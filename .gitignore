@@ -4,3 +4,4 @@ local.properties
 snapshot/
 app/src/main/assets/snapshot.tar.xz
 `n# 敏感数据（安全审计 2026-08-14）`n*.credentials.yaml`ntoken*`n*.key`n*.pem`n*.p12
+.kotlin/
