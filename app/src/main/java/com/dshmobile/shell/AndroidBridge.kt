@@ -16,6 +16,7 @@ class AndroidBridge(
   private val onKeepScreen: (enable: Boolean) -> Unit,
   private val onNotify: (title: String, text: String) -> Unit,
   private val onAllFilesAccessRequest: () -> Unit = {},
+  private val onDebugLogsRequest: () -> Unit = {},
   private val pickToken: String? = null,
 ) {
 
@@ -38,6 +39,12 @@ class AndroidBridge(
   @JavascriptInterface
   fun pickDirectory(callbackId: String) {
     onPickRequest(callbackId)
+  }
+
+  /** 调试日志导出：引擎日志 + 环境信息打包 zip（走会话导出同款下载/弹窗链路）。 */
+  @JavascriptInterface
+  fun downloadDebugLogs() {
+    onDebugLogsRequest()
   }
 
   /** True when the app holds All Files Access (external workspace requirement). */
