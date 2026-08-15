@@ -39,7 +39,11 @@ object SnapshotExtractor {
         entry.isDirectory -> target.mkdirs()
         entry.isSymbolicLink -> {
           target.parentFile?.mkdirs()
-          if (target.exists()) target.delete()
+          // deleteIfExists 不跟随链接：覆盖重解压时旧 symlink 可能是悬空的
+          // （File.exists() 跟随链接对 dangling 返回 false，会漏删导致
+          // createSymbolicLink 抛 FileAlreadyExistsException——v0.10.7
+          // 升级重解压实测）。对普通文件/目录同样安全删除。
+          java.nio.file.Files.deleteIfExists(target.toPath())
           java.nio.file.Files.createSymbolicLink(target.toPath(), java.nio.file.Paths.get(entry.linkName))
         }
         else -> {

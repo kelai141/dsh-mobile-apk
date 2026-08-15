@@ -72,6 +72,11 @@ class UpdateManager(private val context: Context) {
           Runtime.getRuntime().exec(arrayOf("/system/bin/pkill", "-f", "bin.js")).waitFor()
         } catch (_: Throwable) {
         }
+        // 记录快照指纹：在线更新后与内嵌 assets 指纹区分（否则下次启动
+        // 会误判"快照过期"而重解压 assets 快照，把在线更新覆盖回出厂）。
+        if (expectedSha.isNotEmpty()) {
+          File(context.filesDir, ".snapshot-fingerprint").writeText(expectedSha)
+        }
         onStatus("更新完成，引擎已自动重启")
       } catch (t: Throwable) {
         onStatus("更新失败：" + (t.message ?: t.javaClass.simpleName))

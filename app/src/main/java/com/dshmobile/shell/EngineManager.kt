@@ -37,6 +37,75 @@ class EngineManager(private val context: Context, private val pickToken: String?
 
   val engineReady: Boolean get() = nodeBin.exists()
 
+  /** 内嵌快照指纹（assets/snapshot.sha256，由 build-release.ps1 生成）。 */
+  private fun bundledFingerprint(): String = try {
+    context.assets.open("snapshot.sha256").bufferedReader().use { it.readText().trim() }
+  } catch (_: Exception) {
+    ""
+  }
+
+  private fun fingerprintFile(): File = File(context.filesDir, ".snapshot-fingerprint")
+
+  /**
+   * 快照是否已解压且与内嵌版本一致：node 存在 + 指纹匹配。
+   * 升级安装（v0.10.5→v0.10.6 教训）：engineReady 只查 node 存在，
+   * 升级后快照不重解压 → 旧插件继续跑（注入守卫 bug 等修复不生效）。
+   */
+  fun snapshotFresh(): Boolean {
+    if (!nodeBin.exists()) return false
+    val fp = bundledFingerprint()
+    if (fp.isEmpty()) return true // 无指纹文件（旧构建）不强制重解压
+    return fingerprintFile().exists() && fingerprintFile().readText().trim() == fp
+  }
+
+  /**
+   * 升级/快照变化：备份用户数据 → 全量重解压内嵌快照 → 恢复用户数据 → 写指纹。
+   * 快照剥离了 sessions/storages/attachments/凭据/settings（make-snapshot.sh），
+   * 直接重解压会"丢失"这些私有数据，必须先备份后恢复；profiles 出厂配置
+   * （cordis*.yml/node_modules）以快照为准（手动 patch 需在新版基础上重打）。
+   * 任何失败：恢复备份数据，保留旧运行时（下次启动重试）。
+   */
+  fun refreshSnapshot(onProgress: (Long, Long) -> Unit): Boolean {
+    val backup = File(context.filesDir, ".dsh-backup")
+    val dsh = File(homeDir, ".dsh")
+    try {
+      if (dsh.exists()) {
+        backup.deleteRecursively()
+        dsh.copyRecursively(backup)
+      }
+      val ok = extractSnapshot(onProgress)
+      if (!ok) {
+        restoreUserData(backup, dsh)
+        Log.e(TAG, "snapshot refresh: extract failed, kept old runtime")
+        return false
+      }
+      restoreUserData(backup, dsh)
+      backup.deleteRecursively()
+      fingerprintFile().writeText(bundledFingerprint())
+      Log.i(TAG, "snapshot refreshed (fingerprint " + bundledFingerprint().take(12) + ")")
+      return true
+    } catch (t: Throwable) {
+      restoreUserData(backup, dsh)
+      Log.e(TAG, "snapshot refresh failed; kept old runtime", t)
+      return false
+    }
+  }
+
+  /** 恢复快照剥离的用户数据目录/文件（从备份拷贝回私有 .dsh）。 */
+  private fun restoreUserData(backup: File, dsh: File) {
+    if (!backup.exists()) return
+    for (name in listOf(
+      "sessions", "storages", "attachments",
+      ".credentials.yaml", "settings.yaml", ".anonymous-user-id", ".private-layout",
+    )) {
+      val src = File(backup, name)
+      if (!src.exists()) continue
+      val dst = File(dsh, name)
+      if (dst.exists()) dst.deleteRecursively()
+      src.copyRecursively(dst)
+    }
+  }
+
   /** 进程级启动守卫（MainActivity 与 EngineService 各自 new EngineManager，
    *  实例字段互不可见——双启动竞态必须用 companion 级 CAS）。 */
   private val starting: Boolean

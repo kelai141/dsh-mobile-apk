@@ -659,21 +659,21 @@ class MainActivity : ComponentActivity() {
         runOnUiThread { showWeb() }
         return@Thread
       }
-      if (!engineManager.engineReady) {
+      if (!engineManager.snapshotFresh()) {
         runOnUiThread {
           progressText.visibility = View.VISIBLE
           guideView.visibility = View.VISIBLE
-          engineStatus.text = "首次启动：正在解压运行时（约 70MB）…"
+          engineStatus.text = "正在更新运行时（约 70MB）…"
         }
-        val ok = engineManager.extractSnapshot { done, total ->
+        val ok = engineManager.refreshSnapshot { done, total ->
           runOnUiThread {
             // done 是解压后字节数，total 是压缩包字节数，口径不一致；只显示已解压量。
-            engineStatus.text = "正在解压运行时… " + done / 1024 / 1024 + " MB"
+            engineStatus.text = "正在更新运行时… " + done / 1024 / 1024 + " MB"
           }
         }
         if (!ok) {
           runOnUiThread {
-            engineStatus.text = "运行时解压失败，请重试。"
+            engineStatus.text = "运行时更新失败，请重试。"
             showGuide()
           }
           return@Thread
