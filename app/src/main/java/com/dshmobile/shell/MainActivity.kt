@@ -30,6 +30,7 @@ import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.NotificationCompat
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -175,7 +176,8 @@ class MainActivity : ComponentActivity() {
       }
     }
     // WebView 下载：会话日志导出（/api/session.export）与其余引擎源下载
-    // 统一走 app 内 MediaStore 下载——浏览器导航带 Origin:null 会被 dsh
+    // 统一走 app 内下载（优先 Documents/dshdata/exports，未授权回退
+    // MediaStore.Downloads）——浏览器导航带 Origin:null 会被 dsh
     // 的 /api browser-trust fence 拒绝（403），app 内 HttpURLConnection
     // 无浏览器标记 → fence 放行（403 修复路径，见 downloadToDownloads）。
     webView.setDownloadListener { url, _userAgent, contentDisposition, _mimeType, _contentLength ->
@@ -263,9 +265,9 @@ class MainActivity : ComponentActivity() {
   }
 
   /**
-   * 下载引擎侧 URL 到系统下载目录（会话日志 ZIP 导出）。API 29+ 走
-   * MediaStore.Downloads（免权限）；更老系统不支持（实际设备均为新版本）。
-   * 仅接受引擎同源 URL（防本机 SSRF/恶意文件投放）；流式写入并设大小上限。
+   * 下载引擎侧 URL 并保存为会话日志 ZIP 导出。优先直写
+   * Documents/dshdata/exports/（需 MANAGE_EXTERNAL_STORAGE）；未授权时
+   * 回退 MediaStore.Downloads。仅接受引擎同源 URL；流式写入并设大小上限。
    * app 内 HttpURLConnection 请求无浏览器标记（Origin/sec-fetch-site），
    * 通过 dsh 的 /api browser-trust fence（浏览器导航 403 的修复路径）。
    */
@@ -299,12 +301,12 @@ class MainActivity : ComponentActivity() {
         }
         var saved: String? = null
         c.inputStream.use { input ->
-          saved = saveToDownloadsStreamed(filename, input)
+          saved = saveExportToDshData(filename, input)
         }
-        val finalName = saved
+        val finalPath = saved
         runOnUiThread {
-          showTestNotification("会话日志已导出", "已保存到 下载/$finalName")
-          pushExportResult(true, "已保存到 下载/$finalName")
+          showTestNotification("会话日志已导出", "已保存到 $finalPath")
+          pushExportResult(true, "已保存到 $finalPath")
         }
       } catch (t: Throwable) {
         val message = t.message ?: "未知错误"
@@ -328,6 +330,57 @@ class MainActivity : ComponentActivity() {
         "window.__dshExportResult && window.__dshExportResult(" + payload + ")", null,
       )
     }
+  }
+
+  /**
+   * 保存导出流。已授 MANAGE_EXTERNAL_STORAGE 时直写
+   * Documents/dshdata/exports/<净化文件名>.zip（同名加 (1)，先写 .tmp 再 rename）；
+   * 未授权回退 MediaStore.Downloads。返回用于展示的实际路径。
+   */
+  private fun saveExportToDshData(filename: String, input: java.io.InputStream): String {
+    if (Build.VERSION.SDK_INT >= 30 && Environment.isExternalStorageManager()) {
+      val exportDir = File(engineManager.dshDataDir, "exports")
+      exportDir.mkdirs()
+      File(engineManager.dshDataDir, ".nomedia").writeText("")
+      val target = uniqueExportFile(exportDir, filename)
+      val tmp = File(exportDir, "." + target.name + ".tmp")
+      try {
+        tmp.outputStream().use { out ->
+          val buf = ByteArray(64 * 1024)
+          var total = 0L
+          while (true) {
+            val n = input.read(buf)
+            if (n < 0) break
+            total += n
+            if (total > MAX_DOWNLOAD_BYTES) throw java.io.IOException("导出文件过大")
+            out.write(buf, 0, n)
+          }
+        }
+        if (!tmp.renameTo(target)) {
+          java.nio.file.Files.move(tmp.toPath(), target.toPath())
+        }
+      } catch (t: Throwable) {
+        tmp.delete()
+        throw t
+      }
+      return "文档/dshdata/exports/" + target.name
+    }
+    val savedName = saveToDownloadsStreamed(filename, input)
+    return "下载/$savedName"
+  }
+
+  /** 同名冲突加 (1) 后缀。 */
+  private fun uniqueExportFile(dir: File, name: String): File {
+    val dot = name.lastIndexOf('.')
+    val base = if (dot > 0) name.substring(0, dot) else name
+    val ext = if (dot > 0) name.substring(dot) else ""
+    var candidate = File(dir, name)
+    var i = 1
+    while (candidate.exists()) {
+      candidate = File(dir, base + " (" + i + ")" + ext)
+      i++
+    }
+    return candidate
   }
 
   /** 写入 MediaStore.Downloads（Android 10+ 免权限），流式 + 200MB 上限。 */

@@ -1,9 +1,11 @@
 package com.dshmobile.shell
 
 import android.content.Context
+import android.media.MediaScannerConnection
 import android.os.Environment
 import android.util.Log
 import java.io.File
+import java.nio.file.Files
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.compressors.xz.XZCompressorInputStream
@@ -19,9 +21,9 @@ class EngineManager(private val context: Context, private val pickToken: String?
   val homeDir = File(context.filesDir, "home")
 
   /**
-   * 公共持久化目录：/storage/emulated/0/Documents/dshdata。
-   * 引擎 DSH_HOME 指向此处——个性化设置、插件配置、对话记录、附件等全部
-   * 用户数据默认落公共目录（文件管理器可见、可备份、卸载重装不丢）。
+   * 公共导出仓库：/storage/emulated/0/Documents/dshdata。
+   * 仅存放用户主动导出的 session zip（exports/）与 .nomedia 防扫描标记；
+   * 运行时用户数据全部回私有 app data（files/home/.dsh）。
    */
   val dshDataDir: File
     get() {
@@ -59,103 +61,204 @@ class EngineManager(private val context: Context, private val pickToken: String?
   }
 
   /**
-   * 确保公共持久化目录就绪（幂等，后台线程调用）。
+   * 确保私有 DSH_HOME 数据布局就绪（幂等，后台线程调用）。
    *
-   * 方案（issue apk#8）：DSH_HOME 本身**必须留在私有域**——dsh 每次启动会在
-   * `$DSH_HOME/profiles/node_modules` 维护 flat-module 回退（每个依赖包一个
-   * symlink 指向引擎安装位置），而公共目录（/storage/emulated/0）FUSE 禁止
-   * 创建 symlink（实测 Permission denied），整体迁移会使引擎必然崩溃。
+   * v0.10.5 起运行时数据全部回私有 app data；Documents/dshdata 只保留为
+   * 用户主动导出仓库（exports/ + .nomedia）。本方法负责：
+   *  - 首次/干净安装：直接建立私有 .dsh 布局与公共导出仓库；
+   *  - 检测到 v0.10.4 及更早的公共迁移布局（.migrated-from 或私有 symlink）：
+   *    执行反向迁移，把 sessions/storages/attachments/profiles/settings.yaml
+   *    复制回私有实体，并清理公共旧数据；
+   *  - 任何失败都保留公共数据，引擎仍以私有 DSH_HOME 启动，下次重试。
    *
-   * 因此采用**数据项级迁移**：把用户数据搬到 Documents/dshdata，并在私有
-   * 原位建立 symlink（app 私有域允许 symlink，实测 OK），dsh 读写跟随
-   * symlink 落到公共目录：
-   *  - settings.yaml：拷贝到公共（settings-file 经 cordis.patch.yml 的
-   *    config.path 直接指向公共文件，规避原子写替换 symlink 的问题）
-   *  - sessions/、storages/、attachments/：整体搬移 + 私有 symlink
-   *    （目录内写文件不会替换目录 symlink）
-   *  - profiles/{web,headless}/cordis.yml + cordis.patch.yml：拷贝到公共
-   *    + 私有替换为 symlink（dsh 启动只读这两个文件）
-   *  - .credentials.yaml（API key）：**不迁移**——公共目录 FUSE 强制 660，
-   *    credentials-local 权限校验会拒绝加载，且 key 暴露给其他应用；
-   *    key 留在私有实体，由 cordis.patch.yml 的 credentials path 指向。
-   * 迁移源在搬移后仅剩 symlink/保留实体，不删除公共副本。
+   * DSH_HOME 永远保持私有域：profiles/node_modules 的 flat-fallback symlink
+   * 机制依赖 app 私有域（公共 FUSE 禁 symlink），绝不能整体迁移 DSH_HOME。
    */
-  fun ensureDshDataHome(): File {
+  fun ensurePrivateDshData(): File {
     val dshData = dshDataDir
     val privateDsh = File(homeDir, ".dsh")
-    val marker = File(dshData, ".migrated-from")
-    if (privateDsh.isDirectory && !marker.exists()) {
+    privateDsh.mkdirs()
+    val privateMarker = File(privateDsh, ".private-layout")
+    if (privateMarker.exists()) {
+      ensurePublicExportRepo(dshData)
+      return privateDsh
+    }
+    if (isLegacyPublicLayout(dshData, privateDsh)) {
       try {
-        dshData.mkdirs()
-        // 1) settings.yaml：公共实体 + 插件 config.path 指向（见 patch）
-        copyFileIfExists(File(privateDsh, "settings.yaml"), File(dshData, "settings.yaml"))
-        // 2) 目录级数据：整体搬移 + 私有 symlink
-        relocateDir(File(privateDsh, "sessions"), File(dshData, "sessions"))
-        relocateDir(File(privateDsh, "storages"), File(dshData, "storages"))
-        relocateDir(File(privateDsh, "attachments"), File(dshData, "attachments"))
-        // 3) 插件配置：拷贝到公共 + 私有替换为 symlink（dsh 只读）
-        for (profile in listOf("web", "headless")) {
-          for (name in listOf("cordis.yml", "cordis.patch.yml")) {
-            val sf = File(privateDsh, "profiles/$profile/$name")
-            if (sf.exists() && sf.isFile) {
-              val pf = File(dshData, "profiles/$profile/$name")
-              pf.parentFile?.mkdirs()
-              sf.copyTo(pf, overwrite = true)
-              sf.delete()
-              try {
-                java.nio.file.Files.createSymbolicLink(sf.toPath(), pf.toPath())
-              } catch (t: Throwable) {
-                // symlink 失败（极端情况）：保留私有实体，公共副本作废。
-                pf.delete()
-                Log.w(TAG, "symlink failed for " + sf.absolutePath + "; keeping private copy")
-              }
-            }
-          }
-        }
-        marker.writeText(privateDsh.absolutePath)
-        Log.i(TAG, "dshdata migration done -> " + dshData.absolutePath)
+        reverseMigrate(dshData, privateDsh)
+        privateMarker.writeText("private")
+        ensurePublicExportRepo(dshData)
+        Log.i(TAG, "dshdata reverse migration done -> " + privateDsh.absolutePath)
       } catch (t: Throwable) {
         // 迁移失败不阻断启动：DSH_HOME 仍私有，引擎可用，下次再试。
-        Log.e(TAG, "dshdata migration failed", t)
+        Log.e(TAG, "dshdata reverse migration failed; keeping public data", t)
       }
+    } else {
+      // 干净安装或已经是私有布局：直接标记，无需迁移。
+      try {
+        privateMarker.writeText("private")
+      } catch (t: Throwable) {
+        Log.w(TAG, "private layout marker write failed", t)
+      }
+      ensurePublicExportRepo(dshData)
     }
     return privateDsh
   }
 
-  /** 拷贝单个文件（存在时）。 */
-  private fun copyFileIfExists(src: File, dst: File) {
-    if (src.isFile) {
-      dst.parentFile?.mkdirs()
-      src.copyTo(dst, overwrite = true)
+  /** 识别 v0.10.4 及更早的公共迁移布局。 */
+  private fun isLegacyPublicLayout(dshData: File, privateDsh: File): Boolean {
+    if (File(dshData, ".migrated-from").exists()) return true
+    for (name in listOf("sessions", "storages", "attachments")) {
+      if (isSymlink(File(privateDsh, name))) return true
+    }
+    for (profile in listOf("web", "headless")) {
+      for (name in listOf("cordis.yml", "cordis.patch.yml")) {
+        if (isSymlink(File(privateDsh, "profiles/$profile/$name"))) return true
+      }
+    }
+    return false
+  }
+
+  /** 反向迁移：公共数据复制回私有实体，公共旧目录/文件清理。 */
+  private fun reverseMigrate(dshData: File, privateDsh: File) {
+    for (name in listOf("sessions", "storages", "attachments")) {
+      reverseMigrateDir(File(privateDsh, name), File(dshData, name))
+    }
+    for (profile in listOf("web", "headless")) {
+      for (name in listOf("cordis.yml", "cordis.patch.yml")) {
+        reverseMigrateFile(
+          File(privateDsh, "profiles/$profile/$name"),
+          File(dshData, "profiles/$profile/$name"),
+        )
+      }
+    }
+    reverseMigrateFile(File(privateDsh, "settings.yaml"), File(dshData, "settings.yaml"))
+
+    // 清理旧公共数据（冲突时已改名 *.public-backup，不会被动到）。
+    val removedPaths = mutableListOf<String>()
+    for (name in listOf("sessions", "storages", "attachments", "profiles", "settings.yaml", ".migrated-from")) {
+      val f = File(dshData, name)
+      if (f.exists()) {
+        removedPaths += f.absolutePath
+        if (!f.deleteRecursively()) {
+          throw java.io.IOException("failed to delete public path " + f.absolutePath)
+        }
+      }
+    }
+    // 通知 MediaScanner 旧公共子目录已删除，清掉相册已索引的假视频条目。
+    if (removedPaths.isNotEmpty()) {
+      try {
+        MediaScannerConnection.scanFile(context, removedPaths.toTypedArray(), null, null)
+      } catch (t: Throwable) {
+        Log.w(TAG, "media scan cleanup failed", t)
+      }
     }
   }
 
-  /** 目录整体搬移到公共（跨挂载 rename 失败则拷贝+删源），原位建 symlink。 */
-  private fun relocateDir(src: File, dst: File) {
-    if (!src.isDirectory || dst.exists()) return
-    dst.parentFile?.mkdirs()
-    if (!src.renameTo(dst)) {
-      copyTree(src, dst, emptySet())
-      src.deleteRecursively()
+  /** 目录级反向迁移：删私有 symlink，公共实体复制回私有并校验后删公共源。 */
+  private fun reverseMigrateDir(privateDir: File, publicDir: File) {
+    if (isSymlink(privateDir)) {
+      Files.delete(privateDir.toPath())
     }
+    if (!publicDir.isDirectory) return
+    if (privateDir.isDirectory) {
+      if (privateDir.listFiles()?.isNotEmpty() == true) {
+        // 冲突：私有实体优先，公共副本保留待核。
+        val backup = uniqueBackup(publicDir)
+        if (!publicDir.renameTo(backup)) {
+          throw java.io.IOException("failed to backup public dir " + publicDir.absolutePath)
+        }
+        Log.w(TAG, "private " + privateDir.absolutePath + " exists; public kept as " + backup.absolutePath)
+        return
+      }
+      privateDir.deleteRecursively()
+    }
+    privateDir.parentFile?.mkdirs()
+    copyTreeVerified(publicDir, privateDir)
+    if (!publicDir.deleteRecursively()) {
+      throw java.io.IOException("failed to delete public source " + publicDir.absolutePath)
+    }
+  }
+
+  /** 文件级反向迁移：删私有 symlink，公共文件复制回私有后删公共源。 */
+  private fun reverseMigrateFile(privateFile: File, publicFile: File) {
+    if (isSymlink(privateFile)) {
+      Files.delete(privateFile.toPath())
+    }
+    if (!publicFile.isFile) return
+    if (privateFile.exists()) {
+      if (privateFile.length() > 0) {
+        // 公共文件是迁移后的活动副本（settings/profiles），以公共为准；
+        // 私有旧实体备份保留，不静默删除。
+        val backup = uniquePrivateBackup(privateFile)
+        if (!privateFile.renameTo(backup)) {
+          throw java.io.IOException("failed to backup private file " + privateFile.absolutePath)
+        }
+        Log.w(TAG, "private file backed up as " + backup.absolutePath)
+      } else {
+        privateFile.delete()
+      }
+    }
+    privateFile.parentFile?.mkdirs()
+    publicFile.copyTo(privateFile, overwrite = true)
+    if (privateFile.length() != publicFile.length()) {
+      throw java.io.IOException("copy verification failed for " + publicFile.absolutePath)
+    }
+    if (!publicFile.delete()) {
+      throw java.io.IOException("failed to delete public source " + publicFile.absolutePath)
+    }
+  }
+
+  /** 确保公共导出仓库存在：根目录 + .nomedia + exports/。 */
+  private fun ensurePublicExportRepo(dshData: File) {
     try {
-      java.nio.file.Files.createSymbolicLink(src.toPath(), dst.toPath())
+      dshData.mkdirs()
+      File(dshData, ".nomedia").writeText("")
+      File(dshData, "exports").mkdirs()
     } catch (t: Throwable) {
-      Log.w(TAG, "symlink failed for dir " + src.absolutePath)
+      Log.w(TAG, "public export repo setup failed", t)
     }
   }
 
-  /** 递归拷贝目录树（实体内容）。 */
-  private fun copyTree(src: File, dst: File, skip: Set<String>) {
+  private fun isSymlink(file: File): Boolean = Files.isSymbolicLink(file.toPath())
+
+  private fun uniqueBackup(publicFile: File): File {
+    var candidate = File(publicFile.parentFile, publicFile.name + ".public-backup")
+    var i = 1
+    while (candidate.exists()) {
+      candidate = File(publicFile.parentFile, publicFile.name + ".public-backup-" + i)
+      i++
+    }
+    return candidate
+  }
+
+  private fun uniquePrivateBackup(privateFile: File): File {
+    var candidate = File(privateFile.parentFile, privateFile.name + ".private-backup")
+    var i = 1
+    while (candidate.exists()) {
+      candidate = File(privateFile.parentFile, privateFile.name + ".private-backup-" + i)
+      i++
+    }
+    return candidate
+  }
+
+  /** 递归拷贝目录树，并校验文件数与总大小。 */
+  private fun copyTreeVerified(src: File, dst: File) {
+    dst.mkdirs()
     src.listFiles()?.forEach { f ->
-      if (f.name in skip) return@forEach
       val target = File(dst, f.name)
       if (f.isDirectory) {
-        target.mkdirs()
-        copyTree(f, target, skip)
+        copyTreeVerified(f, target)
       } else {
         f.copyTo(target, overwrite = true)
       }
+    }
+    val srcFiles = src.walkBottomUp().filter { it.isFile }.toList()
+    val dstFiles = dst.walkBottomUp().filter { it.isFile }.toList()
+    val srcSize = srcFiles.sumOf { it.length() }
+    val dstSize = dstFiles.sumOf { it.length() }
+    if (srcFiles.size != dstFiles.size || srcSize != dstSize) {
+      throw java.io.IOException("copy verification failed for " + src.absolutePath)
     }
   }
 
@@ -184,10 +287,10 @@ class EngineManager(private val context: Context, private val pickToken: String?
         "PATH" to (usrDir.absolutePath + "/bin:/system/bin"),
         "LD_LIBRARY_PATH" to (usrDir.absolutePath + "/lib"),
         "HOME" to homeDir.absolutePath,
-        // DSH_HOME 保持在私有域（FUSE 禁 symlink，公共域无法维护
-        // profiles/node_modules flat fallback）；用户数据经迁移+symlink
-        // /插件配置落到公共 Documents/dshdata（见 ensureDshDataHome）。
-        "DSH_HOME" to ensureDshDataHome().absolutePath,
+        // DSH_HOME 始终保持在私有域（FUSE 禁 symlink，公共域无法维护
+        // profiles/node_modules flat fallback）；运行时用户数据全部在私有
+        // files/home/.dsh，公共 Documents/dshdata 仅作导出仓库。
+        "DSH_HOME" to ensurePrivateDshData().absolutePath,
         // os.tmpdir() falls back to the baked-in Termux tmp on Android
         // (unwritable from the app domain); keep spill inside filesDir.
         "TMPDIR" to File(homeDir, "tmp").apply { mkdirs() }.absolutePath,
