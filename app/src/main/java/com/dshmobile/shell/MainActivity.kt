@@ -275,11 +275,14 @@ class MainActivity : ComponentActivity() {
   private fun downloadToDownloads(url: String, contentDisposition: String?) {
     if (!isEngineSource(url)) {
       showTestNotification("下载被拒绝", "仅支持从本机引擎导出文件")
+      pushExportResult(false, "仅支持从本机引擎导出文件")
       return
     }
     if (!exportDownloading.compareAndSet(false, true)) return
     if (Build.VERSION.SDK_INT < 29) {
       showTestNotification("导出失败", "当前系统版本不支持下载，请升级到 Android 10+")
+      pushExportResult(false, "当前系统版本不支持下载，请升级到 Android 10+")
+      exportDownloading.set(false)
       return
     }
     val filename = sanitizeFilename(parseDownloadFilename(url, contentDisposition))
@@ -299,14 +302,32 @@ class MainActivity : ComponentActivity() {
           saved = saveToDownloadsStreamed(filename, input)
         }
         val finalName = saved
-        runOnUiThread { showTestNotification("会话日志已导出", "已保存到 下载/$finalName") }
+        runOnUiThread {
+          showTestNotification("会话日志已导出", "已保存到 下载/$finalName")
+          pushExportResult(true, "已保存到 下载/$finalName")
+        }
       } catch (t: Throwable) {
-        runOnUiThread { showTestNotification("导出失败", t.message ?: "未知错误") }
+        val message = t.message ?: "未知错误"
+        runOnUiThread {
+          showTestNotification("导出失败", message)
+          pushExportResult(false, message)
+        }
       } finally {
         conn?.disconnect()
         exportDownloading.set(false)
       }
     }.start()
+  }
+
+  /** 导出结果回传 WebView：UI 插件经 window.__dshExportResult 弹软件内结果框。 */
+  private fun pushExportResult(ok: Boolean, detail: String) {
+    val title = if (ok) "导出成功" else "导出失败"
+    val payload = "{\"ok\":" + ok + ",\"title\":" + jsString(title) + ",\"detail\":" + jsString(detail) + "}"
+    webView.post {
+      webView.evaluateJavascript(
+        "window.__dshExportResult && window.__dshExportResult(" + payload + ")", null,
+      )
+    }
   }
 
   /** 写入 MediaStore.Downloads（Android 10+ 免权限），流式 + 200MB 上限。 */
