@@ -157,7 +157,7 @@ class MainActivity : ComponentActivity() {
         }
         // 只允许引擎同源页面留在 WebView（特权桥 + 下载能力仅对引擎可信）；
         // 外部链接交给系统浏览器，防止不可信页面获得桥能力（社工/通知轰炸/任意下载）。
-        if (url.startsWith(EngineProbe.ENGINE_URL)) {
+        if (isEngineSource(url)) {
           view.loadUrl(url)
           return true
         }
@@ -166,7 +166,7 @@ class MainActivity : ComponentActivity() {
       }
 
       override fun onReceivedError(view: WebView, errorCode: Int, description: String, failingUrl: String) {
-        if (failingUrl.startsWith(EngineProbe.ENGINE_URL)) showGuide()
+        if (isEngineSource(failingUrl)) showGuide()
       }
 
       override fun onPageFinished(view: WebView, url: String) {
@@ -174,15 +174,12 @@ class MainActivity : ComponentActivity() {
         pushSystemDark(view)
       }
     }
-    // WebView 下载：会话日志导出（/api/session.export）跳系统浏览器下载
-    // （issue apk#6，用户要求）；其余引擎源下载维持 MediaStore 兜底。
+    // WebView 下载：会话日志导出（/api/session.export）与其余引擎源下载
+    // 统一走 app 内 MediaStore 下载——浏览器导航带 Origin:null 会被 dsh
+    // 的 /api browser-trust fence 拒绝（403），app 内 HttpURLConnection
+    // 无浏览器标记 → fence 放行（403 修复路径，见 downloadToDownloads）。
     webView.setDownloadListener { url, _userAgent, contentDisposition, _mimeType, _contentLength ->
-      if (isSessionExport(url, "GET")) {
-        // 同上：app 内下载（fence 放行），不再跳浏览器（403）。
-        downloadToDownloads(url, contentDisposition)
-      } else {
-        downloadToDownloads(url, contentDisposition)
-      }
+      downloadToDownloads(url, contentDisposition)
     }
     webView.webChromeClient = object : WebChromeClient() {
       override fun onShowFileChooser(
@@ -272,33 +269,42 @@ class MainActivity : ComponentActivity() {
    * app 内 HttpURLConnection 请求无浏览器标记（Origin/sec-fetch-site），
    * 通过 dsh 的 /api browser-trust fence（浏览器导航 403 的修复路径）。
    */
+  /** 下载 in-flight 守卫：shouldOverrideUrlLoading 与 downloadListener 双入口去重。 */
+  private val exportDownloading = java.util.concurrent.atomic.AtomicBoolean(false)
+
   private fun downloadToDownloads(url: String, contentDisposition: String?) {
-    if (!url.startsWith(EngineProbe.ENGINE_URL)) {
+    if (!isEngineSource(url)) {
       showTestNotification("下载被拒绝", "仅支持从本机引擎导出文件")
       return
     }
+    if (!exportDownloading.compareAndSet(false, true)) return
     if (Build.VERSION.SDK_INT < 29) {
       showTestNotification("导出失败", "当前系统版本不支持下载，请升级到 Android 10+")
       return
     }
     val filename = sanitizeFilename(parseDownloadFilename(url, contentDisposition))
     Thread {
+      var conn: HttpURLConnection? = null
       try {
-        val conn = URL(url).openConnection() as HttpURLConnection
-        conn.connectTimeout = 15_000
-        conn.readTimeout = 60_000
-        conn.requestMethod = "GET"
-        if (conn.responseCode != HttpURLConnection.HTTP_OK) {
-          throw java.io.IOException("HTTP " + conn.responseCode)
+        val c = URL(url).openConnection() as HttpURLConnection
+        conn = c
+        c.connectTimeout = 15_000
+        c.readTimeout = 60_000
+        c.requestMethod = "GET"
+        if (c.responseCode != HttpURLConnection.HTTP_OK) {
+          throw java.io.IOException("HTTP " + c.responseCode)
         }
         var saved: String? = null
-        conn.inputStream.use { input ->
+        c.inputStream.use { input ->
           saved = saveToDownloadsStreamed(filename, input)
         }
         val finalName = saved
         runOnUiThread { showTestNotification("会话日志已导出", "已保存到 下载/$finalName") }
       } catch (t: Throwable) {
         runOnUiThread { showTestNotification("导出失败", t.message ?: "未知错误") }
+      } finally {
+        conn?.disconnect()
+        exportDownloading.set(false)
       }
     }.start()
   }
@@ -374,12 +380,30 @@ class MainActivity : ComponentActivity() {
     }
   }
 
-  /** 命中判定：引擎源 + 会话导出路径 + GET（HEAD 是前端预检，不得触发跳转）。 */
-  private fun isSessionExport(url: String, method: String): Boolean {
-    return method == "GET" && url.startsWith(EngineProbe.ENGINE_URL) && url.contains(SESSION_EXPORT_PATH)
+  /**
+   * 引擎源判定：精确匹配本机引擎的 scheme/host/port（防前缀欺骗，
+   * 如 127.0.0.1:30800 或 127.0.0.1:3080.evil.com 误判为引擎源）。
+   */
+  private fun isEngineSource(url: String): Boolean {
+    return try {
+      val base = Uri.parse(EngineProbe.ENGINE_URL)
+      val uri = Uri.parse(url)
+      uri.scheme == base.scheme && uri.host == base.host && uri.port == base.port
+    } catch (_: Exception) {
+      false
+    }
   }
 
-  /** 原子防重放的外部浏览器打开；失败返回 false 供调用方回退。 */
+  /** 命中判定：引擎源 + 会话导出路径 + GET（HEAD 是前端预检，不得触发跳转）。 */
+  private fun isSessionExport(url: String, method: String): Boolean {
+    return method == "GET" && isEngineSource(url) && url.contains(SESSION_EXPORT_PATH)
+  }
+
+  /**
+   * 原子防重放的外部浏览器打开（非导出外链）。尽力而为：启动失败时
+   * 静默（调用方不读返回值），不再有 MediaStore 回退契约——回退仅
+   * 存在于导出路径（downloadToDownloads 内）。
+   */
   private val exportLaunching = java.util.concurrent.atomic.AtomicBoolean(false)
 
   private fun openInExternalBrowser(uri: android.net.Uri): Boolean {
