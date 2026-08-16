@@ -492,6 +492,8 @@ class EngineManager(private val context: Context, private val pickToken: String?
       "TERMUX_VERSION" to "0.118.3",
       // 目录选择桥端点鉴权 token（web-compat 插件校验 x-dsh-pick-token）。
       "DSH_PICK_TOKEN" to (pickToken ?: ""),
+      // 视觉后端（Qwen-VL）API key：从私有文件读取，避免硬编码进源码。
+      "DASHSCOPE_API_KEY" to (File(context.filesDir, "dashscope-key.txt").takeIf { it.exists() }?.readText()?.trim() ?: ""),
     )
   }
 
