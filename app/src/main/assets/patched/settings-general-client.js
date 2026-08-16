@@ -360,6 +360,11 @@ window.__ModuleLoader__.load({
 					if (window.androidBridge && typeof window.androidBridge.setImmersiveMode === "function") {
 						window.androidBridge.setImmersiveMode(immersive);
 					}
+					/* dsh-mobile-immersive-max: mirror the state to <html data-dsh-immersive>
+					 * so the conversation header collapses (chat area expands). Same tab:
+					 * localStorage does not emit storage events, so set it directly. */
+					if (immersive) document.documentElement.setAttribute("data-dsh-immersive", "true");
+					else document.documentElement.removeAttribute("data-dsh-immersive");
 				} catch (e) {}
 			}, [immersive]);
 			const switchStyle = { flex: "none", width: "44px", height: "24px", accentColor: "var(--dsw-alias-accent)", cursor: "pointer" };
