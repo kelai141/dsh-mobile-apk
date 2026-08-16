@@ -208,6 +208,28 @@ class MainActivity : ComponentActivity() {
     imagePickerBridge.launch(Unit)
   }
 
+  /** 字体大小持久化读取（设置 → 通用设置 滑块；默认 100）。 */
+  private fun textZoomPrefs(): Int {
+    return try {
+      getSharedPreferences("dsh_settings", MODE_PRIVATE).getInt("text_zoom", 100)
+    } catch (_: Exception) {
+      100
+    }
+  }
+
+  /** 字体大小设置（WebView textZoom）+ 持久化，重启/缓存刷新后仍生效。 */
+  private fun setTextZoomPersisted(percent: Int) {
+    val p = percent.coerceIn(50, 200)
+    // JS 桥在 JavaBridge 线程调用；WebView 方法必须切回主线程。
+    runOnUiThread { webView.settings.textZoom = p }
+    try {
+      getSharedPreferences("dsh_settings", MODE_PRIVATE).edit().putInt("text_zoom", p).apply()
+      Log.i("dsh-image", "textZoom set: " + p)
+    } catch (e: Exception) {
+      Log.e("dsh-image", "textZoom persist failed: " + e.message)
+    }
+  }
+
   /** 从 content Uri 读取显示名（MediaStore DISPLAY_NAME）。 */
   private fun queryImageName(uri: Uri): String? {
     return try {
@@ -327,6 +349,8 @@ class MainActivity : ComponentActivity() {
       domStorageEnabled = true
       allowFileAccess = false
       mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+      // 字体大小（设置 → 通用设置）：从本地持久化恢复，不依赖页面缓存。
+      textZoom = textZoomPrefs().coerceIn(50, 200)
       // prefers-color-scheme 跟随系统深色（某些厂商 WebView 默认不跟随；
       // FORCE_DARK_AUTO 让 media query 反映系统深浅，dsh 的"跟随系统"主题依赖它）。
       if (Build.VERSION.SDK_INT >= 29) {
@@ -415,6 +439,7 @@ class MainActivity : ComponentActivity() {
             android.content.res.Configuration.UI_MODE_NIGHT_YES
         },
         onPickImageRequest = { callbackId -> pickImageForBridge(callbackId) },
+        onSetTextZoomRequest = { percent -> setTextZoomPersisted(percent) },
         pickToken = pickToken,
         onRestartEngine = { restartEngine() },
         onReloadWebUI = {

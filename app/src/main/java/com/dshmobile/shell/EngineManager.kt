@@ -347,12 +347,14 @@ class EngineManager(private val context: Context, private val pickToken: String?
     val home = File(homeDir, ".dsh")
     applyAssetPatch("patched/client-ui-conversation-client.js",
       File(dshPkgs, "dsh-client-ui-conversation/lib/client.js"), "onImagePicked")
+    applyAssetPatch("patched/settings-general-client.js",
+      File(dshPkgs, "dsh-client-ui-settings-general/lib/client.js"), "dsh-mobile-textzoom")
     applyAssetPatch("patched/attachment-local-index.js",
       File(dshPkgs, "dsh-attachment-local/lib/index.js"), "COPYFILE_EXCL")
     applyAssetPatch("patched/llm-deepseek-index.js",
       File(dshPkgs, "dsh-llm-deepseek/lib/index.js"), "describeImage")
     applyAssetPatch("patched/web-frontend-index.html",
-      File(webDist, "index.html"), "AbortSignal.any")
+      File(webDist, "index.html"), "dsh-mobile-textzoom-restore")
     applyAssetPatch("patched/vision-mcp-server.mjs",
       File(homeDir, "vision-mcp/server.mjs"), "Qwen-VL")
     applyAssetPatchAppend("patched/cordis.patch.yml",
