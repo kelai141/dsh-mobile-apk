@@ -9074,7 +9074,7 @@ window.__ModuleLoader__.load({
 					case "text":
 						rendered.push((0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.MarkdownText, {
 							text: block.text,
-							streaming,
+							streaming: false, /* dsh-mobile-streaming-math: settled grammar while streaming so a completed TeX line renders KaTeX immediately; incomplete TeX stays literal */
 							codeLabels,
 							fileMentions: mentions
 						}, i));

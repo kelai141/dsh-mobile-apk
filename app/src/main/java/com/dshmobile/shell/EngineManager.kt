@@ -346,7 +346,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
     val webDist = File(dshPkgs, "dsh-web-frontend/dist")
     val home = File(homeDir, ".dsh")
     applyAssetPatch("patched/client-ui-conversation-client.js",
-      File(dshPkgs, "dsh-client-ui-conversation/lib/client.js"), "onImagePicked")
+      File(dshPkgs, "dsh-client-ui-conversation/lib/client.js"), "dsh-mobile-streaming-math")
     applyAssetPatch("patched/attachment-local-index.js",
       File(dshPkgs, "dsh-attachment-local/lib/index.js"), "COPYFILE_EXCL")
     applyAssetPatch("patched/llm-deepseek-index.js",
