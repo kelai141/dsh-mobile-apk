@@ -331,6 +331,63 @@ class EngineManager(private val context: Context, private val pickToken: String?
     }
   }
 
+  /**
+   * 运行时补丁：把 assets/patched 里的修复文件覆盖/追加到快照对应位置（幂等）。
+   * 覆盖的修复：
+   *  - client.js：图片按钮（bridge 版）+ onImagePicked 处理（华为 WebView 不触发 input change）
+   *  - attachment-local：Android link(2) 被 sepolicy 拦截 → copyFile 回退 + EACCES 容忍
+   *  - llm-deepseek：视觉桥接（上传图片 → Qwen-VL 文字描述再喂 DeepSeek）
+   *  - web-frontend index.html：AbortSignal.any polyfill（华为 WebView Chromium 114 缺失）
+   *  - vision-mcp server.mjs + web profile cordis.patch.yml：读图 MCP 挂载
+   * 每项以目标文件内是否存在标记串判断是否已应用（快照刷新/重解压后自动重打）。
+   */
+  private fun applyRuntimePatches() {
+    val dshPkgs = File(usrDir, "lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai")
+    val webDist = File(dshPkgs, "dsh-web-frontend/dist")
+    val home = File(homeDir, ".dsh")
+    applyAssetPatch("patched/client-ui-conversation-client.js",
+      File(dshPkgs, "dsh-client-ui-conversation/lib/client.js"), "onImagePicked")
+    applyAssetPatch("patched/attachment-local-index.js",
+      File(dshPkgs, "dsh-attachment-local/lib/index.js"), "COPYFILE_EXCL")
+    applyAssetPatch("patched/llm-deepseek-index.js",
+      File(dshPkgs, "dsh-llm-deepseek/lib/index.js"), "describeImage")
+    applyAssetPatch("patched/web-frontend-index.html",
+      File(webDist, "index.html"), "AbortSignal.any")
+    applyAssetPatch("patched/vision-mcp-server.mjs",
+      File(homeDir, "vision-mcp/server.mjs"), "Qwen-VL")
+    applyAssetPatchAppend("patched/cordis.patch.yml",
+      File(home, "profiles/web/cordis.patch.yml"), "mcp-vision")
+  }
+
+  /** 覆盖式补丁：目标已含标记串则跳过。 */
+  private fun applyAssetPatch(asset: String, target: File, marker: String) {
+    if (target.exists() && target.readText().contains(marker)) return
+    try {
+      context.assets.open(asset).use { input ->
+        target.parentFile?.mkdirs()
+        target.outputStream().use { out -> input.copyTo(out) }
+      }
+      Log.i(TAG, "runtime patch applied: $asset -> $target")
+    } catch (e: Exception) {
+      Log.e(TAG, "runtime patch failed: $asset", e)
+    }
+  }
+
+  /** 追加式补丁（用于 cordis.patch.yml，保留用户已有条目）。 */
+  private fun applyAssetPatchAppend(asset: String, target: File, marker: String) {
+    if (target.exists() && target.readText().contains(marker)) return
+    try {
+      val content = context.assets.open(asset).bufferedReader().use { it.readText() }
+      target.parentFile?.mkdirs()
+      val existing = if (target.exists()) target.readText() else ""
+      val sep = if (existing.isNotBlank() && !existing.endsWith("\n")) "\n" else ""
+      target.writeText(existing + sep + content)
+      Log.i(TAG, "runtime patch appended: $asset -> $target")
+    } catch (e: Exception) {
+      Log.e(TAG, "runtime patch failed: $asset", e)
+    }
+  }
+
   /** Start the dsh web engine from the embedded snapshot. */
   fun startEngine(port: Int = 3080): Boolean {
     // LD_PRELOAD 依赖快照内的 termux-exec 库：缺失时所有子进程 exec 会失败，
@@ -349,6 +406,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
       return true
     }
     return try {
+      applyRuntimePatches()
       val args = arrayOf(
         nodeBin.absolutePath, "--expose-internals", dshBin.absolutePath, "web", "--port", port.toString(),
       )
@@ -432,6 +490,8 @@ class EngineManager(private val context: Context, private val pickToken: String?
       "TERMUX_VERSION" to "0.118.3",
       // 目录选择桥端点鉴权 token（web-compat 插件校验 x-dsh-pick-token）。
       "DSH_PICK_TOKEN" to (pickToken ?: ""),
+      // 视觉后端（Qwen-VL）API key：从私有文件读取，避免硬编码进源码。
+      "DASHSCOPE_API_KEY" to (File(context.filesDir, "dashscope-key.txt").takeIf { it.exists() }?.readText()?.trim() ?: ""),
     )
   }
 

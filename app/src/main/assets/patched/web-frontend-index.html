@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <script>
+      // Polyfill AbortSignal.any — missing in Huawei WebView (Chromium < 116).
+      if (typeof AbortSignal.any !== "function") {
+        AbortSignal.any = function (signals) {
+          var controller = new AbortController();
+          for (var i = 0; i < signals.length; i++) {
+            (function (signal) {
+              if (signal.aborted) {
+                controller.abort(signal.reason);
+              } else {
+                signal.addEventListener("abort", function () { controller.abort(signal.reason); }, { once: true });
+              }
+            })(signals[i]);
+          }
+          return controller.signal;
+        };
+      }
+
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>DeepSeek Harness</title>
+    <script type="module" crossorigin src="/assets/index-Dqw48FrP.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/vendor-Cjbwl5VI.js">
+    <link rel="stylesheet" crossorigin href="/assets/vendor-CjyC-hUb.css">
+    <link rel="stylesheet" crossorigin href="/assets/index-CSGf6Qzd.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

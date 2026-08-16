@@ -1,0 +1,12 @@
+- insert:
+    - id: mcp-vision
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: vision
+        transport: stdio
+        command: '/data/user/0/com.dshmobile.shell/files/usr/bin/node'
+        args:
+          - '/data/user/0/com.dshmobile.shell/files/home/vision-mcp/server.mjs'
+        env:
+          DASHSCOPE_API_KEY: !!js process.env.DASHSCOPE_API_KEY
+        toolCallTimeoutMs: 120000
