@@ -19,7 +19,66 @@
           return controller.signal;
         };
       }
+      // dsh-mobile-clip-fallback-web: Android WebView rejects
+      // navigator.clipboard.writeText with NotAllowedError (no permission
+      // prompt). Wrap it globally so every copy path (message copy, code
+      // block copy, primitives writeClipboard) falls back to the native
+      // clipboard bridge window.androidBridge.copyText (ClipboardManager),
+      // then to execCommand("copy") under a user gesture.
+      (function () {
+        try {
+          var nc = navigator.clipboard;
+          var origWrite = nc && typeof nc.writeText === "function"
+            ? nc.writeText.bind(nc)
+            : null;
+          if (!origWrite) return;
+          nc.writeText = function (text) {
+            return origWrite(text).catch(function () {
+              var bridgeOk = false;
+              try {
+                if (window.androidBridge && typeof window.androidBridge.copyText === "function") {
+                  bridgeOk = window.androidBridge.copyText(String(text)) === true;
+                }
+              } catch (e) {}
+              if (bridgeOk) return Promise.resolve();
+              var done = false;
+              try {
+                var el = document.createElement("textarea");
+                el.value = String(text);
+                el.setAttribute("readonly", "");
+                el.style.position = "fixed";
+                el.style.left = "-9999px";
+                document.body.appendChild(el);
+                el.select();
+                done = document.execCommand("copy");
+                el.remove();
+              } catch (e) {}
+              if (done) return Promise.resolve();
+              return Promise.reject(new Error("clipboard write failed"));
+            });
+          };
+        } catch (e) {}
+      })();
+      // dsh-mobile-immersive-max: when the Android status bar is hidden
+      // (Settings -> General -> 沉浸式状态栏), collapse the dsh conversation
+      // header so the chat area expands to the very top of the screen.
+      (function () {
+        function applyImmersiveAttr() {
+          var on = false;
+          try { on = localStorage.getItem("dsh.android.immersive") !== "0"; } catch (e) {}
+          if (on) document.documentElement.setAttribute("data-dsh-immersive", "true");
+          else document.documentElement.removeAttribute("data-dsh-immersive");
+        }
+        applyImmersiveAttr();
+        window.addEventListener("storage", applyImmersiveAttr);
+        try { window.__dshImmersiveApply = applyImmersiveAttr; } catch (e) {}
+      })();
     </script>
+    <style>
+      /* dsh-mobile-immersive-max: hide the conversation header bar under immersive mode. */
+      html[data-dsh-immersive="true"] .wSkVaW_header { display: none !important; }
+      html[data-dsh-immersive="true"] .wSkVaW_scrollBody { height: 100% !important; }
+    </style>
 
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="manifest" href="/manifest.webmanifest" />

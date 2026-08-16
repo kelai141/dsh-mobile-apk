@@ -9074,7 +9074,7 @@ window.__ModuleLoader__.load({
 					case "text":
 						rendered.push((0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.MarkdownText, {
 							text: block.text,
-							streaming,
+							streaming: /* dsh-mobile-streaming-math dsh-mobile-perf-math-gated: keep incremental streaming for plain text; settled grammar (math) only when a complete TeX pair is present */ (/\$\$[\s\S]*?\$\$|\$[^$\n]+\$/.test(block.text)) ? false : streaming,
 							codeLabels,
 							fileMentions: mentions
 						}, i));
