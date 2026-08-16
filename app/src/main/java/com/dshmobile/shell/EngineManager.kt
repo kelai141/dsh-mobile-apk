@@ -439,5 +439,22 @@ class EngineManager(private val context: Context, private val pickToken: String?
     /** 上次真实启动时刻（epoch ms）；watchdog 冷却窗口基准。 */
     @Volatile
     var lastStartAttemptAt: Long = 0
+
+    /**
+     * 进程级共享的目录选择鉴权 token（C1 修复，2026-08-16）：
+     * 首次生成后进程内所有 EngineManager 实例复用——MainActivity 重建、
+     * EngineService 看门狗重启引擎都不会丢失/更换 token，引擎侧
+     * fail-closed（空 token 拒绝）后鉴权依然自洽。
+     */
+    @Volatile
+    var sharedPickToken: String? = null
+
+    /** 获取（或首次生成）进程级 pick token。 */
+    fun ensurePickToken(): String {
+      sharedPickToken?.let { return it }
+      val token = java.util.UUID.randomUUID().toString()
+      sharedPickToken = token
+      return token
+    }
   }
 }

@@ -39,18 +39,23 @@ class MainActivity : ComponentActivity() {
 
   private lateinit var webView: WebView
   private lateinit var guideView: LinearLayout
-  /** 目录选择桥鉴权 token（每次进程启动随机；引擎 env + JS 桥同源持有）。 */
-  private val pickToken: String = java.util.UUID.randomUUID().toString()
+  /** 目录选择桥鉴权 token（进程级共享：MainActivity 重建/看门狗重启不更换，
+   *  与引擎 env 的 DSH_PICK_TOKEN 始终一致；C1 修复）。 */
+  private val pickToken: String = EngineManager.ensurePickToken()
   private lateinit var engineStatus: TextView
   private lateinit var progressText: TextView
   private val engineManager by lazy { EngineManager(this, pickToken) }
   private val engineFlowRunning = java.util.concurrent.atomic.AtomicBoolean(false)
   private var pendingPickCallback: String? = null
+  /** M3：上次 pick 因缺权限挂起（onResume 续启/结算的依据）。 */
+  private var pendingPermissionRequest = false
   private var filePathCallback: ValueCallback<Array<Uri>>? = null
 
   private val directoryPicker = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+    pickTtlHandler.removeCallbacks(pickTtlRunnable)
     val callback = pendingPickCallback
     pendingPickCallback = null
+    pendingPermissionRequest = false
     if (callback != null) {
       if (uri != null) {
         val path = AndroidBridge.resolvePickedPath(uri)
@@ -67,7 +72,26 @@ class MainActivity : ComponentActivity() {
     }
   }
 
+  /** H2：壳侧 pick 占槽 TTL（与引擎侧 5 分钟 TTL 对齐）——SAF 结果永远
+   *  不回来（系统设置页停留/进程被杀恢复/缺权限路径）时自动清槽并按取消
+   *  结算，避免后续目录选择被单槽永久拒绝。 */
+  private val pickTtlHandler = android.os.Handler(android.os.Looper.getMainLooper())
+  private val pickTtlRunnable = Runnable {
+    val callback = pendingPickCallback
+    pendingPickCallback = null
+    pendingPermissionRequest = false
+    if (callback != null) {
+      try {
+        webView.evaluateJavascript(
+          "window.__dshBridge?.onDirectoryPicked?.(" + jsString(callback) + ", null)", null,
+        )
+      } catch (_: Exception) {
+      }
+    }
+  }
+
   companion object {
+    private const val TAG = "dsh-shell"
     const val ACTION_UPDATE = "com.dshmobile.shell.action.UPDATE"
 
     /** 导出文件大小上限（防恶意/异常大文件 OOM）。 */
@@ -114,10 +138,39 @@ class MainActivity : ComponentActivity() {
     if (!EngineProbe.check().optBoolean("running", false)) startEngineFlow()
     // 主题补推：从系统设置/SAF 返回时系统主题可能已变（兜底桥时序覆盖）。
     if (::webView.isInitialized) pushSystemDark(webView)
+    // M3：从系统授权页返回——上次 pick 因缺权限挂起时，已授权则自动续启
+    // SAF，仍拒绝则按取消结算（引擎请求不挂到 5 分钟 TTL）。
+    if (pendingPickCallback != null) {
+      val granted = android.os.Build.VERSION.SDK_INT >= 30 &&
+        android.os.Environment.isExternalStorageManager()
+      Log.i(TAG, "M3 resume: pendingPick=" + pendingPickCallback + " granted=" + granted + " permFlag=" + pendingPermissionRequest)
+      if (granted) {
+        pendingPermissionRequest = false
+        directoryPicker.launch(null)
+      } else {
+        pickTtlHandler.removeCallbacks(pickTtlRunnable)
+        val callback = pendingPickCallback
+        pendingPickCallback = null
+        pendingPermissionRequest = false
+        if (callback != null) {
+          try {
+            webView.evaluateJavascript(
+              "window.__dshBridge?.onDirectoryPicked?.(" + jsString(callback) + ", null)", null,
+            )
+          } catch (_: Exception) {
+          }
+        }
+      }
+    }
   }
 
   override fun onDestroy() {
     super.onDestroy()
+    pickTtlHandler.removeCallbacks(pickTtlRunnable)
+    if (::webView.isInitialized) {
+      themeRetryRunnable?.let { webView.removeCallbacks(it) }
+      webView.destroy()
+    }
     engineManager.stopEngine()
   }
 
@@ -198,6 +251,13 @@ class MainActivity : ComponentActivity() {
       }
 
       override fun onJsAlert(view: WebView, url: String, message: String, result: JsResult): Boolean {
+        // L6：不静默放大社工面——超长消息截断记录；页面确认仍自动放行
+        // （移动 WebView 无原生 alert UI，confirm 阻塞会挂死页面）。
+        if (message.length > 200) {
+          Log.w(TAG, "js alert truncated (" + message.length + " chars): " + message.take(200))
+        } else {
+          Log.d(TAG, "js alert: " + message)
+        }
         result.confirm()
         return true
       }
@@ -209,6 +269,11 @@ class MainActivity : ComponentActivity() {
         onNotify = { title, text -> showTestNotification(title, text) },
         onAllFilesAccessRequest = { openAllFilesAccessSettings() },
         onDebugLogsRequest = { downloadDebugLogs() },
+        onGetSystemDark = {
+          (resources.configuration.uiMode and
+            android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
+            android.content.res.Configuration.UI_MODE_NIGHT_YES
+        },
         pickToken = pickToken,
       ),
       "androidBridge",
@@ -240,9 +305,17 @@ class MainActivity : ComponentActivity() {
     }
     if (android.os.Environment.isExternalStorageManager()) {
       pendingPickCallback = callbackId
+      pickTtlHandler.removeCallbacks(pickTtlRunnable)
+      pickTtlHandler.postDelayed(pickTtlRunnable, 5 * 60_000L)
       directoryPicker.launch(null)
       return
     }
+    // M3：未授权路径也占槽 + 记挂起标记——onResume 据此在授权返回后自动
+    // 续启 SAF（或仍拒绝时按取消结算），引擎请求不再静默挂到 5 分钟 TTL。
+    pendingPickCallback = callbackId
+    pendingPermissionRequest = true
+    pickTtlHandler.removeCallbacks(pickTtlRunnable)
+    pickTtlHandler.postDelayed(pickTtlRunnable, 5 * 60_000L)
     openAllFilesAccessSettings()
     webView.evaluateJavascript(
       "window.__dshBridge?.onPermissionRequired?.()", null,
@@ -508,13 +581,18 @@ class MainActivity : ComponentActivity() {
     return sb.toString()
   }
 
+  /** M7：主题延迟重推 Runnable 引用（onDestroy 取消用）。 */
+  private var themeRetryRunnable: Runnable? = null
+
   /** 系统深色状态推送：某些厂商 WebView 的 prefers-color-scheme 不跟随
    *  uiMode（vivo/Android 16 实测），UI 插件经 matchMedia hook 消费此桥值
    *  （window.__dshThemeBridge.setDark）驱动上游 system 主题。
    *  推送时机加固（2026-08-16）：兜底桥（ui-responsive client bundle 内的
    *  ThemeBridge）可能晚于 onPageFinished 才安装——单次推送会静默落空
    *  （`window.__dshThemeBridge &&` 短路），主题不跟随。延迟 800ms 再推
-   *  一次覆盖该时序；onResume 亦补推（覆盖从系统设置/SAF 返回后主题变化）。 */
+   *  一次覆盖该时序；onResume 亦补推（覆盖从系统设置/SAF 返回后主题变化）。
+   *  Runnable 体内 try/catch + onDestroy removeCallbacks（M7：防销毁后
+   *  迟到的 evaluateJavascript 抛主线程异常）。 */
   private fun pushSystemDark(view: android.webkit.WebView) {
     val dark = (resources.configuration.uiMode and
       android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
@@ -523,11 +601,18 @@ class MainActivity : ComponentActivity() {
       view.evaluateJavascript(
         "window.__dshThemeBridge && window.__dshThemeBridge.setDark(" + dark + ")", null,
       )
-      view.postDelayed({
-        view.evaluateJavascript(
-          "window.__dshThemeBridge && window.__dshThemeBridge.setDark(" + dark + ")", null,
-        )
-      }, 800)
+      themeRetryRunnable?.let { view.removeCallbacks(it) }
+      val runnable = Runnable {
+        try {
+          view.evaluateJavascript(
+            "window.__dshThemeBridge && window.__dshThemeBridge.setDark(" + dark + ")", null,
+          )
+        } catch (_: Exception) {
+          // 页面/WebView 已销毁：重推失败无害。
+        }
+      }
+      themeRetryRunnable = runnable
+      view.postDelayed(runnable, 800)
     } catch (_: Exception) {
       // 页面未就绪：onPageFinished 会再推一次。
     }

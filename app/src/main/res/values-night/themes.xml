@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- M6（2026-08-16）：深色模式启动/系统栏不再白闪——night 限定符覆盖
+       浅色变体（windowBackground/statusBarColor 随 uiMode）。 -->
+  <style name="Theme.Dsh" parent="android:Theme.Material.NoActionBar">
+    <item name="android:windowBackground">#111318</item>
+    <item name="android:statusBarColor">#111318</item>
+  </style>
+</resources>

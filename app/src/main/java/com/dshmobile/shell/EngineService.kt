@@ -24,7 +24,8 @@ class EngineService : Service() {
 
   override fun onCreate() {
     super.onCreate()
-    engineManager = EngineManager(this)
+    // C1：复用进程级 pick token（看门狗重启引擎后鉴权不失效、不空放行）。
+    engineManager = EngineManager(this, EngineManager.ensurePickToken())
     startForeground(NOTIFICATION_ID, buildNotification())
   }
 

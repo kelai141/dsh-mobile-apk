@@ -17,11 +17,17 @@ class AndroidBridge(
   private val onNotify: (title: String, text: String) -> Unit,
   private val onAllFilesAccessRequest: () -> Unit = {},
   private val onDebugLogsRequest: () -> Unit = {},
+  private val onGetSystemDark: () -> Boolean = { false },
   private val pickToken: String? = null,
 ) {
 
   @JavascriptInterface
   fun version(): String = "1.0"
+
+  /** 系统深色状态同步查询（H1：首帧主题桥启动时拉取真实 uiMode，
+   *  绕过厂商 WebView matchMedia 卡 light 的问题）。 */
+  @JavascriptInterface
+  fun getSystemDark(): Boolean = onGetSystemDark()
 
   @JavascriptInterface
   fun checkEngine(): String = EngineProbe.check().toString()
@@ -80,7 +86,11 @@ class AndroidBridge(
         val idx = docId.indexOf(':')
         val volume = if (idx > 0) docId.substring(0, idx) else ""
         val rel = if (idx > 0) docId.substring(idx + 1) else docId
-        if (volume == "primary" && rel.isNotEmpty()) "/storage/emulated/0/$rel" else uri.toString()
+        // M5：路径清洗——拒绝 `..` 段/绝对路径（防越界），空 rel 拒绝。
+        if (rel.isEmpty() || rel.split("/").any { it == ".." } || rel.startsWith("/")) {
+          return uri.toString()
+        }
+        if (volume == "primary") "/storage/emulated/0/$rel" else uri.toString()
       } catch (_: Exception) {
         uri.toString()
       }
