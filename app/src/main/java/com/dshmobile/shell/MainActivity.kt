@@ -30,6 +30,7 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContract
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.NotificationCompat
 import java.io.File
@@ -142,8 +143,92 @@ class MainActivity : ComponentActivity() {
       }
     }
 
+  // 图片选择：ACTION_PICK 走系统相册（tap 即选），区别于 ACTION_GET_CONTENT 的文件管理器。
+  // accept 为图片类型时必须走相册，否则系统会进「最近/大型文件」的文档界面（需要长按才能选）。
+  private val imagePicker =
+    registerForActivityResult(PickImageContract()) { uri ->
+      val callback = filePathCallback
+      filePathCallback = null
+      if (callback != null) {
+        callback.onReceiveValue(if (uri == null) null else arrayOf(uri))
+      }
+    }
+
   private val notificationPermission =
     registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* test channel only */ }
+
+  /** bridge 图片选择：原生读图 → base64 data URL → window.__dshBridge.onImagePicked。
+   *  华为 WebView（Chromium 114）的 onShowFileChooser 收到 content:// Uri 后不触发
+   *  input change，改由原生层读字节直接回传 JS，彻底绕开 WebView 文件选择器。 */
+  private var pendingImagePickCallback: String? = null
+
+  private val imagePickerBridge =
+    registerForActivityResult(PickImageContract()) { uri ->
+      val callbackId = pendingImagePickCallback
+      pendingImagePickCallback = null
+      Log.i("dsh-image", "bridge pick result: callbackId=" + callbackId + " uri=" + uri)
+      if (callbackId == null) return@registerForActivityResult
+      if (uri == null) {
+        webView.evaluateJavascript(
+          "window.__dshBridge?.onImagePicked?.(" + jsString(callbackId) + ", null)", null,
+        )
+        return@registerForActivityResult
+      }
+      try {
+        val mediaType = contentResolver.getType(uri) ?: "image/jpeg"
+        val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: byteArrayOf()
+        Log.i("dsh-image", "read bytes=" + bytes.size + " type=" + mediaType)
+        val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+        val dataUrl = "data:$mediaType;base64,$b64"
+        val name = queryImageName(uri) ?: "image"
+        val json = "{\"dataUrl\":" + jsString(dataUrl) +
+          ",\"mediaType\":" + jsString(mediaType) +
+          ",\"name\":" + jsString(name) +
+          ",\"size\":" + bytes.size + "}"
+        Log.i("dsh-image", "json length=" + json.length)
+        webView.evaluateJavascript(
+          "window.__dshBridge?.onImagePicked?.(" + jsString(callbackId) + ", " + json + ")",
+        ) { value -> Log.i("dsh-image", "js result: " + value) }
+      } catch (e: Exception) {
+        Log.e("dsh-image", "read failed", e)
+        webView.evaluateJavascript(
+          "window.__dshBridge?.onImagePicked?.(" + jsString(callbackId) + ", null)", null,
+        )
+      }
+    }
+
+  private fun pickImageForBridge(callbackId: String) {
+    if (pendingImagePickCallback != null) {
+      webView.evaluateJavascript(
+        "window.__dshBridge?.onImagePicked?.(" + jsString(callbackId) + ", null)", null,
+      )
+      return
+    }
+    pendingImagePickCallback = callbackId
+    imagePickerBridge.launch(Unit)
+  }
+
+  /** 从 content Uri 读取显示名（MediaStore DISPLAY_NAME）。 */
+  private fun queryImageName(uri: Uri): String? {
+    return try {
+      contentResolver.query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)
+        ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+    } catch (_: Exception) {
+      null
+    }
+  }
+
+  /** ACTION_PICK 图片选择契约：打开系统相册，tap 即返回单个图片 Uri。 */
+  private class PickImageContract : ActivityResultContract<Unit, Uri?>() {
+    override fun createIntent(context: Context, input: Unit): Intent {
+      return Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI).apply {
+        type = "image/*"
+      }
+    }
+    override fun parseResult(resultCode: Int, intent: Intent?): Uri? {
+      return if (resultCode == android.app.Activity.RESULT_OK) intent?.data else null
+    }
+  }
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
@@ -181,7 +266,9 @@ class MainActivity : ComponentActivity() {
     engineMonitorHandler.removeCallbacks(engineMonitorRunnable)
     engineMonitorHandler.post(engineMonitorRunnable)
     // Back from the directory picker / Termux: re-route if the engine came up.
-    if (!EngineProbe.check().optBoolean("running", false)) startEngineFlow()
+    // 仅当 WebView 未展示（引导页/首次启动）时才探测并重路由；相册/文件选择器
+    // 返回时 WebView 已可见，探测超时会误触发 showWeb→reload，导致 JS 状态丢失。
+    if (webView.visibility != View.VISIBLE && !EngineProbe.check().optBoolean("running", false)) startEngineFlow()
     // 主题补推：从系统设置/SAF 返回时系统主题可能已变（兜底桥时序覆盖）。
     if (::webView.isInitialized) pushSystemDark(webView)
     // M3：从系统授权页返回——上次 pick 因缺权限挂起时，已授权则自动续启
@@ -289,11 +376,17 @@ class MainActivity : ComponentActivity() {
       override fun onShowFileChooser(
         webView: WebView, filePathCallback: ValueCallback<Array<Uri>>, fileChooserParams: FileChooserParams,
       ): Boolean {
-        // 文件上传走系统文件选择器（OpenDocument，可多选）；directoryPicker
-        // 是目录选择（工作区用），两者必须分离。
+        // 文件上传走系统文件选择器；directoryPicker 是目录选择（工作区用），两者分离。
+        // accept="image/*" 时走图片选择器（GetContent → 相册），否则走文档选择器。
         this@MainActivity.filePathCallback?.onReceiveValue(null)
         this@MainActivity.filePathCallback = filePathCallback
-        filePicker.launch(emptyArray())
+        val accept = fileChooserParams.acceptTypes ?: emptyArray()
+        val imageOnly = accept.isNotEmpty() && accept.all { it.startsWith("image/") }
+        if (imageOnly) {
+          imagePicker.launch(Unit)
+        } else {
+          filePicker.launch(emptyArray())
+        }
         return true
       }
 
@@ -321,6 +414,8 @@ class MainActivity : ComponentActivity() {
             android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
             android.content.res.Configuration.UI_MODE_NIGHT_YES
         },
+        onPickImageRequest = { callbackId -> pickImageForBridge(callbackId) },
+        onCopyTextRequest = { text -> copyTextNative(text) },
         pickToken = pickToken,
         onRestartEngine = { restartEngine() },
         onReloadWebUI = {
