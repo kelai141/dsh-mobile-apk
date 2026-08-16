@@ -72,6 +72,12 @@ class AndroidBridge(
     onSetImmersiveRequest(enable)
   }
 
+  /** 调试日志导出：引擎日志 + 环境信息打包 zip（走会话导出同款下载/弹窗链路）。 */
+  @JavascriptInterface
+  fun downloadDebugLogs() {
+    onDebugLogsRequest()
+  }
+
   /** True when the app holds All Files Access (external workspace requirement). */
   @JavascriptInterface
   fun hasAllFilesAccess(): Boolean {
