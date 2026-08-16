@@ -20,6 +20,7 @@ class AndroidBridge(
   private val onGetSystemDark: () -> Boolean = { false },
   private val onPickImageRequest: (callbackId: String) -> Unit = {},
   private val onSetTextZoomRequest: (percent: Int) -> Unit = {},
+  private val onSetImmersiveRequest: (enable: Boolean) -> Unit = {},
   private val pickToken: String? = null,
   private val onRestartEngine: () -> Unit = {},
   private val onReloadWebUI: () -> Unit = {},
@@ -63,6 +64,12 @@ class AndroidBridge(
   @JavascriptInterface
   fun setTextZoom(percent: Int) {
     onSetTextZoomRequest(percent)
+  }
+
+  /** 沉浸式状态栏开关（true=状态栏常态收起）；设置 → 通用设置 调用。 */
+  @JavascriptInterface
+  fun setImmersiveMode(enable: Boolean) {
+    onSetImmersiveRequest(enable)
   }
 
   /** True when the app holds All Files Access (external workspace requirement). */

@@ -33,6 +33,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContract
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.NotificationCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -267,6 +270,9 @@ class MainActivity : ComponentActivity() {
       LogCollector.start(this)
       LogCollector.log("dsh-shell", "app onCreate (dev log on)")
     }
+    // 沉浸式：内容延伸到系统栏区域（状态栏常态收起，边缘滑动临时呼出）。
+    WindowCompat.setDecorFitsSystemWindows(window, false)
+    applyImmersive(immersivePrefs())
     val root = FrameLayout(this)
     webView = WebView(this).apply { id = View.generateViewId() }
     root.addView(webView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
@@ -316,6 +322,60 @@ class MainActivity : ComponentActivity() {
           }
         }
       }
+    }
+  }
+
+  /** 窗口重新获得焦点时重应用沉浸式（系统栏 flag 会随焦点变化被重置）。 */
+  override fun onWindowFocusChanged(hasFocus: Boolean) {
+    super.onWindowFocusChanged(hasFocus)
+    if (hasFocus) applyImmersive(immersivePrefs())
+  }
+
+  /** 沉浸式状态栏持久化读取（设置 → 通用设置 开关；默认收起）。 */
+  private fun immersivePrefs(): Boolean {
+    return try {
+      getSharedPreferences("dsh_settings", MODE_PRIVATE).getBoolean("immersive_mode", true)
+    } catch (_: Exception) {
+      true
+    }
+  }
+
+  /** 状态栏常态收起（沉浸式）：隐藏系统栏，边缘滑动临时呼出后自动收起。 */
+  private fun applyImmersive(enabled: Boolean) {
+    try {
+      if (Build.VERSION.SDK_INT >= 30) {
+        val controller = WindowInsetsControllerCompat(window, window.decorView)
+        if (enabled) {
+          controller.hide(WindowInsetsCompat.Type.statusBars())
+          controller.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        } else {
+          controller.show(WindowInsetsCompat.Type.statusBars())
+        }
+      } else {
+        val flags = if (enabled) {
+          View.SYSTEM_UI_FLAG_FULLSCREEN or
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+            View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+        } else {
+          0
+        }
+        window.decorView.systemUiVisibility = flags
+      }
+    } catch (t: Throwable) {
+      Log.e("dsh-image", "applyImmersive failed: " + t.message)
+    }
+  }
+
+  /** 沉浸式开关（JS 桥）：应用 + 持久化。 */
+  private fun setImmersivePersisted(enabled: Boolean) {
+    runOnUiThread { applyImmersive(enabled) }
+    try {
+      getSharedPreferences("dsh_settings", MODE_PRIVATE).edit().putBoolean("immersive_mode", enabled).apply()
+      Log.i("dsh-image", "immersive set: " + enabled)
+    } catch (e: Exception) {
+      Log.e("dsh-image", "immersive persist failed: " + e.message)
     }
   }
 
@@ -440,6 +500,7 @@ class MainActivity : ComponentActivity() {
         },
         onPickImageRequest = { callbackId -> pickImageForBridge(callbackId) },
         onSetTextZoomRequest = { percent -> setTextZoomPersisted(percent) },
+        onSetImmersiveRequest = { enable -> setImmersivePersisted(enable) },
         pickToken = pickToken,
         onRestartEngine = { restartEngine() },
         onReloadWebUI = {

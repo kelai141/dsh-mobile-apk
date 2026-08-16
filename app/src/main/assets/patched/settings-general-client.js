@@ -345,9 +345,40 @@ window.__ModuleLoader__.load({
 					(0, react_jsx_runtime.jsx)("span", { style: valueStyle, children: zoom + "%" })
 				]
 			}) : null;
+			/* dsh-mobile-immersive: Android-only status-bar hide switch in
+			 * Settings -> General (persisted; applied via native bridge). */
+			const [immersive, setImmersive] = (0, react.useState)(() => {
+				try {
+					return localStorage.getItem("dsh.android.immersive") !== "0";
+				} catch (e) {
+					return true;
+				}
+			});
+			(0, react.useEffect)(() => {
+				try {
+					localStorage.setItem("dsh.android.immersive", immersive ? "1" : "0");
+					if (window.androidBridge && typeof window.androidBridge.setImmersiveMode === "function") {
+						window.androidBridge.setImmersiveMode(immersive);
+					}
+				} catch (e) {}
+			}, [immersive]);
+			const switchStyle = { flex: "none", width: "44px", height: "24px", accentColor: "var(--dsw-alias-accent)", cursor: "pointer" };
+			const immersiveRow = isAndroid ? (0, react_jsx_runtime.jsxs)("div", {
+				style: rowStyle,
+				children: [
+					(0, react_jsx_runtime.jsx)("span", { style: labelStyle, children: "\u6c89\u6d78\u5f0f\u72b6\u6001\u680f" }),
+					(0, react_jsx_runtime.jsx)("input", {
+						type: "checkbox",
+						checked: immersive,
+						style: switchStyle,
+						"aria-label": "\u6c89\u6d78\u5f0f\u72b6\u6001\u680f",
+						onChange: (e) => setImmersive(e.target.checked)
+					})
+				]
+			}) : null;
 			return (0, react_jsx_runtime.jsxs)("div", {
 				className: GeneralSection_module_css_default.section,
-				children: [renderSlot("settings.general.item", {}), fontRow]
+				children: [renderSlot("settings.general.item", {}), fontRow, immersiveRow]
 			});
 		}
 		//#endregion
