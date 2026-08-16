@@ -19,6 +19,7 @@ class AndroidBridge(
   private val onDebugLogsRequest: () -> Unit = {},
   private val onGetSystemDark: () -> Boolean = { false },
   private val onPickImageRequest: (callbackId: String) -> Unit = {},
+  private val onCopyTextRequest: (text: String) -> Boolean = { false },
   private val pickToken: String? = null,
   private val onRestartEngine: () -> Unit = {},
   private val onReloadWebUI: () -> Unit = {},
@@ -56,6 +57,20 @@ class AndroidBridge(
   @JavascriptInterface
   fun pickImage(callbackId: String) {
     onPickImageRequest(callbackId)
+  }
+
+  /**
+   * 原生剪贴板写入（WebView 的 navigator.clipboard.writeText 在 Android 上
+   * 恒被拒 NotAllowedError: Write permission denied，页面 writeClipboard
+   * 失败后回退调用本桥）。返回是否写入成功。
+   */
+  @JavascriptInterface
+  fun copyText(text: String): Boolean = onCopyTextRequest(text)
+
+  /** 调试日志导出：引擎日志 + 环境信息打包 zip（走会话导出同款下载/弹窗链路）。 */
+  @JavascriptInterface
+  fun downloadDebugLogs() {
+    onDebugLogsRequest()
   }
 
   /** True when the app holds All Files Access (external workspace requirement). */
