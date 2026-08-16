@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>dsh 控制台</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --fg: #d0d7de;
+    --dim: #8b949e;
+    --accent: #3fb950;
+    --warn: #d29922;
+    --border: #21262d;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "Cascadia Mono", "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+    font-size: 13px;
+    display: flex;
+    flex-direction: column;
+  }
+  #statusbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 10px;
+    background: #10151d;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    flex: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  #statusbar .title { font-weight: 600; color: var(--fg); }
+  #statusbar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); flex: none; }
+  #statusbar .dot.ok { background: var(--accent); }
+  #statusbar .dot.err { background: #f85149; }
+  #statusbar #engineStatus { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #statusbar #consoleStatus { color: var(--dim); margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #output {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 10px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    line-height: 1.45;
+  }
+  #output .prompt { color: var(--accent); }
+  #inputrow {
+    display: flex;
+    gap: 8px;
+    padding: 8px 10px;
+    border-top: 1px solid var(--border);
+    flex: none;
+  }
+  #cmd {
+    flex: 1;
+    background: #10151d;
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-family: inherit;
+    font-size: 13px;
+    outline: none;
+  }
+  #cmd:focus { border-color: #388bfd; }
+  #send {
+    background: #1f6feb;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 0 16px;
+    font-size: 13px;
+    flex: none;
+  }
+  #send:active { background: #388bfd; }
+</style>
+</head>
+<body>
+  <div id="statusbar">
+    <span class="title">dsh 控制台</span>
+    <span class="dot" id="engineDot"></span>
+    <span id="engineStatus">引擎检测中…</span>
+    <span id="consoleStatus">启动中…</span>
+  </div>
+  <div id="output"><span class="prompt">$ </span>dsh 控制台：底层为快照内嵌 Termux bash，可执行任意排查命令。<br>引擎未运行时也可使用本控制台（例如排查引擎启动失败）。<br><br></div>
+  <div id="inputrow">
+    <input id="cmd" type="text" placeholder="输入命令，回车执行" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <button id="send" type="button">发送</button>
+  </div>
+<script>
+(function () {
+  var output = document.getElementById('output');
+  var cmd = document.getElementById('cmd');
+  var send = document.getElementById('send');
+  var engineStatus = document.getElementById('engineStatus');
+  var engineDot = document.getElementById('engineDot');
+  var consoleStatus = document.getElementById('consoleStatus');
+  var maxLines = 2000;
+
+  function trimOutput() {
+    var children = output.childNodes;
+    if (children.length > maxLines) {
+      for (var i = 0; i < children.length - maxLines + 500; i++) {
+        var el = children[i];
+        if (el && el.parentNode) el.parentNode.removeChild(el);
+      }
+    }
+  }
+
+  function scrollBottom() { output.scrollTop = output.scrollHeight; }
+
+  window.__consoleAppend = function (text) {
+    if (!text) return;
+    var node = document.createElement('span');
+    node.textContent = text;
+    output.appendChild(node);
+    trimOutput();
+    scrollBottom();
+  };
+
+  window.__consoleStatus = function (text) {
+    consoleStatus.textContent = text || '';
+  };
+
+  function refreshEngine() {
+    try {
+      var raw = window.consoleBridge.engineStatus();
+      var info = JSON.parse(raw);
+      if (info && info.running) {
+        engineStatus.textContent = '引擎运行中（' + info.latencyMs + 'ms）';
+        engineDot.className = 'dot ok';
+      } else {
+        engineStatus.textContent = '引擎未运行' + (info && info.error ? '：' + info.error : '');
+        engineDot.className = 'dot err';
+      }
+    } catch (e) {
+      engineStatus.textContent = '引擎检测失败';
+      engineDot.className = 'dot err';
+    }
+  }
+
+  function submit() {
+    var text = cmd.value;
+    if (!text.trim()) return;
+    cmd.value = '';
+    var node = document.createElement('span');
+    node.textContent = '\n';
+    output.appendChild(node);
+    var prompt = document.createElement('span');
+    prompt.className = 'prompt';
+    prompt.textContent = '$ ';
+    output.appendChild(prompt);
+    var echo = document.createElement('span');
+    echo.textContent = text + '\n';
+    output.appendChild(echo);
+    trimOutput();
+    scrollBottom();
+    try { window.consoleBridge.submit(text); } catch (e) {}
+  }
+
+  send.addEventListener('click', submit);
+  cmd.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); submit(); }
+  });
+
+  refreshEngine();
+  setInterval(refreshEngine, 3000);
+})();
+</script>
+</body>
+</html>

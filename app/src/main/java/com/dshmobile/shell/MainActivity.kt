@@ -25,7 +25,9 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
@@ -44,6 +46,34 @@ class MainActivity : ComponentActivity() {
   private val pickToken: String = EngineManager.ensurePickToken()
   private lateinit var engineStatus: TextView
   private lateinit var progressText: TextView
+  /** 启动/测试双态界面（v0.11.0）：解压进度条、崩溃横幅、engine.log 摘要。 */
+  private lateinit var progressBar: ProgressBar
+  private lateinit var crashBanner: TextView
+  private lateinit var logSummary: TextView
+  /** 崩溃标记：记录未捕获异常摘要，下次启动测试界面提示（不吞异常）。 */
+  private var crashInfo: String? = null
+  /** 重启引擎 in-flight 守卫（防连点双杀双启）。 */
+  private val engineRestarting = java.util.concurrent.atomic.AtomicBoolean(false)
+  /** 前台引擎监控：3s 轮询探测，down→测试界面、up→恢复 WebUI
+   *  （"设置里杀进程/引擎崩溃回退测试界面"的落地；watchdog 负责恢复）。 */
+  private val engineMonitorHandler = android.os.Handler(android.os.Looper.getMainLooper())
+  private val engineMonitorRunnable = object : Runnable {
+    override fun run() {
+      Thread {
+        val running = try { EngineProbe.check(500).optBoolean("running", false) } catch (_: Exception) { false }
+        runOnUiThread {
+          if (!::webView.isInitialized || !::guideView.isInitialized) return@runOnUiThread
+          if (!running && webView.visibility == View.VISIBLE) {
+            engineStatus.text = "引擎未运行，正在自动恢复…"
+            showGuide()
+          } else if (running && guideView.visibility == View.VISIBLE) {
+            showWeb()
+          }
+        }
+        engineMonitorHandler.postDelayed(this, 3000)
+      }.start()
+    }
+  }
   private val engineManager by lazy { EngineManager(this, pickToken) }
   private val engineFlowRunning = java.util.concurrent.atomic.AtomicBoolean(false)
   private var pendingPickCallback: String? = null
@@ -117,6 +147,19 @@ class MainActivity : ComponentActivity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    // 崩溃标记：进程级未捕获异常写入 filesDir/.crashed（下次启动测试界面
+    // 提示），随后交回默认 handler——只记录，不吞异常、不阻止崩溃。
+    installCrashMarker()
+    val crashFile = File(filesDir, ".crashed")
+    if (crashFile.exists()) {
+      crashInfo = try { crashFile.readText() } catch (_: Exception) { null }
+      crashFile.delete()
+    }
+    // 开发者日志开关已开（上次会话）：进程启动即恢复收集。
+    if (DevLogPrefs.isEnabled(this)) {
+      LogCollector.start(this)
+      LogCollector.log("dsh-shell", "app onCreate (dev log on)")
+    }
     val root = FrameLayout(this)
     webView = WebView(this).apply { id = View.generateViewId() }
     root.addView(webView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
@@ -134,6 +177,9 @@ class MainActivity : ComponentActivity() {
 
   override fun onResume() {
     super.onResume()
+    // 前台引擎监控：引擎被杀/崩溃时自动回退测试界面，恢复后回 WebUI。
+    engineMonitorHandler.removeCallbacks(engineMonitorRunnable)
+    engineMonitorHandler.post(engineMonitorRunnable)
     // Back from the directory picker / Termux: re-route if the engine came up.
     if (!EngineProbe.check().optBoolean("running", false)) startEngineFlow()
     // 主题补推：从系统设置/SAF 返回时系统主题可能已变（兜底桥时序覆盖）。
@@ -166,6 +212,7 @@ class MainActivity : ComponentActivity() {
 
   override fun onDestroy() {
     super.onDestroy()
+    engineMonitorHandler.removeCallbacks(engineMonitorRunnable)
     pickTtlHandler.removeCallbacks(pickTtlRunnable)
     if (::webView.isInitialized) {
       themeRetryRunnable?.let { webView.removeCallbacks(it) }
@@ -275,6 +322,28 @@ class MainActivity : ComponentActivity() {
             android.content.res.Configuration.UI_MODE_NIGHT_YES
         },
         pickToken = pickToken,
+        onRestartEngine = { restartEngine() },
+        onReloadWebUI = {
+          webView.reload()
+          showTestNotification("界面已刷新", "Web UI 已重新加载")
+        },
+        onOpenConsole = { startActivity(Intent(this, ConsoleActivity::class.java)) },
+        onGetDevLogEnabled = { DevLogPrefs.isEnabled(this) },
+        onSetDevLogEnabled = { enabled ->
+          DevLogPrefs.setEnabled(this, enabled)
+          if (enabled) {
+            LogCollector.start(this)
+            LogCollector.log("dsh-shell", "dev log enabled by user")
+            showTestNotification(
+              "开发者日志已开启",
+              "运行日志按天写入 " + LogCollector.currentDir(this).absolutePath,
+            )
+          } else {
+            LogCollector.log("dsh-shell", "dev log disabled by user")
+            LogCollector.stop()
+            showTestNotification("开发者日志已关闭", "日志收集已停止")
+          }
+        },
       ),
       "androidBridge",
     )
@@ -691,22 +760,65 @@ class MainActivity : ComponentActivity() {
   }
 
   private fun buildGuideView(): LinearLayout {
-    val padding = (24 * resources.displayMetrics.density).toInt()
+    val density = resources.displayMetrics.density
+    val pad = (24 * density).toInt()
     val guide = LinearLayout(this).apply {
       orientation = LinearLayout.VERTICAL
-      setPadding(padding, padding, padding, padding)
+      setPadding(pad, pad, pad, pad)
       gravity = android.view.Gravity.CENTER
       visibility = View.GONE
     }
-    engineStatus = TextView(this).apply { textSize = 16f; setPadding(0, 0, 0, padding) }
-    progressText = TextView(this).apply { textSize = 13f; setPadding(0, 0, 0, padding); visibility = View.GONE }
-    val openTermux = Button(this).apply {
-      text = "打开 Termux"
-      setOnClickListener { launchTermux() }
+    // logo + 标题：启动/测试双态界面的固定头部。
+    val icon = ImageView(this).apply {
+      setImageResource(R.mipmap.ic_launcher)
+      layoutParams = LinearLayout.LayoutParams((64 * density).toInt(), (64 * density).toInt())
+    }
+    val title = TextView(this).apply {
+      text = "DeepSeek Harness"
+      textSize = 20f
+      setPadding(0, (12 * density).toInt(), 0, (4 * density).toInt())
+      gravity = android.view.Gravity.CENTER
+    }
+    // 上次异常退出横幅（崩溃标记存在时显示）。
+    crashBanner = TextView(this).apply {
+      textSize = 12f
+      setTextColor(0xFFF85149.toInt())
+      setPadding(0, (6 * density).toInt(), 0, (10 * density).toInt())
+      gravity = android.view.Gravity.CENTER
+      visibility = View.GONE
+    }
+    engineStatus = TextView(this).apply { textSize = 16f; setPadding(0, 0, 0, pad); gravity = android.view.Gravity.CENTER }
+    // 解压/更新进度条（仅快照刷新时可见）。
+    progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+      visibility = View.GONE
+      layoutParams = LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, (6 * density).toInt(),
+      )
+    }
+    progressText = TextView(this).apply {
+      textSize = 13f
+      setPadding(0, (8 * density).toInt(), 0, pad)
+      gravity = android.view.Gravity.CENTER
+      visibility = View.GONE
+    }
+    // 失败诊断：engine.log 尾部摘要（测试界面排查用）。
+    logSummary = TextView(this).apply {
+      textSize = 11f
+      setPadding(0, 0, 0, pad)
+      gravity = android.view.Gravity.CENTER
+      visibility = View.GONE
+    }
+    val openConsole = Button(this).apply {
+      text = "打开控制台"
+      setOnClickListener { startActivity(Intent(this@MainActivity, ConsoleActivity::class.java)) }
     }
     val retry = Button(this).apply {
       text = "重试"
       setOnClickListener { startEngineFlow() }
+    }
+    val openTermux = Button(this).apply {
+      text = "打开 Termux"
+      setOnClickListener { launchTermux() }
     }
     val update = Button(this).apply {
       text = "检查运行时更新"
@@ -716,11 +828,30 @@ class MainActivity : ComponentActivity() {
         }
       }
     }
+    fun buttonRow(vararg buttons: Button): LinearLayout {
+      val row = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = android.view.Gravity.CENTER
+        val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp.setMargins(0, 0, 0, (10 * density).toInt())
+        layoutParams = lp
+      }
+      for (b in buttons) {
+        val blp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        blp.setMargins((6 * density).toInt(), 0, (6 * density).toInt(), 0)
+        row.addView(b, blp)
+      }
+      return row
+    }
+    guide.addView(icon)
+    guide.addView(title)
+    guide.addView(crashBanner)
     guide.addView(engineStatus)
+    guide.addView(progressBar)
     guide.addView(progressText)
-    guide.addView(openTermux)
-    guide.addView(retry)
-    guide.addView(update)
+    guide.addView(logSummary)
+    guide.addView(buttonRow(openConsole, retry))
+    guide.addView(buttonRow(openTermux, update))
     return guide
   }
 
@@ -744,10 +875,17 @@ class MainActivity : ComponentActivity() {
         runOnUiThread { showWeb() }
         return@Thread
       }
+      // 启动即有反馈：进入测试界面显示"正在启动引擎…"（不再白屏等 probe）。
+      runOnUiThread {
+        progressBar.visibility = View.GONE
+        progressText.visibility = View.GONE
+        engineStatus.text = "正在启动引擎…"
+        showGuide()
+      }
       if (!engineManager.snapshotFresh()) {
         runOnUiThread {
+          progressBar.visibility = View.VISIBLE
           progressText.visibility = View.VISIBLE
-          guideView.visibility = View.VISIBLE
           engineStatus.text = "正在更新运行时（约 70MB）…"
         }
         val ok = engineManager.refreshSnapshot { done, total ->
@@ -762,6 +900,11 @@ class MainActivity : ComponentActivity() {
             showGuide()
           }
           return@Thread
+        }
+        runOnUiThread {
+          progressBar.visibility = View.GONE
+          progressText.visibility = View.GONE
+          engineStatus.text = "正在启动引擎…"
         }
       }
       if (!engineManager.startEngine()) {
@@ -837,8 +980,88 @@ class MainActivity : ComponentActivity() {
     webView.reload()
   }
 
+  /** 进入测试界面（引擎失败/未就绪回退）：状态 + 崩溃横幅 + engine.log 摘要。 */
   private fun showGuide() {
     webView.visibility = View.GONE
     guideView.visibility = View.VISIBLE
+    val crash = crashInfo
+    if (crash != null) {
+      crashBanner.visibility = View.VISIBLE
+      crashBanner.text = "上次异常退出：$crash"
+    }
+    val tail = tailEngineLog(8)
+    if (tail.isNotEmpty()) {
+      logSummary.visibility = View.VISIBLE
+      logSummary.text = "engine.log 末尾：\n$tail"
+    } else {
+      logSummary.visibility = View.GONE
+    }
+  }
+
+  /** engine.log 尾部摘要（测试界面诊断用；缺失/不可读返回空）。 */
+  private fun tailEngineLog(lines: Int): String {
+    val f = File(filesDir, "engine.log")
+    if (!f.exists()) return ""
+    return try {
+      f.readLines().takeLast(lines).joinToString("\n")
+    } catch (_: Exception) {
+      ""
+    }
+  }
+
+  /** 进程级崩溃标记：记录未捕获异常摘要，交回默认 handler（不吞异常）。 */
+  private fun installCrashMarker() {
+    val default = Thread.getDefaultUncaughtExceptionHandler()
+    Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+      try {
+        val text = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US)
+          .format(java.util.Date()) + " " + throwable.javaClass.name + ": " + (throwable.message ?: "")
+        File(filesDir, ".crashed").writeText(text)
+        LogCollector.log("dsh-shell", "uncaught crash: $text")
+      } catch (_: Exception) {
+      }
+      default?.uncaughtException(thread, throwable)
+    }
+  }
+
+  /**
+   * 重启引擎服务进程（设置界面「重启引擎」）：pkill 引擎 → 重置冷却与
+   * 流程守卫 → 1s 后重新走启动流程（EngineService 看门狗亦会拉起，
+   * 进程级 CAS + 冷却保证双路径幂等）。防连点：in-flight 守卫。
+   */
+  private fun restartEngine() {
+    if (!engineRestarting.compareAndSet(false, true)) return
+    Thread {
+      try {
+        try {
+          Runtime.getRuntime().exec(arrayOf("/system/bin/pkill", "-f", "bin.js")).waitFor()
+        } catch (_: Throwable) {
+        }
+        EngineManager.lastStartAttemptAt = 0
+        engineFlowRunning.set(false)
+        LogCollector.log("dsh-shell", "restart engine requested (pkill)")
+        Thread.sleep(1000)
+        runOnUiThread {
+          showTestNotification("引擎重启中", "引擎进程已结束，正在重新启动…")
+          startEngineFlow()
+        }
+      } finally {
+        engineRestarting.set(false)
+      }
+    }.start()
+  }
+
+  /** 开发者日志开关持久化（私有 SharedPreferences；默认关）。 */
+  object DevLogPrefs {
+    private const val PREFS = "dsh_prefs"
+    private const val KEY_DEV_LOG = "dev_log_enabled"
+
+    fun isEnabled(context: Context): Boolean =
+      context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_DEV_LOG, false)
+
+    fun setEnabled(context: Context, enabled: Boolean) {
+      context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        .edit().putBoolean(KEY_DEV_LOG, enabled).apply()
+    }
   }
 }

@@ -27,6 +27,8 @@ class EngineService : Service() {
     // C1：复用进程级 pick token（看门狗重启引擎后鉴权不失效、不空放行）。
     engineManager = EngineManager(this, EngineManager.ensurePickToken())
     startForeground(NOTIFICATION_ID, buildNotification())
+    // 开发者日志开关已开：常驻收集（logcat + engine.log → dshdata/log/ 按天）。
+    if (MainActivity.DevLogPrefs.isEnabled(this)) LogCollector.start(this)
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -39,6 +41,8 @@ class EngineService : Service() {
   override fun onDestroy() {
     watchdog?.shutdownNow()
     watchdog = null
+    // 服务退出即停止日志收集（进程内幂等单例；开关关时也已停）。
+    LogCollector.stop()
     super.onDestroy()
   }
 

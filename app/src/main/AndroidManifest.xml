@@ -29,5 +29,12 @@
         <category android:name="android.intent.category.LAUNCHER" />
       </intent-filter>
     </activity>
+
+    <!-- 内置控制台：快照 bash 交互终端（引擎未运行时也可排查）。 -->
+    <activity
+      android:name=".ConsoleActivity"
+      android:exported="false"
+      android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
+      android:windowSoftInputMode="adjustResize" />
   </application>
 </manifest>

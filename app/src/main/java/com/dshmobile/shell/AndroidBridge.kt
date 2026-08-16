@@ -19,6 +19,11 @@ class AndroidBridge(
   private val onDebugLogsRequest: () -> Unit = {},
   private val onGetSystemDark: () -> Boolean = { false },
   private val pickToken: String? = null,
+  private val onRestartEngine: () -> Unit = {},
+  private val onReloadWebUI: () -> Unit = {},
+  private val onOpenConsole: () -> Unit = {},
+  private val onGetDevLogEnabled: () -> Boolean = { false },
+  private val onSetDevLogEnabled: (Boolean) -> Unit = {},
 ) {
 
   @JavascriptInterface
@@ -70,6 +75,34 @@ class AndroidBridge(
   /** 目录选择桥的一次性会话 token（引擎侧 pick 端点校验；null = 未启用）。 */
   @JavascriptInterface
   fun getPickToken(): String? = pickToken
+
+  /** 重启引擎服务进程：kill 引擎进程，EngineService 看门狗自动拉起。 */
+  @JavascriptInterface
+  fun restartEngine() {
+    onRestartEngine()
+  }
+
+  /** 刷新 Web UI（重载当前引擎页面，issue apk#29 需求 1）。 */
+  @JavascriptInterface
+  fun reloadWebUI() {
+    onReloadWebUI()
+  }
+
+  /** 打开内置控制台（快照 bash 交互终端，引擎未运行时也可排查）。 */
+  @JavascriptInterface
+  fun openConsole() {
+    onOpenConsole()
+  }
+
+  /** 开发者调试日志开关状态（默认关；SharedPreferences 持久化）。 */
+  @JavascriptInterface
+  fun getDevLogEnabled(): Boolean = onGetDevLogEnabled()
+
+  /** 设置开发者调试日志开关；开启后按天写入 dshdata/log/。 */
+  @JavascriptInterface
+  fun setDevLogEnabled(enabled: Boolean) {
+    onSetDevLogEnabled(enabled)
+  }
 
   companion object {
     /**

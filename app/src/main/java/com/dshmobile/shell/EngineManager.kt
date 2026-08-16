@@ -352,40 +352,14 @@ class EngineManager(private val context: Context, private val pickToken: String?
       val args = arrayOf(
         nodeBin.absolutePath, "--expose-internals", dshBin.absolutePath, "web", "--port", port.toString(),
       )
-      val env = mapOf(
-        "PATH" to (usrDir.absolutePath + "/bin:/system/bin"),
-        "LD_LIBRARY_PATH" to (usrDir.absolutePath + "/lib"),
-        "HOME" to homeDir.absolutePath,
-        // DSH_HOME 始终保持在私有域（FUSE 禁 symlink，公共域无法维护
-        // profiles/node_modules flat fallback）；运行时用户数据全部在私有
-        // files/home/.dsh，公共 Documents/dshdata 仅作导出仓库。
-        "DSH_HOME" to ensurePrivateDshData().absolutePath,
-        // os.tmpdir() falls back to the baked-in Termux tmp on Android
-        // (unwritable from the app domain); keep spill inside filesDir.
-        "TMPDIR" to File(homeDir, "tmp").apply { mkdirs() }.absolutePath,
-        // Android 16 forbids exec of app-data ELF regardless of targetSdk
-        // (observed on Android 16/vivo: direct exec EACCES even at targetSdk
-        // 34). Termux's execve hook re-routes denied execs through
-        // /system/bin/linker64 (same mechanism as JNI libs); the snapshot
-        // ships libtermux-exec-*-ld-preload.so. The hook only rewrites for
-        // untrusted_app_25/27 SELinux domains, so force mode is required.
-        "LD_PRELOAD" to preload.absolutePath,
-        "TERMUX_EXEC__SYSTEM_LINKER_EXEC__MODE" to "force",
-        "TERMUX_EXEC__EXECVE_CALL__INTERCEPT" to "1",
-        "TERMUX__ROOTFS" to usrDir.parentFile.absolutePath,
-        "TERMUX__PREFIX" to usrDir.absolutePath,
-        "TERMUX_APP__DATA_DIR" to context.filesDir.parentFile.absolutePath,
-        "TERMUX_APP__LEGACY_DATA_DIR" to "/data/data/com.dshmobile.shell",
-        "TERMUX_VERSION" to "0.118.3",
-        // 目录选择桥端点鉴权 token（web-compat 插件校验 x-dsh-pick-token）。
-        "DSH_PICK_TOKEN" to (pickToken ?: ""),
-      )
-      engineProcess = startWithArgs(args, env)
+      engineProcess = startWithArgs(args, shellEnv())
       // 冷却只在真实启动后写入：失败路径不占用冷却窗口（可立即重试）。
       EngineManager.lastStartAttemptAt = now
+      LogCollector.log(TAG, "engine started")
       true
     } catch (t: Throwable) {
       Log.e(TAG, "engine start failed", t)
+      LogCollector.log(TAG, "engine start FAILED: " + (t.message ?: t.javaClass.simpleName))
       false
     } finally {
       STARTING.set(false)
@@ -419,8 +393,46 @@ class EngineManager(private val context: Context, private val pickToken: String?
   fun stopEngine() {
     engineProcess?.destroy()
     engineProcess = null
+    LogCollector.log(TAG, "engine stopped (manual)")
     // 手动停止后重置冷却：用户回前台应立即允许重新启动。
     EngineManager.lastStartAttemptAt = 0
+  }
+
+  /**
+   * 引擎/控制台/日志进程共用的快照环境（PATH/LD_LIBRARY_PATH/HOME/DSH_HOME/
+   * TERMUX_* 显式注入——快照自足，不依赖 Termux app）。幂等：可安全多次
+   * 调用（ensurePrivateDshData 与 TMPDIR mkdirs 均幂等）。
+   */
+  fun shellEnv(): Map<String, String> {
+    val preload = File(usrDir, "lib/libtermux-exec-ld-preload.so")
+    return mapOf(
+      "PATH" to (usrDir.absolutePath + "/bin:/system/bin"),
+      "LD_LIBRARY_PATH" to (usrDir.absolutePath + "/lib"),
+      "HOME" to homeDir.absolutePath,
+      // DSH_HOME 始终保持在私有域（FUSE 禁 symlink，公共域无法维护
+      // profiles/node_modules flat fallback）；运行时用户数据全部在私有
+      // files/home/.dsh，公共 Documents/dshdata 仅作导出仓库。
+      "DSH_HOME" to ensurePrivateDshData().absolutePath,
+      // os.tmpdir() falls back to the baked-in Termux tmp on Android
+      // (unwritable from the app domain); keep spill inside filesDir.
+      "TMPDIR" to File(homeDir, "tmp").apply { mkdirs() }.absolutePath,
+      // Android 16 forbids exec of app-data ELF regardless of targetSdk
+      // (observed on Android 16/vivo: direct exec EACCES even at targetSdk
+      // 34). Termux's execve hook re-routes denied execs through
+      // /system/bin/linker64 (same mechanism as JNI libs); the snapshot
+      // ships libtermux-exec-*-ld-preload.so. The hook only rewrites for
+      // untrusted_app_25/27 SELinux domains, so force mode is required.
+      "LD_PRELOAD" to preload.absolutePath,
+      "TERMUX_EXEC__SYSTEM_LINKER_EXEC__MODE" to "force",
+      "TERMUX_EXEC__EXECVE_CALL__INTERCEPT" to "1",
+      "TERMUX__ROOTFS" to usrDir.parentFile.absolutePath,
+      "TERMUX__PREFIX" to usrDir.absolutePath,
+      "TERMUX_APP__DATA_DIR" to context.filesDir.parentFile.absolutePath,
+      "TERMUX_APP__LEGACY_DATA_DIR" to "/data/data/com.dshmobile.shell",
+      "TERMUX_VERSION" to "0.118.3",
+      // 目录选择桥端点鉴权 token（web-compat 插件校验 x-dsh-pick-token）。
+      "DSH_PICK_TOKEN" to (pickToken ?: ""),
+    )
   }
 
   companion object {
