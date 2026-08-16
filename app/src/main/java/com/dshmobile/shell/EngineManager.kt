@@ -354,7 +354,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
     applyAssetPatch("patched/llm-deepseek-index.js",
       File(dshPkgs, "dsh-llm-deepseek/lib/index.js"), "describeImage")
     applyAssetPatch("patched/web-frontend-index.html",
-      File(webDist, "index.html"), "dsh-mobile-clipboard-wrapper")
+      File(webDist, "index.html"), "dsh-mobile-clip-fallback-web")
     applyAssetPatch("patched/vision-mcp-server.mjs",
       File(homeDir, "vision-mcp/server.mjs"), "Qwen-VL")
     applyAssetPatchAppend("patched/cordis.patch.yml",

@@ -433,6 +433,7 @@ class MainActivity : ComponentActivity() {
             android.content.res.Configuration.UI_MODE_NIGHT_YES
         },
         onPickImageRequest = { callbackId -> pickImageForBridge(callbackId) },
+        onCopyTextRequest = { text -> copyTextNative(text) },
         pickToken = pickToken,
         onRestartEngine = { restartEngine() },
         onReloadWebUI = {
