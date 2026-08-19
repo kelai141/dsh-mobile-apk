@@ -1,4 +1,4 @@
-package com.dshmobile.shell
+package com.dsharnessmobile.shell
 
 import android.Manifest
 import android.app.NotificationChannel
@@ -196,7 +196,7 @@ class MainActivity : ComponentActivity() {
 
   companion object {
     private const val TAG = "dsh-shell"
-    const val ACTION_UPDATE = "com.dshmobile.shell.action.UPDATE"
+    const val ACTION_UPDATE = "com.dsharnessmobile.shell.action.UPDATE"
 
     /** 导出文件大小上限（防恶意/异常大文件 OOM）。 */
     const val MAX_DOWNLOAD_BYTES = 200L * 1024 * 1024
@@ -377,7 +377,7 @@ class MainActivity : ComponentActivity() {
     }
     ViewCompat.requestApplyInsets(root)
     configureWebView()
-    // Testable update trigger: adb am start -n .../.MainActivity -a com.dshmobile.shell.action.UPDATE
+    // Testable update trigger: adb am start -n .../.MainActivity -a com.dsharnessmobile.shell.action.UPDATE
     if (intent?.action == ACTION_UPDATE) {
       runUpdate()
     } else {

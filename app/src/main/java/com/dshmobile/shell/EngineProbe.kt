@@ -1,4 +1,4 @@
-package com.dshmobile.shell
+package com.dsharnessmobile.shell
 
 import java.net.HttpURLConnection
 import java.net.URL

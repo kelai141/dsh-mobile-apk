@@ -1,4 +1,4 @@
-package com.dshmobile.shell
+package com.dsharnessmobile.shell
 
 import java.io.File
 import java.io.InputStream

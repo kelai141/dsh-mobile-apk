@@ -60,7 +60,7 @@ The bridge decouples the APK from the dsh version: pages feature-detect on `andr
    atomically swaps `usr` → `usr-old` → new `usr`, then kills the old engine — the watchdog
    restarts it from the new runtime.
 
-Test trigger: `adb shell am start -n com.dshmobile.shell/.MainActivity -a com.dshmobile.shell.action.UPDATE`;
+Test trigger: `adb shell am start -n com.dsharnessmobile.shell/.MainActivity -a com.dsharnessmobile.shell.action.UPDATE`;
 status is written to `files/update-status.txt`. Test server: `node scripts/snapshot-server.mjs`.
 
 ## Permissions

@@ -1,4 +1,4 @@
-package com.dshmobile.shell
+package com.dsharnessmobile.shell
 
 import android.app.NotificationChannel
 import android.app.NotificationManager

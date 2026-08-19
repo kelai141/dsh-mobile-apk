@@ -1,4 +1,4 @@
-package com.dshmobile.shell
+package com.dsharnessmobile.shell
 
 import android.content.Context
 import android.media.MediaScannerConnection
@@ -498,7 +498,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
       "TERMUX__ROOTFS" to usrDir.parentFile.absolutePath,
       "TERMUX__PREFIX" to usrDir.absolutePath,
       "TERMUX_APP__DATA_DIR" to context.filesDir.parentFile.absolutePath,
-      "TERMUX_APP__LEGACY_DATA_DIR" to "/data/data/com.dshmobile.shell",
+      "TERMUX_APP__LEGACY_DATA_DIR" to "/data/data/com.dsharnessmobile.shell",
       "TERMUX_VERSION" to "0.118.3",
       // 目录选择桥端点鉴权 token（web-compat 插件校验 x-dsh-pick-token）。
       "DSH_PICK_TOKEN" to (pickToken ?: ""),

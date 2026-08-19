@@ -55,7 +55,7 @@ cp snapshot/snapshot.tar.xz app/src/main/assets/snapshot.tar.xz
 2. 下载快照 → 校验 SHA-256 → 解压到 staging（不碰线上目录）→ 原子切换 `usr` → 杀掉旧引擎 →
    看门狗用新运行时重启。
 
-测试触发：`adb shell am start -n com.dshmobile.shell/.MainActivity -a com.dshmobile.shell.action.UPDATE`；
+测试触发：`adb shell am start -n com.dsharnessmobile.shell/.MainActivity -a com.dsharnessmobile.shell.action.UPDATE`；
 状态写入 `files/update-status.txt`。测试服务器：`node scripts/snapshot-server.mjs`。
 
 ## 权限
