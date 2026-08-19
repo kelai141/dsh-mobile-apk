@@ -362,7 +362,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
     applyAssetPatch("patched/llm-deepseek-index.js",
       File(dshPkgs, "dsh-llm-deepseek/lib/index.js"), "describeImage")
     applyAssetPatch("patched/web-frontend-index.html",
-      File(webDist, "index.html"), "dsh-mobile-clip-fallback-web")
+      File(webDist, "index.html"), "viewport-fit=cover")
     applyAssetPatch("patched/dsh-client-modules-index.js",
       File(dshPkgs, "dsh-client-modules/lib/index.js"), "dsh-mobile-bundle-hardening")
   }
