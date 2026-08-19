@@ -1,5 +1,6 @@
 build/
 .gradle/
+.gradle-home/
 local.properties
 snapshot/
 app/src/main/assets/snapshot.tar.xz

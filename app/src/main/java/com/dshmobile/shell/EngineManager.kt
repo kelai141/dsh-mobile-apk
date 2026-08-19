@@ -91,18 +91,25 @@ class EngineManager(private val context: Context, private val pickToken: String?
     }
   }
 
-  /** 恢复快照剥离的用户数据目录/文件（从备份拷贝回私有 .dsh）。 */
+  /** 恢复快照剥离的用户数据目录/文件（从备份拷贝回私有 .dsh）。
+   *  永不抛异常（Review 2026-08-18 R2）：refreshSnapshot 的失败分支在后台
+   *  线程调用本方法，恢复过程自身失败时不得逃逸——否则异常杀死线程，
+   *  UI 卡在"正在更新运行时…"且无提示。失败只记日志，保留备份待下次重试。 */
   private fun restoreUserData(backup: File, dsh: File) {
     if (!backup.exists()) return
     for (name in listOf(
       "sessions", "storages", "attachments",
       ".credentials.yaml", "settings.yaml", ".anonymous-user-id", ".private-layout",
     )) {
-      val src = File(backup, name)
-      if (!src.exists()) continue
-      val dst = File(dsh, name)
-      if (dst.exists()) dst.deleteRecursively()
-      src.copyRecursively(dst)
+      try {
+        val src = File(backup, name)
+        if (!src.exists()) continue
+        val dst = File(dsh, name)
+        if (dst.exists()) dst.deleteRecursively()
+        src.copyRecursively(dst)
+      } catch (t: Throwable) {
+        Log.e(TAG, "restore user data failed for $name; backup kept at " + backup.absolutePath, t)
+      }
     }
   }
 
@@ -402,8 +409,12 @@ class EngineManager(private val context: Context, private val pickToken: String?
     // 进程级 CAS：并发调用只有一个能真正启动（设备实证 EADDRINUSE 双启动）。
     if (!STARTING.compareAndSet(false, true)) return true
     // 冷却窗口：上次尝试后 90s 内不重复启动（冷启动 boot 需 20-45s）。
+    // Review 2026-08-18（L2 语义澄清）：此处返回 true 的含义是"无需再启动"
+    // （引擎大概率正在启动中），并非"本次调用已启动成功"——调用方随后会
+    // 自行 poll 引擎可达性，因此该语义不会导致错误等待，但不得解读为成功证据。
     if (now - EngineManager.lastStartAttemptAt < START_COOLDOWN_MS) {
       STARTING.set(false)
+      LogCollector.log(TAG, "engine start skipped (cooldown window)")
       return true
     }
     return try {

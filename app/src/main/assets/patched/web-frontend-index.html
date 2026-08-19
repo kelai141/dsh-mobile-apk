@@ -73,20 +73,6 @@
         window.addEventListener("storage", applyImmersiveAttr);
         try { window.__dshImmersiveApply = applyImmersiveAttr; } catch (e) {}
       })();
-      // dsh-mobile-immersive-max: when the Android status bar is hidden
-      // (Settings -> General -> 沉浸式状态栏), collapse the dsh conversation
-      // header so the chat area expands to the very top of the screen.
-      (function () {
-        function applyImmersiveAttr() {
-          var on = false;
-          try { on = localStorage.getItem("dsh.android.immersive") !== "0"; } catch (e) {}
-          if (on) document.documentElement.setAttribute("data-dsh-immersive", "true");
-          else document.documentElement.removeAttribute("data-dsh-immersive");
-        }
-        applyImmersiveAttr();
-        window.addEventListener("storage", applyImmersiveAttr);
-        try { window.__dshImmersiveApply = applyImmersiveAttr; } catch (e) {}
-      })();
 
     </script>
 
@@ -96,13 +82,7 @@
       html[data-dsh-immersive="true"] .wSkVaW_scrollBody { height: 100% !important; }
     </style>
 
-    <style>
-      /* dsh-mobile-immersive-max: hide the conversation header bar under immersive mode. */
-      html[data-dsh-immersive="true"] .wSkVaW_header { display: none !important; }
-      html[data-dsh-immersive="true"] .wSkVaW_scrollBody { height: 100% !important; }
-    </style>
-
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>DeepSeek Harness</title>

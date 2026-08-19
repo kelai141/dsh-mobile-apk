@@ -35,18 +35,25 @@ import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContract
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.NotificationCompat
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import kotlin.math.ceil
 
 /** Shell activity: WebView over the local dsh engine + engine guide fallback. */
 class MainActivity : ComponentActivity() {
 
   private lateinit var webView: WebView
   private lateinit var guideView: LinearLayout
+  /** Bottom insets in CSS px, cached until the engine page is ready to receive them. */
+  private var webSystemBottomInset = 0
+  private var webImeBottomInset = 0
+  /** Coalesces rapid IME animation callbacks into one WebView evaluation per UI turn. */
+  private var webInsetsPushScheduled = false
   /** 目录选择桥鉴权 token（进程级共享：MainActivity 重建/看门狗重启不更换，
    *  与引擎 env 的 DSH_PICK_TOKEN 始终一致；C1 修复）。 */
   private val pickToken: String = EngineManager.ensurePickToken()
@@ -60,23 +67,28 @@ class MainActivity : ComponentActivity() {
   private var crashInfo: String? = null
   /** 重启引擎 in-flight 守卫（防连点双杀双启）。 */
   private val engineRestarting = java.util.concurrent.atomic.AtomicBoolean(false)
+  /** 用户主动关闭后，前台监控与任何尚未结束的启动线程不得重新展示 WebUI。 */
+  @Volatile
+  private var userClosedEngine = false
   /** 前台引擎监控：3s 轮询探测，down→测试界面、up→恢复 WebUI
    *  （"设置里杀进程/引擎崩溃回退测试界面"的落地；watchdog 负责恢复）。 */
   private val engineMonitorHandler = android.os.Handler(android.os.Looper.getMainLooper())
   private val engineMonitorRunnable = object : Runnable {
     override fun run() {
+      val monitor = this
       Thread {
         val running = try { EngineProbe.check(500).optBoolean("running", false) } catch (_: Exception) { false }
         runOnUiThread {
-          if (!::webView.isInitialized || !::guideView.isInitialized) return@runOnUiThread
-          if (!running && webView.visibility == View.VISIBLE) {
-            engineStatus.text = "引擎未运行，正在自动恢复…"
-            showGuide()
-          } else if (running && guideView.visibility == View.VISIBLE) {
-            showWeb()
+          if (::webView.isInitialized && ::guideView.isInitialized && !userClosedEngine) {
+            if (!running && webView.visibility == View.VISIBLE) {
+              engineStatus.text = "引擎未运行，正在自动恢复…"
+              showGuide()
+            } else if (running && guideView.visibility == View.VISIBLE) {
+              showWeb()
+            }
           }
+          if (!userClosedEngine) engineMonitorHandler.postDelayed(monitor, 3000)
         }
-        engineMonitorHandler.postDelayed(this, 3000)
       }.start()
     }
   }
@@ -92,7 +104,7 @@ class MainActivity : ComponentActivity() {
   private var freezeReloaded = false
   private val freezeRunnable = object : Runnable {
     override fun run() {
-      if (!::webView.isInitialized) return
+      if (!::webView.isInitialized || userClosedEngine || webView.visibility != View.VISIBLE) return
       val now = System.currentTimeMillis()
       if (now - pageLoadedAt > 45_000 && now - jsAckAt > 20_000) {
         LogCollector.log("dsh-shell", "webview JS 无响应，渲染进程冻结（frozenMs=" + (now - jsAckAt) + "）")
@@ -125,6 +137,7 @@ class MainActivity : ComponentActivity() {
   }
 
   private fun startFreezeWatchdog() {
+    if (userClosedEngine || !::webView.isInitialized || webView.visibility != View.VISIBLE) return
     val now = System.currentTimeMillis()
     pageLoadedAt = now
     jsAckAt = now
@@ -135,6 +148,8 @@ class MainActivity : ComponentActivity() {
 
   private val engineManager by lazy { EngineManager(this, pickToken) }
   private val engineFlowRunning = java.util.concurrent.atomic.AtomicBoolean(false)
+  /** Invalidates stale startup work when the user closes or explicitly restarts the engine. */
+  private val engineFlowGeneration = java.util.concurrent.atomic.AtomicLong(0)
   private var pendingPickCallback: String? = null
   /** M3：上次 pick 因缺权限挂起（onResume 续启/结算的依据）。 */
   private var pendingPermissionRequest = false
@@ -350,6 +365,17 @@ class MainActivity : ComponentActivity() {
     guideView = buildGuideView()
     root.addView(guideView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     setContentView(root)
+    ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
+      val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars()).bottom
+      val mandatoryGestures = insets.getInsets(WindowInsetsCompat.Type.mandatorySystemGestures()).bottom
+      val ime = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+      val density = resources.displayMetrics.density
+      webSystemBottomInset = pxToCssPx(maxOf(systemBars, mandatoryGestures), density)
+      webImeBottomInset = pxToCssPx(ime, density)
+      scheduleWebInsetsPush()
+      insets
+    }
+    ViewCompat.requestApplyInsets(root)
     configureWebView()
     // Testable update trigger: adb am start -n .../.MainActivity -a com.dshmobile.shell.action.UPDATE
     if (intent?.action == ACTION_UPDATE) {
@@ -362,14 +388,19 @@ class MainActivity : ComponentActivity() {
   override fun onResume() {
     super.onResume()
     // 前台引擎监控：引擎被杀/崩溃时自动回退测试界面，恢复后回 WebUI。
-    engineMonitorHandler.removeCallbacks(engineMonitorRunnable)
-    engineMonitorHandler.post(engineMonitorRunnable)
+    if (!userClosedEngine) {
+      engineMonitorHandler.removeCallbacks(engineMonitorRunnable)
+      engineMonitorHandler.post(engineMonitorRunnable)
+    }
     // Back from the directory picker / Termux: re-route if the engine came up.
     // 仅当 WebView 未展示（引导页/首次启动）时才探测并重路由；相册/文件选择器
     // 返回时 WebView 已可见，探测超时会误触发 showWeb→reload，导致 JS 状态丢失。
-    if (webView.visibility != View.VISIBLE && !EngineProbe.check().optBoolean("running", false)) startEngineFlow()
+    if (!userClosedEngine && webView.visibility != View.VISIBLE && !EngineProbe.check().optBoolean("running", false)) startEngineFlow()
     // 主题补推：从系统设置/SAF 返回时系统主题可能已变（兜底桥时序覆盖）。
-    if (::webView.isInitialized) pushSystemDark(webView)
+    if (::webView.isInitialized) {
+      pushSystemDark(webView)
+      pushWebInsets()
+    }
     // M3：从系统授权页返回——上次 pick 因缺权限挂起时，已授权则自动续启
     // SAF，仍拒绝则按取消结算（引擎请求不挂到 5 分钟 TTL）。
     if (pendingPickCallback != null) {
@@ -453,7 +484,16 @@ class MainActivity : ComponentActivity() {
   override fun onDestroy() {
     super.onDestroy()
     engineMonitorHandler.removeCallbacks(engineMonitorRunnable)
+    freezeHandler.removeCallbacks(freezeRunnable)
     pickTtlHandler.removeCallbacks(pickTtlRunnable)
+    // 兜底释放：Activity 销毁时清掉可能仍持有的屏幕常亮锁。
+    try {
+      if (screenWakeLock != null) {
+        screenWakeLock?.release()
+        screenWakeLock = null
+      }
+    } catch (_: Exception) {
+    }
     if (::webView.isInitialized) {
       themeRetryRunnable?.let { webView.removeCallbacks(it) }
       webView.destroy()
@@ -464,6 +504,7 @@ class MainActivity : ComponentActivity() {
   override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
     super.onConfigurationChanged(newConfig)
     pushSystemDark(webView)
+    pushWebInsets()
   }
 
   override fun onBackPressed() {
@@ -520,7 +561,8 @@ class MainActivity : ComponentActivity() {
       override fun onPageFinished(view: WebView, url: String) {
         super.onPageFinished(view, url)
         pushSystemDark(view)
-        if (isEngineSource(url)) startFreezeWatchdog()
+        pushWebInsets(view)
+        if (isEngineSource(url) && !userClosedEngine) startFreezeWatchdog()
       }
     }
     // WebView 下载：会话日志导出（/api/session.export）与其余引擎源下载
@@ -945,6 +987,42 @@ class MainActivity : ComponentActivity() {
   }
 
   /**
+   * Project edge-to-edge bottom insets into the WebView's CSS coordinate space.
+   * The native API reports physical pixels, while WebView CSS uses density-scaled
+   * pixels; the cached values survive engine-page reloads and are re-sent from
+   * onPageFinished. The seat CSS consumes the greater of system and IME inset.
+   */
+  private fun scheduleWebInsetsPush() {
+    if (!::webView.isInitialized || webInsetsPushScheduled) return
+    webInsetsPushScheduled = true
+    webView.post {
+      webInsetsPushScheduled = false
+      pushWebInsets()
+    }
+  }
+
+  private fun pushWebInsets(view: WebView = webView) {
+    try {
+      view.evaluateJavascript(
+        "(function(){var root=document.documentElement;if(!root)return;var system='" + webSystemBottomInset +
+          "px';var ime='" + webImeBottomInset +
+          "px';root.style.setProperty(" +
+          "'--dsh-android-system-bottom',system);root.style.setProperty('--dsh-android-ime-bottom',ime);" +
+          "})()",
+        null,
+      )
+    } catch (_: Exception) {
+      // 页面/WebView 尚未就绪：onPageFinished 会补推当前缓存值。
+    }
+  }
+
+  /** Convert physical Android pixels to whole CSS pixels without under-padding. */
+  private fun pxToCssPx(physicalPx: Int, density: Float): Int {
+    if (physicalPx <= 0 || density <= 0f) return 0
+    return ceil(physicalPx.toDouble() / density.toDouble()).toInt()
+  }
+
+  /**
    * 引擎源判定：精确匹配本机引擎的 scheme/host/port（防前缀欺骗，
    * 如 127.0.0.1:30800 或 127.0.0.1:3080.evil.com 误判为引擎源）。
    */
@@ -983,11 +1061,26 @@ class MainActivity : ComponentActivity() {
     }
   }
 
+  /** 屏幕常亮 WakeLock（JS 桥 keepScreenOn）。单例字段持有 + 成对
+   *  acquire/release：旧实现每次调用 newWakeLock，新实例 isHeld 恒 false，
+   *  关闭路径永不 release（Review 2026-08-18 实锤的锁泄漏）。 */
+  private var screenWakeLock: PowerManager.WakeLock? = null
+
   private fun keepScreenOn(enable: Boolean) {
-    val power = getSystemService(Context.POWER_SERVICE) as PowerManager
-    val wakeLock = power.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ON_AFTER_RELEASE, "dsh:screen")
-    if (enable && !wakeLock.isHeld) wakeLock.acquire()
-    if (!enable && wakeLock.isHeld) wakeLock.release()
+    try {
+      val power = getSystemService(Context.POWER_SERVICE) as PowerManager
+      if (enable && screenWakeLock == null) {
+        screenWakeLock = power.newWakeLock(
+          PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ON_AFTER_RELEASE,
+          "dsh:screen",
+        ).apply { acquire() }
+      } else if (!enable && screenWakeLock != null) {
+        screenWakeLock?.release()
+        screenWakeLock = null
+      }
+    } catch (t: Throwable) {
+      Log.e(TAG, "keepScreenOn failed: " + t.message)
+    }
   }
 
   private fun showTestNotification(title: String, text: String) {
@@ -1109,12 +1202,24 @@ class MainActivity : ComponentActivity() {
 
   /** 开发者选项「关闭」：停止引擎并回退到初始化（启动/测试）界面，不自动重启。 */
   private fun shutdownToGuide() {
+    userClosedEngine = true
+    engineFlowGeneration.incrementAndGet()
     EngineService.userShutdown = true
+    engineMonitorHandler.removeCallbacks(engineMonitorRunnable)
+    freezeHandler.removeCallbacks(freezeRunnable)
+    runOnUiThread {
+      hideSoftInput()
+      progressBar.visibility = View.GONE
+      progressText.visibility = View.GONE
+      engineStatus.text = "引擎已关闭。点击“重试”可重新启动。"
+      showGuide()
+    }
     try { EngineService.instance?.requestShutdown() } catch (_: Exception) {
     }
     try { engineManager.stopEngine() } catch (_: Exception) {
     }
-    showGuide()
+    try { stopService(Intent(this, EngineService::class.java)) } catch (_: Exception) {
+    }
     LogCollector.log("dsh-shell", "harness closed via dev options (shutdownToGuide)")
   }
 
@@ -1124,49 +1229,65 @@ class MainActivity : ComponentActivity() {
    * engine, then poll until the web service answers.
    */
   private fun startEngineFlow() {
-    // onCreate 与随后的 onResume 都会触发本流程；in-flight 守卫防止
-    // 双线程竞态解压/启动（设备实证：双启动导致引擎进程死亡）。
+    // onCreate and the following onResume can both request startup. Acquire the
+    // flow before mutating lifecycle state so a duplicate cannot invalidate the
+    // actual starter.
     if (!engineFlowRunning.compareAndSet(false, true)) return
+    val generation = engineFlowGeneration.incrementAndGet()
+    userClosedEngine = false
+    EngineService.userShutdown = false
+    engineMonitorHandler.removeCallbacks(engineMonitorRunnable)
+    engineMonitorHandler.post(engineMonitorRunnable)
     Thread {
       try {
+      if (!isCurrentEngineFlow(generation)) return@Thread
       if (EngineProbe.check().optBoolean("running", false)) {
-        runOnUiThread { showWeb() }
+        runOnUiThread { if (isCurrentEngineFlow(generation)) showWeb() }
         return@Thread
       }
+      if (!isCurrentEngineFlow(generation)) return@Thread
       // 启动即有反馈：进入测试界面显示"正在启动引擎…"（不再白屏等 probe）。
       runOnUiThread {
+        if (!isCurrentEngineFlow(generation)) return@runOnUiThread
         progressBar.visibility = View.GONE
         progressText.visibility = View.GONE
         engineStatus.text = "正在启动引擎…"
         showGuide()
       }
       if (!engineManager.snapshotFresh()) {
+        if (!isCurrentEngineFlow(generation)) return@Thread
         runOnUiThread {
+          if (!isCurrentEngineFlow(generation)) return@runOnUiThread
           progressBar.visibility = View.VISIBLE
           progressText.visibility = View.VISIBLE
           engineStatus.text = "正在更新运行时（约 70MB）…"
         }
         val ok = engineManager.refreshSnapshot { done, total ->
           runOnUiThread {
+            if (!isCurrentEngineFlow(generation)) return@runOnUiThread
             // done 是解压后字节数，total 是压缩包字节数，口径不一致；只显示已解压量。
             engineStatus.text = "正在更新运行时… " + done / 1024 / 1024 + " MB"
           }
         }
         if (!ok) {
           runOnUiThread {
+            if (!isCurrentEngineFlow(generation)) return@runOnUiThread
             engineStatus.text = "运行时更新失败，请重试。"
             showGuide()
           }
           return@Thread
         }
         runOnUiThread {
+          if (!isCurrentEngineFlow(generation)) return@runOnUiThread
           progressBar.visibility = View.GONE
           progressText.visibility = View.GONE
           engineStatus.text = "正在启动引擎…"
         }
       }
+      if (!isCurrentEngineFlow(generation)) return@Thread
       if (!engineManager.startEngine()) {
         runOnUiThread {
+          if (!isCurrentEngineFlow(generation)) return@runOnUiThread
           engineStatus.text = "引擎启动失败，请重试。"
           showGuide()
         }
@@ -1174,23 +1295,28 @@ class MainActivity : ComponentActivity() {
       }
       // Poll up to 30s for the web service.
       for (i in 0..30) {
+        if (!isCurrentEngineFlow(generation)) return@Thread
         if (EngineProbe.check().optBoolean("running", false)) {
           startEngineService()
           applyShizukuKeepAlive()
-          runOnUiThread { showWeb() }
+          runOnUiThread { if (isCurrentEngineFlow(generation)) showWeb() }
           return@Thread
         }
         Thread.sleep(1000)
       }
-      runOnUiThread {
-        engineStatus.text = "引擎启动超时，请重试。"
-        showGuide()
-      }
+      if (isCurrentEngineFlow(generation)) runOnUiThread {
+          engineStatus.text = "引擎启动超时，请重试。"
+          showGuide()
+        }
       } finally {
         engineFlowRunning.set(false)
       }
     }.start()
   }
+
+  /** True only for the active startup request and while the user has not closed it. */
+  private fun isCurrentEngineFlow(generation: Long): Boolean =
+    !userClosedEngine && engineFlowGeneration.get() == generation
 
   /** Run the runtime snapshot update; status mirrored to a file for adb verification. */
   private fun runUpdate() {
@@ -1256,6 +1382,15 @@ class MainActivity : ComponentActivity() {
     }
   }
 
+  /** Hide Android's soft keyboard before replacing the WebView with the guide. */
+  private fun hideSoftInput() {
+    try {
+      WindowInsetsControllerCompat(window, window.decorView).hide(WindowInsetsCompat.Type.ime())
+    } catch (_: Exception) {
+      // The input connection may already be gone while a WebView bridge call is settling.
+    }
+  }
+
   /** engine.log 尾部摘要（测试界面诊断用；缺失/不可读返回空）。 */
   private fun tailEngineLog(lines: Int): String {
     val f = File(filesDir, "engine.log")
@@ -1289,6 +1424,9 @@ class MainActivity : ComponentActivity() {
    */
   private fun restartEngine() {
     if (!engineRestarting.compareAndSet(false, true)) return
+    userClosedEngine = false
+    engineFlowGeneration.incrementAndGet()
+    EngineService.userShutdown = false
     Thread {
       try {
         try {
