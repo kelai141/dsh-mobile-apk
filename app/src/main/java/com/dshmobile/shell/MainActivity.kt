@@ -1124,7 +1124,7 @@ class MainActivity : ComponentActivity() {
       layoutParams = LinearLayout.LayoutParams((64 * density).toInt(), (64 * density).toInt())
     }
     val title = TextView(this).apply {
-      text = "DeepSeek Harness"
+      text = "DeepCode"
       textSize = 20f
       setPadding(0, (12 * density).toInt(), 0, (4 * density).toInt())
       gravity = android.view.Gravity.CENTER
