@@ -88,9 +88,15 @@ jobs:
             const body = '## PR 规范检查未通过\n\n- ' + problems.join('\n- ') +
               (isFork ? '\n\n（来自 fork 的 PR 无法自行打 label，请 maintainer 合并时补充）' : '') +
               '\n\n规范见维护手册 4.6 / pr-guidelines。'
-            await github.rest.issues.createComment({
-              owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, body,
-            })
+            // Fork PR 的 GITHUB_TOKEN 是只读的（无 issues:write），createComment
+            // 会抛 Resource not accessible——降级为 warning，不阻断 job。
+            try {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, body,
+              })
+            } catch (commentErr) {
+              core.warning('无法评论 PR（fork 只读 token）：' + commentErr.message)
+            }
             if (fatal && !isFork) {
               core.setFailed('PR 规范检查失败')
             } else {

@@ -1151,7 +1151,7 @@ class MainActivity : ComponentActivity() {
     // 2. 状态卡(surface 卡片,圆角 16)
     val card = LinearLayout(ctx).apply {
       orientation = LinearLayout.VERTICAL
-      elevation = dp(1f)
+      elevation = dp(1f).toFloat()
       setPadding(
         resources.getDimensionPixelSize(R.dimen.ds_space_24),
         resources.getDimensionPixelSize(R.dimen.ds_space_24),
