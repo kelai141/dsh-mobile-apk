@@ -63,6 +63,10 @@ class MainActivity : ComponentActivity() {
   private lateinit var progressBar: ProgressBar
   private lateinit var crashBanner: TextView
   private lateinit var logSummary: TextView
+  /** 测试界面三段式结构块：入场 stagger 动画按块依次淡入。 */
+  private lateinit var brandBlock: View
+  private lateinit var cardBlock: View
+  private lateinit var actionBlock: View
   /** 崩溃标记：记录未捕获异常摘要，下次启动测试界面提示（不吞异常）。 */
   private var crashInfo: String? = null
   /** 重启引擎 in-flight 守卫（防连点双杀双启）。 */
@@ -1111,81 +1115,105 @@ class MainActivity : ComponentActivity() {
 
   private fun buildGuideView(): LinearLayout {
     val ctx = this
-    fun dp(v: Float) = (v * resources.displayMetrics.density).toInt()
+    val dens = resources.displayMetrics.density
+    fun dp(v: Float) = (v * dens).toInt()
     fun sp(v: Float) = v * resources.displayMetrics.scaledDensity
+    fun dim(id: Int) = resources.getDimension(id)
+    fun dpix(id: Int) = resources.getDimensionPixelSize(id)
+
+    // 背景氛围：暖灰/近黑基底 + 顶部 teal 微光（克制，非纯平铺）
+    val bgGradient = android.graphics.drawable.GradientDrawable(
+      android.graphics.drawable.GradientDrawable.Orientation.TL_BR,
+      intArrayOf(getColor(R.color.ds_glow), getColor(R.color.ds_bg), getColor(R.color.ds_bg)),
+    )
 
     val guide = LinearLayout(ctx).apply {
       orientation = LinearLayout.VERTICAL
       setPadding(dp(24f), dp(24f), dp(24f), dp(24f))
       gravity = android.view.Gravity.CENTER
+      background = bgGradient
       visibility = View.GONE
     }
 
-    // 1. 品牌区(顶部,克制)
-    val brandRow = LinearLayout(ctx).apply {
-      orientation = LinearLayout.HORIZONTAL
-      gravity = android.view.Gravity.CENTER
-      val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-      lp.setMargins(0, 0, 0, dp(40f))
+    // —— 1. 品牌区：squircle 图标容器 + 字标，克制留白 ——
+    val iconShell = FrameLayout(ctx).apply {
+      val lp = LinearLayout.LayoutParams(dpix(R.dimen.ds_logo_size) + dp(8f), dpix(R.dimen.ds_logo_size) + dp(8f))
       layoutParams = lp
+      background = android.graphics.drawable.GradientDrawable().apply {
+        setColor(getColor(R.color.ds_accent_soft))
+        cornerRadius = dim(R.dimen.ds_radius_icon)
+        setStroke(dp(1f), getColor(R.color.ds_accent))
+      }
     }
     val icon = ImageView(ctx).apply {
       setImageResource(R.mipmap.ic_launcher)
-      layoutParams = LinearLayout.LayoutParams(
-        resources.getDimensionPixelSize(R.dimen.ds_logo_size),
-        resources.getDimensionPixelSize(R.dimen.ds_logo_size),
-      )
-    }
-    val title = TextView(ctx).apply {
-      text = "DeepCode"
-      textSize = sp(20f)
-      setTextColor(getColor(R.color.ds_text_primary))
-      setPadding(dp(10f), 0, 0, 0)
-      typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
-      gravity = android.view.Gravity.CENTER_VERTICAL
-    }
-    brandRow.addView(icon)
-    brandRow.addView(title)
-    guide.addView(brandRow)
-
-    // 2. 状态卡(surface 卡片,圆角 16)
-    val card = LinearLayout(ctx).apply {
-      orientation = LinearLayout.VERTICAL
-      elevation = dp(1f).toFloat()
-      setPadding(
-        resources.getDimensionPixelSize(R.dimen.ds_space_24),
-        resources.getDimensionPixelSize(R.dimen.ds_space_24),
-        resources.getDimensionPixelSize(R.dimen.ds_space_24),
-        resources.getDimensionPixelSize(R.dimen.ds_space_24),
-      )
-      val lp = LinearLayout.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-      )
-      lp.setMargins(0, 0, 0, resources.getDimensionPixelSize(R.dimen.ds_space_24))
+      val lp = FrameLayout.LayoutParams(dpix(R.dimen.ds_logo_size), dpix(R.dimen.ds_logo_size), android.view.Gravity.CENTER)
       layoutParams = lp
     }
-    card.outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
-    card.clipToOutline = true
-    card.background = android.graphics.drawable.GradientDrawable().apply {
-      setColor(getColor(R.color.ds_surface))
-      cornerRadius = resources.getDimension(R.dimen.ds_radius_md)
-      setStroke(dp(1f), getColor(R.color.ds_border))
+    iconShell.addView(icon)
+    val title = TextView(ctx).apply {
+      text = "DeepCode"
+      textSize = sp(22f)
+      setTextColor(getColor(R.color.ds_text_primary))
+      typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+      gravity = android.view.Gravity.CENTER
+      setPadding(0, dp(12f), 0, 0)
+    }
+    brandBlock = LinearLayout(ctx).apply {
+      orientation = LinearLayout.VERTICAL
+      gravity = android.view.Gravity.CENTER
+      val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+      lp.setMargins(0, 0, 0, dp(48f))
+      layoutParams = lp
+    }.also { it.addView(iconShell); it.addView(title) }
+    guide.addView(brandBlock)
+
+    // —— 2. 状态卡：Double-Bezel（外层 shell + 内层 core，同心圆角） ——
+    val shell = LinearLayout(ctx).apply {
+      orientation = LinearLayout.VERTICAL
+      val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+      lp.setMargins(0, 0, 0, dp(32f))
+      layoutParams = lp
+      setPadding(dp(1.5f), dp(1.5f), dp(1.5f), dp(1.5f))
+      background = android.graphics.drawable.GradientDrawable().apply {
+        setColor(getColor(R.color.ds_shell))
+        cornerRadius = dim(R.dimen.ds_radius_shell)
+        setStroke(dp(1f), getColor(R.color.ds_border))
+      }
+    }
+    val card = LinearLayout(ctx).apply {
+      orientation = LinearLayout.VERTICAL
+      setPadding(dpix(R.dimen.ds_space_24), dp(28f), dpix(R.dimen.ds_space_24), dp(28f))
+      background = android.graphics.drawable.GradientDrawable().apply {
+        setColor(getColor(R.color.ds_surface))
+        cornerRadius = dim(R.dimen.ds_radius_card)
+        setStroke(dp(1f), getColor(R.color.ds_border))
+      }
     }
 
     engineStatus = TextView(ctx).apply {
-      textSize = sp(16f)
+      textSize = sp(17f)
       setTextColor(getColor(R.color.ds_text_primary))
+      typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
       gravity = android.view.Gravity.CENTER
-      setPadding(0, 0, 0, dp(16f))
+      setLineSpacing(0f, 1.15f)
     }
 
-    // 崩溃警示条
     crashBanner = TextView(ctx).apply {
       textSize = sp(12f)
       setTextColor(getColor(R.color.ds_danger))
-      setPadding(0, dp(6f), 0, dp(10f))
+      typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
       gravity = android.view.Gravity.CENTER
       visibility = View.GONE
+      val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+      lp.setMargins(0, dp(16f), 0, 0)
+      lp.gravity = android.view.Gravity.CENTER_HORIZONTAL
+      layoutParams = lp
+      background = android.graphics.drawable.GradientDrawable().apply {
+        setColor(getColor(R.color.ds_danger_soft))
+        cornerRadius = dim(R.dimen.ds_radius_pill)
+      }
+      setPadding(dp(14f), dp(6f), dp(14f), dp(6f))
     }
 
     progressBar = ProgressBar(ctx, null, android.R.attr.progressBarStyleHorizontal).apply {
@@ -1193,20 +1221,20 @@ class MainActivity : ComponentActivity() {
       progressDrawable = android.graphics.drawable.ClipDrawable(
         android.graphics.drawable.GradientDrawable().apply {
           setColor(getColor(R.color.ds_accent))
-          cornerRadius = resources.getDimension(R.dimen.ds_radius_full)
+          cornerRadius = dim(R.dimen.ds_radius_pill)
         },
         android.view.Gravity.START, android.graphics.drawable.ClipDrawable.HORIZONTAL,
       )
       progressBackgroundTintList = android.content.res.ColorStateList.valueOf(getColor(R.color.ds_progress_track))
-      layoutParams = LinearLayout.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT, resources.getDimensionPixelSize(R.dimen.ds_progress_height),
-      )
+      val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dpix(R.dimen.ds_progress_height))
+      lp.setMargins(dp(8f), dp(24f), dp(8f), 0)
+      layoutParams = lp
     }
 
     progressText = TextView(ctx).apply {
       textSize = sp(13f)
       setTextColor(getColor(R.color.ds_text_secondary))
-      setPadding(0, dp(8f), 0, dp(16f))
+      setPadding(0, dp(10f), 0, 0)
       gravity = android.view.Gravity.CENTER
       visibility = View.GONE
     }
@@ -1225,61 +1253,101 @@ class MainActivity : ComponentActivity() {
     card.addView(progressBar)
     card.addView(progressText)
     card.addView(logSummary)
-    guide.addView(card)
+    shell.addView(card)
+    cardBlock = shell
+    guide.addView(cardBlock)
 
-    // 3. 操作区(底部):主按钮实心 teal,次按钮幽灵
-    fun makeButton(text: String, filled: Boolean, onClick: () -> Unit): Button {
-      return Button(ctx).apply {
-        this.text = text
-        isAllCaps = false
-        textSize = sp(14f)
-        stateListAnimator = null
-        if (filled) {
-          setTextColor(getColor(R.color.ds_surface))
-          background = android.graphics.drawable.GradientDrawable().apply {
-            setColor(getColor(R.color.ds_accent))
-            cornerRadius = resources.getDimension(R.dimen.ds_radius_sm)
-          }
-        } else {
-          setTextColor(getColor(R.color.ds_text_primary))
-          background = android.graphics.drawable.GradientDrawable().apply {
-            setColor(android.graphics.Color.TRANSPARENT)
-            cornerRadius = resources.getDimension(R.dimen.ds_radius_sm)
-            setStroke(dp(1f), getColor(R.color.ds_border))
-          }
-        }
-        setOnClickListener {
-          animate().scaleX(0.97f).scaleY(0.97f).setDuration(80).withEndAction {
-            animate().scaleX(1f).scaleY(1f).setDuration(120).start()
-            onClick()
-          }.start()
+    // —— 3. 操作区：胶囊主 CTA + 文字样式次操作 ——
+    fun pressedColor(base: Int): android.content.res.ColorStateList =
+      android.content.res.ColorStateList(arrayOf(intArrayOf(android.R.attr.state_pressed), intArrayOf()), intArrayOf(getColor(R.color.ds_accent_pressed), base))
+    fun rippleOverlay(base: Int): android.graphics.drawable.RippleDrawable =
+      android.graphics.drawable.RippleDrawable(
+        pressedColor(base),
+        android.graphics.drawable.GradientDrawable().apply {
+          setColor(base)
+          cornerRadius = dim(R.dimen.ds_radius_pill)
+        },
+        android.graphics.drawable.GradientDrawable().apply {
+          setColor(getColor(R.color.ds_accent))
+          cornerRadius = dim(R.dimen.ds_radius_pill)
+        },
+      )
+
+    val retry = Button(ctx).apply {
+      text = "启动引擎"
+      isAllCaps = false
+      textSize = sp(14f)
+      setTextColor(getColor(R.color.ds_text_on_accent))
+      typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+      background = rippleOverlay(getColor(R.color.ds_accent))
+      stateListAnimator = null
+      val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dpix(R.dimen.ds_btn_height))
+      lp.setMargins(dp(8f), 0, dp(8f), 0)
+      layoutParams = lp
+      setOnClickListener {
+        animate().scaleX(0.97f).scaleY(0.97f).setDuration(90).withEndAction {
+          animate().scaleX(1f).scaleY(1f).setDuration(150).start()
+          startEngineFlow()
+        }.start()
+      }
+    }
+    val openConsole = Button(ctx).apply {
+      text = "打开控制台"
+      isAllCaps = false
+      textSize = sp(14f)
+      setTextColor(getColor(R.color.ds_accent))
+      typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+      background = rippleOverlay(android.graphics.Color.TRANSPARENT)
+      stateListAnimator = null
+      setPadding(dp(18f), dp(12f), dp(18f), dp(12f))
+      setOnClickListener { startActivity(Intent(this@MainActivity, ConsoleActivity::class.java)) }
+    }
+    val update = Button(ctx).apply {
+      text = "检查更新"
+      isAllCaps = false
+      textSize = sp(14f)
+      setTextColor(getColor(R.color.ds_accent))
+      typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+      background = rippleOverlay(android.graphics.Color.TRANSPARENT)
+      stateListAnimator = null
+      setPadding(dp(18f), dp(12f), dp(18f), dp(12f))
+      setOnClickListener {
+        UpdateManager(this@MainActivity).checkAndApply { status ->
+          runOnUiThread { engineStatus.text = status }
         }
       }
     }
-    fun buttonRow(vararg buttons: Button): LinearLayout {
-      val row = LinearLayout(ctx).apply {
+    actionBlock = LinearLayout(ctx).apply {
+      orientation = LinearLayout.VERTICAL
+      gravity = android.view.Gravity.CENTER
+      layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+    }.also {
+      it.addView(retry)
+      it.addView(LinearLayout(ctx).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = android.view.Gravity.CENTER
-        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-      }
-      for (b in buttons) {
-        val blp = LinearLayout.LayoutParams(0, dp(48f), 1f)
-        blp.setMargins(dp(6f), 0, dp(6f), 0)
-        row.addView(b, blp)
-      }
-      return row
+        setPadding(0, dp(4f), 0, 0)
+        addView(openConsole)
+        addView(update)
+      })
     }
-    val retry = makeButton("重试", filled = true) { startEngineFlow() }
-    val openConsole = makeButton("打开控制台", filled = false) {
-      startActivity(Intent(this@MainActivity, ConsoleActivity::class.java))
-    }
-    val update = makeButton("检查运行时更新", filled = false) {
-      UpdateManager(this@MainActivity).checkAndApply { status ->
-        runOnUiThread { engineStatus.text = status }
-      }
-    }
-    guide.addView(buttonRow(openConsole, retry, update))
+    guide.addView(actionBlock)
     return guide
+  }
+
+  /** 测试界面入场：品牌区/状态卡/操作区依次淡入上移，轻柔节奏。 */
+  private fun animateGuideReveal() {
+    val interp = android.view.animation.PathInterpolator(0.32f, 0.72f, 0f, 1f)
+    val rise = (14 * resources.displayMetrics.density).toInt().toFloat()
+    val items = listOf(brandBlock, cardBlock, actionBlock)
+    items.forEachIndexed { i, v ->
+      v.alpha = 0f
+      v.translationY = rise
+      v.animate()
+        .alpha(1f).translationY(0f)
+        .setStartDelay(i * 90L).setDuration(420L)
+        .setInterpolator(interp).start()
+    }
   }
 
   /** 开发者选项「关闭」：停止引擎并回退到初始化（启动/测试）界面，不自动重启。 */
@@ -1409,6 +1477,7 @@ class MainActivity : ComponentActivity() {
         engineStatus.text = status
         progressText.visibility = View.VISIBLE
         guideView.visibility = View.VISIBLE
+        animateGuideReveal()
         webView.visibility = View.GONE
       }
       try {
@@ -1450,6 +1519,7 @@ class MainActivity : ComponentActivity() {
   private fun showGuide() {
     webView.visibility = View.GONE
     guideView.visibility = View.VISIBLE
+    animateGuideReveal()
     val crash = crashInfo
     if (crash != null) {
       crashBanner.visibility = View.VISIBLE

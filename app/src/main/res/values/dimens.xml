@@ -7,9 +7,14 @@
   <dimen name="ds_space_24">24dp</dimen>
   <dimen name="ds_space_32">32dp</dimen>
   <dimen name="ds_space_40">40dp</dimen>
+  <dimen name="ds_space_48">48dp</dimen>
   <dimen name="ds_radius_sm">6dp</dimen>
   <dimen name="ds_radius_md">16dp</dimen>
-  <dimen name="ds_radius_full">999dp</dimen>
-  <dimen name="ds_progress_height">6dp</dimen>
-  <dimen name="ds_logo_size">32dp</dimen>
+  <dimen name="ds_radius_shell">26dp</dimen>
+  <dimen name="ds_radius_card">22dp</dimen>
+  <dimen name="ds_radius_pill">999dp</dimen>
+  <dimen name="ds_radius_icon">18dp</dimen>
+  <dimen name="ds_progress_height">4dp</dimen>
+  <dimen name="ds_logo_size">40dp</dimen>
+  <dimen name="ds_btn_height">52dp</dimen>
 </resources>
