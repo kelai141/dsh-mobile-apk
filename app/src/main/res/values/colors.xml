@@ -3,15 +3,22 @@
   <!-- 启动图标背景(保持) -->
   <color name="ic_launcher_background">#ffffff</color>
 
-  <!-- UI 设计 token:高端极简 + teal 点缀(浅色) -->
-  <color name="ds_bg">#FAFAF9</color>
+  <!-- UI 设计 token:简洁优雅现代 + teal 点缀(浅色) -->
+  <color name="ds_bg">#F6F6F4</color>
+  <color name="ds_shell">#12000000</color>
   <color name="ds_surface">#FFFFFF</color>
-  <color name="ds_border">#14000000</color>
-  <color name="ds_text_primary">#18181B</color>
-  <color name="ds_text_secondary">#8C18181B</color>
-  <color name="ds_text_tertiary">#5918181B</color>
+  <color name="ds_border">#0F000000</color>
+  <color name="ds_text_primary">#191919</color>
+  <color name="ds_text_secondary">#66191919</color>
+  <color name="ds_text_tertiary">#3D191919</color>
+  <color name="ds_text_on_accent">#FFFFFF</color>
   <color name="ds_accent">#0D9488</color>
   <color name="ds_accent_pressed">#0F766E</color>
-  <color name="ds_danger">#DC2626</color>
-  <color name="ds_progress_track">#1A18181B</color>
+  <color name="ds_accent_soft">#140D9488</color>
+  <color name="ds_glow">#0D0D9488</color>
+  <color name="ds_ok">#0D9488</color>
+  <color name="ds_warn">#B45309</color>
+  <color name="ds_danger">#B91C1C</color>
+  <color name="ds_danger_soft">#14B91C1C</color>
+  <color name="ds_progress_track">#14191919</color>
 </resources>
