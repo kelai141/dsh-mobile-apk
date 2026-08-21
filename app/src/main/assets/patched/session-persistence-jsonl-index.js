@@ -1125,7 +1125,7 @@ var JsonlSessionPersistence = class extends SessionPersistence {
 		const tmp = await this.writeSyncedTempFile(finalPath, content);
 		let linked = false;
 		try {
-			// android-link-eacces-fallback: Android app domains forbid link(2)
+			// jsonl-link-eacces-fallback: Android app domains forbid link(2)
 			// (sepolicy; Huawei/HarmonyOS observed), fall back to a rename
 			// (single-process, same content) like dsh 0.1.0-rc.8 did.
 			await link(tmp, finalPath).catch(function (e) { if (e.code !== "EACCES" && e.code !== "EPERM" && e.code !== "ENOTSUP") throw e; return rename(tmp, finalPath); });

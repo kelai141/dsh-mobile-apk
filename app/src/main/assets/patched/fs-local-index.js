@@ -497,7 +497,7 @@ async function writeFileAtomic(absolutePath, content, mode, signal, internals = 
 		handle = void 0;
 		throwIfAborted(signal, "write");
 		if (createIfAbsent !== void 0) try {
-			// android-link-eacces-fallback: Android app domains forbid link(2)
+			// fs-link-eacces-fallback: Android app domains forbid link(2)
 			// (sepolicy; Huawei/HarmonyOS observed), fall back to rename when
 			// the target is still absent — exactly like dsh 0.1.0-rc.8 did.
 			await linkFile(tempPath, absolutePath).catch(function (e) { if (e.code !== "EACCES" && e.code !== "EPERM" && e.code !== "ENOTSUP") throw e; return lstat(absolutePath).then(function () { throw e; }, function (e2) { if (e2.code !== "ENOENT") throw e2; return rename(tempPath, absolutePath); }); });

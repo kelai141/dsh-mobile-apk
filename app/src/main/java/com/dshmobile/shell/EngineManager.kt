@@ -360,6 +360,9 @@ class EngineManager(private val context: Context, private val pickToken: String?
    *  - session-persistence-jsonl-index.js / fs-local-index.js: Android link(2) fallback — dsh
    *    0.1.1-rc.1 dropped the EACCES/EPERM/ENOTSUP → rename fallback that rc.8 shipped; Android
    *    app domains forbid link(2) (sepolicy), re-add it as a full-file overlay (as in rc.8).
+   *    Note: these are full-file overlays pinned to the rc.1 bundle; when the snapshot is next
+   *    upgraded, re-evaluate whether the overlay is still needed (upstream may re-add the
+   *    fallback) instead of blindly overwriting the newer native file.
    * (v0.12.4 rc8 removed the onImagePicked/llm-deepseek/textzoom patches — rc8's native image
    * request support and no-cache hardening supersede them; the vision-exp patch re-adds a
    * catalog-only llm-deepseek overlay for the model released 2026-08-21.)
@@ -381,9 +384,9 @@ class EngineManager(private val context: Context, private val pickToken: String?
     applyAssetPatch("patched/llm-deepseek-index.js",
       File(dshPkgs, "dsh-llm-deepseek/lib/index.js"), "deepseek-v4-flash-vision-exp")
     applyAssetPatch("patched/session-persistence-jsonl-index.js",
-      File(dshPkgs, "dsh-session-persistence-jsonl/lib/index.js"), "android-link-eacces-fallback")
+      File(dshPkgs, "dsh-session-persistence-jsonl/lib/index.js"), "jsonl-link-eacces-fallback")
     applyAssetPatch("patched/fs-local-index.js",
-      File(dshPkgs, "dsh-fs-local/lib/index.js"), "android-link-eacces-fallback")
+      File(dshPkgs, "dsh-fs-local/lib/index.js"), "fs-link-eacces-fallback")
   }
 
   /** Overwrite-style patch: skipped when the target already contains the marker string. */
