@@ -353,8 +353,16 @@ class EngineManager(private val context: Context, private val pickToken: String?
    *  - primitives-index.js: clipboard fallback for WebViews where navigator.clipboard is denied
    *  - attachment-local-index.js: Android link(2) blocked by sepolicy → copyFile fallback + EACCES tolerance
    *  - web-frontend-index.html: immersive viewport-fit=cover patch
+   *  - llm-deepseek-index.js: DeepSeek-V4-Flash-Vision-Exp catalog entry (multimodal vision model,
+   *    official since dsh 0.1.1-rc.1). Stores the rc.1 adapter as a full-file overlay, so the model
+   *    is selectable on any base snapshot; skip-marker is the model id itself, so a base whose
+   *    bundled adapter already ships the model (0.1.1-rc.1+) leaves the native file untouched.
+   *  - session-persistence-jsonl-index.js / fs-local-index.js: Android link(2) fallback — dsh
+   *    0.1.1-rc.1 dropped the EACCES/EPERM/ENOTSUP → rename fallback that rc.8 shipped; Android
+   *    app domains forbid link(2) (sepolicy), re-add it as a full-file overlay (as in rc.8).
    * (v0.12.4 rc8 removed the onImagePicked/llm-deepseek/textzoom patches — rc8's native image
-   * request support and no-cache hardening supersede them.)
+   * request support and no-cache hardening supersede them; the vision-exp patch re-adds a
+   * catalog-only llm-deepseek overlay for the model released 2026-08-21.)
    */
   private fun applyRuntimePatches() {
     val dshPkgs = File(usrDir, "lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai")
@@ -367,13 +375,26 @@ class EngineManager(private val context: Context, private val pickToken: String?
     applyAssetPatch("patched/primitives-index.js",
       File(dshPkgs, "dsh-client-ui-primitives/lib/index.js"), "dsh-mobile-clip-fallback")
     applyAssetPatch("patched/attachment-local-index.js",
-      File(dshPkgs, "dsh-attachment-local/lib/index.js"), "attachment-link-eacces-fallback")
+      File(dshPkgs, "dsh-attachment-local/lib/index.js"), "attachment-ancestor-sync-eacces-tolerance")
     applyAssetPatch("patched/web-frontend-index.html",
       File(webDist, "index.html"), "viewport-fit=cover")
+    applyAssetPatch("patched/llm-deepseek-index.js",
+      File(dshPkgs, "dsh-llm-deepseek/lib/index.js"), "deepseek-v4-flash-vision-exp")
+    applyAssetPatch("patched/session-persistence-jsonl-index.js",
+      File(dshPkgs, "dsh-session-persistence-jsonl/lib/index.js"), "android-link-eacces-fallback")
+    applyAssetPatch("patched/fs-local-index.js",
+      File(dshPkgs, "dsh-fs-local/lib/index.js"), "android-link-eacces-fallback")
   }
 
   /** Overwrite-style patch: skipped when the target already contains the marker string. */
   private fun applyAssetPatch(asset: String, target: File, marker: String) {
+    // Patches track bundle layouts: when the runtime no longer ships the patched package
+    // (e.g. dsh-client-ui-primitives dropped from the dependency graph in dsh 0.1.1-rc.1),
+    // stop applying instead of littering a dead overlay into to the tree.
+    if (!target.parentFile.exists()) {
+      Log.i(TAG, "runtime patch skipped (target package absent): $asset")
+      return
+    }
     if (target.exists() && target.readText().contains(marker)) return
     try {
       context.assets.open(asset).use { input ->

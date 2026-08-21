@@ -5,15 +5,22 @@ import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { chmod, copyFile, link, mkdir, open, readFile, unlink } from "node:fs/promises";
-// attachment-lazy-sharp: sharp has no android runtime; load lazily so the
-// engine boots on android (image processing degrades there).
-// NOTE: must NOT `await import("sharp")` anywhere in this module — ESM resolves
-// the whole module graph at top-level await, which pulls sharp + its wasm
-// backend (@img/sharp-wasm32 → @emnapi/runtime) during load and crashes the
-// engine. Android has no sharp runtime at all, so the image pipeline degrades
-// to IMAGE_PROCESSING_UNAVAILABLE without ever touching the sharp package.
-function requireSharp() {
-  throw new AttachmentError("Image processing unavailable on this platform", "IMAGE_PROCESSING_UNAVAILABLE");
+// attachment-lazy-sharp: sharp pulls a platform-specific native backend; on
+// Android the only viable one is the WASM build (@img/sharp-wasm32, bundled
+// self-contained). Load it lazily — never at module load — so the engine
+// boots regardless of the backend; on first image use the dynamic import is
+// attempted, and a missing/failing backend degrades to
+// IMAGE_PROCESSING_UNAVAILABLE instead of crashing the engine.
+let sharpModule = void 0;
+async function requireSharp() {
+	if (sharpModule === void 0) {
+		try {
+			sharpModule = await import("sharp");
+		} catch (error) {
+			throw new AttachmentError("Image processing unavailable on this platform", "IMAGE_PROCESSING_UNAVAILABLE", { cause: error });
+		}
+	}
+	return sharpModule.default;
 }
 //#region lib/types/image.js
 /** Raster inspection: full decode at admission, header-only probe on verified reads. */
@@ -43,7 +50,7 @@ async function imageMetadata(image) {
 */
 async function probeImage(data) {
 	try {
-		return await imageMetadata(requireSharp()(data, {
+		return await imageMetadata((await requireSharp())(data, {
 			failOn: "error",
 			limitInputPixels: false
 		}));
@@ -60,7 +67,7 @@ async function probeImage(data) {
 */
 async function detectImage(data, limits) {
 	try {
-		const image = requireSharp()(data, {
+		const image = (await requireSharp())(data, {
 			failOn: "error",
 			limitInputPixels: false
 		});
@@ -127,11 +134,22 @@ async function syncDirectory(path) {
 	/* v8 ignore next -- Windows cannot open directory handles; NTFS metadata journaling owns entry durability there. */
 	if (process.platform === "win32") return;
 	/* v8 ignore start -- Windows cannot exercise directory fsync; POSIX behavior tests enforce this peer. */
-	const handle = await open(path, constants.O_RDONLY);
+	let handle;
 	try {
+		handle = await open(path, constants.O_RDONLY);
 		await handle.sync();
+	} catch (error) {
+		// Android: the app cannot open ancestor dirs above its data dir
+		// (EACCES/EPERM on /data/user/0 — sepolicy blocks the untrusted_app
+		// domain). Durability of those ancestors is the platform's concern;
+		// skip the sync rather than fail the save.
+		// (attachment-ancestor-sync-eacces-tolerance)
+		if (error !== null && (error.code === "EACCES" || error.code === "EPERM")) return;
+		throw error;
 	} finally {
-		await handle.close();
+		try {
+			await handle?.close();
+		} catch {}
 	}
 	/* v8 ignore stop */
 }
