@@ -4,7 +4,7 @@ import { AttachmentError, AttachmentId, AttachmentStore, ImageVariantId } from "
 import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, link, mkdir, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 let sharpModule = void 0;
 async function requireSharp() {
 	if (sharpModule === void 0) {
@@ -469,13 +469,23 @@ async function commitPreparedImageFile(root, prepared) {
 		try {
 			await link(temporary, target);
 		} catch (error) {
-			/* v8 ignore next -- Private same-filesystem directories make EEXIST the only recoverable link race. */
-			if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
-			if (digest$1(new Uint8Array(await readFile(target))) !== sha256) throw new AttachmentError("Stored attachment failed integrity verification.", "ATTACHMENT_CORRUPT");
+			/* Android app domains forbid link(2) (sepolicy /data/user/0): fall back to an atomic
+			   rename of the same-filesystem staging file (same mechanism as fs-local /
+			   session-persistence-jsonl). EEXIST remains the only recoverable link race. */
+			if (error instanceof Error && "code" in error && (error.code === "EACCES" || error.code === "EPERM" || error.code === "ENOTSUP" || error.code === "EXDEV")) {
+				let exists;
+				try { await lstat(target); exists = true; } catch (e2) { if (e2.code === "ENOENT") exists = false; else throw e2; }
+				if (exists) throw error;
+				await rename(temporary, target);
+			} else if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) {
+				throw error;
+			} else {
+				if (digest$1(new Uint8Array(await readFile(target))) !== sha256) throw new AttachmentError("Stored attachment failed integrity verification.", "ATTACHMENT_CORRUPT");
+			}
 		}
 		await syncDirectory(bucket);
 		await syncDirectory(join(root, "objects"));
-		await unlink(temporary);
+		await unlink(temporary).catch(() => {});
 	} catch (error) {
 		/* v8 ignore next -- A descriptor can remain open only when the underlying write/sync/close operation fails. */
 		if (handle !== void 0) await handle.close().catch(
