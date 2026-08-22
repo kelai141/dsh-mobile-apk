@@ -37,6 +37,14 @@
 - 视觉/音频设备工具不可用（body 层裁剪）
 - LLM 兜底（openai）不可用——白箱直答为主
 
+## 故障排查
+
+- **`ensureSymlink ... exists and is not a symlink` 崩溃**：dsh-app-boot 启动时
+  `healProfilesModuleFallback` 要求 `profiles/node_modules` 下是 symlink（自动指向引擎
+  包）；若快照里误注入实体目录会触发该错误。修复：不注入 @deepseek-ai 实体（官方预建
+  symlink 已含 schemastery/cordis/dsh-tools 等 dsh-memory peer 依赖）。升级时**卸载
+  旧版重装**（清掉旧解压目录的残留实体）。
+
 ## 上游贡献点（后续）
 
 - `UpdateManager.manifestUrl` 写死 `10.0.2.2:8899`（模拟器），真机无法在线更新——建议改为可配置（SharedPreferences/字符串资源），这是对上游的有价值贡献
