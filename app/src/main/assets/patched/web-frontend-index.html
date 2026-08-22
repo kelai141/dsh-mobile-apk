@@ -60,6 +60,161 @@
         window.addEventListener("storage", applyImmersiveAttr);
         try { window.__dshImmersiveApply = applyImmersiveAttr; } catch (e) {}
       })();
+      // dsh-mobile-open-fallback: the engine's native-path opener supports only
+      // mac/win/linux; on Android the page's file-mention buttons and tool-row
+      // file links would otherwise surface "path open failed: native path
+      // opener is unsupported on android" through the engine RPC. Intercept
+      // file-path clicks and route them to window.androidBridge.openNativePath
+      // (ACTION_VIEW via FileProvider). Relative paths are resolved by the
+      // engine host (/api/android/open-path, token-gated) against the live
+      // session cwds. On Android the engine-RPC fallback can never open
+      // anything, so the click is consumed unconditionally (fail-silent).
+      // Idempotent with the dsh-host-web-compat plugin (guarded by marker).
+      // Visual parity: plain inline-code path tokens (bash-produced images,
+      // scripts — NOT edit/write-tool deliverables) keep the upstream
+      // open-blue style so openable paths look identical to file-mention
+      // buttons (state-business-primary + hover underline).
+      (function () {
+        try {
+          if (window.__dshOpenFallbackInstalled) return;
+          window.__dshOpenFallbackInstalled = true;
+          // Mark openable plain-code tokens so CSS can style them like
+          // file-mention buttons without touching upstream markup.
+          var STYLE_ID = "dsh-openable-code-style";
+          if (!document.getElementById(STYLE_ID)) {
+            var st = document.createElement("style");
+            st.id = STYLE_ID;
+            st.textContent =
+              ".markdown code.dsh-openable, code.dsh-openable {" +
+              " color: var(--dsw-alias-state-business-primary);" +
+              " cursor: pointer; text-decoration: none;" +
+              " }" +
+              ".markdown code.dsh-openable:hover, code.dsh-openable:hover {" +
+              " text-decoration: underline;" +
+              " text-underline-offset: 3px;" +
+              " }";
+            (document.head || document.documentElement).appendChild(st);
+          }
+          var markOpenable = function (code) {
+            try {
+              if (!code || code.classList.contains("dsh-openable")) return;
+              var text = (code.innerText || "").replace(/^\s+|\s+$/g, "");
+              // Must look like a path; skip mention buttons / links already styled upstream.
+              if (code.querySelector && code.querySelector("button,a")) return;
+              if (!isPathText(text)) return;
+              code.classList.add("dsh-openable");
+            } catch (e) {}
+          };
+          // Debounced scan: streaming rerenders mutate the DOM at high
+          // frequency; coalesce and scan only settled idle frames.
+          var scanTimer = null;
+          var scanOpenable = function () {
+            try {
+              var nodes = document.querySelectorAll(".markdown code, code");
+              for (var i = 0; i < nodes.length; i++) markOpenable(nodes[i]);
+            } catch (e) {}
+          };
+          var scheduleScan = function () {
+            if (scanTimer !== null) return;
+            scanTimer = setTimeout(function () {
+              scanTimer = null;
+              scanOpenable();
+            }, 150);
+          };
+          // Body may not exist yet while this head script runs: defer the
+          // initial scan and the observer until the document is ready, then
+          // re-scan after every mutation (debounced) so openable code tokens
+          // are blue from first paint — no click needed.
+          var bootScan = function () {
+            if (!document.body) {
+              setTimeout(bootScan, 50);
+              return;
+            }
+            scanOpenable();
+            var mo = new MutationObserver(scheduleScan);
+            mo.observe(document.body, { childList: true, subtree: true });
+          };
+          bootScan();
+          if (!window.androidBridge || typeof window.androidBridge.openNativePath !== "function") return;
+          var FILE_TOOLS = { edit: true, write: true, read: true };
+          function isPathText(text) {
+            if (!text || text.length > 400) return false;
+            if (/^https?:\/\//i.test(text)) return false;
+            return text.indexOf("/") >= 0 || text.indexOf("\\") >= 0 || /\.[a-zA-Z0-9]{1,8}$/.test(text);
+          }
+          function openViaReader(text) {
+            if (!text) return;
+            if (text.charAt(0) === "/") {
+              try { window.androidBridge.openNativePath(text); } catch (e) {}
+              return;
+            }
+            try {
+              var h = { "content-type": "application/json" };
+              if (window.androidBridge && window.androidBridge.getPickToken) {
+                h["x-dsh-" + "pick-token"] = window.androidBridge.getPickToken();
+              }
+              fetch("/api/android/open-path", {
+                method: "POST",
+                headers: h,
+                body: JSON.stringify({ path: text }),
+              }).then(function (r) { return r.json(); })
+                .then(function (j) { if (j && j.abs) { try { window.androidBridge.openNativePath(j.abs); } catch (e) {} } })
+                .catch(function () {});
+            } catch (e) {}
+          }
+          document.addEventListener("click", function (e) {
+            var el = e.target;
+            while (el && el !== document.body && !(el instanceof HTMLElement)) el = el.parentElement;
+            if (!el || el === document.body) return;
+            // file-mention buttons carry title=path
+            var title = el.getAttribute && el.getAttribute("title");
+            var isFileLike = title && (title.indexOf("/") >= 0 || title.indexOf(".") >= 0) && title.length < 500;
+            if (isFileLike) {
+              e.preventDefault();
+              e.stopPropagation();
+              e.stopImmediatePropagation();
+              openViaReader(title);
+              return;
+            }
+            // tool-row file links ([data-tool] edit/write/read), no title attr
+            var row = el.closest ? el.closest("[data-tool]") : null;
+            if (!row || !FILE_TOOLS[row.getAttribute("data-tool")]) return;
+            var btn = el.closest ? el.closest("button") : null;
+            var text = btn ? (btn.innerText || "").replace(/^\s+|\s+$/g, "") : "";
+            if (!isPathText(text)) return;
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            openViaReader(text);
+          }, true);
+          // Plain inline-code path tokens (images too): the upstream
+          // file-mention vocabulary only covers files produced by edit/write
+          // tools (deliverables locations); files created by bash (python PIL
+          // renders, curl downloads, ffmpeg frames — png/jpg/webp…) render as
+          // a plain <code> with NO open button. Treat a path-like <code> click
+          // as an open request (relative paths via /api/android/open-path).
+          // The style pass marks openable tokens with .dsh-openable; clicking
+          // prefers that mark (precise) and falls back to the path-text test
+          // for unmarked tokens (e.g. tool rows racing the scan).
+          document.addEventListener("click", function (e) {
+            var el = e.target;
+            while (el && el !== document.body && !(el instanceof HTMLElement)) el = el.parentElement;
+            if (!el || el === document.body) return;
+            var code = el.closest ? el.closest("code") : null;
+            if (!code) return;
+            if (code.querySelector && code.querySelector("button,a")) return;
+            var marked = code.classList.contains("dsh-openable");
+            var text = (code.innerText || "").replace(/^\s+|\s+$/g, "");
+            if (!marked && !isPathText(text)) return;
+            if (!marked) code.classList.add("dsh-openable");
+            if (!isPathText(text)) return;
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            openViaReader(text);
+          }, true);
+        } catch (e) {}
+      })();
     </script>    <script type="module" crossorigin src="/assets/index-ClqxG24t.js"></script>
     <link rel="modulepreload" crossorigin href="/assets/vendor-D22_Mp1f.js">
     <link rel="stylesheet" crossorigin href="/assets/vendor-CjyC-hUb.css">

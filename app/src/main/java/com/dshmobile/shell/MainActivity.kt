@@ -328,32 +328,63 @@ class MainActivity : ComponentActivity() {
   }
 
   /**
-   * 用外部阅读器打开文件路径（issue #52）：引擎 native-path-opener 仅支持
-   * mac/win/linux，Android 上文件提及按钮会失败。路径解析：
-   * - /storage/emulated/0/...（公共目录，MANAGE_EXTERNAL_STORAGE 已授）→ FileProvider content Uri
+   * 用外部阅读器打开文件路径（issue #52 增强,方案 B）：引擎 native-path-opener 仅支持
+   * mac/win/linux,Android 上文件提及按钮会失败。路径解析：
+   * - /storage/emulated/0/...（公共目录,MANAGE_EXTERNAL_STORAGE 已授）→ FileProvider content Uri
    * - 应用私有目录（filesDir 等）→ FileProvider content Uri
-   * - 其他（content:// 或不可读）→ false，前端回退引擎 RPC（桌面宿主行为）
+   * - 相对路径（引擎会话 cwd 相对,如 `tool_check.txt`）→ 按 filesDir/home/.dsh 尝试解析
+   * - Termux 风格路径（/data/data/com.termux/...）→ 重写到本应用 filesDir 对应位置
+   * - 全部失败 → 仍返回 true（静默）：Android 上回退引擎 RPC 必报 "native path opener is
+   *   unsupported on android",静默失败体验优于错误弹窗（与 tool-row 分支语义一致）
    */
   private fun openNativePathWithReader(path: String): Boolean {
+    val resolved = resolveReaderPath(path)
+    if (resolved == null) {
+      Log.w("dsh-image", "openNativePath: unresolvable (silent): $path")
+      return true // Android 上回退引擎 RPC 必失败,静默
+    }
     return try {
-      val file = java.io.File(path)
-      if (!file.exists()) {
-        Log.w("dsh-image", "openNativePath: not exists: $path")
-        return false
-      }
       val uri = androidx.core.content.FileProvider.getUriForFile(
-        this, "$packageName.fileprovider", file,
+        this, "$packageName.fileprovider", resolved,
       )
       val intent = Intent(Intent.ACTION_VIEW, uri).apply {
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
       }
       startActivity(intent)
-      Log.i("dsh-image", "openNativePath ok: $path")
+      Log.i("dsh-image", "openNativePath ok: $path -> ${resolved.absolutePath}")
       true
     } catch (e: Exception) {
-      Log.w("dsh-image", "openNativePath failed: $path -> ${e.message}")
-      false
+      Log.w("dsh-image", "openNativePath failed (silent): $path -> ${e.message}")
+      true
     }
+  }
+
+  /**
+   * 将引擎侧路径解析为 app 进程可读的 File（方案 B 兜底）：
+   * 1. 绝对路径直接使用（/storage/emulated/0 与 filesDir 均在 FileProvider 映射内）;
+   * 2. Termux 前缀 /data/data/com.termux/files/ 重写到本应用 filesDir（快照内相对布局一致）;
+   * 3. 相对路径按 会话常见根 逐级尝试:filesDir、filesDir/home、filesDir/home/.dsh;
+   * 4. 找不到返回 null（调用方静默处理）。
+   */
+  private fun resolveReaderPath(path: String): File? {
+    if (path.isBlank()) return null
+    // Termux 前缀重写（引擎视角路径 → 本 app 私有目录）
+    val rewritten = when {
+      path.startsWith("/data/data/com.termux/files/") ->
+        File(filesDir, path.removePrefix("/data/data/com.termux/files/"))
+      path.startsWith("/data/data/com.dsharnessmobile.shell/files/") ->
+        File(filesDir, path.removePrefix("/data/data/com.dsharnessmobile.shell/files/"))
+      else -> File(path)
+    }
+    if (rewritten.isAbsolute) {
+      return rewritten.takeIf { it.exists() }
+    }
+    // 相对路径:按引擎/壳常见根尝试
+    for (base in listOf(filesDir, File(filesDir, "home"), File(filesDir, "home/.dsh"))) {
+      val candidate = File(base, path)
+      if (candidate.exists()) return candidate
+    }
+    return null
   }
 
   /** 从 content Uri 读取显示名（MediaStore DISPLAY_NAME）。 */

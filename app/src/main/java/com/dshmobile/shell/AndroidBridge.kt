@@ -146,8 +146,10 @@ class AndroidBridge(
    * engine's native-path opener only knows mac/win/linux desktops, and on
    * Android the page's file-mention buttons would otherwise fail with
    * "unsupported on android". The shell resolves the path through
-   * ACTION_VIEW (content Uri via FileProvider); returns whether a reader
-   * took it. Callers fall back to the engine RPC when false (desktop hosts).
+   * ACTION_VIEW (content Uri via FileProvider). Since v0.12.5-fx-1-rgfix the
+   * bridge always returns true on Android (resolves relative/Termux paths,
+   * silent on failure): the engine-RPC fallback can never open anything on
+   * Android, so falling through would only surface an error dialog.
    */
   @JavascriptInterface
   fun openNativePath(path: String): Boolean = onOpenNativePath(path)
