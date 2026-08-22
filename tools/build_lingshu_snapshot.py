@@ -144,17 +144,13 @@ for root, dirs, files in os.walk(MEM_SRC):
             mem_entries[f"home/.dsh/profiles/{prof}/node_modules/@furongjun1999/dsh-memory/{rel}"] = open(fp, "rb").read()
 print("dsh-memory entries:", len(mem_entries))
 
-# ---------------- 5. @deepseek-ai 生态（peer 依赖） ----------------
+# ---------------- 5. @deepseek-ai 生态：不注入实体 ----------------
+# dsh-app-boot 启动时 healProfilesModuleFallback 自动为依赖闭包（含
+# schemastery/cordis/dsh-tools/dsh-session）在 profiles/node_modules 建
+# symlink 指向引擎 real location——实体目录会触发 ensureSymlink 抛错
+# （"exists and is not a symlink"）。故此处仅需确认闭包可达，不注入。
 ds_entries = {}
-droot = os.path.join(ROOT, "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai")
-n = 0
-for root, dirs, files in os.walk(droot):
-    for f in files:
-        fp = os.path.join(root, f)
-        rel = os.path.relpath(fp, droot).replace("\\", "/")
-        ds_entries["home/.dsh/profiles/node_modules/@deepseek-ai/" + rel] = open(fp, "rb").read()
-        n += 1
-print("deepseek-ai entries:", n)
+print("deepseek-ai entries: 0 (auto-heal by dsh-app-boot)")
 
 # ---------------- 6. cordis.patch.yml 追加 ----------------
 PATCH_ADD = """
