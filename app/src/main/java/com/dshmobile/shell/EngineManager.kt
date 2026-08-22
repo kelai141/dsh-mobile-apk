@@ -2,6 +2,7 @@ package com.dsharnessmobile.shell
 
 import android.content.Context
 import android.media.MediaScannerConnection
+import android.os.Build
 import android.os.Environment
 import android.util.Log
 import java.io.File
@@ -386,6 +387,55 @@ class EngineManager(private val context: Context, private val pickToken: String?
       File(dshPkgs, "dsh-fs-local/lib/index.js"))
   }
 
+  /**
+   * dsh grep/glob 工具修复(零改动 dsh):@vscode/ripgrep 只为 darwin/win32/linux 发布
+   * 平台包,Android 上 require.resolve("@vscode/ripgrep-android-arm64/bin/rg") 必然失败
+   * (resolveRgPath 的 Promise rejection 被进程级缓存,首次失败后整个进程生命周期持续失败)。
+   * 方案:在应用 rootfs(filesDir/node_modules,位于 dsh 包树之外)补平台包——Node 模块
+   * 解析向上查找可命中,不触碰 @deepseek-ai/dsh。rg 二进制来源:
+   *   1) 快照内 Termux PIE 构建 usr/bin/rg(存在则 symlink,零体积);
+   *   2) 否则从 assets/runtime/rg-<abi> 复制(APK 自带 PIE rg,依赖 libpcre2-8 快照已含)。
+   * 每次引擎启动前确保,天然规避 rgPathPromise 进程缓存(首次 resolve 时平台包已就位,
+   * 无需人为重启)。与快照 rootfs 层新增性质相同,非 dsh 包内改动。
+   */
+  private fun ensureRipgrepPlatformPackage() {
+    // ABI → Node process.arch 映射(APK 按 ABI 分发,单 APK 单架构)
+    val nodeArch = when (Build.SUPPORTED_ABIS.firstOrNull()) {
+      "x86_64" -> "x64"
+      "x86" -> "ia32"
+      else -> "arm64" // arm64-v8a 及兜底
+    }
+    val pkgDir = File(context.filesDir, "node_modules/@vscode/ripgrep-android-$nodeArch")
+    val rgLink = File(pkgDir, "bin/rg")
+    // 幂等:链接/文件实体已存在(含悬空链接,如快照更新后旧链目标缺失)即视为已处理。
+    if (Files.exists(rgLink.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS)) return
+
+    val srcRg = File(usrDir, "bin/rg")
+    try {
+      pkgDir.mkdirs()
+      File(pkgDir, "bin").mkdirs()
+      if (srcRg.exists()) {
+        // 快照自带 rg(未来版本):symlink 跟随快照更新
+        Files.createSymbolicLink(rgLink.toPath(), srcRg.toPath())
+        Log.i(TAG, "ripgrep platform package ensured (snapshot symlink): ${rgLink.absolutePath} -> ${srcRg.absolutePath}")
+      } else {
+        // 快照无 rg(v0.12.5-fx-1 实测缺失):从 APK assets 复制自带 PIE 构建
+        val abi = if (nodeArch == "x64") "x86_64" else "arm64"
+        val assetPath = "runtime/rg-$abi"
+        context.assets.open(assetPath).use { input ->
+          rgLink.outputStream().use { output -> input.copyTo(output) }
+        }
+        if (!rgLink.setExecutable(true)) Log.w(TAG, "ripgrep chmod +x failed")
+        Log.i(TAG, "ripgrep platform package ensured (asset copy): ${rgLink.absolutePath} <- $assetPath")
+      }
+      // require.resolve 只校验路径存在;package.json 的 name 用于工具链一致性
+      File(pkgDir, "package.json").writeText(
+        "{\"name\":\"@vscode/ripgrep-android-$nodeArch\",\"version\":\"1.18.0\"}\n")
+    } catch (t: Throwable) {
+      Log.e(TAG, "ripgrep platform package setup failed", t) // 不阻塞引擎启动
+    }
+  }
+
   /** Overwrite-style patch: applies when the target differs from the bundled asset (content
    *  fingerprint), so an updated asset re-applies on upgrade instead of being skipped by a stale
    *  marker string (the v1→v2 asset-update failure). */
@@ -453,6 +503,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
     }
     return try {
       applyRuntimePatches()
+      ensureRipgrepPlatformPackage()
       val args = arrayOf(
         nodeBin.absolutePath, "--expose-internals", dshBin.absolutePath, "web", "--port", port.toString(),
       )
