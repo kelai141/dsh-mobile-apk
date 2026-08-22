@@ -164,6 +164,8 @@ PATCH_ADD = """
       config:
         python: /data/data/com.dsharnessmobile.shell/files/usr/bin/python3
         dbPath: /data/data/com.dsharnessmobile.shell/files/home/.dsh/lingshu.db
+        # 全部 71 个工具（含记忆/认知/白箱 wisdom_* 工具族）
+        tools: all
 """
 def load_patch(rel):
     p = os.path.join(ROOT, rel)
