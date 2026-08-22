@@ -39,6 +39,10 @@
 
 ## 故障排查
 
+- **`spawn .../usr/bin/python3 EACCES`（灵枢子进程起不来）**：python deb 注入时丢失
+  执行位（mode 设成 0o644）导致 spawn 被拒。已修复：构建脚本保留 deb 原始 mode
+  （`usr/bin/*` 0o755）。**已装的旧 APK 可 `chmod +x` 修复**（重启后仍有效），
+  新构建的 APK 开箱即用。
 - **`ensureSymlink ... exists and is not a symlink` 崩溃**：dsh-app-boot 启动时
   `healProfilesModuleFallback` 要求 `profiles/node_modules` 下是 symlink（自动指向引擎
   包）；若快照里误注入实体目录会触发该错误。修复：不注入 @deepseek-ai 实体（官方预建
