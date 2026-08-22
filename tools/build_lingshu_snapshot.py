@@ -46,7 +46,10 @@ for m in py_t.getmembers():
     if m.issym():
         py_entries[rel] = {"type": "sym", "link": m.linkname}
     elif m.isreg():
-        py_entries[rel] = {"type": "file", "data": py_t.extractfile(m).read()}
+        # 保留 deb 原始 mode（usr/bin/* 为 0o755 可执行——之前丢失执行位导致
+        # 手机端 spawn python3.14 EACCES）
+        py_entries[rel] = {"type": "file", "data": py_t.extractfile(m).read(),
+                           "mode": m.mode}
 print("python deb entries:", len(py_entries))
 
 # ---------------- 2. aeis 核心包（裁剪） ----------------
@@ -215,7 +218,7 @@ with tarfile.open(SRC, "r:xz") as tin, \
     for rel, d in inject_bytes.items():
         add_bytes(rel, d, 0o644 if not rel.endswith(("/python3.14", "/dsh", "/bash")) else 0o755)
     for rel, d in inject_files.items():
-        add_bytes(rel, d["data"], 0o644)
+        add_bytes(rel, d["data"], d.get("mode", 0o644))
     for rel, link in inject_sym.items():
         ti = tarfile.TarInfo(rel)
         ti.type = tarfile.SYMTYPE
