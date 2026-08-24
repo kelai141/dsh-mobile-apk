@@ -337,39 +337,76 @@ class MainActivity : ComponentActivity() {
    * 安全（2026-08-23 CRITICAL 修复）：运行时白名单 canonical 校验，与
    * res/xml/file_paths.xml 的映射面一致——FileProvider 若配到更宽路径也会被此层拦截。
    */
+  /**
+   * 用外部阅读器打开文件路径（0.13.0 rebase 修复）：引擎 native-path-opener 仅支持
+   * mac/win/linux，Android 上产物/图片点击必须走壳侧 ACTION_VIEW。路径解析：
+   * 1. Termux 前缀重写（/data/data/com.termux/... → filesDir 对应位置）;
+   * 2. 相对路径按 会话常见根 逐级尝试（filesDir、filesDir/home、filesDir/home/.dsh）;
+   * 3. 白名单 canonical 校验（安全，防逃逸）;
+   * 4. 解析失败/不在白名单 → 仍返回 true（静默）：Android 上回退引擎 RPC 必报
+   *    "native path opener is unsupported on android"，静默优于错误弹窗。
+   */
   private fun openNativePathWithReader(path: String): Boolean {
+    val resolved = resolveReaderPath(path)
+    if (resolved == null) {
+      Log.w("dsh-image", "openNativePath: unresolvable (silent): $path")
+      return true
+    }
+    if (!isReaderAllowedPath(resolved)) {
+      Log.w("dsh-image", "openNativePath rejected (outside reader whitelist): $path")
+      return true // 静默：回退引擎 RPC 必失败
+    }
     return try {
-      val file = java.io.File(path)
-      if (!file.exists()) {
-        Log.w("dsh-image", "openNativePath: not exists: $path")
-        return false
-      }
-      if (!isReaderAllowedPath(file)) {
-        Log.w("dsh-image", "openNativePath rejected (outside reader whitelist): $path")
-        return false
-      }
       val uri = androidx.core.content.FileProvider.getUriForFile(
-        this, "$packageName.fileprovider", file,
+        this, "$packageName.fileprovider", resolved,
       )
       val intent = Intent(Intent.ACTION_VIEW, uri).apply {
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
       }
       startActivity(intent)
-      Log.i("dsh-image", "openNativePath ok: $path")
+      Log.i("dsh-image", "openNativePath ok: $path -> ${resolved.absolutePath}")
       true
     } catch (e: Exception) {
-      Log.w("dsh-image", "openNativePath failed: $path -> ${e.message}")
-      false
+      Log.w("dsh-image", "openNativePath failed (silent): $path -> ${e.message}")
+      true
     }
   }
 
-  /** 外部阅读器白名单（与 res/xml/file_paths.xml 映射面一致；canonical 比较防 symlink/.. 逃逸）。 */
+  /** 将引擎侧路径解析为 app 进程可读的 File（0.13.0 rebase，原 resolveReaderPath）。 */
+  private fun resolveReaderPath(path: String): File? {
+    if (path.isBlank()) return null
+    // Termux 前缀重写（引擎视角路径 → 本 app 私有目录）
+    val rewritten = when {
+      path.startsWith("/data/data/com.termux/files/") ->
+        File(filesDir, path.removePrefix("/data/data/com.termux/files/"))
+      path.startsWith("/data/data/com.dsharnessmobile.shell/files/") ->
+        File(filesDir, path.removePrefix("/data/data/com.dsharnessmobile.shell/files/"))
+      else -> File(path)
+    }
+    if (rewritten.isAbsolute) {
+      return rewritten.takeIf { it.exists() }
+    }
+    // 相对路径：按引擎/壳常见根尝试
+    for (base in listOf(filesDir, File(filesDir, "home"), File(filesDir, "home/.dsh"))) {
+      val candidate = File(base, path)
+      if (candidate.exists()) return candidate
+    }
+    return null
+  }
+
+  /** 外部阅读器白名单（与 res/xml/file_paths.xml 映射面一致；canonical 比较防 symlink/.. 逃逸）。
+   *  0.13.0 rebase：补全会话产物/临时工作区/导出目录——恢复 txt/md/png/jpg/js 等产物点击打开。 */
   private fun isReaderAllowedPath(file: java.io.File): Boolean {
     return try {
       val canon = file.canonicalPath
       val roots = listOf(
         java.io.File(filesDir, "home/.dsh/workspaces"),
+        java.io.File(filesDir, "home/.dsh/sessions"),
+        java.io.File(filesDir, "home/.dsh/attachments"),
+        java.io.File(filesDir, "home/.dsh/storages"),
+        java.io.File(filesDir, "home/.dsh/profiles"),
         java.io.File(filesDir, "home/tmp"),
+        java.io.File(filesDir, "home/"),
         java.io.File(filesDir, "usr/bin"),
         java.io.File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), "dshdata"),
       ).map { it.canonicalPath }
