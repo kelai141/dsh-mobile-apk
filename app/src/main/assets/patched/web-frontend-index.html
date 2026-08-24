@@ -87,6 +87,140 @@
         window.addEventListener("storage", applyImmersiveAttr);
         try { window.__dshImmersiveApply = applyImmersiveAttr; } catch (e) {}
       })();
+      // dsh-mobile-open-fallback (0.13.0 rebase): engine native-path opener is
+      // mac/win/linux-only; Android file-mention buttons, tool-row links and
+      // plain-code path tokens (txt/md/png/jpg/js…) would otherwise surface
+      // "path open failed: native path opener is unsupported on android" via
+      // the engine RPC. Intercept file-path clicks and route them to
+      // window.androidBridge.openNativePath (ACTION_VIEW via FileProvider);
+      // relative paths resolved by /api/android/open-path against session cwds.
+      // On Android the engine-RPC fallback can never open anything, so the
+      // click is consumed unconditionally (fail-silent). Visual parity: path
+      // code tokens get .dsh-openable (same blue as file-mention buttons).
+      (function () {
+        try {
+          if (window.__dshOpenFallbackInstalled) return;
+          window.__dshOpenFallbackInstalled = true;
+          var STYLE_ID = "dsh-openable-code-style";
+          if (!document.getElementById(STYLE_ID)) {
+            var st = document.createElement("style");
+            st.id = STYLE_ID;
+            st.textContent =
+              ".markdown code.dsh-openable, code.dsh-openable {" +
+              " color: var(--dsw-alias-state-business-primary);" +
+              " cursor: pointer; text-decoration: none;" +
+              " }" +
+              ".markdown code.dsh-openable:hover, code.dsh-openable:hover {" +
+              " text-decoration: underline;" +
+              " text-underline-offset: 3px;" +
+              " }";
+            (document.head || document.documentElement).appendChild(st);
+          }
+          var markOpenable = function (code) {
+            try {
+              if (!code || code.classList.contains("dsh-openable")) return;
+              var text = (code.innerText || "").replace(/^\s+|\s+$/g, "");
+              if (code.querySelector && code.querySelector("button,a")) return;
+              if (!isPathText(text)) return;
+              code.classList.add("dsh-openable");
+            } catch (e) {}
+          };
+          var scanTimer = null;
+          var scanOpenable = function () {
+            try {
+              var nodes = document.querySelectorAll(".markdown code, code");
+              for (var i = 0; i < nodes.length; i++) markOpenable(nodes[i]);
+            } catch (e) {}
+          };
+          var scheduleScan = function () {
+            if (scanTimer !== null) return;
+            scanTimer = setTimeout(function () {
+              scanTimer = null;
+              scanOpenable();
+            }, 150);
+          };
+          var bootScan = function () {
+            if (!document.body) {
+              setTimeout(bootScan, 50);
+              return;
+            }
+            scanOpenable();
+            var mo = new MutationObserver(scheduleScan);
+            mo.observe(document.body, { childList: true, subtree: true });
+          };
+          bootScan();
+          if (!window.androidBridge || typeof window.androidBridge.openNativePath !== "function") return;
+          var FILE_TOOLS = { edit: true, write: true, read: true };
+          function isPathText(text) {
+            if (!text || text.length > 400) return false;
+            if (/^https?:\/\//i.test(text)) return false;
+            return text.indexOf("/") >= 0 || text.indexOf("\\") >= 0 || /\.[a-zA-Z0-9]{1,8}$/.test(text);
+          }
+          function openViaReader(text) {
+            if (!text) return;
+            if (text.charAt(0) === "/") {
+              try { window.androidBridge.openNativePath(text); } catch (e) {}
+              return;
+            }
+            try {
+              var h = { "content-type": "application/json" };
+              if (window.androidBridge && window.androidBridge.getPickToken) {
+                h["x-dsh-" + "pick-token"] = window.androidBridge.getPickToken();
+              }
+              fetch("/api/android/open-path", {
+                method: "POST",
+                headers: h,
+                body: JSON.stringify({ path: text }),
+              }).then(function (r) { return r.json(); })
+                .then(function (j) { if (j && j.abs) { try { window.androidBridge.openNativePath(j.abs); } catch (e) {} } })
+                .catch(function () {});
+            } catch (e) {}
+          }
+          document.addEventListener("click", function (e) {
+            var el = e.target;
+            while (el && el !== document.body && !(el instanceof HTMLElement)) el = el.parentElement;
+            if (!el || el === document.body) return;
+            var title = el.getAttribute && el.getAttribute("title");
+            var isFileLike = title && (title.indexOf("/") >= 0 || title.indexOf(".") >= 0) && title.length < 500;
+            if (isFileLike) {
+              e.preventDefault();
+              e.stopPropagation();
+              e.stopImmediatePropagation();
+              openViaReader(title);
+              return;
+            }
+            var row = el.closest ? el.closest("[data-tool]") : null;
+            if (!row || !FILE_TOOLS[row.getAttribute("data-tool")]) return;
+            var btn = el.closest ? el.closest("button") : null;
+            var text = btn ? (btn.innerText || "").replace(/^\s+|\s+$/g, "") : "";
+            if (!isPathText(text)) return;
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            openViaReader(text);
+          }, true);
+          // Plain inline-code path tokens (txt/md/png/jpg/js…): upstream
+          // file-mention vocabulary covers only edit/write-tool deliverables;
+          // bash-produced files render as plain <code> with no open button.
+          document.addEventListener("click", function (e) {
+            var el = e.target;
+            while (el && el !== document.body && !(el instanceof HTMLElement)) el = el.parentElement;
+            if (!el || el === document.body) return;
+            var code = el.closest ? el.closest("code") : null;
+            if (!code) return;
+            if (code.querySelector && code.querySelector("button,a")) return;
+            var marked = code.classList.contains("dsh-openable");
+            var text = (code.innerText || "").replace(/^\s+|\s+$/g, "");
+            if (!marked && !isPathText(text)) return;
+            if (!marked) code.classList.add("dsh-openable");
+            if (!isPathText(text)) return;
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            openViaReader(text);
+          }, true);
+        } catch (e) {}
+      })();
     </script>    <script type="module" crossorigin src="/assets/index-ClqxG24t.js"></script>
     <link rel="modulepreload" crossorigin href="/assets/vendor-D22_Mp1f.js">
     <link rel="stylesheet" crossorigin href="/assets/vendor-CjyC-hUb.css">
