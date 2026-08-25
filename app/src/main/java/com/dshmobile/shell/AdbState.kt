@@ -13,13 +13,15 @@ import java.util.TimeZone
 import java.util.concurrent.TimeUnit
 
 /**
- * ADB 授权状态单一事实来源（0.13.0 F1.7 → 0.14 真实 ADB 通道）。
+ * ADB 授权状态单一事实来源（0.13.0 F1.7 最小可用版；增强归 0.14）。版本叙事（2026-08-25 归位）：
+ * 0.13.0 正式版承载 = 三道门 + 真实 pair/connect/shell + 审计回收 + NSD 端口发现（真机回归）；
+ * 0.14 承载 = Shizuku 探活重设计 / 豁免自动升级 / NSD 之外的能力增强。
  *
  * 授权写面（Shizuku 对照后收紧）：三道门的写面只存在于本原生服务
  * （setAllowSwitch/pairWithCode/revokePair + 审计），引擎侧 dsh-android-bridge 只读不写——
  * 被提权方（AI/设置页端点）不得自改授权布尔。
  *
- * 0.14 真实通道（内嵌 Termux android-tools adb 36）：
+ * 真实通道（内嵌 Termux android-tools adb 36）：
  * - 门3 配对码：`adb pair 127.0.0.1:<配对端口> <码>` 真实 SPAKE2 握手——配对成功才写
  *   paired=true。**码值只经 argv 直达 adb**（不进日志/审计/SharedPreferences，审计只记长度）。
  * - 配对后 `adb connect 127.0.0.1:<连接端口>` 探活 + 记录 connected。
@@ -27,6 +29,14 @@ import java.util.concurrent.TimeUnit
  *   共用同一密钥与 adb 服务器，引擎侧无需再配对即可连接执行。
  * - revoke：`adb disconnect` + 本地密钥删除 + paired=false。系统侧授权（adbd 的已配对名单）
  *   需用户在「无线调试」开关上重新打开才彻底清除——设置页文案说明。
+ *
+ * 端口发现（0.13.0 Q17 定案：NSD/mDNS 替换盲扫，不重复造轮子）：
+ *   1. 系统属性直读（精确，保留）：service.adb.tls.pairing_port / service.adb.tls.port。
+ *   2. **NSD（Android NsdManager，替代原 TCP 盲扫）**：查 mDNS 服务类型
+ *      `_adb-tls-pairing._tcp`（配对端口，仅配对码对话框打开那一下播广告 = 门3 窗口）
+ *      与 `_adb-tls-connect._tcp`（配对后的 TLS 连接端口）——AOSP adb_mdns.h 规范
+ *      服务类型；权威、零扫描开销、无假码探测。
+ *   3. 手动 IP:port 输入为硬回退（运营商级 AP 无 mDNS / 配对对话框超时后无广播）。
  */
 object AdbState {
 
@@ -36,6 +46,11 @@ object AdbState {
   private const val KEY_PAIR_PORT = "pairPort"
   private const val KEY_CONNECT_PORT = "connectPort"
   private const val KEY_CONNECTED = "connected"
+  /** 门1 live 同步键（0.13.0 Q8 判定一致化）：壳把 All Files Access 判定写入 prefs，
+   *  引擎侧 dsh-android-bridge live 读它（与门2/门3 同模式），不再依赖重启才生效的 env。 */
+  private const val KEY_FULLACCESS = "fullAccess"
+  /** NSD/mDNS 发现超时（配对端口广告仅门3 配对码对话框打开期间存在；5s 内 resolve 不到即放弃）。 */
+  private const val NSD_TIMEOUT_MS = 5000L
   private val PAIR_CODE = Regex("^\\d{6}$")
 
   /** 配对结果（比 Boolean 提供引导面；设置页轮询 stateJson 亦可）。 */
@@ -44,10 +59,20 @@ object AdbState {
   fun prefs(context: Context) =
     context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
+  /** 门1 live 同步（Q8）：把 All Files Access 判定写入 prefs，引擎插件 live 读（同门2/门3 模式）。
+   *  在授权状态读取/变化点调用（幂等；supportsReload 场景亦即时反映系统权限变化）。 */
+  fun syncFullAccess(context: Context) {
+    prefs(context).edit().putBoolean(KEY_FULLACCESS, fullAccess()).apply()
+  }
+
+  /** 门1（系统侧完全访问档位）：引擎插件 live 读此值（KEY_FULLACCESS），无则回落 env 启动快照。 */
+  fun fullAccessPrefs(context: Context): Boolean = prefs(context).getBoolean(KEY_FULLACCESS, false)
+
   fun allowSwitch(context: Context): Boolean = prefs(context).getBoolean(KEY_ALLOW, false)
 
   fun setAllowSwitch(context: Context, enable: Boolean) {
     prefs(context).edit().putBoolean(KEY_ALLOW, enable).apply()
+    syncFullAccess(context)
     AdbAudit.log(context, "adb-allow-switch", mapOf("allow" to enable))
   }
 
@@ -55,6 +80,7 @@ object AdbState {
 
   fun setPaired(context: Context, value: Boolean) {
     prefs(context).edit().putBoolean(KEY_PAIRED, value).apply()
+    syncFullAccess(context)
   }
 
   fun pairPort(context: Context): String? = prefs(context).getString(KEY_PAIR_PORT, null)
@@ -64,17 +90,19 @@ object AdbState {
   fun connected(context: Context): Boolean = prefs(context).getBoolean(KEY_CONNECTED, false)
 
   /**
-   * 自动发现无线调试端口（issue #80 用户诉求 2026-08-24：「配对端口和连接端口不会自动扫描」）。
-   * 两级探测：
-   *   1. **系统属性直读（精确）**：无线调试开启时 adbd 把配对/连接端口暴露为
-   *      `service.adb.tls.pairing_port` 与 `service.adb.tls.port`（getprop 可读，app 域
-   *      SystemProperties 直接可取）——开的瞬间即可发现，零扫描开销。
-   *   2. TCP 盲扫兜底（属性缺失时）：127.0.0.1 的 37000–45999 段（Android 无线调试随机端口）
-   *      原生 connect 探测；命中后用快照 adb pair 语义确认（非配对端口 TLS 立即拒绝）。
+   * 自动发现无线调试端口（issue #80；0.13.0 Q17 NSD 替换盲扫定案）。
+   * 优先级：
+   *   1. **系统属性直读（精确，零开销）**：`service.adb.tls.pairing_port` / `service.adb.tls.port`
+   *      （无线调试开启即有效，app 域 SystemProperties 直接可取）。
+   *   2. **NSD/mDNS（替代原 TCP 盲扫 37000-45999 + 假码探测——Q17 不重复造轮子）**：
+   *      Android NsdManager 查 AOSP `adb_mdns.h` 规范服务类型 `_adb-tls-pairing._tcp`
+   *      （配对端口，仅配对码对话框打开时播广告=门3窗口）与 `_adb-tls-connect._tcp`
+   *      （配对后 TLS 连接端口）。有限超时（NSD_TIMEOUT_MS=5s）内 resolveService 取端口。
+   *   3. 手动 IP:port 输入为硬回退（运营商级 AP 无 mDNS / 配对对话框超时后无广播）。
    * @return 结构 JSON："{\"pair\": <配对端口|null>, \"connect\": <连接端口|null>, \"candidates\": [...] }"。
-   *   discoverPorts 的桥返回给前端：pair/connect 精确填写，candidates 供参考。
+   *   pair/connect 精确填写；candidates 供参考（NSD 命中的端口亦入列）。
    */
-  fun discoverPorts(engine: EngineManager): String {
+  fun discoverPorts(context: Context, engine: EngineManager): String {
     val out = JSONObject()
       .put("pair", JSONObject.NULL)
       .put("connect", JSONObject.NULL)
@@ -88,46 +116,57 @@ object AdbState {
       if (!pair.isNullOrBlank()) out.put("pair", pair.toIntOrNull() ?: JSONObject.NULL)
       if (!conn.isNullOrBlank()) out.put("connect", conn.toIntOrNull() ?: JSONObject.NULL)
     } catch (_: Throwable) {
-      /* 非 root/受限环境读不到属性：走盲扫兜底 */
+      /* 非 root/受限环境读不到属性：走 NSD */
     }
-    // 2. 盲扫兜底（仅当属性一个都没读到）
+    // 2. NSD/mDNS 发现（仅当属性一个都没读到；0.13.0 Q17 替换盲扫）
     if (out.opt("pair") == JSONObject.NULL && out.opt("connect") == JSONObject.NULL) {
-      val adb = File(engine.usrDir, "bin/adb").takeIf { it.exists() }
-      if (adb != null) {
-        val START = 37000; val END = 45999; val STEP = 19
-        val coarse = mutableListOf<Int>()
-        var p = START
-        while (p <= END) {
-          if (tcpOpen(p)) coarse.add(p)
-          p += STEP
-        }
-        val raw = sortedSetOf<Int>()
-        for (c in coarse) {
-          for (q in (c - STEP).coerceAtLeast(START)..(c + STEP).coerceAtMost(END)) {
-            if (tcpOpen(q)) raw.add(q)
+      try {
+        val mgr = context.getSystemService(Context.NSD_SERVICE) as? android.net.nsd.NsdManager
+        if (mgr != null) {
+          val pairPort = java.util.concurrent.atomic.AtomicInteger(0)
+          val connPort = java.util.concurrent.atomic.AtomicInteger(0)
+          val latch = java.util.concurrent.CountDownLatch(2)
+          val resolveBoth = { info: android.net.nsd.NsdServiceInfo ->
+            val type = info.serviceType ?: ""
+            mgr.resolveService(info, object : android.net.nsd.NsdManager.ResolveListener {
+              override fun onResolveFailed(serviceInfo: android.net.nsd.NsdServiceInfo, errorCode: Int) {
+                latch.countDown()
+              }
+              override fun onServiceResolved(rs: android.net.nsd.NsdServiceInfo) {
+                when {
+                  type.contains("_adb-tls-pairing._tcp") -> pairPort.set(rs.port)
+                  type.contains("_adb-tls-connect._tcp") -> connPort.set(rs.port)
+                }
+                latch.countDown()
+              }
+            })
           }
+          val listener = object : android.net.nsd.NsdManager.DiscoveryListener {
+            override fun onDiscoveryStarted(serviceType: String) {}
+            override fun onDiscoveryStopped(serviceType: String) {}
+            override fun onServiceLost(serviceInfo: android.net.nsd.NsdServiceInfo) {}
+            override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
+              latch.countDown(); latch.countDown()
+            }
+            override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {}
+            override fun onServiceFound(serviceInfo: android.net.nsd.NsdServiceInfo) = resolveBoth(serviceInfo)
+          }
+          try { mgr.discoverServices("_adb-tls-pairing._tcp", android.net.nsd.NsdManager.PROTOCOL_DNS_SD, listener) } catch (_: Throwable) { latch.countDown() }
+          try { mgr.discoverServices("_adb-tls-connect._tcp", android.net.nsd.NsdManager.PROTOCOL_DNS_SD, listener) } catch (_: Throwable) { latch.countDown() }
+          try { latch.await(NSD_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS) } catch (_: InterruptedException) {}
+          try { mgr.stopServiceDiscovery(listener) } catch (_: Throwable) {}
+          if (pairPort.get() > 0) out.put("pair", pairPort.get())
+          if (connPort.get() > 0) out.put("connect", connPort.get())
+          val arr = JSONArray()
+          if (pairPort.get() > 0) arr.put(pairPort.get())
+          if (connPort.get() > 0) arr.put(connPort.get())
+          if (arr.length() > 0) out.put("candidates", arr)
         }
-        val arr = JSONArray()
-        for (q in raw) {
-          val text = runAdb(engine, listOf("pair", "127.0.0.1:$q", "000000"), 5).joinToString("\n")
-          if (text.contains("authenticate") || text.contains("pair")) arr.put(q)
-        }
-        out.put("candidates", arr)
+      } catch (_: Throwable) {
+        /* NSD 不可用（模拟器受限/老系统）：回退手动输入 */
       }
     }
     return out.toString()
-  }
-
-  /** 原生 TCP 探活（connect 成功即视为监听端口；超时 120ms——本地环回毫秒级往返）。 */
-  private fun tcpOpen(port: Int): Boolean {
-    return try {
-      val s = java.net.Socket()
-      s.connect(java.net.InetSocketAddress("127.0.0.1", port), 120)
-      s.close()
-      true
-    } catch (_: Exception) {
-      false
-    }
   }
 
   private fun adbBin(context: Context): File? =
@@ -185,6 +224,7 @@ object AdbState {
       .remove(KEY_PAIR_PORT)
       .remove(KEY_CONNECT_PORT)
       .apply()
+    syncFullAccess(context)
     AdbAudit.log(context, "adb-pair-revoke", emptyMap<String, Any>())
   }
 

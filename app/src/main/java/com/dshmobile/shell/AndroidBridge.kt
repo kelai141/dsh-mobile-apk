@@ -41,8 +41,11 @@ class AndroidBridge(
   private val onSetAdbPair: (code: String, pairPort: Int, connectPort: Int) -> Boolean = { _, _, _ -> false },
   /** 0.13.0 F1.7：回收配对（R6：显式回收 + 审计）。 */
   private val onRevokeAdbPair: () -> Unit = {},
-  /** 0.14（issue #80）：自动发现无线调试端口（配对端口候选 JSONArray；原生 TCP 盲扫 + adb pair 确认）。 */
-  private val onDiscoverAdbPorts: () -> String = { "[]" },
+  /** 0.13.0（issue #80；NSD 替换盲扫）：自动发现无线调试端口——返回结构
+   *  {\"pair\": <配对端口|null>, \"connect\": <连接端口|null>, \"candidates\": [...] }，
+   *  与壳 AdbState.discoverPorts 同形状（桥默认值同为完整结构，不再返回 "[]" 造成两端不一致）。
+   *  0.14：Shizuku 探活重设计与豁免升级。 */
+  private val onDiscoverAdbPorts: () -> String = { """{"pair":null,"connect":null,"candidates":[]}""" },
 ) {
 
   @JavascriptInterface
