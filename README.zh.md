@@ -6,14 +6,14 @@
 
 > **dsh-mobile 生态** · [dsh-shell-termux](https://github.com/kelai141/dsh-shell-termux)（shell）· [dsh-client-ui-responsive](https://github.com/kelai141/dsh-client-ui-responsive)（移动 UI）· [dsh-host-web-compat](https://github.com/kelai141/dsh-host-web-compat)（浏览器兼容）· [dsh-mobile](https://github.com/kelai141/dsh-mobile)（协调仓库，private）
 
-> ⚠️ **这是预览版（0.13.0-preview）**：不稳定，用于社区验证与反馈，不建议当作生产依赖。
-> - **ADB 未完成**：配对 / 端口自动扫描 / 执行为预览界面——真实 ADB 通道开发中，0.13.0 正式版完成。
+> **0.13.0 正式版**：ADB 真实通道（配对 / 端口发现 / shell 执行 / 授权门禁 / 审计）全链实现并真机验证。
+> - 插件市场适配提示：内置市场牵涉大量第三方插件，绝大多数在手机端不一定可用，以可用性验证与反馈为主。
 > - **插件市场适配警示**：内置市场牵涉大量第三方插件，**绝大多数插件在手机端不一定可用、大概率有 bug**（移动端与桌面端在 WebView 内核/文件系统/权限模型/运行环境差异大）；移动端适配是长期工程，beta 阶段以「可用性验证与反馈」为主，暂不建议当作生产依赖。插件报错请到 [issues](https://github.com/kelai141/dsh-mobile-apk/issues) 反馈（附机型/版本/复现步骤）。
 
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的安卓壳：WebView UI 覆盖
 **内嵌 Termux 运行时快照**（解压即跑，无需 Termux app）、SAF 目录桥、保活前台服务、引擎看门狗、
 运行时在线更新。一个 APK 装完即用：完整的 dsh web agent，且能真实执行 bash。应用名 `DeepCode`
-（图标文字 DeepSearch）、包名 `com.dsharnessmobile.shell`、版本 `0.13.0-preview`（versionCode 24）。
+（图标文字 DeepSearch）、包名 `com.dsharnessmobile.shell`、版本 `0.13.0`（versionCode 25）。
 
 ## 功能
 
@@ -31,17 +31,16 @@
   运行时可自更新而无需更新 APK；
 - **SAF 桥**：`pickDirectory` 把所选目录映射为真实路径（`/storage/emulated/0/…`）；
 - **设备访问**：所有文件访问；Shizuku 探活示例；
-- **ADB 授权界面（预览）**：三道门授权状态机 + 配对端口自动扫描（真实 ADB 通道开发中，
-  0.13.0 正式版完成）。
+- **ADB 真实通道（0.13.0）**：真实 `adb pair` SPAKE2 握手 + NSD/mDNS 端口发现，经 adbd（shell uid=2000）执行系统命令（危险命令黑名单）；三道门授权（完全访问档位 / 应用内开关 / 配对码）+ 会话档位实时门控 + 原生审计（`files/audit/audit.ndjson`）；连接端口轮换自愈（5555 回退）。
 
 ## 下载 / 安装
 
-Release `v0.13.0-preview` 提供双 ABI 包：
+Release `v0.13.0` 提供双 ABI 包（另含快照归档、插件包、MANIFEST 校验清单与发布说明）：
 
 | APK | 适用 |
 |---|---|
-| `dsh-mobile-apk-v0.13.0-preview-arm64.apk` | arm64 设备（真机） |
-| `dsh-mobile-apk-v0.13.0-preview-x86_64.apk` | x86_64 模拟器 / 设备 |
+| `dsh-mobile-apk-v0.13.0-arm64.apk` | arm64 设备（真机） |
+| `dsh-mobile-apk-v0.13.0-x86_64.apk` | x86_64 模拟器 / 设备 |
 
 ```sh
 adb install -r -t <apk>    # 同签名覆盖安装
@@ -70,14 +69,14 @@ ELF / cordis 挂载集⊇注入集 / LICENSES 自检（Python 流式）——任
 ## 桥协议 v1（`window.androidBridge`）
 
 应用名 `DeepCode`（图标文字 DeepSearch）、包名 `com.dsharnessmobile.shell`。
-`androidBridge.version` 返回应用版本号（当前 `0.13.0-preview`，versionCode 24），
+`androidBridge.version` 返回应用版本号（当前 `0.13.0`，versionCode 25），
 页面按它做 feature-detect。下列 ADB 方法为预览授权面——真实通道在 0.13.0 正式版完成。
 
 **同步返回**
 
 | 方法 | 签名 | 说明 |
 |---|---|---|
-| `version` | () → string | 应用版本号（`0.13.0-preview`），feature-detect 用 |
+| `version` | () → string | 应用版本号（`0.13.0`），feature-detect 用 |
 | `getSystemDark` | () → boolean | 系统深色模式（绕过部分厂商 WebView `matchMedia` 失效，首帧主题用） |
 | `checkEngine` | () → string | 探测 127.0.0.1:3080；JSON `{running, latencyMs, error?}` |
 | `hasAllFilesAccess` | () → boolean | 是否已授予「所有文件访问」权限（外部工作区要求） |
