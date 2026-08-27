@@ -49,8 +49,9 @@ object AdbState {
   /** 门1 live 同步键（0.13.0 Q8 判定一致化）：壳把 All Files Access 判定写入 prefs，
    *  引擎侧 dsh-android-bridge live 读它（与门2/门3 同模式），不再依赖重启才生效的 env。 */
   private const val KEY_FULLACCESS = "fullAccess"
-  /** NSD/mDNS 发现超时（配对端口广告仅门3 配对码对话框打开期间存在；5s 内 resolve 不到即放弃）。 */
-  private const val NSD_TIMEOUT_MS = 5000L
+  /** NSD/mDNS 发现超时（配对端口广告仅门3 配对码对话框打开期间存在；2s 内 resolve 不到即放弃。
+   *  曾在 5s：bridge 同步调用链上等于界面卡死一小会儿（真机实测报障），压到 2s 收窄窗口）。 */
+  private const val NSD_TIMEOUT_MS = 2000L
   private val PAIR_CODE = Regex("^\\d{6}$")
 
   /** 配对结果（比 Boolean 提供引导面；设置页轮询 stateJson 亦可）。 */
@@ -102,6 +103,25 @@ object AdbState {
    * @return 结构 JSON："{\"pair\": <配对端口|null>, \"connect\": <连接端口|null>, \"candidates\": [...] }"。
    *   pair/connect 精确填写；candidates 供参考（NSD 命中的端口亦入列）。
    */
+  /** 端口发现缓存（bridge 秒回 + 启动后台预取：配对页不再同步等 NSD 卡 UI，2026-08-27 报障修复）。
+   *  TTL 短（15s）保证弹窗换端口后不喂陈旧值；null=未发现（前端手动输入回退）。 */
+  private const val PORT_CACHE_TTL_MS = 15_000L
+  @Volatile private var portCache: String? = null
+  @Volatile private var portCacheAt = 0L
+
+  /** 后台预取（引擎就绪/进入前台后线程调；缓存未过期不重扫）。 */
+  fun prefetchPorts(context: Context, engine: EngineManager) {
+    if (cachedPorts() == null) {
+      val v = discoverPorts(context, engine)
+      portCache = v
+      portCacheAt = System.currentTimeMillis()
+    }
+  }
+
+  /** bridge 读取入口（缓存优先）。 */
+  fun cachedPorts(): String? =
+    if (portCache != null && System.currentTimeMillis() - portCacheAt < PORT_CACHE_TTL_MS) portCache else null
+
   fun discoverPorts(context: Context, engine: EngineManager): String {
     val out = JSONObject()
       .put("pair", JSONObject.NULL)
@@ -166,7 +186,10 @@ object AdbState {
         /* NSD 不可用（模拟器受限/老系统）：回退手动输入 */
       }
     }
-    return out.toString()
+    val json = out.toString()
+    portCache = json
+    portCacheAt = System.currentTimeMillis()
+    return json
   }
 
   private fun adbBin(context: Context): File? =
@@ -185,12 +208,14 @@ object AdbState {
     val adb = adbBin(context)
     if (adb == null) return PairResult(false, false, "ADB 客户端未就绪（快照缺少 android-tools/adb）")
     // 真实握手（码值只进 argv；超时 60s 覆盖 spake2 + 网络往返）
-    val out = runAdb(engine, listOf("pair", "127.0.0.1:$pairPort", code), 60)
+    val out = retryRunAdb(engine, listOf("pair", "127.0.0.1:$pairPort", code), 60)
     val text = out.joinToString("\n")
     val pairedOk = text.contains("Successfully paired") || text.contains("成功配对") || text.contains("已成功配对")
     if (!pairedOk) {
-      AdbAudit.log(context, "adb-pair", mapOf("codeLength" to code.length, "result" to "fail", "pairPort" to pairPort))
-      return PairResult(false, false, "配对失败：${firstLine(text).ifBlank { "无输出（请确认已开启「无线调试」并核对端口）" }}")
+      // 错误首行（不含码值）入审计，供配对失败诊断（2026-08-27）
+      val errLine = firstLine(text)
+      AdbAudit.log(context, "adb-pair", mapOf("codeLength" to code.length, "result" to "fail", "pairPort" to pairPort, "error" to errLine))
+      return PairResult(false, false, "配对失败：${errLine.ifBlank { "无输出（请确认已开启「无线调试」并核对端口）" }}")
     }
     // 配对成功 → 记录端口（连接端口仅供引擎侧 adb connect/shell 使用；端口为 localhost 信息，不入审计）
     prefs(context).edit()
@@ -200,7 +225,7 @@ object AdbState {
       .putBoolean(KEY_CONNECTED, false)
       .apply()
     // 立即连接探活（尽力；失败不撤销配对——可能只是连接端口抄错/无线调试短暂抖动）
-    val connOut = runAdb(engine, listOf("connect", "127.0.0.1:$connectPort"), 25)
+    val connOut = retryRunAdb(engine, listOf("connect", "127.0.0.1:$connectPort"), 25)
     val connText = connOut.joinToString("\n")
     val online = connText.startsWith("connected") || connText.contains("already connected")
     prefs(context).edit().putBoolean(KEY_CONNECTED, online).apply()
@@ -310,8 +335,74 @@ object AdbState {
     "DSH_ADB_WIRELESS" to if (paired(context)) "1" else "0",
   )
 
-  /** 运行快照内 adb（env=引擎 shellEnv + OPENSSL_CONF 覆盖——同 UndoGate 修复）。 */
+  /**
+   * 运行快照内 adb（env=引擎 shellEnv + OPENSSL_CONF 覆盖——同 UndoGate 修复）。
+   *
+   * termux-exec 平台缺陷（0.13.0 真机实锤）：adb client 的 fork-server 冷启动握手必败——
+   * client 起 server 打印 "* daemon started successfully" 后读不到应答，报
+   * "error: protocol fault (couldn't read status message): Success"（server 活着但
+   * client↔server 的启动 socketpair 通信被 termux-exec/Linker64 重路由破坏）。
+   * 因此统一由壳管理一个 `server nodaemon` 常驻进程（probe 验证：client 直连现成
+   * server 时 pair/connect 全部正常），每次调用前确保它在场。
+   */
+  @Volatile private var serverProcess: Process? = null
+
+  /** 确保本地 adb server（127.0.0.1:5037）在场：壳内常驻 `server nodaemon` 进程
+   *  （随壳进程生命周期，被 force-stop 一并清理；日志落 files/home/adb-server.log 供诊断）。
+   *  @return null=就绪；非 null=错误文本（短路调用方）。
+   */
+  private fun ensureAdbServer(engine: EngineManager): String? {
+    if (serverProcess?.isAlive == true) return null
+    return try {
+      val adb = File(engine.usrDir, "bin/adb")
+      if (!adb.exists()) return "adb not found in snapshot runtime"
+      serverProcess?.destroy()
+      serverProcess = null
+      val log = File(engine.homeDir, "adb-server.log")
+      val pb = ProcessBuilder(adb.absolutePath, "server", "nodaemon").apply {
+        environment().putAll(engine.shellEnv())
+        environment()["OPENSSL_CONF"] = File(engine.usrDir, "etc/tls/openssl.cnf").absolutePath
+        redirectErrorStream(true)
+        redirectOutput(log)
+      }
+      val proc = pb.start()
+      serverProcess = proc
+      val deadline = System.currentTimeMillis() + 3000
+      while (System.currentTimeMillis() < deadline && proc.isAlive) {
+        if (adbServerUp()) return null
+        Thread.sleep(100)
+      }
+      if (!proc.isAlive) "adb server 启动失败（详见 files/home/adb-server.log）" else null
+    } catch (t: Throwable) {
+      "adb server 启动异常: " + (t.message ?: t.javaClass.simpleName)
+    }
+  }
+
+  /** 探测本地 5037 是否可连（app 域同源 loopback）。 */
+  private fun adbServerUp(): Boolean = try {
+    java.net.Socket().use { s ->
+      s.connect(java.net.InetSocketAddress("127.0.0.1", 5037), 300)
+      true
+    }
+  } catch (_: Throwable) {
+    false
+  }
+
+  /** runAdb + protocol fault 自愈：冷启动握手被破坏时重建 server 重试一次（2026-08-27 实锤修复）。 */
+  private fun retryRunAdb(engine: EngineManager, args: List<String>, timeoutS: Long): List<String> {
+    var out = runAdb(engine, args, timeoutS)
+    if (out.joinToString("\n").contains("protocol fault")) {
+      serverProcess?.destroy()
+      serverProcess = null
+      ensureAdbServer(engine)
+      out = runAdb(engine, args, timeoutS)
+    }
+    return out
+  }
+
   private fun runAdb(engine: EngineManager, args: List<String>, timeoutS: Long): List<String> {
+    val serverErr = ensureAdbServer(engine)
+    if (serverErr != null) return listOf(serverErr)
     return try {
       val adb = File(engine.usrDir, "bin/adb")
       if (!adb.exists()) return listOf("adb not found in snapshot runtime")

@@ -524,6 +524,11 @@ class MainActivity : ComponentActivity() {
     if (!userClosedEngine) {
       startEngineService()
     }
+    // ADB 端口后台预取（配对页秒回，不再同步等 NSD——2026-08-27 报障修复；15s TTL 内不重扫）。
+    try {
+      Thread { AdbState.prefetchPorts(this, engineManager) }.start()
+    } catch (_: Throwable) {
+    }
     // Back from the directory picker / Termux: re-route if the engine came up.
     // 仅当 WebView 未展示（引导页/首次启动）时才探测并重路由；相册/文件选择器
     // 返回时 WebView 已可见，探测超时会误触发 showWeb→reload，导致 JS 状态丢失。
@@ -787,7 +792,8 @@ class MainActivity : ComponentActivity() {
           AdbState.pairWithCode(this, engineManager, code, pairPort, connectPort).ok
         },
         onRevokeAdbPair = { AdbState.revokePair(this, engineManager) },
-        onDiscoverAdbPorts = { AdbState.discoverPorts(this, engineManager).toString() },
+        // 缓存优先（启动后台预取 + 15s TTL）；无缓存才同步扫——配对页不再卡 UI（2026-08-27 报障修复）。
+        onDiscoverAdbPorts = { AdbState.cachedPorts() ?: AdbState.discoverPorts(this, engineManager).toString() },
       ),
       "androidBridge",
     )
