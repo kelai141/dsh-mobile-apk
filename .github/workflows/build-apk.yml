@@ -42,9 +42,9 @@ jobs:
           fetch-depth: 0
           lfs: true
 
-      - name: 准备运行时（node）
+      - name: 准备运行时（node；dsh-client-ui-responsive 的 tsdown 要求 node ^22.18 || >=24.11）
         uses: actions/setup-node@v4
-        with: { node-version: '20' }
+        with: { node-version: '24' }
       - name: python -> python3（脚本用 `python`）
         run: |
           sudo apt-get update -y
