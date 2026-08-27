@@ -359,13 +359,7 @@ object AdbState {
       serverProcess?.destroy()
       serverProcess = null
       val log = File(engine.homeDir, "adb-server.log")
-      val pb = ProcessBuilder(adb.absolutePath, "server", "nodaemon").apply {
-        environment().putAll(engine.shellEnv())
-        environment()["OPENSSL_CONF"] = File(engine.usrDir, "etc/tls/openssl.cnf").absolutePath
-        redirectErrorStream(true)
-        redirectOutput(log)
-      }
-      val proc = pb.start()
+      val proc = spawnAdb(engine, listOf("server", "nodaemon"), log)
       serverProcess = proc
       val deadline = System.currentTimeMillis() + 3000
       while (System.currentTimeMillis() < deadline && proc.isAlive) {
@@ -388,6 +382,28 @@ object AdbState {
     false
   }
 
+  /**
+   * Spawn 快照内 adb（env=shellEnv + OPENSSL_CONF）。app 域直接 exec app-data ELF 会被拒
+   * （error=13，Android 15+/vivo 策略，2026-08-27 真机实锤 server/client 双双中招），
+   * 捕获 Permission denied 后降级经 /system/bin/linker64 加载——与 EngineManager.startWithArgs
+   * 同机制（native library 方式加载 app-data ELF 恒允许）。
+   */
+  private fun spawnAdb(engine: EngineManager, args: List<String>, out: File? = null): Process {
+    val adb = File(engine.usrDir, "bin/adb")
+    fun build(argv: List<String>): ProcessBuilder = ProcessBuilder(argv).apply {
+      environment().putAll(engine.shellEnv())
+      environment()["OPENSSL_CONF"] = File(engine.usrDir, "etc/tls/openssl.cnf").absolutePath
+      redirectErrorStream(true)
+      if (out != null) redirectOutput(out)
+    }
+    return try {
+      build(listOf(adb.absolutePath) + args).start()
+    } catch (e: java.io.IOException) {
+      if (e.message?.contains("Permission denied") != true) throw e
+      build(listOf("/system/bin/linker64", adb.absolutePath) + args).start()
+    }
+  }
+
   /** runAdb + protocol fault 自愈：冷启动握手被破坏时重建 server 重试一次（2026-08-27 实锤修复）。 */
   private fun retryRunAdb(engine: EngineManager, args: List<String>, timeoutS: Long): List<String> {
     var out = runAdb(engine, args, timeoutS)
@@ -406,12 +422,7 @@ object AdbState {
     return try {
       val adb = File(engine.usrDir, "bin/adb")
       if (!adb.exists()) return listOf("adb not found in snapshot runtime")
-      val pb = ProcessBuilder(listOf(adb.absolutePath) + args).apply {
-        environment().putAll(engine.shellEnv())
-        environment()["OPENSSL_CONF"] = File(engine.usrDir, "etc/tls/openssl.cnf").absolutePath
-        redirectErrorStream(true)
-      }
-      val proc = pb.start()
+      val proc = spawnAdb(engine, args)
       val text = proc.inputStream.bufferedReader().use { it.readText() }
       if (!proc.waitFor(timeoutS, TimeUnit.SECONDS)) {
         proc.destroy()
