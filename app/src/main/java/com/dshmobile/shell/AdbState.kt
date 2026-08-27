@@ -273,7 +273,7 @@ object AdbState {
   private fun classifyFailure(text: String): String {
     val t = text.lowercase()
     return when {
-      t.contains("not found in snapshot") || t.contains("server 启动失败") || t.contains("server 启动异常") -> "server-not-ready"
+      t.contains("not found in snapshot") || t.contains("server 启动失败") || t.contains("server 启动异常") || t.contains("尚未就绪") -> "server-not-ready"
       t.contains("connection refused") || t.contains("failed to connect") || t.contains("cannot connect") -> "window-closed"
       t.contains("timeout") || t.contains("timed out") -> "handshake-timeout"
       t.contains("protocol fault") -> "protocol-fault"
