@@ -1,0 +1,35 @@
+{
+  "baseline": "0.1.0-rc.6",
+  "cordis": "4.0.1",
+  "schemastery": "3.18.1",
+  "upstreamRepo": "dsh",
+  "rows": [
+    { "bundle": "base", "id": "bash-sandbox", "usage": "disabled on android", "expected": "@deepseek-ai/dsh-bash-sandbox" },
+    { "bundle": "web-app", "id": "ui-layout", "usage": "disabled on android", "expected": "@deepseek-ai/dsh-client-ui-layout" }
+  ],
+  "inserted": [
+    { "id": "shell-termux", "pkg": "@dsh-android/dsh-shell-termux", "repo": "dsh-shell-termux" },
+    { "id": "ui-responsive", "pkg": "@dsh-android/dsh-client-ui-responsive", "repo": "dsh-client-ui-responsive" }
+  ],
+  "symbols": [
+    { "pkg": "dsh-bash-local", "symbol": "class LocalBashExecutor", "repo": "dsh-shell-termux" },
+    { "pkg": "dsh-shell", "symbol": "sandboxMode", "repo": "dsh-shell-termux" },
+    { "pkg": "dsh-bash-local", "symbol": "runArgv", "repo": "dsh-shell-termux" },
+    { "pkg": "dsh-bash-local", "symbol": "startArgv", "repo": "dsh-shell-termux" },
+    { "pkg": "dsh-sandbox", "symbol": "SandboxEnforcement", "repo": "dsh-shell-termux" }
+  ],
+  "clientSlots": {
+    "repo": "dsh-client-ui-responsive",
+    "slots": ["sidebar", "conversation", "details", "shell.overlay"],
+    "rowId": "ui-layout",
+    "disabledRow": "ui-layout"
+  },
+  "envContract": {
+    "repo": "dsh-shell-termux",
+    "keys": ["PATH", "LD_LIBRARY_PATH", "HOME", "PREFIX", "TERMUX_VERSION", "SHELL"]
+  },
+  "profiles": {
+    "device": "/data/data/com.termux/files/home/.dsh/profiles",
+    "patches": ["web/cordis.patch.yml", "headless/cordis.patch.yml"]
+  }
+}

@@ -1,3 +1,5 @@
 # 上游 web 前端打包产物(非本仓库手写代码),不计入 GitHub 语言统计
 app/src/main/assets/patched/*.js linguist-vendored
 app/src/main/assets/patched/*.html linguist-vendored
+# 底座归档（build-snapshot 输入）走 Git LFS（体积大）
+base/*.tar.xz filter=lfs diff=lfs merge=lfs -text

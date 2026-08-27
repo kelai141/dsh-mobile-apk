@@ -1,0 +1,6 @@
+[
+ {
+  "name": "bash",
+  "args": "{\"command\": \"ls -la /data/data/com.termux/files/home\", \"description\": \"List files in home directory\"}"
+ }
+]

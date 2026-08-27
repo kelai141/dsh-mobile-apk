@@ -1,0 +1,4 @@
+# Registers the plugin with the Cordis kernel that DSH is built on.
+- insert:
+    - id: dshmarketplace
+      name: dshmarketplace-plugin
