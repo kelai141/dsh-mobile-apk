@@ -224,10 +224,16 @@ object AdbState {
       .putString(KEY_CONNECT_PORT, connectPort.toString())
       .putBoolean(KEY_CONNECTED, false)
       .apply()
-    // 立即连接探活（尽力；失败不撤销配对——可能只是连接端口抄错/无线调试短暂抖动）
-    val connOut = retryRunAdb(engine, listOf("connect", "127.0.0.1:$connectPort"), 25)
-    val connText = connOut.joinToString("\n")
-    val online = connText.startsWith("connected") || connText.contains("already connected")
+    // 立即连接探活（尽力；失败不撤销配对——可能只是连接端口抄错/无线调试短暂抖动）。
+    // 候选端口逐一 connect：NSD/手填连接端口 + 经典 5555 兜底（2026-08-27 实锤：
+    // vivo 无线调试连接端口=5555，NSD 结果可能缺席或与弹窗不一致）。
+    var online = false
+    for (port in listOf(connectPort) + listOfNotNull(5555.takeIf { it != connectPort })) {
+      val connOut = retryRunAdb(engine, listOf("connect", "127.0.0.1:$port"), 25)
+      val connText = connOut.joinToString("\n")
+      online = connText.startsWith("connected") || connText.contains("already connected")
+      if (online) break
+    }
     prefs(context).edit().putBoolean(KEY_CONNECTED, online).apply()
     AdbAudit.log(context, "adb-pair", mapOf("codeLength" to code.length, "pairPort" to pairPort, "connected" to online))
     return if (online) PairResult(true, true, null)
@@ -353,6 +359,12 @@ object AdbState {
    */
   private fun ensureAdbServer(engine: EngineManager): String? {
     if (serverProcess?.isAlive == true) return null
+    // 5037 已被占（本进程残留/历史孤儿/竞态对手）→ 直接复用，不再 spawn 撞车
+    //（2026-08-27 实锤：nodaemon spawn 与 client fork-server 竞争 5037 → Address already in use）。
+    if (adbServerUp()) {
+      serverProcess = null
+      return null
+    }
     return try {
       val adb = File(engine.usrDir, "bin/adb")
       if (!adb.exists()) return "adb not found in snapshot runtime"
