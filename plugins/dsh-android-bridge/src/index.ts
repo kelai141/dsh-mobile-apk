@@ -230,6 +230,23 @@ function looksDangerousAdb(command: string): boolean {
 }
 
 /**
+ * 热补丁（2026-08-27 真机实锤）：通道结果 → 模型文本。
+ * 指定键的值仅 string 放行原样；其余类型一律 JSON.stringify 转写（含对象形状自证）——
+ * 从机制上杜绝 `[object Object]` 进入模型转录（引擎序列化边界事故的现场补救）。
+ */
+function pickText(v: Record<string, unknown>, ...keys: string[]): string {
+  return keys
+    .map((k) => {
+      const x = v[k]
+      if (typeof x === 'string') return x
+      if (x === undefined || x === null) return ''
+      try { return JSON.stringify(x) } catch { return String(x) }
+    })
+    .filter((s) => s.length > 0)
+    .join('\n')
+}
+
+/**
  * 服务面：ctx.androidPrivilege —— 授权状态机（供 dsh-android-manage 等消费）。
  * 全部方法失败关闭：未授权 → 拒绝（return 未授权引导），不执行、不降级。
  */
@@ -399,7 +416,7 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
         },
       },
       render: (_args, v: Record<string, unknown>) => [
-        { type: 'text', text: String(v.stdout ?? v.stderr ?? v.text ?? '') },
+        { type: 'text', text: pickText(v, 'stdout', 'stderr', 'text') || '(no output)' },
       ],
     },
     execute: async ({ command }: { command: string }, exec) => {
@@ -459,7 +476,7 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
         },
       },
       render: (_args, v: Record<string, unknown>) => [
-        { type: 'text', text: String(v.stdout ?? v.guidance ?? v.text ?? '') },
+        { type: 'text', text: pickText(v, 'stdout', 'guidance', 'text') || '(no output)' },
       ],
     },
     execute: async ({ command }: { command: string }, exec) => {

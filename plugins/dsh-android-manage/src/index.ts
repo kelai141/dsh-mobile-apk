@@ -45,6 +45,22 @@ function deny(guidance: string) {
   }
 }
 
+/**
+ * 热补丁（2026-08-27 真机实锤）：模型侧文本取值——仅 string 原样放行；其余类型
+ * JSON.stringify 转写（对象值顺带自证形状），杜绝 `[object Object]` 进入转录。
+ */
+function pickText(v: Record<string, unknown>, ...keys: string[]): string {
+  return keys
+    .map((k) => {
+      const x = v[k]
+      if (typeof x === 'string') return x
+      if (x === undefined || x === null) return ''
+      try { return JSON.stringify(x) } catch { return String(x) }
+    })
+    .filter((s) => s.length > 0)
+    .join('\n')
+}
+
 function tools(priv: PrivilegeFace) {
   const guard = (action: string, args: Record<string, unknown>, exec?: { agent?: { session?: unknown } }) => {
     const a = priv.gateFor(exec?.agent?.session)
@@ -71,7 +87,7 @@ function tools(priv: PrivilegeFace) {
         },
       },
       render: (_args, v: Record<string, unknown>) => [
-        { type: 'text', text: String(v.text ?? v.imagePath ?? '') },
+        { type: 'text', text: pickText(v, 'text', 'imagePath') || '(no output)' },
       ],
     },
     execute: async ({ textRedact = false }, exec) => {
@@ -112,7 +128,7 @@ function tools(priv: PrivilegeFace) {
         },
       },
       render: (_args, v: Record<string, unknown>) => [
-        { type: 'text', text: String(v.text ?? v.treeXmlPath ?? '') },
+        { type: 'text', text: pickText(v, 'text', 'treeXmlPath') || '(no output)' },
       ],
     },
     execute: async (_args, exec) => {
@@ -155,7 +171,7 @@ function tools(priv: PrivilegeFace) {
         },
       },
       render: (_args, v: Record<string, unknown>) => [
-        { type: 'text', text: `${String(v.model)}${v.androidVersion ? ' Android ' + String(v.androidVersion) : ''}${v.text ? '——' + String(v.text) : ''}` },
+        { type: 'text', text: pickText(v, 'text') || '(no output)' },
       ],
     },
     execute: async (_args, exec) => {
@@ -177,9 +193,11 @@ function tools(priv: PrivilegeFace) {
         }
         return {
           model: kv.MODEL ?? '(未知)',
-          androidVersion: kv.VER,
-          frontApp: kv.FOCUS ? kv.FOCUS.replace(/^.*mCurrentFocus=\{\s*(\S+).*$/, '$1') : undefined,
-          resolution: kv.RES ? kv.RES.replace(/^.*init=(\d+x\d+).*$/, '$1') : undefined,
+          // 热补丁：可选成员一律空串兜底——undefined 成员会被引擎 lossless-JSON
+          // 校验整值拒绝（INVALID_TOOL_OUTPUT，2026-08-27 vivo dumpsys 被过滤时实锤）。
+          androidVersion: kv.VER ?? '',
+          frontApp: kv.FOCUS ? kv.FOCUS.replace(/^.*mCurrentFocus=\{\s*(\S+).*$/, '$1') : '',
+          resolution: kv.RES ? kv.RES.replace(/^.*init=(\d+x\d+).*$/, '$1') : '',
           denied: false,
           text: `model=${kv.MODEL ?? '?'} ver=${kv.VER ?? '?'} sdk=${kv.SDK ?? '?'} focus=${kv.FOCUS ?? '?'} res=${kv.RES ?? '?'}`,
         }
@@ -215,7 +233,7 @@ function tools(priv: PrivilegeFace) {
         },
       },
       render: (_args, v: Record<string, unknown>) => [
-        { type: 'text', text: String(v.text ?? '') },
+        { type: 'text', text: pickText(v, 'text') || '(no output)' },
       ],
     },
     execute: async (args: { action?: string; x?: number; y?: number; x2?: number; y2?: number; duration?: number; keycode?: number; text?: string }, exec) => {
