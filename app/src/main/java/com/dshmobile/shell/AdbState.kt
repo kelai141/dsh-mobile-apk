@@ -54,8 +54,24 @@ object AdbState {
   private const val NSD_TIMEOUT_MS = 2000L
   private val PAIR_CODE = Regex("^\\d{6}$")
 
-  /** 配对结果（比 Boolean 提供引导面；设置页轮询 stateJson 亦可）。 */
-  data class PairResult(val ok: Boolean, val paired: Boolean, val guidance: String?)
+  /**
+   * 配对结果（比 Boolean 提供引导面；设置页轮询 stateJson 亦可）。
+   * @param reason 机器可读原因（F3 结构化结果：前端按此分流文案，不再拿一个笼统布尔瞎猜）——
+   *   成功侧 paired / paired-connect-unconfirmed；失败侧 invalid-code / invalid-port /
+   *   adb-missing / window-closed（配对码弹窗已关、端口无监听）/ handshake-timeout /
+   *   protocol-fault / server-not-ready / unknown。
+   */
+  data class PairResult(val ok: Boolean, val paired: Boolean, val guidance: String?, val reason: String)
+
+  /** 桥传输形态（结构化 JSON：ok/reason/message）。 */
+  fun pairWithCodeJson(context: Context, engine: EngineManager, code: String, pairPort: Int, connectPort: Int): String {
+    val r = pairWithCode(context, engine, code, pairPort, connectPort)
+    return JSONObject()
+      .put("ok", r.ok)
+      .put("reason", r.reason)
+      .put("message", r.guidance ?: JSONObject.NULL)
+      .toString()
+  }
 
   fun prefs(context: Context) =
     context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -203,10 +219,10 @@ object AdbState {
    * @return 是否配对成功（paired 状态仅在此写入；码值绝不入审计/日志）。
    */
   fun pairWithCode(context: Context, engine: EngineManager, code: String, pairPort: Int, connectPort: Int): PairResult {
-    if (!PAIR_CODE.matches(code)) return PairResult(false, false, "配对码必须为 6 位数字")
-    if (pairPort !in 1..65535 || connectPort !in 1..65535) return PairResult(false, false, "端口必须是 1-65535")
+    if (!PAIR_CODE.matches(code)) return PairResult(false, false, "配对码必须为 6 位数字", "invalid-code")
+    if (pairPort !in 1..65535 || connectPort !in 1..65535) return PairResult(false, false, "端口必须是 1-65535", "invalid-port")
     val adb = adbBin(context)
-    if (adb == null) return PairResult(false, false, "ADB 客户端未就绪（快照缺少 android-tools/adb）")
+    if (adb == null) return PairResult(false, false, "ADB 客户端未就绪（快照缺少 android-tools/adb）", "adb-missing")
     // 真实握手（码值只进 argv；超时 60s 覆盖 spake2 + 网络往返）
     val out = retryRunAdb(engine, listOf("pair", "127.0.0.1:$pairPort", code), 60)
     val text = out.joinToString("\n")
@@ -214,8 +230,17 @@ object AdbState {
     if (!pairedOk) {
       // 错误首行（不含码值）入审计，供配对失败诊断（2026-08-27）
       val errLine = firstLine(text)
-      AdbAudit.log(context, "adb-pair", mapOf("codeLength" to code.length, "result" to "fail", "pairPort" to pairPort, "error" to errLine))
-      return PairResult(false, false, "配对失败：${errLine.ifBlank { "无输出（请确认已开启「无线调试」并核对端口）" }}")
+      val reason = classifyFailure(text)
+      AdbAudit.log(context, "adb-pair", mapOf("codeLength" to code.length, "result" to "fail", "pairPort" to pairPort, "reason" to reason, "error" to errLine))
+      val guidance = when (reason) {
+        // 系统配对码弹窗关闭即端口停止监听：2026-08-27 真机实锤，用户在弹窗上点什么都没用
+        "window-closed" -> "配对码窗口已关闭（端口无监听）：请重新打开「无线调试 → 使用配对码配对」，用新码尽快提交"
+        "protocol-fault" -> "本地调试服务握手竞态（已自动重建）：请直接再点一次「配对」"
+        "server-not-ready" -> "本地调试服务未就绪：等几秒后再点「配对」"
+        "handshake-timeout" -> "配对握手超时：确认系统配对码弹窗仍在前台后重试"
+        else -> "配对失败：${errLine.ifBlank { "无输出（请确认已开启「无线调试」并核对端口）" }}"
+      }
+      return PairResult(false, false, guidance, reason)
     }
     // 配对成功 → 记录端口（连接端口仅供引擎侧 adb connect/shell 使用；端口为 localhost 信息，不入审计）
     prefs(context).edit()
@@ -236,8 +261,25 @@ object AdbState {
     }
     prefs(context).edit().putBoolean(KEY_CONNECTED, online).apply()
     AdbAudit.log(context, "adb-pair", mapOf("codeLength" to code.length, "pairPort" to pairPort, "connected" to online))
-    return if (online) PairResult(true, true, null)
-    else PairResult(true, true, "已配对成功；连接探活待确认（「连接端口」可能抄错，引擎侧执行时自动重连）")
+    return if (online) PairResult(true, true, null, "paired")
+    else PairResult(true, true, "已配对成功；连接探活待确认（「连接端口」可能抄错，引擎侧执行时自动重连）", "paired-connect-unconfirmed")
+  }
+
+  /**
+   * 失败归因（F3）：从 adb 输出全文提取机器可读 reason，前端据此分流文案。
+   * 顺序敏感：refused 必须先于 timeout（拨号拒绝是窗口关闭的铁证）；
+   * server 启动失败文案与 protocol fault 同现时优先前者（根因在启动而非传输）。
+   */
+  private fun classifyFailure(text: String): String {
+    val t = text.lowercase()
+    return when {
+      t.contains("not found in snapshot") || t.contains("server 启动失败") || t.contains("server 启动异常") -> "server-not-ready"
+      t.contains("connection refused") || t.contains("failed to connect") || t.contains("cannot connect") -> "window-closed"
+      t.contains("timeout") || t.contains("timed out") -> "handshake-timeout"
+      t.contains("protocol fault") -> "protocol-fault"
+      t.contains("daemon not running") -> "server-not-ready"
+      else -> "unknown"
+    }
   }
 
   /** 显式回收配对：断开连接 + 删除本地密钥 + paired=false（真实握手下"重启需重新配对"的立即版）。 */
@@ -352,34 +394,69 @@ object AdbState {
    * server 时 pair/connect 全部正常），每次调用前确保它在场。
    */
   @Volatile private var serverProcess: Process? = null
+  /** 5037 的监听方已通过真实客户端往返验证（bind ≠ 可服务，见 adbPing 注释）。 */
+  @Volatile private var serverReady = false
+  /** 最近一次预热尝试时刻（节流：60s 内不重复拉起；prewarmDue 纯读）。 */
+  @Volatile private var lastPrewarmAt = 0L
 
-  /** 确保本地 adb server（127.0.0.1:5037）在场：壳内常驻 `server nodaemon` 进程
-   *  （随壳进程生命周期，被 force-stop 一并清理；日志落 files/home/adb-server.log 供诊断）。
+  private fun now() = System.currentTimeMillis()
+  private const val PREWARM_THROTTLE_MS = 60_000L
+
+  /**
+   * F1 常驻预热：把 adb server 提前拉到「可服务」态、密钥生成移出配对关键路径。
+   * 背景（2026-08-27 真机实锤）：点「配对」后才冷启动 server（linker64 加载 + 新 RSA 密钥生成 +
+   * 首轮握手竞态重试），整条链吃掉 7 秒以上——系统配对码弹窗的端口存活窗口被我们自己耗光，
+   * 拨号时恒 Connection refused。调用方任意线程任意频次（getAdbState 轮询钩子 / onResume）；
+   * 内部节流 + 同步锁幂等。
+   */
+  fun prewarm(engine: EngineManager) {
+    if (!prewarmDue()) return
+    synchronized(this) {
+      if (!prewarmDue()) return
+      lastPrewarmAt = now()
+      // 就绪判定在 ensureAdbServer 内部（含 ping）；预热失败不打扰用户，留痕在 adb-server.log
+      ensureAdbServer(engine)
+    }
+  }
+
+  /** 是否值得发起一轮预热（纯读，供调用方决定要不要开线程）。 */
+  fun prewarmDue(): Boolean = !serverReady && (now() - lastPrewarmAt >= PREWARM_THROTTLE_MS)
+
+  /** 确保本地 adb server（127.0.0.1:5037）在场且**可服务**：
+   *  壳内常驻 `server nodaemon` 进程（随壳进程生命周期，被 force-stop 一并清理；
+   *  日志落 files/home/adb-server.log 供诊断）。
+   *  F2（2026-08-27 实锤）：5037 bind ≠ 能应答——server 冷启动完成前，真实客户端第一发必吃
+   *  protocol fault 并触发自愈重建，白白烧掉配对码窗口。因此放行条件收紧为一次真实
+   *  `devices` 往返通过（服务端早于 client 就绪的场景亦被覆盖：复用孤儿监听时同样补验）。
    *  @return null=就绪；非 null=错误文本（短路调用方）。
    */
-  private fun ensureAdbServer(engine: EngineManager): String? {
-    if (serverProcess?.isAlive == true) return null
-    // 5037 已被占（本进程残留/历史孤儿/竞态对手）→ 直接复用，不再 spawn 撞车
-    //（2026-08-27 实锤：nodaemon spawn 与 client fork-server 竞争 5037 → Address already in use）。
+  private fun ensureAdbServer(engine: EngineManager): String? = synchronized(this) {
     if (adbServerUp()) {
-      serverProcess = null
-      return null
+      if (!serverReady) {
+        if (!adbPing(engine)) return@synchronized "adb server 未就绪（ping 未通过）"
+        serverReady = true
+      }
+      // 己方常驻进程若已死亡但 socket 仍被占（新进程接管/孤儿）：保留 null，ready 已由 ping 背书
+      if (serverProcess?.isAlive != true) serverProcess = null
+      return@synchronized null
     }
-    return try {
+    try {
       val adb = File(engine.usrDir, "bin/adb")
-      if (!adb.exists()) return "adb not found in snapshot runtime"
+      if (!adb.exists()) return@synchronized "adb not found in snapshot runtime"
       serverProcess?.destroy()
       serverProcess = null
+      serverReady = false
       val log = File(engine.homeDir, "adb-server.log")
       val proc = spawnAdb(engine, listOf("server", "nodaemon"), log)
       serverProcess = proc
-      val deadline = System.currentTimeMillis() + 3000
-      while (System.currentTimeMillis() < deadline && proc.isAlive) {
-        if (adbServerUp()) return null
-        Thread.sleep(100)
-      }
-      if (!proc.isAlive) "adb server 启动失败（详见 files/home/adb-server.log）" else null
+      val deadline = now() + 3000
+      while (now() < deadline && proc.isAlive && !adbServerUp()) Thread.sleep(100)
+      if (!adbServerUp()) return@synchronized "adb server 启动失败（详见 files/home/adb-server.log）"
+      if (!adbPing(engine)) return@synchronized "adb server 刚启动尚未就绪（请数秒后重试）"
+      serverReady = true
+      null
     } catch (t: Throwable) {
+      serverReady = false
       "adb server 启动异常: " + (t.message ?: t.javaClass.simpleName)
     }
   }
@@ -390,6 +467,19 @@ object AdbState {
       s.connect(java.net.InetSocketAddress("127.0.0.1", 5037), 300)
       true
     }
+  } catch (_: Throwable) {
+    false
+  }
+
+  /**
+   * F2 就绪判定：直接 spawn 客户端发 `devices`（不经 runAdb，避免 ensure 递归）。
+   * server 逐字节回出设备列表才算真就绪——冷启动竞态/孤儿僵死都在这里暴露。
+   */
+  private fun adbPing(engine: EngineManager): Boolean = try {
+    val proc = spawnAdb(engine, listOf("devices"))
+    val text = proc.inputStream.bufferedReader().use { it.readText() }
+    proc.waitFor(6, TimeUnit.SECONDS)
+    !text.contains("protocol fault") && text.contains("List of devices")
   } catch (_: Throwable) {
     false
   }
@@ -416,12 +506,14 @@ object AdbState {
     }
   }
 
-  /** runAdb + protocol fault 自愈：冷启动握手被破坏时重建 server 重试一次（2026-08-27 实锤修复）。 */
+  /** runAdb + protocol fault 自愈：冷启动握手被破坏时重建 server 重试一次（2026-08-27 实锤修复；
+   *  F2 后仅剩极端时序可达——重建后 ready 复位，新监听必须重新 ping 验证）。 */
   private fun retryRunAdb(engine: EngineManager, args: List<String>, timeoutS: Long): List<String> {
     var out = runAdb(engine, args, timeoutS)
     if (out.joinToString("\n").contains("protocol fault")) {
       serverProcess?.destroy()
       serverProcess = null
+      serverReady = false
       ensureAdbServer(engine)
       out = runAdb(engine, args, timeoutS)
     }
