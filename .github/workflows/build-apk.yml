@@ -86,12 +86,12 @@ jobs:
         shell: bash
         run: |
           set -e
-          node scripts/build-apk.mjs --abi "${{ matrix.abi }}" --suffix "${{ github.event.inputs.suffix || '-ci' }}"
+          node scripts/build-apk.mjs --abi "${{ matrix.abi }}" --suffix "${{ github.event.inputs.suffix }}"
 
       - name: 上传 APK 产物（本地下载 debug；不出 Release）
         uses: actions/upload-artifact@v4
         with:
-          name: dsh-mobile-apk-${{ matrix.abi }}${{ github.event.inputs.suffix || '-ci' }}
+          name: dsh-mobile-apk-${{ matrix.abi }}${{ github.event.inputs.suffix }}
           path: out/v0.13.0/*.apk
           if-no-files-found: error
           retention-days: 30
