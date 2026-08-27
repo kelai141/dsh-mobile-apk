@@ -23,6 +23,7 @@
 | fmt | 1:11.2.0 | MIT | [termux-packages/fmt](https://github.com/termux/termux-packages/tree/master/packages/fmt) |
 | gawk | 5.3.2 | GPL-3.0+ | [termux-packages/gawk](https://github.com/termux/termux-packages/tree/master/packages/gawk) |
 | gdbm | 1.26-1 | GPL-3.0+ | [termux-packages/gdbm](https://github.com/termux/termux-packages/tree/master/packages/gdbm) |
+| git | 2.55.0 | GPL-2.0 | [termux-packages/git](https://github.com/termux/termux-packages/tree/master/packages/git) |
 | grep | 3.12-3 | GPL-3.0+ | [termux-packages/grep](https://github.com/termux/termux-packages/tree/master/packages/grep) |
 | gzip | 1.14-1 | GPL-3.0+ | [termux-packages/gzip](https://github.com/termux/termux-packages/tree/master/packages/gzip) |
 | less | 704 | GPL-3.0+ | [termux-packages/less](https://github.com/termux/termux-packages/tree/master/packages/less) |
@@ -80,11 +81,11 @@
 | termux-keyring | 3.13 | MIT | [termux-packages/termux-keyring](https://github.com/termux/termux-packages/tree/master/packages/termux-keyring) |
 | termux-tools | 1.46.0+really1.45.0-1 | GPL-3.0+ | [termux-packages/termux-tools](https://github.com/termux/termux-packages/tree/master/packages/termux-tools) |
 | util-linux | 2.42.1-4 | GPL-2.0+ | [termux-packages/util-linux](https://github.com/termux/termux-packages/tree/master/packages/util-linux) |
-| vim | 9.2.0950 | Vim (GPL-compatible, charityware) | [termux-packages/vim](https://github.com/termux/termux-packages/tree/master/packages/vim) |
+| vim | 9.2.1000 | Vim (GPL-compatible, charityware) | [termux-packages/vim](https://github.com/termux/termux-packages/tree/master/packages/vim) |
 | xz-utils | 5.8.3 | PD + LGPL-2.1+ + GPL-2.0+ | [termux-packages/xz-utils](https://github.com/termux/termux-packages/tree/master/packages/xz-utils) |
 | zip | 3.0-7 | Info-ZIP License | [termux-packages/zip](https://github.com/termux/termux-packages/tree/master/packages/zip) |
 | zlib | 1.3.2 | Zlib | [termux-packages/zlib](https://github.com/termux/termux-packages/tree/master/packages/zlib) |
-| zsh | 5.9.2 | MIT-style (zsh) | [termux-packages/zsh](https://github.com/termux/termux-packages/tree/master/packages/zsh) |
+| zsh | 5.9.2-1 | MIT-style (zsh) | [termux-packages/zsh](https://github.com/termux/termux-packages/tree/master/packages/zsh) |
 | zstd | 1.5.7-1 | BSD-3-Clause | [termux-packages/zstd](https://github.com/termux/termux-packages/tree/master/packages/zstd) |
 
 ## 源码要约（GPL §3）

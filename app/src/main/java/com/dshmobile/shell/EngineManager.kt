@@ -574,6 +574,21 @@ class EngineManager(private val context: Context, private val pickToken: String?
   }
 
   /**
+   * 引擎进程存活判定（0.13.0 启动超时 D1 的事实源）：进程句柄活着，或 3080 已可达，
+   * 即视为「引擎还在」（冷启动 20-45s 中轮询窗口内不许宣判失败）。两者皆否才返回 false。
+   * 供 startEngineFlow 的超时语义使用——进程活着就继续等，只有进程死才触发回退。
+   */
+  fun engineProcessAlive(): Boolean {
+    val held = engineProcess
+    if (held != null && held.isAlive) return true
+    if (held == null) {
+      // 句柄丢失（看门狗曾被 fork 或孤儿）：以端口可达性兜底判定。
+      return try { EngineProbe.check(300).optBoolean("running", false) } catch (_: Exception) { false }
+    }
+    return false
+  }
+
+  /**
    * 终结残留引擎进程：先杀持有句柄的（destroyForcibly + waitFor 有界等待），
    * 再兜底 pkill 快照 node 进程（处理服务/看门狗曾被 fork、句柄已被覆盖的孤儿）。
    * 幂等：无残留时零动作。绝不等待超过 5s（不阻塞启动路径）。
@@ -725,6 +740,10 @@ class EngineManager(private val context: Context, private val pickToken: String?
       "DASHSCOPE_API_KEY" to (File(context.filesDir, "dashscope-key.txt").takeIf { it.exists() }?.readText()?.trim() ?: ""),
       // DeepSeek 官方 provider（dsh-llm-deepseek，provider=deepseek-official）：同模式私有文件注入。
       "DEEPSEEK_API_KEY" to (File(context.filesDir, "deepseek-key.txt").takeIf { it.exists() }?.readText()?.trim() ?: ""),
+      // node 预热（0.13.0 启动提速 D3）：v8 模块编译缓存——引擎/工具子进程首启自动生成、
+      // 二次冷启动命中，直接缩短 node 冷启 require 树编译时间（K20 Pro 实测每次冷启都慢、
+      // 0.13.0 之前全快；缓存目录持久在 home/.dsh 下，随用户数据保留不随快照）。
+      "NODE_COMPILE_CACHE" to File(ensurePrivateDshData(), ".node-compile-cache").apply { mkdirs() }.absolutePath,
     ) + certEnv
   }
 

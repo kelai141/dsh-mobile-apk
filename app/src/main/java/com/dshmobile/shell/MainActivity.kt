@@ -787,7 +787,7 @@ class MainActivity : ComponentActivity() {
           AdbState.pairWithCode(this, engineManager, code, pairPort, connectPort).ok
         },
         onRevokeAdbPair = { AdbState.revokePair(this, engineManager) },
-        onDiscoverAdbPorts = { AdbState.discoverPorts(engineManager).toString() },
+        onDiscoverAdbPorts = { AdbState.discoverPorts(this, engineManager).toString() },
       ),
       "androidBridge",
     )
@@ -1562,29 +1562,59 @@ class MainActivity : ComponentActivity() {
         maybeAutoUndo(generation)
         return@Thread
       }
-      // Poll up to 30s for the web service.
-      for (i in 0..30) {
+      // Poll for the web service with process-alive semantics (0.13.0 D1): cold boot takes
+      // 20-45s (EngineManager START_COOLDOWN_MS comment); the old hard 30s budget fired
+      // "引擎启动超时" on slow devices (K20 Pro) even though the engine later started.
+      // Now: as long as the engine process is alive we keep waiting (up to 90s); only a dead
+      // process declares failure (auto-undo path). UI shows a grey "still starting" state, not an error.
+      val pollBudgetMs = 90_000L
+      val pollStepMs = 1000L
+      val budgetEnd = System.currentTimeMillis() + pollBudgetMs
+      var waitedSeconds = 0
+      var booted = false
+      while (System.currentTimeMillis() < budgetEnd) {
         if (!isCurrentEngineFlow(generation)) return@Thread
         if (EngineProbe.check().optBoolean("running", false)) {
-          startEngineService()
-          applyShizukuKeepAlive()
-          runOnUiThread { if (isCurrentEngineFlow(generation)) showWeb() }
-          return@Thread
+          booted = true
+          break
         }
-        if (i == 8 || i == 16) {
-          val waited = i
+        if (!engineManager.engineProcessAlive()) {
+          // 引擎进程已死：宣判失败（自动回退路径），不再空等。
+          break
+        }
+        waitedSeconds = ((budgetEnd - System.currentTimeMillis()) / pollStepMs).toInt()
+        if (waitedSeconds % 15 == 0) {
+          val s = waitedSeconds
           runOnUiThread {
             if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-            applyGuidePhase(GuidePhase.Starting, "正在等待 Web 服务…", "引擎进程已拉起，正在探测 127.0.0.1:3080（${waited}s）。")
+            applyGuidePhase(GuidePhase.Starting, "引擎启动中（已等待 ${60 - s}s，冷启动较慢属正常）")
           }
         }
-        Thread.sleep(1000)
+        Thread.sleep(pollStepMs)
       }
-      if (isCurrentEngineFlow(generation)) runOnUiThread {
-          applyGuidePhase(GuidePhase.Error, "引擎启动超时")
+      if (!isCurrentEngineFlow(generation)) return@Thread
+      if (!booted && !engineManager.engineProcessAlive()) {
+        runOnUiThread {
+          if (!isCurrentEngineFlow(generation)) return@runOnUiThread
+          applyGuidePhase(GuidePhase.Error, "引擎启动失败")
           showGuide()
         }
-      onEngineStartTimeout(generation)
+        onEngineStartTimeout(generation)
+        return@Thread
+      }
+      if (booted) {
+        startEngineService()
+        applyShizukuKeepAlive()
+        runOnUiThread { if (isCurrentEngineFlow(generation)) showWeb() }
+      } else {
+        // 进程还活着但 90s 内未就绪（异常慢）：灰色提示而非红色错误，不触发回退——
+        // 引擎仍在启动，3s engineMonitorRunnable 会兜底切界面。
+        runOnUiThread {
+          if (!isCurrentEngineFlow(generation)) return@runOnUiThread
+          applyGuidePhase(GuidePhase.Starting, "引擎启动较慢（已超过 90s），仍在后台启动中…")
+        }
+      }
+      return@Thread
       } finally {
         engineFlowRunning.set(false)
       }
