@@ -1,0 +1,102 @@
+# Android adaptation (M1.1 final form): dsh-shell-termux replaces the temporary patch v2.
+# Protection boundary = Termux app domain (SELinux u0_aXXX) + approval flow;
+# sandboxMode explicitly declares workspace-write (permission-presets mount prerequisite), enforcement honestly reported as partial.
+- id: bash-sandbox
+  disabled: true
+- insert:
+    - id: shell-termux
+      name: '@dsh-android/dsh-shell-termux'
+      config:
+        # bash/toolchain point at the in-shell snapshot (same domain as the engine, self-contained, no Termux App dependency):
+        # the Termux App's bash belongs to u0_a423 with 700 perms, so the engine (u0_a461) cross-uid
+        # accessSync(X_OK) check always fails (measured "is not executable"). The in-shell
+        # usr/bin ships bash/curl/node; wget is now distributed with the snapshot too.
+        bashPath: /data/data/com.dsharnessmobile.shell/files/usr/bin/bash
+        prefix: /data/data/com.dsharnessmobile.shell/files/usr
+        home: /data/data/com.dsharnessmobile.shell/files/home
+        cwd: /data/data/com.dsharnessmobile.shell/files/home
+        timeoutMs: 120000
+        maxTimeoutMs: 600000
+        # 写面栅栏（0.13.0 D21）：默认档位仅工作区与选定共享目录；danger-full-access 为完全访问档位
+        # （开放共享存储全域，仍限应用域沙盒）。workspaceRoot/sharedDirs 为全局单一实例，
+        # 由 dsh-android-linux-env 插件在设置页动态维护（此处的初始值仅出厂基线）。
+        writeMode: workspace-write
+        workspaceRoot: /data/data/com.dsharnessmobile.shell/files/home/.dsh/workspaces
+        sharedDirs: []
+    - id: host-web-compat
+      name: '@dsh-android/dsh-host-web-compat'
+- id: ui-layout
+  disabled: true
+- insert:
+    - id: ui-responsive
+      name: '@dsh-android/dsh-client-ui-responsive'
+
+# Attachment format extensions (0.12.1, issue #39): dsh-attachment-formats
+# (PDF text layer / Office local structuring; scanned-doc local OCR via tesseract.js with bundled language packs).
+- insert:
+    - id: attachment-formats
+      name: dsh-attachment-formats
+
+# 崩溃自动回退（0.13.0 F3，M3.0）：dsh-undo-savepoint——配置+插件代码树快照、撤销、安全模式；
+# 装坏可退，与 F4 市场安装共用同一机制（撤销保护的安装）。
+- insert:
+    - id: dsh-undo-savepoint
+      name: dsh-undo-savepoint
+
+# 插件市场（0.13.0 F4，M3.3）：dshmarketplace-plugin——会话 /store 命令、设置页市场、agent 工具与技能文件。
+- insert:
+    - id: dshmarketplace
+      name: dshmarketplace-plugin
+
+# 手机管理授权桥（0.13.0 F1.7，M3.2）：dsh-android-bridge——授权状态机/失败关闭/审计；
+# 门控限死为完全访问档位（自动审批模式不构成开放条件）。
+- insert:
+    - id: android-bridge
+      name: '@dsh-android/dsh-android-bridge'
+
+# 手机管理工具面（0.13.0 F1.6，M3.2）：dsh-android-manage——观察/动作/等待闭环，全部失败关闭。
+- insert:
+    - id: android-manage
+      name: '@dsh-android/dsh-android-manage'
+
+# 工具链与环境设置面板（0.13.0 F1.3/F1.5，M3.2）：dsh-android-linux-env——工具链状态/环境配方/
+# 共享目录与镜像设置视图；同时是 shell-termux 写面栅栏（workspaceRoot/sharedDirs，见上文 L20-22）
+# 的设置页维护面——不装载则共享目录设置无处维护（审校 C4 2026-08-23：注入四件套缺此条目）。
+- insert:
+    - id: android-linux-env
+      name: '@dsh-android/dsh-android-linux-env'
+
+# 文件直达会话（0.13.0 F5，M3.5）：dsh-android-file-open——外部文件强制新会话请求/状态/清理。
+- insert:
+    - id: android-file-open
+      name: '@dsh-android/dsh-android-file-open'
+
+# Default model（0.13.0 C3 端点级实锤修正，2026-08-25）：此前 pin 到 opencode-go
+# （OpenCode Zen Go，opencode.ai/zen/go/v1）——该网关实测对无有效 key 请求返回扁平
+# 404（"Not found"），且用户误以为在配 OpenRouter、实际请求发去 Zen Go → 全模型 404、
+# 换 key 无用（openclaw #69898 / opencode #31041 同源撞车）。0.13.0 默认改回 dsh 官方
+# deepseek-official：壳 shellEnv() 已注入 DEEPSEEK_API_KEY（files/deepseek-key.txt 私有文件），
+# 零额外配置、国内可达、开箱即用。opencode-go 仍在「添加自定义供应商」列表中可选。
+# 设置界面 agent-default-model 段为用户级（UI 保存会覆盖此默认）。
+- id: agent-default-model
+  disabled: true
+- insert:
+    - id: agent-default-model-mobile
+      name: '@deepseek-ai/dsh-agent-default-model'
+      config:
+        provider: deepseek-official
+        model: deepseek-v4-flash
+
+# Android directory-picker composition (2026-08-16 fix):
+# the bundle's directory-picker-auto resolves to browse on Android (platform !== linux) and registers
+# a browse backend for ctx.directoryPicker — colliding with dsh-host-web-compat's native singleton
+# (the later registrant throws duplicate service, the whole auto mount fails → the UI's directory-flow
+# slot has no occupant → add/switch workspace entries stop working).
+# Fix: disable auto; host-web-compat exclusively owns the capability (kind: native,
+# dir-pick endpoint + token auth + shell SAF picker); explicitly mount the
+# ui-directory-picker-native surface (renderless flow calling host.pickDirectory).
+- id: directory-picker
+  disabled: true
+- insert:
+    - id: picker-native-surface
+      name: '@deepseek-ai/dsh-client-ui-directory-picker-native'

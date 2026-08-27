@@ -1,0 +1,32 @@
+{
+  "name": "@dsh-android/dsh-android-manage",
+  "description": "Android phone management tools (ADB-first observe/act/wait loop, PRD F1.6): screenshot, UI tree, app/device info — all fail-closed on the privilege bridge",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": ["lib"],
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p ."
+  },
+  "dependencies": {},
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "^0.1.1-rc.2",
+    "@deepseek-ai/cordis": "4.0.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-tools": "0.1.1-rc.2",
+    "@deepseek-ai/cordis": "4.0.1",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.5.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kelai141/dsh-mobile.git"
+  }
+}

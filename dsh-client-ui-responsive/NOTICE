@@ -1,0 +1,11 @@
+NOTICE
+
+This project contains code derived from DeepSeek Harness
+(https://github.com/deepseek-ai/deepseek-harness), which is distributed under
+the MIT License:
+
+  MIT License
+  Copyright (c) 2026 DeepSeek
+
+Derived portions retain their original copyright and license. See the file
+headers of the derived sources for the exact provenance.

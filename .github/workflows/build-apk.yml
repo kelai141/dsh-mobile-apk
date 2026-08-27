@@ -1,14 +1,25 @@
-# build-apk.yml — 云端构建 dsh-mobile APK（自包含：快照随本仓库提交，无需协调库）
+# build-apk.yml — 云端从源重建 dsh-mobile APK（自包含，宿主=本 APK 仓库）
 #
-# 设计：APK 在 dsh-mobile-apk 用 gradle 打包，故 workflow 放本仓库（GITHUB_REPOSITORY = dsh-mobile-apk）。
-# 运行时快照（双 ABI，注入后最终态）已提交到本仓库 snapshots/<abi>/snapshot.tar.xz（Git LFS），
-# 云端只做 gradle 打包，不重建快照、不依赖协调库。仅 upload-artifact 供本地下载 debug，不出 Release。
+# 目标：源码更新后云端能「从源重建快照 + 打包 APK」，不依赖协调库。
+# 整套构建链（build-snapshot/inject/门禁脚本、@dsh-android 插件、插架子仓库、vendor、底座、LICENSES）
+# 均随本仓库提交；本 workflow 只操作本仓库（GITHUB_REPOSITORY = dsh-mobile-apk）。
+#
+# 流程：检出自仓库(node/python/java) -> npm 构建 6 个缺 lib/ 的插件 -> stage 底座 base/
+#       -> node scripts/build-snapshot-013.mjs <abi>（Termux 源装配 + 注入 + 门禁 + 归档）
+#       -> node scripts/build-apk.mjs <abi>（注入插件 + 门禁 + gradle + 产物）
+#       -> upload-artifact（不出 Release）。
+# 注：build-snapshot（Termux 包下载 + 归档压缩）+ 插件 npm 构建较重，需一次 dry-run 迭代验证。
 
 name: build-apk
 
 on:
   workflow_dispatch:
     inputs:
+      abi:
+        description: '目标 ABI（可多选）'
+        type: choice
+        options: [arm64, x86_64, 'both']
+        default: 'both'
       suffix:
         description: 'APK 版本后缀（默认 ci）'
         type: string
@@ -21,53 +32,65 @@ jobs:
       matrix:
         abi: [arm64, x86_64]
       fail-fast: false
+    env:
+      # build-apk.mjs 依赖本仓库顶层 scripts/plugins/vendor/base；apk 仓库 = $GITHUB_WORKSPACE
+      DSH_APK_DIR: ${{ github.workspace }}
     steps:
-      - name: 检出本仓库（含 Git LFS 快照）
+      - name: 检出本仓库（含 Git LFS 底座归档）
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           lfs: true
 
+      - name: 准备运行时（node）
+        uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: python -> python3（脚本用 `python`）
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y python3 python-is-python3 || sudo ln -sf /usr/bin/python3 /usr/bin/python
+          python --version
       - name: 准备 Java（gradle 需要）
         uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
+        with: { distribution: temurin, java-version: '17' }
 
-      - name: stage 快照（snapshots/<abi> -> app/src/main/assets/）
+      - name: 构建插件（缺 lib/ 的 6 个，npm install + build）
+        shell: bash
+        run: |
+          set -e
+          for d in plugins/dsh-android-bridge plugins/dsh-android-manage plugins/dsh-android-linux-env plugins/dsh-android-file-open dsh-shell-termux dsh-client-ui-responsive; do
+            [ -d "$d/lib" ] && { echo "  $d: lib 已存在，跳过"; continue; }
+            echo "== npm build $d =="
+            (cd "$d" && npm install --no-audit --no-fund && npm run build)
+          done
+
+      - name: stage 底座归档（base/ -> .deploy-tmp/<abi>-base/）
         shell: bash
         run: |
           set -e
           abi="${{ matrix.abi }}"
-          [ -f "snapshots/${abi}/snapshot.tar.xz" ] || { echo "缺 snapshots/${abi}/snapshot.tar.xz"; exit 1; }
-          cp "snapshots/${abi}/snapshot.tar.xz" app/src/main/assets/snapshot.tar.xz
-          if [ -f "snapshots/${abi}/snapshot.sha256" ]; then cp "snapshots/${abi}/snapshot.sha256" app/src/main/assets/snapshot.sha256; else
-            echo "缺 snapshots/${abi}/snapshot.sha256"; exit 1
-          fi
-          ls -lh app/src/main/assets/snapshot.tar.xz && cat app/src/main/assets/snapshot.sha256; echo
+          mkdir -p ".deploy-tmp/${abi}-base"
+          [ -f "base/base-usr-${abi}.tar.xz" ] || { echo "缺 base/base-usr-${abi}.tar.xz"; exit 1; }
+          cp "base/base-usr-${abi}.tar.xz" ".deploy-tmp/${abi}-base/base-usr.tar.xz"
+          [ -f "base/base-dsh.tar.xz" ] && cp "base/base-dsh.tar.xz" ".deploy-tmp/${abi}-base/base-dsh.tar.xz"
+          du -sh ".deploy-tmp/${abi}-base"
 
-      - name: gradle assembleDebug (${abi})
+      - name: 构建快照 ${abi}（build-snapshot，Termux 源装配 + 注入 + 门禁 + 归档）
         shell: bash
         run: |
           set -e
-          abi="${{ matrix.abi }}"
-          # 增量打包防护：清老 assets/输出，防跨 ABI 叠加
-          rm -rf app/build/intermediates/assets app/build/outputs/apk/debug
-          ./gradlew :app:assembleDebug --no-daemon -PversionNameSuffix="${{ github.event.inputs.suffix || '-ci' }}"
+          node scripts/build-snapshot-013.mjs "${{ matrix.abi }}"
 
-      - name: 拷贝产物 (${abi})
+      - name: 构建 APK ${abi}（注入插件 + 门禁 + gradle + 产物）
         shell: bash
         run: |
           set -e
-          abi="${{ matrix.abi }}"
-          mkdir -p out
-          cp app/build/outputs/apk/debug/app-debug.apk "out/dsh-mobile-apk-v0.13.0${{ github.event.inputs.suffix || '-ci' }}-${abi}.apk"
-          ls -lh out/
+          node scripts/build-apk.mjs --abi "${{ matrix.abi }}" --suffix "${{ github.event.inputs.suffix || '-ci' }}"
 
       - name: 上传 APK 产物（本地下载 debug；不出 Release）
         uses: actions/upload-artifact@v4
         with:
           name: dsh-mobile-apk-${{ github.event.inputs.suffix || 'ci' }}
-          path: out/*.apk
+          path: out/v0.13.0/*.apk
           if-no-files-found: error
           retention-days: 30

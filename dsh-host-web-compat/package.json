@@ -1,0 +1,18 @@
+{
+  "name": "@dsh-android/dsh-host-web-compat",
+  "description": "Host plugin: legacy-browser polyfills + Android directory-picker bridge (SAF via WebView JS bridge) for the shell APK",
+  "version": "0.1.6",
+  "type": "module",
+  "main": "lib/index.js",
+  "files": [
+    "lib/index.js"
+  ],
+  "private": true,
+  "dependencies": {
+    "@deepseek-ai/cordis": "4.0.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kelai141/dsh-host-web-compat.git"
+  }
+}

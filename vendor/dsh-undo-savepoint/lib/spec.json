@@ -1,0 +1,18 @@
+{
+  "configFiles": [
+    { "root": "profile", "rel": "cordis.patch.yml" },
+    { "root": "profile", "rel": "package.json" },
+    { "root": "profile", "rel": "cordis.yml" },
+    { "root": "profile", "rel": "pnpm-workspace.yaml" },
+    { "root": "profile", "rel": "pnpm-lock.yaml" },
+    { "root": "home", "rel": "cordis.patch.yml" },
+    { "root": "home", "rel": "settings.yaml" },
+    { "root": "home", "rel": ".env" },
+    { "root": "home", "rel": ".credentials.yaml" }
+  ],
+  "pluginCodeExts": [".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".json", ".yml", ".yaml"],
+  "pluginExcludeDirNames": ["node_modules", ".git", "dist", "build", "cache", ".cache", "coverage", ".turbo"],
+  "pluginExcludeFileNames": ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", ".DS_Store"],
+  "pluginMaxFileBytes": 262144,
+  "pluginMaxSnapshotBytes": 5242880
+}

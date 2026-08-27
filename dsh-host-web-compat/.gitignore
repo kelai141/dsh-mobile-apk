@@ -1,0 +1,10 @@
+node_modules/
+lib/*.map
+*.tgz
+# lib/index.js 即本仓库源码（无 src/ 目录），必须入库
+# 敏感数据（安全审计 2026-08-14）
+*.credentials.yaml
+token*
+*.key
+*.pem
+*.p12

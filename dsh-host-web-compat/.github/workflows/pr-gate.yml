@@ -1,0 +1,26 @@
+# PR Gate — dsh-host-web-compat: syntax check + conflict-marker scan (pure JS plugin, no build)
+name: PR Gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    name: node --check + 扫描
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: JS 语法检查
+        run: node --check lib/index.js
+      - name: 冲突标记检查
+        run: |
+          if grep -rEn '^(<<<<<<< |>>>>>>> )' lib --include='*.js'; then
+            echo "::error::检测到未解决的 merge conflict 标记"
+            exit 1
+          fi
+          echo "无冲突标记 ✓"
