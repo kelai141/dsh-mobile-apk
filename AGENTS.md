@@ -30,7 +30,9 @@ cd ..\dsh-client-ui-responsive && npm test && npm run build
 cd ..\plugins\dsh-android-<pkg> && npm run build
 ```
 
-**门禁（build-apk-013.ps1 内）**：marketplace 修复校验（patch-marketplace.mjs）→ undo 移动端裁剪校验（patch-undo-mobile.mjs）→ 快照注入（inject-snapshot.py/inject-external-plugins.py）→ 权威 patch 覆盖（update-snapshot-patch.py）→ 挂载集⊇注入集（check-patch-mounts.mjs）→ 机密（check-snapshot-secrets.ps1）→ **第三方合规（check-third-party.mjs，GPL 义务）** → elf-check → 许可资产拷贝（LICENSES → assets/licenses）→ gradle。
+**门禁（build-apk-013.ps1 内）**：marketplace 修复校验（patch-marketplace.mjs）→ undo 移动端裁剪校验（patch-undo-mobile.mjs）→ 快照注入（inject-snapshot.py/inject-external-plugins.py）→ 权威 patch 覆盖（update-snapshot-patch.py）→ 挂载集⊇注入集（check-patch-mounts.mjs）→ 机密（check-snapshot-secrets.mjs，跨平台替代 .ps1）→ **第三方合规（check-third-party.mjs，GPL 义务）** → elf-check（校验快照 node ELF 架构，防坑 18）→ 许可资产拷贝（LICENSES → assets/licenses）→ gradle。
+
+**云端构建（0.13.0 起，宿主=本仓库）**：`.github/workflows/build-apk.yml`（`workflow_dispatch` 手动，matrix arm64/x86_64）把快照构建+注入+门禁+gradle 打包放云端，仅 `upload-artifact` 供本地下载 debug，不出 Release。快照/插件/vendor/底座（`base/`，Git LFS）来自协调库——经第二个 checkout 拉到 `<workdir>/coord`；`build-apk.mjs` 以 `DSH_APK_DIR=GITHUB_WORKSPACE` 指向本仓库（gradle 在此）。本地仍在协调库根跑 `pwsh scripts\build-apk-013.ps1`（`scripts/` 前缀）。
 
 **设备验证链路**（真机 arm64 vivo V2425A `10AF2B0GN0001F2`；模拟器 MuMu x86_64 `127.0.0.1:16416/7555`）：
 - 安装：`adb -s <serial> install -r -t out\v0.13.0\...apk`（同签名 debug.keystore；**指纹变更触发 refreshSnapshot 全量重解压 ≈2-4 分钟，勿在解压中杀进程**）。
@@ -178,3 +180,4 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 | 2026-08-24 | 0.13.0 | 新增第 3 节「环境无关的开发/维护流程」（环境矩阵 5 组合 / 起步流程 6 步 / 改动流程规范与三必做 / 环境差异点速查 5 项），原第 3-7 节顺延为 4-8 | AI 开发助手 |
 | 2026-08-25 | 0.13.0 | 声明主分支为 `main`（修正「分支 docs/0.13.0-prd / feat/0.13.0」旧引用）+ 新增「禁用 emoji」约定（提交/PR/文档）并清除本文件存量 emoji | AI 开发助手 |
 | 2026-08-25 | 0.13.0 | **0.13.0 正式版收口（PLAN-0.13.0-FINAL）**：端口发现改造—discoverPorts 系统属性直读+NSD 替代盲扫（坑 14 同步）；门1 live 判定一致化（syncFullAccess prefs 键，壳唯一真值，引擎 live 读；授权模型 §5 同步）；启动超时进程存活判定（engineProcessAlive + 90s 预算，D1）；NODE_COMPILE_CACHE 注入（D3）；已知缺口补 canvas/marketplace 惰性决策/provider 命名混淆（§8） | AI 开发助手 |
+| 2026-08-26 | 0.13.0 | **新增云端构建与门禁平台化**：`.github/workflows/build-apk.yml`（宿主=本仓库，workflow_dispatch 双 ABI，仅 upload-artifact 供本地下载 debug，不出 Release；快照/插件/vendor/底座来自协调库经 coord/ 签出，build-apk.mjs 以 DSH_APK_DIR=GITHUB_WORKSPACE 指向本仓库）；构建链门禁改跨平台——check-snapshot-secrets.mjs 替代仅 Windows 的 .ps1、elf-check 校验快照 node ELF 架构（防坑 18 ABI 错配）；协调库 base/（Git LFS）入库；§2 门禁清单与云端构建说明同步 | AI 开发助手 |
