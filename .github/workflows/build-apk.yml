@@ -63,16 +63,18 @@ jobs:
             (cd "$d" && npm install --no-audit --no-fund && npm run build)
           done
 
-      - name: stage 底座归档（base/ -> .deploy-tmp/<abi>-base/）
+      - name: stage 底座归档（base/ -> .deploy-tmp/<base-dir>/）
         shell: bash
         run: |
           set -e
           abi="${{ matrix.abi }}"
-          mkdir -p ".deploy-tmp/${abi}-base"
+          # build-snapshot-013.mjs 的 BASE_DIR：arm64 -> arm64-base；x86_64 -> x64-base（缩写，勿写 x86_64-base）
+          if [ "$abi" = "arm64" ]; then bdir="arm64-base"; else bdir="x64-base"; fi
+          mkdir -p ".deploy-tmp/${bdir}"
           [ -f "base/base-usr-${abi}.tar.xz" ] || { echo "缺 base/base-usr-${abi}.tar.xz"; exit 1; }
-          cp "base/base-usr-${abi}.tar.xz" ".deploy-tmp/${abi}-base/base-usr.tar.xz"
-          [ -f "base/base-dsh.tar.xz" ] && cp "base/base-dsh.tar.xz" ".deploy-tmp/${abi}-base/base-dsh.tar.xz"
-          du -sh ".deploy-tmp/${abi}-base"
+          cp "base/base-usr-${abi}.tar.xz" ".deploy-tmp/${bdir}/base-usr.tar.xz"
+          [ -f "base/base-dsh.tar.xz" ] && cp "base/base-dsh.tar.xz" ".deploy-tmp/${bdir}/base-dsh.tar.xz"
+          du -sh ".deploy-tmp/${bdir}"
 
       - name: 构建快照 ${abi}（build-snapshot，Termux 源装配 + 注入 + 门禁 + 归档）
         shell: bash
