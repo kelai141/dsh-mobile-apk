@@ -160,8 +160,8 @@ function currentStatus(env: NodeJS.ProcessEnv, defaultWriteMode?: string): AdbSt
       : !fullAccess
         ? '未授权：需先授予系统「所有文件访问」（完全访问档位，授予后重启引擎生效）——自动审批模式不构成开放条件'
         : '未授权：请在「开发者选项 → 无线调试」开启并输入配对码与弹窗端口（授权状态在重启后需重新配对）',
+    }
   }
-}
 
 /** 引擎级授权就绪（用户是否授权——不掺会话档位）。 */
 function engineLevelReady(st: AdbStatus): boolean {
@@ -230,6 +230,37 @@ function looksDangerousAdb(command: string): boolean {
 }
 
 /**
+ * 热补丁（2026-08-27 真机实锤）：通道结果 → 模型文本。
+ * 指定键的值仅 string 放行原样；其余类型一律 JSON.stringify 转写（含对象形状自证）——
+ * 从机制上杜绝 `[object Object]` 进入模型转录（引擎序列化边界事故的现场补救）。
+ */
+function pickText(v: Record<string, unknown>, ...keys: string[]): string {
+  return keys
+    .map((k) => {
+      const x = v[k]
+      if (typeof x === 'string') return x
+      if (x === undefined || x === null) return ''
+      try { return JSON.stringify(x) } catch { return String(x) }
+    })
+    .filter((s) => s.length > 0)
+    .join('\n')
+}
+
+/**
+ * 热补丁根修（2026-08-27 活体插桩实锤）：dsh-shell run() 契约返回收集输出结构体
+ * `{text, truncated, spillPath?}`（引擎内置 bash 工具经 streamText(output).text 同款读取），
+ * 历史代码误按字符串 String() 直取 —— 进程真实执行（审计恒 ok）、转录恒 "[object Object]"，
+ * 并连带 device_info 全占位符（拿乱码去 grep MODEL= 零匹配）。此处统一解包。
+ */
+function collectText(x: unknown): string {
+  if (x === null || x === undefined) return ''
+  if (typeof x === 'string') return x
+  const o = x as Record<string, unknown>
+  if (typeof o.text === 'string') return o.text
+  try { return JSON.stringify(x) } catch { return '' }
+}
+
+/**
  * 服务面：ctx.androidPrivilege —— 授权状态机（供 dsh-android-manage 等消费）。
  * 全部方法失败关闭：未授权 → 拒绝（return 未授权引导），不执行、不降级。
  */
@@ -288,16 +319,33 @@ export class AndroidPrivilegeService {
     return readShellAdbState()?.connectPort
   }
 
+  /**
+   * 现场解析可用连接端口：配置端口优先（壳侧 AdbState 记录），失效即回退 5555
+   * （vivo 等无线调试常驻端口；NSD 记录值会随无线调试重启轮换——2026-08-27 实锤 37575 失联）。
+   * 端口为 loopback 信息不入审计。@returns 可用端口与 connect 输出；全失败返回 undefined。
+   */
+  private async resolveLivePort(): Promise<{ port: string; output: string } | { port: undefined; output: string }> {
+    const candidates = [...new Set([this.connectPort(), '5555'].filter((p): p is string => !!p))]
+    let last = ''
+    for (const port of candidates) {
+      const c = await this.runLine(`adb connect 127.0.0.1:${port}`)
+      if (!c.ok) { last = c.stdout; continue }
+      last = c.stdout
+      if (/connected to|already connected/i.test(c.stdout)) return { port, output: c.stdout }
+    }
+    return { port: undefined, output: last }
+  }
+
   /** 经 termux 通道执行一行命令（adb 可执行；连接端口自动注入 `-s`）。 */
   private async runLine(line: string): Promise<{ ok: boolean; stdout: string }> {
     if (!this.shellFace) return { ok: false, stdout: 'Termux 执行器（dsh-shell-termux）未装配' }
     try {
-      const raw = { command: line, cwd: '/', env: {} }
-      const spec = this.shellFace.resolve ? this.shellFace.resolve(raw) : raw
+      const input = { command: line, cwd: '/', env: {} }
+      const spec = this.shellFace.resolve ? this.shellFace.resolve(input) : input
       const r = await this.shellFace.run(spec)
       return {
         ok: true,
-        stdout: String((r as Record<string, unknown>).stdout ?? '') + String((r as { stderr?: string }).stderr ?? ''),
+        stdout: collectText((r as Record<string, unknown>).stdout) + collectText((r as Record<string, unknown>).stderr),
       }
     } catch (e) {
       return { ok: false, stdout: '执行失败：' + String((e as Error).message) }
@@ -313,10 +361,11 @@ export class AndroidPrivilegeService {
     if (!engineLevelReady(this.status())) {
       return { ok: false, stdout: '', guidance: this.status().message ?? '未授权' }
     }
-    const port = this.connectPort()
-    if (!port) return { ok: false, stdout: '', guidance: '无连接端口：配对后壳侧 AdbState 记录端口——请重新配对' }
-    const connect = await this.runLine(`adb connect 127.0.0.1:${port}`)
-    if (!connect.ok) return { ok: false, stdout: connect.stdout, guidance: 'adb 客户端执行失败（快照缺 android-tools？）' }
+    const live = await this.resolveLivePort()
+    if (live.port === undefined) {
+      return { ok: false, stdout: live.output.slice(0, 2048), guidance: 'ADB 连接不可用（配置端口与 5555 均失联）：确认「无线调试」仍开启，必要时重新配对' }
+    }
+    const port = live.port
     const out = await this.runLine(`adb -s 127.0.0.1:${port} shell ${command}`)
     if (!out.ok) return { ok: false, stdout: out.stdout }
     if (/(^|\n)error:|no devices\/emulators|offline/.test(out.stdout)) {
@@ -334,12 +383,15 @@ export class AndroidPrivilegeService {
     if (!engineLevelReady(this.status())) {
       return { ok: false, stdout: '', guidance: this.status().message ?? '未授权' }
     }
-    const port = this.connectPort()
-    if (!port) return { ok: false, stdout: '', guidance: '无连接端口：配对后壳侧 AdbState 记录端口——请重新配对' }
+    const live = await this.resolveLivePort()
+    if (live.port === undefined) {
+      return { ok: false, stdout: live.output.slice(0, 2048), guidance: 'ADB 连接不可用（配置端口与 5555 均失联）：确认「无线调试」仍开启，必要时重新配对' }
+    }
+    const port = live.port
     if (!/^adb\s/.test(line)) return { ok: false, stdout: '', guidance: 'execAdbLine 只能执行以 adb 开头的行' }
     // 仅注入命令位置（行首 / && / ; 之后）的 adb，避免误伤引号内文本（如 adb shell "echo adb hi"）。
     const line2 = line.replace(/(^|&&\s*|;\s*)adb\s/g, `$1adb -s 127.0.0.1:${port} `)
-    const out = await this.runLine(`adb connect 127.0.0.1:${port} && ${line2}`)
+    const out = await this.runLine(`${line2}`)
     if (!out.ok) return { ok: false, stdout: out.stdout }
     return { ok: true, stdout: out.stdout.slice(0, 128 * 1024) }
   }
@@ -362,6 +414,9 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
           wirelessDebugOn: { type: 'boolean' },
           allowSwitchOn: { type: 'boolean' },
           paired: { type: 'boolean' },
+          connected: { type: 'boolean' },
+          authorized: { type: 'boolean' },
+          writeMode: { type: 'string' },
           message: { type: 'string' },
         },
       },
@@ -396,7 +451,7 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
         },
       },
       render: (_args, v: Record<string, unknown>) => [
-        { type: 'text', text: String(v.stdout ?? v.stderr ?? v.text ?? '') },
+        { type: 'text', text: pickText(v, 'stdout', 'stderr', 'text') || '(no output)' },
       ],
     },
     execute: async ({ command }: { command: string }, exec) => {
@@ -424,7 +479,7 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
         const raw = { command, cwd: '/', env: {} }
         const spec = shellFace.resolve ? shellFace.resolve(raw) : raw
         const r = await shellFace.run(spec)
-        return { ok: true, stdout: String((r as Record<string, unknown>).stdout ?? '') , stderr: String((r as { stderr?: string }).stderr ?? '') }
+        return { ok: true, stdout: collectText((r as Record<string, unknown>).stdout), stderr: collectText((r as { stderr?: unknown }).stderr) }
       } catch (e) {
         return { ok: false, text: '执行失败：' + String((e as Error).message) }
       }
@@ -456,7 +511,7 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
         },
       },
       render: (_args, v: Record<string, unknown>) => [
-        { type: 'text', text: String(v.stdout ?? v.guidance ?? v.text ?? '') },
+        { type: 'text', text: pickText(v, 'stdout', 'guidance', 'text') || '(no output)' },
       ],
     },
     execute: async ({ command }: { command: string }, exec) => {

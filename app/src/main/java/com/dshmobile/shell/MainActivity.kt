@@ -524,6 +524,12 @@ class MainActivity : ComponentActivity() {
     if (!userClosedEngine) {
       startEngineService()
     }
+    // ADB 端口后台预取（配对页秒回，不再同步等 NSD——2026-08-27 报障修复；15s TTL 内不重扫）。
+    // F1 常驻预热同线程搭车：server 就绪 + 密钥生成移出配对关键路径（2026-08-27 配对窗口实锤修复）。
+    try {
+      Thread { AdbState.prewarm(engineManager); AdbState.prefetchPorts(this, engineManager) }.start()
+    } catch (_: Throwable) {
+    }
     // Back from the directory picker / Termux: re-route if the engine came up.
     // 仅当 WebView 未展示（引导页/首次启动）时才探测并重路由；相册/文件选择器
     // 返回时 WebView 已可见，探测超时会误触发 showWeb→reload，导致 JS 状态丢失。
@@ -780,14 +786,20 @@ class MainActivity : ComponentActivity() {
         },
         onOpenNativePath = { path -> openNativePathWithReader(path) },
         onAdbShell = { cmd -> AdbState.adbShellExecute(this, engineManager, cmd) },
-        onGetAdbState = { AdbState.stateJson(this) },
+        // F1 预热钩子：设置页每 3s 轮询此桥，服务掉线后 60s 节流内自动补热（prewarmDue 纯读，线程仅在到期时创建）。
+        onGetAdbState = {
+          if (AdbState.prewarmDue()) Thread { AdbState.prewarm(engineManager) }.start()
+          AdbState.stateJson(this)
+        },
         onSetAdbAllow = { enable -> AdbState.setAllowSwitch(this, enable) },
         // 0.14 真实配对：码值只经 adb argv（壳侧），端口取自系统「无线调试」弹窗；配对成功才写 paired。
+        // F3 结构化结果（JSON ok/reason/message）：前端按 reason 分流文案，拒绝「输什么都像码错」。
         onSetAdbPair = { code, pairPort, connectPort ->
-          AdbState.pairWithCode(this, engineManager, code, pairPort, connectPort).ok
+          AdbState.pairWithCodeJson(this, engineManager, code, pairPort, connectPort)
         },
         onRevokeAdbPair = { AdbState.revokePair(this, engineManager) },
-        onDiscoverAdbPorts = { AdbState.discoverPorts(this, engineManager).toString() },
+        // 缓存优先（启动后台预取 + 15s TTL）；无缓存才同步扫——配对页不再卡 UI（2026-08-27 报障修复）。
+        onDiscoverAdbPorts = { AdbState.cachedPorts() ?: AdbState.discoverPorts(this, engineManager).toString() },
       ),
       "androidBridge",
     )
