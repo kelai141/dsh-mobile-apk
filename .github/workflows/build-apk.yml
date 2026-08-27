@@ -1,24 +1,14 @@
-# build-apk.yml — 云端构建 dsh-mobile APK（宿主=本 APK 仓库；协调库作为构建依赖签出到 coord/）
+# build-apk.yml — 云端构建 dsh-mobile APK（自包含：快照随本仓库提交，无需协调库）
 #
 # 设计：APK 在 dsh-mobile-apk 用 gradle 打包，故 workflow 放本仓库（GITHUB_REPOSITORY = dsh-mobile-apk）。
-# 快照构建/注入/门禁脚本在协调库（kelai141/dsh-mobile）的 scripts/，故用第二个 checkout 拉到 <workdir>/coord。
-# 产物：仅 upload-artifact（不出 Release）——你在 run 页下 APK 到本地 debug，省本地算力。
-# 底座归档：协调库 base/（Git LFS）随 coord checkout 拉取，本 workflow 阶段到 coord/.deploy-tmp/<abi>-base/。
-#
-# 前提：协调库须为 public（GITHUB_TOKEN 只能拉 public 仓库 + 本仓库；私有需额外 PAT）——
-#       若 kelai141/dsh-mobile 非 public，改用带权限的 PAT 配 checkout。vendor/plugins 随协调库 checkout，
-#       缺失的 vendor 子仓库在此 clone。
+# 运行时快照（双 ABI，注入后最终态）已提交到本仓库 snapshots/<abi>/snapshot.tar.xz（Git LFS），
+# 云端只做 gradle 打包，不重建快照、不依赖协调库。仅 upload-artifact 供本地下载 debug，不出 Release。
 
 name: build-apk
 
 on:
   workflow_dispatch:
     inputs:
-      abi:
-        description: '目标 ABI（可多选）'
-        type: choice
-        options: [arm64, x86_64, 'both']
-        default: 'both'
       suffix:
         description: 'APK 版本后缀（默认 ci）'
         type: string
@@ -31,39 +21,12 @@ jobs:
       matrix:
         abi: [arm64, x86_64]
       fail-fast: false
-    env:
-      # build-apk.mjs 依赖 coord 子目录中的脚本；apk 仓库 = $GITHUB_WORKSPACE（工作区根）
-      DSH_APK_DIR: ${{ github.workspace }}
     steps:
-      - name: 检出本仓库（APK，gradle 项目）
+      - name: 检出本仓库（含 Git LFS 快照）
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           lfs: true
-
-      - name: 检出协调库（构建脚本/插件/vendor/底座归档）
-        uses: actions/checkout@v4
-        with:
-          repository: kelai141/dsh-mobile
-          path: coord
-          fetch-depth: 0
-          lfs: true
-
-      - name: 装配 vendor 子仓库（非协调库跟踪时 clone）
-        run: |
-          set -e
-          test -d coord/vendor/dsh-undo-savepoint/package.json || git clone --depth 1 https://github.com/lire1131/dsh-undo-savepoint coord/vendor/dsh-undo-savepoint || true
-          # dshmarketplace-plugin 为固化副本，协调库 vendor/ 应有；缺则从上游 clone 后按 PATCHES.md 打补丁
-
-      - name: 准备运行时（node / python→python3）
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - name: 确保 python 指向 python3
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y python3 python-is-python3 || sudo ln -sf /usr/bin/python3 /usr/bin/python
-          python --version
 
       - name: 准备 Java（gradle 需要）
         uses: actions/setup-java@v4
@@ -71,46 +34,40 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: stage 底座归档（coord/base -> coord/.deploy-tmp/<abi>-base/）
+      - name: stage 快照（snapshots/<abi> -> app/src/main/assets/）
         shell: bash
         run: |
           set -e
-          for abi in arm64 x86_64; do
-            mkdir -p "coord/.deploy-tmp/${abi}-base"
-            [ -f "coord/base/base-usr-${abi}.tar.xz" ] || { echo "缺 coord/base/base-usr-${abi}.tar.xz"; exit 1; }
-            cp "coord/base/base-usr-${abi}.tar.xz" "coord/.deploy-tmp/${abi}-base/base-usr.tar.xz"
-            if [ -f "coord/base/base-dsh.tar.xz" ]; then cp "coord/base/base-dsh.tar.xz" "coord/.deploy-tmp/${abi}-base/base-dsh.tar.xz"; fi
-          done
-          du -sh coord/.deploy-tmp/*-base 2>/dev/null || true
+          abi="${{ matrix.abi }}"
+          [ -f "snapshots/${abi}/snapshot.tar.xz" ] || { echo "缺 snapshots/${abi}/snapshot.tar.xz"; exit 1; }
+          cp "snapshots/${abi}/snapshot.tar.xz" app/src/main/assets/snapshot.tar.xz
+          if [ -f "snapshots/${abi}/snapshot.sha256" ]; then cp "snapshots/${abi}/snapshot.sha256" app/src/main/assets/snapshot.sha256; else
+            echo "缺 snapshots/${abi}/snapshot.sha256"; exit 1
+          fi
+          ls -lh app/src/main/assets/snapshot.tar.xz && cat app/src/main/assets/snapshot.sha256; echo
 
-      - name: 构建快照（所选 ABI）
+      - name: gradle assembleDebug (${abi})
         shell: bash
         run: |
           set -e
-          for abi in ${{ github.event.inputs.abi || 'both' }}; do
-            if [ "$abi" = "both" ]; then abis="arm64 x86_64"; else abis="$abi"; fi
-            for a in $abis; do
-              echo "== build snapshot $a =="
-              node coord/scripts/build-snapshot-013.mjs "$a"
-            done
-          done
+          abi="${{ matrix.abi }}"
+          # 增量打包防护：清老 assets/输出，防跨 ABI 叠加
+          rm -rf app/build/intermediates/assets app/build/outputs/apk/debug
+          ./gradlew :app:assembleDebug --no-daemon -PversionNameSuffix="${{ github.event.inputs.suffix || '-ci' }}"
 
-      - name: 构建 APK（所选 ABI）
+      - name: 拷贝产物 (${abi})
         shell: bash
         run: |
           set -e
-          for abi in ${{ github.event.inputs.abi || 'both' }}; do
-            if [ "$abi" = "both" ]; then abis="arm64 x86_64"; else abis="$abi"; fi
-            for a in $abis; do
-              echo "== build apk $a =="
-              node coord/scripts/build-apk.mjs --abi "$a" --suffix "${{ github.event.inputs.suffix || '-ci' }}"
-            done
-          done
+          abi="${{ matrix.abi }}"
+          mkdir -p out
+          cp app/build/outputs/apk/debug/app-debug.apk "out/dsh-mobile-apk-v0.13.0${{ github.event.inputs.suffix || '-ci' }}-${abi}.apk"
+          ls -lh out/
 
       - name: 上传 APK 产物（本地下载 debug；不出 Release）
         uses: actions/upload-artifact@v4
         with:
           name: dsh-mobile-apk-${{ github.event.inputs.suffix || 'ci' }}
-          path: coord/out/v0.13.0/*.apk
+          path: out/*.apk
           if-no-files-found: error
           retention-days: 30
