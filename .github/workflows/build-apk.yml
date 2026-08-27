@@ -54,12 +54,11 @@ jobs:
         uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '17' }
 
-      - name: 构建插件（缺 lib/ 的 6 个，npm install + build）
+      - name: 构建插件（6 个含 build 脚本的；dsh-host-web-compat 用已提交 lib）
         shell: bash
         run: |
           set -e
           for d in plugins/dsh-android-bridge plugins/dsh-android-manage plugins/dsh-android-linux-env plugins/dsh-android-file-open dsh-shell-termux dsh-client-ui-responsive; do
-            [ -d "$d/lib" ] && { echo "  $d: lib 已存在，跳过"; continue; }
             echo "== npm build $d =="
             (cd "$d" && npm install --no-audit --no-fund && npm run build)
           done
