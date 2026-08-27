@@ -21,9 +21,9 @@ on:
         options: [arm64, x86_64, 'both']
         default: 'both'
       suffix:
-        description: 'APK 版本后缀（默认 ci）'
+        description: 'APK 版本后缀（默认空=正式版纯净版本号；测试构建显式传 -fix 等）'
         type: string
-        default: '-ci'
+        default: ''
 
 jobs:
   build:
