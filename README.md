@@ -8,15 +8,14 @@
 
 > **dsh-mobile 生态** · [dsh-shell-termux](https://github.com/kelai141/dsh-shell-termux)（shell）· [dsh-client-ui-responsive](https://github.com/kelai141/dsh-client-ui-responsive)（移动 UI）· [dsh-host-web-compat](https://github.com/kelai141/dsh-host-web-compat)（浏览器兼容）
 
-> ⚠️ **0.13.0-preview — preview release**: unstable, intended for community validation — do not rely on it in production.
-> - **ADB is not complete**: pairing / port auto-scan / execution are preview UI screens — the real ADB channel is under development and completes in the 0.13.0 official release.
+> **0.13.0 — official release**: the ADB real channel (pairing / port discovery / shell execution / authorization gates / audit) is fully implemented and device-verified.
 > - **Plugin-marketplace caveat**: the built-in marketplace covers many third-party plugins, and **most of them are likely unavailable or buggy on phones** (mobile vs desktop differ in WebView engine / filesystem / permission model / runtime). Mobile adaptation is long-term work — treat this beta as usability validation & feedback, not a production dependency. Report plugin issues to the [issue tracker](https://github.com/kelai141/dsh-mobile-apk/issues) with device model / version / reproduction steps.
 
 Android shell for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): WebView UI
 over an **embedded Termux runtime snapshot** (extract-and-run, no Termux app needed), SAF directory
 bridge, keep-alive foreground service, engine watchdog, and online runtime updates. One APK to
 install: it boots a full dsh web agent that can really execute bash. App name `DeepCode` (icon text
-DeepSearch), package `com.dsharnessmobile.shell`, version `0.13.0-preview` (versionCode 24).
+DeepSearch), package `com.dsharnessmobile.shell`, version `0.13.0` (versionCode 25).
 
 ## Features
 
@@ -39,17 +38,20 @@ DeepSearch), package `com.dsharnessmobile.shell`, version `0.13.0-preview` (vers
   auto-restart); the running runtime can update itself without an APK update.
 - **SAF bridge** — `pickDirectory` maps the picked tree to a real path (`/storage/emulated/0/…`).
 - **Device access** — All Files Access; Shizuku probe example.
-- **ADB authorization UI (preview)** — three-gate authorization state machine + pairing-port
-  auto-scan; the real ADB channel lands in the 0.13.0 official release.
+- **ADB real channel (0.13.0)** — real `adb pair` SPAKE2 handshake + NSD/mDNS port discovery,
+  shell execution via adbd (uid 2000) with danger-command blacklist, three-gate authorization
+  (All Files Access / in-app switch / pairing code) plus live session-mode gating, and native audit
+  (`files/audit/audit.ndjson`); connect-port rotation self-heals with a 5555 fallback.
 
 ## Download / Install
 
-Release `v0.13.0-preview` ships two ABI variants:
+Release `v0.13.0` ships two ABI variants (plus snapshot archives, plugin packages,
+MANIFEST checksums and release notes):
 
 | APK | Target |
 |---|---|
-| `dsh-mobile-apk-v0.13.0-preview-arm64.apk` | arm64 devices (real phones) |
-| `dsh-mobile-apk-v0.13.0-preview-x86_64.apk` | x86_64 emulators / devices |
+| `dsh-mobile-apk-v0.13.0-arm64.apk` | arm64 devices (real phones) |
+| `dsh-mobile-apk-v0.13.0-x86_64.apk` | x86_64 emulators / devices |
 
 ```sh
 adb install -r -t <apk>    # same-signature overwrite install
@@ -80,7 +82,7 @@ streaming) — any failure rejects the build.
 ## Bridge protocol v1 (`window.androidBridge`)
 
 App name `DeepCode` (icon text DeepSearch), package `com.dsharnessmobile.shell`.
-`androidBridge.version` returns the app version (currently `0.13.0-preview`, versionCode 24);
+`androidBridge.version` returns the app version (currently `0.13.0`, versionCode 25);
 pages feature-detect on it. The ADB methods below are the preview authorization surface — the real
 channel completes in the 0.13.0 official release.
 
@@ -88,7 +90,7 @@ channel completes in the 0.13.0 official release.
 
 | method | signature | description |
 |---|---|---|
-| `version` | () → string | app version (`0.13.0-preview`) for feature detection |
+| `version` | () → string | app version (`0.13.0`) for feature detection |
 | `getSystemDark` | () → boolean | system dark mode (bypasses vendor WebViews whose `matchMedia` is stuck on light; used by the first-frame theme bridge) |
 | `checkEngine` | () → string | probes 127.0.0.1:3080; JSON `{running, latencyMs, error?}` |
 | `hasAllFilesAccess` | () → boolean | whether All Files Access is granted (external workspace requirement) |
