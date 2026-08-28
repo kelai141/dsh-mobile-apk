@@ -15,7 +15,7 @@ Android shell for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-har
 over an **embedded Termux runtime snapshot** (extract-and-run, no Termux app needed), SAF directory
 bridge, keep-alive foreground service, engine watchdog, and online runtime updates. One APK to
 install: it boots a full dsh web agent that can really execute bash. App name `DeepCode` (icon text
-DeepSearch), package `com.dsharnessmobile.shell`, version `0.13.0` (versionCode 25).
+DeepSearch), package `com.dsharnessmobile.shell`, version `0.13.0-fx-1` (versionCode 26).
 
 ## Features
 
@@ -45,13 +45,13 @@ DeepSearch), package `com.dsharnessmobile.shell`, version `0.13.0` (versionCode 
 
 ## Download / Install
 
-Release `v0.13.0` ships two ABI variants (plus snapshot archives, plugin packages,
+Release `v0.13.0-fx-1` ships two ABI variants (plus snapshot archives, plugin packages,
 MANIFEST checksums and release notes):
 
 | APK | Target |
 |---|---|
-| `dsh-mobile-apk-v0.13.0-arm64.apk` | arm64 devices (real phones) |
-| `dsh-mobile-apk-v0.13.0-x86_64.apk` | x86_64 emulators / devices |
+| `dsh-mobile-apk-v0.13.0-fx-1-arm64.apk` | arm64 devices (real phones) |
+| `dsh-mobile-apk-v0.13.0-fx-1-x86_64.apk` | x86_64 emulators / devices |
 
 ```sh
 adb install -r -t <apk>    # same-signature overwrite install
@@ -82,7 +82,7 @@ streaming) — any failure rejects the build.
 ## Bridge protocol v1 (`window.androidBridge`)
 
 App name `DeepCode` (icon text DeepSearch), package `com.dsharnessmobile.shell`.
-`androidBridge.version` returns the app version (currently `0.13.0`, versionCode 25);
+`androidBridge.version` returns the app version (currently `0.13.0-fx-1`, versionCode 26);
 pages feature-detect on it. The ADB methods below are the preview authorization surface — the real
 channel completes in the 0.13.0 official release.
 
@@ -90,7 +90,7 @@ channel completes in the 0.13.0 official release.
 
 | method | signature | description |
 |---|---|---|
-| `version` | () → string | app version (`0.13.0`) for feature detection |
+| `version` | () → string | app version (`0.13.0-fx-1`) for feature detection |
 | `getSystemDark` | () → boolean | system dark mode (bypasses vendor WebViews whose `matchMedia` is stuck on light; used by the first-frame theme bridge) |
 | `checkEngine` | () → string | probes 127.0.0.1:3080; JSON `{running, latencyMs, error?}` |
 | `hasAllFilesAccess` | () → boolean | whether All Files Access is granted (external workspace requirement) |
