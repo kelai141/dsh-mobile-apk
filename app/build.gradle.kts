@@ -14,8 +14,8 @@ android {
     // (the embedded engine, bash, and every child command would need linker64
     // wrappers); 34 keeps native exec working on Android 15/16 devices.
     targetSdk = 34
-    // 0.13.0 正式版：versionCode 25（24 为 0.13.0-preview——正式版需更高码才能覆盖安装 preview）。
-    versionCode = 25
+    // 0.13.0-fx-1：versionCode 26（25 为 0.13.0 正式版——修复 llm-deepseek seed null 注册崩，覆盖安装需要更高码）。
+    versionCode = 26
     // Snapshot builds append a suffix (e.g. -SN-1-RC8) via -PversionNameSuffix; release builds pass none.
     val snapshotSuffix = providers.gradleProperty("versionNameSuffix").getOrElse("")
     versionName = "0.13.0" + snapshotSuffix
