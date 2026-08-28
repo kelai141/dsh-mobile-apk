@@ -76,7 +76,7 @@ for (const leaf of ['.credentials.yaml', '.anonymous-user-id']) {
 const seedSettings = [
   '# dsh-mobile 0.13.0 开箱默认（非机密模板；用户配置请在设置界面操作，UI 保存会覆盖本文件）',
   '# DeepSeek 官方 provider：key 由壳侧私有文件注入（DEEPSEEK_API_KEY 环境变量），此处不落任何凭据。',
-  # 必须给空对象而非裸键：settings-file 的 section() 对 null 抛 TypeError（llm-deepseek 插件 apply 中途死亡，模型页全灭——2026-08-28 模拟器首启实验实锤）。
+  // 必须给空对象而非裸键：settings-file 的 section() 对 null 抛 TypeError（llm-deepseek 插件 apply 中途死亡，模型页全灭——2026-08-28 模拟器首启实验实锤）。
   'llm-deepseek: {}',
   '  # apiKeyEnv: DEEPSEEK_API_KEY  # 壳体注入，无需手写；无 key 时错误信息引导去设置界面填写',
   '',
