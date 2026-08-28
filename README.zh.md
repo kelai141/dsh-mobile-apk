@@ -13,7 +13,7 @@
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的安卓壳：WebView UI 覆盖
 **内嵌 Termux 运行时快照**（解压即跑，无需 Termux app）、SAF 目录桥、保活前台服务、引擎看门狗、
 运行时在线更新。一个 APK 装完即用：完整的 dsh web agent，且能真实执行 bash。应用名 `DeepCode`
-（图标文字 DeepSearch）、包名 `com.dsharnessmobile.shell`、版本 `0.13.0`（versionCode 25）。
+（图标文字 DeepSearch）、包名 `com.dsharnessmobile.shell`、版本 `0.13.0-fx-1`（versionCode 26）。
 
 ## 功能
 
@@ -35,12 +35,12 @@
 
 ## 下载 / 安装
 
-Release `v0.13.0` 提供双 ABI 包（另含快照归档、插件包、MANIFEST 校验清单与发布说明）：
+Release `v0.13.0-fx-1` 提供双 ABI 包（另含快照归档、插件包、MANIFEST 校验清单与发布说明）：
 
 | APK | 适用 |
 |---|---|
-| `dsh-mobile-apk-v0.13.0-arm64.apk` | arm64 设备（真机） |
-| `dsh-mobile-apk-v0.13.0-x86_64.apk` | x86_64 模拟器 / 设备 |
+| `dsh-mobile-apk-v0.13.0-fx-1-arm64.apk` | arm64 设备（真机） |
+| `dsh-mobile-apk-v0.13.0-fx-1-x86_64.apk` | x86_64 模拟器 / 设备 |
 
 ```sh
 adb install -r -t <apk>    # 同签名覆盖安装
@@ -69,14 +69,14 @@ ELF / cordis 挂载集⊇注入集 / LICENSES 自检（Python 流式）——任
 ## 桥协议 v1（`window.androidBridge`）
 
 应用名 `DeepCode`（图标文字 DeepSearch）、包名 `com.dsharnessmobile.shell`。
-`androidBridge.version` 返回应用版本号（当前 `0.13.0`，versionCode 25），
+`androidBridge.version` 返回应用版本号（当前 `0.13.0-fx-1`，versionCode 26），
 页面按它做 feature-detect。下列 ADB 方法为预览授权面——真实通道在 0.13.0 正式版完成。
 
 **同步返回**
 
 | 方法 | 签名 | 说明 |
 |---|---|---|
-| `version` | () → string | 应用版本号（`0.13.0`），feature-detect 用 |
+| `version` | () → string | 应用版本号（`0.13.0-fx-1`），feature-detect 用 |
 | `getSystemDark` | () → boolean | 系统深色模式（绕过部分厂商 WebView `matchMedia` 失效，首帧主题用） |
 | `checkEngine` | () → string | 探测 127.0.0.1:3080；JSON `{running, latencyMs, error?}` |
 | `hasAllFilesAccess` | () → boolean | 是否已授予「所有文件访问」权限（外部工作区要求） |
