@@ -14,11 +14,12 @@ android {
     // (the embedded engine, bash, and every child command would need linker64
     // wrappers); 34 keeps native exec working on Android 15/16 devices.
     targetSdk = 34
-    // 0.13.0-fx-1：versionCode 26（25 为 0.13.0 正式版——修复 llm-deepseek seed null 注册崩，覆盖安装需要更高码）。
-    versionCode = 26
+    // 0.13.1：versionCode 27（26 为 0.13.0-fx-1——市场安装 execPath 安全化/canvas 出厂依赖/
+    // engine.log 轮转与诊断镜像/settings 坏键迁移/配置导入导出桥/apt 链修复+install-clang）。
+    versionCode = 27
     // Snapshot builds append a suffix (e.g. -SN-1-RC8) via -PversionNameSuffix; release builds pass none.
     val snapshotSuffix = providers.gradleProperty("versionNameSuffix").getOrElse("")
-    versionName = "0.13.0" + snapshotSuffix
+    versionName = "0.13.1" + snapshotSuffix
     buildConfigField("String", "TERMUX_VERSION", "\"0.118.3\"")
   }
 

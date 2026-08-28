@@ -78,6 +78,8 @@ object UndoGate {
     } else {
       Log.e(TAG, "auto-undo failed: " + summary)
     }
+    // 0.13.1 W3：急救触发即镜像现场到共享目录（引擎循环崩溃导致用户完全无法取日志的场景）。
+    engine.mirrorDiagnosticsToShared("undo-gate")
     return UndoResult(ok, summary, if (ok) restoreTarget(out) else null)
   }
 

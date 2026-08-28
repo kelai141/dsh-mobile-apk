@@ -94,3 +94,12 @@
 本发行快递包含对上述二进制的再加工：Termux 包的前缀/编译期路径重写（`scripts/fix-shebang.py`、`scripts/inject-snapshot.py`、
 `termux-elf-cleaner` 调用与 `build-snapshot-013.mjs` 中的 RUNPATH/shebang 处理）、快照归档与插件注入（`build-apk-013.ps1`）；
 改写说明与工具随本仓库发布（见 `docs/RELEASE.md` 合规声明）。
+## 非 dpkg 的随包分发组件（手工维护段，0.13.1 起）
+
+以下 npm 包经 `build-snapshot-013.mjs` 手工装配进快照 `home/.dsh/profiles/web/node_modules/`，
+不在 dpkg 清单内（check-third-party.mjs 只扫 dpkg）；许可证全文随包内 LICENSE 文件分发。
+
+| 组件 | 版本 | 许可证 | 上游源码 |
+|---|---|---|---|
+| @napi-rs/canvas | 1.0.8 | MIT | [Brooooooklyn/canvas](https://github.com/Brooooooklyn/canvas) |
+| @napi-rs/canvas-android-arm64 | 1.0.8 | MIT | [Brooooooklyn/canvas](https://github.com/Brooooooklyn/canvas)（napi android-arm64 预编译 binding） |
