@@ -385,6 +385,68 @@ try {
   console.error(`  [pnpm 装配失败] ${e?.stack ?? String(e)}`)
 }
 
+// ── 7c2. @napi-rs/canvas 进出厂依赖（0.13.1，issue apk#96-Bug3/#103）──
+// pdfjs-dist 的可选原生渲染依赖（DOMMatrix/ImageData/Path2D polyfill + 扫描 PDF 页图栅格化）。
+// npm 无 android-x86_64 triple → 仅 arm64 装配；x86_64 维持 attachment-formats 懒加载守卫降级
+// （模拟器开发环境可接受）。apk 仓 AGENTS.md 曾记「仅 glibc 预编译」系误判：android-arm64
+// binding 是 N-API/Bionic 预编译，真机实测可用（#96 报告人 createCanvas 绘制 OK）。
+// 手工装配（ripgrep 同款）：拉 npm tarball 解入 profiles/web/node_modules + package.json 登记
+// dependencies——manifest 可达后，设备端 pnpm 操作不再把它当孤儿清除。
+// ⚠️ 双份构建脚本（协调仓 + apk 仓云端副本）必须同改，禁止单边演进（AGENTS.md 雷点）。
+if (ABI === 'arm64') {
+  const CANVAS_VERSION = '1.0.8'
+  const canvasPkgs = [
+    { name: '@napi-rs/canvas', tgz: `canvas-${CANVAS_VERSION}.tgz` },
+    { name: '@napi-rs/canvas-android-arm64', tgz: `canvas-android-arm64-${CANVAS_VERSION}.tgz` },
+  ]
+  try {
+    const profileDir = join(STAGE, 'root', 'home', '.dsh', 'profiles', 'web')
+    if (!existsSync(join(profileDir, 'package.json'))) throw new Error('profiles/web/package.json 不存在（base-dsh 未合并？）')
+    for (const pkg of canvasPkgs) {
+      const scope = pkg.name.split('/')[0]
+      const short = pkg.name.split('/')[1]
+      const dest = join(DEBPOOL, pkg.tgz)
+      if (!existsSync(dest)) {
+        const NPM_MIRRORS = ['https://registry.npmjs.org', 'https://registry.npmmirror.com']
+        let meta = null
+        let mirror = 'none'
+        for (const m of NPM_MIRRORS) {
+          try {
+            const r = await fetch(`${m}/${pkg.name}/${CANVAS_VERSION}`, { signal: AbortSignal.timeout(30000) })
+            if (!r.ok) throw new Error('HTTP ' + r.status)
+            const j = await r.json()
+            if (j?.dist?.tarball) { meta = j; mirror = m; break }
+          } catch (err) {
+            console.warn(`  canvas meta 降级 ${m}: ${err.name === 'AbortError' ? 'timeout' : err.message}`)
+          }
+        }
+        if (!meta) throw new Error(`${pkg.name} metadata unavailable from all mirrors`)
+        const buf = Buffer.from(await (await fetch(meta.dist.tarball, { signal: AbortSignal.timeout(180000) })).arrayBuffer())
+        if (meta.dist.sha512) {
+          const actual = createHash('sha512').update(buf).digest('base64')
+          if (actual !== meta.dist.sha512) throw new Error(`${pkg.name} tarball sha512 mismatch`)
+        }
+        writeFileSync(dest, buf)
+        log(`  ${pkg.name}@${CANVAS_VERSION} downloaded from ${mirror} (${(buf.length / 1024 / 1024).toFixed(1)} MB)`)
+      }
+      const dstDir = join(profileDir, 'node_modules', scope, short)
+      // 0.13.1：目录删除走 WSL（Windows rmSync 对 WSL 创建的目录会 9p EACCES/ENOTEMPTY——雷点 9 同源）。
+      wsl(`rm -rf "${wslPath(dstDir)}" && mkdir -p "${wslPath(dstDir)}" && tar -xzf "${wslPath(dest)}" -C "${wslPath(dstDir)}" --strip-components=1 && chmod -R u+rwX "${wslPath(dstDir)}"`)
+    }
+    // package.json 登记依赖（孤儿清除防护的关键——manifest 可达即不被 prune）
+    const pjPath = join(profileDir, 'package.json')
+    const pj = JSON.parse(readFileSync(pjPath, 'utf8'))
+    pj.dependencies = pj.dependencies || {}
+    pj.dependencies['@napi-rs/canvas'] = `^${CANVAS_VERSION}`
+    pj.dependencies['@napi-rs/canvas-android-arm64'] = CANVAS_VERSION
+    writeFileSync(pjPath, JSON.stringify(pj, null, 2) + '\n')
+    log('@napi-rs/canvas 平台绑定就位（profiles/web/node_modules + package.json 登记）')
+  } catch (e) {
+    // 不静默：arm64 缺 canvas = 扫描 PDF 渲染维持降级，必须可见以便追溯
+    console.error(`  [canvas 装配失败——arm64 维持 PDF 渲染降级] ${e?.stack ?? String(e)}`)
+  }
+}
+
 // ── 7d. 包管理器编译期路径覆盖（0.13.0 F1.1 路由正确性的支撑件；2026-08-24 真机实测重写）──
 // Termux 的 apt/apt-get/dpkg 二进制内置 /data/data/com.termux/files/usr 编译期路径；
 // 内嵌环境必须覆盖（实测：不覆盖则 apt/dpkg 拒绝工作）。
@@ -419,11 +481,36 @@ writeFileSync(
     `Dir::Bin::apt-key "${PKG_PREFIX}/bin/apt-key";\n` +
     `Dir::Bin::dpkg "${PKG_PREFIX}/bin/dpkg";\n` +
     `Dir::Bin::dpkg-deb "${PKG_PREFIX}/bin/dpkg-deb";\n` +
-    `Acquire::https::CaInfo "${PKG_PREFIX}/etc/tls/cert.pem";\n`,
+    `Acquire::https::CaInfo "${PKG_PREFIX}/etc/tls/cert.pem";\n` +
+    // Dir::Log（0.13.1 W6 实验补）：缺省时 apt 落到编译期旧前缀 var/log/apt → "E: Directory missing"
+    // 致命（app 域不可访问 com.termux 路径）。
+    `Dir::Log "${PKG_PREFIX}/var/log/apt";\n` +
+    `Dir::Log::History "${PKG_PREFIX}/var/log/apt/history";\n`,
 )
 // apt 运行目录骨架（缺失时 apt 报 packaging system type 无法确定；落在 usr/var 下与 Termux 布局一致）
-for (const d of ['var/cache/apt/archives/partial', 'var/lib/apt/lists/partial', 'var/lib/apt/periodic']) {
+for (const d of ['var/cache/apt/archives/partial', 'var/lib/apt/lists/partial', 'var/lib/apt/periodic', 'var/log/apt']) {
   mkdirSync(join(U, d), { recursive: true })
+}
+// trusted.gpg.d 悬空链接修复（0.13.1 W6 实验实锤）：termux-keyring 的 trusted.gpg.d/*.gpg 是指向
+// 编译期旧前缀（com.termux）的符号链接——app 域访问 /data/data/com.termux 必 EACCES → GPG 校验
+// 失败（NO_PUBKEY）→ apt update 拿不到包列表。keyring 实体在快照 usr/share/termux-keyring/ 内，
+// 构建期直接落实体副本（relocate-snapshot 不覆盖指向旧前缀且目标可平移的链接场景）。
+{
+  const keyringDir = join(U, 'share', 'termux-keyring')
+  const trustedDir = join(U, 'etc', 'apt', 'trusted.gpg.d')
+  if (existsSync(keyringDir) && existsSync(trustedDir)) {
+    let fixed = 0
+    for (const f of readdirSync(trustedDir)) {
+      const link = join(trustedDir, f)
+      const entity = join(keyringDir, f)
+      if (existsSync(entity) && !existsSync(link)) {
+        rmSync(link, { force: true })
+        copyFileSync(entity, link)
+        fixed++
+      }
+    }
+    if (fixed > 0) log(`trusted.gpg.d 悬空链接修复（${fixed} 个 → 实体副本）`)
+  }
 }
 for (const rel of ['apt-get', 'apt']) {
   const real = join(binDir, rel + '.real')
@@ -439,6 +526,61 @@ if (existsSync(join(binDir, 'dpkg'))) {
   console.log('    [pkg-wrap] dpkg -> dpkg.real + wrapper（--instdir/--admindir/--force-script-chrootless）')
 }
 // 注：dpkg-deb 不涉编译期路径（操作 .deb 文件），保留原始。
+
+// ── install-clang.sh（0.13.1 W6：C 工具链按需安装器，随快照分发）──
+// W6 实验定案（2026-08-28 MuMu x86_64 fx-1 实测）：clang 21.1.8 换前缀环境开箱即用
+// （资源目录相对定位，零 wrapper 需求）；断点全在包管理链——dpkg 正规安装在 app 域
+// 必挂（编译期 dpkg.cfg.d EACCES 致命，M3 openjdk 成功系 root adbd 假象），故本脚本
+// 走 apt download-only + dpkg-deb 解包式安装（绕开 dpkg 数据库与 cfg.d 扫描）。
+// gcc 说明：Termux 不发布 gcc；脚本补 gcc -> clang 兼容符号链接（clang 自带 g++ 别名）。
+// dpkg 正规修复（LD_PRELOAD 路径重定向 interposer，需云构建 NDK）归 0.14。
+const installClangSh = `#!/system/bin/sh
+# dsh-mobile 0.13.1: clang 按需安装器（apt download-only + dpkg-deb 解包，绕开 dpkg 安装 bug）
+set -e
+B="\${TERMUX__PREFIX:-${PKG_PREFIX}}"
+export PATH="$B/bin:$PATH"
+# 0.13.1 修订：原生库路径必须先于一切外部命令导出（PATH 已指向 Termux bin，
+# mkdir 等 GNU coreutils ELF 依赖 libandroid-support.so——先导出后调用）。
+export LD_LIBRARY_PATH="$B/lib"
+export LD_PRELOAD="$B/lib/libtermux-exec-ld-preload.so"
+export HOME="\${HOME:-$B/../home}"
+export TMPDIR="$HOME/tmp"
+mkdir -p "$TMPDIR"
+export TERMUX__PREFIX="$B" TERMUX_PREFIX="$B"
+export APT_CONFIG="$B/etc/apt/apt.conf"
+export OPENSSL_CONF="$B/etc/tls/openssl.cnf"
+PKGS="clang binutils ndk-sysroot libllvm lld llvm libcompiler-rt libicu libxml2"
+echo "[install-clang] apt-get update…"
+apt-get update || echo "[install-clang] 警告：apt update 部分失败，继续用已缓存列表"
+echo "[install-clang] 下载依赖（download-only，不进 dpkg 数据库）…"
+apt-get install -y --download-only $PKGS
+echo "[install-clang] 解包（Termux deb 内嵌完整设备路径，需 usr 层平移）…"
+TMPX="$B/../ext-clang-tmp"
+mkdir -p "$TMPX"
+cd "$B/var/cache/apt/archives"
+found=0
+for deb in *.deb; do
+  case "$deb" in
+    clang_*|binutils_*|ndk-sysroot_*|libllvm_*|lld_*|llvm_*|libcompiler-rt_*|libicu_*|libxml2_*) ;;
+    *) continue ;;
+  esac
+  rm -rf "$TMPX/data"
+  "$B/bin/dpkg-deb" -x "$deb" "$TMPX"
+  cp -a "$TMPX/data/data/com.termux/files/usr/." "$B/"
+  found=1
+done
+rm -rf "$TMPX"
+[ "$found" = "1" ] || { echo "[install-clang] 错误：缓存中无目标包（apt 下载失败？）"; exit 1; }
+[ -e "$B/bin/gcc" ] || ln -s clang "$B/bin/gcc"
+echo "[install-clang] 冒烟验证…"
+printf 'int main(void){return 0;}\\n' > "$TMPDIR/.clang-smoke.c"
+"$B/bin/clang" "$TMPDIR/.clang-smoke.c" -o "$TMPDIR/.clang-smoke"
+"$TMPDIR/.clang-smoke"
+rm -f "$TMPDIR/.clang-smoke.c" "$TMPDIR/.clang-smoke"
+echo "[install-clang] 完成：$("$B/bin/clang" --version | head -1)"
+`
+writeFileSync(join(U, 'bin', 'install-clang.sh'), installClangSh, { mode: 0o755 })
+log('install-clang.sh 就位（usr/bin，按需 C 工具链安装器）')
 
 // ── 7e. 错位目录剔除（issue #80 P5，2026-08-24）：relocate-snapshot 历史上会把
 // 包内绝对路径 `/data/data/com.termux/...` 当作相对路径搬进 usr 树（如

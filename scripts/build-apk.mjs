@@ -71,7 +71,7 @@ try {
     // ---- 1. 插件注入链（python，跨平台）----
     // undo 移动端适配 + marketplace 修复校验（门槛；patch-undo-mobile / patch-marketplace 均 node）
     run('node', [join(ROOT, 'scripts', 'patch-undo-mobile.mjs'), join(undo, 'lib', 'client.js'), '--check'])
-    run('node', [join(ROOT, 'scripts', 'patch-marketplace.mjs'), join(market, 'lib', 'index.js')])
+    run('node', [join(ROOT, 'scripts', 'patch-marketplace.mjs'), join(market, 'lib')])
     log('注入 @dsh-android 插件…')
     run('python', [join(ROOT, 'scripts', 'inject-snapshot.py'), snapSrc, join(work, 'snap-injected.tar.xz'), ...pluginDirs])
     log('注入根级插件（undo/market）…')

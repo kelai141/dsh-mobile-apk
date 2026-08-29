@@ -751,6 +751,8 @@ class MainActivity : ComponentActivity() {
         onNotify = { title, text -> NotifyCenter.notify(this, "task", title, text) },
         onAllFilesAccessRequest = { openAllFilesAccessSettings() },
         onDebugLogsRequest = { downloadDebugLogs() },
+        onExportConfig = { exportConfigToShared() },
+        onImportConfig = { importConfigFromShared() },
         onGetSystemDark = {
           (resources.configuration.uiMode and
             android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
@@ -1045,8 +1047,53 @@ class MainActivity : ComponentActivity() {
    *  未授权回退 MediaStore.Downloads；结果复用导出弹窗（同 session 下载）。 */
   private val debugLogging = java.util.concurrent.atomic.AtomicBoolean(false)
 
-  private fun downloadDebugLogs() {
-    if (!debugLogging.compareAndSet(false, true)) return
+  /**
+   * 0.13.1 W4：配置导出——私有 DSH_HOME 的 settings.yaml -> Documents/dshdata/exports/config/settings.yaml。
+   * 引擎读的是私有目录（外部改共享副本无效，v0.10.5 布局），本桥提供安全的手改通道：
+   * 导出 -> 文件管理器编辑 -> 导入。settings.yaml 不含凭据（API key 在私有 deepseek-key.txt）。
+   * 同步执行（JavascriptInterface 专用线程，阻塞 IO 无碍）。
+   */
+  private fun exportConfigToShared(): String {
+    return try {
+      val src = File(engineManager.homeDir, ".dsh/settings.yaml")
+      if (!src.exists()) return """{"ok":false,"error":"settings.yaml 不存在（引擎尚未初始化？）"}"""
+      val dstDir = File(File(engineManager.dshDataDir, "exports"), "config")
+      dstDir.mkdirs()
+      val tmp = File(dstDir, ".settings.yaml.tmp")
+      src.copyTo(tmp, overwrite = true)
+      val dst = File(dstDir, "settings.yaml")
+      if (!tmp.renameTo(dst)) throw java.io.IOException("rename failed")
+      LogCollector.log("dsh-shell", "config exported to " + dst.absolutePath)
+      """{"ok":true,"path":"${dst.absolutePath.replace("\\", "\\\\")}"}"""
+    } catch (t: Throwable) {
+      Log.w(TAG, "config export failed", t)
+      """{"ok":false,"error":"${(t.message ?: "导出失败").replace("\"", "'")}"}"""
+    }
+  }
+
+  /** 0.13.1 W4：配置导入——共享 exports/config/settings.yaml -> 私有 DSH_HOME（引擎 chokidar 热加载）。 */
+  private fun importConfigFromShared(): String {
+    return try {
+      val src = File(File(engineManager.dshDataDir, "exports"), "config/settings.yaml")
+      if (!src.exists()) return """{"ok":false,"error":"未找到 exports/config/settings.yaml（请先导出）"}"""
+      val dst = File(engineManager.homeDir, ".dsh/settings.yaml")
+      // 导入前留一份私有侧备份（防误导入坏配置后无法回退）。
+      if (dst.exists()) {
+        val bak = File(dst.parentFile, "settings.yaml.import-backup")
+        dst.copyTo(bak, overwrite = true)
+      }
+      val tmp = File(dst.parentFile, ".settings.yaml.import-tmp")
+      src.copyTo(tmp, overwrite = true)
+      if (!tmp.renameTo(dst)) throw java.io.IOException("rename failed")
+      LogCollector.log("dsh-shell", "config imported from " + src.absolutePath)
+      """{"ok":true,"path":"${dst.absolutePath.replace("\\", "\\\\")}","hint":"引擎会热加载；若未生效请开发者选项里重启引擎"}"""
+    } catch (t: Throwable) {
+      Log.w(TAG, "config import failed", t)
+      """{"ok":false,"error":"${(t.message ?: "导入失败").replace("\"", "'")}"}"""
+    }
+  }
+
+  private fun downloadDebugLogs() {    if (!debugLogging.compareAndSet(false, true)) return
     Thread {
       try {
         val ts = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
@@ -1552,7 +1599,9 @@ class MainActivity : ComponentActivity() {
         if (!ok) {
           runOnUiThread {
             if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-            applyGuidePhase(GuidePhase.Error, "运行时更新失败")
+            // 0.13.1 W3：解压失败此前零落盘（engine.log 尚不存在、仅 logcat），镜像现场到共享目录。
+            engineManager.mirrorDiagnosticsToShared("snapshot-refresh-failed")
+            applyGuidePhase(GuidePhase.Error, "运行时更新失败（诊断包已存至 Documents/dshdata/diagnostics）")
             showGuide()
           }
           return@Thread
@@ -1606,9 +1655,11 @@ class MainActivity : ComponentActivity() {
       }
       if (!isCurrentEngineFlow(generation)) return@Thread
       if (!booted && !engineManager.engineProcessAlive()) {
+        // 0.13.1 W3：进程死亡现场镜像到共享目录（含退出码），用户可直接取包反馈。
+        engineManager.mirrorDiagnosticsToShared("engine-died-during-boot")
         runOnUiThread {
           if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-          applyGuidePhase(GuidePhase.Error, "引擎启动失败")
+          applyGuidePhase(GuidePhase.Error, "引擎启动失败（诊断包已存至 Documents/dshdata/diagnostics）")
           showGuide()
         }
         onEngineStartTimeout(generation)

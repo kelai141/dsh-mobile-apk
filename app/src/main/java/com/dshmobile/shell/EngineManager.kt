@@ -323,6 +323,22 @@ class EngineManager(private val context: Context, private val pickToken: String?
       dshData.mkdirs()
       File(dshData, ".nomedia").writeText("")
       File(dshData, "exports").mkdirs()
+      // 0.13.1 W3/W4：目录布局说明（每次启动刷新，内容随版本演进）。
+      File(dshData, "README.txt").writeText(
+        "dsh-mobile 共享数据目录（Documents/dshdata）说明\n" +
+          "================================================\n" +
+          "本目录只存放导出物与日志，应用运行数据（配置/会话/凭据）在应用私有目录，\n" +
+          "文件管理器不可见——在本目录改 settings.yaml 不会生效（引擎读不到）。\n\n" +
+          "目录布局：\n" +
+          "  exports/                 会话与配置的导出物\n" +
+          "    config/settings.yaml   配置导出（设置 > 开发者选项 > 导出配置 生成）\n" +
+          "                           修改本文件后点「导入配置」即可生效（无需重装）\n" +
+          "  log/                     开发者调试日志（默认关，设置 > 开发者选项 开启）\n" +
+          "  diagnostics/             启动失败/崩溃时自动生成的诊断包（engine.log + 环境信息 + logcat），\n" +
+          "                           反馈 issue 时直接整目录打包上传即可\n\n" +
+          "改配置的正确途径：设置界面各项开关；或 导出配置 -> 文件管理器编辑 -> 导入配置；\n" +
+          "进阶：设置 > 开发者选项 > 打开控制台（快照内 bash，可直接 vi settings.yaml）。\n",
+      )
     } catch (t: Throwable) {
       Log.w(TAG, "public export repo setup failed", t)
     }
@@ -519,6 +535,10 @@ class EngineManager(private val context: Context, private val pickToken: String?
     return try {
       // 旧进程清理：无论句柄是否还在，先终结残留（引擎挂死/内存里 fork 掉的孤儿）。
       killExistingEngine()
+      // 0.13.1 W5：坏键迁移必须在引擎读 settings 前完成。
+      repairSettingsSeed()
+      // 0.13.1 W3/W4：共享目录 README 每次启动刷新（此前只在迁移路径调用，正常启动不落盘）。
+      ensurePublicExportRepo(dshDataDir)
       applyRuntimePatches()
       // --no-open: the engine must never try to open a desktop browser on Android
       // (the WebView IS the UI). Without it, rc.2's spawn xdg-open on a missing
@@ -535,6 +555,8 @@ class EngineManager(private val context: Context, private val pickToken: String?
     } catch (t: Throwable) {
       Log.e(TAG, "engine start failed", t)
       LogCollector.log(TAG, "engine start FAILED: " + (t.message ?: t.javaClass.simpleName))
+      // 0.13.1 W3：失败现场镜像到共享目录（此前 engine.log 只在私有域，外界拿不到）。
+      mirrorDiagnosticsToShared("engine-spawn-failed")
       false
     } finally {
       STARTING.set(false)
@@ -549,6 +571,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
    */
   private fun startWithArgs(args: Array<String>, env: Map<String, String>): Process {
     val log = File(context.filesDir, "engine.log")
+    rotateEngineLog(log)
     fun build(argv: List<String>): ProcessBuilder =
       ProcessBuilder(argv).also { b ->
         b.environment().putAll(env)
@@ -561,6 +584,140 @@ class EngineManager(private val context: Context, private val pickToken: String?
       if (e.message?.contains("Permission denied") != true) throw e
       Log.w(TAG, "direct exec denied, falling back to linker64: " + e.message)
       build(listOf("/system/bin/linker64") + args.toList()).start()
+    }
+  }
+
+  /**
+   * 0.13.1 W3：engine.log 世代轮转（保留 3 代）——redirectOutput 语义是每次启动截断，
+   * 看门狗 5s 循环重启时崩溃现场每次被清掉，用户永远只剩最后一次的输出。
+   */
+  private fun rotateEngineLog(log: File) {
+    try {
+      val prev1 = File(log.parentFile, "engine.log.1")
+      val prev2 = File(log.parentFile, "engine.log.2")
+      if (prev2.exists()) prev2.delete()
+      if (prev1.exists()) prev1.renameTo(prev2)
+      if (log.exists()) log.renameTo(prev1)
+    } catch (t: Throwable) {
+      Log.w(TAG, "engine.log rotation failed", t)
+    }
+  }
+
+  /** 0.13.1 W3：最近一次死亡的引擎进程退出码（进程活着或句柄丢失时返回 null）。 */
+  fun engineExitInfo(): String? {
+    val held = engineProcess ?: return null
+    if (held.isAlive) return null
+    return try {
+      "exit=" + held.exitValue()
+    } catch (_: Throwable) {
+      null
+    }
+  }
+
+  /**
+   * 0.13.1 W3：失败诊断镜像（best-effort，绝不抛出）。把 engine.log 全世代 + 退出码 +
+   * 环境/设备信息 + 最近 logcat 写入共享目录 Documents/dshdata/diagnostics/<时间戳>-<原因>/，
+   * 用户用文件管理器即可直接复制去反馈（此前全在私有目录，失败时外界拿不到任何现场）。
+   * 触发点：spawn 失败 / 进程死亡 / 健康检查超时 / 快照解压失败 / UndoGate 急救。
+   */
+  fun mirrorDiagnosticsToShared(reason: String) {
+    try {
+      val ts = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(java.util.Date())
+      val dir = File(File(dshDataDir, "diagnostics"), ts + "-" + reason)
+      if (!dir.mkdirs() && !dir.isDirectory) return
+      val log = File(context.filesDir, "engine.log")
+      for (f in arrayOf(log, File(log.parentFile, "engine.log.1"), File(log.parentFile, "engine.log.2"))) {
+        try {
+          if (f.exists()) f.copyTo(File(dir, f.name), overwrite = true)
+        } catch (_: Throwable) {
+        }
+      }
+      try {
+        File(dir, "info.txt").writeText(buildDiagnosticsText(reason))
+      } catch (_: Throwable) {
+      }
+      try {
+        val p = ProcessBuilder("logcat", "-d", "-v", "threadtime", "-t", "400").redirectErrorStream(true).start()
+        val out = p.inputStream.readBytes()
+        if (out.isNotEmpty()) File(dir, "logcat-recent.txt").writeBytes(out)
+      } catch (_: Throwable) {
+      }
+      LogCollector.log(TAG, "diagnostics mirrored: " + dir.absolutePath)
+    } catch (t: Throwable) {
+      Log.w(TAG, "diagnostics mirror failed", t)
+    }
+  }
+
+  private fun buildDiagnosticsText(reason: String): String {
+    val sb = StringBuilder()
+    sb.append("reason: ").append(reason).append('\n')
+    sb.append("time: ").append(java.util.Date().toString()).append('\n')
+    try {
+      sb.append("app: ").append(BuildConfig.VERSION_NAME).append(" (versionCode ").append(BuildConfig.VERSION_CODE).append(")\n")
+    } catch (_: Throwable) {
+    }
+    sb.append("device: ").append(android.os.Build.MANUFACTURER).append(' ').append(android.os.Build.MODEL)
+      .append(" / Android ").append(android.os.Build.VERSION.SDK_INT).append('\n')
+    sb.append("abi: ").append(android.os.Build.SUPPORTED_ABIS.joinToString(",")).append('\n')
+    engineExitInfo()?.let { sb.append("engine_exit: ").append(it).append('\n') }
+    try {
+      val probe = EngineProbe.check(500)
+      sb.append("probe: ").append(probe.toString()).append('\n')
+    } catch (_: Throwable) {
+    }
+    return sb.toString()
+  }
+
+  /**
+   * 0.13.1 W5：settings.yaml 坏键迁移。0.13.0 出厂 seed 的 `llm-deepseek:` 裸键（YAML null）
+   * 会被首启持久化；fx-1 只修了 APK 内出厂模板，覆盖安装升级的设备上存量坏配置仍在——
+   * 引擎 settings section() 抛 TypeError 且被插件加载器吞掉（engine.log 零痕迹），表现为
+   * 模型页提供方列表空白 + 「添加提供方」点击无响应（2026-08-28 模拟器双向复现实锤）。
+   * 启动前把已知坏裸键修复为空对象；幂等、只触碰已知键、失败不阻塞启动。
+   * 判定必须带前瞻：裸键后紧跟缩进子键 = 合法映射（非 null），绝不能改——否则插入重复键
+   * DUPLICATE_KEY 直接炸引擎（2026-08-28 首版修复在 fx-1 正常文件上翻车实录）。
+   */
+  private fun repairSettingsSeed() {
+    try {
+      val f = File(File(homeDir, ".dsh"), "settings.yaml")
+      if (!f.exists()) return
+      val src = f.readText()
+      val lines = src.split("\n")
+      val out = StringBuilder(src.length + 32)
+      var changed = false
+      for (i in lines.indices) {
+        val line = lines[i]
+        val m = Regex("^(llm-deepseek|llm-pi-ai):([ \t]*(#.*)?)$").find(line)
+        if (m == null) {
+          out.append(line).append('\n')
+          continue
+        }
+        // 前瞻下一个非空行：缩进子键 = 合法映射（非 null），跳过不改。
+        // 注意：缩进的【注释行】不构成子键（YAML 注释不参与结构）——fx-1 升级真机的存量
+        // 坏 seed 正是「裸键 + 缩进注释」形态（2026-08-29 真机活体实锤），必须穿透注释继续判定。
+        val next = lines.drop(i + 1)
+          .firstOrNull { it.isNotBlank() && !it.trimStart().startsWith("#") }
+        if (next != null && (next.startsWith(" ") || next.startsWith("\t"))) {
+          out.append(line).append('\n')
+          continue
+        }
+        when (m.groupValues[1]) {
+          "llm-deepseek" -> out.append("llm-deepseek: {}")
+          else -> out.append("llm-pi-ai:\n  providers: {}")
+        }
+        changed = true
+        // 保留原行尾注释（如有）。
+        val comment = m.groupValues[2]
+        if (comment.isNotBlank()) out.append(' ').append(comment.trimStart())
+        out.append('\n')
+      }
+      val fixed = out.toString().removeSuffix("\n")
+      if (changed && fixed != src) {
+        f.writeText(fixed)
+        LogCollector.log(TAG, "settings.yaml repaired: bare null key -> object (0.13.0 seed migration)")
+      }
+    } catch (t: Throwable) {
+      Log.w(TAG, "settings.yaml repair failed (non-fatal)", t)
     }
   }
 

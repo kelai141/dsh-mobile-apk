@@ -17,6 +17,10 @@ class AndroidBridge(
   private val onNotify: (title: String, text: String) -> Unit,
   private val onAllFilesAccessRequest: () -> Unit = {},
   private val onDebugLogsRequest: () -> Unit = {},
+  /** 0.13.1 W4：配置导出（私有 settings.yaml -> 共享 exports/config/）。返回 JSON {ok, path?, error?}。 */
+  private val onExportConfig: () -> String = { """{"ok":false,"error":"bridge not wired"}""" },
+  /** 0.13.1 W4：配置导入（共享 exports/config/settings.yaml -> 私有 DSH_HOME）。返回 JSON 同上。 */
+  private val onImportConfig: () -> String = { """{"ok":false,"error":"bridge not wired"}""" },
   private val onGetSystemDark: () -> Boolean = { false },
   private val onPickImageRequest: (callbackId: String) -> Unit = {},
   private val onSetTextZoomRequest: (percent: Int) -> Unit = {},
@@ -105,6 +109,18 @@ class AndroidBridge(
   fun downloadDebugLogs() {
     onDebugLogsRequest()
   }
+
+  /**
+   * 0.13.1 W4：配置导出（私有 settings.yaml -> Documents/dshdata/exports/config/settings.yaml）。
+   * 引擎 DSH_HOME 在私有域（外部改共享目录副本无效），本桥是安全的手改通道：
+   * 导出 -> 文件管理器编辑 -> 导入。返回 JSON {ok, path?, error?}（同步执行，桥线程允许阻塞 IO）。
+   */
+  @JavascriptInterface
+  fun exportConfig(): String = onExportConfig()
+
+  /** 0.13.1 W4：配置导入（exports/config/settings.yaml -> 私有 DSH_HOME；引擎 chokidar 热加载）。返回 JSON 同上。 */
+  @JavascriptInterface
+  fun importConfig(): String = onImportConfig()
 
   /** True when the app holds All Files Access (external workspace requirement). */
   @JavascriptInterface
