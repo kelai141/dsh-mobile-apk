@@ -692,8 +692,11 @@ class EngineManager(private val context: Context, private val pickToken: String?
           out.append(line).append('\n')
           continue
         }
-        // 前瞻下一个非空行：以空白开头 = 该键下有缩进子级（合法映射），跳过不改。
-        val next = lines.drop(i + 1).firstOrNull { it.isNotBlank() }
+        // 前瞻下一个非空行：缩进子键 = 合法映射（非 null），跳过不改。
+        // 注意：缩进的【注释行】不构成子键（YAML 注释不参与结构）——fx-1 升级真机的存量
+        // 坏 seed 正是「裸键 + 缩进注释」形态（2026-08-29 真机活体实锤），必须穿透注释继续判定。
+        val next = lines.drop(i + 1)
+          .firstOrNull { it.isNotBlank() && !it.trimStart().startsWith("#") }
         if (next != null && (next.startsWith(" ") || next.startsWith("\t"))) {
           out.append(line).append('\n')
           continue
