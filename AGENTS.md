@@ -1,4 +1,4 @@
-# AGENT.md — dsh-mobile-apk 开发地图
+# AGENTS.md — dsh-mobile-apk 开发地图
 
 > **AI 主动更新条款（必须最先执行）**：本文件面向人类与 AI 开发助手，是唯一权威的仓库开发地图。**任何代码变更导致本文件描述失真（文件作用、函数签名、桥协议、构建命令、关键实现落点）时，AI 必须在本轮同步更新本文件，并在文末「更新记录表」登记（时间 + 版本号）。** 变更未触及本文件描述范围时无需更新（避免无意义改写）。若发现本文件与源码不一致，以源码为准并当场修正本文件——不要忽略。
 >
@@ -15,13 +15,14 @@
 - **依赖**：androidx.activity-ktx / core-ktx、commons-compress、xz；Shizuku 零依赖反射（ShizukuSupport.kt，仅探活示例）。
 - **兄弟仓库**（协调仓库 `kelai141/dsh-mobile` 下的子目录）：`dsh-shell-termux`（Termux 执行器）、`dsh-client-ui-responsive`（移动 UI 注入层 + F5 消费端）、`dsh-host-web-compat`（页面注入/兼容）、`plugins/`（dsh-android-bridge / -manage / -linux-env / -file-open，协调仓库内）、`vendor/`（dshmarketplace-plugin、dsh-undo-savepoint 固化副本 + PATCHES.md）。
 - **上游** `deepseek-ai/deepseek-harness`（本地 checkout `dsh/`）：只读参考，**零改动**；一切适配以补丁层/插件/壳侧实现。
+- **版本状态**：**0.13.1 已发布**（Release v0.13.1，versionCode 27，PR #113 合并；详见更新记录表与协调仓 AGENTS.md §1）。当前开放跟踪：#115（市场 Phase2，目标 0.13.2）、#110（randomUUID polyfill 待修）、#108（数据备份 feature）。
 - **环境无关声明**：本文档适用于任意环境（Windows/WSL/Linux/macOS、有/无真机）开发维护者；环境差异点（WSL、ADB 真机、run-as）已在对应章节标注。
 
 ## 2. 构建与验证命令
 
 ```powershell
 # 一键双 ABI（协调仓库根；快照→注入→门禁→gradle→out/）：
-pwsh -File scripts\build-apk-013.ps1 -Suffix ""          # 产物 out\v0.13.0\dsh-mobile-apk-v<ver>-<abi>.apk
+pwsh -File scripts\build-apk-013.ps1 -Suffix ""          # 产物 out\v<版本>\dsh-mobile-apk-v<ver>-<abi>.apk
 # 快照（Termux 源 + TARGETS 预装 + licenses + pnpm 装配 + 瘦身 + 归档）：
 node scripts\build-snapshot-013.mjs <arm64|x86_64>
 # 插件单测/冒烟：
@@ -35,7 +36,7 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 **云端构建（0.13.0 起，宿主=本仓库，自包含）**：`.github/workflows/build-apk.yml`（`workflow_dispatch` 手动，matrix arm64/x86_64）托管整套构建链并只操作本仓库——快照从源重建（`base/` 底座归档为输入，Git LFS）、6 个缺 lib/ 的插件 npm 构建、注入/门禁/gradle 全部云端完成，仅 `upload-artifact` 供本地下载 debug，不出 Release；**不依赖协调库**（私库，GITHUB_TOKEN 无法签出）。`build-apk.mjs` 以 `DSH_APK_DIR=$GITHUB_WORKSPACE` 指向本仓库（gradle 在此）。本地仍在协调库根跑 `pwsh scripts\build-apk-013.ps1`（`scripts/` 前缀）。
 
 **设备验证链路**（真机 arm64 vivo V2425A `10AF2B0GN0001F2`；模拟器 MuMu x86_64 `127.0.0.1:16416/7555`）：
-- 安装：`adb -s <serial> install -r -t out\v0.13.0\...apk`（同签名 debug.keystore；**指纹变更触发 refreshSnapshot 全量重解压 ≈2-4 分钟，勿在解压中杀进程**）。
+- 安装：`adb -s <serial> install -r -t out\v<版本>\...apk`（同签名 debug.keystore；**指纹变更触发 refreshSnapshot 全量重解压 ≈2-4 分钟，勿在解压中杀进程**）。
 - 引擎探活：`adb -s <serial> forward tcp:23080 tcp:3080` → `http://127.0.0.1:23080/`。
 - WebView 调试：`adb shell "cat /proc/net/unix | grep webview_devtools"` → `forward tcp:29225 localabstract:webview_devtools_remote_<pid>`（**每次重启 pid 变**）→ CDP ws 连接后 Runtime.evaluate 驱动（例子脚本见 `.deploy-tmp/cdp-*.mjs`；断言注意 input placeholder 不在 innerText 里）。
 - 远程 RPC（测试面）：POST `/api/<method>`，body 必须全信封 `{"type":"client-request","rpcId":"r1","method":"session.list","payload":{}}`；`session.prompt` 拒绝 live 会话（被 UI 打开的）——直接 API 测代理需先用 session.create 建全新会话。
@@ -59,9 +60,9 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 
 1. **取代码**：clone 协调仓库 `kelai141/dsh-mobile`（主分支 `main`）；壳子仓库 `dsh-mobile-apk/` 是**独立 git**（主分支亦 `main`），按需 clone/关联；上游 `dsh/` 只读。
 2. **构建快照**（仅 Windows 需 WSL）：`node scripts\build-snapshot-013.mjs <arm64|x86_64>`——Termux 源装配 + TARGETS 预装 + pnpm + 权威 cordis patch 覆盖 + 瘦身 + 归档（产物 snapshot.tar.xz + snapshot.sha256）。
-3. **一键打包**：`pwsh -File scripts\build-apk-013.ps1 -Suffix ""` → `out\v0.13.0\dsh-mobile-apk-v<ver>-<abi>.apk`；门禁失败会中断并提示（清单见第 2 节）。
+3. **一键打包**：`pwsh -File scripts\build-apk-013.ps1 -Suffix ""` → `out\v<版本>\dsh-mobile-apk-v<ver>-<abi>.apk`；门禁失败会中断并提示（清单见第 2 节）。
 4. **ABI 核对（坑 18）**：`aapt dump badging <apk>` 看 native-code，或解快照 tar 读 `usr/bin/node` 的 ELF e_machine（**62=x86_64，183=arm64**）——与目标设备一致再装。
-5. **装机**：真机 `adb -s <serial> install -r -t out\v0.13.0\...apk`（同签名 debug.keystore，坑 10）；模拟器 `adb -s 127.0.0.1:16416 install -r -t ...-x86_64.apk`。**首装/指纹变 → refreshSnapshot 全量重解压 ≈2-4 分钟，勿杀进程**。
+5. **装机**：真机 `adb -s <serial> install -r -t out\v<版本>\...apk`（同签名 debug.keystore，坑 10）；模拟器 `adb -s 127.0.0.1:16416 install -r -t ...-x86_64.apk`。**首装/指纹变 → refreshSnapshot 全量重解压 ≈2-4 分钟，勿杀进程**。
 6. **验证**：`adb -s <serial> forward tcp:23080 tcp:3080` → `http://127.0.0.1:23080/`；WebView CDP 与 RPC 信封写法见第 2 节。
 
 ### 3.3 改动流程规范（改哪个仓库、改完必做三件事）
@@ -156,6 +157,9 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 27. **引擎侧页面误调 openNativePath（2026-08-27 记录在案）**：logcat 出现 `dsh-image: openNativePath: not exists: 自动扫描系统无线调试的配对/连接端口…`——引擎 UI 包把按钮 title 文案当路径传给了桥调用。壳侧安全拒绝 no-op 无实害；根因在上游引擎页面包（非本仓库管辖），升级引擎时留意。
 28. **dsh-shell run() 返回 CollectedOutput 结构体（2026-08-27 活体插桩实锤，已修）**：`shellFace.run()` 契约返回 `{stdout:{text,truncated,spillPath?}, stderr:{…}, exitCode,…}` 而非字符串（引擎内置 bash 工具经 `streamText(output).text` 同款读取）。插件历史代码 `String(r.stdout)` 直取 → 恒 `"​[object Object]"`：**进程真实执行（审计恒 ok）、模型转录全毁**，并连带 device_info 满屏 `?` 占位（拿乱码 grep MODEL= 零匹配）与 lossless 拒收（可选字段 undefined 成员被引擎整值拒绝）。修复 = `collectText()` 解包 + `pickText()` 类型闸 render（非 string 一律 JSON 转写，杜绝 [object Object] 再入转录）+ 可选成员空串兜底。**伴生雷**：NSD 抓的连接端口随无线调试重启轮换（37575 失联实锤）→ `resolveLivePort()` 配置端口失效即回退 5555。**排障方法论沉淀**：①疑似「改码不改行为」先杀引擎进程再验——`force-stop` 后可能有孤儿 `node -`（linker64 链）幸存占 5037/3080 继续用旧模块（/proc 扫 cmdline 对照注入 mtime）；②设备端插件注入用 base64 分块 `printf %s >> ` 通道（MSYS /tmp 不跨执行块存活，stdin 管道会截断）；③插桩指纹（状态消息缀 ⟪标记⟫）一次往返即可判定加载版本。
 29. **引擎会话档位为事件溯源、按会话隔离（2026-08-27 澄清，非缺陷）**：UI 档位选择器写入会话日志 `sandbox/mode` 事件（`effectiveSandboxMode` fold，最后一条生效），重启经重放恢复、两会话互不可见；`session.list` projections.permissions.currentValue 为真值。状态端点显示的 `writeMode=workspace-write` 仅部署默认（装配 yml shell-termux config），工具实际放行以会话档位为准（gateFor→sandboxPolicy.resolve）。勿把部署默认当死锁。
+30. **ps1 双 ABI 循环后 assets 停留 x86_64（2026-08-29 实锤，坑 18 现代版）**：build-apk-013.ps1 循环内按 ABI 覆盖 `assets/snapshot.tar.xz`，循环结束留在 x86_64——此后直接 `gradlew assembleDebug` 的 debug 包即 x86 树，装 arm64 真机报 EM_X86_64（本轮已踩）。铁律：真机安装只用 ps1 对应 ABI 命名产物；存疑时 `od -A d -j 18 -N 2 -t u1` 读 node ELF 机器码（183=arm64/62=x86_64）。
+31. **force-stop 杀不死 linker64 回退子进程（2026-08-29 vivo 实锤，0.14 修复）**：升级后旧引擎孤儿存活 → 双引擎抢 3080（探活打到旧引擎、新引擎 bind 失败循环；两代 engine.log 交错误导排障）。真机找引擎 `ps -A | grep linker64`（进程名非 node，pidof node 必空）；处置：run-as kill 全部 linker64 → 看门狗 ~7s 自愈。`pkill -f bin.js` 在 vivo 疑似不生效（坑 28 排障方法论①的 /proc cmdline 扫描为可靠手段）。
+32. **adb forward 静默失效（2026-08-29 实锤）**：APK 重装/USB 重枚举后宿主 forward 清空 → 宿主探活 000，但设备内正常（用户 WebView 秒起）——「引擎挂了」的判断必须先 `adb forward --list` 再重 forward，否则误诊。
 
 ## 7. GPL 合规（2026-08-23 定稿）
 
@@ -194,3 +198,4 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 | 2026-08-28 | 0.13.0 | **0.13.0 正式版发布**：versionCode 25（覆盖安装 preview 24）；workflow suffix 双修（PR #97 步骤 fallback + PR #98 输入默认值，GitHub 空串输入被默认值顶替行为实锤）；纯净版双 ABI 构建（versionName 0.13.0，aapt 验证）；Release v0.13.0 全套 13 资产（双 APK/双快照/7 插件包/MANIFEST/notes，旧版发布规则沿用）；main 分支保护定案（直推被拦，改动走 PR 合并通道） | AI 开发助手 |
 | 2026-08-28 | 0.13.0-fx-1 | **fx-1 补丁版发布**：出厂 seed `llm-deepseek:` 裸键 null 实锤（settings-file section() TypeError → llm-deepseek apply 中途死亡 → 模型页全灭，模拟器首启实验逐环验证）；PR #101 seed 改空对象 + #104 注释符修补（# 误入 JS 数组字面量致 SyntaxError——教训：改构建脚本必须本地 node --check）+ #102 versionCode 26；fx-1 全新安装复验通过（seed 含空对象、12 命名空间、模型目录含 vision-exp）；Release v0.13.0-fx-1 全套 13 资产 | AI 开发助手 |
 | 2026-08-28 | 0.13.1 | **0.13.1 修复批（已发布：PR #113 合并 e47c400，Release v0.13.1 全套 15 资产，versionCode 27）**：W1 市场安装 execPath 安全化——真机 linker64 回退启动污染 process.execPath，市场装插件 execFile(linker64,[bin.js]) 报 bad ELF magic:23212f75（#83/#89/#96 根因实锤）；patch-marketplace 补丁 B（TERMUX__PREFIX/bin/node，双仓同步+三形态测试）。W2 canvas 出厂依赖——@napi-rs/canvas-android-arm64 实为 Bionic 预编译（本文件旧记录误判已改）；构建脚本 7c2 手工装配（仅 arm64）。W5 模型页提供方空白/添加按钮死根因=0.13.0 存量坏 seed 持久化（fx-1 只修出厂模板，升级设备不生效；模拟器双向复现）→ EngineManager 启动前坏键迁移（前瞻缩进防 DUPLICATE_KEY——首版无前瞻在 fx-1 正常文件上翻车，坑已录）。W3 engine.log 世代轮转（3 代，治看门狗截断毁现场）+ 失败诊断镜像（diagnostics/<ts>-<原因>/ 全触发点覆盖，undo-gate 实测）+ dshdata README.txt 每次启动生成。W4 配置导入导出桥（AndroidBridge.exportConfig/importConfig + DevSection 按钮 + settings.yaml.import-backup 防误导）。W6 apt 链三修复（trusted.gpg.d 悬空链接落实体/Dir::Log/install-clang.sh 解包式安装器端到端实测 clang 21.1.8；dpkg cfg.d app 域致命=apt install 不可用，M3 openjdk 系 root adbd 假象）+ LD_LIBRARY_PATH 先于外部命令坑。构建链脚本改动与协调仓双写同步 | AI 开发助手 |
+| 2026-08-30 | 0.13.1 | **文档结构化增补**：坑 30-32 登记（assets ABI 残留/linker64 孤儿 force-stop 杀不死/forward 静默失效——与协调仓雷点 14-16 同源）；标题 AGENT.md→AGENTS.md 对齐文件名；产物路径硬编码 v0.13.0 → v<版本> 占位（产物命名已由 ps1 从 gradle 单一来源读取）；§1 补版本状态与开放跟踪行 | AI 开发助手 |
