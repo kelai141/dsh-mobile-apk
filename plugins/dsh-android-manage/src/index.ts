@@ -555,7 +555,10 @@ function tools(priv: PrivilegeFace) {
         channel = 'input'
       } else {
         // ADBKeyboard 协议：am broadcast -a ADB_INPUT_TEXT --es msg <文本>
-        // shell 单引号包裹 + 内部单引号用 '\'' 惯用法转义
+        // 本应用 0.13.2 起内嵌同协议 IME（com.dsharnessmobile.shell/.AdbKeyboardService）：
+        // 先 ime enable（加入输入法列表，不抢默认），广播仅在用户切到该 IME 时生效。
+        const IME_ID = 'com.dsharnessmobile.shell/.AdbKeyboardService'
+        await priv.execAdbShell(`ime enable ${IME_ID}`).catch(() => ({ ok: false, stdout: '' }))
         const quoted = `'${raw.replace(/'/g, `'\\''`)}'`
         line = `am broadcast -a ADB_INPUT_TEXT --es msg ${quoted}`
         channel = 'adbkeyboard'
@@ -565,6 +568,9 @@ function tools(priv: PrivilegeFace) {
       const errMark = /error:|Error|Exception|unknown/.test(r.stdout)
       if (errMark && channel === 'adbkeyboard' && /not found|Unable to find|无|没有/.test(r.stdout)) {
         return { ok: false, denied: false, channel, text: 'ADBKeyboard IME 未安装：中文输入暂不可用（0.13.2 内嵌 IME 落地后解除）；ASCII 文本可用 input text' }
+      }
+      if (channel === 'adbkeyboard' && /broadcast not sent|no handlers|No receivers/.test(r.stdout)) {
+        return { ok: false, denied: false, channel, text: 'ADB 输入通道未生效：请在系统输入法设置中把「DeepSeek ADB 输入通道」切换为当前输入法后再试（ascii 文本不受影响）' }
       }
       return { ok: !errMark, denied: false, channel, text: errMark ? '输入返回异常：' + r.stdout.slice(0, 300) : `已输入 ${raw.slice(0, 24)}${raw.length > 24 ? '…' : ''}（${channel}）` }
     },
