@@ -592,15 +592,80 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
     appendFileSync(probe, new Date().toISOString() + ' apply-ran\n')
   } catch { /* 探针失败忽略 */ }
   try {
+    // ── 实时事件流（W7 悬浮球，2026-08-31；PRD-0.13.2 §4.2）──
+    // 壳侧 OverlayService 经 FileObserver tail 消费（毫秒级、省电）；文件上限
+    // 512KB，超限轮转 .1 一代。条目使用紧凑键：t=epoch ms s=sessionId k=类型。
+    const LIVE_FILE = (process.env.DSH_HOME ?? '/data/user/0/com.dsharnessmobile.shell/files/home/.dsh') + '/.live.ndjson'
+    const LIVE_MAX = 512 * 1024
+    let liveBytes = 0
+    try { liveBytes = statSync(LIVE_FILE).size } catch { /* 新文件 */ }
+    const appendLive = (line: string) => {
+      try {
+        if (liveBytes + line.length > LIVE_MAX) {
+          try { renameSync(LIVE_FILE, LIVE_FILE + '.1') } catch { rmSync(LIVE_FILE, { force: true }) }
+          liveBytes = 0
+        }
+        appendFileSync(LIVE_FILE, line)
+        liveBytes += line.length
+      } catch { /* 实时流失败不阻断主流程 */ }
+    }
+    // callId → {name, args, start}（tool/result 按 source.callId 配对，给耗时与参数）
+    const liveCalls = new Map<string, { name: string; args: string; start: number }>()
+    const live = (session: unknown, ev: { type?: string; data?: Record<string, unknown> }) => {
+      const sess = session as { id?: unknown } | undefined
+      const s = String(sess?.id ?? '')
+      const t = Date.now()
+      const k = ev.type ?? ''
+      if (k === 'tool/call') {
+        const d = ev.data as { name?: string; arguments?: string; callId?: string }
+        const args = String(d.arguments ?? '').slice(0, 240)
+        if (d.callId) liveCalls.set(String(d.callId), { name: String(d.name ?? ''), args, start: t })
+        appendLive(JSON.stringify({ t, s, k: 'tool_call', name: String(d.name ?? ''), args }) + '\n')
+        return
+      }
+      if (k === 'tool/result') {
+        const d = ev.data as { message?: { source?: { callId?: string }; content?: Array<Record<string, unknown>> } }
+        const callId = d?.message?.source?.callId ? String(d.message.source.callId) : ''
+        const call = callId ? liveCalls.get(callId) : undefined
+        const err = Array.isArray(d?.message?.content) && d.message.content.some((c) => c.isError === true)
+        appendLive(JSON.stringify({
+          t, s, k: 'tool_result', name: call?.name ?? '', args: call?.args ?? '',
+          dur: call ? t - call.start : undefined, err,
+        }) + '\n')
+        if (callId) liveCalls.delete(callId)
+        if (liveCalls.size > 256) { const first = liveCalls.keys().next().value; if (first !== undefined) liveCalls.delete(first) }
+        return
+      }
+      if (k === 'assistant/message') {
+        const content = (ev.data as { message?: { content?: Array<{ text?: string }> } })?.message?.content
+        const text = Array.isArray(content) ? content.map((c) => c.text ?? '').join('').trim() : ''
+        appendLive(JSON.stringify({ t, s, k: 'text', sum: text.slice(0, 160) || '（空回复）' }) + '\n')
+        return
+      }
+      if (k === 'turn/end') {
+        const d = ev.data as { outcome?: unknown }
+        appendLive(JSON.stringify({ t, s, k: 'turn_end', ok: d?.outcome === 'success' }) + '\n')
+        return
+      }
+      if (k === 'session/title') {
+        const d = ev.data as { title?: string }
+        appendLive(JSON.stringify({ t, s, k: 'title', title: String(d?.title ?? '').slice(0, 80) }) + '\n')
+      }
+    }
     ctx.on('session/event', (session: unknown, event: unknown) => {
       if (event === null || typeof event !== 'object') return
-      const ev = event as { type?: string; data?: { message?: { content?: Array<{ text?: string }> } } }
-      if (ev.type !== 'assistant/message') return
-      const content = ev.data?.message?.content
-      const text = Array.isArray(content) ? content.map((c) => c.text ?? '').join('').trim() : ''
-      const snippet = text.slice(0, 80) || '任务完成'
-      const sess = session as { id?: unknown; header?: { title?: string } } | undefined
-      appendTaskMarker(sess?.id, sess?.header?.title, snippet)
+      const ev = event as { type?: string; data?: Record<string, unknown> }
+      const type = ev.type ?? ''
+      // 通知标记（既有）：仅 assistant/message 完成轮次
+      if (type === 'assistant/message') {
+        const content = (ev.data as { message?: { content?: Array<{ text?: string }> } })?.message?.content
+        const text = Array.isArray(content) ? content.map((c) => c.text ?? '').join('').trim() : ''
+        const snippet = text.slice(0, 80) || '任务完成'
+        const sess = session as { id?: unknown; header?: { title?: string } } | undefined
+        appendTaskMarker(sess?.id, sess?.header?.title, snippet)
+      }
+      // 实时流（悬浮球）
+      try { live(session, ev) } catch { /* 单条失败忽略 */ }
     })
     try {
       const probe = TASK_DONE_MARKER.replace('.task-done.ndjson', '.notify-probe.log')
