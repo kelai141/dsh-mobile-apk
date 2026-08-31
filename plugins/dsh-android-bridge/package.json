@@ -1,7 +1,7 @@
 {
   "name": "@dsh-android/dsh-android-bridge",
   "description": "Android privilege bridge: ADB authorization state machine, fail-closed execution, audit — the only controlled privilege-extension channel (PRD F1.7)",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -18,7 +18,9 @@
       "platform": "web"
     }
   },
-  "files": ["lib"],
+  "files": [
+    "lib"
+  ],
   "license": "MIT",
   "private": true,
   "scripts": {
