@@ -205,7 +205,7 @@ class OverlayService : Service() {
       text = "停止"
       setTextColor(Color.WHITE); textSize = 14f
       gravity = Gravity.CENTER
-      background = GradientDrawable().apply { setColor(Color.rgb(0xe0, 0x48, 0x48)); cornerRadius = (6 * dp).toInt() }
+      background = GradientDrawable().apply { setColor(Color.rgb(0xe0, 0x48, 0x48)); cornerRadius = 6 * dp }
       setPadding((24 * dp).toInt(), (8 * dp).toInt(), (24 * dp).toInt(), (8 * dp).toInt())
       setOnClickListener { requestStop() }
     }

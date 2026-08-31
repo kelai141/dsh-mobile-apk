@@ -53,8 +53,8 @@ class AndroidBridge(
   private val onDiscoverAdbPorts: () -> String = { """{"pair":null,"connect":null,"candidates":[]}""" },
   /** 0.13.2 W7：悬浮球开关态（持久化，OverlayController）。 */
   private val onGetOverlayEnabled: () -> Boolean = { false },
-  /** 0.13.2 W7：悬浮球开关（未授 overlay 权限时由控制器发起系统授权引导）。 */
-  private val onSetOverlayEnabled: (Boolean) -> Unit = {},
+  /** 0.13.2 W7：悬浮球开关（未授 overlay 权限时由控制器发起系统授权引导）。返回是否已启动。 */
+  private val onSetOverlayEnabled: (Boolean) -> Boolean = { _ -> false },
 ) {
 
   @JavascriptInterface
