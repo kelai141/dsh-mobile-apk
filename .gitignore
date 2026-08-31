@@ -11,3 +11,7 @@ token*
 *.pem
 *.p12
 .kotlin/
+# 插件构建产物（云端/本地 npm 构建生成，不入库；2026-08-31 收口）
+plugins/*/lib/
+plugins/*/node_modules/
+plugins/*/cbin_*
