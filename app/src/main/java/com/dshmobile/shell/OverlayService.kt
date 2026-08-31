@@ -44,6 +44,7 @@ class OverlayService : Service() {
   private var ballView: View? = null
   private var panelView: View? = null
   private var ballParams: WindowManager.LayoutParams? = null
+  private var panelParams: WindowManager.LayoutParams? = null
 
   // ── live 流状态 ────────────────────────────────────────────────
   private var watcher: FileObserver? = null
@@ -73,6 +74,7 @@ class OverlayService : Service() {
 
   override fun onCreate() {
     super.onCreate()
+    instance = this
     wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
     showBall()
     startWatcher()
@@ -80,7 +82,10 @@ class OverlayService : Service() {
   }
 
   override fun onDestroy() {
+    if (instance === this) instance = null
     watcher?.stopWatching()
+    // 避让帧清零（页面恢复全宽）
+    frameConsumer?.invoke("var b=document.body||document.documentElement;b.style.paddingRight='0px';b.style.paddingBottom='0px';true;")
     removeWindow(ballView); ballView = null
     removeWindow(panelView); panelView = null
     super.onDestroy()
@@ -116,6 +121,7 @@ class OverlayService : Service() {
     wm.addView(ball, params)
     ballView = ball
     attachBallTouch(ball)
+    emitFrame()
   }
 
   private fun attachBallTouch(ball: View) {
@@ -137,12 +143,62 @@ class OverlayService : Service() {
           p.y = p.y.coerceIn(0, resources.displayMetrics.heightPixels - v.height)
           if (p.x > 0) p.x -= (8 * resources.displayMetrics.density).toInt() // 贴边留缝
           wm.updateViewLayout(v, p)
+          // 面板若已展开，随球重新定位；页面避让帧同步
+          if (panelView != null) repositionPanel()
+          emitFrame()
           if (!moved) togglePanel()
           true
         }
         else -> false
       }
     }
+  }
+
+  /**
+   * 向引擎页面广播避让帧：球贴右缘/下缘时注入 body padding，页面内容让出
+   * （仅本应用 WebView 生效；第三方应用无法被 overlay 避让——系统窗口机制限制）。
+   */
+  private var lastRight = 0
+  private var lastBottom = 0
+
+  private fun emitFrame() {
+    val p = ballParams ?: return
+    val dp = resources.displayMetrics.density
+    val w = resources.displayMetrics.widthPixels
+    val h = resources.displayMetrics.heightPixels
+    val margin = (10 * dp).toInt()
+    // 贴边判定容差 20dp：吸附留缝（8dp）时也要触发避让
+    val edgeTol = (20 * dp).toInt()
+    lastRight = if (p.x + p.width >= w - edgeTol) p.width + margin else 0
+    lastBottom = if (p.y + p.height >= h - edgeTol) p.height + margin else 0
+    // 直接改页面 body 样式（不依赖页面内 window.__dshOverlay 定义——早期实现是调用式，恒短路）
+    val js = "var b=document.body||document.documentElement;b.style.paddingRight='" + lastRight + "px';b.style.paddingBottom='" + lastBottom + "px';true;"
+    frameConsumer?.invoke(js)
+  }
+
+  /** 页面加载完成后重放最后一帧（启动期页面未就绪时首帧注入会落空）。 */
+  fun replayFrame() {
+    if (ballParams == null) return
+    val js = "var b=document.body||document.documentElement;b.style.paddingRight='" + lastRight + "px';b.style.paddingBottom='" + lastBottom + "px';true;"
+    frameConsumer?.invoke(js)
+  }
+
+  /** 面板重新定位：跟随球（球上侧展开，越界翻到下侧；水平向球所在侧贴边）。 */
+  private fun repositionPanel() {
+    val pv = panelView ?: return
+    val pp = panelParams ?: return
+    val dp = resources.displayMetrics.density
+    val w = resources.displayMetrics.widthPixels
+    val h = resources.displayMetrics.heightPixels
+    val bp = ballParams ?: return
+    val panelW = pp.width
+    val panelH = pp.height
+    val gap = (10 * dp).toInt()
+    pp.x = if (bp.x + bp.width / 2 < w / 2) (6 * dp).toInt() else w - panelW - (6 * dp).toInt()
+    pp.y = bp.y - panelH - gap
+    if (pp.y < (8 * dp).toInt()) pp.y = bp.y + bp.height + gap
+    if (pp.y + panelH > h - (8 * dp).toInt()) pp.y = h - panelH - (8 * dp).toInt()
+    try { wm.updateViewLayout(pv, pp) } catch (_: Exception) {}
   }
 
   private fun setBallState(state: BallState) {
@@ -241,11 +297,14 @@ class OverlayService : Service() {
         WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
       PixelFormat.TRANSLUCENT,
     ).apply {
-      gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+      gravity = Gravity.TOP or Gravity.START
+      x = 0
       y = (80 * dp).toInt()
     }
     wm.addView(body, params)
     panelView = body
+    panelParams = params
+    repositionPanel()
     renderList(listBox, statusText, titleText)
     probeEngine()
     scheduleProbe()
@@ -448,5 +507,20 @@ class OverlayService : Service() {
         }
       }
     }.start()
+  }
+
+  companion object {
+    /** 当前活跃服务实例（replayFrame 等外部入口用）。 */
+    @Volatile
+    var instance: OverlayService? = null
+      private set
+
+    /**
+     * 页面避让帧消费者（MainActivity 注册/注销）：把球的贴边避让量以 JS
+     * 注入引擎 WebView（body padding）。
+     * 第三方应用无法被 overlay 避让（系统窗口机制限制）；仅本应用页面生效。
+     */
+    @Volatile
+    var frameConsumer: ((String) -> Unit)? = null
   }
 }

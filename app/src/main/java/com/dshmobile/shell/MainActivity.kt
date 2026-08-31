@@ -524,6 +524,16 @@ class MainActivity : ComponentActivity() {
     if (!userClosedEngine) {
       startEngineService()
     }
+    // 悬浮球页面避让帧消费者（OverlayService → WebView body padding；先于
+    // ensureStarted 注册——startService 的 onCreate 同步 emit 首帧，注册晚了会丢帧）。
+    OverlayService.frameConsumer = { js ->
+      runOnUiThread {
+        try {
+          if (::webView.isInitialized) webView.evaluateJavascript(js, null)
+        } catch (_: Exception) {
+        }
+      }
+    }
     // 0.13.2 W7：悬浮球开关已开时补启（含从系统授权页返回的场景——权限授予后 onResume 自动拉起）。
     OverlayController.ensureStarted(this)
     // ADB 端口后台预取（配对页秒回，不再同步等 NSD——2026-08-27 报障修复；15s TTL 内不重扫）。
@@ -624,6 +634,8 @@ class MainActivity : ComponentActivity() {
 
   override fun onDestroy() {
     super.onDestroy()
+    // 悬浮球避让帧消费者清除（Service 侧持有引用，避免 Activity 泄漏）
+    OverlayService.frameConsumer = null
     engineMonitorHandler.removeCallbacks(engineMonitorRunnable)
     freezeHandler.removeCallbacks(freezeRunnable)
     pickTtlHandler.removeCallbacks(pickTtlRunnable)
@@ -705,6 +717,8 @@ class MainActivity : ComponentActivity() {
         super.onPageFinished(view, url)
         pushSystemDark(view)
         pushWebInsets(view)
+        // 悬浮球避让帧补放（启动期首帧注入若因页面未就绪落空，此处重放）
+        if (isEngineSource(url)) OverlayService.instance?.replayFrame()
         if (isEngineSource(url) && !userClosedEngine) startFreezeWatchdog()
       }
     }
