@@ -12,6 +12,8 @@
   <uses-permission android:name="android.permission.WAKE_LOCK" />
   <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
   <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+  <!-- 0.13.2 W7：悬浮球（系统级悬浮窗，用户经设置页授予；OverlayController 引导）。 -->
+  <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
   <application
     android:label="@string/app_name"
@@ -48,6 +50,11 @@
         <action android:name="ADB_CLEAR_TEXT" />
       </intent-filter>
     </receiver>
+
+    <!-- 0.13.2 W7：悬浮球实时面板（TYPE_APPLICATION_OVERLAY + FileObserver 事件流）。 -->
+    <service
+      android:name=".OverlayService"
+      android:exported="false" />
 
     <!-- 0.13.0 F2/M3.4：开机自启接收器（恢复用户上次同意的运行状态；restart 后需已启动过）。 -->
     <receiver

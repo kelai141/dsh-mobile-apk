@@ -524,6 +524,8 @@ class MainActivity : ComponentActivity() {
     if (!userClosedEngine) {
       startEngineService()
     }
+    // 0.13.2 W7：悬浮球开关已开时补启（含从系统授权页返回的场景——权限授予后 onResume 自动拉起）。
+    OverlayController.ensureStarted(this)
     // ADB 端口后台预取（配对页秒回，不再同步等 NSD——2026-08-27 报障修复；15s TTL 内不重扫）。
     // F1 常驻预热同线程搭车：server 就绪 + 密钥生成移出配对关键路径（2026-08-27 配对窗口实锤修复）。
     try {
@@ -794,6 +796,9 @@ class MainActivity : ComponentActivity() {
           AdbState.stateJson(this)
         },
         onSetAdbAllow = { enable -> AdbState.setAllowSwitch(this, enable) },
+        // 0.13.2 W7：悬浮球开关（控制器处理 overlay 权限引导；onResume 补启已授权的开关）。
+        onGetOverlayEnabled = { OverlayController.isEnabled(this) },
+        onSetOverlayEnabled = { enable -> OverlayController.setEnabled(this, enable) },
         // 0.14 真实配对：码值只经 adb argv（壳侧），端口取自系统「无线调试」弹窗；配对成功才写 paired。
         // F3 结构化结果（JSON ok/reason/message）：前端按 reason 分流文案，拒绝「输什么都像码错」。
         onSetAdbPair = { code, pairPort, connectPort ->

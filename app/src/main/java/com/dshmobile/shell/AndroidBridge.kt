@@ -51,6 +51,10 @@ class AndroidBridge(
    *  与壳 AdbState.discoverPorts 同形状（桥默认值同为完整结构，不再返回 "[]" 造成两端不一致）。
    *  0.14：Shizuku 探活重设计与豁免升级。 */
   private val onDiscoverAdbPorts: () -> String = { """{"pair":null,"connect":null,"candidates":[]}""" },
+  /** 0.13.2 W7：悬浮球开关态（持久化，OverlayController）。 */
+  private val onGetOverlayEnabled: () -> Boolean = { false },
+  /** 0.13.2 W7：悬浮球开关（未授 overlay 权限时由控制器发起系统授权引导）。 */
+  private val onSetOverlayEnabled: (Boolean) -> Unit = {},
 ) {
 
   @JavascriptInterface
@@ -220,6 +224,14 @@ class AndroidBridge(
    *  耗时为原生 TCP 盲扫（毫秒/端口）；无线调试未开时返回 []。 */
   @JavascriptInterface
   fun discoverAdbPorts(): String = onDiscoverAdbPorts()
+
+  /** 悬浮球开关态（持久化；开发者选项 → 悬浮球）。 */
+  @JavascriptInterface
+  fun getOverlayEnabled(): Boolean = onGetOverlayEnabled()
+
+  /** 悬浮球开关（控制器负责权限引导）；返回当前是否已启动。 */
+  @JavascriptInterface
+  fun setOverlayEnabled(enable: Boolean): Boolean = onSetOverlayEnabled(enable)
 
   companion object {
     /**
