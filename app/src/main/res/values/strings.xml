@@ -16,4 +16,6 @@
   <string name="ds_runtime_pending">运行时待解压</string>
   <string name="ds_storage_granted">存储已授权</string>
   <string name="ds_storage_needed">去授权存储</string>
+  <!-- 0.13.2 ADB 输入通道 IME（ADBKeyboard 协议；引擎 android_ui_input 中文输入通道） -->
+  <string name="adb_keyboard_label">DeepSeek ADB 输入通道</string>
 </resources>

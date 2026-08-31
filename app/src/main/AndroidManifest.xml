@@ -24,6 +24,31 @@
       android:exported="false"
       android:foregroundServiceType="dataSync" />
 
+    <!-- 0.13.2 ADB 输入通道 IME（ADBKeyboard 协议；android_ui_input 中文输入；
+         仅在被选为当前输入法时提交文本，见 AdbKeyboardService.canCommit）。 -->
+    <service
+      android:name=".AdbKeyboardService"
+      android:exported="true"
+      android:permission="android.permission.BIND_INPUT_METHOD"
+      android:label="@string/adb_keyboard_label">
+      <intent-filter>
+        <action android:name="android.view.InputMethod" />
+      </intent-filter>
+      <meta-data
+        android:name="android.view.im"
+        android:resource="@xml/input_method" />
+    </service>
+
+    <!-- ADBKeyboard 协议广播入口（ADB_INPUT_TEXT/ADB_CLEAR_TEXT）；仅在 IME 活跃时生效。 -->
+    <receiver
+      android:name=".AdbKeyboardReceiver"
+      android:exported="true">
+      <intent-filter>
+        <action android:name="ADB_INPUT_TEXT" />
+        <action android:name="ADB_CLEAR_TEXT" />
+      </intent-filter>
+    </receiver>
+
     <!-- 0.13.0 F2/M3.4：开机自启接收器（恢复用户上次同意的运行状态；restart 后需已启动过）。 -->
     <receiver
       android:name=".BootReceiver"
