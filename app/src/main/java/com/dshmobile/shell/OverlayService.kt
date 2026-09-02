@@ -148,21 +148,26 @@ class OverlayService : Service() {
     haloView = halo
 
     val root = FrameLayout(this).apply {
-      // 球的窗口锚点 = (0,0)，halo 同心环绕（halo 64 > ball 34，球 margin 15dp 居中于 halo）。
-      // 展开时窗口在右侧扩展，球位置不动，拖动锚点稳定（v2 单一窗口天然跟随）。
+      // 锚点布局：halo/ball 固定在窗口左上（球在 halo 中心，margin = (halo-ball)/2），
+      // 展开时 unit 排在球右侧（marginStart = halo 直径）——球位置在任何状态下都不漂移。
+      // 窗口尺寸 = halo 直径（球 34dp 居中于 64dp 光环内）；窗口若只取球尺寸，
+      // halo 超窗口部分会被 FrameLayout 裁剪（实测光环缺 3/4）。
       addView(halo, FrameLayout.LayoutParams(haloSize, haloSize, Gravity.START or Gravity.TOP))
       addView(ball, FrameLayout.LayoutParams(ballSize, ballSize, Gravity.START or Gravity.TOP).apply {
-        marginStart = ((haloSize - ballSize) / 2); topMargin = ((haloSize - ballSize) / 2)
+        marginStart = (haloSize - ballSize) / 2
+        topMargin = (haloSize - ballSize) / 2
       })
     }
     val params = WindowManager.LayoutParams(
-      ballSize, ballSize,
+      haloSize, haloSize,
       WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
       WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
       PixelFormat.TRANSLUCENT,
     ).apply {
       gravity = Gravity.TOP or Gravity.START
-      x = (resources.displayMetrics.widthPixels - ballSize - (12 * dp).toInt()).coerceAtLeast(0)
+      // 初始右上角贴边：球右缘留 12dp 缝（窗口=halo，球在窗口内偏移 inset）。
+      val inset = (haloSize - ballSize) / 2
+      x = (resources.displayMetrics.widthPixels - ballSize - inset - (12 * dp).toInt()).coerceAtLeast(0)
       y = (resources.displayMetrics.heightPixels / 3)
     }
     rootParams = params
@@ -175,7 +180,7 @@ class OverlayService : Service() {
   /** 展开合体圆角矩形（上区状态 + 下区输入，radius 30dp）。 */
   private fun buildUnit(): View {
     val dp = resources.displayMetrics.density
-    val width = (resources.displayMetrics.widthPixels - (32 * dp).toInt()).coerceAtMost((400 * dp).toInt())
+    val width = (resources.displayMetrics.widthPixels - (64 * dp).toInt() - (32 * dp).toInt()).coerceAtMost((400 * dp).toInt())
 
     val status = ShimmerTextView(this).apply {
       text = "空闲"
@@ -298,15 +303,27 @@ class OverlayService : Service() {
     if (expanded) return
     val dp = resources.displayMetrics.density
     val root = rootView ?: return
-    if (unitView == null) buildUnit()?.let { root.addView(it) }
+    val haloSize = (64 * dp).toInt()
+    if (unitView == null) {
+      val u = buildUnit()
+      if (u != null) {
+        root.addView(u, FrameLayout.LayoutParams(
+          ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+          Gravity.START or Gravity.TOP,
+        ).apply { marginStart = haloSize })
+      }
+    }
     val unit = unitView ?: return
-    val width = (resources.displayMetrics.widthPixels - (32 * dp).toInt()).coerceAtMost((400 * dp).toInt())
     unit.visibility = View.VISIBLE
     val p = rootParams ?: return
     // 展开需可聚焦窗口才能弹输入法（v1 面板同款：覆盖 FLAG_NOT_FOCUSABLE）。
     p.flags = p.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
-    if (p.x + width > resources.displayMetrics.widthPixels) p.x = (resources.displayMetrics.widthPixels - width - (8 * dp).toInt())
-    p.width = width
+    // unit 宽须扣除 halo 直径（窗口总宽 = halo + unit，否则向左溢出屏幕）。
+    val width = (resources.displayMetrics.widthPixels - haloSize - (32 * dp).toInt()).coerceAtMost((400 * dp).toInt())
+    // 窗口宽 = halo + unit；球（窗口内 inset 处）保持不动，unit 向右展开。
+    val totalW = haloSize + width
+    if (p.x + totalW > resources.displayMetrics.widthPixels) p.x = (resources.displayMetrics.widthPixels - totalW - (8 * dp).toInt())
+    p.width = totalW
     p.height = ViewGroup.LayoutParams.WRAP_CONTENT
     p.y = p.y.coerceIn(0, resources.displayMetrics.heightPixels - (150 * dp).toInt())
     try { wm.updateViewLayout(root, p) } catch (_: Exception) {}
@@ -327,16 +344,16 @@ class OverlayService : Service() {
     val root = rootView ?: return
     val p = rootParams ?: return
     val dp = resources.displayMetrics.density
-    // 收起回不可聚焦（球不拦截其它应用触摸）。
+    // 收起回不可聚焦（球不拦截其它应用触摸）；窗口恢复 halo 直径（球居中，无位置偏移补偿）。
     p.flags = p.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-    p.width = (34 * dp).toInt()
-    p.height = (34 * dp).toInt()
-    val inset = ((64 * dp).toInt() - (34 * dp).toInt()) / 2
-    // 收起后补回 inset 偏移，保证球可视位置不变（展开时窗口左/上移过）
-    if (p.x > 0) p.x = p.x - inset
-    if (p.y > 0) p.y = p.y - inset
+    val haloSize = (64 * dp).toInt()
     val ballSize = (34 * dp).toInt()
-    if (p.x + inset + ballSize > resources.displayMetrics.widthPixels) p.x = resources.displayMetrics.widthPixels - ballSize - (8 * dp).toInt() - inset
+    val inset = (haloSize - ballSize) / 2
+    p.width = haloSize
+    p.height = haloSize
+    if (p.x + inset + ballSize > resources.displayMetrics.widthPixels) {
+      p.x = resources.displayMetrics.widthPixels - ballSize - (8 * dp).toInt() - inset
+    }
     if (p.x < -inset) p.x = -inset
     if (p.y < -inset) p.y = -inset
     try { wm.updateViewLayout(root, p) } catch (_: Exception) {}
@@ -349,7 +366,7 @@ class OverlayService : Service() {
   private fun attachBallTouch(ball: View) {
     val touchSlop = android.view.ViewConfiguration.get(this).scaledTouchSlop
     var downX = 0f; var downY = 0f; var moved = false
-    // 球在窗口内偏移 (halo-ball)/2：手势换算到窗口 x 时需扣除。
+    // 球在窗口内居中（窗口=halo 直径，球偏移 = (halo-ball)/2）：手势换算到窗口需扣除。
     val inset = ((64 * resources.displayMetrics.density).toInt() - ball.width) / 2
     ball.setOnTouchListener { v, ev ->
       val p = rootParams ?: return@setOnTouchListener false
@@ -373,7 +390,8 @@ class OverlayService : Service() {
     }
   }
 
-  /** M3 Expressive Spatial Default spring（380/0.8）贴边吸附（按球可视中心判定）。 */
+  /** M3 Expressive Spatial Default spring（380/0.8）贴边吸附（按球可视中心判定；
+   *  spring 驱动窗口位置必须 updateViewLayout——translationX 对 overlay 窗口不生效）。 */
   private fun springSnapToEdge() {
     val root = rootView ?: return
     val p = rootParams ?: return
@@ -389,7 +407,16 @@ class OverlayService : Service() {
     SpringAnimation(root, DynamicAnimation.X).apply {
       setSpring(spring)
       setStartValue(p.x.toFloat())
-      addUpdateListener { _, value, _ -> p.x = value.toInt() }
+      addUpdateListener { _, value, _ ->
+        try {
+          p.x = value.toInt()
+          wm.updateViewLayout(root, p)
+        } catch (_: Exception) {}
+      }
+      addEndListener { _, _, _, _ ->
+        // 吸附完成后重算避让帧（球最终位置与拖动中途不同）。
+        emitFrame()
+      }
       start()
     }
   }
