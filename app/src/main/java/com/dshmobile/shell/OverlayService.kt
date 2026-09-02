@@ -19,10 +19,13 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.animation.AlphaAnimation
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.Spinner
 import android.widget.TextView
 import androidx.dynamicanimation.animation.DynamicAnimation
 import androidx.dynamicanimation.animation.SpringAnimation
@@ -42,9 +45,14 @@ import java.net.URL
  *   Deep diving 扫光（ShimmerTextView，无图标）+ 工具 ×N 徽标 + 运行时钟 + 箭头），
  *   下区输入行（输入框 + 品牌蓝圆发送（IconSendOutline16 白箭头）+ 红圆停止白方块 rx=3）；
  * - 引擎维（EngineProbe，应用级）与会话维（live 流，对话级）双维解耦——P7 纠正；
- * - 发送：session.prompt mode=steer（运行中插话）/queue（空闲）；无会话自动 session.create；
+ * - 发送：session.prompt mode=steer（运行中插话）/queue（空闲）；目标会话 = 展开态顶部
+ *   下拉选择器（session.list 投影，第一项恒为「新会话」，空目标自动 session.create）；
  *   停止：session.cancel，仅工作中可用（P4 修复）；
  * - 动效：M3 Expressive spring（吸附 Spatial 380/0.8、展开 Fast 800/0.6、按压 Fast 3800/1.0）。
+ * - 回归修复（2026-09-02 模拟器实测）：①展开弹输入法禁止系统 pan 抬高窗口
+ *   （SOFT_INPUT_ADJUST_NOTHING—球+面板不再整体上跳）；②busy 会话感知（仅当前目标
+ *   会话的 tool_call/turn_end 驱动，其它会话/陈旧行不置忙，杜绝 Deep diving 卡死）；
+ *   ③目标会话选择器（#3）；④send 目标稳定 + session.create 回包不截断解析（#4）。
  *
  * 生命周期：OverlayController 起停（开关持久化 + 权限引导）；onDestroy 移除窗口并清零避让帧。
  */
@@ -68,6 +76,13 @@ class OverlayService : Service() {
   private var sendBtn: View? = null
   private var stopBtn: View? = null
   private var inputBox: EditText? = null
+  private var sessionPicker: Spinner? = null      // 展开态目标会话选择器（#3）
+
+  // ── 会话选择器缓存（session.list 投影） ──────────────────────────
+  private var pickerAdapter: ArrayAdapter<String>? = null
+  private val pickerLabels = ArrayList<String>()   // 「新会话」+ 会话标题/简短 id
+  private val pickerIds = ArrayList<String>()      // 与 pickerLabels 平行；空 = 新会话
+  private var pickerInit = false                   // 首次填充防 onItemSelected 误触发
 
   // ── live 流状态（会话维） ────────────────────────────────────────
   private var watcher: FileObserver? = null
@@ -201,6 +216,8 @@ class OverlayService : Service() {
       PixelFormat.TRANSLUCENT,
     ).apply {
       gravity = Gravity.TOP or Gravity.START
+      // #1 修复：展开弹输入法时禁止系统 pan/抬高整个 overlay 窗口（球+面板一起跳）。
+      softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
       // 初始右上角贴边：球右缘留 12dp 缝（窗口=halo，球在窗口内偏移 inset）。
       val inset = (haloSize - ballSize) / 2
       x = (resources.displayMetrics.widthPixels - ballSize - inset - (12 * dp).toInt()).coerceAtLeast(0)
@@ -250,9 +267,47 @@ class OverlayService : Service() {
     val width = (resources.displayMetrics.widthPixels - (64 * dp).toInt() - (32 * dp).toInt()).coerceAtMost((400 * dp).toInt())
     val c = themeColors()
 
+    // 目标会话选择器（#3：发消息前可明确选对话；Spinner 下拉）。默认第一项 = 「新会话」。
+    // simple_spinner_item 默认深色文字在暗色面板不可见 → 自定义 adapter 按主题着色。
+    val pickerSpinner = Spinner(this).apply {
+      tag = "overlay-sessionpicker"
+      contentDescription = "选择发送对话"
+      adapter = object : ArrayAdapter<String>(this@OverlayService, android.R.layout.simple_spinner_item, pickerLabels) {
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+          val tv = (convertView as? TextView) ?: TextView(context).apply { textSize = 13f }
+          tv.setTextColor(themeColors().idleText)
+          tv.text = getItem(position) ?: ""
+          return tv
+        }
+        override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View {
+          val tv = (convertView as? TextView) ?: TextView(context).apply {
+            textSize = 13f
+            setPadding((12 * dp).toInt(), (8 * dp).toInt(), (12 * dp).toInt(), (8 * dp).toInt())
+          }
+          val dark = isDarkTheme()
+          tv.setTextColor(if (dark) 0xFFE8EAED.toInt() else 0xFF202124.toInt())
+          tv.setBackgroundColor(if (dark) 0xFF1E1F24.toInt() else 0xFFFFFFFF.toInt())
+          tv.text = getItem(position) ?: ""
+          return tv
+        }
+      }.also { pickerAdapter = it }
+      onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+        override fun onItemSelected(parent: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+          // pickerInit 防首帧误触发；用户切换时更新发送目标（空 = 新会话）
+          if (pickerInit && pos >= 0 && pos < pickerIds.size) {
+            activeSessionId = pickerIds[pos]
+            if (activeSessionId.isEmpty()) sessionBusy = false
+            renderPanelOnly()
+          }
+        }
+        override fun onNothingSelected(parent: AdapterView<*>?) {}
+      }
+    }
+    sessionPicker = pickerSpinner
+
     val status = ShimmerTextView(this).apply {
       text = "空闲"
-      textSize = 14f
+      textSize = 13f
       setTypeface(null, android.graphics.Typeface.BOLD)
       setTextColor(c.idleText)
     }
@@ -288,10 +343,19 @@ class OverlayService : Service() {
     }
     chevronView = chevron
 
+    // 会话选择行（独立一行，向下箭头 Spinner）
+    val pickerRow = LinearLayout(this).apply {
+      orientation = LinearLayout.HORIZONTAL
+      gravity = Gravity.CENTER_VERTICAL
+      setPadding((12 * dp).toInt(), (10 * dp).toInt(), (12 * dp).toInt(), (2 * dp).toInt())
+      addView(pickerSpinner, LinearLayout.LayoutParams(0, (26 * dp).toInt(), 1f))
+    }
+
+    // 状态行：状态文字 + 工具×N + 时钟 + 收起箭头
     val row1 = LinearLayout(this).apply {
       orientation = LinearLayout.HORIZONTAL
       gravity = Gravity.CENTER_VERTICAL
-      setPadding((12 * dp).toInt(), (10 * dp).toInt(), (12 * dp).toInt(), (10 * dp).toInt())
+      setPadding((12 * dp).toInt(), (4 * dp).toInt(), (12 * dp).toInt(), (10 * dp).toInt())
       addView(status, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
       addView(chip)
       addView(clock, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = (8 * dp).toInt() })
@@ -354,6 +418,7 @@ class OverlayService : Service() {
         cornerRadius = 30 * dp
         setStroke((1 * dp).toInt(), c.unitStroke)
       }
+      addView(pickerRow)
       addView(row1)
       val divider = View(this@OverlayService).apply { setBackgroundColor(c.divider) }
       dividerView = divider
@@ -389,6 +454,10 @@ class OverlayService : Service() {
     val p = rootParams ?: return
     // 展开需可聚焦窗口才能弹输入法（v1 面板同款：覆盖 FLAG_NOT_FOCUSABLE）。
     p.flags = p.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+    // #1：展开聚焦时禁止系统 pan 抬高窗口（同 buildRoot 的 ADJUST_NOTHING 双保险）。
+    p.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
+    // 每次展开刷新目标会话下拉（session.list 投影）+ 回填选择。
+    refreshSessionPicker()
     // unit 宽须扣除 halo 直径（窗口总宽 = halo + unit，否则向左溢出屏幕）。
     val width = (resources.displayMetrics.widthPixels - haloSize - (32 * dp).toInt()).coerceAtMost((400 * dp).toInt())
     // 窗口宽 = halo + unit；球（窗口内 inset 处）保持不动，unit 向右展开。
@@ -555,17 +624,24 @@ class OverlayService : Service() {
           when (j.optString("k")) {
             "tool_call" -> {
               val s = j.optString("s", "")
-              if (s.isNotEmpty()) activeSessionId = s
-              if (!sessionBusy) { sessionBusy = true; turnStartedAt = System.currentTimeMillis() }
-              toolCount++
-              setHalo(Halo.WORKING)
-              changed = true
+              // 会话感知：仅当事件属于当前目标会话（或尚无目标）才置忙，
+              // 避免其它会话/陈旧行的 tool_call 让 busy 永久卡死（#2）。
+              if (activeSessionId.isEmpty() || s == activeSessionId) {
+                if (!sessionBusy) { sessionBusy = true; turnStartedAt = System.currentTimeMillis() }
+                toolCount++
+                setHalo(Halo.WORKING)
+                changed = true
+              }
             }
             "turn_end" -> {
-              sessionBusy = false
-              toolCount = 0
-              setHalo(Halo.IDLE)
-              changed = true
+              val s = j.optString("s", "")
+              // 任何一次 turn/end 都取消忙碌（当前会话 end 或引擎兜底 end）。
+              if (activeSessionId.isEmpty() || s == activeSessionId) {
+                sessionBusy = false
+                toolCount = 0
+                setHalo(Halo.IDLE)
+                changed = true
+              }
             }
           }
         } catch (_: Exception) {
@@ -654,7 +730,7 @@ class OverlayService : Service() {
         conn.setRequestProperty("content-type", "application/json")
         conn.outputStream.use { it.write(envelope.toString().toByteArray(Charsets.UTF_8)) }
         code = conn.responseCode
-        body = conn.inputStream.bufferedReader().use { it.readText() }.take(200)
+        body = conn.inputStream.bufferedReader().use { it.readText() }
         conn.disconnect()
       } catch (e: Exception) {
         code = -1; body = e.message ?: "网络异常"
@@ -674,36 +750,99 @@ class OverlayService : Service() {
     }
   }
 
-  /** 发送/插话：steer（工作中打断当前轮）/ queue（空闲新轮次）；无会话先 create。 */
+  /** 发送/插话：steer（工作中打断当前轮）/ queue（空闲新轮次）；目标会话 = 选择器当前项（空 = 新会话自动 create）。 */
   private fun requestSend() {
     val text = inputBox?.text?.toString()?.trim() ?: return
     if (text.isEmpty()) return
     if (!engineRunning) { flashStatus("引擎离线"); return }
     inputBox?.setText("")
+    val payload = JSONObject()
+      .put("sessionId", activeSessionId)
+      .put("mode", if (sessionBusy) "steer" else "queue")
+      .put("content", org.json.JSONArray().put(
+        JSONObject().put("type", "text").put("text", text)))
     val send = Runnable {
-      postRpc("session.prompt", JSONObject()
-        .put("sessionId", activeSessionId)
-        .put("mode", if (sessionBusy) "steer" else "queue")
-        .put("content", org.json.JSONArray().put(
-          JSONObject().put("type", "text").put("text", text)))
-      ) { code, _ ->
-        if (code != 200) flashStatus("发送失败（HTTP $code）")
+      postRpc("session.prompt", payload) { code, body ->
+        if (code == 200) {
+          // 发送成功：清空输入并短暂提示；若为插话，busy 状态由 live/engine 流接管
+          renderPanelOnly()
+          flashStatus(if (sessionBusy) "已插话" else "已发送")
+        } else {
+          // 发送失败：回填已输入文本 + 提示（避免用户以为发出去了——#4）
+          inputBox?.setText(text)
+          flashStatus("发送失败（HTTP $code）")
+        }
       }
     }
     if (activeSessionId.isEmpty()) {
-      // 无会话：先自动建会话（用户拍板项：自动建会话为默认）
+      // 目标=「新会话」：先 create 再 prompt（用户拍板项：自动建会话为默认）。
       postRpc("session.create", JSONObject()) { code, body ->
         if (code == 200) {
-          try {
-            val sid = JSONObject(body).optJSONObject("result")
-              ?.optString("value", "")?.let { JSONObject(it).optString("sessionId", "") }
-              ?: JSONObject(body).optString("result", "")
-            if (sid.isNotEmpty()) { activeSessionId = sid; send.run() } else flashStatus("建会话失败")
-          } catch (_: Exception) { flashStatus("建会话失败") }
-        } else flashStatus("建会话失败（HTTP $code）")
+          val sid = extractSessionId(body)
+          if (sid.isNotEmpty()) {
+            activeSessionId = sid
+            refreshSessionPicker()
+            send.run()
+          } else {
+            inputBox?.setText(text)
+            flashStatus("建会话失败（解析）")
+          }
+        } else {
+          inputBox?.setText(text)
+          flashStatus("建会话失败（HTTP $code）")
+        }
       }
     } else {
       send.run()
+    }
+  }
+
+  /** 从 session.create 的 server-response 中取 sessionId（兼容 result.value / 嵌套 JSON 字符串两种形态）。 */
+  private fun extractSessionId(body: String): String {
+    return try {
+      val root = JSONObject(body).optJSONObject("result") ?: return ""
+      // value 可能是对象 {sessionId:...}，也可能被序列化成字符串
+      val value = root.opt("value")
+      when (value) {
+        is JSONObject -> value.optString("sessionId", "")
+        is String -> if (value.isBlank()) "" else JSONObject(value).optString("sessionId", "")
+        else -> ""
+      }
+    } catch (_: Exception) { "" }
+  }
+
+  /** 拉取 session.list → 刷新「目标会话」下拉（第一项恒为「新会话」）。 */
+  private fun refreshSessionPicker() {
+    postRpc("session.list", JSONObject()) { code, body ->
+      val sp = sessionPicker ?: return@postRpc
+      val ad = pickerAdapter ?: return@postRpc
+      pickerLabels.clear(); pickerIds.clear()
+      pickerLabels.add("＋ 新会话"); pickerIds.add("")
+      if (code == 200) {
+        try {
+          val arr = JSONObject(body).optJSONObject("result")
+            ?.optJSONObject("value")?.optJSONArray("items")
+          if (arr != null) {
+            for (i in 0 until arr.length()) {
+              val it = arr.optJSONObject(i) ?: continue
+              val sid = it.optString("sessionId", "")
+              if (sid.isEmpty()) continue
+              val titleObj = it.optJSONObject("projections")?.optJSONObject("values")?.opt("title")
+              val title = if (titleObj == null || titleObj === JSONObject.NULL) "" else titleObj.toString()
+                .ifBlank { "（第 ${i + 1} 个会话）" }
+              // 已选当前目标：置顶展示，便于核对
+              val label = if (sid == activeSessionId) "$title（当前）" else title
+              pickerLabels.add(label); pickerIds.add(sid)
+            }
+          }
+        } catch (_: Exception) {}
+      }
+      ad.notifyDataSetChanged()
+      // 回填当前目标会话在列表中的位置（找不到则回到「新会话」）
+      val idx = pickerIds.indexOf(activeSessionId).let { if (it >= 0) it else 0 }
+      pickerInit = false
+      try { sp.setSelection(idx, false) } catch (_: Exception) {}
+      pickerInit = true
     }
   }
 
