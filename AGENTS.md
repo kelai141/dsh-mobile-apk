@@ -13,7 +13,7 @@
 - **运行时形态**：壳内嵌 Termux 运行时快照（`assets/snapshot.tar.xz` → `files/usr` + `files/home`）；引擎（Node.js `@deepseek-ai/dsh`，基线 0.1.1-rc.2）监听 `127.0.0.1:3080`；WebView 加载引擎 Web UI。
 - **构建链**：minSdk 26 / targetSdk 34 / compileSdk 36；Kotlin 2.0.21；AGP 8.8.2；Java 17。
 - **依赖**：androidx.activity-ktx / core-ktx、commons-compress、xz；Shizuku 零依赖反射（ShizukuSupport.kt，仅探活示例）。
-- **兄弟仓库**（协调仓库 `kelai141/dsh-mobile` 下的子目录）：`dsh-shell-termux`（Termux 执行器）、`dsh-client-ui-responsive`（移动 UI 注入层 + F5 消费端）、`dsh-host-web-compat`（页面注入/兼容）、`plugins/`（dsh-android-bridge / -manage / -linux-env / -file-open，协调仓库内）、`vendor/`（dshmarketplace-plugin、dsh-undo-savepoint 固化副本 + PATCHES.md）。
+- **兄弟仓库**（协调仓库下的子目录）：`dsh-shell-termux`（Termux 执行器）、`dsh-client-ui-responsive`（移动 UI 注入层 + F5 消费端）、`dsh-host-web-compat`（页面注入/兼容）、`plugins/`（dsh-android-bridge / -manage / -linux-env / -file-open，协调仓库内）、`vendor/`（dshmarketplace-plugin、dsh-undo-savepoint 固化副本 + PATCHES.md）。
 - **上游** `deepseek-ai/deepseek-harness`（本地 checkout `dsh/`）：只读参考，**零改动**；一切适配以补丁层/插件/壳侧实现。
 - **版本状态**：**0.13.1 已发布**（Release v0.13.1，versionCode 27，PR #113 合并；详见更新记录表与协调仓 AGENTS.md §1）。**0.13.2-preview 已发布**（versionCode 28，prerelease）。**0.13.2-fix 修复批实施中**（#118 引擎启动/探活/UndoGate 五项 + 悬浮球 v2 重设计 + #120 工作区，详见更新记录表）。当前开放跟踪：#115（市场 Phase2，目标 0.13.2）、#120（添加工作区按键不可用——修复批已实施，待发版验证）、#108（数据备份 feature）。
 - **环境无关声明**：本文档适用于任意环境（Windows/WSL/Linux/macOS、有/无真机）开发维护者；环境差异点（WSL、ADB 真机、run-as）已在对应章节标注。
@@ -58,7 +58,7 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 
 ### 3.2 新环境起步流程（克隆 → 首包 → 装机验证）
 
-1. **取代码**：clone 协调仓库 `kelai141/dsh-mobile`（主分支 `main`）；壳子仓库 `dsh-mobile-apk/` 是**独立 git**（主分支亦 `main`），按需 clone/关联；上游 `dsh/` 只读。
+1. **取代码**：clone 协调仓库（主分支 `main`）；壳子仓库 `dsh-mobile-apk/` 是**独立 git**（主分支亦 `main`），按需 clone/关联；上游 `dsh/` 只读。
 2. **构建快照**（仅 Windows 需 WSL）：`node scripts\build-snapshot-013.mjs <arm64|x86_64>`——Termux 源装配 + TARGETS 预装 + pnpm + 权威 cordis patch 覆盖 + 瘦身 + 归档（产物 snapshot.tar.xz + snapshot.sha256）。
 3. **一键打包**：`pwsh -File scripts\build-apk-013.ps1 -Suffix ""` → `out\v<版本>\dsh-mobile-apk-v<ver>-<abi>.apk`；门禁失败会中断并提示（清单见第 2 节）。
 4. **ABI 核对（坑 18）**：`aapt dump badging <apk>` 看 native-code，或解快照 tar 读 `usr/bin/node` 的 ELF e_machine（**62=x86_64，183=arm64**）——与目标设备一致再装。
@@ -167,6 +167,7 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 33. **系统 HTTP 代理劫持壳侧本地探针（#118 根因1，2026-09-02 实锤）**：WiFi 配置系统代理时，`HttpURLConnection.openConnection()` 默认走 `ProxySelector` 下发的系统代理 → 把 `127.0.0.1:3080` 的本地请求发给代理网关（回不来本机）→ 探针恒 timeout；而 WebView（Chromium 对 loopback 豁免代理）与 curl（不读系统代理）直连正常 → 「网页能开、app 却判引擎没起来」的矛盾现场。修复 = **壳侧所有本地引擎端口调用一律 `openConnection(Proxy.NO_PROXY)`**（EngineProbe / file-incoming / session.export / session.cancel；UpdateManager 的远程下载**不走** NO_PROXY），且诊断包 probe 字段区分 timeout/refused。
 34. **UndoGate.runCli 直接 exec app-data ELF 无 linker64 fallback（#118 根因2，2026-09-02 修）**：`runCli` 直接 `ProcessBuilder` exec `usr/bin/node`（对比 `EngineManager.startWithArgs` 有 `/system/bin/linker64` fallback）——Android 15+ 拒绝直接 exec app-data ELF → error=13 → auto-undo 从未真正执行。修复 = 与 startWithArgs 同款：捕获「Permission denied」降级 `linker64` 加载（`build` 复用 shellEnv/OPENSSL_CONF/redirectErrorStream）。
 35. **requestLegacyExternalStorage 对 targetSdk≥30 应用无效（#120/MT 调研，2026-09-02 实锤）**：该 flag 仅对「targetSdk≤29 + 运行在 Android 10」生效；targetSdk≥30（含 34）应用即使运行在 Android 10 设备上 flag 也被忽略（SO 63365334 / cgeo #10386 / 小米适配指南多源实锤）→ Android 10 上 SAF 树授权不解锁 FUSE 原始路径、bash 走不了 ContentResolver → 非 root 下「读用户任意目录作工作区」不可达成。落地：SDK 26-28（无分区存储）运行时 READ/WRITE 权限放行；SDK 29 保留拒绝但显式 reason（`__dsh_pick_refused__:android-10`）而非伪装取消；SDK 30+ 维持 All Files Access。
+36. **自包含内置子仓副本必须与协调仓同版（2026-09-02 实锤）**：本仓库是**云端自包含构建宿主**（`.github/workflows/build-apk.yml` 依赖 `$GITHUB_WORKSPACE`=本仓库，不签协调私库），仓库内自带整套子仓副本（`dsh-shell-termux`、`dsh-client-ui-responsive`、`dsh-host-web-compat`、`plugins/dsh-android-*`）。**协调仓改动这些子仓的源码或 bump 版本后，必须把产物同步进本仓库对应子目录（src + package.json + lib/），否则自包含链（云端构建 + `gradlew assembleDebug` 直打）注入的是旧副本**——设备上表现「悬浮球开关消失 / ADB 面板缺失 / #120 拒绝信号缺席 / 配置导入导出按钮消失」这类**功能性缺失但编译通过**的幽灵缺陷。0.13.2 实测：协调仓 ui-responsive 0.1.11 含悬浮球开关、apk 仓副本 0.1.9 无它（DevSection 少了 W7 悬浮球开关行 + 配置导入导出块）；host-web-compat 0.1.8 vs 0.1.6（#120 拒绝信号缺席）。**教训：凡协调仓动了这三个独立子仓/bridge/manage，发布前必须比对两个仓库的 package.json version + 抽验 apk 仓副本 lib/client.js 关键字符串（如「悬浮球」），不一致即用 robocopy 从协调仓同步**（`robocopy "<协调仓子仓>" "<本仓\<同名子目录>" /E /XD .git node_modules /XF *.tgz`，lib/ 必须一并拷入——自包含链不对这些子仓执行 npm build）。
 
 ## 7. GPL 合规（2026-08-23 定稿）
 
@@ -190,6 +191,7 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 
 | 时间 | 版本 | 更新内容 | 更新者 |
 |---|---|---|---|
+| 2026-09-02 | 0.13.2-fix | **子仓副本同步协调仓（坑 36 登记，幽灵缺陷根因）**：协调仓 ui-responsive 0.1.11（含 W7 悬浮球开关 + 配置导入导出块）/ host-web-compat 0.1.8（含 #120 拒绝信号）→ robocopy 同步到 apk 仓副本（`dsh-client-ui-responsive` 0.1.9→0.1.11、`dsh-host-web-compat` 0.1.6→0.1.8、`dsh-shell-termux` 补 lib/ 产物）；实测设备快照此前为 0.1.9/0.1.6（自包含链注入旧副本 → DevSection 无悬浮球开关、#120 缺席） | AI 开发助手 |
 | 2026-09-02 | 0.13.2-fix | **悬浮球 v2 发布前回归修复（模拟器实测 4 问题）**：#1 展开弹输入法系统 pan 抬高整个 overlay 窗口（球+面板上跳）→ 窗口与 showPanel 设 `SOFT_INPUT_ADJUST_NOTHING`；#2 Deep diving 卡死→ busy 会话感知（仅当前目标会话 tool_call/turn_end 驱动，其它会话/陈旧 live 行不置忙）+ 修复 live 文件污染（残留 `session-light-test` 无 turn_end 工具行）清理；#3 展开面板无法选发送对话→ 新增目标会话下拉选择器（session.list 投影，第一项「新会话」，标题取 `projections.values.title`——顶层无 title 字段且 optString 对 NULL 返 "null" 字面量须判空）；#4 手动输入发送不成功→ send 目标稳定（来自选择器）、session.create 回包去 `.take(200)` 截断、extractSessionId 正规解析两形态。模拟器复验：send 经 overlay 实测送达会话 history（`hello_final` 落 `session-9078…` user/message）；§4 OverlayService 行语义同步 | AI 开发助手 |
 | 2026-09-02 | 0.13.2-fix | **修复批（未发版，实施中）**：**坑 33-35 登记**（系统代理劫持本地探针 → 全链 Proxy.NO_PROXY / UndoGate 无 linker64 fallback → 补 linkers / requestLegacyExternalStorage 对 targetSdk≥30 无效——MT 管理器调研实锤）；#118 五项修复（EngineProbe 直连+portReachable+refused/timeout 区分、壳侧全部本地 HTTP 直连、UndoGate linker64、冷却窗/存活兜底端口级、启动失败自动重试 2×5s/10s）；**悬浮球 v2 从零重写**（OverlayService v2：纯黑白球 bbox 裁剪居中 + 低饱和光环 + 上下合体圆角矩形 + ShimmerTextView deep diving + 工具×N + 插话/自动建会话 + spring 动效；飞行 v1 面板/12 条流/收起按钮——P5 未绑 onClick）；**#120 壳侧落地**（SDK 26-28 运行时权限放行 + SDK 29 显式拒绝 reason 哨兵 `__dsh_pick_refused__:`，manifest 加 READ maxSdk32/WRITE maxSdk28）；双形态设备验证全 PASS；§4 文件表补 ShimmerTextView/EngineProbe 语义 | AI 开发助手 |
 | 2026-08-21 | 0.13.0 | 首版创建：AGENT.md 规范落地（PRD F6）；逐文件职责与代码位置截至 dsh-mobile-apk main@5679e59（0.12.5-fx-1） | AI 开发助手 |

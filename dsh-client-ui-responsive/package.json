@@ -1,7 +1,7 @@
 {
   "name": "@dsh-android/dsh-client-ui-responsive",
   "description": "Client plugin: responsive AppFrame derived from @deepseek-ai/dsh-client-ui-layout with a Mobile form (<640px: drawer sidebar, bottom-sheet details, top bar, safe areas)",
-  "version": "0.1.9",
+  "version": "0.1.11",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",

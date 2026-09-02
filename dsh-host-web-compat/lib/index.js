@@ -26,6 +26,10 @@ const POLYFILLS = [
   `if(typeof Array.prototype.at==='undefined'){Array.prototype.at=function(i){var l=this.length,t=Number(i)||0;if(t<0)t=Math.max(l+t,0);return t<0||t>=l?undefined:this[t]}}`,
   // String.prototype.replaceAll: Chrome 85+/Safari 13.1+; optional last API on Chromium<85 WebViews.
   `if(typeof String.prototype.replaceAll==='undefined'){String.prototype.replaceAll=function(s,r){if(s instanceof RegExp)throw new TypeError('replaceAll: search must be a string');return this.split(s).join(r)}}`,
+  // crypto.randomUUID: Chrome 92+ and requires a secure context; MIUI12-era WebViews (Chromium 87)
+  // lack it while still offering crypto.getRandomValues (issue #110: randomUUID is not a function).
+  // RFC 4122 v4: set version/variant bits, hex lowercase, canonical dashes.
+  `if(typeof crypto!=='undefined'&&crypto.getRandomValues&&typeof crypto.randomUUID==='undefined'){crypto.randomUUID=function(){var b=new Uint8Array(16);crypto.getRandomValues(b);b[6]=(b[6]&0x0f)|0x40;b[8]=(b[8]&0x3f)|0x80;return Array.prototype.map.call(b,function(x){return('0'+x.toString(16)).slice(-2)}).join('').replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/,'$1-$2-$3-$4-$5')}}`,
 ];
 
 // Boot watchdog (2026-08-17, issue #36): when the page stays on "Loading plugins…" for over 40s,
@@ -386,6 +390,14 @@ class AndroidDirectoryPicker extends Service {
         signal.removeEventListener('abort', onAbort)
         origResolve(path)
       }
+      // #120: refusal surface for the shell's explicit-reason signal (same cleanup).
+      const origSettle = entry.settle
+      entry.settle = (err) => {
+        this.pending.delete(requestId)
+        clearTimeout(ttl)
+        signal.removeEventListener('abort', onAbort)
+        if (origSettle) origSettle(err); else reject(err)
+      }
     })
   }
 
@@ -408,11 +420,28 @@ class AndroidDirectoryPicker extends Service {
    * non-primary volumes such as SD card/USB are explicitly rejected here (the engine can't use them
    * as a workspace; error instead of silent pass-through); combined with C1's token fail-closed this
    * removes the forged-path surface.
+   *
+   * #120 (2026-09): explicit-refusal sentinel — the shell answers with
+   * `__dsh_pick_refused__:<reason>` instead of a fake cancel when the platform cannot
+   * grant an external workspace (Android 10 scoped storage with targetSdk>=30; storage
+   * permission denied). That becomes a loader-side error (folderError dialog on the
+   * client), never a silent cancel.
    */
   resolve(requestId, path) {
     const entry = this.pending.get(requestId)
     if (!entry) return false
     this.pending.delete(requestId)
+    const REFUSED = '__dsh_pick_refused__:'
+    if (typeof path === 'string' && path.startsWith(REFUSED)) {
+      const reason = path.slice(REFUSED.length)
+      const message = reason === 'permission-denied'
+        ? '外部工作区需要存储权限，请在系统设置中允许后重试'
+        : reason === 'android-10'
+          ? '当前系统（Android 10）不支持选择外部目录：请升级到 Android 11+，或使用 Android 8/9 设备'
+          : '无法选择外部目录（' + reason + '）'
+      entry.settle?.(new Error(message)) ?? entry.resolve(null)
+      return true
+    }
     if (typeof path === 'string' && path !== '' &&
       path.startsWith('/storage/emulated/0/') &&
       !path.split('/').includes('..') &&

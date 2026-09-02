@@ -46,6 +46,15 @@ export function DevSection({ renderSlot }: DevSectionProps) {
       return false
     }
   })
+  // 0.13.2 W7：悬浮球开关（壳侧持久化 + overlay 权限引导；未授权返回 false 并自动跳系统设置）。
+  const [overlayOn, setOverlayOn] = useState<boolean>(() => {
+    try {
+      return window.androidBridge?.getOverlayEnabled?.() ?? false
+    } catch {
+      return false
+    }
+  })
+  const [overlayMsg, setOverlayMsg] = useState<string | null>(null)
   const [restarting, setRestarting] = useState(false)
   const [allFiles, setAllFiles] = useState<boolean | null>(null)
   const [confirm, setConfirm] = useState<'restart' | 'close' | null>(null)
@@ -148,6 +157,47 @@ export function DevSection({ renderSlot }: DevSectionProps) {
     }
   }, [])
 
+  // 0.13.2 W7：悬浮球开关（实时查看 AI 工具调用 + 停止）。
+  const toggleOverlay = useCallback((enabled: boolean) => {
+    setOverlayOn(enabled)
+    setOverlayMsg(null)
+    try {
+      const started = window.androidBridge?.setOverlayEnabled?.(enabled) ?? false
+      if (enabled && !started) {
+        setOverlayMsg('未授予悬浮窗权限——已打开系统授权页，返回后自动生效（也可在开发者选项重新开关）')
+      } else if (enabled) {
+        setOverlayMsg('悬浮球已开启：任意界面可拖拽；点开面板实时查看工具调用，可一键停止')
+      } else {
+        setOverlayMsg('悬浮球已关闭')
+      }
+    } catch {
+      setOverlayMsg('桥不可用（仅安卓宿主支持悬浮球）')
+    }
+  }, [])
+
+  // 0.13.1 W4：配置导入/导出（安全手改通道——引擎读私有目录，外部改共享副本无效）。
+  const [configMsg, setConfigMsg] = useState<string | null>(null)
+
+  const exportConfig = useCallback(() => {
+    try {
+      const raw = window.androidBridge?.exportConfig?.()
+      const j = JSON.parse(raw ?? '{}') as { ok?: boolean; path?: string; error?: string }
+      setConfigMsg(j.ok ? `已导出到 ${j.path ?? 'exports/config/settings.yaml'}` : `导出失败：${j.error ?? '未知错误'}`)
+    } catch {
+      setConfigMsg('导出失败：桥不可用（仅安卓宿主可用）')
+    }
+  }, [])
+
+  const importConfig = useCallback(() => {
+    try {
+      const raw = window.androidBridge?.importConfig?.()
+      const j = JSON.parse(raw ?? '{}') as { ok?: boolean; hint?: string; error?: string }
+      setConfigMsg(j.ok ? `已导入并生效（原配置备份为 settings.yaml.import-backup）。${j.hint ?? ''}` : `导入失败：${j.error ?? '未知错误'}`)
+    } catch {
+      setConfigMsg('导入失败：桥不可用（仅安卓宿主可用）')
+    }
+  }, [])
+
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       if (e.key === 'Escape') cancelConfirm()
@@ -185,6 +235,28 @@ export function DevSection({ renderSlot }: DevSectionProps) {
         />
         <span>开发者调试日志</span>
       </label>
+
+      {/* 0.13.2 W7：悬浮球（实时工具流 + 停止） */}
+      <label className="dsh-dev-row dsh-dev-switch">
+        <input
+          type="checkbox"
+          checked={overlayOn}
+          onChange={(e) => toggleOverlay(e.target.checked)}
+        />
+        <span>悬浮球（实时查看 AI 工作，可一键停止）</span>
+      </label>
+      {overlayMsg !== null && <p className="dsh-dev-hint">{overlayMsg}</p>}
+
+      {/* 0.13.1 W4：配置导入/导出（安全手改通道；引擎读私有目录，改共享目录副本无效） */}
+      <div className="dsh-dev-row">
+        <button type="button" className="dsh-dev-btn" onClick={exportConfig}>导出配置</button>
+        <button type="button" className="dsh-dev-btn" onClick={importConfig}>导入配置</button>
+      </div>
+      {configMsg !== null && <p className="dsh-dev-hint">{configMsg}</p>}
+      <p className="dsh-dev-hint">
+        导出位置 Documents/dshdata/exports/config/settings.yaml；用文件管理器修改后点「导入配置」即可生效。
+        配置不含 API 密钥（密钥在应用私有目录，不随导出泄漏）。
+      </p>
 
       {/* F5.1/D15：文件直达临时工作区（占用展示 + 一键清理；PRD R16 手动清理 + 占用展示） */}
       {incomingBytes !== null && (

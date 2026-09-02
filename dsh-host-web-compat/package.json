@@ -1,7 +1,7 @@
 {
   "name": "@dsh-android/dsh-host-web-compat",
   "description": "Host plugin: legacy-browser polyfills + Android directory-picker bridge (SAF via WebView JS bridge) for the shell APK",
-  "version": "0.1.6",
+  "version": "0.1.8",
   "type": "module",
   "main": "lib/index.js",
   "files": [
