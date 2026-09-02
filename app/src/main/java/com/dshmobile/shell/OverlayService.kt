@@ -63,6 +63,8 @@ class OverlayService : Service() {
   private var statusText: TextView? = null
   private var toolChip: TextView? = null
   private var clockText: TextView? = null
+  private var chevronView: ImageView? = null
+  private var dividerView: View? = null
   private var sendBtn: View? = null
   private var stopBtn: View? = null
   private var inputBox: EditText? = null
@@ -84,6 +86,40 @@ class OverlayService : Service() {
   }
 
   override fun onBind(intent: Intent?): IBinder? = null
+
+  /** 明暗切换（系统深色/浅色模式变化）：已展开的合体矩形就地换肤。 */
+  override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+    super.onConfigurationChanged(newConfig)
+    if (expanded) applyThemeColors()
+  }
+
+  /** 按当前主题刷新展开态配色（unit 背景/描边、状态文字、输入框、分隔线、箭头）。 */
+  private fun applyThemeColors() {
+    val c = themeColors()
+    val u = unitView ?: return
+    val dp = resources.displayMetrics.density
+    (u.background as? GradientDrawable)?.apply {
+      setColor(c.unitBg)
+      setStroke((1 * dp).toInt(), c.unitStroke)
+    }
+    statusText?.setTextColor(c.idleText)
+    clockText?.setTextColor(c.clockText)
+    val st = statusText
+    if (st != null && !sessionBusy) {
+      ShimmerTextView::class.java.cast(st).setShimmering(false)
+      st.setTextColor(if (!engineRunning) c.offText else c.idleText)
+    }
+    chevronView?.setColorFilter(c.chevron)
+    inputBox?.apply {
+      setTextColor(c.inputText)
+      setHintTextColor(c.inputHint)
+      (background as? GradientDrawable)?.apply {
+        setColor(c.inputBg)
+        setStroke((1 * dp).toInt(), c.inputStroke)
+      }
+    }
+    dividerView?.setBackgroundColor(c.divider)
+  }
 
   override fun onCreate() {
     super.onCreate()
@@ -177,16 +213,48 @@ class OverlayService : Service() {
     emitFrame()
   }
 
+  /** 系统明暗（0.13.2 悬浮球明暗适配：展开态颜色跟随 uiMode）。 */
+  private fun isDarkTheme(): Boolean =
+    (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
+      android.content.res.Configuration.UI_MODE_NIGHT_YES
+
+  /** 主题色板（随 isDarkTheme() 取用）。 */
+  private data class ThemeColors(
+    val unitBg: Int, val unitStroke: Int,
+    val idleText: Int, val offText: Int, val clockText: Int,
+    val inputBg: Int, val inputStroke: Int, val inputText: Int, val inputHint: Int,
+    val divider: Int, val chevron: Int,
+  )
+
+  private fun themeColors(): ThemeColors = if (isDarkTheme()) {
+    ThemeColors(
+      unitBg = 0xF21E1F24.toInt(), unitStroke = 0xFF3A3D45.toInt(),
+      idleText = 0xFF8A8F98.toInt(), offText = 0xFFE04848.toInt(), clockText = 0xFF81858C.toInt(),
+      inputBg = 0xFF2A2D33.toInt(), inputStroke = 0xFF3A3D45.toInt(),
+      inputText = 0xFFE8EAED.toInt(), inputHint = 0xFF9AA0A6.toInt(),
+      divider = 0xFF2A2D33.toInt(), chevron = 0xFF8AB4F8.toInt(),
+    )
+  } else {
+    ThemeColors(
+      unitBg = 0xF2F8F9FA.toInt(), unitStroke = 0xFFDADCE0.toInt(),
+      idleText = 0xFF5F6368.toInt(), offText = 0xFFC5221F.toInt(), clockText = 0xFF5F6368.toInt(),
+      inputBg = 0xFFFFFFFF.toInt(), inputStroke = 0xFFDADCE0.toInt(),
+      inputText = 0xFF202124.toInt(), inputHint = 0xFF80868B.toInt(),
+      divider = 0xFFE8EAED.toInt(), chevron = 0xFF5F6368.toInt(),
+    )
+  }
+
   /** 展开合体圆角矩形（上区状态 + 下区输入，radius 30dp）。 */
   private fun buildUnit(): View {
     val dp = resources.displayMetrics.density
     val width = (resources.displayMetrics.widthPixels - (64 * dp).toInt() - (32 * dp).toInt()).coerceAtMost((400 * dp).toInt())
+    val c = themeColors()
 
     val status = ShimmerTextView(this).apply {
       text = "空闲"
       textSize = 14f
       setTypeface(null, android.graphics.Typeface.BOLD)
-      setTextColor(0xFF8A8F98.toInt())
+      setTextColor(c.idleText)
     }
     statusText = status
 
@@ -205,7 +273,7 @@ class OverlayService : Service() {
       tag = "overlay-clock"
       text = ""
       textSize = 12f
-      setTextColor(0xFF81858C.toInt())
+      setTextColor(c.clockText)
       setTypeface(null, android.graphics.Typeface.NORMAL)
       visibility = View.GONE
     }
@@ -213,10 +281,12 @@ class OverlayService : Service() {
 
     val chevron = ImageView(this).apply {
       setImageResource(R.drawable.dsh_ic_chevron_down)
+      setColorFilter(c.chevron)
       contentDescription = "收起"
       isClickable = true
       setOnClickListener { hidePanel() }
     }
+    chevronView = chevron
 
     val row1 = LinearLayout(this).apply {
       orientation = LinearLayout.HORIZONTAL
@@ -238,11 +308,11 @@ class OverlayService : Service() {
       setOnEditorActionListener { _, actionId, _ ->
         if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEND) { requestSend(); true } else false
       }
-      setTextColor(0xFFE8EAED.toInt())
-      setHintTextColor(0xFF9AA0A6.toInt())
+      setTextColor(c.inputText)
+      setHintTextColor(c.inputHint)
       background = GradientDrawable().apply {
-        setColor(0xFF2A2D33.toInt()); cornerRadius = 17 * dp
-        setStroke((1 * dp).toInt(), 0xFF3A3D45.toInt())
+        setColor(c.inputBg); cornerRadius = 17 * dp
+        setStroke((1 * dp).toInt(), c.inputStroke)
       }
       setPadding((14 * dp).toInt(), 0, (14 * dp).toInt(), 0)
     }
@@ -280,13 +350,14 @@ class OverlayService : Service() {
     val unit = LinearLayout(this).apply {
       orientation = LinearLayout.VERTICAL
       background = GradientDrawable().apply {
-        setColor(0xF21E1F24.toInt())
+        setColor(c.unitBg)
         cornerRadius = 30 * dp
-        setStroke((1 * dp).toInt(), 0xFF3A3D45.toInt())
+        setStroke((1 * dp).toInt(), c.unitStroke)
       }
       addView(row1)
-      addView(View(this@OverlayService).apply { setBackgroundColor(0xFF2A2D33.toInt()) },
-        LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1))
+      val divider = View(this@OverlayService).apply { setBackgroundColor(c.divider) }
+      dividerView = divider
+      addView(divider, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1))
       addView(row2)
     }
     unitView = unit
