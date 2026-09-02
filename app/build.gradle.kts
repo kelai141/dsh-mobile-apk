@@ -89,6 +89,8 @@ dependencies {
   // androidx.core: FileProvider (external-reader open, issue #52); ViewCompat/
   // WindowInsetsCompat were previously satisfied transitively via activity-ktx.
   implementation("androidx.core:core-ktx:1.15.0")
+  // 悬浮球 v2 动效（PRD-overlay-v2 §3.5）：Material 3 Expressive spring 物理（Android 16 原生适配）
+  implementation("androidx.dynamicanimation:dynamicanimation:1.1.0")
   implementation("org.apache.commons:commons-compress:1.28.0")
   implementation("org.tukaani:xz:1.10")
 }

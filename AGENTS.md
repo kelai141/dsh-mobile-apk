@@ -15,7 +15,7 @@
 - **依赖**：androidx.activity-ktx / core-ktx、commons-compress、xz；Shizuku 零依赖反射（ShizukuSupport.kt，仅探活示例）。
 - **兄弟仓库**（协调仓库 `kelai141/dsh-mobile` 下的子目录）：`dsh-shell-termux`（Termux 执行器）、`dsh-client-ui-responsive`（移动 UI 注入层 + F5 消费端）、`dsh-host-web-compat`（页面注入/兼容）、`plugins/`（dsh-android-bridge / -manage / -linux-env / -file-open，协调仓库内）、`vendor/`（dshmarketplace-plugin、dsh-undo-savepoint 固化副本 + PATCHES.md）。
 - **上游** `deepseek-ai/deepseek-harness`（本地 checkout `dsh/`）：只读参考，**零改动**；一切适配以补丁层/插件/壳侧实现。
-- **版本状态**：**0.13.1 已发布**（Release v0.13.1，versionCode 27，PR #113 合并；详见更新记录表与协调仓 AGENTS.md §1）。当前开放跟踪：#115（市场 Phase2，目标 0.13.2）、#110（randomUUID polyfill 待修）、#108（数据备份 feature）。
+- **版本状态**：**0.13.1 已发布**（Release v0.13.1，versionCode 27，PR #113 合并；详见更新记录表与协调仓 AGENTS.md §1）。**0.13.2-preview 已发布**（versionCode 28，prerelease）。**0.13.2-fix 修复批实施中**（#118 引擎启动/探活/UndoGate 五项 + 悬浮球 v2 重设计 + #120 工作区，详见更新记录表）。当前开放跟踪：#115（市场 Phase2，目标 0.13.2）、#120（添加工作区按键不可用——修复批已实施，待发版验证）、#108（数据备份 feature）。
 - **环境无关声明**：本文档适用于任意环境（Windows/WSL/Linux/macOS、有/无真机）开发维护者；环境差异点（WSL、ADB 真机、run-as）已在对应章节标注。
 
 ## 2. 构建与验证命令
@@ -112,7 +112,9 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 | **ShizukuSupport.kt** | Shizuku 反射探活（仅示例；真实通道走 adb 二进制路线，Shizuku 源码作参考存主仓库 .deploy-tmp/shizuku-adb/） | — |
 | **ConsoleActivity/ConsoleSession** | 内置终端 | 环境与引擎一致 |
 | **LogCollector.kt** | 调试日志收集 | 日文件轮转；审计另见 AdbAudit（files/audit/audit.ndjson） |
-| **OverlayService.kt** / **OverlayController.kt** | 悬浮球实时面板（0.13.2 W7）：TYPE_APPLICATION_OVERLAY 球/面板/拖拽贴边/停止 RPC/FileObserver live 流 | 开关持久化 + SYSTEM_ALERT_WINDOW 引导；面板跟随球（repositionPanel）+ 引擎页避让帧（emitFrame/replayFrame，frameConsumer 桥接 WebView） |
+| **EngineProbe.kt** | 本地引擎探活（0.13.2-fix 重构）：应用级状态唯一判定源 | `check()` **全链 Proxy.NO_PROXY 直连**（#118：系统代理劫持本地探针实锤——WebView/curl 豁免代理而 HttpURLConnection 走 ProxySelector → 请求发往代理网关恒 timeout）；`portReachable()` TCP 端口级判定（HTTP 未就绪 ≠ 引擎死亡）；error 区分 **timeout（代理吞请求/慢启）vs refused（端口未开=真死）** |
+| **OverlayService.kt** / **OverlayController.kt** | 悬浮球 v2（PRD-overlay-v2 rev5，0.13.2-fix 从零重写）：**收起=纯黑白球**（ic_launcher_foreground bbox 裁剪居中，状态=低饱和蓝/红光环绕，球体不随状态变色）+ **展开=上下合体圆角矩形**（radius 30dp：状态行 deep diving 扫光 ShimmerTextView + 工具×N 徽标 + 时钟 / 输入行 EditText+蓝底白箭发送+红底白框停止 rx=3） | 双维状态解耦（引擎=EngineProbe 探活 / 会话=live 流 tool_call 计数）；发送=session.prompt steer（插话）/queue + 自动 session.create；停止=session.cancel 仅工作中可用（v1 activeSessionId 空静默 return 已修）；IME 展开切 NOT_FOCUSABLE；spring 吸附（M3 Expressive 380/0.8）；引擎页避让帧保留 |
+| **ShimmerTextView.kt** | 官方「Deep diving...」品牌蓝渐变扫光文字（0.13.2-fix 新增） | 复刻官方 ChatView.module.css .turnStatus：LinearGradient shader（D500 #4176E6 / D200 #D3E2FF，宽 2.5W，translate −1.5W→0，1.8s linear infinite）+ ValueAnimator；reduced-motion 三 scale==0 时静态渐变 |
 | **AdbKeyboardService.kt** / **AdbKeyboardReceiver.kt** | 内嵌 ADBKeyboard 协议 IME（0.13.2 W6） | ADB_INPUT_TEXT/CLEAR 广播 → commitText；实例活跃才提交（canCommit） |
 
 `app/src/main/assets/`：`snapshot.tar.xz`、`snapshot.sha256`、`undo-emergency.mjs`（急救 CLI，UndoGate 用）、`licenses/`（LICENSES 标准文本 + THIRD_PARTY_NOTICES.md，GPL 合规 A2）、`console.html`。
@@ -162,6 +164,9 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 30. **ps1 双 ABI 循环后 assets 停留 x86_64（2026-08-29 实锤，坑 18 现代版）**：build-apk-013.ps1 循环内按 ABI 覆盖 `assets/snapshot.tar.xz`，循环结束留在 x86_64——此后直接 `gradlew assembleDebug` 的 debug 包即 x86 树，装 arm64 真机报 EM_X86_64（本轮已踩）。铁律：真机安装只用 ps1 对应 ABI 命名产物；存疑时 `od -A d -j 18 -N 2 -t u1` 读 node ELF 机器码（183=arm64/62=x86_64）。
 31. **force-stop 杀不死 linker64 回退子进程（2026-08-29 vivo 实锤，0.14 修复）**：升级后旧引擎孤儿存活 → 双引擎抢 3080（探活打到旧引擎、新引擎 bind 失败循环；两代 engine.log 交错误导排障）。真机找引擎 `ps -A | grep linker64`（进程名非 node，pidof node 必空）；处置：run-as kill 全部 linker64 → 看门狗 ~7s 自愈。`pkill -f bin.js` 在 vivo 疑似不生效（坑 28 排障方法论①的 /proc cmdline 扫描为可靠手段）。
 32. **adb forward 静默失效（2026-08-29 实锤）**：APK 重装/USB 重枚举后宿主 forward 清空 → 宿主探活 000，但设备内正常（用户 WebView 秒起）——「引擎挂了」的判断必须先 `adb forward --list` 再重 forward，否则误诊。
+33. **系统 HTTP 代理劫持壳侧本地探针（#118 根因1，2026-09-02 实锤）**：WiFi 配置系统代理时，`HttpURLConnection.openConnection()` 默认走 `ProxySelector` 下发的系统代理 → 把 `127.0.0.1:3080` 的本地请求发给代理网关（回不来本机）→ 探针恒 timeout；而 WebView（Chromium 对 loopback 豁免代理）与 curl（不读系统代理）直连正常 → 「网页能开、app 却判引擎没起来」的矛盾现场。修复 = **壳侧所有本地引擎端口调用一律 `openConnection(Proxy.NO_PROXY)`**（EngineProbe / file-incoming / session.export / session.cancel；UpdateManager 的远程下载**不走** NO_PROXY），且诊断包 probe 字段区分 timeout/refused。
+34. **UndoGate.runCli 直接 exec app-data ELF 无 linker64 fallback（#118 根因2，2026-09-02 修）**：`runCli` 直接 `ProcessBuilder` exec `usr/bin/node`（对比 `EngineManager.startWithArgs` 有 `/system/bin/linker64` fallback）——Android 15+ 拒绝直接 exec app-data ELF → error=13 → auto-undo 从未真正执行。修复 = 与 startWithArgs 同款：捕获「Permission denied」降级 `linker64` 加载（`build` 复用 shellEnv/OPENSSL_CONF/redirectErrorStream）。
+35. **requestLegacyExternalStorage 对 targetSdk≥30 应用无效（#120/MT 调研，2026-09-02 实锤）**：该 flag 仅对「targetSdk≤29 + 运行在 Android 10」生效；targetSdk≥30（含 34）应用即使运行在 Android 10 设备上 flag 也被忽略（SO 63365334 / cgeo #10386 / 小米适配指南多源实锤）→ Android 10 上 SAF 树授权不解锁 FUSE 原始路径、bash 走不了 ContentResolver → 非 root 下「读用户任意目录作工作区」不可达成。落地：SDK 26-28（无分区存储）运行时 READ/WRITE 权限放行；SDK 29 保留拒绝但显式 reason（`__dsh_pick_refused__:android-10`）而非伪装取消；SDK 30+ 维持 All Files Access。
 
 ## 7. GPL 合规（2026-08-23 定稿）
 
@@ -185,6 +190,7 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 
 | 时间 | 版本 | 更新内容 | 更新者 |
 |---|---|---|---|
+| 2026-09-02 | 0.13.2-fix | **修复批（未发版，实施中）**：**坑 33-35 登记**（系统代理劫持本地探针 → 全链 Proxy.NO_PROXY / UndoGate 无 linker64 fallback → 补 linkers / requestLegacyExternalStorage 对 targetSdk≥30 无效——MT 管理器调研实锤）；#118 五项修复（EngineProbe 直连+portReachable+refused/timeout 区分、壳侧全部本地 HTTP 直连、UndoGate linker64、冷却窗/存活兜底端口级、启动失败自动重试 2×5s/10s）；**悬浮球 v2 从零重写**（OverlayService v2：纯黑白球 bbox 裁剪居中 + 低饱和光环 + 上下合体圆角矩形 + ShimmerTextView deep diving + 工具×N + 插话/自动建会话 + spring 动效；飞行 v1 面板/12 条流/收起按钮——P5 未绑 onClick）；**#120 壳侧落地**（SDK 26-28 运行时权限放行 + SDK 29 显式拒绝 reason 哨兵 `__dsh_pick_refused__:`，manifest 加 READ maxSdk32/WRITE maxSdk28）；双形态设备验证全 PASS；§4 文件表补 ShimmerTextView/EngineProbe 语义 | AI 开发助手 |
 | 2026-08-21 | 0.13.0 | 首版创建：AGENT.md 规范落地（PRD F6）；逐文件职责与代码位置截至 dsh-mobile-apk main@5679e59（0.12.5-fx-1） | AI 开发助手 |
 | 2026-08-23 | 0.13.0 | **重构为便利开发维护版**：真实 ADB 通道（AdbState 配对/端口/密钥/审计 + OPENSSL_CONF 坑）、F5 消费端（FileIncoming 200MB 上限）、构建链全景（快照 TARGETS/licenses/pnpm + 全门禁清单 + APK 产物路径）、合规 D 章、11 条坑记录（realpath/pnpm/header 白名单/surfaceOp/9p 权限/信封式 RPC 等） | AI 开发助手 |
 | 2026-08-24 | 0.13.0 | **真机回归发现全量固化**：引擎 OPENSSL_CONF 缺口（node 子进程全挂→shellEnv 统一注入）、apt/dpkg 编译期路径（APT_CONFIG 主文件方案重写 7d；dpkg SYSCONFDIR 已知限制）、git 预装 TARGETS、临时工作区（registry 强制登记 + TTL 7 天清扫）、通知首启权限注册、配对伪成功防御 + 端口自动扫描（discoverPorts）、老内核 ES2022 polyfill、错位目录剔除 + check-prefix-residue.sh 自检（坑 12-17） | AI 开发助手 |

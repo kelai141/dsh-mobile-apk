@@ -202,9 +202,38 @@ class MainActivity : ComponentActivity() {
     }
   }
 
+  /** #120（2026-09）：SDK 26-28 外部工作区放行——运行时 READ/WRITE 授权后走 SAF。
+   *  拒绝授权则回传显式拒绝哨兵（不再静默当取消），由引擎侧转错误对话框。 */
+  private val storagePermLauncher =
+    registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
+      pickTtlHandler.removeCallbacks(pickTtlRunnable)
+      val callback = pendingPickCallback
+      pendingPickCallback = null
+      pendingPermissionRequest = false
+      if (callback == null) return@registerForActivityResult
+      val granted = !grants.values.contains(false)
+      if (granted) {
+        // 授权成功：占槽 + 起 SAF 树选择器（外部工作区=真实路径）。
+        pendingPickCallback = callback
+        pickTtlHandler.removeCallbacks(pickTtlRunnable)
+        pickTtlHandler.postDelayed(pickTtlRunnable, 5 * 60_000L)
+        directoryPicker.launch(null)
+      } else {
+        // 用户拒绝存储权限：显式拒绝（reason=permission-denied），不再静默取消。
+        webView.evaluateJavascript(
+          "window.__dshBridge?.onDirectoryPicked?.(" + jsString(callback) + ", " +
+            jsString(PICK_REFUSED_PREFIX + "permission-denied") + ")", null,
+        )
+      }
+    }
+
   companion object {
     private const val TAG = "dsh-shell"
     const val ACTION_UPDATE = "com.dsharnessmobile.shell.action.UPDATE"
+
+    /** #120：显式拒绝哨兵路径前缀（引擎侧识别为拒绝而非取消，见 host-web-compat）。
+     *  协议：`__dsh_pick_refused__:<reason>`，reason = permission-denied | android-10。 */
+    const val PICK_REFUSED_PREFIX = "__dsh_pick_refused__:"
 
     /** 导出文件大小上限（防恶意/异常大文件 OOM）。 */
     const val MAX_DOWNLOAD_BYTES = 200L * 1024 * 1024
@@ -492,7 +521,7 @@ class MainActivity : ComponentActivity() {
     // 引擎侧插件端点：路径交给 dsh-android-file-open 强制新会话（引擎未起时端点由启动流承托）。
     Thread {
       try {
-        val conn = java.net.URL("http://127.0.0.1:3080/api/android/file-incoming").openConnection() as java.net.HttpURLConnection
+        val conn = java.net.URL("http://127.0.0.1:3080/api/android/file-incoming").openConnection(java.net.Proxy.NO_PROXY) as java.net.HttpURLConnection
         conn.requestMethod = "POST"
         conn.doOutput = true
         conn.connectTimeout = 3000
@@ -830,6 +859,13 @@ class MainActivity : ComponentActivity() {
   /**
    * SAF 目录选择（带 All Files Access 引导）：外部工作区要求 bash 进程能
    * 直接访问所选真实路径；无权限时先跳系统授权页并提示页面侧重试。
+   *
+   * #120（2026-09）：SDK<30 不再一刀切静默拒绝——
+   * - SDK 26-28（无分区存储）：运行时 READ/WRITE 授权后走 SAF（真实路径直接可用）；
+   * - SDK 29（Android 10）：分区存储 + targetSdk≥30 时 requestLegacyExternalStorage
+   *   被忽略（MT 管理器调研实锤：SO 63365334 / cgeo #10386 / 小米适配指南），
+   *   SAF 授权无法解锁 FUSE 原始路径（bash 只能 POSIX open）→ 不可达，
+   *   但仍改为显式拒绝（reason=android-10）而非假装取消，页面得明确错误对话框。
    */
   private fun pickDirectoryWithPermissionCheck(callbackId: String) {
     // 并发保护：已有在途选择时拒绝新请求（单槽 pendingPickCallback 会被
@@ -841,12 +877,42 @@ class MainActivity : ComponentActivity() {
       return
     }
     if (android.os.Build.VERSION.SDK_INT < 30) {
-      // Android 10 及以下无 All Files Access 模型：外部工作区不可用。
-      // 回传 null 让引擎侧 pick 以取消结算，不崩溃、不静默挂起。
+      if (android.os.Build.VERSION.SDK_INT >= 26) {
+        // Android 8/9：运行时权限放行（无分区存储，授权后真实路径完整可用）。
+        val hasRead = checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE) ==
+          android.content.pm.PackageManager.PERMISSION_GRANTED
+        val hasWrite = if (android.os.Build.VERSION.SDK_INT >= 29) true else
+          checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (hasRead && hasWrite) {
+          pendingPickCallback = callbackId
+          pendingPermissionRequest = true
+          pickTtlHandler.removeCallbacks(pickTtlRunnable)
+          pickTtlHandler.postDelayed(pickTtlRunnable, 5 * 60_000L)
+          directoryPicker.launch(null)
+          return
+        }
+        pendingPickCallback = callbackId
+        pendingPermissionRequest = true
+        pickTtlHandler.removeCallbacks(pickTtlRunnable)
+        pickTtlHandler.postDelayed(pickTtlRunnable, 5 * 60_000L)
+        val perms = if (android.os.Build.VERSION.SDK_INT >= 29) {
+          arrayOf(android.Manifest.permission.READ_EXTERNAL_STORAGE)
+        } else {
+          arrayOf(
+            android.Manifest.permission.READ_EXTERNAL_STORAGE,
+            android.Manifest.permission.WRITE_EXTERNAL_STORAGE,
+          )
+        }
+        storagePermLauncher.launch(perms)
+        return
+      }
+      // Android 10（SDK 29）：不可达但显式拒绝（reason=android-10），不再假装取消。
       webView.evaluateJavascript(
-        "window.__dshBridge?.onDirectoryPicked?.(" + jsString(callbackId) + ", null)", null,
+        "window.__dshBridge?.onDirectoryPicked?.(" + jsString(callbackId) + ", " +
+          jsString(PICK_REFUSED_PREFIX + "android-10") + ")", null,
       )
-      showTestNotification("外部工作区不可用", "Android 10 及以下不支持选择外部目录")
+      showTestNotification("外部工作区不可用", "Android 10 不支持选择外部目录")
       return
     }
     if (android.os.Environment.isExternalStorageManager()) {
@@ -913,7 +979,8 @@ class MainActivity : ComponentActivity() {
     Thread {
       var conn: HttpURLConnection? = null
       try {
-        val c = URL(url).openConnection() as HttpURLConnection
+        // #118：本地引擎端点的下载（session.export）同样必须绕过系统代理直连。
+        val c = URL(url).openConnection(java.net.Proxy.NO_PROXY) as HttpURLConnection
         conn = c
         c.connectTimeout = 15_000
         c.readTimeout = 60_000
@@ -1350,7 +1417,10 @@ class MainActivity : ComponentActivity() {
     chrome = buildGuideChrome(
       this,
       GuideCallbacks(
-        onStartEngine = { startEngineFlow() },
+        onStartEngine = {
+          engineRetryCount = 0 // 手动重试归零自动重试计数
+          startEngineFlow()
+        },
         onOpenConsole = { startActivity(Intent(this, ConsoleActivity::class.java)) },
         onCheckUpdate = { startUpdateCheck() },
         onGrantStorage = { openAllFilesAccessSettings() },
@@ -1571,6 +1641,26 @@ class MainActivity : ComponentActivity() {
     maybeAutoUndo(generation)
   }
 
+  /** #118 建议7（2026-09）：启动失败自动重试（最多 2 次，5s/10s 间隔），
+   *  失败不永远停在 Error 引导页等手动操作。手动重试（onStartEngine）归零计数。 */
+  private var engineRetryCount = 0
+
+  private fun scheduleEngineRetry(generation: Long) {
+    if (!isCurrentEngineFlow(generation)) return
+    if (engineRetryCount >= 2) return
+    engineRetryCount++
+    val delayMs = 5_000L * engineRetryCount
+    val attempt = engineRetryCount
+    runOnUiThread {
+      if (!isCurrentEngineFlow(generation)) return@runOnUiThread
+      applyGuidePhase(GuidePhase.Starting, "引擎启动失败，${delayMs / 1000}s 后自动重试（第 $attempt/2 次）")
+      showGuide()
+    }
+    engineMonitorHandler.postDelayed({
+      if (isCurrentEngineFlow(generation)) startEngineFlow()
+    }, delayMs)
+  }
+
   private fun startEngineFlow() {
     // onCreate and the following onResume can both request startup. Acquire the
     // flow before mutating lifecycle state so a duplicate cannot invalidate the
@@ -1640,6 +1730,8 @@ class MainActivity : ComponentActivity() {
           showGuide()
         }
         maybeAutoUndo(generation)
+        // #118 建议7：失败不清零计数时自动重试（Error 页不再需要手动点重试）。
+        scheduleEngineRetry(generation)
         return@Thread
       }
       // Poll for the web service with process-alive semantics (0.13.0 D1): cold boot takes
@@ -1682,6 +1774,8 @@ class MainActivity : ComponentActivity() {
           showGuide()
         }
         onEngineStartTimeout(generation)
+        // #118 建议7：进程死亡路径同样自动重试（可自愈的瞬时失败不必停在错误页）。
+        scheduleEngineRetry(generation)
         return@Thread
       }
       if (booted) {

@@ -4,6 +4,10 @@
   <uses-permission android:name="android.permission.INTERNET" />
   <!-- 外部工作区：bash 进程需要访问用户选择的目录（Android 11+ 分区存储）。 -->
   <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+  <!-- #120（2026-09）：Android 8/9（无分区存储）外部工作区放行所需运行时权限；
+       maxSdkVersion=32 保证 Android 13+ 不重复申请（Android 13 起并入 READ_MEDIA_* 且工作区走 All Files Access）。 -->
+  <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+  <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />

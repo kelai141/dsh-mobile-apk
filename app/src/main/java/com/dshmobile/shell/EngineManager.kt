@@ -523,7 +523,10 @@ class EngineManager(private val context: Context, private val pickToken: String?
     // 实际不可达（探活 down），冷却窗不应阻止重试——旧实现让挂死进程占着 3080 直到 EADDRINUSE。
     // 同时 startEngine 前必须先终结残留进程：destroy() 仅 SIGTERM，引擎挂死时需 destroyForcibly。
     val withinCooldown = now - EngineManager.lastStartAttemptAt < START_COOLDOWN_MS
-    val engineReachable = try { EngineProbe.check(300).optBoolean("running", false) } catch (_: Exception) { false }
+    // #118 根因3（2026-09）：冷却窗判定改端口级可达（TCP connect），不再用 HTTP 探活——
+    // 冷启动期 HTTP 必超时（800ms→5s 均复现），300ms 探活必然假 down → 冷却窗被绕过 →
+    // killExistingEngine 杀掉正在冷启动的引擎 → 重启循环（用户每 5-7s 观察到一个新 linker64）。
+    val engineReachable = EngineProbe.portReachable(1000)
     if (withinCooldown && engineReachable) {
       STARTING.set(false)
       LogCollector.log(TAG, "engine start skipped (cooldown window; engine reachable)")
@@ -740,7 +743,9 @@ class EngineManager(private val context: Context, private val pickToken: String?
     if (held != null && held.isAlive) return true
     if (held == null) {
       // 句柄丢失（看门狗曾被 fork 或孤儿）：以端口可达性兜底判定。
-      return try { EngineProbe.check(300).optBoolean("running", false) } catch (_: Exception) { false }
+      // #118 根因3（2026-09）：HTTP 未就绪 ≠ 引擎死亡（冷启动/慢响应实测 3061ms），
+      // 必须用端口级 TCP 判定，否则兜底探活把启动中的引擎误判死亡 → 误生成诊断包。
+      return EngineProbe.portReachable(1000)
     }
     return false
   }

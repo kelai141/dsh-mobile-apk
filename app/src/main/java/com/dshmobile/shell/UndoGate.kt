@@ -104,7 +104,11 @@ object UndoGate {
         engine.usrDir.absolutePath + "/bin/node",
         cli.absolutePath,
       ) + args
-      val pb = ProcessBuilder(cmd).apply {
+      // #118 根因2（2026-09）：直接 exec app-data ELF 在 Android 15+ 恒 Permission denied
+      // （error=13），auto-undo 因此从未真正执行。与 EngineManager.startWithArgs 同款：
+      // 捕获 Permission denied 后降级经 /system/bin/linker64 加载（系统库加载机制对
+      // app 数据永远放行）。
+      fun build(argv: List<String>): ProcessBuilder = ProcessBuilder(argv).apply {
         environment().putAll(engine.shellEnv())
         environment()["DSH_HOME"] = dsh.absolutePath
         environment()["DSH_UNDO_ROOT"] = File(dsh, "undo-snapshots").absolutePath
@@ -115,7 +119,14 @@ object UndoGate {
         environment()["OPENSSL_CONF"] = File(engine.usrDir, "etc/tls/openssl.cnf").absolutePath
         redirectErrorStream(true)
       }
-      val proc = pb.start()
+      var proc: Process
+      try {
+        proc = build(cmd).start()
+      } catch (e: java.io.IOException) {
+        if (e.message?.contains("Permission denied") != true) throw e
+        Log.w(TAG, "direct exec denied, falling back to linker64: " + e.message)
+        proc = build(listOf("/system/bin/linker64") + cmd).start()
+      }
       val text = proc.inputStream.bufferedReader().use { it.readText() }
       if (!proc.waitFor(60, java.util.concurrent.TimeUnit.SECONDS)) {
         proc.destroy()

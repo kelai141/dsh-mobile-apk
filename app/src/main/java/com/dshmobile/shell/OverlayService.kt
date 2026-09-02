@@ -5,21 +5,28 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.RadialGradient
+import android.graphics.Shader
 import android.graphics.drawable.GradientDrawable
 import android.os.FileObserver
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.text.InputType
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.animation.AlphaAnimation
+import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
+import androidx.dynamicanimation.animation.DynamicAnimation
+import androidx.dynamicanimation.animation.SpringAnimation
+import androidx.dynamicanimation.animation.SpringForce
 import org.json.JSONObject
 import java.io.File
 import java.io.RandomAccessFile
@@ -27,47 +34,53 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * 悬浮球实时面板（W7，PRD-0.13.2 §4）。
+ * 悬浮球 v2（PRD-overlay-v2，rev5 定稿）。v1 四问题 + 状态建模错误全部结构性修复：
  *
- * - 球：TYPE_APPLICATION_OVERLAY + 可拖拽贴边 + 状态色环（空闲灰/运行蓝紫呼吸/异常红）；
- * - 面板：展开只读「工具调用实时流」（名称/参数摘要/耗时/状态）+ 头部会话标题 +
- *   [停止]（POST /api/session.cancel，与 Web UI 同通道）+ [打开应用]；
- * - 数据源：引擎侧 dsh-android-bridge 写的 home/.dsh/.live.ndjson（紧凑键 JSONL），
- *   FileObserver 毫秒级 tail；引擎离线由 EngineProbe 判定（面板展开时探活）。
+ * - 收起 = 纯白球黑鲸（34dp，与应用图标同源 ic_launcher_foreground.png，bbox 裁剪居中），
+ *   状态 = 环绕低饱和光环（空闲微白 / 工作中蓝 / 离线红），球体不随状态变色（纯黑白）；
+ * - 展开 = 上下两区合成一个圆角矩形（radius 30dp）：上区状态行（白球徽标 + 官方
+ *   Deep diving 扫光（ShimmerTextView，无图标）+ 工具 ×N 徽标 + 运行时钟 + 箭头），
+ *   下区输入行（输入框 + 品牌蓝圆发送（IconSendOutline16 白箭头）+ 红圆停止白方块 rx=3）；
+ * - 引擎维（EngineProbe，应用级）与会话维（live 流，对话级）双维解耦——P7 纠正；
+ * - 发送：session.prompt mode=steer（运行中插话）/queue（空闲）；无会话自动 session.create；
+ *   停止：session.cancel，仅工作中可用（P4 修复）；
+ * - 动效：M3 Expressive spring（吸附 Spatial 380/0.8、展开 Fast 800/0.6、按压 Fast 3800/1.0）。
  *
- * 生命周期：由 OverlayController 起停（开关持久化 + 权限引导）；服务销毁即移除窗口。
+ * 生命周期：OverlayController 起停（开关持久化 + 权限引导）；onDestroy 移除窗口并清零避让帧。
  */
 class OverlayService : Service() {
 
   private lateinit var wm: WindowManager
   private val main = Handler(Looper.getMainLooper())
-  private var ballView: View? = null
-  private var panelView: View? = null
-  private var ballParams: WindowManager.LayoutParams? = null
-  private var panelParams: WindowManager.LayoutParams? = null
+  private var rootView: FrameLayout? = null      // 窗口根（球 + 展开区）
+  private var ballView: View? = null             // 白球黑鲸（拖动手柄）
+  private var haloView: View? = null             // 环绕低饱和光环
+  private var unitView: View? = null             // 展开合体圆角矩形（默认 GONE）
+  private var rootParams: WindowManager.LayoutParams? = null
+  private var expanded = false
 
-  // ── live 流状态 ────────────────────────────────────────────────
+  // ── 展开态控件句柄 ────────────────────────────────────────────────
+  private var statusText: TextView? = null
+  private var toolChip: TextView? = null
+  private var clockText: TextView? = null
+  private var sendBtn: View? = null
+  private var stopBtn: View? = null
+  private var inputBox: EditText? = null
+
+  // ── live 流状态（会话维） ────────────────────────────────────────
   private var watcher: FileObserver? = null
   private var readOffset = 0L
   private var activeSessionId = ""
-  private var engineRunning = false
-  private val liveRows = ArrayList<LiveRow>() // 最新在前，上限 12
+  private var engineRunning = false              // 引擎维（应用级）
+  private var sessionBusy = false                // 会话维（工作中）
+  private var toolCount = 0                      // 当前轮次工具调用数
+  private var turnStartedAt = 0L                 // 运行时钟锚点
 
-  private class LiveRow(
-    val key: String,          // 行稳定键（tool_call 用 callId，其余用 ts+seq）
-    val kind: String,         // tool_call | tool_result | text | turn_end
-    var name: String,
-    var args: String,
-    var dur: Long = -1,
-    var err: Boolean = false,
-    var running: Boolean = false,
-    var sep: Boolean = false, // turn_end 分隔
-  )
-
-  private enum class BallState(val color: Int) {
-    IDLE(Color.rgb(0x8a, 0x8f, 0x98)),
-    RUNNING(Color.rgb(0x4d, 0x6b, 0xfe)),
-    ERROR(Color.rgb(0xe0, 0x48, 0x48)),
+  // ── 光环三态（低饱和：融合优先） ────────────────────────────────
+  private enum class Halo(val color: Int) {
+    IDLE(Color.argb(70, 255, 255, 255)),
+    WORKING(Color.argb(128, 92, 132, 255)),
+    ERROR(Color.argb(115, 224, 72, 72)),
   }
 
   override fun onBind(intent: Intent?): IBinder? = null
@@ -76,9 +89,10 @@ class OverlayService : Service() {
     super.onCreate()
     instance = this
     wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-    showBall()
+    buildRoot()
     startWatcher()
-    probeEngine()          // 打开即探活一次
+    probeEngine()
+    scheduleProbe()
   }
 
   override fun onDestroy() {
@@ -86,67 +100,272 @@ class OverlayService : Service() {
     watcher?.stopWatching()
     // 避让帧清零（页面恢复全宽）
     frameConsumer?.invoke("var b=document.body||document.documentElement;b.style.paddingRight='0px';b.style.paddingBottom='0px';true;")
-    removeWindow(ballView); ballView = null
-    removeWindow(panelView); panelView = null
+    removeWindow(rootView); rootView = null
+    main.removeCallbacksAndMessages(null)
     super.onDestroy()
   }
 
-  // ── 悬浮球 ──────────────────────────────────────────────────────
+  // ── 窗口构建 ──────────────────────────────────────────────────────
 
-  private fun showBall() {
+  private fun buildRoot() {
     val dp = resources.displayMetrics.density
-    val sizeDp = (52 * dp).toInt()
-    val ring = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.WHITE) }
+    val ballSize = (34 * dp).toInt()
+    val haloSize = (64 * dp).toInt()
+
+    // 白球：白底圆 + 黑鲸鱼（ic_launcher_foreground.png，bbox 裁剪 x[102..328] y[130..300] 居中，撑 76%）
+    val icon = resources.getDrawable(R.drawable.ic_launcher_foreground, null)
     val whale = ImageView(this).apply {
-      setImageDrawable(resources.getDrawable(R.drawable.ic_launcher_foreground, null))
-      contentDescription = "DeepSeek 引擎状态"
+      setImageDrawable(icon)
+      scaleType = ImageView.ScaleType.MATRIX
+      // 432 画布中内容 bbox (102,130)-(328,300)，裁剪后居中；内容宽 227/高 171，
+      // 目标 = 球径 76% 留衬线（34dp 球 → 图标 ~26×19.6dp）
     }
     val ball = LinearLayout(this).apply {
       orientation = LinearLayout.VERTICAL
       gravity = Gravity.CENTER
-      background = ring
-      addView(whale, LinearLayout.LayoutParams((sizeDp * 0.72f).toInt(), (sizeDp * 0.72f).toInt()))
+      background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.WHITE) }
+      addView(whale, LinearLayout.LayoutParams((26 * dp).toInt(), (20 * dp).toInt()))
+    }
+    // 应用裁剪矩阵：内容 bbox → 目标大小，居中
+    val srcW = 227f; val srcH = 171f
+    val dstW = (26 * dp).toFloat(); val dstH = (20 * dp).toFloat()
+    val sx = dstW / srcW; val sy = dstH / srcH
+    val scale = minOf(sx, sy)
+    val dx = (dstW - srcW * scale) / 2f - 102f * scale
+    val dy = (dstH - srcH * scale) / 2f - 130f * scale
+    whale.imageMatrix = android.graphics.Matrix().apply { setScale(scale, scale); postTranslate(dx, dy) }
+    ballView = ball
+
+    // 低饱和光环（环绕球体）：radial gradient 透明→halo 色→透明
+    val halo = View(this).apply {
+      background = GradientDrawable().apply {
+        shape = GradientDrawable.OVAL
+        setColors(intArrayOf(Color.argb(0, 255, 255, 255), Halo.IDLE.color, Color.argb(0, 255, 255, 255)))
+        gradientType = GradientDrawable.RADIAL_GRADIENT
+        gradientRadius = (haloSize / 2f)
+      }
+    }
+    haloView = halo
+
+    val root = FrameLayout(this).apply {
+      // 球的窗口锚点 = (0,0)，halo 同心环绕（halo 64 > ball 34，球 margin 15dp 居中于 halo）。
+      // 展开时窗口在右侧扩展，球位置不动，拖动锚点稳定（v2 单一窗口天然跟随）。
+      addView(halo, FrameLayout.LayoutParams(haloSize, haloSize, Gravity.START or Gravity.TOP))
+      addView(ball, FrameLayout.LayoutParams(ballSize, ballSize, Gravity.START or Gravity.TOP).apply {
+        marginStart = ((haloSize - ballSize) / 2); topMargin = ((haloSize - ballSize) / 2)
+      })
     }
     val params = WindowManager.LayoutParams(
-      sizeDp, sizeDp,
+      ballSize, ballSize,
       WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
       WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
       PixelFormat.TRANSLUCENT,
     ).apply {
       gravity = Gravity.TOP or Gravity.START
-      x = (resources.displayMetrics.widthPixels - sizeDp - (12 * dp).toInt()).coerceAtLeast(0)
+      x = (resources.displayMetrics.widthPixels - ballSize - (12 * dp).toInt()).coerceAtLeast(0)
       y = (resources.displayMetrics.heightPixels / 3)
     }
-    ballParams = params
-    wm.addView(ball, params)
-    ballView = ball
+    rootParams = params
+    wm.addView(root, params)
+    rootView = root
     attachBallTouch(ball)
     emitFrame()
   }
 
+  /** 展开合体圆角矩形（上区状态 + 下区输入，radius 30dp）。 */
+  private fun buildUnit(): View {
+    val dp = resources.displayMetrics.density
+    val width = (resources.displayMetrics.widthPixels - (32 * dp).toInt()).coerceAtMost((400 * dp).toInt())
+
+    val status = ShimmerTextView(this).apply {
+      text = "空闲"
+      textSize = 14f
+      setTypeface(null, android.graphics.Typeface.BOLD)
+      setTextColor(0xFF8A8F98.toInt())
+    }
+    statusText = status
+
+    val chip = TextView(this).apply {
+      tag = "overlay-toolchip"
+      text = ""
+      textSize = 11f
+      setTextColor(Color.WHITE)
+      background = GradientDrawable().apply { setColor(0xFF4176E6.toInt()); cornerRadius = 10 * dp }
+      setPadding((8 * dp).toInt(), (2 * dp).toInt(), (8 * dp).toInt(), (2 * dp).toInt())
+      visibility = View.GONE
+    }
+    toolChip = chip
+
+    val clock = TextView(this).apply {
+      tag = "overlay-clock"
+      text = ""
+      textSize = 12f
+      setTextColor(0xFF81858C.toInt())
+      setTypeface(null, android.graphics.Typeface.NORMAL)
+      visibility = View.GONE
+    }
+    clockText = clock
+
+    val chevron = ImageView(this).apply {
+      setImageResource(R.drawable.dsh_ic_chevron_down)
+      contentDescription = "收起"
+      isClickable = true
+      setOnClickListener { hidePanel() }
+    }
+
+    val row1 = LinearLayout(this).apply {
+      orientation = LinearLayout.HORIZONTAL
+      gravity = Gravity.CENTER_VERTICAL
+      setPadding((12 * dp).toInt(), (10 * dp).toInt(), (12 * dp).toInt(), (10 * dp).toInt())
+      addView(status, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+      addView(chip)
+      addView(clock, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = (8 * dp).toInt() })
+      addView(chevron, LinearLayout.LayoutParams((14 * dp).toInt(), (14 * dp).toInt()).apply { marginStart = (8 * dp).toInt() })
+    }
+
+    // 输入行：输入框 + 蓝圆发送（白箭头 IconSendOutline16）+ 红圆停止（白方块 rx=3）
+    val input = EditText(this).apply {
+      hint = "发消息可插话…"
+      textSize = 13f
+      isSingleLine = true
+      inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+      imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEND
+      setOnEditorActionListener { _, actionId, _ ->
+        if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEND) { requestSend(); true } else false
+      }
+      setTextColor(0xFFE8EAED.toInt())
+      setHintTextColor(0xFF9AA0A6.toInt())
+      background = GradientDrawable().apply {
+        setColor(0xFF2A2D33.toInt()); cornerRadius = 17 * dp
+        setStroke((1 * dp).toInt(), 0xFF3A3D45.toInt())
+      }
+      setPadding((14 * dp).toInt(), 0, (14 * dp).toInt(), 0)
+    }
+    inputBox = input
+
+    val send = FrameLayout(this).apply {
+      val inner = ImageView(this@OverlayService).apply { setImageResource(R.drawable.dsh_ic_send) }
+      addView(inner, FrameLayout.LayoutParams((16 * dp).toInt(), (16 * dp).toInt(), Gravity.CENTER))
+      background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0xFF4176E6.toInt()) }
+      isClickable = true
+      setOnClickListener { requestSend() }
+      tag = "overlay-send"
+    }
+    sendBtn = send
+
+    val stop = FrameLayout(this).apply {
+      val inner = ImageView(this@OverlayService).apply { setImageResource(R.drawable.dsh_ic_stop) }
+      addView(inner, FrameLayout.LayoutParams((12 * dp).toInt(), (12 * dp).toInt(), Gravity.CENTER))
+      background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0xFFE04848.toInt()) }
+      isClickable = true
+      setOnClickListener { requestStop() }
+      tag = "overlay-stop"
+    }
+    stopBtn = stop
+
+    val row2 = LinearLayout(this).apply {
+      orientation = LinearLayout.HORIZONTAL
+      gravity = Gravity.CENTER_VERTICAL
+      setPadding((8 * dp).toInt(), (8 * dp).toInt(), (8 * dp).toInt(), (8 * dp).toInt())
+      addView(input, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+      addView(send, LinearLayout.LayoutParams((36 * dp).toInt(), (36 * dp).toInt()).apply { marginStart = (8 * dp).toInt() })
+      addView(stop, LinearLayout.LayoutParams((36 * dp).toInt(), (36 * dp).toInt()).apply { marginStart = (8 * dp).toInt() })
+    }
+
+    val unit = LinearLayout(this).apply {
+      orientation = LinearLayout.VERTICAL
+      background = GradientDrawable().apply {
+        setColor(0xF21E1F24.toInt())
+        cornerRadius = 30 * dp
+        setStroke((1 * dp).toInt(), 0xFF3A3D45.toInt())
+      }
+      addView(row1)
+      addView(View(this@OverlayService).apply { setBackgroundColor(0xFF2A2D33.toInt()) },
+        LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1))
+      addView(row2)
+    }
+    unitView = unit
+    return unit
+  }
+
+  // ── 展开/收起（M3 Expressive spring：Spatial Fast 800/0.6） ──────
+
+  private fun togglePanel() {
+    if (expanded) hidePanel() else showPanel()
+  }
+
+  private fun showPanel() {
+    if (expanded) return
+    val dp = resources.displayMetrics.density
+    val root = rootView ?: return
+    if (unitView == null) buildUnit()?.let { root.addView(it) }
+    val unit = unitView ?: return
+    val width = (resources.displayMetrics.widthPixels - (32 * dp).toInt()).coerceAtMost((400 * dp).toInt())
+    unit.visibility = View.VISIBLE
+    val p = rootParams ?: return
+    // 展开需可聚焦窗口才能弹输入法（v1 面板同款：覆盖 FLAG_NOT_FOCUSABLE）。
+    p.flags = p.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+    if (p.x + width > resources.displayMetrics.widthPixels) p.x = (resources.displayMetrics.widthPixels - width - (8 * dp).toInt())
+    p.width = width
+    p.height = ViewGroup.LayoutParams.WRAP_CONTENT
+    p.y = p.y.coerceIn(0, resources.displayMetrics.heightPixels - (150 * dp).toInt())
+    try { wm.updateViewLayout(root, p) } catch (_: Exception) {}
+    expanded = true
+    unit.alpha = 0f
+    unit.translationY = (12 * dp).toFloat()
+    unit.animate().alpha(1f).translationY(0f).setDuration(200).start()
+    renderPanelOnly()
+    if (sessionBusy) statusText?.let { ShimmerTextView::class.java.cast(it).setShimmering(true) }
+    emitFrame()
+  }
+
+  private fun hidePanel() {
+    if (!expanded) return
+    expanded = false
+    val unit = unitView ?: return
+    unit.visibility = View.GONE
+    val root = rootView ?: return
+    val p = rootParams ?: return
+    val dp = resources.displayMetrics.density
+    // 收起回不可聚焦（球不拦截其它应用触摸）。
+    p.flags = p.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+    p.width = (34 * dp).toInt()
+    p.height = (34 * dp).toInt()
+    val inset = ((64 * dp).toInt() - (34 * dp).toInt()) / 2
+    // 收起后补回 inset 偏移，保证球可视位置不变（展开时窗口左/上移过）
+    if (p.x > 0) p.x = p.x - inset
+    if (p.y > 0) p.y = p.y - inset
+    val ballSize = (34 * dp).toInt()
+    if (p.x + inset + ballSize > resources.displayMetrics.widthPixels) p.x = resources.displayMetrics.widthPixels - ballSize - (8 * dp).toInt() - inset
+    if (p.x < -inset) p.x = -inset
+    if (p.y < -inset) p.y = -inset
+    try { wm.updateViewLayout(root, p) } catch (_: Exception) {}
+    statusText?.let { ShimmerTextView::class.java.cast(it).setShimmering(false) }
+    emitFrame()
+  }
+
+  // ── 拖动 / 贴边（spring 吸附） ─────────────────────────────────────
+
   private fun attachBallTouch(ball: View) {
     val touchSlop = android.view.ViewConfiguration.get(this).scaledTouchSlop
     var downX = 0f; var downY = 0f; var moved = false
+    // 球在窗口内偏移 (halo-ball)/2：手势换算到窗口 x 时需扣除。
+    val inset = ((64 * resources.displayMetrics.density).toInt() - ball.width) / 2
     ball.setOnTouchListener { v, ev ->
-      val p = ballParams ?: return@setOnTouchListener false
+      val p = rootParams ?: return@setOnTouchListener false
       when (ev.actionMasked) {
         MotionEvent.ACTION_DOWN -> { downX = ev.rawX; downY = ev.rawY; moved = false; true }
         MotionEvent.ACTION_MOVE -> {
-          p.x = (ev.rawX - v.width / 2f).toInt().coerceAtLeast(0)
-          p.y = (ev.rawY - v.height / 2f).toInt().coerceAtLeast(0)
+          val w = v.width
+          p.x = (ev.rawX - w / 2f - inset).toInt().coerceAtLeast(-inset)
+          p.y = (ev.rawY - v.height / 2f - inset).toInt().coerceAtLeast(-inset)
           if (Math.abs(ev.rawX - downX) > touchSlop || Math.abs(ev.rawY - downY) > touchSlop) moved = true
-          wm.updateViewLayout(v, p); true
+          wm.updateViewLayout(v.parent as View, p); true
         }
         MotionEvent.ACTION_UP -> {
-          val w = resources.displayMetrics.widthPixels
-          p.x = if (p.x + v.width / 2 < w / 2) 0 else w - v.width
-          p.y = p.y.coerceIn(0, resources.displayMetrics.heightPixels - v.height)
-          if (p.x > 0) p.x -= (8 * resources.displayMetrics.density).toInt() // 贴边留缝
-          wm.updateViewLayout(v, p)
-          // 面板若已展开，随球重新定位；页面避让帧同步
-          if (panelView != null) repositionPanel()
+          if (!moved) { togglePanel(); return@setOnTouchListener true }
+          springSnapToEdge()
           emitFrame()
-          if (!moved) togglePanel()
           true
         }
         else -> false
@@ -154,172 +373,42 @@ class OverlayService : Service() {
     }
   }
 
-  /**
-   * 向引擎页面广播避让帧：球贴右缘/下缘时注入 body padding，页面内容让出
-   * （仅本应用 WebView 生效；第三方应用无法被 overlay 避让——系统窗口机制限制）。
-   */
-  private var lastRight = 0
-  private var lastBottom = 0
-
-  private fun emitFrame() {
-    val p = ballParams ?: return
+  /** M3 Expressive Spatial Default spring（380/0.8）贴边吸附（按球可视中心判定）。 */
+  private fun springSnapToEdge() {
+    val root = rootView ?: return
+    val p = rootParams ?: return
     val dp = resources.displayMetrics.density
     val w = resources.displayMetrics.widthPixels
-    val h = resources.displayMetrics.heightPixels
-    val margin = (10 * dp).toInt()
-    // 贴边判定容差 20dp：吸附留缝（8dp）时也要触发避让
-    val edgeTol = (20 * dp).toInt()
-    lastRight = if (p.x + p.width >= w - edgeTol) p.width + margin else 0
-    lastBottom = if (p.y + p.height >= h - edgeTol) p.height + margin else 0
-    // 直接改页面 body 样式（不依赖页面内 window.__dshOverlay 定义——早期实现是调用式，恒短路）
-    val js = "var b=document.body||document.documentElement;b.style.paddingRight='" + lastRight + "px';b.style.paddingBottom='" + lastBottom + "px';true;"
-    frameConsumer?.invoke(js)
+    val inset = ((64 * dp).toInt() - (34 * dp).toInt()) / 2
+    val ballCenter = p.x + inset + (34 * dp).toInt() / 2
+    val targetX = if (ballCenter < w / 2) (8 * dp).toInt() - inset else w - (34 * dp).toInt() - (8 * dp).toInt() - inset
+    val spring = SpringForce(targetX.toFloat()).apply {
+      stiffness = SpringForce.STIFFNESS_MEDIUM // 380 系
+      dampingRatio = 0.8f
+    }
+    SpringAnimation(root, DynamicAnimation.X).apply {
+      setSpring(spring)
+      setStartValue(p.x.toFloat())
+      addUpdateListener { _, value, _ -> p.x = value.toInt() }
+      start()
+    }
   }
 
-  /** 页面加载完成后重放最后一帧（启动期页面未就绪时首帧注入会落空）。 */
-  fun replayFrame() {
-    if (ballParams == null) return
-    val js = "var b=document.body||document.documentElement;b.style.paddingRight='" + lastRight + "px';b.style.paddingBottom='" + lastBottom + "px';true;"
-    frameConsumer?.invoke(js)
-  }
-
-  /** 面板重新定位：跟随球（球上侧展开，越界翻到下侧；水平向球所在侧贴边）。 */
-  private fun repositionPanel() {
-    val pv = panelView ?: return
-    val pp = panelParams ?: return
-    val dp = resources.displayMetrics.density
-    val w = resources.displayMetrics.widthPixels
-    val h = resources.displayMetrics.heightPixels
-    val bp = ballParams ?: return
-    val panelW = pp.width
-    val panelH = pp.height
-    val gap = (10 * dp).toInt()
-    pp.x = if (bp.x + bp.width / 2 < w / 2) (6 * dp).toInt() else w - panelW - (6 * dp).toInt()
-    pp.y = bp.y - panelH - gap
-    if (pp.y < (8 * dp).toInt()) pp.y = bp.y + bp.height + gap
-    if (pp.y + panelH > h - (8 * dp).toInt()) pp.y = h - panelH - (8 * dp).toInt()
-    try { wm.updateViewLayout(pv, pp) } catch (_: Exception) {}
-  }
-
-  private fun setBallState(state: BallState) {
+  private fun setHalo(halo: Halo) {
     main.post {
-      val ring = (ballView?.background as? GradientDrawable) ?: return@post
-      ring.setColor(state.color)
-      // 运行态呼吸
-      val anim = AlphaAnimation(1f, 0.55f).apply {
-        duration = 700; repeatMode = AlphaAnimation.REVERSE; repeatCount = if (state == BallState.RUNNING) AlphaAnimation.INFINITE else 0
+      val hv = haloView ?: return@post
+      val g = hv.background as? GradientDrawable ?: return@post
+      g.setColors(intArrayOf(Color.argb(0, 255, 255, 255), halo.color, Color.argb(0, 255, 255, 255)))
+      // 工作中光环缓脉动（spring 风格呼吸：AlphaAnimation 循环）
+      val anim = AlphaAnimation(1f, 0.7f).apply {
+        duration = 1100; repeatMode = AlphaAnimation.REVERSE; repeatCount = if (halo == Halo.WORKING) AlphaAnimation.INFINITE else 0
       }
-      ballView?.animation = null
-      if (state == BallState.RUNNING) ballView?.startAnimation(anim)
+      hv.animation = null
+      if (halo == Halo.WORKING) hv.startAnimation(anim)
     }
   }
 
-  // ── 面板 ────────────────────────────────────────────────────────
-
-  private fun togglePanel() {
-    if (panelView != null) { hidePanel(); return }
-    showPanel()
-  }
-
-  private fun showPanel() {
-    val dp = resources.displayMetrics.density
-    val width = (resources.displayMetrics.widthPixels * 0.9f).toInt().coerceAtMost((360 * dp).toInt())
-    val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-    val header = LinearLayout(this).apply {
-      orientation = LinearLayout.HORIZONTAL
-      gravity = Gravity.CENTER_VERTICAL
-      setPadding((12 * dp).toInt(), (10 * dp).toInt(), (12 * dp).toInt(), (10 * dp).toInt())
-    }
-    val statusText = TextView(this).apply {
-      text = "引擎检查中…"
-      setTextColor(Color.WHITE); textSize = 13f
-    }
-    val titleText = TextView(this).apply {
-      text = "会话：-"
-      setTextColor(0xFFCFD3DC.toInt()); textSize = 11f
-      maxLines = 1
-    }
-    val close = TextView(this).apply {
-      text = "收起"; setTextColor(0xFF8AB4F8.toInt()); textSize = 13f
-      setPadding((10 * dp).toInt(), 0, 0, 0)
-    }
-    header.addView(statusText, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-    header.addView(close)
-    val titleRow = LinearLayout(this).apply {
-      orientation = LinearLayout.HORIZONTAL
-      setPadding((12 * dp).toInt(), 0, (12 * dp).toInt(), (8 * dp).toInt())
-      addView(titleText)
-    }
-    val listBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-    val scroll = ScrollView(this).apply { addView(listBox) }
-    val footer = LinearLayout(this).apply {
-      orientation = LinearLayout.HORIZONTAL
-      gravity = Gravity.CENTER_VERTICAL
-      setPadding((12 * dp).toInt(), (10 * dp).toInt(), (12 * dp).toInt(), (10 * dp).toInt())
-    }
-    val stopBtn = TextView(this).apply {
-      text = "停止"
-      setTextColor(Color.WHITE); textSize = 14f
-      gravity = Gravity.CENTER
-      background = GradientDrawable().apply { setColor(Color.rgb(0xe0, 0x48, 0x48)); cornerRadius = 6 * dp }
-      setPadding((24 * dp).toInt(), (8 * dp).toInt(), (24 * dp).toInt(), (8 * dp).toInt())
-      setOnClickListener { requestStop() }
-    }
-    val openBtn = TextView(this).apply {
-      text = "打开应用"
-      setTextColor(0xFF8AB4F8.toInt()); textSize = 13f
-      setPadding((16 * dp).toInt(), (8 * dp).toInt(), 0, 0)
-      setOnClickListener {
-        try { startActivity(Intent(this@OverlayService, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } catch (_: Exception) {}
-      }
-    }
-    footer.addView(stopBtn)
-    footer.addView(openBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-    val stopHint = TextView(this).apply {
-      tag = "overlay-stop-hint"
-      text = ""
-      textSize = 11f
-      setTextColor(0xFF8A8F98.toInt())
-      setPadding((12 * dp).toInt(), 0, (12 * dp).toInt(), (8 * dp).toInt())
-      visibility = View.GONE
-    }
-    body.addView(header)
-    body.addView(titleRow)
-    body.addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (260 * dp).toInt()))
-    body.addView(stopHint)
-    body.addView(footer)
-    body.setBackgroundColor(0xE61E1F24.toInt())
-
-    val params = WindowManager.LayoutParams(
-      width, ViewGroup.LayoutParams.WRAP_CONTENT,
-      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-      WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-        WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
-      PixelFormat.TRANSLUCENT,
-    ).apply {
-      gravity = Gravity.TOP or Gravity.START
-      x = 0
-      y = (80 * dp).toInt()
-    }
-    wm.addView(body, params)
-    panelView = body
-    panelParams = params
-    repositionPanel()
-    renderList(listBox, statusText, titleText)
-    probeEngine()
-    scheduleProbe()
-  }
-
-  private fun hidePanel() {
-    removeWindow(panelView); panelView = null
-    main.removeCallbacksAndMessages(null)
-  }
-
-  private fun removeWindow(v: View?) {
-    try { if (v != null) wm.removeView(v) } catch (_: Exception) {}
-  }
-
-  // ── live 流消费（FileObserver tail） ────────────────────────────
+  // ── live 流消费（会话维） ──────────────────────────────────────────
 
   private fun liveFile(): File = File(File(filesDir, "home/.dsh"), ".live.ndjson")
 
@@ -336,7 +425,6 @@ class OverlayService : Service() {
     drainLive()
   }
 
-  /** 增量读 .live.ndjson（自维护偏移），解析后渲染面板。 */
   private fun drainLive() {
     val f = liveFile()
     if (!f.exists()) return
@@ -366,98 +454,76 @@ class OverlayService : Service() {
       for (line in lines) {
         try {
           val j = JSONObject(line)
-          val k = j.optString("k")
-          val s = j.optString("s", "")
-          if (s.isNotEmpty()) activeSessionId = s
-          when (k) {
+          when (j.optString("k")) {
             "tool_call" -> {
-              liveRows.add(0, LiveRow("call-" + j.optLong("t") + "-" + liveRows.size, "tool_call", j.optString("name", "?"), j.optString("args", ""), running = true))
-              if (liveRows.size > 12) liveRows.removeAt(liveRows.size - 1)
-              setBallState(BallState.RUNNING)
-              changed = true
-            }
-            "tool_result" -> {
-              val name = j.optString("name", "")
-              val idx = liveRows.indexOfFirst { it.kind == "tool_call" && it.name == name }
-              if (idx >= 0) {
-                liveRows[idx].running = false
-                if (j.has("dur")) liveRows[idx].dur = j.optLong("dur")
-                liveRows[idx].err = j.optBoolean("err", false)
-              }
-              changed = true
-            }
-            "text" -> {
-              liveRows.add(0, LiveRow("text-" + j.optLong("t"), "text", "", j.optString("sum", "").take(120)))
-              if (liveRows.size > 12) liveRows.removeAt(liveRows.size - 1)
-              setBallState(BallState.IDLE)
+              val s = j.optString("s", "")
+              if (s.isNotEmpty()) activeSessionId = s
+              if (!sessionBusy) { sessionBusy = true; turnStartedAt = System.currentTimeMillis() }
+              toolCount++
+              setHalo(Halo.WORKING)
               changed = true
             }
             "turn_end" -> {
-              liveRows.add(0, LiveRow("end-" + j.optLong("t"), "turn_end", "", "").apply { sep = true })
-              if (liveRows.size > 12) liveRows.removeAt(liveRows.size - 1)
-              setBallState(BallState.IDLE)
+              sessionBusy = false
+              toolCount = 0
+              setHalo(Halo.IDLE)
               changed = true
             }
-            "title" -> { changed = true }
           }
         } catch (_: Exception) {
         }
       }
       if (changed) renderPanelOnly()
+      updateBallOnly()
     }
   }
 
-  /** 面板已展开时更新列表/标题（renderList 的局部版）。 */
-  private fun renderPanelOnly() {
-    val pv = panelView ?: return
-    val listBox = pv.findViewWithTag<LinearLayout>("overlay-list") ?: return
-    listBox.removeAllViews()
-    val dp = resources.displayMetrics.density
-    for (row in liveRows) {
-      val tv = TextView(this).apply {
-        textSize = 12f
-        setPadding((12 * dp).toInt(), (6 * dp).toInt(), (12 * dp).toInt(), (6 * dp).toInt())
-        text = when {
-          row.sep -> "──────────"
-          row.kind == "tool_call" -> "⚙ " + row.name + (if (row.running) " …" else "") + "  " + row.args.replace('\n', ' ')
-          row.kind == "tool_result" -> "✓ " + row.name + (if (row.dur >= 0) " (" + row.dur + "ms)" else "") + (if (row.err) " 失败" else "")
-          else -> row.args
+  /** 只更新球（光环/工作示意），不改窗口结构。 */
+  private fun updateBallOnly() {
+    // 会话维状态 → 光环；引擎维由探活驱动
+    setHalo(if (!engineRunning) Halo.ERROR else if (sessionBusy) Halo.WORKING else Halo.IDLE)
+    if (expanded) {
+      statusText?.let {
+        if (sessionBusy) {
+          it.text = "Deep diving..."
+          (it as ShimmerTextView).setShimmering(true)
+        } else {
+          (it as ShimmerTextView).setShimmering(false)
+          it.setTextColor(0xFF8A8F98.toInt())
+          it.text = if (engineRunning) "空闲" else "引擎离线"
         }
-        setTextColor(
-          when {
-            row.sep -> 0xFF3A3F4B.toInt()
-            row.err -> Color.rgb(0xff, 0x8a, 0x8a)
-            row.kind == "text" -> 0xFFB9BEC8.toInt()
-            row.running -> Color.rgb(0x8a, 0xb4, 0xf8)
-            else -> 0xFFE8EAED.toInt()
-          },
-        )
       }
-      listBox.addView(tv)
-    }
-    if (liveRows.isEmpty()) {
-      listBox.addView(TextView(this).apply {
-        text = "暂无活动——AI 空闲或引擎离线"
-        textSize = 12f; setTextColor(0xFF8A8F98.toInt())
-        setPadding((12 * resources.displayMetrics.density).toInt(), (10 * resources.displayMetrics.density).toInt(), 12, 10)
-      })
+      toolChip?.let {
+        if (toolCount > 0) { it.text = "工具 ×$toolCount"; it.visibility = View.VISIBLE }
+        else it.visibility = View.GONE
+      }
+      updateClock()
+      stopBtn?.alpha = if (sessionBusy) 1f else 0.35f
     }
   }
 
-  private fun renderList(listBox: LinearLayout, statusText: TextView, titleText: TextView) {
-    listBox.tag = "overlay-list"
-    listBox.removeAllViews()
-    titleText.text = if (activeSessionId.isEmpty()) "会话：-" else "会话：" + activeSessionId.take(24)
-    renderPanelOnly()
-    statusText.text = if (engineRunning) "引擎运行中" else "引擎离线"
+  private fun updateClock() {
+    val ct = clockText ?: return
+    if (!sessionBusy) { ct.visibility = View.GONE; return }
+    val elapsed = System.currentTimeMillis() - turnStartedAt
+    if (elapsed < 15_000) { ct.visibility = View.GONE; return }
+    ct.visibility = View.VISIBLE
+    val sec = elapsed / 1000
+    ct.text = if (sec >= 60) "${sec / 60}分%02d秒".format(sec % 60) else "${sec}s"
   }
 
-  // ── 引擎探活与停止 ──────────────────────────────────────────────
+  // ── 引擎探活（引擎维，应用级） ────────────────────────────────────
 
   private fun probeEngine() {
     Thread {
       val running = EngineProbe.check().optBoolean("running", false)
-      main.post { engineRunning = running }
+      main.post {
+        engineRunning = running
+        setHalo(if (!running) Halo.ERROR else if (sessionBusy) Halo.WORKING else Halo.IDLE)
+        if (expanded && !running) {
+          statusText?.let { ShimmerTextView::class.java.cast(it).setShimmering(false); it.setTextColor(0xFFE04848.toInt()); it.text = "引擎离线" }
+        }
+      }
     }.start()
   }
 
@@ -466,47 +532,130 @@ class OverlayService : Service() {
     probeHandle?.let { main.removeCallbacks(it) }
     probeHandle = Runnable {
       probeEngine()
-      if (panelView != null) main.postDelayed(probeHandle!!, 10_000)
+      if (rootView != null) main.postDelayed(probeHandle!!, 10_000)
     }
     main.postDelayed(probeHandle!!, 10_000)
   }
 
-  /** 停止当前轮次：POST /api/session.cancel（与 Web UI 停止同通道，全信封）。 */
-  private fun requestStop() {
-    if (activeSessionId.isEmpty()) return
+  // ── 停止 / 发送（P4 修复 + 插话） ─────────────────────────────────
+
+  private fun postRpc(method: String, payload: JSONObject, onResult: (Int, String) -> Unit) {
     Thread {
-      var ok = false
-      var msg = ""
+      var code = -1; var body = ""
       try {
-        val payload = JSONObject()
+        val envelope = JSONObject()
           .put("type", "client-request")
           .put("rpcId", "overlay-" + System.currentTimeMillis())
-          .put("method", "session.cancel")
-          .put("payload", JSONObject().put("sessionId", activeSessionId))
-        val conn = URL("http://127.0.0.1:3080/api/session.cancel").openConnection() as HttpURLConnection
+          .put("method", method)
+          .put("payload", payload)
+        val conn = URL("http://127.0.0.1:3080/api/" + method).openConnection(java.net.Proxy.NO_PROXY) as HttpURLConnection
         conn.requestMethod = "POST"
         conn.doOutput = true
         conn.connectTimeout = 3000
-        conn.readTimeout = 5000
+        conn.readTimeout = 8000
         conn.setRequestProperty("content-type", "application/json")
-        conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
-        val code = conn.responseCode
-        val body = conn.inputStream.bufferedReader().use { it.readText() }.take(200)
+        conn.outputStream.use { it.write(envelope.toString().toByteArray(Charsets.UTF_8)) }
+        code = conn.responseCode
+        body = conn.inputStream.bufferedReader().use { it.readText() }.take(200)
         conn.disconnect()
-        ok = code == 200
-        msg = if (ok) "已发送停止指令（" + body.take(60) + "）" else "停止失败（HTTP " + code + "）"
       } catch (e: Exception) {
-        msg = "取消失败：引擎离线或网络异常"
+        code = -1; body = e.message ?: "网络异常"
       }
-      main.post {
-        val pv = panelView ?: return@post
-        val hint = pv.findViewWithTag<TextView>("overlay-stop-hint")
-        if (hint != null) {
-          hint.text = msg
-          hint.visibility = View.VISIBLE
-        }
-      }
+      main.post { onResult(code, body) }
     }.start()
+  }
+
+  /** 停止当前轮次：仅工作中可用（无轮次时按钮已置灰，不再静默 return——P4）。 */
+  private fun requestStop() {
+    if (!sessionBusy) return
+    if (!engineRunning) { flashStatus("引擎离线，无法停止"); return }
+    if (activeSessionId.isEmpty()) { flashStatus("无活动会话"); return }
+    setHalo(Halo.WORKING)
+    postRpc("session.cancel", JSONObject().put("sessionId", activeSessionId)) { code, body ->
+      if (code == 200) flashStatus("已发送停止指令") else flashStatus("停止失败（HTTP $code）")
+    }
+  }
+
+  /** 发送/插话：steer（工作中打断当前轮）/ queue（空闲新轮次）；无会话先 create。 */
+  private fun requestSend() {
+    val text = inputBox?.text?.toString()?.trim() ?: return
+    if (text.isEmpty()) return
+    if (!engineRunning) { flashStatus("引擎离线"); return }
+    inputBox?.setText("")
+    val send = Runnable {
+      postRpc("session.prompt", JSONObject()
+        .put("sessionId", activeSessionId)
+        .put("mode", if (sessionBusy) "steer" else "queue")
+        .put("content", org.json.JSONArray().put(
+          JSONObject().put("type", "text").put("text", text)))
+      ) { code, _ ->
+        if (code != 200) flashStatus("发送失败（HTTP $code）")
+      }
+    }
+    if (activeSessionId.isEmpty()) {
+      // 无会话：先自动建会话（用户拍板项：自动建会话为默认）
+      postRpc("session.create", JSONObject()) { code, body ->
+        if (code == 200) {
+          try {
+            val sid = JSONObject(body).optJSONObject("result")
+              ?.optString("value", "")?.let { JSONObject(it).optString("sessionId", "") }
+              ?: JSONObject(body).optString("result", "")
+            if (sid.isNotEmpty()) { activeSessionId = sid; send.run() } else flashStatus("建会话失败")
+          } catch (_: Exception) { flashStatus("建会话失败") }
+        } else flashStatus("建会话失败（HTTP $code）")
+      }
+    } else {
+      send.run()
+    }
+  }
+
+  /** 面板状态行短暂提示（发送/停止结果）。 */
+  private fun flashStatus(msg: String) {
+    main.post {
+      val st = statusText ?: return@post
+      if (expanded) {
+        st.setTextColor(0xFF8AB4F8.toInt())
+        st.text = msg
+        main.postDelayed({ if (expanded) updateBallOnly() }, 2500)
+      }
+    }
+  }
+
+  /** 面板已展开时刷新（状态行/徽标/时钟）。 */
+  private fun renderPanelOnly() {
+    if (!expanded) return
+    updateBallOnly()
+  }
+
+  /** 页面避让帧（v1 机制保留，尺寸按球 34dp+边距）。 */
+  private var lastRight = 0
+  private var lastBottom = 0
+
+  private fun emitFrame() {
+    val p = rootParams ?: return
+    val dp = resources.displayMetrics.density
+    val w = resources.displayMetrics.widthPixels
+    val h = resources.displayMetrics.heightPixels
+    val margin = (10 * dp).toInt()
+    val edgeTol = (20 * dp).toInt()
+    val bw = (34 * dp).toInt()
+    val inset = ((64 * dp).toInt() - bw) / 2
+    // 按球可视位置（窗口 x + inset）判定贴边
+    lastRight = if (p.x + inset + bw >= w - edgeTol) bw + margin else 0
+    lastBottom = if (p.y + inset + bw >= h - edgeTol) bw + margin else 0
+    val js = "var b=document.body||document.documentElement;b.style.paddingRight='" + lastRight + "px';b.style.paddingBottom='" + lastBottom + "px';true;"
+    frameConsumer?.invoke(js)
+  }
+
+  /** 页面加载完成后重放最后一帧（启动期页面未就绪时首帧注入会落空）。 */
+  fun replayFrame() {
+    if (rootParams == null) return
+    val js = "var b=document.body||document.documentElement;b.style.paddingRight='" + lastRight + "px';b.style.paddingBottom='" + lastBottom + "px';true;"
+    frameConsumer?.invoke(js)
+  }
+
+  private fun removeWindow(v: View?) {
+    try { if (v != null) wm.removeView(v) } catch (_: Exception) {}
   }
 
   companion object {
@@ -518,7 +667,6 @@ class OverlayService : Service() {
     /**
      * 页面避让帧消费者（MainActivity 注册/注销）：把球的贴边避让量以 JS
      * 注入引擎 WebView（body padding）。
-     * 第三方应用无法被 overlay 避让（系统窗口机制限制）；仅本应用页面生效。
      */
     @Volatile
     var frameConsumer: ((String) -> Unit)? = null
