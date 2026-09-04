@@ -253,12 +253,18 @@
   border-right: 1px solid var(--dsw-alias-border-l1);
   z-index: 10;
   padding-top: env(safe-area-inset-top);
-  transform: translateX(-100%);
-  transition: transform var(--ds-transition-duration-slow) var(--ds-ease-in-out);
+  /* 2026-09-03 解劫持（0.13.2 修复批，0.13.1 用户「窄条塌陷」bug 根修）：任何非 none 的
+     transform 都生成 containing block，劫持后代 position:fixed——设置弹窗（sidebar.settings
+     槽内联渲染、无 portal、fixed inset:0）被钉死进 300px 抽屉盒，800px 面板被 flex 压成
+     抽屉宽、逐字换行互相重叠（宽屏截图实为设备像素：CSS 宽 <640 进了 mobile 分支）。
+     滑动改 margin-left（不生成 containing block），弹窗恢复视口级全屏。margin 过渡走
+     主线程，300px 绝对子树 reflow 可接受；overflow:clip 帧（#65）裁屏外位移不产生滚动。 */
+  margin-left: -100%;
+  transition: margin-left var(--ds-transition-duration-slow) var(--ds-ease-in-out);
 }
 
 .mobileDrawer[data-open] {
-  transform: translateX(0);
+  margin-left: 0;
 }
 
 .mobileDrawer > * {

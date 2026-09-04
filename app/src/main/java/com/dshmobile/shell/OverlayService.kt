@@ -65,13 +65,29 @@ class OverlayService : Service() {
   private var haloView: View? = null             // 环绕低饱和光环
   private var unitView: View? = null             // 展开合体圆角矩形（默认 GONE）
   private var rootParams: WindowManager.LayoutParams? = null
+  // 双窗口（0.13.2 修复「互吞」）：光环独立成 FLAG_NOT_TOUCHABLE 纯视觉窗口，
+  // 触摸命中区 = 球窗口（rootView），不再是 halo 大矩形（否则球周围 ~2940dp²
+  // 空白+四角全是触摸黑洞，吞掉下层 WebView 手势——NOT_TOUCH_MODAL 只放行窗口外触摸）。
+  private var haloParams: WindowManager.LayoutParams? = null
+  private var panelParams: WindowManager.LayoutParams? = null   // 展开面板独立窗口（键盘可原生顶起）
   private var expanded = false
+
+  // ── 球窗口尺寸（与球参数分离，供 clamping / halo 同步复用）──
+  // 用 by lazy：Service 构造期 resources 尚为 null，字段初值若在构造时取会 NPE；
+  // 首次访问（onCreate 后）才求值。
+  private val ballSizeDp by lazy { (34 * resources.displayMetrics.density).toInt() }
+  private val haloSizeDp by lazy { (64 * resources.displayMetrics.density).toInt() }
+  // 光晕渐变半径 24dp：球贴边时球心距屏边 = margin 8dp + 球半径 17dp = 25dp > 24dp，
+  // 光晕圆任何贴边姿态下完整在屏内。「错位」根因（2026-09-02 用户实测）：halo 窗口 64dp
+  // 以球心为中心，球贴边时窗口必然出屏 ≤7dp，径向渐变（旧半径=窗口半宽 32dp）被屏幕
+  // 裁掉一角 → 可见光晕偏心。收窄渐变半径后，窗口出屏部分全透明 → 视觉恒同心。
+  private val haloGlowPx by lazy { (24 * resources.displayMetrics.density).toInt() }
 
   // ── 展开态控件句柄 ────────────────────────────────────────────────
   private var statusText: TextView? = null
   private var toolChip: TextView? = null
   private var clockText: TextView? = null
-  private var chevronView: ImageView? = null
+  private var closeView: ImageView? = null       // 展开态收起按钮（✕，会话选择行右端）
   private var dividerView: View? = null
   private var sendBtn: View? = null
   private var stopBtn: View? = null
@@ -92,20 +108,33 @@ class OverlayService : Service() {
   private var sessionBusy = false                // 会话维（工作中）
   private var toolCount = 0                      // 当前轮次工具调用数
   private var turnStartedAt = 0L                 // 运行时钟锚点
+  private var currentToolName = ""               // 当前运行工具（模板化显示：工具类型+概览）
+  private var currentToolSummary = ""            // 工具参数概览（args 提炼一行）
+  private var pendingKind = ""                   // 待用户处理态：question / approval / 空（updateBallOnly 派生）
+  private var pendingBox: LinearLayout? = null   // 待处理卡容器（divider 与输入行之间）
 
-  // ── 光环三态（低饱和：融合优先） ────────────────────────────────
+  // ── 光环四态（低饱和：融合优先） ────────────────────────────────
+  // PENDING = 待用户处理（AI 提问 / 权限审批等待应答）——低饱和琥珀黄（用户拍板新增）。
   private enum class Halo(val color: Int) {
     IDLE(Color.argb(70, 255, 255, 255)),
     WORKING(Color.argb(128, 92, 132, 255)),
+    PENDING(Color.argb(160, 235, 190, 60)),
     ERROR(Color.argb(115, 224, 72, 72)),
   }
 
   override fun onBind(intent: Intent?): IBinder? = null
 
-  /** 明暗切换（系统深色/浅色模式变化）：已展开的合体矩形就地换肤。 */
+  /** 明暗切换 + 旋转/分辨率变化：换肤，并重算窗口坐标（治旋转/分屏后球出屏消失）。 */
   override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
     super.onConfigurationChanged(newConfig)
     if (expanded) applyThemeColors()
+    // 旋转后旧的 x/y 可能超出新屏幕（竖屏拖到 y≈1400，转横屏 1600×900 后 y>900 → 球出屏消失）。
+    val p = rootParams ?: return
+    clampBallPos(p)
+    try { rootView?.let { wm.updateViewLayout(it, p) } } catch (_: Exception) {}
+    syncHalo()
+    positionPanel()
+    emitFrame()
   }
 
   /** 按当前主题刷新展开态配色（unit 背景/描边、状态文字、输入框、分隔线、箭头）。 */
@@ -124,7 +153,7 @@ class OverlayService : Service() {
       ShimmerTextView::class.java.cast(st).setShimmering(false)
       st.setTextColor(if (!engineRunning) c.offText else c.idleText)
     }
-    chevronView?.setColorFilter(c.chevron)
+    closeView?.setColorFilter(c.chevron)
     inputBox?.apply {
       setTextColor(c.inputText)
       setHintTextColor(c.inputHint)
@@ -144,14 +173,18 @@ class OverlayService : Service() {
     startWatcher()
     probeEngine()
     scheduleProbe()
+    startMux()
   }
 
   override fun onDestroy() {
     if (instance === this) instance = null
     watcher?.stopWatching()
+    mux?.close(); mux = null
     // 避让帧清零（页面恢复全宽）
     frameConsumer?.invoke("var b=document.body||document.documentElement;b.style.paddingRight='0px';b.style.paddingBottom='0px';true;")
     removeWindow(rootView); rootView = null
+    removeWindow(haloView); haloView = null
+    removeWindow(unitView); unitView = null
     main.removeCallbacksAndMessages(null)
     super.onDestroy()
   }
@@ -160,8 +193,8 @@ class OverlayService : Service() {
 
   private fun buildRoot() {
     val dp = resources.displayMetrics.density
-    val ballSize = (34 * dp).toInt()
-    val haloSize = (64 * dp).toInt()
+    val ballSize = ballSizeDp
+    val haloSize = haloSizeDp
 
     // 白球：白底圆 + 黑鲸鱼（ic_launcher_foreground.png，bbox 裁剪 x[102..328] y[130..300] 居中，撑 76%）
     val icon = resources.getDrawable(R.drawable.ic_launcher_foreground, null)
@@ -187,30 +220,10 @@ class OverlayService : Service() {
     whale.imageMatrix = android.graphics.Matrix().apply { setScale(scale, scale); postTranslate(dx, dy) }
     ballView = ball
 
-    // 低饱和光环（环绕球体）：radial gradient 透明→halo 色→透明
-    val halo = View(this).apply {
-      background = GradientDrawable().apply {
-        shape = GradientDrawable.OVAL
-        setColors(intArrayOf(Color.argb(0, 255, 255, 255), Halo.IDLE.color, Color.argb(0, 255, 255, 255)))
-        gradientType = GradientDrawable.RADIAL_GRADIENT
-        gradientRadius = (haloSize / 2f)
-      }
-    }
-    haloView = halo
-
-    val root = FrameLayout(this).apply {
-      // 锚点布局：halo/ball 固定在窗口左上（球在 halo 中心，margin = (halo-ball)/2），
-      // 展开时 unit 排在球右侧（marginStart = halo 直径）——球位置在任何状态下都不漂移。
-      // 窗口尺寸 = halo 直径（球 34dp 居中于 64dp 光环内）；窗口若只取球尺寸，
-      // halo 超窗口部分会被 FrameLayout 裁剪（实测光环缺 3/4）。
-      addView(halo, FrameLayout.LayoutParams(haloSize, haloSize, Gravity.START or Gravity.TOP))
-      addView(ball, FrameLayout.LayoutParams(ballSize, ballSize, Gravity.START or Gravity.TOP).apply {
-        marginStart = (haloSize - ballSize) / 2
-        topMargin = (haloSize - ballSize) / 2
-      })
-    }
+    // 球窗口 = 球尺寸（整个窗口就是可触摸的球，无空白吞区 → 「互吞」根治）。
+    val root = FrameLayout(this).apply { addView(ball, FrameLayout.LayoutParams(ballSize, ballSize)) }
     val params = WindowManager.LayoutParams(
-      haloSize, haloSize,
+      ballSize, ballSize,
       WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
       WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
       PixelFormat.TRANSLUCENT,
@@ -218,15 +231,38 @@ class OverlayService : Service() {
       gravity = Gravity.TOP or Gravity.START
       // #1 修复：展开弹输入法时禁止系统 pan/抬高整个 overlay 窗口（球+面板一起跳）。
       softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
-      // 初始右上角贴边：球右缘留 12dp 缝（窗口=halo，球在窗口内偏移 inset）。
-      val inset = (haloSize - ballSize) / 2
-      x = (resources.displayMetrics.widthPixels - ballSize - inset - (12 * dp).toInt()).coerceAtLeast(0)
+      // 初始右上角贴边：球右缘留 12dp 缝（窗口=球尺寸）。
+      x = (resources.displayMetrics.widthPixels - ballSize - (12 * dp).toInt()).coerceAtLeast(0)
       y = (resources.displayMetrics.heightPixels / 3)
     }
     rootParams = params
     wm.addView(root, params)
     rootView = root
     attachBallTouch(ball)
+    // 键盘顶起面板：由独立面板窗口的系统 ADJUST_PAN 原生实现（showPanel 注释）。
+    // 球窗口收不到 IME insets（与键盘零相交的窗口系统不派发，实测 bottom=0 visible=false），
+    // 旧自监听方案已废。
+
+    // 光环独立窗口：FLAG_NOT_TOUCHABLE（不参与触摸命中 → 触摸穿透到其下层 WebView，
+    // 光环本身不再吞任何手势）。视觉光晕中心 = 球窗口中心；渐变半径 24dp（haloGlowPx）——
+    // 球贴边时球心距屏边 25dp > 24dp，光晕圆完整在屏内（治「吸附后光圈与球错位」）。
+    val halo = View(this).apply { background = newHaloDrawable(Halo.IDLE) }
+    haloView = halo
+    val haloP = WindowManager.LayoutParams(
+      haloSize, haloSize,
+      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+      PixelFormat.TRANSLUCENT,
+    ).apply {
+      gravity = Gravity.TOP or Gravity.START
+      // 光环窗口同样禁系统 IME pan（默认 adjust=pan 会在键盘弹出时搬动光环窗口 → 错位）。
+      softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
+      // 中心对齐球窗口中心：halo.x = ball.x + ball/2 - halo/2
+      x = params.x + ballSize / 2 - haloSize / 2
+      y = params.y + ballSize / 2 - haloSize / 2
+    }
+    haloParams = haloP
+    try { wm.addView(halo, haloP) } catch (_: Exception) {}
     emitFrame()
   }
 
@@ -272,6 +308,15 @@ class OverlayService : Service() {
     val pickerSpinner = Spinner(this).apply {
       tag = "overlay-sessionpicker"
       contentDescription = "选择发送对话"
+      // 下拉弹出层 = 独立 popup 窗口，默认方形背景 + item 各自涂底 → 圆角无从谈起。
+      // 解法：popup 窗口背景给圆角渐变底（用户要求「圆角矩形」），item 底色改透明。
+      // 注意：Spinner.popupBackground 在 Kotlin 侧是只读合成属性（无 setter 配对名），必须显式调用。
+      setPopupBackgroundDrawable(GradientDrawable().apply {
+        shape = GradientDrawable.RECTANGLE
+        cornerRadius = 16 * dp
+        setColor(if (isDarkTheme()) 0xFF1E1F24.toInt() else 0xFFFFFFFF.toInt())
+        setStroke((1 * dp).toInt(), themeColors().unitStroke)
+      })
       adapter = object : ArrayAdapter<String>(this@OverlayService, android.R.layout.simple_spinner_item, pickerLabels) {
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
           val tv = (convertView as? TextView) ?: TextView(context).apply { textSize = 13f }
@@ -286,7 +331,7 @@ class OverlayService : Service() {
           }
           val dark = isDarkTheme()
           tv.setTextColor(if (dark) 0xFFE8EAED.toInt() else 0xFF202124.toInt())
-          tv.setBackgroundColor(if (dark) 0xFF1E1F24.toInt() else 0xFFFFFFFF.toInt())
+          tv.setBackgroundColor(Color.TRANSPARENT)   // 圆角由 popupBackground 提供（方形涂底会盖圆角）
           tv.text = getItem(position) ?: ""
           return tv
         }
@@ -334,24 +379,28 @@ class OverlayService : Service() {
     }
     clockText = clock
 
-    val chevron = ImageView(this).apply {
-      setImageResource(R.drawable.dsh_ic_chevron_down)
+    // 收起按钮（✕）：放顶行（会话选择行）右端。旧版收起箭头在状态行、与 Spinner 下拉
+    // 三角同为三角且下拉展开后被列表盖住（视觉引导错误，用户实测）——✕ 与下拉三角可区分
+    // 且位于下拉弹出层之上，永不被盖。
+    val close = ImageView(this).apply {
+      setImageResource(R.drawable.dsh_ic_close)
       setColorFilter(c.chevron)
-      contentDescription = "收起"
+      contentDescription = "收起面板"
       isClickable = true
       setOnClickListener { hidePanel() }
     }
-    chevronView = chevron
+    closeView = close
 
-    // 会话选择行（独立一行，向下箭头 Spinner）
+    // 会话选择行（独立一行，向下箭头 Spinner）+ 右端 ✕ 收起
     val pickerRow = LinearLayout(this).apply {
       orientation = LinearLayout.HORIZONTAL
       gravity = Gravity.CENTER_VERTICAL
       setPadding((12 * dp).toInt(), (10 * dp).toInt(), (12 * dp).toInt(), (2 * dp).toInt())
       addView(pickerSpinner, LinearLayout.LayoutParams(0, (26 * dp).toInt(), 1f))
+      addView(close, LinearLayout.LayoutParams((20 * dp).toInt(), (20 * dp).toInt()).apply { marginStart = (8 * dp).toInt() })
     }
 
-    // 状态行：状态文字 + 工具×N + 时钟 + 收起箭头
+    // 状态行：状态文字 + 工具×N + 时钟（收起按钮已移至顶行 ✕）
     val row1 = LinearLayout(this).apply {
       orientation = LinearLayout.HORIZONTAL
       gravity = Gravity.CENTER_VERTICAL
@@ -359,7 +408,6 @@ class OverlayService : Service() {
       addView(status, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
       addView(chip)
       addView(clock, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = (8 * dp).toInt() })
-      addView(chevron, LinearLayout.LayoutParams((14 * dp).toInt(), (14 * dp).toInt()).apply { marginStart = (8 * dp).toInt() })
     }
 
     // 输入行：输入框 + 蓝圆发送（白箭头 IconSendOutline16）+ 红圆停止（白方块 rx=3）
@@ -423,6 +471,7 @@ class OverlayService : Service() {
       val divider = View(this@OverlayService).apply { setBackgroundColor(c.divider) }
       dividerView = divider
       addView(divider, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1))
+      addView(buildPendingBox(dp))
       addView(row2)
     }
     unitView = unit
@@ -438,42 +487,54 @@ class OverlayService : Service() {
   private fun showPanel() {
     if (expanded) return
     val dp = resources.displayMetrics.density
-    val root = rootView ?: return
-    val haloSize = (64 * dp).toInt()
-    if (unitView == null) {
-      val u = buildUnit()
-      if (u != null) {
-        root.addView(u, FrameLayout.LayoutParams(
-          ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-          Gravity.START or Gravity.TOP,
-        ).apply { marginStart = haloSize })
-      }
-    }
+    if (unitView == null) buildUnit()
     val unit = unitView ?: return
-    unit.visibility = View.VISIBLE
-    val p = rootParams ?: return
-    // 展开需可聚焦窗口才能弹输入法（v1 面板同款：覆盖 FLAG_NOT_FOCUSABLE）。
-    p.flags = p.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
-    // #1：展开聚焦时禁止系统 pan 抬高窗口（同 buildRoot 的 ADJUST_NOTHING 双保险）。
-    p.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
-    // 每次展开刷新目标会话下拉（session.list 投影）+ 回填选择。
-    refreshSessionPicker()
-    // unit 宽须扣除 halo 直径（窗口总宽 = halo + unit，否则向左溢出屏幕）。
-    val width = (resources.displayMetrics.widthPixels - haloSize - (32 * dp).toInt()).coerceAtMost((400 * dp).toInt())
-    // 窗口宽 = halo + unit；球（窗口内 inset 处）保持不动，unit 向右展开。
-    val totalW = haloSize + width
-    if (p.x + totalW > resources.displayMetrics.widthPixels) p.x = (resources.displayMetrics.widthPixels - totalW - (8 * dp).toInt())
-    p.width = totalW
-    p.height = ViewGroup.LayoutParams.WRAP_CONTENT
-    p.y = p.y.coerceIn(0, resources.displayMetrics.heightPixels - (150 * dp).toInt())
-    try { wm.updateViewLayout(root, p) } catch (_: Exception) {}
     expanded = true
+    // 面板独立窗口（2026-09-03 键盘顶起重构）：IME insets 只随「与键盘相交的窗口」派发——
+    // 球窗口贴顶时与键盘零相交（实测 ime bottom=0 visible=false），自监听原理性收不到。
+    // 改面板独立窗口：focusable + ADJUST_PAN（默认），系统原生把面板整体顶到键盘上方、
+    // 收起自动回位（v1「球+面板一起上跳」因两者分离而根治）；球窗口恒 NOT_FOCUSABLE 不动。
+    // 面板宽度显式给窗口（WRAP_CONTENT + 子级 weight 会塌陷成最小宽）：屏宽减球与边距、封顶 400dp。
+    val panelW = (resources.displayMetrics.widthPixels - ballSizeDp - (64 * dp).toInt()).coerceAtMost((400 * dp).toInt())
+    val pp = WindowManager.LayoutParams(
+      panelW, ViewGroup.LayoutParams.WRAP_CONTENT,
+      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+      // NOT_TOUCH_MODAL：面板矩形外的触摸照常穿透（球/WebView 不受阻）；可聚焦才能弹输入法。
+      WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+      PixelFormat.TRANSLUCENT,
+    ).apply {
+      gravity = Gravity.TOP or Gravity.START
+      // 键盘顶起：系统原生 pan——面板窗口整体抬到键盘上方，键盘收起自动回位。
+      softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN
+    }
+    panelParams = pp
+    positionPanel()
+    refreshSessionPicker()
+    unit.visibility = View.VISIBLE
+    try { wm.addView(unit, pp) } catch (_: Exception) {}
+    unit.post { positionPanel() }   // 首帧拿到真实宽高后再精确对位一次
     unit.alpha = 0f
-    unit.translationY = (12 * dp).toFloat()
-    unit.animate().alpha(1f).translationY(0f).setDuration(200).start()
+    unit.animate().alpha(1f).setDuration(200).start()
     renderPanelOnly()
     if (sessionBusy) statusText?.let { ShimmerTextView::class.java.cast(it).setShimmering(true) }
     emitFrame()
+  }
+
+  /** 面板窗口贴球对位：优先放球右侧；放不下翻到球左侧；y 贴球顶、超高时收进屏内。 */
+  private fun positionPanel() {
+    val p = rootParams ?: return
+    val pp = panelParams ?: return
+    val u = unitView ?: return
+    val dp = resources.displayMetrics.density
+    val w = resources.displayMetrics.widthPixels
+    val h = resources.displayMetrics.heightPixels
+    val uw = if (u.width > 0) u.width else pp.width.coerceAtLeast(1)
+    val uh = if (u.height > 0) u.height else (300 * dp).toInt()
+    val gap = (4 * dp).toInt()
+    val right = p.x + ballSizeDp + gap
+    pp.x = if (right + uw <= w - gap) right else (p.x - uw - gap).coerceAtLeast(gap)
+    pp.y = p.y.coerceIn(gap, (h - uh - gap).coerceAtLeast(gap))
+    if (u.parent != null) try { wm.updateViewLayout(u, pp) } catch (_: Exception) {}
   }
 
   private fun hidePanel() {
@@ -481,22 +542,8 @@ class OverlayService : Service() {
     expanded = false
     val unit = unitView ?: return
     unit.visibility = View.GONE
-    val root = rootView ?: return
-    val p = rootParams ?: return
-    val dp = resources.displayMetrics.density
-    // 收起回不可聚焦（球不拦截其它应用触摸）；窗口恢复 halo 直径（球居中，无位置偏移补偿）。
-    p.flags = p.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-    val haloSize = (64 * dp).toInt()
-    val ballSize = (34 * dp).toInt()
-    val inset = (haloSize - ballSize) / 2
-    p.width = haloSize
-    p.height = haloSize
-    if (p.x + inset + ballSize > resources.displayMetrics.widthPixels) {
-      p.x = resources.displayMetrics.widthPixels - ballSize - (8 * dp).toInt() - inset
-    }
-    if (p.x < -inset) p.x = -inset
-    if (p.y < -inset) p.y = -inset
-    try { wm.updateViewLayout(root, p) } catch (_: Exception) {}
+    try { if (unit.parent != null) wm.removeView(unit) } catch (_: Exception) {}
+    panelParams = null
     statusText?.let { ShimmerTextView::class.java.cast(it).setShimmering(false) }
     emitFrame()
   }
@@ -505,45 +552,96 @@ class OverlayService : Service() {
 
   private fun attachBallTouch(ball: View) {
     val touchSlop = android.view.ViewConfiguration.get(this).scaledTouchSlop
-    var downX = 0f; var downY = 0f; var moved = false
-    // 球在窗口内居中（窗口=halo 直径，球偏移 = (halo-ball)/2）：手势换算到窗口需扣除。
-    val inset = ((64 * resources.displayMetrics.density).toInt() - ball.width) / 2
+    var downX = 0f; var downY = 0f
+    var startX = 0; var startY = 0
+    var moved = false
+    // 球窗口 = 球尺寸，无 halo 偏移（inset = 0）。MOVE 每帧更新球窗口 + 同步光环窗口
+    // （halo 是独立 NOT_TOUCHABLE 窗口，若 MOVE 只 translation 跟手、halo 不跟 → 光圈不跟随；
+    //  实测「光圈不随图标运动」即此）。每帧 updateViewLayout 对 34dp 小窗可接受。
     ball.setOnTouchListener { v, ev ->
       val p = rootParams ?: return@setOnTouchListener false
       when (ev.actionMasked) {
-        MotionEvent.ACTION_DOWN -> { downX = ev.rawX; downY = ev.rawY; moved = false; true }
+        MotionEvent.ACTION_DOWN -> {
+          downX = ev.rawX; downY = ev.rawY
+          startX = p.x; startY = p.y
+          moved = false
+          // DOWN 时取消可能仍在跑的 spring（防旧动画的 translationX 覆盖手指拖动）
+          cancelSpring()
+          true
+        }
         MotionEvent.ACTION_MOVE -> {
-          val w = v.width
-          p.x = (ev.rawX - w / 2f - inset).toInt().coerceAtLeast(-inset)
-          p.y = (ev.rawY - v.height / 2f - inset).toInt().coerceAtLeast(-inset)
-          if (Math.abs(ev.rawX - downX) > touchSlop || Math.abs(ev.rawY - downY) > touchSlop) moved = true
-          wm.updateViewLayout(v.parent as View, p); true
+          val dx = ev.rawX - downX; val dy = ev.rawY - downY
+          if (!moved && (Math.abs(dx) > touchSlop || Math.abs(dy) > touchSlop)) moved = true
+          if (moved) {
+            p.x = (startX + dx).toInt()
+            p.y = (startY + dy).toInt()
+            clampBallPos(p)
+            try { wm.updateViewLayout(v.parent as View, p) } catch (_: Exception) {}
+            syncHalo()
+            positionPanel()
+          }
+          true
         }
         MotionEvent.ACTION_UP -> {
           if (!moved) { togglePanel(); return@setOnTouchListener true }
+          p.x = (startX + (ev.rawX - downX)).toInt()
+          p.y = (startY + (ev.rawY - downY)).toInt()
+          clampBallPos(p)
+          try { wm.updateViewLayout(v.parent as View, p) } catch (_: Exception) {}
+          syncHalo()
+          positionPanel()
           springSnapToEdge()
           emitFrame()
           true
         }
+        MotionEvent.ACTION_CANCEL -> { moved = false; true }
         else -> false
       }
     }
   }
 
-  /** M3 Expressive Spatial Default spring（380/0.8）贴边吸附（按球可视中心判定；
-   *  spring 驱动窗口位置必须 updateViewLayout——translationX 对 overlay 窗口不生效）。 */
+  /** 把**窗口**坐标 clamp 到屏幕内（治「拖出屏消失」；四向，含上下界）。
+   *  必须按实际窗口宽/高算边界而非球尺寸——展开态窗口=球+面板（~836px），旧版按 68px 算
+   *  上界导致 p.x 可超界，WMS 把整窗拉回屏内而光环窗口（128px）照常跟 p.x 移动
+   *  =「展开后拖动只有光环动」根因（2026-09-03 用户实测）。 */
+  private fun clampBallPos(p: WindowManager.LayoutParams) {
+    val dp = resources.displayMetrics.density
+    val w = resources.displayMetrics.widthPixels
+    val h = resources.displayMetrics.heightPixels
+    val margin = (8 * dp).toInt()
+    val winW = if (p.width > 0) p.width else ballSizeDp
+    val winH = if (p.height > 0) p.height else (rootView?.height ?: ballSizeDp)
+    p.x = p.x.coerceIn(margin, (w - winW - margin).coerceAtLeast(margin))
+    p.y = p.y.coerceIn(margin, (h - winH - margin).coerceAtLeast(margin))
+  }
+
+  /** 取消进行中的 spring 动画并把 root.translationX/Y 归零（治「消失」：translation 残留）。 */
+  private var springAnim: SpringAnimation? = null
+  private fun cancelSpring() {
+    val s = springAnim ?: return
+    s.cancel()
+    springAnim = null
+    val r = rootView ?: return
+    r.translationX = 0f; r.translationY = 0f
+  }
+
+  /** M3 Expressive Spatial Default spring（380/0.8）贴边吸附。只驱动布局 x（listener 写 p.x），
+   *  动画前后 root.translationX 归零——杜绝「translationX 残留 = 视觉球与命中区分离/飘出屏」。 */
   private fun springSnapToEdge() {
     val root = rootView ?: return
     val p = rootParams ?: return
     val dp = resources.displayMetrics.density
     val w = resources.displayMetrics.widthPixels
-    val inset = ((64 * dp).toInt() - (34 * dp).toInt()) / 2
-    val ballCenter = p.x + inset + (34 * dp).toInt() / 2
-    val targetX = if (ballCenter < w / 2) (8 * dp).toInt() - inset else w - (34 * dp).toInt() - (8 * dp).toInt() - inset
+    val winW = if (p.width > 0) p.width else ballSizeDp   // 展开态=球+面板宽（按球算会把窗口推出屏界，同 clampBallPos）
+    val ballCenter = p.x + winW / 2
+    val margin = (8 * dp).toInt()
+    val targetX = if (ballCenter < w / 2) margin else (w - winW - margin).coerceAtLeast(margin)
     val spring = SpringForce(targetX.toFloat()).apply {
       stiffness = SpringForce.STIFFNESS_MEDIUM // 380 系
       dampingRatio = 0.8f
     }
+    cancelSpring()
+    root.translationX = 0f
     SpringAnimation(root, DynamicAnimation.X).apply {
       setSpring(spring)
       setStartValue(p.x.toFloat())
@@ -551,13 +649,47 @@ class OverlayService : Service() {
         try {
           p.x = value.toInt()
           wm.updateViewLayout(root, p)
+          // 吸附动画逐帧同步光环（旧版只在 endListener 同步 → 吸附过程中光圈留在原地，
+          // 结束才跳到球心 =「光圈不跟随」的动画期成分）。
+          syncHalo()
+          positionPanel()
         } catch (_: Exception) {}
       }
       addEndListener { _, _, _, _ ->
-        // 吸附完成后重算避让帧（球最终位置与拖动中途不同）。
+        // 动画结束：清除 translation（组件写的 translationX 已随 updateViewLayout 并入布局位置）
+        root.translationX = 0f
+        syncHalo()
         emitFrame()
       }
+      springAnim = this
       start()
+    }
+  }
+
+  /** 光环窗口（NOT_TOUCHABLE 纯视觉）中心始终对齐球窗口中心。 */
+  private fun syncHalo() {
+    val hp = haloParams ?: return
+    val p = rootParams ?: return
+    hp.x = p.x + ballSizeDp / 2 - haloSizeDp / 2
+    hp.y = p.y + ballSizeDp / 2 - haloSizeDp / 2
+    try { haloView?.let { wm.updateViewLayout(it, hp) } } catch (_: Exception) {}
+  }
+
+  /** 光环 drawable（径向渐变：透明 → 峰值 0.7≈球缘 → 透明；半径 24dp 恒不出屏被裁）。 */
+  private fun newHaloDrawable(halo: Halo): GradientDrawable = GradientDrawable().apply {
+    shape = GradientDrawable.OVAL
+    gradientType = GradientDrawable.RADIAL_GRADIENT
+    gradientRadius = haloGlowPx.toFloat()
+    setHaloColors(this, halo)
+  }
+
+  /** setColors 二参形态（自定义渐变 stop 位置）仅 API 29+；26-28 退三等分 stop。 */
+  private fun setHaloColors(g: GradientDrawable, halo: Halo) {
+    val colors = intArrayOf(Color.argb(0, 255, 255, 255), halo.color, Color.argb(0, 255, 255, 255))
+    if (android.os.Build.VERSION.SDK_INT >= 29) {
+      g.setColors(colors, floatArrayOf(0f, 0.7f, 1f))
+    } else {
+      g.setColors(colors)
     }
   }
 
@@ -565,7 +697,7 @@ class OverlayService : Service() {
     main.post {
       val hv = haloView ?: return@post
       val g = hv.background as? GradientDrawable ?: return@post
-      g.setColors(intArrayOf(Color.argb(0, 255, 255, 255), halo.color, Color.argb(0, 255, 255, 255)))
+      setHaloColors(g, halo)
       // 工作中光环缓脉动（spring 风格呼吸：AlphaAnimation 循环）
       val anim = AlphaAnimation(1f, 0.7f).apply {
         duration = 1100; repeatMode = AlphaAnimation.REVERSE; repeatCount = if (halo == Halo.WORKING) AlphaAnimation.INFINITE else 0
@@ -585,8 +717,27 @@ class OverlayService : Service() {
     readOffset = liveFile().takeIf { it.exists() }?.length() ?: 0L
     watcher = object : FileObserver(dir.absolutePath, FileObserver.MODIFY or FileObserver.CREATE) {
       override fun onEvent(event: Int, path: String?) {
-        if (path != ".live.ndjson") return
-        drainLive()
+        if (path == ".live.ndjson") drainLive()
+        else if (path == ".overlay-test-pending" &&
+          (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+          // 调试注入（debuggable 包）：run-as 写 question|approval|clear 到该文件 → 合成 pending。
+          // am start-service 通道被跨用户 binder 权限拦死，文件通道复用本 watcher 零新权限。
+          try {
+            val v = File(dir, ".overlay-test-pending").readText().trim()
+            main.post {
+              val rpcId = "test-" + System.currentTimeMillis()
+              when (v) {
+                "approval" -> pendingApprovals[rpcId] = PendingApproval(rpcId, activeSessionId, "ap-test", "bash", "rm -rf build/ 需要审批（debug 注入）")
+                "question" -> {
+                  val items = org.json.JSONArray("""[{"id":"q1","header":"简单问题1","question":"现在是白天还是晚上？","options":[{"label":"白天","description":"现在不在晚上"},{"label":"晚上","description":"现在是晚上"}],"multiSelect":false},{"id":"q2","header":"简单问题2","question":"要重试 TLS 同步吗（debug 注入）？","options":[{"label":"立即重试"},{"label":"稍后"}],"multiSelect":false}]""")
+                  pendingQuestions[rpcId] = PendingQuestion(rpcId, activeSessionId, items)
+                }
+                else -> { pendingApprovals.clear(); pendingQuestions.clear() }
+              }
+              onPendingChanged()
+            }
+          } catch (_: Exception) {}
+        }
       }
     }.apply { startWatching() }
     drainLive()
@@ -629,7 +780,19 @@ class OverlayService : Service() {
               if (activeSessionId.isEmpty() || s == activeSessionId) {
                 if (!sessionBusy) { sessionBusy = true; turnStartedAt = System.currentTimeMillis() }
                 toolCount++
+                // 模板化显示（用户拍板）：live 行自带 name + args（bridge 0.1.1 已在产）——
+                // 思考=Deep diving 扫光；调工具=工具类型+概览。
+                currentToolName = j.optString("name", "")
+                currentToolSummary = toolSummary(j.optString("args", ""))
                 setHalo(Halo.WORKING)
+                changed = true
+              }
+            }
+            "tool_result" -> {
+              val s = j.optString("s", "")
+              // 工具结束 → 回「思考」显示（Deep diving 扫光），概览清空。
+              if (activeSessionId.isEmpty() || s == activeSessionId) {
+                currentToolName = ""; currentToolSummary = ""
                 changed = true
               }
             }
@@ -639,10 +802,13 @@ class OverlayService : Service() {
               if (activeSessionId.isEmpty() || s == activeSessionId) {
                 sessionBusy = false
                 toolCount = 0
+                currentToolName = ""; currentToolSummary = ""
                 setHalo(Halo.IDLE)
                 changed = true
               }
             }
+            // 注：提问/审批不走 live 文件——rpcId 只存在于引擎 mux WebSocket 下行帧，
+            // 由 MuxClient 直连接收（见 handleMuxFrame），POST /api/respond 应答。
           }
         } catch (_: Exception) {
         }
@@ -652,15 +818,452 @@ class OverlayService : Service() {
     }
   }
 
+  // ── 状态显示模板（模板化设置：占位符 {tool}/{summary}，SharedPreferences 可覆写，后续接设置面板）──
+
+  private fun displayPrefs() = getSharedPreferences("overlay_display", Context.MODE_PRIVATE)
+
+  private fun templateThinking(): String =
+    displayPrefs().getString("template_thinking", "Deep diving...") ?: "Deep diving..."
+
+  private fun templateTool(): String =
+    displayPrefs().getString("template_tool", "{tool} · {summary}") ?: "{tool} · {summary}"
+
+  /** 工具参数 JSON → 一行概览（bash=命令 / search=查询 / read·edit=路径；兜底取首个字符串值）。 */
+  private fun toolSummary(argsJson: String): String {
+    if (argsJson.isBlank()) return ""
+    return try {
+      val o = JSONObject(argsJson)
+      val key = listOf("command", "query", "pattern", "file_path", "path", "file", "url", "cmd")
+        .firstOrNull { o.has(it) && !o.optString(it).isBlank() }
+      val raw = when {
+        key != null -> o.optString(key)
+        else -> {
+          var first = ""
+          for (k in o.keys()) { val v = o.opt(k); if (v is String) { first = v; break } }
+          if (first.isBlank()) o.toString().take(40) else first
+        }
+      }
+      raw.replace(Regex("\\s+"), " ").trim().take(24)
+    } catch (_: Exception) {
+      argsJson.replace(Regex("\\s+"), " ").trim().take(24)
+    }
+  }
+
+  // ── 待处理卡（AI 提问 / 权限审批：WS 收帧 + POST /api/respond 应答——用户拍板「几乎所有操作直接在悬浮球上完成」）──
+
+  private data class PendingApproval(val rpcId: String, val sessionId: String, val approvalId: String, val toolName: String, val reason: String)
+  private data class PendingQuestion(val rpcId: String, val sessionId: String, val items: org.json.JSONArray)
+
+  // 协议（dsh 0.1.1-rc.2 源码核实）：rpcId 只在 mux WebSocket 下行帧（server-request）里下发，
+  // 重开自动重放仍 pending 帧（rpcId 不变）；应答统一 POST /api/respond：
+  // 审批 value={sessionId,approvalId,outcome:"allowed-once"|"rejected"}；
+  // 提问 value={sessionId,answer:{answers:[{id,selected:[选项 label]}]}}（顺序配对、selected 用 label、
+  // 单选 custom 与 selected 互斥）；提问取消 result={ok:false,error:{code:"cancelled",...}}（审批无此通道）。
+  private var mux: MuxClient? = null
+  private val pendingApprovals = LinkedHashMap<String, PendingApproval>()
+  private val pendingQuestions = LinkedHashMap<String, PendingQuestion>()
+  private val multiSel = HashMap<String, ArrayList<String>>()   // 多选暂存：questionId → labels
+  private val qSingle = HashMap<String, String>()               // 单选暂存：questionId → label
+  private val qCustom = HashMap<String, String>()               // 自定义答案：questionId → text
+  private var qPage = 0                                          // 多问分页（官方卡 1/N 风格）
+  private var pendingKey = ""                                    // 当前卡指纹（kind:rpcId），变化即清作答态
+  private var renderedCardKey = ""                               // 卡片已渲染指纹（防 live 流重绘打断输入）
+
+  private fun startMux() {
+    mux = MuxClient("127.0.0.1", 3080, "/api/events.mux") { text -> handleMuxFrame(text) }
+  }
+
+  private fun handleMuxFrame(text: String) {
+    val j = try { JSONObject(text) } catch (_: Exception) { return }
+    if (j.optString("type") != "server-request") return
+    val method = j.optString("method")
+    if (method != "approval/requested" && method != "approval/resolved" &&
+      method != "question/requested" && method != "question/resolved") return
+    val payload = j.optJSONObject("payload") ?: return
+    val rpcId = j.optString("rpcId")
+    when (method) {
+      "approval/requested" -> main.post {
+        pendingApprovals[rpcId] = PendingApproval(rpcId, payload.optString("sessionId"), payload.optString("approvalId"), payload.optString("toolName", ""), payload.optString("reason", ""))
+        onPendingChanged()
+      }
+      "approval/resolved" -> main.post {
+        val aid = payload.optString("approvalId", "")
+        pendingApprovals.keys.filter { pendingApprovals[it]?.approvalId == aid }.toList()
+          .forEach { pendingApprovals.remove(it) }
+        onPendingChanged()
+      }
+      "question/requested" -> main.post {
+        pendingQuestions[rpcId] = PendingQuestion(rpcId, payload.optString("sessionId"), payload.optJSONArray("questions") ?: org.json.JSONArray())
+        onPendingChanged()
+      }
+      "question/resolved" -> main.post {
+        pendingQuestions.remove(payload.optString("questionRpcId", ""))
+        onPendingChanged()
+      }
+    }
+  }
+
+  /** 当前会话（未选目标 = 全部）的第一条待处理；审批优先。 */
+  private fun currentPending(): Pair<String, Any>? {
+    val sid = activeSessionId
+    val ok = { s: String -> sid.isEmpty() || s == sid }
+    pendingApprovals.values.firstOrNull { ok(it.sessionId) }?.let { return "approval" to it }
+    pendingQuestions.values.firstOrNull { ok(it.sessionId) }?.let { return "question" to it }
+    return null
+  }
+
+  private fun onPendingChanged() {
+    val key = currentPending()?.let { "${it.first}:${(it.second as? PendingApproval)?.rpcId ?: (it.second as? PendingQuestion)?.rpcId ?: ""}" } ?: ""
+    if (key != pendingKey) {
+      pendingKey = key
+      multiSel.clear(); qSingle.clear(); qCustom.clear(); qPage = 0; renderedCardKey = ""
+    }
+    updateBallOnly()
+  }
+
+  /** 待处理卡容器（divider 与输入行之间，默认 GONE）。 */
+  private fun buildPendingBox(dp: Float): LinearLayout = LinearLayout(this).apply {
+    orientation = LinearLayout.VERTICAL
+    setPadding((12 * dp).toInt(), (2 * dp).toInt(), (12 * dp).toInt(), (6 * dp).toInt())
+    visibility = View.GONE
+    pendingBox = this
+  }
+
+  private fun pendingChip(label: String, filled: Boolean, red: Boolean, dp: Float, onClick: () -> Unit): TextView = TextView(this).apply {
+    text = label
+    textSize = 12f
+    maxLines = 2
+    setTextColor(if (filled || red) Color.WHITE else themeColors().inputText)
+    background = GradientDrawable().apply {
+      cornerRadius = 14 * dp
+      setColor(if (red) 0xFFE04848.toInt() else if (filled) 0xFF4176E6.toInt() else 0x22808080)
+      if (!filled && !red) setStroke((1 * dp).toInt(), themeColors().inputStroke)
+    }
+    setPadding((12 * dp).toInt(), (6 * dp).toInt(), (12 * dp).toInt(), (6 * dp).toInt())
+    isClickable = true
+    setOnClickListener { onClick() }
+  }
+
+  private fun lpChip(dp: Float) = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+    marginEnd = (8 * dp).toInt()
+  }
+
+  /** 渲染卡片（官方提问卡风格）：header 行（灰标签 + ✕ 关闭）、问题加粗、编号徽章选项行
+   *  （label + 灰 description）、✎「输入你的答案」自定义行、页脚 ‹1/N› 翻页 + 跳过本题 + 下一题/提交。
+   *  force=false 时防 live 流重绘打断输入焦点。 */
+  private fun renderPendingCard(force: Boolean = false) {
+    val box = pendingBox ?: return
+    val cur = currentPending()
+    if (cur == null) { box.visibility = View.GONE; return }
+    val key = "$pendingKey@$qPage"
+    if (!force && renderedCardKey == key && box.visibility == View.VISIBLE && box.childCount > 0) return
+    box.removeAllViews()
+    renderedCardKey = key
+    val dp = resources.displayMetrics.density
+    val dark = isDarkTheme()
+    val textColor = if (dark) 0xFFE8EAED.toInt() else 0xFF202124.toInt()
+    val subColor = if (dark) 0xFF9AA0A6.toInt() else 0xFF5F6368.toInt()
+    if (cur.first == "approval") {
+      val a = cur.second as PendingApproval
+      val title = TextView(this).apply {
+        textSize = 12f
+        setTextColor(0xFFB8860B.toInt())
+        setTypeface(null, android.graphics.Typeface.BOLD)
+        text = "权限审批"
+      }
+      box.addView(title)
+      val body = TextView(this).apply {
+        textSize = 13f
+        setTextColor(textColor)
+        text = listOf("工具 ${a.toolName}", a.reason).filter { it.isNotBlank() }.joinToString("：")
+      }
+      box.addView(body)
+      val buttonRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+      buttonRow.addView(pendingChip("批准一次", filled = true, red = false, dp) { respondApproval(a, "allowed-once") }, lpChip(dp))
+      buttonRow.addView(pendingChip("拒绝", filled = false, red = true, dp) { respondApproval(a, "rejected") }, lpChip(dp))
+      box.addView(buttonRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+        setMargins(0, (6 * dp).toInt(), 0, 0)
+      })
+      box.visibility = View.VISIBLE
+      return
+    }
+    val qe = cur.second as PendingQuestion
+    val n = qe.items.length()
+    if (n == 0) { box.visibility = View.GONE; return }
+    qPage = qPage.coerceIn(0, n - 1)
+    val item = qe.items.optJSONObject(qPage) ?: return
+    val qid = item.optString("id")
+    val multi = item.optBoolean("multiSelect", false)
+    // header 行：灰色标签（官方 header 字段）+ 右侧 ✕（取消整问）
+    val header = LinearLayout(this).apply {
+      orientation = LinearLayout.HORIZONTAL
+      gravity = Gravity.CENTER_VERTICAL
+    }
+    header.addView(TextView(this).apply {
+      textSize = 11f
+      setTextColor(subColor)
+      text = item.optString("header", "").ifBlank { "问题 ${qPage + 1}" }
+    }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+    header.addView(TextView(this).apply {
+      text = "✕"
+      textSize = 13f
+      setTextColor(subColor)
+      setPadding((6 * dp).toInt(), 0, (6 * dp).toInt(), 0)
+      isClickable = true
+      setOnClickListener { dismissQuestion(qe) }
+    })
+    box.addView(header)
+    // 问题（加粗）
+    box.addView(TextView(this).apply {
+      textSize = 13f
+      setTextColor(textColor)
+      setTypeface(null, android.graphics.Typeface.BOLD)
+      text = item.optString("question", "")
+    }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+      setMargins(0, (2 * dp).toInt(), 0, (4 * dp).toInt())
+    })
+    // 选项行：[编号徽章] 标签(粗) + 描述(灰)，选中淡蓝底
+    val opts = item.optJSONArray("options")
+    if (opts != null) {
+      for (oi in 0 until opts.length().coerceAtMost(6)) {
+        val o = opts.optJSONObject(oi) ?: continue
+        val label = o.optString("label").ifBlank { "选项${oi + 1}" }
+        val on = if (multi) multiSel[qid]?.contains(label) == true else qSingle[qid] == label
+        val row = LinearLayout(this).apply {
+          orientation = LinearLayout.HORIZONTAL
+          gravity = Gravity.CENTER_VERTICAL
+          setPadding((6 * dp).toInt(), (7 * dp).toInt(), (6 * dp).toInt(), (7 * dp).toInt())
+          background = GradientDrawable().apply { cornerRadius = 10 * dp; setColor(if (on) 0x334176E6 else if (dark) 0x14FFFFFF else 0x0D000000) }
+          isClickable = true
+          setOnClickListener {
+            if (multi) {
+              val sel = multiSel.getOrPut(qid) { ArrayList() }
+              if (on) sel.remove(label) else sel.add(label)
+            } else {
+              qSingle[qid] = label; qCustom.remove(qid)
+              if (n == 1) { respondQuestion(qe); return@setOnClickListener }
+            }
+            renderPendingCard(true)
+          }
+        }
+        row.addView(TextView(this).apply {
+          text = (oi + 1).toString()
+          textSize = 11f
+          setTextColor(if (on) Color.WHITE else subColor)
+          gravity = Gravity.CENTER
+          background = GradientDrawable().apply { cornerRadius = 5 * dp; setColor(if (on) 0xFF4176E6.toInt() else 0x33808080) }
+        }, LinearLayout.LayoutParams((18 * dp).toInt(), (18 * dp).toInt()).apply { marginEnd = (8 * dp).toInt() })
+        row.addView(TextView(this).apply {
+          text = label
+          textSize = 13f
+          setTextColor(textColor)
+          setTypeface(null, android.graphics.Typeface.BOLD)
+        })
+        val desc = o.optString("description", "")
+        if (desc.isNotBlank()) row.addView(TextView(this).apply {
+          text = desc
+          textSize = 11f
+          setTextColor(subColor)
+          maxLines = 1
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = (8 * dp).toInt() })
+        box.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+          setMargins(0, 0, 0, (4 * dp).toInt())
+        })
+      }
+    }
+    // ✎ 自定义答案行（单选与选项互斥——协议约束）
+    val customRow = LinearLayout(this).apply {
+      orientation = LinearLayout.HORIZONTAL
+      gravity = Gravity.CENTER_VERTICAL
+      setPadding((6 * dp).toInt(), (4 * dp).toInt(), (6 * dp).toInt(), (4 * dp).toInt())
+      background = GradientDrawable().apply {
+        cornerRadius = 10 * dp
+        setColor(if (qCustom[qid]?.isNotBlank() == true) 0x334176E6 else if (dark) 0x14FFFFFF else 0x0D000000)
+      }
+    }
+    customRow.addView(TextView(this).apply {
+      text = "✎"
+      textSize = 11f
+      setTextColor(subColor)
+      gravity = Gravity.CENTER
+      background = GradientDrawable().apply { cornerRadius = 5 * dp; setColor(0x33808080) }
+    }, LinearLayout.LayoutParams((18 * dp).toInt(), (18 * dp).toInt()).apply { marginEnd = (8 * dp).toInt() })
+    val edit = EditText(this).apply {
+      hint = "输入你的答案"
+      textSize = 13f
+      isSingleLine = true
+      setTextColor(textColor)
+      setHintTextColor(subColor)
+      background = null
+      setText(qCustom[qid] ?: "")
+      addTextChangedListener(object : android.text.TextWatcher {
+        override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
+        override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
+        override fun afterTextChanged(s: android.text.Editable?) {
+          val t = s?.toString()?.trim() ?: ""
+          if (t.isEmpty()) qCustom.remove(qid) else {
+            qCustom[qid] = t
+            if (!multi) { qSingle.remove(qid); } else { }
+          }
+        }
+      })
+      setOnEditorActionListener { _, actionId, _ ->
+        if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) {
+          if (n == 1) respondQuestion(qe) else { qPage = (qPage + 1).coerceAtMost(n - 1); renderPendingCard(true) }
+          true
+        } else false
+      }
+      imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+    }
+    customRow.addView(edit, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+    box.addView(customRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+      setMargins(0, (2 * dp).toInt(), 0, (4 * dp).toInt())
+    })
+    // 页脚：‹ 1/N › +（跳过本题）+ 下一题/提交
+    val foot = LinearLayout(this).apply {
+      orientation = LinearLayout.HORIZONTAL
+      gravity = Gravity.CENTER_VERTICAL
+    }
+    if (n > 1) {
+      foot.addView(TextView(this).apply {
+        text = "‹ ${qPage + 1}/$n ›"
+        textSize = 12f
+        setTextColor(subColor)
+        setPadding((4 * dp).toInt(), (6 * dp).toInt(), (4 * dp).toInt(), (6 * dp).toInt())
+        isClickable = true
+        setOnClickListener { qPage = (qPage + 1) % n; renderPendingCard(true) }
+      })
+      foot.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+      if (qPage > 0) {
+        foot.addView(pendingChip("跳过本题", filled = false, red = false, dp) {
+          qSingle.remove(qid); qCustom.remove(qid); multiSel.remove(qid)
+          qPage = (qPage + 1).coerceAtMost(n - 1)
+          renderPendingCard(true)
+        }, lpChip(dp))
+      }
+      val last = qPage == n - 1
+      foot.addView(pendingChip(if (last) "提交" else "下一题", filled = true, red = false, dp) {
+        if (!last) { qPage++; renderPendingCard(true); return@pendingChip }
+        respondQuestion(qe)
+      }, lpChip(dp))
+    } else {
+      foot.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+      // 单问多选无自动提交路径 → 给「提交」；单选点选项即答、自定义走键盘 DONE 即答
+      if (multi) foot.addView(pendingChip("提交", filled = true, red = false, dp) { respondQuestion(qe) }, lpChip(dp))
+      foot.addView(pendingChip("跳过", filled = false, red = false, dp) { dismissQuestion(qe) }, lpChip(dp))
+    }
+    box.addView(foot, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+    box.visibility = View.VISIBLE
+  }
+
+  // ── 应答（POST /api/respond，两域同一入口，rpcId 原样回显） ──────────
+
+  private fun respondEnvelope(rpcId: String, result: JSONObject) =
+    JSONObject().put("type", "client-response").put("rpcId", rpcId).put("result", result)
+
+  private fun postRespond(envelope: JSONObject, onAccepted: (Boolean) -> Unit) {
+    Thread {
+      var accepted = false
+      try {
+        val conn = URL("http://127.0.0.1:3080/api/respond").openConnection(java.net.Proxy.NO_PROXY) as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.doOutput = true
+        conn.connectTimeout = 3000
+        conn.readTimeout = 8000
+        conn.setRequestProperty("content-type", "application/json")
+        conn.outputStream.use { it.write(envelope.toString().toByteArray(Charsets.UTF_8)) }
+        val code = conn.responseCode
+        val body = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.use { it.readText() } ?: ""
+        conn.disconnect()
+        accepted = code == 200 && body.contains("\"accepted\":true")
+      } catch (_: Exception) {}
+      main.post { onAccepted(accepted) }
+    }.start()
+  }
+
+  private fun respondApproval(a: PendingApproval, outcome: String) {
+    val value = JSONObject()
+      .put("sessionId", a.sessionId).put("approvalId", a.approvalId).put("outcome", outcome)
+    postRespond(respondEnvelope(a.rpcId, JSONObject().put("ok", true).put("value", value))) { accepted ->
+      if (accepted) {
+        pendingApprovals.remove(a.rpcId)
+        flashStatus(if (outcome == "allowed-once") "已批准" else "已拒绝")
+        onPendingChanged()
+      } else flashStatus("应答失败")
+    }
+  }
+
+  /** 提问作答：answers 按 questions 原序配对（协议硬约束）；单选 custom 与 selected 互斥。 */
+  private fun respondQuestion(qe: PendingQuestion) {
+    val arr = org.json.JSONArray()
+    for (i in 0 until qe.items.length()) {
+      val item = qe.items.optJSONObject(i) ?: continue
+      val qid = item.optString("id")
+      val custom = qCustom[qid]?.trim().orEmpty()
+      val sel = ArrayList<String>()
+      if (item.optBoolean("multiSelect", false)) multiSel[qid]?.let { sel.addAll(it) }
+      else if (custom.isEmpty()) qSingle[qid]?.let { sel.add(it) }
+      val entry = JSONObject().put("id", qid).put("selected", org.json.JSONArray(sel))
+      if (custom.isNotEmpty()) entry.put("custom", custom)
+      arr.put(entry)
+    }
+    val value = JSONObject().put("sessionId", qe.sessionId)
+      .put("answer", JSONObject().put("answers", arr))
+    postRespond(respondEnvelope(qe.rpcId, JSONObject().put("ok", true).put("value", value))) { accepted ->
+      if (accepted) {
+        pendingQuestions.remove(qe.rpcId)
+        flashStatus("已回答")
+        onPendingChanged()
+      } else flashStatus("应答失败")
+    }
+  }
+
+  /** 跳过提问 = 引擎侧取消（result.ok:false + error.code:"cancelled"；审批无此通道）。 */
+  private fun dismissQuestion(qe: PendingQuestion) {
+    val err = JSONObject().put("code", "cancelled").put("message", "dismissed from overlay").put("details", JSONObject())
+    postRespond(respondEnvelope(qe.rpcId, JSONObject().put("ok", false).put("error", err))) { accepted ->
+      if (accepted) {
+        pendingQuestions.remove(qe.rpcId)
+        flashStatus("已跳过")
+        onPendingChanged()
+      } else flashStatus("应答失败")
+    }
+  }
+
   /** 只更新球（光环/工作示意），不改窗口结构。 */
   private fun updateBallOnly() {
-    // 会话维状态 → 光环；引擎维由探活驱动
-    setHalo(if (!engineRunning) Halo.ERROR else if (sessionBusy) Halo.WORKING else Halo.IDLE)
+    // 会话维状态 → 光环；引擎维由探活驱动。PENDING（提问/审批待处理）优先于 WORKING（黄色占先）。
+    pendingKind = currentPending()?.first ?: ""
+    setHalo(
+      when {
+        !engineRunning -> Halo.ERROR
+        pendingKind.isNotEmpty() -> Halo.PENDING
+        sessionBusy -> Halo.WORKING
+        else -> Halo.IDLE
+      }
+    )
     if (expanded) {
       statusText?.let {
-        if (sessionBusy) {
-          it.text = "Deep diving..."
-          (it as ShimmerTextView).setShimmering(true)
+        if (pendingKind == "question") {
+          (it as ShimmerTextView).setShimmering(false)
+          it.setTextColor(0xFFB8860B.toInt())
+          it.text = "等待你的回答…"
+        } else if (pendingKind == "approval") {
+          (it as ShimmerTextView).setShimmering(false)
+          it.setTextColor(0xFFB8860B.toInt())
+          it.text = "等待权限审批…"
+        } else if (sessionBusy) {
+          if (currentToolName.isNotBlank()) {
+            // 模板化（用户拍板）：调工具 → 工具类型 + 概览；思考 → Deep diving 扫光。
+            it.text = templateTool()
+              .replace("{tool}", currentToolName)
+              .replace("{summary}", currentToolSummary)
+            (it as ShimmerTextView).setShimmering(false)
+            it.setTextColor(themeColors().idleText)
+          } else {
+            it.text = templateThinking()
+            (it as ShimmerTextView).setShimmering(true)
+          }
         } else {
           (it as ShimmerTextView).setShimmering(false)
           it.setTextColor(0xFF8A8F98.toInt())
@@ -673,6 +1276,7 @@ class OverlayService : Service() {
       }
       updateClock()
       stopBtn?.alpha = if (sessionBusy) 1f else 0.35f
+      renderPendingCard()
     }
   }
 
@@ -864,23 +1468,16 @@ class OverlayService : Service() {
     updateBallOnly()
   }
 
-  /** 页面避让帧（v1 机制保留，尺寸按球 34dp+边距）。 */
+  /** 页面避让帧。0.13.2「互吞/挤开」修复：不再向 body 注入 paddingRight/Bottom——
+   *  原实现球贴边时注入 44dp padding 挤开 WebView 内容，正是「悬浮球把 WebView 挤开一条缝」的
+   *  观感来源。悬浮球已是独立 overlay 窗口（34dp 小球），不注入 padding，页面保持全宽。 */
   private var lastRight = 0
   private var lastBottom = 0
 
   private fun emitFrame() {
-    val p = rootParams ?: return
-    val dp = resources.displayMetrics.density
-    val w = resources.displayMetrics.widthPixels
-    val h = resources.displayMetrics.heightPixels
-    val margin = (10 * dp).toInt()
-    val edgeTol = (20 * dp).toInt()
-    val bw = (34 * dp).toInt()
-    val inset = ((64 * dp).toInt() - bw) / 2
-    // 按球可视位置（窗口 x + inset）判定贴边
-    lastRight = if (p.x + inset + bw >= w - edgeTol) bw + margin else 0
-    lastBottom = if (p.y + inset + bw >= h - edgeTol) bw + margin else 0
-    val js = "var b=document.body||document.documentElement;b.style.paddingRight='" + lastRight + "px';b.style.paddingBottom='" + lastBottom + "px';true;"
+    lastRight = 0
+    lastBottom = 0
+    val js = "var b=document.body||document.documentElement;b.style.paddingRight='0px';b.style.paddingBottom='0px';true;"
     frameConsumer?.invoke(js)
   }
 
