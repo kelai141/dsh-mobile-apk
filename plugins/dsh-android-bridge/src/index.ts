@@ -616,6 +616,12 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
       const s = String(sess?.id ?? '')
       const t = Date.now()
       const k = ev.type ?? ''
+      if (k === 'turn/start') {
+        // 轮次启动（0.1.3）：悬浮球壳侧的忙态锚点——此前 live 流只有 tool_call/turn_end，
+        // 发送/插话/WebView 提问续跑到首个工具调用之间壳侧完全失聪（面板误显「空闲」）。
+        appendLive(JSON.stringify({ t, s, k: 'turn_start' }) + '\n')
+        return
+      }
       if (k === 'tool/call') {
         const d = ev.data as { name?: string; arguments?: string; callId?: string }
         const args = String(d.arguments ?? '').slice(0, 240)

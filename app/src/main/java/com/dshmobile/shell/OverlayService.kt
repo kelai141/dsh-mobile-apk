@@ -76,7 +76,10 @@ class OverlayService : Service() {
   // 用 by lazy：Service 构造期 resources 尚为 null，字段初值若在构造时取会 NPE；
   // 首次访问（onCreate 后）才求值。
   private val ballSizeDp by lazy { (34 * resources.displayMetrics.density).toInt() }
-  private val haloSizeDp by lazy { (64 * resources.displayMetrics.density).toInt() }
+  // 光环窗口 = 2×(贴边 margin 8dp + 球半径 17dp) = 50dp：贴边时窗口恰好内切屏幕（x=0 对齐屏缘），
+  // WMS 不再 clamp。旧 64dp 窗贴边越界 7dp 被 WMS 整窗平移回屏（dumpsys 实锤：请求 x=-14 → frame x=0），
+  // 渐变中心内移 7dp =「吸边后球/光环不同心」（2026-09-05 用户实测）。渐变半径 24dp ≤ 25dp 半窗，视觉不变。
+  private val haloSizeDp by lazy { (34 * resources.displayMetrics.density).toInt() + 2 * (8 * resources.displayMetrics.density).toInt() }
   // 光晕渐变半径 24dp：球贴边时球心距屏边 = margin 8dp + 球半径 17dp = 25dp > 24dp，
   // 光晕圆任何贴边姿态下完整在屏内。「错位」根因（2026-09-02 用户实测）：halo 窗口 64dp
   // 以球心为中心，球贴边时窗口必然出屏 ≤7dp，径向渐变（旧半径=窗口半宽 32dp）被屏幕
@@ -108,6 +111,9 @@ class OverlayService : Service() {
   private var sessionBusy = false                // 会话维（工作中）
   private var toolCount = 0                      // 当前轮次工具调用数
   private var turnStartedAt = 0L                 // 运行时钟锚点
+  // 乐观忙态置位时刻（0=无）：发送成功/应答提交后、live 事件（turn_start/tool_call）到来前的
+  // 空窗补偿——live 流只有轮次中后段事件，此空窗内壳侧原本完全失聪（面板显示「空闲」，2026-09-05 实测回归）。
+  private var optimisticBusyAt = 0L
   private var currentToolName = ""               // 当前运行工具（模板化显示：工具类型+概览）
   private var currentToolSummary = ""            // 工具参数概览（args 提炼一行）
   private var pendingKind = ""                   // 待用户处理态：question / approval / 空（updateBallOnly 派生）
@@ -773,11 +779,23 @@ class OverlayService : Service() {
         try {
           val j = JSONObject(line)
           when (j.optString("k")) {
+            "turn_start" -> {
+              val s = j.optString("s", "")
+              // 轮次真正启动（bridge 0.1.3 起在产）：覆盖 WebView 侧发送/提问续跑等壳侧不可见的启动，
+              // 并确认乐观忙态。会话感知同 tool_call（#2）。
+              if (activeSessionId.isEmpty() || s == activeSessionId) {
+                optimisticBusyAt = 0L
+                if (!sessionBusy) { sessionBusy = true; turnStartedAt = System.currentTimeMillis() }
+                setHalo(Halo.WORKING)
+                changed = true
+              }
+            }
             "tool_call" -> {
               val s = j.optString("s", "")
               // 会话感知：仅当事件属于当前目标会话（或尚无目标）才置忙，
               // 避免其它会话/陈旧行的 tool_call 让 busy 永久卡死（#2）。
               if (activeSessionId.isEmpty() || s == activeSessionId) {
+                optimisticBusyAt = 0L
                 if (!sessionBusy) { sessionBusy = true; turnStartedAt = System.currentTimeMillis() }
                 toolCount++
                 // 模板化显示（用户拍板）：live 行自带 name + args（bridge 0.1.1 已在产）——
@@ -800,6 +818,7 @@ class OverlayService : Service() {
               val s = j.optString("s", "")
               // 任何一次 turn/end 都取消忙碌（当前会话 end 或引擎兜底 end）。
               if (activeSessionId.isEmpty() || s == activeSessionId) {
+                optimisticBusyAt = 0L
                 sessionBusy = false
                 toolCount = 0
                 currentToolName = ""; currentToolSummary = ""
@@ -1187,6 +1206,8 @@ class OverlayService : Service() {
     postRespond(respondEnvelope(a.rpcId, JSONObject().put("ok", true).put("value", value))) { accepted ->
       if (accepted) {
         pendingApprovals.remove(a.rpcId)
+        // 批准后轮次继续（工具真正执行），下个 live 事件前先亮工作态（同发送空窗逻辑）
+        markBusyOptimistic()
         flashStatus(if (outcome == "allowed-once") "已批准" else "已拒绝")
         onPendingChanged()
       } else flashStatus("应答失败")
@@ -1212,6 +1233,8 @@ class OverlayService : Service() {
     postRespond(respondEnvelope(qe.rpcId, JSONObject().put("ok", true).put("value", value))) { accepted ->
       if (accepted) {
         pendingQuestions.remove(qe.rpcId)
+        // 作答后轮次继续，下个 live 事件前先亮工作态（同发送空窗逻辑）
+        markBusyOptimistic()
         flashStatus("已回答")
         onPendingChanged()
       } else flashStatus("应答失败")
@@ -1230,18 +1253,37 @@ class OverlayService : Service() {
     }
   }
 
+  /** 光环状态派生（唯一权威）。探活 tick 与事件渲染必须共用——探活若自带判定会绕过
+   *  PENDING（2026-09-05 实测回归：待答琥珀光环每 10s 被探活盖回白色，「展开面板才见黄」）。 */
+  private fun deriveHalo(): Halo = when {
+    !engineRunning -> Halo.ERROR
+    pendingKind.isNotEmpty() -> Halo.PENDING
+    sessionBusy -> Halo.WORKING
+    else -> Halo.IDLE
+  }
+
+  /** 乐观置忙：发送成功/应答提交后立即亮工作态，补 live 事件到来前的空窗；
+   *  45s 内无任何目标会话 live 事件则由探活 tick 回退空闲（轮次未真正启动的兜底）。 */
+  private fun markBusyOptimistic() {
+    if (!sessionBusy) { sessionBusy = true; turnStartedAt = System.currentTimeMillis() }
+    optimisticBusyAt = System.currentTimeMillis()
+    updateBallOnly()
+  }
+
+  /** 探活 tick 调用：乐观忙态超时未获 live 事件确认则回退。返回 true 表示发生了回退。 */
+  private fun optimisticBusyExpired(): Boolean {
+    if (optimisticBusyAt == 0L) return false
+    if (System.currentTimeMillis() - optimisticBusyAt <= 45_000L) return false
+    optimisticBusyAt = 0L
+    sessionBusy = false
+    return true
+  }
+
   /** 只更新球（光环/工作示意），不改窗口结构。 */
   private fun updateBallOnly() {
     // 会话维状态 → 光环；引擎维由探活驱动。PENDING（提问/审批待处理）优先于 WORKING（黄色占先）。
     pendingKind = currentPending()?.first ?: ""
-    setHalo(
-      when {
-        !engineRunning -> Halo.ERROR
-        pendingKind.isNotEmpty() -> Halo.PENDING
-        sessionBusy -> Halo.WORKING
-        else -> Halo.IDLE
-      }
-    )
+    setHalo(deriveHalo())
     if (expanded) {
       statusText?.let {
         if (pendingKind == "question") {
@@ -1297,7 +1339,10 @@ class OverlayService : Service() {
       val running = EngineProbe.check().optBoolean("running", false)
       main.post {
         engineRunning = running
-        setHalo(if (!running) Halo.ERROR else if (sessionBusy) Halo.WORKING else Halo.IDLE)
+        // 乐观忙态 45s 未获 live 事件确认 → 回退空闲（轮次未真正启动，如引擎拒绝/会话异常）
+        if (optimisticBusyExpired() && expanded) updateBallOnly()
+        // 必须走 deriveHalo()：此 tick 每 10s 一次，自带判定会漏 PENDING 把待答光环盖回白色
+        setHalo(deriveHalo())
         if (expanded && !running) {
           statusText?.let { ShimmerTextView::class.java.cast(it).setShimmering(false); it.setTextColor(0xFFE04848.toInt()); it.text = "引擎离线" }
         }
@@ -1360,17 +1405,19 @@ class OverlayService : Service() {
     if (text.isEmpty()) return
     if (!engineRunning) { flashStatus("引擎离线"); return }
     inputBox?.setText("")
+    val steer = sessionBusy   // 发送前的忙态决定模式与提示语（成功回调里已被乐观置忙覆盖）
     val payload = JSONObject()
       .put("sessionId", activeSessionId)
-      .put("mode", if (sessionBusy) "steer" else "queue")
+      .put("mode", if (steer) "steer" else "queue")
       .put("content", org.json.JSONArray().put(
         JSONObject().put("type", "text").put("text", text)))
     val send = Runnable {
       postRpc("session.prompt", payload) { code, body ->
         if (code == 200) {
-          // 发送成功：清空输入并短暂提示；若为插话，busy 状态由 live/engine 流接管
-          renderPanelOnly()
-          flashStatus(if (sessionBusy) "已插话" else "已发送")
+          // 发送成功：立即亮工作态（乐观忙态）——live 事件（turn_start/tool_call）到来前
+          // 原本显示「空闲」，实测被用户点名（2026-09-05）；45s 无 live 确认由探活兜底回退。
+          markBusyOptimistic()
+          flashStatus(if (steer) "已插话" else "已发送")
         } else {
           // 发送失败：回填已输入文本 + 提示（避免用户以为发出去了——#4）
           inputBox?.setText(text)

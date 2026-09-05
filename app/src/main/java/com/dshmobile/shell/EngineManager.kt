@@ -93,6 +93,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
   fun refreshSnapshot(onProgress: (Long, Long) -> Unit): Boolean {
     val backup = File(context.filesDir, ".dsh-backup")
     val dsh = File(homeDir, ".dsh")
+    EngineManager.snapshotRefreshing = true
     try {
       if (dsh.exists()) {
         backup.deleteRecursively()
@@ -118,6 +119,8 @@ class EngineManager(private val context: Context, private val pickToken: String?
       restoreUserData(backup, dsh)
       Log.e(TAG, "snapshot refresh failed; kept old runtime", t)
       return false
+    } finally {
+      EngineManager.snapshotRefreshing = false
     }
   }
 
@@ -503,6 +506,12 @@ class EngineManager(private val context: Context, private val pickToken: String?
 
   /** Start the dsh web engine from the embedded snapshot. */
   fun startEngine(port: Int = 3080): Boolean {
+    // 快照刷新进行中禁止拉起（看门狗旁路闸门）：主流程刷新完成后自会启动；期间拉起只会
+    // 起在半新半旧的运行时上。返回 true = 「无需再启动」（与冷却窗语义一致，5s 后看门狗复检）。
+    if (EngineManager.snapshotRefreshing) {
+      LogCollector.log(TAG, "engine start skipped (snapshot refresh in progress)")
+      return true
+    }
     // LD_PRELOAD depends on the snapshot's termux-exec lib: when missing, every child exec fails,
     // and combined with the cooldown window that means a silent 90s engine outage — assert explicitly
     // before starting and fail loudly if absent.
@@ -927,6 +936,13 @@ class EngineManager(private val context: Context, private val pickToken: String?
 
     /** Process-level start CAS: visible across EngineManager instances (double-start race guard). */
     val STARTING = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** 快照刷新进行中（companion 级：MainActivity 与 EngineService 各持 EngineManager 实例，实例字段
+     *  互不可见——同 STARTING CAS 道理）。看门狗自愈拉起在此期间必须止步：刷新先备份再全量解压
+     *  （模拟器实测 8 分钟），期间 startEngine 会拿到「解压到一半的运行时」——2026-09-05 用户质询
+     *  实锤「引擎先于刷新跑起来」。主流程自身在刷新完成后照常拉起（finally 清标志）。 */
+    @Volatile
+    var snapshotRefreshing: Boolean = false
 
     /** Last real start time (epoch ms); the watchdog cooldown-window baseline. */
     @Volatile
