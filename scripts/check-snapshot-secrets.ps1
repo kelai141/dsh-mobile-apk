@@ -22,7 +22,7 @@ Check 'anon-id' '.anonymous-user-id'
   $hasSettings = cmd /c ('tar -tJf "' + $SnapshotPath + '" 2>nul | findstr /i /c:"home/.dsh/settings.yaml"')
   if ($hasSettings) {
     $content = cmd /c ('tar -xOf "' + $SnapshotPath + '" "home/.dsh/settings.yaml" 2>nul')
-    $leak = $content | Select-String -Pattern 'sk-[A-Za-z0-9]{12}|apiKey\s*:\s*\S|api[_-]?key\s*=\s*\S|BEGIN (RSA|OPENSSH|PRIVATE)' | Select-Object -First 1
+    $leak = $content | Select-String -Pattern 'sk-[A-Za-z0-9]{12}|apiKey\s*:\s*\S|api[_-]?key\s*=\s*\S|BEGIN (RSA|OPENSSH|PRIVATE)|dsh web: \S*/\?token=[A-Za-z0-9_-]{40,}' | Select-Object -First 1
     if ($leak) {
       # 脱敏后再输出（疑似密钥不落构建日志/工单）：sk-xxx / key 值截断
       $sample = $leak.Line.Trim()

@@ -49,10 +49,18 @@ object EngineAuth {
   const val BASE_URL = "http://$AUTHORITY"
   private const val COOKIE_NAME_PREFIX = "dsh-auth-"
   private const val TOKEN_LINE = "dsh web: "
-  private val TOKEN_RE = Regex("""dsh web: \S*/\?token=([A-Za-z0-9_\-]{40,})""")
+  internal val TOKEN_RE = Regex("""dsh web: \S*/\?token=([A-Za-z0-9_\-]{40,})""")
   private const val SECRET_RECORD_KEY = "client-connection/browser-session"
 
   @Volatile private var cached: String? = null
+
+  /**
+   * 日志出口脱敏（0.13.8 #184，唯一正则来源 = TOKEN_RE）：把启动令牌行替换为
+   * `?token=***`，保留 URL 形状与其余信息，不整行删除。
+   * 硬约束：只允许作用于**副本/落盘/展示出口**（日志、诊断包、引导页摘录），
+   * 绝不能改写 filesDir/engine.log 本体——壳侧鉴权链（tokenFromLog）依赖该行。
+   */
+  fun redact(text: String): String = text.replace(TOKEN_RE, "dsh web: ***?token=***")
 
   @Volatile private var appContext: Context? = null
 

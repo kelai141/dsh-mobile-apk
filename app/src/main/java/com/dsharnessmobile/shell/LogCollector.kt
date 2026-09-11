@@ -21,6 +21,7 @@ import java.util.concurrent.TimeUnit
  * dsh-<date>.1.log; a new file starts on each new day. Process-level singleton, start/stop idempotent.
  *
  * Privacy: logs contain commands and model content, for troubleshooting only; no credential files are read.
+ * All sink writes pass EngineAuth.redact() (0.13.8 #184) — launch tokens never reach shared copies.
  */
 object LogCollector {
 
@@ -158,16 +159,19 @@ object LogCollector {
     }
   }
 
-  /** Daily rotation: dsh-<date>.log, rotating to dsh-<date>.1.log when over the size limit. */
+  /** Daily rotation: dsh-<date>.log, rotating to dsh-<date>.1.log when over the size limit.
+   *  出口脱敏（0.13.8 #184）：本函数是所有日志落盘（事件/logcat/engine.log 尾巴）的唯一
+   *  咽喉，写前过 EngineAuth.redact——engine.log 本体不动（鉴权链依赖），脱敏只作用于这份副本。 */
   private fun appendToDayFile(ctx: Context, text: String) {
     val day = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
     val dir = currentDir(ctx)
+    val safe = EngineAuth.redact(text)
     val file = File(dir, "dsh-$day.log")
     if (file.exists() && file.length() > MAX_FILE_BYTES) {
       val rotated = File(dir, "dsh-$day.1.log")
       if (rotated.exists()) rotated.delete()
       file.renameTo(rotated)
     }
-    file.appendText(text)
+    file.appendText(safe)
   }
 }

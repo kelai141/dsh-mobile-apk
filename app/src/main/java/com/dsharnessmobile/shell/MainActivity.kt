@@ -471,7 +471,8 @@ class MainActivity : ComponentActivity() {
             LogCollector.log("dsh-shell", "dev log enabled by user")
             showTestNotification(
               "开发者日志已开启",
-              "运行日志按天写入 " + LogCollector.currentDir(this).absolutePath,
+              "运行日志按天写入 " + LogCollector.currentDir(this).absolutePath +
+                "（共享存储，其他应用可读；启动令牌已自动脱敏，日志仍含命令与模型内容）",
             )
           } else {
             LogCollector.log("dsh-shell", "dev log disabled by user")

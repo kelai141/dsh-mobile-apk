@@ -49,7 +49,7 @@ const hasSettings = pathHits(/home\/\.dsh\/settings\.yaml/i)
 if (hasSettings.length) {
   let content = ''
   try { content = sh(`tar -xOf "${abs}" home/.dsh/settings.yaml 2>/dev/null`) } catch { /* 空 */ }
-  const leakRe = /(sk-|apiKey\s*:\s*\S|api[_-]?key\s*=\s*\S|BEGIN (RSA|OPENSSH|PRIVATE))/i
+  const leakRe = /(sk-|apiKey\s*:\s*\S|api[_-]?key\s*=\s*\S|BEGIN (RSA|OPENSSH|PRIVATE)|dsh web: \S*\/\?token=[A-Za-z0-9_-]{40,})/i
   const m = leakRe.exec(content)
   if (m) { console.error(`FAIL[settings-yaml-secret]: ${m[0]}`); fail = true }
 }
