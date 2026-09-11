@@ -27,6 +27,12 @@ jobs:
             exit 1
           fi
           echo "无敏感信息 ✓"
+      # 补丁镜像面自包含一致性 + 引擎树补丁行为回归（协调仓侧 CI 另做跨仓字节比对）
+      - name: 补丁一致性门禁与回归
+        run: |
+          node scripts/check-patch-mirror.mjs --self
+          node scripts/patches/tests/spj-migration-link-f5.test.mjs
+          node scripts/patches/tests/atomic-stale-lock.test.mjs
 
   compile:
     name: Kotlin 编译门禁
