@@ -9,4 +9,7 @@
     <item name="android:textColorPrimary">@color/ds_text_primary</item>
     <item name="android:colorAccent">@color/ds_accent</item>
   </style>
+  <style name="OverlayPickerAnim">
+    <item name="android:windowEnterAnimation">@anim/picker_enter</item>
+  </style>
 </resources>

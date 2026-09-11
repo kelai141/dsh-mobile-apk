@@ -474,6 +474,11 @@ class OverlayService : Service() {
       if (expanded) panel.refreshSessionPicker()
     }
     val targeted = activeSessionId.isEmpty() || agentId == activeSessionId
+    // 0.13.8 G1-5（缺陷 B-5）：pending 清理与「渲染谁」解耦——running=false 对该 agentId
+    // 无条件清 pending（否则目标一换，过期卡片永生）；targeted 只影响下面的忙态渲染。
+    if (!running) {
+      panel.dropPendingFor(agentId)
+    }
     if (!targeted) return
     if (running) {
       optimisticBusyAt = 0L
