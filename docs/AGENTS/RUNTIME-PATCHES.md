@@ -1,6 +1,6 @@
 # RUNTIME-PATCHES.md — assets/patched/ 运行时补丁登记
 
-> 职责：`app/src/main/assets/patched/` 逐文件的权威登记（0.13.7fx-1 起 **2 个在册**：attachment-local、session-persistence-jsonl）——消费方 `EngineManager.applyRuntimePatches()`（EngineManager.kt:409-430），逐文件目标快照路径/作用/来源线索与维护约定。行号、字节数 2026-09-05 当场 grep/ls 实测。
+> 职责：`app/src/main/assets/patched/` 逐文件的权威登记（0.13.7fx-1 起 **2 个在册**：attachment-local、session-persistence-jsonl）——消费方 `EngineManager.applyRuntimePatches()`（EngineManager.kt:610-616），逐文件目标快照路径/作用/来源线索与维护约定。在册字节数与注册行号 2026-09-11 当场 ls/grep 实测；退役批次见 §5。
 
 ## 1. 机制（EngineManager.kt）
 
@@ -18,17 +18,15 @@
 
 | asset 文件（字节） | 目标快照路径（注册行） | 状态 | 作用 / 来源线索 |
 |---|---|---|---|
-| primitives-index.js（299,131） | dsh-client-ui-primitives/lib/index.js（:417-418） | 生效 | WebView 剪贴板兜底：navigator.clipboard 在 Android 被拒（NotAllowedError）时的 fallback 逻辑（EngineManager.kt:396） |
-| attachment-local-index.js（41,295） | dsh-attachment-local/lib/index.js（:419-420） | 生效 | Android sepolicy 禁 link(2) → copyFile 回退 + EACCES 容忍（:397）；内含图片归一化 2048 降采样上限（文件内 `DEFAULT_NORMALIZED_IMAGE_MAX_DIMENSION = 2048`，行 786；`config.normalizedImageMaxDimension ?? 2048`，行 880）。注意：文件内未发现 `ORIGINAL` 字样标记——补丁判定走内容指纹而非内嵌标记 |
-| web-frontend-index.html（679） | dsh-web-frontend/dist/index.html（:421-422，唯一 hashAdaptive=true） | **当前为内容同源空转** | 0.13.7 重出后该 asset 就是 0.1.5 dist 模板的逐字拷贝（仅 bundle hash 不同，壳侧 hashAdaptive 会跟随引擎改写），因此 applyAssetPatch 的内容指纹判定直接跳过它（无 applied 日志）。**历史职责已由别处接管**：viewport-fit=cover 在 Android WebView 上本就无效（env(safe-area-inset-*) 恒 0，见坑 49），系统栏避让改由壳侧推 `--dsh-android-system-top` + 注入层 `--dsh-mobile-top-inset` 承担；ES2022 polyfill（Object.hasOwn/Array.at/replaceAll/randomUUID 等）由 dsh-host-web-compat 的 POLYFILLS 在服务端注入，覆盖面更大。**待办**：确认无回归后退役该 asset 与对应 applyAssetPatch 注册行（本轮为控制构建轮次未动）。 |
-| session-persistence-jsonl-index.js（135,591，0.13.7fx-1 重出） | dsh-session-persistence-jsonl/lib/index.js | 生效 | **两处 link(2) 站点都带 EACCES/EPERM/ENOTSUP → rename 回退**（materialize 与 publishCurrentExclusive；后者是 v0→v3 会话迁移的必经路径，apk #154）。构建期同源补丁 spj-migration-link-F5；回归 scripts/patches/tests/spj-migration-link-f5.test.mjs |
-| fs-local-index.js（38,777） | dsh-fs-local/lib/index.js（:428-429） | 生效 | 同上 link(2) 回退族，作用于 dsh-fs-local 包（:401-403） |
-| llm-deepseek-index.js（38,909） | 无 applyAssetPatch 调用 | 在场未启用 | 旧 rc.1 模型目录覆盖补丁的遗留资产：dsh 0.1.1-rc.2 已原生捆绑 deepseek-v4-flash-vision-exp（含修正后的图片请求序列化），原生文件不再触碰（:399-400、:423-425）；rc8 迁移批同步移除了 onImagePicked/describeImage/bundle-hardening/textzoom 补丁（:413-416，textzoom 桥方法保留但功能面取消）。升级引擎版本时先核对其是否仍属遗留，避免误启用 |
+| attachment-local-index.js（48,404） | dsh-attachment-local/lib/index.js（:612-613） | 生效 | 0.13.7 重出（引擎 0.1.5-rc.1）：Android sepolicy 禁 link(2) → copyFile/rename 回退 + F2 祖先 fsync 守卫（与构建期补丁 attach-durable-F2 同源）；内含图片归一化 2048 降采样上限（`DEFAULT_NORMALIZED_IMAGE_MAX_DIMENSION = 2048`）。补丁判定走内容指纹而非内嵌标记 |
+| session-persistence-jsonl-index.js（138,991） | dsh-session-persistence-jsonl/lib/index.js（:614-615） | 生效 | 0.13.7 重出：**两处 link(2) 站点都带 EACCES/EPERM/ENOTSUP → rename 回退**（materialize 与 publishCurrentExclusive；后者是 v0→v3 会话迁移的必经路径，apk #154）。构建期同源补丁 spj-migration-link-F5；回归 `scripts/patches/tests/spj-migration-link-f5.test.mjs` |
+
+已退役资产（不在 `assets/patched/`，`applyAssetPatch` 注册行同步移除，勿再引用）：`primitives-index.js`、`fs-local-index.js`（0.13.3 批退役，d377abc——link(2) 回退族改由构建期补丁承担）；`web-frontend-index.html`（0.13.7fx-1 退役，§8）；`llm-deepseek-index.js`（rc.2 起遗留死资产，随重出批删除）。
 
 ## 3. 维护约定（硬约束）
 
 1. **全量替换非 delta**：asset 必须是目标文件的完整拷贝（在原文件基础上改后整体入库）；不允许只存 diff 片段或手写残缺文件——applyAssetPatch 直接 writeBytes 整写，半截文件 = 引擎启动即崩。
-2. **更新需随上游引擎对齐**：六个 asset 对应 dsh 0.1.1-rc.2 的包版本。升级快照内引擎版本时必须：① 逐文件核对上游是否已原生包含同等修复（能删则删，llm-deepseek/rc8 为先例）；② 重出 asset 从对应版本包文件改起，不从旧 asset 迭代；③ web-frontend-index.html 的 bundle 引用有 hashAdaptive 兜底，但 polyfill/viewport 逻辑需人工复核。
+2. **更新需随上游引擎对齐**：两个在册 asset 对应 0.13.7 重出时的 dsh 0.1.5-rc.1 包版本。升级快照内引擎版本时必须：① 逐文件核对上游是否已原生包含同等修复（能删则删，llm-deepseek/rc8 为先例）；② 重出 asset 从对应版本包文件改起，不从旧 asset 迭代；③ 与构建期同源补丁（F2/F5）**两处必须同源**，否则互相回退。
 3. **禁止随手重生成**：内容指纹机制意味着 asset 与目标「看起来差不多但字节不同」就会触发重写——不得用本地构建产物/不同 minify 形态随手替换 asset；改动须走完整链路验证（引擎起得来、市场/会话/附件功能实测）。
 4. **新增补丁**：applyAssetPatch 注册新条目 + 本表登记；优先评估上游新版本是否已修复（能不补则不补）。
 
@@ -56,7 +54,7 @@
 
 **协调仓 `scripts/patches/`（apply-patches.mjs + registry.json + data/compat-map.json）是快照注入链的构建期补丁框架**，按 `scope` 分两路：
 - `scope: vendor` 打 vendor 固化插件（dshmarketplace-plugin A-D、dsh-undo-savepoint E1-E7），在 `build-apk-013.ps1` 阶段施加；
-- `scope: engine` 打引擎树内上游包（attach-durable-F2 附件祖先 fsync 守卫、flock-android-F3 node-addon-system 无 Android 预编译的 stub、atomic-stale-lock-F4 孤儿写锁回收、boot-pending-G1、pi-toolcall-G2），在 `build-snapshot-013.mjs` 0f 步施加并逐个复查 marker。
+- `scope: engine` 打引擎树内上游包（attach-durable-F2 附件祖先 fsync 守卫、flock-android-F3 node-addon-system 无 Android 预编译的 stub、atomic-stale-lock-F4 孤儿写锁回收、spj-migration-link-F5 会话迁移 link(2)→rename 回退、reference-drill-F6 移动形态目录行下钻、boot-pending-G1、pi-toolcall-G2），在 `build-snapshot-013.mjs` 0f 步施加并逐个复查 marker。
 
 **与本节 assets/patched/ 的分界**：同一份引擎文件的修复若能在构建期落地（随发行快照固化），优先走 `scope: engine`；运行时 asset 只承担「必须每次启动前覆盖」或「与引擎版本无关的壳侧定制」（见 §3-2）。已退役：pi-drift-F1（上游 0.1.5 原生 strict/deferred 校验）。**assets/patched/ 是设备端运行时补丁**——壳在每次引擎启动前对快照内上游引擎包做覆盖。两者层不同、目标不同、幂等机制不同（构建期 = registry 幂等标记；运行时 = 内容指纹），勿混用；构建期补丁登记见协调仓 scripts/patches/README.md 与 registry.json。
 
@@ -91,6 +89,12 @@
 | `attach-durable-F2` | `dsh-attachment-local/lib/index.js` | 与运行时 asset **同源**：附件祖先 fsync 对 Android 应用私有祖先（`/data/user/0`）EACCES 即止步。构建期补丁服务发布快照，运行时 asset 服务「快照刷新后重施加」——两者内容一致才不会互相回退 |
 | `flock-android-F3` | `node-addon-system/lib/flock.js` | 0.1.5 新增的会话写锁只有 darwin/linux 预编译 → Android 上 `ERR_FLOCK_UNSUPPORTED_PLATFORM` 让整树 boot 失败；按上游 browser-worker 先例 stub 为立即成功（单进程宿主）+ 一次性告警 |
 | `atomic-stale-lock-F4` | `dsh-atomic-write/lib/index.js` | 孤儿 `<file>.lock` 回收（pid 已消失 + 二次核验一致才删，每次获取最多一次）；行为回归 `node scripts/patches/tests/atomic-stale-lock.test.mjs` |
+| `spj-migration-link-F5` | `dsh-session-persistence-jsonl/lib/index.js` | 会话迁移发布（publishCurrentExclusive，v0→v3 必经）与 materialize 两处 link(2) 在 Android SELinux 拒 hardlink（EACCES/EPERM/ENOTSUP）时改用模块顶层 rename（apk #154）；运行时 asset `session-persistence-jsonl-index.js` 与之**同源**。行为回归 `node scripts/patches/tests/spj-migration-link-f5.test.mjs`（fixture = 0.1.5-rc.1 产物） |
+| `reference-drill-F6` | `dsh-client-ui-reference/lib/client.js` | 与上方 F6 段落同条目（表格补登记）：移动形态（`html[data-dsh-mobile-form]`）目录行点行体 = 下钻进子目录（apk #163）；桌面无 form 标记行为逐字不变 |
+
+镜像纪律（0.13.8 PR-A1 起）：本仓 `scripts/patches/**` 是协调仓权威源的**逐字节镜像**（云端
+自包含构建检出本仓），`scripts/check-patch-mirror.mjs` 在两仓 CI 与构建链强制比对——
+改补丁必须双树同批，单边演进即拒打包/拒合并（apk #171 的教训）。
 
 F3/F4 只影响引擎内部（无 WebView/壳侧定制面），快照固化即可，无需运行时 asset 每次启动重写；F2 的
 运行时侧由既有 attachment asset 承担——**两处必须同源**。

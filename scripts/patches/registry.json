@@ -118,6 +118,22 @@
       "marker": "dsh-mobile durable-walk guard（存在=已应用）"
     },
     {
+      "id": "spj-migration-link-F5",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js",
+      "scope": "engine",
+      "summary": "会话迁移发布的 link(2) 回退：publishCurrentExclusive 与 materialize 两处站点在 EACCES/EPERM/ENOTSUP 时改用模块顶层 rename 发布",
+      "provenance": "2026-09-11 apk issue #154（用户实测 + 贡献者 PR #156 定位）；Android 应用域 SELinux 禁 hardlink → 升级前写入的会话全部打不开",
+      "marker": "dsh-mobile link->rename fallback"
+    },
+    {
+      "id": "reference-drill-F6",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-reference/lib/client.js",
+      "scope": "engine",
+      "summary": "移动形态（html[data-dsh-mobile-form]）下目录行的落定动作改为下钻：点行体进子目录而不是把文件夹变成引用；桌面行为不变",
+      "provenance": "2026-09-11 apk #163（用户拍板交互）；上游把「下钻」只绑在行尾 chevron/Tab 上，手机上点不到",
+      "marker": "dsh-mobile mobile-folder-drill (F6)"
+    },
+    {
       "id": "boot-pending-G1",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js",
       "scope": "engine",

@@ -21,6 +21,13 @@ if ($Fast) {
 $apkDir = Join-Path $Root "dsh-mobile-apk"
 if (-not (Test-Path $apkDir)) { $apkDir = $Root }
 
+# 补丁镜像一致性门禁（0.13.8 PR-A1 / apk #171 残留）：scripts/patches 是双仓镜像面
+# （云端自包含构建用 apk 仓副本），单边演进 = 云端快照静默缺引擎补丁（幽灵缺陷）。
+# registry / apply-patches / README 逐字节 + tests 清单，差异即拒打包。
+Write-Host "== 补丁镜像一致性门禁 =="
+node (Join-Path $Root "scripts\check-patch-mirror.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "补丁镜像不一致，拒绝打包（先同步镜像 scripts/patches 到对端树）"; exit 1 }
+
 # pi-ai 目录 diff（0.13.3 W1/P2）：baseline -> pin 信息性输出（构建日志 + 报告文件），
 # 删除清单供回归报告引用——不拒绝构建（删除项由 W4 降级补丁兜底）。
 $overlayManifest = Join-Path $Root "scripts\snapshot-config\engine-overlay.json"
