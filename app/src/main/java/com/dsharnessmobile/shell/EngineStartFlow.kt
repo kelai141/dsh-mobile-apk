@@ -344,6 +344,9 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         if (!isCurrentEngineFlow(generation)) return@Thread
         if (EngineProbe.check().optBoolean("running", false)) {
           booted = true
+          // 0.13.8 #174：引擎就绪钩子——补投冷启动期间待发的来件通知（拷贝完成时
+          // 引擎尚未 listen 的竞态路径；fail-soft，失败留在待发清单等下一轮）。
+          try { FileIncoming.flushPending(activity) } catch (_: Throwable) {}
           break
         }
         if (!activity.engineManager.engineProcessAlive()) {

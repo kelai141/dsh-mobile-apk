@@ -11,11 +11,19 @@ import java.net.URLDecoder
  * 路径校验与文件名净化 → 安全拷贝进临时工作区 → 交给引擎侧插件强制新会话。
  *
  * - 只接受 content:// 与 file:// 真实路径；白名单前缀校验；拒绝 ../ 上级跳转
- * - 文件名净化：问号/冒号/竖线/星号/反斜杠/双引号等非法字符（共享存储实测非法字符集）、
- *   百分号解码、255 字节边界（超长截断 + 哈希后缀），冲突自动重命名 (1)/(2)…
+ * - 文件名净化（0.13.8 #177 白名单化）：路径分隔符 `/` `\` 是路径语义 token 一律替换、
+ *   `..` 连点折叠（`..%2f` 解码后同样覆盖）、首尾点与空白去除、问号/冒号/竖线/星号/双引号等
+ *   非法字符（共享存储实测非法字符集）、百分号解码、255 字节边界（超长截断 + 哈希后缀）、
+ *   冲突自动重命名 (1)/(2)…
+ * - 归属 fail-closed（0.13.8 #177）：拷贝落点由 safeTarget 做 canonical 归属断言
+ *   （写前 + 写后各一次，双侧 canonical 化防 /data/user/0 ↔ /data/data 解析差），
+ *   外部字符串拼路径的最终结果无人校验是本缺陷根因——禁止绕过该层
+ * - 后台化（0.13.8 #174）：onCreate 前台只做 intent 识别与字符串校验（微秒级）；
+ *   TTL 清扫/拷贝/记账/投递全部移交单线程执行器；引擎投递带待发清单与重试
+ *   （冷启动 POST 早于引擎 listen 曾静默丢件）
  * - 临时工作区：files/home/.dsh/workspaces/incoming（应用数据目录，原生语义完整）；
  *   纯手动清理（D15 决策：设置页一键清理 + 占用展示）
- * - 生命周期礼仪：onTaskRemoved 时清理本次产生的临时内容（元数据幂等）
+ * - 生命周期礼仪：onTaskRemoved 时清理本次产生的临时内容（元数据幂等；拷贝进行中让路）
  */
 object FileIncoming {
 
@@ -48,13 +56,20 @@ object FileIncoming {
     return uri
   }
 
-  /** 文件名净化：非法字符替换、百分号解码、长度截断（255 字节边界 + 哈希后缀）。 */
+  /**
+   * 文件名净化（0.13.8 #177 白名单化）：百分号解码在前（`..%2f` 解码后即 `../`），
+   * 路径分隔符与 `..` 连点按路径语义 token 处理而非非法字符；首尾点与空白去除。
+   * 唯一调用方 copyIn；调用后仍须经 safeTarget 归属断言（纵深）。
+   */
   fun sanitizeName(raw: String): String {
     val decoded = try { URLDecoder.decode(raw, "UTF-8") } catch (_: Exception) { raw }
     val cleaned = decoded
       .replace(Regex("[?*|:\\\"<>]"), "_")
+      .replace(Regex("[\\\\/]"), "_") // 路径分隔符：`..` 不是非法字符而是路径语义 token（#177 根因）
+      .replace(Regex("\\.{2,}"), "_") // 连点折叠：`....//` 这类混合形态同样覆盖
       .replace(Regex("[\\u0000-\\u001f]"), "")
       .trim()
+      .trim('.', '_') // 首尾点/下划线清边：纯点名折叠后只剩 `_`，尾点（Windows 保留语义）同去
       .ifEmpty { "file" }
     // 255 字节边界（UTF-8 多字节安全截断）
     var count = 0
@@ -71,6 +86,24 @@ object FileIncoming {
     return short
   }
 
+  /**
+   * 归属断言后的落点（0.13.8 #177，fail-closed）：返回 null = 拒绝落盘。
+   * 断言用双侧 canonical 比较（Android 会把 /data/user/0 解析为 /data/data，只做一侧
+   * 会「永远拒绝」）；**返回值保留 dir 原始形态**——引擎侧 DSH_HOME 契约是 filesDir 的
+   * 原样字符串（/data/user/0 形态），canonical 形态会被插件 safeResolveInside 的
+   * 词法首门拒绝（坑 67 实测）。
+   */
+  internal fun safeTarget(dir: File, name: String): File? {
+    return try {
+      val dirCanon = dir.canonicalFile
+      val target = File(dirCanon, name)
+      if (target.canonicalFile.parentFile != dirCanon) return null
+      File(dir, name)
+    } catch (_: Exception) {
+      null
+    }
+  }
+
   /** 冲突重命名：name.ext → name (1).ext / (2)… */
   fun uniqueName(dir: File, name: String): String {
     if (!File(dir, name).exists()) return name
@@ -85,13 +118,16 @@ object FileIncoming {
   /** 文件大小上限（PRD R17 缓解：R17 注入面/隐私——超限文件拒绝进入工作区。200MB 覆盖常见文档/图片/视频）。 */
   private const val MAX_FILE_BYTES = 200L * 1024 * 1024
 
-  /** 安全拷贝进临时工作区；返回落盘路径（或 null——超限/IO 失败）。 */
+  /** 安全拷贝进临时工作区；返回落盘路径（或 null——超限/IO 失败/归属断言拒绝）。 */
   fun copyIn(context: Context, uri: Uri): File? {
     return try {
       val dir = tmpWorkspace(context)
       val display = queryDisplayName(context, uri) ?: "file"
       val name = uniqueName(dir, sanitizeName(display))
-      val target = File(dir, name)
+      val target = safeTarget(dir, name) ?: run {
+        android.util.Log.w("dsh-file-open", "incoming rejected (ownership assertion): $display")
+        return null
+      }
       val input = context.contentResolver.openInputStream(uri) ?: return null
       input.use { ins ->
         // 有界拷贝（R17：大小上限；防御流式读取绕过 SIZE 列声明）
@@ -110,6 +146,11 @@ object FileIncoming {
           }
         }
       }
+      // 写后复核（TOCTOU / 目录被符号链接替换的窗口）；失败即删，不留孤儿
+      if (target.canonicalFile.parentFile != dir.canonicalFile) {
+        target.delete()
+        return null
+      }
       target
     } catch (_: Exception) {
       null
@@ -117,15 +158,19 @@ object FileIncoming {
   }
 
   private fun queryDisplayName(context: Context, uri: Uri): String? {
-    return try {
+    // 回落结构（0.13.8）：query 抛异常与「返回空游标」都要回落 lastPathSegment——
+    // MuMu/Android 15 对 file:// 返回空游标（不抛异常），旧结构在那里直接掉 "file" 占位。
+    val viaQuery = try {
       context.contentResolver.query(
         uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null,
       )?.use { c ->
         if (c.moveToFirst()) c.getString(c.getColumnIndexOrThrow(android.provider.OpenableColumns.DISPLAY_NAME)) else null
       }
     } catch (_: Exception) {
-      uri.lastPathSegment?.substringAfterLast('/')
+      null
     }
+    return viaQuery?.takeIf { it.isNotBlank() }
+      ?: uri.lastPathSegment?.takeIf { it.isNotBlank() }
   }
 
   /** 元数据：本次打开的会话清单（生命礼仪清理的依据）。 */
@@ -169,8 +214,14 @@ object FileIncoming {
     }
   }
 
-  /** 清理本次临时会话与临时工作区内容（幂等；不阻塞进程退出——生命周期礼仪 F5.3）。 */
+  /** 清理本次临时会话与临时工作区内容（幂等；不阻塞进程退出——生命周期礼仪 F5.3）。
+   *  拷贝在途时让路（0.13.8 #174：后台拷贝与 onTaskRemoved 全清曾可竞态删半个文件），
+   *  残余内容交给下次 TTL 清扫。 */
   fun cleanupTmp(context: Context) {
+    if (activeCopies.get() > 0) {
+      LogCollector.log("dsh-file-open", "temp workspace clean skipped (copy in flight)")
+      return
+    }
     try {
       val dir = tmpWorkspace(context)
       dir.listFiles()?.forEach { it.delete() }
@@ -179,11 +230,74 @@ object FileIncoming {
     }
   }
 
+  /** 来件 IO 专用单线程执行器（0.13.8 #174：onCreate 前台零 IO——尺寸不可预知的拷贝
+   *  与首帧事务曾同线串行，200MB 提供方可达数十秒 = 无上界阻塞）。daemon = 不阻断进程退出。 */
+  private val ioExecutor: java.util.concurrent.ExecutorService =
+    java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+      Thread(r, "dsh-file-incoming").apply { isDaemon = true }
+    }
+
+  /** 拷贝在途计数（cleanupTmp 让路依据，避免删半个文件）。 */
+  private val activeCopies = java.util.concurrent.atomic.AtomicInteger(0)
+
+  /** 待发清单：已落盘但引擎未确认受理的路径（冷启动 POST 早于 listen 曾静默丢件）。 */
+  private fun pendingFile(context: Context): File = File(tmpWorkspace(context), ".pending-notify.ndjson")
+
+  private fun enqueuePending(context: Context, path: String) {
+    try {
+      pendingFile(context).appendText(path + "\n")
+    } catch (_: Exception) {
+    }
+  }
+
+  /** 单次投递尝试（无内部重试）。端点语义：HTTP 200 但 body `{ok:false}` = 拒收
+   *  （路径形态/不存在）——必须核对 body 的 ok 字段，只看状态码会把拒收当成功（静默丢件）。 */
+  private fun deliverOnce(path: String): Boolean {
+    return try {
+      val conn = java.net.URL("http://127.0.0.1:3080/api/android/file-incoming")
+        .openConnection(java.net.Proxy.NO_PROXY) as java.net.HttpURLConnection
+      conn.requestMethod = "POST"
+      conn.doOutput = true
+      conn.connectTimeout = 3000
+      conn.readTimeout = 5000
+      conn.outputStream.use { it.write(org.json.JSONObject().put("path", path).toString().toByteArray()) }
+      val code = conn.responseCode
+      val ok = if (code in 200..299) {
+        val body = conn.inputStream?.use { it.readBytes().toString(Charsets.UTF_8) } ?: ""
+        try { org.json.JSONObject(body).optBoolean("ok", false) } catch (_: Exception) { false }
+      } else false
+      conn.disconnect()
+      ok
+    } catch (_: Exception) {
+      false
+    }
+  }
+
+  /**
+   * 清待发清单（0.13.8 #174）：逐条投递，未确认的写回。返回 true = 清单已空。
+   * 调用点：来件后台流（短促重试）与引擎就绪钩子（EngineStartFlow boot 探活成功点，
+   * 冷启动竞态的确定性补投路径）。
+   */
+  fun flushPending(context: Context): Boolean {
+    val f = pendingFile(context)
+    val lines = try { f.readLines().filter { it.isNotBlank() } } catch (_: Exception) { return true }
+    if (lines.isEmpty()) { try { f.delete() } catch (_: Exception) {} ; return true }
+    val remaining = lines.filter { !deliverOnce(it) }
+    if (remaining.isEmpty()) {
+      try { f.delete() } catch (_: Exception) {}
+      LogCollector.log("dsh-file-open", "pending incoming flushed (${lines.size} file(s))")
+    } else {
+      try { f.writeText(remaining.joinToString("\n") + "\n") } catch (_: Exception) {}
+    }
+    return remaining.isEmpty()
+  }
+
   /**
    * VIEW/SEND 外部来件接线（0.13.0 F5/M3.5；自 MainActivity.maybeProcessIncoming 迁入）：
    * 校验净化 → 拷贝临时工作区 → 通知引擎侧插件。
    * 外部路径不留原件引用（一律拷贝，权限模型对齐 F1.8）；引擎未启动先启动（启动流先于通知）。
-   * 拒绝/失败提示经 notify 回调（MainActivity.showTestNotification）。
+   * 0.13.8 #174 后台化：本函数在 onCreate 主线程调用，前台只做 intent 识别 + 字符串校验，
+   * 微秒级返回；IO 与投递全部在 ioExecutor。notify 一律 post 回主线程（launcher 限制）。
    */
   fun processIncomingIntent(context: Context, intent: Intent?, notify: (title: String, text: String) -> Unit) {
     if (intent == null) return
@@ -194,32 +308,39 @@ object FileIncoming {
       else -> null
     }
     if (uri == null) return
-    // 每次文件入队前先做 TTL 清扫（issue #60 F5.1：临时文件 7 天自动回收，防止无限堆积）
-    sweepExpired(context)
     val validated = validate(uri.toString(), context) ?: run {
       notify("文件直达被拒绝", "路径不在允许范围（仅系统打开/分享的真实路径）")
       return
     }
-    val target = copyIn(context, validated) ?: run {
-      notify("文件拷贝失败", "无法读取传入文件")
-      return
-    }
-    recordOpening(context, target.absolutePath)
-    LogCollector.log("dsh-file-open", "incoming processed: " + target.absolutePath)
-    // 引擎侧插件端点：路径交给 dsh-android-file-open 强制新会话（引擎未起时端点由启动流承托）。
-    Thread {
+    val main = android.os.Handler(android.os.Looper.getMainLooper())
+    ioExecutor.execute {
       try {
-        val conn = java.net.URL("http://127.0.0.1:3080/api/android/file-incoming").openConnection(java.net.Proxy.NO_PROXY) as java.net.HttpURLConnection
-        conn.requestMethod = "POST"
-        conn.doOutput = true
-        conn.connectTimeout = 3000
-        val body = org.json.JSONObject().put("path", target.absolutePath).toString()
-        conn.outputStream.use { it.write(body.toByteArray()) }
-        conn.responseCode
-        conn.disconnect()
-      } catch (_: Exception) {
+        // 每次文件入队前先做 TTL 清扫（issue #60 F5.1：临时文件 7 天自动回收，防止无限堆积）
+        sweepExpired(context)
+        activeCopies.incrementAndGet()
+        val target = try {
+          copyIn(context, validated)
+        } finally {
+          activeCopies.decrementAndGet()
+        }
+        if (target == null) {
+          main.post { notify("文件拷贝失败", "无法读取传入文件") }
+          return@execute
+        }
+        recordOpening(context, target.absolutePath)
+        LogCollector.log("dsh-file-open", "incoming processed: " + target.absolutePath)
+        // 引擎侧插件端点：路径交给 dsh-android-file-open 强制新会话。
+        // 待发清单 + 短促重试（引擎就绪钩子会再补投，冷启动不再丢件）：
+        enqueuePending(context, target.absolutePath)
+        val deadline = System.currentTimeMillis() + 20_000
+        while (System.currentTimeMillis() < deadline) {
+          if (flushPending(context)) return@execute
+          try { Thread.sleep(4_000) } catch (_: InterruptedException) { return@execute }
+        }
+      } catch (t: Throwable) {
+        android.util.Log.w("dsh-file-open", "incoming pipeline failed: " + (t.message ?: t.javaClass.simpleName))
       }
-    }.start()
+    }
   }
 
   /**
