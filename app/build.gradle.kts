@@ -14,15 +14,15 @@ android {
     // (the embedded engine, bash, and every child command would need linker64
     // wrappers); 34 keeps native exec working on Android 15/16 devices.
     targetSdk = 34
-    // 0.13.7：versionCode 34（追上游 dsh 0.1.5-rc.1：上游 ui-layout 基线 + 移动适配层 0.2.0 +
-    // 原生「打开方式」PathOpen/openPathChooser + 引擎树补丁 F3/F4 + polyfill 装配与 Iterator 垫片修复 +
-    // UI 冗余清理（退役 attachment-formats、快照徽章折叠成小绿点）；覆盖安装 0.13.6(33)）。
-    versionCode = 34
+    // 0.13.7fx-1：versionCode 35（@文件回到上游原生：退役注入的「引用本机文件」项与整条 SAF 路径桥；
+    // 引擎启动目录改到应用工作区根，未分组会话不再把 / 当工作区；修复 0.1.5 起失效的移动端 Enter 换行守卫；
+    // 退役空转的 web-frontend-index.html 运行时补丁；覆盖安装 0.13.7(34)）。
+    versionCode = 35
     // Snapshot builds append a suffix (e.g. -SN-1-RC13) via -PversionNameSuffix; release builds pass none.
     val snapshotSuffix = providers.gradleProperty("versionNameSuffix").getOrElse("")
     // 版本号单一来源：UI（GuidePageRenderer）、桥（androidBridge.version）、诊断日志、引擎环境变量
     // （DSH_APP_VERSION，见 EngineManager.engineEnv）全部读这里，禁止任何地方再硬编码版本字面量。
-    versionName = "0.13.7" + snapshotSuffix
+    versionName = "0.13.7fx-1" + snapshotSuffix
     buildConfigField("String", "TERMUX_VERSION", "\"0.118.3\"")
   }
 

@@ -75,7 +75,7 @@ Snippets live in the `POLYFILLS` array; the assembly rule is `POLYFILL_SCRIPT_BO
   `Iterator is not defined` at import time).
 - `apply()` parse-checks the assembled markup with `new Function` at load and throws on failure
   (loud failure beats a silent downgrade).
-- Snippet text must not contain `</script`, which would close the element early.
+- **Shim the real structure, not just the name**: the global `Iterator` must be a constructor whose `.prototype` IS `%IteratorPrototype%` (bundled code such as pdfjs patches `Iterator.prototype.x` directly), and iterator wrappers must inherit that same prototype or chained helpers break.
 
 ## Tests
 
