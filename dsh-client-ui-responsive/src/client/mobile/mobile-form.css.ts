@@ -37,6 +37,9 @@ export const MOBILE_FORM_CSS: string = `
     background: var(--dsw-specific-sidebar-fill);
     transform: translateX(-100%);
     transition: transform var(--ds-transition-duration-slow, 200ms) var(--ds-ease-in-out, ease);
+    /* 底部安全区：抽屉全高贴底时，底部设置入口会被系统手势条遮挡（apk #153）。
+       与 composer-insets 的底部 inset 处理保持一致。 */
+    padding-bottom: max(env(safe-area-inset-bottom, 0px), var(--dsh-android-system-bottom, 0px));
   }
 
   [data-dsh-frame]:not([data-sidebar-collapsed]) > [class*='sidebarCol'] {
