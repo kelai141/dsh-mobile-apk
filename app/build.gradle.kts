@@ -103,4 +103,6 @@ dependencies {
   implementation("org.apache.commons:commons-compress:1.28.0")
   implementation("org.tukaani:xz:1.10")
   testImplementation("junit:junit:4.13.2")
+  // 本地单测用真实 org.json（android.jar 桩在 JVM 里抛 Stub!）——快照 profiles 合并（#167）测试需要
+  testImplementation("org.json:json:20240303")
 }

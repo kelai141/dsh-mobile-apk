@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 0.13.8 #183：Auto Backup（API <=30）排除面。allowBackup=false 为主，本文件为
+     「将来有人改回 true」时的兜底：凭据/会话/工作区/引擎鉴权 prefs 永不进云备份。 -->
+<full-backup-content>
+  <exclude domain="file" path="home/.dsh/.credentials.yaml" />
+  <exclude domain="file" path="home/.dsh/sessions/" />
+  <exclude domain="file" path="home/.dsh/storages/" />
+  <exclude domain="file" path="home/.dsh/attachments/" />
+  <exclude domain="file" path="home/.dsh/workspaces/" />
+  <exclude domain="file" path="home/.dsh/undo-snapshots/" />
+  <exclude domain="file" path="home/.dsh/models-store.json" />
+  <exclude domain="file" path="deepseek-key.txt" />
+  <exclude domain="file" path="dashscope-key.txt" />
+  <exclude domain="sharedpref" path="dsh_engine_auth.xml" />
+  <exclude domain="sharedpref" path="dsh-adb.xml" />
+</full-backup-content>

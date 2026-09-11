@@ -52,6 +52,89 @@ class SnapshotTransactionTest {
     }
   }
 
+  /**
+   * 0.13.8 #167：profiles 分区合并——用户插件生态幸存 + 工厂条目更新，两者同时成立。
+   * （live 与 staged 的 .gitconfig / profiles 内容必须不同，否则断言恒真即假绿。）
+   */
+  @Test
+  fun mergesUserProfilesAndKeepsUserGitconfig() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      writeRuntime(live, "old-node", "old-profile")
+      writeRuntime(stage, "new-node", "new-profile")
+      // 工厂侧 package.json（0.13.8 #167 合并输入）：含一条工厂依赖与工厂 bundles
+      File(stage, "home/.dsh/profiles/web/package.json").writeText(
+        """{"dependencies":{"@dsh-android/dsh-shell-termux":"0.1.0","@dsh-android/dsh-host-web-compat":"0.1.13"},"dsh.profile.bundles":["@dsh-android/dsh-shell-termux"]}""",
+      )
+
+      // 用户生态：第三方依赖 + 用户 pin + 用户 patch 追加块 + .npmrc + 工厂不发行文件
+      File(live, "home/.dsh/profiles/web/package.json").writeText(
+        """{"dependencies":{"@dsh-android/dsh-shell-termux":"0.1.0","@user/third-party":"1.2.3"},"dsh.profile.bundles":["@user/custom-bundle"]}""",
+      )
+      File(live, "home/.dsh/profiles/web/cordis.patch.yml").writeText(
+        "- id: bash-sandbox\n  disabled: true\n- insert:\n    - id: user-custom\n      name: '@user/plugin'\n",
+      )
+      File(live, "home/.dsh/profiles/web/.npmrc").writeText("registry=https://registry.npmmirror.com\n")
+      File(live, "home/.dsh/profiles/web/node_modules/@user").mkdirs()
+      File(live, "home/.dsh/profiles/web/node_modules/@user/plugin.js").writeText("user plugin\n")
+      // 用户改过的 .gitconfig（工厂模板 = [user]，live = 模板 + 用户名）
+      File(live, "home/.gitconfig").writeText("[user]\n\tname = 用户名\n")
+
+      SnapshotTransaction.swap(
+        filesDir, stage, File(live, "usr"), File(live, "home"), preserved, "fp1", 1L,
+      )
+
+      val pkg = File(live, "home/.dsh/profiles/web/package.json").readText()
+      assertTrue("第三方依赖幸存", pkg.contains("@user/third-party"))
+      assertTrue("工厂依赖补入（合并不是保留）", pkg.contains("@dsh-android/dsh-host-web-compat"))
+      assertTrue("用户 bundles 幸存", pkg.contains("@user/custom-bundle"))
+      val patch = File(live, "home/.dsh/profiles/web/cordis.patch.yml").readText()
+      assertTrue("用户追加块幸存", patch.contains("id: user-custom"))
+      assertTrue("工厂已有条目不被重复追加", Regex("id: bash-sandbox").findAll(patch).count() == 1)
+      assertEquals(".npmrc 幸存", "registry=https://registry.npmmirror.com\n", File(live, "home/.dsh/profiles/web/.npmrc").readText())
+      assertEquals(
+        "用户 node_modules 幸存", "user plugin\n",
+        File(live, "home/.dsh/profiles/web/node_modules/@user/plugin.js").readText(),
+      )
+      assertTrue(
+        "工厂 cordis.yml 更新（混合容器内工厂条目仍升级）",
+        File(live, "home/.dsh/profiles/web/cordis.yml").readText() == "new-profile",
+      )
+      assertTrue("用户 .gitconfig 幸存（#179 seed-if-absent）", File(live, "home/.gitconfig").readText().contains("用户名"))
+      assertTrue("工厂 .gitconfig 的新增语义仍保留", File(live, "home/.gitconfig").readText().contains("[user]"))
+      SnapshotTransaction.finish(filesDir)
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
+  /** #167 回滚：合并中断（marker SWAPPING + previous 有备份）→ live profiles 整目录还原。 */
+  @Test
+  fun rollsBackAMergedProfilesDirectoryFromTheDisplacedCopy() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      writeRuntime(live, "old-node", "old-profile")
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      SnapshotFs.createDirectories(stage)
+      val previous = SnapshotTransaction.previousRoot(filesDir)
+      writeRuntime(previous, "old-node", "old-profile") // displaced 整目录备份形态
+      SnapshotTransaction.writeMarker(
+        filesDir,
+        SnapshotTransaction.Marker(SnapshotTransaction.Phase.SWAPPING, "fp1", 1L, listOf("home/.dsh/profiles")),
+      )
+
+      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"), "old-fp")
+
+      assertEquals(SnapshotTransaction.Outcome.ROLLED_BACK, recovery.outcome)
+      assertEquals("old-profile", File(live, "home/.dsh/profiles/web/cordis.yml").readText())
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
   @Test
   fun installsFactoryEntryWhenTheLiveCopyDoesNotExist() {
     val filesDir = tempDir()

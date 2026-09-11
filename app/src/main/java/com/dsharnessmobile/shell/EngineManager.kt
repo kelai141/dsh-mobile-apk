@@ -1052,6 +1052,8 @@ class EngineManager(private val context: Context, private val pickToken: String?
       // can't maintain the profiles/node_modules flat fallback); all runtime user data lives in private
       // files/home/.dsh, and public Documents/dshdata is only the export repo.
       "DSH_HOME" to ensurePrivateDshData().absolutePath,
+      // 0.13.8 #183：引擎子进程读取键盘广播 nonce 的路径基（manage 插件 --es auth 随广播携带）
+      "DSH_FILES_DIR" to context.filesDir.absolutePath,
       // os.tmpdir() falls back to the baked-in Termux tmp on Android
       // (unwritable from the app domain); keep spill inside filesDir.
       "TMPDIR" to File(homeDir, "tmp").apply { mkdirs() }.absolutePath,

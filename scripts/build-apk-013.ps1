@@ -28,6 +28,11 @@ Write-Host "== 补丁镜像一致性门禁 =="
 node (Join-Path $Root "scripts\check-patch-mirror.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "补丁镜像不一致，拒绝打包（先同步镜像 scripts/patches 到对端树）"; exit 1 }
 
+# manifest 加固门禁（0.13.8 PR-B3 / apk #183）：allowBackup/NSC/接收器来源校验在场
+Write-Host "== manifest 加固门禁 =="
+node (Join-Path $Root "scriptscheck-manifest-hardening.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "manifest 加固校验失败，拒绝打包"; exit 1 }
+
 # pi-ai 目录 diff（0.13.3 W1/P2）：baseline -> pin 信息性输出（构建日志 + 报告文件），
 # 删除清单供回归报告引用——不拒绝构建（删除项由 W4 降级补丁兜底）。
 $overlayManifest = Join-Path $Root "scripts\snapshot-config\engine-overlay.json"

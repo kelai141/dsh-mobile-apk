@@ -110,7 +110,8 @@ function tools(svc: { status(): { tier: string } } | undefined) {
         },
       },
       render: (_args, v: Record<string, unknown>) => [
-        { type: 'text', text: `工具链 ${String(v.prefix)}：dpkg ${String(v.dpkgPackages)} 包 / ADB ${String(v.adbTier)}\n` + JSON.stringify(v.tools ?? {}) },
+        // 0.13.8 #172：adbTier 是部署默认档位视图（非通道能力门）——文案如实标注，防模型误读为未授权
+        { type: 'text', text: `工具链 ${String(v.prefix)}：dpkg ${String(v.dpkgPackages)} 包 / ADB 档位视图 ${String(v.adbTier)}（部署默认，非通道门；通道就绪以 android_privilege_status 为准）\n` + JSON.stringify(v.tools ?? {}) },
       ],
     },
     execute: async () => toolchainStatus(svc?.status().tier) as never,

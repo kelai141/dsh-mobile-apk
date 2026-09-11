@@ -90,6 +90,7 @@ class AdbKeyboardService : InputMethodService() {
     const val ACTION_INPUT_TEXT = "ADB_INPUT_TEXT"
     const val ACTION_CLEAR_TEXT = "ADB_CLEAR_TEXT"
     const val EXTRA_MSG = "msg"
+    const val EXTRA_AUTH = "auth"
 
     /** 当前活跃服务实例（广播转发入口；绑定期间才非空）。 */
     @Volatile
@@ -115,5 +116,53 @@ class AdbKeyboardService : InputMethodService() {
       }
       return true
     }
+
+    /** 广播来源 nonce 文件（应用私有 filesDir 根；引擎经 DSH_FILES_DIR 读取后随广播回传）。 */
+    fun nonceFile(context: Context): java.io.File =
+      java.io.File(context.filesDir, NONCE_FILE_NAME)
+
+    /** 幂等创建 nonce（MainActivity.onCreate 与首次校验时调用；应用私有域，仅本 uid 可读）。 */
+    fun ensureNonce(context: Context): String {
+      val f = nonceFile(context)
+      if (f.exists()) {
+        f.readText().trim().takeIf { it.isNotEmpty() }?.let { return it }
+      }
+      val secret = java.math.BigInteger(256, java.security.SecureRandom()).toString(16)
+      f.parentFile?.mkdirs()
+      f.writeText(secret)
+      return secret
+    }
+
+    /**
+     * 来源校验（0.13.8 #183，详见 AdbKeyboardReceiver 类注释）：
+     * 34+ uid 白名单（root/adb shell）或有效 auth nonce（引擎路径）。
+     * `MessageDigest.isEqual` 常量时间比较，防逐字节试探。
+     */
+    fun isTrustedSender(context: Context, intent: Intent): Boolean {
+      if (android.os.Build.VERSION.SDK_INT >= 34) {
+        sentFromUid(intent)?.let { uid -> if (uid == 0 || uid == 2000) return true }
+      }
+      val given = intent.getStringExtra(EXTRA_AUTH) ?: return false
+      val secret = try {
+        nonceFile(context).takeIf { it.exists() }?.readText()?.trim()
+      } catch (_: Throwable) {
+        null
+      } ?: return false
+      return java.security.MessageDigest.isEqual(
+        given.toByteArray(Charsets.UTF_8), secret.toByteArray(Charsets.UTF_8),
+      )
+    }
+
+    /**
+     * API 34+ 的 Intent.getSentFromUid（反射调用——本机 SDK 平台 jar 实测缺该符号，
+     * 编译期不可见；运行时 34+ 设备必有该方法，缺失/异常一律返回 null 走 nonce 分支）。
+     */
+    private fun sentFromUid(intent: Intent): Int? = try {
+      Intent::class.java.getMethod("getSentFromUid").invoke(intent) as? Int
+    } catch (_: Throwable) {
+      null
+    }
+
+    private const val NONCE_FILE_NAME = "adb-keyboard-nonce"
   }
 }

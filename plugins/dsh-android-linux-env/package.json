@@ -1,14 +1,16 @@
 {
   "name": "@dsh-android/dsh-android-linux-env",
   "description": "Toolchain & environment pane: shared dirs, env vars, toolchain status/reset, software mirror and the exportable environment recipe (PRD F1.3/F1.0)",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
     "./package.json": "./package.json"
   },
-  "files": ["lib"],
+  "files": [
+    "lib"
+  ],
   "license": "MIT",
   "private": true,
   "scripts": {
