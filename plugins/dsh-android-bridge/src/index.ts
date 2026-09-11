@@ -102,6 +102,8 @@ export interface ShellAdbPrefs {
   controlToken?: string
   /** 0.13.5 W4：轮询心跳（epoch ms）——判定服务是否真的活着（防僵尸 a11yEnabled）。 */
   controlHeartbeat?: number
+  /** 0.13.8 #180：门1 live 键（壳 syncFullAccess 写入；undefined = prefs 无该键 → 上层回落 env）。 */
+  fullAccess?: boolean
 }
 
 /** 持久文件路径：环境变量显式指定（测试/桌面模拟）优先；安卓壳域默认；其余返回 null。 */
@@ -124,9 +126,11 @@ export function parseAdbPrefsXml(xml: string): ShellAdbPrefs | null {
   const mA11y = /<boolean\s+name="a11yEnabled"\s+value="(true|false)"\s*\/?>/.exec(xml)
   const mToken = /<string\s+name="controlToken">([^<]*)<\/string>/.exec(xml)
   const mHeartbeat = /<long\s+name="controlHeartbeat"\s+value="(\d+)"\s*\/?>/.exec(xml)
+  // 0.13.8 #180：门1 live 化——fullAccess 键在场即解析（写端 = 壳侧 syncFullAccess）。
+  const mFullAccess = /<boolean\s+name="fullAccess"\s+value="(true|false)"\s*\/?>/.exec(xml)
   // 只要任一受管键在场就解析——无障碍通道独立于 ADB 三道人门，
   // 未开启 ADB 时 prefs 里可能只有 a11yEnabled/controlToken（0.13.5 实测踩坑）。
-  if (!mAllow && !mPair && !mA11y && !mToken) return null
+  if (!mAllow && !mPair && !mA11y && !mToken && !mFullAccess) return null
   return {
     allowSwitch: mAllow ? mAllow[1] === 'true' : false,
     paired: mPair ? mPair[1] === 'true' : false,
@@ -136,6 +140,7 @@ export function parseAdbPrefsXml(xml: string): ShellAdbPrefs | null {
     a11yEnabled: mA11y ? mA11y[1] === 'true' : false,
     controlToken: mToken?.[1] || undefined,
     controlHeartbeat: mHeartbeat ? Number(mHeartbeat[1]) : undefined,
+    fullAccess: mFullAccess ? mFullAccess[1] === 'true' : undefined,
   }
 }
 
@@ -160,9 +165,11 @@ function readShellAdbState(): ShellAdbPrefs | undefined {
  */
 function currentStatus(env: NodeJS.ProcessEnv, defaultWriteMode?: string): AdbStatus {
   const writeMode = defaultWriteMode ?? env.DSH_WRITE_MODE ?? 'workspace-write'
-  const fullAccess = env.DSH_ADB_FULLACCESS === '1'
   // live 优先：壳侧 SharedPreferences（引擎与壳同 UID 直读，只读）；无文件 → env 启动快照。
   const live = readShellAdbState()
+  // 0.13.8 #180：门1 live 化——live prefs 优先（与门2/门3 完全同构），env 启动快照兜底；
+  // 同一判定里不再有两套时效语义（桌面/测试宿主无 prefs 时回落 env）。
+  const fullAccess = live ? (live.fullAccess ?? (env.DSH_ADB_FULLACCESS === '1')) : (env.DSH_ADB_FULLACCESS === '1')
   const allowSwitchOn = live ? live.allowSwitch : env.DSH_ADB_ALLOW === '1'
   const paired = live ? live.paired : env.DSH_ADB_PAIRED === '1'
   const wirelessDebugOn = live ? live.paired : env.DSH_ADB_WIRELESS === '1'
@@ -542,10 +549,10 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
   const statusTool = defineTool({
     name: 'android_privilege_status',
     description:
-      '查询设备控制授权状态。两条等价通道：无障碍通道（系统设置开启「DSH 设备控制」一次即成立，'
-      + '提供 dump/click/input/scroll 语义操作）与 ADB 通道（完全访问 + 允许访问 + 无线调试配对，'
-      + '高级/脚本面：shell 执行、原图截图、pm/dumpsys）。返回结构化 gates 与 control 字段；'
-      + '两者都不可用时给出两条开启路径的引导。手机管理工具全部以此为前置检查，失败关闭。',
+      '查询设备控制授权状态。无障碍通道为主（系统设置开启「DSH 设备控制」一次即成立，'
+      + '提供 dump/click/input/scroll 语义操作）；ADB 通道为高级/脚本兜底（完全访问 + 允许访问 + 无线调试配对：'
+      + 'shell 执行、原图截图、pm/dumpsys），不是「等价」通道——无障碍优先，ADB 仅兜底。'
+      + '返回结构化 gates 与 control 字段；两者都不可用时给出两条开启路径的引导。手机管理工具全部以此为前置检查，失败关闭。',
     parameters: {},
     output: {
       schema: {
@@ -579,9 +586,9 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
               + `${control?.tokenConfigured === true ? ' · 令牌已配置' : ''}`
               + `${queueFresh ? ' · 壳侧轮询在线' : ' · 壳侧轮询离线'}`,
             `ADB 通道：${gates?.adbReady ? '已就绪' : `未就绪（完全访问=${String(gates?.fullAccess)} 允许访问=${String(gates?.allowSwitch)} 配对=${String(gates?.paired)} 无线调试=${String(gates?.wirelessDebug)}）`}`,
-            gates?.a11yEnabled ? '结论：设备控制可用（走无障碍通道）'
-              : gates?.adbReady ? '结论：设备控制可用（走 ADB 通道）'
-                : '结论：不可用——开启任一通道即可（推荐无障碍：系统设置 → 无障碍 → DSH 设备控制）',
+            gates?.a11yEnabled ? '结论：设备控制可用（走无障碍通道）——下一步用 android_ui_dump（manage）拿语义清单'
+              : gates?.adbReady ? '结论：设备控制可用（走 ADB 通道，仅兜底）——下一步用 android_ui_dump（无障碍优先）或 android_ui_tree（ADB）'
+                : '结论：不可用——开启任一通道即可（推荐无障碍：系统设置 → 无障碍 → DSH 设备控制，一步即用）',
             v.message ? `ADB 提示：${String(v.message)}` : '',
           ].filter((line) => line !== '').join('\n'),
         }]
@@ -662,7 +669,8 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
       '真实 ADB 通道执行（0.14）：经本机 adbd 以 shell 身份执行系统命令（配对后可用）。' +
       '用途：screencap/uiautomator/dumpsys/input/getprop 等系统面只读与输入类；' +
       '系统配置写面（settings put/pm grant/appops/mount 等）一律拒绝。' +
-      '需完整授权（门1 完全访问档位 + 门2 允许开关 + 门3 真实配对）且会话档位 danger-full-access；未授权失败关闭。',
+      '需引擎级三道门（门1 完全访问 + 门2 允许开关 + 门3 真实配对）且会话档位 danger-full-access'
+      + '（部署默认写面档位只是视图，不参与门禁——0.13.8 #172）；未授权失败关闭。',
     parameters: {
       command: { type: 'string', required: true, description: '在 adbd（shell 用户）中执行的命令' },
     },

@@ -18,6 +18,12 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * 失败关闭：取活/回填任何异常只记录并退避重试，不猜测、不重放动作。
  * 引擎未起时退避到 10s，避免空转耗电。
+ *
+ * 0.13.8 #181：
+ * - 已执行 reqId 去重（有界 LRU）：重连/重投场景下同一请求绝不执行两次；
+ * - 非 2xx 不再静默丢弃——读 errorStream 与 X-DSH-Control-* 响应头并记日志
+ *   （409 = 双 settle 竞态的观测点；413 = 回填超限，真因首次可见）；
+ * - 通用 catch 补日志（原先完全吞掉）。
  */
 class ControlPoller(private val service: DeviceControlService) {
 
@@ -29,10 +35,15 @@ class ControlPoller(private val service: DeviceControlService) {
     private const val READ_TIMEOUT_MS = 9000
     private const val IDLE_BACKOFF_MS = 1000L
     private const val MAX_BACKOFF_MS = 10_000L
+    /** 已执行 reqId 去重集合容量（有界 LRU；4s 内的 in-flight 窗口远用不满 64 条）。 */
+    private const val EXECUTED_LRU_CAPACITY = 64
   }
 
   private val running = AtomicBoolean(false)
   private var thread: Thread? = null
+  private val executed = object : LinkedHashMap<String, Boolean>(EXECUTED_LRU_CAPACITY, 0.75f, true) {
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Boolean>): Boolean = size > EXECUTED_LRU_CAPACITY
+  }
 
   fun start() {
     if (!running.compareAndSet(false, true)) return
@@ -69,7 +80,9 @@ class ControlPoller(private val service: DeviceControlService) {
         execute(token, request)
       } catch (interrupted: InterruptedException) {
         return
-      } catch (_: Exception) {
+      } catch (error: Exception) {
+        // 0.13.8 #181：通用异常不再静默吞掉——退避照旧，但原因必须可查
+        LogCollector.log(TAG, "poll loop error: " + (error.message ?: error.javaClass.simpleName))
         sleep(backoff)
         backoff = (backoff * 2).coerceAtMost(MAX_BACKOFF_MS)
       }
@@ -79,6 +92,12 @@ class ControlPoller(private val service: DeviceControlService) {
   private fun execute(token: String, request: JSONObject) {
     val reqId = request.optString("reqId", "")
     if (reqId.isEmpty()) return
+    // 0.13.8 #181：同一 reqId 只执行一次（有界 LRU；引擎侧 in-flight 门禁之外的壳侧兜底）
+    val firstRun = synchronized(executed) { executed.put(reqId, true) == null }
+    if (!firstRun) {
+      LogCollector.log(TAG, "duplicate delivery skipped (reqId=$reqId) — engine re-delivered an in-flight request")
+      return
+    }
     val op = request.optString("op", "")
     val args = request.optJSONObject("args") ?: JSONObject()
     val outcome: JSONObject = try {
@@ -104,7 +123,10 @@ class ControlPoller(private val service: DeviceControlService) {
     }
   }
 
-  /** POST JSON 并解析响应；非 2xx 或解析失败返回 null（调用方退避）。 */
+  /**
+   * POST JSON 并解析响应；非 2xx 读 errorStream + X-DSH-Control-* 头后返回 null（调用方退避）。
+   * 0.13.8 P0-1：非 2xx 的真因（401/403/413/409 + 字节数/上限）首次进日志，不再静默。
+   */
   private fun post(path: String, body: JSONObject): JSONObject? {
     val connection = URL(BASE + path).openConnection(Proxy.NO_PROXY) as HttpURLConnection
     return try {
@@ -116,7 +138,16 @@ class ControlPoller(private val service: DeviceControlService) {
       OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { it.write(body.toString()) }
       val code = connection.responseCode
       if (code !in 200..299) {
-        connection.errorStream?.close()
+        val errText = connection.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
+        val ctrlCode = connection.headerFields?.get("x-dsh-control-code")?.firstOrNull() ?: ""
+        val bytes = connection.headerFields?.get("x-dsh-control-bytes")?.firstOrNull() ?: ""
+        val limit = connection.headerFields?.get("x-dsh-control-limit")?.firstOrNull() ?: ""
+        LogCollector.log(
+          TAG,
+          "POST $path -> HTTP $code" +
+            (if (ctrlCode.isNotEmpty()) " code=$ctrlCode bytes=$bytes limit=$limit" else "") +
+            (if (errText.isNotEmpty()) " body=" + errText.take(200) else ""),
+        )
         null
       } else {
         val text = BufferedReader(InputStreamReader(connection.inputStream, Charsets.UTF_8)).use { it.readText() }

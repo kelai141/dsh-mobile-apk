@@ -40,6 +40,8 @@ export class ControlQueue {
   private lastResultAt = 0
   private served = 0
   private failed = 0
+  /** 0.13.8 #181：在途标记——take 到 settle 之间二次取活必须被拒（防同一请求双执行）。 */
+  private inFlight = false
 
   /** 是否有壳侧未取走的活（false = 壳侧应停轮）。 */
   get waiting(): boolean {
@@ -68,7 +70,10 @@ export class ControlQueue {
     const req: ControlRequest = { reqId, op, args, gen, createdAt: Date.now() }
     return new Promise<ControlResult>((resolve) => {
       const timer = setTimeout(() => {
-        if (this.pending?.req.reqId === reqId) this.pending = undefined
+        if (this.pending?.req.reqId === reqId) {
+          this.pending = undefined
+          this.inFlight = false
+        }
         this.failed++
         resolve({ ok: false, error: `设备控制超时（${timeoutMs}ms 内壳侧未回填结果）——检查无障碍服务是否在运行` })
       }, Math.max(500, timeoutMs))
@@ -86,7 +91,9 @@ export class ControlQueue {
    */
   waitForWork(timeoutMs: number): Promise<ControlRequest | null> {
     this.lastTakeAt = Date.now()
-    if (this.pending) return Promise.resolve(this.take())
+    // 0.13.8 #181：在途（已取走未回填）时不再交付——被饿的轮询者拿到 null 会按
+    // pollHint 重新轮询，绝不会重复执行同一个 req。
+    if (this.pending && !this.inFlight) return Promise.resolve(this.take())
     return new Promise<ControlRequest | null>((resolve) => {
       const timer = setTimeout(() => {
         this.waiter = undefined
@@ -110,7 +117,9 @@ export class ControlQueue {
     this.lastTakeAt = Date.now()
     const entry = this.pending
     if (!entry) return null
-    // 取走后仍在等待回填；回填或超时才会清空。
+    // 0.13.8 #181：在途即拒——同一 reqId 只许交付一次（原实现可重复返回 → 双执行）。
+    if (this.inFlight) return null
+    this.inFlight = true
     return entry.req
   }
 
@@ -120,6 +129,7 @@ export class ControlQueue {
     if (!entry || entry.req.reqId !== reqId) return false
     clearTimeout(entry.timer)
     this.pending = undefined
+    this.inFlight = false
     this.lastResultAt = Date.now()
     if (result.ok) this.served++
     else this.failed++
@@ -133,6 +143,7 @@ export class ControlQueue {
     if (!entry) return
     clearTimeout(entry.timer)
     this.pending = undefined
+    this.inFlight = false
     entry.resolve({ ok: false, error: reason })
   }
 }
@@ -155,25 +166,57 @@ export type RouteResponse = {
   end(body?: string): void
 }
 
-function readBody(req: RouteRequest, limit = 64 * 1024): Promise<Record<string, unknown>> {
+/**
+ * 请求体读取（0.13.8 V2 P0-1，坑 D0 修复）：判别联合——超限/解析失败不再静默
+ * `resolve({})`（那会把「报文太大」伪装成 403 令牌不匹配，模型完全看不到真因）。
+ * 上限 64KB → 1MiB：V2 列式载荷下 MAX_NODES=4000 的最坏报文 ≈ 501KB，1MiB 结构性不可达。
+ */
+export const CONTROL_BODY_LIMIT = 1024 * 1024
+
+export type ReadBodyResult =
+  | { ok: true; body: Record<string, unknown> }
+  | { ok: false; code: 'too_large' | 'bad_json' | 'aborted'; bytes: number; limit: number }
+
+function readBody(req: RouteRequest, limit = CONTROL_BODY_LIMIT): Promise<ReadBodyResult> {
   return new Promise((resolve) => {
     const chunks: Buffer[] = []
     let size = 0
+    let overLimit = false
     req.on('data', (chunk) => {
       if (!chunk) return
       size += chunk.length
-      if (size > limit) return
+      if (size > limit) {
+        overLimit = true
+        return
+      }
       chunks.push(chunk)
     })
     req.on('end', () => {
+      if (overLimit) {
+        resolve({ ok: false, code: 'too_large', bytes: size, limit })
+        return
+      }
       try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>)
+        resolve({ ok: true, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown> })
       } catch {
-        resolve({})
+        resolve({ ok: false, code: 'bad_json', bytes: size, limit })
       }
     })
-    req.on('error', () => resolve({}))
+    req.on('error', () => resolve({ ok: false, code: 'aborted', bytes: size, limit }))
   })
+}
+
+/** 413/400 统一出口：X-DSH-Control-Code/-Bytes/-Limit 响应头（壳侧 ControlPoller 读这些而非盲等）。 */
+function sendBodyError(res: RouteResponse, r: { code: string; bytes: number; limit: number }): void {
+  const code = r.code === 'too_large' ? 413 : 400
+  res.writeHead(code, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+    'x-dsh-control-code': r.code,
+    'x-dsh-control-bytes': String(r.bytes),
+    'x-dsh-control-limit': String(r.limit),
+  } as Record<string, string>)
+  res.end(JSON.stringify({ ok: false, error: `请求体${r.code === 'too_large' ? '超过上限' : '不是合法 JSON'}：${r.bytes}B / 上限 ${r.limit}B`, code: r.code, bytes: r.bytes, limit: r.limit }))
 }
 
 function sendJson(res: RouteResponse, code: number, payload: unknown): void {
@@ -206,7 +249,13 @@ export function registerControlRoutes(webServer: { register(route: unknown): voi
     kind: 'exact',
     path: '/api/android/ui/pending',
     handler: async (req: RouteRequest, res: RouteResponse) => {
-      const body = await readBody(req)
+      const rb = await readBody(req)
+      if (!rb.ok) {
+        logger?.warn?.(`control/pending: ${rb.code} (${rb.bytes}B / ${rb.limit}B)`)
+        sendBodyError(res, rb)
+        return
+      }
+      const body = rb.body
       if (!tokenMatches(token(), body.token)) {
         logger?.warn?.('control/pending: 令牌不匹配或未配置，拒绝')
         sendJson(res, 403, { ok: false, error: 'control token missing or mismatched' })
@@ -220,7 +269,13 @@ export function registerControlRoutes(webServer: { register(route: unknown): voi
     kind: 'exact',
     path: '/api/android/ui/result',
     handler: async (req: RouteRequest, res: RouteResponse) => {
-      const body = await readBody(req)
+      const rb = await readBody(req)
+      if (!rb.ok) {
+        logger?.warn?.(`control/result: ${rb.code} (${rb.bytes}B / ${rb.limit}B)`)
+        sendBodyError(res, rb)
+        return
+      }
+      const body = rb.body
       if (!tokenMatches(token(), body.token)) {
         logger?.warn?.('control/result: 令牌不匹配或未配置，拒绝')
         sendJson(res, 403, { ok: false, error: 'control token missing or mismatched' })
@@ -232,6 +287,7 @@ export function registerControlRoutes(webServer: { register(route: unknown): voi
         ? { ok: true, data: body.data }
         : { ok: false, error: typeof body.error === 'string' ? body.error : '设备控制失败（壳侧未给出原因）' }
       const accepted = queue.settle(reqId, result)
+      if (!accepted) logger?.warn?.(`control/result: rejected (409, reqId=${reqId})`)
       sendJson(res, accepted ? 200 : 409, { ok: accepted, reason: accepted ? 'settled' : 'unknown-or-stale-reqId' })
     },
   })

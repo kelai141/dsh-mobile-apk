@@ -534,8 +534,9 @@ object AdbState {
    */
   private fun adbPing(engine: EngineManager): Boolean = try {
     val proc = spawnAdb(engine, listOf("devices"))
-    val text = proc.inputStream.bufferedReader().use { it.readText() }
-    proc.waitFor(6, TimeUnit.SECONDS)
+    // 0.13.8 #173：有界读——本函数在 synchronized(this) 内，裸 readText 挂起会锁死
+    // 整个 AdbState（后续 ADB 调用与看门狗强制重启全部冻结）。
+    val text = ProcIo.readBounded(proc, 6) ?: return false
     !text.contains("protocol fault") && text.contains("List of devices")
   } catch (_: Throwable) {
     false
@@ -584,11 +585,9 @@ object AdbState {
       val adb = File(engine.usrDir, "bin/adb")
       if (!adb.exists()) return listOf("adb not found in snapshot runtime")
       val proc = spawnAdb(engine, args)
-      val text = proc.inputStream.bufferedReader().use { it.readText() }
-      if (!proc.waitFor(timeoutS, TimeUnit.SECONDS)) {
-        proc.destroy()
-        return listOf("adb timeout")
-      }
+      // 0.13.8 #173：有界读（读线程排水 + 超时 destroyForcibly）——原「先 readText 后
+      // waitFor」使超时参数形同虚设；超时沿用既有 "adb timeout" 文本（classifyFailure 已识别）。
+      val text = ProcIo.readBounded(proc, timeoutS) ?: return listOf("adb timeout")
       text.lines()
     } catch (t: Throwable) {
       listOf("adb failed: " + (t.message ?: t.javaClass.simpleName))

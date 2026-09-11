@@ -148,9 +148,13 @@ object UndoGate {
         Log.w(TAG, "direct exec denied, falling back to linker64: " + e.message)
         proc = build(listOf("/system/bin/linker64") + cmd).start()
       }
-      val text = proc.inputStream.bufferedReader().use { it.readText() }
-      if (!proc.waitFor(60, java.util.concurrent.TimeUnit.SECONDS)) {
-        proc.destroy()
+      // 0.13.8 #173：有界读——CLI 挂起曾令 60s 守卫失效，且 execute 的 autoUndoRunning
+      // 只在 finally 复位 → 恒「已在执行」，连看门狗 DEAD 支的强制重启都被锁死。
+      // 超时分支显式复位标志与 arm 文件（幂等，防御未来再引入无界读）。
+      val text = ProcIo.readBounded(proc, 60) ?: run {
+        proc.destroyForcibly()
+        try { armFile(context).delete() } catch (_: Throwable) {}
+        autoUndoRunning.set(false)
         return listOf("emergency CLI timeout")
       }
       text.lines()

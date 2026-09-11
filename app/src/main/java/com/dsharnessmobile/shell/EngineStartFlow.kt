@@ -384,9 +384,13 @@ internal class EngineStartFlow(private val activity: MainActivity) {
       } else {
         // 进程还活着但 90s 内未就绪（异常慢）：灰色提示而非红色错误，不触发回退——
         // 引擎仍在启动，3s engineMonitorRunnable 会兜底切界面。
+        // 0.13.8 #175：终点不再「只提示」——安排一次自动重试（DEGRADED_HTTP 阶梯随后
+        // 兜底：若 HTTP 持续失败而端口可连，看门狗会受控重启，不再永久停留灰字）。
+        LogCollector.log("dsh-shell", "engine boot window exceeded 90s; scheduling retry (half-dead ladder will take over if HTTP stays failing)")
+        scheduleEngineRetry(generation)
         activity.runOnUiThread {
           if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-          activity.applyGuidePhase(GuidePhase.Starting, "引擎启动较慢（已超过 90s），仍在后台启动中…")
+          activity.applyGuidePhase(GuidePhase.Starting, "引擎启动较慢（已超过 90s），已安排自动重试…")
         }
       }
       return@Thread
