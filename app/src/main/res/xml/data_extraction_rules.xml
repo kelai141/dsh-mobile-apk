@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 0.13.8 #183：云备份与设备迁移（API 31+）排除面——与 backup_rules.xml 同语义的
+     新规则载体；allowBackup=false 下不生效，作纵深兜底。 -->
+<data-extraction-rules>
+  <cloud-backup>
+    <exclude domain="file" path="home/.dsh/.credentials.yaml" />
+    <exclude domain="file" path="home/.dsh/sessions/" />
+    <exclude domain="file" path="home/.dsh/storages/" />
+    <exclude domain="file" path="home/.dsh/attachments/" />
+    <exclude domain="file" path="home/.dsh/workspaces/" />
+    <exclude domain="file" path="home/.dsh/undo-snapshots/" />
+    <exclude domain="file" path="home/.dsh/models-store.json" />
+    <exclude domain="file" path="deepseek-key.txt" />
+    <exclude domain="file" path="dashscope-key.txt" />
+    <exclude domain="sharedpref" path="dsh_engine_auth.xml" />
+    <exclude domain="sharedpref" path="dsh-adb.xml" />
+  </cloud-backup>
+  <device-transfer>
+    <exclude domain="file" path="home/.dsh/.credentials.yaml" />
+    <exclude domain="file" path="home/.dsh/sessions/" />
+    <exclude domain="file" path="home/.dsh/storages/" />
+    <exclude domain="file" path="home/.dsh/attachments/" />
+    <exclude domain="file" path="home/.dsh/workspaces/" />
+    <exclude domain="file" path="home/.dsh/undo-snapshots/" />
+    <exclude domain="file" path="home/.dsh/models-store.json" />
+    <exclude domain="file" path="deepseek-key.txt" />
+    <exclude domain="file" path="dashscope-key.txt" />
+    <exclude domain="sharedpref" path="dsh_engine_auth.xml" />
+    <exclude domain="sharedpref" path="dsh-adb.xml" />
+  </device-transfer>
+</data-extraction-rules>

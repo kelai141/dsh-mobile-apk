@@ -27,6 +27,22 @@ import { join } from 'node:path'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { parseUiTreeXml, pruneNodes, resolveRef, findActionableAncestor, type UiNode } from './ui-tree.js'
 
+/**
+ * 0.13.8 #183：键盘广播来源校验 nonce 参数（壳侧 AdbKeyboardReceiver 私有文件，
+ * 引擎与壳同 uid 可读）。文件缺失（旧壳 / 桌面宿主）返回空串 = 不带 auth 参数，
+ * 由壳侧 34+ sentFromUid 白名单兜底；桌面宿主无广播路径不受影响。
+ */
+function adbKeyboardAuthArg(): string {
+  const base = process.env.DSH_FILES_DIR
+  if (!base) return ''
+  try {
+    const nonce = readFileSync(join(base, 'adb-keyboard-nonce'), 'utf8').trim()
+    return nonce ? ` --es auth '${nonce}'` : ''
+  } catch {
+    return ''
+  }
+}
+
 export const name = 'dsh-android-manage'
 // androidPrivilege 由 dsh-android-bridge 在 apply 时经 ctx.provide 注册；
 // cordis 代理对未 inject 的非注册属性读取会抛错（"cannot get property without inject"），
@@ -1109,9 +1125,12 @@ function tools(ctx: Context, priv: PrivilegeFace) {
         await priv.execAdbShell(`ime enable ${IME_ID}`).catch(() => undefined)
         const needSwitch = prev.length > 0 && prev !== IME_ID
         if (needSwitch) await priv.execAdbShell(`ime set ${IME_ID}`).catch(() => undefined)
+        // 0.13.8 #183：键盘广播来源校验 nonce——壳侧私有文件（DSH_FILES_DIR），引擎与壳
+        // 同 uid 可读，随广播 --es auth 携带；API 34+ 壳侧另有 sentFromUid 白名单兜底。
+        const authArg = adbKeyboardAuthArg()
         const parts: string[] = []
-        if (clear) parts.push(`am broadcast -a ADB_CLEAR_TEXT`)
-        if (raw) parts.push(`am broadcast -a ADB_INPUT_TEXT --es msg '${raw.replace(/'/g, `'\\''`)}'`)
+        if (clear) parts.push(`am broadcast -a ADB_CLEAR_TEXT${authArg}`)
+        if (raw) parts.push(`am broadcast -a ADB_INPUT_TEXT${authArg} --es msg '${raw.replace(/'/g, `'\\''`)}'`)
         let r: { ok: boolean; stdout: string; guidance?: string } = { ok: true, stdout: '' }
         for (const p of parts) {
           r = await priv.execAdbShell(p)
@@ -1130,8 +1149,8 @@ function tools(ctx: Context, priv: PrivilegeFace) {
           await new Promise((resolve) => setTimeout(resolve, 260))
           readBack = await read()
           if (readBack !== null && readBack !== raw) {
-            await priv.execAdbShell(`am broadcast -a ADB_CLEAR_TEXT`).catch(() => undefined)
-            await priv.execAdbShell(`am broadcast -a ADB_INPUT_TEXT --es msg '${raw.replace(/'/g, `'\\''`)}'`).catch(() => undefined)
+            await priv.execAdbShell(`am broadcast -a ADB_CLEAR_TEXT${authArg}`).catch(() => undefined)
+            await priv.execAdbShell(`am broadcast -a ADB_INPUT_TEXT${authArg} --es msg '${raw.replace(/'/g, `'\\''`)}'`).catch(() => undefined)
             await new Promise((resolve) => setTimeout(resolve, 320))
             readBack = await read()
           }

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 0.13.8 #183：壳侧 HTTP 明文收敛——默认禁明文；仅本机引擎回环与模拟器开发端点放行。
+     引擎是独立 node 子进程，不受 NSC 约束（只保护壳侧 Kotlin/WebView 流量）。
+     注：APK 自更新（0.13.8 H1）走 HTTPS，属 base-config 默认允许面。 -->
+<network-security-config>
+  <base-config cleartextTrafficPermitted="false" />
+  <domain-config cleartextTrafficPermitted="true">
+    <domain includeSubdomains="false">127.0.0.1</domain>
+    <domain includeSubdomains="false">localhost</domain>
+    <domain includeSubdomains="false">10.0.2.2</domain>
+  </domain-config>
+</network-security-config>

@@ -377,7 +377,10 @@ export function AdbAuthSection(_props: AdbAuthSectionProps) {
     [cancelConfirm],
   )
 
-  const granted = status?.tier?.startsWith('T1') === true
+  // 0.13.8 #172：通道就绪 = 引擎级三道门（完全访问 + 允许开关 + 配对/无线调试）——
+  // 部署默认写面档位（tier）只是视图字段，不再决定「已授权」展示。
+  const granted = status?.fullAccess === true && status?.allowSwitchOn === true &&
+    status?.paired === true && status?.wirelessDebugOn === true
   const confirmText = confirm !== null ? CONFIRM_ALLOW_TEXT[confirm] : null
 
   return (
@@ -428,7 +431,7 @@ export function AdbAuthSection(_props: AdbAuthSectionProps) {
       </p>
 
       <div className={granted ? 'adb-auth-tier adb-auth-tier-ok' : 'adb-auth-tier adb-auth-tier-bad'}>
-        <span>{granted ? '已授权（T1）' : '未授权（T0）'}</span>
+        <span>{granted ? 'ADB 通道就绪（引擎级三道门已齐）' : 'ADB 通道未就绪（引擎级三道门未齐）'}</span>
         {status?.message ? <span className="adb-auth-tier-sub">{status.message}</span> : <span className="adb-auth-tier-sub">通道可用</span>}
       </div>
 

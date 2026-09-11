@@ -336,7 +336,9 @@ export class AndroidPrivilegeService {
   gateFor(session?: unknown): { ok: true; via?: 'a11y' | 'adb' } | { ok: false; guidance: string; gates?: ControlGateFacts } {
     const st = this.status()
     const a11y = this.a11yEnabled()
-    const adbReady = engineLevelReady(st) && st.tier !== 'T0'
+    // 0.13.8 #172：能力门只由「引擎级三道门 + 会话档位实时门」决定——部署默认写面
+    // 档位（tier）降级为视图字段，不再参与门禁（坑 29：勿把部署默认当死锁）。
+    const adbReady = engineLevelReady(st)
     const gates: ControlGateFacts = {
       a11yEnabled: a11y,
       fullAccess: st.fullAccess === true,
@@ -372,9 +374,7 @@ export class AndroidPrivilegeService {
     if (!engineLevelReady(st)) {
       return { ok: false, guidance: st.message ?? '未授权' }
     }
-    if (st.tier === 'T0') {
-      return { ok: false, guidance: st.message ?? '未授权' }
-    }
+    // 0.13.8 #172：tier（部署默认档位视图）不再作为拒绝条件——会话档位由各 execute 实时门禁。
     return { ok: true, tier: st.tier }
   }
 
@@ -400,7 +400,8 @@ export class AndroidPrivilegeService {
   /** 0.13.5 W4：结构化授权事实（两条通道各自的门）。 */
   gateFacts(): ControlGateFacts {
     const st = this.status()
-    const adbReady = engineLevelReady(st) && st.tier !== 'T0'
+    // 0.13.8 #172：同 gateFor——部署档位视图不参与能力门。
+    const adbReady = engineLevelReady(st)
     return {
       a11yEnabled: this.a11yEnabled(),
       fullAccess: st.fullAccess === true,
@@ -418,7 +419,7 @@ export class AndroidPrivilegeService {
     return decideControl({
       op,
       a11yEnabled: this.a11yEnabled(),
-      adbReady: engineLevelReady(st) && st.tier !== 'T0',
+      adbReady: engineLevelReady(st), // 0.13.8 #172：部署档位视图不参与能力门
       sessionMode: mode,
       forceBackend,
     })
@@ -865,6 +866,9 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
       handler: async (_req: WsReq, res: WsRes) => {
         sendJson(res, 200, {
           ...svc.status(),
+          // 0.13.8 #172：结构化通道事实（两通道各自的门）——展示面与诊断共用，
+          // adbReady 只看引擎级三道门（部署档位视图不参与，坑 29）。
+          gates: svc.gateFacts() as unknown as Record<string, JsonValue>,
           // 0.13.5 W4：控制通道事实（只读；令牌本身绝不回显）
           control: {
             a11yEnabled: svc.a11yEnabled(),

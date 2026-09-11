@@ -190,6 +190,10 @@ class MainActivity : ComponentActivity() {
     }
     ViewCompat.requestApplyInsets(root)
     configureWebView()
+    // 0.13.8 #183：键盘广播 nonce（应用私有文件，引擎子进程经 DSH_FILES_DIR 读取，
+    // manage 插件广播时 --es auth 携带；幂等）。
+    try { AdbKeyboardService.ensureNonce(this) } catch (_: Throwable) {
+    }
     // Testable update trigger: adb am start -n .../.MainActivity -a com.dsharnessmobile.shell.action.UPDATE
     if (intent?.action == ACTION_UPDATE) {
       engineFlow.runUpdate()
