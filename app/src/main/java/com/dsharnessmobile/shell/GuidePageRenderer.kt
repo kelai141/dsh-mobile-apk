@@ -210,7 +210,8 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
     refreshGuideMeta()
   }
 
-  /** engine.log 尾部摘要（测试界面诊断用；缺失/不可读返回空）。 */
+  /** engine.log 尾部摘要（测试界面诊断用；缺失/不可读返回空）。
+   *  展示出口脱敏（0.13.8 #184）：用户截图上报即外发，令牌行不得进入。 */
   private fun tailEngineLog(lines: Int): String {
     val f = File(activity.filesDir, "engine.log")
     if (!f.exists()) return ""
@@ -225,7 +226,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
           if (tail.size == lines) tail.removeFirst()
           tail.addLast(line)
         }
-        tail.joinToString("\n")
+        EngineAuth.redact(tail.joinToString("\n"))
       }
     } catch (_: Exception) {
       ""

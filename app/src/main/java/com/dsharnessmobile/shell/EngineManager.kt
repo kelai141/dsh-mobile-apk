@@ -531,9 +531,10 @@ class EngineManager(private val context: Context, private val pickToken: String?
           "  exports/                 会话与配置的导出物\n" +
           "    config/settings.yaml   配置导出（设置 > 开发者选项 > 导出配置 生成）\n" +
           "                           修改本文件后点「导入配置」即可生效（无需重装）\n" +
-          "  log/                     开发者调试日志（默认关，设置 > 开发者选项 开启）\n" +
-          "  diagnostics/             启动失败/崩溃时自动生成的诊断包（engine.log + 环境信息 + logcat），\n" +
-          "                           反馈 issue 时直接整目录打包上传即可\n\n" +
+          "  log/                     开发者调试日志（默认关，设置 > 开发者选项 开启；含令牌脱敏，"
+            + "但仍有命令与模型内容）\n" +
+          "  diagnostics/             启动失败/崩溃时自动生成的诊断包（engine.log 脱敏副本 + 环境信息 + logcat），\n" +
+          "                           令牌已替换为 ***，反馈 issue 时直接整目录打包上传即可\n\n" +
           "改配置的正确途径：设置界面各项开关；或 导出配置 -> 文件管理器编辑 -> 导入配置；\n" +
           "进阶：设置 > 开发者选项 > 打开控制台（快照内 bash，可直接 vi settings.yaml）。\n",
       )
@@ -806,20 +807,22 @@ class EngineManager(private val context: Context, private val pickToken: String?
       val dir = File(File(dshDataDir, "diagnostics"), ts + "-" + reason)
       if (!dir.mkdirs() && !dir.isDirectory) return
       val log = File(context.filesDir, "engine.log")
+      // 0.13.8 #184：诊断包落共享存储（任何持 All Files Access 的应用可读），engine.log
+      // 内含引擎 launch token——副本先过 redact，本体不动（壳侧鉴权链 tokenFromLog 依赖）。
       for (f in arrayOf(log, File(log.parentFile, "engine.log.1"), File(log.parentFile, "engine.log.2"))) {
         try {
-          if (f.exists()) f.copyTo(File(dir, f.name), overwrite = true)
+          if (f.exists()) File(dir, f.name).writeText(EngineAuth.redact(f.readText()))
         } catch (_: Throwable) {
         }
       }
       try {
-        File(dir, "info.txt").writeText(buildDiagnosticsText(reason))
+        File(dir, "info.txt").writeText(EngineAuth.redact(buildDiagnosticsText(reason)))
       } catch (_: Throwable) {
       }
       try {
         val p = ProcessBuilder("logcat", "-d", "-v", "threadtime", "-t", "400").redirectErrorStream(true).start()
         val out = p.inputStream.readBytes()
-        if (out.isNotEmpty()) File(dir, "logcat-recent.txt").writeBytes(out)
+        if (out.isNotEmpty()) File(dir, "logcat-recent.txt").writeText(EngineAuth.redact(String(out)))
       } catch (_: Throwable) {
       }
       LogCollector.log(TAG, "diagnostics mirrored: " + dir.absolutePath)
