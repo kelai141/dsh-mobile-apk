@@ -14,6 +14,20 @@ import android.view.animation.PathInterpolator
 internal object DsUi {
   val ease = PathInterpolator(0.32f, 0.72f, 0f, 1f)
 
+  /**
+   * 动效总开关（0.13.8 G3-M11，降级统一入口）：系统「关闭动画」三开关任一关闭、
+   * 或 ValueAnimator 不活动（省电模式等）→ 所有 overlay 动效直接设终态。
+   * 复用 ShimmerTextView.kt 的既有判定口径（单一来源原则）。
+   */
+  fun animationsEnabled(context: android.content.Context): Boolean {
+    if (!android.animation.ValueAnimator.areAnimatorsEnabled()) return false
+    val resolver = context.contentResolver
+    val scale = { key: String -> android.provider.Settings.Global.getFloat(resolver, key, 1f) }
+    return scale(android.provider.Settings.Global.ANIMATOR_DURATION_SCALE) != 0f &&
+      scale(android.provider.Settings.Global.TRANSITION_ANIMATION_SCALE) != 0f &&
+      scale(android.provider.Settings.Global.WINDOW_ANIMATION_SCALE) != 0f
+  }
+
   fun roundRect(
     color: Int,
     radius: Float,
