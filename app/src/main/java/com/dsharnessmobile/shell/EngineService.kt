@@ -100,22 +100,28 @@ class EngineService : Service() {
         exec.scheduleWithFixedDelay({
           try {
             val state = WatchdogV2.assessProbe(this)
+            // 0.13.8 #175：DEGRADED_HTTP 达阈值后不再被 alive 早退——半死引擎（端口可连、
+            // HTTP 持续失败）走与 DEAD 相同的受控重启阶梯；DEGRADED_LOG 保留不重启语义。
+            val degradedLadderTripped = state == WatchdogV2.ProbeState.DEGRADED_HTTP && WatchdogV2.degradedHttpTripped()
             val alive = state != WatchdogV2.ProbeState.DEAD
-            if (state != WatchdogV2.ProbeState.DEGRADED) {
+            if (state == WatchdogV2.ProbeState.HEALTHY || state == WatchdogV2.ProbeState.DEAD) {
               engineManager.onEngineProbe(state == WatchdogV2.ProbeState.HEALTHY)
             }
             WatchdogV2.recordProbe(state)
             WatchdogV2.refreshWakeLock(this)
 
-            if (alive) {
+            if (alive && !degradedLadderTripped) {
               nextRestartAllowedAt = 0L
               UndoGate.disarm(this)
               return@scheduleWithFixedDelay
             }
             if (!engineManager.engineReady) return@scheduleWithFixedDelay
-            if (WatchdogV2.consecutiveFailures < restartDeadConfirmations) {
+            if (!degradedLadderTripped && WatchdogV2.consecutiveFailures < restartDeadConfirmations) {
               LogCollector.log("dsh-watchdog", "confirmed-dead sample " + WatchdogV2.consecutiveFailures + "/" + restartDeadConfirmations + "; observing before restart")
               return@scheduleWithFixedDelay
+            }
+            if (degradedLadderTripped) {
+              LogCollector.log("dsh-watchdog", "DEGRADED_HTTP 连续 " + WatchdogV2.consecutiveDegradedHttp + " 拍（端口可连但 HTTP 持续失败）→ 升级为受控重启")
             }
             if (WatchdogV2.tripped()) {
               LogCollector.log("dsh-watchdog", "watchdog circuit open after confirmed-dead failures; destructive recovery paused")
@@ -129,9 +135,9 @@ class EngineService : Service() {
               LogCollector.log("dsh-watchdog", "dead probe deferred while the tracked child remains inside its boot window")
               return@scheduleWithFixedDelay
             }
-            if (UndoGate.onProbeFailure(this, WatchdogV2.consecutiveFailures)) {
+            if (UndoGate.onProbeFailure(this, WatchdogV2.effectiveFailureCount())) {
               nextRestartAllowedAt = now + WatchdogV2.nextDelayMs()
-              LogCollector.log("dsh-watchdog", "auto-undo trigger after confirmed-dead failures=" + WatchdogV2.consecutiveFailures)
+              LogCollector.log("dsh-watchdog", "auto-undo trigger after confirmed failures=" + WatchdogV2.effectiveFailureCount())
               Thread {
                 val result = UndoGate.execute(this, engineManager)
                 if (result.executed) {
@@ -158,7 +164,7 @@ class EngineService : Service() {
             nextRestartAllowedAt = now + delayMs
             LogCollector.log(
               "dsh-watchdog",
-              "restart requested after confirmed-dead failure #" + WatchdogV2.consecutiveFailures +
+              "restart requested after confirmed failure #" + WatchdogV2.effectiveFailureCount() +
                 " (accepted=" + requested + ", next eligible in " + delayMs + "ms)",
             )
           } catch (t: Throwable) {

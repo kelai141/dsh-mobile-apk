@@ -25,7 +25,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
 import { join } from 'node:path'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
-import { parseUiTreeXml, pruneNodes, resolveRef, findActionableAncestor, type UiNode } from './ui-tree.js'
+import { parseUiTreeXml, pruneNodes, resolveRef, findActionableAncestor, checkUiTreeParse, type UiNode } from './ui-tree.js'
 
 /**
  * 0.13.8 #183：键盘广播来源校验 nonce 参数（壳侧 AdbKeyboardReceiver 私有文件，
@@ -517,8 +517,42 @@ function tools(ctx: Context, priv: PrivilegeFace) {
   // 引擎单进程内模块级缓存（n 值 ≤60，内存代价可忽略）。
   const UI_CACHE_TTL = 30_000
   let uiCache:
-    | { nodes: UiNode[]; byId: ReturnType<typeof pruneNodes>['byId']; byOrig: ReturnType<typeof pruneNodes>['byOrig']; parentByOrig: ReturnType<typeof pruneNodes>['parentByOrig']; screen: { w: number; h: number }; rotation: number; ts: number; gen?: number }
+    | { nodes: UiNode[]; byId: ReturnType<typeof pruneNodes>['byId']; byOrig: ReturnType<typeof pruneNodes>['byOrig']; parentByOrig: ReturnType<typeof pruneNodes>['parentByOrig']; screen: { w: number; h: number }; rotation: number; ts: number; gen?: number; fingerprint?: string; rawCount?: number }
     | null = null
+
+  /**
+   * 0.13.8 P0-4：树结构指纹（FNV-1a）——「界面未变」快路径的判定依据。
+   * 覆盖定位所需字段（文本/描述/类型/几何/交互性）；任一变化 → 指纹翻转 → 完整重抓。
+   * 纯追加语义：指纹相同只回一行「未变」摘要，绝不改写历史结果（L1）。
+   */
+  const treeFingerprint = (nodes: UiNode[]): string => {
+    let h = 0x811c9dc5
+    for (const n of nodes) {
+      const s = `${n.id}|${n.parentId}|${n.text}|${n.desc}|${n.rid}|${n.type}|${n.cx},${n.cy},${n.w},${n.h}|${n.clickable ? 1 : 0}${n.editable ? 1 : 0}${n.scrollable ? 1 : 0}${n.checked ? 1 : 0}${n.visible ? 1 : 0}`
+      for (let i = 0; i < s.length; i++) {
+        h ^= s.charCodeAt(i)
+        h = Math.imul(h, 0x01000193) >>> 0
+      }
+      h ^= 0xff
+      h = Math.imul(h, 0x01000193) >>> 0
+    }
+    return 'fp' + h.toString(16).padStart(8, '0')
+  }
+
+  /** 「界面未变」快路径（P0-4）：指纹一致直接回紧凑摘要，模型可复用上次引用。 */
+  const unchangedResponse = (fp: string, gen?: number) => ({
+    ok: true,
+    denied: false,
+    unchanged: true,
+    screen: uiCache!.screen,
+    rotation: uiCache!.rotation,
+    count: uiCache!.nodes.length,
+    rawCount: uiCache!.rawCount ?? uiCache!.nodes.length,
+    nodes: [] as JsonValue[],
+    gen,
+    note: '界面未变（结构指纹一致）：上次 dump 的引用（n0..nN）与坐标仍然有效，可直接复用；需完整清单请带 fresh:true 重新 dump',
+    text: `界面未变（gen=${gen ?? '未知'}，结构指纹 ${fp}）：上次 dump 的 ${uiCache!.nodes.length} 个节点引用仍有效——直接用 android_ui_click/id:nN 等引用继续，无需重新阅读清单（fresh:true 可强制完整重抓）`,
+  })
 
   /** 0.13.5 W4：控制通道决策。策略面缺席（旧版 bridge）→ 按 ADB 通道处理，保持旧行为。 */
   const controlDecision = (op: string, exec?: { agent?: { session?: unknown } }) => {
@@ -576,15 +610,15 @@ function tools(ctx: Context, priv: PrivilegeFace) {
   const uiDump = defineTool({
     name: 'android_ui_dump',
     description:
-      '【首选】导出当前界面语义控件清单：无障碍语义树优先（无障碍服务已开启时走这条路——一次系统开关即可用、'
-      + '无配对、无 uiautomator idle 阻塞、字段更全），否则回退 uiautomator dump。'
-      + '产出紧凑 JSON 节点表（id(text/desc 语义定位用，同一次 dump 内稳定)/文本/描述/类型/中心坐标/尺寸/可点/可滚动/可编辑）。'
-      + '节点上限 60（超出截断）、文本截 50 字符——token 远低于原始 XML 与截图。'
-      + '调用序：先 android_ui_dump 定位目标，再 android_ui_click/scroll/input 语义动作；'
-      + '点击已自带生效校验（android_ui_click 会回报「已生效/未观察到变化」），页面大幅变化后再 dump。'
+      '【首选】导出当前界面语义控件清单：无障碍语义树优先（一次系统开关即用、无配对、不受 uiautomator idle 阻塞），否则回退 uiautomator dump。'
+      + '产出完整结构化节点表（id / 父id / 文本 / 描述 / 类型 / bounds / 可点 / 可滚动 / 可编辑），0.13.5 起不截断；'
+      + '界面未变时返回紧凑「未变」摘要（省 token，传 fresh:true 强制完整重抓）。'
+      + '下一步用 android_ui_click / android_ui_input / android_ui_scroll 语义动作；页面大幅变化后重新 dump。'
       + '需设备控制授权（无障碍服务已开启，或 ADB 三道门齐备）+ 会话档位 danger-full-access；未授权失败关闭。'
-      + '注意：需要原始 uiautomator XML 或无障碍不可用时，才用 android_ui_tree。',
-    parameters: {},
+      + '注意：需要原始 uiautomator XML 时才用 android_ui_tree。',
+    parameters: {
+      fresh: { type: 'boolean', description: 'true = 跳过「界面未变」快路径，强制完整重抓（默认 false）' },
+    },
     output: {
       schema: {
         type: 'object',
@@ -663,7 +697,8 @@ function tools(ctx: Context, priv: PrivilegeFace) {
         }]
       },
     },
-    execute: async (_args, exec) => {
+    execute: async (args, exec) => {
+      const forceFresh = (args as { fresh?: boolean } | undefined)?.fresh === true
       const a = guard('ui_dump', {}, exec as { agent?: { session?: unknown } })
       if (!a.ok) return { ok: false, denied: true, screen: { w: 0, h: 0 }, rotation: 0, count: 0, rawCount: 0, nodes: [], text: a.guidance }
       // 0.13.5 W4：无障碍通道优先（一次系统开关即用；不经 uiautomator，故不受 F1 idle 阻塞影响）
@@ -680,6 +715,11 @@ function tools(ctx: Context, priv: PrivilegeFace) {
         }
         const data = (r.data ?? {}) as A11ySnapshot
         const pruned = pruneNodes(data.nodes ?? [])
+        const fp = treeFingerprint(pruned.nodes)
+        // 0.13.8 P0-4：「界面未变」快路径——结构指纹一致且缓存新鲜 → 纯追加一行摘要（L1）
+        if (!forceFresh && uiCache && uiCache.fingerprint === fp && Date.now() - uiCache.ts <= UI_CACHE_TTL) {
+          return unchangedResponse(fp, data.gen ?? uiCache.gen)
+        }
         const screen = data.screen && data.screen.w > 0 ? data.screen : { w: 0, h: 0 }
         uiCache = {
           nodes: pruned.nodes,
@@ -690,6 +730,8 @@ function tools(ctx: Context, priv: PrivilegeFace) {
           rotation: data.rotation ?? 0,
           ts: Date.now(),
           gen: data.gen,
+          fingerprint: fp,
+          rawCount: pruned.rawCount,
         }
         const fg = await foregroundInfo()
         const dumpPkg = pruned.nodes.find((n) => String(n.pkg || '') !== '')?.pkg ?? ''
@@ -737,7 +779,17 @@ function tools(ctx: Context, priv: PrivilegeFace) {
         }
         const xml = readFileSync(local, 'utf8')
         const parsed = parseUiTreeXml(xml)
+        // 0.13.8 P0-2：结构自检——解析结果与源 XML 矛盾时响亮拒绝（错误树比没有树更危险）
+        const check = checkUiTreeParse(xml, parsed.raw)
+        if (!check.ok) {
+          return { ok: false, denied: false, screen: { w: 0, h: 0 }, rotation: 0, count: 0, rawCount: 0, nodes: [], text: '控件树解析自检失败（拒绝产出不可信清单）：' + check.reason }
+        }
         const pruned = pruneNodes(parsed.raw)
+        const fp = treeFingerprint(pruned.nodes)
+        // 0.13.8 P0-4：同 a11y 分支——「界面未变」快路径
+        if (!forceFresh && uiCache && uiCache.fingerprint === fp && Date.now() - uiCache.ts <= UI_CACHE_TTL) {
+          return unchangedResponse(fp, uiCache.gen)
+        }
         const size = /Physical size:\s*(\d+)x(\d+)/.exec(r.stdout)
         const screen = size ? { w: Number(size[1]), h: Number(size[2]) } : { w: 0, h: 0 }
         uiCache = {
@@ -748,6 +800,8 @@ function tools(ctx: Context, priv: PrivilegeFace) {
           screen,
           rotation: parsed.rotation,
           ts: Date.now(),
+          fingerprint: fp,
+          rawCount: pruned.rawCount,
         }
         return {
           ok: true,
@@ -812,7 +866,10 @@ function tools(ctx: Context, priv: PrivilegeFace) {
       // 不依赖无障碍虚拟树，也不需要坐标。
       if (useRef) {
         const webRef = ref!.trim()
-        const isWebRef = /^w\d+$/.test(webRef) || webRef.startsWith('css:') || webRef.startsWith('text:') || webRef.startsWith('role:')
+        // 0.13.8 P0-6（D8）：只有显式 css:/role:/wN 才走自有 WebView DOM 通道——
+        // text: 曾被无条件劫持到本通道，原生页面 text: 必然失败且报错指向 WebView。
+        // text:/desc:/rid: 一律走快照模型（resolveRef 的 text 分支恢复可达）。
+        const isWebRef = /^w\d+$/.test(webRef) || webRef.startsWith('css:') || webRef.startsWith('role:')
         if (isWebRef) {
           const payload: Record<string, unknown> = { op: 'click' }
           if (/^w\d+$/.test(webRef)) payload.ref = webRef
@@ -1078,7 +1135,8 @@ function tools(ctx: Context, priv: PrivilegeFace) {
       // #128 L1：WebView DOM 引用（wN / css: / text: / role:）→ 自有 WebView 通道直接写值
       // （原生 value setter + input/change 事件，兼容 React 受控组件），不经 IME、不会汉字化。
       const webRef = typeof ref === 'string' ? ref.trim() : ''
-      const isWebRef = /^w\d+$/.test(webRef) || webRef.startsWith('css:') || webRef.startsWith('text:') || webRef.startsWith('role:')
+      // 0.13.8 P0-6（D8）：同 ui_click——text: 不再劫持进 DOM 通道，走快照模型。
+      const isWebRef = /^w\d+$/.test(webRef) || webRef.startsWith('css:') || webRef.startsWith('role:')
       if (isWebRef) {
         const payload: Record<string, unknown> = { op: 'setText', value: raw }
         if (/^w\d+$/.test(webRef)) payload.ref = webRef

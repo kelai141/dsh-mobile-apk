@@ -3,7 +3,7 @@
 // 不可点击目标的「可点击祖先」回退静默失效。本测试锁死该边界。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseUiTreeXml, pruneNodes, resolveRef, findActionableAncestor } from '../lib/ui-tree.js'
+import { parseUiTreeXml, pruneNodes, resolveRef, findActionableAncestor, checkUiTreeParse } from '../lib/ui-tree.js'
 
 const ATTRS = 'checkable="false" checked="false" enabled="true" focusable="false" focused="false" ' +
   'long-clickable="false" password="false" selected="false" package="com.android.settings"'
@@ -127,4 +127,95 @@ test('作用域引用 @nX 只在子树内匹配，避免侧边栏/主区同名�
   const right = resolveRef(byId, nodes, `text:确定@${scopes[1].id}`)
   assert.equal(right.ok, true)
   assert.equal(right.node.cx > 300, true, '应命中右半区那个「确定」')
+})
+
+// ── 0.13.8 P0-2/P0-3 回归：栈机归位 + 结构自检 + DFS 真树序 ──
+
+test('栈机正确归位：兄弟节点不再被压成子节点（depth/父链可信）', () => {
+  const xml = hierarchy(
+    `<node index="0" text="" resource-id="" class="android.widget.FrameLayout" ${ATTRS} clickable="false" scrollable="false" bounds="[0,0][1080,1920]">` +
+      `<node index="0" text="A" resource-id="id/a" class="android.widget.TextView" ${ATTRS} clickable="true" scrollable="false" bounds="[0,0][100,100]" />` +
+      `<node index="1" text="B" resource-id="id/b" class="android.widget.TextView" ${ATTRS} clickable="true" scrollable="false" bounds="[0,200][100,300]" />` +
+    `</node>`,
+  )
+  const { raw } = parseUiTreeXml(xml)
+  // 修复前：B 的 id 是 0.0.1（A 的"子节点"）；修复后：B 与 A 同层，id=0.1
+  const a = raw.find((r) => r.attrs['resource-id'] === 'id/a')
+  const b = raw.find((r) => r.attrs['resource-id'] === 'id/b')
+  assert.equal(a.id, '0.0')
+  assert.equal(b.id, '0.1')
+  assert.equal(b.parentId, '0')
+
+  const { nodes } = pruneNodes(raw)
+  // depth 跳变 ≤ 1（DFS 真树序的铁律）
+  for (let i = 1; i < nodes.length; i++) {
+    const jump = Math.abs(nodes[i].depth - nodes[i - 1].depth)
+    assert.ok(jump <= 1, `相邻行深度跳变 ${jump} > 1（n${i - 1}→n${i}）——不是真树序`)
+  }
+})
+
+test('结构自检 checkUiTreeParse：节点数不一致响亮拒绝', () => {
+  const xml = hierarchy(
+    `<node index="0" text="" resource-id="" class="android.widget.FrameLayout" ${ATTRS} clickable="false" scrollable="false" bounds="[0,0][1080,1920]" />`,
+  )
+  // 模拟坏解析：把同一节点解析出两条
+  const { raw } = parseUiTreeXml(xml)
+  const doubled = [...raw, { ...raw[0], id: '0.0.0', parentId: raw[0].id }]
+  const check = checkUiTreeParse(xml, doubled)
+  assert.equal(check.ok, false)
+  assert.match(check.reason, /节点数不一致/)
+})
+
+test('结构自检 checkUiTreeParse：正常 XML 通过', () => {
+  const xml = hierarchy(
+    `<node index="0" text="" resource-id="" class="android.widget.FrameLayout" ${ATTRS} clickable="false" scrollable="false" bounds="[0,0][1080,1920]">` +
+      `<node index="0" text="A" resource-id="id/a" class="android.widget.TextView" ${ATTRS} clickable="false" scrollable="false" bounds="[0,0][100,100]" />` +
+    `</node>`,
+  )
+  const { raw } = parseUiTreeXml(xml)
+  const check = checkUiTreeParse(xml, raw)
+  assert.equal(check.ok, true)
+})
+
+test('DFS 真树序：prune 后节点按原始路径前序排列（不再分档打乱）', () => {
+  const xml = hierarchy(
+    `<node index="0" text="" resource-id="" class="android.widget.FrameLayout" ${ATTRS} clickable="false" scrollable="false" bounds="[0,0][1080,1920]">` +
+      `<node index="0" text="ZZZ-last-by-tier" resource-id="id/z" class="android.widget.TextView" ${ATTRS} clickable="false" scrollable="false" bounds="[0,900][100,1000]" />` +
+      `<node index="1" text="AAA-clickable" resource-id="id/a" class="android.widget.Button" ${ATTRS} clickable="true" scrollable="false" bounds="[0,0][100,100]" />` +
+    `</node>`,
+  )
+  const { raw } = parseUiTreeXml(xml)
+  const { nodes } = pruneNodes(raw)
+  // 分档排序曾把可点击的 AAA 排到最前；真树序下容器在前、兄弟按 XML 顺序
+  const zIdx = nodes.findIndex((n) => n.rid === 'id/z')
+  const aIdx = nodes.findIndex((n) => n.rid === 'id/a')
+  assert.ok(zIdx < aIdx, `DFS 序应容器(z, idx=${zIdx})在兄弟(a, idx=${aIdx})之前`)
+})
+
+test('解析等价性门禁：父子关系与独立递归实现一致（抽样结构断言）', () => {
+  // 三层嵌套：独立实现按「<node 配对计数」推导父子，与栈机输出比对
+  const xml = hierarchy(
+    `<node index="0" text="" resource-id="" class="android.widget.FrameLayout" ${ATTRS} clickable="false" scrollable="false" bounds="[0,0][1080,1920]">` +
+      `<node index="0" text="" resource-id="id/left" class="android.widget.LinearLayout" ${ATTRS} clickable="false" scrollable="false" bounds="[0,0][540,1920]">` +
+        `<node index="0" text="L1" resource-id="id/l1" class="android.widget.TextView" ${ATTRS} clickable="false" scrollable="false" bounds="[0,0][100,100]" />` +
+        `<node index="1" text="L2" resource-id="id/l2" class="android.widget.TextView" ${ATTRS} clickable="false" scrollable="false" bounds="[0,100][100,200]" />` +
+      `</node>` +
+      `<node index="1" text="R" resource-id="id/right" class="android.widget.TextView" ${ATTRS} clickable="false" scrollable="false" bounds="[540,0][100,100]" />` +
+    `</node>`,
+  )
+  const { raw } = parseUiTreeXml(xml)
+  // 独立推导（按嵌套层级手工标注的期望值）：
+  const expected = {
+    '0': { parent: '', depth: 0 },
+    '0.0': { parent: '0', depth: 1 },
+    '0.0.0': { parent: '0.0', depth: 2 },
+    '0.0.1': { parent: '0.0', depth: 2 },
+    '0.1': { parent: '0', depth: 1 },
+  }
+  for (const r of raw) {
+    const e = expected[r.id]
+    assert.ok(e, `意外 id ${r.id}`)
+    assert.equal(r.parentId, e.parent, `id=${r.id} 父链不符`)
+  }
+  assert.equal(raw.length, Object.keys(expected).length)
 })

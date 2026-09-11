@@ -96,6 +96,11 @@ interface RawNode { attrs: Record<string, string>; id: string; parentId: string 
  * 解析 hierarchy XML → 原始节点表（含深度路径 id 与父 id）。
  * 单一栈机：开标签下钻、自闭合同层计数、闭标签归位；对厂商畸形输出
  * （属性缺省/坏 bounds）按节点丢弃，不中断整体解析。
+ *
+ * 0.13.8 P0-2（产线 bug 修复）：原实现只匹配 `<node ...>` 开标签、从不处理
+ * `</node>` 出栈——兄弟节点被错误地压成子节点，depth/父链/`@nX` 区域限定/
+ * findActionableAncestor 全部失真（实测最大深度 91 vs 正确 19）。现显式匹配
+ * `</node>` 归位；畸形 XML（多余闭标签）按容错弹栈处理。
  */
 export function parseUiTreeXml(xml: string): { raw: RawNode[]; rotation: number } {
   let rotation = 0
@@ -106,10 +111,15 @@ export function parseUiTreeXml(xml: string): { raw: RawNode[]; rotation: number 
   // 栈帧：index = 本节点在同父下的序号；next = 下一个子节点槽位。
   // 虚拟根永远在栈底，其 index 不参与路径。
   const stack: Array<{ index: number; next: number }> = [{ index: -1, next: 0 }]
-  const re = /<node\s([^>]*?)(\/?)>/g
+  const re = /<node\s([^>]*?)(\/?)>|<\/node>/g
   let m: RegExpExecArray | null
   while ((m = re.exec(xml)) !== null) {
-    const attrsText = m[1]
+    if (m[0] === '</node>') {
+      // 闭标签归位（畸形 XML 的多余闭标签按容错忽略——不弹虚拟根）
+      if (stack.length > 1) stack.pop()
+      continue
+    }
+    const attrsText = m[1] ?? ''
     const selfClosing = m[2] === '/'
     const attrs: Record<string, string> = {}
     ATTR_RE.lastIndex = 0
@@ -125,6 +135,27 @@ export function parseUiTreeXml(xml: string): { raw: RawNode[]; rotation: number 
     if (!selfClosing) stack.push({ index, next: 0 })
   }
   return { raw, rotation }
+}
+
+/**
+ * 解析结果结构自检（0.13.8 P0-2）：解析结果与源 XML 自相矛盾时**响亮拒绝**，
+ * 绝不静默产出错树（错误树比没有树更危险）。
+ * 检查：① 节点标签计数与解析产出一一对应；② 根节点必为 "0"；
+ * ③ 栈未完全归位（未闭合的开标签）视为畸形——按容错放行但由调用方标记。
+ */
+export function checkUiTreeParse(xml: string, raw: RawNode[]): { ok: true } | { ok: false; reason: string } {
+  const tagCount = (xml.match(/<node[\s>]/g) ?? []).length
+  if (raw.length !== tagCount) {
+    return { ok: false, reason: `节点数不一致：XML 含 ${tagCount} 个 <node> 标签，解析产出 ${raw.length} 条（源 XML 畸形或版本不兼容）` }
+  }
+  if (raw.length > 0 && raw[0].id !== '0') {
+    return { ok: false, reason: `根节点 id 应为 "0"，实得 "${raw[0].id}"（栈机归位错误）` }
+  }
+  const maxDepth = raw.reduce((acc, r) => Math.max(acc, r.id === '' ? 0 : r.id.split('.').length), 0)
+  if (maxDepth > 128) {
+    return { ok: false, reason: `最大深度 ${maxDepth} 超出合理上界（128）——栈机未归位，解析结果不可信` }
+  }
+  return { ok: true }
 }
 
 /** 剪枝：只保留可交互或带标签的节点；去重 → 分档排序 → 封顶截断。
@@ -185,9 +216,11 @@ export function pruneNodes(
       windowId: at['window-id'] ?? '',
     })
   }
-  // 分档排序：可交互带标签 > 可交互 > 带标签 > 其它；同档按 y 再 x（阅读序）。
-  const tier = (n: UiNode): number => (n.clickable || n.editable || n.scrollable) && (n.text || n.desc) ? 0 : (n.clickable || n.editable || n.scrollable) ? 1 : (n.text || n.desc) ? 2 : 3
-  nodes.sort((p, q) => tier(p) - tier(q) || p.cy - q.cy || p.cx - q.cx)
+  // 0.13.8 P0-3：DFS 真树序（原始路径字典序 = 前序遍历）——0.13.5 的「分档排序」把兄弟
+  // 节点按档位/坐标打乱，模型看到的相邻行出现 21.8% 的深度跳变（真树遍历不可能），
+  // 层级感知完全失效。真树序下 depth 严格递变 ≤1，配合 parentId（最近幸存祖先）层级唯一。
+  // 阅读序信息不丢失：同层节点保持 XML 顺序（uiautomator 已按 top-left 序输出）。
+  nodes.sort((p, q) => (p.id < q.id ? -1 : p.id > q.id ? 1 : 0))
   // 0.13.5：maxNodes=0 表示不截断（用户拍板：完整暴露，复杂界面才可用）
   const kept = limits.maxNodes > 0 ? nodes.slice(0, limits.maxNodes) : nodes
   // 重编号：n0..nN-1；父引用按原始路径映射到**最近的幸存祖先**（被剪掉的中间层自动上溯）。

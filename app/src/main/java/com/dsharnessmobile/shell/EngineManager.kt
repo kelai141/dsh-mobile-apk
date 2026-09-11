@@ -687,9 +687,15 @@ class EngineManager(private val context: Context, private val pickToken: String?
     val engineReachable = EngineProbe.portReachable(1_000)
     val managedProcessAlive = engineProcess?.isAlive == true
     if (!force && (engineReachable || managedProcessAlive)) {
-      STARTING.set(false)
-      LogCollector.log(TAG, "engine start skipped (existing engine reachable or alive)")
-      return true
+      // 0.13.8 #175：DEGRADED_HTTP 阶梯触发时，「端口可连」不再是健康证据——半死引擎
+      // 必须允许重启（看门狗/重试路径不带 force 也能走到这里）。
+      if (WatchdogV2.degradedHttpTripped()) {
+        LogCollector.log(TAG, "engine start allowed despite reachable port: DEGRADED_HTTP ladder tripped (half-dead engine)")
+      } else {
+        STARTING.set(false)
+        LogCollector.log(TAG, "engine start skipped (existing engine reachable or alive)")
+        return true
+      }
     }
     if (withinCooldown) {
       LogCollector.log(TAG, "engine start retrying after the tracked child exited during cooldown")
@@ -821,8 +827,9 @@ class EngineManager(private val context: Context, private val pickToken: String?
       }
       try {
         val p = ProcessBuilder("logcat", "-d", "-v", "threadtime", "-t", "400").redirectErrorStream(true).start()
-        val out = p.inputStream.readBytes()
-        if (out.isNotEmpty()) File(dir, "logcat-recent.txt").writeText(EngineAuth.redact(String(out)))
+        // 0.13.8 #173：有界读（原 readBytes 无 waitFor，会冻结看门狗调度线程）
+        val out = ProcIo.readBounded(p, 10)
+        if (!out.isNullOrEmpty()) File(dir, "logcat-recent.txt").writeText(EngineAuth.redact(out))
       } catch (_: Throwable) {
       }
       LogCollector.log(TAG, "diagnostics mirrored: " + dir.absolutePath)
@@ -955,6 +962,13 @@ class EngineManager(private val context: Context, private val pickToken: String?
       Runtime.getRuntime().exec(arrayOf("/system/bin/pkill", "-f", "bin.js")).waitFor()
     } catch (_: Throwable) {
     }
+    // 0.13.8 #175：强制重启前必须复核端口真的释放（坑 31：pkill 在部分 ROM 不生效）——
+    // 不释放就 spawn 会 EADDRINUSE 循环。最多等 5s，仍占用则显式记录（下次 tick 重试）。
+    repeat(5) {
+      if (!EngineProbe.portReachable(1_000)) return
+      try { Thread.sleep(1_000) } catch (_: InterruptedException) {}
+    }
+    LogCollector.log(TAG, "killExistingEngine: port 3080 still occupied after cleanup (release recheck failed)")
   }
 
   /** Reset the 90s cooldown window: auto-undo (config rollback) or user retry

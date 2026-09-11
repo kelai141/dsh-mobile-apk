@@ -1,7 +1,7 @@
 {
   "name": "@dsh-android/dsh-android-manage",
   "description": "Android phone management tools (ADB-first observe/act/wait loop, PRD F1.6): screenshot, UI tree, app/device info — all fail-closed on the privilege bridge",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

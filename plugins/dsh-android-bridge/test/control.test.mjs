@@ -61,12 +61,42 @@ test('队列串行：一次只允许一个在途请求', async () => {
 test('过期 reqId 不覆盖在途请求', async () => {
   const queue = new ControlQueue()
   const pending = queue.enqueue('snapshot', {})
-  queue.take()
+  const first = queue.take()
   assert.equal(queue.settle('c-nonexistent', { ok: true, data: {} }), false)
   assert.equal(queue.waiting, true)
-  const req = queue.take()
-  queue.settle(req.reqId, { ok: true, data: { gen: 1 } })
+  // 0.13.8 #181：在途（已取走未回填）时二次取活必须被拒——原实现会把同一 req
+  // 再次交给轮询者，同一请求被执行两次（apk issue #181 实锤）。
+  const second = queue.take()
+  assert.equal(second, null, '在途时二次 take 必须返回 null（防双执行）')
+  queue.settle(first.reqId, { ok: true, data: { gen: 1 } })
   assert.deepEqual(await pending, { ok: true, data: { gen: 1 } })
+  // 回填后队列清空：take 再次返回 null（waiting=false）
+  assert.equal(queue.take(), null)
+})
+
+test('#181 重复 settle 只接受第一次，二次为 409 语义', async () => {
+  const queue = new ControlQueue()
+  const pending = queue.enqueue('click', {})
+  const req = queue.take()
+  assert.equal(queue.settle(req.reqId, { ok: true, data: { n: 1 } }), true)
+  assert.equal(queue.settle(req.reqId, { ok: true, data: { n: 2 } }), false, '重复 settle 必须拒绝')
+  assert.deepEqual(await pending, { ok: true, data: { n: 1 } })
+})
+
+test('#181 超时清在途位：超时后新请求可以入队', async () => {
+  const queue = new ControlQueue()
+  const first = queue.enqueue('click', {}, 300)
+  const req = queue.take()
+  assert.ok(req, '取活成功且置在途位')
+  const result = await first
+  assert.equal(result.ok, false)
+  assert.match(result.error, /超时/)
+  // 超时清 pending + inFlight：新请求不再被「已有在途」拒绝
+  const second = queue.enqueue('click', {})
+  assert.equal(second instanceof Promise, true)
+  const req2 = queue.take()
+  assert.ok(req2, '超时清位后新请求可正常取活')
+  queue.settle(req2.reqId, { ok: true, data: {} })
 })
 
 test('超时返回失败而不是模糊结果', async () => {

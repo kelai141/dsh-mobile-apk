@@ -288,6 +288,9 @@ class DeviceControlService : AccessibilityService() {
     setEnabledFlag(this, true)
     token(this)
     invalidated = true
+    // 0.13.8 #181：先停旧代 poller 再起新代——直接覆盖引用会让旧 daemon 线程
+    // 永不可停（进程内长期双轮询，同一请求可能被两个 poller 相继取走）。
+    poller?.stop()
     val p = ControlPoller(this)
     poller = p
     p.start()
