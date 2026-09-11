@@ -143,6 +143,15 @@ class MainActivity : ComponentActivity() {
     }
     // 沉浸式：内容延伸到系统栏区域（状态栏常态收起，边缘滑动临时呼出）。
     WindowCompat.setDecorFitsSystemWindows(window, false)
+    // 0.13.7fx-1（真机反馈）：只做 edge-to-edge 还不够——有挖孔/刘海的机器上，系统默认把窗口内容
+    // 拦在挖孔下方，最顶部（原状态栏位置）留出一条窗口底色，用户看到「最顶部的黑带」。
+    // 允许内容画进短边挖孔区，内容避让交给推给页面的 --dsh-android-system-top。
+    if (android.os.Build.VERSION.SDK_INT >= 28) {
+      window.attributes = window.attributes.apply {
+        layoutInDisplayCutoutMode =
+          android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+      }
+    }
     uiChrome.applyImmersive(uiChrome.immersivePrefs())
     val root = FrameLayout(this)
     webView = WebView(this).apply {
@@ -442,6 +451,7 @@ class MainActivity : ComponentActivity() {
             android.content.res.Configuration.UI_MODE_NIGHT_YES
         },
         onSetImmersiveRequest = { enable -> setImmersivePersisted(enable) },
+        onSettingsPathRequest = { engineManager.settingsDocumentPath() },
         onCopyTextRequest = { text -> copyTextNative(text) },
         pickToken = pickToken,
         onRestartEngine = { engineFlow.restart() },

@@ -167,8 +167,9 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 | 页面 → 壳 | ~~`pickImage(callbackId)`~~ | 已删除（AndroidBridge/MainActivity/ConfigTransfer 图片桥） | 上游 0.1.5 自带附件入口（回形针 → 系统文件选择器 → 官方上传接口）替代 |
 | 页面 → 壳 | ~~`pickFilePath(callbackId)`~~ | 已删除（AndroidBridge / MainActivity / ConfigTransfer 的 SAF 文档选择链 + 页面 `onFilePicked`） | 0.13.7fx-1 退役：`@` 文件引用回到上游原生菜单（`ui-input-trigger` + `ui-reference`，候选限定在会话工作区内），自建 `@路径` 桥不再需要 |
 | 壳 → 页面 | ~~`window.__dshBridge.onImagePicked`~~ | 已删除（dsh-host-web-compat lib/index.js） | 同上 |
+| 页面 → 壳 | `settingsPath()` | AndroidBridge.kt（新增）→ EngineManager.settingsDocumentPath() | Host 设置文档绝对路径（`$DSH_HOME/settings.yaml`），空串 = 文件不存在。移动适配层用它把上游「打开配置文件」（本来走 mac/win/linux 原生编辑器，Android 必然失败，apk #152）改走系统选择器 |
 | 页面（兼容插件） | `window.__dshOpenPath(path, mode)` | dsh-host-web-compat lib/index.js（新增） | 优先 `openPathChooser`，回退旧 `openNativePath`；聊天 mention 与工具行路径点击统一走它 |
 
-JS 接口计数：**32**（0.13.6 为 34：+openPathChooser、−downloadDebugLogs、−pickImage；0.13.7fx-1 −pickFilePath）。
+JS 接口计数：**33**（0.13.6 为 34：+openPathChooser、−downloadDebugLogs、−pickImage；0.13.7fx-1 −pickFilePath、+settingsPath）。
 `<input type=file>` 的 `onShowFileChooser` 通道保留（上游附件按钮依赖）。
 

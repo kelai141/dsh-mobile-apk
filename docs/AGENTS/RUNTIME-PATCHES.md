@@ -21,7 +21,7 @@
 | primitives-index.js（299,131） | dsh-client-ui-primitives/lib/index.js（:417-418） | 生效 | WebView 剪贴板兜底：navigator.clipboard 在 Android 被拒（NotAllowedError）时的 fallback 逻辑（EngineManager.kt:396） |
 | attachment-local-index.js（41,295） | dsh-attachment-local/lib/index.js（:419-420） | 生效 | Android sepolicy 禁 link(2) → copyFile 回退 + EACCES 容忍（:397）；内含图片归一化 2048 降采样上限（文件内 `DEFAULT_NORMALIZED_IMAGE_MAX_DIMENSION = 2048`，行 786；`config.normalizedImageMaxDimension ?? 2048`，行 880）。注意：文件内未发现 `ORIGINAL` 字样标记——补丁判定走内容指纹而非内嵌标记 |
 | web-frontend-index.html（679） | dsh-web-frontend/dist/index.html（:421-422，唯一 hashAdaptive=true） | **当前为内容同源空转** | 0.13.7 重出后该 asset 就是 0.1.5 dist 模板的逐字拷贝（仅 bundle hash 不同，壳侧 hashAdaptive 会跟随引擎改写），因此 applyAssetPatch 的内容指纹判定直接跳过它（无 applied 日志）。**历史职责已由别处接管**：viewport-fit=cover 在 Android WebView 上本就无效（env(safe-area-inset-*) 恒 0，见坑 49），系统栏避让改由壳侧推 `--dsh-android-system-top` + 注入层 `--dsh-mobile-top-inset` 承担；ES2022 polyfill（Object.hasOwn/Array.at/replaceAll/randomUUID 等）由 dsh-host-web-compat 的 POLYFILLS 在服务端注入，覆盖面更大。**待办**：确认无回归后退役该 asset 与对应 applyAssetPatch 注册行（本轮为控制构建轮次未动）。 |
-| session-persistence-jsonl-index.js（58,909） | dsh-session-persistence-jsonl/lib/index.js（:426-427） | 生效 | link(2) 回退同族：dsh 0.1.1-rc.1 丢掉了 rc.8 的 EACCES/EPERM/ENOTSUP → rename 回退，Android 应用域 sepolicy 禁 link(2)，按 rc.8 形态全文件覆盖补回（:401-403） |
+| session-persistence-jsonl-index.js（135,591，0.13.7fx-1 重出） | dsh-session-persistence-jsonl/lib/index.js | 生效 | **两处 link(2) 站点都带 EACCES/EPERM/ENOTSUP → rename 回退**（materialize 与 publishCurrentExclusive；后者是 v0→v3 会话迁移的必经路径，apk #154）。构建期同源补丁 spj-migration-link-F5；回归 scripts/patches/tests/spj-migration-link-f5.test.mjs |
 | fs-local-index.js（38,777） | dsh-fs-local/lib/index.js（:428-429） | 生效 | 同上 link(2) 回退族，作用于 dsh-fs-local 包（:401-403） |
 | llm-deepseek-index.js（38,909） | 无 applyAssetPatch 调用 | 在场未启用 | 旧 rc.1 模型目录覆盖补丁的遗留资产：dsh 0.1.1-rc.2 已原生捆绑 deepseek-v4-flash-vision-exp（含修正后的图片请求序列化），原生文件不再触碰（:399-400、:423-425）；rc8 迁移批同步移除了 onImagePicked/describeImage/bundle-hardening/textzoom 补丁（:413-416，textzoom 桥方法保留但功能面取消）。升级引擎版本时先核对其是否仍属遗留，避免误启用 |
 
@@ -80,6 +80,11 @@
 （fixture = 0.1.5-rc.1 产物；`.deploy-tmp/` 下的临时预检脚本不入库，勿再引用）。
 
 ### 7.1 同时落在构建期的引擎树补丁（scope=engine，不走 assets/patched/）
+
+- **reference-drill-F6（2026-09-11，apk #163）**：`dsh-client-ui-reference/lib/client.js` 的 `onPick` 判定由
+  `fileKind === "directory" && action === "drill"` 改为 `... || document.documentElement.hasAttribute("data-dsh-mobile-form")`——
+  手机上点目录行行体 = 下钻进子目录（上游只把下钻绑在行尾 chevron/Tab 上，手机上点不到，用户侧表现为「@ 只能选到第一层」）；
+  桌面无 form 标记，行为逐字不变。多选勾选框由注入层 `ReferenceMenuEnhancer` 负责。
 
 | 补丁 | 目标包 | 本次动作 |
 |---|---|---|

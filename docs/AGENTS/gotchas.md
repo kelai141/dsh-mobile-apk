@@ -114,3 +114,12 @@
     壳侧不设工作目录 → 新会话 cwd=`/` → `@` 菜单列的是设备根目录（acct/apex/cache…），用户看到「@文件功能无法使用」
     （apk #150/#144）。修复：`ProcessBuilder.directory(应用工作区根)`（0.13.7fx-1，EngineManager.workspaceRootDir）。
     同一族的坑：任何「上游拿 process.cwd() 兜底」的地方在 Android 上都会落到 `/`。
+
+66. **Android 应用域禁 `link(2)`：补丁必须清点目标文件的全部 link 站点，不能只补历史锚点**：
+    0.13.7 追上游 0.1.5 后，运行期 asset `session-persistence-jsonl-index.js` 只给 `materialize` 路径
+    （`lib/index.js:2973`）补了 `EACCES → rename` 回退，漏了 `publishCurrentExclusive()`（:2021/:2032）——
+    而后者正是 `v0→v3` 会话迁移的必经路径，结果是**升级前写入的会话全部打不开**（apk #154，贡献者定位）。
+    修复：asset 从 0.1.5 包重出（两处都补）、新增构建期补丁 `spj-migration-link-F5`、门禁断言「两处标记都在」、
+    并加行为回归 `scripts/patches/tests/spj-migration-link-f5.test.mjs`（桩 fs 让 link 抛 EACCES → 断言 rename 生效）。
+    回退必须用**模块顶层导入的 `rename`**：`internals.fs`（defaultFileSystem）只暴露 open/readFile/readdir/stat/lstat/link/rm，
+    `internals.fs.rename` 会 `TypeError`（贡献者在 PR #156 里实测记录）。同类站点清点义务适用于所有 fs 原语回退补丁。

@@ -321,43 +321,23 @@ internal class MediaPickController(private val activity: MainActivity) {
       }
     }
 
-  // 图片选择：ACTION_PICK 走系统相册（tap 即选），区别于 ACTION_GET_CONTENT 的文件管理器。
-  // accept 为图片类型时必须走相册，否则系统会进「最近/大型文件」的文档界面（需要长按才能选）。
-  private val imagePicker =
-    activity.registerForActivityResult(PickImageContract()) { uri ->
-      val callback = filePathCallback
-      filePathCallback = null
-      if (callback != null) {
-        callback.onReceiveValue(if (uri == null) null else arrayOf(uri))
-      }
-    }
 
   /** WebView onShowFileChooser 委托（自 MainActivity.configureWebView 迁入）。 */
   fun handleFileChooser(callback: ValueCallback<Array<Uri>>, params: WebChromeClient.FileChooserParams): Boolean {
     // 文件上传走系统文件选择器；directoryPicker 是目录选择（工作区用），两者分离。
-    // accept="image/*" 时走图片选择器（GetContent → 相册），否则走文档选择器。
+    // 0.13.7fx-1（apk #160）：统一走 SAF 文档选择器并要求「全部文件」。
+    // 旧实现把 accept="image/*" 分流到 ACTION_PICK（相册），accept 为空时传空 MIME 数组——
+    // 实测（MuMu/Android 15 DocumentsUI）：空 MIME 数组会让选择器落到「近期的图片」这类受限
+    // 视图，只有 最近/大型文件/本周 三个筛选项、没有根目录抽屉，用户无法浏览全部存储，
+    // 设备无媒体时更是直接「无任何文件」。现在：type=*/*，MIME 显式给 ["*/*"]（或页面声明的
+    // 类型），保留多选，根目录抽屉因此在场。
     filePathCallback?.onReceiveValue(null)
     filePathCallback = callback
-    val accept = params.acceptTypes ?: emptyArray()
-    val imageOnly = accept.isNotEmpty() && accept.all { it.startsWith("image/") }
-    if (imageOnly) {
-      imagePicker.launch(Unit)
-    } else {
-      filePicker.launch(emptyArray())
-    }
+    val declared = (params.acceptTypes ?: emptyArray()).map { it.trim() }.filter { it.isNotEmpty() }
+    val mimeTypes = if (declared.isEmpty() || declared.any { it == "*/*" }) arrayOf("*/*") else declared.toTypedArray()
+    filePicker.launch(mimeTypes)
     return true
   }
 
 }
 
-/** ACTION_PICK 图片选择契约：打开系统相册，tap 即返回单个图片 Uri。 */
-private class PickImageContract : ActivityResultContract<Unit, Uri?>() {
-  override fun createIntent(context: Context, input: Unit): Intent {
-    return Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI).apply {
-      type = "image/*"
-    }
-  }
-  override fun parseResult(resultCode: Int, intent: Intent?): Uri? {
-    return if (resultCode == android.app.Activity.RESULT_OK) intent?.data else null
-  }
-}
