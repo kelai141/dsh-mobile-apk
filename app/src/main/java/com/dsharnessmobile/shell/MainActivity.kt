@@ -195,9 +195,11 @@ class MainActivity : ComponentActivity() {
       engineFlow.runUpdate()
     } else {
       // 来件接线（VIEW/SEND 外部来件）已迁至 FileIncoming.processIncomingIntent：
-      // 校验净化→拷贝临时工作区→通知引擎侧插件；拒绝/失败经 showTestNotification 提示。
-      FileIncoming.processIncomingIntent(this, intent) { title, text -> showTestNotification(title, text) }
+      // 校验净化→后台拷贝临时工作区→待发清单投递引擎侧插件；拒绝/失败经 showTestNotification 提示。
+      // 0.13.8 #174：startEngineFlow 提前——引擎启动是异步的，先拉起缩短
+      // 「拷完 POST 早于引擎 listen」的竞态窗口（投递另有待发清单 + 引擎就绪钩子兜底）。
       startEngineFlow()
+      FileIncoming.processIncomingIntent(this, intent) { title, text -> showTestNotification(title, text) }
     }
   }
 
