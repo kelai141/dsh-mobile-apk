@@ -41,6 +41,7 @@ class ControlPoller(private val service: DeviceControlService) {
 
   private val running = AtomicBoolean(false)
   private var thread: Thread? = null
+  private var heartbeatThread: Thread? = null
   private val executed = object : LinkedHashMap<String, Boolean>(EXECUTED_LRU_CAPACITY, 0.75f, true) {
     override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Boolean>): Boolean = size > EXECUTED_LRU_CAPACITY
   }
@@ -51,12 +52,29 @@ class ControlPoller(private val service: DeviceControlService) {
       it.isDaemon = true
       it.start()
     }
+    // 0.13.8 E3（V2 D2）：心跳与执行解耦——原实现心跳只在轮询循环里刷新，慢建树
+    // 会把「服务在忙」误判成「掉线」并翻转 ADB 通道。独立心跳线程 2s 一拍，
+    // 与动作执行完全并行；busy 态对引擎保持可见（ready/busy 语义）。
+    heartbeatThread = Thread({
+      while (running.get()) {
+        try {
+          DeviceControlService.heartbeat(service)
+        } catch (_: Throwable) {
+        }
+        sleep(2_000)
+      }
+    }, "dsh-a11y-heartbeat").also {
+      it.isDaemon = true
+      it.start()
+    }
   }
 
   fun stop() {
     running.set(false)
     thread?.interrupt()
     thread = null
+    heartbeatThread?.interrupt()
+    heartbeatThread = null
   }
 
   private fun loop() {
@@ -74,8 +92,7 @@ class ControlPoller(private val service: DeviceControlService) {
           continue
         }
         backoff = IDLE_BACKOFF_MS
-        // 心跳：证明「服务活着 + 轮询在跑」——引擎侧只认新鲜心跳，避免僵尸 a11yEnabled
-        DeviceControlService.heartbeat(service)
+        // 心跳由独立线程维护（E3 解耦）；轮询本身也顺带证明通道活着（lastTakeAt）
         val request = poll.optJSONObject("req") ?: continue
         execute(token, request)
       } catch (interrupted: InterruptedException) {

@@ -46,6 +46,8 @@ class DeviceControlService : AccessibilityService() {
      *  prefs 里的 a11yEnabled 会变成「僵尸 true」；引擎侧只认新鲜心跳。 */
     const val KEY_HEARTBEAT = "controlHeartbeat"
     private const val MAX_NODES = 4000
+    /** 0.13.8 E2：建树时间预算（ms）——超过返回部分树 + truncated 标注。 */
+    private const val TREE_BUDGET_MS = 3_000L
     private const val MAX_DEPTH = 40
     private const val TOKEN_BYTES = 18
 
@@ -258,17 +260,22 @@ class DeviceControlService : AccessibilityService() {
 
   /** 最近一次快照：路径 → 节点/边界。节点对象不跨快照使用（页面变化即失效）。 */
   private class Snapshot(
-    val gen: Int,
+    // 0.13.8 E4：gen 用秒级时间戳播种（Long）——服务重连后计数从 0 回绕曾让旧缓存
+    // 「假新鲜」（同一 gen 判定通过 → 按失效快照点击）。时间戳单调，杜绝回绕。
+    val gen: Long,
     val rotation: Int,
     val width: Int,
     val height: Int,
     val nodes: LinkedHashMap<String, AccessibilityNodeInfo>,
     val bounds: HashMap<String, Rect>,
+    // 0.13.8 E2：建树时间预算触发 → 部分树 + 显式标注（宁可标注过的半棵树，不给一句超时）
+    val truncated: Boolean = false,
   )
 
   private val lock = Any()
   private var snapshot: Snapshot? = null
-  private val generation = AtomicInteger(0)
+  // 0.13.8 E4：秒级时间戳播种（Long，单调不回绕）
+  private val generation = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis() / 1000)
   /** issue #127 一次性迁移标记：旧截图目录 files/control-shots 只清一次。 */
   private val legacyShotDirCleaned = java.util.concurrent.atomic.AtomicBoolean(false)
   @Volatile
@@ -278,6 +285,11 @@ class DeviceControlService : AccessibilityService() {
   private var lastInvalidateAt = 0L
 
   private var poller: ControlPoller? = null
+
+  /** 0.13.8 E4：服务代次（onServiceConnected 递增；诊断用——重连后缓存全部作废的观测点）。 */
+  @Volatile
+  var serviceEpoch: Int = 0
+    private set
 
   /** 主线程 Handler：无障碍 API 的回调都在主线程（takeScreenshot 需要 Executor）。 */
   private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -344,8 +356,17 @@ class DeviceControlService : AccessibilityService() {
       val nodes = LinkedHashMap<String, AccessibilityNodeInfo>()
       val bounds = HashMap<String, Rect>()
       var count = 0
+      // 0.13.8 E2：建树时间预算（3s）——超预算返回部分树并显式标注 truncated，
+      // 宁可给一棵标注过的半棵树，也不给一句超时（V2 §4.1）。
+      var truncated = false
+      val deadline = android.os.SystemClock.uptimeMillis() + TREE_BUDGET_MS
       fun walk(node: AccessibilityNodeInfo?, path: String, depth: Int) {
         if (node == null || depth > MAX_DEPTH || count >= MAX_NODES) return
+        if (!truncated && android.os.SystemClock.uptimeMillis() > deadline) {
+          truncated = true
+          return
+        }
+        if (truncated) return
         val rect = Rect()
         node.getBoundsInScreen(rect)
         if (rect.width() > 0 && rect.height() > 0) {
@@ -359,7 +380,7 @@ class DeviceControlService : AccessibilityService() {
       }
       walk(root, "", 0)
       val metrics = screenSize()
-      val fresh = Snapshot(generation.incrementAndGet(), rotation(), metrics.first, metrics.second, nodes, bounds)
+      val fresh = Snapshot(generation.incrementAndGet(), rotation(), metrics.first, metrics.second, nodes, bounds, truncated)
       snapshot = fresh
       invalidated = false
       return fresh
@@ -409,6 +430,7 @@ class DeviceControlService : AccessibilityService() {
     return when (op) {
       "snapshot" -> handleSnapshot()
       "click" -> handleClick(args)
+      "longClick" -> handleLongClick(args)
       "setText" -> handleSetText(args)
       "scroll" -> handleScroll(args)
       "global" -> handleGlobal(args)
@@ -593,12 +615,21 @@ class DeviceControlService : AccessibilityService() {
       .put("nodes", nodes)
   }
 
-  /** 校验 gen（页面已变化时失败关闭）并返回目标节点。 */
+  /** 校验 gen（页面已变化时失败关闭）并返回目标节点。0.13.8 E4：-1 自愈重建 + Long gen。 */
   private fun requireFresh(args: JSONObject): JSONObject? {
-    val requested = if (args.has("gen")) args.optInt("gen", -1) else -1
+    val requested = if (args.has("gen")) args.optLong("gen", -1L) else -1L
     if (requested >= 0) {
-      val current = synchronized(lock) { snapshot?.gen ?: -1 }
-      if (current != requested) return error("控件清单已过期（gen=$requested，当前=$current）——请重新 android_ui_dump")
+      var current = synchronized(lock) { snapshot?.gen ?: -1L }
+      if (current == -1L) {
+        // 0.13.8 E4（V2 §4.4）：「无快照」≠「过期」——当场重建，路径仍在就继续执行；
+        // 原实现两者混为一谈且唯一补救恰是会超时的 dump → 死锁。
+        val rebuilt = buildSnapshot(force = true)
+        if (rebuilt == null) return error("无可用快照且当场重建失败（无障碍服务可能未连接）——请稍后重试或检查设备控制服务")
+        current = rebuilt.gen
+      }
+      if (current != requested) {
+        return error("控件清单已过期（gen=$requested，当前=$current）——界面已变化，请重新 android_ui_dump；不要按旧引用猜测性点击")
+      }
     }
     return null
   }
@@ -633,6 +664,64 @@ class DeviceControlService : AccessibilityService() {
       val x = (args.optDouble("nx") * metrics.first).toFloat()
       val y = (args.optDouble("ny") * metrics.second).toFloat()
       return tapAt(x, y, "gesture-norm")
+    }
+    return error("需要 path 或 nx/ny")
+  }
+
+  /** 手势长按（0.13.8 E6）：路径不移动、时长 durationMs——区别于 tapAt 的 60ms 点按。 */
+  private fun pressAt(x: Float, y: Float, durationMs: Long, via: String): JSONObject {
+    val path = Path().apply { moveTo(x, y) }
+    val gesture = GestureDescription.Builder()
+      .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
+      .build()
+    val latch = java.util.concurrent.CountDownLatch(1)
+    var ok = false
+    val dispatched = dispatchGesture(gesture, object : GestureResultCallback() {
+      override fun onCompleted(description: GestureDescription?) { ok = true; latch.countDown() }
+      override fun onCancelled(description: GestureDescription?) { latch.countDown() }
+    }, null)
+    if (!dispatched) return error("手势派发失败（无障碍服务未就绪）")
+    latch.await(durationMs + 2_000, java.util.concurrent.TimeUnit.MILLISECONDS)
+    return if (ok) JSONObject().put("clicked", "($x,$y)").put("via", via).put("durationMs", durationMs)
+      .put("x", x.toDouble()).put("y", y.toDouble())
+    else error("手势长按未完成（被系统取消）")
+  }
+
+  /**
+   * 长按（0.13.8 E6，V2 §4.2「长按三条通道全缺」修复的 a11y 支）：
+   * 优先 ACTION_LONG_CLICK（沿父链找可长按祖先），失败/不可点回退手势按住 durationMs
+   * （通用长按形态；传 durationMs 可覆盖，300-3000ms 钳制）。
+   */
+  private fun handleLongClick(args: JSONObject): JSONObject {
+    requireFresh(args)?.let { return it }
+    val durationMs = args.optLong("durationMs", 600L).coerceIn(300L, 3_000L)
+    val path = args.optString("path", "")
+    if (path.isNotEmpty()) {
+      var node = nodeAtPath(path) ?: return error("路径 $path 已不存在（页面已变化）——请重新 android_ui_dump")
+      var hops = 0
+      while (hops < 12) {
+        if (node.isLongClickable) break
+        node = node.parent ?: break
+        hops++
+      }
+      if (node.isLongClickable) {
+        val ok = node.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
+        if (ok) {
+          val rect = Rect()
+          node.getBoundsInScreen(rect)
+          return JSONObject().put("clicked", path).put("via", "ACTION_LONG_CLICK")
+            .put("x", rect.exactCenterX().toDouble()).put("y", rect.exactCenterY().toDouble())
+        }
+      }
+      val rect = Rect()
+      node.getBoundsInScreen(rect)
+      return pressAt(rect.exactCenterX(), rect.exactCenterY(), durationMs, "gesture-longclick")
+    }
+    if (args.has("nx") && args.has("ny")) {
+      val metrics = screenSize()
+      val x = (args.optDouble("nx") * metrics.first).toFloat()
+      val y = (args.optDouble("ny") * metrics.second).toFloat()
+      return pressAt(x, y, durationMs, "gesture-norm-longclick")
     }
     return error("需要 path 或 nx/ny")
   }
