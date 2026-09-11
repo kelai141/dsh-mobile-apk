@@ -358,6 +358,29 @@ class EngineManager(private val context: Context, private val pickToken: String?
         skillFile.writeText(PHONE_CONTROL_SKILL)
         Log.i(TAG, "phone-control SKILL refreshed")
       }
+      // 0.13.8 #130/V2 P1-11：标准组合的 skill-filesystem 行没有 config——预设自带的
+      // skills 目录不在任何被扫描的 skill 根里，phone-control 的 SKILL 从未被加载
+      // （与缺 frontmatter 并列的两处缺陷之一）。结构化后处理：照抄上游 cordis 预设的
+      // 写法注入 customSkillDirs（指向本预设 skills/ 目录，baseUrl 相对解析）；
+      // 已注入则跳过（幂等）。置于 preset.yml 早退之前——存量用户的升级路径也覆盖。
+      val composition = File(dir, "agent.cordis.yml")
+      if (composition.exists()) {
+        val text = composition.readText()
+        if (text.contains("- id: skill-filesystem") && !text.contains("customSkillDirs")) {
+          val anchor = "- id: skill-filesystem\n  name: '@deepseek-ai/dsh-skill-filesystem'"
+          val injected = anchor + "\n" +
+            "  config:\n" +
+            "    customSkillDirs:\n" +
+            "      - !!js \"process.getBuiltinModule('node:url').fileURLToPath(new URL('skills/', baseUrl))\""
+          val patched = text.replace(anchor, injected)
+          if (patched != text) {
+            composition.writeText(patched)
+            Log.i(TAG, "phone-control preset: customSkillDirs injected into skill-filesystem row")
+          } else {
+            Log.w(TAG, "phone-control preset: skill-filesystem anchor not found; customSkillDirs not injected")
+          }
+        }
+      }
       if (File(dir, "preset.yml").exists()) return
       val shipped = File(
         context.filesDir,
@@ -1118,6 +1141,10 @@ class EngineManager(private val context: Context, private val pickToken: String?
      * （无障碍/DOM 优先、先验前台、按 ref 而非盲点坐标、动作后必校验、输入单次注入并回读）。
      */
     private val PHONE_CONTROL_SKILL = """
+---
+name: phone-control
+description: 手机操控纪律：无障碍语义树优先、ref 语义点击/输入、动作后必校验、禁止盲点坐标与绕路。
+---
 # 手机操控流程（DSH 设备控制）
 
 ## 固定顺序

@@ -824,16 +824,18 @@ function tools(ctx: Context, priv: PrivilegeFace) {
   const uiClick = defineTool({
     name: 'android_ui_click',
     description:
-      '语义点击：按 android_ui_dump 清单中的引用点按控件（解析 bounds 中心 → input tap，AI 不猜像素）。' +
+      '语义点击/长按：按 android_ui_dump 清单中的引用点按控件（解析 bounds 中心 → input tap，AI 不猜像素）。' +
       '引用格式：id:n3 / text:设置（精确文本）/ desc:… / rid:…；裸数字按 id。' +
       '控件树不可用时可用 nx/ny 归一化坐标兜底：相对设备物理屏幕（0-1），' +
       '由截图像素换算 nx=像素x/截图宽、ny=像素y/截图高——工具层负责映射到物理分辨率，模型无需手工乘缩放系数。' +
       '目标不可点自动回退最近可点祖先；不在最近 dump 中返回引导（页面已变请重新 dump）。' +
-      '需 ADB 授权 + 会话档位 danger-full-access；每次调用审计。',
+      '长按：传 longClick:true（0.13.8 新增，无障碍 ACTION_LONG_CLICK 优先、手势按住 600ms 兜底）。' +
+      '需设备控制授权（无障碍或 ADB 三道门）+ 会话档位 danger-full-access；每次调用审计。',
     parameters: {
       ref: { type: 'string', description: '控件引用（id:n3 或 text:精确文本 等；与 nx/ny 二选一）' },
       nx: { type: 'number', description: '归一化 X（0-1，相对物理屏宽；= 截图内像素 x ÷ 截图宽）——无 ref 时使用' },
       ny: { type: 'number', description: '归一化 Y（0-1，相对物理屏高；= 截图内像素 y ÷ 截图高）——无 ref 时使用' },
+      longClick: { type: 'boolean', description: 'true = 长按（ACTION_LONG_CLICK 优先，手势按住 600ms 兜底）' },
     },
     output: {
       schema: {
@@ -854,7 +856,9 @@ function tools(ctx: Context, priv: PrivilegeFace) {
         { type: 'text', text: String(v.text ?? '') },
       ],
     },
-    execute: async ({ ref, nx, ny }: { ref?: string; nx?: number; ny?: number }, exec) => {
+    execute: async ({ ref, nx, ny, longClick }: { ref?: string; nx?: number; ny?: number; longClick?: boolean }, exec) => {
+      // 0.13.8 E6：长按走壳侧 longClick op（ACTION_LONG_CLICK 优先 + 手势按住兜底）
+      const clickOp = longClick === true ? 'longClick' : 'click'
       const a = guard('ui_click', { ref, nx, ny }, exec as { agent?: { session?: unknown } })
       if (!a.ok) return { ok: false, denied: true, text: a.guidance }
       const useRef = typeof ref === 'string' && ref.trim().length > 0
@@ -913,7 +917,7 @@ function tools(ctx: Context, priv: PrivilegeFace) {
           const orig = origPathOf(node.id)
           if (!orig) return { ok: false, denied: false, text: '无障碍通道需要节点原始路径——请重新 android_ui_dump' }
           payload.path = orig
-          const r = await a11yExec('click', payload)
+          const r = await a11yExec(clickOp, payload)
           if (!r.ok) return { ok: false, denied: false, text: '无障碍点击失败：' + r.error }
           const clicked = (r.data ?? {}) as { x?: number; y?: number; via?: string }
           const verdict = await verifyClick(uiCache?.gen, exec as ExecLike)
@@ -927,7 +931,7 @@ function tools(ctx: Context, priv: PrivilegeFace) {
         }
         payload.nx = nx
         payload.ny = ny
-        const r = await a11yExec('click', payload)
+        const r = await a11yExec(clickOp, payload)
         if (!r.ok) return { ok: false, denied: false, text: '无障碍点击失败：' + r.error }
         const clicked = (r.data ?? {}) as { x?: number; y?: number; via?: string }
         const verdict = await verifyClick(uiCache?.gen, exec as ExecLike)
@@ -974,7 +978,7 @@ function tools(ctx: Context, priv: PrivilegeFace) {
           payload.nx = nx
           payload.ny = ny
         }
-        const r = await a11yExec('click', payload)
+        const r = await a11yExec(clickOp, payload)
         if (!r.ok) return { ok: false, denied: false, text: '无障碍点击失败：' + r.error }
         return {
           ok: true,
