@@ -20,9 +20,15 @@ const checks = [
   ['桥 openPathChooser 已注入', "typeof window.androidBridge?.openPathChooser === 'function'", true],
   ['桥 downloadDebugLogs 已退役', "typeof window.androidBridge?.downloadDebugLogs === 'undefined'", true],
   ['桥 pickImage 已退役', "typeof window.androidBridge?.pickImage === 'undefined'", true],
-  ['菜单注入项「引用本机文件」存在（打开 add 菜单后）',
-    "(async () => { const b = document.querySelector('[data-composer-card] button[aria-haspopup=\"listbox\"], [data-composer-card] button[aria-label*=\"添加\"]'); if (!b) return 'no-trigger'; b.click(); await new Promise(r => setTimeout(r, 250)); const hit = !!document.querySelector('[data-dsh-file-pick]'); const dbg = !!document.querySelector('[data-dsh-debug-log]'); const img = !!document.querySelector('[data-dsh-image-pick]'); document.body.click(); return { filePick: hit, debugLog: dbg, imagePick: img }; })()",
-    (v) => v && v.filePick === true && v.debugLog === false && v.imagePick === false],
+  // 0.13.7fx-1：注入项整体退役（@ 文件回上游原生），这里断言它们都不再出现在菜单里
+  ['菜单注入项已退役：引用本机文件 / 导出调试日志 / 上传图片（打开 add 菜单后）',
+    "(async () => { const b = document.querySelector('[data-composer-card] button[aria-haspopup=\"listbox\"], [data-composer-card] button[aria-label*=\"添加\"]'); if (b) { b.click(); await new Promise(r => setTimeout(r, 250)); } const filePick = !!document.querySelector('[data-dsh-file-pick]'); const dbg = !!document.querySelector('[data-dsh-debug-log]'); const img = !!document.querySelector('[data-dsh-image-pick]'); document.body.click(); return { filePick, debugLog: dbg, imagePick: img }; })()",
+    (v) => v && v.filePick === false && v.debugLog === false && v.imagePick === false],
+  ['桥 pickFilePath 已退役（SAF 路径桥整链）', "typeof window.androidBridge?.pickFilePath === 'undefined'", true],
+  // 原生 @ 菜单保持纯净：不许再有任何非 option 的注入按钮混进 [role=listbox]
+  ['原生 @ 菜单无注入杂项（0.13.7fx-1 退役回归）',
+    "(async () => { const ce = document.querySelector('[contenteditable=true]'); if (!ce) return 'no-composer'; ce.focus(); document.execCommand('insertText', false, '@'); await new Promise(r => setTimeout(r, 1500)); const m = document.querySelector('[data-trigger-menu]'); const strays = m ? [...m.querySelectorAll('button:not([role=option])')].map(e => (e.innerText || '').trim()).filter(Boolean) : []; const rows = m ? m.querySelectorAll('[role=option]').length : 0; document.execCommand('selectAll'); document.execCommand('delete'); return { menu: !!m, rows, strays }; })()",
+    (v) => v === 'no-composer' || (v && (v.menu === false || (Array.isArray(v.strays) && v.strays.length === 0)))],
   ['上游附件按钮未被遮蔽',
     "(async () => { const btn = document.querySelector('button[aria-label=\"添加附件\"]'); if (!btn) return 'absent'; return getComputedStyle(btn).display !== 'none'; })()",
     true],

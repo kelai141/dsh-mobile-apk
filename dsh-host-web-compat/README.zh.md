@@ -54,9 +54,15 @@
 ## 其他注入
 
 - 目录选择桥（`__dshBridge` + `/api/android/dir-pick/*` 轮询端点，SAF 真实路径回填）；
+- 打开路径（`window.__dshOpenPath`：聊天 mention 与工具行路径 → 壳侧系统选择器）；
 - 主题桥（`__dshThemeBridge`：系统深浅色 → 页面主题变量）；
 - Agent 工具行文件路径识别（点击工具行里的绝对路径 → 交给壳侧选择器打开）；
 - boot 看门狗（40s 仍停在 Loading plugins 时收集诊断 + 一次性自动重载）。
+
+0.1.13（2026-09-10，0.13.7fx-1）退役：注入 composer 菜单的「引用本机文件」项（`data-dsh-file-pick`）
+与整条 `pickFilePath`/`onFilePicked` 桥管线。上游 0.1.5 自带 `@` 引用菜单
+（`ui-input-trigger` + `ui-reference`，候选限定在会话工作区内），我们那一项挂在同一个
+`[role=listbox]` 里属于重复入口；按官方语义，`@` 只引用工作区文件（详见 issue #150/#144）。
 
 ## 开发约束
 
@@ -67,7 +73,7 @@
   （2026-09-10 实测：Set 方法 IIFE 结尾 `})()` 直接撞上下一段的 `if (`，WebView 110 上
   `Iterator is not defined`，排查花了整整一轮）。
 - `apply()` 在装载期对装配结果做 `new Function` 解析断言，不合格直接抛错（响亮失败优先于静默降级）。
-- 片段文本内不得出现 `</script`（会提前闭合元素）。
+- **垫片要按真实现的结构补**：全局 `Iterator` 必须是构造器且 `.prototype === %IteratorPrototype%`（pdfjs 等打包代码会用 `Iterator.prototype.x` 直接打补丁），迭代器包装器必须继承同一原型，否则链式助手断链（见坑 61）。
 
 ## 测试
 

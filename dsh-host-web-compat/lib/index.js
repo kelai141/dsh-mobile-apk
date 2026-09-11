@@ -187,7 +187,7 @@ if(sysDark)window.__dshThemeBridge.setDark(true)
 }catch(e){}
 })()</script>`;
 
-/** Page side: directory-picker bridge + image-pick bridge + permission-prompt callback (idempotent injection). */
+/** Page side: directory-picker bridge + open-path route + permission-prompt callback (idempotent injection). */
 const PICKER_SCRIPT = `<script>(function(){
 if(window.__dshBridge){return}
 window.__dshBridge={
@@ -197,54 +197,7 @@ try{var h={'content-type':'application/json'};if(window.androidBridge&&window.an
 onPermissionRequired:function(){
 try{alert('需要\u201c所有文件访问\u201d权限才能使用外部目录。请在系统设置中允许后重试。')}catch(e){}
 },
-// 0.13.3 W10：文件路径选择回调（@文件引用重构）——壳 SAF 选文档解析出 primary 真实路径，
-// 页面把 @"<path>" mention 插入 composer（普通 prompt 文本，内容零拷贝），模型用 read
-// 工具按原路径读。payload={path,name,size,mediaType} | {refused:reason} | null（用户取消）。
-onFilePicked:function(callbackId,payload){
-try{
-if(!payload){return}
-var info=typeof payload==='string'?JSON.parse(payload):payload;
-if(info.refused){
-var msg=info.refused==='android-10'
-?'当前系统（Android 10）不支持按路径引用文件：请升级到 Android 11+，或用系统分享把文件发到应用（文件直达）。'
-:info.refused==='not-local-storage'
-?'请选择本机存储（内部存储/SD 卡）中的文件——云端文档或第三方应用内的文件没有可引用的本地路径。'
-:'无法引用该文件（'+info.refused+'）。';
-try{alert(msg)}catch(e){}
-return;
-}
-if(!info.path){return}
-insertFileMention(info.path);
-}catch(e){console.error('dsh file pick bridge failed',e)}
-}
 };
-// 把 @"<path>" mention 写入 composer：textarea（受控组件走原生 setter + input 事件）或
-// 0.1.2-rc.1 Lexical contenteditable（focus + insertText）。mention 是普通文本，模型收到
-// 后调 read 工具读原路径。
-function insertFileMention(path){
-var mention='@"'+path+'"';
-var ta=document.querySelector('textarea');
-if(ta){
-try{
-var setter=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value').set;
-var cur=ta.value||'';
-var piece=(cur.length>0&&!/[\\s]$/.test(cur)?' ':'')+mention+' ';
-setter.call(ta,cur+piece);
-ta.dispatchEvent(new Event('input',{bubbles:true}));
-ta.focus();
-return;
-}catch(e){console.error('dsh mention textarea insert failed',e)}
-}
-var ce=document.querySelector('[contenteditable="true"]');
-if(ce){
-ce.focus();
-var base=(ce.textContent||'');
-var piece2=(base.length>0&&!/[\\s]$/.test(base)?' ':'')+mention+' ';
-try{document.execCommand('insertText',false,piece2)}catch(e){console.error('dsh mention insert failed',e)}
-return;
-}
-try{alert('未找到输入框：请先打开或新建一个会话')}catch(e){}
-}
 // 2026-09-10 原生「打开方式」：壳新增 androidBridge.openPathChooser(path, mode)，
 // 由系统选择器列出 MT 管理器 / 系统文件管理等候选并返回 {ok,...} JSON；
 // 旧桥 openNativePath（隐式 ACTION_VIEW）保留为回退。页面所有「打开路径」入口都走这里。
@@ -274,74 +227,6 @@ requestedIds[j.requestId]=true;window.androidBridge.pickDirectory(j.requestId)
 }).catch(function(){}).then(function(){setTimeout(poll,500)})}catch(e){setTimeout(poll,500)}
 }
 poll()
-})();
-(function(){
-if(window.__dshFilePick){return}
-window.__dshFilePick=true;
-var added=false;
-// Menu dismiss (issue #58): injected items live INSIDE the command popup card,
-// so the popup's own outside-pointerdown dismiss never fires for them, and they
-// are not upstream options (popup.select never runs). Re-send Escape to the
-// search input: PopupSelectView's onKeyDown handles it and dismisses back to
-// the composer. Fall back to a synthetic outside pointerdown if no search box.
-function dismissMenu(){
-try{
-var menu=document.querySelector('[role=listbox]');
-if(!menu)return;
-var input=menu.closest('[aria-label]')?menu.parentElement.querySelector('input[type=text]'):null;
-if(input){
-input.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
-return;
-}
-var ev=new PointerEvent('pointerdown',{bubbles:true,cancelable:true});
-var target=document.body;
-document.dispatchEvent(ev);
-}catch(e){}
-}
-function ensureItem(){
-var menu=document.querySelector('[role=listbox]');
-if(!menu||added)return;
-// The reference entry needs the shell's SAF path resolver; upstream's own
-// attachment button already covers plain uploads, so a host without the bridge
-// gets no second picker here (2026-09-10: the official intake replaces ours).
-if(!window.androidBridge||typeof window.androidBridge.pickFilePath!=='function')return;
-added=true;
-var item=document.createElement('button');
-item.type='button';
-item.setAttribute('data-dsh-file-pick','1');
-item.textContent='引用本机文件';
-item.style.cssText='display:flex;align-items:center;gap:8px;width:100%;min-height:40px;padding:8px 10px;border:none;border-radius:10px;background:transparent;cursor:pointer;font-size:14px;line-height:22px;color:var(--dsw-alias-label-primary,#333);text-align:left';
-item.title='选择本机文件，以 @路径 引用（内容不上传，模型直接读取原文件）';
-item.onclick=function(){
-dismissMenu();
-try{
-// 0.13.3 W10 @文件引用：壳 SAF 选文档 → 真实路径 → onFilePicked 插 mention（零拷贝）
-var cb='dshfp'+Date.now().toString(36)+Math.random().toString(36).slice(2,8);
-window.androidBridge.pickFilePath(cb);
-}catch(e){console.error('dsh file reference failed',e)}
-};
-menu.appendChild(item);
-}
-function start(){
-try{
-if(!document.getElementById('dsh-menu-style')){
-var st=document.createElement('style');st.id='dsh-menu-style';
-// 2026-09-10：上游 0.1.5 自带附件入口（回形针 → 系统文件选择器 → 官方上传接口），
-// 我们不再遮蔽 [aria-label="添加附件"/"添加图片"]，也不再注入「上传图片」，
-// 只保留手机上的菜单宽度约束。
-st.textContent='[role="listbox"],[role="menu"]{max-width:min(92vw,340px)!important;}';
-document.head.appendChild(st);
-}
-}catch(e){}
-var obs=new MutationObserver(function(){
-var menu=document.querySelector('[role=listbox]');
-if(menu&&!menu.querySelector('[data-dsh-file-pick]')){
-added=false;ensureItem();
-}
-});
-obs.observe(document.body,{childList:true,subtree:true});
-}
-if(document.body){start()}else{document.addEventListener('DOMContentLoaded',start)}
 })();
 (function(){
 // External-reader file open (issue #52): the engine's native-path opener

@@ -21,8 +21,6 @@ class AndroidBridge(
   /** 0.13.1 W4：配置导入（共享 exports/config/settings.yaml -> 私有 DSH_HOME）。返回 JSON 同上。 */
   private val onImportConfig: () -> String = { """{"ok":false,"error":"bridge not wired"}""" },
   private val onGetSystemDark: () -> Boolean = { false },
-  /** 0.13.3 W10：@文件引用路径选择（SAF 文档 → primary 真实路径 → 页面插 mention）。 */
-  private val onPickFilePathRequest: (callbackId: String) -> Unit = {},
   private val onSetImmersiveRequest: (enable: Boolean) -> Unit = {},
   private val onCopyTextRequest: (text: String) -> Boolean = { false },
   private val pickToken: String? = null,
@@ -91,11 +89,6 @@ class AndroidBridge(
     onPickRequest(callbackId)
   }
 
-  /** 0.13.3 W10：@文件引用路径选择（SAF 文档选择器 → primary 真实路径 → onFilePicked 回调）。 */
-  @JavascriptInterface
-  fun pickFilePath(callbackId: String) {
-    onPickFilePathRequest(callbackId)
-  }
 
   /** Immersive status bar toggle (true = status bar normally hidden); called by Settings → General. */
   @JavascriptInterface

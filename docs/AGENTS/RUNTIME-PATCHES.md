@@ -1,6 +1,6 @@
 # RUNTIME-PATCHES.md — assets/patched/ 运行时补丁登记
 
-> 职责：`app/src/main/assets/patched/` 六文件的权威登记——消费方 `EngineManager.applyRuntimePatches()`（EngineManager.kt:409-430），逐文件目标快照路径/作用/来源线索与维护约定。行号、字节数 2026-09-05 当场 grep/ls 实测。
+> 职责：`app/src/main/assets/patched/` 逐文件的权威登记（0.13.7fx-1 起 **2 个在册**：attachment-local、session-persistence-jsonl）——消费方 `EngineManager.applyRuntimePatches()`（EngineManager.kt:409-430），逐文件目标快照路径/作用/来源线索与维护约定。行号、字节数 2026-09-05 当场 grep/ls 实测。
 
 ## 1. 机制（EngineManager.kt）
 
@@ -9,10 +9,10 @@
 - **覆盖式全量替换**：`applyAssetPatch`（:439-462）把 asset 字节整文件写入目标，**非 delta/非行级补丁**——asset 即目标文件的完整修改版拷贝。
 - **内容指纹判定**：目标已存在且字节与 asset 完全一致（contentEquals，:454）才跳过；不用固定 marker 字符串——v1→v2 升级时旧 marker 曾导致更新后的 asset 被误跳过（:404-405、:432-434 注释实锤）。快照刷新覆盖目标后指纹失配 → 自动重施加。
 - **目标包缺席即跳过**：目标父目录不存在时不落补丁（:443-446，如包被上游裁出依赖图，宁缺毋滥不留死覆盖）。
-- **hashAdaptive（仅 web-frontend-index.html）**：引擎 dist/index.html 引用 content-hash 的 bundle 名（`/assets/index-<hash>.js`）；引擎升级 → hash 变化 → patched 模板指向旧 hash 会 404 白屏。`adaptIndexHashes`（:471-490）先从引擎现存 index.html 提取当前 hash，再替换 patched 模板中的旧引用（同 stem/同 ext、hash 不同才替换；提取失败原样返回——宁不注入不写坏）。2026-08-23 前端审核 CRITICAL#4 落地。
+- ~~hashAdaptive~~（0.13.7fx-1 随 web-frontend-index.html 退役，理由见 §8）：曾用于让 patched 模板跟随引擎 dist 的 content-hash bundle 名；`adaptIndexHashes` 已随 asset 一起删除。
 - 另有 append 式辅助 `applyAssetPatchAppend`（:493-505，marker 幂等追加，历史上用于 cordis.patch.yml 场景）——当前无调用方，仅保留备用。
 
-## 2. 六文件逐项登记
+## 2. 文件逐项登记
 
 目标根 = 快照内 `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/`（dshPkgs，EngineManager.kt:410）。asset 字节数为 ls 实测。
 
@@ -89,3 +89,19 @@
 
 F3/F4 只影响引擎内部（无 WebView/壳侧定制面），快照固化即可，无需运行时 asset 每次启动重写；F2 的
 运行时侧由既有 attachment asset 承担——**两处必须同源**。
+
+## 8. 0.13.7fx-1：web-frontend-index.html 退役（2026-09-11）
+
+**实测（从 0.13.7 发布快照 out/v0.13.7/snapshot-x86_64.tar.xz 抽出对比）**：引擎自带的
+usr/.../dsh-web-frontend/dist/index.html 与 asset 除行尾（CRLF vs LF）外逐字相同，bundle 引用
+（index-DuF6ti6g.js / index-DPX2bQLO.css）也就是 npm 包 0.1.5-rc.1 发布件自带的那套。
+因此运行时那一步只是把同样的内容按 CRLF 再写一遍（写一次后内容指纹才收敛），**没有任何行为增量**。
+
+**退役的直接动因（坑 64）**：adaptIndexHashes 的 hash 字符集 `-([A-Za-z0-9]{8})\.(js|css)` 跟不上
+npm 现包的写法（index-Df-65__b.js：带 `-`、9 字符）。一旦引擎 dist 不是这份 asset 对应的构建，
+改写失败就原样写回旧引用 → index.html 指向不存在的 bundle（白屏）。补丁的价值此前已随 viewport-fit 消失
+（Android WebView 上 env(safe-area-inset-*) 恒 0，系统栏避让已由壳侧 inset 通道承担；ES2022 polyfill
+由 dsh-host-web-compat 注入，覆盖面更大）。
+
+**改动面**：删 assets/patched/web-frontend-index.html；EngineManager.applyRuntimePatches() 去掉该行；
+applyAssetPatch 去掉 hashAdaptive 形参与 adaptIndexHashes 函数；本文件 §1/§2/§3 同步。

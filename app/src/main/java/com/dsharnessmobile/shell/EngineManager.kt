@@ -591,8 +591,12 @@ class EngineManager(private val context: Context, private val pickToken: String?
    *  - attachment-local-index.js: Android link(2) blocked by sepolicy → rename fallback
    *    (rebuilt onto 0.1.2-rc.1 source, 0.13.3 W9; the rc.2-locked asset was erasing the
     *    engine upgrade's own new code, e.g. breaking prompt via stale persistence API)
-   *  - web-frontend-index.html: bundle-hash template (hashAdaptive rewrites the content-hashed
-   *    references on device; 0.13.3 rebuilt from the rc.1 dist — structurally identical to rc.2)
+   *  - (0.13.7fx-1 retirement) web-frontend-index.html: the asset had become the engine's own
+   *    dist/index.html verbatim (0.1.5-rc.1 ships index-DuF6ti6g.js / index-DPX2bQLO.css), so the
+   *    patch rewrote identical bytes once per snapshot refresh and nothing else. Its hash-adaptive
+   *    rewrite also could not follow the npm hash charset (-([A-Za-z0-9]{8}) never matches
+   *    index-Df-65__b), so a dist built from the plain package would have been overwritten with
+   *    references to bundles that do not exist.
    *  - session-persistence-jsonl-index.js: Android link(2) fallback — rebuilt onto 0.1.2-rc.1
    *    source (0.13.3 W9): link(tmp, finalPath) failure on EACCES/EPERM/ENOTSUP → rename fallback.
    *  - 0.13.3 retirements (both rc.2-locked assets, upstream 0.1.2-rc.1 covers them natively):
@@ -605,11 +609,8 @@ class EngineManager(private val context: Context, private val pickToken: String?
    */
   private fun applyRuntimePatches() {
     val dshPkgs = File(usrDir, "lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai")
-    val webDist = File(dshPkgs, "dsh-web-frontend/dist")
     applyAssetPatch("patched/attachment-local-index.js",
       File(dshPkgs, "dsh-attachment-local/lib/index.js"))
-    applyAssetPatch("patched/web-frontend-index.html",
-      File(webDist, "index.html"), hashAdaptive = true)
     applyAssetPatch("patched/session-persistence-jsonl-index.js",
       File(dshPkgs, "dsh-session-persistence-jsonl/lib/index.js"))
   }
@@ -617,11 +618,8 @@ class EngineManager(private val context: Context, private val pickToken: String?
   /** Overwrite-style patch: applies when the target differs from the bundled asset (content
    *  fingerprint), so an updated asset re-applies on upgrade instead of being skipped by a stale
    *  marker string (the v1→v2 asset-update failure).
-   *  hashAdaptive（2026-08-23，前端审核 CRITICAL#4）：web-frontend-index.html 引用引擎 dist 的
-   *  content-hashed bundle 名（/assets/index-<hash>.js）。引擎升级 → hash 变化 → patched 模板
-   *  仍指向旧 hash → 404 白屏。开启后：先从引擎现存 index.html 提取当前 hash 引用，再替换
-   *  patched 模板中的旧引用（asset 模板本身可长期不随引擎更新）。 */
-  private fun applyAssetPatch(asset: String, target: File, hashAdaptive: Boolean = false) {
+   */
+  private fun applyAssetPatch(asset: String, target: File) {
     // Patches track bundle layouts: when the runtime no longer ships the patched package
     // (e.g. dsh-client-ui-primitives dropped from the dependency graph in dsh 0.1.1-rc.1),
     // stop applying instead of littering a dead overlay into to the tree.
@@ -635,44 +633,16 @@ class EngineManager(private val context: Context, private val pickToken: String?
       Log.w(TAG, "runtime patch asset missing: $asset")
       return
     }
-    val finalBytes = if (hashAdaptive) adaptIndexHashes(assetBytes, target) else assetBytes
-    if (target.exists() && target.readBytes().contentEquals(finalBytes)) return
+    if (target.exists() && target.readBytes().contentEquals(assetBytes)) return
     try {
       target.parentFile?.mkdirs()
-      target.writeBytes(finalBytes)
+      target.writeBytes(assetBytes)
       Log.i(TAG, "runtime patch applied/updated: $asset -> $target")
     } catch (e: Exception) {
       Log.e(TAG, "runtime patch failed: $asset", e)
     }
   }
 
-  /**
-   * 把 patched index.html 中旧的 /assets/index-*.js、vendor-*.js|css 引用替换为
-   * 引擎 dist/index.html 当前实际引用的新 hash。提取失败（引擎 index 读不到/无匹配）
-   * 时原样返回——此时与旧行为一致，宁可不注入也不写坏。
-   * 匹配规则：引擎当前引用 `assets/<stem>-<hash>.<ext>`，patched 中存在
-   * `assets/<stem>-<hash'>.<ext>`（同 stem/同 ext，hash 不同）→ 替换为新 hash。
-   */
-  private fun adaptIndexHashes(patched: ByteArray, engineIndex: File): ByteArray {
-    return try {
-      val current = engineIndex.readText()
-      val p = patched.toString(Charsets.UTF_8)
-      var out = p
-      val refRe = Regex("(?:/|\")assets/([A-Za-z0-9_.-]+)-([A-Za-z0-9]{8})\\.(js|css)(?:\"| )")
-      val curRefs = refRe.findAll(current)
-      for (m in curRefs) {
-        val stem = m.groupValues[1]
-        val hash = m.groupValues[2]
-        val ext = m.groupValues[3]
-        val old = Regex("assets/" + Regex.escape(stem) + "-[A-Za-z0-9]{8}\\." + ext)
-        out = out.replace(old, "assets/$stem-$hash.$ext")
-      }
-      out.toByteArray(Charsets.UTF_8)
-    } catch (e: Exception) {
-      Log.w(TAG, "index hash adaptation failed; keeping bundled patch: " + e.message)
-      patched
-    }
-  }
 
   /** Append-style patch (for cordis.patch.yml, keeping the user's existing entries). */
   private fun applyAssetPatchAppend(asset: String, target: File, marker: String) {
@@ -754,6 +724,13 @@ class EngineManager(private val context: Context, private val pickToken: String?
     }
   }
 
+  /** The app workspace root (files/home/.dsh/workspaces), created on demand; null when unusable. */
+  private fun workspaceRootDir(): File? = try {
+    File(context.filesDir, "home/.dsh/workspaces").apply { mkdirs() }.takeIf { it.isDirectory }
+  } catch (_: Throwable) {
+    null
+  }
+
   /**
    * Spawn the engine, falling back to the system linker when the direct exec
    * is denied: Android 15+ apps targeting SDK 35+ may not exec app-data ELF
@@ -766,6 +743,12 @@ class EngineManager(private val context: Context, private val pickToken: String?
     fun build(argv: List<String>): ProcessBuilder =
       ProcessBuilder(argv).also { b ->
         b.environment().putAll(env)
+        // Working directory = the app workspace root (0.13.7fx-1). An Android app process starts
+        // in `/`, and the engine takes process.cwd() as the default Session cwd and as the
+        // file-reference root for a Session without a workspace — so `@` listed /acct, /apex, …
+        // instead of anything the user owns. The workspace root is where the app keeps its
+        // workspaces (and the shell write-fence root), so ungrouped Sessions stay inside it.
+        workspaceRootDir()?.let { b.directory(it) }
         b.redirectErrorStream(true)
         b.redirectOutput(log)
       }

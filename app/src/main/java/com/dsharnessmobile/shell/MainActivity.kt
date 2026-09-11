@@ -441,7 +441,6 @@ class MainActivity : ComponentActivity() {
             android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
             android.content.res.Configuration.UI_MODE_NIGHT_YES
         },
-        onPickFilePathRequest = { callbackId -> mediaPickerController.pickFilePathForBridge(callbackId) },
         onSetImmersiveRequest = { enable -> setImmersivePersisted(enable) },
         onCopyTextRequest = { text -> copyTextNative(text) },
         pickToken = pickToken,

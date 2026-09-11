@@ -103,3 +103,14 @@
 
 61 续（同日第二层，同一入口）：**Iterator 垫片必须长成构造器形状，否则 pdfjs 把整树打挂**。清掉「Iterator is not defined」之后，`ui-sidebar-documentpreview` 的 combo 包仍在 import 期抛 `Cannot read properties of undefined (reading 'join')`。定位方式（可复用）：CDP `Debugger.setPauseOnExceptions: all` 暂停在抛点 + `Debugger.getScriptSource` 取源码行——出错行是 pdfjs 的 `if (typeof Iterator.prototype.join !== "function") Iterator.prototype.join = ...`：真 `Iterator` 是构造器且 `.prototype === %IteratorPrototype%`，而第一版垫片是裸对象 `{from}`（`Iterator.prototype` 为 undefined）→ 守卫行即抛，loader 记 `failed to import loader entry ...` → 整树 Failed to load plugins。修复：垫片改成 `function Iterator(){throw new TypeError(...)}` + `from` + `Object.defineProperty(ctor,'prototype',{value:proto})`（proto 仍是打过助手的 %IteratorPrototype%）；同时 `box()` 包装器必须 `Object.create(proto)` 而不是裸对象，否则链式助手 `iter.map(f).toArray()` 全断（真机断言当时报 `toArray is not a function`）。两道回归都进了 `dsh-host-web-compat/scripts/smoke-injections.mjs`：在 `node:vm` 里先删掉 Iterator 全局**和**原生助手方法（如实模拟 Chromium 110）再跑垫片，然后执行 pdfjs 的守卫行与 `Iterator.from([1,2]).map(...).toArray()`。**教训：垫片要按「真实现的结构」补（构造器 + prototype + 继承链），只补名字不够。**
 
+
+64. **运行时补丁不得引用引擎构建产物（bundle hash）**：`adaptIndexHashes` 用 `-([A-Za-z0-9]{8})\.(js|css)` 抓引擎
+    `dist/index.html` 的 bundle 名，而 npm 现包的 hash 已经是 `index-Df-65__b.js` 这种（带 `-`、9 字符）——正则匹配不上就
+    「原样返回」，patched 模板的旧引用被整文件写回 → 页面引到不存在的 bundle（白屏）。结论：这类补丁的生命周期跟着上游构建走，
+    要么不写，要么写就得随每次引擎升级核对（0.13.7fx-1 直接退役 `web-frontend-index.html`，见 RUNTIME-PATCHES §8）。
+
+65. **Android 应用进程的 cwd 是 `/`，而引擎拿它当默认值**：`SessionCommandController(ctx, agents, process.cwd())` 把
+    `process.cwd()` 当「未指定工作区」会话的 cwd；`file-reference-local` 在会话无 cwd 时也回退到同一个进程目录。
+    壳侧不设工作目录 → 新会话 cwd=`/` → `@` 菜单列的是设备根目录（acct/apex/cache…），用户看到「@文件功能无法使用」
+    （apk #150/#144）。修复：`ProcessBuilder.directory(应用工作区根)`（0.13.7fx-1，EngineManager.workspaceRootDir）。
+    同一族的坑：任何「上游拿 process.cwd() 兜底」的地方在 Android 上都会落到 `/`。
