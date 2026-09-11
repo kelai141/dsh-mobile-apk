@@ -58,6 +58,7 @@ one must end on a complete statement (see Development constraints).
 
 - Directory-picker bridge (`__dshBridge` plus the `/api/android/dir-pick/*` polling endpoints that
   return real SAF paths);
+- open-path (`window.__dshOpenPath`: chat mentions and tool-row paths into the shell chooser);
 - theme bridge (`__dshThemeBridge`: system light/dark into page theme variables);
 - agent tool-row path recognition (clicking an absolute path in a tool row hands it to the shell
   chooser);

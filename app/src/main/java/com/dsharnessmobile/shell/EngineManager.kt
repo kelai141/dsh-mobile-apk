@@ -724,6 +724,12 @@ class EngineManager(private val context: Context, private val pickToken: String?
     }
   }
 
+  /** Absolute path of the Host settings document (`$DSH_HOME/settings.yaml`); empty when missing. */
+  fun settingsDocumentPath(): String {
+    val file = File(dshDataDir, "settings.yaml")
+    return if (file.isFile) file.absolutePath else ""
+  }
+
   /** The app workspace root (files/home/.dsh/workspaces), created on demand; null when unusable. */
   private fun workspaceRootDir(): File? = try {
     File(context.filesDir, "home/.dsh/workspaces").apply { mkdirs() }.takeIf { it.isDirectory }

@@ -14,10 +14,10 @@ android {
     // (the embedded engine, bash, and every child command would need linker64
     // wrappers); 34 keeps native exec working on Android 15/16 devices.
     targetSdk = 34
-    // 0.13.7fx-1：versionCode 35（@文件回到上游原生：退役注入的「引用本机文件」项与整条 SAF 路径桥；
+    // 0.13.7fx-1 修订构建：versionCode 36（发布后 issue 修复批：会话迁移 link(2) 回退 #154、
     // 引擎启动目录改到应用工作区根，未分组会话不再把 / 当工作区；修复 0.1.5 起失效的移动端 Enter 换行守卫；
     // 退役空转的 web-frontend-index.html 运行时补丁；覆盖安装 0.13.7(34)）。
-    versionCode = 35
+    versionCode = 36
     // Snapshot builds append a suffix (e.g. -SN-1-RC13) via -PversionNameSuffix; release builds pass none.
     val snapshotSuffix = providers.gradleProperty("versionNameSuffix").getOrElse("")
     // 版本号单一来源：UI（GuidePageRenderer）、桥（androidBridge.version）、诊断日志、引擎环境变量

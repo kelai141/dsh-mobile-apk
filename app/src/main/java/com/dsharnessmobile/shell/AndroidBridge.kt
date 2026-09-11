@@ -21,6 +21,8 @@ class AndroidBridge(
   /** 0.13.1 W4：配置导入（共享 exports/config/settings.yaml -> 私有 DSH_HOME）。返回 JSON 同上。 */
   private val onImportConfig: () -> String = { """{"ok":false,"error":"bridge not wired"}""" },
   private val onGetSystemDark: () -> Boolean = { false },
+  /** Absolute path of the Host settings document, or empty when unavailable. */
+  private val onSettingsPathRequest: () -> String = { "" },
   private val onSetImmersiveRequest: (enable: Boolean) -> Unit = {},
   private val onCopyTextRequest: (text: String) -> Boolean = { false },
   private val pickToken: String? = null,
@@ -90,6 +92,13 @@ class AndroidBridge(
   }
 
 
+  /**
+   * Absolute path of the Host settings document (`$DSH_HOME/settings.yaml`).
+   * The mobile adaptation layer opens it through the shell chooser, because the upstream
+   * "open configuration file" action delegates to a desktop native text editor (apk #152).
+   */
+  @JavascriptInterface
+  fun settingsPath(): String = onSettingsPathRequest()
   /** Immersive status bar toggle (true = status bar normally hidden); called by Settings → General. */
   @JavascriptInterface
   fun setImmersiveMode(enable: Boolean) {

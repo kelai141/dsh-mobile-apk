@@ -2033,8 +2033,9 @@ async function publishCurrentExclusive(staged, currentPath, internals) {
 	} catch (error) {
 		/* v8 ignore else -- a non-collision filesystem error propagates unchanged. */
 		if (isEEXIST(error)) return false;
-		/* v8 ignore next -- the filesystem error is already complete. */
-		throw error;
+		/* dsh-mobile link->rename fallback: Android app-private dirs reject link(2) (EACCES). */
+		if (!(error instanceof Error && "code" in error && (error.code === "EACCES" || error.code === "EPERM" || error.code === "ENOTSUP"))) throw error;
+		await rename(staged, currentPath);
 	}
 	await syncDirectory(dirname(currentPath), internals);
 	return true;
