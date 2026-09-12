@@ -56,12 +56,17 @@ class OverlayHalo(private val svc: OverlayService) {
       val hv = svc.haloView ?: return@post
       val g = hv.background as? GradientDrawable ?: return@post
       setHaloColors(g, halo)
-      // 工作中光环缓脉动（spring 风格呼吸：AlphaAnimation 循环）
-      val anim = AlphaAnimation(1f, 0.7f).apply {
-        duration = 1100; repeatMode = AlphaAnimation.REVERSE; repeatCount = if (halo == Halo.WORKING) AlphaAnimation.INFINITE else 0
+      // 脉动：WORKING = 缓呼吸（spring 风格）；PENDING = 更快更深的琥珀脉（M8，0.13.8 G3 余项，
+      // 待答是「要人动手」的状态，脉动节奏刻意比工作态更急）。IDLE 静止。
+      // 统一受 DsUi.animationsEnabled 降级（系统关动画/省电模式 → 全部静止，不耗帧）。
+      val pulse = halo == Halo.WORKING || halo == Halo.PENDING
+      val anim = AlphaAnimation(1f, if (halo == Halo.PENDING) 0.55f else 0.7f).apply {
+        duration = if (halo == Halo.PENDING) 900 else 1100
+        repeatMode = AlphaAnimation.REVERSE
+        repeatCount = if (pulse) AlphaAnimation.INFINITE else 0
       }
       hv.animation = null
-      if (halo == Halo.WORKING) hv.startAnimation(anim)
+      if (pulse && DsUi.animationsEnabled(svc)) hv.startAnimation(anim) else hv.alpha = 1f
     }
   }
 

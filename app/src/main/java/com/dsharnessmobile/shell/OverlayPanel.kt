@@ -413,6 +413,73 @@ class OverlayPanel(private val svc: OverlayService) {
   /** 渲染卡片（官方提问卡风格）：header 行（灰标签 + ✕ 关闭）、问题加粗、编号徽章选项行
    *  （label + 灰 description）、✎「输入你的答案」自定义行、页脚 ‹1/N› 翻页 + 跳过本题 + 下一题/提交。
    *  force=false 时防 live 流重绘打断输入焦点。 */
+  /**
+   * M4/M5/M6/M7（0.13.8 G3 余项）：悬浮球动效的四个落点，统一走 [DsUi.animationsEnabled]
+   * 降级——系统关动画/省电模式下全部退化为瞬时切换（不闪、不卡、不消耗帧）。
+   * 设计口径：位移与透明度只用短时（≤220ms）一次性动画；呼吸/脉冲用无限循环但**只作用于
+   * 单行状态文本与光环**，避免整面板反复重绘（低端机上那才真卡）。
+   */
+  private fun animationsOn(): Boolean = DsUi.animationsEnabled(svc)
+
+  /** M4：待答卡入场——位移 6dp + 渐显（禁用动画时直接显示）。 */
+  private fun animateCardIn(view: View) {
+    if (!animationsOn()) { view.alpha = 1f; view.translationY = 0f; return }
+    val rise = 6 * svc.resources.displayMetrics.density
+    view.animate().cancel()
+    view.alpha = 0f
+    view.translationY = rise
+    view.animate().alpha(1f).translationY(0f)
+      .setDuration(200L).setInterpolator(DsUi.ease).start()
+  }
+
+  /** M5：状态行配色在「空闲/工作/待答」之间平滑过渡（琥珀↔文本色），用 ArgbEvaluator 而非硬切。 */
+  private fun animateTextColor(tv: TextView, target: Int) {
+    val from = (tv.tag as? Int) ?: target
+    tv.tag = target
+    if (!animationsOn() || from == target) { tv.setTextColor(target); return }
+    android.animation.ValueAnimator.ofObject(
+      android.animation.ArgbEvaluator(), from, target,
+    ).apply {
+      duration = 220L
+      interpolator = DsUi.ease
+      addUpdateListener { tv.setTextColor(it.animatedValue as Int) }
+      start()
+    }
+  }
+
+  /** M6：状态行换文案——只在文案真的变了时做一次「淡出→换字→淡入」，避免每帧重排。 */
+  private fun setStatusText(tv: TextView, next: String) {
+    if (tv.text?.toString() == next) return
+    if (!animationsOn()) { tv.text = next; tv.alpha = 1f; return }
+    tv.animate().cancel()
+    tv.animate().alpha(0f).setDuration(90L).withEndAction {
+      tv.text = next
+      tv.animate().alpha(1f).setDuration(140L).start()
+    }.start()
+  }
+
+  /** M7：琥珀呼吸——待答（question/approval）期间状态行缓慢明暗（1.0↔0.55，1.2s 一次往返）。
+   *  动画实例挂在面板字段上（工程无 res id，故不用 View tag 键）。 */
+  private var statusBreathing: android.animation.ObjectAnimator? = null
+
+  private fun setAmberBreathing(tv: TextView, on: Boolean) {
+    if (on && animationsOn()) {
+      if (statusBreathing?.isRunning == true) return
+      statusBreathing = android.animation.ObjectAnimator.ofFloat(tv, View.ALPHA, 1f, 0.55f).apply {
+        duration = 1200L
+        repeatMode = android.animation.ValueAnimator.REVERSE
+        repeatCount = android.animation.ValueAnimator.INFINITE
+        interpolator = DsUi.ease
+        start()
+      }
+    } else if (statusBreathing != null) {
+      statusBreathing?.cancel()
+      statusBreathing = null
+      tv.animate().cancel()
+      tv.alpha = 1f
+    }
+  }
+
   private fun renderPendingCard(force: Boolean = false) {
     val box = pendingBox ?: return
     val cur = currentPending()
@@ -447,6 +514,7 @@ class OverlayPanel(private val svc: OverlayService) {
         setMargins(0, (6 * dp).toInt(), 0, 0)
       })
       box.visibility = View.VISIBLE
+      animateCardIn(box)
       return
     }
     val qe = cur.second as PendingQuestion
@@ -616,6 +684,7 @@ class OverlayPanel(private val svc: OverlayService) {
     }
     box.addView(foot, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
     box.visibility = View.VISIBLE
+    animateCardIn(box)
   }
 
   // ── 应答（0.13.3 W3：POST /api/$events/result，{clientId,eventId,outcome}）──
@@ -780,28 +849,35 @@ class OverlayPanel(private val svc: OverlayService) {
       statusText?.let {
         if (svc.pendingKind == "question") {
           (it as ShimmerTextView).setShimmering(false)
-          it.setTextColor(0xFFB8860B.toInt())
-          it.text = "等待你的回答…"
+          animateTextColor(it, 0xFFB8860B.toInt())
+          setStatusText(it, "等待你的回答…")
+          setAmberBreathing(it, true)
         } else if (svc.pendingKind == "approval") {
           (it as ShimmerTextView).setShimmering(false)
-          it.setTextColor(0xFFB8860B.toInt())
-          it.text = "等待权限审批…"
+          animateTextColor(it, 0xFFB8860B.toInt())
+          setStatusText(it, "等待权限审批…")
+          setAmberBreathing(it, true)
         } else if (svc.sessionBusy) {
+          setAmberBreathing(it, false)
           if (svc.currentToolName.isNotBlank()) {
             // 模板化（用户拍板）：调工具 → 工具类型 + 概览；思考 → Deep diving 扫光。
-            it.text = templateTool()
-              .replace("{tool}", svc.currentToolName)
-              .replace("{summary}", svc.currentToolSummary)
+            setStatusText(
+              it,
+              templateTool()
+                .replace("{tool}", svc.currentToolName)
+                .replace("{summary}", svc.currentToolSummary),
+            )
             (it as ShimmerTextView).setShimmering(false)
-            it.setTextColor(themeColors().idleText)
+            animateTextColor(it, themeColors().idleText)
           } else {
-            it.text = templateThinking()
+            setStatusText(it, templateThinking())
             (it as ShimmerTextView).setShimmering(true)
           }
         } else {
           (it as ShimmerTextView).setShimmering(false)
-          it.setTextColor(0xFF8A8F98.toInt())
-          it.text = if (svc.engineRunning) "空闲" else "引擎离线"
+          setAmberBreathing(it, false)
+          animateTextColor(it, 0xFF8A8F98.toInt())
+          setStatusText(it, if (svc.engineRunning) "空闲" else "引擎离线")
         }
       }
       toolChip?.let {
