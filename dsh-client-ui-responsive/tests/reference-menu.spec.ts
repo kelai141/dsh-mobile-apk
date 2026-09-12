@@ -37,6 +37,9 @@ function flush(): Promise<void> {
 }
 
 beforeEach(async () => {
+  // 本增强层是**移动形态专用**（#169-4 要求加门）：测试必须站在移动形态里，
+  // 否则注入被门拦掉——这正是门生效的证明。
+  document.documentElement.setAttribute('data-dsh-mobile-form', '')
   const card = document.createElement('div')
   card.setAttribute('data-composer-card', '')
   editable = document.createElement('div')
@@ -51,6 +54,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   enhancer.detach()
+  document.documentElement.removeAttribute('data-dsh-mobile-form')
   document.body.innerHTML = ''
   vi.restoreAllMocks()
 })
