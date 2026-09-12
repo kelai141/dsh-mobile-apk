@@ -16,43 +16,79 @@
  * - every row gets a leading checkbox; checked rows form a multi-select set with a bottom
  *   "add N" action that inserts them all as references (driven through upstream's own pick so the
  *   atomic reference semantics stay upstream's);
- * - (row-body drilling is upstream's once the F6 engine patch is applied);
  * - clicking a file row's body keeps upstream behavior (settle the pick);
  * - clicks on the checkbox never reach upstream's mousedown pick.
  *
- * 0.13.8（真机反馈的两处缺陷）：
- * - **勾选态不实时同步**：`preventDefault()` 吃掉原生 checkbox 的状态翻转后，实现只改了内部集合，
- *   没回写 DOM → 视觉上框永远是空的（用户实测：「勾上了、确认也能选中，但方框状态没同步」）。
- *   修复 = 每次 toggle 与每次 enhance 后统一 `syncCheckboxes()` 把 `.checked` 按集合回写。
- * - **确认按钮没做深色适配**：底部条用内联样式写死了浅色分隔线与白字，暗色主题下按钮与分隔线
- *   与面板脱节。修复 = 走主题 token + `prefers-color-scheme` 兜底（样式集中在 REFERENCE_BAR_CSS，
- *   由 index.ts 注入，不再散落内联）。
+ * 0.13.8 真机迭代（两轮反馈）：
+ * - 第一轮：勾选态不实时同步（`preventDefault()` 吃掉原生 checkbox 翻转后没回写 DOM）、
+ *   确认按钮白底白字（主题 token `--dsw-alias-brand-primary` 在深色下近白 + 上游 button 默认样式
+ *   盖过注入样式表）。
+ * - 第二轮（本版重做）：**用标签字符串当视觉状态的键是错的**——上游一重渲染行标签就可能与插入时
+ *   不一致，于是出现「内部集合已勾选、方框仍显示未勾选」（用户实测：底部已显示"已选 1 项"而方框空）。
+ *   现在状态**挂在行元素上**（`data-dsh-ref-on`），视觉完全由 CSS 从该属性派生，中间没有 JS 同步
+ *   步骤；行元素被上游换掉时 `enhance()` 按标签把状态补回新元素。
+ * - 同时按原生行样式重画勾选框：不再是浏览器默认的 input 方块，而是主题化圆角方框
+ *   （未选 = 描边；选中 = 品牌蓝底 + 白勾），垂直居中、与行内图标同列。
  */
 const ROW_SELECTOR = '[data-trigger-menu] [role="option"]'
 const CHECK_ATTR = 'data-dsh-ref-check'
+/** 选中标记（**视觉状态的唯一来源**：属性是状态，样式是后果，由 CSS 消费）。 */
+const ON_ATTR = 'data-dsh-ref-on'
 const BAR_ATTR = 'data-dsh-ref-bar'
 const NAME_CLASS_HINT = 'itemName'
+/** Gesture kinds one tap can arrive as; only the first of an interaction acts. */
+const GESTURES = ['pointerdown', 'mousedown', 'click'] as const
+/** Window that folds the gesture kinds of a single tap into one action. */
+const ACTION_DEBOUNCE_MS = 400
+/** 品牌蓝（勾选框与按钮共用）。**不取 `--dsw-alias-brand-primary`**：该 token 在深色主题下实测
+ *  解析为 rgb(249,250,251)（近白），当底色配白字就是「白底白字不可见」。 */
+const BRAND = '#4d6bfe'
+
 /**
- * 多选条的状态样式（hover/active/禁用/勾选框强调色）。
+ * 勾选框与底部条样式。
  *
- * 关键样式（背景、文字色、边框）**不在这里**：真机实测发现上游对 `button` 的默认样式会盖过
- * 注入样式表（表现为「白底 + 白字」，按钮看不见字），因此那几项改成内联 `!important` 写入
- * （见 `applyBarStyles`）——内联 + important 是目前唯一能稳定压过任意上游规则的写法。
- * 本表只写「状态类」样式（这类样式上游不会覆盖，写在表里更清晰也更好维护）。
- *
- * 颜色口径（**真机实测踩到的坑**）：`--dsw-alias-brand-primary` 在深色主题下解析为
- * `rgb(249,250,251)`（近白）——拿它当按钮底色配白字就是「白底白字，按钮看不见」。
- * 因此按钮/勾选框的品牌色**不再取该 token**，直接用显式品牌蓝 `#4d6bfe`（两种主题下都够深）。
- * 其余颜色（分隔线/条底/次要文字）仍取 token + `prefers-color-scheme` 兜底，壳侧 ThemeBridge
- * 已把该媒体查询接到系统深浅色，故暗色分支就是「当前主题」的真值。
+ * 两点设计决定：
+ * 1. 勾选框用 `<span>` + CSS 画——原生 `<input type=checkbox>` 在深色主题里是浏览器默认方块，
+ *    与上游行样式不融（用户反馈「和原生 ui 融合得太差」）；
+ * 2. 选中态由 `[data-dsh-ref-on]` 属性派生，没有任何 JS 视觉同步步骤，因此不可能出现
+ *    「集合已选中而方框未勾」的失配。
+ * 底部条的关键样式仍在 JS 里内联 `!important`（上游 button 默认样式会盖过注入表）。
  */
 export const REFERENCE_BAR_CSS: string = `
+[data-dsh-ref-check] {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin: 0 10px 0 2px;
+  align-self: center;
+  border-radius: 5px;
+  border: 1.5px solid #8b909a;
+  background: transparent;
+  box-sizing: border-box;
+  position: relative;
+  transition: background-color .12s ease, border-color .12s ease;
+}
+[data-dsh-ref-on] [data-dsh-ref-check] {
+  background: #4d6bfe;
+  border-color: #4d6bfe;
+}
+[data-dsh-ref-on] [data-dsh-ref-check]::after {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 1.5px;
+  width: 4px;
+  height: 8px;
+  border: solid #ffffff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
 [data-dsh-ref-bar] {
   display: flex;
   gap: 8px;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 10px;
+  padding: 8px 12px;
   border-top: 1px solid var(--dsw-alias-border-l1, #e5e5e5);
   background: var(--dsw-alias-bg-l1, #ffffff);
 }
@@ -65,47 +101,27 @@ export const REFERENCE_BAR_CSS: string = `
   border-radius: 8px;
   border: none;
   background: #4d6bfe;
-  color: var(--dsw-alias-text-on-brand, #ffffff);
+  color: #ffffff;
   font-size: 13px;
   font-weight: 500;
   line-height: 1.4;
 }
 [data-dsh-ref-add]:active { filter: brightness(0.92); }
-[data-dsh-ref-add]:disabled { opacity: 0.5; }
-[data-dsh-ref-check] {
-  flex: none;
-  width: 18px;
-  height: 18px;
-  margin: 0 8px 0 0;
-  accent-color: #4d6bfe;
-}
 @media (prefers-color-scheme: dark) {
+  [data-dsh-ref-check] { border-color: var(--dsw-alias-border-l2, #6b7075); }
   [data-dsh-ref-bar] {
     border-top-color: var(--dsw-alias-border-l1, #2a2b30);
     background: var(--dsw-alias-bg-l1, #17181c);
   }
   [data-dsh-ref-bar-count] { color: var(--dsw-alias-text-l2, #9aa0a6); }
-  [data-dsh-ref-add] { color: var(--dsw-alias-text-on-brand, #ffffff); }
 }
 `
-
-/** Gesture kinds one tap can arrive as; only the first of an interaction acts. */
-const GESTURES = ['pointerdown', 'mousedown', 'click'] as const
-/** Window that folds the gesture kinds of a single tap into one action. */
-const ACTION_DEBOUNCE_MS = 400
-
-/** One row this enhancer tracks: its label, whether it is a directory, and the live element. */
-interface Row {
-  label: string
-  directory: boolean
-}
 
 /** Read a row's candidate label (upstream renders it in the name span; fall back to text). */
 function rowLabel(row: HTMLElement): string {
   const name = row.querySelector('[class*="' + NAME_CLASS_HINT + '"]')
   return ((name?.textContent ?? row.textContent) || '').trim()
 }
-
 
 /** The composer's editable host (upstream Lexical root). */
 function composerEditable(): HTMLElement | null {
@@ -114,6 +130,7 @@ function composerEditable(): HTMLElement | null {
 
 /** Multi-select state plus the mobile-only row behavior for the reference menu. */
 export class ReferenceMenuEnhancer {
+  /** 标签集合（仅用于最终 pick；视觉状态不依赖它，见文件头）。 */
   private readonly checked = new Set<string>()
   private observer: MutationObserver | null = null
   private lastClaim = 0
@@ -131,7 +148,7 @@ export class ReferenceMenuEnhancer {
     event.preventDefault()
     event.stopImmediatePropagation()
     event.stopPropagation()
-    if (this.claimOnce()) this.toggle(rowLabel(row))
+    if (this.claimOnce()) this.toggle(row)
   }
 
   private readonly onMenuClick = (event: MouseEvent): void => {
@@ -156,9 +173,6 @@ export class ReferenceMenuEnhancer {
   }
 
   attach(): void {
-    // One gesture kind only: claiming pointerdown + preventDefault suppresses the compatibility
-    // mouse events, while claiming both would run the row behavior twice (measured on device: a
-    // single tap produced three folder references).
     for (const kind of GESTURES) document.addEventListener(kind, this.onGesture, true)
     document.addEventListener('click', this.onMenuClick, true)
     this.observer = new MutationObserver(() => { this.schedule() })
@@ -185,48 +199,50 @@ export class ReferenceMenuEnhancer {
     })
   }
 
-  /** Add the leading checkbox to every row that lacks one, then refresh the action bar. */
+  /**
+   * Ensure every row carries a checkbox, re-apply the checked mark for rows upstream re-rendered
+   * (state lives on the element, so a fresh element needs the mark back), then refresh the bar.
+   */
   private enhance(): void {
     for (const row of document.querySelectorAll<HTMLElement>(ROW_SELECTOR)) {
-      if (row.querySelector('[' + CHECK_ATTR + ']') !== null) continue
-      const box = document.createElement('input')
-      box.type = 'checkbox'
-      box.setAttribute(CHECK_ATTR, rowLabel(row))
-      box.setAttribute('aria-label', rowLabel(row))
-      row.insertBefore(box, row.firstChild)
+      let box = row.querySelector<HTMLElement>('[' + CHECK_ATTR + ']')
+      if (box === null) {
+        box = document.createElement('span')
+        box.setAttribute(CHECK_ATTR, '')
+        box.setAttribute('role', 'checkbox')
+        box.setAttribute('aria-label', rowLabel(row))
+        row.insertBefore(box, row.firstChild)
+      }
+      const on = this.checked.has(rowLabel(row))
+      if (on) row.setAttribute(ON_ATTR, '')
+      else row.removeAttribute(ON_ATTR)
+      box.setAttribute('aria-checked', on ? 'true' : 'false')
     }
-    this.syncCheckboxes()
     this.renderBar()
   }
 
-  /** Toggle one label in the multi-select set. */
-  private toggle(label: string): void {
-    if (this.checked.has(label)) this.checked.delete(label)
-    else this.checked.add(label)
-    this.syncCheckboxes()
+  /** Toggle one row：状态直接落在行元素上，随后由 CSS 呈现（无二次同步步骤）。 */
+  private toggle(row: HTMLElement): void {
+    const label = rowLabel(row)
+    const on = !row.hasAttribute(ON_ATTR)
+    if (on) {
+      row.setAttribute(ON_ATTR, '')
+      this.checked.add(label)
+    } else {
+      row.removeAttribute(ON_ATTR)
+      this.checked.delete(label)
+    }
+    row.querySelector<HTMLElement>('[' + CHECK_ATTR + ']')
+      ?.setAttribute('aria-checked', on ? 'true' : 'false')
     this.renderBar()
   }
 
   /**
-   * 把集合状态回写到 DOM 复选框（0.13.8 修复）：check 手势被 preventDefault 掉之后，
-   * 原生状态翻转不会发生，视觉必须由这里补上；每次 enhance 后也走一遍，
-   * 免得上游重渲染列表时把已选行画成未选（状态源始终是 `checked` 集合，DOM 只是投影）。
+   * 底部条的关键样式内联写入：`style.setProperty(..., 'important')` 的优先级高于任何样式表规则
+   * （含上游对 `button` 的默认样式——真机实测过一次「白底白字」正是这个原因）。
+   * 颜色不取 `--dsw-alias-brand-primary`（深色下近白），用显式品牌蓝。
    */
-  private syncCheckboxes(): void {
-    for (const row of document.querySelectorAll<HTMLElement>(ROW_SELECTOR)) {
-      const box = row.querySelector<HTMLInputElement>('[' + CHECK_ATTR + ']')
-      if (box === null) continue
-      const label = box.getAttribute(CHECK_ATTR) ?? ''
-      box.checked = this.checked.has(label)
-    }
-  }
-
-  /**
-   * 关键样式内联写入（0.13.8 修复「按键没做深色适配」）：`style.setProperty(..., 'important')`
-   * 的优先级高于任何样式表规则（含上游的 button 默认样式），是唯一稳的落法。
-   * 颜色优先取主题 token，取不到时按当前深浅色给品牌蓝/白字（蓝底白字在两种主题下都可读）。
-   */
-  private applyBarStyles(bar: HTMLElement, count: HTMLElement, add: HTMLButtonElement): void {
+  private applyBarStyles(bar: HTMLElement, count: HTMLElement, add: HTMLElement): void {
     const set = (el: HTMLElement, prop: string, value: string): void => {
       el.style.setProperty(prop, value, 'important')
     }
@@ -236,13 +252,12 @@ export class ReferenceMenuEnhancer {
     set(bar, 'gap', '8px')
     set(bar, 'align-items', 'center')
     set(bar, 'justify-content', 'space-between')
-    set(bar, 'padding', '8px 10px')
+    set(bar, 'padding', '8px 12px')
     set(bar, 'border-top', '1px solid var(--dsw-alias-border-l1, ' + (dark ? '#2a2b30' : '#e5e5e5') + ')')
     set(bar, 'background', 'var(--dsw-alias-bg-l1, ' + (dark ? '#17181c' : '#ffffff') + ')')
     set(count, 'font-size', '13px')
     set(count, 'color', 'var(--dsw-alias-text-l2, ' + (dark ? '#9aa0a6' : '#5f6368') + ')')
-    // 按钮：显式品牌蓝 + 白字，且用 important 压过上游 button 默认样式（真机实测的根因）
-    set(add, 'background-color', '#4d6bfe')   // 见文件头：该 token 深色下近白，不能当按钮底色
+    set(add, 'background-color', BRAND)
     set(add, 'background-image', 'none')
     set(add, 'color', '#ffffff')
     set(add, 'border', 'none')
@@ -251,7 +266,6 @@ export class ReferenceMenuEnhancer {
     set(add, 'font-size', '13px')
     set(add, 'font-weight', '500')
     set(add, 'line-height', '1.4')
-    set(add, 'min-width', '64px')
     set(add, 'appearance', 'none')
   }
 
@@ -282,6 +296,7 @@ export class ReferenceMenuEnhancer {
   private async addSelected(): Promise<void> {
     const labels = [...this.checked]
     this.checked.clear()
+    document.querySelectorAll('[' + ON_ATTR + ']').forEach((el) => { el.removeAttribute(ON_ATTR) })
     document.querySelector<HTMLElement>('[' + BAR_ATTR + ']')?.remove()
     for (const label of labels) {
       if (!(await this.pickByLabel(label))) return
@@ -308,7 +323,7 @@ export class ReferenceMenuEnhancer {
     return true
   }
 
-  /** The row whose candidate label matches, ignoring the checkbox we injected. */
+  /** The row whose candidate label matches. */
   private findRow(label: string): HTMLElement | null {
     for (const row of document.querySelectorAll<HTMLElement>(ROW_SELECTOR)) {
       if (rowLabel(row) === label) return row
