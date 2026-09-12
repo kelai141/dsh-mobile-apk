@@ -36,6 +36,12 @@ DeepSearch), package `com.dsharnessmobile.shell`, version `0.13.0-fx-1` (version
   poll + crash auto-rollback gate (UndoGate).
 - **Online runtime updates** — manifest-driven snapshot swap (download → sha256 → atomic switch →
   auto-restart); the running runtime can update itself without an APK update.
+- **APK self-update (0.13.8)** — the startup screen's "check for updates" button, manual only
+  (**never automatic**): queries the GitHub latest release, matches the asset for the device ABI and
+  downloads it through a mirror chain. When a newer version exists the **same button** turns into
+  "download and install vX.Y.Z" as a second confirmation; after the download the system
+  "install unknown apps" screen is opened on first use, then the system installer (signature
+  mismatch is rejected by the system; the app never installs anything silently).
 - **SAF bridge** — `pickDirectory` maps the picked tree to a real path (`/storage/emulated/0/…`).
 - **Device access** — All Files Access; Shizuku probe example.
 - **ADB real channel (0.13.0)** — real `adb pair` SPAKE2 handshake + NSD/mDNS port discovery,
@@ -136,14 +142,41 @@ Test trigger: `adb shell am start -n com.dsharnessmobile.shell/.MainActivity -a 
 status is written to `files/update-status.txt`. Test server: serve `manifest.json` + the snapshot from any
 local HTTP server (default endpoint `http://10.0.2.2:8899/manifest.json` maps the host from the emulator).
 
+## APK self-update protocol (0.13.8)
+
+Fully separate from the runtime snapshot update above (`UpdateChecker` vs `UpdateManager`); this one
+handles the APK itself:
+
+1. **Manual only** — triggered by the startup screen's "check for updates" button, never automatically
+   (no background behavior around a 160MB asset);
+2. **Metadata** — `api.github.com/repos/kelai141/dsh-mobile-apk/releases/latest`, direct with 10/15s
+   timeouts; failures report the real reason (HTTP code / exception) and do **not** block the existing
+   snapshot-update check (the same button then runs it);
+3. **Asset match** — `dsh-mobile-apk-v<version>-<abi>.apk` with the ABI taken from `SUPPORTED_ABIS[0]`
+   (the device's native ABI; ARM-translated x86 devices report `x86_64,arm64-v8a,x86` and a naive
+   "any arm64" rule downloads the wrong package);
+4. **Version compare** — tag vs `BuildConfig.VERSION_NAME` (minus any `-SN-*` snapshot suffix), compared
+   digit-group by digit-group, covering both semver and the `0.13.7fx-N` revision naming;
+5. **Mirror-chain download** — `github.com` direct → `gh-proxy.com` → `ghfast.top`, landing in
+   `Documents/dshdata/updates/` (already inside the FileProvider mapping), `.tmp` → rename atomic;
+   verified against the `.sha256` asset when present (mismatch deletes the file and reports); an already
+   downloaded, verified package is reused instead of re-downloading after an interrupted permission flow;
+6. **Install** — without the "install unknown apps" grant the system settings screen is opened first
+   (the install resumes on `onResume` after granting), then a FileProvider URI + `ACTION_VIEW` opens the
+   system installer; a signature mismatch is rejected by the system. Nothing is ever installed silently.
+
+This is the shell's only external HTTP egress (every other shell-side HTTP call is same-origin to the
+local engine at `127.0.0.1:3080`) and it only fires on an explicit user tap.
+
 ## Permissions
 
 | permission | purpose |
 |---|---|
-| `INTERNET` | WebView + engine probe |
+| `INTERNET` | WebView + engine probe + APK self-update (manual only) |
 | `POST_NOTIFICATIONS` | notification channel (runtime request on API 33+) |
 | `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_DATA_SYNC` | keep-alive foreground service |
 | `MANAGE_EXTERNAL_STORAGE` | All Files Access (external workspace requirement; special permission, user-granted) |
+| `REQUEST_INSTALL_PACKAGES` | open the system installer for a downloaded update (0.13.8; the user must grant "install unknown apps" in system settings) |
 
 SAF picking needs no permission.
 

@@ -255,6 +255,8 @@ class MainActivity : ComponentActivity() {
     }
     // M3：从系统授权页返回——上次 pick 因缺权限挂起时按授权结果续启/结算（迁至 DirectoryPickerController）。
     dirPickerController.settlePendingOnResume()
+    // 0.13.8 批 H：从「安装未知应用」授权页返回——已授权则续继 APK 更新包的安装。
+    guideRenderer.settlePendingInstall()
   }
 
   /** 窗口重新获得焦点时重应用沉浸式（系统栏 flag 会随焦点变化被重置）。 */

@@ -17,7 +17,7 @@
 //
 // 用法：node scripts/check-patch-mirror.mjs [--self] [--peer <dir>]
 // 退出码：0 = 全部通过；1 = 失败（构建链与 CI 以此拒打包/拒合并）。
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs'
 import { join, dirname, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -137,6 +137,26 @@ if (peer) {
     check('tests/ 共有文件逐字节一致', badContent.length === 0, `内容漂移: [${badContent.join(', ')}]`)
   } catch (e) {
     check('tests/ 目录可枚举', false, String(e).slice(0, 200))
+  }
+  // 门禁链自身也在镜像面（0.13.8 批 H 补线）：build-apk-013.ps1 与两个常驻门禁脚本
+  // 单边演进同样造成「云端自包含构建跑旧门禁/旧脚本」的幽灵面——本仓曾出现
+  // bounded-io 门禁只落在 apk 兜、协调仓脚本仍带 Join-Path 拼写缺陷而无人察觉。
+  // 对端缺该文件时跳过（apk 仓独占脚本合法）。
+  const MIRROR_TOP = [
+    'scripts/build-apk-013.ps1',
+    'scripts/check-manifest-hardening.mjs',
+    'scripts/check-bounded-io.mjs',
+  ]
+  for (const rel of MIRROR_TOP) {
+    const theirs = join(peer, rel)
+    if (!existsSync(theirs)) { console.log(`SKIP  镜像一致: ${rel}（对端无此文件）`); continue }
+    try {
+      const r = cmp(join(ROOT, rel), theirs)
+      check(`镜像一致: ${rel}`, r !== 'content', r === 'eol' ? '仅行尾差异（见告警）' : undefined)
+      if (r === 'eol') eolWarns.push(rel)
+    } catch (e) {
+      check(`镜像一致: ${rel}`, false, String(e).slice(0, 200))
+    }
   }
   if (eolWarns.length > 0) {
     console.log(`WARN  仅行尾差异（git blob 层一致则无碍；本机为工作树 autocrlf 噪声）: [${eolWarns.join(', ')}]`)
