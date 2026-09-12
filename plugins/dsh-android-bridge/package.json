@@ -25,25 +25,25 @@
   "private": true,
   "scripts": {
     "build": "tsc -p . && tsc -p tsconfig.client.json --noEmit && node build-client.mjs",
-    "typecheck": "tsc -p . --noEmit && tsc -p tsconfig.client.json --noEmit"
+    "typecheck": "tsc -p . --noEmit && tsc -p tsconfig.client.json --noEmit",
+    "test": "npm run build && node --test test/control.test.mjs test/protocol-negotiation.test.mjs"
   },
-  "dependencies": {},
   "peerDependencies": {
-    "@deepseek-ai/dsh-tools": "^0.1.1-rc.2",
     "@deepseek-ai/cordis": "4.0.1",
-    "@deepseek-ai/schemastery": "3.18.1",
     "@deepseek-ai/dsh-client-runtime": "^0.1.1-rc.2",
-    "@deepseek-ai/dsh-client-ui-slots": "^0.1.1-rc.2",
     "@deepseek-ai/dsh-client-ui-settings": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-tools": "^0.1.1-rc.2",
+    "@deepseek-ai/schemastery": "3.18.1",
     "react": "^18.2.0"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-tools": "0.1.1-rc.2",
     "@deepseek-ai/cordis": "4.0.1",
-    "@deepseek-ai/schemastery": "3.18.1",
     "@deepseek-ai/dsh-client-runtime": "0.1.1-rc.2",
-    "@deepseek-ai/dsh-client-ui-slots": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-ui-settings": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-tools": "0.1.1-rc.2",
+    "@deepseek-ai/schemastery": "3.18.1",
     "@types/node": "^24.0.0",
     "@types/react": "~18.3.1",
     "esbuild": "^0.25.0",

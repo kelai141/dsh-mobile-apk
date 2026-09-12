@@ -148,6 +148,8 @@ if (peer) {
     'scripts/check-bounded-io.mjs',
     'scripts/check-protocol-v2.mjs',
     'scripts/gen-protocol-v2-fixture.mjs',
+    'scripts/profile-web.cordis.patch.yml',
+    'scripts/snapshot-config/engine-overlay.json',
   ]
   for (const rel of MIRROR_TOP) {
     const theirs = join(peer, rel)

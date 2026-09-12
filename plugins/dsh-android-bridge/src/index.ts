@@ -17,6 +17,7 @@ import { join, dirname } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
 import { decideControl, type ControlDecision, type ControlOp } from './control-policy.js'
+import { negotiateProtocol } from './control-queue.js'
 import {
   ControlQueue,
   controlTokenFrom,
@@ -434,7 +435,10 @@ export class AndroidPrivilegeService {
 
   /** 0.13.5 W4：队列统计（诊断用；不泄漏页面内容）。 */
   controlStats() {
-    return this.controlQueue?.stats() ?? { waiting: false, served: 0, failed: 0, lastTakeAt: 0, lastResultAt: 0 }
+    return this.controlQueue?.stats() ?? {
+      waiting: false, served: 0, failed: 0, lastTakeAt: 0, lastResultAt: 0,
+      protocol: negotiateProtocol(undefined), caps: undefined,
+    }
   }
 
   /**
@@ -545,6 +549,9 @@ export class AndroidPrivilegeService {
   }
 }
 
+/** 诊断面展示路由的常用操作（与工具面一一对应）。 */
+const ROUTE_OPS: ControlOp[] = ['snapshot', 'click', 'scroll', 'setText', 'screenshot', 'global']
+
 function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record<string, unknown>): Record<string, unknown>; run(spec: Record<string, unknown>): Promise<Record<string, unknown>> }, controlTokenConfigured: () => boolean = () => false) {
   const statusTool = defineTool({
     name: 'android_privilege_status',
@@ -571,6 +578,8 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
           message: { type: 'string' },
           gates: { type: 'object', additionalProperties: true, description: '结构化授权事实（a11yEnabled/fullAccess/allowSwitch/paired/wirelessDebug/adbReady）' },
           control: { type: 'object', additionalProperties: true, description: '控制通道运行时状态（a11yEnabled/queue/tokenConfigured）' },
+          route: { type: 'object', additionalProperties: true, description: '每个常用操作走哪条通道/为什么/另一条缺什么（结构化路由）' },
+          shell: { type: 'object', additionalProperties: true, description: '壳侧声明的协议版本与能力（caps.ops/view/gz）与协商结论' },
         },
       },
       render: (_args, v: Record<string, unknown>) => {
@@ -590,17 +599,51 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
               : gates?.adbReady ? '结论：设备控制可用（走 ADB 通道，仅兜底）——下一步用 android_ui_dump（无障碍优先）或 android_ui_tree（ADB）'
                 : '结论：不可用——开启任一通道即可（推荐无障碍：系统设置 → 无障碍 → DSH 设备控制，一步即用）',
             v.message ? `ADB 提示：${String(v.message)}` : '',
+            (() => {
+              const shell = v.shell as { protocol?: { shell?: number; engine?: number; ok?: boolean; reason?: string }; caps?: { ops?: unknown[] } | null } | undefined
+              if (!shell?.protocol) return ''
+              const p = shell.protocol
+              const capsOps = Array.isArray(shell.caps?.ops) ? (shell.caps!.ops as unknown[]).length : 0
+              return `壳侧协议：pv=${String(p.shell)}（引擎支持 ${String(p.engine)}）${p.ok ? '' : ' —— 不兼容：' + String(p.reason)}`
+                + (capsOps > 0 ? ` · 声明能力 ${capsOps} 项` : ' · 未声明能力（老壳）')
+            })(),
+            '路由（dump/click/scroll/input/screenshot/global）：'
+              + Object.entries((v.route ?? {}) as Record<string, { backend?: string }>)
+                .map(([op, r]) => `${op}=${String(r?.backend ?? '?')}`).join(' '),
           ].filter((line) => line !== '').join('\n'),
         }]
       },
     },
-    execute: async () => {
+    execute: async (_args, exec) => {
       const st = svc.status()
+      const session = (exec as { agent?: { session?: unknown } } | undefined)?.agent?.session
+      // 0.13.8 P2-15：结构化 route 块——每个常用操作**走哪条通道、为什么、另一条缺什么**。
+      // 以前这些判断只存在于代码路径里，模型只能靠「失败后猜」。
+      const route: Record<string, unknown> = {}
+      const facts = svc.gateFacts()
+      for (const op of ROUTE_OPS) {
+        const d = svc.controlDecision(op, session)
+        const altAdb = facts.adbReady === true
+        const altA11y = svc.a11yEnabled()
+        route[op] = {
+          backend: d.backend,
+          reason: d.reason,
+          alternative: d.backend === 'a11y'
+            ? { backend: 'adb', available: altAdb, missing: altAdb ? null : '完整访问档位 / 应用内允许访问开关 / 无线调试配对' }
+            : { backend: 'a11y', available: altA11y, missing: altA11y ? null : '系统设置 → 无障碍 → 开启「DSH 设备控制」' },
+        }
+      }
+      const queue = svc.controlStats()
       return {
         ...st,
         deviceModel: svc.boundModel(),
         gates: svc.gateFacts() as unknown as Record<string, JsonValue>,
-        control: { a11yEnabled: svc.a11yEnabled(), queue: svc.controlStats(), tokenConfigured: controlTokenConfigured() },
+        route: route as unknown as Record<string, JsonValue>,
+        shell: {
+          protocol: queue.protocol as unknown as JsonValue,
+          caps: (queue.caps ?? null) as unknown as JsonValue,
+        },
+        control: { a11yEnabled: svc.a11yEnabled(), queue: queue as unknown as JsonValue, tokenConfigured: controlTokenConfigured() },
       }
     },
   })
