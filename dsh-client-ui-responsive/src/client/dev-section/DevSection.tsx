@@ -10,6 +10,7 @@
  * back to the init screen (shell shutdownToGuide bridge).
  */
 import { useCallback, useEffect, useState } from 'react'
+import { useShellState } from '../mobile/use-shell-state.ts'
 import type { PropsRenderSlots, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: pulls in the settings.section owner share (erased at build time, types only).
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -19,6 +20,17 @@ import type {} from '../android-bridge.ts'
 /** Full section props: the settings shell supplies only `close`, plus the
  *  developer-options child seat (adb authorization panel et al) this section declares. */
 export type DevSectionProps = PropsRuntime<'settings.section'> & Partial<PropsRenderSlots<'settings.dev.item'>>
+
+/** 壳侧悬浮球开关真值回读（桥不可用/抛错 → false）。
+ *  ST-02（页侧半边）：壳侧 getOverlayEnabled() = 偏好 && 悬浮窗权限 && 服务实例在场，
+ *  权限缺失时偏好已回落 false —— 展示值只能以该回读为准，不得沿用上次的 UI 值。 */
+function readOverlayEnabled(): boolean {
+  try {
+    return window.androidBridge?.getOverlayEnabled?.() ?? false
+  } catch {
+    return false
+  }
+}
 
 const CONFIRM_TEXT: Record<'restart' | 'close', { title: string; desc: string; ok: string }> = {
   restart: {
@@ -39,7 +51,9 @@ const CONFIRM_TEXT: Record<'restart' | 'close', { title: string; desc: string; o
  * @returns the section element tree.
  */
 export function DevSection({ renderSlot }: DevSectionProps) {
-  const [devLog, setDevLog] = useState<boolean>(() => {
+  // ST-09：四处壳侧状态全部经 useShellState 订阅（挂载 + 可见/回前台重读 + 写后回读），
+  // 不再裸写一次性桥读 —— 组件内不得在 useState 初值器里直读 window.androidBridge。
+  const [devLog, refreshDevLog] = useShellState<boolean>(() => {
     try {
       return window.androidBridge?.getDevLogEnabled?.() ?? false
     } catch {
@@ -47,16 +61,17 @@ export function DevSection({ renderSlot }: DevSectionProps) {
     }
   })
   // 0.13.2 W7：悬浮球开关（壳侧持久化 + overlay 权限引导；未授权返回 false 并自动跳系统设置）。
-  const [overlayOn, setOverlayOn] = useState<boolean>(() => {
+  // ST-02：展示值一律以桥回读为准（壳侧 = 偏好 && 权限 && 服务在场），不做乐观置位。
+  const [overlayOn, refreshOverlay] = useShellState<boolean>(readOverlayEnabled)
+  const [overlayMsg, setOverlayMsg] = useState<string | null>(null)
+  const [restarting, setRestarting] = useState(false)
+  const [allFiles] = useShellState<boolean>(() => {
     try {
-      return window.androidBridge?.getOverlayEnabled?.() ?? false
+      return window.androidBridge?.hasAllFilesAccess?.() ?? false
     } catch {
       return false
     }
   })
-  const [overlayMsg, setOverlayMsg] = useState<string | null>(null)
-  const [restarting, setRestarting] = useState(false)
-  const [allFiles, setAllFiles] = useState<boolean | null>(null)
   const [confirm, setConfirm] = useState<'restart' | 'close' | null>(null)
   // F5.1/D15（2026-08-23 补齐）：文件直达临时工作区占用 + 一键清理（R16 手动清理 + 占用展示）
   const [incomingBytes, setIncomingBytes] = useState<number | null>(null)
@@ -65,7 +80,12 @@ export function DevSection({ renderSlot }: DevSectionProps) {
 
   const refreshIncoming = useCallback(async () => {
     try {
-      const r = await fetch('/api/android/file-incoming')
+      // FX-205.6：端点带插件侧鉴权——浏览器面凭据是 same-origin 会话 cookie，必须显式声明。
+      const r = await fetch('/api/android/file-incoming', { credentials: 'same-origin', cache: 'no-store' })
+      if (r.status === 401 || r.status === 403) {
+        setIncomingMsg('未获授权（HTTP ' + r.status + '）——来件状态不可读')
+        return
+      }
       if (r.ok) {
         const j = (await r.json()) as { bytes?: number }
         setIncomingBytes(typeof j.bytes === 'number' ? j.bytes : null)
@@ -79,13 +99,32 @@ export function DevSection({ renderSlot }: DevSectionProps) {
     void refreshIncoming()
   }, [refreshIncoming])
 
+  // 来件占用的可见/回前台刷新（F5 消费端同款路径）。壳侧状态的同类重读由 useShellState 负责。
+  useEffect(() => {
+    const onVisible = (): void => {
+      if (document.visibilityState !== 'visible') return
+      void refreshIncoming()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('focus', onVisible)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('focus', onVisible)
+    }
+  }, [refreshIncoming])
+
   const cleanIncoming = useCallback(async () => {
     setCleaning(true)
     setIncomingMsg(null)
     try {
-      const r = await fetch('/api/android/file-incoming/clean', { method: 'POST' })
+      const r = await fetch('/api/android/file-incoming/clean', { method: 'POST', credentials: 'same-origin', cache: 'no-store' })
+      if (r.status === 401 || r.status === 403 || r.status === 405) {
+        setIncomingMsg('清理未获授权（HTTP ' + r.status + '）——仅限本机壳侧/已授权页面')
+        return
+      }
       const j = (await r.json().catch(() => null)) as { ok?: boolean; removed?: number } | null
-      setIncomingMsg(j?.ok ? `已清空临时工作区（${j.removed ?? 0} 项）——相关会话中的文件引用将失效` : '清理失败')
+      // FX-205.5：清理范围收敛为「本工具自有临时项」，用户放入工作区的文件不再被删。
+      setIncomingMsg(j?.ok ? `已清理本工具临时项（${j.removed ?? 0} 项）——相关会话中的文件引用将失效` : '清理失败')
     } catch {
       setIncomingMsg('清理请求失败（仅安卓宿主可用）')
     } finally {
@@ -99,14 +138,6 @@ export function DevSection({ renderSlot }: DevSectionProps) {
     if (n >= 1024) return (n / 1024).toFixed(1) + ' KB'
     return n + ' B'
   }
-
-  useEffect(() => {
-    try {
-      setAllFiles(window.androidBridge?.hasAllFilesAccess?.() ?? false)
-    } catch {
-      setAllFiles(false)
-    }
-  }, [])
 
   const askRestart = useCallback(() => setConfirm('restart'), [])
   const askClose = useCallback(() => setConfirm('close'), [])
@@ -149,22 +180,26 @@ export function DevSection({ renderSlot }: DevSectionProps) {
   }, [])
 
   const toggleLog = useCallback((enabled: boolean) => {
-    setDevLog(enabled)
     try {
       window.androidBridge?.setDevLogEnabled?.(enabled)
     } catch {
       /* bridge absent: nothing to do */
     }
-  }, [])
+    // 写后回读（§4.5 七模式之五）：展示值 = 壳侧真值，不做乐观置位
+    // （ST-11 落地后 getDevLogEnabled = 偏好 && 采集器在跑，回读即真实采集状态）。
+    refreshDevLog()
+  }, [refreshDevLog])
 
   // 0.13.2 W7：悬浮球开关（实时查看 AI 工具调用 + 停止）。
   const toggleOverlay = useCallback((enabled: boolean) => {
-    setOverlayOn(enabled)
     setOverlayMsg(null)
     try {
       const started = window.androidBridge?.setOverlayEnabled?.(enabled) ?? false
+      // ST-02：开关以桥回读为准（权限缺失时壳侧偏好已回落 false），不再乐观置位；
+      // 「返回后自动生效」因此不再成立——必须回前台重读 + 用户重新打开开关。
+      refreshOverlay()
       if (enabled && !started) {
-        setOverlayMsg('未授予悬浮窗权限——已打开系统授权页，返回后自动生效（也可在开发者选项重新开关）')
+        setOverlayMsg('已打开系统授权页；授予后请重新打开本开关')
       } else if (enabled) {
         setOverlayMsg('悬浮球已开启：任意界面可拖拽；点开面板实时查看工具调用，可一键停止')
       } else {
@@ -173,7 +208,7 @@ export function DevSection({ renderSlot }: DevSectionProps) {
     } catch {
       setOverlayMsg('桥不可用（仅安卓宿主支持悬浮球）')
     }
-  }, [])
+  }, [refreshOverlay])
 
   // 0.13.1 W4：配置导入/导出（安全手改通道——引擎读私有目录，外部改共享副本无效）。
   const [configMsg, setConfigMsg] = useState<string | null>(null)

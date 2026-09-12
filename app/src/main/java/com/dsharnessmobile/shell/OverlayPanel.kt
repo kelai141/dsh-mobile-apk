@@ -80,7 +80,10 @@ class OverlayPanel(private val svc: OverlayService) {
   }
 
   internal fun startMux() {
-    mux = MuxClient("127.0.0.1", 3080, "/api/remote.mux") { text -> handleMuxFrame(text) }
+    // 0.14.0-preview：MuxClient 末位新增可选参数 streamId（默认 = 本流 dsh-overlay-events）。
+    // Kotlin 的尾随 lambda 绑定**最后一个**形参，所以这里必须把 onFrame 显式写在括号内
+    // （写成 MuxClient(...) { } 会把 lambda 当成 streamId，编译期直接报错）。
+    mux = MuxClient("127.0.0.1", 3080, "/api/remote.mux", { text -> handleMuxFrame(text) })
   }
 
   private fun handleMuxFrame(text: String) {

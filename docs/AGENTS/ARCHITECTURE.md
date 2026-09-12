@@ -15,7 +15,7 @@
 | DownloadSaver.kt | 244 | 引擎源下载落盘（exports 优先/MediaStore 回退）+ 外链系统浏览器打开 | MainActivity、DebugLogExporter |
 | WebUiChrome.kt | 178 | 窗口 UI chrome：沉浸式/textZoom/剪贴板/常亮/主题推送 | MainActivity |
 | FileIncoming.kt | 279 | 外部来件（VIEW/SEND）校验净化→临时工作区→通知引擎；TTL 清扫 | MainActivity、EngineService |
-| AndroidBridge.kt | 264 | 全部 @JavascriptInterface 桥（window.androidBridge，31 方法）+ resolvePickedPath | MainActivity（addJavascriptInterface 唯一注册点 :394） |
+| AndroidBridge.kt | 264 | 全部 @JavascriptInterface 桥（window.androidBridge，35 方法；0.14.0-preview 实测计数，0.13.x 文档写 31 已失真）+ resolvePickedPath | MainActivity（addJavascriptInterface 唯一注册点 :394） |
 
 注入方向：MainActivity 字段初始化阶段 `by lazy`/直接构造各协作类并传 `this`（如 `engineFlow = EngineStartFlow(this)`，MainActivity.kt:64-76）；ActivityResult 注册必须在 STARTED 前，故 dirPickerController/mediaPickerController 为字段直接构造（MainActivity.kt:71-74）。协作类只回调 MainActivity 的 internal 方法（如 `activity.applyGuidePhase`），不持有彼此。
 

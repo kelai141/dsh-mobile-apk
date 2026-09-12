@@ -10,7 +10,9 @@ import org.json.JSONObject
  * - 列式而非行式：同一字段的所有值放一个数组，不重复字段名（V1 每节点 428 B，其中约 300 B 是键名）；
  * - 符号表：字符串只发一次，行里发整数下标（-1 = 空串）；
  * - 常数广播：除 `b`/`str` 外，整列同值且 n>1 时只发 1 个元素；
- * - 整数句柄：句柄 = 行下标，不单独发 id（`id:nN` 语义不变）；
+ * - 整数句柄：句柄 = **原始行号**（随 `o` 列显式发出，载荷行下标只是列内位置），不单独发 id
+ *   （`id:nN` 语义不变）；壳侧 `resolveTarget` 用 `snapshot.rows[handle]` 索引**全量行表**，
+ *   故句柄必须是 walk 全量行号而不是压缩后的载荷下标（FX-206.1：探针 393→86 行下 86/86 全错位）；
  * - 真树 DFS 前序 + 整数深度 + 最近可操作祖先行句柄（祖先回退从走链变查表）。
  *
  * 实测（探针 393 节点 / 147,588 B）：回填报文 36,931 B → 4,704 B（7.85x），
@@ -34,10 +36,21 @@ object ControlProtocolV2 {
   const val F_SELECTED = 64
   const val F_ENABLED = 128
 
-  /** 壳侧支持的 op 列表——**唯一来源**：handle 的 when 与 `caps.ops` 共用（§S4.2）。 */
+  /** 壳侧支持的 op 列表——**唯一来源**：handle 的 when 与 `caps.ops` 共用（§S4.2）。
+   *
+   * 末两组（browser* / vd*）是「六面登记链已冻结、壳侧实现未落地」的 op：白名单与 handle 分支
+   * 必须在场（handle 侧 fail-closed 返回结构化「暂不支持」），否则引擎侧按白名单判「支持」而壳侧
+   * 落进 `else -> error("未知操作")`——诊断面无法区分「名字打错」与「尚未实现」。两组都**不进
+   * 无障碍通道**（契约 neverA11y；见 plugins/dsh-android-browser/src/contract.ts /
+   * plugins/dsh-android-vdisplay/src/status.ts 与 scripts/control-ops-pending.json）。 */
   val SUPPORTED_OPS = listOf(
     "snapshot", "click", "longClick", "setText", "scroll", "global",
     "screenshot", "state", "nodeText", "webSnapshot", "webAction",
+    // 侧栏浏览器宿主半（browser*）
+    "browserCaps", "browserShow", "browserHide", "browserOpen", "browserJs",
+    "browserInput", "browserShot", "browserState", "browserSetUa", "browserViewport",
+    // 虚拟屏特权通道（vd*）
+    "vdCreate", "vdDestroy", "vdLaunch", "vdMoveTask", "vdInfo",
   )
 
   /**
@@ -123,6 +136,7 @@ object ControlProtocolV2 {
     }
 
     // 4. 行集 + 仅叶子去重（DD-5）：骨架连接点（有后代者）永不参与去重 ⇒ 深度跳变 0%、最大跳 1
+    //    out[fi] = **原始行号**（walk 全量行表下标），作为 `o` 列发出；不可用 fi 当句柄。
     val out = ArrayList<Int>(n)
     val seenKeys = HashSet<String>()
     for (i in 0 until n) {
@@ -192,6 +206,9 @@ object ControlProtocolV2 {
       .put("d", broadcast(d))
       .put("p", broadcast(p))
       .put("b", JSONArray(b as Collection<*>)) // 长度固定 4n，不广播（§S2.3）
+      // FX-206.1：载荷行下标 → 原始行号映射（动作回指句柄）。非广播列（严格递增），
+      // 只有 n=1 时长度为 1；引擎侧 decodeV2 缺该列即失败关闭。
+      .put("o", broadcast(out))
       .put("f", broadcast(f))
       .put("c", broadcast(c))
       .put("k", broadcast(k))

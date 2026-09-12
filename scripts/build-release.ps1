@@ -1,7 +1,8 @@
 param(
   [string]$Version = "",
   [string]$Gradle = "gradle",          # gradle command (accepts a GRADLE_USER_HOME-aware wrapper)
-  [switch]$SkipGitCheck                 # skip the git dirty-state gate (emergency releases only)
+  [switch]$SkipGitCheck,                # skip the git dirty-state gate (emergency releases only)
+  [switch]$GatesOnly                    # 只跑到门禁段（0.13.8-b：验收/本地核验用，不做插件构建与打包）
 )
 # build-release.ps1 v2.1 - dual-ABI release build (release/v<v>/{apk,snapshot,plugins}/ + gates)
 # Spec: release/README.md; host injection: plugin builds are injected into both snapshots (prevents "fix not compiled into user env")
@@ -26,6 +27,19 @@ if (-not $SkipGitCheck) {
   }
   Write-Output "== git 工作区干净（4 仓库）"
 }
+
+# 0b) 门禁聚合入口（0.13.8-b 批 B2 FX-208.E2 发布链 / F-ENV-13）：发布组装必须跑与打包**同源**的
+#     门禁集，而不是只跑机密与 elf（这是 issue #208 的四条漏网路径之一）。
+#     先跑静态接线断言（某条链漏接任一门禁立刻中止），再执行门禁集。
+$gateAgg = Join-Path $root "scripts\check-release-gates.mjs"
+Write-Output "== 发布门禁接线断言（唯一接线面聚合入口）=="
+node $gateAgg
+if ($LASTEXITCODE -ne 0) { throw "发布门禁接线断言失败，中止组装" }
+Write-Output "== 发布门禁集执行（与打包同源）=="
+# ST-31：发布链要求 SKIP=0——--require 让每个支持它的门禁把 SKIP 判为失败（不得以 SKIP 结案）。
+node $gateAgg --run --require --snapshot-dir (Join-Path $root "dsh-mobile-apk\snapshot")
+if ($LASTEXITCODE -ne 0) { throw "发布门禁未通过，中止组装" }
+if ($GatesOnly) { Write-Output "== -GatesOnly：门禁段结束（未做插件构建与打包）=="; exit 0 }
 
 # 0) Version (default: the APK versionName)
 $apkVer = (Select-String -Path (Join-Path $root "dsh-mobile-apk\app\build.gradle.kts") -Pattern 'versionName = "([^"]+)"').Matches.Groups[1].Value
@@ -116,6 +130,9 @@ foreach ($abi in @(@{n='arm64-v8a'; f=$armSnap}, @{n='x86_64'; f=$x86Snap})) {
   $fpPath = Join-Path $root "dsh-mobile-apk\app\src\main\assets\snapshot.sha256"
   $fpValue = (Get-FileHash $abi.f -Algorithm SHA256).Hash.ToLower()
   [IO.File]::WriteAllText($fpPath, $fpValue)
+  # ST-04 严格复核：本 ABI 的快照与刚写入的指纹必须逐字节一致（--require：缺件即失败，不得 SKIP）。
+  node (Join-Path $root "scripts\check-snapshot-fingerprint.mjs") --require
+  if ($LASTEXITCODE -ne 0) { throw ("快照指纹对账失败（" + $abi.n + "）：tar 与声明值不一致，中止组装") }
   Push-Location (Join-Path $root "dsh-mobile-apk")
   & $Gradle assembleDebug --offline --no-daemon --rerun-tasks 2>$null | Out-Null
   if ($LASTEXITCODE -ne 0) { throw ("APK build failed (" + $abi.n + ")") }
@@ -124,10 +141,11 @@ foreach ($abi in @(@{n='arm64-v8a'; f=$armSnap}, @{n='x86_64'; f=$x86Snap})) {
   Copy-Item $apk.FullName (Join-Path $apkDir ("dsh-mobile-apk-v" + $Version + "-" + $abi.n + ".apk")) -Force
 }
 
-# 4) Snapshot security gate
-& (Join-Path $root "scripts\check-snapshot-secrets.ps1") $armSnap
+# 4) Snapshot security gate（ST-06 / F-ENV-08 口径：机密门禁只有一份被调用的实现 = .mjs 跨平台版；
+# 旧 .ps1 走 cmd /c tar，$LASTEXITCODE 反映 cmd 尾命令而非脚本 exit 码，只能靠输出标记判定）
+node (Join-Path $root "scripts\check-snapshot-secrets.mjs") $armSnap
 if ($LASTEXITCODE -ne 0) { throw "arm64 快照安全门禁未通过，发布中止" }
-& (Join-Path $root "scripts\check-snapshot-secrets.ps1") $x86Snap
+node (Join-Path $root "scripts\check-snapshot-secrets.mjs") $x86Snap
 if ($LASTEXITCODE -ne 0) { throw "x86_64 快照安全门禁未通过，发布中止" }
 
 # 5) sha256 manifest + notes template

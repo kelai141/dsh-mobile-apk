@@ -295,7 +295,10 @@
     "@deepseek-ai/dsh-workflow-worker-thread": "0.1.5-rc.1",
     "@deepseek-ai/dsh-workspace": "0.1.5-rc.1",
     "@deepseek-ai/schemastery": "3.18.2",
-    "@deepseek-ai/node-addon-system": "0.1.2"
+    "@deepseek-ai/node-addon-system": "0.1.2",
+    "commander": "15.0.0",
+    "js-yaml": "4.3.1",
+    "node-addon-require-builtin": "0.1.5"
   },
   "vendorTop": {
     "@anthropic-ai/sdk": "0.123.0",
@@ -358,5 +361,14 @@
     "@deepseek-ai/dsh-host-apiproxy (0.1.1-rc.2)",
     "@deepseek-ai/dsh-tool-subagent-report (0.1.1-rc.2)",
     "@deepseek-ai/node-addon-landlock-run (0.1.1)"
-  ]
+  ],
+  "extraPresent": [
+    "@img/sharp-wasm32",
+    "@mistralai/mistralai",
+    "@vscode/ripgrep-android-arm64",
+    "@vscode/ripgrep-android-x64",
+    "clsx",
+    "scheduler"
+  ],
+  "extraPresentNote": "随 overlay 落地但不在 packages 版本钉面上的包（平台可选依赖 / 客户端面传递依赖；依赖闭包不可达）。反向面门禁（check-engine-overlay.mjs，ST-17）要求：快照内每个包必须「已登记」或「由已登记包经 dependencies/optionalDependencies/peerDependencies 闭包可达」——不在两者内的包必须在此显式登记，否则判红。"
 }

@@ -35,15 +35,20 @@ class MuxClient(
   private val port: Int,
   private val path: String,
   private val onFrame: (String) -> Unit,
+  /** $events 流的 streamId（gateway 仅要求非空字符串；单连接内唯一即可）。
+   *  默认 = 既有悬浮球流；通知应答器用 dsh-notify-responder 另开一条（§6.3.1）。 */
+  streamId: String = STREAM_ID,
 ) {
   companion object {
     private const val TAG = "dsh-overlay-mux"
     private const val GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
     private const val MAX_FRAME = 8 * 1024 * 1024
-    /** $events 流的 streamId（gateway 仅要求非空字符串；进程唯一即可）。 */
-    private const val STREAM_ID = "dsh-overlay-events"
-    private const val STREAM_OPEN = "{\"type\":\"open\",\"streamId\":\"$STREAM_ID\",\"endpoint\":\"\$events\",\"payload\":{\"args\":{}}}"
+    /** $events 流的默认 streamId（悬浮球）。 */
+    const val STREAM_ID = "dsh-overlay-events"
   }
+
+  private val streamOpen =
+    "{\"type\":\"open\",\"streamId\":\"" + streamId + "\",\"endpoint\":\"\$events\",\"payload\":{\"args\":{}}}"
 
   @Volatile
   private var running = true
@@ -105,11 +110,22 @@ class MuxClient(
         }
       }
     }
-    if (!status.contains(" 101")) throw Exception("handshake refused: $status")
+    val code = muxHandshakeStatusCode(status)
+    if (code != 101) {
+      // ST-13（F-APK-03）：握手被拒走的是同一道 cookie 栅栏（connection.requestRejection）。
+      // 旧实现只 throw：重连循环会拿着**服务端已作废、本地却仍未过期**的 cookie 无限重试
+      // （EngineAuth.stillValid 只看 expiresAt），表现为「手动失效 cookie 后审批卡/提问卡
+      // 再也不弹，必须重启 App」。现在按状态码走 handleUnauthorized：丢缓存 + 强制刷新。
+      if (muxRefusalNeedsAuthRefresh(code)) {
+        Log.w(TAG, "mux handshake refused " + code + ": invalidating + refreshing engine cookie")
+        EngineAuth.handleUnauthorizedBound()
+      }
+      throw Exception("handshake refused: $status")
+    }
     if (accept != expectedAccept(key)) throw Exception("bad sec-websocket-accept")
     // 连上即 open $events 流（服务端无 open 不会转发任何事件）
-    sendFrame(out, 0x1, STREAM_OPEN.toByteArray(Charsets.UTF_8))
-    Log.i(TAG, "mux connected ($path, \$events open)")
+    sendFrame(out, 0x1, streamOpen.toByteArray(Charsets.UTF_8))
+    Log.i(TAG, "mux connected ($path, \$events open, streamId=" + streamOpen.length + "b)")
     frameLoop(ins, out)
   }
 
@@ -197,3 +213,20 @@ class MuxClient(
     } catch (_: Exception) {}
   }
 }
+
+/**
+ * ST-13（F-APK-03）：握手响应行 → HTTP 状态码。解析不出返回 0（= 不按鉴权失败处理，
+ * 仍走既有 throw + 退避重连）。
+ */
+internal fun muxHandshakeStatusCode(statusLine: String): Int {
+  val parts = statusLine.trim().split(' ')
+  if (parts.size < 2) return 0
+  return parts[1].toIntOrNull() ?: 0
+}
+
+/**
+ * ST-13：哪些非 101 状态码表示「cookie 被服务端作废」——必须丢 cookie 并强制刷新一次
+ * （401 Unauthorized / 403 Forbidden；407 是代理鉴权，本机 loopback 直连不会出现）。
+ * 其余非 101（如 404 path 变更、500 网关异常）与 cookie 无关，刷新只会白白换一次 cookie。
+ */
+internal fun muxRefusalNeedsAuthRefresh(code: Int): Boolean = code == 401 || code == 403

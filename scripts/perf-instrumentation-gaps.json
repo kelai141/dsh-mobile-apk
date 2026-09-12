@@ -1,0 +1,4 @@
+{
+  "$comment": "启动性能 §7.2 的壳侧声明缺口台账（0.13.8-b B2，No-Go 台账）。A1 不由本文件承载：两条路径都已落地（出厂 seed scripts/lib/profile-seed.mjs + 存量升级归一化 perf-patch-reload-N1），故 §9.4 的「未归一化不得按完成结案」对 A1 已解除。两条壳侧缺口（C1-uv-threadpool-size / startup-segment-instrumentation）已在 0.14.0-preview 的壳侧落地（P-AC-03 的 UV_THREADPOOL_SIZE 注入 + P-AC-04 的 t_boot_start / t_listen / t_compose_total 三字段），按本文件的纪律「实现后条目变 stale 即失败，强制当场删除并收口」，两条已删除；gaps 数组为空是合法终态（门禁打印「缺口台账 0 条」）。新增缺口仍按同格式追加。",
+  "gaps": []
+}

@@ -1,0 +1,79 @@
+{
+  "$comment": "控制 op 族的**所有权**与**待落地面**台账（0.13.8-b；Lead 裁决 2026-09-12）。两段：families=长期所有权（门禁据此按族校验：D 项排除族内 op，neverA11y/neverFaces 面不得出现该族 op，toolSurface 校验工具面 owner）；pending=短期待落地（stale 只按本条声明的 faces 判定；声明的面全部落地后必须删除该条，否则 FAIL）。faces=本批需要落地的面；neverFaces=按设计永不落地的面（A11Y_OPS=neverA11y；ROUTE_OPS 本批不落——诊断面列 neverA11y op 会播错误指引；manage=工具由各插件自注册）。",
+  "families": [
+    {
+      "id": "browser",
+      "source": "plugins/dsh-android-browser/src/contract.ts",
+      "symbol": "BROWSER_OPS",
+      "neverA11y": true,
+      "faces": [
+        "handle",
+        "SUPPORTED_OPS",
+        "ControlOp",
+        "toolSurface"
+      ],
+      "neverFaces": [
+        "A11Y_OPS",
+        "ROUTE_OPS",
+        "manage"
+      ],
+      "ops": [
+        "browserCaps",
+        "browserShow",
+        "browserHide",
+        "browserOpen",
+        "browserJs",
+        "browserInput",
+        "browserShot",
+        "browserState",
+        "browserSetUa",
+        "browserViewport"
+      ],
+      "toolSurface": {
+        "file": "plugins/dsh-android-browser/src/contract.ts",
+        "symbol": "BROWSER_OPS",
+        "note": "host 半的工具/op 契约面：BROWSER_OP_CONTRACTS 逐条引用 BROWSER_OPS.*（permission 档位同源）；manage 不承载这些工具。"
+      },
+      "reason": "侧栏 AI 浏览器宿主半的壳桥 op；契约注释明确「browser* 不进 A11Y_OPS」。ROUTE_OPS 本批不落（诊断面列 neverA11y op 会播错误指引）。",
+      "owner": {
+        "engine": "dev-gates / dev-incoming（ControlOp 联合；A11Y_OPS/ROUTE_OPS 不列）",
+        "shell": "dev-shell2（DeviceControlService.handle + ControlProtocolV2.SUPPORTED_OPS）"
+      }
+    },
+    {
+      "id": "vdisplay",
+      "source": "plugins/dsh-android-vdisplay/src/status.ts",
+      "symbol": "VD_OPS",
+      "neverA11y": true,
+      "faces": [
+        "handle",
+        "SUPPORTED_OPS",
+        "ControlOp",
+        "toolSurface"
+      ],
+      "neverFaces": [
+        "A11Y_OPS",
+        "ROUTE_OPS",
+        "manage"
+      ],
+      "ops": [
+        "vdCreate",
+        "vdDestroy",
+        "vdLaunch",
+        "vdMoveTask",
+        "vdInfo"
+      ],
+      "toolSurface": {
+        "file": "plugins/dsh-android-vdisplay/src/index.ts",
+        "symbol": "VD_OPS",
+        "note": "工具注册点在 src/index.ts（ctx.tools.register），op 名与状态面共用 src/status.ts 的 VD_OPS；manage 不承载这些工具。"
+      },
+      "reason": "虚拟屏 Shizuku 特权通道 op；像素合成在壳侧 SurfaceView（不经无障碍通道）。ROUTE_OPS 本批不落。",
+      "owner": {
+        "engine": "dev-gates / dev-incoming（ControlOp 联合；A11Y_OPS/ROUTE_OPS 不列）",
+        "shell": "dev-shell2（DeviceControlService.handle + ControlProtocolV2.SUPPORTED_OPS）"
+      }
+    }
+  ],
+  "pending": []
+}

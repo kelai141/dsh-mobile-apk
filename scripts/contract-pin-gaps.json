@@ -1,0 +1,68 @@
+{
+  "$comment": "版本钉未对齐的显式声明（0.13.8-b ST-06 / F-ENV-05）。§8.4 的依赖边要求「先对齐 peer 基线，再扩 contract.inserted」——本文件让门禁在保持红-able 的前提下不假绿：accepted = 当前事实值（^/~ 归一后），一旦偏离（改成另一个错值、或新增未声明偏离）即红；一旦真正对齐（accepted 项消失）同样即红（stale 条目），迫使删除本条目。对齐面在 plugins/** 与 dsh-* 插件仓（非构建链写域），对齐后逐条删除本文件条目。",
+  "gaps": [
+    {
+      "repo": "plugins/dsh-android-bridge",
+      "reason": "0.13.7 追上游 0.1.5-rc.1 时该插件未随版对齐（dev 钉 0.1.1-rc.2 / cordis 4.0.1 / schemastery 3.18.1）。运行时缺口由快照引擎树实际版本兜底；对齐属插件责任人（本方只读 plugins/**）。",
+      "accepted": [
+        "@deepseek-ai/cordis@4.0.1",
+        "@deepseek-ai/schemastery@3.18.1",
+        "@deepseek-ai/dsh-client-runtime@0.1.1-rc.2",
+        "@deepseek-ai/dsh-client-ui-settings@0.1.1-rc.2",
+        "@deepseek-ai/dsh-client-ui-slots@0.1.1-rc.2",
+        "@deepseek-ai/dsh-tools@0.1.1-rc.2"
+      ]
+    },
+    {
+      "repo": "plugins/dsh-android-manage",
+      "reason": "同 dsh-android-bridge：0.13.7 后未随版对齐（dev 钉 0.1.1-rc.2 / cordis 4.0.1）。",
+      "accepted": [
+        "@deepseek-ai/cordis@4.0.1",
+        "@deepseek-ai/dsh-tools@0.1.1-rc.2"
+      ]
+    },
+    {
+      "repo": "plugins/dsh-android-linux-env",
+      "reason": "同 dsh-android-bridge：0.13.7 后未随版对齐（dev 钉 0.1.1-rc.2 / cordis 4.0.1）。",
+      "accepted": [
+        "@deepseek-ai/cordis@4.0.1",
+        "@deepseek-ai/dsh-tools@0.1.1-rc.2"
+      ]
+    },
+    {
+      "repo": "plugins/dsh-android-file-open",
+      "reason": "同 dsh-android-bridge：0.13.7 后未随版对齐（dev 钉 0.1.1-rc.2 / cordis 4.0.1）。",
+      "accepted": [
+        "@deepseek-ai/cordis@4.0.1",
+        "@deepseek-ai/dsh-llm@0.1.1-rc.2",
+        "@deepseek-ai/dsh-tools@0.1.1-rc.2"
+      ]
+    },
+    {
+      "repo": "plugins/dsh-android-browser",
+      "reason": "0.13.8 新插件（浏览器控制宿主半）：与其它 @dsh-android 插件同一代基线未随版对齐（dev 钉 0.1.1-rc.2 / cordis 4.0.1）；对齐属插件责任人（本方只读 plugins/**）。",
+      "accepted": [
+        "@deepseek-ai/cordis@4.0.1",
+        "@deepseek-ai/dsh-tools@0.1.1-rc.2"
+      ]
+    },
+    {
+      "repo": "plugins/dsh-android-vdisplay",
+      "reason": "0.13.8 新插件（虚拟屏/Shizuku）：同 dsh-android-browser 的未对齐基线（dev 钉 0.1.1-rc.2 / cordis 4.0.1，另含 client-runtime / client-ui-slots）。",
+      "accepted": [
+        "@deepseek-ai/cordis@4.0.1",
+        "@deepseek-ai/dsh-client-runtime@0.1.1-rc.2",
+        "@deepseek-ai/dsh-client-ui-slots@0.1.1-rc.2",
+        "@deepseek-ai/dsh-tools@0.1.1-rc.2"
+      ]
+    },
+    {
+      "repo": "plugins/dsh-model-capability",
+      "reason": "同 dsh-android-bridge：0.13.5 W3 新增包，未随 0.13.7 的上游对齐（dev 钉 0.1.1-rc.2 / cordis 4.0.1）。",
+      "accepted": [
+        "@deepseek-ai/cordis@4.0.1",
+        "@deepseek-ai/dsh-tools@0.1.1-rc.2"
+      ]
+    }
+  ]
+}

@@ -170,6 +170,21 @@ export function checkUiTreeParse(xml: string, raw: RawNode[]): { ok: true } | { 
 /** 剪枝：只保留可交互或带标签的节点；去重 → 分档排序 → 封顶截断。
  *  输出节点重编号为 n0/n1/…（深层 XML 路径 id 过长费 token；编号在同一次 dump
  *  内稳定）。byId/byOrig 为内部解析索引（工具侧缓存持有，不序列化给模型）。 */
+/**
+ * 原始路径（uiautomator 前序子下标，如 "0.2.10"）的**数值**比较：逐段比数字，前缀短的在前。
+ * 整串字典序会把 "0.10" 排在 "0.2" 之前（FX-212.4）。
+ */
+function compareOrigPath(a: string, b: string): number {
+  if (a === b) return 0
+  const pa = a === '' ? [] : a.split('.').map(Number)
+  const pb = b === '' ? [] : b.split('.').map(Number)
+  const n = Math.min(pa.length, pb.length)
+  for (let i = 0; i < n; i++) {
+    if (pa[i] !== pb[i]) return pa[i] - pb[i]
+  }
+  return pa.length - pb.length
+}
+
 export function pruneNodes(
   raw: RawNode[],
   limits: typeof PRUNE_LIMITS = PRUNE_LIMITS,
@@ -225,11 +240,11 @@ export function pruneNodes(
       windowId: at['window-id'] ?? '',
     })
   }
-  // 0.13.8 P0-3：DFS 真树序（原始路径字典序 = 前序遍历）——0.13.5 的「分档排序」把兄弟
-  // 节点按档位/坐标打乱，模型看到的相邻行出现 21.8% 的深度跳变（真树遍历不可能），
-  // 层级感知完全失效。真树序下 depth 严格递变 ≤1，配合 parentId（最近幸存祖先）层级唯一。
-  // 阅读序信息不丢失：同层节点保持 XML 顺序（uiautomator 已按 top-left 序输出）。
-  nodes.sort((p, q) => (p.id < q.id ? -1 : p.id > q.id ? 1 : 0))
+  // 0.13.8 P0-3 / 0.14 FX-212.4：DFS 真树序——比较用**数字段数值**而非整串字典序。字典序把
+  // "0.10" 排到 "0.2" 之前，根下 11 个顺序兄弟被读成 btn0,btn1,btn10,btn2…（屏幕顺序错乱，
+  // text:同名#k 的序号跟着错）。数值比较下 depth 严格递变 ≤1，parentId（最近幸存祖先）层级唯一，
+  // 阅读序信息不丢失：同层节点保持 XML 到达顺序（uiautomator 已按 top-left 序输出）。
+  nodes.sort((p, q) => compareOrigPath(p.id, q.id))
   // 0.13.5：maxNodes=0 表示不截断（用户拍板：完整暴露，复杂界面才可用）
   const kept = limits.maxNodes > 0 ? nodes.slice(0, limits.maxNodes) : nodes
   // 重编号：n0..nN-1；父引用按原始路径映射到**最近的幸存祖先**（被剪掉的中间层自动上溯）。

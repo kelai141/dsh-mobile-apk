@@ -128,7 +128,7 @@ internal object SnapshotTransaction {
     fingerprint: String,
     startedAt: Long,
     onEntry: (String) -> Unit = {},
-  ) {
+  ): List<String> {
     val stagedUsr = File(stagedRoot, "usr")
     if (!SnapshotFs.exists(stagedUsr)) throw IOException("staged runtime is missing usr/")
     val previous = previousRoot(filesDir)
@@ -136,6 +136,8 @@ internal object SnapshotTransaction {
     SnapshotFs.createDirectories(previous)
     writeMarker(filesDir, Marker(Phase.SWAPPING, fingerprint, startedAt))
     val moved = mutableListOf<String>()
+    // #214：profiles 合并期间的工厂语义纠正说明（返回给调用方写日志/诊断）。
+    val notes = mutableListOf<String>()
 
     replaceEntry(filesDir, moved, fingerprint, startedAt, "usr", stagedUsr, usrDir, File(previous, "usr"), onEntry)
 
@@ -157,7 +159,9 @@ internal object SnapshotTransaction {
             if (child.name == "profiles" && SnapshotFs.exists(liveChild)) {
               // 0.13.8 #167：profiles 是「工厂面 + 用户面」混合容器——工厂条目
               // 更新、用户条目（第三方依赖/.npmrc/自打补丁/追加块）保留。
-              mergeProfiles(filesDir, moved, fingerprint, startedAt, child, liveChild, File(previousDsh, "profiles"), onEntry)
+              // 0.14.0 #214：工厂对同 id 的 disabled 语义改为权威（旧规则「以 live 为基」使
+              // 旧版遗留的 ui-layout disable 永不被纠正 → 根服务 layout 不 activate）。
+              mergeProfiles(filesDir, moved, fingerprint, startedAt, child, liveChild, File(previousDsh, "profiles"), onEntry, notes)
               continue
             }
             replaceEntry(
@@ -183,6 +187,7 @@ internal object SnapshotTransaction {
       }
     }
     writeMarker(filesDir, Marker(Phase.SWAPPED, fingerprint, startedAt, moved))
+    return notes
   }
 
   /**
@@ -209,6 +214,7 @@ internal object SnapshotTransaction {
     liveProfiles: File,
     previousProfiles: File,
     onEntry: (String) -> Unit,
+    notes: MutableList<String>,
   ) {
     // Journal + 整目录拷贝备份（拷贝失败即中止刷新——宁可不起树也不丢用户生态）
     moved += "home/.dsh/profiles"
@@ -217,8 +223,19 @@ internal object SnapshotTransaction {
     SnapshotFs.createDirectories(previousProfiles.parentFile ?: filesDir)
     copyRecursivelyStrict(liveProfiles, previousProfiles)
     try {
-      mergeTree(stagedProfiles, liveProfiles)
-      onEntry("home/.dsh/profiles (merged)")
+      // 用户面 = 只有 **profile 根** 的两个清单（profiles/<name>/package.json 与 cordis.patch.yml）：
+      // 用户 pin / 用户追加块只可能在这里。其下 node_modules 子树内的清单属工厂面——0.14.0 P0：
+      // 旧实现把「并集」规则递归套到嵌套清单，只合并 dependencies/bundles 而丢掉工厂新增的
+      // exports 等字段，live 树因此变成「旧清单 + 新文件」的混合体，插件跨包 import
+      // "./route-auth" 直接 ERR_PACKAGE_PATH_NOT_EXPORTED（引擎 exit=1）。
+      val userFacingFiles = HashSet<String>()
+      for (profile in stagedProfiles.listFiles() ?: emptyArray()) {
+        userFacingFiles += File(profile, "package.json").absolutePath
+        userFacingFiles += File(profile, "cordis.patch.yml").absolutePath
+      }
+      mergeTree(stagedProfiles, liveProfiles, notes, userFacingFiles)
+      val suffix = if (notes.isEmpty()) "" else "；工厂语义纠正 " + notes.size + " 处"
+      onEntry("home/.dsh/profiles (merged" + suffix + ")")
     } catch (t: Throwable) {
       // 合并失败：整目录回滚到 live 原状，再把异常抛给调用方（中止启动，正常 recover）
       SnapshotFs.deletePath(liveProfiles)
@@ -244,8 +261,21 @@ internal object SnapshotTransaction {
     }
   }
 
-  /** 递归合并：staged 权威 + package.json/cordis.patch.yml 特殊合并 + live-only 不动。 */
-  private fun mergeTree(staged: File, live: File) {
+  /**
+   * 递归合并：staged 权威 + live-only 不动；**只有 [userFacingFiles]（profile 根清单）走特殊合并**。
+   *
+   * 边界（0.14.0 P0）：node_modules 子树下的 package.json 与 cordis.patch.yml 是**工厂件**，
+   * 必须整体覆盖。旧实现按文件名递归套用并集/按 id 合并，只保住 live 的 dependencies 与
+   * bundles，工厂新增的 exports/version/main/bin 等字段全部丢失——live 树变成「旧清单 + 新文件」
+   * 的混合体（实测：@dsh-android/dsh-android-file-open 的 live manifest 缺 "./route-auth"，
+   * 而快照 tar 内有 → ERR_PACKAGE_PATH_NOT_EXPORTED，引擎起不来）。
+   */
+  private fun mergeTree(
+    staged: File,
+    live: File,
+    notes: MutableList<String>,
+    userFacingFiles: Set<String>,
+  ) {
     val attrs = Files.readAttributes(
       staged.toPath(), BasicFileAttributes::class.java, NOFOLLOW_LINKS,
     )
@@ -253,11 +283,13 @@ internal object SnapshotTransaction {
       attrs.isSymbolicLink -> return
       attrs.isDirectory -> {
         SnapshotFs.createDirectories(live)
-        for (child in staged.listFiles() ?: emptyArray()) mergeTree(child, File(live, child.name))
+        for (child in staged.listFiles() ?: emptyArray()) {
+          mergeTree(child, File(live, child.name), notes, userFacingFiles)
+        }
       }
-      attrs.isRegularFile -> when (staged.name) {
-        "package.json" -> mergePackageJson(staged, live)
-        "cordis.patch.yml" -> mergePatchYamlById(staged, live)
+      attrs.isRegularFile -> when {
+        staged.absolutePath in userFacingFiles && staged.name == "package.json" -> mergePackageJson(staged, live)
+        staged.absolutePath in userFacingFiles && staged.name == "cordis.patch.yml" -> mergePatchYamlById(staged, live, notes)
         else -> Files.copy(
           staged.toPath(), live.toPath(),
           REPLACE_EXISTING, COPY_ATTRIBUTES,
@@ -288,9 +320,13 @@ internal object SnapshotTransaction {
       val deps = user.optJSONObject("dependencies") ?: org.json.JSONObject().also { user.put("dependencies", it) }
       for (key in factoryDeps.keys()) if (!deps.has(key)) deps.put(key, factoryDeps.getString(key))
     }
-    val factoryBundles = factory.optJSONArray("dsh.profile.bundles")
+    // bundles 并集（兼容两种键形态）：真实出厂清单写的是**嵌套** dsh.profile.bundles
+    // （scripts/lib/profile-seed.mjs:38-42；设备实测同一形态），而旧实现只读扁键
+    // "dsh.profile.bundles" ⇒ 真机恒不命中，bundles 并集静默失效（工厂新增 bundle 进不了 live）。
+    val factoryBundles = findBundles(factory)
     if (factoryBundles != null && factoryBundles.length() > 0) {
-      val bundles = user.optJSONArray("dsh.profile.bundles") ?: org.json.JSONArray().also { user.put("dsh.profile.bundles", it) }
+      val bundles = findBundles(user)
+        ?: createBundles(user, nested = nestedBundles(factory) || user.optJSONObject("dsh") != null)
       val present = (0 until bundles.length()).map { bundles.optString(it) }.toHashSet()
       for (i in 0 until factoryBundles.length()) {
         val item = factoryBundles.optString(i)
@@ -300,45 +336,36 @@ internal object SnapshotTransaction {
     live.writeText(user.toString(2))
   }
 
-  /**
-   * cordis.patch.yml 按 id 合并：live 内容为基座（用户追加块与改写权威），把 live
-   * 缺少 id 的工厂**顶层块**（连同其前导注释）追加到末尾。文本层实现（壳侧无 YAML 依赖）；
-   * 工厂块解析失败时保守跳过该块，绝不破坏 live 内容。
-   */
-  private fun mergePatchYamlById(staged: File, live: File) {
-    val liveText = if (SnapshotFs.exists(live)) live.readText() else ""
-    val stagedText = try { staged.readText() } catch (_: Throwable) { return }
-    val liveIds = Regex("""^\s*(?:-\s+)?id:\s*(\S+)""", RegexOption.MULTILINE)
-      .findAll(liveText).mapTo(HashSet()) { it.groupValues[1] }
-    if (liveIds.isEmpty() && liveText.isNotBlank()) return // live 结构未知：不追加，保守保 live
-    val appended = StringBuilder()
-    for (block in topLevelYamlBlocks(stagedText)) {
-      val blockIds = Regex("""^\s*(?:-\s+)?id:\s*(\S+)""", RegexOption.MULTILINE)
-        .findAll(block).map { it.groupValues[1] }.toList()
-      if (blockIds.isEmpty()) continue
-      if (blockIds.any { it in liveIds }) continue
-      appended.append(block).append('\n')
-    }
-    if (appended.isNotEmpty()) {
-      val separator = if (liveText.endsWith("\n") || liveText.isEmpty()) "" else "\n"
-      live.writeText(liveText + separator + appended)
-    }
+  /** 读 bundles：先历史扁键，再真实嵌套 dsh.profile.bundles。 */
+  private fun findBundles(root: org.json.JSONObject): org.json.JSONArray? =
+    root.optJSONArray("dsh.profile.bundles")
+      ?: root.optJSONObject("dsh")?.optJSONObject("profile")?.optJSONArray("bundles")
+
+  /** 该清单的 bundles 是否为嵌套形态（而非历史扁键）。 */
+  private fun nestedBundles(root: org.json.JSONObject): Boolean =
+    root.optJSONArray("dsh.profile.bundles") == null &&
+      root.optJSONObject("dsh")?.optJSONObject("profile")?.optJSONArray("bundles") != null
+
+  /** 按 [nested] 新建 bundles 数组（live 缺该键时用工厂/live 的实际形态，避免写进引擎不读的扁键）。 */
+  private fun createBundles(root: org.json.JSONObject, nested: Boolean): org.json.JSONArray {
+    if (!nested) return org.json.JSONArray().also { root.put("dsh.profile.bundles", it) }
+    val dsh = root.optJSONObject("dsh") ?: org.json.JSONObject().also { root.put("dsh", it) }
+    val profile = dsh.optJSONObject("profile") ?: org.json.JSONObject().also { dsh.put("profile", it) }
+    return org.json.JSONArray().also { profile.put("bundles", it) }
   }
 
-  /** 顶层 `- ` 列表块切分（含块前紧邻的注释/空行前导）；非列表行归入下一个块的前导。 */
-  private fun topLevelYamlBlocks(text: String): List<String> {
-    val blocks = mutableListOf<String>()
-    val current = StringBuilder()
-    for (line in text.lineSequence()) {
-      val isTopItem = Regex("^- ").containsMatchIn(line)
-      if (isTopItem) {
-        if (current.isNotBlank()) blocks.add(current.toString())
-        current.setLength(0)
-      }
-      current.append(line).append('\n')
-    }
-    if (current.isNotBlank()) blocks.add(current.toString())
-    return blocks
+  /**
+   * cordis.patch.yml 合并：#214 起改由 [FactoryProfilePatch.merge] 执行——工厂对同 id 的
+   * `disabled` 语义权威（纠正旧版遗留的 disable 漂移），用户独有条目保留，工厂新增块照旧追加。
+   * 文本层实现（壳侧无 YAML 依赖），纠正说明写入 [notes] 供调用方留日志。
+   */
+  private fun mergePatchYamlById(staged: File, live: File, notes: MutableList<String>) {
+    val liveText = if (SnapshotFs.exists(live)) live.readText() else ""
+    val stagedText = try { staged.readText() } catch (_: Throwable) { return }
+    val result = FactoryProfilePatch.merge(liveText, stagedText)
+    if (result.text == liveText) return
+    live.writeText(result.text)
+    for (change in result.changes) notes += live.parentFile?.name + "/" + live.name + ": " + change
   }
 
   /**

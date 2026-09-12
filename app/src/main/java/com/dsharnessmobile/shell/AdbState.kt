@@ -77,13 +77,22 @@ object AdbState {
     context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
   /** 门1 live 同步（Q8）：把 All Files Access 判定写入 prefs，引擎插件 live 读（同门2/门3 模式）。
-   *  在授权状态读取/变化点调用（幂等；supportsReload 场景亦即时反映系统权限变化）。 */
+   *  在授权状态读取/变化点调用（幂等；supportsReload 场景亦即时反映系统权限变化）。
+   *  ST-01：MainActivity.onResume 也调用（系统设置里改权限后回前台 ≤3s 收敛）；值变化时
+   *  落一条结构化日志，供设备实测核对「展示值与判定值同步翻转」。 */
   fun syncFullAccess(context: Context) {
-    prefs(context).edit().putBoolean(KEY_FULLACCESS, fullAccess()).apply()
+    val value = fullAccess()
+    val p = prefs(context)
+    val previous = p.getBoolean(KEY_FULLACCESS, false)
+    p.edit().putBoolean(KEY_FULLACCESS, value).apply()
+    if (previous != value) {
+      LogCollector.log("dsh-adb", "full-access synced: " + previous + " -> " + value)
+    }
   }
 
-  /** 门1（系统侧完全访问档位）：引擎插件 live 读此值（KEY_FULLACCESS），无则回落 env 启动快照。 */
-  fun fullAccessPrefs(context: Context): Boolean = prefs(context).getBoolean(KEY_FULLACCESS, false)
+  // ST-22（S0 死状态清理）：此处原有「门1 pref 读口」访问器，**零调用者**（壳内读侧一律走活体
+  // fullAccess()；KEY_FULLACCESS 的唯一消费者是引擎侧插件对 prefs XML 的 live 直读）。该访问器
+  // 已删除——壳侧不再保留第二个读口，避免再次出现「定义了没人读」的死状态。
 
   fun allowSwitch(context: Context): Boolean = prefs(context).getBoolean(KEY_ALLOW, false)
 
@@ -97,6 +106,8 @@ object AdbState {
 
   fun setPaired(context: Context, value: Boolean) {
     prefs(context).edit().putBoolean(KEY_PAIRED, value).apply()
+    // ST-12：配对事实变化后真源探测必须立刻重探（否则新配对要等最多一个 TTL 才显示已就绪）。
+    wirelessProbe.invalidate()
     syncFullAccess(context)
   }
 
@@ -105,6 +116,34 @@ object AdbState {
 
   /** 连接探活记录（配对/执行成功后置位；revoke 清位）。 */
   fun connected(context: Context): Boolean = prefs(context).getBoolean(KEY_CONNECTED, false)
+
+  // ── ST-12（F-APK-04）：wirelessDebugOn / connected 的真源探测 ──────────────
+  /** 无线调试连接端口的 TCP 探测缓存 TTL：**必须小于**设置页轮询周期（3s），
+   *  否则「关掉系统无线调试 → ≤3s 面板降级」的判据会被缓存拖过阈值。 */
+  private const val WIRELESS_PROBE_TTL_MS = 2_000L
+  private const val WIRELESS_PROBE_TIMEOUT_MS = 400
+  /** 活体真源键（与门1/门2/门3 同模式：引擎侧 live 读同一份 prefs）。 */
+  private const val KEY_WIRELESS_ON = "wirelessOn"
+  private val wirelessProbe = LiveProbe(WIRELESS_PROBE_TTL_MS)
+
+  /** 系统「无线调试」是否真的开着（活体）：关闭后 adbd 的 TLS 连接端口不再监听。 */
+  fun wirelessDebugLive(context: Context): Boolean = wirelessProbe.value {
+    val port = connectPort(context)?.trim()?.toIntOrNull() ?: return@value false
+    tcpProbe("127.0.0.1", port, WIRELESS_PROBE_TIMEOUT_MS)
+  }
+
+  /** 活体值写回 prefs（仅变化时写 + 留痕）：引擎侧 live 面据此与展示面同口径。 */
+  private fun syncWirelessLive(context: Context, live: Boolean) {
+    try {
+      val p = prefs(context)
+      if (p.getBoolean(KEY_WIRELESS_ON, false) != live) {
+        p.edit().putBoolean(KEY_WIRELESS_ON, live).apply()
+        LogCollector.log("dsh-adb", "wireless-debug live probe: " + live)
+      }
+    } catch (_: Throwable) {
+      /* prefs 不可写不阻断状态读取 */
+    }
+  }
 
   /**
    * 自动发现无线调试端口（issue #80；0.13.0 Q17 NSD 替换盲扫定案）。
@@ -249,6 +288,8 @@ object AdbState {
       .putString(KEY_CONNECT_PORT, connectPort.toString())
       .putBoolean(KEY_CONNECTED, false)
       .apply()
+    // ST-12：新连接端口在场 → 立刻重探（不要复用旧端口的探测结果）。
+    wirelessProbe.invalidate()
     // 立即连接探活（尽力；失败不撤销配对——可能只是连接端口抄错/无线调试短暂抖动）。
     // 候选端口逐一 connect：NSD/手填连接端口 + 经典 5555 兜底（2026-08-27 实锤：
     // vivo 无线调试连接端口=5555，NSD 结果可能缺席或与弹窗不一致）。
@@ -297,6 +338,8 @@ object AdbState {
       .remove(KEY_PAIR_PORT)
       .remove(KEY_CONNECT_PORT)
       .apply()
+    // ST-12：端口与配对全部清空 → 立即作废探测缓存（stateJson 下一次即为未就绪）。
+    wirelessProbe.invalidate()
     syncFullAccess(context)
     AdbAudit.log(context, "adb-pair-revoke", emptyMap<String, Any>())
   }
@@ -408,25 +451,34 @@ object AdbState {
       .toString()
   }
 
-  /** 状态 JSON（桥 getAdbState / 探活消费；不泄露端口/密钥路径）。 */
+  /** 状态 JSON（桥 getAdbState / 探活消费；不泄露端口/密钥路径）。
+   *
+   *  ST-12（F-APK-04）：`wirelessDebugOn` / `connected` 改走**轻量真源探测**——旧实现
+   *  `.put("wirelessDebugOn", pair)` 只是偏好回读，关掉系统无线调试（或重启手机）后展示面
+   *  依旧「已授权」。现在：wirelessDebugOn = TCP 连系统「无线调试」连接端口的活体结果
+   *  （TTL 2s < 页面 3s 轮询 ⇒ 关闭后 ≤3s 降级），connected = prefs 记录 && 活体可达。 */
   fun stateJson(context: Context): String {
     val allow = allowSwitch(context)
     val pair = paired(context)
     val full = fullAccess()
-    val conn = connected(context)
-    val authorized = full && allow && pair
+    val wirelessOn = wirelessDebugLive(context)
+    val conn = connected(context) && wirelessOn
+    syncWirelessLive(context, wirelessOn)
+    val authorized = full && allow && pair && wirelessOn
     val message = when {
       authorized && !conn -> "已授权（已配对）——连接待建立：引擎侧执行时将自动重连；仍失败请重新配对"
       !full -> "未授权：未处于完全访问档位（自动审批模式不构成开放条件）；请先在设置中授予「所有文件访问」"
       !allow -> "未授权：应用内「允许访问」开关未开启（开发者选项→安全）"
-      else -> "未授权：未配对——请在开发者选项开启「无线调试」，并输入系统弹窗中的 6 位配对码与端口（重启后需重新配对）"
+      !pair -> "未授权：未配对——请在开发者选项开启「无线调试」，并输入系统弹窗中的 6 位配对码与端口（重启后需重新配对）"
+      !wirelessOn -> "未授权：系统「无线调试」已关闭或连接端口不可达——请在开发者选项重新开启「无线调试」（端口变化后需重新配对）"
+      else -> "未授权：请在开发者选项开启「无线调试」，并输入系统弹窗中的 6 位配对码与端口（重启后需重新配对）"
     }
     return JSONObject()
       .put("tier", if (authorized && conn) "T1" else if (authorized) "T1-connecting" else "T0")
       .put("fullAccess", full)
       .put("allowSwitch", allow)
       .put("paired", pair)
-      .put("wirelessDebugOn", pair)
+      .put("wirelessDebugOn", wirelessOn)
       .put("connected", conn)
       .put("authorized", authorized)
       .put("message", if (authorized) null else message)
@@ -536,8 +588,14 @@ object AdbState {
     val proc = spawnAdb(engine, listOf("devices"))
     // 0.13.8 #173：有界读——本函数在 synchronized(this) 内，裸 readText 挂起会锁死
     // 整个 AdbState（后续 ADB 调用与看门狗强制重启全部冻结）。
-    val text = ProcIo.readBounded(proc, 6) ?: return false
-    !text.contains("protocol fault") && text.contains("List of devices")
+    // #211.1：超时是独立三态（带形态标记），不再与真空输出同形；就绪判定保持保守（false）。
+    val r = ProcIo.readBounded(proc, 6)
+    if (r.timedOut) {
+      LogCollector.log("dsh-adb", "adbPing timed out (" + r.marker() + "; partial=" + r.text.length + "B)")
+      false
+    } else {
+      !r.text.contains("protocol fault") && r.text.contains("List of devices")
+    }
   } catch (_: Throwable) {
     false
   }
@@ -586,9 +644,11 @@ object AdbState {
       if (!adb.exists()) return listOf("adb not found in snapshot runtime")
       val proc = spawnAdb(engine, args)
       // 0.13.8 #173：有界读（读线程排水 + 超时 destroyForcibly）——原「先 readText 后
-      // waitFor」使超时参数形同虚设；超时沿用既有 "adb timeout" 文本（classifyFailure 已识别）。
-      val text = ProcIo.readBounded(proc, timeoutS) ?: return listOf("adb timeout")
-      text.lines()
+      // waitFor」使超时参数形同虚设；超时沿用既有 "adb timeout" 文本（classifyFailure 已识别），
+      // #211.1 追加形态标记与已读量（超时态含已读部分，不再与真空输出同形）。
+      val r = ProcIo.readBounded(proc, timeoutS)
+      if (r.timedOut) return listOf(r.timeoutText("adb timeout"))
+      r.text.lines()
     } catch (t: Throwable) {
       listOf("adb failed: " + (t.message ?: t.javaClass.simpleName))
     }

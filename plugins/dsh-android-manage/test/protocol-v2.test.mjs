@@ -14,7 +14,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { parseUiTreeXml, pruneNodes, parseBoundsToBox } from '../lib/ui-tree.js'
-import { decodeV2, encodeV2FromRaw, cacheFromV2, isV2Payload } from '../lib/protocol-v2.js'
+import { decodeV2, encodeV2, encodeV2FromRaw, rowsFromRaw, cacheFromV2, isV2Payload } from '../lib/protocol-v2.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const FIXTURE = join(HERE, 'fixtures', 'ui-probe.xml')
@@ -114,11 +114,13 @@ test('encode → decode 逐字段等价（TS 自往返）', () => {
   assert.ok(v.rows.length >= pruned.nodes.length, 'V2 行集不应少于 V1 节点集')
   assert.ok(v.rows.length - pruned.nodes.length <= 20, `V2 行集比 V1 多 ${v.rows.length - pruned.nodes.length} 行（超出预期）`)
 
-  // 行句柄协议：cacheFromV2 后 byId/byOrig 的键分别是 nN 与行句柄
+  // 行句柄协议（FX-206.1）：cacheFromV2 后 byId/byOrig 的键分别是 nN 与**原始行号**句柄
   const cache = cacheFromV2(v)
   assert.equal(cache.nodes.length, v.rows.length)
-  assert.equal(cache.byId.get('n0')?.origPath, '0')
-  assert.equal(cache.byOrig.get('5')?.n.id, 'n5')
+  const last = v.rows.length - 1
+  assert.equal(cache.byId.get('n' + last)?.origPath, String(v.origRow[last]))
+  assert.equal(cache.byOrig.get(String(v.origRow[last]))?.n.id, 'n' + last)
+  assert.ok(v.origRow[last] > last, '末行句柄必须大于载荷下标（证明不是恒等映射）')
 })
 
 test('目标口径（view=target）收窄后仍结构自洽', () => {
@@ -134,6 +136,139 @@ test('目标口径（view=target）收窄后仍结构自洽', () => {
     assert.ok(self || v.rows.some((m) => m.id !== n.id && m.depth > n.depth && m.x + m.y >= 0),
       `行 ${n.id} 既非目标也非骨架`)
   }
+})
+
+/**
+ * FX-206.1 的**独立判据**：不复用编码器内部输出，按文档规则（骨架闭包 + 仅叶子去重）重算原始行号表，
+ * 再断言「载荷第 fi 行的句柄 = out[fi]」。夹具含零尺寸节点与重复叶子——这两类正是壳侧过滤的成因。
+ */
+function expectedOrigRows(rows, view = 'all') {
+  const n = rows.length
+  const actionable = (r) => (r.flag & (1 | 2 | 4)) !== 0   // clickable | scrollable | editable
+  const keep = new Array(n).fill(false)
+  const ancStack = []
+  for (let i = 0; i < n; i++) {
+    while (ancStack.length > 0 && rows[ancStack[ancStack.length - 1]].depth >= rows[i].depth) ancStack.pop()
+    const hasArea = rows[i].w > 0 && rows[i].h > 0
+    const inSet = view === 'target' ? hasArea && (actionable(rows[i]) || rows[i].text !== '' || rows[i].desc !== '') : hasArea
+    if (inSet) {
+      keep[i] = true
+      for (const a of ancStack) keep[a] = true
+    }
+    ancStack.push(i)
+  }
+  const subtreeEnd = new Array(n).fill(n)
+  const st = []
+  for (let i = 0; i < n; i++) {
+    while (st.length > 0 && rows[st[st.length - 1]].depth >= rows[i].depth) subtreeEnd[st.pop()] = i
+    st.push(i)
+  }
+  const nextKept = new Array(n).fill(n)
+  let nxt = n
+  for (let i = n - 1; i >= 0; i--) {
+    nextKept[i] = nxt
+    if (keep[i]) nxt = i
+  }
+  const out = []
+  const seen = new Set()
+  for (let i = 0; i < n; i++) {
+    if (!keep[i]) continue
+    if (nextKept[i] >= subtreeEnd[i]) {
+      const r = rows[i]
+      const key = [r.text, r.desc, r.cls, r.x + Math.floor(r.w / 2), r.y + Math.floor(r.h / 2)].join('\u0000')
+      if (seen.has(key)) continue
+      seen.add(key)
+    }
+    out.push(i)
+  }
+  return out
+}
+
+/** 合成行表：0 根 / 1 零尺寸且无后代 / 2 有面积 / 3 叶子 / 4 与 3 完全同内容的重复叶子 / 5 有面积。 */
+const MAPPING_ROWS = (() => {
+  const base = { text: '', desc: '', cls: 'a.A', pkg: '', rid: '', windowId: '', depth: 0, x: 0, y: 0, w: 10, h: 10, flag: 0 }
+  return [
+    { ...base, w: 100, h: 100 },
+    { ...base, depth: 1, y: 10, w: 0, h: 0, text: '零尺寸非祖先' },
+    { ...base, depth: 1, y: 20, text: 'A' },
+    { ...base, depth: 2, y: 30, cls: 'a.C', text: 'dup' },
+    { ...base, depth: 2, y: 30, cls: 'a.C', text: 'dup' },
+    { ...base, depth: 1, y: 40, cls: 'a.D', text: 'B' },
+  ]
+})()
+
+test('FX-206.1：载荷第 fi 行的句柄指回原始行号（夹具含零尺寸与重复叶子，错位数 = 0）', () => {
+  const expected = expectedOrigRows(MAPPING_ROWS, 'all')
+  assert.deepEqual(expected, [0, 2, 3, 5], '夹具必须真的触发过滤（0 尺寸行 1 与重复叶子 4 被剔），否则本用例证明不了任何事')
+
+  const payload = encodeV2(MAPPING_ROWS, 'all', 1, 0, 100, 100)
+  assert.deepEqual(payload.o, expected, 'o 列必须逐项等于原始行号')
+  const dec = decodeV2(payload)
+  assert.equal(dec.ok, true)
+  const v = dec.value
+  assert.equal(v.rows.length, expected.length)
+  assert.deepEqual([...v.origRow], expected)
+
+  const cache = cacheFromV2(v)
+  let wrong = 0
+  for (let fi = 0; fi < v.rows.length; fi++) {
+    if (cache.nodes[fi].origPath !== String(expected[fi])) wrong++
+  }
+  assert.equal(wrong, 0, '错位数必须 = 0')
+
+  // 反向自证（内嵌）：旧实现 handle = String(fi) 在这个夹具上 3/4 行错位。
+  let identityWrong = 0
+  for (let fi = 0; fi < v.rows.length; fi++) {
+    if (String(fi) !== String(expected[fi])) identityWrong++
+  }
+  assert.equal(identityWrong, 3, '夹具必须对旧实现敏感（4 行里 3 行错位）')
+
+  // 真实探针夹具同款断言：末行句柄必须 > 载荷下标。
+  const probe = encodeV2FromRaw(parsed.raw, parsed.rotation, SCREEN, GEN, 'all')
+  const pv = decodeV2(probe).value
+  const probeExpected = expectedOrigRows(rowsFromRaw(parsed.raw), 'all')
+  assert.deepEqual([...pv.origRow], probeExpected, '真机探针上 o 列也必须等于原始行号表')
+  assert.ok(pv.origRow[pv.rows.length - 1] > pv.rows.length - 1)
+})
+
+test('FX-206.1：o 列缺失/越界/非递增一律失败关闭（宁可不给清单，也不给会点错的句柄）', () => {
+  const payload = encodeV2(MAPPING_ROWS, 'all', 1, 0, 100, 100)
+  const noO = { ...payload }
+  delete noO.o
+  const dec = decodeV2(noO)
+  assert.equal(dec.ok, false)
+  assert.match(dec.error, /o 必须是整数数组/)
+  assert.equal(decodeV2({ ...payload, o: [0, 99] }).ok, false, 'o 长度既非 1 也非 n 必须拒绝')
+  assert.equal(decodeV2({ ...payload, o: [0, 2, 2, 5] }).ok, false, 'o 非严格递增必须拒绝')
+  assert.equal(decodeV2({ ...payload, o: [0, 2, 3, 9] }).ok, false, '原始行号越界必须拒绝')
+  assert.equal(decodeV2({ ...payload, o: [0, 2, 3, 5] }).ok, true)
+})
+
+test('FX-206.4：truncated 真值透出（缺列 = false，不再静默丢弃）', () => {
+  const payload = encodeV2(MAPPING_ROWS, 'all', 1, 0, 100, 100)
+  assert.equal(decodeV2(payload).value.truncated, false)
+  assert.equal(decodeV2({ ...payload, truncated: true }).value.truncated, true)
+})
+
+test('FX-212.5：V2 行带真实 parentId（预序 + 深度重建），且 p 列口径不变', () => {
+  const payload = encodeV2FromRaw(parsed.raw, parsed.rotation, SCREEN, GEN, 'all')
+  const v = decodeV2(payload).value
+  assert.equal(v.rows[0].parentId, '', '根行无父')
+  let checked = 0
+  for (let i = 1; i < v.rows.length; i++) {
+    const d = v.rows[i].depth
+    if (d === 0) { assert.equal(v.rows[i].parentId, ''); continue }
+    const parent = v.rows[i].parentId
+    assert.match(parent, /^n\d+$/, `行 ${i} 必须带父 id`)
+    const pi = Number(parent.slice(1))
+    assert.ok(pi < i, '父行必须在本行之前（预序）')
+    assert.ok(v.rows[pi].depth < d, '父行深度必须更浅')
+    checked++
+  }
+  assert.ok(checked > 0, '夹具必须真有非根行')
+  // p 列口径未动：actionableAncestor 仍是载荷行下标（广播列还原后逐项相等）
+  const pCol = payload.p.length === 1 ? new Array(v.rows.length).fill(payload.p[0]) : payload.p
+  assert.deepEqual([...v.actionableAncestor], pCol, 'p 列口径绝不能改（FX-206.1 硬约束）')
 })
 
 test('坏载荷一律失败关闭（不静默产出空树）', () => {

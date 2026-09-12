@@ -256,7 +256,17 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     Thread {
       try {
       if (!isCurrentEngineFlow(generation)) return@Thread
-      if (EngineProbe.check().optBoolean("running", false)) {
+      // FX-210.1（源文档 §3.3 B1 顺序约束）：恢复入口是「服务路径与 Activity 路径」的
+      // 共同前置——引擎已被前台服务拉起时重开 app 也要消费 .snapshot-transaction 判据，
+      // 因此它必须排在「引擎已在跑」早退之前（顺序由 startupRecoverThenProbe 保证）。
+      val engineAlreadyRunning = startupRecoverThenProbe(
+        recover = { activity.engineManager.recoverInterruptedRefresh() },
+        probeRunning = { EngineProbe.check().optBoolean("running", false) },
+      )
+      if (engineAlreadyRunning) {
+        // P-AC-04：这条早退路径不经过 spawn 观察线程，补一次 listen 标记（幂等；本进程没记过
+        // t_boot_start 时按「未知」记 -1 落盘，而不是让三字段整行缺失）。
+        LogCollector.markListen(activity)
         activity.runOnUiThread { if (isCurrentEngineFlow(generation)) activity.showWeb() }
         return@Thread
       }
@@ -267,9 +277,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         activity.applyGuidePhase(GuidePhase.Starting, "正在启动引擎…")
         activity.showGuide()
       }
-      // Resolve a runtime transaction interrupted by a kill, an OEM cleaner or a
-      // low-memory restart before deciding whether the snapshot is current.
-      activity.engineManager.recoverInterruptedRefresh()
+      // 中断事务已由启动前置（startupRecoverThenProbe）恢复——此处只做新鲜度判定。
       if (!isCurrentEngineFlow(generation)) return@Thread
       if (!activity.engineManager.snapshotFresh()) {
         if (!isCurrentEngineFlow(generation)) return@Thread
@@ -333,17 +341,20 @@ internal class EngineStartFlow(private val activity: MainActivity) {
       // Poll for the web service with process-alive semantics (0.13.0 D1): cold boot takes
       // 20-45s (EngineManager START_COOLDOWN_MS comment); the old hard 30s budget fired
       // "引擎启动超时" on slow devices (K20 Pro) even though the engine later started.
-      // Now: as long as the engine process is alive we keep waiting (up to 90s); only a dead
-      // process declares failure (auto-undo path). UI shows a grey "still starting" state, not an error.
-      val pollBudgetMs = 90_000L
-      val pollStepMs = 1000L
+      // Now: as long as the engine process is alive we keep waiting (up to the budget); only a
+      // dead process declares failure (auto-undo path). UI shows a grey "still starting" state.
+      // FX-212.2（E-9）：预算与文案只许有一个来源——ENGINE_BOOT_BUDGET_MS。旧实现把预算改到
+      // 90s 却把文案硬编码成 60 - s，首帧即显示「已等待 -30s」；本处不再出现任何字面量秒数。
+      val pollBudgetMs = ENGINE_BOOT_BUDGET_MS
+      val pollStepMs = ENGINE_BOOT_POLL_STEP_MS
       val budgetEnd = System.currentTimeMillis() + pollBudgetMs
-      var waitedSeconds = 0
       var booted = false
       while (System.currentTimeMillis() < budgetEnd) {
         if (!isCurrentEngineFlow(generation)) return@Thread
         if (EngineProbe.check().optBoolean("running", false)) {
           booted = true
+          // P-AC-04：主路径的 listen 标记（watchEngineListen 线程为主，这里兜底；幂等）。
+          LogCollector.markListen(activity)
           // 0.13.8 #174：引擎就绪钩子——补投冷启动期间待发的来件通知（拷贝完成时
           // 引擎尚未 listen 的竞态路径；fail-soft，失败留在待发清单等下一轮）。
           try { FileIncoming.flushPending(activity) } catch (_: Throwable) {}
@@ -353,12 +364,11 @@ internal class EngineStartFlow(private val activity: MainActivity) {
           // 引擎进程已死：宣判失败（自动回退路径），不再空等。
           break
         }
-        waitedSeconds = ((budgetEnd - System.currentTimeMillis()) / pollStepMs).toInt()
-        if (waitedSeconds % 15 == 0) {
-          val s = waitedSeconds
+        val clock = engineBootClock(pollBudgetMs - (budgetEnd - System.currentTimeMillis()))
+        if (engineBootShouldReport(clock.waitedSeconds)) {
           activity.runOnUiThread {
             if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-            activity.applyGuidePhase(GuidePhase.Starting, "引擎启动中（已等待 ${60 - s}s，冷启动较慢属正常）")
+            activity.applyGuidePhase(GuidePhase.Starting, engineBootProgressText(clock))
           }
         }
         Thread.sleep(pollStepMs)
@@ -475,3 +485,55 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     }.start()
   }
 }
+
+/**
+ * 启动前置（FX-210.1，JVM 单测的顺序契约）：先执行恢复入口，再做探活分流。
+ *
+ * 缺陷形态：探活命中「引擎已在跑」即 return@Thread，事务恢复（applyRecovery）被跳过——
+ * 引擎由前台服务拉起后重开 app 时，.snapshot-transaction 判据永不消费。把这一步抽成
+ * 函数是为了让「恢复先于早退」成为可断言的顺序，而不是散落在流程里的两行语句。
+ *
+ * @return 探活结果（true = 引擎已在跑，调用方走早退分支）。
+ */
+internal fun startupRecoverThenProbe(recover: () -> Unit, probeRunning: () -> Boolean): Boolean {
+  recover()
+  return probeRunning()
+}
+
+// ── FX-212.2：启动轮询预算与引导页倒计时文案的同一真源 ────────────────────────
+//
+// 缺陷形态（F-212.2 / E-9）：预算从 30s 提到 90s 时只改了轮询常量，文案仍写死 `60 - s`
+// （s = 剩余秒）——首帧显示「已等待 -30s」，此后每一帧恒偏 30s；把 60 改成 90 而仍留两处
+// 独立常量的做法同样判未修复。这里把预算、步进、上报节拍、文案全部收进同一组符号：
+// [EngineBootClock] 的两个读数互补（waited + remaining = budget），文案只由它派生。
+
+/** 冷启动轮询预算（毫秒）——轮询与文案的**唯一**来源。 */
+internal const val ENGINE_BOOT_BUDGET_MS = 90_000L
+
+/** 轮询步进（毫秒）。 */
+internal const val ENGINE_BOOT_POLL_STEP_MS = 1_000L
+
+/** 文案上报间隔（秒）：每 15s 一帧（首帧 waited=0 立即上报，恒无负值）。 */
+internal const val ENGINE_BOOT_REPORT_STEP_S = 15
+
+/**
+ * 同一毫秒输入派生的双读数：已等待 / 剩余**互补**（二者相加恒为预算秒数）。
+ * 单侧钳制到 [0, budget]，因此任何输入（含超预算、负值）都不会派生负数文案。
+ */
+internal class EngineBootClock(elapsedMs: Long, budgetMs: Long) {
+  val budgetSeconds: Int = (budgetMs / 1_000L).toInt()
+  val waitedSeconds: Int = (elapsedMs.coerceIn(0L, budgetMs) / 1_000L).toInt()
+  val remainingSeconds: Int = budgetSeconds - waitedSeconds
+}
+
+/** 默认预算 = [ENGINE_BOOT_BUDGET_MS]（调用点不得再传字面量秒数）。 */
+internal fun engineBootClock(elapsedMs: Long, budgetMs: Long = ENGINE_BOOT_BUDGET_MS): EngineBootClock =
+  EngineBootClock(elapsedMs, budgetMs)
+
+/** 引导页启动中文案（唯一生成点）：显示值与真实已等**同源**。 */
+internal fun engineBootProgressText(clock: EngineBootClock): String =
+  "引擎启动中（已等待 ${clock.waitedSeconds}s / 剩余 ${clock.remainingSeconds}s，冷启动较慢属正常）"
+
+/** 上报节流：每 [ENGINE_BOOT_REPORT_STEP_S] 秒一帧。 */
+internal fun engineBootShouldReport(waitedSeconds: Int, stepSeconds: Int = ENGINE_BOOT_REPORT_STEP_S): Boolean =
+  waitedSeconds % stepSeconds == 0

@@ -8,6 +8,9 @@
     "lib/index.js"
   ],
   "private": true,
+  "scripts": {
+    "test": "node --test scripts/open-path-session.test.mjs && node scripts/smoke-injections.mjs"
+  },
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.1"
   },

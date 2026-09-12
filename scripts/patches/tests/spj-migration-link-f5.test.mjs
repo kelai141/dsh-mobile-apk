@@ -9,7 +9,7 @@
 // link 抛 EACCES 时改走 rename、其它错误原样抛出（防止「只替换了文本但代码跑不起来」）。
 //
 // 用法：node scripts/patches/tests/spj-migration-link-f5.test.mjs
-import { mkdtempSync, mkdirSync, copyFileSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -46,7 +46,9 @@ const scratch = mkdtempSync(join(tmpdir(), 'f5-test-'))
 try {
   const target = join(scratch, TARGET)
   mkdirSync(dirname(target), { recursive: true })
-  copyFileSync(FIXTURE, target)
+  // FX-E19：fixture 索引 LF 而工作树在 core.autocrlf=true 下是 CRLF——按 LF 归一后写夹具，
+  // 否则多行锚点（带 \n）恒失配 → 本回归「本机必红」且后续补丁回归全部失去信号。
+  writeFileSync(target, readFileSync(FIXTURE, 'utf8').replace(/\r\n/g, '\n'))
 
   const applied = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'patches', 'apply-patches.mjs'), scratch, '--apply', '--scope', 'engine', '--only', 'spj-migration-link-F5'], { encoding: 'utf8' })
   check('apply-patches exits 0', applied.status === 0, (applied.stderr || '').trim().split('\n').slice(-2).join(' '))

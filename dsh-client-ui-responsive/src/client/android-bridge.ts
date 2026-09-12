@@ -39,6 +39,9 @@ export interface AndroidShellBridge {
   hasAllFilesAccess?: () => boolean
   /** Immersive status-bar toggle (true = status bar normally hidden), persisted by the shell. */
   setImmersiveMode?: (enable: boolean) => void
+  /** ST-10: current immersive state from the shell truth source (ShellState.ImmersiveMode).
+   *  Prefer this over any page-side copy; absent on desktop / older shells (storage fallback applies). */
+  getImmersiveMode?: () => boolean
   /** 0.13.7: open a path through the Android system chooser (MT Manager, system files).
    *  Returns a JSON `{ok, launched?, reason?}` answer; `folder` targets the directory. */
   openPathChooser?: (path: string, mode?: OpenPathMode) => string

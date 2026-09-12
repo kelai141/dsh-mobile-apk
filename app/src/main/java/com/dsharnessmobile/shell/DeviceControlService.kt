@@ -470,9 +470,40 @@ class DeviceControlService : AccessibilityService() {
       "nodeText" -> handleNodeText(args)
       "webSnapshot" -> handleWebSnapshot(args)
       "webAction" -> handleWebAction(args)
+      // ── 六面登记链已冻结、壳侧实现尚未落地（browser* / vd*）：**必须写分支**且 fail-closed ──
+      // 门禁 A 项断言「handle 分支集合 == SUPPORTED_OPS」；若落进兜底的「未知操作」错误分支，
+      // 则「尚未实现」与「op 名打错」在工具层/诊断面同形（DESIGN-PROTOCOL-V2 的教训）。
+      // 注：本条注释刻意不写出兜底分支的字面形态——门禁以该字面量截断 handle 块做集合比对。
+      // 实现落地时逐条替换为真实分支，并同步删除 scripts/control-ops-pending.json 的族条目。
+      "browserCaps" -> unsupported(op)
+      "browserShow" -> unsupported(op)
+      "browserHide" -> unsupported(op)
+      "browserOpen" -> unsupported(op)
+      "browserJs" -> unsupported(op)
+      "browserInput" -> unsupported(op)
+      "browserShot" -> unsupported(op)
+      "browserState" -> unsupported(op)
+      "browserSetUa" -> unsupported(op)
+      "browserViewport" -> unsupported(op)
+      "vdCreate" -> unsupported(op)
+      "vdDestroy" -> unsupported(op)
+      "vdLaunch" -> unsupported(op)
+      "vdMoveTask" -> unsupported(op)
+      "vdInfo" -> unsupported(op)
       else -> error("未知操作 $op")
     }
   }
+
+  /**
+   * 已登记但壳侧尚未实现的 op：fail-closed 的**结构化**拒绝。
+   *
+   * 保留既有错误通道键 `__error`（消费方 optString("__error") 不变），另附机器可读的
+   * `reason=unsupported` 与 `op`——工具层/设置页据此把「尚未实现」与「op 名打错」分开。
+   */
+  private fun unsupported(op: String): JSONObject = JSONObject()
+    .put("__error", "暂不支持：$op（壳侧已登记、实现未落地——fail-closed 拒绝）")
+    .put("reason", "unsupported")
+    .put("op", op)
 
   /**
    * 无障碍截屏（API 30+，`AccessibilityService.takeScreenshot`，需 `canTakeScreenshot="true"`）。

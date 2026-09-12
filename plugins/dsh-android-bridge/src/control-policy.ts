@@ -13,8 +13,30 @@
  *   - 策略是纯函数，便于单测；调用方（工具层）必须使用它的结论，不得自行旁路。
  */
 
-export type ControlOp = 'snapshot' | 'click' | 'setText' | 'scroll' | 'global' | 'screenshot' | 'state'
+// 0.13.8 收口 longClick：壳侧 handle 的 `longClick` 分支此前未进本类型联合与 A11Y_OPS，
+// 于是 a11y 在线时落 `A11Y_OPS.includes` 判假 → 「暂不支持」deny（坑 52 的存量 leak）。
+//
+// 0.14.0-preview 六面登记：op 名先冻结在两份插件契约里——侧栏 AI 浏览器宿主
+// （plugins/dsh-android-browser/src/contract.ts 的 BROWSER_OPS，10 条）与虚拟屏
+// （plugins/dsh-android-vdisplay/src/status.ts 的 VD_OPS，5 条）。本联合按契约逐字登记。
+// **这 15 条一条都不进 A11Y_OPS**：契约标注 neverA11y（browser*/vd* 是壳桥 op，不经无障碍通道，
+// 方案 §4.5），永久豁免登记在 scripts/control-ops-known-gaps.json（faces: A11Y_OPS）。
+// 六面登记链由 scripts/check-control-ops.mjs 守：壳侧 handle 分支 + SUPPORTED_OPS（dev-shell2
+// 同批）、本联合、ROUTE_OPS（诊断面子集）、manage 工具面。**只落引擎侧不落壳侧必红**
+// （ControlOp == SUPPORTED_OPS 差集非空），这是 REV-E 的实测结论，不是误报。
+//
+// **ROUTE_OPS 刻意不补这 15 条（裁决留档，勿在下一轮「顺手补齐」）**：ROUTE_OPS 不是路由清单，
+// 而是 android_privilege_status 里的**后端诊断**面——它逐 op 调 decideControl 打印
+// backend / reason / alternative。browser* 与 vd* 是 neverA11y，可它们实际由**同一个 a11y 服务的
+// handle 分支**承载；一旦列进 ROUTE_OPS，a11y 在线时诊断面就会输出「无障碍通道暂不支持操作 X」
+// 与「该操作请用 ADB 通道」这类**错误指引**（而它们既不进 A11Y_OPS 也不走 ADB）。
+// 若将来要让它们出现在诊断面，先解开这个语义矛盾（要么承认它们是 a11y 承载、要么给出独立后端），
+// 再同批改 ROUTE_OPS；ROUTE_OPS ⊂ ControlOp 的约束在两种做法下都成立，门禁不会替你做这个判断。
+export type ControlOp = 'snapshot' | 'click' | 'longClick' | 'setText' | 'scroll' | 'global' | 'screenshot' | 'state'
   | 'nodeText' | 'webSnapshot' | 'webAction'
+  | 'browserCaps' | 'browserShow' | 'browserHide' | 'browserOpen' | 'browserJs'
+  | 'browserInput' | 'browserShot' | 'browserState' | 'browserSetUa' | 'browserViewport'
+  | 'vdCreate' | 'vdDestroy' | 'vdLaunch' | 'vdMoveTask' | 'vdInfo'
 
 export interface ControlPolicyInput {
   op: ControlOp
@@ -40,9 +62,14 @@ export const REQUIRED_SESSION_MODE = 'danger-full-access'
 /** a11y 通道能覆盖的操作：五个语义操作 + 截屏（API 30+，见 A11Y-CONTROL-DESIGN.md §2.2）
  *  + `state`（便宜的状态读数：快照代次/失效标记，供点击生效校验，issue #129）
  *  + `webSnapshot`/`webAction`（issue #128 L1：自有 WebView 的 DOM 语义快照与动作——
- *  与 a11y 共用同一队列/心跳，壳侧在页面不在场时明确报错）。 */
+ *  与 a11y 共用同一队列/心跳，壳侧在页面不在场时明确报错）
+ *  + `longClick`（0.13.8 收口：壳侧 handle 的 `longClick` 分支就是
+ *  `AccessibilityService` 的 ACTION_LONG_CLICK 优先 + 手势按住兜底，本属 a11y 可承载操作；
+ *  漏登记 = a11y 在线时长按被 deny。六处登记链由 scripts/check-control-ops.mjs 守）。
+ *  **browser\* / vd\*（15 条）刻意不在此列**：契约 neverA11y，见上方 ControlOp 注释与
+ *  scripts/control-ops-known-gaps.json 的永久豁免。 */
 export const A11Y_OPS: readonly ControlOp[] = [
-  'snapshot', 'click', 'setText', 'scroll', 'global', 'screenshot', 'state', 'nodeText', 'webSnapshot', 'webAction',
+  'snapshot', 'click', 'longClick', 'setText', 'scroll', 'global', 'screenshot', 'state', 'nodeText', 'webSnapshot', 'webAction',
 ]
 
 export function decideControl(input: ControlPolicyInput): ControlDecision {

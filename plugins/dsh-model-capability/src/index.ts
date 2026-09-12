@@ -28,7 +28,8 @@ import {
 } from './capability-probe.js'
 import { hasCapabilities, lookupCatalog, type CatalogSnapshot } from './catalog-lookup.js'
 import { providerFromSettings, type SettingsLike } from './settings-config.js'
-import { applyModelPatch, type ModelPatch, type SettingsWriteLike } from './settings-writer.js'
+import { applyModelPatch, createStampStore, type ModelPatch, type SettingsWriteLike } from './settings-writer.js'
+import { capabilitySignature } from './signature.js'
 
 export const name = 'dsh-model-capability'
 
@@ -418,30 +419,22 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
       return config.routes ?? Object.keys(section?.providers ?? {})
     }
 
-    /** 能力相关字段的签名：新增路由/模型或字段增删都会变，值变化不触发（避免自触发循环）。 */
+    /**
+     * 能力补给触发签名（0.14.0-preview / ST-03）：**值敏感**——含路由级键（baseURL/api 等）的规范化值
+     * 与模型级能力字段的值，结构增删同样改变签名。旧实现只记「字段有无」，换网关/手改配置不触发重跑。
+     * 见 src/signature.ts 与计划文档 §4.2 ST-03。
+     */
     const signatureOf = (): string => {
       try {
         const descriptor = settings.describe({ namespaces: ['llm-pi-ai'] }).find((d) => d.ns === 'llm-pi-ai')
-        const section = descriptor?.value as { providers?: Record<string, Record<string, unknown>> } | undefined
-        const routes = section?.providers ?? {}
-        const parts: string[] = []
-        for (const route of Object.keys(routes).sort()) {
-          const models = Array.isArray(routes[route]?.models) ? routes[route].models as unknown[] : []
-          const ids = models.map((model) => {
-            if (typeof model === 'string') return model
-            const record = model as Record<string, unknown>
-            const flags = ['reasoningEfforts', 'input', 'contextWindow', 'maxTokens']
-              .map((key) => (record[key] === undefined ? '-' : '+'))
-              .join('')
-            return `${String(record.id ?? '?')}${flags}`
-          })
-          parts.push(`${route}:[${ids.join(',')}]`)
-        }
-        return parts.join('|')
+        return capabilitySignature(descriptor?.value, config.routes)
       } catch {
         return ''
       }
     }
+
+    /** 来源戳：记录「该字段现在的值是我方写下的」，使新发现的值可刷新我方旧写入（用户手写值无戳）。 */
+    const stamps = createStampStore()
 
     const runAutoPass = async () => {
       const routes = routesToConsider()
@@ -454,7 +447,7 @@ export function apply(ctx: Context, config: PluginConfig = {}) {
           const patches = patchesFrom(found.report).filter((patch) => patch.reasoningEfforts !== undefined)
           diag(`runAutoPass(${route}): patches=${patches.length}`)
           if (patches.length === 0) continue
-          const result = await applyModelPatch(settings, route, patches, log)
+          const result = await applyModelPatch(settings, route, patches, log, stamps)
           diag(`runAutoPass(${route}): wrote=${result.wrote} reason=${result.reason} changes=${JSON.stringify(result.changes)}`)
           if (result.wrote) log?.info?.(`auto-apply ${route}: ${result.changes.join('；')}`)
         } catch (error) {

@@ -316,6 +316,141 @@ class SnapshotTransactionTest {
     }
   }
 
+  /**
+   * apk #214 端到端：从「曾禁用 ui-layout」的旧版升级（live profiles 在场 → 走合并而非整树替换）时，
+   * 工厂语义必须纠正旧版遗留的 `- id: ui-layout / disabled: true`；否则根服务 layout 不 activate。
+   */
+  @Test
+  fun profileSwapReconcilesLegacyUiLayoutDisable() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      writeRuntime(live, "old-node", "old-profile")
+      writeRuntime(stage, "new-node", "new-profile")
+      val livePatch = File(live, "home/.dsh/profiles/web/cordis.patch.yml")
+      livePatch.writeText(LEGACY_UI_LAYOUT_PATCH)
+      File(stage, "home/.dsh/profiles/web/cordis.patch.yml").writeText(FACTORY_PATCH)
+
+      val notes = SnapshotTransaction.swap(
+        filesDir = filesDir,
+        stagedRoot = stage,
+        usrDir = File(live, "usr"),
+        homeDir = File(live, "home"),
+        preservedNames = preserved,
+        fingerprint = "fp214",
+        startedAt = 1L,
+      )
+
+      val merged = livePatch.readText()
+      assertFalse("旧版遗留的 ui-layout disable 必须被纠正（#214 规格断言）", merged.contains("ui-layout"))
+      assertTrue("live 既有工厂块保留", merged.contains("shell-termux"))
+      assertTrue("live 缺失的工厂块照旧追加", merged.contains("android-manage"))
+      assertTrue("纠正必须留说明（供升级现场追溯）", notes.any { it.contains("ui-layout") })
+      SnapshotTransaction.finish(filesDir)
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
+  /**
+   * 0.14.0 P0：node_modules 子树下的 package.json 是**工厂件**——工厂新增的 exports 必须整份覆盖 live。
+   * 现场：@dsh-android/dsh-android-file-open 的 live manifest 缺 "./route-auth"，而快照 tar 内有，
+   * 插件跨包 import 直接 ERR_PACKAGE_PATH_NOT_EXPORTED → 引擎 exit=1。根因是把「并集」规则
+   * 递归套用到嵌套清单（只并 dependencies/bundles，丢掉 exports/version 等）。
+   */
+  @Test
+  fun nestedNodeModulesManifestFollowsTheFactoryNotTheLiveCopy() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      writeRuntime(live, "old-node", "old-profile")
+      writeRuntime(stage, "new-node", "new-profile")
+      val rel = "home/.dsh/profiles/web/node_modules/@dsh-android/dsh-android-file-open/package.json"
+      File(stage, rel).apply { parentFile.mkdirs() }.writeText(
+        """{"name":"file-open","version":"0.2.0","exports":{".":"./lib/index.js","./route-auth":"./lib/route-auth.js"},"dependencies":{"dep":"1.0.0"}}""",
+      )
+      File(live, rel).apply { parentFile.mkdirs() }.writeText(
+        """{"name":"file-open","version":"0.1.0","exports":{".":"./lib/index.js"},"dependencies":{"dep":"1.0.0","userExtra":"9.9.9"}}""",
+      )
+
+      SnapshotTransaction.swap(filesDir, stage, File(live, "usr"), File(live, "home"), preserved, "fp1", 1L)
+
+      val nested = File(live, rel).readText()
+      assertTrue("工厂新增 exports 必须覆盖 live（P0 根因）", nested.contains("route-auth"))
+      assertTrue("工厂 version 必须生效", nested.contains("0.2.0"))
+      assertFalse("嵌套清单不得保留 live 独有字段（旧并集语义的残留）", nested.contains("userExtra"))
+      SnapshotTransaction.finish(filesDir)
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
+  /** 同一口径：node_modules 子树下的 cordis.patch.yml 也是工厂件，整份覆盖（不做按 id 追加）。 */
+  @Test
+  fun nestedCordisPatchYmlFollowsTheFactoryNotTheLiveCopy() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      writeRuntime(live, "old-node", "old-profile")
+      writeRuntime(stage, "new-node", "new-profile")
+      val rel = "home/.dsh/profiles/web/node_modules/@dsh-android/dsh-android-manage/cordis.patch.yml"
+      val factoryPatch = "- id: manage-row\n  disabled: false\n"
+      File(stage, rel).apply { parentFile.mkdirs() }.writeText(factoryPatch)
+      File(live, rel).apply { parentFile.mkdirs() }.writeText(
+        "- id: manage-row\n  disabled: true\n- insert:\n    - id: stale-user-row\n      name: '@user/x'\n",
+      )
+
+      SnapshotTransaction.swap(filesDir, stage, File(live, "usr"), File(live, "home"), preserved, "fp1", 1L)
+
+      assertEquals("嵌套 patch 必须与工厂逐字一致", factoryPatch, File(live, rel).readText())
+      SnapshotTransaction.finish(filesDir)
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
+  /**
+   * profile **根**清单仍走并集（用户 pin 权威），且真实嵌套形态 dsh.profile.bundles 的并集必须生效：
+   * 旧实现只读扁键 "dsh.profile.bundles"，而出厂清单是嵌套 dsh.profile.bundles
+   * （scripts/lib/profile-seed.mjs:38-42；设备实测同形态）⇒ 真机恒不命中，工厂新增 bundle 进不去。
+   */
+  @Test
+  fun profileRootManifestKeepsUserPinAndUnionsTheNestedFactoryBundles() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      writeRuntime(live, "old-node", "old-profile")
+      writeRuntime(stage, "new-node", "new-profile")
+      val rel = "home/.dsh/profiles/web/package.json"
+      File(stage, rel).writeText(
+        """{"name":"dsh-profile-web","dependencies":{"@dsh-android/dsh-host-web-compat":"0.1.13"},"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base","@deepseek-ai/dsh-web-app"],"patchReload":"startup"}}}""",
+      )
+      File(live, rel).writeText(
+        """{"name":"dsh-profile-web","dependencies":{"@user/third-party":"1.2.3"},"dsh":{"profile":{"bundles":["@user/custom-bundle"]}}}""",
+      )
+
+      SnapshotTransaction.swap(filesDir, stage, File(live, "usr"), File(live, "home"), preserved, "fp1", 1L)
+
+      val root = org.json.JSONObject(File(live, rel).readText())
+      val deps = root.getJSONObject("dependencies")
+      assertEquals("用户 pin 权威", "1.2.3", deps.getString("@user/third-party"))
+      assertEquals("工厂依赖补入", "0.1.13", deps.getString("@dsh-android/dsh-host-web-compat"))
+      val bundles = root.getJSONObject("dsh").getJSONObject("profile").getJSONArray("bundles")
+      val list = (0 until bundles.length()).map { bundles.getString(it) }
+      assertTrue("工厂新增 bundle 必须补入（真实嵌套键形态）", list.contains("@deepseek-ai/dsh-web-app"))
+      assertTrue("工厂既有 bundle 也必须补入", list.contains("@deepseek-ai/dsh-base"))
+      assertTrue("用户既有 bundle 必须幸存（不是重建数组）", list.contains("@user/custom-bundle"))
+      assertFalse("不得写成引擎不读的扁键", root.has("dsh.profile.bundles"))
+      SnapshotTransaction.finish(filesDir)
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
   private fun writeRuntime(root: File, nodeMarker: String, profileMarker: String) {
     File(root, "usr/bin").mkdirs()
     File(root, "usr/bin/node").writeText(nodeMarker)
@@ -326,4 +461,31 @@ class SnapshotTransactionTest {
   }
 
   private fun tempDir(): File = Files.createTempDirectory("snapshot-transaction-test").toFile()
+
+  private companion object {
+    /** ≤0.13.6 权威清单形态（docs/archive/M1-PLAN.md:104-105）：ui-layout 被禁用。 */
+    val LEGACY_UI_LAYOUT_PATCH = """
+      # Android adaptation
+      - id: bash-sandbox
+        disabled: true
+      - insert:
+          - id: shell-termux
+            name: '@dsh-android/dsh-shell-termux'
+      - id: ui-layout
+        disabled: true
+    """.trimIndent() + "\n"
+
+    /** 0.1.5 起的权威清单形态：ui-layout 不再出现（工厂语义 = 恒启用）。 */
+    val FACTORY_PATCH = """
+      # Android adaptation
+      - id: bash-sandbox
+        disabled: true
+      - insert:
+          - id: shell-termux
+            name: '@dsh-android/dsh-shell-termux'
+      - insert:
+          - id: android-manage
+            name: '@dsh-android/dsh-android-manage'
+    """.trimIndent() + "\n"
+  }
 }

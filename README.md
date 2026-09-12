@@ -90,7 +90,8 @@ ELF / cordis 挂载集⊇注入集 / LICENSES 自检（Python 流式）——任
 | `hasAllFilesAccess` | () → boolean | 是否已授予「所有文件访问」权限（外部工作区要求） |
 | `getPickToken` | () → string | 目录选择桥的一次性会话 token（引擎侧 pick 端点校验） |
 | `copyText` | (text) → boolean | 写入系统剪贴板（WebView `clipboard.writeText` 被拒时的回退） |
-| `getDevLogEnabled` | () → boolean | dev 日志开关状态 |
+| `getDevLogEnabled` | () → boolean | dev 日志开关**事实** = 偏好 && 采集器在跑（ST-11：拒绝乐观置位） |
+| `getImmersiveMode` | () → boolean | 沉浸式状态栏开关的**壳侧权威值**（ST-10：页面以它为唯一初值；与 `setImmersiveMode` 同源） |
 | `getAdbState` | () → string | ADB 授权状态视图（三道门状态机）：JSON `{fullAccess, allowSwitch, paired, wirelessDebugOn, message}`（预览） |
 | `discoverAdbPorts` | () → string | 无线调试端口自动扫描（原生 TCP 盲扫）：配对端口候选 JSONArray；无线调试未开时返回 `[]`（预览） |
 | `setAdbPair` | (code, pairPort, connectPort) → boolean | 门3 配对：真执行 `adb pair` 握手；码值只进 argv，不入审计（预览） |

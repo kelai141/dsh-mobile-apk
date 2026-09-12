@@ -35,7 +35,9 @@ const scratch = mkdtempSync(join(tmpdir(), 'f4-test-'))
 try {
   const target = join(scratch, TARGET)
   mkdirSync(dirname(target), { recursive: true })
-  copyFileSync(FIXTURE, target)
+  // FX-E19：fixture 索引 LF 而工作树在 core.autocrlf=true 下是 CRLF——按 LF 归一后写夹具，
+  // 否则多行锚点（带 \n）恒失配 → 本回归在 CRLF 工作树上「本机必红」（CI 的 LF 检出看不出）。
+  writeFileSync(target, readFileSync(FIXTURE, 'utf8').replace(/\r\n/g, '\n'))
 
   const first = applyPatches(scratch)
   check('apply-patches exits 0', first.status === 0, (first.stderr || '').trim().split('\n').slice(-2).join(' '))
