@@ -197,6 +197,29 @@ BUILD SUCCESSFUL in 34s   （arm64 与 x86_64 各自的 gradle 构建）
 
 上述 1-3 已修复，#4 由新增门禁与守卫锁住。**发布资产即由这条已验证的链路产出。**
 
+### 发版命令全文空跑（含 `-ExportSnapshots`）
+
+发版命令 `pwsh -File scripts\build-apk-013.ps1 -Suffix "" -ExportSnapshots` 亦已空跑通过（只构建、不发布）：
+
+```
+EXIT=0        FAILED 行计数 = 0
+BUILD SUCCESSFUL in 30s / 29s   （arm64 与 x86_64）
+快照资产导出: out\v0.14.0-preview\snapshot-arm64.tar.xz
+快照资产导出: out\v0.14.0-preview\snapshot-x86_64.tar.xz
+=== 汇总。已产出 ABI: [arm64, x86_64] / 被拒 ABI: [] ===
+```
+
+产出清单（`out/v0.14.0-preview/`）：
+
+| 文件 | 大小 |
+|---|---|
+| `dsh-mobile-apk-v0.14.0-preview-arm64.apk` | 161.40 MB |
+| `dsh-mobile-apk-v0.14.0-preview-x86_64.apk` | 158.70 MB |
+| `snapshot-arm64.tar.xz` + `.sha256` | 157.20 MB |
+| `snapshot-x86_64.tar.xz` + `.sha256` | 154.50 MB |
+
+即发布资产的**四个核心件（双 APK + 双快照 xz/sha256）已由这条已验证的命令实际产出**；插件 tgz 与 `MANIFEST.txt` 由 `build-release.ps1` 在发布时组装。
+
 ## 真机待验（arm64，发布前补充门禁）
 
 - 返回手势全面屏路径、A1 存量升级路径、通知锁屏批准与脱敏、OEM 折叠态动作可见性。
