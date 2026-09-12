@@ -291,18 +291,36 @@ function tools(ctx: Context, priv: PrivilegeFace) {
       const a = guard('screenshot', { textRedact }, exec as { agent?: { session?: unknown } })
       if (!a.ok) return { imagePath: '', denied: true, text: a.guidance }
       // 0.13.5 W4：无障碍截屏优先（API 30+ 的 AccessibilityService.takeScreenshot——不需要 ADB）
+      let adbNote = ''
       if (controlDecision('screenshot', exec as { agent?: { session?: unknown } }).backend === 'a11y') {
         const r = await a11yExec('screenshot', {}, 12_000)
-        if (!r.ok) return { imagePath: '', denied: false, text: '无障碍截屏失败：' + r.error }
-        const data = (r.data ?? {}) as { path?: string; width?: number; height?: number }
-        if (!data.path) return { imagePath: '', denied: false, text: '无障碍截屏未返回文件路径' }
-        return inlineShot(
-          data.path,
-          data.width ?? 0,
-          data.height ?? 0,
-          exec as ExecLike,
-          `无障碍通道，设备物理分辨率 ${data.width ?? '?'}x${data.height ?? '?'}`,
-        )
+        if (!r.ok) {
+          // 0.13.8 E6：无障碍截屏不可用（API<30 无 takeScreenshot / FLAG_SECURE 被拒 / 服务未就绪）
+          // → 回落 ADB screencap，而不是把「没有截图能力」当结论抛给模型。
+          if (priv.execAdbLine) {
+            adbNote = `（无障碍截屏不可用：${r.error}——已回落 ADB 通道）`
+          } else {
+            return {
+              imagePath: '', denied: false,
+              text: `无障碍截屏失败：${r.error}。ADB 通道未接通，无法回落——`
+                + '需要截图请先完成 ADB 授权（完全访问 → 允许访问开关 → 配对码），或用 android_ui_dump 读结构。',
+            }
+          }
+        } else {
+          const data = (r.data ?? {}) as { path?: string; width?: number; height?: number }
+          if (!data.path) {
+            if (!priv.execAdbLine) return { imagePath: '', denied: false, text: '无障碍截屏未返回文件路径，且 ADB 通道未接通（无法回落）' }
+            adbNote = '（无障碍截屏未返回文件路径——已回落 ADB 通道）'
+          } else {
+            return inlineShot(
+              data.path,
+              data.width ?? 0,
+              data.height ?? 0,
+              exec as ExecLike,
+              `无障碍通道，设备物理分辨率 ${data.width ?? '?'}x${data.height ?? '?'}`,
+            )
+          }
+        }
       }
       // 0.14 真实通道：adbd（shell uid）执行 screencap → adb pull 回引擎私有临时目录（app uid 可读）。
       if (!priv.execAdbLine) return { imagePath: '', denied: false, text: 'ADB 执行通道未接通（dsh-android-bridge 未提供 execAdbLine）' }
@@ -318,7 +336,7 @@ function tools(ctx: Context, priv: PrivilegeFace) {
         // F2 统一坐标系：回传物理分辨率锚点。模型侧读图可能降采样（maxDim 2048），
         // 严禁直接用截图像素坐标点击——归一化用 android_ui_click 的 nx/ny。
         const size = await screenSize()
-        return inlineShot(local, size.w, size.h, exec as ExecLike, `ADB 通道，设备物理分辨率 ${size.w}x${size.h}`)
+        return inlineShot(local, size.w, size.h, exec as ExecLike, `ADB 通道，设备物理分辨率 ${size.w}x${size.h}${adbNote}`)
       } catch (e) {
         return { imagePath: '', denied: false, text: '截图失败：' + String((e as Error).message) }
       }
@@ -1508,11 +1526,20 @@ function tools(ctx: Context, priv: PrivilegeFace) {
   const uiGlobal = defineTool({
     name: 'android_ui_global',
     description:
-      '【首选】系统级导航动作（无障碍通道，不需要 ADB）：back=返回上一级、home=回桌面、'
-      + 'recents=最近任务、notifications=下拉通知栏。卡在子菜单/弹窗/详情页出不来时，第一步就用 back。'
+      '【首选】系统级动作（无障碍通道，不需要 ADB）：back=返回上一级、home=回桌面、recents=最近任务、'
+      + 'notifications=下拉通知栏、quickSettings=快捷设置面板、toggleSplitScreen=分屏、powerDialog=关机菜单、'
+      + 'lockScreen=锁屏、takeScreenshot=系统截图、menu=菜单键、mediaPlayPause=播放/暂停、'
+      + 'dismissNotificationShade=收起通知栏、accessibilityShortcut=无障碍快捷方式。'
+      + '卡在子菜单/弹窗/详情页出不来时，第一步就用 back。'
+      + '设备实际可用的动作由系统 getSystemActions() 决定，不可用者返回可用清单（不会静默无效果）。'
       + '需设备控制授权（无障碍服务已开启即可）+ 会话档位 danger-full-access。',
     parameters: {
-      action: { type: 'string', required: true, enum: ['back', 'home', 'recents', 'notifications'], description: '要执行的全局动作' },
+      action: {
+        type: 'string', required: true,
+        enum: ['back', 'home', 'recents', 'notifications', 'quickSettings', 'toggleSplitScreen', 'powerDialog',
+          'lockScreen', 'takeScreenshot', 'menu', 'mediaPlayPause', 'dismissNotificationShade', 'accessibilityShortcut'],
+        description: '要执行的全局动作（可用集由系统决定，不可用会回可用清单）',
+      },
     },
     output: {
       schema: {
@@ -1530,8 +1557,10 @@ function tools(ctx: Context, priv: PrivilegeFace) {
     execute: async ({ action }: { action: string }, exec) => {
       const a = guard('ui_global', { action }, exec as { agent?: { session?: unknown } })
       if (!a.ok) return { ok: false, denied: true, action, text: a.guidance }
-      if (!['back', 'home', 'recents', 'notifications'].includes(action)) {
-        return { ok: false, denied: false, action, text: 'action 必须是 back / home / recents / notifications' }
+      const GLOBAL_ACTIONS = ['back', 'home', 'recents', 'notifications', 'quickSettings', 'toggleSplitScreen',
+        'powerDialog', 'lockScreen', 'takeScreenshot', 'menu', 'mediaPlayPause', 'dismissNotificationShade', 'accessibilityShortcut']
+      if (!GLOBAL_ACTIONS.includes(action)) {
+        return { ok: false, denied: false, action, text: `action 必须是 ${GLOBAL_ACTIONS.join(' / ')}` }
       }
       const r = await a11yExec('global', { action }, 6000)
       if (!r.ok) {
