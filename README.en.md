@@ -104,7 +104,8 @@ channel completes in the 0.13.0 official release.
 | `hasAllFilesAccess` | () → boolean | whether All Files Access is granted (external workspace requirement) |
 | `getPickToken` | () → string | one-shot token for the directory-picker bridge (validated by the engine-side pick endpoint) |
 | `copyText` | (text) → boolean | native clipboard write (WebView `clipboard.writeText` is always rejected; page falls back to this) |
-| `getDevLogEnabled` | () → boolean | dev debug-log toggle state |
+| `getDevLogEnabled` | () → boolean | dev debug-log toggle **fact** = preference && collector running (ST-11) |
+| `getImmersiveMode` | () → boolean | authoritative shell-side immersive value (ST-10; pairs with `setImmersiveMode`) |
 | `getAdbState` | () → string | ADB authorization state view (gate state machine): JSON `{fullAccess, allowSwitch, paired, wirelessDebugOn, message}` (preview) |
 | `discoverAdbPorts` | () → string | wireless-debug port auto-scan (native TCP sweep): pairing-port candidates as JSONArray; `[]` while wireless debugging is off (preview) |
 | `setAdbPair` | (code, pairPort, connectPort) → boolean | gate-3 pairing: real `adb pair` handshake; the code goes to argv only — never into the audit log (preview) |

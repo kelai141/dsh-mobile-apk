@@ -253,14 +253,45 @@ if(consumed){e.preventDefault();e.stopPropagation()}
 // carry title=path — the interception above — but tool rows do not), so those
 // clicks fell through to the engine RPC and failed with "unsupported on
 // android". Intercept path-like buttons inside [data-tool] rows for the file
-// tools and route them through the external reader. The button text is the
-// tool-args path, usually RELATIVE to the session cwd; relative paths are
-// resolved by the engine host (/api/android/open-path, token-gated) against
-// the live session cwds with an fs-exists disambiguation. The event is
-// consumed synchronously; when resolution or the reader fails nothing happens
-// (no worse than the engine-RPC error dialog this replaces).
+// tools and route them through the external reader.
+//
+// ST-15 (F-UI-01/F-UI-02):
+//  - the condition is the DOM FACT "this row really renders an upstream fileLink
+//    button" ([class*="fileLink"]; CSS Modules keep the original name in the hash —
+//    the same technique ui-responsive uses for [class*="ledger"]), NOT a static
+//    copy of upstream's tool-name list (upstream adding a fourth variant used to
+//    disable this interception silently).
+//  - the session identity comes from the marker ui-responsive publishes on
+//    <html data-dsh-session-id>, whose truth source is the client session store —
+//    the same authority upstream uses (sessions.byId[sessionId].cwd). The engine
+//    endpoint resolves inside THAT session only; it never scans every session.
+//  - failures are surfaced (toast + console.warn), never a silently consumed click.
 if(typeof window.__dshOpenPath!=="function"){return}
-var FILE_TOOLS={edit:true,write:true,read:true};
+function fileLinkOf(row){
+  try{return row.querySelector('[class*="fileLink"]')}catch(e){return null}
+}
+function sessionIdOf(){
+  try{
+    var id=document.documentElement.getAttribute('data-dsh-session-id');
+    return typeof id==='string'&&id!==''?id:undefined;
+  }catch(e){return undefined}
+}
+function showOpenPathNotice(message){
+  try{
+    var id='dsh-open-path-notice',el=document.getElementById(id);
+    if(!el){
+      el=document.createElement('div');
+      el.id=id;
+      el.setAttribute('role','status');
+      el.style.cssText='position:fixed;left:12px;right:12px;bottom:16px;z-index:2147483000;padding:10px 12px;border-radius:8px;background:rgba(20,20,20,.92);color:#fff;font-size:13px;line-height:1.4;box-shadow:0 4px 16px rgba(0,0,0,.3)';
+      document.body.appendChild(el);
+    }
+    el.textContent=message;
+    if(showOpenPathNotice.timer){clearTimeout(showOpenPathNotice.timer)}
+    showOpenPathNotice.timer=setTimeout(function(){try{el.remove()}catch(e){}},5000);
+    if(window.console&&console.warn){console.warn('[dsh-open-path] '+message)}
+  }catch(e){}
+}
 function isPathText(text){
   if(!text||text.length>400)return false;
   if(/^https?:\\/\\//i.test(text))return false;
@@ -272,13 +303,21 @@ function openViaReader(text){
     return;
   }
   try{
+    var sid=sessionIdOf();
+    var payload={path:text};
+    if(sid!==undefined){payload.sessionId=sid}
     var h={'content-type':'application/json'};
     if(window.androidBridge&&window.androidBridge.getPickToken){h['x-dsh-pick-token']=window.androidBridge.getPickToken()}
-    fetch('/api/android/open-path',{method:'POST',headers:h,body:JSON.stringify({path:text})})
-      .then(function(r){return r.json()})
-      .then(function(j){if(j&&j.abs){window.__dshOpenPath(j.abs,'view')}})
-      .catch(function(){});
-  }catch(e){}
+    fetch('/api/android/open-path',{method:'POST',headers:h,body:JSON.stringify(payload)})
+      .then(function(r){return r.json().then(function(j){return {status:r.status,json:j}}).catch(function(){return {status:r.status,json:null}})})
+      .then(function(result){
+        var j=result.json;
+        if(j&&j.abs){window.__dshOpenPath(j.abs,'view');return}
+        var detail=j&&(j.reason||j.error)?String(j.reason||j.error):('HTTP '+result.status);
+        showOpenPathNotice('无法打开该文件：'+detail+(j&&j.sessionId?'（会话 '+j.sessionId+'）':''));
+      })
+      .catch(function(){showOpenPathNotice('无法打开该文件：本机端点不可达')});
+  }catch(e){showOpenPathNotice('无法打开该文件：'+((e&&e.message)||'未知错误'))}
 }
 document.addEventListener('click',function(e){
   var el=e.target;
@@ -286,7 +325,10 @@ document.addEventListener('click',function(e){
   if(!el||el===document.body)return;
   var row=el.closest?el.closest('[data-tool]'):null;
   if(!row)return;
-  if(!FILE_TOOLS[row.getAttribute('data-tool')])return;
+  // DOM 事实：行内确有上游 fileLink 按钮（不再复刻工具名白名单）
+  var link=fileLinkOf(row);
+  if(!link)return;
+  if(!(el===link||link.contains(el)))return;
   var btn=el.closest?el.closest('button'):null;
   var text=btn?(btn.innerText||'').replace(/^\\s+|\\s+$/g,''):'';
   if(!isPathText(text))return;
@@ -544,9 +586,9 @@ export function apply(ctx) {
       })
       req.on('end', () => {
         try {
-          const { path: rel } = JSON.parse(body)
+          const { path: rel, sessionId } = JSON.parse(body)
           res.writeHead(200, { 'content-type': 'application/json' })
-          res.end(JSON.stringify(resolveSessionPath(rel, ctx)))
+          res.end(JSON.stringify(resolveSessionPath(rel, ctx, sessionId)))
         } catch {
           res.writeHead(400)
           res.end('bad json')
@@ -570,24 +612,49 @@ export function apply(ctx) {
  * @param ctx - the plugin context (sessions service access for cwd resolution).
  * @returns `{ abs }` on success, `{ error }` when nothing resolves.
  */
-function resolveSessionPath(rel, ctx) {
-  if (typeof rel !== 'string' || rel === '') return { error: 'empty path' }
+function resolveSessionPath(rel, ctx, sessionId) {
+  if (typeof rel !== 'string' || rel === '') return { error: 'empty-path', reason: '路径为空' }
   if (rel.startsWith('/')) {
-    return existsSync(rel) ? { abs: rel } : { error: 'not found' }
+    return existsSync(rel) ? { abs: rel } : { error: 'not-found', reason: '该绝对路径不存在' }
   }
   if (rel.startsWith('~/')) {
     const abs = resolvePath(homedir(), rel.slice(2))
-    return existsSync(abs) ? { abs } : { error: 'not found' }
+    return existsSync(abs) ? { abs } : { error: 'not-found', reason: '家目录下不存在该文件' }
   }
   let sessions
   try { sessions = ctx.get('sessions') } catch { sessions = undefined }
+  // ST-15：会话作用域优先（F-UI-01）——有 sessionId 就只在该会话的 cwd 内解析。
+  // 该行的会话身份由页面标记提供（ui-responsive 从客户端会话快照发布）；
+  // 绝不"遍历全部会话 + fs 存在性"猜一个（两个工作区同名文件时必然开错）。
+  if (typeof sessionId === 'string' && sessionId !== '') {
+    let cwd
+    try { cwd = sessions?.get?.(sessionId)?.header?.cwd } catch { cwd = undefined }
+    if (typeof cwd !== 'string' || cwd === '') {
+      let list = []
+      try { list = typeof sessions?.list === 'function' ? sessions.list() : [] } catch { list = [] }
+      for (const session of list) {
+        if (String(session?.header?.id ?? '') !== sessionId) continue
+        cwd = session?.header?.cwd
+        break
+      }
+    }
+    if (typeof cwd !== 'string' || cwd === '') {
+      return { error: 'session-unknown', reason: '会话不存在或没有工作区', sessionId }
+    }
+    const abs = resolvePath(cwd, rel)
+    try {
+      if (existsSync(abs)) return { abs, sessionId }
+    } catch { /* permission/race: report as not found in that session */ }
+    return { error: 'not-found-in-session', reason: '该会话工作区内不存在此文件', sessionId }
+  }
+  // 兼容旧页面（无 sessionId）：保留存在性消歧，但显式标记 guessed——不静默把猜解当权威。
   let list = []
   try { list = typeof sessions?.list === 'function' ? sessions.list() : [] } catch { list = [] }
   for (const session of list) {
     const cwd = session?.header?.cwd
     if (typeof cwd !== 'string' || cwd === '') continue
     const abs = resolvePath(cwd, rel)
-    try { if (existsSync(abs)) return { abs } } catch { /* permission/race: try next */ }
+    try { if (existsSync(abs)) return { abs, guessed: true } } catch { /* permission/race: try next */ }
   }
-  return { error: 'not found' }
+  return { error: 'not-found', reason: '未提供会话且无法在活动会话中命中' }
 }

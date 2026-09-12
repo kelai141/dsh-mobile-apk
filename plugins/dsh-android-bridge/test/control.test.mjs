@@ -2,9 +2,12 @@
 // 策略 fail-closed（会话档位 + 双后端可用性）、队列串行/超时/令牌校验。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { decideControl } from '../lib/control-policy.js'
 import { ControlQueue, controlTokenFrom, registerControlRoutes, tokenMatches } from '../lib/control-queue.js'
-import { parseAdbPrefsXml } from '../lib/index.js'
+import { parseAdbPrefsXml, shellControlToken } from '../lib/index.js'
 
 const base = { op: 'click', a11yEnabled: false, adbReady: false, sessionMode: 'danger-full-access' }
 
@@ -115,11 +118,63 @@ test('令牌校验：未配置/过短/不匹配一律拒绝', () => {
   assert.equal(tokenMatches('a'.repeat(20), undefined), false)
 })
 
-test('令牌来源：环境变量优先，其次壳侧 prefs', () => {
-  assert.equal(controlTokenFrom({ DSH_CONTROL_TOKEN: 'env-token-123456' }, { controlToken: 'prefs-token-123' }), 'env-token-123456')
+test('ST-07 生产语义：env 与 prefs 不一致时一律以壳侧 prefs 实时值为准', () => {
+  assert.equal(
+    controlTokenFrom({ DSH_CONTROL_TOKEN: 'env-token-123456' }, { controlToken: 'prefs-token-123' }),
+    'prefs-token-123',
+    'env 不得再压过 prefs（旧实现下把「配置陈旧」伪装成「服务未开启」）',
+  )
+  assert.equal(
+    controlTokenFrom({ DSH_CONTROL_TOKEN: 'env-token-123456' }, undefined),
+    undefined,
+    '未显式开启测试开关时 env 完全不参与（fail-closed）',
+  )
   assert.equal(controlTokenFrom({}, { controlToken: 'prefs-token-123' }), 'prefs-token-123')
   assert.equal(controlTokenFrom({}, { controlToken: 'short' }), undefined)
   assert.equal(controlTokenFrom({}, undefined), undefined)
+  assert.equal(
+    controlTokenFrom({ DSH_CONTROL_TOKEN: 'short' }, { controlToken: 'prefs-token-123' }),
+    'prefs-token-123',
+    '过短的 env 值不得顶掉合法 prefs 值',
+  )
+})
+
+test('ST-07 显式测试开关：DSH_CONTROL_TOKEN_TEST=1 时 env 生效，缺失回落 prefs', () => {
+  const env = { DSH_CONTROL_TOKEN_TEST: '1', DSH_CONTROL_TOKEN: 'env-token-123456' }
+  assert.equal(controlTokenFrom(env, { controlToken: 'prefs-token-123' }), 'env-token-123456')
+  assert.equal(controlTokenFrom({ DSH_CONTROL_TOKEN_TEST: 'true', DSH_CONTROL_TOKEN: 'env-token-123456' }, { controlToken: 'prefs-token-123' }), 'env-token-123456')
+  assert.equal(controlTokenFrom({ DSH_CONTROL_TOKEN_TEST: '1' }, { controlToken: 'prefs-token-123' }), 'prefs-token-123')
+  assert.equal(controlTokenFrom({ DSH_CONTROL_TOKEN_TEST: '1', DSH_CONTROL_TOKEN: 'short' }, { controlToken: 'prefs-token-123' }), 'prefs-token-123')
+  assert.equal(controlTokenFrom({ DSH_CONTROL_TOKEN_TEST: '0', DSH_CONTROL_TOKEN: 'env-token-123456' }, { controlToken: 'prefs-token-123' }), 'prefs-token-123')
+})
+
+test('ST-07 shellControlToken：生产实时读壳侧 prefs（壳重装换令牌后自愈）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-prefs-'))
+  const prefs = join(dir, 'dsh-adb.xml')
+  writeFileSync(prefs, '<map><string name="controlToken">prefs-live-token-1</string></map>')
+  const prev = {
+    path: process.env.DSH_ADB_PREFS_PATH,
+    token: process.env.DSH_CONTROL_TOKEN,
+    flag: process.env.DSH_CONTROL_TOKEN_TEST,
+  }
+  try {
+    process.env.DSH_ADB_PREFS_PATH = prefs
+    process.env.DSH_CONTROL_TOKEN = 'env-token-123456'
+    delete process.env.DSH_CONTROL_TOKEN_TEST
+    assert.equal(shellControlToken(), 'prefs-live-token-1')
+    // 壳侧重装/清数据后重新生成令牌 → 引擎下一次请求即读到新值
+    writeFileSync(prefs, '<map><string name="controlToken">prefs-live-token-2</string></map>')
+    assert.equal(shellControlToken(), 'prefs-live-token-2')
+    process.env.DSH_CONTROL_TOKEN_TEST = '1'
+    assert.equal(shellControlToken(), 'env-token-123456')
+  } finally {
+    if (prev.path === undefined) delete process.env.DSH_ADB_PREFS_PATH
+    else process.env.DSH_ADB_PREFS_PATH = prev.path
+    if (prev.token === undefined) delete process.env.DSH_CONTROL_TOKEN
+    else process.env.DSH_CONTROL_TOKEN = prev.token
+    if (prev.flag === undefined) delete process.env.DSH_CONTROL_TOKEN_TEST
+    else process.env.DSH_CONTROL_TOKEN_TEST = prev.flag
+  }
 })
 
 function fakeReq(body) {

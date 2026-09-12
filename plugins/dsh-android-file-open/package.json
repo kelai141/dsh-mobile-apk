@@ -12,9 +12,12 @@
   "license": "MIT",
   "private": true,
   "scripts": {
-    "build": "tsc -p ."
+    "build": "tsc -p .",
+    "test": "npm run build && node --test test/auth.test.mjs"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@dsh-android/dsh-android-bridge": "file:../dsh-android-bridge"
+  },
   "peerDependencies": {
     "@deepseek-ai/dsh-tools": "^0.1.1-rc.2",
     "@deepseek-ai/dsh-llm": "^0.1.1-rc.2",

@@ -7,7 +7,7 @@
  *
  * 体积动机（实测冻结口径）：V1 426 B/节点 → V2 54.7 B/行；探针 86 行 = 4,705 B（V1 同场景 37,052 B）。
  * 压缩来自四件事：列式（不重复字段名）、符号表（字符串只发一次）、常数广播（整列同值只发 1 个）、
- * 整数句柄（句柄 = 行下标，不单独发 id）。
+ * 整数句柄（句柄 = **原始行号**，随 `o` 列显式发出；载荷行下标只是列内位置）。
  */
 import type { UiNode, NodeEntry } from './ui-tree.js'
 import { decodeEntities, parseBoundsToBox } from './ui-tree.js'
@@ -31,8 +31,12 @@ export interface V2Decoded {
   screen: { w: number; h: number }
   rawCount: number
   view: V2View
+  /** 壳侧建树预算耗尽（E2 的 `truncated`）：真值透出，呈现面据此渲染，不再写死「未截断」。 */
+  truncated: boolean
   /** 与 V1 公开节点同形（resolveRef / render / 工具面零改动）。 */
   rows: UiNode[]
+  /** 载荷行下标 → 原始行号（壳侧 walk 全量行表下标）。动作回指的 row 句柄取此列（FX-206.1）。 */
+  origRow: Int32Array
   /** 行下标 → 最近可操作祖先行下标（-1 = 无）。C2 祖先回退的直接答案。 */
   actionableAncestor: Int32Array
   /** 行下标 → 子树结束下标（开区间）。C1 的 @nX 区域限定用它。 */
@@ -74,13 +78,17 @@ export function decodeV2(data: unknown): DecodeResult {
   const n = Number(d.n)
   if (!Number.isInteger(n) || n < 0) return { ok: false, error: 'n 必须是非负整数' }
   const view: V2View = d.view === 'target' ? 'target' : 'all'
+  const truncated = d.truncated === true
   const rawCount = Number(d.raw ?? n)
+  if (!Number.isInteger(rawCount) || rawCount < n) {
+    return { ok: false, error: `raw 必须是不小于 n=${n} 的整数（收到 ${String(d.raw)}）` }
+  }
   if (n === 0) {
     return {
       ok: true,
       value: {
-        gen, rotation: rot, screen: { w: scr[0], h: scr[1] }, rawCount, view,
-        rows: [], actionableAncestor: new Int32Array(0), subtreeEnd: new Int32Array(0),
+        gen, rotation: rot, screen: { w: scr[0], h: scr[1] }, rawCount, view, truncated,
+        rows: [], origRow: new Int32Array(0), actionableAncestor: new Int32Array(0), subtreeEnd: new Int32Array(0),
       },
     }
   }
@@ -99,6 +107,26 @@ export function decodeV2(data: unknown): DecodeResult {
     return { ok: false, error: `b 长度必须为 4n=${n * 4}（收到 ${Array.isArray(b) ? b.length : '非数组'}）` }
   }
 
+  // FX-206.1（P0）：句柄必须指回**壳侧 walk 全量行表**的原始行号。载荷行下标 fi 只是列内位置，
+  // 壳侧 resolveTarget 用 rows[handle] 索引全量表；两者只在「没有节点被过滤」时偶然相等
+  // （探针 393 行 → 86 行下 86/86 全错位）。缺列即失败关闭：宁可不给清单，也不能给出会点错的句柄。
+  const o = d.o
+  if (!isIntArray(o)) return { ok: false, error: 'o 必须是整数数组（载荷行下标 → 原始行号映射）——壳侧编码器过旧，请更新 APK' }
+  if (o.length !== 1 && o.length !== n) {
+    return { ok: false, error: `o 长度 ${o.length} 既不是 1（广播）也不是 n=${n}` }
+  }
+  const origRow = new Int32Array(n)
+  for (let i = 0; i < n; i++) {
+    const src = pick(o, i, n)
+    if (!Number.isInteger(src) || src < 0 || src >= rawCount) {
+      return { ok: false, error: `o[${i}]=${src} 越界：原始行号必须落在 [0, rawCount=${rawCount}) 内` }
+    }
+    if (i > 0 && src <= origRow[i - 1]) {
+      return { ok: false, error: `o 必须严格递增（第 ${i} 项 ${src} 不大于前一项 ${origRow[i - 1]}）` }
+    }
+    origRow[i] = src
+  }
+
   const rows: UiNode[] = new Array(n)
   const actionableAncestor = new Int32Array(n)
   for (let i = 0; i < n; i++) {
@@ -106,7 +134,7 @@ export function decodeV2(data: unknown): DecodeResult {
     const x = b[i * 4]; const y = b[i * 4 + 1]; const w = b[i * 4 + 2]; const h = b[i * 4 + 3]
     rows[i] = {
       id: 'n' + i,
-      parentId: '',                                    // V2 不发父链；祖先回退走 actionableAncestor
+      parentId: '',                                    // 下方预序 + 深度一次补齐（FX-212.5）；祖先回退走 actionableAncestor
       text: sym(S, pick(cols.t, i, n)),
       desc: sym(S, pick(cols.s, i, n)),
       rid: sym(S, pick(cols.r, i, n)),
@@ -126,18 +154,24 @@ export function decodeV2(data: unknown): DecodeResult {
     actionableAncestor[i] = pick(cols.p, i, n)
   }
 
-  // 子树区间：预序 + 深度 ⇒ 首个更浅或同深的后续行（单调栈，O(n)）
+  // 子树区间：预序 + 深度 ⇒ 首个更浅或同深的后续行（单调栈，O(n)）。
+  // 同一栈顺手重建父链（FX-212.5）：V2 不发父 id，但预序 + 深度可无损得到最近祖先行，
+  // 下游 render 的 ^nX、detailRecord.parentId 与 ui_detail 的 parentLabel 因此不再恒空。
   const subtreeEnd = new Int32Array(n).fill(n)
   const stk: number[] = []
   for (let i = 0; i < n; i++) {
     const di = rows[i].depth
     while (stk.length > 0 && rows[stk[stk.length - 1]].depth >= di) subtreeEnd[stk.pop() as number] = i
+    rows[i].parentId = stk.length > 0 ? 'n' + stk[stk.length - 1] : ''
     stk.push(i)
   }
 
   return {
     ok: true,
-    value: { gen, rotation: rot, screen: { w: scr[0], h: scr[1] }, rawCount, view, rows, actionableAncestor, subtreeEnd },
+    value: {
+      gen, rotation: rot, screen: { w: scr[0], h: scr[1] }, rawCount, view, truncated,
+      rows, origRow, actionableAncestor, subtreeEnd,
+    },
   }
 }
 
@@ -145,7 +179,8 @@ export function decodeV2(data: unknown): DecodeResult {
  * V2 解码结果 → 工具层缓存形状。
  *
  * `origPath` 槽位在 V2 下承载**行句柄**（十进制字符串）：无障碍动作回指不再发原始路径，
- * 改发 `row`（§S5.1 DD-10）。`byOrig` 以行句柄为键，`parentByOrig` 留空（不再用于 V2）。
+ * 改发 `row`（§S5.1 DD-10）。句柄值 = 载荷行下标经 `o` 列映射回的**原始行号**（FX-206.1），
+ * 壳侧 resolveTarget 用它索引 walk 全量行表。`byOrig` 以行句柄为键，`parentByOrig` 留空（不再用于 V2）。
  */
 export function cacheFromV2(v: V2Decoded): {
   nodes: UiNode[]
@@ -156,7 +191,7 @@ export function cacheFromV2(v: V2Decoded): {
   const byId = new Map<string, NodeEntry>()
   const byOrig = new Map<string, NodeEntry>()
   v.rows.forEach((n, i) => {
-    const handle = String(i)
+    const handle = String(v.origRow[i])
     const withOrig: UiNode = { ...n, origPath: handle }
     v.rows[i] = withOrig
     const entry: NodeEntry = { n: withOrig, parentOrig: '', origPath: handle }
@@ -223,7 +258,8 @@ export function encodeV2FromRaw(
   return encodeV2(rowsFromRaw(raw), view, gen, rotation, screen.w, screen.h)
 }
 
-/** 行表 → V2 载荷（与壳侧 `ControlProtocolV2.encode` 同一规则；跨语言门禁比对的就是这一层）。 */
+/** 行表 → V2 载荷（与壳侧 `ControlProtocolV2.encode` 同一规则；跨语言门禁比对的就是这一层）。
+ * `o` 列 = 载荷每行的**原始行号**（动作回指句柄）；严格递增，故仅 n=1 时长度为 1。 */
 export function encodeV2(
   rowsIn: EncRow[],
   view: V2View,
@@ -323,7 +359,7 @@ export function encodeV2(
     view,
     n: out.length,
     str,
-    d: broadcast(d), p: broadcast(p), b, f: broadcast(f),
+    d: broadcast(d), p: broadcast(p), b, o: broadcast(out), f: broadcast(f),
     c: broadcast(c), k: broadcast(k), r: broadcast(r), w: broadcast(w),
     t: broadcast(t), s: broadcast(s),
   }

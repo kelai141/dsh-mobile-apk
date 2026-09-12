@@ -46,6 +46,8 @@ function applyManage(face) {
   mod.apply({
     logger: () => ({ warn: () => {}, debug: () => {} }),
     tools: { register: (t) => tools.push(t) },
+    // 截图内联路径先取附件/模型面（inlineShot）；桩返回 undefined 即走「返回路径」回退分支。
+    get: () => undefined,
     androidPrivilege: face,
   })
   const byName = (n) => tools.find((t) => t.name === n)
@@ -61,7 +63,9 @@ test('a11y 通道：ui_dump 走 controlExec 并把壳侧节点剪枝成同一节
   assert.equal(r.ok, true)
   assert.equal(calls.control.length, 1)
   assert.equal(calls.control[0].op, 'snapshot')
-  assert.equal(calls.adbLine.length, 0, 'a11y 通道不应触发 uiautomator dump')
+  // a11y 分支仍会经 execAdbLine 探前台真值（dumpsys）——断言收敛到「不得触发 uiautomator dump」
+  // （按命令行内容判定，不按条数：条数会随前台探测实现变化，过严会让这条一直假红）。
+  assert.ok(!calls.adbLine.some((l) => /uiautomator/.test(l)), 'a11y 通道不应触发 uiautomator dump')
   assert.deepEqual(r.screen, { w: 1080, h: 2400 })
   const button = r.nodes.find((n) => n.text === '设置')
   assert.ok(button, '壳侧节点应进入语义清单')
@@ -71,9 +75,12 @@ test('a11y 通道：ui_dump 走 controlExec 并把壳侧节点剪枝成同一节
 test('a11y 通道：ui_click 按原始路径回指壳侧节点', async () => {
   const { face, calls } = makeFace({ backend: 'a11y' })
   const { byName } = applyManage(face)
-  await byName('android_ui_dump').execute({}, exec)
+  // 第二次 dump 命中「界面未变」快路径会返回 nodes: []（0.13.8 P0-4，语义正确）——
+  // 节点清单取首次 dump 的结果。
+  const first = await byName('android_ui_dump').execute({}, exec)
+  const node = first.nodes.find((n) => n.text === '设置')
+  assert.ok(node, '首次 dump 应给出节点清单')
   const click = byName('android_ui_click')
-  const node = (await byName('android_ui_dump').execute({}, exec)).nodes.find((n) => n.text === '设置')
   const r = await click.execute({ ref: `id:${node.id}` }, exec)
   assert.equal(r.ok, true)
   const call = calls.control.find((c) => c.op === 'click')
@@ -86,8 +93,9 @@ test('a11y 通道：ui_click 按原始路径回指壳侧节点', async () => {
 test('a11y 通道：ui_input 走 setText 并带上 clear 语义', async () => {
   const { face, calls } = makeFace({ backend: 'a11y' })
   const { byName } = applyManage(face)
-  await byName('android_ui_dump').execute({}, exec)
-  const node = (await byName('android_ui_dump').execute({}, exec)).nodes.find((n) => n.text === '设置')
+  const first = await byName('android_ui_dump').execute({}, exec)
+  const node = first.nodes.find((n) => n.text === '设置')
+  assert.ok(node, '首次 dump 应给出节点清单')
   const r = await byName('android_ui_input').execute({ text: '你好', ref: `id:${node.id}` }, exec)
   assert.equal(r.ok, true)
   assert.equal(r.channel, 'a11y')

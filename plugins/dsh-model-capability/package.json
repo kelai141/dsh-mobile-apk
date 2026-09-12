@@ -16,7 +16,7 @@
   "private": true,
   "scripts": {
     "build": "tsc -p .",
-    "test": "npm run build && node --test test/capability-probe.test.mjs test/catalog-lookup.test.mjs test/settings-writer.test.mjs test/dialect-gate.test.mjs"
+    "test": "npm run build && node --test test/capability-probe.test.mjs test/catalog-lookup.test.mjs test/settings-writer.test.mjs test/dialect-gate.test.mjs test/signature-stamp.test.mjs"
   },
   "dependencies": {},
   "peerDependencies": {

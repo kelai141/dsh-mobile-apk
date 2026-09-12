@@ -22,10 +22,44 @@ import {
   ControlQueue,
   controlTokenFrom,
   registerControlRoutes,
+  tokenMatches,
   type ControlResult,
 } from './control-queue.js'
+import { toLosslessJson, findUndefinedPaths } from './lossless-json.js'
+import {
+  SessionNotifyState,
+  formatDuration,
+  reportOutcomeLabel,
+  sessionTag,
+  shouldPopupReport,
+  summarize,
+  todoProgress,
+  turnEndKind,
+  turnEndOk,
+  TURN_END_KINDS,
+} from './notify-projection.js'
 
-export { decideControl, ControlQueue, registerControlRoutes, controlTokenFrom }
+export {
+  decideControl,
+  ControlQueue,
+  registerControlRoutes,
+  controlTokenFrom,
+  tokenMatches,
+  SessionNotifyState,
+  formatDuration,
+  reportOutcomeLabel,
+  sessionTag,
+  shouldPopupReport,
+  summarize,
+  todoProgress,
+  turnEndKind,
+  turnEndOk,
+  TURN_END_KINDS,
+  toLosslessJson,
+  findUndefinedPaths,
+}
+export type { TurnEndKind, TurnEndKindOrUnknown, TodoProgress, ReportEntry } from './notify-projection.js'
+export type { LosslessJson } from './lossless-json.js'
 export type { ControlDecision, ControlOp } from './control-policy.js'
 export type { ControlRequest, ControlResult } from './control-queue.js'
 
@@ -105,6 +139,13 @@ export interface ShellAdbPrefs {
   controlHeartbeat?: number
   /** 0.13.8 #180：门1 live 键（壳 syncFullAccess 写入；undefined = prefs 无该键 → 上层回落 env）。 */
   fullAccess?: boolean
+  /**
+   * ST-12：无线调试的**活体键**（壳 AdbState.syncWirelessLive 写入，TTL 2s < 页面轮询 3s）。
+   * 与 paired 的区别：paired 是「曾经配对成功」的历史事实（授权持久化），wirelessOn 是
+   * 「系统无线调试此刻开着」的实时开关——两者会分叉（用户配对后关掉无线调试）。
+   * undefined = prefs 无该键（旧壳）→ 回落 paired（旧语义，不假装知道实时值）。
+   */
+  wirelessOn?: boolean
 }
 
 /** 持久文件路径：环境变量显式指定（测试/桌面模拟）优先；安卓壳域默认；其余返回 null。 */
@@ -129,6 +170,8 @@ export function parseAdbPrefsXml(xml: string): ShellAdbPrefs | null {
   const mHeartbeat = /<long\s+name="controlHeartbeat"\s+value="(\d+)"\s*\/?>/.exec(xml)
   // 0.13.8 #180：门1 live 化——fullAccess 键在场即解析（写端 = 壳侧 syncFullAccess）。
   const mFullAccess = /<boolean\s+name="fullAccess"\s+value="(true|false)"\s*\/?>/.exec(xml)
+  // ST-12：无线调试活体键（写端 = 壳侧 AdbState.syncWirelessLive；TTL 2s）。
+  const mWirelessOn = /<boolean\s+name="wirelessOn"\s+value="(true|false)"\s*\/?>/.exec(xml)
   // 只要任一受管键在场就解析——无障碍通道独立于 ADB 三道人门，
   // 未开启 ADB 时 prefs 里可能只有 a11yEnabled/controlToken（0.13.5 实测踩坑）。
   if (!mAllow && !mPair && !mA11y && !mToken && !mFullAccess) return null
@@ -142,6 +185,7 @@ export function parseAdbPrefsXml(xml: string): ShellAdbPrefs | null {
     controlToken: mToken?.[1] || undefined,
     controlHeartbeat: mHeartbeat ? Number(mHeartbeat[1]) : undefined,
     fullAccess: mFullAccess ? mFullAccess[1] === 'true' : undefined,
+    wirelessOn: mWirelessOn ? mWirelessOn[1] === 'true' : undefined,
   }
 }
 
@@ -154,6 +198,17 @@ function readShellAdbState(): ShellAdbPrefs | undefined {
   } catch {
     return undefined
   }
+}
+
+/**
+ * 当前控制令牌实时值：生产 = 壳侧 prefs（每次启动由壳生成，重装/清数据后自愈）；
+ * 只有显式测试开关 `DSH_CONTROL_TOKEN_TEST=1` 在场时 `DSH_CONTROL_TOKEN` 才生效
+ * （ST-07）。同批鉴权的 exact 路由（dsh-android-file-open 的来件三条）复用本函数，
+ * 不另造令牌方案。
+ * @returns 令牌；未配置为 undefined（调用方必须 fail-closed）。
+ */
+export function shellControlToken(): string | undefined {
+  return controlTokenFrom(process.env, readShellAdbState())
 }
 
 /**
@@ -173,7 +228,9 @@ function currentStatus(env: NodeJS.ProcessEnv, defaultWriteMode?: string): AdbSt
   const fullAccess = live ? (live.fullAccess ?? (env.DSH_ADB_FULLACCESS === '1')) : (env.DSH_ADB_FULLACCESS === '1')
   const allowSwitchOn = live ? live.allowSwitch : env.DSH_ADB_ALLOW === '1'
   const paired = live ? live.paired : env.DSH_ADB_PAIRED === '1'
-  const wirelessDebugOn = live ? live.paired : env.DSH_ADB_WIRELESS === '1'
+  // ST-12：无线调试以活体键为准（wirelessOn 在场即用，哪怕它是 false——那是「配对后关掉
+  // 无线调试」的实时事实）；旧壳无该键 → 回落 paired（旧的间接证明语义）。
+  const wirelessDebugOn = live ? (live.wirelessOn ?? live.paired) : env.DSH_ADB_WIRELESS === '1'
   const connected = live ? live.connected === true : false
   const authorized = fullAccess && allowSwitchOn && paired && wirelessDebugOn
   const tier: PrivilegeTier = authorized && writeMode === 'danger-full-access' ? 'T1' : 'T0'
@@ -192,7 +249,7 @@ function currentStatus(env: NodeJS.ProcessEnv, defaultWriteMode?: string): AdbSt
           : undefined
         : `已授权（引擎级）——当前部署档位 ${writeMode}，会话内档位实时判定（/permission danger-full-access 可即时开放）`
       : !fullAccess
-        ? '未授权：需先授予系统「所有文件访问」（完全访问档位，授予后重启引擎生效）——自动审批模式不构成开放条件'
+        ? '未授权：需先授予系统「所有文件访问」（完全访问档位，回前台即生效）——自动审批模式不构成开放条件'
         : '未授权：请在「开发者选项 → 无线调试」开启并输入配对码与弹窗端口（授权状态在重启后需重新配对）',
     }
   }
@@ -203,8 +260,16 @@ function engineLevelReady(st: AdbStatus): boolean {
 }
 
 /** 0.13.5 W4：结构化授权事实（设置页与工具层共用，便于 AI 分卡定位失败原因）。 */
+/** ST-23：无障碍在线的新鲜窗口（队列取活心跳与壳侧独立心跳共用同一口径）。 */
+export const A11Y_FRESH_MS = 20_000
+
 export interface ControlGateFacts {
   a11yEnabled: boolean
+  /**
+   * ST-23：无障碍在线判定的**来源标注**——queue=控制队列取活心跳新鲜，heartbeat=壳侧独立
+   * 心跳线程新鲜（慢建树场景），off=两条都不新鲜。两口径并存时靠它区分，不再只能看一个布尔。
+   */
+  a11ySource: 'queue' | 'heartbeat' | 'off'
   fullAccess: boolean
   allowSwitch: boolean
   paired: boolean
@@ -343,12 +408,14 @@ export class AndroidPrivilegeService {
    */
   gateFor(session?: unknown): { ok: true; via?: 'a11y' | 'adb' } | { ok: false; guidance: string; gates?: ControlGateFacts } {
     const st = this.status()
-    const a11y = this.a11yEnabled()
+    const a11ySource = this.a11ySource()
+    const a11y = a11ySource !== 'off'
     // 0.13.8 #172：能力门只由「引擎级三道门 + 会话档位实时门」决定——部署默认写面
     // 档位（tier）降级为视图字段，不再参与门禁（坑 29：勿把部署默认当死锁）。
     const adbReady = engineLevelReady(st)
     const gates: ControlGateFacts = {
       a11yEnabled: a11y,
+      a11ySource,
       fullAccess: st.fullAccess === true,
       allowSwitch: st.allowSwitchOn === true,
       paired: st.paired === true,
@@ -396,13 +463,28 @@ export class AndroidPrivilegeService {
     return readShellAdbState()?.connectPort
   }
 
-  /** 0.13.5 W4：无障碍服务是否**真的活着**。
-   *  prefs 的 a11yEnabled 会在进程被 force-stop 后变成僵尸 true（onDestroy 不保证执行），
-   *  因此叠加「壳侧轮询心跳」：队列最近一次取活距今 < 20s 才算在线（空闲长轮询 5s 一次）。 */
+  /**
+   * ST-23：无障碍在线的**判定来源**。prefs 的 a11yEnabled 会在进程被 force-stop 后变成僵尸
+   * true（onDestroy 不保证执行），所以叠加两类心跳，同一个 20s 新鲜窗口：
+   *  - queue：控制队列最近一次取活（pollAgeMs）新鲜——慢建树的轮次里队列可能长时间没取活；
+   *  - heartbeat：壳侧独立心跳线程写的 live prefs 键 controlHeartbeat 新鲜（防慢建树被误判掉线）；
+   *  - off：都不新鲜 / prefs 未声明 a11yEnabled（fail-closed）。
+   * 两条口径并存时必须能看出走的哪条，故对外同时暴露 {@link a11ySource}。
+   */
+  a11ySource(): 'queue' | 'heartbeat' | 'off' {
+    const live = readShellAdbState()
+    if (live?.a11yEnabled !== true) return 'off'
+    if (this.controlQueue && this.controlQueue.pollAgeMs() < A11Y_FRESH_MS) return 'queue'
+    const heartbeat = live.controlHeartbeat
+    if (typeof heartbeat === 'number' && Number.isFinite(heartbeat) && Date.now() - heartbeat < A11Y_FRESH_MS) {
+      return 'heartbeat'
+    }
+    return 'off'
+  }
+
+  /** 0.13.5 W4：无障碍服务是否**真的活着**（ST-23：队列心跳或独立心跳任一新鲜即可）。 */
   a11yEnabled(): boolean {
-    if (readShellAdbState()?.a11yEnabled !== true) return false
-    if (!this.controlQueue) return false
-    return this.controlQueue.pollAgeMs() < 20_000
+    return this.a11ySource() !== 'off'
   }
 
   /** 0.13.5 W4：结构化授权事实（两条通道各自的门）。 */
@@ -410,8 +492,10 @@ export class AndroidPrivilegeService {
     const st = this.status()
     // 0.13.8 #172：同 gateFor——部署档位视图不参与能力门。
     const adbReady = engineLevelReady(st)
+    const a11ySource = this.a11ySource()
     return {
-      a11yEnabled: this.a11yEnabled(),
+      a11yEnabled: a11ySource !== 'off',
+      a11ySource,
       fullAccess: st.fullAccess === true,
       allowSwitch: st.allowSwitchOn === true,
       paired: st.paired === true,
@@ -435,9 +519,10 @@ export class AndroidPrivilegeService {
 
   /** 0.13.5 W4：队列统计（诊断用；不泄漏页面内容）。 */
   controlStats() {
+    // 队列缺失时的降级视图：同样遵守「可选键缺省整键不发」（caps 不在此列）。
     return this.controlQueue?.stats() ?? {
       waiting: false, served: 0, failed: 0, lastTakeAt: 0, lastResultAt: 0,
-      protocol: negotiateProtocol(undefined), caps: undefined,
+      protocol: negotiateProtocol(undefined),
     }
   }
 
@@ -552,6 +637,97 @@ export class AndroidPrivilegeService {
 /** 诊断面展示路由的常用操作（与工具面一一对应）。 */
 const ROUTE_OPS: ControlOp[] = ['snapshot', 'click', 'scroll', 'setText', 'screenshot', 'global']
 
+/**
+ * android_privilege_status 的**声明面**（工具 schema）。返回面必须与它一致——
+ * 离线用例 test/privilege-status.test.mjs 直接拿本常量做递归校验，声明与实现不再各写一份。
+ */
+export const PRIVILEGE_STATUS_OUTPUT_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    tier: { type: 'string', required: true },
+    fullAccess: { type: 'boolean', required: true },
+    wirelessDebugOn: { type: 'boolean' },
+    allowSwitchOn: { type: 'boolean' },
+    paired: { type: 'boolean' },
+    connected: { type: 'boolean' },
+    authorized: { type: 'boolean' },
+    writeMode: { type: 'string' },
+    deviceModel: { type: 'string', description: '当前绑定设备型号（连接校验缓存；空=未知）' },
+    message: { type: 'string' },
+    gates: { type: 'object', additionalProperties: true, description: '结构化授权事实（a11yEnabled/fullAccess/allowSwitch/paired/wirelessDebug/adbReady）' },
+    control: { type: 'object', additionalProperties: true, description: '控制通道运行时状态（a11yEnabled/queue/tokenConfigured）' },
+    route: { type: 'object', additionalProperties: true, description: '每个常用操作走哪条通道/为什么/另一条缺什么（结构化路由）' },
+    shell: { type: 'object', additionalProperties: true, description: '壳侧声明的协议版本与能力（caps.ops/view/gz）与协商结论' },
+  },
+}
+
+/**
+ * exact 路由 /api/android/privilege/status 的返回体（与工具面同源）。
+ *
+ * 出口必过 [toLosslessJson]：svc.status() 的 message、controlStats() 的 caps 都可能是
+ * undefined——可选键缺省**整键不发**，否则返回体被工具体判为 not lossless JSON
+ * （与 #204 同型：声明面与返回面脱钩）。
+ */
+export function buildPrivilegeStatusPayload(
+  svc: AndroidPrivilegeService,
+  controlTokenConfigured: boolean,
+): Record<string, unknown> {
+  return toLosslessJson({
+    ...svc.status(),
+    // 0.13.8 #172：结构化通道事实（两通道各自的门）——展示面与诊断共用，
+    // adbReady 只看引擎级三道门（部署档位视图不参与，坑 29）。
+    gates: svc.gateFacts(),
+    // 0.13.5 W4：控制通道事实（只读；令牌本身绝不回显）
+    control: {
+      a11yEnabled: svc.a11yEnabled(),
+      queue: svc.controlStats(),
+      tokenConfigured: controlTokenConfigured,
+    },
+  }) as Record<string, unknown>
+}
+
+/**
+ * android_privilege_status 的**返回面**（工具出口；离线用例直接调它做递归断言）。
+ * 出口必过 [toLosslessJson]：st.message（已授权但连接未建立时是 undefined）与
+ * queue.caps（壳侧从未声明能力时是 undefined）都是可选键——缺省就整键不发。
+ */
+export function buildPrivilegeStatusToolPayload(
+  svc: AndroidPrivilegeService,
+  session: unknown,
+  controlTokenConfigured: boolean,
+): Record<string, JsonValue> {
+  const st = svc.status()
+  // 0.13.8 P2-15：结构化 route 块——每个常用操作**走哪条通道、为什么、另一条缺什么**。
+  // 以前这些判断只存在于代码路径里，模型只能靠「失败后猜」。
+  const route: Record<string, unknown> = {}
+  const facts = svc.gateFacts()
+  for (const op of ROUTE_OPS) {
+    const d = svc.controlDecision(op, session)
+    const altAdb = facts.adbReady === true
+    const altA11y = svc.a11yEnabled()
+    route[op] = {
+      backend: d.backend,
+      reason: d.reason,
+      alternative: d.backend === 'a11y'
+        ? { backend: 'adb', available: altAdb, missing: altAdb ? null : '完整访问档位 / 应用内允许访问开关 / 无线调试配对' }
+        : { backend: 'a11y', available: altA11y, missing: altA11y ? null : '系统设置 → 无障碍 → 开启「DSH 设备控制」' },
+    }
+  }
+  const queue = svc.controlStats()
+  return toLosslessJson({
+    ...st,
+    deviceModel: svc.boundModel(),
+    gates: svc.gateFacts(),
+    route,
+    shell: {
+      protocol: queue.protocol,
+      caps: queue.caps ?? null,
+    },
+    control: { a11yEnabled: svc.a11yEnabled(), queue, tokenConfigured: controlTokenConfigured },
+  }) as Record<string, JsonValue>
+}
+
 function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record<string, unknown>): Record<string, unknown>; run(spec: Record<string, unknown>): Promise<Record<string, unknown>> }, controlTokenConfigured: () => boolean = () => false) {
   const statusTool = defineTool({
     name: 'android_privilege_status',
@@ -562,27 +738,14 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
       + '返回结构化 gates 与 control 字段；两者都不可用时给出两条开启路径的引导。手机管理工具全部以此为前置检查，失败关闭。',
     parameters: {},
     output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          tier: { type: 'string', required: true },
-          fullAccess: { type: 'boolean', required: true },
-          wirelessDebugOn: { type: 'boolean' },
-          allowSwitchOn: { type: 'boolean' },
-          paired: { type: 'boolean' },
-          connected: { type: 'boolean' },
-          authorized: { type: 'boolean' },
-          writeMode: { type: 'string' },
-          deviceModel: { type: 'string', description: '当前绑定设备型号（连接校验缓存；空=未知）' },
-          message: { type: 'string' },
-          gates: { type: 'object', additionalProperties: true, description: '结构化授权事实（a11yEnabled/fullAccess/allowSwitch/paired/wirelessDebug/adbReady）' },
-          control: { type: 'object', additionalProperties: true, description: '控制通道运行时状态（a11yEnabled/queue/tokenConfigured）' },
-          route: { type: 'object', additionalProperties: true, description: '每个常用操作走哪条通道/为什么/另一条缺什么（结构化路由）' },
-          shell: { type: 'object', additionalProperties: true, description: '壳侧声明的协议版本与能力（caps.ops/view/gz）与协商结论' },
-        },
-      },
-      render: (_args, v: Record<string, unknown>) => {
+      // 运行期仍是 PRIVILEGE_STATUS_OUTPUT_SCHEMA 的完整对象；这里只把**静态类型**放宽为
+      // json 根——execute 的返回类型由 schema 字面量推断，而本工具的返回体是运行期按
+      // status/gates/route/shell 拼装后过 toLosslessJson 的聚合值。声明面与返回面的一致性
+      // 由 test/privilege-status.test.mjs 拿同一常量做递归校验（不靠类型系统兜）。
+      schema: PRIVILEGE_STATUS_OUTPUT_SCHEMA as unknown as { type: 'json' },
+      render: (_args, value) => {
+        // schema 静态类型放宽为 json 根后，渲染侧自行收窄（运行期结构由 schema 校验保证）。
+        const v = value as Record<string, unknown>
         const gates = v.gates as ControlGateFacts | undefined
         const control = v.control as { tokenConfigured?: boolean; queue?: { lastTakeAt?: number } } | undefined
         const queueFresh = typeof control?.queue?.lastTakeAt === 'number' && control.queue.lastTakeAt > 0
@@ -591,8 +754,10 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
           type: 'text',
           text: [
             `授权档位 ${String(v.tier)}${v.deviceModel ? ' · ' + String(v.deviceModel) : ''}`,
-            `无障碍通道：${gates?.a11yEnabled ? '已开启（可用）' : '未开启'}`
-              + `${control?.tokenConfigured === true ? ' · 令牌已配置' : ''}`
+            '无障碍通道：' + (gates?.a11yEnabled
+              ? '已开启（可用·来源 ' + String(gates?.a11ySource ?? 'unknown') + '）'
+              : '未开启')
+              + (control?.tokenConfigured === true ? ' · 令牌已配置' : '')
               + `${queueFresh ? ' · 壳侧轮询在线' : ' · 壳侧轮询离线'}`,
             `ADB 通道：${gates?.adbReady ? '已就绪' : `未就绪（完全访问=${String(gates?.fullAccess)} 允许访问=${String(gates?.allowSwitch)} 配对=${String(gates?.paired)} 无线调试=${String(gates?.wirelessDebug)}）`}`,
             gates?.a11yEnabled ? '结论：设备控制可用（走无障碍通道）——下一步用 android_ui_dump（manage）拿语义清单'
@@ -614,38 +779,11 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
         }]
       },
     },
-    execute: async (_args, exec) => {
-      const st = svc.status()
-      const session = (exec as { agent?: { session?: unknown } } | undefined)?.agent?.session
-      // 0.13.8 P2-15：结构化 route 块——每个常用操作**走哪条通道、为什么、另一条缺什么**。
-      // 以前这些判断只存在于代码路径里，模型只能靠「失败后猜」。
-      const route: Record<string, unknown> = {}
-      const facts = svc.gateFacts()
-      for (const op of ROUTE_OPS) {
-        const d = svc.controlDecision(op, session)
-        const altAdb = facts.adbReady === true
-        const altA11y = svc.a11yEnabled()
-        route[op] = {
-          backend: d.backend,
-          reason: d.reason,
-          alternative: d.backend === 'a11y'
-            ? { backend: 'adb', available: altAdb, missing: altAdb ? null : '完整访问档位 / 应用内允许访问开关 / 无线调试配对' }
-            : { backend: 'a11y', available: altA11y, missing: altA11y ? null : '系统设置 → 无障碍 → 开启「DSH 设备控制」' },
-        }
-      }
-      const queue = svc.controlStats()
-      return {
-        ...st,
-        deviceModel: svc.boundModel(),
-        gates: svc.gateFacts() as unknown as Record<string, JsonValue>,
-        route: route as unknown as Record<string, JsonValue>,
-        shell: {
-          protocol: queue.protocol as unknown as JsonValue,
-          caps: (queue.caps ?? null) as unknown as JsonValue,
-        },
-        control: { a11yEnabled: svc.a11yEnabled(), queue: queue as unknown as JsonValue, tokenConfigured: controlTokenConfigured() },
-      }
-    },
+    execute: async (_args, exec) => buildPrivilegeStatusToolPayload(
+      svc,
+      (exec as { agent?: { session?: unknown } } | undefined)?.agent?.session,
+      controlTokenConfigured(),
+    ),
   })
   const termuxChannelTool = defineTool({
     name: 'android_termux_channel_exec',
@@ -786,7 +924,8 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
     shell?: { resolve?(spec: Record<string, unknown>): Record<string, unknown>; run(spec: Record<string, unknown>): Promise<Record<string, unknown>> }
   }).shell
   // 0.13.5 W4：无障碍控制队列（引擎侧服务端；壳侧轮询取活/回填）。
-  // 令牌来自壳侧 prefs（每次启动生成）或 DSH_CONTROL_TOKEN（测试）；两者皆缺 → 路由 fail-closed。
+  // 令牌实时读壳侧 prefs（每次启动生成）；DSH_CONTROL_TOKEN 只在显式测试开关
+  // DSH_CONTROL_TOKEN_TEST=1 下生效（ST-07）；两处皆缺 → 路由 fail-closed。
   const controlQueue = new ControlQueue()
   const svc = new AndroidPrivilegeService(ctx, shellMode, sandboxPolicy, shellFace, controlQueue)
   try {
@@ -795,7 +934,7 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
     // 服务已提供（重复装载）：忽略，保持首个实例
     ctx.logger?.('dsh-android-bridge')?.debug?.('androidPrivilege already provided')
   }
-  const controlToken = () => controlTokenFrom(process.env, readShellAdbState())
+  const controlToken = () => shellControlToken()
   ctx.effect?.(() => () => controlQueue.cancel('plugin disposed'))
   // F0.3 引擎事件桥（最小版，2026-08-24）：session 事件 → 「任务完成」标记文件。
   // 壳侧 WatchdogV2 每 5s 探活周期顺带消费标记 → 系统通知栏弹「任务完成」（POST_NOTIFICATIONS
@@ -809,6 +948,29 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
       appendFileSync(TASK_DONE_MARKER, entry)
     } catch { /* 标记失败不阻断（通知不是关键路径） */ }
   }
+  // ── 通知信道 `.notify.ndjson`（0.14.0-preview §6.2.1）──
+  // 唯一权威新信道：逐行 JSON、追加写、壳侧 FileObserver 按偏移消费后截断/轮转。
+  // `kind` 是唯一分类权威（silent/todo/report/question/approval/resolve）；本插件只写
+  // report（turn/end）与 todo（todo/write）——提问/审批的弹窗由壳侧 NotifyBridge 从
+  // `$events` waterfall 直接投放（应答必须走 mux + `$events/result`，不经本文件）。
+  // `.task-done.ndjson` 兼容期保留（老壳仍读它）；新壳只读本文件，双读不双发。
+  const NOTIFY_FILE = (process.env.DSH_HOME ?? '/data/user/0/com.dsharnessmobile.shell/files/home/.dsh') + '/.notify.ndjson'
+  const NOTIFY_MAX = 512 * 1024
+  let notifyBytes = 0
+  try { notifyBytes = statSync(NOTIFY_FILE).size } catch { /* 新文件 */ }
+  const appendNotify = (entry: Record<string, unknown>) => {
+    try {
+      const line = JSON.stringify({ ts: new Date().toISOString(), ...entry }) + '\n'
+      if (notifyBytes + line.length > NOTIFY_MAX) {
+        try { renameSync(NOTIFY_FILE, NOTIFY_FILE + '.1') } catch { rmSync(NOTIFY_FILE, { force: true }) }
+        notifyBytes = 0
+      }
+      appendFileSync(NOTIFY_FILE, line)
+      notifyBytes += line.length
+    } catch { /* 通知不是关键路径：写失败不阻断引擎 */ }
+  }
+  // 会话级投影状态（D13/D14 修复的载体：标题表 + 轮次用时/工具数 + 摘要 + 产出文件）
+  const notifyState = new SessionNotifyState()
   // 探针（诊断用）：插件 apply 执行即写——验证插件加载与事件桥注册（2026-08-24 联调）。
   try {
     const probe = TASK_DONE_MARKER.replace('.task-done.ndjson', '.notify-probe.log')
@@ -870,8 +1032,10 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
         return
       }
       if (k === 'turn/end') {
-        const d = ev.data as { outcome?: unknown }
-        appendLive(JSON.stringify({ t, s, k: 'turn_end', ok: d?.outcome === 'success' }) + '\n')
+        // D13（§6.5 NT-22）：载荷是 {turn, reason: TurnEndReason}，没有 outcome 字段。
+        // 旧实现判 `d?.outcome === 'success'` 恒 false（.live.ndjson 的 turn_end.ok 全灭）。
+        const d = ev.data as { turn?: unknown; reason?: unknown }
+        appendLive(JSON.stringify({ t, s, k: 'turn_end', ok: turnEndOk(d?.reason) }) + '\n')
         return
       }
       if (k === 'session/title') {
@@ -883,13 +1047,78 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
       if (event === null || typeof event !== 'object') return
       const ev = event as { type?: string; data?: Record<string, unknown> }
       const type = ev.type ?? ''
-      // 通知标记（既有）：仅 assistant/message 完成轮次
-      if (type === 'assistant/message') {
-        const content = (ev.data as { message?: { content?: Array<{ text?: string }> } })?.message?.content
-        const text = Array.isArray(content) ? content.map((c) => c.text ?? '').join('').trim() : ''
-        const snippet = text.slice(0, 80) || '任务完成'
-        const sess = session as { id?: unknown; header?: { title?: string } } | undefined
-        appendTaskMarker(sess?.id, sess?.header?.title, snippet)
+      const sessId = String((session as { id?: unknown } | undefined)?.id ?? '')
+      const now = Date.now()
+      // ── 通知投影（§6.2.1 信道协议；`.notify.ndjson` 逐行追加）──
+      // 标题来源是 session/title（D14）；成败判定是 reason.kind（D13）。两处都不得回退
+      // 到「session.header.title」或「reason.outcome」——那些字段不存在。
+      try {
+        switch (type) {
+          case 'session/title':
+            notifyState.setTitle(sessId, ev.data?.title)
+            break
+          case 'turn/start':
+            notifyState.startTurn(sessId, ev.data?.turn, now)
+            break
+          case 'tool/call':
+            notifyState.countToolCall(sessId)
+            break
+          case 'assistant/message': {
+            const content = (ev.data as { message?: { content?: Array<{ text?: string }> } })?.message?.content
+            const text = Array.isArray(content) ? content.map((c) => c.text ?? '').join('').trim() : ''
+            notifyState.setSummary(sessId, text)
+            // 兼容期：老壳仍读 .task-done.ndjson（新壳只读 .notify.ndjson，双读不双发）。
+            appendTaskMarker(sessId, notifyState.titleFor(sessId), summarize(text, 80) || '任务完成')
+            break
+          }
+          case 'deliverables/presented':
+            notifyState.setPresented(sessId, (ev.data as { files?: unknown } | undefined)?.files)
+            break
+          case 'todo/write': {
+            const progress = todoProgress(ev.data?.todos)
+            // ≥1s 节流 + 进度签名不变不重投（R6：高频静默更新会拖累同包弹窗类的提醒强度）
+            if (notifyState.acceptTodo(sessId, progress, now)) {
+              appendNotify({
+                kind: 'todo',
+                done: progress.done,
+                total: progress.total,
+                current: progress.current,
+                sessionId: sessId,
+                title: notifyState.titleFor(sessId),
+              })
+            }
+            break
+          }
+          case 'turn/end': {
+            const kind = turnEndKind(ev.data?.reason)
+            if (kind === 'unknown') {
+              ctx.logger?.('dsh-android-bridge')?.warn?.(
+                'turn/end reason.kind 未知（上游新增 kind？）：' + JSON.stringify(ev.data?.reason ?? null),
+              )
+            }
+            const report = notifyState.endTurn({ sessionId: sessId, turn: ev.data?.turn, reason: ev.data?.reason, now })
+            appendNotify({
+              kind: 'report',
+              outcome: report.outcome,
+              outcomeLabel: reportOutcomeLabel(report.outcome),
+              sessionId: report.sessionId,
+              title: report.title,
+              summary: report.summary,
+              durationMs: report.durationMs,
+              durationLabel: formatDuration(report.durationMs),
+              toolCount: report.toolCount,
+              turn: report.turn,
+              presentedFiles: report.presentedFiles,
+              // aborted（用户自己按停）不弹窗，其余（含未知）都弹——NT-05
+              popup: shouldPopupReport(report.outcome),
+            })
+            break
+          }
+          default:
+            break
+        }
+      } catch (e) {
+        ctx.logger?.('dsh-android-bridge')?.warn?.('notify projection failed: ' + String((e as Error).message))
       }
       // 实时流（悬浮球）
       try { live(session, ev) } catch { /* 单条失败忽略 */ }
@@ -915,18 +1144,7 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
       kind: 'exact',
       path: '/api/android/privilege/status',
       handler: async (_req: WsReq, res: WsRes) => {
-        sendJson(res, 200, {
-          ...svc.status(),
-          // 0.13.8 #172：结构化通道事实（两通道各自的门）——展示面与诊断共用，
-          // adbReady 只看引擎级三道门（部署档位视图不参与，坑 29）。
-          gates: svc.gateFacts() as unknown as Record<string, JsonValue>,
-          // 0.13.5 W4：控制通道事实（只读；令牌本身绝不回显）
-          control: {
-            a11yEnabled: svc.a11yEnabled(),
-            queue: svc.controlStats(),
-            tokenConfigured: controlToken() !== undefined,
-          },
-        })
+        sendJson(res, 200, buildPrivilegeStatusPayload(svc, controlToken() !== undefined))
       },
     })
     // 0.13.5 W4：无障碍控制队列两条 exact 路由（自带共享令牌；壳侧轮询取活/回填）。

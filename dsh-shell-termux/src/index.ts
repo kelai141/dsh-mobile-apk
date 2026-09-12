@@ -31,11 +31,24 @@ import type { Config as LocalConfig } from '@deepseek-ai/dsh-bash-local'
 /** Default grace period passed to probe spawns. */
 const PROBE_GRACE_MS = 3_000
 
-/** Tools the dsh tool surface relies on beyond bash itself (pkg names). */
-const REQUIRED_TOOLCHAIN = ['bash', 'coreutils', 'findutils', 'grep', 'ripgrep'] as const
+/**
+ * Tools the dsh tool surface relies on beyond bash itself (pkg names).
+ * Exported (ST-17): the engine-side toolchain view (`android_toolchain_status`) consumes
+ * THIS table instead of keeping a second literal list — one table, one truth.
+ */
+export const REQUIRED_TOOLCHAIN = ['bash', 'coreutils', 'findutils', 'grep', 'ripgrep'] as const
 
-/** Executables probed under `$PREFIX/bin` (coreutils/findutils/grep basics). */
-const PROBE_BINARIES = ['bash', 'ls', 'cat', 'grep', 'find', 'sed', 'cp', 'mv', 'rm', 'mkdir', 'rg'] as const
+/** Executables probed under `$PREFIX/bin` (coreutils/findutils/grep basics). Exported for the same reason. */
+export const PROBE_BINARIES = ['bash', 'ls', 'cat', 'grep', 'find', 'sed', 'cp', 'mv', 'rm', 'mkdir', 'rg'] as const
+
+/** 包名 → 代表性被探二进制（probe() 与引擎侧工具链视图共用同一映射）。 */
+export const TOOLCHAIN_REPRESENTATIVE: Readonly<Record<(typeof REQUIRED_TOOLCHAIN)[number], (typeof PROBE_BINARIES)[number]>> = {
+  bash: 'bash',
+  coreutils: 'ls',
+  findutils: 'find',
+  grep: 'grep',
+  ripgrep: 'rg',
+}
 
 /**
  * Plugin config: the local executor's knobs verbatim, plus the Termux world
@@ -221,11 +234,7 @@ export class TermuxBashExecutor extends LocalBashExecutor {
     }
     const bashVersion = await this.readBashVersion()
     // Map toolchain packages to their probed representative binary.
-    const missingPkgs = REQUIRED_TOOLCHAIN.filter((pkg) => {
-      const binary: (typeof PROBE_BINARIES)[number] =
-        pkg === 'coreutils' ? 'ls' : pkg === 'findutils' ? 'find' : pkg === 'grep' ? 'grep' : pkg === 'ripgrep' ? 'rg' : 'bash'
-      return missing.has(binary)
-    })
+    const missingPkgs = REQUIRED_TOOLCHAIN.filter((pkg) => missing.has(TOOLCHAIN_REPRESENTATIVE[pkg]))
     return {
       status: missingPkgs.length === 0 ? 'full' : 'partial',
       bash: this.bashPath,

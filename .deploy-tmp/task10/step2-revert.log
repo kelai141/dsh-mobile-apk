@@ -1,0 +1,296 @@
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.11.1/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+> Task :app:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preDebugBuild UP-TO-DATE
+> Task :app:generateDebugBuildConfig UP-TO-DATE
+> Task :app:checkDebugAarMetadata UP-TO-DATE
+> Task :app:generateDebugResValues UP-TO-DATE
+> Task :app:mapDebugSourceSetPaths UP-TO-DATE
+> Task :app:generateDebugResources UP-TO-DATE
+> Task :app:mergeDebugResources UP-TO-DATE
+> Task :app:packageDebugResources UP-TO-DATE
+> Task :app:parseDebugLocalResources UP-TO-DATE
+> Task :app:createDebugCompatibleScreenManifests UP-TO-DATE
+> Task :app:extractDeepLinksDebug UP-TO-DATE
+> Task :app:processDebugMainManifest UP-TO-DATE
+> Task :app:processDebugManifest UP-TO-DATE
+> Task :app:processDebugManifestForPackage UP-TO-DATE
+> Task :app:processDebugResources UP-TO-DATE
+> Task :app:javaPreCompileDebug UP-TO-DATE
+> Task :app:preDebugUnitTestBuild UP-TO-DATE
+> Task :app:javaPreCompileDebugUnitTest UP-TO-DATE
+> Task :app:compileDebugKotlin
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/AdbState.kt:205:17 'fun resolveService(p0: NsdServiceInfo!, p1: NsdManager.ResolveListener!): Unit' is deprecated. Deprecated in Java.
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/ConsoleActivity.kt:73:12 'var statusBarColor: Int' is deprecated. Deprecated in Java.
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/ConsoleActivity.kt:74:12 'var navigationBarColor: Int' is deprecated. Deprecated in Java.
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:380:18 'var isChecked: Boolean' is deprecated. Deprecated in Java.
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:437:10 'val defaultDisplay: Display!' is deprecated. Deprecated in Java.
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:652:10 Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'java.io.File?'.
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:1191:27 Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'java.io.File?'.
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:1193:33 Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'java.io.File?'.
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/FileIncoming.kt:314:36 'fun <T : Parcelable!> getParcelableExtra(p0: String!): T?' is deprecated. Deprecated in Java.
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:351:16 'static field SYSTEM_UI_FLAG_FULLSCREEN: Int' is deprecated. Deprecated in Java.
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:352:18 'static field SYSTEM_UI_FLAG_IMMERSIVE_STICKY: Int' is deprecated. Deprecated in Java.
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:353:18 'static field SYSTEM_UI_FLAG_LAYOUT_STABLE: Int' is deprecated. Deprecated in Java.
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:354:18 'static field SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN: Int' is deprecated. Deprecated in Java.
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:358:26 'var systemUiVisibility: Int' is deprecated. Deprecated in Java.
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:801:24 'static field SCREEN_BRIGHT_WAKE_LOCK: Int' is deprecated. Deprecated in Java.
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/NotifyStore.kt:65:26 'constructor(p0: String!, p1: Int): FileObserver' is deprecated. Deprecated in Java.
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/OverlayLiveFeed.kt:32:24 'constructor(p0: String!, p1: Int): FileObserver' is deprecated. Deprecated in Java.
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/OverlayPanel.kt:362:7 Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'com.dsharnessmobile.shell.ShimmerTextView?'.
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:262:46 Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'com.dsharnessmobile.shell.ShimmerTextView?'.
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:298:29 Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'com.dsharnessmobile.shell.ShimmerTextView?'.
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:528:35 Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'com.dsharnessmobile.shell.ShimmerTextView?'.
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/ShellState.kt:80:16 'static field SYSTEM_UI_FLAG_FULLSCREEN: Int' is deprecated. Deprecated in Java.
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/ShellState.kt:81:18 'static field SYSTEM_UI_FLAG_IMMERSIVE_STICKY: Int' is deprecated. Deprecated in Java.
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/ShellState.kt:82:18 'static field SYSTEM_UI_FLAG_LAYOUT_STABLE: Int' is deprecated. Deprecated in Java.
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/ShellState.kt:83:18 'static field SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN: Int' is deprecated. Deprecated in Java.
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/ShellState.kt:87:35 'var systemUiVisibility: Int' is deprecated. Deprecated in Java.
+w: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/WebUiChrome.kt:59:24 'static field SCREEN_BRIGHT_WAKE_LOCK: Int' is deprecated. Deprecated in Java.
+Unable to release compile session, maybe daemon is already down: java.rmi.ConnectException: Connection refused to host: 127.0.0.1; nested exception is: 
+	java.net.ConnectException: Connection refused: connect
+e: Daemon compilation failed: Connection to the Kotlin daemon has been unexpectedly lost. This might be caused by the daemon being killed by another process or the operating system, or by JVM crash.
+org.jetbrains.kotlin.gradle.tasks.DaemonCrashedException: Connection to the Kotlin daemon has been unexpectedly lost. This might be caused by the daemon being killed by another process or the operating system, or by JVM crash.
+	at org.jetbrains.kotlin.gradle.tasks.TasksUtilsKt.wrapAndRethrowCompilationException(tasksUtils.kt:55)
+	at org.jetbrains.kotlin.compilerRunner.GradleKotlinCompilerWork.compileWithDaemon(GradleKotlinCompilerWork.kt:243)
+	at org.jetbrains.kotlin.compilerRunner.GradleKotlinCompilerWork.compileWithDaemonOrFallbackImpl(GradleKotlinCompilerWork.kt:159)
+	at org.jetbrains.kotlin.compilerRunner.GradleKotlinCompilerWork.run(GradleKotlinCompilerWork.kt:111)
+	at org.jetbrains.kotlin.compilerRunner.GradleCompilerRunnerWithWorkers$GradleKotlinCompilerWorkAction.execute(GradleCompilerRunnerWithWorkers.kt:76)
+	at org.gradle.workers.internal.DefaultWorkerServer.execute(DefaultWorkerServer.java:63)
+	at org.gradle.workers.internal.NoIsolationWorkerFactory$1$1.create(NoIsolationWorkerFactory.java:66)
+	at org.gradle.workers.internal.NoIsolationWorkerFactory$1$1.create(NoIsolationWorkerFactory.java:62)
+	at org.gradle.internal.classloader.ClassLoaderUtils.executeInClassloader(ClassLoaderUtils.java:100)
+	at org.gradle.workers.internal.NoIsolationWorkerFactory$1.lambda$execute$0(NoIsolationWorkerFactory.java:62)
+	at org.gradle.workers.internal.AbstractWorker$1.call(AbstractWorker.java:44)
+	at org.gradle.workers.internal.AbstractWorker$1.call(AbstractWorker.java:41)
+	at org.gradle.internal.operations.DefaultBuildOperationRunner$CallableBuildOperationWorker.execute(DefaultBuildOperationRunner.java:209)
+	at org.gradle.internal.operations.DefaultBuildOperationRunner$CallableBuildOperationWorker.execute(DefaultBuildOperationRunner.java:204)
+	at org.gradle.internal.operations.DefaultBuildOperationRunner$2.execute(DefaultBuildOperationRunner.java:66)
+	at org.gradle.internal.operations.DefaultBuildOperationRunner$2.execute(DefaultBuildOperationRunner.java:59)
+	at org.gradle.internal.operations.DefaultBuildOperationRunner.execute(DefaultBuildOperationRunner.java:166)
+	at org.gradle.internal.operations.DefaultBuildOperationRunner.execute(DefaultBuildOperationRunner.java:59)
+	at org.gradle.internal.operations.DefaultBuildOperationRunner.call(DefaultBuildOperationRunner.java:53)
+	at org.gradle.workers.internal.AbstractWorker.executeWrappedInBuildOperation(AbstractWorker.java:41)
+	at org.gradle.workers.internal.NoIsolationWorkerFactory$1.execute(NoIsolationWorkerFactory.java:59)
+	at org.gradle.workers.internal.DefaultWorkerExecutor.lambda$submitWork$0(DefaultWorkerExecutor.java:174)
+	at java.base/java.util.concurrent.FutureTask.run(FutureTask.java:264)
+	at org.gradle.internal.work.DefaultConditionalExecutionQueue$ExecutionRunner.runExecution(DefaultConditionalExecutionQueue.java:194)
+	at org.gradle.internal.work.DefaultConditionalExecutionQueue$ExecutionRunner.access$700(DefaultConditionalExecutionQueue.java:127)
+	at org.gradle.internal.work.DefaultConditionalExecutionQueue$ExecutionRunner$1.run(DefaultConditionalExecutionQueue.java:169)
+	at org.gradle.internal.Factories$1.create(Factories.java:31)
+	at org.gradle.internal.work.DefaultWorkerLeaseService.withLocks(DefaultWorkerLeaseService.java:263)
+	at org.gradle.internal.work.DefaultWorkerLeaseService.runAsWorkerThread(DefaultWorkerLeaseService.java:127)
+	at org.gradle.internal.work.DefaultWorkerLeaseService.runAsWorkerThread(DefaultWorkerLeaseService.java:132)
+	at org.gradle.internal.work.DefaultConditionalExecutionQueue$ExecutionRunner.runBatch(DefaultConditionalExecutionQueue.java:164)
+	at org.gradle.internal.work.DefaultConditionalExecutionQueue$ExecutionRunner.run(DefaultConditionalExecutionQueue.java:133)
+	at java.base/java.util.concurrent.Executors$RunnableAdapter.call(Executors.java:539)
+	at java.base/java.util.concurrent.FutureTask.run(FutureTask.java:264)
+	at org.gradle.internal.concurrent.ExecutorPolicy$CatchAndRecordFailures.onExecute(ExecutorPolicy.java:64)
+	at org.gradle.internal.concurrent.AbstractManagedExecutor$1.run(AbstractManagedExecutor.java:48)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1136)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:635)
+	at java.base/java.lang.Thread.run(Thread.java:833)
+Caused by: java.rmi.UnmarshalException: Error unmarshaling return header; nested exception is: 
+	java.net.SocketException: Connection reset
+	at java.rmi/sun.rmi.transport.StreamRemoteCall.executeCall(StreamRemoteCall.java:255)
+	at java.rmi/sun.rmi.server.UnicastRef.invoke(UnicastRef.java:165)
+	at java.rmi/java.rmi.server.RemoteObjectInvocationHandler.invokeRemoteMethod(RemoteObjectInvocationHandler.java:215)
+	at java.rmi/java.rmi.server.RemoteObjectInvocationHandler.invoke(RemoteObjectInvocationHandler.java:160)
+	at jdk.proxy4/jdk.proxy4.$Proxy149.compile(Unknown Source)
+	at org.jetbrains.kotlin.compilerRunner.GradleKotlinCompilerWork.incrementalCompilationWithDaemon(GradleKotlinCompilerWork.kt:331)
+	at org.jetbrains.kotlin.compilerRunner.GradleKotlinCompilerWork.compileWithDaemon(GradleKotlinCompilerWork.kt:235)
+	... 37 more
+Caused by: java.net.SocketException: Connection reset
+	at java.base/sun.nio.ch.NioSocketImpl.implRead(NioSocketImpl.java:323)
+	at java.base/sun.nio.ch.NioSocketImpl.read(NioSocketImpl.java:350)
+	at java.base/sun.nio.ch.NioSocketImpl$1.read(NioSocketImpl.java:803)
+	at java.base/java.net.Socket$SocketInputStream.read(Socket.java:966)
+	at java.base/java.io.BufferedInputStream.fill(BufferedInputStream.java:244)
+	at java.base/java.io.BufferedInputStream.read(BufferedInputStream.java:263)
+	at java.base/java.io.DataInputStream.readByte(DataInputStream.java:271)
+	at java.rmi/sun.rmi.transport.StreamRemoteCall.executeCall(StreamRemoteCall.java:241)
+	... 43 more
+
+Failed to compile with Kotlin daemon: org.jetbrains.kotlin.gradle.tasks.DaemonCrashedException: Connection to the Kotlin daemon has been unexpectedly lost. This might be caused by the daemon being killed by another process or the operating system, or by JVM crash.
+	at org.jetbrains.kotlin.gradle.tasks.TasksUtilsKt.wrapAndRethrowCompilationException(tasksUtils.kt:55)
+	at org.jetbrains.kotlin.compilerRunner.GradleKotlinCompilerWork.compileWithDaemon(GradleKotlinCompilerWork.kt:243)
+	at org.jetbrains.kotlin.compilerRunner.GradleKotlinCompilerWork.compileWithDaemonOrFallbackImpl(GradleKotlinCompilerWork.kt:159)
+	at org.jetbrains.kotlin.compilerRunner.GradleKotlinCompilerWork.run(GradleKotlinCompilerWork.kt:111)
+	at org.jetbrains.kotlin.compilerRunner.GradleCompilerRunnerWithWorkers$GradleKotlinCompilerWorkAction.execute(GradleCompilerRunnerWithWorkers.kt:76)
+	at org.gradle.workers.internal.DefaultWorkerServer.execute(DefaultWorkerServer.java:63)
+	at org.gradle.workers.internal.NoIsolationWorkerFactory$1$1.create(NoIsolationWorkerFactory.java:66)
+	at org.gradle.workers.internal.NoIsolationWorkerFactory$1$1.create(NoIsolationWorkerFactory.java:62)
+	at org.gradle.internal.classloader.ClassLoaderUtils.executeInClassloader(ClassLoaderUtils.java:100)
+	at org.gradle.workers.internal.NoIsolationWorkerFactory$1.lambda$execute$0(NoIsolationWorkerFactory.java:62)
+	at org.gradle.workers.internal.AbstractWorker$1.call(AbstractWorker.java:44)
+	at org.gradle.workers.internal.AbstractWorker$1.call(AbstractWorker.java:41)
+	at org.gradle.internal.operations.DefaultBuildOperationRunner$CallableBuildOperationWorker.execute(DefaultBuildOperationRunner.java:209)
+	at org.gradle.internal.operations.DefaultBuildOperationRunner$CallableBuildOperationWorker.execute(DefaultBuildOperationRunner.java:204)
+	at org.gradle.internal.operations.DefaultBuildOperationRunner$2.execute(DefaultBuildOperationRunner.java:66)
+	at org.gradle.internal.operations.DefaultBuildOperationRunner$2.execute(DefaultBuildOperationRunner.java:59)
+	at org.gradle.internal.operations.DefaultBuildOperationRunner.execute(DefaultBuildOperationRunner.java:166)
+	at org.gradle.internal.operations.DefaultBuildOperationRunner.execute(DefaultBuildOperationRunner.java:59)
+	at org.gradle.internal.operations.DefaultBuildOperationRunner.call(DefaultBuildOperationRunner.java:53)
+	at org.gradle.workers.internal.AbstractWorker.executeWrappedInBuildOperation(AbstractWorker.java:41)
+	at org.gradle.workers.internal.NoIsolationWorkerFactory$1.execute(NoIsolationWorkerFactory.java:59)
+	at org.gradle.workers.internal.DefaultWorkerExecutor.lambda$submitWork$0(DefaultWorkerExecutor.java:174)
+	at java.base/java.util.concurrent.FutureTask.run(FutureTask.java:264)
+	at org.gradle.internal.work.DefaultConditionalExecutionQueue$ExecutionRunner.runExecution(DefaultConditionalExecutionQueue.java:194)
+	at org.gradle.internal.work.DefaultConditionalExecutionQueue$ExecutionRunner.access$700(DefaultConditionalExecutionQueue.java:127)
+	at org.gradle.internal.work.DefaultConditionalExecutionQueue$ExecutionRunner$1.run(DefaultConditionalExecutionQueue.java:169)
+	at org.gradle.internal.Factories$1.create(Factories.java:31)
+	at org.gradle.internal.work.DefaultWorkerLeaseService.withLocks(DefaultWorkerLeaseService.java:263)
+	at org.gradle.internal.work.DefaultWorkerLeaseService.runAsWorkerThread(DefaultWorkerLeaseService.java:127)
+	at org.gradle.internal.work.DefaultWorkerLeaseService.runAsWorkerThread(DefaultWorkerLeaseService.java:132)
+	at org.gradle.internal.work.DefaultConditionalExecutionQueue$ExecutionRunner.runBatch(DefaultConditionalExecutionQueue.java:164)
+	at org.gradle.internal.work.DefaultConditionalExecutionQueue$ExecutionRunner.run(DefaultConditionalExecutionQueue.java:133)
+	at java.base/java.util.concurrent.Executors$RunnableAdapter.call(Executors.java:539)
+	at java.base/java.util.concurrent.FutureTask.run(FutureTask.java:264)
+	at org.gradle.internal.concurrent.ExecutorPolicy$CatchAndRecordFailures.onExecute(ExecutorPolicy.java:64)
+	at org.gradle.internal.concurrent.AbstractManagedExecutor$1.run(AbstractManagedExecutor.java:48)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1136)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:635)
+	at java.base/java.lang.Thread.run(Thread.java:833)
+Caused by: java.rmi.UnmarshalException: Error unmarshaling return header; nested exception is: 
+	java.net.SocketException: Connection reset
+	at java.rmi/sun.rmi.transport.StreamRemoteCall.executeCall(StreamRemoteCall.java:255)
+	at java.rmi/sun.rmi.server.UnicastRef.invoke(UnicastRef.java:165)
+	at java.rmi/java.rmi.server.RemoteObjectInvocationHandler.invokeRemoteMethod(RemoteObjectInvocationHandler.java:215)
+	at java.rmi/java.rmi.server.RemoteObjectInvocationHandler.invoke(RemoteObjectInvocationHandler.java:160)
+	at jdk.proxy4/jdk.proxy4.$Proxy149.compile(Unknown Source)
+	at org.jetbrains.kotlin.compilerRunner.GradleKotlinCompilerWork.incrementalCompilationWithDaemon(GradleKotlinCompilerWork.kt:331)
+	at org.jetbrains.kotlin.compilerRunner.GradleKotlinCompilerWork.compileWithDaemon(GradleKotlinCompilerWork.kt:235)
+	... 37 more
+Caused by: java.net.SocketException: Connection reset
+	at java.base/sun.nio.ch.NioSocketImpl.implRead(NioSocketImpl.java:323)
+	at java.base/sun.nio.ch.NioSocketImpl.read(NioSocketImpl.java:350)
+	at java.base/sun.nio.ch.NioSocketImpl$1.read(NioSocketImpl.java:803)
+	at java.base/java.net.Socket$SocketInputStream.read(Socket.java:966)
+	at java.base/java.io.BufferedInputStream.fill(BufferedInputStream.java:244)
+	at java.base/java.io.BufferedInputStream.read(BufferedInputStream.java:263)
+	at java.base/java.io.DataInputStream.readByte(DataInputStream.java:271)
+	at java.rmi/sun.rmi.transport.StreamRemoteCall.executeCall(StreamRemoteCall.java:241)
+	... 43 more
+Using fallback strategy: Compile without Kotlin daemon
+Try ./gradlew --stop if this issue persists
+If it does not look related to your configuration, please file an issue with logs to https://kotl.in/issue
+exception: app\src\main\java\com\dsharnessmobile\shell\AdbState.kt:205:17: warning: 'fun resolveService(p0: NsdServiceInfo!, p1: NsdManager.ResolveListener!): Unit' is deprecated. Deprecated in Java.
+exception:             mgr.resolveService(info, object : android.net.nsd.NsdManager.ResolveListener {
+exception:                 ^^^^^^^^^^^^^^
+exception: app\src\main\java\com\dsharnessmobile\shell\ConsoleActivity.kt:73:12: warning: 'var statusBarColor: Int' is deprecated. Deprecated in Java.
+exception:     window.statusBarColor = Color.parseColor("#080A09")
+exception:            ^^^^^^^^^^^^^^
+exception: app\src\main\java\com\dsharnessmobile\shell\ConsoleActivity.kt:74:12: warning: 'var navigationBarColor: Int' is deprecated. Deprecated in Java.
+exception:     window.navigationBarColor = Color.parseColor("#080A09")
+exception:            ^^^^^^^^^^^^^^^^^^
+exception: app\src\main\java\com\dsharnessmobile\shell\DeviceControlService.kt:380:18: warning: 'var isChecked: Boolean' is deprecated. Deprecated in Java.
+exception:         if (node.isChecked) flag = flag or ControlProtocolV2.F_CHECKED
+exception:                  ^^^^^^^^^
+exception: app\src\main\java\com\dsharnessmobile\shell\DeviceControlService.kt:437:10: warning: 'val defaultDisplay: Display!' is deprecated. Deprecated in Java.
+exception:       wm.defaultDisplay?.rotation ?: 0
+exception:          ^^^^^^^^^^^^^^
+exception: app\src\main\java\com\dsharnessmobile\shell\EngineManager.kt:652:10: warning: only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'java.io.File?'.
+exception:     if (!target.parentFile.exists()) {
+exception:          ^^^^^^^^^^^^^^^^^
+exception: app\src\main\java\com\dsharnessmobile\shell\EngineManager.kt:1191:27: warning: only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'java.io.File?'.
+exception:       "TERMUX__ROOTFS" to usrDir.parentFile.absolutePath,
+exception:                           ^^^^^^^^^^^^^^^^^
+exception: app\src\main\java\com\dsharnessmobile\shell\EngineManager.kt:1193:33: warning: only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'java.io.File?'.
+exception:       "TERMUX_APP__DATA_DIR" to context.filesDir.parentFile.absolutePath,
+exception:                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+exception: app\src\main\java\com\dsharnessmobile\shell\FileIncoming.kt:314:36: warning: 'fun <T : Parcelable!> getParcelableExtra(p0: String!): T?' is deprecated. Deprecated in Java.
+exception:       Intent.ACTION_SEND -> intent.getParcelableExtra(Intent.EXTRA_STREAM)
+exception:                                    ^^^^^^^^^^^^^^^^^^
+exception: app\src\main\java\com\dsharnessmobile\shell\MainActivity.kt:351:16: warning: 'static field SYSTEM_UI_FLAG_FULLSCREEN: Int' is deprecated. Deprecated in Java.
+exception:           View.SYSTEM_UI_FLAG_FULLSCREEN or
+exception:                ^^^^^^^^^^^^^^^^^^^^^^^^^
+exception: app\src\main\java\com\dsharnessmobile\shell\MainActivity.kt:352:18: warning: 'static field SYSTEM_UI_FLAG_IMMERSIVE_STICKY: Int' is deprecated. Deprecated in Java.
+exception:             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+exception:                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+exception: app\src\main\java\com\dsharnessmobile\shell\MainActivity.kt:353:18: warning: 'static field SYSTEM_UI_FLAG_LAYOUT_STABLE: Int' is deprecated. Deprecated in Java.
+exception:             View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+exception:                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+exception: app\src\main\java\com\dsharnessmobile\shell\MainActivity.kt:354:18: warning: 'static field SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN: Int' is deprecated. Deprecated in Java.
+exception:             View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+exception:                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+exception: app\src\main\java\com\dsharnessmobile\shell\MainActivity.kt:358:26: warning: 'var systemUiVisibility: Int' is deprecated. Deprecated in Java.
+exception:         window.decorView.systemUiVisibility = flags
+exception:                          ^^^^^^^^^^^^^^^^^^
+exception: app\src\main\java\com\dsharnessmobile\shell\MainActivity.kt:801:24: warning: 'static field SCREEN_BRIGHT_WAKE_LOCK: Int' is deprecated. Deprecated in Java.
+exception:           PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ON_AFTER_RELEASE,
+exception:                        ^^^^^^^^^^^^^^^^^^^^^^^
+exception: app\src\main\java\com\dsharnessmobile\shell\NotifyStore.kt:65:26: warning: 'constructor(p0: String!, p1: Int): FileObserver' is deprecated. Deprecated in Java.
+exception:       watcher = object : FileObserver(d.absolutePath, FileObserver.MODIFY or FileObserver.CREATE) {
+exception:                          ^^^^^^^^^^^^
+exception: app\src\main\java\com\dsharnessmobile\shell\OverlayLiveFeed.kt:32:24: warning: 'constructor(p0: String!, p1: Int): FileObserver' is deprecated. Deprecated in Java.
+exception:     watcher = object : FileObserver(dir.absolutePath, FileObserver.MODIFY or FileObserver.CREATE) {
+exception:                        ^^^^^^^^^^^^
+exception: app\src\main\java\com\dsharnessmobile\shell\OverlayPanel.kt:362:7: warning: only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'com.dsharnessmobile.shell.ShimmerTextView?'.
+exception:       ShimmerTextView::class.java.cast(st).setShimmering(false)
+exception:       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+exception: app\src\main\java\com\dsharnessmobile\shell\OverlayService.kt:262:46: warning: only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'com.dsharnessmobile.shell.ShimmerTextView?'.
+exception:     if (sessionBusy) panel.statusText?.let { ShimmerTextView::class.java.cast(it).setShimmering(true) }
+exception:                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+exception: app\src\main\java\com\dsharnessmobile\shell\OverlayService.kt:298:29: warning: only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'com.dsharnessmobile.shell.ShimmerTextView?'.
+exception:     panel.statusText?.let { ShimmerTextView::class.java.cast(it).setShimmering(false) }
+exception:                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+exception: app\src\main\java\com\dsharnessmobile\shell\OverlayService.kt:528:35: warning: only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type 'com.dsharnessmobile.shell.ShimmerTextView?'.
+exception:           panel.statusText?.let { ShimmerTextView::class.java.cast(it).setShimmering(false); it.setTextColor(0xFFE04848.toInt()); it.text = "????????" }
+exception:                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+exception: app\src\main\java\com\dsharnessmobile\shell\ShellState.kt:80:16: warning: 'static field SYSTEM_UI_FLAG_FULLSCREEN: Int' is deprecated. Deprecated in Java.
+exception:           View.SYSTEM_UI_FLAG_FULLSCREEN or
+exception:                ^^^^^^^^^^^^^^^^^^^^^^^^^
+exception: app\src\main\java\com\dsharnessmobile\shell\ShellState.kt:81:18: warning: 'static field SYSTEM_UI_FLAG_IMMERSIVE_STICKY: Int' is deprecated. Deprecated in Java.
+exception:             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+exception:                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+exception: app\src\main\java\com\dsharnessmobile\shell\ShellState.kt:82:18: warning: 'static field SYSTEM_UI_FLAG_LAYOUT_STABLE: Int' is deprecated. Deprecated in Java.
+exception:             View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+exception:                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+exception: app\src\main\java\com\dsharnessmobile\shell\ShellState.kt:83:18: warning: 'static field SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN: Int' is deprecated. Deprecated in Java.
+exception:             View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+exception:                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+exception: app\src\main\java\com\dsharnessmobile\shell\ShellState.kt:87:35: warning: 'var systemUiVisibility: Int' is deprecated. Deprecated in Java.
+exception:         activity.window.decorView.systemUiVisibility = flags
+exception:                                   ^^^^^^^^^^^^^^^^^^
+exception: app\src\main\java\com\dsharnessmobile\shell\WebUiChrome.kt:59:24: warning: 'static field SCREEN_BRIGHT_WAKE_LOCK: Int' is deprecated. Deprecated in Java.
+exception:           PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ON_AFTER_RELEASE,
+exception:                        ^^^^^^^^^^^^^^^^^^^^^^^
+
+> Task :app:compileDebugJavaWithJavac UP-TO-DATE
+> Task :app:bundleDebugClassesToRuntimeJar UP-TO-DATE
+> Task :app:bundleDebugClassesToCompileJar UP-TO-DATE
+> Task :app:compileDebugUnitTestKotlin UP-TO-DATE
+> Task :app:compileDebugUnitTestJavaWithJavac NO-SOURCE
+> Task :app:processDebugJavaRes UP-TO-DATE
+> Task :app:processDebugUnitTestJavaRes UP-TO-DATE
+
+> Task :app:testDebugUnitTest
+
+FactoryProfilePatchTest > legacyUiLayoutDisableIsReconciledAway FAILED
+    java.lang.AssertionError at FactoryProfilePatchTest.kt:54
+
+FactoryProfilePatchTest > factoryDisabledFlagWinsOverTheLiveValue FAILED
+    java.lang.AssertionError at FactoryProfilePatchTest.kt:82
+
+FactoryProfilePatchTest > missingFactoryBlocksAreStillAppended FAILED
+    java.lang.AssertionError at FactoryProfilePatchTest.kt:120
+
+SnapshotTransactionTest > profileSwapReconcilesLegacyUiLayoutDisable FAILED
+    java.lang.AssertionError at SnapshotTransactionTest.kt:346
+
+24 tests completed, 4 failed
+
+> Task :app:testDebugUnitTest FAILED
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':app:testDebugUnitTest'.
+> There were failing tests. See the report at: file:///D:/coding/dsh-mobile/dsh-mobile-apk/app/build/reports/tests/testDebugUnitTest/index.html
+
+* Try:
+> Run with --scan to get full insights.
+
+BUILD FAILED in 3m 41s
+24 actionable tasks: 2 executed, 22 up-to-date

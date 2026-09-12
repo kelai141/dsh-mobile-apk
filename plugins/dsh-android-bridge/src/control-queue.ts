@@ -93,11 +93,14 @@ export class ControlQueue {
     waiting: boolean; served: number; failed: number; lastTakeAt: number; lastResultAt: number
     protocol: Negotiation; caps?: Record<string, unknown>
   } {
-    return {
+    const base = {
       waiting: this.waiting, served: this.served, failed: this.failed,
       lastTakeAt: this.lastTakeAt, lastResultAt: this.lastResultAt,
-      protocol: negotiateProtocol(this.lastPv), caps: this.lastCaps,
+      protocol: negotiateProtocol(this.lastPv),
     }
+    // 可选键缺省整键不发（caps 从未声明过时不得在场为 undefined：会让消费面
+    // 落到 not lossless JSON——android_privilege_status 的实测缺陷）。
+    return this.lastCaps === undefined ? base : { ...base, caps: this.lastCaps }
   }
 
   /** 记录壳侧声明的协议版本与能力（回填信封；诊断与协商共用）。 */
@@ -199,9 +202,18 @@ export class ControlQueue {
   }
 }
 
+/** 令牌长度下限（壳侧生成 18 字节；下限同时拒绝空串与占位值）。 */
+const MIN_TOKEN_LENGTH = 8
+
+/** 显式测试开关：只有它为 `1`/`true` 时 `DSH_CONTROL_TOKEN` 才参与取令牌。 */
+export const CONTROL_TOKEN_TEST_ENV = 'DSH_CONTROL_TOKEN_TEST'
+
+/** env 令牌值（仅在测试开关在场时被读取）。 */
+const CONTROL_TOKEN_ENV = 'DSH_CONTROL_TOKEN'
+
 /** 令牌比对（常数时间不必要：本地回环 + 仅防同机其它应用误触）。 */
 export function tokenMatches(expected: string | undefined, provided: unknown): boolean {
-  if (typeof expected !== 'string' || expected.length < 8) return false
+  if (typeof expected !== 'string' || expected.length < MIN_TOKEN_LENGTH) return false
   return typeof provided === 'string' && provided === expected
 }
 
@@ -275,15 +287,28 @@ function sendJson(res: RouteResponse, code: number, payload: unknown): void {
   res.end(JSON.stringify(payload))
 }
 
-/** 令牌来源：环境变量（测试）→ 壳侧 prefs（生产）。 */
+/**
+ * 令牌来源（ST-07 / F-PLUG-01：**生产一律以壳侧 prefs 实时值为准**）。
+ *
+ * 反转前 env 恒压过 prefs：壳侧重装或清数据后重新生成令牌，而引擎进程里仍是启动快照
+ * 里的旧值 → 取活与回填两条 exact 路由恒定 403 且不可自愈（唯一恢复手段是重启引擎），
+ * 同时 prefs 的 `a11yEnabled` 仍为 true —— 把「配置陈旧」伪装成「服务未开启」。
+ * 现语义：未显式声明 `DSH_CONTROL_TOKEN_TEST=1` 时 **env 完全不参与**；显式测试模式下
+ * env 优先（测试需要确定性），env 缺失时回落 prefs。
+ * @param env - 进程环境（测试可注入）。
+ * @param prefs - 壳侧 prefs 解析结果（实时读取）。
+ * @returns 当前生效的令牌；缺失或过短时为 undefined（调用方 fail-closed）。
+ */
 export function controlTokenFrom(
   env: NodeJS.ProcessEnv,
   prefs: { controlToken?: string } | undefined,
 ): string | undefined {
-  const fromEnv = env.DSH_CONTROL_TOKEN
-  if (typeof fromEnv === 'string' && fromEnv.length >= 8) return fromEnv
-  const fromPrefs = prefs?.controlToken
-  return typeof fromPrefs === 'string' && fromPrefs.length >= 8 ? fromPrefs : undefined
+  const valid = (value: unknown): string | undefined =>
+    typeof value === 'string' && value.length >= MIN_TOKEN_LENGTH ? value : undefined
+  const fromPrefs = valid(prefs?.controlToken)
+  const rawFlag = env[CONTROL_TOKEN_TEST_ENV]
+  if (rawFlag !== '1' && rawFlag !== 'true') return fromPrefs
+  return valid(env[CONTROL_TOKEN_ENV]) ?? fromPrefs
 }
 
 export interface RegisterOptions {

@@ -219,3 +219,26 @@ test('解析等价性门禁：父子关系与独立递归实现一致（抽样�
   }
   assert.equal(raw.length, Object.keys(expected).length)
 })
+
+test('FX-212.4：根下 11 个顺序兄弟按屏幕顺序输出 btn0..btn10（数字段比较，不是整串字典序）', () => {
+  // 旧实现 nodes.sort 用整串字典序："0.10" < "0.2" → 兄弟顺序被读成 btn0,btn1,btn10,btn2…，
+  // text:X#k 的 #k 计数也跟着错（模型据此点错控件）。
+  const children = Array.from({ length: 11 }, (_, i) =>
+    `<node index="${i}" text="btn${i}" resource-id="" class="android.widget.Button" ${ATTRS} ` +
+    `clickable="true" scrollable="false" bounds="[0,${100 + i * 60}][200,${150 + i * 60}]" />`).join('')
+  const xml = hierarchy(
+    `<node index="0" text="root" resource-id="" class="android.widget.FrameLayout" ${ATTRS} ` +
+    `clickable="false" scrollable="false" bounds="[0,0][1080,1920]">${children}</node>`,
+  )
+  const { raw } = parseUiTreeXml(xml)
+  const { nodes } = pruneNodes(raw)
+  assert.deepEqual(
+    nodes.map((n) => n.text).filter((t) => t.startsWith('btn')),
+    ['btn0', 'btn1', 'btn2', 'btn3', 'btn4', 'btn5', 'btn6', 'btn7', 'btn8', 'btn9', 'btn10'],
+    '兄弟顺序必须等于 XML/屏幕顺序',
+  )
+  // 真树序遍历性：深度逐行递变最大跳 1（排序被改坏时这里也会红）
+  let maxJump = 0
+  for (let i = 1; i < nodes.length; i++) maxJump = Math.max(maxJump, nodes[i].depth - nodes[i - 1].depth)
+  assert.equal(maxJump, 1)
+})

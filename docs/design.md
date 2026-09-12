@@ -31,7 +31,8 @@
 | hasAllFilesAccess | () → Boolean | 是否已授予「所有文件访问」 |
 | getPickToken | () → String | 目录选择桥一次性会话 token（引擎侧 pick 端点校验；null = 禁用） |
 | copyText | (text) → Boolean | 写入系统剪贴板（WebView clipboard 被拒的回退） |
-| getDevLogEnabled | () → Boolean | dev 日志开关状态 |
+| getDevLogEnabled | () → Boolean | dev 日志开关**事实** = 偏好 && 采集器在跑（ST-11：EngineService.onDestroy 停采集器后不再乐观显示「开」） |
+| getImmersiveMode | () → Boolean | 沉浸式状态栏开关的壳侧权威值（ST-10：真源 = `dsh_settings/immersive_mode`；页面以它为唯一初值） |
 
 **命令**
 

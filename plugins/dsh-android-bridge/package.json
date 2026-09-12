@@ -4,8 +4,12 @@
   "version": "0.2.4",
   "type": "module",
   "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
   "exports": {
-    ".": "./lib/index.js",
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
     "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
@@ -26,7 +30,7 @@
   "scripts": {
     "build": "tsc -p . && tsc -p tsconfig.client.json --noEmit && node build-client.mjs",
     "typecheck": "tsc -p . --noEmit && tsc -p tsconfig.client.json --noEmit",
-    "test": "npm run build && node --test test/control.test.mjs test/protocol-negotiation.test.mjs"
+    "test": "npm run build && node --test test/control.test.mjs test/protocol-negotiation.test.mjs test/notify-projection.test.mjs test/privilege-status.test.mjs test/wireless-live.test.mjs test/a11y-freshness.test.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.1",

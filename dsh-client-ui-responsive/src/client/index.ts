@@ -36,6 +36,7 @@ import { TRAJECTORY_DETAILS_CSS } from './trajectory-details.css.ts'
 import { TrajectoryPanelsObserver } from './trajectory-panels-observer.ts'
 import { ComposerPopupGuard } from './composer-popup-guard.ts'
 import { SESSION_LOG_DIALOG_HIDE_CSS } from './session-log-dialog.css.ts'
+import { SessionLogDialogObserver } from './session-log-dialog-observer.ts'
 import { DevSection } from './dev-section/DevSection.tsx'
 import { DEV_SECTION_CSS } from './dev-section/dev-section.css.ts'
 import { GeneralSettings } from './general-settings/GeneralSettings.tsx'
@@ -51,6 +52,9 @@ import { EXTERNAL_OPEN_ID, externalOpenDefinition } from './mobile/external-open
 import { ExternalOpenTab } from './mobile/external-open.tsx'
 import { SettingsDocumentAction } from './mobile/settings-document.ts'
 import { ReferenceMenuEnhancer, REFERENCE_BAR_CSS } from './mobile/reference-menu.ts'
+import { BackStackSignal } from './mobile/back-stack.ts'
+import { SessionMarker, type SessionsFace } from './mobile/session-marker.ts'
+import { BROWSER_TAB_ID, BrowserTab, browserTabDefinition } from './mobile/browser-tab.tsx'
 
 // Contract exports only (export-convergence rule): the plugin surface is
 // `apply` and `inject`; every component, marker, and helper stays internal.
@@ -227,6 +231,12 @@ export function apply(ctx: ClientContext): void {
   // via window.__dshExportResult). Hide the upstream preparing/success/error
   // modal so two dialogs never stack on Android.
   ctx.effect(() => injectStyle('session-log-dialog', SESSION_LOG_DIALOG_HIDE_CSS), 'ui-responsive: hide upstream session-log dialog')
+  // ST-14：:has() 是主路径；旧内核把整条规则当语法错误丢弃（#17 同形态）→ class 降级路径兜底。
+  ctx.effect(() => {
+    const observer = new SessionLogDialogObserver()
+    observer.attach()
+    return () => { observer.detach() }
+  }, 'ui-responsive: session-log dialog :has() fallback')
 
   // ── Native "open with" wiring ───────────────────────────────────────────
 
@@ -271,6 +281,28 @@ export function apply(ctx: ClientContext): void {
     key: EXTERNAL_OPEN_ID,
   }, ExternalOpenTab))
 
+  // ST-15：把「当前会话 id」发布到 DOM（工具行文件链接必须按行所属会话解析）。
+  // 真源 = 客户端会话快照；注入层（host-web-compat）据此随请求带 sessionId。
+  ctx.effect(() => {
+    const marker = new SessionMarker(ctx.sessions as unknown as SessionsFace)
+    marker.attach()
+    return () => { marker.detach() }
+  }, 'ui-responsive: session id marker for tool-row file links')
+
+  // Sidebar AI browser workbench (plan §7.4 / SIDEBAR-BROWSER-PLAN; user constraint U-1):
+  // the entry is a tab TYPE registered next to the upstream「工作区文件」type — its guide
+  // entry is the sibling card in the same「文件」panel — and the body draws the tier report
+  // served by the host half (plugins/dsh-android-browser, read-only route, plugin-side auth).
+  ctx.effect(() => {
+    const tabs = ctx.get('sidebarRightTabs')
+    if (tabs === undefined) return () => {}
+    return tabs.register(browserTabDefinition())
+  }, 'ui-responsive: AI browser tab type')
+  ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
+    name: 'sidebar.right.pane.tab',
+    key: BROWSER_TAB_ID,
+  }, BrowserTab))
+
   // Mobile reference menu (apk #163): rows get a leading checkbox (multi-select) and a
   // directory row body drills in instead of referencing the folder; upstream keeps the
   // settle-pick for files and for the trailing chevron.
@@ -291,6 +323,19 @@ export function apply(ctx: ClientContext): void {
     action.attach()
     return () => { action.detach() }
   }, 'ui-responsive: settings document action takeover')
+
+  // System back (plan §5.1): the upstream frame keeps its multi-level surfaces in
+  // memory, so the shell's back callback — which must decide synchronously —
+  // needs a page-side stack signal. This module owns that stack and the
+  // `window.__dshBack` entry the shell calls; the shell keeps the cross-document
+  // history branch (`canGoBack()`) ahead of it.
+  ctx.effect(() => {
+    const backStack = new BackStackSignal({
+      toggleSidebar: () => { ctx.layout.toggleSidebar() },
+    })
+    backStack.attach()
+    return () => { backStack.detach() }
+  }, 'ui-responsive: back-stack signal (page layers → shell back gate)')
 
   // ── Bridges ─────────────────────────────────────────────────────────────
 
@@ -321,8 +366,16 @@ export function apply(ctx: ClientContext): void {
       if (busy) return
       busy = true
       try {
-        const r = await fetch('/api/android/file-incoming')
-        if (!r.ok) return
+        // FX-205.6：插件侧端点自带鉴权（Host 白名单 + 控制令牌 / 上游浏览器会话），
+        // credentials 必须显式声明 same-origin（页面 cookie 是浏览器面的凭据）。
+        const r = await fetch('/api/android/file-incoming', { credentials: 'same-origin', cache: 'no-store' })
+        if (!r.ok) {
+          // 401/403 不再静默：否则「来件投递曾被静默 403」会以「什么都没发生」的形态复现。
+          if (r.status === 401 || r.status === 403) {
+            console.warn('[dsh-mobile] file-incoming unauthorized (HTTP ' + r.status + ')——来件消费已停')
+          }
+          return
+        }
         const j = (await r.json().catch(() => null)) as { items?: Array<{ sessionId?: string; file?: string }> } | null
         if (!j?.items) return
         for (const item of j.items) {
@@ -332,6 +385,7 @@ export function apply(ctx: ClientContext): void {
             opened.add(item.sessionId)
             void fetch('/api/android/file-incoming/claim', {
               method: 'POST',
+              credentials: 'same-origin',
               headers: { 'content-type': 'application/json' },
               body: JSON.stringify({ file: item.file }),
             }).catch(() => { /* claim 失败（条目已删/端点缺）不阻断 */ })

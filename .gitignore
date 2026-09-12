@@ -4,6 +4,10 @@ build/
 local.properties
 snapshot/
 app/src/main/assets/snapshot.tar.xz
+# 快照指纹声明值（0.13.8-b ST-04 / F-ENV-01）：由构建链在拷贝 tar 后重写，与 tar 同属「本地产物」，
+# 不入库——入库会造成「声明值是某一次单 ABI 构建的事实」，且与上面 tar 的忽略语义不一致。
+# 出库后净检出/CI 下 tar 与 sha 均缺席，门禁打印 SKIP 计数；构建链以 --require 严格跑（缺席即失败）。
+app/src/main/assets/snapshot.sha256
 # 敏感数据（安全审计 2026-08-14）
 *.credentials.yaml
 token*
