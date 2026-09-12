@@ -1,0 +1,117 @@
+{
+  "$comment": "跨层状态矩阵（0.13.8-b ST-25 登记制起点）。每条 = 一个「我方状态/镜像」的 持有者 + 写路径 + 外部真源 + 同步路径，外加一条**机器可核对**的 evidence（门禁逐条执行）。改一次状态更新一次：新增条目必须带真实 evidence，stale 条目（写路径消失/evidence 不再命中）即 FAIL。",
+  "fields": [
+    "holder",
+    "writePath",
+    "sourceOfTruth",
+    "syncPath"
+  ],
+  "states": [
+    {
+      "id": "immersive-mode",
+      "holder": "壳侧（ShellState / AndroidBridge）",
+      "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/ShellState.kt:setImmersiveMode",
+      "sourceOfTruth": "壳偏好 dsh_settings/immersive_mode",
+      "syncPath": "页面以壳侧读面 getImmersiveMode() 为唯一初值，不再用 localStorage 自证（ST-10）",
+      "evidence": {
+        "kind": "grep",
+        "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt",
+        "pattern": "fun getImmersiveMode"
+      }
+    },
+    {
+      "id": "overlay-enabled",
+      "holder": "壳侧（OverlayController / OverlayService）",
+      "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/OverlayController.kt",
+      "sourceOfTruth": "SYSTEM_ALERT_WINDOW 系统权限 + 服务实例在场 + 壳偏好",
+      "syncPath": "isEnabled = 偏好 && canDrawOverlays && 服务在场（ST-02 三真值合取）；页面只读该判定值",
+      "evidence": {
+        "kind": "grep",
+        "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/OverlayController.kt",
+        "pattern": "canDrawOverlays"
+      }
+    },
+    {
+      "id": "all-files-access",
+      "holder": "壳侧（AdbState / AndroidBridge）",
+      "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/AdbState.kt",
+      "sourceOfTruth": "Environment.isExternalStorageManager()（系统事实）",
+      "syncPath": "getter 每次现读系统事实；onResume 另调 AdbState.syncFullAccess 收敛壳内缓存（ST-01）",
+      "evidence": {
+        "kind": "grep",
+        "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt",
+        "pattern": "isExternalStorageManager"
+      }
+    },
+    {
+      "id": "a11y-control-channel",
+      "holder": "壳侧（DeviceControlService）+ 插件 dsh-android-manage",
+      "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt",
+      "sourceOfTruth": "AccessibilityManager 服务在线 + 控制队列轮询心跳",
+      "syncPath": "桥 a11yStatus() 实时读（含队列心跳），不缓存偏好（坑 46 僵尸 a11yEnabled 的根因）",
+      "evidence": {
+        "kind": "grep",
+        "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt",
+        "pattern": "fun a11yStatus"
+      }
+    },
+    {
+      "id": "adb-authorization",
+      "holder": "壳侧（AdbState）",
+      "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/AdbState.kt",
+      "sourceOfTruth": "三道人门（fullAccess / allowSwitch / paired）",
+      "syncPath": "桥 getAdbState() 每次现读三道门并合成 JSON，不做跨调用缓存",
+      "evidence": {
+        "kind": "grep",
+        "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt",
+        "pattern": "fun getAdbState"
+      }
+    },
+    {
+      "id": "pick-token",
+      "holder": "壳侧（EngineAuth / AndroidBridge）",
+      "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/EngineAuth.kt",
+      "sourceOfTruth": "壳侧一次性 pick token",
+      "syncPath": "桥 getPickToken() 每次现读（不跨引擎重启缓存 token，否则静默拒绝）",
+      "evidence": {
+        "kind": "grep",
+        "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt",
+        "pattern": "fun getPickToken"
+      }
+    },
+    {
+      "id": "dev-log-enabled",
+      "holder": "壳侧（AndroidBridge + prefs）+ 壳侧 LogCollector",
+      "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:setDevLogEnabled",
+      "sourceOfTruth": "壳偏好 + 日志目录是否真在写（事实值）",
+      "syncPath": "getDevLogEnabled() 目前返回偏好——事实值缺口已登记在 scripts/bridge-symmetry-baseline.json 的 preferenceGetters",
+      "evidence": {
+        "kind": "gate",
+        "file": "scripts/check-bridge-symmetry.mjs"
+      }
+    },
+    {
+      "id": "profile-patch-reload",
+      "holder": "构建链（快照出厂清单）+ 引擎树补丁",
+      "writePath": "scripts/lib/profile-seed.mjs + scripts/patches/registry.json:perf-patch-reload-N1",
+      "sourceOfTruth": "出厂 profile 清单 home/.dsh/profiles/<name>/package.json",
+      "syncPath": "全新安装 = 构建期 seed 写 startup；存量升级 = N1 补丁在 installation-owned 元组下把旧默认 live 归一化（P-AC-23/24）",
+      "evidence": {
+        "kind": "gate",
+        "file": "scripts/check-perf-instrumentation.mjs"
+      }
+    },
+    {
+      "id": "notify-ready-gate",
+      "holder": "壳侧（EngineStartFlow / OverlayService 通知应答流）",
+      "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt",
+      "sourceOfTruth": "引擎进程存活 + WS 就绪（其 cookie 依赖 WebView 侧刷新）——纯动作广播冷启动时宿主 UI 未拉起 ⇒ ready 永不来（坑 93）",
+      "syncPath": "未就绪不投递：墙钟预算内轮询，宿主 UI 拉起（am start）后 ready 立刻到来并补投（实测 76ms）；预算常量单一来源 ENGINE_BOOT_BUDGET_MS",
+      "evidence": {
+        "kind": "grep",
+        "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt",
+        "pattern": "ENGINE_BOOT_BUDGET_MS"
+      }
+    }
+  ]
+}

@@ -75,16 +75,59 @@ for (const key of contract.envContract.keys) {
   else fail('环境键 ' + key + ' 未注入')
 }
 
-console.log('== 6. 版本钉（package.json vs contract.json） ==')
-for (const repo of contract.inserted.map(i => i.repo)) {
+console.log('== 6. 版本钉（package.json vs contract.json；覆盖面 = scripts/plugin-dirs.json） ==')
+// 覆盖清单（0.13.8-b ST-06 / F-ENV-05）：注入集单一常量的每个包都必须登记进 contract.inserted，
+// 否则「peer 版本钉」对它们没有覆盖面（契约少登记一个包 = 该包的钉永远不被检查）。
+const pluginManifest = JSON.parse(readFileSync(join(root, 'scripts', 'plugin-dirs.json'), 'utf8'))
+const insertedRepos = new Set(contract.inserted.map(i => i.repo))
+const uncovered = pluginManifest.dirs.filter(d => !insertedRepos.has(d))
+if (uncovered.length > 0) fail('注入集未登记进 contract.inserted（版本钉无覆盖面）: ' + uncovered.join(', '))
+else ok('注入集 ' + pluginManifest.dirs.length + ' 个包全部登记在 contract.inserted')
+
+// 版本钉两面（devDependencies + peerDependencies）都要钉：只看 dev 会漏掉「发布面钉旧版」。
+// 说明符允许 ^/~ 前缀（区间语义仍指向同一版本），其余严格等值。
+const norm = (spec) => String(spec).replace(/^[\^~]/, '')
+const expectedPin = (dep) => dep === '@deepseek-ai/cordis' ? contract.cordis
+  : dep === '@deepseek-ai/schemastery' ? contract.schemastery
+  : contract.baseline // @deepseek-ai/dsh-*
+const isPinnedDep = (dep) => dep.startsWith('@deepseek-ai/dsh-')
+  || dep === '@deepseek-ai/cordis' || dep === '@deepseek-ai/schemastery'
+const deviations = (repo) => {
   const pkg = JSON.parse(readFileSync(join(root, repo, 'package.json'), 'utf8'))
-  for (const [dep, pin] of Object.entries(pkg.devDependencies ?? {})) {
-    if (dep.startsWith('@deepseek-ai/dsh-') && pin !== contract.baseline) {
-      fail(repo + ': ' + dep + ' 钉 ' + pin + ' ≠ 基线 ' + contract.baseline)
-    }
+  const out = new Set()
+  for (const [dep, spec] of Object.entries({ ...(pkg.peerDependencies ?? {}), ...(pkg.devDependencies ?? {}) })) {
+    if (!isPinnedDep(dep)) continue
+    if (norm(spec) !== norm(expectedPin(dep))) out.add(dep + '@' + norm(spec))
   }
-  const cordisPin = pkg.devDependencies?.['@deepseek-ai/cordis'] ?? pkg.peerDependencies?.['@deepseek-ai/cordis']
-  if (cordisPin !== contract.cordis) fail(repo + ': cordis 钉 ' + cordisPin + ' ≠ ' + contract.cordis)
+  return out
+}
+// 未对齐的显式声明（scripts/contract-pin-gaps.json）：§8.4 要求先对齐基线再扩门禁，
+// 声明期内在场 = 红-able；对齐后条目变 stale 也会红，必须删除。
+const gapsPath = join(root, 'scripts', 'contract-pin-gaps.json')
+const pinGaps = existsSync(gapsPath) ? (JSON.parse(readFileSync(gapsPath, 'utf8')).gaps ?? []) : []
+for (const ins of contract.inserted) {
+  if (!existsSync(join(root, ins.repo, 'package.json'))) continue // 仓库缺失已在第 2 节报过
+  const actual = [...deviations(ins.repo)].sort()
+  const gap = pinGaps.find(g => g.repo === ins.repo)
+  if (gap === undefined) {
+    if (actual.length > 0) {
+      fail(ins.repo + ': 版本钉偏离且未声明: ' + actual.join(', ')
+        + '（基线 ' + contract.baseline + ' / cordis ' + contract.cordis + ' / schemastery ' + contract.schemastery + '）')
+    } else ok(ins.repo + ': 版本钉 == 基线/cordis/schemastery')
+    continue
+  }
+  if (!gap.reason || !String(gap.reason).trim()) { fail(ins.repo + ': contract-pin-gaps 条目缺 reason'); continue }
+  const accepted = [...new Set(gap.accepted ?? [])].sort()
+  const undeclared = actual.filter(d => !accepted.includes(d))
+  const stale = accepted.filter(d => !actual.includes(d))
+  if (undeclared.length > 0 || stale.length > 0) {
+    fail(ins.repo + ': 声明与事实不符（未声明偏离: [' + undeclared.join(', ') + ']；已对齐却仍声明: [' + stale.join(', ') + ']）')
+  } else ok(ins.repo + ': 版本钉偏离已显式声明（' + accepted.length + ' 项，基线 ' + contract.baseline + '）')
+}
+for (const g of pinGaps) {
+  if (!contract.inserted.some(i => i.repo === g.repo)) {
+    fail('contract-pin-gaps 声明了未登记进 contract.inserted 的仓库: ' + g.repo)
+  }
 }
 ok('版本钉检查完成')
 

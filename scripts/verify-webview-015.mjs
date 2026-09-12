@@ -53,6 +53,26 @@ const checks = [
   ['documentpreview 客户端条目在场（曾被 Iterator 缺失打挂的包）',
     "(window.__DSH_BOOT__?.entries ?? []).map(e => e.id).filter(id => id.includes('documentpreview'))",
     (v) => Array.isArray(v) && v.length >= 1],
+  // ── 0.14.0-preview 追加：系统返回层栈通道在场（计划 §5.1 IX-BG-01/14）──
+  // 页面侧 BackStackSignal 暴露 window.__dshBack；层数/逐层类型全局是设备侧逐级返回断言的读点；
+  // dshBackBridge 是壳侧同步缓存的 set/get 成对上行面（getBackAvailable 回读「层栈非空」缓存）。
+  ['返回层栈入口 window.__dshBack 在场（函数）', "typeof window.__dshBack === 'function'", true],
+  // 注意：层数/逐层类型只断言「类型在场」——不绑定初始值，因为本条之前的检查会打开 @ 菜单等层，
+  // 层栈在读到时可能已非 0（判据是通道在场 + 层随交互变化，见后面两条交互断言）。
+  ['返回层栈层数全局在场（数字）', "typeof window.__dshBackDepth === 'number'", true],
+  ['返回层栈逐层类型全局在场（数组）', "Array.isArray(window.__dshBackKinds)", true],
+  ['返回层栈上行桥 dshBackBridge 成对在场（set/get）',
+    "typeof window.dshBackBridge?.setAvailable === 'function' && typeof window.dshBackBridge?.getBackAvailable === 'function'", true],
+  // 判据：抽屉必须被登记为层、且壳侧同步缓存为真（层数增减由下一条「消费」断言覆盖，避免点击幂等性带来的噪声）。
+  ['抽屉成为层（kinds 含 drawer）且壳侧同步缓存为真',
+    "(async () => { const sleep = (ms) => new Promise(r => setTimeout(r, ms)); const kinds = () => Array.isArray(window.__dshBackKinds) ? window.__dshBackKinds : []; if (!kinds().includes('drawer')) { const b = document.querySelector('[data-dsh-mobile-topbar] button'); if (!b) return 'no-topbar'; b.click(); await sleep(500); } return { depth: window.__dshBackDepth, kinds: kinds(), cached: window.dshBackBridge?.getBackAvailable?.() }; })()",
+    (v) => v && v.depth >= 1 && v.cached === true && Array.isArray(v.kinds) && v.kinds.includes('drawer')],
+  ['层栈消费（__dshBack 弹出该层）→ 层数下降且壳侧缓存回读 false',
+    "(async () => { const before = window.__dshBackDepth; const consumed = typeof window.__dshBack === 'function' ? window.__dshBack() : 'no-entry'; await new Promise(r => setTimeout(r, 400)); return { before, consumed, depth: window.__dshBackDepth, cached: window.dshBackBridge?.getBackAvailable?.() }; })()",
+    (v) => v && v.consumed === true && v.before >= 1 && v.depth === v.before - 1 && v.cached === (v.depth > 0)],
+  // ── 0.14.0-preview 追加：壳侧状态 getter 在场（计划 §4.3 ST-10/ST-11）──
+  ['桥 getImmersiveMode 在场（ST-10 壳侧唯一真源）', "typeof window.androidBridge?.getImmersiveMode === 'function'", true],
+  ['getImmersiveMode 返回布尔（回读壳侧偏好真值）', "typeof window.androidBridge?.getImmersiveMode?.() === 'boolean'", true],
 ]
 
 const ws = new WebSocket(wsUrl)

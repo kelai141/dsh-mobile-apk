@@ -119,6 +119,10 @@ cat > stage-root/home/.dsh/profiles/web/cordis.patch.yml <<'PATCH_EOF'
 - insert:
     - id: picker-native-surface
       name: '@deepseek-ai/dsh-client-ui-directory-picker-native'
+    - id: android-browser
+      name: '@dsh-android/dsh-android-browser'
+    - id: android-vdisplay
+      name: '@dsh-android/dsh-android-vdisplay'
 # Default model（0.13.0 C3 修正）：deepseek-official（壳注入 DEEPSEEK_API_KEY，开箱即用）——
 # 不再 pin opencode-go（OpenCode Zen Go 端点实测 404，见 profile-web.cordis.patch.yml 注释）。
 - id: agent-default-model

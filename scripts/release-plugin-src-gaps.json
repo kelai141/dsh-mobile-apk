@@ -1,0 +1,12 @@
+{
+  "note": "build-release.ps1 的 $pluginSrcs 与 build-apk-013.ps1 的 $pluginDirs 差集的显式声明处。每条必须写理由；未声明的差集一律 FAIL。",
+  "gaps": [
+    { "plugin": "plugins/dsh-android-bridge", "reason": "宿主侧 release 注入只覆盖 dsh-shell-termux / dsh-client-ui-responsive / dsh-host-web-compat；@dsh-android 插件由设备侧 make-snapshot.sh 与 build-apk-013.ps1 注入链装配进快照，release 快照里已带其 lib，重复注入会与快照内 lib 版本不一致（build-release.ps1 2e 的 hash 比对会拒）" },
+    { "plugin": "plugins/dsh-android-manage", "reason": "同 dsh-android-bridge：@dsh-android 插件随快照出厂，不由 build-release.ps1 注入" },
+    { "plugin": "plugins/dsh-android-linux-env", "reason": "同 dsh-android-bridge：@dsh-android 插件随快照出厂，不由 build-release.ps1 注入" },
+    { "plugin": "plugins/dsh-android-file-open", "reason": "同 dsh-android-bridge：@dsh-android 插件随快照出厂，不由 build-release.ps1 注入" },
+    { "plugin": "plugins/dsh-model-capability", "reason": "同 dsh-android-bridge：@dsh-android 插件随快照出厂，不由 build-release.ps1 注入（F-ENV-04/05 的 pluginDirs 单常量收敛另批处理）" },
+    { "plugin": "plugins/dsh-android-browser", "reason": "同 dsh-android-bridge：@dsh-android 插件随快照出厂，不由 build-release.ps1 注入" },
+    { "plugin": "plugins/dsh-android-vdisplay", "reason": "同 dsh-android-bridge：@dsh-android 插件随快照出厂，不由 build-release.ps1 注入" }
+  ]
+}

@@ -29,6 +29,13 @@ const PEER_OVERRIDE = peerArgIdx >= 0 ? argv[peerArgIdx + 1] : process.env.DSH_M
 const SELF_ONLY = argv.includes('--self')
 
 const failures = []
+// ST-31：任何 SKIP 必须计数（发布链要求 SKIP=0；本门禁的 SKIP 只有一种合法形态——
+// 单仓 checkout 无对端 / 对端确无该镜像文件）。
+let skipped = 0
+const skip = (msg) => {
+  skipped += 1
+  console.log('SKIP(#' + skipped + ')  ' + msg)
+}
 const check = (label, ok, detail) => {
   console.log((ok ? 'PASS  ' : 'FAIL  ') + label + (ok || detail === undefined ? '' : ' -> ' + detail))
   if (!ok) failures.push(label)
@@ -86,7 +93,7 @@ if (!SELF_ONLY) {
 }
 
 if (!SELF_ONLY && !peer) {
-  console.log('SKIP  镜像层：对端树不在场（CI 单仓场景请 checkout 对端后运行，或传 --peer/--self）')
+  skip('镜像层：对端树不在场（CI 单仓场景请 checkout 对端后运行，或传 --peer/--self）')
 }
 if (peer) {
   console.log(`镜像对端: ${relative(dirname(ROOT), peer) || peer}`)
@@ -144,19 +151,97 @@ if (peer) {
   // 对端缺该文件时跳过（apk 仓独占脚本合法）。
   const MIRROR_TOP = [
     'scripts/build-apk-013.ps1',
+    // ST-06 纳入镜像面：云端自包含构建链自身也是「单边演进 = 幽灵缺陷」面（此前只在 apk 仓存在、
+    // 被镜像检查显式 SKIP）；注入集单一常量 + 契约/门禁脚本同批纳入（0.13.8-b 批 B1）。
+    'scripts/build-apk.mjs',
+    'scripts/plugin-dirs.json',
+    'scripts/contract.json',
+    'scripts/contract-pin-gaps.json',
+    'scripts/check-patch-mounts.mjs',
+    'scripts/check-contract.mjs',
+    'scripts/check-snapshot-secrets.mjs',
+    'scripts/inject-all.py',
+    'scripts/ci-verify-snapshot.py',
+    'scripts/build-snapshot-013.mjs',
+    'scripts/lib/shell.mjs',
+    // 0.13.8-b 批 B2（ST-25/26/31 + §7.2）：制度性门禁、度量入口与 A1 seed 模块同样双仓同源
+    // （云端自包含构建会跑它们；单边演进 = 云端跑旧门禁/旧 seed）。
+    'scripts/check-state-registry.mjs',
+    'scripts/state-registry.json',
+    'scripts/check-bridge-symmetry.mjs',
+    'scripts/bridge-symmetry-baseline.json',
+    'scripts/check-gate-skips.mjs',
+    'scripts/check-perf-instrumentation.mjs',
+    'scripts/perf-instrumentation-gaps.json',
+    'scripts/perf/count-compose.mjs',
+    'scripts/perf/measure-steady.ps1',
+    'scripts/lib/profile-seed.mjs',
+    // 0.13.8-b 新插件 + 本轮新增跨包边的 file-open：自包含副本与协调仓同源是既有铁律（AGENTS §4
+    // robocopy src + package.json + lib 产物）。**目录级**比对（递归，排除 node_modules）——只点
+    // package.json + lib/index.js 会在单边改 lib/facts.js、test/*.test.mjs、新导出面时假绿
+    // （本轮实测：browser 副本曾落后 4 文件 / 5 文件内容不同；file-open 曾落后 test/auth.test.mjs）。
+    'plugins/dsh-android-browser',
+    'plugins/dsh-android-vdisplay',
+    'plugins/dsh-android-file-open',
+    'scripts/build-release.ps1',
     'scripts/check-manifest-hardening.mjs',
     'scripts/check-bounded-io.mjs',
     'scripts/check-protocol-v2.mjs',
     'scripts/check-runtime-assets.mjs',
+    'scripts/check-snapshot-fingerprint.mjs',
+    'scripts/check-tool-output-schema.mjs',
+    'scripts/check-control-ops.mjs',
+    'scripts/check-release-gates.mjs',
+    'scripts/control-ops-known-gaps.json',
+    'scripts/control-ops-pending.json',
+    'scripts/check-inject-completeness.mjs',
+    'scripts/check-kotlin-comments.mjs',
+    'scripts/check-strip-noop.mjs',
+    // 云端链与 CI 都跑它（build-apk.mjs GATE_SCRIPTS），此前不在镜像面 = 单边演进可绕过（ST-17 顺路收口）
+    'scripts/check-engine-overlay.mjs',
+    'scripts/release-plugin-src-gaps.json',
     'scripts/gen-protocol-v2-fixture.mjs',
     'scripts/profile-web.cordis.patch.yml',
     'scripts/snapshot-config/engine-overlay.json',
   ]
+  /** 递归列出目录下所有文件（相对路径；node_modules/.git 排除）——目录级镜像面用。 */
+  const walkAll = (dir, prefix = '') => {
+    const out = []
+    for (const name of readdirSync(dir)) {
+      if (name === 'node_modules' || name === '.git') continue
+      const full = join(dir, name)
+      const relPath = prefix ? prefix + '/' + name : name
+      if (statSync(full).isDirectory()) out.push(...walkAll(full, relPath))
+      else out.push(relPath)
+    }
+    return out
+  }
   for (const rel of MIRROR_TOP) {
+    const mine = join(ROOT, rel)
     const theirs = join(peer, rel)
-    if (!existsSync(theirs)) { console.log(`SKIP  镜像一致: ${rel}（对端无此文件）`); continue }
+    if (!existsSync(mine)) { check(`镜像面源文件在场: ${rel}`, false, '本仓缺席（MIRROR_TOP 条目失效）'); continue }
+    if (statSync(mine).isDirectory()) {
+      if (!existsSync(theirs)) { skip(`镜像目录: ${rel}（对端无此目录）`); continue }
+      const mineFiles = walkAll(mine)
+      const peerFiles = walkAll(theirs)
+      const onlyMine = mineFiles.filter((x) => !peerFiles.includes(x))
+      const onlyPeer = peerFiles.filter((x) => !mineFiles.includes(x))
+      check(`镜像目录清单一致: ${rel}（${mineFiles.length} 文件）`,
+        onlyMine.length === 0 && onlyPeer.length === 0,
+        '本仓独有: [' + onlyMine.slice(0, 5).join(', ') + ']；对端独有: [' + onlyPeer.slice(0, 5).join(', ') + ']')
+      const badContent = []
+      for (const x of mineFiles) {
+        if (!peerFiles.includes(x)) continue
+        const r = cmp(join(mine, x), join(theirs, x))
+        if (r === 'content') badContent.push(x)
+        else if (r === 'eol') eolWarns.push(rel + '/' + x)
+      }
+      check(`镜像目录内容一致: ${rel}`, badContent.length === 0, '内容漂移: [' + badContent.slice(0, 5).join(', ') + ']')
+      continue
+    }
+    if (!existsSync(theirs)) { skip(`镜像一致: ${rel}（对端无此文件）`); continue }
     try {
-      const r = cmp(join(ROOT, rel), theirs)
+      const r = cmp(mine, theirs)
       check(`镜像一致: ${rel}`, r !== 'content', r === 'eol' ? '仅行尾差异（见告警）' : undefined)
       if (r === 'eol') eolWarns.push(rel)
     } catch (e) {
@@ -172,4 +257,4 @@ if (failures.length > 0) {
   console.error(`CHECK-PATCH-MIRROR FAILED（${failures.length} 项）：${failures.join('；')}`)
   process.exit(1)
 }
-console.log('CHECK-PATCH-MIRROR PASSED')
+console.log('CHECK-PATCH-MIRROR PASSED（SKIP=' + skipped + '）')

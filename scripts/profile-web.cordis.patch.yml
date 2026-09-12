@@ -126,3 +126,16 @@
 - insert:
     - id: dsh-model-sync
       name: '@aiwayds/dsh-model-sync'
+
+# 侧栏 AI 浏览器（0.13.8 新插件 @dsh-android/dsh-android-browser）：宿主半——tier 判定、面板数据契约、
+# 壳桥 op 名（BROWSER_OPS，见其 src/contract.ts）。**browser\* 不进 A11Y_OPS**（方案 §4.5）。
+# 本轮壳侧尚未实现壳桥分支，op 名先冻结在契约里（未挂载 = 引擎不加载，故此处先挂载）。
+- insert:
+    - id: android-browser
+      name: '@dsh-android/dsh-android-browser'
+
+# 虚拟屏（0.13.8 新插件 @dsh-android/dsh-android-vdisplay）：Shizuku 特权通道的能力状态面 + 只读状态端点
+# + vd\* op 声明（VD_OPS，见其 src/status.ts）；像素合成留在壳侧 SurfaceView。vd\* 同样不进 A11Y_OPS。
+- insert:
+    - id: android-vdisplay
+      name: '@dsh-android/dsh-android-vdisplay'

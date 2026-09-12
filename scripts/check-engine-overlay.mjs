@@ -59,16 +59,40 @@ for (const patch of PATCH_REGISTRY.patches.filter((p) => p.scope === 'engine')) 
 const py = `
 import tarfile, json, sys
 want = json.loads(open(sys.argv[2], 'r', encoding='utf-8').read())
+nm = sys.argv[4]
 hits = {}
+present = {}
 presets = 0
+looked_non_pkg = 0
 with tarfile.open(sys.argv[1], 'r|xz') as t:
     for m in t:
         n = m.name
         if n.startswith(sys.argv[3]) and m.isfile():
             presets += 1
-        if n in want:
-            hits[n] = t.extractfile(m).read().decode('utf-8', 'replace')
-print(json.dumps({'hits': hits, 'presets': presets}))
+        if not m.isfile():
+            continue
+        # 关键（0.13.8-b 实锤回归）：want 里既有 package.json，也有 .js/.ts 目标（patch-marker）——
+        # 一律要取回内容。曾经这里只放行 package.json，导致 7 个 .js marker 永远「缺失」→ 假红拒打包。
+        need_hit = n in want
+        need_present = n.endswith('/package.json') and n.startswith(nm)
+        if not (need_hit or need_present):
+            continue
+        txt = t.extractfile(m).read().decode('utf-8', 'replace')
+        if need_hit:
+            hits[n] = txt
+        if not need_present:
+            looked_non_pkg += 1
+            continue
+        # 反向面：快照内每个包的 (version, deps) —— 供依赖闭包判定「未登记且无来源」
+        try:
+            j = json.loads(txt)
+        except Exception:
+            continue
+        present[n] = {'name': j.get('name'), 'version': j.get('version'), 'dir': nm,
+                      'deps': list((j.get('dependencies') or {}).keys())
+                              + list((j.get('optionalDependencies') or {}).keys())
+                              + list((j.get('peerDependencies') or {}).keys())}
+print(json.dumps({'hits': hits, 'presets': presets, 'present': present, 'lookedNonPkg': looked_non_pkg}))
 `
 let res
 try {
@@ -79,7 +103,7 @@ try {
   writeFileSync(wantFile, JSON.stringify([...want.keys(), presetsPrefix]))
   try {
     const snapWin = snap.replace(/\\/g, '/')
-    res = JSON.parse(execSync(`${process.platform === 'win32' ? 'python' : 'python3'} ${JSON.stringify(tmpPy)} ${JSON.stringify(snapWin)} ${JSON.stringify(wantFile)} ${JSON.stringify(presetsPrefix)}`, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }))
+    res = JSON.parse(execSync(`${process.platform === 'win32' ? 'python' : 'python3'} ${JSON.stringify(tmpPy)} ${JSON.stringify(snapWin)} ${JSON.stringify(wantFile)} ${JSON.stringify(presetsPrefix)} ${JSON.stringify(NM)}`, { encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 }))
   } finally {
     rmSync(tmpPy, { force: true })
     rmSync(wantFile, { force: true })
@@ -91,6 +115,15 @@ try {
 
 const fails = []
 let checked = 0
+// 防回归自检（0.13.8-b）：want 含非 package.json 目标（patch-marker 的 .js/.ts）时，扫描器必须真的
+// 取回过这类目标——否则「marker 面」会整体失效而无人知（本轮 7 项假红即此形态）。
+{
+  const nonPkgWant = [...want.keys()].filter((p) => !p.endsWith('/package.json')).length
+  const looked = res.lookedNonPkg ?? 0
+  if (nonPkgWant > 0 && looked === 0) {
+    fails.push('扫描器口径失效：want 含 ' + nonPkgWant + ' 个非 package.json 目标（patch-marker 等），但一个都没取回')
+  }
+}
 for (const [path, meta] of want) {
   const content = res.hits[path]
   if (!content) {
@@ -118,6 +151,63 @@ for (const [path, meta] of want) {
     }
     checked++
   } else checked++
+}
+// ── 反向面（0.13.8-b ST-17）：快照里出现的包必须「已登记」或「可由已登记包经依赖闭包到达」──
+// 单向门禁只证「登记的都在」，证不了「在的都登记/有来源」——未登记且无来源的包 = 幽灵面（可能是上游新增
+// 依赖、也可能是被塞进来的包）。传递依赖不逐个登记（npm 提升会产生数百条、每次上游 bump 都变），
+// 而是用快照自身的 dependencies 做闭包，闭包外的一律判红。
+{
+  const present = res.present ?? {}
+  const declared = new Set()
+  for (const name of Object.keys(M.packages ?? {})) declared.add(name)
+  for (const name of Object.keys(M.vendorTop ?? {})) declared.add(name)
+  for (const name of Object.keys(M.pins ?? {})) declared.add(name)
+  for (const entry of M.keepUnpublished ?? []) declared.add(entry.replace(/ \(.+$/, '').trim())
+  declared.add('@deepseek-ai/dsh-agent-presets')
+  for (const name of M.extraPresent ?? []) declared.add(name)
+  // name -> tarPath（同名多副本时取第一个：闭包判定只需可达性）
+  // 只统计「顶层包目录」：路径 = <NM>node_modules/<pkg|@scope/pkg>/package.json。
+  // 更深层的 package.json 是嵌套副本；name 与目录名不一致的是 exports 子路径等非包目录（跳过）。
+  const byName = new Map()
+  for (const [path, meta] of Object.entries(present)) {
+    if (!meta || !meta.name) continue
+    const rel = path.slice(NM.length + 'node_modules/'.length)
+    const parts = rel.split('/')
+    const dirName = parts[0].startsWith('@') ? parts.slice(0, 2).join('/') : parts[0]
+    const depth = parts[0].startsWith('@') ? 3 : 2
+    if (parts.length !== depth) continue          // 嵌套副本
+    if (meta.name !== dirName) continue           // exports 子路径/别名目录
+    if (byName.has(meta.name)) continue
+    byName.set(meta.name, meta)
+  }
+  const reached = new Set()
+  const queue = [...declared].filter((n) => byName.has(n))
+  for (const n of queue) reached.add(n)
+  while (queue.length > 0) {
+    const cur = byName.get(queue.shift())
+    for (const dep of cur?.deps ?? []) {
+      if (reached.has(dep)) continue
+      reached.add(dep)
+      if (byName.has(dep)) queue.push(dep)
+    }
+  }
+  const unaccounted = [...byName.keys()].filter((n) => !declared.has(n) && !reached.has(n)).sort()
+  checked += 0
+  console.log('  反向面：快照内 ' + byName.size + ' 包 / 登记 ' + declared.size + ' / 依赖闭包可达 ' + reached.size
+    + ' / 无来源 ' + unaccounted.length)
+  // 根安装集断言（防「删登记项靠闭包兜住」）：dsh 根 package.json 的每个直接依赖都必须**逐条登记**
+  // （版本钉面）或在 extraPresent 里显式声明——从 overlay 表删一个根依赖即红。
+  const rootMeta = present[NM + 'package.json']
+  const rootDeps = rootMeta?.deps ?? []
+  const rootUnpinned = rootDeps.filter((n) => !declared.has(n)).sort()
+  console.log('  根安装集：直接依赖 ' + rootDeps.length + ' 条 / 未登记 ' + rootUnpinned.length)
+  if (rootUnpinned.length > 0) {
+    fails.push('dsh 根直接依赖未登记（版本钉缺失）' + rootUnpinned.length + ' 个: [' + rootUnpinned.slice(0, 8).join(', ') + ']')
+  }
+  if (unaccounted.length > 0) {
+    fails.push('未登记且依赖闭包不可达的包 ' + unaccounted.length + ' 个: [' + unaccounted.slice(0, 5).join(', ') + ']'
+      + '——若为上游新增依赖请登记进 engine-overlay.json，若是被塞入的包请移除')
+  }
 }
 if (res.presets < 1) fails.push(`dsh-agent-presets 内置 presets/ 为空（${res.presets} 项）——0.1.2-rc.1 预设载体缺席`)
 else console.log(`  dsh-agent-presets presets/ 条目: ${res.presets}`)

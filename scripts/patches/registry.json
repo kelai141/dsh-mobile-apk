@@ -115,7 +115,7 @@
       "scope": "engine",
       "summary": "附件持久化的祖先 fsync 在 Android 应用私有路径上失败即止步：/data/user/0 对应用不可读，原实现一路 sync 到文件系统根 → open EACCES → 所有图片上传被 api-proxy 兜底成 session/agent-busy",
       "provenance": "2026-09-10 实测（模拟器 16416：上传图片发送 → prompt rejected (session/agent-busy)，details.reason=EACCES open '/data/user/0'）；同一根因解释 read_image 读任意路径都报同一 EACCES",
-      "marker": "dsh-mobile durable-walk guard（存在=已应用）"
+      "marker": "dsh-mobile durable-walk guard"
     },
     {
       "id": "spj-migration-link-F5",
@@ -129,9 +129,18 @@
       "id": "publish-exclusive-F7",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js",
       "scope": "engine",
-      "summary": "发布独占语义找回：F5 的 rename 回退会静默覆盖已存在的 currentPath（link 的 EEXIST=return false 在 Android 上成死代码）→ 先用 open(currentPath,'wx') 做 O_EXCL 原子占位，输家在此得到 EEXIST 并 return false，与 link 路径语义一致",
-      "provenance": "2026-09-12 apk issue #170（审计 F5 输出）；触发面 = 双引擎进程并发发布同一会话",
+      "summary": "发布独占语义找回 + 失败回收：F5 的 rename 回退会静默覆盖已存在的目标（link 的 EEXIST 语义在 Android 上成死代码）→ O_EXCL 原子占位抽成模块级小函数 dshMobileClaimExclusive()，F5 的两站（publishCurrentExclusive + materializePosix）共用：publish 站输家得 EEXIST 并 return false、materialize 站输家得 EEXIST 并抛出（该站上游只有抛错通道）；两站占位成功后 rename 失败一律 unlink 回收占位，防 0 字节残留让之后每次发布都输掉竞争",
+      "provenance": "2026-09-12 apk issue #170 / FX-207.1+207.2（审计 F5 输出）；触发面 = 双引擎进程并发发布同一会话/同一日志；跨进程独占只剩原子发布是 flock-android-F3 stub 的后果",
+      "requires": ["spj-migration-link-F5"],
       "marker": "dsh-mobile exclusive publish (F7)"
+    },
+    {
+      "id": "perf-patch-reload-N1",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js",
+      "scope": "engine",
+      "summary": "patchReload=startup 出厂默认 + 存量升级归一化：web 模板默认 live->startup（上游 live 档额外挂 timer/hmr 反复重算客户端 combo），并把 installation-owned 当前元组下已显式写入的旧默认 live 一并归一化（上游只在键缺失时写回模板默认，存量用户永不归一化）",
+      "provenance": "0.13.8 性能 A1（docs/ANDROID-RUNTIME-PERF-2026-09-12.md §A1，实测冷启动 24.9s -> 16.6s）；验收 P-AC-23 全新安装 + P-AC-24 存量升级",
+      "marker": "dsh-mobile patchReload normalization (N1)"
     },
     {
       "id": "reference-drill-F6",

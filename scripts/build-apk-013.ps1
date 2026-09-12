@@ -28,10 +28,34 @@ Write-Host "== 补丁镜像一致性门禁 =="
 node (Join-Path $Root "scripts\check-patch-mirror.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "补丁镜像不一致，拒绝打包（先同步镜像 scripts/patches 到对端树）"; exit 1 }
 
+# 制度性门禁（0.13.8-b 批 B2 ST-25/26/31）：状态登记制、桥面对称性、SKIP 纪律与门禁覆盖清单化。
+# 三者都是离线静态断言（不依赖快照），与 CI 同源（pr-gate 亦调用）——本地链漏接即形同虚设。
+Write-Host "== 状态登记制门禁 =="
+node (Join-Path $Root "scripts\check-state-registry.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "状态登记制校验失败（PR 模板四栏/登记表 evidence），拒绝打包"; exit 1 }
+Write-Host "== 桥面对称性门禁 =="
+node (Join-Path $Root "scripts\check-bridge-symmetry.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "桥面出现新的不对称（只有 setter/getter 返偏好），拒绝打包"; exit 1 }
+Write-Host "== 门禁覆盖与 SKIP 纪律门禁 =="
+node (Join-Path $Root "scripts\check-gate-skips.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "门禁覆盖清单/SKIP 纪律失败（发布链要求 SKIP=0），拒绝打包"; exit 1 }
+
+# 快照指纹对账门禁（0.13.8-b 批 B2 ST-04 / F-ENV-01）：sha256(assets/snapshot.tar.xz) == assets/snapshot.sha256。
+# 预检：净检出下 tar 不在场 → SKIP 计数（exit 0）；第 3 步写完本 ABI 的声明值后再以 --require 严格复核。
+# 「手工替换 tar」这一动作此前没有任何机器校验（壳侧 snapshotFresh() 只做字符串比较）。
+Write-Host "== 快照指纹对账门禁（预检）=="
+node (Join-Path $Root "scripts\check-snapshot-fingerprint.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "快照指纹与声明值不一致（手工替换 tar？），拒绝打包"; exit 1 }
+
 # manifest 加固门禁（0.13.8 PR-B3 / apk #183）：allowBackup/NSC/接收器来源校验在场
 Write-Host "== manifest 加固门禁 =="
 node (Join-Path $Root "scripts\check-manifest-hardening.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "manifest 加固校验失败，拒绝打包"; exit 1 }
+
+# Kotlin 块注释嵌套（KDoc 里写 node_modules/** 会吞掉整个文件；dev-shell 实测）
+Write-Host "== Kotlin 注释嵌套门禁 =="
+node (Join-Path $Root "scripts\check-kotlin-comments.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "Kotlin 块注释嵌套，拒绝打包"; exit 1 }
 
 # 子进程无界读 grep 门禁（0.13.8 #173）：输出必须走 ProcIo.readBounded
 Write-Host "== 有界读门禁 =="
@@ -43,11 +67,16 @@ Write-Host "== 协议 V2 门禁 =="
 node (Join-Path $Root "scripts\check-protocol-v2.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "协议 V2 门禁失败，拒绝打包"; exit 1 }
 
-# 运行时补丁资产一致性门禁（0.13.8 收尾 / apk #170 复盘）：assets/patched/* 是引擎启动时
-# 覆盖运行树的预打补丁副本，必须与快照同源——否则「构建期 marker 全绿、设备上补丁被改回去」。
-Write-Host "== 运行时补丁资产门禁 =="
-node (Join-Path $Root "scripts\check-runtime-assets.mjs") 2>&1
-if ($LASTEXITCODE -ne 0) { Write-Host "运行时补丁资产过期，拒绝打包（从快照重新生成 assets/patched）"; exit 1 }
+# 工具返回值 vs output.schema 运行时契约门禁（0.13.8-b 批 B2 T2 / E-10，issue #204 的假绿防线）：
+# 用引擎同一个 validateJsonSchemaValue 校验各工具分支返回值 + 递归无 undefined + 源码级注册差集 = 0。
+Write-Host "== 工具输出 schema 契约门禁 =="
+node (Join-Path $Root "scripts\check-tool-output-schema.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "工具返回值与 output.schema 不一致，拒绝打包"; exit 1 }
+
+# 控制 op 六处登记链一致性门禁（0.13.8-b 批 B2）：漏一处 = a11y 通道下该 op 静默 deny（坑 52）。
+Write-Host "== 控制 op 登记链门禁 =="
+node (Join-Path $Root "scripts\check-control-ops.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "控制 op 登记链漂移（六处集合不一致），拒绝打包"; exit 1 }
 
 # pi-ai 目录 diff（0.13.3 W1/P2）：baseline -> pin 信息性输出（构建日志 + 报告文件），
 # 删除清单供回归报告引用——不拒绝构建（删除项由 W4 降级补丁兜底）。
@@ -70,20 +99,16 @@ $Out = Join-Path $Root ("out\v" + $GradleVer)
 $apkDir = Join-Path $Root "dsh-mobile-apk"
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 
-$pluginDirs = @(
-    (Join-Path $Root "dsh-shell-termux"),
-    (Join-Path $Root "dsh-client-ui-responsive"),
-    (Join-Path $Root "dsh-host-web-compat"),
-    # 0.13.0 F1.6/F1.7/F5 四件套（2026-08-23 修复 C3：此前快照仅有 3 个 @dsh-android 包，
-    # 而权威 patch 挂载了 bridge/manage/linux-env/file-open → 装配失败/功能缺席）
-    (Join-Path $Root "plugins\dsh-android-bridge"),
-    (Join-Path $Root "plugins\dsh-android-manage"),
-    (Join-Path $Root "plugins\dsh-android-linux-env"),
-    (Join-Path $Root "plugins\dsh-android-file-open"),
-    # 0.13.5 W3（issue #125）：自定义提供商能力发现——被动端点描述符 + 厂商 schema +
-    # 引擎目录精确 id 查表 + 显式批准后的主动探测；字段级写回 llm-pi-ai 模型能力。
-    (Join-Path $Root "plugins\dsh-model-capability")
-)
+# 注入集单一常量（0.13.8-b ST-06 / F-ENV-04）：dirs/externals 都在 scripts/plugin-dirs.json，
+# 与云端链 dsh-mobile-apk/scripts/build-apk.mjs 共用同一份——此前两条链各写一份，云端
+# pluginDirs 少一个「权威 patch 已挂载」的包（dsh-model-capability）且无任何门禁能发现。
+# 注入四件套的历史背景（2026-08-23 修复 C3）：此前快照仅有 3 个 @dsh-android 包，而权威 patch
+# 挂载了 bridge/manage/linux-env/file-open → 装配失败/功能缺席。
+$pluginManifest = Get-Content (Join-Path $Root "scripts\plugin-dirs.json") -Raw | ConvertFrom-Json
+$pluginDirs = @($pluginManifest.dirs | ForEach-Object { Join-Path $Root $_ })
+$externDirs = @($pluginManifest.externals | ForEach-Object { Join-Path $Root $_ })
+$externByName = @{}
+foreach ($d in $externDirs) { $externByName[(Split-Path $d -Leaf)] = $d }
 
 foreach ($abi in @('arm64', 'x86_64')) {
     if ($OnlyAbi -and $OnlyAbi -ne $abi) { continue }
@@ -102,13 +127,12 @@ foreach ($abi in @('arm64', 'x86_64')) {
         New-Item -ItemType Directory -Force -Path (Join-Path $Root ".deploy-tmp\plugins") | Out-Null
         # undo-savepoint 注入源：vendor/dsh-undo-savepoint（固化移动端裁剪版——
         # 头部只留快照徽章、移除撤销/恢复快捷键行与全局键盘监听，见其 PATCHES.md 差异表）
-        $undo = Join-Path $Root "vendor\dsh-undo-savepoint"
-        # marketplace 注入源：vendor/dshmarketplace-plugin（固化修复版，见其 PATCHES.md——
-        # 上游 0.1.5 pre-execute 守卫不调 next() 导致全工具崩溃；build 前强制校验修复在场）
-        $market = Join-Path $Root "vendor\dshmarketplace-plugin"
-        # model-sync 注入源（0.13.3 W7）：vendor/dsh-model-sync（@aiwayds/dsh-model-sync 0.3.1
-        # 固化副本，MIT；ZCode 式隐式模型补给，见其 PATCHES.md）
-        $modelSync = Join-Path $Root "vendor\dsh-model-sync"
+        # 三个根级注入源（undo / marketplace / model-sync）同样来自 plugin-dirs.json.externals：
+        # marketplace 是固化修复版（上游 0.1.5 pre-execute 守卫不调 next() 导致全工具崩溃，见其
+        # PATCHES.md）；model-sync 是 @aiwayds/dsh-model-sync 0.3.1 固化副本（0.13.3 W7）。
+        $undo = $externByName['dsh-undo-savepoint']
+        $market = $externByName['dshmarketplace-plugin']
+        $modelSync = $externByName['dsh-model-sync']
         if (-not (Test-Path (Join-Path $undo "package.json"))) { Write-Host "缺 undo 注入源 $undo（git clone lire1131/dsh-undo-savepoint）"; continue }
         if (-not (Test-Path (Join-Path $market "package.json"))) { Write-Host "缺 marketplace 注入源 $market（vendor 固化副本）"; continue }
         if (-not (Test-Path (Join-Path $modelSync "lib\index.js"))) { Write-Host "缺 model-sync 注入源 $modelSync（vendor 固化副本）"; continue }
@@ -121,12 +145,22 @@ foreach ($abi in @('arm64', 'x86_64')) {
         # 为一次 tar 流处理——压缩/解压从 ×4 → ×1（原三步各自全量重压缩 ~743MB）。
         # 雷点 8：全量输出。
         Write-Host "== 单 pass 注入（@dsh-android + undo/market + 权威 patch）（$abi）=="
-        python (Join-Path $Root "scripts\inject-all.py") $snap (Join-Path $work "snap-final2.tar.xz") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") --dsh-android @pluginDirs --external $undo $market $modelSync 2>&1
+        # ST-05：--all-profiles = 权威 patch 与注入包覆盖全部真实装配 profile（web + headless；
+        # 负控 profile headless-bad 由 inject-all.py 显式跳过）。此前只写 web，headless 停在旧值。
+        python (Join-Path $Root "scripts\inject-all.py") $snap (Join-Path $work "snap-final2.tar.xz") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") --dsh-android @pluginDirs --external $undo $market $modelSync --all-profiles 2>&1
         if ($LASTEXITCODE -ne 0) { Write-Host "注入失败，拒绝打包（$abi）"; continue }
         # 防回归（审校 C4 2026-08-23）：patch 挂载集 ⊇ 注入集——缺条目（如 linux-env 漏挂）直接拒打包
         Write-Host "== 挂载集校验（$abi）=="
         node (Join-Path $Root "scripts\check-patch-mounts.mjs") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") @pluginDirs $undo $market $modelSync 2>&1 | Select-Object -First 4
         if ($LASTEXITCODE -ne 0) { Write-Host "patch 挂载集校验失败，拒绝打包（$abi）"; continue }
+        # 注入面成员完整性（P0：包内新增文件曾被静默丢弃 → tar 里 import 悬空 → 设备侧引擎启动即死）
+        Write-Host "== 注入成员完整性门禁（$abi）=="
+        node (Join-Path $Root "scripts\check-inject-completeness.mjs") (Join-Path $work "snap-final2.tar.xz") 2>&1
+        if ($LASTEXITCODE -ne 0) { Write-Host "注入产物成员不完整（新增文件丢失/import 悬空），拒绝打包（$abi）"; continue }
+        # 剥离清单后置断言（ST-16）：清单项在产物里必须不存在（防剥离静默 no-op）
+        Write-Host "== 剥离清单后置断言（$abi）=="
+        node (Join-Path $Root "scripts\check-strip-noop.mjs") (Join-Path $work "snap-final2.tar.xz") 2>&1
+        if ($LASTEXITCODE -ne 0) { Write-Host "剥离清单项仍在场（剥离未生效），拒绝打包（$abi）"; continue }
         $snapIn = Join-Path $work "snap-final2.tar.xz"
     } else {
         $snapIn = $snap
@@ -155,22 +189,29 @@ foreach ($abi in @('arm64', 'x86_64')) {
     Copy-Item (Join-Path $Root "LICENSES\*.txt") $licAssets -Force
     Copy-Item (Join-Path $Root "THIRD_PARTY_NOTICES.md") $licAssets -Force
     Write-Host "== 许可资产就位（$abi）=="
-    # 注：check-snapshot-secrets.ps1 内部走 cmd /c tar，外层 $LASTEXITCODE 不可靠
-    # （反映 cmd 尾命令而非脚本 exit 码——PASSED 时可能残留 1 造成误判 continue）。
-    # 以脚本输出标记为准。
-    $secretResult = & (Join-Path $PSScriptRoot "check-snapshot-secrets.ps1") $snapIn 2>&1 | Out-String
-    if ($secretResult -match 'FAIL\[' -or $secretResult -match 'CHECK_FAILED') {
-        Write-Host "🔒 SNAPSHOT_SECRET_CHECK_FAILED（$abi）：快照含机密，拒绝打包"
-        ($secretResult -split "`n") | Select-Object -First 6
-        continue
-    }
-    if ($secretResult -notmatch 'CHECK_PASSED') {
-        Write-Host "⚠️ 门禁输出异常（$abi）：$($secretResult.Trim())"
-    }
+    # 机密门禁单实现（0.13.8-b ST-06 / F-ENV-08 口径）：check-snapshot-secrets.mjs——跨平台 node
+    # 实现，云端链 build-apk.mjs 调用的是同一份；退出码可靠（旧 .ps1 走 cmd /c tar，$LASTEXITCODE
+    # 反映 cmd 尾命令而非脚本 exit 码，只能靠输出标记判定）。.ps1 实现已不再被任何链调用。
+    Write-Host "== 快照机密门禁（$abi）=="
+    node (Join-Path $Root "scripts\check-snapshot-secrets.mjs") $snapIn 2>&1
+    if ($LASTEXITCODE -ne 0) { Write-Host "SNAPSHOT_SECRET_CHECK_FAILED（$abi）：快照含机密，拒绝打包"; continue }
     $wslPath = $snapIn.Replace('D:', '/mnt/d').Replace('\', '/')
     $wslCmd = "tar -tf `"$wslPath`" | grep -cE '^usr/bin/(node|bash|rg|python|perl|ruby|zip|vim|zsh|openssl|socat|busybox)$'; tar -tf `"$wslPath`" | grep -c '^-'"
     wsl -e bash -lc $wslCmd 2>$null | Select-Object -First 2
     node (Join-Path $Root "scripts\elf-check.mjs") $snapIn $abi 2>&1 | Select-Object -First 3
+
+    # 运行时补丁资产一致性门禁（0.13.8 收尾 / apk #170 复盘）：assets/patched/* 是引擎启动时
+    # 覆盖运行树的预打补丁副本，必须与快照同源——否则「构建期 marker 全绿、设备上补丁被改回去」。
+    # FX-208.1：按当前 ABI 传参；--require = 快照/资产缺席即失败，不得 SKIP exit 0（旧实现把构建机状态
+    # 变成门禁结果）。ST-06：本调用原先落在 foreach 之外（$abi 未定义恒走 x86_64 默认值）——已移进循环。
+    Write-Host "== 运行时补丁资产门禁（$abi，严格）=="
+    node (Join-Path $Root "scripts\check-runtime-assets.mjs") $abi --require 2>&1
+    if ($LASTEXITCODE -ne 0) { Write-Host "运行时补丁资产过期或缺失（$abi），拒绝打包（从快照重新生成 assets/patched）"; continue }
+
+    # A1 出厂声明值对账（P-AC-01，--require 严格档）：注入后快照的 profile 清单必须带 patchReload 出厂值。
+    Write-Host "== 性能度量入口与 A1 出厂值门禁（$abi，严格）=="
+    node (Join-Path $Root "scripts\check-perf-instrumentation.mjs") --require --snapshot $snapIn --abi $abi 2>&1
+    if ($LASTEXITCODE -ne 0) { Write-Host "A1 出厂值/度量入口校验失败（$abi），拒绝打包"; continue }
 
     # 3. 双 ABI APK（cp 快照 + 指纹 → gradle assembleDebug）
     Write-Host "== 构建 APK（$abi, suffix=$Suffix）=="
@@ -181,6 +222,10 @@ foreach ($abi in @('arm64', 'x86_64')) {
     Copy-Item $snapIn (Join-Path $apkDir "app\src\main\assets\snapshot.tar.xz") -Force
     $sha = (Get-FileHash $snapIn -Algorithm SHA256).Hash.ToLower()
     Set-Content -Path (Join-Path $apkDir "app\src\main\assets\snapshot.sha256") -Value $sha -NoNewline -Encoding ascii
+    # ST-04 严格复核：本 ABI 的 tar 与刚写入的声明值必须逐字节一致（--require：缺件即失败，不得 SKIP）。
+    # 两个 ABI 各自构建时各自声明值与各自 tar 一致——不得再出现「入库值是单一 ABI 构建的事实」。
+    node (Join-Path $Root "scripts\check-snapshot-fingerprint.mjs") --require 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "快照指纹对账失败（$abi）：tar 与声明值不一致，拒绝打包" }
     Push-Location $apkDir
     try {
         & .\gradlew :app:assembleDebug --no-daemon -PversionNameSuffix="$Suffix" 2>&1 | Select-Object -Last 4

@@ -1,0 +1,110 @@
+{
+  "note": "控制 op 六处登记链的显式豁免面。每条必须写清 op / faces / reason / 到期条件；空数组 = 零豁免（收口优先）。",
+  "gaps": [
+    {
+      "op": "browserCaps",
+      "faces": [
+        "A11Y_OPS"
+      ],
+      "reason": "browser* 是壳桥 op（侧栏 AI 浏览器宿主半），不经无障碍通道——插件契约 plugins/dsh-android-browser/src/contract.ts 明确「browser* 不进 A11Y_OPS」（方案 §4.5）。永久豁免，非临时缺口。"
+    },
+    {
+      "op": "browserShow",
+      "faces": [
+        "A11Y_OPS"
+      ],
+      "reason": "browser* 是壳桥 op（侧栏 AI 浏览器宿主半），不经无障碍通道——插件契约 plugins/dsh-android-browser/src/contract.ts 明确「browser* 不进 A11Y_OPS」（方案 §4.5）。永久豁免，非临时缺口。"
+    },
+    {
+      "op": "browserHide",
+      "faces": [
+        "A11Y_OPS"
+      ],
+      "reason": "browser* 是壳桥 op（侧栏 AI 浏览器宿主半），不经无障碍通道——插件契约 plugins/dsh-android-browser/src/contract.ts 明确「browser* 不进 A11Y_OPS」（方案 §4.5）。永久豁免，非临时缺口。"
+    },
+    {
+      "op": "browserOpen",
+      "faces": [
+        "A11Y_OPS"
+      ],
+      "reason": "browser* 是壳桥 op（侧栏 AI 浏览器宿主半），不经无障碍通道——插件契约 plugins/dsh-android-browser/src/contract.ts 明确「browser* 不进 A11Y_OPS」（方案 §4.5）。永久豁免，非临时缺口。"
+    },
+    {
+      "op": "browserJs",
+      "faces": [
+        "A11Y_OPS"
+      ],
+      "reason": "browser* 是壳桥 op（侧栏 AI 浏览器宿主半），不经无障碍通道——插件契约 plugins/dsh-android-browser/src/contract.ts 明确「browser* 不进 A11Y_OPS」（方案 §4.5）。永久豁免，非临时缺口。"
+    },
+    {
+      "op": "browserInput",
+      "faces": [
+        "A11Y_OPS"
+      ],
+      "reason": "browser* 是壳桥 op（侧栏 AI 浏览器宿主半），不经无障碍通道——插件契约 plugins/dsh-android-browser/src/contract.ts 明确「browser* 不进 A11Y_OPS」（方案 §4.5）。永久豁免，非临时缺口。"
+    },
+    {
+      "op": "browserShot",
+      "faces": [
+        "A11Y_OPS"
+      ],
+      "reason": "browser* 是壳桥 op（侧栏 AI 浏览器宿主半），不经无障碍通道——插件契约 plugins/dsh-android-browser/src/contract.ts 明确「browser* 不进 A11Y_OPS」（方案 §4.5）。永久豁免，非临时缺口。"
+    },
+    {
+      "op": "browserState",
+      "faces": [
+        "A11Y_OPS"
+      ],
+      "reason": "browser* 是壳桥 op（侧栏 AI 浏览器宿主半），不经无障碍通道——插件契约 plugins/dsh-android-browser/src/contract.ts 明确「browser* 不进 A11Y_OPS」（方案 §4.5）。永久豁免，非临时缺口。"
+    },
+    {
+      "op": "browserSetUa",
+      "faces": [
+        "A11Y_OPS"
+      ],
+      "reason": "browser* 是壳桥 op（侧栏 AI 浏览器宿主半），不经无障碍通道——插件契约 plugins/dsh-android-browser/src/contract.ts 明确「browser* 不进 A11Y_OPS」（方案 §4.5）。永久豁免，非临时缺口。"
+    },
+    {
+      "op": "browserViewport",
+      "faces": [
+        "A11Y_OPS"
+      ],
+      "reason": "browser* 是壳桥 op（侧栏 AI 浏览器宿主半），不经无障碍通道——插件契约 plugins/dsh-android-browser/src/contract.ts 明确「browser* 不进 A11Y_OPS」（方案 §4.5）。永久豁免，非临时缺口。"
+    },
+    {
+      "op": "vdCreate",
+      "faces": [
+        "A11Y_OPS"
+      ],
+      "reason": "vd* 是虚拟屏 Shizuku 特权通道 op（像素合成在壳侧 SurfaceView），不经无障碍通道——plugins/dsh-android-vdisplay/src/status.ts 的声明；随六处登记落地时生效。永久豁免。"
+    },
+    {
+      "op": "vdDestroy",
+      "faces": [
+        "A11Y_OPS"
+      ],
+      "reason": "vd* 是虚拟屏 Shizuku 特权通道 op（像素合成在壳侧 SurfaceView），不经无障碍通道——plugins/dsh-android-vdisplay/src/status.ts 的声明；随六处登记落地时生效。永久豁免。"
+    },
+    {
+      "op": "vdLaunch",
+      "faces": [
+        "A11Y_OPS"
+      ],
+      "reason": "vd* 是虚拟屏 Shizuku 特权通道 op（像素合成在壳侧 SurfaceView），不经无障碍通道——plugins/dsh-android-vdisplay/src/status.ts 的声明；随六处登记落地时生效。永久豁免。"
+    },
+    {
+      "op": "vdMoveTask",
+      "faces": [
+        "A11Y_OPS"
+      ],
+      "reason": "vd* 是虚拟屏 Shizuku 特权通道 op（像素合成在壳侧 SurfaceView），不经无障碍通道——plugins/dsh-android-vdisplay/src/status.ts 的声明；随六处登记落地时生效。永久豁免。"
+    },
+    {
+      "op": "vdInfo",
+      "faces": [
+        "A11Y_OPS"
+      ],
+      "reason": "vd* 是虚拟屏 Shizuku 特权通道 op（像素合成在壳侧 SurfaceView），不经无障碍通道——plugins/dsh-android-vdisplay/src/status.ts 的声明；随六处登记落地时生效。永久豁免。"
+    }
+  ]
+}

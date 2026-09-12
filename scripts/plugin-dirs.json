@@ -1,0 +1,20 @@
+{
+  "$comment": "构建链注入集单一常量（0.13.8-b ST-06 / F-ENV-04）。本地链 scripts/build-apk-013.ps1 与云端链 scripts/build-apk.mjs 都从这里读，禁止各写一份（历史缺陷：云端 pluginDirs 少一个权威 patch 已挂载的插件 dsh-model-capability，且版本/输出目录字面量写死 0.13.0）。check-release-gates.mjs 断言 release 链的 pluginSrcs 覆盖 dirs；check-contract.mjs 断言 dirs 全部登记在 contract.inserted。改这里即改两条链。",
+  "dirs": [
+    "dsh-shell-termux",
+    "dsh-client-ui-responsive",
+    "dsh-host-web-compat",
+    "plugins/dsh-android-bridge",
+    "plugins/dsh-android-manage",
+    "plugins/dsh-android-linux-env",
+    "plugins/dsh-android-file-open",
+    "plugins/dsh-model-capability",
+    "plugins/dsh-android-browser",
+    "plugins/dsh-android-vdisplay"
+  ],
+  "externals": [
+    "vendor/dsh-undo-savepoint",
+    "vendor/dshmarketplace-plugin",
+    "vendor/dsh-model-sync"
+  ]
+}

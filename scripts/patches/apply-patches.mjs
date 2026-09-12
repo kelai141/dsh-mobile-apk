@@ -486,43 +486,118 @@ const IMPLS = {
     },
   },
 
-  // ── publish-exclusive-F7：找回发布独占语义（2026-09-12 apk issue #170，scope=engine）──
-  // F5 用 rename 回退修「旧会话打不开」，但 rename 会**静默替换**已存在的 currentPath，
-  // 于是上游的 isEEXIST → return false（唯一创建语义）在 Android 上成了死代码：
-  // 并发发布同一会话时双方都返回 true，后者覆盖前者已追加的事件（历史静默缺失）。
-  // 修法：沿用 F5 的站点，在 rename 之前用 O_EXCL 原子占位——占位成功=我们赢；输家得到
-  // EEXIST 并 return false，与 link 路径完全同语义；rename 随后替换的是我们自己刚占的位。
+  // ── publish-exclusive-F7：找回发布独占语义 + 失败回收（2026-09-12 apk issue #170 / FX-207.1+207.2，scope=engine）──
+  // F5 用 rename 回退修「旧会话打不开」，但 rename 会**静默替换**已存在的目标，于是上游的
+  // isEEXIST → return false（唯一创建语义）在 Android 上成了死代码：并发发布同一会话/同一日志时
+  // 双方都成功，后者覆盖前者已追加的事件（历史静默缺失）。
+  // 修法：O_EXCL 原子占位抽成模块级小函数 dshMobileClaimExclusive()，**F5 的两个站点共用**——
+  //   ① publish 站（publishCurrentExclusive，rename 之前）：占位成功=我们赢，输家得到 EEXIST 并
+  //      return false，与 link 路径完全同语义；rename 随后替换的是我们自己刚占的位。
+  //   ② materialize 站（materializePosix 的 link 回退）：同一函数占位；输家得到 EEXIST 并抛出
+  //      （该站上游只有抛错通道：persistBatch() 把任何 resolve 当成 materialized，返回 false 会变成
+  //      静默无操作），不静默覆盖。
+  // 两站占位成功后若 rename 失败（IO 错/权限），必须 unlink 回收占位（dshMobileReleaseClaim）——
+  // 否则留下 0 字节目标：它会被当成「已存在」让之后每次发布都输掉占位竞争，且被读日志侧当成损坏文件。
+  // E-3：不得只给 F7 的 publish 站打补丁——两站共用同一小函数，任一站漏了就等于没修。
   'publish-exclusive-F7': {
     file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js',
     scope: 'engine',
-    check: (s) => s.includes('dsh-mobile exclusive publish (F7)'),
+    check: (s) => s.includes('dsh-mobile exclusive publish (F7)')
+      && s.includes('dsh-mobile exclusive materialize (F7)')
+      && (s.match(/dshMobileClaimExclusive\(/g) || []).length >= 3,
     apply: (s) => {
-      if (s.includes('dsh-mobile exclusive publish (F7)')) return s
+      if (s.includes('dsh-mobile exclusive materialize (F7)')) return s
       const MARK = '/* dsh-mobile link->rename fallback: Android app-private dirs reject link(2) (EACCES). */'
       const idx = s.indexOf(MARK, s.indexOf('isEEXIST(error)) return false;'))
       // 锚点缺失 = 目标文件不是 F5 打过补丁的那份（例如补丁测试用的合成夹具）→ 不改写直接返回。
       // 强制力不靠这里抛错：装配后的快照有 overlay marker 门禁（F7 marker 缺席即拒打包），
       // 所以「真树上锚点没命中」仍然会被拦住，而合成夹具不会误伤。
       if (idx < 0) return s
-      const RENAME = 'await rename(staged, currentPath);'
-      const rel = s.indexOf(RENAME, idx)
-      if (rel < 0) return s
-      const CLAIM_LINES = [
+      const RENAME_PUBLISH = 'await rename(staged, currentPath);'
+      const RENAME_MATERIALIZE = 'await rename(tmp, finalPath);'
+      const relPublish = s.indexOf(RENAME_PUBLISH, idx)
+      const relMaterialize = s.indexOf(RENAME_MATERIALIZE, idx)
+      if (relPublish < 0 || relMaterialize < 0) return s
+
+      // unlink 导入（F5 只补了 rename；internals.fs 不暴露 unlink）
+      const IMPORT_OLD = 'rename, rm, stat, truncate } from "node:fs/promises";'
+      const IMPORT_NEW = 'rename, rm, stat, truncate, unlink } from "node:fs/promises";'
+      if (s.includes(IMPORT_NEW)) { /* 幂等 */ }
+      else if (s.includes(IMPORT_OLD)) s = s.replace(IMPORT_OLD, IMPORT_NEW)
+      else throw new Error('publish-exclusive 锚点未命中：import unlink（F5 的 rename 导入形态已变）')
+
+      // 模块级小函数：O_EXCL 原子占位 + 失败回收（两站共用同一份实现）
+      const HELPERS = [
         '/* dsh-mobile exclusive publish (F7): rename() silently replaces an existing target, so the',
         '   EEXIST semantics link(2) gave us would vanish. Claim the destination with O_EXCL first:',
-        '   the loser gets EEXIST here and reports false, exactly like the link path. */',
-        'try {',
-        '  const claim = await open(currentPath, "wx");',
-        '  await claim.close();',
-        '} catch (claimError) {',
-        '  if (claimError instanceof Error && "code" in claimError && claimError.code === "EEXIST") return false;',
-        '  throw claimError;',
+        '   the winner keeps the claim, the loser gets EEXIST and reports false exactly like the link',
+        '   path. Cross-process exclusivity now rests on this atomic claim alone — that is the',
+        '   consequence of flock-android-F3 stubbing the writer lock out on Android, and of link(2)',
+        '   being unavailable in the app-private domain. */',
+        'async function dshMobileClaimExclusive(targetPath) {',
+        '\ttry {',
+        '\t\tconst claim = await open(targetPath, "wx");',
+        '\t\tawait claim.close();',
+        '\t\treturn true;',
+        '\t} catch (claimError) {',
+        '\t\tif (isEEXIST(claimError)) return false;',
+        '\t\tthrow claimError;',
+        '\t}',
         '}',
-      ]
-      const indent = '\t\t'
-      const body = CLAIM_LINES.map((line) => indent + line).join('\n') + '\n'
-      s = s.slice(0, rel) + body + indent + s.slice(rel)
-      if (!s.includes('dsh-mobile exclusive publish (F7)')) throw new Error('publish-exclusive 复核失败——不写回')
+        '/* dsh-mobile exclusive publish reclaim (F7): a failed publish must not leave the O_EXCL',
+        '   placeholder behind — a 0-byte target reads as a live log, makes every later publisher lose',
+        '   the claim race, and can be mistaken for a corrupt session file. Best-effort: the original',
+        '   publish error still propagates. */',
+        'async function dshMobileReleaseClaim(targetPath) {',
+        '\tawait unlink(targetPath).catch(() => {});',
+        '}',
+        '',
+      ].join('\n')
+      const ANCHOR_FN = 'async function publishCurrentExclusive(staged, currentPath, internals) {'
+      const fnIdx = s.indexOf(ANCHOR_FN)
+      if (fnIdx < 0) throw new Error('publish-exclusive 锚点未命中：publishCurrentExclusive 函数头')
+      s = s.slice(0, fnIdx) + HELPERS + s.slice(fnIdx)
+
+      // 站①：publishCurrentExclusive —— 占位失败 return false；rename 失败回收
+      const PUBLISH_OLD = '\t\tawait rename(staged, currentPath);'
+      const PUBLISH_NEW = [
+        '\t\tif (!(await dshMobileClaimExclusive(currentPath))) return false;',
+        '\t\ttry {',
+        '\t\t\tawait rename(staged, currentPath);',
+        '\t\t} catch (publishError) {',
+        '\t\t\tawait dshMobileReleaseClaim(currentPath);',
+        '\t\t\tthrow publishError;',
+        '\t\t}',
+      ].join('\n')
+      // 重新定位（helpers 插入后索引变化）
+      const pubIdx = s.indexOf(PUBLISH_OLD, s.indexOf(ANCHOR_FN))
+      if (pubIdx < 0) throw new Error('publish-exclusive 锚点未命中：publish 站 rename(staged, currentPath)')
+      s = s.slice(0, pubIdx) + PUBLISH_NEW + s.slice(pubIdx + PUBLISH_OLD.length)
+
+      // 站②：materializePosix —— 同一占位函数；输家得 EEXIST 抛出（不静默覆盖）；rename 失败回收
+      const MAT_OLD = '\t\t\tawait rename(tmp, finalPath);'
+      const MAT_NEW = [
+        '\t\t\tif (!(await dshMobileClaimExclusive(finalPath))) {',
+        '\t\t\t\t/* dsh-mobile exclusive materialize (F7): another publisher owns this log. The link',
+        '\t\t\t\t   path surfaces EEXIST by throwing and persistBatch() treats any resolve as',
+        '\t\t\t\t   materialized, so the loser must throw here too — never rename over the winner. */',
+        '\t\t\t\tthrow Object.assign(new Error("dsh-mobile exclusive materialize: target already exists"), { code: "EEXIST" });',
+        '\t\t\t}',
+        '\t\t\ttry {',
+        '\t\t\t\tawait rename(tmp, finalPath);',
+        '\t\t\t} catch (materializeError) {',
+        '\t\t\t\tawait dshMobileReleaseClaim(finalPath);',
+        '\t\t\t\tthrow materializeError;',
+        '\t\t\t}',
+      ].join('\n')
+      const matIdx = s.indexOf(MAT_OLD, s.indexOf(ANCHOR_FN))
+      if (matIdx < 0) throw new Error('publish-exclusive 锚点未命中：materialize 站 rename(tmp, finalPath)')
+      s = s.slice(0, matIdx) + MAT_NEW + s.slice(matIdx + MAT_OLD.length)
+
+      if (!s.includes('dsh-mobile exclusive publish (F7)') || !s.includes('dsh-mobile exclusive materialize (F7)')
+        || (s.match(/dshMobileClaimExclusive\(/g) || []).length < 3) {
+        throw new Error('publish-exclusive 复核失败——不写回')
+      }
       return s
     },
   },
@@ -723,6 +798,54 @@ const IMPLS = {
       return s
     },
   },
+  // ── perf-patch-reload-N1：patchReload=startup 出厂默认 + 存量升级归一化（0.13.8 性能 A1，scope=engine）──
+  // 背景（docs/ANDROID-RUNTIME-PERF-2026-09-12.md §A1/R2，实测 24.9s -> 16.6s 冷启动）：
+  // 出厂 web profile 的 patchReload 是 "live"，上游在 live 档额外挂 cordis-plugin-timer 与
+  // cordis-plugin-hmr，启动期反复现场重算客户端 combo（36 -> 16 次）。Android 上 live reload
+  // 本就不可用（坑 19：改 cordis.patch.yml 必须冷启动才生效），保留它纯亏启动时间。
+  // 两处一起改才算修好（P-AC-23 全新安装 + P-AC-24 存量升级）：
+  //   ① web 模板默认 "live" -> "startup"：initProfile（全新安装）与「键缺失」的升级用户都拿到 startup；
+  //   ② normalizeShippedProfile 的 needsReloadDefault：上游只在键**缺失**时写回模板默认，而存量设备上
+  //      旧引擎早已把 "live" 显式写进 profiles/web/package.json -> 永不归一化。改为「installation-owned
+  //      当前元组下把旧默认 live 一并归一化」，只动安装方拥有的元组，用户自建 profile 元组不受影响。
+  'perf-patch-reload-N1': {
+    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js',
+    scope: 'engine',
+    check: (s) => (s.match(/dsh-mobile patchReload normalization \(N1\)/g) || []).length === 2,
+    apply: (s) => {
+      if ((s.match(/dsh-mobile patchReload normalization \(N1\)/g) || []).length === 2) return s
+      const TEMPLATE_OLD = '\tweb: {\n\t\tbundles: ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"],\n\t\tpatchReload: "live"\n\t},'
+      const TEMPLATE_NEW = [
+        '\tweb: {',
+        '\t\tbundles: ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"],',
+        '\t\t/* dsh-mobile patchReload normalization (N1): the shipped web profile starts in',
+        '\t\t * "startup" mode — Android cannot use live patch reload (a cordis.patch.yml change',
+        '\t\t * never takes effect without a restart, gotcha 19) and live costs 8s of cold start. */',
+        '\t\tpatchReload: "startup"',
+        '\t},',
+      ].join('\n')
+      if (!s.includes(TEMPLATE_OLD)) throw new Error('perf-patch-reload 锚点未命中：web 模板 patchReload: "live"')
+      s = s.replace(TEMPLATE_OLD, TEMPLATE_NEW)
+      const NORMALIZE_OLD = '\tconst needsReloadDefault = manifest.dsh?.profile?.patchReload === void 0 && isCurrentTuple;'
+      const NORMALIZE_NEW = [
+        '\t/* dsh-mobile patchReload normalization (N1): resident installs already carry the old',
+        '\t * installation default "live" explicitly, so the upstream fill-a-missing-key rule never',
+        '\t * reaches them; an installation-owned tuple is normalized to the shipped default. */',
+        '\tconst staleReloadDefault = manifest.dsh?.profile?.patchReload === "live";',
+        '\tconst needsReloadDefault = isCurrentTuple && (manifest.dsh?.profile?.patchReload === void 0 || staleReloadDefault);',
+      ].join('\n')
+      if (!s.includes(NORMALIZE_OLD)) throw new Error('perf-patch-reload 锚点未命中：needsReloadDefault（引擎升级后请人工核对 normalizeShippedProfile）')
+      s = s.replace(NORMALIZE_OLD, NORMALIZE_NEW)
+      const ASSIGN_OLD = '\t\t\t\tpatchReload: manifest.dsh?.profile?.patchReload ?? template.patchReload'
+      const ASSIGN_NEW = '\t\t\t\tpatchReload: staleReloadDefault ? template.patchReload : (manifest.dsh?.profile?.patchReload ?? template.patchReload)'
+      if (!s.includes(ASSIGN_OLD)) throw new Error('perf-patch-reload 锚点未命中：patchReload 回写表达式')
+      s = s.replace(ASSIGN_OLD, ASSIGN_NEW)
+      if ((s.match(/dsh-mobile patchReload normalization \(N1\)/g) || []).length !== 2) {
+        throw new Error('perf-patch-reload 复核失败——不写回')
+      }
+      return s
+    },
+  },
 }
 
 // ── 登记表 ↔ 实现 交叉校验（漂移即拒）──
@@ -766,6 +889,23 @@ if (mode === 'list') {
 let applied = 0
 let failed = 0
 const touched = new Set()
+
+/** 前提补丁（registry.requires）：前提未打时依赖补丁的锚点不可能命中——提前给出精确诊断。 */
+const requirementFailure = (meta) => {
+  for (const dep of meta?.requires ?? []) {
+    const dimpl = IMPLS[dep]
+    if (!dimpl) return `requires 声明的补丁 ${dep} 没有实现（registry/IMPLS 漂移）`
+    let dsrc
+    try {
+      dsrc = loadImpl(dimpl.file, vendorRoot)
+    } catch {
+      return `前提补丁 ${dep} 的目标文件缺失（${dimpl.file}）`
+    }
+    if (!dimpl.check(dsrc)) return `前提补丁 ${dep} 未打（marker 不在场）——先施加 ${dep}，否则本补丁只会在原地空转`
+  }
+  return null
+}
+
 for (const id of order) {
   const impl = IMPLS[id]
   const meta = registry.patches.find((p) => p.id === id)
@@ -774,6 +914,12 @@ for (const id of order) {
     src = loadImpl(impl.file, vendorRoot)
   } catch (e) {
     console.error(`[fail] ${id}: 目标文件缺失 ${impl.file}（${e.message}）`)
+    failed++
+    continue
+  }
+  const missingDep = requirementFailure(meta)
+  if (missingDep) {
+    console.error(`[fail] ${id}: ${missingDep}`)
     failed++
     continue
   }
@@ -791,7 +937,20 @@ for (const id of order) {
     continue
   }
   try {
-    IMPL_state[impl.file] = impl.apply(src)
+    const next = impl.apply(src)
+    // FX-E19：check() 为假却「施加后零改动」= 锚点未命中（典型：前提补丁未打）。
+    // 旧实现照打 `[ok] applied` 并报 `ALL OK`，制造假绿 apply——零改动必须失败。
+    if (next === src) {
+      console.error(`[fail] ${id}: apply 零改动（锚点未命中或前提补丁未打）——拒绝报 ALL OK；请人工核对 ${impl.file}`)
+      failed++
+      continue
+    }
+    if (!impl.check(next)) {
+      console.error(`[fail] ${id}: 施加后自验失败（marker 仍不在场）——不写回 ${impl.file}`)
+      failed++
+      continue
+    }
+    IMPL_state[impl.file] = next
     touched.add(impl.file)
     saveImpl(impl.file, vendorRoot)
     applied++
@@ -808,4 +967,4 @@ if (mode === 'apply') {
 } else if (failed) {
   process.exit(1)
 }
-console.log(`apply-patches: ALL OK（${order.length - failed}/${order.length}，mode=${mode}）`)
+console.log(`apply-patches: ALL OK（${order.length - failed}/${order.length}，mode=${mode}，changed=${applied}）`)

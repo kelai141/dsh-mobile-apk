@@ -39,6 +39,46 @@
       "id": "ui-responsive",
       "pkg": "@dsh-android/dsh-client-ui-responsive",
       "repo": "dsh-client-ui-responsive"
+    },
+    {
+      "id": "host-web-compat",
+      "pkg": "@dsh-android/dsh-host-web-compat",
+      "repo": "dsh-host-web-compat"
+    },
+    {
+      "id": "android-bridge",
+      "pkg": "@dsh-android/dsh-android-bridge",
+      "repo": "plugins/dsh-android-bridge"
+    },
+    {
+      "id": "android-manage",
+      "pkg": "@dsh-android/dsh-android-manage",
+      "repo": "plugins/dsh-android-manage"
+    },
+    {
+      "id": "android-linux-env",
+      "pkg": "@dsh-android/dsh-android-linux-env",
+      "repo": "plugins/dsh-android-linux-env"
+    },
+    {
+      "id": "android-file-open",
+      "pkg": "@dsh-android/dsh-android-file-open",
+      "repo": "plugins/dsh-android-file-open"
+    },
+    {
+      "id": "model-capability",
+      "pkg": "@dsh-android/dsh-model-capability",
+      "repo": "plugins/dsh-model-capability"
+    },
+    {
+      "id": "android-browser",
+      "pkg": "@dsh-android/dsh-android-browser",
+      "repo": "plugins/dsh-android-browser"
+    },
+    {
+      "id": "android-vdisplay",
+      "pkg": "@dsh-android/dsh-android-vdisplay",
+      "repo": "plugins/dsh-android-vdisplay"
     }
   ],
   "symbols": [

@@ -92,6 +92,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dsh-mobile-apk-${{ matrix.abi }}${{ github.event.inputs.suffix }}
-          path: out/v0.13.0/*.apk
+          # 版本目录来自 app/build.gradle.kts（ST-06）：写死 out/v0.13.0 会在版本 bump 后静默
+          # 落到 if-no-files-found: error（云端链「构建成功但无产物」）。
+          path: out/v*/*.apk
           if-no-files-found: error
           retention-days: 30

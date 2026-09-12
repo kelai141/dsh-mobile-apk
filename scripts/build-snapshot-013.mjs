@@ -9,7 +9,7 @@
 // 输出：.deploy-tmp/snapshot-013/<abi>/snapshot.tar.xz（插件注入与装配由 inject-snapshot.py 在归档后执行）
 //
 // 用法：node scripts/build-snapshot-013.mjs <arm64|x86_64>   （基座缺省 .deploy-tmp/{arm64,x64}-base/base-usr.tar.xz）
-import { execSync } from 'node:child_process'
+import { execSync, spawnSync } from 'node:child_process'
 import { mkdirSync, existsSync, writeFileSync, readFileSync, readdirSync, rmSync, statSync, renameSync, copyFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -51,6 +51,7 @@ const PYTHON = process.platform === 'win32' ? 'python' : 'python3'
 // 清单/模板与编排逻辑分离：预装包、镜像链、剥离清单、瘦身清单、seed 模板、apt.conf、
 // install-clang.sh 均在本目录维护；编排器只读数据 + 走流程。@@PREFIX@@ 为模板占位
 // （构建期替换为设备端前缀，本地 stage 路径不可烧入）。
+import { seedProfilePatchReload } from './lib/profile-seed.mjs'
 const CFG_DIR = join(ROOT, 'scripts', 'snapshot-config')
 const readCfg = (f) => readFileSync(join(CFG_DIR, f), 'utf8')
 const PREINSTALL = JSON.parse(readCfg('preinstall.json'))
@@ -125,8 +126,8 @@ if (existsSync(baseDsh)) {
 // 密钥/sessions/storages/匿名 id 由首次运行或用户配置生成（剥除）。
 // settings.yaml：0.13.0 C1（Q14=a）改为「非机密模板占位」——此前全删导致首启默认 pin
 // 无任何 route 可解析（用户手写 yml 的摩擦源头，见 C 流）。模板只含零机密骨架：
-// 无 key、无 apiKeyEnv 指向未配置、无真实 endpoint 明文（门禁 check-snapshot-secrets.ps1
-// 校验模板不得含 sk-/apiKey 明文）。
+// 无 key、无 apiKeyEnv 指向未配置、无真实 endpoint 明文（门禁 check-snapshot-secrets.mjs——
+// ST-06 起两链统一调用的跨平台单实现；旧 .ps1 不再被任何链调用——校验模板不得含 sk-/apiKey 明文）。
 const DH = join(STAGE, 'root', 'home', '.dsh')
 for (const leaf of STRIP.secretLeaves) {
   const p = join(DH, leaf)
@@ -137,6 +138,16 @@ for (const leaf of STRIP.secretLeaves) {
 const seedSettingsPath = join(DH, 'settings.yaml')
 writeFileSync(seedSettingsPath, SEED_SETTINGS)
 log(`settings.yaml seed template written (zero-secret): ${seedSettingsPath}`)
+// 性能 A1 seed（0.13.8 §7.2）：出厂 profile 清单写 dsh.profile.patchReload=startup——上游在 live
+// 档额外挂 cordis-plugin-timer/hmr 并在启动期反复现场重算客户端 combo（实测冷启动 24.9s -> 16.6s）。
+// Android 无 live reload 收益（坑 19），故出厂即 startup；dev 档用 DSH_PROFILE_PATCH_RELOAD=live 覆写。
+// 存量升级路径由引擎树补丁 perf-patch-reload-N1 归一化（旧引擎已把 live 显式写进设备清单）。
+const profileSeed = seedProfilePatchReload(join(STAGE, 'root'), {
+  reload: process.env.DSH_PROFILE_PATCH_RELOAD || 'startup',
+})
+for (const r of profileSeed) {
+  log(`profile seed: ${r.profile} patchReload=${r.value ?? '<profile 缺席>'} ${r.changed ? '(updated)' : '(unchanged)'} previous=${r.previous ?? 'none'}`)
+}
 // F4 安装链（2026-08-23）：清陈旧 pnpm 状态记录——base-dsh 提取自运行设备，其
 // .modules.yaml / .pnpm-workspace-state / pnpm-lock 指向旧 store（含 com.dshmobile 残留路径），
 // 会让设备端 `dsh plugin add`（市场安装）报 ERR_PNPM_UNEXPECTED_STORE；插件实为目录注入，
@@ -148,6 +159,16 @@ for (const rel of STRIP.stalePnpmState) {
 for (const dir of STRIP.runtimeDirs) {
   const p = join(DH, dir)
   if (existsSync(p)) { rmSync(p, { recursive: true, force: true }); log(`strip runtime: ${dir}/`) }
+}
+// 剥离清单后置断言（ST-16）：清单项在 stage 树里必须不存在；--base 给出 base-dsh 归档时额外做**反 no-op**
+// （基座里命中的条目必须在输出里消失）——防「清单键名/前缀漂移导致剥离静默 no-op」而无人知。
+{
+  const stripArgs = ['scripts', 'check-strip-noop.mjs', '--stage', join(STAGE, 'root')]
+  if (existsSync(baseDsh)) stripArgs.push('--base', baseDsh)
+  const r = spawnSync(process.execPath, stripArgs, { cwd: ROOT, encoding: 'utf8' })
+  if (r.stdout) process.stdout.write(r.stdout)
+  if (r.stderr) process.stderr.write(r.stderr)
+  if (r.status !== 0) { console.error('剥离清单后置断言失败——拒绝出快照（ST-16）'); process.exit(1) }
 }
 // 快照内 sourcemap 曾经泄露 UI bundle 源码（make-snapshot.sh 75 同款剔除）
 wsl(`find "${wslPath(DH)}" -name '*.map' -delete 2>/dev/null || true`)
@@ -828,5 +849,17 @@ if (!(licCount >= 4)) {
   process.exit(1)
 }
 log(`归档内 LICENSES 自检通过（${licCount} 个标准文本）`)
+// A1 出厂声明值对账（P-AC-01，--require 严格档）：归档内 profiles/{web,headless}/package.json 必须带
+// patchReload=出厂值。seed 步在归档之前（本文件 0 段），此处是对**产物**的复核——stage 正确而归档缺件
+// 的同型缺陷此前在 LICENSES 上实锤过一次。
+const perfGate = spawnSync(process.execPath,
+  [join(ROOT, 'scripts', 'check-perf-instrumentation.mjs'), '--require', '--snapshot', archive, '--abi', ABI],
+  { encoding: 'utf8' })
+if (perfGate.status !== 0) {
+  console.error('A1 出厂声明值对账失败（归档内 profile 清单缺 patchReload 出厂值）——拒绝出快照')
+  console.error((perfGate.stdout + perfGate.stderr).split('\n').filter((l) => l.startsWith('FAIL')).join('\n'))
+  process.exit(1)
+}
+log('A1 出厂声明值对账通过（归档内 profiles/{web,headless} patchReload=出厂值）')
 log(`完成: ${archive} (${(statSync(archive).size / 1024 / 1024).toFixed(1)} MB, sha256=${sha.slice(0, 12)}…)`)
 log('后续步骤：注入插件（inject-snapshot.py）→ 门禁（elf-check/ci-verify-snapshot 语义）→ 打包装入 APK')

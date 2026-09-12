@@ -1,7 +1,7 @@
 import z from "@deepseek-ai/schemastery";
 import { SessionFormatUnsupportedMigrationError, sessionFormatCatalog } from "@deepseek-ai/dsh-session-format-catalog";
 import { readdirSync } from "node:fs";
-import { link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, truncate } from "node:fs/promises";
+import { link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, truncate, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, parse, resolve, toNamespacedPath } from "node:path";
 import { performance } from "node:perf_hooks";
 import { scheduler } from "node:timers/promises";
@@ -2018,6 +2018,29 @@ async function removeCommittedTemporary(path, internals) {
 		await internals.fs.rm(path);
 	} catch {}
 }
+/* dsh-mobile exclusive publish (F7): rename() silently replaces an existing target, so the
+   EEXIST semantics link(2) gave us would vanish. Claim the destination with O_EXCL first:
+   the winner keeps the claim, the loser gets EEXIST and reports false exactly like the link
+   path. Cross-process exclusivity now rests on this atomic claim alone — that is the
+   consequence of flock-android-F3 stubbing the writer lock out on Android, and of link(2)
+   being unavailable in the app-private domain. */
+async function dshMobileClaimExclusive(targetPath) {
+	try {
+		const claim = await open(targetPath, "wx");
+		await claim.close();
+		return true;
+	} catch (claimError) {
+		if (isEEXIST(claimError)) return false;
+		throw claimError;
+	}
+}
+/* dsh-mobile exclusive publish reclaim (F7): a failed publish must not leave the O_EXCL
+   placeholder behind — a 0-byte target reads as a live log, makes every later publisher lose
+   the claim race, and can be mistaken for a corrupt session file. Best-effort: the original
+   publish error still propagates. */
+async function dshMobileReleaseClaim(targetPath) {
+	await unlink(targetPath).catch(() => {});
+}
 async function publishCurrentExclusive(staged, currentPath, internals) {
 	if (internals.platform === "win32") try {
 		await internals.publishNewWin32(staged, currentPath);
@@ -2045,7 +2068,13 @@ async function publishCurrentExclusive(staged, currentPath, internals) {
 		  if (claimError instanceof Error && "code" in claimError && claimError.code === "EEXIST") return false;
 		  throw claimError;
 		}
-		await rename(staged, currentPath);
+		if (!(await dshMobileClaimExclusive(currentPath))) return false;
+		try {
+			await rename(staged, currentPath);
+		} catch (publishError) {
+			await dshMobileReleaseClaim(currentPath);
+			throw publishError;
+		}
 	}
 	await syncDirectory(dirname(currentPath), internals);
 	return true;
@@ -2984,7 +3013,18 @@ var JsonlSessionPersistence = class extends SessionPersistence {
 			await link(tmp, finalPath).catch(async (error) => {
 				/* dsh-mobile link->rename fallback: Android app-private dirs reject link(2) (EACCES). */
 				if (!(error instanceof Error && "code" in error && (error.code === "EACCES" || error.code === "EPERM" || error.code === "ENOTSUP"))) throw error;
+				if (!(await dshMobileClaimExclusive(finalPath))) {
+				/* dsh-mobile exclusive materialize (F7): another publisher owns this log. The link
+				   path surfaces EEXIST by throwing and persistBatch() treats any resolve as
+				   materialized, so the loser must throw here too — never rename over the winner. */
+				throw Object.assign(new Error("dsh-mobile exclusive materialize: target already exists"), { code: "EEXIST" });
+			}
+			try {
 				await rename(tmp, finalPath);
+			} catch (materializeError) {
+				await dshMobileReleaseClaim(finalPath);
+				throw materializeError;
+			}
 			});
 			linked = true;
 		} finally {
