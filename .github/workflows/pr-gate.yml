@@ -33,6 +33,12 @@ jobs:
           node scripts/check-patch-mirror.mjs --self
           node scripts/patches/tests/spj-migration-link-f5.test.mjs
           node scripts/patches/tests/atomic-stale-lock.test.mjs
+      # 控制协议 V2（0.13.8 批 F）：引擎侧编解码的往返等价与体积基线（壳侧 Kotlin 一侧由
+      # 本仓单测 + 跨语言往返门禁另守）。
+      - name: 协议 V2 往返与体积门禁
+        run: |
+          (cd plugins/dsh-android-manage && npm install --no-audit --no-fund && npm run build)
+          node scripts/check-protocol-v2.mjs
 
   compile:
     name: Kotlin 编译门禁

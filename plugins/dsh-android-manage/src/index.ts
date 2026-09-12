@@ -25,7 +25,8 @@ import { Context } from '@deepseek-ai/cordis'
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
 import { join } from 'node:path'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
-import { parseUiTreeXml, pruneNodes, resolveRef, findActionableAncestor, checkUiTreeParse, type UiNode } from './ui-tree.js'
+import { parseUiTreeXml, pruneNodes, resolveRef, findActionableAncestor, checkUiTreeParse, type UiNode, actionableAncestorV2, scopePoolV2 } from './ui-tree.js'
+import { cacheFromV2, decodeV2, isV2Payload, type V2Decoded } from './protocol-v2.js'
 
 /**
  * 0.13.8 #183：键盘广播来源校验 nonce 参数（壳侧 AdbKeyboardReceiver 私有文件，
@@ -517,7 +518,7 @@ function tools(ctx: Context, priv: PrivilegeFace) {
   // 引擎单进程内模块级缓存（n 值 ≤60，内存代价可忽略）。
   const UI_CACHE_TTL = 30_000
   let uiCache:
-    | { nodes: UiNode[]; byId: ReturnType<typeof pruneNodes>['byId']; byOrig: ReturnType<typeof pruneNodes>['byOrig']; parentByOrig: ReturnType<typeof pruneNodes>['parentByOrig']; screen: { w: number; h: number }; rotation: number; ts: number; gen?: number; fingerprint?: string; rawCount?: number }
+    | { nodes: UiNode[]; byId: ReturnType<typeof pruneNodes>['byId']; byOrig: ReturnType<typeof pruneNodes>['byOrig']; parentByOrig: ReturnType<typeof pruneNodes>['parentByOrig']; screen: { w: number; h: number }; rotation: number; ts: number; gen?: number; fingerprint?: string; rawCount?: number; v2?: V2Decoded }
     | null = null
 
   /**
@@ -577,6 +578,31 @@ function tools(ctx: Context, priv: PrivilegeFace) {
 
   /** 公开 id → 原始路径 id（无障碍动作按路径回指壳侧节点）。 */
   const origPathOf = (publicId: string): string | undefined => uiCache?.byId.get(publicId)?.origPath
+
+  /** resolveRef 的 V2 子树池（预序区间切片）；V1 缓存返回 undefined（走 origPath 前缀匹配）。 */
+  const scopePoolFor = (): ((id: string) => UiNode[] | null) | undefined => {
+    const v2 = uiCache?.v2
+    return v2 ? (id: string) => scopePoolV2(v2, id) : undefined
+  }
+
+  /** 无障碍动作回指（§S5.1 DD-10）：V2 发 row（行句柄，壳侧零字符串解析）；V1 发 path（原始路径）。
+   *  V2 下 byId 条目的 origPath 槽位承载行下标（见 protocol-v2.cacheFromV2）。 */
+  const putTargetRefById = (payload: Record<string, unknown>, publicId: string): boolean => {
+    const handle = origPathOf(publicId)
+    if (handle === undefined || handle === '') return false
+    if (uiCache?.v2) payload.row = Number(handle)
+    else payload.path = handle
+    return true
+  }
+  const putTargetRef = (payload: Record<string, unknown>, node: UiNode): boolean => putTargetRefById(payload, node.id)
+
+  /** 祖先回退：V2 查表 O(1)（壳侧编码时已完成同一上溯，DD-8）；V1 走父链上溯（含跳过被剪层）。 */
+  const actionableAncestorOf = (node: UiNode): UiNode | null => {
+    const v2 = uiCache?.v2
+    if (v2) return actionableAncestorV2(v2, node)
+    if (!uiCache) return null
+    return findActionableAncestor(uiCache.byId, uiCache.byOrig, uiCache.parentByOrig, node)
+  }
 
   /**
    * 前台真值（现场实测教训 2026-09-10：uiautomator/a11y 可能抓到 DSH shell 覆盖层或错误的窗口，
@@ -714,24 +740,48 @@ function tools(ctx: Context, priv: PrivilegeFace) {
           }
         }
         const data = (r.data ?? {}) as A11ySnapshot
-        const pruned = pruneNodes(data.nodes ?? [])
+        // 协议分流（§S4.3 兼容矩阵）：壳侧 V2 列式载荷（v=2）→ 解码为同形节点表 + 祖先/子树表；
+        // 老壳侧（无 v）继续走 V1 剪枝路径——两条路产出的 UiNode 同形，下游零改动。
+        let pruned: {
+          nodes: UiNode[]
+          byId: ReturnType<typeof pruneNodes>['byId']
+          byOrig: ReturnType<typeof pruneNodes>['byOrig']
+          parentByOrig: ReturnType<typeof pruneNodes>['parentByOrig']
+          rawCount: number
+        }
+        let v2: V2Decoded | undefined
+        if (isV2Payload(data)) {
+          const dec = decodeV2(data)
+          if (!dec.ok) {
+            return {
+              ok: false, denied: false, screen: { w: 0, h: 0 }, rotation: 0, count: 0, rawCount: 0, nodes: [],
+              text: `无障碍载荷解码失败（协议 V2，拒绝产出不可信清单）：${dec.error}——请更新 APK，或改用 ADB 通道（android_ui_tree）`,
+            }
+          }
+          v2 = dec.value
+          const built = cacheFromV2(v2)
+          pruned = { ...built, rawCount: v2.rawCount }
+        } else {
+          pruned = pruneNodes(data.nodes ?? [])
+        }
         const fp = treeFingerprint(pruned.nodes)
         // 0.13.8 P0-4：「界面未变」快路径——结构指纹一致且缓存新鲜 → 纯追加一行摘要（L1）
         if (!forceFresh && uiCache && uiCache.fingerprint === fp && Date.now() - uiCache.ts <= UI_CACHE_TTL) {
-          return unchangedResponse(fp, data.gen ?? uiCache.gen)
+          return unchangedResponse(fp, v2?.gen ?? data.gen ?? uiCache.gen)
         }
-        const screen = data.screen && data.screen.w > 0 ? data.screen : { w: 0, h: 0 }
+        const screen = v2 ? v2.screen : (data.screen && data.screen.w > 0 ? data.screen : { w: 0, h: 0 })
         uiCache = {
           nodes: pruned.nodes,
           byId: pruned.byId,
           byOrig: pruned.byOrig,
           parentByOrig: pruned.parentByOrig,
           screen,
-          rotation: data.rotation ?? 0,
+          rotation: v2?.rotation ?? data.rotation ?? 0,
           ts: Date.now(),
-          gen: data.gen,
+          gen: v2?.gen ?? data.gen,
           fingerprint: fp,
           rawCount: pruned.rawCount,
+          v2,
         }
         const fg = await foregroundInfo()
         const dumpPkg = pruned.nodes.find((n) => String(n.pkg || '') !== '')?.pkg ?? ''
@@ -751,7 +801,7 @@ function tools(ctx: Context, priv: PrivilegeFace) {
           count: pruned.nodes.length,
           rawCount: pruned.rawCount,
           nodes: pruned.nodes as unknown as JsonValue[],
-          note: '无障碍通道（backend=a11y）：id 仅在最近一次 dump 内有效；页面变化后请重新 dump',
+          note: `无障碍通道（backend=a11y，协议 ${v2 ? 'V2 列式' : 'V1'}）：id 仅在最近一次 dump 内有效；页面变化后请重新 dump`,
           text: `控件清单（无障碍通道，未截断）：${pruned.nodes.length} 个节点（原始 ${pruned.rawCount}，剔除 ${pruned.rawCount - pruned.nodes.length} 个零尺寸/完全重复节点，屏幕 ${screen.w}x${screen.h}；前台 ${fg?.pkg ?? '?'}/${fg?.activity ?? '?'}）`
             + warn + webHint,
         }
@@ -906,11 +956,11 @@ function tools(ctx: Context, priv: PrivilegeFace) {
           if (!uiCache || Date.now() - uiCache.ts > UI_CACHE_TTL) {
             return { ok: false, denied: false, text: '没有最近的控件清单——请先执行 android_ui_dump' }
           }
-          const hit = resolveRef(uiCache.byId, uiCache.nodes, ref!.trim())
+          const hit = resolveRef(uiCache.byId, uiCache.nodes, ref!.trim(), scopePoolFor())
           if (!hit.ok) return { ok: false, denied: false, text: hit.error }
           let node = hit.node
           if (!node.clickable && !node.editable && !node.scrollable) {
-            const anc = findActionableAncestor(uiCache.byId, uiCache.byOrig, uiCache.parentByOrig, node)
+            const anc = actionableAncestorOf(node)
             if (!anc) return { ok: false, denied: false, text: `目标「${(node.text || node.desc).slice(0, 20)}」不可点击且无可用祖先——考虑滚动或重新 dump` }
             node = anc
           }
@@ -947,11 +997,11 @@ function tools(ctx: Context, priv: PrivilegeFace) {
         if (!uiCache || Date.now() - uiCache.ts > UI_CACHE_TTL) {
           return { ok: false, denied: false, text: '没有最近的控件清单——请先执行 android_ui_dump' }
         }
-        const hit = resolveRef(uiCache.byId, uiCache.nodes, ref!.trim())
+        const hit = resolveRef(uiCache.byId, uiCache.nodes, ref!.trim(), scopePoolFor())
         if (!hit.ok) return { ok: false, denied: false, text: hit.error }
         let node = hit.node
         if (!node.clickable && !node.editable && !node.scrollable) {
-          const anc = findActionableAncestor(uiCache.byId, uiCache.byOrig, uiCache.parentByOrig, node)
+          const anc = actionableAncestorOf(node)
           if (!anc) return { ok: false, denied: false, text: `目标「${(node.text || node.desc).slice(0, 20)}」不可点击且无可用祖先——考虑滚动或重新 dump` }
           node = anc
         }
@@ -971,9 +1021,7 @@ function tools(ctx: Context, priv: PrivilegeFace) {
         const payload: Record<string, unknown> = {}
         if (uiCache?.gen !== undefined) payload.gen = uiCache.gen
         if (useRef) {
-          const orig = origPathOf(hitId)
-          if (!orig) return { ok: false, denied: false, text: '无障碍通道需要节点原始路径——请重新 android_ui_dump' }
-          payload.path = orig
+          if (!putTargetRefById(payload, hitId)) return { ok: false, denied: false, text: '无障碍通道需要节点行句柄/原始路径——请重新 android_ui_dump' }
         } else {
           payload.nx = nx
           payload.ny = ny
@@ -1050,11 +1098,9 @@ function tools(ctx: Context, priv: PrivilegeFace) {
         if (uiCache?.gen !== undefined) payload.gen = uiCache.gen
         if (args.ref) {
           if (!uiCache || Date.now() - uiCache.ts > UI_CACHE_TTL) return { ok: false, denied: false, from: [], to: [], text: '没有最近的控件清单——请先执行 android_ui_dump' }
-          const hit = resolveRef(uiCache.byId, uiCache.nodes, String(args.ref).trim())
+          const hit = resolveRef(uiCache.byId, uiCache.nodes, String(args.ref).trim(), scopePoolFor())
           if (!hit.ok) return { ok: false, denied: false, from: [], to: [], text: hit.error }
-          const orig = origPathOf(hit.node.id)
-          if (!orig) return { ok: false, denied: false, from: [], to: [], text: '无障碍通道需要节点原始路径——请重新 android_ui_dump' }
-          payload.path = orig
+          if (!putTargetRef(payload, hit.node)) return { ok: false, denied: false, from: [], to: [], text: '无障碍通道需要节点行句柄/原始路径——请重新 android_ui_dump' }
         }
         const r = await a11yExec('scroll', payload)
         if (!r.ok) return { ok: false, denied: false, from: [], to: [], text: '无障碍滚动失败：' + r.error }
@@ -1073,7 +1119,7 @@ function tools(ctx: Context, priv: PrivilegeFace) {
         if (!uiCache || Date.now() - uiCache.ts > UI_CACHE_TTL) {
           return { ok: false, denied: false, text: 'ref 滚动需要最近的 android_ui_dump 缓存' }
         }
-        const hit = resolveRef(uiCache.byId, uiCache.nodes, args.ref)
+        const hit = resolveRef(uiCache.byId, uiCache.nodes, args.ref, scopePoolFor())
         if (!hit.ok) return { ok: false, denied: false, text: hit.error }
         const n = hit.node
         area = { x1: n.cx - Math.floor(n.w / 2), y1: n.cy - Math.floor(n.h / 2), x2: n.cx + Math.floor(n.w / 2), y2: n.cy + Math.floor(n.h / 2) }
@@ -1164,11 +1210,9 @@ function tools(ctx: Context, priv: PrivilegeFace) {
         if (uiCache?.gen !== undefined) payload.gen = uiCache.gen
         if (typeof ref === 'string' && ref.trim().length > 0) {
           if (!uiCache || Date.now() - uiCache.ts > UI_CACHE_TTL) return { ok: false, denied: false, channel: 'a11y', text: '没有最近的控件清单——请先执行 android_ui_dump' }
-          const hit = resolveRef(uiCache.byId, uiCache.nodes, ref.trim())
+          const hit = resolveRef(uiCache.byId, uiCache.nodes, ref.trim(), scopePoolFor())
           if (!hit.ok) return { ok: false, denied: false, channel: 'a11y', text: hit.error }
-          const orig = origPathOf(hit.node.id)
-          if (!orig) return { ok: false, denied: false, channel: 'a11y', text: '无障碍通道需要节点原始路径——请重新 android_ui_dump' }
-          payload.path = orig
+          if (!putTargetRef(payload, hit.node)) return { ok: false, denied: false, channel: 'a11y', text: '无障碍通道需要节点行句柄/原始路径——请重新 android_ui_dump' }
         }
         const r = await a11yExec('setText', payload)
         if (!r.ok) return { ok: false, denied: false, channel: 'a11y', text: '无障碍输入失败：' + r.error }
