@@ -10,6 +10,18 @@
   <string name="ds_undoing">回撤中</string>
   <string name="ds_open_console">打开控制台</string>
   <string name="ds_check_update">检查更新</string>
+  <!-- 0.13.8 批 H：启动页 APK 自更新（仅手动；同按钮二次确认；下载后自动拉起授权/安装） -->
+  <string name="ds_apk_checking">检查中…</string>
+  <string name="ds_apk_latest">APK 已是最新 %1$s</string>
+  <string name="ds_apk_confirm">下载并安装 %1$s</string>
+  <string name="ds_apk_available">发现新版 APK %1$s（当前 %2$s，%3$s）——再点一次同一按钮开始下载并安装</string>
+  <string name="ds_apk_downloading">下载中 %1$d%%</string>
+  <string name="ds_apk_download_hint">正在从镜像链下载 %1$s（%2$s）——请保持应用在前台</string>
+  <string name="ds_apk_retry">重试下载并安装 %1$s</string>
+  <string name="ds_apk_retry_install">重试安装</string>
+  <string name="ds_apk_need_permission">需要「安装未知应用」权限，已打开授权页——开启后返回即自动安装</string>
+  <string name="ds_apk_permission_denied">未获得「安装未知应用」权限——APK 已下载，授权后可再点按钮继续安装</string>
+  <string name="ds_apk_installing">已拉起系统安装器——安装完成后重新打开应用即生效</string>
   <string name="ds_copy_log">复制</string>
   <string name="ds_log_title">engine.log</string>
   <string name="ds_runtime_ready">运行时已就绪</string>

@@ -32,6 +32,13 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
     private set
   private var statusPulse: ObjectAnimator? = null
 
+  // —— APK 自更新（0.13.8 批 H）状态：仅手动触发、同一按钮二次确认 ——
+  /** 已发现的新版（非空 = 按钮停在「下载并安装 vX」二次确认态，再点才开始下载）。 */
+  private var apkPending: UpdateChecker.CheckResult.Available? = null
+  /** 下载完成待安装的包（授权页返回后由 settlePendingInstall 续继）。 */
+  private var apkReadyToInstall: File? = null
+  private var apkBusy = false
+
   fun buildGuideView(): LinearLayout {
     chrome = buildGuideChrome(
       activity,
@@ -41,7 +48,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
           activity.startEngineFlow()
         },
         onOpenConsole = { activity.startActivity(Intent(activity, ConsoleActivity::class.java)) },
-        onCheckUpdate = { activity.engineFlow.startUpdateCheck() },
+        onCheckUpdate = { onUpdateButton() },
         onGrantStorage = { activity.dirPickerController.openAllFilesAccessSettings() },
         onCopyLog = { copyGuideLog() },
       ),
@@ -167,6 +174,156 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
     chrome.storageChip.setTextColor(
       activity.getColor(if (storageOk) R.color.ds_text_secondary else R.color.ds_accent),
     )
+  }
+
+  /** 测试界面「检查更新」按钮：手动检查 APK 自更新（用户拍板：不自动检查）。
+   *  同按钮三态 = 检查 → （发现新版）二次确认 → 下载安装；已有下载好的包则直接续继安装。 */
+  private fun onUpdateButton() {
+    if (apkBusy) return
+    apkReadyToInstall?.let { continueInstall(); return }
+    apkPending?.let { downloadAndInstall(it); return }
+    checkApkUpdate()
+  }
+
+  private fun setUpdateButton(label: String, enabled: Boolean) {
+    // 固定高按钮 + 长版本号（v0.13.7fx-1）会换行截断（device 实测）——单行 + 省略号
+    chrome.updateButton.maxLines = 1
+    chrome.updateButton.ellipsize = android.text.TextUtils.TruncateAt.END
+    chrome.updateButton.text = label
+    chrome.updateButton.isEnabled = enabled
+    chrome.updateButton.alpha = if (enabled) 1f else 0.55f
+  }
+
+  private fun apkHint(msg: String) {
+    chrome.statusHint.text = msg
+    chrome.statusHint.visibility = View.VISIBLE
+  }
+
+  private fun sizeText(bytes: Long): String =
+    if (bytes <= 0) "" else "%.1f MB".format(bytes / 1048576.0)
+
+  /** 手动检查（不自动检查）：失败如实报原因，且不阻断既有引擎快照更新检查。
+   *  发现新版时不自动进入下载——由用户再点同一按钮二次确认（169MB 下载不做误触启动）。 */
+  private fun checkApkUpdate() {
+    apkBusy = true
+    setUpdateButton(activity.getString(R.string.ds_apk_checking), enabled = false)
+    Thread {
+      val r = UpdateChecker.checkLatest()
+      activity.runOnUiThread {
+        if (activity.isFinishing || activity.isDestroyed) return@runOnUiThread
+        apkBusy = false
+        when (r) {
+          is UpdateChecker.CheckResult.UpToDate -> {
+            val v = "v" + UpdateChecker.currentVersion()
+            setUpdateButton(activity.getString(R.string.ds_check_update), enabled = true)
+            apkHint(activity.getString(R.string.ds_apk_latest, v))
+            toast(activity.getString(R.string.ds_apk_latest, v))
+            // 外层的壳已是最新 → 继续既有引擎快照检查（保持本按钮原有语义不失）
+            activity.engineFlow.startUpdateCheck()
+          }
+          is UpdateChecker.CheckResult.Available -> {
+            apkPending = r
+            setUpdateButton(activity.getString(R.string.ds_apk_confirm, r.tag), enabled = true)
+            apkHint(activity.getString(R.string.ds_apk_available, r.tag, "v" + UpdateChecker.currentVersion(), sizeText(r.sizeBytes)))
+          }
+          is UpdateChecker.CheckResult.Failed -> {
+            setUpdateButton(activity.getString(R.string.ds_check_update), enabled = true)
+            apkHint(r.reason)
+            toast(r.reason)
+            activity.engineFlow.startUpdateCheck()
+          }
+        }
+      }
+    }.start()
+  }
+
+  /** 二次确认后的下载：镜像链 + .tmp→rename 原子落盘（有 .sha256 资产则校验）；完成后自动拉起安装。 */
+  private fun downloadAndInstall(r: UpdateChecker.CheckResult.Available) {
+    apkBusy = true
+    val dest = File(UpdateChecker.updatesDir(activity), r.name)
+    setUpdateButton(activity.getString(R.string.ds_apk_downloading, 0), enabled = false)
+    apkHint(activity.getString(R.string.ds_apk_download_hint, r.name, sizeText(r.sizeBytes)))
+    Thread {
+      var fail: String? = null
+      var ok = false
+      try {
+        val expected = r.sha256Url?.let { UpdateChecker.downloadText(it) }
+        // 上次下载完成但未安装（授权中断/安装取消）→ 复用已验证的包，不重复拉 169MB
+        val cached = dest.exists() && dest.length() == r.sizeBytes &&
+          (expected == null || UpdateChecker.verifySha256(dest, expected))
+        if (cached) {
+          ok = true
+        } else {
+          val used = UpdateChecker.download(r.apkUrl, dest) { pct ->
+            activity.runOnUiThread {
+              if (apkBusy && !activity.isFinishing && !activity.isDestroyed) {
+                setUpdateButton(activity.getString(R.string.ds_apk_downloading, pct), enabled = false)
+              }
+            }
+          }
+          if (used == null) {
+            fail = "下载失败：镜像链全部不可用（直连/GitHub 加速镜像均失败）"
+          } else if (expected != null && !UpdateChecker.verifySha256(dest, expected)) {
+            dest.delete()
+            fail = "下载失败：sha256 校验不匹配（文件已删除，请重试）"
+          } else {
+            ok = true
+          }
+        }
+      } catch (e: Exception) {
+        fail = "下载失败：" + (e.message ?: e.javaClass.simpleName)
+      }
+      val result = fail
+      activity.runOnUiThread {
+        if (activity.isFinishing || activity.isDestroyed) return@runOnUiThread
+        apkBusy = false
+        if (ok) {
+          apkReadyToInstall = dest
+          continueInstall()
+        } else {
+          // 保持二次确认态：同一按钮变「重试下载并安装」，再点即重试
+          setUpdateButton(activity.getString(R.string.ds_apk_retry, r.tag), enabled = true)
+          apkHint(result ?: "下载失败")
+          toast(result ?: "下载失败")
+        }
+      }
+    }.start()
+  }
+
+  /** 已下载完成：权限不足先拉「安装未知应用」授权页（onResume 结算续继），否则直接唤起系统安装器。 */
+  private fun continueInstall() {
+    val apk = apkReadyToInstall ?: return
+    if (!apk.exists()) {
+      apkReadyToInstall = null
+      setUpdateButton(activity.getString(R.string.ds_check_update), enabled = true)
+      apkHint("安装包已不存在，请重新检查更新")
+      return
+    }
+    if (!UpdateChecker.canInstall(activity)) {
+      apkHint(activity.getString(R.string.ds_apk_need_permission))
+      UpdateChecker.requestInstallPermission(activity)
+      return
+    }
+    if (UpdateChecker.invokeInstaller(activity, apk)) {
+      apkHint(activity.getString(R.string.ds_apk_installing))
+      apkPending = null
+      apkReadyToInstall = null
+      setUpdateButton(activity.getString(R.string.ds_check_update), enabled = true)
+    } else {
+      setUpdateButton(activity.getString(R.string.ds_apk_retry_install), enabled = true)
+      apkHint("安装器拉起失败，请再点按钮重试")
+    }
+  }
+
+  /** 从「安装未知应用」授权页返回（MainActivity.onResume 调用）：已授权则自动续继安装。 */
+  fun settlePendingInstall() {
+    if (apkReadyToInstall == null || apkBusy) return
+    if (UpdateChecker.canInstall(activity)) continueInstall()
+    else apkHint(activity.getString(R.string.ds_apk_permission_denied))
+  }
+
+  private fun toast(msg: String) {
+    android.widget.Toast.makeText(activity, msg, android.widget.Toast.LENGTH_LONG).show()
   }
 
   private fun copyGuideLog() {

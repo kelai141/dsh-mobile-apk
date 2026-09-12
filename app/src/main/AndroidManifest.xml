@@ -15,6 +15,9 @@
   <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
   <uses-permission android:name="android.permission.WAKE_LOCK" />
   <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+  <!-- 0.13.8 批 H：启动页 APK 自更新（UpdateChecker）——唤起系统安装器需要此声明；
+       用户在系统「安装未知应用」页显式授权后才会真正安装，应用不静默安装任何东西。 -->
+  <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
   <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
   <!-- 0.13.2 W7：悬浮球（系统级悬浮窗，用户经设置页授予；OverlayController 引导）。 -->
   <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />

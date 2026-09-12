@@ -29,6 +29,10 @@
 - **保活**：前台服务 + 5 秒看门狗（自动重拉挂死引擎）+ 3 秒 UI 轮询 + 崩溃自动回退闸门（UndoGate）；
 - **在线运行时更新**：manifest 驱动的快照替换（下载 → sha256 → 原子切换 → 自动重启），
   运行时可自更新而无需更新 APK；
+- **APK 自更新（0.13.8）**：启动页「检查更新」按钮手动触发（**不自动检查**）——查 GitHub
+  latest release、按设备 ABI 匹配资产、镜像链逐级回退下载；发现新版时**同一按钮**变为
+  「下载并安装 vX.Y.Z」二次确认，确认后下载 → 首次自动拉起系统「安装未知应用」授权页 →
+  系统安装器（签名不匹配由系统拒绝；应用不静默安装任何东西）；
 - **SAF 桥**：`pickDirectory` 把所选目录映射为真实路径（`/storage/emulated/0/…`）；
 - **设备访问**：所有文件访问；Shizuku 探活示例；
 - **ADB 真实通道（0.13.0）**：真实 `adb pair` SPAKE2 握手 + NSD/mDNS 端口发现，经 adbd（shell uid=2000）执行系统命令（危险命令黑名单）；三道门授权（完全访问档位 / 应用内开关 / 配对码）+ 会话档位实时门控 + 原生审计（`files/audit/audit.ndjson`）；连接端口轮换自愈（5555 回退）。
@@ -121,14 +125,35 @@ ELF / cordis 挂载集⊇注入集 / LICENSES 自检（Python 流式）——任
 状态写入 `files/update-status.txt`。测试服务器：本地起 HTTP 服务提供 `manifest.json` 与快照文件
 （默认指向 `http://10.0.2.2:8899/manifest.json`，模拟器映射宿主机）。
 
+## APK 自更新协议（0.13.8）
+
+与上面的运行时快照更新**完全分离**（`UpdateChecker` vs `UpdateManager`），只管 APK 本体：
+
+1. **仅手动**：启动页「检查更新」按钮触发，**不自动检查**（169MB 资产不做任何后台/自动行为）；
+2. **元数据**：`api.github.com/repos/kelai141/dsh-mobile-apk/releases/latest` 直连（10/15s 超时）；
+   失败如实报原因（HTTP 码/异常），且**不阻断**既有的引擎快照更新检查（同一按钮接着跑快照检查）；
+3. **资产匹配**：`dsh-mobile-apk-v<版本>-<abi>.apk`，ABI 取 `SUPPORTED_ABIS[0]`（设备原生 ABI——
+   带 ARM 翻译的 x86 设备 abilist 形如 `x86_64,arm64-v8a,x86`，按「含 arm64 即 arm64」会下错包）；
+4. **版本比较**：tag 与 `BuildConfig.VERSION_NAME`（去 `-SN-*` 快照后缀）逐数字组比大小——
+   覆盖语义化版本与 `0.13.7fx-N` 修订号两种命名；
+5. **镜像链下载**：`github.com` 直连 → `gh-proxy.com` → `ghfast.top` 逐级回退，落
+   `Documents/dshdata/updates/`（FileProvider 既有映射内），`.tmp` → rename 原子；有 `.sha256`
+   资产则校验，校验失败即删文件并报错；已下好且校验通过的包不重复下载（授权中断后可直接续继）；
+6. **安装**：未持有「安装未知应用」权限 → 先拉起系统授权页（返回后 `onResume` 自动续继）→
+   FileProvider URI + `ACTION_VIEW` 唤起系统安装器；签名不匹配由系统拒绝。应用**不静默安装**。
+
+这是壳侧唯一的外部 HTTP 出口（其余壳侧 HTTP 全部收敛到本地引擎同源 `127.0.0.1:3080`），
+仅在用户点击按钮时发起。
+
 ## 权限
 
 | 权限 | 用途 |
 |---|---|
-| `INTERNET` | WebView + 引擎探测 |
+| `INTERNET` | WebView + 引擎探测 + APK 自更新（仅手动触发） |
 | `POST_NOTIFICATIONS` | 通知通道（API 33+ 运行时请求） |
 | `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_DATA_SYNC` | 保活前台服务 |
 | `MANAGE_EXTERNAL_STORAGE` | 「所有文件访问」（外部工作区要求；特殊权限，用户手动授予） |
+| `REQUEST_INSTALL_PACKAGES` | 唤起系统安装器安装下载的更新包（0.13.8；须用户在系统页显式授权，「安装未知应用」） |
 
 SAF 目录/图片选择无需权限。
 

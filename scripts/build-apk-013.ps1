@@ -30,12 +30,12 @@ if ($LASTEXITCODE -ne 0) { Write-Host "补丁镜像不一致，拒绝打包（�
 
 # manifest 加固门禁（0.13.8 PR-B3 / apk #183）：allowBackup/NSC/接收器来源校验在场
 Write-Host "== manifest 加固门禁 =="
-node (Join-Path $Root "scriptscheck-manifest-hardening.mjs") 2>&1
+node (Join-Path $Root "scripts\check-manifest-hardening.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "manifest 加固校验失败，拒绝打包"; exit 1 }
 
 # 子进程无界读 grep 门禁（0.13.8 #173）：输出必须走 ProcIo.readBounded
 Write-Host "== 有界读门禁 =="
-node (Join-Path $Root "scriptscheck-bounded-io.mjs") 2>&1
+node (Join-Path $Root "scripts\check-bounded-io.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "无界读命中，拒绝打包"; exit 1 }
 
 # pi-ai 目录 diff（0.13.3 W1/P2）：baseline -> pin 信息性输出（构建日志 + 报告文件），
