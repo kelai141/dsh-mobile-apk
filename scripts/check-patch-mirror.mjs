@@ -146,6 +146,7 @@ if (peer) {
     'scripts/build-apk-013.ps1',
     'scripts/check-manifest-hardening.mjs',
     'scripts/check-bounded-io.mjs',
+    'scripts/check-protocol-v2.mjs',
   ]
   for (const rel of MIRROR_TOP) {
     const theirs = join(peer, rel)

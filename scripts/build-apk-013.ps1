@@ -38,6 +38,11 @@ Write-Host "== 有界读门禁 =="
 node (Join-Path $Root "scripts\check-bounded-io.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "无界读命中，拒绝打包"; exit 1 }
 
+# 控制协议 V2 往返 + 体积门禁（0.13.8 批 F / DESIGN-PROTOCOL-V2.md §S6）
+Write-Host "== 协议 V2 门禁 =="
+node (Join-Path $Root "scripts\check-protocol-v2.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "协议 V2 门禁失败，拒绝打包"; exit 1 }
+
 # pi-ai 目录 diff（0.13.3 W1/P2）：baseline -> pin 信息性输出（构建日志 + 报告文件），
 # 删除清单供回归报告引用——不拒绝构建（删除项由 W4 降级补丁兜底）。
 $overlayManifest = Join-Path $Root "scripts\snapshot-config\engine-overlay.json"

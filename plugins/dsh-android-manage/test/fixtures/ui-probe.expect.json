@@ -1,0 +1,13 @@
+{
+  "_comment": "控制协议 V2 冻结基线（探针 test/fixtures/ui-probe.xml，393 节点 / 147,588 B）。改动编码规则（多一个字段/广播失效/去重口径变化）必须手改此表——这个动作本身就是评审点。",
+  "_baselineNote": "设计与实测口径见 docs/review/20260910-a11y/DESIGN-PROTOCOL-V2.md §S2.12。该文档记 v2Bytes=4705 / v1Bytes=37052；本表按入库探针 + 当前信封逐字重测为 4704 / 36931（差 0.02% / 0.3%，来自信封字段与节点集口径的极小差异）——以本表为准。",
+  "rawNodes": 393,
+  "positiveNodes": 87,
+  "maxDepth": 18,
+  "v1Bytes": 36931,
+  "v2Bytes": 4704,
+  "v2MaxBytes": 5200,
+  "v2Rows": 86,
+  "v2TargetRows": 85,
+  "v2CompressionRatioMin": 7
+}

@@ -69,7 +69,7 @@ export interface NodeEntry {
 
 const ATTR_RE = /([a-zA-Z-]+)="([^"]*)"/g
 
-function decodeEntities(s: string): string {
+export function decodeEntities(s: string): string {
   return s
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
@@ -77,6 +77,15 @@ function decodeEntities(s: string): string {
     .replace(/&#39;/g, "'")
     .replace(/&amp;/g, '&')
     .replace(/&#(\d+);/g, (_m, n: string) => String.fromCodePoint(Number(n)))
+}
+
+/** bounds="[x1,y1][x2,y2]" → {x,y,w,h}；畸形/缺省按零尺寸（0,0,0,0）——V2 编码保留零尺寸节点做骨架。 */
+export function parseBoundsToBox(b: string | undefined): { x: number; y: number; w: number; h: number } {
+  if (!b) return { x: 0, y: 0, w: 0, h: 0 }
+  const m = /\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]/.exec(b)
+  if (!m) return { x: 0, y: 0, w: 0, h: 0 }
+  const x1 = Number(m[1]); const y1 = Number(m[2]); const x2 = Number(m[3]); const y2 = Number(m[4])
+  return { x: x1, y: y1, w: Math.max(0, x2 - x1), h: Math.max(0, y2 - y1) }
 }
 
 /** 解析 bounds="[x1,y1][x2,y2]"；畸形/零尺寸返回 null（该节点丢弃）。 */
@@ -258,6 +267,8 @@ export function resolveRef(
   byId: Map<string, NodeEntry>,
   nodes: UiNode[],
   ref: string,
+  /** V2 专用：子树池提供者（预序区间切片）。缺省 = V1 的 origPath 前缀匹配。 */
+  scopePool?: (scopeId: string) => UiNode[] | null,
 ): { ok: true; node: UiNode; matches?: UiNode[] } | { ok: false; error: string; matches?: UiNode[] } {
   const r = ref.trim()
   if (r === '') return { ok: false, error: 'ref 为空' }
@@ -294,12 +305,18 @@ export function resolveRef(
   if (scopeId !== '') {
     const scope = byId.get(scopeId)
     if (!scope) return { ok: false, error: `作用域 ${scopeId} 不在最近一次 dump 中——请重新 android_ui_dump` }
-    const scopePath = scope.origPath
-    pool = nodes.filter((n) => {
-      const p = n.origPath ?? ''
-      return p === scopePath || p.startsWith(scopePath + '.')
-    })
-    if (pool.length === 0) pool = [scope.n]
+    if (scopePool) {
+      const v2Pool = scopePool(scopeId)
+      if (v2Pool && v2Pool.length > 0) pool = v2Pool
+      else pool = [scope.n]
+    } else {
+      const scopePath = scope.origPath
+      pool = nodes.filter((n) => {
+        const p = n.origPath ?? ''
+        return p === scopePath || p.startsWith(scopePath + '.')
+      })
+      if (pool.length === 0) pool = [scope.n]
+    }
   }
   const cands = pool.filter((n) => (kind === 'text' ? n.text === t : kind === 'desc' ? n.desc === t : n.rid === t))
   if (cands.length === 0) {
@@ -343,4 +360,21 @@ export function findActionableAncestor(
     cur = parentByOrig.get(cur) ?? ''
   }
   return null
+}
+
+/** V2 下的祖先回退（§S2.6 C2）：`actionableAncestor` 查表，O(1)——语义与
+ *  `findActionableAncestor` 等价（壳侧编码时已按同一规则上溯，DD-8）。 */
+export function actionableAncestorV2(v: { rows: UiNode[]; actionableAncestor: Int32Array }, node: UiNode): UiNode | null {
+  const i = Number(node.id.slice(1))
+  if (!Number.isInteger(i) || i < 0 || i >= v.rows.length) return null
+  const p = v.actionableAncestor[i]
+  return p >= 0 && p < v.rows.length ? v.rows[p] : null
+}
+
+/** V2 下的 `@nX` 区域限定：子树 = 预序连续区间（§S2.6），O(1) 切片替代 origPath 前缀匹配。 */
+export function scopePoolV2(v: { rows: UiNode[]; subtreeEnd: Int32Array }, scopeId: string): UiNode[] | null {
+  const i = Number(scopeId.slice(1))
+  if (!Number.isInteger(i) || i < 0 || i >= v.rows.length) return null
+  const end = v.subtreeEnd[i]
+  return v.rows.slice(i, end > i ? end : i + 1)
 }
