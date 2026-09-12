@@ -818,6 +818,7 @@ class DeviceControlService : AccessibilityService() {
    * 代次变化或 invalidated=true 即界面确实变了。
    */
   private fun handleState(): JSONObject = JSONObject()
+    .put("globals", org.json.JSONArray(availableGlobalActions() as Collection<*>))
     .put("gen", synchronized(lock) { snapshot?.gen ?: -1 })
     .put("invalidated", invalidated)
     .put("enabled", true)
@@ -954,15 +955,33 @@ class DeviceControlService : AccessibilityService() {
     return walk(root, 0)
   }
 
+  /**
+   * 当前设备可用全局动作（目录与判定在 GlobalActionCatalog——纯函数、可单测）。
+   * 诊断面（state.globals）与失败回填共用。
+   */
+  fun availableGlobalActions(): List<String> =
+    GlobalActionCatalog.available(systemGlobalActionIds(), Build.VERSION.SDK_INT)
+
+  private fun systemGlobalActionIds(): Set<Int> = try {
+    getSystemActions()?.map { it.id }?.toSet() ?: emptySet()
+  } catch (_: Throwable) {
+    emptySet()
+  }
+
+  /** 全局动作（0.13.8 E6：getSystemActions 驱动；不可用时回可用清单，不静默失败）。 */
   private fun handleGlobal(args: JSONObject): JSONObject {
-    val action = when (args.optString("action", "")) {
-      "back" -> GLOBAL_ACTION_BACK
-      "home" -> GLOBAL_ACTION_HOME
-      "recents" -> GLOBAL_ACTION_RECENTS
-      "notifications" -> GLOBAL_ACTION_NOTIFICATIONS
-      else -> return error("未知全局动作")
+    val name = args.optString("action", "")
+    val available = availableGlobalActions()
+    val entry = GlobalActionCatalog.find(name)
+      ?: return error("未知全局动作 $name——可用：${available.joinToString(" / ")}")
+    if (!available.contains(entry.name)) {
+      return error(
+        "设备不支持全局动作 ${entry.name}" +
+          (if (Build.VERSION.SDK_INT < entry.minSdk) "（需要 Android API ${entry.minSdk}，本机 ${Build.VERSION.SDK_INT}）" else "（系统未报告该动作）") +
+          "——可用：${available.joinToString(" / ")}",
+      )
     }
-    val ok = performGlobalAction(action)
-    return if (ok) JSONObject().put("global", args.optString("action")) else error("全局动作被系统拒绝")
+    val ok = performGlobalAction(entry.id)
+    return if (ok) JSONObject().put("global", entry.name) else error("全局动作 ${entry.name} 被系统拒绝（执行返回 false）")
   }
 }
