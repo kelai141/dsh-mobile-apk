@@ -56,6 +56,9 @@ class MainActivity : ComponentActivity() {
   private var webSystemBottomInset = 0
   private var webSystemTopInset = 0
   private var webImeBottomInset = 0
+  /** apk #182-2：横屏 + 侧边挖孔（short edge = 左右）时页面需要左右 inset 才能避让。 */
+  private var webSystemLeftInset = 0
+  private var webSystemRightInset = 0
   /** Coalesces rapid IME animation callbacks into one WebView evaluation per UI turn. */
   private var webInsetsPushScheduled = false
   /** 目录选择桥鉴权 token（进程级共享：MainActivity 重建/看门狗重启不更换，
@@ -175,6 +178,9 @@ class MainActivity : ComponentActivity() {
       // is 0 while the bar is hidden, so this tracks the toggle for free.
       webSystemTopInset = pxToCssPx(maxOf(bars.top, cutout.top), density)
       webSystemBottomInset = pxToCssPx(maxOf(bars.bottom, mandatoryGestures), density)
+      // #182-2：左右同样取系统栏与挖孔的较大者（横屏且侧边挖孔时 cutout.left/right > 0）。
+      webSystemLeftInset = pxToCssPx(maxOf(bars.left, cutout.left), density)
+      webSystemRightInset = pxToCssPx(maxOf(bars.right, cutout.right), density)
       webImeBottomInset = pxToCssPx(ime, density)
       // #197（机制①）：edge-to-edge 下 WebView 的**布局尺寸从不随 IME 变化**（布局视口恒 800），
       // 页面只把 frame 高度钉成 visualViewport.height → 输入框在布局里仍在页面底部，Chrome 按
@@ -469,6 +475,7 @@ class MainActivity : ComponentActivity() {
         },
         onSetImmersiveRequest = { enable -> setImmersivePersisted(enable) },
         onSettingsPathRequest = { engineManager.settingsDocumentPath() },
+        onExportSettingsDocument = { engineManager.settingsDocumentExport() },
         onCopyTextRequest = { text -> copyTextNative(text) },
         pickToken = pickToken,
         onRestartEngine = { engineFlow.restart() },
@@ -634,9 +641,13 @@ class MainActivity : ComponentActivity() {
         "(function(){var root=document.documentElement;if(!root)return;var top='" + webSystemTopInset +
           "px';var system='" + webSystemBottomInset +
           "px';var ime='" + webImeBottomInset +
+          "px';var left='" + webSystemLeftInset +
+          "px';var right='" + webSystemRightInset +
           "px';root.style.setProperty(" +
           "'--dsh-android-system-top',top);root.style.setProperty(" +
           "'--dsh-android-system-bottom',system);root.style.setProperty('--dsh-android-ime-bottom',ime);" +
+          "root.style.setProperty('--dsh-android-system-left',left);" +
+          "root.style.setProperty('--dsh-android-system-right',right);" +
           "})()",
         null,
       )

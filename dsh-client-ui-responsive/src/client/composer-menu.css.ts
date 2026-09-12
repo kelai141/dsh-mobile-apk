@@ -18,9 +18,18 @@ export const COMPOSER_MENU_CSS: string = `
   min-height: 0;
 }
 
-html[data-dsh-mobile-form] [data-composer-card] [role='listbox'],
+/* 宽度钳制只作用在绘制卡片上（[data-dsh-popup]），滚动容器（listbox）必须铺满卡片：
+   实测（450px 视口）卡片 424 宽而 listbox 只有 340 → 滚动条离卡片右缘 64px，
+   看起来就是「滚动条没吸在最右侧、和布局边界不匹配」（#135 的回归形态）。
+   注意：本段注释在模板字符串内，**不要写反引号**（会提前终止字符串，tsc 报 TS1005）。 */
+html[data-dsh-mobile-form] [data-composer-card] [data-dsh-popup] {
+  max-width: var(--dsh-mobile-popup-max-width, min(96vw, 420px)) !important;
+}
 html[data-dsh-mobile-form] [data-composer-card] [role='menu'] {
-  max-width: var(--dsh-mobile-popup-max-width, min(92vw, 340px)) !important;
+  max-width: var(--dsh-mobile-popup-max-width, min(96vw, 420px)) !important;
+}
+html[data-dsh-mobile-form] [data-composer-card] [role='listbox'] {
+  max-width: none !important;
 }
 
 html[data-dsh-mobile-form] [data-composer-card] [role='listbox'] {

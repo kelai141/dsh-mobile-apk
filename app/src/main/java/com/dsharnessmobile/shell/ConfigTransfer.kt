@@ -334,8 +334,25 @@ internal class MediaPickController(private val activity: MainActivity) {
     filePathCallback?.onReceiveValue(null)
     filePathCallback = callback
     val declared = (params.acceptTypes ?: emptyArray()).map { it.trim() }.filter { it.isNotEmpty() }
-    val mimeTypes = if (declared.isEmpty() || declared.any { it == "*/*" }) arrayOf("*/*") else declared.toTypedArray()
-    filePicker.launch(mimeTypes)
+    // apk #182-1：页面可能给**扩展名型** accept（`accept=".pdf"`），原样交给 DocumentsUI 它认不出
+    // （列表里看不到 pdf）。逐 token 归一化：`image/*` 这类通配保留、`.ext` 走 MimeTypeMap 查 MIME、
+    // 查不到的并入 `*/*`（宁可放宽也不要「一个文件都看不到」）。
+    val normalized = LinkedHashSet<String>()
+    var wildcard = declared.isEmpty()
+    for (token in declared) {
+      when {
+        token == "*/*" -> wildcard = true
+        token.contains('/') -> normalized.add(token)
+        token.startsWith(".") || !token.contains('.') -> {
+          val ext = token.removePrefix(".").lowercase()
+          val mime = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
+          if (mime != null) normalized.add(mime) else wildcard = true
+        }
+        else -> wildcard = true
+      }
+    }
+    if (wildcard || normalized.isEmpty()) normalized.add("*/*")
+    filePicker.launch(normalized.toTypedArray())
     return true
   }
 

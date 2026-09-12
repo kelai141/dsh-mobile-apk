@@ -126,6 +126,14 @@
       "marker": "dsh-mobile link->rename fallback"
     },
     {
+      "id": "publish-exclusive-F7",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js",
+      "scope": "engine",
+      "summary": "发布独占语义找回：F5 的 rename 回退会静默覆盖已存在的 currentPath（link 的 EEXIST=return false 在 Android 上成死代码）→ 先用 open(currentPath,'wx') 做 O_EXCL 原子占位，输家在此得到 EEXIST 并 return false，与 link 路径语义一致",
+      "provenance": "2026-09-12 apk issue #170（审计 F5 输出）；触发面 = 双引擎进程并发发布同一会话",
+      "marker": "dsh-mobile exclusive publish (F7)"
+    },
+    {
       "id": "reference-drill-F6",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-reference/lib/client.js",
       "scope": "engine",
