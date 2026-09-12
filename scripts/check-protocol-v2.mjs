@@ -53,6 +53,14 @@ if (srcNewest.ms > libNewest.ms) {
   fail(`构建产物过期：src/${srcNewest.file} 比 lib/${libNewest.file} 新\n  先构建：cd ${PLUGIN} && npm run build`)
 }
 
+// 跨语言 fixture 必须与 TS 编码器同源（壳侧 Kotlin 单测就是拿它比对的）
+const gen = spawnSync(process.execPath, ['scripts/gen-protocol-v2-fixture.mjs', '--check'], { cwd: ROOT, encoding: 'utf8' })
+if (gen.status !== 0) {
+  console.error((gen.stdout ?? '') + (gen.stderr ?? ''))
+  fail('跨语言 fixture 与生成器不一致：重跑 node scripts/gen-protocol-v2-fixture.mjs 并提交产物')
+}
+console.log('PASS  跨语言 fixture 与生成器同源')
+
 const run = spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8' })
 const out = (run.stdout ?? '') + (run.stderr ?? '')
 const summary = out.split('\n').filter((l) => /^ℹ (tests|pass|fail)/.test(l)).join('  ')

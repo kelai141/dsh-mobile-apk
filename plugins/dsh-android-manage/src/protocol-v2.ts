@@ -168,29 +168,22 @@ export function cacheFromV2(v: V2Decoded): {
 
 // ── TS 编码器（ADB 路径；与壳侧 Kotlin 编码器逐字同规则） ──────────────────────
 
+/** XML 原始节点（parseUiTreeXml 的产物形状）。 */
 interface EncRawNode { attrs: Record<string, string>; id: string; parentId: string }
 
-interface EncRow {
+/** XML 布尔属性：visible-to-user / enabled 是**反向判据**（缺省 true），其余缺省 false。 */
+const attrFlag = (at: Record<string, string>, key: string): boolean =>
+  key === 'visible-to-user' || key === 'enabled' ? at[key] !== 'false' : at[key] === 'true'
+
+/** 编码器输入行（纯数据）：`rowsFromRaw` 的产物，也是跨语言门禁的 canonical 形态。 */
+export interface EncRow {
   text: string; desc: string; cls: string; pkg: string; rid: string; windowId: string
   depth: number; x: number; y: number; w: number; h: number; flag: number
 }
 
-const attrFlag = (at: Record<string, string>, key: string): boolean =>
-  key === 'visible-to-user' || key === 'enabled' ? at[key] !== 'false' : at[key] === 'true'
-
-/**
- * 从**正确解析**的 XML 节点表编码为 V2（ADB 路径用）。
- * 与 Kotlin 编码器同规则：骨架闭包（view=all：正尺寸 ∪ 全部祖先）→ 仅叶子去重 → 符号表 + 广播。
- */
-export function encodeV2FromRaw(
-  raw: EncRawNode[],
-  rotation: number,
-  screen: { w: number; h: number },
-  gen: number,
-  view: V2View = 'all',
-): Record<string, unknown> {
-  // 1. 全量行（含零尺寸节点——骨架连续性与深度连续性的前提）
-  const rows: EncRow[] = raw.map((r) => {
+/** XML 原始节点 → 编码行（含零尺寸节点；与壳侧 Kotlin 的 walk 逐字同规则）。 */
+export function rowsFromRaw(raw: EncRawNode[]): EncRow[] {
+  return raw.map((r) => {
     const at = r.attrs
     const box = parseBoundsToBox(at.bounds)
     const depth = r.id === '' ? 0 : r.id.split('.').length - 1
@@ -214,6 +207,32 @@ export function encodeV2FromRaw(
       x: box.x, y: box.y, w: box.w, h: box.h, flag,
     }
   })
+}
+
+/**
+ * 从**正确解析**的 XML 节点表编码为 V2（ADB 路径用）。
+ * 与 Kotlin 编码器同规则：骨架闭包（view=all：正尺寸 ∪ 全部祖先）→ 仅叶子去重 → 符号表 + 广播。
+ */
+export function encodeV2FromRaw(
+  raw: EncRawNode[],
+  rotation: number,
+  screen: { w: number; h: number },
+  gen: number,
+  view: V2View = 'all',
+): Record<string, unknown> {
+  return encodeV2(rowsFromRaw(raw), view, gen, rotation, screen.w, screen.h)
+}
+
+/** 行表 → V2 载荷（与壳侧 `ControlProtocolV2.encode` 同一规则；跨语言门禁比对的就是这一层）。 */
+export function encodeV2(
+  rowsIn: EncRow[],
+  view: V2View,
+  gen: number,
+  rotation: number,
+  width: number,
+  height: number,
+): Record<string, unknown> {
+  const rows = rowsIn
   const n = rows.length
   const actionable = (r: EncRow): boolean =>
     (r.flag & (FLAG.clickable | FLAG.editable | FLAG.scrollable)) !== 0
@@ -299,7 +318,7 @@ export function encodeV2FromRaw(
     v: 2,
     gen,
     rot: rotation,
-    scr: [screen.w, screen.h],
+    scr: [width, height],
     raw: n,
     view,
     n: out.length,

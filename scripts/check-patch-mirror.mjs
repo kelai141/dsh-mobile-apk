@@ -147,6 +147,7 @@ if (peer) {
     'scripts/check-manifest-hardening.mjs',
     'scripts/check-bounded-io.mjs',
     'scripts/check-protocol-v2.mjs',
+    'scripts/gen-protocol-v2-fixture.mjs',
   ]
   for (const rel of MIRROR_TOP) {
     const theirs = join(peer, rel)
