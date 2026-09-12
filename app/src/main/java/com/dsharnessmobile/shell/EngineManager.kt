@@ -754,10 +754,38 @@ class EngineManager(private val context: Context, private val pickToken: String?
     }
   }
 
-  /** Absolute path of the Host settings document (`$DSH_HOME/settings.yaml`); empty when missing. */
+  /**
+   * Absolute path of the Host settings document (`$DSH_HOME/settings.yaml`); empty when missing.
+   *
+   * apk #168：此前取的是**公共导出仓库** `Documents/dshdata/settings.yaml`——那不是配置的落点
+   * （配置在私有 `$DSH_HOME`），于是恒返回空串，页面侧接管直接放弃，「打开配置文件」在真机上
+   * 一直是坏的。这里换回单一来源。
+   */
   fun settingsDocumentPath(): String {
-    val file = File(dshDataDir, "settings.yaml")
+    val file = File(File(homeDir, ".dsh"), "settings.yaml")
     return if (file.isFile) file.absolutePath else ""
+  }
+
+  /**
+   * apk #168 第二道坎：把活动 settings.yaml **复制到已放行的公共导出目录**并返回副本路径。
+   *
+   * 为什么不直接放行私有路径：`.dsh` 目录里还有 `.credentials.yaml` / deepseek-key.txt 等凭据，
+   * 放宽白名单或 FileProvider 映射会把凭据一并交给系统选择器（安全退化）。复制副本只暴露配置
+   * 本身，且副本落在既有白名单 `Documents/dshdata/exports` 内——选择器与 FileProvider 天然可用。
+   * 失败返回空串（调用方保持上游错误路径）。
+   */
+  fun settingsDocumentExport(): String = try {
+    val src = File(File(homeDir, ".dsh"), "settings.yaml")
+    if (!src.isFile) {
+      ""
+    } else {
+      val dir = File(File(dshDataDir, "exports"), "config").apply { mkdirs() }
+      val dst = File(dir, "settings.yaml")
+      src.copyTo(dst, overwrite = true)
+      dst.absolutePath
+    }
+  } catch (_: Throwable) {
+    ""
   }
 
   /** The app workspace root (files/home/.dsh/workspaces), created on demand; null when unusable. */

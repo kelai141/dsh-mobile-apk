@@ -31,10 +31,26 @@ import { MOBILE_FORM_MAX_WIDTH } from './mobile/form-marker.ts'
 /** The composer's own editable: upstream's Lexical host, or the pre-0.1.5 textarea. */
 const COMPOSER_EDITABLE = '[contenteditable="true"], textarea'
 
+/**
+ * 中文 IME 的候选确认键常落在 compositionend **之后**几毫秒（apk #182-3）。
+ * 那段时间里 `isComposing=false` 且 keyCode 不是 229，只看这两条会把「确认候选」误判成
+ * 「用户按了换行」→ 被改发 Shift+Enter，多插一个换行。上游 keymap 用 `recentlyComposing`
+ * 补这一档，这里对齐同样的宽限窗。
+ */
+const COMPOSITION_GRACE_MS = 10
+
 export class EnterGuard {
+  private lastCompositionEndAt = 0
+
+  private readonly onCompositionEnd = (): void => {
+    this.lastCompositionEndAt = Date.now()
+  }
+
   private readonly onKeyDown = (event: KeyboardEvent): void => {
     if (event.key !== 'Enter' || event.shiftKey) return
     if (event.isComposing || event.keyCode === 229) return
+    // 组合态第三判据：刚结束组合的宽限窗内，Enter 交还上游处理（候选确认）。
+    if (Date.now() - this.lastCompositionEndAt <= COMPOSITION_GRACE_MS) return
     const target = event.target
     if (!(target instanceof HTMLElement)) return
     // The composer card only: QueueDock and other Enter handlers are out of scope.
@@ -68,9 +84,11 @@ export class EnterGuard {
 
   attach(): void {
     document.addEventListener('keydown', this.onKeyDown, { capture: true })
+    document.addEventListener('compositionend', this.onCompositionEnd, { capture: true })
   }
 
   detach(): void {
     document.removeEventListener('keydown', this.onKeyDown, { capture: true })
+    document.removeEventListener('compositionend', this.onCompositionEnd, { capture: true })
   }
 }

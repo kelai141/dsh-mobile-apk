@@ -147,6 +147,7 @@ if (peer) {
     'scripts/check-manifest-hardening.mjs',
     'scripts/check-bounded-io.mjs',
     'scripts/check-protocol-v2.mjs',
+    'scripts/check-runtime-assets.mjs',
     'scripts/gen-protocol-v2-fixture.mjs',
     'scripts/profile-web.cordis.patch.yml',
     'scripts/snapshot-config/engine-overlay.json',

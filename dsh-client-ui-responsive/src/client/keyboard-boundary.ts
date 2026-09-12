@@ -27,6 +27,8 @@ export class KeyboardBoundary {
   private media: MediaQueryList | null = null
   private lastIme = 0
   private lastVv = 0
+  /** 上次补偿用的视觉视口平移量（#197 机制①第二道防线）。 */
+  private lastVvTop = 0
   /** 收敛代次（#197 机制②）：新事件打断旧的复算链，避免过期复算覆盖新状态。 */
   private settleGeneration = 0
   /** 延迟复算的定时器句柄（detach 时清掉；jsdom 测试结束后残留回调会报错）。 */
@@ -34,10 +36,13 @@ export class KeyboardBoundary {
   /** 已卸载标记：卸载后任何延迟回调都必须直接返回（宿主可能已销毁 window/document）。 */
   private detached = false
 
-  /** Watch visualViewport resize + the shell's IME inset variable. */
+  /** Watch visualViewport resize + scroll + the shell's IME inset variable. */
   attach(): void {
     this.detached = false
     window.visualViewport?.addEventListener('resize', this.onViewportChange)
+    // #197 机制①的第二道防线：视觉视口被浏览器平移时，offsetTop 会在**滚动聊天区**时变化
+    // （实测 371 → 252 → 86），只监听 resize 会漏掉这些变化。
+    window.visualViewport?.addEventListener('scroll', this.onViewportChange)
     // jsdom's matchMedia stub returns a bare object: tolerate it (the
     // visualViewport resize still drives the pin).
     this.media = typeof window.matchMedia === 'function' ? window.matchMedia('(max-width: 767px)') : null
@@ -53,6 +58,7 @@ export class KeyboardBoundary {
       this.settleTimer = null
     }
     window.visualViewport?.removeEventListener('resize', this.onViewportChange)
+    window.visualViewport?.removeEventListener('scroll', this.onViewportChange)
     this.media?.removeEventListener?.('change', this.onViewportChange)
     this.restore()
   }
@@ -88,12 +94,19 @@ export class KeyboardBoundary {
     const ime = Number.parseFloat(rootStyle.getPropertyValue('--dsh-android-ime-bottom')) || 0
     const vv = window.visualViewport
     const vvHeight = vv === null ? 0 : Math.round(vv.height)
+    // #197 机制①的第二道防线：布局视口若仍被浏览器平移（offsetTop > 0），内容在屏幕上的
+    // 位置会整体上移 offsetTop，底部就留下 offsetTop 高的空白带。把这段位移补进钉住的高度里
+    // （frame 高度 = 可视高度 + 平移量），空白带即被填满。壳侧已把 IME inset 施加到 WebView
+    // 布局尺寸（机制① 的根治），这里是防止「某些内核仍平移」的第二道防线。
+    const rawTop = vv === null ? 0 : Number(vv.offsetTop)
+    const vvTop = Number.isFinite(rawTop) ? Math.max(0, Math.round(rawTop)) : 0
     // Only react to real keyboard transitions (IME inset > 0); a resize with
     // no inset is a window resize and must keep the natural 100% height.
-    if (ime > 0 && vvHeight > 0 && (ime !== this.lastIme || vvHeight !== this.lastVv)) {
+    if (ime > 0 && vvHeight > 0 && (ime !== this.lastIme || vvHeight !== this.lastVv || vvTop !== this.lastVvTop)) {
       this.lastIme = ime
       this.lastVv = vvHeight
-      frame.style.height = `${vvHeight}px`
+      this.lastVvTop = vvTop
+      frame.style.height = `${vvHeight + vvTop}px`
       // Null out the seat's IME padding while the frame is pinned (see the
       // class comment); keep safe-area/system paddings intact.
       const seat = document.querySelector<HTMLElement>('[data-composer-seat]')
@@ -114,5 +127,6 @@ export class KeyboardBoundary {
     this.seat = null
     this.lastIme = 0
     this.lastVv = 0
+    this.lastVvTop = 0
   }
 }

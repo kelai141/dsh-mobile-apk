@@ -20,6 +20,8 @@ const ACTION_LABELS = ['打开配置文件', 'Open configuration file']
 /** Host bridge surface this handler needs beyond the path chooser. */
 interface SettingsPathBridge {
   settingsPath?: () => string
+  /** apk #168：壳侧把活动 settings.yaml 复制到白名单目录后返回副本路径（空 = 失败）。 */
+  exportSettingsDocument?: () => string
 }
 
 /** Read the settings document path from the shell bridge; empty when unavailable. */
@@ -31,6 +33,27 @@ function settingsPath(): string {
   } catch {
     return ''
   }
+}
+
+/**
+ * apk #168 的关键一步：优先用**壳侧导出的副本**路径。
+ *
+ * 活动配置在私有 `$DSH_HOME`，而选择器白名单（与 FileProvider 映射）刻意不包括 `.dsh`——
+ * 那里有 `.credentials.yaml` 等凭据，放宽等于把凭据交给系统选择器。所以壳侧先把 settings.yaml
+ * 复制到已放行的 `Documents/dshdata/exports/config/`，页面打开的是这份副本（UI 文案已说明）。
+ * 副本拿不到时才退回旧路径（私有路径会被白名单拒绝，届时仍走上游错误路径）。
+ */
+function settingsPathForChooser(): string {
+  const bridge = (window as unknown as { androidBridge?: SettingsPathBridge }).androidBridge
+  if (typeof bridge?.exportSettingsDocument === 'function') {
+    try {
+      const exported = bridge.exportSettingsDocument() || ''
+      if (exported !== '') return exported
+    } catch {
+      /* 导出失败后回退 */
+    }
+  }
+  return settingsPath()
 }
 
 /** Whether the clicked element is the upstream open-configuration-file action. */
@@ -49,7 +72,7 @@ export class SettingsDocumentAction {
   private readonly onClick = (event: MouseEvent): void => {
     if (!chooserAvailable()) return
     if (!isSettingsDocumentAction(event.target)) return
-    const path = settingsPath()
+    const path = settingsPathForChooser()
     if (path === '') return
     // Claim only when the shell really took the path: a refusal keeps upstream's own error path.
     if (!openPathChooser(path, 'view').ok) return
