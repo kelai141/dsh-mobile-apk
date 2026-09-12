@@ -14,15 +14,20 @@ android {
     // (the embedded engine, bash, and every child command would need linker64
     // wrappers); 34 keeps native exec working on Android 15/16 devices.
     targetSdk = 34
-    // 0.13.7fx-1 修订构建：versionCode 36（发布后 issue 修复批：会话迁移 link(2) 回退 #154、
-    // 引擎启动目录改到应用工作区根，未分组会话不再把 / 当工作区；修复 0.1.5 起失效的移动端 Enter 换行守卫；
-    // 退役空转的 web-frontend-index.html 运行时补丁；覆盖安装 0.13.7(34)）。
-    versionCode = 36
+    // 0.13.8：versionCode 37（覆盖安装 0.13.7fx-1(36)）。本版主题：
+    // ① 控制协议 V2（列式载荷 428 B/节点 → 54.7 B/行，413 自动降级 view=target，行句柄动作回指）；
+    // ② E6 能力补齐（全局动作面 getSystemActions 驱动、无障碍截屏回落 ADB）；
+    // ③ P2 收口（android_ui_detail 两级披露 + DetailStore、android_privilege_status 结构化 route +
+    //    协议协商）；④ 启动页 APK 自更新（仅手动 + 同按钮二次确认 + 安装授权）；
+    // ⑤ 悬浮球动效 M4-M8；⑥ @ 菜单勾选框（状态由行属性派生 + 原生风格自绘）；
+    // ⑦ 键盘空白带根治（IME inset 施加到 WebView 布局尺寸，apk #197）；
+    // ⑧ 构建门禁链自身缺陷修复（Join-Path 拼写、镜像比对面、协议 V2 门禁）。
+    versionCode = 37
     // Snapshot builds append a suffix (e.g. -SN-1-RC13) via -PversionNameSuffix; release builds pass none.
     val snapshotSuffix = providers.gradleProperty("versionNameSuffix").getOrElse("")
     // 版本号单一来源：UI（GuidePageRenderer）、桥（androidBridge.version）、诊断日志、引擎环境变量
     // （DSH_APP_VERSION，见 EngineManager.engineEnv）全部读这里，禁止任何地方再硬编码版本字面量。
-    versionName = "0.13.7fx-1" + snapshotSuffix
+    versionName = "0.13.8" + snapshotSuffix
     buildConfigField("String", "TERMUX_VERSION", "\"0.118.3\"")
   }
 
