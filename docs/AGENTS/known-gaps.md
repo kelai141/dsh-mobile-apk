@@ -19,3 +19,18 @@
 - **单窗口截屏**（API 34 `takeScreenshotOfWindow`）与多窗口选择（`getWindows()`）未接。
 - **API <30 设备**：无障碍截屏不可用（`takeScreenshot` 需要 API 30），仍需 ADB `screencap`；`GLOBAL_ACTION_TAKE_SCREENSHOT`(28) 只存相册不回传数据。
 - **arm64 真机验证**：无障碍通道目前仅在 x86_64 模拟器验证（无 arm64 设备在线）。
+
+## 0.13.8 批 F 收尾登记（2026-09-12）
+
+- **API 33+「无障碍输入法」（E6d）无法实现**：`javap` 校验 android-36 的 `android.jar`，
+  `AccessibilityNodeInfo` 无 `INPUT_METHOD_EDITOR` 相关符号，设计文档设想的路径在当前 SDK
+  上不存在。`ACTION_SET_TEXT` 不被接受的场景由 ADB-IME 通道（`AdbKeyboardService`）承担。
+- **截图回落 ADB 的触发路径未在设备上跑通**：本机 API 35 无障碍截屏可用，回落分支只能在
+  API<30 设备上真实触发（ADB `screencap` 本身已多次实测）。
+- **profile patch 合并语义「按 id 只增不删」**（坑 70）：我们注入的 row 一旦写进设备
+  `home/.dsh/profiles/web/cordis.patch.yml` 就**删不掉**（改代码 + 重装 + 重解压都不生效）。
+  影响：0.13.8 之后若要下线已注入 row，需要在 `SnapshotTransaction.mergePatchYamlById` 上给
+  「上游注入行以 staged 为准」留口子（当前无标记区分「我们注入的」与「用户手改的」，
+  实现前先设计标记方式，勿草率改成覆盖语义——那会吃掉用户手改）。
+- **悬浮球动效 M4–M8 未做**（G3 余项）：待答卡位移渐隐 / 状态行 TextSwitcher / 琥珀呼吸 /
+  PENDING 脉冲。M1/M2/M9/M10/M11 与降级门（`DsUi.animationsEnabled`）已在 #191 落地。

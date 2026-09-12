@@ -27,6 +27,7 @@ import { join } from 'node:path'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { parseUiTreeXml, pruneNodes, resolveRef, findActionableAncestor, checkUiTreeParse, type UiNode, actionableAncestorV2, scopePoolV2 } from './ui-tree.js'
 import { cacheFromV2, decodeV2, isV2Payload, type V2Decoded } from './protocol-v2.js'
+import { detailRecord, pageRows, writeDetailStore } from './detail-store.js'
 
 /**
  * 0.13.8 #183：键盘广播来源校验 nonce 参数（壳侧 AdbKeyboardReceiver 私有文件，
@@ -291,18 +292,36 @@ function tools(ctx: Context, priv: PrivilegeFace) {
       const a = guard('screenshot', { textRedact }, exec as { agent?: { session?: unknown } })
       if (!a.ok) return { imagePath: '', denied: true, text: a.guidance }
       // 0.13.5 W4：无障碍截屏优先（API 30+ 的 AccessibilityService.takeScreenshot——不需要 ADB）
+      let adbNote = ''
       if (controlDecision('screenshot', exec as { agent?: { session?: unknown } }).backend === 'a11y') {
         const r = await a11yExec('screenshot', {}, 12_000)
-        if (!r.ok) return { imagePath: '', denied: false, text: '无障碍截屏失败：' + r.error }
-        const data = (r.data ?? {}) as { path?: string; width?: number; height?: number }
-        if (!data.path) return { imagePath: '', denied: false, text: '无障碍截屏未返回文件路径' }
-        return inlineShot(
-          data.path,
-          data.width ?? 0,
-          data.height ?? 0,
-          exec as ExecLike,
-          `无障碍通道，设备物理分辨率 ${data.width ?? '?'}x${data.height ?? '?'}`,
-        )
+        if (!r.ok) {
+          // 0.13.8 E6：无障碍截屏不可用（API<30 无 takeScreenshot / FLAG_SECURE 被拒 / 服务未就绪）
+          // → 回落 ADB screencap，而不是把「没有截图能力」当结论抛给模型。
+          if (priv.execAdbLine) {
+            adbNote = `（无障碍截屏不可用：${r.error}——已回落 ADB 通道）`
+          } else {
+            return {
+              imagePath: '', denied: false,
+              text: `无障碍截屏失败：${r.error}。ADB 通道未接通，无法回落——`
+                + '需要截图请先完成 ADB 授权（完全访问 → 允许访问开关 → 配对码），或用 android_ui_dump 读结构。',
+            }
+          }
+        } else {
+          const data = (r.data ?? {}) as { path?: string; width?: number; height?: number }
+          if (!data.path) {
+            if (!priv.execAdbLine) return { imagePath: '', denied: false, text: '无障碍截屏未返回文件路径，且 ADB 通道未接通（无法回落）' }
+            adbNote = '（无障碍截屏未返回文件路径——已回落 ADB 通道）'
+          } else {
+            return inlineShot(
+              data.path,
+              data.width ?? 0,
+              data.height ?? 0,
+              exec as ExecLike,
+              `无障碍通道，设备物理分辨率 ${data.width ?? '?'}x${data.height ?? '?'}`,
+            )
+          }
+        }
       }
       // 0.14 真实通道：adbd（shell uid）执行 screencap → adb pull 回引擎私有临时目录（app uid 可读）。
       if (!priv.execAdbLine) return { imagePath: '', denied: false, text: 'ADB 执行通道未接通（dsh-android-bridge 未提供 execAdbLine）' }
@@ -318,10 +337,89 @@ function tools(ctx: Context, priv: PrivilegeFace) {
         // F2 统一坐标系：回传物理分辨率锚点。模型侧读图可能降采样（maxDim 2048），
         // 严禁直接用截图像素坐标点击——归一化用 android_ui_click 的 nx/ny。
         const size = await screenSize()
-        return inlineShot(local, size.w, size.h, exec as ExecLike, `ADB 通道，设备物理分辨率 ${size.w}x${size.h}`)
+        return inlineShot(local, size.w, size.h, exec as ExecLike, `ADB 通道，设备物理分辨率 ${size.w}x${size.h}${adbNote}`)
       } catch (e) {
         return { imagePath: '', denied: false, text: '截图失败：' + String((e as Error).message) }
       }
+    },
+  })
+
+  const uiDetail = defineTool({
+    name: 'android_ui_detail',
+    description:
+      '【两级披露第二级】按需取回 dump 的全量明细：给 ref 取单个节点的逐字段记录（完整文本/几何/祖先，'
+      + '不受默认渲染压缩影响）；给 all=true 分页取整表（offset/limit，默认 60 行并如实报告省略量）。'
+      + '只在默认清单不够用时用——日常定位用 android_ui_dump。需先执行过 android_ui_dump。',
+    parameters: {
+      ref: { type: 'string', description: '节点引用（id:nN / text:… / desc:… / rid:…；与 all 二选一）' },
+      all: { type: 'boolean', description: 'true = 取整表分页（配 offset/limit）' },
+      offset: { type: 'number', description: '整表起始行（默认 0）' },
+      limit: { type: 'number', description: '整表每页行数（默认 60，上限 200）' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          denied: { type: 'boolean' },
+          handle: { type: 'string' },
+          path: { type: 'string' },
+          node: { type: 'object', additionalProperties: true },
+          rows: { type: 'array', items: { type: 'object', additionalProperties: true } },
+          total: { type: 'number' },
+          offset: { type: 'number' },
+          omitted: { type: 'number' },
+          text: { type: 'string' },
+        },
+      },
+      render: (_args, v: Record<string, unknown>) => [{
+        type: 'text',
+        text: String(v.text ?? '') + (Array.isArray(v.rows) && v.rows.length > 0
+          ? '\n' + v.rows.map((r) => JSON.stringify(r)).join('\n')
+          : v.node ? '\n' + JSON.stringify(v.node) : ''),
+      }],
+    },
+    execute: async ({ ref, all, offset, limit }: { ref?: string; all?: boolean; offset?: number; limit?: number }, exec) => {
+      const a = guard('ui_detail', { ref, all }, exec as { agent?: { session?: unknown } })
+      if (!a.ok) return { ok: false, denied: true, text: a.guidance }
+      if (!uiCache || Date.now() - uiCache.ts > UI_CACHE_TTL) {
+        return { ok: false, denied: false, text: '没有最近的控件清单——请先 android_ui_dump，再按需取明细' }
+      }
+      const handle = detailHandle
+      const path = detailPath
+      if (ref !== undefined && ref.trim() !== '') {
+        const hit = resolveRef(uiCache.byId, uiCache.nodes, ref.trim(), scopePoolFor())
+        if (!hit.ok) return { ok: false, denied: false, handle, path, text: hit.error }
+        const idx = uiCache.nodes.findIndex((n) => n.id === hit.node.id)
+        const rows = uiCache.nodes
+        const extra: Record<string, unknown> = {}
+        const v2 = uiCache.v2
+        if (v2 && idx >= 0) {
+          const anc = v2.actionableAncestor[idx]
+          extra.actionableAncestor = anc >= 0 ? 'n' + anc : null
+          extra.subtree = { start: 'n' + idx, end: v2.subtreeEnd[idx] > idx ? 'n' + v2.subtreeEnd[idx] : null }
+        }
+        const parent = uiCache.nodes.find((n) => n.id === hit.node.parentId)
+        if (parent) extra.parentLabel = `${parent.type || 'View'}${parent.text ? ' text="' + parent.text.slice(0, 24) + '"' : ''}`
+        return {
+          ok: true, denied: false, handle, path, total: rows.length,
+          node: detailRecord(hit.node, extra) as unknown as Record<string, JsonValue>,
+          text: `明细 ${hit.node.id}（句柄 ${handle}${path ? '，离线 ' + path : ''}）`,
+        }
+      }
+      if (all === true) {
+        const lim = Math.min(Math.max(Number(limit ?? 60) || 60, 1), 200)
+        const { page, offset: off, omitted } = pageRows(uiCache.nodes, Number(offset ?? 0) || 0, lim)
+        return {
+          ok: true, denied: false, handle, path, rows: page.map((n) => detailRecord(n)) as unknown as Array<Record<string, JsonValue>>,
+          total: uiCache.nodes.length, offset: off, omitted,
+          text: `全量明细第 ${off}..${off + page.length - 1} 行 / 共 ${uiCache.nodes.length} 行`
+            + (omitted > 0 ? `（本页外还有 ${omitted} 行，请带 offset 继续）` : '')
+            + `；句柄 ${handle}${path ? '，离线可 read/grep：' + path : ''}`,
+        }
+      }
+      return { ok: false, denied: false, handle, path, text: '请给 ref（单节点）或 all=true（整表分页）' }
     },
   })
 
@@ -520,6 +618,41 @@ function tools(ctx: Context, priv: PrivilegeFace) {
   let uiCache:
     | { nodes: UiNode[]; byId: ReturnType<typeof pruneNodes>['byId']; byOrig: ReturnType<typeof pruneNodes>['byOrig']; parentByOrig: ReturnType<typeof pruneNodes>['parentByOrig']; screen: { w: number; h: number }; rotation: number; ts: number; gen?: number; fingerprint?: string; rawCount?: number; v2?: V2Decoded }
     | null = null
+
+  /** 明细文件目录（与截图/XML 同一个 dsh-tmp；LRU 按前缀清理，保留最近 20 份）。 */
+  const detailDir = (): string => pruneTmp('ui-detail-', 20)
+
+  /**
+   * 发布两级披露的第二级（0.13.8 P2-13）：把全量节点表按**确定性句柄**（结构指纹）落盘，
+   * 第一次调用给出一句「全量明细在哪」。节点数低于阈值时返回空提示——那种规模的清单
+   * 默认渲染已经够全，多说一句只是噪音。
+   */
+  const DETAIL_HINT_MIN_NODES = 60
+  const publishDetail = (
+    nodes: UiNode[],
+    meta: { gen: number; protocol: string; view: string; screen: { w: number; h: number }; rotation: number; rawCount: number },
+  ): { handle: string; path: string; hint: string } => {
+    const handle = treeFingerprint(nodes)
+    let path = ''
+    try {
+      path = writeDetailStore(detailDir(), handle, nodes.map((n) => detailRecord(n)), { ...meta, count: nodes.length, handle })
+    } catch {
+      // 落盘失败绝不影响主结果（与上游 spill 的取向一致：落盘是尽力而为）
+      return { handle, path: '', hint: '' }
+    }
+    detailHandle = handle
+    detailPath = path
+    if (nodes.length < DETAIL_HINT_MIN_NODES) return { handle, path, hint: '' }
+    return {
+      handle,
+      path,
+      hint: `\n全量明细（${nodes.length} 节点逐字段，含完整文本/几何/祖先，可按需或离线 read/grep）：android_ui_detail all=true（句柄 ${handle}）`,
+    }
+  }
+
+  /** 最近一次 dump 的明细句柄（两级披露取回时用；无 dump 时为空）。 */
+  let detailHandle = ''
+  let detailPath = ''
 
   /**
    * 0.13.8 P0-4：树结构指纹（FNV-1a）——「界面未变」快路径的判定依据。
@@ -793,17 +926,27 @@ function tools(ctx: Context, priv: PrivilegeFace) {
         const webHint = webNode
           ? `\n检测到 WebView 容器 ${webNode.id}：其内部控件在本通道不可见。若目标是 DSH 自有 Web UI，改用 android_web_dump（DOM 快照，毫秒级、按选择器精准命中）；第三方网页仍只能靠坐标。`
           : ''
+        const detail = publishDetail(pruned.nodes, {
+          gen: v2?.gen ?? data.gen ?? -1,
+          protocol: v2 ? 'v2' : 'v1',
+          view: v2?.view ?? 'all',
+          screen,
+          rotation: v2?.rotation ?? data.rotation ?? 0,
+          rawCount: pruned.rawCount,
+        })
         return {
           ok: true,
           denied: false,
           screen,
-          rotation: data.rotation ?? 0,
+          rotation: v2?.rotation ?? data.rotation ?? 0,
           count: pruned.nodes.length,
           rawCount: pruned.rawCount,
           nodes: pruned.nodes as unknown as JsonValue[],
+          detailHandle: detail.handle,
+          detailPath: detail.path,
           note: `无障碍通道（backend=a11y，协议 ${v2 ? 'V2 列式' : 'V1'}）：id 仅在最近一次 dump 内有效；页面变化后请重新 dump`,
           text: `控件清单（无障碍通道，未截断）：${pruned.nodes.length} 个节点（原始 ${pruned.rawCount}，剔除 ${pruned.rawCount - pruned.nodes.length} 个零尺寸/完全重复节点，屏幕 ${screen.w}x${screen.h}；前台 ${fg?.pkg ?? '?'}/${fg?.activity ?? '?'}）`
-            + warn + webHint,
+            + warn + webHint + detail.hint,
         }
       }
       if (!priv.execAdbLine) return { ok: false, denied: false, screen: { w: 0, h: 0 }, rotation: 0, count: 0, rawCount: 0, nodes: [], text: 'ADB 执行通道未接通（dsh-android-bridge 未提供 execAdbLine）' }
@@ -1508,11 +1651,20 @@ function tools(ctx: Context, priv: PrivilegeFace) {
   const uiGlobal = defineTool({
     name: 'android_ui_global',
     description:
-      '【首选】系统级导航动作（无障碍通道，不需要 ADB）：back=返回上一级、home=回桌面、'
-      + 'recents=最近任务、notifications=下拉通知栏。卡在子菜单/弹窗/详情页出不来时，第一步就用 back。'
+      '【首选】系统级动作（无障碍通道，不需要 ADB）：back=返回上一级、home=回桌面、recents=最近任务、'
+      + 'notifications=下拉通知栏、quickSettings=快捷设置面板、toggleSplitScreen=分屏、powerDialog=关机菜单、'
+      + 'lockScreen=锁屏、takeScreenshot=系统截图、menu=菜单键、mediaPlayPause=播放/暂停、'
+      + 'dismissNotificationShade=收起通知栏、accessibilityShortcut=无障碍快捷方式。'
+      + '卡在子菜单/弹窗/详情页出不来时，第一步就用 back。'
+      + '设备实际可用的动作由系统 getSystemActions() 决定，不可用者返回可用清单（不会静默无效果）。'
       + '需设备控制授权（无障碍服务已开启即可）+ 会话档位 danger-full-access。',
     parameters: {
-      action: { type: 'string', required: true, enum: ['back', 'home', 'recents', 'notifications'], description: '要执行的全局动作' },
+      action: {
+        type: 'string', required: true,
+        enum: ['back', 'home', 'recents', 'notifications', 'quickSettings', 'toggleSplitScreen', 'powerDialog',
+          'lockScreen', 'takeScreenshot', 'menu', 'mediaPlayPause', 'dismissNotificationShade', 'accessibilityShortcut'],
+        description: '要执行的全局动作（可用集由系统决定，不可用会回可用清单）',
+      },
     },
     output: {
       schema: {
@@ -1530,8 +1682,10 @@ function tools(ctx: Context, priv: PrivilegeFace) {
     execute: async ({ action }: { action: string }, exec) => {
       const a = guard('ui_global', { action }, exec as { agent?: { session?: unknown } })
       if (!a.ok) return { ok: false, denied: true, action, text: a.guidance }
-      if (!['back', 'home', 'recents', 'notifications'].includes(action)) {
-        return { ok: false, denied: false, action, text: 'action 必须是 back / home / recents / notifications' }
+      const GLOBAL_ACTIONS = ['back', 'home', 'recents', 'notifications', 'quickSettings', 'toggleSplitScreen',
+        'powerDialog', 'lockScreen', 'takeScreenshot', 'menu', 'mediaPlayPause', 'dismissNotificationShade', 'accessibilityShortcut']
+      if (!GLOBAL_ACTIONS.includes(action)) {
+        return { ok: false, denied: false, action, text: `action 必须是 ${GLOBAL_ACTIONS.join(' / ')}` }
       }
       const r = await a11yExec('global', { action }, 6000)
       if (!r.ok) {

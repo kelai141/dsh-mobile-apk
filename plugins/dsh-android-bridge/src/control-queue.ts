@@ -33,6 +33,39 @@ interface PendingEntry {
 
 let seq = 0
 
+/** 引擎支持的协议版本上限（壳侧 `pv` 高于此值 = 壳比引擎新）。 */
+export const ENGINE_PROTOCOL_VERSION = 2
+
+export interface Negotiation {
+  ok: boolean
+  /** 壳侧声明的协议版本（未声明按 1 = V1 兼容路径）。 */
+  shell: number
+  engine: number
+  reason: string
+}
+
+/**
+ * 协议版本协商（0.13.8 P2-15；V2 §S4）：把「新壳 + 老引擎」变成一次**带指引的失败**，
+ * 而不是静默产出一棵空树。老壳不声明 `pv` → 按 V1 兼容路径放行（0.13.7 及以前的行为）。
+ */
+export function negotiateProtocol(shellPv: unknown): Negotiation {
+  const engine = ENGINE_PROTOCOL_VERSION
+  if (shellPv === undefined || shellPv === null) {
+    return { ok: true, shell: 1, engine, reason: '壳侧未声明协议版本——按 V1 兼容路径处理' }
+  }
+  const shell = Number(shellPv)
+  if (!Number.isFinite(shell) || shell < 1) {
+    return { ok: false, shell: 0, engine, reason: `壳侧协议版本非法（pv=${String(shellPv)}）` }
+  }
+  if (shell > engine) {
+    return {
+      ok: false, shell, engine,
+      reason: `壳侧协议 pv=${shell} 比引擎支持的 pv=${engine} 新——请更新引擎快照（android_ui_dump 会一直拿不到可信结果）`,
+    }
+  }
+  return { ok: true, shell, engine, reason: shell === engine ? `协议 pv=${shell} 一致` : `壳侧 pv=${shell} 走 V${shell} 兼容路径` }
+}
+
 export class ControlQueue {
   private pending?: PendingEntry
   private waiter?: () => void
@@ -40,6 +73,9 @@ export class ControlQueue {
   private lastResultAt = 0
   private served = 0
   private failed = 0
+  /** 0.13.8 P2-15：最近一次回填声明的协议版本与能力（诊断面展示 + 协商判定）。 */
+  private lastPv?: number
+  private lastCaps?: Record<string, unknown>
   /** 0.13.8 #181：在途标记——take 到 settle 之间二次取活必须被拒（防同一请求双执行）。 */
   private inFlight = false
 
@@ -53,8 +89,23 @@ export class ControlQueue {
     return this.pending ? 250 : 2000
   }
 
-  stats(): { waiting: boolean; served: number; failed: number; lastTakeAt: number; lastResultAt: number } {
-    return { waiting: this.waiting, served: this.served, failed: this.failed, lastTakeAt: this.lastTakeAt, lastResultAt: this.lastResultAt }
+  stats(): {
+    waiting: boolean; served: number; failed: number; lastTakeAt: number; lastResultAt: number
+    protocol: Negotiation; caps?: Record<string, unknown>
+  } {
+    return {
+      waiting: this.waiting, served: this.served, failed: this.failed,
+      lastTakeAt: this.lastTakeAt, lastResultAt: this.lastResultAt,
+      protocol: negotiateProtocol(this.lastPv), caps: this.lastCaps,
+    }
+  }
+
+  /** 记录壳侧声明的协议版本与能力（回填信封；诊断与协商共用）。 */
+  noteShell(pv: unknown, caps: unknown): Negotiation {
+    const negotiation = negotiateProtocol(pv)
+    this.lastPv = negotiation.shell
+    if (caps !== null && typeof caps === 'object' && !Array.isArray(caps)) this.lastCaps = caps as Record<string, unknown>
+    return negotiation
   }
 
   /**
@@ -286,6 +337,15 @@ export function registerControlRoutes(webServer: { register(route: unknown): voi
       const result: ControlResult = ok
         ? { ok: true, data: body.data }
         : { ok: false, error: typeof body.error === 'string' ? body.error : '设备控制失败（壳侧未给出原因）' }
+      // 0.13.8 P2-15：先做协议协商——壳比引擎新时明确失败并给升级指引，
+      // 不让模型看到一株「看起来正常」的空树（§S4.1 场景 3）。
+      const negotiation = queue.noteShell(body.pv, body.caps)
+      if (!negotiation.ok) {
+        logger?.warn?.(`control/result: 协议不兼容（壳 pv=${negotiation.shell} / 引擎 pv=${negotiation.engine}）`)
+        queue.settle(reqId, { ok: false, error: negotiation.reason })
+        sendJson(res, 422, { ok: false, code: 'schema_invalid', error: negotiation.reason })
+        return
+      }
       const accepted = queue.settle(reqId, result)
       if (!accepted) logger?.warn?.(`control/result: rejected (409, reqId=${reqId})`)
       sendJson(res, accepted ? 200 : 409, { ok: accepted, reason: accepted ? 'settled' : 'unknown-or-stale-reqId' })

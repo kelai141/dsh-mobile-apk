@@ -15,7 +15,7 @@
   "private": true,
   "scripts": {
     "build": "tsc -p .",
-    "test": "npm run build && node --test test/ui-tree.test.mjs test/protocol-v2.test.mjs"
+    "test": "npm run build && node --test test/ui-tree.test.mjs test/protocol-v2.test.mjs test/detail-store.test.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.1",
