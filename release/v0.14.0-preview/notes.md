@@ -171,6 +171,32 @@
 
 `check-patch-mirror`（含新插件目录级递归比对）/ `check-manifest-hardening`（XML 语义）/ `check-bounded-io`（正则扩容）/ `check-protocol-v2` / `check-tool-output-schema`（13 工具 18 分支运行时校验）/ `check-control-ops`（六处集合差集 + 族级 toolSurface）/ `check-snapshot-fingerprint` / `check-release-gates`（聚合入口，15 项声明）/ `check-gate-skips`（SKIP 必计数、发布链要求 0）/ `check-state-registry` / `check-bridge-symmetry` / `check-perf-instrumentation` / **`check-inject-completeness`**（成员集合 == 源包 + 相对导入可解析）/ **`check-kotlin-comments`**（嵌套块注释）/ **`check-strip-noop`**（剥离清单后置断言 + 反 no-op）。全部接入「唯一接线面」五位置，并各带**故意注入违规必红**的反向验证。
 
+## 发布链预演（发版前空跑，2026-09-13）
+
+发版前以 **`pwsh -File scripts\build-apk-013.ps1 -Suffix ""`（只构建、不发布）** 完整空跑了一次发布链，结果：
+
+```
+EXIT=0        FAILED 行计数 = 0
+BUILD SUCCESSFUL in 34s   （arm64 与 x86_64 各自的 gradle 构建）
+=== 汇总。已产出 ABI: [arm64, x86_64] / 被拒 ABI: [] ===
+```
+
+| 产物 | 大小 |
+|---|---|
+| `dsh-mobile-apk-v0.14.0-preview-arm64.apk` | 161.40 MB |
+| `dsh-mobile-apk-v0.14.0-preview-x86_64.apk` | 158.70 MB |
+
+即：双 ABI 纯净构建链（快照 → 双注入 → 全部快照门禁含 arm64 侧 → 双 gradle → 双 APK）**全程无一条判红**，两个 ABI 均产出、无被拒项。
+
+**这次空跑抓出并修复了 4 处只在发版链上可见的问题**（`-Fast` 单 ABI 档覆盖不到）：
+
+1. `engine-overlay.json` 的 `extraPresent` 缺 `@vscode/ripgrep-android-arm64` → arm64 快照反向面判红、**拒绝打包 arm64**；
+2. arm64 快照陈旧（早于 A1 出厂 seed）→ 性能插桩门禁 A1 出厂值不为 `startup` → **拒绝打包 arm64**；
+3. `build-snapshot-013.mjs` 的 strip 门禁调用把脚本路径拆成两个 argv 元素 → `MODULE_NOT_FOUND` → **拒绝出快照**；
+4. per-ABI 门禁失败后构建链**仍以 exit 0 结束** → 会静默交付单 ABI 产物（已修：新增「已产出 / 被拒 ABI」汇总 + 被拒非空即 exit 1 + 常驻门禁 `check-build-chain-abort.mjs`，含「去掉守卫则 exit 0」的反证）。
+
+上述 1-3 已修复，#4 由新增门禁与守卫锁住。**发布资产即由这条已验证的链路产出。**
+
 ## 真机待验（arm64，发布前补充门禁）
 
 - 返回手势全面屏路径、A1 存量升级路径、通知锁屏批准与脱敏、OEM 折叠态动作可见性。
