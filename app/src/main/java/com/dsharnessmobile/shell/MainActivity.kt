@@ -176,6 +176,15 @@ class MainActivity : ComponentActivity() {
       webSystemTopInset = pxToCssPx(maxOf(bars.top, cutout.top), density)
       webSystemBottomInset = pxToCssPx(maxOf(bars.bottom, mandatoryGestures), density)
       webImeBottomInset = pxToCssPx(ime, density)
+      // #197（机制①）：edge-to-edge 下 WebView 的**布局尺寸从不随 IME 变化**（布局视口恒 800），
+      // 页面只把 frame 高度钉成 visualViewport.height → 输入框在布局里仍在页面底部，Chrome 按
+      // 「把它滚进可视区」平移视觉视口；页面随后缩短 frame，Chrome 不重算 → offsetTop 残留
+      // （实测 ime=371 ↔ vvTop=371），表现为键盘弹起后底部一大片空白。
+      // 修法：把 IME inset 施加到 WebView 自身的**布局尺寸**上（底 padding 收缩内容盒）——
+      // 布局视口真的变短，浏览器就没有可平移的余地，机制① 从根上消失；只推 CSS 变量做不到这点。
+      if (webViewReady) {
+        webView.setPadding(0, 0, 0, ime)
+      }
       scheduleWebInsetsPush()
       if (guideViewReady) {
         val gutter = resources.getDimensionPixelSize(R.dimen.ds_guide_gutter)

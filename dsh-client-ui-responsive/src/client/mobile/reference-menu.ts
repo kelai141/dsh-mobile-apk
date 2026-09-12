@@ -19,11 +19,76 @@
  * - (row-body drilling is upstream's once the F6 engine patch is applied);
  * - clicking a file row's body keeps upstream behavior (settle the pick);
  * - clicks on the checkbox never reach upstream's mousedown pick.
+ *
+ * 0.13.8（真机反馈的两处缺陷）：
+ * - **勾选态不实时同步**：`preventDefault()` 吃掉原生 checkbox 的状态翻转后，实现只改了内部集合，
+ *   没回写 DOM → 视觉上框永远是空的（用户实测：「勾上了、确认也能选中，但方框状态没同步」）。
+ *   修复 = 每次 toggle 与每次 enhance 后统一 `syncCheckboxes()` 把 `.checked` 按集合回写。
+ * - **确认按钮没做深色适配**：底部条用内联样式写死了浅色分隔线与白字，暗色主题下按钮与分隔线
+ *   与面板脱节。修复 = 走主题 token + `prefers-color-scheme` 兜底（样式集中在 REFERENCE_BAR_CSS，
+ *   由 index.ts 注入，不再散落内联）。
  */
 const ROW_SELECTOR = '[data-trigger-menu] [role="option"]'
 const CHECK_ATTR = 'data-dsh-ref-check'
 const BAR_ATTR = 'data-dsh-ref-bar'
 const NAME_CLASS_HINT = 'itemName'
+/**
+ * 多选条的状态样式（hover/active/禁用/勾选框强调色）。
+ *
+ * 关键样式（背景、文字色、边框）**不在这里**：真机实测发现上游对 `button` 的默认样式会盖过
+ * 注入样式表（表现为「白底 + 白字」，按钮看不见字），因此那几项改成内联 `!important` 写入
+ * （见 `applyBarStyles`）——内联 + important 是目前唯一能稳定压过任意上游规则的写法。
+ * 本表只写「状态类」样式（这类样式上游不会覆盖，写在表里更清晰也更好维护）。
+ *
+ * 颜色口径（**真机实测踩到的坑**）：`--dsw-alias-brand-primary` 在深色主题下解析为
+ * `rgb(249,250,251)`（近白）——拿它当按钮底色配白字就是「白底白字，按钮看不见」。
+ * 因此按钮/勾选框的品牌色**不再取该 token**，直接用显式品牌蓝 `#4d6bfe`（两种主题下都够深）。
+ * 其余颜色（分隔线/条底/次要文字）仍取 token + `prefers-color-scheme` 兜底，壳侧 ThemeBridge
+ * 已把该媒体查询接到系统深浅色，故暗色分支就是「当前主题」的真值。
+ */
+export const REFERENCE_BAR_CSS: string = `
+[data-dsh-ref-bar] {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-top: 1px solid var(--dsw-alias-border-l1, #e5e5e5);
+  background: var(--dsw-alias-bg-l1, #ffffff);
+}
+[data-dsh-ref-bar-count] {
+  font-size: 13px;
+  color: var(--dsw-alias-text-l2, #5f6368);
+}
+[data-dsh-ref-add] {
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: none;
+  background: #4d6bfe;
+  color: var(--dsw-alias-text-on-brand, #ffffff);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+[data-dsh-ref-add]:active { filter: brightness(0.92); }
+[data-dsh-ref-add]:disabled { opacity: 0.5; }
+[data-dsh-ref-check] {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin: 0 8px 0 0;
+  accent-color: #4d6bfe;
+}
+@media (prefers-color-scheme: dark) {
+  [data-dsh-ref-bar] {
+    border-top-color: var(--dsw-alias-border-l1, #2a2b30);
+    background: var(--dsw-alias-bg-l1, #17181c);
+  }
+  [data-dsh-ref-bar-count] { color: var(--dsw-alias-text-l2, #9aa0a6); }
+  [data-dsh-ref-add] { color: var(--dsw-alias-text-on-brand, #ffffff); }
+}
+`
+
 /** Gesture kinds one tap can arrive as; only the first of an interaction acts. */
 const GESTURES = ['pointerdown', 'mousedown', 'click'] as const
 /** Window that folds the gesture kinds of a single tap into one action. */
@@ -128,9 +193,9 @@ export class ReferenceMenuEnhancer {
       box.type = 'checkbox'
       box.setAttribute(CHECK_ATTR, rowLabel(row))
       box.setAttribute('aria-label', rowLabel(row))
-      box.style.cssText = 'flex:none;width:18px;height:18px;margin:0 8px 0 0;accent-color:var(--dsw-alias-brand-primary,#4d6bfe)'
       row.insertBefore(box, row.firstChild)
     }
+    this.syncCheckboxes()
     this.renderBar()
   }
 
@@ -138,7 +203,56 @@ export class ReferenceMenuEnhancer {
   private toggle(label: string): void {
     if (this.checked.has(label)) this.checked.delete(label)
     else this.checked.add(label)
+    this.syncCheckboxes()
     this.renderBar()
+  }
+
+  /**
+   * 把集合状态回写到 DOM 复选框（0.13.8 修复）：check 手势被 preventDefault 掉之后，
+   * 原生状态翻转不会发生，视觉必须由这里补上；每次 enhance 后也走一遍，
+   * 免得上游重渲染列表时把已选行画成未选（状态源始终是 `checked` 集合，DOM 只是投影）。
+   */
+  private syncCheckboxes(): void {
+    for (const row of document.querySelectorAll<HTMLElement>(ROW_SELECTOR)) {
+      const box = row.querySelector<HTMLInputElement>('[' + CHECK_ATTR + ']')
+      if (box === null) continue
+      const label = box.getAttribute(CHECK_ATTR) ?? ''
+      box.checked = this.checked.has(label)
+    }
+  }
+
+  /**
+   * 关键样式内联写入（0.13.8 修复「按键没做深色适配」）：`style.setProperty(..., 'important')`
+   * 的优先级高于任何样式表规则（含上游的 button 默认样式），是唯一稳的落法。
+   * 颜色优先取主题 token，取不到时按当前深浅色给品牌蓝/白字（蓝底白字在两种主题下都可读）。
+   */
+  private applyBarStyles(bar: HTMLElement, count: HTMLElement, add: HTMLButtonElement): void {
+    const set = (el: HTMLElement, prop: string, value: string): void => {
+      el.style.setProperty(prop, value, 'important')
+    }
+    const dark = typeof window.matchMedia === 'function'
+      && window.matchMedia('(prefers-color-scheme: dark)').matches
+    set(bar, 'display', 'flex')
+    set(bar, 'gap', '8px')
+    set(bar, 'align-items', 'center')
+    set(bar, 'justify-content', 'space-between')
+    set(bar, 'padding', '8px 10px')
+    set(bar, 'border-top', '1px solid var(--dsw-alias-border-l1, ' + (dark ? '#2a2b30' : '#e5e5e5') + ')')
+    set(bar, 'background', 'var(--dsw-alias-bg-l1, ' + (dark ? '#17181c' : '#ffffff') + ')')
+    set(count, 'font-size', '13px')
+    set(count, 'color', 'var(--dsw-alias-text-l2, ' + (dark ? '#9aa0a6' : '#5f6368') + ')')
+    // 按钮：显式品牌蓝 + 白字，且用 important 压过上游 button 默认样式（真机实测的根因）
+    set(add, 'background-color', '#4d6bfe')   // 见文件头：该 token 深色下近白，不能当按钮底色
+    set(add, 'background-image', 'none')
+    set(add, 'color', '#ffffff')
+    set(add, 'border', 'none')
+    set(add, 'border-radius', '8px')
+    set(add, 'padding', '6px 14px')
+    set(add, 'font-size', '13px')
+    set(add, 'font-weight', '500')
+    set(add, 'line-height', '1.4')
+    set(add, 'min-width', '64px')
+    set(add, 'appearance', 'none')
   }
 
   /** Reflect the current set: a bottom action inside the open menu. */
@@ -151,17 +265,16 @@ export class ReferenceMenuEnhancer {
     }
     const bar = existing ?? document.createElement('div')
     bar.setAttribute(BAR_ATTR, '')
-    bar.style.cssText = 'display:flex;gap:8px;align-items:center;justify-content:space-between;padding:8px 10px;border-top:1px solid var(--dsw-alias-separator,#e5e5e5)'
     bar.innerHTML = ''
     const count = document.createElement('span')
+    count.setAttribute('data-dsh-ref-bar-count', '')
     count.textContent = '已选 ' + String(this.checked.size) + ' 项'
-    count.style.cssText = 'font-size:13px;opacity:.8'
     const add = document.createElement('button')
     add.type = 'button'
     add.setAttribute('data-dsh-ref-add', '')
-    add.textContent = '添加'
-    add.style.cssText = 'padding:6px 14px;border-radius:8px;border:none;background:var(--dsw-alias-brand-primary,#4d6bfe);color:#fff;font-size:13px'
+    add.textContent = '添加 ' + String(this.checked.size) + ' 项'
     bar.append(count, add)
+    this.applyBarStyles(bar, count, add)
     if (existing === null) menu.appendChild(bar)
   }
 

@@ -27,6 +27,8 @@ export class KeyboardBoundary {
   private media: MediaQueryList | null = null
   private lastIme = 0
   private lastVv = 0
+  /** 收敛代次（#197 机制②）：新事件打断旧的复算链，避免过期复算覆盖新状态。 */
+  private settleGeneration = 0
 
   /** Watch visualViewport resize + the shell's IME inset variable. */
   attach(): void {
@@ -49,6 +51,17 @@ export class KeyboardBoundary {
     const frame = document.querySelector<HTMLElement>('[data-dsh-frame]')
     if (frame === null) return
     this.frame = frame
+    this.apply(frame)
+    // #197 机制②：键盘动画中途的 resize 会把 frame 高度钉在一个**偏小**的中间值
+    // （生产日志抓到 frameH=189 while vvH=495），若随后没有新事件就永久停在半高。
+    // 这里补两次复算把中间态收敛掉（rAF 抓动画尾帧，260ms 抓内核最终布局）。
+    const generation = ++this.settleGeneration
+    requestAnimationFrame(() => { if (generation === this.settleGeneration) this.apply(frame) })
+    window.setTimeout(() => { if (generation === this.settleGeneration) this.apply(frame) }, 260)
+  }
+
+  /** 按当前 IME inset 与可视视口高度决定钉住还是还原（可重复调用，幂等）。 */
+  private apply(frame: HTMLElement): void {
     const rootStyle = getComputedStyle(document.documentElement)
     const ime = Number.parseFloat(rootStyle.getPropertyValue('--dsh-android-ime-bottom')) || 0
     const vv = window.visualViewport
