@@ -71,6 +71,7 @@ jobs:
           node scripts/check-bridge-symmetry.mjs
           node scripts/check-gate-skips.mjs
           node scripts/check-kotlin-comments.mjs
+          node scripts/check-build-chain-abort.mjs
           node scripts/check-perf-instrumentation.mjs
 
   compile:

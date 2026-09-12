@@ -75,6 +75,7 @@ const GATE_SCRIPTS = [
   'check-inject-completeness.mjs',
   'check-strip-noop.mjs',
   'check-kotlin-comments.mjs',
+  'check-build-chain-abort.mjs',
   'check-snapshot-file-modes.mjs',
   'check-third-party.mjs',
   'check-snapshot-secrets.mjs',
@@ -141,6 +142,8 @@ try {
   run('node', [gate('check-manifest-hardening.mjs')])
   log('门禁：Kotlin 注释嵌套…')
   run('node', [gate('check-kotlin-comments.mjs')])
+  log('门禁：构建链中止语义（任一 ABI 被拒 = 非 0）…')
+  run('node', [gate('check-build-chain-abort.mjs')])
   log('门禁：子进程有界读…')
   run('node', [gate('check-bounded-io.mjs')])
   log('门禁：协议 V2 往返与体积…')

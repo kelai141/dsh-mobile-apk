@@ -6,7 +6,8 @@ param(
     [string]$OnlyAbi = "",
     [switch]$SkipInject,
     [switch]$ExportSnapshots,              # 0.13.2 增补：导出注入后快照资产 + 一致性门禁（见第 4 步）
-    [switch]$Fast                          # 2c 快速档（2026-09-05）：单 ABI（缺省 x86_64=MuMu 开发目标）+ 注入链 preset 1
+    [string]$ForceRejectAbi = "",          # 自检钩子（仅供 check-build-chain-abort --self-test）：强制某 ABI 走拒绝路径，验证整链非 0
+[switch]$Fast                          # 2c 快速档（2026-09-05）：单 ABI（缺省 x86_64=MuMu 开发目标）+ 注入链 preset 1
 )
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
@@ -39,6 +40,11 @@ if ($LASTEXITCODE -ne 0) { Write-Host "桥面出现新的不对称（只有 sett
 Write-Host "== 门禁覆盖与 SKIP 纪律门禁 =="
 node (Join-Path $Root "scripts\check-gate-skips.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "门禁覆盖清单/SKIP 纪律失败（发布链要求 SKIP=0），拒绝打包"; exit 1 }
+
+# 构建链中止语义（任一 ABI 被门禁拒绝 = 整链非 0；含尾部守卫动态自检）
+Write-Host "== 构建链中止语义门禁 =="
+node (Join-Path $Root "scripts\check-build-chain-abort.mjs") --self-test 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "构建链中止语义失效（某 ABI 被拒后仍可能 exit 0），拒绝打包"; exit 1 }
 
 # 快照指纹对账门禁（0.13.8-b 批 B2 ST-04 / F-ENV-01）：sha256(assets/snapshot.tar.xz) == assets/snapshot.sha256。
 # 预检：净检出下 tar 不在场 → SKIP 计数（exit 0）；第 3 步写完本 ABI 的声明值后再以 --require 严格复核。
@@ -110,8 +116,12 @@ $externDirs = @($pluginManifest.externals | ForEach-Object { Join-Path $Root $_ 
 $externByName = @{}
 foreach ($d in $externDirs) { $externByName[(Split-Path $d -Leaf)] = $d }
 
+$rejectedAbis = @()
+$producedAbis = @()
 foreach ($abi in @('arm64', 'x86_64')) {
     if ($OnlyAbi -and $OnlyAbi -ne $abi) { continue }
+    # 自检钩子：强制该 ABI 走「拒绝打包」路径（默认空 = 永不触发），用于锁住「任一 ABI 被拒 → 整链非 0」。
+    if ($ForceRejectAbi -eq $abi) { Write-Host "自检：强制拒绝 $abi（构建链中止语义自检）"; $rejectedAbis += $abi; continue }
     $snap = Join-Path $Root ".deploy-tmp\snapshot-013\$abi\snapshot.tar.xz"
     if (-not (Test-Path $snap)) { Write-Host "缺快照 $snap（先跑 build-snapshot-013.mjs）"; continue }
     $work = Join-Path $Root ".deploy-tmp\build-\13-$abi"
@@ -120,7 +130,7 @@ foreach ($abi in @('arm64', 'x86_64')) {
     # 1b. 引擎 overlay 抽验门禁（0.13.3 W1）：登记表在快照内全量落位（版本精确断言 + presets 在场）
     Write-Host "== 引擎 overlay 抽验（$abi）=="
     node (Join-Path $Root "scripts\check-engine-overlay.mjs") $snap 2>&1
-    if ($LASTEXITCODE -ne 0) { Write-Host "引擎 overlay 抽验失败，拒绝打包（$abi）"; continue }
+    if ($LASTEXITCODE -ne 0) { Write-Host "引擎 overlay 抽验失败，拒绝打包（$abi）"; $rejectedAbis += $abi; continue }
 
     # 1. 插件注入（@dsh-android 专用 + 通用根级包）
     if (-not $SkipInject) {
@@ -140,7 +150,7 @@ foreach ($abi in @('arm64', 'x86_64')) {
         # 登记表 scripts/patches/registry.json。默认 ensure 语义（缺席即施加，锚点失配拒打包）。
         # 雷点 8：全量输出——Select-First 截断管道会杀 node 致误判失败
         node (Join-Path $Root "scripts\patches\apply-patches.mjs") (Join-Path $Root "vendor") 2>&1
-        if ($LASTEXITCODE -ne 0) { Write-Host "vendor 补丁校验/施加失败，拒绝打包（$abi）"; continue }
+        if ($LASTEXITCODE -ne 0) { Write-Host "vendor 补丁校验/施加失败，拒绝打包（$abi）"; $rejectedAbis += $abi; continue }
         # 单 pass 注入（2c 提速 2026-09-05）：@dsh-android + 根级插件 + 权威 patch 覆盖合并
         # 为一次 tar 流处理——压缩/解压从 ×4 → ×1（原三步各自全量重压缩 ~743MB）。
         # 雷点 8：全量输出。
@@ -148,19 +158,19 @@ foreach ($abi in @('arm64', 'x86_64')) {
         # ST-05：--all-profiles = 权威 patch 与注入包覆盖全部真实装配 profile（web + headless；
         # 负控 profile headless-bad 由 inject-all.py 显式跳过）。此前只写 web，headless 停在旧值。
         python (Join-Path $Root "scripts\inject-all.py") $snap (Join-Path $work "snap-final2.tar.xz") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") --dsh-android @pluginDirs --external $undo $market $modelSync --all-profiles 2>&1
-        if ($LASTEXITCODE -ne 0) { Write-Host "注入失败，拒绝打包（$abi）"; continue }
+        if ($LASTEXITCODE -ne 0) { Write-Host "注入失败，拒绝打包（$abi）"; $rejectedAbis += $abi; continue }
         # 防回归（审校 C4 2026-08-23）：patch 挂载集 ⊇ 注入集——缺条目（如 linux-env 漏挂）直接拒打包
         Write-Host "== 挂载集校验（$abi）=="
         node (Join-Path $Root "scripts\check-patch-mounts.mjs") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") @pluginDirs $undo $market $modelSync 2>&1 | Select-Object -First 4
-        if ($LASTEXITCODE -ne 0) { Write-Host "patch 挂载集校验失败，拒绝打包（$abi）"; continue }
+        if ($LASTEXITCODE -ne 0) { Write-Host "patch 挂载集校验失败，拒绝打包（$abi）"; $rejectedAbis += $abi; continue }
         # 注入面成员完整性（P0：包内新增文件曾被静默丢弃 → tar 里 import 悬空 → 设备侧引擎启动即死）
         Write-Host "== 注入成员完整性门禁（$abi）=="
         node (Join-Path $Root "scripts\check-inject-completeness.mjs") (Join-Path $work "snap-final2.tar.xz") 2>&1
-        if ($LASTEXITCODE -ne 0) { Write-Host "注入产物成员不完整（新增文件丢失/import 悬空），拒绝打包（$abi）"; continue }
+        if ($LASTEXITCODE -ne 0) { Write-Host "注入产物成员不完整（新增文件丢失/import 悬空），拒绝打包（$abi）"; $rejectedAbis += $abi; continue }
         # 剥离清单后置断言（ST-16）：清单项在产物里必须不存在（防剥离静默 no-op）
         Write-Host "== 剥离清单后置断言（$abi）=="
         node (Join-Path $Root "scripts\check-strip-noop.mjs") (Join-Path $work "snap-final2.tar.xz") 2>&1
-        if ($LASTEXITCODE -ne 0) { Write-Host "剥离清单项仍在场（剥离未生效），拒绝打包（$abi）"; continue }
+        if ($LASTEXITCODE -ne 0) { Write-Host "剥离清单项仍在场（剥离未生效），拒绝打包（$abi）"; $rejectedAbis += $abi; continue }
         $snapIn = Join-Path $work "snap-final2.tar.xz"
     } else {
         $snapIn = $snap
@@ -176,13 +186,13 @@ foreach ($abi in @('arm64', 'x86_64')) {
             # 发生在 inject-all.py 重打包时（dev 专档，禁止用于发布资产）。
             Write-Host "警告：-SkipInject 档快照未做权限归一化（dev 专档，禁止发布）"
         } else {
-            Write-Host "快照权限模式校验失败，拒绝打包（$abi）"; continue
+            Write-Host "快照权限模式校验失败，拒绝打包（$abi）"; $rejectedAbis += $abi; continue
         }
     }
     # 第三方许可合规（GPL 义务 A1/A2 门禁 2026-08-23）：copyleft 包许可证全文须随快照分发，
     # 矩阵须覆盖 dpkg status 全部包；缺失直接拒绝打包（--- tar 视图：9p 权限不影响判定）。
     node (Join-Path $Root "scripts\check-third-party.mjs") (Join-Path $work "x") --tar $snapIn 2>&1 | Select-Object -First 4
-    if ($LASTEXITCODE -ne 0) { Write-Host "THIRD-PARTY CHECK FAILED，拒绝打包（$abi）"; continue }
+    if ($LASTEXITCODE -ne 0) { Write-Host "THIRD-PARTY CHECK FAILED，拒绝打包（$abi）"; $rejectedAbis += $abi; continue }
     # 许可资产（LICENSES 标准文本 + notices）打入 APK assets（A2：随包分发）
     $licAssets = Join-Path $apkDir "app\src\main\assets\licenses"
     New-Item -ItemType Directory -Force -Path $licAssets | Out-Null
@@ -236,6 +246,7 @@ foreach ($abi in @('arm64', 'x86_64')) {
     } finally {
         Pop-Location
     }
+    $producedAbis += $abi
 }
 
 # 4. 发布快照资产导出 + 一致性门禁（0.13.2 增补；0.13.1 实锤教训：Release snapshot-*.tar.xz
@@ -254,10 +265,17 @@ if ($ExportSnapshots) {
         $apkOut = Join-Path $Out ("dsh-mobile-apk-v" + $GradleVer + $Suffix + "-" + $abi + ".apk")
         if (Test-Path $apkOut) {
             & (Join-Path $PSScriptRoot "check-snapshot-asset.ps1") -ApkPath $apkOut -SnapshotPath $outSnap
-            if ($LASTEXITCODE -ne 0) { Write-Host "快照资产一致性校验失败，拒绝发布组装（$abi）"; continue }
+            if ($LASTEXITCODE -ne 0) { Write-Host "快照资产一致性校验失败，拒绝发布组装（$abi）"; $rejectedAbis += $abi; continue }
         } else {
             Write-Host "警告: 缺 APK $apkOut，跳过一致性校验（$abi）"
         }
     }
 }
-Write-Host "=== 完成。产物目录：$Out ==="
+$producedList = (($producedAbis | Select-Object -Unique) -join ", ")
+$rejectedList = (($rejectedAbis | Select-Object -Unique) -join ", ")
+Write-Host "=== 汇总。已产出 ABI: [$producedList] / 被拒 ABI: [$rejectedList] ==="
+Write-Host "=== 产物目录：$Out ==="
+# 任一 ABI 被门禁拒绝 = 不得交付（单 ABI 产物发布 = 缺 ABI 的 release）——必须非 0 退出，
+# 由 scripts/check-build-chain-abort.mjs 静态锁住（0.13.8-b：arm64 被拒后整链仍 exit 0 的实锤）。
+if ($rejectedAbis.Count -gt 0) { Write-Host "有 ABI 被门禁拒绝——不发版（exit 1）"; exit 1 }
+if ($producedAbis.Count -eq 0) { Write-Host "没有任何 ABI 产出——不发版（exit 1）"; exit 1 }

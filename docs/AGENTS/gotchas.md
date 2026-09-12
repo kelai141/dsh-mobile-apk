@@ -273,6 +273,14 @@
     「就绪后补投」两条语义成立（预算常量单一来源 `ENGINE_BOOT_BUDGET_MS`，见 `EngineStartFlow.kt`）。
     锚点：`EngineStartFlow.kt`（就绪轮询/预算）+ `OverlayService`（通知应答流）+ 状态登记条 `notify-ready-gate`。
 
+94. **构建绿 != 产物对：某个 ABI 被门禁拒绝后，构建链仍可能以 exit 0 结束并交付单 ABI 产物（0.13.8-b 实锤）**：
+    `build-apk-013.ps1 -Suffix ''` 空跑时 arm64 侧 overlay 门禁判红 → 脚本打印「拒绝打包（arm64）」并 `continue`，
+    随后照常打印完成行且 **exit 0**，产物目录只剩 x86_64 的 APK ⇒ 发版会发出缺 ABI 的 release 而无人察觉。
+    铁律：per-ABI 的每条拒绝路径都必须把该 ABI 记入 `$rejectedAbis`，尾部必须打印「已产出 / 被拒 ABI」汇总，
+    并在「被拒非空」或「产出为空」时 `exit 1`。防线 = `scripts/check-build-chain-abort.mjs`（静态逐处断言 +
+    `--self-test` 抽真实尾部块用合成状态驱动：被拒→非 0 / 全产出→0 / 零产出→非 0 / 去掉守卫→0 承重反证）。
+
+
 
 
 

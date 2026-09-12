@@ -199,6 +199,7 @@ if (peer) {
     'scripts/check-strip-noop.mjs',
     // 云端链与 CI 都跑它（build-apk.mjs GATE_SCRIPTS），此前不在镜像面 = 单边演进可绕过（ST-17 顺路收口）
     'scripts/check-engine-overlay.mjs',
+    'scripts/check-build-chain-abort.mjs',
     'scripts/release-plugin-src-gaps.json',
     'scripts/gen-protocol-v2-fixture.mjs',
     'scripts/profile-web.cordis.patch.yml',
