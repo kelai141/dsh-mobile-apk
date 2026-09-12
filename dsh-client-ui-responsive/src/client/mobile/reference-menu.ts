@@ -16,31 +16,112 @@
  * - every row gets a leading checkbox; checked rows form a multi-select set with a bottom
  *   "add N" action that inserts them all as references (driven through upstream's own pick so the
  *   atomic reference semantics stay upstream's);
- * - (row-body drilling is upstream's once the F6 engine patch is applied);
  * - clicking a file row's body keeps upstream behavior (settle the pick);
  * - clicks on the checkbox never reach upstream's mousedown pick.
+ *
+ * 0.13.8 真机迭代（两轮反馈）：
+ * - 第一轮：勾选态不实时同步（`preventDefault()` 吃掉原生 checkbox 翻转后没回写 DOM）、
+ *   确认按钮白底白字（主题 token `--dsw-alias-brand-primary` 在深色下近白 + 上游 button 默认样式
+ *   盖过注入样式表）。
+ * - 第二轮（本版重做）：**用标签字符串当视觉状态的键是错的**——上游一重渲染行标签就可能与插入时
+ *   不一致，于是出现「内部集合已勾选、方框仍显示未勾选」（用户实测：底部已显示"已选 1 项"而方框空）。
+ *   现在状态**挂在行元素上**（`data-dsh-ref-on`），视觉完全由 CSS 从该属性派生，中间没有 JS 同步
+ *   步骤；行元素被上游换掉时 `enhance()` 按标签把状态补回新元素。
+ * - 同时按原生行样式重画勾选框：不再是浏览器默认的 input 方块，而是主题化圆角方框
+ *   （未选 = 描边；选中 = 品牌蓝底 + 白勾），垂直居中、与行内图标同列。
  */
 const ROW_SELECTOR = '[data-trigger-menu] [role="option"]'
 const CHECK_ATTR = 'data-dsh-ref-check'
+/** 选中标记（**视觉状态的唯一来源**：属性是状态，样式是后果，由 CSS 消费）。 */
+const ON_ATTR = 'data-dsh-ref-on'
 const BAR_ATTR = 'data-dsh-ref-bar'
 const NAME_CLASS_HINT = 'itemName'
 /** Gesture kinds one tap can arrive as; only the first of an interaction acts. */
 const GESTURES = ['pointerdown', 'mousedown', 'click'] as const
 /** Window that folds the gesture kinds of a single tap into one action. */
 const ACTION_DEBOUNCE_MS = 400
+/** 品牌蓝（勾选框与按钮共用）。**不取 `--dsw-alias-brand-primary`**：该 token 在深色主题下实测
+ *  解析为 rgb(249,250,251)（近白），当底色配白字就是「白底白字不可见」。 */
+const BRAND = '#4d6bfe'
 
-/** One row this enhancer tracks: its label, whether it is a directory, and the live element. */
-interface Row {
-  label: string
-  directory: boolean
+/**
+ * 勾选框与底部条样式。
+ *
+ * 两点设计决定：
+ * 1. 勾选框用 `<span>` + CSS 画——原生 `<input type=checkbox>` 在深色主题里是浏览器默认方块，
+ *    与上游行样式不融（用户反馈「和原生 ui 融合得太差」）；
+ * 2. 选中态由 `[data-dsh-ref-on]` 属性派生，没有任何 JS 视觉同步步骤，因此不可能出现
+ *    「集合已选中而方框未勾」的失配。
+ * 底部条的关键样式仍在 JS 里内联 `!important`（上游 button 默认样式会盖过注入表）。
+ */
+export const REFERENCE_BAR_CSS: string = `
+[data-dsh-ref-check] {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin: 0 10px 0 2px;
+  align-self: center;
+  border-radius: 5px;
+  border: 1.5px solid #8b909a;
+  background: transparent;
+  box-sizing: border-box;
+  position: relative;
+  transition: background-color .12s ease, border-color .12s ease;
 }
+[data-dsh-ref-on] [data-dsh-ref-check] {
+  background: #4d6bfe;
+  border-color: #4d6bfe;
+}
+[data-dsh-ref-on] [data-dsh-ref-check]::after {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 1.5px;
+  width: 4px;
+  height: 8px;
+  border: solid #ffffff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+[data-dsh-ref-bar] {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-top: 1px solid var(--dsw-alias-border-l1, #e5e5e5);
+  background: var(--dsw-alias-bg-l1, #ffffff);
+}
+[data-dsh-ref-bar-count] {
+  font-size: 13px;
+  color: var(--dsw-alias-text-l2, #5f6368);
+}
+[data-dsh-ref-add] {
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: none;
+  background: #4d6bfe;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+[data-dsh-ref-add]:active { filter: brightness(0.92); }
+@media (prefers-color-scheme: dark) {
+  [data-dsh-ref-check] { border-color: var(--dsw-alias-border-l2, #6b7075); }
+  [data-dsh-ref-bar] {
+    border-top-color: var(--dsw-alias-border-l1, #2a2b30);
+    background: var(--dsw-alias-bg-l1, #17181c);
+  }
+  [data-dsh-ref-bar-count] { color: var(--dsw-alias-text-l2, #9aa0a6); }
+}
+`
 
 /** Read a row's candidate label (upstream renders it in the name span; fall back to text). */
 function rowLabel(row: HTMLElement): string {
   const name = row.querySelector('[class*="' + NAME_CLASS_HINT + '"]')
   return ((name?.textContent ?? row.textContent) || '').trim()
 }
-
 
 /** The composer's editable host (upstream Lexical root). */
 function composerEditable(): HTMLElement | null {
@@ -49,6 +130,7 @@ function composerEditable(): HTMLElement | null {
 
 /** Multi-select state plus the mobile-only row behavior for the reference menu. */
 export class ReferenceMenuEnhancer {
+  /** 标签集合（仅用于最终 pick；视觉状态不依赖它，见文件头）。 */
   private readonly checked = new Set<string>()
   private observer: MutationObserver | null = null
   private lastClaim = 0
@@ -66,7 +148,7 @@ export class ReferenceMenuEnhancer {
     event.preventDefault()
     event.stopImmediatePropagation()
     event.stopPropagation()
-    if (this.claimOnce()) this.toggle(rowLabel(row))
+    if (this.claimOnce()) this.toggle(row)
   }
 
   private readonly onMenuClick = (event: MouseEvent): void => {
@@ -91,9 +173,6 @@ export class ReferenceMenuEnhancer {
   }
 
   attach(): void {
-    // One gesture kind only: claiming pointerdown + preventDefault suppresses the compatibility
-    // mouse events, while claiming both would run the row behavior twice (measured on device: a
-    // single tap produced three folder references).
     for (const kind of GESTURES) document.addEventListener(kind, this.onGesture, true)
     document.addEventListener('click', this.onMenuClick, true)
     this.observer = new MutationObserver(() => { this.schedule() })
@@ -120,25 +199,74 @@ export class ReferenceMenuEnhancer {
     })
   }
 
-  /** Add the leading checkbox to every row that lacks one, then refresh the action bar. */
+  /**
+   * Ensure every row carries a checkbox, re-apply the checked mark for rows upstream re-rendered
+   * (state lives on the element, so a fresh element needs the mark back), then refresh the bar.
+   */
   private enhance(): void {
     for (const row of document.querySelectorAll<HTMLElement>(ROW_SELECTOR)) {
-      if (row.querySelector('[' + CHECK_ATTR + ']') !== null) continue
-      const box = document.createElement('input')
-      box.type = 'checkbox'
-      box.setAttribute(CHECK_ATTR, rowLabel(row))
-      box.setAttribute('aria-label', rowLabel(row))
-      box.style.cssText = 'flex:none;width:18px;height:18px;margin:0 8px 0 0;accent-color:var(--dsw-alias-brand-primary,#4d6bfe)'
-      row.insertBefore(box, row.firstChild)
+      let box = row.querySelector<HTMLElement>('[' + CHECK_ATTR + ']')
+      if (box === null) {
+        box = document.createElement('span')
+        box.setAttribute(CHECK_ATTR, '')
+        box.setAttribute('role', 'checkbox')
+        box.setAttribute('aria-label', rowLabel(row))
+        row.insertBefore(box, row.firstChild)
+      }
+      const on = this.checked.has(rowLabel(row))
+      if (on) row.setAttribute(ON_ATTR, '')
+      else row.removeAttribute(ON_ATTR)
+      box.setAttribute('aria-checked', on ? 'true' : 'false')
     }
     this.renderBar()
   }
 
-  /** Toggle one label in the multi-select set. */
-  private toggle(label: string): void {
-    if (this.checked.has(label)) this.checked.delete(label)
-    else this.checked.add(label)
+  /** Toggle one row：状态直接落在行元素上，随后由 CSS 呈现（无二次同步步骤）。 */
+  private toggle(row: HTMLElement): void {
+    const label = rowLabel(row)
+    const on = !row.hasAttribute(ON_ATTR)
+    if (on) {
+      row.setAttribute(ON_ATTR, '')
+      this.checked.add(label)
+    } else {
+      row.removeAttribute(ON_ATTR)
+      this.checked.delete(label)
+    }
+    row.querySelector<HTMLElement>('[' + CHECK_ATTR + ']')
+      ?.setAttribute('aria-checked', on ? 'true' : 'false')
     this.renderBar()
+  }
+
+  /**
+   * 底部条的关键样式内联写入：`style.setProperty(..., 'important')` 的优先级高于任何样式表规则
+   * （含上游对 `button` 的默认样式——真机实测过一次「白底白字」正是这个原因）。
+   * 颜色不取 `--dsw-alias-brand-primary`（深色下近白），用显式品牌蓝。
+   */
+  private applyBarStyles(bar: HTMLElement, count: HTMLElement, add: HTMLElement): void {
+    const set = (el: HTMLElement, prop: string, value: string): void => {
+      el.style.setProperty(prop, value, 'important')
+    }
+    const dark = typeof window.matchMedia === 'function'
+      && window.matchMedia('(prefers-color-scheme: dark)').matches
+    set(bar, 'display', 'flex')
+    set(bar, 'gap', '8px')
+    set(bar, 'align-items', 'center')
+    set(bar, 'justify-content', 'space-between')
+    set(bar, 'padding', '8px 12px')
+    set(bar, 'border-top', '1px solid var(--dsw-alias-border-l1, ' + (dark ? '#2a2b30' : '#e5e5e5') + ')')
+    set(bar, 'background', 'var(--dsw-alias-bg-l1, ' + (dark ? '#17181c' : '#ffffff') + ')')
+    set(count, 'font-size', '13px')
+    set(count, 'color', 'var(--dsw-alias-text-l2, ' + (dark ? '#9aa0a6' : '#5f6368') + ')')
+    set(add, 'background-color', BRAND)
+    set(add, 'background-image', 'none')
+    set(add, 'color', '#ffffff')
+    set(add, 'border', 'none')
+    set(add, 'border-radius', '8px')
+    set(add, 'padding', '6px 14px')
+    set(add, 'font-size', '13px')
+    set(add, 'font-weight', '500')
+    set(add, 'line-height', '1.4')
+    set(add, 'appearance', 'none')
   }
 
   /** Reflect the current set: a bottom action inside the open menu. */
@@ -151,17 +279,16 @@ export class ReferenceMenuEnhancer {
     }
     const bar = existing ?? document.createElement('div')
     bar.setAttribute(BAR_ATTR, '')
-    bar.style.cssText = 'display:flex;gap:8px;align-items:center;justify-content:space-between;padding:8px 10px;border-top:1px solid var(--dsw-alias-separator,#e5e5e5)'
     bar.innerHTML = ''
     const count = document.createElement('span')
+    count.setAttribute('data-dsh-ref-bar-count', '')
     count.textContent = '已选 ' + String(this.checked.size) + ' 项'
-    count.style.cssText = 'font-size:13px;opacity:.8'
     const add = document.createElement('button')
     add.type = 'button'
     add.setAttribute('data-dsh-ref-add', '')
-    add.textContent = '添加'
-    add.style.cssText = 'padding:6px 14px;border-radius:8px;border:none;background:var(--dsw-alias-brand-primary,#4d6bfe);color:#fff;font-size:13px'
+    add.textContent = '添加 ' + String(this.checked.size) + ' 项'
     bar.append(count, add)
+    this.applyBarStyles(bar, count, add)
     if (existing === null) menu.appendChild(bar)
   }
 
@@ -169,6 +296,7 @@ export class ReferenceMenuEnhancer {
   private async addSelected(): Promise<void> {
     const labels = [...this.checked]
     this.checked.clear()
+    document.querySelectorAll('[' + ON_ATTR + ']').forEach((el) => { el.removeAttribute(ON_ATTR) })
     document.querySelector<HTMLElement>('[' + BAR_ATTR + ']')?.remove()
     for (const label of labels) {
       if (!(await this.pickByLabel(label))) return
@@ -195,7 +323,7 @@ export class ReferenceMenuEnhancer {
     return true
   }
 
-  /** The row whose candidate label matches, ignoring the checkbox we injected. */
+  /** The row whose candidate label matches. */
   private findRow(label: string): HTMLElement | null {
     for (const row of document.querySelectorAll<HTMLElement>(ROW_SELECTOR)) {
       if (rowLabel(row) === label) return row
