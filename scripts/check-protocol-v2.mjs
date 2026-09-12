@@ -47,10 +47,17 @@ const newest = (dir, ext) => {
   }
   return { ms: newestMs, file: newestFile }
 }
-const srcNewest = newest(join(ROOT, PLUGIN, 'src'), '.ts')
-const libNewest = newest(join(ROOT, PLUGIN, 'lib'), '.js')
-if (srcNewest.ms > libNewest.ms) {
-  fail(`构建产物过期：src/${srcNewest.file} 比 lib/${libNewest.file} 新\n  先构建：cd ${PLUGIN} && npm run build`)
+const srcDir = join(ROOT, PLUGIN, 'src')
+const libDir = join(ROOT, PLUGIN, 'lib')
+const staleness = () => {
+  const s = newest(srcDir, '.ts')
+  const l = newest(libDir, '.js')
+  return { s, l, stale: s.ms > l.ms }
+}
+const cur = staleness()
+if (cur.stale) {
+  fail(`构建产物过期：src/${cur.s.file} 比 lib/${cur.l.file} 新
+  先构建：cd ${PLUGIN} && npm install && npm run build（构建链不代建插件，免得注入中途被重写）`)
 }
 
 // 跨语言 fixture 必须与 TS 编码器同源（壳侧 Kotlin 单测就是拿它比对的）
