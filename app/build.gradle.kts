@@ -14,25 +14,31 @@ android {
     // (the embedded engine, bash, and every child command would need linker64
     // wrappers); 34 keeps native exec working on Android 15/16 devices.
     targetSdk = 34
-    // 0.13.8：versionCode 37（覆盖安装 0.13.7fx-1(36)）。本版主题：
-    // ① 控制协议 V2（列式载荷 428 B/节点 → 54.7 B/行，413 自动降级 view=target，行句柄动作回指）；
-    // ② E6 能力补齐（全局动作面 getSystemActions 驱动、无障碍截屏回落 ADB）；
-    // ③ P2 收口（android_ui_detail 两级披露 + DetailStore、android_privilege_status 结构化 route +
-    //    协议协商）；④ 启动页 APK 自更新（仅手动 + 同按钮二次确认 + 安装授权）；
-    // ⑤ 悬浮球动效 M4-M8；⑥ @ 菜单勾选框（状态由行属性派生 + 原生风格自绘）；
-    // ⑦ 键盘空白带根治（IME inset 施加到 WebView 布局尺寸，apk #197）；
-    // ⑧ 构建门禁链自身缺陷修复（Join-Path 拼写、镜像比对面、协议 V2 门禁）。
-    versionCode = 37
+    // 0.14.0-preview：versionCode 38（覆盖安装 0.13.8(37)）。本版主题（迭代计划
+    // docs/NEXT-ITERATION-PLAN-2026-09-12.md 的切片 1 = B0+B1+B2）：
+    // ① B0 发布阻断项清零：android_ui_dump schema 族与返回面脱钩（#204）、控制协议 V2 行句柄
+    //    口径（#206.1，载荷行下标 → 原始行号）、file-incoming 三条 exact 路由无鉴权（#205）；
+    // ② B1 数据与自愈：#210 半死状态机四缺口、#211 壳侧 IO 三处、状态陈旧 P0（真源 + 同步路径）、
+    //    临时工作区 R1-R3；
+    // ③ B2 门禁与发布链：新增门禁接进唯一接线面（本地构建链 / 两仓 CI / 发布组装链三处），
+    //    快照指纹对账、工具返回值 schema 自检、控制 op 六处登记链、SKIP 计数。
+    versionCode = 38
     // Snapshot builds append a suffix (e.g. -SN-1-RC13) via -PversionNameSuffix; release builds pass none.
     val snapshotSuffix = providers.gradleProperty("versionNameSuffix").getOrElse("")
     // 版本号单一来源：UI（GuidePageRenderer）、桥（androidBridge.version）、诊断日志、引擎环境变量
     // （DSH_APP_VERSION，见 EngineManager.engineEnv）全部读这里，禁止任何地方再硬编码版本字面量。
-    versionName = "0.13.8" + snapshotSuffix
+    versionName = "0.14.0-preview" + snapshotSuffix
     buildConfigField("String", "TERMUX_VERSION", "\"0.118.3\"")
+    // 0.14.0-preview：虚拟屏 P0 建屏矩阵走仪器测试入口（app UID 下运行 = P0-6 要测的调用者身份），
+    // 不新增任何产品面（Activity/Bridge/Manifest 均不动）。见 .deploy-tmp/iter-0140/vdisplay-p0.md §8.8。
+    testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
   buildFeatures {
     buildConfig = true
+    // 0.14.0-preview：ShizukuUserService.aidl 生成 Stub（虚拟屏线 S5 的 bindUserService 需要）。
+    // 惰性：当前无 Kotlin 引用该 aidl 时也不会产生额外产物。
+    aidl = true
   }
 
   androidResources {
@@ -99,6 +105,11 @@ tasks.whenTaskAdded {
 }
 
 dependencies {
+  // Shizuku 特权通道（0.14.0-preview 虚拟屏线 P0-0）：Maven Central 13.1.5（2023-09-21；上游
+  // App 仍更新但库停更，只按 13.1.5 API 面写代码）。许可 MIT（aar POM <licenses> 实测），
+  // minSdk 26 >= aar 的 24/23，无需 desugaring；settings.gradle.kts 已有 mavenCentral()。
+  implementation("dev.rikka.shizuku:api:13.1.5")
+  implementation("dev.rikka.shizuku:provider:13.1.5")
   implementation("androidx.activity:activity-ktx:1.10.1")
   // androidx.core: FileProvider (external-reader open, issue #52); ViewCompat/
   // WindowInsetsCompat were previously satisfied transitively via activity-ktx.
@@ -108,6 +119,9 @@ dependencies {
   implementation("org.apache.commons:commons-compress:1.28.0")
   implementation("org.tukaani:xz:1.10")
   testImplementation("junit:junit:4.13.2")
+  // 仪器测试（虚拟屏建屏矩阵）：只用于 P0 探针，不进产品面。
+  androidTestImplementation("androidx.test.ext:junit:1.2.1")
+  androidTestImplementation("androidx.test:runner:1.6.2")
   // 本地单测用真实 org.json（android.jar 桩在 JVM 里抛 Stub!）——快照 profiles 合并（#167）测试需要
   testImplementation("org.json:json:20240303")
 }

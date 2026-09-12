@@ -174,7 +174,7 @@ object FileIncoming {
   }
 
   /** 元数据：本次打开的会话清单（生命礼仪清理的依据）。 */
-  fun metaFile(context: Context): File = File(tmpWorkspace(context), ".meta.ndjson")
+  fun metaFile(context: Context): File = File(tmpWorkspace(context), META_ENTRY)
 
   fun recordOpening(context: Context, path: String) {
     try {
@@ -201,7 +201,7 @@ object FileIncoming {
       val list = dir.listFiles() ?: return
       var removed = 0
       for (f in list) {
-        if (f.name == ".sessions") continue // 引擎侧队列元数据：由 claim 消费删除
+        if (f.name == SESSIONS_ENTRY) continue // 引擎侧队列元数据：由 claim 消费删除
         val last = f.lastModified()
         if (last > 0 && now - last > TTL_MS) {
           if (f.delete() || !f.exists()) removed++
@@ -214,18 +214,59 @@ object FileIncoming {
     }
   }
 
+  /** 元数据条目名（生命礼仪豁免面，与 .sessions 对称）。 */
+  private const val SESSIONS_ENTRY = ".sessions"
+  private const val PENDING_ENTRY = ".pending-notify.ndjson"
+  internal const val META_ENTRY = ".meta.ndjson"
+
+  /**
+   * 全清是否可执行（纯函数，JVM 单测锁定）：拷贝与投递/重试两段都静默才许全清。
+   *
+   * FX-211.2（F-211.2 双重静默）：旧实现只看 activeCopies——copyIn 的 finally 一减，
+   * 「recordOpening → enqueuePending → 20s 重试」就全在守卫之外；用户「分享到 DSH」后数秒内
+   * 划掉应用（EngineService.onTaskRemoved → cleanupTmp）时计数已归零 → 顶层全删：刚拷好的
+   * 来件、待发清单、会话元数据一起消失，且**无重试、无残留、无日志**。
+   */
+  internal fun workspaceWipeAllowed(copies: Int, deliveries: Int): Boolean = copies <= 0 && deliveries <= 0
+
+  /**
+   * 本次全清要删的条目名（纯函数，JVM 单测锁定）。豁免面 = 三个元数据条目（.sessions /
+   * .pending-notify.ndjson / .meta.ndjson）∪ 待发清单里仍未受理的来件——「有 pending 就不许
+   * 删它引用的文件」，与 .sessions 的既有豁免同构。
+   */
+  internal fun cleanupDeletions(entries: List<String>, pendingPaths: List<String>): List<String> {
+    val pendingNames = pendingPaths.map { File(it).name }.toSet()
+    return entries.filter { it != SESSIONS_ENTRY && it != PENDING_ENTRY && it != META_ENTRY && it !in pendingNames }
+  }
+
+  /** 待发清单里的路径（未受理来件的绝对路径）；读不到 = 空（fail-soft）。 */
+  private fun pendingPaths(context: Context): List<String> = try {
+    pendingFile(context).readLines().map { it.trim() }.filter { it.isNotEmpty() }
+  } catch (_: Exception) {
+    emptyList()
+  }
+
   /** 清理本次临时会话与临时工作区内容（幂等；不阻塞进程退出——生命周期礼仪 F5.3）。
    *  拷贝在途时让路（0.13.8 #174：后台拷贝与 onTaskRemoved 全清曾可竞态删半个文件），
-   *  残余内容交给下次 TTL 清扫。 */
+   *  FX-211.2 起**投递/重试在途时同样让路**，且任何仍被待发清单引用的来件与三个元数据条目
+   *  一律不删（残余内容交给下次 TTL 清扫）。 */
   fun cleanupTmp(context: Context) {
-    if (activeCopies.get() > 0) {
-      LogCollector.log("dsh-file-open", "temp workspace clean skipped (copy in flight)")
+    if (!workspaceWipeAllowed(activeCopies.get(), activeDeliveries.get())) {
+      LogCollector.log("dsh-file-open", "temp workspace clean skipped (copy/delivery in flight)")
       return
     }
     try {
       val dir = tmpWorkspace(context)
-      dir.listFiles()?.forEach { it.delete() }
-      LogCollector.log("dsh-file-open", "temp workspace cleaned (task removed ritual)")
+      val entries = dir.listFiles()?.map { it.name } ?: emptyList()
+      val deletions = cleanupDeletions(entries, pendingPaths(context))
+      var removed = 0
+      for (name in deletions) {
+        if (File(dir, name).delete()) removed++
+      }
+      LogCollector.log(
+        "dsh-file-open",
+        "temp workspace cleaned (task removed ritual; removed=" + removed + " kept=" + (entries.size - removed) + ")",
+      )
     } catch (_: Exception) {
     }
   }
@@ -240,8 +281,12 @@ object FileIncoming {
   /** 拷贝在途计数（cleanupTmp 让路依据，避免删半个文件）。 */
   private val activeCopies = java.util.concurrent.atomic.AtomicInteger(0)
 
+  /** FX-211.2：投递 + 重试在途计数。拷贝后的记账/入待发清单/20s 重试原本全在守卫外，
+   *  「分享来件 → 数秒内划掉应用」时 cleanupTmp 看到拷贝计数已归零 → 顶层全删 = 静默丢件。 */
+  private val activeDeliveries = java.util.concurrent.atomic.AtomicInteger(0)
+
   /** 待发清单：已落盘但引擎未确认受理的路径（冷启动 POST 早于 listen 曾静默丢件）。 */
-  private fun pendingFile(context: Context): File = File(tmpWorkspace(context), ".pending-notify.ndjson")
+  private fun pendingFile(context: Context): File = File(tmpWorkspace(context), PENDING_ENTRY)
 
   private fun enqueuePending(context: Context, path: String) {
     try {
@@ -251,8 +296,13 @@ object FileIncoming {
   }
 
   /** 单次投递尝试（无内部重试）。端点语义：HTTP 200 但 body `{ok:false}` = 拒收
-   *  （路径形态/不存在）——必须核对 body 的 ok 字段，只看状态码会把拒收当成功（静默丢件）。 */
-  private fun deliverOnce(path: String): Boolean {
+   *  （路径形态/不存在）——必须核对 body 的 ok 字段，只看状态码会把拒收当成功（静默丢件）。
+   *
+   *  鉴权（FX-205.1/.6）：三条 file-incoming exact 路由绕过上游 /api 前缀栅栏（上游 match()
+   *  先查 exact 表），必须带共享控制令牌头 `X-DSH-Control-Token`（与无障碍控制队列同一枚
+   *  DeviceControlService.token；引擎侧实时读壳侧 prefs 比对）。不带 = 401 fail-closed，
+   *  表现为「投递静默失败」——因此投递方与鉴权必须同批发布。 */
+  private fun deliverOnce(context: Context, path: String): Boolean {
     return try {
       val conn = java.net.URL("http://127.0.0.1:3080/api/android/file-incoming")
         .openConnection(java.net.Proxy.NO_PROXY) as java.net.HttpURLConnection
@@ -260,6 +310,8 @@ object FileIncoming {
       conn.doOutput = true
       conn.connectTimeout = 3000
       conn.readTimeout = 5000
+      // 共享控制令牌（壳侧生成、写 dsh-adb.xml；引擎侧同一枚）——缺它一律 401。
+      conn.setRequestProperty("X-DSH-Control-Token", DeviceControlService.token(context))
       conn.outputStream.use { it.write(org.json.JSONObject().put("path", path).toString().toByteArray()) }
       val code = conn.responseCode
       val ok = if (code in 200..299) {
@@ -282,7 +334,7 @@ object FileIncoming {
     val f = pendingFile(context)
     val lines = try { f.readLines().filter { it.isNotBlank() } } catch (_: Exception) { return true }
     if (lines.isEmpty()) { try { f.delete() } catch (_: Exception) {} ; return true }
-    val remaining = lines.filter { !deliverOnce(it) }
+    val remaining = lines.filter { !deliverOnce(context, it) }
     if (remaining.isEmpty()) {
       try { f.delete() } catch (_: Exception) {}
       LogCollector.log("dsh-file-open", "pending incoming flushed (${lines.size} file(s))")
@@ -314,6 +366,9 @@ object FileIncoming {
     }
     val main = android.os.Handler(android.os.Looper.getMainLooper())
     ioExecutor.execute {
+      // FX-211.2：把守卫从「拷贝」扩到「投递 + 重试期」——这一段里 tmp 工作区中的来件与待发
+      // 清单都不能被 onTaskRemoved 的全清吃掉（划掉应用 = 用户主动关闭，不等于丢弃来件）。
+      activeDeliveries.incrementAndGet()
       try {
         // 每次文件入队前先做 TTL 清扫（issue #60 F5.1：临时文件 7 天自动回收，防止无限堆积）
         sweepExpired(context)
@@ -339,6 +394,9 @@ object FileIncoming {
         }
       } catch (t: Throwable) {
         android.util.Log.w("dsh-file-open", "incoming pipeline failed: " + (t.message ?: t.javaClass.simpleName))
+      } finally {
+        // 成功/失败/早退都递减：守卫只覆盖本段投递期，不泄漏（否则 tmp 永不清理）。
+        activeDeliveries.decrementAndGet()
       }
     }
   }

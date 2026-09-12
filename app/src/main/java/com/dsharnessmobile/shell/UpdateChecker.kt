@@ -114,11 +114,26 @@ object UpdateChecker {
    *  注意：修订号 -1/-2（0.13.7fx-N 命名）**不能**当后缀剥掉，否则 fx-2 会被判成与 fx-1 同版。 */
   fun currentVersion(): String = BuildConfig.VERSION_NAME.replace(Regex("-SN-.*$"), "")
 
-  /** 语义比较：取版本串里的**全部数字组**逐位比大小（"0.13.7fx-1" → [0,13,7,1]），
+  /**
+   * 预发布/快照后缀**白名单**（FX-209.2，E-5/E-11）：只剥 rc / preview / SN 这一类
+   * 非发布序号后缀（含其后的数字段：-rc.1 / -preview2 / -SN-1-13）。
+   *
+   * - 旧实现（不剥任何后缀）把 `v0.13.7-rc.1` 的 `1` 当成第四个版本段 → 判为比 0.13.7 新；
+   * - `-fx-N` 是**修订更新链**的一环（0.13.7fx-2 必须比 0.13.7fx-1 新），不在白名单内，
+   *   因此绝不能被剥掉——这正是 E-11 判「回退」的形态。
+   * - 白名单是闭集：任何未列出的尾巴（fx-N、build.7、自定义渠道段）一律保留原样参与比较。
+   */
+  private val PRERELEASE_SUFFIX = Regex("(?i)-(?:rc|preview|sn)(?:[.\\-]?\\d+)*$")
+
+  /** 剥掉白名单后缀（internal：单测复算 6 组 tag 形态）。 */
+  internal fun stripPrereleaseSuffix(v: String): String = PRERELEASE_SUFFIX.replace(v, "")
+
+  /** 语义比较：取版本串（先剥白名单后缀）里的**全部数字组**逐位比大小（"0.13.7fx-1" → [0,13,7,1]），
    *  位数不足补 0（0.13 == 0.13.0）。覆盖两种命名：语义化版本与 0.13.7fx-N 修订号。
-   *  tag 形如 v0.13.8 / 0.13.8 / v0.13.7fx-2。 */
+   *  tag 形如 v0.13.8 / 0.13.8 / v0.13.7fx-2 / v0.13.7-rc.1（rc 段不参与比较）。
+   *  FX-209.2：两侧同口径剥后缀（BuildConfig.VERSION_NAME 亦可能是 0.14.0-preview）。 */
   fun isNewer(tag: String, current: String): Boolean {
-    fun parts(v: String) = Regex("\\d+").findAll(v).map { it.value.toLongOrNull() ?: 0L }.toList()
+    fun parts(v: String) = Regex("\\d+").findAll(stripPrereleaseSuffix(v)).map { it.value.toLongOrNull() ?: 0L }.toList()
     val a = parts(tag); val b = parts(current)
     for (i in 0 until maxOf(a.size, b.size)) {
       val x = a.getOrElse(i) { 0L }; val y = b.getOrElse(i) { 0L }

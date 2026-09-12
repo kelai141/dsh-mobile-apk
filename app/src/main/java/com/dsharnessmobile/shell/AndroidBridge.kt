@@ -26,6 +26,10 @@ class AndroidBridge(
   /** apk #168：把活动 settings.yaml 导出为公共副本并返回其路径（私有目录不对外开放）。 */
   private val onExportSettingsDocument: () -> String = { "" },
   private val onSetImmersiveRequest: (enable: Boolean) -> Unit = {},
+  /** ST-10：沉浸式**读**面（缺它就是三方分裂 #1：壳偏好与页面 localStorage 互不校验）。
+   *  默认实现直接读壳侧单一真源（ShellAppContext 由 EngineAuth.initContext 绑定），
+   *  因此 MainActivity 无需传参即可返回真实值。 */
+  private val onGetImmersiveMode: () -> Boolean = { ImmersiveMode.current() },
   private val onCopyTextRequest: (text: String) -> Boolean = { false },
   private val pickToken: String? = null,
   private val onRestartEngine: () -> Unit = {},
@@ -112,6 +116,13 @@ class AndroidBridge(
   }
 
   /**
+   * ST-10（F-APK-06 / F-UI-05 三方分裂 #1）：沉浸式**读**面——页面以壳侧值为唯一初值。
+   * 只有 setter 时，用 `adb shell` 直接改壳偏好（绕过页面）后重开设置页显示不一致。
+   */
+  @JavascriptInterface
+  fun getImmersiveMode(): Boolean = onGetImmersiveMode()
+
+  /**
    * Native clipboard write (navigator.clipboard.writeText in WebView is always rejected on Android
    * with NotAllowedError: Write permission denied, so the page falls back to this bridge after
    * writeClipboard fails). Returns whether the write succeeded.
@@ -177,9 +188,11 @@ class AndroidBridge(
     onOpenConsole()
   }
 
-  /** Dev debug-log toggle state (default off; persisted via SharedPreferences). */
+  /** Dev debug-log toggle state (default off; persisted via SharedPreferences).
+   *  ST-11：返回值 = 偏好 **&&** 采集器在跑——EngineService.onDestroy 无条件停采集器，
+   *  此后只回读偏好就是乐观置位（开关显示「开」而日志文件不再增长）。 */
   @JavascriptInterface
-  fun getDevLogEnabled(): Boolean = onGetDevLogEnabled()
+  fun getDevLogEnabled(): Boolean = onGetDevLogEnabled() && LogCollector.isRunning()
 
   /** Set the dev debug-log toggle; when on, logs are written daily under dshdata/log/. */
   @JavascriptInterface

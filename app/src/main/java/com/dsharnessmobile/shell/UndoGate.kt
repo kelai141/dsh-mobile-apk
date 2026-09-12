@@ -82,6 +82,13 @@ object UndoGate {
       }
       // 先确认有快照（空库不执行，避免空转）
       val list = runCli(context, engine, cli, dsh, listOf("list"))
+      // #211.1：CLI 超时 = 状态未知，绝不判「无快照可回滚」（旧实现两者同形，超时被静默误判为
+      // 空库 → 自动回退从未执行）。此分支只是「不执行」并给出可区分的摘要，不吞掉区别。
+      if (list.any { it.contains(ProcIo.TIMEOUT_FLAG) }) {
+        Log.w(TAG, "auto-undo aborted: emergency CLI list timed out; snapshot state unknown")
+        LogCollector.log(TAG, "auto-undo aborted: snapshot list timed out (" + ProcIo.TIMEOUT_FLAG + ")")
+        return UndoResult(false, "急救 CLI 超时：快照清单状态未知（非「无快照可回滚」）", null)
+      }
       if (!list.any { it.startsWith("2026") || it.startsWith("20") } && !list.any { it.contains("[auto]") }) {
         Log.i(TAG, "auto-undo skipped: no snapshots found")
         return UndoResult(false, "无快照可回滚", null)
@@ -151,13 +158,14 @@ object UndoGate {
       // 0.13.8 #173：有界读——CLI 挂起曾令 60s 守卫失效，且 execute 的 autoUndoRunning
       // 只在 finally 复位 → 恒「已在执行」，连看门狗 DEAD 支的强制重启都被锁死。
       // 超时分支显式复位标志与 arm 文件（幂等，防御未来再引入无界读）。
-      val text = ProcIo.readBounded(proc, 60) ?: run {
+      val r = ProcIo.readBounded(proc, 60)
+      if (r.timedOut) {
         proc.destroyForcibly()
         try { armFile(context).delete() } catch (_: Throwable) {}
         autoUndoRunning.set(false)
-        return listOf("emergency CLI timeout")
+        return listOf(r.timeoutText("emergency CLI timeout"))
       }
-      text.lines()
+      r.text.lines()
     } catch (t: Throwable) {
       Log.e(TAG, "emergency CLI run failed", t)
       listOf("emergency CLI failed: " + (t.message ?: t.javaClass.simpleName))

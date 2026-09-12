@@ -3,64 +3,29 @@ package com.dsharnessmobile.shell
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.os.Build
 import android.os.PowerManager
 import android.util.Log
-import android.view.View
 import android.webkit.WebView
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
 
 /** 窗口/页面 UI chrome 助手（自 MainActivity 拆出）：沉浸式状态栏、
  *  原生剪贴板、屏幕常亮、系统深色主题推送——均为无业务逻辑的纯 UI 状态读写。 */
 internal class WebUiChrome(private val activity: MainActivity) {
 
-  /** 沉浸式状态栏持久化读取（设置 → 通用设置 开关；默认收起）。 */
-  fun immersivePrefs(): Boolean {
-    return try {
-      activity.getSharedPreferences("dsh_settings", Context.MODE_PRIVATE).getBoolean("immersive_mode", true)
-    } catch (_: Exception) {
-      true
-    }
-  }
+  // ST-10（F-APK-06）：本类原有一份与 MainActivity 私有方法**逐字重复**的沉浸式实现，
+  // 加上页面 localStorage 就是三份状态。真源统一收敛到 ImmersiveMode（ShellState.kt），
+  // 本类三个入口只做委托——不再持有第二份 prefs 读写与第二份 systemUiVisibility 逻辑。
 
-  /** 状态栏常态收起（沉浸式）：隐藏系统栏，边缘滑动临时呼出后自动收起。 */
+  /** 沉浸式权威值读取（设置 → 通用设置 开关；默认收起）。 */
+  fun immersivePrefs(): Boolean = ImmersiveMode.isEnabled(activity)
+
+  /** 状态栏常态收起（沉浸式）：委托 ImmersiveMode.apply。 */
   fun applyImmersive(enabled: Boolean) {
-    try {
-      if (Build.VERSION.SDK_INT >= 30) {
-        val controller = WindowInsetsControllerCompat(activity.window, activity.window.decorView)
-        if (enabled) {
-          controller.hide(WindowInsetsCompat.Type.statusBars())
-          controller.systemBarsBehavior =
-            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        } else {
-          controller.show(WindowInsetsCompat.Type.statusBars())
-        }
-      } else {
-        val flags = if (enabled) {
-          View.SYSTEM_UI_FLAG_FULLSCREEN or
-            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
-            View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
-            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-        } else {
-          0
-        }
-        activity.window.decorView.systemUiVisibility = flags
-      }
-    } catch (t: Throwable) {
-      Log.e("dsh-image", "applyImmersive failed: " + t.message)
-    }
+    ImmersiveMode.apply(activity, enabled)
   }
 
-  /** 沉浸式开关（JS 桥）：应用 + 持久化。 */
+  /** 沉浸式开关（JS 桥）：持久化 + 应用（委托 ImmersiveMode.setEnabled）。 */
   fun setImmersivePersisted(enabled: Boolean) {
-    activity.runOnUiThread { applyImmersive(enabled) }
-    try {
-      activity.getSharedPreferences("dsh_settings", Context.MODE_PRIVATE).edit().putBoolean("immersive_mode", enabled).apply()
-      Log.i("dsh-image", "immersive set: " + enabled)
-    } catch (e: Exception) {
-      Log.e("dsh-image", "immersive persist failed: " + e.message)
-    }
+    ImmersiveMode.setEnabled(activity, enabled)
   }
 
   /** 0.13.3：textZoom 桥与持久化退役（D6）——上游 ui-theme fontSize 原生覆盖字体调节。 */

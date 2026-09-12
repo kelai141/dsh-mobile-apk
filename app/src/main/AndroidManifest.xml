@@ -91,6 +91,18 @@
       </intent-filter>
     </receiver>
 
+    <!-- 0.14.0-preview §6.3.1：通知动作接收器（提问直接回复 / 选项 / 审批批准拒绝 / 提交失败重试）。
+         加固口径（不得写成「receiver 数量 == 0」——本 manifest 早已有两个 exported=true 的 receiver）：
+         本通道存在处理通知动作的 receiver，且 exported="false" + 动作 PendingIntent 为显式 Intent
+         （component 指向本包 receiver）。外部应用无法构造有效动作。 -->
+    <receiver
+      android:name=".NotifyActionReceiver"
+      android:exported="false">
+      <intent-filter>
+        <action android:name="com.dsharnessmobile.shell.action.NOTIFY_ACTION" />
+      </intent-filter>
+    </receiver>
+
     <activity
       android:name=".MainActivity"
       android:exported="true"

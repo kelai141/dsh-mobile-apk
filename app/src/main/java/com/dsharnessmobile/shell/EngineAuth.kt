@@ -70,6 +70,9 @@ object EngineAuth {
    */
   fun initContext(context: Context) {
     appContext = context.applicationContext
+    // ST-10：同一绑定点也把进程级上下文交给 ShellAppContext——桥 getImmersiveMode() 没有
+    // Context 形参，这是它读壳侧权威值的唯一入口（MainActivity.onCreate 已先于桥安装调用）。
+    ShellAppContext.bind(context)
   }
 
   private fun ctx(): Context? = appContext
@@ -118,14 +121,18 @@ object EngineAuth {
   }
 
   /**
-   * A 401 from any /api call: drop the stored cookie and refresh once.
+   * A 401/403 from any /api call **or from the mux WS handshake** (ST-13, F-APK-03):
+   * drop the stored cookie and refresh once, bypassing the cache short-circuit.
    * @return the new cookie, or null when refresh failed (caller keeps going;
    * the next periodic caller retries).
    */
-  fun handleUnauthorized(context: Context): String? {
-    invalidate(context)
-    return refresh(context)
-  }
+  fun handleUnauthorized(context: Context): String? = refresh(context, force = true)
+
+  /**
+   * Context-less 401/403 entry: MuxClient runs on a plain socket thread and only has
+   * the app context bound by [initContext]. Same semantics as [handleUnauthorized].
+   */
+  fun handleUnauthorizedBound(): String? = ctx()?.let { refresh(it, force = true) }
 
   /** Drop the stored cookie (key rotation / data clear / 401). */
   fun invalidate(context: Context) {
@@ -137,12 +144,27 @@ object EngineAuth {
   /**
    * Best-effort cookie refresh: P0 token exchange, P1 mint fallback.
    * Safe on any background thread; synchronous and never throws.
+   *
+   * FX-210.5 硬约束：本函数内含同步 HTTP（交换 4s connect + 4s read）并持本对象锁，
+   * 锁排队可叠加到 ~16s——**禁止在主线程调用**（壳侧 onCreate/onResume 调用点已迁后台）。
+   * 失败态以结构化原因（reason/latencyMs）进壳侧开发日志，绝不落 token/cookie 值。
    * @return a fresh cookie, or null (refresh failed — retried by later callers).
    */
-  fun refresh(context: Context): String? {
+  fun refresh(context: Context): String? = refresh(context, force = false)
+
+  /**
+   * @param force true = 该 cookie 已被服务端拒绝（401/403）：本地 expiresAt 检查**不构成**
+   *   复用理由。旧实现的短路 `cookie(app)?.let { return it }` 会把被拒 cookie 原样返回，
+   *   让 handleUnauthorized 形同空转——手动失效 cookie 后审批卡/提问卡不再弹出，只能重启
+   *   App（ST-13 判据：≤10s 恢复）。force 时先 invalidate（内存 + prefs）再重取。
+   */
+  internal fun refresh(context: Context, force: Boolean): String? {
+    val startedAt = System.currentTimeMillis()
     val app = context.applicationContext
     synchronized(this) {
-      cookie(app)?.let { return it }
+      val cachedCookie = cookie(app)
+      if (mayReuseCachedCookie(force, cachedCookie)) return cachedCookie
+      if (force) invalidate(app)
       val exchanged = exchangeFromLogToken(app)
       if (exchanged != null) {
         store(app, exchanged)
@@ -156,6 +178,11 @@ object EngineAuth {
         return minted
       }
       Log.w(TAG, "cookie refresh failed (no token line, exchange error, or credentials record absent)")
+      LogCollector.log(
+        TAG,
+        "cookie refresh failed: reason=no-token-line-or-exchange-error-or-missing-credentials latencyMs=" +
+          (System.currentTimeMillis() - startedAt),
+      )
       return null
     }
   }
@@ -203,6 +230,7 @@ object EngineAuth {
       val code = conn.responseCode
       if (code != 303) {
         Log.w(TAG, "token exchange unexpected status: $code")
+        LogCollector.log(TAG, "token exchange failed: reason=unexpected-status-" + code)
         return null
       }
       val cookies = conn.headerFields?.get("Set-Cookie") ?: return null
@@ -211,6 +239,7 @@ object EngineAuth {
         ?.takeIf { it.contains('=') }
     } catch (e: Exception) {
       Log.w(TAG, "token exchange failed: ${e.javaClass.simpleName}")
+      LogCollector.log(TAG, "token exchange failed: reason=" + e.javaClass.simpleName)
       null
     } finally {
       conn?.disconnect()
@@ -288,6 +317,10 @@ object EngineAuth {
     val digest = MessageDigest.getInstance("SHA-256").digest(authority.toByteArray(StandardCharsets.UTF_8))
     return COOKIE_NAME_PREFIX + Base64.getUrlEncoder().withoutPadding().encodeToString(digest)
   }
+
+  /** ST-13：是否允许用缓存短路——force（服务端已拒绝过该 cookie）时一律不允许，
+   *  哪怕本地 stillValid() 仍为 true。单测锁定该语义（缓存短路正是缺陷形态之一）。 */
+  internal fun mayReuseCachedCookie(force: Boolean, cached: String?): Boolean = !force && cached != null
 
   /** Cheap self-check: decode the payload segment and verify expiry. */
   private fun stillValid(cookie: String): Boolean {

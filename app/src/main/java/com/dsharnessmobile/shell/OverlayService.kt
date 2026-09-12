@@ -285,6 +285,12 @@ class OverlayService : Service() {
     expanded = false
     // 0.13.5：关闭面板解除「钉住」——下次展开重新跟随正在工作的会话
     userPinnedSession = false
+    // FX-212.1（B4）：会话选择器是**独立顶层窗口**（OverlayPanel.pickerWindow，0.13.8 G2 起
+    // 不再挂在面板窗口里），收起面板必须一并收口。旧实现只 removeView(unitView)：展开面板 →
+    // 点会话行 → 不选任何条 → 收起后选择器窗口留在屏上（dumpsys window 可见该 type=2038 窗口）。
+    // 收口放在 unitView 早退之前，避免「面板视图缺失但选择器仍在」时漏收。
+    // 注：onDestroy 路径（覆盖层随进程终止的回收时机）按 U-1 真机结论暂不改，只登记。
+    panel.closePicker()
     val unit = panel.unitView ?: return
     unit.visibility = View.GONE
     try { if (unit.parent != null) wm.removeView(unit) } catch (_: Exception) {}

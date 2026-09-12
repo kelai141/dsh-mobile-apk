@@ -248,10 +248,19 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
       var ok = false
       try {
         val expected = r.sha256Url?.let { UpdateChecker.downloadText(it) }
+        // FX-209.E1（E-12 第二处）：缓存复用分支与新下载分支**共用同一份**产物校验。
+        // 旧实现两边各写一套：缓存分支比 sizeBytes（有 sha 还校验 sha），下载分支只判
+        // 「HTTP 200 且写盘成功」——同一份截断/半包产物在两条路径上判定相反。判定强度现在
+        // 只由 verifyApkArtifact（ApkArtifactCheck.kt）决定，两分支用同形参数调用。
+        fun artifactVerdict(): ApkArtifactVerdict = verifyApkArtifact(
+          fileExists = dest.exists(),
+          actualBytes = dest.length(),
+          expectedBytes = r.sizeBytes,
+          expectedSha256 = expected,
+          sha256Matches = { UpdateChecker.verifySha256(dest, it) },
+        )
         // 上次下载完成但未安装（授权中断/安装取消）→ 复用已验证的包，不重复拉 169MB
-        val cached = dest.exists() && dest.length() == r.sizeBytes &&
-          (expected == null || UpdateChecker.verifySha256(dest, expected))
-        if (cached) {
+        if (artifactVerdict() is ApkArtifactVerdict.Accept) {
           ok = true
         } else {
           val used = UpdateChecker.download(r.apkUrl, dest) { pct ->
@@ -263,11 +272,14 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
           }
           if (used == null) {
             fail = "下载失败：镜像链全部不可用（直连/GitHub 加速镜像均失败）"
-          } else if (expected != null && !UpdateChecker.verifySha256(dest, expected)) {
-            dest.delete()
-            fail = "下载失败：sha256 校验不匹配（文件已删除，请重试）"
           } else {
-            ok = true
+            when (val verdict = artifactVerdict()) {
+              is ApkArtifactVerdict.Accept -> ok = true
+              is ApkArtifactVerdict.Reject -> {
+                dest.delete()
+                fail = "下载失败：" + verdict.reason + "（文件已删除，请重试）"
+              }
+            }
           }
         }
       } catch (e: Exception) {

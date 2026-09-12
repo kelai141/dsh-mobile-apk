@@ -139,7 +139,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
         filesDir,
         SnapshotTransaction.Marker(SnapshotTransaction.Phase.STAGED, fingerprint, startedAt),
       )
-      SnapshotTransaction.swap(
+      val swapNotes = SnapshotTransaction.swap(
         filesDir = filesDir,
         stagedRoot = stage,
         usrDir = usrDir,
@@ -149,6 +149,8 @@ class EngineManager(private val context: Context, private val pickToken: String?
         startedAt = startedAt,
         onEntry = { onStage("正在更新 " + it) },
       )
+      // #214：profiles 合并期间的工厂语义纠正逐条留档（升级现场可追溯，不只依赖 UI 文案）。
+      for (note in swapNotes) LogCollector.log(TAG, "profile patch reconciled during swap: " + note)
       // Commit point: the fingerprint is durable only after the swap completed.
       writeFingerprint(fingerprint)
       SnapshotTransaction.finish(filesDir)
@@ -728,6 +730,8 @@ class EngineManager(private val context: Context, private val pickToken: String?
       killExistingEngine()
       // 0.13.1 W5：坏键迁移必须在引擎读 settings 前完成。
       repairSettingsSeed()
+      // 0.14.0 #214：退役行 disabled 残留自愈（前置于引擎读 profile；幂等一次性，见函数注释）。
+      repairProfilePatch()
       // 0.13.1 W3/W4：共享目录 README 每次启动刷新（此前只在迁移路径调用，正常启动不落盘）。
       ensurePublicExportRepo(dshDataDir)
       applyRuntimePatches()
@@ -804,6 +808,11 @@ class EngineManager(private val context: Context, private val pickToken: String?
   private fun startWithArgs(args: Array<String>, env: Map<String, String>): Process {
     val log = File(context.filesDir, "engine.log")
     rotateEngineLog(log)
+    // P-AC-04（§7.2 启动分段插桩）：t_boot_start 的壳侧起点（落壳侧自有文件
+    // files/boot-segments.log）。这次标记即本世代的起点；监听段由 watchEngineListen() 观察
+    // （与启动路径解耦），engine.log 本体壳侧一个字都不写。
+    LogCollector.markBootStart(context)
+    watchEngineListen()
     fun build(argv: List<String>): ProcessBuilder =
       ProcessBuilder(argv).also { b ->
         b.environment().putAll(env)
@@ -829,6 +838,31 @@ class EngineManager(private val context: Context, private val pickToken: String?
    * 0.13.1 W3：engine.log 世代轮转（保留 3 代）——redirectOutput 语义是每次启动截断，
    * 看门狗 5s 循环重启时崩溃现场每次被清掉，用户永远只剩最后一次的输出。
    */
+  /**
+   * P-AC-04：监听段（t_listen）观察者。
+   *
+   * 引擎可被**任何**路径拉起（Activity 启动流 / EngineService 看门狗 / ConsoleActivity），
+   * 所以「Web 端口首次应答」的观测挂在 spawn 点而不是某一条启动流里，否则看门狗重启的世代
+   * 永远没有 t_listen。单线程、有界 90s（与冷启动预算同量级）后自然退出；每 500ms 一次
+   * portReachable(500)（loopback，自带 Proxy.NO_PROXY）。
+   */
+  private fun watchEngineListen() {
+    Thread {
+      val deadline = System.currentTimeMillis() + 90_000L
+      while (System.currentTimeMillis() < deadline) {
+        if (EngineProbe.portReachable(500)) {
+          LogCollector.markListen(context)
+          return@Thread
+        }
+        try {
+          Thread.sleep(500)
+        } catch (_: InterruptedException) {
+          return@Thread
+        }
+      }
+    }.apply { isDaemon = true; name = "dsh-engine-listen-watch" }.start()
+  }
+
   private fun rotateEngineLog(log: File) {
     try {
       val prev1 = File(log.parentFile, "engine.log.1")
@@ -866,9 +900,11 @@ class EngineManager(private val context: Context, private val pickToken: String?
       val log = File(context.filesDir, "engine.log")
       // 0.13.8 #184：诊断包落共享存储（任何持 All Files Access 的应用可读），engine.log
       // 内含引擎 launch token——副本先过 redact，本体不动（壳侧鉴权链 tokenFromLog 依赖）。
+      // #211.3：有界读——原先 readText() → redact → writeText() 的峰值约 3× 单份日志
+      // （多 GB 的 engine.log 会 OOM/卡死看门狗线程）；现在按上限读尾部并标注截断。
       for (f in arrayOf(log, File(log.parentFile, "engine.log.1"), File(log.parentFile, "engine.log.2"))) {
         try {
-          if (f.exists()) File(dir, f.name).writeText(EngineAuth.redact(f.readText()))
+          mirrorLogBounded(f, File(dir, f.name), MIRROR_LOG_LIMIT_BYTES)
         } catch (_: Throwable) {
         }
       }
@@ -879,8 +915,10 @@ class EngineManager(private val context: Context, private val pickToken: String?
       try {
         val p = ProcessBuilder("logcat", "-d", "-v", "threadtime", "-t", "400").redirectErrorStream(true).start()
         // 0.13.8 #173：有界读（原 readBytes 无 waitFor，会冻结看门狗调度线程）
+        // #211.1：三态结果——超时态写形态标记（不再把已读部分/超时混成同一形态）。
         val out = ProcIo.readBounded(p, 10)
-        if (!out.isNullOrEmpty()) File(dir, "logcat-recent.txt").writeText(EngineAuth.redact(out))
+        val body = out.textWithMarkers()
+        if (body.isNotEmpty()) File(dir, "logcat-recent.txt").writeText(EngineAuth.redact(body))
       } catch (_: Throwable) {
       }
       LogCollector.log(TAG, "diagnostics mirrored: " + dir.absolutePath)
@@ -918,6 +956,55 @@ class EngineManager(private val context: Context, private val pickToken: String?
    * 判定必须带前瞻：裸键后紧跟缩进子键 = 合法映射（非 null），绝不能改——否则插入重复键
    * DUPLICATE_KEY 直接炸引擎（2026-08-28 首版修复在 fx-1 正常文件上翻车实录）。
    */
+  /**
+   * 0.14.0 #214 一次性迁移（启动前置）：清除**退役行**残留的 `disabled: true`。
+   *
+   * 现场：从「曾禁用 ui-layout」的旧版本升上来的设备，live 的
+   * `profiles/web/cordis.patch.yml` 里 `- id: ui-layout / disabled: true` 被 0.13.8 的
+   * profiles 合并规则永久保留（旧规则「live 内容为基，只追加缺失工厂块」），上游 bundle 的
+   * ui-layout 行（布局服务中枢）因此被禁 → 根服务 `layout` 不 activate → 13 条客户端插件全
+   * pending（apk #214 截图现场）。这类设备不一定再触发快照刷新（指纹未变则 merge 不跑），
+   * 所以自愈必须在引擎读 profile 之前做一次，不能只依赖 [refreshSnapshot]。
+   *
+   * 边界（与 [FactoryProfilePatch] 一致）：只清退役行 id 的 `disabled: true`；不新增任何
+   * disable；用户独有条目与自建 profile 条目不动；改前留同目录 `.pre-<版本>.bak`（回滚路径）；
+   * 改动逐条进开发日志；每版本只跑一次（幂等标记），失败不阻塞启动。
+   */
+  private fun repairProfilePatch() {
+    val marker = File(context.filesDir, ".profile-patch-repair-" + BuildConfig.VERSION_NAME)
+    if (marker.exists()) return
+    try {
+      val profilesRoot = File(File(homeDir, ".dsh"), "profiles")
+      val targets = (profilesRoot.listFiles() ?: emptyArray())
+        .sortedBy { it.name }
+        .map { File(it, "cordis.patch.yml") }
+        .filter { it.isFile }
+      var repaired = 0
+      for (target in targets) {
+        val live = try { target.readText() } catch (_: Throwable) { continue }
+        val result = FactoryProfilePatch.repairRetiredDisabledRows(live)
+        if (result.text == live) continue
+        val backup = File(target.parentFile, target.name + ".pre-" + BuildConfig.VERSION_NAME + ".bak")
+        if (!backup.exists()) {
+          try { backup.writeText(live) } catch (_: Throwable) {}
+        }
+        target.writeText(result.text)
+        repaired++
+        LogCollector.log(
+          TAG,
+          "profile patch repaired (" + (target.parentFile?.name ?: "?") + "): " +
+            result.changes.joinToString(" | ") + " ; backup=" + backup.name,
+        )
+      }
+      marker.writeText("repaired=" + repaired + " targets=" + targets.size + " at " + System.currentTimeMillis() + "\n")
+      if (repaired > 0) {
+        LogCollector.log(TAG, "profile patch repair (apk #214): " + repaired + " profile(s) cleaned; marker=" + marker.name)
+      }
+    } catch (t: Throwable) {
+      Log.w(TAG, "profile patch repair failed (non-fatal)", t)
+    }
+  }
+
   private fun repairSettingsSeed() {
     try {
       val f = File(File(homeDir, ".dsh"), "settings.yaml")
@@ -1158,6 +1245,10 @@ class EngineManager(private val context: Context, private val pickToken: String?
       // 二次冷启动命中，直接缩短 node 冷启 require 树编译时间（K20 Pro 实测每次冷启都慢、
       // 0.13.0 之前全快；缓存目录持久在 home/.dsh 下，随用户数据保留不随快照）。
       "NODE_COMPILE_CACHE" to File(ensurePrivateDshData(), ".node-compile-cache").apply { mkdirs() }.absolutePath,
+      // C1（P-AC-03 / §7.2）：libuv 线程池默认 4——fs/crypto/zlib/dns 全挤在这 4 条线程上。
+      // 显式取 min(8, cores)（见 uvThreadPoolSize）：零产品语义改动，引擎与所有工具子进程
+      // 经 shellEnv() 一并继承。判据：子进程回读 process.env.UV_THREADPOOL_SIZE = min(8, cores)。
+      "UV_THREADPOOL_SIZE" to uvThreadPoolSize(Runtime.getRuntime().availableProcessors()).toString(),
     ) + certEnv
   }
 
@@ -1240,5 +1331,48 @@ description: 手机操控纪律：无障碍语义树优先、ref 语义点击/�
       sharedPickToken = token
       return token
     }
+  }
+}
+
+/**
+ * C1（P-AC-03 / §7.2）：libuv 线程池目标值 = min(8, cores)，下限 1（0/负数按 1 处理）。
+ *
+ * 提到顶层是为了可断言——shellEnv() 需要 Context，JVM 单测拿不到；这里只锁「值」这一半，
+ * 「注入进 shellEnv()」那一半由 W3ShellContractTest 的源码扫描锁定。
+ */
+internal fun uvThreadPoolSize(cores: Int): Int = minOf(8, cores.coerceAtLeast(1))
+
+/** 诊断镜像的单份上限（#211.3）：只需现场尾部；内存峰值从 3× 整份压到 3× 上限内。 */
+internal const val MIRROR_LOG_LIMIT_BYTES: Long = 2L * 1024 * 1024
+
+/**
+ * 诊断镜像的有界单份复制（#211.3，JVM 单测）：只读 [limitBytes] 上限内的**尾部**字节，
+ * 出口过 EngineAuth.redact（launch token 不进共享副本），超限在尾部标注截断。
+ * 相比原来的 readText() → redact → writeText()（峰值约 3× 单份日志），这里既不再整份读入，
+ * 也不把「读到一半」伪装成完整现场。绝不抛出。
+ *
+ * @return true = 写出了副本（源缺失/空/写入失败为 false）。
+ */
+internal fun mirrorLogBounded(src: File, dst: File, limitBytes: Long = MIRROR_LOG_LIMIT_BYTES): Boolean {
+  return try {
+    if (!src.exists() || !src.isFile) return false
+    val len = src.length()
+    val limit = limitBytes.coerceAtLeast(1L)
+    val start = (len - limit).coerceAtLeast(0L)
+    val size = (len - start).toInt()
+    if (size <= 0) return false
+    val buf = ByteArray(size)
+    java.io.RandomAccessFile(src, "r").use { raf ->
+      raf.seek(start)
+      raf.readFully(buf)
+    }
+    var text = String(buf, Charsets.UTF_8)
+    if (start > 0L) {
+      text += "\n[diagnostic mirror truncated: first " + start + " bytes omitted; source " + len + " bytes]\n"
+    }
+    dst.writeText(EngineAuth.redact(text))
+    true
+  } catch (_: Throwable) {
+    false
   }
 }

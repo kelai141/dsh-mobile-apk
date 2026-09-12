@@ -10,16 +10,15 @@ import android.util.Log
 
 /** 开机自启（零改动原则：仅恢复用户上次同意状态；白名单/厂商跳转引导由设置面承托）。
  *  独立成文件（Phase 3）：与 AndroidManifest 组件一一对齐——manifest 注册的
- *  receiver 不应寄居在 WatchdogV2.kt 文件尾部。 */
+ *  receiver 不应寄居在 WatchdogV2.kt 文件尾部。
+ *
+ *  ST-21（S0 死状态清理）：这里原先读一个**全仓无任何写点、无 UI** 的开机自启偏好键（默认恒 true
+ *  的隐式定义）——用户既关不掉也开不了。该键及其读取分支已删除，行为改为显式：开机自启当前
+ *  **无条件**。将来若要接设置项，写点（设置页持久化）与读点必须同批落地，禁止再出现「有读无写」。 */
 class BootReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent) {
     if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
-    val enabled = context.getSharedPreferences("dsh-engine", Context.MODE_PRIVATE).getBoolean("bootAllowsStart", true)
-    if (!enabled) {
-      LogCollector.log("dsh-watchdog", "boot completed; auto-start disabled by user preference")
-      return
-    }
-    LogCollector.log("dsh-watchdog", "boot completed; starting engine service (user-consented state)")
+    LogCollector.log("dsh-watchdog", "boot completed; starting engine service (auto-start is unconditional)")
     try {
       context.startForegroundService(Intent(context, EngineService::class.java))
     } catch (t: Throwable) {

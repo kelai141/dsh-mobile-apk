@@ -31,6 +31,10 @@ class EngineService : Service() {
     engineManager = EngineManager(this, EngineManager.ensurePickToken())
     instance = this
     startForeground(NOTIFICATION_ID, buildNotification())
+    // 0.14.0-preview §6.2/§6.3：通知信道消费点 + 通知应答流（两者都是进程级幂等单例）。
+    // 落在这里而不是 OverlayService：通知必须**独立于悬浮球开关**生存（§6.0 风险 2）。
+    NotifyStore.start(this)
+    NotifyBridge.start(this)
     // Dev log toggle on: persistent collection (logcat + engine.log → dshdata/log/, daily).
     if (MainActivity.DevLogPrefs.isEnabled(this)) LogCollector.start(this)
   }
@@ -71,8 +75,9 @@ class EngineService : Service() {
     watchdog = null
     WatchdogV2.releaseWakeLock()
     if (instance === this) instance = null
-    // Log collection stops when the service exits (in-process idempotent singleton; also stopped when the toggle is off).
-    LogCollector.stop()
+    // ST-11：偏好仍为开时不停采集器（否则开关会乐观置位「开」而实际已停）；
+    // 偏好已关才停。回前台由 MainActivity.onResume 的 DevLogControl.ensureStarted 补启。
+    if (!DevLogControl.isPrefEnabled(this)) LogCollector.stop()
     super.onDestroy()
   }
 
@@ -94,79 +99,68 @@ class EngineService : Service() {
    */
   private fun ensureEngine() {
     if (!engineManager.engineReady) return
+    // FX-210.1：恢复入口是「服务路径与 Activity 路径」的共同前置——引擎已被前台服务拉起
+    // 时重开 app 也要消费 .snapshot-transaction 判据（此前只在 Activity 启动流内、且在
+    // 「引擎已在跑」早退之后）。幂等：无事务时只是一次 stat。
+    engineManager.recoverInterruptedRefresh()
     if (watchdog == null) {
       WatchdogV2.acquireWakeLock(this)
       watchdog = Executors.newSingleThreadScheduledExecutor().also { exec ->
         exec.scheduleWithFixedDelay({
           try {
-            val state = WatchdogV2.assessProbe(this)
-            // 0.13.8 #175：DEGRADED_HTTP 达阈值后不再被 alive 早退——半死引擎（端口可连、
-            // HTTP 持续失败）走与 DEAD 相同的受控重启阶梯；DEGRADED_LOG 保留不重启语义。
-            val degradedLadderTripped = state == WatchdogV2.ProbeState.DEGRADED_HTTP && WatchdogV2.degradedHttpTripped()
-            val alive = state != WatchdogV2.ProbeState.DEAD
-            if (state == WatchdogV2.ProbeState.HEALTHY || state == WatchdogV2.ProbeState.DEAD) {
-              engineManager.onEngineProbe(state == WatchdogV2.ProbeState.HEALTHY)
-            }
-            WatchdogV2.recordProbe(state)
-            WatchdogV2.refreshWakeLock(this)
-
-            if (alive && !degradedLadderTripped) {
-              nextRestartAllowedAt = 0L
-              UndoGate.disarm(this)
-              return@scheduleWithFixedDelay
-            }
-            if (!engineManager.engineReady) return@scheduleWithFixedDelay
-            if (!degradedLadderTripped && WatchdogV2.consecutiveFailures < restartDeadConfirmations) {
-              LogCollector.log("dsh-watchdog", "confirmed-dead sample " + WatchdogV2.consecutiveFailures + "/" + restartDeadConfirmations + "; observing before restart")
-              return@scheduleWithFixedDelay
-            }
-            if (degradedLadderTripped) {
-              LogCollector.log("dsh-watchdog", "DEGRADED_HTTP 连续 " + WatchdogV2.consecutiveDegradedHttp + " 拍（端口可连但 HTTP 持续失败）→ 升级为受控重启")
-            }
-            if (WatchdogV2.tripped()) {
-              LogCollector.log("dsh-watchdog", "watchdog circuit open after confirmed-dead failures; destructive recovery paused")
-              return@scheduleWithFixedDelay
-            }
-
             val now = System.currentTimeMillis()
-            val managedChildAlive = engineManager.engineProcessAlive()
-            val bootAge = now - EngineManager.lastStartAttemptAt
-            if (managedChildAlive && bootAge in 0 until EngineManager.START_COOLDOWN_MS) {
-              LogCollector.log("dsh-watchdog", "dead probe deferred while the tracked child remains inside its boot window")
-              return@scheduleWithFixedDelay
-            }
-            if (UndoGate.onProbeFailure(this, WatchdogV2.effectiveFailureCount())) {
-              nextRestartAllowedAt = now + WatchdogV2.nextDelayMs()
-              LogCollector.log("dsh-watchdog", "auto-undo trigger after confirmed failures=" + WatchdogV2.effectiveFailureCount())
-              Thread {
-                val result = UndoGate.execute(this, engineManager)
-                if (result.executed) {
-                  LogCollector.log("dsh-watchdog", "auto-undo ok -> " + (result.snapshotId ?: "?"))
-                  engineManager.resetCooldown()
-                  engineManager.startEngine()
-                } else {
-                  LogCollector.log("dsh-watchdog", "auto-undo not executed: " + result.summary.take(160))
-                }
-              }.start()
-              return@scheduleWithFixedDelay
-            }
-            if (now < nextRestartAllowedAt) {
-              LogCollector.log("dsh-watchdog", "restart deferred for " + (nextRestartAllowedAt - now) + "ms")
-              return@scheduleWithFixedDelay
-            }
-
-            if (managedChildAlive) {
-              engineManager.mirrorDiagnosticsToShared("engine-boot-hung")
-              LogCollector.log("dsh-watchdog", "tracked child exceeded boot deadline; forcing one controlled restart")
-            }
-            val requested = engineManager.startEngine(force = managedChildAlive)
-            val delayMs = WatchdogV2.nextDelayMs()
-            nextRestartAllowedAt = now + delayMs
-            LogCollector.log(
-              "dsh-watchdog",
-              "restart requested after confirmed failure #" + WatchdogV2.effectiveFailureCount() +
-                " (accepted=" + requested + ", next eligible in " + delayMs + "ms)",
+            val state = WatchdogV2.assessProbe(this)
+            // FX-210.2/.3/.4：决策与状态无关副作用全部落在 planTick 的前置段（先于一切早退，
+            // 含熔断打开的那一拍），调用方只执行返回的破坏性动作。退避/熔断同用
+            // effectiveFailureCount（半死阶梯与 DEAD 共用计数，见 #175/#210.2）。
+            val plan = WatchdogV2.planTick(
+              state = state,
+              now = now,
+              nextRestartAllowedAt = nextRestartAllowedAt,
+              engineReady = engineManager.engineReady,
+              engineProcessAlive = engineManager.engineProcessAlive(),
+              bootAgeMs = now - EngineManager.lastStartAttemptAt,
+              restartDeadConfirmations = restartDeadConfirmations,
+              feedProbe = { healthy -> engineManager.onEngineProbe(healthy) },
+              consumeMarkers = { WatchdogV2.consumeTaskDoneMarkers(this) },
+              refreshWake = { WatchdogV2.refreshWakeLock(this) },
+              undoReady = { UndoGate.onProbeFailure(this, WatchdogV2.effectiveFailureCount()) },
             )
+            for (line in plan.logs) LogCollector.log("dsh-watchdog", line)
+            when (plan.action) {
+              WatchdogV2.TickAction.IDLE -> {
+                nextRestartAllowedAt = 0L
+                UndoGate.disarm(this)
+              }
+              WatchdogV2.TickAction.HOLD -> Unit
+              WatchdogV2.TickAction.UNDO -> {
+                nextRestartAllowedAt = now + WatchdogV2.nextDelayMs()
+                Thread {
+                  val result = UndoGate.execute(this, engineManager)
+                  if (result.executed) {
+                    LogCollector.log("dsh-watchdog", "auto-undo ok -> " + (result.snapshotId ?: "?"))
+                    engineManager.resetCooldown()
+                    engineManager.startEngine()
+                  } else {
+                    LogCollector.log("dsh-watchdog", "auto-undo not executed: " + result.summary.take(160))
+                  }
+                }.start()
+              }
+              WatchdogV2.TickAction.RESTART -> {
+                if (plan.force) {
+                  engineManager.mirrorDiagnosticsToShared("engine-boot-hung")
+                  LogCollector.log("dsh-watchdog", "tracked child exceeded boot deadline; forcing one controlled restart")
+                }
+                val requested = engineManager.startEngine(force = plan.force)
+                val delayMs = WatchdogV2.nextDelayMs()
+                nextRestartAllowedAt = now + delayMs
+                LogCollector.log(
+                  "dsh-watchdog",
+                  "restart requested after confirmed failure #" + WatchdogV2.effectiveFailureCount() +
+                    " (accepted=" + requested + ", next eligible in " + delayMs + "ms)",
+                )
+              }
+            }
           } catch (t: Throwable) {
             Log.e("dsh-watchdog", "watchdog tick failed", t)
             LogCollector.log("dsh-watchdog", "watchdog tick failed: " + (t.message ?: t.javaClass.simpleName))

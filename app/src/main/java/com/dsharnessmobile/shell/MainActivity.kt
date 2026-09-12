@@ -26,6 +26,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.NotificationCompat
 import androidx.core.view.ViewCompat
@@ -52,6 +53,9 @@ class MainActivity : ComponentActivity() {
   /** True only after WebView reported a load error for the local engine origin. */
   @Volatile
   internal var enginePageFailed = false
+  /** 返回策略：页面层栈信号缓存（JS 经 dshBackBridge 主动推送；onPageStarted 复位、
+   *  onPageFinished 拉平）。返回回调只读它，绝不 evaluateJavascript 现问页面。 */
+  internal val backGateState = BackGateState()
   /** System insets in CSS px, cached until the engine page is ready to receive them. */
   private var webSystemBottomInset = 0
   private var webSystemTopInset = 0
@@ -229,6 +233,14 @@ class MainActivity : ComponentActivity() {
 
   override fun onResume() {
     super.onResume()
+    // ST-01（真源收敛，F-APK-01）：设置页授予/撤销「所有文件访问」后回前台必须 ≤3s 收敛。
+    // 此前写路径只有 setAllowSwitch/setPaired/revokePair（全在「用户拨我方开关」的动作上），
+    // 在系统设置里改权限后回前台无人重写 KEY_FULLACCESS，引擎侧门1 读到陈旧值。
+    // 展示值 = stateJson 的活体 fullAccess()，判定值 = 引擎读 KEY_FULLACCESS，此处令两者同源。
+    AdbState.syncFullAccess(this)
+    // ST-11：开发者日志回前台补启——EngineService 退出时采集器可能已停而偏好仍为开，
+    // 「开关事实 = 偏好 && 在跑」由 DevLogControl 保证（幂等；偏好关时 no-op）。
+    DevLogControl.ensureStarted(this)
     // 前台引擎监控：引擎被杀/崩溃时自动回退测试界面，恢复后回 WebUI。
     if (!userClosedEngine) {
       engineFlow.startMonitor()
@@ -250,7 +262,8 @@ class MainActivity : ComponentActivity() {
         }
       }
     }
-    // 0.13.2 W7：悬浮球开关已开时补启（含从系统授权页返回的场景——权限授予后 onResume 自动拉起）。
+    // 0.13.2 W7 + ST-02：悬浮球开关已开且权限在场时补启。权限缺失时 OverlayController 把偏好
+    // 回落 false，本行随即短路——不再每次回前台弹系统页；用户重新授予后需再点一次开关。
     OverlayController.ensureStarted(this)
     // ADB 端口后台预取（配对页秒回，不再同步等 NSD——2026-08-27 报障修复；15s TTL 内不重扫）。
     // F1 常驻预热同线程搭车：server 就绪 + 密钥生成移出配对关键路径（2026-08-27 配对窗口实锤修复）。
@@ -262,7 +275,13 @@ class MainActivity : ComponentActivity() {
     // 仅当 WebView 未展示（引导页/首次启动）时才探测并重路由；相册/文件选择器
     // 返回时 WebView 已可见，探测超时会误触发 showWeb→reload，导致 JS 状态丢失。
     guideRenderer.refreshGuideMeta()
-    if (!userClosedEngine && webView.visibility != View.VISIBLE && !EngineProbe.check().optBoolean("running", false)) startEngineFlow()
+    // FX-210.5：探活不得在主线程（onResume 每次回前台都跑；cookie 取不到 + 3080 半死时
+    // 单次同步 HTTP 为秒级）。后台探活 + 主线程分流，失败原因结构化落盘。
+    if (!userClosedEngine && webView.visibility != View.VISIBLE) {
+      probeEngineOffMainThread { running ->
+        if (!running && !userClosedEngine && webView.visibility != View.VISIBLE) startEngineFlow()
+      }
+    }
     // 主题补推：从系统设置/SAF 返回时系统主题可能已变（兜底桥时序覆盖）。
     if (::webView.isInitialized) {
       pushSystemDark(webView)
@@ -274,58 +293,40 @@ class MainActivity : ComponentActivity() {
     guideRenderer.settlePendingInstall()
   }
 
-  /** 窗口重新获得焦点时重应用沉浸式（系统栏 flag 会随焦点变化被重置）。 */
+  /**
+   * FX-210.5：引擎探活的后台入口。EngineProbe.check 是同步 HTTP（connect+read 各 800ms，
+   * 半死引擎下为秒级下限），主线程调用会直接冻结 onResume/首帧；失败态以结构化原因落盘
+   * （reason/latencyMs，不含任何令牌）。
+   */
+  private fun probeEngineOffMainThread(onResult: (Boolean) -> Unit) {
+    Thread {
+      val probe = try {
+        EngineProbe.check()
+      } catch (t: Throwable) {
+        org.json.JSONObject().put("running", false).put("error", t.javaClass.simpleName)
+      }
+      val running = probe.optBoolean("running", false)
+      if (!running) {
+        LogCollector.log(
+          "dsh-engine-probe",
+          "probe miss: reason=" + probe.optString("error").ifBlank { "unknown" } +
+            " latencyMs=" + probe.optLong("latencyMs", -1L),
+        )
+      }
+      runOnUiThread {
+        try {
+          if (!isFinishing && !isDestroyed) onResult(running)
+        } catch (_: Throwable) {
+        }
+      }
+    }.apply { isDaemon = true; name = "engine-probe" }.start()
+  }
+
+  /** 窗口重新获得焦点时重应用沉浸式（系统栏 flag 会随焦点变化被重置）。
+   *  ST-10：读与都用 ShellState.ImmersiveMode 单一真源，本类不再自带私有副本。 */
   override fun onWindowFocusChanged(hasFocus: Boolean) {
     super.onWindowFocusChanged(hasFocus)
-    if (hasFocus) applyImmersive(immersivePrefs())
-  }
-
-  /** 沉浸式状态栏持久化读取（设置 → 通用设置 开关；默认收起）。 */
-  private fun immersivePrefs(): Boolean {
-    return try {
-      getSharedPreferences("dsh_settings", MODE_PRIVATE).getBoolean("immersive_mode", true)
-    } catch (_: Exception) {
-      true
-    }
-  }
-
-  /** 状态栏常态收起（沉浸式）：隐藏系统栏，边缘滑动临时呼出后自动收起。 */
-  private fun applyImmersive(enabled: Boolean) {
-    try {
-      if (Build.VERSION.SDK_INT >= 30) {
-        val controller = WindowInsetsControllerCompat(window, window.decorView)
-        if (enabled) {
-          controller.hide(WindowInsetsCompat.Type.statusBars())
-          controller.systemBarsBehavior =
-            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        } else {
-          controller.show(WindowInsetsCompat.Type.statusBars())
-        }
-      } else {
-        val flags = if (enabled) {
-          View.SYSTEM_UI_FLAG_FULLSCREEN or
-            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
-            View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
-            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-        } else {
-          0
-        }
-        window.decorView.systemUiVisibility = flags
-      }
-    } catch (t: Throwable) {
-      Log.e("dsh-image", "applyImmersive failed: " + t.message)
-    }
-  }
-
-  /** 沉浸式开关（JS 桥）：应用 + 持久化。 */
-  private fun setImmersivePersisted(enabled: Boolean) {
-    runOnUiThread { applyImmersive(enabled) }
-    try {
-      getSharedPreferences("dsh_settings", MODE_PRIVATE).edit().putBoolean("immersive_mode", enabled).apply()
-      Log.i("dsh-image", "immersive set: " + enabled)
-    } catch (e: Exception) {
-      Log.e("dsh-image", "immersive persist failed: " + e.message)
-    }
+    if (hasFocus) ImmersiveMode.apply(this, ImmersiveMode.isEnabled(this))
   }
 
   override fun onDestroy() {
@@ -360,8 +361,55 @@ class MainActivity : ComponentActivity() {
     pushWebInsets()
   }
 
-  override fun onBackPressed() {
-    if (webView.canGoBack()) webView.goBack() else super.onBackPressed()
+  /**
+   * 返回策略接线（计划 §5.1 方案 1）：legacy onBackPressed() 覆写升级为
+   * OnBackPressedCallback。回调内**同步**读缓存布尔——evaluateJavascript 是异步 API，
+   * 不能在返回回调里现问页面，页面信号只能由 JS 主动推送。
+   *
+   * 三级判定见 BackGate.decide：① 跨文档历史（canGoBack()，本机 WebView 不认
+   * same-document 条目，故只作历史腿）→ goBack()；② 页面层栈 → JS 执行关闭并**消费**
+   * （即便 JS 侧没找到关闭控件也不退出：「观测不到/关不掉的层不得变成误退应用」）；
+   * ③ 都没有 → 关掉本回调后重新 dispatch，落回 Activity 默认 finish。
+   */
+  private fun installBackGate() {
+    onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+      override fun handleOnBackPressed() {
+        val canGoBack = ::webView.isInitialized && webView.canGoBack()
+        val pageStack = backGateState.pageStackAvailable
+        val decision = BackGate.decide(canGoBack, pageStack)
+        Log.i(
+          BackGate.TAG,
+          "back: canGoBack=" + canGoBack + " pageStack=" + pageStack +
+            " depth=" + backGateState.pageStackDepth + " -> " + decision.name,
+        )
+        when (decision) {
+          BackDecision.GO_BACK_HISTORY -> webView.goBack()
+          BackDecision.DISPATCH_PAGE_STACK -> webView.evaluateJavascript(BackGate.DISPATCH_SCRIPT, null)
+          BackDecision.FINISH_ACTIVITY -> {
+            // 层穷尽：交回 Activity 默认行为。重新 dispatch（而非直接 finish()）保持与
+            // 其它 OnBackPressedCallback 的次序语义一致；dispatch 返回后复位，多窗口或
+            // 延迟 finish 时下一次返回仍由本回调处理。
+            isEnabled = false
+            onBackPressedDispatcher.onBackPressed()
+            isEnabled = true
+          }
+        }
+      }
+    })
+  }
+
+  /**
+   * onPageFinished 后拉平层栈缓存：注入插件可能晚于首帧挂载，桥上推的初始信号会漏。
+   * @param view - 已就绪的 WebView。
+   */
+  private fun pullBackGateState(view: WebView) {
+    try {
+      view.evaluateJavascript(BackGate.READ_DEPTH_SCRIPT) { raw ->
+        backGateState.onPageFinished(BackGate.parseDepth(raw))
+      }
+    } catch (t: Throwable) {
+      Log.w(BackGate.TAG, "page stack pull failed: " + t.message)
+    }
   }
 
   private fun configureWebView() {
@@ -423,10 +471,14 @@ class MainActivity : ComponentActivity() {
       override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
         super.onPageStarted(view, url, favicon)
         if (isEngineSource(url)) enginePageFailed = false
+        // 新文档：上一文档的层栈信号作废（页面插件在新文档里重新推）。
+        if (isEngineSource(url)) backGateState.onPageStarted()
       }
 
       override fun onPageFinished(view: WebView, url: String) {
         super.onPageFinished(view, url)
+        // 层栈缓存拉平（插件可能晚于首帧挂载，初始上行信号会漏）。
+        if (isEngineSource(url)) pullBackGateState(view)
         pushSystemDark(view)
         pushWebInsets(view)
         // 悬浮球避让帧补放（启动期首帧注入若因页面未就绪落空，此处重放）
@@ -473,7 +525,8 @@ class MainActivity : ComponentActivity() {
             android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
             android.content.res.Configuration.UI_MODE_NIGHT_YES
         },
-        onSetImmersiveRequest = { enable -> setImmersivePersisted(enable) },
+        // ST-10：桥 setter 走 ShellState.ImmersiveMode（偏好 + 应用成对，单一真源）。
+        onSetImmersiveRequest = { enable -> ImmersiveMode.setEnabled(this, enable) },
         onSettingsPathRequest = { engineManager.settingsDocumentPath() },
         onExportSettingsDocument = { engineManager.settingsDocumentExport() },
         onCopyTextRequest = { text -> copyTextNative(text) },
@@ -485,11 +538,11 @@ class MainActivity : ComponentActivity() {
           showTestNotification("界面已刷新", "Web UI 已重新加载")
         },
         onOpenConsole = { startActivity(Intent(this, ConsoleActivity::class.java)) },
-        onGetDevLogEnabled = { DevLogPrefs.isEnabled(this) },
+        onGetDevLogEnabled = { DevLogControl.isEnabled(this) },
         onSetDevLogEnabled = { enabled ->
-          DevLogPrefs.setEnabled(this, enabled)
+          // ST-10/ST-11：偏好与采集器成对动作走 ShellState.DevLogControl（单一真源）。
+          DevLogControl.setEnabled(this, enabled)
           if (enabled) {
-            LogCollector.start(this)
             LogCollector.log("dsh-shell", "dev log enabled by user")
             showTestNotification(
               "开发者日志已开启",
@@ -498,7 +551,6 @@ class MainActivity : ComponentActivity() {
             )
           } else {
             LogCollector.log("dsh-shell", "dev log disabled by user")
-            LogCollector.stop()
             showTestNotification("开发者日志已关闭", "日志收集已停止")
           }
         },
@@ -530,11 +582,19 @@ class MainActivity : ComponentActivity() {
       ),
       "androidBridge",
     )
+    // 返回策略（计划 §5.1 方案 1）：页面 → 壳的层栈上行接口。独立接口对象，只暴露
+    // setAvailable/getBackAvailable 两个方法（授权面窄于 androidBridge 的 34 个方法）；
+    // addJavascriptInterface 的方法调用是同步的——正是「同步决策」需要的形态。
+    webView.addJavascriptInterface(BackGateBridge(backGateState), "dshBackBridge")
+    installBackGate()
     // 0.13.3 W2：引擎 /api 全前缀走浏览器鉴权（401）。WebView 首屏先换好 cookie：
     // Kotlin 侧 P0（engine.log token 交换）/P1（credentials 密钥自 mint）拿到 cookie 后
     // 注入 CookieManager——同源 XHR/WS 自动携带；交换失败时回退带 token 的 URL 让引擎
     // 303+Set-Cookie 自愈（官方交换路径）。
-    val authCookie = EngineAuth.refresh(this)
+    // FX-210.5：此处只取**零网络**的本地缓存 cookie（预置 cookie 有效即用）；同步 refresh
+    // 含最长 8s 的 HTTP 且持 EngineAuth 锁（排队可达 ~16s），原先在 onCreate 主线程同步调用
+    // 会冻结首帧——已迁到下面的后台重试线程（首个尝试立即执行）。
+    val authCookie = EngineAuth.cookie(this)
     if (authCookie != null) {
       try {
         android.webkit.CookieManager.getInstance().setCookie(EngineProbe.ENGINE_URL, authCookie)
@@ -551,7 +611,7 @@ class MainActivity : ComponentActivity() {
       Thread {
         val deadline = System.currentTimeMillis() + 120_000L
         while (System.currentTimeMillis() < deadline) {
-          try { Thread.sleep(5_000) } catch (_: InterruptedException) { return@Thread }
+          // FX-210.5：refresh 在后台线程内同步执行（首个尝试不再延迟 5s）。
           val cookie = try { EngineAuth.refresh(this) } catch (_: Throwable) { null }
           if (cookie != null) {
             try { android.webkit.CookieManager.getInstance().setCookie(EngineProbe.ENGINE_URL, cookie) } catch (_: Throwable) {}
@@ -560,6 +620,7 @@ class MainActivity : ComponentActivity() {
             }
             return@Thread
           }
+          try { Thread.sleep(5_000) } catch (_: InterruptedException) { return@Thread }
         }
       }.apply { isDaemon = true; name = "engine-auth-reload" }.start()
     }

@@ -1,6 +1,5 @@
 package com.dsharnessmobile.shell
 
-import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.MediaStore
@@ -94,19 +93,15 @@ internal class DirectoryPickerController(private val activity: MainActivity) {
         if (uri != null) {
           // SAF 持久化（docs/ANDROID10-SAF-ROUTING.md 方案 A）：系统 SAF 授权默认随
           // 进程结束失效——takePersistable 后重启仍在，sharedDirs 不再变死路径。
-          // prefs 留档 tree URI 供后续清理/审计。
+          // ST-24（S0 死状态清理）：原先另把 tree URI 留档到一张私有 prefs 目录清单，但全仓无任何
+          // 消费方（有写无读），且与真源（系统 getPersistedUriPermissions）构成双口径。该清单与
+          // 写入点已删除：SAF 授权事实只以系统持久化授权为准。
           try {
             activity.contentResolver.takePersistableUriPermission(
               uri,
               android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
                 android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
             )
-            activity.getSharedPreferences("dsh-saf-dirs", Context.MODE_PRIVATE)
-              .edit().putStringSet(
-                "trees",
-                (activity.getSharedPreferences("dsh-saf-dirs", Context.MODE_PRIVATE)
-                  .getStringSet("trees", emptySet()) ?: emptySet()) + uri.toString(),
-              ).apply()
           } catch (_: SecurityException) {
             // 部分 ROM 返回非 persistable 授权：降级为会话内有效，不阻断 pick。
           }
