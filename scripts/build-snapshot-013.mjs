@@ -163,7 +163,7 @@ for (const dir of STRIP.runtimeDirs) {
 // 剥离清单后置断言（ST-16）：清单项在 stage 树里必须不存在；--base 给出 base-dsh 归档时额外做**反 no-op**
 // （基座里命中的条目必须在输出里消失）——防「清单键名/前缀漂移导致剥离静默 no-op」而无人知。
 {
-  const stripArgs = ['scripts', 'check-strip-noop.mjs', '--stage', join(STAGE, 'root')]
+  const stripArgs = [join(ROOT, 'scripts', 'check-strip-noop.mjs'), '--stage', join(STAGE, 'root')]
   if (existsSync(baseDsh)) stripArgs.push('--base', baseDsh)
   const r = spawnSync(process.execPath, stripArgs, { cwd: ROOT, encoding: 'utf8' })
   if (r.stdout) process.stdout.write(r.stdout)
