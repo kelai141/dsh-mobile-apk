@@ -365,6 +365,7 @@
   "extraPresent": [
     "@img/sharp-wasm32",
     "@mistralai/mistralai",
+    "@vscode/ripgrep-android-arm64",
     "@vscode/ripgrep-android-x64",
     "clsx",
     "scheduler"
