@@ -214,8 +214,13 @@ class ShizukuUserServiceBridge() : ShizukuUserService.Stub() {
     return try {
       val file = File(path)
       val removed = when {
-        file.isDirectory -> file.deleteRecursively()
-        else -> !file.exists() || file.delete()
+        // 审查 I-9：远端删除同样不得跟随符号链接（删链接本身而不是它的目标）——
+        // NOFOLLOW 原语删完再复查存在性，removed 语义与旧实现一致（删不净即失败）。
+        file.isDirectory && !SnapshotFs.isSymbolicLink(file) -> {
+          SnapshotFs.deletePath(file)
+          !SnapshotFs.exists(file)
+        }
+        else -> !SnapshotFs.exists(file) || file.delete()
       }
       out.putBoolean("ok", removed)
       if (!removed) out.putString("error", "delete failed")

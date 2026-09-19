@@ -15,6 +15,7 @@ import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -27,10 +28,12 @@ import androidx.webkit.WebViewFeature
 import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
@@ -70,6 +73,14 @@ internal class BrowserHost(
     /** 非会话调用（旧调用/设备脚本）的工作台键：与任何真实会话隔离，保持改造前的可用性。 */
     private const val ANONYMOUS_SESSION = "__anonymous__"
     private const val MAX_TABS = 8
+    /**
+     * 请求级过滤写进 logcat 的**条数上限**（审查 S-4）。
+     *
+     * 为什么必须有上限：被拦请求的数量由**页面**决定 —— 一个恶意/失控页面可以刷出成千上万条回环
+     * 探测请求，没有上限就是把 logcat 与诊断文件交给它写。超出后只累加计数
+     * （`status().blockedRequests`），行为仍如实可观测。
+     */
+    private const val BLOCKED_REQUEST_LOG_LIMIT = 20
     private const val SNAPSHOT_MAX_NODES = 400
     /** 无活动标签页时的只读占位（避免把“没有页面”误判成“有页面”） */
     private val ORPHAN_GENERATION = AtomicLong(0)
@@ -125,6 +136,15 @@ internal class BrowserHost(
     var pageHeight = 0
     var pageDevicePixelRatio = 0.0
     var errorPageUrl: String? = null
+    /**
+     * 被**请求级过滤**拦下的子资源计数（审查 S-4）。
+     *
+     * 为什么要有这个计数：拦截动作发生在 `shouldInterceptRequest`（后台线程），既不改页面状态、
+     * 也不产生 onReceivedError —— 如果只写 logcat，模型与面板都无从知道「页面少了东西」，
+     * 现场排查只能靠人捞日志。计数进 `status()` 后可被 `browser_state` 直接看到。
+     * 计数用 AtomicInteger：该方法在 WebView 的 IO 线程池上并发调用。
+     */
+    val blockedRequests = AtomicInteger(0)
   }
 
   /**
@@ -147,6 +167,14 @@ internal class BrowserHost(
     var requestedVisible = false
     var stageVisible = false
     var stageBounds: StageBounds? = null
+    /**
+     * 最近一次可信 bounds 下推的 `uptimeMillis`（`0` = 从未下推）。
+     *
+     * 「记忆态」与「在场态」必须分开：`stageVisible` 只说明**上一次下推**说了什么，
+     * 它无法回答「现在还有没有发布者」。用户实报「收起侧边栏浏览器不卸载」正是这个缺口
+     * （见 [BrowserOverlayPolicy] 的 KDoc）——所以绘制判据加上了这个时间戳做保鲜。
+     */
+    var boundsAt = 0L
   }
 
   /** 全部会话工作台（键 = 会话 id；[ANONYMOUS_SESSION] 为非会话调用）。 */
@@ -372,6 +400,10 @@ internal class BrowserHost(
   /** Hide the browser surface without destroying its tab state. */
   fun hide(): String = onMain {
     requestedVisible = false
+    // 停画必须把两半都撤掉：只清 requestedVisible 会让 stageVisible 留成 true，
+    // 于是下一次 show()/switchTo 回到本工作台时**不需要任何在场 UI** 就又画出来
+    // （用户实报「收起侧边栏浏览器不卸载」的幽灵态由此而来）。见 [BrowserOverlayPolicy]。
+    stageVisible = false
     applyVisibility()
     status().toString()
   } ?: unavailable("main-thread-timeout")
@@ -428,6 +460,9 @@ internal class BrowserHost(
         viewportHeight = value.optDouble("viewportHeight", 0.0),
         visible = value.optBoolean("visible", false),
       )
+      // 记下「在场发布者刚刚说过话」的时刻：这是绘制判据的保鲜依据
+      // （见 [BrowserOverlayPolicy]）。必须在写完 stageBounds 之后、applyStageBounds 之前。
+      currentWorkspace?.boundsAt = SystemClock.uptimeMillis()
       if (lastError == "invalid-stage-bounds") lastError = ""
       applyStageBounds()
       status().toString()
@@ -516,6 +551,8 @@ internal class BrowserHost(
   fun destroy() {
     onMain {
       stageBounds = null
+      // 看门狗随 Activity 一起退场（否则它持有的 root/View 引用会泄漏到下一次 attach）。
+      root.removeCallbacks(boundsWatchdog)
       root.removeOnLayoutChangeListener(rootLayoutListener)
       disposeView()
       Unit
@@ -523,6 +560,9 @@ internal class BrowserHost(
   }
 
   private fun disposeView() {
+    // 审查 N-2：看门狗此前只在 destroy() 摘表，disposeView()（close/关最后一页走到）不摘 ⇒
+    // browserClose 之后仍每 500ms 唤醒主线程空转。这里补摘（幂等：removeCallbacks 对未挂表是空操作）。
+    root.removeCallbacks(boundsWatchdog)
     // browserClose 的语义 = 关闭**当前会话**的工作台（销毁它的全部页面与 renderer）。
     // 复用 dropWorkspace，避免「同一件事两份实现」——早先这里是 dropWorkspace 的重复副本，
     // 改一处漏一处是这类状态的经典回归源。
@@ -588,6 +628,37 @@ internal class BrowserHost(
           return true
         }
 
+        /**
+         * 请求级过滤（审查 S-4）：顶层导航串被准入检查过，**不代表页面发出去的子请求也被查过**。
+         *
+         * 旧实现的缺口：全仓没有 `shouldInterceptRequest`，于是放行后的任意站点可以用
+         * `<img>/<iframe>/<script>/<form>/fetch` 去打 `127.0.0.1:3080`（引擎同源，且引擎的鉴权
+         * cookie 就在**进程级** CookieManager 里）、`192.168.*`、`169.254.169.254`。
+         * 壳侧此前零防线，唯一拦截在引擎侧（`sec-fetch-site` 与 SameSite）——两者都不是本仓可控属性。
+         *
+         * 返回非 null 即阻断（403 + 空体）。判定是纯函数（[BrowserHostNavigationPolicy.blockedRequestReason]），
+         * 与准入共用同一套主机规范化，避免两层口径分裂。
+         */
+        override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+          val url = request.url?.toString().orEmpty()
+          val reason = BrowserHostNavigationPolicy.blockedRequestReason(url)
+          if (reason == null) return null
+          val count = tab.blockedRequests.incrementAndGet()
+          // 前若干条进 logcat（稳定 tag，便于现场 `logcat | grep dsh-browser` 定性）；
+          // 之后的只计数——攻击者可控的页面可以刷出成千上万条，日志面不能被它撑爆。
+          if (count <= BLOCKED_REQUEST_LOG_LIMIT) {
+            android.util.Log.w("dsh-browser", "blocked subresource ($reason): $url")
+          }
+          return WebResourceResponse(
+            "text/plain",
+            "utf-8",
+            403,
+            "Blocked",
+            emptyMap(),
+            ByteArrayInputStream(ByteArray(0)),
+          )
+        }
+
         override fun onPageStarted(view: WebView, startedUrl: String, favicon: android.graphics.Bitmap?) {
           // 内置错误页守卫（0.14.0 设备实锤的真缺陷）：错误页用 loadDataWithBaseURL(null, ...) 载入，
           // 其文档 URL 是 **about:blank**，**不是** data: ——所以只判 data: 的旧守卫会漏掉它：
@@ -650,6 +721,9 @@ internal class BrowserHost(
     tab.view = created
     applyIdentityToView(created)
     appliedViewport = requestedViewport
+    // 覆盖层在场之后才需要看门狗：它守的是「发布者已经不在场」这件事（见 boundsWatchdog）。
+    root.removeCallbacks(boundsWatchdog)
+    root.postDelayed(boundsWatchdog, BrowserOverlayPolicy.STAGE_BOUNDS_WATCHDOG_MS)
     applyStageBounds()
     return created
   }
@@ -743,8 +817,18 @@ internal class BrowserHost(
     // 只处理当前工作台的 `view` 是不够的——别的会话的 WebView 仍然 attach 在 root 上且可见，
     // 那正是用户要求消除的「跨对话互相看见」。切到哪个会话，就只有那个会话的页面在场。
     val current = currentWorkspace
+    val now = SystemClock.uptimeMillis()
     for (workspace in workspaces.values) {
-      val visible = workspace === current && workspace.requestedVisible && workspace.stageVisible
+      // 判据 = 当前位置 ∧ 调用方意愿 ∧ 最近一次舞台判定 ∧ **发布者仍在场**（保鲜期）。
+      // 前三项都是粘滞记忆态，只有第四项能把「组件已经卸载、没人再来下推」这件事反映出来；
+      // 缺了它就会出现没有任何 UI 所有者、用户收起侧栏也撤不掉的幽灵覆盖层（用户实报）。
+      val visible = BrowserOverlayPolicy.visible(
+        isCurrent = workspace === current,
+        requestedVisible = workspace.requestedVisible,
+        stageVisible = workspace.stageVisible,
+        boundsAgeMs = BrowserOverlayPolicy.boundsAge(workspace.boundsAt, now),
+        ttlMs = BrowserOverlayPolicy.STAGE_BOUNDS_TTL_MS,
+      )
       for (tab in workspace.tabs.values) {
         // **INVISIBLE 而不是 GONE**（0.14.0 模拟器实锤）：
         // GONE 的 View 不参与布局 → WebView 内页面拿不到布局盒（innerWidth/innerHeight = 0），
@@ -752,6 +836,40 @@ internal class BrowserHost(
         // 两者对用户的观感完全一致（都不会盖在聊天界面上），但对 AI 的可读性是「全有 vs 全无」。
         tab.view?.visibility = if (visible) View.VISIBLE else View.INVISIBLE
       }
+    }
+  }
+
+  /**
+   * 保鲜看门狗：记忆态说自己可见、但保鲜期内没有任何新下推时，**立刻停画**。
+   *
+   * 为什么必须是个"主动"的定时器：`applyVisibility()` 只在有事件时被调用，而"发布者消失"
+   * 本身不产生任何事件（组件卸载、工具进程被回收、页面崩掉、别的会话抢走当前工作台……）。
+   * 没有这个看门狗，粘滞的 `stageVisible` 可以永久把 WebView 留在屏幕上——
+   * 那正是用户 2026-09-19 实报「收起侧边栏浏览器不卸载」的存活条件。
+   *
+   * 代价：每 [BrowserOverlayPolicy.STAGE_BOUNDS_WATCHDOG_MS] 一次主线程空转（绝大多数拍
+   * `stageVisible` 为 false 或保鲜期内，直接跳过），相比"永久盖住聊天界面"可以忽略。
+   */
+  private val boundsWatchdog = object : Runnable {
+    override fun run() {
+      val workspace = currentWorkspace
+      if (workspace != null) {
+        val age = BrowserOverlayPolicy.boundsAge(workspace.boundsAt, SystemClock.uptimeMillis())
+        if (BrowserOverlayPolicy.shouldDropStaleStage(
+            stageVisible = workspace.stageVisible,
+            boundsAgeMs = age,
+            ttlMs = BrowserOverlayPolicy.STAGE_BOUNDS_TTL_MS,
+          )
+        ) {
+          // 停画但**保留排版**：AI 的工作面独立于 UI 是否可见（0.14.0 既有口径）。
+          workspace.stageVisible = false
+          applyVisibility()
+        }
+      }
+      // 审查 N-2：没有工作台（或没有可见工作台）时不再自续 —— 看门狗守的是「发布者已不在场」，
+      // 而「一个页面都没有」不产生任何停画决策；继续每 500ms 唤醒主线程只是纯开销。
+      val stillNeeded = workspaces.values.any { it.stageVisible || it.requestedVisible }
+      if (stillNeeded) root.postDelayed(this, BrowserOverlayPolicy.STAGE_BOUNDS_WATCHDOG_MS)
     }
   }
 
@@ -815,6 +933,8 @@ internal class BrowserHost(
       .put("tabId", activeTabId ?: "")
       .put("tabs", tabSummaries())
       .put("tabCount", tabs.size)
+      // 请求级过滤计数（审查 S-4）：非 0 表示本页有子资源被拒（模型/面板据此知道「页面少了东西」）。
+      .put("blockedRequests", activeTab()?.blockedRequests?.get() ?: 0)
       .put("reason", lastError)
   }
 
@@ -1289,7 +1409,11 @@ a{display:inline-block;margin-top:16px;padding:10px 20px;border-radius:8px;backg
           val nodeCount = nodes.length()
           done(JSONObject()
             .put("ok", true)
-            .put("tabId", TAB_ID)
+            // 审查 §3.2-S7：此前恒回报常量 "tab-1"——多页签时**是错值**（在 tab-3 上取快照也说是
+            // tab-1），而工具层把它写进 lastSnapshot.tabId 用于后续动作归因，于是「点错页」在回执层
+            // 完全不可见（还被两道防线同时遮蔽：schema 的 NOT_RENDERED 白名单 + 壳侧 resolveRef 只校验
+            // pageGeneration/ref 不校验 tab）。这里取当前活动页的真实 id。
+            .put("tabId", activeTab()?.id ?: TAB_ID)
             .put("surface", "browser")
             .put("pageGeneration", startedGeneration)
             .put("url", payload.optString("url", url))

@@ -14,10 +14,14 @@ android {
     // (the embedded engine, bash, and every child command would need linker64
     // wrappers); 34 keeps native exec working on Android 15/16 devices.
     targetSdk = 34
-    // 0.14.0 正式版：versionCode 39（覆盖安装 v0.14.0-preview(38)）。
-    // 注意 vc 必须轮换：上一版 preview 已用 38 发布过，同 code 装不上（无法覆盖安装）。
-    // 本版主题 = 虚拟屏与 AI 浏览器达到可用线 + 附件入口分流 + 快照升级健壮性。
-    // 演进：0.13.8(37) → 0.14.0-preview(38) → 0.14.0(39)。
+    // 0.14.1：versionCode 40（覆盖安装 v0.14.0(39)）。
+    // 注意 vc 必须轮换：上一版已用 39 发布过，同 code 装不上（无法覆盖安装）。
+    // 本版主题 = 优化 + 小组件适配 + 已知 issue 修复（十块，见 docs/0.14.1-preview-PLAN.md）：
+    // 引擎启动加速与插件懒加载、老设备适配、虚拟屏范围门禁、悬浮窗完成态卡片、悬浮球自由移动与
+    // 状态描边、通知实时性、AI 浏览器回执、第三方插件 boot 隔离与 schema 加固。
+    // 内联本轮实机反馈驱动的修复：快照半程事务幂等收敛、启动失败诊断落盘（files/boot-fail.log）、
+    // shell 侧 pnpm store 路径 canonical 化、undo_scan 会话文件名兼容、undo_list 时区统一。
+    // 演进：0.13.8(37) → 0.14.0-preview(38) → 0.14.0(39) → 0.14.1(40)。
     // 下列 0.14.0-preview 主题（迭代计划
     // docs/NEXT-ITERATION-PLAN-2026-09-12.md 的切片 1 = B0+B1+B2）：
     // ① B0 发布阻断项清零：android_ui_dump schema 族与返回面脱钩（#204）、控制协议 V2 行句柄
@@ -26,12 +30,12 @@ android {
     //    临时工作区 R1-R3；
     // ③ B2 门禁与发布链：新增门禁接进唯一接线面（本地构建链 / 两仓 CI / 发布组装链三处），
     //    快照指纹对账、工具返回值 schema 自检、控制 op 六处登记链、SKIP 计数。
-    versionCode = 39
+    versionCode = 40
     // Snapshot builds append a suffix (e.g. -SN-1-RC13) via -PversionNameSuffix; release builds pass none.
     val snapshotSuffix = providers.gradleProperty("versionNameSuffix").getOrElse("")
     // 版本号单一来源：UI（GuidePageRenderer）、桥（androidBridge.version）、诊断日志、引擎环境变量
     // （DSH_APP_VERSION，见 EngineManager.engineEnv）全部读这里，禁止任何地方再硬编码版本字面量。
-    versionName = "0.14.0" + snapshotSuffix
+    versionName = "0.14.1" + snapshotSuffix
     buildConfigField("String", "TERMUX_VERSION", "\"0.118.3\"")
     // 0.14.0-preview：虚拟屏 P0 建屏矩阵走仪器测试入口（app UID 下运行 = P0-6 要测的调用者身份），
     // 不新增任何产品面（Activity/Bridge/Manifest 均不动）。见 .deploy-tmp/iter-0140/vdisplay-p0.md §8.8。

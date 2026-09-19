@@ -30,6 +30,12 @@ class UpdateManager(private val context: Context) {
     Thread {
       try {
         onStatus("检查更新…")
+        // S-10：未配置可信发布源 = 未启用（不再对着模拟器别名超时，也不再给出「可用」的错觉）。
+        if (manifestUrl.isBlank()) {
+          throw IllegalStateException(
+            "在线更新未启用：未配置可信发布源（需 HTTPS + 签名；本地联调用 overrideManifestUrl 打开）",
+          )
+        }
         val manifest = JSONObject(fetch(manifestUrl))
         val url = manifest.getString("url")
         // 完整性加固（2026-08-23，审核 A6/B5）：在线更新快照可被中间人篡改——
@@ -51,7 +57,7 @@ class UpdateManager(private val context: Context) {
         onStatus("解压新快照…")
         // The archive holds a usr/ prefix; stage it OUTSIDE the live tree.
         val stage = File(context.filesDir, "update-stage")
-        deleteRecursively(stage)
+        SnapshotFs.deletePath(stage)
         SnapshotExtractor.extract(
           tmp.inputStream(), manifest.optLong("size", 0), stage, { _, _ -> }, runtimeRoot = context.filesDir,
         )
@@ -62,7 +68,7 @@ class UpdateManager(private val context: Context) {
         onStatus("切换运行时…")
         val usr = File(context.filesDir, "usr")
         val old = File(context.filesDir, "usr-old")
-        deleteRecursively(old)
+        SnapshotFs.deletePath(old)
         if (usr.exists()) usr.renameTo(old)
         if (!newUsr.renameTo(usr)) {
           // 切换失败：立即回退旧代，不留半更新状态（PRD F3.2 第二层回退语义）。
@@ -71,7 +77,7 @@ class UpdateManager(private val context: Context) {
           }
           throw IllegalStateException("切换失败（已回退旧代）")
         }
-        deleteRecursively(stage)
+        SnapshotFs.deletePath(stage)
         // 更新管理器第二版（PRD F3.2/F1.10）：保留上一版运行时（usr-old），
         // 由 EngineManager 探活确认（连续 N 次健康）后清理；超窗未健康自动回退旧代。
         // 原子切换联动 F3 最后已知良好状态语义：pending 标记是回退状态机的输入。
@@ -133,13 +139,60 @@ class UpdateManager(private val context: Context) {
     return digest.digest().joinToString("") { "%02x".format(it) }
   }
 
-  private fun deleteRecursively(file: File) {
-    if (!file.exists()) return
-    file.walkBottomUp().forEach { it.delete() }
+  companion object {
+    /**
+     * 发布面 manifest 地址（审查 §5.10 / S-10）。
+     *
+     * **空串 = 在线更新未启用**（默认，生产姿态）。旧实现把默认值写成
+     * `http://10.0.2.2:8899/manifest.json`（**模拟器别名**）且全仓没有任何生产覆盖点 ⇒
+     * 该功能在真机上只能得到「连接超时」，而文档仍把它当可用能力写（「看起来有、实际不可用」），
+     * 同时留下一条明文 HTTP + 同信道 sha256 的更新路径（完整性基准与载荷同源，对主动 MITM 零效力）。
+     *
+     * 0.14.1 裁定（审查 S-10 的第二条选项）：**显式下线**，直到接上 HTTPS + 内置公钥签名。
+     * 需要设备端联调的开发/验收场景用 [overrideManifestUrl] 显式打开（见其限制）。
+     */
+    const val DEFAULT_MANIFEST_URL = ""
+
+    /** 开发/验收用的模拟器别名（仅 http 且仅此主机允许走明文）。 */
+    private const val EMULATOR_HOST = "10.0.2.2"
+
+    /** manifest 地址校验结论：accepted 为空串 = 关闭；refusal 非空 = 拒绝原因。 */
+    data class ManifestUrlVerdict(val accepted: String, val refusal: String?)
+
+    /**
+     * 纯函数：manifest 地址的准入判据（可 JVM 单测；不碰 context）。
+     *
+     * 规则：空 = 关闭（生产默认）；只接受 http(s)；**明文 http 只允许回环与模拟器别名**
+     * （本地联调与生产可用刻意分开，见 §5.10 的教训——旧实现把二者混成一个默认值）。
+     */
+    fun validateManifestUrl(url: String?): ManifestUrlVerdict {
+      val text = url?.trim().orEmpty()
+      if (text.isEmpty()) return ManifestUrlVerdict("", null)
+      val scheme = text.substringBefore("://", "").lowercase()
+      val host = text.substringAfter("://", "").substringBefore('/').substringBefore(':')
+      if (text.contains("://") && scheme != "http" && scheme != "https") {
+        return ManifestUrlVerdict("", "只接受 http(s) 地址（当前：$scheme）")
+      }
+      if (scheme != "https" && host != EMULATOR_HOST && host != "127.0.0.1" && host != "localhost") {
+        return ManifestUrlVerdict(
+          "",
+          "明文 http 只允许回环与模拟器别名（$EMULATOR_HOST）：请改用 https，或经 adb reverse 映射到回环",
+        )
+      }
+      return ManifestUrlVerdict(text, null)
+    }
   }
 
-  companion object {
-    /** Emulator reaches the host loopback alias; production overrides via manifestUrl. */
-    const val DEFAULT_MANIFEST_URL = "http://10.0.2.2:8899/manifest.json"
+  /**
+   * 开发/验收用的显式开关：设置 manifest 地址（`null`/空 = 关闭）。
+   *
+   * 明文 http 只对**回环与模拟器别名**放行——其余一律要求 https。这样「本地联调」与
+   * 「生产可用」不会因为同一个开关而混为一谈（§5.10 的教训是二者被混在一起）。
+   * @return null = 接受；非 null = 拒绝原因。
+   */
+  fun overrideManifestUrl(url: String?): String? {
+    val verdict = validateManifestUrl(url)
+    manifestUrl = verdict.accepted
+    return verdict.refusal
   }
 }

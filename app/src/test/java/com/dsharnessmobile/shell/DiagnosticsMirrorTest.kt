@@ -50,7 +50,9 @@ class DiagnosticsMirrorTest {
     assertTrue(mirrorLogBounded(src, dst, limitBytes = 64 * 1024))
     val text = dst.readText()
     assertFalse("launch token 不得出现在共享副本", text.contains(token))
-    assertTrue(text.contains("***?token=***"))
+    // 0.14.1：脱敏出口改用无长度下限的 REDACT_RE（fail-closed），形态为 `token=***`
+    // （旧实现用带 {40,} 下限的提取正则，短令牌会漏网）。
+    assertTrue("必须以 token=*** 打码", text.contains("token=***"))
   }
 
   @Test

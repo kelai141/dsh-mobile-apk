@@ -21,6 +21,10 @@ jobs:
         # 2026-09-10 定例：片段拼成一个 <script>，一个语法错误会让整块 polyfill 静默失效，
         # 文本 grep 抓不到——必须真装配、真解析（历史缺陷：Set 片段 })() 撞下一段 if (）。
         run: node scripts/smoke-injections.mjs
+      - name: 看门狗判据行为回归（结果性 vs 文本在场，含反向对照）
+        # 0.14.1 块C §2.3：判据必须是行为对照。写了不跑 = 等于没写（check-plugin-tests 当年就是这样漏的），
+        # 故这里与 smoke 并列显式跑 node:test。
+        run: node --test --test-reporter=spec scripts/open-path-session.test.mjs scripts/boot-watchdog.test.mjs
       - name: 冲突标记检查
         run: |
           if grep -rEn '^(<<<<<<< |>>>>>>> )' lib scripts --include='*.js' --include='*.mjs'; then

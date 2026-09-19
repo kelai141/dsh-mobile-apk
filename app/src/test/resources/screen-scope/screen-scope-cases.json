@@ -1,0 +1,319 @@
+{
+  "_doc": [
+    "跨语言屏幕范围判定 fixture（权威源）。",
+    "",
+    "为什么存在：这条门禁有**两份实现**——引擎侧 plugins/dsh-android-bridge/src/screen-scope.ts",
+    "（调用点第一道）与壳侧 app/src/main/java/com/dsharnessmobile/shell/ShellOps.kt（执行点第二道，",
+    "Shizuku 真正下发命令前复查）。两份实现只要有一边漂移，就是「一层放行、另一层拒绝」或更糟",
+    "「两层都放行」；而它们在各自仓库里各自单测全绿时，漂移**完全不可见**（审查 N-5 已实测过同族",
+    "缺陷：两侧正则『逐字相同』但 JS 的 \\s 含 Unicode 空白、Java 的 \\s 只含 ASCII，并不等价）。",
+    "本文件是判定语义的**唯一真值面**：两侧测试都读它、逐条断言 verdict 字符串。",
+    "",
+    "字段：",
+    "  name         用例名（诊断用）",
+    "  command      被判定命令（逐字，含引号/分号）",
+    "  ownedTargets 已注册虚拟屏的**目标值**集合（displayId 空间与 SF token 空间混排，均按原样字符串",
+    "               比对；'0' 恒为真实屏，任何用例都不得把它写进本数组）",
+    "  expect       期望 verdict（两侧同名）：allow / deny-unparsed / deny-orphan-target-token /",
+    "               deny-uncertified-target",
+    "  why          为什么是这条 verdict（反证台账，改坏时知道哪条不变式破了）",
+    "",
+    "覆盖的两条 0.14.1 绕过分级（审查 §8.3 / §8.3b）：",
+    "  §8.3  选项在子命令**前**的正式写法（input -d 0 tap …）要进命令词面；",
+    "  §8.3b 一行命令里「带 -d 的第一段」不得给同行其它段发通行证（段级自证）。",
+    "改本文件后必须两端同步：node scripts/gen-screen-scope-fixture.mjs"
+  ],
+  "cases": [
+    {
+      "name": "S-1a 选项在前的 input（0 = 真实屏）",
+      "command": "input -d 0 tap 500 800",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "Android CLI 正式形态是 input [-d DISPLAY_ID] <command>；旧实现要求动词紧跟 input ⇒ 整条命令不进命令词面 ⇒ 直接放行（读/写真实屏）。归一化后必须命中命令词面，且 -d 0 不是已注册虚拟屏 ⇒ 拒。"
+    },
+    {
+      "name": "S-1b 选项在前 --display 拼写",
+      "command": "input --display 0 tap 500 800",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "三种拼写都要被归一化，否则换一种写法即可逃逸。"
+    },
+    {
+      "name": "S-1c 选项在前 --display= 拼写",
+      "command": "input --display=0 tap 500 800",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "等号形态同样算目标屏参数（旧取值正则已支持 =，归一化必须一致）。"
+    },
+    {
+      "name": "S-1d 选项在前 -d 未知 id",
+      "command": "input -d 9999 tap 500 800",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "放宽面收敛在「已注册的虚拟屏」上：未知 id 不得凭数字自证。"
+    },
+    {
+      "name": "S-1e 对照 无选项的 input 仍拒",
+      "command": "input tap 100 200",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "无目标屏参数 = 作用于默认屏（真实屏 0），既有语义不得因本次放宽而丢失。"
+    },
+    {
+      "name": "S-2a 多段洗白（第二段读真实屏）",
+      "command": "screencap -p -d 11529215046816944610 /sdcard/a.png; screencap -p /sdcard/real.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "旧实现只看「命令里出现的每个 -d 值是否都属于虚拟屏」⇒ 第一段的已注册 token 把整行洗白。段级自证后，第二段无 -d ⇒ 拒。"
+    },
+    {
+      "name": "S-2b echo 携带 token + uiautomator",
+      "command": "echo -d 11529215046816944610 ; uiautomator dump /sdcard/real.xml",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-orphan-target-token",
+      "why": "第一段带目标屏凭据却自身不含任何屏幕命令词 —— 这种 token 没有合法用途，只为给同行其它命令发通行证。",
+      "note": "该命令同时含 uiautomator 段（本应 deny-uncertified-target）；两段都违规时按扫描顺序报第一处，两侧必须报同一处，故此条同时锁住段序。"
+    },
+    {
+      "name": "S-2c sh -c 内层再切一层",
+      "command": "sh -c \"screencap -d 11529215046816944610; input tap 100 200\"",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "载荷整段在引号里，剥引号文本后外层看不见它 ⇒ 必须把 sh -c 载荷解一层引号再当命令扫，否则 sh -c 是通用逃逸口。"
+    },
+    {
+      "name": "S-2d 任意命令搭车（echo 带 token + cat）",
+      "command": "echo -d 11529215046816944610; cat /sdcard/secret.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-orphan-target-token",
+      "why": "「一行参数给任意命令开道」的形态本身就要拒：目标屏参数只能由作用在该屏上的命令段携带。"
+    },
+    {
+      "name": "S-2e && 拼接",
+      "command": "screencap -p -d 11529215046816944610 /sdcard/a.png && input tap 1 2",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "&& 与 ; 同为顶层分隔符，必须一视同仁，否则换个分隔符即可逃逸。"
+    },
+    {
+      "name": "S-2f 反引号嵌套执行体",
+      "command": "echo `screencap -p /sdcard/real.png`",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "反引号里的内容会被 shell 执行；不展开就等于放过一条读真实屏的路。"
+    },
+    {
+      "name": "S-2g $( ) 嵌套执行体",
+      "command": "echo $(input tap 1 2)",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "命令替换与反引号同性质（会被执行），必须同样展开。"
+    },
+    {
+      "name": "S-3 am 的 -d 是 Intent data，不是目标屏凭据",
+      "command": "am start -d 7 -n com.example/.Main",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "am 的显示参数是 --display；把 -d（Intent data）当目标屏凭据 = 给「启动到真实屏」发通行证。"
+    },
+    {
+      "name": "对照 am --display 合法目标屏放行",
+      "command": "am start --display 7 -n com.example/.Main",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "跨屏拉起是产品能力（manage 的 android_app_launch 走这条），不得被误拦。"
+    },
+    {
+      "name": "对照 反斜杠转义不得逃逸",
+      "command": "input \\-d 0 tap 500 800",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "shell 会消掉反斜杠 ⇒ 实际执行的就是 input -d 0 tap …；判定前必须解转义（否则字符级洗白）。"
+    },
+    {
+      "name": "对照 引号内的命令词不执行（不得误拦）",
+      "command": "echo 'screencap -p /sdcard/x.png'",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "引号内是 argv 数据不是命令；把它当命令词会让「echo 一段文档」被范围门误拒（过度拦截与门禁自相矛盾同类）。"
+    },
+    {
+      "name": "对照 SF 反查命令自身必须放行",
+      "command": "dumpsys SurfaceFlinger | grep -E '^(Virtual Display |    name=)'",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "这是范围判定用来核对 SF token 的命令（含引号内的 |）。若它被自己的门拦死，token 集合恒空 ⇒ 已注册虚拟屏也被拒（比不修更糟）；若切段不感知引号，这里会因引号不闭合判 deny-unparsed。"
+    },
+    {
+      "name": "对照 普通只读命令不拦",
+      "command": "getprop ro.product.model",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "门禁只守屏幕面；无关命令一律放行（避免把范围门做成万能拦截器）。"
+    },
+    {
+      "name": "对照 cat 一段文本文件不拦",
+      "command": "cat /sdcard/notes.txt",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "同上：文件面另有 op 面管辖，不在屏幕范围门的职责内。"
+    },
+    {
+      "name": "对照 已注册 displayId 的 screencap 放行",
+      "command": "screencap -p -d 7 /sdcard/a.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "F2 既有放宽面（读自己的虚拟屏）不得因段级改造而丢失。"
+    },
+    {
+      "name": "对照 已注册 SF token 的 screencap 放行",
+      "command": "screencap -p -d 11529215046816944610 /sdcard/a.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "F6 既有放宽面（screencap -d 吃的是 SF token）不得丢失。"
+    },
+    {
+      "name": "对照 已注册目标的 input 放行",
+      "command": "input -d 7 tap 100 200",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "选项在前的形态在**合法目标**上必须放行 —— 否则本次修法只是把「绕过」换成「全拒」。"
+    },
+    {
+      "name": "对照 -d 0 永不作为虚拟屏",
+      "command": "screencap -p -d 0 /sdcard/a.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "display 0 恒为真实屏：放行它等于范围门自毁。"
+    },
+    {
+      "name": "对照 多目标必须逐个命中",
+      "command": "screencap -d 7 -d 99 -p /sdcard/a.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "不得只认证其中一个（否则「一个合法目标 + 一个任意目标」即可两台通吃）。"
+    },
+    {
+      "name": "对照 无参 screencap 仍拒",
+      "command": "screencap -p /sdcard/real.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "无目标屏参数 = 默认真实屏；这是 0.14.0 就有的语义，不得回归。"
+    },
+    {
+      "name": "对照 无目标屏参数的 dumpsys 仍拒",
+      "command": "dumpsys window",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "dumpsys window|display|input 没有目标屏参数 ⇒ 无法自证 ⇒ 恒拒。"
+    },
+    {
+      "name": "对照 uiautomator 无法自证",
+      "command": "uiautomator dump /sdcard/x.xml",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "dump 的是默认屏的语义树（无 display 参数），故在 virtual-only 下不可用。"
+    },
+    {
+      "name": "对照 monkey 无目标屏参数仍拒",
+      "command": "monkey -p com.example 1",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "monkey 会向默认屏注入随机事件；无 --display 即不可自证。"
+    },
+    {
+      "name": "对照 引号不闭合一律判拒（fail-closed）",
+      "command": "echo \"unterminated",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "看不懂的命令不放行：解析失败必须是显式拒绝态，而不是「没命中命令词 ⇒ 放行」。"
+    }
+  ]
+}

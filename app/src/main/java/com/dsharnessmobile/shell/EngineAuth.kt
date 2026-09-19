@@ -50,17 +50,28 @@ object EngineAuth {
   private const val COOKIE_NAME_PREFIX = "dsh-auth-"
   private const val TOKEN_LINE = "dsh web: "
   internal val TOKEN_RE = Regex("""dsh web: \S*/\?token=([A-Za-z0-9_\-]{40,})""")
+  /**
+   * **脱敏专用**正则（与 [TOKEN_RE] 刻意分开，0.14.1 单测实测抓出的缺陷）：
+   * [TOKEN_RE] 带 `{40,}` 长度下限——那是**提取**令牌时防误命中用的（短串可能是普通文本），
+   * 但把它复用到**脱敏**出口就是 fail-open：令牌短于 40 位时正则不命中 → 原样落盘/展示 → **泄漏**。
+   * 脱敏必须**只要形态像就一律打码**（宁可多打，不可漏打），故此处不设长度下限。
+   * 实测反证：`token=SECRETTOKENVALUE1234567890`（26 位）旧实现完全不替换。
+   * 硬约束不变：只作用于副本/落盘/展示出口，**绝不**改写 `filesDir/engine.log` 本体
+   * （鉴权链 `tokenFromLog` 依赖该行，它用 [TOKEN_RE] 提取，两者互不影响）。
+   */
+  private val REDACT_RE = Regex("""([?&]token=)[A-Za-z0-9_\-]+""")
   private const val SECRET_RECORD_KEY = "client-connection/browser-session"
 
   @Volatile private var cached: String? = null
 
   /**
-   * 日志出口脱敏（0.13.8 #184，唯一正则来源 = TOKEN_RE）：把启动令牌行替换为
-   * `?token=***`，保留 URL 形状与其余信息，不整行删除。
+   * 日志出口脱敏（0.13.8 #184；0.14.1 改为用 [REDACT_RE]）：把启动令牌替换为
+   * `token=***`，保留 URL 形状与其余信息，不整行删除。
+   * **不得**改回用 [TOKEN_RE] 脱敏：它的 `{40,}` 下限会让短令牌漏网（fail-open，已实测）。
    * 硬约束：只允许作用于**副本/落盘/展示出口**（日志、诊断包、引导页摘录），
    * 绝不能改写 filesDir/engine.log 本体——壳侧鉴权链（tokenFromLog）依赖该行。
    */
-  fun redact(text: String): String = text.replace(TOKEN_RE, "dsh web: ***?token=***")
+  fun redact(text: String): String = text.replace(REDACT_RE, "$1***")
 
   @Volatile private var appContext: Context? = null
 

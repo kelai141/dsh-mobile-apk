@@ -125,13 +125,17 @@
     - id: picker-native-surface
       name: '@deepseek-ai/dsh-client-ui-directory-picker-native'
 
-# 隐式模型同步（0.13.3 W7，决策台账 D4-P3/D5）：vendor/dsh-model-sync（@aiwayds/dsh-model-sync
-# 0.3.1 固化副本，MIT）——启动+5s 首跑/240min 定时轮/设置变更重臂；pi.dev 目录抓取 → 翻译门控
-# → settings.mutate 写回 llm-pi-ai（store-first/字段级 merge/静默失败），ZCode 式隐式补给。
-# 断网零破坏；W4 pi-drift-F1 降级补丁与其互为犄角（显式列表不可服务时单模型缺席而非整包死）。
-- insert:
-    - id: dsh-model-sync
-      name: '@aiwayds/dsh-model-sync'
+# 【0.14.1 摘除（用户裁定，勿再挂回）】隐式模型同步插件 @aiwayds/dsh-model-sync（0.13.3 W7 引入，
+# vendor 固化副本）已移除。原因（2026-09-19 审查 §9 实锤，两条语义在同一个 models 数组上必然打架）：
+#   插件语义 =「受管路由以 pi.dev 远端目录为唯一事实来源，settings.yaml 只是它的投影」；
+#   用户心智 =「我配置的 provider 才该出现在我的设置里」。
+# 具体后果三条：① 默认路由（opencode-go / zai-coding-cn / minimax-cn / xiaomi-token-plan-cn）
+# 多数用户从未配置过，却被整段写进 providers；② 投影语义 + keepBuiltinOnly=true ⇒ 用户删掉的模型
+# 下一个周期（≤240min）被写回来（「怎么也删不掉」）；③ 与 dsh-model-capability 叠加后同一批
+# entry 上是两个插件的笔迹，归因困难。
+# 摘除面：本 patch 的 insert 行 + scripts/plugin-dirs.json 的 externals + vendor/dsh-model-sync/。
+# 存量数据不自动清理（无法可靠区分插件写入与用户手写）：残留条目与 ~/.dsh/models-store.json
+# 的处置见 docs/CHANGELOG.md 的 0.14.1 条目。
 
 # 侧栏 AI 浏览器（0.13.8 新插件 @dsh-android/dsh-android-browser）：宿主半——tier 判定、面板数据契约、
 # 壳桥 op 名（BROWSER_OPS，见其 src/contract.ts）。**browser\* 不进 A11Y_OPS**（方案 §4.5）。

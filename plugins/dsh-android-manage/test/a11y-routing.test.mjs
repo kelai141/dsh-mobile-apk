@@ -211,15 +211,25 @@ test('android_app_launch 指定虚拟屏时走 vdLaunchApp（monkey -p 没有屏
   assert.ok(!calls.adbShell.some((c) => /monkey/.test(c)), '虚拟屏路径不得用 monkey（无屏幕维度）')
 })
 
-test('android_screenshot 在 ADB 回落路径上必须带上目标 displayId（不再抓真实屏）', async () => {
+test('android_screenshot 的 ADB 回落对虚拟屏必须传 SF token（不是 displayId）', async () => {
   // 0.14.0 设备实录：无障碍离线时截图走 ADB 回落，而该路径**完全忽略 screenId**——
   // 无参 screencap 只抓 display 0，模型对虚拟屏截图却拿到真实屏画面，据此误判「设置没开在虚拟屏上」。
+  //
+  // 0.14.1 块G F6（设备实测真因，见 vd-shot.ts 文件头）：0.14.0 的修法把 **displayId** 落到
+  // `screencap -d` 上，但 `screencap -d` 吃的是 **SurfaceFlinger token**——设备上
+  // `screencap -d <displayId>` 对虚拟屏恒 `Status: -2`（无文件），只有传 SF token 才出图。
+  // 故本用例锁死：虚拟屏目标的 ADB 回落必须传 **SF token**，displayId 不得出现在 -d 上。
   const { face, calls } = makeFace({ backend: 'adb' })
   face.screenAccess = () => ({ ok: true, screenId: 'virtual-1', displayId: 25, scope: 'all' })
   face.screenAccessResolved = async () => ({ ok: true, screenId: 'virtual-1', displayId: 25, scope: 'all' })
   face.controlExec = async (op) => {
     if (op === 'vdInfo') return { ok: true, data: { screens: [{ alias: 'virtual-1', kind: 'virtual', displayId: 25, width: 360, height: 640 }] } }
     return { ok: true, data: { done: true } }
+  }
+  face.execAdbShell = async (cmd) => {
+    calls.adbShell.push(cmd)
+    // 真实设备形态夹具（MuMu x86_64 模拟器 / Android 15）：虚拟屏 token 与 name 成对。
+    return { ok: true, stdout: 'Virtual Display 11529215046816944610\n    name="DSH virtual-1"\n' }
   }
   // 让截图像「已落地」：桩的 adbLine 回执需含文件名，否则工具走「未落地」分支提前返回。
   face.execAdbLine = async (line) => {
@@ -230,8 +240,26 @@ test('android_screenshot 在 ADB 回落路径上必须带上目标 displayId（�
   const r = await byName('android_screenshot').execute({ screenId: 'virtual-1', textRedact: true }, exec)
   const line = calls.adbLine.find((l) => /screencap/.test(l))
   assert.ok(line, 'ADB 回落路径必须真的发起 screencap')
-  assert.match(line, /screencap -p -d 25/, '必须把目标 displayId 落到 screencap 上')
+  assert.match(line, /screencap -p -d 11529215046816944610/, '必须把 SF token 落到 screencap 上')
+  assert.ok(!/ -d 25 /.test(line), 'displayId 不得出现在 -d 上（对虚拟屏恒 Status -2）')
   assert.match(String(r.text ?? ''), /360x640/, '分辨率锚点必须是目标虚拟屏自己的像素')
+  assert.match(String(r.text ?? ''), /SurfaceFlinger token/, '说明必须点名 token，避免模型按 displayId 排查')
+})
+
+test('android_screenshot 虚拟屏反查不到 SF token 时必须 fail-closed（不回落真实屏）', async () => {
+  // 反证：反查命令不可达 / 别名未注册 → 必须**拒绝**，且**不得**回落 displayId 硬试、
+  // **不得**回落无参 screencap（那会抓真实屏，正是 0.13.8 修过的「拿真实屏当虚拟屏」旧缺陷）。
+  const { face, calls } = makeFace({ backend: 'adb' })
+  face.screenAccess = () => ({ ok: true, screenId: 'virtual-1', displayId: 25, scope: 'all' })
+  face.screenAccessResolved = async () => ({ ok: true, screenId: 'virtual-1', displayId: 25, scope: 'all' })
+  // 反查失败：没有任何 DSH 虚拟屏行。
+  face.execAdbShell = async (cmd) => { calls.adbShell.push(cmd); return { ok: true, stdout: '    name="mumuscreen000"\n' } }
+  face.execAdbLine = async (line) => { calls.adbLine.push(line); return { ok: true, stdout: '' } }
+  const { byName } = applyManage(face)
+  const r = await byName('android_screenshot').execute({ screenId: 'virtual-1', textRedact: true }, exec)
+  assert.ok(!calls.adbLine.some((l) => /screencap/.test(l)), '反查失败时不得发起任何 screencap')
+  assert.match(String(r.text ?? ''), /SurfaceFlinger display token 解析不到/, '必须如实说明反查失败')
+  assert.match(String(r.text ?? ''), /不会/, '必须显式声明不回落 displayId 或真实屏')
 })
 
 test('android_screenshot 不带 screenId 时抓默认屏（语义不变）', async () => {
@@ -414,4 +442,71 @@ test('无障碍通道失败时工具返回明确错误，不静默降级到 ADB'
   assert.equal(r.ok, false)
   assert.match(r.text, /无障碍取树失败/)
   assert.equal(calls.adbLine.length, 0, '不得静默回落 ADB（降级由策略决定，不由工具猜测）')
+})
+
+// ── 块G F3 / F4b（0.14.1）：screenId 残余丢参点 + web_dump 过度拦截 ────────────────────
+
+test('F3：ui_click 的 a11y 首分支（ref 路径）必须把 screenId 投递到壳侧', async () => {
+  // 丢参点的后果与「门放行但动作落真实屏」同源：门按 virtual-1 放行，执行却在真实屏上——
+  // 比直接拒绝更难排查（0.14.0 已有同型实锤，见文件上方 screenId 双修用例）。
+  const { face, calls } = makeFace({ backend: 'a11y' })
+  face.screenAccess = () => ({ ok: true, screenId: 'virtual-1', displayId: 38, scope: 'virtual-only' })
+  face.screenAccessResolved = async () => ({ ok: true, screenId: 'virtual-1', displayId: 38, scope: 'virtual-only' })
+  const { byName } = applyManage(face)
+  // 先 dump 拿 ref（同一屏），再按 ref 点击。
+  const first = await byName('android_ui_dump').execute({ screenId: 'virtual-1' }, exec)
+  const node = first.nodes.find((n) => n.text === '设置')
+  assert.ok(node, '首次 dump 应给出节点清单')
+  calls.control.length = 0
+  const r = await byName('android_ui_click').execute({ ref: `id:${node.id}`, screenId: 'virtual-1' }, exec)
+  assert.equal(r.ok, true, JSON.stringify(r).slice(0, 200))
+  const call = calls.control.find((c) => c.op === 'click')
+  assert.ok(call, '应走无障碍点击')
+  assert.equal(call.args.screenId, 'virtual-1', 'a11y 点击载荷必须带上目标屏（否则点在真实屏上）')
+})
+
+test('F3：nodeText 回读必须带上目标屏（校验的是同一块屏的聚焦框）', async () => {
+  // 回读不带 screenId → 壳侧按真实屏读聚焦框，输入校验在同一块屏之外比较，会假报「未落地」。
+  const { face, calls } = makeFace({ backend: 'adb' })
+  face.execAdbShell = async (command) => { calls.adbShell.push(command); return { ok: true, stdout: '' } }
+  const { byName } = applyManage(face)
+  await byName('android_ui_input').execute({ text: 'hello', screenId: 'virtual-1' }, exec)
+  const nt = calls.control.find((c) => c.op === 'nodeText')
+  assert.ok(nt, 'ADBKeyboard 通道注入后必须回读断言')
+  assert.equal(nt.args.screenId, 'virtual-1', 'nodeText 回读必须指向同一块屏')
+})
+
+test('F4b：virtual-only 下 android_web_dump 不得被屏幕范围门拒绝（它读的是壳自有 WebView）', async () => {
+  // 过度拦截形态（块G §2.5）：web_dump ∈ SCREEN_ACTIONS，但该工具**没有 screenId 参数**，
+  // guard 的 requested 恒为 undefined → decideScreenAccess 落到 real → virtual-only 下必然拒绝。
+  // 被拦的能力根本不读设备屏：壳侧 handleWebSnapshot 走 MainActivity.webViewRef（DSH 自己的 Web UI）。
+  // 这与 review C11 已记录的 device_info 判例同型（只读元数据/自有页面，不含设备屏内容）。
+  const { face, calls } = makeFace({ backend: 'a11y' })
+  let guardCalls = 0
+  face.screenAccess = () => {
+    guardCalls++
+    return { ok: false, reason: 'screen-out-of-scope', scope: 'virtual-only', screenId: 'real', guidance: 'virtual-only 下不允许 real' }
+  }
+  face.screenAccessResolved = async () => face.screenAccess()
+  face.controlExec = async (op, args) => {
+    calls.control.push({ op, args })
+    if (op === 'webSnapshot') return { ok: true, data: { ok: true, url: 'http://127.0.0.1:3080/', title: 'DSH', nodes: [] } }
+    return { ok: true, data: {} }
+  }
+  const { byName } = applyManage(face)
+  const r = await byName('android_web_dump').execute({}, exec)
+  assert.equal(r.denied, false, 'web_dump 不读设备屏，不得被屏幕范围门拒：' + JSON.stringify(r).slice(0, 200))
+  assert.equal(guardCalls, 0, 'web_dump 不该走屏幕目标判定（比照 device_info 判例移出 SCREEN_ACTIONS）')
+  assert.ok(calls.control.some((c) => c.op === 'webSnapshot'), 'web_dump 必须真的取到 DOM 快照')
+})
+
+test('F4b：android_web_dump 仍然受会话档位门约束（移出范围判定不等于免门禁）', async () => {
+  const { face, calls } = makeFace({ backend: 'a11y' })
+  face.gateFor = () => ({ ok: false, guidance: '会话档位不是 danger-full-access' })
+  const { byName } = applyManage(face)
+  const r = await byName('android_web_dump').execute({}, exec)
+  assert.equal(r.ok, false)
+  assert.equal(r.denied, true)
+  assert.match(String(r.text), /danger-full-access/)
+  assert.equal(calls.control.length, 0, '被档位门拒时不得触碰壳侧')
 })

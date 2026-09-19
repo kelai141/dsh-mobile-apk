@@ -18,7 +18,7 @@
 import { execFileSync, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { mkdirSync, existsSync, rmSync, copyFileSync, writeFileSync, readFileSync, readdirSync } from 'node:fs'
+import { mkdirSync, existsSync, rmSync, copyFileSync, cpSync, writeFileSync, readFileSync, readdirSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -56,7 +56,6 @@ const externalDirs = manifest.externals.map((d) => join(ROOT, d))
 const externalNamed = (name) => externalDirs.find((p) => p.replace(/\\/g, '/').endsWith('/' + name))
 const undo = externalNamed('dsh-undo-savepoint')
 const market = externalNamed('dshmarketplace-plugin')
-const modelSync = externalNamed('dsh-model-sync')
 
 // 门禁集（唯一声明处；check-release-gates.mjs 断言与 build-apk-013.ps1 的差集 = 0）
 const GATE_SCRIPTS = [
@@ -89,6 +88,19 @@ const GATE_SCRIPTS = [
   'check-perf-instrumentation.mjs',
   // 模型面工具 wire 预算（0.14.0 §4.1 渐进披露）：注册集 + 初始可见集双口径（与本地链同一份实现）。
   'check-tool-surface-budget.mjs',
+  // 插件单测（0.14.1 §1.1b 决策 1 / §2.4 前置项 1）：脚本自 0.14.0 起存在却从未被任何路径调用。
+  // 与本地链同一份实现，差集必须为 0（check-release-gates 断言）——只加一侧即判红。
+  'check-plugin-tests.mjs',
+  // 冷启动预算（0.14.1 块F P0-2）：与本地链同一份实现（差集必须为 0）。
+  'check-boot-budget.mjs',
+  // 快照构建器产出面（0.14.1 P0 反回归）：与本地链同一份实现（差集必须为 0）。
+  'check-snapshot-builder-output.mjs',
+  // 浏览器语法下限（0.14.1 块C G-1）：与本地链同一份实现（差集必须为 0）。
+  'check-browser-syntax-floor.mjs',
+  // 构建并发上限（0.14.1 系统级约束）：不得吃满全部逻辑核（MuMu 模拟器/系统稳定）。
+  'check-build-parallel-cap.mjs',
+  // Kotlin 单测数量反回归（0.14.1 P0）：CI 不跑 Kotlin 单测 + 只按退出码判 = 防线删失仍绿。
+  'check-kotlin-test-count.mjs',
 ]
 
 // ---- 参数解析 ----
@@ -138,7 +150,6 @@ try {
   pluginDirs.forEach((p) => requires('插件', p))
   requires('vendor undo', join(undo, 'package.json'))
   requires('vendor market', join(market, 'package.json'))
-  requires('vendor model-sync', join(modelSync, 'lib', 'index.js'))
 
   // ---- 2. 门禁（注入前；与 build-apk-013.ps1 同一份门禁集，0.13.8-b ST-06）----
   log('门禁：补丁镜像一致性…')
@@ -164,6 +175,26 @@ try {
   run('node', [gate('check-tool-output-schema.mjs')])
   log('门禁：控制 op 六处登记链…')
   run('node', [gate('check-control-ops.mjs')])
+  // 插件单测门禁（0.14.1 §1.1b 决策 1 / §2.4 前置项 1）：脚本自 0.14.0 起存在却从未被调用。
+  // 判据：有 test/*.test.mjs 必须真跑通且有效通过数 > 0（全 skip = 假绿）。需 plugins/*/lib 产物。
+  log('门禁：插件单测（真跑，全 skip 即假绿）…')
+  run('node', [gate('check-plugin-tests.mjs')])
+  // 冷启动预算（0.14.1 块F P0-2；【0.14.1 P0-a 修复】原来写死 --self-test，使真检被结构性绕开——
+  // 门禁对设备真产物会判红，但调用点只跑自证 → 判据真会红却永不执行。改为默认档：有真产物则真检
+  // （超预算 exit 1 拒打包），无产物则 SKIP(real-data) 并退 --self-test。无产物不等于绿。）
+  log('门禁：冷启动预算（有真产物则真检，否则退自证）…')
+  run('node', [gate('check-boot-budget.mjs')])
+  // 快照构建器产出面（0.14.1 P0 反回归）：锁「归档段是否还在」——被删会导致静默复用陈旧快照。
+  log('门禁：快照构建器产出面（归档段 + 配置键闭合 + 路径同源）…')
+  run('node', [gate('check-snapshot-builder-output.mjs')])
+  // 构建并发上限（0.14.1 用户拍板系统级约束）：不得吃满全部逻辑核（MuMu 模拟器/系统稳定）。
+  log('门禁：构建并发上限（固定 8 线程，不得吃满全部核心）…')
+  run('node', [gate('check-build-parallel-cap.mjs')])
+  // Kotlin 单测数量反回归（0.14.1 P0）：CI 从不跑 Kotlin 单测，且「只按退出码判」分不清
+  // 「全绿」与「一个用例都没跑」。本门禁逐类比对基线 + 断言无缺席 + 结果新鲜。
+  // 云端链无 gradle 产物 → --allow-missing 显式 SKIP 计数（不计入绿），本地链才有真结果。
+  log('门禁：Kotlin 单测数量反回归（逐类基线只许升 + 无缺席 + 结果新鲜）…')
+  run('node', [gate('check-kotlin-test-count.mjs'), '--allow-missing'])
   // 制度性门禁（0.13.8-b B2 ST-25/26/31）：与本地链同一份集合（差集 = 0 由 check-release-gates 断言）
   log('门禁：状态登记制（PR 模板四栏 + 登记表 evidence）…')
   run('node', [gate('check-state-registry.mjs')])
@@ -179,16 +210,63 @@ try {
   if (!SKIP_INJECT) {
     // 统一补丁门禁（Phase 2a）：engine + vendor 补丁幂等施加与校验（registry.json）
     run('node', [join(ROOT, 'scripts', 'patches', 'apply-patches.mjs'), join(ROOT, 'vendor')])
+    // 浏览器语法下限：注入段降级（0.14.1 块C G-1，与本地链 build-apk-013.ps1:219-255 等价）
+    //
+    // 真因：注入进快照的 lib/client.js 若携带 Chromium 87 之后的语法（`?.` 等），老内核
+    // （Android 10 / WebView 87，唯一在案的实测老内核 = 87.0.4280.101）解析期即失败 → 整个模块
+    // 不执行。本链此前只有**注入后**的 `--scan`（下方第 4 段），却没有任何步骤把产物降到合规形态
+    // → 云端自包含构建必判红（实测 `--scan vendor/dshmarketplace-plugin` 差分 1/1）。
+    //
+    // **为什么必须走暂存副本、禁止原地**：
+    //   · `vendor/**/lib/` 是**入库跟踪**的（.gitignore 显式 `!vendor/...` 例外）→ 原地降级会写脏
+    //     工作树，绊停发布链自身的 dirty 门禁，并让「产物可追溯到已提交源码」失效；
+    //   · `plugins/*/lib/` 在 .gitignore 内，但原地降级会改写 lib/ 与包内 node_modules 副本 →
+    //     与 apk 仓镜像产生无意义漂移，把 check-patch-mirror 判红（本地链实测踩到）。
+    // 故：需要产物级降级的 vendor 三源先复制到 work 下的**暂存副本**再降级，并把暂存路径交给
+    // combo 预计算与 inject-all（两处必须同一份，否则 combo 键与注入内容不一致）。
+    // 我方 3 个带 client bundle 的包已在自己构建源里钉了 chrome87（tsdown.client.ts / build-client.mjs），
+    // 不在此处重复降级（重复降级会制造镜像漂移，且无收益）。
+    //
+    // **顺序硬约束**：必须在 combo 预计算之前——combo 缓存键 = sha256(client.js)，实测同一棵树
+    // 「先算 combo」与「降级后再算」的键集合仅 49/62 重叠（13 条键随降级改变）；顺序反了这 13 条
+    // 必然 miss（fail-open 静默回退，启动收益归零）。
+    // **权威判据仍在下游**：注入完成后的 `--scan <注入后 tar>` 才是判红点，本步只负责把产物改成合规形态。
+    log('浏览器语法下限：注入段降级（暂存副本，chrome87）…')
+    const degradeStaged = join(work, 'degrade-src')
+    mkdirSync(degradeStaged, { recursive: true })
+    // 默认指向**原源目录**（表示「不降级」）；只有真的降级成功才改指向暂存副本。
+    // 无 lib/client.js 的源不复制、保持原路径。
+    const degraded = new Map([
+      ['undo', undo], ['market', market],
+    ])
+    for (const key of ['undo', 'market']) {
+      const src = degraded.get(key)
+      const leaf = key + '-degraded'
+      if (!existsSync(join(src, 'lib', 'client.js'))) {
+        log(`  跳过降级（无 lib/client.js）：${src}`)
+        continue
+      }
+      const dst = join(degradeStaged, leaf)
+      rmSync(dst, { recursive: true, force: true })
+      // cpSync recursive 等价于本地链的 `robocopy /MIR`（整树复制；排除 .git 以免把版本库带进暂存树）
+      cpSync(src, dst, { recursive: true, filter: (s) => !s.split(/[\\/]/).includes('.git') })
+      run('node', [gate('check-browser-syntax-floor.mjs'), '--degrade', '--stage', dst])
+      degraded.set(key, dst)
+      log(`  暂存降级就位：${src} -> ${dst}`)
+    }
+    const undoDeg = degraded.get('undo')
+    const marketDeg = degraded.get('market')
     // combo 缓存注入段（A3 启动性能）：注入链的 client.js 不在快照段预计算范围内，这里补算为
     // client-combos.inject.json + <sha256>.map，经 inject-all --combo-cache-delta 合入 tar；
     // 覆盖由注入后门禁 check-combo-cache 断言（与 build-apk-013.ps1 同一份实现）。
+    // 用**降级后的**源（与下方 inject-all 同一份），否则 combo 键与注入内容不一致。
     log('combo 缓存注入段预计算（A3）…')
     const comboDelta = join(work, 'combo-cache-delta')
     mkdirSync(comboDelta, { recursive: true })
     run('node', [
       join(ROOT, 'scripts', 'lib', 'combo-precompute.mjs'),
       ...pluginDirs.flatMap((p) => ['--scan', p]),
-      '--scan', undo, '--scan', market, '--scan', modelSync,
+      '--scan', undoDeg, '--scan', marketDeg,
       '--out', comboDelta, '--manifest', 'client-combos.inject.json', '--engine', 'inject',
     ])
     log('单 pass 注入（@dsh-android + undo/market + 权威 patch，全部装配 profile）…')
@@ -197,7 +275,7 @@ try {
       join(ROOT, 'scripts', 'inject-all.py'), snapSrc, join(work, 'snap-final2.tar.xz'),
       join(ROOT, 'scripts', 'profile-web.cordis.patch.yml'),
       '--dsh-android', ...pluginDirs,
-      '--external', undo, market, modelSync,
+      '--external', undoDeg, marketDeg,
       '--all-profiles',
       '--combo-cache-delta', comboDelta,
     ])
@@ -209,13 +287,17 @@ try {
 
   // ---- 4. 门禁（注入后；与 build-apk-013.ps1 同一份门禁集）----
   log('门禁：patch 挂载集校验（双向差集）…')
-  run('node', [gate('check-patch-mounts.mjs'), join(ROOT, 'scripts', 'profile-web.cordis.patch.yml'), ...pluginDirs, undo, market, modelSync])
+  run('node', [gate('check-patch-mounts.mjs'), join(ROOT, 'scripts', 'profile-web.cordis.patch.yml'), ...pluginDirs, undo, market])
   // 注入面成员完整性（P0）：包内新增文件必须随注入进 tar，且相对导入不得悬空
   log('门禁：注入成员完整性（成员集合 + 相对导入可解析）…')
   run('node', [gate('check-inject-completeness.mjs'), snapIn])
   // combo 缓存覆盖（A3）：注入后 tar 的每条 client.js 必须有 sha256 命中的缓存条目（含注入段增量）
   log('门禁：combo 缓存覆盖（sha256 命中 + map 在场）…')
   run('node', [gate('check-combo-cache.mjs'), snapIn])
+  // 浏览器语法下限（0.14.1 块C G-1）：入口 chunk 带 `static{}` 会让老内核（WebView <94）整模块不执行
+  // → 纯白无字。判据 = 真实解析器 AST + esbuild 双 arm 逐字节差分（禁 grep），扫全清单。
+  log('门禁：浏览器语法下限（AST + 双 arm 差分）…')
+  run('node', [gate('check-browser-syntax-floor.mjs'), '--scan', snapIn])
   // 模型面工具 wire 预算（0.14.0 §4.1）：注册集（解锁后上限）+ 初始可见集（模型第一眼）双口径。
   // 前置于本步的插件 npm build 已产出 plugins/*/lib，门禁真跑各插件 apply() 采集工具定义。
   log('门禁：模型面工具 wire 预算（注册集 + 初始可见集）…')

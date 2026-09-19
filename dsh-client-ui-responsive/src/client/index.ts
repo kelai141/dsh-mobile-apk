@@ -58,6 +58,12 @@ import { ReferenceMenuEnhancer, REFERENCE_BAR_CSS } from './mobile/reference-men
 import { BackStackSignal } from './mobile/back-stack.ts'
 import { SessionMarker, type SessionsFace } from './mobile/session-marker.ts'
 import { BROWSER_TAB_ID, BROWSER_TAB_KIND, BrowserTab, browserTabDefinition } from './mobile/browser-tab.tsx'
+import {
+  BrowserAutoPlace,
+  domCollapsedNow,
+  domCurrentSessionId,
+  type BrowserSidebarFace,
+} from './mobile/browser-auto-place.ts'
 import { IncomingDraftConsumer } from './mobile/incoming-draft.ts'
 
 // Contract exports only (export-convergence rule): the plugin surface is
@@ -354,67 +360,30 @@ export function apply(ctx: ClientContext): void {
     key: BROWSER_TAB_ID,
   }, BrowserTab))
 
-  // ── AI 浏览器：模型驱动后自动「落位」到右侧栏（0.14.0 P0-2，用户语义） ──────────────
+  // ── AI 浏览器：模型驱动后自动「落位」到右侧栏（0.14.0 P0-2，用户语义；0.14.1 块 D） ──────
   //
   // 用户原话：「顶栏就是浏览器标签页切换；AI 打开浏览器后应自动在侧边栏注册/切到该面板，
   // 人无需再点一下才符合语义。」随后澄清为：**收起状态下自动开窗（注册 tab），但不强制展开**
   // —— 人手动展开时就能看见已经打开的浏览器界面。
   //
-  // 与虚拟屏自动露出的互斥由「各自边沿触发 + 用户收起即静默」共同保证：两侧都不再持续抢焦点，
-  // 同一时刻只有「新出现的能力面板」会落位一次。
-  //
-  // 两个必须遵守的上游事实（读源码 + 设备实证，别再改回旧做法）：
-  //  1. `openTab` 会**展开侧栏**：`dsh-client-ui-sidebar-right/lib/client.js` 的 `openContent` 里第一条 op 就是
-  //     `planSetExpanded(state, true)`——上游设计「内容看不见就不算打开」。所以**收起态下调 `openTab`
-  //     必然强制展开**，与用户语义（收起态自动开窗但不强制展开）直接冲突。
-  //  2. `data-sidebar-right-open` 在收起态**仍然存在**，舞台也仍有布局矩形——不能用它判断可见性。
-  //
-  // 所以正确结构是**边沿触发 + 延迟落位**，而不是「每秒无条件 openTab」：
-  //  - 只在**新页面出现**（签名变化 = 边沿）时动作，绝不因为「页面还在」而反复动作。
-  //    （旧的每秒轮询是电平触发的持续断言，后果：用户一收起就被下一拍拽开、点 × 关掉又被切回来。）
-  //  - 收起态**不调 openTab**，只记 `pending`（待落位）；等观察到用户把侧栏展开时再补一次 openTab。
-  //    这正是用户要的：「收起状态下自动创建窗口而不强制展开，用户手动展开就能看见」。
+  // 0.14.1 块 D（已知 issue #1）修正两处**在源码里实证**的缺陷，判据与实现见
+  // `mobile/browser-auto-place.ts`（本处只做接线，不再内联策略）：
+  //  A. 落位必须绑定**发起动作的会话**（壳侧 `browserHostStatus().ownerSessionId`，且只在它与
+  //     `<html data-dsh-session-id>` 的当前会话一致时才动作）——读全局状态后调
+  //     `ctx.sidebarRight.openTab` 会落在**上屏/焦点会话**上（跨会话污染）。
+  //  B. 落位必须走**带会话的入口** `openTabIn(ownerSessionId, kind)`：`openTab` 内部第一条 op 是
+  //     `planSetExpanded(state, true)`（`ui-sidebar-right/src/client/stores.ts` 的 `openContent`），
+  //     收起态下调它必然强制展开。收起态一律只记 per-session `pending`。
   ctx.effect(() => {
-    const sidebar = ctx.get('sidebarRight') as { openTab?: (kind: string, options?: { revealIfOpened?: boolean }) => void } | undefined
-    if (sidebar?.openTab === undefined) return () => {}
-    /** 上一次已处理过的页面签名（边沿检测）；null = 还没读到过壳侧状态。 */
-    let seen = ''
-    /** 收起期间出现过的新页面：等用户展开时补一次落位。 */
-    let pending = false
-    // 权威收起信号 = 上游展开控件是否在场（`ExpandButton` 只在收起时渲染；
-    // `data-rightbar-collapsed` 是常量 "true"，用作状态会恒判收起 → 永不落位）。
-    const collapsedNow = (): boolean => document.querySelector('[data-sidebar-right-expand]') !== null
-    const tick = () => {
-      try {
-        const status = JSON.parse(String(window.androidBridge?.browserHostStatus?.() ?? '{}')) as {
-          created?: unknown; pageGeneration?: unknown; tabs?: unknown
-        }
-        if (status.created !== true) return
-        // 签名 = 「哪些页 + 各自代次」，代表「页面集合的实质性变化」。签名不变即什么都不做。
-        const tabs = Array.isArray(status.tabs) ? (status.tabs as Array<Record<string, unknown>>) : []
-        const signature = tabs.map((t) => String(t.tabId) + ':' + String(t.url)).join('|') + '#' + String(status.pageGeneration)
-        if (seen !== '' && signature === seen) {
-          // 无变化。唯一例外：收起期间攒下的待落位，等用户展开时补。
-          if (pending && !collapsedNow()) {
-            pending = false
-            sidebar.openTab?.(BROWSER_TAB_KIND)
-          }
-          return
-        }
-        const first = seen === ''
-        seen = signature
-        // 首次观测只建立基线，不动作：页面可能是上次会话遗留的，不该在启动时抢侧栏。
-        if (first) return
-        if (collapsedNow()) { pending = true; return }
-        sidebar.openTab?.(BROWSER_TAB_KIND)
-      } catch {
-        /* 壳不可用：下一拍再看，不抛 */
-      }
-    }
-    // 轮询只用来**发现边沿**（1s 足够），不再承担「保持置前」的语义。
-    const timer = window.setInterval(tick, 1_000)
-    return () => { window.clearInterval(timer) }
-  }, 'ui-responsive: AI browser auto-place into right sidebar (edge-triggered, deferred while collapsed)')
+    const placement = new BrowserAutoPlace({
+      kind: BROWSER_TAB_KIND,
+      status: () => window.androidBridge?.browserHostStatus?.(),
+      currentSessionId: domCurrentSessionId,
+      collapsed: domCollapsedNow,
+      sidebar: () => (ctx.get('sidebarRight') as BrowserSidebarFace | undefined),
+    })
+    return placement.attach()
+  }, 'ui-responsive: AI browser auto-place into right sidebar (session-addressed, deferred while collapsed)')
 
   // Mobile reference menu (apk #163): rows get a leading checkbox (multi-select) and a
   // directory row body drills in instead of referencing the folder; upstream keeps the

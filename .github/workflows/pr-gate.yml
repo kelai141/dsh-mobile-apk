@@ -54,12 +54,35 @@ jobs:
           node scripts/check-tool-output-schema.mjs
       - name: 控制 op 登记链门禁
         run: node scripts/check-control-ops.mjs
+      # 插件单测门禁（0.14.1 §1.1b 决策 1 / §2.4 前置项 1）：脚本存在却从未被调用，34 个测试文件无人跑。
+      # 真跑各插件 test/*.test.mjs（全 skip 判假绿）——需 plugins/*/lib 产物，故先构建。
+      - name: 插件单测门禁
+        run: |
+          for d in dsh-shell-termux plugins/dsh-android-bridge plugins/dsh-android-manage plugins/dsh-android-linux-env plugins/dsh-android-file-open plugins/dsh-android-browser plugins/dsh-android-vdisplay plugins/dsh-model-capability; do
+            (cd "$d" && npm install --no-audit --no-fund && npm run build)
+          done
+          node scripts/check-plugin-tests.mjs
       # 壳侧加固语义（NSC / backup 规则 / exported）与子进程有界读（0.13.8-b FX-208.4 / E1）
       - name: 壳侧加固与有界读门禁
         run: |
           node scripts/check-manifest-hardening.mjs
           node scripts/check-bounded-io.mjs
           node scripts/check-api-route-auth.mjs
+      # 冷启动预算（0.14.1 块F P0-2；【0.14.1 P0-a 修复】原来写死 --self-test，使真检被结构性绕开）。
+      # 改为默认档：有真产物则真检（超预算 exit 1），无产物则显式 SKIP(real-data) 后跑自证。
+      # CI 无设备，故常态是 SKIP+自证——**SKIP 不等于达标**，真检由设备验收步骤驱动（--pull/--segments）。
+      - name: 冷启动预算门禁（真产物优先，无产物 SKIP+自证）
+        run: node scripts/check-boot-budget.mjs
+      # 快照构建器产出面（0.14.1 P0 反回归）：锁归档段是否还在（被删 -> 静默复用陈旧快照）。
+      - name: 快照构建器产出面门禁
+        run: node scripts/check-snapshot-builder-output.mjs
+      # 浏览器语法下限（0.14.1 块C G-1）：CI 无构建树 -> --self-test 四向自证（反向必红/正向必绿/
+      # 载荷不触发/工具链在场且版本钉住）。
+      - name: 浏览器语法下限门禁（自证）
+        run: node scripts/check-browser-syntax-floor.mjs --self-test
+      # 构建并发上限（0.14.1 用户拍板系统级约束）：打包固定 8 线程、不得吃满 16 逻辑核。
+      - name: 构建并发上限门禁
+        run: node scripts/check-build-parallel-cap.mjs
       # 快照指纹对账（ST-04）：净检出下 tar 被 .gitignore 忽略 → SKIP 计数（构建链以 --require 严格跑）
       - name: 快照指纹对账门禁
         run: node scripts/check-snapshot-fingerprint.mjs
@@ -105,3 +128,21 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew :app:compileDebugKotlin --no-daemon --stacktrace
+      # Kotlin 单测门禁（0.14.1 P0：此前 CI **从不跑** testDebugUnitTest——全仓 grep 零命中）。
+      # 为什么必须补：本轮全量实跑 417 例，其中契约断言（CallSiteContractTest / BootDiagnosticsContractTest
+      # / ApiLevelGuardTest / UndoGateDecisionTest / SnapshotTransactionTest / NotificationContractTest /
+      # OverlayHaloInvariantTest / BootFailLogTest …）**只有在 CI 里跑起来才是防线**；否则它们只是
+      # 「本地跑过」，改坏实现不会有任何拦截——与 P0-a「判据真会红但被结构性绕开」是同一形态。
+      # 全量实跑（Lead 本机，同 runner 档位）：417 tests / 0 failures / 1 skipped，冷启 BUILD ~39s。
+      # 故**取全量**而非子集：耗时与 compileDebugKotlin 同档（缓存命中后更快），没有"为省时间不接"的理由。
+      - name: 单元测试门禁（:app:testDebugUnitTest 全量）
+        run: |
+          ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace
+      # 测试报告留档：失败时可直接下载 HTML 报告（否则只有日志尾部行）。
+      - name: 上传单测报告（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kotlin-unit-test-report
+          path: app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore

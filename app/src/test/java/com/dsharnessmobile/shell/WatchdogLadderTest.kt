@@ -135,14 +135,146 @@ class WatchdogLadderTest {
       feedProbe = { feeds++ },
       consumeMarkers = { consumed++ },
       refreshWake = { wakes++ },
-      undoReady = { undoProbed = true; true },
+      // undo 本轮修复后**先于**熔断求值（见下 undoRemainsReachableOnceTheCircuitBreakerIsOpen）。
+      // 本用例只锁「前置副作用在熔断打开那一拍仍执行」，故把 undo 传为不可用，使熔断分支可达。
+      undoReady = { undoProbed = true; false },
     )
     assertEquals(WatchdogV2.TickAction.HOLD, plan.action)
     assertTrue("熔断分支必须给出可读原因", plan.logs.any { it.contains("circuit open") })
     assertEquals("熔断早退也不得跳过 onEngineProbe（#210.3）", WatchdogV2.MAX_CONSEC_FAILURES + 1, feeds)
     assertEquals("熔断早退也不得跳过标记消费（#210.4）", WatchdogV2.MAX_CONSEC_FAILURES + 1, consumed)
     assertEquals("熔断早退也不得跳过唤醒锁续期", WatchdogV2.MAX_CONSEC_FAILURES + 1, wakes)
-    assertFalse("熔断打开后不得继续走到 undo/重启", undoProbed)
+    assertTrue("undo 闸门必须先被求值（修复后它排在熔断之前）", undoProbed)
+  }
+
+  // ── 0.14.1：熔断锁存盲区（undo 与 restart 在「半死引擎」下双双永久失效）────
+  //
+  // 存量缺陷：`tripped()` 曾排在 boot-window 与 `undoReady()` 之前，且一旦为真即**永久** HOLD，
+  // 只有 HEALTHY 探活或 EngineStartFlow 的唯一一处 reset 能解。熔断在 60s 打开（12 拍 x 5s），
+  // 而托管子进程的启动预算是 90s → 「子进程存活、HTTP 永不健康」这条路径上计数器先撞满，
+  // `undoReady()` 此后**再也不被求值**：自动 undo 与自动重启同时永久失效。
+  //
+  // 下面三条是配套防线：
+  //  1) undoRemainsReachableOnceTheCircuitBreakerIsOpen —— 正向：熔断打开后 undo 仍可介入（本修复的判绿点，
+  //     修复前该断言得到 HOLD(circuit-open)，即判红）；
+  //  2) halfDeadEngineStillReachesUndoAfterTheBootWindowExpires —— 真实半死场景（子进程存活 + bootAge 递增）；
+  //  3) circuitBreakerStillBlocksBlindRestartWhenUndoIsUnavailable —— 反向对照：熔断的保护能力**未被削掉**。
+
+  /** 生产 `planTick` 的逐拍驱动（DEAD 状态、可配 undo 闸门）。 */
+  private fun deadTick(
+    undoReady: () -> Boolean,
+    engineProcessAlive: Boolean = false,
+    bootAgeMs: Long = 999_999L,
+  ) = WatchdogV2.planTick(
+    state = WatchdogV2.ProbeState.DEAD,
+    now = 0L,
+    nextRestartAllowedAt = 0L,
+    engineReady = true,
+    engineProcessAlive = engineProcessAlive,
+    bootAgeMs = bootAgeMs,
+    restartDeadConfirmations = 2,
+    feedProbe = {},
+    consumeMarkers = {},
+    refreshWake = {},
+    undoReady = undoReady,
+  )
+
+  /** 连拍至熔断打开（undo 不可用），返回打开后的 plan。 */
+  private fun openCircuitWithUndoUnavailable(): WatchdogV2.TickPlan {
+    repeat(WatchdogV2.MAX_CONSEC_FAILURES) { deadTick(undoReady = { false }) }
+    assertTrue("前置：12 拍后熔断必须已打开", WatchdogV2.tripped())
+    return deadTick(undoReady = { false })
+  }
+
+  @Test
+  fun undoRemainsReachableOnceTheCircuitBreakerIsOpen() {
+    WatchdogV2.reset()
+    openCircuitWithUndoUnavailable()
+    var undoProbed = false
+    // 熔断已打开；undo 闸门放行 —— 修复前返回 HOLD(circuit-open)（判红），修复后必须 UNDO。
+    val plan = deadTick(undoReady = { undoProbed = true; true })
+    assertTrue("undo 闸门必须被求值（不得被熔断早退吞掉）", undoProbed)
+    assertEquals(
+      "熔断打开后 undo 仍必须能介入：熔断只该禁止盲目重启，不该锁死配置回滚（0.14.1 锁存盲区）",
+      WatchdogV2.TickAction.UNDO,
+      plan.action,
+    )
+  }
+
+  @Test
+  fun halfDeadEngineStillReachesUndoAfterTheBootWindowExpires() {
+    WatchdogV2.reset()
+    // 真实半死形态：子进程存活（端口可连 / HTTP 全败 → DEGRADED_HTTP），bootAge 随拍递增。
+    // 引擎从未被重启过，故启动时间为 0，bootAgeMs == now。
+    var armedAt: Long? = null
+    var undoProbed = 0
+    var undoAtTick = 0
+    var firstDisruptive: WatchdogV2.TickAction? = null
+    for (tick in 1..30) {
+      val now = tick * 5_000L
+      val plan = WatchdogV2.planTick(
+        state = WatchdogV2.ProbeState.DEGRADED_HTTP,
+        now = now,
+        nextRestartAllowedAt = 0L,
+        engineReady = true,
+        engineProcessAlive = true,
+        bootAgeMs = now,
+        restartDeadConfirmations = 2,
+        feedProbe = {},
+        consumeMarkers = {},
+        refreshWake = {},
+        // 用**生产闸门** UndoGate.decide 驱动：两阶段 arm/watch 语义即为线上语义。
+        undoReady = {
+          undoProbed++
+          when (UndoGate.decide(WatchdogV2.effectiveFailureCount(), now, null, armedAt)) {
+            UndoGate.GateDecision.ARM -> { armedAt = now; false }
+            UndoGate.GateDecision.EXECUTE -> true
+            else -> false
+          }
+        },
+      )
+      if (plan.action == WatchdogV2.TickAction.UNDO) { undoAtTick = tick; firstDisruptive = plan.action; break }
+      if (plan.action == WatchdogV2.TickAction.RESTART) firstDisruptive = plan.action
+    }
+    assertTrue("半死引擎下 undo 闸门必须被求值（修复前恒为 0 次）", undoProbed > 0)
+    assertEquals(
+      "托管子进程存活但 HTTP 永不健康时，undo 仍必须在启动预算用尽后介入，不得被熔断永久锁死",
+      WatchdogV2.TickAction.UNDO,
+      firstDisruptive,
+    )
+    assertTrue("undo 必须在观察窗（15s）走完之后、且晚于 boot 预算（90s）才放行", undoAtTick * 5_000L > 90_000L)
+  }
+
+  @Test
+  fun circuitBreakerStillBlocksBlindRestartWhenUndoIsUnavailable() {
+    WatchdogV2.reset()
+    val plan = openCircuitWithUndoUnavailable()
+    // 反向对照（反假绿必需）：undo 不可用时熔断必须继续拦住盲目重启——修复不得削掉保护能力。
+    assertEquals("熔断打开且 undo 不可用时必须 HOLD，不得 RESTART", WatchdogV2.TickAction.HOLD, plan.action)
+    assertTrue("熔断分支必须给出可读原因", plan.logs.any { it.contains("circuit open") })
+  }
+
+  @Test
+  fun bootWindowStillGuardsALiveChildFromUndo() {
+    WatchdogV2.reset()
+    // 启动预算内（bootAge < 90s）的存活子进程属冷启动，undo 不得打断它——这条保护不得因本次修复失守。
+    var undoProbed = false
+    val plan = WatchdogV2.planTick(
+      state = WatchdogV2.ProbeState.DEAD,
+      now = 60_000L,
+      nextRestartAllowedAt = 0L,
+      engineReady = true,
+      engineProcessAlive = true,
+      bootAgeMs = 30_000L,
+      restartDeadConfirmations = 1,
+      feedProbe = {},
+      consumeMarkers = {},
+      refreshWake = {},
+      undoReady = { undoProbed = true; true },
+    )
+    assertEquals("boot 预算内必须推迟破坏性恢复", WatchdogV2.TickAction.HOLD, plan.action)
+    assertTrue(plan.logs.any { it.contains("boot window") })
+    assertFalse("boot 预算内连 undo 闸门都不该被求值", undoProbed)
   }
 
   // ── 状态机分支 ────────────────────────────────────────────────

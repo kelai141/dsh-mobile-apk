@@ -14,7 +14,6 @@
   ],
   "externals": [
     "vendor/dsh-undo-savepoint",
-    "vendor/dshmarketplace-plugin",
-    "vendor/dsh-model-sync"
+    "vendor/dshmarketplace-plugin"
   ]
 }

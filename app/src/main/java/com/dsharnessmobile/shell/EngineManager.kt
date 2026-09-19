@@ -124,7 +124,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
       val discarded = mutableListOf<String>()
       SnapshotFs.deletePath(stage) { f, ex -> discarded += (f.name + " (" + ex.javaClass.simpleName + ")") }
       if (SnapshotFs.exists(stage)) {
-        val orphan = File(filesDir, ".snapshot-stage-orphan-" + startedAt)
+        val orphan = File(filesDir, SnapshotTransaction.STAGE_ORPHAN_PREFIX + startedAt)
         val movedAside = try {
           SnapshotFs.move(stage, orphan); true
         } catch (t: Throwable) {
@@ -173,6 +173,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
         fingerprint = fingerprint,
         startedAt = startedAt,
         onEntry = { onStage("正在更新 " + it) },
+        spaceCheck = { required -> insufficientSpaceReason(filesDir, required) },
       )
       // #214：profiles 合并期间的工厂语义纠正逐条留档（升级现场可追溯，不只依赖 UI 文案）。
       for (note in swapNotes) LogCollector.log(TAG, "profile patch reconciled during swap: " + note)
@@ -184,6 +185,12 @@ class EngineManager(private val context: Context, private val pickToken: String?
     } catch (t: Throwable) {
       Log.e(TAG, "snapshot refresh failed; rolling back", t)
       onStage("运行时更新失败，正在回滚…")
+      // 【0.14.1 升级路径 P0】把真因留存给 boot-fail.log。
+      // 旧实现只 `return false`，调用方（EngineStartFlow）只能拿到一个布尔值 → boot-fail.log
+      // 里 `error=none(boolean-failure-path)`、detail 只有「返回 false」。设备实测该形态下
+      // 真因（`FileSystemException: ... Directory not empty` + 栈）**完全没有落盘**，排障者
+      // 只能靠 logcat 反查——正是用户反馈一「App 启动失败时几乎不留任何诊断日志」的同形复发。
+      lastRefreshFailure = t
       try {
         val marker = SnapshotTransaction.readMarker(filesDir)
         if (marker != null) {
@@ -195,12 +202,31 @@ class EngineManager(private val context: Context, private val pickToken: String?
       } catch (rollbackError: Throwable) {
         // Keep the marker: the next start retries the rollback before anything else.
         Log.e(TAG, "snapshot refresh rollback failed; recovery marker retained", rollbackError)
+        // 补偿失败也要留证（它是「marker 为何留着」的直接解释），但不得取代真因。
+        t.addSuppressed(rollbackError)
       }
       return false
     } finally {
       EngineManager.snapshotRefreshing.set(false)
     }
   }
+
+  /**
+   * 最近一次快照刷新失败的真因（0.14.1 升级路径 P0）。
+   *
+   * 为什么需要：`refreshSnapshot` 以布尔值回报成败，调用方拿不到异常 → `boot-fail.log` 的
+   * `error=` 字段只能是 `none(boolean-failure-path)`。把真因挂在这里，调用方可原样落盘。
+   * 只保留最近一次（诊断用途，不需要历史）；读取后不清空，便于多处消费。
+   */
+  @Volatile
+  var lastRefreshFailure: Throwable? = null
+
+  /**
+   * 最近一次「启动恢复未收敛」的明细（D-3：回滚失败时 marker 保留，下次启动重试）。
+   * 非空即表示**当前这棵树可能不完整**——启动自检与诊断面据此如实上报，而不是当作正常启动。
+   */
+  var pendingRecoveryFailure: String? = null
+    private set
 
   /**
    * Resolves a transaction interrupted by a kill, an OEM cleaner or a low-memory restart.
@@ -212,20 +238,50 @@ class EngineManager(private val context: Context, private val pickToken: String?
   fun recoverInterruptedRefresh() {
     // Another refresh/recovery owns the stage/previous trees right now: never race it.
     if (!EngineManager.snapshotRefreshing.compareAndSet(false, true)) return
+    // 提到 try 之外：catch 里要用它做「marker 是否真的还在」的对账（0.14.1 块K ②）。
+    val filesDir = context.filesDir
     try {
-      val filesDir = context.filesDir
       val marker = SnapshotTransaction.readMarker(filesDir)
       if (marker == null) {
         // No marker: only a stale stage directory can survive (a rollback that was
         // interrupted before it deleted the stage).
-        SnapshotFs.deletePath(SnapshotTransaction.stageRoot(filesDir))
+        //
+        // 0.14.1 块K ②（反馈二「幂等收敛」）：marker 缺席 + 残渣在场 = finish() 没跑完
+        // （用户实测：0.14.0 覆盖安装留下 SWAPPED 半程事务 + 920 MB previous + 176 MB stage）。
+        // 此处**只在快照已激活**时回收——那是「live 已是工厂新树、previous 只是被置换下去的旧副本」
+        // 的唯一安全条件；半程事务的 previous 是回滚源，绝不能被这一路径删。
+        if (SnapshotTransaction.hasResidue(filesDir) && snapshotFresh()) {
+          val reclaimed = SnapshotTransaction.reclaimResidue(filesDir)
+          if (reclaimed.isNotEmpty()) {
+            Log.w(TAG, "snapshot residue reclaimed on start (no pending transaction): " + reclaimed.joinToString(", "))
+            LogCollector.log(TAG, "snapshot residue reclaimed: " + reclaimed.joinToString(", "))
+          }
+        } else {
+          SnapshotFs.deletePath(SnapshotTransaction.stageRoot(filesDir))
+        }
         return
       }
       applyRecovery(
         SnapshotTransaction.recover(filesDir, SnapshotTransaction.stageRoot(filesDir), usrDir, homeDir),
       )
     } catch (t: Throwable) {
-      Log.e(TAG, "snapshot transaction recovery failed; marker retained", t)
+      // 文案必须与事实一致（0.14.1 块K ②）：finish() 现在用 try/finally 保证 marker 先被清，
+      // 因此**本 catch 不能再无条件断言「marker retained」**——清理抛错时 marker 其实已清，
+      // 照旧打印会把「残渣没扫完」误报成「事务未收敛」，正是反馈一里「日志与事实不符」的同类形态。
+      val markerStillThere = SnapshotTransaction.readMarker(filesDir) != null
+      if (markerStillThere) {
+        Log.e(TAG, "snapshot transaction recovery failed; marker retained", t)
+      } else {
+        Log.e(TAG, "snapshot transaction recovery failed after the marker was cleared "
+          + "(residue reclaim is retried on the next start)", t)
+      }
+      // 恢复失败但事务已收敛：顺手回收残渣，避免 920 MB previous 长期占地（反馈二）。
+      if (!markerStillThere && snapshotFresh()) {
+        val reclaimed = SnapshotTransaction.reclaimResidue(filesDir)
+        if (reclaimed.isNotEmpty()) {
+          LogCollector.log(TAG, "snapshot residue reclaimed after recovery failure: " + reclaimed.joinToString(", "))
+        }
+      }
     } finally {
       EngineManager.snapshotRefreshing.set(false)
     }
@@ -246,6 +302,39 @@ class EngineManager(private val context: Context, private val pickToken: String?
         SnapshotTransaction.finish(context.filesDir)
         Log.w(TAG, "interrupted refresh completed (runtime was already activated)")
       }
+      // 【D-3 / 审查 §7.7.5】回滚未完整落地：marker **已保留**（下次启动先重试），
+      // 并把失败条目写进诊断面——用户实报的「插件注册了但不真实可用」正是「半成品树被当成
+      // 已恢复长期使用」的下游症状（§7.7），所以这条必须可归因，不能只留一行 logcat。
+      SnapshotTransaction.Outcome.ROLLBACK_FAILED -> {
+        val detail = recovery.failures.joinToString(", ")
+        Log.e(TAG, "interrupted refresh rollback incomplete; recovery marker retained: " + detail)
+        LogCollector.log(TAG, "snapshot recovery incomplete (retry on next start): " + detail)
+        pendingRecoveryFailure = detail
+      }
+    }
+  }
+
+  /**
+   * 交换前空间断言（审查 §7.2-F-4 / B12）：把 StatFs 事实翻译成**可直接照做**的文案。
+   *
+   * 为什么必须有它：`refreshSnapshot`/`swap` 全程没有任何空间前置检查，空间不足时解压/合并
+   * 中途 ENOSPC → 报「运行时更新失败」，用户与维护者都看不出真因（§7.2 的 F-7 形态）。
+   * 这也是唯一一条「重启未必好、且会重复失败」的机制。
+   * @return 拒绝文案；null = 空间充足。
+   */
+  private fun insufficientSpaceReason(filesDir: File, requiredBytes: Long): String? {
+    return try {
+      val stat = android.os.StatFs(filesDir.absolutePath)
+      val free = stat.availableBytes
+      if (free >= requiredBytes) return null
+      val needMb = requiredBytes / (1024 * 1024)
+      val freeMb = free / (1024 * 1024)
+      "存储空间不足：运行时更新需要约 " + needMb + " MB 可用空间，当前仅 " + freeMb + " MB。" +
+        "请清理存储（开发者选项 → 清除运行时缓存，或删除不需要的文件）后重试；本次更新未改动现有运行时。"
+    } catch (t: Throwable) {
+      // 拿不到 StatFs 事实（异常挂载等）：不因测量失败而阻断更新，但留日志以便事后归因。
+      Log.w(TAG, "snapshot space precheck unavailable", t)
+      null
     }
   }
 
@@ -498,7 +587,10 @@ class EngineManager(private val context: Context, private val pickToken: String?
       val f = File(dshData, name)
       if (f.exists()) {
         removedPaths += f.absolutePath
-        if (!f.deleteRecursively()) {
+        // 审查 I-9：`deleteRecursively` 的 walkBottomUp 用 File.isDirectory 判目录，**跟随符号链接**
+        // ⇒ 用户数据树里若有一条指向别处的链，删除会穿过去。一律走项目既有的 NOFOLLOW 原语。
+        SnapshotFs.deletePath(f)
+        if (SnapshotFs.exists(f)) {
           throw java.io.IOException("failed to delete public path " + f.absolutePath)
         }
       }
@@ -529,11 +621,12 @@ class EngineManager(private val context: Context, private val pickToken: String?
         Log.w(TAG, "private " + privateDir.absolutePath + " exists; public kept as " + backup.absolutePath)
         return
       }
-      privateDir.deleteRecursively()
+      SnapshotFs.deletePath(privateDir)
     }
     privateDir.parentFile?.mkdirs()
     copyTreeVerified(publicDir, privateDir)
-    if (!publicDir.deleteRecursively()) {
+    SnapshotFs.deletePath(publicDir)
+    if (SnapshotFs.exists(publicDir)) {
       throw java.io.IOException("failed to delete public source " + publicDir.absolutePath)
     }
   }
@@ -999,6 +1092,23 @@ class EngineManager(private val context: Context, private val pickToken: String?
       .append(" / Android ").append(android.os.Build.VERSION.SDK_INT).append('\n')
     sb.append("abi: ").append(android.os.Build.SUPPORTED_ABIS.joinToString(",")).append('\n')
     engineExitInfo()?.let { sb.append("engine_exit: ").append(it).append('\n') }
+    // 0.14.1 块C §2.4：WebView 版本与语法下限判据进诊断包。
+    // 为什么也进诊断包（而不只进 boot-diag.log）：老设备白屏时页面跑不起来，用户必须能**自助**取到
+    // 「我的 WebView 版本够不够」这一个结论，而不必先跑到页面上看。
+    // 字段名与 MainActivity 在 boot-diag.log 里用的**逐字一致**，便于两处对账。
+    // 取值口径同源：WebView.getCurrentWebViewPackage()?.versionName + 首个点分段数字。
+    try {
+      val pkg = android.webkit.WebView.getCurrentWebViewPackage()
+      val ver = pkg?.versionName ?: ""
+      val major = Regex("(\\d+)\\.").find(ver)?.groupValues?.get(1)?.toIntOrNull() ?: -1
+      sb.append("webview_package: ").append(pkg?.packageName ?: "").append('\n')
+      sb.append("webview_version: ").append(ver).append('\n')
+      sb.append("webview_major: ").append(major).append('\n')
+      // 语法下限 94（Chromium 94 起才有类静态块 static{}；低于它入口 chunk 解析即整体不执行 = 纯白无字）。
+      sb.append("syntax_floor_ok: ").append(major >= MainActivity.WEBVIEW_SYNTAX_FLOOR_MAJOR).append('\n')
+    } catch (_: Throwable) {
+      // 诊断本身不得成为故障源；字段缺席好过抛异常。
+    }
     try {
       val probe = EngineProbe.check(500)
       sb.append("probe: ").append(probe.toString()).append('\n')
@@ -1242,7 +1352,8 @@ class EngineManager(private val context: Context, private val pickToken: String?
       if (updateHealthTicks >= UPDATE_CONFIRM_TICKS) {
         pending.delete()
         File(context.filesDir, ".update-pending-at").delete()
-        File(context.filesDir, "usr-old").deleteRecursively()
+        // 审查 I-9 点名：usr-old 里的绝对链此时已指向**新** usr 树，跟随删除会穿进 live 运行时。
+        SnapshotFs.deletePath(File(context.filesDir, "usr-old"))
         updateHealthTicks = 0
         LogCollector.log(TAG, "update confirmed: old runtime cleaned (usr-old removed)")
       }
@@ -1264,7 +1375,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
     if (!old.exists()) return
     try {
       val broken = File(context.filesDir, "usr-broken")
-      broken.deleteRecursively()
+      SnapshotFs.deletePath(broken)
       if (usr.exists()) usr.renameTo(broken)
       if (old.renameTo(usr)) {
         LogCollector.log(TAG, "update rolled back to previous runtime; restarting engine")
@@ -1312,6 +1423,18 @@ class EngineManager(private val context: Context, private val pickToken: String?
       // can't maintain the profiles/node_modules flat fallback); all runtime user data lives in private
       // files/home/.dsh, and public Documents/dshdata is only the export repo.
       "DSH_HOME" to ensurePrivateDshData().absolutePath,
+      // 0.14.1 块K ③（反馈三）：从 shell 执行 `dsh plugin add` 必失败 —— ERR_PNPM_UNEXPECTED_STORE。
+      // 现象：node_modules 链自 `/data/user/0/…/.local/share/pnpm/store/v10`，pnpm 却想用
+      // `/data/data/…/.local/share/pnpm/store/v10`；两路径 **inode 相同**（用户实测 719892）
+      // —— 同一目录的两种写法（`/data/data` 与 `/data/user/0` 在本机实测同 inode）。
+      //
+      // 真因：pnpm 的 store 位置由它自己按 CWD/HOME 推导，而 shell 的 CWD（`files/home`）与
+      // 记录进 node_modules 元数据时的写法可能不同 → 两条写法指向同一目录却字符串不等，
+      // pnpm 判定「store 变了」直接拒绝安装（引擎内安装走同一 HOME，故不受影响）。
+      //
+      // 修法（用户建议二选一中的「显式设置 pnpm store-dir」）：**显式钉住** store 目录，
+      // 且与 HOME 同源派生（见 [pnpmStoreDir]）——pnpm 不再自己猜，两条路径必然同一字符串。
+      "npm_config_store_dir" to pnpmStoreDir(homeDir),
       // 0.13.8 #183：引擎子进程读取键盘广播 nonce 的路径基（manage 插件 --es auth 随广播携带）
       "DSH_FILES_DIR" to context.filesDir.absolutePath,
       // os.tmpdir() falls back to the baked-in Termux tmp on Android
@@ -1445,6 +1568,23 @@ description: 手机操控纪律：无障碍语义树优先、ref 语义点击/�
  * 「注入进 shellEnv()」那一半由 W3ShellContractTest 的源码扫描锁定。
  */
 internal fun uvThreadPoolSize(cores: Int): Int = minOf(8, cores.coerceAtLeast(1))
+
+/**
+ * 0.14.1 块K ③（反馈三）：pnpm store 目录——**唯一真源**，与 HOME 同源派生。
+ *
+ * 为什么必须显式钉住：从 shell 执行 `dsh plugin add` 恒报 `ERR_PNPM_UNEXPECTED_STORE`
+ * （node_modules 链自 `/data/user/0/…`，pnpm 想用 `/data/data/…`；用户实测两路径 inode 相同）。
+ * 根因是 pnpm 按 CWD/HOME 自推 store 位置，而 Android 上 `/data/data/<pkg>` 与
+ * `/data/user/0/<pkg>` 是同一目录的两种写法，字符串不等即被判「store 变了」而拒绝安装。
+ * 显式给 `npm_config_store_dir` 后 pnpm 不再推导，两条路径必然是同一字符串。
+ *
+ * 口径与 pnpm 默认一致（`$HOME/.local/share/pnpm/store`），因此**不改动既有 store 位置**——
+ * 已经安装好的 node_modules 元数据全部继续有效（改位置会引发一次全量重装）。
+ * @param homeDir - 应用私有 HOME（= filesDir/home）。
+ * @returns store 目录的绝对路径（不创建；pnpm 自己会在需要时建）。
+ */
+internal fun pnpmStoreDir(homeDir: File): String =
+  File(File(File(homeDir, ".local"), "share"), "pnpm/store").absolutePath
 
 /** 诊断镜像的单份上限（#211.3）：只需现场尾部；内存峰值从 3× 整份压到 3× 上限内。 */
 internal const val MIRROR_LOG_LIMIT_BYTES: Long = 2L * 1024 * 1024

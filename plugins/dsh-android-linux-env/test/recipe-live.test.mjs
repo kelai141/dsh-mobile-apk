@@ -15,6 +15,10 @@ function makeCtx(services = {}) {
     tools: { register(t) { tools.push(t) } },
     webServer: { register(route) { routes.set(route.path, route); return () => { routes.delete(route.path) } } },
     get: (name) => resolvedServices[name],
+    // 0.14.1 块 E：两条 runtime-cache 路由按「注册即 effect」注册（热重载/卸载必须回收路由，
+    // 不留重复 handler）。桩 ctx 必须提供 effect，否则 apply() 在路由段抛
+    // 「ctx.effect is not a function」——这不是产品缺陷，而是桩缺能力。
+    effect(cb) { cb(); return () => {} },
   }
   return { ctx: target, routes, tools }
 }

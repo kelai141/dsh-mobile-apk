@@ -1,9 +1,0 @@
-# dsh-model-sync bundle patch: mounts the plugin into the profile's assembly
-# tree under the stable plugin id `dsh-model-sync`. It registers the
-# `model-sync` settings namespace and keeps configured `llm-pi-ai` provider
-# routes' model lists in step with the gateway's /models endpoint via
-# add-only merges written through the official settings seam.
-
-- insert:
-    - id: dsh-model-sync
-      name: '@aiwayds/dsh-model-sync'

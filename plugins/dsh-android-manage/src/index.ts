@@ -28,6 +28,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } fr
 import { parseUiTreeXml, pruneNodes, resolveRef, findActionableAncestor, checkUiTreeParse, type UiNode, actionableAncestorV2, scopePoolV2 } from './ui-tree.js'
 import { cacheFromV2, decodeV2, isV2Payload, type V2Decoded } from './protocol-v2.js'
 import { detailRecord, pageRows, writeDetailStore } from './detail-store.js'
+import { resolveVirtualDisplayToken, vdTokenMissingText } from './vd-shot.js'
 
 /**
  * 0.13.8 #183：键盘广播来源校验 nonce 参数（壳侧 AdbKeyboardReceiver 私有文件，
@@ -55,13 +56,15 @@ interface PrivilegeFace {
   /** 会话级通道门：无障碍通道（服务已开启）或 ADB 三道人门任一成立即放行；会话档位 danger-full-access 恒需。 */
   gateFor(session?: unknown): { ok: true; via?: 'a11y' | 'adb' } | { ok: false; guidance: string }
   /** 真实 ADB 通道：adb shell（adbd 执行，shell uid=2000）。 */
-  execAdbShell?(command: string): Promise<{ ok: boolean; stdout: string; guidance?: string }>
+  execAdbShell?(command: string, auth?: { session?: unknown; internal?: string }): Promise<{ ok: boolean; stdout: string; guidance?: string }>
   /** 真实 ADB 通道：原始 adb 行（自动注入 -s 与幂等 connect；screencap+pull 等组合用）。 */
-  execAdbLine?(line: string): Promise<{ ok: boolean; stdout: string; guidance?: string }>
+  execAdbLine?(line: string, auth?: { session?: unknown; internal?: string }): Promise<{ ok: boolean; stdout: string; guidance?: string }>
   /** 0.13.5 W4：控制通道策略（a11y 优先 / ADB 回退 / 拒绝，fail-closed）。 */
   controlDecision?(op: string, session?: unknown, forceBackend?: 'a11y' | 'adb'): { backend: 'a11y' | 'adb' | 'deny'; reason: string; guidance?: string }
   /** 0.13.5 W4：无障碍通道执行（壳侧队列往返；未开启无障碍时直接拒绝）。 */
-  controlExec?(op: string, args: Record<string, unknown>, timeoutMs?: number): Promise<{ ok: true; data: unknown } | { ok: false; error: string }>
+  controlExec?(op: string, args: Record<string, unknown>, timeoutMs?: number, auth?: { session?: unknown; internal?: string }): Promise<{ ok: true; data: unknown } | { ok: false; error: string }>
+  /** S-5：绑定本次调用的会话（bridge 服务面据此复查档位；见其 KDoc）。 */
+  bindSession?(session: unknown): void
 
   /** 0.14: current native-owned access range; no model tool can mutate it. */
   screenScope?(): 'virtual-only' | 'real-only' | 'all'
@@ -104,9 +107,13 @@ function tools(ctx: Context, priv: PrivilegeFace) {
   // before it chooses a11y/ADB. That prevents the legacy ADB fallback from bypassing virtual-only.
   // review C11：`device_info` 已移出——它只读型号/版本等元数据，不含屏幕内容；默认 virtual-only
   // 下把它整体拒绝属过度拦截（U-3 约束的是「屏幕内容读取与操作」）。
+  // 块G F4b（0.14.1）：`web_dump` 同型移出——它读的是**壳自有 WebView**（DSH 自己的 Web UI，
+  // 壳侧 handleWebSnapshot 走 MainActivity.webViewRef），既没有 `screenId` 参数也与设备屏无关。
+  // 留在本集合里的后果是确定的过度拦截：guard 的 requested 恒为 undefined → decideScreenAccess
+  // 落到 real → virtual-only 下 android_web_dump 必然被拒，而它根本不读设备屏。
   const SCREEN_ACTIONS = new Set([
     'screenshot', 'ui_detail', 'ui_tree', 'act_input', 'ui_dump', 'ui_click',
-    'ui_scroll', 'ui_input', 'web_dump', 'app_launch', 'ui_global',
+    'ui_scroll', 'ui_input', 'app_launch', 'ui_global',
   ])
   /**
    * 屏幕范围门 + 会话通道门。
@@ -124,6 +131,10 @@ function tools(ctx: Context, priv: PrivilegeFace) {
    * 修法不是逐个补字段（下次加字段还会漏），而是**唯一入口收完整实参**。
    */
   const guard = async (action: string, args: Record<string, unknown>, exec?: { agent?: { session?: unknown } }) => {
+    // S-5：把本次调用的会话绑定到**当前异步上下文**——bridge 的服务面据此复查档位。
+    // 为什么在这里绑：本插件的私有面调用点有 40+ 处（分散在各 helper 里，多数拿不到 exec），
+    // 逐个改签名噪声大且必漏；而 guard 是每个工具入口的唯一必经点，语义正是「这次调用属于谁」。
+    priv.bindSession?.(exec?.agent?.session)
     if (SCREEN_ACTIONS.has(action) && (priv.screenAccessResolved ?? priv.screenAccess)) {
       const requested = typeof args.screenId === 'string' ? args.screenId : undefined
       // **必须用异步面**：`virtual-N` → displayId 要经壳侧 vdInfo 注册表解析，同步面做不到，
@@ -407,7 +418,9 @@ function tools(ctx: Context, priv: PrivilegeFace) {
   async function readAnimScales(): Promise<Record<string, string>> {
     if (!priv.execAdbShell) return {}
     const cmd = 'for k in ' + ANIM_KEYS.join(' ') + '; do echo R:$k=$(settings get global $k); done'
-    const r = await priv.execAdbShell(cmd).catch(() => ({ ok: false, stdout: '' }))
+    // S-5：`settings get/put global` 命中服务面危险命令黑名单，故走**具名内部白名单**——
+    // 白名单按命令形态逐条校验（bridge 的 isAnimationScaleCommand），不是名字对了就放行。
+    const r = await priv.execAdbShell(cmd, { internal: 'animation-scales' }).catch(() => ({ ok: false, stdout: '' }))
     const out: Record<string, string> = {}
     for (const m of r.stdout.matchAll(/R:(\w+)=(\S+)/g)) out[m[1]] = m[2]
     return out
@@ -417,13 +430,15 @@ function tools(ctx: Context, priv: PrivilegeFace) {
    *  音乐类 App 播放条常驻动画使窗口永不 idle（"could not get idle state" 实锤根因）。 */
   async function setAnimScales(v: string): Promise<void> {
     if (!priv.execAdbShell) return
-    await priv.execAdbShell(ANIM_KEYS.map((k) => `settings put global ${k} ${v}`).join('; ')).catch(() => undefined)
+    await priv.execAdbShell(ANIM_KEYS.map((k) => `settings put global ${k} ${v}`).join('; '), { internal: 'animation-scales' })
+      .catch(() => undefined)
   }
 
   /** F1 止血：还原动画三开关（读数失败的键回 1 标准值）。 */
   async function restoreAnimScales(old: Record<string, string>): Promise<void> {
     if (!priv.execAdbShell) return
-    await priv.execAdbShell(ANIM_KEYS.map((k) => `settings put global ${k} ${old[k] ?? '1'}`).join('; ')).catch(() => undefined)
+    await priv.execAdbShell(ANIM_KEYS.map((k) => `settings put global ${k} ${old[k] ?? '1'}`).join('; '), { internal: 'animation-scales' })
+      .catch(() => undefined)
   }
 
   /** F10：本地临时产物统一目录（TMPDIR/dsh-tmp/）+ 按 prefix LRU 清理，杜绝私有目录无限堆积。 */
@@ -538,13 +553,30 @@ function tools(ctx: Context, priv: PrivilegeFace) {
         // 无参数地 `screencap` 只会抓默认屏（display 0），于是模型对虚拟屏截图拿到的是真实屏画面，
         // 却以为自己在看虚拟屏（设备会话里 agent 正是据此误判「设置没开在虚拟屏上」）。
         // 屏幕范围已在 guard() 里判定过；这里只负责把它落到 screencap 上。
-        // 注：`screencap -d <id>` 需要 shell 权限，本通道 uid=2000 满足。
-        const targetDisplay = typeof screenId === 'string' && screenId !== '' && screenId !== 'real'
+        //
+        // **0.14.1 块G F6（设备实测真因）**：`screencap -d` 吃的是 **SurfaceFlinger token**，
+        // 不是 DisplayManager displayId——两者是不相交的 id 空间（虚拟屏 token 形如
+        // 11529215046816944610，displayId 只是 2/3/5 这样的小整数）。此前传 displayId ⇒
+        // 必然 `Failed to take screenshot. Status: -2`。故虚拟屏目标必须先反查 SF token。
+        // token 全程按**字符串**（超 2^53 与 2^63-1，数值化即失真）。
+        const isVirtualTarget = typeof screenId === 'string' && screenId !== '' && screenId !== 'real'
+        const targetDisplay = isVirtualTarget
           ? (await priv.screenAccessResolved?.(screenId)) ?? priv.screenAccess?.(screenId)
           : undefined
-        const displayFlag = targetDisplay !== undefined && targetDisplay.ok === true && targetDisplay.displayId !== 0
-          ? `-d ${targetDisplay.displayId} `
-          : ''
+        let displayFlag = ''
+        if (isVirtualTarget) {
+          // 反查 SF token：经 shell 通道收窄读取（全量 dumpsys 会超出 inline 回传窗口）。
+          const sf = await priv.execAdbShell?.("dumpsys SurfaceFlinger | grep -E '^(Virtual Display |    name=)'")
+          const sfOut = sf?.ok === true ? sf.stdout : ''
+          const token = resolveVirtualDisplayToken(sfOut, screenId)
+          if (token === null) {
+            // fail-closed：**绝不**回落 displayId 硬试、**绝不**回落无参 screencap（会抓真实屏）。
+            return { imagePath: '', denied: false, text: vdTokenMissingText(screenId) }
+          }
+          displayFlag = `-d ${token} `
+        } else if (targetDisplay !== undefined && targetDisplay.ok === true && targetDisplay.displayId !== 0) {
+          displayFlag = `-d ${targetDisplay.displayId} `
+        }
         const r = await priv.execAdbLine(`adb shell screencap -p ${displayFlag}${remote} && adb pull ${remote} ${local} && ls -l ${local}; adb shell rm -f ${remote}`)
         if (!r.ok) return { imagePath: '', denied: false, text: r.guidance ?? (r.stdout || '截图执行失败') }
         if (!/^-rw|^-|^total|dsh-shot/.test(r.stdout.trim()) && !existsSync(local)) {
@@ -564,7 +596,12 @@ function tools(ctx: Context, priv: PrivilegeFace) {
           ? { w: matched.width, h: matched.height }
           : await screenSize()
         const targetDisplayId = targetDisplay !== undefined && targetDisplay.ok === true ? targetDisplay.displayId : 0
-        const scopeNote = displayFlag === '' ? '' : `（目标屏 ${screenId}，displayId ${targetDisplayId}）`
+        // 虚拟屏的锚点说明点名 SF token（displayId 对它无意义，写出来会误导坐标换算的排查）。
+        const scopeNote = displayFlag === ''
+          ? ''
+          : isVirtualTarget
+            ? `（目标屏 ${screenId}，SurfaceFlinger token）`
+            : `（目标屏 ${screenId}，displayId ${targetDisplayId}）`
         return inlineShot(local, size.w, size.h, exec as ExecLike, `ADB 通道，设备物理分辨率 ${size.w}x${size.h}${scopeNote}${adbNote}`)
       } catch (e) {
         return { imagePath: '', denied: false, text: '截图失败：' + String((e as Error).message) }
@@ -1539,7 +1576,9 @@ function tools(ctx: Context, priv: PrivilegeFace) {
       // 0.13.5 W4：无障碍通道优先。坐标由壳侧用**它自己的屏幕尺寸**换算——
       // 工具层不再需要屏幕尺寸，也就不会因「dump 缓存过期」把 nx/ny 点击误拒（实机踩坑）。
       if (controlDecision('click', exec as { agent?: { session?: unknown } }).backend === 'a11y') {
-        const payload: Record<string, unknown> = {}
+        // 块G F3：payload 必须带 screenId——此分支此前是裸 `{}`，门按 virtual-N 放行、执行却落真实屏，
+        // 模型看到「点了但画面没变」比直接拒绝更难排查（同 ui_dump 的双修口径）。
+        const payload: Record<string, unknown> = { ...screenArgs(args) }
         if (uiCache?.gen !== undefined) payload.gen = uiCache.gen
         if (useRef) {
           if (!uiCache || Date.now() - uiCache.ts > UI_CACHE_TTL) {
@@ -1855,10 +1894,13 @@ function tools(ctx: Context, priv: PrivilegeFace) {
         }
         // 现场实测（2026-09-10）：`input text` 偶发丢尾字符、中文 IME 可能把字母汉字化——
         // 注入后**回读断言**（壳侧 nodeText 读聚焦框，便宜），不一致自动重试一次。
+        // 块G F3：回读必须带目标屏——否则壳侧按真实屏读聚焦框，校验与注入不在同一块屏上，
+        // 会假报「输入未落地」（模型据此重试或改道，实际输入早已成功）。
+        const nodeTextArgs = { ...screenArgs(args) }
         let readBack: string | null = null
         if (r.ok && raw.length > 0) {
           const read = async (): Promise<string | null> => {
-            const nt = await a11yExec('nodeText', {}, 4000)
+            const nt = await a11yExec('nodeText', { ...nodeTextArgs }, 4000)
             if (!nt.ok) return null
             const d = (nt.data ?? {}) as { text?: string }
             return d.text ?? ''

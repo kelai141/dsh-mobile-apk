@@ -64,12 +64,54 @@ const GATES = [
   // 双口径。掩蔽组名单从 capability-gate 实现导出，门禁不另写一份（防清单漂移假绿）。
   // 离线可跑（真跑各插件 apply()，只需 plugins/*/lib 构建产物）-> CI 与两条链都跑。
   { script: 'check-tool-surface-budget.mjs', ci: true, needsSnapshot: false },
+  // 插件单测（0.14.1 §1.1b 决策 1 / §2.4 前置项 1）：该脚本自 0.14.0 起就存在，却**从未被任何
+  // 路径调用**（不在 GATES、不在接线断言、两条链与两仓 CI 均无引用）——7 个插件的 34 个测试文件
+  // 全部没人跑，「已新增该门禁」的声明与事实不符。此处接入声明集合即同时被两条构建链与两仓 CI
+  // 覆盖（check-gate-skips.mjs 会断言声明集合被两条链逐项调用）。离线可跑，只需 plugins/*/lib。
+  { script: 'check-plugin-tests.mjs', ci: true, needsSnapshot: false },
+  // 冷启动预算 C1~C6（0.14.1 块F P0-2）：把口径从「LISTEN 达标」换成「首个 HTTP 响应 + 无 >2s
+  // 同步块」——只判 LISTEN 会系统性假绿（设备实测 LISTEN 2981ms 达标而 compose 2795ms 挡住首个响应）。
+  // 判据全部为数值算术断言 + 自带反向对照（--self-test）。
+  // **真数据来源（2026-09-19 修复「只跑 self-test 就算过」）**：
+  //   a. 默认档（无参数）——按 `--segments/--probe` > `DSH_BOOT_SEGMENTS`/`DSH_BOOT_PROBE` >
+  //      `.deploy-tmp/boot-budget/{boot-segments.log,engine.log}` 顺序发现**设备原始产物**；
+  //      有产物即**真检**（超预算 exit 1），无产物则明确标 `SKIP(real-data)` 并退 `--self-test`
+  //      自证（**绝不冒充绿**）。
+  //   b. `--pull <serial>`——直接 `adb ... run-as <pkg> cat files/{boot-segments.log,engine.log}`
+  //      拉取真产物再真检（自动化半边，免人手导出）。
+  //   c. `--require-real`（发布前设备门禁）——产物缺席即判红，禁止「无产物 = 通过」。
+  //   此前四处调用点一律传 `--self-test`，真检**永不执行**（判据真会红却被结构性绕开）；现全部改默认档。
+  { script: 'check-boot-budget.mjs', ci: true, needsSnapshot: false },
+  // 快照构建器**产出面**结构断言（0.14.1 P0 反回归）：0849579 曾把 §8 归档整段删掉，构建器跑到
+  // 瘦身就 exit 0、**从不产出 tar**，而打包链只判「tar 是否存在」→ 静默复用陈旧快照、全链零报错。
+  // 判据 = 产出面构造在场 + slim.json 配置键消费者闭合（死键即某步被删的第一手信号）+ 与打包链路径同源。
+  // 离线可跑（只读源码与配置），故 CI 与两条链都跑。
+  { script: 'check-snapshot-builder-output.mjs', ci: true, needsSnapshot: false },
+  // 浏览器语法下限（0.14.1 块C G-1）：老设备（WebView <94）白屏的产物级真因——入口 chunk 带
+  // ES2022 类静态块 `static{}`，解析期语法错误 → 整模块不执行 → 纯白无字。判据为**真实解析器 AST**
+  // + esbuild 双 arm 逐字节差分（禁 grep 文本在场），自带四向自证。真检需快照/构建树，CI 跑 --self-test。
+  { script: 'check-browser-syntax-floor.mjs', ci: true, needsSnapshot: true },
+  // 构建并发上限（0.14.1 用户拍板的系统级约束）：构建期压缩/解压不得吃满全部逻辑核（原为 `xz -T0`
+  // = 16 线程），否则开发机被撑满 → MuMu 模拟器卡顿/系统不稳（「模拟器优先」是铁律 2，两者常并行）。
+  // 判据 = 上限来自单一常量且默认 8 + 构建链真的消费它 + 设备侧同受限 + 注释不自伤。离线可跑。
+  { script: 'check-build-parallel-cap.mjs', ci: true, needsSnapshot: false },
+  // Kotlin 单测数量反回归（0.14.1 P0）：审计发现两处同源缺口——① CI 从不跑 Kotlin 单测
+  // （pr-gate 只跑 compileDebugKotlin）→ 417 例契约断言只在本地手动跑过；② 即使跑起来，
+  // 只按退出码判也分不清「全绿」与「一个用例都没跑」（测试类被删/改名/漏编译时 exit 仍 0）。
+  // 本门禁逐类比对基线（只许升）+ 断言无缺席 + 结果新鲜，抓「防线被删却仍然绿」。
+  // ci:false 是刻意的：云端 CI 无 gradle 产物环境，故本项由本地链/发布链跑；
+  // 无结果时显式 SKIP(#1) 计数（不计入绿），绝不冒充通过。
+  { script: 'check-kotlin-test-count.mjs', ci: false, needsSnapshot: false },
 ]
 const CI_GATES = GATES.filter((g) => g.ci).map((g) => g.script)
 const ALL_GATES = GATES.map((g) => g.script)
 
 if (argv.includes('--list')) {
-  for (const g of GATES) console.log(g.script.padEnd(34) + (g.ci ? 'CI+构建' : '仅构建/发布') + (g.needsSnapshot ? ' 需要快照' : ''))
+  for (const g of GATES) {
+    // 真检档标注：让「怎么真验」有唯一入口，不靠人记（F 门禁的真数据路径见文首注释与详档 §5.1）。
+    const note = g.script === 'check-boot-budget.mjs' ? '  [真检需 --require-real + 设备产物；见详档 §5.1]' : ''
+    console.log(g.script.padEnd(34) + (g.ci ? 'CI+构建' : '仅构建/发布') + (g.needsSnapshot ? ' 需要快照' : '') + note)
+  }
   process.exit(0)
 }
 
@@ -213,6 +255,29 @@ for (const gate of ALL_GATES) {
   const argvFor = [join('scripts', gate)]
   // 严格档（发布链 --require）：凡支持 --require 的门禁一律传，SKIP 即失败（ST-31：发布链 SKIP=0）。
   if (STRICT && ['check-snapshot-fingerprint.mjs', 'check-perf-instrumentation.mjs', 'check-snapshot-secrets.mjs', 'check-contract.mjs'].includes(gate)) argvFor.push('--require')
+  // 冷启动预算（0.14.1 块F P0-2）：真检需要**设备原始产物**（boot-segments.log + 引擎探针输出），
+  // 冷启动预算（0.14.1 块F P0-2）：**不再强制 --self-test**。默认档会先找设备真产物
+  // （`--segments/--probe` > `DSH_BOOT_SEGMENTS`/`DSH_BOOT_PROBE` > `.deploy-tmp/boot-budget/`）：
+  // 有产物就**真检**（超预算 exit 1），无产物才明确标 `SKIP(real-data)` 并退 --self-test 自证
+  // （绝不冒充绿）。四条调用点已同改为默认档，本聚合入口与它们口径一致。
+  // 注意：这里**不自动加 `--require-real`**——构建机/CI 无设备，强加会让发布链必然失败；
+  // 「发布前必须在设备上真检」由设备门禁显式跑 `--require-real`（无产物即判红）承担。
+  if (gate === 'check-boot-budget.mjs') {
+    runGate([join('scripts', gate)], gate + '(real-or-skip)')
+    ran += 1
+    console.log('PASS  ' + gate + '（真实数据来源：设备产物优先真检；无产物则 SKIP + self-test 自证，不算绿。'
+      + '发布前设备门禁请显式跑 --require-real）')
+    continue
+  }
+  // 浏览器语法下限（0.14.1 块C）：主模式 --scan 需要一个构建树/快照；有快照面就真扫，没有就退到
+  // --self-test（四向自证：反向必红 / 正向必绿 / 载荷不触发 / 工具链在场）——**不得静默跳过**。
+  if (gate === 'check-browser-syntax-floor.mjs') {
+    if (snapshotDir && abis.length > 0) runGate([join('scripts', gate), '--scan', snapshotTar(abis[0])], gate + '(scan ' + abis[0] + ')')
+    else runGate([join('scripts', gate), '--self-test'], gate + '(self-test)')
+    ran += 1
+    console.log('PASS  ' + gate + '（' + (snapshotDir && abis.length > 0 ? 'scan ' + abis[0] : '--self-test 四向自证') + '）')
+    continue
+  }
   if (gate === 'check-runtime-assets.mjs') {
     if (snapshotDir && abis.length > 0) {
       for (const abi of abis) runGate([join('scripts', gate), abi, '--require', '--snapshot', snapshotTar(abi)], gate + '(' + abi + ')')

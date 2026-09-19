@@ -29,7 +29,11 @@ await build({
   platform: 'browser',
   outfile: 'lib/client.js',
   sourcemap: true,
-  target: 'es2022',
+  // 语法下限（0.14.1 块C）：浏览器面产物必须能跑在 Chromium 87（Android 10 纸面基线；在案实测老内核
+  // 为 WebView 87.0.4280.101）。原 es2022 会产出类静态块等老内核解析期即失败的语法，整模块不执行。
+  // 改构建目标比在产物上打补丁稳：下次构建自然正确（与 dsh-client-ui-responsive/build-scripts/
+  // tsdown.client.ts 的 clientConfig.target 同源口径）。
+  target: 'chrome87',
   jsx: 'automatic',
   define: {
     'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV ?? 'production'),

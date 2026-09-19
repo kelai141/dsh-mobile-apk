@@ -216,7 +216,10 @@ if grep -q 'process.platform === "android" ? \[\] : \["/tmp"\]' "$PSANDBOX"; the
 sed -i 's|"/tmp",|...(process.platform === "android" ? [] : ["/tmp"]),|' "$PSANDBOX"
 echo "dsh-sandbox writableRoots patch applied"
 fi
-tar -cf - $EXCLUDES -C "$ROOT" usr -C "$ROOT/stage-root" home/.dsh 2>"$ROOT/home/tarerr.txt" | xz -9 -T0 > "$ROOT/home/snapshot/snapshot.tar.xz"
+# 并发上限（0.14.1 系统级约束）：设备侧快照构建同样不得吃满全部核心——手机 SoC 撑满会让
+# 前台应用（本 App / 模拟器宿主）卡顿甚至触发系统不稳定。统一上限 8，可用 DSH_CPU_THREADS 覆写。
+XZ_THREADS="${DSH_CPU_THREADS:-8}"
+tar -cf - $EXCLUDES -C "$ROOT" usr -C "$ROOT/stage-root" home/.dsh 2>"$ROOT/home/tarerr.txt" | xz -9 -T"$XZ_THREADS" > "$ROOT/home/snapshot/snapshot.tar.xz"
 rm -rf stage-root
 ls -lh "$ROOT/home/snapshot/snapshot.tar.xz"
 echo "DONE"

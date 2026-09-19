@@ -105,6 +105,46 @@ Write-Host "== 控制 op 登记链门禁 =="
 node (Join-Path $Root "scripts\check-control-ops.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "控制 op 登记链漂移（六处集合不一致），拒绝打包"; exit 1 }
 
+# 插件单测门禁（0.14.1 §1.1b 决策 1 / §2.4 前置项 1）：脚本自 0.14.0 起存在却从未被任何路径调用，
+# 7 个插件的 34 个测试文件全部没人跑。判据：有 test/*.test.mjs 必须真跑通且有效通过数 > 0（全 skip = 假绿）。
+# 需 plugins/*/lib 构建产物（本链在注入前已构建）；产物的新鲜度由 check-tool-output-schema 等另行守。
+Write-Host "== 插件单测门禁 =="
+node (Join-Path $Root "scripts\check-plugin-tests.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "插件单测未通过（或全 skip 假绿），拒绝打包"; exit 1 }
+
+# 冷启动预算门禁（0.14.1 块F P0-2）：口径从「LISTEN 达标」换成「首个 HTTP 响应 + 无 >2s 同步块」。
+# 【0.14.1 P0-a 修复】此前这里写死 --self-test，导致**真检被结构性绕开**：门禁对设备真产物会判红
+# （C1 首个响应−LISTEN 超预算、C4 p99 超预算），但四条调用点全都只跑自证 → 判据虽真会红，却永不执行。
+# 现改为**默认档**：门禁自己按优先级发现真产物（显式 --segments/--probe > DSH_BOOT_BUDGET_DIR > 约定落点），
+#   有产物 → 真检（超预算即 exit 1 拒打包）；无产物 → 打印 SKIP(real-data) 并退 --self-test（exit 0）。
+# 即「无产物 = SKIP，绝不等于绿」，且构建机无设备时不会因此误拒。
+Write-Host "== 冷启动预算门禁（有设备产物则真检，否则退自证） =="
+node (Join-Path $Root "scripts\check-boot-budget.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "冷启动预算门禁失败（真产物超预算，或自证判据已退化为假绿），拒绝打包"; exit 1 }
+
+# 快照构建器产出面门禁（0.14.1 P0 反回归）：0849579 曾删掉 §8 归档整段，构建器 exit 0 却不产 tar，
+# 打包链只判「tar 是否存在」→ 静默复用陈旧快照。本门禁锁产出面构造 + slim 配置键闭合 + 路径同源。
+Write-Host "== 快照构建器产出面门禁 =="
+node (Join-Path $Root "scripts\check-snapshot-builder-output.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "快照构建器产出面缺失/漂移（可能静默复用陈旧快照），拒绝打包"; exit 1 }
+
+# 构建并发上限门禁（0.14.1 用户拍板的系统级约束）：构建期压缩/解压不得吃满全部逻辑核——原写法是
+# `xz -T0`（= 16 逻辑线程），会把开发机撑满 → 同时运行的 MuMu 模拟器卡顿、甚至系统级不稳。而
+# 「模拟器优先」是铁律 2（本地构建 → MuMu 实测），两者经常并行，撑满等于自己踩自己的验收环境。
+# 用户口径：固定 8 线程（= 物理核），不撑满 16。上限唯一出处见 scripts/lib/shell.mjs 的 XZ_THREADS。
+Write-Host "== 构建并发上限门禁 =="
+node (Join-Path $Root "scripts\check-build-parallel-cap.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "构建并发吃满全部核心（模拟器/系统不稳），拒绝打包"; exit 1 }
+
+# Kotlin 单测数量反回归（0.14.1 P0）：CI 从不跑 Kotlin 单测（pr-gate 只 compileDebugKotlin），
+# 417 例契约断言此前只在本地手动跑过；且「只按退出码判」分不清「全绿」与「一个用例都没跑」
+# （测试类被删/改名/漏编译时 exit 仍 0）。本门禁逐类比对基线（只许升）+ 断言无缺席 + 结果新鲜。
+# 注意时序：本步在 gradle 构建**之前**，故用的是**上一次**的测试结果——若尚无结果则显式
+# SKIP(#1) 计数（不计入绿）。真正的「本次构建前必须重跑单测」由发布链步骤保证（见 build-release.ps1）。
+Write-Host "== Kotlin 单测数量反回归门禁 =="
+node (Join-Path $Root "scripts\check-kotlin-test-count.mjs") --allow-missing 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "Kotlin 单测防线数量/新鲜度不达标（可能有用例被删或结果陈旧），拒绝打包"; exit 1 }
+
 # pi-ai 目录 diff（0.13.3 W1/P2）：baseline -> pin 信息性输出（构建日志 + 报告文件），
 # 删除清单供回归报告引用——不拒绝构建（删除项由 W4 降级补丁兜底）。
 $overlayManifest = Join-Path $Root "scripts\snapshot-config\engine-overlay.json"
@@ -158,29 +198,80 @@ foreach ($abi in @('arm64', 'x86_64')) {
         New-Item -ItemType Directory -Force -Path (Join-Path $Root ".deploy-tmp\plugins") | Out-Null
         # undo-savepoint 注入源：vendor/dsh-undo-savepoint（固化移动端裁剪版——
         # 头部只留快照徽章、移除撤销/恢复快捷键行与全局键盘监听，见其 PATCHES.md 差异表）
-        # 三个根级注入源（undo / marketplace / model-sync）同样来自 plugin-dirs.json.externals：
+        # 两个根级注入源（undo / marketplace）同样来自 plugin-dirs.json.externals：
         # marketplace 是固化修复版（上游 0.1.5 pre-execute 守卫不调 next() 导致全工具崩溃，见其
-        # PATCHES.md）；model-sync 是 @aiwayds/dsh-model-sync 0.3.1 固化副本（0.13.3 W7）。
+        # PATCHES.md）；undo 是固化移动端裁剪版。model-sync 已于 0.14.1 摘除（见 profile-web patch 的注释）。
         $undo = $externByName['dsh-undo-savepoint']
         $market = $externByName['dshmarketplace-plugin']
-        $modelSync = $externByName['dsh-model-sync']
         if (-not (Test-Path (Join-Path $undo "package.json"))) { Deny-Abi $abi "缺 undo 注入源 $undo（git clone lire1131/dsh-undo-savepoint）"; continue }
         if (-not (Test-Path (Join-Path $market "package.json"))) { Deny-Abi $abi "缺 marketplace 注入源 $market（vendor 固化副本）"; continue }
-        if (-not (Test-Path (Join-Path $modelSync "lib\index.js"))) { Deny-Abi $abi "缺 model-sync 注入源 $modelSync（vendor 固化副本）"; continue }
         # 统一补丁门禁（Phase 2a）：marketplace A-D + undo E1-E7 幂等施加与校验，
         # 登记表 scripts/patches/registry.json。默认 ensure 语义（缺席即施加，锚点失配拒打包）。
         # 雷点 8：全量输出——Select-First 截断管道会杀 node 致误判失败
         node (Join-Path $Root "scripts\patches\apply-patches.mjs") (Join-Path $Root "vendor") 2>&1
         if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "vendor 补丁校验/施加失败"; continue }
+        # 浏览器语法下限：注入段的 lib/client.js 降级（0.14.1 块C G-1 的第二段）。
+        # 为什么注入段也要降：快照段的降级（build-snapshot-013.mjs 的 0f-1b）只覆盖快照内已有产物，
+        # 而注入包里**新进来**的 lib/client.js 不在其中。我方 3 个带 client bundle 的包已改自身构建
+        # 目标（tsdown.client.ts / build-client.mjs 的 chrome87），但 vendor/（marketplace /
+        # undo-savepoint）**无构建源**（只有 lib/，package.json 指向不存在的 build.mjs）→ 改不了源，
+        # 只能在此处按产物降级。
+        # **就地 vs 暂存（这条是硬约束，不是偏好）**：`plugins/*/lib/` 在 .gitignore 内（就地降级对
+        # git 不可见，安全）；但 `vendor/*/lib/` 是**入库跟踪**的（.gitignore 有显式 `!vendor/...` 例外）
+        # ——就地降级会把它写脏，进而绊停发布链自己的 dirty 门禁（也会让「产物可追溯到已提交源码」失效）。
+        # 故 vendor 三个源先复制到 $work 下再降级，并把**暂存路径**交给 combo 预计算与 inject-all
+        # （两处必须用同一份，否则 combo 键与注入内容不一致）。
+        # **顺序硬约束**：必须在 combo 预计算之前——T7 实测同一棵树「先算 combo」与「降级后再算」的
+        # 键集合仅 49/62 重叠（13 条键随降级改变）；顺序反了这 13 条必然 miss（fail-open 静默回退）。
+        # **权威判据不在本步**：注入完成后的 `check-browser-syntax-floor.mjs --scan <注入后 tar>`
+        # 才是判红点（见下方「浏览器语法下限门禁」），本步只负责把产物改成合规形态。
+        # 雷点 8：全量输出，不用 Select-* 截断管道（会杀 node 致误判）。
+        Write-Host "== 浏览器语法下限：注入段降级（$abi）=="
+        $degradeStaged = Join-Path $work "degrade-src"
+        New-Item -ItemType Directory -Force -Path $degradeStaged | Out-Null
+        $degradeFailDetail = ""
+        # 默认仍指向原源目录（表示「不降级」）；只有真的降级成功才改指向暂存副本。
+        # **必须显式初始化**：无 lib/client.js 的源不会进下面的 if，若这两个变量保持未定义/为 $null，
+        # 后续 `@($undoDeg, ...)` 会含 $null 元素，经 splatting 传给 node 时造成**参数错位**
+        # （实测表现：--out 的值被当成未知参数）。
+        $undoDeg = $undo; $marketDeg = $market
+        # vendor 两源：**暂存副本**再降级（vendor/*/lib 是入库跟踪的，就地降级会写脏仓库并绊停
+        # 发布链自己的 dirty 门禁）。无 lib/client.js 的源不复制、保持原路径。
+        # 本段刻意**不写中间 continue**：构建链静态锁「每个 continue 都必须是经 Deny-Abi 记账的
+        # 拒绝路径」（check-build-chain-abort.mjs），而「该源没有浏览器 bundle」是正常跳过不是拒绝；
+        # 且嵌套 foreach 里的 continue 只会继续内层循环、不会跳过本 ABI。故失败只记明细，
+        # 统一在段末用一条 `Deny-Abi $abi "..."; continue` 记账并跳过本 ABI。
+        foreach ($pair in @(@('undo-degraded', $undo), @('market-degraded', $market))) {
+            $leaf = $pair[0]; $src = $pair[1]
+            if (Test-Path (Join-Path $src "lib\client.js")) {
+                $dst = Join-Path $degradeStaged $leaf
+                Remove-Item $dst -Recurse -Force -ErrorAction SilentlyContinue
+                robocopy $src $dst /MIR /NFL /NDL /NJH /NJS /NP | Out-Null
+                node (Join-Path $Root "scripts\check-browser-syntax-floor.mjs") --degrade --stage $dst 2>&1
+                if ($LASTEXITCODE -ne 0) { $degradeFailDetail = "注入段浏览器语法降级失败（$leaf）" }
+                elseif ($leaf -eq 'undo-degraded') { $undoDeg = $dst }
+                elseif ($leaf -eq 'market-degraded') { $marketDeg = $dst }
+            }
+        }
+        # **不降级我方 plugin**（原实现会 `--degrade --stage <plugin>` 就地改写）：
+        #   · 它们已在自己**构建源**里钉了 chrome87（tsdown.client.ts / build-client.mjs），实测
+        #     「只扫本包自己的 lib/client.js」为 0 违规（判据1 0 / 判据2 0）→ 再降一次是**多余的**；
+        #   · 就地降级会改写 lib/ 与包内 node_modules 副本 → 与 apk 仓镜像产生**无意义的漂移**，
+        #     把 check-patch-mirror 判红（实测踩到），发布链断在无关门禁上。
+        #   · 真正需要产物级降级的是 **vendor/**（无构建源），已由上面「暂存副本」分支覆盖。
+        # 注入后的权威判据是下方 `check-browser-syntax-floor.mjs --scan <注入后 tar>`——它扫全清单，
+        # 一旦有包没降到位就判红；不需要在这里「顺手再降一遍」。
+        if (-not [string]::IsNullOrEmpty($degradeFailDetail)) { Deny-Abi $abi $degradeFailDetail; continue }
         # combo 缓存注入段（A3 启动性能）：注入链的 client.js 不在快照段预计算范围内，这里对
         # 注入源逐个补算为 client-combos.inject.json + <sha256>.map，经 inject-all --combo-cache-delta
         # 作为新 tar 条目合入 home/.dsh/profiles/web/.combo-cache/。覆盖由注入后门禁 check-combo-cache 断言。
+        # 用**降级后的**源（与下方 inject-all 同一份），否则 combo 键与注入内容不一致。
         # 雷点 8：全量输出。
         Write-Host "== combo 缓存注入段预计算（$abi）=="
         $comboDelta = Join-Path $work "combo-cache-delta"
         New-Item -ItemType Directory -Force -Path $comboDelta | Out-Null
         $comboArgs = @()
-        foreach ($d in (@($pluginDirs) + @($undo, $market, $modelSync))) { $comboArgs += @("--scan", $d) }
+        foreach ($d in (@($pluginDirs) + @($undoDeg, $marketDeg))) { $comboArgs += @("--scan", $d) }
         node (Join-Path $Root "scripts\lib\combo-precompute.mjs") @comboArgs --out $comboDelta --manifest client-combos.inject.json --engine inject 2>&1
         if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "combo 缓存注入段预计算失败"; continue }
         # 单 pass 注入（2c 提速 2026-09-05）：@dsh-android + 根级插件 + 权威 patch 覆盖合并
@@ -189,11 +280,11 @@ foreach ($abi in @('arm64', 'x86_64')) {
         Write-Host "== 单 pass 注入（@dsh-android + undo/market + 权威 patch）（$abi）=="
         # ST-05：--all-profiles = 权威 patch 与注入包覆盖全部真实装配 profile（web + headless；
         # 负控 profile headless-bad 由 inject-all.py 显式跳过）。此前只写 web，headless 停在旧值。
-        python (Join-Path $Root "scripts\inject-all.py") $snap (Join-Path $work "snap-final2.tar.xz") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") --dsh-android @pluginDirs --external $undo $market $modelSync --all-profiles --combo-cache-delta $comboDelta 2>&1
+        python (Join-Path $Root "scripts\inject-all.py") $snap (Join-Path $work "snap-final2.tar.xz") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") --dsh-android @pluginDirs --external $undoDeg $marketDeg --all-profiles --combo-cache-delta $comboDelta 2>&1
         if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "注入失败"; continue }
         # 防回归（审校 C4 2026-08-23）：patch 挂载集 ⊇ 注入集——缺条目（如 linux-env 漏挂）直接拒打包
         Write-Host "== 挂载集校验（$abi）=="
-        node (Join-Path $Root "scripts\check-patch-mounts.mjs") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") @pluginDirs $undo $market $modelSync 2>&1 | Select-Object -First 4
+        node (Join-Path $Root "scripts\check-patch-mounts.mjs") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") @pluginDirs $undo $market 2>&1 | Select-Object -First 4
         if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "patch 挂载集校验失败"; continue }
         # 注入面成员完整性（P0：包内新增文件曾被静默丢弃 → tar 里 import 悬空 → 设备侧引擎启动即死）
         Write-Host "== 注入成员完整性门禁（$abi）=="
@@ -203,6 +294,14 @@ foreach ($abi in @('arm64', 'x86_64')) {
         Write-Host "== combo 缓存覆盖门禁（$abi）=="
         node (Join-Path $Root "scripts\check-combo-cache.mjs") (Join-Path $work "snap-final2.tar.xz") 2>&1
         if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "combo 缓存覆盖不全（回退将吞掉全部启动收益）"; continue }
+
+        # 浏览器语法下限（0.14.1 块C G-1）：发往浏览器的 bundle 不得携带老内核（WebView <94）解析
+        # 不了的语法——入口 chunk 里一个 `static{}` 就会让整模块不执行 → 纯白无字（自 0.13.3 起每版皆有）。
+        # 判据 = 真实解析器 AST + esbuild 双 arm 逐字节差分（禁 grep 文本在场）；扫**全清单**（dist + 每个
+        # lib/client.js），不是只扫入口 chunk。降级动作在快照构建期由同一脚本的 --degrade 完成。
+        Write-Host "== 浏览器语法下限门禁（$abi）=="
+        node (Join-Path $Root "scripts\check-browser-syntax-floor.mjs") --scan (Join-Path $work "snap-final2.tar.xz") 2>&1
+        if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "发往浏览器的 bundle 携带未降级的 ES2022 语法（老内核白屏）"; continue }
         # 模型面工具 wire 预算（0.14.0 §4.1）：注册集 + 初始可见集双口径。真跑各插件 apply()，
         # 需 plugins/*/lib 构建产物（本链前置已构建）。防「工具面无声膨胀」吃掉每会话固定预算。
         Write-Host "== 工具面预算门禁（$abi）=="

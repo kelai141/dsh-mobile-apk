@@ -91,6 +91,12 @@ export interface AndroidShellBridge {
   setVdisplayFloatEnabled?: (enable: boolean) => boolean
   /** 0.14.0 设置页「手机控制」：强制销毁全部虚拟屏（三连点确认后调用）。 */
   forceDestroyVdisplay?: () => string
+  /** 0.14.1 块J FIX-4：通知设置读回（JSON：suppressForeground / suppressForegroundDefault / categories）。
+   *  `key` 为空串 = 全量快照；回读始终取壳侧真源，不回显入参。 */
+  getNotifySetting?: (key?: string) => string
+  /** 0.14.1 块J FIX-4：通知设置写入（key = `suppressForeground` 或 `cat.<category>`）。
+   *  返回写后读回的 JSON；`applied=false` 即未生效（未知 key / 读回不一致）。 */
+  setNotifySetting?: (key: string, value: boolean) => string
 }
 
 declare global {

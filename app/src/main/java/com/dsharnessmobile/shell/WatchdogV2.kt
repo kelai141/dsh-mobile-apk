@@ -141,14 +141,25 @@ object WatchdogV2 {
         listOf("confirmed-dead sample " + consecutiveFailures + "/" + restartDeadConfirmations + "; observing before restart"),
       )
     }
-    if (tripped()) {
-      return TickPlan(TickAction.HOLD, logs + "watchdog circuit open after confirmed-dead failures; destructive recovery paused")
-    }
+    // 冷启动预算内的托管子进程：任何破坏性动作（含配置回滚）都推迟到它用满预算之后，
+    // 避免把「还在冷启动」误判成「起不来」。
     if (engineProcessAlive && bootAgeMs in 0 until startCooldownMs) {
       return TickPlan(TickAction.HOLD, logs + "dead probe deferred while the tracked child remains inside its boot window")
     }
+    // ── undo 必须先于熔断锁存（0.14.1 修复的锁存盲区）────────────────────────
+    // 缺陷形态（存量，非本迭代引入）：[tripped] 曾排在本分支之前，而它一旦为真即**永久** HOLD，
+    // 只有 HEALTHY 探活或 EngineStartFlow 的唯一一处 `WatchdogV2.reset()` 能解。而熔断在
+    // effectiveFailureCount >= 12 时打开（12 拍 x 5s = 60s），却小于 START_COOLDOWN_MS = 90s 的
+    // 启动预算——于是「托管子进程仍存活、但 HTTP 永远不健康」（半死引擎 / 插件树挂住）这条路径上，
+    // 计数器先撞满 12，本函数此后**再也不会求值 undoReady()**：自动 undo 与自动重启同时永久失效。
+    // 配置回滚（undo）与「禁止盲目重启」（熔断）是两种正交的恢复手段，不应互斥：先给 undo 机会，
+    // 熔断继续守它该守的「undo 不可用时不得盲目反复重启」。反向对照见 WatchdogLadderTest 的
+    // circuitBreakerStillBlocksBlindRestartWhenUndoIsUnavailable。
     if (undoReady()) {
       return TickPlan(TickAction.UNDO, logs + ("auto-undo trigger after confirmed failures=" + effectiveFailureCount()))
+    }
+    if (tripped()) {
+      return TickPlan(TickAction.HOLD, logs + "watchdog circuit open after confirmed-dead failures; destructive recovery paused")
     }
     if (now < nextRestartAllowedAt) {
       return TickPlan(TickAction.HOLD, logs + ("restart deferred for " + (nextRestartAllowedAt - now) + "ms"))

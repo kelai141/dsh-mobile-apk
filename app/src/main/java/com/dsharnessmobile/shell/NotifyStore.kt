@@ -47,6 +47,26 @@ object NotifyStore {
   var lastEntryAt: Long = 0L
     private set
 
+  /**
+   * 最近一条**工作汇报**（`kind == "report"`）的原始 ndjson 行（0.14.1 块J 为 T5 提供的窄接口）。
+   *
+   * 为什么是「原始行」而不是渲染好的文案：`reportLine` / `reportBigText` 是 NotifyCenter 的私有口径，
+   * 暴露原始行让消费方按需取字段，避免在此再造一份渲染口径（第二真源）。
+   */
+  @Volatile
+  private var lastReportLineRaw: String? = null
+
+  /**
+   * 进程内「最近汇报」只读访问器（T5 OverlayReport.kt 调用；**签名保持稳定**）。
+   *
+   * 挂点在 [dispatch] 的 `kind == "report"` 分支，且登记在**投递判定之前**——因此该条即使被前台
+   * 抑制延后（FIX-1）或因类别关闭未投递，长按面板仍能看到「刚做完的那一轮」的文本；这正是
+   * OverlayReport 的用途（本轮完成 → 长按查看汇报），不该因为一条通知被抑制就看不到内容。
+   *
+   * @return 最近一条 report 的原始 ndjson 行；本进程内还没见过 report 时为 null。
+   */
+  fun latestReportLine(): String? = lastReportLineRaw
+
   fun dir(context: Context): File = File(context.filesDir, "home/.dsh")
 
   fun file(context: Context): File = File(dir(context), FILE_NAME)
@@ -59,6 +79,11 @@ object NotifyStore {
     if (started) return
     started = true
     val app = context.applicationContext
+    // FIX-2（0.14.1 块J）：listener 的真实实现挂在**消费链的生命周期入口**而非某个 Activity——
+    // 它是「被抑制/未授权/渠道降级」的用户可见反馈面。幂等；不覆盖外部已安装的实现。
+    NotifyCenter.installShellListener()
+    // FIX-3 存量升级归一化：schema 代次只跑一次（缺键的存量用户即在此刻被修好；显式值原样保留）。
+    NotifyCenter.ensureSuppressForegroundMigrated(app)
     val d = dir(app)
     if (!d.exists()) d.mkdirs()
     try {
@@ -68,7 +93,7 @@ object NotifyStore {
         }
       }.apply { startWatching() }
     } catch (t: Throwable) {
-      LogCollector.log(TAG, "notify watcher failed: " + t.message)
+      NotifyProbe.log(app, TAG, "notify watcher failed: " + t.message)
     }
     // 启动即消费一次（进程离线期间的积压行：偏移持久化保证不重复投递）
     drain(app)
@@ -197,7 +222,7 @@ object NotifyStore {
     if (len < offset) {
       // 轮转（引擎把 >=512KB 的文件改名 .1）或文件被重建：先补读 .1 的残段，再从头开始
       drainRotated(app, offset)
-      LogCollector.log(TAG, "notify file rotated/recreated; offset reset (was " + offset + ")")
+      NotifyProbe.log(app, TAG, "notify file rotated/recreated; offset reset (was " + offset + ")")
       offset = 0L
     }
     if (len == offset) return
@@ -215,7 +240,7 @@ object NotifyStore {
         }
       }
     } catch (t: Throwable) {
-      LogCollector.log(TAG, "notify drain failed: " + t.message)
+      NotifyProbe.log(app, TAG, "notify drain failed: " + t.message)
       return
     }
     if (consumed > 0) p.edit().putLong(KEY_OFFSET, offset + consumed).apply()
@@ -235,10 +260,10 @@ object NotifyStore {
         val read = raf.read(buf)
         if (read <= 0) return
         for (line in drainBytes(buf, read).lines) dispatch(app, line)
-        LogCollector.log(TAG, "rotated remnant drained from " + oldOffset + " (len=" + len + ")")
+        NotifyProbe.log(app, TAG, "rotated remnant drained from " + oldOffset + " (len=" + len + ")")
       }
     } catch (t: Throwable) {
-      LogCollector.log(TAG, "rotated remnant drain failed: " + t.message)
+      NotifyProbe.log(app, TAG, "rotated remnant drain failed: " + t.message)
     }
   }
 
@@ -246,21 +271,32 @@ object NotifyStore {
   fun dispatch(context: Context, line: String): NotifyCenter.Result? {
     val entry = parseEntry(line)
     if (entry == null) {
-      LogCollector.log(TAG, "notify line ignored (unparsable): " + line.take(120))
+      NotifyProbe.log(context.applicationContext, TAG, "notify line ignored (unparsable): " + line.take(120))
       return null
     }
     if (entry.kind == "unknown") {
-      LogCollector.log(TAG, "notify line ignored (unknown kind): " + line.take(120))
+      NotifyProbe.log(context.applicationContext, TAG, "notify line ignored (unknown kind): " + line.take(120))
       return NotifyCenter.Result.UNKNOWN_KIND
     }
     if (entry.kind == "report" || entry.kind == "silent") notifyChannelActive = true
+    // 最近汇报登记（T5 窄接口）：在投递判定**之前**，故被抑制/被关也不影响面板可见内容。
+    if (entry.kind == "report") lastReportLineRaw = line
     lastEntryAt = android.os.SystemClock.uptimeMillis()
     val ts = parseEpochMs(line)
     if (ts > 0) {
-      LogCollector.log(TAG, "notify kind=" + entry.kind + " latencyMs=" + (System.currentTimeMillis() - ts))
+      NotifyProbe.log(context.applicationContext, TAG, "notify kind=" + entry.kind + " latencyMs=" + (System.currentTimeMillis() - ts))
     }
-    val result = NotifyCenter.notifyEvent(context, entry, foreground = isForeground(context))
-    LogCollector.log(TAG, "notify dispatch kind=" + entry.kind + " result=" + result)
+    val foreground = isForeground(context)
+    // FIX-1 补投触发点 ①（事件驱动）：应用已不在前台且队列非空 → 先补投延后条目再投本条。
+    // 触发点 ② 是 NotifySuppressQueue 的自续 tick（30s，队列空即停），覆盖「后台不再有新事件」的场景。
+    // 补投走 notifyEvent(foreground=false)，不经过本函数，故不存在递归。
+    if (!foreground && NotifySuppressQueue.pendingCount() > 0) NotifySuppressQueue.flush(context)
+    val result = NotifyCenter.notifyEvent(context, entry, foreground = foreground)
+    // J-2：这条「投递结果」是本缺陷唯一的终态记账，详档 §6.2/§6.3 的分流表按它判 POSTED /
+    // SUPPRESSED_FOREGROUND。必须走 [NotifyProbe] 写进 files/notify-responder.log——旧实现用
+    // LogCollector.log 只写 day-file，而 day-file 只在「调试采集器已开」时存在，于是设备上
+    // `grep result= files/notify-responder.log` 恒为 0 命中（判据结构性取不到数）。
+    NotifyProbe.log(context.applicationContext, TAG, "notify dispatch kind=" + entry.kind + " result=" + result)
     return result
   }
 
@@ -274,11 +310,18 @@ object NotifyStore {
 
   /**
    * 旧信道回退（NT-09 双读不双发）：只有新信道尚未服役时才投递；否则丢一行并记日志。
-   * @return true = 已投递（旧壳语义）；false = 被新信道接管（不双发）
+   *
+   * **`return false` 的语义（设备复验口径）**：`notify-debug.log` 里的 `notify returned ok=false`
+   * 正是本函数的 false——即「新信道（`.notify.ndjson`）已服役，旧信道按 NT-09 让路」。
+   * 这是**预期行为，不是缺陷**：两条信道同时存在时若都投，同一轮任务会弹两次。旧实现把这一行的
+   * 解释只写进 day-file（调试采集器未开就不存在），于是在设备上 `ok=false` 变成无法解释的悬疑
+   * ——与 J-2 同源。现改走 [NotifyProbe]，该解释与 `ok=false` 落在同一个可 run-as 直读的文件里。
+   * @return true = 已投递（新信道未服役）；false = 被新信道接管（不双发）
    */
   fun legacyFallback(context: Context, title: String, text: String): Boolean {
     if (notifyChannelActive) {
-      LogCollector.log(TAG, "legacy .task-done fallback skipped (notify channel active): " + title)
+      NotifyProbe.log(context.applicationContext, TAG,
+        "legacy .task-done fallback skipped (notify channel active; NT-09 single-send): " + title)
       return false
     }
     NotifyCenter.notify(context, "task", title, text)

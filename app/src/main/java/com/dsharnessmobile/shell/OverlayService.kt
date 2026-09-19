@@ -17,9 +17,6 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
-import androidx.dynamicanimation.animation.DynamicAnimation
-import androidx.dynamicanimation.animation.SpringAnimation
-import androidx.dynamicanimation.animation.SpringForce
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -36,7 +33,8 @@ import java.net.URL
  * - 发送：session.prompt mode=steer（运行中插话）/queue（空闲）；目标会话 = 展开态顶部
  *   下拉选择器（session.list 投影，第一项恒为「新会话」，空目标自动 session.create）；
  *   停止：session.cancel，仅工作中可用（P4 修复）；
- * - 动效：M3 Expressive spring（吸附 Spatial 380/0.8、展开 Fast 800/0.6、按压 Fast 3800/1.0）。
+ * - 动效：展开/收起 = 200ms 渐显；**无贴边 spring 吸附**（0.14.1 块I 拍板：松手即停在手指位置，
+ *   只做四向钳制，距屏幕四边恒留 BALL_EDGE_MARGIN_DP；旧「吸附 Spatial 380/0.8」已删除）。
  * - 回归修复（2026-09-02 模拟器实测）：①展开弹输入法禁止系统 pan 抬高窗口
  *   （SOFT_INPUT_ADJUST_NOTHING—球+面板不再整体上跳）；②busy 会话感知（仅当前目标
  *   会话的 tool_call/turn_end 驱动，其它会话/陈旧行不置忙，杜绝 Deep diving 卡死）；
@@ -48,7 +46,7 @@ import java.net.URL
  * 光环维 → OverlayHalo（四态 drawable/setHalo/syncHalo/deriveHalo）；面板维 → OverlayPanel
  * （buildUnit 构建/渲染/状态模板/待答卡/应答）；live 流 → OverlayLiveFeed（FileObserver 事件
  * 分发 + F7 自动化避让）；主题 → OverlayTheme（色板/明暗）。本文件保留：生命周期、三窗口
- * WindowManager 参数、拖动/吸附、探活与发送编排。
+ * WindowManager 参数、拖动/钳制、探活与发送编排。
  */
 class OverlayService : Service() {
 
@@ -69,10 +67,19 @@ class OverlayService : Service() {
   // 用 by lazy：Service 构造期 resources 尚为 null，字段初值若在构造时取会 NPE；
   // 首次访问（onCreate 后）才求值。
   internal val ballSizeDp by lazy { (34 * resources.displayMetrics.density).toInt() }
+  /**
+   * 贴边最小边距（dp）——**单一具名常量**（0.14.1 块I）：
+   * 它同时是 ① 拖动钳制 `clampBallPos` 的四向最小边距；② 光环窗尺寸 `haloSizeDp` 的推导项。
+   * 二者本是一个数（`app/src/test/.../OverlayHaloInvariantTest` 锁死整数恒等式
+   * `haloSizeDp / 2 == ballSizeDp / 2 + edgeMarginPx`）——分散成两个字面量就会漂移，
+   * 而 `edgeMarginPx < (8*density)` 会让光环窗左缘为负 → WMS 整窗平移 → 历史「偏心」回归。
+   * **不得改小**：见 haloSizeDp 注释的定量推导。
+   */
+  internal val edgeMarginPx by lazy { (BALL_EDGE_MARGIN_DP * resources.displayMetrics.density).toInt() }
   // 光环窗口 = 2×(贴边 margin 8dp + 球半径 17dp) = 50dp：贴边时窗口恰好内切屏幕（x=0 对齐屏缘），
   // WMS 不再 clamp。旧 64dp 窗贴边越界 7dp 被 WMS 整窗平移回屏（dumpsys 实锤：请求 x=-14 → frame x=0），
   // 渐变中心内移 7dp =「吸边后球/光环不同心」（2026-09-05 用户实测）。渐变半径 24dp ≤ 25dp 半窗，视觉不变。
-  internal val haloSizeDp by lazy { (34 * resources.displayMetrics.density).toInt() + 2 * (8 * resources.displayMetrics.density).toInt() }
+  internal val haloSizeDp by lazy { ballSizeDp + 2 * edgeMarginPx }
 
   // ── 引擎维/会话维状态（协作类经 internal 共享） ──────────────────
   internal var activeSessionId = ""              // 展开态目标会话（空 = 新会话）
@@ -93,6 +100,36 @@ class OverlayService : Service() {
   private val halo = OverlayHalo(this)
   internal val panel = OverlayPanel(this)
   private val live = OverlayLiveFeed(this)
+
+  // ── 块H（0.14.1）完成态卡片 + 报告栏 ──────────────────────────────
+  /** 完成位（会话维、带消费标记）。**必须放在服务级字段**：面板收起态要能存活
+   *  （hidePanel 会 removeView(unitView)，放视图状态里必丢）——详档 §3.2 判定 2。 */
+  internal val completion = CompletionNotice()
+  /** 报告栏（独立顶层窗口，不复用 unit 面板）。 */
+  internal val report = OverlayReport(this)
+  /** 面板是否被用户手势占用（长按状态行期间）——自动收起守卫，同族于 hasDraft()。 */
+  internal var panelOccupied = false
+
+  /** 块H-A1：本次展开期要显示的完成态文案（"" = 回常态）。
+   *  **带会话比对**（详档 §3.2「目标会话切换清除」）：完成位归属别的会话则不呈现。 */
+  internal fun completionLabel(): String = completion.activeLabelFor(activeSessionId)
+
+  /** 块H-A1：目标会话切换（详档 §3.2 复位时机）——完成位归属别的会话即清除。 */
+  internal fun onTargetSessionChanged(newSessionId: String) {
+    if (completion.onTargetSessionChanged(newSessionId)) {
+      // 文案已失效：面板展开态需立即重绘回常态（否则残留文案要等下一次事件才消失）。
+      if (expanded) updateBallOnly()
+    }
+  }
+
+  /** 块H-A1：新一轮开始（api-session/status running=true 或任一 tool_call）——完成位立即回常态。 */
+  internal fun onTurnStart() = completion.onTurnStart()
+
+  /** 块H-A1：轮次结束（.live.ndjson turn_end）——带 ok/kind 的**语义标签**（更精确）。 */
+  internal fun onTurnEnd(sessionId: String, label: String) = completion.onTurnEnd(sessionId, label)
+
+  /** 块H-A1：权威完成信号（api-session/status running=false）——**不覆盖**已有语义标签。 */
+  internal fun onAuthoritativeIdle(key: String) = completion.onAuthoritativeIdle(key, COMPLETION_DEFAULT_LABEL)
 
   // 职责外移后的委托入口（调用点保持原形态）
   internal fun setHalo(h: Halo) = halo.setHalo(h)
@@ -130,6 +167,8 @@ class OverlayService : Service() {
     if (instance === this) instance = null
     live.stopWatcher()
     panel.destroy()
+    // 块H-A2：报告栏是独立顶层窗口，必须在此收口（纪律同 panel.closePicker/unitView）。
+    report.hideReport()
     // 避让帧清零（页面恢复全宽）
     frameConsumer?.invoke("var b=document.body||document.documentElement;b.style.paddingRight='0px';b.style.paddingBottom='0px';true;")
     removeWindow(rootView); rootView = null
@@ -221,7 +260,7 @@ class OverlayService : Service() {
     emitFrame()
   }
 
-  // ── 展开/收起（M3 Expressive spring：Spatial Fast 800/0.6） ──────
+  // ── 展开/收起（200ms 渐显；无 spring 动画——0.14.1 块I 起贴边 spring 亦已删除） ──
 
   private fun togglePanel() {
     if (expanded) hidePanel() else showPanel()
@@ -233,6 +272,9 @@ class OverlayService : Service() {
     if (panel.unitView == null) panel.buildUnit()
     val unit = panel.unitView ?: return
     expanded = true
+    // 块H-A1「首次打开」：消费完成位——本次展开期常驻显示 A1 文案，下次收起再打开即回常态
+    // （详档 §3.2 判定 1：用户口径是「首次打开」，永久常驻会让「首次」二字失去意义）。
+    completion.consume()
     // 面板独立窗口（2026-09-03 键盘顶起重构）：IME insets 只随「与键盘相交的窗口」派发——
     // 球窗口贴顶时与键盘零相交（实测 ime bottom=0 visible=false），自监听原理性收不到。
     // 改面板独立窗口：focusable + ADJUST_PAN（默认），系统原生把面板整体顶到键盘上方、
@@ -291,6 +333,11 @@ class OverlayService : Service() {
     // 收口放在 unitView 早退之前，避免「面板视图缺失但选择器仍在」时漏收。
     // 注：onDestroy 路径（覆盖层随进程终止的回收时机）按 U-1 真机结论暂不改，只登记。
     panel.closePicker()
+    // 块H-A2：报告栏同样在 unitView 早退之前收口（FX-212.1 纪律——防「面板视图缺失但子窗口仍在」）。
+    report.hideReport()
+    panelOccupied = false
+    // 块H-A1：结束本次完成态展示（完成位已在 showPanel 消费时清空，故下次打开回常态）。
+    completion.onPanelHidden()
     val unit = panel.unitView ?: return
     unit.visibility = View.GONE
     try { if (unit.parent != null) wm.removeView(unit) } catch (_: Exception) {}
@@ -299,7 +346,7 @@ class OverlayService : Service() {
     emitFrame()
   }
 
-  // ── 拖动 / 贴边（spring 吸附） ─────────────────────────────────────
+  // ── 拖动 / 四向钳制（0.14.1 块I：不再吸附边缘） ────────────────────
 
   private fun attachBallTouch(ball: View) {
     val touchSlop = android.view.ViewConfiguration.get(this).scaledTouchSlop
@@ -316,8 +363,6 @@ class OverlayService : Service() {
           downX = ev.rawX; downY = ev.rawY
           startX = p.x; startY = p.y
           moved = false
-          // DOWN 时取消可能仍在跑的 spring（防旧动画的 translationX 覆盖手指拖动）
-          cancelSpring()
           true
         }
         MotionEvent.ACTION_MOVE -> {
@@ -341,7 +386,8 @@ class OverlayService : Service() {
           try { wm.updateViewLayout(v.parent as View, p) } catch (_: Exception) {}
           syncHalo()
           positionPanel()
-          springSnapToEdge()
+          // 0.14.1 块I：松手停在手指处——吸附动画（springSnapToEdge）已删除，
+          // 唯一的边界约束是上面 clampBallPos 的四向 edgeMarginPx。
           emitFrame()
           true
         }
@@ -352,69 +398,18 @@ class OverlayService : Service() {
   }
 
   /** 把**窗口**坐标 clamp 到屏幕内（治「拖出屏消失」；四向，含上下界）。
-   *  必须按实际窗口宽/高算边界而非球尺寸——展开态窗口=球+面板（~836px），旧版按 68px 算
-   *  上界导致 p.x 可超界，WMS 把整窗拉回屏内而光环窗口（128px）照常跟 p.x 移动
-   *  =「展开后拖动只有光环动」根因（2026-09-03 用户实测）。 */
+   *  窗口宽/高在运行期恒为球尺寸（0.14.1 块I 更正：展开面板自 0.13.3 起是**独立窗口**
+   *  ——`showPanel()` 自建 `WindowManager.LayoutParams` 并 `wm.addView(unit, pp)`，
+   *  `rootParams.width/height` 全文件再无赋值；旧注释称「展开态窗口=球+面板 ~836px」已过期）。
+   *  仍按 `p.width/p.height` 取界而非硬编码球径——保留对「窗口尺寸将来变大」的鲁棒性。 */
   private fun clampBallPos(p: WindowManager.LayoutParams) {
-    val dp = resources.displayMetrics.density
     val w = resources.displayMetrics.widthPixels
     val h = resources.displayMetrics.heightPixels
-    val margin = (8 * dp).toInt()
+    val margin = edgeMarginPx
     val winW = if (p.width > 0) p.width else ballSizeDp
     val winH = if (p.height > 0) p.height else (rootView?.height ?: ballSizeDp)
     p.x = p.x.coerceIn(margin, (w - winW - margin).coerceAtLeast(margin))
     p.y = p.y.coerceIn(margin, (h - winH - margin).coerceAtLeast(margin))
-  }
-
-  /** 取消进行中的 spring 动画并把 root.translationX/Y 归零（治「消失」：translation 残留）。 */
-  private var springAnim: SpringAnimation? = null
-  private fun cancelSpring() {
-    val s = springAnim ?: return
-    s.cancel()
-    springAnim = null
-    val r = rootView ?: return
-    r.translationX = 0f; r.translationY = 0f
-  }
-
-  /** M3 Expressive Spatial Default spring（380/0.8）贴边吸附。只驱动布局 x（listener 写 p.x），
-   *  动画前后 root.translationX 归零——杜绝「translationX 残留 = 视觉球与命中区分离/飘出屏」。 */
-  private fun springSnapToEdge() {
-    val root = rootView ?: return
-    val p = rootParams ?: return
-    val dp = resources.displayMetrics.density
-    val w = resources.displayMetrics.widthPixels
-    val winW = if (p.width > 0) p.width else ballSizeDp   // 展开态=球+面板宽（按球算会把窗口推出屏界，同 clampBallPos）
-    val ballCenter = p.x + winW / 2
-    val margin = (8 * dp).toInt()
-    val targetX = if (ballCenter < w / 2) margin else (w - winW - margin).coerceAtLeast(margin)
-    val spring = SpringForce(targetX.toFloat()).apply {
-      stiffness = SpringForce.STIFFNESS_MEDIUM // 380 系
-      dampingRatio = 0.8f
-    }
-    cancelSpring()
-    root.translationX = 0f
-    SpringAnimation(root, DynamicAnimation.X).apply {
-      setSpring(spring)
-      setStartValue(p.x.toFloat())
-      addUpdateListener { _, value, _ ->
-        try {
-          p.x = value.toInt()
-          wm.updateViewLayout(root, p)
-          // 吸附动画逐帧同步光环（旧版只在 endListener 同步 → 吸附过程中光圈留在原地，
-          // 结束才跳到球心 =「光圈不跟随」的动画期成分）。
-          syncHalo()
-          positionPanel()
-        } catch (_: Exception) {}
-      }
-      addEndListener { _, _, _, _ ->
-        // 动画结束：清除 translation（组件写的 translationX 已随 updateViewLayout 并入布局位置）
-        root.translationX = 0f
-        syncHalo()
-        emitFrame()
-      }
-      springAnim = this
-      start()
-    }
   }
 
   // ── 乐观忙态（发送/应答空窗补偿） ─────────────────────────────────
@@ -477,6 +472,8 @@ class OverlayService : Service() {
     // 钉住 = 用户在选择器里显式选过；面板关闭时解除钉住，下次展开重新跟随。
     if (running && !userPinnedSession && agentId.isNotEmpty() && agentId != activeSessionId) {
       activeSessionId = agentId
+      // 块H-A1（详档 §3.2 复位时机）：目标会话已切换 → 清掉归属旧会话的完成位/文案。
+      onTargetSessionChanged(agentId)
       if (expanded) panel.refreshSessionPicker()
     }
     val targeted = activeSessionId.isEmpty() || agentId == activeSessionId
@@ -489,6 +486,8 @@ class OverlayService : Service() {
     if (running) {
       optimisticBusyAt = 0L
       if (!sessionBusy) { sessionBusy = true; turnStartedAt = System.currentTimeMillis() }
+      // 块H-A1：新一轮开始 → 清除旧完成位（否则 A 轮完成后 B 轮进行中仍显示「已完成」）。
+      onTurnStart()
       setHalo(Halo.WORKING)
     } else {
       optimisticBusyAt = 0L
@@ -498,10 +497,18 @@ class OverlayService : Service() {
       // issue #133：会话完成 → 该会话的待答/待审批项已过期，先清掉（否则球停在琥珀
       // 「等待你的回答…」）；再按设置把已展开的过期面板自动收起。
       val dropped = panel.dropPendingFor(agentId)
+      // 块H-A1：**权威完成信号**置位完成位（详档 §3.1 首选）。必须在自动收起之前置位：
+      // 自动收起是默认路径，用户此刻还没看到面板，完成位要能存活到下次点球重开。
+      // 注意：本处的键沿用既有 targeted 逻辑用的 agentId（源码明文警告 agentId != sessionId，
+      // 该映射未确证——详见文件头与 docs 的登记；此处仅保持与既有会话感知一致，不新造映射）。
+      onAuthoritativeIdle(agentId)
+      // 面板此刻已展开 = 用户「已经看到了」→ 直接消费并展示（否则 autoCollapseOnDone 关闭时
+      // 展开态会永远不显示完成文案：consume 只挂在 showPanel 上）。
+      if (expanded) completion.consume()
       setHalo(deriveHalo())
-      if (expanded && autoCollapseOnDone() && !panel.hasDraft()) {
+      if (expanded && autoCollapseOnDone() && !panel.hasDraft() && !panelOccupied) {
         main.postDelayed({
-          if (expanded && !sessionBusy && pendingKind.isEmpty()) {
+          if (expanded && !sessionBusy && pendingKind.isEmpty() && !panelOccupied) {
             hidePanel()
             if (dropped) flashStatus("已完成")
           }
@@ -525,7 +532,12 @@ class OverlayService : Service() {
         // 必须走 deriveHalo()：此 tick 每 10s 一次，自带判定会漏 PENDING 把待答光环盖回白色
         setHalo(deriveHalo())
         if (expanded && !running) {
-          panel.statusText?.let { ShimmerTextView::class.java.cast(it).setShimmering(false); it.setTextColor(0xFFE04848.toInt()); it.text = "引擎离线" }
+          // 块H-A1：完成态分支在 updateBallOnly 的分支链里**优先于** else 常态分支（详档 §5.1），
+          // 而本处是绕过分支链的直接赋值——两者必须同口径，否则完成文案会被每 10s 的探活
+          // tick 覆写成「引擎离线」。故有完成文案时交由分支链负责（详档 §6.3 回归面）。
+          if (completionLabel().isEmpty()) {
+            panel.statusText?.let { ShimmerTextView::class.java.cast(it).setShimmering(false); it.setTextColor(0xFFE04848.toInt()); it.text = "引擎离线" }
+          }
         }
       }
     }.start()
@@ -635,6 +647,8 @@ class OverlayService : Service() {
           if (sid.isNotEmpty()) {
             activeSessionId = sid
             userPinnedSession = false
+            // 块H-A1：新建会话 = 目标会话切换（详档 §3.2 复位时机）。
+            onTargetSessionChanged(sid)
             panel.refreshSessionPicker()
             send.run()
           } else {
@@ -677,6 +691,40 @@ class OverlayService : Service() {
     }
   }
 
+  // ── 块H-A2/A3：报告栏入口与跳转应用 ───────────────────────────────
+
+  /**
+   * 块H-A2：长按状态行 → 开/关报告栏。返回本次是否显示了报告栏（长按手势已消费）。
+   * 报告栏是独立顶层窗口（OverlayReport），**不自动收起 unit 面板**——用户可对照原文
+   * （详档 §4.1 末条：两者不得同时抢占，但 unit 收起时报告栏一并收口，见 hidePanel）。
+   */
+  internal fun toggleReportBar(): Boolean = report.toggleReport()
+
+  /**
+   * 块H-A3：三击状态行 → 回到 DSH 主界面。
+   *
+   * 参照 NotifyCenter.kt:605-606 的既有先例：`Intent(app, MainActivity::class.java)` +
+   * `FLAG_ACTIVITY_NEW_TASK or FLAG_ACTIVITY_SINGLE_TOP`。
+   * **SINGLE_TOP 是「已在前台时不重建 Activity」的关键**：Activity 已在栈顶时该 flag 让系统
+   * 复用现有实例（只回调 onNewIntent），不会新建实例导致 WebView 重新加载
+   * （详档 §6.2 反证 4 要求：不得使温热启动口径回归）。MainActivity 未声明 launchMode
+   * （默认 standard），故该 flag 必须显式带上。
+   *
+   * 从非前台 Service 发起 startActivity 存在 Android 10+ 背景启动限制（详档 §7 未确证项 3）；
+   * 本 Service 持有 SYSTEM_ALERT_WINDOW 权限（悬浮球开关的前置条件），属前台服务豁免之外
+   * 的常见豁免面，但**未经真机多 ROM 复核**——失败时静默（不崩、不重复尝试）。
+   */
+  internal fun jumpToApp() {
+    try {
+      val intent = Intent(this, MainActivity::class.java).apply {
+        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+      }
+      startActivity(intent)
+    } catch (e: Exception) {
+      LogCollector.log("dsh-overlay", "jump to app failed: " + (e.message ?: e.javaClass.simpleName))
+    }
+  }
+
   /** 面板已展开时刷新（状态行/徽标/时钟）。 */
   internal fun renderPanelOnly() {
     if (!expanded) return
@@ -708,6 +756,20 @@ class OverlayService : Service() {
   }
 
   companion object {
+    /**
+     * 球距屏幕四边的最小边距（dp，0.14.1 块I 新增的唯一具名常量）。
+     * 与 `edgeMarginPx`（运行期 px）同源；**同时**参与 haloSizeDp 的推导——
+     * 改小它会让 `haloSizeDp / 2 - ballSizeDp / 2 != 该值`，贴边时光环窗请求 x 为负、
+     * 被 WMS 整窗平移回屏（历史「吸边后光环偏心」根因）。测试见 OverlayHaloInvariantTest。
+     */
+    internal const val BALL_EDGE_MARGIN_DP = 8
+
+    /**
+     * 块H-A1 完成态默认语义标签（权威信号只给 running:boolean，不含结果原因时的兜底）。
+     * 带语义的更精确标签由 OverlayLiveFeed 的 turn_end 提供，并**优先**（见 CompletionNotice）。
+     */
+    internal const val COMPLETION_DEFAULT_LABEL = "已完成"
+
     /** 当前活跃服务实例（replayFrame 等外部入口用）。 */
     @Volatile
     var instance: OverlayService? = null

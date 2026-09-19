@@ -22,7 +22,7 @@
 | dev.rikka.shizuku:provider | 13.1.5 | manifest `rikka.shizuku.ShizukuProvider`（binder bootstrap，`INTERACT_ACROSS_USERS_FULL` 保护，门禁白名单放行） | 自写 provider 需对齐 Shizuku binder 协议；随 api 同步升级 |
 | androidx.activity:activity-ktx | 1.10.1 | ComponentActivity 基类（MainActivity/ConsoleActivity）；ActivityResultContracts 目录/权限等契约（ConfigTransfer、MainActivity） | 自写 ActivityResult 分发与回调生命周期；选择器「字段初始化即注册」时序约束要重推 |
 | androidx.core:core-ktx | 1.15.0 | FileProvider（PathOpen 外部打开）；ViewCompat/WindowInsetsCompat/WindowCompat（insets 三件套、ShellState 沉浸式） | FileProvider 可自实现 ContentProvider 但需自管 URI 授权与安全边界；insets 兼容层要回退平台 API 并全档自测 |
-| androidx.dynamicanimation:dynamicanimation | 1.1.0 | 悬浮球 spring：SpringAnimation/SpringForce/DynamicAnimation（OverlayService 贴边吸附 380/0.8） | 手写 spring 微分方程或降级 ValueAnimator；吸附手感需重调参 |
+| androidx.dynamicanimation:dynamicanimation | 1.1.0 | **壳侧已无使用方**（0.14.1 块I 删除 OverlayService 的 springSnapToEdge/cancelSpring/springAnim 与贴边吸附，详见坑 147 邻域与 docs/0.14.1-preview-HALO-FREE-MOVE-AND-RING.md §4.1）——依赖声明**按详档判定保留**，供将来动效复用 | 手写 spring 微分方程或降级 ValueAnimator；保留声明的原因：删依赖会牵动 gradle/lock 面与用途表，收益为零 |
 | org.apache.commons:commons-compress | 1.28.0 | 快照 xz tar 流式解压（TarArchiveInputStream/XZCompressorInputStream，SnapshotExtractor）——快照逐文件解压 + owner-only 权限 + exec xattr 全走它 | 自实现 xz+tar 成本极高；换库需重验数万文件流式解压与 symlink 保留 |
 | org.tukaani:xz | 1.10 | xz 解码算法后端（commons-compress 依赖它做 XZ） | 与 commons-compress 绑定，单独换无意义 |
 
@@ -32,7 +32,7 @@
 |---|---|---|
 | activity-ktx | 4 | MainActivity、ConsoleActivity、GuideChrome（ComponentActivity 引用）、ConfigTransfer（契约） |
 | core-ktx | 7 | MainActivity、ConsoleActivity、WebUiChrome、EngineService、NotifyCenter（NotificationCompat）、FileIncoming、ShellState |
-| dynamicanimation | 1 | OverlayService（唯一 spring 使用方） |
+| dynamicanimation | 0 | 0.14.1 块I 起壳侧零使用方（原 OverlayService 的贴边吸附已删；声明保留，用途变化已登记） |
 | commons-compress | 2 | SnapshotExtractor（解压主路径）、EngineManager（快照刷新复用同一套 tar/xz 流） |
 | xz | 0（间接） | 经 commons-compress 的 XZCompressorInputStream 间接使用 |
 | shizuku api/provider | 2 | ShizukuTransport（api 直连）、ShizukuUserService（AIDL/Stub 基类） |
@@ -65,7 +65,7 @@
 ## 6. 升级策略建议
 
 1. **低频原则**：依赖面服务于「稳定壳 + 云端自包含构建」，无功能需求不主动升级；AGP/Kotlin 升级必须连带验证 `.github/workflows/build-apk.yml` 与本地 `gradlew assembleDebug` 双链一致。
-2. **必测真机回归项**（任何依赖变更后）：快照全量解压（指纹翻转 + `.snapshot-fingerprint` 更新，勿中途杀进程）；引擎冷启动探活与市场安装（linker64 回退 + termux-exec preload 链）；悬浮球三窗口显示/吸附 spring 手感（dynamicanimation 敏感）；SAF 目录选择与 All Files Access 分代（activity-ktx 契约敏感，26-29/30+/33+ 三档）；FileProvider 外部打开白名单（core-ktx）；Shizuku transport（api/provider 版本与 Shizuku App 侧协议兼容——升级前先在模拟器装对应 Shizuku 版本实测 bind）。
+2. **必测真机回归项**（任何依赖变更后）：快照全量解压（指纹翻转 + `.snapshot-fingerprint` 更新，勿中途杀进程）；引擎冷启动探活与市场安装（linker64 回退 + termux-exec preload 链）；悬浮球三窗口显示/无吸附拖动手感（dynamicanimation 已无使用方，见用途表）；SAF 目录选择与 All Files Access 分代（activity-ktx 契约敏感，26-29/30+/33+ 三档）；FileProvider 外部打开白名单（core-ktx）；Shizuku transport（api/provider 版本与 Shizuku App 侧协议兼容——升级前先在模拟器装对应 Shizuku 版本实测 bind）。
 3. **commons-compress/xz 锁定**：与快照 tar 产物格式强耦合，仅在快照构建链同步验证后升级；解压失败 = 用户首启白屏级事故。
 4. **新增依赖**：先过 GPL/许可合规（登记 scripts/third-party-licenses.json + THIRD_PARTY_NOTICES.md），再评估体积与 ABI 面——当前零 JNI/.so 依赖，保持该状态。
 

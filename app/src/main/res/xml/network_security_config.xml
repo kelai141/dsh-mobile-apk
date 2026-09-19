@@ -1,12 +1,46 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 0.13.8 #183：壳侧 HTTP 明文收敛——默认禁明文；仅本机引擎回环与模拟器开发端点放行。
-     引擎是独立 node 子进程，不受 NSC 约束（只保护壳侧 Kotlin/WebView 流量）。
-     注：APK 自更新（0.13.8 H1）走 HTTPS，属 base-config 默认允许面。 -->
+<!-- 0.14.1 块K（用户 2026-09-19 拍板）：**撑开明文 http**，使隔离浏览器（BrowserHost）能加载非本机
+     明文站点（局域网设备管理页 NAS/路由器等）。
+
+     背景（issue #232，源码级确证）：准入面 BrowserHostNavigationPolicy 一直放行 http，而本文件
+     旧值 base-config cleartextTrafficPermitted="false" 只白名单回环 → 「准入说行、平台必炸」，
+     侧栏必然出错误页，工具回执却仍报「已打开」。用户裁定方向 = **让平台策略与准入面对齐到「允许
+     明文」这一侧**，而不是把准入面收紧到「拒绝明文」。
+
+     #183「壳侧明文收敛」影响（必须显式记录，不得淡化）：
+       0.13.8 #183 的原始目标是「壳侧默认禁明文，仅放行本机引擎回环与模拟器开发端点」。本次把
+       base-config 改为 true 后，**该目标对隔离浏览器的明文流量不再成立**——隔离 WebView 可访问
+       任意明文站点，明文流量回到不受平台默认保护的状态（可被同网段被动嗅探/篡改）。
+       这是**已拍板接受**的取舍，代价与理由见 docs/0.14.1-preview-ISSUE232-BROWSER-RECEIPT.md §3.2。
+
+       影响面收敛（逐条说明，避免被误读为「全域放开」）：
+         - 引擎子进程（node）本就**不受 NSC 约束**（NSC 只保护应用自身的 Kotlin/WebView 流量，
+           引擎是独立子进程），故引擎侧行为零变化；
+         - APK 自更新（0.13.8 H1）走 HTTPS，仍是 base-config 允许面，零变化；
+         - 主 WebView 只加载 127.0.0.1 引擎源（回环，仍逐字放行），零变化；
+         - 变化面**仅限** BrowserHost 这个不可信隔离浏览器（它无 addJavascriptInterface、无桥）。
+
+       为什么不是「收敛到私有网段」（T4 建议的保守形态）：Android NSC 的 <domain> 只接受主机名，
+       且 IP 字面量按**精确匹配**、**不支持 CIDR/前缀匹配**——静态 XML 无法表达「192.168.0.0/16」
+       这类网段。若只列若干具体 IP，用户换一台设备或换一个网段即再次「准入说行、平台必炸」，
+       等于把 issue #232 原样保留。故本轮按用户裁定取 base-config 撑开的形态。
+
+      **0.14.1 修正（装机实测崩溃，必读）**：本文件曾同时保留「base-config 撑开」与「回环
+      domain-config」两份明文声明。在**多进程**应用上这是**致命**的——Android 源码级规则：
+      `ApplicationConfig.handleNewApplication()` 里
+        `if (defaultConfig.isCleartextTrafficPermitted() != config.isCleartextTrafficPermitted())
+           { if (defaultConfig.hasPerDomainConfigs() || config.hasPerDomainConfigs())
+               throw new RuntimeException("Found multiple conflicting per-domain rules"); }`
+      即「base 与 per-domain 对明文判定不一致，且存在 per-domain 配置」时**抛异常**。
+      实测后果（MuMu x86_64 模拟器，装机后）：Shizuku UserService 进程起不来
+      （`ShukizuServiceStarter: unable to start service … Caused by: Found multiple conflicting
+      per-domain rules`）→ 虚拟屏全线 `shizuku-user-service-connecting` → 块G/F6 能力整体不可用。
+      历史为何没暴露：旧值 `base=false` + 回环 3 条 domain=true 时，各进程判定一致，故不抛。
+      修法：**base-config 已允许全部明文，回环 domain-config 在功能上冗余**（这正是原注释自己写的
+      「它在功能上已冗余」）——冗余项同时是崩溃源，故**删除该 domain-config**，只留 base-config。
+      回环语义不变（base 允许全部明文 ⊇ 回环）；审计面改由检查脚本断言 base 的显式声明承担。
+      代价：不再有「逐字记录应访问的本机明文端点」的 XML 审计面（该信息转入本注释与门禁注释）。
+-->
 <network-security-config>
-  <base-config cleartextTrafficPermitted="false" />
-  <domain-config cleartextTrafficPermitted="true">
-    <domain includeSubdomains="false">127.0.0.1</domain>
-    <domain includeSubdomains="false">localhost</domain>
-    <domain includeSubdomains="false">10.0.2.2</domain>
-  </domain-config>
+  <base-config cleartextTrafficPermitted="true" />
 </network-security-config>

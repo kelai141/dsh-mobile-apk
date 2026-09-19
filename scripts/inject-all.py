@@ -6,7 +6,10 @@
   ② 根级插件注入（原 inject-external-plugins.py：undo/market 等非 scoped 包，lib/skills/清单文件）
   ③ cordis.patch.yml 权威装配覆盖（原 update-snapshot-patch.py：仅 web profile，--all-profiles 展开）
 压缩从 ×4 → ×1、解压从 ×4 → ×1；发布档 preset 由 DSH_INJECT_PRESET 控制（默认 9 保发布保真，
--Fast dev 循环传 1 —— 743MB tar 上 preset9≈380s / preset1≈75s / xz -T0 -6≈48s 实测，2026-09-05）。
+-Fast dev 循环传 1 —— 743MB tar 上 preset9≈380s / preset1≈75s / 多线程 xz -6≈48s 实测，2026-09-05）。
+并发上限（0.14.1 系统级约束）：构建期压缩/解压不得吃满全部逻辑核（原写法是 `-T0`），否则开发机被
+撑满 → 同时运行的 MuMu 模拟器卡顿/系统不稳（「模拟器优先」是铁律 2）。统一走 scripts/lib/shell.mjs
+的 XZ_THREADS（默认 8，可由 DSH_CPU_THREADS 覆写）；本文件自身不调 xz（只做 lzma 流式重打包）。
 
 用法：
   python inject-all.py <snapshot.tar.xz> <out.tar.xz> <authoritative.patch.yml> --dsh-android <dir>... --external <dir>... [--all-profiles] [--combo-cache-delta <dir>]

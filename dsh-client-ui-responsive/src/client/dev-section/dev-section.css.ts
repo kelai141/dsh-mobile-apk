@@ -220,6 +220,45 @@ export const DEV_SECTION_CSS: string = `
   color: var(--dsw-alias-danger-fg, #c0392b);
 }
 
+/* 0.14.1 块 E：运行时缓存清理块（清单行 + 跳过明细折叠）。标签一律为
+ * $DSH_HOME/$DSH_FILES_DIR 形态，绝不出现应用私有目录的绝对路径。 */
+.dsh-dev-cache {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--dsw-alias-border-l3, #e3e3e8);
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-layer-2, #fafafa);
+}
+
+.dsh-dev-cache-list {
+  margin: 0;
+  padding-left: 18px;
+  max-height: 180px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary, #666);
+  word-break: break-all;
+}
+
+/* 0.14.1 块J FIX-4：通知设置块（前台抑制 + 五类分类开关）。 */
+.dsh-dev-notify {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--dsw-alias-border-l3, #e3e3e8);
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-layer-2, #fafafa);
+}
+
+.dsh-dev-notify-cats {
+  display: grid;
+  gap: 4px;
+}
+
 /* Dark-theme fallback (#43, 2026-08-18): in some environments --dsw-alias-bg-elevated is undefined
  * and falls back to #fff (white bg), while label-primary is white text in dark mode → white-on-white.
  * Provide explicit theme-consistent fallbacks for tokens that may not exist. */
@@ -248,6 +287,17 @@ export const DEV_SECTION_CSS: string = `
   }
   .dsh-dev-modal-desc {
     color: var(--dsw-alias-label-secondary, #c9c9cf);
+  }
+  .dsh-dev-cache {
+    background: var(--dsw-alias-bg-layer-2, #26262b);
+    border-color: var(--dsw-alias-border-l3, #3a3a42);
+  }
+  .dsh-dev-cache-list {
+    color: var(--dsw-alias-label-secondary, #c9c9cf);
+  }
+  .dsh-dev-notify {
+    background: var(--dsw-alias-bg-layer-2, #26262b);
+    border-color: var(--dsw-alias-border-l3, #3a3a42);
   }
 }
 

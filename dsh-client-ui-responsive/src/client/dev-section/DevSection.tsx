@@ -11,6 +11,8 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 import { useShellState } from '../mobile/use-shell-state.ts'
+import { RuntimeCacheRow } from './runtime-cache.tsx'
+import { NotifySettingsRow } from './notify-settings.tsx'
 import type { PropsRenderSlots, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: pulls in the settings.section owner share (erased at build time, types only).
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -295,6 +297,13 @@ export function DevSection({ renderSlot }: DevSectionProps) {
         导出位置 Documents/dshdata/exports/config/settings.yaml；用文件管理器修改后点「导入配置」即可生效。
         配置不含 API 密钥（密钥在应用私有目录，不随导出泄漏）。
       </p>
+
+      {/* 0.14.1 块 E（详档 §4.3）：运行时缓存清理——白名单制、先给可回收体积再执行、逐项落审计。 */}
+      <RuntimeCacheRow />
+
+      {/* 0.14.1 块J FIX-4（J-1 修复）：通知设置入口——前台抑制 + 五类分类开关。
+          此前 NotifyCenter 的三个设置入口零外部调用点，能力在、入口无。 */}
+      <NotifySettingsRow />
 
       {/* F5.1/D15：文件直达临时工作区（占用展示 + 一键清理；PRD R16 手动清理 + 占用展示） */}
       {incomingBytes !== null && (

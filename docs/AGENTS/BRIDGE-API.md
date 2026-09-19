@@ -114,7 +114,7 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 | **EngineManager.kt** | 引擎总管：解压/指纹/环境/进程/补丁 | `shellEnv()`：PATH/LD_LIBRARY_PATH/HOME/DSH_HOME/TMPDIR/LD_PRELOAD(+termux-exec force)/TERMUX__PREFIX/SSL_CERT_FILE/DSH_ADB_*/DSH_ADB_FULLACCESS（=壳侧 fullAccess() 同源）/密钥注入；`refreshSnapshot` 指纹差异→备份→重解压→还原用户数据（白名单：sessions/storages/attachments/credentials/settings 等，**profiles 不回灌、跟随快照**）；**`snapshotRefreshing` companion 级闸门（0.13.2-fix 三批）**：刷新期 startEngine 直接跳过——看门狗自愈路径无此闸门时会拿「解压到一半的运行时」拉引擎（实例分属 MainActivity/EngineService，标志必须挂 companion，同 STARTING CAS 道理）；`killExistingEngine`（destroyForcibly+pkill bin.js）；90s 冷却窗探活绕过 |
 | **EngineService.kt** | 前台服务 + 看门狗 | watchdog 5s 探活 + UndoGate 触发 + 唤醒锁续期/释放 + onTaskRemoved 清理（F5 生命礼仪） |
 | **MainActivity.kt** | 主 WebView、隔离 BrowserHost、桥接线与意图处理 | `FileIncoming.processIncomingIntent`（VIEW/SEND→POST `/api/android/file-incoming`）；BrowserHost 按生命周期暂停/销毁；AndroidBridge 接线含 ScreenScope、BrowserHost、虚拟屏与 BackGate callbacks（`addJavascriptInterface(..., "dshBackBridge")`）|
-| **AndroidBridge.kt** | `window.androidBridge` 协议 v1（方法计数由 `check-bridge-symmetry.mjs` 从源码守） | 设置/路径/授权族（`getAdbState`/`setAdbPair`/`adbShell`/`openPathChooser`/`settingsPath`…）+ `get/setScreenScope`（用户设置唯一写面）+ `browserHostStatus/show/hide/reload/bounds/viewport` + `vdisplayStatus/Create/Destroy/LaunchSettingsProbe/BackProbe/Bounds` + `a11yStatus/openA11ySettings/unlockRestrictedSettings` |
+| **AndroidBridge.kt** | `window.androidBridge` 协议 v1（方法计数由 `check-bridge-symmetry.mjs` 从源码守） | 设置/路径/授权族（`getAdbState`/`setAdbPair`/`adbShell`/`openPathChooser`/`settingsPath`…）+ `get/setScreenScope`（用户设置唯一写面）+ `browserHostStatus/show/hide/reload/bounds/viewport/close/identity`（后两个此前漏记，0.14.1 审查 §3.5-M3 更正） + `vdisplayStatus/Create/Destroy/LaunchSettingsProbe/BackProbe/Bounds` + `a11yStatus/openA11ySettings/unlockRestrictedSettings` |
 | **SnapshotExtractor.kt** | tar 解压（x-zip→filesDir、symlink、exec 属性戳印）+ **zip-slip 防护**（resolveEntry 拒绝 .. / 绝对路径 / 越界 symlink） | `extract()` |
 | **UpdateManager.kt** | 在线快照更新（第一版） | usr→usr-old 两步切换 + 指纹写 |
 | **WatchdogV2.kt** | 引擎看门狗（v2） | 连续失败熔断；boot 恢复用户同意状态 |
@@ -191,7 +191,7 @@ JS interface count is checked from source by `scripts/check-bridge-symmetry.mjs`
 | 方向 | 方法/通道 | 位置 | 说明 |
 |---|---|---|---|
 | 页面 → 壳 | `getScreenScope()` / `setScreenScope(scope)` | AndroidBridge → MainActivity → `ScreenScopePrefs` | 用户设置唯一写面；wire 值仅 `virtual-only`、`real-only`、`all`，未知值回落 `virtual-only`。模型工具没有 setter。设置页落在开发者选项「屏幕与 Shizuku 控制」。 |
-| 页面 → 壳 | `browserHostStatus/show/hide/reload/bounds/viewport` | AndroidBridge → MainActivity → `BrowserHost` | Files 右栏的可信页面把 CSS stage bounds 与视口预设传给壳；第二 WebView 只覆盖该 stage（letterbox rect，不做 CSS 缩放），不挂 JavaScript bridge。 |
+| 页面 → 壳 | `browserHostStatus/show/hide/reload/bounds/viewport/close/identity` | AndroidBridge → MainActivity → `BrowserHost` | Files 右栏的可信页面把 CSS stage bounds 与视口预设传给壳；第二 WebView 只覆盖该 stage（letterbox rect，不做 CSS 缩放），不挂 JavaScript bridge。 |
 | 页面 → 壳 | `vdisplayStatus/create/destroy/launchSettingsProbe/backProbe/bounds` | AndroidBridge → MainActivity → `VdisplayController`/`VdisplayHost` | 建屏/销毁/`am start --display` 探针/`input -d` 回退探针/viewer stage 几何。`virtual-1` 建成前一律 `screen-not-ready`，绝不映射 display 0。 |
 | 页面 → 壳 | `dshBackBridge.setAvailable/getBackAvailable` | BackGateBridge（独立 @JavascriptInterface 对象） | 注入层回传页内层栈可用性；URL 由 Activity 决策，`getBackAvailable` 为只读事实。 |
 | 引擎 → 壳 | `dsh_screen_scope.xml` 只读 | `androidPrivilege.screenScope/screenAccess` | manage 工具在选 a11y/ADB 前读取 native scope；无障碍执行点仍重复检查，防止直连控制队列绕过。 |

@@ -10,8 +10,11 @@
 //   2. exported 语义：每个带 <intent-filter> 的组件显式声明 android:exported；
 //      exported="true" 的组件集合 == 显式白名单（新增未登记的公开口即拒）；
 //      exported="true" 的组件必须有 android:permission，或只用受保护系统广播 + 源码来源校验。
-//   3. NSC 语义：base-config 显式 cleartextTrafficPermitted="false"；
-//      明文放行的 domain-config 只能列回环/模拟器主机（出现其它域即拒）。
+//   3. NSC 语义（0.14.1 块K 起：姿态由「默认禁明文」改为「撑开明文」）：
+//      base-config 显式声明 cleartextTrafficPermitted="true"；回环保留面（127.0.0.1 / localhost /
+//      10.0.2.2）逐字在场且不多不少；无第二个 base-config、无「无 <domain> 的明文 domain-config」。
+//      跨层同向（准入面放行 http ⇔ NSC 撑开明文）由 JVM 测试 BrowserHostCleartextConsistencyTest
+//      守，本文件只断言该测试仍被接线。
 //   4. exclude 语义：backup_rules 与 data_extraction_rules（cloud-backup + device-transfer）
 //      必须逐条覆盖 REQUIRED_EXCLUDES（删任意一条即拒，空 exclude 即拒）。
 //
@@ -200,26 +203,77 @@ if (manifest) {
   check('exported="true" 组件有权限或来源校验', unguarded.length === 0, unguarded.join('、'))
 }
 
-// ── 3. network security config ──────────────────────────────────────────────
-const NSC = '127.0.0.1|localhost|::1|10.0.2.2'
+// ── 3. network security config（0.14.1 块K：姿态由「默认禁明文」改为「撑开明文」）─────────
+//
+// 变更与理由：issue #232 确证「准入面放行 http、平台 NSC 禁非本机明文」是自相矛盾的一对，
+// 用户的裁定方向是**撑开 NSC**（详见 res/xml/network_security_config.xml 头注释与
+// docs/0.14.1-preview-ISSUE232-BROWSER-RECEIPT.md §3.2）。旧断言把「base 禁明文」锁死，
+// 与新姿态直接冲突，故本段按新形态重写。
+//
+// 新形态断言的是**真正要守的东西**（而不是换一个方向的字面量）：
+//   ① base-config 必须**显式**声明 cleartextTrafficPermitted（缺省=false 是平台默认，漏写即静默收紧）；
+//   ② 其值必须是 "true"（本轮拍板姿态）——一旦有人回退成 false，本门禁判红；
+//   ③ **不得与任何 per-domain 明文配置共存**（0.14.1 装机实测的致命项，见下）；
+//   ④ 不得出现**第二个** base-config；
+//   ⑤ 跨层同向由 JVM 测试 BrowserHostCleartextConsistencyTest 守（真实调用准入面函数 + 解析本文件），
+//      本段只断言该测试仍被接线（删掉它即红）——避免「改了 NSC 却没人守准入面」的单边演进。
+//
+// ③ 为什么是**冲突检查**而不是「回环三项逐字在场」（0.14.1 装机实测实锤，必读）：
+//   Android 源码 `ApplicationConfig.handleNewApplication()` 的规则是
+//     `if (defaultConfig.isCleartextTrafficPermitted() != config.isCleartextTrafficPermitted())`
+//     `  { if (defaultConfig.hasPerDomainConfigs() || config.hasPerDomainConfigs())`
+//     `      throw new RuntimeException("Found multiple conflicting per-domain rules"); }`
+//   —— 即「base 与 per-domain 的明文判定不一致 + 存在 per-domain 配置」就**抛异常**。
+//   本应用是**多进程**（主进程 + Shizuku UserService 进程等），各进程读到的配置实例不同，
+//   一旦 base 放开 + 又留 per-domain 明文声明，UserService 进程 **起不来**
+//   （实测：`ShizukuServiceStarter: unable to start service … Found multiple conflicting per-domain rules`），
+//   导致虚拟屏全线 `shizuku-user-service-connecting`（块G/F6 能力整体不可用）。
+//   旧值 `base=false` + 回环 domain=true 时各进程判定一致，故历史上没暴露——**这正是它危险的地方**。
+//   因此本段把判据从「回环三项在不在」改为「**base 放开明文时不得存在 per-domain 配置**」：
+//   守恒的是**同一件事**（明文姿态），但判据对准了真正的崩溃成因。
+//   注：base 允许全部明文 ⊇ 回环，故删掉回环 domain-config **不缩小**任何实际放行面。
+const NSC_LOOPBACK = ['127.0.0.1', 'localhost', '10.0.2.2']
 const nscText = read(join(MAIN, 'res', 'xml', 'network_security_config.xml'))
 check('network_security_config.xml 在场', nscText !== null)
 if (nscText !== null) {
   const nsc = parseXml(nscText)
   const base = descendants(nsc, 'base-config')
   check('恰好一个 base-config', base.length === 1, 'count=' + base.length)
-  check('base-config cleartextTrafficPermitted="false"',
-    base.length === 1 && base[0].attrs['cleartextTrafficPermitted'] === 'false',
-    'value=' + JSON.stringify(base[0]?.attrs['cleartextTrafficPermitted']))
-  const allowedHosts = new Set(NSC.split('|'))
-  const offenders = []
-  for (const dc of descendants(nsc, 'domain-config')) {
-    if (dc.attrs['cleartextTrafficPermitted'] !== 'true') continue
-    const hosts = texts(dc)
-    if (hosts.length === 0) { offenders.push('domain-config 无 <domain>（=全域明文）'); continue }
-    for (const h of hosts) if (!allowedHosts.has(h)) offenders.push(h)
+  const baseValue = base.length === 1 ? base[0].attrs['cleartextTrafficPermitted'] : undefined
+  check('base-config 显式声明 cleartextTrafficPermitted（漏写即平台默认 false，属静默收紧）',
+    baseValue !== undefined, 'value=' + JSON.stringify(baseValue))
+  check('base-config cleartextTrafficPermitted="true"（0.14.1 块K 拍板姿态；回退成 false 即判红）',
+    baseValue === 'true', 'value=' + JSON.stringify(baseValue))
+  // ③ 冲突检查（装机实测的崩溃成因）：base 放开明文时，任何 per-domain 配置都可能让
+  //    多进程间判定分歧 → 抛 "Found multiple conflicting per-domain rules" → UserService 起不来。
+  const perDomains = descendants(nsc, 'domain-config')
+  check('base 放开明文时不得存在任何 domain-config（多进程会抛 multiple conflicting per-domain rules，'
+    + '实测致 Shizuku UserService 起不来、虚拟屏全不可用）',
+    !(baseValue === 'true' && perDomains.length > 0),
+    'domain-config 数量=' + perDomains.length
+    + '；若确需 per-domain 明文（如只放行回环），必须把 base 改回 false（回到 0.14.0 语义，'
+    + '届时「非本机 http 一律失败」的 issue #232 会复发——两者不可兼得）')
+  // 反向对照：base=false + 回环 domain=true 是**合法**形态（旧语义），不得被判红——
+  // 否则门禁会挡住「回退到 0.14.0 语义」这条正当修复路径。
+  const legacy = parseXml('<network-security-config>'
+    + '<base-config cleartextTrafficPermitted="false" />'
+    + '<domain-config cleartextTrafficPermitted="true">'
+    + NSC_LOOPBACK.map((h) => '<domain includeSubdomains="false">' + h + '</domain>').join('')
+    + '</domain-config></network-security-config>')
+  const legacyPer = descendants(legacy, 'domain-config')
+  const legacyBase = descendants(legacy, 'base-config')[0].attrs['cleartextTrafficPermitted']
+  check('反向对照：base=false + 回环 domain=true（0.14.0 语义）不被本判据误伤',
+    !(legacyBase === 'true' && legacyPer.length > 0))
+  // 跨层不变式的接线（实现与真实函数调用在 JVM 测试里，这里只守「测试没被删」）。
+  const xlayer = join(MAIN, '..', 'test', 'java', 'com', 'dsharnessmobile', 'shell', 'BrowserHostCleartextConsistencyTest.kt')
+  const xlayerText = read(xlayer)
+  check('跨层明文一致性测试在场（准入面放行 http ⇔ NSC 撑开明文）', xlayerText !== null)
+  if (xlayerText !== null) {
+    check('跨层明文一致性测试真实调用准入面函数（禁改为文本在场判据）',
+      xlayerText.includes('BrowserHostNavigationPolicy.normalize('))
+    check('跨层明文一致性测试解析 NSC 本体（禁硬编码放行集合）',
+      xlayerText.includes('network_security_config.xml'))
   }
-  check('明文放行仅限回环/模拟器主机', offenders.length === 0, offenders.join('、'))
 }
 
 // ── 4. backup rules（exclude 语义）─────────────────────────────────────────

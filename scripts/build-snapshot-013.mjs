@@ -10,11 +10,12 @@
 //
 // 用法：node scripts/build-snapshot-013.mjs <arm64|x86_64>   （基座缺省 .deploy-tmp/{arm64,x64}-base/base-usr.tar.xz）
 import { execSync, spawnSync } from 'node:child_process'
-import { mkdirSync, existsSync, writeFileSync, readFileSync, readdirSync, rmSync, statSync, renameSync, copyFileSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { mkdirSync, existsSync, writeFileSync, readFileSync, readdirSync, rmSync, statSync, renameSync, copyFileSync, lstatSync, readlinkSync, symlinkSync } from 'node:fs'
+import { join, dirname, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
-import { wslPath, sh as wsl } from './lib/shell.mjs'
+import { wslPath, sh as wsl, XZ_THREADS } from './lib/shell.mjs'
+import { sanitizeSymlinks } from './lib/symlink-sanitize.mjs'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const ABI = process.argv[2] ?? 'arm64'
@@ -111,14 +112,16 @@ if (existsSync(STAGE)) {
 }
 mkdirSync(join(STAGE, 'root'), { recursive: true })
 // WSL 解压保 symlink（Windows bsdtar 需特权）
-// 多线程优先铁律（2026-09-08）：基座 tar.xz 是多块流（xz --list 实证 21/5 块），
-// `xz -dT0 | tar -x` 并行解码，替代 `tar -xJf` 的单线程解码路径。
+// 多线程优先（2026-09-08）：基座 tar.xz 是多块流（xz --list 实证 21/5 块），
+// `xz -dT<n> | tar -x` 并行解码，替代 `tar -xJf` 的单线程解码路径。
+// **并发上限 8（0.14.1 用户拍板，系统级约束）**：此处原为 `-dT0`（吃满 16 逻辑核），会把开发机
+// 撑满 → 同时运行的 MuMu 模拟器卡顿/系统不稳；「模拟器优先」是铁律 2。统一用 shell.mjs 的 XZ_THREADS。
 log('解压基座（WSL）…')
-wsl(`set -o pipefail; mkdir -p "${wslPath(join(STAGE, 'root'))}" && xz -dT0 -c "${wslPath(baseTar)}" | tar -x -C "${wslPath(join(STAGE, 'root'))}" && du -sh ${wslPath(join(STAGE, 'root', 'usr'))} | cut -f1`)
+wsl(`set -o pipefail; mkdir -p "${wslPath(join(STAGE, 'root'))}" && xz -dT${XZ_THREADS} -c "${wslPath(baseTar)}" | tar -x -C "${wslPath(join(STAGE, 'root'))}" && du -sh ${wslPath(join(STAGE, 'root', 'usr'))} | cut -f1`)
 // home/.dsh 配置层在独立基座包（架构无关），一并合并
 const baseDsh = join(BASE_DIR, 'base-dsh.tar.xz')
 if (existsSync(baseDsh)) {
-  wsl(`set -o pipefail; xz -dT0 -c "${wslPath(baseDsh)}" | tar -x -C "${wslPath(join(STAGE, 'root'))}"`)
+  wsl(`set -o pipefail; xz -dT${XZ_THREADS} -c "${wslPath(baseDsh)}" | tar -x -C "${wslPath(join(STAGE, 'root'))}"`)
   log('合并 base-dsh（home/.dsh 配置层）')
 }
 // 🔒 机密剥离（安全审计 C1，2026-08-23）：base-dsh 是从运行中设备提取的配置层，
@@ -344,6 +347,69 @@ for (const entry of OVERLAY.keepUnpublished ?? []) {
     process.exit(1)
   }
   log('引擎树补丁行为回归 external-draft-conversation-seam-J1: PASS')
+}
+
+// ── 0f-1b. 浏览器语法下限降级（0.14.1 块C）：把已下载的 dist 与全部 client.js 降到 chrome87 ──
+// 真因（产物级实证，详档 docs/0.14.1-preview-LEGACY-AND-PERF.md §1.2）：上游 dsh-web-frontend 的
+// 入口 chunk 含 ES2022 类静态块 static{}（Chromium 94+ 才有），WebView <94 解析期抛 SyntaxError →
+// 整个入口模块一行不执行 → 纯白、无报错、引擎健康。自 0.13.3 起每个发布版本都有。
+// 为什么在构建链而不是改上游 target：我们**从不构建上游前端**，dsh-web-frontend/dist 是从 npm 下载的
+// tarball（engine-overlay.json:287 / overlayTgz:196-217），vite.config.ts 根本不在快照里。上游 3 个
+// dist 产物 + 上游各包自带 client.js 的构建配置都不在我们手里 → 唯一合法落点就是构建期对已下载产物降级。
+// 顺序硬约束（详档 §2.1「为何必须在 0f-2 之前」）：combo 缓存键 = sha256(client.js)，必须**先降级再预计算**；
+// 反了 = 缓存键与设备侧实际字节不一致 = 全 miss（fail-open 静默回退，启动收益归零）。
+// 覆盖范围与门禁 check-browser-syntax-floor --scan **同一清单**（防口径分裂），由同一实现执行：
+//   任一 `dsh-web-frontend/dist/**/*.js`（上游前端 dist，全部）+ 任一 `lib/client.js`（含引擎树内
+//   上游包与 home/.dsh/profiles/** 下的 profile 级副本）。清单规则只此一处（门禁脚本内）。
+// 降级原语由门禁脚本自带（--degrade）：单一实现，避免构建链与门禁各写一份口径。
+// ⚠️ 双份构建脚本必须同改（雷点 10）。
+{
+  // 覆盖口径必须与门禁 check-browser-syntax-floor **逐字相同**（防两处各写一份清单而分裂）：
+  // 门禁的清单规则是「dsh-web-frontend/dist/**/*.js + 任一 lib/client.js」，故这里直接把 **stage 根**
+  // 交给同一实现去遍历（它只收集命中该规则的文件，非浏览器面 .js 不会被读/改）。
+  // 实测（built x86_64 快照）：88 个浏览器面文件里 57 个在引擎树、13 个在 home/.dsh、
+  // 1 个在 usr/lib/node_modules/npm/node_modules/proggy —— 只传前两棵树会漏掉最后 1 个，
+  // 而门禁扫得到它：一旦它将来带现代语法，门禁判红而降级步骤无从修复（构建死锁）。传 stage 根即消除该口径分裂。
+  const stageRoot = join(STAGE, 'root')
+  const gateScript = join(ROOT, 'scripts', 'check-browser-syntax-floor.mjs')
+  if (!existsSync(gateScript)) {
+    console.error('[语法下限降级失败] 门禁脚本缺席: ' + gateScript + '——无法降级，快照不可发布')
+    process.exit(1)
+  }
+  if (!existsSync(stageRoot)) {
+    console.error('[语法下限降级失败] stage 根缺席: ' + stageRoot + '——快照不可发布')
+    process.exit(1)
+  }
+  const r = spawnSync(process.execPath, [gateScript, '--degrade', '--stage', stageRoot], { cwd: ROOT, encoding: 'utf8' })
+  if (r.stdout) process.stdout.write(r.stdout)
+  if (r.stderr) process.stderr.write(r.stderr)
+  if (r.status !== 0) {
+    console.error('[语法下限降级失败] chrome87 降级未成功（exit ' + r.status + '）——快照不可发布')
+    process.exit(1)
+  }
+  const m = /files=(\d+) changed=(\d+)/.exec(r.stdout ?? '')
+  if (!m) {
+    console.error('[语法下限降级失败] 无法从 --degrade 输出解析文件数（files=/changed= 缺席）')
+    process.exit(1)
+  }
+  const scannedFiles = Number(m[1])
+  const degradedFiles = Number(m[2])
+  // 反 no-op：清单非空 + 真的改写了文件。0 命中 = 口径漂移（路径前缀变了而没人知），拒绝出快照。
+  if (scannedFiles === 0 || degradedFiles === 0) {
+    console.error('[语法下限降级失败] 反 no-op：扫描 ' + scannedFiles + ' 个文件、实际改写 ' + degradedFiles
+      + ' 个——降级步骤形同虚设（浏览器面清单口径漂移？），快照不可发布')
+    process.exit(1)
+  }
+  // 降级后在本步骤内立即复扫（同一门禁的判绿半边）：确认「改完确实 0 违规、双 arm 差分归零」，
+  // 而不是只确认 exit 0（esbuild 返回码不为 0 不等于产物合规）。
+  const scan = spawnSync(process.execPath, [gateScript, '--scan', stageRoot], { cwd: ROOT, encoding: 'utf8' })
+  if (scan.stdout) process.stdout.write(scan.stdout)
+  if (scan.stderr) process.stderr.write(scan.stderr)
+  if (scan.status !== 0) {
+    console.error('[语法下限降级失败] 降级后复扫未全绿（exit ' + scan.status + '）——快照不可发布')
+    process.exit(1)
+  }
+  log(`浏览器语法下限降级就位（chrome87；扫描 ${scannedFiles} 个浏览器面文件，改写 ${degradedFiles} 个，降级后复扫全绿）`)
 }
 
 // ── 0f-2. combo 构建期预计算（0.14.0 启动性能 P1-2 / 引擎树补丁 combo-cache-A3 的写半边）──
@@ -820,3 +886,163 @@ const ptyPre = join(STAGE, 'root', npmDshRoot, 'node-pty', 'prebuilds')
 `)
 }
 log('瘦身完成（win32/darwin prebuilds + .map 已剔除）')
+
+// ── 8a2. 瘦身扩展（2026-08-25，issue apk#86 相关体积审计）：pnpm 跨平台 reflink .node ──
+// pnpm standalone 自带的 win32/darwin reflink 原生二进制在 Android/pnpm 运行时永不加载——
+// 纯死重剔除，保留 linux-arm64/x64。
+// 注意：glob 在双引号内不被 shell 展开，rm -f "path/*.node" 是字面量匹配（静默 no-op）——
+// 必须用 find -name（find 自身做模式匹配，不依赖 shell 展开）。清单外置 slim.json。
+log('瘦身扩展：pnpm 跨平台 reflink .node…')
+const pnpmDist = join(U, 'lib', 'node_modules', 'pnpm', 'dist')
+{
+  const findCmds = SLIM.reflinkGlobs
+    .map((g) => `find "${wslPath(pnpmDist)}" -maxdepth 1 -name '${g}' -delete 2>/dev/null || true`)
+    .join('\n  ')
+  wsl(`\n  ${findCmds}\n`)
+}
+log('瘦身扩展完成（pnpm reflink.win32/darwin .node 已剔除）')
+
+// ── 8a2b. 全局 Node 重复包：引擎内副本保留，孤儿 global 副本删除 ───────────
+// @img/sharp-wasm32 在 global node_modules 没有消费者（global 无 sharp 本体），
+// 而 dsh 引擎树内有解析副本；仅当引擎内副本在场时才删 global，否则保留（它可能
+// 是唯一可解析的副本，删了会让 sharp 的 wasm 兜底失效）。@emnapi/runtime 不删：
+// 引擎内无副本，global 那份可能正是引擎树的解析目标。
+log('瘦身扩展：global node_modules 孤儿重复包…')
+{
+  const globalNodeModules = join(U, 'lib', 'node_modules')
+  for (const pkg of SLIM.orphanGlobalNodePackages ?? []) {
+    const globalDir = overlayPkgDir(pkg, globalNodeModules)
+    const engineDir = overlayPkgDir(pkg)
+    if (!existsSync(join(globalDir, 'package.json'))) continue
+    if (!existsSync(join(engineDir, 'package.json'))) {
+      log(`  保留 global ${pkg}：引擎内解析副本不在场（可能是唯一副本）`)
+      continue
+    }
+    wsl(`rm -rf "${wslPath(globalDir)}"`)
+    log(`  删除 global 重复包 ${pkg}（引擎内副本在场）`)
+  }
+}
+log('瘦身扩展完成（global 孤儿重复包已剔除）')
+
+// ── 8a3. 权限归一化：不在本步做 ───────────────────────────────────────────
+// 实测（2026-09-08）：WSL 的 /mnt/d 9p 挂载未启用 metadata，chmod 恒被忽略（stat 仍 777），
+// 因此「归档前 chmod 整棵树」在 Windows 侧是无效步骤，只会白走 6 万文件。归档权限的唯一
+// 权威落点是 inject-all.py 重打包时按内容判定（ELF/shebang=0700，数据文件=0600，目录=0700），
+// 门禁 scripts/check-snapshot-file-modes.mjs 校验的正是注入后快照（APK 内嵌 + 发布资产同源）。
+
+// ── 8a4. 软链自净化（0.14.1 P0，真机报错日志驱动）─────────────────────────
+//
+// 缺陷形态（用户 2026-09-19 报错日志，小米 21121210C / Android 33 / arm64）：
+//   W dsh-snap: skipping unsafe symlink: usr/etc/alternatives/editor -> /data/data/com.termux/files/usr/bin/nano
+//   W dsh-snap: skipping unsafe symlink: home/.dsh/profiles/node_modules/micromark
+//                                        -> /data/data/com.termux/files/usr/lib/node_modules/@deepseek-ai/dsh/node_modules/micromark
+// 设备侧提取器**必须**拒绝这批链接（沙箱边界：`SnapshotExtractor.isLinkTargetAllowed` 的 KDoc 明文
+// 「Termux residue（/data/data/com.termux/...）一律拒绝」「逃逸目标一律拒绝」）——在线更新快照走明文
+// HTTP，这一层是安全边界，**不能为了这批链接放宽**。
+//
+// 真因在**归档内容**：软链目标写的是构建机的 Termux 绝对前缀。
+//   - deb 数据树（`dpkg-deb --fsys-tarfile | tar --strip-components=6`）里的相对/绝对链原样落地，
+//     其绝对链是 Termux 惯例前缀 `/data/data/com.termux/files/usr/...`；
+//   - 基座 bootstrap 的 `home/.dsh/profiles/node_modules/<pkg>` 是**指向同树 usr 的 dedup 链接**，
+//     目标同样写成 Termux 绝对前缀。
+// 实测产物清点（`tar -tvJf` 全量）：arm64 **111 条**、x86_64 **113 条**指向旧前缀的绝对链；
+// 其中 arm64 有 **97 条**是 profiles/node_modules 的 dedup 链接，而它们的目标**就在同一份归档里**
+// （`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/` 共 29393 条目）。后果：每台设备都静默丢这批
+// 链接 —— 实测设备 `home/.dsh/profiles/node_modules/` 198 条 vs 归档 264 条，属于
+// 「构建机环境 ≠ 设备环境」的幽灵缺失（构建机上解析得到，设备上必然解析不到）。
+//
+// 修法（归档**之前**归一化，幂等）：
+//   ① 相对链：保留（设备侧判据接受树内相对链）；
+//   ② 绝对链指向**本 App 前缀**：保留（设备侧按 runtimeCanon 接受，如 busybox applet 链接）；
+//   ③ 绝对链指向旧 Termux 前缀：剥前缀得树内候选路径 —— 存在则改写为**相对链**（功能等价、设备可解析），
+//      不存在则删除（纯残留，留着只会在每台设备上被丢弃）；
+//   ④ 其它越界绝对链：删除并计数（不删也必然被设备丢弃，留着只会让归档与设备不一致）。
+// 判据不是「链接看起来对不对」，而是**归档里不得存在任何设备必然丢弃的条目**（见本步之后的产物自检）。
+const STAGE_ROOT = join(STAGE, 'root')
+{
+  const stats = sanitizeSymlinks(STAGE_ROOT, ['usr', 'home/.dsh'])
+  log(`软链自净化: 共 ${stats.links} 条；相对化 ${stats.rewrote}；删除残留 ${stats.dropped}；保留 App 绝对链 ${stats.keptAppAbsolute}；其它绝对链 ${stats.keptOtherAbsolute}`)
+  if (stats.dropped > 0) console.log('    [drop] ' + stats.droppedSamples.join(' | '))
+}
+
+// ── 8. 归档 ────────────────────────────────────────────────────────────
+log('归档 snapshot.tar.xz…')
+const archive = join(OUT_DIR, 'snapshot.tar.xz')
+rmSync(archive, { force: true })
+// 输出结构对齐既有快照：usr/ + home/.dsh/ + home/.gitconfig（home 其余目录不随快照）
+// 2c 提速（2026-09-05 实测）：tar -cJf 单线程 xz → tar -c | xz -T<n> 多线程（同 preset 档，
+// 743MB tar 380s 级 → 48s；产物字节因分块并行而不同，sha256 由下游重算，一致性门禁不受影响）。
+// **并发上限 8（0.14.1 用户拍板，系统级约束）**：原为 `-T0`（吃满 16 逻辑核），会把开发机撑满，
+// 导致同时运行的 MuMu 模拟器卡顿/系统不稳——而「模拟器优先」是铁律 2，构建与模拟器实测常并行。
+// 改为 8（= 物理核数）；出处与理由见 `scripts/lib/shell.mjs` 的 XZ_THREADS（单一常量，禁各处再写死）。
+// 可复现性（2026-09-08）：tar 记录的是 stage 树的 mtime（= 每次构建的解压时刻），会让**内容
+// 完全相同的两次构建**产出不同 sha256 → 设备每次都判定「快照变了」并重解压（模拟器实测每次
+// 多花 3-5 分钟）。统一 `--mtime=@<固定纪元>`（GNU tar）后，同一输入的产物字节稳定；inject-all.py
+// 新增文件同样取固定 mtime（SOURCE_DATE_EPOCH 可覆写）。
+const SOURCE_DATE_EPOCH = process.env.SOURCE_DATE_EPOCH ?? '1704067200'
+wsl(`
+  cd "${wslPath(join(STAGE, 'root'))}" && \
+  tar -c --mtime=@${SOURCE_DATE_EPOCH} usr home/.dsh home/.gitconfig 2>/dev/null | xz -T${XZ_THREADS} -6 > "${wslPath(archive)}" && \
+  ls -lh "${wslPath(archive)}"
+`)
+const sha = createHash('sha256').update(readFileSync(archive)).digest('hex')
+writeFileSync(join(OUT_DIR, 'snapshot.sha256'), sha)
+// 归档后自检（2026-08-23：x86 曾出现「stage 有、归档无」的 LICENSES 目录怪癖——防再犯）。
+// 2026-08-24 修复（两次实锤，三个错误方案依次排除）：
+//   1) wsl tar -tf | grep -c 经 execSync 捕获时：localhost 代理噪音行混入 → Number(整串) NaN；
+//   2) 正则 /(\d+)/ 提取 → WSL 输出经 execSync 的编码畸变（UTF-16 字节穿插）→ 匹配为 0/null；
+//   3) 直接读归档字节匹配路径 → xz 为压缩流，路径名非明文 → 0。
+// 结论：必须**流式解压 tar** 再数条目——构建环境已有 Python（inject-snapshot.py 用 lzma/tarfile
+// 流式处理快照），自检改用 Python 一行（无 WSL、无编码畸变、无压缩明文问题）。
+let licCount = 0
+try {
+  // 结论：必须**流式解压 tar** 再数条目——用构建环境的 Python（Windows 本地 python / WSL 内 python3；
+  // 0.13.5 W5 起整个构建在 WSL 内跑，命令名必须按平台选择，否则 exit 127）直接开归档流式统计。
+  const archiveWin = archive.replace(/\\/g, '/')
+  const py = `import lzma,tarfile; t=tarfile.open(${JSON.stringify(archiveWin)},'r'); n=[x for x in t.getnames() if x.startswith('usr/share/LICENSES/') and x.endswith('.txt')]; print(len(n))`
+  licCount = Number(execSync(PYTHON + ' -c ' + JSON.stringify(py), { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }).trim())
+} catch (e) {
+  console.error(`  [LICENSES 归档自检执行失败] ${String(e)}`)
+}
+if (!(licCount >= 4)) {
+  console.error(`归档内缺 GNU 标准许可文本（LICENSES/*.txt 仅 ${licCount} 个）——快照不可发布`)
+  process.exit(1)
+}
+log(`归档内 LICENSES 自检通过（${licCount} 个标准文本）`)
+// 归档内软链自检（0.14.1 P0，与「LICENSES 归档缺件」同型：stage 对而归档错）：
+// 归档里**不得存在**任何指向旧 Termux 前缀的软链 —— 设备侧提取器必然丢弃它们
+// （SnapshotExtractor.isLinkTargetAllowed 的沙箱边界），留着就是「构建机看得见、设备上没有」的
+// 幽灵缺失。撤掉 8a4 的净化后再构建 → 此处必红（实测 arm64 111 / x86_64 113 条）。
+let termuxLinks = 0
+let termuxSamples = []
+try {
+  const pyLink = `import tarfile; t=tarfile.open(${JSON.stringify(archive.replace(/\\/g, '/'))},'r');`
+    + ` b=[m.name for m in t if m.issym() and m.linkname.startswith('/data/data/com.termux')];`
+    + ` print(len(b)); print('\\n'.join(b[:5]))`
+  const out = execSync(PYTHON + ' -c ' + JSON.stringify(pyLink), { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }).trim().split('\n')
+  termuxLinks = Number(out[0] || 0)
+  termuxSamples = out.slice(1).filter((l) => l !== '')
+} catch (e) {
+  console.error(`  [软链归档自检执行失败] ${String(e)}`)
+  termuxLinks = -1
+}
+if (termuxLinks !== 0) {
+  console.error(`归档内仍有 ${termuxLinks} 条旧 Termux 前缀软链（设备侧必然丢弃）——快照不可发布`)
+  for (const s of termuxSamples) console.error('  ' + s)
+  process.exit(1)
+}
+log('归档内软链自检通过（0 条旧 Termux 前缀软链）')
+// A1 出厂声明值对账（P-AC-01，--require 严格档）：归档内 profiles/{web,headless}/package.json 必须带
+// patchReload=出厂值。seed 步在归档之前（本文件 0 段），此处是对**产物**的复核——stage 正确而归档缺件
+// 的同型缺陷此前在 LICENSES 上实锤过一次。
+const perfGate = spawnSync(process.execPath,
+  [join(ROOT, 'scripts', 'check-perf-instrumentation.mjs'), '--require', '--snapshot', archive, '--abi', ABI],
+  { encoding: 'utf8' })
+if (perfGate.status !== 0) {
+  console.error('A1 出厂声明值对账失败（归档内 profile 清单缺 patchReload 出厂值）——拒绝出快照')
+  console.error((perfGate.stdout + perfGate.stderr).split('\n').filter((l) => l.startsWith('FAIL')).join('\n'))
+  process.exit(1)
+}
+log('A1 出厂声明值对账通过（归档内 profiles/{web,headless} patchReload=出厂值）')
+log(`完成: ${archive} (${(statSync(archive).size / 1024 / 1024).toFixed(1)} MB, sha256=${sha.slice(0, 12)}…)`)
+log('后续步骤：注入插件（inject-snapshot.py）→ 门禁（elf-check/ci-verify-snapshot 语义）→ 打包装入 APK')

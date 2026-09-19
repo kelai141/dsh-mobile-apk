@@ -5,6 +5,7 @@ import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.text.InputType
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.AdapterView
@@ -225,6 +226,7 @@ class OverlayPanel(private val svc: OverlayService) {
       setTextColor(c.idleText)
     }
     statusText = status
+    attachStatusGesture(status)
 
     val chip = TextView(svc).apply {
       tag = "overlay-toolchip"
@@ -360,7 +362,10 @@ class OverlayPanel(private val svc: OverlayService) {
     val st = statusText
     if (st != null && !svc.sessionBusy) {
       ShimmerTextView::class.java.cast(st).setShimmering(false)
-      st.setTextColor(if (!svc.engineRunning) c.offText else c.idleText)
+      // 块H-A1：完成态正在展示时不得被换肤流程改回常态色（文本由分支链负责，颜色也应一致）。
+      if (svc.completionLabel().isEmpty()) {
+        st.setTextColor(if (!svc.engineRunning) c.offText else c.idleText)
+      }
     }
     closeView?.setColorFilter(c.chevron)
     inputBox?.apply {
@@ -383,6 +388,103 @@ class OverlayPanel(private val svc: OverlayService) {
 
   private fun templateTool(): String =
     displayPrefs().getString("template_tool", "{tool} · {summary}") ?: "{tool} · {summary}"
+
+  /** 块H-A1：完成态常驻文案（并入 overlay_display prefs，与上述两个模板同族，可覆写）。
+   *  默认整句「已完成，长按查看汇报」；语义标签非「已完成」时（失败/被阻塞/被中断…）
+   *  只替换标签部分、保留同一后缀提示——既保证失败态不显示「已完成」，又让提示语只有一处真源。 */
+  private fun templateCompletion(): String =
+    displayPrefs().getString("template_completion", "已完成，长按查看汇报") ?: "已完成，长按查看汇报"
+
+  /** 后缀提示（默认「长按查看汇报」）：由 template_completion 剥掉默认标签前缀得到。 */
+  private fun completionHint(): String =
+    templateCompletion().removePrefix("已完成，").ifBlank { "长按查看汇报" }
+
+  // ── 块H 状态行手势（A2 长按开报告栏 / A3 三击跳转）──────────────────
+  // 详档 §3.3：目标行原本**无任何触摸处理**（11 处 setOnClickListener 均不涉及 statusText），
+  // 故不存在与既有行内手势抢的冲突。消歧用**单一 OnTouchListener 状态机**统一裁决
+  // （不用 setOnLongClickListener + 自行数点击）：
+  //   DOWN  → 记起点与时刻；距上次 UP 在 doubleTapTimeout 内则 tapCount++，否则重置为 1；
+  //   MOVE  → 位移超 scaledTouchSlop 即标 moved，本次手势不再判长按/三击（防拖动误触）；
+  //   计时到 longPressTimeout 且未 moved → 触发 A2（长按优先，一次手势只触发一个动作）；
+  //   UP    → 未 moved 且未触发长按：tapCount==3 → 触发 A3；否则等窗口结束；
+  //   CANCEL → 全部重置。
+  // 阈值一律**运行时读取** ViewConfiguration（不编造数字；先例 OverlayService 的 scaledTouchSlop）。
+  // 注意 ViewConfiguration 的 static/实例面**不一致**（javap android-36 android.jar 实证）：
+  //   getScaledTouchSlop() 等 scaled* 是**实例**方法 → vc.scaledTouchSlop
+  //   getLongPressTimeout() / getDoubleTapTimeout() / getTapTimeout() 是 **static** 方法
+  //   → 必须写成 ViewConfiguration.getLongPressTimeout()，写成实例属性会 Unresolved reference。
+  //   既有的 scaledTouchSlop 先例恰好只用到实例方法，故未暴露该差异。
+
+  private var statusLongPress: Runnable? = null
+  private var statusTapCount = 0
+  private var statusLastUpAt = 0L
+
+  /** 长按/三击状态机（挂在 statusText 上；返回 true 表示本事件序列被消费）。 */
+  private fun attachStatusGesture(tv: TextView) {
+    val vc = android.view.ViewConfiguration.get(svc)
+    val slop = vc.scaledTouchSlop                                          // 实例方法
+    val longPressMs = android.view.ViewConfiguration.getLongPressTimeout().toLong()   // static
+    val tapWindowMs = android.view.ViewConfiguration.getDoubleTapTimeout().toLong()   // static
+    var downX = 0f; var downY = 0f
+    var moved = false
+    var longFired = false
+
+    fun cancelPending() {
+      statusLongPress?.let { svc.main.removeCallbacks(it) }
+      statusLongPress = null
+    }
+
+    tv.isClickable = true
+    tv.setOnTouchListener { _, ev ->
+      when (ev.actionMasked) {
+        MotionEvent.ACTION_DOWN -> {
+          downX = ev.rawX; downY = ev.rawY
+          moved = false; longFired = false
+          // 面板被用户占用：长按期间取消自动收起（详档 §3.3 冲突面 2 的消歧）。
+          svc.panelOccupied = true
+          // 三击计数：距上次 UP 在 doubleTapTimeout 内则累加，否则重置为 1。
+          statusTapCount = nextTapCount(System.currentTimeMillis(), statusLastUpAt, tapWindowMs, statusTapCount)
+          cancelPending()
+          val r = Runnable {
+            if (!moved && !longFired) {
+              longFired = true
+              svc.toggleReportBar()
+            }
+          }
+          statusLongPress = r
+          svc.main.postDelayed(r, longPressMs)
+          true
+        }
+        MotionEvent.ACTION_MOVE -> {
+          if (!moved && (Math.abs(ev.rawX - downX) > slop || Math.abs(ev.rawY - downY) > slop)) {
+            // 超 touchSlop = 按住并滑动 → 判为拖动/滚动，取消长按且**不**触发 A2/A3。
+            moved = true
+            cancelPending()
+          }
+          true
+        }
+        MotionEvent.ACTION_UP -> {
+          cancelPending()
+          svc.panelOccupied = false
+          statusLastUpAt = System.currentTimeMillis()
+          // 一次手势一个动作：长按已触发则本次不得再触发 A3；拖动同理。
+          if (statusUpAction(moved, longFired, statusTapCount) == StatusGestureAction.JUMP_TO_APP) {
+            statusTapCount = 0
+            svc.jumpToApp()
+          }
+          true
+        }
+        MotionEvent.ACTION_CANCEL -> {
+          cancelPending()
+          svc.panelOccupied = false
+          statusTapCount = 0
+          moved = true
+          true
+        }
+        else -> false
+      }
+    }
+  }
 
   // ── 待处理卡（AI 提问 / 权限审批：WS 收帧 + POST /api/respond 应答——用户拍板「几乎所有操作直接在悬浮球上完成」）──
 
@@ -876,6 +978,16 @@ class OverlayPanel(private val svc: OverlayService) {
             setStatusText(it, templateThinking())
             (it as ShimmerTextView).setShimmering(true)
           }
+        } else if (svc.completionLabel().isNotEmpty()) {
+          // 块H-A1：完成态常驻分支（详档 §5.1 指定位置：sessionBusy 分支之后、else 常态之前）。
+          // 待答分支在前 → 待答时不得显示「已完成」（§6.3 回归面）；
+          // sessionBusy 分支在前 → 新一轮进行中不得显示上一轮的完成（§3.1 硬性 2）。
+          (it as ShimmerTextView).setShimmering(false)
+          setAmberBreathing(it, false)
+          animateTextColor(it, 0xFF8AB4F8.toInt())
+          // 文案 = 语义标签 + 操作提示。标签来自权威信号或 turn_end 的语义，因此失败类
+          // （“失败/被阻塞/…”）不会伪装成「已完成」——这是 A1 的语义分支要求。
+          setStatusText(it, svc.completionLabel() + "，" + completionHint())
         } else {
           (it as ShimmerTextView).setShimmering(false)
           setAmberBreathing(it, false)

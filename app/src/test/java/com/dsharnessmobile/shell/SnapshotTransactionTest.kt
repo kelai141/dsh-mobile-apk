@@ -5,6 +5,7 @@ import java.nio.file.Files
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -136,6 +137,116 @@ class SnapshotTransactionTest {
   }
 
   /**
+   * 【0.14.1 升级路径 P0】补偿动作不得掩盖真因，且删除失败必须有兜底。
+   *
+   * 设备实证（16384 覆盖安装 0.14.0 → 0.14.1）：`mergeProfiles` 的 catch 旧实现是内联三行
+   *   `deletePath(liveProfiles); move(previousProfiles, liveProfiles); throw original`。
+   * `deletePath` 逐项容错 → 可能返回而 live 仍非空 → `move` 到非空目标抛
+   * `FileSystemException: … Directory not empty`，**取代**原始异常 → 真因被掩盖，
+   * marker 永不收敛，live 插件树半合并 1/10。
+   *
+   * **行为级判据**（不用文本在场断言——本轮实测过：把 addSuppressed 删掉，纯文本判据照样绿）：
+   * 反射调用 `compensateFailedProfilesMerge`，构造「删不净的 live」（其下留一个非空子目录，
+   * 并把子目录 chmod 成只读以让递归删除失败；JVM 下更稳的做法是让子项为**非空目录**，
+   * 因为 `deletePath` 对文件失败会 onFailure 继续）。
+   * 断言：① 抛出的**就是**原始异常（同一对象身份）；② previous 的内容回到 live（兜底成功）；
+   * ③ 不得抛出 Directory not empty 之类次生异常。
+   */
+  @Test
+  fun mergeCompensationNeverMasksTheOriginalFailureAndRecoversTheBackup() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      val profiles = File(live, "home/.dsh/profiles")
+      SnapshotFs.createDirectories(profiles)
+      File(profiles, "dirty.json").writeText("live")
+
+      val method = SnapshotTransaction::class.java.getDeclaredMethod(
+        "compensateFailedProfilesMerge",
+        File::class.java, File::class.java, File::class.java, Throwable::class.java,
+      )
+      method.isAccessible = true
+      // `SnapshotTransaction` 是 Kotlin `object`：静态 `invoke(null, ...)` 会 NPE，
+      // 必须把 `INSTANCE` 当接收者传进去。
+      val self = SnapshotTransaction::class.java.getDeclaredField("INSTANCE").get(null)
+
+      // ── ① 补偿**必然失败**的确定性构造（跨平台）：previous 指向一个**不存在**的目录
+      //    → `move(previous, live)` 必抛 NoSuchFileException。这正是设备上
+      //    「rollback 也失败」的等价形态。
+      //    契约：`compensateFailedProfilesMerge` **返回**原始异常（调用方写 `throw compensate(...)`），
+      //    故 invoke 正常返回时拿到的就是 original；若它抛异常，抛出的也必须是 original。
+      val missingPrevious = File(filesDir, "no-such-previous")
+      val original = IllegalStateException("原始合并失败（真因，必须被保留）")
+      val returned = try {
+        method.invoke(self, filesDir, profiles, missingPrevious, original)
+      } catch (invocation: java.lang.reflect.InvocationTargetException) {
+        invocation.targetException
+      }
+      assertSame(
+        "补偿失败时必须原样交回**原始异常**（旧实现会被 Directory not empty 之类的次生异常取代）",
+        original,
+        returned,
+      )
+      assertTrue(
+        "补偿的次生错误必须作为 suppressed 附在真因上（否则真因链断裂、排障只能看到假象）",
+        original.suppressed.isNotEmpty(),
+      )
+      assertTrue(
+        "suppressed 里必须能看到真正的次生失败（本例为 move 找不到 previous）",
+        original.suppressed.any {
+          it is java.nio.file.NoSuchFileException ||
+            it is java.io.FileNotFoundException ||
+            it is java.nio.file.FileSystemException
+        },
+      )
+
+      // ── ② 补偿**成功**路径：previous 是完整备份 → live 被还原成备份内容。
+      val filesDir2 = tempDir()
+      try {
+        val live2 = File(filesDir2, "live").apply { mkdirs() }
+        val profiles2 = File(live2, "home/.dsh/profiles")
+        SnapshotFs.createDirectories(profiles2)
+        File(profiles2, "dirty.json").writeText("live")
+        val previous2 = SnapshotTransaction.previousRoot(filesDir2)
+        SnapshotFs.createDirectories(previous2)
+        File(previous2, "backup.json").writeText("previous")
+
+        val original2 = IllegalStateException("原始合并失败 2")
+        method.invoke(self, filesDir2, profiles2, previous2, original2)
+        assertTrue(
+          "补偿成功时必须把 previous 的备份内容放回 live",
+          File(profiles2, "backup.json").exists(),
+        )
+      } finally {
+        SnapshotFs.deletePath(filesDir2)
+      }
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
+  /**
+   * 真因出口：`EngineManager.lastRefreshFailure` 必须存在且被失败路径赋值。
+   *
+   * 为什么仍保留一条源码契约断言：`refreshSnapshot` 只回布尔值，`boot-fail.log` 想拿到真因
+   * 只能靠这个出口；但**行为**由本文件另两条用例覆盖（上面那条锁补偿语义，
+   * `EngineManager` 侧的赋值属跨类行为，见 `BootFailLogTest` 的失败终态用例）。
+   */
+  @Test
+  fun refreshSnapshotExposesItsFailureCauseForBootFailLog() {
+    val src = File("src/main/java/com/dsharnessmobile/shell/EngineManager.kt").readText()
+    assertTrue(
+      "EngineManager 必须暴露 lastRefreshFailure（refreshSnapshot 的真因出口）",
+      src.contains("var lastRefreshFailure"),
+    )
+    val flow = File("src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt").readText()
+    assertTrue(
+      "boot-fail 必须带上真因（否则 error=none(boolean-failure-path) 不可排障）",
+      flow.contains("lastRefreshFailure") && flow.contains("refreshCause"),
+    )
+  }
+
+  /**
    * review C4：备份只有「拷贝完成 + 原子 rename」后才入 journal——拷贝中途被杀的残渣
    * （`profiles.copying`，半份内容）绝不能被恢复路径当成 displaced 覆盖 live。
    */
@@ -183,6 +294,52 @@ class SnapshotTransactionTest {
       assertEquals("new-node", File(live, "usr/bin/node").readText())
       assertEquals("factory: true\n", File(live, "home/.dsh/settings.yaml").readText())
       SnapshotTransaction.finish(filesDir)
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
+  /**
+   * 【0.14.1 升级路径 P0】rollbackEntry 的**正常路径**回归：displaced 在场时回滚必须
+   * 以 ROLLED_BACK 结束、备份内容回到 live、marker 被清。
+   *
+   * **诚实边界（必须说清，否则它就是一个看起来更强的判据）**：本用例**测不到**真正的缺陷触发条件。
+   * 设备上的失败是 `deletePath(live)` **删不净**（SELinux/`untrusted_app` 下子项删除被拒，
+   * 而 `SnapshotFs.deletePath` 逐项容错、删不掉的只记 onFailure 后继续），随后 `move` 到非空目录抛
+   * `FileSystemException: … Directory not empty`。JVM 单测跑在普通文件系统上，`deletePath` 会**真的删干净**，
+   * 因此「兜底改名挪开」这一分支在本用例里根本不会被执行——
+   * **实测证实**：把兜底删掉（改回 `deletePath(live); move(displaced, live)`）本用例**仍然全绿**。
+   * 所以：
+   *   - 本用例锁的是**回滚语义**（正常路径不许回归）；
+   *   - 「删不净仍能放回」这一分支的证据 = **设备实测**（16384 上 repair 前后 boot-fail 真因从
+   *     `mergeProfiles` 移到 `rollbackEntry`，且 `error=` 已能带出真因）+ 与
+   *     `compensateFailedProfilesMerge` **同一段代码形态**（那段有可判红的反证）。
+   * 不把这两件事混为一谈：判据没有牙的地方就写明没有牙。
+   */
+  @Test
+  fun rollbackPutsTheDisplacedCopyBackEvenWhenLiveCouldNotBeCleared() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      // live 的 usr/profile 都在场（模拟「删不净」的现场：deletePath 后仍留内容）
+      writeRuntime(live, "live-node", "live-profile")
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      SnapshotFs.createDirectories(stage)
+      val previous = SnapshotTransaction.previousRoot(filesDir)
+      writeRuntime(previous, "old-node", "old-profile")
+      SnapshotTransaction.writeMarker(
+        filesDir,
+        SnapshotTransaction.Marker(
+          SnapshotTransaction.Phase.SWAPPING, "fp1", 1L, listOf("usr", "home/.dsh/profiles"),
+        ),
+      )
+
+      val recovery = SnapshotTransaction.recover(filesDir, stage, File(live, "usr"), File(live, "home"))
+
+      assertEquals(SnapshotTransaction.Outcome.ROLLED_BACK, recovery.outcome)
+      // displaced 的备份内容必须回到 live（兜底：先改名挪开，再 move 回来）
+      assertEquals("old-node", File(live, "usr/bin/node").readText())
+      assertNull("marker 必须被清（否则每次启动重试同一失败）", SnapshotTransaction.readMarker(filesDir))
     } finally {
       SnapshotFs.deletePath(filesDir)
     }
@@ -555,6 +712,85 @@ class SnapshotTransactionTest {
     }
   }
 
+  // ── ② 反馈二：半程事务必须幂等收敛（0.14.1 块K） ────────────────────────────
+  //
+  // 用户实测形态（华为 NOH-AN00 / Android 31 / 0.14.0 vc39）：`.snapshot-transaction` 长期停在
+  // `phase=SWAPPED`（自 0.14.0 覆盖安装那一刻），配套 `.snapshot-previous` 920 MB、
+  // `.snapshot-stage` 176 MB 长期不回收；之后每次启动都走「收敛未完成事务」。
+  //
+  // 真因（源码级，见 0.14.1 块K 报告）：提交路径是
+  //   EngineManager.applyRecovery(ROLLED_FORWARD) → writeFingerprint → SnapshotTransaction.finish()
+  // 而完成安装那一刻的 finish() 在真机上被 `NoSuchMethodError`（Error，非 Exception）打穿 ——
+  // 于是 marker 永远留在 SWAPPED。
+
+  @Test
+  fun finishClearsMarkerEvenWhenArtifactCleanupThrows() {
+    // 判据：产物清理抛错（模拟真机 Error 打穿 deletePath 的情形）时，marker 仍必须被清除。
+    // 旧实现顺序为 delete → delete → clearMarker，任一抛出即 marker 残留 ⇒ 本测试判红。
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      writeRuntime(live, "node", "profile")
+      SnapshotFs.createDirectories(SnapshotTransaction.stageRoot(filesDir))
+      SnapshotFs.createDirectories(SnapshotTransaction.previousRoot(filesDir))
+      SnapshotTransaction.writeMarker(
+        filesDir,
+        SnapshotTransaction.Marker(SnapshotTransaction.Phase.SWAPPED, "fp", 1L, listOf("usr")),
+      )
+
+      // 注入一个「清理必失败」的删除原语（等价真机 Error 越过 catch 的形态）。
+      var attempts = 0
+      try {
+        SnapshotTransaction.finish(filesDir) { attempts += 1; throw NoSuchMethodError("injected: Stream.toList") }
+      } catch (_: NoSuchMethodError) {
+        // 清理失败本身可以向上传播；但 marker 必须已经被清掉（finally 语义）。
+      }
+      assertTrue("删除原语应被尝试（否则测试没走到清理步）", attempts > 0)
+      assertNull(
+        "finish() 必须保证 marker 被清除——它残留 SWAPPED 会让之后每次启动都重跑前滚、残渣永不回收",
+        SnapshotTransaction.readMarker(filesDir),
+      )
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
+  @Test
+  fun reclaimResidueRemovesPreviousAndStageWhenNoMarkerRemains() {
+    // 幂等收敛：marker 已丢、残渣还在 ⇒ 必须能被回收（用户诉求「自动提交并清理」）。
+    val filesDir = tempDir()
+    try {
+      val previous = SnapshotTransaction.previousRoot(filesDir)
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      File(previous, "usr/bin").mkdirs()
+      File(previous, "usr/bin/node").writeText("old")
+      File(stage, "home/.dsh").mkdirs()
+      assertNull("本用例前提：没有 marker", SnapshotTransaction.readMarker(filesDir))
+      assertTrue("前提：残渣在场", SnapshotTransaction.hasResidue(filesDir))
+
+      val reclaimed = SnapshotTransaction.reclaimResidue(filesDir)
+
+      assertTrue("two residue dirs are reported", reclaimed.containsAll(listOf(SnapshotTransaction.PREVIOUS_NAME, SnapshotTransaction.STAGE_NAME)))
+      assertFalse("previous 必须被真删（不得只报不删）", SnapshotFs.exists(previous))
+      assertFalse("stage 必须被真删", SnapshotFs.exists(stage))
+      assertFalse("回收后不应再有残渣", SnapshotTransaction.hasResidue(filesDir))
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
+  @Test
+  fun reclaimResidueIsIdempotentOnACleanTree() {
+    // 幂等：无残渣时不得报任何回收项，也不得抛错（每次启动都会走这条判定）。
+    val filesDir = tempDir()
+    try {
+      assertFalse(SnapshotTransaction.hasResidue(filesDir))
+      assertEquals(emptyList<String>(), SnapshotTransaction.reclaimResidue(filesDir))
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
   private companion object {
     /** ≤0.13.6 权威清单形态（docs/archive/M1-PLAN.md:104-105）：ui-layout 被禁用。 */
     val LEGACY_UI_LAYOUT_PATCH = """
@@ -581,4 +817,200 @@ class SnapshotTransactionTest {
             name: '@dsh-android/dsh-android-manage'
     """.trimIndent() + "\n"
   }
+
+  // ── 0.14.1 审查 D-3 / §7.7.5：回滚失败**不得无条件清 marker** ──────────────────────
+  //
+  // 缺陷形态：旧 recover() 无论回滚成败都 clearMarker() ⇒ 半成品树被当成「已恢复」长期使用，
+  // 下游症状正是用户实报的「插件注册了但不真实可用」（列表在、能力不在，§7.7）。
+  @Test
+  fun recoveryKeepsTheMarkerWhenRollbackCouldNotFinish() {
+    val filesDir = tempDir()
+    try {
+      // 构造「回滚这一条必定失败」的形态：live 路径的**父级是一个普通文件** ⇒
+      // rollbackEntry 里 `move(displaced, live)` 的 createDirectories 必然抛错。
+      // （不用「只读目录/占用句柄」这类平台相关手法：CI 跑 Linux、本机跑 Windows，两者语义不同。）
+      File(filesDir, "live").writeText("not-a-directory")
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      SnapshotFs.createDirectories(stage)
+      val previous = SnapshotTransaction.previousRoot(filesDir)
+      File(previous, "usr/bin").mkdirs()
+      File(previous, "usr/bin/node").writeText("old-node")
+      SnapshotTransaction.writeMarker(
+        filesDir,
+        SnapshotTransaction.Marker(SnapshotTransaction.Phase.SWAPPING, "fp1", 1L, listOf("usr")),
+      )
+
+      val recovery = SnapshotTransaction.recover(filesDir, stage, File(filesDir, "live/usr"), File(filesDir, "live/home"))
+
+      assertEquals(SnapshotTransaction.Outcome.ROLLBACK_FAILED, recovery.outcome)
+      assertTrue("失败条目必须如实回报（供 boot-fail.log 归因）", recovery.failures.isNotEmpty())
+      assertTrue("marker 必须保留（下次启动重试回滚，而不是把半成品当已恢复）",
+        SnapshotTransaction.readMarker(filesDir) != null)
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
+  @Test
+  fun rollbackReportsOkSoTheCallerCanDecideAboutTheMarker() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      writeRuntime(live, "live-node", "live-profile")
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      SnapshotFs.createDirectories(stage)
+      val previous = SnapshotTransaction.previousRoot(filesDir)
+      writeRuntime(previous, "old-node", "old-profile")
+      val marker = SnapshotTransaction.Marker(
+        SnapshotTransaction.Phase.SWAPPING, "fp1", 1L, listOf("usr", "home/.dsh/profiles"),
+      )
+      val result = SnapshotTransaction.rollback(filesDir, stage, File(live, "usr"), File(live, "home"), marker)
+      assertTrue("成功回滚必须回报 ok（调用方据此决定清 marker）", result.ok)
+      assertTrue(result.failures.isEmpty())
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
+  // ── 0.14.1 审查 N-1 / F-9：只写不回收的两类残渣 ────────────────────────────────
+  @Test
+  fun residueReclaimCoversFailedAndOrphanStageDirectoriesWithAnAgeGate() {
+    val filesDir = tempDir()
+    try {
+      val now = 1_800_000_000_000L
+      val old = now - 31L * 60L * 1000L        // 超过 30 分钟门槛
+      val fresh = now - 60L * 1000L            // 1 分钟前（可能属于进行中事务）
+      // 三类残渣：`.failed-<ts>`（rollback 挪开的 live 树，三层位置各一）
+      val usrFailed = File(filesDir, "usr.failed-$old").apply { mkdirs() }
+      File(usrFailed, "bin/node").apply { parentFile?.mkdirs() }.writeText("x")
+      val dshFailed = File(filesDir, "home/.dsh/profiles.failed-$old").apply { mkdirs() }
+      val orphanStage = File(filesDir, SnapshotTransaction.STAGE_ORPHAN_PREFIX + old).apply { mkdirs() }
+      // 新鲜残渣：必须**不动**（可能仍被进行中的恢复引用）
+      val freshFailed = File(filesDir, "usr.failed-$fresh").apply { mkdirs() }
+      // 无时间戳的（老命名）：保守不动
+      val noStamp = File(filesDir, "usr.failed-legacy").apply { mkdirs() }
+
+      val reclaimed = SnapshotTransaction.reclaimResidue(filesDir, now)
+
+      assertFalse("老 .failed-* 必须被回收（旧实现只认 previous/stage）", usrFailed.exists())
+      assertFalse("home/.dsh 下的 .failed-* 同样回收", dshFailed.exists())
+      assertFalse("孤儿 stage 必须被回收（旧实现只有写点、无回收点）", orphanStage.exists())
+      assertTrue("新鲜残渣不得动（30 分钟年龄门槛）", freshFailed.exists())
+      assertTrue("解析不出时间戳的命名保守不动", noStamp.exists())
+      assertEquals(3, reclaimed.size)
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
+  // ── 0.14.1 审查 §7.2-F-4 / B12：交换前的空间断言 ──────────────────────────────
+  @Test
+  fun swapRefusesToStartWhenTheSpacePrecheckFailsAndLeavesTheTreeUntouched() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      writeRuntime(live, "old-node", "old-profile")
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      File(stage, "usr/bin").mkdirs()
+      File(stage, "usr/bin/node").writeText("new-node-内容")
+      var asked = 0L
+      val failure = try {
+        SnapshotTransaction.swap(
+          filesDir = filesDir,
+          stagedRoot = stage,
+          usrDir = File(live, "usr"),
+          homeDir = File(live, "home"),
+          preservedNames = preserved,
+          fingerprint = "fp2",
+          startedAt = 2L,
+          spaceCheck = { required -> asked = required; "空间不足" },
+        )
+        null
+      } catch (t: SnapshotTransaction.InsufficientSpaceException) {
+        t
+      }
+      assertTrue("空间不足必须抛专门类型（调用方据此给可照做的文案）", failure != null)
+      assertTrue("需求按 2.5× 解压体量算（实测口径）", asked > 0)
+      assertEquals("空间不足时**不得动 live 树**", "old-node", File(live, "usr/bin/node").readText())
+      assertNull("也不得留下 marker（事务根本没开始）", SnapshotTransaction.readMarker(filesDir))
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
+
+  // ── 0.14.1 D-1 设备侧收尾：已摘除插件的存量迁移 ────────────────────────────────
+  //
+  // 设备实测（16416 覆盖安装本轮构建）：`profiles/web/node_modules/@aiwayds/dsh-model-sync` 与
+  // 清单里的挂载条目**都还在**（profile 根的两个清单是用户面，升级不替换）⇒ 摘除对老用户等于没摘，
+  // 而新装用户正常 —— 幽灵缺陷的定义形态。本用例把迁移钉死：条目摘掉、包目录删掉、其它挂载不动、
+  // 幂等（第二遍是空操作）。
+  @Test
+  fun removedProfilePluginsAreReconciledOutOfTheLiveProfile() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      writeRuntime(stage, "new-node", "new-profile")
+      // 工厂面：新快照**不再**含该插件；用户面：老设备的清单与包目录仍在。
+      val liveWeb = File(live, "home/.dsh/profiles/web")
+      SnapshotFs.createDirectories(liveWeb)
+      File(liveWeb, "cordis.patch.yml").writeText(
+        listOf(
+          "- id: keep-me",
+          "  name: '@dsh-android/keep-me'",
+          "- insert:",
+          "    - id: dsh-model-sync",
+          "      name: '@aiwayds/dsh-model-sync'",
+          "- insert:",
+          "    - id: keep-me-too",
+          "      name: '@user/keep-me-too'",
+          "",
+        ).joinToString("\n"),
+      )
+      File(liveWeb, "package.json").writeText("{}\n")
+      val stalePackage = File(liveWeb, "node_modules/@aiwayds/dsh-model-sync/lib").apply { mkdirs() }
+      File(stalePackage, "index.js").writeText("stale")
+
+      SnapshotTransaction.swap(
+        filesDir = filesDir,
+        stagedRoot = stage,
+        usrDir = File(live, "usr"),
+        homeDir = File(live, "home"),
+        preservedNames = preserved,
+        fingerprint = "fp3",
+        startedAt = 3L,
+      )
+
+      val text = File(liveWeb, "cordis.patch.yml").readText()
+      assertFalse("被摘除插件的挂载条目必须消失", text.contains("id: dsh-model-sync"))
+      assertFalse("其包名也不得再出现", text.contains("@aiwayds/dsh-model-sync"))
+      assertTrue("其它挂载必须原样保留", text.contains("id: keep-me-too"))
+      assertTrue("用户自定义条目不得被误删", text.contains("@user/keep-me-too"))
+      assertFalse("存量包目录必须删除",
+        File(liveWeb, "node_modules/@aiwayds/dsh-model-sync").exists())
+      assertFalse("删空的作用域目录也应清理（留着空目录会让人以为包还在）",
+        File(liveWeb, "node_modules/@aiwayds").exists())
+
+      // 幂等：再来一次完整交换（必须重新铺好 staged 树——上一轮已把它换进 live），
+      // 迁移不得再有动作、更不得抛错。
+      val stage2 = SnapshotTransaction.stageRoot(filesDir)
+      SnapshotFs.createDirectories(stage2)
+      writeRuntime(stage2, "new-node-2", "new-profile-2")
+      val second = SnapshotTransaction.swap(
+        filesDir = filesDir,
+        stagedRoot = stage2,
+        usrDir = File(live, "usr"),
+        homeDir = File(live, "home"),
+        preservedNames = preserved,
+        fingerprint = "fp3",
+        startedAt = 4L,
+      )
+      assertTrue("第二遍不得再报迁移动作（幂等）：" + second.joinToString("；"),
+        second.filter { it.contains("dsh-model-sync") }.isEmpty())
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
 }

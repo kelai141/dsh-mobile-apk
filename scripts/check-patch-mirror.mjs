@@ -159,6 +159,11 @@ if (peer) {
   // 对端缺该文件时跳过（apk 仓独占脚本合法）。
   const MIRROR_TOP = [
     'scripts/build-apk-013.ps1',
+    // 门禁脚本**自身**也必须在镜像面（AGENTS.md 铁律 6 明文声明：「scripts/patches/** 与
+    // scripts/check-patch-mirror.mjs 是双仓逐字节镜像，单边演进必拒」）。此前它没被自己列进
+    // MIRROR_TOP，于是 apk 副本可以长期落后而本门禁**永远不会报**——本轮实测就是如此
+    // （coord 306 行 vs apk 305 行，差 P0-c 的 manage 条目）。自指条目是本门禁唯一的自守面。
+    'scripts/check-patch-mirror.mjs',
     // ST-06 纳入镜像面：云端自包含构建链自身也是「单边演进 = 幽灵缺陷」面（此前只在 apk 仓存在、
     // 被镜像检查显式 SKIP）；注入集单一常量 + 契约/门禁脚本同批纳入（0.13.8-b 批 B1）。
     'scripts/build-apk.mjs',
@@ -172,6 +177,15 @@ if (peer) {
     'scripts/ci-verify-snapshot.py',
     'scripts/build-snapshot-013.mjs',
     'scripts/lib/shell.mjs',
+    // 0.14.1：软链自净化模块（快照归档前归一化旧 Termux 前缀软链）同样双仓同源。
+    // build-snapshot-013.mjs 已在镜像面，其依赖模块若不入册就会出现「构建脚本同源、依赖单边演进」
+    // —— 云端自包含构建跑旧净化逻辑，产物照样带 111/113 条设备必然丢弃的软链。
+    'scripts/lib/symlink-sanitize.mjs',
+    // 0.14.1：Kotlin 单测数量回归门禁与基线。apk 仓的 check-release-gates.mjs 已把它列进清单，
+    // 但脚本与基线此前**只存在于协调仓** → apk 侧聚合门禁会因「脚本缺席」判红（云端自包含构建同理）。
+    // 门禁脚本自身 = 防线，必须与产物面同源；基线只许升档（--update-baseline 拒绝降级）。
+    'scripts/check-kotlin-test-count.mjs',
+    'scripts/kotlin-test-baseline.json',
     // 0.13.8-b 批 B2（ST-25/26/31 + §7.2）：制度性门禁、度量入口与 A1 seed 模块同样双仓同源
     // （云端自包含构建会跑它们；单边演进 = 云端跑旧门禁/旧 seed）。
     'scripts/check-state-registry.mjs',
@@ -195,7 +209,14 @@ if (peer) {
     // apk 仓那一侧同理（同名副本随 apk 仓提交，故 CI 检出 apk 仓即得）。
     'dsh-host-web-compat',
     'dsh-client-ui-responsive',
+    // 0.14.1 P0-c 补线：注入集（scripts/plugin-dirs.json 的 dirs）里凡在此缺席的目录 = 无门禁可拦的
+    // 镜像漂移面。本轮实测三处漏项：manage 曾单边演进 35 行（含块G F6 的 vd-shot SF token 反查
+    // 接线），apk 副本缺该接线而**编译与门禁全绿**——正是幽灵缺陷的定义形态（铁律 5）。
+    // 故把注入集全量对齐 MIRROR_TOP，而不是只补这一个。
     'plugins/dsh-android-bridge',
+    'plugins/dsh-android-manage',
+    'plugins/dsh-model-capability',
+    'dsh-shell-termux',
     'plugins/dsh-android-linux-env',
     'plugins/dsh-android-browser',
     'plugins/dsh-android-vdisplay',
@@ -207,6 +228,9 @@ if (peer) {
     'scripts/api-route-auth-policy.json',
     'vendor/dsh-undo-savepoint/PATCHES.md',
     'vendor/dshmarketplace-plugin/PATCHES.md',
+    // vendor/dsh-model-sync（@aiwayds/dsh-model-sync 固化副本）随插件于 0.14.1 **整体摘除**（用户裁定，
+    // 理由见 scripts/profile-web.cordis.patch.yml 的注释），故这里的镜像条目同批移除——
+    // 留着会让门禁对端缺失而 SKIP，看起来像「仍有一个 vendor 面在守」。
     'scripts/check-protocol-v2.mjs',
     'scripts/check-runtime-assets.mjs',
     'scripts/check-snapshot-fingerprint.mjs',
@@ -233,6 +257,25 @@ if (peer) {
     // 另一侧以旧阈值判红/判绿（基线是「事实值」，单边演进即口径分裂）。
     'scripts/check-tool-surface-budget.mjs',
     'scripts/tool-surface-budget.json',
+    // 插件单测门禁（0.14.1 §1.1b 决策 1 / §2.4）：声明集合新增它之后必须同批进镜像面——否则
+    // 单边演进可让云端链跑到旧副本（或对端缺文件）而本地链/CI 判绿，与 ST-17 同型缺陷。
+    'scripts/check-plugin-tests.mjs',
+    // 冷启动预算门禁（0.14.1 块F P0-2）：脚本 + 其消费的探针口径实现都双仓同源——只有一侧更新
+    // 判据会让另一侧以旧口径判绿（设备实测的 -1 正是「口径不同步」类事故）。
+    'scripts/check-boot-budget.mjs',
+    // 快照构建器产出面门禁（0.14.1 P0 反回归）：它断言「两树同版: build-snapshot-013.mjs」，
+    // 故必须自身也在镜像面——脚本若单边演进，云端链就不会跑这条反回归防线。
+    'scripts/check-snapshot-builder-output.mjs',
+    // 浏览器语法下限门禁（0.14.1 块C G-1）：构建期降级原语 + 判据都双仓同源——云端自包含构建会用
+    // apk 仓副本跑降级与判据，单边演进 = 两侧对「发往浏览器的 bundle 语法下限」口径分裂。
+    'scripts/check-browser-syntax-floor.mjs',
+    // 构建并发上限门禁（0.14.1 系统级约束）：它断言 lib/shell.mjs 的常量与三处消费面；单边演进
+    // 会让一侧仍吃满全部核心（MuMu 卡顿/系统不稳），故脚本 + 上限模块都进镜像面。
+    'scripts/check-build-parallel-cap.mjs',
+    // 屏幕范围判定的跨语言 fixture 同步器（0.14.1 审查 §8.3/§8.3b 收口）：它把插件侧权威源
+    // 复制成壳侧单测资源，是「引擎侧第一道门」与「壳侧执行点第二道门」等价的唯一真值链。
+    // 脚本单边演进 = 一侧按旧规则生成/校验副本，等价性无声失效。
+    'scripts/gen-screen-scope-fixture.mjs',
   ]
   /** 递归列出目录下所有文件（相对路径；node_modules/.git 排除）——目录级镜像面用。 */
   const walkAll = (dir, prefix = '') => {
@@ -246,14 +289,28 @@ if (peer) {
     }
     return out
   }
+  /**
+   * 目录级比对中**按设计逐侧不同**的生成物——它们不是镜像漂移，计入比对会让该目录永久判红
+   * （假红），反而失去「挡住真漂移」的判别力。两类，逐条具名（排除面刻意极小）：
+   *   - `*.tgz`：打包产物，子仓 .gitignore 已忽略；各自打包时按本侧源码生成，两侧本就不同源。
+   *   - `lib/catalog-snapshot.json`：由 build-snapshot-013.mjs 按**本次构建的 ABI 引擎树**生成
+   *     （实测 engineRootHint：coord=…/x86_64/root、apk=…/arm64/root），是构建期数据，
+   *     不属于铁律 5 的「src + package.json + lib 产物」镜像面。
+   * 除外：src/、test/、package.json 等源码仍全量逐字节比对。
+   */
+  const MIRROR_SKIP = [
+    /\.tgz$/,
+    /^plugins\/dsh-model-capability\/lib\/catalog-snapshot\.json$/,
+  ]
+  const mirrorKept = (rel, x) => !MIRROR_SKIP.some((re) => re.test(rel + '/' + x))
   for (const rel of MIRROR_TOP) {
     const mine = join(ROOT, rel)
     const theirs = join(peer, rel)
     if (!existsSync(mine)) { check(`镜像面源文件在场: ${rel}`, false, '本仓缺席（MIRROR_TOP 条目失效）'); continue }
     if (statSync(mine).isDirectory()) {
       if (!existsSync(theirs)) { skip(`镜像目录: ${rel}（对端无此目录）`); continue }
-      const mineFiles = walkAll(mine)
-      const peerFiles = walkAll(theirs)
+      const mineFiles = walkAll(mine).filter((x) => mirrorKept(rel, x))
+      const peerFiles = walkAll(theirs).filter((x) => mirrorKept(rel, x))
       const onlyMine = mineFiles.filter((x) => !peerFiles.includes(x))
       const onlyPeer = peerFiles.filter((x) => !mineFiles.includes(x))
       check(`镜像目录清单一致: ${rel}（${mineFiles.length} 文件）`,

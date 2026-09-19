@@ -13,6 +13,7 @@
  * 首版（无 ADB 通道实现时）：状态查询 + 审计 + 失败关闭引导——与 PRD "未授权全部失败关闭" 语义一致。
  */
 import { readFileSync, appendFileSync, mkdirSync, statSync, writeFileSync, renameSync, rmSync } from 'node:fs'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { join, dirname } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
@@ -22,6 +23,8 @@ import {
   decideScreenAccess,
   controlOpNeedsRealScreen,
   realScreenAdbCommandDenied,
+  adbCommandDisplayTokens,
+  screenTokensFromSfDump,
   isVirtualScreenId,
   type ScreenAccessDecision,
   type UserScreenScope,
@@ -378,6 +381,101 @@ function looksDangerousAdb(command: string): boolean {
   return PATTERNS_ADB.some((p) => p.test(c))
 }
 
+// ── 审查 §5.1 / S-5：授权门从**调用方**下沉到**服务面** ────────────────────────────────
+//
+// 缺陷形态：`gateFor(session)`（会话档位 danger-full-access）与危险命令黑名单此前只存在于
+// 工具壳（manage 的 guard、bridge 的 shell 工具）里，而服务面 `controlExec` / `execAdbShell`
+// **自身不判档位**。于是任何能 `ctx.get('androidPrivilege')` 的引擎侧代码（含市场装的第三方
+// 插件）都能直接驱动 uid 2000 特权 shell 或向屏幕注入输入，与用户选的会话档位无关。
+// in-tree 反例即 manage 的动画开关：同类命令经工具走会被黑名单拒，因为它是**内部直连**所以畅通
+// ——说明「危险命令一律拒绝」是工具壳的属性，不是通道的属性。
+//
+// 修法：判据下沉到服务面，且**单一真源**（工具壳的检查保留为 UX 快速路径，服务面是地板）。
+//
+// 会话来源（两级，都显式）：
+//   ① 调用点直接传 `{ session }`（首选）；
+//   ② 工具层进入时 `bindSession(session)` 绑定到**当前异步上下文**（AsyncLocalStorage）——
+//      manage 有 40+ 处私有面调用点分散在各 helper 里，逐个改签名既噪声大又易漏；
+//      绑定点放在每个工具入口的 `guard()` 内，语义等价于「这次调用属于哪个会话」。
+// 两者都没有 → **默认拒绝**（fail-closed：无来源的特权调用不接受）。
+//
+// 已知残余（如实登记）：恶意插件可以尝试 `bindSession(<别人的会话 id>)` 冒充来源——档位按该 id
+// 实时 resolve，故它需要先知道一个处于 danger-full-access 的会话 id；且每次特权调用都落审计
+// （含会话），事后可查。彻底消除需要上游提供「不可伪造的调用方身份」，不在本仓可控面。
+
+/** 特权执行面的授权上下文。 */
+export interface ControlAuth {
+  /** 调用方会话（模型视角）——用于 `gateFor` 的档位判定。 */
+  session?: unknown
+  /**
+   * 引擎内部**已知安全调用**：具名白名单（见 [INTERNAL_PRIVILEGED]）。
+   * 名字必须在注册表里，且本次命令必须通过该名字自带的校验器；每次调用留审计。
+   * **不是万能通行证**：未知名字 / 校验不过 / 该名字不适用于此 op 一律拒。
+   */
+  internal?: string
+}
+
+/**
+ * 需要会话档位的控制 op —— 「一旦被任意引擎侧代码直接驱动，等价于拿到 uid 2000 shell
+ * 或向设备屏注入输入」的面。
+ *
+ * 刻意不在列（各自的理由不同，别一刀切）：
+ *  - `browser*`：0.14.0 做过一次**正确方向**的纠偏（浏览器不该被设备控制门锁死，见 control-policy
+ *    的注释），本常量不把它加回来；它的权限档位问题走契约侧对齐（审查 §3.2-S5 / H-8）。
+ *  - `vdInfo`/`vdCreate`/`vdDestroy`/`state`/`snapshot`/`nodeText`/`screenshot`/`web*`：读面或
+ *    管理面，已被范围门与 A11Y_OPS 门覆盖；把它们也纳入会让「读设备状态」也变得过不去。
+ */
+const TIER_REQUIRED_OPS: readonly string[] = [
+  'shExec', 'shPull', 'shPush', 'shRemove',
+  'vdInput', 'vdLaunch', 'vdLaunchApp', 'vdMoveTask',
+  'click', 'longClick', 'setText', 'scroll', 'global',
+]
+
+/** 动画三开关（manage 的 android_env_prepare 读写面）。 */
+const ANIMATION_SCALE_KEYS = ['window_animation_scale', 'transition_animation_scale', 'animator_duration_scale']
+
+/**
+ * 动画三开关命令的**逐条形态**校验器（内部白名单不是「名字对了就放行」）。
+ * 只接受两种由本仓代码构造的形态：
+ *   读：`for k in <三键>; do echo R:$k=$(settings get global $k); done`
+ *   写：`settings put global <三键之一> <数值|null>`，可多段以 `;` 连接
+ */
+function isAnimationScaleCommand(command: string): boolean {
+  const text = command.trim()
+  if (text === 'for k in ' + ANIMATION_SCALE_KEYS.join(' ') + '; do echo R:$k=$(settings get global $k); done') return true
+  const parts = text.split(';').map((s) => s.trim()).filter((s) => s.length > 0)
+  if (parts.length === 0) return false
+  return parts.every((part) => new RegExp(
+    '^settings put global (' + ANIMATION_SCALE_KEYS.join('|') + ') ([0-9.]+|null)$').test(part))
+}
+
+/** 引擎内部已知安全调用注册表：名字 → 该名字**允许的命令形态**（形态外一律拒）。 */
+const INTERNAL_PRIVILEGED: Record<string, { why: string; allows: (command: string) => boolean }> = {
+  'sf-token-lookup': {
+    why: '屏幕范围判定自身要核对 SurfaceFlinger 的虚拟屏 token；这条 dumpsys 读命令是判定的组成部分，与档位无关',
+    allows: (command) => command.trim() === "dumpsys SurfaceFlinger | grep -E '^(Virtual Display |    name=)'",
+  },
+  'animation-scales': {
+    why: 'manage 的动画三开关读写（uiautomator dump 需要事件流安静）；形态由 isAnimationScaleCommand 逐条钉死',
+    allows: isAnimationScaleCommand,
+  },
+}
+
+/**
+ * 特权 shell 的超时口径（审查 §5.2 的错配修法）。
+ *
+ * **`shellTimeout < engineTimeout` 是硬不变量**：壳侧执行时限必须先到，引擎才能在命令真的
+ * 执行完 / 被壳侧终止之后拿到结论。反了（旧实现：壳侧 20s、引擎入队 8s）会制造
+ * 「假失败 + 副作用已发生」——模型按失败重试即**二次执行**（点击/输入/写入类 op 非幂等）。
+ * 单测 test/screen-scope.test.mjs 钉住这条不变量。
+ */
+export const SHELL_EXEC_TIMEOUT_MS = 20_000
+/** 引擎侧入队超时：必须**大于**壳侧执行时限（见上）。 */
+export const SHELL_QUEUE_TIMEOUT_MS = 25_000
+
+/** 当前异步上下文的调用方授权（由工具层 [AndroidPrivilegeService.bindSession] 绑定）。 */
+const callerAuth = new AsyncLocalStorage<ControlAuth>()
+
 /**
  * 热补丁（2026-08-27 真机实锤）：通道结果 → 模型文本。
  * 指定键的值仅 string 放行原样；其余类型一律 JSON.stringify 转写（含对象形状自证）——
@@ -530,6 +628,115 @@ export class AndroidPrivilegeService {
   }
 
   /**
+   * 块G F2：壳侧虚拟屏注册表当前登记的**全部** displayId（不按别名过滤）。
+   *
+   * 用途：raw shell 命令里显式出现 `-d <id>` 时，只有能证明该 id 属于一块虚拟屏才可放行
+   * （否则「用户只给 virtual-only」会连自己的虚拟屏截图都拿不到）。只认原生回报的 kind=virtual
+   * 且 displayId>0 的条目；注册表不可达一律空集（fail-closed：绝不凭命令里的数字自证是虚拟屏）。
+   * 只在命令确实带了目标 id 时才去问壳侧，保持低成本路径零额外往返。
+   */
+  /**
+   * 块G F2 + F6：一次 `vdInfo` 同时拿回**注册表的两个投影**（displayId 集合 + 别名集合）。
+   *
+   * 为什么合并成一次：控制队列是壳侧单线程（在途请求会被直接拒），两次分别问 vdInfo 不仅多一次
+   * 往返，还会在并发/交叉调用下互相踩。一次取回、两处使用。
+   * 注册表不可达 → 两个集合都为空（fail-closed）。
+   */
+  async registeredVirtualScreens(): Promise<{ ids: number[]; aliases: string[] }> {
+    try {
+      const r = await this.controlExec('vdInfo', {})
+      if (!r.ok) return { ids: [], aliases: [] }
+      const data = (r.data ?? {}) as { screens?: Array<{ alias?: string; displayId?: number; kind?: string }> }
+      const virtual = (data.screens ?? []).filter((s) => s.kind === 'virtual')
+      return {
+        ids: virtual
+          .map((s) => s.displayId)
+          .filter((id): id is number => typeof id === 'number' && Number.isInteger(id) && id > 0),
+        aliases: virtual
+          .map((s) => s.alias)
+          .filter((a): a is string => typeof a === 'string' && a.length > 0),
+      }
+    } catch {
+      return { ids: [], aliases: [] }
+    }
+  }
+
+  async registeredVirtualDisplayIds(): Promise<number[]> {
+    return (await this.registeredVirtualScreens()).ids
+  }
+
+  /**
+   * 块G F6：`dumpsys SurfaceFlinger` 的虚拟屏 **token ↔ 别名** 配对。
+   *
+   * 为什么需要（设备实测真因，见 screen-scope.ts 的 screenTokensFromSfDump）：`screencap -d` 吃的是
+   * **SurfaceFlinger display token**，而壳侧注册表（`vdInfo`）给的是 **DisplayManager displayId**；
+   * 两个 id 空间**不相交**——用 displayId 传 `-d` 对虚拟屏必然 Status -2，用 token 才出图。
+   * 故范围判定必须能核对 token 归属，否则「放行的值取不到图、能取到图的值被拒」。
+   *
+   * **必须先用 grep 收窄**（设备实测，别改回全量）：全量 `dumpsys SurfaceFlinger` 在本机是 31,590 B，
+   * 而虚拟屏段落在 **第 ~9,500 字节之后**，超出壳侧 capture 路径的 8 KiB inline 窗口（其余进 spool
+   * 文件、不回传）⇒ 全量取回**必然**拿不到 `Virtual Display` 行，反查恒空、判定恒拒。
+   * 收窄后只有 25 B 量级，稳稳落在窗口内。
+   *
+   * fail-closed：命令不可达/超时/解析不出 → 返回空数组（判定侧视为无 token 可核对 → 拒绝）。
+   */
+  async shellSfVirtualDisplayTokens(): Promise<Array<{ alias: string; token: string }>> {
+    try {
+      const r = await this.controlExec('shExec', {
+        // 只取「Virtual Display <token>」与其紧跟的 name= 行；输出 ~25 B。
+        command: "dumpsys SurfaceFlinger | grep -E '^(Virtual Display |    name=)'",
+        timeoutMs: 15_000,
+      }, SHELL_QUEUE_TIMEOUT_MS, { internal: 'sf-token-lookup' })
+      if (!r.ok) return []
+      const data = (r.data ?? {}) as Record<string, unknown>
+      const stdout = typeof data.stdout === 'string' ? data.stdout : ''
+      if (data.ok !== true || stdout.length === 0) return []
+      return screenTokensFromSfDump(stdout)
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * 块G F2：raw shell 命令的屏幕范围复查（三个执行点共用）。
+   *
+   * 与纯 `realScreenAdbCommandDenied` 的区别：命令里带了可解析的目标 display id 且**基础判据确实要拒**
+   * 时，才去问壳侧注册表核对；目标确为虚拟屏 → 放行。低成本路径（范围含 real / 命令不命中命令面 /
+   * 命令无目标屏）零额外往返——不为一条本来就不该拦的命令多打一次 vdInfo。
+   */
+  private async adbCommandScopeDenied(command: string): Promise<string | null> {
+    const base = realScreenAdbCommandDenied(this.screenScope(), command)
+    if (base === null) return null
+    if (adbCommandDisplayTokens(command).length === 0) return base
+    // 块G F2 + F6：两个 id 空间都核对——DisplayManager displayId（F2）与 SurfaceFlinger token（F6）。
+    //
+    // 顺序刻意如此（两个理由，都别改）：
+    //  ① **短路**：先只问注册表（一次 vdInfo，与 F2 既有开销一致）。命中即放行——绝大多数调用是
+    //     displayId 形态，不该为它们多打一次 SurfaceFlinger 往返。
+    //  ② **串行**：控制队列是壳侧单线程（`ControlQueue.enqueue` 在途时直接返回「已有在途的设备控制
+    //     请求」），发 SF 反查前**必须**等注册表那一跳结束。并发发请求会让后一个立即失败 → token
+    //     集合恒空 → 已注册虚拟屏的 token 也被拒（比不修更糟）。
+    const registry = await this.registeredVirtualScreens()
+    const byDisplayId = realScreenAdbCommandDenied(this.screenScope(), command, {
+      virtualDisplayIds: registry.ids,
+    })
+    if (byDisplayId === null) return null
+    // displayId 空间不命中：再核对 SurfaceFlinger token（只有这一路需要额外往返与别名集合）。
+    if (registry.aliases.length === 0) return byDisplayId
+    const sf = await this.shellSfVirtualDisplayTokens()
+    return realScreenAdbCommandDenied(this.screenScope(), command, {
+      virtualDisplayIds: registry.ids,
+      virtualAliases: registry.aliases,
+      sfVirtualDisplays: sf,
+    })
+  }
+
+  /** 同上，公开面（android_shell_exec 工具执行点在类外，需要经服务对象调用）。 */
+  shellCommandScopeDenied(command: string): Promise<string | null> {
+    return this.adbCommandScopeDenied(command)
+  }
+
+  /**
    * 会话级通道门（AI 能否获取——实时）：引擎级授权（三道门+门1）满足后，
    * 按 `exec.agent.session` 的档位 resolve；≠ danger-full-access 即拒绝。
    * 安全方向：会话切回 read-only/workspace-write → 下一次调用立即拒绝。
@@ -677,13 +884,76 @@ export class AndroidPrivilegeService {
   }
 
   /**
+   * 工具层入口绑定本次调用的会话（审查 §5.1 / S-5）。
+   *
+   * 为什么用 AsyncLocalStorage 而不是模块级变量：工具调用**可以并发**（同一引擎上多个会话），
+   * 模块级的「当前会话」会被并发调用互相覆盖——那正是 M5（browser 的 lastSnapshot 单槽）同型缺陷。
+   * ALS 把会话绑在**当前异步上下文**上，工具体内调用的所有嵌套 helper 自动继承。
+   */
+  bindSession(session: unknown): void {
+    if (session === undefined || session === null) return
+    callerAuth.enterWith({ session })
+  }
+
+  /** 本次调用的授权：显式参数 > 当前异步上下文绑定 > 无（fail-closed 拒绝）。 */
+  private resolveAuth(auth?: ControlAuth): ControlAuth {
+    if (auth?.internal !== undefined || auth?.session !== undefined) return auth
+    const bound = callerAuth.getStore()
+    return bound === undefined ? {} : bound
+  }
+
+  /**
+   * 特权面的服务侧授权（S-5）。`allowed:false` = 拒绝；`internal:true` = 走内部白名单放行
+   * （已审计，调用方可据此跳过危险命令黑名单）。
+   */
+  private authorizePrivileged(
+    auth: ControlAuth | undefined,
+    op: string,
+    command: string | undefined,
+  ): { allowed: true; internal: boolean } | { allowed: false; error: string } {
+    const resolved = this.resolveAuth(auth)
+    const internal = resolved.internal
+    if (typeof internal === 'string' && internal.length > 0) {
+      const entry = INTERNAL_PRIVILEGED[internal]
+      const ok = entry !== undefined && command !== undefined && entry.allows(command)
+      writeAudit({ action: 'privileged-internal', call: internal, op, command: command ?? '', result: ok ? 'ok' : 'denied-internal-shape' })
+      if (ok) return { allowed: true, internal: true }
+      return {
+        allowed: false,
+        error: `内部特权调用 ${internal} 未登记、或本次命令不在其允许形态内（服务面拒绝）——`
+          + '内部白名单按**命令形态**逐条校验，不是名字对了就放行。',
+      }
+    }
+    if (resolved.session === undefined) {
+      writeAudit({ action: 'privileged', op, command: command ?? '', result: 'denied-no-session' })
+      return {
+        allowed: false,
+        error: `缺少调用方会话：特权面（${op}）不接受无来源调用（服务面默认拒绝）。`
+          + '模型侧请经工具调用（工具层会绑定会话）；插件侧请显式传 { session }。',
+      }
+    }
+    const gate = this.gateFor(resolved.session)
+    if (!gate.ok) {
+      writeAudit({ action: 'privileged', op, command: command ?? '', result: 'denied-not-gated' })
+      return { allowed: false, error: gate.guidance }
+    }
+    return { allowed: true, internal: false }
+  }
+
+  /**
    * 0.13.5 W4：把一个壳桥操作交给壳侧执行。
    * 0.14.0 双通道（承载拆离）：只有 a11y 承载的 op（A11Y_OPS）要求无障碍在线；browser 与 vd 两组
    * 是 neverA11y（见 control-ops-pending.json），由壳侧 ControlCarrier 在无障碍关闭时照常承载——
    * 两条通道互不为前提，模型侧任一通道可用即可完成同类动作（不降级到 ADB/Shizuku——降级由工具层的策略决定）。
    */
-  async controlExec(op: ControlOp, args: Record<string, unknown>, timeoutMs?: number): Promise<ControlResult> {
+  async controlExec(op: ControlOp, args: Record<string, unknown>, timeoutMs?: number, auth?: ControlAuth): Promise<ControlResult> {
     if (!this.controlQueue) return { ok: false, error: '控制队列未装配（插件未挂载 webServer？）' }
+    // 审查 §5.1 / S-5：档位门在**服务面**复查（工具壳的检查是 UX 快速路径，不是唯一防线）。
+    if (TIER_REQUIRED_OPS.includes(op)) {
+      const command = typeof args.command === 'string' ? args.command : undefined
+      const decision = this.authorizePrivileged(auth, op, command)
+      if (!decision.allowed) return { ok: false, error: decision.error }
+    }
     if (A11Y_OPS.includes(op) && !this.a11yEnabled()) {
       // SPEC §4.2②：无障碍关（纯 Shizuku）不等于「这条路走不通」——语义树/ref 动作确实不可用，
       // 但**坐标操作仍然可用**。此前这里返回硬错误，模型拿到一句「先去开无障碍」就停在原地；
@@ -705,13 +975,24 @@ export class AndroidPrivilegeService {
           '若确实需要语义树/ref 动作，请由用户在系统设置里开启「DSH 设备控制」无障碍服务。',
       }
     }
-    // review C11 范围复查下沉到执行点：manage 工具层之外（其它插件/直连调用）不得绕过——
-    // a11y 承载的内容/输入 op 全部作用于真实屏前台窗口，范围不含 real 时在执行点拒绝。
-    const scope = this.screenScope()
-    if (controlOpNeedsRealScreen(op) && scope === 'virtual-only') {
-      return {
-        ok: false,
-        error: 'screen-out-of-scope: 用户当前开放屏幕范围为 virtual-only，不允许读取或操作真实屏幕。请由用户在设置中修改范围。',
+    // review C11 范围复查下沉到执行点：manage 工具层之外（其它插件/直连调用）不得绕过。
+    //
+    // 0.14.1 块G（F1）诊断修正：本判据此前是「按 op 名一刀切」——只看
+    // `controlOpNeedsRealScreen(op)` 与用户范围，**从不读 `args.screenId`**，命中后还硬编码
+    // 「不允许读取或操作真实屏幕」。于是范围 virtual-only、屏幕上确有 virtual-1 时，
+    // `snapshot`/`screenshot`（本就带 screenId 且此刻目标是虚拟屏）被判成「读真实屏」而拒绝。
+    // 用户实报的那条自相矛盾报文逐字来自这里——**是文案在撒谎，不是参数在漂移**
+    // （screenId 在 args 里全程都在，manage guard 用的也是完整实参）。
+    //
+    // 正确判据 = **目标屏**，不是 op 名：REAL_SCREEN_CONTROL_OPS 表达的是「这个 op 按设计作用于
+    // 屏幕内容」，而「这一次调用作用于哪块屏」必须由 args.screenId 经注册表解析后判定。
+    // 未知别名 → screen-not-found，未就绪虚拟屏 → screen-not-ready，真实屏+范围不含 real →
+    // screen-out-of-scope：三者都是 fail-closed，放宽的只是「目标确为虚拟屏且范围允许」这一例。
+    if (controlOpNeedsRealScreen(op)) {
+      const requested = typeof args.screenId === 'string' && args.screenId !== '' ? args.screenId : undefined
+      const decision = await this.screenAccessResolved(requested)
+      if (!decision.ok) {
+        return { ok: false, error: decision.reason + ': ' + decision.guidance }
       }
     }
     return this.controlQueue.enqueue(op, args, timeoutMs)
@@ -750,11 +1031,30 @@ export class AndroidPrivilegeService {
    * 0.14.0 前本方法在快照内经 Termux spawn `adb`（要无线调试配对 + 常驻 server）；0.14.0 起内置
    * adb 退役，失败一律回壳侧结构化 code/guidance（未安装 / 未启动 / 未授权 → 明确拒绝，非超时）。
    */
-  async execAdbShell(command: string): Promise<{ ok: boolean; stdout: string; guidance?: string }> {
+  async execAdbShell(command: string, auth?: ControlAuth): Promise<{ ok: boolean; stdout: string; guidance?: string }> {
+    // 审查 §5.1 / S-5：特权面在**服务面**复查档位与危险命令（工具壳的同名检查保留为 UX 快速路径）。
+    const decision = this.authorizePrivileged(auth, 'shExec', command)
+    if (!decision.allowed) return { ok: false, stdout: '', guidance: decision.error }
+    if (!decision.internal && looksDangerousAdb(command)) {
+      writeAudit({ action: 'shell-exec', args: { command }, result: 'denied-danger-service' })
+      return {
+        ok: false,
+        stdout: '',
+        guidance: '命令被特权 shell 通道危险检查拦截（系统配置/权限写面一律拒绝；自动审批不豁免）'
+          + '——该判据在**服务面**复查，任何插件直连同样生效。',
+      }
+    }
     // review C11：raw shell 是绕过页面/工具层的执行面——范围不含 real 时真实屏读写命令在此拒绝。
-    const scopeDenied = realScreenAdbCommandDenied(this.screenScope(), command)
+    // 块G F2：命令显式指定了目标屏（`-d <id>`）时按**目标屏**判定，不再按命令词一刀切。
+    const scopeDenied = await this.adbCommandScopeDenied(command)
     if (scopeDenied !== null) return { ok: false, stdout: '', guidance: scopeDenied }
-    const r = await this.controlExec('shExec', { command, timeoutMs: 20_000 })
+    // S-6：壳侧执行时限与引擎入队时限**同时**下发，且入队 > 壳侧（见 SHELL_QUEUE_TIMEOUT_MS 的说明）。
+    const r = await this.controlExec(
+      'shExec',
+      { command, timeoutMs: SHELL_EXEC_TIMEOUT_MS },
+      SHELL_QUEUE_TIMEOUT_MS,
+      auth,
+    )
     if (!r.ok) return { ok: false, stdout: '', guidance: r.error }
     const data = (r.data ?? {}) as Record<string, unknown>
     const stdout = typeof data.stdout === 'string' ? data.stdout : ''
@@ -767,24 +1067,37 @@ export class AndroidPrivilegeService {
    * 0.14.0 §6：不再有 adb 客户端语义——行先翻译成 exec / pull / push 步骤（`translateAdbLine`），
    * 再逐步投递到壳侧特权 shell 通道；`adb` 字符串不出现于执行面。
    */
-  async execAdbLine(line: string): Promise<{ ok: boolean; stdout: string; guidance?: string }> {
+  async execAdbLine(line: string, auth?: ControlAuth): Promise<{ ok: boolean; stdout: string; guidance?: string }> {
+    // 审查 §5.1 / S-5：与 execAdbShell 同一道服务面门（档位 + 危险命令黑名单）。
+    const decision = this.authorizePrivileged(auth, 'shExec', line)
+    if (!decision.allowed) return { ok: false, stdout: '', guidance: decision.error }
+    if (!decision.internal && looksDangerousAdb(line)) {
+      writeAudit({ action: 'shell-exec', args: { command: line }, result: 'denied-danger-service' })
+      return {
+        ok: false,
+        stdout: '',
+        guidance: '命令被特权 shell 通道危险检查拦截（系统配置/权限写面一律拒绝；自动审批不豁免）'
+          + '——该判据在**服务面**复查，任何插件直连同样生效。',
+      }
+    }
     // review C11：screencap+pull / uiautomator dump 等行同样要在执行点复查屏幕范围。
-    const scopeDenied = realScreenAdbCommandDenied(this.screenScope(), line)
+    // 块G F2：`screencap -p -d <虚拟屏 id>` 是**读范围内的屏**，必须与无参 screencap 区分开。
+    const scopeDenied = await this.adbCommandScopeDenied(line)
     if (scopeDenied !== null) return { ok: false, stdout: '', guidance: scopeDenied }
     const translated = translateAdbLine(line)
     if (!translated.ok) return { ok: false, stdout: '', guidance: translated.error }
     let out = ''
     for (const step of translated.steps) {
       if (step.kind === 'exec') {
-        const r = await this.controlExec('shExec', { command: step.command })
+        const r = await this.controlExec('shExec', { command: step.command, timeoutMs: SHELL_EXEC_TIMEOUT_MS }, SHELL_QUEUE_TIMEOUT_MS, auth)
         if (!r.ok) return { ok: false, stdout: out, guidance: r.error }
         const data = (r.data ?? {}) as Record<string, unknown>
         out += typeof data.stdout === 'string' ? data.stdout : ''
         continue
       }
       const r = step.kind === 'pull'
-        ? await this.controlExec('shPull', { remote: step.remote, local: step.local })
-        : await this.controlExec('shPush', { local: step.local, remote: step.remote })
+        ? await this.controlExec('shPull', { remote: step.remote, local: step.local }, SHELL_QUEUE_TIMEOUT_MS, auth)
+        : await this.controlExec('shPush', { local: step.local, remote: step.remote }, SHELL_QUEUE_TIMEOUT_MS, auth)
       if (!r.ok) return { ok: false, stdout: out, guidance: r.error }
       const data = (r.data ?? {}) as Record<string, unknown>
       if (data.ok !== true) return { ok: false, stdout: out, guidance: shellFailureText(data) }
@@ -1064,13 +1377,15 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
         return { ok: false, text: '命令被特权 shell 通道危险检查拦截（系统配置/权限写面一律拒绝；自动审批不豁免）' }
       }
       // review C11：屏幕范围在执行点复查（工具层黑名单之外）——virtual-only 下 screencap/input 等真实屏命令拒绝。
-      const scopeDenied = realScreenAdbCommandDenied(svc.screenScope(), command)
+      // 块G F2：命令带 `-d <id>` 时按**目标屏**判定（目标确为已注册虚拟屏则放行）。
+      const scopeDenied = await svc.shellCommandScopeDenied(command)
       if (scopeDenied !== null) {
         writeAudit({ action: 'shell-exec', args: { command }, result: 'denied-screen-scope' })
         return { ok: false, text: scopeDenied }
       }
       writeAudit({ action: 'shell-exec', args: { command }, result: 'ok' })
-      const r = await svc.execAdbShell(command)
+      // S-5：把会话显式传到服务面（服务面自己也会判一次档位；工具壳的检查只是快速路径）。
+      const r = await svc.execAdbShell(command, { session: (exec as { agent?: { session?: unknown } }).agent?.session })
       return r.ok
         ? { ok: true, stdout: r.stdout }
         : { ok: false, guidance: r.guidance ?? '', text: r.guidance ?? (r.stdout || '执行失败') }
@@ -1225,8 +1540,14 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
       if (k === 'turn/end') {
         // D13（§6.5 NT-22）：载荷是 {turn, reason: TurnEndReason}，没有 outcome 字段。
         // 旧实现判 `d?.outcome === 'success'` 恒 false（.live.ndjson 的 turn_end.ok 全灭）。
+        //
+        // 0.14.1 块H（详档 §5.2 选项 C）：除 ok 之外必须**同时**写 kind——壳侧完成态语义标签
+        // 优先消费 `turn_end.kind`（completed/aborted/blocked/error/max-tokens/interrupted），
+        // `ok` 只是兜底。此前只写 ok，于是 ok=false 时壳侧只能显示笼统的「结果未知」，
+        // 无法区分失败/被阻塞/被中断/被取消。kind 与 ok 同源（turnEndKind/turnEndOk 都读 reason.kind），
+        // 未知 reason 一律 `unknown`，绝不映射成 completed（不得把未知当成功）。
         const d = ev.data as { turn?: unknown; reason?: unknown }
-        appendLive(JSON.stringify({ t, s, k: 'turn_end', ok: turnEndOk(d?.reason) }) + '\n')
+        appendLive(JSON.stringify({ t, s, k: 'turn_end', ok: turnEndOk(d?.reason), kind: turnEndKind(d?.reason) }) + '\n')
         return
       }
       if (k === 'session/title') {

@@ -35,6 +35,29 @@ object NotifyCenter {
   private const val KEY_SELECTED_PREFIX = "channel."
   private const val KEY_SUPPRESS_FOREGROUND = "suppressForeground"
 
+  /**
+   * 前台抑制默认值（0.14.1 块J FIX-3，用户 2026-09-19 拍板取 A）：
+   * **false = 前台也投递系统通知（真·实时）**。
+   *
+   * 旧默认值 true 的后果（详档 §3.1 假设②，源码级确证）：前台时 `Face.REPORT` 命中
+   * `deliverEvent` 的抑制分支并 `return SUPPRESSED_FOREGROUND`——终态、不入队、无补投，
+   * 而消费侧已推进字节偏移，于是该条永久消失；退到后台后 `isForeground()` 为 false，
+   * 条件整体不成立，通知照常投递。**这就是用户上报的「必须划到后台才会推送」**。
+   *
+   * 公开成常量是为了让门禁/单测断言「默认值」本身，而不是断言源码里的字面量。
+   */
+  const val DEFAULT_SUPPRESS_FOREGROUND = false
+
+  /**
+   * 前台抑制偏好的 schema 代次（存量升级一次性归一化用）。
+   * 1 = 「默认不抑制」语义首次生效的那一代。
+   */
+  private const val KEY_SUPPRESS_SCHEMA = "suppressForegroundSchema"
+  private const val SUPPRESS_SCHEMA_CURRENT = 1
+
+  /** 归一化时把**旧值**备份到此键——绝不静默丢弃，便于事后核对存量设备。 */
+  private const val KEY_SUPPRESS_LEGACY = "suppressForegroundLegacy"
+
   /** 固定通知 ID（静默两类单条覆盖，NT-06「通知栏只有 2 条」）。 */
   const val ID_WATCHDOG = 0x1001
   const val ID_TODO = 0x1002
@@ -99,6 +122,60 @@ object NotifyCenter {
   @Volatile
   var listener: Listener? = null
 
+  /**
+   * 默认 listener（0.14.1 块J FIX-2）：把「被抑制」从**静默**变成用户可见反馈。
+   *
+   * 旧形态：`listener` 在全仓**从未被赋值**（详档 §1.2 第 6 项，源码级确证），于是
+   * `listener?.onForegroundSuppressed(...)` 是空操作——抑制发生时用户既没有系统通知、
+   * 也没有应用内提示，是「一切正常与彻底失败不可区分」的静默失败形态。
+   *
+   * 本实现只依赖**既有公开面**：`OverlayService.instance`（companion 里已有）与
+   * `OverlayService.flashStatus`（`OverlayService.kt:669`，internal，同模块可见）。
+   * 因此在**调用时刻**惰性解析实例——不持有 Activity/Service 引用，无泄漏面；服务不在时
+   * 退化为探针一行（可 run-as 读），绝不抛异常到 MuxClient 读线程。
+   */
+  private object ShellListener : Listener {
+    override fun onPermissionDenied() {
+      flash("通知未授权，任务完成不会提醒")
+    }
+
+    override fun onForegroundSuppressed(category: String) {
+      // FIX-1 起「抑制 = 延后」而非丢弃，文案必须如实反映（不得再说「已丢弃」）。
+      flash("通知已延后（前台抑制开启）：" + category)
+    }
+
+    override fun onChannelDegraded(category: String) {
+      flash("通知渠道已降级为静默：" + category)
+    }
+
+    private fun flash(msg: String) {
+      try {
+        OverlayService.instance?.flashStatus(msg)
+      } catch (t: Throwable) {
+        // 反馈面本身不得成为故障源（服务已销毁 / 主线程不可用）。
+        LogCollector.log("dsh-notify", "listener feedback failed: " + (t.message ?: t.javaClass.simpleName))
+      }
+    }
+  }
+
+  /**
+   * 有界注册（幂等；进程级一次）。调用点是 `NotifyStore.start`——通知消费的真实生命周期入口
+   * （EngineService.onCreate / 动作冷启动都会经它），而不是某个 Activity，因此不会随旋转/重建重复注册。
+   * @return true = 本次安装了默认实现（false = 已有（含外部）实现，不覆盖）
+   */
+  @Synchronized
+  fun installShellListener(): Boolean {
+    if (listener != null) return false
+    listener = ShellListener
+    return true
+  }
+
+  /** 解绑（测试 / 停机清理用）；已注册的默认实现同样被清掉。 */
+  @Synchronized
+  fun uninstallListener() {
+    listener = null
+  }
+
   fun prefs(context: Context): SharedPreferences =
     context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -111,10 +188,126 @@ object NotifyCenter {
     prefs(context).edit().putBoolean("cat." + category, value).apply()
   }
 
-  fun suppressForeground(context: Context): Boolean = prefs(context).getBoolean(KEY_SUPPRESS_FOREGROUND, true)
+  fun suppressForeground(context: Context): Boolean =
+    prefs(context).getBoolean(KEY_SUPPRESS_FOREGROUND, DEFAULT_SUPPRESS_FOREGROUND)
 
   fun setSuppressForeground(context: Context, value: Boolean) {
     prefs(context).edit().putBoolean(KEY_SUPPRESS_FOREGROUND, value).apply()
+    // 用户显式选择后即视为本代次已归一化：不得让一次性迁移再回头覆盖它。
+    prefs(context).edit().putInt(KEY_SUPPRESS_SCHEMA, SUPPRESS_SCHEMA_CURRENT).apply()
+    NotifyProbe.log(context.applicationContext, "dsh-notify", "suppressForeground set to " + value)
+  }
+
+  /**
+   * 存量升级迁移（0.14.1 块J FIX-3）：一次性、幂等、可审计。
+   *
+   * **为什么需要它 + 为什么形态是「不动 prefs」**：
+   *
+   * 1. 旧缺陷对用户的传导**不经过 prefs**——`suppressForeground()` 缺键即返回 true。即「存量用户」
+   *    的 prefs 里根本**没有** `suppressForeground` 键，抑制是**默认值**造出来的。全仓 `setSuppressForeground`
+   *    零调用（详档 §1.2 第 5 项，源码级确证），0.14.0-preview 起也从未接线——**没有任何发行版写过
+   *    这个键**。⇒ 把默认值改成 false，存量用户**立即**被修好，且无需改他们任何一个 prefs 字节。
+   * 2. 因此本函数**不覆盖**任何已存在的值：若磁盘上确有 `suppressForeground`，那只能是用户/自动化
+   *    显式写入的**真实意志**，静默改写它属于「代理信号当作真实状态」的反面错误（F-APK-02 同族）。
+   *    显式值原样保留，仅备份到 [KEY_SUPPRESS_LEGACY] 并在探针留痕，随后由设置页（FIX-4）可见可控。
+   * 3. schema 代次保证**只跑一次**：升级后用户再手动改开关，不会被下一轮启动的迁移抹掉。
+   *
+   * 双起点验收口径（与详档 §5.1 FIX-3 要求的「全新安装 + 存量升级各验一次」一致）：
+   *  - 全新安装：无键 → 生效值 false（前台真发）；
+   *  - 存量升级：无键（旧默认造出的抑制）→ 生效值 false（被修好）；
+   *  - 显式 true：原样保留 true（尊重用户），但探针记 explicit=true 供事后核对。
+   *
+   * @return 迁移后的生效值
+   */
+  fun ensureSuppressForegroundMigrated(context: Context): Boolean {
+    val app = context.applicationContext
+    val p = prefs(app)
+    if (p.getInt(KEY_SUPPRESS_SCHEMA, 0) >= SUPPRESS_SCHEMA_CURRENT) return suppressForeground(app)
+    val explicit = p.contains(KEY_SUPPRESS_FOREGROUND)
+    if (explicit) {
+      val old = p.getBoolean(KEY_SUPPRESS_FOREGROUND, DEFAULT_SUPPRESS_FOREGROUND)
+      p.edit().putBoolean(KEY_SUPPRESS_LEGACY, old).putInt(KEY_SUPPRESS_SCHEMA, SUPPRESS_SCHEMA_CURRENT).apply()
+      NotifyProbe.log(app, "dsh-notify", "suppressForeground migration: explicit=" + old +
+        " preserved (user choice, now surfaced in settings); default=" + DEFAULT_SUPPRESS_FOREGROUND)
+    } else {
+      // 唯一「无事可做」的分支：缺键即走新默认值。仍然记一行，让存量升级在设备上可被证实跑过。
+      p.edit().putInt(KEY_SUPPRESS_SCHEMA, SUPPRESS_SCHEMA_CURRENT).apply()
+      NotifyProbe.log(app, "dsh-notify", "suppressForeground migration: implicit (no stored key) -> default=" +
+        DEFAULT_SUPPRESS_FOREGROUND)
+    }
+    return suppressForeground(app)
+  }
+
+  // ── 设置页读写能力（0.14.1 块J FIX-4：把零调用的 setter 接到可观测的单一入口）──
+  //
+  // 壳侧只交付**读写能力**：设置页 UI 若落在 dsh-client-ui-responsive，属 T8 写面——本处给出
+  // T8 需要的唯一入口（一个读 + 一个写），JS 接线清单随交付说明交给 Lead 转 T8。
+  // 「先写后读回」而非回显入参：拒绝乐观置位（与 ShellState.DevLogControl 同纪律）。
+
+  /** 通知设置快照（可用作设置页初始态 + 写回后的读回值）。 */
+  fun settingsSnapshot(context: Context): JSONObject {
+    val app = context.applicationContext
+    val out = JSONObject()
+    out.put("ok", true)
+    out.put("suppressForeground", suppressForeground(app))
+    out.put("suppressForegroundDefault", DEFAULT_SUPPRESS_FOREGROUND)
+    val cats = JSONObject()
+    for (face in Face.values()) cats.put(face.category, enabled(app, face.category))
+    out.put("categories", cats)
+    return out
+  }
+
+  /**
+   * 设置项 key 是否合法（key 取值：`suppressForeground` / `cat.<category>`）。
+   *
+   * 抽成纯函数是为了让「未知 key 必须拒绝」在 JVM 上可断言——该判定**先于**任何 prefs 读写，
+   * 不依赖 Context。`applySetting` 是唯一调用方（单一真源，防两处漂移）。
+   */
+  fun settingKeyKnown(key: String): Boolean {
+    val category = key.removePrefix("cat.")
+    return key == KEY_SETTING_SUPPRESS || (key.startsWith("cat.") && Face.of(category) != null)
+  }
+
+  /**
+   * 设置页写入口（key 取值：`suppressForeground` / `cat.<category>`）。
+   * 未知 key 一律拒绝且不改任何 prefs（不得静默吞掉一次误写）。
+   * @return 写后读回的快照，附 `applied` 与 `reason`。
+   */
+  fun applySetting(context: Context, key: String, value: Boolean): JSONObject {
+    val app = context.applicationContext
+    val category = key.removePrefix("cat.")
+    if (!settingKeyKnown(key)) {
+      NotifyProbe.log(app, "dsh-notify", "notify setting rejected (unknown key): " + key)
+      return settingsSnapshot(app).put("applied", false).put("reason", "unknown-key")
+    }
+    if (key == KEY_SETTING_SUPPRESS) {
+      setSuppressForeground(app, value)
+      // 关掉抑制必须立刻把延后条目补投出去（否则用户以为关了却还在等）。唯一 flush 权威是
+      // [onSuppressForegroundChanged]（本处不得再直接调 NotifySuppressQueue.flush——两处判定会漂移）。
+      onSuppressForegroundChanged(app)
+    } else {
+      setEnabled(app, category, value)
+    }
+    val snap = settingsSnapshot(app)
+    // 读回必须按**同一结构**取（cat.* 落在 categories 子对象里，不在顶层）——否则读回恒 false，
+    // 会把每一次合法写入都误报成 readback-mismatch（乐观置位的反面：假阴性）。
+    val readBack = if (key == KEY_SETTING_SUPPRESS) {
+      snap.optBoolean(KEY_SETTING_SUPPRESS, false)
+    } else {
+      snap.optJSONObject("categories")?.optBoolean(category, false) ?: false
+    }
+    val ok = readBack == value
+    NotifyProbe.log(app, "dsh-notify", "notify setting applied key=" + key + " value=" + value +
+      " readBack=" + readBack + " ok=" + ok)
+    return snap.put("applied", ok).put("reason", if (ok) "ok" else "readback-mismatch")
+  }
+
+  /** 设置项 key（与 prefs 键同名字面量集中一处，避免设置页/迁移两处漂移）。 */
+  const val KEY_SETTING_SUPPRESS = "suppressForeground"
+
+  /** 设置页/长按入口的开关生效即时反馈：关掉抑制时立刻补投被延后的条目。 */
+  fun onSuppressForegroundChanged(context: Context) {
+    if (!suppressForeground(context)) NotifySuppressQueue.flush(context)
   }
 
   // ── 渠道选择：纯逻辑（JVM 可测）+ Android 胶水 ─────────────────────────
@@ -376,6 +569,9 @@ object NotifyCenter {
     // 而应用在前台时本来就有应用内提问 UI 兜底。
     if (face == Face.REPORT && foreground && suppressForeground(app)) {
       NotifyProbe.log(app, "dsh-notify", "notify suppressed (foreground): " + face.category)
+      // FIX-1：抑制 = **延后**，不是丢弃。旧实现此处直接 return 终态，而消费侧已推进字节偏移
+      // ⇒ 该条永久消失（「必须划到后台才推送」的另一半成因）。改由待投队列承载，TTL 防陈旧。
+      NotifySuppressQueue.enqueue(app, entry, deferredKey(entry))
       listener?.onForegroundSuppressed(face.category)
       return Result.SUPPRESSED_FOREGROUND
     }
@@ -402,6 +598,27 @@ object NotifyCenter {
     )
     return Result.POSTED
   }
+
+  /**
+   * 待投队列的覆盖式去重键（FIX-1）。
+   *
+   * 同会话的多次汇报共用一个 `notificationId`（[notificationId] 的 `dsh-report:<sessionId>`），
+   * 因此延后队列必须用**同一粒度**去重——否则退后台会为同一会话补弹一串陈旧汇报，
+   * 与「覆盖式 ID」的既有语义自相矛盾。会话为空时退化为事件身份（不得让不同事件互相吞掉）。
+   */
+  internal fun deferredKey(entry: NotifyEntry): String = when {
+    entry.sessionId.isNotEmpty() -> "report:" + entry.sessionId
+    entry.eventId.isNotEmpty() -> "report:" + entry.eventId
+    else -> "report:" + entry.kind + ":" + entry.displayTitle()
+  }
+
+  /**
+   * 补投一条**被延后**的条目（FIX-1）：以 `foreground = false` 走正常投递主体，因此不再命中抑制判定。
+   *
+   * 为什么必须复用 [deliverEvent] 而不是自己拼通知：渠道选择、`entry.popup` 形态决策、权限/类别门、
+   * 通知 ID 覆盖、探针记账五处都只应有一个实现。补投路径另写一份等于制造第二真源。
+   */
+  fun deliverDeferred(context: Context, entry: NotifyEntry): Result = notifyEvent(context, entry, foreground = false)
 
   fun hasPermission(app: Context): Boolean =
     Build.VERSION.SDK_INT < 33 ||

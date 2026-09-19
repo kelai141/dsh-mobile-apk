@@ -107,6 +107,9 @@ class OverlayLiveFeed(private val svc: OverlayService) {
                 // 45s 兜底退化为「45s 内无任何 live 活动」，live 唯一回退恢复有效。
                 svc.optimisticBusyAt = System.currentTimeMillis()
                 if (!svc.sessionBusy) { svc.sessionBusy = true; svc.turnStartedAt = System.currentTimeMillis() }
+                // 块H-A1：任一 tool_call = 新一轮已开始 → 清除上一轮的完成位（否则 A 轮完成后
+                // B 轮进行中仍显示「已完成」，详档 §3.1 硬性 2）。
+                svc.onTurnStart()
                 svc.toolCount++
                 // 模板化显示（用户拍板）：live 行自带 name + args（bridge 0.1.1 已在产）——
                 // 思考=Deep diving 扫光；调工具=工具类型+概览。
@@ -139,6 +142,18 @@ class OverlayLiveFeed(private val svc: OverlayService) {
                 svc.sessionBusy = false
                 svc.toolCount = 0
                 svc.currentToolName = ""; svc.currentToolSummary = ""
+                // 块H-A1 语义标签来源（详档 §3.1）：`ok` 只给布尔（且旧实现曾恒 false），
+                // `kind` 才是权威语义。二者都必须读：
+                //   kind 在场 → 映射为「已完成」/失败类标签（失败不得伪装成完成）；
+                //   只有 ok   → true→「已完成」/false→「结果未知」（不得把失败当成功）；
+                //   都缺      → 不置位，交给权威信号 api-session/status 的默认文案。
+                val kind = j.optString("kind", "")
+                val label = when {
+                  kind.isNotEmpty() -> turnEndLabel(kind)
+                  j.has("ok") -> if (j.optBoolean("ok", false)) "已完成" else "结果未知"
+                  else -> ""
+                }
+                if (label.isNotEmpty()) svc.onTurnEnd(s, label)
                 // 0.13.8 G1-2（缺陷 B-2）：turn_end 同时清理该会话的待答/待审批
                 // （轮次已结束，pending 必然过期——原实现只回白光环，卡片永挂）；
                 // 光环走 deriveHalo 唯一权威（不再直接 IDLE 绕过 PENDING）。

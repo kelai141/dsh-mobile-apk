@@ -40,30 +40,119 @@ object UndoGate {
    * the right to execute after [WATCH_MS]. A healthy probe disarms the wait.
    */
   fun onProbeFailure(context: Context, consecutiveFailures: Int): Boolean {
-    if (consecutiveFailures < TRIGGER_CONSEC_FAILURES) return false
     val now = System.currentTimeMillis()
-    val last = lastUndoAt(context)
-    if (last != null && now - last < RETRY_WINDOW_MS) {
-      Log.i(TAG, "auto-undo suppressed: last undo at $last (within retry window)")
-      return false
-    }
-    val armedAt = armFile(context).takeIf { it.exists() }?.readText()?.trim()?.toLongOrNull()
-    if (armedAt == null) {
-      try {
-        armFile(context).writeText(now.toString())
-      } catch (t: Throwable) {
-        Log.e(TAG, "auto-undo arm failed", t)
-        return false
+    return when (decide(consecutiveFailures, now, lastUndoAt(context), armedAt(context))) {
+      GateDecision.IDLE -> false
+      GateDecision.SUPPRESS -> {
+        // 只记一次：重试窗口内每 5s 一拍，逐拍落盘会刷爆观测文件（真实原因由 .undo-auto-done 承载）。
+        if (!suppressNoted) {
+          suppressNoted = true
+          record(context, "suppressed retry-window failures=" + consecutiveFailures + " lastUndoAt=" + lastUndoAt(context))
+        }
+        false
       }
-      Log.i(TAG, "auto-undo armed at $now; waiting $WATCH_MS ms")
-      return false
+      GateDecision.ARM -> {
+        suppressNoted = false
+        val armed = try {
+          armFile(context).writeText(now.toString())
+          true
+        } catch (t: Throwable) {
+          Log.e(TAG, "auto-undo arm failed", t)
+          record(context, "arm-failed " + (t.message ?: t.javaClass.simpleName))
+          false
+        }
+        if (armed) {
+          Log.i(TAG, "auto-undo armed at $now; waiting $WATCH_MS ms")
+          record(context, "armed failures=" + consecutiveFailures + " watchMs=" + WATCH_MS)
+        }
+        false
+      }
+      GateDecision.WAIT -> false
+      GateDecision.EXECUTE -> {
+        suppressNoted = false
+        record(context, "trigger failures=" + consecutiveFailures)
+        true
+      }
     }
-    if (now - armedAt < WATCH_MS) {
-      Log.i(TAG, "auto-undo delay: armed at $armedAt, waiting watch window")
-      return false
-    }
-    return true
   }
+
+  /**
+   * 自动回撤闸门的**纯决策**（JVM 可直接单测，不依赖 Context / 文件系统）。
+   *
+   * 抽出来的理由：本闸门是「自动 undo 到底会不会跑」的唯一判据，而它原先整体依赖
+   * Context + 文件读，导致这段决定「是否自救」的逻辑**零测试覆盖**——`planTick` 的熔断锁存
+   * 盲区正是同类「恢复判据无防线」的产物。把四态判定独立成纯函数后可直接断言。
+   *
+   * 语义（与 [onProbeFailure] 逐条对应）：
+   * - [GateDecision.IDLE]     未达触发阈值（[TRIGGER_CONSEC_FAILURES]），不动作；
+   * - [GateDecision.SUPPRESS] 距上次成功执行不足 [RETRY_WINDOW_MS]，防循环；
+   * - [GateDecision.ARM]      首次确认死亡：起 [WATCH_MS] 观察窗，留给引擎自愈的最后机会；
+   * - [GateDecision.WAIT]     观察窗未走完；
+   * - [GateDecision.EXECUTE]  观察窗走完仍不健康 → 放行执行。
+   *
+   * @param consecutiveFailures 看门狗给出的连续确认死亡拍数
+   * @param nowMs 当前墙钟毫秒
+   * @param lastUndoAtMs 上次自动 undo 成功时刻（无则 null）
+   * @param armedAtMs 观察窗起始时刻（未起窗则 null）
+   */
+  internal fun decide(
+    consecutiveFailures: Int,
+    nowMs: Long,
+    lastUndoAtMs: Long?,
+    armedAtMs: Long?,
+  ): GateDecision = when {
+    consecutiveFailures < TRIGGER_CONSEC_FAILURES -> GateDecision.IDLE
+    lastUndoAtMs != null && nowMs - lastUndoAtMs < RETRY_WINDOW_MS -> GateDecision.SUPPRESS
+    armedAtMs == null -> GateDecision.ARM
+    nowMs - armedAtMs < WATCH_MS -> GateDecision.WAIT
+    else -> GateDecision.EXECUTE
+  }
+
+  /** [decide] 的取值域。 */
+  internal enum class GateDecision { IDLE, ARM, WAIT, SUPPRESS, EXECUTE }
+
+  // ── 可观测性（0.14.1）：不受 DevLogPrefs 闸门的独立落盘 ─────────────────────
+  //
+  // 为什么需要独立通道：`LogCollector.log` 在 appContext == null 时直接 return，而 appContext 仅在
+  // `LogCollector.start` 内设置、后者受 `DevLogPrefs.isEnabled` 闸门且**默认 false** —— 于是默认
+  // 设备上「自动 undo 是否触发 / 是否成功」这类看门狗叙述行**全部落空**，用户无从判断回撤跑没跑
+  // （这正是「感觉自动 undo 失效了」的直接来源）。此处按 `.undo-auto-done` marker 的既有范式，
+  // 写一条**进程私有但恒在**的判据文件：run-as 可读，不依赖任何调试开关。
+  //
+  // 边界：不碰 LogCollector / boot-diag.log（T6 写面），自带独立文件与轮转。
+  private const val ATTEMPT_FILE = "undo-gate.log"
+  private const val ATTEMPT_MAX_BYTES = 64L * 1024
+
+  /** 观测行前缀（设备侧单条 grep；与 boot-segments 同类，机器可判）。 */
+  const val ATTEMPT_MARK = "dsh-undo-gate"
+
+  /** 本进程是否已记过「被重试窗口抑制」（每纪元只记一次）。 */
+  @Volatile private var suppressNoted = false
+
+  /**
+   * 落一条闸门观测（best-effort，绝不抛）。**不经 DevLogPrefs 闸门**——它必须在默认配置下可见。
+   * 超限轮转一代，与 boot-diag.log 同口径。
+   */
+  private fun record(context: Context, message: String) {
+    val line = ATTEMPT_MARK + " at=" + System.currentTimeMillis() + " " + message.replace('\n', ' ')
+    // 双写：LogCollector 打开时进统一日志面（顺序与上下文在一起），关闭时下面的文件仍在。
+    try { LogCollector.log(TAG, message) } catch (_: Throwable) {}
+    try {
+      val f = File(context.filesDir, ATTEMPT_FILE)
+      if (f.length() > ATTEMPT_MAX_BYTES) {
+        val prev = File(context.filesDir, ATTEMPT_FILE + ".1")
+        try { prev.delete() } catch (_: Throwable) { /* 旧代删不掉不影响本轮追加 */ }
+        try { f.renameTo(prev) } catch (_: Throwable) { /* 轮转失败则继续追加 */ }
+      }
+      f.appendText(line + "\n")
+    } catch (_: Throwable) {
+      // 观测面本身不得成为故障源（磁盘满 / 目录不可写）。
+    }
+  }
+
+  /** 观察窗起始时刻（无则 null）。 */
+  private fun armedAt(context: Context): Long? =
+    armFile(context).takeIf { it.exists() }?.readText()?.trim()?.toLongOrNull()
 
   /**
    * 执行自动 undo（必须后台线程调用）：
@@ -78,6 +167,7 @@ object UndoGate {
       val cli = File(context.filesDir, "undo-emergency.mjs")
       if (!cli.exists()) {
         Log.e(TAG, "auto-undo aborted: emergency CLI not deployed at " + cli.absolutePath)
+        record(context, "aborted cli-missing at=" + cli.absolutePath)
         return UndoResult(false, "急救 CLI 未部署", null)
       }
       // 先确认有快照（空库不执行，避免空转）
@@ -86,11 +176,12 @@ object UndoGate {
       // 空库 → 自动回退从未执行）。此分支只是「不执行」并给出可区分的摘要，不吞掉区别。
       if (list.any { it.contains(ProcIo.TIMEOUT_FLAG) }) {
         Log.w(TAG, "auto-undo aborted: emergency CLI list timed out; snapshot state unknown")
-        LogCollector.log(TAG, "auto-undo aborted: snapshot list timed out (" + ProcIo.TIMEOUT_FLAG + ")")
+        record(context, "aborted list-timeout flag=" + ProcIo.TIMEOUT_FLAG)
         return UndoResult(false, "急救 CLI 超时：快照清单状态未知（非「无快照可回滚」）", null)
       }
       if (!list.any { it.startsWith("2026") || it.startsWith("20") } && !list.any { it.contains("[auto]") }) {
         Log.i(TAG, "auto-undo skipped: no snapshots found")
+        record(context, "skipped no-snapshots listLines=" + list.size)
         return UndoResult(false, "无快照可回滚", null)
       }
       val out = runCli(context, engine, cli, dsh, listOf("restore-last-good"))
@@ -98,9 +189,10 @@ object UndoGate {
       val summary = out.joinToString("\n")
       if (ok) {
         markerFile(context).writeText(System.currentTimeMillis().toString())
-        LogCollector.log(TAG, "auto-undo executed: restore-last-good ok")
+        record(context, "executed ok snapshot=" + (restoreTarget(out) ?: "?"))
       } else {
         Log.e(TAG, "auto-undo failed: " + summary)
+        record(context, "executed failed exitSummary=" + summary.take(160).replace('\n', ' '))
       }
       // 0.13.1 W3：急救触发即镜像现场到共享目录（引擎循环崩溃导致用户完全无法取日志的场景）。
       engine.mirrorDiagnosticsToShared("undo-gate")

@@ -17,6 +17,7 @@ $pluginSrcs = @('dsh-shell-termux','dsh-client-ui-responsive','dsh-host-web-comp
 #     Abort if any repo has uncommitted changes — otherwise tgz/APK ship uncommitted code that can't be diffed for troubleshooting.
 $gitRepos = @('dsh-shell-termux','dsh-client-ui-responsive','dsh-host-web-compat','dsh-mobile-apk')
 if (-not $SkipGitCheck) {
+  $checked = 0
   foreach ($repo in $gitRepos) {
     $dirty = & git -C (Join-Path $root $repo) status --porcelain 2>$null
     if ($LASTEXITCODE -ne 0) { throw ("git 不可用或仓库缺失: " + $repo) }
@@ -24,8 +25,27 @@ if (-not $SkipGitCheck) {
       throw ("发布中止：$repo 有未提交改动（共 " + ($dirty.Count) + " 项）——请先提交或显式 -SkipGitCheck。`n" +
         ($dirty | Select-Object -First 5 | ForEach-Object { "  " + $_ }) -join "`n")
     }
+    $checked += 1
   }
-  Write-Output "== git 工作区干净（4 仓库）"
+  # 协调仓根（0.14.1 §1.1b 决策 1 / §2.4 前置项 2）：上面四个子仓**漏掉了协调仓根自身**——
+  # plugins/** 与 scripts/** 有未提交改动不会绊停发布链，而这两处正是注入集与门禁的实现面
+  # （漏掉 = 发布产物可追溯到未提交的门禁/插件源码，正是本门禁要防的那种不可 diff 交付）。
+  # 布局判定：只有**协调仓布局**（根下存在 dsh-mobile-apk 子仓）才做本检查；apk 自包含树里
+  # 根本身就是 apk 仓（已在上面列表中，`dsh-mobile-apk` 子目录不存在）——不做本检查，避免重复。
+  # pathspec 限定到**喂给发布产物的目录**：根级未跟踪草稿（.tmp-*、临时截图、研究目录）不属发布面，
+  # 不该拦发布；用全仓 status 会把它们当脏（实测根仓有数十项此类未跟踪文件）。
+  $coordRoot = Test-Path (Join-Path $root "dsh-mobile-apk")
+  if ($coordRoot) {
+    $releasePaths = @('plugins','scripts','vendor','LICENSES')
+    $dirtyRoot = & git -C $root status --porcelain -- @releasePaths 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "git 不可用或协调仓根不是 git 仓库" }
+    if ($dirtyRoot) {
+      throw ("发布中止：协调仓根有未提交改动（发布面 " + ($releasePaths -join '/') + "，共 " + ($dirtyRoot.Count) + " 项）——请先提交或显式 -SkipGitCheck。`n" +
+        ($dirtyRoot | Select-Object -First 5 | ForEach-Object { "  " + $_ }) -join "`n")
+    }
+    $checked += 1
+  }
+  Write-Output ("== git 工作区干净（" + $checked + " 个仓库面）")
 }
 
 # 0b) 门禁聚合入口（0.13.8-b 批 B2 FX-208.E2 发布链 / F-ENV-13）：发布组装必须跑与打包**同源**的

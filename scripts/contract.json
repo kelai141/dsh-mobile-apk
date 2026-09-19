@@ -113,11 +113,50 @@
     "slots": [
       "shell.overlay",
       "conversation.session.header.utilities",
-      "sidebar.right.pane.tab"
+      "sidebar.right.pane.tab",
+      "settings.section",
+      "settings.general.item"
     ],
     "rowId": "ui-layout",
     "enabledRow": "ui-layout",
-    "ownRoot": false
+    "ownRoot": false,
+    "declarations": [
+      {
+        "slot": "shell.overlay",
+        "file": "packages/client/ui-layout/src/client/index.ts",
+        "kind": "list",
+        "scope": "root",
+        "why": "0.14.0 起框架由上游 ui-layout 持有：shell.overlay 是「与既有条目并列新增」的整帧表面座位（悬浮球/悬浮窗/注入层的承载面）。上游若把它改成 single 或换 bundle，注入层渲染即静默失效。"
+      },
+      {
+        "slot": "conversation.session.header.utilities",
+        "file": "packages/client/ui-conversation/src/client/contract/slots.ts",
+        "kind": "list",
+        "scope": "session",
+        "why": "会话头部工具条（源码实测 scope=session，非 root）：注入层在此挂移动端按钮。上游把它收成 single 会让后注册者覆盖前者（按钮互相吞掉）。"
+      },
+      {
+        "slot": "sidebar.right.pane.tab",
+        "file": "packages/client/ui-sidebar-right/src/client/contract/slots.ts",
+        "kind": "keyed",
+        "scope": "session",
+        "why": "右栏标签页座位（AI 浏览器面板 / 虚拟屏 viewer 的落点）。实测更正：真实声明是 kind=keyed + scope=session，不是 list/root —— 按 tab.kind 以 id 注册。把它当 list 会导致「以为可并列而实际按 key 覆盖」的错判，故此处按源码实测值钉住（首次断言即在此项判红，证明判据有效）。"
+      },
+      {
+        "slot": "settings.section",
+        "file": "packages/client/ui-settings/src/client/contract/slots.ts",
+        "kind": "list",
+        "scope": "root",
+        "why": "设置页分区座位（0.14.1 §2.5 硬依赖）。升级即断风险实证：rc.1 有 settings.plugin.item（keyed），该项在 alpha.2 被删除，而 settings.section 在 alpha.2 仍成立 —— 故块 E（清除运行时缓存）与 0.14.3 的设置面一律基于 settings.section；本项把「它仍为 list/root」变成可判红的机器判据，而不是文档里的一句说法。"
+      },
+      {
+        "slot": "settings.general.item",
+        "file": "packages/client/ui-settings/src/client/contract/slots.ts",
+        "kind": "list",
+        "scope": "root",
+        "why": "通用设置项座位。零调用的 setSuppressForeground/setEnabled 接线（0.14.1 块 J FIX-4）与既有开发者选项都依赖它保持 list。"
+      }
+    ]
   },
   "envContract": {
     "repo": "dsh-shell-termux",

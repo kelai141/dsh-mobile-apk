@@ -24,7 +24,7 @@
     },
     {
       "source": "plugins/dsh-android-linux-env/src/index.ts",
-      "expected": 1
+      "expected": 3
     },
     {
       "source": "plugins/dsh-android-browser/src/index.ts",
@@ -285,6 +285,28 @@
       "access": "public",
 "publicResponseMarker": "sendJson(res, 200, await readVdToolSnapshot(faceOf()))",
       "rationale": "Only fail-closed VirtualDisplay readiness metadata is returned. It contains no pixels, UI tree, input, task command, shell output, path, or credential."
+    },
+    {
+      "id": "runtime-cache-scan",
+      "path": "/api/android/runtime-cache/scan",
+      "kind": "exact",
+      "registrationSource": "plugins/dsh-android-linux-env/src/index.ts",
+      "registration": "path: '/api/android/runtime-cache/scan'",
+      "endpointSource": "plugins/dsh-android-linux-env/src/index.ts",
+      "access": "protected",
+      "authMarker": "authorizeMobileRoute(req, authOptions())",
+      "authCallMarker": "authorizeMobileRoute(req, authOptions())"
+    },
+    {
+      "id": "runtime-cache-execute",
+      "path": "/api/android/runtime-cache/execute",
+      "kind": "exact",
+      "registrationSource": "plugins/dsh-android-linux-env/src/index.ts",
+      "registration": "path: '/api/android/runtime-cache/execute'",
+      "endpointSource": "plugins/dsh-android-linux-env/src/index.ts",
+      "access": "protected",
+      "authMarker": "authorizeMobileRoute(req, authOptions())",
+      "authCallMarker": "authorizeMobileRoute(req, authOptions())"
     }
   ]
 }

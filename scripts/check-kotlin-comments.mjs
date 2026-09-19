@@ -71,6 +71,23 @@ export function scanNested(text) {
   return hits
 }
 
+/**
+ * 审查 DOC-3：源文件备份副本扫描（`.bak` / `.orig` / 尾部 `~`）。
+ *
+ * `SnapshotTransaction.kt.bak` 曾与在用文件**逐字节相同**地躺在仓里（621 行）：既不参与编译、
+ * 也不被任何 `*.kt` 扫描覆盖 —— 任何人工 grep 或 `*.kt*` 通配扫描都会命中这份旧实现。
+ * 备份只该存在于 git 历史里。
+ */
+export const BACKUP_RE = /(\.bak|\.orig|~)$/
+export function findBackups(dir, out = []) {
+  for (const name of readdirSync(dir)) {
+    const full = join(dir, name)
+    if (statSync(full).isDirectory()) findBackups(full, out)
+    else if (BACKUP_RE.test(name)) out.push(relative(ROOT, full).replace(/\\/g, '/'))
+  }
+  return out
+}
+
 if (argv.includes('--self-test')) {
   // 两向自检：真嵌套必须命中；字符串里的 image/*、行注释里的 glob、普通 KDoc 不得误报。
   const NL = String.fromCharCode(10)
@@ -82,9 +99,14 @@ if (argv.includes('--self-test')) {
   const hits = scanNested(bad).length
   const falsePositives = scanNested(okString).length + scanNested(okLine).length + scanNested(okRaw).length
   const pass = hits === 1 && falsePositives === 0
-  console.log((pass ? 'KOTLIN-COMMENTS SELF-TEST PASSED' : 'KOTLIN-COMMENTS SELF-TEST FAILED')
-    + '（真嵌套命中 ' + hits + ' / 期望 1；误报 ' + falsePositives + ' / 期望 0）')
-  process.exit(pass ? 0 : 1)
+  // 备份扫描的判别力自证（DOC-3）：必须命中 .bak/.orig/尾部 ~，且不得误伤正常文件名。
+  const backupHits = ['SnapshotTransaction.kt.bak', 'X.orig', 'Y.kt~'].filter((n) => BACKUP_RE.test(n)).length
+  const backupMisses = ['SnapshotTransaction.kt', 'README.md', 'a.bak.kt'].filter((n) => BACKUP_RE.test(n)).length
+  const allPass = pass && backupHits === 3 && backupMisses === 0
+  console.log((allPass ? 'KOTLIN-COMMENTS SELF-TEST PASSED' : 'KOTLIN-COMMENTS SELF-TEST FAILED')
+    + '（真嵌套命中 ' + hits + ' / 期望 1；误报 ' + falsePositives + ' / 期望 0；'
+    + '备份命中 ' + backupHits + ' / 期望 3；备份误报 ' + backupMisses + ' / 期望 0）')
+  process.exit(allPass ? 0 : 1)
 }
 
 let files = 0
@@ -102,7 +124,13 @@ const walk = (dir) => {
   }
 }
 walk(base)
-console.log('扫描 .kt 文件: ' + files + '（根: ' + relative(ROOT, base).replace(/\\/g, '/') + '）')
+const backups = findBackups(base)
+if (backups.length > 0) {
+  console.error('CHECK-KOTLIN-COMMENTS FAILED（发现 ' + backups.length + ' 个源文件备份副本，请在 git 历史里留档后删除）：')
+  for (const b of backups.slice(0, 10)) console.error('  - ' + b)
+  process.exit(1)
+}
+console.log('扫描 .kt 文件: ' + files + '（根: ' + relative(ROOT, base).replace(/\\/g, '/') + '；备份副本 0）')
 if (failures.length > 0) {
   console.error('CHECK-KOTLIN-COMMENTS FAILED（' + failures.length + ' 处嵌套块注释）：')
   for (const f of failures.slice(0, 10)) console.error('  - ' + f)

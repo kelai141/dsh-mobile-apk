@@ -145,6 +145,10 @@ class EngineService : Service() {
                 Thread {
                   val result = UndoGate.execute(this, engineManager)
                   if (result.executed) {
+                    // 0.14.1：配置回滚成功后必须解除熔断锁存。tripped 一旦为真即永久 HOLD，
+                    // 只有 HEALTHY 探活或 EngineStartFlow 的唯一一处 reset 能解——而 undo 成功
+                    // 正是「引擎应当重新可用」的时点，此处不复位会让恢复后的世代白白被锁住。
+                    WatchdogV2.reset()
                     LogCollector.log("dsh-watchdog", "auto-undo ok -> " + (result.snapshotId ?: "?"))
                     engineManager.resetCooldown()
                     engineManager.startEngine()

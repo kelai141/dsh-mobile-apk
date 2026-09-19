@@ -2,6 +2,7 @@ package com.dsharnessmobile.shell
 
 import android.util.Log
 import java.io.File
+import java.io.IOException
 import java.io.InputStream
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
@@ -33,12 +34,30 @@ object SnapshotExtractor {
    *   must still accept them; after the atomic swap they resolve correctly. Defaults
    *   to [dest] for in-place extraction.
    */
+  /**
+   * 解压上限（审查 §5.11 / S-10）：默认值按快照真实体量的 3–5 倍留余量
+   * （实测：条目 ~6 万、解压后 ~2.5 GB、单文件最大 ~200 MB）。
+   * 做成**可注入**而不是硬编码常量，是为了让单测能用小上限真跑一遍判据
+   * （写一个 24 万条目的归档去测等于让测试自己变成解压炸弹）。
+   */
+  data class Limits(
+    val maxEntries: Int = 240_000,
+    val maxTotalBytes: Long = 8L * 1024L * 1024L * 1024L,
+    val maxSingleFileBytes: Long = 2L * 1024L * 1024L * 1024L,
+  ) {
+    companion object {
+      /** 生产口径。 */
+      val DEFAULT = Limits()
+    }
+  }
+
   fun extract(
     input: InputStream,
     totalBytes: Long,
     dest: File,
     onProgress: (Long, Long) -> Unit,
     runtimeRoot: File = dest,
+    limits: Limits = Limits.DEFAULT,
   ) {
     val xz = XZCompressorInputStream(input)
     val tar = TarArchiveInputStream(xz)
@@ -49,8 +68,23 @@ object SnapshotExtractor {
       destCanon
     }
     var done = 0L
+    var entries = 0
     var entry: TarArchiveEntry? = tar.nextEntry
     while (entry != null) {
+      // 解压上限（审查 §5.11 / S-10）：本层自认是「沙盒边界」（在线更新走明文 HTTP 可篡改），
+      // 但旧实现只防了路径穿越，**没防解压炸弹**——xz 炸弹/海量小文件足以撑爆 /data 并长时间占 CPU。
+      // 上限按快照真实体量的 3–5 倍留余量（实测：条目 ~6 万、解压后 ~2.5 GB、单文件最大 ~200 MB）。
+      entries += 1
+      if (entries > limits.maxEntries) {
+        throw IOException("快照归档条目数超限（>" + limits.maxEntries + "），已中止解压")
+      }
+      done += entry.size.coerceAtLeast(0)
+      if (done > limits.maxTotalBytes) {
+        throw IOException("快照归档解压体量超限（>" + limits.maxTotalBytes + " 字节），已中止解压")
+      }
+      if (entry.size > limits.maxSingleFileBytes) {
+        throw IOException("快照归档单文件超限（" + entry.name + " > " + limits.maxSingleFileBytes + " 字节），已中止解压")
+      }
       // 路径穿越防护（2026-08-23 安全审计 CRITICAL 修复）：拒绝绝对路径/../ 越界 /
       // 符号链接逃逸——在线更新快照由明文 HTTP（可篡改）路径提供，此层是沙盒边界。
       val target = resolveEntry(dest, destCanon, entry)

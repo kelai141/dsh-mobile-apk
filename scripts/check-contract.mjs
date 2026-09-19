@@ -87,6 +87,54 @@ if (contract.clientSlots.enabledRow !== undefined) {
   else ok('profile patch 保留 ' + contract.clientSlots.enabledRow + ' 启用')
 }
 
+// 槽位**声明面**（0.14.1 §1.1b 决策 1 第 3 项）：上面的 §4 只断言「我们注册了哪些槽」，
+// 全是**我方源码里挑字符串**——上游把槽删掉/改 kind/改 scope 时它照样绿（文本还在我方文件里）。
+// 这是「注入层在升级后静默失效」的真实盲区，本段用**上游声明源**做结构性判据：
+//   · 从上游该槽的声明文件里定位声明块（单行 `'x': { ... }` 或多行 `'x': {\n ... \n}` 两种形态）；
+//   · 断言 kind / scope 与 contract.json 记录的实测值一致（kind=keyed/list/single，scope=root/session）。
+// 判红理由分两类且文案分开：槽**消失**（升级删槽）与 kind/scope **漂移**（语义变更）是不同事故。
+if (Array.isArray(contract.clientSlots.declarations) && contract.clientSlots.declarations.length > 0) {
+  console.log('== 4b. 槽位声明面（上游 kind/scope 与实测值一致；防升级静默失效） ==')
+  for (const d of contract.clientSlots.declarations) {
+    const declFile = join(root, contract.upstreamRepo, d.file)
+    if (!existsSync(declFile)) {
+      skip('上游声明文件不在场: ' + d.file + '（只读 checkout；CI/自包含树不含）——槽 ' + d.slot + ' 未执行')
+      continue
+    }
+    const text = readFileSync(declFile, 'utf8')
+    const key = "'" + d.slot + "'"
+    const at = text.indexOf(key)
+    if (at < 0) {
+      fail('槽 ' + d.slot + ' 在上游声明源里消失（' + d.file + '）：注入层注册将静默落空')
+      continue
+    }
+    // 声明块 = 键之后到首个 `}` 为止（单行与多行两种写法都覆盖；槽值内无嵌套对象字面量）。
+    const rest = text.slice(at + key.length)
+    const braceOpen = rest.indexOf('{')
+    const braceClose = rest.indexOf('}')
+    if (braceOpen < 0 || braceClose < braceOpen) {
+      fail('槽 ' + d.slot + ' 的声明块无法解析（' + d.file + '）——上游写法变更，需人工核对')
+      continue
+    }
+    const block = rest.slice(braceOpen, braceClose + 1)
+    const kind = (/\bkind\s*:\s*'([a-z]+)'/.exec(block) ?? [, null])[1]
+    const scope = (/\bscope\s*:\s*'([a-z]+)'/.exec(block) ?? [, null])[1]
+    if (kind === null || scope === null) {
+      fail('槽 ' + d.slot + ' 声明缺 kind/scope（' + d.file + ' 实测 kind=' + kind + ' scope=' + scope + '）')
+      continue
+    }
+    const kindOk = kind === d.kind
+    const scopeOk = scope === d.scope
+    if (kindOk && scopeOk) {
+      ok('槽 ' + d.slot + ' 声明面 == 实测（kind=' + d.kind + ' scope=' + d.scope + '）')
+    } else {
+      fail('槽 ' + d.slot + ' 声明漂移：实测 kind=' + kind + ' scope=' + scope
+        + '，登记期望 kind=' + d.kind + ' scope=' + d.scope
+        + '（kind 变更 = 并列/覆盖语义变了；scope 变更 = 注册作用域变了。改了上游就同步改 contract.json 并复核注入层注册面）')
+    }
+  }
+}
+
 console.log('== 5. 环境契约键 ==')
 const envText = readFileSync(join(root, contract.envContract.repo, 'src/index.ts'), 'utf8')
 for (const key of contract.envContract.keys) {

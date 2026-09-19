@@ -1,6 +1,7 @@
 package com.dsharnessmobile.shell
 
 import java.io.File
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -191,6 +192,32 @@ class W3ShellContractTest {
       code.contains("\"UV_THREADPOOL_SIZE\" to uvThreadPoolSize(Runtime.getRuntime().availableProcessors())"),
     )
     assertTrue("取值函数必须封顶 8 且下探 1", code.contains("internal fun uvThreadPoolSize(cores: Int): Int = minOf(8, cores.coerceAtLeast(1))"))
+  }
+
+  // ── 0.14.1 块K ③（反馈三）：pnpm store 路径别名 ──────────────────────────────
+
+  @Test
+  fun shellEnvPinsThePnpmStoreDir() {
+    // 判据（值这一半）：store 目录必须与 HOME 同源派生，且落在 pnpm 默认口径
+    // （$HOME/.local/share/pnpm/store）——不改变既有 store 位置，已装 node_modules 元数据继续有效。
+    // 注意：`File.path` 在 JVM(Windows) 与设备上分隔符不同，故**用 File 逐段比较**，
+    // 不比较字符串（否则单测只能在某一平台过 = 假绿/假红）。
+    val home = File(System.getProperty("java.io.tmpdir"), "dsh-pnpm-store-test-home")
+    assertEquals(
+      File(File(File(home, ".local"), "share"), "pnpm/store"),
+      File(pnpmStoreDir(home)),
+    )
+    assertTrue("store 必须落在 HOME 之下（pnpm 默认口径）", File(pnpmStoreDir(home)).startsWith(home))
+    // 反证：不得退化成其它位置（例如 profiles 下或 Termux 编译期写死的 /data/data/com.termux）。
+    assertFalse("store 不得落在 Termux 编译期路径", pnpmStoreDir(home).contains("com.termux"))
+    assertFalse("store 不得落在 profiles 下", pnpmStoreDir(home).contains("profiles"))
+
+    // 判据（注入这一半）：shellEnv() 必须真的把它注入引擎/控制台子进程 env。
+    val code = codeOnly(source("EngineManager.kt"))
+    assertTrue(
+      "③：shellEnv() 必须注入 npm_config_store_dir，否则 pnpm 仍按 CWD/HOME 自推、在 /data/data ↔ /data/user/0 两种写法间判「store 变了」",
+      code.contains("\"npm_config_store_dir\" to pnpmStoreDir(homeDir)"),
+    )
   }
 
   @Test

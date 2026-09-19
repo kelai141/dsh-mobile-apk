@@ -110,8 +110,45 @@ const BOOT_WATCHDOG_SCRIPT = `<script>(function(){
 if(window.__dshBootDiag){return}window.__dshBootDiag=true;
 var reloaded=false;
 try{reloaded=!!sessionStorage.getItem('dshBootReloaded')}catch(e){}
+// 结果性判据（2026-09-18，0.14.1 块C §2.3）：原触发条件是「Loading plugins 文案在场」，而该文案由
+// 上游 boot 页创建、与失败原因**同在入口 chunk 里** —— 入口模块因语法错误（老内核 static{}）整体不执行时
+// 文案永不存在，循环每轮提前 return，诊断浮层永不出现（自我参照死角）。
+// 现以「渲染结果」为主判据：#root / [data-dsh-frame] 有子节点，或 main/body 的可见文本超过阈值。
+// 原文案判据**保留为次要信号**（boot 页仍在场同样算 pending），不再是唯一门控。
+var RENDER_TEXT_FLOOR=120;
+// 壳侧 LogCollector/onConsoleMessage 抓的前缀标记（块L 契约；改动须同步 T6）
+var BOOT_STALL_PREFIX='[dsh-boot-stall]';
+// 页面**就绪**前缀（0.14.1 块L L-1）：壳侧 stall 判据此前用 MainActivity.webViewReady，
+// 而它等价于「webView 字段已初始化」——与页面是否渲染无关，于是一次健康启动被判卡住 7 次。
+// 真正表达「页面已就绪」的信号只能是页面自己报的：本脚本在结果性判据 rendered() 首次为真时
+// 报一条，壳侧据此把该 epoch 标为「已就绪」并**停止** stall 计时。
+var BOOT_READY_PREFIX='[dsh-boot-ready]';
+// 页面侧运行时取数的进度跟踪（waitingForMs 用）：变化即刷新 lastProgressAt。
+var lastProgressAt=Date.now();
+var lastProgressKey='';
+function textLen(el){
+  try{return ((el&&el.textContent)||'').replace(/\\s+/g,'').length}catch(e){return 0}
+}
+function rendered(){
+  try{
+    var root=document.getElementById('root');
+    if(root&&root.children&&root.children.length>0)return true;
+    var frame=document.querySelector('[data-dsh-frame]');
+    if(frame&&frame.children&&frame.children.length>0)return true;
+    var main=document.querySelector('main,[role="main"]');
+    if(main&&textLen(main)>=RENDER_TEXT_FLOOR)return true;
+    return textLen(document.body)>=RENDER_TEXT_FLOOR;
+  }catch(e){return false}
+}
 function pendingBoot(){
-  try{return /Loading plugins/i.test(document.body.textContent||'')}catch(e){return false}
+  // 主判据：已渲染出内容 => 不 pending（早退，正常启动路径）。
+  if(rendered())return false;
+  // 次要信号：上游 boot 文案在场 => 确实还停在 boot。
+  var t='';try{t=(document.body&&document.body.textContent)||''}catch(e){}
+  if(/Loading plugins/i.test(t))return true;
+  if(window.__DSH_BOOT__&&textLen(document.body)>0)return false;
+  // 既无渲染结果也无 boot 文案 => 入口模块可能整体未执行（原判据看不见的白屏死角）=> 按 pending 处理。
+  return true;
 }
 function collect(){
   var r={tookMs:0,ua:(navigator.userAgent||'').slice(0,180),manifest:null,bundleCount:0,pendingBundles:[],badBundles:[],engineHttp:null};
@@ -124,6 +161,153 @@ function collect(){
     r.badBundles=pl.filter(function(x){return x.responseStatus>=400}).map(function(x){return x.name+' #'+x.responseStatus});
   }catch(e){r.perfErr=String(e)}
   return r;
+}
+function fold(v){try{return String(v).replace(/[\\r\\n]+/g,' ').slice(0,2048)}catch(e){return ''}}
+// ── §6.2 运行时明细（0.14.1 块L L-2）──────────────────────────────────────────
+// 硬约束（详档 §6.2）：①不得让诊断依赖「页面已跑起来」才取数；②不得用静态文本作判据。
+// 取不到时该字段本身写字符串 unavailable，**绝不是空数组**——空数组正是本次
+// 「诊断看起来正常」误导的根源；「真值是空数组」与「取不到」必须可区分。
+//
+// 四字段的取数依据（逐条对照详档 §6.2 处方，含**为什么只有这些能取**）：
+//
+//   failedEntries   **真值**。BootPage.render() 把失败集合渲染成 [class*=failedItem] 子节点，
+//                   这是页面侧唯一真实可读的失败投影（上游 boot-page.ts 的 states Map 私有）。
+//   graphLoaded     **真值（三态）**。由 installProgressWatch 包一层 __ModuleLoader__.create 得来；
+//                   探针未装上时写 unavailable，不猜——false 与 unavailable 语义不同。
+//   waitingForMs    **真值**。最近一次可观测进度（DOM 变更 / create 调用）至今的毫秒数。
+//   pendingEntries  **不可得 → 显式 unavailable**（附 pendingEntriesReason）。理由：真正的待决集合
+//                   住在 boot.ts 私有的 Context 里（entry.fiber.inject ∩ ctx.get(s)===undefined，
+//                   boot.ts:148-150）。注入脚本只拿得到 window 全局，**拿不到模块内 ctx**；
+//                   上游是只读 checkout，不得为了取数去改上游导出。
+//                   ⇒ 用**真值替代**（见下两条），而**不是**把近似值写进该字段充数：
+//   pendingModuleQueue  **真值**。__ModuleLoader__.pendingQueue 里待决的模块请求数（模块系统
+//                   自己的队列）——回答「还有几个 bundle 没落地」，与 fiber 待决是两件事，故分列。
+//   declaredInjectEntries **真值**。服务端下发 manifest 里**声明了 inject** 的条目与其服务名。
+//                   这是真实的装配声明，可缩小排查面；但「声明了 inject」≠「正等该服务」，
+//                   故**不得**把它当 pendingEntries（那是编造诊断，正是本次用户被误导的事故形态）。
+function collectRuntime(){
+  var r={
+    pendingEntries:'unavailable',
+    pendingEntriesReason:'requires-upstream-loader-context-export',
+    failedEntries:'unavailable',
+    graphLoaded:'unavailable',
+    waitingForMs:'unavailable',
+    pendingModuleQueue:'unavailable',
+    declaredInjectEntries:'unavailable',
+  };
+  // graphLoaded：moduleLoader.create 的调用痕迹（monkey-patch 只包一次，见 installProgressWatch）
+  try{
+    var ml=window.__ModuleLoader__;
+    if(ml&&ml.__dshCreateCalled===true)r.graphLoaded=true;
+    else if(ml&&ml.__dshCreateCalled===false)r.graphLoaded=false;
+  }catch(e){r.graphLoaded='unavailable'}
+  // waitingForMs：进度停滞后经过的时间
+  try{r.waitingForMs=Date.now()-lastProgressAt}catch(e){r.waitingForMs='unavailable'}
+  // pendingModuleQueue：模块系统待决请求数（真值；空数组/0 是真值，不是「取不到」）
+  try{
+    var q=window.__ModuleLoader__&&window.__ModuleLoader__.pendingQueue;
+    if(q!==undefined&&q!==null&&q.length!==undefined)r.pendingModuleQueue=q.length;
+  }catch(e){r.pendingModuleQueue='unavailable'}
+  // declaredInjectEntries：服务端 manifest 的 inject 声明（真值；用于缩小排查面）
+  try{
+    var b=window.__DSH_BOOT__;
+    if(b&&b.entries&&b.entries.length){
+      var decl=[];
+      for(var i=0;i<b.entries.length;i++){
+        var e=b.entries[i];
+        if(!e||!e.inject)continue;
+        var svc=Object.keys(e.inject);
+        if(svc.length===0)continue;
+        decl.push({id:e.id,inject:svc});
+      }
+      r.declaredInjectEntries=decl;   // [] = 图里确实没有声明 inject 的条目（真值）
+    }
+  }catch(e){r.declaredInjectEntries='unavailable'}
+  // failedEntries：boot 页失败投影（真值）
+  try{
+    var out=[];
+    if(typeof document.querySelectorAll==='function'){
+      var items=document.querySelectorAll('[class*=failedItem]');
+      for(var j=0;j<items.length;j++){
+        var t=(items[j].textContent||'').replace(/\\s+/g,' ').trim();
+        if(t.length>0)out.push({id:t.slice(0,160),reason:'boot-page-failure-item'});
+      }
+    }
+    r.failedEntries=out;
+  }catch(e){r.failedEntries='unavailable'}
+  return r;
+}
+// 进度观测：把 create() 的调用与 DOM 变化记成「进度」，供 waitingForMs 计算。
+// 只包一层（幂等），不改模块系统行为——仅置一个标记位。
+// 必须可**重试**：本脚本在文档 head 末尾前求值，此时 __ModuleLoader__ 往往还没被装配脚本挂上；
+// 只装一次会导致 graphLoaded 永远是 unavailable。由 readyWatch 每拍重试。
+function installProgressWatch(){
+  try{
+    var ml=window.__ModuleLoader__;
+    if(ml&&typeof ml.create==='function'&&ml.__dshCreateCalled===undefined){
+      var orig=ml.create;
+      ml.__dshCreateCalled=false;
+      ml.create=function(){ml.__dshCreateCalled=true;lastProgressAt=Date.now();return orig.apply(this,arguments)};
+    }
+  }catch(e){}
+  try{
+    if(!window.__dshProgressObserver&&typeof MutationObserver!=='undefined'&&document.documentElement){
+      window.__dshProgressObserver=new MutationObserver(function(){lastProgressAt=Date.now()});
+      window.__dshProgressObserver.observe(document.documentElement,{childList:true,subtree:true});
+    }
+  }catch(e){}
+}
+function publishReady(){
+  // 页面**就绪**的运行时判据（与 pendingBoot 同一 rendered()，无静态文本）。
+  try{
+    if(window.__dshBootReadyPublished)return;
+    if(!rendered())return;
+    window.__dshBootReadyPublished=true;
+    var line=BOOT_READY_PREFIX+' dsh-boot-diag source=page-ready'
+      +' pageSideRuntime='+fold(JSON.stringify({readyAt:Date.now(),waitedMs:Date.now()-lastProgressAt}));
+    window.__dshBootReady=line;
+    // 与 stall 报告同一条消费通道（壳侧 onConsoleMessage 读前缀）。
+    try{console.error(line)}catch(e){}
+  }catch(e){}
+}
+function publish(report){
+  // 块L（0.14.1）页面侧诊断发布点：**一个赋值语句**、壳侧只读。
+  // 契约（Lead 定稿，字段名以此为准）：壳侧落盘 files/boot-diag.log，单条 grep 标记 dsh-boot-diag；
+  // 行格式 dsh-boot-diag source=<shell-stall|page-console|...> <dsh-boot-segments 快照>
+  // pageSideRuntime=... detail=<k=v 或 JSON，已折叠换行>。
+  // 注意：本段位于模板串内，注释里**不得出现反引号**（会把模板串提前截断，注入脚本整块失效）。
+  // 页面侧只负责提供 source=page-stall 的 detail 与可控前缀；分段快照与 pageSideRuntime 由壳侧组装。
+  // 硬约定：页面侧 **没有** fiber/渲染状态时写 pageSideRuntime=unavailable，绝不留空数组
+  // （空数组正是本次用户反馈「看起来正常」的误导根源）。
+  try{
+    var rt=collectRuntime();
+    // pageSideRuntime 携带**真实**的页面侧运行时字段（§6.2 处方四字段）。
+    // 取不到时该字段的值本身是字符串 unavailable（不是空数组、不是 {}）——空数组正是
+    // 本次「看起来正常」误导的根源；「真值是空数组」与「取不到」必须能区分。
+    var runtimeJson=fold(JSON.stringify(rt));
+    var detail='tookMs='+report.tookMs
+      +' ua='+fold(report.ua)
+      +' manifestCount='+(report.manifest&&report.manifest.count!==undefined?report.manifest.count:'unavailable')
+      +' bundleCount='+report.bundleCount
+      +' pendingBundles='+(report.pendingBundles||[]).length
+      +' badBundles='+(report.badBundles||[]).length
+      +' engineHttp='+(report.engineHttp===null?'unavailable':report.engineHttp)
+      +' rendered='+report.rendered
+      +' pendingBoot='+report.pendingBoot;
+    var payload={
+      marker:'dsh-boot-diag',
+      source:'page-stall',
+      // 壳侧 onConsoleMessage 收的就是这一行（前缀可控，见 BOOT_STALL_PREFIX）。
+      // 字段名与壳侧 LogCollector.writeBootDiag 的行格式同源（跨仓字段级契约，见其测试）。
+      line: BOOT_STALL_PREFIX+' dsh-boot-diag source=page-stall'
+        +' pageSideRuntime='+runtimeJson
+        +' detail='+fold(detail),
+      detail: report,
+      runtime: rt
+    };
+    window.__dshBootStallReport=payload;   // 唯一发布点（壳侧只读）
+    return payload;
+  }catch(e){return null}
 }
 function show(report){
   try{
@@ -143,15 +327,36 @@ async function run(){
   }
   if(!pendingBoot())return;
   var report=collect();report.tookMs=Date.now()-t0;
+  // 结果性判据明细一并落进报告（可诊断性：壳侧无需再猜页面状态）
+  try{report.rendered=rendered();report.pendingBoot=pendingBoot()}catch(e){report.rendered='unavailable';report.pendingBoot='unavailable'}
   var ac=new AbortController();var timer=setTimeout(function(){ac.abort()},3000);
   try{var res=await fetch(location.href,{method:'HEAD',cache:'no-store',signal:ac.signal});report.engineHttp=res.status}catch(e){report.engineHttp='ERR'}finally{clearTimeout(timer)}
-  try{console.error('[dsh-boot-stall]',report)}catch(e){}
+  // 壳侧的 onConsoleMessage 抓这一条（T6 写面：读该前缀 → writeBootDiag(source=page-console, detail=该行））。
+  // 必须打印**已折叠的单行**（payload.line），不是原始对象——对象经 console 序列化会多行、字段名也不是
+  // 壳侧解析的 k=v 口径，两边形对不上。
+  try{var pub=publish(report);console.error(pub?pub.line:BOOT_STALL_PREFIX+' dsh-boot-diag source=page-stall pageSideRuntime=unavailable detail=unavailable')}catch(e){}
   show(report);
   if(!reloaded){reloaded=true;try{sessionStorage.setItem('dshBootReloaded','1')}catch(e){}
     setTimeout(function(){try{location.reload()}catch(e){}},9000)
   }
 }
-if(document.body){run()}else{document.addEventListener('DOMContentLoaded',run)}
+// 就绪快报（0.14.1 块L L-1）：**与 40s 卡住循环分开**，以 500ms 粒度在前 60s 内持续看
+// rendered()，一旦为真立刻报一条 [dsh-boot-ready] 并停止。壳侧的 stall 计时据此在产品开始
+// 渲染的那一刻**就**复位——这是「健康启动不得被误报」的关键：stall 判据不得依赖 onPageFinished
+// （那只代表文档加载完，不代表页面渲染完/插件装配完），也不得依赖 webView 字段是否已初始化。
+function readyWatch(){
+  var t0=Date.now();
+  var tick=function(){
+    // 每拍重试装进度探针：__ModuleLoader__ 由装配脚本在本脚本之后挂上（见 installProgressWatch 注释）。
+    try{installProgressWatch()}catch(e){}
+    try{publishReady()}catch(e){}
+    if(window.__dshBootReadyPublished)return;
+    if(Date.now()-t0>60000)return;   // 边界：超窗口不再报（stall 路径接管）
+    setTimeout(tick,500);
+  };
+  setTimeout(tick,500);
+}
+if(document.body){readyWatch();run()}else{document.addEventListener('DOMContentLoaded',function(){readyWatch();run()})}
 })()</script>`;
 
 // Theme bridge: on some vendor WebViews (measured: vivo/Android 16) prefers-color-scheme does not
@@ -353,6 +558,75 @@ const POLYFILL_SCRIPT =
   '<script>' + POLYFILL_SCRIPT_BODY + '</scr' + 'ipt>' + BOOT_WATCHDOG_SCRIPT + THEME_BRIDGE_SCRIPT + PICKER_SCRIPT;
 
 /**
+ * §2.3（0.14.1 块C）静态失败占位 + `window.onerror` 兜底。
+ *
+ * 真因：入口 chunk 因解析期语法错误（老内核无 `static{}`）**整体不执行**时，上游 boot 页创建不出来、
+ * 我们的 BOOT_WATCHDOG_SCRIPT 也跑不到「诊断浮层」——用户只看到**纯白无字**，既没有失败提示、
+ * 也没有任何可报给维护方的信息。
+ *
+ * 本块的两个不变量：
+ *  1. **不依赖任何上游产物**：纯内联 HTML + 内联脚本，在 `</head>` 前最先求值，故入口 chunk 全灭时
+ *     它仍然生效（这正是「静态」二字的含义）。
+ *  2. **只在失败时出现，成功后必须消失**：用 `visibility:hidden` + `#dsh-static-fallback`，并在
+ *     `DOMContentLoaded` / 定时器里检查「页面是否真的渲染了」（`#root` 有子节点或 body 文本超阈值），
+ *     渲染成功即移除此节点——否则健康的页面会被这层占位挡住，等于把白屏换成另一种坏。
+ *
+ * `window.onerror` 只**记录**（进 `window.__dshStaticErrors` 并 `console.error` 一条带
+ * `[dsh-boot-stall]` 前缀的行），不吞异常、不改控制流；壳侧 `onConsoleMessage` 会把它落进
+ * `boot-diag.log`（§2.3 的壳侧半边），于是「纯白下台」变成可诊断下台。
+ */
+const STATIC_FALLBACK_SCRIPT = `<div id="dsh-static-fallback" style="position:fixed;z-index:2147483646;left:0;right:0;top:0;padding:12px 14px;background:#1e1e1e;color:#e8e8e8;font:13px/1.5 sans-serif">正在启动引擎界面…<br>若长时间停留在此页，请下拉退出后重新打开；仍失败请到「设置 → 开发者选项 → 打开控制台」查看日志。</div>
+<script>(function(){
+if(window.__dshStaticFallback){return}window.__dshStaticFallback=true;
+window.__dshStaticErrors=[];
+// 记录渲染期错误（含入口 chunk 的解析/执行错误）；不吞异常、不改控制流。
+window.addEventListener('error',function(e){
+  try{
+    var text=(e&&e.message)||'';
+    window.__dshStaticErrors.push(text);
+    // 与壳侧 onConsoleMessage 的 stall 前缀契约一致，使壳侧能落进 boot-diag.log。
+    console.error('[dsh-boot-stall] dsh-boot-diag source=page-error text='+String(text).slice(0,300)+' url='+String((e&&e.filename)||'')+':'+String((e&&e.lineno)||0));
+  }catch(x){}
+},true);
+// 成功后必须移除占位：健康页面绝不能被它挡住。
+// 判据与 BOOT_WATCHDOG_SCRIPT 的 rendered() 同义（结果性判据，不依赖任何上游文案）。
+var removed=false;
+function clearStaticFallback(){
+  if(removed)return;
+  try{
+    var root=document.getElementById('root');
+    var body=(document.body&&document.body.textContent)||'';
+    var rendered=(root&&root.children&&root.children.length>0)||body.replace(/\\s+/g,'').length>120;
+    if(!rendered)return;
+    var el=document.getElementById('dsh-static-fallback');
+    if(el&&el.parentNode)el.parentNode.removeChild(el);
+    removed=true;
+  }catch(x){}
+}
+try{document.addEventListener('DOMContentLoaded',clearStaticFallback)}catch(x){}
+try{setInterval(clearStaticFallback,500)}catch(x){}
+})()</script>`;
+
+/**
+ * 静态占位与既有 POLYFILL_SCRIPT 的**注入相互独立**：`POLYFILL_SCRIPT` 的幂等判据是
+ * `x-dsh-pick-token` 在场（见 tapIndex），若把静态占位塞进同一串，一旦该判据命中（页面里已有
+ * pick token 形状的文本），静态占位就会被一起跳过——而它恰恰是「入口全灭」时唯一的可见反馈。
+ * 故单独用 `dsh-static-fallback` 作为自己的幂等哨兵。
+ */
+const STATIC_FALLBACK_MARK = 'id="dsh-static-fallback"';
+
+/**
+ * 把静态失败占位注入 `</head>` 之前（最早求值）。幂等：已含哨兵则原样返回。
+ * @param html - 引擎返回的 index.html。
+ * @returns 注入后的 HTML（已注入或哨兵在场时返回原串）。
+ */
+function injectStaticFallback(html) {
+  if (typeof html !== 'string' || !html.includes('</head>')) return html
+  if (html.includes(STATIC_FALLBACK_MARK)) return html
+  return html.replace('</head>', STATIC_FALLBACK_SCRIPT + '</head>')
+}
+
+/**
  * Android directory-picker backend: kind 'native'. pick() waits for the
  * WebView page (polling the engine) to run the SAF chooser and POST the
  * real path back; abort cancels the pending request.
@@ -509,6 +783,12 @@ export function apply(ctx) {
   ctx.webServer.tapIndex((html) =>
     html.includes('x-dsh-pick-token') ? html : html.replace('</head>', POLYFILL_SCRIPT + '</head>')
   );
+
+  // §2.3（0.14.1 块C）静态失败占位：**独立于**上面的 pick-token 幂等判据注入。
+  // 上面那条 tapIndex 在 `x-dsh-pick-token` 在场时整体跳过（含 POLYFILL_SCRIPT），而静态占位恰恰是
+  // 「入口 chunk 全灭」时唯一的可见反馈——若与它共用判据就会被一起跳过。故单独一次 tapIndex
+  // （自带 `dsh-static-fallback` 哨兵幂等）。
+  ctx.webServer.tapIndex((html) => injectStaticFallback(html));
 
   // Android directory-picker backend: registered as ctx.directoryPicker.
   // Endpoint auth: the shell APK generates DSH_PICK_TOKEN on every start (engine env); the page JS

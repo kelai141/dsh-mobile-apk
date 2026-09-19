@@ -4,6 +4,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { BROWSER_TAB_ID, BROWSER_TAB_KIND, BrowserTab, browserTabDefinition } from '../src/client/mobile/browser-tab.tsx'
+import { SESSION_ID_ATTRIBUTE } from '../src/client/mobile/session-marker.ts'
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -146,15 +147,21 @@ describe('AI 浏览器 Files 侧栏工作台（0.14.0 极简面板）', () => {
   })
 })
 
-/** 找到 apply() 注册的揭示 effect（用桩 ctx 真跑 apply）。 */
-async function loadRevealEffect(opts: { status: () => string; openTab: (kind: string, o?: unknown) => void }) {
+/**
+ * 找到 apply() 注册的自动落位 effect（用桩 ctx 真跑 apply）。
+ *
+ * 0.14.1 块 D 后的契约：落位走**带会话的入口** `openTabIn(ownerSessionId, kind)`，且只在
+ * 壳侧 `ownerSessionId` 与 `<html data-dsh-session-id>` 一致时才动作——旧契约（无会话身份、
+ * 调 mounted `openTab`）正是已知 issue #1 的缺陷 A，已被本轮的回归用例锁定为不许回归。
+ */
+async function loadRevealEffect(opts: { status: () => string; openTabIn: (sessionId: string, kind: string, o?: unknown) => void }) {
   const { apply } = await import('../src/client/index.ts')
   const effects: Array<{ name: string; run: () => (() => void) | void }> = []
   const stub = {
     effect: (cb: () => (() => void) | void, name?: string) => { effects.push({ name: name ?? '', run: cb }); return () => {} },
     slots: { inject: () => () => {}, register: () => () => {} },
     get: (key: string) => {
-      if (key === 'sidebarRight') return { openTab: opts.openTab }
+      if (key === 'sidebarRight') return { openTabIn: opts.openTabIn }
       if (key === 'sidebarRightTabs') return { register: () => () => {} }
       return undefined
     },
@@ -169,51 +176,55 @@ async function loadRevealEffect(opts: { status: () => string; openTab: (kind: st
   return found
 }
 
-describe('AI 浏览器自动落位到右侧栏（0.14.0 P0-2：边沿触发 + 收起时延迟落位）', () => {
+describe('AI 浏览器自动落位到右侧栏（0.14.1 块 D：会话绑定 + 收起时延迟落位）', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     // 默认「侧栏展开」= 展开控件不在场；收起用例单独覆盖。
     document.body.innerHTML = ''
+    // 上屏会话 = s1（SessionMarker 发布的位置）；壳侧 ownerSessionId 必须与它一致才落位。
+    document.documentElement.setAttribute(SESSION_ID_ATTRIBUTE, 's1')
   })
   afterEach(() => {
     vi.useRealTimers()
     document.body.innerHTML = ''
+    document.documentElement.removeAttribute(SESSION_ID_ATTRIBUTE)
   })
 
   /** 让 status 可随调用变化，模拟壳侧状态演进。 */
-  function loadWithQueue(frames: string[], openTab: (kind: string, o?: unknown) => void) {
+  function loadWithQueue(frames: string[], openTabIn: (sessionId: string, kind: string, o?: unknown) => void) {
     let i = 0
     return loadRevealEffect({
       status: () => frames[Math.min(i++, frames.length - 1)] ?? '{}',
-      openTab,
+      openTabIn,
     })
   }
 
-  const page = (gen: number, url = 'https://example.com/') =>
-    JSON.stringify({ created: true, pageGeneration: gen, tabs: [{ tabId: 'tab-1', url }] })
+  const page = (gen: number, url = 'https://example.com/', owner = 's1') =>
+    JSON.stringify({ created: true, ownerSessionId: owner, pageGeneration: gen, tabs: [{ tabId: 'tab-1', url }] })
 
   it('首次观测只建立基线：不动作（避免启动时抢侧栏）', async () => {
     const calls: unknown[] = []
-    const eff = await loadWithQueue([page(1)], (k, o) => { calls.push({ k, o }) })
+    const eff = await loadWithQueue([page(1)], (s, k) => { calls.push({ s, k }) })
     await act(async () => { eff!.run() })
     await act(async () => { vi.advanceTimersByTime(3_000) })
     expect(calls.length).toBe(0)
   })
 
-  it('出现「新页面」（边沿）时落位一次，且不重复触发', async () => {
-    const calls: Array<{ k: string; o?: unknown }> = []
-    const eff = await loadWithQueue([page(1), page(1), page(2), page(2), page(2)], (k, o) => { calls.push({ k, o }) })
+  it('出现「新页面」（边沿）时按发起会话落位一次，且不重复触发', async () => {
+    const calls: Array<{ s: string; k: string }> = []
+    const eff = await loadWithQueue([page(1), page(1), page(2), page(2), page(2)], (s, k) => { calls.push({ s, k }) })
     await act(async () => { eff!.run() })
     await act(async () => { vi.advanceTimersByTime(5_000) })
     expect(calls.length).toBe(1)
     expect(calls[0].k).toBe(BROWSER_TAB_KIND)
+    expect(calls[0].s, '落位必须带发起会话身份（缺陷 A 的判据）').toBe('s1')
   })
 
-  it('收起态出现新页面：**不调 openTab**（不强制展开），展开后补一次', async () => {
+  it('收起态出现新页面：**不落位**（不强制展开），用户展开后补一次', async () => {
     // 收起态的设备实况 = 上游展开控件在场（权威信号）。
     document.body.innerHTML = '<button data-sidebar-right-expand="true"></button>'
-    const calls: Array<{ k: string; o?: unknown }> = []
-    const eff = await loadWithQueue([page(1), page(2), page(2), page(2)], (k, o) => { calls.push({ k, o }) })
+    const calls: Array<{ s: string; k: string }> = []
+    const eff = await loadWithQueue([page(1), page(2), page(2), page(2)], (s, k) => { calls.push({ s, k }) })
     await act(async () => { eff!.run() })
     await act(async () => { vi.advanceTimersByTime(2_500) })
     // 收起期间绝不落位——这是用户报「收起后自动展开」的根因。
@@ -222,11 +233,12 @@ describe('AI 浏览器自动落位到右侧栏（0.14.0 P0-2：边沿触发 + �
     document.body.innerHTML = ''
     await act(async () => { vi.advanceTimersByTime(2_000) })
     expect(calls.length).toBe(1)
+    expect(calls[0]).toEqual({ s: 's1', k: BROWSER_TAB_KIND })
   })
 
   it('页面未创建时不落位（避免开一个空面板）', async () => {
     const calls: unknown[] = []
-    const eff = await loadWithQueue([JSON.stringify({ created: false })], (k, o) => { calls.push({ k, o }) })
+    const eff = await loadWithQueue([JSON.stringify({ created: false })], (s, k) => { calls.push({ s, k }) })
     await act(async () => { eff!.run() })
     await act(async () => { vi.advanceTimersByTime(3_000) })
     expect(calls.length).toBe(0)
@@ -276,9 +288,18 @@ describe('可见性判据：收起 vs 全屏（0.14.0 设备实证三次修正�
     expect(src).not.toMatch(/closest\(\s*'\[data-rightbar-collapsed/)
   })
 
-  it('自动落位循环同样用「展开控件在场」作为收起判据', async () => {
-    const src = await import('node:fs').then((fs) => fs.readFileSync('src/client/index.ts', 'utf8'))
+  it('自动落位循环同样用「展开控件在场」作为收起判据（0.14.1 块 D 后策略在 mobile/browser-auto-place.ts）', async () => {
+    // 策略自 index.ts 抽到独立模块（缺陷 A/B 的修法需要可单测的会话绑定），判据位置随之迁移：
+    // 落位面见 browser-auto-place.ts，接线面见 index.ts（两者都必须只用权威收起信号）。
+    const src = await import('node:fs').then((fs) => fs.readFileSync('src/client/mobile/browser-auto-place.ts', 'utf8'))
     expect(src).toContain("document.querySelector('[data-sidebar-right-expand]')")
     expect(src).not.toMatch(/querySelector\(\s*'\[data-rightbar-collapsed[^)]*\)\s*!==\s*null/)
+    expect(src).not.toMatch(/closest\(\s*'\[data-rightbar-collapsed/)
+
+    const wiring = await import('node:fs').then((fs) => fs.readFileSync('src/client/index.ts', 'utf8'))
+    expect(wiring).toContain('domCollapsedNow')
+    expect(wiring).not.toMatch(/querySelector\(\s*'\[data-rightbar-collapsed[^)]*\)\s*!==\s*null/)
+    // 反向：旧的 mounted 入口不得再出现在落位接线里（那是缺陷 A 的调用形态）。
+    expect(wiring).not.toContain('sidebar.openTab?.(')
   })
 })

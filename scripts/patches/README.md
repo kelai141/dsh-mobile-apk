@@ -85,3 +85,101 @@ node scripts/patches/apply-patches.mjs vendor --list
   经 `inject-all.py --combo-cache-delta` 合入 tar；覆盖门禁 `scripts/check-combo-cache.mjs`。
   字节等价回归 `scripts/patches/tests/combo-cache-a3.test.mjs`（命中/缺席/篡改/id 不符/批路径五向）。
   fixture = 0.1.5-rc.1 产物（`tests/fixtures/dsh-client-modules-0.1.5-rc.1/`、`tests/fixtures/dsh-root-0.1.5-rc.1/`）。
+
+## 2026-09-19 0.14.1 块F（A5，scope=engine）
+
+- **新增 combo-single-lazy-A5**（同目标文件，`requires: combo-lazy-A4`）：A4 已把 `compose()` 收敛
+  为 1 次，但这一次仍无条件为全表每条记录 `buildCombo([record], rev)` 产出「单条 combo」，供
+  `/plugins/??<id>/client.js&rev=…` 使用——而单条 URL 的唯一生产者是 HMR `invalidate()`
+  （`client/system.ts:126-127` 只在 `reloadUrls` 有值时才用单条 `row.url`）。设备 CDP 实测 boot 期
+  浏览器只请求 2 个 `/plugins/` 资源（两个批 combo），56 条单条 combo 一条都没被请求——即那
+  2 795 ms 同步块里有一整块与「首个页面请求」无关。补丁把单条产物改为**首次被请求时**构建：
+  `compose()` 只登记（纯字符串键，无字节运算/无哈希）`单条 URL -> {record, sourceMap}` 映射，
+  `bundleResource()` 命中时 `buildCombo` 并缓存；批 combo 仍即时构建，`notifyGraphChanged()` /
+  `rebuilt()` 语义不变。
+  - **陈旧字节防线**：单条响应缓存按「组合世代」失效（每次 `compose()` 换新 Map）。**刻意不保留
+    上一代**——`reconcilePackage` 会换入新记录对象而旧对象仍持旧 rev，保留上一代就可能让旧 URL
+    交付被取代的字节；命中后仍用记录重建 artifact、把 `artifact.url` 与请求 URL 逐字符比对，记录
+    换 rev 后旧 URL 一律 404。未知 URL 404、非 GET/HEAD 405 的上游语义不变。
+  - **探针**：`globalThis.__dshMobileComboLazyStats = { records, singleBuilds, maxMs }`——
+    boot 期 `singleBuilds === 0` 证明「已延迟」，请求一条后变 1 证明惰性路径活着（专门区分
+    「已延迟」与「探针没接上」，即 `t_compose_total=-1` 的教训）。
+  - 字节等价回归 `scripts/patches/tests/combo-single-lazy-a5.test.mjs`（27 项：构造期零单条构建 /
+    正向对照计数 0→1 / script 与 sourceMap 逐字节 / contentType / 二次请求走缓存 / 换 rev 后旧 URL
+    404 / 同 rev 换字节返回重算值 / 未知 URL 404 / 405 / 批 combo 仍可服务）。
+
+  **适用范围提醒（第 3 项 C3 同此限制）**：上述实测环境为宿主 Node v24.17.0 x64 桌面，不是 MuMu
+  4 vCPU 设备；设备侧收益须按详档 §4 第 1 项的验收判据（`GET /` 首字节 A/B 交错 n≥5 取中位）实测，
+  本轮不写未测得的确定值。
+
+- **新增 combo-parallel-C3**（同目标文件，`requires: combo-lazy-A4, combo-cache-A3, combo-single-lazy-A5`）：
+  A3/A4/A5 之后剩下的仍是落在首个页面请求路径上的同步块。C3 把 `buildCombo` 的**逐记录字节计算**
+  分片到启动期临时 worker 池：A3 命中留主线程查表（A3 是字节真相源），identity 路径未命中走池；
+  `rev` 分配、`sections` 拼接、`framedHash`、`Buffer.from` 全部留主线程，语义与上游一致。
+  - **池生命周期**：每次组合过程创建、在同一过程 `finally` 里对每个 worker 调 `terminate()`——
+    比「启动完成后回收」更严格，稳态 RSS 不驻留。`K = min(2, cores - 1)`；
+    `DSH_MOBILE_COMBO_PARALLEL=0` 强制单线程（A/B 对照用）。
+  - **正确性不依赖池**：worker 不可用 / 分片超时（20 s deadline）/ worker 内抛错 → 回退主线程
+    现场生成并计数，绝不产出错误字节、也不挂死。
+  - **实现坑（宿主实测）**：步进同步必须把 `SharedArrayBuffer` **本体**放进 `workerData`；
+    传 `Int32Array` 视图会被结构化克隆（worker 内 `instanceof SharedArrayBuffer === false`），
+    主线程 `Atomics.wait` 永远等不到。worker 源码由 `dshMobileComboWorkerBody.toString()` 生成，
+    避免第二份手写复制与主线程实现漂移。
+  - 探针：`globalThis.__dshMobileComboParallelStats = { workers, shards, records, fallbackRecords,
+    terminateRequests, live }`。
+  - 回归 `scripts/patches/tests/combo-parallel-c3.test.mjs`（21 项：分片臂 vs 单线程臂**逐字节**比
+    `rev`/`script`/`sourceMap`/`url`，且显式并附「不是只比长度、不是只比哈希」两条元判据；批路径等价；
+    篡改记录后输出随之变化；池确实被用上；`terminate` 后线程真的退出 `live==0`）。
+  - **未确证项如实标注**：worker isolate 在 Android/Node v24 上的实际 RSS 增量与回收后回落
+    （详档 §6 第 8 项）本轮**未在设备上测**；测试只做宿主观测并打印，不把未测得阈值写成硬判据。
+    设备侧须按 §6 第 8 项实测 `/proc/<pid>/status` `VmRSS`。
+
+- **新增 combo-probe-P1**（同目标文件，`requires: combo-lazy-A4, combo-cache-A3, combo-single-lazy-A5, combo-parallel-C3`）：
+  把 compose 探针**送进产品内**，收口 `t_compose_total` 在设备上 42/42 恒为 -1。在 `compose()` 返回处
+  （= LISTEN 之后、首个页面请求路径上，正是 `check-boot-budget` C2 要测的那个同步块）打印：
+  ```
+  [perf] compose #N at=..ms dur=..ms instances=.. records=.. singles=.. comboCache=..
+  [perf] TOTAL calls=.. totalMs=.. instances=.. firstAt=..ms singles=.. loopP99Ms=.. loopSamples=.. comboCache=..
+  [perf] boot singles=.. records=..        （compose #1 之后一次，C5 反向判据）
+  [perf] single #N at=..ms singles=..      （单条 URL 被服务时，C5 正向对照）
+  ```
+  字段齐备，无值报 -1（绝不省字段）；`loopP99Ms`/`loopSamples` 取自 `monitorEventLoopDelay`
+  （宿主实测：它不会挂住事件循环退出）。
+  - **只主线程安装**（`isMainThread` 门）：worker 线程的 `calls=0` TOTAL 绝不得成为壳侧解析到的
+    最后一条 TOTAL。**为什么必须挡**（T6 设备实测的真因）：`--import`/`NODE_OPTIONS` 在 file-based
+    worker 线程里也会执行（Node v24.17 实测，引擎树至少 5 处 worker），worker 临终打 `calls=0`，
+    而壳侧取**最后一条** ⇒ 得到「非 -1 但为 0」——`check-boot-budget` C6 只查 `!= -1`，**抓不到**。
+    回归 `scripts/patches/tests/combo-probe-p1.test.mjs` 含该假绿的**反向对照**：同一 worker 场景下
+    有门静默 / 把门替换为恒 false 后 worker 真的产出 TOTAL，并证明壳侧「取最后一条」会被后者替换。
+  - **为什么不是 preload/注入方案**：`scripts/perf/count-compose.mjs` 的 TOTAL 只在
+    `process.on('exit')` 打印，那一刻落在 `killExistingEngine()` 内、**早于** `rotateEngineLog()` ⇒
+    上一代临终写的 TOTAL 被搬进 `engine.log.1`，新生代 probe tail 从偏移 0 起读 ⇒ 即使打进出厂件
+    大概率仍读到 -1；且 `NODE_OPTIONS` 会被 agent 的全部 node 子进程继承、preload 缺 `COMBO_LIB`
+    时直接 `exit(2)`，会打坏用户工具链。
+  - **不新增快照成员**（避开 `check-snapshot-file-modes` 时序与「测量脚本进产品树」争议）；
+    壳侧解析器零改动；与 `scripts/perf/count-compose.mjs`（设备取证用 preload）**格式同源**，
+    二者共用同一行契约，可互相校验。
+  - 自证：`node scripts/patches/tests/combo-probe-p1.test.mjs`（23 项）——① 不装本补丁时同一构造
+    取不到 TOTAL（保持 -1/unknown 语义）；② 装了之后取到真实 calls/totalMs 且四条格式行齐备；
+    ③ worker 线程不得冒充（含 ③b 无门反向对照 / ③c 取最后一条的顺序危害）。
+
+## 2026-09-19 第三方插件 boot 隔离（G3，scope=engine）
+
+- **新增 boot-third-party-isolation-G3**（目标 `dsh-app-boot/lib/index.js`）：真实用户反馈
+  （`报错反馈/0.14.0/20260919-125714-engine-died-during-boot`，华为 NOH-AN00 / Android 31 / arm64）
+  里用户自装的 `dsh-live2d-pets` 在 **import 期**抛 `SyntaxError`（上游 `@deepseek-ai/dsh-settings`
+  不再导出 `settingsNamespace`）→ 整树 boot 失败、engine exit=1。
+  - **`boot-pending-G1` 结构上无法覆盖**：G1 锚点全在 `assertEntriesActivated`
+    （`dsh-app-boot:1472-1505`），而这条失败在更早的 `boot():1552` → `mountRootInclude():553` →
+    `EntryTree.update`（`cordis-plugin-loader:86/97`）→ `updateError('import')`（`:309`）处就抛出，
+    `assertEntriesActivated:1555` **根本不可达**。所以不是「锚点漏分支」，是函数在这条路径上不可达。
+  - 修法：`boot()` 经**隔离式挂载器**挂 root include——失败条目若归属可证地属用户自装（裸包名且非
+    `@deepseek-ai/*` / `@dsh-android/*` / 出货具名插件），用既有 `applyEntryPatches` 的
+    `disabled: true` 覆盖后重试，并在 engine.log **点名**被跳过的插件。
+  - 不变量（与 G1 同口径更强）：官方包 / 出厂移动侧包失败**仍响亮失败**；**归属不可证的失败**
+    （相对/绝对路径、`file:`、其它带 scheme 的 specifier）**仍响亮失败**——路径不是「用户自装」的
+    证据，否则产品自身的相对路径条目坏掉会被静默跳过；**上限 8 个**，超过即失败并给完整清单。
+  - 与 G1 **锚点互不相交**，故不设 `requires`（避免假耦合）。
+  - 回归 `scripts/patches/tests/boot-third-party-isolation-g3.test.mjs`（27 项）+ 真实引擎树 A/B：
+    改前第三方臂 `BOOT-FAIL`、改后 `BOOT-OK` 且点名；官方臂改前改后均 `BOOT-FAIL`。
+  - **未确证**：A/B 在宿主（Node v24.17.0 x64 + 解包引擎树）完成，**未在设备上**装真坏插件跑冷启动。

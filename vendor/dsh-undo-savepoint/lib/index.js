@@ -634,7 +634,23 @@ function recodeSessionBytes(b) {
   if (re.status !== 'ok') throw new Error(`recode re-analysis failed: ${re.reason}`);
   return out;
 }
-/** 递归收集 <home>/sessions 下所有 session.jsonl.zstd。 */
+/**
+ * 会话原始日志文件名判据（含压缩后缀）。
+ *
+ * 引擎权威命名：`dsh/packages/session/session-format/src/filename.ts:5` 的
+ * `CANONICAL_LOG_FILENAME = /^session(?:\.v([1-9][0-9]*))?\.jsonl$/` —— v0 是
+ * `session.jsonl`，**每一代之后都带 `.vN`**（v3 → `session.v3.jsonl`）。
+ * 本插件读的是压缩落盘形态，故再追加 `.zstd`。
+ *
+ * 缺陷形态（用户 2026-09-19 实报，反馈六）：原实现只认字面量
+ * `session.jsonl.zstd`，而本版引擎写的是 **`session.v3.jsonl.zstd`** ⇒ `undo_scan`
+ * 恒扫 0 个文件（输出 `scanned 0 session file(s)`），该工具对本版用户完全无效。
+ * 只放宽到「带代数」，不改成通配 `*.jsonl.zstd`：临时/非规范名不得混入（与上游
+ * `parseSessionFormatLogFilename` 的「非规范名一律不认」口径一致）。
+ */
+const SESSION_LOG_FILENAME = /^session(?:\.v[1-9][0-9]*)?\.jsonl\.zstd$/i;
+
+/** 递归收集 <home>/sessions 下所有规范会话日志（v0 `session.jsonl.zstd` + 各代 `session.vN.jsonl.zstd`）。 */
 async function walkSessionFiles(cfg) {
   const root = join(cfg.homeDir ?? DSH_HOME, 'sessions');
   const out = [];
@@ -646,7 +662,7 @@ async function walkSessionFiles(cfg) {
     for (const e of entries) {
       const p = join(dir, e.name);
       if (e.isDirectory()) stack.push(p);
-      else if (e.isFile() && e.name.toLowerCase() === 'session.jsonl.zstd') out.push(p);
+      else if (e.isFile() && SESSION_LOG_FILENAME.test(e.name)) out.push(p);
     }
   }
   return out;
@@ -976,6 +992,29 @@ function makeId(now = new Date()) {
   const p = (n, w = 2) => String(n).padStart(w, '0');
   const ts = `${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`;
   return `${ts}-${randomBytes(2).toString('hex')}`;
+}
+
+/**
+ * 快照时间的**本地**展示口径（与快照 id 同源）。
+ *
+ * 缺陷形态（用户 2026-09-19 实报，反馈五）：快照 id 由 [makeId] 用本地时间字段拼成
+ * （`getFullYear/getHours`），而 manifest 的 `time` 字段是 `new Date().toISOString()`
+ * （**UTC**）。`undo_list` 直接把这个 UTC 串切片展示，于是同一份快照出现两个相差时区
+ * 偏移的时刻（用户实测 id `20260919-120038` vs 显示 `2026-09-19 04:00:38`，差 8 小时），
+ * 且 id 与显示时间**对不上**，用户无法用显示时间去核对 id。
+ *
+ * 修法：展示一律按本地时间格式化，与 id 同口径；无法解析时原样回显（不伪造时刻）。
+ * @param time - 快照 manifest 的 `time`（ISO-8601 UTC 串）。
+ * @returns `YYYY-MM-DD HH:mm:ss`（本地时区）；入参不可解析时返回其原样切片。
+ */
+function fmtSnapshotTime(time) {
+  const raw = typeof time === 'string' ? time : '';
+  if (raw === '') return '';
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return raw.replace('T', ' ').slice(0, 19);
+  const p = (n, w = 2) => String(n).padStart(w, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+    + ` ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 async function pathExists(p) {
@@ -2245,10 +2284,10 @@ export function apply(ctx, config = {}) {
           + (s.profileFiles ?? []).filter((f) => f.hash).length;
         const truncated = (s.plugins ?? []).some((p) => p.truncated);
         const sizeTxt = typeof s.totalBytes === 'number' ? `, ${fmtBytes(s.totalBytes)}` : '';
-        return `${s.id}  ${(s.time ?? '').replace('T', ' ').slice(0, 19)}  ${s.kind}${mark ? ` [${mark}]` : ''}${truncated ? ' [truncated]' : ''}  [${loc}]  ${(s.reason ?? '').slice(0, 50)}  (${s.files.length} file(s)${pluginCount > 0 ? `, ${pluginCount} plugin file(s)` : ''}${sizeTxt})`;
+        return `${s.id}  ${fmtSnapshotTime(s.time)}  ${s.kind}${mark ? ` [${mark}]` : ''}${truncated ? ' [truncated]' : ''}  [${loc}]  ${(s.reason ?? '').slice(0, 50)}  (${s.files.length} file(s)${pluginCount > 0 ? `, ${pluginCount} plugin file(s)` : ''}${sizeTxt})`;
       });
       const alert = cfg.bootAlert?.crashed
-        ? `⚠️ Previous DSH run did not finish starting (crashed or was killed).${lastGood ? ` Last known-good snapshot: ${lastGood.id} (${(lastGood.time ?? '').replace('T', ' ').slice(0, 19)}${lastGood.reason ? `, ${lastGood.reason}` : ''}).` : ''} You may want to undo back to it: undo_restore mode "id" snapshot_id ${lastGood?.id ?? '<id from list>'}.${crashAdvice(cfg.bootAlert?.crashReason)} If DSH cannot boot at all, use undo_safe_mode action "on" to boot with only this plugin.\n`
+        ? `⚠️ Previous DSH run did not finish starting (crashed or was killed).${lastGood ? ` Last known-good snapshot: ${lastGood.id} (${fmtSnapshotTime(lastGood.time)}${lastGood.reason ? `, ${lastGood.reason}` : ''}).` : ''} You may want to undo back to it: undo_restore mode "id" snapshot_id ${lastGood?.id ?? '<id from list>'}.${crashAdvice(cfg.bootAlert?.crashReason)} If DSH cannot boot at all, use undo_safe_mode action "on" to boot with only this plugin.\n`
         : '';
       return `${alert}Snapshots (newest first):\n${rows.join('\n')}\n\nProfile: ${cfg.profileName}\nSensitive mode: ${cfg.sensitiveMode ?? 'redact'}${latestRedacted > 0 ? ` (latest snapshot redacted ${latestRedacted} file(s))` : ''}\nManual store: ${cfg.manualDir}\nAuto store: ${cfg.autoDir}`;
     },

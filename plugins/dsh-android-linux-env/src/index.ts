@@ -8,8 +8,11 @@
  * 导出不含任何密钥（.credentials/.env 值一律排除）。
  * 共享目录表为全局单一实例：本插件是引擎侧的读写面（实际存储挂靠配置文件/持久层），
  * 壳侧 SAF 桥选择结果经 pick 端点同步（现有链路），本插件提供视图与增删接口。
+ *
+ * 0.14.1 块 E：开发者选项「清除运行时缓存」的宿主半（白名单扫描 + 逐项删 + 审计）落在本插件，
+ * 设计判据见 `runtime-cache.ts` 的头注释与 `docs/0.14.1-preview-LEGACY-AND-PERF.md` §4.3。
  */
-import { readFileSync, existsSync, readdirSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -25,6 +28,8 @@ import {
 // 不再在本插件维护第二份字面量清单。走该包**根导出**（已存在的稳定子路径）+ 只改既有文件，
 // 规避两个已踩过的启动即死形态（ERR_PACKAGE_PATH_NOT_EXPORTED / 注入链丢新增文件）。
 import { PROBE_BINARIES, REQUIRED_TOOLCHAIN, TOOLCHAIN_REPRESENTATIVE } from '@dsh-android/dsh-shell-termux'
+// 块 E：白名单扫描/执行/标签（设计与判据见 runtime-cache.ts 头注释）。
+import { displayLabel, executeCleanup, planCleanup, type CleanupPlan } from './runtime-cache.js'
 
 export const name = 'dsh-android-linux-env'
 export const inject = ['tools', 'webServer', 'androidPrivilege'] as const
@@ -259,11 +264,83 @@ function tools(ctx: Context, svc: { status(): { tier: string } } | undefined) {
   return [statusTool, recipeTool]
 }
 
+// ── 块 E：运行时缓存清理的宿主半（用户平面，零新增模型可见工具） ──────────────────────
+
+/** 清理审计落点：`$DSH_FILES_DIR/audit/runtime-cache.ndjson`（壳侧审计目录同域）。 */
+function cacheAuditFile(): string | undefined {
+  const filesDir = process.env.DSH_FILES_DIR
+  // 未注入 = 非壳侧宿主（桌面/测试）：不落审计，也**绝不**回落到 cwd 去写（那是产品目录污染）。
+  if (filesDir === undefined || filesDir.trim() === '') return undefined
+  const dir = join(filesDir, 'audit')
+  try {
+    mkdirSync(dir, { recursive: true })
+  } catch { /* 审计目录不可建：落审计失败不改变删除结果 */ }
+  return join(dir, 'runtime-cache.ndjson')
+}
+
+/** 追加一条清理审计（换行分隔 JSON；失败被吞，不影响已完成的删除项）。 */
+function writeCacheAudit(entry: Record<string, unknown>): void {
+  const file = cacheAuditFile()
+  if (file === undefined) return
+  try {
+    appendFileSync(file, JSON.stringify({ at: new Date().toISOString(), ...entry }) + '\n')
+  } catch { /* 审计面不可用不改变删除结果 */ }
+}
+
+/**
+ * 扫描计划 → UI 载荷。**绝不下发绝对路径**：只给稳定 id、类别、`$DSH_HOME`/`$DSH_FILES_DIR`
+ * 形式的展示标签与体积，避免把应用私有目录布局泄漏到页面（§4.3⑤ 的「如实上报」用标签达成）。
+ * @param plan - `planCleanup()` 的产物。
+ * @returns 只读载荷。
+ */
+function cacheScanPayload(plan: CleanupPlan): Record<string, unknown> {
+  return {
+    ok: true,
+    reclaimableBytes: plan.reclaimableBytes,
+    // 目标数/跳过数供 UI 如实展示「跳过了什么」——未识别路径不得静默。
+    targets: plan.targets.map((target) => ({
+      id: target.id,
+      kind: target.kind,
+      label: displayLabel(target.path, plan),
+      bytes: target.bytes,
+      files: target.files,
+    })),
+    skipped: plan.skipped.map((skip) => ({ id: skip.id, label: displayLabel(skip.path, plan), reason: skip.reason })),
+  }
+}
+
+/**
+ * 执行清理 → UI 载荷。
+ * @param plan - 已展示过体积的同一份计划。
+ * @returns 逐项结果 + 实际释放量（与扫描值的一致性由调用方断言）。
+ */
+function cacheExecutePayload(plan: CleanupPlan): Record<string, unknown> {
+  const report = executeCleanup(plan, {
+    audit: (entry) => { writeCacheAudit({ scope: 'runtime-cache', ...entry }) },
+  })
+  return {
+    ok: true,
+    removed: report.removed,
+    failed: report.failed,
+    removedBytes: report.removedBytes,
+    plannedBytes: plan.reclaimableBytes,
+    items: report.items.map((item) => ({
+      id: item.id,
+      label: displayLabel(item.path, plan),
+      status: item.status,
+      bytes: item.bytes,
+      ...(item.reason === undefined ? {} : { reason: item.reason }),
+    })),
+  }
+}
+
 export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
   // 授权档位权威 = bridge 服务（androidPrivilege，patch 顺序 bridge 先于本插件）
   const svc = (ctx as unknown as { androidPrivilege?: { status(): { tier: string } } }).androidPrivilege
   for (const t of tools(ctx, svc)) ctx.tools.register(t)
-  const wsvc = (ctx as unknown as { webServer?: { register(r: unknown): void } }).webServer
+  // register() 在运行期返回 disposer（上游 webserver 契约；file-open 同一形态）。声明为
+  // `() => void` 才能走 ctx.effect——热重载/卸载必须回收路由，不留重复 handler。
+  const wsvc = (ctx as unknown as { webServer?: { register(r: unknown): () => void } }).webServer
   if (wsvc) {
     const authOptions = () => ({
       token: shellControlToken,
@@ -297,5 +374,43 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
         },
       })
     }
+
+    // 块 E（§4.3③ 先给可回收体积再执行）：GET = 只读扫描；POST = 执行。
+    // 两条都自带鉴权（authorizeMobileRoute：connection 的 Host/Origin/browser-session 优先，
+    // 缺 connection 时回环 Host + 壳侧实时 controlToken），并登记
+    // scripts/api-route-auth-policy.json（缺登记 → check-api-route-auth.mjs 判红）。
+    const sendJson = (res: MobileRouteResponse, code: number, payload: unknown): void => {
+      res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      res.end(JSON.stringify(payload))
+    }
+    ctx.effect(() => wsvc.register({
+      kind: 'exact',
+      path: '/api/android/runtime-cache/scan',
+      handler: async (req: MobileRouteRequest, res: MobileRouteResponse) => {
+        const rejection = authorizeMobileRoute(req, authOptions())
+        if (rejection !== undefined) { sendMobileRouteRejection(res, rejection); return }
+        if (req.method !== 'GET') {
+          res.writeHead(405, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', allow: 'GET' })
+          res.end(JSON.stringify({ ok: false, error: 'GET only' }))
+          return
+        }
+        sendJson(res, 200, cacheScanPayload(planCleanup()))
+      },
+    }))
+    ctx.effect(() => wsvc.register({
+      kind: 'exact',
+      path: '/api/android/runtime-cache/execute',
+      handler: async (req: MobileRouteRequest, res: MobileRouteResponse) => {
+        const rejection = authorizeMobileRoute(req, authOptions())
+        if (rejection !== undefined) { sendMobileRouteRejection(res, rejection); return }
+        if (req.method !== 'POST') {
+          res.writeHead(405, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', allow: 'POST' })
+          res.end(JSON.stringify({ ok: false, error: 'POST only' }))
+          return
+        }
+        // 执行前重新扫描（体积以执行瞬间的实测为准），再逐项删。
+        sendJson(res, 200, cacheExecutePayload(planCleanup()))
+      },
+    }))
   }
 }

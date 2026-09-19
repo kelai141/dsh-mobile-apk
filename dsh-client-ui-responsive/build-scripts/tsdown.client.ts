@@ -178,6 +178,13 @@ function clientConfig(id: string, entry: string): UserConfig {
     outDir: 'lib',
     format: 'cjs',
     platform: 'browser',
+    // 语法下限（0.14.1 块C，详档 §2.1 替代方案）：浏览器面产物必须能跑在 Android 10 /
+    // Chromium 87 上（纸面基线 PLAN-0.14.0-FORMAL-2026-09-13.md:109；唯一在案的实测老内核
+    // 恰好是 WebView 87.0.4280.101）。此前这里没有 target，浏览器 bundle 继承工具默认（es2024 级）
+    // → 产出可选链/类静态块等老内核解析期即失败的语法，整入口模块不执行 = 纯白无线索。
+    // 改**这里**（我方自有构建源）比在产物上打补丁更稳：下次构建自然正确。
+    // 上游 3 个 dist 产物的构建配置不在我们手里，仍由构建链 check-browser-syntax-floor --degrade 兜底。
+    target: 'chrome87',
     // Types ship from lib/types (tsc); dts here would wrap the banner/footer into .d.cts and break parsing.
     dts: false,
     // Plugin code is fetched outside Vite's module graph, so its own bundle

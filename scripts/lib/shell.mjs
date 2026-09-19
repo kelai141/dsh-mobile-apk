@@ -15,6 +15,25 @@ import { execFileSync, execSync } from 'node:child_process'
 
 export const IS_WSL_HOST = process.platform === 'win32'
 
+/**
+ * 压缩类任务的**并发线程上限**（0.14.1 用户拍板的系统级约束）。
+ *
+ * 为什么固定为 8 而不是「全部核心 / -T0」：本开发机是 8 物理核 / 16 逻辑核。构建期把 xz/压缩
+ * 开到全部 16 个逻辑线程会把机器吃满，导致同时运行的 **MuMu 模拟器卡顿、甚至系统级不稳定**——
+ * 而模拟器实测（铁律 2「模拟器优先」）与构建常常并行发生，撑满等于自己踩自己的验收环境。
+ * 8 = 物理核数，既能吃到接近全部物理并行度（SMT 对 xz 这类内存带宽受限任务收益本就很小），
+ * 又给模拟器/系统留出余量。
+ *
+ * 用法：把原先的 `xz -T0` 换成 `xz -T${XZ_THREADS}`；其它并行工具同理。
+ * 覆盖：环境变量 `DSH_CPU_THREADS`（给 CI 或更强机器留出口，但仍建议不超过物理核）。
+ */
+export const CPU_THREADS_CAP = 8
+export const XZ_THREADS = (() => {
+  const raw = Number(process.env.DSH_CPU_THREADS)
+  if (Number.isFinite(raw) && raw >= 1) return Math.max(1, Math.floor(raw))
+  return CPU_THREADS_CAP
+})()
+
 let cachedDistro
 /**
  * WSL 发行版名（用于 \\wsl.localhost\<distro>\... 映射）。

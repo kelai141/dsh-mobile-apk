@@ -15,10 +15,12 @@ import android.os.PowerManager
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.ConsoleMessage
 import android.webkit.JsResult
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -103,6 +105,23 @@ class MainActivity : ComponentActivity() {
 
   companion object {
     private const val TAG = "dsh-shell"
+
+    /**
+     * §2.3（0.14.1 块C）：主 WebView 背景色（中性深灰）。未设时为默认白，白屏与「正常空页」
+     * 视觉不可区分；此色与引导页深色系一致，使「没渲染出来」一眼可辨且不闪白。
+     */
+    private const val MAIN_WEBVIEW_BACKGROUND = 0xFF1E1E1E.toInt()
+
+    /**
+     * §2.4：ES2022 类静态块（`static{}`）需要 Chromium 94+；低于此值的产物会在**解析期**整体
+     * 不执行——用户看到纯白、无报错、引擎却健康（详档 §1.2 的 A 档实测）。
+     * 本常量是诊断字段 `syntax_floor_ok` 的判据门槛，与 `check-browser-syntax-floor.mjs` 的
+     * 「chrome87 降级」目标口径不同：**这里是「当前内核能不能解析已发布产物」**，取 94。
+     * **可见性 = internal**（0.14.1 §2.4 收口）：`EngineManager.buildDiagnosticsText()` 的
+     * `syntax_floor_ok:` 字段必须与本处同源（同一个数字），故跨类引用；`private` 会编译不过。
+     * 单一来源：两处引用同一常量，禁止任何一方再写字面量 94。
+     */
+    internal const val WEBVIEW_SYNTAX_FLOOR_MAJOR = 94
     /** 虚拟屏空闲回收扫描间隔（判定阈值在 VdisplayController.IDLE_RECLAIM_MS = 10 分钟）。 */
     private const val VDISPLAY_REAP_INTERVAL_MS = 2 * 60 * 1000L
     const val ACTION_UPDATE = "com.dsharnessmobile.shell.action.UPDATE"
@@ -174,6 +193,9 @@ class MainActivity : ComponentActivity() {
     webView = WebView(this).apply {
       id = View.generateViewId()
       visibility = View.GONE
+      // §2.3（0.14.1 块C）：未设背景色时默认白，白屏在视觉上与「正常空页」不可区分——渲染失败
+      // 就看不出来。设中性深色，使「没渲染出来」一眼可辨（与引导页同色系，避免闪白）。
+      setBackgroundColor(MAIN_WEBVIEW_BACKGROUND)
     }
     webViewRef = webView
     root.addView(webView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
@@ -225,6 +247,9 @@ class MainActivity : ComponentActivity() {
     }
     ViewCompat.requestApplyInsets(root)
     configureWebView()
+    // §2.4（0.14.1 块C）：内核版本必须在**首启路径**上落盘，不只进诊断包——老设备白屏时
+    // 页面根本跑不起来，用户拿不到版本就无法自助；落 boot-diag.log 后 `run-as cat` 即可取。
+    reportWebViewVersion("onCreate")
     // 0.13.8 #183：键盘广播 nonce（应用私有文件，引擎子进程经 DSH_FILES_DIR 读取，
     // manage 插件广播时 --es auth 携带；幂等）。
     try { AdbKeyboardService.ensureNonce(this) } catch (_: Throwable) {
@@ -532,6 +557,68 @@ class MainActivity : ComponentActivity() {
       }
 
       /**
+       * §2.3（0.14.1 块C）：HTTP 层失败（4xx/5xx）此前**零实现**——`onReceivedError` 只覆盖
+       * 传输层失败（DNS/拒绝连接），服务端返回 500 时它**不触发**，于是「引擎活着但页面 500」
+       * 与「正常空页」在诊断上不可区分。这里把状态码落到启动诊断面（`source=http-error`）。
+       * 只在引擎同源时置位：外部跳转不该污染引擎页面健康度。
+       */
+      override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse) {
+        super.onReceivedHttpError(view, request, errorResponse)
+        if (!isEngineSource(request.url.toString())) return
+        try {
+          LogCollector.writeBootDiag(
+            this@MainActivity,
+            "http-error",
+            "url=${request.url} status=${errorResponse.statusCode} reason=${errorResponse.reasonPhrase ?: ""}"
+          )
+        } catch (t: Throwable) {
+          Log.w(TAG, "http error diag failed: " + (t.message ?: t.javaClass.simpleName))
+        }
+      }
+
+      /**
+       * §2.3：TLS 失败此前零实现。引擎走 `http://127.0.0.1` 不走 TLS，故本回调只在用户被跳到
+       * 外部 https 页面时触发；**不得**为「让页面能开」而放行（`super` 保持默认拒绝语义），
+       * 只落诊断（`source=ssl-error`）以免静默白屏。
+       */
+      override fun onReceivedSslError(view: WebView, handler: android.webkit.SslErrorHandler, error: android.net.http.SslError) {
+        try {
+          LogCollector.writeBootDiag(
+            this@MainActivity,
+            "ssl-error",
+            "url=${error.url} primary=${error.primaryError}"
+          )
+        } catch (t: Throwable) {
+          Log.w(TAG, "ssl error diag failed: " + (t.message ?: t.javaClass.simpleName))
+        }
+        // 保持上游默认行为（取消），不放行：安全敏感面不得为诊断而弱化。
+        handler.cancel()
+      }
+
+      /**
+       * §2.3：渲染进程被杀（低内存/OOM/厂商治理）此前主 WebView **零实现**（仅隔离
+       * `BrowserHost.kt:634` 有）。不处理则 Activity 留在一个永不响应的 WebView 上——用户看到
+       * 「卡死」而不是「崩了」。这里落诊断并释放该 WebView 的渲染进程，交由既有引擎监控/引导页
+       * 路径恢复（不在此重建 WebView：重建属启动流程，避免在回调里引入第二套生命周期）。
+       * @returns true = 已消费（WebView 不再被使用）。
+       */
+      override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
+        try {
+          LogCollector.writeBootDiag(
+            this@MainActivity,
+            "render-gone",
+            "didCrash=${detail.didCrash()} rendererPriorityAtExit=${detail.rendererPriorityAtExit()}"
+          )
+        } catch (t: Throwable) {
+          Log.w(TAG, "render gone diag failed: " + (t.message ?: t.javaClass.simpleName))
+        }
+        enginePageFailed = true
+        try { view.destroy() } catch (t: Throwable) { Log.w(TAG, "destroy after render-gone failed", t) }
+        showGuide()
+        return true
+      }
+
+      /**
        * A failed navigation fires onReceivedError and *then* onPageFinished, so the
        * error state must be cleared when the next load starts — clearing it in
        * onPageFinished would erase the evidence of the error page that is still on
@@ -562,6 +649,54 @@ class MainActivity : ComponentActivity() {
       downloadSaver.downloadToDownloads(url, contentDisposition)
     }
     webView.webChromeClient = object : WebChromeClient() {
+      /**
+       * 块L L-2：页面控制台消费者（跨层契约的壳侧一半）。
+       *
+       * 页面侧 `dsh-host-web-compat` 早已用 `console.error('[dsh-boot-stall] dsh-boot-diag …')`
+       * 发布诊断行（并自述「壳侧 onConsoleMessage 抓这一条」），但全壳此前**零实现**，
+       * 于是 `files/boot-diag.log` 的 `source=page-console` 恒 0 行、`pageSideRuntime` 恒
+       * `unavailable`——那是**永远不可得**而不是「当前不可得」。本方法补上这一半。
+       *
+       * 两种前缀（契约与页面侧逐字对应，改动须两侧同步，见 LogCollector 的常量）：
+       *  - `[dsh-boot-ready]`：页面首次渲染成功（L-1 的判据真源）→ 停止本 epoch 的 stall 计时；
+       *  - `[dsh-boot-stall]`：页面自报卡住（带 §6.2 四字段）→ 落 `source=page-console`。
+       *
+       * 返回 `true` = 已消费，不再走默认 console 行为。**只拦我们自己的前缀**，其余一律
+       * 返回 false 交给默认处理（不改变第三方页面的既有日志行为，也不吞掉真正的页面报错）。
+       */
+      override fun onConsoleMessage(message: ConsoleMessage): Boolean {
+        val text = message?.message() ?: return false
+        return try {
+          when {
+            LogCollector.isPageReadyMessage(text) -> {
+              engineFlow.onPageReadyReported(text)
+              true
+            }
+            LogCollector.isPageStallMessage(text) -> {
+              engineFlow.onPageStallReported(text)
+              true
+            }
+            // §2.3（0.14.1 块C）：既有两个自有前缀之外，**补收页面 JS 错误**。老设备白屏的
+            // 产物级真因是解析期 SyntaxError——它只出现在控制台，此前全壳不收，用户拿不到。
+            // 与自有前缀**并集**（不改动上面两条既有分支），只落诊断，不改变第三方页面行为。
+            isRenderErrorMessage(message) -> {
+              LogCollector.writeBootDiag(
+                this@MainActivity,
+                "console-error",
+                "level=${message.messageLevel()} url=${message.sourceId()}:${message.lineNumber()} text=${text.take(400)}"
+              )
+              // 返回 false：仍是「未消费」，交回默认 console 行为（不吞页面报错）。
+              false
+            }
+            else -> false
+          }
+        } catch (t: Throwable) {
+          // 诊断通路不得成为故障源；未消费则交回默认处理。
+          Log.w(TAG, "page console route failed: " + (t.message ?: t.javaClass.simpleName))
+          false
+        }
+      }
+
       override fun onShowFileChooser(
         webView: WebView, filePathCallback: ValueCallback<Array<Uri>>, fileChooserParams: FileChooserParams,
       ): Boolean {
@@ -949,6 +1084,64 @@ class MainActivity : ComponentActivity() {
       result.optString("guidance").ifBlank { result.optString("error").ifBlank { "解锁失败" } }
     }
     return org.json.JSONObject().put("ok", ok).put("message", message).toString()
+  }
+
+  /**
+   * §2.4（0.14.1 块C）：主 WebView 内核版本回读 + 落盘诊断。
+   *
+   * 为什么必须做（详档 §2.4 原话）：`docs/WHITE-SCREEN-MI8-MIUI125-2026-09-17.md:268-270` 把
+   * 「WebView 内核版本」列为定位闭环所必需的**第 1 项**，而此前该值既不进诊断包、也不进日志、
+   * 主 WebView 也不读——**用户拿不到，维护方就要不到**。老设备白屏的真因是内核版本（`<94` 不支持
+   * ES2022 类静态块），拿不到版本就无法判定，用户必须装 adb 才能给出。
+   *
+   * 读法与 `BrowserHost.kt:876-878` 同源（`getCurrentWebViewPackage()` + 主版本号正则），
+   * 落盘走既有 `LogCollector.writeBootDiag`（唯一写者纪律：壳侧自有文件，不写 engine.log）。
+   * @returns 形如 `"110.0.5481.154.1"`；API < 26 或读不到时返回空串（显式空，不抛）。
+   */
+  internal fun currentWebViewVersionName(): String =
+    if (Build.VERSION.SDK_INT >= 26) WebView.getCurrentWebViewPackage()?.versionName ?: "" else ""
+
+  /** 主版本号（§2.4 的判据字段：`syntax_floor_ok` 的输入）；读不到记 0（显式未知，不当通过）。 */
+  internal fun currentWebViewMajor(): Int =
+    Regex("(\\d+)\\.").find(currentWebViewVersionName())?.groupValues?.get(1)?.toIntOrNull() ?: 0
+
+  /**
+   * §2.4：把内核版本落到启动诊断面。**判据**：`files/boot-diag.log` 出现
+   * `source=webview-version` 行且 `webview_major` 与 `dumpsys webviewupdate` 一致。
+   * 失败绝不抛出（诊断通路不得成为故障源）。
+   */
+  private fun reportWebViewVersion(source: String) {
+    try {
+      val version = currentWebViewVersionName()
+      val major = currentWebViewMajor()
+      // ES2022 类静态块需 Chromium 94+；<94 的产物会在解析期整体不执行（详档 §1.2）。
+      val floorOk = major >= WEBVIEW_SYNTAX_FLOOR_MAJOR
+      LogCollector.writeBootDiag(
+        this,
+        "webview-version",
+        "from=$source webview_package=${WebView.getCurrentWebViewPackage()?.packageName ?: ""}"
+          + " webview_version=$version webview_major=$major"
+          + " syntax_floor_ok=$floorOk"
+      )
+    } catch (t: Throwable) {
+      Log.w(TAG, "webview version report failed: " + (t.message ?: t.javaClass.simpleName))
+    }
+  }
+
+  /**
+   * §2.3：控制台错误判据——**结果性**而非「文本在场」式：按 ConsoleMessage 的级别取
+   * `ERROR`（含页面抛出的 SyntaxError / ReferenceError 等），并排除我们自己的两个前缀
+   * （它们由上面两条分支消费，绝不能重复落盘）。
+   *
+   * 为什么用级别而不是匹配 "SyntaxError" 文本：白屏时页面可能连错误对象都构造不出来，
+   * 也可能由不同内核给出不同措辞；级别是平台给出的结果信号，措辞会变、级别不会。
+   * @param message - 平台回调给出的控制台消息。
+   * @returns true = 应作为渲染错误落诊断。
+   */
+  internal fun isRenderErrorMessage(message: ConsoleMessage): Boolean {
+    val text = message.message() ?: return false
+    if (LogCollector.isPageReadyMessage(text) || LogCollector.isPageStallMessage(text)) return false
+    return message.messageLevel() == ConsoleMessage.MessageLevel.ERROR
   }
 
   /** 进程级崩溃标记：记录未捕获异常摘要，交回默认 handler（不吞异常）。 */

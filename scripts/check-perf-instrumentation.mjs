@@ -95,6 +95,37 @@ const n1 = registry.patches.find((p) => p.id === 'perf-patch-reload-N1')
 check('存量升级归一化补丁 perf-patch-reload-N1 在 registry（P-AC-24 / Q-20b 默认 N1）',
   Boolean(n1 && n1.scope === 'engine' && String(n1.marker || '').includes('patchReload normalization')))
 
+// 产品内探针补丁 combo-probe-P1（0.14.1 块F P0-2）：设备上 t_compose_total 恒为 -1 的结构性真因是
+// 「[perf] TOTAL 只有测量 preload 会产，而 scripts/perf/count-compose.mjs 没有任何发行路径」+「解析链
+// 挂在默认关闭的调试采集器上」。故把产出时机放进产品内 compose() 返回处（P1）。
+// 本断言锁两件事，缺一即同类潜伏无防线：
+//   ① 补丁仍登记在 registry 且是 engine scope、marker 在场（被删 = 读数回到 -1，而 C6 会误以为「探针没装」）；
+//   ② **marker/口径与壳侧解析正则同源**——壳侧 LogCollector.kt 按 `[perf] TOTAL calls=… totalMs=…` 解析，
+//      若补丁的输出字段名与壳侧正则漂移，两侧各自「绿」而真机读数为空（这正是本轮要防的跨层假绿）。
+const p1 = registry.patches.find((p) => p.id === 'combo-probe-P1')
+const p1Ok = Boolean(p1 && p1.scope === 'engine' && String(p1.marker || '').trim())
+check('产品内探针补丁 combo-probe-P1 在 registry（engine scope + marker 在场；缺失则 t_compose_total 回到 -1）', p1Ok)
+if (p1Ok) {
+  // 同源面：补丁实现里必须真的产出 TOTAL 行，且字段名与壳侧解析面对得上。
+  const implText = readFileSync(join(ROOT, 'scripts', 'patches', 'apply-patches.mjs'), 'utf8')
+  const p1Impl = implText.slice(implText.indexOf('combo-probe-P1'))
+  const emitTotal = p1Impl.includes('[perf] TOTAL calls=') && p1Impl.includes('totalMs=')
+  const shellParser = (() => {
+    // 布局无关：协调仓根用 dsh-mobile-apk/...；apk 自包含根落到同名相对路径。
+    // 本文件下方的 resolveRepoPath 定义在更后面，故此处就地解析（避免 TDZ）。
+    const rel = 'dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/LogCollector.kt'
+    const cands = [rel, rel.slice('dsh-mobile-apk/'.length)]
+    const hit = cands.find((c) => existsSync(join(ROOT, c)))
+    return hit ? readFileSync(join(ROOT, hit), 'utf8') : null
+  })()
+  const shellOk = shellParser === null
+    || (shellParser.includes('TOTAL calls=') && shellParser.includes('totalMs='))
+  check('探针输出口径与壳侧解析同源（补丁产出 `[perf] TOTAL calls=… totalMs=…`，LogCollector 按同形解析）',
+    emitTotal && shellOk,
+    '补丁产出=' + emitTotal + ' 壳侧同形=' + (shellParser === null ? '（壳侧缺席，跳过）' : shellOk)
+      + '——两侧漂移会让「补丁在跑」与「壳侧读到值」互相假装成立')
+}
+
 // ── 3. A1 出厂声明值对账（P-AC-01）─────────────────────────────────────────
 const autoTar = join(ROOT, '.deploy-tmp', 'snapshot-013', ABI, 'snapshot.tar.xz')
 const tarPath = argOf('snapshot') || (existsSync(autoTar) ? autoTar : null)

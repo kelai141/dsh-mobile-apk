@@ -15,7 +15,7 @@
   "private": true,
   "scripts": {
     "build": "tsc -p .",
-    "test": "npm run build && node --test test/env-recipe-schema.test.mjs test/recipe-live.test.mjs test/toolchain-single-table.test.mjs"
+    "test": "npm run build && node --test test/env-recipe-schema.test.mjs test/recipe-live.test.mjs test/toolchain-single-table.test.mjs test/runtime-cache-allowlist.test.mjs test/runtime-cache-route.test.mjs"
   },
   "dependencies": {
     "@dsh-android/dsh-android-bridge": "file:../dsh-android-bridge",
