@@ -8,7 +8,9 @@
 #   P1 node 工具链：npm/corepack/pnpm 可执行 + 无 OpenSSL config error（需 OPENSSL_CONF）
 #   P2 apt/dpkg：wrapper 存在 + APT_CONFIG 主文件 + apt --version 干净（编译期路径覆盖）
 #   P3 alternatives：pager/editor 链接可达
-#   P4 git：usr/bin/git 存在
+#   P4 git：usr/bin/git 存在 + **编译期 SHELL_PATH 不再指向旧前缀**（apk#247：
+#      静态断言 git.real 内无旧串 + 功能断言 credential.helper 真能执行——
+#      「存在」不等于「能用」）
 #   P5 错位目录：usr/data/data/com.termux/... 冗余文件（警示，非致命）
 #
 # 用法：sh check-prefix-residue.sh [PREFIX]
@@ -93,6 +95,29 @@ if [ -x "$B/bin/git" ]; then
 else
   echo "P4 git: FAIL（git 未预装——issue #80 P3；构建链 TARGETS 应含 git）"
   FAIL=1
+fi
+
+# P4b/P4c git 编译期 SHELL_PATH（apk#247）——「git 存在」曾长期掩盖本项：
+# 旧串在时 git --version 一样正常输出，但一切经 shell 的 git 路径全废
+# （credential.helper / `!` alias / hook / rebase --exec）。
+if grep -q -- "/data/data/com.termux/files/usr/bin/sh" "$B/bin/git.real" 2>/dev/null; then
+  echo "P4b git SHELL_PATH: FAIL（git.real 内仍含旧前缀串——relocate-snapshot.py 的等长替换未生效）"
+  FAIL=1
+else
+  echo "P4b git SHELL_PATH: PASS（无旧前缀残留）"
+fi
+# 功能断言：不需要网络、不需要凭据，只验证 helper 能被 shell 拉起来。
+if [ -x "$B/bin/git" ]; then
+  if printf 'protocol=https\nhost=example.com\n\n' \
+     | GIT_TERMINAL_PROMPT=0 "$B/bin/git" -c core.askPass= \
+         -c credential.helper= \
+         -c credential.helper='!f(){ echo username=u; echo password=p; }; f' \
+         credential fill 2>/dev/null | grep -q '^username=u$'; then
+    echo "P4c git credential.helper: PASS（helper 可经 shell 执行）"
+  else
+    echo "P4c git credential.helper: FAIL（helper 无法执行——SHELL_PATH 指向不存在的旧前缀）"
+    FAIL=1
+  fi
 fi
 
 # P5 错位目录（relocate 把绝对路径当相对路径搬移的残留）
