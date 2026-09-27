@@ -28,11 +28,18 @@
  * - menu drill-down: the last enabled breadcrumb (one level per press).
  * - attachment source menu (this plugin's own paperclip popup): its own
  *   outside-pointerdown dismissal, which the enhancer implements.
+ * - global main panel (upstream's plugin manager and its kin): one detail level
+ *   per press through the page's own crumb control, then the page's own back
+ *   control (this plugin's, at the list root — see mobile/main-panel-back.ts).
  *
  * Failure direction: the stack only ever pops through reconciliation (a layer's
  * anchor disappearing from the DOM). A layer whose control cannot be found keeps
  * being counted, so the shell consumes the press instead of finishing the
  * activity ("an unobserved or unclosable layer must never exit the app").
+ *
+ * The main-panel layer is the one kind that always finds a closure: its top level
+ * (the plugin manager list root) draws no control upstream, so it ends at the layout
+ * service's own panel selection rather than consuming the press without effect.
  */
 
 /** Layer kinds, bottom to top as detected within one pass. */
@@ -44,6 +51,7 @@ export type BackLayerKind =
   | 'menu'
   | 'menu-drill'
   | 'attachment-menu'
+  | 'main-panel'
 
 /** One observed layer plus the closure that pops it. */
 interface BackLayerDetection {
@@ -97,6 +105,16 @@ const ATTACHMENT_MENU_SELECTOR = '[data-dsh-attachment-picker-menu]'
 const MENU_DRILL_SELECTOR = '[data-trigger-menu] nav'
 /** Hashed CSS-module close controls still carry the class token (`[class*=ledger]` precedent). */
 const CLOSE_CLASS_HINT = '[class*="close"]'
+/**
+ * One detail level of a global main panel: the plugin manager's package, item,
+ * and row pages each carry one of these stable attributes
+ * (ui-plugin-manager PluginManagerPage.tsx), and each draws its own crumb.
+ */
+const PANEL_DETAIL_SELECTORS = ['[data-plugin-detail]', '[data-plugin-item-detail]', '[data-plugin-row-detail]'] as const
+/** The crumb button inside one of those levels (class token survives CSS-module hashing). */
+const CRUMB_BUTTON_HINT = 'button[class*="crumb"]'
+/** This plugin's back control, mounted by mobile/main-panel-back.ts at the list root. */
+const PANEL_BACK_SELECTOR = '[data-dsh-main-panel-back]'
 /** Attributes any layer's presence is derived from; the filter keeps the observer cheap. */
 const OBSERVED_ATTRIBUTES = [
   MOBILE_FORM_ATTR,
@@ -109,6 +127,8 @@ const OBSERVED_ATTRIBUTES = [
   'data-sidebar-right-open',
   'data-trigger-menu',
   'data-dsh-attachment-picker-menu',
+  'data-plugin-panel',
+  'data-dsh-main-panel-back',
 ]
 
 declare global {
@@ -199,6 +219,38 @@ function closeRightFullscreen(panel: Element): boolean {
 }
 
 /**
+ * Leave one level of an upstream global main panel.
+ *
+ * The plugin manager owns a depth hierarchy (list -> package -> row) and each
+ * detail level draws its own crumb control, so a press pops exactly one level
+ * through that control rather than writing the page's store. The list root
+ * draws no control of its own, so the fallback is this plugin's back button
+ * (mobile/main-panel-back.ts), which is the control that layer closes through.
+ * @returns whether a control was found and triggered.
+ */
+function closeMainPanel(leave: () => void): boolean {
+  // One detail level at a time, through the crumb the page itself draws.
+  const details = PANEL_DETAIL_SELECTORS.flatMap(selector => [...document.querySelectorAll(selector)])
+  const detail = details[details.length - 1]
+  const crumb = detail?.querySelector(CRUMB_BUTTON_HINT) ?? null
+  if (crumb !== null) {
+    dispatchMouse(crumb, 'click')
+    return true
+  }
+  // The list root: the injected control when this plugin mounted one (phone form).
+  const back = document.querySelector(PANEL_BACK_SELECTOR)
+  if (back !== null) {
+    dispatchMouse(back, 'click')
+    return true
+  }
+  // The list root upstream draws no control at all, at any width. Leaving the panel is
+  // then the layout service own panel selection - the exact action the sidebar rows and
+  // the injected button perform - not a write into the page private store.
+  leave()
+  return true
+}
+
+/**
  * Dismiss a trigger menu (slash / `@`) through the menu's own dismissal path.
  * @param menu - the `[data-trigger-menu]` element.
  * @returns whether the dismissal was dispatched.
@@ -233,6 +285,23 @@ function popMenuDrill(nav: Element): boolean {
 export interface BackStackOptions {
   /** Toggle the phone drawer: `ctx.layout.toggleSidebar()`, the top-bar button's own action. */
   toggleSidebar: () => void
+  /**
+   * The presented global main panel (`ctx.layout.panelInfo.activePanelId`), or
+   * null while the Conversation is presented.
+   *
+   * Read from the layout service rather than the DOM: it is the upstream fact
+   * "which main panel is selected", it covers every registrant of the `main`
+   * seat, and it keeps the layer out of the Conversation — where the shell must
+   * still finish the activity.
+   */
+  activePanelId: () => string | null
+  /**
+   * Leave the presented main panel (upstream `ctx.layout.selectPanel(null)`).
+   *
+   * The list root draws no back control of its own, so this is that level final
+   * closure; the detail levels never reach it (their crumb pops first).
+   */
+  leaveMainPanel: () => void
 }
 
 /**
@@ -299,6 +368,17 @@ export class BackStackSignal {
   }
 
   /**
+   * Re-reconcile now.
+   *
+   * The main-panel layer fact lives in the layout service, not in the DOM, so a panel
+   * switch is also pushed from its subscription; a DOM change that leaves the same panel
+   * selected must not be the only trigger.
+   */
+  refresh(): void {
+    if (this.attached) this.sync()
+  }
+
+  /**
    * Pop the topmost layer through its own control.
    * @returns whether a layer existed (the shell consumes the press either way);
    *   the stack itself only shrinks when the layer's anchor leaves the DOM.
@@ -341,6 +421,8 @@ export class BackStackSignal {
     const found: BackLayerDetection[] = []
     const drawer = this.detectDrawer()
     if (drawer !== null) found.push(drawer)
+    const mainPanel = this.detectMainPanel()
+    if (mainPanel !== null) found.push(mainPanel)
     for (const dialog of this.detectDialogs()) found.push(dialog)
     const trajectory = this.detectTrajectoryDetails()
     if (trajectory !== null) found.push(trajectory)
@@ -372,6 +454,19 @@ export class BackStackSignal {
         return true
       },
     }
+  }
+
+  /**
+   * The presented global main panel (plugin manager, task manager).
+   *
+   * It is not a dialog, so nothing else in this stack sees it: without this
+   * layer a back press finished the activity from inside the page. The stack
+   * position is above the drawer (the panel covers it) and below dialogs and
+   * menus, so a surface opened over the panel still closes first.
+   */
+  private detectMainPanel(): BackLayerDetection | null {
+    if (this.options.activePanelId() === null) return null
+    return { id: 'main-panel', kind: 'main-panel', close: () => closeMainPanel(() => { this.options.leaveMainPanel() }) }
   }
 
   /** Every modal surface, in document order (settings panel, Modal, lightbox). */

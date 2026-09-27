@@ -60,6 +60,9 @@ import { ExternalOpenTab } from './mobile/external-open.tsx'
 import { SettingsDocumentAction } from './mobile/settings-document.ts'
 import { ReferenceMenuEnhancer, REFERENCE_BAR_CSS } from './mobile/reference-menu.ts'
 import { BackStackSignal } from './mobile/back-stack.ts'
+import { MAIN_PANEL_BACK_CSS } from './mobile/main-panel-back.css.ts'
+import { MainPanelBackMount } from './mobile/main-panel-back.ts'
+import { PanelNavDrawer } from './mobile/panel-nav-drawer.ts'
 import { SessionMarker, type SessionsFace } from './mobile/session-marker.ts'
 import { BROWSER_TAB_ID, BROWSER_TAB_KIND, BrowserTab, browserTabDefinition } from './mobile/browser-tab.tsx'
 import {
@@ -444,10 +447,46 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => {
     const backStack = new BackStackSignal({
       toggleSidebar: () => { ctx.layout.toggleSidebar() },
+      // The selected main panel is the layout service own fact: it covers every
+      // registrant of the main seat and stays null on the Conversation, where the
+      // shell must still finish the activity.
+      activePanelId: () => ctx.layout.panelInfo.getSnapshot().activePanelId,
+      leaveMainPanel: () => { ctx.layout.selectPanel(null) },
     })
     backStack.attach()
-    return () => { backStack.detach() }
+    // A panel switch is a service change, so reconcile on it as well as on DOM mutations.
+    // The same notification moves the phone drawer aside: it is a 289px off-canvas
+    // overlay on the phone form, and leaving it up hides the panel it just opened -
+    // including that panel's back control, which the user then cannot tap.
+    const drawer = new PanelNavDrawer({
+      activePanelId: () => ctx.layout.panelInfo.getSnapshot().activePanelId,
+      collapseDrawer: () => { ctx.layout.toggleSidebar() },
+      frame: () => document.querySelector('[data-dsh-frame]'),
+    })
+    const unsubscribe = ctx.layout.panelInfo.subscribe(() => {
+      backStack.refresh()
+      drawer.sync()
+    })
+    return () => {
+      unsubscribe()
+      backStack.detach()
+    }
   }, 'ui-responsive: back-stack signal (page layers → shell back gate)')
+
+  // FX1-C (2026-09-27, user): the sidebar 插件 row switches the centre column to
+  // upstream plugin-manager main panel, which is neither a dialog nor a sidebar layer -
+  // so system back finished the activity from inside it (点进去就出不来), and its list
+  // root drew no back control at all (你关闭键呢). The layer above pops the page; this
+  // mount injects the missing control at the list root. Upstream stays unpatched.
+  ctx.effect(() => {
+    const disposeStyle = injectStyle('main-panel-back', MAIN_PANEL_BACK_CSS)
+    const mount = new MainPanelBackMount(() => { ctx.layout.selectPanel(null) })
+    mount.attach()
+    return () => {
+      mount.detach()
+      disposeStyle()
+    }
+  }, 'ui-responsive: injected back control for upstream main panels')
 
   // ── Bridges ─────────────────────────────────────────────────────────────
 

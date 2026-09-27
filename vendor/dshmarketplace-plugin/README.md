@@ -41,6 +41,7 @@ you run another one.
 | | |
 | --- | --- |
 | **`/store`** | Opens the catalogue over the session — search by capability, see what each plugin reaches, install without leaving the harness. |
+| **Install-tested only** | Every plugin offered here already installed cleanly in a throwaway sandbox. Anything that failed, needs a manual build-script approval, or was never tested stays off the shelf — the full catalogue, verdicts included, is on [dshmarketplace.dev](https://dshmarketplace.dev). |
 | **Settings tab** | The same catalogue, docked under Settings → Plugins. |
 | **Agent tools** | `dshmarketplace_search` and `dshmarketplace_install`, so *"find me a memory plugin and set it up"* works in conversation. |
 | **Bundled skill** | Teaches the agent to search rather than recall a plugin name from training data — for an ecosystem this young, a remembered name is usually wrong. |

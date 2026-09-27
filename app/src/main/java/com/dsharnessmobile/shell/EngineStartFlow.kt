@@ -1,6 +1,7 @@
 package com.dsharnessmobile.shell
 
 import android.content.Intent
+import android.os.SystemClock
 import android.util.Log
 import android.view.View
 import java.io.File
@@ -505,8 +506,11 @@ internal class EngineStartFlow(private val activity: MainActivity) {
             activity.guideRenderer.progressText.visibility = View.VISIBLE
             activity.guideRenderer.progressText.text = "准备写入内嵌环境…"
           }
-          // 0.14.2 P2：阶段文案的轮换序号。只驱动车轱辘话的轮换，不参与任何比例/数字计算。
-          var progressTick = 0
+          // 0.14.2 FX1-A：轮换改由**时间**驱动。旧实现在 onProgress 里 tick++，而回调频率 = 解压进度
+          // 回调频率（SnapshotExtractor 每 1MB 一次，2.5GB 约 2500 次、间隔数十毫秒），
+          // 于是文案以毫秒级频率换句 -> 用户现场「一直在闪」。
+          // 本次刷新开始前复位一次，使第一句立刻可见、时间窗从此刻起算。
+          activity.guideRenderer.resetRuntimeStageRotation()
           val ok = activity.engineManager.refreshSnapshot(
             onProgress = { _, _ ->
               activity.runOnUiThread {
@@ -518,7 +522,8 @@ internal class EngineStartFlow(private val activity: MainActivity) {
                 if (activity.guideRenderer.lastGuidePhase != GuidePhase.Extracting) {
                   activity.applyGuidePhase(GuidePhase.Extracting, "正在解压运行时")
                 }
-                activity.guideRenderer.showRuntimeStage(progressTick++)
+                // 时间戳取自单调时钟：回调频率再高，闸门也只按 1.3s 的窗放行（同一窗内只刷可见性）。
+                activity.guideRenderer.showRuntimeStage(SystemClock.elapsedRealtime())
               }
             },
             onStage = { stage ->

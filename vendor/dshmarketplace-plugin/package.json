@@ -1,6 +1,6 @@
 {
   "name": "dshmarketplace-plugin",
-  "version": "0.1.5",
+  "version": "0.1.7",
   "description": "Browse and install DeepSeek Harness plugins from inside DSH, in English or Chinese.",
   "keywords": [
     "dsh",

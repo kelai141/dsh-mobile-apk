@@ -9,6 +9,8 @@ import { BackStackSignal } from '../src/client/mobile/back-stack.ts'
 let signal: BackStackSignal
 let toggleSidebar: ReturnType<typeof vi.fn>
 let uplink: ReturnType<typeof vi.fn>
+let leaveMainPanel: ReturnType<typeof vi.fn>
+let activePanelId: string | null
 
 /** Deliver the pending MutationObserver batch (jsdom delivers it as a microtask). */
 function flush(): Promise<void> {
@@ -67,8 +69,16 @@ beforeEach(() => {
   setPhoneForm(false)
   toggleSidebar = vi.fn()
   uplink = vi.fn()
+  leaveMainPanel = vi.fn()
+  // Every case below is about the drawer, dialogs, and menus: the Conversation is
+  // presented, so the main-panel layer must not appear (FX1-C, main-panel-back.spec.ts).
+  activePanelId = null
   window.dshBackBridge = { setAvailable: uplink }
-  signal = new BackStackSignal({ toggleSidebar })
+  signal = new BackStackSignal({
+    toggleSidebar,
+    activePanelId: () => activePanelId,
+    leaveMainPanel,
+  })
 })
 
 afterEach(() => {

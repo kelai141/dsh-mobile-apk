@@ -150,6 +150,39 @@
     - id: android-vdisplay
       name: '@dsh-android/dsh-android-vdisplay'
 
+# PTC 代码执行（TypeScript 代码块）：**nodeExecutable 必须显式钉死**，不得依赖 `process.execPath`。
+#
+# 现场（用户 2026-09-27 报障）：「连最小的程序（return 1 + 1;）都失败了，共试了 4 次」，
+# 报错 code run failed (worker-exit): Node process exited before completing (1):
+#     error: expected absolute path: "--max-old-space-size=512"
+#
+# 真因链（设备实测逐段复现）：
+#   ① 壳侧 EngineManager.startWithArgs 在 direct exec 被拒时改用系统链接器：
+#      build(listOf("/system/bin/linker64") + args)（EngineManager.kt:1126）。这是 Android 15+
+#      对 app-data ELF 的既定绕法，引擎本身照常起来。
+#   ② 但此时 **process.execPath 变成 /apex/com.android.runtime/bin/linker64**（实测：
+#      /system/bin/linker64 <node> -e "console.log(process.execPath)" 输出 linker64 自身）。
+#   ③ NodePtcRuntime 的 nodeExecutable 出厂缺省就是 process.execPath
+#      （ptc-runtime-node/src/index.ts:76 config.nodeExecutable ?? process.execPath），于是每个代码块
+#      子进程的 argv 成为 [linker64, "--max-old-space-size=512", <process.js>, ...]
+#      （同文件 :223 [executable, heapFlag, ...bootstrapArgs]）。
+#   ④ linker64 把**第一个非选项参数**当程序路径，--max-old-space-size=512 正好排在它
+#      —— 于是它自己报 expected absolute path 并退出，Node 根本没被加载。实测原样复现：
+#        /system/bin/linker64 --max-old-space-size=512 <node> -e 1
+#        → error: expected absolute path: "--max-old-space-size=512"（与本缺陷逐字节相同）。
+#
+# 为什么模拟器上不复现：x86_64 模拟器 direct exec 成功，execPath 就是真的 node，绕不到链接器这一支。
+# 这也是它只在部分真机上出现的原因——**与设备是否走链接器回落有关，与用户代码无关**。
+#
+# 修法：把 nodeExecutable 钉成快照内 node 的绝对路径（与上方 shell-termux 的 bashPath 同口径、
+# 同一份快照），从此这条链路**完全不读 process.execPath**。
+# 与 marketplace 补丁 B 是同一族修法（那里的 execPath:process.execPath 也曾被 linker64 回退污染，
+# 导致 bad ELF magic）——同一环境事实，第二次咬人。
+# 逆转条件：上游 NodePtcRuntime 自己解析执行世界里的 node（不再缺省取 process.execPath）后，本行可撤。
+- id: ptc-runtime
+  config:
+    nodeExecutable: /data/data/com.dsharnessmobile.shell/files/usr/bin/node
+
 # Office→PDF（0.14.2 追版决策，2026-09-25 实测）——**显式禁用上游 web-app bundle 的 office-to-pdf 行**。
 # rc.1 新增该行（0.1.5 的 web-app bundle 里 office 零命中），它运行时依赖
 # @deepseek-ai/libreoffice-kit，而该依赖在本平台**无条件不可用**：

@@ -265,7 +265,11 @@ export function mountKeybar(host: KeybarHost): KeybarHandle {
   let insetHost: HTMLElement | null = null
 
   /**
-   * 底边留白：四源取最大（壳侧推送 + visualViewport 实测），防形态 A/C。
+   * 底边留白：见 layout.ts 的 computeBottomInset 判据（自足量 + 系统条/安全区）。
+   *
+   * 0.14.2-fx-1：视觉视口的 offsetTop 必须一起读。壳侧把 IME 吸收进布局尺寸后，
+   * 键条的自然底边就是布局视口底边，判据要拿它与**视觉**底边（offsetTop + height）比；
+   * 漏掉 offsetTop 会在「布局视口没缩但浏览器平移了内容」的内核上留下一条空白带。
    *
    * 变量写在**终端根节点**上，不是键条上（0.14.2 真机缺陷实修的关键一步）：
    * 自定义属性只向**后代**继承，写在键条上祖先读不到，于是
@@ -287,6 +291,7 @@ export function mountKeybar(host: KeybarHost): KeybarHandle {
       shellSystemBottom: readPx(styles, '--dsh-android-system-bottom'),
       shellImeBottom: readPx(styles, '--dsh-android-ime-bottom'),
       visualViewportHeight: view.visualViewport?.height ?? view.innerHeight,
+      visualViewportOffsetTop: view.visualViewport?.offsetTop ?? 0,
       layoutViewportHeight: view.innerHeight,
     })
     if (insetHost !== null && insetHost !== host) insetHost.style.removeProperty(KEYBAR_INSET_VAR)

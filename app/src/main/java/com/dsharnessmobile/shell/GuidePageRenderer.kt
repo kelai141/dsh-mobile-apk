@@ -77,6 +77,21 @@ internal val RUNTIME_STAGE_PHRASES: List<String> = listOf(
 )
 
 /**
+ * 每句阶段文案的**停留时长**（0.14.2 FX1-A）。
+ *
+ * 取值依据（1.3s 而不是更快/更慢）：
+ *  - 用户现场是「一直在闪」——旧实现按**回调次数**换句，而解压每 1MB 回调一次
+ *    （SnapshotExtractor），2.5GB 完整解压约 2500 次回调、单次间隔 ~30ms 量级，
+ *    于是同一句话停留不到一帧地被打断，观感就是闪烁；
+ *  - 心理学上的「还在动」判据：约 1s 以上的稳定停留才被读成「一句完整的话」，
+ *    低于 ~0.5s 只被读成「画面在抖」；故下限取 1.2s；
+ *  - 上限取 1.5s：再久，长时间解压时用户会怀疑界面冻住，失去「轮换」的意义。
+ * 1.3s 落在该区间中部，且与既有 2s 状态轮询（useShellState pollMs）不成整数倍，
+ * 避免两个周期叠成肉眼可见的拍频。该值未经多机型校准，调整只改这一处。
+ */
+internal const val STAGE_ROTATE_INTERVAL_MS = 1_300L
+
+/**
  * 按 [tick] 确定地取一条阶段文案（纯函数 JVM 可测）。
  *
  * 为什么需要轮换：解压是长时间单一相位，一句不动的文案会让用户以为界面冻住了；轮换车轱辘话
@@ -88,6 +103,75 @@ internal val RUNTIME_STAGE_PHRASES: List<String> = listOf(
 internal fun runtimeStagePhrase(tick: Int): String {
   val n = RUNTIME_STAGE_PHRASES.size
   return RUNTIME_STAGE_PHRASES[((tick % n) + n) % n]
+}
+
+/**
+ * 阶段文案的**时间**轮换闸门（0.14.2 FX1-A，纯逻辑 JVM 可测）。
+ *
+ * ── 为什么必须有这一层（缺陷本体）────────────────────────────────────────────
+ * 旧实现把「轮换」挂在了**回调次数**上：`EngineStartFlow` 每次 `onProgress` 就 `tick++`，
+ * 而 `SnapshotExtractor` 每解压 1MB 回调一次 ⇒ 2.5GB 完整解压约 2500 次回调，
+ * 单次间隔 ~30ms；文案于是以毫秒级频率换句，用户读到的就是「一直在闪」。
+ * 这是「用事件次数冒充时间」的形态：事件频率由数据量决定，与人的阅读节奏毫无关系。
+ *
+ * 本类把判据改成**时间**：同一时间窗内无论来多少次回调，都拒绝换句（返回 false）。
+ * 于是文案的更换节奏由 [intervalMs] 决定，与回调频率彻底解耦——数据量再大也不会更闪。
+ *
+ * ── 并发与边界语义（都已在 `GuideAndConsoleBatch6Test` 里逐条判红）────────────
+ *  - 全部字段由 `lock` 保护：`onProgress` 经 `runOnUiThread` 到主线程，但 `onStage` 与
+ *    相位切换也可能从别处触发，复合操作（判窗+计时+自增）必须原子；
+ *  - **首次调用必定返回 true**（用户要立刻看到一句，而不是先空 1.3s）——用 `started` 标记
+ *    而不是拿 0 当「没有上次」，因为 0 是合法时钟值（`SystemClock.elapsedRealtime()` 从 0 起）；
+ *  - **时钟回拨**（nowMs < 上次锚点）不得让闸门永久卡死（那会变成新的「界面冻住」），
+ *    也不得因抖动而连续换句（那是闪的复发）：处理为「重新锚定到当前时刻、本次不换句」；
+ *  - 序号自增**按模回绕**，不依赖 Int 溢出（2^31 次 × 1.3s ≈ 88 年才溢出，但回绕成本为零）。
+ *
+ * @param intervalMs 每句的停留时长；调用方传 [STAGE_ROTATE_INTERVAL_MS]。<=0 视为「每调必换」
+ *   （测试与极端配置的确定性语义，不做特判）。
+ */
+internal class RuntimeStageRotation(private val intervalMs: Long) {
+
+  private val lock = Any()
+  private var stageIndex = 0
+  private var anchorMs = 0L
+  private var started = false
+
+  /** 当前该显示的那一句（未开始时为第一句）。 */
+  fun currentPhrase(): String = synchronized(lock) { runtimeStagePhrase(stageIndex) }
+
+  /** 已推进到的轮换序号（反证用：证明「同一时间窗内它没有动」）。 */
+  val index: Int get() = synchronized(lock) { stageIndex }
+
+  /**
+   * 到了下一个时间窗就前进一句并返回 true；**同一时间窗内一律返回 false**（文案不得变）。
+   *
+   * @param nowMs 单调时钟毫秒（生产传 `SystemClock.elapsedRealtime()`；测试直接给值）。
+   * @returns true = 调用方应把文案更新为 [currentPhrase]；false = 文案**保持原样**（不闪的判据）。
+   */
+  fun advanceIfDue(nowMs: Long): Boolean = synchronized(lock) {
+    if (!started) {
+      started = true
+      anchorMs = nowMs
+      return true
+    }
+    if (nowMs < anchorMs) {
+      // 时钟回拨：重新锚定，本次不换句。既不卡死（下次仍按新锚点判窗），也不抖动。
+      anchorMs = nowMs
+      return false
+    }
+    if (nowMs - anchorMs < intervalMs) return false
+    anchorMs = nowMs
+    stageIndex = (stageIndex + 1) % RUNTIME_STAGE_PHRASES.size
+    true
+  }
+
+  /** 相位切换/流程重跑时复位，使下一次调用重新显示第一句并重新起算时间窗。 */
+  fun reset() = synchronized(lock) {
+    stageIndex = 0
+    anchorMs = 0L
+    started = false
+    Unit
+  }
 }
 
 /**
@@ -278,19 +362,36 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
     phase == GuidePhase.Undoing
 
   /**
+   * 0.14.2 FX1-A：阶段文案的轮换闸门（时间驱动）。
+   *
+   * 为什么放在这里而不是 EngineStartFlow：轮换是**视图**的节奏问题，闸门与它控制的那个
+   * `progressText` 放同一处，才不会出现「两个调用点各带自己的计时」。
+   */
+  private val stageRotation = RuntimeStageRotation(STAGE_ROTATE_INTERVAL_MS)
+
+  /**
    * 0.14.2 P2：进度回调的**唯一**写入口——只写阶段车轱辘话，不写数字、不切确定档。
    *
    * 旧实现这里有两个方法（一个切确定档、一个拼「已写入 N MB / 约 700 MB（x%）」文案），
    * 两者共用一个编造的分母。现在收敛成一个只表达「在动」的入口：
-   * 进度条恒为不确定态，文案只按 [tick] 轮换 [RUNTIME_STAGE_PHRASES]。
+   * 进度条恒为不确定态，文案只按 [RUNTIME_STAGE_PHRASES] 轮换。
    *
-   * @param tick 轮换序号（调用方按进度回调递增即可，无需任何字节数）。
+   * 0.14.2 FX1-A：轮换改由**时间**驱动（[RuntimeStageRotation]）。旧实现在此直接按调用次数
+   * 取句，而调用频率 = 解压进度回调频率（每 1MB 一次，2.5GB 约 2500 次、间隔 ~30ms）
+   * ⇒ 文案以毫秒级频率换句，用户读到的是「一直在闪」。现在同一时间窗内重复调用**只刷新可见性、
+   * 不换句子**（进度条的不确定动画仍在动，所以「还在动」这个信息没丢）。
+   *
+   * @param nowMs 单调时钟毫秒（调用方传 `SystemClock.elapsedRealtime()`；测试可直接给值）。
    */
-  fun showRuntimeStage(tick: Int) {
+  fun showRuntimeStage(nowMs: Long) {
     progressBar.isIndeterminate = true
     progressText.visibility = View.VISIBLE
-    progressText.text = runtimeStagePhrase(tick)
+    if (!stageRotation.advanceIfDue(nowMs)) return
+    progressText.text = stageRotation.currentPhrase()
   }
+
+  /** 相位切走/流程重跑时复位轮换，使下一次重新显示第一句并重新起算时间窗。 */
+  fun resetRuntimeStageRotation() = stageRotation.reset()
 
   private fun defaultHint(phase: GuidePhase): String = when (phase) {
     GuidePhase.Starting -> "首次启动会解压内嵌运行时，请保持应用在前台。"

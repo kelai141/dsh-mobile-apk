@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 // 0.14.0 极简浏览器面板：顶部地址 + 单按钮，底部分辨率 + PC/手机；无其它文字与控件。
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { BROWSER_TAB_ID, BROWSER_TAB_KIND, BrowserTab, browserTabDefinition } from '../src/client/mobile/browser-tab.tsx'
@@ -40,6 +40,32 @@ async function render(bridge?: Record<string, unknown>): Promise<HTMLElement> {
   const useTabInfo = () => ({ tab: { signal: new AbortController().signal } })
   await act(async () => { root!.render(<BrowserTab {...({ sessionId: 'session-test', useTabInfo } as never)} />) })
   return host
+}
+
+/**
+ * Wait until an assertion about the mounted tree holds, flushing React between attempts.
+ *
+ * The panel publishes its availability through `useState` (seeded by the initial effect, then
+ * rewritten by a 300 ms interval), so a synchronous read right after `act()` depends on which
+ * pass happened to land first — and running the whole suite changes that ordering. That is how
+ * these cases flipped between green and red with no code change.
+ *
+ * Deliberately built on `act(async () => {})` alone (microtask + React flush) and **not** on
+ * `setTimeout`: this file also contains a block that enables fake timers, so a timer-based wait
+ * would hang forever whenever those timers leak, turning a load-dependent red into a hard red.
+ * @param el - mounted host element.
+ * @param assert - assertion to poll; it must throw while the fact is not yet true.
+ */
+async function waitForRender(el: HTMLElement, assert: () => void): Promise<void> {
+  let last: unknown
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    await act(async () => {})
+    try {
+      assert()
+      return
+    } catch (error) { last = error }
+  }
+  throw last
 }
 
 function setReactInputValue(input: HTMLInputElement, value: string): void {
@@ -181,6 +207,12 @@ async function loadRevealEffect(opts: { status: () => string; openTabIn: (sessio
 }
 
 describe('AI 浏览器自动落位到右侧栏（0.14.1 块 D：会话绑定 + 收起时延迟落位）', () => {
+  // `loadRevealEffect` 动态 import 本仓入口并真跑 apply()。这份一次性成本（模块转换 + 装配）
+  // 实测约 4.5s，落在默认 5s 的**每个用例预算**里：空闲时刚够、整套负载下必超时
+  // ——实测「首次观测只建立基线」4489ms 通过、同一用例在满负载下 5000ms 超时。
+  // 超时后残留的假时钟又会污染后面的 block（整棵子树渲染成空）。
+  // 因此把这份一次性成本**移出**用例预算：先以宽预算预热，用例本身只测行为。
+  beforeAll(async () => { await import('../src/client/index.ts') }, 30_000)
   beforeEach(() => {
     vi.useFakeTimers()
     // 默认「侧栏展开」= 展开控件不在场；收起用例单独覆盖。
@@ -309,9 +341,15 @@ describe('可见性判据：收起 vs 全屏（0.14.0 设备实证三次修正�
 })
 // ── 0.14.1 批 9（§3.3 S3-18）：桥不在场时不得是一块无解释的死面板 ──────────────
 describe('BrowserTab 不可用时的解释（S3-18）', () => {
+  // 本文件另有一个启用**假时钟**的 block；它一旦在负载下超时，假时钟可能残留到本 block，
+  // 使 `act()` 里的 React 调度再也不推进（表现为整棵子树渲染成空）。这里显式收回真实时钟，
+  // 不依赖邻居的 afterEach 一定跑过。
+  beforeEach(() => { vi.useRealTimers() })
   it('桥缺席：给出原因与下一步，且不再渲染整块禁用控件', async () => {
     const el = await render(undefined)
-    expect(el.querySelector('[data-browser-unavailable="true"]'), '必须标记为不可用态').toBeTruthy()
+    await waitForRender(el, () => {
+      expect(el.querySelector('[data-browser-unavailable="true"]'), '必须标记为不可用态').toBeTruthy()
+    })
     expect(el.textContent).toContain('内置浏览器不可用')
     expect(el.textContent).toContain('重新安装或更新应用')
     expect(el.textContent).toContain('系统浏览器')
@@ -321,12 +359,17 @@ describe('BrowserTab 不可用时的解释（S3-18）', () => {
 
   it('壳侧明确回报 available=false 时同样给解释', async () => {
     const el = await render({ browserHostStatus: () => state({ available: false, ok: false }) })
-    expect(el.textContent).toContain('内置浏览器不可用')
+    await waitForRender(el, () => {
+      expect(el.textContent).toContain('内置浏览器不可用')
+    })
   })
 
   it('可用时不得出现不可用说明（不误报）', async () => {
     const el = await render({ browserHostStatus: () => state() })
+    // 可用态由 useState 发布（首帧 effect + 300ms 轮询各写一次），故断言必须等这一事实落定。
+    await waitForRender(el, () => {
+      expect(el.querySelector('input[aria-label="浏览器地址"]')).toBeTruthy()
+    })
     expect(el.querySelector('[data-browser-unavailable="true"]')).toBeNull()
-    expect(el.querySelector('input[aria-label="浏览器地址"]')).toBeTruthy()
   })
 })

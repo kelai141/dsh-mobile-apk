@@ -151,7 +151,14 @@ class GuideAndConsoleBatch6Test {
   @Test
   fun `解压流程只推阶段轮换而不渲染任何数字`() {
     val flow = codeOnly(source("EngineStartFlow.kt"))
-    assertTrue("流程必须走阶段入口", flow.contains("showRuntimeStage(progressTick++)"))
+    // FX1-A：调用点从「次数驱动」改成「时间驱动」——传单调时钟而不是 tick 计数。
+    // 旧形态 `showRuntimeStage(progressTick++)` = 每次回调换一句 = 用户看到的「一直在闪」。
+    assertTrue(
+      "流程必须走阶段入口（传单调时钟）",
+      flow.contains("showRuntimeStage(SystemClock.elapsedRealtime())"),
+    )
+    assertFalse("不得退回按回调次数换句（闪的成因）", flow.contains("progressTick++"))
+    assertTrue("刷新开始前必须复位轮换（第一句立刻可见、时间窗重新起算）", flow.contains("resetRuntimeStageRotation()"))
     assertFalse("流程不得再调确定档", flow.contains("setDeterminateProgress"))
     assertFalse("流程不得再拼带数字的进度文案", flow.contains("runtimeProgressLabel"))
     assertFalse("流程不得再引用编造常数", flow.contains("RUNTIME_UNCOMPRESSED_APPROX_BYTES"))
@@ -160,6 +167,98 @@ class GuideAndConsoleBatch6Test {
     // 反证：flow 里若出现任何字节数渲染（/ 1024 / 1024 或 MB 拼接）即判红。
     assertFalse("flow 不得做任何字节→MB 换算", flow.contains("/ 1024 / 1024"))
     assertFalse("flow 不得拼 MB", flow.contains("MB\"") || flow.contains(" MB"))
+  }
+
+  // ── FX1-A：阶段文案的时间轮换（修「一直在闪」）────────────────────────────
+
+  /**
+   * 反证核心 (a)：**同一时间窗内连续多次回调，文案不得变**——这就是「不闪」的机器判据。
+   *
+   * 旧实现按回调次数换句，而解压每 1MB 回调一次（2.5GB 约 2500 次、间隔 ~30ms），
+   * 于是 1.3s 的窗内会换 40 多句。这里喂 2500 次「同一时刻附近」的回调，必须一次都不换。
+   */
+  @Test
+  fun `同一时间窗内连续回调文案不得变（不闪的判据）`() {
+    val r = RuntimeStageRotation(STAGE_ROTATE_INTERVAL_MS)
+    val t0 = 1_000_000L
+    // 首次调用立刻给一句（不得先空一个窗，否则用户看到的是「没反应」）。
+    assertTrue("首次调用必须立刻放行", r.advanceIfDue(t0))
+    val first = r.currentPhrase()
+    assertEquals("首次必须显示第一句", RUNTIME_STAGE_PHRASES[0], first)
+    // 窗内的 2500 次回调（模拟 2.5GB 解压：每 1MB 一次）全部必须被拒。
+    var advanced = 0
+    for (i in 1..2500) {
+      val now = t0 + (i * 30L) % (STAGE_ROTATE_INTERVAL_MS - 1) // 始终落在同一个窗内
+      if (r.advanceIfDue(now)) advanced++
+    }
+    assertEquals("同一窗内 2500 次回调一次都不许换句——换一次就是闪一次", 0, advanced)
+    assertEquals("文案必须仍是第一句", first, r.currentPhrase())
+    assertEquals("序号不得前进", 0, r.index)
+  }
+
+  /** 反证 (b)：跨过时间窗后**必须**推进到下一句（否则修成了「冻住」）。 */
+  @Test
+  fun `跨过时间窗后必须推进到下一句`() {
+    val r = RuntimeStageRotation(STAGE_ROTATE_INTERVAL_MS)
+    val t0 = 500L
+    r.advanceIfDue(t0)
+    val first = r.currentPhrase()
+    // 差 1ms 还不到点：不得换。
+    assertFalse("差 1ms 不得换句", r.advanceIfDue(t0 + STAGE_ROTATE_INTERVAL_MS - 1))
+    assertEquals(first, r.currentPhrase())
+    // 正好到点：必须换。
+    assertTrue("到点必须换句", r.advanceIfDue(t0 + STAGE_ROTATE_INTERVAL_MS))
+    assertEquals("必须推进到第二句", RUNTIME_STAGE_PHRASES[1], r.currentPhrase())
+    assertEquals(1, r.index)
+    // 再跨两窗：走满一轮并回绕，且期间每一句都仍是合法阶段句。
+    assertTrue(r.advanceIfDue(t0 + STAGE_ROTATE_INTERVAL_MS * 2))
+    assertEquals(RUNTIME_STAGE_PHRASES[2], r.currentPhrase())
+    assertTrue(r.advanceIfDue(t0 + STAGE_ROTATE_INTERVAL_MS * 3))
+    assertEquals("应回绕到第一句", RUNTIME_STAGE_PHRASES[0], r.currentPhrase())
+    assertEquals("序号按模回绕（不靠 Int 溢出）", 0, r.index)
+    for (p in RUNTIME_STAGE_PHRASES) assertTrue("轮换出的句子必须仍是无数字阶段句", stagePhraseHasNoNumbers(p))
+  }
+
+  /** 反证 (c)：异常输入（负 tick / 极大 tick / 时钟回拨）仍安全，且不制造闪烁或冻死。 */
+  @Test
+  fun `异常时钟输入下轮换既不闪也不冻`() {
+    val r = RuntimeStageRotation(STAGE_ROTATE_INTERVAL_MS)
+    // 时钟从 0 起（SystemClock.elapsedRealtime() 的合法值）——不能被当成「没有上次」。
+    assertTrue("t=0 是合法时钟值，首次调用必须放行", r.advanceIfDue(0L))
+    assertEquals(RUNTIME_STAGE_PHRASES[0], r.currentPhrase())
+    // 时钟回拨：不得换句（否则抖动就变成连续换句），也不得让闸门永久卡死。
+    assertFalse("时钟回拨不得换句", r.advanceIfDue(-100L))
+    assertEquals("回拨期间文案不得变", RUNTIME_STAGE_PHRASES[0], r.currentPhrase())
+    assertFalse("回拨后仍在新锚点的窗内，不得换句", r.advanceIfDue(-100L + STAGE_ROTATE_INTERVAL_MS - 1))
+    assertTrue("回拨后跨过新锚点的一个窗必须能恢复轮换（不得冻死）", r.advanceIfDue(-100L + STAGE_ROTATE_INTERVAL_MS))
+    // 极大时间戳：不得抛异常、不得越界。
+    val huge = Long.MAX_VALUE - 1
+    val okHuge = r.advanceIfDue(huge)
+    assertTrue("极大时间戳后当前句仍在合法集合内", RUNTIME_STAGE_PHRASES.contains(r.currentPhrase()))
+    assertEquals("极大时间戳后序号仍在合法范围", true, r.index in RUNTIME_STAGE_PHRASES.indices)
+    // 极大之后再来一个「小」时间戳（等价回拨）：同样安全。
+    r.advanceIfDue(1L)
+    assertTrue("回拨后当前句仍合法", RUNTIME_STAGE_PHRASES.contains(r.currentPhrase()))
+    assertTrue(okHuge || r.index in RUNTIME_STAGE_PHRASES.indices)
+    // reset 后回到起点，且下一次调用立刻放行（相位重跑语义）。
+    r.reset()
+    assertEquals(0, r.index)
+    assertEquals("reset 后 currentPhrase 回到第一句", RUNTIME_STAGE_PHRASES[0], r.currentPhrase())
+    assertTrue("reset 后下一次调用必须立刻放行", r.advanceIfDue(9_999_999L))
+    assertEquals(RUNTIME_STAGE_PHRASES[0], r.currentPhrase())
+  }
+
+  /** 间隔常量本身必须落在「人读得完一句」又不「像冻住」的区间（判据不是拍脑袋）。 */
+  @Test
+  fun `轮换间隔落在可读且不僵死的区间`() {
+    assertTrue(
+      "低于 1.2s 会被读成「在抖」而不是一句完整的话（实测 $STAGE_ROTATE_INTERVAL_MS ms）",
+      STAGE_ROTATE_INTERVAL_MS >= 1_200L,
+    )
+    assertTrue(
+      "高于 1.5s 长时间解压会让人怀疑界面冻住（实测 $STAGE_ROTATE_INTERVAL_MS ms）",
+      STAGE_ROTATE_INTERVAL_MS <= 1_500L,
+    )
   }
 
   // ── S1-5：诊断包路径不得进标题 ───────────────────────────────────────────

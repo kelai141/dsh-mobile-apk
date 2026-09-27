@@ -23,26 +23,71 @@ import {
 
 const rect = (top, bottom) => ({ top, bottom })
 
-test('底部留白：取四源最大值（safe-area / 壳侧系统条 / 壳侧 IME / visualViewport 收缩）', () => {
-  const base = { safeAreaBottom: 0, shellSystemBottom: 0, shellImeBottom: 0, visualViewportHeight: 800, layoutViewportHeight: 800 }
-  assert.equal(computeBottomInset(base), 0)
+test('底部留白：安全区 / 壳侧系统条 / 视觉视口自足量 三者取最大', () => {
+  const base = { safeAreaBottom: 0, shellSystemBottom: 0, shellImeBottom: 0, visualViewportHeight: 800, visualViewportOffsetTop: 0, layoutViewportHeight: 800 }
+  assert.equal(computeBottomInset(base), 0, '没有键盘、没有系统条、没有安全区 -> 零留白')
 
   // 安全区单独生效
   assert.equal(computeBottomInset({ ...base, safeAreaBottom: 34 }), 34)
   // 壳侧系统条单独生效
   assert.equal(computeBottomInset({ ...base, shellSystemBottom: 48 }), 48)
-  // 壳侧 IME 单独生效
-  assert.equal(computeBottomInset({ ...base, shellImeBottom: 300 }), 300)
-  // visualViewport 收缩单独生效（这正是本模拟器壳侧恒 0 时唯一能救回来的通道）
+  // 视觉视口收缩（布局视口没缩、浏览器把可视区抬起来）单独生效 -> shortfall = 800 - 500
   assert.equal(computeBottomInset({ ...base, visualViewportHeight: 500 }), 300)
-  // 四源并存时取最大
+  // 浏览器纵向平移也计入可视底边：offsetTop 抬起来的部分同样算「已经让开」
+  assert.equal(computeBottomInset({ ...base, visualViewportHeight: 500, visualViewportOffsetTop: 300 }), 0)
+  // 多源并存时取最大
   assert.equal(computeBottomInset({
-    safeAreaBottom: 34, shellSystemBottom: 48, shellImeBottom: 300, visualViewportHeight: 400, layoutViewportHeight: 800,
+    ...base, safeAreaBottom: 34, shellSystemBottom: 48, visualViewportHeight: 400,
   }), 400)
 })
 
+// ── 0.14.2-fx-1：同一个键盘被计两次（多抬一个键盘高）──────────────────────────
+//
+// 缺陷现场（用户原话）：「九个终端控制键仍旧会额外上抬，上抬距离还恰好是比键盘高一个键盘」。
+// 真因：壳侧 edge-to-edge 同时做两件事（MainActivity.kt:276-279）——把 IME inset 施加到 WebView 自身的
+// **布局尺寸**（webView.setPadding(0,0,0,ime)，#197 机制①的根治），**并且**把同一个高度推成
+// --dsh-android-ime-bottom。吸收态下「布局视口高 - 视觉视口高」与壳侧变量都等于同一个键盘高，
+// 旧实现的 max 把它们叠加，于是留白翻倍。
+//
+// 设备实测（CDP，360 CSS 宽，键盘 300，键条高 53）：
+//   基线               innerH=800 vvH=800 ime=0px   -> 键条 top=747（底 800，正确）
+//   吸收态（壳侧真实） innerH=500 vvH=500 ime=300px -> 键条 top=147（应 447，多抬 300 = 一个键盘）
+//   还原               innerH=800 vvH=800 ime=0px   -> 键条 top=747
+
+test('反证：壳侧已把 IME 吸收进布局尺寸时，不得再叠加壳侧 IME 变量（多抬一个键盘的真因）', () => {
+  // 吸收态：布局视口与视觉视口**一起**变短，二者相等即为「键盘已被吸收」。
+  const absorbed = {
+    safeAreaBottom: 0, shellSystemBottom: 0, shellImeBottom: 300,
+    visualViewportHeight: 500, visualViewportOffsetTop: 0, layoutViewportHeight: 500,
+  }
+  assert.equal(computeBottomInset(absorbed), 0,
+    '吸收态下键条自然底边已到键盘顶，再加留白就是多抬一个键盘（实测 147 应 447）')
+
+  // 加系统条时，也只有系统条计入（IME 仍不得二次计入）。
+  assert.equal(computeBottomInset({ ...absorbed, shellSystemBottom: 48 }), 48)
+})
+
+test('反证：非吸收态（布局视口不随键盘变短的内核）仍然必须让开一个键盘', () => {
+  // 布局视口不变、视觉视口变短 -> 形态 A/C 的防线，必须仍然给足留白。
+  const unabsorbed = {
+    safeAreaBottom: 0, shellSystemBottom: 0, shellImeBottom: 300,
+    visualViewportHeight: 500, visualViewportOffsetTop: 0, layoutViewportHeight: 800,
+  }
+  assert.equal(computeBottomInset(unabsorbed), 300, '未吸收态必须让开整整一个键盘')
+})
+
+test('视觉视口整个不可用时，壳侧 IME 变量是唯一兜底（不得把键条留在键盘底下）', () => {
+  const noViewport = {
+    safeAreaBottom: 0, shellSystemBottom: 0, shellImeBottom: 300,
+    visualViewportHeight: 0, visualViewportOffsetTop: 0, layoutViewportHeight: 800,
+  }
+  assert.equal(computeBottomInset(noViewport), 300, '视觉视口读不到时必须退回壳侧 IME 变量')
+  // 两条通道都没有 -> 零留白（没有证据说需要让开，不得凭空造留白）。
+  assert.equal(computeBottomInset({ ...noViewport, shellImeBottom: 0 }), 0)
+})
+
 test('底部留白：异常输入一律归 0，绝不产生负值或 NaN', () => {
-  const z = { safeAreaBottom: 0, shellSystemBottom: 0, shellImeBottom: 0, visualViewportHeight: 0, layoutViewportHeight: 0 }
+  const z = { safeAreaBottom: 0, shellSystemBottom: 0, shellImeBottom: 0, visualViewportHeight: 0, visualViewportOffsetTop: 0, layoutViewportHeight: 0 }
   for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -50]) {
     assert.equal(computeBottomInset({ ...z, shellImeBottom: bad }), 0, '壳侧 IME=' + String(bad))
     assert.equal(computeBottomInset({ ...z, safeAreaBottom: bad }), 0, '安全区=' + String(bad))

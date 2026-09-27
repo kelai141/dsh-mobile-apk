@@ -70,21 +70,21 @@
     },
     {
       "source": "vendor/dshmarketplace-plugin/lib/index.js",
-      "expression": "Q",
+      "expression": "et",
       "resolvesTo": [
         "/api/dshmarketplace/search"
       ],
-      "literalEvidence": "Q=`${q}/search`",
-      "reason": "minified 打包名：以 base 常量 q 拼接（模板串形态），literalEvidence 证明表达式解析到登记的 search 路由。"
+      "literalEvidence": "et=`${O}/search`",
+      "reason": "minified 打包名（0.1.7 重命名：原 Q；base 常量亦由 q 改为 O）：以 base 常量拼接（模板串形态），literalEvidence 证明表达式解析到登记的 search 路由。0.1.7 追版同时把客户端 D 补丁的 mobile: 过滤挂在该 handler 上，故本行是双补丁共用的锚点。"
     },
     {
       "source": "vendor/dshmarketplace-plugin/lib/index.js",
-      "expression": "V",
+      "expression": "rt",
       "resolvesTo": [
         "/api/dshmarketplace/install"
       ],
-      "literalEvidence": "V=`${q}/install`",
-      "reason": "同 Q：base 常量 q 拼接的 install 路由；变更拼接形态或路径都会直接判红。"
+      "literalEvidence": "rt=`${O}/install`",
+      "reason": "同 et（0.1.7 重命名：原 V）：base 常量 O 拼接的 install 路由；变更拼接形态或路径都会直接判红。"
     }
   ],
   "routes": [
@@ -104,7 +104,7 @@
       "path": "/api/dshmarketplace/search",
       "kind": "exact",
       "registrationSource": "vendor/dshmarketplace-plugin/lib/index.js",
-      "registration": "path:Q",
+      "registration": "path:et",
       "endpointSource": "vendor/dshmarketplace-plugin/lib/client.js",
       "access": "protected",
       "authMarker": "dsh-mobile marketplace route auth (U2)",
@@ -115,7 +115,7 @@
       "path": "/api/dshmarketplace/install",
       "kind": "exact",
       "registrationSource": "vendor/dshmarketplace-plugin/lib/index.js",
-      "registration": "path:V",
+      "registration": "path:rt",
       "endpointSource": "vendor/dshmarketplace-plugin/lib/client.js",
       "access": "protected",
       "authMarker": "dsh-mobile marketplace route auth (U2)",

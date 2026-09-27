@@ -1,13 +1,7 @@
 {
   "$comment": "vendor 固化插件补丁登记表（apply-patches.mjs 消费；id 必须与 IMPLS 一一对应，启动时交叉校验）。marker 语义见 README。",
   "patches": [
-    {
-      "id": "market-A",
-      "target": "dshmarketplace-plugin/lib/index.js",
-      "summary": "pre-execute 守卫：tt() 双参签名 + 每条路径透传 next()（上游 listener 恒返 undefined → gate.kind 崩溃）",
-      "provenance": "0.13.0；全工具执行崩溃修复（Cannot read properties of undefined (reading 'kind')）",
-      "marker": "function tt(){return async (t,n)=>{"
-    },
+
     {
       "id": "market-B",
       "target": "dshmarketplace-plugin/lib/index.js",
@@ -15,14 +9,7 @@
       "provenance": "0.13.1；apk issue #83/#89（linker64 回退污染 process.execPath → bad ELF magic: 23212f75）",
       "marker": "execPath:(process.env.TERMUX__PREFIX"
     },
-    {
-      "id": "market-C",
-      "target": "dshmarketplace-plugin/lib/client.js",
-      "summary": "不可安装条目置灰：installable:false → 按钮 disabled + title 说明",
-      "provenance": "0.13.1 Phase1；2026-08-29 真机风险确认后才 500 NO_COMMAND 实录",
-      "marker": "||e.installable===false",
-      "soft": true
-    },
+
     {
       "id": "market-D-server",
       "target": "dshmarketplace-plugin/lib/index.js",
@@ -226,6 +213,22 @@
     }
   ],
   "retired": [
+    {
+      "id": "market-A",
+      "target": "dshmarketplace-plugin/lib/index.js",
+      "retiredIn": "0.1.7",
+      "summary": "pre-execute 守卫——退役理由：上游 0.1.7 自己修好了该 waterfall 崩溃。listener 工厂现为 function b(t=c){return async(r,n)=>{let e=()=>typeof n==\"function\"?n():{kind:\"allow\"},s;try{s=await M(r,t)}catch{s=void 0}return s??e()}}——每条路径都返回一个 gate 对象（无 next 时回落 {kind:\"allow\"}），不再是恒返 undefined，故 0.1.5 的三处 tt() 锚点全部消失",
+      "provenance": "2026-09-26 追版实测：npm pack dshmarketplace-plugin@0.1.7 解包后 lib/index.js 内 b() 形态见上（.deploy-tmp/market-017/package/lib/index.js）",
+      "whyHere": "退役不等于删除：登记在此使 0.1.7 的原生修复可被复查；若上游将来把它改回「不调用 next 就返回 undefined」，这条记录就是判红的依据。"
+    },
+    {
+      "id": "market-C",
+      "target": "dshmarketplace-plugin/lib/client.js",
+      "retiredIn": "0.1.7",
+      "summary": "不可安装条目置灰（installable:false → disabled + title）——退役理由：上游 0.1.7 在服务端与工具面都新增 installCheck==\"passed\" 过滤，客户端拿不到不可安装的行，置灰无对象",
+      "provenance": "2026-09-26 实测 api/v1/plugins 分页 1200 条：installCheck===passed 共 800 条，其中 installable===false = 0、install 为空 = 0；未通过的 400 条里 installable===false = 85（这些行已被上游过滤，到不了客户端）",
+      "whyHere": "退役不等于删除：保留记录以便上游若撤掉 installCheck 过滤时能立刻发现置灰需求回归（届时重启 market-C 即可）。"
+    },
     {
       "id": "atomic-stale-lock-F4",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-atomic-write/lib/index.js",

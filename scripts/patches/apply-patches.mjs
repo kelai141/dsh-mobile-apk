@@ -25,12 +25,11 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const registry = JSON.parse(readFileSync(join(HERE, 'registry.json'), 'utf8'))
 const compat = JSON.parse(readFileSync(join(HERE, 'data', 'compat-map.json'), 'utf8'))
 
-// ── dshmarketplace-plugin / lib/index.js：A（tt 守卫三锚点）──────────────────
-const A_FIXED = [
-  'function tt(){return async (t,n)=>{if(t?.tool?.name!=="dshmarketplace_install")return n();',
-  'if(!r)return n();',
-  ')});return n()}}',
-]
+// ── dshmarketplace-plugin：A（pre-execute 守卫）已于 0.1.7 退役 ──────────────
+// 上游 0.1.7 自己修好了这个 waterfall 崩溃：listener 工厂 `function b(t=c){return async(r,n)=>{
+// let e=()=>typeof n=="function"?n():{kind:"allow"},...return s??e()}}` —— 每条路径都返回一个
+// gate 对象（无 next 时回落 {kind:"allow"}），不再是恒返 undefined。锚点随之消失。
+// 退役记录保留在 registry.json 的 `retired` 段与 vendor PATCHES.md，可审计。
 
 // 文件内容缓存（同一目标文件的多补丁顺序生效）
 const IMPL_state = {}
@@ -50,39 +49,6 @@ function saveImpl(target, vendorRoot) {
 const F7_LEGACY_INLINE = 'const claim = await open(currentPath, "wx");'
 
 const IMPLS = {
-  // ── marketplace A：pre-execute 守卫（全工具崩溃修复）──
-  'market-A': {
-    file: 'dshmarketplace-plugin/lib/index.js',
-    check: (s) => A_FIXED.every((m) => s.includes(m)),
-    apply: (s) => {
-      let changed = 0
-      // A-1 签名 + 首路径（长形态优先，短形态兜底）
-      if (s.includes('function tt(){return async t=>{if(t?.tool?.name!=="dshmarketplace_install")return;')) {
-        s = s.replace('function tt(){return async t=>{if(t?.tool?.name!=="dshmarketplace_install")return;', 'function tt(){return async (t,n)=>{if(t?.tool?.name!=="dshmarketplace_install")return n();')
-        changed++
-      } else if (s.includes('dshmarketplace_install")return;') && !s.includes('dshmarketplace_install")return n();')) {
-        s = s.replace('dshmarketplace_install")return;', 'dshmarketplace_install")return n();')
-        changed++
-      }
-      // A-2 fullName 空路径
-      if (!s.includes('if(!r)return n();') && s.includes('if(!r)return;')) {
-        s = s.replace('if(!r)return;', 'if(!r)return n();')
-        changed++
-      }
-      // A-3 尾部
-      if (!s.includes(')});return n()}}') && s.includes('join(`\n`)}}')) {
-        s = s.replace('join(`\n`)}}', 'join(`\n`)});return n()}}')
-        changed++
-      }
-      if (changed === 0) {
-        throw new Error('锚点未命中——未匹配任何已知形态；请人工检查 lib/index.js 的 tt() 实现')
-      }
-      if (!A_FIXED.every((m) => s.includes(m))) {
-        throw new Error('修复后复核失败（锚点缺失）——不写回，请人工检查')
-      }
-      return s
-    },
-  },
 
   // ── marketplace B：安装 runner execPath 安全化（apk#83/#89 bad ELF magic）──
   'market-B': {
@@ -97,20 +63,12 @@ const IMPLS = {
     },
   },
 
-  // ── marketplace C：不可安装条目置灰（soft：锚点失配仅告警不拒打包，与原语义一致）──
-  'market-C': {
-    file: 'dshmarketplace-plugin/lib/client.js',
-    soft: true,
-    check: (s) => s.includes('||e.installable===false'),
-    apply: (s) => {
-      const OLD = 'className:"dshm-install",disabled:n==="installing"||n==="installed",onClick:()=>a(e)'
-      const NEW = 'className:"dshm-install",title:e.installable===false?"该条目当前不可安装（市场无安装命令，或需凭据/仅桌面环境）":"",disabled:n==="installing"||n==="installed"||e.installable===false,onClick:()=>a(e)'
-      if (!s.includes(OLD)) throw new Error('置灰锚点未命中——安装按钮渲染可能已变，请人工核对')
-      const out = s.replace(OLD, NEW)
-      if (!out.includes('||e.installable===false')) throw new Error('置灰复核失败——不写回')
-      return out
-    },
-  },
+  // ── marketplace C（不可安装条目置灰）已于 0.1.7 退役 ──────────────────────────
+  // 上游 0.1.7 服务端新增 installCheck:"passed" 过滤：search 端点与 dshmarketplace_search 工具
+  // 都只返回安装校验通过的条目，客户端因此拿不到 installable:false 的行，置灰已无对象。
+  // 实测（2026-09-26，api/v1/plugins 分页 1200 条）：installCheck===passed 800 条中
+  //   installable===false = 0、install 为空 = 0；未通过的 400 条里 installable===false = 85。
+  // 退役记录见 registry.json 的 retired 段与 vendor PATCHES.md。
 
   // ── marketplace D-server：搜索响应 compat 富化 + mobile: 过滤（含 COMPAT_MAP 幂等刷新）──
   'market-D-server': {
@@ -126,10 +84,13 @@ const IMPLS = {
         return s.replace(mapRe, `let _=${MAP},e=String(t.fullName`)
       }
       const D_SRV = `function Wc(t){let _=${MAP},e=String(t.fullName??"").split("#").pop().split("/").pop().toLowerCase(),f=_?.[e]??"unknown",n=${NOTE}[f];return{...t,compat:f,compatNote:n}}`
-      const INSERT_BEFORE = 'function qt(t){'
-      const OLD = 'let a=await u({q:s.searchParams.get("q")??void 0,category:s.searchParams.get("category")??void 0,limit:s.searchParams.get("limit")??60});l(e,200,a)'
-      const NEW = 'let _q=s.searchParams.get("q")??void 0,_m=String(_q??"").startsWith("mobile:");if(_m)_q=String(_q).slice(7).trim()||void 0;let a=await u({q:_q,category:s.searchParams.get("category")??void 0,limit:s.searchParams.get("limit")??60});a.results=(a.results??[]).map(x=>Wc(x));if(_m)a.results=a.results.filter(x=>x.compat!=="desktop");l(e,200,a)'
-      if (!s.includes(INSERT_BEFORE)) throw new Error('D 插入锚点 qt( 未命中——请人工核对')
+      // 0.1.7 重新 minify：apply 函数名与搜索端点标识符都变了（qt 绑定仍在，handler 内是 c/（l,200,p(a))）。
+      // 插入锚点用 apply 函数声明，缺失时回落到 export-name 绑定；两者都失配则明确报错（check 会拒打包）。
+      const INSERT_BEFORE = s.includes('function Dt(t){') ? 'function Dt(t){' : (s.includes('var qt=') ? 'var qt=' : null)
+      if (INSERT_BEFORE === null) throw new Error('D 插入锚点未命中——apply 函数与 export 绑定都不在场，请人工核对')
+      // 0.1.7 的服务端搜索 handler：上游新增 installCheck:"passed"，我们只在这段前后加 mobile: 过滤与富化。
+      const OLD = 'let a=await c({q:s.searchParams.get("q")??void 0,category:s.searchParams.get("category")??void 0,limit:s.searchParams.get("limit")??60,installCheck:"passed"});l(e,200,p(a))'
+      const NEW = 'let _q=s.searchParams.get("q")??void 0,_m=String(_q??"").startsWith("mobile:");if(_m)_q=String(_q).slice(7).trim()||void 0;let a=await c({q:_q,category:s.searchParams.get("category")??void 0,limit:s.searchParams.get("limit")??60,installCheck:"passed"});a.results=(a.results??[]).map(x=>Wc(x));if(_m)a.results=a.results.filter(x=>x.compat!=="desktop");l(e,200,p(a))'
       s = s.replace(INSERT_BEFORE, D_SRV + INSERT_BEFORE)
       if (!s.includes(OLD)) {
         const i = s.indexOf('searchParams.get("q")')
@@ -154,14 +115,28 @@ const IMPLS = {
       const AUTH_NEW = `let dshMobileMarketplaceRouteAuthorized=(n,e)=>{/* dsh-mobile marketplace route auth (U2); dsh-mobile marketplace no-store (U2) */let r=401;try{let s=t.get?.("connection");typeof s?.requestRejection==="function"&&(r=s.requestRejection(n))}catch{}if(r===void 0)return!0;if(r===403){e.writeHead(403,{"cache-control":"no-store"});e.end()}else{e.writeHead(401,{"content-type":"application/json; charset=utf-8","cache-control":"no-store"});e.end('{"ok":false,"error":"unauthorized"}')}return!1};`
       if (s.includes(AUTH_NEW)) return s
       if (s.includes(AUTH_OLD)) return s.replace(AUTH_OLD, AUTH_NEW)
-      const SEARCH_OLD = 'let r=A();r&&t.skills.register(r),t.webServer.register({kind:"exact",path:Q,handler:async(n,e)=>{'
-      const SEARCH_NEW = [
-        'let r=A();r&&t.skills.register(r);',
-        AUTH_NEW,
-        't.webServer.register({kind:"exact",path:Q,handler:async(n,e)=>{if(!dshMobileMarketplaceRouteAuthorized(n,e))return;',
-      ].join('')
-      const INSTALL_OLD = 't.webServer.register({kind:"exact",path:V,handler:b({install:n=>p(n,T()),onInstalled:f})})'
-      const INSTALL_NEW = 't.webServer.register({kind:"exact",path:V,handler:async(n,e)=>{if(!dshMobileMarketplaceRouteAuthorized(n,e))return;return b({install:s=>p(s,T()),onInstalled:f})(n,e)}})'
+      // 0.1.7 标识符重命名：A()->I()、Q->et、V->rt、b()->N。锚点按新字节写死，
+      // 并保留 0.1.5 旧形态作为兜底（两个版本都能重锚，便于回退排障）。
+      const SEARCH_OLD = s.includes('let r=I();r&&t.skills.register(r),t.webServer.register({kind:"exact",path:et,handler:async(n,e)=>{')
+        ? 'let r=I();r&&t.skills.register(r),t.webServer.register({kind:"exact",path:et,handler:async(n,e)=>{'
+        : 'let r=A();r&&t.skills.register(r),t.webServer.register({kind:"exact",path:Q,handler:async(n,e)=>{'
+      // SEARCH_NEW 做两件事，缺一即半成品（此前只做第 1 件，导致 search 路由实际无鉴权）：
+      //   1) 在 skills 注册与 webServer 注册之间插入 AUTH_NEW 定义（原来是逗号，改成 ";" + 定义）；
+      //   2) 把 guard 调用插进 search handler 体的开头。
+      // 用纯字符串替换而非正则：path 值是标识符、其后紧跟 ",handler:"，正则容易失配（实测踩到）。
+      const SEARCH_SEP = ',t.webServer.register({kind:"exact",path:'
+      if (!SEARCH_OLD.includes(SEARCH_SEP)) throw new Error('market-route-auth 锚点未命中：search 注册段分隔形态已变')
+      const HANDLER_OPEN = ',handler:async(n,e)=>{'
+      if (!SEARCH_OLD.includes(HANDLER_OPEN)) throw new Error('market-route-auth 锚点未命中：search handler 开头形态已变')
+      const SEARCH_NEW = SEARCH_OLD
+        .replace(SEARCH_SEP, ';' + AUTH_NEW + 't.webServer.register({kind:"exact",path:')
+        .replace(HANDLER_OPEN, ',handler:async(n,e)=>{if(!dshMobileMarketplaceRouteAuthorized(n,e))return;')
+      const INSTALL_OLD = s.includes('t.webServer.register({kind:"exact",path:rt,handler:N({install:n=>f(n,T()),onInstalled:h})})')
+        ? 't.webServer.register({kind:"exact",path:rt,handler:N({install:n=>f(n,T()),onInstalled:h})})'
+        : 't.webServer.register({kind:"exact",path:V,handler:b({install:n=>p(n,T()),onInstalled:f})})'
+      const INSTALL_NEW = s.includes('path:rt,handler:N(')
+        ? 't.webServer.register({kind:"exact",path:rt,handler:async(n,e)=>{if(!dshMobileMarketplaceRouteAuthorized(n,e))return;return N({install:s=>f(s,T()),onInstalled:h})(n,e)}})'
+        : 't.webServer.register({kind:"exact",path:V,handler:async(n,e)=>{if(!dshMobileMarketplaceRouteAuthorized(n,e))return;return b({install:s=>p(s,T()),onInstalled:f})(n,e)}})'
       if (!s.includes(SEARCH_OLD)) throw new Error('market-route-auth 锚点未命中：search route 起点已变')
       if (!s.includes(INSTALL_OLD)) throw new Error('market-route-auth 锚点未命中：install route 已变')
       s = s.replace(SEARCH_OLD, SEARCH_NEW).replace(INSTALL_OLD, INSTALL_NEW)

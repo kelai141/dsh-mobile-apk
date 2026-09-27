@@ -47,16 +47,46 @@ export const KEYBAR_INSET_VAR = '--dsh-terminal-keybar-inset'
 /**
  * 计算键条需要承担的**底部留白**（纯函数，可单测）。
  *
- * 取四条来源的最大值，与 composer-insets.css.ts 同源口径：
- *  - safeAreaBottom：env(safe-area-inset-bottom)（调用方从计算样式读，读不到给 0）；
- *  - shellSystemBottom：壳侧 --dsh-android-system-bottom（手势/导航条高度）；
- *  - shellImeBottom：壳侧 --dsh-android-ime-bottom（软键盘高度）；
- *  - visualViewport 收缩量：布局视口高 - 视觉视口高。
+ * ## 判据不是「键盘多高」，而是「键条自然落点还在可视底边之下多少」
  *
- * 为什么要对 IME 取 max：壳侧推送在本模拟器恒 0（实测），只信它会得到 0，从而出现形态 A/C；
- * 而 visualViewport 是浏览器自己算的，键盘弹出时 height 会真的变小。两者取大即「谁更保守听谁的」。
+ * 键条是终端根（height:100%）的最后一个 flex:none 子项，因此它的**自然底边 = 布局视口底边**；
+ * 而它必须落在**可视底边**（视觉视口的 offsetTop + height）之上。于是：
  *
- * @param input - 四条原始读数（像素；未知给 0）。
+ *   shortfall = max(0, 布局视口高 - (视觉视口高 + 视觉视口偏移))
+ *
+ * 这个量是**自足**的：它不猜键盘多高，只描述「还差多少没让开」。
+ *
+ * ## 为什么不能再叠加壳侧 IME 变量（0.14.2-fx-1 真机缺陷实修）
+ *
+ * 用户原话：「九个终端控制键仍旧会额外上抬，上抬距离还恰好是比键盘高一个键盘」。
+ *
+ * 真因是**同一个键盘被计了两次**。壳侧 edge-to-edge 下做的是两件事
+ * （MainActivity.kt:276-279）：把 IME inset 施加到 WebView 自身的**布局尺寸**
+ * （webView.setPadding(0,0,0,ime)，注释写明这是 #197 机制①的根治——让布局视口真的变短，
+ * 浏览器就没有可平移的余地），**同时**把同一个高度推成 CSS 变量 --dsh-android-ime-bottom。
+ *
+ * 旧实现用「布局视口高 - 视觉视口高」当键盘高度，再与壳侧变量取 max。吸收态下两者都等于同一个
+ * 键盘高度，但布局视口**已经**因此变短了——键条的自然底边早就到了键盘顶，再加一份留白就是多抬一个键盘。
+ *
+ * 设备实测（CDP，360 CSS 宽，键盘 300，键条高 53）：
+ *   基线               innerH=800 vvH=800 ime=0px   -> 键条 top=747（底 800，正确）
+ *   吸收态（壳侧真实） innerH=500 vvH=500 ime=300px -> 键条 top=147（**应 447**，多抬 300）
+ *   还原               innerH=800 vvH=800 ime=0px   -> 键条 top=747
+ *
+ * 新判据在同一组读数上给出 shortfall = 0；非吸收态（布局视口不随键盘变短的内核）仍得到
+ * shortfall = 布局高 - 可视高，形态 A/C 的防线不变。
+ *
+ * ## 壳侧 IME 变量的残余职责：视觉视口整个读不到时的兜底
+ *
+ * 正常路径一律走 visualViewport（浏览器自己算的）；只有它 height 为 0（不可用）时才退回壳侧变量，
+ * 避免「两条通道都没有」时把键条留在键盘底下。
+ *
+ * ## 系统条 / 安全区仍独立计入
+ *
+ * 壳侧只把 **IME** 吸收进了 WebView 布局尺寸（setPadding 的第四个参数就是 ime），系统手势条与安全区
+ * 没进布局尺寸，所以它们照旧独立取 max。
+ *
+ * @param input - 原始读数（像素；未知给 0）。
  * @returns 底部留白像素（非负）。
  */
 export function computeBottomInset(input: {
@@ -64,15 +94,24 @@ export function computeBottomInset(input: {
   readonly shellSystemBottom: number
   readonly shellImeBottom: number
   readonly visualViewportHeight: number
+  /** 视觉视口相对布局视口的纵向偏移（浏览器把内容平移进可视区时的量）。 */
+  readonly visualViewportOffsetTop: number
   readonly layoutViewportHeight: number
 }): number {
   const finite = (n: number): number => (Number.isFinite(n) && n > 0 ? n : 0)
   const safe = finite(input.safeAreaBottom)
   const system = finite(input.shellSystemBottom)
-  const imeFromShell = finite(input.shellImeBottom)
-  // visualViewport 收缩量 = 布局视口高 - 视觉视口高；为负（放大）时按 0。
-  const imeFromViewport = Math.max(0, finite(input.layoutViewportHeight) - finite(input.visualViewportHeight))
-  return Math.max(safe, system, imeFromShell, imeFromViewport)
+  const layout = finite(input.layoutViewportHeight)
+  const viewportHeight = finite(input.visualViewportHeight)
+  const viewportTop = finite(input.visualViewportOffsetTop)
+  // 视觉视口可用时，壳侧 IME 变量不参与：它描述的高度已经在布局尺寸里生效过了（见上方实测）。
+  const imeFallback = viewportHeight > 0 ? 0 : finite(input.shellImeBottom)
+  // 还差多少没让开：布局视口底边 与 视觉视口底边 之差（为负即已让开，按 0）。
+  //
+  // 视觉视口不可用（height 为 0）时**没有**这条判据：此时 layout - 0 会退化成「整个布局视口高」，
+  // 那不是留白而是把内容顶到屏幕外。该分支一律交给上面的壳侧兜底，不再自己算。
+  const shortfall = viewportHeight > 0 ? Math.max(0, layout - (viewportHeight + viewportTop)) : 0
+  return Math.max(safe, system, imeFallback, shortfall)
 }
 
 /** 一个矩形（视口坐标，与 getBoundingClientRect 同基准）。 */

@@ -14,7 +14,11 @@ android {
     // (the embedded engine, bash, and every child command would need linker64
     // wrappers); 34 keeps native exec working on Android 15/16 devices.
     targetSdk = 34
-    // 0.14.2：versionCode 41（覆盖安装 v0.14.1(40)）。
+    // 0.14.2-fx-1：versionCode 42（覆盖安装 0.14.2(41)）。
+    // fx-1 是 0.14.2 的修订版，**必须**抬 vc：同 code 装不上（无法覆盖安装），
+    // 且 vc41 与已发布的 0.14.2 相同会让系统/用户无法区分两者。
+    // 本版主题 = 用户报障四缺陷（启动页文案闪烁 / 九键条多抬一个键盘 /
+    // 插件面板无返回键 / 插件市场未适配 0.1.7）。
     // 注意 vc 必须轮换：上一版已用 40 发布过，同 code 装不上（无法覆盖安装）。
     // 本版主题 = 追上游 0.1.7-rc.1 + 四条 boot 阻断清零 + 远端 issue/PR 收口：
     //  ① 引擎 overlay 追版 rc.1（vendorTop 闭包 +19 包、cosmokit 1.8.3→1.8.5）；
@@ -23,7 +27,7 @@ android {
     //  ④ #249 迁移删剩空壳 - insert:（升级后 boot TypeError）；
     //  ⑤ #258 多窗口/自由窗口下 nx/ny 归一化基准取错（CoordBasisPolicy，四路统一）；
     //  ⑥ #250 在 0.14.1 存量用户侧的终态由本版根除（combo 并行分片下标缺陷）。
-    // 演进：0.13.8(37) → 0.14.0-preview(38) → 0.14.0(39) → 0.14.1(40) → 0.14.2(41)。
+    // 演进：0.13.8(37) → 0.14.0-preview(38) → 0.14.0(39) → 0.14.1(40) → 0.14.2(41) → 0.14.2-fx-1(42)。
     // 下列 0.14.0-preview 主题（迭代计划
     // docs/NEXT-ITERATION-PLAN-2026-09-12.md 的切片 1 = B0+B1+B2）：
     // ① B0 发布阻断项清零：android_ui_dump schema 族与返回面脱钩（#204）、控制协议 V2 行句柄
@@ -32,12 +36,12 @@ android {
     //    临时工作区 R1-R3；
     // ③ B2 门禁与发布链：新增门禁接进唯一接线面（本地构建链 / 两仓 CI / 发布组装链三处），
     //    快照指纹对账、工具返回值 schema 自检、控制 op 六处登记链、SKIP 计数。
-    versionCode = 41
+    versionCode = 42
     // Snapshot builds append a suffix (e.g. -SN-1-RC13) via -PversionNameSuffix; release builds pass none.
     val snapshotSuffix = providers.gradleProperty("versionNameSuffix").getOrElse("")
     // 版本号单一来源：UI（GuidePageRenderer）、桥（androidBridge.version）、诊断日志、引擎环境变量
     // （DSH_APP_VERSION，见 EngineManager.engineEnv）全部读这里，禁止任何地方再硬编码版本字面量。
-    versionName = "0.14.2" + snapshotSuffix
+    versionName = "0.14.2-fx-1" + snapshotSuffix
     buildConfigField("String", "TERMUX_VERSION", "\"0.118.3\"")
     // 0.14.0-preview：虚拟屏 P0 建屏矩阵走仪器测试入口（app UID 下运行 = P0-6 要测的调用者身份），
     // 不新增任何产品面（Activity/Bridge/Manifest 均不动）。见 .deploy-tmp/iter-0140/vdisplay-p0.md §8.8。
