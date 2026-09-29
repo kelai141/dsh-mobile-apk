@@ -1099,50 +1099,42 @@ class EngineManager(private val context: Context, private val pickToken: String?
     // If it has exited, a caller may retry immediately; deferring on a timestamp
     // alone turns a real early crash into a 90-second outage.
     val withinCooldown = now - EngineManager.lastStartAttemptAt < START_COOLDOWN_MS
-    // M.1（apk #272）：把「有东西在听」与「这是我们的引擎」分开。
-    //
-    // 旧实现只看 `portReachable()` ⇒ 任何占用 3080 的非本引擎进程都会被当成「已有引擎可用」，
-    // 于是**静默 return true**：不启动、不报错，用户永久进不去且界面无任何可辨提示。
-    // 现在改成四态判定（见 EngineProbe.classifyEngineAvailability）：只有确证是**我们自己的**
-    // 引擎（托管子进程存活 / 200-303 / 401 且有本代 token 行佐证）才允许早退；
-    // PORT_FOREIGN 必须照常走启动路径（它前面还有 killExistingEngine 清残留）。
-    val httpCode = runCatching { EngineProbe.check(1_000).optInt("code", -1) }.getOrDefault(-1)
+    val availability = probeAvailability(1_000)
     val managedProcessAlive = engineProcess?.isAlive == true
-    // 本代 token 行：engine.log 由 redirectOutput 每次启动**截断重写**，故它就是当前代次的日志；
-    // 有 token 行说明「眼下这一代引擎确实起来过」，用于把 401 从「匿名 401 的任意服务」里区分出来。
-    val logHasTokenLine = runCatching { EngineAuth.tokenFromLog(context) != null }.getOrDefault(false)
-    val availability = EngineProbe.classifyEngineAvailability(
-      httpCode = httpCode,
-      managedAlive = managedProcessAlive,
-      logHasTokenLine = logHasTokenLine,
-      portReachable = EngineProbe.portReachable(1_000),
-    )
     lastAvailability = availability
+    if (availability == EngineProbe.EngineAvailability.PORT_FOREIGN) {
+      val refusal = "本机 3080 端口由未归属到本壳的进程占用；为保护该进程，本次不杀、不重启、不拉起引擎"
+      lastStartRefusal = refusal
+      LogCollector.log(TAG, "engine start refused (PORT_FOREIGN; force=$force)")
+      Log.w(TAG, refusal)
+      STARTING.set(false)
+      return false
+    }
     val engineUsable = availability == EngineProbe.EngineAvailability.OUR_PROCESS ||
       availability == EngineProbe.EngineAvailability.OUR_HTTP
-    if (!force && engineUsable) {
-      // 0.13.8 #175：DEGRADED_HTTP 阶梯触发时，「端口可连」不再是健康证据——半死引擎
-      // 必须允许重启（看门狗/重试路径不带 force 也能走到这里）。这条语义**保持不变**。
-      if (WatchdogV2.degradedHttpTripped()) {
-        LogCollector.log(TAG, "engine start allowed despite reachable port: DEGRADED_HTTP ladder tripped (half-dead engine)")
-      } else {
-        STARTING.set(false)
-        LogCollector.log(TAG, "engine start skipped (existing engine usable: " + availability + ")")
-        return true
-      }
+    val degradedHttp = engineUsable && WatchdogV2.degradedHttpTripped()
+    if (!force && engineUsable && !degradedHttp) {
+      STARTING.set(false)
+      LogCollector.log(TAG, "engine start skipped (existing engine usable: " + availability + ")")
+      return true
     }
-    if (!force && availability == EngineProbe.EngineAvailability.PORT_FOREIGN) {
-      // 不再静默：这是「3080 被别的进程占着」——我们要照常启动（下面 killExistingEngine 会清
-      // 我们自己的残留），但如果那个占用者不是我们的进程，EADDRINUSE 会让启动失败并留下真因为据。
-      LogCollector.log(TAG, "engine port reachable but not ours (PORT_FOREIGN); proceeding to start — a foreign listener on 3080 will surface as a bind failure")
-      Log.w(TAG, "port 3080 is reachable but is not our engine (no managed process, no token line); starting anyway")
+    if ((force || degradedHttp) && availability == EngineProbe.EngineAvailability.OUR_HTTP && !managedProcessAlive) {
+      lastStartRefusal = "引擎 HTTP 响应可归属，但本壳没有可安全停止的子进程句柄；拒绝盲目重启"
+      LogCollector.log(TAG, "engine restart refused (owned HTTP without tracked process handle)")
+      STARTING.set(false)
+      return false
     }
     if (withinCooldown) {
       LogCollector.log(TAG, "engine start retrying after the tracked child exited during cooldown")
     }
     return try {
-      // 旧进程清理：无论句柄是否还在，先终结残留（引擎挂死/内存里 fork 掉的孤儿）。
-      killExistingEngine()
+      // 只停止持有句柄的本壳子进程；未归属监听器绝不通过名称匹配清理。
+      if (!killExistingEngine()) {
+        lastAvailability = EngineProbe.classifyPreSpawnPort(EngineProbe.portReachable(250))
+        lastStartRefusal = "旧引擎停止后 3080 仍被占用；本次拒绝 spawn，避免覆盖未知监听器"
+        LogCollector.log(TAG, "engine start refused: listener remained after owned-child cleanup")
+        return false
+      }
       // 0.13.1 W5：坏键迁移必须在引擎读 settings 前完成。
       repairSettingsSeed()
       // 0.14.0 #214：退役行 disabled 残留自愈（前置于引擎读 profile；幂等一次性，见函数注释）。
@@ -1160,7 +1152,26 @@ class EngineManager(private val context: Context, private val pickToken: String?
       val args = arrayOf(
         nodeBin.absolutePath, "--expose-internals", dshBin.absolutePath, "web", "--port", port.toString(), "--no-open",
       )
-      engineProcess = startWithArgs(args, shellEnv())
+      // TOCTOU guard: cleanup is not proof that the port stayed free during runtime preparation.
+      val preSpawnAvailability = EngineProbe.classifyPreSpawnPort(EngineProbe.portReachable(300))
+      if (preSpawnAvailability != EngineProbe.EngineAvailability.DOWN) {
+        lastAvailability = preSpawnAvailability
+        lastStartRefusal = "最终 spawn 前复查发现 3080 已被占用；按外部监听处理，本次只拒绝一次且不重试"
+        LogCollector.log(TAG, "engine start refused at final pre-spawn recheck (PORT_FOREIGN)")
+        return false
+      }
+      val started = startWithArgs(args, shellEnv())
+      engineProcess = started
+      // If a listener won the final check/start race, Node exits on EADDRINUSE. Reclassify once and
+      // leave subsequent watchdog attempts at the foreign-port refusal path (no kill/retry storm).
+      try { Thread.sleep(200) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
+      if (!started.isAlive && EngineProbe.portReachable(250)) {
+        engineProcess = null
+        lastAvailability = EngineProbe.EngineAvailability.PORT_FOREIGN
+        lastStartRefusal = "3080 在最终复查与引擎 bind 之间被其他进程抢占；已停止本次启动且不会清理外部进程"
+        LogCollector.log(TAG, "engine spawn lost EADDRINUSE race; classified PORT_FOREIGN, no retry")
+        return false
+      }
       // The cooldown is written only after a real start: failure paths don't consume the window (retry is immediate).
       EngineManager.lastStartAttemptAt = now
       LogCollector.log(TAG, "engine started")
@@ -1226,13 +1237,11 @@ class EngineManager(private val context: Context, private val pickToken: String?
   private fun startWithArgs(args: Array<String>, env: Map<String, String>): Process {
     val log = File(context.filesDir, "engine.log")
     rotateEngineLog(log)
-    // M.1（#272）缺陷 c：把「本代起点」交给 EngineAuth，供 token 归属校验使用。
-    // 位置必须在 rotateEngineLog **之后**、spawn **之前**：rotate 之后旧代已滚到 .1，
-    // 此刻起产生的日志才属于本代；而 tokenFromLog 用 mtime >= 本时刻 来拒绝旧代。
+    // Rotation must isolate the active path; otherwise an old token could survive a failed rename.
+    if (log.exists()) throw java.io.IOException("could not isolate engine.log generation before spawn")
+    // Mark the generation before ProcessBuilder creates the fresh redirect target. token extraction
+    // also checks creation time, so a stale file with a refreshed mtime cannot impersonate this run.
     runCatching { EngineAuth.markGenerationStart(System.currentTimeMillis()) }
-    // P-AC-04（§7.2 启动分段插桩）：t_boot_start 的壳侧起点（落壳侧自有文件
-    // files/boot-segments.log）。这次标记即本世代的起点；监听段由 watchEngineListen() 观察
-    // （与启动路径解耦），engine.log 本体壳侧一个字都不写。
     LogCollector.markBootStart(context)
     watchEngineListen()
     fun build(argv: List<String>): ProcessBuilder =
@@ -1247,13 +1256,18 @@ class EngineManager(private val context: Context, private val pickToken: String?
         b.redirectErrorStream(true)
         b.redirectOutput(log)
       }
-    return try {
+    val process = try {
       build(args.toList()).start()
     } catch (e: java.io.IOException) {
       if (e.message?.contains("Permission denied") != true) throw e
       Log.w(TAG, "direct exec denied, falling back to linker64: " + e.message)
       build(listOf("/system/bin/linker64") + args.toList()).start()
     }
+    if (!log.isFile) {
+      runCatching { process.destroyForcibly() }
+      throw java.io.IOException("engine spawn did not create a fresh engine.log")
+    }
+    return process
   }
 
   /**
@@ -1665,10 +1679,35 @@ class EngineManager(private val context: Context, private val pickToken: String?
     EngineManager.lastStartAttemptAt = 0
   }
 
+  /** Ownership-aware HTTP/log/process probe used by startup, restart and auth recovery. */
+  fun probeAvailability(timeoutMs: Int = 1_000): EngineProbe.EngineAvailability {
+    val httpCode = runCatching { EngineProbe.check(timeoutMs).optInt("code", -1) }.getOrDefault(-1)
+    val managedAlive = engineProcess?.isAlive == true
+    val tokenLine = runCatching { EngineAuth.tokenFromLog(context) != null }.getOrDefault(false)
+    val reachable = EngineProbe.portReachable(timeoutMs)
+    return EngineProbe.classifyEngineAvailability(httpCode, managedAlive, tokenLine, reachable).also {
+      lastAvailability = it
+    }
+  }
+
+  /** Stop only this process-owned child; an inferred HTTP listener is never kill authority. */
+  fun stopOwnedEngine(): Boolean {
+    val availability = probeAvailability(500)
+    val trackedAlive = engineProcess?.isAlive == true
+    if (availability == EngineProbe.EngineAvailability.PORT_FOREIGN ||
+      (availability == EngineProbe.EngineAvailability.OUR_HTTP && !trackedAlive)) {
+      lastStartRefusal = "端口监听进程没有本壳持有的子进程句柄；为保护未归属进程，拒绝停止或重启"
+      LogCollector.log(TAG, "stop refused (unowned listener: " + availability + ")")
+      return false
+    }
+    if (!trackedAlive) return !EngineProbe.portReachable(250)
+    if (!EngineProbe.canStopTrackedEngine(availability, trackedAlive)) return false
+    return killExistingEngine()
+  }
+
   /**
-   * 引擎进程存活判定（0.13.0 启动超时 D1 的事实源）：进程句柄活着，或 3080 已可达，
-   * 即视为「引擎还在」（冷启动 20-45s 中轮询窗口内不许宣判失败）。两者皆否才返回 false。
-   * 供 startEngineFlow 的超时语义使用——进程活着就继续等，只有进程死才触发回退。
+   * EngineProcessAlive retains its historical watchdog semantics: a reachable TCP port is enough
+   * to defer cold-start timeout; destructive actions must use [probeAvailability] instead.
    */
   fun engineProcessAlive(): Boolean {
     val held = engineProcess
@@ -1683,18 +1722,17 @@ class EngineManager(private val context: Context, private val pickToken: String?
   }
 
   /**
-   * 终结残留引擎进程：先杀持有句柄的（destroyForcibly + waitFor 有界等待），
-   * 再兜底 pkill 快照 node 进程（处理服务/看门狗曾被 fork、句柄已被覆盖的孤儿）。
-   * 幂等：无残留时零动作。
-   *
-   * 0.14.0 缓存审计：SIGTERM 宽限从 3s 提到 6s——上游 CLI 的关机预算是「dispose 最多 5 秒」
-   * （apps/cli/reference/README 原文），而 Node 只在进程正常退出时才把 NODE_COMPILE_CACHE 落盘；
-   * 3s 强杀会稳定截断 5s 预算内的优雅排空，编译缓存条目连同每次换树后的热编译一起丢。6s 覆盖
-   * 上游预算 + 1s 余量；上限仍是硬界（超时 destroyForcibly，5s→6s 只影响重启路径，不阻塞首启）。
+   * Terminate only the tracked child process. We intentionally do not use pkill: a process-name
+   * match cannot prove ownership and could kill an unrelated listener. The port must be observed
+   * released before a caller is allowed to spawn a replacement.
    */
-  private fun killExistingEngine() {
+  private fun killExistingEngine(): Boolean {
     val held = engineProcess
-    if (held != null) {
+    if (held == null && EngineProbe.portReachable(250)) {
+      LogCollector.log(TAG, "killExistingEngine refused: reachable port has no tracked child")
+      return false
+    }
+    if (held != null && held.isAlive) {
       try {
         held.destroy()
         if (!held.waitFor(6, java.util.concurrent.TimeUnit.SECONDS)) {
@@ -1703,22 +1741,14 @@ class EngineManager(private val context: Context, private val pickToken: String?
         }
       } catch (_: Throwable) {
       }
-      engineProcess = null
     }
-    // 兜底：命中快照 node 的残留进程（`bin.js web` 是该引擎的唯一形态；pnpm/脚本子进程
-    // 不含 bin.js web 特征，不会被误杀）。pkill 不可用时静默跳过。
-    // 注：与 UpdateManager 的既有清理（pkill -f bin.js）口径一致。
-    try {
-      Runtime.getRuntime().exec(arrayOf("/system/bin/pkill", "-f", "bin.js")).waitFor()
-    } catch (_: Throwable) {
-    }
-    // 0.13.8 #175：强制重启前必须复核端口真的释放（坑 31：pkill 在部分 ROM 不生效）——
-    // 不释放就 spawn 会 EADDRINUSE 循环。最多等 5s，仍占用则显式记录（下次 tick 重试）。
+    if (held != null && !held.isAlive) engineProcess = null
     repeat(5) {
-      if (!EngineProbe.portReachable(1_000)) return
-      try { Thread.sleep(1_000) } catch (_: InterruptedException) {}
+      if (!EngineProbe.portReachable(250)) return true
+      try { Thread.sleep(1_000) } catch (_: InterruptedException) { Thread.currentThread().interrupt(); return false }
     }
-    LogCollector.log(TAG, "killExistingEngine: port 3080 still occupied after cleanup (release recheck failed)")
+    LogCollector.log(TAG, "killExistingEngine: port 3080 remains occupied; refusing spawn")
+    return false
   }
 
   /** Reset the 90s cooldown window: auto-undo (config rollback) or user retry

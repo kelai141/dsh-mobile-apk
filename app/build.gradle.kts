@@ -36,21 +36,18 @@ android {
     //    临时工作区 R1-R3；
     // ③ B2 门禁与发布链：新增门禁接进唯一接线面（本地构建链 / 两仓 CI / 发布组装链三处），
     //    快照指纹对账、工具返回值 schema 自检、控制 op 六处登记链、SKIP 计数。
-    versionCode = 43
+    versionCode = 44
     // Snapshot builds append a suffix (e.g. -SN-1-RC13) via -PversionNameSuffix; release builds pass none.
     val snapshotSuffix = providers.gradleProperty("versionNameSuffix").getOrElse("")
     // 版本号单一来源：UI（GuidePageRenderer）、桥（androidBridge.version）、诊断日志、引擎环境变量
     // （DSH_APP_VERSION，见 EngineManager.engineEnv）全部读这里，禁止任何地方再硬编码版本字面量。
-    // 0.14.2-fx-2：versionCode 43（覆盖安装 fx-1(42)）。本版主题 = 用户报障与远端 issue 收口：
-    //  ① L.1 PTC argv 结构修复：堆参数从 argv[1] 移出改走 NODE_OPTIONS（缺陷 C 的更深一层，fx-1 只钉了路径没改逻辑）；
-    //  ② L.2 settings 写回 CAS 冲突：有界重试 + 每次重读描述符 + 落盘 expected/actual；
-    //  ③ #272 可用性判据过宽：端口可连/401 不再当「健康」，401 走正交 auth 字段 + 手动自救出口；
-    //  ④ #273 快照事务：回滚不再丢符号链接、marker 原子写且失败即中止、工厂覆盖另存用户版本；
-    //  ⑤ #274 看门狗证据门槛（正向证据 + 有界宽限）+ 配置原子写 + 空间预检 + 磁盘满可见；
-    //  ⑥ 真机启动链路：完整性判据补齐运行时动态库面 + 链接失败触发重抽取自愈（task-79）；
-    //  ⑦ #270 家族：sessionController 激活失败（task-80）。
-    // 演进：… → 0.14.2(41) → 0.14.2-fx-1(42) → 0.14.2-fx-2(43)。
-    versionName = "0.14.2-fx-2" + snapshotSuffix
+    // 0.14.2-fx-3：versionCode 44（覆盖安装 fx-2(43)）。本版主题 = #295 启动归属与认证归因收口：
+    //  ① 端口归属必须由受管子进程或本代 active engine.log 证据证明，HTTP 状态本身不构成所有权；
+    //  ② 旧代 token、轮转日志、未知 generation 与 TOCTOU 端口竞争均 fail closed，禁止误杀外部进程；
+    //  ③ 仅受管精确 origin 的主框架 401 进入有界自动恢复，403/子资源/外部监听只作诊断；
+    //  ④ 移除误导性的手动「重新认证」入口；#288 无实时覆盖层证据则安全停步，不伪造 CSS 修复。
+    // 演进：… → 0.14.2(41) → 0.14.2-fx-1(42) → 0.14.2-fx-2(43) → 0.14.2-fx-3(44)。
+    versionName = "0.14.2-fx-3" + snapshotSuffix
     buildConfigField("String", "TERMUX_VERSION", "\"0.118.3\"")
     // 0.14.0-preview：虚拟屏 P0 建屏矩阵走仪器测试入口（app UID 下运行 = P0-6 要测的调用者身份），
     // 不新增任何产品面（Activity/Bridge/Manifest 均不动）。见 .deploy-tmp/iter-0140/vdisplay-p0.md §8.8。

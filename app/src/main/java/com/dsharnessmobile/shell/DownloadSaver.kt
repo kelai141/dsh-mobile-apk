@@ -14,15 +14,7 @@ import java.net.URL
  * 引擎源判定：精确匹配本机引擎的 scheme/host/port（防前缀欺骗，
  * 如 127.0.0.1:30800 或 127.0.0.1:3080.evil.com 误判为引擎源）。
  */
-internal fun isEngineSource(url: String): Boolean {
-  return try {
-    val base = Uri.parse(EngineProbe.ENGINE_URL)
-    val uri = Uri.parse(url)
-    uri.scheme == base.scheme && uri.host == base.host && uri.port == base.port
-  } catch (_: Exception) {
-    false
-  }
-}
+internal fun isEngineSource(url: String): Boolean = EngineProbe.isEngineOrigin(url)
 
 /** 会话日志导出端点路径（WebView 内双拦截识别用）。 */
 internal const val SESSION_EXPORT_PATH = "/api/session.export"

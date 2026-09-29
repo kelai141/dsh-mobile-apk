@@ -249,11 +249,6 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
           }
         },
         onOpenConsole = { activity.startActivity(Intent(activity, ConsoleActivity::class.java)) },
-        // M.1（#272）缺陷 b：手动自救出口。**不依赖任何 401 判定**——无条件丢 cookie 重取 + 重启引擎 + 重载。
-        // 为什么把「重新认证」与「重启引擎」合成一个动作：两者对用户是同一件事（「把连接弄回来」）；
-        // 分成两个按钮会让用户在「凭证问题还是进程问题」上做一次他无从判断的选择。
-        // 顺序：先失效本地凭证（invalidate）→ 重新换取 → 重启引擎（引擎重启会换新 token，故顺序无关但先拿后启更省一次重试）。
-        onReauthEngine = { onReauthEngine() },
         onCheckUpdate = { onUpdateButton() },
         onGrantStorage = { activity.dirPickerController.requestStorageGrant() },
         onCopyLog = { copyGuideLog() },
@@ -341,41 +336,6 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
     refreshGuideMeta()
   }
 
-  /**
-   * M.1（apk #272）缺陷 b：手动自救——重新认证 + 重启引擎 + 重载界面。
-   *
-   * 关键性质：**不依赖 401 判定**。旧实现的自愈完全挂在「检测到 401」上（而 401 又被当成健康），
-   * 于是判定链一坏，用户就再无出路。本方法只依赖「用户点了按钮」这一个事实。
-   *
-   * 步骤与理由：
-   *  ① `EngineAuth.handleUnauthorized` = force 刷新：先 invalidate 本地 cookie（内存 + prefs）再重取，
-   *     特意**绕过缓存短路**——若沿用 mayReuseCachedCookie 的短路，被服务端拒绝的旧 cookie 会被原样返回，
-   *     这条路径就形同空转（该函数注释里记着 ST-13 的实测教训：手动失效后审批卡不再弹出，只能重启 App）。
-   *  ② 注入新的 CookieManager（页面同源 XHR/WS 自动携带；注入失败只是本拍无效，不阻断重启）。
-   *  ③ `engineFlow.restart()` 重启引擎：进程级兜底，覆盖「凭证链本身坏了」的情况。
-   *  ④ 回执如实：认证成功/失败、引擎重启是否受理，都写进副文案（不承诺「一定能连上」）。
-   *
-   * refresh 内含同步 HTTP（最长 8s）且持 EngineAuth 锁 ⇒ **必须在后台线程**（与既有 onAuthRetry 同纪律）。
-   */
-  private fun onReauthEngine() {
-    applyFlowHint("正在重新认证并重启引擎…")
-    Thread {
-      val cookie = try { EngineAuth.handleUnauthorized(activity) } catch (_: Throwable) { null }
-      if (cookie != null) {
-        try {
-          android.webkit.CookieManager.getInstance().setCookie(EngineProbe.ENGINE_URL, cookie)
-        } catch (_: Throwable) {
-          // 注入失败不阻断：重启引擎后仍会走既有首屏 cookie 注入路径。
-        }
-      }
-      val restarted = try { activity.engineFlow.restart() } catch (_: Throwable) { false }
-      activity.runOnUiThread {
-        val authText = if (cookie != null) "凭证已重新获取" else "凭证未能重新获取（可打开控制台排查）"
-        val bootText = if (restarted) "，正在重启引擎…" else "，引擎重启未受理（可能正在启动中）"
-        applyFlowHint(authText + bootText)
-      }
-    }.apply { isDaemon = true; name = "dsh-guide-reauth" }.start()
-  }
 
   /**
    * 缺陷 D（fx-2）：点「安全模式启动」——进入安全模式 + 把修复 prompt 塞进剪贴板。

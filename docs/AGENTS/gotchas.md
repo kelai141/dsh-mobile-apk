@@ -1207,4 +1207,8 @@
     **同型提醒**：凡「两条链各写一份调用」的地方，都要问「是不是同一条命令、同一份缓存口径」。
       **开发链绿 ≠ 发布链绿**——这里的差别只有一个 `--offline`。
 
+215. **HTTP 状态不是引擎所有权证明（issue #295）**：本地 3080 上任意服务都可以返回 200、303、401 或 403；若壳侧只看状态码，会在 force/restart/update 路径把外部监听器当成自己的引擎，进而盲杀或反复 spawn。**真因**是健康探测与所有权证明混用。**修法**：`EngineProbe.check().running` 保留健康语义，但破坏性启动/停止/认证恢复必须只接受本壳托管子进程，或当前 generation 的 `engine.log` token 行；旋转日志、未知 generation、精确 origin 之外一律 fail closed。停止后及 spawn 前必须再次确认端口已释放；TOCTOU 抢占只记录一次 `PORT_FOREIGN`，不得用 `pkill -f bin.js` 兜底。
+
+216. **启动轮询的 401 也不能绕过所有权门禁（issue #295）**：WebView 的 main-frame 401 之外，启动线程直接探测到的 401 同样可能来自外部监听器；若直接调用 `EngineAuth.handleUnauthorized`，会清理/刷新壳侧 cookie 并把非本引擎当成认证失败。**修法**：启动轮询复用精确本地 origin + owned-process/current-generation proof + main-frame policy helper，未证明归属时只记录拒绝，不触发认证恢复。
+
 

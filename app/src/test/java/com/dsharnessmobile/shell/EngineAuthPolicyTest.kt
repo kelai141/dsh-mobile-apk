@@ -55,11 +55,39 @@ class EngineAuthPolicyTest {
     assertFalse("起点前 30s（超出容差）必须拒绝", EngineAuth.logBelongsToCurrentGeneration(generationStart - 30_000L, generationStart))
   }
 
-  /** 起点未知（0）时保持旧行为（不做归属校验），且文件不存在（mtime=0）时必须拒绝。 */
+  /** Unknown generation is fail-closed; a zero timestamp cannot prove current ownership. */
   @Test
-  fun `unknown generation start keeps legacy behaviour and missing file is rejected`() {
-    assertTrue("起点未知时不得误杀", EngineAuth.logBelongsToCurrentGeneration(123L, generationStartMs = 0L))
+  fun `unknown generation start and missing file are rejected`() {
+    assertFalse("起点未知时不得提取 token", EngineAuth.logBelongsToCurrentGeneration(123L, generationStartMs = 0L))
     assertFalse("文件不存在（mtime=0）不得当成本代", EngineAuth.logBelongsToCurrentGeneration(0L, generationStartMs = 1_000L))
+  }
+
+  @Test
+  fun `production extractor reads only current log and rejects unknown generation`() {
+    val dir = java.nio.file.Files.createTempDirectory("engine-auth-token")
+    try {
+      val current = dir.resolve("engine.log").toFile()
+      val freshToken = "current_token_123456789012345678901234567890"
+      current.writeText("dsh web: http://127.0.0.1:3080/?token=$freshToken\n")
+      val generation = current.lastModified() - 1L
+      assertEquals("current engine.log token is extracted", freshToken, EngineAuth.tokenFromCurrentLog(current, generation))
+
+      // Refreshing mtime cannot resurrect stale content: creation time remains before this generation.
+      val createdMs = java.nio.file.Files.readAttributes(
+        current.toPath(), java.nio.file.attribute.BasicFileAttributes::class.java,
+      ).creationTime().toMillis()
+      val staleGeneration = createdMs + 60_000L
+      java.nio.file.Files.setLastModifiedTime(current.toPath(), java.nio.file.attribute.FileTime.fromMillis(staleGeneration + 1L))
+      assertNull("stale current-log content with refreshed mtime is rejected", EngineAuth.tokenFromCurrentLog(current, staleGeneration))
+
+      val rotated = dir.resolve("engine.log.1").toFile()
+      rotated.writeText("dsh web: http://127.0.0.1:3080/?token=rotated_token_123456789012345678901234567890\n")
+      java.nio.file.Files.setLastModifiedTime(rotated.toPath(), java.nio.file.attribute.FileTime.fromMillis(generation - 60_000L))
+      assertNull("rotated diagnostics never prove ownership", EngineAuth.tokenFromCurrentLog(rotated, generation))
+      assertNull("unknown generation fails closed in production extractor", EngineAuth.tokenFromCurrentLog(current, 0L))
+    } finally {
+      dir.toFile().deleteRecursively()
+    }
   }
 
   // ── (d) cookie 时窗 ────────────────────────────────────────────────────────

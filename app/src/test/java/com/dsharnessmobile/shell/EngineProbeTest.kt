@@ -45,14 +45,19 @@ class EngineProbeTest {
     )
   }
 
-  /** 200（已认证）与 303（令牌交换重定向）都是我们引擎的具体证据。 */
+  /** 200/303 alone are ordinary HTTP observations, not ownership proof. */
   @Test
-  fun `200 and 303 prove our engine`() {
+  fun `200 and 303 without shell proof remain foreign`() {
     for (code in listOf(200, 303)) {
       assertEquals(
-        "code=$code 必须是我们的引擎",
-        EngineProbe.EngineAvailability.OUR_HTTP,
+        "code=$code alone must not prove ownership",
+        EngineProbe.EngineAvailability.PORT_FOREIGN,
         EngineProbe.classifyEngineAvailability(code, managedAlive = false, logHasTokenLine = false, portReachable = true),
+      )
+      assertEquals(
+        "code=$code plus current token line proves owned HTTP",
+        EngineProbe.EngineAvailability.OUR_HTTP,
+        EngineProbe.classifyEngineAvailability(code, managedAlive = false, logHasTokenLine = true, portReachable = true),
       )
     }
   }
@@ -111,5 +116,32 @@ class EngineProbeTest {
   fun `401 is not death — availability stays ours when token line is present`() {
     val state = EngineProbe.classifyEngineAvailability(401, managedAlive = false, logHasTokenLine = true, portReachable = true)
     assertTrue("401 + token 行必须仍是「我们的引擎」（decision D3/W2）", state == EngineProbe.EngineAvailability.OUR_HTTP)
+  }
+
+  @Test
+  fun `auth recovery requires owned main frame exact origin and 401`() {
+    val owned = EngineProbe.EngineAvailability.OUR_PROCESS
+    assertTrue(EngineProbe.shouldAutoRecoverAuth(401, true, "http://127.0.0.1:3080/", owned))
+    assertTrue(EngineProbe.shouldAutoRecoverAuth(401, true, "http://127.0.0.1:3080/?x=1", EngineProbe.EngineAvailability.OUR_HTTP))
+    assertFalse("403 never refreshes auth", EngineProbe.shouldAutoRecoverAuth(403, true, "http://127.0.0.1:3080/", owned))
+    assertFalse("subresources never refresh auth", EngineProbe.shouldAutoRecoverAuth(401, false, "http://127.0.0.1:3080/", owned))
+    assertFalse("foreign listener never refreshes auth", EngineProbe.shouldAutoRecoverAuth(401, true, "http://127.0.0.1:3080/", EngineProbe.EngineAvailability.PORT_FOREIGN))
+    assertFalse("unrelated origin never refreshes auth", EngineProbe.shouldAutoRecoverAuth(401, true, "http://127.0.0.1:3081/", owned))
+  }
+
+  @Test
+  fun `origin helper rejects port host scheme and userinfo tricks`() {
+    assertTrue(EngineProbe.isEngineOrigin("http://127.0.0.1:3080/path"))
+    assertFalse(EngineProbe.isEngineOrigin("https://127.0.0.1:3080/"))
+    assertFalse(EngineProbe.isEngineOrigin("http://127.0.0.1:30800/"))
+    assertFalse(EngineProbe.isEngineOrigin("http://127.0.0.2:3080/"))
+    assertFalse(EngineProbe.isEngineOrigin("http://127.0.0.1:3080.evil.example/"))
+    assertFalse(EngineProbe.isEngineOrigin("http://attacker@127.0.0.1:3080/"))
+  }
+
+  @Test
+  fun `pre spawn port check fails closed`() {
+    assertEquals(EngineProbe.EngineAvailability.PORT_FOREIGN, EngineProbe.classifyPreSpawnPort(true))
+    assertEquals(EngineProbe.EngineAvailability.DOWN, EngineProbe.classifyPreSpawnPort(false))
   }
 }

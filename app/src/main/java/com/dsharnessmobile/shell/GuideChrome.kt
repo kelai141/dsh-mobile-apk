@@ -33,14 +33,6 @@ internal class GuideChrome(
   val primaryButton: Button,
   val consoleButton: Button,
   val updateButton: Button,
-  /**
-   * M.1（apk #272）缺陷 b：**不依赖 401 判定**的手动自救出口。
-   *
-   * 为什么需要它：401 的自动自愈链（EngineProbe.auth → handleUnauthorized → reload）本身可能失效
-   * （cookie 换不出来、页面判定链坏了），那时用户必须有一条**永远可点**的路把引擎拉回可用态。
-   * 语义 = 丢弃本地 cookie + 重新认证 + 重载；与「重启引擎」合并在同一个按钮上（两者都是「重试连接」）。
-   */
-  val reauthButton: Button,
   val runtimeChip: TextView,
   val storageChip: TextView,
   val versionLabel: TextView,
@@ -49,8 +41,6 @@ internal class GuideChrome(
 internal class GuideCallbacks(
   val onStartEngine: () -> Unit,
   val onOpenConsole: () -> Unit,
-  /** M.1（#272）：重新认证 + 重启引擎（不依赖 401 判定，任何时候都能点）。 */
-  val onReauthEngine: () -> Unit,
   val onCheckUpdate: () -> Unit,
   val onGrantStorage: () -> Unit,
   val onCopyLog: () -> Unit,
@@ -389,13 +379,6 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
   val primaryButton = makePrimary()
   val consoleButton = makeSecondary(activity.getString(R.string.ds_open_console), callbacks.onOpenConsole)
   val updateButton = makeSecondary(activity.getString(R.string.ds_check_update), callbacks.onCheckUpdate)
-  // M.1（#272）缺陷 b：第三个次级按钮 = 不依赖 401 判定的手动自救出口。
-  // 文案走 strings.xml（本仓「用户可见文案单一真源」惯例）。
-  val reauthButton = makeSecondary(activity.getString(R.string.ds_reauth_engine), callbacks.onReauthEngine).apply {
-    // 完整语义走无障碍 contentDescription：按钮上只放 4 字（窄屏不被截断），
-    // 但「点了到底做什么」必须对读屏用户同样可及（本仓无障碍面既有要求）。
-    contentDescription = activity.getString(R.string.ds_reauth_cd)
-  }
 
   val secondaryRow = LinearLayout(activity).apply {
     orientation = LinearLayout.HORIZONTAL
@@ -405,16 +388,6 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
     lp.topMargin = dpix(R.dimen.ds_space_8)
     layoutParams = lp
   }
-  // 窄屏（360dp 竖屏）容不下**三个等宽**按钮：三枚 14sp 中文按钮每枚仅约 100dp，
-  // 「重新认证」这类文案会被 ellipsize 成「重新认…」。
-  // ⇒ 自救按钮**另起一行**，与前三枚同一 makeSecondary 样式；第一行两枚位置不动（回归面最小）。
-  //
-  // 宽度用**显式 matchParent（整行）**，不用 weight：
-  //   设备实测（5554 横屏 1600x900）该按钮渲染 626px = 整行；而早先版本这里传的是 `half`
-  //   （`LayoutParams(0, MATCH_PARENT, 1f)`）——**在只有一个子视图的行里，weight=1 必然吃满整行**，
-  //   所以 `half` 从来没有产生过半宽。源码写 `half` 而渲染是整行 = 源码在说谎，下一个人会读错。
-  //   现改为语义正确的整行参数（效果与实测一致，且不再需要读者去推 weight 语义）。
-  //   整行也是刻意的选择：更易点、文案有充足宽度，不会在小屏上被截断。
   val half = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
   val halfEnd = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
     marginStart = dpix(R.dimen.ds_space_8)
@@ -422,25 +395,11 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
   secondaryRow.addView(consoleButton, half)
   secondaryRow.addView(updateButton, halfEnd)
 
-  val rescueRow = LinearLayout(activity).apply {
-    orientation = LinearLayout.HORIZONTAL
-    val lp = LinearLayout.LayoutParams(
-      ViewGroup.LayoutParams.MATCH_PARENT, dpix(R.dimen.ds_btn_secondary_height),
-    )
-    lp.topMargin = dpix(R.dimen.ds_space_8)
-    layoutParams = lp
-  }
-  rescueRow.addView(
-    reauthButton,
-    LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
-  )
-
   val actionBlock = LinearLayout(activity).apply {
     orientation = LinearLayout.VERTICAL
     setPadding(0, dpix(R.dimen.ds_space_12), 0, 0)
     addView(primaryButton)
     addView(secondaryRow)
-    addView(rescueRow)
   }
   root.addView(actionBlock)
 
@@ -490,7 +449,6 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
     primaryButton = primaryButton,
     consoleButton = consoleButton,
     updateButton = updateButton,
-    reauthButton = reauthButton,
     runtimeChip = runtimeChip,
     storageChip = storageChip,
     versionLabel = versionLabel,

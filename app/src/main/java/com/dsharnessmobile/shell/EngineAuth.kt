@@ -116,38 +116,28 @@ object EngineAuth {
   }
 
   /**
-   * 纯函数：token 行的**归属**判据（M.1 / #272 缺陷 c）。
+   * 纯判据：日志文件是否可能属于当前引擎代次。
    *
-   * 缺陷：`tokenFromLog` 会依次看 engine.log / .1 / .2，取**第一条命中**。启动瞬间
-   * `rotateEngineLog` 已把上一代滚到 .1、新代 engine.log 还是空（引擎约 2s 后才打印 token 行），
-   * 此时读到的正是**上一代死进程**的 token —— 拿它去交换必然失败（或换回一个属于旧进程的 cookie），
-   * 表现为「首启偶发要等很久才进去」。
-   *
-   * 判据：日志文件的 mtime 必须 >= 本代起点（本代 spawn 的时刻）。旧代文件在 spawn 时已滚走，
-   * mtime 早于本代起点 ⇒ 拒绝。允许 [slackMs] 的时钟回拨/写入延迟余量。
-   *
-   * @param logModifiedMs 日志文件最后修改时刻；文件不存在传 0。
-   * @param generationStartMs 本代引擎 spawn 时刻；未知传 0（= 不做归属校验，保持旧行为）。
-   * @param slackMs 容差。
+   * 未知代次一律拒绝；mtime 只是必要条件，token 提取还要求当前 engine.log 的 creation time
+   * 不早于本代起点，避免触碰旧日志后刷新 mtime 就伪装成新代。轮转文件 engine.log.1/.2
+   * 永远不作为当前代 token 来源。
    */
   internal fun logBelongsToCurrentGeneration(
     logModifiedMs: Long,
     generationStartMs: Long,
     slackMs: Long = 5_000L,
   ): Boolean {
-    if (generationStartMs <= 0L) return true
-    if (logModifiedMs <= 0L) return false
+    if (generationStartMs <= 0L || logModifiedMs <= 0L) return false
     return logModifiedMs >= generationStartMs - slackMs
   }
 
   @Volatile private var cached: String? = null
 
   /**
-   * 本代引擎的 spawn 时刻（epoch ms）；0 = 未知（不做归属校验，保持旧行为）。
+   * 本代引擎 spawn 起点（epoch ms）；0 = 未知，token 提取必须 fail closed。
    *
-   * M.1（#272）缺陷 c：tokenFromLog 需要知道「哪一代」才能拒绝上一代的 token 行。
-   * 由 [EngineManager.startWithArgs] 在 rotate 之后、spawn 之前标记——那里是「本代起点」
-   * 的唯一权威位置。用**实例字段**而非 prefs：代次是进程内事实，跨进程读到的旧值比没有更危险。
+   * 由 [EngineManager.startWithArgs] 在 rotate 之后、spawn 之前标记；用进程内字段而非 prefs，
+   * 因为代次是进程事实，跨进程读到旧值比没有更危险。
    */
   @Volatile private var generationStartAt: Long = 0L
 
@@ -300,37 +290,43 @@ object EngineAuth {
     }
   }
 
-  /** The launch token from the newest engine.log generation, when present. */
-  fun tokenFromLog(context: Context): String? = tokenFromLog(File(context.filesDir, "engine.log"))
+  /** The launch token from the active engine.log only, when its generation is proven. */
+  fun tokenFromLog(context: Context): String? =
+    tokenFromCurrentLog(File(context.filesDir, "engine.log"), generationStartAt)
 
-  // ── P0: engine.log token → 303 Set-Cookie ──────────────────────────────
+  // ── P0: current engine.log token → 303 Set-Cookie ──────────────────────
 
   private fun exchangeFromLogToken(app: Context): String? {
-    val token = tokenFromLog(File(app.filesDir, "engine.log")) ?: return null
+    val token = tokenFromCurrentLog(File(app.filesDir, "engine.log"), generationStartAt) ?: return null
     return exchange(app, token)
   }
 
-  private fun tokenFromLog(log: File): String? {
-    // Newest generation first: engine.log, engine.log.1, engine.log.2 (0.13.1 W3 rotation).
-    // Tail only — the URL line prints at boot; no need to scan a whole file.
-    for (f in arrayOf(log, File(log.parentFile, "engine.log.1"), File(log.parentFile, "engine.log.2"))) {
-      if (!f.exists()) continue
-      try {
-        val bytes = f.inputStream().use { input ->
-          val tail = ByteArray(64 * 1024)
-          val skipped = input.channel.size() - tail.size
-          if (skipped > 0) input.channel.position(skipped)
-          val read = input.read(tail)
-          tail.copyOf(if (read > 0) read else 0)
-        }
-        val text = String(bytes, StandardCharsets.UTF_8)
-        val last = TOKEN_RE.findAll(text).lastOrNull()?.groupValues?.get(1)
-        if (last != null) return last
-      } catch (_: Exception) {
-        // unreadable generation: try the next one
-      }
+  /** Production extractor, also exercised with real temporary files by JVM tests. */
+  internal fun tokenFromCurrentLog(log: File, generationStartMs: Long): String? {
+    if (!log.isFile || generationStartMs <= 0L) return null
+    val attributes = try {
+      java.nio.file.Files.readAttributes(log.toPath(), java.nio.file.attribute.BasicFileAttributes::class.java)
+    } catch (_: Exception) {
+      return null
     }
-    return null
+    val modifiedMs = attributes.lastModifiedTime().toMillis()
+    val createdMs = attributes.creationTime().toMillis()
+    if (!logBelongsToCurrentGeneration(modifiedMs, generationStartMs)) return null
+    if (!logBelongsToCurrentGeneration(createdMs, generationStartMs)) return null
+
+    return try {
+      // Rotated logs are diagnostics only; they can never prove the current generation.
+      val bytes = log.inputStream().use { input ->
+        val tail = ByteArray(64 * 1024)
+        val skipped = input.channel.size() - tail.size
+        if (skipped > 0) input.channel.position(skipped)
+        val read = input.read(tail)
+        tail.copyOf(if (read > 0) read else 0)
+      }
+      TOKEN_RE.findAll(String(bytes, StandardCharsets.UTF_8)).lastOrNull()?.groupValues?.get(1)
+    } catch (_: Exception) {
+      null
+    }
   }
 
   private fun exchange(context: Context, token: String): String? {

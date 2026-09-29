@@ -115,8 +115,9 @@ class MainActivity : ComponentActivity() {
   /** 本次会话是否已经为通知权限弹过一次（S1-11：不重复弹、且只在真需要时弹）。 */
   private var notifPermissionAsked = false
 
-  /** M.1（#272）：已为本代页面做过多少次 401 自愈重载（见 [onEngineAuthRejected]）。 */
+  /** Bounded internal 401 recovery; it is only armed after an ownership probe. */
   private var engineAuthReloadAttempts = 0
+  private val engineAuthRecoveryInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
 
   companion object {
     private const val TAG = "dsh-shell"
@@ -132,7 +133,7 @@ class MainActivity : ComponentActivity() {
     private const val NOTIF_CHANNEL_ID = "dsh"
 
     /**
-     * M.1（apk #272）：引擎页面被 401/403 拒绝后，最多自愈重载几次就退回原生引导页。
+     * Bounded internal recovery: an owned main-frame 401 gets at most three self-healing reloads.
      *
      * 为什么有上限：cookie 永远换不出来时（例如签名密钥被清）无限重载 = 页面反复闪，
      * 用户既看不懂也无从脱身。3 次足够覆盖「token 行刚到、cookie 尚未就绪」的正常竞态。
@@ -723,13 +724,24 @@ class MainActivity : ComponentActivity() {
         } catch (t: Throwable) {
           Log.w(TAG, "http error diag failed: " + (t.message ?: t.javaClass.simpleName))
         }
-        // M.1（apk #272）缺陷 b：401/403 不是「页面坏了」，是「引擎在、但当前 cookie 不被接受」。
-        // 旧实现只落一条诊断就结束 ⇒ 用户停在一个 401 文案页，而壳侧自愈链（handleUnauthorized →
-        // refresh → reload）**从未被触发**（EngineProbe 把 401 当健康，这条回调也没有动作）。
-        // 现在：重新认证 + 重载一次；重试到上限仍失败就**退回原生引导页**——
-        // 那是「不依赖 401 判定」的手动自救出口（引导页的按钮始终可点，用户不会被困在网页里）。
-        if (errorResponse.statusCode == 401 || errorResponse.statusCode == 403) {
-          onEngineAuthRejected(request.url.toString())
+        // Automatic recovery is intentionally narrower than diagnostics: only a main-frame 401 from
+        // the exact local origin may proceed, and ownership is proved asynchronously before cookies change.
+        // 403 is diagnostic-only: it must never clear, refresh, or reload authentication state.
+        if (errorResponse.statusCode == 401 && request.isForMainFrame && isEngineSource(request.url.toString()) &&
+          engineAuthReloadAttempts < ENGINE_AUTH_RELOAD_MAX && engineAuthRecoveryInFlight.compareAndSet(false, true)) {
+          val rejectedUrl = request.url.toString()
+          Thread {
+            try {
+              val availability = engineManager.probeAvailability()
+              if (EngineProbe.shouldAutoRecoverAuth(401, true, rejectedUrl, availability)) {
+                runOnUiThread { onEngineAuthRejected(rejectedUrl) }
+              } else {
+                LogCollector.log(TAG, "401 recovery refused: engine ownership not proven")
+              }
+            } finally {
+              engineAuthRecoveryInFlight.set(false)
+            }
+          }.apply { isDaemon = true; name = "engine-auth-ownership-probe" }.start()
         }
       }
 
@@ -1057,14 +1069,8 @@ class MainActivity : ComponentActivity() {
   }
 
   /**
-   * M.1（apk #272）缺陷 b 的自愈入口：引擎页面被 401/403 拒绝时重新认证并重载。
-   *
-   * 为什么要「有上限 + 退回引导页」：无限重载会在 cookie 永远换不出来时变成死循环
-   * （用户只看到页面反复闪）。到上限后退回**原生引导页**，那里有可点的按钮（打开控制台 /
-   * 安全模式启动），是「不依赖 401 判定」的手动出口——即使用户的 401 判定链本身坏了，
-   * 他也不会被困在一个没有出路的网页里。
-   *
-   * @param url 被拒的引擎页面 URL（只用于日志）。
+   * Bounded internal recovery after ownership-gated main-frame 401. 403 never reaches this method.
+   * @param url rejected exact local-engine URL (for diagnostics only).
    */
   private fun onEngineAuthRejected(url: String) {
     val attempt = engineAuthReloadAttempts + 1
@@ -1076,7 +1082,7 @@ class MainActivity : ComponentActivity() {
       // 因为这条路径的用户同样需要一段可直接粘贴给模型的东西——否则他只有一块卡住的屏。
       val prompt = buildSafeModePrompt(
         stage = "engine-auth-401",
-        detail = "引擎页面被 401/403 拒绝，自愈重载 " + ENGINE_AUTH_RELOAD_MAX + " 次后仍未恢复（cookie 无法换出）。",
+        detail = "引擎主页面被 401 拒绝，所有权门控的自动认证重载 " + ENGINE_AUTH_RELOAD_MAX + " 次后仍未恢复（cookie 无法换出）。",
         logTail = runCatching { PluginMounts.readEngineLogTail(this, 4_000) }.getOrDefault(""),
         safeModeActive = false,
       )
@@ -1087,8 +1093,8 @@ class MainActivity : ComponentActivity() {
             showGuide()
             applyGuidePhase(
               GuidePhase.Error,
-              getString(R.string.ds_auth_stuck_title),
-              getString(R.string.ds_auth_stuck_hint),
+              "引擎认证失败",
+              "自动认证重试已用尽，可打开控制台排查；不会清理或重启未归属的引擎进程。"
             )
           }
         } catch (t: Throwable) {

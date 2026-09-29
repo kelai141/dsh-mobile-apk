@@ -87,6 +87,10 @@ class UpdateManager(private val context: Context) {
         if (!File(newUsr, "bin/node").exists()) throw IllegalStateException("新快照缺少 node")
 
         onStatus(UpdateStatus(UpdateOutcome.Working, "切换运行时…"))
+        // Stop only an engine child held by this app process; never broad-match a listener by argv.
+        if (!EngineManager(context).stopOwnedEngine()) {
+          throw IllegalStateException("运行时更新已拒绝：3080 监听进程未归属到本壳，未停止外部进程")
+        }
         val usr = File(context.filesDir, "usr")
         val old = File(context.filesDir, "usr-old")
         SnapshotFs.deletePath(old)
@@ -105,12 +109,7 @@ class UpdateManager(private val context: Context) {
         File(context.filesDir, ".update-pending").writeText("1")
         File(context.filesDir, ".update-pending-at").writeText(System.currentTimeMillis().toString())
 
-        // Kill the old engine process: the EngineService watchdog restarts
-        // it from the NEW usr within seconds.
-        try {
-          Runtime.getRuntime().exec(arrayOf("/system/bin/pkill", "-f", "bin.js")).waitFor()
-        } catch (_: Throwable) {
-        }
+        // The tracked child was stopped before the runtime swap; the service watchdog starts the new tree.
         // Record the snapshot fingerprint: distinguishes an online update from the embedded assets
         // fingerprint (otherwise the next boot misjudges "snapshot stale" and re-extracts the assets
         // snapshot, reverting the online update to factory state).

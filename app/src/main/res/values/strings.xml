@@ -19,14 +19,6 @@
   <string name="ds_updating">更新中</string>
   <string name="ds_undoing">回撤中</string>
   <string name="ds_open_console">打开控制台</string>
-  <!-- M.1（apk #272）：不依赖 401 判定的手动自救出口。点击 = 丢弃本地 cookie + 重新认证 + 重启引擎 + 重载。
-       按钮文案取 4 字（360dp 竖屏 half 宽下不会被截断）；完整语义写在这条提示里。 -->
-  <string name="ds_reauth_engine">重新认证</string>
-  <string name="ds_reauth_cd">重新认证并重启引擎：丢弃本机保存的会话凭证、重新向引擎换取，然后重载界面</string>
-  <!-- M.1（apk #272）：引擎页面被 401/403 拒绝、自愈重试耗尽后退回原生引导页。
-       这是「不依赖 401 判定」的手动自救出口——即使用户的自愈链本身坏了，也不会被困在网页里。 -->
-  <string name="ds_auth_stuck_title">引擎需要重新认证</string>
-  <string name="ds_auth_stuck_hint">引擎在运行，但当前会话凭证未被接受，自动重试已用尽。可点下方按钮重试或重启引擎；也可打开控制台排查。修复指令与报错原文已复制到剪贴板。</string>
   <string name="ds_check_update">检查更新</string>
   <!-- 0.13.8 批 H：启动页 APK 自更新（仅手动；同按钮二次确认；下载后自动拉起授权/安装） -->
   <string name="ds_apk_checking">检查中…</string>

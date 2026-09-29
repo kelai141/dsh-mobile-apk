@@ -463,10 +463,13 @@ internal class EngineStartFlow(private val activity: MainActivity) {
           // 不阻断启动：恢复失败只意味着「这棵树还没收敛」，引擎仍可能正常起。
           reportRecoveryRejectionIfAny(activity, activity.engineManager.pendingRecoveryFailure)
         },
-        // M.1（#272）：这里问的是「**我们自己的**引擎是否已在跑」，而不是「HTTP 是否完全就绪」。
-        // `running` 口径未变（含 401）⇒ 401 也算「已在跑」（引擎在、只是要重新认证），
-        // 否则每次冷启动都会被判为「引擎没起」而重复拉起（decision D3/W2 必须保持）。
-        probeRunning = { EngineProbe.check().optBoolean("running", false) },
+        // Health `running` intentionally includes arbitrary 401s for watchdog semantics; startup
+        // early-exit needs ownership proof and must not treat an unrelated local listener as ours.
+        probeRunning = {
+          val ownership = activity.engineManager.probeAvailability()
+          ownership == EngineProbe.EngineAvailability.OUR_PROCESS ||
+            ownership == EngineProbe.EngineAvailability.OUR_HTTP
+        },
       )
       if (engineAlreadyRunning) {
         // P-AC-04：这条早退路径不经过 spawn 观察线程，补一次 listen 标记（幂等；本进程没记过
@@ -634,8 +637,16 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         // 也**不能**当成「引擎死亡」（`running` 仍含 401 ⇒ engineProcessAlive 路径不变，D3/W2 不受影响）。
         val probe = EngineProbe.check()
         if (probe.optString("auth") == "required") {
-          LogCollector.log("dsh-engine-start", "engine answered 401 during boot: re-authenticating (cookie rejected)")
-          runCatching { EngineAuth.handleUnauthorized(activity) }
+          // A startup probe is not ownership evidence by itself: an unrelated local
+          // listener can also answer 401. Reuse the same exact-origin/main-frame
+          // policy before clearing or refreshing any cookie state.
+          val availability = activity.engineManager.probeAvailability()
+          if (EngineProbe.shouldAutoRecoverAuth(401, true, EngineProbe.ENGINE_URL, availability)) {
+            LogCollector.log("dsh-engine-start", "owned engine answered 401 during boot: re-authenticating (cookie rejected)")
+            runCatching { EngineAuth.handleUnauthorized(activity) }
+          } else {
+            LogCollector.log("dsh-engine-start", "401 startup recovery refused: engine ownership not proven")
+          }
           // 认证刷新后本拍不算就绪：继续轮询，下一拍 200 才是真的就绪。
           Thread.sleep(pollStepMs)
           continue
@@ -806,29 +817,28 @@ internal class EngineStartFlow(private val activity: MainActivity) {
   }
 
   /**
-   * 重启引擎服务进程（设置界面「重启引擎」）：pkill 引擎 → 重置冷却与
-   * 流程守卫 → 1s 后重新走启动流程（EngineService 看门狗亦会拉起，
-   * 进程级 CAS + 冷却保证双路径幂等）。防连点：in-flight 守卫。
+   * Restart only after the manager proves it can stop its tracked child. Foreign listeners are
+   * left untouched and the subsequent spawn is not attempted.
    */
   fun restart(): Boolean {
-    // S3-15：返回「是否真的发起了重启」。页面侧旧实现无论成败都显示「重启中…」两秒后自己变回
-    // ——那是假忙碌。CAS 失败（已在重启中）同样属于「没发起」，如实回 false。
     if (!engineRestarting.compareAndSet(false, true)) return false
     activity.userClosedEngine = false
     flowGeneration.incrementAndGet()
     EngineService.setUserShutdown(activity, false)
     Thread {
       try {
-        try {
-          Runtime.getRuntime().exec(arrayOf("/system/bin/pkill", "-f", "bin.js")).waitFor()
-        } catch (_: Throwable) {
+        if (!activity.engineManager.stopOwnedEngine()) {
+          activity.runOnUiThread {
+            activity.showTestNotification("未重启引擎", activity.engineManager.lastStartRefusal ?: "端口监听未归属到本壳，未执行停止或启动")
+          }
+          return@Thread
         }
         EngineManager.lastStartAttemptAt = 0
         flowRunning.set(false)
-        LogCollector.log("dsh-shell", "restart engine requested (pkill)")
+        LogCollector.log("dsh-shell", "restart engine requested (tracked child only)")
         Thread.sleep(1000)
         activity.runOnUiThread {
-          activity.showTestNotification("引擎重启中", "引擎进程已结束，正在重新启动…")
+          activity.showTestNotification("引擎重启中", "已停止本壳托管进程，正在重新启动…")
           start()
         }
       } finally {

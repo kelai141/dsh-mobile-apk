@@ -64,21 +64,8 @@ object EngineProbe {
   enum class EngineAuthState { OK, REQUIRED, UNKNOWN }
 
   /**
-   * 纯判据：把「端口/HTTP/托管进程/日志」四个观测合成为一个可辨状态（JVM 单测）。
-   *
-   * @param httpCode GET / 的响应码；**-1 = 没有拿到任何 HTTP 应答**（连接被拒/超时/非 HTTP 服务）。
-   * @param managedAlive 本进程持有的 engineProcess 是否存活。
-   * @param logHasTokenLine 当前 engine.log 代次里是否有引擎的 `dsh web: ...?token=` 行。
-   * @param portReachable TCP 层是否能连上 3080。
-   *
-   * 规则（顺序即优先级）：
-   *  1. 托管进程活着 ⇒ [EngineAvailability.OUR_PROCESS]（句柄是比端口强的证据）。
-   *  2. 200 或 303 ⇒ [EngineAvailability.OUR_HTTP]：303 只可能是我们引擎的令牌交换重定向，
-   *     而 200 需要带上我们自己铸造的 cookie 才会出现，两者都足够具体。
-   *  3. 401 **且**本代日志里有 token 行 ⇒ [EngineAvailability.OUR_HTTP]：401 单独不够具体
-   *     （任何拒绝匿名请求的服务都会回 401），必须由「引擎自己的 token 行」佐证。
-   *  4. 端口可连但以上都不成立 ⇒ [EngineAvailability.PORT_FOREIGN]（**不得再当健康**）。
-   *  5. 其余 ⇒ [EngineAvailability.DOWN]。
+   * Classify observed listener evidence. HTTP status is never an ownership proof by itself:
+   * only a tracked child or a current-generation shell token line can establish ownership.
    */
   internal fun classifyEngineAvailability(
     httpCode: Int,
@@ -87,11 +74,45 @@ object EngineProbe {
     portReachable: Boolean,
   ): EngineAvailability {
     if (managedAlive) return EngineAvailability.OUR_PROCESS
-    if (httpCode == 200 || httpCode == 303) return EngineAvailability.OUR_HTTP
-    if (httpCode == 401 && logHasTokenLine) return EngineAvailability.OUR_HTTP
-    if (portReachable) return EngineAvailability.PORT_FOREIGN
+    if (logHasTokenLine && httpCode in setOf(200, 303, 401, 403)) return EngineAvailability.OUR_HTTP
+    if (portReachable || httpCode >= 0) return EngineAvailability.PORT_FOREIGN
     return EngineAvailability.DOWN
   }
+
+  /** The second port observation immediately before spawn is authoritative for this attempt. */
+  internal fun classifyPreSpawnPort(portReachable: Boolean): EngineAvailability =
+    if (portReachable) EngineAvailability.PORT_FOREIGN else EngineAvailability.DOWN
+
+  /** A forced restart may stop only the exact managed child, never an inferred listener. */
+  internal fun canStopTrackedEngine(availability: EngineAvailability, managedAlive: Boolean): Boolean =
+    managedAlive && availability != EngineAvailability.PORT_FOREIGN
+
+  /** Exact local engine origin comparison, independent of Android Uri for JVM policy tests. */
+  internal fun isEngineOrigin(url: String): Boolean = try {
+    val uri = java.net.URI(url)
+    uri.scheme.equals("http", ignoreCase = true) &&
+      uri.host.equals("127.0.0.1", ignoreCase = true) && uri.port == 3080 && uri.rawUserInfo == null
+  } catch (_: Exception) {
+    false
+  }
+
+  /** Automatic cookie recovery is narrowly limited to owned main-frame engine 401 responses. */
+  internal fun shouldAutoRecoverAuth(
+    statusCode: Int,
+    isMainFrame: Boolean,
+    url: String,
+    availability: EngineAvailability,
+  ): Boolean = statusCode == 401 && isMainFrame && isEngineOrigin(url) &&
+    (availability == EngineAvailability.OUR_PROCESS || availability == EngineAvailability.OUR_HTTP)
+
+  /** 403 is reportable for an owned engine, but never an auth-refresh trigger. */
+  internal fun isOwnedEngineForbidden(
+    statusCode: Int,
+    isMainFrame: Boolean,
+    url: String,
+    availability: EngineAvailability,
+  ): Boolean = statusCode == 403 && isMainFrame && isEngineOrigin(url) &&
+    (availability == EngineAvailability.OUR_PROCESS || availability == EngineAvailability.OUR_HTTP)
 
   /**
    * 纯判据：401 的语义化（JVM 单测）。
