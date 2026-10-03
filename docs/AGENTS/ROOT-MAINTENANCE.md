@@ -36,7 +36,7 @@ symlink 不跟随；root-origin regular hardlink、foreign owner、跨 device、
 
 ProcIo 的 destroy/各 stream close 都在独立 daemon cleanup worker，waiter 只按共同 cleanup 预算 join；read/close 不在输出内存锁内。返回 text/flags 是有界不可变部分快照，晚到 reader 不能改已返回结果；readError 不当 EOF。ShizukuCaptureIo 使用执行 UID 拥有的0700目录（root 在本应用 cache，shell 在自身目录），随机名、CREATE_NEW/NOFOLLOW_LINKS 创建 .part；不覆盖已存在输出路径。writer/flush/close 真结束且 exit、drain、cleanup、读取与 cap 均完整后才无覆盖发布；不完整返回 spoolReady=false、空路径与不可变 inline/size，不能作为可取的 ready spool。
 
-RootOwnershipJobs 是进程级 single flight；UI request 立即返回 repair-started/repair-running，root 状态既有轮询读实际结果。state 合并本地 worker 和当前耐久 lease：worker 已返回但 lease 未 finish 仍 running/pending、completedAt=0，UNKNOWN/超30s overdue；结果和 lease 分开呈现，不把旧 complete result 冒充当前租约完成。caller 最多等待30s，不取消共享 worker，也不以 caller 超时释放耐久隔离。相近 Activity/Service 启动仅复用5s内已结算扫描；用户维护与普通重试重新检查。
+RootOwnershipJobs 是进程级 single flight；状态锁 `lock` 只守字段（`state()` 与桥调用只取它，不被探测挡住），入口清算的真绑定探测在独立的 `entryLock` 内串行化（#319）；UI request 立即返回 repair-started/repair-running，root 状态既有轮询读实际结果。state 合并本地 worker 和当前耐久 lease：worker 已返回但 lease 未 finish 仍 running/pending、completedAt=0，UNKNOWN/超30s overdue；结果和 lease 分开呈现，不把旧 complete result 冒充当前租约完成。caller 最多等待30s，不取消共享 worker，也不以 caller 超时释放耐久隔离。相近 Activity/Service 启动仅复用5s内已结算扫描；用户维护与普通重试重新检查。
 
 ## 5. 启动生命周期所有权
 

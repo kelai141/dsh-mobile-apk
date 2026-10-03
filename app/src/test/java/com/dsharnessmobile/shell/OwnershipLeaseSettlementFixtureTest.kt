@@ -311,9 +311,9 @@ class OwnershipLeaseSettlementFixtureTest {
   }
 
   @Test fun staleLeaseIsClearedInsideTheJobEntryCriticalSection() {
-    // 真机实测（2026-10-02）：清算放进本锁、且只在确实有租约时付探测成本；置 running 在同一临界区内。
+    // 真机实测（2026-10-02）：清算放进入口锁、且只在确实有租约时付探测成本；置 running 在同一入口临界区内。
     val jobs = body("RootOwnershipJobs", "private fun start(")
-    val lock = jobs.indexOf("synchronized(lock)")
+    val lock = jobs.indexOf("synchronized(entryLock)")
     val runningCheck = jobs.indexOf("if (running) return false")
     val firstOutstanding = jobs.indexOf("RootMaintenanceLease.outstanding(app) != null")
     val clear = jobs.indexOf("ShizukuTransport.clearLeaseWhenNoRootChannel(app)")
@@ -323,6 +323,25 @@ class OwnershipLeaseSettlementFixtureTest {
     assertTrue(clear > firstOutstanding && secondOutstanding > clear)
     assertTrue(setRunning > clear)
   }
+
+  @Test fun rootStatusReadIsNotBlockedByTheEntryProbe() {
+    // issue #319：真绑定探测最长 15s，不得在 state() 共用的状态锁内执行。
+    // 反证：探测(clear...)必须出现在 entryLock 内、且不在任何 synchronized(lock) 块里。
+    val jobs = body("RootOwnershipJobs", "private fun start(")
+    val probe = jobs.indexOf("ShizukuTransport.clearLeaseWhenNoRootChannel(app)")
+    assertTrue(probe > jobs.indexOf("synchronized(entryLock)"))
+    // 逐个状态锁块检查其区间不含探测。
+    val stateLockBlocks = Regex("""synchronized\(lock\)\s*\{""").findAll(jobs).map { it.range.last }.toList()
+    for (open in stateLockBlocks) {
+      var d = 1
+      var i = open + 1
+      while (i < jobs.length && d > 0) { if (jobs[i] == '{') d++ else if (jobs[i] == '}') d--; i++ }
+      assertFalse("探测落在状态锁内会重现 #319", probe in open..i)
+    }
+    // state() 只取状态锁，不碰入口锁。
+    assertFalse(body("RootOwnershipJobs", "fun state(").contains("entryLock"))
+  }
+
 
   @Test fun noRootPathClearIsTheOnlyNonOwnerExitAndKeepsUnknownSemanticsElsewhere() {
     val lease = source("RootMaintenanceLease")
