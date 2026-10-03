@@ -76,6 +76,10 @@
 **不变量**：没有任何一级报出的能力**保持缺失（绝不猜测）**；每个报出的能力**都带 `source`**；`reasoningEfforts` 是**逐模型**值，本模块**从不**产出供应商级设置。
 **合流不是替换**：S3/S5 是插进既有四级的两级，不是用一个实现替换另一个（判据见 `docs/0.14.2-preview-SHIZUKU-RESET-AND-MODEL-FILL.md` §1）。
 
+### 4.2 快照面板的客户端所有权
+
+`dsh-client-ui-responsive/src/client/snapshot-panels-observer.ts` 的 `snapshotOwners` 按真实三层 `data-slot` 认领 vendored 快照面板的 header/titleRow；`SnapshotPanelsObserver` 分别租赁抬升和解除包含的临时 class，并在关闭、重分类、移除或 reload 时恢复。配套 `snapshot-panels.css.ts` 只改变这两个已认领元素的绘制层和包含约束。真因、测试与设备边界见 `gotchas.md` 坑 239。
+
 ## 0.14.3 新模块与职责（源码登记，未执行验证）
 
 | 新模块 | 职责 / 关键入口 |

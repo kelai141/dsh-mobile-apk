@@ -61,7 +61,7 @@ ui-sidebar-right 都挂在它上面——继续 fork 就得每个版本复刻一
 ## 构建
 
 ```sh
-npm install          # @deepseek-ai/* 固定 0.1.5-rc.1
+npm install          # @deepseek-ai/* 固定版本以 package.json 为准
 npm run typecheck
 npm run build        # tsc（lib/types）+ tsdown（lib/client.js 浏览器包）
 npx vitest run

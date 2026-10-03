@@ -66,6 +66,15 @@ ui-sidebar 的 SidebarRoot 读 `usePanelInfo`——禁用 `ui-layout` 会让三�
 
 ## 已知边界
 
+快照管理由 vendored 插件挂在会话标题栏的 actions 插槽。`SnapshotPanelsObserver`
+按 renderer 的真实 `display:contents` 包装节点认领面板，在打开时临时抬升 header，
+并解除承载面板的 titleRow 的布局包含约束，使 fixed 遮罩覆盖完整视口。关闭后两组
+class 租约释放，上游标题行的 query container 恢复。正文容器与 React 节点位置保持
+原样。测试必须使用 `conversation.header` / `conversation.session.header` /
+`conversation.session.header.actions` 完整插槽链；直接把 header 插入根节点会漏掉
+真实 DOM 与布局树的区别。背景、diff 和控件中心的真实命中还需浏览器或设备验证，
+jsdom 类名断言不能替代绘制及正常坐标输入。
+
 - 上游若改动 `data-*` 属性名或 768px 阈值，手机形态与全屏假设会失配——真机验收清单
   第一条就是竖屏右栏是否覆盖式滑入；
 - 目录打开在部分文件管理器上不接受 FileProvider 目录 URI，故目录主候选固定为

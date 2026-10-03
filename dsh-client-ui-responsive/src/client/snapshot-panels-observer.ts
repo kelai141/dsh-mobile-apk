@@ -1,32 +1,40 @@
 /**
- * Raise the conversation header while its vendored snapshot manager is open (#288).
+ * Keep the vendored snapshot manager above the transcript and viewport-sized (#288).
  *
  * vendor/dsh-undo-savepoint/lib/client.js renders SnapshotPanel in
  * conversation.session.header.actions, not a body portal. Its exact hooks are
  * div.u_overlay[data-undo-panel] > div.u_panel and the panel's direct u_* rows.
- * ConversationHeader publishes data-window-drag and a direct leading seat;
- * ConversationMainPanel renders that header as a flex item under div[data-phase].
- * Raising this header puts its titleRow container context above transcript paint
- * without moving React nodes, changing code blocks, or raising the frame itself.
- * The deployed stacking chain/paint order has not been measured; this is the
- * source-backed header path, not a claim about every possible overlay ancestor.
+ * Every upstream renderSlot adds a real display:contents DOM wrapper. The header
+ * sits under conversation.header, and its title row under conversation.session.header.
+ * SnapshotPanel is a direct child of the header.actions outlet (the vendor returns
+ * a React Fragment). Recognizing these seats avoids confusing DOM parents with
+ * the layout tree, which omits the wrappers.
+ *
+ * Old WebViews apply layout containment to the title row's container-type:inline-size:
+ * it becomes both a stacking context and the fixed panel's containing block. A
+ * temporary title-row class removes containment; a separate header class raises
+ * the subtree. Closing the last owned panel releases both classes and restores
+ * upstream CSS, without moving React nodes or changing transcript containers.
  */
 
 const OVERLAY_SELECTOR = 'div.u_overlay[data-undo-panel]'
 const CANDIDATE_SELECTOR = 'div[data-undo-panel]'
 const HEADER_SELECTOR = 'header[data-window-drag]'
 const RAISED_CLASS = 'dsh-mobile-snapshot-header-raised'
+const UNCONTAINED_CLASS = 'dsh-mobile-snapshot-title-row-uncontained'
 const LEASES_KEY = Symbol.for('dsh-client-ui-responsive.snapshot-panels.header-leases')
+const TITLE_LEASES_KEY = Symbol.for('dsh-client-ui-responsive.snapshot-panels.title-row-leases')
 
-type HeaderLease = { users: number; added: boolean }
-type HeaderLeases = WeakMap<HTMLElement, HeaderLease>
+type ClassLease = { users: number; added: boolean }
+type ClassLeases = WeakMap<HTMLElement, ClassLease>
+type SnapshotOwners = { header: HTMLElement; titleRow: HTMLElement }
 
 /** Share class ownership across overlapping instances, including module reloads. */
-function headerLeases(document: Document): HeaderLeases {
-  const existing = Reflect.get(document, LEASES_KEY) as HeaderLeases | undefined
+function classLeases(document: Document, key: symbol): ClassLeases {
+  const existing = Reflect.get(document, key) as ClassLeases | undefined
   if (existing !== undefined) return existing
-  const leases: HeaderLeases = new WeakMap()
-  Reflect.set(document, LEASES_KEY, leases)
+  const leases: ClassLeases = new WeakMap()
+  Reflect.set(document, key, leases)
   return leases
 }
 
@@ -36,28 +44,42 @@ function hasChild(parent: Element, selector: string): boolean {
 }
 
 /** Distinguish SnapshotPanel from MessagePanel, settings, and text/code lookalikes. */
-function snapshotHeader(overlay: HTMLElement): HTMLElement | null {
+function snapshotOwners(overlay: HTMLElement): SnapshotOwners | null {
   const panel = Array.from(overlay.children).find(child => child.matches('div.u_panel'))
   if (panel === undefined || !['u_head', 'u_toolbar', 'u_tbody', 'u_foot']
     .every(row => hasChild(panel, 'div.' + row))) return null
 
   // These are separate upstream overlay/right-panel seats, not conversation chrome.
   if (overlay.closest('[data-shell-overlay], [data-sidebar-right-panel]') !== null) return null
-  const header = overlay.closest<HTMLElement>(HEADER_SELECTOR)
-  if (header === null || !header.parentElement?.matches('div[data-phase]')
+  const actions = overlay.parentElement
+  if (!actions?.matches('div[data-slot="conversation.session.header.actions"]')) return null
+  const header = actions.closest<HTMLElement>(HEADER_SELECTOR)
+  const headerSeat = header?.parentElement
+  if (header === null || !headerSeat?.matches('div[data-slot="conversation.header"]')
+    || !headerSeat.parentElement?.matches('div[data-phase]')
     || !hasChild(header, 'div[data-conversation-header-leading]')) return null
-  return header
+
+  // Only the direct session-header row carrying this actions outlet owns its
+  // containment; sibling tabs and transcript query containers stay untouched.
+  const sessionSeat = Array.from(header.children)
+    .find(child => child.matches('div[data-slot="conversation.session.header"]'))
+  const titleRow = sessionSeat === undefined ? undefined : Array.from(sessionSeat.children)
+    .find(child => child.matches('div') && child.contains(actions)) as HTMLElement | undefined
+  return titleRow === undefined ? null : { header, titleRow }
 }
 
-/** Own only the temporary header class; the companion stylesheet owns its paint level. */
+/** Lease temporary ownership classes; the companion stylesheet owns geometry and paint. */
 export class SnapshotPanelsObserver {
   private observer: MutationObserver | null = null
   private readonly headers = new Set<HTMLElement>()
-  private readonly leases: HeaderLeases
+  private readonly titleRows = new Set<HTMLElement>()
+  private readonly leases: ClassLeases
+  private readonly titleLeases: ClassLeases
 
   /** @param document - The document containing the conversation headers. */
   constructor(private readonly document: Document = globalThis.document) {
-    this.leases = headerLeases(document)
+    this.leases = classLeases(document, LEASES_KEY)
+    this.titleLeases = classLeases(document, TITLE_LEASES_KEY)
   }
 
   /** Observe existing and newly mounted snapshot managers; repeated attachment is harmless. */
@@ -70,50 +92,61 @@ export class SnapshotPanelsObserver {
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['class', 'data-undo-panel', 'data-phase', 'data-window-drag',
+      attributeFilter: ['class', 'data-slot', 'data-undo-panel', 'data-phase', 'data-window-drag',
         'data-conversation-header-leading', 'data-shell-overlay', 'data-sidebar-right-panel'],
     })
     this.sync()
   }
 
-  /** Stop observation and release only classes this observer leased, including detached headers. */
+  /** Release this observer's leases, including owners already detached from the document. */
   detach(): void {
     this.observer?.disconnect()
     this.observer = null
-    for (const header of this.headers) this.release(header)
+    for (const header of this.headers) this.release(header, RAISED_CLASS, this.leases)
+    for (const titleRow of this.titleRows) this.release(titleRow, UNCONTAINED_CLASS, this.titleLeases)
     this.headers.clear()
+    this.titleRows.clear()
   }
 
   private sync(): void {
-    const next = new Set<HTMLElement>()
+    const nextHeaders = new Set<HTMLElement>()
+    const nextTitleRows = new Set<HTMLElement>()
     for (const overlay of this.document.querySelectorAll<HTMLElement>(OVERLAY_SELECTOR)) {
-      const header = snapshotHeader(overlay)
-      if (header !== null) next.add(header)
-    }
-    for (const header of this.headers) {
-      if (!next.has(header)) this.release(header)
-    }
-    for (const header of next) {
-      if (!this.headers.has(header)) {
-        const lease = this.leases.get(header)
-        if (lease !== undefined) lease.users += 1
-        else this.leases.set(header, { users: 1, added: !header.classList.contains(RAISED_CLASS) })
-      }
-      if (!header.classList.contains(RAISED_CLASS)) {
-        const lease = this.leases.get(header)
-        if (lease !== undefined) lease.added = true
-        header.classList.add(RAISED_CLASS)
+      const owners = snapshotOwners(overlay)
+      if (owners !== null) {
+        nextHeaders.add(owners.header)
+        nextTitleRows.add(owners.titleRow)
       }
     }
-    this.headers.clear()
-    for (const header of next) this.headers.add(header)
+    this.syncClasses(this.headers, nextHeaders, RAISED_CLASS, this.leases)
+    this.syncClasses(this.titleRows, nextTitleRows, UNCONTAINED_CLASS, this.titleLeases)
   }
 
-  private release(header: HTMLElement): void {
-    const lease = this.leases.get(header)
+  private syncClasses(owned: Set<HTMLElement>, next: Set<HTMLElement>, className: string, leases: ClassLeases): void {
+    for (const element of owned) {
+      if (!next.has(element)) this.release(element, className, leases)
+    }
+    for (const element of next) {
+      if (!owned.has(element)) {
+        const lease = leases.get(element)
+        if (lease !== undefined) lease.users += 1
+        else leases.set(element, { users: 1, added: !element.classList.contains(className) })
+      }
+      if (!element.classList.contains(className)) {
+        const lease = leases.get(element)
+        if (lease !== undefined) lease.added = true
+        element.classList.add(className)
+      }
+    }
+    owned.clear()
+    for (const element of next) owned.add(element)
+  }
+
+  private release(element: HTMLElement, className: string, leases: ClassLeases): void {
+    const lease = leases.get(element)
     if (lease === undefined || --lease.users > 0) return
-    if (lease.added) header.classList.remove(RAISED_CLASS)
-    this.leases.delete(header)
+    if (lease.added) element.classList.remove(className)
+    leases.delete(element)
   }
 
   private relevant(record: MutationRecord): boolean {
@@ -121,8 +154,8 @@ export class SnapshotPanelsObserver {
     if (target.nodeType === 1) {
       const element = target as Element
       // Includes ownership-hook removal and reclassification of an already tracked header.
-      for (const header of this.headers) {
-        if (header.contains(element) || element.contains(header)) return true
+      for (const owner of [...this.headers, ...this.titleRows]) {
+        if (owner.contains(element) || element.contains(owner)) return true
       }
       if (element.closest(CANDIDATE_SELECTOR) !== null) return true
       const header = element.closest(HEADER_SELECTOR)

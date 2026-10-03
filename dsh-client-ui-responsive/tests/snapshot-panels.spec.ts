@@ -10,6 +10,7 @@ import { SnapshotPanelsObserver } from '../src/client/snapshot-panels-observer.t
 import { SNAPSHOT_PANELS_CSS } from '../src/client/snapshot-panels.css.ts'
 
 const RAISED = 'dsh-mobile-snapshot-header-raised'
+const UNCONTAINED = 'dsh-mobile-snapshot-title-row-uncontained'
 
 /**
  * Resolve a vendored-fixed copy from cwd upward; jsdom makes import.meta.url non-file.
@@ -45,18 +46,35 @@ function attach(Observer: typeof SnapshotPanelsObserver = SnapshotPanelsObserver
   return observer
 }
 
-/** ConversationMainPanel + ConversationHeader hooks, without guessing hashed module classes. */
-function mountConversation(): { root: HTMLElement; header: HTMLElement; seat: HTMLElement; code: HTMLElement } {
+/**
+ * SlotOutlet keeps a real data-slot node even though display:contents removes its layout box.
+ * Keep every upstream header outlet: a literal root > header fixture hid issue #288.
+ */
+function mountConversation(): {
+  root: HTMLElement; header: HTMLElement; headerSlot: HTMLElement;
+  sessionSlot: HTMLElement; titleRow: HTMLElement; seat: HTMLElement; code: HTMLElement
+} {
   const root = document.createElement('div')
   root.setAttribute('data-phase', 'active')
   root.style.display = 'flex'
   root.style.flexDirection = 'column'
-  root.innerHTML = '<header data-window-drag style="display:grid;flex:none">' +
-    '<div data-conversation-header-leading><button>navigation</button></div>' +
-    '<div style="container-type:inline-size"><div data-test-seat></div></div>' +
-    '</header><main><pre style="position:relative;z-index:6"><code>content</code></pre></main>'
+  root.innerHTML = '<div data-slot="conversation.header" style="display:contents">' +
+    '<header data-window-drag style="display:grid;flex:none">' +
+    '<div data-conversation-header-leading><div data-slot="conversation.header.leading" style="display:contents"><button>navigation</button></div></div>' +
+    '<div data-slot="conversation.session.header" style="display:contents">' +
+    '<div data-test-title-row style="container-type:inline-size"><div><nav>session</nav><div>' +
+    '<div data-slot="conversation.session.header.actions" data-test-seat style="display:contents"></div>' +
+    '</div></div><div data-conversation-header-corner></div></div>' +
+    '</div></header></div><main><div style="position:relative"><div style="position:sticky;z-index:6">Code banner</div>' +
+    '<pre><code>content</code></pre></div></main>'
   document.body.append(root)
-  return { root, header: root.querySelector('header')!, seat: root.querySelector('[data-test-seat]')!, code: root.querySelector('pre')! }
+  return {
+    root, header: root.querySelector('header')!,
+    headerSlot: root.querySelector('[data-slot="conversation.header"]')!,
+    sessionSlot: root.querySelector('[data-slot="conversation.session.header"]')!,
+    titleRow: root.querySelector('[data-test-title-row]')!,
+    seat: root.querySelector('[data-test-seat]')!, code: root.querySelector('pre')!,
+  }
 }
 
 /** SnapshotPanel lib/client.js:603–724; rows exist even while loading or empty. */
@@ -100,51 +118,66 @@ describe('snapshot source ownership', () => {
     expect(vendor).not.toContain('createPortal')
   })
 
-  it('uses one bounded class selector with no old-WebView or global code-block dependency', () => {
+  it('targets the real header outlet and relaxes containment only while its manager is owned', () => {
     const css = SNAPSHOT_PANELS_CSS.replace(/\/\*[\s\S]*?\*\//g, '')
-    expect(css).toContain('div[data-phase] > header[data-window-drag].' + RAISED)
+    expect(css).toContain('[data-slot="conversation.header"]')
+    expect(css).toContain('header[data-window-drag].' + RAISED)
     expect(css).toContain('z-index: 16;')
     expect(css).not.toContain(':has(')
     expect(css).not.toContain('@media')
     expect(css).not.toMatch(/\b(pre|code|iframe|body|html)\b/)
     expect(css).not.toMatch(/(position|transform|isolation|pointer-events|overflow)\s*:/)
-    expect(css.match(/\{/g)).toHaveLength(1)
+    expect(css).toContain('container-type: normal')
+    expect(css).toContain('contain: none')
+    expect(css).toContain(UNCONTAINED)
   })
 })
 
 describe('SnapshotPanelsObserver header promotion', () => {
   it('raises an already mounted owned header without changing DOM, inline styles, or code paint', () => {
-    const { header, seat, code } = mountConversation()
+    const { root, header, headerSlot, sessionSlot, titleRow, seat, code } = mountConversation()
     const overlay = mountSnapshot(seat)
     header.classList.add('other-owner')
     const headerStyle = header.getAttribute('style')
     const overlayStyle = overlay.getAttribute('style')
     const codeStyle = code.getAttribute('style')
+    const titleStyle = titleRow.getAttribute('style')
+    expect(header.parentElement).toBe(headerSlot)
+    expect(headerSlot.parentElement).toBe(root)
+    expect(titleRow.parentElement).toBe(sessionSlot)
+    expect(headerSlot.style.display).toBe('contents')
     const observer = attach()
     expect(header.classList.contains(RAISED)).toBe(true)
+    expect(titleRow.classList.contains(UNCONTAINED)).toBe(true)
     expect(overlay.parentElement).toBe(seat)
     expect(header.getAttribute('style')).toBe(headerStyle)
     expect(overlay.getAttribute('style')).toBe(overlayStyle)
     expect(code.getAttribute('style')).toBe(codeStyle)
+    expect(titleRow.getAttribute('style')).toBe(titleStyle)
     observer.detach()
     expect(header.classList.contains(RAISED)).toBe(false)
     expect(header.classList.contains('other-owner')).toBe(true)
+    expect(titleRow.classList.contains(UNCONTAINED)).toBe(false)
     expect(header.getAttribute('style')).toBe(headerStyle)
+    expect(titleRow.getAttribute('style')).toBe(titleStyle)
   })
 
   it('opens, closes, and reopens without depending on CSS.supports or translated labels', async () => {
     vi.stubGlobal('CSS', undefined)
-    const { header, seat } = mountConversation()
+    const { header, titleRow, seat } = mountConversation()
     attach()
     const first = mountSnapshot(seat, 'Snapshot Manager')
     await settle()
     expect(header.classList.contains(RAISED)).toBe(true)
+    expect(titleRow.classList.contains(UNCONTAINED)).toBe(true)
     first.remove()
     await settle()
     expect(header.classList.contains(RAISED)).toBe(false)
+    expect(titleRow.classList.contains(UNCONTAINED)).toBe(false)
     mountSnapshot(seat, '快照管理')
     await settle()
     expect(header.classList.contains(RAISED)).toBe(true)
+    expect(titleRow.classList.contains(UNCONTAINED)).toBe(true)
   })
 
   it('releases disjoint headers independently when one manager closes', async () => {
@@ -155,23 +188,29 @@ describe('SnapshotPanelsObserver header promotion', () => {
     attach()
     expect(left.header.classList.contains(RAISED)).toBe(true)
     expect(right.header.classList.contains(RAISED)).toBe(true)
+    expect(left.titleRow.classList.contains(UNCONTAINED)).toBe(true)
+    expect(right.titleRow.classList.contains(UNCONTAINED)).toBe(true)
     first.remove()
     await settle()
     expect(left.header.classList.contains(RAISED)).toBe(false)
     expect(right.header.classList.contains(RAISED)).toBe(true)
+    expect(left.titleRow.classList.contains(UNCONTAINED)).toBe(false)
+    expect(right.titleRow.classList.contains(UNCONTAINED)).toBe(true)
   })
 
   it('retains a shared header while any of its managers remains', async () => {
-    const { header, seat } = mountConversation()
+    const { header, titleRow, seat } = mountConversation()
     const first = mountSnapshot(seat)
     const second = mountSnapshot(seat)
     attach()
     first.remove()
     await settle()
     expect(header.classList.contains(RAISED)).toBe(true)
+    expect(titleRow.classList.contains(UNCONTAINED)).toBe(true)
     second.remove()
     await settle()
     expect(header.classList.contains(RAISED)).toBe(false)
+    expect(titleRow.classList.contains(UNCONTAINED)).toBe(false)
   })
 
   it('tracks an externally moved manager without itself moving any React-owned node', async () => {
@@ -183,11 +222,13 @@ describe('SnapshotPanelsObserver header promotion', () => {
     await settle()
     expect(left.header.classList.contains(RAISED)).toBe(false)
     expect(right.header.classList.contains(RAISED)).toBe(true)
+    expect(left.titleRow.classList.contains(UNCONTAINED)).toBe(false)
+    expect(right.titleRow.classList.contains(UNCONTAINED)).toBe(true)
     expect(overlay.parentElement).toBe(right.seat)
   })
 
   it('shares leases across overlapping instances and a module reload', async () => {
-    const { header, seat } = mountConversation()
+    const { header, titleRow, seat } = mountConversation()
     mountSnapshot(seat)
     const old = attach()
     vi.resetModules()
@@ -196,13 +237,16 @@ describe('SnapshotPanelsObserver header promotion', () => {
     old.detach()
     await settle()
     expect(header.classList.contains(RAISED)).toBe(true)
+    expect(titleRow.classList.contains(UNCONTAINED)).toBe(true)
     current.detach()
     expect(header.classList.contains(RAISED)).toBe(false)
+    expect(titleRow.classList.contains(UNCONTAINED)).toBe(false)
   })
 
   it('does not remove a class already present before acquisition', () => {
-    const { header, seat } = mountConversation()
+    const { header, titleRow, seat } = mountConversation()
     header.classList.add(RAISED, 'other-owner')
+    titleRow.classList.add(UNCONTAINED, 'other-title-owner')
     mountSnapshot(seat)
     const first = attach()
     const second = attach()
@@ -210,6 +254,8 @@ describe('SnapshotPanelsObserver header promotion', () => {
     second.detach()
     expect(header.classList.contains(RAISED)).toBe(true)
     expect(header.classList.contains('other-owner')).toBe(true)
+    expect(titleRow.classList.contains(UNCONTAINED)).toBe(true)
+    expect(titleRow.classList.contains('other-title-owner')).toBe(true)
   })
 
   it('attaches/detaches idempotently, releases detached headers, and can attach again', async () => {
@@ -258,6 +304,126 @@ describe('SnapshotPanelsObserver header promotion', () => {
     expect(header.classList.contains(RAISED)).toBe(true)
   })
 
+  it.each(['headerSlot', 'sessionSlot', 'seat'] as const)(
+    'releases and reacquires both paint classes when the %s outlet changes ownership', async key => {
+      const conversation = mountConversation()
+      mountSnapshot(conversation.seat)
+      const outlet = conversation[key]
+      const original = outlet.getAttribute('data-slot')!
+      attach()
+      expect(conversation.header.classList.contains(RAISED)).toBe(true)
+      expect(conversation.titleRow.classList.contains(UNCONTAINED)).toBe(true)
+      outlet.setAttribute('data-slot', 'another.plugin.outlet')
+      await settle()
+      expect(conversation.header.classList.contains(RAISED)).toBe(false)
+      expect(conversation.titleRow.classList.contains(UNCONTAINED)).toBe(false)
+      outlet.setAttribute('data-slot', original)
+      await settle()
+      expect(conversation.header.classList.contains(RAISED)).toBe(true)
+      expect(conversation.titleRow.classList.contains(UNCONTAINED)).toBe(true)
+    },
+  )
+
+  it('releases both classes when a vendor row is reclassified rather than removed', async () => {
+    const { header, titleRow, seat } = mountConversation()
+    const overlay = mountSnapshot(seat)
+    const toolbar = overlay.querySelector('.u_toolbar')!
+    attach()
+    toolbar.className = 'looks-like-u_toolbar'
+    await settle()
+    expect(header.classList.contains(RAISED)).toBe(false)
+    expect(titleRow.classList.contains(UNCONTAINED)).toBe(false)
+    toolbar.className = 'u_toolbar'
+    await settle()
+    expect(header.classList.contains(RAISED)).toBe(true)
+    expect(titleRow.classList.contains(UNCONTAINED)).toBe(true)
+  })
+
+  it('keeps ownership through a real diff child and restores classes only after its manager closes', async () => {
+    const { header, titleRow, seat } = mountConversation()
+    const overlay = mountSnapshot(seat)
+    const panel = overlay.querySelector('.u_panel')!
+    const diff = document.createElement('div')
+    diff.className = 'u_diffbox'
+    diff.setAttribute('data-undo-diff', 'true')
+    diff.innerHTML = '<div class="u_diffhead"><button>close diff</button></div><div class="u_diffbody">changes</div>'
+    attach()
+    panel.insertBefore(diff, panel.querySelector('.u_tbody'))
+    await settle()
+    expect(header.classList.contains(RAISED)).toBe(true)
+    expect(titleRow.classList.contains(UNCONTAINED)).toBe(true)
+    expect(diff.parentElement).toBe(panel)
+    diff.remove()
+    await settle()
+    expect(header.classList.contains(RAISED)).toBe(true)
+    expect(titleRow.classList.contains(UNCONTAINED)).toBe(true)
+    overlay.remove()
+    await settle()
+    expect(header.classList.contains(RAISED)).toBe(false)
+    expect(titleRow.classList.contains(UNCONTAINED)).toBe(false)
+  })
+
+  it('reacquires classes removed by another renderer and cleans them up without inline-style changes', async () => {
+    const { header, titleRow, seat } = mountConversation()
+    const originalStyle = titleRow.getAttribute('style')
+    const overlay = mountSnapshot(seat)
+    attach()
+    header.classList.remove(RAISED)
+    titleRow.classList.remove(UNCONTAINED)
+    await settle()
+    expect(header.classList.contains(RAISED)).toBe(true)
+    expect(titleRow.classList.contains(UNCONTAINED)).toBe(true)
+    expect(titleRow.getAttribute('style')).toBe(originalStyle)
+    overlay.remove()
+    await settle()
+    expect(header.classList.contains(RAISED)).toBe(false)
+    expect(titleRow.classList.contains(UNCONTAINED)).toBe(false)
+    expect(titleRow.getAttribute('style')).toBe(originalStyle)
+  })
+
+  it('releases a replaced title row and leases the replacement without retaining stale classes', async () => {
+    const { header, titleRow, sessionSlot, seat } = mountConversation()
+    const overlay = mountSnapshot(seat)
+    attach()
+    const replacement = titleRow.cloneNode(true) as HTMLElement
+    replacement.classList.remove(UNCONTAINED)
+    replacement.querySelector('[data-test-seat]')!.replaceChildren(overlay)
+    titleRow.replaceWith(replacement)
+    await settle()
+    expect(titleRow.classList.contains(UNCONTAINED)).toBe(false)
+    expect(replacement.classList.contains(UNCONTAINED)).toBe(true)
+    expect(replacement.parentElement).toBe(sessionSlot)
+    expect(header.classList.contains(RAISED)).toBe(true)
+    overlay.remove()
+    await settle()
+    expect(replacement.classList.contains(UNCONTAINED)).toBe(false)
+    expect(header.classList.contains(RAISED)).toBe(false)
+  })
+
+  it.each(['direct-header', 'wrong-header-outlet', 'missing-session-outlet', 'indirect-actions-child'] as const)(
+    'rejects the %s lookalike even when vendor marker rows are present', shape => {
+      const { root, header, headerSlot, sessionSlot, titleRow, seat } = mountConversation()
+      const overlay = mountSnapshot(seat)
+      if (shape === 'direct-header') {
+        root.insertBefore(header, headerSlot)
+        headerSlot.remove()
+      } else if (shape === 'wrong-header-outlet') {
+        headerSlot.setAttribute('data-slot', 'another.header')
+      } else if (shape === 'missing-session-outlet') {
+        header.append(titleRow)
+        sessionSlot.remove()
+      } else {
+        const wrapper = document.createElement('div')
+        wrapper.append(overlay)
+        seat.append(wrapper)
+      }
+      attach()
+      expect(header.classList.contains(RAISED)).toBe(false)
+      expect(titleRow.classList.contains(UNCONTAINED)).toBe(false)
+      expect(overlay.className).toBe('u_overlay')
+    },
+  )
+
   it('ignores localized text, the message panel, class substrings, and unowned body surfaces', () => {
     const { header, seat, code } = mountConversation()
     code.textContent = '<div class="u_overlay" data-undo-panel>Snapshot Manager 快照管理</div>'
@@ -294,8 +460,11 @@ describe('SnapshotPanelsObserver header promotion', () => {
     const rightStyle = right.getAttribute('style')
     attach()
     expect(main.header.classList.contains(RAISED)).toBe(true)
+    expect(main.titleRow.classList.contains(UNCONTAINED)).toBe(true)
     expect(shellConversation.header.classList.contains(RAISED)).toBe(false)
     expect(rightConversation.header.classList.contains(RAISED)).toBe(false)
+    expect(shellConversation.titleRow.classList.contains(UNCONTAINED)).toBe(false)
+    expect(rightConversation.titleRow.classList.contains(UNCONTAINED)).toBe(false)
     expect(shell.getAttribute('style')).toBe(shellStyle)
     expect(right.getAttribute('style')).toBe(rightStyle)
     expect(iframe.parentElement).toBe(right)
