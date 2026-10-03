@@ -8,7 +8,10 @@ import java.util.concurrent.TimeUnit
 
 /** One bounded caller settlement for native ownership maintenance; no model command entrypoint. */
 internal object RootOwnershipJobs {
+  /** 状态锁：只守下面的字段，临界区必须短——**禁止**在其内做探测/binder/IO（issue #319）。 */
   private val lock = Any()
+  /** 入口串行锁：串行化 start() 的「清算探测 → 复核 → 置 running」；最长约 15s 的真绑定探测只挡其他 start()（#319；方案来自 PR #322 @Ni-ShuWu）。 */
+  private val entryLock = Any()
   private var running = false
   private var startedAt = 0L
   private var completedAt = 0L
@@ -32,8 +35,8 @@ internal object RootOwnershipJobs {
   private fun start(context: Context, reuseRecent: Boolean = false): Boolean {
     val app = context.applicationContext
     val done: CountDownLatch
-    synchronized(lock) {
-      if (running) return false
+    synchronized(entryLock) {
+      synchronized(lock) { if (running) return false }
       // 入口级清算：只有**确实存在残留租约**时才付探测成本（含 binder 调用）；且此刻本进程
       // 没有在跑的维护（上面的 running 已挡住在跑的情形，锁内的 fence 复核挡住跨入口的并发）。
       // 放在本锁内 ⇒ 与下面置 running=true 是一段临界区，不会与别的 start() 交错。
@@ -41,10 +44,12 @@ internal object RootOwnershipJobs {
         ShizukuTransport.clearLeaseWhenNoRootChannel(app)
         if (RootMaintenanceLease.outstanding(app) != null) return false
       }
-      // Activity and foreground Service can start together; reuse only a very recent settlement.
-      if (reuseRecent && result != null && SystemClock.elapsedRealtime() - completedAt < 5_000L) return false
-      running = true; startedAt = SystemClock.elapsedRealtime(); completedAt = 0L; result = null
-      done = CountDownLatch(1); latch = done
+      synchronized(lock) {
+        // Activity and foreground Service can start together; reuse only a very recent settlement.
+        if (reuseRecent && result != null && SystemClock.elapsedRealtime() - completedAt < 5_000L) return false
+        running = true; startedAt = SystemClock.elapsedRealtime(); completedAt = 0L; result = null
+        done = CountDownLatch(1); latch = done
+      }
     }
     Thread({
       val settled = try { ShizukuTransport.autoHealOwnershipDirect(app) }
