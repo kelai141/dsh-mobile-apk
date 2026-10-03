@@ -6,8 +6,10 @@
 
 | 修复前 | 修复后 |
 |---|---|
-| ![修复前：代码块盖住快照管理面板](ui-00-BEFORE-panel-covered-by-codeblock.jpg) | ![修复后：面板完整可见](ui-01-snapshot-panel-SGT-AL10-20261003-213933.jpg) |
+| ![修复前：代码块盖住快照管理面板](https://raw.githubusercontent.com/snoworwind/dsh-mobile-apk/docs/issue-288-device-evidence/docs/AGENTS/evidence/issue-288/ui-00-BEFORE-panel-covered-by-codeblock.jpg) | ![修复后：面板完整可见](https://raw.githubusercontent.com/snoworwind/dsh-mobile-apk/docs/issue-288-device-evidence/docs/AGENTS/evidence/issue-288/ui-01-snapshot-panel-SGT-AL10-20261003-213933.jpg) |
 | `ui-00-BEFORE-panel-covered-by-codeblock.jpg` | `ui-01-snapshot-panel-SGT-AL10-20261003-213933.jpg` |
+
+引用形式与 **issue #288 正文**、以及**修复 PR #321 描述**完全一致：一律 `https://raw.githubusercontent.com/snoworwind/dsh-mobile-apk/<分支>/<仓库内路径>` 的绝对 URL。原因：PR 描述里的**相对路径解析基准是目标分支（`main`）**，截图此刻还没进 `main`，相对路径会变破图；绝对 URL 在 PR 与 issue 上都立即可见。合并进 `main` 后 GitHub 会把这类引用改写成相对路径。
 
 ### 差异（人眼可判读，不需要看懂代码）
 
