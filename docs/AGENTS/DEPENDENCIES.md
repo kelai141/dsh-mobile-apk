@@ -1,6 +1,6 @@
 # DEPENDENCIES.md — 引用库权威登记
 
-> 源码登记：0.14.3 / versionCode 45，未构建本轮APK。声明版本不证明产物版本、ABI、大小/hash或测试通过。依赖以 [APK Gradle声明](<dsh-mobile-apk/app/build.gradle.kts#L127-L150>) 和 [引擎overlay](<dsh-mobile-apk/scripts/snapshot-config/engine-overlay.json>) 为准；不维护会漂移的文件/导入计数。
+> 源码基线：当前 main 为 0.14.4 / BuildConfig versionCode 46；VC55 是用户设备报告的 Android manifest 版本码。设备专用升级包须在签名重封装时 bump manifest 到 VC56，回退包 VC57+；均尚未构建。声明版本不证明产物版本、ABI、大小/hash或测试通过。依赖以 APK Gradle 声明和引擎 overlay 为准。
 
 ## 1. 工具链与构建声明
 
@@ -8,7 +8,7 @@
 |---|---|
 | AGP / Kotlin / Gradle / Java | 8.8.2 / 2.0.21 / 8.11.1 / 17；发布与开发使用项目wrapper，不用系统gradle替代。 |
 | compileSdk / targetSdk / minSdk | 36 / 34 / 26；任何新增API保持minSdk守卫。 |
-| versionCode / versionName | 45 / 0.14.3；suffix来自Gradle属性；这是当前声明，不是已生成的APK。 |
+| versionCode / versionName | 源码 Gradle 46 / 0.14.4；设备专用修复包将以重封装把 Android manifest bump 至 VC56，回退包需 VC57+；BuildConfig 与 manifest 码不混为同一证据。 |
 | Termux基线 | BuildConfig.TERMUX_VERSION=0.118.3。 |
 | 签名 | repoDebug固定keystore，来源链与正常链使用同一证书；终包签名指纹由真实构建后补，不虚构。 |
 | lint | checkReleaseBuilds=false / abortOnError=false，不等于功能或安全门禁通过。 |
@@ -17,13 +17,14 @@
 
 | 依赖 | 版本 | 当前用途 / 升级联动 |
 |---|---|---|
-| dev.rikka.shizuku:api/provider | 13.1.5 | 强类型UserService/API与bootstrap；ShizukuTransport/ShizukuUserService/VdisplayController。源码POM登记口径为MIT，不沿用旧文的Apache-2.0误记；aar notices仍须按实际分发核实。 |
+| dev.rikka.shizuku:api/provider | 13.1.5 | 强类型UserService/API与bootstrap；ShizukuTransport/ShizukuUserService/VdisplayController。Maven POM登记MIT；`THIRD_PARTY_NOTICES.md` 与 `LICENSES/MIT-Shizuku-API.txt` 已补源码侧登记，终包仍须抽取复核。 |
 | androidx.activity:activity-ktx | 1.10.1 | ComponentActivity、ActivityResult；同文件legacy ConfigTransfer未挂载，但DirectoryPickerController的SAF注册仍被MainActivity使用。 |
 | androidx.webkit:webkit | 1.12.1 | BrowserHost document-start/UA-CH；0.14.3 BrowserHostProfile需要MULTI_PROFILE、set/getProfile、profile cookie/webStorage/geolocation/serviceWorker API。必须运行时feature gate并在load/settings前验证nonDefault，不能fallback Default。 |
 | androidx.core:core-ktx | 1.15.0 | FileProvider、NotificationCompat、insets与WindowCompat等。 |
 | androidx.dynamicanimation:dynamicanimation | 1.1.0 | 声明保留；贴边spring已退役，不能当现行悬浮球行为。 |
 | org.apache.commons:commons-compress | 1.28.0 | 快照tar/xz流式解压、symlink/权限/xattr路径；noCompress xz保留原字节流。 |
 | org.tukaani:xz | 1.10 | commons-compress的XZ算法后端。 |
+| org.yaml:snakeyaml | 2.4 | 用户 profile patch 落盘前 SafeConstructor 严格解析并拒绝重复键；Cordis `!!js` 仅在校验副本去标记后按纯 scalar 解析，不执行 JavaScript。 |
 | junit:junit | 4.13.2（testImplementation） | JVM策略/core/源码接线及process/capture settlement fixtures。 |
 | org.json:json | 20240303（testImplementation） | JVM真实JSONObject/JSONArray，Android平台运行用系统实现。 |
 | androidx.test.ext:junit / runner | 1.2.1 / 1.6.2（androidTestImplementation） | VirtualDisplay instrumentation探针，不进产品工具面。 |

@@ -1387,4 +1387,10 @@
     **真因**：`gh` 的 `-f/--raw-field` 与 `-F/--field` **语义不同**——`-F` 会展开 `@file`（gh 的 @ 语法），`-f` 是 **raw**，把值**原样当字符串**传递、**不展开** `@`。`gh workflow run --help` 明文写着这一条（`-F, --field … respecting @ syntax` vs `-f, --raw-field …`；gh 版本 2.101.0），但按既有命令字面照抄就会踩中。**为什么危险**：所有自动门禁全绿——发布链 exit 0、资产数量与大小正常、签名断言通过、MANIFEST 生成成功、双 ABI 快照与 APK 都在——**没有任何一条门禁校验「notes 资产的内容是否像一份发布说明」**，属「门禁全绿但产物是坏的」形态，只能靠发布后人工核对资产内容发现。
     **修法**：改用 `gh workflow run … -F notes=@release/v<版本>/notes.md`（`-F` 才展开 @file）；并在发布后**下载 notes.md 资产核对首行**是否为 `# v<版本> 发布说明`。**建议（只登记，未开 issue）**：① 把「下载 notes.md 资产并核对首行」列入**发布后动作清单**——发布链自身不校验 notes 内容，这是当前唯一防线；② 可另立 issue 提出「发布链加一条 notes 非空/首行断言」的门禁改进（开不开由 Lead/用户决定）。
     **复验证据**：已**删除坏 draft**，改用 `-F` 重派（run **37281961398**），核对 notes 资产为 **7767 字节正文**（Lead 已执行）；本条待核结论以该次 run 的资产首行为准。
+247. **Mnemon client external 没有 provider factory：Include 先于 core Entry 到达（0.14.3 vc54）**：
+    **现象**：`dsh-mnemon-source-runtime` 与 `dsh-mnemon-source-memory-spaces` 都报 `require("dsh-mnemon/client") missed the module table`，web boot 两项未激活。
+    **直接条件**：Source client bundle 的同步 require 会把 `/client` 规范化成 module id `dsh-mnemon`；vc54 的 `ClientModuleSystem` 只有在 boot graph/factory 表含该 provider row 时才能物化它。vc54 实际 client loader + VC55 当前 Mnemon package 的隔离正例（provider row 在场）两 Source 均成功物化；负控（provider row 缺席）复现同一 missing-table 错误。
+    **高概率触发点，尚非失败设备的逐行实证**：当前 live `cordis.patch.yml` 先挂 `mnemon-audited-sources` Include，后挂 `mnemon-bundle`/`mnemon` core provider。Client registry 是增量扫描；Source 先到时 graph 可能尚无 provider row，随后补行不会让已失败的同步 require 自动成功。vc54 启动时的 `window.__DSH_BOOT__` 未留存，不能声称已看到那张失败 graph。
+    **修法**：profile merge 与 startup-before-engine 两条通道都以独立幂等 marker，将这个精确 Include 块（连同其说明注释）移动到启用的 `mnemon` provider 后；条目集合与用户配置不重写。所有 cordis.patch 写入前 SafeConstructor 拒绝语法错误/重复键，仅在只读校验副本移除 Cordis `!!js` scalar 标记，不执行表达式。
+    **验收边界**：源码回归已加入；vc54 client loader 正例与 provider 缺席负控有隔离证据。Kotlin Gradle 测试受限于当前 Android 容器无可运行 JVM；目标机仍锁屏、ADB 未配对、Shizuku 未运行，APK 重建/PackageManager、冷启动与 Mnemon 页面验收均未完成，不得把本条源码修复称为已发布或设备已修复。
 

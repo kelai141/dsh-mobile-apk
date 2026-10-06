@@ -588,6 +588,34 @@ class FactoryProfilePatchTest {
     assertTrue("必须留下可追溯说明", result.changes.any { it.contains("归一") })
   }
 
+  @Test
+  fun legacyNormalizationReplacesPreexistingEntryConfigAndPassesStrictYaml() {
+    val live = """
+      - id: agent-default-model
+        disabled: true
+        config:
+          provider: stale-provider
+          nested:
+            keepOld: false
+      - insert:
+          - id: agent-default-model-mobile
+            name: '@deepseek-ai/dsh-agent-default-model'
+            config:
+              provider: xiaomimimo
+              model: mimo-v2.5
+              options:
+                disabled: false
+    """.trimIndent() + "\n"
+
+    val result = FactoryProfilePatch.normalizeLegacyAgentDefaultModel(live)
+
+    assertFalse("旧上游 config 子树必须被替换，不能与新 config 重复", result.text.contains("stale-provider"))
+    assertTrue("用户 provider 必须保留", result.text.contains("provider: xiaomimimo"))
+    assertTrue("用户嵌套 disabled 是数据，不是迁移控制字段", result.text.contains("disabled: false"))
+    assertEquals(null, FactoryProfilePatch.verifyNormalization(live, result.text))
+    SnapshotTransaction.validatePatchYaml(result.text, "cordis.patch.yml")
+  }
+
   /** 反例 A：把触发条件放宽成「见到 -mobile 就删」⇒ 必须判红（窄条件是判据本体）。 */
   @Test
   fun aBareMobileIdWithoutOurNameMustNotBeTouched() {
@@ -651,6 +679,62 @@ class FactoryProfilePatchTest {
     // 幂等：二次 merge 零改写
     val second = FactoryProfilePatch.merge(result.text, newShapeFactory)
     assertEquals("二次 merge 不得再改", result.text, second.text)
+  }
+
+  @Test
+  fun mergeMovesAuditedMnemonSourceIncludeAfterItsProvider() {
+    val live = """
+      # Audited Android Source fixes; the original rows remain disabled for rollback.
+      # This regular Include resolves patched packages from its own local node_modules.
+      - insert:
+          - id: mnemon-audited-sources
+            name: '@deepseek-ai/cordis-plugin-include'
+            config:
+              path: 'file:///data/user/0/com.dsharnessmobile.shell/files/home/.dsh/profiles/web/mnemon-runtime-fixes-20260919/cordis.yml'
+      - id: mnemon-bundle
+        disabled: false
+      - id: mnemon
+        disabled: false
+        config:
+          writeEnabled: true
+      - id: unrelated-user-row
+        name: 'user-owned-plugin'
+    """.trimIndent() + "\n"
+    val factory = "- id: factory-row\n"
+
+    val result = FactoryProfilePatch.merge(live, factory)
+
+    assertTrue(
+      "main provider row must precede the Source Include which imports dsh-mnemon/client",
+      result.text.indexOf("- id: mnemon\n") < result.text.indexOf("- id: mnemon-audited-sources"),
+    )
+    assertTrue("Include comments move with the Include", result.text.contains("# Audited Android Source fixes"))
+    assertTrue("the Include path is retained verbatim", result.text.contains("mnemon-runtime-fixes-20260919/cordis.yml"))
+    assertTrue("user-owned rows survive", result.text.contains("user-owned-plugin"))
+    assertEquals(
+      "ordering migration must not add or remove ids",
+      FactoryProfilePatch.blockIds(live).toSet() + "factory-row",
+      FactoryProfilePatch.blockIds(result.text).toSet(),
+    )
+    assertEquals("the migration must be idempotent", result.text, FactoryProfilePatch.merge(result.text, factory).text)
+  }
+
+  @Test
+  fun mnemonSourceOrderMigrationDoesNotOverrideDisabledProvider() {
+    val live = """
+      - insert:
+          - id: mnemon-audited-sources
+            name: '@deepseek-ai/cordis-plugin-include'
+            config:
+              path: 'file:///data/user/0/com.dsharnessmobile.shell/files/home/.dsh/profiles/web/mnemon-runtime-fixes-20260919/cordis.yml'
+      - id: mnemon
+        disabled: true
+    """.trimIndent() + "\n"
+
+    val result = FactoryProfilePatch.normalizeMnemonSourceOrder(live)
+
+    assertEquals("a disabled provider is intentional user state; do not reorder around it", live, result.text)
+    assertTrue(result.changes.isEmpty())
   }
 
   // ── 结构校验的判别力（Lead 追加的两条反证）───────────────────────────────

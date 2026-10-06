@@ -144,6 +144,8 @@ dependencies {
   // 悬浮球 v2 动效（PRD-overlay-v2 §3.5）：Material 3 Expressive spring 物理（Android 16 原生适配）
   implementation("androidx.dynamicanimation:dynamicanimation:1.1.0")
   implementation("org.apache.commons:commons-compress:1.28.0")
+  // Strict safe parsing before profile-patch transaction writes; rejects duplicate mapping keys.
+  implementation("org.yaml:snakeyaml:2.4")
   implementation("org.tukaani:xz:1.10")
   testImplementation("junit:junit:4.13.2")
   // 仪器测试（虚拟屏建屏矩阵）：只用于 P0 探针，不进产品面。

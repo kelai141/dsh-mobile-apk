@@ -241,7 +241,13 @@ internal object FactoryProfilePatch {
       val separator = if (out.endsWith("\n") || out.isEmpty()) "" else "\n"
       out += separator + tail
     }
-    return Result(out, changes)
+    // The audited Source Include can be activated before its shared Mnemon client
+    // provider if it remains ahead of the `mnemon` entry in a live user patch.
+    // Move only that known Include after the provider so the web module graph can
+    // register `dsh-mnemon/client` before either Source client materializes.
+    val ordered = normalizeMnemonSourceOrder(out)
+    changes += ordered.changes
+    return Result(ordered.text, changes)
   }
 
   /**
@@ -297,23 +303,31 @@ internal object FactoryProfilePatch {
     }
     val mobile = mobileEntry ?: return Result(liveText, emptyList())
     val mobileFragment = lineRange(blocks[mobileBlockIndex].lines, mobile.startLine, mobile.endLine)
-    // 取出 -mobile 的 config 段（含其子键），整段原样保留 —— 用户值不得被改写。
-    val configLines = extractConfigLines(mobileFragment)
-    if (configLines.isEmpty()) return Result(liveText, emptyList())
+    // 取出 -mobile 的 config 原文（含注释、嵌套 disabled 与 CRLF）。只调整
+    // 结构缩进；不得把用户值重新序列化或按 YAML 节点重写。
+    val mobileConfig = extractConfigFragment(mobileFragment, mobile.indent + "  ")
+    if (mobileConfig.isEmpty()) return Result(liveText, emptyList())
     val changes = ArrayList<String>()
     // ③ 把 config 打到上游 id 上并去掉 disabled: true。
-    // 缩进对齐：**必须按 config 键自身的缩进做基准**才对。
-    // 曾写错过：`upstreamKeyIndent + line.removePrefix(upstreamKeyIndent)` 是**恒等变换**
-    // （先去掉同一个前缀再加回来），config 会留在原缩进上、成为上游 id 的更深层级。
-    // 正确做法：去掉 config 段的**源**缩进，换成上游条目的键缩进。
     val upstreamKeyIndent = upstream.indent + "  "
-    val configKeyIndent = leadingSpaces(configLines.first())
-    val newUpstream = configLines.joinToString("\n") { line ->
-      if (line.isEmpty()) line else upstreamKeyIndent + line.removePrefix(configKeyIndent)
-    }
-    var upstreamOut = extractNonDisabledBody(upstreamFragment)
-    // 去掉原 config（若有）后追加新 config —— 上游行原本只有 disabled，通常无 config。
-    upstreamOut = upstreamOut.trimEnd('\n') + "\n" + newUpstream + "\n"
+    // 严格按上游 entry 的 key-indent 移除旧 config 子树；同名 config/disabled
+    // 深层键不是 entry-level 键，不能被当作迁移控制字段。其余兄弟键不重建。
+    val withoutOldConfig = removeEntryLevelConfig(upstreamFragment, upstreamKeyIndent)
+    val upstreamOut = removeEntryLevelDisabled(withoutOldConfig, upstreamKeyIndent)
+    val newUpstreamConfig = reindentRaw(
+      mobileConfig,
+      mobile.indent + "  ",
+      upstreamKeyIndent,
+    )
+    val eol = preferredLineEnding(upstreamFragment, liveText)
+    val appendSeparator = if (upstreamOut.endsWith("\n")) "" else eol
+    val configWithEntryTerminator =
+      if (upstreamFragment.endsWith("\n") && !newUpstreamConfig.endsWith("\n")) {
+        newUpstreamConfig + eol
+      } else {
+        newUpstreamConfig
+      }
+    val upstreamOutWithConfig = upstreamOut + appendSeparator + configWithEntryTerminator
     changes += "归一旧单点写法: " + LEGACY_UPSTREAM_ID + " 就地覆盖 config 并去掉 disabled（用户值保留）"
     // ④ 删除 -mobile 子条目；其所在 insert 组若因此变空则整组删除。
     var mobileOut = ""
@@ -325,11 +339,10 @@ internal object FactoryProfilePatch {
       changes += "删除旧单点条目: " + LEGACY_MOBILE_ID
       mobileOut = mobileGroupRemainder
     }
-    // ⑤ 按块重组全文（逐块替换，未动块原文保真）。
     val sb = StringBuilder(liveText.length + 128)
     for ((index, block) in blocks.withIndex()) {
       when (index) {
-        upstreamIndex -> sb.append(upstreamOut)
+        upstreamIndex -> sb.append(upstreamOutWithConfig)
         mobileBlockIndex -> sb.append(mobileOut)
         else -> sb.append(block.text)
       }
@@ -816,8 +829,197 @@ internal object FactoryProfilePatch {
     return line.substring(0, i)
   }
 
+  /**
+   * Reorder the known Mnemon Source Include after the Mnemon provider entry.
+   * DSH's client registry composes an incremental graph; when the Source Include
+   * activates first, its external `dsh-mnemon/client` can be absent at the instant
+   * the Source factory materializes. Keep this migration narrow to this deployment.
+   */
+  internal fun normalizeMnemonSourceOrder(liveText: String): Result {
+    if (liveText.isEmpty()) return Result(liveText, emptyList())
+    val blocks = parseBlocks(liveText)
+    val sourceIndex = blocks.indexOfFirst { block ->
+      block.isInsert &&
+        block.entries.any { it.id == "mnemon-audited-sources" } &&
+        block.text.contains("@deepseek-ai/cordis-plugin-include") &&
+        block.text.contains("mnemon-runtime-fixes-20260919/cordis.yml")
+    }
+    if (sourceIndex < 0) return Result(liveText, emptyList())
+    val providerIndex = blocks.indexOfFirst { block ->
+      !block.isInsert && block.entries.any { it.id == "mnemon" }
+    }
+    if (providerIndex < 0 || sourceIndex > providerIndex) return Result(liveText, emptyList())
+    val sourceBlock = blocks[sourceIndex]
+    val sourceEntry = sourceBlock.entries.firstOrNull { it.id == "mnemon-audited-sources" }
+      ?: return Result(liveText, emptyList())
+    val providerBlock = blocks[providerIndex]
+    val providerEntry = providerBlock.entries.firstOrNull { it.id == "mnemon" }
+      ?: return Result(liveText, emptyList())
+    val sourceFragment = lineRange(sourceBlock.lines, sourceEntry.startLine, sourceEntry.endLine)
+    val providerFragment = lineRange(providerBlock.lines, providerEntry.startLine, providerEntry.endLine)
+    if (disabledAtIndent(sourceFragment, sourceEntry.indent.length + 2) == true ||
+      disabledAtIndent(providerFragment, providerEntry.indent.length + 2) == true
+    ) return Result(liveText, emptyList())
+
+    // Keep the explanatory comments with the Include rather than beside the preceding row.
+    var preamble = ""
+    var previousReplacement: String? = null
+    val previousIndex = sourceIndex - 1
+    if (previousIndex >= 0) {
+      val previous = blocks[previousIndex]
+      var cut = previous.lines.size
+      while (cut > 0) {
+        val line = withoutLineEnding(previous.lines[cut - 1])
+        if (line.isBlank() || (line.startsWith("#") && leadingSpaces(line).isEmpty())) cut-- else break
+      }
+      if (cut < previous.lines.size) {
+        val suffix = previous.lines.subList(cut, previous.lines.size)
+        val auditedCommentIndex = suffix.indexOfFirst {
+          withoutLineEnding(it).startsWith("# Audited Android Source fixes")
+        }
+        if (auditedCommentIndex >= 0) {
+          val moveFrom = cut + auditedCommentIndex
+          preamble = previous.lines.subList(moveFrom, previous.lines.size).joinToString("")
+          previousReplacement = previous.lines.subList(0, moveFrom).joinToString("")
+        }
+      }
+    }
+    val textBlocks = blocks.map { it.text }.toMutableList()
+    if (previousReplacement != null) textBlocks[previousIndex] = previousReplacement
+    val movedBlock = textBlocks.removeAt(sourceIndex)
+    val providerIndexAfterRemoval = if (sourceIndex < providerIndex) providerIndex - 1 else providerIndex
+    var providerText = textBlocks[providerIndexAfterRemoval]
+    if (providerText.isNotEmpty() && !providerText.endsWith("\n")) providerText += "\n"
+    if (providerText.isNotEmpty() && !providerText.endsWith("\n\n")) providerText += "\n"
+    textBlocks[providerIndexAfterRemoval] = providerText + preamble + movedBlock
+    val reordered = textBlocks.joinToString("")
+    if (reordered == liveText) return Result(liveText, emptyList())
+    return Result(
+      reordered,
+      listOf("将 Mnemon audited Source Include 移到 Mnemon provider 之后，确保 dsh-mnemon/client 依赖先进入 web client graph"),
+    )
+  }
+
   /** `config:` 键行（任意缩进）。 */
   private val CONFIG_KEY = Regex("""^\s*config:\s*$""")
+
+  /** Exact entry-level `config:` key, optionally followed by an inline YAML comment. */
+  private val CONFIG_ENTRY_KEY = Regex("""config:[ \t]*(?:#.*)?""")
+
+  /** Remove an optional LF and its preceding CR without normalizing either one. */
+  private fun withoutLineEnding(raw: String): String {
+    var end = raw.length
+    if (end > 0 && raw[end - 1] == '\n') end--
+    if (end > 0 && raw[end - 1] == '\r') end--
+    return raw.substring(0, end)
+  }
+
+  /** A plain, entry-level mapping key; quoted keys and unknown YAML are not rewritten. */
+  private fun isEntryConfigKey(line: String, keyIndent: String): Boolean {
+    if (leadingSpaces(line) != keyIndent || !line.startsWith(keyIndent)) return false
+    return CONFIG_ENTRY_KEY.matches(line.substring(keyIndent.length))
+  }
+
+  /** Extract the named entry's config as raw lines; trim only ambiguous trailing blank lines. */
+  private fun extractConfigFragment(fragment: String, keyIndent: String): String {
+    val lines = splitLines(fragment)
+    val head = lines.indexOfFirst { isEntryConfigKey(withoutLineEnding(it), keyIndent) }
+    if (head < 0) return ""
+    val out = StringBuilder(fragment.length)
+    out.append(lines[head])
+    val pendingBlank = ArrayList<String>()
+    var index = head + 1
+    while (index < lines.size) {
+      val raw = lines[index]
+      val line = withoutLineEnding(raw)
+      if (line.isBlank()) {
+        pendingBlank += raw
+        index++
+        continue
+      }
+      if (leadingSpaces(line).length <= keyIndent.length) break
+      pendingBlank.forEach { out.append(it) }
+      pendingBlank.clear()
+      out.append(raw)
+      index++
+    }
+    return out.toString()
+  }
+
+  /** Remove only the upstream entry-level `config:` key and its indented values. */
+  private fun removeEntryLevelConfig(fragment: String, keyIndent: String): String {
+    val lines = splitLines(fragment)
+    val out = StringBuilder(fragment.length)
+    var index = 0
+    while (index < lines.size) {
+      if (!isEntryConfigKey(withoutLineEnding(lines[index]), keyIndent)) {
+        out.append(lines[index++])
+        continue
+      }
+      index++
+      val pendingBlank = ArrayList<String>()
+      while (index < lines.size) {
+        val raw = lines[index]
+        val line = withoutLineEnding(raw)
+        if (line.isBlank()) {
+          pendingBlank += raw
+          index++
+          continue
+        }
+        val indent = leadingSpaces(line)
+        if (indent.length <= keyIndent.length) {
+          pendingBlank.forEach { out.append(it) }
+          pendingBlank.clear()
+          break
+        }
+        if (line.substring(indent.length).startsWith("#")) {
+          pendingBlank.forEach { out.append(it) }
+          pendingBlank.clear()
+          out.append(raw)
+        } else {
+          pendingBlank.clear()
+        }
+        index++
+      }
+      if (index == lines.size) pendingBlank.forEach { out.append(it) }
+    }
+    return out.toString()
+  }
+
+  /** Remove only the upstream entry's own disabled key; nested disabled data survives. */
+  private fun removeEntryLevelDisabled(fragment: String, keyIndent: String): String {
+    val out = StringBuilder(fragment.length)
+    for (raw in splitLines(fragment)) {
+      val match = ENTRY_DISABLED.find(withoutLineEnding(raw))
+      if (match != null && match.groupValues[1] == keyIndent) continue
+      out.append(raw)
+    }
+    return out.toString()
+  }
+
+  /** Rebase indentation while retaining every line's original LF/CRLF terminator. */
+  private fun reindentRaw(fragment: String, fromIndent: String, toIndent: String): String {
+    val out = StringBuilder(fragment.length + 32)
+    for (raw in splitLines(fragment)) {
+      val line = withoutLineEnding(raw)
+      val eol = raw.substring(line.length)
+      if (line.isBlank()) out.append(raw)
+      else {
+        val relative = if (line.startsWith(fromIndent)) line.substring(fromIndent.length) else line
+        out.append(toIndent).append(relative).append(eol)
+      }
+    }
+    return out.toString()
+  }
+
+  /** Prefer the upstream fragment's line-ending style; fallback to the original document. */
+  private fun preferredLineEnding(primary: String, fallback: String): String {
+    for (text in listOf(primary, fallback)) {
+      val lf = text.indexOf('\n')
+      if (lf >= 0) return if (lf > 0 && text[lf - 1] == '\r') "\r\n" else "\n"
+    }
+    return "\n"
+  }
 
   /** 把工厂子条目片段从 [fromIndent] 重新缩进到 [toIndent]（仅前导缩进，内容原样）。 */
   private fun reindent(fragment: String, fromIndent: String, toIndent: String): String {

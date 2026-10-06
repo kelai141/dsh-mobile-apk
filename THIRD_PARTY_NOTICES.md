@@ -103,3 +103,23 @@
 |---|---|---|---|
 | @napi-rs/canvas | 1.0.8 | MIT | [Brooooooklyn/canvas](https://github.com/Brooooooklyn/canvas) |
 | @napi-rs/canvas-android-arm64 | 1.0.8 | MIT | [Brooooooklyn/canvas](https://github.com/Brooooooklyn/canvas)（napi android-arm64 预编译 binding） |
+
+## Gradle runtime dependencies (manual)
+
+These AAR/JAR libraries are outside the dpkg matrix checked by `check-third-party.mjs`; their license texts are copied from `LICENSES/` into APK `assets/licenses/`.
+
+| Component | Version | License | Upstream |
+|---|---|---|---|
+| dev.rikka.shizuku:api | 13.1.5 | MIT | [Shizuku-API](https://github.com/RikkaApps/Shizuku-API) |
+| dev.rikka.shizuku:provider | 13.1.5 | MIT | [Shizuku-API](https://github.com/RikkaApps/Shizuku-API) |
+| org.yaml:snakeyaml | 2.4 | Apache-2.0 | [SnakeYAML](https://bitbucket.org/snakeyaml/snakeyaml) |
+
+## Gradle runtime dependencies (manual)
+
+The following AAR/JAR dependencies are not part of the dpkg snapshot matrix checked by `check-third-party.mjs`; their license texts are shipped from `LICENSES/` into `assets/licenses/`.
+
+| Component | Version | License | Upstream |
+|---|---|---|---|
+| dev.rikka.shizuku:api | 13.1.5 | MIT | [Shizuku-API](https://github.com/RikkaApps/Shizuku-API) |
+| dev.rikka.shizuku:provider | 13.1.5 | MIT | [Shizuku-API](https://github.com/RikkaApps/Shizuku-API) |
+| org.yaml:snakeyaml | 2.4 | Apache-2.0 | [SnakeYAML](https://bitbucket.org/snakeyaml/snakeyaml) |

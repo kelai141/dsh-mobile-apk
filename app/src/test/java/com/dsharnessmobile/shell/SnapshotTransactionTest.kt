@@ -14,6 +14,40 @@ class SnapshotTransactionTest {
   private val preserved = setOf("sessions", "settings.yaml", ".credentials.yaml")
 
   @Test
+  fun strictPatchYamlAcceptsCordisJsExpressionAsSafeScalar() {
+    val patch = """
+      - id: mnemon-bundle
+        disabled: !!js >-
+          ((entry) => Boolean(entry.options.disabled))
+          ([...loader.entries()].find(entry => entry.options.id === 'mnemon'))
+      - id: next-row
+        disabled: false
+    """.trimIndent()
+
+    SnapshotTransaction.validatePatchYaml(patch, "cordis.patch.yml")
+  }
+
+  @Test
+  fun strictPatchYamlRejectsDuplicateMappingKeys() {
+    val patch = """
+      - id: agent-default-model
+        config:
+          provider: deepseek-official
+        config:
+          model: deepseek-v4-flash
+    """.trimIndent()
+
+    val failure = try {
+      SnapshotTransaction.validatePatchYaml(patch, "cordis.patch.yml")
+      null
+    } catch (e: SnapshotFsException) {
+      e
+    }
+    assertTrue("duplicate mapping keys must fail before atomic write", failure != null)
+    assertTrue(failure?.message?.contains("严格合法 YAML") == true)
+  }
+
+  @Test
   fun activatesFactoryEntriesAndNeverTouchesUserData() {
     val filesDir = tempDir()
     try {

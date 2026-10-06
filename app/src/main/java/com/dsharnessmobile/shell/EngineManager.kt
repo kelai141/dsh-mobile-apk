@@ -1622,19 +1622,14 @@ class EngineManager(private val context: Context, private val pickToken: String?
    * 改动逐条进开发日志；每版本只跑一次（幂等标记），失败不阻塞启动。
    */
   private fun repairProfilePatch() {
-    // 两条**独立**的自愈，各自有自己的幂等标记：
-    //  · 退役行 disabled 残留（apk #214）：标记 .profile-patch-repair-<version>；
-    //  · 旧「单点」写法归一（0.14.2-fx-2，见 normalizeLegacyAgentDefaultModel）：标记 .profile-patch-normalize-<version>。
-    //
-    // **为什么必须独立标记**：本函数原先的早退（marker.exists()）语义是「本版本已修退役行」。
-    // 若归一复用同一标记，则**已经装过同版本**的设备永远补不上这次新修复 —— 实测踩到：
-    // 两台设备在装上含归一的包后，`merge` 因指纹已 fresh 而不跑、本函数因标记已存在而早退，
-    // 于是 live patch 冷启动两次 md5 都不变（归一从未执行）。
-    //
-    // 更一般的教训（既有注释里已写过一次，见本文件下方 #214 段落）：
-    // 「这类设备不一定再触发快照刷新（指纹未变则 merge 不跑），所以自愈必须在引擎读 profile
-    //   之前做一次，不能只依赖 refreshSnapshot」—— 新增修复同样必须走这条通道。
+    // 三条**独立**的自愈，各自有自己的幂等标记：
+    //  · 退役行 disabled 残留（apk #214）：.profile-patch-repair-<version>；
+    //  · 旧「单点」写法归一：.profile-patch-normalize-<version>；
+    //  · Mnemon client external 顺序：.profile-patch-mnemon-order-<version>。
+    // 新增迁移不得复用其它标记：已装过同一 app 版本的设备需要能补跑新迁移。
+    // 所有修复都必须在引擎读取 profile 之前执行；快照指纹 fresh 时 merge 路径会早退。
     normalizeLegacySinglePointPatch()
+    normalizeMnemonClientSourceOrder()
     val marker = File(context.filesDir, ".profile-patch-repair-" + BuildConfig.VERSION_NAME)
     if (marker.exists()) return
     var failed = false
@@ -1657,6 +1652,13 @@ class EngineManager(private val context: Context, private val pickToken: String?
         val after = FactoryProfilePatch.blockIds(result.text).toSet()
         if (!after.containsAll(before - FactoryProfilePatch.RETIRED_DISABLED_ROW_IDS)) {
           Log.w(TAG, "profile patch repair skipped (parse check failed): " + target.absolutePath)
+          failed = true
+          continue
+        }
+        try {
+          SnapshotTransaction.validatePatchYaml(result.text, "cordis.patch.yml")
+        } catch (t: Throwable) {
+          Log.w(TAG, "profile patch repair skipped (strict YAML failed): " + target.absolutePath, t)
           failed = true
           continue
         }
@@ -1736,6 +1738,13 @@ class EngineManager(private val context: Context, private val pickToken: String?
           failed = true
           continue
         }
+        try {
+          SnapshotTransaction.validatePatchYaml(result.text, "cordis.patch.yml")
+        } catch (t: Throwable) {
+          Log.w(TAG, "profile patch normalize skipped (strict YAML failed): " + target.absolutePath, t)
+          failed = true
+          continue
+        }
         val backup = File(target.parentFile, target.name + ".pre-" + BuildConfig.VERSION_NAME + ".bak")
         if (!backup.exists()) {
           try { backup.writeText(live) } catch (_: Throwable) {}
@@ -1770,6 +1779,75 @@ class EngineManager(private val context: Context, private val pickToken: String?
       }
     } catch (t: Throwable) {
       Log.w(TAG, "profile patch normalize failed (non-fatal)", t)
+    }
+  }
+
+  /**
+   * Reorder the audited Mnemon Source Include before engine startup even when the
+   * snapshot fingerprint is already fresh. The new marker is independent from the
+   * retired-row and default-model migrations so a prior repair cannot suppress it.
+   */
+  private fun normalizeMnemonClientSourceOrder() {
+    val marker = File(context.filesDir, ".profile-patch-mnemon-order-" + BuildConfig.VERSION_NAME)
+    if (marker.exists()) return
+    var failed = false
+    var reordered = 0
+    try {
+      val profilesRoot = File(File(homeDir, ".dsh"), "profiles")
+      val targets = (profilesRoot.listFiles() ?: emptyArray())
+        .sortedBy { it.name }
+        .filter { isFactoryOwnedProfile(it) }
+        .map { File(it, "cordis.patch.yml") }
+        .filter { it.isFile }
+      for (target in targets) {
+        val live = try { target.readText() } catch (_: Throwable) { failed = true; continue }
+        val result = FactoryProfilePatch.normalizeMnemonSourceOrder(live)
+        if (result.text == live) continue
+        val beforeIds = FactoryProfilePatch.blockIds(live)
+        val afterIds = FactoryProfilePatch.blockIds(result.text)
+        if (beforeIds.size != afterIds.size || beforeIds.toSet() != afterIds.toSet()) {
+          Log.w(TAG, "Mnemon client order migration skipped (entry set changed): " + target.absolutePath)
+          failed = true
+          continue
+        }
+        try {
+          SnapshotTransaction.validatePatchYaml(result.text, "cordis.patch.yml")
+        } catch (t: Throwable) {
+          Log.w(TAG, "Mnemon client order migration skipped (strict YAML failed): " + target.absolutePath, t)
+          failed = true
+          continue
+        }
+        val backup = File(target.parentFile, target.name + ".pre-" + BuildConfig.VERSION_NAME + ".bak")
+        if (!backup.exists()) {
+          try { backup.writeText(live) } catch (_: Throwable) {}
+        }
+        val tmp = File(target.parentFile, target.name + ".mnemon-order.tmp")
+        try {
+          tmp.writeText(result.text)
+          if (!tmp.renameTo(target)) {
+            target.writeText(result.text)
+            SnapshotFs.deletePath(tmp)
+          }
+        } catch (t: Throwable) {
+          failed = true
+          SnapshotFs.deletePath(tmp)
+          Log.w(TAG, "Mnemon client order migration write failed (retried next start): " + target.absolutePath, t)
+          continue
+        }
+        reordered++
+        LogCollector.log(
+          TAG,
+          "Mnemon client order migration (" + (target.parentFile?.name ?: "?") + "): " +
+            result.changes.joinToString(" | ") + " ; backup=" + backup.name,
+        )
+      }
+      if (failed) {
+        LogCollector.log(TAG, "Mnemon client order migration deferred (partial failure; retried next start)")
+      } else {
+        marker.writeText("reordered=" + reordered + " targets=" + targets.size + " at " + System.currentTimeMillis() + "\n")
+      }
+    } catch (t: Throwable) {
+      Log.w(TAG, "Mnemon client order migration failed (non-fatal)", t)
     }
   }
 

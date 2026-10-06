@@ -65,7 +65,7 @@
   从未实现；`android_app_launch {screenId}` 无落点回读，会报成功而应用落在真实屏。
   根因、方案与新增门禁清单见协调仓同名文档 §3/§4/§6/§7。
 - **按需 skill 注入（U-5）未实施**：控制流程仍会进入常驻上下文/schema 的部分未清点，token 预算门禁未做。
-- **Shizuku 许可登记缺口**：gradle aar 依赖不在 `check-third-party.mjs` 的 dpkg 矩阵覆盖内，`assets/licenses/THIRD_PARTY_NOTICES.md` 无 Shizuku条目（aar POM源码登记为MIT，旧Apache-2.0说法更正）——发版合规需补。
+- **Gradle AAR/JAR 许可产物复核待完成**：源码现已为 Shizuku API/provider 13.1.5 登记 MIT、为 SnakeYAML 2.4 登记 Apache-2.0，并补齐 `LICENSES/` 文本；构建链会复制这些文件到 APK `assets/licenses/`，但修复候选 APK 尚未构建，发版前仍须从终包抽取核对 notices 与许可证全文。
 - **性能 A1 结论未定**：`check-perf-instrumentation` 的 P-AC-01 要求出厂值 `patchReload: startup`，但 0.14.0 设备 A/B 观测 `live` 组中位约 12.5-13.0s 快于 `startup` 组 14.6-15.0s（n 小、compose 探针缺失、单机型）——方向与方案主张相反，需 owner 拍板是锁正确性语义还是改基线（见 `docs/0.14.0-preview-VERIFICATION-LOG.md` §50）。
 - **`combo-lazy-A4` 退役后的设备侧复验未做（2026-09-25）**：补丁已从 registry/IMPLS 移除、P1 的 `requires` 已清空，静态门禁与 17 个补丁回归全绿；但「撤 A4 后裸树启动期 2 次 compose」这一结论目前只有**离线同基线 A/B** 证据（`.deploy-tmp/retire-sweep/REPORT.md` §3.1.2）。设备侧需补：撤 A4 的快照冷启动读 `[perf] compose #N dur=` 与 `TOTAL calls=`，确认 calls ≤ 2 且首屏未变差（预期略好——A4 原先把那次 compose 压在首个请求路径上）。三层验收留到统一构建窗口。
 - **C5 正向对照的设备侧取证依赖一棵打过 P1 的引擎树**：`check-boot-budget.mjs` 的对照在构建链打补丁**之前**跑时必然缺席（记 SKIP，符合设计）；发布前 `--require-real` 档需要 `.deploy-tmp/snapshot-013/<abi>/stage/root/...` 那棵树**已打 P1**，否则 C5 只有 SKIP、拿不到「等价成立」。CI/发布链接线时需确认该前置。

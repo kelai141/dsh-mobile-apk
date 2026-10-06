@@ -48,7 +48,7 @@ flowchart TD
 
 - 快照准入由SnapshotFingerprintPolicy严格64hex决定；fresh需node与durable commit一致，当前锚点见§6 K03。
 - shared ownership prelude已结算后先恢复事务再probe/strictSHA/fresh；不新鲜暂存解压→用户配置stage过滤→factory交换→提交指纹，pending不提前读事务。
-- 交换内还要合并用户面：`SnapshotTransaction.kt:626`（`mergeProfiles`）、`SnapshotTransaction.kt:546`（`reconcileRemovedProfilePlugins`，已摘除插件的存量迁移）；残渣按年龄回收 `SnapshotTransaction.kt:196`（`reclaimResidue`）；
+- 交换内还要合并用户面：`SnapshotTransaction.kt:626`（`mergeProfiles`）、`SnapshotTransaction.kt:546`（`reconcileRemovedProfilePlugins`，已摘除插件的存量迁移）；profile 合并 `SnapshotTransaction.mergePatchYamlById` → `FactoryProfilePatch.merge()` 同时将 audited Mnemon Source Include 排到 `mnemon` provider 后；冷启动 `EngineManager.repairProfilePatch()` 以独立 marker 在引擎读取前兜底修复；残渣按年龄回收 `SnapshotTransaction.kt:196`（`reclaimResidue`）；
   **0.14.2-fx-2 缺陷 I（apk #271）在交换前新增了两道闸门**：`SnapshotTransaction.kt:313`（`requireDeletableResidue` 可写性预检，点名非应用属主残留）与 `SnapshotTransaction.kt:242`（`clearFailedResidue` 无年龄门槛地清上一轮 `*.failed-*`）；`SnapshotFs.kt:177`（`move`）自保——目标非空先 `SnapshotFs.kt:83`（`deletePathStrict`）删净、删不净即抛（`snapshot-delete-residue` / `snapshot-move-blocked`）；
 - **0.14.2-fx-2 缺陷 D（安全模式）**：启动失败页主按钮变「安全模式启动」→ `GuidePageRenderer.kt` 的 `enterSafeMode()`；状态机与剪贴板 prompt 在 `SafeMode.kt`（唯一写面：`auto/safe-mode.json` + `safe-mode-backup-*.yml`）；控制台命令解析在 `SafeConsole.kt`（纯函数，命中即不落 bash，接线 `ConsoleActivity.kt`）。
 - 引擎经snapshotRefreshing/STARTING/runtime完整性/端口归属闸门与runtime patches再spawn，当前锚点见§6 K02/K03。

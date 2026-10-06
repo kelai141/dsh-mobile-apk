@@ -1,6 +1,9 @@
 package com.dsharnessmobile.shell
 
 import android.util.Log
+import org.yaml.snakeyaml.LoaderOptions
+import org.yaml.snakeyaml.Yaml
+import org.yaml.snakeyaml.constructor.SafeConstructor
 
 import java.io.File
 import java.io.IOException
@@ -1078,12 +1081,30 @@ internal object SnapshotTransaction {
     }
   }
 
-  /** YAML 文本合理性校验（壳侧无 YAML 依赖，只做结构级判据：非空、首行是列表项或注释）。 */
-  private fun validatePatchYaml(text: String, label: String) {
+  /** Strict safe YAML parse before a profile patch is staged for atomic replacement. */
+  internal fun validatePatchYaml(text: String, label: String) {
     if (text.isBlank()) {
       throw SnapshotFsException(
         code = CODE_ATOMIC_WRITE,
         message = label + " 合并结果为空，已拒绝落盘（空 patch 等于静默丢掉全部装配条目）",
+      )
+    }
+    try {
+      // Cordis uses `!!js` only as a marker for a JavaScript-expression scalar. Strip that
+      // marker in the validation copy only; SafeConstructor then validates YAML structure
+      // and duplicate keys without evaluating or constructing executable Java objects.
+      val validationText = Regex("""(?m)^([ \t]*disabled:[ \t]*)!!js(?=[ \t]|$)""").replace(text, "$1")
+      val options = LoaderOptions()
+      options.setAllowDuplicateKeys(false)
+      // Iterate all documents so lazy parser errors occur before writeTextAtomic mutates live data.
+      val documents = Yaml(SafeConstructor(options)).loadAll(validationText)
+      for (document in documents) Unit
+    } catch (e: Exception) {
+      throw SnapshotFsException(
+        code = CODE_ATOMIC_WRITE,
+        message = label + " 合并结果不是严格合法 YAML（拒绝重复键/语法错误），已拒绝落盘："
+          + (e.message ?: e.javaClass.simpleName),
+        cause = e,
       )
     }
   }
