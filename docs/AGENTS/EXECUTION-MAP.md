@@ -6,7 +6,7 @@
 > 2. 手里是**文件或函数** → 查 §2 主表的「关键文件」列，或 §6 分块详解里的小节；
 > 3. 想**先通读一遍** → §1 全局运行顺序（阶段 0-4 + 时序图）→ §2 主表 → §4 耦合矩阵。
 >
-> **当前源码登记**：0.14.3 / 官方639ed015（0.2.0-rc.2），新模块/fixtures与当前锚点见§6/§7；旧cc0c921/coord1f9852d审查条目仅历史溯源，非本轮运行证据。
+> **当前源码登记**：v0.14.5基线 + 0.14.5-fx-1本地实施（详见下方实施补充）；上游官方639ed015（0.2.0-rc.2），新模块/fixtures与当前锚点见§6/§7；旧cc0c921/coord1f9852d审查条目仅历史溯源，非本轮运行证据。
 > 锚点格式 `path:line`，路径一律**相对 apk 仓根**；插件与三个子仓（`plugins/*`、`dsh-client-ui-responsive`、`dsh-host-web-compat`、`dsh-shell-termux`）在本仓是协调仓的**逐字节镜像**，行号以本仓副本为准。
 >
 > **锚点会漂**：改了代码就跑 `node scripts/check-code-map.mjs`——它守「覆盖完整、锚点有效、编号一致」（详见 §7）。
@@ -18,6 +18,12 @@
 2. **读三件东西**：查点的「运行顺序」（什么时候跑）→ 流程图（主干与失败出口）→「耦合」（谁读写了什么，改它会不会连带别处）。
 3. **跑排查入口**：查点「症状 → 排查」里的命令 / grep 关键词 / logcat tag（都是本块独有的，别从别处抄）。
 4. **先看疑点**：§3 疑点清单里该查点是否已有登记（含证据、影响、状态），避免重复踩坑。
+
+## 0.14.5-fx-1 实施补充（2026-10-09）
+
+- K08 / 前端呈现：`BrowserHost.setStageBounds` 与 `BrowserOverlayPolicy` 的 4000ms TTL 为租约；`dsh-client-ui-responsive/src/client/mobile/native-browser-presentation.ts` 可见挂载时每1000ms续租，普通几何去重不得饿死续租。隐藏/卸载停止，前台强制重放；原生 `onActivityResumed` 仅在租约新鲜时重算/请求绘制，不刷新租约。测试 `BrowserOverlayContractTest.kt` 和客户端 `native-browser-presentation.spec.ts`。
+- K02 / K01：`EngineManager.startEngine` 端口拒绝码及 `startupExceptionCode` → `EngineStartFlow` → `GuidePageRenderer` 结构化提示。端口拒绝停止自动undo/retry/属主修复，主按钮重试；已确认权限/空间提示保护，其他错误仍SafeMode。启动owner运行期间及异步监控回执不抢呈现权。测试 `Issue342StartupDiagnosticTest.kt`。
+- 前端Insets：`mobile-form.css.ts` >=768px frame消费动态top，border-box/minmax保持高度；窄屏沿用#135，wide fullscreen随列容器避让。测试 `system-top-insets.spec.ts`。详情见协调仓 `docs/maintenance/0.14.5-fx-1/04-implementation-report.md`；设备尚未验收。
 
 ## 1. 全局运行顺序（阶段 0-4）
 

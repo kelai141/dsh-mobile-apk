@@ -1532,3 +1532,10 @@
     ② `ConvertFrom-Json` 的日期字段**默认就是 DateTime**，要字符串比较就显式 `.ToString('yyyy-MM-dd')`；
     ③ **执行输出与计划不一致时必须当场停手查**——我这次看到了 `62 ≠ 49` 却继续，这正是本仓反复出现的
        「输出看起来正常，但它证明的事情是假的」同一形态，只不过这次是我自己造的。
+
+
+264. **#341：bounds 去重必须与覆盖层 TTL 租约配对（0.14.5-fx-1）**：旧客户端静止时不发相同bounds，原生4000ms后主动INVISIBLE，DOM/加载仍正常。可见挂载每1000ms续租，隐藏/卸载即停止；普通Mutation去重不能重置续租截止时间。不能删TTL，否则幽灵覆盖层回归；也不能把Surface日志当单一根因。回归新增客户端9例与原生TTL/前台契约，真实绘制留第三阶段。
+
+265. **#340：宽屏顶部避让的高度盒必须一起修**：上游frame是height:100%与grid-template-rows:100%；只加top padding会使底部溢出。宽屏frame用border-box/minmax(0,1fr)消费动态inset一次；absolute fullscreen面板在rightbarCol内，不能再加第二层top padding。手机#135消费位置保留。
+
+266. **#342：端口错误不能被恢复流程抢走**：PORT_FOREIGN必须带拒绝码到屏上，禁止自动undo/retry/属主提示和外部HTTP探活顶掉诊断页；显式重试的新启动owner期间监控也不得抢呈现。私有目录诊断需errno及私有目录访问拒绝双证据，公共文件授权和exec拒绝不能据此误报。

@@ -81,6 +81,32 @@ class BrowserOverlayContractTest {
   }
 
   @Test
+  fun foregroundReappliesOnlyFreshStageAndRequestsDrawing() {
+    val body = memberBody(codeOnly(source("BrowserHost.kt")), "fun onActivityResumed()")
+    assertTrue(body.contains("BrowserOverlayPolicy.visible("))
+    assertTrue(body.contains("BrowserOverlayPolicy.boundsAge("))
+    assertTrue(body.contains("applyStageBounds()"))
+    assertTrue(body.contains("view?.requestLayout()"))
+    assertFalse("Resume cannot forge a new UI lease", body.contains("boundsAt ="))
+  }
+
+  @Test
+  fun eachVisibleStageBoundsInvalidatesTheNativeSurfaceWithoutForcingLayout() {
+    val body = memberBody(codeOnly(source("BrowserHost.kt")), "private fun applyStageBounds()")
+    assertTrue(body.contains("if (stageVisible) view?.invalidate()"))
+    assertFalse("A steady-state lease does not force a 1Hz layout traversal", body.contains("view?.requestLayout()"))
+  }
+
+  @Test
+  fun clientLeasePeriodIsStrictlyBelowNativeTtl() {
+    val candidates = listOf(File("../dsh-client-ui-responsive/src/client/mobile/native-browser-presentation.ts"),
+      File("dsh-client-ui-responsive/src/client/mobile/native-browser-presentation.ts"))
+    val client = candidates.firstOrNull { it.isFile } ?: throw AssertionError("Missing mirrored browser presentation")
+    val period = Regex("BROWSER_STAGE_LEASE_MS = (\\d+)").find(client.readText())!!.groupValues[1].toLong()
+    assertTrue(period > 0L && period < BrowserOverlayPolicy.STAGE_BOUNDS_TTL_MS)
+  }
+
+  @Test
   fun freshnessWatchdogExistsAndIsScheduled() {
     val src = codeOnly(source("BrowserHost.kt"))
     assertTrue("必须有保鲜看门狗（发布者消失本身不产生任何事件）",

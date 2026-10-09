@@ -1207,9 +1207,11 @@ class EngineManager(private val context: Context, private val pickToken: String?
     // （打包指纹不可用 / termux-exec 预载库缺失）会把**上一次**的 live-runtime 码与确诊项留下
     // 来 ⇒ 调用方（错误页主按钮）会拿陈旧码去花掉那次重抽取，诊断包也会出现
     // 「有 confirmed/evidence 却没有 code」的自相矛盾字段。
+    lastStartRefusal = null
     lastStartRefusalCode = null
     lastStartRefusalConfirmed = emptyList()
     snapshotFingerprintProblem()?.let { problem ->
+      lastStartRefusalCode = REFUSAL_RUNTIME_UNAVAILABLE
       lastStartRefusal = problem.failureCode + ": " + problem.detail
       return false
     }
@@ -1225,6 +1227,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
     val preload = File(usrDir, "lib/libtermux-exec-ld-preload.so")
     if (!preload.exists()) {
       Log.e(TAG, "engine start failed: termux-exec preload missing at " + preload.absolutePath)
+      lastStartRefusalCode = REFUSAL_RUNTIME_UNAVAILABLE
       lastStartRefusal = "termux-exec 预载库缺失（" + preload.absolutePath + "）"
       return false
     }
@@ -1304,6 +1307,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
     lastAvailability = availability
     if (availability == EngineProbe.EngineAvailability.PORT_FOREIGN) {
       val refusal = "本机 3080 端口由未归属到本壳的进程占用；为保护该进程，本次不杀、不重启、不拉起引擎"
+      lastStartRefusalCode = REFUSAL_PORT_FOREIGN
       lastStartRefusal = refusal
       LogCollector.log(TAG, "engine start refused (PORT_FOREIGN; force=$force)")
       Log.w(TAG, refusal)
@@ -1331,6 +1335,8 @@ class EngineManager(private val context: Context, private val pickToken: String?
       // 只停止持有句柄的本壳子进程；未归属监听器绝不通过名称匹配清理。
       if (!killExistingEngine()) {
         lastAvailability = EngineProbe.classifyPreSpawnPort(EngineProbe.portReachable(250))
+        if (lastAvailability == EngineProbe.EngineAvailability.PORT_FOREIGN)
+          lastStartRefusalCode = REFUSAL_PORT_FOREIGN
         lastStartRefusal = "旧引擎停止后 3080 仍被占用；本次拒绝 spawn，避免覆盖未知监听器"
         LogCollector.log(TAG, "engine start refused: listener remained after owned-child cleanup")
         return false
@@ -1359,6 +1365,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
       val preSpawnAvailability = EngineProbe.classifyPreSpawnPort(EngineProbe.portReachable(300))
       if (preSpawnAvailability != EngineProbe.EngineAvailability.DOWN) {
         lastAvailability = preSpawnAvailability
+        lastStartRefusalCode = REFUSAL_PORT_FOREIGN
         lastStartRefusal = "最终 spawn 前复查发现 3080 已被占用；按外部监听处理，本次只拒绝一次且不重试"
         LogCollector.log(TAG, "engine start refused at final pre-spawn recheck (PORT_FOREIGN)")
         return false
@@ -1371,6 +1378,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
       if (!started.isAlive && EngineProbe.portReachable(250)) {
         engineProcess = null
         lastAvailability = EngineProbe.EngineAvailability.PORT_FOREIGN
+        lastStartRefusalCode = REFUSAL_PORT_FOREIGN
         lastStartRefusal = "3080 在最终复查与引擎 bind 之间被其他进程抢占；已停止本次启动且不会清理外部进程"
         LogCollector.log(TAG, "engine spawn lost EADDRINUSE race; classified PORT_FOREIGN, no retry")
         return false
@@ -1380,6 +1388,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
       LogCollector.log(TAG, "engine started")
       true
     } catch (t: Throwable) {
+      lastStartRefusalCode = startupExceptionCode(t)
       Log.e(TAG, "engine start failed", t)
       LogCollector.log(TAG, "engine start FAILED: " + (t.message ?: t.javaClass.simpleName))
       // 0.13.1 W3：失败现场镜像到共享目录（此前 engine.log 只在私有域，外界拿不到）。
@@ -1388,6 +1397,27 @@ class EngineManager(private val context: Context, private val pickToken: String?
     } finally {
       STARTING.set(false)
     }
+  }
+
+  /** Only syscall evidence classifies storage failures; arbitrary exception prose stays unknown. */
+  internal fun startupExceptionCode(error: Throwable): String? {
+    val causes = generateSequence(error) { it.cause }.take(16).toList()
+    val errno = causes.filterIsInstance<android.system.ErrnoException>().firstOrNull()?.errno
+    if (errno == android.system.OsConstants.ENOSPC) return REFUSAL_STORAGE_FULL
+    if (errno == android.system.OsConstants.EACCES || errno == android.system.OsConstants.EPERM) {
+      // Exec policy denial and public storage denial are NOT evidence that app-private data is unwritable.
+      val privateWriteDenied = listOf(context.filesDir, homeDir).any { dir ->
+        dir.isDirectory && try {
+          !android.system.Os.access(dir.absolutePath, android.system.OsConstants.W_OK or android.system.OsConstants.X_OK)
+        } catch (e: android.system.ErrnoException) {
+          e.errno == android.system.OsConstants.EACCES || e.errno == android.system.OsConstants.EPERM
+        } catch (_: SecurityException) {
+          false
+        }
+      }
+      if (privateWriteDenied) return REFUSAL_PRIVATE_STORAGE_DENIED
+    }
+    return null
   }
 
   /** The active web profile owns migrated settings; legacy YAML is used only before a profile exists. */
@@ -2245,6 +2275,11 @@ description: 手机操控纪律：无障碍语义树优先、ref 语义点击/�
      *  double-start the engine (device-observed EADDRINUSE). 90s covers the
      *  slowest observed boot with margin. */
     const val START_COOLDOWN_MS = 90_000L
+
+  const val REFUSAL_PORT_FOREIGN = "port-foreign"
+  const val REFUSAL_PRIVATE_STORAGE_DENIED = "private-storage-denied"
+  const val REFUSAL_STORAGE_FULL = "storage-full"
+  const val REFUSAL_RUNTIME_UNAVAILABLE = "runtime-unavailable"
 
   /**
    * 拒绝启动原因码：live 运行时树残缺（issue #309）。

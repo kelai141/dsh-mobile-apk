@@ -21,6 +21,18 @@ export const MOBILE_FORM_CSS: string = `
   --dsh-mobile-top-inset: max(env(safe-area-inset-top, 0px), var(--dsh-android-system-top, 0px));
 }
 
+/* APK #340: the wide frame also occupies Android's edge-to-edge viewport.
+   Reserve the measured top inset once for all three columns, including the
+   absolute fullscreen panel anchored in rightbarCol. A 100% grid row would
+   retain the old height beneath the padding and clip the bottom controls. */
+@media (min-width: 768px) {
+  [data-dsh-frame] {
+    box-sizing: border-box;
+    padding-top: var(--dsh-mobile-top-inset, 0px);
+    grid-template-rows: minmax(0, 1fr);
+  }
+}
+
 @media (max-width: 767px) {
   [data-dsh-frame] {
     grid-template-columns: 0 minmax(0, 1fr) 0 !important;

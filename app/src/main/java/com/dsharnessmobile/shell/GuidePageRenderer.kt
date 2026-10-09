@@ -15,6 +15,28 @@ import java.io.File
 
 internal enum class GuidePhase { Idle, Starting, Extracting, Updating, Recovering, Undoing, Error, Closed, Info }
 
+/** Stable user copy comes only from a structured failure code, never raw paths or exception text. */
+internal fun startupFailureHintResource(code: String?): Int = when (code) {
+  EngineManager.REFUSAL_PORT_FOREIGN -> R.string.ds_start_port_foreign
+  EngineManager.REFUSAL_PRIVATE_STORAGE_DENIED -> R.string.ds_start_private_denied
+  EngineManager.REFUSAL_STORAGE_FULL -> R.string.ds_start_storage_full
+  EngineManager.REFUSAL_RUNTIME_UNAVAILABLE,
+  EngineManager.REFUSAL_LIVE_RUNTIME_INCOMPLETE,
+  EngineManager.REFUSAL_HARD_BUNDLE_SELECTION -> R.string.ds_start_runtime_unavailable
+  else -> R.string.ds_start_unknown
+}
+
+internal fun startupFailureHint(context: android.content.Context, code: String?): String =
+  context.getString(startupFailureHintResource(code))
+
+internal fun startupFailureUsesRetry(code: String?): Boolean =
+  code == EngineManager.REFUSAL_PORT_FOREIGN
+
+internal fun startupFailureAllowsOwnershipRepair(code: String?): Boolean =
+  code != EngineManager.REFUSAL_PORT_FOREIGN &&
+    code != EngineManager.REFUSAL_PRIVATE_STORAGE_DENIED &&
+    code != EngineManager.REFUSAL_STORAGE_FULL
+
 // ── 状态副文案的仲裁（S1-2；顶层纯逻辑，JVM 可测）──────────────────────────
 //
 // 缺陷现场：五个来源（相位默认句 / 流程进度 / 旁路回执 / 下载提示 / 日志回执）各自直接写
@@ -221,6 +243,8 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
   private var statusPulse: ObjectAnimator? = null
 
   // —— S1-2：状态副文案的仲裁状态（唯一写入口 pushHint 维护） ——
+  private var startupRetryAction = false
+  private var startupOwnershipRepairAllowed = true
   private var hintSource: HintSource? = null
   private var hintSticky = false
 
@@ -259,7 +283,8 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
           healed > 0 -> "已自动修复 $healed 个 root 属主条目（root 通道写盘遗留）——点上方按钮重试启动。"
           else -> ""
         }
-        if (text.isNotEmpty()) pushHint(text, HintSource.PHASE, sticky = true)
+        if (text.isNotEmpty() && lastGuidePhase == GuidePhase.Error && startupOwnershipRepairAllowed)
+          pushHint(text, HintSource.PHASE, sticky = true)
       }
     }, "dsh-root-owner-repair-guide").start()
   }
@@ -324,7 +349,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
           // 缺陷 D（fx-2）：同一个主按钮在 **Error 相位**下语义不同——它变成「安全模式启动」。
           // 分叉放在这里而不是换控件：`GuideChrome` 只有一个 primaryButton，
           // 复用它的既有样式/锁态/无障碍面比新增按钮更少出事面（也避免用 Phase==Error 之外的判据）。
-          if (lastGuidePhase == GuidePhase.Error) enterSafeMode()
+          if (lastGuidePhase == GuidePhase.Error && !startupRetryAction) enterSafeMode()
           else {
             activity.engineFlow.engineRetryCount = 0 // 手动重试归零自动重试计数
             // 0.14.1 D2：同时清空**跨进程**的快照刷新失败账本。用户显式点「重试」就是要求
@@ -370,16 +395,19 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
 
   fun applyGuidePhase(phase: GuidePhase, title: String, hint: String? = null) {
     lastGuidePhase = phase
+    startupRetryAction = phase == GuidePhase.Error &&
+      startupFailureUsesRetry(activity.engineManager.lastStartRefusalCode)
+    startupOwnershipRepairAllowed = startupFailureAllowsOwnershipRepair(activity.engineManager.lastStartRefusalCode)
     engineStatus.text = title
     val resolvedHint = hint ?: defaultHint(phase)
     // S1-2：相位文案走仲裁漏斗（不可打断相位期间，旁路回执不得顶掉它）。
-    pushHint(resolvedHint, HintSource.PHASE, sticky = phaseLocked(phase))
+    pushHint(resolvedHint, HintSource.PHASE, sticky = phaseLocked(phase) || (phase == GuidePhase.Error && !startupOwnershipRepairAllowed))
 
     // 2026-09-30（主人一问换来：「root 属主会导致无法启动，你在设置里弄真有用吗」）：
     // **失败相位自动属主自愈**——启动已经挂了的时候用户就停在这一页，此时自动跑一次有界自愈
     // （su 优先），并把结果如实写进提示行。修复不依赖用户找到任何按钮（启动挂了的用户
     // 根本进不到设置页，那里的按钮形同虚设）。
-    if (phase == GuidePhase.Error) autoRepairOwnershipOnFailure()
+    if (phase == GuidePhase.Error && startupOwnershipRepairAllowed) autoRepairOwnershipOnFailure()
 
     val busy = phase == GuidePhase.Starting ||
       phase == GuidePhase.Extracting ||
@@ -407,6 +435,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
       phase == GuidePhase.Closed -> activity.getString(R.string.ds_restart)
       // 缺陷 D（fx-2）：启动失败时主按钮是「安全模式启动」而不是「重试」。
       // 用户口径：失败的当下，重试往往只是再撞一次同一堵墙；能自救的那条路是带着上下文进安全模式。
+      startupRetryAction -> activity.getString(R.string.ds_start_retry)
       phase == GuidePhase.Error -> activity.getString(R.string.ds_safe_start)
       phase == GuidePhase.Recovering -> activity.getString(R.string.ds_recovering)
       phase == GuidePhase.Starting || phase == GuidePhase.Extracting -> activity.getString(R.string.ds_starting)
@@ -606,7 +635,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
     GuidePhase.Undoing -> "正在把配置/插件回滚到最后良好快照（自动回撤）。"
     // 缺陷 D（fx-2）：失败页的默认副文案要说清「这个按钮现在做什么」——
     // 旧文案只提「重试」，而按钮此刻已被改成安全模式入口（文案与事实必须对齐）。
-    GuidePhase.Error -> activity.getString(R.string.ds_safe_hint)
+    GuidePhase.Error -> startupFailureHint(activity, activity.engineManager.lastStartRefusalCode)
     GuidePhase.Closed -> "引擎已停止，不会自动恢复。"
     GuidePhase.Idle -> "引擎就绪后将进入 " + UserCopy.APP_NAME + "。首次使用需授予存储权限——导出文件与日志要写在公共目录。"
     GuidePhase.Info -> "运行时随安装包一起更新：安装新版 APK 即完成升级。"

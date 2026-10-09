@@ -81,4 +81,10 @@
   <string name="a11y_service_label">DeepCode 设备控制</string>
   <string name="a11y_service_summary">让 AI 助手以语义方式读取界面并操作控件</string>
   <string name="a11y_service_description">开启后，AI 助手可以读取当前界面的控件（文本/描述/位置）并执行点击、输入、滚动等操作。仅在你主动开启时生效，关闭后立即失效；同时要求会话处于「完全访问」档位。</string>
+    <string name="ds_start_port_foreign">本地端口 3080 正被其他程序使用，应用没有停止该程序。请关闭冲突应用后点「重试启动」，或重启设备。[port-foreign]</string>
+    <string name="ds_start_private_denied">应用无法写入自己的私有运行目录。公共文件授权不能解决此问题；请重启设备后再次打开应用，仍失败请打开控制台并复制日志反馈。安全模式只能隔离插件，不能修复目录权限。[private-storage-denied]</string>
+    <string name="ds_start_storage_full">设备报告存储空间不足。请释放空间后再点「安全模式启动」；该按钮只隔离插件，不会释放空间。不要清除本应用的数据。[storage-full]</string>
+    <string name="ds_start_runtime_unavailable">运行时或必需插件未就绪。请打开控制台并复制日志查看原因；安全模式保留现有恢复入口。[runtime-unavailable]</string>
+    <string name="ds_start_unknown">尚无法确定启动失败原因。请打开控制台或复制日志反馈；也可尝试安全模式，暂时隔离第三方插件。[start-unknown]</string>
+    <string name="ds_start_retry">重试启动</string>
 </resources>
