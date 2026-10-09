@@ -50,6 +50,14 @@ internal class EngineStartFlow(private val activity: MainActivity) {
       // 放行其余分支就会继续做「引擎未运行 → 自动恢复」的相位切换，把 Error 页顶掉——那是
       // 另一种形态的弹回。用户显式重试/安全模式会清 latch，出口仍在。
       if (clientPluginTreeFailed) return
+      // The startup owner performs its own probes. A retry clears the previous refusal;
+      // the monitor must not briefly promote that same foreign listener during the new attempt.
+      if (flowOwnership.running) {
+        engineMonitorHandler.postDelayed(this, 3_000)
+        return
+      }
+      // HTTP liveness does not prove that a foreign listener belongs to this engine.
+      if (activity.engineManager.lastStartRefusalCode == EngineManager.REFUSAL_PORT_FOREIGN) return
       val generation = monitorGeneration
       val monitor = this
       Thread {
@@ -58,6 +66,11 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         val portAlive = EngineProbe.portReachable(500)
         activity.runOnUiThread {
           if (generation != monitorGeneration || !activity.pageUiActive || !canRunEngineWork()) return@runOnUiThread
+          if (flowOwnership.running) {
+            engineMonitorHandler.postDelayed(monitor, 3_000)
+            return@runOnUiThread
+          }
+          if (activity.engineManager.lastStartRefusalCode == EngineManager.REFUSAL_PORT_FOREIGN) return@runOnUiThread
           if (activity.webViewReady && activity.guideViewReady && !activity.userClosedEngine) {
             if (httpAlive || portAlive) {
               engineMonitorFailures = 0
@@ -663,7 +676,8 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     val attempt = engineRetryCount
     activity.runOnUiThread {
       if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-      activity.applyGuidePhase(GuidePhase.Starting, "引擎启动失败，${delayMs / 1000}s 后自动重试（第 $attempt/2 次）")
+      activity.applyGuidePhase(GuidePhase.Starting, "引擎启动失败，${delayMs / 1000}s 后自动重试（第 $attempt/2 次）",
+        startupFailureHint(activity, activity.engineManager.lastStartRefusalCode))
       activity.showGuide()
     }
     engineMonitorHandler.postDelayed({
@@ -685,6 +699,8 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     // clear a replacement, and duplicate lifecycle callbacks change neither.
     val token = flowOwnership.begin() ?: return
     val generation = token.generation
+    activity.engineManager.lastStartRefusalCode = null
+    activity.engineManager.lastStartRefusal = null
     if (!isCurrentEngineFlow(generation)) { flowOwnership.finish(token); return }
     // 新启动世代 = boot-stall 的新 epoch：在此复位（**不在** onPageFinished。
     // onPageFinished 只代表文档加载完，在那里复位会造成同 epoch 重复报，见 L-1）。
@@ -846,6 +862,9 @@ internal class EngineStartFlow(private val activity: MainActivity) {
             // 有了码，boot-fail.log 的一行就说清「是哪一类失败」，不必翻栈。
             val refreshCause = activity.engineManager.lastRefreshFailure
             val refreshCode = activity.engineManager.lastRefreshFailureCode ?: "snapshot-refresh-failed"
+            activity.engineManager.lastStartRefusalCode = refreshCause?.let {
+              activity.engineManager.startupExceptionCode(it)
+            } ?: EngineManager.REFUSAL_RUNTIME_UNAVAILABLE
             LogCollector.writeBootFail(
               activity, refreshCode,
               "内嵌运行时快照解压/写入失败（refreshSnapshot 返回 false，code=" + refreshCode + "）"
@@ -867,7 +886,8 @@ internal class EngineStartFlow(private val activity: MainActivity) {
                 // 缺陷 D（fx-2）：这两个显式 hint 会**覆盖** defaultHint，所以安全模式引导
                 // 必须在这里也带上——否则「运行时更新失败」屏的按钮已改成安全模式入口，
                 // 文案却还在让人「重试」，两者对不上。
-                diagnosticsLocationHint(dir) + "。可复制该路径或打开控制台查看 engine.log。" +
+                startupFailureHint(activity, activity.engineManager.lastStartRefusalCode) + "\n" +
+                  diagnosticsLocationHint(dir) + "。可复制该路径或打开控制台查看 engine.log。" +
                   activity.getString(R.string.ds_safe_hint_short),
               )
               activity.showGuide()
@@ -928,9 +948,11 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         }
         activity.runOnUiThread {
           if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-          activity.applyGuidePhase(GuidePhase.Error, "引擎启动失败")
+          activity.applyGuidePhase(GuidePhase.Error, "引擎启动失败", startupFailureHint(activity, refusalCode))
           activity.showGuide()
         }
+        // A foreign listener cannot be repaired by changing this app's profile or ownership.
+        if (refusalCode == EngineManager.REFUSAL_PORT_FOREIGN) return@Thread
         maybeAutoUndo(generation)
         // #118 建议7：失败不清零计数时自动重试（Error 页不再需要手动点重试）。
         scheduleEngineRetry(generation)
@@ -1081,9 +1103,11 @@ internal class EngineStartFlow(private val activity: MainActivity) {
           "启动线程抛出未捕获异常（此前该路径零落盘）",
           t,
         )
+        activity.engineManager.lastStartRefusalCode = activity.engineManager.startupExceptionCode(t)
         activity.runOnUiThread {
           if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-          activity.applyGuidePhase(GuidePhase.Error, "引擎启动失败")
+          activity.applyGuidePhase(GuidePhase.Error, "引擎启动失败",
+            startupFailureHint(activity, activity.engineManager.lastStartRefusalCode))
           activity.showGuide()
         }
       } finally {
@@ -1253,6 +1277,7 @@ internal class StartupFlowOwnership {
   private data class State(val generation: Long = 0, val token: Token? = null, val running: Boolean = false, val destroyed: Boolean = false)
   private val state = java.util.concurrent.atomic.AtomicReference(State())
   val destroyed: Boolean get() = state.get().destroyed
+  val running: Boolean get() = state.get().running
 
   fun begin(): Token? {
     while (true) {

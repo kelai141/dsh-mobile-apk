@@ -766,6 +766,21 @@ internal class BrowserHost(
   fun onActivityResumed() {
     onMain {
       view?.onResume()
+      val workspace = currentWorkspace
+      if (workspace != null && BrowserOverlayPolicy.visible(
+          isCurrent = true,
+          requestedVisible = workspace.requestedVisible,
+          stageVisible = workspace.stageVisible,
+          boundsAgeMs = BrowserOverlayPolicy.boundsAge(workspace.boundsAt, SystemClock.uptimeMillis()),
+          ttlMs = BrowserOverlayPolicy.STAGE_BOUNDS_TTL_MS,
+        )) {
+        // Reapply only a live UI lease; foregrounding must never revive a detached stage.
+        applyStageBounds()
+        view?.requestLayout()
+        view?.invalidate()
+      } else {
+        applyVisibility()
+      }
       Unit
     }
   }
@@ -1050,12 +1065,20 @@ internal class BrowserHost(
     val positionedTop = top + (stageHeight - height) / 2
     // 记下这块「用户刚见过」的舞台尺寸，供收起态排版兜底（见 lastStageSize 说明）。
     lastStageSize = width.coerceAtLeast(1) to height.coerceAtLeast(1)
-    view?.layoutParams = FrameLayout.LayoutParams(width.coerceAtLeast(1), height.coerceAtLeast(1)).apply {
-      leftMargin = positionedLeft
-      topMargin = positionedTop
+    val existing = view?.layoutParams as? FrameLayout.LayoutParams
+    if (existing == null || existing.width != width || existing.height != height ||
+      existing.leftMargin != positionedLeft || existing.topMargin != positionedTop
+    ) {
+      view?.layoutParams = FrameLayout.LayoutParams(width.coerceAtLeast(1), height.coerceAtLeast(1)).apply {
+        leftMargin = positionedLeft
+        topMargin = positionedTop
+      }
     }
     stageVisible = true
     applyVisibility()
+    // A repeated live lease can be the only signal after a renderer/surface stops drawing.
+    // Invalidate the visible native surface without forcing a layout pass on every renewal.
+    if (stageVisible) view?.invalidate()
   }
 
   /** 读取页面自报视口（诊断 + 设备断言）；失败保留上一次值。 */
