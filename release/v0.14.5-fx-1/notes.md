@@ -1,16 +1,16 @@
 # v0.14.5-fx-1
 
-This maintenance release addresses the open reports #340, #341, and #342. Issue #108 remains not planned and is not implemented by this release.
+本维护版本处理 #340、#341 和 #342。Issue #108 已按用户决定标记为 `not_planned`，本版不包含完整数据备份与恢复功能。
 
-## Changes
+## 修复内容
 
-- **#341 Browser sidebar rendering:** renew visible native overlay bounds while the presentation is mounted, recover drawing after foreground/lifecycle restoration, and rebind when the page replaces its stage element. The implementation does not reload the isolated page or clear browser data.
-- **#342 Startup diagnostics:** show actionable messages for confirmed port conflicts and classified runtime/permission failures, keep unknown engine failures distinct, and offer an explicit retry action.
-- **#340 Status bar insets:** consume the current system top inset on wide layouts across immersive-mode changes without fixed-height padding.
-- Increment Android `versionCode` from 47 to 48 and set `versionName` to `0.14.5-fx-1`; existing app data remains in place on same-signature `install -r` upgrades.
+- **#341 侧栏浏览器绘制：** 浏览器舞台在可见且挂载时续租原生覆盖层 bounds；回到前台时重新应用有效 bounds 并请求绘制；页面替换舞台节点时重新绑定。不会重载隔离页面或清理浏览器数据。
+- **#342 启动诊断：** 对已确认的端口冲突和已分类的运行时/权限故障给出可操作提示；未知引擎故障保持独立分类；错误页提供明确的手动重试入口。
+- **#340 状态栏内边距：** 宽屏布局读取动态系统顶部 inset，沉浸模式切换时不使用固定高度占位。
+- Android `versionCode` 从 47 升至 48，`versionName` 更新为 `0.14.5-fx-1`。相同签名的 `install -r` 覆盖安装保留应用数据。
 
-## Validation status
+## 验收状态
 
-The release workflow rebuilds both ABI snapshots, runs release gates, assembles both APKs, and verifies their signing schemes and certificate. These checks are performed by the workflow for this release and are not claimed here as already passed.
+正式发布工作流会重建 arm64 与 x86_64 快照及 APK，执行发布门禁，并核验两种 ABI 的 APK 签名方案和证书。工作流完成后会以实际结果更新此说明；在此之前不把这些检查写成已通过。
 
-The MuMu test report confirms the #342 port-conflict recovery path and the tested subset of #340 immersive inset behavior. Full #341 isolated-WebView drawing validation remains inconclusive because the available MuMu WebView provider does not support the required multi-profile capability. Xiaomi Pad 7S Pro and OPPO OPD2601 device validation remains outstanding. See `docs/maintenance/0.14.5-fx-1/06-validation-report.md` in the coordination repository for exact commands and evidence.
+MuMu 实测确认了 #342 端口冲突提示与释放端口后的手动重试，以及 #340 沉浸开关内边距行为的已测子集。由于可用 MuMu WebView provider 不支持所需的 MULTI_PROFILE，#341 的隔离 WebView 绘制恢复仍无法在该环境验证。小米 Pad 7S Pro 与 OPPO OPD2601 的设备验证仍待完成。详细测试结果见协调仓库 `docs/maintenance/0.14.5-fx-1/06-validation-report.md`。
