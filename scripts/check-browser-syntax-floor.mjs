@@ -114,7 +114,8 @@ const resolveEsbuild = () => {
       // 平台可用的那一个才算命中：快照构建在 WSL/Linux 内跑（build-snapshot-013.mjs:30-44 自执行进 WSL），
       // 而仓内 node_modules 只有 @esbuild/win32-x64 时，直接 import 会抛
       // 「You installed esbuild for another platform」——必须在选择阶段就按平台过滤，否则是踩坑而不是命中。
-      if (esbuildUsable(main, version)) return { rel, dir, main, version }
+      // A usable but stale parser must not mask the fixed-version provisioner below.
+      if (version === ESBUILD_PIN && esbuildUsable(main, version)) return { rel, dir, main, version }
     }
   }
   return null
