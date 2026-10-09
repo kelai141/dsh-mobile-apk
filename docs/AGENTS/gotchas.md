@@ -1539,3 +1539,9 @@
 265. **#340：宽屏顶部避让的高度盒必须一起修**：上游frame是height:100%与grid-template-rows:100%；只加top padding会使底部溢出。宽屏frame用border-box/minmax(0,1fr)消费动态inset一次；absolute fullscreen面板在rightbarCol内，不能再加第二层top padding。手机#135消费位置保留。
 
 266. **#342：端口错误不能被恢复流程抢走**：PORT_FOREIGN必须带拒绝码到屏上，禁止自动undo/retry/属主提示和外部HTTP探活顶掉诊断页；显式重试的新启动owner期间监控也不得抢呈现。私有目录诊断需errno及私有目录访问拒绝双证据，公共文件授权和exec拒绝不能据此误报。
+
+267. **fx2 来源链只构建 committed HEAD**：隔离目录不是当前 dirty 工作树的备份，也不包含未提交修改。输出保留供复查，不复制回原仓；续跑必须验证相同 source/commit，不能复用未知非空目录。独立浅检出可能保留 LFS pointer，必须走 sources 链重建，不能拿它冒充本地现成 base 构建。
+
+268. **fx2 通知延后必须先提交后消费**：入队/清结失败都不能清掉耐久条目，来源偏移提交失败保留重放。pending 八条/五分钟、结算哈希三十二条/五分钟是有界语义，不是全局 exactly-once。未知/损坏 journal 不自动清空，须保留证据并排查格式或存储失败。
+
+269. **WSL 启动 Windows Gradle 必须确认真实进程**：本次 PowerShell 调 gradlew.bat 曾空返回但后台 runner 未结束，重复启动导致同一 app/build 编译竞争。用命令行、父 PID 和创建时间核实归属，只处理本任务 runner；单一 Java wrapper、非增量、in-process 编译完成自检。禁止把锁竞争误判为源码缺陷，禁止批量终止用户既有进程或清缓存。

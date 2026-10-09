@@ -25,6 +25,7 @@ class EngineService : Service() {
     val stopped = java.util.concurrent.atomic.AtomicBoolean(false)
     val startupQueued = java.util.concurrent.atomic.AtomicBoolean(false)
     val startupCaller = java.util.concurrent.atomic.AtomicReference<Thread?>(null)
+    val startupFuture = java.util.concurrent.atomic.AtomicReference<java.util.concurrent.ScheduledFuture<*>?>(null)
     val undoCaller = java.util.concurrent.atomic.AtomicReference<Thread?>(null)
     val watchdog = java.util.concurrent.atomic.AtomicReference<ScheduledExecutorService?>(null)
     val wakeOwner = WatchdogV2.WakeLockOwner()
@@ -132,18 +133,24 @@ class EngineService : Service() {
   private fun scheduleStartup(epoch: ServiceEpoch, delayMs: Long) {
     if (!isEpochCurrent(epoch)) return
     try {
-      startupExecutor.schedule({
-        val caller = Thread.currentThread()
-        epoch.startupCaller.set(caller)
-        try { if (isEpochCurrent(epoch)) ensureEngine(epoch) }
-        catch (t: Throwable) {
-          if (isEpochCurrent(epoch)) {
-            epoch.startupQueued.set(false)
-            Log.e("dsh-engine", "service startup failed", t)
+      synchronized(epoch) {
+        val future = startupExecutor.schedule({
+          // A zero-delay task must not reschedule before its future has been installed.
+          synchronized(epoch) { if (!isEpochCurrent(epoch)) return@schedule }
+          val caller = Thread.currentThread()
+          epoch.startupCaller.set(caller)
+          try { if (isEpochCurrent(epoch)) ensureEngine(epoch) }
+          catch (t: Throwable) {
+            if (isEpochCurrent(epoch)) {
+              epoch.startupQueued.set(false)
+              Log.e("dsh-engine", "service startup failed", t)
+            }
           }
-        }
-        finally { epoch.startupCaller.compareAndSet(caller, null) }
-      }, delayMs, TimeUnit.MILLISECONDS)
+          finally { epoch.startupCaller.compareAndSet(caller, null) }
+        }, delayMs, TimeUnit.MILLISECONDS)
+        epoch.startupFuture.getAndSet(future)?.cancel(false)
+        if (!isEpochCurrent(epoch)) future.cancel(true)
+      }
     } catch (_: java.util.concurrent.RejectedExecutionException) {
       // Destruction can reject a queued retry. No effects or replacement teardown follow.
     }
@@ -152,6 +159,7 @@ class EngineService : Service() {
   private fun retireEpoch(epoch: ServiceEpoch) {
     serviceEpoch.compareAndSet(epoch, null)
     epoch.stopped.set(true)
+    epoch.startupFuture.getAndSet(null)?.cancel(true)
     epoch.startupCaller.getAndSet(null)?.interrupt()
     epoch.undoCaller.getAndSet(null)?.interrupt()
     epoch.watchdog.getAndSet(null)?.shutdownNow()
@@ -163,12 +171,10 @@ class EngineService : Service() {
     val ownership = ShizukuTransport.prepareStartupOwnership(applicationContext)
     if (!isEpochCurrent(epoch)) return
     if (startupOwnershipPending(ownership.optString("reason"))) {
-      val delay = epoch.ownershipRetry.nextDelayMs()
-      if (delay != null) scheduleStartup(epoch, delay)
-      else {
-        // No more automatic retries this epoch. A later external start may recheck settlement once.
-        epoch.startupQueued.set(false)
-        Log.i("dsh-root", "service startup remains deferred after bounded ownership retries")
+      val delay = epoch.ownershipRetry.nextDelayMs() ?: SLOW_OWNERSHIP_RECHECK_MS
+      scheduleStartup(epoch, delay)
+      if (delay == SLOW_OWNERSHIP_RECHECK_MS) {
+        Log.i("dsh-root", "service startup remains deferred; ownership recheck in " + delay + "ms")
       }
       return
     }

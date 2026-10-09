@@ -419,12 +419,6 @@ function looksDangerousAdb(command: string): boolean {
 export interface ControlAuth {
   /** 调用方会话（模型视角）——用于 `gateFor` 的档位判定。 */
   session?: unknown
-  /**
-   * 引擎内部**已知安全调用**：具名白名单（见 [INTERNAL_PRIVILEGED]）。
-   * 名字必须在注册表里，且本次命令必须通过该名字自带的校验器；每次调用留审计。
-   * **不是万能通行证**：未知名字 / 校验不过 / 该名字不适用于此 op 一律拒。
-   */
-  internal?: string
 }
 
 /**
@@ -461,7 +455,7 @@ function isAnimationScaleCommand(command: string): boolean {
     '^settings put global (' + ANIMATION_SCALE_KEYS.join('|') + ') ([0-9.]+|null)$').test(part))
 }
 
-/** 引擎内部已知安全调用注册表：名字 → 该名字**允许的命令形态**（形态外一律拒）。 */
+/** 仅由 JS 私有执行入口选择；公开 auth 数据不能选择内部操作。 */
 const INTERNAL_PRIVILEGED: Record<string, { why: string; allows: (command: string) => boolean }> = {
   'sf-token-lookup': {
     why: '屏幕范围判定自身要核对 SurfaceFlinger 的虚拟屏 token；这条 dumpsys 读命令是判定的组成部分，与档位无关',
@@ -736,11 +730,11 @@ export class AndroidPrivilegeService {
    */
   async shellSfVirtualDisplayTokens(): Promise<Array<{ alias: string; token: string }>> {
     try {
-      const r = await this.controlExec('shExec', {
+      const r = await this.#controlExec('shExec', {
         // 只取「Virtual Display <token>」与其紧跟的 name= 行；输出 ~25 B。
         command: "dumpsys SurfaceFlinger | grep -E '^(Virtual Display |    name=)'",
         timeoutMs: 15_000,
-      }, SHELL_QUEUE_TIMEOUT_MS, { internal: 'sf-token-lookup' })
+      }, SHELL_QUEUE_TIMEOUT_MS, undefined, 'sf-token-lookup')
       if (!r.ok) return []
       const data = (r.data ?? {}) as Record<string, unknown>
       const stdout = typeof data.stdout === 'string' ? data.stdout : ''
@@ -955,7 +949,7 @@ export class AndroidPrivilegeService {
 
   /** 本次调用的授权：显式参数 > 当前异步上下文绑定 > 无（fail-closed 拒绝）。 */
   private resolveAuth(auth?: ControlAuth): ControlAuth {
-    if (auth?.internal !== undefined || auth?.session !== undefined) return auth
+    if (auth?.session !== undefined) return auth
     const bound = callerAuth.getStore()
     return bound === undefined ? {} : bound
   }
@@ -964,16 +958,23 @@ export class AndroidPrivilegeService {
    * 特权面的服务侧授权（S-5）。`allowed:false` = 拒绝；`internal:true` = 走内部白名单放行
    * （已审计，调用方可据此跳过危险命令黑名单）。
    */
-  private authorizePrivileged(
+  #authorizePrivileged(
     auth: ControlAuth | undefined,
     op: string,
     command: string | undefined,
+    internal?: 'sf-token-lookup' | 'animation-scales',
   ): { allowed: true; internal: boolean } | { allowed: false; error: string } {
+    if (auth && 'internal' in auth) {
+      writeAudit({ action: 'privileged', op, result: 'denied-forged-internal' })
+      return { allowed: false, error: '调用方不能提供 internal 授权标记；动画操作请使用会话授权的专用接口。' }
+    }
     const resolved = this.resolveAuth(auth)
-    const internal = resolved.internal
-    if (typeof internal === 'string' && internal.length > 0) {
+    if (internal !== undefined) {
       const entry = INTERNAL_PRIVILEGED[internal]
-      const ok = entry !== undefined && command !== undefined && entry.allows(command)
+      const gate = internal === 'animation-scales'
+        ? (resolved.session === undefined ? { ok: false } : this.gateFor(resolved.session))
+        : { ok: true }
+      const ok = gate.ok && op === 'shExec' && entry !== undefined && command !== undefined && entry.allows(command)
       writeAudit({ action: 'privileged-internal', call: internal, op, command: command ?? '', result: ok ? 'ok' : 'denied-internal-shape' })
       if (ok) return { allowed: true, internal: true }
       return {
@@ -1005,12 +1006,21 @@ export class AndroidPrivilegeService {
    * 两条通道互不为前提，模型侧任一通道可用即可完成同类动作（不降级到 ADB/Shizuku——降级由工具层的策略决定）。
    */
   async controlExec(op: ControlOp, args: Record<string, unknown>, timeoutMs?: number, auth?: ControlAuth): Promise<ControlResult> {
+    return this.#controlExec(op, args, timeoutMs, auth)
+  }
+
+  async #controlExec(op: ControlOp, args: Record<string, unknown>, timeoutMs?: number, auth?: ControlAuth,
+    internal?: 'sf-token-lookup' | 'animation-scales'): Promise<ControlResult> {
     if (!this.controlQueue) return { ok: false, error: '控制队列未装配（插件未挂载 webServer？）' }
     // 审查 §5.1 / S-5：档位门在**服务面**复查（工具壳的检查是 UX 快速路径，不是唯一防线）。
     if (TIER_REQUIRED_OPS.includes(op)) {
       const command = typeof args.command === 'string' ? args.command : undefined
-      const decision = this.authorizePrivileged(auth, op, command)
+      const decision = this.#authorizePrivileged(auth, op, command, internal)
       if (!decision.allowed) return { ok: false, error: decision.error }
+      if (op === 'shExec' && !decision.internal && command !== undefined && looksDangerousAdb(command)) {
+        writeAudit({ action: 'shell-exec', args: { command }, result: 'denied-danger-service' })
+        return { ok: false, error: '命令被特权 shell 通道危险检查拦截（服务面拒绝）。' }
+      }
     }
     if (A11Y_OPS.includes(op) && !this.a11yEnabled()) {
       // SPEC §4.2②：无障碍关（纯 Shizuku）不等于「这条路走不通」——语义树/ref 动作确实不可用，
@@ -1127,8 +1137,31 @@ export class AndroidPrivilegeService {
    * adb 退役，失败一律回壳侧结构化 code/guidance（未安装 / 未启动 / 未授权 → 明确拒绝，非超时）。
    */
   async execAdbShell(command: string, auth?: ControlAuth): Promise<{ ok: boolean; stdout: string; guidance?: string }> {
+    return this.#execAdbShell(command, auth)
+  }
+
+  /** 固定键动画操作仍需会话档位；调用者不能提交任意 shell 文本。 */
+  async readAnimationScales(auth?: ControlAuth): Promise<{ ok: boolean; stdout: string; guidance?: string }> {
+    const command = 'for k in ' + ANIMATION_SCALE_KEYS.join(' ') + '; do echo R:$k=$(settings get global $k); done'
+    return this.#execAdbShell(command, auth, 'animation-scales')
+  }
+
+  async writeAnimationScales(values: Record<string, string>, auth?: ControlAuth): Promise<{ ok: boolean; stdout: string; guidance?: string }> {
+    if (values === null || typeof values !== 'object' || Array.isArray(values)) {
+      return { ok: false, stdout: '', guidance: '动画设置必须是三项动画键的值映射。' }
+    }
+    const entries = Object.entries(values)
+    if (entries.length === 0 || entries.some(([key, value]) => !ANIMATION_SCALE_KEYS.includes(key)
+      || typeof value !== 'string' || !/^(?:\d+(?:\.\d+)?|null)$/.test(value))) {
+      return { ok: false, stdout: '', guidance: '动画设置只接受三项动画键及非负数值或 null。' }
+    }
+    return this.#execAdbShell(entries.map(([key, value]) => `settings put global ${key} ${value}`).join('; '), auth, 'animation-scales')
+  }
+
+  async #execAdbShell(command: string, auth?: ControlAuth,
+    internal?: 'sf-token-lookup' | 'animation-scales'): Promise<{ ok: boolean; stdout: string; guidance?: string }> {
     // 审查 §5.1 / S-5：特权面在**服务面**复查档位与危险命令（工具壳的同名检查保留为 UX 快速路径）。
-    const decision = this.authorizePrivileged(auth, 'shExec', command)
+    const decision = this.#authorizePrivileged(auth, 'shExec', command, internal)
     if (!decision.allowed) return { ok: false, stdout: '', guidance: decision.error }
     if (!decision.internal && looksDangerousAdb(command)) {
       writeAudit({ action: 'shell-exec', args: { command }, result: 'denied-danger-service' })
@@ -1144,11 +1177,12 @@ export class AndroidPrivilegeService {
     const scopeDenied = await this.adbCommandScopeDenied(command)
     if (scopeDenied !== null) return { ok: false, stdout: '', guidance: scopeDenied }
     // S-6：壳侧执行时限与引擎入队时限**同时**下发，且入队 > 壳侧（见 SHELL_QUEUE_TIMEOUT_MS 的说明）。
-    const r = await this.controlExec(
+    const r = await this.#controlExec(
       'shExec',
       { command, timeoutMs: SHELL_EXEC_TIMEOUT_MS },
       SHELL_QUEUE_TIMEOUT_MS,
       auth,
+      internal,
     )
     if (!r.ok) return { ok: false, stdout: '', guidance: r.error }
     const data = (r.data ?? {}) as Record<string, unknown>
@@ -1164,7 +1198,7 @@ export class AndroidPrivilegeService {
    */
   async execAdbLine(line: string, auth?: ControlAuth): Promise<{ ok: boolean; stdout: string; guidance?: string }> {
     // 审查 §5.1 / S-5：与 execAdbShell 同一道服务面门（档位 + 危险命令黑名单）。
-    const decision = this.authorizePrivileged(auth, 'shExec', line)
+    const decision = this.#authorizePrivileged(auth, 'shExec', line)
     if (!decision.allowed) return { ok: false, stdout: '', guidance: decision.error }
     if (!decision.internal && looksDangerousAdb(line)) {
       writeAudit({ action: 'shell-exec', args: { command: line }, result: 'denied-danger-service' })

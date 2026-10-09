@@ -1,5 +1,13 @@
 # ARCHITECTURE.md — 模块地图
 
+## fx2 生命周期与恢复增量
+
+`EngineService` 的启动属主快速复查预算耗尽后转为五分钟慢速复查；定时任务绑定 Service epoch，销毁时取消，迟到回调不得启动旧世代引擎。端口外来占用、启动门和用户开机选项仍按原有失败分类处理。
+
+`NotifySuppressQueue` 在现有 `dsh-notify` 私有 preferences 内保存 v1 有界延后日志，`NotifyStore.start` 恢复并重启 tick。延后成功必须先同步提交；失败不消费来源偏移。补投后同步结算，借助完整条目哈希和系统活动通知回执缩小崩溃重复窗口，不承诺跨 Android 通知与 preferences 的原子 exactly-once。容量、TTL、会话覆盖语义不变，不迁移模型、HOME 或用户插件目录。
+
+插件授权增量见 `BRIDGE-API.md`：固定动画设置 API 与私有 SurfaceFlinger 查询分离，公共调用不能声明 `internal` 权限。
+
 > 职责：安卓壳源码的权威模块登记（assets 资产、manifest 组件）。**文件数与行数请用命令现数**（`find app/src/main -name '*.kt' | wc -l`、`wc -l <file>`）；本表不维护这些易漂移的数字。「被引用」为名称级 grep（含少量注释提及），调用关系以源码为准。源码根：`app/src/main/java/com/dsharnessmobile/shell/`。
 
 ## 1. 宿主 Activity 及拆分协作类

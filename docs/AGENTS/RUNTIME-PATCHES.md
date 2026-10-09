@@ -1,6 +1,6 @@
 # RUNTIME-PATCHES.md — assets/patched/ 运行时补丁登记
 
-> 职责：设备端完整覆盖资产与构建期补丁的权威登记。0.14.3是源码交接，未构建本轮APK；§2与历史重出章节的尺寸/hash均是明确标注的旧批次记录，不是0.14.3测量。新目标0.2.0-rc.2的资产重出/最终同源对账仍由父任务完成，不能把旧资产标成已适配。
+> 职责：设备端完整覆盖资产与构建期补丁登记。活动构建期清单由 `scripts/patches/registry.json` 生成；运行 `node scripts/check-maintenance-docs.mjs --write` 更新，省略 `--write` 检查。§2 与历史重出章节的尺寸/hash 是旧批次记录；当前产物同源性与验收状态见对应版本阶段交接和最终产物证据。
 
 ## 1. 机制（EngineManager.kt）
 
@@ -58,7 +58,53 @@
 - `scope: vendor` 打 vendor 固化插件（dshmarketplace-plugin B/D + **U2 exact-route browser-session 鉴权**；dsh-undo-savepoint E1-E8 + **S1 safe 保留自有插件** + **U1 `/api/undo` connection/token 鉴权与 no-store**），在 `build-apk-013.ps1` 阶段施加；对应行为回归在 `scripts/patches/tests/{undo-route-auth,market-route-auth}.test.mjs`。
   - **2026-09-26 追版**：两个插件都追到上游新版（marketplace 0.1.5→0.1.7、undo 0.3.8→0.4.9）。已退役：marketplace A（上游 0.1.7 原生修 next 兜底）、marketplace C（上游 0.1.7 用 `installCheck==="passed"` 过滤掉不可安装条目）；新增 undo S1（safe 生成对齐壳侧 `SafeMode.kt`：只摘第三方、保留 `@dsh-android/*` 与全部 `disable` 行——上游原实现整份覆写会重开无鉴权的 `client-hmr` SSE）。详见各 vendor 的 `PATCHES.md` 与 `registry.json` 的 `retired` 段。undo 0.4.9 另有安全收益：`settings.yaml` 纳入脱敏（0.3.8 时代在快照范围内却不脱敏 ⇒ 明文进包）。
 - `scripts/check-api-route-auth.mjs` 与 `api-route-auth-policy.json` 不属于运行时 asset：它们扫描所有 mobile-owned WebServer registration source，要求 protected guard 或窄公开白名单，并在本地/云端/CI/发布链接线。file-incoming 的 queue、claim、content、complete、clean 五个 exact route 均属于 protected 面；content 只接受进程内 ticket，不能返回源绝对路径。
-- `scope: engine` 打引擎树内上游包（全量以 §7.1 表为准，条数与清单现数 `scripts/patches/registry.json`：narb-android-N1 / attach-durable-F2 / **fs-local-link-F8** / flock-android-F3 / atomic-stale-lock-F4 / spj-migration-link-F5 / publish-exclusive-F7 / reference-drill-F6 / pi-toolcall-G2 / perf-compile-cache-flush-N2 / combo-probe-P1 / client-registry-scan-C4 / typert-registry-scan-C4 / boot-third-party-isolation-G3 / arkweb-resource-protocol-H1 / external-draft-conversation-seam-J1 / terminal-inspector-android-D1 / fs-local-digest-guard-B / ptc-argv-L1 / file-upload-restart-R1），在 `build-snapshot-013.mjs` 0f 步施加并逐个复查 marker（N1/G3 的 0.14.2 重锚见 §7.4；同批撤销 6 条已不在册：N1/G1/A3/A4/A5/C3，A4 退役理由见 §7.4）。
+- `scope: engine` 打引擎树内上游包，在 `build-snapshot-013.mjs` 0f 步施加并逐个复查 marker / exact verifier；当前活动清单见下方生成区。§7 的批次说明记录历史实现，不作为活动全集。
+
+### 6.1 当前活动构建期补丁（registry 生成）
+
+<!-- generated:active-registry:start -->
+| 活动补丁 ID | scope | 目标 |
+|---|---|---|
+| `market-B` | undefined | `dshmarketplace-plugin/lib/index.js` |
+| `market-D-server` | undefined | `dshmarketplace-plugin/lib/index.js` |
+| `market-route-auth-U2` | undefined | `dshmarketplace-plugin/lib/index.js` |
+| `market-D-client` | undefined | `dshmarketplace-plugin/lib/client.js` |
+| `undo-E1` | undefined | `dsh-undo-savepoint/lib/client.js` |
+| `undo-E2` | undefined | `dsh-undo-savepoint/lib/client.js` |
+| `undo-E3` | undefined | `dsh-undo-savepoint/lib/client.js` |
+| `undo-E4` | undefined | `dsh-undo-savepoint/lib/client.js` |
+| `undo-E5` | undefined | `dsh-undo-savepoint/lib/client.js` |
+| `undo-E6` | undefined | `dsh-undo-savepoint/lib/client.js` |
+| `undo-E7` | undefined | `dsh-undo-savepoint/lib/client.js` |
+| `undo-E8` | undefined | `dsh-undo-savepoint/lib/client.js` |
+| `undo-safe-align-S1` | undefined | `dsh-undo-savepoint/lib/core.mjs` |
+| `undo-safe-transaction-S2` | undefined | `dsh-undo-savepoint/lib/core.mjs` |
+| `undo-api-auth-U1` | undefined | `dsh-undo-savepoint/lib/index.js` |
+| `narb-android-N1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/node-addon-require-builtin/lib/index.js` |
+| `flock-android-F3` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/node-addon-system/lib/flock.js` |
+| `attach-durable-F2` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js` |
+| `spj-migration-link-F5` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js` |
+| `publish-exclusive-F7` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js` |
+| `fs-local-link-F8` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-fs-local/lib/index.js` |
+| `combo-probe-P1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js` |
+| `client-registry-scan-C4` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js` |
+| `typert-registry-scan-C4` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-typert-loader/lib/index.js` |
+| `perf-compile-cache-flush-N2` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/lib/bin.js` |
+| `boot-third-party-isolation-G3` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js` |
+| `external-draft-conversation-seam-J1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-conversation/lib/client.js` |
+| `arkweb-resource-protocol-H1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-resources/lib/client.js` |
+| `reference-drill-F6` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-reference/lib/client.js` |
+| `terminal-inspector-android-D1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/lib/runner-launch-B2zsQ1Dz.js` |
+| `pi-upstream-streaming-020` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js`<br>`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/anthropic-messages.js`<br>`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/bedrock-converse-stream.js`<br>`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/mistral-conversations.js`<br>`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/openai-responses-shared.js`<br>`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/pi-messages.js` |
+| `mimo-thinking-toggle-056` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js`<br>`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js` |
+| `pi-toolcall-G2` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js` |
+| `fs-local-digest-guard-B` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-fs-local/lib/index.js` |
+| `ptc-argv-L1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-ptc-runtime-node/lib/index.js` |
+| `ptc-android-native-A1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-ptc-runtime-node/lib/index.js`<br>`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-ptc-runtime-node/lib/process.js` |
+| `file-upload-restart-R1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-file-upload/lib/index.js` |
+
+已退役登记：`market-A`、`market-C`、`atomic-stale-lock-F4`。历史章节保留退役前语义；活动状态以本表和 registry 为准。
+<!-- generated:active-registry:end -->
 
 **与本节 assets/patched/ 的分界**：同一份引擎文件的修复若能在构建期落地（随发行快照固化），优先走 `scope: engine`；运行时 asset 只承担「必须每次启动前覆盖」或「与引擎版本无关的壳侧定制」（见 §3-2）。已退役：pi-drift-F1（上游 0.1.5 原生 strict/deferred 校验）。**assets/patched/ 是设备端运行时补丁**——壳在每次引擎启动前对快照内上游引擎包做覆盖。两者层不同、目标不同、幂等机制不同（构建期 = registry 幂等标记；运行时 = 内容指纹），勿混用；构建期补丁登记见协调仓 scripts/patches/README.md 与 registry.json。
 
@@ -82,7 +128,7 @@
 （缺席即拒打包），F4 另有常驻行为测试 `node scripts/patches/tests/atomic-stale-lock.test.mjs`
 （fixture = 0.1.5-rc.1 产物；`.deploy-tmp/` 下的临时预检脚本不入库，勿再引用）。
 
-### 7.1 同时落在构建期的引擎树补丁（scope=engine，不走 assets/patched/）
+### 7.1 构建期引擎补丁历史与实现说明（活动状态见 §6.1）
 
 - **reference-drill-F6（2026-09-11，apk #163）**：`dsh-client-ui-reference/lib/client.js` 的 `onPick` 判定由
   `fileKind === "directory" && action === "drill"` 改为 `... || document.documentElement.hasAttribute("data-dsh-mobile-form")`——
@@ -93,7 +139,7 @@
 |---|---|---|
 | `attach-durable-F2` | `dsh-attachment-local/lib/index.js` | 与运行时 asset **同源**：附件祖先 fsync 对 Android 应用私有祖先（`/data/user/0`）EACCES 即止步。构建期补丁服务发布快照，运行时 asset 服务「快照刷新后重施加」——两者内容一致才不会互相回退 |
 | `flock-android-F3` | `node-addon-system/lib/flock.js` | 0.1.5 新增的会话写锁只有 darwin/linux 预编译 → Android 上 `ERR_FLOCK_UNSUPPORTED_PLATFORM` 让整树 boot 失败；按上游 browser-worker 先例 stub 为立即成功（单进程宿主）+ 一次性告警 |
-| `atomic-stale-lock-F4` | `dsh-atomic-write/lib/index.js` | 孤儿 `<file>.lock` 回收（pid 已消失 + 二次核验一致才删，每次获取最多一次）；行为回归 `node scripts/patches/tests/atomic-stale-lock.test.mjs` |
+| ~~`atomic-stale-lock-F4`~~（已退役） | `dsh-atomic-write/lib/index.js` | 历史孤儿锁回收补丁已由上游吸收；retired 登记继续供应真产物夹具，`scripts/patches/tests/atomic-stale-lock.test.mjs` 验证上游回收行为。 |
 | `fs-local-link-F8` | `dsh-fs-local/lib/index.js` | 文件写工具 `createIfAbsent` 发布的 `link(2)` 回退（apk issue #246）：Android 应用域恒拒 hardlink ⇒ `write` 工具建不了新文件。`EACCES`/`EPERM`/`ENOTSUP` 时改用 **O_EXCL 占位 + rename** 等价实现 no-replace（**不能裸用 rename**——那会静默覆盖并发创建者的文件，丢掉 `link` 的独占语义）：输家仍得 `EEXIST` 与同一 `cannot overwrite existing` 拒绝文案；`rename` 失败回收占位，防 0 字节残留让之后每次创建都输掉占位竞争。运行时 asset `fs-local-index.js` 与之**同源**。行为回归 `node scripts/patches/tests/fs-local-link-f8.test.mjs`（fixture = 0.1.5-rc.1 产物） |
 | `spj-migration-link-F5` | `dsh-session-persistence-jsonl/lib/index.js` | 会话迁移发布（publishCurrentExclusive，v0→v3 必经）与 materialize 两处 link(2) 在 Android SELinux 拒 hardlink（EACCES/EPERM/ENOTSUP）时改用模块顶层 rename（apk #154）；运行时 asset `session-persistence-jsonl-index.js` 与之**同源**。行为回归 `node scripts/patches/tests/spj-migration-link-f5.test.mjs`（fixture = 0.1.5-rc.1 产物） |
 | `publish-exclusive-F7` | `dsh-session-persistence-jsonl/lib/index.js` | 发布独占语义找回：F5 的 rename 回退会**静默替换**已存在目标 → O_EXCL 原子占位抽成模块级小函数，F5 两站共用（publish 站输家 return false；materialize 站输家抛 EEXIST），rename 失败一律 unlink 回收占位（防 0 字节残留让之后每次发布都输掉竞争）。依赖 F5，行为回归 `node scripts/patches/tests/publish-exclusive-reclaim.test.mjs`（apk #170 / FX-207.1+207.2） |

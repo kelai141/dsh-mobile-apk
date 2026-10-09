@@ -23,11 +23,6 @@ on:
         required: false
         type: string
         default: ''
-      skip_snapshot_rebuild:
-        description: '复用已产出的快照（调试用；正式发布必须 false）'
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -38,7 +33,6 @@ jobs:
   # 独立 job：这是整链最重的一段（本地约 4 分钟/ABI），且不需要 gradle；失败时可只重跑它。
   snapshot:
     runs-on: ubuntu-latest
-    if: ${{ inputs.skip_snapshot_rebuild != true }}
     strategy:
       matrix:
         abi: [arm64, x86_64]
@@ -143,8 +137,6 @@ jobs:
   # ── J2 打包 + 门禁 + 待发布 artifact（无远程写权限）─────────────────────
   release:
     needs: [snapshot]
-    # J1 被 skip 时仍要跑（needs 的 skipped 会被当失败，故 always + 显式判空）
-    if: always() && (needs.snapshot.result == 'success' || inputs.skip_snapshot_rebuild == true)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -171,7 +163,6 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y python3 python-is-python3 || sudo ln -sf /usr/bin/python3 /usr/bin/python
       - uses: actions/download-artifact@v4
-        if: ${{ inputs.skip_snapshot_rebuild != true }}
         with:
           path: .deploy-tmp/snapshot-013
       - name: 归置快照为 ABI 命名（对齐 release/ 规范）
@@ -179,10 +170,8 @@ jobs:
         run: |
           set -e
           mkdir -p snapshot
-          if [ "${{ inputs.skip_snapshot_rebuild }}" != "true" ]; then
-            cp .deploy-tmp/snapshot-013/snapshot-arm64/snapshot.tar.xz  snapshot/snapshot-arm64.tar.xz
-            cp .deploy-tmp/snapshot-013/snapshot-x86_64/snapshot.tar.xz snapshot/snapshot-x86_64.tar.xz
-          fi
+          cp .deploy-tmp/snapshot-013/snapshot-arm64/snapshot.tar.xz  snapshot/snapshot-arm64.tar.xz
+          cp .deploy-tmp/snapshot-013/snapshot-x86_64/snapshot.tar.xz snapshot/snapshot-x86_64.tar.xz
           for abi in arm64 x86_64; do
             [ -f "snapshot/snapshot-${abi}.tar.xz" ] || { echo "::error::缺 snapshot/snapshot-${abi}.tar.xz"; exit 1; }
           done
@@ -288,11 +277,9 @@ jobs:
           OUT="release/v${ver}"
           mkdir -p "$OUT/apk" "$OUT/snapshot" "$OUT/plugins" "$OUT/provenance"
           cp .deploy-tmp/source-build/plugin-lock-resolution-release.json "$OUT/provenance/"
-          if [ "${{ inputs.skip_snapshot_rebuild }}" != "true" ]; then
-            for abi in arm64 x86_64; do
-              cp ".deploy-tmp/snapshot-013/plugin-locks-${abi}/plugin-lock-resolution-${abi}.json" "$OUT/provenance/"
-            done
-          fi
+          for abi in arm64 x86_64; do
+            cp ".deploy-tmp/snapshot-013/plugin-locks-${abi}/plugin-lock-resolution-${abi}.json" "$OUT/provenance/"
+          done
           ls -l "out/v${ver}"
           for f in out/v${ver}/*.apk; do [ -f "$f" ] && cp "$f" "$OUT/apk/"; done
           for f in out/v${ver}/snapshot-*.tar.xz; do [ -f "$f" ] && cp "$f" "$OUT/snapshot/"; done

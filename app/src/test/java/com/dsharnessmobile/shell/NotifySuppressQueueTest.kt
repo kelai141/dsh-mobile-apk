@@ -17,6 +17,69 @@ import org.junit.Test
  */
 class NotifySuppressQueueTest {
 
+  @Test fun failedPersistenceKeepsPendingUntilSuccessfulSettlement() {
+    NotifySuppressQueue.reset()
+    val pending = listOf(NotifySuppressQueue.Pending("report:s", entry("event"), 1L))
+    try {
+      assertFalse(NotifySuppressQueue.commitJournal(pending, emptyMap()) { false })
+      assertEquals(0, NotifySuppressQueue.pendingCount())
+      var disk = ""
+      assertTrue(NotifySuppressQueue.commitJournal(pending, emptyMap()) { disk = it; true })
+      assertEquals(pending, NotifySuppressQueue.decodeJournal(disk).first)
+      assertEquals(1, NotifySuppressQueue.pendingCount())
+      assertFalse(NotifySuppressQueue.commitJournal(emptyList(), mapOf("event" to 2L)) { false })
+      assertEquals("failed settlement must retain the original durable item", pending, NotifySuppressQueue.decodeJournal(disk).first)
+      assertEquals(1, NotifySuppressQueue.pendingCount())
+      assertTrue(NotifySuppressQueue.commitJournal(emptyList(), mapOf("event" to 2L)) { disk = it; true })
+      assertEquals(emptyList<NotifySuppressQueue.Pending>(), NotifySuppressQueue.decodeJournal(disk).first)
+      assertEquals(mapOf("event" to 2L), NotifySuppressQueue.decodeJournal(disk).second)
+      assertEquals(0, NotifySuppressQueue.pendingCount())
+    } finally { NotifySuppressQueue.reset() }
+  }
+
+  @Test fun journalRoundTripPreservesCompleteEntryAndOriginalDeadline() {
+    val item = NotifyEntry(
+      kind = "report", title = "title", text = "text", event = "done", dedupeKey = "custom", sessionId = "s",
+      eventId = "event", count = 2, done = 3, total = 4, current = "current", outcome = "completed",
+      outcomeLabel = "label", summary = "summary", body = "line1\nline2", durationMs = 42L,
+      durationLabel = "duration", toolCount = 5, turn = 6, presentedFiles = listOf("file"), popup = false,
+      toolName = "tool", reason = "reason", questions = listOf(NotifyQuestion("q", "header", "question", listOf("A", "B"))),
+      target = "target",
+    )
+    val pending = listOf(NotifySuppressQueue.Pending("report:s", item, 1_000L))
+    val settled = mapOf(NotifySuppressQueue.identity(item) to 1_200L)
+    val recovered = NotifySuppressQueue.decodeJournal(NotifySuppressQueue.encodeJournal(pending, settled))
+    assertEquals(pending, recovered.first)
+    assertEquals(settled, recovered.second)
+    assertTrue(NotifySuppressQueue.isExpired(recovered.first.single().enqueuedAt, 1_000L + NotifySuppressQueue.TTL_MS))
+  }
+
+  @Test fun journalSupportsOldEntriesWithNoEventIdOrTarget() {
+    val item = NotifyEntry(kind = "report", sessionId = "old-session", summary = "old report")
+    val recovered = NotifySuppressQueue.decodeJournal(NotifySuppressQueue.encodeJournal(
+      listOf(NotifySuppressQueue.Pending("report:old-session", item, 1L)), emptyMap(),
+    ))
+    assertEquals(item, recovered.first.single().entry)
+    assertEquals(NotifySuppressQueue.identity(item), NotifySuppressQueue.identity(recovered.first.single().entry))
+  }
+
+  @Test fun identityDistinguishesSeparateTurnsAndFullBody() {
+    val item = NotifyEntry(kind = "report", sessionId = "s", summary = "same", turn = 1, body = "body")
+    assertFalse(NotifySuppressQueue.identity(item) == NotifySuppressQueue.identity(item.copy(turn = 2)))
+    assertFalse(NotifySuppressQueue.identity(item) == NotifySuppressQueue.identity(item.copy(body = "other body")))
+  }
+
+  @Test(expected = IllegalArgumentException::class)
+  fun unknownJournalVersionIsRejectedWithoutDiscardingIt() {
+    NotifySuppressQueue.decodeJournal("{\"version\":2,\"pending\":[],\"settled\":{}}")
+  }
+
+  @Test(expected = IllegalArgumentException::class)
+  fun oversizedJournalIsRejected() {
+    val q = List(NotifySuppressQueue.MAX_PENDING + 1) { NotifySuppressQueue.Pending("key$it", entry("e$it"), 1L) }
+    NotifySuppressQueue.decodeJournal(NotifySuppressQueue.encodeJournal(q, emptyMap()))
+  }
+
   private fun entry(id: String, session: String = "s1") = NotifyEntry(
     kind = "report", sessionId = session, eventId = id, title = "会话 " + session,
   )

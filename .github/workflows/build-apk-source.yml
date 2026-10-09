@@ -143,63 +143,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .deploy-tmp/component-sources
-          # 同上：已存在则复用，本地复跑不再撞 clone。
-          if [ ! -d .deploy-tmp/component-sources/host-web-compat/.git ]; then
-            git clone --filter=blob:none --no-checkout --depth=1 https://github.com/kelai141/dsh-host-web-compat.git .deploy-tmp/component-sources/host-web-compat
-          fi
-          git -C .deploy-tmp/component-sources/host-web-compat fetch --depth=1 origin 2de902729e01eb3619aa50bdfa164c5231948848
-          git -C .deploy-tmp/component-sources/host-web-compat checkout --detach 2de902729e01eb3619aa50bdfa164c5231948848
-          test "$(git -C .deploy-tmp/component-sources/host-web-compat rev-parse HEAD)" = "2de902729e01eb3619aa50bdfa164c5231948848"
-          cmp dsh-host-web-compat/lib/index.js .deploy-tmp/component-sources/host-web-compat/lib/index.js
-          mkdir -p .deploy-tmp/source-build
-          node <<'NODE'
-          const crypto = require('node:crypto')
-          const fs = require('node:fs')
-          const pinnedRoot = '.deploy-tmp/component-sources/host-web-compat'
-          const mirrorRoot = 'dsh-host-web-compat'
-          const cordisKey = '@deepseek-ai/cordis'
-          const sha256 = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
-          const pinned = JSON.parse(fs.readFileSync(`${pinnedRoot}/package.json`, 'utf8'))
-          const mirror = JSON.parse(fs.readFileSync(`${mirrorRoot}/package.json`, 'utf8'))
-          const overlay = JSON.parse(fs.readFileSync('scripts/snapshot-config/engine-overlay.json', 'utf8'))
-          const overlayCordis = (overlay.packages ?? {})[cordisKey]
-          if (!overlayCordis) throw new Error(`the engine overlay does not pin ${cordisKey}`)
-          // The in-repo mirror tracks the engine overlay's Cordis pin rather than
-          // the component repository's, because the plugin is mounted into the
-          // APK engine tree. Compare the manifest modulo exactly that one
-          // dependency and bind the replacement value to the overlay pin, so a
-          // mirror that drifted upstream for any other reason still fails.
-          const expected = { ...pinned, dependencies: { ...(pinned.dependencies ?? {}), [cordisKey]: overlayCordis } }
-          if (JSON.stringify(expected) !== JSON.stringify(mirror)) {
-            const differences = []
-            const collect = (left, right, prefix) => {
-              const keys = new Set([...Object.keys(left ?? {}), ...Object.keys(right ?? {})])
-              for (const key of keys) {
-                const path = prefix ? `${prefix}.${key}` : key
-                const a = left?.[key]
-                const b = right?.[key]
-                if (a && b && typeof a === 'object' && typeof b === 'object') collect(a, b, path)
-                else if (JSON.stringify(a) !== JSON.stringify(b)) differences.push(path)
-              }
-            }
-            collect(expected, mirror, '')
-            throw new Error(`${mirrorRoot}/package.json differs from the pinned component commit outside the declared ${cordisKey} pin: ${differences.join(', ') || 'key order'}`)
-          }
-          const report = {
-            repository: 'https://github.com/kelai141/dsh-host-web-compat',
-            pinnedCommit: '2de902729e01eb3619aa50bdfa164c5231948848',
-            pinnedLibSha256: sha256(`${pinnedRoot}/lib/index.js`),
-            mirrorLibSha256: sha256(`${mirrorRoot}/lib/index.js`),
-            libByteIdentical: true,
-            manifestDelta: {
-              [cordisKey]: { pinnedCommitPin: pinned.dependencies?.[cordisKey], mirrorPin: mirror.dependencies?.[cordisKey], engineOverlayPin: overlayCordis },
-            },
-            manifestDeltaReason: 'The mirror is mounted into the APK engine tree, so its Cordis dependency follows the engine overlay pin instead of the component repository pin. Every other manifest field must equal the pinned commit.',
-            reason: 'lib/index.js is the shipped plugin payload and is verified byte-for-byte against the pinned component commit.',
-          }
-          fs.writeFileSync('.deploy-tmp/source-build/host-web-compat-pin.json', JSON.stringify(report, null, 2) + '\n')
-          console.log(`host-web-compat matches pinned ${report.pinnedCommit.slice(0, 7)} (Cordis pin ${mirror.dependencies[cordisKey]} follows the engine overlay)`)
-          NODE
+          # 三个项目组件来自本次 APK 提交；逐文件核对来源，避免独立仓旧 pin 拒绝已交付修复。
+          node scripts/source-build/record-project-components.mjs inputs \
+            .deploy-tmp/source-build/project-component-provenance.json
           # 市场插件用**固定 npm 发布产物**，不用组件源码树：我们的镜像与全部 market-* 补丁都是
           # 按发布字节定义的（vendor/dshmarketplace-plugin/PATCHES.md：镜像来自 0.1.7.tgz），
           # 而从源码树重建会得到不同字节 —— 0.1.5 时代就踩过（源码构建产物与发布产物闭合形态不同，
@@ -807,7 +753,9 @@ jobs:
             sha256sum "$d/package.json" "$d/package-lock.json" 2>/dev/null || true
           done > .deploy-tmp/source-build/plugin-lock-sha256.txt
           printf '%s\n' "$GITHUB_SHA" > .deploy-tmp/source-build/project-source-commit.txt
-          node -e 'const fs=require("fs"); const cp=require("child_process"); const dirs={"dsh-host-web-compat":".deploy-tmp/component-sources/host-web-compat"}; const out={projectCommit:process.env.GITHUB_SHA,deepseekHarnessCommit:cp.execFileSync("git",["-C",".deploy-tmp/deepseek-harness","rev-parse","HEAD"],{encoding:"utf8"}).trim(),components:{}}; for(const [name,dir] of Object.entries(dirs)) out.components[name]={commit:cp.execFileSync("git",["-C",dir,"rev-parse","HEAD"],{encoding:"utf8"}).trim()}; out.components["dshmarketplace-plugin"]={source:"pinned npm publish artifact",tarball:"https://registry.npmjs.org/dshmarketplace-plugin/-/dshmarketplace-plugin-0.1.7.tgz",tarballSha256:require("crypto").createHash("sha256").update(fs.readFileSync(".deploy-tmp/component-sources/dshmarketplace-plugin-0.1.7.tgz")).digest("hex")}; out.components["dsh-undo-savepoint"]={source:"checked-in JavaScript source",fileSha256:require("crypto").createHash("sha256").update(fs.readFileSync("vendor/dsh-undo-savepoint/lib/index.js")).digest("hex")}; fs.writeFileSync(".deploy-tmp/source-build/component-source-provenance.json",JSON.stringify(out,null,2)+"\n")'
+          node scripts/source-build/record-project-components.mjs outputs \
+            .deploy-tmp/source-build/project-component-provenance.json
+          node -e 'const fs=require("fs"); const cp=require("child_process"); const project=JSON.parse(fs.readFileSync(".deploy-tmp/source-build/project-component-provenance.json","utf8")); const out={projectCommit:project.projectCommit,deepseekHarnessCommit:cp.execFileSync("git",["-C",".deploy-tmp/deepseek-harness","rev-parse","HEAD"],{encoding:"utf8"}).trim(),components:project.components}; out.components["dshmarketplace-plugin"]={source:"pinned npm publish artifact",tarball:"https://registry.npmjs.org/dshmarketplace-plugin/-/dshmarketplace-plugin-0.1.7.tgz",tarballSha256:require("crypto").createHash("sha256").update(fs.readFileSync(".deploy-tmp/component-sources/dshmarketplace-plugin-0.1.7.tgz")).digest("hex")}; out.components["dsh-undo-savepoint"]={source:"checked-in JavaScript source",fileSha256:require("crypto").createHash("sha256").update(fs.readFileSync("vendor/dsh-undo-savepoint/lib/index.js")).digest("hex")}; fs.writeFileSync(".deploy-tmp/source-build/component-source-provenance.json",JSON.stringify(out,null,2)+"\n")'
           sha256sum app/build.gradle.kts build.gradle.kts settings.gradle.kts \
             > .deploy-tmp/source-build/android-build-inputs-sha256.txt
           gradle_artifacts="${GRADLE_USER_HOME:-$HOME/.gradle}/caches/modules-2/files-2.1"
@@ -880,7 +828,7 @@ jobs:
             .deploy-tmp/source-build/marketplace-metadata-delta.json
             .deploy-tmp/source-build/project-source-commit.txt
             .deploy-tmp/source-build/component-source-provenance.json
-            .deploy-tmp/source-build/host-web-compat-pin.json
+            .deploy-tmp/source-build/project-component-provenance.json
             .deploy-tmp/source-build/marketplace-source-provenance.json
             .deploy-tmp/source-build/marketplace-patch-adapter.json
             .deploy-tmp/source-build/source-build-policy.json

@@ -1,5 +1,13 @@
 # build-and-env.md — 构建与验证命令 + 环境流程
 
+## fx2 本地来源链
+
+`node scripts/source-build/run-local-source-chain.mjs --list` / `--dry-run` 只读 committed HEAD 的 workflow；实际执行在原仓之外的独立浅检出。未提交源码不参与构建。用 `--build-workspace /tmp/dsh-build --from <阶段>` 指定可复核的续跑目录，必须属于同一 source/commit；输出留在该目录，不自动回写 base。隔离检出禁用 LFS smudge，sources 阶段负责重建 base，不能跳过缺失的实际输入。
+
+三项目组件的来源证明改为本次 APK commit、原目录、包身份、逐文件 SHA-256 与真实输出 SHA-256；不再用独立 host 仓旧 pin 与当前 APK 副本硬比。目录、tgz 以及独立仓入口不变。完整外部消费者迁移仍待确认。
+
+开发期按 AGENTS §2.2 选择测试，文档生成块用 `node scripts/check-maintenance-docs.mjs --write` 更新，再不带参数检查；该维护提示不替代功能门禁。最终完整验收与发布资格仍由双 ABI、设备三层及覆盖升级证据决定。
+
 > grep 用法：`grep -n "门禁\|Fast\|abi" docs/AGENTS/build-and-env.md`。
 >
 > **当前 0.14.5 重构真值**：本轮目标、GitHub Issue 与用户反馈台账、构建/设备证据统一见[重构计划](../../../docs/REFACTOR-2026-10-05.md)。项目地图与更新协议见 `AGENTS.md`；本页只维护构建、验证和环境事实。
@@ -27,7 +35,11 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 > - 门禁脚本能用流式并行就用（Python 侧 `tarfile` 单遍流式，勿反复解压同一归档）。
 > 新增构建步骤若只能单线程，必须在脚本注释里写明原因（例：9p 写带宽是瓶颈，并行无收益）。
 
-**门禁（build-apk-013.ps1 内）**：聚合入口 `scripts/check-release-gates.mjs`（`--list` 现数，不维护数量；接进本地链 / 云端 `build-apk.mjs` / 两仓 CI / 发布链 `build-release.ps1`，发布链 `--run --require` 要求 SKIP=0）。内容 = vendor 统一补丁（`scripts/patches/apply-patches.mjs`：marketplace A-D/U2 + undo E1-E8/U1，registry.json 驱动，勿加 Select-First）→ 快照单 pass 注入（`inject-all.py`，补齐 + 修剪双向对齐）→ 注入产物完整性（`check-inject-completeness.mjs`）→ 挂载集（`check-patch-mounts.mjs`）→ 机密（`check-snapshot-secrets.mjs`）→ 第三方合规（`check-third-party.mjs`）→ 路由鉴权（`check-api-route-auth.mjs`）→ 工具 schema / 控制 op / 状态登记 / 桥对称 / 门禁 SKIP / 性能插桩 / Kotlin 注释 / 构建链中止 / strip no-op → 运行时资产（`check-runtime-assets.mjs`）→ 快照指纹（`check-snapshot-fingerprint.mjs`）→ elf-check → 许可资产拷贝（LICENSES → assets/licenses）→ gradle。
+**门禁（build-apk-013.ps1 内）**：聚合入口 `scripts/check-release-gates.mjs`（`--list` 现数，不维护数量；接进本地链 / 云端 `build-apk.mjs` / 两仓 CI / 发布链 `build-release.ps1`，发布链 `--run --require` 要求 SKIP=0）。内容 = vendor 统一补丁（`scripts/patches/apply-patches.mjs`：活动 vendor 项由 registry.json 驱动，完整清单见 RUNTIME-PATCHES.md §6.1；market-A/C 已退役，undo S1/S2 在活动清单内，勿加 Select-First）→ 快照单 pass 注入（`inject-all.py`，补齐 + 修剪双向对齐）→ 注入产物完整性（`check-inject-completeness.mjs`）→ 挂载集（`check-patch-mounts.mjs`）→ 机密（`check-snapshot-secrets.mjs`）→ 第三方合规（`check-third-party.mjs`）→ 路由鉴权（`check-api-route-auth.mjs`）→ 工具 schema / 控制 op / 状态登记 / 桥对称 / 门禁 SKIP / 性能插桩 / Kotlin 注释 / 构建链中止 / strip no-op → 运行时资产（`check-runtime-assets.mjs`）→ 快照指纹（`check-snapshot-fingerprint.mjs`）→ elf-check → 许可资产拷贝（LICENSES → assets/licenses）→ gradle。
+
+**维护文档对账**：Gradle 版本/依赖与活动补丁清单由 `node scripts/check-maintenance-docs.mjs --write` 生成；改声明或 registry 后更新生成区并运行不带 `--write` 的检查。该检查属于维护一致性检查，可按输入路径在 PR 中显示结果，不作为 APK 功能与数据安全门禁的替代。
+
+**Release 快照契约**：`.github/workflows/release.yml` 始终先构建本次运行的 arm64/x86_64 快照，release job 依赖 snapshot job 成功，再下载同一 run 的快照与 lock provenance。已移除无快照来源的 `skip_snapshot_rebuild` 调试输入；失败后可用 GitHub Actions 的重跑失败 job 复用同一 run 中保留的 artifact，artifact 过期则重新构建本次运行。不得用另一 commit 的快照填充发布输入。
 
 **CI 插件复用**：APK `pr-gate.yml` 从 `scripts/plugin-dirs.json` 选择 termux 与 Android 插件，按顺序只准备一次已解析 lock、`npm ci` 和构建产物；协议、插件测试、output schema 和 wire 预算共用这些产物。`@deepseek-ai/dsh-tools` 是 manage 的固定 devDependency，不再额外解析安装。常规 `build-apk.yml` 与来源链也从清单按顺序选择带 build script 的包，各准备并构建一次；来源审计和常规 build 互斥，`abi` 输入决定常规矩阵。Release job 只准备依赖，`build-apk-013.ps1` 统一构建，后续 `npm pack` 复用同一批 `lib/`，不再次安装或构建。
 

@@ -57,13 +57,15 @@ interface PrivilegeFace {
   /** 会话级通道门：无障碍通道（服务已开启）或 ADB 三道人门任一成立即放行；会话档位 danger-full-access 恒需。 */
   gateFor(session?: unknown): { ok: true; via?: 'a11y' | 'adb' } | { ok: false; guidance: string }
   /** 真实 ADB 通道：adb shell（adbd 执行，shell uid=2000）。 */
-  execAdbShell?(command: string, auth?: { session?: unknown; internal?: string }): Promise<{ ok: boolean; stdout: string; guidance?: string }>
+  execAdbShell?(command: string, auth?: { session?: unknown }): Promise<{ ok: boolean; stdout: string; guidance?: string }>
+  readAnimationScales?(auth?: { session?: unknown }): Promise<{ ok: boolean; stdout: string; guidance?: string }>
+  writeAnimationScales?(values: Record<string, string>, auth?: { session?: unknown }): Promise<{ ok: boolean; stdout: string; guidance?: string }>
   /** 真实 ADB 通道：原始 adb 行（自动注入 -s 与幂等 connect；screencap+pull 等组合用）。 */
-  execAdbLine?(line: string, auth?: { session?: unknown; internal?: string }): Promise<{ ok: boolean; stdout: string; guidance?: string }>
+  execAdbLine?(line: string, auth?: { session?: unknown }): Promise<{ ok: boolean; stdout: string; guidance?: string }>
   /** 0.13.5 W4：控制通道策略（a11y 优先 / ADB 回退 / 拒绝，fail-closed）。 */
   controlDecision?(op: string, session?: unknown, forceBackend?: 'a11y' | 'adb'): { backend: 'a11y' | 'adb' | 'deny'; reason: string; guidance?: string }
   /** 0.13.5 W4：无障碍通道执行（壳侧队列往返；未开启无障碍时直接拒绝）。 */
-  controlExec?(op: string, args: Record<string, unknown>, timeoutMs?: number, auth?: { session?: unknown; internal?: string }): Promise<{ ok: true; data: unknown } | { ok: false; error: string }>
+  controlExec?(op: string, args: Record<string, unknown>, timeoutMs?: number, auth?: { session?: unknown }): Promise<{ ok: true; data: unknown } | { ok: false; error: string }>
   /** S-5：绑定本次调用的会话（bridge 服务面据此复查档位；见其 KDoc）。 */
   bindSession?(session: unknown): void
 
@@ -469,11 +471,8 @@ function tools(ctx: Context, priv: PrivilegeFace) {
   /** F1 止血：读动画三开关当前值。$k/$(...) 由 execAdbShell 的远端段整体转义保护（0.1.3 起），
    *  本地 bash 不展开、由设备端求值。 */
   async function readAnimScales(): Promise<Record<string, string>> {
-    if (!priv.execAdbShell) return {}
-    const cmd = 'for k in ' + ANIM_KEYS.join(' ') + '; do echo R:$k=$(settings get global $k); done'
-    // S-5：`settings get/put global` 命中服务面危险命令黑名单，故走**具名内部白名单**——
-    // 白名单按命令形态逐条校验（bridge 的 isAnimationScaleCommand），不是名字对了就放行。
-    const r = await priv.execAdbShell(cmd, { internal: 'animation-scales' }).catch(() => ({ ok: false, stdout: '' }))
+    if (!priv.readAnimationScales) return {}
+    const r = await priv.readAnimationScales().catch(() => ({ ok: false, stdout: '' }))
     const out: Record<string, string> = {}
     for (const m of r.stdout.matchAll(/R:(\w+)=(\S+)/g)) out[m[1]] = m[2]
     return out
@@ -482,15 +481,15 @@ function tools(ctx: Context, priv: PrivilegeFace) {
   /** F1 止血：动画三开关置值——uiautomator dump 的 idle 等待依赖无障碍事件流安静，
    *  音乐类 App 播放条常驻动画使窗口永不 idle（"could not get idle state" 实锤根因）。 */
   async function setAnimScales(v: string): Promise<void> {
-    if (!priv.execAdbShell) return
-    await priv.execAdbShell(ANIM_KEYS.map((k) => `settings put global ${k} ${v}`).join('; '), { internal: 'animation-scales' })
+    if (!priv.writeAnimationScales) return
+    await priv.writeAnimationScales(Object.fromEntries(ANIM_KEYS.map((k) => [k, v])))
       .catch(() => undefined)
   }
 
   /** F1 止血：还原动画三开关（读数失败的键回 1 标准值）。 */
   async function restoreAnimScales(old: Record<string, string>): Promise<void> {
-    if (!priv.execAdbShell) return
-    await priv.execAdbShell(ANIM_KEYS.map((k) => `settings put global ${k} ${old[k] ?? '1'}`).join('; '), { internal: 'animation-scales' })
+    if (!priv.writeAnimationScales) return
+    await priv.writeAnimationScales(Object.fromEntries(ANIM_KEYS.map((k) => [k, old[k] ?? '1'])))
       .catch(() => undefined)
   }
 

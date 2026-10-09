@@ -1,6 +1,12 @@
 # BRIDGE-API.md — 当前桥与通道说明
 
-> 桥方法与签名以 AndroidBridge/BackGateBridge/consoleBridge 源码为准，计数由门禁现取；不沿用旧版数量。0.14.3为源码交接，尚未构建/验收；后文版本增量用于历史溯源，当前契约以本节为准。
+## fx2 插件特权服务边界
+
+公共 `execAdbShell`、`execAdbLine`、`controlExec` 不接受调用者提供的 `internal` 标记；出现该字段即拒绝。SurfaceFlinger 查询只经私有固定调用路径获得免会话授权，不允许调用者提供任意 shell 文本。动画比例改用 `readAnimationScales` / `writeAnimationScales`：仅三个固定设置键，写值仅允许非负十进制字符串或 null，仍检查会话权限级别和危险操作开关。manage 插件复用桥内会话上下文，不保存额外授权凭证。
+
+这不是同一 Node 进程内恶意插件的沙箱：会话对象和插件装配仍属于既有信任边界。壳侧屏幕范围校验继续保留；不能把私有调用标记当成对任意同进程攻击的完整隔离。
+
+> 桥方法与签名以 AndroidBridge/BackGateBridge/consoleBridge 源码为准，计数由门禁现取；不沿用旧版数量。后文版本增量用于历史溯源，不能代表当前版本的构建或验收状态。
 
 ## 1. 信任与线程边界
 

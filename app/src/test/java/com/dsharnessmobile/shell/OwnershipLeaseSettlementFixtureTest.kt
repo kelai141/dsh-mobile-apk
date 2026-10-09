@@ -277,6 +277,13 @@ class OwnershipLeaseSettlementFixtureTest {
   @Test fun waitingPhaseHasASlowRecheckAfterTheBoundedBudget() {
     assertTrue(source("EngineStartFlow").contains("ownershipRetry.nextDelayMs() ?: SLOW_OWNERSHIP_RECHECK_MS"))
     assertTrue(source("EngineService").contains("SLOW_OWNERSHIP_RECHECK_MS = 300_000L"))
+    val service = body("EngineService", "private fun ensureEngine(")
+    assertTrue(service.contains("epoch.ownershipRetry.nextDelayMs() ?: SLOW_OWNERSHIP_RECHECK_MS"))
+    assertTrue(service.contains("scheduleStartup(epoch, delay)"))
+    val retire = body("EngineService", "private fun retireEpoch(")
+    assertTrue(retire.contains("epoch.startupFuture.getAndSet(null)?.cancel(true)"))
+    val schedule = body("EngineService", "private fun scheduleStartup(")
+    assertTrue(schedule.contains("if (!isEpochCurrent(epoch)) future.cancel(true)"))
   }
 
   @Test fun waitingPhaseOffersAProductExitInsteadOfForcingAReboot() {
