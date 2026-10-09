@@ -115,7 +115,7 @@ export const name = 'dsh-android-bridge'
 // 误声明 'logger' 会导致插件 pending（waiting for service: logger）→ 整个插件树装载失败。
 // 'shell' = dsh-shell-termux 提供的 Termux 原生执行器（F0.2 Termux 宿主通道经它执行）。
 // 'sandboxPolicy' = dsh-sandbox-policy（会话级档位实时 resolve——AI 获取面）。
-export const inject = ['tools', 'webServer', 'shell', 'sandboxPolicy'] as const
+export const inject = ['tools', 'webServer', 'shell', 'sandboxPolicy', 'sessions'] as const
 
 /** 授权档位（PRD F1.8 三档应用域语义；T1 为 shell 级授权档） */
 export type PrivilegeTier = 'T0' | 'T1' | 'T2'
@@ -411,9 +411,7 @@ function looksDangerousAdb(command: string): boolean {
 //      绑定点放在每个工具入口的 `guard()` 内，语义等价于「这次调用属于哪个会话」。
 // 两者都没有 → **默认拒绝**（fail-closed：无来源的特权调用不接受）。
 //
-// 已知残余（如实登记）：恶意插件可以尝试 `bindSession(<别人的会话 id>)` 冒充来源——档位按该 id
-// 实时 resolve，故它需要先知道一个处于 danger-full-access 的会话 id；且每次特权调用都落审计
-// （含会话），事后可查。彻底消除需要上游提供「不可伪造的调用方身份」，不在本仓可控面。
+// 会话必须是 ctx.sessions 当前持有的同一 live 对象；仅有形状、ID 或自报 snapshotEvents 均不可信。
 
 /** 特权执行面的授权上下文。 */
 export interface ControlAuth {
@@ -561,22 +559,42 @@ function collectText(x: unknown): string {
  */
 export class AndroidPrivilegeService {
   /** 最近一次连接校验缓存的设备型号（F4 多设备消歧；空 = 未校验/校验失败）。 */
-  private liveModel = ''
+  #liveModel = ''
 
   /** 最近一次 Shizuku caps 补探时刻（0.14.1 缺陷 A1；TTL 见 CAPS_PROBE_TTL_MS）。 */
-  private capsProbeAt = 0
+  #capsProbeAt = 0
+
+  readonly #defaultMode?: () => string | undefined
+  readonly #sandboxPolicy?: { defaultMode?: string; resolve(r?: { session?: unknown }): { mode?: string } }
+  readonly #shellFace?: { resolve?(spec: Record<string, unknown>): Record<string, unknown>; run(spec: Record<string, unknown>): Promise<Record<string, unknown>> }
+  readonly #controlQueue?: ControlQueue
+  readonly #sessions?: { get(id: string): unknown }
 
   constructor(
-    private readonly ctx: Context,
-    private readonly defaultMode?: () => string | undefined,
-    private readonly sandboxPolicy?: { defaultMode?: string; resolve(r?: { session?: unknown }): { mode?: string } },
-    private readonly shellFace?: { resolve?(spec: Record<string, unknown>): Record<string, unknown>; run(spec: Record<string, unknown>): Promise<Record<string, unknown>> },
+    _ctx: Context,
+    defaultMode?: () => string | undefined,
+    sandboxPolicy?: { defaultMode?: string; resolve(r?: { session?: unknown }): { mode?: string } },
+    shellFace?: { resolve?(spec: Record<string, unknown>): Record<string, unknown>; run(spec: Record<string, unknown>): Promise<Record<string, unknown>> },
     /** 0.13.5 W4：无障碍控制队列（apply() 注入；缺省 = 控制通道不可用）。 */
-    private readonly controlQueue?: ControlQueue,
-  ) {}
+    controlQueue?: ControlQueue,
+  ) {
+    this.#defaultMode = defaultMode
+    this.#sandboxPolicy = sandboxPolicy
+    this.#shellFace = shellFace
+    this.#controlQueue = controlQueue
+    this.#sessions = (_ctx as Context & { get(name: string): unknown }).get?.('sessions') as
+      { get(id: string): unknown } | undefined
+  }
+
+  #trustedSession(session: unknown): unknown {
+    if (session === null || typeof session !== 'object' || !this.#sessions) return undefined
+    const id = (session as { id?: unknown }).id
+    if (typeof id !== 'string' || id.length === 0) return undefined
+    try { return this.#sessions.get(id) === session ? session : undefined } catch { return undefined }
+  }
 
   status(): AdbStatus {
-    const st = currentStatus(process.env, this.defaultMode?.() ?? this.sandboxPolicy?.defaultMode)
+    const st = currentStatus(process.env, this.#defaultMode?.() ?? this.#sandboxPolicy?.defaultMode)
     // 0.14.0 §6 双通道：Shizuku 特权通道是 ADB 面的替代通道（内置 adb 退役）——状态面必须如实
     // 说明当前由谁承载，而不是回显已无意义的 ADB 门文案。
     if (this.shizukuReady() && !engineLevelReady(st)) {
@@ -597,7 +615,7 @@ export class AndroidPrivilegeService {
    * 工具面报「Shizuku 未就绪」，模型据此放弃了一个当时完全可用的虚拟屏能力。
    */
   shizukuChannel(): boolean | undefined {
-    const cached = this.controlQueue?.stats().caps?.shizuku
+    const cached = this.#controlQueue?.stats().caps?.shizuku
     return typeof cached === 'boolean' ? cached : undefined
   }
 
@@ -623,8 +641,8 @@ export class AndroidPrivilegeService {
     const cached = this.shizukuChannel()
     if (cached !== undefined) return cached
     const now = Date.now()
-    if (now - this.capsProbeAt < CAPS_PROBE_TTL_MS) return undefined
-    this.capsProbeAt = now
+    if (now - this.#capsProbeAt < CAPS_PROBE_TTL_MS) return undefined
+    this.#capsProbeAt = now
     try {
       await this.controlExec('vdInfo', {}, 4000)
     } catch {
@@ -728,7 +746,7 @@ export class AndroidPrivilegeService {
    *
    * fail-closed：命令不可达/超时/解析不出 → 返回空数组（判定侧视为无 token 可核对 → 拒绝）。
    */
-  async shellSfVirtualDisplayTokens(): Promise<Array<{ alias: string; token: string }>> {
+  async #shellSfVirtualDisplayTokens(): Promise<Array<{ alias: string; token: string }>> {
     try {
       const r = await this.#controlExec('shExec', {
         // 只取「Virtual Display <token>」与其紧跟的 name= 行；输出 ~25 B。
@@ -775,7 +793,7 @@ export class AndroidPrivilegeService {
     if (byDisplayId === null) return null
     // displayId 空间不命中：再核对 SurfaceFlinger token（只有这一路需要额外往返与别名集合）。
     if (registry.aliases.length === 0) return byDisplayId
-    const sf = await this.shellSfVirtualDisplayTokens()
+    const sf = await this.#shellSfVirtualDisplayTokens()
     return realScreenAdbCommandDenied(this.screenScope(), command, {
       virtualDisplayIds: registry.ids,
       virtualAliases: registry.aliases,
@@ -822,7 +840,8 @@ export class AndroidPrivilegeService {
       adbReady,
       shizukuReady,
     }
-    const policy = this.sandboxPolicy?.resolve(session === undefined ? {} : { session })
+    const trustedSession = this.#trustedSession(session)
+    const policy = trustedSession === undefined ? undefined : this.#sandboxPolicy?.resolve({ session: trustedSession })
     const mode = policy?.mode
     if (mode !== 'danger-full-access') {
       return {
@@ -881,7 +900,7 @@ export class AndroidPrivilegeService {
   a11ySource(): 'queue' | 'heartbeat' | 'off' {
     const live = readShellAdbState()
     if (live?.a11yEnabled !== true) return 'off'
-    if (this.controlQueue && this.controlQueue.pollAgeMs() < A11Y_FRESH_MS) return 'queue'
+    if (this.#controlQueue && this.#controlQueue.pollAgeMs() < A11Y_FRESH_MS) return 'queue'
     const heartbeat = live.controlHeartbeat
     if (typeof heartbeat === 'number' && Number.isFinite(heartbeat) && Date.now() - heartbeat < A11Y_FRESH_MS) {
       return 'heartbeat'
@@ -915,7 +934,8 @@ export class AndroidPrivilegeService {
   /** 0.13.5 W4：当前操作应走哪个后端（纯策略，fail-closed）。 */
   controlDecision(op: ControlOp, session?: unknown, forceBackend?: 'a11y' | 'adb'): ControlDecision {
     const st = this.status()
-    const mode = this.sandboxPolicy?.resolve(session === undefined ? {} : { session })?.mode
+    const trustedSession = this.#trustedSession(session)
+    const mode = trustedSession === undefined ? undefined : this.#sandboxPolicy?.resolve({ session: trustedSession })?.mode
     return decideControl({
       op,
       a11yEnabled: this.a11yEnabled(),
@@ -929,7 +949,7 @@ export class AndroidPrivilegeService {
   /** 0.13.5 W4：队列统计（诊断用；不泄漏页面内容）。 */
   controlStats() {
     // 队列缺失时的降级视图：同样遵守「可选键缺省整键不发」（caps 不在此列）。
-    return this.controlQueue?.stats() ?? {
+    return this.#controlQueue?.stats() ?? {
       waiting: false, served: 0, failed: 0, lastTakeAt: 0, lastResultAt: 0,
       protocol: negotiateProtocol(undefined),
     }
@@ -943,15 +963,20 @@ export class AndroidPrivilegeService {
    * ALS 把会话绑在**当前异步上下文**上，工具体内调用的所有嵌套 helper 自动继承。
    */
   bindSession(session: unknown): void {
-    if (session === undefined || session === null) return
-    callerAuth.enterWith({ session })
+    const trustedSession = this.#trustedSession(session)
+    if (trustedSession === undefined) return
+    callerAuth.enterWith({ session: trustedSession })
   }
 
   /** 本次调用的授权：显式参数 > 当前异步上下文绑定 > 无（fail-closed 拒绝）。 */
   private resolveAuth(auth?: ControlAuth): ControlAuth {
-    if (auth?.session !== undefined) return auth
+    if (auth?.session !== undefined) {
+      const session = this.#trustedSession(auth.session)
+      return session === undefined ? {} : { session }
+    }
     const bound = callerAuth.getStore()
-    return bound === undefined ? {} : bound
+    const session = this.#trustedSession(bound?.session)
+    return session === undefined ? {} : { session }
   }
 
   /**
@@ -1011,7 +1036,7 @@ export class AndroidPrivilegeService {
 
   async #controlExec(op: ControlOp, args: Record<string, unknown>, timeoutMs?: number, auth?: ControlAuth,
     internal?: 'sf-token-lookup' | 'animation-scales'): Promise<ControlResult> {
-    if (!this.controlQueue) return { ok: false, error: '控制队列未装配（插件未挂载 webServer？）' }
+    if (!this.#controlQueue) return { ok: false, error: '控制队列未装配（插件未挂载 webServer？）' }
     // 审查 §5.1 / S-5：档位门在**服务面**复查（工具壳的检查是 UX 快速路径，不是唯一防线）。
     if (TIER_REQUIRED_OPS.includes(op)) {
       const command = typeof args.command === 'string' ? args.command : undefined
@@ -1053,7 +1078,7 @@ export class AndroidPrivilegeService {
         return { ok: false, code: 'screen-not-found', error: 'screen-not-found: vdInput 只接受已登记的 virtual-N 目标。', screenId: target }
       }
       if (target === undefined) {
-        const status = await this.controlQueue.enqueue('vdInfo', {}, 4000)
+        const status = await this.#controlQueue.enqueue('vdInfo', {}, 4000)
         if (!status.ok) return { ok: false, code: 'screen-not-ready', error: 'screen-not-ready: 无法读取虚拟屏注册表。' }
         const data = (status.data ?? {}) as {
           selected?: unknown
@@ -1100,7 +1125,7 @@ export class AndroidPrivilegeService {
         return { ok: false, error: decision.reason + ': ' + decision.guidance }
       }
     }
-    return this.controlQueue.enqueue(op, args, timeoutMs)
+    return this.#controlQueue.enqueue(op, args, timeoutMs)
   }
 
   /**
@@ -1109,16 +1134,16 @@ export class AndroidPrivilegeService {
    * `getprop ro.product.model` 回填的旧值）。
    */
   boundModel(): string {
-    return this.liveModel
+    return this.#liveModel
   }
 
   /** 经 termux 通道执行一行命令（adb 可执行；连接端口自动注入 `-s`）。 */
   private async runLine(line: string): Promise<{ ok: boolean; stdout: string }> {
-    if (!this.shellFace) return { ok: false, stdout: 'Termux 执行器（dsh-shell-termux）未装配' }
+    if (!this.#shellFace) return { ok: false, stdout: 'Termux 执行器（dsh-shell-termux）未装配' }
     try {
       const input = { command: line, cwd: '/', env: {} }
-      const spec = this.shellFace.resolve ? this.shellFace.resolve(input) : input
-      const r = await this.shellFace.run(spec)
+      const spec = this.#shellFace.resolve ? this.#shellFace.resolve(input) : input
+      const r = await this.#shellFace.run(spec)
       return {
         ok: true,
         stdout: condenseRepeatedText(

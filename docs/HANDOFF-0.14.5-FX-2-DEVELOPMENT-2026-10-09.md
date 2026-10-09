@@ -70,3 +70,17 @@ Node_modules 的 esbuild 为 Windows 包；Linux TypeScript 能过而客户端 b
 - 后续迁移须一次覆盖源码/测试、构建/快照、CI/registry、路径/包身份、CODEOWNERS/README/AGENTS、镜像政策、旧消费者过渡与回退，再独立审查。当前保留这些入口是第一阶段批准的条件边界，不是未完成的强制工作包。
 
 结论：**第二阶段可完成范围已集成，可以移交 Luna 验证。** 完整双 ABI、设备、覆盖升级、真实来源链及最终发布就绪判断尚未执行，不能据开发单测宣称可发布。
+
+## 6. 第三阶段进展（2026-10-10）
+
+第三阶段复核发现 Stage 2 的 F-02 队列私有化仍不充分：`private` TS 构造参数属性编译后是普通 JS 对象属性，可直接取得 `controlQueue`；此外 `ControlAuth.session` 可由插件伪造，实际固定版 sandbox-policy/session-projection 会读取其自报 `snapshotEvents()` 并接受伪造的 `danger-full-access`。独立复现已取消队列项，未与设备交互。
+
+本轮修正：
+- bridge 控制队列、策略和执行依赖使用 JS `#private` 字段；SurfaceFlinger 内部查询为私有方法。
+- 特权授权只接受 `ctx.sessions.get(session.id) === session` 的活动会话对象；无 Store、无效/伪造对象均 fail-closed。添加对象属性不可见、伪造 Session 不能授权 `gateFor` / `execAdbShell` / `controlExec` 的回归用例。
+- 通知 journal 损坏或未知 schema 时保留原始 prefs，不反复解码、不继续消费/写回；记录 probe 并 fail-closed，避免源事件被错误覆盖。
+- 更新 `release/v0.14.5-fx-2/notes.md`，明确权限收紧实现和 Kotlin 跳过项，不宣称设备验收完成。
+
+截至该记录：bridge Windows `npm test` 为 157/157；Kotlin `:app:testDebugUnitTest` BUILD SUCCESSFUL，105 XML suites / 1152 tests / 0 failures / 0 errors / 2 skipped。Kotlin XML 位于 `app/build/test-results/testDebugUnitTest/`。屏幕范围回归测试先修复了旧测试遗漏 SurfaceFlinger 第二跳回填后，完整 screen-scope 47/47 通过。实际测试输入为当前未提交修复工作树，故这些结果不适用于更早的 `595562bc76deb81f15514b6a11bed66d215e9405` commit。
+
+最终双 ABI 快照与 APK、MuMu 三层回归、覆盖升级验证尚未执行；此记录是进度证据，不是发布就绪声明。最终交接须追加修复 commit、隔离构建产物哈希、设备测试结果和全部未执行/跳过项。

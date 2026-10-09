@@ -80,6 +80,23 @@ class NotifySuppressQueueTest {
     NotifySuppressQueue.decodeJournal(NotifySuppressQueue.encodeJournal(q, emptyMap()))
   }
 
+  @Test fun corruptOrUnknownJournalIsReadOnlyAndNeverOverwritten() {
+    val malformed = "{not-json"
+    val invalid = NotifySuppressQueue.readJournal(malformed) as NotifySuppressQueue.JournalRead.Invalid
+    assertEquals(malformed, invalid.original)
+    assertTrue(invalid.reason.isNotBlank())
+    val unknown = NotifySuppressQueue.readJournal("{\"version\":2,\"pending\":[],\"settled\":{}}")
+    assertTrue(unknown is NotifySuppressQueue.JournalRead.Invalid)
+    assertTrue(NotifySuppressQueue.readJournal(null) is NotifySuppressQueue.JournalRead.Valid)
+
+    var writes = 0
+    val committed = NotifySuppressQueue.commitJournalIfAllowed(
+      listOf(NotifySuppressQueue.Pending("report:s", entry("e"), 1L)), emptyMap(), allowed = false,
+    ) { writes++; true }
+    assertFalse(committed)
+    assertEquals("invalid persisted bytes must remain untouched", 0, writes)
+  }
+
   private fun entry(id: String, session: String = "s1") = NotifyEntry(
     kind = "report", sessionId = session, eventId = id, title = "会话 " + session,
   )

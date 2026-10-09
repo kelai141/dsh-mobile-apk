@@ -27,6 +27,11 @@ import java.security.MessageDigest
  */
 object NotifySuppressQueue {
 
+  internal sealed class JournalRead {
+    data class Valid(val pending: List<Pending>, val settled: Map<String, Long>) : JournalRead()
+    data class Invalid(val original: String, val reason: String) : JournalRead()
+  }
+
   const val TAG = "dsh-notify"
 
   /** 延后条目存活上限：超时即丢弃（防退后台弹一堆陈旧汇报）。 */
@@ -89,6 +94,7 @@ object NotifySuppressQueue {
   private const val MAX_SETTLED = 32
   private var settled: Map<String, Long> = emptyMap()
   private var loaded = false
+  private var journalWritable = true
   private var appContext: Context? = null
 
   /** Stable identity includes all display fields, including reports without an eventId. */
@@ -142,21 +148,49 @@ object NotifySuppressQueue {
     return entries to done.keys().asSequence().associateWith { done.getLong(it) }
   }
 
+  internal fun readJournal(raw: String?): JournalRead {
+    if (raw == null) return JournalRead.Valid(emptyList(), emptyMap())
+    return try {
+      val state = decodeJournal(raw)
+      JournalRead.Valid(state.first, state.second)
+    } catch (t: Exception) {
+      JournalRead.Invalid(raw, t.message ?: t.javaClass.simpleName)
+    }
+  }
+
   private fun load(app: Context) {
     if (loaded) return
     val raw = NotifyCenter.prefs(app).getString(JOURNAL_KEY, null)
-    val state = if (raw == null) emptyList<Pending>() to emptyMap<String, Long>() else decodeJournal(raw)
-    queue = state.first
-    settled = state.second
+    when (val state = readJournal(raw)) {
+      is JournalRead.Valid -> {
+        queue = state.pending
+        settled = state.settled
+      }
+      is JournalRead.Invalid -> {
+        queue = emptyList()
+        settled = emptyMap()
+        journalWritable = false
+        NotifyProbe.log(app, TAG, "suppress deferred journal invalid; preserving stored bytes: " + state.reason)
+      }
+    }
     appContext = app
     loaded = true
   }
 
   /** Commit first: a failed disk write must never turn into a consumed source event. */
   private fun persist(app: Context, pending: List<Pending>, done: Map<String, Long>): Boolean =
-    commitJournal(pending, done) { raw -> NotifyCenter.prefs(app).edit().putString(JOURNAL_KEY, raw).commit() }
+    commitJournalIfAllowed(pending, done, journalWritable) { raw ->
+      NotifyCenter.prefs(app).edit().putString(JOURNAL_KEY, raw).commit()
+    }
 
   internal fun commitJournal(pending: List<Pending>, done: Map<String, Long>, write: (String) -> Boolean): Boolean {
+    return commitJournalIfAllowed(pending, done, journalWritable, write)
+  }
+
+  internal fun commitJournalIfAllowed(
+    pending: List<Pending>, done: Map<String, Long>, allowed: Boolean, write: (String) -> Boolean,
+  ): Boolean {
+    if (!allowed) return false
     if (!write(encodeJournal(pending, done))) return false
     queue = pending
     settled = done
@@ -176,7 +210,10 @@ object NotifySuppressQueue {
   fun restore(context: Context) {
     val app = context.applicationContext
     try {
-      synchronized(lock) { load(app) }
+      synchronized(lock) {
+        load(app)
+        if (!journalWritable) return
+      }
       if (pendingCount() > 0) {
         if (!NotifyStore.isForeground(app) || !NotifyCenter.suppressForeground(app)) flush(app) else scheduleTick(app)
       }
@@ -204,6 +241,7 @@ object NotifySuppressQueue {
     val now = System.currentTimeMillis()
     synchronized(lock) {
       load(app)
+      if (!journalWritable) return false
       val done = settled.filterValues { !isExpired(it, now) }
       if (done.containsKey(identity(entry))) return true
       // Source replay must not extend the TTL or move an older report behind its successor.
@@ -223,6 +261,7 @@ object NotifySuppressQueue {
   fun reset() {
     synchronized(lock) {
       val app = appContext
+      if (!journalWritable) return
       if (app != null && !persist(app, emptyList(), emptyMap())) return
       queue = emptyList()
       settled = emptyMap()
@@ -241,6 +280,7 @@ object NotifySuppressQueue {
     try {
       synchronized(lock) {
         load(app)
+        if (!journalWritable) return 0
         val (deliver, expired) = takeForFlush(queue, now)
         val expiredIdentities = queue.filter { isExpired(it.enqueuedAt, now) }.associate { identity(it.entry) to now }
         val doneAtExpiry = (settled.filterValues { !isExpired(it, now) } + expiredIdentities)
