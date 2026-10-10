@@ -49,7 +49,7 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 
 **冷启动预算读数**：`scripts/check-boot-budget.mjs --self-test` 是门禁自身的廉价回归；设备门禁 `--require-real` 必须消费安装包启动后采集的日志。C1 比较的是壳侧首次成功 HTTP 探测观测时刻与 TCP LISTEN 探测观测时刻，两者来自不同轮询（HTTP 启动轮询约 1s；TCP 探测每 500ms），差值包含探针采样量化和调度延迟；C1 超限不能单独归因于同步 compose，需与 C2 和 P1 phase 对读，4000ms 门槛仍按原值判定。event-loop 可能先输出 `loopP99Ms=-1 loopSamples=0`，再在 debounce 收口后输出最终采样；C4 必须从最后一条完整 `[perf] TOTAL` 成对读取两字段，不能把早期哨兵当最终结果。末条哨兵判 FAIL，末条有效样本则按样本数和预算判定。若补丁源改变，先从当前源码重建对应 ABI 快照，再构建/安装并重新采集日志；旧设备日志只能描述产生它的旧安装包，不能证明新快照行为。详见坑 251。
 
-**C4 换尺（2026-10-06）**：C4 的 `loopP99Ms` 原先取自 `perf_hooks` 的 event-loop-delay monitor，而它对「与 `enable()` 同 tick 内开始的同步块」**结构性失明**（设备上一段 2.0s 启动阻塞被读成 11ms；本机 95/500/1500/2000ms 各档一律读成约 11ms）。现改为 P1 **自建、arming 时锚定墙钟基线**的采样器。⇒ **换尺后读数不可比**：旧值 37.0/61.6/77.1ms 与新值不是同一个量，本阈值已按新尺在 MuMu x86_64（16416）n=8 重标为 **3400ms**（实测 1468.4–2886.5ms）。该阈值是**回归哨兵**，不是性能目标：窗口的支配项是上游引擎激活全部 Loader entry（`loader-settle-wait` 1624–3249ms），本仓的 `constructor-flush` 仅 57–182ms、`compose` 单次最大 5–29ms。阈值取自模拟器，**真机 arm64 未测**，发布前须补同口径采样。
+**C4 换尺（2026-10-06）**：C4 的 `loopP99Ms` 原先取自 `perf_hooks` 的 event-loop-delay monitor，而它对「与 `enable()` 同 tick 内开始的同步块」**结构性失明**（设备上一段 2.0s 启动阻塞被读成 11ms；本机 95/500/1500/2000ms 各档一律读成约 11ms）。现改为 P1 **自建、arming 时锚定墙钟基线**的采样器，换尺前后读数不可比。权威预算及样本见 `scripts/check-boot-budget.mjs`：先前单机 n=8 的 3400ms 已被两台 MuMu x86_64、分别串行采样 n=24 的 **7200ms** 取代；完整样本最大值 6260.6ms，单机小样本遗漏了尾部。该阈值是回归哨兵；C1/C4 超限须与 P1 phase、C2 及设备调度共同排查，不能通过只重复成功结果抹去失败。阈值来自模拟器，**真机 arm64 未测**，发布前须补同口径采样。
 
 **本地发布链（`build-release.ps1`）的 gradle 调用必须与开发链同口径（0.14.2-fx-2 修）**：发布链原用**系统 gradle**
 + `--offline --rerun-tasks`，而开发链（`build-apk-013.ps1`）用项目 wrapper 且不带 `--offline` —— 系统 gradle 的依赖缓存里
