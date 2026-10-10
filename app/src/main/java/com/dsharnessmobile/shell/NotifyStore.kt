@@ -179,6 +179,7 @@ object NotifyStore {
     NotifyCenter.installShellListener()
     // FIX-3 存量升级归一化：schema 代次只跑一次（缺键的存量用户即在此刻被修好；显式值原样保留）。
     NotifyCenter.ensureSuppressForegroundMigrated(app)
+    NotifySuppressQueue.restore(app)
     val d = dir(app)
     if (!d.exists()) d.mkdirs()
     watching(app, d)
@@ -368,7 +369,7 @@ object NotifyStore {
     val len = f.length()
     if (drainStep(offset, len) == DrainStep.Rotated) {
       // 轮转（引擎把 >=512KB 的文件改名 .1）或文件被重建：先补读 .1 的残段，再从头开始
-      drainRotated(app, offset)
+      if (!drainRotated(app, offset)) return
       NotifyProbe.log(app, TAG, "notify file rotated/recreated; offset reset (was " + offset + ", len=" + len + ") trigger=" + trigger)
       offset = 0L
     }
@@ -394,9 +395,19 @@ object NotifyStore {
     }
     // 至少一次语义（P1）：**先投递再推进偏移**。反向（旧实现：先推进、后投递）在两者之间崩溃即
     // **静默丢**——那条汇报永远不出现（本缺陷的形态）；正向崩溃最多重复投一条，由 P3 去重兜住。
-    for (line in lines) dispatch(app, line)
+    for (line in lines) {
+      if (dispatch(app, line) == NotifyCenter.Result.ERROR) {
+        NotifyProbe.log(app, TAG, "notify drain retained offset after delivery/persistence failure: " + offset)
+        return
+      }
+    }
     val next = advanceOffset(offset, consumed, len)
-    if (next != offset) p.edit().putLong(KEY_OFFSET, next).apply()
+    if (next != offset && !p.edit().putLong(KEY_OFFSET, next).commit()) {
+      // SharedPreferences updates memory even when commit fails; retain the retry cursor there too.
+      p.edit().putLong(KEY_OFFSET, offset).commit()
+      NotifyProbe.log(app, TAG, "notify offset commit failed; source will replay")
+      return
+    }
     NotifyProbe.log(
       app, TAG,
       "notify drain trigger=" + trigger + " lines=" + lines.size + " offset " + offset + "->" + next + " len=" + len,
@@ -456,23 +467,27 @@ object NotifyStore {
 
 
   /** 轮转残段补读（尽力而为）：从旧偏移读到 .1 末尾。 */
-  private fun drainRotated(app: Context, oldOffset: Long) {
+  private fun drainRotated(app: Context, oldOffset: Long): Boolean {
     val rotated = File(dir(app), ROTATED_NAME)
-    if (!rotated.exists()) return
+    if (!rotated.exists()) return true
     try {
       RandomAccessFile(rotated, "r").use { raf ->
         val len = raf.length()
-        if (len <= oldOffset) return
+        if (len <= oldOffset) return true
         raf.seek(oldOffset)
         val buf = ByteArray((len - oldOffset).toInt().coerceAtMost(READ_CAP_BYTES))
         val read = raf.read(buf)
-        if (read <= 0) return
-        for (line in drainBytes(buf, read).lines) dispatch(app, line)
+        if (read <= 0) return true
+        for (line in drainBytes(buf, read).lines) {
+          if (dispatch(app, line) == NotifyCenter.Result.ERROR) return false
+        }
         NotifyProbe.log(app, TAG, "rotated remnant drained from " + oldOffset + " (len=" + len + ")")
       }
     } catch (t: Throwable) {
       NotifyProbe.log(app, TAG, "rotated remnant drain failed: " + t.message)
+      return false
     }
+    return true
   }
 
   /** 单行分流：六种 kind + 未知 kind 显式忽略并记日志（不崩、不误投）。 */

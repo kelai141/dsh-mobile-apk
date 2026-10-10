@@ -1,5 +1,13 @@
 # build-and-env.md — 构建与验证命令 + 环境流程
 
+## fx2 本地来源链
+
+`node scripts/source-build/run-local-source-chain.mjs --list` / `--dry-run` 只读 committed HEAD 的 workflow；实际执行在原仓之外的独立浅检出。未提交源码不参与构建。用 `--build-workspace /tmp/dsh-build --from <阶段>` 指定可复核的续跑目录，必须属于同一 source/commit；输出留在该目录，不自动回写 base。隔离检出禁用 LFS smudge，sources 阶段负责重建 base，不能跳过缺失的实际输入。
+
+三项目组件的来源证明改为本次 APK commit、原目录、包身份、逐文件 SHA-256 与真实输出 SHA-256；不再用独立 host 仓旧 pin 与当前 APK 副本硬比。目录、tgz 以及独立仓入口不变。完整外部消费者迁移仍待确认。
+
+开发期按 AGENTS §2.2 选择测试，文档生成块用 `node scripts/check-maintenance-docs.mjs --write` 更新，再不带参数检查；该维护提示不替代功能门禁。最终完整验收与发布资格仍由双 ABI、设备三层及覆盖升级证据决定。
+
 > grep 用法：`grep -n "门禁\|Fast\|abi" docs/AGENTS/build-and-env.md`。
 >
 > **当前 0.14.5 重构真值**：本轮目标、GitHub Issue 与用户反馈台账、构建/设备证据统一见[重构计划](../../../docs/REFACTOR-2026-10-05.md)。项目地图与更新协议见 `AGENTS.md`；本页只维护构建、验证和环境事实。
@@ -27,7 +35,11 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 > - 门禁脚本能用流式并行就用（Python 侧 `tarfile` 单遍流式，勿反复解压同一归档）。
 > 新增构建步骤若只能单线程，必须在脚本注释里写明原因（例：9p 写带宽是瓶颈，并行无收益）。
 
-**门禁（build-apk-013.ps1 内）**：聚合入口 `scripts/check-release-gates.mjs`（`--list` 现数，不维护数量；接进本地链 / 云端 `build-apk.mjs` / 两仓 CI / 发布链 `build-release.ps1`，发布链 `--run --require` 要求 SKIP=0）。内容 = vendor 统一补丁（`scripts/patches/apply-patches.mjs`：marketplace A-D/U2 + undo E1-E8/U1，registry.json 驱动，勿加 Select-First）→ 快照单 pass 注入（`inject-all.py`，补齐 + 修剪双向对齐）→ 注入产物完整性（`check-inject-completeness.mjs`）→ 挂载集（`check-patch-mounts.mjs`）→ 机密（`check-snapshot-secrets.mjs`）→ 第三方合规（`check-third-party.mjs`）→ 路由鉴权（`check-api-route-auth.mjs`）→ 工具 schema / 控制 op / 状态登记 / 桥对称 / 门禁 SKIP / 性能插桩 / Kotlin 注释 / 构建链中止 / strip no-op → 运行时资产（`check-runtime-assets.mjs`）→ 快照指纹（`check-snapshot-fingerprint.mjs`）→ elf-check → 许可资产拷贝（LICENSES → assets/licenses）→ gradle。
+**门禁（build-apk-013.ps1 内）**：聚合入口 `scripts/check-release-gates.mjs`（`--list` 现数，不维护数量；接进本地链 / 云端 `build-apk.mjs` / 两仓 CI / 发布链 `build-release.ps1`，发布链 `--run --require` 要求 SKIP=0）。内容 = vendor 统一补丁（`scripts/patches/apply-patches.mjs`：活动 vendor 项由 registry.json 驱动，完整清单见 RUNTIME-PATCHES.md §6.1；market-A/C 已退役，undo S1/S2 在活动清单内，勿加 Select-First）→ 快照单 pass 注入（`inject-all.py`，补齐 + 修剪双向对齐）→ 注入产物完整性（`check-inject-completeness.mjs`）→ 挂载集（`check-patch-mounts.mjs`）→ 机密（`check-snapshot-secrets.mjs`）→ 第三方合规（`check-third-party.mjs`）→ 路由鉴权（`check-api-route-auth.mjs`）→ 工具 schema / 控制 op / 状态登记 / 桥对称 / 门禁 SKIP / 性能插桩 / Kotlin 注释 / 构建链中止 / strip no-op → 运行时资产（`check-runtime-assets.mjs`）→ 快照指纹（`check-snapshot-fingerprint.mjs`）→ elf-check → 许可资产拷贝（LICENSES → assets/licenses）→ gradle。
+
+**维护文档对账**：Gradle 版本/依赖与活动补丁清单由 `node scripts/check-maintenance-docs.mjs --write` 生成；改声明或 registry 后更新生成区并运行不带 `--write` 的检查。该检查属于维护一致性检查，可按输入路径在 PR 中显示结果，不作为 APK 功能与数据安全门禁的替代。
+
+**Release 快照契约**：`.github/workflows/release.yml` 始终先构建本次运行的 arm64/x86_64 快照，release job 依赖 snapshot job 成功，再下载同一 run 的快照与 lock provenance。已移除无快照来源的 `skip_snapshot_rebuild` 调试输入；失败后可用 GitHub Actions 的重跑失败 job 复用同一 run 中保留的 artifact，artifact 过期则重新构建本次运行。不得用另一 commit 的快照填充发布输入。
 
 **CI 插件复用**：APK `pr-gate.yml` 从 `scripts/plugin-dirs.json` 选择 termux 与 Android 插件，按顺序只准备一次已解析 lock、`npm ci` 和构建产物；协议、插件测试、output schema 和 wire 预算共用这些产物。`@deepseek-ai/dsh-tools` 是 manage 的固定 devDependency，不再额外解析安装。常规 `build-apk.yml` 与来源链也从清单按顺序选择带 build script 的包，各准备并构建一次；来源审计和常规 build 互斥，`abi` 输入决定常规矩阵。Release job 只准备依赖，`build-apk-013.ps1` 统一构建，后续 `npm pack` 复用同一批 `lib/`，不再次安装或构建。
 
@@ -37,7 +49,7 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 
 **冷启动预算读数**：`scripts/check-boot-budget.mjs --self-test` 是门禁自身的廉价回归；设备门禁 `--require-real` 必须消费安装包启动后采集的日志。C1 比较的是壳侧首次成功 HTTP 探测观测时刻与 TCP LISTEN 探测观测时刻，两者来自不同轮询（HTTP 启动轮询约 1s；TCP 探测每 500ms），差值包含探针采样量化和调度延迟；C1 超限不能单独归因于同步 compose，需与 C2 和 P1 phase 对读，4000ms 门槛仍按原值判定。event-loop 可能先输出 `loopP99Ms=-1 loopSamples=0`，再在 debounce 收口后输出最终采样；C4 必须从最后一条完整 `[perf] TOTAL` 成对读取两字段，不能把早期哨兵当最终结果。末条哨兵判 FAIL，末条有效样本则按样本数和预算判定。若补丁源改变，先从当前源码重建对应 ABI 快照，再构建/安装并重新采集日志；旧设备日志只能描述产生它的旧安装包，不能证明新快照行为。详见坑 251。
 
-**C4 换尺（2026-10-06）**：C4 的 `loopP99Ms` 原先取自 `perf_hooks` 的 event-loop-delay monitor，而它对「与 `enable()` 同 tick 内开始的同步块」**结构性失明**（设备上一段 2.0s 启动阻塞被读成 11ms；本机 95/500/1500/2000ms 各档一律读成约 11ms）。现改为 P1 **自建、arming 时锚定墙钟基线**的采样器。⇒ **换尺后读数不可比**：旧值 37.0/61.6/77.1ms 与新值不是同一个量，本阈值已按新尺在 MuMu x86_64（16416）n=8 重标为 **3400ms**（实测 1468.4–2886.5ms）。该阈值是**回归哨兵**，不是性能目标：窗口的支配项是上游引擎激活全部 Loader entry（`loader-settle-wait` 1624–3249ms），本仓的 `constructor-flush` 仅 57–182ms、`compose` 单次最大 5–29ms。阈值取自模拟器，**真机 arm64 未测**，发布前须补同口径采样。
+**C4 换尺（2026-10-06）**：C4 的 `loopP99Ms` 原先取自 `perf_hooks` 的 event-loop-delay monitor，而它对「与 `enable()` 同 tick 内开始的同步块」**结构性失明**（设备上一段 2.0s 启动阻塞被读成 11ms；本机 95/500/1500/2000ms 各档一律读成约 11ms）。现改为 P1 **自建、arming 时锚定墙钟基线**的采样器，换尺前后读数不可比。权威预算及样本见 `scripts/check-boot-budget.mjs`：先前单机 n=8 的 3400ms 已被两台 MuMu x86_64、分别串行采样 n=24 的 **7200ms** 取代；完整样本最大值 6260.6ms，单机小样本遗漏了尾部。该阈值是回归哨兵；C1/C4 超限须与 P1 phase、C2 及设备调度共同排查，不能通过只重复成功结果抹去失败。阈值来自模拟器，**真机 arm64 未测**，发布前须补同口径采样。
 
 **本地发布链（`build-release.ps1`）的 gradle 调用必须与开发链同口径（0.14.2-fx-2 修）**：发布链原用**系统 gradle**
 + `--offline --rerun-tasks`，而开发链（`build-apk-013.ps1`）用项目 wrapper 且不带 `--offline` —— 系统 gradle 的依赖缓存里

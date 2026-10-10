@@ -87,10 +87,19 @@ adb -s <serial> install -r -t out\v<版本>\dsh-mobile-apk-v<版本>-arm64.apk
 
 ---
 
+### 2.2 开发期选择与最终收口
+
+- 开始版本任务时建立 `release/v<版本>/notes.md` 草稿，随实现和证据更新；计划/待验收明确标注。最终对照上一 Release、目标 Commit/Tag、已合并 PR、Issue、CI/设备证据和资产核对，仅保留该版本实际交付内容。发布说明面向用户，先写问题改善，再写安装/升级、限制与验证范围。
+- 根据变更输入选择自检；结果记录源码/门禁版本、输入哈希、环境和命令。相关输入、依赖、门禁或环境改变即失效；相关输入不变可复用已有有效证据。成组修正后集中重验；权限、数据事务、签名、桥协议及门禁自身的即时反证不可省。
+- 纯 runtime JS 改动开发期优先热推；壳侧、签名、Manifest、APK assets 改动需要 APK。选择开发 ABI 前实际查询 ADB 设备和 `ro.product.cpu.abilist`；仅在设备非空且均明确 x86/x86_64 时可缩为 x86_64。设备为空或未知不能推断。最终候选从最终源码构建双 ABI，重新安装并完成 §2.1 三层验收及覆盖升级；热推证据不能代替最终 APK。
+- 来源审计入口 `scripts/source-build/run-local-source-chain.mjs` 仅构建已提交 HEAD，在原工作树外的独立检出执行；未提交内容不进入来源链。产物留在隔离目录，续跑显式传 `--build-workspace <同 HEAD 目录>`。不要把来源链的 LFS pointer 当成本地底座归档。
+- 权限、用户数据、运行时生效、ABI、签名、快照/APK 产物门禁保持阻断。仅维护说明的生成块漂移由 PR Gate 的提示 job 呈现（`check-maintenance-docs.mjs`，更新用 `--write`），不加入 APK 发布阻断链；branch protection 的远端设置不由本地文档改变。
+
 ## 3. 去哪查（按需 grep，别通读）
 
 | 要查什么 | 去哪 |
 |---|---|
+| fx2 阶段计划 / 开发候选与验收交接 | `docs/HANDOFF-0.14.5-FX-2-PLAN-2026-10-09.md` / `docs/HANDOFF-0.14.5-FX-2-DEVELOPMENT-2026-10-09.md` |
 | **坑位（历史实锤，权威）** | `docs/AGENTS/gotchas.md`（递增编号，允许空缺；grep 关键词） |
 | 模块职责 / 函数位置 | `docs/AGENTS/modules.md` |
 | 架构 / 依赖方向 | `docs/AGENTS/ARCHITECTURE.md` |

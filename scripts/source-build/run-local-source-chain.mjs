@@ -14,15 +14,17 @@
 //   node scripts/source-build/run-local-source-chain.mjs --from snapshot # 从快照阶段续跑
 //   node scripts/source-build/run-local-source-chain.mjs --only apk      # 只跑打包阶段
 //   node scripts/source-build/run-local-source-chain.mjs --dry-run       # 只打印将要执行什么
+//   node scripts/source-build/run-local-source-chain.mjs --build-workspace /tmp/dsh-build --from snapshot
+// 实际执行只使用 HEAD 的隔离检出；不包含原工作树未提交文件。隔离目录保留用于续跑与取件。
 //
 // 环境：ANDROID_HOME 默认取 `.deploy-tmp/android-sdk`（缺失即判红并给出铺法）。
 import { execFileSync, spawnSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { committedWorkflow, prepareSourceWorkspace, sourceCommit } from './local-source-workspace.mjs'
 
 const ROOT = resolve(import.meta.dirname, '..', '..')
-const WORKFLOW = join(ROOT, '.github', 'workflows', 'build-apk-source.yml')
 const argv = process.argv.slice(2)
 const flag = (name) => argv.includes(name)
 const value = (name, fallback = null) => {
@@ -30,7 +32,12 @@ const value = (name, fallback = null) => {
   return i >= 0 ? argv[i + 1] : fallback
 }
 
-const ANDROID_HOME = process.env.ANDROID_HOME || join(ROOT, '.deploy-tmp', 'android-sdk')
+const ANDROID_HOME = resolve(process.env.ANDROID_HOME || join(ROOT, '.deploy-tmp', 'android-sdk'))
+const repoCommit = sourceCommit(ROOT)
+if (flag('--build-workspace') && (!value('--build-workspace') || value('--build-workspace').startsWith('--'))) {
+  console.error('--build-workspace 需要指定独立的目录路径')
+  process.exit(2)
+}
 
 /** 步骤名 → 阶段。未列出的步骤按「跟随前一个阶段」处理。 */
 const STAGES = [
@@ -56,7 +63,7 @@ const SKIP_STEP = /^(Set up job|Checkout project source|Prepare build tools|Run 
 function parseSteps() {
   // Windows 检出是 CRLF：行尾的 \r 会让 `(.*)$` 直接失配（JS 的 `.` 不匹配 \r），
   // 表现为「一个步骤都解析不到」。统一成 LF 再解析。
-  const text = readFileSync(WORKFLOW, 'utf8').replaceAll('\r\n', '\n')
+  const text = committedWorkflow(ROOT, repoCommit).replaceAll('\r\n', '\n')
   const lines = text.split('\n')
   const steps = []
   let current = null
@@ -162,7 +169,7 @@ const preflight = () => {
   // 缺它时报错发生在编排器内部，表现为**静默退出码 1**（无任何输出），极难定位——故列进前置检查，
   // 让它在开跑前就带着说明判红。
   for (const cmd of ['node', 'python', 'python3', 'java', 'xz', 'gpg', 'unzip', 'git', 'curl', 'tar']) {
-    const probe = spawnSync('bash', ['-lc', `command -v ${cmd}`], { encoding: 'utf8' })
+    const probe = spawnSync('bash', ['--noprofile', '--norc', '-c', `command -v ${cmd}`], { encoding: 'utf8' })
     if (probe.status !== 0) missing.push(`缺少命令：${cmd}`)
   }
   if (missing.length) {
@@ -185,7 +192,15 @@ if (flag('--dry-run')) {
 }
 preflight()
 
-const repoCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim()
+let buildRoot
+try {
+  buildRoot = prepareSourceWorkspace(ROOT, repoCommit, value('--build-workspace'))
+} catch (error) {
+  console.error(`无法准备隔离来源构建目录：${error.message}`)
+  process.exit(2)
+}
+console.log(`来源输入：HEAD ${repoCommit}（不包含原工作树的未提交内容）`)
+console.log(`隔离构建目录：${buildRoot}（保留用于续跑与取件）`)
 // Node 优先用用户级 v24（`~/.local/node24`）：CI 跑的就是 v24，而 Ubuntu apt 装的是 v22，
 // 且系统 corepack 的 `enable` 要往 /usr/bin 写符号链接（非 root 必失败）。
 const userNodeBin = join(homedir(), '.local', 'node24', 'bin')
@@ -204,8 +219,8 @@ const baseEnv = {
   ...process.env,
   ANDROID_HOME,
   ANDROID_SDK_ROOT: ANDROID_HOME,
-  DSH_APK_DIR: ROOT,
-  GITHUB_WORKSPACE: ROOT,
+  DSH_APK_DIR: buildRoot,
+  GITHUB_WORKSPACE: buildRoot,
   GITHUB_SHA: repoCommit,
   PATH: `${nodePathPrefix}${join(homedir(), '.local', 'bin')}:${join(ANDROID_HOME, 'build-tools', '36.0.0')}:${join(ANDROID_HOME, 'platform-tools')}:${process.env.PATH}`,
   // pnpm 11 只认自己的前缀：实测 `npm_config_registry` 被忽略、`pnpm_config_registry` 生效
@@ -227,6 +242,8 @@ const baseEnv = {
 // 取件，stage 一挪就必然 ENOENT）。本地工作区本来就在 ext4，那条 WSL 分支省不到 I/O，
 // 只有害处。shell.mjs 里对 WSL_DISTRO_NAME 的另一处用法只在 Windows 宿主侧生效，不受影响。
 delete baseEnv.WSL_DISTRO_NAME
+// Do not let caller Git path overrides escape the isolated checkout.
+for (const name of ['GIT_DIR', 'GIT_COMMON_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES']) delete baseEnv[name]
 
 let failed = 0
 for (const [i, item] of selected.entries()) {
@@ -237,16 +254,16 @@ for (const [i, item] of selected.entries()) {
   const shellArgs = item.shell === 'bash'
     ? ['--noprofile', '--norc', '-eo', 'pipefail', '-c', item.run]
     : ['-e', '-c', item.run]
-  const res = spawnSync('bash', shellArgs, { cwd: ROOT, env: baseEnv, stdio: 'inherit' })
+  const res = spawnSync('bash', shellArgs, { cwd: buildRoot, env: baseEnv, stdio: 'inherit' })
   const seconds = ((Date.now() - started) / 1000).toFixed(1)
   if (res.status !== 0) {
     failed += 1
     console.error(`\n[FAIL] 步骤失败：${item.name}（${seconds}s，退出码 ${res.status}）`)
-    console.error(`续跑：node scripts/source-build/run-local-source-chain.mjs --from ${item.stage}`)
+    console.error(`续跑时使用 --build-workspace ${JSON.stringify(buildRoot)} --from ${item.stage}`)
     break
   }
   console.log(`--- 完成（${seconds}s）`)
 }
 
 if (failed) process.exit(1)
-console.log('\n本地来源链跑完（产出的 APK 在 out/v*/ 下）。')
+console.log(`\n本地来源链跑完（产出的 APK 在 ${join(buildRoot, 'out', 'v*')} 下）。`)

@@ -3,6 +3,9 @@ package com.dsharnessmobile.shell
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import org.json.JSONArray
+import org.json.JSONObject
+import java.security.MessageDigest
 
 /**
  * 前台抑制待投队列（0.14.1 块J FIX-1：「抑制 = 丢弃」改为「抑制 = 延后」）。
@@ -23,6 +26,11 @@ import android.os.Looper
  * false，见 NotifyCenter.DEFAULT_SUPPRESS_FOREGROUND）。默认路径上本队列恒为空。
  */
 object NotifySuppressQueue {
+
+  internal sealed class JournalRead {
+    data class Valid(val pending: List<Pending>, val settled: Map<String, Long>) : JournalRead()
+    data class Invalid(val original: String, val reason: String) : JournalRead()
+  }
 
   const val TAG = "dsh-notify"
 
@@ -82,6 +90,138 @@ object NotifySuppressQueue {
   @Volatile
   private var queue: List<Pending> = emptyList()
 
+  private const val JOURNAL_KEY = "notify.deferred.v1"
+  private const val MAX_SETTLED = 32
+  private var settled: Map<String, Long> = emptyMap()
+  private var loaded = false
+  private var journalWritable = true
+  private var appContext: Context? = null
+
+  /** Stable identity includes all display fields, including reports without an eventId. */
+  internal fun identity(entry: NotifyEntry): String = MessageDigest.getInstance("SHA-256")
+    .digest(canonicalJson(encodeEntry(entry)).toByteArray(Charsets.UTF_8))
+    .joinToString("") { "%02x".format(it.toInt() and 255) }
+
+  private fun canonicalJson(value: Any?): String = when (value) {
+    is JSONObject -> value.keys().asSequence().sorted().joinToString(",", "{", "}") {
+      JSONObject.quote(it) + ":" + canonicalJson(value.get(it))
+    }
+    is JSONArray -> (0 until value.length()).joinToString(",", "[", "]") { canonicalJson(value.get(it)) }
+    is String -> JSONObject.quote(value)
+    null, JSONObject.NULL -> "null"
+    else -> value.toString()
+  }
+
+  internal fun encodeEntry(e: NotifyEntry): JSONObject = JSONObject().apply {
+    put("kind", e.kind); put("title", e.title); put("text", e.text); put("event", e.event)
+    put("dedupeKey", e.dedupeKey); put("sessionId", e.sessionId); put("eventId", e.eventId)
+    put("count", e.count); put("done", e.done); put("total", e.total); put("current", e.current)
+    put("outcome", e.outcome); put("outcomeLabel", e.outcomeLabel); put("summary", e.summary)
+    put("body", e.body); put("durationMs", e.durationMs); put("durationLabel", e.durationLabel)
+    put("toolCount", e.toolCount); put("turn", e.turn); put("popup", e.popup)
+    put("presentedFiles", JSONArray(e.presentedFiles)); put("toolName", e.toolName); put("reason", e.reason)
+    if (e.target != null) put("target", e.target)
+    put("questions", JSONArray(e.questions.map { q -> JSONObject().apply {
+      put("id", q.id); put("header", q.header); put("question", q.question); put("options", JSONArray(q.options))
+    } }))
+  }
+
+  internal fun encodeJournal(pending: List<Pending>, done: Map<String, Long>): String = JSONObject().apply {
+    put("version", 1)
+    put("pending", JSONArray(pending.map { p -> JSONObject().apply {
+      put("key", p.key); put("at", p.enqueuedAt); put("entry", encodeEntry(p.entry))
+    } }))
+    put("settled", JSONObject(done))
+  }.toString()
+
+  internal fun decodeJournal(raw: String): Pair<List<Pending>, Map<String, Long>> {
+    val root = JSONObject(raw)
+    require(root.getInt("version") == 1) { "unsupported deferred journal" }
+    val pending = root.getJSONArray("pending")
+    require(pending.length() <= MAX_PENDING) { "oversize deferred journal" }
+    val entries = (0 until pending.length()).map { i ->
+      val p = pending.getJSONObject(i)
+      Pending(p.getString("key"), requireNotNull(NotifyStore.parseEntry(p.getJSONObject("entry").toString())), p.getLong("at"))
+    }
+    val done = root.getJSONObject("settled")
+    require(done.length() <= MAX_SETTLED) { "oversize deferred settlements" }
+    return entries to done.keys().asSequence().associateWith { done.getLong(it) }
+  }
+
+  internal fun readJournal(raw: String?): JournalRead {
+    if (raw == null) return JournalRead.Valid(emptyList(), emptyMap())
+    return try {
+      val state = decodeJournal(raw)
+      JournalRead.Valid(state.first, state.second)
+    } catch (t: Exception) {
+      JournalRead.Invalid(raw, t.message ?: t.javaClass.simpleName)
+    }
+  }
+
+  private fun load(app: Context) {
+    if (loaded) return
+    val raw = NotifyCenter.prefs(app).getString(JOURNAL_KEY, null)
+    when (val state = readJournal(raw)) {
+      is JournalRead.Valid -> {
+        queue = state.pending
+        settled = state.settled
+      }
+      is JournalRead.Invalid -> {
+        queue = emptyList()
+        settled = emptyMap()
+        journalWritable = false
+        NotifyProbe.log(app, TAG, "suppress deferred journal invalid; preserving stored bytes: " + state.reason)
+      }
+    }
+    appContext = app
+    loaded = true
+  }
+
+  /** Commit first: a failed disk write must never turn into a consumed source event. */
+  private fun persist(app: Context, pending: List<Pending>, done: Map<String, Long>): Boolean =
+    commitJournalIfAllowed(pending, done, journalWritable) { raw ->
+      NotifyCenter.prefs(app).edit().putString(JOURNAL_KEY, raw).commit()
+    }
+
+  internal fun commitJournal(pending: List<Pending>, done: Map<String, Long>, write: (String) -> Boolean): Boolean {
+    return commitJournalIfAllowed(pending, done, journalWritable, write)
+  }
+
+  internal fun commitJournalIfAllowed(
+    pending: List<Pending>, done: Map<String, Long>, allowed: Boolean, write: (String) -> Boolean,
+  ): Boolean {
+    if (!allowed) return false
+    if (!write(encodeJournal(pending, done))) return false
+    queue = pending
+    settled = done
+    return true
+  }
+
+  internal fun isSettled(context: Context, entry: NotifyEntry): Boolean = synchronized(lock) {
+    load(context.applicationContext)
+    settled[identity(entry)]?.let { !isExpired(it, System.currentTimeMillis()) } ?: false
+  }
+
+  internal fun isPending(context: Context, entry: NotifyEntry): Boolean = synchronized(lock) {
+    load(context.applicationContext)
+    queue.any { identity(it.entry) == identity(entry) }
+  }
+
+  fun restore(context: Context) {
+    val app = context.applicationContext
+    try {
+      synchronized(lock) {
+        load(app)
+        if (!journalWritable) return
+      }
+      if (pendingCount() > 0) {
+        if (!NotifyStore.isForeground(app) || !NotifyCenter.suppressForeground(app)) flush(app) else scheduleTick(app)
+      }
+    } catch (t: Throwable) {
+      NotifyProbe.log(app, TAG, "suppress deferred restore failed: " + t.message)
+    }
+  }
+
   @Volatile
   private var tickScheduled = false
 
@@ -96,18 +236,36 @@ object NotifySuppressQueue {
     private set
 
   /** 入队（命中前台抑制时由 NotifyCenter 调用）。 */
-  fun enqueue(context: Context, entry: NotifyEntry, key: String) {
+  fun enqueue(context: Context, entry: NotifyEntry, key: String): Boolean {
     val app = context.applicationContext
     val now = System.currentTimeMillis()
-    synchronized(lock) { queue = merge(queue, entry, key, now) }
+    synchronized(lock) {
+      load(app)
+      if (!journalWritable) return false
+      val done = settled.filterValues { !isExpired(it, now) }
+      if (done.containsKey(identity(entry))) return true
+      // Source replay must not extend the TTL or move an older report behind its successor.
+      if (queue.any { identity(it.entry) == identity(entry) }) return true
+      val next = merge(queue, entry, key, now)
+      val removed = queue.filterNot { next.contains(it) }.associate { identity(it.entry) to now }
+      val completed = (done + removed).entries.toList().takeLast(MAX_SETTLED).associate { it.key to it.value }
+      if (!persist(app, next, completed)) return false
+    }
     NotifyProbe.log(app, TAG, "suppress deferred (foreground): kind=" + entry.kind + " key=" + key +
       " pending=" + pendingCount() + " ttlMs=" + TTL_MS)
     scheduleTick(app)
+    return true
   }
 
   /** 丢弃全部延后条目（用户关掉抑制时先补投，测试清理时直接清空）。 */
   fun reset() {
-    synchronized(lock) { queue = emptyList() }
+    synchronized(lock) {
+      val app = appContext
+      if (!journalWritable) return
+      if (app != null && !persist(app, emptyList(), emptyMap())) return
+      queue = emptyList()
+      settled = emptyMap()
+    }
     tickScheduled = false
   }
 
@@ -119,38 +277,48 @@ object NotifySuppressQueue {
   fun flush(context: Context): Int {
     val app = context.applicationContext
     val now = System.currentTimeMillis()
-    val (deliver, expired) = synchronized(lock) {
-      val taken = takeForFlush(queue, now)
-      val rest = queue.filterNot { taken.first.contains(it) }
-      queue = rest.filterNot { isExpired(it.enqueuedAt, now) }
-      taken
-    }
-    if (expired > 0) {
-      lastDropReason = "ttl-expired"
-      NotifyProbe.log(app, TAG, "suppress deferred dropped (ttl expired): count=" + expired + " ttlMs=" + TTL_MS)
-    }
-    var posted = 0
-    for (item in deliver) {
-      when (NotifyCenter.deliverDeferred(app, item.entry)) {
-        NotifyCenter.Result.POSTED -> posted++
-        // P3 去重（0.14.1）：同 id 同内容的条目在窗口内已被投过一次——用户已经看到它了，补投没有意义。
-        // 按「已结算」处理，**不得**放回队列：放回会每 FLUSH_TICK_MS 重试到 TTL 到期（探针里多一串
-        // ttl-expired），而重试永远不可能改变结论（内容相同就永远判重）。
-        NotifyCenter.Result.DUPLICATE_SUPPRESSED -> Unit
-        else -> {
-          // 补投未成功：放回队列（仍受 TTL 约束），下一轮再试。
-          synchronized(lock) {
-            queue = merge(queue, item.entry, item.key, item.enqueuedAt)
+    try {
+      synchronized(lock) {
+        load(app)
+        if (!journalWritable) return 0
+        val (deliver, expired) = takeForFlush(queue, now)
+        val expiredIdentities = queue.filter { isExpired(it.enqueuedAt, now) }.associate { identity(it.entry) to now }
+        val doneAtExpiry = (settled.filterValues { !isExpired(it, now) } + expiredIdentities)
+          .entries.toList().takeLast(MAX_SETTLED).associate { it.key to it.value }
+        if (!persist(app, queue.filterNot { isExpired(it.enqueuedAt, now) }, doneAtExpiry)) {
+          scheduleTick(app)
+          return 0
+        }
+        if (expired > 0) {
+          lastDropReason = "ttl-expired"
+          NotifyProbe.log(app, TAG, "suppress deferred dropped (ttl expired): count=" + expired + " ttlMs=" + TTL_MS)
+        }
+        var posted = 0
+        for (item in deliver) {
+          val result = NotifyCenter.deliverDeferred(app, item.entry)
+          if (result == NotifyCenter.Result.POSTED) posted++
+          // A duplicate is already visible; failures keep the original durable item and deadline.
+          if (result == NotifyCenter.Result.POSTED || result == NotifyCenter.Result.DUPLICATE_SUPPRESSED) {
+            val done = (settled + (identity(item.entry) to now)).entries.toList().takeLast(MAX_SETTLED)
+              .associate { it.key to it.value }
+            if (!persist(app, queue.filterNot { it == item }, done)) {
+              NotifyProbe.log(app, TAG, "suppress deferred settlement failed; durable pending retained")
+              break
+            }
           }
         }
+        if (posted > 0 || expired > 0) {
+          NotifyProbe.log(app, TAG, "suppress deferred flushed posted=" + posted + " expired=" + expired +
+            " pending=" + pendingCount())
+        }
+        if (pendingCount() > 0) scheduleTick(app) else tickScheduled = false
+        return posted
       }
+    } catch (t: Throwable) {
+      NotifyProbe.log(app, TAG, "suppress deferred flush failed: " + t.message)
+      if (pendingCount() > 0) scheduleTick(app)
+      return 0
     }
-    if (posted > 0 || expired > 0) {
-      NotifyProbe.log(app, TAG, "suppress deferred flushed posted=" + posted + " expired=" + expired +
-        " pending=" + pendingCount())
-    }
-    if (pendingCount() > 0) scheduleTick(app) else tickScheduled = false
-    return posted
   }
 
   /** 队列非空期间的自续 tick：前台则继续等，后台则补投。队列一空即停（有界）。 */
@@ -162,7 +330,7 @@ object NotifySuppressQueue {
       handler.postDelayed({
         tickScheduled = false
         if (pendingCount() == 0) return@postDelayed
-        if (NotifyStore.isForeground(app)) scheduleTick(app) else flush(app)
+        if (NotifyStore.isForeground(app) && NotifyCenter.suppressForeground(app)) scheduleTick(app) else flush(app)
       }, FLUSH_TICK_MS)
     } catch (t: Throwable) {
       tickScheduled = false

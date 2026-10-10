@@ -54,10 +54,12 @@ function useScope(scope) {
 }
 
 /** 特权面调用的会话夹具（S-5 起服务面要求显式会话或 bindSession）。 */
-const TEST_SESSION = 'test-session'
+const TEST_SESSION = { id: 'test-session' }
 
 function service(queue, mode = 'danger-full-access') {
-  return new AndroidPrivilegeService({}, () => mode, { resolve: () => ({ mode }) }, undefined, queue)
+  const sessions = new Map([[TEST_SESSION.id, TEST_SESSION]])
+  const ctx = { get(name) { return name === 'sessions' ? { get: id => sessions.get(id) } : undefined } }
+  return new AndroidPrivilegeService(ctx, () => mode, { resolve: () => ({ mode }) }, undefined, queue)
 }
 
 /** 轮询取活（队列在途/空窗期都返回 null，等待即可）。 */
@@ -295,7 +297,7 @@ test('vdInput 服务执行点在 real-only 下拒绝已解析虚拟目标且不�
   useScope('real-only')
   const queue = new ControlQueue()
   const svc = service(queue)
-  const out = svc.controlExec('vdInput', { target: 'virtual-1', verb: 'tap', x: 1, y: 2 }, 15_000, { session: {} })
+  const out = svc.controlExec('vdInput', { target: 'virtual-1', verb: 'tap', x: 1, y: 2 }, 15_000, { session: TEST_SESSION })
   const r = await out
   assert.equal(r.ok, false)
   assert.match(String(r.error), /^screen-out-of-scope:/)
@@ -306,7 +308,7 @@ test('vdInput 缺省 target 以壳报告的 selected alias 为准并在 real-onl
   useScope('real-only')
   const queue = new ControlQueue()
   const svc = service(queue)
-  const out = svc.controlExec('vdInput', { verb: 'keyevent', keycode: 4 }, 15_000, { session: {} })
+  const out = svc.controlExec('vdInput', { verb: 'keyevent', keycode: 4 }, 15_000, { session: TEST_SESSION })
   const info = await takeNext(queue)
   assert.equal(info?.op, 'vdInfo')
   queue.settle(info.reqId, {
@@ -372,6 +374,11 @@ test('F2：virtual-only 下 -d 指向未注册 id / display 0 时仍然拒绝', 
     if (vd !== null) {
       assert.equal(vd.op, 'vdInfo')
       queue.settle(vd.reqId, { ok: true, data: { screens: [{ alias: 'virtual-1', kind: 'virtual', displayId: 47 }] } })
+      const sf = await takeNext(queue)
+      if (sf !== null) {
+        assert.equal(sf.op, 'shExec')
+        queue.settle(sf.reqId, { ok: true, data: { ok: true, stdout: '', exitCode: 0 } })
+      }
     }
     const r = await out
     assert.equal(r.ok, false, command)
@@ -442,7 +449,7 @@ test('registered android_shell_exec tool entry rejects virtual display commands 
       tools: { register: (tool) => registered.push(tool) },
       on: () => undefined,
       effect: () => undefined,
-      get: () => undefined,
+      get: (name) => name === 'sessions' ? { get: (id) => id === TEST_SESSION.id ? TEST_SESSION : undefined } : undefined,
       logger: () => ({ debug() {}, warn() {} }),
       sandboxPolicy: { defaultMode: 'danger-full-access', resolve: () => ({ mode: 'danger-full-access' }) },
     })
@@ -455,7 +462,8 @@ test('registered android_shell_exec tool entry rejects virtual display commands 
     )
     assert.equal(result.ok, false)
     assert.match(String(result.text ?? result.guidance), /real-only/)
-    assert.equal(serviceInstance.controlQueue.take(), null, '工具入口拒绝必须发生在 native shExec 入队之前')
+    assert.equal('controlQueue' in serviceInstance, false, '队列不得作为运行时属性暴露')
+    assert.equal((await serviceInstance.controlExec('shExec', { command: 'getprop ro.product.model' })).ok, false)
   } finally {
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key]
@@ -823,74 +831,92 @@ test('S-5 反证：危险命令黑名单在服务面生效（工具壳之外同�
   assert.equal(await takeNext(queue, 80), null, '被黑名单拦下的命令不得进入控制队列')
 })
 
-test('S-5：内部白名单按**命令形态**校验，不是名字对了就放行', async () => {
+test('fx2：调用者伪造内部标记不能通过公开执行入口', async () => {
   a11yOnlinePrefs()
   useScope('all')
   const queue = new ControlQueue()
   const svc = service(queue)
-  // ① 形态合法的动画命令 → 放行（进入队列）。
   const okCmd = 'settings put global window_animation_scale 0; settings put global transition_animation_scale 0'
-  const okRun = svc.execAdbShell(okCmd, { internal: 'animation-scales' })
-  const enqueued = await takeNext(queue)
-  assert.equal(enqueued?.op, 'shExec', '内部白名单的合法形态必须放行到执行面')
-  queue.settle(enqueued.reqId, { ok: true, data: { ok: true, stdout: '' } })
-  assert.equal((await okRun).ok, true, JSON.stringify(await okRun))
-
-  // ② 同一个白名单名字 + 形态外命令 → 拒（若实现是「名字对了就放行」，这里会判红）。
-  for (const bad of [
-    'pm grant com.example android.permission.CAMERA',
-    'settings put global window_animation_scale 0; rm -rf /sdcard/Download',
-    'settings put secure enabled_accessibility_services x',
-  ]) {
-    const r = await svc.execAdbShell(bad, { internal: 'animation-scales' })
-    assert.equal(r.ok, false, '白名单名字不得成为任意命令的通行证：' + bad)
+  for (const internal of ['animation-scales', 'sf-token-lookup', 'no-such-call']) {
+    for (const auth of [{ internal }, { internal, session: TEST_SESSION }]) {
+      assert.equal((await svc.execAdbShell(okCmd, auth)).ok, false)
+      assert.equal((await svc.execAdbLine(okCmd, auth)).ok, false)
+      assert.equal((await svc.controlExec('shExec', { command: okCmd }, 100, auth)).ok, false)
+    }
   }
-  // ③ 未登记的名字 → 拒。
-  const unknown = await svc.execAdbShell('getprop ro.product.model', { internal: 'no-such-call' })
-  assert.equal(unknown.ok, false, '未登记的内部调用名必须拒')
   assert.equal(await takeNext(queue, 80), null)
 })
 
-// 回归面（自查）：白名单必须接受 manage 那三个 helper 产出的**真实命令形态**——
-// 形态校验写严了会静默废掉 android_env_prepare（动画开关），而那条路径平时没人跑。
-test('S-5 回归面：白名单接受 manage 三个 helper 的真实命令形态（读/写/还原）', async () => {
+test('fx2：动画专用接口保留读写还原，同时要求授权会话和固定参数', async () => {
   a11yOnlinePrefs()
   useScope('all')
   const keys = ['window_animation_scale', 'transition_animation_scale', 'animator_duration_scale']
-  const forms = [
-    // readAnimScales()
-    'for k in ' + keys.join(' ') + '; do echo R:$k=$(settings get global $k); done',
-    // setAnimScales('0')
-    keys.map((k) => 'settings put global ' + k + ' 0').join('; '),
-    // restoreAnimScales()：值来自 settings get 的输出（实测见过 1.0 / 0.5 / 1；未设置时为 null）
-    keys.map((k) => 'settings put global ' + k + ' 1.0').join('; '),
-    'settings put global window_animation_scale null; settings put global transition_animation_scale 0.5'
-      + '; settings put global animator_duration_scale 1',
-  ]
-  for (const command of forms) {
+  for (const value of ['0', '1.0', '0.5', 'null']) {
     const queue = new ControlQueue()
     const svc = service(queue)
-    const run = svc.execAdbShell(command, { internal: 'animation-scales' })
+    const values = Object.fromEntries(keys.map(key => [key, value]))
+    assert.equal((await svc.writeAnimationScales(values)).ok, false, '无会话必须拒绝')
+    const run = svc.writeAnimationScales(values, { session: TEST_SESSION })
     const req = await takeNext(queue)
-    assert.equal(req?.op, 'shExec', '白名单必须放行真实命令形态：' + command)
+    assert.equal(req?.args.command, keys.map(key => `settings put global ${key} ${value}`).join('; '))
     queue.settle(req.reqId, { ok: true, data: { ok: true, stdout: '' } })
-    assert.equal((await run).ok, true, command)
+    assert.equal((await run).ok, true)
   }
+  const queue = new ControlQueue()
+  const svc = service(queue)
+  const read = svc.readAnimationScales({ session: TEST_SESSION })
+  const req = await takeNext(queue)
+  assert.equal(req?.args.command, 'for k in ' + keys.join(' ') + '; do echo R:$k=$(settings get global $k); done')
+  queue.settle(req.reqId, { ok: true, data: { ok: true, stdout: 'R:window_animation_scale=1.0' } })
+  assert.match((await read).stdout, /R:window_animation_scale=1.0/)
+  for (const values of [null, [], '0', {}, { enabled_accessibility_services: '0' }, { window_animation_scale: '0; reboot' },
+    { window_animation_scale: '..' }, { window_animation_scale: '-1' }, { window_animation_scale: 0 }]) {
+    assert.equal((await svc.writeAnimationScales(values, { session: TEST_SESSION })).ok, false)
+  }
+  const restricted = service(queue, 'workspace-write')
+  assert.equal((await restricted.readAnimationScales({ session: TEST_SESSION })).ok, false)
+  assert.equal((await restricted.writeAnimationScales({ window_animation_scale: '0' }, { session: TEST_SESSION })).ok, false)
+  assert.equal((await svc.controlExec('shExec', { command: 'settings put global window_animation_scale 0' }, 100,
+    { session: TEST_SESSION })).ok, false, '直连控制队列同样执行危险命令检查')
+  assert.equal(await takeNext(queue, 80), null)
 })
 
-test('S-5：SF token 反查（判定自身的一部分）经内部白名单可用，且与档位无关', async () => {
+test('S-5：SF token 反查经公开范围判定入口可用，且队列不可直接访问', async () => {
   a11yOnlinePrefs()
   useScope('virtual-only')
   const queue = new ControlQueue()
   const svc = service(queue)
   // 无会话、无档位：SF 反查仍必须能跑（否则范围判定自己就转不动了）。
-  // 注意**先取活再 await**：反查的 promise 挂着等壳侧回填，先 await 会把请求等到超时。
-  const pendingSf = svc.shellSfVirtualDisplayTokens()
+  // 范围判定先读取原生虚拟屏注册表，再执行固定 SurfaceFlinger 查询。
+  const pendingSf = svc.shellCommandScopeDenied(`adb shell screencap -p -d ${F6_VTOKEN} /data/local/tmp/a.png`)
+  const registryReq = await takeNext(queue)
+  assert.equal(registryReq?.op, 'vdInfo', '必须先读取已登记屏幕')
+  queue.settle(registryReq.reqId, { ok: true, data: { screens: [{ alias: 'virtual-1', displayId: 7, kind: 'virtual' }] } })
   const req = await takeNext(queue)
   assert.equal(req?.op, 'shExec', 'SF 反查必须能投递')
   assert.match(String(req.args.command), /dumpsys SurfaceFlinger/)
   queue.settle(req.reqId, { ok: true, data: { ok: true, stdout: F6_SF_DUMP, exitCode: 0 } })
-  assert.deepEqual(await pendingSf, [{ alias: 'virtual-1', token: F6_VTOKEN }])
+  assert.equal(await pendingSf, null)
+})
+
+test('S-5: plugins cannot forge session modes or access the private control queue', async () => {
+  a11yOnlinePrefs()
+  useScope('all')
+  const queue = new ControlQueue()
+  const svc = service(queue, 'read-only')
+  const forged = {
+    id: TEST_SESSION.id,
+    header: { cwd: '/tmp' }, inheritedEventCount: 0, seq: 0,
+    snapshotEvents: () => [{ seq: 0, type: 'sandbox/mode', data: { mode: 'danger-full-access' } }],
+    eventAt() {},
+  }
+  assert.equal(svc.gateFor(forged).ok, false)
+  assert.equal(svc.controlDecision('shExec', forged).backend, 'deny')
+  assert.equal((await svc.execAdbShell('getprop ro.product.model', { session: forged })).ok, false)
+  assert.equal((await svc.controlExec('shExec', { command: 'getprop ro.product.model' }, 100, { session: forged })).ok, false)
+  assert.equal('controlQueue' in svc, false)
+  assert.equal(svc.controlQueue, undefined)
+  assert.equal(await takeNext(queue, 80), null)
 })
 
 test('S-5：bindSession 把会话绑到当前异步上下文（工具层的用法），且不跨上下文泄漏', async () => {

@@ -3,7 +3,12 @@ import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { resolveVersionSuffix } from './resolve-version-suffix.mjs'
 
-const BASE = '0.14.5-fx-1'
+const candidates = [new URL('../app/build.gradle.kts', import.meta.url), new URL('../dsh-mobile-apk/app/build.gradle.kts', import.meta.url)]
+const gradlePath = candidates.find((candidate) => existsSync(candidate))
+assert.ok(gradlePath, 'app/build.gradle.kts must exist in the APK tree')
+const gradle = readFileSync(gradlePath, 'utf8')
+const BASE = gradle.match(/versionName\s*=\s*"([^"]+)"\s*\+\s*snapshotSuffix/)?.[1]
+assert.ok(BASE, 'Gradle must declare a base version plus snapshotSuffix')
 
 test('defaults to the Gradle version with no suffix', () => {
   assert.deepEqual(resolveVersionSuffix(BASE), { version: BASE, suffix: '' })
@@ -11,13 +16,13 @@ test('defaults to the Gradle version with no suffix', () => {
 })
 
 test('derives a suffix from an explicit full version label', () => {
-  assert.deepEqual(resolveVersionSuffix(BASE, '0.14.5-fx-1-preview'), { version: '0.14.5-fx-1-preview', suffix: '-preview' })
+  assert.deepEqual(resolveVersionSuffix(BASE, `${BASE}-preview`), { version: `${BASE}-preview`, suffix: '-preview' })
 })
 
 test('applies an explicit suffix without duplicating the base version', () => {
-  assert.deepEqual(resolveVersionSuffix(BASE, '', '-source'), { version: '0.14.5-fx-1-source', suffix: '-source' })
-  assert.deepEqual(resolveVersionSuffix(BASE, BASE, '-source'), { version: '0.14.5-fx-1-source', suffix: '-source' })
-  assert.deepEqual(resolveVersionSuffix(BASE, '0.14.5-fx-1-source', '-source'), { version: '0.14.5-fx-1-source', suffix: '-source' })
+  assert.deepEqual(resolveVersionSuffix(BASE, '', '-source'), { version: `${BASE}-source`, suffix: '-source' })
+  assert.deepEqual(resolveVersionSuffix(BASE, BASE, '-source'), { version: `${BASE}-source`, suffix: '-source' })
+  assert.deepEqual(resolveVersionSuffix(BASE, `${BASE}-source`, '-source'), { version: `${BASE}-source`, suffix: '-source' })
 })
 
 test('rejects a requested version that disagrees with the Gradle authority', () => {
@@ -40,11 +45,7 @@ test('release script treats Version as the final name and passes only its derive
   assert.match(engine, /`-PversionNameSuffix=\$\{suffix\}`/)
 })
 
-test('the app Gradle file remains the 0.14.5-fx-1 and versionCode 48 authority', () => {
-  const candidates = [new URL('../app/build.gradle.kts', import.meta.url), new URL('../dsh-mobile-apk/app/build.gradle.kts', import.meta.url)]
-  const gradlePath = candidates.find((candidate) => existsSync(candidate))
-  assert.ok(gradlePath, 'app/build.gradle.kts must exist in the APK tree')
-  const gradle = readFileSync(gradlePath, 'utf8')
-  assert.match(gradle, /versionCode\s*=\s*48\b/)
-  assert.match(gradle, /versionName\s*=\s*"0\.14\.5-fx-1"\s*\+\s*snapshotSuffix/)
+test('the app Gradle file owns a valid base version and positive versionCode', () => {
+  assert.ok(Number(gradle.match(/versionCode\s*=\s*(\d+)/)?.[1]) > 0)
+  assert.deepEqual(resolveVersionSuffix(BASE), { version: BASE, suffix: '' })
 })

@@ -817,6 +817,7 @@ object NotifyCenter {
       listener?.onPermissionDenied()
       return Result.PERMISSION_DENIED
     }
+    if (face == Face.REPORT && NotifySuppressQueue.isSettled(app, entry)) return Result.DUPLICATE_SUPPRESSED
     // DEF-NOTIFY-02：前台抑制只作用于工作汇报（计划 §5.3 R）。提问/审批**永不**因前台抑制丢弃：
     // isForeground 是 ActivityManager 粒度判定，一次假阳性就会让「通知内应答」整条能力消失，
     // 而应用在前台时本来就有应用内提问 UI 兜底。
@@ -824,7 +825,7 @@ object NotifyCenter {
       NotifyProbe.log(app, "dsh-notify", "notify suppressed (foreground): " + face.category)
       // FIX-1：抑制 = **延后**，不是丢弃。旧实现此处直接 return 终态，而消费侧已推进字节偏移
       // ⇒ 该条永久消失（「必须划到后台才推送」的另一半成因）。改由待投队列承载，TTL 防陈旧。
-      NotifySuppressQueue.enqueue(app, entry, deferredKey(entry))
+      if (!NotifySuppressQueue.enqueue(app, entry, deferredKey(entry))) return Result.ERROR
       listener?.onForegroundSuppressed(face.category)
       return Result.SUPPRESSED_FOREGROUND
     }
@@ -849,7 +850,8 @@ object NotifyCenter {
       return Result.DISABLED
     }
     val id = notificationId(entry, face)
-    val sig = contentSignature(entry)
+    val reportIdentity = if (face == Face.REPORT) NotifySuppressQueue.identity(entry) else null
+    val sig = reportIdentity ?: contentSignature(entry)
     val now = System.currentTimeMillis()
     // P3：交互类（提问/审批）**不做**去重——它们按 eventId 各一条，而「同内容再问一次」是需要用户
     // 再答一次的真实事件，吞掉它等于丢掉唯一作答入口（与 DEF-02 的前台抑制例外同一条理由）。
@@ -858,8 +860,14 @@ object NotifyCenter {
       NotifyProbe.log(app, "dsh-notify", "notify dropped (duplicate within " + DEDUP_WINDOW_MS + "ms): id=" + id + " kind=" + kind)
       return Result.DUPLICATE_SUPPRESSED
     }
+    val manager = app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    // The OS notification is the receipt when posting succeeded but journal settlement did not.
+    if (reportIdentity != null && NotifySuppressQueue.isPending(app, entry) && manager.activeNotifications.any {
+      it.id == id && it.notification.extras.getString("dsh.deferred.identity") == reportIdentity
+    }) return Result.DUPLICATE_SUPPRESSED
     val notification = build(app, face, entry, fallback, form.degradeToSilent, degradedNotice)
-    (app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(id, notification)
+    if (reportIdentity != null) notification.extras.putString("dsh.deferred.identity", reportIdentity)
+    manager.notify(id, notification)
     lastPostId = id
     lastPostSig = sig
     lastPostAt = now
