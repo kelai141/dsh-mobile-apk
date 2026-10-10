@@ -1,6 +1,6 @@
 # 0.14.5-fx-2
 
-状态：本地候选，尚未发布。请勿把本地 APK 校验和当作 Release 下载地址。
+状态：已由 GitHub Actions 一键链构建并生成 draft Release（`v0.14.5-fx-2`），待人工核对后转正式。发布资产以 Release 附件与其中 `MANIFEST.txt` 的 SHA256 为准。
 
 ## 本次改进
 
@@ -16,15 +16,19 @@
 
 全新安装会从 APK 内的运行时快照解包并部署。隔离 AVD 首次解包约耗时 8 分钟，首次 `am start -W` 曾超时，但应用随后启动并正常完成页面/API 检查；真实设备耗时可能不同。MuMu 上已使用原有 MiMo 2.5 配置完成真实任务，没有读取或输出凭据。通知和系统通知服务不能组成跨系统原子事务，不承诺任意崩溃时序下严格 exactly-once。
 
-本地双 ABI APK、签名、快照和构建门禁已通过；Android 35 x86_64 AVD 上完成 clean install、fx1 覆盖升级、UI/CDP、服务重启、开机恢复检查及开机服务慢复查自愈的动态验证；同一验证在 MuMu PGBM10 上交叉复现（该设备会把应用任务重新拉到前台，属系统行为，不是服务重启）。MuMu PGBM10 上完成 fx1 覆盖升级、MiMo 2.5 真实现金流任务、Shizuku 屏幕范围矩阵和横竖屏实际点击，报告文件、模型选择和会话在冷重启后恢复。隔离 AVD 上另完成 root 授权开关、伪造特权请求拒绝、十项状态同步、通知进程恢复与权限撤销等故障验证。
+双 ABI APK、签名、快照和构建门禁已通过（本地候选与 CI 一键链各自全链通过）；Android 35 x86_64 AVD 上完成 clean install、fx1 覆盖升级、UI/CDP、服务重启、开机恢复检查及开机服务慢复查自愈的动态验证；同一验证在 MuMu PGBM10 上交叉复现（该设备会把应用任务重新拉到前台，属系统行为，不是服务重启）。MuMu PGBM10 上完成 fx1 覆盖升级、MiMo 2.5 真实现金流任务、Shizuku 屏幕范围矩阵和横竖屏实际点击，报告文件、模型选择和会话在冷重启后恢复。隔离 AVD 上另完成 root 授权开关、伪造特权请求拒绝、十项状态同步、通知进程恢复与权限撤销等故障验证。
 
-旧 WebView 不支持隔离浏览器 profile 时，应用会明确拒绝启用，不会降级为共享浏览器数据；完整 BrowserHost 回归已在支持该能力的 Android 35 AVD 上通过。冷启动预算曾超限，已保留日志并排查插件装载阶段与宿主资源压力，不宣称所有环境性能均达标。真实 arm64 设备及 GitHub Actions 尚未运行，因此**尚非无条件发布就绪**；这些是发布前补充门禁，不是缺少 MuMu、模型或特权通道。
+旧 WebView 不支持隔离浏览器 profile 时，应用会明确拒绝启用，不会降级为共享浏览器数据；完整 BrowserHost 回归已在支持该能力的 Android 35 AVD 上通过。冷启动预算曾超限，已保留日志并排查插件装载阶段与宿主资源压力，不宣称所有环境性能均达标。GitHub Actions 一键链已实际运行：快照（arm64/x86_64）、release、publish 四个 job 全部成功，产出 draft Release 与全部发布资产。真实 arm64 设备补充门禁尚未执行，因此**尚非无条件发布就绪**；该门禁是发布前补充项，不是缺少 MuMu、模型或特权通道。
 
-本地 APK SHA256：
+APK 校验和：**以 Release 附件为准**。下列两组哈希用途不同，不可混用——第一组是开发期在本机构建并完成三层设备验收的候选，第二组才是 Release 实际分发的字节。
 
-| ABI | 文件 | SHA256 |
+| 用途 | ABI | SHA256 |
 |---|---|---|
-| arm64-v8a | `dsh-mobile-apk-v0.14.5-fx-2-arm64.apk` | `5cc0d298bf88831e45b6365c134d5d5536b06e7a51f40b934cc031c2d652ee0d` |
-| x86_64 | `dsh-mobile-apk-v0.14.5-fx-2-x86_64.apk` | `fc7dbd195c5489f92a7e3b3f715d726c77a65e362e422d3f1d8aab287bc18e3c` |
+| 开发期设备验收候选（对应 AVD/MuMu 三层验收的安装包） | arm64-v8a | `5cc0d298bf88831e45b6365c134d5d5536b06e7a51f40b934cc031c2d652ee0d` |
+| 开发期设备验收候选 | x86_64 | `fc7dbd195c5489f92a7e3b3f715d726c77a65e362e422d3f1d8aab287bc18e3c` |
+| **Release 实际分发** | arm64-v8a | `5e54183f4ddfc5bc60e4c50aabc6bf0e1c3e3acebc10989b08a518b18d24319f` |
+| **Release 实际分发** | x86_64 | `3350213b71c31db32da4b65f753dc97fc38bbf55371c25bb481948e04835d7b2` |
 
-完整测试证据、失败与跳过项见 [`HANDOFF-0.14.5-FX-2-DEVELOPMENT-2026-10-09.md`](../../docs/HANDOFF-0.14.5-FX-2-DEVELOPMENT-2026-10-09.md) 第 7 节。尚未创建 Tag、PR 或 Release，也未执行任何 GitHub 远端写入。
+两组不同的原因已核实：CI 一键链按设计**从源重建快照**，因此两个 ABI 的内嵌 `assets/snapshot.tar.xz` 都与本地候选不同（x86_64 条目表完全一致但字节不同；arm64 另叠加 `libsqlite3` 版本漂移——CI 侧为 `libsqlite3.54.0.so`，本地候选为 `libsqlite3.53.4.so`），APK 内除该快照外其余 234 个条目逐一相同。根因是 `scripts/snapshot-config/preinstall.json` 只列包名、**不锁版本**，Termux 包由镜像链在构建时解析，故跨时间/跨机构建不保证字节一致。两个 ABI 的 Release 资产均以同一把固定发布密钥签名（SHA-256 `1dde9d980f62b715f29c20b421063f1d3d796085adf7de7e9907dd16d845bcbd`，与 v0.14.5-fx-1 一致）、versionCode 49、versionName `0.14.5-fx-2`。开发期三层验收未在 Release 字节上重跑，属已知边界。
+
+完整测试证据、失败与跳过项见 [`HANDOFF-0.14.5-FX-2-DEVELOPMENT-2026-10-09.md`](../../docs/HANDOFF-0.14.5-FX-2-DEVELOPMENT-2026-10-09.md) 第 7 节。本版本已通过 PR #345（apk 仓）与配套协调仓 PR #97 合入 `main`，并由 `main` 触发 `release` workflow 生成 draft Release。
