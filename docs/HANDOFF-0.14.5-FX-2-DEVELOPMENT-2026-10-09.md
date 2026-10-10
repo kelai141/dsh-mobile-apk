@@ -89,7 +89,7 @@ Node_modules 的 esbuild 为 Windows 包；Linux TypeScript 能过而客户端 b
 
 ### 候选与产物
 
-- APK 仓候选：`acfac65dee19369e05f23643c39e06eca894345f`；协调仓 scratch HEAD：`be3a63dd90fdb6e156ec38362d7b37c217eb6acb`。均为本地候选，未 push/PR/tag/release。
+- APK 仓候选：`acfac65dee19369e05f23643c39e06eca894345f`；协调仓 scratch HEAD：`be3a63dd90fdb6e156ec38362d7b37c217eb6acb`。当时均为本地候选、未 push/PR/tag/release；其后已由 PR #345 / #97 合入并触发 Actions 一键链，见第 9 节。
 - APK 仓保留未跟踪输入 `app/src/main/assets/plugin-hard-manifest.json`；构建依赖 `node_modules` 也未跟踪。未清理或纳入交付提交。验证记录更新本文件与 release notes。
 - 双 ABI 最终 APK：arm64 SHA256 `5cc0d298bf88831e45b6365c134d5d5536b06e7a51f40b934cc031c2d652ee0d`；x86_64 SHA256 `fc7dbd195c5489f92a7e3b3f715d726c77a65e362e422d3f1d8aab287bc18e3c`。版本 `0.14.5-fx-2` / versionCode 49；最终全链签名及 repo 签名身份门禁通过。
 - 最终 runtime snapshots：arm64 SHA256 `88bbcf08bfe64a9805669eaf2c6c66a93e10dc35d7a2eda0d664b5e417713614`；x86_64 SHA256 `44fb9677d378431b21d98dbbaf7f15fa5bff7e90a74c69ca7170d6ad2faf9777`。快照来源指纹、插件闭包、补丁、secret、ABI ELF、权限和嵌入内容均经双 ABI 构建链检查。
@@ -152,8 +152,31 @@ API 37.1 Play Store AVD 的 `surfaceflinger` / 系统服务曾异常退出；该
 
 - Boot budget 五轮cold1/2超限保留，cold3/4/5连续通过，宿主内存时间相关证据不是严格单因果。三轮稳定结果支持无需无证据改插件启动顺序；下一位不要提高7200ms门槛或删掉历史FAIL。cold1/2/3/4/5日志和每轮真实正式门禁在 `.deploy-tmp/stage3-remaining/mumu-cold-*/`；分析及输入SHA在 `mumu-cold-1-analysis.md` 与 `mumu-cold-diagnosis-inputs.sha256`。
 - 所有源码、最终双 ABI 快照/APK与被测设备安装包一致；本轮只改文档，因此既有构建无需因文档复跑。当前仍未运行arm64真机发布补充门禁、真实GitHub Actions；远端PR、Push、Tag、Release也未执行。
-- 没有确认可自主修复且属于产品源码的问题。此前的唯一本地未闭环项（真实 F-03 慢复查动态恢复）已由 `avd5558-verify` 轮闭环为 PASS，历次前置失败与 boot-budget FAIL 均按原样保留。仍**不能**宣称 FX2 无条件发布就绪：真实 arm64 设备门禁与真实 GitHub Actions 仍 NOT RUN。按交接要求，本节与 notes 已更新，现停止并等待用户决定是否创建 PR / 正式发版。
+- 没有确认可自主修复且属于产品源码的问题。此前的唯一本地未闭环项（真实 F-03 慢复查动态恢复）已由 `avd5558-verify` 轮闭环为 PASS，历次前置失败与 boot-budget FAIL 均按原样保留。真实 arm64 设备门禁仍未执行，故仍**不能**宣称 FX2 无条件发布就绪。
 - 交接前已清理 MuMu PGBM10 本轮新增的 Shizuku 安装和授权：管理器“授权的应用”中关闭 DeepCode，uiautomator 回读开关 `checked=false`；结束临时 UID2000 server 并卸载刚安装的 manager。回读无 `moe.shizuku.privileged.api` 包；原旋转设置恢复为 accelerometer_rotation=1 / user_rotation=0。MuMu PJJ110 未操作。
+
+## 9. PR 与发布执行记录（2026-10-10）
+
+### 已执行
+
+- **分支推送**：`codex/0.14.5-fx-2-development`（apk 仓）与 `codex/0.14.5-fx-2-engineering`（协调仓）此前均只在本地、远端不存在（远端查询为 404）。两分支各领先 `origin/main` 4 个提交，且均与 `origin/main` 分叉，已先 merge `origin/main` 再推送。推送使用 Windows git（本机 WSL 侧 git-lfs 缺失；`base/*.tar.xz` 为 LFS 指针，远端 LFS 解析正常，指针与 `origin/main` 逐字节一致，未上传底座归档）。
+- **PR 与合并**：apk 仓 PR #345（fix/docs）、协调仓 PR #97（fix/docs）均已合入 `main`。apk 仓 `main` 受 ruleset `protect`（要求 1 个 approve + code owner）保护，仓库所有者以 bypass 权限合并；协调仓直接合并。
+- **Actions 一键链实跑**：由 `main` 触发 `release` workflow（run 38057063736），四个 job 全部成功——`snapshot (arm64)` 4m25s、`snapshot (x86_64)` 4m38s、`release` 24m17s、`publish`。产出 draft Release `v0.14.5-fx-2`（`targetCommitish=main`）。
+- **Release 资产**（共 12 项）：双 ABI APK、双 ABI 注入后快照、三个子仓 tgz、三份 plugin-lock-resolution、`MANIFEST.txt`、`notes.md`。已下载双 ABI APK 并按 `MANIFEST.txt` 校验 SHA256 自洽。
+- **签名与版本核对**：两个 ABI 的 Release APK 均由同一把固定发布密钥签名（证书 SHA-256 `1dde9d980f62b715f29c20b421063f1d3d796085adf7de7e9907dd16d845bcbd`，与 v0.14.5-fx-1 发布资产一致；DN 显示 `CN=Android Debug` 是该固定密钥的既有名义，非临时调试签名）。versionCode 49、versionName `0.14.5-fx-2`。
+- **发布说明修正**（PR #346，已合并）：原 notes 写「尚未创建 Tag、PR 或 Release」「GitHub Actions 尚未运行」，并只给出一组「本地 APK」哈希，容易被误当作 Release 校验值。已改为：区分「开发期三层验收候选」与「Release 实际分发」两组 SHA256、据实写明 Actions 四 job 已成功、补记 PR 号。draft Release 的 body 与 `notes.md` 附件均已同步为修正版。
+
+### 关键结论：CI 与本地候选字节不同，属设计行为而非缺陷
+
+- Release 两个 ABI 的 APK 与开发期完成三层验收的本地候选**不是同一批字节**：arm64 本地 `5cc0d298…` vs Release `5e54183f…`；x86_64 本地 `fc7dbd19…` vs Release `3350213b…`。
+- 已逐条目对比确认：APK 内除 `assets/snapshot.tar.xz` 外**其余 234 个条目逐一相同**。原因是 CI 一键链按设计**从源重建快照**：x86_64 快照条目表完全一致但字节不同；arm64 另叠加 `libsqlite3` 版本漂移（CI 为 `libsqlite3.54.0.so`，本地候选为 `libsqlite3.53.4.so`）。
+- 根因：`scripts/snapshot-config/preinstall.json` 只列包名、**不锁版本**，Termux 包在构建期由镜像链解析，故跨时间/跨机构建不保证字节一致。这是既有设计，不是本轮引入。
+- **已知边界（不得掩盖）**：开发期三层设备验收是在本地候选上完成的，**未在 Release 实际字节上重跑**。`dsh-mobile-apk/AGENTS.md` §2 明确「发布包不经本地：由 GitHub Action 一键链产出」，因此 Release 字节的权威性成立；但若要宣称 Release 字节本身已完成三层验收，须下载 Release APK 重装重验。
+
+### 仍未执行
+
+- 真实 arm64 真机补充门禁（V2425A）。
+- Release 尚未转正式：按 `release.yml` 的刻意保守设计，只出 **draft** Release，转正式需人工核对后手动操作，本轮未转。
 
 ### 相关文档索引
 
