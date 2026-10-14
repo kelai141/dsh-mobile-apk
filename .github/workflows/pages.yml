@@ -43,9 +43,12 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v4
         with: { node-version: '24' }
-      # 门禁先行：资产名与发布链绑定，发布链改名即判红（防重演 App 侧坑 172）
+      # 门禁先行：资产名与发布链绑定，发布链改名即判红（防重演 App 侧坑 172）。
+      # 必须给 glob：node --test 在 Node 24 上**不接受目录**（传目录会按 CJS 解析并报
+      # Cannot find module .../webpages/tests，实测 exit 1）。引号交给 node 自己展开，
+      # 不依赖 shell 的 glob 行为。
       - name: 资产名与 URL 拼接门禁
-        run: node --test webpages/tests/
+        run: node --test "webpages/tests/*.test.mjs"
       - name: 构建静态站
         run: node webpages/tools/build.mjs
       - name: 站点自检（产物存在 + 占位符已替换 + 体积预算）

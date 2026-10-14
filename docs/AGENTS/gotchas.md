@@ -1719,3 +1719,10 @@ EngineManager的Process已为companion共享，CAS也只允许一个winner spawn
 最小修法给Activity独立engineBootMayContinue观察，按STARTING→process→STARTING→process顺序读取，覆盖winner发布Process再释放CAS及一次读取期间完整的CAS acquire/publish/release。watchdog/归属仍用原engineProcessAlive，STARTING不能冒充进程所有权。
 两处Activity死亡判据使用新观察；90s预算、真实退出、失败释放及预算终态落盘保留，预算文案同时覆盖尚在准备的请求。
 EngineBootContinuationTest用latch驱动真实观察函数：winner持CAS但无进程时loser等待，发布后继续，真实退出或失败释放后停止；另精确冻结第一次process旧读，迫使winner在中间完成publish/clear，再验证最后重读不会误判。单测与最终SN17 APK三层证据由统一收口记录承载，不把最终页面恢复健康改写为原失败通过。
+
+294. **`node --test <目录>` 在 Node 24 上按 CJS 解析并失败：门禁写对了、命令写错了（0.14.7 webpages PR #360 合并后 CI 实锤）**：新增的 `pages` 工作流在「资产名与 URL 拼接门禁」一步直接红，报 `Error: Cannot find module '/home/runner/work/dsh-mobile-apk/dsh-mobile-apk/webpages/tests'` + `code: MODULE_NOT_FOUND`，25 个用例一个都没跑。
+   **为什么本地没发现**：开发期在本地跑的是**显式文件路径** `node --test webpages/tests/release-url.test.mjs`（25 项全绿），而提交进工作流的是**目录** `node --test webpages/tests/`。两条命令不同形，本地绿证明不了 CI 绿——**门禁的调用形态本身没有被测过**。
+   **真因**：`node --test` 的路径参数在 Node 24 上不展开目录；传目录时该参数被当成 CJS 模块说明符去解析，于是报「找不到模块」而不是「没有测试」。加不加结尾斜杠都一样失败（实测两者 `ℹ fail 1`）。
+   **修法**：给 glob 并加引号，让 node 自己展开——`node --test "webpages/tests/*.test.mjs"`。不要把展开交给 shell（`sh` 与 `pwsh` 行为不同，且无匹配时字面量透传会再次变成「找不到模块」）。
+   **判据（可判红，两条都实测过）**：① 新形态 `node --test "webpages/tests/*.test.mjs"` 必须 `ℹ tests 25 / pass 25 / fail 0`、exit 0；② 反证——旧形态 `node --test webpages/tests` 必须仍然 `ℹ fail 1`、exit 1。只验 ① 不验 ② 就无法区分「修好了」与「这条断言本来就跑不到」。
+   **教训**：门禁脚本改完，必须**用工作流里逐字一致的那条命令**本地复验一次，而不是用等价的手工命令。这个坑与「门禁必须被门禁测试」同源。
