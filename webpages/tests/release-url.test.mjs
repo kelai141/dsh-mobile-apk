@@ -137,23 +137,59 @@ test('armv8l 兜底为 arm64 而非判不支持（否则主流机型看到"暂�
   assert.equal(r.confidence, 'likely', '兜底结论必须被标注，界面据此提示可手动切换');
 });
 
-test('毫无架构线索时判 unknown 交给手动选择（不猜、也不假拒绝）', () => {
-  // 现代 Android Chrome 的 reduced UA 不含架构 token，机型已被冻结成 "K"
-  const r = classifyAbi({ ua: 'Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36' });
+test('Android Chromium 无架构线索时兜底 arm64（夸克/H 浏览器实测形态）', () => {
+  // reduced UA 不含架构 token；platform 只有 'Linux'。旧实现在此处判 unknown，
+  // 真机因此看到"未能识别设备架构"，而 PC 端正常 —— 正是该缺陷的可识别特征。
+  const r = classifyAbi({ platform: 'Linux', ua: 'Mozilla/5.0 (Linux; Android 16; V2425A) AppleWebKit/537.36 Chrome/130 Mobile Safari/537.36' });
+  assert.equal(r.abi, 'arm64');
+  assert.equal(r.confidence, 'likely');
+});
+
+test('architecture 有值但 bitness 为空时不再丢信号（真机实测形态）', () => {
+  const r = classifyAbi({ architecture: 'arm', bitness: '', platform: 'Linux', ua: 'Android 16 Mobile' });
+  assert.equal(r.abi, 'arm64');
+  assert.equal(r.confidence, 'likely');
+  // 非桌面平台（模拟器/手机）才适用：桌面由零号规则拦下，见下方桌面用例
+  const x = classifyAbi({ architecture: 'x86', bitness: '', platform: 'Linux', ua: 'Mozilla/5.0 (Linux; Android 12) Mobile' });
+  assert.equal(x.abi, 'x86_64');
+  assert.equal(x.confidence, 'likely');
+});
+
+test('明确 32 位结构化信号仍判不支持（兜底不得放宽确定性结论）', () => {
+  assert.equal(classifyAbi({ architecture: 'arm', bitness: '32' }).confidence, 'unsupported');
+  assert.equal(classifyAbi({ architecture: 'arm', bitness: '32' }).legacy, 'armv7');
+});
+
+test('未知平台仍然判 unknown（Linux 兜底不外溢）', () => {
+  const r = classifyAbi({ platform: 'FreeBSD', ua: 'Mozilla/5.0 (X11; FreeBSD)' });
   assert.equal(r.abi, null);
   assert.equal(r.confidence, 'unknown');
 });
 
-test('桌面浏览器判 unknown，不会被谎称成已识别的 arm64', () => {
-  assert.equal(classifyAbi({ platform: 'Win32' }).confidence, 'unknown');
-  assert.equal(classifyAbi({ platform: 'MacIntel' }).confidence, 'unknown');
-  assert.equal(classifyAbi({ platform: 'Win32' }).abi, null, '不得凭空推 APK');
+test('桌面系统一律判 unknown：PC 访客要装的是手机，架构无从得知', () => {
+  // 真实缺陷：Windows Chrome 的 UA 含 "Win64; x64"，会命中 x86_64 规则，
+  // 于是 PC 访客被"已识别为 x86_64"引到模拟器专用的包上。
+  const win = classifyAbi({ platform: 'Win32', ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/130 Safari/537.36' });
+  assert.equal(win.abi, null, 'PC 不得被判定为 x86_64');
+  assert.equal(win.confidence, 'unknown');
+  // 即使桌面给了结构化架构也一样：那是 PC 的架构，不是手机的
+  const winArch = classifyAbi({ architecture: 'x86', bitness: '64', platform: 'Win32', ua: 'Mozilla/5.0 (Windows NT 10.0)' });
+  assert.equal(winArch.abi, null);
+  assert.equal(winArch.confidence, 'unknown');
+  assert.equal(classifyAbi({ platform: 'MacIntel', ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' }).confidence, 'unknown');
 });
 
-test('Linux 桌面 x86_64 可正常判定（不受桌面兜底影响）', () => {
+test('Linux 桌面 x86_64 仍可正常判定（不被桌面兜底误伤）', () => {
   const r = classifyAbi({ platform: 'Linux x86_64', ua: 'Mozilla/5.0 (X11; Linux x86_64)' });
   assert.equal(r.abi, 'x86_64');
   assert.equal(r.confidence, 'certain');
+});
+
+test('MuMu 等模拟器：结构化 architecture=x86 优先于 Android 兜底', () => {
+  // 模拟器内浏览器是 Android UA，若只靠 UA 会被兜底成 arm64（错）。
+  // userAgentData 的 architecture=x86 必须胜出。
+  const r = classifyAbi({ architecture: 'x86', bitness: '', platform: 'Linux', ua: 'Mozilla/5.0 (Linux; Android 12; MuMu) Chrome/120 Mobile' });
+  assert.equal(r.abi, 'x86_64');
 });
 
 test('真正更老的 32 位与异构架构仍判不支持', () => {
@@ -206,4 +242,30 @@ test('页面在无 JS 时仍给出可用的下载入口', () => {
   const html = readRepo('webpages/src/index.html');
   assert.ok(/<noscript>/.test(html), '缺少 noscript 兜底');
   assert.ok(/github\.com\/kelai141\/dsh-mobile-apk\/releases/.test(html), 'noscript 未指向 Releases');
+});
+
+// ── SEO：站点必须能被搜索引擎发现 ──────────────────────────────────────────
+
+test('robots 不屏蔽抓取，且声明了 canonical 与 sitemap', () => {
+  const html = readRepo('webpages/src/index.html');
+  assert.ok(/<meta name="robots" content="index, follow/.test(html), '缺少可索引的 robots meta');
+  assert.ok(!/noindex/i.test(html), '页面不得含 noindex');
+  assert.ok(/rel="canonical"/.test(html), '缺少 canonical');
+  assert.ok(/__JSONLD__/.test(html), '缺少 JSON-LD 占位符');
+});
+
+test('sitemap.xml 与 robots.txt 由同一次构建产出（robots 声明的文件必须真实存在）', () => {
+  const build = readRepo('webpages/tools/build.mjs');
+  // 这里守的是一个真实缺陷：robots.txt 曾声明 Sitemap: .../sitemap.xml
+  // 而构建从不生成该文件，爬虫取到 404。
+  assert.ok(build.includes("'sitemap.xml'"), '构建脚本未产出 sitemap.xml');
+  assert.ok(/Sitemap: ' \+ SITE_URL/.test(build) || build.includes('Sitemap: '), 'robots 未声明 sitemap');
+});
+
+test('正文含可抓取的静态说明（不依赖 JS 渲染）', () => {
+  const html = readRepo('webpages/src/index.html');
+  for (const token of ['关于 dsh-mobile', '该下载哪个架构', '安装说明', '常见问题']) {
+    assert.ok(html.includes(token), '缺少静态正文段落：' + token);
+  }
+  assert.ok(/<h1>/.test(html), '缺少 h1');
 });

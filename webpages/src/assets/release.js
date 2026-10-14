@@ -17,9 +17,10 @@
  * 4. **架构判定宁可"尽力而为 + 明示"也不要假拒绝**：arm64 手机上的浏览器常把
  *    navigator.platform 报成 "Linux armv8l"（32 位用户态字符串）。若把它当成 armv7 判为
  *    不支持，会让**主流机型**看到"暂无支持版本"——对 C 端分发页是不可接受的假阴性。
- *    故：结构化信号（userAgentData 的 architecture+bitness）为决定性判据；
- *    只有字符串线索且指向 32 位时，按主流机型给 arm64 兜底并**在界面上标注未确认识别**，
- *    同时始终提供手动切换。
+ *
+ *    更常见的形态（Android 16 + 夸克/H 浏览器实测）：userAgentData 只给 architecture
+ *    不给 bitness，或干脆没有架构线索且 platform='Linux'。这两种都必须兜底为 arm64，
+ *    否则真机看到"未能识别设备架构"，而 PC 端反而正常——正是该缺陷的可识别特征。
  */
 
 /** 仓库坐标（与 App 侧 UpdateChecker.REPO 一致）。 */
@@ -36,15 +37,31 @@ export const API_LATEST_URL = 'https://api.github.com/repos/' + OWNER + '/' + RE
  * 实测（2026-10-14，对 v0.14.7 真实资产）：gh-proxy.com 820ms 快于 github.com 直连 1447ms，
  * 故"直连永远第一"并不成立，必须实测排序。
  */
+// 标签用真实域名：用户有权知道自己在走哪个第三方反代（加速线路是社区服务，非官方托管）。
+// 不要用「加速线路 1」这类尾随数字——与紧随其后的延迟毫秒相邻会读成「线路 1876ms」。
 export const MIRROR_TEMPLATES = [
   { id: 'github', label: 'GitHub 官方', prefix: 'https://github.com/', cors: false, kind: 'official' },
-  { id: 'gh-proxy', label: '加速线路 1', prefix: 'https://gh-proxy.com/https://github.com/', cors: true, kind: 'mirror' },
-  { id: 'ghfast', label: '加速线路 2', prefix: 'https://ghfast.top/https://github.com/', cors: false, kind: 'mirror' },
-  { id: 'ghproxy-net', label: '加速线路 3', prefix: 'https://ghproxy.net/https://github.com/', cors: false, kind: 'mirror' },
+  { id: 'gh-proxy', label: 'gh-proxy.com', prefix: 'https://gh-proxy.com/https://github.com/', cors: true, kind: 'mirror' },
+  { id: 'ghfast', label: 'ghfast.top', prefix: 'https://ghfast.top/https://github.com/', cors: false, kind: 'mirror' },
+  { id: 'ghproxy-net', label: 'ghproxy.net', prefix: 'https://ghproxy.net/https://github.com/', cors: false, kind: 'mirror' },
 ];
 
 /** 受支持的 ABI 家族名。 */
 export const SUPPORTED_ABIS = ['arm64', 'x86_64'];
+
+/** 站点正式地址（canonical / sitemap / JSON-LD 共用；改域名只需改这一处）。 */
+export const SITE_URL = 'https://kelai141.github.io/dsh-mobile-apk/';
+
+/**
+ * 测速靶：**与版本解绑**。
+ *
+ * 为什么不用当前版本的 APK 探测：那会把"选线路"和"当前版本资产"绑在一起——
+ * 资产一旦改名或某版本发布不完整，测速就整体失效，用户被钉死在默认线路上
+ * （这正是"节点切换与版本绑定"的缺陷成因）。
+ * 改用 releases/latest/download/MANIFEST.txt：它是一个几十字节的稳定小文件，
+ * 四个前缀实测均 200，且永远指向最新版，不会因改版失效。
+ */
+export const PROBE_FILE = 'MANIFEST.txt';
 
 /** ABI 家族 -> 面向用户的可读名。 */
 export const ABI_LABELS = { arm64: 'arm64（64 位 ARM，绝大多数手机）', x86_64: 'x86_64（64 位 x86，模拟器）' };
@@ -96,6 +113,13 @@ export function manifestUrl(template, tag) {
   return assetUrl(template, tag, 'MANIFEST.txt');
 }
 
+/** 与版本无关的测速 URL（最新版的稳定小文件）。 */
+export function probeUrl(template) {
+  const t = typeof template === 'string' ? { prefix: template } : template;
+  if (!t || !t.prefix) throw new Error('probeUrl: 缺少镜像前缀');
+  return t.prefix + OWNER + '/' + REPO + '/releases/latest/download/' + PROBE_FILE;
+}
+
 // 字符串探测用正则。注意两处易错点：
 //   - armv8 必须挡掉尾随字母（armv8l 是 armv8 的 **32 位**用户态，不是 arm64）；
 //   - armv7l / armv6l 的尾随 l 必须显式容许，否则真实 platform 串 "Linux armv7l" 匹配不上。
@@ -128,15 +152,35 @@ export function classifyAbi(signals) {
   const ok = (abi, raw, confidence) => ({ abi, raw, confidence: confidence || 'certain', legacy: null });
   const no = (raw, legacy) => ({ abi: null, raw, confidence: 'unsupported', legacy: legacy || null });
 
+  // 零：桌面系统一律判 unknown，交给用户选。
+  // 为什么不能让 PC 走字符串探测：Windows Chrome 的 UA 含 "Win64; x64"，
+  // 会命中 x86_64 规则并"理直气壮"地告诉 PC 访客"已识别为 x86_64"，
+  // 而 PC 访客要装的是手机——那台手机的架构在 PC 上根本无从得知，
+  // 结果就是把人引到模拟器专用的包上。桌面下唯一诚实的答案是"请选择"。
+  // 注意：MuMu 等模拟器**内部的浏览器**是 Android UA，不走这一支；
+  // 其架构由上面的 userAgentData（architecture=x86）确定。
+  if (/(windows nt|win32|win64|macintosh|mac os x|macintel|cros )/.test(platform + ' ' + ua)) {
+    return { abi: null, raw: basis, confidence: 'unknown', legacy: null };
+  }
+
   // 一：结构化字段优先。语义明确，不受字符串形态干扰，是唯一"决定性"判据。
+  // 关键修正（实测 2026-10-14，Android 16 + 夸克/H 浏览器）：这些内核常**只给 architecture
+  // 不给 bitness**（或 bitness 为空串）。旧实现把 'arm' 的空 bitness 一路落到"无线索"，
+  // 于是真机看到"未能识别设备架构"——而 PC 端因为 arch=x86+bitness=64 正常识别，
+  // 这正好解释了"PC 能认、手机不能认"的现象。
+  // 现在：缺失 bitness 不再丢弃信号，按主流机型兜底（likely），用户仍可手动改。
   if (arch) {
-    if (arch === 'arm' || arch === 'arm64' || arch === 'aarch64') {
-      if (bitness === '64' || arch !== 'arm') return ok('arm64', basis);
+    if (arch === 'arm64' || arch === 'aarch64') return ok('arm64', basis);
+    if (arch === 'arm') {
+      if (bitness === '64') return ok('arm64', basis);
       if (bitness === '32') return no(basis, 'armv7');
+      return ok('arm64', basis, 'likely');
     }
-    if (arch === 'x86' || arch === 'x86_64' || arch === 'amd64') {
-      if (bitness === '64' || arch !== 'x86') return ok('x86_64', basis);
+    if (arch === 'x86_64' || arch === 'amd64') return ok('x86_64', basis);
+    if (arch === 'x86') {
+      if (bitness === '64') return ok('x86_64', basis);
       if (bitness === '32') return no(basis, 'x86');
+      return ok('x86_64', basis, 'likely');
     }
     if (/^(mips|mips64|riscv32|riscv64|ppc|ppc64|s390|s390x)$/.test(arch)) return no(basis, 'other');
   }
@@ -157,8 +201,16 @@ export function classifyAbi(signals) {
     if (RE_OTHER.test(p)) return no(p, 'other');
   }
 
-  // 四：毫无线索（桌面浏览器、reduced UA、隐私模式等）。**不猜**，交给界面出手动选择，
-  //     这样既不假拒绝任何人，也不会谎称"已识别设备架构"。
+  // 四：platform 为 Linux 且无任何架构线索 —— 这是**手机浏览器**的典型形态。
+  //     Android 上 Chromium 系（含夸克、H 浏览器等国产内核）普遍上报 platform='Linux'，
+  //     且 reduced UA 不含架构 token、userAgentData 缺失或只给部分字段。
+  //     反过来：Windows/macOS 桌面不会是 'Linux'；真 Linux 桌面几乎必带 x86_64/aarch64。
+  //     故按主流机型兜底为 arm64（likely，可手动改），比直接说"未能识别"对 C 端有用得多。
+  if (platform === 'linux' || (/linux/.test(ua) && /android/.test(ua))) {
+    return ok('arm64', basis, 'likely');
+  }
+
+  // 五：确实毫无线索（未知平台、隐私模式等）。**不猜**，交给界面出手动选择。
   return { abi: null, raw: basis, confidence: 'unknown', legacy: null };
 }
 

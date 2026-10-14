@@ -1725,4 +1725,23 @@ EngineBootContinuationTest用latch驱动真实观察函数：winner持CAS但无�
    **真因**：`node --test` 的路径参数在 Node 24 上不展开目录；传目录时该参数被当成 CJS 模块说明符去解析，于是报「找不到模块」而不是「没有测试」。加不加结尾斜杠都一样失败（实测两者 `ℹ fail 1`）。
    **修法**：给 glob 并加引号，让 node 自己展开——`node --test "webpages/tests/*.test.mjs"`。不要把展开交给 shell（`sh` 与 `pwsh` 行为不同，且无匹配时字面量透传会再次变成「找不到模块」）。
    **判据（可判红，两条都实测过）**：① 新形态 `node --test "webpages/tests/*.test.mjs"` 必须 `ℹ tests 25 / pass 25 / fail 0`、exit 0；② 反证——旧形态 `node --test webpages/tests` 必须仍然 `ℹ fail 1`、exit 1。只验 ① 不验 ② 就无法区分「修好了」与「这条断言本来就跑不到」。
+
+295. **发布页架构识别在真机上判"未能识别"、PC 上却正常：只取 architecture 不取 bitness 的浏览器把信号丢光了（0.14.7 webpages 线上反馈 + 本轮实修）**
+    **现象**：Android 16 上用夸克浏览器与 H 浏览器打开发布页，均提示"未能识别设备架构"；同一页面在 PC 上能正常识别为 x86_64。
+    **真因（两处，都会把真机推给"未知"）**：① 这些 Chromium 系内核的 `navigator.userAgentData.getHighEntropyValues(["architecture","bitness"])` 常**只返回 architecture，bitness 为空**，而旧实现用 `arch === "arm" && bitness === "64"` 才算数，空 bitness 一路落到"无线索"；② reduced UA 不含架构 token 且 `platform` 只有 `"Linux"` 时，旧实现同样判 unknown。PC 端因为 arch=x86 + bitness=64 齐全而正常——**"PC 能认、手机不能认"正是该缺陷的可识别特征**。
+    **修法**：① architecture 有值但 bitness 缺失时不再丢弃信号，`arm` -> arm64(`likely`)、`x86` -> x86_64(`likely`)，保留用户的"换另一个架构"出口；② `platform="Linux"` 且无架构线索时按主流机型兜底 arm64(`likely`)（Windows/macOS 不会是 `Linux`，真 Linux 桌面几乎必带 x86_64/aarch64）；③ 补零号规则——**桌面系统一律判 unknown**，见下条。
+    **判据（可判红）**：① `{architecture:"arm",bitness:""}` 必须为 arm64/`likely`，而 `{architecture:"arm",bitness:"32"}` 必须仍为 `unsupported`（兜底不得放宽确定性结论）；② `{platform:"Linux",ua:"...Android 16..."}` 必须 arm64/`likely`；③ 反证：`{platform:"FreeBSD",ua:"...(X11; FreeBSD)"}` 仍须 unknown，证明兜底不外溢。
+
+296. **同一发布页把 Windows 访客判成 x86_64 并推模拟器专用包：PC 访客要装的是手机，手机的架构在 PC 上无从得知（0.14.7 本轮发现，与 295 同源）**
+    **现象**：Windows Chrome 打开发布页显示"已识别设备架构：x86_64"并给出 x86_64 安装包——而 x86_64 包是给 **MuMu 等模拟器**用的，真机是 arm64。
+    **真因**：Windows Chrome 的 UA 含 `Win64; x64`，命中字符串探测的 x86_64 规则。判定逻辑默认"访问者就是要在这台设备上装"，而 PC 访客要装的是**另一台设备（手机）**。
+    **修法**：新增零号规则，`platform`/`ua` 命中 `windows nt|win32|win64|macintosh|mac os x|macintel|cros` 一律判 `unknown`，界面改为"请选择设备架构"+两个选项。**关键细节**：MuMu 等模拟器**内部浏览器**是 Android UA，不走这一支，其架构由 `userAgentData` 的 `architecture=x86` 决定 —— 故结构化字段必须**优先于** UA 兜底，否则模拟器会被兜底成 arm64（错）。
+    **判据（可判红）**：① `{platform:"Win32",ua:"...Win64; x64..."}` 必须 abi=null/`unknown`；② 即使 `{architecture:"x86",bitness:"64",platform:"Win32"}` 也必须 unknown（那是 PC 的架构，不是手机的）；③ 反证：`{architecture:"x86",bitness:"",platform:"Linux",ua:"...Android..."}` 必须 x86_64（证明模拟器路径未被桌面规则误伤）。
+
+297. **发布页 robots.txt 声明了一个从不存在的 sitemap.xml：站点自己给自己制造坏信号（0.14.7 本轮 SEO 核查发现）**
+    **现象**：`/dsh-mobile-apk/robots.txt` 返回 200 且含 `Sitemap: https://kelai141.github.io/dsh-mobile-apk/sitemap.xml`，但该 sitemap 请求 **404**——`build.mjs` 只生成 robots.txt，从未生成 sitemap.xml。
+    **真因**：robots 与 sitemap 由两处分别维护（前者硬编码在构建脚本里，后者根本不存在），缺少"声明即产出"的约束。
+    **修法**：同一次构建同时产出两者，并加门禁守住"robots 声明的 sitemap 必须由构建产出"。另补 JSON-LD / canonical / OG / robots meta 与四段不依赖 JS 的静态正文。
+    **判据**：构建产物必须同时含 `robots.txt` 与 `sitemap.xml`；门禁用例断言 build.mjs 里出现 sitemap 产出与 `Sitemap:` 声明。**注意自证陷阱**：JSON-LD 的 `downloadUrl` 只声明**确有其资产**的 URL——声明一个 404 比不声明更糟（与坑 172 同源的"名字对不对"问题）。
+    **宿主限制（如实记，非缺陷）**：`kelai141.github.io/robots.txt` 不存在，项目站**无法**从上层目录声明 sitemap；这是 GitHub Pages 项目站的固有形态，不影响站点自身 robots/sitemap 可访问。
    **教训**：门禁脚本改完，必须**用工作流里逐字一致的那条命令**本地复验一次，而不是用等价的手工命令。这个坑与「门禁必须被门禁测试」同源。

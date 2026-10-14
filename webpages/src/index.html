@@ -4,10 +4,23 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="color-scheme" content="light dark" />
-<title>dsh-mobile 下载</title>
-<meta name="description" content="dsh-mobile 安卓壳应用下载页：自动识别设备架构，提供 GitHub Releases 直连与加速镜像线路。" />
+<title>dsh-mobile 下载 - DeepSeek Harness 安卓客户端 APK</title>
+<meta name="description" content="DeepSeek Harness 安卓壳应用（dsh-mobile）官方下载页。支持 Android 8.0 及以上，自动识别 arm64 / x86_64 架构，提供 GitHub Releases 直连与国内加速线路，免费下载 APK。" />
+<meta name="keywords" content="DeepSeek Harness, dsh-mobile, 安卓, APK, 下载, arm64, x86_64, Termux" />
+<link rel="canonical" href="https://kelai141.github.io/dsh-mobile-apk/" />
+<meta name="robots" content="index, follow, max-image-preview:large" />
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="dsh-mobile" />
+<meta property="og:title" content="dsh-mobile 下载 - DeepSeek Harness 安卓客户端" />
+<meta property="og:description" content="安卓壳应用，内置完整运行环境，装机即用。自动识别设备架构，提供 GitHub 直连与加速线路。" />
+<meta property="og:url" content="https://kelai141.github.io/dsh-mobile-apk/" />
+<meta property="og:image" content="https://kelai141.github.io/dsh-mobile-apk/assets/icon.svg" />
+<meta name="twitter:card" content="summary" />
+<meta name="twitter:title" content="dsh-mobile 下载 - DeepSeek Harness 安卓客户端" />
+<meta name="twitter:description" content="安卓壳应用，内置完整运行环境，装机即用。自动识别设备架构。" />
 <link rel="icon" href="assets/icon.svg" type="image/svg+xml" />
 <link rel="modulepreload" href="assets/release.js" />
+<script type="application/ld+json">__JSONLD__</script>
 <!-- 样式在构建期内联：首屏只需 1 个请求（本页 HTML 自带 release 数据与样式）。源文件见 assets/styles.css。 -->
 <style>
 /*__STYLES__*/
@@ -26,24 +39,44 @@
 <main class="wrap layout">
   <section class="intro">
     <h1>在手机上运行 DeepSeek Harness</h1>
-    <p class="lede">安卓壳应用，内置完整运行环境，装机即用，无需自行配置。</p>
+    <p class="lede">dsh-mobile 是 DeepSeek Harness 的安卓壳应用，把完整运行环境打进安装包，装机即用，无需自行配置 Termux 与依赖。</p>
     <ul class="facts">
-      <li>系统要求：Android 8.0（API 26）及以上</li>
-      <li>安装包约 150 MB，由 GitHub Releases 提供，本站不托管</li>
-      <li>自动识别设备架构，无需手动选择</li>
+      <li>支持 Android 8.0（API 26）及以上</li>
+      <li>安装包约 150 MB，内置引擎与 Termux 环境</li>
+      <li>自动识别 arm64 / x86_64，无需手动选择架构</li>
+      <li>安装包由 GitHub Releases 提供，本站不托管文件</li>
     </ul>
   </section>
 
   <section class="card" id="download" aria-labelledby="dl-title">
     <h2 id="dl-title" class="card-title">下载</h2>
     <div id="dl-body">
-      <p class="muted">正在识别设备并读取版本信息…</p>
+      <p class="muted">正在读取版本信息…</p>
     </div>
     <noscript>
-      <p class="muted">当前浏览器未启用 JavaScript，无法自动识别设备架构。请前往
+      <p class="muted">当前浏览器未启用 JavaScript，请前往
         <a href="https://github.com/kelai141/dsh-mobile-apk/releases/latest">GitHub Releases</a>
-        手动选择 arm64 或 x86_64 安装包。</p>
+        选择 arm64 或 x86_64 安装包。</p>
     </noscript>
+  </section>
+
+  <!-- 面向搜索引擎的静态说明：不依赖 JS 即可被抓取，且对用户折叠展示。 -->
+  <section class="intro seo" aria-labelledby="about-title">
+    <h2 id="about-title">关于 dsh-mobile</h2>
+    <p>dsh-mobile 是 <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a> 的安卓客户端封装。
+      它在应用内运行一个内嵌的 Termux 快照与 Node 引擎，并向模型暴露安卓平台能力（无障碍、虚拟屏、通知、文件访问等），
+      因此可以在手机上直接使用 DeepSeek Harness 的完整能力。</p>
+    <h3>该下载哪个架构</h3>
+    <p>绝大多数手机是 <b>arm64</b>（即 arm64-v8a / AArch64）；MuMu 等安卓模拟器通常是 <b>x86_64</b>。
+      两个安装包体积相近，无法凭体积区分。装错架构不会被系统拒绝安装，而是在启动引擎时失败，
+      所以请以页面上方自动识别的结果为准；若识别不准可用「换另一个架构」手动切换。</p>
+    <h3>安装说明</h3>
+    <p>下载后点击安装包；若系统提示「未知来源」，需在设置中允许浏览器安装应用。
+      与已安装版本签名一致时可直接覆盖升级，数据保留。最低支持 Android 8.0（API 26）。</p>
+    <h3>常见问题</h3>
+    <p><b>下载很慢或失败？</b>页面上方可在 GitHub 直连与加速线路之间切换，站点会自动实测并优先选择最快的线路。</p>
+    <p><b>安装包安全吗？</b>安装包全部来自 <a href="https://github.com/kelai141/dsh-mobile-apk/releases">GitHub Releases</a>，
+      本站不托管、不修改任何文件，并展示发布清单中的 SHA-256 供核对。</p>
   </section>
 </main>
 
@@ -53,7 +86,7 @@
     <span class="sep">/</span>
     <a href="https://github.com/kelai141/dsh-mobile-apk/releases">全部版本</a>
   </p>
-  <p class="muted small">本站为第三方分发页，不收集任何用户数据，不使用 Cookie 与统计脚本。安装包来源为 GitHub Releases，请自行核对下载页给出的 SHA-256。</p>
+  <p class="muted small">本站为第三方分发页，不收集任何用户数据，不使用 Cookie 与统计脚本。</p>
 </footer>
 
 <!-- 构建期内联的 release 数据：首屏零额外请求，且天然不受 GitHub API 限流影响。 -->

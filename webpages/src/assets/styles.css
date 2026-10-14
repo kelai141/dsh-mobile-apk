@@ -177,3 +177,20 @@ summary:hover { color: var(--fg-2); }
 .muted { color: var(--fg-3); }
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+/* 线路选择：与版本解绑，任何时候都可用（切换即改 href，不使用 blob URL） */
+.lines { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.lines button {
+  min-height: 36px; padding: 7px 12px;
+  border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--fg-2);
+  font-family: inherit; font-size: 13px; cursor: pointer;
+  transition: background var(--ds-dur) var(--ds-ease), border-color var(--ds-dur) var(--ds-ease);
+}
+.lines button:hover { background: var(--bg-soft); }
+.lines button[aria-pressed="true"] { border-color: var(--fg-3); color: var(--fg); font-weight: 600; }
+.lines button .ms { color: var(--fg-3); font-weight: 400; margin-left: 4px; font-family: var(--ds-font-code); font-size: 12px; }
+
+/* 架构可切换时的次要入口 */
+.switchers { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 12px; font-size: 13px; color: var(--fg-3); }
+.switchers button { background: none; border: 0; padding: 0; color: var(--accent); font: inherit; cursor: pointer; }
+.switchers button:hover { text-decoration: underline; }

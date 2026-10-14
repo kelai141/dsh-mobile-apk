@@ -21,7 +21,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  API_LATEST_URL, MIRROR_TEMPLATES, apkNameCandidates, assetUrl, sha256FromManifest,
+  API_LATEST_URL, MIRROR_TEMPLATES, SITE_URL, apkNameCandidates, assetUrl, sha256FromManifest,
 } from '../src/assets/release.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -104,15 +104,63 @@ async function attachSha256(data) {
   log('警告：所有 MANIFEST 源均不可用，本次构建不含 sha256（页面会提示到 Releases 自行核对）');
 }
 
-function render(indexHtml, styles, data) {
+function render(indexHtml, styles, data, jsonLd) {
   return indexHtml
     .replace('/*__STYLES__*/', () => styles)
+    .replace('__JSONLD__', () => JSON.stringify(jsonLd))
     .replace('__RELEASE_DATA__', () => JSON.stringify(data));
+}
+
+/**
+ * JSON-LD 结构化数据（Google 富结果用）。
+ * 只在确有资产时才声明 downloadUrl —— 声明一个 404 的 URL 比不声明更糟。
+ */
+function buildJsonLd(data) {
+  const apk = [];
+  for (const abi of ['arm64', 'x86_64']) {
+    const hit = apkNameCandidates(data.tag, abi).find((n) => data.assets.some((a) => a.name === n));
+    if (!hit) continue;
+    const meta = data.assets.find((a) => a.name === hit);
+    apk.push({
+      '@type': 'SoftwareApplication',
+      name: 'dsh-mobile (' + abi + ')',
+      operatingSystem: 'Android 8.0+',
+      applicationCategory: 'DeveloperApplication',
+      softwareVersion: data.tag.replace(/^v/, ''),
+      fileSize: String(meta.size),
+      downloadUrl: assetUrl(MIRROR_TEMPLATES[0], data.tag, hit),
+      ...(data.sha256 && data.sha256[abi] ? { sha256: data.sha256[abi] } : {}),
+    });
+  }
+  return {
+    '@context': 'https://schema.org',
+    '@graph': [
+      {
+        '@type': 'WebSite',
+        name: 'dsh-mobile 下载',
+        url: SITE_URL,
+        inLanguage: 'zh-CN',
+      },
+      {
+        '@type': 'SoftwareApplication',
+        name: 'dsh-mobile',
+        alternateName: 'DeepSeek Harness 安卓客户端',
+        description: 'DeepSeek Harness 的安卓壳应用，内置完整运行环境，支持 arm64 与 x86_64。',
+        operatingSystem: 'Android 8.0+',
+        applicationCategory: 'DeveloperApplication',
+        softwareVersion: data.tag.replace(/^v/, ''),
+        datePublished: data.publishedAt || undefined,
+        softwareHelp: SITE_URL,
+        offers: { '@type': 'Offer', price: '0', priceCurrency: 'CNY' },
+      },
+      ...apk,
+    ],
+  };
 }
 
 /** 极简校验：模板占位符必须被完全替换。 */
 function assertRendered(html) {
-  for (const token of ['__STYLES__', '__RELEASE_DATA__']) {
+  for (const token of ['__STYLES__', '__RELEASE_DATA__', '__JSONLD__']) {
     if (html.includes(token)) throw new Error('占位符未被替换：' + token);
   }
 }
@@ -134,7 +182,7 @@ async function main() {
 
   const indexHtml = read('src/index.html');
   const styles = read('src/assets/styles.css');
-  const html = render(indexHtml, styles, data);
+  const html = render(indexHtml, styles, data, buildJsonLd(data));
   assertRendered(html);
 
   const outBytes = Buffer.byteLength(html, 'utf8');
@@ -157,8 +205,31 @@ async function main() {
   // 运行期兜底数据源（与内联数据同源，供内联解析失败时使用）
   fs.writeFileSync(p(DIST, 'data', 'releases.json'), JSON.stringify(data, null, 2) + '\n');
 
-  const sitemap = ['User-agent: *', 'Allow: /', 'Sitemap: ' + 'https://' + 'kelai141.github.io/dsh-mobile-apk/sitemap.xml', ''].join('\n');
-  fs.writeFileSync(p(DIST, 'robots.txt'), sitemap);
+  // robots.txt：四个主流搜索引擎显式放行 + 声明 sitemap。
+  // 必须与 sitemap.xml **同时**产出 —— 此前 robots 声明了 sitemap 但构建从不生成它，
+  // 爬虫取到 404，属于自己给自己制造坏信号。
+  fs.writeFileSync(p(DIST, 'robots.txt'), [
+    'User-agent: *',
+    'Allow: /',
+    '',
+    'Sitemap: ' + SITE_URL + 'sitemap.xml',
+    '',
+  ].join('\n'));
+
+  // sitemap.xml：单页站点，lastmod 取构建时间（内容确实随构建变化）。
+  const lastmod = new Date().toISOString().slice(0, 10);
+  fs.writeFileSync(p(DIST, 'sitemap.xml'), [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+    '  <url>',
+    '    <loc>' + SITE_URL + '</loc>',
+    '    <lastmod>' + lastmod + '</lastmod>',
+    '    <changefreq>weekly</changefreq>',
+    '    <priority>1.0</priority>',
+    '  </url>',
+    '</urlset>',
+    '',
+  ].join('\n'));
 
   if (refresh) {
     fs.mkdirSync(p('data'), { recursive: true });

@@ -34,7 +34,15 @@ release 完成      --+
 
 发版后自动刷新走 `workflow_run: release/completed`，**无需改动 release.yml 一行**。
 
-页面运行期的数据优先级：
+### 线路（镜像）与版本解绑
+
+测速靶是 `releases/latest/download/MANIFEST.txt`（几十字节的稳定小文件，四个前缀实测均 200），
+**不是当前版本的 APK**。理由：把测速绑到当前版本资产上，一旦资产改名或该版本发布不完整，
+测速会整体失效、用户被钉死在默认线路上。`probeUrl()` 与 `assetUrl()` 因此是两个独立函数。
+
+线路选择器是**独立组件**，在"架构未知""该版本无匹配资产"等任何状态下都可用，与实际下载的版本无耦合。
+
+### 页面运行期的数据优先级
 
 1. **HTML 内联数据**（构建期写死）——首屏零额外请求；
 2. `api.github.com` 后台校验（失败静默）——只提示有新版，不擅自改下载目标；
@@ -43,6 +51,30 @@ release 完成      --+
 为什么内联是主源而不是纯前端拉 API：实测 `api.github.com` 未认证额度为 **60 次/小时/IP**，
 而 C 端用户大量共享 CGNAT 出口 IP，被限流是常态。实测中本站构建机就被限流到 403，
 页面仍完整渲染——这正是该设计要保住的性质。
+
+## 搜索引擎可见性（SEO）
+
+爬虫需要的东西全部由构建期产出，且**不需要 JS**：
+
+- `<title>` / `description` / `keywords` / `canonical` / `robots`（`index, follow`）/ Open Graph / Twitter Card；
+- **JSON-LD**（`schema.org` 的 `WebSite` + `SoftwareApplication`，含每个架构的 `downloadUrl`、
+  `fileSize`、`sha256`）。只声明**确有其资产**的 downloadUrl —— 声明一个 404 比不声明更糟；
+- `robots.txt`（显式 Allow + 声明 sitemap）；
+- `sitemap.xml`。
+
+**一个已修的真实缺陷**：早期版本的 `robots.txt` 声明了 `Sitemap: .../sitemap.xml`，
+但构建脚本**从不生成该文件**，爬虫取到 404——站点自己给自己制造坏信号。
+现在两者由同一次构建产出，并有门禁守着（`sitemap.xml 与 robots.txt 由同一次构建产出`）。
+宿主机 `kelai141.github.io/robots.txt` 不存在，因此**无法**从上层目录声明 sitemap；
+这是 GitHub Pages 项目站的固有限制，不影响收录（站点自身的 robots 与 sitemap 均可访问）。
+
+正文另有 `关于 dsh-mobile` / `该下载哪个架构` / `安装说明` / `常见问题` 四段静态文字，
+不依赖 JS 渲染即可被抓取，同时服务真人用户。
+
+提交站点到搜索引擎（可选，提升收录速度）：**Google Search Console** 与 **Bing Webmaster Tools**
+均可添加 `https://kelai141.github.io/dsh-mobile-apk/`；但 GitHub Pages 用户**无法**验证域名所有权，
+只能验证 URL 前缀（部分功能受限）。百度对 `github.io` 收录普遍较差，且不提供前缀验证，
+如需百度收录需自有域名。
 
 ## 架构识别与"暂无支持版本"
 
@@ -54,6 +86,19 @@ release 完成      --+
 | `likely` | 只有 32 位字符串线索（如 `Linux armv8l`） | 按主流机型给 arm64，并提示可"换架构" |
 | `unknown` | 毫无线索（桌面浏览器 / reduced UA） | **不猜**，直接列出两个架构供选择 |
 | `unsupported` | 明确 32 位（`architecture=x86,bitness=32`）或异构架构 | 报"暂无支持版本" |
+
+另有两条桌面/兼容规则，都是实测缺陷驱动：
+
+- **桌面系统（Windows / macOS / ChromeOS）一律判 `unknown`**，即使 UA 里写着 `Win64; x64`。
+  真因：PC 访客要装的是**手机**，而那台手机的架构在 PC 上无从得知；按 UA 判会把 PC 访客
+  引到**模拟器专用**的 x86_64 包上。桌面下唯一诚实的答案是"请选择设备架构"。
+  注意 MuMu 等模拟器**内部浏览器**是 Android UA，不走这一支，其架构由 `userAgentData` 的
+  `architecture=x86` 确定（结构化字段优先于 UA 兜底）。
+- **`architecture` 有值但 `bitness` 为空时不再丢信号**：Android 16 上的 Chromium 系
+  （含夸克、H 浏览器）常只给 architecture。旧实现把 `arm` + 空 bitness 一路落到"无线索"，
+  真机于是看到"未能识别设备架构"，而 PC 端正常——正是该缺陷的可识别特征。
+- **`platform='Linux'` 且无任何架构线索时兜底 arm64**：这是手机浏览器的典型形态
+  （Windows/macOS 不会是 'Linux'，真 Linux 桌面几乎必带 x86_64/aarch64）。
 
 为什么 `armv8l` 兜底为 arm64 而不是判不支持：arm64 手机上的浏览器常把它报成 32 位用户态字符串，
 若判不支持，**主流机型**会看到"暂无支持版本"——对 C 端分发页是不可接受的假阴性。
@@ -88,7 +133,7 @@ node webpages/tools/build.mjs --refresh           # 同时刷新 data/releases.j
 替代判据与已完成证据：
 
 - **代码层**：命名门禁 25 项全绿（含受控负控，证明门禁仍会判红）；
-- **渲染层**：CDP 设备仿真覆盖竖屏 390x844 / 横屏 844x390 / 深色 / 桌面判不出 / 32 位不支持 五种形态，
+- **渲染层**：CDP 设备仿真覆盖竖屏 / 横屏 / 桌面（请选择架构）/ 夸克类无架构线索 / 32 位不支持 等形态，
   逐形态核对界面文案与下载 URL；
 - **网络层**：真实网络下镜像测速与资产直链实测（`HEAD` 200 / `content-length` 158453224 / `accept-ranges: bytes`）；
 - **性能**：首屏 FCP 约 208 ms（本地静态服务），首屏仅 1 个文档请求，`index.html` 约 12 KB。
