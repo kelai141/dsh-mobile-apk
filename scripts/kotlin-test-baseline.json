@@ -1,6 +1,6 @@
 {
   "$comment": "Kotlin 单测基线（0.14.1）：只许升不许降。键=测试类名（=源文件名去 .kt），值=用例数。逐类记录而非只记总数——防「删 A 类用例 + 加 B 类用例」净零抵消。升档：node scripts/check-kotlin-test-count.mjs --update-baseline（会拒绝降档）。",
-  "totalTests": 1286,
+  "totalTests": 1298,
   "testsByClass": {
     "AcceptRoutingTest": 7,
     "AdbLiveProbeTest": 4,
@@ -26,7 +26,9 @@
     "DiagnosticsMirrorTest": 3,
     "EngineAuthPolicyTest": 10,
     "EngineBootBudgetTest": 5,
+    "EngineBootContinuationTest": 3,
     "EngineBootInstrumentationTest": 11,
+    "EngineListenProbeScheduleTest": 9,
     "EngineProbeCounterProofTest": 4,
     "EngineProbeTest": 12,
     "ExternalLinksTest": 7,

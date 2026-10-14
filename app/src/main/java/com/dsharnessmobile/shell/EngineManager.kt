@@ -1593,22 +1593,38 @@ class EngineManager(private val context: Context, private val pickToken: String?
    *
    * 引擎可被**任何**路径拉起（Activity 启动流 / EngineService 看门狗 / ConsoleActivity），
    * 所以「Web 端口首次应答」的观测挂在 spawn 点而不是某一条启动流里，否则看门狗重启的世代
-   * 永远没有 t_listen。单线程、有界 90s（与冷启动预算同量级）后自然退出；每 500ms 一次
-   * portReachable(500)（loopback，自带 Proxy.NO_PROXY）。
+   * 永远没有 t_listen。单线程、有界 [LISTEN_WATCH_WINDOW_MS]（与冷启动预算同量级）后自然退出。
+   *
+   * **0.14.8 修尺子（自适应步进）**：旧实现是「固定 sleep(500) + portReachable(500)」，
+   * 于是 t_listen 的量化误差恒为 [0,500)（均值 250ms）——而 loopback 上「无人监听」是**立即
+   * refused**，固定节拍不为任何真实开销买单，纯粹是采样栅格。现按 [nextListenProbeDelayMs]
+   * 步进（20ms 起步、1.5 几何退避、[LISTEN_PROBE_MAX_STEP_MS] 封顶），单次 connect 预算同步
+   * 压到 [LISTEN_PROBE_CONNECT_TIMEOUT_MS] 并再对剩余窗口取 min（超时值只影响异常情形：
+   * 丢包/防火墙；connect 超时传 0 在 Java Socket 上是**无限等待**，故必须 ≥ 1）。
+   *
+   * 窗口、线程名、markListen 幂等与 daemon 属性全部保持不变。
    */
   private fun watchEngineListen() {
     Thread {
-      val deadline = System.currentTimeMillis() + 90_000L
-      while (System.currentTimeMillis() < deadline) {
-        if (EngineProbe.portReachable(500)) {
+      val deadline = System.currentTimeMillis() + LISTEN_WATCH_WINDOW_MS
+      var attempt = 0
+      while (true) {
+        val remaining = deadline - System.currentTimeMillis()
+        if (remaining <= 0L) return@Thread
+        val connectTimeoutMs = minOf(LISTEN_PROBE_CONNECT_TIMEOUT_MS, remaining).toInt()
+        if (EngineProbe.portReachable(connectTimeoutMs)) {
           LogCollector.markListen(context)
           return@Thread
         }
+        val step = nextListenProbeDelayMs(attempt)
+        // 下一次探测会落到窗口之外：不必先睡满再判——否则线程会越过 deadline 才退出。
+        if (step >= remaining) return@Thread
         try {
-          Thread.sleep(500)
+          Thread.sleep(step.toLong())
         } catch (_: InterruptedException) {
           return@Thread
         }
+        attempt++
       }
     }.apply { isDaemon = true; name = "dsh-engine-listen-watch" }.start()
   }
@@ -2462,6 +2478,63 @@ internal fun uvThreadPoolSize(cores: Int): Int = minOf(8, cores.coerceAtLeast(1)
  */
 internal fun pnpmStoreDir(homeDir: File): String =
   File(File(File(homeDir, ".local"), "share"), "pnpm/store").absolutePath
+
+/**
+ * P-AC-04 修尺子（0.14.8）：监听观察窗口，与冷启动预算同量级；窗口本身**不改**。
+ *
+ * 观察者（[EngineManager.watchEngineListen]）在窗口内自适应步进，窗口外自然退出；
+ * 该常量是窗口的唯一真源，同时被调度函数用于「剩余窗口」的计算。
+ */
+internal const val LISTEN_WATCH_WINDOW_MS: Long = 90_000L
+
+/**
+ * 单次 TCP connect 预算（P-AC-04 修尺子）。
+ *
+ * loopback 上「端口无人监听」是**立即 refused**，这个值只在异常情形（丢包 / 防火墙 /
+ * 半开连接）才成为实际耗时。旧实现取 500ms = 与固定节拍同量级，等于把最坏情形写进预算；
+ * 压到 150ms 后异常情形的单次代价有界，且远大于 loopback 的 refused 延迟。
+ * **不得为 0**：Java 的 Socket.connect(addr, 0) 是无限等待。
+ */
+internal const val LISTEN_PROBE_CONNECT_TIMEOUT_MS: Long = 150L
+
+/**
+ * 探测步长上限（P-AC-04 修尺子）。
+ *
+ * 步长早期密、后期疏：上限越小，栅格越细、t_listen 的量化误差越小，代价是 90s 窗口内的
+ * connect 次数（100ms 上限 ≈ 904 次 ≈ 10 次/秒；loopback refused 微秒级，可忽略）。
+ *
+ * 取 100 而非 500 的实测依据：500ms 栅格的采样滞后均值 247ms / 最大 497ms，100ms 栅格降到
+ * 均值 49ms / 最大 97ms——旧实现的读数与真实监听时刻之间就隔着这一段，而设备实测
+ * t_listen_ms 全程在 5~15s 间波动（没有「只在前段才需要精度」这回事）。
+ */
+internal const val LISTEN_PROBE_MAX_STEP_MS: Int = 100
+
+/** 首次探测后等待的步长（第 0 次退避）：小步起步，让窗口前段的读数不被 500ms 栅格量化。 */
+internal const val LISTEN_PROBE_START_STEP_MS: Int = 20
+
+/** 步长几何增长比（1.5 ⇒ 20/30/45/67… 再封顶到 [LISTEN_PROBE_MAX_STEP_MS]）。 */
+internal const val LISTEN_PROBE_GROWTH: Double = 1.5
+
+/**
+ * 自适应探测调度（P-AC-04 修尺子）：第 [attempt] 次探测**之后**应等待的毫秒数。
+ *
+ * 旧实现是固定 500ms 轮询，于是 t_listen 的量化误差恒为 [0,500)（均值 250ms；设备实测
+ * t_listen_ms 在 8052~14866ms 间跳变，其中含这段采样栅格）。步长序列 20/20/30/45/67/100…
+ * 抽成**顶层纯函数**（而非
+ * private 成员）是为了让调度口径能被 JVM 单测直接钉住——[EngineManager] 需要 Context，
+ * 单测拿不到。
+ *
+ * 契约（[EngineListenProbeScheduleTest] 逐条锁死）：
+ * - attempt <= 0 一律返回 [LISTEN_PROBE_START_STEP_MS]（负值不得被放大成步长）；
+ * - 步长单调不回退，且恒落在 [LISTEN_PROBE_START_STEP_MS, LISTEN_PROBE_MAX_STEP_MS]；
+ * - 有限次退避后**精确**封顶到上限（不因浮点误差停在上限下方）；
+ * - 序列总和覆盖整个 [LISTEN_WATCH_WINDOW_MS]，且覆盖所用探测次数有界。
+ */
+internal fun nextListenProbeDelayMs(attempt: Int): Int {
+  if (attempt <= 0) return LISTEN_PROBE_START_STEP_MS
+  val grown = LISTEN_PROBE_START_STEP_MS * Math.pow(LISTEN_PROBE_GROWTH, (attempt - 1).toDouble())
+  return if (grown >= LISTEN_PROBE_MAX_STEP_MS) LISTEN_PROBE_MAX_STEP_MS else grown.toInt()
+}
 
 /** 诊断镜像的单份上限（#211.3）：只需现场尾部；内存峰值从 3× 整份压到 3× 上限内。 */
 internal const val MIRROR_LOG_LIMIT_BYTES: Long = 2L * 1024 * 1024
