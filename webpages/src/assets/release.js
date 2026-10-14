@@ -33,9 +33,12 @@ export const LATEST_RELEASE_URL = RELEASES_URL + '/latest';
 export const API_LATEST_URL = 'https://api.github.com/repos/' + OWNER + '/' + REPO + '/releases/latest';
 
 /**
- * 镜像前缀表。顺序 = 默认优先级；实测延迟仅作初值，运行时以真实测速结果重排。
- * 实测（2026-10-14，对 v0.14.7 真实资产）：gh-proxy.com 820ms 快于 github.com 直连 1447ms，
- * 故"直连永远第一"并不成立，必须实测排序。
+ * 镜像前缀表。顺序 = **初始**优先级；运行时由"健康检查 + 实测延迟"重排。
+ *
+ * cors 字段的事实（2026-10-14 浏览器实测）：只有 gh-proxy.com 返回
+ * Access-Control-Allow-Origin，其余三条都没有。但这**不能**用来判断可用性——
+ * gh-proxy.com 在 2026-10-15 起对 MANIFEST 与 APK 均返回 403（连测三次稳定），
+ * 却因为带 CORS 且响应最快，反而最容易被选成默认线路。详见 probeUrl 的说明。
  */
 // 标签用真实域名：用户有权知道自己在走哪个第三方反代（加速线路是社区服务，非官方托管）。
 // 不要用「加速线路 1」这类尾随数字——与紧随其后的延迟毫秒相邻会读成「线路 1876ms」。
@@ -53,15 +56,23 @@ export const SUPPORTED_ABIS = ['arm64', 'x86_64'];
 export const SITE_URL = 'https://kelai141.github.io/dsh-mobile-apk/';
 
 /**
- * 测速靶：**与版本解绑**。
+ * 健康检查 + 测速靶：**与版本解绑**，且必须是一个**小文件**。
  *
  * 为什么不用当前版本的 APK 探测：那会把"选线路"和"当前版本资产"绑在一起——
- * 资产一旦改名或某版本发布不完整，测速就整体失效，用户被钉死在默认线路上
- * （这正是"节点切换与版本绑定"的缺陷成因）。
- * 改用 releases/latest/download/MANIFEST.txt：它是一个几十字节的稳定小文件，
- * 四个前缀实测均 200，且永远指向最新版，不会因改版失效。
+ * 资产一旦改名或某版本发布不完整，测速就整体失效，用户被钉死在默认线路上。
+ * 用 releases/latest/download/MANIFEST.txt 则永远指向最新版（几十字节）。
+ *
+ * 为什么必须是小文件：浏览器端判活用的是 <script> 标签（见 app.js 的 probeMirror），
+ * 它会**真正加载整个响应体**。MANIFEST.txt 只有约 1.4 KB，代价可忽略；换成 APK 就是 150 MB。
  */
 export const PROBE_FILE = 'MANIFEST.txt';
+
+/** 健康检查 URL（与版本无关的稳定小文件）。 */
+export function probeUrl(template) {
+  const t = typeof template === 'string' ? { prefix: template } : template;
+  if (!t || !t.prefix) throw new Error('probeUrl: 缺少镜像前缀');
+  return t.prefix + OWNER + '/' + REPO + '/releases/latest/download/' + PROBE_FILE;
+}
 
 /** ABI 家族 -> 面向用户的可读名。 */
 export const ABI_LABELS = { arm64: 'arm64（64 位 ARM，绝大多数手机）', x86_64: 'x86_64（64 位 x86，模拟器）' };
@@ -111,13 +122,6 @@ export function assetUrl(template, tag, assetName) {
 /** MANIFEST.txt 的 URL（含 sha256 清单）。 */
 export function manifestUrl(template, tag) {
   return assetUrl(template, tag, 'MANIFEST.txt');
-}
-
-/** 与版本无关的测速 URL（最新版的稳定小文件）。 */
-export function probeUrl(template) {
-  const t = typeof template === 'string' ? { prefix: template } : template;
-  if (!t || !t.prefix) throw new Error('probeUrl: 缺少镜像前缀');
-  return t.prefix + OWNER + '/' + REPO + '/releases/latest/download/' + PROBE_FILE;
 }
 
 // 字符串探测用正则。注意两处易错点：

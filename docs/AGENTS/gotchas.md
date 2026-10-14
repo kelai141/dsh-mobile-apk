@@ -1751,3 +1751,42 @@ EngineBootContinuationTest用latch驱动真实观察函数：winner持CAS但无�
 299. **TAR EOF does not certify XZ stream integrity (#359).** The decoder probe stopped at TAR end markers, so a long padded archive could hide a corrupt or truncated XZ footer beyond the bytes requested by the TAR reader. Closing either stream does not drain it. The production probe now reads the remaining XZ stream to EOF before reporting success. Runtime self-tests cover valid padding and both footer failures (14 checks); an installed APK's 150,009,840-byte snapshot also decoded successfully with the declared decoder versions. Device WebView regression passed in portrait and landscape; no APK or runtime extraction behavior is changed by this build-time gate correction.
 
 300. **Touch reorder cancellation must settle the upstream owner (#357/#358).** A second finger or touchcancel previously cleared only local flags; an unmatched touchend could still drop on the previous target. Because upstream dragend commits its last hover, cancellation now flushes a source-row drop through upstream's no-op path before dragend. Synthetic phases use ReactDOM flushSync, DataTransfer types satisfy the global file-drop handler, and competing trusted Android HTML drag/context-menu defaults are suppressed while this adapter owns the row. Real AVD testing exposed both global transfer metadata and native drag competition after the initial React tests passed. Regression: 713 UI tests, successful build, real catalog cancellation with unchanged order, a subsequent successful reorder, persisted order after reload, and native ADB reorder. The browser-stage lease handle is typed as a numeric window timer so Node ambient timer declarations do not break compilation. Evidence applies to the hot-pushed runtime, not a final release APK.
+
+
+301. **线路探针把 403 当成"最快线路"：no-cors 拿到的是不透明响应，读不到状态码（0.14.7 发布页线上故障，本轮实修）**
+    **现象**：发布页自动选中 `gh-proxy.com` 作为默认线路并显示最快，但用户点"下载"拿到的是错误页而非 APK。该镜像对 MANIFEST 与 APK **均返回 403**（连测三次稳定复现），其余三条线路 302/200 正常。
+    **真因**：探针用 `fetch(url, {mode:'no-cors'})`，而 **no-cors 返回的是不透明响应（`type:'opaque'`、`status:0`），读不到状态码**——403 与 200 在探针眼里完全等价。雪上加霜的是 **403 比 200 回得更快**（实测 284ms vs 605ms），于是死线不仅没被判死，还每次都被排成第一名。探针只测了"有没有响应"，没测"响应是不是可用"。
+    **修法**：**判活与测速分离**。判活改用 `<script>` 标签——它对 HTTP 错误状态可靠触发 `onerror`、对 2xx 触发 `onload`，且不受 CORS 限制（CORS 模式实测只有 gh-proxy.com 有 `Access-Control-Allow-Origin`，等于只有死线可读，方向完全相反）。测速仍用 no-cors 但打**真实资产** URL，到响应头即 `abort`。死线按钮置 `disabled` 并显示"不可用"，当前线路被判死时自动换走。
+    **判据（可判红）**：① 实测四条线路，`<script>` 对 gh-proxy.com 必须 `error`、其余三条 `loaded`；② **反证**：对不存在的版本（`v0.0.0-nope`）必须**四条全 `error`**，证明判据不是恒判活；③ 受控负控：把判活改回 `no-cors fetch` 必须判红。
+    **注意**：`<script>` 判活**会真正加载响应体**，所以靶必须是小文件（MANIFEST 约 1.4 KB）；换成 APK 就是 150 MB。
+
+302. **`redirect:'manual'` 在 `fetch` 下全线抛 TypeError，不能当作探测手段（0.14.7 本轮实测）**
+    **现象**：想用 `fetch(url,{mode:'no-cors',redirect:'manual'})` 借 `type:'opaqueredirect'` 区分重定向与 403，结果四条线路**全部立即抛 `TypeError`**（0ms）。
+    **真因**：`redirect:'manual'` 与 `no-cors`/`cors` 的组合在 Chromium 下不产出可用的 `opaqueredirect` 响应（本站四条线路均走重定向）。`cors+manual`、`cors+follow` 同理。
+    **修法**：不依赖该组合；判活走 `<script>`（见 301）。
+    **判据**：同一次实测里 `redirect:'manual'` 的四条线路必须全为 `TypeError`，而 `<script>` 判活能得到"三活一死"的**区分性**结果——这才是可用判据。
+
+303. **`ms=0` 被当成"最快"：未测到速度的线路排序第一（0.14.7 本轮自引入并自测出）**
+    **现象**：加了"测速失败回退 `ms:0`"后，未测到速度的线路会被排到所有有效测量**之前**。
+    **真因**：排序直接写 `sort((a,b)=>a.ms-b.ms)`，而 `0` 是最小的合法数值，语义上却表示"没有数据"。**另有隐藏的第二处**：`runProbe` 内部写缓存时也在按 raw ms 排序，同样中招。
+    **修法**：集中到 `rankBySpeed()`，`ms<=0` 一律映射为 `Number.POSITIVE_INFINITY` 排到最后；调用点（3 处）全部改走它。
+    **判据（可判红）**：受控负控——只把**其中一处**改回 raw sort，必须判红。**这条负控抓到过真实的判据缺口**：最初的门禁只断言 `rankBySpeed` 存在，改回 raw sort 后仍全绿；补上"调用点必须走 rankBySpeed"与"全文不得出现 raw ms 排序"才判红。
+
+304. **门禁在带注释的源码上做全文正则匹配，会把自己的说明文字判红（0.14.7 本轮踩中）**
+    **现象**：新加的判据断言 `app.js` 里不得出现 `mode:'no-cors'` 的健康检查，结果**永远判红**——因为源码注释里为解释"为什么不用 no-cors"必然写了这个写法。
+    **真因**：正则跑在**含注释的全文**上，把文档当代码。
+    **修法**：先剥离注释再断言（块注释与行注释），并把断言范围收窄到目标函数体（`probeMirror`）而非全文。
+    **判据**：同一条测试里补一条**受控正控**——`measureSpeed` 里**确实应存在** `fetch(`，证明"剥离注释 + 收窄函数体"的匹配逻辑真的能命中代码而不是恒不命中。
+
+305. **极简 DOM 环境会把全部线路误判为不可用：把"未探测"当成"探测失败"（外部 PR #372 的门禁暴露）**
+    **现象**：新增的 `<script>` 判活让外部 PR #372 的 DOM shim 用例失败——`document.head` 为 `undefined`，`appendChild` 抛 `TypeError`，四条线路全部被判死。
+    **真因**：判活函数假定 `document.head` 存在；失败与"没有探测能力"没有区分，统一落到 `null`（=不可用）。
+    **修法**：加 `canProbe()` 能力自检；无能力时返回 `{unprobed:true}`，`runProbe` 见"全部未探测"则**不标死线、不排序、不写缓存**，并让点击兜底直接放行。
+    **判据（可判红）**：无 `document.head` 的环境下必须得到 `dead:[]`（而不是四条全死）；受控负控——去掉 `unprobed` 分支必须判红。
+    **教训**：探测类代码必须显式区分**三种**状态——可达 / 明确不可达 / **无法判定**。把第三种混进第二种，会把"我不知道"升级成"它坏了"，进而把全部选项禁用。
+
+306. **用 read 的分页结果做整文件重写会静默截断文件（本轮真实事故）**
+    **现象**：对 343 KB / 1511 行的 `gotchas.md` 追加条目时，用 `read` 取回的内容拼回整文件再 `write`，文件被截成 51 KB / 144 行，**1570 行历史条目丢失**（`git diff --stat` 显示 1570 deletions）。
+    **真因**：`read` 对长文件**分页返回**（默认上限），把当页内容当作全文写回 = 用部分覆盖整体。
+    **修法**：长文件一律用**定向编辑**追加（以文末唯一片段作锚点），不要 `read` 全文再 `write`；发现截断立即 `git checkout -- <file>` 复原再重做。
+    **判据**：写后必须核对 `git diff --stat` 的删除行数与文件字节数，删除数异常大即已截断。

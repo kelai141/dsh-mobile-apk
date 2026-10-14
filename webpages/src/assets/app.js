@@ -53,23 +53,93 @@ async function deviceSignals() {
 }
 
 /**
- * 测速：no-cors fetch 到**响应头到达**即中止。
- * 必须 abort —— no-cors 响应不可读，不中止浏览器会继续把文件拉完。
+ * 线路健康检查 + 测速。
+ *
+ * **为什么不用 fetch(mode:'no-cors')**（2026-10-15 实修的真实缺陷）：
+ * no-cors 拿到的是**不透明响应**，读不到状态码——403 与 200 在探针眼里完全一样。
+ * gh-proxy.com 从 2026-10-15 起对该仓库返回 403，而 403 比 200 回得更快，
+ * 于是它每次都被选成"最快线路"，用户点下载拿到的是错误页而不是 APK。
+ * （实测：gh-proxy fetch 284ms "ok"，同时 <script> 判为 error；其余三条相反。）
+ *
+ * **为什么用 <script> 标签**：它对 HTTP 错误状态可靠触发 onerror、对 2xx 触发 onload，
+ * 且不受 CORS 限制（CORS 模式下只有 gh-proxy 可读，等于只有死线能被判活）。
+ * 代价是**会真正加载响应体**，所以靶必须是小文件 —— 见 release.js 的 probeUrl 说明。
+ * 注意：onload 只代表"拿到了 2xx"，不代表内容是有效 JS；这里只关心可达性。
+ *
+ * 返回 { id, ms } 或 null（不可用）。
  */
-function probeMirror(template) {
+/**
+ * 速度测量：对**真实资产 URL** 做 no-cors fetch，到响应头到达即中止。
+ *
+ * 为什么打**真实资产**而不是 MANIFEST（2026-10-15 修正）：
+ * 健康检查用的 MANIFEST.txt 只有约 1.4 KB、由 github.com 直接回；
+ * 而用户真正下载的 150 MB APK 走 github.com -> release-assets.githubusercontent.com
+ * 的**另一条链路**（实测重定向后的 host 就是 release-assets）。两者的首字节延迟并不同源，
+ * 用小文件排序会把用户送到"探测很快、下载未必快"的线路上。
+ *
+ * 只等响应头，拿到即 abort：不消耗 150 MB 流量（abort 后客户端不再收包）。
+ *
+ * **已知局限（如实记，勿当已解决）**：这里量的是 TTFB，不是**吞吐**。
+ * 静态页在 no-cors 下拿不到响应体（不透明响应），无法真正测下载速度；
+ * 因此"首字节快、后续慢"的线路仍可能被排前。用户可手动切换，这是该局限的兜底。
+ *
+ * 注意：本函数**不判断可用性**——403 也是合法响应且回得很快。
+ * 可用性由 probeMirror 的 <script> 健康检查单独负责，两者分工不可合并。
+ */
+function measureSpeed(url) {
   return new Promise((resolve) => {
+    if (!canProbe() || typeof fetch !== 'function') { resolve(null); return; }
     const ctrl = new AbortController();
     const started = performance.now();
     const timer = setTimeout(() => { ctrl.abort(); resolve(null); }, PROBE_TIMEOUT_MS);
-    fetch(probeUrl(template), { mode: 'no-cors', cache: 'no-store', signal: ctrl.signal })
+    fetch(url, { mode: 'no-cors', cache: 'no-store', signal: ctrl.signal })
       .then(() => {
         const ms = Math.round(performance.now() - started);
         clearTimeout(timer);
         ctrl.abort();
-        resolve({ id: template.id, ms });
+        resolve(ms);
       })
       .catch(() => { clearTimeout(timer); resolve(null); });
   });
+}
+
+function canProbe() {
+  return typeof document !== 'undefined'
+    && !!document.head
+    && typeof document.createElement === 'function';
+}
+
+async function probeMirror(template, speedUrlFor) {
+  // 环境不支持脚本加载：返回 unprobed，表示"未探测"而非"探测失败"，
+  // 调用方据此不标死线（否则会把全部线路误标为不可用）。
+  if (!canProbe()) return { id: template.id, ms: 0, unprobed: true };
+
+  const alive = await new Promise((resolve) => {
+    const script = document.createElement('script');
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      script.remove();
+      resolve(ok);
+    };
+    const timer = setTimeout(() => finish(false), PROBE_TIMEOUT_MS);
+    script.onload = () => finish(true);
+    script.onerror = () => finish(false);
+    // 加时间戳绕过缓存：命中的缓存会掩盖"这条线路现在坏了"的事实
+    script.src = probeUrl(template) + '?dsh=' + Date.now();
+    document.head.appendChild(script);
+  });
+
+  // 健康检查不过就是死线，不测速——死线的 403 反而回得最快，测了只会误导排序
+  if (!alive) return null;
+
+  const speedUrl = typeof speedUrlFor === 'function' ? speedUrlFor(template) : null;
+  if (!speedUrl) return { id: template.id, ms: 0 };
+  const ms = await measureSpeed(speedUrl);
+  // 速度测不到（超时/被 abort）时退化为"可达但无数据"，0 表示不参与"谁最快"的比较
+  return { id: template.id, ms: ms == null ? 0 : ms };
 }
 
 function readCache() {
@@ -105,6 +175,28 @@ function esc(s) {
 }
 
 /**
+ * 下载前兜底：确认目标线路此刻仍可达（<script> 判活，与测速同一判据）。
+ * 为什么需要它：探测结果最长缓存 6 小时，且线路可能在页面打开后才失效；
+ * 用户点"下载"却拿到 403 错误页是**最伤**的失败形态（体积 150 MB，失败一次代价很高）。
+ * 这里在跳转前用一次小文件健康检查确认，坏了就顺延到下一个可用线路。
+ *
+ * 注意：只改 href，不阻断导航 —— 检查超时也必须放行，不能让探针本身成为失败源。
+ */
+function ensureUsableLine(candidates, onPick, done) {
+  const list = candidates.slice();
+  let i = 0;
+  const tryNext = () => {
+    if (i >= list.length) return done(list[0], false);   // 全不可达：按原线路放行，交给浏览器
+    const tpl = list[i++];
+    probeMirror(tpl).then((hit) => {
+      if (hit) { onPick(tpl); return done(tpl, true); }
+      tryNext();
+    });
+  };
+  tryNext();
+}
+
+/**
  * 线路选择器：独立组件，任何状态（含"暂无支持版本"）都可渲染。
  * 与版本解绑 —— 这是"节点切换不要和版本绑定"的落点。
  */
@@ -119,34 +211,47 @@ function lineSelector(tag, assetName, current, onPick) {
     btn.type = 'button';
     btn.setAttribute('aria-pressed', String(tpl.id === current.id));
     btn.dataset.id = tpl.id;
-    btn.innerHTML = esc(tpl.label) + (tpl.kind === 'official' ? '' : '<span class="ms"></span>');
+    btn.innerHTML = esc(tpl.label) + '<span class="ms"></span>';
     btn.addEventListener('click', () => onPick(tpl));
     wrap.appendChild(btn);
   }
   return wrap;
 }
 
-function paintLineSelector(wrap, current, results) {
+function paintLineSelector(wrap, current, results, dead) {
   for (const btn of wrap.querySelectorAll('button')) {
-    const on = btn.dataset.id === current.id;
+    const id = btn.dataset.id;
+    const on = id === current.id;
     btn.setAttribute('aria-pressed', String(on));
+    const isDead = !!(dead && dead.indexOf(id) >= 0);
+    btn.disabled = isDead;
+    btn.title = isDead ? '该线路当前不可用' : '';
     const msEl = btn.querySelector('.ms');
     if (msEl) {
-      const hit = results && results.find((r) => r.id === btn.dataset.id);
-      msEl.textContent = hit ? '（' + hit.ms + 'ms）' : '';
+      const hit = results && results.find((r) => r.id === id);
+      msEl.textContent = isDead ? '（不可用）' : (hit && hit.ms > 0 ? '（' + hit.ms + 'ms）' : '');
     }
   }
 }
 
-/** 后台测速（与版本无关），完成后回调排序结果。 */
-function runProbe(cb) {
-  Promise.all(MIRROR_TEMPLATES.map(probeMirror)).then((rs) => {
-    const hits = rs.filter(Boolean);
-    if (hits.length) {
-      const best = hits.slice().sort((a, b) => a.ms - b.ms)[0];
-      writeCache(best.id);
-    }
-    cb(hits);
+/**
+ * 后台健康检查（与版本无关），完成后回调 { ok, dead }。
+ * ok   = 可达线路（含实测毫秒），供排序与展示；
+ * dead = 不可达线路的 id，供 UI 置灰，避免用户手动切到死线上。
+ */
+function runProbe(cb, speedUrlFor) {
+  Promise.all(MIRROR_TEMPLATES.map((m) => probeMirror(m, speedUrlFor))).then((rs) => {
+    const all = rs.filter(Boolean);
+    const probed = all.filter((r) => !r.unprobed);
+    // 完全没有真正探测过（环境不支持）：不标死线、不排序、不写缓存
+    if (!probed.length) { cb({ ok: [], dead: [] }); return; }
+    // 一旦有真结果，未探测成功的线路才可判死
+    const dead = all.filter((r) => r.unprobed).length
+      ? []                                                  // 探测不可用时不当判决
+      : MIRROR_TEMPLATES.filter((m) => !all.some((r) => r.id === m.id)).map((m) => m.id);
+    for (const hit of probed) healthyOnce.add(hit.id);
+    writeCache(rankBySpeed(probed)[0].id);
+    cb({ ok: all, dead });
   });
 }
 
@@ -164,6 +269,22 @@ function renderUnsupported(classification) {
 }
 
 let lastResults = null;
+let lastDead = [];
+/** 本会话内已被健康检查确认可达的线路 id（避免每次点击都做一次额外请求）。 */
+const healthyOnce = new Set();
+
+/**
+ * 按实测毫秒排序。ms<=0 表示"可达但没测到速度"（超时/未测），
+ * 必须排到所有有效测量**之后** —— 否则 0 会被当成"最快"，
+ * 把用户送到一条延迟未知的线路上。这是 2026-10-15 的排序缺陷。
+ */
+function rankBySpeed(ok) {
+  return ok.slice().sort((x, y) => {
+    const ax = x.ms > 0 ? x.ms : Number.POSITIVE_INFINITY;
+    const ay = y.ms > 0 ? y.ms : Number.POSITIVE_INFINITY;
+    return ax - ay;
+  });
+}
 
 /**
  * 在"没有主下载按钮"的形态下（架构未知 / 该版本无匹配资产）也要能选线路。
@@ -185,15 +306,26 @@ function mountStandaloneLines(data, current) {
   });
   box.appendChild(sel);
   el.body.appendChild(box);
-  runProbe((hits) => {
-    lastResults = hits;
-    if (!hits.length || sel.dataset.manual === '1') { paintLineSelector(sel, cur, hits); return; }
-    const best = byId(hits.slice().sort((x, y) => x.ms - y.ms)[0].id);
-    if (best.id !== cur.id) {
-      cur = best;
-      if (typeof sel.onPick === 'function') sel.onPick(best);
+  // 此形态没有主下载按钮（架构未知/无匹配资产），拿不到具体资产名，
+  // 故不传 speedUrlFor：延迟回退为健康检查耗时，仅用于排序展示。
+  runProbe(({ ok, dead }) => {
+    lastResults = ok;
+    lastDead = dead;
+    const usable = ok.length ? ok : [];
+    let target = cur;
+    if (usable.length && sel.dataset.manual !== '1') {
+      const best = byId(rankBySpeed(usable)[0].id);
+      if (best.id !== cur.id) {
+        target = best;
+        if (typeof sel.onPick === 'function') sel.onPick(best);
+      }
     }
-    paintLineSelector(sel, cur, hits);
+    // 当前线路已死：强制换到任意可用线路，否则用户会点到 403
+    if (dead.indexOf(cur.id) >= 0 && usable.length) {
+      target = byId(rankBySpeed(usable)[0].id);
+      if (typeof sel.onPick === 'function') sel.onPick(target);
+    }
+    paintLineSelector(sel, target, ok, dead);
   });
   return sel;
 }
@@ -283,12 +415,41 @@ function renderDownload(release, classification) {
 
   const main = document.getElementById('dl-main');
   const host = document.getElementById('lines-host');
-  const sel = lineSelector(tag, asset.name, current, (tpl) => {
+  let sel = null;
+
+  /**
+   * 点击下载的兜底：只在**本线路尚未被确认健康**时拦截一次。
+   *
+   * 为什么要拦截：探测结果最长缓存 6 小时，线路可能在页面打开后才失效；
+   * 把用户送到 403 错误页是最伤的失败形态（包 150 MB，失败一次代价很高）。
+   * 为什么不每次都拦：健康线路不该为一次多余的小文件请求付出延迟。
+   * 判据：healthyOnce 由后台探测或本兜底自身写入；命中即直接放行。
+   */
+  main.addEventListener('click', (ev) => {
+    if (!canProbe()) return;                       // 环境不支持探测：直接放行
+    if (healthyOnce.has(current.id)) return;       // 已确认健康，放行
+    ev.preventDefault();
+    const ranked = [current].concat(
+      MIRROR_TEMPLATES.filter((m) => m.id !== current.id && lastDead.indexOf(m.id) < 0),
+    );
+    ensureUsableLine(ranked, (tpl) => {
+      current = tpl;
+      healthyOnce.add(tpl.id);
+      writeCache(tpl.id);
+      main.href = assetUrl(tpl, tag, asset.name);
+      if (sel) paintLineSelector(sel, current, lastResults, lastDead);
+    }, () => {
+      // 必须重新触发导航：本次点击已被 preventDefault 吃掉
+      window.location.href = main.href;
+    });
+  });
+
+  sel = lineSelector(tag, asset.name, current, (tpl) => {
     current = tpl;
     writeCache(tpl.id);
     // 只改 href，保留浏览器原生下载器（Accept-Ranges 续传、无内存峰值）
     main.href = assetUrl(tpl, tag, asset.name);
-    paintLineSelector(sel, current, lastResults);
+    paintLineSelector(sel, current, lastResults, lastDead);
   });
   host.appendChild(sel);
 
@@ -303,17 +464,23 @@ function renderDownload(release, classification) {
   }
 
   // 实测排序：把最快的线路设为首选（仅当用户尚未手动选过时）
-  runProbe((hits) => {
-    lastResults = hits;
-    if (!hits.length) return;
-    const best = byId(hits.slice().sort((a, b) => a.ms - b.ms)[0].id);
+  // 速度按**真实资产**测：小文件 TTFB 与外网大文件吞吐在国内并不同序
+  runProbe(({ ok, dead }) => {
+    lastResults = ok;
+    lastDead = dead;
+    if (!ok.length) { paintLineSelector(sel, current, ok, dead); return; }
+    const ranked = rankBySpeed(ok);
     const manual = sel.dataset.manual === '1';
-    if (!manual && best.id !== current.id) {
-      current = best;
-      main.href = assetUrl(best, tag, asset.name);
+    // 当前线路已死则无论是否手动选过都要换走（手动选过一条死线没有意义）
+    if (dead.indexOf(current.id) >= 0) {
+      current = byId(ranked[0].id);
+      main.href = assetUrl(current, tag, asset.name);
+    } else if (!manual && ranked[0].id !== current.id) {
+      current = byId(ranked[0].id);
+      main.href = assetUrl(current, tag, asset.name);
     }
-    paintLineSelector(sel, current, hits);
-  });
+    paintLineSelector(sel, current, ok, dead);
+  }, (tpl) => assetUrl(tpl, tag, asset.name));
   sel.addEventListener('click', () => { sel.dataset.manual = '1'; }, true);
 }
 
