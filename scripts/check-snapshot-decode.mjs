@@ -103,6 +103,9 @@ const PROBE_SOURCE = [
   '        int n;',
   '        while ((n = tar.read(buf)) >= 0) total += n;',
   '      }',
+  '      // TAR end markers can precede XZ padding, checksums, index and footer.',
+  '      // Closing the stream does not validate unread compressed bytes.',
+  '      while (xz.read(buf) != -1) {}',
   '    }',
   '    System.out.println("XZ_DECODE_OK entries=" + entries + " bytes=" + total + " declared=" + declared);',
   '  }',
@@ -119,13 +122,17 @@ const FIXTURE_SOURCE = [
   'public class SnapshotDecodeFixture {',
   '  public static void main(String[] args) throws Exception {',
   '    byte[] data = "snapshot decoder self-test\\n".repeat(1024).getBytes(StandardCharsets.UTF_8);',
-  '    try (OutputStream file = new FileOutputStream(args[0]);',
-  '         TarArchiveOutputStream tar = new TarArchiveOutputStream(new XZCompressorOutputStream(file))) {',
+  '    ByteArrayOutputStream archive = new ByteArrayOutputStream();',
+  '    try (TarArchiveOutputStream tar = new TarArchiveOutputStream(archive)) {',
   '      TarArchiveEntry entry = new TarArchiveEntry("self-test.txt");',
   '      entry.setSize(data.length);',
   '      tar.putArchiveEntry(entry);',
   '      tar.write(data);',
   '      tar.closeArchiveEntry();',
+  '    }',
+  '    try (XZCompressorOutputStream xz = new XZCompressorOutputStream(new FileOutputStream(args[0]))) {',
+  '      xz.write(archive.toByteArray());',
+  '      if (args.length > 1) xz.write(new byte[1024 * 1024]);',
   '    }',
   '  }',
   '}',
@@ -265,6 +272,20 @@ if (SELF_TEST || SELF_TEST_RUNTIME) {
       writeFileSync(flippedTar, flippedBytes)
       const flipped = decideDecode(runProbe(java, classpath, flippedTar))
       check('反向：实际解码器拒绝校验字节被翻转的 XZ 尾部', !flipped.ok)
+
+      const paddedTar = join(work, 'padded.tar.xz')
+      const paddedFixture = runJavaSource(java, classpath, 'SnapshotDecodeFixture.java', FIXTURE_SOURCE, [paddedTar, 'padding'])
+      if (paddedFixture.error || paddedFixture.status !== 0) fail('padded fixture generation failed')
+      check('valid TAR with long trailing padding passes', decideDecode(runProbe(java, classpath, paddedTar)).ok)
+      const paddedBytes = readFileSync(paddedTar)
+      const paddedCorrupt = join(work, 'padded-corrupt.tar.xz')
+      const paddedFlipped = Buffer.from(paddedBytes)
+      paddedFlipped[paddedFlipped.length - 12] ^= 0x01
+      writeFileSync(paddedCorrupt, paddedFlipped)
+      check('corrupt footer after TAR EOF and long padding is rejected', !decideDecode(runProbe(java, classpath, paddedCorrupt)).ok)
+      const paddedTruncated = join(work, 'padded-truncated.tar.xz')
+      writeFileSync(paddedTruncated, paddedBytes.subarray(0, paddedBytes.length - 1))
+      check('truncated footer after TAR EOF and long padding is rejected', !decideDecode(runProbe(java, classpath, paddedTruncated)).ok)
 
       const fingerprintRoot = join(work, 'fingerprint-root')
       const assets = join(fingerprintRoot, 'app', 'src', 'main', 'assets')
