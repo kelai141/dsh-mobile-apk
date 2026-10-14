@@ -12,7 +12,7 @@
 //   node scripts/check-release-gates.mjs --list               # 打印声明的门禁集合
 //   node scripts/check-release-gates.mjs --run [--snapshot-dir <dir>]   # 顺序执行门禁集（发布链用）
 // 退出码：0 = 通过；1 = 接线缺口 / 门禁失败 / 树定位失败。
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join, dirname, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
@@ -463,16 +463,58 @@ let ran = 0
 // SKIP 合计（ST-31 / ST-16）：逐门禁捕获输出并解析 SKIP=n；发布链（--require）要求合计 = 0。
 let skipTotal = 0
 const perGateSkips = {}
+/**
+ * 逐门禁耗时记账（0.14.8 门禁优化 P1）。
+ *
+ * 为什么需要它：在本次改动之前，全仓关于「门禁多慢」的唯一事实是 2026-09-26 的一次性测量
+ * （发布链 --run 冷跑 322.2s、12 条产物门禁单跑 411.5s）。那组数字既过期（两个月），又是在
+ * 不同机器负载与不同快照下测的，**无法回归**——任何「优化后更快」的说法都只能靠一次性探针。
+ *
+ * 判据口径（避免把测量本身变成噪声源）：
+ *   · 只计**墙钟**（wall-clock），不做 CPU 时间——门禁的痛点就是等待，不是算力；
+ *   · 每条门禁**单独计时**（含其子进程 spawn 与全部输出）；
+ *   · 同时记录该门禁本次的 stdout+stderr 字节数——「耗时 / 产出」比才是优化的判据，
+ *     单独看耗时会把「本来就该慢的活」误判成浪费（实测 check-snapshot-secrets 67.7s 只产出 56 B）。
+ *   · 落盘 JSON 供回归对比，**不参与任何判据**（不设耗时阈值：阈值会把慢机器变成假红）。
+ */
+const gateTimings = []
 const runGate = (argvFor, label) => {
+  const t0 = Date.now()
   const r = spawnSync(process.execPath, argvFor, { cwd: ROOT, encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 })
+  const elapsedMs = Date.now() - t0
   if (r.stdout) process.stdout.write(r.stdout)
   if (r.stderr) process.stderr.write(r.stderr)
   const m = /SKIP=(\d+)/.exec((r.stdout || '') + (r.stderr || ''))
   perGateSkips[label] = m !== null ? Number(m[1]) : 0
   if (m) skipTotal += Number(m[1])
+  const outBytes = Buffer.byteLength(r.stdout || '', 'utf8') + Buffer.byteLength(r.stderr || '', 'utf8')
+  gateTimings.push({ gate: label, ms: elapsedMs, exit: r.status, outBytes })
+  console.log('  [timing] ' + label.padEnd(46) + String(elapsedMs).padStart(8) + ' ms   out=' + outBytes + ' B')
   if (r.status !== 0) {
     console.error('CHECK-RELEASE-GATES FAILED：' + label + ' 退出码 ' + r.status + '，中止组装')
+    writeGateTimings('failed')
     process.exit(1)
+  }
+}
+/**
+ * 落盘逐门禁耗时（供回归对比）。
+ * 位置可用 DSH_GATE_TIMINGS_OUT 覆盖；缺省写到 .deploy-tmp/gate-timings/<时间戳>.json。
+ * 落盘失败**不影响判据**（只打印 WARN）——记账是观测面，不得成为新的失败点。
+ */
+function writeGateTimings(outcome) {
+  try {
+    const out = process.env.DSH_GATE_TIMINGS_OUT
+      || join(ROOT, '.deploy-tmp', 'gate-timings', new Date().toISOString().replace(/[:.]/g, '-') + '.json')
+    mkdirSync(dirname(out), { recursive: true })
+    const totalMs = gateTimings.reduce((s, g) => s + g.ms, 0)
+    const totalOut = gateTimings.reduce((s, g) => s + g.outBytes, 0)
+    writeFileSync(out, JSON.stringify({
+      at: new Date().toISOString(), outcome, strict: STRICT, snapshotDir: snapshotDir ?? null,
+      abis, totalMs, totalOutBytes: totalOut, gates: gateTimings,
+    }, null, 2))
+    console.log('  [timing] 合计 ' + totalMs + ' ms / ' + gateTimings.length + ' 条门禁，输出 ' + totalOut + ' B -> ' + relative(ROOT, out).replace(/\\/g, '/'))
+  } catch (e) {
+    console.log('  [timing] WARN 耗时记账落盘失败（不影响判据）：' + String(e && e.message).slice(0, 120))
   }
 }
 const snapshotTar = (abi) => join(resolve(snapshotDir), 'snapshot-' + abi + '.tar.xz')
@@ -597,3 +639,5 @@ if (STRICT && overBudget.length > 0) {
 // 用 ALL_GATES.length 作分母会把已下沉的门禁算成「没执行」，读日志的人会误判成漏跑。
 console.log('CHECK-RELEASE-GATES --run PASSED（已执行 ' + ran + '/' + RELEASE_GATES.length + ' 项（发布段），SKIP=' + skipTotal
   + '；另有 ' + RELEASE_EXCLUDED.length + ' 项已下沉、不在本段：' + RELEASE_EXCLUDED.map((g) => g.script + '->' + g.sink).join(', ') + '）')
+// 0.14.8 P1：成功路径也落盘耗时（失败路径已在 runGate 内落盘）。
+writeGateTimings('passed')

@@ -176,14 +176,46 @@ check('combo-probe-P1 源码包含完整 phase 诊断实现', sourceMissingPhase
 // ── 3. A1 出厂声明值对账（P-AC-01）─────────────────────────────────────────
 const autoTar = join(ROOT, '.deploy-tmp', 'snapshot-013', ABI, 'snapshot.tar.xz')
 const tarPath = argOf('snapshot') || (existsSync(autoTar) ? autoTar : null)
-const readFromTar = (tar, member) => {
-  try { return execFileSync(TAR, ['-xO', '-f', tar, member], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 }) } catch { return null }
+// ── P4（0.14.8 门禁优化）：一次解压取全部成员，不再「每成员一次 tar -xO」。──────────────
+//
+// 旧实现逐成员调 `tar -xO -f <tar> <member>`。**xz 不可随机寻址——取一个成员 = 全量解码一遍。**
+// 实测（本机 2026-10-14）：单次取一个成员 **10.8 s**；本门禁取 1 个引擎成员 + 2 个 profile 成员
+// = 3 次全量解码，门禁实测总耗时 **34.2 s**（34.2 ÷ 3 ≈ 11.4，与探针吻合）。
+//
+// 与 check-runtime-assets（P3）、check-mcp-client-deps、check-inject-completeness 同一处方：
+// 一次 `tar -xf` 解到临时目录，后续读本地文件。判据强度不变（读的是同一批字节）。
+const extractCache = { dir: null, tar: null, members: new Map() }
+/** 一次解压 `members` 到临时目录，返回 { member -> utf8 string | null }。 */
+const readManyFromTar = (tar, members) => {
+  if (extractCache.tar !== tar) {
+    if (extractCache.dir) { try { rmSync(extractCache.dir, { recursive: true, force: true }) } catch { /* 清理失败不影响判据 */ } }
+    extractCache.dir = mkdtempSync(join(tmpdir(), 'perf-probe-'))
+    extractCache.tar = tar
+    extractCache.members = new Map()
+  }
+  const missing = members.filter((m) => !extractCache.members.has(m))
+  if (missing.length > 0) {
+    try {
+      execFileSync(TAR, ['-xf', tar, '-C', extractCache.dir, '--', ...missing], { stdio: ['ignore', 'ignore', 'ignore'], maxBuffer: 64 * 1024 * 1024 })
+    } catch { /* 缺席成员按缺失处理 */ }
+    for (const m of missing) {
+      try { extractCache.members.set(m, readFileSync(join(extractCache.dir, ...m.split('/'))).toString('utf8')) }
+      catch { extractCache.members.set(m, null) }
+    }
+  }
+  return extractCache.members
 }
+process.on('exit', () => { if (extractCache.dir) { try { rmSync(extractCache.dir, { recursive: true, force: true }) } catch { /* 同上 */ } } })
 if (!tarPath) {
   skip('无快照可对账（--snapshot <tar> 或 ' + autoTar + '）——A1 出厂值未在真实产物上核对')
 } else {
   const comboProbeMember = 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js'
-  const comboProbeText = readFromTar(tarPath, comboProbeMember)
+  // P4：一次性取回全部 3 个成员（旧实现逐个 tar -xO = 3 次全量解码）。
+  const profileMembers = ['web', 'headless'].map((p) => 'home/.dsh/profiles/' + p + '/package.json')
+  const bulk = readManyFromTar(tarPath, [comboProbeMember, ...profileMembers])
+  console.log('PASS  快照成员一次性取回（一次 tar -xf，' + [comboProbeMember, ...profileMembers].filter((m) => bulk.get(m) !== undefined).length
+    + '/3 个；旧实现为每成员一次 tar -xO = 全量解码 3 次）')
+  const comboProbeText = bulk.get(comboProbeMember) ?? null
   const missingPhaseMarkers = comboProbeText === null ? PHASE_PROBE_MARKERS : missingPhaseProbeMarkers(comboProbeText)
   check('快照内产品 index.js 携带当前 phase 探针（阻止旧 P1 快照进入 APK）',
     comboProbeText !== null && missingPhaseMarkers.length === 0,
@@ -192,7 +224,7 @@ if (!tarPath) {
       : 'phase 签名缺失：' + missingPhaseMarkers.join(', ') + '；请从当前代码重建 snapshot')
   for (const profile of ['web', 'headless']) {
     const member = 'home/.dsh/profiles/' + profile + '/package.json'
-    const text = readFromTar(tarPath, member)
+    const text = bulk.get(member) ?? null
     if (text === null) { skip('快照内缺 ' + member + '（' + tarPath + '）'); continue }
     let manifest = null
     try { manifest = JSON.parse(text) } catch { /* 保留 null = 解析失败 */ }

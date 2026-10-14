@@ -25,10 +25,11 @@
 //               （引擎换代后资产必然不同源——本门禁会拒打包，但没有生成器就得手工 tar -xO，
 //               于是「怎么修」变部落知识；这里把它变成一条命令，写完仍按逐字节复核）
 // 退出码：0 = 通过（或非严格模式下明确计数并打印的 SKIP）；1 = 资产与快照不同源 / 严格模式下缺件。
-import { readFileSync, existsSync, readdirSync, writeFileSync } from 'node:fs'
+import { readFileSync, existsSync, readdirSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { TAR } from './lib/shell.mjs'
 import { createHash } from 'node:crypto'
-import { join, dirname, basename, resolve } from 'node:path'
+import { join, dirname, basename, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync, spawnSync } from 'node:child_process'
 
@@ -89,16 +90,50 @@ const sourcesFor = (asset) => {
   return patches.filter((p) => (p.target ?? '').endsWith('/' + base) && (p.target ?? '').includes('/dsh-' + pkg + '/'))
 }
 
-/** 从快照里取源文件字节（tar -xO；工作目录切到快照目录，规避 Windows/MSYS 的绝对路径改写）。 */
-const readFromSnapshot = (path) => {
+// ── P3（0.14.8 门禁优化）：一次解压取全部目标，不再「每资产一次 tar -xO」。────────────
+//
+// 旧实现：下面的 `for (const asset of assets)` 循环里逐个调 `readFromSnapshot(target)`，
+// 而它是 `tar -xO -f <160MB tar> <单个成员>`。**xz 不可随机寻址——取一个成员 = 全量解码一遍。**
+// 实测（本机 2026-10-14）：单次 `tar -xO` 取一个成员 **10.8 s**；assets/patched 有 3 个资产
+// ⇒ 3 次全量解码，门禁实测总耗时 **32.3 s**（32.3 ÷ 3 ≈ 10.8，与探针吻合）。
+//
+// 本项目对此已有两次成文教训，本处是同一形态的漏网：
+//   · check-mcp-client-deps.mjs:90-91 「为什么不用『每包一次 tar -xOf』…闭包十几个包就要几分钟」
+//   · check-inject-completeness.mjs:68-69 「逐成员 tar -xO 会对 170MB xz 重解压 N 次，实测 >10min 超时」
+//
+// 处方与那两处一致：**一次 `tar -xf` 把需要的成员解到临时目录**，后续在本地文件上比对。
+// 判据强度不变——比对的仍是同一批字节，只是不再重复解码。
+const snapshotDirCache = { dir: null, dispose: null }
+/** 惰性建一次临时解压目录；调用方负责在退出前 dispose。 */
+const snapshotExtractDir = () => {
+  if (snapshotDirCache.dir !== null) return snapshotDirCache.dir
+  const dir = mkdtempSync(join(tmpdir(), 'runtime-assets-'))
+  snapshotDirCache.dir = dir
+  snapshotDirCache.dispose = () => { try { rmSync(dir, { recursive: true, force: true }) } catch { /* 清理失败不影响判据 */ } }
+  return dir
+}
+/** 退出前清理临时目录（含异常路径）。 */
+const disposeSnapshotDir = () => { if (snapshotDirCache.dispose) snapshotDirCache.dispose() }
+process.on('exit', disposeSnapshotDir)
+
+/**
+ * 把 `wanted`（tar 成员路径数组）一次性解到临时目录，返回 { member -> Buffer }。
+ * 解不出来的成员在返回的 Map 里**缺席**（调用方按「读不到」处理，与旧行为一致）。
+ */
+const readManyFromSnapshot = (wanted) => {
+  const out = new Map()
+  if (wanted.length === 0) return out
+  const dir = snapshotExtractDir()
   try {
-    return execFileSync(TAR, ['-xO', '-f', SNAPSHOT_NAME, path], {
-      cwd: dirname(SNAP),
+    execFileSync(TAR, ['-xf', SNAP, '-C', dir, '--', ...wanted], {
+      stdio: ['ignore', 'ignore', 'ignore'],
       maxBuffer: 64 * 1024 * 1024,
     })
-  } catch {
-    return null
+  } catch { /* 缺席成员按缺失处理（后续断言会报），不在此处中断 */ }
+  for (const m of wanted) {
+    try { out.set(m, readFileSync(join(dir, m.split('/').join(sep)))) } catch { /* 缺席 */ }
   }
+  return out
 }
 const sha256 = (buf) => createHash('sha256').update(buf).digest('hex')
 
@@ -143,6 +178,21 @@ const skipAsset = (msg) => {
   skipped += 1
   console.log('SKIP(#' + skipped + ')  ' + msg)
 }
+// P3：先把所有「单 target」资产的快照字节**一次性**取回（一次 tar -xf），再逐个比对。
+// 只在主判据路径上批量；多 target / 无条目两类走 skipAsset 的分支不参与取字节（它们不比对内容）。
+const singleTargets = []
+for (const asset of assets) {
+  const src = sourcesFor(asset)
+  if (src.length === 0) continue
+  const targets = [...new Set(src.map((p) => p.target))]
+  if (targets.length !== 1) continue
+  singleTargets.push({ asset, target: targets[0] })
+}
+const snapBytes = readManyFromSnapshot([...new Set(singleTargets.map((x) => x.target))])
+if (singleTargets.length > 0) {
+  console.log('PASS  快照字节一次性取回（一次 tar -xf，' + snapBytes.size + '/' + new Set(singleTargets.map((x) => x.target)).size + ' 个目标成员；'
+    + '旧实现为每资产一次 tar -xO = 全量解码 N 次）')
+}
 for (const asset of assets) {
   const src = sourcesFor(asset)
   if (src.length === 0) {
@@ -155,7 +205,7 @@ for (const asset of assets) {
     continue
   }
   const target = targets[0]
-  const snapBuf = readFromSnapshot(target)
+  const snapBuf = snapBytes.get(target) ?? null
   if (snapBuf === null) {
     skipAsset(`资产 ${asset} ↔ ${target}：快照里读不到该文件（快照缺该包？）`)
     continue
