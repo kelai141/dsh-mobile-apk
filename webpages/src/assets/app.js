@@ -248,6 +248,8 @@ function renderDownload(release, classification) {
   const canonical = canonicalApkName(tag, classification.abi);
   const legacyNote = asset.name !== canonical ? '<p class="muted small">该版本沿用历史资产名。</p>' : '';
   let current = initialMirror();
+  const digest = release.sha256?.[classification.abi];
+  const hasDigest = typeof digest === 'string' && /^[0-9a-f]{64}$/i.test(digest);
 
   el.body.innerHTML =
     '<div class="verline">' +
@@ -271,9 +273,9 @@ function renderDownload(release, classification) {
         '<li>与已安装版本签名一致时可直接覆盖升级，数据保留。</li>' +
         '<li>两个架构安装包体积相近，无法凭体积区分，请以上方识别结果为准。</li>' +
       '</ol>' +
-      (release.sha256
-        ? '<p class="hash">SHA-256（' + esc(asset.name) + '）<br>' + esc(release.sha256) + '</p>'
-        : '<p class="hash">可在 Releases 页面的 MANIFEST.txt 中核对校验值。</p>') +
+      (hasDigest
+        ? '<p class="hash">SHA-256（' + esc(asset.name) + '）<br>' + esc(digest) + '</p>'
+        : '<p class="hash">该版本未提供内联校验值，可在 Releases 页面的 MANIFEST.txt 中核对。</p>') +
     '</details>' +
     (classification.confidence === 'likely'
       ? '<div class="switchers"><button type="button" id="switch-abi">识别不准？换另一个架构</button></div>'

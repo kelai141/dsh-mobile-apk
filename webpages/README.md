@@ -29,10 +29,10 @@ webpages/
 ```
 push webpages/**  --+
 workflow_dispatch --+--> node tools/build.mjs --> dist/ --> upload-pages-artifact --> deploy-pages
-release 完成      --+
+release published --+
 ```
 
-发版后自动刷新走 `workflow_run: release/completed`，**无需改动 release.yml 一行**。
+Publication refresh uses the `release: published` event after a draft becomes public. Site sources are checked out from the repository's default branch rather than the release tag. Draft creation alone does not refresh the site. Manual dispatch and site-source pushes remain supported.
 
 ### 线路（镜像）与版本解绑
 

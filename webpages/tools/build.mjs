@@ -36,18 +36,23 @@ const MAX_HTML_BYTES = 120 * 1024;
 
 /** 归一化 GitHub release JSON -> 页面数据（只保留需要的字段，避免把整包 JSON 塞进 HTML）。 */
 function normalize(json, source) {
-  if (!json || !json.tag_name) throw new Error('release 数据缺少 tag_name');
+  const tag = source === 'seed' ? json?.tag : json?.tag_name;
+  if (typeof tag !== 'string' || !tag.trim()) throw new Error('release data has no valid tag');
   const assets = Array.isArray(json.assets)
     ? json.assets.filter((a) => a && typeof a.name === 'string')
         .map((a) => ({ name: a.name, size: Number(a.size) || 0 }))
     : [];
   return {
-    tag: json.tag_name,
-    publishedAt: json.published_at || '',
+    tag,
+    publishedAt: (source === 'seed' ? json.publishedAt : json.published_at) || '',
     source,
     generatedAt: new Date().toISOString(),
     assets,
-    sha256: {},
+    sha256: Object.fromEntries(['arm64', 'x86_64'].flatMap((abi) => {
+      const digest = source === 'seed' ? json.sha256?.[abi] : null;
+      return typeof digest === 'string' && /^[0-9a-f]{64}$/i.test(digest)
+        ? [[abi, digest.toLowerCase()]] : [];
+    })),
   };
 }
 
