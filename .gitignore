@@ -23,6 +23,9 @@ plugins/*/cbin_*
 # Python 编译缓存
 __pycache__/
 
+# 发布页站点的构建产物（由 webpages/tools/build.mjs 生成，不入库）
+webpages/dist/
+
 # 本地临时工作区（排查截图与中间产物）：0.14.0 两次误入提交后固化
 .deploy-tmp/
 

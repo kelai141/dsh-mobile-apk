@@ -1,0 +1,179 @@
+/* dsh-mobile 下载页样式 —— 视觉语言照抄 DeepSeek Harness 官方主题。
+ *
+ * 令牌来源（上游权威定义，逐字对齐，勿自创色值）：
+ *   dsh/packages/client/ui-theme/src/styles/design-platform.css  （静态色阶 + 语义别名）
+ *   dsh/packages/client/ui-theme/src/styles/base.css             （字体栈 / 圆角 / 缓动）
+ *
+ * 抄到的关键特征（这就是"官方那个味道"）：
+ *   - 主按钮不是蓝色，而是**近黑**（浅色下 --dsw-alias-brand-primary = neutral-bluish-1000 rgb(15,17,21)）；
+ *     深色下反转为**近白**（neutral-bluish-50）。蓝色只用于链接与信息态。
+ *   - 蓝是 DeepSeek 蓝：浅色用 deepseek-500 rgb(65,118,230)，深色用 deepseek-400 rgb(122,170,255)。
+ *   - 面：白底 + 极淡中性蓝灰分层，边框半透明（浅色 rgba(0,0,0,.1) / 深色 rgba(255,255,255,.12)）。
+ *   - 圆角档位 4/8/12/16/20/28；缓动 cubic-bezier(.4,0,.2,1)，时长 .1/.2/.3s。
+ *   - 字体走系统栈（含 PingFang SC / Microsoft YaHei），不引外部字体，首屏零字体请求。
+ */
+:root {
+  /* 静态色阶（design-platform.css 原值） */
+  --ds-nb-00: rgb(255, 255, 255);
+  --ds-nb-50: rgb(249, 250, 251);
+  --ds-nb-60: rgb(249, 250, 251);
+  --ds-nb-75: rgb(241, 243, 245);
+  --ds-nb-100: rgb(235, 238, 242);
+  --ds-nb-200: rgb(225, 229, 238);
+  --ds-nb-300: rgb(207, 211, 214);
+  --ds-nb-500: rgb(151, 157, 166);
+  --ds-nb-600: rgb(129, 133, 140);
+  --ds-nb-700: rgb(97, 102, 107);
+  --ds-nb-800: rgb(53, 54, 56);
+  --ds-nb-850: rgb(44, 44, 46);
+  --ds-nb-875: rgb(35, 35, 36);
+  --ds-nb-900: rgb(27, 27, 28);
+  --ds-nb-950: rgb(21, 21, 23);
+  --ds-nb-1000: rgb(15, 17, 21);
+  --ds-blue-500: rgb(65, 118, 230);
+  --ds-blue-400: rgb(122, 170, 255);
+  --ds-blue-800: rgb(52, 65, 91);
+  --ds-green-500: rgb(34, 197, 94);
+  --ds-green-400: rgb(78, 209, 126);
+  --ds-amber-500: rgb(245, 158, 11);
+  --ds-amber-400: rgb(247, 173, 49);
+  --ds-red-500: rgb(239, 68, 68);
+
+  /* 字体 / 圆角 / 缓动（base.css 原值） */
+  --ds-font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --ds-font-code: "SF Mono", "JetBrains Mono", "Fira Code", Consolas, "Liberation Mono", Menlo, Courier, "PingFang SC", "Microsoft YaHei";
+  --ds-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --ds-dur: 0.2s;
+  --ds-radius-sm: 8px;
+  --ds-radius-md: 12px;
+  --ds-radius-lg: 16px;
+  --ds-radius-xl: 20px;
+
+  /* 语义别名（浅色） */
+  --bg: var(--ds-nb-00);
+  --bg-soft: var(--ds-nb-50);
+  --layer: var(--ds-nb-00);
+  --layer-2: var(--ds-nb-60);
+  --fg: var(--ds-nb-1000);
+  --fg-2: var(--ds-nb-700);
+  --fg-3: var(--ds-nb-600);
+  --border: rgba(0, 0, 0, 0.1);
+  --border-strong: rgba(0, 0, 0, 0.16);
+  --accent: var(--ds-blue-500);
+  --brand-fill: var(--ds-nb-1000);
+  --brand-fg: var(--ds-nb-00);
+  --tint: rgb(237, 243, 254);
+  --ok: var(--ds-green-500);
+  --warn: var(--ds-amber-500);
+  --pad: clamp(16px, 4vw, 24px);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: var(--ds-nb-950);
+    --bg-soft: var(--ds-nb-900);
+    --layer: var(--ds-nb-850);
+    --layer-2: var(--ds-nb-800);
+    --fg: var(--ds-nb-50);
+    --fg-2: var(--ds-nb-300);
+    --fg-3: var(--ds-nb-400, rgb(173, 178, 184));
+    --border: rgba(255, 255, 255, 0.12);
+    --border-strong: rgba(255, 255, 255, 0.2);
+    --accent: var(--ds-blue-400);
+    --brand-fill: var(--ds-nb-50);
+    --brand-fg: var(--ds-nb-1000);
+    --tint: var(--ds-blue-800);
+    --ok: var(--ds-green-400);
+    --warn: var(--ds-amber-400);
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--ds-font);
+  font-size: 16px;
+  line-height: 1.6;
+  padding-bottom: env(safe-area-inset-bottom);
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.wrap { width: 100%; max-width: 960px; margin: 0 auto; padding-inline: var(--pad); }
+.skip { position: absolute; left: -9999px; }
+.skip:focus { left: 8px; top: 8px; z-index: 9; background: var(--layer); padding: 8px 12px; border-radius: var(--ds-radius-sm); }
+
+.top { border-bottom: 1px solid var(--border); background: var(--layer); padding-top: env(safe-area-inset-top); }
+.top-in { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding-block: 14px; }
+.brand { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; letter-spacing: -0.01em; }
+.brand svg { display: block; }
+.tag { color: var(--fg-3); font-size: 13px; }
+
+.layout { display: grid; grid-template-columns: 1fr; gap: clamp(20px, 3vw, 36px); padding-block: clamp(22px, 4vw, 44px); }
+@media (orientation: landscape) and (min-width: 760px) {
+  .layout { grid-template-columns: minmax(0, 1fr) minmax(340px, 400px); align-items: start; }
+}
+
+.intro h1 { font-size: clamp(23px, 4.6vw, 32px); line-height: 1.28; margin: 0 0 10px; letter-spacing: -0.02em; font-weight: 600; }
+.lede { color: var(--fg-2); margin: 0 0 18px; max-width: 44ch; font-size: 15.5px; }
+.facts { list-style: none; padding: 0; margin: 0; display: grid; gap: 7px; }
+.facts li { color: var(--fg-3); font-size: 14px; }
+
+.card { background: var(--layer); border: 1px solid var(--border); border-radius: var(--ds-radius-lg); padding: var(--pad); }
+.card-title { font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg-3); margin: 0 0 14px; font-weight: 600; }
+
+.verline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.badge { display: inline-block; font-size: 13px; font-weight: 500; padding: 2px 10px; border-radius: 999px; background: var(--tint); color: var(--accent); font-family: var(--ds-font-code); }
+.date { color: var(--fg-3); font-size: 13px; }
+.dev { font-size: 13.5px; color: var(--fg-3); margin: 0 0 14px; }
+.dev b { color: var(--fg); font-weight: 600; }
+
+.btn {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  width: 100%; min-height: 50px; padding: 13px 18px;
+  border: 0; border-radius: var(--ds-radius-md);
+  background: var(--brand-fill); color: var(--brand-fg);
+  font-family: inherit; font-weight: 600; font-size: 16px; text-decoration: none;
+  cursor: pointer; -webkit-tap-highlight-color: transparent;
+  transition: opacity var(--ds-dur) var(--ds-ease);
+}
+.btn:hover { opacity: .88; text-decoration: none; }
+.btn:active { opacity: .78; }
+.btn-sub { font-weight: 400; font-size: 13px; opacity: .72; font-family: var(--ds-font-code); }
+
+.btn2 {
+  display: block; width: 100%; min-height: 46px; padding: 12px 16px; margin-top: 10px;
+  border: 1px solid var(--border-strong); border-radius: var(--ds-radius-md); background: transparent; color: var(--fg);
+  font-family: inherit; font-weight: 500; font-size: 15px; text-decoration: none; text-align: center; cursor: pointer;
+  transition: background var(--ds-dur) var(--ds-ease);
+}
+.btn2:hover { background: var(--bg-soft); text-decoration: none; }
+
+.line-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; font-size: 13px; color: var(--fg-3); }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-3); flex: 0 0 auto; }
+.dot.ok { background: var(--ok); }
+.dot.warn { background: var(--warn); }
+.link-btn { background: none; border: 0; padding: 0; color: var(--accent); font: inherit; cursor: pointer; }
+.link-btn:hover { text-decoration: underline; }
+
+.notice { margin: 0; padding: 14px 16px; border-radius: var(--ds-radius-md); border: 1px solid var(--border); background: var(--bg-soft); }
+.notice h3 { margin: 0 0 6px; font-size: 16px; font-weight: 600; }
+.notice p { margin: 0; color: var(--fg-2); font-size: 14px; }
+
+details { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
+summary { cursor: pointer; color: var(--fg-3); font-size: 13.5px; }
+summary:hover { color: var(--fg-2); }
+.hash { margin: 10px 0 0; font-family: var(--ds-font-code); font-size: 11.5px; word-break: break-all; color: var(--fg-3); line-height: 1.7; }
+.steps { margin: 10px 0 0; padding-left: 20px; color: var(--fg-2); font-size: 14px; }
+.steps li { margin-bottom: 5px; }
+
+.foot { padding-block: 26px 40px; color: var(--fg-3); font-size: 13px; border-top: 1px solid var(--border); }
+.foot p { margin: 0 0 8px; }
+.sep { margin: 0 8px; opacity: .45; }
+.small { font-size: 12.5px; line-height: 1.6; max-width: 72ch; }
+.muted { color: var(--fg-3); }
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }

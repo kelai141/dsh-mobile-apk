@@ -1,0 +1,15 @@
+{
+  "name": "dsh-mobile 下载",
+  "short_name": "dsh-mobile",
+  "start_url": "./",
+  "display": "browser",
+  "background_color": "#f7f8fa",
+  "theme_color": "#2f6df6",
+  "icons": [
+    {
+      "src": "assets/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}

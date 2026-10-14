@@ -1,0 +1,33 @@
+{
+  "tag": "v0.14.7",
+  "publishedAt": "2026-10-14T12:27:57Z",
+  "source": "seed",
+  "generatedAt": "2026-10-14T13:20:00Z",
+  "assets": [
+    {
+      "name": "dsh-mobile-apk-v0.14.7-arm64.apk",
+      "size": 158453224
+    },
+    {
+      "name": "dsh-mobile-apk-v0.14.7-x86_64.apk",
+      "size": 155065330
+    },
+    {
+      "name": "MANIFEST.txt",
+      "size": 1387
+    },
+    {
+      "name": "notes.md",
+      "size": 15213
+    },
+    {
+      "name": "snapshot-arm64.tar.xz",
+      "size": 153420248
+    },
+    {
+      "name": "snapshot-x86_64.tar.xz",
+      "size": 150032356
+    }
+  ],
+  "sha256": {}
+}

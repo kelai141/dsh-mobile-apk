@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="dsh-mobile">
+  <rect width="64" height="64" rx="14" fill="#2f6df6"/>
+  <path d="M20 40V24h5.6l6.4 10.2L38.4 24H44v16h-4.6V31.4l-5.6 8.8h-2.6l-5.6-8.8V40z" fill="#fff"/>
+</svg>
