@@ -10,7 +10,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { ModelCapabilityRow } from '../src/client/dev-section/model-capability.tsx'
+import { ModelCapabilityRow, ModelCapabilitySection } from '../src/client/dev-section/model-capability.tsx'
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -176,5 +176,50 @@ describe('ModelCapabilityRow（A6 手动补齐入口）', () => {
     await act(async () => { fillButton(el).click() })
     expect(el.textContent).not.toMatch(/\/data\/user\/0/)
     expect(el.textContent).not.toMatch(/filesDir/)
+  })
+})
+
+// ── 0.14.8 提级：设置页一级分区的入口（用户反馈「设置页里没有」）──────────────
+//
+// 判据：
+//   ⑥ 分区组件与开发者选项行**共用同一实现**，不复制第二份控件；
+//   ⑦ 分区挂载同样是**零请求**，不排任何定时器（提级不得把手动动作变成自动触发/轮询）；
+//   ⑧ 点击后仍走同一条受鉴权路由，凭据口径不变。
+
+describe('ModelCapabilitySection（0.14.8 设置页一级分区）', () => {
+  const mountSection = async (): Promise<HTMLElement> => {
+    host = document.createElement('div')
+    document.body.appendChild(host)
+    root = createRoot(host)
+    await act(async () => { root!.render(<ModelCapabilitySection {...({} as never)} />) })
+    return host
+  }
+
+  it('分区挂载不发任何请求（提级不得引入自动触发）', async () => {
+    const fetchSpy = makeFetch({ [FILL_URL]: { body: { ok: true } } })
+    vi.stubGlobal('fetch', fetchSpy.impl)
+    await mountSection()
+    expect(fetchSpy.calls, '分区挂载即调用 = A7 禁止的自动路径').toHaveLength(0)
+  })
+
+  it('分区复用行组件（同一实现，不复制第二份控件）', async () => {
+    const fetchSpy = makeFetch({ [FILL_URL]: { body: { ok: true } } })
+    vi.stubGlobal('fetch', fetchSpy.impl)
+    const el = await mountSection()
+    const btn = [...el.querySelectorAll('button')].find((b) => b.textContent === '补齐')
+    expect(btn, '分区块里缺少补齐按钮').toBeTruthy()
+    expect(el.querySelector('[data-plugin="dev-model-capability"]'), '分区未复用行组件').toBeTruthy()
+  })
+
+  it('点击后走同一条受鉴权路由且带 same-origin 凭据', async () => {
+    const fetchSpy = makeFetch({ [FILL_URL]: { body: { ok: true, routes: 1, wrote: 0, details: [] } } })
+    vi.stubGlobal('fetch', fetchSpy.impl)
+    const el = await mountSection()
+    const btn = [...el.querySelectorAll('button')].find((b) => b.textContent === '补齐') as HTMLButtonElement
+    await act(async () => { btn.click() })
+    expect(fetchSpy.calls).toHaveLength(1)
+    expect(fetchSpy.calls[0].url).toBe(FILL_URL)
+    expect(fetchSpy.calls[0].method).toBe('POST')
+    expect(fetchSpy.calls[0].credentials, '凭据口径变化').toBe('same-origin')
   })
 })

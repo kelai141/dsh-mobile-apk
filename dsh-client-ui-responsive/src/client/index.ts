@@ -47,6 +47,7 @@ import { openSessionForNotify, type SessionOpenFace } from './mobile/notify-land
 import { DevSection } from './dev-section/DevSection.tsx'
 import { PhoneControlSection } from './dev-section/phone-control.tsx'
 import { NotifySettingsSection } from './dev-section/notify-settings.tsx'
+import { ModelCapabilitySection } from './dev-section/model-capability.tsx'
 import { DEV_SECTION_CSS } from './dev-section/dev-section.css.ts'
 import { GeneralSettings } from './general-settings/GeneralSettings.tsx'
 import { ThemeBridge } from './theme-bridge.ts'
@@ -293,6 +294,16 @@ export function apply(ctx: ClientContext): void {
     order: 98,
     label: () => '手机控制',
   }, PhoneControlSection))
+
+  // 模型能力（0.14.8 提级）：补齐非内置提供商模型的思考档位等能力。
+  // 此前唯一入口埋在开发者选项里（用户 2026-10-15 反馈「设置页里没有」）——提级为一级分区。
+  // 与通知设置同形：能力在、入口无。手动触发，不轮询（用户明确要求）。
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'android-model-capability',
+    order: 96,
+    label: () => '模型能力',
+  }, ModelCapabilitySection))
 
   // Android general-settings rows (issue #59): immersive status-bar toggle.
   // 0.13.3 (D6): the font-size slider retired — upstream ui-theme fontSize
