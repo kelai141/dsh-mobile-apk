@@ -1858,3 +1858,4 @@ EngineBootContinuationTest用latch驱动真实观察函数：winner持CAS但无�
 - 正确姿势是**新开一个 `origin/main` 的 worktree**（`git worktree add <dir> -b <branch> origin/main`），把本次改动作为补丁**3 路合并**过去：`git diff <陈旧基线> -- <我的文件> > my.patch` 然后 `git apply -3 my.patch`。3 路合并会以上游为底、只叠加我的 hunk，冲突时显式停下而不是静默回退。
 - 合并后必须自查两条：`git diff <baseline> origin/main` 里的上游特征串仍在场（本次是 `nextListenProbeDelayMs`）；`git diff origin/main -U0` 的删除行**只应**是你有意改的（本次恰好 8 行，逐行可读）。
 - 同理：陈旧工作树上的门禁红/绿都不可信，必须在 `origin/main` 的 worktree 上重跑才能作为证据。
+- **同一坑的第二次显形（文档侧）**：表格类文档按「第 N 行的位置」插入新行时，锚点若取自陈旧工作树，行会插到目标基线里完全不同的位置。本轮把症状索引的新条目插到了 `3.` 与 `4.` 之间却写着编号 `7.`（序列变成 `1,2,3,7,4,5,6`）。**规则：按位置插入的锚点必须取自目标基线**（用 `git show origin/main:<path>` 或干净 worktree 的读取结果），插入后自查该组序号连续无重号 —— `check-code-map.mjs` 不校验这种编号，门禁绿替代不了自查。
