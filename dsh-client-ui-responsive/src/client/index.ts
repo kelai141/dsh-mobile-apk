@@ -37,6 +37,7 @@ import { AttachmentPickerMenuEnhancer } from './mobile/attachment-picker-menu.ts
 import { COMPOSER_ROW_CSS } from './composer-row.css.ts'
 import { COMPOSER_INSETS_CSS } from './composer-insets.css.ts'
 import { TRAJECTORY_DETAILS_CSS } from './trajectory-details.css.ts'
+import { TERMINAL_BLOCK_CSS } from './terminal-block.css.ts'
 import { TrajectoryPanelsObserver } from './trajectory-panels-observer.ts'
 import { SnapshotPanelsObserver } from './snapshot-panels-observer.ts'
 import { SNAPSHOT_PANELS_CSS } from './snapshot-panels.css.ts'
@@ -233,6 +234,15 @@ export function apply(ctx: ClientContext): void {
       disposeStyle()
     }
   }, 'ui-responsive: trajectory details full-viewport overlay + :has() fallback')
+
+  // 手机端终端卡片排版（社区截图）：上游命令行的 white-space 是 pre 且带
+  // text-overflow: ellipsis，而 banner 里的状态胶囊与复制按钮不可收缩，把命令挤进窄
+  // 列——长命令于是被省略号截断、右侧留下大片空白，输出区还会横滑。实测（emulator-5562
+  // 引擎 WebView）：命令内容 537px 落在 376px 盒子里（隐藏 161px；360px 视口下 401px），
+  // 输出区 scrollWidth 310 / clientWidth 249。TERMINAL_BLOCK_CSS 重绑两个 whitespace
+  // 变量为 pre-wrap、让 banner 换行且命令行独取整行、并解除 banner 的 150px 上限。
+  // 仅手机形态生效，横屏与桌面不改。
+  ctx.effect(() => injectStyle('terminal-block', TERMINAL_BLOCK_CSS), 'ui-responsive: mobile terminal card layout')
 
   // Mobile Enter guard: on the mobile form the soft-keyboard Enter key must
   // insert a newline instead of submitting — the send button is the only
