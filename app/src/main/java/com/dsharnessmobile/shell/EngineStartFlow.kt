@@ -697,7 +697,13 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     clearClientPluginTreeFailureLatch()
     // The owner and generation change in one CAS; an obsolete finally cannot
     // clear a replacement, and duplicate lifecycle callbacks change neither.
-    val token = flowOwnership.begin() ?: return
+    val token = flowOwnership.begin()
+    if (token == null) {
+      // 抢不到所有权有两种原因，**必须分开**（定位报告 §2.3）：destroyed 是生命周期终结，
+      // 保持「不启动」；running 是「另一次启动/快照刷新正在跑」，丢弃它才是缺陷。
+      deferEngineStartWhileSnapshotTransactionBusy()
+      return
+    }
     val generation = token.generation
     activity.engineManager.lastStartRefusalCode = null
     activity.engineManager.lastStartRefusal = null
@@ -1121,6 +1127,85 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     caller.start()
   }
 
+  /**
+   * P1：`flowOwnership.begin()` 拿不到所有权时的**如实处置**（定位报告 §2.3）。
+   *
+   * `begin()` 返回 null 有两种原因，且语义相反，**必须分开**：
+   *  - `destroyed`：Activity 已销毁 / 进程整体关停 —— 保持「不启动」（原来那个 return 是对的）；
+   *  - `running`：**另一次启动流或快照刷新正在跑**（刷新期间 `running` 恒为 true，
+   *    `finish(token)` 只在启动线程的 finally 里执行；见 EngineStartFlow.kt:1117）——
+   *    此时静默 return 就是缺陷本体：不 spawn、不改相位、不落盘，用户与排障者都看不到痕迹。
+   *
+   * 处置：① 一定留一行**进 boot-fail.log** 的落痕。不走 `LogCollector.log` 就完事：它的 sink 受
+   * `DevLogPrefs` 门控且默认关闭，`dsh-day.log` 恒 absent，等于没留痕（报告 §4 可观测性缺口）；
+   * ② 有快照事务在场时起一个**有界等待者**（[deferredStartRunnable]），等事务收口**且**所有权
+   * 空出来再自动续跑一次 [start]。
+   *
+   * 判据用**跨进程真源** journal 文件而不是 `flowOwnership.running`：后者只是本 Activity 实例的
+   * 内存态（MainActivity 未声明 launchMode，新实例会绕过它），journal 才是「刷新真的在跑」的事实。
+   */
+  private fun deferEngineStartWhileSnapshotTransactionBusy() {
+    if (flowOwnership.destroyed) return // 生命周期终结：保持不启动，不等待、不留痕。
+    if (!canRunEngineWork()) return
+    engineMonitorHandler.removeCallbacks(deferredStartRunnable)
+    val marker = SnapshotTransaction.readMarker(activity.filesDir)
+    LogCollector.log("dsh-shell", "engine start deferred: another start flow or a snapshot refresh owns the generation")
+    if (marker == null) {
+      // 所有权被占、但没有任何快照事务在场：这次丢弃没有客观依据可等（典型是同一实例里上一次
+      // 启动流的收尾还没跑完）。如实记账，不制造一个注定空等的等待者。
+      LogCollector.writeBootFail(
+        activity, "engine-start-deferred-no-transaction",
+        "启动请求未获世代所有权（另一次启动流仍在占用），且无快照事务在场：本次请求未被受理，未拉起引擎；"
+          + "下一次入口（点按钮 / 回前台探活）会重试。",
+      )
+      return
+    }
+    LogCollector.writeBootFail(
+      activity, "engine-start-deferred",
+      "启动请求撞上正在进行的快照刷新，已转为有界等待（**非**静默丢弃）：事务 phase="
+        + (marker.phase.name) + "，帐龄(自述)="
+        + snapshotTransactionAccountedAgeMs(marker, System.currentTimeMillis()) / 1_000 + "s，预算 "
+        + SNAPSHOT_TRANSACTION_WAIT_BUDGET_MS / 60_000 + " 分钟；事务收口后自动续跑一次启动。",
+    )
+    engineMonitorHandler.postDelayed(deferredStartRunnable, SNAPSHOT_TRANSACTION_WAIT_POLL_STEP_MS)
+  }
+
+  /**
+   * P1 的有界等待者：**事务收口 且 世代所有权空出来** ⇒ 自动续跑一次 [start]。
+   *
+   * 为什么等两个条件而不是只等事务：所有权由上一次启动流的 worker 持有（刷新就发生在它内部），
+   * 事务收口后它还要跑完 spawn/轮询那一段才 `finish(token)`。只等事务会在所有权还没空出来时
+   * 续跑一次，又撞回 L700 —— 那只是把静默丢弃换成忙等。
+   *
+   * 有界性：累计等待到 [SNAPSHOT_TRANSACTION_WAIT_BUDGET_MS] 即落一条如实 timeout 痕迹后收手
+   * （**不判失败**、不显示成故障：事务仍在跑时用户看到的是同一句「正在以安全模式重启运行时…」）。
+   */
+  private val deferredStartRunnable = object : Runnable {
+    private var waitedMs = 0L
+    override fun run() {
+      if (!canRunEngineWork()) { waitedMs = 0L; return }
+      val transactionBusy = SnapshotTransaction.readMarker(activity.filesDir) != null
+      if (!transactionBusy && !flowOwnership.running) {
+        waitedMs = 0L
+        LogCollector.log("dsh-shell", "deferred engine start resuming: snapshot transaction settled and ownership is free")
+        start()
+        return
+      }
+      if (waitedMs >= SNAPSHOT_TRANSACTION_WAIT_BUDGET_MS) {
+        waitedMs = 0L
+        LogCollector.writeBootFail(
+          activity, "engine-start-deferred-timeout",
+          "启动请求在 " + SNAPSHOT_TRANSACTION_WAIT_BUDGET_MS / 60_000 + " 分钟等待预算内仍未取得世代所有权"
+            + "（快照事务在场=" + transactionBusy + "）：本次启动请求未执行，也未拉起引擎；"
+            + "事务仍在解压时可稍后重试或改用重启应用。",
+        )
+        return
+      }
+      waitedMs += SNAPSHOT_TRANSACTION_WAIT_POLL_STEP_MS
+      engineMonitorHandler.postDelayed(this, SNAPSHOT_TRANSACTION_WAIT_POLL_STEP_MS)
+    }
+  }
+
   private fun canRunEngineWork(): Boolean =
     !flowOwnership.destroyed && !activity.isDestroyed && !activity.isFinishing && !activity.userClosedEngine &&
       !EngineService.userShutdown && !Thread.currentThread().isInterrupted
@@ -1253,6 +1338,15 @@ internal class EngineStartFlow(private val activity: MainActivity) {
   private fun performSafeModeRestart() {
     if (!canRunEngineWork()) return
     val engine = activity.engineManager
+    // P1（定位报告 §2.3/§7）：**动任何东西之前**先看快照事务是否正在进行（跨进程真源
+    // = 事务 journal 文件，比本 Activity 实例的内存态客观——MainActivity 未声明 launchMode，
+    // 新实例会绕过 flowOwnership）。事务在场时先停旧引擎会把用户从「能跑但插件错」推到
+    // 「8-12 分钟没有引擎」，正是社区现象「点了安全模式、引擎没起来」。故此处**一步都不动**，
+    // 只如实回执 + 有界等待事务收口，收口后再走同一条「先停旧、再起新」。
+    if (SnapshotTransaction.readMarker(activity.filesDir) != null) {
+      awaitSnapshotTransactionThenRestartSafeMode()
+      return
+    }
     val liveComplete = engine.liveRuntimeComplete()
     val snapshotFresh = engine.snapshotFresh()
     // 归属权在「停」之前只能由 stopOwnedEngine 的真实返回值回答（它内含探活 + 句柄判定），
@@ -1292,16 +1386,87 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     // 而不是被上一次失败的降级闸门挡住（与手动重试同口径）。
     engineRetryCount = 0
     engine.clearRefreshLedger()
+    // P2（定位报告 §4/§7）：**成功/进入面**留痕。既有四个失败 stage（refused / not-owned /
+    // stop-failed / failed）都在失败分支上，成功面此前只写 LogCollector.log——而采集器默认关
+    // （DevLogPrefs 默认 false），dsh-day.log 恒 absent ⇒ 安全模式重启的成功面在诊断包里
+    // 完全不可见，这正是社区反馈「查不出真因」的直接原因。本 stage 是**进入面**（不是失败面）：
+    // 它与那四个失败 stage 组成两面对照。D3 验收脚本 verify-d3-safemode-restart.mjs 的 C4
+    // 判据用的是通配 safe-mode-restart-*，本 stage 命中该通配是**刻意的**——但读的人不得据此
+    // 把它当失败记录判红（脚本自身把它归在「失败面补充证据」一列，不参与判红）。
+    LogCollector.writeBootFail(
+      activity, "safe-mode-restart-started",
+      "安全模式重启进入启动流（decision=" + preDecision + "）：本壳托管的旧引擎已停，正以安全模式清单重建运行时",
+    )
     LogCollector.log("dsh-shell", "safe mode restart: owned engine stopped, starting with the safe profile (decision=" + preDecision + ")")
     activity.startEngineFlow()
   }
 
-  /** 安全模式重启的如实回执（相位 + 文案），保证「停旧起新」窗口不被显示成已就绪。 */
-  private fun applySafeModeRestartHint(decision: SafeModeRestartDecision) {
-    val hint = safeModeRestartHint(decision)
+  /**
+   * P1：快照事务进行中的安全模式重启——**不丢弃、不谎报成功、不先停旧引擎**。
+   *
+   * 为什么不能先停：定位报告 §3 的 M2 与 §2.4 说明，刷新一旦开始就必然跑完（解压路径不响应
+   * 线程中断），实测 8-12 分钟。先停旧引擎会让用户在这段时间里**完全没有引擎**——界面上就是
+   * 社区反馈的那一幕「点了安全模式，引擎没起来」。故这里等事务收口**之后**才走
+   * [performSafeModeRestart] 的既有「先停旧、再起新」。
+   *
+   * 有界性（见 [awaitSnapshotTransactionSettled]）：16 分钟硬预算 + 1s 步进。预算依据 =
+   * 报告 §3 的全量重解压实测上限 12 分钟（8-12 分钟区间），留 4 分钟余量覆盖换树 + 收尾
+   * （提交点是「先写指纹、后清 marker」，Lead 实测该窗口本身约 25s）。超预算**不当失败**：
+   * 事务仍在跑时如实落一条 timeout 痕迹并复用同一相位文案，让用户知道还在等而不是坏了。
+   */
+  private fun awaitSnapshotTransactionThenRestartSafeMode() {
+    val engine = activity.engineManager
+    val liveComplete = engine.liveRuntimeComplete()
+    val snapshotFresh = engine.snapshotFresh()
+    // 只读的预判：live 树残缺时**一步都不动**（与既有的 [safeModeRestartCanProceed] 同源），
+    // 停滞在这里等一个注定会被拒的重启毫无意义——如实回执比空等更负责。
+    val preDecision = safeModeRestartDecision(liveComplete, snapshotFresh, ownedStopOk = true)
+    // 事务自述的相与账龄（纯读，不猜）：用户可见文案与 boot-fail 记录**同一份**，避免两处口径漂移。
+    val marker = SnapshotTransaction.readMarker(activity.filesDir)
+    val waitText = snapshotTransactionWaitText(
+      marker?.phase?.name ?: "unknown",
+      snapshotTransactionAccountedAgeMs(marker, System.currentTimeMillis()),
+    )
+    // 如实相位：此刻**旧引擎仍在跑**（我们还没停），事务也在跑。不得出现「已就绪」。
+    activity.runOnUiThread {
+      if (canRunEngineWork()) applySafeModeRestartHint(preDecision, waitText)
+    }
+    LogCollector.log("dsh-shell", "safe mode restart deferred: snapshot transaction in progress (decision=" + preDecision + ")")
+    LogCollector.writeBootFail(
+      activity, "snapshot-transaction-wait",
+      waitText + "（安全模式重启已推迟，非静默丢弃；decision=" + preDecision
+        + "）事务收口后自动继续「先停旧引擎、再以安全模式清单重建」",
+    )
+    val settled = awaitSnapshotTransactionSettled(
+      transactionActive = { SnapshotTransaction.readMarker(activity.filesDir) != null },
+      current = { canRunEngineWork() },
+    )
+    if (!settled) {
+      LogCollector.writeBootFail(
+        activity, "snapshot-transaction-wait-failed",
+        "快照事务在 " + SNAPSHOT_TRANSACTION_WAIT_BUDGET_MS / 60_000 + " 分钟预算内仍未收口（或已换代/销毁）："
+          + "安全模式重启本次未执行，安全模式的插件改动本次不生效；事务仍在解压时不建议重复操作，"
+          + "可稍后重试或改用重启应用。",
+      )
+      return
+    }
+    if (!canRunEngineWork()) return
+    // 事务已收口：按同一判据重算一次（live/快照在等待期间可能已变），再走既有的先停后启。
+    performSafeModeRestart()
+  }
+
+  /**
+   * 安全模式重启的如实回执（相位 + 文案），保证「停旧起新」窗口不被显示成已就绪。
+   *
+   * @param extraHint 附加的如实说明（可为 null）。P1 的事务等待路径用它承载
+   *   [snapshotTransactionWaitText]——那一段回答的是「为什么在等、还要等多久」，与
+   *   [safeModeRestartDecision] 的判定面是两个维度，故**不并进** [safeModeRestartHint] 的取值域。
+   */
+  private fun applySafeModeRestartHint(decision: SafeModeRestartDecision, extraHint: String? = null) {
+    val hint = safeModeRestartHint(decision) + (extraHint?.let { "\n" + it } ?: "")
     when {
       safeModeRestartCanProceed(decision) ->
-        // 放行面：此刻是明确的中间态（旧已停、新未起），相位必须是 Starting 而不是任何就绪态。
+        // 放行面：明确的中间态（旧引擎停止中或已停、新引擎未就绪），相位必须是 Starting 而不是任何就绪态。
         activity.applyGuidePhase(GuidePhase.Starting, "正在以安全模式重启运行时…", hint)
       else ->
         // 拒绝面：停在可读错误页（Error 相位保留「安全模式启动」出口，用户可再次尝试）。
@@ -1319,7 +1484,12 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     if (!engineRestarting.compareAndSet(false, true)) return false
     flowOwnership.invalidate()
     val token = flowOwnership.begin()
-    if (token == null) { engineRestarting.set(false); return false }
+    if (token == null) {
+      // 同 start()：running（另一次启动/刷新在跑）不得静默丢弃，如实留痕 + 有界等待续跑。
+      engineRestarting.set(false)
+      deferEngineStartWhileSnapshotTransactionBusy()
+      return false
+    }
     val generation = token.generation
     activity.userClosedEngine = false // Explicit user restart, not a lifecycle callback.
     EngineService.setUserShutdown(activity, false)
@@ -1787,14 +1957,94 @@ internal fun safeModeRestartCanProceed(decision: SafeModeRestartDecision): Boole
  */
 internal fun safeModeRestartHint(decision: SafeModeRestartDecision): String = when (decision) {
   SafeModeRestartDecision.PROCEED ->
-    "正在以安全模式重启运行时…（旧引擎已停，新引擎启动中，请保持应用在前台）"
+    "正在以安全模式重启运行时…（本壳托管的旧引擎将先被停止，新引擎随后启动，请保持应用在前台）"
   SafeModeRestartDecision.PROCEED_SNAPSHOT_STALE ->
-    "正在以安全模式重启运行时…（运行时快照尚未就绪，本次启动会先按既有规则处理快照，可能较慢；旧引擎已停，新引擎启动中）"
+    "正在以安全模式重启运行时…（运行时快照尚未就绪，本次启动会先按既有规则处理快照，可能较慢；" +
+      "若快照解压正在进行，会先等它收口再停旧引擎并启动新引擎）"
   SafeModeRestartDecision.REFUSE_LIVE_INCOMPLETE ->
     "运行时不完整，未停止也未重启引擎：安全模式的插件改动**本次不生效**。请先在错误页按提示重做运行时，再重试。"
   SafeModeRestartDecision.REFUSE_OWNERSHIP ->
     "3080 端口未被归属到本应用，未停止也未重启引擎：安全模式的插件改动**本次不生效**。请先在控制台排查端口占用。"
 }
+
+/**
+ * 快照事务等待的**如实相位文案**（P1；纯函数，JVM 可反证）。
+ *
+ * 【为什么它**不在** [safeModeRestartHint] 的取值域内】[safeModeRestartHint] 是
+ * [SafeModeRestartDecision] 四值枚举的穷尽 when，语义是「这一步该不该去停旧进程并重新拉起」
+ * 的四个结论；而本函数回答的是**另一个维度**的问题——「事务还要多久、现在处于什么相」。
+ * 把它塞进那个枚举等于把「修并发缺陷」与「改既有判定契约」混进同一个改动（既有
+ * SafeModeRestartDecisionTest / IndependentSafeModeRestartTest 有取值域与文案一一对应断言）。
+ * 故刻意独立：**改写这条文案不会影响那四个结论的取值域**。
+ *
+ * 约束（D3 判据 C3 + 既有 `claimsReady` 断言）：**不得**出现「已就绪 / 启动完成 / 已启动完成 /
+ * 可以开始使用」这类宣称可用的词——此刻旧引擎仍在跑、事务仍在跑，是明确的中间相。
+ *
+ * @param phase 事务 journal 自述的相（如 STAGED / SWAPPING）
+ * @param accountedAgeMs 事务自述开始时间至今的时长；null = journal 没有可用的起始时间
+ */
+internal fun snapshotTransactionWaitText(phase: String, accountedAgeMs: Long?): String =
+  "运行时正在解压（快照事务进行中，phase=" + phase + "，已进行约 " +
+    (accountedAgeMs?.let { (it / 60_000).coerceAtLeast(0L).toString() + " 分钟" } ?: "未知时长") +
+    "）：本壳托管的旧引擎仍在运行，事务收口后会自动停止旧引擎并以安全模式清单重建，请保持应用在前台。"
+
+/** 事务自述账龄（毫秒）；journal 没有可用起始时间时返回 0（**不猜**，也不写负值）。 */
+internal fun snapshotTransactionAccountedAgeMs(marker: SnapshotTransaction.Marker?, nowMs: Long): Long =
+  marker?.startedAt?.takeIf { it > 0L }?.let { (nowMs - it).coerceAtLeast(0L) } ?: 0L
+
+// ── P1（0.14.8）：快照事务窗口内的**有界等待**（定位报告 §2.3/§7）────────────────────
+//
+// 缺陷形态：刷新期间 `flowOwnership.running` 恒为 true（finish 只在启动线程 finally 里跑），
+// 于是 EngineStartFlow.start() 的 `flowOwnership.begin() ?: return` 把请求**静默丢弃**——
+// 不 spawn、不改相位、不落盘。安全模式重启（performSafeModeRestart 末尾的 startEngineFlow）
+// 正是撞在这堵墙上，用户看到的就是「点了安全模式，引擎没起来」。
+
+/**
+ * 等待快照事务**收口**（journal 消失）；true = 已收口，false = 预算内未收口或已换代/销毁。
+ *
+ * 写法与 [awaitEngineHttpReady] 同源：注入式 clock + 硬预算，使「有界」可被 JVM 逐条反证
+ * （这条等待最危险的形态是变成无限等——它跑在启动线程上，一旦不受预算约束就会永久挂住）。
+ *
+ * - 判据 [transactionActive] = `SnapshotTransaction.readMarker(filesDir) != null`：**跨进程真源**。
+ *   比 `flowOwnership.running` 客观——后者只是本 Activity 实例的内存态，而 MainActivity 未声明
+ *   `launchMode`，新实例会绕过它（报告 §2.3 的适用边界）。
+ * - [current]：世代/生命周期校验，false 立即收手，不对废弃世代做动作。
+ * - 预算用尽 ⇒ 返回 false，**由调用方如实回执**；不得静默（那只是把丢弃挪了个位置）。
+ *
+ * 预算依据（不给魔数）：报告 §3 的一次全量重解压实测为 **8-12 分钟**，
+ * [SNAPSHOT_TRANSACTION_WAIT_BUDGET_MS] 取 16 分钟 = 12 分钟上限 + 4 分钟余量，余量覆盖换树
+ * 与收尾——提交点是「先写指纹、后清 marker」，Lead 实测该窗口本身约 25s，而事务随时可能从
+ * STAGED 推进到 SWAPPING。超预算不算失败：用户看到的是同一条如实中间态文案（不显示成故障），
+ * 另在 boot-fail.log 落一条 timeout 痕迹。
+ *
+ * @param pollStepMs 轮询步进（生产 1s；单测注入）
+ * @param now 时钟读数（单测注入）
+ * @param sleep 睡眠（单测注入，避免真实等待）
+ * @param transactionActive 事务是否仍在进行（journal 在场）
+ * @param current 世代/生命周期校验
+ */
+internal fun awaitSnapshotTransactionSettled(
+  budgetMs: Long = SNAPSHOT_TRANSACTION_WAIT_BUDGET_MS,
+  pollStepMs: Long = SNAPSHOT_TRANSACTION_WAIT_POLL_STEP_MS,
+  now: () -> Long = { System.currentTimeMillis() },
+  sleep: (Long) -> Unit = { ms -> if (ms > 0L) Thread.sleep(ms) },
+  transactionActive: () -> Boolean,
+  current: () -> Boolean = { true },
+): Boolean {
+  val deadline = now() + budgetMs
+  while (true) {
+    if (!current()) return false
+    if (!transactionActive()) return true
+    if (now() >= deadline) return false
+    sleep(pollStepMs)
+  }
+}
+
+/** 快照事务等待预算：16 分钟（依据见 [awaitSnapshotTransactionSettled] 的注释）。 */
+internal const val SNAPSHOT_TRANSACTION_WAIT_BUDGET_MS = 16 * 60_000L
+
+/** 快照事务等待步进（毫秒）。 */
+internal const val SNAPSHOT_TRANSACTION_WAIT_POLL_STEP_MS = 1_000L
 
 // ── DEVICE-FINDING-4：引擎强制重启后的**有界就绪等待**（纯判据，JVM 可反证）─────────
 

@@ -1831,3 +1831,30 @@ EngineBootContinuationTest用latch驱动真实观察函数：winner持CAS但无�
 现象：四列以上 Markdown 表格的说明被挤成高行，横滑时误开右栏。上游 `.md-table-wide` 静止态为 `overflow-x:hidden`，侧栏仲裁只识别 `auto/scroll`，触屏没有鼠标 hover；同时单元格 `30vw` 上限过窄。移动端适配以稳定 hook 常驻 `overflow-x:auto`，表格及其后代预设 `touch-action:auto`，按内容分配列宽，保留 100px 最小内容宽和不超过 240px 的内容上限，不缩字号。普通小表格与桌面宽屏鼠标模式保留上游行为。
 
 验证：`tests/sidebar-gestures.spec.ts` 覆盖旧样式负控、流式插入后首触点不抢手势、表格外侧栏仍能展开。jsdom 不证明原生滚动与布局，必须另附 WebView/CDP、ADB 两方向证据。开发期热推不能代替发版 APK 的最终验收。
+312. **0.14.8 安全模式重启「点了没反应、过几分钟又能跑」= 刷新窗口内的启动请求被静默丢弃（本轮实修，L2）**：
+
+定位报告 §2.3/§2.5 确证缺陷**不在**安全模式本身（SafeMode 零碰指纹），而在刷新窗口内启动请求的**零回执**。三条真因缺一条都解释不全：
+
+① `EngineStartFlow.start()` 抢世代所有权失败时直接 `val token = flowOwnership.begin() ?: return` —— 而工厂刷新在**同一个世代里同步跑**、`finish(token)` 只在启动线程 finally 执行 ⇒ 刷新期间 `begin()` 恒返回 null ⇒ 任何再次进入的启动请求不 spawn、不改相位、不落盘。且 `begin()` 返回 null 的**两种原因**（destroyed / running）被并成同一个 return，「被并发让行」与「生命周期终结」分不清，`destroyed` 时还会白等。
+
+② `refreshSnapshotInternal` 把「另一条事务在飞」记成**自己的失败**（`lastRefreshFailure = IllegalStateException(...)` + 失败账本），而同一堵墙上另两处早已是对的：`startEngine` 返回 true 让行、`invalidateSnapshotFreshness` 返回 false 让行。全仓只此一处口径不一致。后果不止日志难看：纯并发争用会喂出「同一份快照连续失败达阈」，让 `shouldDegradeRefresh` 此后**永久跳过刷新**。
+
+③ 成功面只写 `LogCollector.log`，而采集器受 `DevLogPrefs` 门控、默认关闭 ⇒ 用户诊断包里 0 条安全模式痕迹的直接原因。
+
+修法：`start()`/`restart()` 拿到 null 时按 `destroyed`（不启动、不留痕）/ `running`（`writeBootFail` **进 boot-fail.log** + 有界等待后自动续跑）**分开**处置；`performSafeModeRestart` 在**停旧引擎之前**先判事务——先停会让用户白等 8-12 分钟没有引擎，那正是社区现象本身；事务在场则如实相位 + 等收口（`snapshot-transaction-wait`），收口后再先停后启。成功面补 `stage=safe-mode-restart-started`，与既有四个失败 stage 组成两面对照。`refreshSnapshotInternal` 新增 `lastRefreshDeferred` 与失败语义分开，被让行不进账本。
+
+**判据选择（关键）**：跨进程真源用**事务 journal 文件**（`SnapshotTransaction.readMarker(filesDir) != null`）而不是本 Activity 实例的内存态——MainActivity 未声明 `launchMode`，新实例会绕过 `flowOwnership.running`。
+
+**两处易漏的推论**：① 续跑必须**同时**等「事务收口」与「世代所有权空出来」——只等事务会在所有权还没释放时续跑一次，又撞回同一行，等于把静默丢弃换成忙等；② 等待必须有界，否则刷新卡死时把用户无限挂在中间态。
+
+文案：新增 `snapshotTransactionWaitText` 纯函数，**刻意不属于** `safeModeRestartHint` 取值域（后者是 `SafeModeRestartDecision` 四值枚举的穷尽 when，扩枚举等于把修并发缺陷与改既有判定契约混进一个改动）；放行面旧文案「旧引擎已停」改为不预设（事务在场时旧引擎确实还没停）。D3 判据点名的「已就绪/启动完成」类词一个都不出现。
+
+313. **subagent/循环里做「3 路合并」前，先确认工作树的分叉基线：过期工作树会把已合入的上游改动整体回退（本轮实修踩到）**：
+
+现象：`git diff 5fdcf62 -- <仅两个源文件>` 显示的工作树内容比 `origin/main` **旧**——工作树缺 PR #373 的自适应探针、#387 的剪贴板镜像。若直接 `git add` 这两个文件提交，PR 会静默**删掉** main 上已经落地的 195 行改动（`git diff --stat origin/main` 显示 `EngineManager.kt | 112 +++----`，其中 80 行是删除），而本地门禁此时还会**假红**（`check-code-map` 报 `react-dom.d.ts` 未被覆盖——该文件在 main 上已被覆盖，只是陈旧工作树里的执行地图还没有对应查点）。
+
+判断与修法：
+- 先跑 `git diff --stat <怀疑的基线> origin/main -- <你要改的文件>`：非空即说明工作树落后，**不要**基于它提交。
+- 正确姿势是**新开一个 `origin/main` 的 worktree**（`git worktree add <dir> -b <branch> origin/main`），把本次改动作为补丁**3 路合并**过去：`git diff <陈旧基线> -- <我的文件> > my.patch` 然后 `git apply -3 my.patch`。3 路合并会以上游为底、只叠加我的 hunk，冲突时显式停下而不是静默回退。
+- 合并后必须自查两条：`git diff <baseline> origin/main` 里的上游特征串仍在场（本次是 `nextListenProbeDelayMs`）；`git diff origin/main -U0` 的删除行**只应**是你有意改的（本次恰好 8 行，逐行可读）。
+- 同理：陈旧工作树上的门禁红/绿都不可信，必须在 `origin/main` 的 worktree 上重跑才能作为证据。

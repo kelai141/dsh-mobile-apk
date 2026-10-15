@@ -85,12 +85,19 @@ class IndependentSafeModeRestartTest {
     }
   }
 
-  // ── 放行文案必须说明是中间态（旧已停 / 新未起）───────────────────────────────
+  // ── 放行文案必须说明是中间态（旧将停/已停、新未起）────────────────────────────
+  //
+  // 0.14.8 P1 断言更新：文案此前写死「旧引擎已停」，而事务进行中时**旧引擎其实还没停**
+  // （安全模式重启会先等事务收口，见 DeferredEngineStartTest）。写死就是「文案与事实不符」，
+  // 与本次修复要修的静默丢弃同族。改为：必须点名旧引擎与新引擎两条事实，且**不得**预先
+  // 宣称旧引擎已停。
   @Test
   fun proceedHintsDescribeIntermediateState() {
     for (d in listOf(SafeModeRestartDecision.PROCEED, SafeModeRestartDecision.PROCEED_SNAPSHOT_STALE)) {
       val hint = safeModeRestartHint(d)
-      assertTrue("放行文案必须如实描述中间态（决策 $d）：$hint", hint.contains("旧引擎已停"))
+      assertTrue("放行文案必须点名本壳托管的旧引擎（决策 $d）：$hint", hint.contains("旧引擎"))
+      assertTrue("放行文案必须说明新引擎随后启动/正在启动（决策 $d）：$hint", hint.contains("新引擎"))
+      assertFalse("事务仍可能在跑，放行文案不得预宣称「旧引擎已停」（决策 $d）：$hint", hint.contains("旧引擎已停"))
     }
   }
 

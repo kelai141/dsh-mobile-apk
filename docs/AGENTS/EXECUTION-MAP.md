@@ -124,7 +124,7 @@ sequenceDiagram
 | K08 | 浏览器宿主 | 隔离浏览器：无桥 WebView、准入过滤、几何与保活 | 模型 browser* op（控制队列）/ 面板 browserHost* 桥 | 交互面 | S01,P03,控制队列 | MainActivity 构造，op 与面板下推拉起 | BrowserHost.kt,BrowserHostNavigationPolicy.kt,BrowserOverlayPolicy.kt,BrowserHostProfile.kt | 高 |
 | K09 | 悬浮球与面板 | 悬浮球三窗口与展开面板：状态、待答、应答、完成态 | 设置页开关或 onResume 补启；点球展开；WS 帧与 live 文件事件 | 交互面 | K01,K10,引擎网关 | K01 宿主 Activity 与桥开关；EngineService 划掉后台时停它 | OverlayService.kt,OverlayPanel.kt | 高 |
 | K10 | 通知中心 | 引擎事件到通知栏应答的投递-应答闭环；延后日志同步提交、恢复与结算 | 引擎 .notify.ndjson / WS waterfall / 通知动作广播 | 交互面 | P01 通知投影、K09 面板 pending | EngineService.onCreate、动作广播冷启动 | NotifyCenter.kt,NotifyBridge.kt,NotifyStore.kt,NotifySuppressQueue.kt,NotifyDecisionQueue.kt | 高 |
-| K11 | Kotlin 单测面 | JVM策略/core/settlement/wiring与instrumentation覆盖；在场不是已执行 | 外部Gradle/结果基线门禁 | 测试与门禁 | 横切 | 实际XML/日志与外部三层证据 | app/src/test/java/com/dsharnessmobile/shell,scripts/check-kotlin-test-count.mjs,scripts/kotlin-test-baseline.json,app/build.gradle.kts | 中 |
+| K11 | Kotlin 单测面 | JVM策略/core/settlement/wiring与instrumentation覆盖；在场不是已执行。0.14.8 P1 增补：刷新窗口内启动请求的有界等待（跨进程真源 = 真 journal 文件；收口即停 / 超预算必返 / 换代立刻收手 / 无事务不等）与接线契约（裸 `flowOwnership.begin() ?: return` 不得回归、推迟必须进 boot-fail），见 `app/src/test/java/com/dsharnessmobile/shell/DeferredEngineStartTest.kt` | 外部Gradle/结果基线门禁 | 测试与门禁 | 横切 | 实际XML/日志与外部三层证据 | app/src/test/java/com/dsharnessmobile/shell,scripts/check-kotlin-test-count.mjs,scripts/kotlin-test-baseline.json,app/build.gradle.kts | 中 |
 | P01 | 桥插件（dsh-android-bridge） | 设备控制的授权判定、控制队列与三条特权执行出口 | 模型设备工具 / 其它插件直连服务面 / 壳侧长轮询取活 | 稳态控制 | K04 控制队列协议、K05 无障碍面、K06 特权执行、P02 manage、P03 浏览器、K10 通知 | cordis 装配（provide androidPrivilege）、模型设备工具、壳侧 ControlPoller 长轮询 | plugins/dsh-android-bridge/src/index.ts,plugins/dsh-android-bridge/src/control-queue.ts,plugins/dsh-android-bridge/src/screen-scope.ts | 高 |
 | P02 | 管理插件（dsh-android-manage） | 把模型意图落成壳侧无障碍或特权 shell 的屏幕工具面 | 模型每轮 tool call；插件 apply 时注册 14 个工具 | 稳态控制 | 授权桥与控制队列（androidPrivilege）,壳侧无障碍与特权执行面,屏幕范围偏好 | 引擎 cordis 装配（android-bridge 先于 android-manage）；每次模型 tool call | plugins/dsh-android-manage/src/index.ts,plugins/dsh-android-manage/src/protocol-v2.ts,plugins/dsh-android-manage/src/vd-shot.ts | 高 |
 | P03 | 浏览器与虚拟屏插件 | browser_* 与 vd* 工具落壳侧控制 op 并如实回执 | 模型调用 browser_* / android_vdisplay_* 工具 | 稳态控制 | K08,K07,桥控制队列 | 引擎启动时按装配集注册 | plugins/dsh-android-browser/src/tools.ts,plugins/dsh-android-browser/src/index.ts,plugins/dsh-android-vdisplay/src/index.ts,plugins/dsh-android-vdisplay/src/status.ts | 高 |
@@ -408,6 +408,7 @@ sequenceDiagram
 | 从 | 到 | 关系 | 证据 |
 |---|---|---|---|
 | K01 | 引擎进程与快照面 | EngineStartFlow 在工作线程调 refreshSnapshot/startEngine/engineProcessAlive，Activity 侧只传 Activity 与 pickToken | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:408 |
+| K01 | 快照事务（跨进程真源） | 0.14.8 P1：启动请求与安全模式重启都不得在刷新窗口内被静默丢弃。判据 = 事务 journal（`SnapshotTransaction.readMarker(filesDir)`，跨进程）而不是本 Activity 实例的内存态所有权；`start()`/`restart()` 的 destroyed 与 running 必须分开处置，安全模式重启在**停旧引擎之前**先判事务 | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:700；app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:207 |
 | K01 | 引擎鉴权与探活 | 首屏 cookie 注入进程级 CookieManager，探活结果决定 showWeb/showGuide 分流 | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:812 |
 | K01 | 前台服务与看门狗 | startEngineService 挂载前台服务，回撤阈值取 WatchdogV2.effectiveFailureCount | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:670 |
 | K01 | 诊断落盘 | 启动分段、引导页 stall、HTTP/TLS/渲染进程错误全部经 LogCollector 写壳侧自有文件 | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1113 |
@@ -423,7 +424,7 @@ sequenceDiagram
 | K01 | 内置控制台 | 引导页与控制台按钮 START ConsoleActivity，其 ConsoleSession 用与引擎同源的 shellEnv 起快照 bash | app/src/main/java/com/dsharnessmobile/shell/ConsoleSession.kt:33 |
 | K01 | 系统外部角色 | BootReceiver 接 ACTION_BOOT_COMPLETED 决定是否自启前台服务，分享面板经 VIEW/SEND 进本 Activity | app/src/main/java/com/dsharnessmobile/shell/BootReceiver.kt:24 |
 | K02 | K01 | 启动全程用引导页阶段承载文案，成功才切 WebUI | EngineStartFlow.kt:445-479、MainActivity.kt:145-155 |
-| K02 | K03 | 刷新期禁启动、事务恢复、update-pending 健康 3 拍才删 usr-old 三处握手 | EngineManager.kt:813、1344-1369 |
+| K02 | K03 | 刷新期禁启动、事务恢复、update-pending 健康 3 拍才删 usr-old 三处握手；刷新窗口内的启动请求**不得静默丢弃**（0.14.8 P1）：`start()`/`restart()` 拿不到世代所有权时按 destroyed/running 分开处置，running 走 boot-fail 留痕 + 有界等待后自动续跑；安全模式重启在停旧引擎前先判事务 journal | EngineManager.kt:813、1344-1369；EngineStartFlow.kt:700、1580 |
 | K02 | UpdateManager | .update-pending/.update-pending-at 与 usr-old 的生产者 | UpdateManager.kt:84-85 |
 | K02 | UndoGate | 看门狗 UNDO、启动超时与客户端插件树失败共用闸门：可点名时外科拔除非 Hard 插件；整份回撤只用当前 snapshot fingerprint 下的壳侧 HEALTHY known-good ID；被拒后复位锁存以继续引擎重试 | EngineService.kt:207-293、EngineStartFlow.kt:345-390、UndoGate.kt:278-434 |
 | K02 | 通知链 NotifyStore/NotifyCenter | 每拍按字节偏移消费 .task-done.ndjson，双读不双发 | WatchdogV2.kt:258-309、NotifyCenter.kt:188 |
@@ -569,6 +570,7 @@ sequenceDiagram
 | 4. 页面卡 loading 而引擎健康 | K01 | `boot-diag.log` 出现 `source=shell-stall` 且 `pageSideRuntime=unavailable` ⇒ 页面未自报就绪（L-1）；对照同一 epoch 是否有 `source=page-console phase=page-ready`（L-2 四字段）。logcat grep `dsh-boot-ready`/`dsh-boot-stall`。 |
 | 5. 界面停在深灰空页或反复弹「页面无响应，正在自动刷新…」 | K01 | 查 `boot-diag.log | grep render-gone`；logcat tag `dsh-shell` grep `webview JS 无响应`（冻结看门狗每 20-30s 复判一次，而 WebView 已被 destroy）。 |
 | 6. 页面里的目录选择/「在外部应用打开」静默失败 | K01 | 查 logcat tag `dsh-engine-probe`/`dsh-shell` 与引擎侧 `x-dsh-pick-token` 403；`adb shell dumpsys activity activities | grep -i dsharness` 数 MainActivity 实例数（>1 即走双实例路径）。 |
+| 7. 点了「安全模式启动」没反应、过几分钟又能跑 | K01 | 先看 `boot-fail.log` 是否新增 `stage=safe-mode-restart-started`（进入面）或 `snapshot-transaction-wait`（事务在场、已如实推迟并等待）——`engine-start-deferred*` 则说明请求撞上刷新但已转为有界等待；若只有 `safe-mode-restart-refused/-not-owned` 则是既有拒绝面（live 残缺 / 端口未归属，本次改动不生效）。判「刷新真的收口」仍只有一条口径：`.snapshot-fingerprint` 翻转 + `.snapshot-transaction` 消失。 |
 | 1. 停在「引擎启动失败」或长时间 Starting | K02 | `adb shell run-as com.dsharnessmobile.shell cat files/boot-fail.log`（stage=engine-start-false / process-died-during-boot / boot-budget-exceeded / snapshot-refresh-failed），再 `cat files/engine.log`（首行即定性，`describeEngineLogState` 已把它折进 detail）；logcat tag `dsh-engine`。 |
 | 2. 引擎反复被重启或长时间不重启 | K02 | `cat files/boot-segments.log` 看 t_boot_start / t_listen 世代与失败密度；`grep dsh-watchdog`（logcat 或 `Documents/dshdata/log/dsh-日期.log`，需开发者日志开）；熔断态 grep `watchdog circuit open`，半死态 grep `DEGRADED_HTTP` 与 `DEGRADED_HTTP 连续`。 |
 | 3. 端口被占 / 双引擎 | K02 | grep `killExistingEngine: port 3080 still occupied`；设备侧 `adb shell "ps -A | grep -E 'linker|node'"`（进程名是 linker64 不是 node，坑 31）。 |

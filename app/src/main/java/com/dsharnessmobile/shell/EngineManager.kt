@@ -175,6 +175,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
     }
     lastRefreshFailure = null
     lastRefreshFailureCode = null
+    lastRefreshDeferred = false
     val fingerprint = bundledFingerprint()
     val ok = refreshSnapshotInternal(onProgress, onStage)
     // 0.14.1 D2（issue #240 建议 2）：把成败**跨进程**记账。失败账本按 fingerprint 计键，
@@ -183,6 +184,11 @@ class EngineManager(private val context: Context, private val pickToken: String?
     try {
       if (ok) {
         SnapshotFs.deletePath(refreshLedgerFile())
+      } else if (lastRefreshDeferred) {
+        // P1（定位报告 §2.5）：**「别人正在做」不是「我失败了」**。被让行（另一条事务在飞）不写失败
+        // 账本——否则纯粹的并发争用会把「同一份快照连续失败达阈」喂出来，让降级闸门
+        // （shouldDegradeRefresh）此后永久跳过刷新。账本语义是「这份快照自己起不来」。
+        Log.i(TAG, "snapshot refresh deferred: another transaction is in flight (failure ledger untouched)")
       } else {
         refreshLedgerFile().writeText(SnapshotRefreshPolicy.afterFailure(readRefreshLedger(), fingerprint))
       }
@@ -203,8 +209,17 @@ class EngineManager(private val context: Context, private val pickToken: String?
   ): Boolean {
     val filesDir = context.filesDir
     if (!beginSnapshotTransaction()) {
-      lastRefreshFailure = IllegalStateException("another runtime transaction is already in progress")
+      // P1（定位报告 §2.5）：**口径纠正**。旧实现把「别人正在做」记成自己的失败
+      // （挂 IllegalStateException 到 lastRefreshFailure），而同一堵墙上的另两处早已是对的：
+      // startEngine(:1304-1307) 返回 true 让行、invalidateSnapshotFreshness(:443-446) 返回 false 让行。
+      // 全仓只有这一处把事务在飞记成失败，这是口径不一致而非设计取舍。
+      //
+      // 返回值仍是 false（本次**确实没有**刷新，调用方据此不得宣称已安排），但事实必须如实：
+      // lastRefreshFailure=null（没有属于本次的异常）+ lastRefreshDeferred=true（是被让行），
+      // 且不进跨进程失败账本（见 refreshSnapshot 的包装）。
+      lastRefreshFailure = null
       lastRefreshFailureCode = "snapshot-transaction-in-flight"
+      lastRefreshDeferred = true
       return false
     }
     val fingerprint = bundledFingerprint()
@@ -384,6 +399,16 @@ class EngineManager(private val context: Context, private val pickToken: String?
    */
   @Volatile
   var lastRefreshFailureCode: String? = null
+
+  /**
+   * 上一次 [refreshSnapshot] 的 false 是不是**被让行**（另一条快照事务在飞）而不是失败（0.14.8 P1）。
+   *
+   * 为什么必须与 [lastRefreshFailureCode] 分开：`snapshot-transaction-in-flight` 这个码本身
+   * 需要保留（调用方据此给「正在解压，稍后自动继续」的文案），但它是**推迟**语义而不是失败语义——
+   * 失败账本、失败终态文案都不得据此记账（定位报告 §2.5）。
+   */
+  @Volatile
+  var lastRefreshDeferred: Boolean = false
 
   /**
    * 最近一次**拒绝启动**的可归因原因（issue #271 ④）：非空即表示上一次 `startEngine` 是被
