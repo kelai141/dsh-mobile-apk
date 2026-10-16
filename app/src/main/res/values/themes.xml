@@ -3,7 +3,9 @@
   <style name="Theme.Dsh" parent="android:Theme.Material.Light.NoActionBar">
     <item name="android:windowBackground">@color/ds_bg</item>
     <item name="android:statusBarColor">@color/ds_bg</item>
-    <item name="android:navigationBarColor">@color/ds_bg</item>
+    <!-- issue #392 真沉浸：导航/手势条区域透明，露出的是页面自身画布，而不是一条与底栏
+         不同色的系统实色条。内容避让仍由壳侧下发的 dsh-android-system-bottom 变量承担。 -->
+    <item name="android:navigationBarColor">@android:color/transparent</item>
     <item name="android:windowLightStatusBar">true</item>
     <item name="android:textColor">@color/ds_text_primary</item>
     <item name="android:textColorPrimary">@color/ds_text_primary</item>

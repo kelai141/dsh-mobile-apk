@@ -3,7 +3,8 @@
   <style name="Theme.Dsh" parent="android:Theme.Material.NoActionBar">
     <item name="android:windowBackground">@color/ds_bg</item>
     <item name="android:statusBarColor">@color/ds_bg</item>
-    <item name="android:navigationBarColor">@color/ds_bg</item>
+    <!-- issue #392 真沉浸：导航/手势条区域透明（见 values/themes.xml 注释）。 -->
+    <item name="android:navigationBarColor">@android:color/transparent</item>
     <item name="android:windowLightStatusBar">false</item>
     <item name="android:windowLightNavigationBar">false</item>
     <item name="android:navigationBarDividerColor">@android:color/transparent</item>

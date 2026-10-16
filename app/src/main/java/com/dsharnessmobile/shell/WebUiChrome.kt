@@ -21,6 +21,37 @@ internal class WebUiChrome(private val activity: MainActivity) {
   /** 状态栏常态收起（沉浸式）：委托 ImmersiveMode.apply。 */
   fun applyImmersive(enabled: Boolean) {
     ImmersiveMode.apply(activity, enabled)
+    applyNavigationBarImmersive()
+  }
+
+  /**
+   * issue #392 真沉浸：把导航/手势条区域交由**页面画布**呈现，而不是一条系统实色条。
+   *
+   * 缺陷形态：主题里 `navigationBarColor=@color/ds_bg`，夜色下是纯黑 #000000，而页面画布是
+   * #151517——最底一段被系统涂成实色，与应用底栏割裂。应用侧此前只做了
+   * `setDecorFitsSystemWindows(false)`（内容确实铺到了物理底边），但系统仍在最底一段涂自己的
+   * 颜色，所以「沉浸式」看着不成立。
+   *
+   * 判据口径：**截图本身不足以定案**——主题的 `windowBackground` 同为 `@color/ds_bg`，夜色
+   * 同为 #000000，「最底一段纯黑」在「系统涂色」与「页面没铺到、露出窗口底色」两种假设下都成立。
+   * 定案靠设备层 A/B。本仓实测（Medium_Phone 1080x2400 / 420dpi / 手势条）：改前导航条 inset
+   * 区（`frame=[0,2337][1080,2400]`，高 63px）恒为 (0,0,0)、其上为 (10,10,11)；改后同区变为
+   * (10,10,11)，即页面画布色透出——说明页面本就铺到物理底边，原色带确系系统所涂。
+   *
+   * 修法：导航条透明（四份 themes.xml 同步改 `@android:color/transparent`），并在 Android 10+
+   * 关掉导航条对比度强制——否则手势条后面仍会被系统叠一层 scrim，透出的不是页面色。
+   * 沉浸式开关只隐藏状态栏（`ImmersiveMode.apply`），与导航条透明是两件独立的事，
+   * 故本函数**不**受该开关控制：无论开关如何，底部都不该出现系统色带。
+   */
+  fun applyNavigationBarImmersive() {
+    try {
+      if (android.os.Build.VERSION.SDK_INT >= 29) {
+        activity.window.isNavigationBarContrastEnforced = false
+      }
+    } catch (t: Throwable) {
+      // 厂商 ROM 可能拒绝该 setter：如实放弃（保持主题里的透明值），不把窗口偏好变成崩溃。
+      Log.w("dsh-shell", "navigation bar contrast opt-out failed: " + t.message)
+    }
   }
 
   /** 沉浸式开关（JS 桥）：持久化 + 应用（委托 ImmersiveMode.setEnabled）。 */
