@@ -1,5 +1,6 @@
 package com.dsharnessmobile.shell
 
+import android.app.ActivityManager
 import android.content.Context
 import android.media.MediaScannerConnection
 import android.os.Environment
@@ -1581,7 +1582,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
     // Mark the generation before ProcessBuilder creates the fresh redirect target. token extraction
     // also checks creation time, so a stale file with a refreshed mtime cannot impersonate this run.
     runCatching { EngineAuth.markGenerationStart(System.currentTimeMillis()) }
-    LogCollector.markBootStart(context)
+    LogCollector.markBootStart(context, engineHeapMb(deviceTotalRamMb()))
     watchEngineListen()
     fun build(argv: List<String>): ProcessBuilder =
       ProcessBuilder(argv).also { b ->
@@ -2271,6 +2272,23 @@ class EngineManager(private val context: Context, private val pickToken: String?
   }
 
   /**
+   * 设备物理总内存（MB）；读不到时返回 0，由 [engineHeapMb] 退回下限（宁可给足，不编造）。
+   *
+   * 用 ActivityManager.MemoryInfo.totalMem 而不是 /proc/meminfo：前者是应用可直接读的 API，
+   * 不必依赖 procfs 在 Android 10+ 上的可见性收紧（实测读不到时返回 0 并按下限处理）。
+   */
+  private fun deviceTotalRamMb(): Int {
+    val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return 0
+    return try {
+      val info = ActivityManager.MemoryInfo()
+      am.getMemoryInfo(info)
+      (info.totalMem / (1024L * 1024L)).toInt()
+    } catch (_: Throwable) {
+      0
+    }
+  }
+
+  /**
    * Snapshot environment shared by engine/console/log processes (PATH/LD_LIBRARY_PATH/HOME/DSH_HOME/
    * TERMUX_* injected explicitly — the snapshot is self-sufficient, no Termux app needed). Idempotent:
    * safe to call repeatedly (ensurePrivateDshData and the TMPDIR mkdirs are both idempotent).
@@ -2361,6 +2379,14 @@ class EngineManager(private val context: Context, private val pickToken: String?
       // 显式取 min(8, cores)（见 uvThreadPoolSize）：零产品语义改动，引擎与所有工具子进程
       // 经 shellEnv() 一并继承。判据：子进程回读 process.env.UV_THREADPOOL_SIZE = min(8, cores)。
       "UV_THREADPOOL_SIZE" to uvThreadPoolSize(Runtime.getRuntime().availableProcessors()).toString(),
+      // 引擎 V8 老生代上限（0.14.8 堆下限）：**此前无人管理**——不设标志时 V8 只按物理内存推导，
+      // 小内存设备上推出来的上限可能小到引擎 boot 期就 OOM（社区反馈「JavaScript 堆太小导致启动失败」）。
+      // 这里显式给出自适应值（见 engineHeapMb）：设备总内存的一半、下限 512MB、上限 1024MB。
+      // 用 NODE_OPTIONS 而不是 argv，是因为 argv 会**覆盖** NODE_OPTIONS，二者不能同时表达同一件事；
+      // 而 NODE_OPTIONS 还顺带覆盖所有经 shellEnv() 派生的子进程（工具子进程 / 控制台 / UndoGate）。
+      // 实测口径：--max-old-space-size=N ⇒ heap_size_limit = N + 96MB；引擎最小可用堆约 70MB。
+      // 读不到设备内存时退回下限，保证「任何设备都够启动」而不是编造一个值。
+      "NODE_OPTIONS" to heapOptionFrom(engineHeapMb(deviceTotalRamMb())),
     ) + certEnv
   }
 
@@ -2486,6 +2512,38 @@ description: 手机操控纪律：无障碍语义树优先、ref 语义点击/�
  * 「注入进 shellEnv()」那一半由 W3ShellContractTest 的源码扫描锁定。
  */
 internal fun uvThreadPoolSize(cores: Int): Int = minOf(8, cores.coerceAtLeast(1))
+
+/** 引擎 V8 老生代上限的**下限**（MB）。低于此值时引擎连 boot 期的模块图都可能堆爆。 */
+internal const val ENGINE_HEAP_FLOOR_MB: Int = 512
+
+/** 引擎 V8 老生代上限的**上限**（MB）。再往上不放：堆开成多 GB 会被 lmkd 杀掉，且掩盖真实内存缺陷。 */
+internal const val ENGINE_HEAP_CAP_MB: Int = 1024
+
+/**
+ * 引擎 V8 老生代上限（MB）= clamp(设备总内存的一半, 下限 [ENGINE_HEAP_FLOOR_MB], 上限 [ENGINE_HEAP_CAP_MB])。
+ *
+ * 为什么是「一半 + 上下限」而不是沿用 V8 的默认推导：V8 只用物理内存推，**没有任何人管这台设备上
+ * 引擎的实际工作集**——小内存设备推出来的上限可能小于引擎 boot 所需（社区反馈的启动失败），
+ * 大内存设备又可能推出远超需要的值。显式下限保证「任何设备都够启动」，上限保证不失控。
+ *
+ * 实测依据（逐档回读 heap_size_limit，详见 docs/AGENTS/gotchas.md 本轮条目）：
+ * - 不设标志：6GB 设备 1120MB、4GB 设备 1075MB、3GB 设备 844MB（纯由物理内存推导）；
+ * - 设 --max-old-space-size=N：实际上限恒为 N+96MB（512 到 608、256 到 352、2048 到 2144）；
+ * - 引擎最小可用堆约 70MB（64MB 起步在约 21s 内 FATAL heap out of memory）。
+ * 故 [512, 1024] 既在最小可用值之上留足量级，又不越过实测的自然推导值太多。
+ *
+ * 提到顶层是为了可断言——shellEnv() 需要 Context，JVM 单测拿不到；这里只锁「值」这一半，
+ * 「注入进 shellEnv()」那一半由 W3ShellContractTest 的源码扫描锁定（与 [uvThreadPoolSize] 同款）。
+ */
+internal fun engineHeapMb(totalRamMb: Int): Int {
+  if (totalRamMb <= 0) return ENGINE_HEAP_FLOOR_MB
+  return (totalRamMb / 2).coerceIn(ENGINE_HEAP_FLOOR_MB, ENGINE_HEAP_CAP_MB)
+}
+
+/** 由上限值装配 NODE_OPTIONS 的值。非法域按下限处理——宁可给足，不编造一个小于下限的标志。 */
+internal fun heapOptionFrom(heapMb: Int): String =
+  "--max-old-space-size=" + heapMb.coerceAtLeast(ENGINE_HEAP_FLOOR_MB)
+
 
 /**
  * 0.14.1 块K ③（反馈三）：pnpm store 目录——**唯一真源**，与 HOME 同源派生。

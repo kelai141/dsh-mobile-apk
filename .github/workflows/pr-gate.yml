@@ -118,6 +118,8 @@ jobs:
           node scripts/check-manifest-hardening.mjs
           node scripts/check-bounded-io.mjs
           node scripts/check-api-route-auth.mjs
+          # 引擎堆下限双源一致性（0.14.8）：壳侧 shellEnv() 与快照内启动器必须同区间
+          node scripts/check-engine-heap-floor.mjs
       # 冷启动预算（0.14.1 块F P0-2；【0.14.1 P0-a 修复】原来写死 --self-test，使真检被结构性绕开）。
       # 改为默认档：有真产物则真检（超预算 exit 1），无产物则显式 SKIP(real-data) 后跑自证。
       # CI 无设备，故常态是 SKIP+自证——**SKIP 不等于达标**，真检由设备验收步骤驱动（--pull/--segments）。

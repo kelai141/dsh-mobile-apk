@@ -77,6 +77,8 @@ const GATE_SCRIPTS = [
   // Delivery gate: every final APK must verify with v1, v2, and v3 before leaving out/.
   'check-apk-signatures.mjs',
   'check-manifest-hardening.mjs',
+  // 0.14.8 堆下限：壳侧 shellEnv() 与快照内启动器必须给出同一 clamp 区间（单边漂移 = 部分路径仍 OOM）。
+  'check-engine-heap-floor.mjs',
   'check-bounded-io.mjs',
   'check-api-route-auth.mjs',
   'check-protocol-v2.mjs',

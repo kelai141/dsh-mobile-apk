@@ -50,6 +50,12 @@ const GATES = [
   // 其余只被 node --check 解析过。本门禁把全部 26 个真的串行跑起来，并对已知失败采用**带理由的显式白名单**：
   // 存量失败如实记账，任何**新增**失败立刻判红。实测它当场逮到 ptc-android-native-A1 读 fixture 里不存在的 src/*.ts。
   { script: 'check-patch-test-manifest.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
+  // 0.14.8 堆下限：引擎 V8 老生代下限有**两个注入点**（壳侧 shellEnv() 的 NODE_OPTIONS +
+  // 快照内启动器 usr/libexec/dsh-node），两处必须表达同一个 clamp 区间。单边漂移会造出
+  // 「引擎起来了、code run 却仍 OOM」这类最难查的形态（启动器要覆盖被过滤 env 的调用方）。
+  // 输入均在 apk 仓（EngineManager.kt + build-snapshot-013.mjs）⇒ 由 apk 仓 CI 跑；
+  // 自身带 --self-test（1 正样本 + 8 受控负控），证明每条判据仍会判红。
+  { script: 'check-engine-heap-floor.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
   { script: 'check-manifest-hardening.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
   { script: 'check-bounded-io.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
   // #222：所有 mobile-owned /api exact/prefix 路由必须在登记表中，并有本地 auth guard 或窄公开白名单。

@@ -251,14 +251,19 @@ object LogCollector {
   /**
    * 引擎启动请求（EngineManager.startWithArgs 的 spawn 点）：重置本世代并**立即落一行**
    * `note=boot-start`——引擎随后即使启动失败、端口从未应答，三字段也已经在判据文件里。
+   *
+   * @param engineHeapMb 本次生效的 V8 老生代上限（MB，见 EngineManager.engineHeapMb）。
+   *   默认 -1 = 未知/未注入，**如实显示**而不是编造一个值。它落进 boot-segments.log 的
+   *   boot-start 行，回答「这次启动到底给了引擎多大堆」——此前该事实**任何诊断面都取不到**，
+   *   于是堆相关问题只能靠猜（0.14.8 堆下限同批修）。
    */
-  fun markBootStart(context: Context) {
+  fun markBootStart(context: Context, engineHeapMb: Int = -1) {
     segBootStartMs = System.currentTimeMillis()
     segListenMs = 0L
     segComposeTotalMs = -1L
     segComposeSource = SOURCE_NONE
     segFirstHttpMs = 0L
-    emitBootSegments(context, "note=boot-start")
+    emitBootSegments(context, "note=boot-start engineHeapMb=" + engineHeapMb)
     // （乙）解析链必须与调试日志采集器**解耦**：采集器默认关闭，旧实现把探针解析只挂在 tick()
     // 里 ⇒ 默认设备上即使探针在场也永远落不出 t_compose_total（恒 -1 的第二半成因）。这里起一条
     // 有界轻量 tail，只在本次启动窗口内观察 engine.log，绝不依赖任何用户开关。
@@ -742,7 +747,33 @@ object LogCollector {
         "unreadable"
       }
     }
-    return "engineLog=" + state + "," + gens + ",firstLine=" + firstLine
+    // 堆耗尽必须单独抓出来（0.14.8 堆下限）——**不能被首行遮蔽**：
+    // V8 的 FATAL ERROR: Reached heap limit / Ineffective mark-compacts near heap limit
+    // 往往不是第一行（引擎先打印若干 setup 行才进到分配密集段），而 firstLine 只取首个非空行，
+    // 于是一次堆 OOM 在 boot-fail.log 里会显示成一句无害的开场白，真因彻底不可见。
+    // 这正是「兜底码丢真因」的同型缺陷：诊断能力在，入口把它盖住了。
+    // 该字段与 firstLine **并存**（不替换），且只在真出现时写，不给每条失败加噪声。
+    val heapOom = when (state) {
+      "absent", "empty" -> "none"
+      else -> try {
+        base.useLines { seq ->
+          seq.firstOrNull { line ->
+            val l = line.lowercase()
+            // 逐条枚举原句会随 V8 版本过时（本条测试当场抓到漏了 MarkCompactCollector 一族）。
+            // 判据改为「FATAL 级 + 堆语义」，覆盖 V8 全部已知措辞且不误伤健康行：
+            //   Reached heap limit / Ineffective mark-compacts near heap limit
+            //   CALL_AND_RETRY_LAST Allocation failed - JavaScript heap out of memory
+            //   MarkCompactCollector: young object promotion failed（无 heap 字样）
+            val fatal = l.contains("fatal error") || l.contains("fatal:")
+            val heapish = l.contains("heap") || l.contains("markcompact") || l.contains("allocation failed")
+            (fatal && heapish) || l.contains("heap out of memory")
+          }?.let { EngineAuth.redact(it).replace('\n', ' ').take(600) } ?: "none"
+        } ?: "none"
+      } catch (_: Throwable) {
+        "unreadable"
+      }
+    }
+    return "engineLog=" + state + "," + gens + ",firstLine=" + firstLine + ",heapOom=" + heapOom
   }
 
   /** 有界追加 + 超限轮转一代（boot-diag / boot-fail 共用形态；唯一写者是壳）。 */

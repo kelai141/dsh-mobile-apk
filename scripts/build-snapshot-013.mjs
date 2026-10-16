@@ -798,10 +798,31 @@ try {
       + '# dsh-mobile: PTC node launcher (C1) - app-data ELF cannot be exec\'d under untrusted_app,\n'
       + '# so hand it to the system linker with the snapshot library path exported here.\n'
       + 'export LD_LIBRARY_PATH="' + NEW_PREFIX + '/lib"\n'
+      // ── 引擎/子进程 V8 堆下限（0.14.8）────────────────────────────────────────
+      // 为什么放在**启动器**而不是只靠壳侧 env：本 wrapper 是快照内 node 的唯一启动器，
+      // 而有些调用方给子进程的是**过滤后的 env**（PTC 只放 6 个名字，见上方真因），
+      // 壳侧 shellEnv() 注入的 NODE_OPTIONS 到不了那种路径。把下限写在启动器里，
+      // 任何「经由 libexec/dsh-node 启动」的路径都拿到同一个底线。
+      // 自适应在**设备上**算而不是构建期写死：MemTotal 只有运行时才准确。
+      // 语义 = clamp(MemTotal/2, 512, 1024)MB，与壳侧 EngineManager.engineHeapMb 同口径
+      // （两处必须同值；任何一方改了，另一方由门禁 check-engine-heap-floor.mjs 判红）。
+      // 仅在 NODE_OPTIONS **未被调用方设置**时才填：调用方显式给的值（例如 PTC 的
+      // maxOldGenerationSizeMb、用户自定义 --max-old-space-size）必须优先，不得被启动器覆盖。
+      // 纯 sh 读 /proc/meminfo，不依赖 sed/awk/busybox 子命令（缺工具也不至于副作用）。
+      + 'if [ -z "$NODE_OPTIONS" ]; then\n'
+      + '  __dsh_mem_kb=0\n'
+      + '  while read -r __dsh_key __dsh_val __dsh_rest; do\n'
+      + '    if [ "$__dsh_key" = "MemTotal:" ]; then __dsh_mem_kb=$__dsh_val; break; fi\n'
+      + '  done < /proc/meminfo\n'
+      + '  __dsh_heap=$(( __dsh_mem_kb / 2048 ))\n'
+      + '  [ "$__dsh_heap" -lt 512 ] && __dsh_heap=512\n'
+      + '  [ "$__dsh_heap" -gt 1024 ] && __dsh_heap=1024\n'
+      + '  export NODE_OPTIONS="--max-old-space-size=$__dsh_heap"\n'
+      + 'fi\n'
       + 'exec /system/bin/linker64 "' + NEW_PREFIX + '/bin/node" "$@"\n',
     { mode: 0o755 },
   )
-  log('PTC node wrapper 就位: usr/' + PTC_NODE_WRAPPER_REL + ' -> linker64 + bin/node（LD_LIBRARY_PATH 在 wrapper 内 export）')
+  log('PTC node wrapper 就位: usr/' + PTC_NODE_WRAPPER_REL + ' -> linker64 + bin/node（LD_LIBRARY_PATH + 堆下限在 wrapper 内）')
 } catch (e) {
   // 不静默：PTC 是本里程碑验收项（`code run` 是模型的主要执行手段），装配失败必须可见。
   console.error('  [PTC wrapper 装配失败] ' + (e?.stack ?? String(e)))

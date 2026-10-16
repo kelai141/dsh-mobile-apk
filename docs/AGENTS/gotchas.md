@@ -1975,3 +1975,36 @@ Stellar 在跑、兼容层正常，本应用却在设置页与工具面一律报
 321. **插件库存 ID 与 Hard 清单 ID 不在同一层**：真实 `pluginManager/listPlugins` 返回 `include:<profile id>`，受保护条目可能没有 `patchId`；Hard manifest 保存配置 ID。直接比较库存 entryId 会漏掉过滤。本轮设备返回 197 个条目，按当前清单映射后命中 192 个 Hard 条目。仓储按 exact moduleName 加 profile ID（可信 patchId 或根 include 路径）匹配，启停入口也独立复核；禁止只在 UI 按名称或目录过滤。回归测试包含没有 patchId 的真实树前缀反证。
 
 322. **齿轮点击矩形波纹与切页端点跳位**：通用 `DsUi.ripple` 只复制 cornerRadius，传 oval 时 mask 仍是矩形；原生管理齿轮改用独立 oval mask，并只旋转 RotateDrawable。原切页按目的页交换两个加权内容区，动画端点又根据进度隐藏目标内容区，导致同一帧无 View 占满剩余高度，底部操作区跳到顶部。两页改为单个稳定加权 FrameLayout 内切换，操作区不参与内容切换测量。构建与回归证据见 `.deploy-tmp/management-ui/gradle-gear-fix.log` 及同目录 `gear-fix-*.png`。
+323. **引擎的 V8 堆此前无人管理：没人设过上限，它只由设备物理内存推导——小内存设备可能推出连 boot 都撑不住的值（本轮实修，L3）**：
+
+现象：社区反馈「因为 Node 进程的 JavaScript 堆太小而导致引擎启动失败」。反馈者未提供诊断包（自行修完后才说），故**没有第一手现场**。
+
+真因（源码级确证，非猜测）：全链路**没有任何一处为引擎设定 V8 老生代上限**——
+① 引擎 argv（`EngineManager.startWithArgs` 的 `val args = arrayOf(nodeBin…, "--expose-internals", dshBin…, "web", …)`）没有堆标志；
+② `shellEnv()` 注入的 20 余个变量里没有 `NODE_OPTIONS`；
+③ profile（`scripts/profile-web.cordis.patch.yml`）也没有。
+于是 `heap_size_limit` 完全由 V8 按物理内存推导。**实测口径**（逐档回读 `v8.getHeapStatistics().heap_size_limit`）：
+6GB 设备 1120MB / 4GB 设备 1075MB / 3GB 设备 844MB；设 `--max-old-space-size=N` 则恒为 **N+96MB**（512 到 608、256 到 352、2048 到 2144）；
+**引擎最小可用堆约 70MB**（64MB 起步在约 21s 内 `FATAL ERROR: Reached heap limit`）。树里那个 `512` 是 **PTC 子进程专用**（patch A1/L1 走 `NODE_OPTIONS`），与引擎本体无关——这正是「看起来有人管、其实没人管」的误导来源。
+**未证实**（如实登记）：到底**是谁**在反馈那台设备上把堆压小的，仍无直接证据；候选是未知的显式注入 / 用户自起引擎 / 小内存推导。本修法不依赖该答案——它把「没人管」变成「有下限兜住」。
+
+修法（两个注入点，必须是同一个 clamp 区间 `clamp(总内存/2, 512, 1024)MB`）：
+① **壳侧**：`shellEnv()` 注入 `NODE_OPTIONS=--max-old-space-size=<engineHeapMb(deviceTotalRamMb())>`。用 `NODE_OPTIONS` 而不是 argv，因为**argv 会覆盖 NODE_OPTIONS**（实测 argv 2048 + env 512 得 2240），二者表达同一件事必冲突；
+② **快照内启动器**：`usr/libexec/dsh-node`（C1 wrapper）在 `NODE_OPTIONS` **未设置**时按设备 `/proc/meminfo` 自适应填同一个区间。为什么必须双源：有些调用方给子进程的是**过滤后的 env**（PTC 只放 6 个名字），壳侧注入到不了那条路径。启动器必须**不覆盖**调用方显式给的值（PTC 的 `maxOldGenerationSizeMb` / 用户自定义优先）。
+
+**诊断面的同型缺陷（本次一并修）**：`describeEngineLogState()` 此前只报 `firstLine`（首个非空行），而真实的堆 FATAL **不是首行**——本轮设备实测捕获的输出里它是**第 6 行**（前面是 4 行 GC 统计 + 空行）。
+后果：一次堆 OOM 在 `boot-fail.log` 里显示成一句无害的开场白，真因彻底不可见（与「兜底码丢真因」同族）。现新增独立 `heapOom=` 字段（与 `firstLine` **并存**，仅在真出现时写）。
+判据按「FATAL 级 + 堆语义」而非逐条枚举原句——枚举会随 V8 版本过时：本轮测试**当场抓到**漏了 `MarkCompactCollector: young object promotion failed` 一族（该行不含 `heap` 字样）。
+另在 boot-segments 的 `note=boot-start` 行追加 `engineHeapMb=`，让「这次到底给了多大堆」第一次成为可核对事实（此前任何诊断面都取不到）。
+
+判据与门禁：`scripts/check-engine-heap-floor.mjs`（已进 `check-release-gates.mjs` 声明集合，本地链 / 云端链 / apk CI 三处接线，静态接线断言核过）。
+它断言：壳侧两常量在场且为正、取值走 clamp 而非裸除法、读不到内存退回下限、启动器真读 meminfo 且除数为 2048（KB 转一半 MB）、**双源上下限逐值相等**、启动器不覆盖已设值、argv 不含堆标志。
+`--self-test` = 1 正样本 + **8 条受控负控**（删下限 / 去 clamp / 去自适应 / 上下限分叉 / 除数改坏 / 无条件覆盖 / argv 混标志 / 上限分叉），逐条证明仍会判红。
+JVM 边界测试在 `EngineBootInstrumentationTest`（取值与 clamp 边界、退化输入不得逃出下限、标志格式可被 parseInt）；源码扫描接线在 `W3ShellContractTest`（函数写得对但没接进 `shellEnv()` 即判红，防「能力在、入口无」）。
+
+**设备实测证据（本轮）**：模拟器 Android 16 上真实复现并捕获堆 OOM 原文（`--max-old-space-size=64`），该真实多行输出已固化为回归用例 `heapExhaustionIsDetectedOnRealCapturedV8OutputWhereFatalIsNotTheFirstLine`——覆盖「真实 FATAL 不在首行」这一关键形态，而不是只测构造的简写。
+启动器算术在设备上用合成 MemTotal 逐档对照 Kotlin 口径，12 档（256MB 到 16GB）**逐值一致、0 处不符**；显式预设 `NODE_OPTIONS` 时启动器确实不覆盖。
+**未覆盖（不记通过）**：未在真机（arm64 / Enforcing）验证；未验证「堆下限真的让某台小内存设备从起不来变成起得来」（手头模拟器均 ≥3GB，自然推导值本就高于下限）——该因果只能由反馈设备的复现来确认，本轮给出的是「下限已被显式兜住」与「诊断面能看见堆 OOM」两条。
+
+**为什么不把堆调到多 GB**：`lmkd` 会把堆开得过大的进程杀掉，且会**掩盖**真实内存缺陷；上下限（512/1024）在最小可用值之上留足量级，又不越过实测的自然推导值太多。
+

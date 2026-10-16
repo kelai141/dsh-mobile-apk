@@ -197,6 +197,55 @@ class W3ShellContractTest {
     assertTrue("取值函数必须封顶 8 且下探 1", code.contains("internal fun uvThreadPoolSize(cores: Int): Int = minOf(8, cores.coerceAtLeast(1))"))
   }
 
+  // ── 0.14.8 堆下限：引擎 V8 老生代上限必须由壳注入 ────────────────────────────
+
+  @Test
+  fun shellEnvInjectsTheAdaptiveEngineHeap() {
+    // 「能力在、入口无 = 未完成」：engineHeapMb/heapOptionFrom 两个纯函数由 JVM 边界测试锁住「值」，
+    // 本判据锁「真的接进了 shellEnv()」这一半——否则函数写得再对，引擎也拿不到任何标志。
+    val code = codeOnly(source("EngineManager.kt"))
+    assertTrue(
+      "堆下限：shellEnv() 必须注入 NODE_OPTIONS = --max-old-space-size=<自适应值>",
+      code.contains("\"NODE_OPTIONS\" to heapOptionFrom(engineHeapMb(deviceTotalRamMb()))"),
+    )
+    assertTrue(
+      "必须有下限常量（低于它引擎可能起不来）",
+      code.contains("internal const val ENGINE_HEAP_FLOOR_MB: Int = 512"),
+    )
+    assertTrue(
+      "必须有上限常量（堆开成多 GB 会被 lmkd 杀掉）",
+      code.contains("internal const val ENGINE_HEAP_CAP_MB: Int = 1024"),
+    )
+    assertTrue(
+      "取值必须 clamp 到上下限，不得只做除法（小内存设备会推出危险值）",
+      code.contains("(totalRamMb / 2).coerceIn(ENGINE_HEAP_FLOOR_MB, ENGINE_HEAP_CAP_MB)"),
+    )
+    assertTrue(
+      "读不到设备内存时必须退回下限，不得编造",
+      code.contains("if (totalRamMb <= 0) return ENGINE_HEAP_FLOOR_MB"),
+    )
+  }
+
+  @Test
+  fun engineHeapIsNotExpressedThroughArgv() {
+    // argv 会**覆盖** NODE_OPTIONS（实测：argv 2048 + env 512 ⇒ 2240），二者表达同一件事必冲突。
+    // 引擎 argv 只保留 --expose-internals 与该 CLI 自身的参数；堆一律走 env 单一来源。
+    val code = codeOnly(source("EngineManager.kt"))
+    assertFalse(
+      "引擎 argv 不得出现 max-old-space-size（否则与 NODE_OPTIONS 双重来源，行为取决于谁覆盖谁）",
+      code.contains("--max-old-space-size=") && code.contains("\"nodeBin.absolutePath, \"--max-old-space-size="),
+    )
+    // 判据按**结构**而不是整行字面量：字面量断言会被无意义的换行/引号差异打破，
+    // 而这里真正要守的是「引擎 argv 里的 node 与 bin.js 相邻且带 --expose-internals」。
+    val argvStart = code.indexOf("val args = arrayOf(")
+    assertTrue("引擎 argv 必须仍在（锚点存在）", argvStart > 0)
+    val argvBody = code.substring(argvStart, minOf(argvStart + 260, code.length))
+    assertTrue("argv 首个元素必须是快照 node", argvBody.contains("nodeBin.absolutePath"))
+    assertTrue("argv 必须保留 --expose-internals（引擎 CLI 既有语义）", argvBody.contains("--expose-internals"))
+    assertTrue("argv 必须指向 bin.js 与 web 子命令", argvBody.contains("dshBin.absolutePath") && argvBody.contains("web"))
+    assertFalse("argv 内不得出现堆标志（堆只走 NODE_OPTIONS 单一来源）", argvBody.contains("max-old-space-size"))
+  }
+
   // ── 0.14.1 块K ③（反馈三）：pnpm store 路径别名 ──────────────────────────────
 
   // ── 0.14.2 D13：侧边栏终端的默认 shell ─────────────────────────────────────
@@ -254,7 +303,10 @@ class W3ShellContractTest {
       assertTrue("P-AC-04：三字段之一缺失：" + field, collector.contains(field))
     }
     val manager = codeOnly(source("EngineManager.kt"))
-    assertTrue("引擎启动时刻必须由 spawn 点标记", manager.contains("LogCollector.markBootStart(context)"))
+    assertTrue(
+      "引擎启动时刻必须由 spawn 点标记，并带上本次生效的堆值（0.14.8 堆下限）",
+      manager.contains("LogCollector.markBootStart(context, engineHeapMb(deviceTotalRamMb()))"),
+    )
     assertTrue("监听时刻必须由 spawn 起的观察线程标记", manager.contains("LogCollector.markListen(context)"))
     assertTrue("启动主路径必须兜底补一次 listen 标记", codeOnly(source("EngineStartFlow.kt")).contains("LogCollector.markListen(activity)"))
     assertTrue(
@@ -268,7 +320,11 @@ class W3ShellContractTest {
     )
     assertTrue(
       "启动即落一行（引擎没起来时三字段仍在场）",
-      collector.contains("emitBootSegments(context, \"note=boot-start\")"),
+      collector.contains("emitBootSegments(context, \"note=boot-start engineHeapMb=\""),
+    )
+    assertTrue(
+      "该行必须带本次生效的堆值（否则堆相关问题只能靠猜）",
+      collector.contains("note=boot-start engineHeapMb=") && collector.contains("engineHeapMb: Int = -1"),
     )
     assertTrue(
       "compose 口径必须来自探针 TOTAL totalMs=（同源，判据差 <5%）",

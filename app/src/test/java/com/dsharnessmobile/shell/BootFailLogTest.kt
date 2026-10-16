@@ -252,6 +252,92 @@ class BootFailLogTest {
     assertTrue("全空行时必须写 none", LogCollector.describeEngineLogState(files).contains("firstLine=none"))
   }
 
+  // ── 0.14.8 堆下限：堆耗尽证据不得被首行遮蔽 ──────────────────────────────────
+
+  @Test
+  fun heapExhaustionIsSurfacedEvenWhenItIsNotTheFirstLine() {
+    // 本缺陷的核心：firstLine 只取**首个非空行**，而 V8 的堆 FATAL 往往不是第一行
+    // （引擎先打印若干 setup 行才进到分配密集段）⇒ 一次堆 OOM 在 boot-fail.log 里
+    // 显示成一句无害的开场白，真因彻底不可见。旧实现只报 firstLine，本判据必须能判红。
+    File(files, "engine.log").writeText(
+      "dsh web: preparing runtime\n" +
+        "node-addon-require-builtin: hook installed\n" +
+        "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory\n" +
+        " 1: 0xb7c0c0 node::Abort() [node]\n",
+    )
+    val state = LogCollector.describeEngineLogState(files)
+    assertTrue("首行仍应如实保留（既有语义不变）", state.contains("firstLine=dsh web: preparing runtime"))
+    assertTrue("堆耗尽必须单独出现，不能被首行遮蔽", state.contains("heapOom="))
+    assertTrue("必须抓到那条 FATAL 文案", state.contains("Reached heap limit"))
+    assertFalse("不得把首行误当堆证据", state.contains("heapOom=dsh web:"))
+  }
+
+  @Test
+  fun heapExhaustionIsDetectedOnRealCapturedV8OutputWhereFatalIsNotTheFirstLine() {
+    // 本用例的输入**不是编造的字符串**：下面这几行是 2026-10-16 在模拟器（Android 16）上用
+    // 已装快照的 libexec/dsh-node、以 NODE_OPTIONS=--max-old-space-size=64 跑分配循环时
+    // **真实捕获**的输出（见 PR 描述的设备证据）。它同时证明两件事：
+    //   ① 真实的堆 FATAL 行**不是**首行（此处是第 6 行，前面还有 4 行 GC 统计 + 空行）；
+    //   ② 脱敏/取值逻辑必须能在这份真实形态上判红，而不是只在我构造的简写上行得通。
+    val real = listOf(
+      "<--- Last few GCs --->",
+      "",
+      "[33092:0x7d7556e5c000]      466 ms: Mark-Compact 39.1 (72.5) -> 39.1 (104.5) MB, pooled: 0 MB," +
+        " 16.21 / 0.00 ms  (+ 0.3 ms in 6 steps since start of marking) (average mu = 0.938, current mu = 0.81",
+      "[33092:0x7d7556e5c000]      581 ms: Mark-Compact 62.7 (128.2) -> 62.7 (128.2) MB, pooled: 0 MB," +
+        " 38.99 / 0.00 ms  (average mu = 0.842, current mu = 0.662) allocation failure; scavenge might not succeed",
+      "",
+      "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory",
+      "----- Native stack trace -----",
+    )
+    File(files, "engine.log").writeText("dsh web: preparing runtime\n" + real.joinToString("\n") + "\n")
+    val state = LogCollector.describeEngineLogState(files)
+    assertTrue("首行仍是良性行（真实引擎的常见形态）", state.contains("firstLine=dsh web: preparing runtime"))
+    assertTrue("真实堆 FATAL 必须被判出（否则这次 OOM 在 boot-fail.log 里彻底不可见）",
+      state.contains("Reached heap limit"))
+    assertFalse("不得误把首行/GC 统计行当成堆证据", state.contains("heapOom=Mark-Compact"))
+  }
+  @Test
+  fun heapExhaustionCoversAllFourV8WordingVariants() {
+    // V8 的堆耗尽措辞不止一种（不同触发路径打印不同头），只认一种是漏网。逐条反证。
+    val variants = listOf(
+      "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory",
+      "FATAL ERROR: Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory",
+      "FATAL ERROR: MarkCompactCollector: young object promotion failed\n",
+      "FATAL ERROR: CALL_AND_RETRY_LAST Allocation failed - JavaScript heap out of memory",
+    )
+    variants.forEach { line ->
+      File(files, "engine.log").writeText("benign setup line\n" + line + "\n")
+      val state = LogCollector.describeEngineLogState(files)
+      assertTrue("必须认出这一种措辞: " + line.take(40), state.contains("heapOom=") && state.contains("heapOom=none").not())
+    }
+  }
+
+  @Test
+  fun heapFieldIsHonestWhenThereIsNoHeapEvidence() {
+    // 「无堆证据」必须如实写 none，绝不允许编造：没日志/空日志/健康日志三种形态都不得出现堆字样。
+    assertTrue("无日志时 heapOom=none", LogCollector.describeEngineLogState(files).contains("heapOom=none"))
+    File(files, "engine.log").writeText("")
+    assertTrue("空日志时 heapOom=none", LogCollector.describeEngineLogState(files).contains("heapOom=none"))
+    File(files, "engine.log").writeText("engine ready on 3080\n")
+    val healthy = LogCollector.describeEngineLogState(files)
+    assertTrue("健康启动不得出现堆证据", healthy.contains("heapOom=none"))
+  }
+
+  @Test
+  fun heapEvidenceIsRedactedAndBounded() {
+    // 与 firstLine 同规格：过 EngineAuth.redact（engine.log 含 launch token）+ 有界。
+    // 脱敏形态必须与 EngineAuth.REDACT_RE 的真实取值域一致（它只认 [?&]token=<值>；
+    // engine.log 里的 launch token 就是 `?token=...` 那种 URL 形态，故这里按真实形态构造）。
+    File(files, "engine.log").writeText(
+      "setup\nFATAL ERROR: Reached heap limit while serving http://127.0.0.1:3080/?token=SECRETTOKENVALUE1234567890\n",
+    )
+    val state = LogCollector.describeEngineLogState(files)
+    assertFalse("堆证据同样不得泄露 launch token", state.contains("SECRETTOKENVALUE1234567890"))
+    File(files, "engine.log").writeText("x\nFATAL ERROR: Reached heap limit " + "Y".repeat(5000) + "\n")
+    assertTrue("堆证据必须有界（单条不得爆文件）", LogCollector.describeEngineLogState(files).length < 1400)
+  }
+
   @Test
   fun engineLogStateIsCarriedIntoTheFailureDetail() {
     // 「加了但没接上」的反证：该判据必须真的被死亡路径用上（进 detail）。
