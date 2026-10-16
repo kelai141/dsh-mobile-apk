@@ -1970,4 +1970,8 @@ Stellar 在跑、兼容层正常，本应用却在设置页与工具面一律报
 复验证据：`dsh-client-ui-responsive/tests/conversation-dock.spec.ts` 覆盖同名条目、目录漂移、父子路由与引用隔离；设备证据与运行树哈希见本轮 PR。
 
 
-282. **原生管理页不可把配置脱敏结果当完整替换文档**：`settings/describe` 会省略敏感值；把这份 user 对象交给 `settings/replace` 会重建可编辑配置并丢失未回填字段。原生页面改用 `settings/update` 合并保存，携带 `expectedRevision`；密码框留空不提交。插件启停的 `ChangeResult.application=failed` 也不保证磁盘未变，必须重新读取状态。停用前后比较完整运行清单，发现其他 active 插件失活则补偿目标状态并核验恢复。测试见 `PluginManagementRepositoryTest.kt`，设备范围见本轮开发报告。
+320. **原生管理页不可把配置脱敏结果当完整替换文档**：`settings/describe` 会省略敏感值；把这份 user 对象交给 `settings/replace` 会重建可编辑配置并丢失未回填字段。原生页面改用 `settings/mutate` 按字段合并保存，携带 `expectedRevision`；密码框留空不提交。插件启停的 `ChangeResult.application=failed` 也不保证磁盘未变，必须重新读取状态。停用前后比较完整运行清单，发现其他 active 插件失活则补偿目标状态并核验恢复。测试见 `PluginManagementRepositoryTest.kt`，设备范围见本轮开发报告。
+
+321. **插件库存 ID 与 Hard 清单 ID 不在同一层**：真实 `pluginManager/listPlugins` 返回 `include:<profile id>`，受保护条目可能没有 `patchId`；Hard manifest 保存配置 ID。直接比较库存 entryId 会漏掉过滤。本轮设备返回 197 个条目，按当前清单映射后命中 192 个 Hard 条目。仓储按 exact moduleName 加 profile ID（可信 patchId 或根 include 路径）匹配，启停入口也独立复核；禁止只在 UI 按名称或目录过滤。回归测试包含没有 patchId 的真实树前缀反证。
+
+322. **齿轮点击矩形波纹与切页端点跳位**：通用 `DsUi.ripple` 只复制 cornerRadius，传 oval 时 mask 仍是矩形；原生管理齿轮改用独立 oval mask，并只旋转 RotateDrawable。原切页按目的页交换两个加权内容区，动画端点又根据进度隐藏目标内容区，导致同一帧无 View 占满剩余高度，底部操作区跳到顶部。两页改为单个稳定加权 FrameLayout 内切换，操作区不参与内容切换测量。构建与回归证据见 `.deploy-tmp/management-ui/gradle-gear-fix.log` 及同目录 `gear-fix-*.png`。

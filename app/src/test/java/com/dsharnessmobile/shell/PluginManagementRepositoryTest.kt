@@ -49,6 +49,24 @@ class PluginManagementRepositoryTest {
   }
 
   @Test
+  fun `真实Loader树前缀与缺失patchId均不能绕过Hard保护`() = runBlocking<Unit> {
+    val hardRow = JSONObject().put("entryId", "include:built-in").put("moduleName", "@product/core")
+      .put("enabled", true).put("readOnlyReason", "management-required")
+    val ordinary = JSONObject().put("entryId", "include:user").put("moduleName", "@user/tool")
+      .put("enabled", true).put("patchId", "user")
+    var mutationCalled = false
+    val repository = repo({ method, _, _ ->
+      if (method == "pluginManager/listPlugins") envelopeArray(JSONArray().put(hardRow).put(ordinary))
+      else { mutationCalled = true; envelope(JSONObject().put("application", "applied")) }
+    })
+    assertEquals(listOf("include:user"), repository.listPlugins().map { it.entryId })
+    assertThrows(PluginManagementRepository.PluginManagementException::class.java) {
+      runBlocking { repository.setPluginEnabled("include:built-in", false) }
+    }
+    assertFalse(mutationCalled)
+  }
+
+  @Test
   fun `Hard条目即使伪造为可写也不能启停`() = runBlocking<Unit> {
     val row = JSONObject().put("entryId", "built-in").put("moduleName", "@product/core")
       .put("enabled", true).put("patchId", "built-in")
@@ -81,7 +99,7 @@ class PluginManagementRepositoryTest {
   }
 
   @Test
-  fun `配置写入走settings update并携带期望revision`() = runBlocking<Unit> {
+  fun `配置写入走settings mutate并携带期望revision`() = runBlocking<Unit> {
     val row = JSONObject().put("entryId", "user").put("moduleName", "@user/tool")
       .put("enabled", true).put("patchId", "user")
     val descriptor = JSONObject().put("ns", "user").put("revision", 4)
@@ -90,7 +108,7 @@ class PluginManagementRepositoryTest {
       when (method) {
         "pluginManager/listPlugins" -> envelopeArray(JSONArray().put(row))
         "settings/describe" -> envelope(JSONObject().put("writable", true).put("namespaces", JSONArray().put(descriptor)))
-        "settings/update" -> { argsSeen = args; envelope(descriptor) }
+        "settings/mutate" -> { argsSeen = args; envelope(descriptor) }
         else -> null
       }
     })
@@ -99,7 +117,7 @@ class PluginManagementRepositoryTest {
 
     assertEquals("user", argsSeen?.optString("ns"))
     assertEquals(4, argsSeen?.optInt("expectedRevision"))
-    assertTrue(argsSeen?.optJSONObject("patch")?.has("enabled") == true)
+    assertEquals("enabled", argsSeen?.optJSONArray("ops")?.optJSONObject(0)?.optJSONArray("path")?.optString(0))
   }
 
   @Test
@@ -122,7 +140,7 @@ class PluginManagementRepositoryTest {
       when (method) {
         "pluginManager/listPlugins" -> envelopeArray(JSONArray().put(row))
         "settings/describe" -> envelope(JSONObject().put("writable", true).put("namespaces", JSONArray().put(descriptor)))
-        "settings/update" -> { patchSeen = args.optJSONObject("patch"); envelope(descriptor) }
+        "settings/mutate" -> { patchSeen = args.optJSONArray("ops")?.optJSONObject(0); envelope(descriptor) }
         else -> null
       }
     })
@@ -130,7 +148,29 @@ class PluginManagementRepositoryTest {
     repository.savePluginConfiguration("user", JSONObject().put("enabled", false), 3)
 
     assertFalse(patchSeen?.has("token") == true)
-    assertEquals(false, patchSeen?.optBoolean("enabled"))
+    assertEquals("enabled", patchSeen?.optJSONArray("path")?.optString(0))
+    assertEquals(false, patchSeen?.optBoolean("value"))
+  }
+
+  @Test
+  fun `敏感数组只提交变更字段而不替换脱敏后的整行`() = runBlocking<Unit> {
+    val row = JSONObject().put("entryId", "user").put("moduleName", "@user/tool").put("enabled", true).put("patchId", "user")
+    val descriptor = JSONObject().put("ns", "user").put("revision", 1)
+      .put("user", JSONObject("{\"accounts\":[{\"name\":\"old\"}]}"))
+      .put("secrets", JSONArray().put(JSONObject().put("path", JSONArray(listOf("accounts", "0", "token"))).put("set", true)))
+    var operations: JSONArray? = null
+    val repository = repo({ method, args, _ -> when (method) {
+      "pluginManager/listPlugins" -> envelopeArray(JSONArray().put(row))
+      "settings/describe" -> envelope(JSONObject().put("writable", true).put("namespaces", JSONArray().put(descriptor)))
+      "settings/mutate" -> { operations = args.getJSONArray("ops"); envelope(descriptor) }
+      else -> null
+    } })
+    repository.savePluginConfiguration("user", JSONObject("{\"accounts\":[{\"name\":\"new\"}]}"), 1)
+    assertEquals(1, operations?.length())
+    assertEquals("[\"accounts\",\"0\",\"name\"]", operations?.getJSONObject(0)?.getJSONArray("path").toString())
+    assertThrows(PluginManagementRepository.PluginManagementException::class.java) {
+      runBlocking { repository.savePluginConfiguration("user", JSONObject("{\"accounts\":[]}"), 1) }
+    }
   }
 
   @Test

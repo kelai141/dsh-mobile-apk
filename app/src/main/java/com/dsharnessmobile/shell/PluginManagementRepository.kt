@@ -38,7 +38,7 @@ internal class PluginManagementRepository internal constructor(
   /** Reads the real inventory and removes only exact entries owned by the active Hard manifest. */
   suspend fun listPlugins(): List<PluginRow> {
     val hard = requireHardManifest()
-    return rowsToPlugins(runtimeInventory()).filterNot { hard.owns(it.entryId, it.moduleName) }.map { row ->
+    return rowsToPlugins(runtimeInventory()).filterNot { hardOwns(hard, it) }.map { row ->
       val desired = pendingState.get(row.entryId, row.moduleName) ?: return@map row
       if (row.enabled == desired) {
         pendingState.remove(row.entryId, row.moduleName)
@@ -54,7 +54,7 @@ internal class PluginManagementRepository internal constructor(
     val before = runtimeInventory()
     val row = rowsToPlugins(before).firstOrNull { it.entryId == entryId }
       ?: throw PluginManagementException("插件已不存在")
-    if (hard.owns(row.entryId, row.moduleName)) {
+    if (hardOwns(hard, row)) {
       throw PluginManagementException("Hard 清单中的插件不可修改")
     }
     row.readOnlyReason?.let { throw PluginManagementException("插件不可修改：$it") }
@@ -141,10 +141,32 @@ internal class PluginManagementRepository internal constructor(
       throw PluginManagementException("配置已被其他操作修改，请重新读取后再保存")
     }
     val namespace = row.patchId ?: row.entryId
+    // Path edits avoid replacing redacted secrets inside arrays, which an ordinary merge would overwrite.
+    val ops = org.json.JSONArray()
+    fun diff(previous: Any?, next: Any?, path: List<String>) {
+      when {
+        next is JSONObject -> for (key in next.keys()) {
+          diff((previous as? JSONObject)?.opt(key), next.opt(key), path + key)
+        }
+        next is org.json.JSONArray && previous is org.json.JSONArray && next.length() == previous.length() ->
+          for (index in 0 until next.length()) diff(previous.opt(index), next.opt(index), path + index.toString())
+        previous?.toString() != next?.toString() -> {
+          val secrets = descriptor.optJSONArray("secrets")
+          for (index in 0 until (secrets?.length() ?: 0)) {
+            val secret = secrets?.optJSONObject(index)?.optJSONArray("path") ?: continue
+            val secretPath = (0 until secret.length()).map { secret.optString(it) }
+            if (next is org.json.JSONArray && secretPath.take(path.size) == path && secretPath.size > path.size) {
+              throw PluginManagementException("包含敏感字段的列表不能整体替换；请逐项编辑并保留原列表长度")
+            }
+          }
+          ops.put(JSONObject().put("op", "set").put("path", org.json.JSONArray(path)).put("value", next))
+        }
+      }
+    }
+    diff(descriptor.optJSONObject("user") ?: JSONObject(), section, emptyList())
     return rpcValue(
-      "settings/update",
-      JSONObject().put("ns", namespace).put("patch", JSONObject(section.toString()))
-        .put("expectedRevision", expectedRevision),
+      "settings/mutate",
+      JSONObject().put("ns", namespace).put("ops", ops).put("expectedRevision", expectedRevision),
       MUTATION_TIMEOUT_MS,
     )
   }
@@ -203,6 +225,13 @@ internal class PluginManagementRepository internal constructor(
     }
     return null
   }
+
+  /** Inventory uses Loader tree ids (include:<profile id>); the signed manifest uses profile ids.
+   * patchId is absent on protected/unaddressable entries, so it cannot be the only identity source.
+   */
+  private fun hardOwns(hard: PluginMounts.HardManifest, row: PluginRow): Boolean =
+    hard.owns(row.entryId, row.moduleName) || hard.owns(row.patchId, row.moduleName) ||
+      (row.entryId.startsWith("include:") && hard.owns(row.entryId.removePrefix("include:"), row.moduleName))
 
   private fun requireHardManifest(): PluginMounts.HardManifest = hardManifest()
     ?: throw PluginManagementException("无法验证当前 Hard 清单，已停止插件管理操作")

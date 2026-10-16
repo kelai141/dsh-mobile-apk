@@ -371,7 +371,7 @@ internal class PluginManagementPage(
     }
     val editorLp = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8); bottomMargin = dp(8) }
     page.addView(editor, editorLp)
-    addPrimitiveControls(page, schema, editor)
+    addPrimitiveControls(page, schema, editor, namespace.optJSONObject("value") ?: JSONObject())
     secretPaths.forEach { path ->
       val secret = EditText(activity).apply {
         hint = "${path.joinToString(".")}：已设置，留空保留原值"
@@ -414,7 +414,7 @@ internal class PluginManagementPage(
   }
 
   /** Schema-declared primitive fields get native text/check controls; the full JSON stays available. */
-  private fun addPrimitiveControls(page: LinearLayout, schema: JSONObject?, editor: EditText) {
+  private fun addPrimitiveControls(page: LinearLayout, schema: JSONObject?, editor: EditText, effective: JSONObject) {
     val properties = schema?.optJSONObject("properties") ?: schema?.optJSONObject("dict") ?: return
     if (properties.length() == 0) return
     page.addView(label("常用字段", 13, gray3, true))
@@ -426,18 +426,22 @@ internal class PluginManagementPage(
       val enum = field.optJSONArray("enum")
       when {
         enum != null && enum.length() in 1..20 -> {
-          val opts = (0 until enum.length()).map { enum.optString(it) }
+          val opts = listOf("不修改此字段") + (0 until enum.length()).map { enum.optString(it) }
           val current = try { JSONObject(editor.text.toString()).optString(key) } catch (_: Throwable) { "" }
+          val originalIndex = if (current.isBlank()) 0 else opts.indexOf(current).coerceAtLeast(0)
+          var changedByUser = false
           val fieldLabel = label(field.optString("title").ifBlank { key }, 13, gray1)
           page.addView(fieldLabel)
           val spinner = Spinner(activity).apply {
             adapter = android.widget.ArrayAdapter(activity, android.R.layout.simple_spinner_dropdown_item, opts)
-            setSelection(opts.indexOf(current).coerceAtLeast(0))
+            setSelection(originalIndex)
             contentDescription = field.optString("title").ifBlank { key }
             onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
               override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
               override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
-                if (opts.isNotEmpty()) updateEditorValue(editor, key) { it.put(key, opts[position]) }
+                if (!changedByUser && position == originalIndex) return
+                changedByUser = true
+                updateEditorValue(editor, key) { if (position > 0) it.put(key, enum.opt(position - 1)) else it.remove(key) }
               }
             }
           }
@@ -448,7 +452,7 @@ internal class PluginManagementPage(
             text = field.optString("title").ifBlank { key }
             setTextColor(gray1)
             buttonTintList = android.content.res.ColorStateList.valueOf(white)
-            isChecked = try { JSONObject(editor.text.toString()).optBoolean(key) } catch (_: Throwable) { false }
+            isChecked = try { JSONObject(editor.text.toString()).optBoolean(key, effective.optBoolean(key)) } catch (_: Throwable) { false }
             setOnCheckedChangeListener { _, checked -> updateEditorValue(editor, key) { it.put(key, checked) } }
           }
           page.addView(check)
@@ -462,12 +466,12 @@ internal class PluginManagementPage(
             setSingleLine(true)
             setPadding(dp(10), dp(8), dp(10), dp(8))
             background = rounded(gray4, 8)
-            val current = try { JSONObject(editor.text.toString()).opt(key)?.toString().orEmpty() } catch (_: Throwable) { "" }
+            val current = try { (JSONObject(editor.text.toString()).opt(key) ?: effective.opt(key))?.toString().orEmpty() } catch (_: Throwable) { "" }
             setText(current)
             inputType = if (type == "string") android.text.InputType.TYPE_CLASS_TEXT else
               android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_SIGNED or
                 if (type == "number") android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL else 0
-            setOnFocusChangeListener { _, focused -> if (!focused) updateEditorValue(editor, key) { obj ->
+            setOnFocusChangeListener { _, focused -> if (!focused && text.toString() != current) updateEditorValue(editor, key) { obj ->
               val raw = text.toString()
               when (type) {
                 "number" -> raw.toDoubleOrNull()?.let { obj.put(key, it) }

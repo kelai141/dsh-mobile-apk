@@ -111,13 +111,13 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
   // S1-13：首屏此前对「这是什么 / 为什么要授权」零解释——用户第一次打开只看到品牌名与
   // 「内嵌运行时」，随后被要求授权存储，却没有任何一句话说明这是干什么的、权限用来做什么。
   // 这里补一行**事实陈述**（不是营销文案）：能力面 + 权限面各一句。
-  titleCol.addView(TextView(activity).apply {
+  val explanation = TextView(activity).apply {
     text = activity.getString(R.string.ds_brand_explain)
-    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-    setTextColor(color(R.color.ds_text_tertiary))
+    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+    setTextColor(color(R.color.ds_text_secondary))
     setLineSpacing(0f, 1.25f)
     setPadding(0, dp(4f), 0, 0)
-  })
+  }
 
   val versionLabel = TextView(activity).apply {
     setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
@@ -150,6 +150,9 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
   brandBlock.addView(titleCol)
   brandBlock.addView(versionLabel)
   content.addView(brandBlock)
+  content.addView(explanation, LinearLayout.LayoutParams(-1, -2).apply {
+    bottomMargin = dpix(R.dimen.ds_space_16)
+  })
 
   // —— Status card ——
   val card = LinearLayout(activity).apply {
@@ -184,6 +187,7 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
   }
   val statusRow = LinearLayout(activity).apply {
+    visibility = View.GONE
     orientation = LinearLayout.HORIZONTAL
     gravity = Gravity.CENTER_VERTICAL
   }
@@ -372,12 +376,15 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
       ),
     )
   }
-  root.addView(scroll)
-  val managementHost = FrameLayout(activity).apply {
-    visibility = View.GONE
+  val managementHost = FrameLayout(activity).apply { visibility = View.GONE }
+  // One stable viewport owns the remaining height throughout a transition, including its endpoints.
+  // Changing visibility of its children must never move the bottom action row.
+  val viewport = FrameLayout(activity).apply {
     layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+    addView(scroll, FrameLayout.LayoutParams(-1, -1))
+    addView(managementHost, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER_HORIZONTAL))
   }
-  root.addView(managementHost)
+  root.addView(viewport)
 
   // —— Actions (sticky) ——
   fun makePrimary(): Button = Button(activity).apply {
@@ -436,9 +443,22 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
   secondaryRow.addView(updateButton, halfEnd)
 
   val gear = android.widget.ImageButton(activity).apply {
-    setImageResource(R.drawable.ic_management_gear)
+    setImageDrawable(android.graphics.drawable.RotateDrawable().apply {
+      drawable = activity.getDrawable(R.drawable.ic_management_gear)
+      fromDegrees = 0f
+      toDegrees = 240f
+      pivotX = 0.5f
+      pivotY = 0.5f
+      isPivotXRelative = true
+      isPivotYRelative = true
+    })
     imageTintList = android.content.res.ColorStateList.valueOf(color(R.color.ds_text_primary))
-    background = DsUi.ripple(DsUi.oval(color(R.color.ds_surface)), color(R.color.ds_accent_soft))
+    // The generic ripple helper copies corner radius only; an oval needs an oval mask too.
+    background = android.graphics.drawable.RippleDrawable(
+      android.content.res.ColorStateList.valueOf(color(R.color.ds_accent_soft)),
+      DsUi.oval(color(R.color.ds_surface)), DsUi.oval(android.graphics.Color.WHITE),
+    )
+    clipToOutline = true
     contentDescription = "打开管理中心"
     setPadding(dp(16f), dp(16f), dp(16f), dp(16f))
     setOnClickListener { callbacks.onManagement() }

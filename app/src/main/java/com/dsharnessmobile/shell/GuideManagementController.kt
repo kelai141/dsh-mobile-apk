@@ -43,7 +43,11 @@ internal class GuideManagementController(
     row("插件管理", "启停插件与编辑配置") { showPlugins() }
     (chrome.updateButton.parent as? ViewGroup)?.removeView(chrome.updateButton)
     management.addView(chrome.updateButton.apply {
-      minHeight = dp(64)
+      minHeight = dp(72)
+      gravity = Gravity.START or Gravity.CENTER_VERTICAL
+      setPadding(dp(20), dp(12), dp(20), dp(12))
+      textSize = 16f
+      background = DsUi.ripple(DsUi.roundRect(activity.getColor(R.color.ds_surface), dp(8).toFloat()), activity.getColor(R.color.ds_accent_soft))
       layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) }
     })
     row("存储管理", "私有数据、容量与公共导出目录") { showStorage() }
@@ -74,16 +78,24 @@ internal class GuideManagementController(
     setPadding(0, dp(8), 0, dp(8))
   }
   private fun row(title: String, subtitle: String, action: () -> Unit) {
-    management.addView(Button(activity).apply {
-      text = "$title\n$subtitle"
-      textSize = 15f
-      isAllCaps = false
-      gravity = Gravity.START or Gravity.CENTER_VERTICAL
+    management.addView(LinearLayout(activity).apply {
+      orientation = LinearLayout.HORIZONTAL
+      gravity = Gravity.CENTER_VERTICAL
       setPadding(dp(20), dp(12), dp(20), dp(12))
-      minHeight = dp(72)
-      setTextColor(activity.getColor(R.color.ds_text_primary))
+      minimumHeight = dp(72)
       background = DsUi.ripple(DsUi.roundRect(activity.getColor(R.color.ds_surface), dp(8).toFloat()), activity.getColor(R.color.ds_accent_soft))
       layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) }
+      isClickable = true
+      isFocusable = true
+      contentDescription = "$title，$subtitle"
+      val words = column().apply { setPadding(0, 0, dp(12), 0) }
+      words.addView(label(title, 16f).apply { setPadding(0, 0, 0, 0) })
+      words.addView(label(subtitle, 13f).apply {
+        setPadding(0, dp(4), 0, 0)
+        setTextColor(activity.getColor(R.color.ds_text_secondary))
+      })
+      addView(words, LinearLayout.LayoutParams(0, -2, 1f))
+      addView(label("›", 24f).apply { importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO })
       setOnClickListener { action() }
     })
   }
@@ -111,7 +123,7 @@ internal class GuideManagementController(
   }
   private fun render(value: Float) {
     progress = value
-    chrome.gear.rotation = 240f * value
+    chrome.gear.drawable?.level = (10_000 * value).toInt()
     chrome.homeContent.visibility = if (value >= 1f) View.GONE else View.VISIBLE
     chrome.managementHost.visibility = if (value <= 0f) View.GONE else View.VISIBLE
     // One content area is interactive at a time, including interrupted transitions.
@@ -120,9 +132,6 @@ internal class GuideManagementController(
     chrome.homeContent.alpha = 1f - value
     chrome.managementHost.alpha = value
     chrome.managementHost.translationY = dp(12) * (1f - value)
-    // Only one weighted view participates in layout; the outgoing page must not halve the viewport.
-    chrome.homeContent.layoutParams = (chrome.homeContent.layoutParams as LinearLayout.LayoutParams).apply { weight = if (destination == "home") 1f else 0f }
-    chrome.managementHost.layoutParams = (chrome.managementHost.layoutParams as LinearLayout.LayoutParams).apply { weight = if (destination == "home") 0f else 1f }
   }
 
   private fun removeDetail() {
@@ -173,8 +182,19 @@ internal class GuideManagementController(
         postDelayed({ if (destination == "storage") showStorage() }, 1000)
       }
     })
-    val status = label("", 14f)
-    body.addView(status)
+    val status = chrome.storageChip
+    (status.parent as? ViewGroup)?.removeView(status)
+    body.addView(status, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
+    for (index in 0 until body.childCount) {
+      (body.getChildAt(index) as? Button)?.apply {
+        isAllCaps = false
+        stateListAnimator = null
+        minimumHeight = dp(48)
+        setTextColor(activity.getColor(R.color.ds_text_primary))
+        background = DsUi.ripple(DsUi.roundRect(activity.getColor(R.color.ds_surface), dp(8).toFloat()), activity.getColor(R.color.ds_accent_soft))
+        layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) }
+      }
+    }
     displayDetail(ScrollView(activity).apply { addView(body) })
     destination = "storage"
     storageStatus = status
