@@ -40,8 +40,11 @@ const profile = readFileSync(PROFILE, 'utf8')
 // ① wrapper 生成
 check('build-snapshot 生成 PTC wrapper（7c1 段在场）', build.includes('PTC node wrapper'))
 check('wrapper 落点为 usr/libexec/dsh-node', build.includes("const PTC_NODE_WRAPPER_REL = 'libexec/dsh-node'"))
+// 窗口从 400 放宽到 2000：wrapper 内容会随功能增长（0.14.8 加了堆下限段），
+// 而本判据要守的是「同一个 writeFileSync 落了 mode 0o755」，不是「内容必须短」。
+// 旧窗口是恒定量，内容一长就假红（实测 0.14.8 堆下限把三段挤到 400 之外）。
 check('wrapper 带可执行位（mode 0o755）',
-  /writeFileSync\(\s*\n?\s*join\(U, PTC_NODE_WRAPPER_REL\)[\s\S]{0,400}?\{ mode: 0o755 \}/.test(build))
+  /writeFileSync\(\s*\n?\s*join\(U, PTC_NODE_WRAPPER_REL\)[\s\S]{0,2000}?\{ mode: 0o755 \}/.test(build))
 check('wrapper 用 /system/bin/sh shebang', build.includes("'#!/system/bin/sh\\n'"))
 check('wrapper 内部 export LD_LIBRARY_PATH 指向快照 lib', build.includes("'export LD_LIBRARY_PATH=\"' + NEW_PREFIX + '/lib\"\\n'"))
 check('wrapper 经 /system/bin/linker64 启动 node（绕开 app-data ELF exec）',
@@ -73,6 +76,20 @@ check('wrapper 不依赖 LD_PRELOAD / TERMUX_EXEC__* 继承（只靠自 export�
   !/LD_PRELOAD|TERMUX_EXEC__/.test(wrapperBlock))
 check('wrapper 不引用 TERMUX_APP__LEGACY_DATA_DIR（防「钩子重定向 wrapper 自身」的未复现风险）',
   !wrapperBlock.includes('TERMUX_APP__LEGACY_DATA_DIR'))
+
+// ③-b 0.14.8 堆下限：wrapper 是「被过滤 env」那条路径上唯一的堆来源
+// （PTC 只放 6 个环境变量，壳侧 shellEnv() 的 NODE_OPTIONS 到不了它）。
+// 判据三条：未设时自适应填值 / 用前先判空（不得覆盖调用方显式值）/ 落在 exec 之前才生效。
+check('wrapper 在 NODE_OPTIONS 未设置时才填堆下限（不得覆盖调用方显式值）',
+  wrapperBlock.includes('if [ -z "$NODE_OPTIONS" ]; then'))
+check('wrapper 按设备 MemTotal 自适应算堆（clamp 到 512-1024MB）',
+  wrapperBlock.includes('/proc/meminfo') &&
+    /__dsh_mem_kb \/ 2048/.test(wrapperBlock) &&
+    wrapperBlock.includes('[ "$__dsh_heap" -lt 512 ]') &&
+    wrapperBlock.includes('[ "$__dsh_heap" -gt 1024 ]'))
+check('wrapper 导出的堆标志落在 exec 之前（否则对本次进程无效）',
+  wrapperBlock.indexOf('export NODE_OPTIONS=') >= 0 &&
+    wrapperBlock.indexOf('export NODE_OPTIONS=') < wrapperBlock.indexOf('exec /system/bin/linker64'))
 
 // ④ 双仓镜像：apk 侧同一文件必须含同一 wrapper 落点（防单边演进）
 const apkBuild = join(repoRoot, 'dsh-mobile-apk', 'scripts', 'build-snapshot-013.mjs')
