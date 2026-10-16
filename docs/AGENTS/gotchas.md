@@ -2009,4 +2009,5 @@ JVM 边界测试在 `EngineBootInstrumentationTest`（取值与 clamp 边界、�
 **为什么不把堆调到多 GB**：`lmkd` 会把堆开得过大的进程杀掉，且会**掩盖**真实内存缺陷；上下限（512/1024）在最小可用值之上留足量级，又不越过实测的自然推导值太多。
 **同轮踩到的两个既存问题（都不是本次改动引入，一并如实登记）**：
 ① `ptc-node-wrapper-c1.test.mjs` 的「带可执行位」判据把 `writeFileSync(...)` 与 `{ mode: 0o755 }` 之间的窗口写死为 400 字符——wrapper 内容一长（本次加了堆下限段）就**假红**。已把窗口放宽到 2000 并补三条锁新行为的判据（未设时才填、自适应 clamp、落在 `exec` 之前）。教训：这类「窗口长度」是恒定量，本质是在断言「实现必须短」，与真正要守的语义（同一个 `writeFileSync` 落了 755）无关。
-② `combo-probe-p1.test.mjs` 的「重复 phase 记录聚合到固定阶段行」判据（要求 `constructorRows <= 2`，实测 3）**在纯净 `origin/main` 上同样判红**——用 detached `origin/main` worktree 复现确认，且同一工作树内多次运行会 2 红 1 绿，属**时序 flaky**。本轮未修（不属本改动范围），但它是 `check-patch-test-manifest.mjs` 的未声明失败来源，会随机卡住本地全链构建；修它或按既有 `KNOWN_FAIL` 格式带 `reason`/`since` 登记，是下一轮的独立任务。
+② `combo-probe-p1.test.mjs` 的「重复 phase 记录聚合到固定阶段行」判据把行数上界**写死成常量 `<= 2`**，实际是在断言「这段洪水必须在 2 个窗口（500ms）内跑完」——而窗口本身是 250ms（`dshMobileComboProbePhaseWindowMs`），16 轮 × 25ms 的 sleep 加上每轮构造的真实开销必然落在多个窗口里（本机实测稳定 3 行：窗口起点 531.6 / 798.4 / 1086.4ms，共约 1.1s）。机器一慢或构造一变重就假红；且**纯净 `origin/main` 上同样判红**（用 detached worktree 复现确认），是 `check-patch-test-manifest.mjs` 的未声明失败来源，会随机卡住本地全链构建。
+   修法：断言的应是**被守着的不变量，不是这台机器的速度**。改为按实测耗时算窗口上界（`ceil(elapsedMs/250)+1`）并要求 `行数 < 轮数`——后者才是「聚合」的判据（退化成事件级 push 时 16 轮会产出 16 行）。受控负控已验证：把窗口改成 1ms（等价于每事件一行）时新判据判红（`constructorRows=16 rounds=16`），证明它没有变成恒绿。修后连跑 5 次全部通过（修前 5 次红 3 次）。

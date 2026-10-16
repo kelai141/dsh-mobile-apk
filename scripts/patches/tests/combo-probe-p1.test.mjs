@@ -227,8 +227,10 @@ try {
       deferred?.observations === 1 && deferred.callbacks === 3, JSON.stringify(deferred))
 
     const phaseCountBeforeFlood = phaseLines.length
+    const FLOOD_ROUNDS = 16
+    const floodStartedAt = Date.now()
     let finalizedDuringFlood = false
-    for (let i = 0; i < 16; i++) {
+    for (let i = 0; i < FLOOD_ROUNDS; i++) {
       new ClientModuleRegistry(ctx)
       await new Promise((resolve) => setTimeout(resolve, 25))
       if (i >= 10 && phaseLines.length > phaseCountBeforeFlood) finalizedDuringFlood = true
@@ -236,10 +238,19 @@ try {
     check('phase 持续到达时仍按固定 deadline 收口，不等静默 debounce', finalizedDuringFlood,
       `before=${phaseCountBeforeFlood} after=${phaseLines.length}`)
     await new Promise((resolve) => setTimeout(resolve, 275))
+    const floodElapsedMs = Date.now() - floodStartedAt
     const floodRows = phaseLines.slice(phaseCountBeforeFlood).filter((line) => line.includes('name=constructor-flush '))
-    check('重复 phase 记录聚合到固定阶段行，输出行数受 allowlist 上限约束',
-      floodRows.length > 0 && floodRows.length <= 2 && !patched.includes('dshMobileComboProbePhases.push'),
-      `constructorRows=${floodRows.length}`)
+    // 断言的**是被守着的不变量，不是这台机器的速度**。
+    // 旧判据写死 `<= 2`，实际在断言「这段洪水必须在 2 个窗口（500ms）内跑完」——窗口本身是 250ms
+    // （dshMobileComboProbePhaseWindowMs），而 16 轮 × 25ms 的 sleep 加上每轮构造的真实开销必然落在
+    // 1~3 个窗口里。机器一慢（或构造变重）就 3 行 ⇒ 假红。实测本机稳定 3 行、且纯净 origin/main 上同样红。
+    // 真正要守的两件事：① 有记录（不是被静默丢弃）；② **聚合**——行数由窗口数决定、远少于事件数
+    // （若退化成事件级 push，16 轮会产出 16 行）。故按实测耗时算窗口上界，并明确要求行数 < 轮数。
+    const maxWindows = Math.ceil(floodElapsedMs / 250) + 1
+    check('重复 phase 记录聚合到固定阶段行（行数由 250ms 窗口数决定，不随事件数增长）',
+      floodRows.length > 0 && floodRows.length < FLOOD_ROUNDS && floodRows.length <= maxWindows
+        && !patched.includes('dshMobileComboProbePhases.push'),
+      `constructorRows=${floodRows.length} rounds=${FLOOD_ROUNDS} elapsedMs=${floodElapsedMs} maxWindows=${maxWindows}`)
   } finally {
     console.log = originalLog
   }
