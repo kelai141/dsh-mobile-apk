@@ -22,6 +22,24 @@ import android.widget.Toast
 import org.json.JSONObject
 import java.util.concurrent.Executors
 
+/** A stopped engine is an ordinary page state; HTTP liveness alone does not mean the plugin API is ready. */
+internal enum class PluginEngineAvailability { OFFLINE, STARTING, ONLINE, FAILED }
+
+internal fun pluginEngineAvailability(
+  userStopped: Boolean,
+  httpAlive: Boolean,
+  portAlive: Boolean,
+  phase: GuidePhase,
+  startPending: Boolean,
+): PluginEngineAvailability = when {
+  userStopped -> PluginEngineAvailability.OFFLINE
+  httpAlive -> PluginEngineAvailability.ONLINE
+  phase == GuidePhase.Error -> PluginEngineAvailability.FAILED
+  portAlive || startPending || phase in setOf(GuidePhase.Starting, GuidePhase.Extracting,
+    GuidePhase.Updating, GuidePhase.Recovering, GuidePhase.Undoing) -> PluginEngineAvailability.STARTING
+  else -> PluginEngineAvailability.OFFLINE
+}
+
 /** Native plugin list and detail surface. Repository owns RPC/auth and performs network I/O off-main. */
 internal class PluginManagementPage(
   private val activity: MainActivity,
@@ -82,6 +100,11 @@ internal class PluginManagementPage(
   private var allRows: List<PluginRow> = emptyList()
   private var filter = Filter.ALL
   private var showingDetail = false
+  private var loading = false
+  private lateinit var searchControls: View
+  private var startPendingUntil = 0L
+  private var apiWaitSince = 0L
+  private val retryLoad = Runnable { load() }
 
   val view: View get() = root
 
@@ -150,6 +173,7 @@ internal class PluginManagementPage(
     searchBlock.addView(chips)
     searchBlock.addView(summary)
     root.addView(searchBlock)
+    searchControls = searchBlock
 
     list.adapter = adapter
     content.addView(list, FrameLayout.LayoutParams(-1, -1))
@@ -177,6 +201,7 @@ internal class PluginManagementPage(
 
   fun dispose() {
     disposed = true
+    root.removeCallbacks(retryLoad)
     worker.shutdownNow()
   }
 
@@ -207,25 +232,128 @@ internal class PluginManagementPage(
   }
 
   private fun load() {
+    if (disposed || loading || showingDetail) return
+    root.removeCallbacks(retryLoad)
+    loading = true
     setBusy(true)
     error.visibility = View.GONE
+    val phase = activity.guideRenderer.lastGuidePhase
+    val userStopped = activity.userClosedEngine || EngineService.userShutdown
+    val requestPending = android.os.SystemClock.elapsedRealtime() < startPendingUntil
     worker.execute {
+      val probe = EngineProbe.check()
+      val availability = pluginEngineAvailability(
+        userStopped, probe.optBoolean("running"),
+        if (probe.optBoolean("running")) true else EngineProbe.portReachable(300), phase, requestPending,
+      )
+      if (availability != PluginEngineAvailability.ONLINE) {
+        activity.runOnUiThread {
+          if (disposed || activity.isFinishing || activity.isDestroyed) return@runOnUiThread
+          loading = false
+          setBusy(false)
+          showEngineAvailability(availability)
+        }
+        return@execute
+      }
       try {
         val rows = kotlinx.coroutines.runBlocking { repository.listPlugins() }
         activity.runOnUiThread {
           if (disposed || activity.isFinishing || activity.isDestroyed) return@runOnUiThread
+          loading = false
+          apiWaitSince = 0L
+          startPendingUntil = 0L
           allRows = rows
+          showList()
           setBusy(false)
           refreshRows()
         }
-      } catch (t: Throwable) {
+      } catch (t: Exception) {
+        val stillRunning = EngineProbe.check().optBoolean("running")
         activity.runOnUiThread {
           if (disposed || activity.isFinishing || activity.isDestroyed) return@runOnUiThread
+          loading = false
           setBusy(false)
-          showError("加载插件失败：${t.message ?: "请稍后重试"}", retry = true)
+          if (!stillRunning) {
+            showEngineAvailability(pluginEngineAvailability(activity.userClosedEngine || EngineService.userShutdown,
+              false, false, activity.guideRenderer.lastGuidePhase,
+              android.os.SystemClock.elapsedRealtime() < startPendingUntil))
+          } else {
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (apiWaitSince == 0L) apiWaitSince = now
+            if (requestPending && now - apiWaitSince < 30_000L) {
+              showEngineAvailability(PluginEngineAvailability.STARTING)
+            } else {
+              showList()
+              countLabel.text = "清单暂不可用"
+              showError("暂时无法读取插件，请稍后刷新。${t.message.orEmpty()}", retry = true)
+            }
+          }
         }
       }
     }
+  }
+
+  private fun showList() {
+    showingDetail = false
+    searchControls.visibility = View.VISIBLE
+    content.removeAllViews()
+    content.addView(list, FrameLayout.LayoutParams(-1, -1))
+    content.addView(error, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
+    error.visibility = View.GONE
+  }
+
+  private fun showEngineAvailability(state: PluginEngineAvailability) {
+    showingDetail = false
+    allRows = emptyList()
+    adapter.rows = emptyList()
+    adapter.notifyDataSetChanged()
+    searchControls.visibility = View.GONE
+    error.visibility = View.GONE
+    content.removeAllViews()
+    val waiting = state == PluginEngineAvailability.STARTING
+    val failed = state == PluginEngineAvailability.FAILED
+    val panel = LinearLayout(activity).apply {
+      orientation = LinearLayout.VERTICAL
+      gravity = Gravity.CENTER_HORIZONTAL
+      setPadding(dp(24), dp(32), dp(24), dp(24))
+    }
+    panel.addView(label(when {
+      waiting -> "正在启动引擎"
+      failed -> "引擎尚未启动成功"
+      else -> "引擎未启动"
+    }, 20, white, true))
+    panel.addView(label(when {
+      waiting -> "就绪后会自动加载插件。首次准备运行时可能需要几分钟。"
+      failed -> "请返回启动页重试，或打开控制台查看原因。"
+      else -> "启动引擎后，即可读取插件列表并管理运行状态。"
+    }, 14, gray1).apply { gravity = Gravity.CENTER; setPadding(0, dp(12), 0, dp(20)) })
+    if (waiting) {
+      panel.addView(ProgressBar(activity).apply {
+        indeterminateTintList = android.content.res.ColorStateList.valueOf(accent)
+      }, LinearLayout.LayoutParams(dp(28), dp(28)))
+      root.postDelayed(retryLoad, 1_500L)
+    } else {
+      panel.addView(actionButton(if (failed) "返回管理中心" else "启动引擎并加载插件") {
+        if (failed) onBack() else {
+          val primary = activity.guideRenderer.chrome.primaryButton
+          if (!primary.isEnabled) {
+            showEngineAvailability(PluginEngineAvailability.STARTING)
+          } else {
+            startPendingUntil = android.os.SystemClock.elapsedRealtime() + 15_000L
+            apiWaitSince = 0L
+            // Use the existing explicit launch outlet, including its maintenance and recovery guards.
+            primary.performClick()
+            showEngineAvailability(PluginEngineAvailability.STARTING)
+          }
+        }
+      }.apply {
+        setTextColor(textOnAccent)
+        background = DsUi.ripple(DsUi.roundRect(accent, dp(8).toFloat()), activity.getColor(R.color.ds_accent_pressed))
+        minimumHeight = dp(48)
+        layoutParams = LinearLayout.LayoutParams(-1, -2)
+      })
+    }
+    content.addView(ScrollView(activity).apply { addView(panel) }, FrameLayout.LayoutParams(-1, -1))
   }
 
   private fun changeEnabled(row: PluginRow, enabled: Boolean) {

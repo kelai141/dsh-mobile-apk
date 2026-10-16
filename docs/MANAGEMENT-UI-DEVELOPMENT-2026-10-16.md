@@ -2,7 +2,7 @@
 
 ## 当前交付
 
-本地分支 `codex/android-management-ui`，基于远端 main `e6a0b76b`。启动页精简、全屏管理中心、真实插件列表和存储入口已落地。控制台界面没有改动。按用户最新要求，先交开发包测试；不推送分支、不创建 PR、不发布，等待测试后的明确口令。
+本地分支 `codex/android-management-ui`，基于远端 main `e6a0b76b`。启动页精简、全屏管理中心、真实插件列表和存储入口已落地。控制台已按用户后续要求统一黑白灰风格，并精简状态层级。用户已完成开发包测试并授权创建 PR；不发布版本。
 
 齿轮使用六齿图标与 0°/240° 固定终点，可中途反向。返回由 AndroidX 回调修改同一导航状态。2026-10-16 用户反馈的矩形波纹和位置跳动已修：圆形遮罩、只旋转图标、两页共用稳定高度内容容器。
 
@@ -23,3 +23,9 @@
 ## 验证边界
 
 这是只编译壳、复用旧快照的开发验证包，不是发版候选。尚未完成最终横屏、大字体、预测返回取消、真机、插件启停/配置写入全链与覆盖升级矩阵，不声称完整验收通过。用户继续测试界面后决定 PR。证据与 APK 身份在 `.deploy-tmp/management-ui/`，APK 在 `app/build/outputs/apk/debug/app-debug.apk`。
+
+## 后续修正：控制台与离线插件入口
+
+控制台保留原有 bash 会话、桥接口、命令历史、快捷命令和键盘 Insets，只调整中性色日夜主题、布局及系统栏颜色。插件页先读取真实引擎状态；未启动时展示正常引导，不调用库存 RPC、不显示 0 插件或错误横幅。用户可显式选择启动，复用启动页原有主操作；启动期间保留三级页面，自动读取真实列表，离页取消轮询。启动失败给出恢复指引；真正的服务读取失败仍会明确报告。
+
+相关单测（ConsoleThemeSourceTest、GuideAndConsoleBatch6Test、PluginEngineAvailabilityTest、PluginManagementRepositoryTest）：41 项，0 失败、0 跳过；壳构建成功。命令与日志见 `.deploy-tmp/management-ui/gradle-console-offline-verified.log`。 模拟器中实测离线引导、显式启动后插件列表载入、返回管理中心、控制台命令执行；控制台实际输出 `ui-console-ok`。CDP 确认控制台主题颜色与核心控件，ADB 截图见 `.deploy-tmp/management-ui/plugins-engine-offline.png`、`plugins-start-result.png`、`console-monochrome.png`、`console-command-result.png`。测试 APK SHA-256：`8223fa168bed51d831a39ad49b4a1ad0f562891d2dd2be3e5a461f98ad81da65`。

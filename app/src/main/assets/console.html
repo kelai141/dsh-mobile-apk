@@ -6,28 +6,46 @@
 <title>DeepCode 控制台</title>
 <style>
   :root {
-    --ds-bg: #080A09;
-    --ds-surface: #131715;
-    --ds-input: #0C100E;
-    --ds-border: rgba(238, 242, 240, 0.10);
-    --ds-text-primary: #EEF2F0;
-    --ds-text-secondary: rgba(238, 242, 240, 0.58);
-    --ds-text-tertiary: rgba(238, 242, 240, 0.34);
-    --ds-accent: #3DDBCA;
-    --ds-accent-pressed: #5EEAD4;
-    --ds-danger: #F87171;
-    --ds-chip: rgba(255, 255, 255, 0.06);
-    --ds-radius-pill: 999px;
+    color-scheme: light dark;
+    --ds-bg: #F5F5F7;
+    --ds-surface: #FFFFFF;
+    --ds-input: #F5F5F7;
+    --ds-border: rgba(0, 0, 0, 0.10);
+    --ds-text-primary: #1D1D1F;
+    --ds-text-secondary: #6E6E73;
+    --ds-text-tertiary: #86868B;
+    --ds-accent: #1D1D1F;
+    --ds-accent-pressed: #3A3A3C;
+    --ds-text-on-accent: #FFFFFF;
+    --ds-danger: #D70015;
+    --ds-danger-soft: rgba(215, 0, 21, 0.08);
+    --ds-chip: #F2F2F4;
+    --ds-radius: 8px;
     --ds-ease: cubic-bezier(0.32, 0.72, 0, 1);
     --inset-top: env(safe-area-inset-top, 0px);
     --inset-bottom: env(safe-area-inset-bottom, 0px);
   }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ds-bg: #000000;
+      --ds-surface: #1C1C1E;
+      --ds-input: #2C2C2E;
+      --ds-border: rgba(255, 255, 255, 0.16);
+      --ds-text-primary: #F5F5F7;
+      --ds-text-secondary: #98989D;
+      --ds-text-tertiary: #6E6E73;
+      --ds-accent: #F5F5F7;
+      --ds-accent-pressed: #C7C7CC;
+      --ds-text-on-accent: #1D1D1F;
+      --ds-danger: #FF6960;
+      --ds-danger-soft: rgba(255, 105, 96, 0.16);
+      --ds-chip: #2C2C2E;
+    }
+  }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { height: 100%; margin: 0; }
   body {
-    background:
-      radial-gradient(540px 240px at 50% -80px, rgba(61, 219, 202, 0.10), transparent 70%),
-      var(--ds-bg);
+    background: var(--ds-bg);
     color: var(--ds-text-primary);
     font-family: ui-monospace, "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
     font-size: 13px;
@@ -35,205 +53,64 @@
     flex-direction: column;
     overscroll-behavior: none;
   }
-  #top {
-    flex: none;
-    padding: calc(8px + var(--inset-top)) 14px 10px;
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.015));
-    border-bottom: 1px solid var(--ds-border);
+  #top { flex: none; padding: calc(8px + var(--inset-top)) 14px 10px; background: var(--ds-bg); border-bottom: 1px solid var(--ds-border); }
+  #statusbar { display: flex; align-items: center; gap: 10px; min-height: 38px; }
+  #close, .ghost, .chip, #send, #jump {
+    appearance: none; font: inherit; border: 0; border-radius: var(--ds-radius); cursor: pointer;
   }
-  #statusbar {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    min-height: 36px;
-  }
-  #close {
-    appearance: none;
-    border: 0;
-    background: var(--ds-chip);
-    color: var(--ds-text-primary);
-    border-radius: var(--ds-radius-pill);
-    padding: 7px 12px;
-    font: inherit;
-    font-size: 12px;
-    font-weight: 600;
-  }
-  #close:active { transform: scale(0.96); }
-  #statusbar .title {
-    font-weight: 600;
-    letter-spacing: 0.01em;
-    font-size: 14px;
-  }
-  .pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-    padding: 5px 10px;
-    border-radius: var(--ds-radius-pill);
-    background: var(--ds-chip);
-    color: var(--ds-text-secondary);
-    font-size: 11px;
-    overflow: hidden;
-  }
+  #close { background: var(--ds-chip); color: var(--ds-text-primary); padding: 8px 10px; font-size: 12px; font-weight: 600; }
+  #close:active, #send:active, #jump:active { transform: scale(0.98); }
+  #statusbar .title { font-weight: 600; font-size: 15px; white-space: nowrap; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; min-width: 0; padding: 6px 9px; border-radius: var(--ds-radius); background: var(--ds-chip); color: var(--ds-text-secondary); font-size: 11px; overflow: hidden; }
   .pill.grow { flex: 1; }
-  .dot {
-    width: 7px; height: 7px; border-radius: 50%;
-    background: var(--ds-text-tertiary); flex: none;
-  }
-  .dot.ok { background: var(--ds-accent); box-shadow: 0 0 0 3px rgba(61, 219, 202, 0.16); }
-  .dot.err { background: var(--ds-danger); box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.16); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ds-text-tertiary); flex: none; }
+  .dot.ok { background: var(--ds-text-primary); }
+  .dot.err { background: var(--ds-danger); }
   .dot.ok.pulse { animation: pulse 1.6s var(--ds-ease) infinite; }
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.35; }
-  }
-  #engineStatus, #consoleStatus {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  #tools {
-    display: flex;
-    gap: 8px;
-    margin-top: 8px;
-  }
-  .ghost {
-    appearance: none;
-    border: 0;
-    background: transparent;
-    color: var(--ds-accent);
-    font: inherit;
-    font-size: 12px;
-    font-weight: 600;
-    padding: 4px 2px;
-  }
-  .ghost:active { opacity: 0.7; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+  #engineStatus, #consoleStatus { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #tools { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  .ghost { background: transparent; color: var(--ds-text-secondary); font-size: 12px; font-weight: 600; padding: 7px 4px; }
+  .ghost:active { color: var(--ds-text-primary); }
   .ghost[disabled] { color: var(--ds-text-tertiary); }
-  #output {
-    flex: 1;
-    overflow-y: auto;
-    padding: 14px 16px 20px;
-    white-space: pre-wrap;
-    word-break: break-all;
-    line-height: 1.65;
-    scrollbar-width: thin;
-    scrollbar-color: var(--ds-text-tertiary) transparent;
-  }
+  #output { flex: 1; overflow-y: auto; padding: 14px 16px 20px; white-space: pre-wrap; word-break: break-all; line-height: 1.65; scrollbar-width: thin; scrollbar-color: var(--ds-text-tertiary) transparent; }
   #output::-webkit-scrollbar { width: 6px; }
-  #output::-webkit-scrollbar-thumb { background: var(--ds-text-tertiary); border-radius: var(--ds-radius-pill); }
+  #output::-webkit-scrollbar-thumb { background: var(--ds-text-tertiary); border-radius: var(--ds-radius); }
   #output::-webkit-scrollbar-track { background: transparent; }
-  #output .prompt { color: var(--ds-accent); font-weight: 600; }
+  #output .prompt { color: var(--ds-text-secondary); font-weight: 700; }
   #output .muted { color: var(--ds-text-tertiary); }
-  #jump {
-    position: absolute;
-    right: 16px;
-    bottom: 92px;
-    appearance: none;
-    border: 0;
-    background: var(--ds-surface);
-    color: var(--ds-text-primary);
-    border: 1px solid var(--ds-border);
-    border-radius: var(--ds-radius-pill);
-    padding: 8px 12px;
-    font: inherit;
-    font-size: 12px;
-    font-weight: 600;
-    display: none;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
-  }
-  #dock {
-    flex: none;
-    padding: 8px 12px calc(10px + var(--inset-bottom));
-    background: linear-gradient(0deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.015));
-    border-top: 1px solid var(--ds-border);
-  }
-  #chips {
-    display: flex;
-    gap: 8px;
-    overflow-x: auto;
-    padding-bottom: 8px;
-    scrollbar-width: none;
-  }
+  #jump { position: absolute; right: 16px; bottom: 92px; background: var(--ds-surface); color: var(--ds-text-primary); border: 1px solid var(--ds-border); padding: 8px 10px; font-size: 12px; font-weight: 600; display: none; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16); }
+  #dock { flex: none; padding: 8px 12px calc(10px + var(--inset-bottom)); background: var(--ds-bg); border-top: 1px solid var(--ds-border); }
+  #chips { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 8px; scrollbar-width: none; }
   #chips::-webkit-scrollbar { display: none; }
-  .chip {
-    flex: none;
-    appearance: none;
-    border: 0;
-    background: var(--ds-chip);
-    color: var(--ds-text-secondary);
-    border-radius: var(--ds-radius-pill);
-    padding: 6px 10px;
-    font: inherit;
-    font-size: 11px;
-  }
-  .chip:active { transform: scale(0.97); color: var(--ds-text-primary); }
-  #inputrow {
-    display: flex;
-    gap: 8px;
-    align-items: stretch;
-  }
-  #cmdwrap {
-    flex: 1;
-    min-width: 0;
-    background: var(--ds-input);
-    border: 1px solid var(--ds-border);
-    border-radius: 16px;
-    box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.05);
-    display: flex;
-    align-items: center;
-    transition: border-color 180ms var(--ds-ease), box-shadow 180ms var(--ds-ease);
-  }
-  #cmdwrap.focus {
-    border-color: var(--ds-accent);
-    box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.05), 0 0 0 3px rgba(61, 219, 202, 0.16);
-  }
-  #cmd {
-    flex: 1;
-    min-width: 0;
-    background: transparent;
-    color: var(--ds-text-primary);
-    border: 0;
-    padding: 12px 14px;
-    font-family: inherit;
-    font-size: 14px;
-    outline: none;
-  }
+  .chip { flex: none; background: var(--ds-chip); color: var(--ds-text-secondary); padding: 7px 9px; font-size: 11px; }
+  .chip:active { color: var(--ds-text-primary); }
+  #inputrow { display: flex; gap: 8px; align-items: stretch; }
+  #cmdwrap { flex: 1; min-width: 0; background: var(--ds-input); border: 1px solid var(--ds-border); border-radius: var(--ds-radius); display: flex; align-items: center; transition: border-color 180ms var(--ds-ease), box-shadow 180ms var(--ds-ease); }
+  #cmdwrap.focus { border-color: var(--ds-text-secondary); box-shadow: 0 0 0 2px var(--ds-border); }
+  #cmd { flex: 1; min-width: 0; background: transparent; color: var(--ds-text-primary); border: 0; padding: 12px 14px; font-family: inherit; font-size: 14px; outline: none; }
   #cmd::placeholder { color: var(--ds-text-tertiary); }
   #cmd:disabled { opacity: 0.5; }
-  #send {
-    background: var(--ds-accent);
-    color: #04110F;
-    border: none;
-    border-radius: var(--ds-radius-pill);
-    padding: 0 18px;
-    font-family: inherit;
-    font-size: 13px;
-    font-weight: 700;
-    flex: none;
-    min-width: 72px;
-    transition: transform 140ms var(--ds-ease), background 140ms var(--ds-ease), opacity 140ms var(--ds-ease);
-  }
-  #send:active { background: var(--ds-accent-pressed); transform: scale(0.96); }
+  #send { background: var(--ds-accent); color: var(--ds-text-on-accent); padding: 0 16px; font-size: 13px; font-weight: 700; flex: none; min-width: 64px; transition: transform 140ms var(--ds-ease), background 140ms var(--ds-ease), opacity 140ms var(--ds-ease); }
+  #send:active { background: var(--ds-accent-pressed); }
   #send:disabled { opacity: 0.4; }
   #wrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
-  #engineHint { padding: 6px 10px; font-size: 12px; line-height: 1.4; color: var(--fg-dim, #9aa0a6); }
+  #engineHint { padding: 7px 9px; margin-top: 7px; border-radius: var(--ds-radius); background: var(--ds-chip); font-size: 11px; line-height: 1.4; color: var(--ds-text-secondary); }
   #enginePill[role=button] { cursor: pointer; }
 </style>
 </head>
 <body>
   <div id="top">
     <div id="statusbar">
-      <button id="close" type="button">关闭</button>
+      <button id="close" type="button" aria-label="返回管理中心">返回</button>
       <span class="title">控制台</span>
-      <span class="pill grow" id="enginePill" role="button" title="点此立即重新检测引擎"><span class="dot" id="engineDot"></span><span id="engineStatus">引擎检测中…</span></span>
+      <span class="pill grow"><span class="dot" id="bashDot"></span><span id="consoleStatus">启动中…</span></span>
     </div>
     <div id="tools">
-      <span class="pill"><span class="dot" id="bashDot"></span><span id="consoleStatus">启动中…</span></span>
-      <span style="flex:1"></span>
-      <button class="ghost" id="copyBtn" type="button">复制</button>
-      <button class="ghost" id="clearBtn" type="button">清空</button>
-      <button class="ghost" id="restartBtn" type="button">重连</button>
+      <span class="pill grow" id="enginePill" role="button" title="点此立即重新检测引擎"><span class="dot" id="engineDot"></span><span id="engineStatus">引擎检测中…</span></span>
+      <button class="ghost" id="copyBtn" type="button" aria-label="复制输出">复制</button>
+      <button class="ghost" id="clearBtn" type="button" aria-label="清空输出">清空</button>
+      <button class="ghost" id="restartBtn" type="button" aria-label="重连控制台">重连</button>
     </div>
     <div id="engineHint" style="display:none"></div>
   </div>

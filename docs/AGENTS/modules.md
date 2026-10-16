@@ -267,3 +267,6 @@ Android API 面登记见 `docs/AGENTS/ANDROID-API-USAGE.md` §1/§3/§4/§8；�
 - `GuideManagementController.kt`：启动页 / 管理中心 / 插件与存储三级导航，0°/240°可逆过渡和预测返回进度。管理页打开期间，`GuidePageRenderer.showWeb()` 保留导航上下文。
 - `PluginManagementRepository.kt`：鉴权 RPC、Hard 清单过滤和变更校验，复用运行时插件管理与配置事务。
 - `PluginManagementPage.kt`：真实插件列表、搜索筛选、原生 Switch 与配置详情；网络读取不占用主线程。
+
+- `PluginManagementPage.kt` 的 `pluginEngineAvailability`：区分未启动、启动中、在线和启动失败。未启动不读库存；启动入口委托现有主按钮，在线后读取真实列表。
+- `ConsoleActivity.kt` / `assets/console.html`：控制台黑白灰日夜主题；会话与桥行为保持原有实现。

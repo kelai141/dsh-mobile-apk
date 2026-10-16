@@ -674,6 +674,8 @@ sequenceDiagram
 
 #### K01 启动与引导面
 
+原生插件页先探测引擎：OFFLINE 正常引导 → 用户显式启动（复用主操作）→ STARTING 轮询 → ONLINE 读库存；FAILED 提示恢复，离页取消轮询。控制台仍由独立 ConsoleActivity 承载原 bash 会话。
+
 原生管理导航：`GuidePageRenderer` 建 `GuideChrome` 后连接 `GuideManagementController`。齿轮点击与系统返回共用目的页；动画只从当前进度前往 0/240°，不累计角度。三级插件页先消费详情返回，再回管理中心。异步引擎探活仍运行，管理页打开时 `showWeb()` 不抢走当前页面。存储页只展示路径、容量和显式授权入口，不删除用户数据。
 
 

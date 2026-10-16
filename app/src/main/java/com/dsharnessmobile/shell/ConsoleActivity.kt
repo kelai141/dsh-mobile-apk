@@ -3,7 +3,6 @@ package com.dsharnessmobile.shell
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.graphics.Color
 import android.os.Bundle
 import android.view.View
 import android.view.ViewGroup
@@ -82,15 +81,17 @@ class ConsoleActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     WindowCompat.setDecorFitsSystemWindows(window, false)
-    window.statusBarColor = Color.parseColor("#080A09")
-    window.navigationBarColor = Color.parseColor("#080A09")
+    window.statusBarColor = getColor(R.color.ds_bg)
+    window.navigationBarColor = getColor(R.color.ds_bg)
+    val isNight = (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
+      android.content.res.Configuration.UI_MODE_NIGHT_YES
     WindowInsetsControllerCompat(window, window.decorView).apply {
-      isAppearanceLightStatusBars = false
-      isAppearanceLightNavigationBars = false
+      isAppearanceLightStatusBars = !isNight
+      isAppearanceLightNavigationBars = !isNight
     }
     webView = WebView(this).apply {
       id = View.generateViewId()
-      setBackgroundColor(Color.parseColor("#080A09"))
+      setBackgroundColor(getColor(R.color.ds_bg))
       layoutParams = ViewGroup.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
       )
