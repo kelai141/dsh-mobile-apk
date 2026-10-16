@@ -193,6 +193,9 @@ try {
   run('node', [gate('check-snapshot-fingerprint.mjs')])
   log('门禁：manifest 加固语义…')
   run('node', [gate('check-manifest-hardening.mjs')])
+  // 0.14.8 堆下限：壳侧 shellEnv() 与快照内启动器必须给出同一 clamp 区间（单边漂移 = 部分路径仍 OOM）。
+  log('门禁：引擎堆下限双源一致性…')
+  run('node', [gate('check-engine-heap-floor.mjs')])
   log('门禁：Kotlin 注释嵌套…')
   run('node', [gate('check-kotlin-comments.mjs')])
   log('门禁：构建链中止语义（任一 ABI 被拒 = 非 0）…')

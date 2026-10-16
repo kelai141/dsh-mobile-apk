@@ -26,6 +26,10 @@ import { fileURLToPath } from "node:url"
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = dirname(HERE)
 const SELF_TEST = process.argv.includes("--self-test")
+// --require（构建/发布链严格档）：输入缺席不得以 SKIP 结案。本门禁的两个输入都在仓内，
+// 正常不缺席；该开关是为「文件被误删/路径漂移」时不至于静默跳过而留的收口。
+const REQUIRE = process.argv.includes("--require")
+let skipped = 0
 
 const KOTLIN_REL = "app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt"
 const WRAPPER_REL = "scripts/build-snapshot-013.mjs"
@@ -33,7 +37,7 @@ const WRAPPER_REL = "scripts/build-snapshot-013.mjs"
 let failures = 0
 const fail = (msg) => { failures += 1; console.log("FAIL  " + msg) }
 const pass = (msg) => console.log("PASS  " + msg)
-const skip = (msg) => console.log("SKIP  " + msg)
+const skip = (msg) => { skipped += 1; console.log("SKIP(#" + skipped + ")  " + msg) }
 
 /**
  * 纯分析函数（可被自检直接喂合成样本）。返回 { findings: [...], values: {...} }。
@@ -170,15 +174,23 @@ if (SELF_TEST) selfTest()
 // ── 真实仓库检查 ─────────────────────────────────────────────────────────────
 const kPath = join(ROOT, KOTLIN_REL)
 const wPath = join(ROOT, WRAPPER_REL)
-if (!existsSync(kPath)) { console.log("CHECK-ENGINE-HEAP-FLOOR FAILED（缺 " + KOTLIN_REL + "）"); process.exit(1) }
-if (!existsSync(wPath)) { console.log("CHECK-ENGINE-HEAP-FLOOR FAILED（缺 " + WRAPPER_REL + "）"); process.exit(1) }
+// 缺件有两档语义：非严格档显式计数并跳过（本仓布局下这两件必然在场，正常不会走到），
+// 严格档（--require）判红——否则「输入被删」会表现成一次静默的绿。
+let missing = 0
+if (!existsSync(kPath)) { missing += 1; skip("缺 " + KOTLIN_REL + "（壳侧堆取值不可核对）") }
+if (!existsSync(wPath)) { missing += 1; skip("缺 " + WRAPPER_REL + "（启动器堆下限不可核对）") }
+if (missing > 0) {
+  if (REQUIRE) { console.log("CHECK-ENGINE-HEAP-FLOOR FAILED（--require 档不得 SKIP，缺件 " + missing + "）"); process.exit(1) }
+  console.log("CHECK-ENGINE-HEAP-FLOOR PASSED（SKIP=" + skipped + "；缺件 " + missing + " 处，非严格档）")
+  process.exit(0)
+}
 
 const { findings, values } = analyze(readFileSync(kPath, "utf8"), readFileSync(wPath, "utf8"))
 if (findings.length === 0) {
   pass("壳侧下限/上限 = " + values.floor + "/" + values.cap + "，启动器钳制 = " + values.clampLo + "/" + values.clampHi + "（逐值一致）")
   pass("启动器自适应除数为 " + values.divisor + "（MemTotal KB → 一半的 MB）")
   pass("argv 未携带堆标志，堆来源唯一")
-  console.log("CHECK-ENGINE-HEAP-FLOOR PASSED")
+  console.log("CHECK-ENGINE-HEAP-FLOOR PASSED（SKIP=" + skipped + "）")
   process.exit(0)
 }
 findings.forEach(fail)
