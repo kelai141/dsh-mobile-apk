@@ -227,6 +227,8 @@ internal fun undoUnavailableHint(summary: String): String = when {
 
 internal class GuidePageRenderer(private val activity: MainActivity) {
 
+  internal val management by lazy { GuideManagementController(activity, this) }
+
   lateinit var chrome: GuideChrome
   private lateinit var engineStatus: TextView
   /** 引擎启动流写入解压进度（EngineStartFlow）。 */
@@ -369,6 +371,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
         onCopyLog = { copyGuideLog() },
         // 功能 B（0.14.6）：故障诊断包分享。入口可见性由 refreshGuideMeta 按证据点亮。
         onShareLog = { shareGuideLog() },
+        onManagement = { management.toggle() },
       ),
     )
     engineStatus = chrome.engineStatus
@@ -381,6 +384,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
     actionBlock = chrome.actionBlock
     chrome.versionLabel.text = "v" + BuildConfig.VERSION_NAME
     refreshGuideMeta()
+    management.build()
     return chrome.root
   }
 
@@ -405,6 +409,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
       startupFailureUsesRetry(activity.engineManager.lastStartRefusalCode)
     startupOwnershipRepairAllowed = startupFailureAllowsOwnershipRepair(activity.engineManager.lastStartRefusalCode)
     engineStatus.text = title
+    (engineStatus.parent as View).visibility = if (phase == GuidePhase.Idle || phase == GuidePhase.Info) View.GONE else View.VISIBLE
     val resolvedHint = hint ?: defaultHint(phase)
     // S1-2：相位文案走仲裁漏斗（不可打断相位期间，旁路回执不得顶掉它）。
     pushHint(resolvedHint, HintSource.PHASE, sticky = phaseLocked(phase) || (phase == GuidePhase.Error && !startupOwnershipRepairAllowed))
@@ -649,7 +654,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
     // 旧文案只提「重试」，而按钮此刻已被改成安全模式入口（文案与事实必须对齐）。
     GuidePhase.Error -> startupFailureHint(activity, activity.engineManager.lastStartRefusalCode)
     GuidePhase.Closed -> "引擎已停止，不会自动恢复。"
-    GuidePhase.Idle -> "引擎就绪后将进入 " + UserCopy.APP_NAME + "。首次使用需授予存储权限——导出文件与日志要写在公共目录。"
+    GuidePhase.Idle -> "引擎就绪后将进入 " + UserCopy.APP_NAME + "。"
     GuidePhase.Info -> "运行时随安装包一起更新：安装新版 APK 即完成升级。"
   }
 
@@ -683,10 +688,12 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
   fun cancelPulse() {
     statusPulse?.cancel()
     statusPulse = null
+    management.destroy()
   }
 
   fun refreshGuideMeta() {
     if (!::chrome.isInitialized) return
+    management.refreshStorage()
     val runtimeReady = try { activity.engineManager.engineReady } catch (_: Exception) { false }
     chrome.runtimeChip.text = if (runtimeReady) {
       activity.getString(R.string.ds_runtime_ready)
@@ -910,6 +917,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
   }
 
   fun showWeb() {
+    if (management.isOpen) return
     activity.guideView.visibility = View.GONE
     // 不直接置 VISIBLE：露出时机要与首帧提交对齐（#242 反色闪），
     // 但由 revealWebView() 保证「最迟 WEB_REVEAL_FALLBACK_MS 后一定显形」。

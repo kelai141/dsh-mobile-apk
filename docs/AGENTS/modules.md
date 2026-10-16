@@ -260,3 +260,10 @@
 引擎侧（协调仓 `plugins/dsh-android-bridge`，镜像到本仓同名目录）：`notify-projection.ts`（D13 `reason.kind` 成败判定 / D14 `session/title` 标题来源 / 待办 n-N / 汇报载荷）、`lossless-json.ts`（聚合返回体出口去 undefined——修 `android_privilege_status` 的 not lossless JSON）、`index.ts` 新增 `.notify.ndjson` 写入（`kind: report|todo`）与 `buildPrivilegeStatusPayload`/`buildPrivilegeStatusToolPayload`。
 
 Android API 面登记见 `docs/AGENTS/ANDROID-API-USAGE.md` §1/§3/§4/§8；验收条目与设备判据见协调仓 `docs/NEXT-ITERATION-PLAN-2026-09-12.md` §6。
+
+## 原生管理入口（2026-10-16）
+
+- `GuideChrome.kt`：启动页与底部主操作、六齿管理按钮。
+- `GuideManagementController.kt`：启动页 / 管理中心 / 插件与存储三级导航，0°/240°可逆过渡和预测返回进度。管理页打开期间，`GuidePageRenderer.showWeb()` 保留导航上下文。
+- `PluginManagementRepository.kt`：鉴权 RPC、Hard 清单过滤和变更校验，复用运行时插件管理与配置事务。
+- `PluginManagementPage.kt`：真实插件列表、搜索筛选、原生 Switch 与配置详情；网络读取不占用主线程。

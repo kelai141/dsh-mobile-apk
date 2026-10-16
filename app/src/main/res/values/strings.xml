@@ -63,7 +63,7 @@
   <string name="ds_storage_no_detail">没有可复制的失败详情（尚未有过一次失败记录）</string>
   <string name="ds_storage_probing">正在探测存储…</string>
   <!-- S1-13：首屏解释「这是什么 / 为什么要授权」（旧版首屏只有品牌名与一行副标题） -->
-  <string name="ds_brand_explain">在本机跑 AI 任务：模型通过无障碍与虚拟屏操作手机，过程看得到、随时可停</string>
+  <string name="ds_brand_explain">本地 AI 任务，操作可见，随时可控</string>
   <!-- S1-3：自动恢复期间主按钮必须锁住（旧版此时显示可点的「重试」，而重试必然同样失败） -->
   <string name="ds_recovering">正在自动恢复</string>
   <!-- S1-1：日志不存在时说清「没有可复制的日志」，而不是点了没反应 -->

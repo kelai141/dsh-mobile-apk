@@ -412,6 +412,7 @@ class MainActivity : ComponentActivity() {
     webViewRef = webView
     root.addView(webView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     guideView = guideRenderer.buildGuideView()
+    guideRenderer.management.restore(savedInstanceState?.getString("dsh.guide-page"))
     root.addView(guideView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     setContentView(root)
     // 0.14.1 用户反馈：公共导出目录（Documents/dshdata）的供给必须在**不依赖引擎状态**的地方触发。
@@ -767,6 +768,7 @@ class MainActivity : ComponentActivity() {
   }
 
   override fun onSaveInstanceState(outState: Bundle) {
+    outState.putString("dsh.guide-page", guideRenderer.management.savedPage)
     outState.putBoolean("dsh.engine-user-closed", userClosedEngine)
     outState.putBoolean("dsh.renderer-recreation-attempted", pageRecovery.rendererRecreationAttempted)
     super.onSaveInstanceState(outState)
@@ -827,7 +829,15 @@ class MainActivity : ComponentActivity() {
    */
   private fun installBackGate() {
     onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+      override fun handleOnBackStarted(backEvent: androidx.activity.BackEventCompat) {
+        if (guideViewReady && guideView.visibility == View.VISIBLE) guideRenderer.management.beginBack()
+      }
+      override fun handleOnBackProgressed(backEvent: androidx.activity.BackEventCompat) {
+        guideRenderer.management.progressBack(backEvent.progress)
+      }
+      override fun handleOnBackCancelled() { guideRenderer.management.cancelBack() }
       override fun handleOnBackPressed() {
+        if (guideViewReady && guideView.visibility == View.VISIBLE && guideRenderer.management.back()) return
         val canGoBack = webViewReady && webView.canGoBack()
         val pageStack = webViewReady && backGateState.pageStackAvailable
         val decision = BackGate.decide(canGoBack, pageStack)

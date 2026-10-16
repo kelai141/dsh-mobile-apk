@@ -260,12 +260,12 @@ object EngineProbe {
     } catch (_: Throwable) { false }
   }
 
-  private fun rpc(context: Context, method: String, args: JSONObject): JSONObject? {
+  internal fun rpc(context: Context, method: String, args: JSONObject, readTimeoutMs: Int = 1_500): JSONObject? {
     return try {
       val conn = URL("$ENGINE_URL/api/$method").openConnection(Proxy.NO_PROXY) as HttpURLConnection
       conn.requestMethod = "POST"
       conn.connectTimeout = 1_000
-      conn.readTimeout = 1_500
+      conn.readTimeout = readTimeoutMs
       conn.doOutput = true
       conn.setRequestProperty("content-type", "application/json")
       EngineAuth.attach(context, conn)

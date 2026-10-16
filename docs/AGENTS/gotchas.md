@@ -1969,3 +1969,5 @@ Stellar 在跑、兼容层正常，本应用却在设置页与工具面一律报
 
 复验证据：`dsh-client-ui-responsive/tests/conversation-dock.spec.ts` 覆盖同名条目、目录漂移、父子路由与引用隔离；设备证据与运行树哈希见本轮 PR。
 
+
+282. **原生管理页不可把配置脱敏结果当完整替换文档**：`settings/describe` 会省略敏感值；把这份 user 对象交给 `settings/replace` 会重建可编辑配置并丢失未回填字段。原生页面改用 `settings/update` 合并保存，携带 `expectedRevision`；密码框留空不提交。插件启停的 `ChangeResult.application=failed` 也不保证磁盘未变，必须重新读取状态。停用前后比较完整运行清单，发现其他 active 插件失活则补偿目标状态并核验恢复。测试见 `PluginManagementRepositoryTest.kt`，设备范围见本轮开发报告。

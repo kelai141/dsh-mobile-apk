@@ -674,6 +674,9 @@ sequenceDiagram
 
 #### K01 启动与引导面
 
+原生管理导航：`GuidePageRenderer` 建 `GuideChrome` 后连接 `GuideManagementController`。齿轮点击与系统返回共用目的页；动画只从当前进度前往 0/240°，不累计角度。三级插件页先消费详情返回，再回管理中心。异步引擎探活仍运行，管理页打开时 `showWeb()` 不抢走当前页面。存储页只展示路径、容量和显式授权入口，不删除用户数据。
+
+
 - **顺序**：MainActivity恢复saved/persistent userClosed、构造主WebView/guide/native holders并装精确可信桥；后台startup先共享RootOwnershipJobs，pending延后不读事务；已结算才恢复事务→探活→strict SHA/fresh→必要refresh→spawn→90s轮询→WebUI。
 - **CAS所有权**：StartupFlowOwnership的一份CAS状态绑定running/token/generation/destroyed；重复begin不推进世代，旧finally只finish旧token；close/destroy只中断caller，不取消共享root worker。阻塞维护/恢复后及每个UI/引擎后续效果均查generation。ownership pending六次2/4/8/16/30/30秒与普通engine失败5/10秒两次重试分开。
 - **#306前台恢复**：ForegroundPageRecoveryPolicy隔离foreground/generation。pause停页面monitor/freeze/stall，后台冻结不是故障证据，迟到JS/auth/theme/probe不能reload/Toast。后台请求合并，rendererGone优先一次quiet recreate，ready前重复crash停native error不loop；显式用户retry可继续。新Activity重绑webViewRef/BrowserHostHolder/Vdisplay holders，旧holder清除做身份校验，保留userClosed/userShutdown；Activity销毁不关闭共享engine。
@@ -2095,6 +2098,9 @@ app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt
 app/src/main/java/com/dsharnessmobile/shell/UserCopy.kt
 app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt
 app/src/main/java/com/dsharnessmobile/shell/GuideChrome.kt
+app/src/main/java/com/dsharnessmobile/shell/GuideManagementController.kt
+app/src/main/java/com/dsharnessmobile/shell/PluginManagementRepository.kt
+app/src/main/java/com/dsharnessmobile/shell/PluginManagementPage.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotRecoveryNotice.kt
 app/src/main/java/com/dsharnessmobile/shell/RuntimeTree.kt
 app/src/main/java/com/dsharnessmobile/shell/GuidePageRenderer.kt

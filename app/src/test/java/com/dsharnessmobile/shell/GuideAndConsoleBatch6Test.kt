@@ -382,14 +382,13 @@ class GuideAndConsoleBatch6Test {
   // ── S1-13 / S1-14 / S1-15：首屏解释、版本号、最大宽度 ────────────────────
 
   @Test
-  fun `首屏必须解释这是什么与为什么授权`() {
+  fun `首屏保留能力说明且公共目录授权移至管理中心`() {
     val chrome = codeOnly(source("GuideChrome.kt"))
     assertTrue("品牌区必须有解释行", chrome.contains("R.string.ds_brand_explain"))
     val renderer = codeOnly(source("GuidePageRenderer.kt"))
-    assertTrue(
-      "Idle 副文案必须说明存储权限的用途（不是劝，是说清为什么）",
-      renderer.contains("首次使用需授予存储权限"),
-    )
+    assertFalse("私有运行时启动不应劝公共目录授权", renderer.contains("首次使用需授予存储权限"))
+    val management = codeOnly(source("GuideManagementController.kt"))
+    assertTrue("公共目录授权必须解释实际用途", management.contains("导出会话文件到 Documents/dshdata"))
   }
 
   @Test
