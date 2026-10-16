@@ -915,6 +915,8 @@ flowchart TD
 
 #### K06 特权执行、屏幕范围与本地文件面
 
+- **Shizuku 建链**：`kickBind/ensureBound` 在锁内创建独立 `BindAttempt`，由主线程 `bindOnMain` 注册；重置/20s 超时先作废代次、释放该代等待锁，再排队 `discardOnMain`（先注销 SDK 缓存、再移除远端），之后的新绑定按 FIFO 执行。回调须同时匹配当前 attempt 与 generation；主线程调用者立即回读，不能等待同线程回调。
+
 - **执行门**：ShellOps→ShizukuTransport，native controller固定argv；su只精确派发前通道不可用fallback一次，policy refusal/nonzero exit/timeout/Binder未知不重放。有效versionCode AI consent与应用su授权分离，uid2000不是root；会话danger与native screen scope继续复查。
 - **durable admission**：RootExecutionFence(Context)锁前/锁内查RootMaintenanceLease；fair read timed tryLock(0,MILLISECONDS)尊重writer。真正UID0dispatch前commit epoch/start/operation，epoch或commit失败零派发；Shizuku RpcLease持久化后复查identity/consent，每pull/push chunk本地准备后RPC紧前再查。
 - **结算/boot**：generic exit/drain/read/cleanup/Binder未知留UNKNOWN，阻止新受控RPC/维护/startup；sameboot应用restart/recreate/reset不清，且租约带派发证据（`RootMaintenanceLease.markDispatched`，su 在 `RootAccess.execPrivileged` 派发前、Shizuku 在 `RpcLease.beforeRpc` 取租约后写）后不再自动清算，只能用户显式清除。仅同boot-id/boot-count非空且值改变证明真boot，scheme切换不清，无隐式清除（已派发租约只有用户显式清除出口）。helper完整JSON+确定exit0/2可finish，包括已确认partial仍ok=false；畸形/缺字段/截断不finish。
@@ -2195,6 +2197,7 @@ app/src/main/java/com/dsharnessmobile/shell/VdisplayFloat.kt
 app/src/main/java/com/dsharnessmobile/shell/VdisplayOps.kt
 app/src/main/java/com/dsharnessmobile/shell/VirtualDisplayProbe.kt
 app/src/androidTest/java/com/dsharnessmobile/shell/VdisplayProbeTest.kt
+app/src/androidTest/java/com/dsharnessmobile/shell/ShizukuReconnectTest.kt
 app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt
 app/src/main/java/com/dsharnessmobile/shell/BrowserHostNavigationPolicy.kt
 app/src/main/java/com/dsharnessmobile/shell/BrowserOverlayPolicy.kt

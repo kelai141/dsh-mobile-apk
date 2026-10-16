@@ -33,6 +33,10 @@ internal class ShizukuBindState(private val watchdogMs: Long) {
   private var bindingFlag = false
   private var bindingSince = 0L
   private var attemptCount = 0
+  private var generation = 0L
+
+  /** 每次发起或作废连接都换代；旧回调不能改写新一轮的记账。 */
+  val currentGeneration: Long get() = synchronized(lock) { generation }
   private var error = ShizukuBindCodes.NOT_BOUND
 
   /** 是否确有一次绑定在飞（**只有它才配得上「正在建立」这四个字**）。 */
@@ -56,6 +60,7 @@ internal class ShizukuBindState(private val watchdogMs: Long) {
   fun reapIfStale(now: Long): Boolean = synchronized(lock) {
     if (!bindingFlag || now - bindingSince <= watchdogMs) return false
     bindingFlag = false
+    generation += 1
     error = ShizukuBindCodes.BIND_TIMEOUT
     true
   }
@@ -69,26 +74,34 @@ internal class ShizukuBindState(private val watchdogMs: Long) {
     bindingFlag = true
     bindingSince = now
     attemptCount += 1
+    generation += 1
     error = ShizukuBindCodes.CONNECTING
     true
   }
 
   /** `onServiceConnected`：binder 无效时**不得**当成连上（与 bound 判据同口径）。 */
-  fun onConnected(binderValid: Boolean) = synchronized(lock) {
+  fun onConnected(binderValid: Boolean, callbackGeneration: Long = currentGeneration): Boolean = synchronized(lock) {
+    if (callbackGeneration != generation || !bindingFlag) return false
     bindingFlag = false
     error = if (binderValid) "" else ShizukuBindCodes.INVALID_BINDER
+    true
   }
 
-  fun onDisconnected() = synchronized(lock) {
+  fun onDisconnected(callbackGeneration: Long = currentGeneration): Boolean = synchronized(lock) {
+    if (callbackGeneration != generation) return false
     bindingFlag = false
+    generation += 1
     error = ShizukuBindCodes.DISCONNECTED
+    true
   }
 
   /** 发起即抛异常：必须复位，否则那个永不回调的闩会把后续调用全挡死。 */
-  fun onBindThrew(errorCode: String) = synchronized(lock) {
+  fun onBindThrew(errorCode: String, callbackGeneration: Long = currentGeneration): Boolean = synchronized(lock) {
+    if (callbackGeneration != generation) return false
     bindingFlag = false
+    generation += 1
     error = errorCode
-    Unit
+    true
   }
 
   /**
@@ -108,6 +121,7 @@ internal class ShizukuBindState(private val watchdogMs: Long) {
    */
   fun onReset() = synchronized(lock) {
     bindingFlag = false
+    generation += 1
     error = ShizukuBindCodes.RESET
     Unit
   }

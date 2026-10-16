@@ -131,6 +131,73 @@ class ShizukuBindStateTest {
     assertTrue("断连后必须能重建连接", s.beginAttempt(5L))
   }
 
+  @Test
+  fun lateConnectionAfterResetCannotResurrectTheRemovedService() {
+    val s = ShizukuBindState(watchdog)
+    s.beginAttempt(0L)
+    val old = s.currentGeneration
+    s.onReset()
+    assertFalse(s.onConnected(true, old))
+    assertEquals(ShizukuBindCodes.RESET, s.lastError)
+    assertFalse(s.binding)
+  }
+
+  @Test
+  fun lateConnectionAfterTimeoutCannotCompleteANewerAttempt() {
+    val s = ShizukuBindState(watchdog)
+    s.beginAttempt(0L)
+    val old = s.currentGeneration
+    s.reapIfStale(watchdog + 1)
+    s.beginAttempt(watchdog + 2)
+    val current = s.currentGeneration
+    assertFalse(s.onConnected(true, old))
+    assertTrue(s.binding)
+    assertEquals(ShizukuBindCodes.CONNECTING, s.lastError)
+    assertTrue(s.onConnected(true, current))
+    assertEquals("", s.lastError)
+  }
+
+  @Test
+  fun oldDisconnectCannotClearAHealthyReplacement() {
+    val s = ShizukuBindState(watchdog)
+    s.beginAttempt(0L)
+    val old = s.currentGeneration
+    s.onConnected(true, old)
+    s.onReset()
+    s.beginAttempt(1L)
+    val current = s.currentGeneration
+    s.onConnected(true, current)
+    assertFalse(s.onDisconnected(old))
+    assertEquals("", s.lastError)
+    assertTrue(s.onDisconnected(current))
+    assertEquals(ShizukuBindCodes.DISCONNECTED, s.lastError)
+  }
+
+  @Test
+  fun lateFailureCannotCancelTheReplacementWaiter() {
+    val s = ShizukuBindState(watchdog)
+    s.beginAttempt(0L)
+    val old = s.currentGeneration
+    s.onReset()
+    s.beginAttempt(1L)
+    assertFalse(s.onBindThrew("old-failure", old))
+    assertTrue(s.binding)
+    assertEquals(2, s.attempts)
+    assertEquals(ShizukuBindCodes.CONNECTING, s.lastError)
+  }
+
+  @Test
+  fun disconnectedAttemptCannotBeResurrectedByADuplicateConnection() {
+    val s = ShizukuBindState(watchdog)
+    s.beginAttempt(0L)
+    val old = s.currentGeneration
+    s.onConnected(true, old)
+    assertFalse(s.onConnected(true, old))
+    s.onDisconnected(old)
+    assertFalse(s.onConnected(true, old))
+    assertEquals(ShizukuBindCodes.DISCONNECTED, s.lastError)
+  }
+
   // ── 文案三态：不许用一句「正在建立」盖住三种状态 ────────────────────
 
   /** 不变量：「正在建立」这四个字**当且仅当** binding 为真时才允许出现。 */
@@ -337,8 +404,15 @@ class ShizukuBindStateTest {
     val body = src.substring(start, minOf(src.length, start + 4_000))
     assertTrue(
       "承重墙必须在场：unbindUserService(args(...), connection, remove = true)",
-      body.contains("Shizuku.unbindUserService(args(app), connection") && body.contains("/* remove = */ true"),
+      body.contains("discardOnMain(previous?.userArgs ?: args(app), previous?.connection, remove = true)"),
     )
+    val cleanup = src.substring(src.indexOf("  private fun discardOnMain("), src.indexOf("  private fun bindOnMain("))
+    assertTrue("注销与移除必须排到 SDK 回调所在的主线程", cleanup.contains("connectionMain.post"))
+    val detach = cleanup.indexOf("Shizuku.unbindUserService(userArgs, connection, /* remove = */ false)")
+    val remove = cleanup.indexOf("Shizuku.unbindUserService(userArgs, connection, /* remove = */ true)")
+    assertTrue("两步调用必须同时存在，且先注销 SDK 缓存再移除远端", detach >= 0 && remove >= 0 && detach < remove)
+    val watchdogBody = src.substring(src.indexOf("  private fun reapStaleBind("), src.indexOf("  private fun args("))
+    assertTrue("超时也必须移除远端僵尸，而非只清本地标志", watchdogBody.contains("discardOnMain(previous.userArgs, previous.connection, remove = true)"))
     assertFalse("resetConnection 不得同步等待新绑定（UI 路径）", body.contains("latch.await("))
     assertTrue("必须调用 bindState.onReset()（否则我们这一侧的闩不清，重置无效）", body.contains("bindState.onReset()"))
     assertTrue("必须让 caps 缓存失效（否则最多 5 秒仍报旧值）", body.contains("ControlCarrier.invalidateShizukuCache()"))

@@ -7,6 +7,8 @@ import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.IBinder
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import org.json.JSONObject
@@ -63,119 +65,116 @@ object ShizukuTransport {
   private val bindState = ShizukuBindState(BIND_WATCHDOG_MS)
 
   @Volatile private var connectedAt = 0L
-  private var bindLatch: CountDownLatch? = null
+  private var activeAttempt: BindAttempt? = null
+  // SDK 13.1.5 在主线程遍历未同步的连接集合；注册、注销也必须走同一线程。
+  private val connectionMain by lazy { Handler(Looper.getMainLooper()) }
 
   /** v3：本连接是否已把「应用 uid + 数据目录」回填给 UserService（按连接代次去重）。 */
   @Volatile private var configuredForAge = -1L
 
-  private val connection = object : ServiceConnection {
-    override fun onServiceConnected(name: ComponentName, binder: IBinder) {
-      service = ShizukuUserService.Stub.asInterface(binder)
-      // 先探活再记账：binder 无效时不得当成「连上」（与 status() 的 bound 判据同口径）。
-      bindState.onConnected(binder.pingBinder())
-      connectedAt = SystemClock.elapsedRealtime()
-      bindLatch?.countDown()
-      // 连接已建立，latch 使命完成：清空以便断连后重建。留着它会让下一次 ensureBound 的
-      // await 立即返回、永远看不到新的等待窗口（本缺陷的根因形态）。
-      bindLatch = null
-      Log.i(TAG, "user service connected ${name.className}")
-    }
+  private class BindAttempt(val userArgs: Shizuku.UserServiceArgs, val generation: Long) {
+    val latch = CountDownLatch(1)
+    val connection: ServiceConnection = object : ServiceConnection {
+      override fun onServiceConnected(name: ComponentName, binder: IBinder) {
+        synchronized(lock) {
+          if (activeAttempt !== this@BindAttempt) return
+          val valid = runCatching { binder.pingBinder() }.getOrDefault(false)
+          if (!bindState.onConnected(valid, generation)) return
+          service = if (valid) ShizukuUserService.Stub.asInterface(binder) else null
+          connectedAt = if (valid) SystemClock.elapsedRealtime() else 0L
+          configuredForAge = -1L
+          latch.countDown()
+          if (!valid) {
+            activeAttempt = null
+            discardOnMain(userArgs, connection, remove = true)
+          }
+        }
+        ControlCarrier.invalidateShizukuCache()
+        Log.i(TAG, "user service callback " + name.className + " generation=" + generation)
+      }
 
-    override fun onServiceDisconnected(name: ComponentName) {
-      service = null
-      bindState.onDisconnected()
-      bindLatch?.countDown()
-      // 断连后旧 latch 已经 countDown、语义作废；清掉它，下一次 ensureBound 才会新建并真正等待。
-      // 复用已放行的 latch 会让 await 立即返回 → 又变成「第一次必失败」，正是本缺陷的成因。
-      bindLatch = null
-      Log.w(TAG, "user service disconnected ${name.className}")
+      override fun onServiceDisconnected(name: ComponentName) {
+        synchronized(lock) {
+          if (activeAttempt !== this@BindAttempt || !bindState.onDisconnected(generation)) return
+          service = null
+          connectedAt = 0L
+          configuredForAge = -1L
+          activeAttempt = null
+          latch.countDown()
+        }
+        ControlCarrier.invalidateShizukuCache()
+        Log.w(TAG, "user service disconnected " + name.className + " generation=" + generation)
+      }
     }
   }
 
   /**
-   * 用户显式「重置链接」（设置页「手机控制」）：强制移除 Shizuku 侧 UserService 并清空绑定态。
-   *
-   * ── 承重墙：为什么必须 `remove = true`（本按钮有效的唯一原因）────────────────────
-   * 现场：Shizuku 已授权，却从「可创建」跳成「需要准备」，**重新授权与重启 App 均无效**。
-   * 「App 重启无效」直接排除了「我们自己进程内的标志位脏了」——那会被重启清掉。它指向的是
-   * **Shizuku 侧的 UserService 实例处于坏态**：绑定请求发出后既不回调也不抛，成为僵尸。
-   * 只清我们的标志位对这个坏实例毫无作用（下一次 bind 仍打到同一个坏实例上）。
-   * `Shizuku.unbindUserService(args, connection, remove = true)` 在 AAR 里的实现是
-   * `IShizukuService.removeUserService(conn, forRemove = true)`（本仓实测 disassemble 确认），
-   * 即让 Shizuku 管理器**移除**这个 UserService，下次绑定重建一个干净的。
-   *
-   * 这不是新增承诺：[readyService] 的既有文案早已写着「在设置页「手机控制」重新连接 Shizuku 会
-   * 重启 UserService（无需重装）」——而那条路此前并不存在（该文案的来源其实是另一处
-   * `unlockRestrictedSettingsViaShizuku`）。本方法是把已承诺的那条路真的修出来。
-   *
-   * ── 纪律：绝不同步等待新绑定 ──────────────────────────────────────────────────
-   * 本方法在设置页的每次点击上同步执行（UI 高频路径），**不得**在此 await 新绑定——
-   * 与 [kickBind] 同纪律。重置后由下一次 2s 轮询 + [kickBind] 自然收敛。
-   *
-   * ── `ok` 的语义：本方法的 `ok` 与 [status] 的 `ok` **不是同一件事**（勿「统一」）──────────
-   * 两者同名但语义不同，本方法同时用 `ok` 与 `code` 说两件不同的事：
-   *   - `ok`   = **重置动作是否已执行**（动作面）。成功执行即 true——哪怕通道此刻还没就绪。
-   *   - `code` = **当前通道态**（就绪面）。重置后为 [ShizukuBindCodes.RESET]，即「已重置、待重建」。
-   * [status] 的 `ok` 则**确为就绪判据**（`bound == true` 才 true），且被 [ControlCarrier.shizukuReady]
-   * 与 `VdisplayController` 的就绪分支消费——**绝不能**改它。
-   *
-   * 为什么必须分开（0.14.2 设备实测缺陷）：重置**真的生效了**（`bindAttempts` 1→3、
-   * `userServiceAgeMs` 从 608801ms 归到 66538ms），但本方法此前直接返回 [status]，其 `ok=false`
-   * （重置后尚未绑定），而 UI 的 `settleLinkCall` 判 `ok === true` 才算成功 ⇒ 界面把「重置成功、
-   * 通道待重建」渲染成「重置 Shizuku 连接失败」。这是「语义在一个字段上被两件事共用」的形态：
-   * 一个只读快照的 `ok` 被拿去回答一个动作的成败。
-   *
-   * 修法：动作成功即显式置 `ok=true` 并加 `reset=true`，**同时原样保留**就绪事实字段
-   * （`bound=false` / `binding=false` / `lastError=RESET` / `code=RESET` / `guidance`）——
-   * 它们仍如实说「通道当前未就绪」。**只改这一个动作方法的返回**，[status] 一字不动。
-   *
-   * @param context 任意 context（内部取 applicationContext）。
-   * @returns 写后回读的 [status]，但 `ok` 表达**动作已执行**、`reset=true` 标记本次为重置动作；
-   *   就绪事实字段一律保留（通道是否已就绪看 `code`/`bound`/`lastError`，不看 `ok`）。
+   * SDK 的 remove=true 只移除远端服务，不清应用内的连接缓存。必须先 remove=false 注销旧回调，
+   * 再按需移除远端；否则旧服务的迟到 died 回调会清掉新绑定，页面重新陷入「建立中」。
+   * 始终排队，避免在 SDK 正遍历回调集合时修改它；与后续 bind 按同一主线程 FIFO 排序。
    */
+  private fun discardOnMain(userArgs: Shizuku.UserServiceArgs, connection: ServiceConnection?, remove: Boolean) {
+    connectionMain.post {
+      runCatching { Shizuku.unbindUserService(userArgs, connection, /* remove = */ false) }
+        .onFailure { Log.w(TAG, "detach user service failed", it) }
+      if (remove) {
+        runCatching { Shizuku.unbindUserService(userArgs, connection, /* remove = */ true) }
+          .onFailure { Log.w(TAG, "remove user service failed", it) }
+      }
+    }
+  }
+
+  private fun bindOnMain(attempt: BindAttempt) {
+    connectionMain.post {
+      if (synchronized(lock) { activeAttempt !== attempt || !bindState.binding }) return@post
+      try {
+        // 清 SDK 中上一代连接（包括同步 bind 抛错留下的记录），不能复用它的回调集合。
+        Shizuku.unbindUserService(attempt.userArgs, attempt.connection, /* remove = */ false)
+        Shizuku.bindUserService(attempt.userArgs, attempt.connection)
+      } catch (failure: Throwable) {
+        synchronized(lock) {
+          if (activeAttempt !== attempt) return@post
+          bindState.onBindThrew(ShizukuBindCodes.bindFailed(failure), attempt.generation)
+          activeAttempt = null
+          attempt.latch.countDown()
+        }
+        Log.w(TAG, "bind user service failed", failure)
+      }
+    }
+  }
+
+  /** 用户主动重置：立即作废本地连接，异步注销旧回调并移除远端；下一次轮询自然重建。 */
   fun resetConnection(context: Context): JSONObject {
     val app = context.applicationContext
     synchronized(lock) {
-      // 承重墙：让 Shizuku 管理器移除这个 UserService。失败不抛出——重置本身必须始终走完
-      // （否则 Shizuku 侧已死时连「清空我们这一侧」都做不到，用户会看到按钮毫无反应）。
-      runCatching { Shizuku.unbindUserService(args(app), connection, /* remove = */ true) }
-        .onFailure { Log.w(TAG, "reset: unbindUserService(remove=true) failed: " + it.javaClass.simpleName + ": " + (it.message ?: "")) }
+      val previous = activeAttempt
+      activeAttempt = null
       service = null
       connectedAt = 0L
-      // 作废在飞的僵尸闩：留着它会让下一次 ensureBound 复用一个永不 countDown 的 latch，
-      // 于是重置后仍然只是「等满预算再报正在建立」——按钮看起来点了但没反应。
-      bindLatch?.countDown()
-      bindLatch = null
+      configuredForAge = -1L
+      bindState.onReset()
+      previous?.latch?.countDown()
+      discardOnMain(previous?.userArgs ?: args(app), previous?.connection, remove = true)
     }
-    // 我们这一侧的记账复位：bindingFlag=false 使下一次 beginAttempt 放行（这就是「重置有效」的判据）。
-    bindState.onReset()
-    // caps 的 5s TTL 缓存必须失效，否则重置后最多 5 秒内界面仍报旧值，用户会认为按钮没用。
     ControlCarrier.invalidateShizukuCache()
     Log.i(TAG, "shizuku connection reset (user action); attempts=" + bindState.attempts)
-    // 动作面 `ok` + `reset` 由纯函数组装（可在 JVM 上逐条断言，见 ShizukuBindStateTest）。
-    // 就绪事实一个都不删：code/lastError/bound/binding/guidance 仍由 status() 原样带出，
-    // 于是调用方既能知道「重置动作成功」，也能知道「通道此刻还没就绪」。
     return shizukuResetResponse(status(app))
   }
 
-  /**
-   * 看门狗执行点（**非阻塞**，可安全出现在 status() 这类高频读路径上）。
-   *
-   * 只在确有一次僵尸绑定时才动锁与日志（[ShizukuBindState.reapIfStale] 幂等），
-   * 因此热路径上的开销是一次 synchronized + 一次减法。
-   */
+  /** 超时既回收本地等待，也移除远端僵尸服务；读路径只排队，不等 Binder。 */
   private fun reapStaleBind() {
-    if (!bindState.reapIfStale(SystemClock.elapsedRealtime())) return
-    Log.w(
-      TAG,
-      "bind watchdog: no callback within ${BIND_WATCHDOG_MS}ms; reset binding state (attempts=${bindState.attempts})",
-    )
     synchronized(lock) {
-      // 放行并作废当前 latch。留着它会让后续 ensureBound 一直复用一个永不 countDown 的 latch，
-      // 于是每轮仍然只是「等满预算再报正在建立」——那正是本缺陷的形态。
-      bindLatch?.countDown()
-      bindLatch = null
+      if (!bindState.reapIfStale(SystemClock.elapsedRealtime())) return
+      val previous = activeAttempt
+      activeAttempt = null
+      service = null
+      connectedAt = 0L
+      configuredForAge = -1L
+      previous?.latch?.countDown()
+      if (previous != null) discardOnMain(previous.userArgs, previous.connection, remove = true)
     }
+    ControlCarrier.invalidateShizukuCache()
+    Log.w(TAG, "bind watchdog: remove stale user service (attempts=" + bindState.attempts + ")")
   }
 
   private fun args(context: Context): Shizuku.UserServiceArgs = Shizuku.UserServiceArgs(
@@ -320,19 +319,16 @@ object ShizukuTransport {
       val latch: CountDownLatch
       synchronized(lock) {
         if (service?.asBinder()?.pingBinder() == true) return status(context)
-        latch = bindLatch ?: CountDownLatch(1).also { bindLatch = it }
         if (bindState.beginAttempt(SystemClock.elapsedRealtime())) {
-          try {
-            Shizuku.bindUserService(args(context.applicationContext), connection)
-          } catch (t: Throwable) {
-            bindState.onBindThrew(ShizukuBindCodes.bindFailed(t))
-            // 发起就抛异常：latch 永不会因回调而放行，必须换新的，否则后续调用会永远复用一个死 latch。
-            bindLatch = null
-            latch.countDown()
-          }
+          val attempt = BindAttempt(args(context.applicationContext), bindState.currentGeneration)
+          activeAttempt = attempt
+          bindOnMain(attempt)
         }
+        latch = activeAttempt?.latch ?: return status(context)
       }
       if (service?.asBinder()?.pingBinder() == true) return status(context)
+      // SDK 的连接回调也在主线程；主线程调用者必须先返回，不能阻塞自己的回调。
+      if (Looper.myLooper() == Looper.getMainLooper()) return status(context)
       val remaining = deadline - SystemClock.elapsedRealtime()
       if (remaining <= 0L) break
       // 到点即复用当次结果，不把 4s 片拉长到整段预算——调用方的超时语义不变。
@@ -344,21 +340,8 @@ object ShizukuTransport {
       reapStaleBind()
       if (!bindState.binding) break
     }
-    // 预算耗尽且确实还在连接中：给出「可重试」而不是「去设置页排查」。区分这两者是本缺陷的核心。
-    return if (bindState.binding) {
-      status(context).put("code", CONNECTING_CODE).put("retryAfterMs", BIND_TIMEOUT_MS)
-        .put(
-          "guidance",
-          shizukuBindGuidance(
-            CONNECTING_CODE,
-            true,
-            bindState.attemptAgeMs(SystemClock.elapsedRealtime()),
-            BIND_WATCHDOG_MS,
-          ),
-        )
-    } else {
-      status(context)
-    }
+    // status 自己跑看门狗并生成三态，不能用等待前的 binding 覆盖刚到达的结果。
+    return status(context)
   }
 
   /**

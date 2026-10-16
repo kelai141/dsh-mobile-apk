@@ -72,7 +72,7 @@ exportConfig返回实际path与可能含provider密钥的共享目录警告hint�
 | 方向 | 方法 | 位置 | 说明 |
 |---|---|---|---|
 | 页面 → 壳 | `resetShizukuConnection()` | `AndroidBridge.kt`（`@JavascriptInterface`）→ MainActivity `onResetShizukuConnection` → `ShizukuTransport.resetConnection(context)` | 用户显式「重置链接」。**非阻塞**：本方法在设置页每次点击上同步执行，**绝不 await 新绑定**（与 `kickBind` 同纪律），重置后的收敛交给既有 2s 轮询 + `kickBind`。**写后回读**：返回 `ShizukuTransport.status()` 的 status JSON（`ok/installed/running/granted/bound/binding/bindAttempts/bindAgeMs/lastError/code/guidance`），页面据此如实展示，**不承诺「已修好」**——能否恢复取决于 Shizuku 服务本身是否还在运行 |
-| 同上（承重墙） | — | `ShizukuTransport.resetConnection` | 三件事缺一不可：① 调 `Shizuku.unbindUserService(args(app), connection, remove = true)` 让 Shizuku 管理器**移除**该 UserService（AAR 实现 = `IShizukuService.removeUserService(conn, forRemove = true)`，本仓实测 disassemble 确认），下次绑定重建干净的；**失败不中断**（`runCatching` + `Log.w`）。② 清我们这一侧：`service/connectedAt` 归零、**僵尸 `bindLatch` countDown 并置 null**（留着会让下一次 `ensureBound` 复用一个永不 countDown 的 latch）、`ShizukuBindState.onReset()` 令 `bindingFlag=false` 使下一次 `beginAttempt` 放行。③ `ControlCarrier.invalidateShizukuCache()` 让 caps 的 5s TTL 缓存立即失效 |
+| 同上（连接回收） | — | `ShizukuTransport.resetConnection` | 立即作废当前连接代次与等待锁，清空本地服务引用并使 caps 缓存失效；在主线程先 `unbindUserService(remove=false)` 注销 SDK 连接缓存，再 `remove=true` 移除远端。超时走同一回收路径。每次新绑定有独立回调，旧代次回调不会覆盖新连接。`ok=true/reset=true` 表示重置已提交，是否就绪仍看 `bound/code`。 |
 | 同上（新增结构化 code） | `ShizukuBindCodes.RESET` = `shizuku-user-service-reset` | `ShizukuBindState.kt` | 语义边界：既有四个 mutator 描述「一次尝试的结果」，`onReset()` 描述「用户主动放弃当前通道」——它不假装连上也不假装失败，而是回到「尚未发起」的可重试起点，并让 UI 如实说「已重置」而不是「正在建立」 |
 | 同上（页面消费） | — | `dsh-client-ui-responsive` 手机控制「刷新状态」同行新增「重置链接」 | 复用既有 `settleLinkCall` 结算口径，**不新造口径、不新增定时器**（沿用既有 2s 轮询） |
 
