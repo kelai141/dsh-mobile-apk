@@ -132,7 +132,26 @@ function makeCtx(providers, hooks = {}) {
   }
 }
 
-const flush = () => new Promise((resolve) => setTimeout(resolve, 60))
+/**
+ * 等插件的延迟工作跑完。
+ *
+ * 为什么不是固定墙钟延时（原实现是 `setTimeout(60)`）：插件这条链是
+ * 「deferrer 的 MessageChannel 跳一次 -> async describe -> runAutoPass -> setImmediate」，
+ * 它的长度是**事件循环轮数**，不是一个秒数。任何常量都在编码「这台机器有多快」这个假设。
+ * 2026-10-16 实测：8 个忙循环加压下 A1 用例报「保存后应恰好写回一次，实际 0」，而空载单跑
+ * 3/3 通过、整目录跑 3/3 通过——同一个文件在打包时随机判红，直接中止了本次全链构建。
+ *
+ * 为什么按轮数等就是充分的：插件设计上**零定时器**（A7，且有用例守着），所以一旦事件循环
+ * 没有待办，就不存在「稍后还会产生一次写回」的来源。而工作一定在 `save()` / `apply()` 返回前
+ * 就已入队（deferrer.defer 是同步 postMessage），因此逐轮推进不可能漏掉它。
+ *
+ * setImmediate 每一跳都是一次完整循环：若还有待完成的 I/O，poll 阶段会等它，续体随后落地。
+ * 取 10 跳，远多于这条链所需（实测 3~4 跳即收敛），且与机器速度无关。
+ * @returns 事件循环推进若干轮后的 promise。
+ */
+const flush = async () => {
+  for (let i = 0; i < 10; i += 1) await new Promise((resolve) => setImmediate(resolve))
+}
 const withModel = (route, model) => (s) => ({
   providers: { ...s.providers, [route]: { ...s.providers[route], models: [model] } },
 })
