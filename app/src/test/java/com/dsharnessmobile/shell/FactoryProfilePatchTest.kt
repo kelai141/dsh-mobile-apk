@@ -497,9 +497,9 @@ class FactoryProfilePatchTest {
     assertTrue("零改动时不得有改动说明", result.changes.isEmpty())
 
     val blocks = FactoryProfilePatch.topLevelBlocks(text)
-    // 23 = 22 个 `- ` 顶层条目 + 1 个「首个条目之前的注释头」块（parseBlocks 会把它们冲成独立块）。
-    // 历史锚点：0.14.2 时代 20 个条目 ⇒ 21 块，正是本断言当时的期望值。
-    assertEquals("顶层条目数（工厂件结构改变时同步本断言）", 23, blocks.size)
+    // 22 = 21 个 `- ` 顶层条目 + 1 个「首个条目之前的注释头」块（parseBlocks 会把它们冲成独立块）。
+    // 历史锚点：0.14.2 时代 20 个条目 ⇒ 21 块；0.14.8 退役 dsh-model-capability 后 21 个条目 ⇒ 22 块。
+    assertEquals("顶层条目数（工厂件结构改变时同步本断言）", 22, blocks.size)
     val groups = blocks.map { FactoryProfilePatch.blockIds(it) }.filter { it.size > 1 }
     assertEquals("唯一多子条目组 = shell-termux + host-web-compat", 1, groups.size)
     assertEquals(listOf("shell-termux", "host-web-compat"), groups.single())
@@ -508,7 +508,7 @@ class FactoryProfilePatchTest {
   /**
    * D10 的**真实形态**反证：拿仓库里的权威工厂件，人为抹掉 @BQ@host-web-compat@BQ@ 这一条
    * （设备上真实发生过的「同一组里少一个插件」形态），merge 必须把它补回**同一个** insert 组，
-   * 且其余 20 个顶层条目（21 - 1 = shell-termux 所在组）一字不动。
+   * 且其余顶层条目（20 - 1 = shell-termux 所在组）一字不动。
    *
    * 旧实现在这里 @BQ@changes=0@BQ@ 且零日志：工厂件里 @BQ@shell-termux@BQ@ 已让该块被判定「存在」。
    */
@@ -530,7 +530,7 @@ class FactoryProfilePatchTest {
 
     assertTrue("D10：缺失的组内兄弟必须被补回", result.text.contains("id: host-web-compat"))
     assertTrue("补回的是同一个组（shell-termux 仍是组首）", result.text.contains("id: shell-termux"))
-    assertEquals("顶层条目数不变（补进组内，不是追加成新块）", 23, FactoryProfilePatch.topLevelBlocks(result.text).size)
+    assertEquals("顶层条目数不变（补进组内，不是追加成新块）", 22, FactoryProfilePatch.topLevelBlocks(result.text).size)
     val group = FactoryProfilePatch.topLevelBlocks(result.text)
       .first { FactoryProfilePatch.blockIds(it).contains("shell-termux") }
     assertEquals(listOf("shell-termux", "host-web-compat"), FactoryProfilePatch.blockIds(group))
