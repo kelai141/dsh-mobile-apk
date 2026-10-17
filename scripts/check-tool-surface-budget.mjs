@@ -33,7 +33,6 @@ const PLUGINS = [
   'dsh-android-vdisplay',
   'dsh-android-file-open',
   'dsh-android-linux-env',
-  'dsh-model-capability',
 ]
 
 /** 预算：字节 + 允许的相对漂移；基线文件由 --update 生成。 */

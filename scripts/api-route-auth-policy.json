@@ -41,10 +41,6 @@
     {
       "source": "dsh-host-web-compat/lib/index.js",
       "expected": 3
-    },
-    {
-      "source": "plugins/dsh-model-capability/src/index.ts",
-      "expected": 1
     }
   ],
   "dynamicPathExpressions": [
@@ -62,13 +58,6 @@
       ],
       "literalEvidence": "for (const [action, path] of ROUTES)",
       "reason": "Linux 环境路由由 ROUTES 的动作/路径成对常量注册；七条鉴权与方法判据共用同一 handler，不能另起无鉴权入口。"
-    },
-    {
-      "source": "plugins/dsh-model-capability/src/index.ts",
-      "expression": "MANUAL_FILL_ROUTE",
-      "resolvesTo": ["/api/android/model-capability/fill"],
-      "literalEvidence": "export const MANUAL_FILL_ROUTE = '/api/android/model-capability/fill'",
-      "reason": "A6 手动补齐路由的路径常量：宿主注册与页面调用共用同一字面量，避免两处各写一份导致漂移。"
     },
     {
       "source": "plugins/dsh-android-browser/src/index.ts",
@@ -411,17 +400,6 @@
       "registrationSource": "plugins/dsh-android-linux-env/src/index.ts",
       "registration": "path: '/api/android/runtime-cache/execute'",
       "endpointSource": "plugins/dsh-android-linux-env/src/index.ts",
-      "access": "protected",
-      "authMarker": "authorizeMobileRoute(req, authOptions())",
-      "authCallMarker": "authorizeMobileRoute(req, authOptions())"
-    },
-    {
-      "id": "model-capability-fill",
-      "path": "/api/android/model-capability/fill",
-      "kind": "exact",
-      "registrationSource": "plugins/dsh-model-capability/src/index.ts",
-      "registration": "path: MANUAL_FILL_ROUTE",
-      "endpointSource": "plugins/dsh-model-capability/src/index.ts",
       "access": "protected",
       "authMarker": "authorizeMobileRoute(req, authOptions())",
       "authCallMarker": "authorizeMobileRoute(req, authOptions())"

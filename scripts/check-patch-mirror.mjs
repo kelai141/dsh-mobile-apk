@@ -280,7 +280,6 @@ if (peer) {
     // 故把注入集全量对齐 MIRROR_TOP，而不是只补这一个。
     'plugins/dsh-android-bridge',
     'plugins/dsh-android-manage',
-    'plugins/dsh-model-capability',
     'dsh-shell-termux',
     'plugins/dsh-android-linux-env',
     'plugins/dsh-android-browser',
@@ -389,7 +388,6 @@ if (peer) {
    */
   const MIRROR_SKIP = [
     /\.tgz$/,
-    /^plugins\/dsh-model-capability\/lib\/catalog-snapshot\.json$/,
   ]
   const mirrorKept = (rel, x) => !MIRROR_SKIP.some((re) => re.test(rel + '/' + x))
   for (const rel of MIRROR_TOP) {

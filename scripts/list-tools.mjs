@@ -14,7 +14,6 @@ const PLUGINS = [
   'dsh-android-vdisplay',
   'dsh-android-file-open',
   'dsh-android-linux-env',
-  'dsh-model-capability',
 ]
 
 // 与预算门禁同款桩：捕获 ctx.tools.register(def)。

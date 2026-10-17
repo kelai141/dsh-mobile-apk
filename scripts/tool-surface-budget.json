@@ -24,10 +24,6 @@
     "dsh-android-linux-env": {
       "count": 2,
       "bytes": 340
-    },
-    "dsh-model-capability": {
-      "count": 2,
-      "bytes": 2120
     }
   },
   "initialVisible": 2951,
@@ -40,8 +36,6 @@
     "android_capabilities",
     "android_env_recipe",
     "android_file_incoming_status",
-    "android_toolchain_status",
-    "model_capability_apply",
-    "model_capability_probe"
+    "android_toolchain_status"
   ]
 }

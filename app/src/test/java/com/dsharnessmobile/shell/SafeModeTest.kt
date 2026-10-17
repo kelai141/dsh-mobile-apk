@@ -90,7 +90,6 @@ class SafeModeTest {
     PluginMounts.HardEntry("android-manage", "@dsh-android/dsh-android-manage"),
     PluginMounts.HardEntry("android-linux-env", "@dsh-android/dsh-android-linux-env"),
     PluginMounts.HardEntry("android-file-open", "@dsh-android/dsh-android-file-open"),
-    PluginMounts.HardEntry("model-capability", "@dsh-android/dsh-model-capability"),
     PluginMounts.HardEntry("android-browser", "@dsh-android/dsh-android-browser"),
     PluginMounts.HardEntry("android-vdisplay", "@dsh-android/dsh-android-vdisplay"),
     PluginMounts.HardEntry("dsh-undo-savepoint", "dsh-undo-savepoint"),
@@ -535,7 +534,6 @@ class SafeModeTest {
       "@dsh-android/dsh-android-manage",
       "@dsh-android/dsh-android-linux-env",
       "@dsh-android/dsh-android-file-open",
-      "@dsh-android/dsh-model-capability",
       "@dsh-android/dsh-android-browser",
       "@dsh-android/dsh-android-vdisplay",
     )) {

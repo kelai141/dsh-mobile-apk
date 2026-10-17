@@ -117,11 +117,6 @@
       "repo": "plugins/dsh-android-file-open"
     },
     {
-      "id": "model-capability",
-      "pkg": "@dsh-android/dsh-model-capability",
-      "repo": "plugins/dsh-model-capability"
-    },
-    {
       "id": "android-browser",
       "pkg": "@dsh-android/dsh-android-browser",
       "repo": "plugins/dsh-android-browser"

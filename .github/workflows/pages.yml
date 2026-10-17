@@ -49,8 +49,21 @@ jobs:
       # 不依赖 shell 的 glob 行为。
       - name: 资产名与 URL 拼接门禁
         run: node --test "webpages/tests/*.test.mjs"
-      - name: 构建静态站
-        run: node webpages/tools/build.mjs
+      # --refresh：构建同时把最新 release 写回 data/releases.json 种子。
+      # 为什么需要（用户 2026-10-17 指出）：种子是 GitHub API 不可用时的兜底数据源，
+      # 不跟着发版走就会一直停在上一版——API 被限流（未认证 60 次/小时/IP，C 端 CGNAT
+      # 共享出口极易命中）时，用户看到的是旧版本号与旧资产清单。
+      - name: 构建静态站（含刷新种子）
+        run: node webpages/tools/build.mjs --refresh
+      # 种子漂移必须显式可见：refresh 会改写工作区文件，若忘记提交回 main，下一次 API
+      # 限流又会回落旧数据。这里只告警不判红（发版链不应因站点种子失败）。
+      - name: 种子漂移提示
+        if: always()
+        run: |
+          if ! git diff --quiet -- webpages/data/releases.json; then
+            echo "::warning::webpages/data/releases.json 已随构建刷新，请把差异提交回 main"
+            git --no-pager diff --stat -- webpages/data/releases.json
+          fi
       - name: 站点自检（产物存在 + 占位符已替换 + 体积预算）
         run: |
           set -euo pipefail

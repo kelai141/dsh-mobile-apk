@@ -88,14 +88,6 @@
     - id: android-file-open
       name: '@dsh-android/dsh-android-file-open'
 
-# 自定义提供商能力发现（0.13.5 W3，issue #125）：dsh-model-capability——用户手填的
-# 供应商路由没有任何能力元数据（面板只写 id/name/contextWindow/maxTokens），composer
-# 因此没有思考档位可渲染。四段来源按序补齐：被动端点描述符 → 厂商 schema →
-# 引擎目录精确 id 查表（pi-ai 厂商声明，非名字猜测）→ 显式批准 + 负控通过的主动探测；
-# 只写模型级缺项、绝不覆盖用户值（settings-writer 字段级 merge + SETTINGS_CONFLICT 重试）。
-- insert:
-    - id: model-capability
-      name: '@dsh-android/dsh-model-capability'
 
 # Default model（0.13.0 C3 端点级实锤修正，2026-08-25）：此前 pin 到 opencode-go
 # （OpenCode Zen Go，opencode.ai/zen/go/v1）——该网关实测对无有效 key 请求返回扁平

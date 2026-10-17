@@ -17,8 +17,6 @@
       name: '@dsh-android/dsh-android-linux-env'
     - id: android-file-open
       name: '@dsh-android/dsh-android-file-open'
-    - id: model-capability
-      name: '@dsh-android/dsh-model-capability'
     - id: android-browser
       name: '@dsh-android/dsh-android-browser'
     - id: android-vdisplay

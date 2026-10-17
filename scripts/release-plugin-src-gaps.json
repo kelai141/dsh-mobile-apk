@@ -5,7 +5,6 @@
     { "plugin": "plugins/dsh-android-manage", "reason": "同 dsh-android-bridge：@dsh-android 插件随快照出厂，不由 build-release.ps1 注入" },
     { "plugin": "plugins/dsh-android-linux-env", "reason": "同 dsh-android-bridge：@dsh-android 插件随快照出厂，不由 build-release.ps1 注入" },
     { "plugin": "plugins/dsh-android-file-open", "reason": "同 dsh-android-bridge：@dsh-android 插件随快照出厂，不由 build-release.ps1 注入" },
-    { "plugin": "plugins/dsh-model-capability", "reason": "同 dsh-android-bridge：@dsh-android 插件随快照出厂，不由 build-release.ps1 注入（F-ENV-04/05 的 pluginDirs 单常量收敛另批处理）" },
     { "plugin": "plugins/dsh-android-browser", "reason": "同 dsh-android-bridge：@dsh-android 插件随快照出厂，不由 build-release.ps1 注入" },
     { "plugin": "plugins/dsh-android-vdisplay", "reason": "同 dsh-android-bridge：@dsh-android 插件随快照出厂，不由 build-release.ps1 注入" }
   ]
