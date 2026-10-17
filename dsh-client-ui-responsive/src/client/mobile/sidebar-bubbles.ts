@@ -415,6 +415,14 @@ export class SidebarBubbles {
     this.collapseTimer = null
     // Native BrowserHost stays hidden until the exit animation finishes.
     this.popover.setAttribute('data-dsh-sidebar-bubbles', open ? 'open' : 'closing')
+    // 原生覆盖层避让（0.14.8 设备实测，用户报「三个点展开的标签界面被黑色虚拟屏遮挡」）：
+    // 虚拟屏/浏览器的画像是**壳侧 SurfaceView**，addView 在 root 上、**位于 WebView 之上**——
+    // 页面里的 z-index 再高也压不过它，所以弹层一旦与画面矩形重叠就是「怎么也点不到、看不全」。
+    // 这是两条渲染通路的结构事实，不是样式问题。修法：把「弹层已展开」发布成**页面级信号**，
+    // 由画面上层（dsh-android-vdisplay / dsh-client-ui-responsive 的浏览器面）据此把原生层
+    // 暂时隐藏，收起时再恢复（弹层本来就是覆盖式交互，隐藏不改变任何状态）。
+    // 用 document 级属性而不是只在弹层内部：画面组件与本组件分属不同插件，共享不了实例。
+    document.documentElement.toggleAttribute('data-dsh-popover-open', open)
     if (!open) this.collapseTimer = window.setTimeout(() => {
       this.collapseTimer = null
       this.popover?.setAttribute('data-dsh-sidebar-bubbles', 'closed')
@@ -447,7 +455,20 @@ export class SidebarBubbles {
     const nativeBottom = Math.max(0, parseFloat(root.getPropertyValue('--dsh-android-ime-bottom')) || 0, parseFloat(root.getPropertyValue('--dsh-android-system-bottom')) || 0)
     const bottom = Math.min(panel.bottom - (parseFloat(padding.paddingBottom) || 0), (visual?.offsetTop ?? 0) + (visual?.height ?? window.innerHeight), window.innerHeight - nativeBottom)
     const width = Math.max(1, Math.min(304, right - left - 24))
-    const popTop = Math.max(top + 54, (visual?.offsetTop ?? 0) - panel.top + 8)
+    // 顶部工具条避让（0.14.8 设备实测）：弹层原按「头部 top + 54」定位，而**头部之上还有一条
+    // 原生工具条**（数据行/图标按钮实测占到 y≈70，头部 top≈26 ⇒ 26+54=80 仅勉强越过，
+    // 折叠态/更大字号下直接压住弹层首行）。用户报「三个点展开的标签界面被遮挡」即此。
+    // 判据改为：取弹层要避让的**所有**可视顶栏的最低边（头部 + 其上方条带），再加 8px。
+    const chromeBottom = (() => {
+      let lowest = top + (this.header?.getBoundingClientRect().height ?? 40)
+      const panelElement = this.panel
+      for (const node of panelElement === null ? [] : [...panelElement.querySelectorAll<HTMLElement>('[data-dockkit-strip], [data-dsh-bubble-native]')]) {
+        const rect = node.getBoundingClientRect()
+        if (rect.height > 0 && rect.top < panel.top + 160) lowest = Math.max(lowest, rect.bottom - panel.top)
+      }
+      return lowest
+    })()
+    const popTop = Math.max(chromeBottom + 8, (visual?.offsetTop ?? 0) - panel.top + 8)
     this.popover.style.width = width + 'px'
     this.popover.style.left = Math.max(left - panel.left + 12, right - panel.left - width - 12) + 'px'
     this.popover.style.top = popTop + 'px'

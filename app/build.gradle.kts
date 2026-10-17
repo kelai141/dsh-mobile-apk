@@ -14,15 +14,15 @@ android {
     // (the embedded engine, bash, and every child command would need linker64
     // wrappers); 34 keeps native exec working on Android 15/16 devices.
     targetSdk = 34
-    // 0.14.7：versionCode 51（覆盖安装 0.14.6(50)）。所有交付 APK 强制包含 v1/v2/v3 签名。
+    // 0.14.8：versionCode 52（覆盖安装 0.14.7(51)）。所有交付 APK 强制包含 v1/v2/v3 签名。
     // 为什么必须升：UpdateChecker 的判据是 isNewer(tag, currentVersion())。若 versionName 仍等于上一个
-    // 已发布 tag（0.14.6），应用内更新对任何设备恒判 UpToDate —— 修好更新检测却送不出去。
-    versionCode = 51
+    // 已发布 tag（0.14.7），应用内更新对任何设备恒判 UpToDate —— 修好更新检测却送不出去。
+    versionCode = 52
     // Snapshot builds append a suffix (e.g. -SN-1-RC13) via -PversionNameSuffix; release builds pass none.
     val snapshotSuffix = providers.gradleProperty("versionNameSuffix").getOrElse("")
     // 版本号单一来源：UI（GuidePageRenderer）、桥（androidBridge.version）、诊断日志、引擎环境变量
     // （DSH_APP_VERSION，见 EngineManager.engineEnv）全部读这里，禁止任何地方再硬编码版本字面量。
-    versionName = "0.14.7" + snapshotSuffix
+    versionName = "0.14.8" + snapshotSuffix
     buildConfigField("String", "TERMUX_VERSION", "\"0.118.3\"")
     // 0.14.0-preview：虚拟屏 P0 建屏矩阵走仪器测试入口（app UID 下运行 = P0-6 要测的调用者身份），
     // 不新增任何产品面（Activity/Bridge/Manifest 均不动）。见 .deploy-tmp/iter-0140/vdisplay-p0.md §8.8。

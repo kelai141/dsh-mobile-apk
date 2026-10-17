@@ -50,6 +50,11 @@
       "name": "@deepseek-ai/dsh-workflow-worker-thread",
       "lastSeenVersion": "0.1.1-rc.2",
       "reason": "同上"
+    },
+    {
+      "name": "@deepseek-ai/dsh-subagent-in-process-driver",
+      "lastSeenVersion": "0.2.0-rc.2",
+      "reason": "上游 0.2.1-rc.2 整包删除（packages/subagent/subagent-in-process-driver 目录已删）；基座引擎树仍带出它，overlay 不认 ⇒ 按 0.14.2 残留剔除口径登记"
     }
   ],
   "platformDeadPackages": [

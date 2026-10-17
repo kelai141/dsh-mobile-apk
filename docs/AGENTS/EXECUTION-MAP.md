@@ -2112,7 +2112,7 @@ scripts/build-apk-engine.test.mjs
 scripts/patches/data/undo-safe-transaction-snippet.mjs
 scripts/patches/data/registry-scan-c4.mjs
 scripts/patches/data/client-index-loader-barrier.mjs
-scripts/patches/upstream/pi-ai-0.87.1.patch
+scripts/patches/upstream/pi-ai-1.1.0.patch
 glob:dsh-client-ui-responsive/src/client/mobile/upstream-browser/**
 app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt
 app/src/main/java/com/dsharnessmobile/shell/UserCopy.kt
@@ -2269,7 +2269,6 @@ glob:plugins/dsh-android-linux-env/test/*.mjs
 glob:plugins/dsh-android-model-capability/test/*.mjs
 glob:plugins/dsh-model-capability/test/*.mjs
 dsh-client-ui-responsive/src/index.ts
-dsh-client-ui-responsive/src/invariant.ts
 dsh-client-ui-responsive/src/css-modules.d.ts
 dsh-client-ui-responsive/src/react-dom.d.ts
 dsh-client-ui-responsive/src/client/snapshot-panels-observer.ts

@@ -434,14 +434,14 @@
       "expression": "REMOTE_STREAM_MUX_PATH",
       "pathText": "/api/remote.mux",
       "verdict": "protected",
-      "authMarker": "webCtx.connection.admit(req)",
-      "authCallMarker": "webCtx.connection.admit(req)",
+      "authMarker": "webCtx.connection.admitConnection(req)",
+      "authCallMarker": "webCtx.connection.admitConnection(req)",
       "bundleRowId": "typert-gateway",
       "pathEvidence": {
         "file": "packages/api/gateway/src/stream-protocol.ts",
         "marker": "export const REMOTE_STREAM_MUX_PATH = '/api/remote.mux'"
       },
-      "evidence": "升级路由无 kind 字段；注册块内先走 Host/Origin 栅栏 + browserAuth 的 admit()，rejection 即 rejectRemoteStreamUpgrade——与 client-connection 的 /api 前缀同一道门。"
+      "evidence": "升级路由无 kind 字段；0.2.1 起注册块内的鉴权标记是 webCtx.connection.admitConnection(req)——它同 admit() 一样先过 Host/Origin 栅栏 + browserAuth 认证，再加 socket 归属检查；rejection 即 rejectRemoteStreamUpgrade，与 client-connection 的 /api 前缀同一道门。"
     },
     {
       "source": "packages/api/session-controller/src/media-references.ts",
@@ -468,6 +468,22 @@
         "marker": "export const API_PATH = '/api'"
       },
       "evidence": "Host/Origin 栅栏 + browserAuth 的 requestRejection/admit 落在注册块内；这是全部 /api 面（除更长精确/前缀路由）的唯一入口。"
+    },
+    {
+      "source": "packages/client/connection/src/index.ts",
+      "form": "web",
+      "expression": "CONNECT_PATH",
+      "kind": "exact",
+      "pathText": "/connect",
+      "verdict": "protected",
+      "authMarker": "connection.authorizeConnect(req, res)",
+      "authCallMarker": "connection.authorizeConnect(req, res)",
+      "bundleRowId": "connection",
+      "pathEvidence": {
+        "file": "packages/client/connection/src/connect-protocol.ts",
+        "marker": "export const CONNECT_PATH = '/connect'"
+      },
+      "evidence": "启动令牌交换路由：注册块内 handler 调 connection.authorizeConnect(req, res)——先 isTrusted 的 Host/Origin 栅栏，再 browserAuth.authorizeConnect 认证并发布凭据；失败 403/401。"
     },
     {
       "source": "packages/client/connection/src/rpc-host.ts",
@@ -637,15 +653,55 @@
       "evidence": "会话日志 ZIP 下载走 connection.fetch；/api 前缀 handler 的 admit 栅栏之前不会到达该 Fetch 路由，故不需要自带 guard。"
     },
     {
-      "source": "packages/webhook/webhook-github/src/index.ts",
+      "source": "packages/experimental/inspector/src/host/plugin.ts",
+      "form": "fetch",
+      "expression": "INSPECTOR_BOOTSTRAP_PATH",
+      "pathText": "/api/experimental-inspector/bootstrap",
+      "verdict": "not-mounted",
+      "packageName": "@deepseek-ai/dsh-experimental-inspector",
+      "pathEvidence": {
+        "file": "packages/experimental/inspector/src/shared/web.ts",
+        "marker": "export const INSPECTOR_BOOTSTRAP_PATH = '/api/experimental-inspector/bootstrap'"
+      },
+      "evidence": "实验性 Inspector 的浏览器 bootstrap Fetch 路由。不挂载依据：上游 packages/bundle/base/cordis.patch.yml 与 packages/bundle/web-app/cordis.patch.yml 均无 inspector 行，本仓 scripts/profile-web.cordis.patch.yml 也无 insert ⇒ 发行 profile 不加载该插件。"
+    },
+    {
+      "source": "packages/experimental/inspector/src/host/plugin.ts",
+      "form": "web",
+      "expression": "DEVTOOLS_PATH",
+      "kind": "prefix",
+      "pathText": "/inspector/devtools",
+      "verdict": "not-mounted",
+      "packageName": "@deepseek-ai/dsh-experimental-inspector",
+      "pathEvidence": {
+        "file": "packages/experimental/inspector/src/host/plugin.ts",
+        "marker": "const DEVTOOLS_PATH = '/inspector/devtools'"
+      },
+      "evidence": "DevTools 静态资源前缀路由，随 experimental-inspector 插件一起注册。该包不在 base/web-app bundle 行（packages/bundle/{base,web-app}/cordis.patch.yml 零命中），本仓 scripts/profile-web.cordis.patch.yml 无 insert ⇒ 发行 profile 不挂载。"
+    },
+    {
+      "source": "packages/experimental/inspector/src/host/plugin.ts",
+      "form": "upgrade",
+      "expression": "`${DEVTOOLS_PATH",
+      "pathText": "/inspector/devtools/cdp",
+      "verdict": "not-mounted",
+      "packageName": "@deepseek-ai/dsh-experimental-inspector",
+      "pathEvidence": {
+        "file": "packages/experimental/inspector/src/host/plugin.ts",
+        "marker": "path: `${DEVTOOLS_PATH}/cdp`"
+      },
+      "evidence": "CDP WebSocket upgrade 路由，与 DevTools 前缀同属 experimental-inspector。该包不在 base/web-app bundle 行、本仓 profile patch 无 insert，发行 profile 不加载，upgrade 监听同理不存在。"
+    },
+    {
+      "source": "packages/experimental/webhook-github/src/index.ts",
       "form": "web",
       "expression": "config.path",
       "kind": "exact",
       "pathText": null,
-      "dynamicPathReason": "配置字段：path 来自部署方 cordis.yml 的 Config.path，不是构建期常量；本平台 bundle（base+web-app）没有 webhook-github 行，装配面不会加载该插件。",
+      "dynamicPathReason": "配置字段：path 来自部署方 cordis.yml 的 Config.path，不是构建期常量；0.2.1 起包从 packages/webhook/ 移到 packages/experimental/webhook-github/（包名不变），但 base/web-app bundle 无该行，装配面不会加载。",
       "verdict": "not-mounted",
       "packageName": "@deepseek-ai/dsh-webhook-github",
-      "evidence": "webhook-github 只出现在 apps/cli 的示例 cordis.yml，不在 base/web-app bundle 行里；移动 profile 不挂载该插件，故 config.path 无任何实际注册。"
+      "evidence": "依据三条：packages/bundle/base/cordis.patch.yml 与 packages/bundle/web-app/cordis.patch.yml 均无 webhook-github 行；本仓 scripts/profile-web.cordis.patch.yml 无 insert；上游 apps/cli/package.json 的 dependencies 已无该包（仅留在 devDependencies），发布安装树不产出。发行 profile 不挂载，config.path 无实际注册。"
     }
   ]
 }

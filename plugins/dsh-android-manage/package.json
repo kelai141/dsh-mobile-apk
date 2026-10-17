@@ -18,13 +18,13 @@
     "test": "npm run build && node --test test/ui-tree.test.mjs test/protocol-v2.test.mjs test/detail-store.test.mjs test/a11y-routing.test.mjs test/tool-output-schema.test.mjs test/coord-basis.test.mjs test/boot-ready-audit.test.mjs"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "4.0.4",
+    "@deepseek-ai/cordis": "4.0.5",
     "@deepseek-ai/dsh-tools": "^0.2.0-rc.2"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-util-values": "0.2.0-rc.2",
-    "@deepseek-ai/cordis": "4.0.4",
-    "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-util-values": "0.2.1-rc.2",
+    "@deepseek-ai/cordis": "4.0.5",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
     "@types/node": "^24.0.0",
     "typescript": "^5.5.0"
   },

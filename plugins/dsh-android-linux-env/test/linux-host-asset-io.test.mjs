@@ -11,9 +11,8 @@ import { createHash } from 'node:crypto'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { createBootstrap } from '../../dsh-linux-bootstrap/src/index.js'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   CODE_ASSET_NOT_PREPARED,
   CODE_ASSET_SPEC_INVALID,
@@ -28,6 +27,32 @@ import {
   stagedDirectoryFor,
   unpackedTreeFor,
 } from '../lib/linux-host-asset-io.js'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+
+/**
+ * 定位 vendored bootstrap。**不允许静默 skip**：两种布局都找不到就立刻判红，并打印试过的绝对路径。
+ *
+ * 真因（2026-10-17 实测）：本文件此前写静态 `import '../../dsh-linux-bootstrap/src/index.js'`，而
+ * `dsh-linux-bootstrap` 只存在于**壳仓自包含副本**（`dsh-mobile-apk/plugins/dsh-linux-bootstrap`）；
+ * 协调仓的 `plugins/` 只放注入集插件。于是同一份用例在壳仓全绿、在协调仓根必红
+ * `ERR_MODULE_NOT_FOUND`。判据本身没问题，是**定位逻辑对仓布局的假设太窄**。
+ */
+const BOOTSTRAP_ENTRY_CANDIDATES = [
+  // 壳仓自包含布局：<repo>/plugins/dsh-linux-bootstrap
+  resolve(HERE, '..', '..', 'dsh-linux-bootstrap', 'src', 'index.js'),
+  // 协调仓布局：bootstrap 只在本仓内的壳仓副本里
+  resolve(HERE, '..', '..', '..', 'dsh-mobile-apk', 'plugins', 'dsh-linux-bootstrap', 'src', 'index.js'),
+]
+const bootstrapEntry = BOOTSTRAP_ENTRY_CANDIDATES.find((candidate) => existsSync(candidate))
+if (!bootstrapEntry) {
+  throw new Error(
+    '找不到 vendored bootstrap 入口（dsh-linux-bootstrap/src/index.js），本用例集拒绝空跑。已尝试：\n  '
+    + BOOTSTRAP_ENTRY_CANDIDATES.join('\n  '),
+  )
+}
+// 动态 import 是唯一能「两布局皆可」的手段：静态 import 的说明符由模块解析器写死，无法回落。
+const { createBootstrap } = await import(pathToFileURL(bootstrapEntry).href)
 
 const RUNTIME_PACKAGE_NAME = '@dsh-android/linux-runtime'
 const MANIFEST_NAME = 'linux-release.json'
@@ -323,9 +348,20 @@ test('refuses when a rebuild is needed and the retained archive no longer matche
 // ── 不变量：JS 推导与 Kotlin 发布口径必须逐字一致 ──────────────────────────
 
 test('the JS staging derivation agrees with the Kotlin publisher verbatim', async () => {
-  // 从**本文件位置**解析仓根：测试的 cwd 由 runner 决定，不能用相对 cwd 的路径。
-  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
-  const shell = join(repoRoot, 'app', 'src', 'main', 'java', 'com', 'dsharnessmobile', 'shell')
+  // 从**本文件位置**解析壳侧源码目录：测试的 cwd 由 runner 决定，不能用相对 cwd 的路径。
+  // 两种仓布局：壳仓自包含（<repo>/app）与协调仓（壳侧 Kotlin 只在 <repo>/dsh-mobile-apk/app）。
+  const repoRoot = resolve(HERE, '..', '..', '..')
+  const shellCandidates = [
+    join(repoRoot, 'app', 'src', 'main', 'java', 'com', 'dsharnessmobile', 'shell'),
+    join(repoRoot, 'dsh-mobile-apk', 'app', 'src', 'main', 'java', 'com', 'dsharnessmobile', 'shell'),
+  ]
+  const shell = shellCandidates.find((candidate) => existsSync(join(candidate, 'LinuxAssetIO.kt')))
+  if (!shell) {
+    throw new Error(
+      '找不到壳侧 Kotlin 源码目录（LinuxAssetIO.kt），本用例拒绝空跑。已尝试：\n  '
+      + shellCandidates.map((candidate) => join(candidate, 'LinuxAssetIO.kt')).join('\n  '),
+    )
+  }
   const kotlinIo = await readFile(join(shell, 'LinuxAssetIO.kt'), 'utf8')
   const kotlinPrepare = await readFile(join(shell, 'LinuxAssetPrepare.kt'), 'utf8')
 

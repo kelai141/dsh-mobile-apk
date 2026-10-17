@@ -39,14 +39,14 @@ const RAW = readFileSync(FIXTURE, 'utf8')
 // 并断言「改法」本身在场（下面第 ⑥ 组锁 apply-patches 里的锚点与守卫文本）。
 function applyPatch(text) {
   const execOld = [
-    '\t\t\tconst executable = await this.ctx.subprocess.resolveExecutable(this.config.nodeExecutable, void 0, signal);',
+    '\t\t\tconst executable = await this.ctx.subprocess.resolveExecutable(this.config.launch.executable, void 0, signal);',
     '\t\t\tif (settled) return await result.promise;',
   ].join('\n')
   const argvOld = [
     '\t\t\tconst argv = [',
     '\t\t\t\texecutable,',
     '\t\t\t\t...packaged ? [] : [heapFlag],',
-    '\t\t\t\t...bootstrapArgs(this.ctx.fs, this.config, this.config.maxMessageBytes)',
+    '\t\t\t\t...bootstrapArgs(this.ctx.fs, this.config.launch, this.config.maxMessageBytes)',
     '\t\t\t];',
   ].join('\n')
   const envOld = [
@@ -59,7 +59,7 @@ function applyPatch(text) {
     throw new Error('夹具上锚点未命中——夹具版本与补丁面不同代')
   }
   const execNew = [
-    '\t\t\tconst executable = await this.ctx.subprocess.resolveExecutable(this.config.nodeExecutable, void 0, signal);',
+    '\t\t\tconst executable = await this.ctx.subprocess.resolveExecutable(this.config.launch.executable, void 0, signal);',
     '\t\t\t' + MARKER + ': fail loud on an unusable executable.',
     '\t\t\tif (typeof executable !== \'string\' || !isAbsolute(executable)) {',
     '\t\t\t\tthrow new Error(\'ptc-runtime-node: resolved node executable is not an absolute path\');',
@@ -74,7 +74,7 @@ function applyPatch(text) {
     '\t\t\t// ' + MARKER + ': the heap flag must never sit at argv[1].',
     '\t\t\tconst argv = [',
     '\t\t\t\texecutable,',
-    '\t\t\t\t...bootstrapArgs(this.ctx.fs, this.config, this.config.maxMessageBytes)',
+    '\t\t\t\t...bootstrapArgs(this.ctx.fs, this.config.launch, this.config.maxMessageBytes)',
     '\t\t\t];',
   ].join('\n')
   const envNew = [
@@ -93,7 +93,7 @@ check('夹具里存在旧形态 argv 项 `...packaged ? [] : [heapFlag],`',
 check('夹具里 heapFlag 由 maxOldGenerationSizeMb 构造（heapFlag 定义在场）',
   RAW.includes('const heapFlag = `--max-old-space-size=${this.config.maxOldGenerationSizeMb}`;'))
 check('夹具里 executable 由 resolveExecutable 解析（守卫有用武之地）',
-  RAW.includes('resolveExecutable(this.config.nodeExecutable, void 0, signal)'))
+  RAW.includes('resolveExecutable(this.config.launch.executable, void 0, signal)'))
 
 const OUT = applyPatch(RAW)
 

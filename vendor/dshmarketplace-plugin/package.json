@@ -57,8 +57,8 @@
     }
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-native-command": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-tools": "0.2.0-rc.2"
+    "@deepseek-ai/dsh-native-command": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2"
   },
   "devDependencies": {
     "esbuild": "^0.25.0"

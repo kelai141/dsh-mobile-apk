@@ -11,6 +11,9 @@ import { planClientRegistryScan } from '../data/registry-scan-c4.mjs';
 test('client scan preserves graph/bundle/runtime/error behavior and removes repeated IO', async () => {
 const scratch=mkdtempSync(join(tmpdir(),'c4-behavior-'));
 const pristine = fs.readFileSync(versionedFixture('dsh-client-modules','lib','index.js'),'utf8');
+// 0.2.1-rc.2 起引擎在构造器里用 createRequire(import.meta.url)('../package.json') 读自身发布身份，
+// 变体必须落在「lib/index.js + package.json」的真实包根下；单独写一个 .mjs 会 MODULE_NOT_FOUND。
+const fixturePackage = fs.readFileSync(versionedFixture('dsh-client-modules','package.json'),'utf8');
 assert.equal(planClientRegistryScan(planClientRegistryScan(pristine)),planClientRegistryScan(pristine));
 assert.throws(() => planClientRegistryScan(pristine.replace('processOne(entryName, onError) {','broken(){')),/anchor mismatch/);
 try {
@@ -20,7 +23,10 @@ try {
  const variants=[['baseline',pristine],['candidate',planClientRegistryScan(pristine)]];
  const outputs=[];
  for(const [name,file] of variants){
-  const target=join(scratch,name+'.mjs');writeFileSync(target,file);
+  // 变体放在独立包根 modules/<name>/ 下（不落在 root 前缀内，避免污染下方 package.json 读取计数）。
+  const moduleRoot=join(scratch,'modules',name);mkdirSync(join(moduleRoot,'lib'),{recursive:true});
+  writeFileSync(join(moduleRoot,'package.json'),fixturePackage);
+  const target=join(moduleRoot,'lib','index.js');writeFileSync(target,file);
   const {ClientModuleRegistry}=await import(pathToFileURL(target));
   const root=join(scratch,name);mkdirSync(root);const baseUrl=pathToFileURL(join(root,'entry.mjs')).href;
   const rows=[];const hooks=new Map();let scans=0, reads=0;

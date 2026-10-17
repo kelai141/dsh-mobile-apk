@@ -20,6 +20,9 @@ test('enabled gateway browser exports do not race host fiber; controllers remain
     writeFileSync(join(cordis, 'package.json'), JSON.stringify({ type: 'module', exports: './index.js' }))
     writeFileSync(join(cordis, 'index.js'), 'export class Service { constructor(ctx) { this.ctx = ctx } }')
     const pristine = readFileSync(versionedFixture('dsh-client-modules', 'lib', 'index.js'), 'utf8')
+    // 0.2.1-rc.2 起引擎在构造器里用 createRequire(import.meta.url)('../package.json') 读自身发布身份，
+    // baseline/candidate 变体必须落在「lib/index.js + package.json」的真实包根下；只写一个 .mjs 会 MODULE_NOT_FOUND。
+    const fixturePackage = readFileSync(versionedFixture('dsh-client-modules', 'package.json'), 'utf8')
     const candidate = planClientRegistryScan(pristine)
     assert.equal(planClientRegistryScan(candidate), candidate)
     assert.equal(planGatewayClientSource(candidate), candidate)
@@ -42,7 +45,10 @@ test('enabled gateway browser exports do not race host fiber; controllers remain
     }
     const ctx = { loader: { entries: () => rows, internal: { version: 'v2', resolveSync(base, { specifier }) { return { url: pathToFileURL(join(pkgs.get(specifier), 'host.js')).href } } } }, logger: { warn() {}, error() {} }, on(event, cb) { hooks.set(event, cb) }, inject() {} }
     for (const [name, source] of [['baseline', pristine], ['candidate', candidate]]) {
-      const file = join(scratch, name + '.mjs'); writeFileSync(file, source)
+      const moduleRoot = join(scratch, 'modules', name)
+      mkdirSync(join(moduleRoot, 'lib'), { recursive: true })
+      writeFileSync(join(moduleRoot, 'package.json'), fixturePackage)
+      const file = join(moduleRoot, 'lib', 'index.js'); writeFileSync(file, source)
       const { ClientModuleRegistry } = await import(pathToFileURL(file))
       const registry = new ClientModuleRegistry(ctx)
       const graph = registry.graph()

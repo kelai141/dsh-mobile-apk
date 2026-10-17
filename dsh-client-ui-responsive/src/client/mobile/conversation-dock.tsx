@@ -131,7 +131,12 @@ export function resolveDockSubagent(
         if (!node || Number(node.getAttribute('aria-level')) !== depth
           || node.querySelector('[class*="_label"]')?.textContent !== (entry.label ?? entry.id)
           || (node.getAttribute('aria-current') === 'true' && entry.id !== current)) { valid = false; return }
-        if (node === row) match = { parentSessionId: parent, childSessionId: entry.id, mode: entry.mode }
+        // 0.2.1-rc.2：目录条目的 mode 新增 'external'（外部创建的子代理任务）。它不是 durable 子代理地址
+        // （SubagentAddress.mode 不含 'external'，上游 manager/service 均显式跳过它），但仍是一个真实会话 id
+        // ⇒ 以纯 SessionId 打开，不构造 parent+mode 地址。
+        if (node === row) match = entry.mode === 'external'
+          ? entry.id
+          : { parentSessionId: parent, childSessionId: entry.id, mode: entry.mode }
         if (node.getAttribute('aria-expanded') === 'true') walk(entry.id, depth + 1)
         if (!valid) return
       }

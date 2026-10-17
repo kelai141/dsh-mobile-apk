@@ -11,7 +11,7 @@
 | bzip2 | 1.0.8-8 | BSD-2-Clause | [termux-packages/bzip2](https://github.com/termux/termux-packages/tree/master/packages/bzip2) |
 | ca-certificates | 1:2026.09.25 | MPL-2.0 | [termux-packages/ca-certificates](https://github.com/termux/termux-packages/tree/master/packages/ca-certificates) |
 | coreutils | 9.12 | GPL-3.0+ | [termux-packages/coreutils](https://github.com/termux/termux-packages/tree/master/packages/coreutils) |
-| curl | 8.22.0 | MIT | [termux-packages/curl](https://github.com/termux/termux-packages/tree/master/packages/curl) |
+| curl | 8.23.0 | MIT | [termux-packages/curl](https://github.com/termux/termux-packages/tree/master/packages/curl) |
 | dash | 0.5.13.5 | BSD-style (dash) | [termux-packages/dash](https://github.com/termux/termux-packages/tree/master/packages/dash) |
 | dialog | 1.3-20260721-0 | LGPL-2.1+ | [termux-packages/dialog](https://github.com/termux/termux-packages/tree/master/packages/dialog) |
 | diffutils | 3.12-2 | GPL-3.0+ | [termux-packages/diffutils](https://github.com/termux/termux-packages/tree/master/packages/diffutils) |
@@ -35,7 +35,7 @@
 | libcap | 2.78 | GPL-2.0+ | [termux-packages/libcap](https://github.com/termux/termux-packages/tree/master/packages/libcap) |
 | libcap-ng | 2:0.9.6 | LGPL-2.1+ | [termux-packages/libcap-ng](https://github.com/termux/termux-packages/tree/master/packages/libcap-ng) |
 | libcrypt | 0.2-6 | LGPL-2.1+ | [termux-packages/libcrypt](https://github.com/termux/termux-packages/tree/master/packages/libcrypt) |
-| libcurl | 8.22.0 | MIT | [termux-packages/libcurl](https://github.com/termux/termux-packages/tree/master/packages/libcurl) |
+| libcurl | 8.23.0 | MIT | [termux-packages/libcurl](https://github.com/termux/termux-packages/tree/master/packages/libcurl) |
 | libexpat | 2.9.0 | MIT | [termux-packages/libexpat](https://github.com/termux/termux-packages/tree/master/packages/libexpat) |
 | libffi | 3.8.0 | MIT | [termux-packages/libffi](https://github.com/termux/termux-packages/tree/master/packages/libffi) |
 | libgmp | 6.3.0-2 | GPL-2.0+/GPL-3.0+/LGPL-3.0+ | [termux-packages/libgmp](https://github.com/termux/termux-packages/tree/master/packages/libgmp) |
@@ -56,7 +56,7 @@
 | openssl | 1:3.6.5 | Apache-2.0 | [termux-packages/openssl](https://github.com/termux/termux-packages/tree/master/packages/openssl) |
 | openssl-tool | 1:3.6.5 | Apache-2.0 | [termux-packages/openssl-tool](https://github.com/termux/termux-packages/tree/master/packages/openssl-tool) |
 | pcre2 | 10.49 | BSD-3-Clause | [termux-packages/pcre2](https://github.com/termux/termux-packages/tree/master/packages/pcre2) |
-| perl | 5.42.2 | GPL-1.0+ / Artistic-1.0 | [termux-packages/perl](https://github.com/termux/termux-packages/tree/master/packages/perl) |
+| perl | 5.44.0 | GPL-1.0+ / Artistic-1.0 | [termux-packages/perl](https://github.com/termux/termux-packages/tree/master/packages/perl) |
 | procps | 4.0.7-2 | GPL-2.0+ | [termux-packages/procps](https://github.com/termux/termux-packages/tree/master/packages/procps) |
 | psmisc | 23.7-1 | GPL-2.0+ | [termux-packages/psmisc](https://github.com/termux/termux-packages/tree/master/packages/psmisc) |
 | python | 3.14.6-1 | PSF-2.0 | [termux-packages/python](https://github.com/termux/termux-packages/tree/master/packages/python) |
@@ -75,7 +75,7 @@
 | termux-keyring | 3.14 | MIT | [termux-packages/termux-keyring](https://github.com/termux/termux-packages/tree/master/packages/termux-keyring) |
 | termux-tools | 1.46.0+really1.45.0-1 | GPL-3.0+ | [termux-packages/termux-tools](https://github.com/termux/termux-packages/tree/master/packages/termux-tools) |
 | util-linux | 2.42.4 | GPL-2.0+ | [termux-packages/util-linux](https://github.com/termux/termux-packages/tree/master/packages/util-linux) |
-| vim | 9.2.1150-2 | Vim (GPL-compatible, charityware) | [termux-packages/vim](https://github.com/termux/termux-packages/tree/master/packages/vim) |
+| vim | 9.2.1200 | Vim (GPL-compatible, charityware) | [termux-packages/vim](https://github.com/termux/termux-packages/tree/master/packages/vim) |
 | xz-utils | 5.8.4 | PD + LGPL-2.1+ + GPL-2.0+ | [termux-packages/xz-utils](https://github.com/termux/termux-packages/tree/master/packages/xz-utils) |
 | zip | 3.0-7 | Info-ZIP License | [termux-packages/zip](https://github.com/termux/termux-packages/tree/master/packages/zip) |
 | zlib | 1.3.2 | Zlib | [termux-packages/zlib](https://github.com/termux/termux-packages/tree/master/packages/zlib) |

@@ -1,8 +1,0 @@
-Android 源码构建右栏产物捕获
-
-设备：emulator-5556、emulator-5562。两台设备的 lib/client.js 字节完全相同。
-命令：adb -s <serial> exec-out run-as com.dsharnessmobile.shell cat files/usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar-right/lib/client.js
-包身份：同目录 package.json，@deepseek-ai/dsh-client-ui-sidebar-right@0.2.0-rc.2。
-Get-FileHash SHA256：b5070e3eb1fe36424cc94610a7a3d3f037573cdc665781577d227fd12edc2b30。
-快照前置：两台设备均有 files/.snapshot-fingerprint，且 files/.snapshot-transaction 均不存在。
-该字节是在 B1 补丁写入前捕获；此前锚点拒绝未对设备写入。

@@ -1,6 +1,8 @@
 # RUNTIME-PATCHES.md — assets/patched/ 运行时补丁登记
 
-> 职责：设备端完整覆盖资产与构建期补丁登记。活动构建期清单由 `scripts/patches/registry.json` 生成；运行 `node scripts/check-maintenance-docs.mjs --write` 更新，省略 `--write` 检查。§2 与历史重出章节的尺寸/hash 是旧批次记录；当前产物同源性与验收状态见对应版本阶段交接和最终产物证据。
+> 职责：设备端完整覆盖资产与构建期补丁登记。活动构建期清单由 `scripts/patches/registry.json` 生成；运行 `node scripts/check-maintenance-docs.mjs --write` 更新，省略 `--write` 检查。§2 的尺寸/hash 已按 2026-10-17 实测更新（夹具复算 + 现产物对账）；历史重出章节里的数字是当时批次记录；当前产物同源性与验收状态见对应版本阶段交接和最终产物证据。
+>
+> 当前适配目标：官方 `dsh-v0.2.1-rc.2` / commit `687f282e8625c6b8d11ff58211a90524be2e4317`（预发布，不称 stable）。引擎换代批次的补丁面变更、夹具换代与运行时资产实测见 §7.7。
 
 ## 1. 机制（EngineManager.kt）
 
@@ -14,20 +16,20 @@
 
 ## 2. 文件逐项登记
 
-目标根为快照内usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai；下表尺寸来自明确历史批次。注册入口现在为applyRuntimePatches，旧注册行号不再作为当前锚点。
+目标根为快照内usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai；下表尺寸/hash 为 2026-10-17 实测值（0.2.1-rc.2 夹具经对应补丁链复算，并与 `assets/patched/` 现产物逐字节对账）；历史批次数字保留在 §7.4/7.5/7.7。注册入口现在为applyRuntimePatches，旧注册行号不再作为当前锚点。
 
 | asset 文件（字节） | 目标快照路径（注册行） | 状态 | 作用 / 来源线索 |
 |---|---|---|---|
-| attachment-local-index.js（**47,937**，2026-09-24 按 0.1.7-rc.1 快照重建） | dsh-attachment-local/lib/index.js（applyRuntimePatches） | 生效 | 0.13.7 重出（引擎 0.1.5-rc.1）+ 0.14.2 随引擎 0.1.7-rc.1 换代重建（§7.4）+ 0.14.0 review C1：**与构建期 `attach-durable-F2` 逐字节同源**（F2 已扩为三件套：祖先 fsync 守卫 + 两处 link(2)→rename 回退 + unlink ENOENT 容忍）；内含图片归一化 2048 降采样上限（`DEFAULT_NORMALIZED_IMAGE_MAX_DIMENSION = 2048`）。补丁判定走内容指纹而非内嵌标记 |
-| session-persistence-jsonl-index.js（**145,247**，2026-09-24 按 0.1.7-rc.1 快照重建） | dsh-session-persistence-jsonl/lib/index.js（applyRuntimePatches） | 生效 | 0.13.7 重出 + 0.13.8-b 追加 F5/F7（与构建期同源）+ 0.14.2 随引擎 0.1.7-rc.1 换代重建（§7.4）：两处 link(2) 站点带 EACCES/EPERM/ENOTSUP → rename 回退，发布独占语义由模块级 `dshMobileClaimExclusive/ReleaseClaim` 恢复（O_EXCL 占位 + 失败回收）。**0.14.0 review C1 实锤**：v0.14.0-preview 资产曾是「内联占位 + helper 占位」双占位坏版本（恒 EEXIST 恒 false，旧会话迁移永久失败并留 0 字节毒文件）——修复 = F7 补丁增加 v1→v2 收敛分支 + 本资产从快照重出 + 门禁升级为逐字节比对。行为回归 `scripts/patches/tests/{spj-migration-link-f5,publish-exclusive-reclaim}.test.mjs`（后者支持 `--asset` 直测资产本体） |
-| fs-local-index.js（**47,793**，2026-09-26 由出厂态 fixture 经补丁链重建：F8 + B） | dsh-fs-local/lib/index.js（applyRuntimePatches） | 生效 | **0.14.1 重新入册**（apk issue #246）：`writeFileAtomic` 的 `createIfAbsent` 发布站点是全包唯一的 `link(2)` 调用，且该分支失败即抛、无任何回退 → Android 应用域恒拒 hardlink ⇒ 真机上 `write` 工具建不了任何新文件（覆盖已存在文件走 `rename`，正常）。与构建期 `fs-local-link-F8` 逐字节同源。**本资产是 0.13.3 退役资产的重新入册**——当年退役理由「上游 0.1.2-rc.1 已原生覆盖 rename 回退」对 `createIfAbsent` 站点不成立（0.1.5-rc.1 实测：全文仅此一处 `link` 调用，`EACCES`/`EPERM`/`ENOTSUP` 无任何处理）。补丁判定走内容指纹而非内嵌标记。行为回归 `scripts/patches/tests/fs-local-link-f8.test.mjs`（支持 `--asset` 直测资产本体） | **0.14.2 追加 `fs-local-digest-guard-B`**（版本守卫摘要 CAS 兜底）：资产必须同时含 F8+B 两个 marker，否则引擎启动时会把 B 覆盖回「只有 F8」的旧字节 ⇒ 真机上 B 等于没修（实测踩到：旧资产 43,405 B 与当时快照逐字节一致，门禁因快照陈旧而不响）。重建方式 = 取出厂态 fixture 按 registry 顺序施加该文件全部 engine 补丁（产物 47,793 B），**禁止手改**；门禁见 §7.5 |
+| attachment-local-index.js（**47,937**；sha256 `7ffe07dc8bed38a858f85c7f6df1fa41214cc16c634afbd989e07bf60cb31dbd`；2026-09-24 按 0.1.7-rc.1 快照重建；2026-10-17 实测 0.2.1-rc.2 夹具经 `attach-durable-F2` 复算与该资产逐字节一致） | dsh-attachment-local/lib/index.js（applyRuntimePatches） | 生效 | 0.13.7 重出（引擎 0.1.5-rc.1）+ 0.14.2 随引擎 0.1.7-rc.1 换代重建（§7.4）+ 0.14.0 review C1：**与构建期 `attach-durable-F2` 逐字节同源**（F2 已扩为三件套：祖先 fsync 守卫 + 两处 link(2)→rename 回退 + unlink ENOENT 容忍）；内含图片归一化 2048 降采样上限（`DEFAULT_NORMALIZED_IMAGE_MAX_DIMENSION = 2048`）。补丁判定走内容指纹而非内嵌标记 |
+| session-persistence-jsonl-index.js（**145,247**；sha256 `3a0844c1d3b2025c580da7dbd30353fac319c551187b0bfa03f25182abe57355`；2026-09-24 按 0.1.7-rc.1 快照重建。**2026-10-17 实测：现资产仍是上一代产物**——0.1.7-rc.2 与 0.2.0-rc.2 夹具经 F5+F7 产出同一字节；0.2.1-rc.2 夹具复算为 **149,673 B / sha256 `b9ac5744c96a35c881ccc0d1b70850b012245dc54f07f2e543ad3632784a0981`**，新快照出炉后必须重出，详见 §7.7） | dsh-session-persistence-jsonl/lib/index.js（applyRuntimePatches） | 生效 | 0.13.7 重出 + 0.13.8-b 追加 F5/F7（与构建期同源）+ 0.14.2 随引擎 0.1.7-rc.1 换代重建（§7.4）：两处 link(2) 站点带 EACCES/EPERM/ENOTSUP → rename 回退，发布独占语义由模块级 `dshMobileClaimExclusive/ReleaseClaim` 恢复（O_EXCL 占位 + 失败回收）。**0.14.0 review C1 实锤**：v0.14.0-preview 资产曾是「内联占位 + helper 占位」双占位坏版本（恒 EEXIST 恒 false，旧会话迁移永久失败并留 0 字节毒文件）——修复 = F7 补丁增加 v1→v2 收敛分支 + 本资产从快照重出 + 门禁升级为逐字节比对。行为回归 `scripts/patches/tests/{spj-migration-link-f5,publish-exclusive-reclaim}.test.mjs`（后者支持 `--asset` 直测资产本体） |
+| fs-local-index.js（**47,826**；sha256 `4b1daab4763d47c0936886e23767f485a5aee54cc66ecbcf0588f047de6f5408`；2026-09-26 由出厂态 fixture 经补丁链重建：F8 + B。0.14.2 批记录为 47,793 B，当前补丁实现（F8 的 ENOSYS 分支 + B）产出 47,826 B；2026-10-17 实测 0.2.1-rc.2 夹具复算与该资产逐字节一致） | dsh-fs-local/lib/index.js（applyRuntimePatches） | 生效 | **0.14.1 重新入册**（apk issue #246）：`writeFileAtomic` 的 `createIfAbsent` 发布站点是全包唯一的 `link(2)` 调用，且该分支失败即抛、无任何回退 → Android 应用域恒拒 hardlink ⇒ 真机上 `write` 工具建不了任何新文件（覆盖已存在文件走 `rename`，正常）。与构建期 `fs-local-link-F8` 逐字节同源。**本资产是 0.13.3 退役资产的重新入册**——当年退役理由「上游 0.1.2-rc.1 已原生覆盖 rename 回退」对 `createIfAbsent` 站点不成立（0.1.5-rc.1 实测：全文仅此一处 `link` 调用，`EACCES`/`EPERM`/`ENOTSUP` 无任何处理）。补丁判定走内容指纹而非内嵌标记。行为回归 `scripts/patches/tests/fs-local-link-f8.test.mjs`（支持 `--asset` 直测资产本体） | **0.14.2 追加 `fs-local-digest-guard-B`**（版本守卫摘要 CAS 兜底）：资产必须同时含 F8+B 两个 marker，否则引擎启动时会把 B 覆盖回「只有 F8」的旧字节 ⇒ 真机上 B 等于没修（实测踩到：旧资产 43,405 B 与当时快照逐字节一致，门禁因快照陈旧而不响）。重建方式 = 取出厂态 fixture 按 registry 顺序施加该文件全部 engine 补丁（0.14.2 批产物 47,793 B；当前实现产出 47,826 B），**禁止手改**；门禁见 §7.5 |
 
 已退役资产（不在 `assets/patched/`，`applyAssetPatch` 注册行同步移除，勿再引用）：`primitives-index.js`、`fs-local-index.js`（0.13.3 批退役，d377abc——link(2) 回退族改由构建期补丁承担；**0.14.1 已重新入册，见 §2 的 fs-local-index.js 行与 §7.1 的 `fs-local-link-F8`**——退役时该回退并未真正落到构建期补丁，`createIfAbsent` 站点成了覆盖空洞）；`web-frontend-index.html`（0.13.7fx-1 退役，§8）；`llm-deepseek-index.js`（rc.2 起遗留死资产，随重出批删除）。
 
 ## 3. 维护约定（硬约束）
 
 1. **全量替换非 delta**：asset 必须是目标文件的完整拷贝（在原文件基础上改后整体入库）；不允许只存 diff 片段或手写残缺文件——applyAssetPatch 直接 writeBytes 整写，半截文件 = 引擎启动即崩。
-2. **更新需随上游引擎对齐**：升级0.2.0-rc.2必须从对应原始文件重出三条资产，并施加该文件全部当前补丁，再与最终双ABI快照逐字节/全部marker或exact verifier对账；不能叠加旧asset。§7.4/7.5是历史证据，不是本轮已完成。
+2. **更新需随上游引擎对齐**：引擎换代必须从对应原始产物重出三条资产，并施加该文件全部当前补丁，再与最终双ABI快照逐字节/全部marker或exact verifier对账；不能叠加旧asset。**0.14.8（引擎 0.2.1-rc.2）实测状态**：`attachment-local-index.js`（47,937 B）与 `fs-local-index.js`（47,826 B）已能由 0.2.1-rc.2 夹具经对应补丁链逐字节复现；`session-persistence-jsonl-index.js` 现资产仍为上一代产物（145,247 B），0.2.1-rc.2 夹具复算为 149,673 B ⇒ 新快照出炉后必须重出。§7.4/7.5/7.7 是批次证据，不能代替「本轮已完成」的实测。
 3. **禁止随手重生成**：内容指纹机制意味着 asset 与目标「看起来差不多但字节不同」就会触发重写——不得用本地构建产物/不同 minify 形态随手替换 asset；改动须走完整链路验证（引擎起得来、市场/会话/附件功能实测）。
 4. **新增补丁**：applyAssetPatch 注册新条目 + 本表登记；优先评估上游新版本是否已修复（能不补则不补）。
 
@@ -132,7 +134,7 @@
 
 ### 7.1 构建期引擎补丁历史与实现说明（活动状态见 §6.1）
 
-- **sidebar-bubble-reorder-B1（2026-10-17）**：`dsh-client-ui-sidebar-right/lib/client.js` 增加 `reorderIn(session, tab, before)`。复用原 store 的 `placeTab`，恢复原活动标签；仅操作当前挂载会话的 dock 同分栏，拒绝失效会话、浮动页、跨分栏与无效/无变化目标。补丁接受本代 npm 发布包和 Android 源码构建的两条精确锚点；未知或部分损坏字节拒绝写入。真实夹具、幂等、损坏输入和 runner 集成测试见 `scripts/patches/tests/sidebar-bubble-reorder.test.mjs`。
+- **sidebar-bubble-reorder-B1（2026-10-17）**：`dsh-client-ui-sidebar-right/lib/client.js` 增加 `reorderIn(session, tab, before)`。复用原 store 的 `placeTab`，恢复原活动标签；仅操作当前挂载会话的 dock 同分栏，拒绝失效会话、浮动页、跨分栏与无效/无变化目标。补丁接受本代 npm 发布包锚点；Android 源码构建产物夹具本轮退役（见 §7.7），该路径的回归用例显式 skip 并打印缺席原因；未知或部分损坏字节拒绝写入。真实夹具、幂等、损坏输入和 runner 集成测试见 `scripts/patches/tests/sidebar-bubble-reorder.test.mjs`。
 
 - **reference-drill-F6（2026-09-11，apk #163）**：`dsh-client-ui-reference/lib/client.js` 的 `onPick` 判定由
   `fileKind === "directory" && action === "drill"` 改为 `... || document.documentElement.hasAttribute("data-dsh-mobile-form")`——
@@ -145,30 +147,30 @@
 | `flock-android-F3` | `node-addon-system/lib/flock.js` | 0.1.5 新增的会话写锁只有 darwin/linux 预编译 → Android 上 `ERR_FLOCK_UNSUPPORTED_PLATFORM` 让整树 boot 失败；按上游 browser-worker 先例 stub 为立即成功（单进程宿主）+ 一次性告警 |
 | ~~`atomic-stale-lock-F4`~~（已退役） | `dsh-atomic-write/lib/index.js` | 历史孤儿锁回收补丁已由上游吸收；retired 登记继续供应真产物夹具，`scripts/patches/tests/atomic-stale-lock.test.mjs` 验证上游回收行为。 |
 | `fs-local-link-F8` | `dsh-fs-local/lib/index.js` | 文件写工具 `createIfAbsent` 发布的 `link(2)` 回退（apk issue #246）：Android 应用域恒拒 hardlink ⇒ `write` 工具建不了新文件。`EACCES`/`EPERM`/`ENOTSUP` 时改用 **O_EXCL 占位 + rename** 等价实现 no-replace（**不能裸用 rename**——那会静默覆盖并发创建者的文件，丢掉 `link` 的独占语义）：输家仍得 `EEXIST` 与同一 `cannot overwrite existing` 拒绝文案；`rename` 失败回收占位，防 0 字节残留让之后每次创建都输掉占位竞争。运行时 asset `fs-local-index.js` 与之**同源**。行为回归 `node scripts/patches/tests/fs-local-link-f8.test.mjs`（fixture = 0.1.5-rc.1 产物） |
-| `spj-migration-link-F5` | `dsh-session-persistence-jsonl/lib/index.js` | 会话迁移发布（publishCurrentExclusive，v0→v3 必经）与 materialize 两处 link(2) 在 Android SELinux 拒 hardlink（EACCES/EPERM/ENOTSUP）时改用模块顶层 rename（apk #154）；运行时 asset `session-persistence-jsonl-index.js` 与之**同源**。行为回归 `node scripts/patches/tests/spj-migration-link-f5.test.mjs`（fixture = 0.1.5-rc.1 产物） |
-| `publish-exclusive-F7` | `dsh-session-persistence-jsonl/lib/index.js` | 发布独占语义找回：F5 的 rename 回退会**静默替换**已存在目标 → O_EXCL 原子占位抽成模块级小函数，F5 两站共用（publish 站输家 return false；materialize 站输家抛 EEXIST），rename 失败一律 unlink 回收占位（防 0 字节残留让之后每次发布都输掉竞争）。依赖 F5，行为回归 `node scripts/patches/tests/publish-exclusive-reclaim.test.mjs`（apk #170 / FX-207.1+207.2） |
+| `spj-migration-link-F5` | `dsh-session-persistence-jsonl/lib/index.js` | 会话迁移发布（publishCurrentExclusive，v0→v3 必经）与 materialize 两处 link(2) 在 Android SELinux 拒 hardlink（EACCES/EPERM/ENOTSUP）时改用模块顶层 rename（apk #154）；运行时 asset `session-persistence-jsonl-index.js` 与之**同源**。行为回归 `node scripts/patches/tests/spj-migration-link-f5.test.mjs`（fixture 取同代目录，如 `dsh-session-persistence-jsonl-0.2.1-rc.2`）。0.14.8：上游拆模块与 `internals.fs.link(...)` 改写后，本补丁在 0.2.1-rc.2 产物上仍 applied（§7.7） |
+| `publish-exclusive-F7` | `dsh-session-persistence-jsonl/lib/index.js` | 发布独占语义找回：F5 的 rename 回退会**静默替换**已存在目标 → O_EXCL 原子占位抽成模块级小函数，F5 两站共用（publish 站输家 return false；materialize 站输家抛 EEXIST），rename 失败一律 unlink 回收占位（防 0 字节残留让之后每次发布都输掉竞争）。依赖 F5，行为回归 `node scripts/patches/tests/publish-exclusive-reclaim.test.mjs`（apk #170 / FX-207.1+207.2）。0.14.8：与 F5 同批在新产物上 applied 2/2；夹具换代后该文件产物变为 149,673 B（§7.7） |
 | ~~`boot-pending-G1`~~（0.14.2 撤销，不在册） | `dsh-app-boot/lib/index.js` | 非官方包 pending 降级为告警并继续启动（第三方插件 inject 了 client-only 服务 → 永久 pending → 整树 boot 失败）；FAILED 与官方包 pending 仍致命（0.13.5 W1b / apk #126 P3）。**0.14.2 追 0.1.7-rc.1 时撤销**：`requiredStartupEntryIds` 与本方行面无交集（要修的场景不存在），且 `const failures = [];` 锚点会误匹配 `auditStartupEntries` 的同名声明——维持「严禁重锚」；boot 期容错唯一真源改为 `boot-third-party-isolation-G3` |
 | `pi-toolcall-G2` | `@earendil-works/pi-ai/dist/api/openai-completions.js` | 流式 tool_call 空名止血：出口丢弃空名调用（连其 tool result）+ arguments 保证非空；累加器把缺 index/id 的续块合并进唯一在途调用（0.13.5 W2 / apk #124） |
 | ~~`perf-patch-reload-N1`~~（0.14.2 撤销，不在册） | `dsh-app-boot/lib/index.js` | 性能 A1：web 模板 `patchReload` 默认 live→startup（Android 无 live reload 收益，坑 19），并把 installation-owned 当前元组下**已显式写入**的旧默认 live 归一化（上游只在键缺失时写回模板默认，存量升级永不归一化）。**0.14.2 追 0.1.7-rc.1 时撤销**：rc.1 全仓 `patchReload` 零命中（源码 + 产物），reload 链改为常驻但空转的 `dsh-client-hmr`——机制整条消失，补丁无面可打；写半边 `scripts/lib/profile-seed.mjs` 同步由「seed 死键」改为「剥死键 + 断言 bundles 非空」 |
 | `arkweb-resource-protocol-H1` | `dsh-client-resources/lib/client.js` | ArkWeb（HarmonyOS）令 `dsh-resource://<type>/...` 丢 hostname → 上游 `protocolOf()` 取不到 file provider、文件预览报资源服务不可用（apk #221）；补丁按地址文法局部恢复 type，标准 URL 与其他 scheme 行为不变。回归 `node scripts/patches/tests/arkweb-resource-protocol.test.mjs`；**仍需真实 ArkWeb + Chromium 设备验收** |
 | `external-draft-conversation-seam-J1` | `dsh-client-ui-conversation/lib/client.js` | 外部文件草稿：向 ConversationController 补受控 `addFiles(sessionId, files)` seam，复用既有 `createDrafts` / InputHub `shell.addAttachments` / refusal release——不创建第二条上传路径、不自动发送、路径不进页面/模型。回归 `node scripts/patches/tests/external-draft-conversation-seam.test.mjs` |
 | `perf-compile-cache-flush-N2` | `dsh/lib/bin.js` | 启动性能：Node 只在正常退出写 `NODE_COMPILE_CACHE`，而壳侧停引擎是有界宽限的 SIGTERM→SIGKILL、系统可整进程回收 → 换树后的新条目永远写不进去（设备实测 09-12 23:07 后零新增）。入口周期 flush（40s 首刷 + 5min）+ `exit` 兜底；不注册信号处理，不改任何命令退出语义。回归 `node scripts/patches/tests/compile-cache-flush-n2.test.mjs` |
-| `narb-android-N1` | `node-addon-require-builtin/lib/index.js` | Android 无预编译 `node-addon-require-builtin` 绑定（npm 无 `-android-x64` 产物，上游 support-matrix 明写 has no published platform package）：0.1.7-rc.1 的 `dsh-app-boot` 新增该依赖（0.1.5 夹具零命中），real 设备 `boot-fail.log` 连记 4 轮 `host preparation failed / No usable native binding found for node-addon-require-builtin-android-x64` ⇒ 引擎 boot 期硬崩。修法：`createEntryApi` 顶层调用包 try/catch（失败即 `api = undefined` + 一次性告警），三个导出函数在 `api` 缺席时回落 `require(moduleId)`——壳侧本就以 `--expose-internals` 起 node（EngineManager.kt:1036 argv 第二项），该 flag 恰好暴露 rc.1 `internalModules()` 需要的五个 `internal/modules/*`，与内置模块同一实现，不是「假装成功」。行为回归 `node scripts/patches/tests/narb-native-fallback-n1.test.mjs`（11 项，含 `--expose-internals` 子进程真跑回落） |
+| `narb-android-N1` | `node-addon-require-builtin/lib/index.js` | Android 无预编译 `node-addon-require-builtin` 绑定（npm 无 `-android-x64` 产物，上游 support-matrix 明写 has no published platform package）：0.1.7-rc.1 的 `dsh-app-boot` 新增该依赖（0.1.5 夹具零命中），real 设备 `boot-fail.log` 连记 4 轮 `host preparation failed / No usable native binding found for node-addon-require-builtin-android-x64` ⇒ 引擎 boot 期硬崩。修法：`createEntryApi` 顶层调用包 try/catch（失败即 `api = undefined` + 一次性告警），三个导出函数在 `api` 缺席时回落 `require(moduleId)`——壳侧本就以 `--expose-internals` 起 node（EngineManager.kt:1036 argv 第二项），该 flag 恰好暴露 rc.1 `internalModules()` 需要的五个 `internal/modules/*`，与内置模块同一实现，不是「假装成功」。行为回归 `node scripts/patches/tests/narb-native-fallback-n1.test.mjs`（11 项，含 `--expose-internals` 子进程真跑回落）。0.14.8：依赖升至 `node-addon-require-builtin` **0.1.9**，同一回落形态在 0.1.9 产物上复核通过（§7.7） |
 | `combo-probe-P1` | `dsh-client-modules/lib/index.js` | 把 compose 探针送进产品内，并在既有 Loader settle barrier 批量发布启动 graph：构造器仍产生同 shape/rev 的空 graph，启动期 Fiber dirty 合并，在 connection ready continuation 前 compose 完整图；构造时已有 rows 最多先同步一次、settle 再一次（≤2），settle 后运行期 add/remove 与 HMR 保持即时语义。只主线程安装（worker 的 calls=0 TOTAL 不得冒充真读数）；每次 compose 返回时立即输出累计 TOTAL，从同一 C4 monitor 读取当次 p99/样本数，保持壳 tail 与 last-row 解析时序。phase 独立使用四阶段 allowlist Map 聚合、固定 250ms unref timer 收口，后续事件不重置 deadline；字段区分 wall-clock 耗时、observations 与 forwardedCallbacks。phase 不改变 TOTAL/C4 采样窗口；不新增快照成员。回归 `scripts/patches/tests/combo-probe-p1.test.mjs` 覆盖空图、分批 activation、ready 顺序、compose/TOTAL 即时对应、phase 边界与固定 deadline、运行期/HMR。壳 `LogCollector` 另缓存 LISTEN 前读数并在 markListen 关联，用于避免 C6 -1。完整二进制设备预算仍须真实复跑。`provenance` 见 `scripts/patches/registry.json` 的 `combo-probe-P1` |
 | `client-registry-scan-C4` | `dsh-client-modules/lib/index.js` | flush 内按名称索引 Loader rows，错误回调后失效；复用 nearestPackage 本次已解析 manifest；G1 仅让未禁用的 gateway 及其两个 inject 依赖既有行在 host fiber 未就绪时也提供 browser bundle（四个 controller 保留，详见坑位 288）。保留构造同步聚合失败、settle/Web ready 顺序、运行期 add/remove 与 HMR；回归 `client-registry-scan-c4.test.mjs`、联合 `combo-probe-p1.test.mjs`。 |
 | `typert-registry-scan-C4` | `dsh-typert-loader/lib/index.js` | 同步 flush 单次索引已挂接名称，错误回调后失效；异步 manifest 完成后继续使用 live Loader 判定，防消失的条目误注册。显式包、激活失败及运行期撤销保留；回归 `typert-registry-scan-c4.test.mjs`。 |
 | `boot-third-party-isolation-G3` | `dsh-app-boot/lib/index.js` | 第三方插件 boot 期失败隔离：`boot()` 经隔离式挂载器挂 root include，失败条目若属**用户自装**（非 `@deepseek-ai/*` / `@dsh-android/*` / 出货具名插件）则加 `disabled:true` 后重试并点名列出被跳过的插件；官方/出厂插件失败、不可识别失败、或超过上限 8 个仍响亮失败。真因：用户自装插件 import 期抛错在 `mountRootInclude` 就抛出，`boot-pending-G1` 的锚点 `assertEntriesActivated` 结构上不可达。真源见 `scripts/patches/registry.json` 的 `boot-third-party-isolation-G3`；回归 `node scripts/patches/tests/boot-third-party-isolation-g3.test.mjs` |
 | `file-upload-restart-R1` | `dsh-client-file-upload/lib/index.js` | Agent resolver 单槽注册改为**同槽覆盖**（2026-09-28 模拟器 5556 实锤）：cordis `Fiber._reload` 的顺序是「先执行新实例 body、再 `_unload()` 释放旧 effect」，故 session-controller 因 `agent-default-model` 条目被改写而重启时，新 `SessionController` 构造里的 `ctx.effect(() => ctx.fileUploads.registerAgentResolver(...))` 撞上上游的 already-registered 守卫 → 新 fiber 判 FAILED、服务永久缺席（切一次默认模型即触发，客户端恒报 `session/control: active Service "sessionController" is unavailable`）。修法只去掉守卫、保留身份判据的 disposer（旧 fiber 的 disposer 不会清掉新注册）；仍只有一个槽。真源见 `scripts/patches/registry.json` 的 `file-upload-restart-R1` |
-| `mimo-thinking-toggle-056` | `dsh-llm-pi-ai/lib/index.js` + `@earendil-works/pi-ai/dist/api/openai-completions.js` | Issue #56：开放显式 `thinkingFormat=mimo`；仅精确官方 MiMo profile 或用户显式 compat 生成 off/low 二态映射，选择器显示“关闭思考/开启思考”，默认开启。Completions serializer 将状态编码为 `thinking.type=disabled|enabled`，不发送 `reasoning_effort`；保留 assistant 多轮 `reasoning_content`。固定 DSH 0.2.0-rc.2 / pi-ai 0.87.1 锚点；行为回归 `scripts/patches/tests/mimo-thinking-toggle-056.test.mjs`。 |
+| `mimo-thinking-toggle-056` | `dsh-llm-pi-ai/lib/index.js` + `@earendil-works/pi-ai/dist/api/openai-completions.js` | Issue #56：开放显式 `thinkingFormat=mimo`；仅精确官方 MiMo profile 或用户显式 compat 生成 off/low 二态映射，选择器显示“关闭思考/开启思考”，默认开启。Completions serializer 将状态编码为 `thinking.type=disabled|enabled`，不发送 `reasoning_effort`；保留 assistant 多轮 `reasoning_content`。固定 DSH 0.2.1-rc.2 / pi-ai 1.1.0 锚点（版本守卫：`dsh-llm-pi-ai@0.2.1-rc.2` + `pi-ai@1.1.0`，不符即抛）；行为回归 `scripts/patches/tests/mimo-thinking-toggle-056.test.mjs`。 |
 
 
 ### 7.1a 0.14.3 新增/变更补丁与构建钩子（源码在场，未执行）
 
 | 补丁/文件 | 真实目标与职责 | 登记 / 回归状态 |
 |---|---|---|
-| [ptc-android-native-A1](<dsh-mobile-apk/scripts/patches/ptc-android-native-A1.mjs>) | dsh-ptc-runtime-node@0.2.0-rc.2的host lib/index.js及child lib/process.js；Android trusted linker64→TERMUX__PREFIX/bin/node前缀，heap仅本次NODE_OPTIONS，host/child精确native allowlist，model JS env仍null-prototype空对象 | registry/apply-patches已接A1并requires L1；exact双文件verifier及additionalTargets/targetMarkers在场。source-copy fixture与 [A1测试](<dsh-mobile-apk/scripts/patches/tests/ptc-android-native-A1.test.mjs>) 已写、未运行。 |
-| [pi-upstream-streaming-020](<dsh-mobile-apk/scripts/patches/pi-upstream-streaming-020.mjs>) | raw pi-ai@0.87.1覆盖会丢官方pnpm patch；精确恢复anthropic-messages、bedrock-converse-stream、mistral-conversations、openai-completions、openai-responses-shared、pi-messages六个dist/api JS | [官方patch副本](<dsh-mobile-apk/scripts/patches/upstream/pi-ai-0.87.1.patch>)固定SHA b9bcce474fb2ac44633dff0fa722816a5bff5451b4575d5874035ea14ba70a4f，完整六文件plan先验证后缓存写，严格上下文、幂等、无fuzzy。G2 requires streaming020。 |
-| ptc-argv-L1 | host heap参数移出argv，经本次NODE_OPTIONS；A1重整launch前缀，不能只保留L1并假称Android已可启动 | registry仍在场，A1 requires L1；旧fixture通过不能证明target0.2双文件通过。 |
+| [ptc-android-native-A1](<dsh-mobile-apk/scripts/patches/ptc-android-native-A1.mjs>) | dsh-ptc-runtime-node@0.2.1-rc.2的host lib/index.js及child lib/process.js；Android trusted linker64→TERMUX__PREFIX/bin/node前缀（0.14.8 已适配上游新 `launch` schema，见 §7.7），heap仅本次NODE_OPTIONS，host/child精确native allowlist，model JS env仍null-prototype空对象 | registry/apply-patches已接A1并requires L1；exact双文件verifier及additionalTargets/targetMarkers在场。source-copy fixture与 [A1测试](<dsh-mobile-apk/scripts/patches/tests/ptc-android-native-A1.test.mjs>) 已写、未运行。 |
+| [pi-upstream-streaming-020](<dsh-mobile-apk/scripts/patches/pi-upstream-streaming-020.mjs>) | raw pi-ai@1.1.0覆盖会丢官方pnpm patch；精确恢复anthropic-messages、bedrock-converse-stream、mistral-conversations、openai-completions、openai-responses-shared、pi-messages六个dist/api JS | [官方patch副本](<dsh-mobile-apk/scripts/patches/upstream/pi-ai-1.1.0.patch>)固定SHA 66eaf960054f10441b93ac3857114e96c1901f6d183713e2f21437b007111644，完整六文件plan先验证后缓存写，严格上下文、幂等、无fuzzy。G2 requires streaming020。 |
+| ptc-argv-L1 | host heap参数移出argv，经本次NODE_OPTIONS；A1重整launch前缀，不能只保留L1并假称Android已可启动 | registry仍在场，A1 requires L1。0.14.8：锚点随上游改为 `this.config.launch.executable`，错误文案指向 `ptc-runtime.launch.executable`，`bootstrapArgs` 第三段参数改为 `this.config.launch`；0.2.1-rc.2 双文件产物上 L1+A1 applied（§7.7）。 |
 | terminal-inspector-android-D1 | dsh-subprocess-local的runner-launch-B2zsQ1Dz（按targetDiscovery发现版本bundle）；createProcessInspector把android归入既有Linux分支，其它平台throw不放宽 | registry在场；版本重锚/最终bundle核实由父构建完成，不推断0.2已验收。 |
 | atomic-stale-lock-F4 | dsh-atomic-write | registry自0.1.7-rc.2已移入retired：上游原生takeOverExitedLock吸收孤儿锁语义；0.14.3仍不施加，历史§7.1行不是当前登记。 |
 
@@ -189,7 +191,7 @@ F3/F4 只影响引擎内部（无 WebView/壳侧定制面），快照固化即�
 
 **F7 资产重出（已完成 2026-09-12）**：F7 进了构建期快照，但
 `session-persistence-jsonl-index.js` 是**每次启动整文件覆盖**的运行时 asset → 不重出就等于没修。
-**当前状态：已重出，138,025 B，sha256 `BDAEF25C049368BB2415D8DADD14A2A2BE8ADB0DECDE0BE59961149415B7CA33`；**
+**该批状态（0.13.8-b 当时）：已重出，138,025 B，sha256 `BDAEF25C049368BB2415D8DADD14A2A2BE8ADB0DECDE0BE59961149415B7CA33`；**（现产物与 0.2.1-rc.2 的对账见 §2 表与 §7.7，勿把本批数字当现行值）
 `node scripts/check-runtime-assets.mjs x86_64 --require` = 核对组合 3 / SKIP=0；asset 内
 `dshMobileClaimExclusive` 3 处（1 定义 + 2 站调用）、`dshMobileReleaseClaim` 2 处、materialize marker 1 处，`node --check` 通过。
 重出前的只读重演记录（留档，防再犯）：
@@ -371,6 +373,58 @@ Android Back关闭后仍在MainActivity，MiMo选择保留。未改100ms预算�
 新APK完成验收。临时CPU/wrapper诊断原件需恢复并核验hash；最终发布必须重新生成快照/全链APK
 并完成集成三层验收。首次constructor TOTAL的样本为0、deferred返回前尚未采到其同步阻塞，因此
 不能把phase wall time直接当C4 p99；更早debounce TOTAL的统计窗口不同，也不能拿来作性能归因。
+
+### 7.7 0.14.8 追上游 0.2.1-rc.2（2026-10-17 实测）
+
+**目标**：官方 `dsh-v0.2.1-rc.2` / commit `687f282e8625c6b8d11ff58211a90524be2e4317`。引擎换代面（包版本全集、pi-ai 1.1.0、profile 行面增删）见协调仓 `docs/0.14.8-UPSTREAM-0.2.1-RC2-DIFF.md`；本节只记补丁面、夹具与运行时资产的实测结果。
+
+**补丁面变更（6 条）**
+
+| 补丁 | 本轮变更 |
+|---|---|
+| `pi-upstream-streaming-020` | 官方补丁文件换为 `scripts/patches/upstream/pi-ai-1.1.0.patch`（4,477 B，sha256 `66eaf960054f10441b93ac3857114e96c1901f6d183713e2f21437b007111644`）；六个 streaming adapter 集合不变（anthropic-messages / bedrock-converse-stream / mistral-conversations / openai-completions / openai-responses-shared / pi-messages）。实现先校验 manifest 为 `@earendil-works/pi-ai@1.1.0` 与补丁 SHA，再严格上下文替换；旧 `pi-ai-0.87.1.patch`（4,469 B，`b9bcce47…`）保留作历史对照 |
+| `ptc-argv-L1` | 锚点从 `this.config.nodeExecutable` 迁到 `this.config.launch.executable`（3 处锚点）；错误文案里的配置键同步改为 `ptc-runtime.launch.executable`；`bootstrapArgs` 第三段参数改为 `this.config.launch`；heap 标志彻底移出 argv，`env.NODE_OPTIONS = heapFlag` 改为每次 spawn 都设置（不再只在 packaged 分支） |
+| `ptc-android-native-A1` | `launchBlock` 改为新 launch schema：`nodeExecutable` → `launch.executable`，`packaged` 判据改为 `this.config.launch.kind === 'embedded'`，argv 直接为 `[...launchPrefix, ...bootstrapArgs(this.ctx.fs, this.config.launch, this.config.maxMessageBytes)]`。`assertChildClearing` 适配上游把清环境体拆到 `environment.ts` 的 `clearProgramEnvironment(state)`：源码面只校验 `clearProgramEnvironment(processState)` 一次调用，产物面（tsdown 内联）仍校验 `STARTUP_ENVIRONMENT_NAMES` 过滤 + `Reflect.deleteProperty(state.env, key)` + `state.env = Object.create(null)`。`assertPolicyGate` 从「恰一处」改为自校准等数：已审阅的 `danger-full-access` 放行判据出现次数必须等于 `this.ctx.sandbox.confine(argv,` 出现次数且两者 > 0（index 现有两条 spawn 路径：一次执行 + 持久 PTC），单点弱化或新增未审阅 spawn 路径都会判红 |
+| `mimo-thinking-toggle-056` | 版本守卫改为 `dsh-llm-pi-ai@0.2.1-rc.2` + `pi-ai@1.1.0`，不符即抛；二态思考开关语义不变 |
+| `narb-android-N1` | `node-addon-require-builtin` 0.1.6 → **0.1.9**（该依赖也是 `dsh-hmr` 的新增依赖）；原形态在 0.1.9 产物上复核通过 |
+| `spj-migration-link-F5` / `publish-exclusive-F7` | 上游把该包拆成多模块（`generation.ts` 承载 `publishCurrentExclusive`）且把 `link` 调用改为 `internals.fs.link(...)`；两条补丁在新产物上仍命中并 applied（探查见下），夹具换代，同文件产物字节随之变化 |
+
+`registry.json` 的 `provenance` 是自由文本，可能与补丁实现不同步；判据以实现代码 + 本节实测为准。
+
+**实测（2026-10-17，本机）**
+
+```powershell
+# stage = 按 fixtures/manifest.json 的 targets 把 20 份 0.2.1-rc.2 夹具铺成引擎树（46 个文件）
+node scripts/patches/apply-patches.mjs <stage> --apply --scope engine   # applied 24/24，exit 0
+node scripts/patches/apply-patches.mjs <stage> --apply --scope engine   # changed=0（幂等）
+node scripts/patches/apply-patches.mjs <stage> --check --scope engine   # 24/24 OK
+```
+
+结论：§6.1 的 24 条 `scope: engine` 补丁在 0.2.1-rc.2 产物上**全部 applied**，没有一条属于「锚点找不到就删」。
+
+**夹具（现数 56 份）**
+
+| 代次 | 份数 | `source` | 说明 |
+|---|---|---|---|
+| 0.1.7-rc.2 | 16 | `superseded` | 历史对照 |
+| 0.2.0-rc.2 | 20 | `superseded` | 上一代 |
+| 0.2.1-rc.2 | 20 | `engine-tgz` | 本代，全套按 npm 发布 tarball 采集 |
+
+- 0.2.1-rc.2 全套采集：`node scripts/probe-engine-anchors.mjs --fixtures`（按 overlay 的包名+版本回读同一批未打补丁产物，不推断、不用 stage 目录）。
+- **退役两份「Android 源码构建产物」夹具**：`dsh-client-ui-sidebar-right-mobile`、`dsh-host-frontend-static-SN16`。原因：夹具必须是**同代真实产物**，而这两份只能在同代 Android 源码构建上用 `--capture-only` 采集；本轮构建链只产出 npm 发布 tarball 链，无法凭空生成同代字节。待源码链 `--capture-only` 从同代源码构建补回后再入册。
+- 连带：`scripts/patches/tests/sidebar-bubble-reorder.test.mjs` 对源码构建那一路改为**显式 skip 并打印缺席原因**——既不让「夹具缺席」冒充被测行为判绿，也不静默略过。
+
+**运行时资产实测（三条）**
+
+| asset | 现产物字节 | sha256 | 与 0.2.1-rc.2 夹具复算 | 结论 |
+|---|---|---|---|---|
+| `attachment-local-index.js` | 47,937 | `7ffe07dc8bed38a858f85c7f6df1fa41214cc16c634afbd989e07bf60cb31dbd` | 逐字节一致 | 无需重出 |
+| `fs-local-index.js` | 47,826 | `4b1daab4763d47c0936886e23767f485a5aee54cc66ecbcf0588f047de6f5408` | 逐字节一致 | §2 旧记 47,793 B 已按实测更正 |
+| `session-persistence-jsonl-index.js` | 145,247 | `3a0844c1d3b2025c580da7dbd30353fac319c551187b0bfa03f25182abe57355` | **不一致**：复算 149,673 B / `b9ac5744…` | **待新快照重出**（现资产仍是上一代产物） |
+
+复算/重出的唯一合法方式（禁止手改资产）：把夹具 `<fixture>/lib/index.js` 放到 stage 里该文件的目标路径，按 registry 顺序施加该文件全部 engine 补丁，逐字节比对 `assets/patched/` 同名文件；随后仍需 `node scripts/check-runtime-assets.mjs x86_64 --require` 与最终快照对账（§7.3 三件套，不因本轮换代放宽）。
+
+**配置联动（跨仓）**：A1/L1 的锚点依赖 profile 侧新 schema——协调仓 `scripts/profile-web.cordis.patch.yml` 的 `- id: ptc-runtime` 已由 `nodeExecutable:` 改为 `launch: { kind: node-script, executable: <快照内包装脚本> }`。补丁与 profile 必须同批落地；只改一侧会让 PTC 行配置失效或锚点失配。
 
 ## 8. 0.13.7fx-1：web-frontend-index.html 退役（2026-09-11）
 

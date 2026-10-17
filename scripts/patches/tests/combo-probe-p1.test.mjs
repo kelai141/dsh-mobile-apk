@@ -5,7 +5,7 @@
 //
 // 本测试守四件事（combo 家族 A3/A4/A5/C3 全部撤销后，P1 是仅存的 combo 侧补丁，且已无前置）：
 //   ① 前置声明与登记表一致（requires 里的 id 都存在，且不牵连已撤销的补丁）；
-//   ② 在**未打补丁的 rc.1 真产物夹具**上可施加、幂等、且 `node --check` 过；
+//   ② 在**未打补丁的当前基线真产物夹具**上可施加、幂等、且 `node --check` 过；
 //   ③ TOTAL 同步输出并保留壳侧/count-compose 的解析契约；
 //   ④ 主线程门：worker 不得成为 TOTAL 的最后一个打印者（0.14.1 的假绿形态）。
 //
@@ -22,7 +22,11 @@ import { versionedFixture } from './lib/fixture.mjs'
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(here, '..', '..', '..')
 const TARGET = 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js'
+// 0.2.1-rc.2 起引擎在构造器里用 createRequire(import.meta.url)('../package.json') 读自身发布身份
+// （graph.release.version），所以夹具必须按 manifest 的多文件集合把 package.json companion 铺到同一
+// 包根；只拷 lib/index.js 会让真产物在构造期 MODULE_NOT_FOUND，而不是测试断言失败。
 const FIXTURE = versionedFixture('dsh-client-modules', 'lib', 'index.js')
+const FIXTURE_PKG = versionedFixture('dsh-client-modules', 'package.json')
 
 const failures = []
 const check = (label, ok, detail) => {
@@ -43,6 +47,7 @@ try {
   const target = join(scratch, TARGET)
   mkdirSync(dirname(target), { recursive: true })
   copyFileSync(FIXTURE, target)
+  copyFileSync(FIXTURE_PKG, join(dirname(target), '..', 'package.json'))
   const pristine = readFileSync(target, 'utf8')
   check('前置：夹具是未打本方补丁的真产物', !pristine.includes('dsh-mobile'))
 
@@ -50,7 +55,7 @@ try {
     [join(repoRoot, 'scripts', 'patches', 'apply-patches.mjs'), scratch, '--apply', '--scope', 'engine',
       '--only', 'combo-probe-P1,client-registry-scan-C4'], { encoding: 'utf8' })
   const first = apply()
-  check('P1 在 rc.1 真产物上施加成功（A4 已于 2026-09-25 退役，不再作为前置）', first.status === 0,
+  check('P1 在当前基线真产物上施加成功（A4 已于 2026-09-25 退役，不再作为前置）', first.status === 0,
     (first.stdout + first.stderr).trim().split('\n').slice(-2).join(' | '))
   const patched = readFileSync(target, 'utf8')
   check('探针标记与打印器在场',
@@ -299,4 +304,4 @@ if (failures.length) {
   console.error(`combo-probe-p1: ${failures.length} 项失败`)
   process.exit(1)
 }
-console.log('combo-probe-p1: 全部检查通过（rc.1 真产物上安装 + 解析契约）')
+console.log('combo-probe-p1: 全部检查通过（当前基线真产物上安装 + 解析契约）')

@@ -175,7 +175,10 @@ function watchStageVisibility(publish: () => void): () => void {
       subtree: true,
       attributes: true,
       // 只盯与可见性相关的属性，避免把每次文本重排都收进来。
-      attributeFilter: ['style', 'class', 'hidden', 'data-sidebar-right-open', 'data-sidebar-right-collapsed'],
+      // data-dsh-popover-open（0.14.8）：三个点弹层展开/收起是 documentElement 上的属性翻转，
+      // 它不改变舞台几何，却**必须**让原生 SurfaceView 让开——原生层在 WebView 之上，
+      // 不藏起来的话弹层会被虚拟屏画面整块盖住（用户实报）。
+      attributeFilter: ['style', 'class', 'hidden', 'data-sidebar-right-open', 'data-sidebar-right-collapsed', 'data-dsh-popover-open'],
     })
   } catch {
     /* document.body 尚未就绪：轮询兜底仍然在 */
@@ -216,10 +219,14 @@ function VdPanel(props: { sessionId?: unknown }): ReactElement {
       // data-rightbar-collapsed 是恒为 true 的常量，不可用——见坑 119/120）。
       const collapsed = document.querySelector('[data-sidebar-right-expand]') !== null
       const hidden = getComputedStyle(stage).display === 'none' || getComputedStyle(stage).visibility === 'hidden'
+      // 覆盖层让位（0.14.8 用户实报）：三个点弹层展开时必须把原生画面藏起来。
+      // 原生 SurfaceView 在 WebView 之上，不藏它的话弹层会被虚拟屏画面整块盖住，
+      // 用户看到的是「点开三个点，结果被一块黑色虚拟屏挡住」。收起后 next publish 自动恢复。
+      const overlapped = document.documentElement.hasAttribute('data-dsh-popover-open')
       nativeBridge()?.vdisplayBounds?.(JSON.stringify({
         left: rect.left, top: rect.top, width: rect.width, height: rect.height,
         viewportWidth: window.innerWidth, viewportHeight: window.innerHeight,
-        visible: !occupiedRef.current && !collapsed && !hidden && snap.state === 'active' &&
+        visible: !occupiedRef.current && !collapsed && !hidden && !overlapped && snap.state === 'active' &&
           rect.width > 1 && rect.height > 1,
         viewerId: VIEWER_ID,
         // 目标屏别名兜底（0.14.0 设备实锤）：`snap.selected` 在面板刚打开 / 状态未拉到 / 该屏刚被

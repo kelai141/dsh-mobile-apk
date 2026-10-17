@@ -1,8 +1,0 @@
-{
-  "kind": "installed-runtime-source-capture",
-  "engine": "0.2.0-rc.2",
-  "package": "@deepseek-ai/dsh-host-frontend-static@0.2.0-rc.2",
-  "capturedFile": "lib/index.js",
-  "sourceSha256": "19bb095c5175bd5dc6532aa97512e2013a132e5073558ba4b059b8ad5b0f19a2",
-  "identityBasis": "The 0.2.0-rc.2 dsh-root fixture pins this package version; SN16 runtime source bytes were captured from the installed module and are retained here without device credentials."
-}

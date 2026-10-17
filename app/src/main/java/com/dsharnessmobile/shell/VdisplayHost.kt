@@ -180,14 +180,23 @@ internal class VdisplayHost(
     // 正确做法：按**内容宽高比**在舞台内尽力放大（用 scale 的最小值保证不溢出、不裁剪），
     // 再在舞台内居中。这是 letterbox 的适配方向——宁可留对称的窄边，也绝不拉伸变形。
     val content = VdisplayController.contentSizeForAlias(bounds.target)
-    val aspect = if (content != null && content.first > 0 && content.second > 0) {
+    val contentAspect = if (content != null && content.first > 0 && content.second > 0) {
       content.first.toDouble() / content.second.toDouble()
     } else {
       stageWidth.toDouble() / stageHeight.toDouble()
     }
-    val fit = minOf(stageWidth.toDouble() / aspect, stageHeight.toDouble())
-    val width = (fit * aspect).toInt().coerceIn(1, (root.width - stageLeft).coerceAtLeast(1))
-    val height = fit.toInt().coerceIn(1, (root.height - stageTop).coerceAtLeast(1))
+    // 等比适配（0.14.8 设备实测修正，用户报「虚拟屏比例不对」）：旧式把宽高比又当宽度基准，
+    // 在「舞台比内容更高」时算出 width < stageWidth 且 height < stageHeight 的双向留边，
+    // 画面缩在中间一条窄带（实测内容 288x640 = 0.45、舞台 344x654 = 0.526：旧式宽 294，
+    // 左右各留 25px，用户看到的就是「内容只占一半、另一半黑」）。
+    // 正确做法：按「宽受限 / 高受限」显式二选一，绝不双向留边。
+    val byWidth = stageWidth.toDouble() / contentAspect
+    val byHeight = stageHeight.toDouble() * contentAspect
+    val useHeight = byWidth > stageHeight
+    val width = (if (useHeight) byHeight else stageWidth.toDouble()).toInt()
+      .coerceIn(1, (root.width - stageLeft).coerceAtLeast(1))
+    val height = (if (useHeight) stageHeight.toDouble() else byWidth).toInt()
+      .coerceIn(1, (root.height - stageTop).coerceAtLeast(1))
     // 居中：把等比后的内容摆在舞台中央（两侧/上下对称留边，而不是全部堆在左侧）。
     val left = stageLeft + (stageWidth - width) / 2
     val top = stageTop + (stageHeight - height) / 2

@@ -837,22 +837,22 @@ const IMPLS = {
     apply: (s) => {
       if (s.includes('dsh-mobile ptc argv heap via NODE_OPTIONS (L1)')) return s
       const OLD_EXEC = [
-        "\t\t\tconst executable = await this.ctx.subprocess.resolveExecutable(this.config.nodeExecutable, void 0, signal);",
+        "\t\t\tconst executable = await this.ctx.subprocess.resolveExecutable(this.config.launch.executable, void 0, signal);",
         "\t\t\tif (settled) return await result.promise;",
       ].join('\n')
       const NEW_EXEC = [
-        "\t\t\tconst executable = await this.ctx.subprocess.resolveExecutable(this.config.nodeExecutable, void 0, signal);",
+        "\t\t\tconst executable = await this.ctx.subprocess.resolveExecutable(this.config.launch.executable, void 0, signal);",
         "\t\t\t// dsh-mobile ptc argv heap via NODE_OPTIONS (L1): fail loud on an unusable executable.",
         "\t\t\t// Android falls back to the system linker when direct exec of an app-data ELF is denied, and",
         "\t\t\t// process.execPath is then polluted with that linker path; a linker never loads Node, so the",
         "\t\t\t// child would die with an absolute-path error before any of our code runs. Guard both shapes",
         "\t\t\t// here instead of guessing a replacement path.",
         "\t\t\tif (typeof executable !== 'string' || !isAbsolute(executable)) {",
-        "\t\t\t  throw new Error('ptc-runtime-node: resolved node executable is not an absolute path (' + String(executable) + '); set ptc-runtime.nodeExecutable to an absolute node binary or wrapper path');",
+        "\t\t\t  throw new Error('ptc-runtime-node: resolved node executable is not an absolute path (' + String(executable) + '); set ptc-runtime.launch.executable to an absolute node binary or wrapper path');",
         "\t\t\t}",
         "\t\t\tconst __dshMobileExecBase = executable.slice(executable.lastIndexOf('/') + 1);",
         "\t\t\tif (/^(?:ld\\.so(?:\\.[0-9]+)*|linker(?:64)?)$/.test(__dshMobileExecBase)) {",
-        "\t\t\t  throw new Error('ptc-runtime-node: resolved node executable is the system dynamic linker (' + executable + '); set ptc-runtime.nodeExecutable to an absolute node binary or wrapper path, not a linker');",
+        "\t\t\t  throw new Error('ptc-runtime-node: resolved node executable is the system dynamic linker (' + executable + '); set ptc-runtime.launch.executable to an absolute node binary or wrapper path, not a linker');",
         "\t\t\t}",
         "\t\t\tif (settled) return await result.promise;",
       ].join('\n')
@@ -860,7 +860,7 @@ const IMPLS = {
 "\t\t\tconst argv = [",
 "\t\t\t\texecutable,",
 "\t\t\t\t...packaged ? [] : [heapFlag],",
-"\t\t\t\t...bootstrapArgs(this.ctx.fs, this.config, this.config.maxMessageBytes)",
+"\t\t\t\t...bootstrapArgs(this.ctx.fs, this.config.launch, this.config.maxMessageBytes)",
 "\t\t\t];",
       ].join('\n')
       const NEW_ARGV = [
@@ -870,7 +870,7 @@ const IMPLS = {
 "\t\t\t// as that path and the child would die before Node loads. It travels via env instead.",
 "\t\t\tconst argv = [",
 "\t\t\t\texecutable,",
-"\t\t\t\t...bootstrapArgs(this.ctx.fs, this.config, this.config.maxMessageBytes)",
+"\t\t\t\t...bootstrapArgs(this.ctx.fs, this.config.launch, this.config.maxMessageBytes)",
 "\t\t\t];",
       ].join('\n')
       const OLD_ENV = [

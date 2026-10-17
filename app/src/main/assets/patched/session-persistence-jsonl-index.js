@@ -6,6 +6,7 @@ import { basename, dirname, isAbsolute, join, parse, resolve, toNamespacedPath }
 import { performance } from "node:perf_hooks";
 import { scheduler } from "node:timers/promises";
 import { createHash, randomBytes } from "node:crypto";
+import pLimit from "p-limit";
 import { SessionAlreadyExistsError, SessionAlreadyOwnedError, SessionFormatUnsupportedError, SessionHandleClosedError, SessionPersistence, SessionPersistenceCorruptionError, SessionPersistenceNotFoundError, SessionPersistenceRevision, SessionReadOnlyError, assertContiguous, assertStoredId, materializeAppendBatch, materializeCreateHeader, sessionFormatVersionRefusal, validateStoredEvents } from "@deepseek-ai/dsh-session-persistence";
 import { BlockAssembler, errorChain, expandAssistantStream } from "@deepseek-ai/dsh-llm";
 import { tryLockExclusive } from "@deepseek-ai/node-addon-system/flock";
@@ -401,39 +402,43 @@ var JsonlBackendTracker = class {
 	* sessions' events by id; the teardown effect closes every open handle —
 	* close drains the routed buffer — and aggregates failures. This provider
 	* owns no separate storage connection, so closing handles is the complete
-	* teardown. Registrations are effects of the current fiber.
-	* @param ctx - the backend's context.
+	* teardown. The returned effect removes listeners before closing handles.
+	* @param ctx - the backend's resource-owning context.
+	* @returns the disposer to run after persistence consumers finish unloading.
 	*/
 	install(ctx) {
-		ctx.on("session/event", (session, event) => {
-			this.writers.get(session.id)?.enqueueLive(event, (error) => {
-				ctx.logger.warn(`session-persistence: background write for session "${session.id}" failed (buffered events retained): ${String(error)}`);
+		const { writers, openHandles, name } = this;
+		return ctx.effect(function* () {
+			yield async () => {
+				const errors = [];
+				for (const handle of [...openHandles]) try {
+					await handle.close();
+				} catch (error) {
+					errors.push(error);
+				}
+				if (errors.length > 0) throw new AggregateError(errors, `${name} dispose failed`);
+			};
+			yield ctx.on("session/event", (session, event) => {
+				writers.get(session.id)?.enqueueLive(event, (error) => {
+					ctx.logger.warn(`session-persistence: background write for session "${session.id}" failed (buffered events retained): ${String(error)}`);
+				});
 			});
-		});
-		ctx.on("session/flush", (session) => {
-			const writer = this.writers.get(session.id);
-			if (writer === null || writer === void 0) return void 0;
-			return (async () => {
-				await writer.drainLive();
-				await writer.flush();
-			})();
-		});
-		ctx.on("session/disposed", (session) => {
-			const writer = this.writers.get(session.id);
-			if (writer === null || writer === void 0) return;
-			writer.close().catch((error) => {
-				ctx.logger.warn(`session-persistence: final drain for session "${session.id}" failed: ${String(error)}`);
+			yield ctx.on("session/flush", (session) => {
+				const writer = writers.get(session.id);
+				if (writer === null || writer === void 0) return void 0;
+				return (async () => {
+					await writer.drainLive();
+					await writer.flush();
+				})();
 			});
-		});
-		ctx.effect(() => async () => {
-			const errors = [];
-			for (const handle of [...this.openHandles]) try {
-				await handle.close();
-			} catch (error) {
-				errors.push(error);
-			}
-			if (errors.length > 0) throw new AggregateError(errors, `${this.name} dispose failed`);
-		}, `${this.name} open handles`);
+			yield ctx.on("session/disposed", (session) => {
+				const writer = writers.get(session.id);
+				if (writer === null || writer === void 0) return;
+				writer.close().catch((error) => {
+					ctx.logger.warn(`session-persistence: final drain for session "${session.id}" failed: ${String(error)}`);
+				});
+			});
+		}, `${this.name} live routing and open handles`);
 	}
 };
 //#endregion
@@ -1476,7 +1481,7 @@ function workerSpawn(request) {
 * @param expectedEventCount - exact logical event count expected after decoding.
 * @param expectedPrefix - verified physical prefix; an append tail may be present and is not validated.
 * @param signal - optional cancellation for scheduler wait and Worker execution.
-* @returns stable physical identity and digest observed by the worker.
+* @returns the worker's physical identity and digest after its natural zero exit.
 */
 function verifyCurrentGenerationInWorker(path, compression, expectedId, expectedEventCount, expectedPrefix, signal) {
 	return verificationScheduler.run(() => runVerificationWorker(path, compression, expectedId, expectedEventCount, expectedPrefix, signal), signal);
@@ -1493,6 +1498,7 @@ function runVerificationWorker(path, compression, expectedId, expectedEventCount
 	const worker = new Worker(entry, options);
 	return new Promise((resolve, reject) => {
 		let settled = false;
+		let success;
 		const cleanup = () => {
 			signal?.removeEventListener("abort", abort);
 		};
@@ -1521,17 +1527,16 @@ function runVerificationWorker(path, compression, expectedId, expectedEventCount
 				fail(error);
 				return;
 			}
-			settled = true;
-			cleanup();
-			worker.terminate().then(() => {
-				resolve(response.result);
-			}, (error) => {
-				reject(error instanceof Error ? error : new Error(String(error)));
-			});
+			success = response;
 		});
 		worker.once("error", fail);
 		worker.once("exit", (code) => {
-			if (!settled) fail(/* @__PURE__ */ new Error(`migration verifier exited before reporting a result (code ${code})`));
+			if (settled) return;
+			settled = true;
+			cleanup();
+			if (success === void 0) reject(/* @__PURE__ */ new Error(`migration verifier exited before reporting a result (code ${code})`));
+			else if (code !== 0) reject(/* @__PURE__ */ new Error(`migration verifier exited after reporting a result (code ${code})`));
+			else resolve(success.result);
 		});
 		const abort = () => {
 			fail(verifierAbortError(signal));
@@ -2325,6 +2330,8 @@ function assertZstdHeaderFrame(plaintext) {
 }
 /** Loader schema for the JSONL artifact's physical encoding. */
 const JsonlCompressionSchema = z.union([z.const("zstd"), z.const("none")]).default(DEFAULT_COMPRESSION);
+/** Default maximum listing filesystem operations in flight per backend. */
+const DEFAULT_LIST_CONCURRENCY = 3;
 /** Deep-freeze acyclic stored JSON; its arrays contain only indexed JSON values. */
 function freezeStoredEvent(event) {
 	const pending = [event];
@@ -2364,6 +2371,30 @@ function fileRevision(identity) {
 function isENOENT(error) {
 	return error?.code === "ENOENT";
 }
+/**
+* Run `task` over `items` through the backend's shared listing limiter and
+* settle every call. Callers consume the outcomes in input order, so the first
+* failure they report matches a sequential loop whatever the completion order.
+* A limited task must never wait on the same limiter.
+* @param limit - the backend's shared listing limiter.
+* @param items - inputs in their sequential order.
+* @param task - per-item operation.
+* @returns one outcome per item, in input order.
+*/
+function settleLimited(limit, items, task) {
+	return Promise.allSettled(items.map((item) => limit(() => task(item))));
+}
+/**
+* Unwrap outcomes from {@link settleLimited}, rethrowing the first rejection in input order.
+* @param outcomes - outcomes in input order.
+* @returns the fulfilled values in input order.
+*/
+function settledValues(outcomes) {
+	return outcomes.map((outcome) => {
+		if (outcome.status === "rejected") throw outcome.reason;
+		return outcome.value;
+	});
+}
 /** Whether a filesystem-owned failure should retain its original errno and path. */
 function isErrnoException(error) {
 	return typeof error?.code === "string";
@@ -2394,23 +2425,25 @@ function waitWithAbort(operation, signal) {
 	});
 }
 /**
-* The JSONL persistence backend. Load as a plugin; it registers as
-* `ctx.sessionPersistence`. Sessions materialize lazily: a created session is
+* The JSONL backend registered as `ctx.sessionPersistence` by the plugin.
+* Sessions materialize lazily: a created session is
 * visible to this process immediately, reaches disk on its first append or
 * flush, and never existed if the process crashes before that.
 */
 var JsonlSessionPersistence = class extends SessionPersistence {
 	config;
-	static Config = z.object({
-		root: z.string().required(),
-		compression: JsonlCompressionSchema
-	});
+	tracker;
 	/** Backend label for diagnostics and effects; shadows `Service.name` without changing the service key. */
 	name = "session-persistence-jsonl";
 	root;
 	compression;
+	/**
+	* Bounds directory, header, and stat I/O across every concurrent listing of
+	* this backend (`list()`, the root encoding check, historical fingerprints).
+	* Queued tasks of a cancelled listing run and reject at their signal check.
+	*/
+	listLimit;
 	rootEncodingCheck;
-	tracker = new JsonlBackendTracker(this.name);
 	generationFormat;
 	/**
 	* Bounded LRU of parsed, validated stored logs keyed by session id and
@@ -2422,13 +2455,15 @@ var JsonlSessionPersistence = class extends SessionPersistence {
 	coldLogMemo = /* @__PURE__ */ new Map();
 	/** One joinable decode/migration operation per selected historical Session file revision. */
 	migrationPreparations = /* @__PURE__ */ new Map();
-	constructor(ctx, config) {
+	constructor(ctx, config, tracker) {
 		super(ctx);
 		this.config = config;
+		this.tracker = tracker;
 		/* v8 ignore next 5 -- generated catalog and Session source share one build-time version owner. */
 		if (sessionFormatCatalog.currentVersion !== SESSION_FORMAT_VERSION) throw new Error(`session-persistence-jsonl: format catalog v${sessionFormatCatalog.currentVersion} does not match Session v${SESSION_FORMAT_VERSION}`);
 		this.root = resolve(config.root);
 		this.compression = config.compression ?? DEFAULT_COMPRESSION;
+		this.listLimit = pLimit(config.listConcurrency ?? DEFAULT_LIST_CONCURRENCY);
 		this.generationFormat = {
 			currentVersion: sessionFormatCatalog.currentVersion,
 			encodeHeader: (header, inheritedEventCount) => sessionFormatCatalog.encodeCurrentHeader(header, inheritedEventCount),
@@ -2436,7 +2471,6 @@ var JsonlSessionPersistence = class extends SessionPersistence {
 			isUnsupportedMigrationError: (error) => error instanceof SessionFormatUnsupportedMigrationError
 		};
 		this.assertUsableRoot();
-		this.tracker.install(ctx);
 	}
 	/**
 	* Refusal-diagnostics hook: the absolute target path, without touching the filesystem.
@@ -2574,13 +2608,13 @@ var JsonlSessionPersistence = class extends SessionPersistence {
 		};
 		const selected = await this.findLog(id, options?.signal);
 		if (selected === void 0) return void 0;
-		const header = await this.readGenerationHeader(selected, id, options?.signal);
-		if (header === void 0) return void 0;
+		const metadata = await this.readGenerationHeader(selected, id, options?.signal);
+		if (metadata === void 0) return void 0;
 		try {
 			const identity = await stat(selected.sourcePath, { bigint: true });
 			options?.signal?.throwIfAborted();
 			return {
-				header,
+				...metadata,
 				revision: selected.sourceVersion < SESSION_FORMAT_VERSION ? SessionPersistenceRevision(`${fileRevision(identity)}:${await this.historicalCorpusRevision(options?.signal)}`) : fileRevision(identity),
 				sizeBytes: Number(identity.size)
 			};
@@ -2603,21 +2637,31 @@ var JsonlSessionPersistence = class extends SessionPersistence {
 		const pending = [...this.tracker.pendingEntries()];
 		const artifacts = await this.listArtifacts(signal);
 		const corpusRevision = artifacts.some((artifact) => artifact.sourceVersion < SESSION_FORMAT_VERSION) ? await this.historicalCorpusRevision(signal) : void 0;
-		for (const artifact of artifacts) {
+		const statted = settledValues(await settleLimited(this.listLimit, artifacts, async (artifact) => {
 			signal?.throwIfAborted();
 			try {
 				const identity = await stat(artifact.path, { bigint: true });
 				signal?.throwIfAborted();
-				listed.add(artifact.header.id);
-				snapshots.push({
-					header: artifact.header,
-					revision: artifact.sourceVersion < SESSION_FORMAT_VERSION ? SessionPersistenceRevision(`${fileRevision(identity)}:${corpusRevision}`) : fileRevision(identity),
-					sizeBytes: Number(identity.size)
-				});
+				return {
+					artifact,
+					identity
+				};
 			} catch (error) {
 				signal?.throwIfAborted();
 				if (!isENOENT(error)) throw error;
+				return;
 			}
+		}));
+		for (const entry of statted) {
+			if (entry === void 0) continue;
+			const { artifact, identity } = entry;
+			listed.add(artifact.header.id);
+			snapshots.push({
+				header: artifact.header,
+				formatStatus: artifact.formatStatus,
+				revision: artifact.sourceVersion < SESSION_FORMAT_VERSION ? SessionPersistenceRevision(`${fileRevision(identity)}:${corpusRevision}`) : fileRevision(identity),
+				sizeBytes: Number(identity.size)
+			});
 		}
 		for (const [id, entry] of pending) if (!listed.has(id)) snapshots.push({
 			header: entry.header,
@@ -3032,29 +3076,56 @@ var JsonlSessionPersistence = class extends SessionPersistence {
 	}
 	/** Enumerate selected physical generations without interpreting their headers or bodies. */
 	async listGenerations(signal) {
-		const sources = [];
-		for (const project of await this.listProjectDirs(signal)) for (const dir of await this.listSessionDirs(project, signal)) {
+		return (await this.mapSessionDirectories((dir) => {
 			signal?.throwIfAborted();
-			const selected = await this.resolveGenerationInDirectory(dir, signal);
-			if (selected !== void 0) sources.push(selected);
+			return this.resolveGenerationInDirectory(dir, signal);
+		}, signal)).filter((source) => source !== void 0);
+	}
+	/**
+	* Apply `task` to every Session directory through the shared listing
+	* limiter. Results and the first failure follow the sequential
+	* project-then-directory order; a project whose listing fails ends the
+	* traversal after the directories of the projects before it.
+	* @param task - per-directory operation; must not wait on the listing limiter.
+	* @param signal - optional cancellation for directory listings.
+	* @returns per-directory results in traversal order.
+	*/
+	async mapSessionDirectories(task, signal) {
+		const limit = this.listLimit;
+		const projects = await settleLimited(limit, await limit(() => this.listProjectDirs(signal)), (project) => this.listSessionDirs(project, signal));
+		const dirs = [];
+		let projectFailure;
+		for (const outcome of projects) {
+			if (outcome.status === "rejected") {
+				projectFailure = outcome;
+				break;
+			}
+			for (const dir of outcome.value) dirs.push(dir);
 		}
-		return sources;
+		const results = settledValues(await settleLimited(limit, dirs, task));
+		if (projectFailure !== void 0) throw projectFailure.reason;
+		return results;
 	}
 	/** Historical logical events depend on the corpus, including members with unreadable headers. */
 	async historicalCorpusRevision(signal) {
 		const paths = (await this.listGenerations(signal)).map((source) => source.sourcePath).sort();
-		const hash = createHash("sha256");
-		for (const path of paths) {
+		const entries = settledValues(await settleLimited(this.listLimit, paths, async (path) => {
 			signal?.throwIfAborted();
-			let revision;
 			try {
-				revision = fileRevision(await stat(path, { bigint: true }));
+				return {
+					path,
+					revision: fileRevision(await stat(path, { bigint: true }))
+				};
 			} catch (error) {
 				if (!isENOENT(error)) throw error;
-				revision = "missing";
+				return {
+					path,
+					revision: "missing"
+				};
 			}
-			hash.update(JSON.stringify([path, revision]));
-		}
+		}));
+		const hash = createHash("sha256");
+		for (const { path, revision } of entries) hash.update(JSON.stringify([path, revision]));
 		signal?.throwIfAborted();
 		return hash.digest("hex");
 	}
@@ -3062,22 +3133,32 @@ var JsonlSessionPersistence = class extends SessionPersistence {
 		signal?.throwIfAborted();
 		await this.ensureRootEncoding();
 		signal?.throwIfAborted();
-		const artifacts = [];
-		const ids = /* @__PURE__ */ new Set();
-		for (const selected of await this.listGenerations(signal)) {
+		const generations = await this.listGenerations(signal);
+		const headers = await settleLimited(this.listLimit, generations, async (selected) => {
 			signal?.throwIfAborted();
-			let header;
 			try {
-				header = await this.readGenerationHeader(selected, void 0, signal);
+				return {
+					selected,
+					metadata: await this.readGenerationHeader(selected, void 0, signal)
+				};
 			} catch (error) {
-				if (error instanceof SessionFormatUnsupportedError || error instanceof SessionPersistenceCorruptionError) continue;
+				if (error instanceof SessionFormatUnsupportedError || error instanceof SessionPersistenceCorruptionError) return {
+					selected,
+					metadata: void 0
+				};
 				throw error;
 			}
-			if (header === void 0) continue;
-			if (ids.has(header.id)) throw new Error(`duplicate JSONL session id "${header.id}" appears in multiple project directories`);
-			ids.add(header.id);
+		});
+		const artifacts = [];
+		const ids = /* @__PURE__ */ new Set();
+		for (const outcome of headers) {
+			if (outcome.status === "rejected") throw outcome.reason;
+			const { selected, metadata } = outcome.value;
+			if (metadata === void 0) continue;
+			if (ids.has(metadata.header.id)) throw new Error(`duplicate JSONL session id "${metadata.header.id}" appears in multiple project directories`);
+			ids.add(metadata.header.id);
 			artifacts.push({
-				header,
+				...metadata,
 				path: selected.sourcePath,
 				sourceVersion: selected.sourceVersion
 			});
@@ -3119,7 +3200,10 @@ var JsonlSessionPersistence = class extends SessionPersistence {
 		if (result.status === "malformed") return void 0;
 		const header = this.currentHeader(result.header);
 		await this.assertStoredIdentity(selected.sourcePath, selected.sourceVersion, header, expectedId, signal);
-		return header;
+		return {
+			header,
+			formatStatus: result.status
+		};
 	}
 	/** Convert format-catalog string identities to current branded Session metadata. */
 	currentHeader(header) {
@@ -3490,10 +3574,10 @@ var JsonlSessionPersistence = class extends SessionPersistence {
 		return this.rootEncodingCheck;
 	}
 	async checkRootEncoding() {
-		for (const project of await this.listProjectDirs()) for (const dir of await this.listSessionDirs(project)) {
+		await this.mapSessionDirectories(async (dir) => {
 			const incompatible = await this.findOppositeGenerationInDirectory(dir);
 			if (incompatible !== void 0) throw this.encodingMismatch(incompatible);
-		}
+		});
 	}
 	async rejectLegacyFlatArtifact(project, id, signal) {
 		signal?.throwIfAborted();
@@ -3568,5 +3652,36 @@ var JsonlSessionPersistence = class extends SessionPersistence {
 		}
 	}
 };
+/** JSONL persistence plugin label. */
+const name = "session-persistence-jsonl";
+/** Loader schema for the backend's root, physical encoding, and listing concurrency. */
+const Config = z.object({
+	root: z.string().required(),
+	compression: JsonlCompressionSchema,
+	listConcurrency: z.natural().min(1).default(DEFAULT_LIST_CONCURRENCY)
+});
+/**
+* Mount persistence with live routing and handles retained through the
+* consumer unloads triggered by removing this provider. Consumers must own
+* cleanup in their injecting scope; concurrent root disposal is not ordered.
+* @param ctx - the owning plugin context.
+* @param config - the storage root, physical encoding, and listing concurrency.
+* @returns resolves when the service is ready.
+*/
+async function apply(ctx, config) {
+	let service;
+	ctx.effect(function* () {
+		const tracker = new JsonlBackendTracker(name);
+		yield tracker.install(ctx);
+		service = ctx.plugin({
+			name: "session-persistence-jsonl-service",
+			apply(serviceCtx) {
+				new JsonlSessionPersistence(serviceCtx, config, tracker);
+			}
+		});
+		yield service.dispose;
+	}, "session-persistence-jsonl resources");
+	await service.await();
+}
 //#endregion
-export { JsonlCompressionSchema, JsonlSessionPersistence as default };
+export { Config, JsonlCompressionSchema, apply, name };

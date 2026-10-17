@@ -15,7 +15,7 @@
 ## 2. Gradle依赖
 
 <!-- generated:gradle-declarations:start -->
-当前源码声明：versionName `0.14.7` / versionCode `51`；suffix 来自 Gradle 属性。此处不证明 APK 产物或验收状态。
+当前源码声明：versionName `0.14.8` / versionCode `52`；suffix 来自 Gradle 属性。此处不证明 APK 产物或验收状态。
 
 | 配置 | 声明 |
 |---|---|
@@ -67,14 +67,14 @@ ShizukuSupport/ShizukuProbe仍反射探活，授权只能由用户在Shizuku中�
 
 ## 4. 引擎、npm与许可的第二依赖面
 
-当前源码适配目标为官方 dsh-v0.2.0-rc.2 / commit 639ed015397290b3745d163aafe02ffee4aa3f84（预发布，不称stable）。overlay root/第一方包0.2.0-rc.2、pi-ai0.87.1、Cordis4.0.4及官方Lexical0.49.0家族是源码输入；APK内实际版本待终包核实。自包含来源链和协调仓共同管理快照npm/Termux闭包，不是“APK仓不管理”。旧Cordis回退源码逻辑不能继续套在新目标上。
+当前源码适配目标为官方 dsh-v0.2.1-rc.2 / commit 687f282e8625c6b8d11ff58211a90524be2e4317（预发布，不称stable）。overlay root/第一方包0.2.1-rc.2、pi-ai1.1.0、Cordis4.0.5、schemastery3.18.5、node-addon-require-builtin0.1.9、js-yaml4.3.2，以及官方Lexical0.49.0家族（本代未变，仍为0.49.0）是源码输入；APK内实际版本待终包核实。自包含来源链和协调仓共同管理快照npm/Termux闭包，不是“APK仓不管理”。旧Cordis回退源码逻辑不能继续套在新目标上。
 
-raw npm overlay不会自动保留官方pnpm patch。六provider pi-upstream-streaming-020需固定官方patch SHA并精确上下文；Android PTC A1需host/child双目标和副本同步。具体补丁、目标与构建钩子状态见 [运行时补丁台账](RUNTIME-PATCHES.md)。
+raw npm overlay不会自动保留官方pnpm patch。六provider pi-upstream-streaming-020需固定官方patch SHA并精确上下文（本代文件 = `scripts/patches/upstream/pi-ai-1.1.0.patch`，sha256 66eaf960054f10441b93ac3857114e96c1901f6d183713e2f21437b007111644）；Android PTC A1需host/child双目标和副本同步。具体补丁、目标与构建钩子状态见 [运行时补丁台账](RUNTIME-PATCHES.md)。
 
 官方浏览器UI仅私有MIT复用BrowserBody/Title/controller契约，保留SOURCE清单/LICENSE，不导入官方feature插件运行时公开API或Electron/Iframe实现；Sidebar指南与tab框架通过注册消费。组件源码/manifest的目标依赖不等于lib已重建或镜像已完成。GPL/第三方notice按快照dpkg与aar/npm各自范围核实，dpkg门禁不覆盖aar；合规状态必须核对当前候选的最终 license artifact。
 
 ## 5. 升级回归与证据
 
-版本变更需同步来源pin、lock根声明、同源补丁/资产、双仓副本及许可来源。运行时资产从目标版本原始产物完整重建，不叠旧资产；逐字节一致与全部补丁marker/精确verifier都要成立。webKit升级重点验证profile首次赋值、worker/cookie/storage隔离、不支持provider失败、UA-CH与Activity重建holder；Shizuku重点验证旧AIDL服务、工作资料UID、chunk撤consent与耐久UNKNOWN。快照/SAF/Files/通知/控制台/引擎流式任务按 [外部测试需求](<docs/0.14.3-TEST-REQUIREMENTS.md>) 执行。
+版本变更需同步来源pin、lock根声明、同源补丁/资产、双仓副本及许可来源。运行时资产从目标版本原始产物完整重建，不叠旧资产；逐字节一致与全部补丁marker/精确verifier都要成立。三条资产的当前实测状态（两条与 0.2.1-rc.2 夹具逐字节一致、一条待新快照重出）见 [运行时补丁台账](RUNTIME-PATCHES.md) §7.7。webKit升级重点验证profile首次赋值、worker/cookie/storage隔离、不支持provider失败、UA-CH与Activity重建holder；Shizuku重点验证旧AIDL服务、工作资料UID、chunk撤consent与耐久UNKNOWN。快照/SAF/Files/通知/控制台/引擎流式任务按 [外部测试需求](<docs/0.14.3-TEST-REQUIREMENTS.md>) 执行。
 
 当前候选的自检、构建与三层验收状态见对应版本的阶段交接记录；本文件只登记依赖与升级联动，不独立宣称发布批准。0.14.3 外部测试需求属于历史版本证据，不能代替当前候选验收。

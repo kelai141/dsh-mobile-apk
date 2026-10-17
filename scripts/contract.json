@@ -1,14 +1,14 @@
 {
-  "baseline": "0.2.0-rc.2",
-  "cordis": "4.0.4",
-  "schemastery": "3.18.4",
+  "baseline": "0.2.1-rc.2",
+  "cordis": "4.0.5",
+  "schemastery": "3.18.5",
   "upstreamRepo": ".deploy-tmp/deepseek-harness",
   "upstream": {
-    "$comment": "0.14.3 source-only target identity. Inventories were read from the official SHA; upstreamRepo and adaptationSourceRepo both select the disposable pinned build checkout. dsh/ and .deploy-tmp/upstream-020rc2 remain readonly historical inputs. No build, patch validation or runtime acceptance is implied.",
-    "tag": "dsh-v0.2.0-rc.2",
-    "describe": "dsh-v0.2.0-rc.2",
-    "commit": "639ed015397290b3745d163aafe02ffee4aa3f84",
-    "rootVersion": "0.2.0-rc.2",
+    "$comment": "0.14.8 source-only target identity. Inventories were read from the official SHA; upstreamRepo and adaptationSourceRepo both select the disposable pinned build checkout. dsh/ and .deploy-tmp/upstream-020rc2 remain readonly historical inputs. No build, patch validation or runtime acceptance is implied.",
+    "tag": "dsh-v0.2.1-rc.2",
+    "describe": "dsh-v0.2.1-rc.2",
+    "commit": "687f282e8625c6b8d11ff58211a90524be2e4317",
+    "rootVersion": "0.2.1-rc.2",
     "adaptationSourceRepo": ".deploy-tmp/deepseek-harness"
   },
   "runtimeCompat": {
@@ -33,19 +33,19 @@
         "packageVersion": "0.1.7",
         "publishedTarball": "https://registry.npmjs.org/dshmarketplace-plugin/-/dshmarketplace-plugin-0.1.7.tgz",
         "publishedTarballSha256": "881c21ec33a4a91ad65c61676540faab4122440e3f9685f69939533a6dbbc0c1",
-        "targetSourceCommit": "639ed015397290b3745d163aafe02ffee4aa3f84",
+        "targetSourceCommit": "687f282e8625c6b8d11ff58211a90524be2e4317",
         "fields": [
           {
             "section": "peerDependencies",
             "name": "@deepseek-ai/dsh-native-command",
             "from": "^0.1.0-rc.6",
-            "to": "0.2.0-rc.2"
+            "to": "0.2.1-rc.2"
           },
           {
             "section": "peerDependencies",
             "name": "@deepseek-ai/dsh-tools",
             "from": "^0.1.0-rc.6",
-            "to": "0.2.0-rc.2"
+            "to": "0.2.1-rc.2"
           }
         ],
         "reason": "The published 0.1.7 caret peers reject the 0.2 prerelease. This explicitly recorded Android declaration delta prevents silent row disabling; no vendor runtime payload is changed and runtime compatibility is not claimed."
@@ -166,7 +166,8 @@
       "settings.general.item",
       "conversation.header.leading",
       "sidebar.right.pane.tab.title",
-      "sidebar.right.tab.menu.item"
+      "sidebar.right.tab.menu.item",
+      "android.dock.conversation"
     ],
     "rowId": "ui-layout",
     "enabledRow": "ui-layout",
@@ -225,9 +226,9 @@
     "upstreamUniverse": {
       "$comment": "G-1 反向判据的登记集：上游**声明面**槽位全集（见 scanUpstreamSlots 的枚举范围），不是「上游一共有多少座位」的哲学断言——它只负责让「新长出来/被删掉」两类漂移判红。追版换树后必须重新 --capture-slots 并逐条判定新增项。",
       "scanScope": "packages/client/<pkg>/src/**（排除 tests/__tests__ 与 *.test.tsx）里的 `'slot': { kind: …; scope: … }`",
-      "capturedFrom": "dsh-v0.2.0-rc.2",
-      "capturedReason": "Read directly from official 0.2.0-rc.2 source: 79 -> 80 declarations, no removals or kind/scope drift. Added sidebar.right.tab.files.actions (list/session) is an upstream Files-panel actions position not consumed by the Android layer. The five registered Android consumption positions retain their declared kinds/scopes. This is source inventory evidence only, not a gate/build result.",
-      "total": 80,
+      "capturedFrom": "dsh-v0.2.1-rc.2",
+      "capturedReason": "0.14.8 追版 dsh-v0.2.1-rc.2 重新登记：新增 11 条座位逐条判定我方不消费（我方消费面仍是 shell.overlay / sidebar.right.pane.tab(+title/menu) / settings.section / settings.general.item / conversation.header.leading 与自建 android.dock.conversation）；上游删除 conversation.message.images，我方未注册该座位，删除不造成静默落空",
+      "total": 90,
       "entries": [
         {
           "slot": "conversation.approval.detail",
@@ -248,14 +249,38 @@
           "file": ".deploy-tmp/deepseek-harness/packages/client/ui-chat/src/client/contract/slots.ts"
         },
         {
+          "slot": "conversation.chat.flow",
+          "kind": "single",
+          "scope": "session",
+          "file": ".deploy-tmp/deepseek-harness/packages/client/ui-chat/src/client/contract/slots.ts"
+        },
+        {
+          "slot": "conversation.chat.message.images",
+          "kind": "single",
+          "scope": "session",
+          "file": ".deploy-tmp/deepseek-harness/packages/client/ui-chat/src/client/contract/slots.ts"
+        },
+        {
           "slot": "conversation.chat.node",
           "kind": "keyed",
           "scope": "session",
           "file": ".deploy-tmp/deepseek-harness/packages/client/ui-chat/src/client/contract/slots.ts"
         },
         {
+          "slot": "conversation.chat.reasoning.body",
+          "kind": "single",
+          "scope": "session",
+          "file": ".deploy-tmp/deepseek-harness/packages/client/ui-chat/src/client/contract/slots.ts"
+        },
+        {
           "slot": "conversation.chat.turnTail",
           "kind": "list",
+          "scope": "session",
+          "file": ".deploy-tmp/deepseek-harness/packages/client/ui-chat/src/client/contract/slots.ts"
+        },
+        {
+          "slot": "conversation.chat.user.images",
+          "kind": "single",
           "scope": "session",
           "file": ".deploy-tmp/deepseek-harness/packages/client/ui-chat/src/client/contract/slots.ts"
         },
@@ -281,6 +306,12 @@
           "slot": "conversation.hero.brand.mark",
           "kind": "single",
           "scope": "root",
+          "file": ".deploy-tmp/deepseek-harness/packages/client/ui-conversation/src/client/contract/slots.ts"
+        },
+        {
+          "slot": "conversation.hero.options",
+          "kind": "list",
+          "scope": "session",
           "file": ".deploy-tmp/deepseek-harness/packages/client/ui-conversation/src/client/contract/slots.ts"
         },
         {
@@ -320,6 +351,12 @@
           "file": ".deploy-tmp/deepseek-harness/packages/client/ui-conversation/src/client/contract/slots.ts"
         },
         {
+          "slot": "conversation.input.model.label",
+          "kind": "single",
+          "scope": "session",
+          "file": ".deploy-tmp/deepseek-harness/packages/client/ui-model-selection/src/client/slots.ts"
+        },
+        {
           "slot": "conversation.input.overlay",
           "kind": "list",
           "scope": "session",
@@ -342,12 +379,6 @@
           "kind": "list",
           "scope": "session",
           "file": ".deploy-tmp/deepseek-harness/packages/client/ui-conversation/src/client/contract/slots.ts"
-        },
-        {
-          "slot": "conversation.message.images",
-          "kind": "single",
-          "scope": "session",
-          "file": ".deploy-tmp/deepseek-harness/packages/client/ui-chat/src/client/contract/slots.ts"
         },
         {
           "slot": "conversation.plan-review.actions",
@@ -398,6 +429,12 @@
           "file": ".deploy-tmp/deepseek-harness/packages/client/ui-trajectory/src/client/trajectory-contract.ts"
         },
         {
+          "slot": "conversation.user.text.node",
+          "kind": "keyed",
+          "scope": "session",
+          "file": ".deploy-tmp/deepseek-harness/packages/client/ui-conversation/src/client/contract/slots.ts"
+        },
+        {
           "slot": "conversation.view",
           "kind": "list",
           "scope": "session",
@@ -414,6 +451,12 @@
           "kind": "list",
           "scope": "session",
           "file": ".deploy-tmp/deepseek-harness/packages/client/ui-deliverables/src/client/file-actions.ts"
+        },
+        {
+          "slot": "plugins.add.actions",
+          "kind": "list",
+          "scope": "root",
+          "file": ".deploy-tmp/deepseek-harness/packages/client/ui-plugin-manager/src/client/slot-contract.ts"
         },
         {
           "slot": "plugins.bundle.activation",
@@ -454,6 +497,12 @@
         {
           "slot": "plugins.row.config",
           "kind": "keyed",
+          "scope": "root",
+          "file": ".deploy-tmp/deepseek-harness/packages/client/ui-plugin-manager/src/client/slot-contract.ts"
+        },
+        {
+          "slot": "plugins.tab",
+          "kind": "list",
           "scope": "root",
           "file": ".deploy-tmp/deepseek-harness/packages/client/ui-plugin-manager/src/client/slot-contract.ts"
         },
@@ -534,6 +583,12 @@
           "kind": "single",
           "scope": "root",
           "file": ".deploy-tmp/deepseek-harness/packages/client/ui-settings/src/client/contract/slots.ts"
+        },
+        {
+          "slot": "shell.bottom",
+          "kind": "single",
+          "scope": "root",
+          "file": ".deploy-tmp/deepseek-harness/packages/client/ui-layout/src/client/index.ts"
         },
         {
           "slot": "shell.leading",
@@ -708,9 +763,14 @@
           "kind": "keyed",
           "scope": "session",
           "file": ".deploy-tmp/deepseek-harness/packages/client/ui-tool/src/client/contract/slots.ts"
+        },
+        {
+          "slot": "workspace.toast",
+          "kind": "keyed",
+          "scope": "root",
+          "file": ".deploy-tmp/deepseek-harness/packages/client/ui-workspace/src/client/contract/toast.ts"
         }
-      ],
-      "capturedSourceCommit": "639ed015397290b3745d163aafe02ffee4aa3f84"
+      ]
     },
     "retiredSlots": [
       {
@@ -747,9 +807,9 @@
   },
   "upstreamRows": {
     "$comment": "G-4 判据的登记集：上游 base + web-app 两个 bundle 的全部行 id（含我们未挂载的）。新增行必须逐条判「挂载 / 明确不挂」后重新登记——0.14.2 追版时 `mcp-resources` 这类新行走的就是这里。",
-    "capturedFrom": "dsh-v0.2.0-rc.2",
-    "capturedReason": "Read directly from official 0.2.0-rc.2 base/web-app source: 178 -> 179 ids. Add otel (retain core telemetry service), ui-settings-session-log (retain official upload control), desktop-product-telemetry and product-analytics (explicitly disable Android; both upstream expressions restrict them to desktop). Remove schedule/time-context/ui-schedule from base/web: scheduling now belongs to the opt-in experimental schedule bundle, and no removed row is targeted by the Android patch. No package-name or bundle drift in retained rows; expression-disabled analytics rows remain upstreamDisabled=false under the scanner literal-boolean convention.",
-    "total": 179,
+    "capturedFrom": "dsh-v0.2.1-rc.2",
+    "capturedReason": "0.14.8 追版 dsh-v0.2.1-rc.2 重新登记上游行集（占位，稍后改真因）",
+    "total": 186,
     "entries": [
       {
         "key": "account-controller",
@@ -950,6 +1010,12 @@
         "bundle": "base"
       },
       {
+        "key": "harness-dev-context",
+        "name": "@deepseek-ai/dsh-harness-dev-context",
+        "upstreamDisabled": false,
+        "bundle": "web-app"
+      },
+      {
         "key": "hmr",
         "name": "@deepseek-ai/dsh-hmr",
         "upstreamDisabled": false,
@@ -1094,6 +1160,12 @@
         "bundle": "base"
       },
       {
+        "key": "remote-access",
+        "name": "@deepseek-ai/dsh-api-remote-access",
+        "upstreamDisabled": false,
+        "bundle": "base"
+      },
+      {
         "key": "repeat-tool-reminder",
         "name": "@deepseek-ai/dsh-repeat-tool-reminder",
         "upstreamDisabled": false,
@@ -1116,6 +1188,12 @@
         "name": "@deepseek-ai/dsh-sandbox-policy",
         "upstreamDisabled": false,
         "bundle": "base"
+      },
+      {
+        "key": "schedule",
+        "name": "@deepseek-ai/dsh-schedule",
+        "upstreamDisabled": false,
+        "bundle": "web-app"
       },
       {
         "key": "session",
@@ -1235,12 +1313,6 @@
         "key": "skill",
         "name": "@deepseek-ai/dsh-skill",
         "upstreamDisabled": false,
-        "bundle": "base"
-      },
-      {
-        "key": "skill-badge",
-        "name": "@deepseek-ai/dsh-skill-badge",
-        "upstreamDisabled": true,
         "bundle": "base"
       },
       {
@@ -1382,12 +1454,6 @@
         "bundle": "base"
       },
       {
-        "key": "tool-ralph",
-        "name": "@deepseek-ai/dsh-tool-ralph",
-        "upstreamDisabled": true,
-        "bundle": "base"
-      },
-      {
         "key": "tool-result-pruner",
         "name": "@deepseek-ai/dsh-compaction-tool-result-pruner",
         "upstreamDisabled": false,
@@ -1438,6 +1504,12 @@
       {
         "key": "tool-workflow",
         "name": "@deepseek-ai/dsh-tool-workflow",
+        "upstreamDisabled": false,
+        "bundle": "base"
+      },
+      {
+        "key": "tool-working-directory",
+        "name": "@deepseek-ai/dsh-tool-working-directory",
         "upstreamDisabled": false,
         "bundle": "base"
       },
@@ -1510,6 +1582,12 @@
       {
         "key": "ui-cordis",
         "name": "@deepseek-ai/dsh-client-ui-cordis",
+        "upstreamDisabled": false,
+        "bundle": "web-app"
+      },
+      {
+        "key": "ui-deepseek-model-label-1017",
+        "name": "@deepseek-ai/dsh-client-ui-deepseek-model-label-1017",
         "upstreamDisabled": false,
         "bundle": "web-app"
       },
@@ -1588,6 +1666,18 @@
       {
         "key": "ui-renderer",
         "name": "@deepseek-ai/dsh-client-ui-renderer",
+        "upstreamDisabled": false,
+        "bundle": "web-app"
+      },
+      {
+        "key": "ui-schedule",
+        "name": "@deepseek-ai/dsh-client-ui-schedule",
+        "upstreamDisabled": false,
+        "bundle": "web-app"
+      },
+      {
+        "key": "ui-secret-mask",
+        "name": "@deepseek-ai/dsh-client-ui-secret-mask",
         "upstreamDisabled": false,
         "bundle": "web-app"
       },
@@ -1766,6 +1856,12 @@
         "bundle": "base"
       },
       {
+        "key": "web-deepseek-api",
+        "name": "@deepseek-ai/dsh-web-deepseek-api",
+        "upstreamDisabled": false,
+        "bundle": "base"
+      },
+      {
         "key": "web-fetch-http",
         "name": "@deepseek-ai/dsh-web-fetch-http",
         "upstreamDisabled": false,
@@ -1802,6 +1898,12 @@
         "bundle": "base"
       },
       {
+        "key": "working-directory",
+        "name": "@deepseek-ai/dsh-working-directory",
+        "upstreamDisabled": false,
+        "bundle": "base"
+      },
+      {
         "key": "workspace",
         "name": "@deepseek-ai/dsh-workspace",
         "upstreamDisabled": false,
@@ -1825,7 +1927,6 @@
         "upstreamDisabled": false,
         "bundle": "web-app"
       }
-    ],
-    "capturedSourceCommit": "639ed015397290b3745d163aafe02ffee4aa3f84"
+    ]
   }
 }

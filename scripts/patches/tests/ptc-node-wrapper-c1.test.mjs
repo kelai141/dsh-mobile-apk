@@ -4,12 +4,12 @@
 // 真因：PTC 给子进程传的是**显式过滤后的 env**（ptc-runtime-node 的 STARTUP_ENVIRONMENT_NAMES 只放
 // PATH/PATHEXT/SYSTEMROOT/WINDIR/TEMP/TMP），LD_LIBRARY_PATH 不在其中 ⇒ 子进程里的 node 找不到
 // libz.so.1 等 DT_NEEDED（Permissive 报 CANNOT LINK；Enforcing 真机 app 域 exec app-data ELF 被拒 ⇒ EACCES）。
-// 修法 C1：nodeExecutable 指向**快照内的 wrapper 脚本**（非 ELF ⇒ 走 shebang 不触发 app-data ELF exec；
+// 修法 C1：nodeExecutable（0.2.1 起为 launch.executable）指向**快照内的 wrapper 脚本**（非 ELF ⇒ 走 shebang 不触发 app-data ELF exec；
 // wrapper 自己 export LD_LIBRARY_PATH ⇒ 不依赖被 tombstone 的继承；linker64 只读取 node 而非 exec）。
 //
 // 本测试锁四件事（都对**仓库源文件**断言，不需要设备/构建）：
 //  ① build-snapshot 生成 wrapper（含正确三行、可执行位、设备路径而非本地 stage 路径）；
-//  ② profile 的 nodeExecutable 指向该 wrapper；
+//  ② profile 的 launch.executable 指向该 wrapper（kind: node-script）；
 //  ③ **反证**：PTC 子进程 env 白名单里不得出现 TERMUX_APP__LEGACY_DATA_DIR
 //     （tombstone 残留 + 防「钩子把 wrapper 自己也重定向」这一**未复现但未排除**的风险）；
 //  ④ wrapper 就位后，profile 不得再指向裸 bin/node（否则修法被无声回退）。
@@ -37,6 +37,27 @@ const PREFIX = '/data/data/com.dsharnessmobile.shell/files/usr'
 const build = readFileSync(BUILD, 'utf8')
 const profile = readFileSync(PROFILE, 'utf8')
 
+/** 取 YAML 顶层 "- id: <id>" 条目正文（到下一个顶层条目前）。 */
+function yamlEntry(text, id) {
+  const match = new RegExp('^- id: ' + id + '\\n([\\s\\S]*?)(?=^- )', 'm').exec(text)
+  return match ? match[1] : ''
+}
+/** 取某条目下一层映射的键行（去缩进，形如 "kind: node-script"）。 */
+function mappingLines(block, key) {
+  const lines = block.split(/\r?\n/)
+  const start = lines.findIndex((line) => line.trim() === key + ':')
+  if (start < 0) return []
+  const indent = lines[start].match(/^[ \t]*/)[0].length
+  const out = []
+  for (const line of lines.slice(start + 1)) {
+    if (line.trim() === '') continue
+    const lineIndent = line.match(/^[ \t]*/)[0].length
+    if (lineIndent <= indent) break
+    out.push(line.trim())
+  }
+  return out
+}
+
 // ① wrapper 生成
 check('build-snapshot 生成 PTC wrapper（7c1 段在场）', build.includes('PTC node wrapper'))
 check('wrapper 落点为 usr/libexec/dsh-node', build.includes("const PTC_NODE_WRAPPER_REL = 'libexec/dsh-node'"))
@@ -52,11 +73,19 @@ check('wrapper 经 /system/bin/linker64 启动 node（绕开 app-data ELF exec�
 check('wrapper 只烧设备路径、不烧构建期本地路径（NEW_PREFIX 而非 join(U, …)）',
   build.includes("'export LD_LIBRARY_PATH=\"' + NEW_PREFIX") && build.includes("'exec /system/bin/linker64 \"' + NEW_PREFIX"))
 
-// ② profile 接线
-check('profile 的 nodeExecutable 指向 wrapper',
-  profile.includes('nodeExecutable: ' + PREFIX + '/' + WRAPPER_REL))
+// ② profile 接线（0.2.1-rc.2：上游删除 nodeExecutable，改为必填 launch:{kind,executable}）
+const ptcEntry = yamlEntry(profile, 'ptc-runtime')
+const launchLines = mappingLines(ptcEntry, 'launch')
+check('profile 的 ptc-runtime 使用 launch 联合类型，kind 为 node-script',
+  launchLines.includes('kind: node-script'))
+check('profile 的 launch.executable 指向 wrapper',
+  launchLines.includes('executable: ' + PREFIX + '/' + WRAPPER_REL))
+check('launch 只保留已审阅的 kind/executable 两个键',
+  launchLines.length === 2)
+check('profile 不再残留旧键 nodeExecutable（0.2.1 已删除）',
+  !/^\s*nodeExecutable\s*:/m.test(ptcEntry))
 check('profile 不再指向裸 bin/node（修法未被无声回退）',
-  !profile.includes('nodeExecutable: ' + PREFIX + '/bin/node'))
+  !launchLines.includes('executable: ' + PREFIX + '/bin/node'))
 check('profile 记录了 C1 的逆转条件（上游补白名单后可改回）',
   profile.includes('逆转条件：上游把 LD_LIBRARY_PATH'))
 

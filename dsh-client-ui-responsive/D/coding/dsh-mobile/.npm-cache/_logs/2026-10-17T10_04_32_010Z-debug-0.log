@@ -1,0 +1,12 @@
+0 verbose cli /usr/bin/node /usr/bin/npm
+1 info using npm@11.17.0
+2 info using node@v24.19.0
+3 silly config load:file:/usr/lib/node_modules/npm/npmrc
+4 silly config load:file:/mnt/d/coding/dsh-mobile/dsh-mobile-apk/dsh-client-ui-responsive/.npmrc
+5 silly config load:file:/root/.npmrc
+6 silly config load:file:/usr/etc/npmrc
+7 verbose title npm test
+8 verbose argv "test"
+9 verbose logfile logs-max:10 dir:/mnt/d/coding/dsh-mobile/dsh-mobile-apk/dsh-client-ui-responsive/D:/coding/dsh-mobile/.npm-cache/_logs/2026-10-17T10_04_32_010Z-
+10 verbose logfile /mnt/d/coding/dsh-mobile/dsh-mobile-apk/dsh-client-ui-responsive/D:/coding/dsh-mobile/.npm-cache/_logs/2026-10-17T10_04_32_010Z-debug-0.log
+11 silly logfile done cleaning log files
