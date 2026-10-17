@@ -25,9 +25,12 @@ if (commit !== expectedCommit) throw new Error(`unexpected DeepSeek Harness comm
 
 const overlay = JSON.parse(readFileSync(overlayPath, 'utf8'))
 const sourcePackage = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'))
-if (sourcePackage.version !== '0.2.0-rc.2' || sourcePackage.packageManager !== 'pnpm@11.7.0'
-  || overlay.engineVersion !== '0.2.0-rc.2' || overlay.rootPackage?.version !== '0.2.0-rc.2') {
-  throw new Error('source export requires official 0.2.0-rc.2 source/overlay and pnpm 11.7.0')
+// 身份一律从合同读（0.14.8）：上游 0.2.1 把 pnpm 由 11.7.0 抬到 11.28.5。
+// 写死版本号的后果是每次引擎追版后这条断言静默失效或误判红。
+const contract = JSON.parse(readFileSync(join(process.cwd(), 'scripts', 'contract.json'), 'utf8'))
+if (sourcePackage.version !== contract.baseline || sourcePackage.packageManager !== contract.upstream.packageManager
+  || overlay.engineVersion !== contract.baseline || overlay.rootPackage?.version !== contract.baseline) {
+  throw new Error('source export requires official ' + contract.baseline + ' source/overlay and ' + contract.upstream.packageManager)
 }
 const lockfilePath = join(repo, 'pnpm-lock.yaml')
 if (!existsSync(lockfilePath)) throw new Error('pinned Harness source is missing pnpm-lock.yaml')

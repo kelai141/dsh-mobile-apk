@@ -233,7 +233,9 @@ jobs:
           git -C .deploy-tmp/deepseek-harness checkout --detach "$COMMIT"
           test "$(git -C .deploy-tmp/deepseek-harness rev-parse HEAD)" = "$COMMIT"
           test "$(git -C .deploy-tmp/deepseek-harness describe --tags --always)" = "dsh-v$TAG"
-          node -e 'const c=require("./scripts/contract.json"), p=require("./.deploy-tmp/deepseek-harness/package.json"); if(c.upstreamRepo!==".deploy-tmp/deepseek-harness" || !c.baseline || !c.upstream.commit || p.version!==c.baseline || p.packageManager!=="pnpm@11.7.0") throw Error("release source identity does not match contract")'
+          # packageManager / engines 也由合同提供（上游 0.2.1 把 pnpm 由 11.7.0 抬到 11.28.5），
+          # 写死同样会漂移；合同缺字段即判红，避免「没登记就当通过」。
+          node -e 'const c=require("./scripts/contract.json"), p=require("./.deploy-tmp/deepseek-harness/package.json"); if(c.upstreamRepo!==".deploy-tmp/deepseek-harness" || !c.baseline || !c.upstream.commit || !c.upstream.packageManager || !c.upstream.enginesNode || p.version!==c.baseline || p.packageManager!==c.upstream.packageManager || p.engines.node!==c.upstream.enginesNode) throw Error("release source identity does not match contract")'
           test -d .deploy-tmp/deepseek-harness/packages/client/ui-theme/src/styles || { echo "::error::上游令牌定义面缺席"; exit 1; }
       # 本地链期望的输入位是 .deploy-tmp/snapshot-013/<abi>/snapshot.tar.xz（**注入前**），
       # 注入/降级/门禁/打包都在链内完成。J1 产出的正是注入前快照，归置到该位置即可。

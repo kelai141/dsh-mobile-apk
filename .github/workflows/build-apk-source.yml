@@ -139,7 +139,7 @@ jobs:
           test "$(git -C .deploy-tmp/deepseek-harness rev-parse HEAD)" = "$COMMIT"
           test "$(git -C .deploy-tmp/deepseek-harness describe --tags --always)" = "dsh-v$TAG"
           node -e 'const c=require("./scripts/contract.json"); if(c.upstreamRepo!==".deploy-tmp/deepseek-harness" || !c.baseline || !c.upstream.commit) throw Error("source workflow identity does not match contract")'
-          node -e 'const c=require("./scripts/contract.json"), p=require("./.deploy-tmp/deepseek-harness/package.json"); if(p.version!==c.baseline || p.packageManager!=="pnpm@11.7.0" || p.engines.node!=="^22.19.0 || >=24.0.0") throw Error("official Harness runtime policy changed")'
+          node -e 'const c=require("./scripts/contract.json"), p=require("./.deploy-tmp/deepseek-harness/package.json"); if(!c.upstream.packageManager || !c.upstream.enginesNode || p.version!==c.baseline || p.packageManager!==c.upstream.packageManager || p.engines.node!==c.upstream.enginesNode) throw Error("official Harness runtime policy changed")'
 
       - name: Checkout pinned component sources
         shell: bash

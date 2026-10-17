@@ -65,7 +65,7 @@ if (overlay.engineVersion !== contract.baseline || overlay.rootPackage?.version 
 const sourceManifestPath = value('--source-manifest')
 const sourceManifest = sourceManifestPath ? JSON.parse(readFileSync(resolve(ROOT, sourceManifestPath), 'utf8')) : null
 if (sourceManifest && (sourceManifest.commit !== contract.upstream.commit
-  || sourceManifest.packageManager !== 'pnpm@11.7.0' || !/^[0-9a-f]{64}$/.test(sourceManifest.lockfileSha256 ?? ''))) {
+  || sourceManifest.packageManager !== contract.upstream.packageManager || !/^[0-9a-f]{64}$/.test(sourceManifest.lockfileSha256 ?? ''))) {
   console.error('source-build manifest 身份/真实 lock hash 与合同不符'); process.exit(2)
 }
 const sourcePackages = new Map((sourceManifest?.packages ?? []).map(packageInfo => [packageInfo.name, packageInfo]))

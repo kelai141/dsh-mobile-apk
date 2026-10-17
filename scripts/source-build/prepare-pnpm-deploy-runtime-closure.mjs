@@ -16,9 +16,11 @@ if (!sourceArg || !overlayArg || !backupArg || !reportArg) {
 const sourceRoot = resolve(sourceArg)
 const sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: sourceRoot, encoding: 'utf8' }).trim()
 const sourceManifest = JSON.parse(readFileSync(join(sourceRoot, 'package.json'), 'utf8'))
-if (sourceCommit !== '639ed015397290b3745d163aafe02ffee4aa3f84' || sourceManifest.version !== '0.2.0-rc.2'
-  || sourceManifest.packageManager !== 'pnpm@11.7.0') {
-  throw new Error('production deployment requires official 0.2.0-rc.2 source and pnpm 11.7.0')
+// 身份一律从合同读（0.14.8）：写死的提交/版本号会随每次引擎追版漂移。
+const contract = JSON.parse(readFileSync(join(process.cwd(), 'scripts', 'contract.json'), 'utf8'))
+if (sourceCommit !== contract.upstream.commit || sourceManifest.version !== contract.baseline
+  || sourceManifest.packageManager !== contract.upstream.packageManager) {
+  throw new Error('production deployment requires official ' + contract.baseline + ' source and ' + contract.upstream.packageManager)
 }
 const cliDir = join(sourceRoot, 'apps', 'cli')
 const packageFile = join(cliDir, 'package.json')
