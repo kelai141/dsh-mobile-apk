@@ -3,8 +3,8 @@
   "short_name": "dsh-mobile",
   "start_url": "./",
   "display": "browser",
-  "background_color": "#f7f8fa",
-  "theme_color": "#2f6df6",
+  "background_color": "#ffffff",
+  "theme_color": "#111111",
   "icons": [
     {
       "src": "assets/icon.svg",

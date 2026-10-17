@@ -4,6 +4,8 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="color-scheme" content="light dark" />
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+<meta name="theme-color" content="#0c0c0d" media="(prefers-color-scheme: dark)" />
 <title>dsh-mobile 下载 - DeepSeek Harness 安卓客户端 APK</title>
 <meta name="description" content="DeepSeek Harness 安卓壳应用（dsh-mobile）官方下载页。支持 Android 8.0 及以上，自动识别 arm64 / x86_64 架构，提供 GitHub Releases 直连与国内加速线路，免费下载 APK。" />
 <meta name="keywords" content="DeepSeek Harness, dsh-mobile, 安卓, APK, 下载, arm64, x86_64, Termux" />
@@ -31,25 +33,60 @@
 
 <header class="top">
   <div class="wrap top-in">
-    <span class="brand">DeepSeek Harness</span>
-    <span class="tag">dsh-mobile 安卓壳</span>
+    <a class="brand" href="#top">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-word">dsh-mobile</span>
+    </a>
+    <p class="top-meta">
+      <span>DeepSeek Harness</span>
+      <span class="sep" aria-hidden="true">/</span>
+      <span>Android</span>
+      <span class="sep" aria-hidden="true">/</span>
+      <span>API 26+</span>
+    </p>
+    <a class="top-cta" href="#download">下载 <span aria-hidden="true">↓</span></a>
   </div>
 </header>
 
-<main class="wrap layout">
-  <section class="intro">
-    <h1>在手机上运行 DeepSeek Harness</h1>
+<main class="wrap layout" id="top">
+  <section class="hero" aria-labelledby="hero-title">
+    <p class="eyebrow">
+      <span class="num">01</span>
+      <span>概览</span>
+      <span class="latin" aria-hidden="true">Overview</span>
+    </p>
+    <h1><span id="hero-title">在手机上运行<br />DeepSeek Harness<span class="accent">.</span></span></h1>
     <p class="lede">dsh-mobile 是 DeepSeek Harness 的安卓壳应用，把完整运行环境打进安装包，装机即用，无需自行配置 Termux 与依赖。</p>
+    <div class="ruler" aria-hidden="true"></div>
     <ul class="facts">
-      <li>支持 Android 8.0（API 26）及以上</li>
-      <li>安装包约 150 MB，内置引擎与 Termux 环境</li>
-      <li>自动识别 arm64 / x86_64，无需手动选择架构</li>
-      <li>安装包由 GitHub Releases 提供，本站不托管文件</li>
+      <li>
+        <span class="f-num" aria-hidden="true">01</span>
+        <span class="f-key">系统</span>
+        <span class="f-val">Android 8.0（API 26）及以上</span>
+      </li>
+      <li>
+        <span class="f-num" aria-hidden="true">02</span>
+        <span class="f-key">体积</span>
+        <span class="f-val">安装包约 150 MB，内置引擎与 Termux 环境</span>
+      </li>
+      <li>
+        <span class="f-num" aria-hidden="true">03</span>
+        <span class="f-key">架构</span>
+        <span class="f-val">自动识别 arm64 / x86_64，无需手动选择</span>
+      </li>
+      <li>
+        <span class="f-num" aria-hidden="true">04</span>
+        <span class="f-key">来源</span>
+        <span class="f-val">安装包由 GitHub Releases 提供，本站不托管文件</span>
+      </li>
     </ul>
   </section>
 
   <section class="card" id="download" aria-labelledby="dl-title">
-    <h2 id="dl-title" class="card-title">下载</h2>
+    <div class="card-head">
+      <h2 id="dl-title" class="card-title">下载</h2>
+      <span class="card-meta" aria-hidden="true">02 / Download</span>
+    </div>
     <div id="dl-body">
       <p class="muted">正在读取版本信息…</p>
     </div>
@@ -60,33 +97,58 @@
     </noscript>
   </section>
 
-  <!-- 面向搜索引擎的静态说明：不依赖 JS 即可被抓取，且对用户折叠展示。 -->
-  <section class="intro seo" aria-labelledby="about-title">
+  <!-- 面向搜索引擎的静态说明：不依赖 JS 即可被抓取，同时服务真人用户。 -->
+  <section class="notes" aria-labelledby="about-title">
+    <p class="eyebrow">
+      <span class="num">03</span>
+      <span>说明</span>
+      <span class="latin" aria-hidden="true">Notes</span>
+    </p>
     <h2 id="about-title">关于 dsh-mobile</h2>
-    <p>dsh-mobile 是 <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a> 的安卓客户端封装。
+    <p class="seo-lede">dsh-mobile 是 <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a> 的安卓客户端封装。
       它在应用内运行一个内嵌的 Termux 快照与 Node 引擎，并向模型暴露安卓平台能力（无障碍、虚拟屏、通知、文件访问等），
       因此可以在手机上直接使用 DeepSeek Harness 的完整能力。</p>
-    <h3>该下载哪个架构</h3>
-    <p>绝大多数手机是 <b>arm64</b>（即 arm64-v8a / AArch64）；MuMu 等安卓模拟器通常是 <b>x86_64</b>。
-      两个安装包体积相近，无法凭体积区分。装错架构不会被系统拒绝安装，而是在启动引擎时失败，
-      所以请以页面上方自动识别的结果为准；若识别不准可用「换另一个架构」手动切换。</p>
-    <h3>安装说明</h3>
-    <p>下载后点击安装包；若系统提示「未知来源」，需在设置中允许浏览器安装应用。
-      与已安装版本签名一致时可直接覆盖升级，数据保留。最低支持 Android 8.0（API 26）。</p>
-    <h3>常见问题</h3>
-    <p><b>下载很慢或失败？</b>页面上方可在 GitHub 直连与加速线路之间切换，站点会自动实测并优先选择最快的线路。</p>
-    <p><b>安装包安全吗？</b>安装包全部来自 <a href="https://github.com/kelai141/dsh-mobile-apk/releases">GitHub Releases</a>，
-      本站不托管、不修改任何文件，并展示发布清单中的 SHA-256 供核对。</p>
+    <div class="notes-grid">
+      <div class="notes-item">
+        <h3>该下载哪个架构</h3>
+        <p>绝大多数手机是 <b>arm64</b>（即 arm64-v8a / AArch64）；MuMu 等安卓模拟器通常是 <b>x86_64</b>。
+          两个安装包体积相近，无法凭体积区分。装错架构不会被系统拒绝安装，而是在启动引擎时失败，
+          所以请以页面上方自动识别的结果为准；若识别不准可用「换另一个架构」手动切换。</p>
+      </div>
+      <div class="notes-item">
+        <h3>安装说明</h3>
+        <p>下载后点击安装包；若系统提示「未知来源」，需在设置中允许浏览器安装应用。
+          与已安装版本签名一致时可直接覆盖升级，数据保留。最低支持 Android 8.0（API 26）。</p>
+      </div>
+      <div class="notes-item">
+        <h3>常见问题 · 下载很慢或失败</h3>
+        <p>页面上方可在 GitHub 直连与加速线路之间切换，站点会自动实测并优先选择最快的线路。</p>
+      </div>
+      <div class="notes-item">
+        <h3>常见问题 · 安装包安全吗</h3>
+        <p>安装包全部来自 <a href="https://github.com/kelai141/dsh-mobile-apk/releases">GitHub Releases</a>，
+          本站不托管、不修改任何文件，并展示发布清单中的 SHA-256 供核对。</p>
+      </div>
+    </div>
   </section>
 </main>
 
 <footer class="wrap foot">
-  <p>
-    <a href="https://github.com/kelai141/dsh-mobile-apk">源码仓库</a>
-    <span class="sep">/</span>
-    <a href="https://github.com/kelai141/dsh-mobile-apk/releases">全部版本</a>
-  </p>
-  <p class="muted small">本站为第三方分发页，不收集任何用户数据，不使用 Cookie 与统计脚本。</p>
+  <div class="foot-grid">
+    <div>
+      <p class="foot-label">链接</p>
+      <p>
+        <a href="https://github.com/kelai141/dsh-mobile-apk">源码仓库</a>
+        <span class="sep" aria-hidden="true">/</span>
+        <a href="https://github.com/kelai141/dsh-mobile-apk/releases">全部版本</a>
+      </p>
+    </div>
+    <div>
+      <p class="foot-label">隐私</p>
+      <p class="muted small">本站为第三方分发页，不收集任何用户数据，不使用 Cookie 与统计脚本。</p>
+    </div>
+  </div>
+  <p class="colophon">dsh-mobile · 静态分发页 · 安装包由 GitHub Releases 提供</p>
 </footer>
 
 <!-- 构建期内联的 release 数据：首屏零额外请求，且天然不受 GitHub API 限流影响。 -->
