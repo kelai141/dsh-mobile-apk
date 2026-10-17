@@ -125,18 +125,21 @@ jobs:
           if [ ! -d .deploy-tmp/deepseek-harness/.git ]; then
             git clone --filter=blob:none --no-checkout --depth=1 https://github.com/deepseek-ai/deepseek-harness.git .deploy-tmp/deepseek-harness
           fi
-          git -C .deploy-tmp/deepseek-harness fetch --depth=1 origin 639ed015397290b3745d163aafe02ffee4aa3f84
-          git -C .deploy-tmp/deepseek-harness fetch --depth=1 origin refs/tags/dsh-v0.2.0-rc.2:refs/tags/dsh-v0.2.0-rc.2
+          # 合同是唯一真源（0.14.8 起不再写死）：写死的提交/标签会在每次引擎追版后静默失效。
+          COMMIT=$(node -p 'require("./scripts/contract.json").upstream.commit')
+          TAG=$(node -p 'require("./scripts/contract.json").baseline')
+          git -C .deploy-tmp/deepseek-harness fetch --depth=1 origin "$COMMIT"
+          git -C .deploy-tmp/deepseek-harness fetch --depth=1 origin "refs/tags/dsh-v$TAG:refs/tags/dsh-v$TAG"
           # A previous interrupted build may have modified tracked inputs before this checkout.
           # Reset only this dedicated source checkout; preserve ignored dependency caches.
           test "$(realpath .deploy-tmp/deepseek-harness)" = "$(realpath .)/.deploy-tmp/deepseek-harness"
           git -C .deploy-tmp/deepseek-harness checkout -- .
           git -C .deploy-tmp/deepseek-harness clean -fdq
-          git -C .deploy-tmp/deepseek-harness checkout --detach 639ed015397290b3745d163aafe02ffee4aa3f84
-          test "$(git -C .deploy-tmp/deepseek-harness rev-parse HEAD)" = "639ed015397290b3745d163aafe02ffee4aa3f84"
-          test "$(git -C .deploy-tmp/deepseek-harness describe --tags --always)" = "dsh-v0.2.0-rc.2"
-          node -e 'const c=require("./scripts/contract.json"); if(c.upstreamRepo!==".deploy-tmp/deepseek-harness" || c.baseline!=="0.2.0-rc.2" || c.upstream.commit!=="639ed015397290b3745d163aafe02ffee4aa3f84") throw Error("source workflow identity does not match contract")'
-          node -e 'const p=require("./.deploy-tmp/deepseek-harness/package.json"); if(p.version!=="0.2.0-rc.2" || p.packageManager!=="pnpm@11.7.0" || p.engines.node!=="^22.19.0 || >=24.0.0") throw Error("official Harness runtime policy changed")'
+          git -C .deploy-tmp/deepseek-harness checkout --detach "$COMMIT"
+          test "$(git -C .deploy-tmp/deepseek-harness rev-parse HEAD)" = "$COMMIT"
+          test "$(git -C .deploy-tmp/deepseek-harness describe --tags --always)" = "dsh-v$TAG"
+          node -e 'const c=require("./scripts/contract.json"); if(c.upstreamRepo!==".deploy-tmp/deepseek-harness" || !c.baseline || !c.upstream.commit) throw Error("source workflow identity does not match contract")'
+          node -e 'const c=require("./scripts/contract.json"), p=require("./.deploy-tmp/deepseek-harness/package.json"); if(p.version!==c.baseline || p.packageManager!=="pnpm@11.7.0" || p.engines.node!=="^22.19.0 || >=24.0.0") throw Error("official Harness runtime policy changed")'
 
       - name: Checkout pinned component sources
         shell: bash
@@ -212,7 +215,7 @@ jobs:
           const reportPath = `${process.env.GITHUB_WORKSPACE}/.deploy-tmp/source-build/harness-build-script-exclusion.json`
           const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex')
           const original = fs.readFileSync(path, 'utf8')
-          // Official 0.2.0-rc.2 appends the Electron desktop bundle to build:lib:host. This
+          // Official Harness appends the Electron desktop bundle to build:lib:host. This
           // source audit builds an Android APK: @deepseek-ai/dsh-desktop is private,
           // absent from the engine overlay, and outside the apps/cli production
           // deploy closure, while the recursive bundle pass below already bundles
@@ -856,6 +859,6 @@ jobs:
             .deploy-tmp/source-build/pnpm-package-materialization.json
             .deploy-tmp/source-build/engine-patch-copy-reconciliation.json
             scripts/patches/tests/fixtures/manifest.json
-            scripts/patches/tests/fixtures/*-0.2.0-rc.2/**
+            scripts/patches/tests/fixtures/*-*.*.*-rc.*/**
           if-no-files-found: error
           retention-days: 30

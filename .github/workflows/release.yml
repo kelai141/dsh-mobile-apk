@@ -225,10 +225,15 @@ jobs:
           set -e
           mkdir -p .deploy-tmp
           git clone --filter=blob:none --no-checkout https://github.com/deepseek-ai/deepseek-harness.git .deploy-tmp/deepseek-harness
-          git -C .deploy-tmp/deepseek-harness checkout --detach 639ed015397290b3745d163aafe02ffee4aa3f84
-          test "$(git -C .deploy-tmp/deepseek-harness rev-parse HEAD)" = "639ed015397290b3745d163aafe02ffee4aa3f84"
-          test "$(git -C .deploy-tmp/deepseek-harness describe --tags --always)" = "dsh-v0.2.0-rc.2"
-          node -e 'const c=require("./scripts/contract.json"), p=require("./.deploy-tmp/deepseek-harness/package.json"); if(c.upstreamRepo!==".deploy-tmp/deepseek-harness" || c.baseline!=="0.2.0-rc.2" || c.upstream.commit!=="639ed015397290b3745d163aafe02ffee4aa3f84" || p.version!==c.baseline || p.packageManager!=="pnpm@11.7.0") throw Error("release source identity does not match contract")'
+          # 提交与标签一律从合同读，不写死：写死会随每次引擎追版静默漂移，
+          # 0.14.8 追 0.2.1-rc.2 时该步直接判红（contract 已升而 workflow 仍钉 0.2.0-rc.2）。
+          # 合同是唯一真源；这里只断言「检出的树与合同逐字相符」。
+          COMMIT=$(node -p 'require("./scripts/contract.json").upstream.commit')
+          TAG=$(node -p 'require("./scripts/contract.json").baseline')
+          git -C .deploy-tmp/deepseek-harness checkout --detach "$COMMIT"
+          test "$(git -C .deploy-tmp/deepseek-harness rev-parse HEAD)" = "$COMMIT"
+          test "$(git -C .deploy-tmp/deepseek-harness describe --tags --always)" = "dsh-v$TAG"
+          node -e 'const c=require("./scripts/contract.json"), p=require("./.deploy-tmp/deepseek-harness/package.json"); if(c.upstreamRepo!==".deploy-tmp/deepseek-harness" || !c.baseline || !c.upstream.commit || p.version!==c.baseline || p.packageManager!=="pnpm@11.7.0") throw Error("release source identity does not match contract")'
           test -d .deploy-tmp/deepseek-harness/packages/client/ui-theme/src/styles || { echo "::error::上游令牌定义面缺席"; exit 1; }
       # 本地链期望的输入位是 .deploy-tmp/snapshot-013/<abi>/snapshot.tar.xz（**注入前**），
       # 注入/降级/门禁/打包都在链内完成。J1 产出的正是注入前快照，归置到该位置即可。
