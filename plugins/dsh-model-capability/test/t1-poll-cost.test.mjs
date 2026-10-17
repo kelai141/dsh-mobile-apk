@@ -135,7 +135,19 @@ function makeCtx(providers) {
   }
 }
 
-const flush = () => new Promise((resolve) => setTimeout(resolve, 40))
+// 固定 40ms 睡眠在慢机上是假失败源（0.14.8 CI 实测）：写回链路要跨若干微任务与一次
+// settings.mutate，CI 冷启动时 40ms 内跑不完，于是「写回 0 次」被判成「自触发环未收敛」。
+// 这里是**等待条件成立**，不是等待固定时长——判据强度不变，只去掉对机器速度的依赖。
+const flush = (ms = 40) => new Promise((resolve) => setTimeout(resolve, ms))
+/** 轮询等待谓词成立（默认最多 2s）；超时不抛错，交由调用方的断言给出真实判据。 */
+const waitFor = async (predicate, timeoutMs = 2000, stepMs = 10) => {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (predicate()) return true
+    await flush(stepMs)
+  }
+  return predicate()
+}
 
 const EV = 'settings/document-updated'
 
@@ -346,7 +358,9 @@ test('T1-⑥ 自触发环收敛：连续自身写回后签名稳定，不无限�
 
   // 用户保存新模型；此后每一轮都由「我方写回自己引发的那个事件」驱动。
   c.save((s) => ({ providers: { ...s.providers, gateway: { ...s.providers.gateway, models: [{ id: REAL_ID }] } } }))
-  await flush()
+  // 先等到「首次写回真的发生」，再给足余量观察是否出现第二次（自旋）。
+  // 固定轮次睡眠在慢机上会在首写回之前就断言，见 flush 处的说明。
+  await waitFor(() => c.state.mutates >= 1)
   await flush()
   await flush()
 
