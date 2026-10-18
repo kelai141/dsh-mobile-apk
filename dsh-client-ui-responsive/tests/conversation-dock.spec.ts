@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest'
 import { SidebarReorder, REORDER_ATTR } from '../src/client/mobile/sidebar-reorder.ts'
-import { ConversationDropZone, conversationAddress, conversationId, conversationTarget, resolveDockSubagent, registerConversationDock } from '../src/client/mobile/conversation-dock.tsx'
+import { ConversationDropZone, conversationAddress, conversationId, conversationTarget, existingConversation, resolveDockSubagent, registerConversationDock } from '../src/client/mobile/conversation-dock.tsx'
 
 function touch(type: string, target: HTMLElement, x: number, y = 100, multiple = false) {
   const e = new Event(type, { bubbles: true, cancelable: true })
@@ -157,20 +157,20 @@ describe('subagent identity resolution', () => {
     rows[0]!.querySelector('span')!.textContent = 'different'
     expect(resolveDockSubagent(rows[1]!, sessions as any, 'parent' as any)).toBeUndefined()
   })
-  it('opens an external subagent entry by plain session id (0.2.1-rc.2 catalog mode)', () => {
-    document.body.innerHTML = '<div role="tree"><div role="treeitem" aria-level="1"><span class="test_label">ext</span></div></div>'
-    const rows = [...document.querySelectorAll<HTMLElement>('[role=treeitem]')]
-    const state = { projectionsBySession: { parent: { values: { subagentCatalog: [
-      { id: 'e1', label: 'ext', mode: 'external' },
-    ] } } } }
-    const sessions = { list: { getSnapshot: () => state }, subagentAddress: () => undefined }
-    const target = resolveDockSubagent(rows[0]!, sessions as any, 'parent' as any)
-    expect(target).toBe('e1')
-    expect(conversationAddress(target!)).toBe('dsh-resource://conversation/session/e1')
-    expect(conversationTarget(conversationAddress(target!))).toBe('e1')
-  })
   it('rejects malformed direct-parent routes', () => {
     expect(conversationTarget('dsh-resource://conversation/session/child?parent=p&mode=broken')).toBeUndefined()
     expect(conversationTarget('dsh-resource://conversation/session/child?parent=&mode=continuable')).toBeUndefined()
+  })
+})
+
+
+describe('stable child tab identity', () => {
+  it('locates the same live child across direct and catalog addresses without confusing two children', () => {
+    const child = { parentSessionId: 'parent', childSessionId: 'child', mode: 'continuable' as const }
+    const tabs = [{ id: 'child-tab', kind: 'conversation', contentId: conversationAddress(child) }]
+    expect(existingConversation(tabs, 'child')).toBe('child-tab')
+    expect(existingConversation(tabs, { ...child, mode: 'one-shot' })).toBe('child-tab')
+    expect(existingConversation(tabs, 'different-child')).toBeUndefined()
+    expect(existingConversation([{ ...tabs[0], kind: 'browser' }], 'child')).toBeUndefined()
   })
 })

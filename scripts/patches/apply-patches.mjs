@@ -27,6 +27,7 @@ import { CLIENT_SCAN_MARKER, GATEWAY_CLIENT_MARKER, TYPERT_SCAN_MARKER, planClie
 import { CLIENT_INDEX_LOADER_BARRIER_MARKER, planClientIndexLoaderBarrier } from './data/client-index-loader-barrier.mjs'
 import { resolveEnginePatchFile } from './resolve-engine-patch-target.mjs'
 import { hasSidebarReorder, patchSidebarReorder } from './data/sidebar-bubble-reorder.mjs'
+import { hasSidebarKeepWide, patchSidebarKeepWide } from './data/sidebar-keep-wide-B2.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const registry = JSON.parse(readFileSync(join(HERE, 'registry.json'), 'utf8'))
@@ -148,6 +149,13 @@ const IMPLS = {
     file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar-right/lib/client.js',
     check: hasSidebarReorder,
     apply: patchSidebarReorder,
+  },
+
+  // 手机形态收起态仍挂载宽内容：把 260 元素的挂载从手势帧移走（0.14.8 手势实测）。
+  'sidebar-keep-wide-B2': {
+    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar/lib/client.js',
+    check: hasSidebarKeepWide,
+    apply: patchSidebarKeepWide,
   },
 
   // Raw npm pins do not include pnpm patchedDependencies; retain the official six-provider patch.

@@ -33,17 +33,18 @@
 
 | 文件 | 职责一句话 | 被引用 |
 |---|---|---|
-| OverlayService.kt | 三窗口（球/光环/面板）生命周期、拖动与四向钳制（0.14.1 块I 起**无贴边吸附**）、块H 完成位与报告栏窗口收口、探活与发送编排（session.prompt/cancel/create） | OverlayController、MainActivity、EngineService、协作类 |
+| OverlayService.kt | **常态三窗口**（球/光环/面板）+ **隐藏态第四窗**（召回条，由 OverlayRecall 懒建）生命周期、拖动与四向钳制（0.14.1 块I 起**无贴边吸附**）、块H 完成位与报告栏窗口收口、**悬浮球隐藏/召回**（`hideBall`/`recallBall`：球窗与光环窗 `removeView`、召回按 F8 z 序先光环后球重新入窗）、探活与发送编排（session.prompt/cancel/create） | OverlayController、MainActivity、EngineService、协作类 |
 | OverlayHalo.kt | 光环 drawable（**glow+ring 两层 LayerDrawable**，0.14.1 块I）/四态切换/syncHalo 同心 + deriveHalo 派生唯一权威；Halo 枚举（纯 Kotlin ARGB 字面量） | OverlayService |
-| OverlayPanel.kt | 展开面板视图构建/状态模板/待答卡渲染 + MuxClient 消费 + POST /api/respond 应答 + 状态行手势（块H：长按报告栏/三击跳转） | OverlayService、OverlayLiveFeed |
+| OverlayPanel.kt | 展开面板视图构建/状态模板/待答卡渲染 + MuxClient 消费 + POST /api/respond 应答 + 状态行手势（块H：长按报告栏/三击跳转）+ 顶行入口（隐藏悬浮球，与 ✕ 收起并列；`contentDescription="隐藏悬浮球"`） | OverlayService、OverlayLiveFeed |
 | OverlayLiveFeed.kt | FileObserver 监听 .live.ndjson 逐行 drain（turn_start/tool_call/tool_result/turn_end **+ 块H 的 kind 语义标签**）+ android_* 自动化避让 + debug 合成注入 | OverlayService |
-| OverlayTheme.kt | 系统明暗判定 + 展开态色板（ThemeColors） | OverlayService、OverlayPanel |
+| OverlayTheme.kt | 系统明暗判定 + 展开态色板（ThemeColors，含隐藏态召回条底色 `recallStrip`） | OverlayService、OverlayPanel |
 | MuxClient.kt | 手写 WebSocket 客户端（/api/remote.mux 下行，协议见 BRIDGE-API.md；可选 streamId 供通知应答流复用） | OverlayPanel、NotifyBridge |
 | ShimmerTextView.kt | Deep diving 扫光动效 TextView（LinearGradient shader） | OverlayService、OverlayPanel |
 | OverlayReport.kt | 0.14.1 块H 新增：报告栏独立顶层窗口（buildReportBar/showReport/hideReport/isShowing）+ 完成位状态机 CompletionNotice + 纯逻辑 reportLines/turnEndLabel/手势裁决函数 | OverlayService |
+| OverlayRecall.kt | 悬浮球隐藏态协作类：球/光环离屏后贴在最近水平边缘的召回条（懒建的第四个 overlay 窗口，8x44dp，NOT_FOCUSABLE+NOT_TOUCH_MODAL，窗口尺寸=可视尺寸）+ 贴边与召回落点纯函数（recallStripPlacement/recallBallPlacement，与 clampBallPos 同边界） | OverlayService |
 | OverlayController.kt | 悬浮球开关持久化 + 服务起停 + SYSTEM_ALERT_WINDOW 权限引导（偏好 ∧ 权限 ∧ 服务在场） | AndroidBridge lambda、MainActivity、OverlayService（注释） |
 
-注入方向：`OverlayService` 构造 `OverlayHalo(this)/OverlayPanel(this)/OverlayLiveFeed(this)`，OverlayPanel 内部再构造 `OverlayTheme(svc)`——统一为「构造注入服务引用、同包顶层类、无静态单例」。协作类只经 `svc.internal` 字段/方法读写共享状态，调用方向单向：Service → 协作类，协作类 → Service 公开面。
+注入方向：`OverlayService` 构造 `OverlayHalo(this)/OverlayPanel(this)/OverlayLiveFeed(this)/OverlayRecall(this)`，OverlayPanel 内部再构造 `OverlayTheme(svc)`——统一为「构造注入服务引用、同包顶层类、无静态单例」。协作类只经 `svc.internal` 字段/方法读写共享状态，调用方向单向：Service → 协作类，协作类 → Service 公开面（隐藏态召回条是这条方向的活例子：条只调 `svc.recallBall()`，隐藏态本身由 `OverlayService.hidden` 持有）。
 
 ## 3. 引擎运行时与保活
 
@@ -174,3 +175,9 @@ AI 工具（dsh-android-manage）
 ```
 
 两条通道**等价且无障碍优先**（PRD-0.13.2 §3.3 B3）；授权面在设置页「设备控制授权」：无障碍为主入口，ADB 折叠为高级/脚本面。
+
+### 移动端覆盖层内的双工作区
+
+响应式插件保持上游 DockLayout 的稳定 TabHost 与原生 row 状态，不重建或迁移正文祖先。`mobile-workspaces.ts` 封装当前固定引擎版本的 adopted Session store 适配点；所有布局写入调用原生 actions，适配面缺席时拒绝动作。竖屏网格呈上下、横屏呈左右；paneId 绑定标题与焦点，交换只改变整个工作区的物理位置。移动端通过 layout.openRightbar(false, fullscreen) 报告覆盖呈现，主对话不预留右侧轨道。
+
+渲染能力逐类型登记。原生 BrowserHost 仍是单 stage，禁止两个浏览器同时进入通用分屏；虚拟屏保留专用 viewer/设备生命周期。会话、子代理、终端开启已有 keepMounted 策略，浏览器保留既有策略。详细交互和验收见 `dsh-client-ui-responsive/docs/mobile-multitask-spec.md`。

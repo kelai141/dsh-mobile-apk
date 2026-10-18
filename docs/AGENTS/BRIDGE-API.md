@@ -62,6 +62,32 @@ exportConfig返回实际path与可能含provider密钥的共享目录警告hint�
 - `unlockRestrictedSettings()`：Android 13+ 一键解锁受限设置（`appops set <pkg> ACCESS_RESTRICTED_SETTINGS allow`，**0.14.0 起走 Shizuku 特权 shell**——内置 adb 已退役，旧文写的「壳侧 ADB 通道」是遗留措辞；未授权/未就绪失败关闭，返回 `{ok,message}`）。
 - 引擎侧只读状态端点 `/api/android/privilege/status` 新增 `control:{a11yEnabled,queue,tokenConfigured}` 与工具 `android_privilege_status` 的 `gates`/`control` 字段。
 
+## 0.14.9-preview 增量（悬浮球隐藏态与边缘召回条——块J，2026-09-28）
+
+> **桥面零变更**：本块不新增/不改任何 `androidBridge` 方法与控制 op（`check-bridge-symmetry.mjs`
+> 与 `check-control-ops.mjs` 不受影响）。它是**壳侧 UI 行为**：用户从展开面板里点 `隐藏`，
+> 球与光环离屏，屏缘留一条召回条。详档 `docs/0.14.9-preview-OVERLAY-BALL-HIDE.md`。
+
+- **入口**：展开面板顶行（会话选择行）`隐藏` 文字入口（`tag=overlay-hide-entry`、
+  `contentDescription="隐藏悬浮球"`、热区 44dp）→ `OverlayService.hideBall()`。
+  与 `✕ 收起面板`（`contentDescription="收起面板"`）**并列但语义不同**：✕ 只收面板（球还在），
+  隐藏是球离屏。桥面没有「隐藏」这个开关——设置页开关仍是唯一的**持久化**启停面。
+- **隐藏**（`hideBall`）：`hidePanel()` → `wm.removeView(rootView)` / `wm.removeView(haloView)`
+  → `OverlayRecall.show(球最后位置)`。**不是** alpha=0 / visibility=GONE / FLAG_NOT_TOUCHABLE：
+  overlay 窗口的命中矩形 = 窗口矩形，前两种会留下 34dp 隐形触区（0.13.2「互吞」同形），
+  第三种要改球窗 flags，而「球窗尺寸/标志全程不变」是 F8 硬约束。见坑 328。
+- **召回**（`recallBall`）：收条 → 光环窗、球窗**按 F8 z 序**（先光环、后球）重新 `addView`
+  → 球落在条所在的那条边（落点由纯函数 `recallBallPlacement` 给出，与 `clampBallPos` 同边界）。
+- **窗口面**：常态仍是 3 个 overlay 窗口（球/光环/面板）；隐藏期间多出**第 4 个**（召回条，
+  `TYPE_APPLICATION_OVERLAY` + `NOT_FOCUSABLE` + `NOT_TOUCH_MODAL`，8×44dp，窗口尺寸=可视尺寸）。
+  它**只在隐藏期间懒建**（`buildRoot` 的 `wm.addView` 计数仍为 2，`CallSiteContractTest` 的
+  I-A2 窗口计数不变）——所以任何「按窗口数做判据」的脚本都不受影响。
+- **服务语义**：隐藏**不停服务**（探活 / MuxClient / live 流照常），所以 `OverlayController.isEnabled`
+  （偏好 ∧ 权限 ∧ `OverlayService.instance != null`）在隐藏态仍为 true——这不是 ST-02 的
+  「显示开、事实不在」不一致：服务确实在场、召回条确实可见。
+- **不落盘**：隐藏态是 `OverlayService.hidden` 这个普通内存字段（只在主线程读写），无 prefs 键；
+  进程重建/服务重启即回位。长期不可见请走设置页开关（那条路才持久化）。
+
 ## 0.14.2 增量（Shizuku「重置链接」——P1，2026-09-26）
 
 > 背景：现场报障 —— Shizuku 已授权、通道一度「可创建」，随后跳成「需要准备」，**重新授权与重启 App 均无效**。

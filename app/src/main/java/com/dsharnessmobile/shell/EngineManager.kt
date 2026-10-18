@@ -2384,7 +2384,8 @@ class EngineManager(private val context: Context, private val pickToken: String?
       "UV_THREADPOOL_SIZE" to uvThreadPoolSize(Runtime.getRuntime().availableProcessors()).toString(),
       // 引擎 V8 老生代上限（0.14.8 堆下限）：**此前无人管理**——不设标志时 V8 只按物理内存推导，
       // 小内存设备上推出来的上限可能小到引擎 boot 期就 OOM（社区反馈「JavaScript 堆太小导致启动失败」）。
-      // 这里显式给出自适应值（见 engineHeapMb）：设备总内存的一半、下限 512MB、上限 1024MB。
+      // 这里显式给出自适应值（见 engineHeapMb）：设备总内存的一半、下限 512MB、上限 4096MB。
+      // 上限取 1024 会让「一半内存」分支在所有真机上被截断（0.14.8 缺陷），见 ENGINE_HEAP_CAP_MB。
       // 用 NODE_OPTIONS 而不是 argv，是因为 argv 会**覆盖** NODE_OPTIONS，二者不能同时表达同一件事；
       // 而 NODE_OPTIONS 还顺带覆盖所有经 shellEnv() 派生的子进程（工具子进程 / 控制台 / UndoGate）。
       // 实测口径：--max-old-space-size=N ⇒ heap_size_limit = N + 96MB；引擎最小可用堆约 70MB。
@@ -2519,8 +2520,30 @@ internal fun uvThreadPoolSize(cores: Int): Int = minOf(8, cores.coerceAtLeast(1)
 /** 引擎 V8 老生代上限的**下限**（MB）。低于此值时引擎连 boot 期的模块图都可能堆爆。 */
 internal const val ENGINE_HEAP_FLOOR_MB: Int = 512
 
-/** 引擎 V8 老生代上限的**上限**（MB）。再往上不放：堆开成多 GB 会被 lmkd 杀掉，且掩盖真实内存缺陷。 */
-internal const val ENGINE_HEAP_CAP_MB: Int = 1024
+/**
+ * 引擎 V8 老生代上限的**上限**（MB）。
+ *
+ * ⚠️ 这个值**必须显著大于** [ENGINE_HEAP_NATURAL_MAX_FLAG_MB]（1024）。0.14.8 原本取 1024，
+ * 与「重现 V8 自然推导最大值所需的标志」**逐值相等**，于是推导出的 `totalRam/2` 分支在每一台
+ * 真实设备上都被上限吃掉：结果恒为 1024（effective 1120MB），下限分支永远不可达。
+ * 实测后果就是社区反馈原话——「自适应下限没用，只能提上限」：用户只有改这个常量才能改变堆大小。
+ * 取 4096 让「一半内存」分支在 4GB 及以上设备真正生效（4GB→2048、6GB→3072、≥8GB→4096）。
+ *
+ * 为什么不担心「堆开太大被 lmkd 杀」：老生代上限是**天花板而非预分配**，V8 只在真需要时增长；
+ * lmkd 按真实 RSS 压力回收，与这个上限无关。反之，上限过低会让本来只是内存吃紧的引擎
+ * 直接 FATAL heap out of memory —— 引擎死掉严格劣于「在系统真压迫时被回收」。
+ */
+internal const val ENGINE_HEAP_CAP_MB: Int = 4096
+
+/**
+ * 重现 V8 **自然推导最大上限**所需的 `--max-old-space-size` 标志值（MB）。
+ *
+ * V8 不上限推导的实测天花板是 1120MB（6GB/4GB/16GB 设备均如此），而
+ * `--max-old-space-size=N ⇒ heap_size_limit = N + 96MB`，故复原它需要 N = 1024。
+ * 本常量是「上限不得低于自然推导」这条判据的**唯一真源**：上限一旦 ≤ 它，
+ * 自适应标志就退化成对 V8 的**向下覆盖**，本缺陷即复现。门禁 C2/F 逐值核对。
+ */
+internal const val ENGINE_HEAP_NATURAL_MAX_FLAG_MB: Int = 1024
 
 /**
  * 引擎 V8 老生代上限（MB）= clamp(设备总内存的一半, 下限 [ENGINE_HEAP_FLOOR_MB], 上限 [ENGINE_HEAP_CAP_MB])。
@@ -2533,7 +2556,11 @@ internal const val ENGINE_HEAP_CAP_MB: Int = 1024
  * - 不设标志：6GB 设备 1120MB、4GB 设备 1075MB、3GB 设备 844MB（纯由物理内存推导）；
  * - 设 --max-old-space-size=N：实际上限恒为 N+96MB（512 到 608、256 到 352、2048 到 2144）；
  * - 引擎最小可用堆约 70MB（64MB 起步在约 21s 内 FATAL heap out of memory）。
- * 故 [512, 1024] 既在最小可用值之上留足量级，又不越过实测的自然推导值太多。
+ * 故下限 [512] 在最小可用值之上留足量级。
+ *
+ * ⚠️ 上限必须**大于** [ENGINE_HEAP_NATURAL_MAX_FLAG_MB]：等于它时 `totalRam/2` 分支在真机上一律被
+ * 截断，函数退化成恒返回 1024 的常量、下限永不可达——这正是 0.14.8 的缺陷形态（社区反馈
+ * 「自适应下限没用，只能提上限」）。门禁 F 直接断言「存在真实设备档使结果落在区间内部」。
  *
  * 提到顶层是为了可断言——shellEnv() 需要 Context，JVM 单测拿不到；这里只锁「值」这一半，
  * 「注入进 shellEnv()」那一半由 W3ShellContractTest 的源码扫描锁定（与 [uvThreadPoolSize] 同款）。

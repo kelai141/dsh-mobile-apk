@@ -33,17 +33,41 @@ class EngineBootInstrumentationTest {
 
   @Test
   fun engineHeapIsHalfOfDeviceRamClampedIntoFloorAndCap() {
-    // 取值口径 = clamp(总内存/2, 512, 1024)。三条边界都必须可判红：
+    // 取值口径 = clamp(总内存/2, 512, 4096)。三条边界都必须可判红：
     // 小内存设备（含社区反馈那类）不得推出小于下限的值——那正是「堆太小起不来」的成因；
-    // 大内存设备不得无限放大——堆开到数 GB 会被 lmkd 杀掉，也掩盖真实内存缺陷。
-    assertEquals("2GB 设备：一半 1024，恰好触顶", 1024, engineHeapMb(2048))
-    assertEquals("4GB 设备：一半 2048 被上限压到 1024", 1024, engineHeapMb(4096))
-    assertEquals("6GB 设备：同上，上限不随内存增长", 1024, engineHeapMb(6144))
+    // 大内存设备不得无限放大——上限挡住失控（但上限必须远高于 V8 自然档，见下一个用例）。
+    assertEquals("2GB 设备：一半 1024 落在区间内部，不被任何端点吃掉", 1024, engineHeapMb(2048))
+    assertEquals("4GB 设备：一半 2048 真正生效", 2048, engineHeapMb(4096))
+    assertEquals("6GB 设备：一半 3072 真正生效", 3072, engineHeapMb(6144))
+    assertEquals("8GB 设备：一半 4096 恰好触顶", 4096, engineHeapMb(8192))
+    assertEquals("16GB 设备：被上限压到 4096，不再随内存增长", 4096, engineHeapMb(16384))
     assertEquals("2GB 以下：一半 512 恰好触底", 512, engineHeapMb(1024))
     assertEquals("1.5GB 设备：一半 768 高于下限，保留下限之外的真实推导", 768, engineHeapMb(1536))
-    assertEquals("1GB 设备：一半 512 恰好下限", 512, engineHeapMb(1024))
     assertEquals("512MB 设备：一半 256 被下限抬起（这是本缺陷的核心判据）", 512, engineHeapMb(512))
     assertEquals("256MB 设备：同样抬到下限而不是推算出 128", 512, engineHeapMb(256))
+  }
+
+  @Test
+  fun engineHeapCapDoesNotFlattenTheHalfOfRamBranchOnRealDevices() {
+    // 0.14.8 的真实缺陷（社区反馈「自适应下限没用，只能提上限」）：
+    // 上限取 1024，而 1024 恰是「重现 V8 自然上限（1120MB）」所需的标志档，于是
+    // totalRam/2 在**每一台真实设备**上都被截断 ⇒ 函数退化成常量 1024、下限永不可达。
+    // 这条判据直接锁「在真实设备档上确实落在区间内部」，而不是只看 clamp 形态。
+    assertTrue(
+      "上限必须严格大于自然标志档，否则自适应标志是对 V8 的向下覆盖",
+      ENGINE_HEAP_CAP_MB > ENGINE_HEAP_NATURAL_MAX_FLAG_MB,
+    )
+    // 真实在售机型的总内存档（1/2/3/4/6/8GB）：除最大档外都必须落在区间内部，不得恒等于上限。
+    val realDeviceRamMb = listOf(1024, 2048, 3072, 4096, 6144)
+    for (ram in realDeviceRamMb) {
+      val heap = engineHeapMb(ram)
+      assertTrue(
+        "${ram}MB 设备拿到 ${heap}，不得被上限截断成常量（那正是 0.14.8 缺陷）",
+        heap != ENGINE_HEAP_CAP_MB,
+      )
+      assertTrue("${ram}MB 设备的堆不得低于下限", heap >= ENGINE_HEAP_FLOOR_MB)
+    }
+    assertEquals("6GB 设备必须真的拿到 3072，而不是被截成 1024", 3072, engineHeapMb(6144))
   }
 
   @Test
@@ -53,7 +77,7 @@ class EngineBootInstrumentationTest {
     assertEquals("未知内存必须退回下限而不是 0", 512, engineHeapMb(0))
     assertEquals("负值同样退回下限", 512, engineHeapMb(-1))
     assertEquals(512, engineHeapMb(Int.MIN_VALUE))
-    assertEquals("极大值被上限压住，不得溢出成负数", 1024, engineHeapMb(Int.MAX_VALUE))
+    assertEquals("极大值被上限压住，不得溢出成负数", 4096, engineHeapMb(Int.MAX_VALUE))
   }
 
   @Test
@@ -61,6 +85,7 @@ class EngineBootInstrumentationTest {
     // 注入给 node 的必须是**合法可解析**的标志，且任何输入都不得产出小于下限的标志。
     assertEquals("--max-old-space-size=512", heapOptionFrom(512))
     assertEquals("--max-old-space-size=1024", heapOptionFrom(1024))
+    assertEquals("--max-old-space-size=4096", heapOptionFrom(4096))
     assertEquals("低于下限的输入被抬回下限", "--max-old-space-size=512", heapOptionFrom(64))
     assertEquals("正是实测会 FATAL 的那一档，绝不允许被注入", "--max-old-space-size=512", heapOptionFrom(32))
     assertEquals("0 同样按下限处理（绝不产出 0MB 这种必然 FATAL 的标志）", "--max-old-space-size=512", heapOptionFrom(0))

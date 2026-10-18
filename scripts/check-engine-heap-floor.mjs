@@ -9,7 +9,7 @@
 // 这种最难查的形态：引擎起来了、`code run` 却仍然 OOM，而两处代码看上去都对。
 //
 // 判据（每条都可判红）：
-//   A. 壳侧两个常量必须存在且为正值（512 / 1024），取值必须走 clamp 而不是裸除法；
+//   A. 壳侧两个常量必须存在且为正值（512 / 4096），取值必须走 clamp 而不是裸除法；
 //   B. 启动器必须在**设备上**按 MemTotal 自适应、且 clamp 到同一区间；
 //   C. A 与 B 的上下限数字必须**逐值相等**（本门禁的核心判据）；
 //   D. 启动器不得覆盖调用方已设置的 NODE_OPTIONS（显式值优先于默认值）；
@@ -66,6 +66,26 @@ export function analyze(kotlinSrc, wrapperSrc) {
     findings.push("A: 读不到设备内存时必须退回下限（未知不得当未知处理）")
   }
 
+  // ── F：上限必须严格大于「重现 V8 自然上限所需的标志值」───────────────────────
+  // 0.14.8 的真实缺陷：CAP 取 1024，与 V8 自然推导天花板（1120MB ⇒ 标志 1024）逐值相等，
+  // 于是 totalRam/2 分支在每台真机上都被截断，取值退化成常量 1024、下限永不可达。
+  // 判据不能只写「CAP > FLOOR」（1024 > 512 会放过这个缺陷），必须对 V8 自然档判。
+  const naturalM = /ENGINE_HEAP_NATURAL_MAX_FLAG_MB:\s*Int\s*=\s*(\d+)/.exec(kotlinSrc)
+  if (!naturalM) {
+    findings.push("F: 壳侧缺 ENGINE_HEAP_NATURAL_MAX_FLAG_MB（无法判定上限是否向下覆盖了 V8 自然推导）")
+  } else {
+    values.naturalFlag = Number(naturalM[1])
+    if (values.cap !== null && values.cap <= values.naturalFlag) {
+      findings.push("F: 上限 " + values.cap + " ≤ V8 自然上限标志档 " + values.naturalFlag
+        + "（自适应标志退化成对 V8 的向下覆盖；totalRam/2 分支在真机上恒被截断，下限永不可达——0.14.8 缺陷复现）")
+    }
+  }
+  // 自适应必须真有可能落在区间内部：否则 clamp 只是恒返回某个端点。
+  if (values.floor !== null && values.cap !== null && values.cap - values.floor < 1024) {
+    findings.push("F: 区间 [" + values.floor + "," + values.cap + "] 过窄（<1024MB），"
+      + "「总内存一半」几乎必然被某个端点吃掉，等于没有自适应")
+  }
+
   // ── B：启动器侧自适应 ────────────────────────────────────────────────────
   if (!/\/proc\/meminfo/.test(wrapperSrc)) findings.push("B: 启动器未读 /proc/meminfo（无法在设备上自适应）")
   if (!/MemTotal:/.test(wrapperSrc)) findings.push("B: 启动器未解析 MemTotal")
@@ -118,7 +138,8 @@ export function analyze(kotlinSrc, wrapperSrc) {
 // ── 判别力自检：合成样本必须能判红 ────────────────────────────────────────────
 const GOOD_KOTLIN = [
   "internal const val ENGINE_HEAP_FLOOR_MB: Int = 512",
-  "internal const val ENGINE_HEAP_CAP_MB: Int = 1024",
+  "internal const val ENGINE_HEAP_CAP_MB: Int = 4096",
+  "internal const val ENGINE_HEAP_NATURAL_MAX_FLAG_MB: Int = 1024",
   "  if (totalRamMb <= 0) return ENGINE_HEAP_FLOOR_MB",
   "  return (totalRamMb / 2).coerceIn(ENGINE_HEAP_FLOOR_MB, ENGINE_HEAP_CAP_MB)",
   "  val args = arrayOf(nodeBin.absolutePath, \"--expose-internals\", dshBin.absolutePath)",
@@ -130,7 +151,7 @@ const GOOD_WRAPPER = [
   "  if [ \"$__dsh_key\" = \"MemTotal:\" ]; then __dsh_mem_kb=$__dsh_val; break; fi",
   "  __dsh_heap=$(( __dsh_mem_kb / 2048 ))",
   "  [ \"$__dsh_heap\" -lt 512 ] && __dsh_heap=512",
-  "  [ \"$__dsh_heap\" -gt 1024 ] && __dsh_heap=1024",
+  "  [ \"$__dsh_heap\" -gt 4096 ] && __dsh_heap=4096",
   "  export NODE_OPTIONS=\"--max-old-space-size=$__dsh_heap\"",
   "fi",
   "export LD_LIBRARY_PATH=\"/x/lib\"",
@@ -162,10 +183,27 @@ function selfTest() {
   expect("负控 C2：启动器除数被改成 1024（只取 1/4）", GOOD_KOTLIN, GOOD_WRAPPER.replace("2048", "1024"), true)
   expect("负控 D1：启动器无条件覆盖 NODE_OPTIONS", GOOD_KOTLIN, GOOD_WRAPPER.replace('if [ -z "$NODE_OPTIONS" ]; then', "if true; then"), true)
   expect("负控 E1：argv 混入堆标志", GOOD_KOTLIN.replace('"--expose-internals"', '"--expose-internals", "--max-old-space-size=256"'), GOOD_WRAPPER, true)
-  expect("负控 C3：壳侧上限被改坏（与启动器分叉）", GOOD_KOTLIN.replace("ENGINE_HEAP_CAP_MB: Int = 1024", "ENGINE_HEAP_CAP_MB: Int = 2048"), GOOD_WRAPPER, true)
+  expect("负控 C3：壳侧上限被改坏（与启动器分叉）", GOOD_KOTLIN.replace("ENGINE_HEAP_CAP_MB: Int = 4096", "ENGINE_HEAP_CAP_MB: Int = 2048"), GOOD_WRAPPER, true)
+  // C3 的变异体会让壳侧 2048 与启动器 4096 分叉，同时触发 F —— 这里单独锁 F 的**独立**判别力：
+  // 双源一致（都是 1024）却正好等于 V8 自然档，正是 0.14.8 的原始缺陷形态，必须判红。
+  expect("负控 F1：双源一致但上限=1024（正好向下覆盖 V8 自然推导，即 0.14.8 原缺陷）",
+    GOOD_KOTLIN.replace("ENGINE_HEAP_CAP_MB: Int = 4096", "ENGINE_HEAP_CAP_MB: Int = 1024"),
+    GOOD_WRAPPER.replace(/-gt 4096/, "-gt 1024").replace("=4096", "=1024"),
+    true)
+  // F2 抬「自然标志档」而不是抬上限：抬上限仍 >1024 属合法放宽，不应判红（那不是缺陷）。
+  // 真正要判红的是「上限 ≤ 自然标志档」，故把 N 抬到与 CAP 相等。
+  expect("负控 F2：上限正好等于自然标志档（cap ≤ N，无向下覆盖余量）",
+    GOOD_KOTLIN.replace("ENGINE_HEAP_NATURAL_MAX_FLAG_MB: Int = 1024", "ENGINE_HEAP_NATURAL_MAX_FLAG_MB: Int = 4096"),
+    GOOD_WRAPPER,
+    true)
+  expect("负控 F3：区间过窄（上限仅比下限高 512MB，自适应必然被端点吃掉）",
+    GOOD_KOTLIN.replace("ENGINE_HEAP_CAP_MB: Int = 4096", "ENGINE_HEAP_CAP_MB: Int = 1024")
+      .replace("ENGINE_HEAP_NATURAL_MAX_FLAG_MB: Int = 1024", "ENGINE_HEAP_NATURAL_MAX_FLAG_MB: Int = 768"),
+    GOOD_WRAPPER.replace(/-gt 4096/, "-gt 1024").replace("=4096", "=1024"),
+    true)
 
   if (stFail > 0) { console.log("CHECK-ENGINE-HEAP-FLOOR SELF-TEST FAILED（" + stFail + " 项）"); process.exit(1) }
-  console.log("CHECK-ENGINE-HEAP-FLOOR SELF-TEST PASSED（正样本 1 + 受控负控 8）")
+  console.log("CHECK-ENGINE-HEAP-FLOOR SELF-TEST PASSED（正样本 1 + 受控负控 11）")
   process.exit(0)
 }
 

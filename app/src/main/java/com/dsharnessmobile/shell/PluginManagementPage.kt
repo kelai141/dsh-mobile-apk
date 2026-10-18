@@ -104,6 +104,7 @@ internal class PluginManagementPage(
   private lateinit var searchControls: View
   private var startPendingUntil = 0L
   private var apiWaitSince = 0L
+  private var offlinePanel: PluginOfflinePanel? = null
   private val retryLoad = Runnable { load() }
 
   val view: View get() = root
@@ -251,7 +252,9 @@ internal class PluginManagementPage(
           if (disposed || activity.isFinishing || activity.isDestroyed) return@runOnUiThread
           loading = false
           setBusy(false)
-          showEngineAvailability(availability)
+          // 引擎没起来不等于「不能管理插件」：离线数据源直接读写 live 装配清单，
+          // 用户才可能先把会导致崩溃的 soft 插件关掉、再启动引擎。
+          showOfflineManagement(availability)
         }
         return@execute
       }
@@ -274,7 +277,7 @@ internal class PluginManagementPage(
           loading = false
           setBusy(false)
           if (!stillRunning) {
-            showEngineAvailability(pluginEngineAvailability(activity.userClosedEngine || EngineService.userShutdown,
+            showOfflineManagement(pluginEngineAvailability(activity.userClosedEngine || EngineService.userShutdown,
               false, false, activity.guideRenderer.lastGuidePhase,
               android.os.SystemClock.elapsedRealtime() < startPendingUntil))
           } else {
@@ -293,13 +296,52 @@ internal class PluginManagementPage(
     }
   }
 
+  /** 在线路径的列表（引擎活着，走 pluginManager RPC）。 */
   private fun showList() {
+    offlinePanel = null
     showingDetail = false
     searchControls.visibility = View.VISIBLE
     content.removeAllViews()
     content.addView(list, FrameLayout.LayoutParams(-1, -1))
     content.addView(error, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
     error.visibility = View.GONE
+  }
+
+  /**
+   * 离线路径：引擎没起来时仍可管理 soft 插件（直接读写 live 装配清单）。
+   *
+   * 为什么必须在这里而不是只给一个「启动引擎」按钮：会导致引擎起不来的插件，恰恰是用户唯一需要
+   * 先关掉的东西；旧实现把它挡在「先起引擎」之后，形成死循环。
+   * 启动中的状态不抢页面（用户正在等引擎起来），但按钮仍可用；启动失败与未启动一律给离线列表。
+   */
+  private fun showOfflineManagement(state: PluginEngineAvailability) {
+    showingDetail = false
+    allRows = emptyList()
+    adapter.rows = emptyList()
+    adapter.notifyDataSetChanged()
+    searchControls.visibility = View.GONE
+    error.visibility = View.GONE
+    if (state == PluginEngineAvailability.STARTING) {
+      showEngineAvailability(state)
+      return
+    }
+    val panel = offlinePanel ?: PluginOfflinePanel(activity).also { offlinePanel = it }
+    panel.reload()
+    content.removeAllViews()
+    content.addView(panel.view, FrameLayout.LayoutParams(-1, -1))
+  }
+
+  /** 离线态的「启动引擎」主入口：仍复用引导页主按钮（含维护隔离与恢复闸门），只是不再挡列表。 */
+  private fun launchEngineFromHere() {
+    val primary = activity.guideRenderer.chrome.primaryButton
+    if (!primary.isEnabled) {
+      showEngineAvailability(PluginEngineAvailability.STARTING)
+      return
+    }
+    startPendingUntil = android.os.SystemClock.elapsedRealtime() + 15_000L
+    apiWaitSince = 0L
+    // Use the existing explicit launch outlet, including its maintenance and recovery guards.
+    primary.performClick()
   }
 
   private fun showEngineAvailability(state: PluginEngineAvailability) {
@@ -333,19 +375,8 @@ internal class PluginManagementPage(
       }, LinearLayout.LayoutParams(dp(28), dp(28)))
       root.postDelayed(retryLoad, 1_500L)
     } else {
-      panel.addView(actionButton(if (failed) "返回管理中心" else "启动引擎并加载插件") {
-        if (failed) onBack() else {
-          val primary = activity.guideRenderer.chrome.primaryButton
-          if (!primary.isEnabled) {
-            showEngineAvailability(PluginEngineAvailability.STARTING)
-          } else {
-            startPendingUntil = android.os.SystemClock.elapsedRealtime() + 15_000L
-            apiWaitSince = 0L
-            // Use the existing explicit launch outlet, including its maintenance and recovery guards.
-            primary.performClick()
-            showEngineAvailability(PluginEngineAvailability.STARTING)
-          }
-        }
+      panel.addView(actionButton(if (failed) "返回管理中心" else "启动引擎") {
+        if (failed) onBack() else launchEngineFromHere()
       }.apply {
         setTextColor(textOnAccent)
         background = DsUi.ripple(DsUi.roundRect(accent, dp(8).toFloat()), activity.getColor(R.color.ds_accent_pressed))

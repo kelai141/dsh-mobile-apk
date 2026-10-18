@@ -184,3 +184,7 @@ Harness按固定0.2.0-rc.2源码完成全仓构建；prepare-harness-vendor-over
 ## Android SDK 许可资产
 
 `third-party-licenses.json` 除 dpkg 矩阵还登记 Shizuku api/provider/aidl/shared 13.1.5（官方固定版本 POM 的 MIT 许可）。`check-third-party.mjs` 校验实际 Gradle 版本与固定 MIT 文本 SHA256；本地和 portable 构建门禁从实际快照生成 notices，再将 `LICENSES/*.txt` 和 notices 复制到 `assets/licenses/`。缺文本、改文本、未登记版本或无法核实依赖必须拒打包；PR 与本地入口跑 `check-third-party.test.mjs`。最终包另需检查两个 ABI 的实际 assets，源码门禁不替代它。
+
+### WSL 调 Windows PowerShell 的可执行扩展名
+
+本轮隔离开发链发现：WSL 派生的 PowerShell 可能继承只有 `.CPL` 的 PATHEXT，导致 node.exe 已在 PATH、`Get-Command node` 仍失败。先读取环境并保留日志；仅在该构建子进程中补上 `.COM;.EXE;.BAT;.CMD`，同时加入 Windows System32、Node 与 JDK 路径。不要修改用户全局环境或把此问题当成缺少 Node 依赖。

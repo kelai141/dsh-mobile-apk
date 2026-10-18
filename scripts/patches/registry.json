@@ -341,6 +341,14 @@
       "summary": "Agent resolver 单槽注册改为同槽覆盖——cordis 重启 fiber 的顺序是「先跑新实例 body、后释放旧 effect」，上游对已占用槽直接 throw ⇒ session-controller 每次重启即判 FAILED，sessionController 服务永久缺席（在设置里换一次默认模型即触发）",
       "provenance": "2026-09-28 模拟器 5556 实锤：设置里换一次默认模型 → 内置插件面板 196 个里 1 个失败（api-session-controller），此后新建会话/切模型恒报 sessionController is unavailable；诊断版 cordis（fiber 失败点写 stderr）拿到 file-upload: Agent resolver is already registered 栈；补丁后同机切模型 3 次 = 0 失败、0 报错",
       "marker": "dsh-mobile file-upload resolver replace (R1)"
+    },
+    {
+      "id": "sidebar-keep-wide-B2",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar/lib/client.js",
+      "scope": "engine",
+      "summary": "手机形态让左抽屉收起态仍挂载宽内容（wide 恒真）+ 收起时不写 56px 内联宽度冻结；把 260 元素的 React 挂载从手势 touchmove 帧上移走",
+      "provenance": "2026-10-18 侧边栏手势真机实测：开方向拖动期 136ms 帧停顿 vs 关方向 69ms，根因是收起态卸载宽内容后手势内 ensureOpen 触发重挂载",
+      "marker": "dsh-mobile sidebar keep wide (B2)"
     }
   ],
   "retired": [

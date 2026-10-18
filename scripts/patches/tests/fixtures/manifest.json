@@ -1212,6 +1212,31 @@
       "patchIds": [
         "atomic-stale-lock-F4"
       ]
+    },
+    "dsh-client-ui-sidebar-0.2.1-rc.2": {
+      "source": "engine-tgz",
+      "engine": "0.2.1-rc.2",
+      "package": "@deepseek-ai/dsh-client-ui-sidebar@0.2.1-rc.2",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-client-ui-sidebar-0.2.1-rc.2.tgz",
+        "tarballSha256": "e81aff6896a6c033b800e294d281997c1b10698f4973193acadf717614366a21",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/client.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/client.js": "4d4535b9ac9160e13067b1f8a8510d158da2aaf6a15191b418a5956261ff9b3e",
+        "package.json": "905c4de684d51d1dd28023e8a1c1130e730a10165abc621e2dad90f7979f17bf"
+      },
+      "targets": {
+        "lib/client.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar/lib/client.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar/package.json"
+      },
+      "patchIds": [
+        "sidebar-keep-wide-B2"
+      ]
     }
   },
   "capture": {
@@ -1223,6 +1248,6 @@
       ]
     },
     "overlaySha256": "87486df7cf65e8199902e3b855987aad7ba155693bb9b69ab7efedf2168afb2a",
-    "registrySha256": "17612572dea271ac856a3224024f2af136b972ce6bb443cc69856a2950cea6eb"
+    "registrySha256": "c93ded50bab0e8d8b4ac400729045ccef4c8c1445c1027ed8e58af69aba5ced8"
   }
 }

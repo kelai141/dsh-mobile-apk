@@ -111,11 +111,17 @@ check('wrapper 不引用 TERMUX_APP__LEGACY_DATA_DIR（防「钩子重定向 wra
 // 判据三条：未设时自适应填值 / 用前先判空（不得覆盖调用方显式值）/ 落在 exec 之前才生效。
 check('wrapper 在 NODE_OPTIONS 未设置时才填堆下限（不得覆盖调用方显式值）',
   wrapperBlock.includes('if [ -z "$NODE_OPTIONS" ]; then'))
-check('wrapper 按设备 MemTotal 自适应算堆（clamp 到 512-1024MB）',
+check('wrapper 按设备 MemTotal 自适应算堆（clamp 到 512-4096MB）',
   wrapperBlock.includes('/proc/meminfo') &&
     /__dsh_mem_kb \/ 2048/.test(wrapperBlock) &&
     wrapperBlock.includes('[ "$__dsh_heap" -lt 512 ]') &&
-    wrapperBlock.includes('[ "$__dsh_heap" -gt 1024 ]'))
+    wrapperBlock.includes('[ "$__dsh_heap" -gt 4096 ]'))
+// 上限 1024 是 0.14.8 的真实缺陷：它正好是 V8 自然上限（1120MB）对应的标志档，
+// 于是 MemTotal/2 分支在所有真机上被截断，自适应形同虚设（社区反馈「只能提上限」）。
+// 这条判据让该缺陷在 wrapper 侧也判红，而不只在 Kotlin 侧。
+check('wrapper 上限不得退化成 1024（否则 /2 分支在真机上恒被截断）',
+  !wrapperBlock.includes('[ "$__dsh_heap" -gt 1024 ]') &&
+    !/__dsh_heap=1024\b/.test(wrapperBlock))
 check('wrapper 导出的堆标志落在 exec 之前（否则对本次进程无效）',
   wrapperBlock.indexOf('export NODE_OPTIONS=') >= 0 &&
     wrapperBlock.indexOf('export NODE_OPTIONS=') < wrapperBlock.indexOf('exec /system/bin/linker64'))

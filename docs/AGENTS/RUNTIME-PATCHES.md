@@ -106,6 +106,7 @@
 | `ptc-argv-L1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-ptc-runtime-node/lib/index.js` |
 | `ptc-android-native-A1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-ptc-runtime-node/lib/index.js`<br>`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-ptc-runtime-node/lib/process.js` |
 | `file-upload-restart-R1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-file-upload/lib/index.js` |
+| `sidebar-keep-wide-B2` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar/lib/client.js` |
 
 已退役登记：`market-A`、`market-C`、`atomic-stale-lock-F4`。历史章节保留退役前语义；活动状态以本表和 registry 为准。
 <!-- generated:active-registry:end -->
@@ -133,6 +134,8 @@
 （fixture = 0.1.5-rc.1 产物；`.deploy-tmp/` 下的临时预检脚本不入库，勿再引用）。
 
 ### 7.1 构建期引擎补丁历史与实现说明（活动状态见 §6.1）
+
+- **sidebar-keep-wide-B2（2026-10-18）**：`dsh-client-ui-sidebar/lib/client.js` 让**手机形态**的 `wide` 恒真（收起态仍挂载宽内容），并取消手机收起态的内联宽度冻结。动机：上游收起 150ms 后卸载宽内容（真机 326 元素 / 约 54KB 到 66 元素 / 约 10KB），而手机抽屉由手势驱动，`ensureOpen` 的重新挂载正落在手指还按着的帧上（开方向拖动期 136ms vs 关方向 69ms）。**两条锚点必须一起打**：`lastWideWidth` 在收起期间不更新且初值等于传入 width（手机窄屏算出 56px），只改 `wide` 会让跟手首帧看到一帧压扁抽屉、设置面板路径常驻 56px 压缩抽屉。口径收窄为「非桌面 titlebar 且 `data-dsh-mobile-form`」，桌面端逐格不变（八格真值表只有「手机 + 收起 + 已 settle」一格变化）。marker 随第一条替换落进产物供 `check-engine-overlay` 抽验。真实夹具、幂等、三向负控、真值表与 runner 集成测试见 `scripts/patches/tests/sidebar-keep-wide-B2.test.mjs`。**设备实测否定了「rail 搜索按钮会消失」的源码推断**：`WorkspaceBrowser` 拿到的 `wide` 来自 shell 的 `collapsed`，不是 `SidebarRoot` 这个局部变量。
 
 - **sidebar-bubble-reorder-B1（2026-10-17）**：`dsh-client-ui-sidebar-right/lib/client.js` 增加 `reorderIn(session, tab, before)`。复用原 store 的 `placeTab`，恢复原活动标签；仅操作当前挂载会话的 dock 同分栏，拒绝失效会话、浮动页、跨分栏与无效/无变化目标。补丁接受本代 npm 发布包锚点；Android 源码构建产物夹具本轮退役（见 §7.7），该路径的回归用例显式 skip 并打印缺席原因；未知或部分损坏字节拒绝写入。真实夹具、幂等、损坏输入和 runner 集成测试见 `scripts/patches/tests/sidebar-bubble-reorder.test.mjs`。
 

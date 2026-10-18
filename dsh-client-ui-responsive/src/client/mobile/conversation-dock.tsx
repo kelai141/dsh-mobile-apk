@@ -35,6 +35,28 @@ export function conversationId(address: string): SessionId | undefined {
     return id ? id as SessionId : undefined
   } catch { return undefined }
 }
+/** Child identity is independent of catalog mode/address spelling. Never duplicate a live child view. */
+export function existingConversation(tabs: readonly { id: string; kind: string; contentId: string }[], target: DockSessionTarget): string | undefined {
+  const id = typeof target === 'string' ? target : target.childSessionId
+  return tabs.find(tab => (tab.kind === 'conversation' || tab.kind === 'subagentchat')
+    && conversationId(tab.contentId.replace('dsh-resource://subagentchat/session/', PREFIX)) === id)?.id
+}
+
+/** Both the upstream child popover and the left drawer keep their own opening paths. */
+export function retainDockIdentity(sidebar: Pick<Context['sidebarRight'], 'mounted' | 'tabsIn' | 'focus' | 'openResource'>): () => void {
+  const original = sidebar.openResource
+  const wrapped: typeof original = (...args) => {
+    const [address] = args
+    const id = conversationId(address.replace('dsh-resource://subagentchat/session/', PREFIX))
+    const owner = sidebar.mounted.getSnapshot()
+    const existing = id && owner ? existingConversation(sidebar.tabsIn(owner), id) : undefined
+    if (existing) { sidebar.focus(existing as Parameters<typeof sidebar.focus>[0]); return }
+    original.apply(sidebar, args)
+  }
+  sidebar.openResource = wrapped
+  return () => { if (sidebar.openResource === wrapped) sidebar.openResource = original }
+}
+
 export function conversationTarget(address: string): DockSessionTarget | undefined {
   const id = conversationId(address)
   if (id === undefined) return undefined
@@ -84,7 +106,7 @@ export function registerConversationDock(ctx: Context): void {
   }
   ctx.effect(() => ctx.resources.register(provider), 'ui-responsive: conversation resource')
   ctx.effect(() => ctx.sidebarRightTabs.register({
-    id: ID, kind: 'conversation', patterns: [PREFIX + '**'], priority: 'extension',
+    id: ID, kind: 'conversation', keepMounted: true, patterns: [PREFIX + '**'], priority: 'extension',
     canOpen: address => conversationTarget(address) !== undefined,
     title: address => {
       const target = conversationTarget(address)
@@ -94,6 +116,12 @@ export function registerConversationDock(ctx: Context): void {
         if (label) return label
       }
       const id = conversationId(address)
+      if (id !== undefined) {
+        for (const projection of Object.values(snapshot.projectionsBySession)) {
+          const label = projection?.values.subagentCatalog?.find(entry => entry.id === id)?.label
+          if (label) return label
+        }
+      }
       return (id === undefined ? undefined : snapshot.byId[id]?.title) ?? '对话'
     },
   }), 'ui-responsive: conversation tab')
@@ -131,12 +159,13 @@ export function resolveDockSubagent(
         if (!node || Number(node.getAttribute('aria-level')) !== depth
           || node.querySelector('[class*="_label"]')?.textContent !== (entry.label ?? entry.id)
           || (node.getAttribute('aria-current') === 'true' && entry.id !== current)) { valid = false; return }
-        // 0.2.1-rc.2：目录条目的 mode 新增 'external'（外部创建的子代理任务）。它不是 durable 子代理地址
-        // （SubagentAddress.mode 不含 'external'，上游 manager/service 均显式跳过它），但仍是一个真实会话 id
-        // ⇒ 以纯 SessionId 打开，不构造 parent+mode 地址。
-        if (node === row) match = entry.mode === 'external'
-          ? entry.id
-          : { parentSessionId: parent, childSessionId: entry.id, mode: entry.mode }
+        // Older catalogs can still contain external entries even though rc.2 narrows the type.
+        const mode: string = entry.mode
+        if (node === row) {
+          if (mode === 'external') match = entry.id
+          else if (mode === 'unknown' || mode === 'one-shot' || mode === 'continuable') match = { parentSessionId: parent, childSessionId: entry.id, mode }
+          else { valid = false; return }
+        }
         if (node.getAttribute('aria-expanded') === 'true') walk(entry.id, depth + 1)
         if (!valid) return
       }
@@ -259,34 +288,6 @@ export const CONVERSATION_DOCK_CSS = `
     -webkit-user-drag: none; -webkit-touch-callout: none;
   }
 }
-/* Frost lives only in the edge, never on the reading or composing surface. */
-[data-sidebar-right-panel][data-sidebar-right-open]::after {
-  content: ''; position: absolute; inset: 0 auto 0 0; width: 12px; z-index: 45;
-  pointer-events: none; border: 0;
-  background: linear-gradient(to right, rgba(117,167,255,.045), transparent);
-  -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px);
-  -webkit-mask-image: linear-gradient(to right, #000, transparent);
-  mask-image: linear-gradient(to right, #000, transparent);
-}
-[data-sidebar-right-open] [data-dockkit-divider]::before {
-  background: rgba(117,167,255,.12); box-shadow: 0 0 8px rgba(94,158,255,.06);
-}
 html[data-dsh-sidebar-reorder] [role=treeitem] { user-select: none; -webkit-user-select: none; }
-/* Portrait preserves the dock tree and native tab actions. Only the active
-   pane body occupies the full second row; both groups of tabs remain reachable. */
-@media (max-width: 767px) {
-  [data-sidebar-right-panel] [data-dockkit-split] {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
-    grid-template-rows: auto minmax(0, 1fr);
-  }
-  [data-sidebar-right-panel] [data-dockkit-split] > [data-dockkit-host='dock']:not([hidden]),
-  [data-sidebar-right-panel] [data-dockkit-split] > [data-dockkit-host='dock']:not([hidden]) > section { display: contents; }
-  [data-sidebar-right-panel] [data-dockkit-split] [class*='tabHostHeader'] { grid-row: 1; min-width: 0; pointer-events: auto; }
-  [data-sidebar-right-panel] [data-dockkit-split] [data-dockkit-column='0'] > [class*='tabHostHeader'] { grid-column: 1; }
-  [data-sidebar-right-panel] [data-dockkit-split] [data-dockkit-column='1'] > [class*='tabHostHeader'] { grid-column: 2; }
-  [data-sidebar-right-panel] [data-dockkit-split] [class*='tabHostBody'] { grid-row: 2; grid-column: 1 / -1; min-height: 0; pointer-events: auto; }
-  [data-sidebar-right-panel] [data-dockkit-split] section:not([data-dockkit-pane-active]) > [class*='tabHostBody'],
-  [data-sidebar-right-panel] [data-dockkit-split] > [data-dockkit-divider] { display: none; }
-}
 @media (prefers-reduced-motion: reduce) { .dsh-conversation-drop-zone, .dsh-conversation-drop-zone::before { transition: none; animation: none; } }
 `

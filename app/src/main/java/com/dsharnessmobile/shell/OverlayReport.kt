@@ -147,10 +147,7 @@ class OverlayReport(private val svc: OverlayService) {
 
     return LinearLayout(svc).apply {
       orientation = LinearLayout.VERTICAL
-      background = DsUi.roundRect(
-        if (theme.isDarkTheme()) 0xF01E1F24.toInt() else 0xF0FFFFFF.toInt(),
-        16 * dp, c.unitStroke, (1 * dp).toInt(),
-      )
+      background = DsUi.roundRect(c.unitBg, 16 * dp, c.unitStroke, (1 * dp).toInt())
       elevation = 8 * dp
       addView(header, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
       addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
@@ -256,7 +253,8 @@ class OverlayReport(private val svc: OverlayService) {
     }
     val w = (sw - 2 * (16 * dp).toInt()).coerceAtMost((440 * dp).toInt()).coerceAtLeast((200 * dp).toInt())
     // 高度三个口径（0.14.1 D6，0.14.2 拆开上下限；纯函数见文件末尾）：
-    //   minH       = 140dp（标题 + 摘要行 + 手柄；低于此值手柄都放不下，也就没有「上拉」的起点）
+    //   minH       = 140dp 或自然内容高度的较小值。短汇报从自然高度开始，避免 weight ScrollView
+    //                在固定的 140dp 窗口里把正文下面撑出空白；长汇报仍保留 140dp 的预览/拖拽下限。
     //   compactCap = 打开时的高度上限（屏高 40%，不低于 300dp）——短汇报不强占屏幕
     //   expandCeil = 上拉能到的天花板（近全屏，留 24dp 边距）
     // **P3 承重墙：这两个上限此前是同一个值** ⇒ 内容一超上限，栏开场即钉在天花板、
@@ -264,7 +262,8 @@ class OverlayReport(private val svc: OverlayService) {
     // 初始高度**按内容取**（短汇报不强占上限高度）——见 reportBarInitialHeight。
     val compactCap = reportBarCompactCap(sh, dp)
     val expandCeil = reportBarExpandCeil(sh, dp)
-    val minH = (140 * dp).toInt().coerceAtMost(compactCap)
+    val naturalHeight = measureNaturalHeight(bar, w, compactCap)
+    val minH = (140 * dp).toInt().coerceAtMost(compactCap).coerceAtMost(naturalHeight.coerceAtLeast(1))
     val lp = android.view.WindowManager.LayoutParams(
       w,
       ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -283,7 +282,7 @@ class OverlayReport(private val svc: OverlayService) {
       x = (sw - w) / 2
       y = 0
     }
-    lp.height = reportBarInitialHeight(measureNaturalHeight(bar, w, compactCap), minH, compactCap)
+    lp.height = reportBarInitialHeight(naturalHeight, minH, compactCap)
     attachDragGesture(bar, lp, minH, expandCeil)
     bar.setOnTouchListener { _, e ->
       if (e.action == MotionEvent.ACTION_OUTSIDE) hideReport()

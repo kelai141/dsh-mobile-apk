@@ -21,10 +21,12 @@
 
 ## 右侧气泡导航实施补充（2026-10-17，不改版本）
 
-- P03：`sidebar-bubbles.ts` 从原生 strip 读取当前会话标签，窄于 768 CSS 像素时挂载导航；`sidebar-bubbles.css.ts` 提供可滚动胶囊与 180ms 退出/进入动画，`sidebar-bubbles.locales.ts` 管理文案。选择和关闭点击原控件，内容节点不迁移。原 strip 重建后按元素身份刷新代理，卸载时恢复 aria/样式并释放引用。
+- P03：`sidebar-bubbles.ts` 从原生 strip 读取当前会话标签，1100 CSS 像素以内挂载悬浮药丸导航。`mobile-workspaces.ts` 对接当前 Session 的原生 store actions，保持 row 双窗格模型及稳定 TabHost；竖屏仅转换物理网格方向。按 paneId/tabId 同步焦点、标题、比例、小窗与位置交换；能力表明确允许 conversation/subagentchat/terminal/browser，虚拟屏与未知类型拒绝通用分屏。`sidebar-bubbles.css.ts` 使用统一深浅色药丸与短指示条。关闭沿用原控件；正文 DOM 不迁移。详见镜像 `dsh-client-ui-responsive/docs/mobile-multitask-spec.md`。
 - K08 / P03：`native-browser-presentation.ts` 观察气泡 open/closing 标记，隐藏原生显示层直到退出动画完成；同一浏览器页与 profile 保留。原生 IME 高度和 visualViewport 共同约束列表下沿。
 - P03：`back-stack.ts` 先收起气泡再走右栏原返回路径；取消长按后首次返回可用，并恢复三点按钮焦点。`sidebar-gestures.ts` 排除导航触点，普通滑动保持列表滚动。
 - 构建期 B1：`scripts/patches/data/sidebar-bubble-reorder.mjs` 通过原 `placeTab` 提交同分栏排序并保留活动页；发布包/Android 源码构建双形态夹具和拒绝写入反例由 `scripts/patches/tests/sidebar-bubble-reorder.test.mjs` 执行。
+- 多任务验收：`scripts/verify-mobile-workspaces.mjs`，独立编排真实 CDP/ADB 场景；未运行或证据不足的项不得写 PASS。
+- 构建期 B2：`scripts/patches/data/sidebar-keep-wide-B2.mjs` 让手机形态收起态仍挂载宽内容（`wide` 恒真）并取消收起态内联宽度冻结，把抽屉内容的 React 挂载从手势 touchmove 帧上移走；两条锚点必须同打，单独打 `wide` 会因 `lastWideWidth` 的 56px 初值露出压扁抽屉。真值表、幂等、三向负控与 runner 集成由 `scripts/patches/tests/sidebar-keep-wide-B2.test.mjs` 执行。
 - 验收入口：`scripts/verify-sidebar-bubbles.mjs` 在真实 WebView 上读取业务语义，ADB 执行点击、滑动、长按、取消与返回并保存截图。宽屏使用 `--wide`；`--owner` 可选择专用验收会话。详见 `docs/maintenance/sidebar-bubbles-2026-10-17.md`。
 
 ## 0.14.5-fx-1 实施补充（2026-10-09）
@@ -252,7 +254,7 @@ sequenceDiagram
 - [K09] 3. 自动收起守卫覆盖不到待答卡草稿（已确认）：守卫是 `!panel.hasDraft()`（`OverlayService.kt:509`），而 `hasDraft`（`OverlayPanel.kt:947`）只看输入行 `inputBox`；提问卡的「输入你的答案」存在 `qCustom` 与卡片 EditText（`OverlayPanel.kt:73`、`:734-744`）。轮次结束时先 `dropPendingFor`（`OverlayService.kt:499` 使 `pendingKind` 变空）再过 900ms 自动收起（`:509-515`）。触发：展开面板 → 提问卡输入到一半 → 不提交 → 引擎轮次结束或 `turn_end` 清理（`OverlayLiveFeed.kt:160`）→ 答案与卡片一起消失且无提示。
 - [K09] 4. 自动收起分支里的 `flashStatus("已完成")` 是死调用（已确认，坑 148 已登记）：`OverlayService.kt:512-513` 先 `hidePanel()`（`:327` 同步置 `expanded=false`）再 `flashStatus`（`:686` 有 `if (expanded)` 守卫）→ 永不显示；真正可见的是 `:516-518` 的 else 分支。影响：无用户可见后果（完成位已接管提示），但会误导维护者以为此处有反馈。
 - [K09] 5. `frameConsumer` 避让帧恒为 0px 的死通道（已确认）：`OverlayService.kt:737-745` 把 `lastRight`/`lastBottom` 恒置 0，`replayFrame`（`:748-752`）重放同样 0px；`emitFrame` 在拖动松手、开合面板、onDestroy 都向 WebView 注入一次 JS（消费方 `MainActivity.kt:296`）。影响：0.13.2 起不再挤开页面属预期，但排查「WebView 被挤开一条缝」类旧症状会误入此路，且每次拖动松手多一次跨进程 `evaluateJavascript`。
-- [K09] 漂移：`dsh-mobile-apk/docs/AGENTS/ARCHITECTURE.md:27-34` 说 OverlayService.kt 772 / OverlayHalo.kt 164 / OverlayPanel.kt 1217 / OverlayReport.kt 325 行，源码实测 `OverlayService.kt` 785 / `OverlayHalo.kt` 168 / `OverlayPanel.kt` 1222 / `OverlayReport.kt` 384（差 59 行正是块H 的 CompletionNotice 段）
+- [K09] 漂移：`dsh-mobile-apk/docs/AGENTS/ARCHITECTURE.md:27-34` 说 OverlayService.kt 772 / OverlayHalo.kt 164 / OverlayPanel.kt 1217 / OverlayReport.kt 325 行，源码实测 `OverlayService.kt` 785 / `OverlayHalo.kt` 168 / `OverlayPanel.kt` 1222 / `OverlayReport.kt` 384（差 59 行正是块H 的 CompletionNotice 段）；**0.14.9-preview 块J 已把该表刷新到 923 / 224 / 1527 / 72 并新增 `OverlayRecall.kt` 198 行**（OverlayReport 行未动，仍按上面的实测口径）——表侧漂移随之失效，本条保留作为块H 的证据。
 - [K09] 漂移：`dsh-mobile-apk/docs/AGENTS/ARCHITECTURE.md:29` 与 `dsh-mobile-apk/docs/AGENTS/modules.md:39` 说「应答 POST /api/respond 全信封，approval value={sessionId,approvalId,outcome}；question 取消发 ok:false error cancelled」，源码 `OverlayPanel.kt:818` 是 POST /api/$events/result、payload={args:{clientId,eventId,outcome}}，审批取值 allowed-once/rejected（`OverlayPanel.kt:616-617`）、提问跳过是 kind=rejected 加 error{name:UserQuestionError,code:cancelled}（`OverlayPanel.kt:904-908`）；同族过期注释仍在源码里：`OverlayPanel.kt:24`、`OverlayPanel.kt:489`、`OverlayLiveFeed.kt:166`
 - [K09] 漂移：`dsh-mobile/docs/0.14.1-preview-OVERLAY-COMPLETION-CARD.md` 的 1.1 表说 OverlayService.kt 673 / OverlayPanel.kt 1046 / OverlayLiveFeed.kt 172 / OverlayHalo.kt 91 / OverlayTheme.kt 33 行，源码实测 785 / 1222 / 196 / 168 / 38；该详档被源码注释当准绳引用（`OverlayService.kt:106`、`OverlayReport.kt:252`）
 - [K09] 漂移：`app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:141` 说 flashStatus 在 `OverlayService.kt:669`，源码该函数在 `OverlayService.kt:683`
@@ -1033,10 +1035,11 @@ flowchart TD
 
 #### K09 悬浮球与面板
 
-- **一句话**：系统级悬浮球与展开面板的全套交互面——三窗口生命周期、拖动钳制、状态行/待答卡渲染、应答回流引擎、完成态常驻文案与自动收起。
+- **一句话**：系统级悬浮球与展开面板的全套交互面——常态三窗口生命周期（块J 起隐藏态多一个懒建的召回条窗）、**隐藏/召回**、拖动钳制、状态行/待答卡渲染、应答回流引擎、完成态常驻文案与自动收起。
 - **入口/触发**：
   - 启停：设置页开关（桥 `androidBridge.setOverlayEnabled` → `MainActivity.kt:769` 的 λ）与回前台补启 `MainActivity.kt:306` 经 `OverlayController.setEnabled/ensureStarted`；停：`OverlayController.stop`、`EngineService.kt:70`（划掉后台=完整停机）。
   - 球手势：球窗 `ACTION_UP` 未移动 → `togglePanel`（`OverlayService.kt:382`）；拖动中每帧钳制并同步光环。
+  - 隐藏/召回（块J）：展开面板顶行 `隐藏` 入口（`OverlayPanel.kt:309`）→ `OverlayService.hideBall()`（`OverlayService.kt:415`，收面板 + 球/光环 `removeView` + 建召回条）；点召回条 → `OverlayService.recallBall()`（`OverlayService.kt:436`，收条 + 光环/球按 z 序重新 `addView`）。
   - 数据触发：10s 探活 `scheduleProbe`（`OverlayService.kt:547`）、MuxClient 的 `$events` WS 帧（`OverlayPanel.kt:87`）、FileObserver 的 `.live.ndjson`（`OverlayLiveFeed.kt:28`）。
   - 面板手势：状态行长按=报告栏、三击=跳应用（`OverlayPanel.kt:423`）；发送/停止=输入行两按钮（`OverlayPanel.kt:308/318`）。
 - **运行顺序**：
@@ -1044,16 +1047,18 @@ flowchart TD
   2. 稳态三条事件源都 `main.post` 汇聚到主线程改状态：探活（工作线程 `EngineProbe.check`）→ `applyAgentStatus`/`setHalo(deriveHalo())`；WS 帧（MuxClient 读线程 → `handleMuxFrame`）→ pending 表与忙态；live 文件（FileObserver 回调线程 → `drainLive`）→ busy/工具计数/完成语义标签。任一变化都收口到 `updateBallOnly()` + `deriveHalo()`。
   3. 用户动作：点球 → `showPanel`/`hidePanel`（主线程增删面板窗、消费完成位、刷新会话选择器）；发送/停止/应答 → `postRpc`/`postEventResult`（工作线程 HTTP）→ `main.post` 回调再改状态。
   4. 轮次结束（`api-session/status running=false` 或 `.live.ndjson turn_end`）：清 pending → 置完成位 → 满足条件时 900ms 后自动收起；控制权交回宿主（点球重开）或 K10（报告栏数据源）。
-  5. `onDestroy`（`OverlayService.kt:166`）：停 watcher、关 mux、收报告栏、清零避让帧、remove 三窗口。
+  5. `onDestroy`（`OverlayService.kt:166`）：停 watcher、关 mux、收报告栏、**收召回条（块J）**、清零避让帧、remove 三窗口。
+  6. 隐藏态（块J）：`hideBall` 把球/光环离窗并留召回条、`recallBall` 反向（按同一 z 序重新入窗）——两者都在主线程，且**都不触碰**探活/Mux/live 三条事件源（隐藏期间状态照常维护，召回即最新）。转屏时隐藏态提前返回，只把条按新屏幕重新贴边（`OverlayService.kt:143`）。
 - **嵌套与线程**（≤3 层）：
   - 主线程：`onCreate` → `buildRoot` → `wm.addView`×3；`ACTION_UP` → `togglePanel` → `showPanel` → `panel.buildUnit` → `refreshSessionPicker`。
+  - 主线程（块J）：`hideBall` → `hidePanel` → `wm.removeView`×2 → `recall.show` → `wm.addView`（召回条）；`recallBall` → `wm.removeView`（条）→ `wm.addView`（光环、再球——z 序不可反）。
   - MuxClient 读线程 → `OverlayPanel.handleMuxFrame` → 主线程 `handleEventValue` → `applyAgentStatus`（`OverlayService.kt:470`）→ `panel.updateBallOnly` → `halo.setHalo`（内部再 `main.post` 一次，`OverlayHalo.kt:113`）。
   - FileObserver 回调线程 → `OverlayLiveFeed.drainLive`（读文件）→ 主线程 `onTurnEnd`/`dropPendingFor`/`renderPanelOnly`。
   - 工作线程：`postRpc`、`postEventResult`、`probeEngine` 的 `HttpURLConnection` 调用 → `main.post` 回调。
 - **耦合**（具体符号）：
   - 偏好键：`overlay_display` 的 `auto_collapse_on_done`（`OverlayService.kt:427`）与 `template_thinking`/`template_tool`/`template_completion`（`OverlayPanel.kt:387/390/396`）；`dsh-overlay` 的 `enabled`（`OverlayController.kt:22-23`）。
   - 跨块符号：`OverlayService.instance`（`OverlayService.kt:775`）被 `OverlayController.isEnabled`、`NotifyCenter.kt:161`、`MainActivity.kt:642` 读；`OverlayService.frameConsumer`（`OverlayService.kt:783`）被 `MainActivity.kt:296` 写、`:424` 清。
-  - 服务级共享字段：`activeSessionId`/`userPinnedSession`/`engineRunning`/`sessionBusy`/`toolCount`/`optimisticBusyAt`/`currentToolName`/`pendingKind`/`panelOccupied`/`completion`/`report`（`OverlayService.kt:85-111`）由 OverlayPanel/OverlayLiveFeed/OverlayHalo 直接读写。
+  - 服务级共享字段：`activeSessionId`/`userPinnedSession`/`engineRunning`/`sessionBusy`/`toolCount`/`optimisticBusyAt`/`currentToolName`/`pendingKind`/`panelOccupied`/`completion`/`report`/`recall`/`hidden`（`OverlayService.kt:85-120`）由 OverlayPanel/OverlayLiveFeed/OverlayHalo/OverlayRecall 直接读写（`hidden` 由 OverlayService 持有、`OverlayRecall` 只经 `svc.recallBall()` 回调，见 ARCHITECTURE.md 的单向纪律）。
   - 网络与鉴权：`http://127.0.0.1:3080/api/<method>`（`OverlayService.kt:574`）与 `POST /api/$events/result`（`OverlayPanel.kt:818`），均 `EngineAuth.attach`（`:580`、`OverlayPanel.kt:824`）+ 401 重试一次（`:586`）。
   - 引擎事件流：streamId `dsh-overlay-events`（`MuxClient.kt:46`）与 K10 的 `dsh-notify-responder`（`NotifyBridge.kt:28`）并行，两条流首答者结算、另一方收 `cancel`。
   - 文件：`files/home/.dsh/.live.ndjson`（`OverlayLiveFeed.kt:26`）、调试注入 `files/home/.dsh/.overlay-test-pending`（`:35`，debuggable 门控）、临时工作区 `files/home/.dsh/storages/workspace.json`（`OverlayService.kt:449`）。
@@ -1079,7 +1084,7 @@ flowchart TD
   4. 自动收起分支里的 `flashStatus("已完成")` 是死调用（已确认，坑 148 已登记）：`OverlayService.kt:512-513` 先 `hidePanel()`（`:327` 同步置 `expanded=false`）再 `flashStatus`（`:686` 有 `if (expanded)` 守卫）→ 永不显示；真正可见的是 `:516-518` 的 else 分支。影响：无用户可见后果（完成位已接管提示），但会误导维护者以为此处有反馈。
   5. `frameConsumer` 避让帧恒为 0px 的死通道（已确认）：`OverlayService.kt:737-745` 把 `lastRight`/`lastBottom` 恒置 0，`replayFrame`（`:748-752`）重放同样 0px；`emitFrame` 在拖动松手、开合面板、onDestroy 都向 WebView 注入一次 JS（消费方 `MainActivity.kt:296`）。影响：0.13.2 起不再挤开页面属预期，但排查「WebView 被挤开一条缝」类旧症状会误入此路，且每次拖动松手多一次跨进程 `evaluateJavascript`。
 
-漂移：`dsh-mobile-apk/docs/AGENTS/ARCHITECTURE.md:27-34` 说 OverlayService.kt 772 / OverlayHalo.kt 164 / OverlayPanel.kt 1217 / OverlayReport.kt 325 行，源码实测 `OverlayService.kt` 785 / `OverlayHalo.kt` 168 / `OverlayPanel.kt` 1222 / `OverlayReport.kt` 384（差 59 行正是块H 的 CompletionNotice 段）
+漂移：`dsh-mobile-apk/docs/AGENTS/ARCHITECTURE.md:27-34` 说 OverlayService.kt 772 / OverlayHalo.kt 164 / OverlayPanel.kt 1217 / OverlayReport.kt 325 行，源码实测 `OverlayService.kt` 785 / `OverlayHalo.kt` 168 / `OverlayPanel.kt` 1222 / `OverlayReport.kt` 384（差 59 行正是块H 的 CompletionNotice 段）；**0.14.9-preview 块J 已把该表刷新到 923 / 224 / 1527 / 72 并新增 `OverlayRecall.kt` 198 行**（OverlayReport 行未动，仍按上面的实测口径）——表侧漂移随之失效，本条保留作为块H 的证据。
 
 漂移：`dsh-mobile-apk/docs/AGENTS/ARCHITECTURE.md:29` 与 `dsh-mobile-apk/docs/AGENTS/modules.md:39` 说「应答 POST /api/respond 全信封，approval value={sessionId,approvalId,outcome}；question 取消发 ok:false error cancelled」，源码 `OverlayPanel.kt:818` 是 POST /api/$events/result、payload={args:{clientId,eventId,outcome}}，审批取值 allowed-once/rejected（`OverlayPanel.kt:616-617`）、提问跳过是 kind=rejected 加 error{name:UserQuestionError,code:cancelled}（`OverlayPanel.kt:904-908`）；同族过期注释仍在源码里：`OverlayPanel.kt:24`、`OverlayPanel.kt:489`、`OverlayLiveFeed.kt:166`
 
@@ -2068,12 +2073,18 @@ node scripts/verify-client-plugin-fail-recovery.mjs --self-test   # 客户端插
 覆盖全域（脚本里定义，构建产物与第三方目录除外）：`app/src/**/*.kt` 与 `AndroidManifest.xml`、`plugins/*/{src,test}/**`、三个子仓 src/lib、`scripts/{check-,verify-,build-,inject-}*` 与 `scripts/patches/**`、`scripts/snapshot-config/**`。
 
 <!-- COVERAGE
+dsh-client-ui-responsive/src/client/mobile/mobile-workspaces.ts
+dsh-client-ui-responsive/src/client/mobile/mobile-workspaces.css.ts
+scripts/verify-mobile-workspaces.mjs
 dsh-client-ui-responsive/src/client/mobile/sidebar-bubbles.ts
 dsh-client-ui-responsive/src/client/mobile/sidebar-bubbles.css.ts
 dsh-client-ui-responsive/src/client/mobile/sidebar-bubbles.locales.ts
 scripts/verify-sidebar-bubbles.mjs
 scripts/patches/data/sidebar-bubble-reorder.mjs
 scripts/patches/tests/sidebar-bubble-reorder.test.mjs
+scripts/patches/data/sidebar-keep-wide-B2.mjs
+scripts/patches/tests/sidebar-keep-wide-B2.test.mjs
+glob:scripts/patches/tests/fixtures/dsh-client-ui-sidebar-0.2.1-rc.2/**
 glob:scripts/patches/tests/fixtures/dsh-client-ui-sidebar-right-0.2.0-rc.2/**
 glob:scripts/patches/tests/fixtures/dsh-client-ui-sidebar-right-mobile-0.2.0-rc.2/**
 # 0.14.3 actual new source/fixture ledger (not execution evidence)
@@ -2122,6 +2133,9 @@ app/src/main/java/com/dsharnessmobile/shell/GuideChrome.kt
 app/src/main/java/com/dsharnessmobile/shell/GuideManagementController.kt
 app/src/main/java/com/dsharnessmobile/shell/PluginManagementRepository.kt
 app/src/main/java/com/dsharnessmobile/shell/PluginManagementPage.kt
+app/src/main/java/com/dsharnessmobile/shell/PluginPatchOffline.kt
+app/src/main/java/com/dsharnessmobile/shell/PluginOfflinePanel.kt
+app/src/test/java/com/dsharnessmobile/shell/PluginPatchOfflineTest.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotRecoveryNotice.kt
 app/src/main/java/com/dsharnessmobile/shell/RuntimeTree.kt
 app/src/main/java/com/dsharnessmobile/shell/GuidePageRenderer.kt
@@ -2209,6 +2223,7 @@ app/src/main/java/com/dsharnessmobile/shell/OverlayReport.kt
 app/src/main/java/com/dsharnessmobile/shell/OverlayLiveFeed.kt
 app/src/main/java/com/dsharnessmobile/shell/OverlayHalo.kt
 app/src/main/java/com/dsharnessmobile/shell/OverlayTheme.kt
+app/src/main/java/com/dsharnessmobile/shell/OverlayRecall.kt
 app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt
 app/src/main/java/com/dsharnessmobile/shell/NotifyBridge.kt
 app/src/main/java/com/dsharnessmobile/shell/NotifyStore.kt
