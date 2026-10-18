@@ -178,11 +178,17 @@ class OverlayBatch5Test {
     val picker = panel.substringAfter("val pickerRowText").substringBefore("sessionPicker = pickerRowText")
     val status = panel.substringAfter("val status =").substringBefore("statusText = status")
     val reportEntry = panel.substringAfter("val reportEntry =").substringBefore("reportEntryView = reportEntry")
+    val hideEntry = panel.substringAfter("val hideEntry = TextView(svc)").substringBefore("hideEntryView = hideEntry")
     assertTrue("会话选择器必须保留 44dp 触控高度", picker.contains("minHeight = (MIN_TOUCH_TARGET_DP * dp).toInt()"))
     assertFalse("字号放大时会话选择行不得固定为 26dp", panel.contains("LayoutParams(0, (26 * dp).toInt(), 1f)"))
     assertTrue("状态文字手势热区必须保留", status.contains("minHeight = (MIN_TOUCH_TARGET_DP * dp).toInt()"))
     assertTrue("汇报入口宽度必须保留", reportEntry.contains("minWidth = (MIN_TOUCH_TARGET_DP * dp).toInt()"))
     assertTrue("汇报入口高度必须保留", reportEntry.contains("minHeight = (MIN_TOUCH_TARGET_DP * dp).toInt()"))
+    // 块J（0.14.9-preview）：隐藏入口必须与既有入口同口径（不新造尺寸常量），✕ 命中区不得被挤掉。
+    // 按 main 的**逐项断言**口径写，不再用「出现次数」计数：并入 #411 后同一文件里该常量的出现次数
+    // 已随会话选择行热区变成 14 处，写死次数会在别的合法改动上假红。
+    assertTrue("隐藏入口宽度必须取热区常量", hideEntry.contains("minWidth = (MIN_TOUCH_TARGET_DP * dp).toInt()"))
+    assertTrue("隐藏入口高度必须取热区常量", hideEntry.contains("minHeight = (MIN_TOUCH_TARGET_DP * dp).toInt()"))
     assertTrue("面板关闭键命中区必须保留", panel.contains("addView(close, LinearLayout.LayoutParams((MIN_TOUCH_TARGET_DP * dp).toInt(), (MIN_TOUCH_TARGET_DP * dp).toInt())"))
     assertTrue("发送按钮命中区必须保留", panel.contains("addView(send, LinearLayout.LayoutParams((MIN_TOUCH_TARGET_DP * dp).toInt(), (MIN_TOUCH_TARGET_DP * dp).toInt())"))
     assertTrue("停止按钮命中区必须保留", panel.contains("addView(stop, LinearLayout.LayoutParams((MIN_TOUCH_TARGET_DP * dp).toInt(), (MIN_TOUCH_TARGET_DP * dp).toInt())"))

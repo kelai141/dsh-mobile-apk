@@ -1,6 +1,6 @@
 {
   "$comment": "Kotlin 单测基线（0.14.1）：只许升不许降。键=测试类名（=源文件名去 .kt），值=用例数。逐类记录而非只记总数——防「删 A 类用例 + 加 B 类用例」净零抵消。升档：node scripts/check-kotlin-test-count.mjs --update-baseline（会拒绝降档）。",
-  "totalTests": 1364,
+  "totalTests": 1385,
   "testsByClass": {
     "AcceptRoutingTest": 7,
     "AdbLiveProbeTest": 4,
@@ -15,7 +15,7 @@
     "BrowserHostNavigationPolicyTest": 17,
     "BrowserOverlayContractTest": 7,
     "BrowserOverlayPolicyTest": 9,
-    "CallSiteContractTest": 28,
+    "CallSiteContractTest": 33,
     "ClientPluginFailRouteTest": 26,
     "ClientRollbackGateTest": 24,
     "ConsoleThemeSourceTest": 3,
@@ -70,6 +70,7 @@
     "OverlayCompletionNoticeTest": 20,
     "OverlayHaloInvariantTest": 7,
     "OverlayPendingCardTest": 13,
+    "OverlayRecallTest": 11,
     "OverlayReportBarTest": 10,
     "OverlayReportExpandTest": 7,
     "OwnershipLeaseSettlementFixtureTest": 22,
@@ -94,7 +95,7 @@
     "ScreenScopeTest": 5,
     "ShellOpsScopeTargetTest": 11,
     "ShellOpsScreenCommandFixtureTest": 9,
-    "ShizukuBindStateTest": 21,
+    "ShizukuBindStateTest": 26,
     "ShizukuCaptureSettlementFixtureTest": 5,
     "ShizukuRpcLeaseWiringFixtureTest": 4,
     "SnapshotBundledAssetTest": 7,

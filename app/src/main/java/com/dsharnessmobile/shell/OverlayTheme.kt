@@ -32,6 +32,17 @@ class OverlayTheme(private val ctx: Context) {
     val haloIdle: Int,
     /** 空闲态光环次强档（同色相、更弱 alpha——撑起更宽的可见环，口径同 Halo.fade）。 */
     val haloIdleFade: Int,
+    /**
+     * 隐藏态召回条底色（0.14.9-preview 块J）。
+     *
+     * 与 haloIdle 同病同治：条压在**任意页面**上（不只是 DSH 自己的界面），单一档位通吃不了
+     * ——浅色页上纯白条与背景同色（对比度 1.00:1 = 看不见），深色页上深灰条同理。
+     * 故按主题分档，且**中性灰/白**（r=g=b）：条只是「球还在」的信物，不得与 WORKING 的蓝 /
+     * PENDING 的琥珀 / ERROR 的红抢语义（同 haloIdle 的中性纪律）。
+     * alpha 取 0x99（60%）而不是光环的 0x60：条是**唯一的召回入口**，可发现性优先于「低调」；
+     * 深色档 0x99FFFFFF 压在深色页、浅色档 0x993D3D3D 压在浅色页，都是 60% 覆盖面。
+     */
+    val recallStrip: Int,
   )
 
   fun themeColors(): ThemeColors = if (isDarkTheme()) {
@@ -43,6 +54,8 @@ class OverlayTheme(private val ctx: Context) {
       divider = 0xFF2A2D33.toInt(), chevron = 0xFF8AB4F8.toInt(),
       // 深色档 = 改动前的唯一一档（0x60FFFFFF），逐字节不变 ⇒ 深色主题零回归。
       haloIdle = 0x60FFFFFF.toInt(), haloIdleFade = 0x3AFFFFFF.toInt(),
+      // 块J：深色页上条用白（半透明），与页面底色反向。
+      recallStrip = 0x99FFFFFF.toInt(),
     )
   } else {
     ThemeColors(
@@ -52,6 +65,8 @@ class OverlayTheme(private val ctx: Context) {
       inputText = 0xFF202124.toInt(), inputHint = 0xFF80868B.toInt(),
       divider = 0xFFE8EAED.toInt(), chevron = 0xFF5F6368.toInt(),
       haloIdle = 0x8A3D3D3D.toInt(), haloIdleFade = 0x523D3D3D.toInt(),
+      // 块J：浅色页上条用中性深灰（与 haloIdle 同色相族的更强档），白底上仍占 60% 覆盖。
+      recallStrip = 0x993D3D3D.toInt(),
     )
   }
 }

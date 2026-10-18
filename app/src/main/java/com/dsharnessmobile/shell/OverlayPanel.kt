@@ -33,6 +33,7 @@ class OverlayPanel(private val svc: OverlayService) {
   internal var unitView: View? = null            // 展开合体圆角矩形（默认 GONE）
   internal var statusText: TextView? = null
   private var reportEntryView: TextView? = null   // P5-1：状态行右侧的可见「查看汇报」入口
+  private var hideEntryView: TextView? = null     // 块J：顶行的「隐藏」入口（球离屏 + 屏缘召回条）
   private var toolChip: TextView? = null
   private var clockText: TextView? = null
   private var closeView: View? = null                // 收起按钮（✕，44dp 命中区；S2-18）
@@ -297,13 +298,40 @@ class OverlayPanel(private val svc: OverlayService) {
     closeView = close
     closeIcon = (close.getChildAt(0) as? ImageView)
 
-    // 会话选择行（独立一行，向下箭头 Spinner）+ 右端 ✕ 收起
+    // 块J（0.14.9-preview）：面板里的「隐藏」入口——球整只离屏、屏缘留一条召回条。
+    //
+    // 与右端 ✕ 语义**不同**，所以是两个入口而不是一个：✕ 只收面板（球仍在屏上、点球就回来），
+    // 「隐藏」是球离屏（回程只有那条召回条）。用户要求在面板里给一个显式入口，且必须与
+    // 「收起」区分得开——把两件事塞进一个按钮（如长按 ✕）等于让「收起面板」这一最常用动作
+    // 带上一个不可撤销的歧义（长按误触 = 球没了，还要去屏缘找条）。
+    //
+    // 用文字入口而非新图标：与状态行「查看汇报」同一先例（本仓不为一个入口新建 drawable，
+    // 也不需要新色值——文字取主题 chevron 强调色）。热区同 S2-18 口径（≥44dp）。
+    val hideEntry = TextView(svc).apply {
+      tag = "overlay-hide-entry"
+      text = "隐藏"
+      textSize = 12f
+      setTextColor(c.chevron)
+      gravity = Gravity.CENTER
+      minHeight = (MIN_TOUCH_TARGET_DP * dp).toInt()
+      minWidth = (MIN_TOUCH_TARGET_DP * dp).toInt()
+      contentDescription = "隐藏悬浮球"
+      isClickable = true
+      setOnClickListener { svc.hideBall() }
+      DsUi.bindPressScale(this)
+    }
+    hideEntryView = hideEntry
+
+    // 会话选择行（独立一行，向下箭头 Spinner）+ 右端「隐藏」「✕ 收起」
     // S2-18：✕ 的命中区 44dp，行内边距按需收紧（旧行高 38dp → 44dp，只多 6dp）。
+    // 块J：隐藏入口再占 44dp（间隔 4dp，✕ 的 marginStart 保持 8dp）——面板最窄时
+    // （屏宽 - 球 34dp - 64dp）仍有富余，选择器文字用 weight 1 自动让位。
     val pickerRow = LinearLayout(svc).apply {
       orientation = LinearLayout.HORIZONTAL
       gravity = Gravity.CENTER_VERTICAL
       setPadding((12 * dp).toInt(), (2 * dp).toInt(), (8 * dp).toInt(), (2 * dp).toInt())
       addView(pickerRowText, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+      addView(hideEntry, LinearLayout.LayoutParams((MIN_TOUCH_TARGET_DP * dp).toInt(), (MIN_TOUCH_TARGET_DP * dp).toInt()).apply { marginStart = (4 * dp).toInt() })
       addView(close, LinearLayout.LayoutParams((MIN_TOUCH_TARGET_DP * dp).toInt(), (MIN_TOUCH_TARGET_DP * dp).toInt()).apply { marginStart = (8 * dp).toInt() })
     }
 
@@ -430,6 +458,7 @@ class OverlayPanel(private val svc: OverlayService) {
     }
     closeIcon?.setColorFilter(c.chevron)
     reportEntryView?.setTextColor(c.chevron)   // P5-1：汇报入口用主题强调色（换肤时必须同步）
+    hideEntryView?.setTextColor(c.chevron)     // 块J：隐藏入口同口径（换肤时必须同步，漏了就留着旧主题灰）
     inputBox?.apply {
       setTextColor(c.inputText)
       setHintTextColor(c.inputHint)
