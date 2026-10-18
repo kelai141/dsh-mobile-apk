@@ -269,5 +269,8 @@ Android API 面登记见 `docs/AGENTS/ANDROID-API-USAGE.md` §1/§3/§4/§8；�
 - `PluginManagementRepository.kt`：鉴权 RPC、Hard 清单过滤和变更校验，复用运行时插件管理与配置事务。
 - `PluginManagementPage.kt`：真实插件列表、搜索筛选、原生 Switch 与配置详情；网络读取不占用主线程。
 
-- `PluginManagementPage.kt` 的 `pluginEngineAvailability`：区分未启动、启动中、在线和启动失败。未启动不读库存；启动入口委托现有主按钮，在线后读取真实列表。
+- `PluginManagementPage.kt` 的 `pluginEngineAvailability`：区分未启动、启动中、在线和启动失败。未启动与启动失败不再只给「启动引擎」空态，而是路由到离线管理页（启动中仍显示启动中的等待态）；启动入口委托现有主按钮，在线后读取真实列表，在线路径不变。
+- `PluginPatchOffline.kt`：引擎未启动时的插件管理数据源，直接读写 live 装配清单（`home/.dsh/profiles/web/cordis.patch.yml`）。只把 `insert` 组里的子条目列为可管理行（顶层 `- id:` 是覆盖，不是插件来源）；Hard 清单的 `{id,name}` 一律排除；生效值按 Cordis 覆盖语义折叠（同 id 顶层 `disabled` 最后一条生效，`name` 断言不匹配不生效）；无改动或无法唯一定位返回 null（拒绝写入）。写入只改写目标 disabled 位或追加一条覆盖，其它字节逐字保留。
+- `PluginOfflinePanel.kt`：离线管理页（列表 + 启停按钮 + 错误条），经 `PluginManagementPage` 在引擎不可用时路由进入。`PluginOfflineRepository` 负责读、写、原子替换与写后回读校验：回读状态与请求不一致即报失败并保留原清单。
+- `EngineStartFlow.start()`：入口（主线程）同步把相位切到 `GuidePhase.Starting` 并 `showGuide()`，主按钮立刻显示「启动中」；这一步不探测、不解压、不重建状态，已解压且指纹匹配的运行时仍走既有早退路径。worker 线程内原先那次重复切相位已删。
 - `ConsoleActivity.kt` / `assets/console.html`：控制台黑白灰日夜主题；会话与桥行为保持原有实现。

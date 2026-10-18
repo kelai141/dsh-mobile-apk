@@ -712,6 +712,23 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     // onPageFinished 只代表文档加载完，在那里复位会造成同 epoch 重复报，见 L-1）。
     resetBootStall()
     startMonitor()
+    // 启动即有反馈（2026-10-18）：相位切换必须**先于**任何可能耗时的前置工作落地。
+    // 旧实现把 «正在启动引擎…» 排在 worker 线程里、且排在 `prepareStartupOwnership` 与
+    // 「引擎已在跑」探活之后——主线程要空等属主探测（Shizuku/root 面可达数秒），用户按了按钮
+    // 屏幕纹丝不动，随后才突然跳到「启动中」。这里在主线程、worker 之前一次切到位：
+    // 相位与按钮文案同源（applyGuidePhase 一次切到底），主按钮当场变成「启动中」并锁住。
+    //
+    // 为什么要判 `webView` 是否在场：**只有引导页才是用户按下这个按钮的地方**。自动入口
+    // （onCreate/onResume）也会走到这里，而那时引擎可能已经在跑——若无条件 showGuide()，
+    // 会把正在显示的引擎页面抢下去闪一下再切回来。用户按按钮时 webView 必然不可见，
+    // 因此这条判据既不削弱「按下即有反馈」，又不给自动入口制造闪烁。
+    //
+    // 复用现有快照（用户口径）：这一步只做相位，不探测、不解压、不重建任何状态；已解压且指纹
+    // 匹配的运行时仍走下面的既有早退路径（startupRecoverThenProbe → snapshotFresh）。
+    if (!activity.webViewReady || activity.webView.visibility != View.VISIBLE) {
+      activity.applyGuidePhase(GuidePhase.Starting, "正在启动引擎…")
+      activity.showGuide()
+    }
     val caller = Thread {
       try {
       if (!isCurrentEngineFlow(generation)) return@Thread
@@ -787,12 +804,8 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         return@Thread
       }
       if (!isCurrentEngineFlow(generation)) return@Thread
-      // 启动即有反馈：进入测试界面显示"正在启动引擎…"（不再白屏等 probe）。
-      activity.runOnUiThread {
-        if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-        activity.applyGuidePhase(GuidePhase.Starting, "正在启动引擎…")
-        activity.showGuide()
-      }
+      // 相位已由本函数入口切到 Starting（启动即有反馈），这里不再重复切换——
+      // 重复切会把中途「等待属主维护」等相位又顶回「正在启动引擎…」。
       // 中断事务已由启动前置（startupRecoverThenProbe）恢复——此处只做新鲜度判定。
       if (!isCurrentEngineFlow(generation)) return@Thread
       if (!activity.engineManager.snapshotFresh()) {

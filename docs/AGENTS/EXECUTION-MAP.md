@@ -2125,6 +2125,9 @@ app/src/main/java/com/dsharnessmobile/shell/GuideChrome.kt
 app/src/main/java/com/dsharnessmobile/shell/GuideManagementController.kt
 app/src/main/java/com/dsharnessmobile/shell/PluginManagementRepository.kt
 app/src/main/java/com/dsharnessmobile/shell/PluginManagementPage.kt
+app/src/main/java/com/dsharnessmobile/shell/PluginPatchOffline.kt
+app/src/main/java/com/dsharnessmobile/shell/PluginOfflinePanel.kt
+app/src/test/java/com/dsharnessmobile/shell/PluginPatchOfflineTest.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotRecoveryNotice.kt
 app/src/main/java/com/dsharnessmobile/shell/RuntimeTree.kt
 app/src/main/java/com/dsharnessmobile/shell/GuidePageRenderer.kt

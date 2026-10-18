@@ -138,6 +138,37 @@ class CallSiteContractTest {
     assertTrue("FX-210.1：函数体必须先 recover 再 probe", body.trimStart().startsWith("recover()"))
   }
 
+  /**
+   * 离线插件管理（2026-10-18）：「引擎没起来」不得再等于「不能管理插件」。
+   *
+   * 旧实现的缺陷是回路自锁：插件管理只有 engine RPC 一个数据源，而用户要关的恰恰是让引擎起不来的
+   * 那个插件。这里断言路由仍在（撤掉离线页会变红），且离线页确实读 live 装配清单而不是引擎。
+   */
+  @Test
+  fun pluginManagementFallsBackToTheOfflineSourceWhenTheEngineIsDown() {
+    val page = codeOnly(source("PluginManagementPage.kt"))
+    assertTrue("引擎不可用时必须路由到离线管理页", page.contains("showOfflineManagement(availability)"))
+    val offline = codeOnly(source("PluginOfflinePanel.kt"))
+    assertTrue("离线数据源必须直接读写 live 装配清单", offline.contains("profiles/web/cordis.patch.yml"))
+    assertFalse("离线路径不得依赖运行中的引擎", offline.contains("EngineProbe"))
+    assertTrue("离线读列表必须复用同一折叠口径", offline.contains("PluginPatchOffline.rows("))
+  }
+  /**
+   * 启动即时反馈（2026-10-18）：»正在启动引擎…» 必须在拉起 worker 之前就落到相位上。
+   *
+   * 旧实现在 worker 线程里切相位，且排在 prepareStartupOwnership 与探活之后——主线程空等属主探测
+   * 时屏幕毫无反应，用户以为按钮没生效。本契约把「相位先于 worker」钉在可断言的位置：
+   * 把那次切相位挪回线程里（或挪到 Thread 之后），这里立刻变红。
+   */
+  @Test
+  fun startSwitchesToStartingBeforeTheWorkerThread() {
+    val body = memberBody(codeOnly(source("EngineStartFlow.kt")), "fun start() {")
+    val phaseAt = body.indexOf("applyGuidePhase(GuidePhase.Starting")
+    val workerAt = body.indexOf("val caller = Thread {")
+    assertTrue("相位切换必须存在（启动即有反馈）", phaseAt >= 0)
+    assertTrue("worker 线程必须存在（启动主体未变）", workerAt >= 0)
+    assertTrue("相位切换必须先于 worker 线程（否则属主探测期间按钮毫无反馈）", phaseAt < workerAt)
+  }
   /** FX-210.1：服务路径（EngineService）也要前置恢复入口。 */
   @Test
   fun engineServiceAlsoRunsTheRecoveryPrelude() {
