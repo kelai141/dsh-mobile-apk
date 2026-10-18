@@ -17,6 +17,7 @@ class RepairToolsTest {
   private lateinit var publicRoot: File
   private lateinit var backups: File
   private lateinit var fs: RepairToolsFs
+  private lateinit var aliasFs: RepairToolsFs
 
   @Before
   fun setUp() {
@@ -25,6 +26,13 @@ class RepairToolsTest {
     publicRoot = File(base, "Documents/dshdata").apply { mkdirs() }
     backups = File(runtime, RepairTools.BACKUP_DIR).apply { mkdirs() }
     fs = RepairToolsFs(
+      runtimeRoot = runtime,
+      publicRoot = publicRoot,
+      backupRoot = backups,
+      runtimeAliases = emptyList(),
+      publicAliases = emptyList(),
+    )
+    aliasFs = RepairToolsFs(
       runtimeRoot = runtime,
       publicRoot = publicRoot,
       backupRoot = backups,
@@ -93,15 +101,21 @@ class RepairToolsTest {
     val log = File(publicRoot, "log/dsh-2026-10-18.log")
     log.parentFile.mkdirs()
     log.writeText("diagnostic\n")
+    File(publicRoot, "log/new.txt").apply { parentFile.mkdirs(); writeText("existing public file\n") }
     assertEquals("diagnostic\n", fs.read(File(publicRoot, "log/dsh-2026-10-18.log").absolutePath, 0, 64).getString("content"))
     assertEquals("read-only-scope", failure {
       fs.write(File(publicRoot, "log/dsh-2026-10-18.log").absolutePath, "changed")
     }.getString("error"))
 
-    val publicAlias = failure { fs.write(base.absolutePath + "/public-alias/log/new.txt", "x") }
+    // Public diagnostics are read-only even for existing files. A write attempt
+    // through an alias must reach that same stable refusal.
+    val publicAlias = failure {
+      aliasFs.write(base.absolutePath + "/public-alias/log/new.txt", "x")
+    }
     assertEquals("read-only-scope", publicAlias.getString("error"))
     File(runtime, "note.txt").writeText("runtime data\n")
-    assertEquals("runtime data\n", fs.read(base.absolutePath + "/runtime-alias/note.txt", 0, 64).getString("content"))
+    assertEquals("runtime data\n", aliasFs.read(base.absolutePath + "/runtime-alias/note.txt", 0, 64)
+      .getString("content"))
   }
 
   @Test

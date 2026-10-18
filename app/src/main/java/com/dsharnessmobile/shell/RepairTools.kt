@@ -378,7 +378,7 @@ internal class RepairToolsFs(
     if (!parent.exists() && !parent.mkdirs()) {
       throw RepairFailure("mkdir-failed", "无法创建目标目录")
     }
-    ensureAllowed(parent.canonicalFile, write = true)
+    ensureAllowed(parent.canonicalFile, write = true, source = path)
     if (Files.isSymbolicLink(target.toPath())) {
       throw RepairFailure("symlink-target", "拒绝写入符号链接目标")
     }
@@ -464,6 +464,8 @@ internal class RepairToolsFs(
       throw RepairFailure("apk-protected", "APK 与系统分区不在允许范围")
     }
     val mapped = mapAlias(text)
+    // Alias inputs are relative to the aliased root, not to filesDir. Resolve
+    // them after mapping so `runtime-alias/home/x` reaches the runtime tree.
     val absolute = if (File(mapped).isAbsolute) File(mapped) else File(runtimeRoot, mapped)
     val normalized = absolute.toPath().normalize().toFile()
     if (Files.isSymbolicLink(normalized.toPath())) {
@@ -474,7 +476,7 @@ internal class RepairToolsFs(
     } catch (_: IOException) {
       throw RepairFailure("path-unreadable", "路径无法规范化")
     }
-    val scope = ensureAllowed(canonical, write)
+    val scope = ensureAllowed(canonical, write, text)
     if (write) {
       val parent = canonical.parentFile ?: throw RepairFailure("invalid-path", "目标没有父目录")
       if (!inside(parent.canonicalFile, scope.root)) {
@@ -503,7 +505,7 @@ internal class RepairToolsFs(
     return scopes().any { inside(absolute, it.root) }
   }
 
-  private fun ensureAllowed(file: File, write: Boolean): Scope {
+  private fun ensureAllowed(file: File, write: Boolean, source: String): Scope {
     if (file.name.endsWith(".apk", ignoreCase = true)) {
       throw RepairFailure("apk-protected", "APK 与系统分区不在允许范围")
     }
@@ -530,6 +532,17 @@ internal class RepairToolsFs(
     val scope = scopes.firstOrNull { inside(file, it.root) }
       ?: throw RepairFailure("outside-scope", "路径超出运行时和公共诊断目录")
     if (write && !scope.writable) throw RepairFailure("read-only-scope", "该目录只允许读取")
+    // A mapped alias can point at a path whose parent does not exist yet. The
+    // scope check still needs to reject writes outside every allowed root, even
+    // though the exact target is not yet on disk.
+    val mappedSource = mapAlias(source.trim())
+    val sourceFile = if (File(mappedSource).isAbsolute) File(mappedSource) else File(runtimeRoot, mappedSource)
+    val canonicalSource = runCatching { sourceFile.canonicalFile }.getOrNull()
+    val sourceInside = file.exists() ||
+      (canonicalSource != null && scopes().any { inside(canonicalSource, it.root) })
+    if (write && !sourceInside) {
+      throw RepairFailure("outside-scope", "目标父目录超出允许范围")
+    }
     return scope
   }
 
