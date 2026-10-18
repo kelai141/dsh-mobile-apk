@@ -75,7 +75,7 @@ exportConfig返回实际path与可能含provider密钥的共享目录警告hint�
 - **隐藏**（`hideBall`）：`hidePanel()` → `wm.removeView(rootView)` / `wm.removeView(haloView)`
   → `OverlayRecall.show(球最后位置)`。**不是** alpha=0 / visibility=GONE / FLAG_NOT_TOUCHABLE：
   overlay 窗口的命中矩形 = 窗口矩形，前两种会留下 34dp 隐形触区（0.13.2「互吞」同形），
-  第三种要改球窗 flags，而「球窗尺寸/标志全程不变」是 F8 硬约束。见坑 193。
+  第三种要改球窗 flags，而「球窗尺寸/标志全程不变」是 F8 硬约束。见坑 327。
 - **召回**（`recallBall`）：收条 → 光环窗、球窗**按 F8 z 序**（先光环、后球）重新 `addView`
   → 球落在条所在的那条边（落点由纯函数 `recallBallPlacement` 给出，与 `clampBallPos` 同边界）。
 - **窗口面**：常态仍是 3 个 overlay 窗口（球/光环/面板）；隐藏期间多出**第 4 个**（召回条，
