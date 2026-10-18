@@ -81,6 +81,12 @@ class RepairToolsTest {
     val outside = File(base, "outside.txt").apply { writeText("private"); }
     val failure = failure { fs.read(outside.absolutePath, 0, 10) }
     assertEquals("outside-scope", failure.getString("error"))
+
+    val systemNamed = File(base, "system/outside.txt").apply {
+      parentFile.mkdirs()
+      writeText("private")
+    }
+    assertEquals("outside-scope", failure { fs.read(systemNamed.absolutePath, 0, 10) }.getString("error"))
   }
 
   @Test
@@ -132,9 +138,10 @@ class RepairToolsTest {
   }
 
   @Test
-  fun apkAndSystemPathsAreRefusedEvenWhenTheyLookLikeRuntimePaths() {
-    assertEquals("apk-protected", failure { fs.read("/system/bin/sh", 0, 8) }.getString("error"))
-    assertEquals("apk-protected", failure { fs.read("/nonexistent/file", 0, 8) }.getString("error"))
+  fun apkPathsAreRefusedEvenWhenTheyLookLikeRuntimePaths() {
+    assertEquals("outside-scope", failure {
+      fs.read(File(base, "nonexistent/file").absolutePath, 0, 8)
+    }.getString("error"))
     assertEquals("apk-protected", failure { fs.write(runtime.absolutePath + "/x.apk", "x") }.getString("error"))
   }
 

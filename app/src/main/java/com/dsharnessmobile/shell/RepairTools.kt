@@ -321,9 +321,6 @@ internal class RepairToolsFs(
 
   fun read(path: String, offset: Long, limit: Int): JSONObject {
     if (offset < 0) throw RepairFailure("bad-offset", "offset 不能为负数")
-    if (path.trim().startsWith("/") && !isInsideAllowedRoot(path)) {
-      throw RepairFailure("apk-protected", "APK 与系统分区不在允许范围")
-    }
     val file = resolve(path, write = false)
     if (!file.exists()) throw RepairFailure("not-found", "路径不存在：" + path)
     if (file.isDirectory) throw RepairFailure("is-directory", "目标不是文件：" + path)
@@ -471,8 +468,11 @@ internal class RepairToolsFs(
       throw RepairFailure("path-unreadable", "路径无法规范化")
     }
     // Scope is the first access decision. A CI temp path may contain a segment
-    // named `system`; that must remain an outside-scope refusal. An APK name is
-    // rejected after the path is proven to be inside an allowed root.
+    // named `system`; that must remain an outside-scope refusal. Explicit host
+    // system partitions and APK names are rejected after the allowed-root check.
+    if (isSystemPartitionPath(mapped)) {
+      throw RepairFailure("apk-protected", "APK 与系统分区不在允许范围")
+    }
     if (scopes().none { inside(canonical, it.root) }) {
       throw RepairFailure("outside-scope", "路径超出运行时和公共诊断目录")
     }
@@ -501,11 +501,11 @@ internal class RepairToolsFs(
     return text
   }
 
-  private fun isInsideAllowedRoot(raw: String): Boolean {
-    val path = mapAlias(raw.trim())
-    if (path.contains('\u0000')) return false
-    val absolute = File(path)
-    return scopes().any { inside(absolute, it.root) }
+  private fun isSystemPartitionPath(raw: String): Boolean {
+    val path = raw.trim().replace('\\', '/')
+    if (!path.startsWith("/")) return false
+    val roots = listOf("/data/app", "/system", "/product", "/vendor", "/apex")
+    return roots.any { path == it || path.startsWith(it + "/") }
   }
 
   private fun ensureAllowed(file: File, write: Boolean, source: String): Scope {
