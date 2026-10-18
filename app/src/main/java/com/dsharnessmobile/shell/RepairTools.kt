@@ -457,12 +457,6 @@ internal class RepairToolsFs(
   private fun resolve(raw: String, write: Boolean): File {
     val text = raw.trim()
     if (text.isEmpty() || text.contains('\u0000')) throw RepairFailure("invalid-path", "路径为空或含 NUL")
-    // Reject the extension before resolving a relative path against filesDir.
-    // Otherwise the target appears inside the allowed runtime root and reaches
-    // the scope check instead of receiving the stable APK refusal.
-    if (text.endsWith(".apk", ignoreCase = true)) {
-      throw RepairFailure("apk-protected", "APK 与系统分区不在允许范围")
-    }
     val mapped = mapAlias(text)
     // Alias inputs are relative to the aliased root, not to filesDir. Resolve
     // them after mapping so `runtime-alias/home/x` reaches the runtime tree.
@@ -475,6 +469,15 @@ internal class RepairToolsFs(
       normalized.canonicalFile
     } catch (_: IOException) {
       throw RepairFailure("path-unreadable", "路径无法规范化")
+    }
+    // Scope is the first access decision. A CI temp path may contain a segment
+    // named `system`; that must remain an outside-scope refusal. An APK name is
+    // rejected after the path is proven to be inside an allowed root.
+    if (scopes().none { inside(canonical, it.root) }) {
+      throw RepairFailure("outside-scope", "路径超出运行时和公共诊断目录")
+    }
+    if (text.endsWith(".apk", ignoreCase = true)) {
+      throw RepairFailure("apk-protected", "APK 与系统分区不在允许范围")
     }
     val scope = ensureAllowed(canonical, write, text)
     if (write) {
