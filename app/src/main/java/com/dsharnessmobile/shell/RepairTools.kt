@@ -506,6 +506,13 @@ internal class RepairToolsFs(
   }
 
   private fun ensureAllowed(file: File, write: Boolean, source: String): Scope {
+    // Scope is decided before the system-path name rules. Otherwise a random
+    // temp path containing a slash segment such as /tmp/.../system/ would be
+    // misreported as an APK mutation when the real reason is that it lies
+    // outside every allowed root.
+    val scopes = scopes()
+    val scope = scopes.firstOrNull { inside(file, it.root) }
+      ?: throw RepairFailure("outside-scope", "路径超出运行时和公共诊断目录")
     if (file.name.endsWith(".apk", ignoreCase = true)) {
       throw RepairFailure("apk-protected", "APK 与系统分区不在允许范围")
     }
@@ -528,9 +535,6 @@ internal class RepairToolsFs(
       path.contains("/product/") || path.contains("/vendor/") || path.contains("/apex/")) {
       throw RepairFailure("apk-protected", "APK 与系统分区不在允许范围")
     }
-    val scopes = scopes()
-    val scope = scopes.firstOrNull { inside(file, it.root) }
-      ?: throw RepairFailure("outside-scope", "路径超出运行时和公共诊断目录")
     if (write && !scope.writable) throw RepairFailure("read-only-scope", "该目录只允许读取")
     // A mapped alias can point at a path whose parent does not exist yet. The
     // scope check still needs to reject writes outside every allowed root, even
