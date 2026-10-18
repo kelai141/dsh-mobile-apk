@@ -309,3 +309,50 @@ describe('keyboard and Android back', () => {
     expect(collapse).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('workspace drag safety', () => {
+  function workspaceNavigation() {
+    vi.spyOn(performance, 'now').mockImplementation(() => Date.now())
+    bubbles.detach()
+    const navigation = { activeId: id('chat'), hiddenTabs: new Set<TabId>(), single: vi.fn(() => true), split: vi.fn(() => true), float: vi.fn(() => true), preview: vi.fn(() => true), drop: vi.fn(() => true), clearPreview: vi.fn() }
+    bubbles = new SidebarBubbles({ session: () => current, tabs: () => records, reorder, t, workspaces: navigation })
+    bubbles.attach(); toggle().click(); geometry()
+    return navigation
+  }
+  it('keeps the 24px safety buffer out of split mode and restores cancellation without committing order', () => {
+    const navigation = workspaceNavigation()
+    pointer('pointerdown', select('child'), 150, 130); vi.advanceTimersByTime(400)
+    pointer('pointermove', document, 17, 180); vi.advanceTimersByTime(300)
+    expect(navigation.preview).not.toHaveBeenCalled()
+    pointer('pointercancel', document, 17, 180)
+    expect(navigation.drop).not.toHaveBeenCalled(); expect(reorder).not.toHaveBeenCalled()
+    expect(document.querySelector('.dsh-bubble-drag-ghost')).toBeNull()
+    expect(popover().hasAttribute('data-drag-out')).toBe(false)
+  })
+  it('requires a stable out-of-buffer dwell, then commits only the previewed workspace drop', () => {
+    const navigation = workspaceNavigation()
+    pointer('pointerdown', select('child'), 150, 130); vi.advanceTimersByTime(400)
+    pointer('pointermove', document, 10, 220); vi.advanceTimersByTime(149)
+    expect(navigation.preview).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(32)
+    expect(navigation.preview).toHaveBeenCalledWith(id('child'), 10, 220)
+    expect(popover().hasAttribute('data-drag-out')).toBe(true)
+    pointer('pointerup', document, 10, 220)
+    expect(navigation.drop).toHaveBeenCalledTimes(1)
+    expect(navigation.drop).toHaveBeenCalledWith(id('child'), 10, 220)
+    expect(reorder).not.toHaveBeenCalled()
+    expect(popover().hasAttribute('data-drag-out')).toBe(false)
+    expect(document.querySelector('.dsh-bubble-drag-ghost')).toBeNull()
+  })
+  it('clears an out-of-buffer preview on reentry without switching to a floating panel', () => {
+    const navigation = workspaceNavigation()
+    pointer('pointerdown', select('child'), 150, 130); vi.advanceTimersByTime(400)
+    pointer('pointermove', document, 10, 220); vi.advanceTimersByTime(192)
+    expect(navigation.preview).toHaveBeenCalled()
+    pointer('pointermove', document, 17, 220)
+    expect(popover().hasAttribute('data-drag-out')).toBe(false)
+    pointer('pointerup', document, 17, 220)
+    expect(navigation.drop).not.toHaveBeenCalled(); expect(navigation.float).not.toHaveBeenCalled()
+    expect(reorder).not.toHaveBeenCalled()
+  })
+})

@@ -21,10 +21,11 @@
 
 ## 右侧气泡导航实施补充（2026-10-17，不改版本）
 
-- P03：`sidebar-bubbles.ts` 从原生 strip 读取当前会话标签，窄于 768 CSS 像素时挂载导航；`sidebar-bubbles.css.ts` 提供可滚动胶囊与 180ms 退出/进入动画，`sidebar-bubbles.locales.ts` 管理文案。选择和关闭点击原控件，内容节点不迁移。原 strip 重建后按元素身份刷新代理，卸载时恢复 aria/样式并释放引用。
+- P03：`sidebar-bubbles.ts` 从原生 strip 读取当前会话标签，1100 CSS 像素以内挂载悬浮药丸导航。`mobile-workspaces.ts` 对接当前 Session 的原生 store actions，保持 row 双窗格模型及稳定 TabHost；竖屏仅转换物理网格方向。按 paneId/tabId 同步焦点、标题、比例、小窗与位置交换；能力表明确允许 conversation/subagentchat/terminal/browser，虚拟屏与未知类型拒绝通用分屏。`sidebar-bubbles.css.ts` 使用统一深浅色药丸与短指示条。关闭沿用原控件；正文 DOM 不迁移。详见镜像 `dsh-client-ui-responsive/docs/mobile-multitask-spec.md`。
 - K08 / P03：`native-browser-presentation.ts` 观察气泡 open/closing 标记，隐藏原生显示层直到退出动画完成；同一浏览器页与 profile 保留。原生 IME 高度和 visualViewport 共同约束列表下沿。
 - P03：`back-stack.ts` 先收起气泡再走右栏原返回路径；取消长按后首次返回可用，并恢复三点按钮焦点。`sidebar-gestures.ts` 排除导航触点，普通滑动保持列表滚动。
 - 构建期 B1：`scripts/patches/data/sidebar-bubble-reorder.mjs` 通过原 `placeTab` 提交同分栏排序并保留活动页；发布包/Android 源码构建双形态夹具和拒绝写入反例由 `scripts/patches/tests/sidebar-bubble-reorder.test.mjs` 执行。
+- 多任务验收：`scripts/verify-mobile-workspaces.mjs`，独立编排真实 CDP/ADB 场景；未运行或证据不足的项不得写 PASS。
 - 验收入口：`scripts/verify-sidebar-bubbles.mjs` 在真实 WebView 上读取业务语义，ADB 执行点击、滑动、长按、取消与返回并保存截图。宽屏使用 `--wide`；`--owner` 可选择专用验收会话。详见 `docs/maintenance/sidebar-bubbles-2026-10-17.md`。
 
 ## 0.14.5-fx-1 实施补充（2026-10-09）
@@ -2068,6 +2069,9 @@ node scripts/verify-client-plugin-fail-recovery.mjs --self-test   # 客户端插
 覆盖全域（脚本里定义，构建产物与第三方目录除外）：`app/src/**/*.kt` 与 `AndroidManifest.xml`、`plugins/*/{src,test}/**`、三个子仓 src/lib、`scripts/{check-,verify-,build-,inject-}*` 与 `scripts/patches/**`、`scripts/snapshot-config/**`。
 
 <!-- COVERAGE
+dsh-client-ui-responsive/src/client/mobile/mobile-workspaces.ts
+dsh-client-ui-responsive/src/client/mobile/mobile-workspaces.css.ts
+scripts/verify-mobile-workspaces.mjs
 dsh-client-ui-responsive/src/client/mobile/sidebar-bubbles.ts
 dsh-client-ui-responsive/src/client/mobile/sidebar-bubbles.css.ts
 dsh-client-ui-responsive/src/client/mobile/sidebar-bubbles.locales.ts

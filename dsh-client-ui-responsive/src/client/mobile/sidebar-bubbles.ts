@@ -2,7 +2,7 @@
 import type { TabId, TabRecord } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-locale/client'
-import { MOBILE_FORM_MAX_WIDTH } from './form-marker.ts'
+import { WORKSPACE_MAX_WIDTH, DRAG_SAFE_PX, DRAG_DWELL_MS, type WorkspaceNavigation } from './mobile-workspaces.ts'
 import type {} from './sidebar-bubbles.locales.ts'
 
 const PANEL = '[data-sidebar-right-panel][data-sidebar-right-open]:not([aria-hidden="true"])'
@@ -20,6 +20,7 @@ export interface SidebarBubblesOptions {
   readonly session: () => SessionId | undefined
   readonly tabs: (session: SessionId) => readonly TabRecord[]
   readonly reorder: BubbleReorderFace['reorderIn']
+  readonly workspaces?: WorkspaceNavigation
   readonly t: TranslateNS<'androidSidebarBubbles'>
 }
 interface BubbleTab {
@@ -47,6 +48,8 @@ interface Press {
   startScroll: number
   before: TabId | undefined
   valid: boolean
+  outsideSince?: number
+  workspaceDrop?: boolean
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, className: string): HTMLElementTagNameMap[K] {
@@ -132,13 +135,14 @@ export class SidebarBubbles {
   private pressTimer: number | null = null
   private scrollFrame: number | null = null
   private suppressClick = false
+  private ghost: HTMLElement | null = null
 
   constructor(private readonly options: SidebarBubblesOptions) {}
 
   attach(): void {
     if (this.attached) return
     this.attached = true
-    this.media = window.matchMedia?.('(max-width: ' + MOBILE_FORM_MAX_WIDTH + 'px)') ?? null
+    this.media = window.matchMedia?.('(max-width: ' + WORKSPACE_MAX_WIDTH + 'px)') ?? null
     this.media?.addEventListener?.('change', this.refresh)
     this.observer = new MutationObserver(records => {
       if (records.some(record => this.relevant(record))) this.refresh()
@@ -205,7 +209,7 @@ export class SidebarBubbles {
 
   private sync(): void {
     const owner = this.options.session()
-    const narrow = this.media?.matches ?? window.innerWidth <= MOBILE_FORM_MAX_WIDTH
+    const narrow = this.media?.matches ?? window.innerWidth <= WORKSPACE_MAX_WIDTH
     const panel = narrow && owner !== undefined
       ? [...document.querySelectorAll<HTMLElement>(PANEL)].find(node => node.getAttribute('data-sidebar-right-session') === owner && node.closest('[hidden]') === null) ?? null : null
     if (panel !== this.panel || owner !== this.owner) {
@@ -231,13 +235,13 @@ export class SidebarBubbles {
       const pane = strip.getAttribute('data-dockkit-strip') ?? ''
       return [...strip.querySelectorAll<HTMLElement>('[data-dockkit-tab]')].flatMap(source => {
         const id = source.getAttribute('data-dockkit-tab') as TabId
-        const record = records.get(id)
+        const record = this.options.workspaces?.hiddenTabs.has(id) ? undefined : records.get(id)
         return record ? [{ record, source, pane, selected: source.getAttribute('aria-selected') === 'true', close: source.querySelector<HTMLButtonElement>('[data-dockkit-tab-close]') }] : []
       })
     })
     if (this.press && !this.tabs.some(tab => tab.record.id === this.press?.tab)) this.cancelPress()
     this.syncRows()
-    const current = this.tabs.find(tab => tab.selected && tab.source.closest('[data-dockkit-pane-active]')) ?? this.tabs.find(tab => tab.selected) ?? this.tabs[0]
+    const current = this.tabs.find(tab => tab.record.id === this.options.workspaces?.activeId) ?? this.tabs.find(tab => tab.selected && tab.source.closest('[data-dockkit-pane-active]')) ?? this.tabs.find(tab => tab.selected) ?? this.tabs[0]
     if (current && this.heading) {
       const signature = current.source.querySelector('[data-dockkit-tab-title]')?.innerHTML ?? current.record.title
       if (this.heading.dataset.title !== signature) {
@@ -309,6 +313,7 @@ export class SidebarBubbles {
     this.header?.remove(); this.popover?.remove(); this.mask?.remove()
     this.panel = null; this.owner = undefined; this.header = null; this.heading = null
     this.toggle = null; this.popover = null; this.list = null; this.mask = null; this.actions = null; this.status = null
+    document.documentElement.removeAttribute('data-dsh-popover-open')
     this.rows.clear(); this.tabs = []; this.controls = ''; this.controlSources = []; this.suppressClick = false
   }
 
@@ -343,7 +348,14 @@ export class SidebarBubbles {
       row.close.setAttribute('aria-label', this.options.t('close', { title: row.label.textContent || tab.record.title }))
       row.close.hidden = tab.close === null
       row.element.toggleAttribute('data-selected', tab.selected)
+      const focused = tab.record.id === this.options.workspaces?.activeId
+      row.element.toggleAttribute('data-focused', focused)
+      row.select.setAttribute('aria-description', tab.selected ? (focused ? '当前输入工作区' : '另一工作区显示中') : '')
+      let focusLabel = row.select.querySelector<HTMLElement>('.dsh-bubble-focus-label')
+      if (!focusLabel && this.options.workspaces) { focusLabel = element('small', 'dsh-bubble-focus-label'); row.select.append(focusLabel) }
+      if (focusLabel) focusLabel.textContent = focused && tab.selected ? '当前' : ''
       row.element.toggleAttribute('data-group-start', index > 0 && this.tabs[index - 1].pane !== tab.pane)
+      row.element.style.setProperty('--dsh-bubble-index', String(index))
       row.element.style.setProperty('--dsh-bubble-delay', Math.min(index, 7) * 8 + 'ms')
       if (this.list?.children[index] !== row.element) this.list?.insertBefore(row.element, this.list.children[index] ?? null)
     })
@@ -352,6 +364,7 @@ export class SidebarBubbles {
   private syncControls(current: BubbleTab | undefined): void {
     if (!this.panel || !this.header || !this.actions || !this.toggle) return
     const originals = [...this.panel.querySelectorAll<HTMLButtonElement>(STRIP + ' button')].filter(node => {
+      if (this.options.workspaces && !node.matches('[data-sidebar-right-mode], [data-sidebar-right-toggle]')) return false
       if (node.closest('[data-dockkit-tab]')) return false
       return node.matches('[data-sidebar-right-mode], [data-sidebar-right-toggle]') || node.closest('[data-dockkit-strip]')?.getAttribute('data-dockkit-strip') === current?.pane
     })
@@ -372,6 +385,7 @@ export class SidebarBubbles {
       const svg = original.querySelector('svg')
       if (svg) proxy.append(svg.cloneNode(true))
       const chrome = original.matches('[data-sidebar-right-mode], [data-sidebar-right-toggle]')
+      if (original.matches('[data-sidebar-right-mode]')) proxy.setAttribute('data-dsh-mode-proxy', '')
       if (!chrome) proxy.append(document.createTextNode(label))
       proxy.addEventListener('click', () => {
         if (!this.current() || !original.isConnected) return
@@ -380,6 +394,13 @@ export class SidebarBubbles {
       })
       if (chrome) this.header.insertBefore(proxy, this.toggle)
       else this.actions.append(proxy)
+    }
+    if (this.options.workspaces) {
+      const split = button('dsh-bubble-control'); split.textContent = '分栏'; split.setAttribute('aria-label', '创建双工作区'); split.dataset.dshWorkspaceSplit = '';
+      split.addEventListener('click', () => { if (this.options.workspaces?.split()) this.setOpen(false) })
+      const float = button('dsh-bubble-control'); float.textContent = '小窗'; float.setAttribute('aria-label', '将当前标签小窗化'); float.dataset.dshWorkspaceFloat = '';
+      float.addEventListener('click', () => { if (this.options.workspaces?.float()) this.setOpen(false) })
+      this.actions.append(split, float)
     }
     this.actions.hidden = this.actions.childElementCount === 0
   }
@@ -390,7 +411,8 @@ export class SidebarBubbles {
     if (!this.current()) { this.refresh(); return }
     const tab = this.tabs.find(tab => tab.record.id === id)
     if (!tab?.source.isConnected) return
-    tab.source.click()
+    if (this.options.workspaces) { if (!this.options.workspaces.single(id)) return }
+    else tab.source.click()
     this.setOpen(false, true)
   }
 
@@ -415,13 +437,6 @@ export class SidebarBubbles {
     this.collapseTimer = null
     // Native BrowserHost stays hidden until the exit animation finishes.
     this.popover.setAttribute('data-dsh-sidebar-bubbles', open ? 'open' : 'closing')
-    // 原生覆盖层避让（0.14.8 设备实测，用户报「三个点展开的标签界面被黑色虚拟屏遮挡」）：
-    // 虚拟屏/浏览器的画像是**壳侧 SurfaceView**，addView 在 root 上、**位于 WebView 之上**——
-    // 页面里的 z-index 再高也压不过它，所以弹层一旦与画面矩形重叠就是「怎么也点不到、看不全」。
-    // 这是两条渲染通路的结构事实，不是样式问题。修法：把「弹层已展开」发布成**页面级信号**，
-    // 由画面上层（dsh-android-vdisplay / dsh-client-ui-responsive 的浏览器面）据此把原生层
-    // 暂时隐藏，收起时再恢复（弹层本来就是覆盖式交互，隐藏不改变任何状态）。
-    // 用 document 级属性而不是只在弹层内部：画面组件与本组件分属不同插件，共享不了实例。
     document.documentElement.toggleAttribute('data-dsh-popover-open', open)
     if (!open) this.collapseTimer = window.setTimeout(() => {
       this.collapseTimer = null
@@ -446,7 +461,7 @@ export class SidebarBubbles {
     const original = this.panel.querySelector<HTMLElement>(STRIP)?.getBoundingClientRect()
     const padding = getComputedStyle(this.panel)
     const topInset = parseFloat(padding.paddingTop) || 0
-    const top = Math.max(topInset, (original?.top ?? panel.top) - panel.top)
+    const top = this.options.workspaces ? topInset : Math.max(topInset, (original?.top ?? panel.top) - panel.top)
     this.header.style.top = top + 'px'
     const visual = window.visualViewport
     const left = Math.max(panel.left, visual?.offsetLeft ?? 0)
@@ -455,19 +470,7 @@ export class SidebarBubbles {
     const nativeBottom = Math.max(0, parseFloat(root.getPropertyValue('--dsh-android-ime-bottom')) || 0, parseFloat(root.getPropertyValue('--dsh-android-system-bottom')) || 0)
     const bottom = Math.min(panel.bottom - (parseFloat(padding.paddingBottom) || 0), (visual?.offsetTop ?? 0) + (visual?.height ?? window.innerHeight), window.innerHeight - nativeBottom)
     const width = Math.max(1, Math.min(304, right - left - 24))
-    // 顶部工具条避让（0.14.8 设备实测）：弹层原按「头部 top + 54」定位，而**头部之上还有一条
-    // 原生工具条**（数据行/图标按钮实测占到 y≈70，头部 top≈26 ⇒ 26+54=80 仅勉强越过，
-    // 折叠态/更大字号下直接压住弹层首行）。用户报「三个点展开的标签界面被遮挡」即此。
-    // 判据改为：取弹层要避让的**所有**可视顶栏的最低边（头部 + 其上方条带），再加 8px。
-    const chromeBottom = (() => {
-      let lowest = top + (this.header?.getBoundingClientRect().height ?? 40)
-      const panelElement = this.panel
-      for (const node of panelElement === null ? [] : [...panelElement.querySelectorAll<HTMLElement>('[data-dockkit-strip], [data-dsh-bubble-native]')]) {
-        const rect = node.getBoundingClientRect()
-        if (rect.height > 0 && rect.top < panel.top + 160) lowest = Math.max(lowest, rect.bottom - panel.top)
-      }
-      return lowest
-    })()
+    const chromeBottom = Math.max(top + 48, ...[...this.panel.querySelectorAll<HTMLElement>('[data-dockkit-strip], [data-dsh-bubble-native]')].map(node => { const rect = node.getBoundingClientRect(); return rect.height > 0 && rect.top < panel.top + 160 ? rect.bottom - panel.top : 0 }))
     const popTop = Math.max(chromeBottom + 8, (visual?.offsetTop ?? 0) - panel.top + 8)
     this.popover.style.width = width + 'px'
     this.popover.style.left = Math.max(left - panel.left + 12, right - panel.left - width - 12) + 'px'
@@ -521,6 +524,16 @@ export class SidebarBubbles {
       this.suppressClick = true
       const row = this.rows.get(this.press.tab)
       row?.element.setAttribute('data-dragging', '')
+      if (row && this.panel) {
+        const rect = row.element.getBoundingClientRect()
+        this.ghost = row.element.cloneNode(true) as HTMLElement
+        this.ghost.classList.add('dsh-bubble-drag-ghost'); this.ghost.removeAttribute('data-dsh-bubble-tab')
+        this.ghost.setAttribute('aria-hidden', 'true'); this.ghost.querySelectorAll('button').forEach(node => { node.tabIndex = -1; node.removeAttribute('data-dsh-bubble-select') })
+        Object.assign(this.ghost.style, { left: rect.left + 'px', top: rect.top + 'px', width: rect.width + 'px' })
+        const colors = getComputedStyle(row.element)
+        this.ghost.style.backgroundColor = colors.backgroundColor; this.ghost.style.color = colors.color
+        this.panel.append(this.ghost)
+      }
       row?.select.setPointerCapture?.(this.press.pointer)
       this.trackDrag()
       this.scrollFrame = requestAnimationFrame(this.autoScroll)
@@ -545,9 +558,11 @@ export class SidebarBubbles {
       event.preventDefault(); event.stopPropagation()
       press.latestX = event.clientX; press.latestY = event.clientY
       this.trackDrag()
-      const { tab, before, valid } = press
+      const { tab, before, valid, workspaceDrop, latestX, latestY } = press
       this.cancelPress()
-      if (valid) this.reorder(tab, before)
+      if (workspaceDrop) { this.options.workspaces?.drop(tab, latestX, latestY); this.setOpen(false) }
+      else if (valid) this.reorder(tab, before)
+      else if (this.status) this.status.textContent = '未放置标签，已恢复原布局'
     } else this.cancelPress()
   }
   private readonly onPointerCancel = (): void => { this.cancelPress(); this.suppressClick = false }
@@ -571,10 +586,22 @@ export class SidebarBubbles {
     const tab = this.tabs.find(tab => tab.record.id === press.tab)
     if (!tab) { this.cancelPress(); return }
     const row = this.rows.get(press.tab)
-    if (row) row.element.style.transform = 'translateY(' + (press.latestY - press.y + this.popover.scrollTop - press.startScroll) + 'px)'
+    if (this.ghost) this.ghost.style.transform = 'translate(' + (press.latestX - press.x) + 'px,' + (press.latestY - press.y) + 'px)'
+    else if (row) row.element.style.transform = 'translateY(' + (press.latestY - press.y + this.popover.scrollTop - press.startScroll) + 'px)'
     for (const candidate of this.rows.values()) candidate.element.removeAttribute('data-drop')
     const bounds = this.popover.getBoundingClientRect()
     press.valid = press.latestX >= bounds.left && press.latestX <= bounds.right && press.latestY >= bounds.top && press.latestY <= bounds.bottom
+    const outside = press.latestX < bounds.left - DRAG_SAFE_PX || press.latestX > bounds.right + DRAG_SAFE_PX || press.latestY < bounds.top - DRAG_SAFE_PX || press.latestY > bounds.bottom + DRAG_SAFE_PX
+    if (outside && this.options.workspaces) {
+      press.outsideSince ??= performance.now()
+      if (performance.now() - press.outsideSince >= DRAG_DWELL_MS) {
+        this.popover.setAttribute('data-drag-out', '')
+        press.workspaceDrop = this.options.workspaces.preview(press.tab, press.latestX, press.latestY)
+      }
+    } else {
+      press.outsideSince = undefined; press.workspaceDrop = false
+      this.popover.removeAttribute('data-drag-out'); this.options.workspaces?.clearPreview()
+    }
     if (!press.valid) return
     const group = this.tabs.filter(candidate => candidate.pane === tab.pane && candidate.record.id !== press.tab)
     const target = group.find(candidate => {
@@ -595,6 +622,7 @@ export class SidebarBubbles {
     const delta = y < rect.top + 44 ? -Math.min(10, Math.max(0, (rect.top + 44 - y) / 4))
       : y > rect.bottom - 44 ? Math.min(10, Math.max(0, (y - rect.bottom + 44) / 4)) : 0
     if (delta && press.latestX >= rect.left && press.latestX <= rect.right) { this.popover.scrollTop += delta; this.trackDrag() }
+    this.trackDrag()
     this.scrollFrame = requestAnimationFrame(this.autoScroll)
   }
 
@@ -610,6 +638,8 @@ export class SidebarBubbles {
     }
     for (const row of this.rows.values()) row.element.removeAttribute('data-drop')
     this.press = null
+    this.ghost?.remove(); this.ghost = null
+    this.popover?.removeAttribute('data-drag-out'); this.options.workspaces?.clearPreview()
   }
 
   private reorder(tab: TabId, before: TabId | undefined): void {

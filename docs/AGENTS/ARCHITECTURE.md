@@ -173,3 +173,9 @@ AI 工具（dsh-android-manage）
 ```
 
 两条通道**等价且无障碍优先**（PRD-0.13.2 §3.3 B3）；授权面在设置页「设备控制授权」：无障碍为主入口，ADB 折叠为高级/脚本面。
+
+### 移动端覆盖层内的双工作区
+
+响应式插件保持上游 DockLayout 的稳定 TabHost 与原生 row 状态，不重建或迁移正文祖先。`mobile-workspaces.ts` 封装当前固定引擎版本的 adopted Session store 适配点；所有布局写入调用原生 actions，适配面缺席时拒绝动作。竖屏网格呈上下、横屏呈左右；paneId 绑定标题与焦点，交换只改变整个工作区的物理位置。移动端通过 layout.openRightbar(false, fullscreen) 报告覆盖呈现，主对话不预留右侧轨道。
+
+渲染能力逐类型登记。原生 BrowserHost 仍是单 stage，禁止两个浏览器同时进入通用分屏；虚拟屏保留专用 viewer/设备生命周期。会话、子代理、终端开启已有 keepMounted 策略，浏览器保留既有策略。详细交互和验收见 `dsh-client-ui-responsive/docs/mobile-multitask-spec.md`。
