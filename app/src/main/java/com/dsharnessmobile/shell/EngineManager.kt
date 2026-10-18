@@ -1835,7 +1835,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
    */
   private fun repairProfilePatch() {
     // 两条**独立**的自愈，各自有自己的幂等标记：
-    //  · 退役行 disabled 残留（apk #214）：标记 .profile-patch-repair-<version>；
+    //  · 退役行 disabled 残留与退役工厂插件条目（apk #214 / 0.14.8 undo 退役）：标记 .profile-patch-repair-<version>；
     //  · 旧「单点」写法归一（0.14.2-fx-2，见 normalizeLegacyAgentDefaultModel）：标记 .profile-patch-normalize-<version>。
     //
     // **为什么必须独立标记**：本函数原先的早退（marker.exists()）语义是「本版本已修退役行」。
@@ -1862,12 +1862,15 @@ class EngineManager(private val context: Context, private val pickToken: String?
       var repaired = 0
       for (target in targets) {
         val live = try { target.readText() } catch (_: Throwable) { failed = true; continue }
-        val result = FactoryProfilePatch.repairRetiredDisabledRows(live)
+        val result = FactoryProfilePatch.repairRetiredEntries(
+          live,
+          retiredFactories = FactoryProfilePatch.RETIRED_FACTORY_ENTRIES,
+        )
         if (result.text == live) continue
-        // 解析校验（review C8）：只允许移除退役行——其余 id 集合必须原样保留，否则不写。
+        // 解析校验（review C8）：只允许移除退役行与退役工厂条目——其余 id 集合必须原样保留，否则不写。
         val before = FactoryProfilePatch.blockIds(live).toSet()
         val after = FactoryProfilePatch.blockIds(result.text).toSet()
-        if (!after.containsAll(before - FactoryProfilePatch.RETIRED_DISABLED_ROW_IDS)) {
+        if (!after.containsAll(before - FactoryProfilePatch.RETIRED_DISABLED_ROW_IDS - FactoryProfilePatch.RETIRED_FACTORY_ENTRIES.keys)) {
           Log.w(TAG, "profile patch repair skipped (parse check failed): " + target.absolutePath)
           failed = true
           continue

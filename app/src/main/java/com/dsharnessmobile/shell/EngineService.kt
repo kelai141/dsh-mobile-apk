@@ -207,6 +207,14 @@ class EngineService : Service() {
           try {
             if (!isEpochCurrent(epoch) || epoch.watchdog.get() !== exec) return@scheduleWithFixedDelay
             val now = System.currentTimeMillis()
+            // 启动流正在排队重试或修复助手持有闸门时，后台不得同时重启、回撤或改写
+            // 正在被修复的运行时。保留通知消费与唤醒锁续期：它们不解耦地改写运行时状态。
+            if (RepairState.required(this) || RepairState.active || RepairState.retryPending) {
+              NotifyStore.drainTick(this)
+              if (!isEpochCurrent(epoch)) return@scheduleWithFixedDelay
+              WatchdogV2.refreshWakeLock(this, epoch.wakeOwner)
+              return@scheduleWithFixedDelay
+            }
             // P1（0.14.1 通知停摆修复）：通知信道消费的**兜底驱动**（`NotifyStore` 的 drainTick）。
             // 它必须在本拍的任何状态判定之前执行——引擎 HEALTHY 时也要消费，而在 DEAD/DEGRADED 各态下
             // 更是唯一活着的消费者（真机停摆现场：`.notify.ndjson` 一直在长，而事件驱动的消费一条也没
@@ -215,12 +223,8 @@ class EngineService : Service() {
             if (!isEpochCurrent(epoch)) return@scheduleWithFixedDelay
             val state = WatchdogV2.assessProbe(this) { isEpochCurrent(epoch) }
             if (!isEpochCurrent(epoch)) return@scheduleWithFixedDelay
-            // 自动回滚的目标选择（2026-09-21）：**壳侧探活 HEALTHY 是「好」的唯一硬证据**。
-            // 急救 CLI 的 restore-last-good 认的是插件自报的 boot-state（apply 阶段/30s 定时写 ok，
-            // 不代表引擎整体起来了）——设备实测过「引擎起不来但 boot-state 仍 ok」的形态，于是回滚
-            // 会把**含坏配置的那份快照**原样写回。这里在健康拍记下当时的最新快照 id，UndoGate 回滚时
-            // 优先用它回滚。幂等 + 一次目录列举，值不变不落盘。
-            if (state == WatchdogV2.ProbeState.HEALTHY) UndoGate.noteHealthy(this, engineManager)
+            // UndoGate 的历史健康记录在 0.14.8 起不再更新：插件已退役，壳侧不再运行自动 undo。
+            // 急救 CLI 与已有快照仍保留给用户手动恢复。
             if (!isEpochCurrent(epoch)) return@scheduleWithFixedDelay
             // FX-210.2/.3/.4：决策与状态无关副作用全部落在 planTick 的前置段（先于一切早退，
             // 含熔断打开的那一拍），调用方只执行返回的破坏性动作。退避/熔断同用
@@ -249,20 +253,9 @@ class EngineService : Service() {
               feedProbe = { healthy -> if (isEpochCurrent(epoch)) engineManager.onEngineProbe(healthy) },
               consumeMarkers = { if (isEpochCurrent(epoch)) WatchdogV2.consumeTaskDoneMarkers(this) },
               refreshWake = { if (isEpochCurrent(epoch)) WatchdogV2.refreshWakeLock(this, epoch.wakeOwner) },
-              // 【issue #274 ①】回滚的证据门：探活超时 = 「引擎在忙/磁盘慢」而非故障，
-              // 端口非本进程持有 = 重启/回滚都不解决问题。两者命中时本拍既不 arm 也不 execute。
-              undoReady = {
-                isEpochCurrent(epoch) && UndoGate.onProbeFailure(
-                  this,
-                  WatchdogV2.effectiveFailureCount(),
-                  UndoGate.RollbackEvidence(
-                    logTail = WatchdogV2.lastLogTail,
-                    portOwnedByApp = engineManager.engineProcessAlive(),
-                    slowOnly = WatchdogV2.lastProbeTimedOut,
-                  ),
-                  engine = engineManager,
-                )
-              },
+              // 自动 undo 主代理已断开运行调用（0.14.8）：看门狗只做探活与受控重启。
+              // UndoGate 类保留为历史实现，手动急救入口不受影响。
+              undoReady = { false },
               callerCurrent = { isEpochCurrent(epoch) },
             )
             if (!isEpochCurrent(epoch)) return@scheduleWithFixedDelay
@@ -274,50 +267,9 @@ class EngineService : Service() {
             when (plan.action) {
               WatchdogV2.TickAction.IDLE -> {
                 epoch.nextRestartAllowedAt = 0L
-                UndoGate.disarm(this)
               }
               WatchdogV2.TickAction.HOLD -> Unit
-              WatchdogV2.TickAction.UNDO -> {
-                epoch.nextRestartAllowedAt = now + WatchdogV2.nextDelayMs()
-                val caller = Thread {
-                  try {
-                    if (!isEpochCurrent(epoch)) return@Thread
-                    val result = UndoGate.execute(this, engineManager)
-                    if (!isEpochCurrent(epoch)) return@Thread
-                    if (result.executed) {
-                      // 0.14.1：配置回滚成功后必须解除熔断锁存。tripped 一旦为真即永久 HOLD，
-                      // 只有 HEALTHY 探活或 EngineStartFlow 的唯一一处 reset 能解——而 undo 成功
-                      // 正是「引擎应当重新可用」的时点，此处不复位会让恢复后的世代白白被锁住。
-                      WatchdogV2.reset()
-                      LogCollector.log("dsh-watchdog", "auto-undo ok -> " + (result.snapshotId ?: "?"))
-                      if (!isEpochCurrent(epoch)) return@Thread
-                      engineManager.resetCooldown()
-                      if (!isEpochCurrent(epoch)) return@Thread
-                      engineManager.startEngine()
-                    } else {
-                      LogCollector.log("dsh-watchdog", "auto-undo not executed: " + result.summary.take(160))
-                      // 回滚不可用时必须**解除失败计数与熔断锁存**，否则本拍之后再没有恢复路径：
-                      // planTick 在锁存打开后恒 HOLD（不再 RESTART），而「引擎一直死」又永远不会出现
-                      // HEALTHY 拍去解开它 —— 用户看到的是「引擎死了、App 也不再重试」的死局。
-                      // 2026-09-21 设备实测：跨版本护栏拒绝回滚（UndoGate 返回 executed=false）后正是这个形状
-                      // （引擎进程消失、HTTP 000，直到进程重启才恢复）。复位只清计数/锁存，不清 arm 文件；
-                      // 重启仍受退避约束（≤80s），不会打风暴。
-                      if (isEpochCurrent(epoch)) WatchdogV2.reset()
-                    }
-                  } catch (t: Throwable) {
-                    if (isEpochCurrent(epoch)) Log.e("dsh-watchdog", "auto-undo failed", t)
-                  } finally {
-                    epoch.undoCaller.compareAndSet(Thread.currentThread(), null)
-                  }
-                }
-                if (epoch.undoCaller.compareAndSet(null, caller)) {
-                  if (!isEpochCurrent(epoch)) {
-                    epoch.undoCaller.compareAndSet(caller, null)
-                    return@scheduleWithFixedDelay
-                  }
-                  caller.start()
-                }
-              }
+              WatchdogV2.TickAction.UNDO -> Unit
               WatchdogV2.TickAction.RESTART -> {
                 if (!isEpochCurrent(epoch)) return@scheduleWithFixedDelay
                 if (plan.force) {

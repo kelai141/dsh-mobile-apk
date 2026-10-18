@@ -430,9 +430,9 @@ class ClientRollbackGateTest {
       "既有两参调用点必须继续编译（默认值 null）",
       code.contains("clientFailure: PluginMounts.FailedEntry? = null"),
     )
-    // 既有调用点（EngineService / EngineStartFlow 的两参形式）必须还在场。
+    // 自动 undo 的看门狗调用点已随 0.14.8 退役；前端插件树失败路径仍走同一条执行面。
     val svc = codeOnly(shellSource("EngineService.kt"))
-    assertTrue("既有调用点 EngineService 保持两参形式", svc.contains("UndoGate.execute(this, engineManager)"))
+    assertFalse("看门狗不得继续自动执行 undo", svc.contains("UndoGate.execute(this, engineManager)"))
   }
 
   @Test

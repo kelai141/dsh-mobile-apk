@@ -8,6 +8,8 @@ app/src/main/assets/snapshot.tar.xz
 # 不入库——入库会造成「声明值是某一次单 ABI 构建的事实」，且与上面 tar 的忽略语义不一致。
 # 出库后净检出/CI 下 tar 与 sha 均缺席，门禁打印 SKIP 计数；构建链以 --require 严格跑（缺席即失败）。
 app/src/main/assets/snapshot.sha256
+# 与快照同生的本地清单：由 build-hard-manifest.mjs 从当前 tar 生成，不能把单次打包事实提交。
+app/src/main/assets/plugin-hard-manifest.json
 # 敏感数据（安全审计 2026-08-14）
 *.credentials.yaml
 token*

@@ -56,7 +56,8 @@ const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
 const pluginDirs = manifest.dirs.map((d) => join(ROOT, d))
 const externalDirs = manifest.externals.map((d) => join(ROOT, d))
 const externalNamed = (name) => externalDirs.find((p) => p.replace(/\\/g, '/').endsWith('/' + name))
-const undo = externalNamed('dsh-undo-savepoint')
+// 0.14.8：dsh-undo-savepoint 已从新快照装配面退役。plugin-dirs.json 保留历史条目供升级迁移与
+// 手动急救，但它不再进入注入集或 patch 挂载集。
 const market = externalNamed('dshmarketplace-plugin')
 
 // 门禁集（唯一声明处；check-release-gates.mjs 断言与 build-apk-013.ps1 的差集 = 0）
@@ -171,7 +172,6 @@ try {
   // ---- 1. 前置：基座/插件/vendor 在场 ----
   requires('snapshot 源', snapSrc)
   pluginDirs.forEach((p) => requires('插件', p))
-  requires('vendor undo', join(undo, 'package.json'))
   requires('vendor market', join(market, 'package.json'))
 
   // ---- 2. 门禁（注入前；与 build-apk-013.ps1 同一份门禁集，0.13.8-b ST-06）----
@@ -285,9 +285,9 @@ try {
     // 默认指向**原源目录**（表示「不降级」）；只有真的降级成功才改指向暂存副本。
     // 无 lib/client.js 的源不复制、保持原路径。
     const degraded = new Map([
-      ['undo', undo], ['market', market],
+      ['market', market],
     ])
-    for (const key of ['undo', 'market']) {
+    for (const key of ['market']) {
       const src = degraded.get(key)
       const leaf = key + '-degraded'
       if (!existsSync(join(src, 'lib', 'client.js'))) {
@@ -302,15 +302,14 @@ try {
       degraded.set(key, dst)
       log(`  暂存降级就位：${src} -> ${dst}`)
     }
-    const undoDeg = degraded.get('undo')
     const marketDeg = degraded.get('market')
-    log('单 pass 注入（@dsh-android + undo/market + 权威 patch，全部装配 profile）…')
+    log('单 pass 注入（@dsh-android + market + 权威 patch，全部装配 profile）…')
     // ST-05：--all-profiles = 权威 patch 写给全部真实装配 profile（web+headless，负控 profile 除外）
     run(PYTHON, [
       join(ROOT, 'scripts', 'inject-all.py'), snapSrc, join(work, 'snap-final2.tar.xz'),
       join(ROOT, 'scripts', 'profile-web.cordis.patch.yml'),
       '--dsh-android', ...pluginDirs,
-      '--external', undoDeg, marketDeg,
+      '--external', marketDeg,
       '--all-profiles',
     ])
     snapIn = join(work, 'snap-final2.tar.xz')
@@ -321,7 +320,7 @@ try {
 
   // ---- 4. 门禁（注入后；与 build-apk-013.ps1 同一份门禁集）----
   log('门禁：patch 挂载集校验（双向差集）…')
-  run('node', [gate('check-patch-mounts.mjs'), join(ROOT, 'scripts', 'profile-web.cordis.patch.yml'), ...pluginDirs, undo, market])
+  run('node', [gate('check-patch-mounts.mjs'), join(ROOT, 'scripts', 'profile-web.cordis.patch.yml'), ...pluginDirs, market])
   // 注入面成员完整性（P0）：包内新增文件必须随注入进 tar，且相对导入不得悬空
   log('门禁：注入成员完整性（成员集合 + 相对导入可解析）…')
   run('node', [gate('check-inject-completeness.mjs'), snapIn])

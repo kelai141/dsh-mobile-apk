@@ -41,11 +41,8 @@
 # （dsh-client-file-upload + onShowFileChooser 官方通道）与文档预览（documentpreview 内含
 # pdfjs），两个「添加附件」按钮并排出现（窄屏尤其挤）。包体仍在基座快照内，不再装载即等于退役；
 # 若日后需要 Office/OCR 能力，恢复本节 insert 即可（一行可逆）。
-# 崩溃自动回退（0.13.0 F3，M3.0）：dsh-undo-savepoint——配置+插件代码树快照、撤销、安全模式；
-# 装坏可退，与 F4 市场安装共用同一机制（撤销保护的安装）。
-- insert:
-    - id: dsh-undo-savepoint
-      name: dsh-undo-savepoint
+# 0.14.8 退役（用户裁定）：dsh-undo-savepoint 不再作为新快照的装配插件。
+# 旧用户由壳侧启动迁移去除工厂安装项，历史快照与安全模式备份保留。
 
 # 插件市场（0.13.0 F4，M3.3）：dshmarketplace-plugin——会话 /store 命令、设置页市场、agent 工具与技能文件。
 - insert:

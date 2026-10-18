@@ -124,6 +124,18 @@
         "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt",
         "pattern": "ENGINE_BOOT_BUDGET_MS"
       }
+    },
+    {
+      "id": "native-repair-handoff",
+      "holder": "壳侧（RepairState / EngineStartFlow / RepairActivity）",
+      "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/RepairState.kt:requireRepair/setRetries/reset",
+      "sourceOfTruth": "壳偏好 native-repair: required + retries",
+      "syncPath": "启动失败或客户端插件装配失败共用两次重试；耗尽后持久闸门阻止自动启动与监控继续动作，主页面按钮转为进入内置修复助手。页面就绪会复位闸门与预算。",
+      "evidence": {
+        "kind": "grep",
+        "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/RepairState.kt",
+        "pattern": "fun requireRepair"
+      }
     }
   ]
 }

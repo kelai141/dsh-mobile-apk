@@ -96,9 +96,9 @@ class UndoGateKnownGoodTest {
       code.contains("aborted no-known-good-for-this-install stored=") && code.contains("knownGoodUsable(knownGoodId(context), knownGoodFp(context), installFingerprint(context))"))
     // ③ 已知良好记录必须带安装指纹（否则无法判跨版本）
     assertTrue("记录必须两行：id + 指纹", code.contains("knownGoodFile(context).writeText(id + \"\\n\" + fp + \"\\n\")"))
-    // ④ 「已知良好」只由壳侧健康观测写入
+    // ④ 自动 undo 已退役：看门狗不再记录 known-good，手动恢复仍读取历史记录。
     val svc = shellSource("EngineService.kt")
-    assertTrue("看门狗 HEALTHY 拍必须记 known-good", svc.contains("UndoGate.noteHealthy(this, engineManager)"))
+    assertFalse("看门狗不得继续写自动 undo 的健康记录", svc.contains("UndoGate.noteHealthy(this, engineManager)"))
   }
 
   @Test
@@ -110,7 +110,7 @@ class UndoGateKnownGoodTest {
     val cli = File("src/main/assets/undo-emergency.mjs").takeIf { it.isFile }
       ?: File("app/src/main/assets/undo-emergency.mjs")
 
-    assertTrue("启动前部署本地急救 CLI", startFlow.contains("engineManager.deployUndoCli()"))
+    assertFalse("自动 undo 退役后启动流不得继续部署或调用急救链", startFlow.contains("engineManager.deployUndoCli()"))
     assertTrue("CLI 部署到壳可读的 filesDir", manager.contains("File(context.filesDir, asset)"))
     assertTrue("控制台继承 shellEnv", session.contains("environment().putAll(engineManager.shellEnv())"))
     assertTrue("shellEnv 为控制台提供 app-private 根目录", manager.contains("\"DSH_FILES_DIR\" to context.filesDir.absolutePath"))

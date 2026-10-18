@@ -355,7 +355,10 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
           // 缺陷 D（fx-2）：同一个主按钮在 **Error 相位**下语义不同——它变成「安全模式启动」。
           // 分叉放在这里而不是换控件：`GuideChrome` 只有一个 primaryButton，
           // 复用它的既有样式/锁态/无障碍面比新增按钮更少出事面（也避免用 Phase==Error 之外的判据）。
-          if (lastGuidePhase == GuidePhase.Error && !startupRetryAction) enterSafeMode()
+          if (lastGuidePhase == GuidePhase.Error) {
+            RepairState.requireRepair(activity)
+            activity.startActivity(Intent(activity, RepairActivity::class.java))
+          }
           else {
             activity.engineFlow.engineRetryCount = 0 // 手动重试归零自动重试计数
             // 0.14.1 D2：同时清空**跨进程**的快照刷新失败账本。用户显式点「重试」就是要求
@@ -405,8 +408,10 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
 
   fun applyGuidePhase(phase: GuidePhase, title: String, hint: String? = null) {
     lastGuidePhase = phase
+    // Error is always the native repair handoff. A foreign 3080 listener still
+    // cannot be repaired by the assistant, so it keeps the retry action.
     startupRetryAction = phase == GuidePhase.Error &&
-      startupFailureUsesRetry(activity.engineManager.lastStartRefusalCode)
+      !startupFailureAllowsOwnershipRepair(activity.engineManager.lastStartRefusalCode)
     startupOwnershipRepairAllowed = startupFailureAllowsOwnershipRepair(activity.engineManager.lastStartRefusalCode)
     engineStatus.text = title
     (engineStatus.parent as View).visibility = if (phase == GuidePhase.Idle || phase == GuidePhase.Info) View.GONE else View.VISIBLE
@@ -418,7 +423,8 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
     // **失败相位自动属主自愈**——启动已经挂了的时候用户就停在这一页，此时自动跑一次有界自愈
     // （su 优先），并把结果如实写进提示行。修复不依赖用户找到任何按钮（启动挂了的用户
     // 根本进不到设置页，那里的按钮形同虚设）。
-    if (phase == GuidePhase.Error && startupOwnershipRepairAllowed) autoRepairOwnershipOnFailure()
+    if (phase == GuidePhase.Error && startupOwnershipRepairAllowed &&
+      !RepairState.required(activity)) autoRepairOwnershipOnFailure()
 
     val busy = phase == GuidePhase.Starting ||
       phase == GuidePhase.Extracting ||
@@ -446,8 +452,8 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
       phase == GuidePhase.Closed -> activity.getString(R.string.ds_restart)
       // 缺陷 D（fx-2）：启动失败时主按钮是「安全模式启动」而不是「重试」。
       // 用户口径：失败的当下，重试往往只是再撞一次同一堵墙；能自救的那条路是带着上下文进安全模式。
+      phase == GuidePhase.Error -> "启动修复助手"
       startupRetryAction -> activity.getString(R.string.ds_start_retry)
-      phase == GuidePhase.Error -> activity.getString(R.string.ds_safe_start)
       phase == GuidePhase.Recovering -> activity.getString(R.string.ds_recovering)
       phase == GuidePhase.Starting || phase == GuidePhase.Extracting -> activity.getString(R.string.ds_starting)
       phase == GuidePhase.Updating -> activity.getString(R.string.ds_updating)

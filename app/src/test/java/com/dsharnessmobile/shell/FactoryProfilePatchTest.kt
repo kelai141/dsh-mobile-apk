@@ -214,6 +214,67 @@ class FactoryProfilePatchTest {
     assertTrue(result.changes.isEmpty())
   }
 
+  @Test
+  fun retiredFactoryPluginIsRemovedOnUpgradeButUserDataKeepsItsBackup() {
+    val live = """
+      # 旧工厂块
+      - insert:
+          - id: dsh-undo-savepoint
+            name: dsh-undo-savepoint
+      - insert:
+          - id: dshmarketplace
+            name: dshmarketplace-plugin
+    """.trimIndent() + "\n"
+    val result = FactoryProfilePatch.repairRetiredEntries(
+      live,
+      retiredFactories = FactoryProfilePatch.RETIRED_FACTORY_ENTRIES,
+    )
+    assertFalse("退役工厂插件的安装项必须消失", result.text.contains("dsh-undo-savepoint"))
+    assertTrue("其它装配条目必须原样保留", result.text.contains("dshmarketplace-plugin"))
+    assertTrue("必须报告这次迁移", result.changes.any { it.contains("dsh-undo-savepoint") })
+  }
+
+  @Test
+  fun retiredFactoryPluginIsNotReaddedByFactoryMerge() {
+    val mirror = listOf(
+      File("../scripts/profile-web.cordis.patch.yml"),
+      File("scripts/profile-web.cordis.patch.yml"),
+    ).firstOrNull { it.isFile } ?: return
+    val factory = mirror.readText()
+    val live = "- id: dshmarketplace\n  name: dshmarketplace-plugin\n"
+    val result = FactoryProfilePatch.merge(live, factory)
+    assertFalse("新快照工厂件不得把退役 undo 插件重新追加", result.text.contains("id: dsh-undo-savepoint"))
+  }
+
+  @Test
+  fun retiredFactoryPluginKeepsUserOwnedOrConfiguredEntries() {
+    val configured = """
+      - insert:
+          - id: dsh-undo-savepoint
+            name: dsh-undo-savepoint
+            config:
+              keep: true
+    """.trimIndent() + "\n"
+    val configuredResult = FactoryProfilePatch.repairRetiredEntries(
+      configured,
+      retiredFactories = FactoryProfilePatch.RETIRED_FACTORY_ENTRIES,
+    )
+    assertEquals("带用户配置的同名条目不得被迁移改写", configured, configuredResult.text)
+    val userOwned = """
+      - insert:
+          - id: dsh-undo-savepoint
+            name: '@vendor/my-undo'
+    """.trimIndent() + "\n"
+    assertEquals(
+      "用户自装的同名 id 不得被误删",
+      userOwned,
+      FactoryProfilePatch.repairRetiredEntries(
+        userOwned,
+        retiredFactories = FactoryProfilePatch.RETIRED_FACTORY_ENTRIES,
+      ).text,
+    )
+  }
+
   /**
    * 维护约束守卫：权威装配清单（本仓镜像）当前不得把退役行重新写成 disabled。
    * 若未来工厂真的要禁用某行，必须同时把它从 RETIRED_DISABLED_ROW_IDS 移出并另行走查。
@@ -497,9 +558,9 @@ class FactoryProfilePatchTest {
     assertTrue("零改动时不得有改动说明", result.changes.isEmpty())
 
     val blocks = FactoryProfilePatch.topLevelBlocks(text)
-    // 22 = 21 个 `- ` 顶层条目 + 1 个「首个条目之前的注释头」块（parseBlocks 会把它们冲成独立块）。
-    // 历史锚点：0.14.2 时代 20 个条目 ⇒ 21 块；0.14.8 退役 dsh-model-capability 后 21 个条目 ⇒ 22 块。
-    assertEquals("顶层条目数（工厂件结构改变时同步本断言）", 22, blocks.size)
+    // 21 = 20 个 `- ` 顶层条目 + 1 个「首个条目之前的注释头」块（parseBlocks 会把它们冲成独立块）。
+    // 历史锚点：0.14.2 时代 20 个条目 ⇒ 21 块；0.14.8 退役 undo 装配项后仍为 20 个条目。
+    assertEquals("顶层条目数（工厂件结构改变时同步本断言）", 21, blocks.size)
     val groups = blocks.map { FactoryProfilePatch.blockIds(it) }.filter { it.size > 1 }
     assertEquals("唯一多子条目组 = shell-termux + host-web-compat", 1, groups.size)
     assertEquals(listOf("shell-termux", "host-web-compat"), groups.single())
@@ -530,7 +591,7 @@ class FactoryProfilePatchTest {
 
     assertTrue("D10：缺失的组内兄弟必须被补回", result.text.contains("id: host-web-compat"))
     assertTrue("补回的是同一个组（shell-termux 仍是组首）", result.text.contains("id: shell-termux"))
-    assertEquals("顶层条目数不变（补进组内，不是追加成新块）", 22, FactoryProfilePatch.topLevelBlocks(result.text).size)
+    assertEquals("顶层条目数不变（补进组内，不是追加成新块）", 21, FactoryProfilePatch.topLevelBlocks(result.text).size)
     val group = FactoryProfilePatch.topLevelBlocks(result.text)
       .first { FactoryProfilePatch.blockIds(it).contains("shell-termux") }
     assertEquals(listOf("shell-termux", "host-web-compat"), FactoryProfilePatch.blockIds(group))

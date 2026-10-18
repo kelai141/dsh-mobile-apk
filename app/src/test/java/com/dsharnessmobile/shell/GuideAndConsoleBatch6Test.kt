@@ -292,7 +292,7 @@ class GuideAndConsoleBatch6Test {
     assertTrue("未知摘要必须落到兜底句而不是空", undoUnavailableHint("??? ").contains("自动回撤没能完成"))
     val flow = codeOnly(source("EngineStartFlow.kt"))
     assertFalse("调用点不得再用 summary.take(120)", flow.contains("result.summary.take(120)"))
-    assertTrue(flow.contains("undoUnavailableHint(result.summary)"))
+    assertFalse("自动 undo 退役后不再有执行摘要上屏", flow.contains("undoUnavailableHint(result.summary)"))
   }
 
   // ── S1-1：复制日志不得静默 ───────────────────────────────────────────────

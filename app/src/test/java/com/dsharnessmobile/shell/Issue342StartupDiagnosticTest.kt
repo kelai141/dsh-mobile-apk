@@ -27,17 +27,17 @@ class Issue342StartupDiagnosticTest {
       EngineManager.REFUSAL_LIVE_RUNTIME_INCOMPLETE).forEach { assertFalse(startupFailureUsesRetry(it)) }
   }
 
-  @Test fun `foreign refusal has no auto undo retry or ownership repair`() {
+  @Test fun `foreign refusal has no automatic retry or ownership repair`() {
     val flow = source("EngineStartFlow.kt")
     val failure = flow.substringAfter("val refusalCode = activity.engineManager.lastStartRefusalCode")
       .substringBefore("val pollBudgetMs")
     val guard = "if (refusalCode == EngineManager.REFUSAL_PORT_FOREIGN) return@Thread"
     assertTrue(failure.contains(guard))
-    assertTrue(failure.indexOf(guard) < failure.indexOf("maybeAutoUndo(generation)"))
+    assertFalse("自动 undo 已退役，启动失败不得再进入回撤入口", flow.contains("maybeAutoUndo(generation)"))
     assertTrue(failure.indexOf(guard) < failure.indexOf("scheduleEngineRetry(generation)"))
     val guide = source("GuidePageRenderer.kt")
-    assertTrue(guide.contains("if (phase == GuidePhase.Error && startupOwnershipRepairAllowed) autoRepairOwnershipOnFailure()"))
-    assertTrue(guide.contains("lastGuidePhase == GuidePhase.Error && !startupRetryAction"))
+    assertTrue(guide.contains("if (phase == GuidePhase.Error && startupOwnershipRepairAllowed &&"))
+    assertTrue(guide.contains("if (lastGuidePhase == GuidePhase.Error) {"))
     assertTrue(guide.contains("phase == GuidePhase.Error && !startupOwnershipRepairAllowed"))
   }
 

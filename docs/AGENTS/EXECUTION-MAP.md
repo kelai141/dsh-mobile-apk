@@ -2108,6 +2108,14 @@ scripts/patches/data/client-index-loader-barrier.mjs
 scripts/patches/upstream/pi-ai-1.1.0.patch
 glob:dsh-client-ui-responsive/src/client/mobile/upstream-browser/**
 app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt
+app/src/main/java/com/dsharnessmobile/shell/RepairActivity.kt
+app/src/main/java/com/dsharnessmobile/shell/RepairConversationStore.kt
+app/src/main/java/com/dsharnessmobile/shell/RepairModelClient.kt
+app/src/main/java/com/dsharnessmobile/shell/RepairModelConfig.kt
+app/src/main/java/com/dsharnessmobile/shell/RepairState.kt
+app/src/main/java/com/dsharnessmobile/shell/RepairToolCallParser.kt
+app/src/main/java/com/dsharnessmobile/shell/RepairTools.kt
+app/src/main/java/com/dsharnessmobile/shell/RepairYaml.kt
 app/src/main/java/com/dsharnessmobile/shell/UserCopy.kt
 app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt
 app/src/main/java/com/dsharnessmobile/shell/GuideChrome.kt
@@ -2269,6 +2277,7 @@ dsh-host-web-compat/lib/index.js
 glob:dsh-host-web-compat/scripts/*
 dsh-shell-termux/src/index.ts
 scripts/build-apk-013.ps1
+scripts/build-apk-dev-fast.mjs
 scripts/build-snapshot-013.mjs
 scripts/make-snapshot.sh
 scripts/inject-all.py

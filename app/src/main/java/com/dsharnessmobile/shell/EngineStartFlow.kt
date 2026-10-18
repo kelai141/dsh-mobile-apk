@@ -25,7 +25,10 @@ internal class EngineStartFlow(private val activity: MainActivity) {
   private val engineRestarting = java.util.concurrent.atomic.AtomicBoolean(false)
   /** #118 建议7（2026-09）：启动失败自动重试（最多 2 次，5s/10s 间隔），
    *  失败不永远停在 Error 引导页等手动操作。手动重试（onStartEngine）归零计数。 */
-  internal var engineRetryCount = 0
+  internal var engineRetryCount: Int
+    get() = RepairState.retries(activity)
+    set(value) = RepairState.setRetries(activity, value)
+  @Volatile private var currentStartGeneration = 0L
 
   /** Foreground liveness is deliberately conservative: a slow HTTP response is
    * not proof that the local Node process died. Only consecutive probe misses
@@ -45,6 +48,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     override fun run() {
       if (!canRunEngineWork()) return
       if (!activity.pageUiActive || activity.userClosedEngine) return
+      if (RepairState.required(activity) || RepairState.active || RepairState.retryPending) return
       // CONTRACT §4 闸门：插件装配失败 latch 期内整条前台监控都不再动作。
       // 为什么是整条而不是只挡住 showWeb 那一支：latch 的语义是「页面已定性失败，等用户决策」；
       // 放行其余分支就会继续做「引擎未运行 → 自动恢复」的相位切换，把 Error 页顶掉——那是
@@ -255,6 +259,8 @@ internal class EngineStartFlow(private val activity: MainActivity) {
    */
   fun onPageReadyReported(rawLine: String) {
     if (!canRunEngineWork()) return
+    if (clientPluginTreeFailed || RepairState.required(activity)) return
+    RepairState.reset(activity)
     pageReadyReported = true
     if (pageReadyLogged) return
     pageReadyLogged = true
@@ -329,6 +335,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
    */
   fun onClientPluginTreeFailed(rawLine: String) {
     if (!canRunEngineWork()) return
+    if (clientPluginTreeFailed || RepairState.required(activity)) return
     val folded = (rawLine ?: "").replace('\n', ' ').replace('\r', ' ').trim()
     clientPluginFailureRawLine = folded
     val ids = LogCollector.clientFailedIdsOf(folded)
@@ -343,149 +350,9 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     clientPluginTreeFailed = true
     // ③ 呈现：前台立刻切错误相位；非前台挂起，由 MainActivity.onResume 消费。
     activity.runOnUiThread { activity.presentClientPluginFailure() }
-    // ④ 后台花掉一次性回滚预算。**不**在 WebView 线程上做 IO/回滚。
-    val generation = monitorGeneration
-    Thread {
-      try {
-        maybeRecoverFromClientPluginTreeFailure(generation)
-      } catch (t: Throwable) {
-        Log.e("dsh-shell", "client plugin tree recovery failed", t)
-      }
-    }.apply { isDaemon = true; name = "dsh-client-plugin-recovery" }.start()
-  }
+    // 页面装配失败也消耗同一份两次重试预算，不再执行配置回滚。
+    activity.runOnUiThread { scheduleEngineRetry(currentStartGeneration, clientFailure = true) }
 
-  /**
-   * 自动回滚编排（CONTRACT §4）：一次性入口 → 判定路线 → 唯一动作走 [UndoGate.execute]。
-   *
-   * **EngineStartFlow 不重复决策**：外科拔除还是整份回滚由 [UndoGate.execute] 内部按同一判据
-   * 分支（§5）；这里只负责「算出该传进去的 clientFailure，以及在明确不该动作时不动手」。
-   */
-  private fun maybeRecoverFromClientPluginTreeFailure(generation: Long) {
-    // 只花一次：本进程已花过预算就直接停手（与 UndoGate 的 30 分钟窗叠加）。
-    if (clientPluginTreeRecoverySpent) return
-    // 一次性入口：被抑制（重试窗内）或未放行 ⇒ 现在不执行回滚。
-    if (!UndoGate.onClientPluginTreeFailure(activity, clientPluginFailureReason, activity.engineManager)) return
-    if (clientPluginTreeRecoverySpent) return
-    clientPluginTreeRecoverySpent = true
-    LogCollector.log("dsh-shell", "client plugin tree recovery starting (generation=" + generation + ")")
-    try {
-      val engine = activity.engineManager
-      val patch = PluginMounts.patchFile(engine)
-      val ids = LogCollector.clientFailedIdsOf(clientPluginFailureRawLine)
-      // 纯判据（见 [clientPluginFailureRoute]）：唯一命中才外科拔除；点名不出但清单未变才允许
-      // 整份回滚；两者都不成立就**不动作**（宁可不动，也不做一次会吞掉用户插件的写回）。
-      val hardManifest = PluginMounts.ensureHard(activity, PluginMounts.currentFingerprint(activity))
-      if (hardManifest == null) {
-        LogCollector.writeBootFail(activity, "client-plugin-tree-failed-ownership-unverified",
-          "本版本插件归属清单缺失或不匹配；未自动隔离/回滚，用户配置保持原样")
-        activity.runOnUiThread { activity.presentClientPluginFailure() }
-        return
-      }
-      val candidate = PluginMounts.clientPullCandidate(activity, patch, ids, hardManifest)
-      val route = clientPluginFailureRoute(candidate, PluginMounts.mountUnchangedSinceHealthy(activity, patch))
-      if (route == ClientPluginFailureRoute.NO_ACTION) {
-        LogCollector.writeBootFail(
-          activity, "client-plugin-tree-failed-no-action",
-          // 措辞必须**如实指向真因**（Lead 设备取证 DEVICE-FINDING-1）：这一支的触发条件是
-          // 「clientPullCandidate 返回 null 且有效 composition 自健康起已变」。
-          // Profile cordis 与已解析 bundle insert layers 都参与点名；身份不唯一、factory来源不明或命中Hard时拒绝修改。
-          "点名不出唯一可拔 Soft 条目（profile/bundle composition 中无对应 insert、命中多条、factory 身份不明或命中 Hard），" +
-            "不自动回滚（避免连坐用户其它插件），停在可读错误页",
-        )
-        activity.runOnUiThread { activity.presentClientPluginFailure() }
-        return
-      }
-      activity.runOnUiThread {
-        if (!activity.isDestroyed && !activity.isFinishing) {
-          activity.applyGuidePhase(
-            GuidePhase.Undoing, "正在回退插件装配…",
-            activity.getString(R.string.ds_client_plugin_fail_hint, clientPluginFailureReason),
-          )
-        }
-      }
-      // 唯一动作：外科传 candidate、整份传 null；分支判定在 execute 内部（§5）。
-      val result = UndoGate.execute(activity, engine, candidate)
-      if (result.executed) {
-        WatchdogV2.reset()
-        engine.resetCooldown()
-        // 设备实测 #3（DEVICE-FINDING-3）：**不 force 就等于没修**。
-        //
-        // startEngine() 的首个判据是 `if (!force && engineUsable && !degradedHttp) return true` ——
-        // 客户端插件装配失败时引擎 **HTTP 是健康的**（坏的只是它装配出来的插件树），于是不带 force
-        // 的调用会判定「已有可用引擎」**直接早退、什么都不做**。引擎继续用**启动时读入的旧 profile**
-        // 组合并服务 window.__DSH_BOOT__，那份清单里仍含刚被拔掉的坏插件；即使下面的
-        // reloadEnginePage() 真的重新导航，取回的**还是同一份坏 manifest**，页面再次报同样的失败。
-        // 真机事实：拔除成功、patch 磁盘上已干净，而引擎进程 ETIME 早于拔除时刻——从未重启，屏幕
-        // 240s 恒定停在「插件装配失败」。数据面修好、服务面没修好，用户面就是没修好。
-        //
-        // force = true 的安全边界**不在本调用点**，而在 startEngine 既有护栏：PORT_FOREIGN 仍拒绝；
-        // OUR_HTTP 但本壳没有可安全停止的子进程句柄仍拒绝；killExistingEngine 只停**本壳持有的**
-        // 句柄，绝不按名字杀未归属的监听器。本场景 engineProcessAlive() == true（有句柄）⇒ 可正常
-        // kill+spawn；此刻界面停在引导页 Error 相位（Web UI 从未加载成功），无用户可见的在跑会话。
-        engine.startEngine(force = true)
-        // 设备实测 #4（DEVICE-FINDING-4）：**reload 必须等引擎真的能应答**。
-        //
-        // startEngine(force = true) 只保证**进程已 spawn**，不保证 HTTP 已 listen（冷启动实测
-        // 5-45s 宽分布）。若紧接着 reload，导航会撞上尚未监听的窗口 ⇒ ERR_CONNECTION_REFUSED
-        // ⇒ onReceivedError 置 enginePageFailed ⇒ 用户看到「页面加载失败」，仍然进不去。
-        // 所以这里在**后台线程**（本函数本就在回滚线程上）做有界就绪等待，不做任何固定 sleep。
-        //
-        // 为什么把等待放在 clearClientPluginTreeFailureLatch() **之前**：latch 的语义是「页面已定性
-        // 失败，等用户决策」。等待期间引擎还没起来，latch 必须继续按住所有「把 WebUI 推回前台」的
-        // 自动路径（含 engineMonitorRunnable），否则 3s 一拍的监控会在引擎未监听时切相位。等待有了
-        // 结论之后再决定是「解 latch + 重新导航」还是「保持 Error 并如实留档」。
-        val ready = awaitEngineHttpReady(
-          budgetMs = ENGINE_BOOT_BUDGET_MS,
-          processAlive = { activity.engineManager.engineProcessAlive() },
-          current = { !activity.isDestroyed && !activity.isFinishing && canRunEngineWork() },
-        )
-        if (!ready) {
-          // 预算内没等到引擎应答：**不** reload（那只会再造一次「页面加载失败」），也不解 latch，
-          // 如实停在可读错误页并把判据落盘——用户仍有「安全模式启动」这条出口。
-          LogCollector.writeBootFail(
-            activity, "client-plugin-tree-failed-engine-not-ready",
-            "已强制重启引擎，但在 " + ENGINE_BOOT_BUDGET_MS / 1000 + "s 预算内未等到 HTTP 应答：" +
-              "不在此时重新导航（避免又一次 ERR_CONNECTION_REFUSED），停在可读错误页",
-          )
-          activity.runOnUiThread { activity.presentClientPluginFailure() }
-          return
-        }
-        // 放行：先解 latch，再**重新导航 + 露出 WebView**（用户可见的「恢复」动作）。
-        clearClientPluginTreeFailureLatch()
-        activity.runOnUiThread {
-          if (!activity.isDestroyed && !activity.isFinishing) {
-            // 设备实测 #2（DEVICE-FINDING-2）：**只 showWeb() 不够**——数据修好不等于屏幕修好。
-            //
-            // showWeb() 只在 enginePageFailed == true 时才 reload，而本场景失败的是**插件装配**
-            // 而非导航传输（WebView 早就加载成功了，enginePageFailed == false），于是 showWeb()
-            // 只执行 guideRenderer.showWeb()：把**已经持有旧失败文档**的 WebView 重新露出来，
-            // 从不重新导航。而客户端插件清单是**文档加载时**拉的，旧文档不会自己重拉一次
-            // ⇒ 真机实测：拔除已成功（patch 与基线逐字节相同），屏幕却 3 分钟仍停在
-            // "Failed to load plugins"，只能靠手动冷启动恢复。
-            //
-            // 因此必须**同时**做两件事，顺序也不可换：
-            //   ① reloadEnginePage() 真正 webView.reload()：重新取 manifest 与插件树（修复数据面）；
-            //   ② showWeb() 把引导页换回 WebView（reload 不负责切界面）。
-            // 前置条件已由上面的就绪等待保证（引擎此刻确实在应答，reload 不会撞空端口）。
-            // 有界性不变：仍是一次性预算（clientPluginTreeRecoverySpent）内的动作；latch 已清，
-            // 走的是 pageRecovery 的 Recovery.RELOAD 一次性重载，不是重载环。
-            activity.reloadEnginePage()
-            activity.showWeb()
-          }
-        }
-        LogCollector.log("dsh-shell", "client plugin tree recovery executed: " + result.summary.take(200))
-      } else {
-        LogCollector.writeBootFail(
-          activity, "client-plugin-tree-failed-recovery-failed",
-          "自动回滚未生效：" + result.summary.take(400),
-        )
-        // 失败 ⇒ 停在 Error，不再自动重试回滚（latch 保持置位，坏页面不会被弹回）。
-        activity.runOnUiThread { activity.presentClientPluginFailure() }
-      }
-    } catch (t: Throwable) {
-      Log.e("dsh-shell", "client plugin tree recovery failed", t)
-      LogCollector.writeBootFail(activity, "client-plugin-tree-failed-recovery-exception", "自动回滚编排抛出异常", t)
-    }
   }
 
   /** 页面就绪/失败时复位（重新计时 + 允许再次上报）。 */
@@ -608,69 +475,11 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     LogCollector.log("dsh-shell", "harness closed via dev options (shutdownToGuide)")
   }
 
-  /** 引擎启动超时/失败后进入自动回撤流程：UndoGate 幂等，安全多次调用。 */
-  private fun maybeAutoUndo(generation: Long) {
+  private fun scheduleEngineRetry(generation: Long, clientFailure: Boolean = false) {
     if (!isCurrentEngineFlow(generation)) return
-    val token = flowOwnership.tokenFor(generation) ?: return
-    val caller = Thread {
-      try {
-        requireCurrentEngineFlow(generation)
-        // 引擎全死时先决门槛：急救 CLI 存在 + 快照非空 + 幂等窗口。
-        // 0.14.1：阈值必须用 effectiveFailureCount（半死与 DEAD 共用计数），与看门狗侧
-        // EngineService.kt 的 undoReady 同口径。旧实现只读 consecutiveFailures —— 而该计数在
-        // DEGRADED_HTTP（端口可连、HTTP 持续失败）下恒被清零，于是「半死引擎」在这条路径上
-        // 永远达不到阈值，自动回撤静默不可达（与 planTick 的熔断锁存同族盲区）。
-        // DEAD 路径不受影响：DEAD 下 consecutiveDegradedHttp 恒 0，两个计数相等。
-        if (!UndoGate.onProbeFailure(activity, WatchdogV2.effectiveFailureCount(), engine = activity.engineManager)) return@Thread
-        requireCurrentEngineFlow(generation)
-        activity.runOnUiThread {
-          if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-          activity.applyGuidePhase(GuidePhase.Undoing, "正在执行回撤…", "正在恢复到崩溃前的最后良好快照。")
-        }
-        requireCurrentEngineFlow(generation)
-        val result = UndoGate.execute(activity, activity.engineManager)
-        requireCurrentEngineFlow(generation)
-        if (result.executed) {
-          // 恢复配置文件后重启引擎（冷却窗复位由 UndoGate 完成后置零）。
-          // 0.14.1：undo 成功即解除熔断锁存（与 EngineService 的 UNDO 分支同口径）——tripped 一旦
-          // 为真即永久 HOLD，若此处不复位，回撤后重启的世代会被上一次的失败计数白白锁住。
-          WatchdogV2.reset()
-          activity.runOnUiThread {
-            if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-            // P3-6：快照 id 不上屏（用户看不懂也做不了什么）——正文说清「回到哪个状态 + 接下来会怎样」，
-            // id 进日志供排查。
-            LogCollector.log("dsh-guide", "undo applied snapshot=" + (result.snapshotId ?: "?"))
-            activity.applyGuidePhase(GuidePhase.Recovering, "回撤完成，正在重启引擎…", "已恢复到上一次可用的运行时状态。")
-          }
-          requireCurrentEngineFlow(generation)
-          activity.engineManager.resetCooldown()
-          if (isCurrentEngineFlow(generation)) activity.engineManager.startEngine()
-        } else {
-          activity.runOnUiThread {
-            if (!isCurrentEngineFlow(generation)) return@runOnUiThread
-            activity.applyGuidePhase(GuidePhase.Error, "自动回撤不可用", undoUnavailableHint(result.summary))
-          }
-        }
-      } catch (t: Throwable) {
-        if (isCurrentEngineFlow(generation)) Log.e("dsh-shell", "auto-undo failed", t)
-      } finally {
-        token.detach(Thread.currentThread())
-      }
-    }
-    token.attach(caller)
-    caller.start()
-  }
-
-  /** 引擎启动超时（startEngineFlow 轮询失败后调用）：触发自动回撤。 */
-  private fun onEngineStartTimeout(generation: Long) {
-    // 先给看门狗一次机会：WatchdogV2 熔断阈值(12)远高于此处的保守阈值(6)，
-    // 因此本路径只在「启动即失败」时触发；正常慢启动不会到达这里。
-    maybeAutoUndo(generation)
-  }
-
-  private fun scheduleEngineRetry(generation: Long) {
-    if (!isCurrentEngineFlow(generation)) return
-    if (engineRetryCount >= 2) return
+    if (RepairState.retryPending || RepairState.required(activity)) return
+    if (engineRetryCount >= 2) { requireNativeRepair(); return }
+    RepairState.retryPending = true
     engineRetryCount++
     val delayMs = 5_000L * engineRetryCount
     val attempt = engineRetryCount
@@ -681,8 +490,41 @@ internal class EngineStartFlow(private val activity: MainActivity) {
       activity.showGuide()
     }
     engineMonitorHandler.postDelayed({
-      if (isCurrentEngineFlow(generation)) start()
+      RepairState.retryPending = false
+      if (isCurrentEngineFlow(generation) && !RepairState.required(activity)) {
+        Thread {
+          if (!isCurrentEngineFlow(generation)) return@Thread
+          // stopOwnedEngine() also returns false when the tracked child is
+          // already dead and the port is closed. Only a still-reachable port
+          // without an owned child is a genuine reason to stop retrying.
+          if (clientFailure && !activity.engineManager.stopOwnedEngine() &&
+            EngineProbe.portReachable(500)) {
+            requireNativeRepair()
+            return@Thread
+          }
+          activity.engineManager.resetCooldown()
+          activity.runOnUiThread {
+            if (isCurrentEngineFlow(generation)) {
+              if (clientFailure) activity.enginePageFailed = true
+              start()
+            }
+          }
+        }.apply { name = "dsh-startup-retry"; start() }
+      }
     }, delayMs)
+  }
+
+  /** 两次重试耗尽后不再启动、回滚或自动拔插件，交给独立原生助手。 */
+  private fun requireNativeRepair() {
+    RepairState.requireRepair(activity)
+    RepairState.retryPending = false
+    Thread { activity.engineManager.mirrorDiagnosticsToShared("startup-retries-exhausted") }
+      .apply { isDaemon = true; name = "dsh-repair-diagnostics"; start() }
+    activity.runOnUiThread {
+      if (activity.isDestroyed || activity.isFinishing) return@runOnUiThread
+      activity.showGuide()
+      activity.applyGuidePhase(GuidePhase.Error, "引擎仍无法启动", "已自动重试两次。可启动修复助手，自动读取本轮诊断并修复运行时。")
+    }
   }
 
   /**
@@ -692,9 +534,17 @@ internal class EngineStartFlow(private val activity: MainActivity) {
    */
   fun start() {
     if (!canRunEngineWork()) return
+    if (RepairState.required(activity)) { requireNativeRepair(); return }
+    // EngineManager.ensurePrivateDshData() establishes the active profile and
+    // migrates legacy DSH_HOME layouts. The handoff used to happen as a side
+    // effect of starting the engine; selecting and validating a model happens
+    // before that now, so establish it before the first start.
     // CONTRACT §4：新启动世代/用户显式重试 ⇒ 解除插件失败 latch（放行一次坏页面的呈现）。
     // 这里只清 latch，**不**退一次性回滚预算——预算是「本进程最多自动回滚一次」，与世代无关。
     clearClientPluginTreeFailureLatch()
+    // 页面装载失败也会消耗两次重试预算；新世代开始时清掉 latch，
+    // 让下一次页面申报能再次落到修复闸门。
+    clientPluginTreeFailed = false
     // The owner and generation change in one CAS; an obsolete finally cannot
     // clear a replacement, and duplicate lifecycle callbacks change neither.
     val token = flowOwnership.begin()
@@ -705,6 +555,8 @@ internal class EngineStartFlow(private val activity: MainActivity) {
       return
     }
     val generation = token.generation
+    currentStartGeneration = generation
+    RepairState.startupInProgress = true
     activity.engineManager.lastStartRefusalCode = null
     activity.engineManager.lastStartRefusal = null
     if (!isCurrentEngineFlow(generation)) { flowOwnership.finish(token); return }
@@ -907,11 +759,15 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         }
       }
       if (!isCurrentEngineFlow(generation)) return@Thread
-      // 急救 CLI 随 App 版本部署（内容比对幂等）：下探失败时自动回撤的前置依赖。
-      activity.engineManager.deployUndoCli()
-      requireCurrentEngineFlow(generation)
       if (!activity.engineManager.startEngine()) {
         requireCurrentEngineFlow(generation)
+      // A Hard ownership mismatch is itself an install/runtime integrity failure.
+      // There is no separate UI retry state that can resolve it: the assistant
+      // reads the actual archive and profile through native tools.
+      if (activity.engineManager.lastStartRefusalCode == EngineManager.REFUSAL_HARD_BUNDLE_SELECTION) {
+        requireNativeRepair()
+        return@Thread
+      }
         // 任务 19：失败终态落盘（此前这条路径**零落盘**——用户反馈第一条的真因）。
         //
         // issue #271 ④：区分「被前置条件拒绝」与「spawn 真失败」。半搬态（live 树缺 node）
@@ -959,7 +815,6 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         }
         // A foreign listener cannot be repaired by changing this app's profile or ownership.
         if (refusalCode == EngineManager.REFUSAL_PORT_FOREIGN) return@Thread
-        maybeAutoUndo(generation)
         // #118 建议7：失败不清零计数时自动重试（Error 页不再需要手动点重试）。
         scheduleEngineRetry(generation)
         return@Thread
@@ -1068,7 +923,6 @@ internal class EngineStartFlow(private val activity: MainActivity) {
           )
           activity.showGuide()
         }
-        onEngineStartTimeout(generation)
         // #118 建议7：进程死亡路径同样自动重试（可自愈的瞬时失败不必停在错误页）。
         scheduleEngineRetry(generation)
         return@Thread
@@ -1121,6 +975,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
       } finally {
         token.detach(Thread.currentThread())
         flowOwnership.finish(token)
+        RepairState.startupInProgress = false
       }
     }
     token.attach(caller)
@@ -1208,7 +1063,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
 
   private fun canRunEngineWork(): Boolean =
     !flowOwnership.destroyed && !activity.isDestroyed && !activity.isFinishing && !activity.userClosedEngine &&
-      !EngineService.userShutdown && !Thread.currentThread().isInterrupted
+      !EngineService.userShutdown && !RepairState.active && !Thread.currentThread().isInterrupted
 
   /** Also rejects completion callbacks after destruction or global user shutdown. */
   private fun isCurrentEngineFlow(generation: Long): Boolean =
@@ -1503,8 +1358,10 @@ internal class EngineStartFlow(private val activity: MainActivity) {
           }
           return@Thread
         }
-        UndoGate.clearRetryEpochForUserRestart(activity)
         if (!isCurrentEngineFlow(generation)) return@Thread
+        // Only an explicit, ownership-proven user restart clears the legacy undo
+        // suppression epoch. Automatic retries never take this path.
+        UndoGate.clearRetryEpochForUserRestart(activity)
         EngineManager.lastStartAttemptAt = 0
         LogCollector.log("dsh-shell", "restart engine requested (tracked child only)")
         Thread.sleep(1000)

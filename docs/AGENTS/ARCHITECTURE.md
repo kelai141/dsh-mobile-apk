@@ -59,6 +59,7 @@
 | FactoryProfilePatch.kt | 0.14（#214）：profile `cordis.patch.yml` 工厂语义定点纠正（按 id 以工厂为准，退役 disabled 残行清理，用户独有条目不动） | EngineManager、SnapshotTransaction |
 | UpdateManager.kt | SHA 校验后把在线包解到共享 stage，经 ONLINE_UPDATE journal 只换 usr；探活健康提交，冷启动恢复未提交事务 | EngineManager、EngineStartFlow |
 | EngineProbe.kt | 引擎探活（Proxy.NO_PROXY 直连 #118；401/303 视作 alive）；Soft promotion 的只读健康证据另要求 Cordis inventory、启用的主插件与 preset fibers active、session/list 与 modelCatalog 形状完整 | 壳侧全部探活唯一入口 |
+| RepairActivity.kt / RepairModelClient.kt | 引擎启动失败后的原生聊天式诊断与修复面 | 不依赖 Node、WebView 或插件；读取 DSH 模型路由与凭据，历史保持 provider 原生 tool 形状，工具面限定私有运行时与公共诊断目录 |
 | ConsoleActivity.kt | 内置 bash 控制台（assets/console.html + consoleBridge 6 方法） | MainActivity、GuidePageRenderer |
 | ConsoleSession.kt | 快照 bash 子进程（stdin 管道 + Listener 回调，随 Activity 生死） | ConsoleActivity |
 

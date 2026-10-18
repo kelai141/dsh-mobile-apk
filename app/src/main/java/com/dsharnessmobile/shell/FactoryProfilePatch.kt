@@ -65,6 +65,14 @@ internal object FactoryProfilePatch {
   internal val RETIRED_DISABLED_ROW_IDS = setOf("ui-layout")
 
   /**
+   * 已从新快照的装配面退役、但仍可能存在于老用户 profile 的工厂插件。
+   *
+   * 这里只提供历史身份供**急救与诊断**识别；它们不再参与 [merge] 的装机追加。
+   * 工厂安装项的启动迁移由 `EngineManager.repairProfilePatch()` 负责。
+   */
+  internal val RETIRED_FACTORY_ENTRIES = mapOf("dsh-undo-savepoint" to "dsh-undo-savepoint")
+
+  /**
    * 旧「单点」写法的两个 id（0.14.2-fx-2 归一迁移，见 [normalizeLegacyAgentDefaultModel]）。
    *
    * 旧写法：`- id: agent-default-model / disabled: true` **加上** `- insert: - id: agent-default-model-mobile`
@@ -427,6 +435,68 @@ internal object FactoryProfilePatch {
     return Result(sb.toString(), changes)
   }
 
+  /**
+   * 历史迁移：清退役 disabled 行，并可摘除显式列出的退役工厂插件条目。
+   *
+   * 工厂插件摘除必须逐条验证：精确 id/name、无 `config:`。用户自装同名条目、带配置
+   * 的条目以及注释都保留原样。备份由调用方在写盘前创建。
+   *
+   * 默认参数刻意留空：普通启动自愈只应清 disabled 行；工厂插件退役需要装配入口显式传入集合。
+   */
+  internal fun repairRetiredEntries(
+    liveText: String,
+    retired: Set<String> = RETIRED_DISABLED_ROW_IDS,
+    retiredFactories: Map<String, String> = emptyMap(),
+  ): Result {
+    if (liveText.isBlank() || (retired.isEmpty() && retiredFactories.isEmpty())) return Result(liveText, emptyList())
+    val changes = ArrayList<String>()
+    val sb = StringBuilder(liveText.length)
+    for (block in parseBlocks(liveText)) {
+      var text = block.text
+      var out: String? = null
+      var removedFactory = false
+      val hits = block.entries.filter { it.id in retired }
+      val factoryIndexes = block.entries.indices.filter { index ->
+        val entry = block.entries[index]
+        retiredFactories[entry.id] == entryName(block, entry)
+      }.toSet()
+      if (hits.isNotEmpty() || factoryIndexes.isNotEmpty()) {
+        val replacements = HashMap<Int, String>()
+        val drops = HashSet<Int>()
+        for ((index, entry) in block.entries.withIndex()) {
+          val fragment = lineRange(block.lines, entry.startLine, entry.endLine)
+          if (index in factoryIndexes && !hasEntryConfig(fragment)) {
+            drops += index
+            removedFactory = true
+            continue
+          }
+          if (entry.id in retired) {
+            val cleaned = removeDisabledTrue(fragment, entry.indent.length + 2)
+            if (cleaned != fragment) {
+              val stripped = dropIfActionless(cleaned)
+              if (stripped != null) replacements[index] = stripped else drops += index
+            }
+          }
+        }
+        if (replacements.isNotEmpty() || drops.isNotEmpty()) {
+          if (hits.isNotEmpty()) changes += "移除退役行的 disabled 残留: " + hits.joinToString(",") { it.id }
+          for (index in factoryIndexes - drops) {
+            changes += "保留带用户配置的退役工厂条目: " + block.entries[index].id
+          }
+          if (drops.isNotEmpty()) {
+            changes += "移除退役工厂插件条目: " + drops.map { block.entries[it].id }.joinToString(",")
+          }
+          out = rewriteBlock(block, replacements, drops)
+        }
+      }
+      text = out ?: text
+      val tidied = if (removedFactory) dropEmptyFactoryInsert(text) else text
+      if (tidied != text) changes += "清理空 insert 组"
+      sb.append(tidied)
+    }
+    return Result(sb.toString(), changes)
+  }
+
   // ── 块级工具（对外沿用） ────────────────────────────────────────────────────
 
   /**
@@ -684,6 +754,46 @@ internal object FactoryProfilePatch {
     return if (hasAction) block else null
   }
 
+  /** 条目自身是否带 `config:`（任意缩进；用于拒绝误删用户配置过的工厂条目）。 */
+  private fun hasEntryConfig(fragment: String): Boolean =
+    fragment.split("\n").any { CONFIG_KEY.matches(it.trimEnd('\r')) }
+
+  /** 取条目声明的包名（`name:` 的条目层级键，配置块内的显示名不算）。 */
+  private fun entryName(block: Block, entry: Entry): String? {
+    val fragment = lineRange(block.lines, entry.startLine, entry.endLine)
+    for (line in fragment.split("\n")) {
+      val m = NAME_KEY.find(line.trimEnd('\r')) ?: continue
+      if (m.groupValues[1].length == entry.indent.length + 2) {
+        return m.groupValues[2].trim().trim('\'', '"')
+      }
+    }
+    return null
+  }
+
+  /** 清理只包含空白的 insert 组；非空组与块外注释原样保留。 */
+  private fun dropEmptyFactoryInsert(text: String): String {
+    val lines = splitLines(text).toMutableList()
+    var index = 0
+    while (index < lines.size) {
+      val line = lines[index].trimEnd('\r')
+      if (line.trim() != "- insert:") { index += 1; continue }
+      val wrapperIndent = leadingSpaces(line).length
+      var end = index + 1
+      var hasChild = false
+      while (end < lines.size) {
+        val candidate = lines[end].trimEnd('\r')
+        if (candidate.isBlank()) { end += 1; continue }
+        if (leadingSpaces(candidate).length <= wrapperIndent) break
+        hasChild = true
+        break
+      }
+      if (hasChild) { index += 1; continue }
+      lines.subList(index, end).clear()
+      if (index > 0 && lines[index - 1].isBlank()) lines.removeAt(index - 1)
+    }
+    return lines.joinToString("")
+  }
+
   /**
    * 把条目片段按**锚点 id**插进 live 的 insert 组（锚点 = 其后应出现该新条目的已在场兄弟）；
    * 锚点为 null 时追加到组尾。锚点找不到（已被删/拼写不同）时退化为组尾，不丢内容。
@@ -818,6 +928,9 @@ internal object FactoryProfilePatch {
 
   /** `config:` 键行（任意缩进）。 */
   private val CONFIG_KEY = Regex("""^\s*config:\s*$""")
+
+  /** 条目层级的 `name:` 键行，捕获缩进与包名。 */
+  private val NAME_KEY = Regex("""^(\s*)name:\s*(\S+)""")
 
   /** 把工厂子条目片段从 [fromIndent] 重新缩进到 [toIndent]（仅前导缩进，内容原样）。 */
   private fun reindent(fragment: String, fromIndent: String, toIndent: String): String {

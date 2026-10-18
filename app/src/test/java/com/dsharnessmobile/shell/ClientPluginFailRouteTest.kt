@@ -180,31 +180,22 @@ class ClientPluginFailRouteTest {
   @Test
   fun onClientPluginTreeFailedWritesBothChannelsAndLatches() {
     val code = codeOnly(src("EngineStartFlow.kt"))
-    val fn = code.substringAfter("fun onClientPluginTreeFailed(").substringBefore("private fun maybeRecoverFromClientPluginTreeFailure(")
+    val fn = code.substringAfter("fun onClientPluginTreeFailed(").substringBefore("fun resetPageReadyState(")
     assertTrue("必须落 boot-fail（stage=client-plugin-tree-failed）",
       fn.contains("LogCollector.writeBootFail(activity, \"client-plugin-tree-failed\""))
     assertTrue("必须有 Log.e 双通道", fn.contains("Log.e("))
     assertTrue("必须先置 latch 再呈现", fn.indexOf("clientPluginTreeFailed = true") < fn.indexOf("presentClientPluginFailure"))
-    assertTrue("必须起后台回滚线程（不在 WebView 线程做 IO）", fn.contains("maybeRecoverFromClientPluginTreeFailure("))
+    assertTrue("失败必须进入同一份两次重试预算", fn.contains("scheduleEngineRetry(currentStartGeneration, clientFailure = true)"))
   }
 
   @Test
-  fun recoverySpendsExactlyOnceAndGoesThroughUndoGateExecute() {
+  fun recoveryUsesTheSameRetryBudgetWithoutUndoGate() {
     val code = codeOnly(src("EngineStartFlow.kt"))
-    val fn = code.substringAfter("private fun maybeRecoverFromClientPluginTreeFailure(")
-    val head = fn.substringBefore("val engine = activity.engineManager")
-    assertTrue("已花预算即直接 return（只花一次）", Regex("if \\(clientPluginTreeRecoverySpent\\) return").containsMatchIn(head))
-    assertTrue("必须过一次性入口 UndoGate.onClientPluginTreeFailure",
-      head.contains("UndoGate.onClientPluginTreeFailure(activity,"))
-    assertTrue("实际动作必须走 UndoGate.execute（不重复决策）",
-      fn.contains("UndoGate.execute(activity, engine, candidate)"))
-    assertTrue("必须用 clientPullCandidate 纯判据点名", fn.contains("PluginMounts.clientPullCandidate("))
-    assertTrue("必须区分「清单未变」才允许整份回滚", fn.contains("PluginMounts.mountUnchangedSinceHealthy("))
-    assertTrue("成功后必须复位看门狗与冷却并强制重启引擎",
-      fn.contains("WatchdogV2.reset()") && fn.contains("engine.resetCooldown()") &&
-        fn.contains("engine.startEngine(force = true)"))
-    assertTrue("成功后必须解 latch 并放行一次 WebView",
-      fn.contains("clearClientPluginTreeFailureLatch()") && fn.contains("activity.showWeb()"))
+    assertFalse("页面失败不得继续自动调用 UndoGate.execute", code.contains("UndoGate.execute(activity, engine, candidate)"))
+    assertFalse("页面失败不得继续进入配置回滚线程", code.contains("maybeRecoverFromClientPluginTreeFailure("))
+    assertTrue("页面失败必须复用两次重试预算", code.contains("scheduleEngineRetry(currentStartGeneration, clientFailure = true)"))
+    assertTrue("页面失败重试前必须停止本壳托管的引擎", code.contains("stopOwnedEngine()"))
+    assertTrue("死引擎空端口不得跳过剩余重试", code.contains("!activity.engineManager.stopOwnedEngine() &&\n            EngineProbe.portReachable(500)"))
   }
 
   /**
@@ -219,80 +210,22 @@ class ClientPluginFailRouteTest {
    * 而客户端插件清单是文档加载时拉的，引擎重启不会让旧文档重拉，用户看到的仍是坏的。
    *
    * 判据：成功分支必须**同时**出现 reloadEnginePage()（真正 webView.reload()）与 showWeb()，
-   * 且顺序为 reload 在前。只 showWeb 即判红——把这条缺陷钉死，防止将来「顺手简化」又删掉它。
+   * 设备当年的 reload 顺序已由旧自动 undo 链退役；现在这里守住「不得把旧链带回来」。
    */
   @Test
-  fun recoverySuccessBothReloadsAndRevealsTheWebView() {
+  fun retiredAutomaticRecoveryCannotReturnThroughTheOldUndoThread() {
     val code = codeOnly(src("EngineStartFlow.kt"))
-    val fn = code.substringAfter("private fun maybeRecoverFromClientPluginTreeFailure(")
-    val success = fn.substringAfter("if (result.executed) {").substringBefore("} else {")
-    assertTrue("成功分支切片不得为空（切片判据失效会静默变假绿）", success.trim().length > 50)
-    assertTrue("成功分支必须重新导航（否则旧失败文档原样留在 WebView 里）", success.contains("reloadEnginePage()"))
-    assertTrue("成功分支必须把引导页换回 WebView", success.contains("showWeb()"))
-    assertTrue("必须先 reload 再展示（数据修好 + 屏幕修好，缺一即判红）",
-      success.indexOf("reloadEnginePage()") < success.indexOf("showWeb()"))
+    assertFalse("页面失败不得继续调用 UndoGate.execute", code.contains("UndoGate.execute"))
+    assertFalse("页面失败不得继续启动旧的自动回滚线程", code.contains("maybeRecoverFromClientPluginTreeFailure("))
+    assertTrue("页面失败必须复用两次重试预算", code.contains("scheduleEngineRetry(currentStartGeneration, clientFailure = true)"))
+    assertTrue("重试前必须停止本壳托管的旧引擎", code.contains("stopOwnedEngine()"))
   }
 
-  /**
-   * 设备实测 #3（DEVICE-FINDING-3）回归：**拔掉插件不等于引擎不再服务它**。
-   *
-   * 真机事实：拔除成功、patch 磁盘上已干净（坏条目 0），但引擎进程 ETIME 早于拔除时刻 ——
-   * **从未重启**，屏幕 240s 恒定停在「插件装配失败」，不手动冷启动就不恢复。
-   *
-   * 真因：成功分支调 `engine.startEngine()`（不带 force），而 EngineManager.startEngine 里
-   * `if (!force && engineUsable && !degradedHttp) return true` 直接早退——客户端插件装配失败时
-   * 引擎 **HTTP 是健康的**，坏的只是它装配出来的插件树。于是引擎继续用**启动时读入的旧 profile**
-   * 组合并服务 window.__DSH_BOOT__，那份清单里仍含刚被拔掉的坏插件；即使 WebView 真的 reload
-   * （fix#2 已保证），重新取回的**还是同一份坏 manifest**。
-   *
-   * 判据：成功分支必须是 `startEngine(force = true)`；写成无 force 的 `startEngine()` 即判红。
-   * 安全边界不在本调用点，而在 startEngine 既有护栏（PORT_FOREIGN 仍拒、OUR_HTTP 但无本壳子进程
-   * 句柄仍拒、killExistingEngine 只停本壳持有的句柄）——本函数不得自行实现这些判据。
-   */
   @Test
-  fun recoverySuccessForceRestartsTheEngine() {
+  fun boundedEngineReadinessWaitStillHasAConcreteBudget() {
     val code = codeOnly(src("EngineStartFlow.kt"))
-    val fn = code.substringAfter("private fun maybeRecoverFromClientPluginTreeFailure(")
-    val success = fn.substringAfter("if (result.executed) {").substringBefore("} else {")
-    assertTrue("成功分支切片不得为空（切片判据失效会静默变假绿）", success.trim().length > 50)
-    assertTrue(
-      "成功分支必须 startEngine(force = true)：不 force 则引擎判定「已有可用引擎」直接早退，" +
-        "继续服务启动时读入的旧 profile（仍含刚拔掉的坏插件），reload 拿回的仍是同一份坏 manifest",
-      success.contains("startEngine(force = true)"),
-    )
-    // 反证：无 force 的 `startEngine()` 正是 DEVICE-FINDING-3 的缺陷形态——等于没修。
-    assertFalse(
-      "不得写成无 force 的 startEngine()（DEVICE-FINDING-3：拔除后引擎从未重启）",
-      Regex("startEngine\\(\\)").containsMatchIn(success),
-    )
-  }
-
-  /**
-   * 设备实测 #4（DEVICE-FINDING-4）回归：**reload 不得与引擎启动赛跑**。
-   *
-   * 真机事实：整条链已打通（拔除成功、patch 回基线、引擎 PID 15592→15673 真的换了），但屏幕显示
-   * 的是「页面加载失败」——enginePageFailed 那一支。
-   *
-   * 真因是**时序**而不是缺调用：startEngine(force = true) 只保证**进程已 spawn**，不保证 HTTP 已
-   * listen（冷启动实测 5-45s）。紧接着发起的 reload 撞上未监听窗口 ⇒ ERR_CONNECTION_REFUSED ⇒
-   * onReceivedError 置 enginePageFailed ⇒ 回落 Error 相位。fix#2 加的 reload 方向对，但发起太早。
-   *
-   * 判据：成功分支必须**先有就绪等待、再有 reload**——顺序反了即判红。有界性由既有
-   * ENGINE_BOOT_BUDGET_MS 保证，不得用固定 sleep 糊（冷启动耗时为宽分布）。
-   */
-  @Test
-  fun recoverySuccessWaitsForEngineReadinessBeforeReloading() {
-    val code = codeOnly(src("EngineStartFlow.kt"))
-    val fn = code.substringAfter("private fun maybeRecoverFromClientPluginTreeFailure(")
-    val success = fn.substringAfter("if (result.executed) {").substringBefore("} else {")
-    assertTrue("成功分支切片不得为空（切片判据失效会静默变假绿）", success.trim().length > 50)
-    assertTrue("成功分支必须有有界就绪等待（否则 reload 撞未监听窗口 ⇒ 页面加载失败）",
-      success.contains("awaitEngineHttpReady("))
-    val waitAt = success.indexOf("awaitEngineHttpReady(")
-    val reloadAt = success.indexOf("reloadEnginePage()")
-    assertTrue("就绪等待必须排在 reloadEnginePage() 之前（顺序反了就是 DEVICE-FINDING-4）",
-      waitAt in 0 until reloadAt)
-    assertTrue("就绪等待必须复用既有预算常量（不得写死秒数）", success.contains("ENGINE_BOOT_BUDGET_MS"))
+    assertTrue("原生修复的重启等待仍需有界", code.contains("awaitEngineHttpReady("))
+    assertTrue("有界等待必须复用既有预算常量", code.contains("ENGINE_BOOT_BUDGET_MS"))
   }
 
   /**

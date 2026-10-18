@@ -224,6 +224,11 @@ class MainActivity : ComponentActivity() {
   /** 引擎启动流（委托 EngineStartFlow.start）。 */
   internal fun startEngineFlow() {
     if (isFinishing || isDestroyed) return
+    if (RepairState.required(this)) {
+      showGuide()
+      applyGuidePhase(GuidePhase.Error, "引擎仍无法启动", "已自动重试两次。可启动修复助手，自动读取本轮诊断并修复运行时。")
+      return
+    }
     // CONTRACT §4：显式启动出口（用户点「重试」/错误页的「安全模式启动」）先解除插件失败 latch，
     // 否则刚被 latch 挡下的 showWeb 会让这一次显式启动看不到任何结果。
     engineFlow.clearClientPluginTreeFailureLatch()
@@ -555,6 +560,11 @@ class MainActivity : ComponentActivity() {
   override fun onResume() {
     super.onResume()
     pageRecovery.resume()
+    if (!RepairState.active && RepairState.required(this)) {
+      showGuide()
+      applyGuidePhase(GuidePhase.Error, "引擎仍无法启动", "已自动重试两次。可启动修复助手，自动读取本轮诊断并修复运行时。")
+      return
+    }
     if (recoverPageIfPending()) {
       if (!userClosedEngine) engineFlow.startEngineService() // Native fallback/recreation does not disable task protection.
       return // A dead renderer is never reused, even by a liveness callback.

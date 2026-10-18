@@ -5,6 +5,7 @@
   <color name="ds_surface">#1C1C1E</color>
   <color name="ds_surface_muted">#2C2C2E</color>
   <color name="ds_chip">#2C2C2E</color>
+  <color name="ds_button_surface">#343437</color>
   <color name="ds_border">#26FFFFFF</color>
   <color name="ds_hairline">#2EFFFFFF</color>
   <color name="ds_text_primary">#F5F5F7</color>
