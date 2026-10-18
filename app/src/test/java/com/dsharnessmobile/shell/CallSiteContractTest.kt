@@ -478,6 +478,87 @@ class CallSiteContractTest {
     assertTrue("A2：守卫必须判断 panelOccupied", body.contains("!panelOccupied"))
     assertTrue("回归：既有「有草稿不收」不得被覆盖", body.contains("!panel.hasDraft()"))
   }
+  // ── 0.14.9-preview 块J：悬浮球隐藏态 + 边缘召回条 ─────────────────────
+  // 详档 docs/0.14.9-preview-OVERLAY-BALL-HIDE.md §3/§4 的落点与反证要求。
+  // 行为（贴边几何）由 OverlayRecallTest 覆盖；这里守**调用点与真源**——撤掉任一条即红。
+
+  /** J-A1：入口必须在展开面板里（可见文字入口），且它是唯一进入隐藏态的路径。 */
+  @Test
+  fun theHideEntryLivesInThePanelAndCallsHideBall() {
+    val panel = codeOnly(source("OverlayPanel.kt"))
+    assertTrue("J-A1：面板必须有「隐藏悬浮球」入口（可发现性：不得只靠手势）", panel.contains("contentDescription = \"隐藏悬浮球\""))
+    assertTrue("J-A1：入口必须挂进顶行（与 ✕ 收起并排）", panel.contains("overlay-hide-entry"))
+    assertTrue("J-A1：点击必须走 svc.hideBall()", panel.contains("setOnClickListener { svc.hideBall() }"))
+    assertTrue("J-A1：换肤必须同步该入口颜色（漏了会留旧主题灰）", panel.contains("hideEntryView?.setTextColor(c.chevron)"))
+    val svc = codeOnly(source("OverlayService.kt"))
+    assertTrue("J-A1：隐藏入口必须收口到一个服务级函数", svc.contains("internal fun hideBall()"))
+    assertTrue("J-A1：回程入口必须是 recallBall()", svc.contains("internal fun recallBall()"))
+  }
+
+  /**
+   * J-A2：隐藏 = 球窗与光环窗**离窗**（removeView），不是 alpha/visibility。
+   *
+   * 这是块J 的核心反证：留在 WindowManager 里的不可见 overlay 窗口照样吃触摸，
+   * 34dp 的隐形触区就是历史「互吞」的同形缺陷。撤掉 removeView、改成 alpha=0f 即红。
+   */
+  @Test
+  fun hidingRemovesBothWindowsInsteadOfFadingThem() {
+    val svc = codeOnly(source("OverlayService.kt"))
+    val body = memberBody(svc, "internal fun hideBall()")
+    assertTrue("J-A2：必须先收面板（用户按的按钮就在面板上）", body.contains("hidePanel()"))
+    assertTrue("J-A2：球窗必须离窗", body.contains("removeWindow(rootView)"))
+    assertTrue("J-A2：光环窗必须离窗", body.contains("removeWindow(haloView)"))
+    assertTrue("J-A2：离窗后必须留下召回条", body.contains("recall.show("))
+    assertFalse("J-A2：不得用透明度冒充消失（不可见窗口仍在吃触摸）", body.contains("alpha = 0f"))
+    assertFalse("J-A2：不得用 visibility 冒充消失", body.contains("visibility = View.GONE"))
+  }
+
+  /**
+   * J-A3：召回必须**先光环、后球**重新入窗（F8 z 序：同类型 overlay 窗口后加者在上，
+   * 顺序写反 = 辉光整窗盖住球面，2026-09-05 真机实测过的回归）。
+   */
+  @Test
+  fun recallReAddsTheHaloBeforeTheBallToKeepZOrder() {
+    val body = memberBody(codeOnly(source("OverlayService.kt")), "internal fun recallBall()")
+    val haloAt = body.indexOf("wm.addView(h,")
+    val ballAt = body.indexOf("wm.addView(r,")
+    assertTrue("J-A3：必须重新入窗光环窗", haloAt >= 0)
+    assertTrue("J-A3：必须重新入窗球窗", ballAt >= 0)
+    assertTrue("J-A3：光环窗必须先于球窗 addView（z 序）", haloAt < ballAt)
+    assertTrue("J-A3：条必须先收（否则召回后屏上留一条）", body.contains("recall.hide()"))
+    assertTrue("J-A3：召回后必须复位光环状态", body.contains("setHalo(deriveHalo())"))
+  }
+
+  /**
+   * J-A4：召回条是本服务的**第四个窗口**，只在隐藏期间懒建——buildRoot 的窗口计数必须不变
+   * （I-A2 的「窗口数仍为 3」是同一件事的另一面，那条断言在本类已有用例里）。
+   * 另外条窗口必须 NOT_FOCUSABLE：抢焦点会把 WebView 的输入法顶掉。
+   */
+  @Test
+  fun theRecallStripIsBuiltLazilyAndNeverStealsFocus() {
+    val svc = codeOnly(source("OverlayService.kt"))
+    val buildRoot = memberBody(svc, "private fun buildRoot()")
+    assertFalse("J-A4：buildRoot 不得建召回条（窗口计数会破）", buildRoot.contains("recall."))
+    val recall = codeOnly(source("OverlayRecall.kt"))
+    assertTrue("J-A4：条必须有窗口参数（懒建）", recall.contains("WindowManager.LayoutParams("))
+    assertTrue("J-A4：条窗口必须 NOT_FOCUSABLE（否则顶掉输入法）", recall.contains("FLAG_NOT_FOCUSABLE"))
+    assertTrue("J-A4：条必须在场时认得出自己（uiautomator/无障碍）", recall.contains("contentDescription = \"唤回悬浮球\""))
+    assertTrue("J-A4：条的唯一点击动作是召回", recall.contains("svc.recallBall()"))
+  }
+
+  /**
+   * J-A5：隐藏态**刻意不落盘**（无 prefs 键）——详档 §4「明确不做」。
+   * 这一条是反向契约：谁把「隐藏」做成持久化（getSharedPreferences/putBoolean），
+   * 谁就要先改那条设计决定与文档，而不是悄悄让它复活。
+   */
+  @Test
+  fun hidingIsDeliberatelyNotPersisted() {
+    val hideBody = memberBody(codeOnly(source("OverlayService.kt")), "internal fun hideBall()")
+    assertFalse("J-A5：hideBall 不得写偏好", hideBody.contains("putBoolean"))
+    assertFalse("J-A5：hideBall 不得读偏好", hideBody.contains("getSharedPreferences"))
+    val recall = codeOnly(source("OverlayRecall.kt"))
+    assertFalse("J-A5：召回条类不得碰偏好（隐藏态是会话内状态）", recall.contains("SharedPreferences"))
+  }
 }
 
 /**
@@ -756,4 +837,5 @@ class BootDiagnosticsContractTest {
       body.contains("skillFile.readText().trim() != PHONE_CONTROL_SKILL"),
     )
   }
+
 }

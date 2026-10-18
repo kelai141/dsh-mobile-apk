@@ -45,8 +45,9 @@ import java.net.URL
  * 拆分布局（2026-09-05，纯搬移零行为变更，同包顶层协作类 + 构造注入服务引用，无静态单例）：
  * 光环维 → OverlayHalo（四态 drawable/setHalo/syncHalo/deriveHalo）；面板维 → OverlayPanel
  * （buildUnit 构建/渲染/状态模板/待答卡/应答）；live 流 → OverlayLiveFeed（FileObserver 事件
- * 分发 + F7 自动化避让）；主题 → OverlayTheme（色板/明暗）。本文件保留：生命周期、三窗口
- * WindowManager 参数、拖动/钳制、探活与发送编排。
+ * 分发 + F7 自动化避让）；主题 → OverlayTheme（色板/明暗）；隐藏态 → OverlayRecall（贴边召回条，
+ * 0.14.9-preview 块J）。本文件保留：生命周期、三窗口 WindowManager 参数（隐藏态的第四个窗口
+ * ——召回条——由 OverlayRecall 懒建）、拖动/钳制、隐藏/召回、探活与发送编排。
  */
 class OverlayService : Service() {
 
@@ -107,6 +108,16 @@ class OverlayService : Service() {
   internal val completion = CompletionNotice()
   /** 报告栏（独立顶层窗口，不复用 unit 面板）。 */
   internal val report = OverlayReport(this)
+  /** 隐藏态协作类（0.14.9-preview 块J）：球/光环离屏时贴在屏幕边缘的召回条。 */
+  internal val recall = OverlayRecall(this)
+  /**
+   * 隐藏态（0.14.9-preview 块J）：球窗与光环窗已从 WindowManager 移除，屏上只剩召回条。
+   *
+   * **刻意不落盘**（无 prefs 键）：隐藏是「我现在不想看到它」的临时动作，服务重启/进程重建
+   * 即回位；要长期不可见请用设置页开关（那条路径才持久化）。理由与反证见
+   * docs/0.14.9-preview-OVERLAY-BALL-HIDE.md §4「明确不做」。
+   */
+  internal var hidden = false
   /** 面板是否被用户手势占用（长按状态行期间）——自动收起守卫，同族于 hasDraft()。 */
   internal var panelOccupied = false
 
@@ -146,9 +157,18 @@ class OverlayService : Service() {
     // P5-3：空闲态光环按主题取色，而 haloView 的 drawable 是手工构造的（不随 uiMode 自动更新）
     // ——不在此重刷就会出现「切到深色后空闲光环仍是浅色主题的灰」。
     halo.refreshTheme()
+    // 块J：召回条的底色同源色板（切深浅色不能让它留在旧主题的灰）。
+    recall.refreshTheme()
     // 旋转后旧的 x/y 可能超出新屏幕（竖屏拖到 y≈1400，转横屏 1600×900 后 y>900 → 球出屏消失）。
     val p = rootParams ?: return
     clampBallPos(p)
+    if (hidden) {
+      // 隐藏态：球/光环不在 WindowManager 里，updateViewLayout/syncHalo 对它们只会抛异常
+      // （被各处的 try 吞掉，但那是噪声不是路径）。这里唯一的真活是让条在新屏幕重新贴边——
+      // 竖屏贴右缘的条转到横屏后 x 会小于新屏宽，整条悬在屏中间 = 召回条不再是「贴边拉手」。
+      recall.reposition(p.x, p.y, ballSizeDp)
+      return
+    }
     try { rootView?.let { wm.updateViewLayout(it, p) } } catch (_: Exception) {}
     syncHalo()
     // 展开中的面板要按新屏幕重算窗口宽度（只重定位不改宽 = 竖屏宽带到横屏、或横屏宽溢出竖屏）。
@@ -181,6 +201,9 @@ class OverlayService : Service() {
     panel.destroy()
     // 块H-A2：报告栏是独立顶层窗口，必须在此收口（纪律同 panel.closePicker/unitView）。
     report.hideReport()
+    // 块J：召回条同样是独立顶层窗口，必须在此收口（同上纪律）——漏了就是「服务没了、
+    // 屏上还留一条谁也不认领的拉手」的残窗（FX-212.1 的同形缺陷）。
+    recall.hide()
     // 避让帧清零（页面恢复全宽）
     frameConsumer?.invoke("var b=document.body||document.documentElement;b.style.paddingRight='0px';b.style.paddingBottom='0px';true;")
     removeWindow(rootView); rootView = null
@@ -244,7 +267,9 @@ class OverlayService : Service() {
     // F8 z 序修复（2026-09-05 真机实测）：光环窗必须先于球窗 addView——同 TYPE_APPLICATION_OVERLAY
     // 窗口 z 序按添加顺序、后加者在上，旧顺序辉光整窗盖住球面（「不是一圈氛围光而是整个球变红」）。
     // z 序约定：状态切换只走 setHalo()/syncHalo()（换 drawable/updateViewLayout，不改 z 序），
-    // 三窗口生命周期内禁止 remove/re-add 重排。
+    // 三窗口生命周期内禁止 remove/re-add 重排。**唯一例外**是隐藏/召回这一对（块J，0.14.9-preview）：
+    // hideBall 移除球+光环、recallBall 按同一顺序（先光环后球）重新 add——例外被写死在一个函数里，
+    // 顺序在 recallBall 内有注释与契约测试守着，不是「谁想重排都可以」。
     val halo = View(this).apply { background = this@OverlayService.halo.newHaloDrawable(Halo.IDLE) }
     haloView = halo
     val haloP = WindowManager.LayoutParams(
@@ -368,6 +393,61 @@ class OverlayService : Service() {
     try { if (unit.parent != null) wm.removeView(unit) } catch (_: Exception) {}
     panelParams = null
     panel.statusText?.let { ShimmerTextView::class.java.cast(it).setShimmering(false) }
+    emitFrame()
+  }
+
+  // ── 隐藏 / 召回（0.14.9-preview 块J）────────────────────────────────
+
+  /**
+   * 进入隐藏态（面板顶部行「隐藏」入口 → 本函数）：**球和光环从屏上消失**，只留一条贴边召回条。
+   *
+   * 三步，顺序有讲究：
+   *  ① `hidePanel()`——面板是 focusable 窗口，先收（用户按的按钮就在面板上，收了面板才谈得上
+   *     「球消失」；hidePanel 幂等，未展开时是空操作）；
+   *  ② 球窗、光环窗 `removeView`——**移除而不是 alpha/visibility**（理由见 OverlayRecall 类注释，
+   *     一句话：留在 WindowManager 里的不可见窗口照样吃触摸）；
+   *  ③ 按球的最后位置把召回条贴到最近的水平边缘（球被移除前先把 x/y 读出来，否则不知道贴哪边）。
+   *
+   * 服务**不停**：探活 / MuxClient / live 流照常跑（召回时状态是最新的，不需要重建），
+   * engineRunning 等字段也照常维护——这也是「隐藏」与设置页开关（停服务）的本质区别。
+   * 幂等：已在隐藏态时直接返回，重复触发不会在屏上留第二条。
+   */
+  internal fun hideBall() {
+    if (hidden) return
+    val p = rootParams
+    hidePanel()
+    hidden = true
+    removeWindow(rootView)
+    removeWindow(haloView)
+    recall.show(p?.x ?: 0, p?.y ?: 0, ballSizeDp)
+    emitFrame()
+  }
+
+  /**
+   * 退出隐藏态（点召回条 → 本函数）：收条 → 球窗/光环窗按 **F8 z 序**重新入窗 → 复位光环。
+   *
+   * z 序是本函数唯一容易写错的地方：同 TYPE_APPLICATION_OVERLAY 的窗口按 addView 顺序叠，
+   * **后加者在上**。光环必须先 add、球后 add（buildRoot 的既有顺序），否则辉光整窗盖住球面
+   * ——那是 2026-09-05 真机实测过的回归（「不是一圈氛围光而是整个球变红」）。
+   *
+   * 球落在**条所在的那条边**（不是条的原 x——条贴边、球有自己的 edgeMargin），落点由纯函数
+   * `recallBallPlacement` 给出，与 clampBallPos 同边界，保证召回后还能正常拖动。
+   */
+  internal fun recallBall() {
+    if (!hidden) return
+    hidden = false
+    val spot = recall.ballPlacementForRecall(ballSizeDp, edgeMarginPx)
+    recall.hide()
+    val rp = rootParams
+    if (rp != null && spot != null) {
+      rp.x = spot[0]
+      rp.y = spot[1]
+      clampBallPos(rp)
+    }
+    haloView?.let { h -> haloParams?.let { hp -> try { wm.addView(h, hp) } catch (_: Exception) {} } }
+    rootView?.let { r -> rp?.let { params -> try { wm.addView(r, params) } catch (_: Exception) {} } }
+    syncHalo()
+    setHalo(deriveHalo())
     emitFrame()
   }
 

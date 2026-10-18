@@ -178,7 +178,9 @@ class OverlayBatch5Test {
     val sites = Regex(Regex.escape("(MIN_TOUCH_TARGET_DP * dp).toInt()")).findAll(panel).count()
     // 回报入口 minWidth + minHeight、状态行手势热区 minHeight（S2-1）、发送(宽/高)、停止(宽/高)、
     // 面板 ✕ 命中区(宽/高，S2-18) = 9
-    assertEquals("面板侧九处尺寸必须都取同一常量（实测 $sites 处）", 9, sites)
+    // 块J（0.14.9-preview）：隐藏入口 minWidth + minHeight（2）+ pickerRow 里它的 LayoutParams(宽/高)（2）= 13。
+    // 这一条是**计数型**契约：新增可点元素必须走同一常量，因此每次新增入口都要同步这个数（不许绕开常量）。
+    assertEquals("面板侧十三处尺寸必须都取同一常量（实测 $sites 处）", 13, sites)
   }
 
   @Test

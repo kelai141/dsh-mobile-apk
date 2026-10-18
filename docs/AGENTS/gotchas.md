@@ -2015,3 +2015,10 @@ JVM 边界测试在 `EngineBootInstrumentationTest`（取值与 clamp 边界、�
    修法：断言的应是**被守着的不变量，不是这台机器的速度**。改为按实测耗时算窗口上界（`ceil(elapsedMs/250)+1`）并要求 `行数 < 轮数`——后者才是「聚合」的判据（退化成事件级 push 时 16 轮会产出 16 行）。受控负控已验证：把窗口改成 1ms（等价于每事件一行）时新判据判红（`constructorRows=16 rounds=16`），证明它没有变成恒绿。修后连跑 5 次全部通过（修前 5 次红 3 次）。
 
 325. **Shizuku 的 remove=true 不会清 SDK 连接缓存，超时只清本地记账会反复卡在建链中（2026-10-17）**：授权后一直显示建立通道，重置也可能被旧回调打回未连接。固定依赖 API 13.1.5 的实际字节确认：`unbindUserService(remove=true)` 仅移除远端服务；只有 `remove=false` 才清理应用内的连接集合与缓存。旧实现复用一个 ServiceConnection，后台注册又与主线程回调并发，超时也没有移除远端坏实例。修法：SDK 生命周期统一排入主线程；先注销缓存，再按需移除远端；每次绑定独立回调、latch 与 generation，重置/超时后的迟到回调无效。状态机回归覆盖旧连接、旧断连、旧异常与重复回调；设备与 CI 证据随本次 PR 记录。
+
+326. **「看不见」不等于「不在」：把 overlay 窗口 alpha=0 / GONE 当隐藏，等于在屏上留一个隐形触摸黑洞（2026-10-18，悬浮球隐藏态设计期确证）**
+    现象（历史同形，0.13.2 实锤）：悬浮球最初把光环与球放在同一个大矩形窗口里，球周围约 2940dp² 的空白与四角**看不见却照吃触摸**，下层 WebView 的手势被吞——「互吞」这个缺陷名的来源。
+    真因：`TYPE_APPLICATION_OVERLAY` 窗口的**命中矩形 = 窗口矩形**，与「画不画得出来」无关：`alpha = 0f` 与 `visibility = View.GONE` 都只是不绘制，窗口与命中区仍在；加 `FLAG_NOT_TOUCHABLE` 能解决命中，但要改球窗的 flags，而「球窗尺寸/标志全程不变」是 F8 的硬约束（旧 64dp 窗贴边越界被 WMS 整窗平移回屏，请求 x=-14 → frame x=0，正是「吸边后球/光环不同心」的根因）。
+    修法：隐藏 = `wm.removeView()`；召回 = 按先光环后球的顺序重新 `addView`（z 序见 F8）。召回条另建第四个窗口，且**窗口尺寸 = 可视尺寸（8x44dp）**，不留「窗口比图形大」的边——同一个坑的第二种形态。
+    复验证据：`CallSiteContractTest.hidingRemovesBothWindowsInsteadOfFadingThem`（断言 `removeWindow(rootView)`/`removeWindow(haloView)` 在场，且 hideBall 体内**不得**出现 `alpha = 0f` / `visibility = View.GONE`）与 `theRecallStripIsBuiltLazilyAndNeverStealsFocus`（条窗懒建 + NOT_FOCUSABLE）；撤掉任一条即红。
+    同型提醒：凡「让某个悬浮面消失」，先问「它的**命中矩形**现在在哪」——判据是窗口在不在 WindowManager 里，不是像素还画不画。

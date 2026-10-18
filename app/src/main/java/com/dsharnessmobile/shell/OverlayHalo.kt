@@ -13,7 +13,8 @@ import android.view.animation.AlphaAnimation
  *
  * 0.14.1 块I（状态描边 ring）：ring 与 glow **合成在同一个 haloView 的 background**（LayerDrawable 两层），
  * 不是第二个窗口——这样 ① 脉冲动画（挂在 View 上）天然同相位，无需第二段动画代码；② 不触碰
- * FLAG_NOT_TOUCHABLE 触摸语义与 F8 z 序；③ 不新增窗口（窗口数恒为 3）。
+ * FLAG_NOT_TOUCHABLE 触摸语义与 F8 z 序；③ 不新增窗口（光环面常态窗口数恒为 3——块J 的隐藏态
+ * 召回条是第四个窗口，只在隐藏期间懒建，与光环面无关，见 OverlayRecall）。
  * ring 的颜色**不另立色表**：两层都只读 [resolveColors] 在这一次调用里返回的同一个 (color, fade)，
  * 改色入口仍只有 newHaloDrawable / setHalo 两处（源码契约测试 CallSiteContractTest 的 I-A2/I-A3 组锁死）。
  */
