@@ -207,11 +207,14 @@ pwsh scripts\build-apk-013.ps1 -Fast
 
 SAF 目录/图片选择无需权限。虚拟屏与特权 shell 需用户安装、启动并授权 **Shizuku**。
 
+## 贡献
+
+分支与提交约定、经验记录写法（`docs/contrib/<github-account>/`）、新增界面的中英双语要求、PR 证据与提交前自审，见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
+
 ## 版本历史
 
 完整版本历史见 [`docs/AGENTS/changelog-archive.md`](docs/AGENTS/changelog-archive.md)（倒序，最新在最上）。
 开发地图与坑位库见 [`AGENTS.md`](AGENTS.md) 与 [`docs/AGENTS/gotchas.md`](docs/AGENTS/gotchas.md)。
-贡献流程（分支、经验文档按 GitHub 账号存放、新增界面中英双语、PR 证据与自审）见协调仓 [`CONTRIBUTING.md`](https://github.com/kelai141/dsh-mobile/blob/main/CONTRIBUTING.md)。
 
 ## License
 
