@@ -195,6 +195,32 @@ class OverlayService : Service() {
     panel.startMux()
   }
 
+  /**
+   * 只认显式启动。引擎没开、用户把任务从最近任务里划掉时，Activity 与 EngineService
+   * 可能都不在进程里（EngineService 只在引擎启动流里起），没人替悬浮球执行生命周期清理；
+   * 系统按默认 START_STICKY 把本服务重建，新的服务实例会重新建窗 —— 现场就是「球消失一下
+   * 又冒出来」。重建投递没有原始 Intent（intent == null），此时自停，不留下无人认领的窗口。
+   *
+   * 注意：不能据此宣称「onCreate 一次都没跑」—— 系统重建服务时函数返回前已经走过一次
+   * onCreate，窗口可能有极短一瞬。这里收紧的是服务与窗口不再存活。
+   */
+  override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    if (intent == null) {
+      stopSelf()
+      return START_NOT_STICKY
+    }
+    return START_NOT_STICKY
+  }
+
+  /**
+   * 划掉任务 = 主动关闭：自停，由 onDestroy 统一撤窗（三条路径都走同一个收口）。
+   * 引擎没开时 Activity/EngineService 可能都不在进程里，不能指望它们替本服务收尾。
+   */
+  override fun onTaskRemoved(rootIntent: Intent?) {
+    super.onTaskRemoved(rootIntent)
+    stopSelf()
+  }
+
   override fun onDestroy() {
     if (instance === this) instance = null
     live.stopWatcher()

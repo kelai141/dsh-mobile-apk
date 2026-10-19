@@ -34,6 +34,20 @@ describe('conversation docking', () => {
     expect(conversationId('invalid')).toBeUndefined()
     expect(conversationId('dsh-resource://conversation/session/%xx')).toBeUndefined()
   })
+  it('prompts to drag in first and only says release after entering the target', () => {
+    const source = row()
+    touch('touchstart', source, 80); vi.advanceTimersByTime(400)
+    const target = () => document.querySelector('.dsh-conversation-drop-zone:not([data-leaving])')
+    expect(target()?.textContent).toBe('拖到此处以在侧边栏打开')
+    expect(target()?.hasAttribute('data-over')).toBe(false)
+    touch('touchmove', source, innerWidth - 8)
+    expect(target()?.textContent).toBe('松开于侧边栏打开')
+    expect(target()?.hasAttribute('data-over')).toBe(true)
+    // 移出接收区回到列表：必须退回「拖到此处」，不能停在「松开」。
+    touch('touchmove', source, 80)
+    expect(target()?.textContent).toBe('拖到此处以在侧边栏打开')
+    expect(target()?.hasAttribute('data-over')).toBe(false)
+  })
   it('opens once after settling reorder and removes the target (also in landscape)', () => {
     const source = row()
     const events: string[] = []

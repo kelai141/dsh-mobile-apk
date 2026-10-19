@@ -188,6 +188,11 @@ export function subagentAside(row: HTMLElement): HTMLButtonElement | null {
 export class ConversationDropZone {
   private zone: HTMLDivElement | undefined
   private readonly leaving = new Map<HTMLDivElement, number>()
+  /** 两种文案：拖动已开始但尚未进入接收区 / 手指已进入接收区可松手。 */
+  private static readonly LABELS = {
+    idle: '拖到此处以在侧边栏打开',
+    over: '松开于侧边栏打开',
+  } as const
   constructor(
     private readonly open: (target: DockSessionTarget) => void,
     private readonly current: () => string | undefined = () => undefined,
@@ -214,11 +219,13 @@ export class ConversationDropZone {
       this.zone = document.createElement('div')
       this.zone.className = 'dsh-conversation-drop-zone'
       this.zone.setAttribute('role', 'status')
-      this.zone.textContent = '松开于侧边栏打开'
+      this.zone.textContent = ConversationDropZone.LABELS.idle
       document.body.append(this.zone)
     }
     this.zone.toggleAttribute('data-over', over)
-    const label = '松开于侧边栏打开'
+    // 文案必须跟着是否进入接收区切换：否则用户看到的永远是「松开」
+    // （拖动已开始但手指还在列表上时也在喊松手）。
+    const label = over ? ConversationDropZone.LABELS.over : ConversationDropZone.LABELS.idle
     if (this.zone.textContent !== label) this.zone.textContent = label
   }
   detach(): void {
