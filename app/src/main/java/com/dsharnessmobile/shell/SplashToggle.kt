@@ -38,6 +38,9 @@ internal class SplashToggle(private val context: Context) : FrameLayout(context)
   private val thumbOff = context.getColor(R.color.ds_surface)
 
   init {
+    // ViewGroup 默认带 WILL_NOT_DRAW：若不显式清掉，onDraw 根本不会被调用，
+    // 轨道与滑块都不画，只剩一个看不见但可点的热区（用户观感就是「按了没反应」）。
+    setWillNotDraw(false)
     isClickable = true
     isFocusable = true
     minimumWidth = dp(64)
