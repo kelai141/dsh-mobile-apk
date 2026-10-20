@@ -84,7 +84,7 @@ export const DEV_SECTION_CSS: string = `
 .dsh-dev-btn-active {
   border-color: var(--dsw-alias-state-success-primary, var(--dsw-alias-border-l3));
   background: var(--dsw-alias-state-success-primary, var(--dsw-alias-button-elevated-fill));
-  color: var(--dsw-alias-label-on-emphasis, var(--dsw-alias-label-primary));
+  color: var(--dsw-alias-label-primary-inverted);
 }
 
 .dsh-dev-danger {
