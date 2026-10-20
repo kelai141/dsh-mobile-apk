@@ -4,7 +4,7 @@
  *
  * 只做三件事，全部 Node 内置能力，零依赖：
  *   1. 读 src/index.html，把样式与 release 数据**内联**（首屏 1 个请求）；
- *   2. 取最新 release（GitHub API 优先，失败回落 data/releases.json 种子）；
+ *   2. 默认离线读取发布清单；只有显式 --refresh 在 CI 同步公开正式版；
  *   3. 取 MANIFEST.txt 里的 sha256，按 ABI 家族注入，供用户核对。
  *
  * 为什么内联而不是运行时再拉：
@@ -18,10 +18,11 @@
  */
 
 import fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  API_LATEST_URL, MIRROR_TEMPLATES, SITE_URL, apkNameCandidates, assetUrl, sha256FromManifest,
+  MIRROR_TEMPLATES, SITE_URL, REPO_URL, apkNameCandidates, assetUrl, sha256FromManifest,
 } from '../src/assets/release.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -29,6 +30,7 @@ const p = (...s) => path.join(root, ...s);
 const read = (f) => fs.readFileSync(p(f), 'utf8');
 const log = (...a) => console.log('[build]', ...a);
 
+const API_LATEST_URL = REPO_URL.replace('https://github.com/', 'https://api.github.com/repos/') + '/releases/latest';
 const SEED_FILE = 'data/releases.json';
 const DIST = 'dist';
 /** 预算：内联后的 index.html 超过此值即判红，防止悄悄膨胀。 */
@@ -37,7 +39,8 @@ const MAX_HTML_BYTES = 120 * 1024;
 /** 归一化 GitHub release JSON -> 页面数据（只保留需要的字段，避免把整包 JSON 塞进 HTML）。 */
 function normalize(json, source) {
   const tag = source === 'seed' ? json?.tag : json?.tag_name;
-  if (typeof tag !== 'string' || !tag.trim()) throw new Error('release data has no valid tag');
+  if (typeof tag !== 'string' || !/^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(tag)) throw new Error('release data has no valid tag');
+  if (source !== 'seed' && (json.draft || json.prerelease || !json.published_at)) throw new Error('release must be a published stable version');
   const assets = Array.isArray(json.assets)
     ? json.assets.filter((a) => a && typeof a.name === 'string')
         .map((a) => ({ name: a.name, size: Number(a.size) || 0 }))
@@ -61,7 +64,9 @@ async function fetchJson(url, timeoutMs) {
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
-      headers: { 'User-Agent': 'dsh-mobile-pages-build', Accept: 'application/vnd.github+json' },
+      headers: { 'User-Agent': 'dsh-mobile-pages-build', Accept: 'application/vnd.github+json',
+        ...(process.env.GH_TOKEN ? { Authorization: 'Bearer ' + process.env.GH_TOKEN } : {}),
+      },
       signal: ctrl.signal,
     });
     if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -83,38 +88,38 @@ async function fetchText(url, timeoutMs) {
   }
 }
 
-/** 取 sha256：优先官方直连，失败逐个换镜像前缀（与页面同一张模板表）。 */
+/** Only the official manifest may provide integrity data. A failed sync must not deploy stale data. */
 async function attachSha256(data) {
-  const wanted = [];
+  const text = await fetchText(assetUrl(MIRROR_TEMPLATES[0], data.tag, 'MANIFEST.txt'), 15000);
   for (const abi of ['arm64', 'x86_64']) {
-    for (const name of apkNameCandidates(data.tag, abi)) {
-      if (data.assets.some((a) => a.name === name)) { wanted.push([abi, name]); break; }
+    const name = apkNameCandidates(data.tag, abi).find(name => data.assets.some(asset => asset.name === name));
+    if (!name) throw new Error('missing release APK: ' + abi);
+    const entries = text.split(/\r?\n/).map(line => line.trim().split(/\s+/)).filter(parts => parts[1] === 'apk/' + name);
+    const digest = sha256FromManifest(text, 'apk/' + name);
+    const asset = data.assets.find(asset => asset.name === name);
+    if (entries.length !== 1 || !digest || !asset.size || Number(entries[0][2]) !== asset.size) {
+      throw new Error('invalid manifest entry: ' + name);
     }
+    data.sha256[abi] = digest;
   }
-  if (!wanted.length) return;
+}
 
-  for (const tpl of MIRROR_TEMPLATES) {
-    try {
-      const text = await fetchText(assetUrl(tpl, data.tag, 'MANIFEST.txt'), 8000);
-      for (const [abi, name] of wanted) {
-        const sum = sha256FromManifest(text, 'apk/' + name);
-        if (sum) data.sha256[abi] = sum;
-      }
-      log('sha256 取自 ' + tpl.id + '，命中 ' + Object.keys(data.sha256).length + '/2');
-      return;
-    } catch (err) {
-      log('MANIFEST 源 ' + tpl.id + ' 不可用：' + err.message);
-    }
-  }
-  log('警告：所有 MANIFEST 源均不可用，本次构建不含 sha256（页面会提示到 Releases 自行核对）');
+const escapeHtml = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const jsonForHtml = value => JSON.stringify(value).replace(/</g, '\\u003c');
+function downloadLinks(data) {
+  return ['arm64', 'x86_64'].map(abi => {
+    const name = apkNameCandidates(data.tag, abi).find(name => data.assets.some(asset => asset.name === name));
+    return name ? '<a class="' + (abi === 'arm64' ? 'btn' : 'btn2') + '" href="' + escapeHtml(assetUrl(MIRROR_TEMPLATES[0], data.tag, name)) + '">下载 / Download ' + abi + '</a>' : '';
+  }).join('');
 }
 
 function render(indexHtml, styles, data, jsonLd) {
   return indexHtml
     .replace('/*__STYLES__*/', () => styles)
-    .replace('__JSONLD__', () => JSON.stringify(jsonLd))
-    .replace('__TAG__', () => data.tag)
-    .replace('__RELEASE_DATA__', () => JSON.stringify(data));
+    .replace('__JSONLD__', () => jsonForHtml(jsonLd))
+    .replace('__TAG__', () => escapeHtml(data.tag))
+    .replace('__DOWNLOAD_LINKS__', () => downloadLinks(data))
+    .replace('__RELEASE_DATA__', () => jsonForHtml(data));
 }
 
 /**
@@ -164,27 +169,27 @@ function buildJsonLd(data) {
   };
 }
 
-/** 极简校验：模板占位符必须被完全替换。新增占位符必须同时进这里与 render()。 */
+/** 检查整个产物，避免替换表与守卫清单同时漏掉新占位符。 */
 function assertRendered(html) {
-  for (const token of ['__STYLES__', '__RELEASE_DATA__', '__JSONLD__', '__TAG__']) {
-    if (html.includes(token)) throw new Error('占位符未被替换：' + token);
-  }
+  if (/__[A-Z][A-Z0-9_]*__/.test(html)) throw new Error('占位符未被替换');
 }
 
 function bytes(n) { return (n / 1024).toFixed(1) + ' KB'; }
 
 async function main() {
+  if (process.argv.includes('--self-test')) {
+    const result = spawnSync(process.execPath, ['--test', p('tests/*.test.mjs')], { stdio: 'inherit' });
+    if (result.status !== 0) throw new Error('下载站自检失败');
+    return;
+  }
   const refresh = process.argv.includes('--refresh');
 
-  let data = null;
-  try {
-    data = normalize(await fetchJson(API_LATEST_URL, 12000), 'api');
-    log('最新版本取自 GitHub API：' + data.tag);
-  } catch (err) {
-    log('API 不可用（' + err.message + '），回落种子数据');
-    data = normalize(JSON.parse(read(SEED_FILE)), 'seed');
-  }
-  await attachSha256(data);
+  // Regular builds are offline and make zero network requests.
+  // Explicit refresh is fail-closed: API/manifest failures keep the previous Pages deployment intact.
+  const data = refresh
+    ? normalize(await fetchJson(API_LATEST_URL, 15000), 'release')
+    : normalize(JSON.parse(read(SEED_FILE)), 'seed');
+  if (refresh) await attachSha256(data);
 
   const indexHtml = read('src/index.html');
   const styles = read('src/assets/styles.css');
@@ -205,7 +210,7 @@ async function main() {
   fs.writeFileSync(p(DIST, 'index.html'), html);
   fs.writeFileSync(p(DIST, '.nojekyll'), '');
   fs.writeFileSync(p(DIST, 'assets', 'release.js'), read('src/assets/release.js'));
-  fs.writeFileSync(p(DIST, 'assets', 'app.js'), read('src/assets/app.js'));
+  for (const module of ['app.js', 'locales.js', 'routing.js']) fs.writeFileSync(p(DIST, 'assets', module), read('src/assets/' + module));
   fs.writeFileSync(p(DIST, 'assets', 'icon.png'), fs.readFileSync(p('src/assets/icon.png')));
 
   // 运行期兜底数据源（与内联数据同源，供内联解析失败时使用）
@@ -243,7 +248,7 @@ async function main() {
     log('已刷新种子 ' + SEED_FILE);
   }
 
-  const total = ['index.html', 'assets/release.js', 'assets/app.js', 'assets/icon.png', 'data/releases.json']
+  const total = ['index.html', 'assets/release.js', 'assets/app.js', 'assets/locales.js', 'assets/routing.js', 'assets/icon.png', 'data/releases.json']
     .map((f) => fs.statSync(p(DIST, f)).size)
     .reduce((a, b) => a + b, 0);
 

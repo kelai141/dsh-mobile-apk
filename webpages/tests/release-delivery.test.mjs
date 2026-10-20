@@ -12,22 +12,28 @@ const arm = 'a'.repeat(64), x86 = 'b'.repeat(64);
 const asset = abi => `dsh-mobile-apk-${tag}-${abi}.apk`;
 const assets = ['arm64', 'x86_64'].map(abi => ({ name: asset(abi), size: 100 }));
 
-test('offline seed and refresh round-trip preserve release identity and checksums', () => {
+test('offline build and explicit refresh preserve identity; failed sync never publishes stale data', () => {
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'pages-delivery-'));
   try {
     for (const dir of ['src', 'tools', 'data']) fs.cpSync(path.join(root, dir), path.join(scratch, dir), { recursive: true });
+    fs.writeFileSync(path.join(scratch, 'data/releases.json'), JSON.stringify({ tag, assets, publishedAt: '2026-10-14T00:00:00Z', sha256: {} }));
     const preload = path.join(scratch, 'network.mjs');
     fs.writeFileSync(preload, `
+import fs from 'node:fs';
 globalThis.fetch = async url => {
+  fs.writeFileSync(new URL('./network-called', import.meta.url), 'called');
   if (process.env.PAGES_TEST_OFFLINE === '1') throw new Error('controlled offline');
+  if (process.env.PAGES_TEST_BAD_MANIFEST === '1' && !String(url).includes('api.github.com')) return { ok: true, text: async () => 'invalid manifest' };
   if (String(url).includes('api.github.com')) return { ok: true, json: async () => (${JSON.stringify({ tag_name: tag, published_at: '2026-10-14T00:00:00Z', assets })}) };
   return { ok: true, text: async () => ${JSON.stringify(`${arm}  apk/${asset('arm64')}  100\n${x86}  apk/${asset('x86_64')}  100`)} };
 };`);
     const run = (offline, refresh = false) => {
+      fs.rmSync(path.join(scratch, 'network-called'), { force: true });
       const result = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, path.join(scratch, 'tools/build.mjs'), ...(refresh ? ['--refresh'] : [])], {
         encoding: 'utf8', env: { ...process.env, PAGES_TEST_OFFLINE: offline ? '1' : '0' },
       });
       assert.equal(result.status, 0, result.stdout + result.stderr);
+      if (!refresh) assert.equal(fs.existsSync(path.join(scratch, 'network-called')), false, 'regular builds must make zero network requests');
       const data = JSON.parse(fs.readFileSync(path.join(scratch, 'dist/data/releases.json')));
       const html = fs.readFileSync(path.join(scratch, 'dist/index.html'), 'utf8');
       assert.equal(data.tag, tag);
@@ -44,6 +50,18 @@ globalThis.fetch = async url => {
     const restored = run(true);
     assert.equal(restored.publishedAt, '2026-10-14T00:00:00Z');
     assert.deepEqual(restored.sha256, { arm64: arm, x86_64: x86 });
+    const strictFailure = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, path.join(scratch, 'tools/build.mjs'), '--refresh'], {
+      encoding: 'utf8', env: { ...process.env, PAGES_TEST_OFFLINE: '1' },
+    });
+    assert.equal(strictFailure.status, 1, 'API failure must not silently publish the seed');
+    assert.match(strictFailure.stderr, /controlled offline/);
+    const badManifest = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, path.join(scratch, 'tools/build.mjs'), '--refresh'], {
+      encoding: 'utf8', env: { ...process.env, PAGES_TEST_OFFLINE: '0', PAGES_TEST_BAD_MANIFEST: '1' },
+    });
+    assert.equal(badManifest.status, 1, 'invalid manifest must fail publication');
+    assert.match(badManifest.stderr, /invalid manifest entry/);
+    // The last successful deployment remains complete and usable.
+    assert.equal(JSON.parse(fs.readFileSync(path.join(scratch, 'dist/data/releases.json'))).tag, tag);
     // Malformed fallback input must fail rather than publish an unidentified release.
     fs.writeFileSync(path.join(scratch, 'data/releases.json'), '{}');
     const bad = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, path.join(scratch, 'tools/build.mjs')], {
@@ -75,7 +93,7 @@ const get = id => {
   return nodes.get(id);
 };
 get('release-data').textContent = JSON.stringify(release);
-globalThis.document = { getElementById: get, createElement: node };
+globalThis.document = { documentElement: {}, querySelectorAll: () => [], getElementById: get, createElement: node };
 Object.defineProperty(globalThis, 'navigator', { value: { platform: 'Linux armv8l', userAgent: '', onLine: false }, configurable: true });
 globalThis.localStorage = { getItem: () => null, setItem() {} };
 globalThis.fetch = async () => { throw new Error('controlled offline'); };
@@ -112,6 +130,9 @@ assert.ok(!html().includes('[object Object]'));
 test('publication triggers a default-branch site build rather than a draft build', () => {
   const workflow = fs.readFileSync(path.join(root, '../.github/workflows/pages.yml'), 'utf8');
   assert.match(workflow, /\n  release:\s*\n    types: \[published\]/);
-  assert.doesNotMatch(workflow, /\n  workflow_run:/);
+  assert.match(workflow, /\n  workflow_call:/);
+  const release = fs.readFileSync(path.join(root, '../.github/workflows/release.yml'), 'utf8');
+  assert.match(release, /sync-pages:[\s\S]*needs: \[publish\][\s\S]*uses: \.\/.github\/workflows\/pages.yml/);
+  assert.match(workflow, /GH_TOKEN: \$\{\{ github.token \}\}/);
   assert.match(workflow, /ref: \$\{\{ github\.event\.repository\.default_branch \}\}/);
 });

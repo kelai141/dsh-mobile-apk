@@ -53,7 +53,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: base
-          key: lfsbase-${{ matrix.abi }}-${{ hashFiles(format('base/base-dsh.tar.xz'), format('base/base-usr-{0}.tar.xz', matrix.abi)) }}
+          key: lfsbase-${{ matrix.abi }}-${{ hashFiles('base/base-dsh.tar.xz', format('base/base-usr-{0}.tar.xz', matrix.abi)) }}
       - name: 按需拉取 LFS 底座（仅本 ABI，未命中缓存时）
         if: steps.lfs-base.outputs.cache-hit != 'true'
         shell: bash
@@ -372,3 +372,14 @@ jobs:
             gh release upload "$TAG" "$f" --repo "${{ github.repository }}" --clobber
           done
           gh release view "$TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[].name'
+
+  # Creating a draft with GITHUB_TOKEN does not emit a new workflow-triggering release event.
+  # Explicitly refresh Pages here; only the latest public stable release is eligible.
+  # Publishing the draft later also triggers pages.yml via release: published.
+  sync-pages:
+    needs: [publish]
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/pages.yml

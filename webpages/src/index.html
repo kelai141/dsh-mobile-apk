@@ -14,7 +14,7 @@
 <meta property="og:type" content="website" />
 <meta property="og:site_name" content="dsh-mobile" />
 <meta property="og:title" content="dsh-mobile 下载 - DeepSeek Harness 安卓客户端" />
-<meta property="og:description" content="安卓壳应用，内置完整运行环境，装机即用。自动识别设备架构，提供 GitHub 直连与加速线路。" />
+<meta property="og:description" content="文档、编程、手机控制、深度研究，口袋里全部搞定。" />
 <meta property="og:url" content="https://kelai141.github.io/dsh-mobile-apk/" />
 <meta property="og:image" content="https://kelai141.github.io/dsh-mobile-apk/assets/icon.png" />
 <meta name="twitter:card" content="summary" />
@@ -29,101 +29,42 @@
 </style>
 </head>
 <body>
-<a class="skip" href="#download">跳到下载</a>
-
+<a class="skip" href="#download" data-i18n="skip">跳到下载</a>
 <header class="bar">
-  <a class="brand" href="#top">
-    <span class="mark" aria-hidden="true"><img src="assets/icon.png" alt="" width="432" height="432" /></span>
-    <span class="name">dsh-mobile</span>
-  </a>
-  <a class="ghchip" href="https://github.com/kelai141/dsh-mobile-apk" rel="noopener">开源仓库 <span aria-hidden="true">↗</span></a>
+  <a class="brand" href="#top"><span class="mark" aria-hidden="true"><img src="assets/icon.png" alt="" width="432" height="432" /></span><span class="name">dsh-mobile</span></a>
+  <button type="button" id="language" class="text-button" aria-label="Switch to English">English</button>
+  <a class="ghchip" href="https://github.com/kelai141/dsh-mobile-apk" rel="noopener" data-i18n="repo">开源仓库</a>
 </header>
-
 <main class="wrap" id="top">
   <section class="hero" aria-labelledby="hero-title">
-    <h1><span id="hero-title">在手机上运行 DeepSeek Harness</span></h1>
-    <p class="lede">内嵌完整运行环境，装机即用。自动识别设备架构并挑选最快下载线路。</p>
+    <p class="eyebrow">DeepSeek Harness · Android</p>
+    <h1><span id="hero-title" data-i18n="slogan">文档、编程、手机控制、深度研究，口袋里全部搞定。</span></h1>
+    <p class="lede" data-i18n="lede">在 Android 上运行 DeepSeek Harness，内置完整运行环境，装机即用。</p>
   </section>
-
   <section class="panel" id="download" aria-labelledby="dl-title">
-    <h2 id="dl-title" class="panel-title mono">下载 <span class="dim">/ download</span></h2>
-    <dl class="meta mono">
-      <div><dt>release</dt><dd>__TAG__</dd></div>
-      <div><dt>target</dt><dd>arm64 · x86_64</dd></div>
-      <div><dt>source</dt><dd>GitHub Releases<span class="dim">（本站不托管字节）</span></dd></div>
-    </dl>
-    <div id="dl-body">
-      <p class="muted">正在读取版本信息…</p>
-    </div>
-    <noscript>
-      <p class="muted">当前浏览器未启用 JavaScript，请前往
-        <a href="https://github.com/kelai141/dsh-mobile-apk/releases/latest">GitHub Releases</a>
-        选择 arm64 或 x86_64 安装包。</p>
-    </noscript>
+    <div class="panel-heading"><h2 id="dl-title" data-i18n="downloadTitle">下载 Android 版</h2><span class="release-tag mono">__TAG__</span></div>
+    <div id="dl-body">__DOWNLOAD_LINKS__</div>
+    <p class="requirements" data-i18n="requirements">Android 8.0 及以上 · 内置引擎与 Termux 环境</p>
+    <p class="source-note" data-i18n="sourceNote">安装包来自 GitHub Releases，镜像加速源为第三方服务。</p>
+    <noscript><p class="small">未启用 JavaScript，可直接使用上方安装包链接，或前往 <a href="https://github.com/kelai141/dsh-mobile-apk/releases">GitHub Releases</a>。JavaScript is disabled. Use the package links above or visit GitHub Releases.</p></noscript>
   </section>
-
-  <!-- 仓库跳转卡：整张卡即链接，点一下直达 GitHub。 -->
-  <a class="repo" href="https://github.com/kelai141/dsh-mobile-apk" rel="noopener">
-    <span class="repo-head">
-      <span class="mark mark-sm" aria-hidden="true"><img src="assets/icon.png" alt="" width="432" height="432" /></span>
-      <span class="repo-path mono">kelai141 / dsh-mobile-apk</span>
-    </span>
-    <span class="repo-body">开源仓库，源码、发布记录与问题反馈都在这里。</span>
-    <span class="repo-foot">
-      <span class="star">★ 觉得好用就 star 一下我们</span>
-      <span class="go">前往仓库 <span aria-hidden="true">↗</span></span>
-    </span>
-  </a>
-
-  <div class="block">
-    <h2 class="sec-title">规格</h2>
-    <ul class="specs">
-      <li><span class="k mono">系统</span><span class="v">Android 8.0（API 26）及以上</span></li>
-      <li><span class="k mono">体积</span><span class="v">安装包约 150 MB，内置引擎与 Termux 环境</span></li>
-      <li><span class="k mono">架构</span><span class="v">自动识别 arm64 / x86_64</span></li>
-      <li><span class="k mono">来源</span><span class="v">GitHub Releases，本站不托管文件</span></li>
-    </ul>
-  </div>
-
-  <!-- 面向搜索引擎的静态说明：不依赖 JS 即可被抓取，同时服务真人用户。 -->
   <section class="notes" aria-labelledby="about-title">
-    <h2 id="about-title" class="sec-title">关于 dsh-mobile</h2>
-    <p class="lede">dsh-mobile 是 <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a> 的安卓客户端封装。
-      它在应用内运行一个内嵌的 Termux 快照与 Node 引擎，并向模型暴露安卓平台能力（无障碍、虚拟屏、通知、文件访问等），
-      因此可以在手机上直接使用 DeepSeek Harness 的完整能力。</p>
-    <div class="faq mono">
-      <details>
-        <summary>该下载哪个架构</summary>
-        <p>绝大多数手机是 <b>arm64</b>（即 arm64-v8a / AArch64）；MuMu 等安卓模拟器通常是 <b>x86_64</b>。
-          两个安装包体积相近，无法凭体积区分。装错架构不会被系统拒绝安装，而是在启动引擎时失败，
-          所以请以页面上方自动识别的结果为准；若识别不准可用「换另一个架构」手动切换。</p>
-      </details>
-      <details>
-        <summary>安装说明</summary>
-        <p>下载后点击安装包；若系统提示「未知来源」，需在设置中允许浏览器安装应用。
-          与已安装版本签名一致时可直接覆盖升级，数据保留。最低支持 Android 8.0（API 26）。</p>
-      </details>
-      <details>
-        <summary>常见问题 · 下载很慢或失败</summary>
-        <p>页面上方可在 GitHub 直连与加速线路之间切换，站点会自动实测并优先选择最快的线路。</p>
-      </details>
-      <details>
-        <summary>常见问题 · 安装包安全吗</summary>
-        <p>安装包全部来自 <a href="https://github.com/kelai141/dsh-mobile-apk/releases">GitHub Releases</a>，
-          本站不托管、不修改任何文件，并展示发布清单中的 SHA-256 供核对。</p>
-      </details>
+    <h2 id="about-title" data-i18n="aboutTitle">关于 dsh-mobile</h2>
+    <p class="lede" data-i18n="about">把 DeepSeek Harness 带到手机上。处理文档、编写代码、操作手机、开展研究，让任务随身继续。</p>
+    <div class="faq">
+      <details><summary data-i18n="abiTitle">该下载哪个架构</summary><p data-i18n="abiHelp">大多数 Android 手机选择 arm64；对应架构的安卓模拟器选择 x86_64。浏览器识别仅供参考，装错架构可能导致引擎无法启动，请使用“更换架构”重新选择。</p></details>
+      <details><summary data-i18n="installTitle">安装说明</summary><p data-i18n="installHelp">下载后打开 APK，按系统提示允许浏览器安装应用。与已安装版本签名一致时可覆盖升级并保留数据。首次使用请按应用引导配置模型。</p></details>
+      <details><summary data-i18n="slowTitle">常见问题 · 下载很慢或失败</summary><p data-i18n="slowHelp">系统自动在官方源与镜像加速源中选择线路。如下载失败，点击下载按钮下方的“切换”，手动选择另一类来源后重试。检测超时不代表无法下载。</p></details>
+      <details><summary data-i18n="safetyTitle">常见问题 · 安装包安全吗</summary><p data-i18n="safetyHelp">本站不托管、不修改安装包。可展开“安装与校验说明”，核对文件名与 SHA-256；发布页的 MANIFEST.txt 提供完整校验清单。</p></details>
     </div>
   </section>
-
-  <!-- 构建期内联的 release 数据：首屏零额外请求，且天然不受 GitHub API 限流影响。 -->
+  <a class="repo" href="https://github.com/kelai141/dsh-mobile-apk" rel="noopener"><span class="mono">kelai141 / dsh-mobile-apk</span><span data-i18n="repo">开源仓库</span><span aria-hidden="true">↗</span></a>
   <script type="application/json" id="release-data">__RELEASE_DATA__</script>
 </main>
-
 <footer class="foot wrap">
-  <p><a href="https://github.com/kelai141/dsh-mobile-apk">源码仓库</a><span class="dim"> / </span><a href="https://github.com/kelai141/dsh-mobile-apk/releases">全部版本</a><span class="dim"> / </span><a href="https://github.com/deepseek-ai/deepseek-harness">上游项目</a></p>
-  <p class="muted">本站为第三方分发页，不收集任何用户数据，不使用 Cookie 与统计脚本。</p>
+  <nav><a href="https://github.com/kelai141/dsh-mobile-apk/releases" data-i18n="history">全部版本</a><a href="https://github.com/deepseek-ai/deepseek-harness" data-i18n="upstream">上游项目</a></nav>
+  <p class="muted" data-i18n="privacy">无 Cookie、无统计脚本。</p>
 </footer>
-
 <script type="module" src="assets/app.js"></script>
 </body>
 </html>

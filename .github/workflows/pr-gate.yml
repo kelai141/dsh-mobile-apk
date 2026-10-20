@@ -25,6 +25,11 @@ jobs:
       - name: APK 组装、版本与签名回归
         if: always()
         run: node --test scripts/check-apk-signatures.test.mjs scripts/resolve-version-suffix.test.mjs scripts/build-apk-engine.test.mjs scripts/check-third-party.test.mjs
+      - name: 下载站发布同步与路由回归
+        if: always()
+        run: |
+          node webpages/tools/build.mjs --self-test
+          node webpages/tools/build.mjs
       - name: 冲突标记检查
         if: always()
         run: |

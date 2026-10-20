@@ -30,7 +30,6 @@ export const REPO = 'dsh-mobile-apk';
 export const REPO_URL = 'https://github.com/' + OWNER + '/' + REPO;
 export const RELEASES_URL = REPO_URL + '/releases';
 export const LATEST_RELEASE_URL = RELEASES_URL + '/latest';
-export const API_LATEST_URL = 'https://api.github.com/repos/' + OWNER + '/' + REPO + '/releases/latest';
 
 /**
  * 镜像前缀表。顺序 = **初始**优先级；运行时由"健康检查 + 实测延迟"重排。

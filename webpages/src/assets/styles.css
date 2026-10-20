@@ -1,20 +1,4 @@
-/* dsh-mobile 下载页样式 —— 与应用本体同一套设计令牌。
- *
- * 令牌**逐值照抄**壳侧 `app/src/main/res/values-night/colors.xml`（暗色）
- * 与 `values/colors.xml`（浅色）的 `ds_*` 系列：纯黑画布 / 深灰面板 /
- * 发丝描边 / 近中性灰三级文字 / 反转墨色主操作（暗色即白底黑字）。
- * 改色请改那两个 XML，再同步到这里 —— 两边不一致就是本站与应用脱节的开始。
- *
- * 四条判据（改样式前先读）：
- *   1. **面板 > 装饰**：信息落在大圆角面板里，靠发丝描边与层级区分，不用阴影与渐变；
- *   2. **技术数据走等宽**：版本号、架构、体积、延迟、SHA-256 一律 --mono + tabular-nums，
- *      用控制台分页的形态呈现（release / target / source 三行在前，操作在后）；
- *   3. **主操作唯一**：全页只有一颗满幅胶囊按钮，其余一律 --fill-2 底或纯文字；
- *   4. **体积**：零外部字体、零图片素材（除 8.5 KB 的本体应用图标），全部内联进文档。
- *
- * 横屏（含桌面）改双栏：左栏身份 + 仓库 + 规格，右栏下载面板，说明通栏 ——
- * 竖排卡片被拉宽是最像"手机页面硬拉伸"的形态，横屏必须重新排版而不是等比例放大。
- */
+/* Download-first layout; application palette, system fonts, no external assets. */
 :root {
   color-scheme: dark light;
 
@@ -61,242 +45,92 @@
   }
 }
 
+
 *, *::before, *::after { box-sizing: border-box; }
-
-html { -webkit-text-size-adjust: 100%; }
-
-body {
-  margin: 0;
-  background: var(--bg);
-  color: var(--text);
-  font: 400 16px/1.55 var(--sans);
-  -webkit-font-smoothing: antialiased;
-  padding-bottom: env(safe-area-inset-bottom);
-}
-
-a { color: inherit; }
-::selection { background: var(--fill); color: var(--on-fill); }
-:where(a, button, summary):focus-visible { outline: 2px solid var(--fill); outline-offset: 3px; }
-
+html { -webkit-text-size-adjust: 100%; scroll-padding-top: 80px; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 400 16px/1.6 var(--sans); -webkit-font-smoothing: antialiased; padding-bottom: env(safe-area-inset-bottom); }
+a { color: inherit; text-underline-offset: 4px; }
+button, select { font: inherit; }
+button, a, summary, select { -webkit-tap-highlight-color: transparent; }
+:where(a, button, summary, select):focus-visible { outline: 2px solid var(--text); outline-offset: 4px; }
+[hidden] { display: none !important; }
 .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
-.dim { color: var(--text-3); }
-.muted { color: var(--text-3); }
-.small { font-size: 12.5px; line-height: 1.65; }
-
+.muted, .small { color: var(--text-2); }
+.small { font-size: 13px; }
 .skip { position: absolute; left: -9999px; }
-.skip:focus {
-  left: 16px; top: 12px; z-index: 30; padding: 9px 12px;
-  background: var(--fill); color: var(--on-fill); border-radius: 10px;
-  font-size: 13px; text-decoration: none;
+.skip:focus { left: 16px; top: 12px; z-index: 30; padding: 8px 12px; background: var(--fill); color: var(--on-fill); }
+.wrap { width: 100%; max-width: 1120px; margin-inline: auto; padding-inline: 24px; }
+.bar { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 20px; padding: 14px 24px; padding-top: calc(14px + env(safe-area-inset-top)); background: var(--bg); border-bottom: 1px solid var(--line); }
+.brand { display: inline-flex; align-items: center; gap: 10px; margin-right: auto; min-width: 0; text-decoration: none; }
+.mark { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: white; flex: none; }
+.mark img { width: 22px; height: 22px; }
+.name { font-size: 16px; font-weight: 650; }
+.ghchip { font-size: 13px; text-decoration: none; color: var(--text-2); }
+.text-button, .architecture button { display: inline-flex; align-items: center; min-height: 44px; padding: 0; border: 0; background: none; color: var(--text); font-size: 13px; cursor: pointer; text-decoration: underline; text-underline-offset: 4px; }
+#top { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 0.95fr); column-gap: 64px; row-gap: 40px; padding-top: 64px; }
+.hero { align-self: center; }
+.eyebrow { margin: 0 0 20px; font-size: 13px; color: var(--text-2); }
+h1 { margin: 0 0 20px; font-size: 40px; line-height: 1.35; font-weight: 700; text-wrap: balance; overflow-wrap: anywhere; }
+.lede { margin: 0; font-size: 16px; line-height: 1.8; color: var(--text-2); }
+.panel { min-width: 0; padding: 24px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; scroll-margin-top: 80px; }
+.panel-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 24px; }
+.panel-heading h2 { margin: 0; font-size: 18px; }
+.release-tag { font-size: 12px; color: var(--text-2); flex: none; }
+.btn { position: relative; display: flex; flex-direction: column; justify-content: center; gap: 5px; min-height: 72px; width: 100%; padding: 14px 20px; border-radius: 8px; background: var(--fill); color: var(--on-fill); text-align: center; text-decoration: none; font-size: 18px; font-weight: 650; }
+.btn:hover { opacity: .88; }
+.btn-sub { font: 400 12px/1.5 var(--mono); opacity: .8; }
+.btn2 { display: flex; align-items: center; min-height: 48px; margin-top: 10px; padding: 10px 14px; border: 1px solid var(--line); border-radius: 6px; text-decoration: none; font-size: 14px; }
+.dev { margin: 0 0 12px; font-size: 13px; color: var(--text-2); }
+.device-note { text-align: center; margin: 9px 0 10px; }
+.route-picker { padding-block: 2px; }
+.route-picker summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; font-size: 13px; cursor: pointer; list-style: none; }
+.route-picker summary::-webkit-details-marker { display: none; }
+.route-picker summary > span:first-child { color: var(--text-2); }
+.route-picker summary > span:last-child { text-decoration: underline; text-underline-offset: 4px; flex: none; }
+.route-picker label { display: block; margin: 8px 0; font-size: 13px; color: var(--text-2); }
+.route-picker select { width: 100%; min-height: 44px; padding: 8px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--surface-muted); color: var(--text); font-size: 14px; }
+.route-picker p { margin: 8px 0; }
+.architecture { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--text-2); }
+.verify { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.verify summary { min-height: 44px; display: list-item; cursor: pointer; font-size: 13px; color: var(--text-2); }
+.verify p { font-size: 13px; color: var(--text-2); }
+.hash, .filename { display: block; overflow-wrap: anywhere; font: 12px/1.8 var(--mono); color: var(--text); user-select: all; }
+.requirements { margin: 20px 0 6px; font-size: 12px; color: var(--text-2); }
+.source-note { margin: 0; font-size: 12px; color: var(--text-2); }
+.notes { grid-column: 1 / -1; padding-top: 28px; border-top: 1px solid var(--line); }
+.notes h2 { margin: 0 0 12px; font-size: 20px; }
+.notes > .lede { max-width: 72ch; margin-bottom: 24px; font-size: 15px; }
+.faq { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 48px; align-items: start; }
+.faq details { border-top: 1px solid var(--line); padding-block: 12px; }
+.faq summary { cursor: pointer; padding-block: 6px; font-size: 14px; }
+.faq p { font-size: 14px; color: var(--text-2); }
+.repo { grid-column: 1 / -1; display: flex; gap: 16px; align-items: center; padding-block: 16px; border-top: 1px solid var(--line); text-decoration: none; font-size: 13px; }
+.repo span:first-child { margin-right: auto; overflow-wrap: anywhere; }
+.foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; padding-block: 24px; border-top: 1px solid var(--line); font-size: 12px; }
+.foot nav { display: flex; gap: 20px; }
+.foot p { margin: 0; }
+@media (max-width: 760px) {
+  .wrap { padding-inline: 20px; }
+  .bar { padding: 8px 20px; padding-top: calc(8px + env(safe-area-inset-top)); gap: 16px; }
+  #top { grid-template-columns: minmax(0, 1fr); padding-top: 28px; row-gap: 24px; }
+  .eyebrow { margin-bottom: 12px; }
+  h1 { font-size: 28px; margin-bottom: 12px; }
+  .lede { font-size: 14px; }
+  .panel { padding: 20px; }
+  .panel-heading { margin-bottom: 18px; }
+  .faq { grid-template-columns: minmax(0, 1fr); }
+  .notes { padding-top: 24px; }
 }
-
-.wrap { width: 100%; max-width: 880px; margin-inline: auto; padding-inline: clamp(16px, 4.6vw, 32px); }
-
-/* ── 顶栏：品牌（本体应用图标）+ 仓库常驻入口 ───────────────────────────── */
-.bar {
-  position: sticky; top: 0; z-index: 10;
-  display: flex; align-items: center; gap: 10px;
-  padding: 9px clamp(16px, 4.6vw, 32px);
-  padding-top: calc(9px + env(safe-area-inset-top));
-  background: var(--bg); border-bottom: 1px solid var(--line-2);
+@media (max-width: 360px) {
+  .wrap { padding-inline: 16px; }
+  .bar { padding-inline: 16px; gap: 12px; }
+  .panel { padding: 16px; }
+  .name { font-size: 14px; }
+  h1 { font-size: 25px; }
 }
-.brand { display: inline-flex; align-items: center; gap: 9px; text-decoration: none; margin-right: auto; min-width: 0; }
-/* 圆底取自 ic_launcher_background = #ffffff，图标即本体 launcher 前景图 */
-.mark {
-  display: inline-grid; place-items: center; flex: none;
-  width: 30px; height: 30px; border-radius: 50%;
-  background: #fff; border: 1px solid var(--line);
+@media (min-width: 761px) and (max-height: 560px) {
+  #top { padding-top: 24px; column-gap: 32px; }
+  h1 { font-size: 28px; }
+  .panel { padding: 18px; }
 }
-.mark img { width: 19px; height: 19px; display: block; }
-.mark-sm { width: 24px; height: 24px; }
-.mark-sm img { width: 15px; height: 15px; }
-.name { font-size: 13.5px; font-weight: 600; letter-spacing: 0.01em; }
-.ghchip {
-  flex: none; padding: 6px 11px; border: 1px solid var(--line); border-radius: 999px;
-  font-size: 12.5px; color: var(--text-2); text-decoration: none;
-  transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease);
-}
-.ghchip:hover { border-color: var(--text-3); color: var(--text); }
-
-/* ── 主视觉 ─────────────────────────────────────────────────────────────── */
-.hero { margin: clamp(22px, 4vw, 36px) 0 18px; }
-.hero h1 { margin: 0 0 8px; font-size: clamp(25px, 5.4vw, 34px); line-height: 1.2; letter-spacing: -0.022em; font-weight: 700; }
-.lede { margin: 0; font-size: 15px; color: var(--text-2); max-width: 60ch; }
-
-/* ── 下载面板：技术参数在前、操作在后 ──────────────────────────────────── */
-.panel { padding: 18px; background: var(--surface); border: 1px solid var(--line); border-radius: 16px; scroll-margin-top: 70px; }
-.panel-title { margin: 0 0 14px; font-size: 12px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; }
-.meta { display: grid; margin: 0 0 16px; padding: 0; border-top: 1px solid var(--line-2); }
-.meta > div { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line-2); }
-.meta dt { font-size: 11.5px; color: var(--text-3); }
-.meta dd { margin: 0; font-size: 12px; text-align: right; }
-.meta .dim { font-size: 11px; }
-
-#dl-body > p { margin: 0 0 10px; }
-#dl-body > p:last-child { margin-bottom: 0; }
-
-.verline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 8px; }
-.badge {
-  display: inline-block; padding: 3px 9px; border: 1px solid var(--line); border-radius: 999px;
-  font: 400 11.5px/1.5 var(--mono); font-variant-numeric: tabular-nums; color: var(--text-2);
-}
-.dev { margin: 0 0 14px; font-size: 13px; color: var(--text-2); }
-.dev b { color: var(--text); font-family: var(--mono); font-weight: 500; }
-
-/* 主操作：满幅胶囊，暗色即白底黑字（与应用一致） */
-.btn {
-  position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
-  width: 100%; padding: 15px 52px; border: 0; border-radius: 999px;
-  background: var(--fill); color: var(--on-fill);
-  font: 600 15.5px/1.3 var(--sans); text-align: center; text-decoration: none; cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-  transition: opacity var(--dur) var(--ease);
-}
-.btn::after {
-  content: "\2193"; position: absolute; right: 20px; top: 50%; transform: translateY(-50%);
-  font: 400 15px/1 var(--mono); opacity: 0.7;
-}
-.btn:hover { opacity: 0.88; text-decoration: none; }
-.btn-sub { display: block; font: 400 11px/1.3 var(--mono); font-variant-numeric: tabular-nums; opacity: 0.62; }
-
-/* 次操作：架构选择 / 查看全部版本 */
-.btn2 {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  width: 100%; margin-top: 8px; padding: 14px 16px;
-  border: 1px solid var(--line); border-radius: 14px; background: var(--fill-2); color: var(--text);
-  font: 600 14px/1.4 var(--sans); text-align: left; text-decoration: none; cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-  transition: border-color var(--dur) var(--ease);
-}
-.btn2::after { content: "\2197"; font: 400 13px/1 var(--mono); color: var(--text-3); }
-.btn2:hover { border-color: var(--text-3); text-decoration: none; }
-
-.notice { margin-bottom: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--fill-2); }
-.notice h3 { margin: 0 0 6px; font-size: 15px; font-weight: 600; }
-.notice p { margin: 0; font-size: 13px; color: var(--text-2); }
-.notice b { color: var(--text); }
-
-/* 线路选择：与版本解绑的独立组件，任何状态都可用 */
-#lines-host { margin-top: 14px; }
-.lines { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-.lines button {
-  min-height: 44px; padding: 10px 12px; border: 1px solid transparent; border-radius: 999px;
-  background: var(--fill-2); color: var(--text-2);
-  font: 400 12.5px/1.4 var(--sans); text-align: left; cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-  transition: background var(--dur) var(--ease), color var(--dur) var(--ease), border-color var(--dur) var(--ease);
-}
-/* 已选中（aria-pressed="true"）的线路按钮不得被悬浮态改色：其底色是 --fill，而 --text 与
- * --fill 在明暗两套令牌里**取值相同**，一旦悬浮把文字改成 --text 就是同色不可见。
- * 真因：`button:hover:not(:disabled)` 特异性 (0,3,1) 高于 `button[aria-pressed="true"]` (0,2,1)，
- * 光靠调整声明顺序压不住；这里直接把选中态从悬浮规则里排除。 */
-.lines button:not([aria-pressed="true"]):hover:not(:disabled) { color: var(--text); border-color: var(--line); }
-.lines button[aria-pressed="true"] { background: var(--fill); color: var(--on-fill); font-weight: 600; }
-.lines button:disabled { border-color: var(--line); border-style: dashed; opacity: 0.42; cursor: not-allowed; }
-.lines .ms { display: block; margin-top: 2px; font: 400 10.5px/1.3 var(--mono); color: var(--text-3); }
-.lines button[aria-pressed="true"] .ms { color: var(--on-fill); opacity: 0.6; }
-
-#dl-body details { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line-2); }
-#dl-body summary {
-  display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  list-style: none; cursor: pointer; font: 400 12.5px/1.5 var(--mono); color: var(--text-2);
-}
-#dl-body summary::-webkit-details-marker { display: none; }
-#dl-body summary::after { content: "[ + ]"; font-size: 11px; color: var(--text-3); }
-#dl-body details[open] summary::after { content: "[ \2212 ]"; }
-#dl-body summary:hover { color: var(--text); }
-
-.steps { display: grid; gap: 7px; margin: 12px 0 0; padding: 0; list-style: none; counter-reset: step; }
-.steps li { counter-increment: step; display: grid; grid-template-columns: 1.6rem minmax(0, 1fr); gap: 6px; font-size: 13px; color: var(--text-2); }
-.steps li::before { content: counter(step, decimal-leading-zero); font: 400 11px/1.7 var(--mono); color: var(--text-3); }
-
-.hash {
-  margin: 12px 0 0; padding: 10px 12px; border: 1px solid var(--line-2); border-radius: 12px;
-  font: 400 10.5px/1.7 var(--mono); color: var(--text-3); word-break: break-all; background: var(--chip);
-}
-
-.switchers { margin-top: 14px; font-size: 13px; color: var(--text-2); }
-.switchers > span { display: block; margin-bottom: 4px; font: 400 11.5px/1.5 var(--mono); color: var(--text-3); }
-.switchers button { padding: 0; border: 0; background: none; color: var(--text); font: inherit; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
-.switchers .lines { margin-top: 8px; }
-
-/* ── 仓库跳转卡：整张卡即链接，点一下直达 GitHub ───────────────────────── */
-.repo {
-  display: grid; gap: 12px; margin-top: 14px; padding: 16px;
-  background: var(--surface); border: 1px solid var(--line); border-radius: 16px;
-  text-decoration: none;
-  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
-}
-.repo:hover { border-color: var(--text-3); background: var(--surface-muted); }
-.repo-head { display: flex; align-items: center; gap: 9px; }
-.repo-path { font-size: 13.5px; font-weight: 600; }
-.repo-body { font-size: 13.5px; line-height: 1.65; color: var(--text-2); }
-.repo-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-.star {
-  padding: 5px 11px; border: 1px solid var(--line); border-radius: 999px;
-  font-size: 12.5px; color: var(--text);
-}
-.go { font-size: 13.5px; font-weight: 600; }
-.go::after { content: " \2192"; font-family: var(--mono); }
-
-/* ── 规格 ───────────────────────────────────────────────────────────────── */
-.sec-title { margin: 26px 0 12px; font-size: 12px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-3); }
-.specs { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin: 0; padding: 0; list-style: none; }
-.specs li { padding: 14px; background: var(--surface); border: 1px solid var(--line-2); border-radius: 14px; }
-.specs .k { display: block; margin-bottom: 6px; font-size: 11px; color: var(--text-3); }
-.specs .v { font-size: 13.5px; color: var(--text-2); }
-
-/* ── 说明 ───────────────────────────────────────────────────────────────── */
-.notes > .lede { margin-bottom: 14px; font-size: 14px; line-height: 1.72; }
-.faq details { padding: 14px 0; border-top: 1px solid var(--line-2); }
-.faq summary { list-style: none; cursor: pointer; font: 500 14px/1.5 var(--sans); color: var(--text); }
-.faq summary::-webkit-details-marker { display: none; }
-.faq summary::after { content: " [ + ]"; font: 400 11px/1 var(--mono); color: var(--text-3); }
-.faq details[open] summary::after { content: " [ \2212 ]"; }
-.faq details p { margin: 8px 0 0; font-size: 13.5px; line-height: 1.72; color: var(--text-2); }
-.faq b { color: var(--text); }
-
-.foot { margin-top: 30px; padding-block: 18px 34px; border-top: 1px solid var(--line-2); }
-.foot p { margin: 0 0 6px; font-size: 12.5px; }
-.foot a { text-decoration: none; }
-.foot a:hover { text-decoration: underline; }
-
-/* ── 横屏（含桌面）：双栏，竖排卡片不得等比例拉宽 ─────────────────────── */
-@media (orientation: landscape) {
-  .wrap {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
-    column-gap: clamp(20px, 3vw, 40px);
-    max-width: 1180px;
-    align-items: start;
-  }
-  .hero { grid-area: 1 / 1 / 2 / 2; margin-top: 4px; }
-  .panel { grid-area: 1 / 2 / 4 / 3; margin-top: 0; }
-  .repo { grid-area: 2 / 1 / 3 / 2; margin-top: 18px; }
-  .block { grid-area: 3 / 1 / 4 / 2; margin-top: 22px; }
-  .notes { grid-area: 4 / 1 / 5 / 3; margin-top: 22px; }
-  .specs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .notes .lede { max-width: 62ch; }
-  .foot { max-width: 1180px; }
-}
-
-/* 横屏矮视口：主操作必须仍落在首屏内 */
-@media (orientation: landscape) and (max-height: 560px) {
-  .bar { padding-block: 6px; padding-top: calc(6px + env(safe-area-inset-top)); }
-  .hero { margin: 12px 0 12px; }
-  .hero h1 { font-size: 21px; margin-bottom: 4px; }
-  .lede { font-size: 13px; }
-  .panel { padding: 14px; }
-  .panel-title { margin-bottom: 10px; }
-  .meta > div { padding: 6px 0; }
-  .verline { margin-bottom: 6px; }
-  .dev { margin-bottom: 10px; }
-  .btn { padding-block: 12px; }
-  .repo { margin-top: 14px; padding: 13px; }
-}
-
-@media (max-width: 380px) { .lines { grid-template-columns: 1fr; } }
-
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { transition-duration: 0.01ms !important; }
-}
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
