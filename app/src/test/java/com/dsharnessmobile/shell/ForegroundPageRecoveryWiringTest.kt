@@ -93,7 +93,11 @@ class ForegroundPageRecoveryWiringTest {
     assertTrue(creation.contains("savedInstanceState?.getBoolean"))
     assertTrue(creation.contains("pageRecovery.restoreRecreationBudget("))
     assertTrue(recovery.contains("ForegroundPageRecoveryPolicy.Recovery.NATIVE_ERROR"))
-    assertTrue(creation.contains("if (!userClosedEngine) startEngineFlow()"))
+    // 自动启动现在还有一道用户偏好门（启动页管理里的「打开应用后自动启动」）；
+    // 判据只加不减：既要求 userClosedEngine 短路，也要求读偏好，还要求偏好开时才拉起。
+    assertTrue(creation.contains("if (!userClosedEngine) {"))
+    assertTrue(creation.contains("if (SplashStore.autoStart(this)) {"))
+    assertTrue(creation.contains("startEngineFlow()"))
     val destruction = between(activity, "override fun onDestroy()", "override fun onConfigurationChanged(")
     assertTrue(ordered(destruction, "engineFlow.destroy()", "pageRecovery.pause()"))
     assertTrue(destruction.contains("webViewRef === webView"))
@@ -185,7 +189,7 @@ class ForegroundPageRecoveryWiringTest {
     val creation = between(activity, "override fun onCreate(", "private var pendingNotifySession")
     assertTrue(creation.contains("getBoolean(\"dsh.engine-user-closed\""))
     assertTrue(creation.contains("EngineService.isUserShutdownPersisted(this)"))
-    val startup = between(activity, "internal fun startEngineFlow()", "internal fun applyGuidePhase(")
+    val startup = between(activity, "internal fun startEngineFlow(", "internal fun applyGuidePhase(")
     assertTrue(ordered(startup, "if (userClosedEngine)", "if (pageRecovery.rendererGone)"))
     assertTrue(startup.contains("if (EngineService.userShutdown) return"))
     val rendererBranch = startup.substringAfter("if (pageRecovery.rendererGone)")

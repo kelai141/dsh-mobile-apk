@@ -128,8 +128,64 @@ class MainActivity : ComponentActivity() {
   // 与拆分前 MainActivity 字段初始化时序一致）。
   internal val dirPickerController = DirectoryPickerController(this)
   internal val mediaPickerController = MediaPickController(this)
+  /** 启动页视频的系统选择器与有界拷贝（注册必须在 STARTED 之前）。 */
+  internal val splashImportController = SplashImportController(this)
+
+  /** 开屏视频覆盖层；在 onCreate 建好 root 之后初始化。 */
+  private var splashOverlay: SplashOverlay? = null
+  /** 覆盖层所在的根视图；超时兜底的 post/removeCallbacks 都挂在它上面。 */
+  private var splashRoot: View? = null
+  private var splashTimeout: Runnable? = null
+  /** 本次 Activity 是否已经播过开屏视频（一次冷启动只播一次）。 */
+  private var splashPlayed = false
   /** 窗口/页面 UI chrome（沉浸式/字体/剪贴板/常亮/主题推送）。 */
   private val uiChrome = WebUiChrome(this)
+
+  /**
+   * 启动时播放开屏视频。
+   *
+   * `force` 只由「启动引擎」按钮使用：一次冷启动最多自动播一次，用户手动再启动时可以重播。
+   * 视频只是装饰——任何一步不满足（未配置、正在播放、页面已就绪）都静默返回，不改变启动流程。
+   */
+  private fun maybePlaySplash(force: Boolean) {
+    if (!force && splashPlayed) return
+    val overlay = splashOverlay ?: return
+    val path = SplashStore.filePath(this) ?: return
+    if (overlay.isActive) return
+    if (guideRenderer.lastGuidePhase == GuidePhase.Error) return
+    if (!overlay.play(path)) return
+    splashPlayed = true
+    scheduleSplashTimeout()
+    // 页面尚未显示时 guideView 在根视图里是可见的；视频盖在它上面不改变任何布局。
+    LogCollector.log("dsh-splash", "video started path=" + java.io.File(path).name)
+  }
+
+  /** 页面自报就绪是唯一的「引擎加载完成」信号；淡出必须真实移除视图。 */
+  private fun onSplashPageReady() {
+    finishSplash("page-ready")
+  }
+
+  private fun finishSplash(reason: String, animate: Boolean = true) {
+    splashTimeout?.let { task -> splashRoot?.removeCallbacks(task) }
+    splashTimeout = null
+    val overlay = splashOverlay ?: return
+    if (!overlay.isActive) return
+    overlay.dismiss(animate)
+    LogCollector.log("dsh-splash", "video finished: " + reason)
+  }
+
+  /**
+   * 上限兜底：页面迟迟不报就绪（或引擎死掉）时，视频不能无限盖住启动页。
+   * 90 秒与引擎启动预算同源；超过它仍无 ready 就按失败处理。
+   */
+  private fun scheduleSplashTimeout() {
+    splashTimeout?.let { task -> splashRoot?.removeCallbacks(task) }
+    val task = Runnable {
+      finishSplash("timeout", animate = false)
+    }
+    splashTimeout = task
+    splashRoot?.postDelayed(task, SPLASH_TIMEOUT_MS)
+  }
 
   /** 崩溃标记：记录未捕获异常摘要，下次启动测试界面提示（不吞异常）。 */
   internal var crashInfo: String? = null
@@ -191,6 +247,9 @@ class MainActivity : ComponentActivity() {
     private const val WEB_REVEAL_FALLBACK_MS = 1200L
     private const val WEB_REVEAL_FADE_MS = 140L
 
+    /** 开屏视频最长覆盖时间：与引擎启动预算同量级，超时后照常露出启动页。 */
+    private const val SPLASH_TIMEOUT_MS = 90_000L
+
     /**
      * §2.4：ES2022 类静态块（`static{}`）需要 Chromium 94+；低于此值的产物会在**解析期**整体
      * 不执行——用户看到纯白、无报错、引擎却健康（详档 §1.2 的 A 档实测）。
@@ -231,7 +290,7 @@ class MainActivity : ComponentActivity() {
   //    的调用面保持不变：onCreate/onResume/监控/WebViewClient/引导按钮共用入口）。 ——
 
   /** 引擎启动流（委托 EngineStartFlow.start）。 */
-  internal fun startEngineFlow() {
+  internal fun startEngineFlow(splash: Boolean = false) {
     if (isFinishing || isDestroyed) return
     if (RepairState.required(this)) {
       showGuide()
@@ -252,6 +311,8 @@ class MainActivity : ComponentActivity() {
       EngineService.setUserShutdown(this, false)
     }
     if (EngineService.userShutdown) return
+    // 显式点「启动引擎」时重播开屏视频；自动入口只在冷启动播一次（见 onCreate）。
+    if (splash) maybePlaySplash(force = true)
     if (pageRecovery.rendererGone) {
       pageRecovery.userReloadRequested()
       recoverPageIfPending()
@@ -262,7 +323,14 @@ class MainActivity : ComponentActivity() {
 
   /** 引导页状态渲染（委托 GuidePageRenderer；EngineStartFlow/前台监控经此驱动）。 */
   internal fun applyGuidePhase(phase: GuidePhase, title: String, hint: String? = null) =
-    guideRenderer.applyGuidePhase(phase, title, hint)
+    guideRenderer.applyGuidePhase(phase, title, hint).also {
+      // 只要用户此刻需要用启动页上的按钮（失败、关闭、恢复中、空闲），视频就必须让开——
+      // 它盖住的正是重试、修复助手与控制台入口。加载中的相位（Starting/Extracting/Updating）
+      // 继续播放，直到页面自报就绪。
+      val userNeedsGuide = phase == GuidePhase.Error || phase == GuidePhase.Closed ||
+        phase == GuidePhase.Recovering || phase == GuidePhase.Idle || phase == GuidePhase.Info
+      if (userNeedsGuide) finishSplash("phase-" + phase.name)
+    }
 
   /** 回退测试界面（委托 GuidePageRenderer）。 */
   internal fun showGuide() {
@@ -448,6 +516,12 @@ class MainActivity : ComponentActivity() {
     guideRenderer.management.restore(savedInstanceState?.getString("dsh.guide-page"))
     root.addView(guideView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     setContentView(root)
+    // 开屏视频是最上层视图：加在 guideView 之后、任何宿主视图之前。
+    splashRoot = root
+    splashOverlay = SplashOverlay(root) { code ->
+      LogCollector.log("dsh-splash", "video stopped: " + code)
+      finishSplash("failure-" + code, animate = false)
+    }
     // 0.14.1 用户反馈：公共导出目录（Documents/dshdata）的供给必须在**不依赖引擎状态**的地方触发。
     // 旧实现只从 startEngine()/shellEnv() 进入，而 startEngine() 在「引擎已可连或进程还活着」时
     // 早退、onResume 的探活发现引擎活着也不再走启动流程 → 授权之后没有任何东西会再跑一次建目录，
@@ -513,7 +587,17 @@ class MainActivity : ComponentActivity() {
       // 校验净化→后台拷贝临时工作区→待发清单投递引擎侧插件；拒绝/失败经 showTestNotification 提示。
       // 0.13.8 #174：startEngineFlow 提前——引擎启动是异步的，先拉起缩短
       // 「拷完 POST 早于引擎 listen」的竞态窗口（投递另有待发清单 + 引擎就绪钩子兜底）。
-      if (!userClosedEngine) startEngineFlow()
+      // 「打开应用后自动启动」关闭时停在启动页；手动点「启动引擎」仍会拉起引擎。
+      if (!userClosedEngine) {
+        if (SplashStore.autoStart(this)) {
+          maybePlaySplash(force = false)
+          startEngineFlow()
+        } else {
+          // 关闭自动启动后必须显式停在启动页：webView 初始为 GONE，而 guideView
+          // 自带 GONE，什么都不做的话用户会看到一片空白（没有可点的「启动引擎」）。
+          showGuide()
+        }
+      }
       FileIncoming.processIncomingIntent(this, intent) { title, text -> showTestNotification(title, text) }
       // P0-1：冷启动路径的通知落点（热路径在 onNewIntent）。放在 startEngineFlow 之后：
       // 落点要等页面把会话列表装起来，故这里只登记，真正的投递由页面就绪/onNewIntent 触发。
@@ -639,6 +723,8 @@ class MainActivity : ComponentActivity() {
     } catch (_: Throwable) {
       // 名称同步失败不得影响启动（渠道本身仍可用，只是可能显示旧词）。
     }
+    // 「打开应用后自动启动」关闭时，只保留对**已在运行**引擎的监控，不再自动拉起。
+    val autoStart = SplashStore.autoStart(this)
     // 前台引擎监控：引擎被杀/崩溃时自动回退测试界面，恢复后回 WebUI。
     if (!userClosedEngine) {
       engineFlow.startMonitor()
@@ -647,7 +733,7 @@ class MainActivity : ComponentActivity() {
     // + WatchdogV2 tick）此前只在 startEngineFlow 首次轮询成功时挂载——**引擎先跑、app 后启动
     // （后台恢复/热启动）时服务从未启动 → watchdog 缺失 → 通知消费（task-done 标记）/自动回退
     // /唤醒锁全链路失效**。onResume 幂等确保服务启动（已在跑则 no-op）。
-    if (!userClosedEngine) {
+    if (!userClosedEngine && autoStart) {
       engineFlow.startEngineService()
     }
     // 悬浮球页面避让帧消费者（OverlayService → WebView body padding；先于
@@ -676,9 +762,9 @@ class MainActivity : ComponentActivity() {
     provisionPublicRepoAndRefreshChip(PublicRepoProvision.TRIGGER_ON_RESUME)
     // FX-210.5：探活不得在主线程（onResume 每次回前台都跑；cookie 取不到 + 3080 半死时
     // 单次同步 HTTP 为秒级）。后台探活 + 主线程分流，失败原因结构化落盘。
-    if (!userClosedEngine && webView.visibility != View.VISIBLE) {
+    if (!userClosedEngine && autoStart && webView.visibility != View.VISIBLE) {
       probeEngineOffMainThread { running ->
-        if (!running && !userClosedEngine && webView.visibility != View.VISIBLE) startEngineFlow()
+        if (!running && !userClosedEngine && SplashStore.autoStart(this) && webView.visibility != View.VISIBLE) startEngineFlow()
       }
     }
     // 主题补推：从系统设置/SAF 返回时系统主题可能已变（兜底桥时序覆盖）。
@@ -759,6 +845,8 @@ class MainActivity : ComponentActivity() {
   }
 
   override fun onPause() {
+    // 退后台不继续解码视频（省电、避免后台播放）；回前台且仍在等引擎时续播。
+    splashOverlay?.pause()
     pageRecovery.pause()
     engineFlow.stopMonitoring() // Only Activity page probes/heartbeats; EngineService task watchdog remains running.
     // BrowserHost owns its independent background policy; do not pause global WebView timers.
@@ -768,6 +856,7 @@ class MainActivity : ComponentActivity() {
 
   override fun onStart() {
     super.onStart()
+    splashOverlay?.resume()
     // 回前台：浮窗让位，侧栏查看器重新接管虚拟屏 Surface。
     if (::vdisplayFloat.isInitialized) vdisplayFloat.hide()
     if (::vdisplayHost.isInitialized) vdisplayHost.reattach()
@@ -821,6 +910,10 @@ class MainActivity : ComponentActivity() {
   }
 
   override fun onDestroy() {
+    // 视频必须与播放器一起在这里终结；否则 Activity 重建后播放器仍在后台解码。
+    finishSplash("destroy", animate = false)
+    splashOverlay = null
+    splashRoot = null
     engineFlow.destroy() // Invalidate and cancel startup callers before destroying their page owners.
     // 0.14.6：解除更新状态机的超时定时器并把进行中相位收敛为可解释终态
     // （否则重新打开应用会看到一个永远不会动的「更新中」）。
@@ -1139,6 +1232,7 @@ class MainActivity : ComponentActivity() {
             LogCollector.isPageReadyMessage(text) -> {
               pageRecovery.pageReady()
               engineFlow.onPageReadyReported(text)
+              onSplashPageReady()
               true
             }
             LogCollector.isPageStallMessage(text) -> {

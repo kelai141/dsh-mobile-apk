@@ -339,7 +339,9 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
             )
             activity.engineFlow.engineRetryCount = 0
             activity.engineManager.clearRefreshLedger()
-            activity.startEngineFlow()
+            // Explicit start: replay the launch video even if the automatic path already
+            // played it once in this Activity.
+            activity.startEngineFlow(splash = true)
           } else {
             pushHint(
               result.optString("guidance").ifBlank {
@@ -381,7 +383,9 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
             // 0.14.1 D2：同时清空**跨进程**的快照刷新失败账本。用户显式点「重试」就是要求
             // 「再试一次刷新」；不清账的话降级闸门会让他永远拿不到那次刷新，按钮就成了摆设。
             activity.engineManager.clearRefreshLedger()
-            activity.startEngineFlow()
+            // Explicit start: replay the launch video even if the automatic path already
+            // played it once in this Activity.
+            activity.startEngineFlow(splash = true)
           }
           }
         },

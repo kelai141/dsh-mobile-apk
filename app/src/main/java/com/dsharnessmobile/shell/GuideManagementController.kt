@@ -28,6 +28,7 @@ internal class GuideManagementController(
   private var pluginPage: PluginManagementPage? = null
   private lateinit var feedback: TextView
   private var storageStatus: TextView? = null
+  private var splashPage: SplashSettingsPage? = null
   val isOpen get() = destination != "home" || progress > 0f
   val savedPage get() = destination
   private fun dp(n: Int) = (n * activity.resources.displayMetrics.density).toInt()
@@ -52,6 +53,9 @@ internal class GuideManagementController(
       layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) }
     })
     row(t("存储管理", "Storage"), t("数据、容量与导出", "Data, space, exports")) { showStorage() }
+    // 启动页管理（0.14.9）：开屏视频与「打开应用后自动启动」属于启动面，
+    // 放进管理中心而不是引擎 Web UI 的设置中心——引擎没起来时也必须能改。
+    row(t("启动页管理", "Startup screen"), t("开屏视频与自动启动", "Launch video and auto start")) { showSplash() }
     languageRow()
     feedback = label("", 14f)
     management.addView(feedback)
@@ -183,9 +187,11 @@ internal class GuideManagementController(
 
   private fun removeDetail() {
     pluginPage?.dispose()
+    splashPage?.dispose()
     detail?.let { chrome.managementHost.removeView(it) }
     detail = null
     pluginPage = null
+    splashPage = null
     chrome.managementHost.getChildAt(0)?.visibility = View.VISIBLE
   }
   private fun displayDetail(view: View) {
@@ -260,6 +266,12 @@ internal class GuideManagementController(
     storageStatus = status
     refreshStorage()
   }
+  private fun showSplash() {
+    val page = SplashSettingsPage(activity) { back() }
+    displayDetail(page.view)
+    splashPage = page
+    destination = "splash"
+  }
   fun refreshStorage() {
     if (destination != "storage") return
     val presentation = PublicRepoProvision.presentation(activity.engineManager.publicRepoStatus())
@@ -273,6 +285,7 @@ internal class GuideManagementController(
   fun back(): Boolean = when (destination) {
     "plugins" -> { if (pluginPage?.back() != true) navigate("management"); true }
     "storage" -> { navigate("management"); true }
+    "splash" -> { navigate("management"); true }
     "management" -> { navigate("home"); true }
     else -> false
   }
@@ -286,6 +299,7 @@ internal class GuideManagementController(
     render(1f)
     if (page == "plugins") showPlugins()
     if (page == "storage") showStorage()
+    if (page == "splash") showSplash()
   }
-  fun destroy() { animation?.cancel(); pluginPage?.dispose() }
+  fun destroy() { animation?.cancel(); pluginPage?.dispose(); splashPage?.dispose() }
 }
