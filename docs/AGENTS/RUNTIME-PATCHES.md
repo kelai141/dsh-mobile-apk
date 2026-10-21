@@ -107,6 +107,7 @@
 | `ptc-android-native-A1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-ptc-runtime-node/lib/index.js`<br>`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-ptc-runtime-node/lib/process.js` |
 | `file-upload-restart-R1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-file-upload/lib/index.js` |
 | `sidebar-keep-wide-B2` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar/lib/client.js` |
+| `inspector-worker-expose-internals-472` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-experimental-inspector/lib/index.js` |
 
 已退役登记：`market-A`、`market-C`、`atomic-stale-lock-F4`。历史章节保留退役前语义；活动状态以本表和 registry 为准。
 <!-- generated:active-registry:end -->
@@ -134,6 +135,8 @@
 （fixture = 0.1.5-rc.1 产物；`.deploy-tmp/` 下的临时预检脚本不入库，勿再引用）。
 
 ### 7.1 构建期引擎补丁历史与实现说明（活动状态见 §6.1）
+
+- **inspector-worker-expose-internals-472（2026-10-21，apk #472）**：`dsh-experimental-inspector/lib/index.js` 的 `spawnWorker()` 用 `execArgv: []` 显式清空 Worker 的继承参数，丢掉壳侧启动命令里的 `--expose-internals`。`node-addon-require-builtin` 没有 android-arm64 预编译件，`requireBuiltin('internal/modules/esm/loader')` 只能走需要该 flag 的 require 回退 ⇒ Worker 内恒 `MODULE_NOT_FOUND`，`/api/experimental-inspector/bootstrap` 每启动两条 404。补丁只把该处改为 `execArgv: ["--expose-internals"]`；**不继承** `process.execArgv`，避免把 `--inspect` 之类带进 Worker。marker 供 `check-engine-overlay` 抽验；真实夹具、幂等、三向负控与 runner 集成测试见 `scripts/patches/tests/inspector-worker-expose-internals-472.test.mjs`。
 
 - **sidebar-keep-wide-B2（2026-10-18）**：`dsh-client-ui-sidebar/lib/client.js` 让**手机形态**的 `wide` 恒真（收起态仍挂载宽内容），并取消手机收起态的内联宽度冻结。动机：上游收起 150ms 后卸载宽内容（真机 326 元素 / 约 54KB 到 66 元素 / 约 10KB），而手机抽屉由手势驱动，`ensureOpen` 的重新挂载正落在手指还按着的帧上（开方向拖动期 136ms vs 关方向 69ms）。**两条锚点必须一起打**：`lastWideWidth` 在收起期间不更新且初值等于传入 width（手机窄屏算出 56px），只改 `wide` 会让跟手首帧看到一帧压扁抽屉、设置面板路径常驻 56px 压缩抽屉。口径收窄为「非桌面 titlebar 且 `data-dsh-mobile-form`」，桌面端逐格不变（八格真值表只有「手机 + 收起 + 已 settle」一格变化）。marker 随第一条替换落进产物供 `check-engine-overlay` 抽验。真实夹具、幂等、三向负控、真值表与 runner 集成测试见 `scripts/patches/tests/sidebar-keep-wide-B2.test.mjs`。**设备实测否定了「rail 搜索按钮会消失」的源码推断**：`WorkspaceBrowser` 拿到的 `wide` 来自 shell 的 `collapsed`，不是 `SidebarRoot` 这个局部变量。
 
