@@ -29,9 +29,13 @@ DeepSeek Harness 的**安卓壳应用**（包名 `com.dsharnessmobile.shell`）�
 ## 2. 怎么建、怎么装、怎么验
 
 ```powershell
-# 在【协调仓根】执行（壳侧不单独构建）
-pwsh -File scripts\build-apk-013.ps1 -Suffix ""   # 双 ABI 全链，门禁失败即拒打包
-pwsh -File scripts\build-apk-013.ps1 -Fast         # dev 档：单 ABI x86_64 + preset 1（禁发布）
+# 在【协调仓根】执行（壳侧不单独构建）。三种模式见协调仓 AGENTS.md「三种打包模式」：
+#   release：双 ABI 全链，门禁失败即拒打包
+#   Fast   ：单 ABI x86_64 + preset 1，**门禁全跑**，开发迭代加速（禁发布）
+#   dev    ：node dsh-mobile-apk\scripts\build-apk-dev-fast.mjs，**跳过全部发布门禁**，仅本地测试（禁发布；
+#            不重建/不注入快照，复用 app/src/main/assets/snapshot.tar.xz）
+pwsh -File scripts\build-apk-013.ps1 -Suffix ""   # release 档：双 ABI 全链，门禁失败即拒打包
+pwsh -File scripts\build-apk-013.ps1 -Fast         # Fast 档：单 ABI x86_64 + preset 1（禁发布）
 # 发布包不经本地：由 GitHub Action 一键链产出（workflow_dispatch 传 version + notes）——
 # gh workflow run release -R kelai141/dsh-mobile-apk -F version=<版本> -F notes=@release/v<版本>/notes.md
 
