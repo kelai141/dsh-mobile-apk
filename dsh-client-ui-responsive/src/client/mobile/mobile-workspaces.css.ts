@@ -2,7 +2,19 @@
 export const MOBILE_WORKSPACES_CSS = `
 @media (max-width: 1100px) {
   [data-dsh-workspaces='2'] [data-dockkit-surface] { padding-top: 48px; box-sizing: border-box; }
-  [data-dsh-workspaces='2'] [data-dockkit-split] { min-height: 0; min-width: 0; background: var(--dsw-specific-sidebar-fill); }
+  /* Tracks and slots are declared here, not written inline: React owns the element style,
+     and an inline grid left behind after a collapse laid the single pane out in row 3. */
+  [data-dsh-workspaces='2'] [data-dockkit-split] {
+    min-height: 0; min-width: 0; background: var(--dsw-specific-sidebar-fill);
+    grid-template-columns: var(--dsh-workspace-columns, minmax(0, 1fr)) !important;
+    grid-template-rows: var(--dsh-workspace-rows, minmax(0, 1fr)) !important;
+  }
+  [data-dsh-workspaces='2'][data-dsh-workspace-orientation='horizontal'] [data-dockkit-split] > [data-dockkit-host='dock'][data-dsh-workspace-slot='0'] { grid-column: 1 !important; grid-row: 1 !important; }
+  [data-dsh-workspaces='2'][data-dsh-workspace-orientation='horizontal'] [data-dockkit-split] > [data-dockkit-host='dock'][data-dsh-workspace-slot='1'] { grid-column: 3 !important; grid-row: 1 !important; }
+  [data-dsh-workspaces='2'][data-dsh-workspace-orientation='vertical'] [data-dockkit-split] > [data-dockkit-host='dock'][data-dsh-workspace-slot='0'] { grid-column: 1 !important; grid-row: 1 !important; }
+  [data-dsh-workspaces='2'][data-dsh-workspace-orientation='vertical'] [data-dockkit-split] > [data-dockkit-host='dock'][data-dsh-workspace-slot='1'] { grid-column: 1 !important; grid-row: 3 !important; }
+  [data-dsh-workspaces='2'][data-dsh-workspace-orientation='horizontal'] [data-dockkit-split] > [data-dockkit-divider] { grid-column: 2 !important; grid-row: 1 !important; }
+  [data-dsh-workspaces='2'][data-dsh-workspace-orientation='vertical'] [data-dockkit-split] > [data-dockkit-divider] { grid-column: 1 !important; grid-row: 2 !important; }
   [data-dsh-workspaces='2'] [data-dockkit-split] > [data-dockkit-host='dock']:not([hidden]) { display: flex; min-width: 0; min-height: 0; }
   [data-dsh-workspaces='2'] [data-dockkit-host='dock'] > section { position: relative; display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; padding-top: 44px; box-sizing: border-box; }
   [data-dsh-workspaces='2'] [data-dockkit-host='dock'] [class*='tabHostHeader'] { display: none; }
@@ -36,6 +48,22 @@ export const MOBILE_WORKSPACES_CSS = `
   [data-dsh-workspaces] .dsh-workspace-status { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 32px); z-index: 100; pointer-events: none; color: var(--dsw-alias-label-primary); background: var(--dsw-alias-interactive-bg-hover); border-radius: 999px; padding: 6px 12px; text-align: center; font-size: 12px; }
   [data-dsh-workspaces] .dsh-workspace-status:empty { display: none; }
   [data-dsh-workspaces] .dsh-bubble-drag-ghost { position: fixed; z-index: 2147483001; pointer-events: none; margin: 0; transition: none; opacity: .95; }
+  /* The JS writes the measured title-bar bottom; 52px is the same value before the
+     bubble header has mounted, so the first frame cannot expose the float to the bar. */
+  [data-sidebar-right-panel] { --dsh-dockkit-float-top: 52px; }
+  /* Mobile form pre-sets pan-y on every surface; a vertical press on the float header
+     would become a scroll and Blink would cancel the pointer before it can move. */
+  [data-dsh-workspaces] [data-dockkit-float-grip], [data-dsh-workspaces] [data-dockkit-float-resize] { touch-action: none !important; }
+  [data-dsh-workspaces] [data-dockkit-float-grip] { min-height: 44px; }
+  [data-dsh-workspaces] [data-dockkit-float-grip] button { min-width: 44px; min-height: 44px; }
+  /* 20px was a hover-sized corner; touch needs a real target and a visible affordance. */
+  /* The conversation composer paints above the corner in DOM order; lift the grip so a
+     touch at the visible corner always starts the resize rather than focusing the input. */
+  [data-dsh-workspaces] [data-dockkit-float-resize] { width: 44px !important; height: 44px !important; z-index: 5 !important; }
+  [data-dsh-workspaces] [data-dockkit-float-resize]::after { opacity: .55; }
+  /* Navigation drawers are modal on the phone form; the fixed float layer must not
+     cover the session list or the back control the user is reaching for. */
+  [data-dsh-frame]:not([data-sidebar-collapsed]) [data-dockkit-float] { visibility: hidden !important; }
 }
 .dsh-workspace-drop-preview { position: fixed; z-index: 2147482999; pointer-events: none; box-sizing: border-box; border: 1.5px solid var(--dsw-alias-border-l2); border-radius: 12px; background: rgba(128,128,128,.12); color: var(--dsw-alias-label-primary); display: flex; align-items: center; justify-content: center; font-size: 13px; }
 @media (max-width: 1100px) { [data-dsh-bubble-panel][data-dsh-workspace-orientation='vertical'] [data-dsh-bubble-action][data-dsh-mode-proxy] { display: none; } }

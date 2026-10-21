@@ -16,11 +16,46 @@ import {
   planFloatTab, planOpenContent, planPlaceTab, planResizeSplit, planSettle, planSplitPane, planUnfloatPane,
   type PaneId, type TabId, type TabRecord, type LayoutOp, type LayoutState, type FloatRect, type SplitId,
 } from '@deepseek-ai/dsh-client-ui-dockkit'
-import { DIVIDER_HIT_SIZE, MobileWorkspaces, retainWorkspaceTypes, splitFraction } from '../src/client/mobile/mobile-workspaces.ts'
+import {
+  DIVIDER_HIT_SIZE, MobileWorkspaces, clampFloatRect, portraitWorkspace, retainWorkspaceTypes, splitFraction, tabCapability,
+} from '../src/client/mobile/mobile-workspaces.ts'
 
 const SESSION = 'workspace-session'
 const drafts = new Map<string, { text: string }>()
 const mounted: MobileWorkspaces[] = []
+
+describe('mobile float bounds and orientation', () => {
+  it('keeps the whole floating frame inside the panel below the title bar', () => {
+    expect(clampFloatRect({ x: -50, y: -20, width: 500, height: 800 }, { left: 0, top: 48, right: 360, bottom: 640 }))
+      .toEqual({ x: 8, y: 56, width: 344, height: 576 })
+  })
+
+  it('moves the origin back when the minimum frame no longer fits at the current edge', () => {
+    const rect = clampFloatRect({ x: 240, y: 290, width: 100, height: 100 }, { left: 0, top: 0, right: 260, bottom: 300 })
+    expect(rect).toEqual({ x: 32, y: 152, width: 220, height: 140 })
+  })
+
+  it('prefers the visible viewport over a stale screen orientation report', () => {
+    viewport(400, 800)
+    const screen = window.screen as Screen & { orientation?: unknown }
+    const original = Object.getOwnPropertyDescriptor(screen, 'orientation')
+    Object.defineProperty(screen, 'orientation', { configurable: true, value: { type: 'landscape-primary' } })
+    try {
+      expect(portraitWorkspace()).toBe(true)
+    } finally {
+      if (original === undefined) Reflect.deleteProperty(screen, 'orientation')
+      else Object.defineProperty(screen, 'orientation', original)
+    }
+  })
+
+  it('treats every built-in file preview kind as split and float capable', () => {
+    for (const kind of ['files', 'text', 'plan', 'changes-review', 'scheduleTask', 'open-with']) {
+      expect(tabCapability({ id: 'tab', kind, contentId: kind, title: kind } as TabRecord)).toEqual({ split: true, float: true })
+    }
+    expect(tabCapability({ id: 'display', kind: 'android-vdisplay', contentId: 'display', title: '虚拟屏' } as TabRecord))
+      .toEqual({ split: false, float: false })
+  })
+})
 
 describe('workspace divider fraction geometry', () => {
   it('uses one 20px hit track for both the accessible divider and the fraction math', () => {
@@ -300,6 +335,59 @@ describe('mobile workspace navigation over native Dockkit planners', () => {
     expect(Object.values(h.dock.getSnapshot().state.tabs).some(tab => tab.id === conversation)).toBe(true)
     expect(Object.values(h.dock.getSnapshot().state.tabs).some(tab => tab.id === secondBrowser)).toBe(true)
     expect(Object.values(h.dock.getSnapshot().state.tabs).some(tab => tab.id === display)).toBe(true)
+    h.workspaces.detach()
+  })
+
+  it('lets a file preview tab join a split and then become the small window', async () => {
+    viewport()
+    const h = makeHarness()
+    const first = Object.keys(h.dock.getSnapshot().state.tabs)[0] as TabId
+    const files = h.open('files', 'files:workspace', '文件')
+    await h.flush()
+    h.dock.focusTab(first)
+    await h.flush()
+
+    expect(h.workspaces.split()).toBe(true)
+    await h.flush()
+    const filesButton = [...h.panel.querySelectorAll<HTMLButtonElement>('[data-dsh-workspace-picker] button')]
+      .find(button => button.textContent === '文件')
+    expect(filesButton?.disabled).toBe(false)
+    filesButton?.click()
+    await h.flush()
+    expect(h.panel.querySelector('[data-dsh-workspace-choosing]')).toBeNull()
+    expect(h.panel.querySelectorAll('[data-dsh-workspace-slot]').length).toBeGreaterThan(0)
+
+    h.dock.focusTab(files)
+    await h.flush()
+    expect(h.workspaces.float()).toBe(true)
+    await h.flush()
+    const floated = Object.values(h.dock.getSnapshot().state.nodes)
+      .find(node => node.kind === 'pane' && node.host === 'float')
+    expect(floated?.kind === 'pane' ? floated.tabs : []).toContain(files)
+    h.workspaces.detach()
+  })
+
+  it('drops the split slot markers when the layout collapses to one pane', async () => {
+    viewport()
+    const h = makeHarness()
+    const first = Object.keys(h.dock.getSnapshot().state.tabs)[0] as TabId
+    const second = h.open('terminal', 'terminal:slot', '终端')
+    await h.flush()
+    expect(h.workspaces.split()).toBe(true)
+    await h.flush()
+    expect(h.grid.querySelectorAll('[data-dsh-workspace-slot]').length).toBeGreaterThan(0)
+
+    const state = h.dock.getSnapshot().state
+    const root = state.nodes[state.rootId]
+    const side = root.kind === 'split'
+      ? root.children.map(id => state.nodes[id]).find(node => node.kind === 'pane' && !node.tabs.includes(first))
+      : undefined
+    expect(side?.kind).toBe('pane')
+    h.dock.placeTab(second, side!.kind === 'pane' ? side!.id : first, 999999)
+    await h.flush()
+    expect(h.workspaces.single(first)).toBe(true)
+    await h.flush()
+    expect(h.grid.querySelectorAll('[data-dsh-workspace-slot]')).toHaveLength(0)
     h.workspaces.detach()
   })
 

@@ -1,4 +1,5 @@
 /** Versioned Android presentation over the existing Sidebar store. Never reparent a tab body. */
+import { FLOAT_MIN_SIZE } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type { LayoutState, PaneId, PaneNode, TabId, TabRecord, FloatRect, SplitId } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 
@@ -9,13 +10,24 @@ export const DRAG_DWELL_MS = 150
 export const DIVIDER_HIT_SIZE = 20
 export interface TabCapability { readonly split: boolean; readonly float: boolean; readonly nativeSurface?: 'browser' }
 const NONE: TabCapability = { split: false, float: false }
-/** Explicit opt-in: native viewers and unknown third-party types keep their own lifecycle. */
+/**
+ * Explicit opt-in: dedicated native surfaces and unknown third-party types keep their own
+ * lifecycle. File previews are the right column's primary content on phones, so every
+ * built-in DOM-backed tab type must stay eligible; otherwise 分栏/小窗 refuse precisely
+ * where the user needs them.
+ */
 export const TAB_CAPABILITIES: Readonly<Record<string, TabCapability>> = {
   conversation: { split: true, float: true },
   subagentchat: { split: true, float: true },
   terminal: { split: true, float: true },
   browser: { split: true, float: true, nativeSurface: 'browser' },
   'android-browser': { split: true, float: true, nativeSurface: 'browser' },
+  files: { split: true, float: true },
+  text: { split: true, float: true },
+  plan: { split: true, float: true },
+  'changes-review': { split: true, float: true },
+  scheduleTask: { split: true, float: true },
+  'open-with': { split: true, float: true },
   'android-vdisplay': NONE,
 }
 export const tabCapability = (tab: TabRecord): TabCapability => TAB_CAPABILITIES[tab.kind] ?? NONE
@@ -23,14 +35,45 @@ export function compatibleTabs(a: TabRecord, b: TabRecord): boolean {
   return a.id !== b.id && a.contentId !== b.contentId && tabCapability(a).split && tabCapability(b).split
     && !(tabCapability(a).nativeSurface === 'browser' && tabCapability(b).nativeSurface === 'browser')
 }
+/**
+ * The viewport is the layout truth here. Android WebViews can report the display's natural
+ * orientation through `screen.orientation`, which turned a portrait phone split into two
+ * side-by-side columns; the visible aspect ratio cannot disagree with the grid we paint.
+ */
 export function portraitWorkspace(): boolean {
-  const orientation = window.screen.orientation?.type
-  return orientation ? orientation.startsWith('portrait') : window.innerHeight >= window.innerWidth
+  const width = document.documentElement.clientWidth || window.innerWidth
+  const height = document.documentElement.clientHeight || window.innerHeight
+  return height >= width
 }
 export function splitFraction(position: number, extent: number, minimum = 128): number {
   const available = Math.max(1, extent - DIVIDER_HIT_SIZE)
   const min = Math.min(.45, minimum / available)
   return Math.max(min, Math.min(1 - min, (position - DIVIDER_HIT_SIZE / 2) / available))
+}
+
+/** The viewport-relative box a floating pane must stay inside. */
+export interface FloatBounds { readonly left: number; readonly top: number; readonly right: number; readonly bottom: number }
+
+/**
+ * Clamp a float to the usable sidebar area. The dockkit model stores viewport coordinates
+ * and its own move/resize gestures do not bound them, so a phone drag can leave the header
+ * under the top bar or push the corner grip off-screen. Keep the whole frame inside the
+ * bounds, including the minimum size: when the origin no longer leaves room, move it back
+ * instead of shrinking below what the header controls need.
+ */
+export function clampFloatRect(rect: FloatRect, bounds: FloatBounds, gap = 8): FloatRect {
+  const availableWidth = Math.max(FLOAT_MIN_SIZE.width, bounds.right - bounds.left - gap * 2)
+  const availableHeight = Math.max(FLOAT_MIN_SIZE.height, bounds.bottom - bounds.top - gap * 2)
+  const width = Math.min(Math.max(FLOAT_MIN_SIZE.width, rect.width), availableWidth)
+  const height = Math.min(Math.max(FLOAT_MIN_SIZE.height, rect.height), availableHeight)
+  const minX = bounds.left + gap, maxX = bounds.right - gap - width
+  const minY = bounds.top + gap, maxY = bounds.bottom - gap - height
+  return {
+    x: maxX >= minX ? Math.min(Math.max(rect.x, minX), maxX) : minX,
+    y: maxY >= minY ? Math.min(Math.max(rect.y, minY), maxY) : minY,
+    width,
+    height,
+  }
 }
 interface Actions {
   focusTab(session: SessionId, tab: TabId): void
@@ -41,6 +84,9 @@ interface Actions {
   floatTab(session: SessionId, tab: TabId, rect: FloatRect): void
   unfloatPane(session: SessionId, pane: PaneId): void
   resizeSplit(session: SessionId, split: SplitId, sizes: readonly number[]): void
+  /** Present in the 0.2.1 store; optional here so older hosts and fixtures fail closed. */
+  moveFloat?(session: SessionId, pane: PaneId, x: number, y: number): void
+  resizeFloat?(session: SessionId, pane: PaneId, rect: FloatRect): void
 }
 interface SurfaceStore {
   getSnapshot(): { bySession: Record<string, { layout: LayoutState }> }
@@ -84,8 +130,11 @@ export class MobileWorkspaces implements WorkspaceNavigation {
   private previewNew = false
   private previewKey = ''
   private previewElement: HTMLElement | undefined
-  private originals = new Map<HTMLElement, string | null>()
   private headers = new Map<PaneId, HTMLElement>()
+  /** Stores whose float actions already carry the viewport clamp. */
+  private readonly bounded = new WeakSet<object>()
+  /** Float panes already clamped in this viewport epoch (reset on rotation/resize). */
+  private readonly clamped = new Set<string>()
   private gesture: { pointer: number; kind: 'divider' | 'swap'; pane?: PaneId; startX: number; startY: number; moved: boolean } | undefined
   private pointerOwner: HTMLElement | undefined
   private snapshotAtPress: LayoutState | undefined
@@ -145,18 +194,18 @@ export class MobileWorkspaces implements WorkspaceNavigation {
   readonly refresh = (): void => {
     if (this.attached && !this.frame) this.frame = requestAnimationFrame(() => { this.frame = 0; this.sync() })
   }
-  private remember(element: HTMLElement): void {
-    if (!this.originals.has(element)) this.originals.set(element, element.getAttribute('style'))
-  }
   private unmount(): void {
     this.onCancel(); this.unsubscribe?.(); this.unsubscribe = undefined
     this.clearPreview()
-    for (const [node, style] of this.originals) { if (style === null) node.removeAttribute('style'); else node.setAttribute('style', style) }
-    this.originals.clear()
     this.headers.forEach(node => node.remove()); this.headers.clear()
     this.panel?.querySelectorAll('[data-dsh-workspace-picker]').forEach(node => node.remove())
     this.panel?.querySelectorAll('[data-dsh-workspace-choosing]').forEach(node => node.removeAttribute('data-dsh-workspace-choosing'))
+    this.panel?.querySelectorAll('[data-dsh-workspace-slot]').forEach(node => node.removeAttribute('data-dsh-workspace-slot'))
     this.panel?.removeAttribute('data-dsh-workspaces'); this.panel?.removeAttribute('data-dsh-workspace-orientation')
+    this.panel?.style.removeProperty('--dsh-dockkit-float-top')
+    this.clamped.clear()
+    if (this.resizeTimer !== undefined) clearTimeout(this.resizeTimer)
+    this.resizeTimer = undefined
     if (this.statusTimer !== undefined) clearTimeout(this.statusTimer)
     this.statusTimer = undefined
     this.status?.remove(); this.status = undefined
@@ -167,6 +216,65 @@ export class MobileWorkspaces implements WorkspaceNavigation {
     if (this.statusTimer !== undefined) clearTimeout(this.statusTimer)
     this.statusTimer = window.setTimeout(() => { if (this.status) this.status.textContent = ''; this.statusTimer = undefined }, 4000)
     return false
+  }
+  /** The usable area floats may occupy: the panel, below its pinned title bar. */
+  private floatBounds(): FloatBounds {
+    const rect = this.panel?.getBoundingClientRect()
+    const left = Math.max(0, rect?.left ?? 0)
+    const top = Math.max(0, rect?.top ?? 0)
+    const header = this.panel?.querySelector<HTMLElement>('.dsh-bubble-header')?.getBoundingClientRect().bottom
+    return {
+      left,
+      top: Math.max(top, header ?? top + 48),
+      right: Math.min(window.innerWidth, rect?.right ?? window.innerWidth),
+      bottom: Math.min(window.innerHeight, rect?.bottom ?? window.innerHeight),
+    }
+  }
+  /**
+   * The dockkit intents call the store's float actions directly, so a wrapper local to
+   * `float()` cannot bound header drags or corner resizes. Re-wrap the shared action object
+   * once; the upstream intents look the methods up at call time, and the store is per session.
+   */
+  private ensureFloatBounds(store: SurfaceStore): void {
+    const actions = store.actions
+    if (this.bounded.has(actions)) return
+    this.bounded.add(actions)
+    const mobile = (): boolean => this.panel !== undefined && window.innerWidth <= WORKSPACE_MAX_WIDTH
+    const bound = (rect: FloatRect): FloatRect => clampFloatRect(rect, this.floatBounds())
+    const floatTab = actions.floatTab
+    actions.floatTab = (session, tab, rect) => floatTab(session, tab, mobile() ? bound(rect) : rect)
+    const moveFloat = actions.moveFloat
+    if (moveFloat !== undefined) {
+      actions.moveFloat = (session, pane, x, y) => {
+        if (!mobile()) { moveFloat(session, pane, x, y); return }
+        const node = store.getSnapshot().bySession[session]?.layout.nodes[pane]
+        const rect = node?.kind === 'pane' ? node.rect : undefined
+        if (rect === undefined) { moveFloat(session, pane, x, y); return }
+        const clamped = bound({ ...rect, x, y })
+        moveFloat(session, pane, clamped.x, clamped.y)
+      }
+    }
+    const resizeFloat = actions.resizeFloat
+    if (resizeFloat !== undefined) {
+      actions.resizeFloat = (session, pane, rect) => resizeFloat(session, pane, mobile() ? bound(rect) : rect)
+    }
+  }
+  /** Persisted or pre-fix floats may sit outside today's viewport; settle them once per epoch. */
+  private clampFloats(layout: LayoutState, session: SessionId): void {
+    const store = this.store()
+    if (!store) return
+    for (const paneId of layout.floats) {
+      const key = session + ':' + paneId
+      if (this.clamped.has(key)) continue
+      const node = layout.nodes[paneId]
+      if (node?.kind !== 'pane' || node.rect === undefined) continue
+      this.clamped.add(key)
+      const clamped = clampFloatRect(node.rect, this.floatBounds())
+      const moved = Math.abs(clamped.x - node.rect.x) > .5 || Math.abs(clamped.y - node.rect.y) > .5
+      const sized = Math.abs(clamped.width - node.rect.width) > .5 || Math.abs(clamped.height - node.rect.height) > .5
+      if (moved) store.actions.moveFloat?.(session, paneId, clamped.x, clamped.y)
+      if (sized) store.actions.resizeFloat?.(session, paneId, clamped)
+    }
   }
   private sync(): void {
     const session = this.owner.mounted.getSnapshot()
@@ -183,6 +291,14 @@ export class MobileWorkspaces implements WorkspaceNavigation {
     }
     const layout = this.layout(), panes = this.panes(layout)
     if (!panel || !layout || !session || panes.length === 0) return
+    const store = this.store()
+    if (store) this.ensureFloatBounds(store)
+    this.clampFloats(layout, session)
+    // The pinned title bar is part of the app surface: a float may never slide under it.
+    const floatTop = Math.round(this.floatBounds().top + 4)
+    if (panel.style.getPropertyValue('--dsh-dockkit-float-top') !== floatTop + 'px') {
+      panel.style.setProperty('--dsh-dockkit-float-top', floatTop + 'px')
+    }
     this.overlay?.(panel.getAttribute('data-sidebar-right-panel') === 'fullscreen')
     const active = this.activeId
     if (active && !this.hiddenTabs.has(active)) {
@@ -192,30 +308,31 @@ export class MobileWorkspaces implements WorkspaceNavigation {
     panel.setAttribute('data-dsh-workspaces', String(panes.length))
     const vertical = portraitWorkspace()
     panel.setAttribute('data-dsh-workspace-orientation', vertical ? 'vertical' : 'horizontal')
-    // The native model remains a supported row split; only physical tracks change.
+    // The native model remains a supported row split; only physical tracks change. Tracks
+    // and cell slots are CSS custom properties/attributes, never inline style writes:
+    // React owns the element's style, and a written inline grid must not outlive the split
+    // (that left the collapsed single pane half-height with two tab bodies stacked).
     const grid = panel.querySelector<HTMLElement>('[data-dockkit-split]')
     if (grid && panes.length === 2) {
-      this.remember(grid)
       grid.style.setProperty('--dsh-divider-hit', DIVIDER_HIT_SIZE + 'px')
       const root = layout.nodes[layout.rootId]
       const sizes = root.kind === 'split' ? root.sizes : [.5, .5]
       this.paintRatio(grid, sizes[0] / (sizes[0] + sizes[1]), vertical)
       for (const cell of grid.querySelectorAll<HTMLElement>(':scope > [data-dockkit-host="dock"]')) {
-        this.remember(cell)
         const logical = Number(cell.getAttribute('data-dockkit-column'))
         const physical = this.swapped.has(session) ? 1 - logical : logical
-        cell.style.gridColumn = vertical ? '1' : String(physical * 2 + 1)
-        cell.style.gridRow = vertical ? String(physical * 2 + 1) : '1'
+        cell.setAttribute('data-dsh-workspace-slot', String(physical))
       }
       const divider = grid.querySelector<HTMLElement>(':scope > [data-dockkit-divider]')
       if (divider) {
-        this.remember(divider); divider.style.gridColumn = vertical ? '1' : '2'; divider.style.gridRow = vertical ? '2' : '1'
         divider.setAttribute('role', 'separator'); divider.setAttribute('aria-orientation', vertical ? 'horizontal' : 'vertical')
         const bounds = grid.getBoundingClientRect(), extent = vertical ? bounds.height : bounds.width
         divider.setAttribute('aria-valuenow', String(Math.round(sizes[0] * 100))); divider.setAttribute('aria-valuemin', String(Math.round(splitFraction(0, extent) * 100))); divider.setAttribute('aria-valuemax', String(Math.round(splitFraction(extent, extent) * 100)))
         divider.tabIndex = 0; divider.setAttribute('aria-label', '调整工作区比例；双击恢复均分')
         divider.ondblclick = () => { const current = this.layout(); if (current && current.nodes[current.rootId].kind === 'split') this.store()?.actions.resizeSplit(session, current.rootId as SplitId, [.5, .5]) }
       }
+    } else {
+      for (const cell of panel.querySelectorAll<HTMLElement>('[data-dsh-workspace-slot]')) cell.removeAttribute('data-dsh-workspace-slot')
     }
     const live = new Set(panes.map(pane => pane.id))
     for (const id of this.picker.keys()) if (!live.has(id)) this.picker.delete(id)
@@ -246,8 +363,8 @@ export class MobileWorkspaces implements WorkspaceNavigation {
   }
   private paintRatio(grid: HTMLElement, ratio: number, vertical: boolean): void {
     const physical = this.session && this.swapped.has(this.session) ? 1 - ratio : ratio
-    grid.style.gridTemplateColumns = vertical ? 'minmax(0, 1fr)' : `minmax(0, ${physical}fr) ${DIVIDER_HIT_SIZE}px minmax(0, ${1 - physical}fr)`
-    grid.style.gridTemplateRows = vertical ? `minmax(0, ${physical}fr) ${DIVIDER_HIT_SIZE}px minmax(0, ${1 - physical}fr)` : 'minmax(0, 1fr)'
+    grid.style.setProperty('--dsh-workspace-columns', vertical ? 'minmax(0, 1fr)' : `minmax(0, ${physical}fr) ${DIVIDER_HIT_SIZE}px minmax(0, ${1 - physical}fr)`)
+    grid.style.setProperty('--dsh-workspace-rows', vertical ? `minmax(0, ${physical}fr) ${DIVIDER_HIT_SIZE}px minmax(0, ${1 - physical}fr)` : 'minmax(0, 1fr)')
   }
   private nativeSurfaceConflict(tabId: TabId, layout: LayoutState): boolean {
     return !!tabCapability(layout.tabs[tabId]).nativeSurface && layout.floats.some(id => {
@@ -354,8 +471,10 @@ export class MobileWorkspaces implements WorkspaceNavigation {
     const recent = (this.history.get(session) ?? []).find(candidate => candidate !== id && layout.tabs[candidate]
       && !this.hiddenTabs.has(candidate) && this.panes(layout).some(pane => pane.tabs.includes(candidate))
       && !(tabCapability(layout.tabs[id]).nativeSurface && tabCapability(layout.tabs[candidate]).nativeSurface))
-    const width = Math.min(420, window.innerWidth - 24), height = Math.min(480, window.innerHeight - 96)
-    store.actions.floatTab(session, id, { x: 12, y: 60, width, height })
+    const bounds = this.floatBounds()
+    const width = Math.min(420, bounds.right - bounds.left - 24)
+    const height = Math.min(480, bounds.bottom - bounds.top - 24)
+    store.actions.floatTab(session, id, clampFloatRect({ x: bounds.left + 12, y: bounds.top + 12, width, height }, bounds))
     if (recent) store.actions.focusTab(session, recent)
     else {
       const after = this.layout()
@@ -482,7 +601,21 @@ export class MobileWorkspaces implements WorkspaceNavigation {
     const ratio = event.key === 'Home' ? .5 : splitFraction(proposed * (extent - DIVIDER_HIT_SIZE) + DIVIDER_HIT_SIZE / 2, extent)
     this.store()?.actions.resizeSplit(this.session, root.id, [ratio, 1 - ratio])
   }
-  private readonly onResize = (): void => { if (this.gesture) this.onCancel(); this.refresh() }
+  private resizeTimer: number | undefined
+  private readonly onResize = (): void => {
+    this.clamped.clear()
+    if (this.gesture) this.onCancel()
+    this.refresh()
+    // The rotated layout can settle after the resize event itself (the panel may still report
+    // its portrait rect on the first sync). Clamp again against the settled panel so a float
+    // does not stay at the old side of the screen.
+    if (this.resizeTimer !== undefined) clearTimeout(this.resizeTimer)
+    this.resizeTimer = window.setTimeout(() => {
+      this.resizeTimer = undefined
+      this.clamped.clear()
+      this.refresh()
+    }, 250)
+  }
   private readonly onFocus = (event: FocusEvent): void => {
     if (!(event.target instanceof HTMLElement) || !this.panel?.contains(event.target)) return
     const section = event.target.closest<HTMLElement>('[data-dockkit-pane]'), pane = section?.dataset.dockkitPane as PaneId | undefined
