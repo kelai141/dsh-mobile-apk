@@ -97,6 +97,31 @@ describe('narrow navigation over native tabs', () => {
     expect(select('chat').getAttribute('aria-pressed')).toBe('true')
     expect(select('chat').querySelectorAll('svg')).toHaveLength(1)
   })
+  it('0.14.9：收起后面板里的气泡头保持挂载（滑出过渡由 CSS 播放），不会被瞬间移除', () => {
+    expect(panel.querySelector('.dsh-bubble-header')).not.toBeNull()
+    panel.querySelector<HTMLButtonElement>('[data-sidebar-right-toggle]')!.click()
+    vi.advanceTimersByTime(20)
+    expect(panel.hasAttribute('data-sidebar-right-open')).toBe(false)
+    // 收起态不卸载：若移除节点，CSS 的 translateX 收起过渡无从播放，顶栏就是瞬移消失。
+    expect(panel.querySelector('.dsh-bubble-header')).not.toBeNull()
+    expect(panel.querySelectorAll('[data-dsh-sidebar-bubbles-toggle]')).toHaveLength(1)
+  })
+  it('0.14.9：全屏代理优先直调装配方通道；未提供时才回退 original.click()', () => {
+    const fallback = vi.fn()
+    panel.querySelector('[data-sidebar-right-mode]')!.addEventListener('click', fallback)
+    const proxy = () => panel.querySelector<HTMLButtonElement>('.dsh-bubble-control[data-dsh-mode-proxy]')!
+    // 缺省（无直调通道）：保留旧回退，行为不回归。
+    proxy().click()
+    expect(fallback).toHaveBeenCalledTimes(1)
+    const direct = vi.fn()
+    bubbles.detach()
+    bubbles = new SidebarBubbles({ session: () => current, tabs: () => records, reorder, t, toggleFullscreen: direct })
+    bubbles.attach()
+    proxy().click()
+    expect(direct).toHaveBeenCalledTimes(1)
+    // 有直调通道时不再经过会空转的 original.click()。
+    expect(fallback).toHaveBeenCalledTimes(1)
+  })
   it('switches through the original tab and collapses without replacing bodies or inputs', async () => {
     const body = panel.querySelector('[data-tab-body]'), terminal = panel.querySelector('[data-terminal]')
     const input = panel.querySelector('input')!; input.value = 'unsent draft'

@@ -482,6 +482,12 @@ export function apply(ctx: ClientContext): void {
         session: () => sidebar.mounted.getSnapshot(),
         tabs: session => sidebar.tabsIn(session),
         reorder: (session, tab, before) => sidebar.reorderIn(session, tab, before),
+        // 顶栏全屏切换直调服务：代理按钮在面板内，上游按 activeElement 解析目标会判为
+        // 过期标记而空转（0.14.9 实机验证）。null 让上游取挂载会话的活动停靠窗格。
+        toggleFullscreen: () => {
+          const target = sidebar.commandTarget(null)
+          if (target !== undefined) sidebar.toggleFullscreen(target)
+        },
         t,
       })
       bubbles.attach()

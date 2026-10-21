@@ -17,6 +17,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { MOBILE_FORM_CSS } from '../src/client/mobile/mobile-form.css.ts'
+import { SidebarDragPreview } from '../src/client/mobile/sidebar-drag-preview.ts'
 
 /** 剥掉注释：断言不能被散文满足，也不能被散文击破。 */
 const code = (source: string): string =>
@@ -36,6 +37,13 @@ const DOCKKIT_PARTS = [
   '[data-dockkit-divider]',
 ]
 
+/**
+ * 0.14.9：气泡头（顶栏）也是滑动元素。它挂在面板根节点下（sidebar-bubbles.ts 的
+ * panel.append），不在 dockkit 子树里 —— 不纳入这批落点时，拖动期间内容跟手而顶栏钉在原地，
+ * 松手提交后顶栏才随收起态瞬移消失（用户报告的原话）。
+ */
+const BUBBLE_CHROME_PART = '> [data-dsh-bubble-nav]'
+
 /** 上游右栏本体的稳定属性；两处都必须以它为前缀限定，避免误伤浮动窗与其他面板。 */
 const PANEL_SELECTOR = '[data-sidebar-right-panel="fullscreen"]'
 
@@ -45,6 +53,12 @@ describe('0.14.7 跟随位移的落点契约', () => {
     for (const part of DOCKKIT_PARTS) {
       expect(previewSource).toContain(part)
     }
+  })
+
+  it('0.14.9：气泡头两处都覆盖（写位移侧按模板串片段核，关过渡侧核完整组合）', () => {
+    // preview 侧是 `${RIGHT_PANEL_SELECTOR} > [data-dsh-bubble-nav]`，源码里没有拼好的整串。
+    expect(previewSource).toContain(BUBBLE_CHROME_PART)
+    expect(formCss).toContain('html[data-dsh-drawer-dragging] ' + PANEL_SELECTOR + ' ' + BUBBLE_CHROME_PART)
   })
 
   it('关过渡侧（mobile-form.css.ts）覆盖同一批元素 —— 只关右栏本体是缺陷形态', () => {
@@ -77,5 +91,32 @@ describe('0.14.7 跟随位移的落点契约', () => {
     const broken = formCss.replace(/\[data-dockkit-host="dock"\]/g, '')
     expect(broken).not.toContain(
       'html[data-dsh-drawer-dragging] ' + PANEL_SELECTOR + ' ' + DOCKKIT_PARTS[0]!)
+  })
+})
+
+describe('0.14.9 跟手位移落点行为（jsdom）', () => {
+  it('右栏按像素行程统一换算：气泡头与 dock 子元素同帧同值；左抽屉仍按自身宽度百分比', () => {
+    document.body.innerHTML = [
+      '<div data-sidebar-right-panel="fullscreen">',
+      '<div data-dockkit-host="dock"></div>',
+      '<div class="dsh-bubble-header" data-dsh-bubble-nav></div>',
+      '</div>',
+      '<div data-dsh-frame><div class="sidebarCol-x"></div></div>',
+    ].join('')
+    const preview = new SidebarDragPreview()
+    preview.previewRight(0.5)
+    const host = document.querySelector<HTMLElement>('[data-dockkit-host]')!
+    const header = document.querySelector<HTMLElement>('.dsh-bubble-header')!
+    // 半程位移必须是像素值（split 下百分比会随元素自身宽度漂移），且两处逐字一致。
+    expect(host.style.transform).toMatch(/^translateX\(\d+(\.\d+)?px\)$/)
+    expect(header.style.transform).toBe(host.style.transform)
+    expect(header.style.visibility).toBe('visible')
+    preview.endPreview()
+    expect(host.style.transform).toBe('')
+    expect(header.style.transform).toBe('')
+    expect(header.style.visibility).toBe('')
+    preview.previewLeft(0.5)
+    const drawer = document.querySelector<HTMLElement>('[data-dsh-frame] > .sidebarCol-x')!
+    expect(drawer.style.transform).toBe('translateX(-50%)')
   })
 })

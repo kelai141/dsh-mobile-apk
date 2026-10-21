@@ -5,7 +5,14 @@ import type { TranslateNS } from '@deepseek-ai/dsh-client-locale/client'
 import { WORKSPACE_MAX_WIDTH, DRAG_SAFE_PX, DRAG_DWELL_MS, type WorkspaceNavigation } from './mobile-workspaces.ts'
 import type {} from './sidebar-bubbles.locales.ts'
 
-const PANEL = '[data-sidebar-right-panel][data-sidebar-right-open]:not([aria-hidden="true"])'
+/**
+ * 0.14.9：面板收起时也保持挂载。悬浮气泡头（.dsh-bubble-header）现在随内容一起滑入滑出
+ * （sidebar-bubbles.css.ts 的 translateX 收起态），若仍按「打开才挂载」，收起提交的一瞬间
+ * 节点就被移除，CSS 过渡无从播放 —— 用户看到的就是顶栏瞬移消失。面板本体在上游收起时
+ * 本来就不卸载（dock 内容整体平移到右边缘外），所以挂载生命周期改跟随面板节点本身；
+ * 交互入口仍由 current() 按 data-sidebar-right-open 把关。
+ */
+const PANEL = '[data-sidebar-right-panel]'
 const STRIP = '[data-dockkit-host="dock"] [data-dockkit-strip]'
 const OWN = '[data-dsh-bubble-nav]'
 const PRESS_MS = 400
@@ -22,6 +29,15 @@ export interface SidebarBubblesOptions {
   readonly reorder: BubbleReorderFace['reorderIn']
   readonly workspaces?: WorkspaceNavigation
   readonly t: TranslateNS<'androidSidebarBubbles'>
+  /**
+   * 顶栏「全屏 / 退出全屏」的直调通道（0.14.9）。
+   *
+   * 不能走 `original.click()`：上游 `toggleFullscreen` 用 `document.activeElement` 解析目标，
+   * 而代理按钮挂在面板内（`[data-sidebar-right-session]` 之下），上游把这种"面板内但不在
+   * 窗格里"的元素判为过期侧栏标记、直接返回 undefined —— 代理点击永远空转（实机验证：
+   * 横屏停靠列点「全屏」无任何反应）。装配方用服务 API 直调，目标取挂载会话的活动停靠窗格。
+   */
+  readonly toggleFullscreen?: () => void
 }
 interface BubbleTab {
   record: TabRecord
@@ -390,7 +406,9 @@ export class SidebarBubbles {
       proxy.addEventListener('click', () => {
         if (!this.current() || !original.isConnected) return
         this.setOpen(false)
-        original.click()
+        // 全屏切换必须直调服务：走原按钮 click() 会因目标解析失败而空转（见选项注释）。
+        if (chrome && original.matches('[data-sidebar-right-mode]') && this.options.toggleFullscreen) this.options.toggleFullscreen()
+        else original.click()
       })
       if (chrome) this.header.insertBefore(proxy, this.toggle)
       else this.actions.append(proxy)

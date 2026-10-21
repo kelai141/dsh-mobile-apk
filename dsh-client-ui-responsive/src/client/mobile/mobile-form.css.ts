@@ -131,14 +131,17 @@ export const MOBILE_FORM_CSS: string = `
        （ui-sidebar-right 的 lib 内联样式：panel [data-dockkit-host=dock|empty|divider]
        → translateX(var(--dsh-sidebar-width)) + visibility 过渡）。只关右栏本体等于没关，
        右栏拖动期间仍吃那 200ms，表现为"跟不上手"。
-     这三个选择器与 sidebar-drag-preview.ts 的 RIGHT_SLIDE_SELECTOR 逐字对齐：那里写内联
+     这些选择器与 sidebar-drag-preview.ts 的 RIGHT_SLIDE_SELECTOR 逐字对齐：那里写内联
      位移，这里关过渡，两边必须同一批元素，否则又会漂移成"位移写了但过渡没关"。
+     气泡头（.dsh-bubble-header 及其弹层/遮罩，带 data-dsh-bubble-nav 的房间直属子节点）
+     也在名单里：它现在同样跟手平移，若只有它保留 200ms 过渡，拖动时顶栏会慢半拍。
      设置面板打开时左抽屉被钉成 transform:none（上方那条规则），拖动预览的位移因此
      被内联样式覆盖 —— 这是有意的：设置态不参与抽屉跟手。 */
   html[data-dsh-drawer-dragging] [data-dsh-frame] > [class*='sidebarCol'],
   html[data-dsh-drawer-dragging] [data-sidebar-right-panel='fullscreen'] [data-dockkit-host='dock'],
   html[data-dsh-drawer-dragging] [data-sidebar-right-panel='fullscreen'] [data-dockkit-empty],
-  html[data-dsh-drawer-dragging] [data-sidebar-right-panel='fullscreen'] [data-dockkit-divider] {
+  html[data-dsh-drawer-dragging] [data-sidebar-right-panel='fullscreen'] [data-dockkit-divider],
+  html[data-dsh-drawer-dragging] [data-sidebar-right-panel='fullscreen'] > [data-dsh-bubble-nav] {
     transition: none !important;
   }
 }

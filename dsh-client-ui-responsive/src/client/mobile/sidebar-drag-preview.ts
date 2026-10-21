@@ -27,11 +27,16 @@ const RIGHT_PANEL_SELECTOR = '[data-sidebar-right-panel="fullscreen"]'
  * 与规则顺序打架；并且不给出本体加 transform —— 本体一旦成为 transformed ancestor 就会变成
  * 内部固定定位子元素（浮动面板、指针）的 containing block，把它们一起带走。
  * 只取 host='dock'：float 模式是浮动窗，上游也从不给它位移。
+ *
+ * 0.14.9：移动端气泡头（sidebar-bubbles.ts 的 .dsh-bubble-header，含弹层与遮罩）直接挂在
+ * 面板根节点上，不在 dockkit 子树里 —— 只平移 host 时内容跟手、顶栏不动，松手提交后顶栏
+ * 才随收起态瞬移消失。它必须和 host 同一批落点、同一帧位移。
  */
 const RIGHT_SLIDE_SELECTOR = [
   `${RIGHT_PANEL_SELECTOR} [data-dockkit-host='dock']`,
   `${RIGHT_PANEL_SELECTOR} [data-dockkit-empty]`,
   `${RIGHT_PANEL_SELECTOR} [data-dockkit-divider]`,
+  `${RIGHT_PANEL_SELECTOR} > [data-dsh-bubble-nav]`,
 ].join(', ')
 
 /** 取一个面板的滑动元素：左抽屉只有一个，右栏是上面那批。 */
@@ -43,6 +48,15 @@ function slideTargets(side: 'left' | 'right'): HTMLElement[] {
   return Array.from(document.querySelectorAll<HTMLElement>(RIGHT_SLIDE_SELECTOR))
 }
 
+/** 右栏收起的行程：与上游 `translateX(var(--dsh-sidebar-width))` 同一参照（fullscreen 为
+ * 面板宽度 = 100vw，push 为列宽）。不能再用百分比：split 下每个 host 只有面板一半宽、
+ * 气泡头更是与 host 同宽不同，百分比会让同一帧里各元素位移各不相同。 */
+function rightSlideDistance(): number {
+  const panel = document.querySelector<HTMLElement>(RIGHT_PANEL_SELECTOR)
+  const measured = panel?.getBoundingClientRect().width ?? 0
+  return measured > 0 ? measured : document.documentElement.clientWidth || window.innerWidth || 0
+}
+
 /**
  * 把一个面板的展开度写成内联位移。
  * @param progress - 0..1，1 = 完全展开。
@@ -50,14 +64,15 @@ function slideTargets(side: 'left' | 'right'): HTMLElement[] {
  */
 function paint(progress: number, side: 'left' | 'right'): void {
   const clamped = progress < 0 ? 0 : progress > 1 ? 1 : progress
-  // 位移一律向"收起方向"偏移一个自身宽度：左抽屉收起在 -100%，右栏在 +100%。
-  const offset = (1 - clamped) * 100
-  const transform = side === 'left' ? `translateX(-${offset}%)` : `translateX(${offset}%)`
+  // 左抽屉收起在 -100%（百分比参照自身宽度，即抽屉宽）。右栏按像素行程统一换算。
+  const transform = side === 'left'
+    ? `translateX(-${(1 - clamped) * 100}%)`
+    : `translateX(${(1 - clamped) * rightSlideDistance()}px)`
   for (const element of slideTargets(side)) {
     element.style.transform = transform
     // 右栏收起态是 visibility:hidden（上游规则），不翻回来的话向右侧拖动时它根本不可见，
     // 跟手就成了"看不见的位移"。拖动期间一律可见，松手后由 endPreview 交还 CSS：展开态
-    // 立即可见，收起态靠上游那条 200ms 延迟的 visibility 过渡正好滑出后再隐藏。
+    // 立即可见，收起态靠那条 200ms 延迟的 visibility 过渡正好滑出后再隐藏。
     if (side === 'right') element.style.visibility = 'visible'
   }
 }

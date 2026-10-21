@@ -4,13 +4,27 @@ export const SIDEBAR_BUBBLES_CSS = `
   [data-dsh-bubble-panel] [data-dsh-bubble-native] {
     visibility: hidden !important; min-height: 48px;
   }
-  [data-dsh-bubble-panel]:not([data-sidebar-right-open]) > [data-dsh-bubble-nav] { display: none; }
   [data-dsh-bubble-panel] [data-dsh-bubble-nav] { box-sizing: border-box; pointer-events: auto; }
   [data-dsh-bubble-panel] .dsh-bubble-header {
     position: absolute; left: 0; right: 0; z-index: 90; height: 48px;
     display: flex; align-items: center; gap: 2px; padding: 2px 8px;
     background: var(--dsw-specific-sidebar-fill); color: var(--dsw-alias-label-primary);
     border-bottom: 1px solid var(--dsw-alias-border-l2);
+  }
+  /* 0.14.9：顶栏随内容一起开合。收起目标位移与 dock 子元素同源
+     （translateX(var(--dsh-sidebar-width))），visibility 延迟到滑出后再隐藏；展开态
+     立即可见。拖动手势期间内联位移接管、过渡由 mobile-form.css.ts 的
+     data-dsh-drawer-dragging 关掉，松手后从手指位置平滑收敛。 */
+  [data-dsh-bubble-panel] > [data-dsh-bubble-nav].dsh-bubble-header {
+    transform: translateX(var(--dsh-sidebar-width));
+    visibility: hidden;
+    transition: transform var(--ds-transition-duration-slow) var(--ds-ease-in-out),
+                visibility 0s linear var(--ds-transition-duration-slow);
+  }
+  [data-dsh-bubble-panel][data-sidebar-right-open] > [data-dsh-bubble-nav].dsh-bubble-header {
+    transform: none;
+    visibility: visible;
+    transition: transform var(--ds-transition-duration-slow) var(--ds-ease-in-out);
   }
   [data-dsh-bubble-panel] .dsh-bubble-heading { min-width: 0; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 14px; }
   [data-dsh-bubble-panel] .dsh-bubble-heading [data-dockkit-tab-title] { max-width: 100%; }
@@ -152,6 +166,7 @@ export const SIDEBAR_BUBBLES_CSS = `
 }
 @media (prefers-reduced-motion: reduce) {
   [data-dsh-bubble-panel] .dsh-bubble-popover,
-  [data-dsh-bubble-panel] .dsh-bubble-row { transition: none !important; }
+  [data-dsh-bubble-panel] .dsh-bubble-row,
+  [data-dsh-bubble-panel] > [data-dsh-bubble-nav].dsh-bubble-header { transition: none !important; }
 }
 `
