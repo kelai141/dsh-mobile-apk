@@ -7,6 +7,7 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.RectF
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.widget.FrameLayout
 
@@ -48,13 +49,29 @@ internal class SplashToggle(private val context: Context) : FrameLayout(context)
     layoutParams = LayoutParams(dp(64), dp(48))
     background = DsUi.ripple(DsUi.roundRect(android.graphics.Color.TRANSPARENT, dp(24).toFloat()), context.getColor(R.color.ds_accent_soft))
     setOnClickListener {
+      android.util.Log.i(SplashOverlay.PROBE_TAG, "toggle click before checked=$isChecked enabled=$isEnabled")
       setChecked(!isChecked, notify = true)
+      android.util.Log.i(SplashOverlay.PROBE_TAG, "toggle click after checked=$isChecked onChanged=${onChanged != null}")
     }
+  }
+
+  override fun onTouchEvent(event: MotionEvent): Boolean {
+    if (event.actionMasked == MotionEvent.ACTION_DOWN || event.actionMasked == MotionEvent.ACTION_UP) {
+      android.util.Log.i(
+        SplashOverlay.PROBE_TAG,
+        "toggle touch action=${event.actionMasked} x=${event.x.toInt()} y=${event.y.toInt()} enabled=$isEnabled",
+      )
+    }
+    return super.onTouchEvent(event)
   }
 
   fun setChecked(value: Boolean, notify: Boolean) {
     val next = value
     val changed = next != isChecked
+    android.util.Log.i(
+      SplashOverlay.PROBE_TAG,
+      "setChecked next=$next changed=$changed notify=$notify onChanged=${onChanged != null}",
+    )
     isChecked = next
     refreshStateDescription()
     animator?.cancel()
@@ -105,18 +122,10 @@ internal class SplashToggle(private val context: Context) : FrameLayout(context)
     isClickable = true
   }
 
-  override fun drawableStateChanged() {
-    super.drawableStateChanged()
-    // Keep the drawn track in sync with the checked state when the platform restores
-    // saved state on a rebuilt Activity.
-    val viaState = (drawableState?.contains(android.R.attr.state_checked) == true)
-    if (viaState != isChecked) {
-      isChecked = viaState
-      progress = if (viaState) 1f else 0f
-      refreshStateDescription()
-      invalidate()
-    }
-  }
+  // 注意：不要从 drawableState 推导 isChecked。这个控件不是 Checkable，也没有把
+  // state_checked 写进 drawable state；按下时 ripple 改变 drawable state 会触发
+  // drawableStateChanged，若在那里把 isChecked 置回 false，每次点击都会从 false 变成
+  // true——开关就永远关不掉（0.14.9 真机实锤）。状态由 isChecked + onSaveInstanceState 管。
 
   override fun onSaveInstanceState(): android.os.Parcelable {
     val base = super.onSaveInstanceState()

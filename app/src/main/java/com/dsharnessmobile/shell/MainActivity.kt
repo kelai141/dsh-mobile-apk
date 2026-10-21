@@ -170,6 +170,7 @@ class MainActivity : ComponentActivity() {
     splashTimeout = null
     val overlay = splashOverlay ?: return
     if (!overlay.isActive) return
+    android.util.Log.i(SplashOverlay.PROBE_TAG, "finishSplash reason=$reason")
     overlay.dismiss(animate)
     LogCollector.log("dsh-splash", "video finished: " + reason)
   }
@@ -979,13 +980,21 @@ class MainActivity : ComponentActivity() {
   private fun installBackGate() {
     onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
       override fun handleOnBackStarted(backEvent: androidx.activity.BackEventCompat) {
+        // 开屏视频在播时，返回手势只用于关视频，不把管理页的返回动画卷进来。
+        if (splashOverlay?.isActive == true) return
         if (guideViewReady && guideView.visibility == View.VISIBLE) guideRenderer.management.beginBack()
       }
       override fun handleOnBackProgressed(backEvent: androidx.activity.BackEventCompat) {
+        if (splashOverlay?.isActive == true) return
         guideRenderer.management.progressBack(backEvent.progress)
       }
       override fun handleOnBackCancelled() { guideRenderer.management.cancelBack() }
       override fun handleOnBackPressed() {
+        // 0.14.9：开屏视频播放时，系统返回（手势或按键）先关闭视频并消费本次返回。
+        if (splashOverlay?.isActive == true) {
+          finishSplash("back")
+          return
+        }
         if (guideViewReady && guideView.visibility == View.VISIBLE && guideRenderer.management.back()) return
         val canGoBack = webViewReady && webView.canGoBack()
         val pageStack = webViewReady && backGateState.pageStackAvailable

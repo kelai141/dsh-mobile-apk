@@ -22,6 +22,8 @@ internal class SplashOverlay(
   private val onFailure: (String) -> Unit,
 ) {
   private var textureView: TextureView? = null
+  /** Black backdrop behind the TextureView; TextureView itself cannot take a background. */
+  private var overlayRoot: FrameLayout? = null
   private var player: MediaPlayer? = null
   private var surface: android.view.Surface? = null
   private var dismissed = false
@@ -35,23 +37,33 @@ internal class SplashOverlay(
    */
   fun play(path: String): Boolean {
     if (isActive) return true
+    android.util.Log.i(PROBE_TAG, "overlay play path=$path")
     dismissed = false
     prepared = false
     val view = TextureView(container.context).apply {
       layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
       isOpaque = true
-      // Opaque black before the first frame: the guide page behind must not flash through.
+      importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+      isClickable = false
+    }
+    // TextureView 明确不支持 background drawable（setBackgroundDrawable 直接抛异常），
+    // 用它自己铺黑会在启动时闪退。黑底改由外层 FrameLayout 提供，视频首帧前不闪穿。
+    val root = FrameLayout(container.context).apply {
+      layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
       setBackgroundColor(android.graphics.Color.BLACK)
       importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
       isClickable = false
     }
+    root.addView(view)
     textureView = view
-    container.addView(view)
+    overlayRoot = root
+    container.addView(root)
     // 后挂的宿主占位（BrowserHost / VdisplayHost 的 1x1 view）也会 addView；
     // 视频必须始终在最上层，否则会被无声地盖住。
-    view.bringToFront()
+    root.bringToFront()
     view.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
       override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+        android.util.Log.i(PROBE_TAG, "surface available ${width}x$height dismissed=$dismissed")
         if (dismissed) return
         startPlayer(path, surface)
       }
@@ -72,21 +84,25 @@ internal class SplashOverlay(
 
   /** Fade out and remove. Idempotent; safe to call before the first frame arrives. */
   fun dismiss(animate: Boolean = true, onDone: (() -> Unit)? = null) {
+    android.util.Log.i(PROBE_TAG, "dismiss animate=$animate dismissed=$dismissed")
     if (dismissed) { onDone?.invoke(); return }
     dismissed = true
     val view = textureView
+    val root = overlayRoot
     textureView = null
-    if (view == null) { releasePlayer(); onDone?.invoke(); return }
+    overlayRoot = null
+    if (view == null && root == null) { releasePlayer(); onDone?.invoke(); return }
+    val target = root ?: view ?: run { releasePlayer(); onDone?.invoke(); return }
     if (!animate) {
       releasePlayer()
-      container.removeView(view)
+      container.removeView(target)
       onDone?.invoke()
       return
     }
     // Keep the last frame on screen while it fades; releasing first would flash black.
-    view.animate().alpha(0f).setDuration(FADE_MS).withEndAction {
+    target.animate().alpha(0f).setDuration(FADE_MS).withEndAction {
       releasePlayer()
-      container.removeView(view)
+      container.removeView(target)
       onDone?.invoke()
     }.start()
   }
@@ -122,27 +138,33 @@ internal class SplashOverlay(
         applyCover(width, height)
       }
       media.setOnPreparedListener {
+        android.util.Log.i(PROBE_TAG, "prepared ${it.videoWidth}x${it.videoHeight} dismissed=$dismissed")
         if (dismissed) { releasePlayer(); return@setOnPreparedListener }
         prepared = true
         it.start()
         applyCover(it.videoWidth, it.videoHeight)
       }
       media.setOnErrorListener { _, what, extra ->
+        android.util.Log.i(PROBE_TAG, "media error what=$what extra=$extra")
         fail("decode") // The caller falls back to the guide page.
         true
       }
       media.prepareAsync()
+      android.util.Log.i(PROBE_TAG, "prepareAsync issued")
     } catch (t: Throwable) {
+      android.util.Log.i(PROBE_TAG, "player setup failed: ${t.javaClass.simpleName}: ${t.message}")
       fail("io")
     }
   }
 
   private fun fail(code: String) {
+    android.util.Log.i(PROBE_TAG, "fail code=$code dismissed=$dismissed")
     if (dismissed) return
     dismissed = true
     releasePlayer()
-    textureView?.let { container.removeView(it) }
+    (overlayRoot ?: textureView)?.let { container.removeView(it) }
     textureView = null
+    overlayRoot = null
     onFailure(code)
   }
 
@@ -193,5 +215,7 @@ internal class SplashOverlay(
 
   companion object {
     private const val FADE_MS = 260L
+    /** Temporary probe tag for the 0.14.9 splash crash/toggle investigation. */
+    internal const val PROBE_TAG = "dsh-splash-probe"
   }
 }
