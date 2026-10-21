@@ -287,6 +287,32 @@ export const DEV_SECTION_CSS: string = `
   overflow-wrap: anywhere;
 }
 
+/* issue #471：启动失败诊断（可展开的子进程堆栈）。 */
+.dsh-dev-diag {
+  margin: 2px 0 8px;
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
+}
+.dsh-dev-diag summary {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+.dsh-dev-diag pre {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .dsh-dev-warn {
   margin: 0;
   font-size: 12px;

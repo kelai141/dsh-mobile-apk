@@ -126,6 +126,9 @@ internal object ShellOps {
   internal fun canFallbackBeforeDispatch(code: String): Boolean = code in setOf(
     "shizuku-absent", "shizuku-not-running", "shizuku-denied", "shizuku-prev11",
     "shizuku-user-service-not-bound", "shizuku-user-service-too-old",
+    // issue #471：用户服务连续启动即崩（如联发科 ROM + Shizuku 13.6.0）。绑定从未成功，
+    // 命令一定未派发 ⇒ 回退 su 直连不构成重放。
+    "shizuku-user-service-start-failed",
   )
 
   private fun pull(context: Context, args: JSONObject): JSONObject {

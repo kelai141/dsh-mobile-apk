@@ -327,6 +327,38 @@ describe('PhoneControlSection（手机控制设置页）', () => {
     expect(el.textContent).toContain('重置 Shizuku 连接失败')
   })
 
+  // ── issue #471：连续启动失败必须暴露真实原因（联发科 ROM + Shizuku 13.6.0）──────────
+
+  it('用户服务连续启动失败：状态词升级为「启动失败」，诊断日志可展开', async () => {
+    const logs = [
+      'E/AndroidRuntime: FATAL EXCEPTION: main',
+      'E/AndroidRuntime: Process: com.dsharnessmobile.shell:dsh-vdisplay, PID: 2',
+      'E/AndroidRuntime: at android.app.LoadedApk.makeApplicationInner(LoadedApk.java:1500)',
+    ].join('\n')
+    const el = await render({
+      shizukuStatus: () => shizukuJson({
+        bound: false,
+        binding: false,
+        startFailed: true,
+        connectFailures: 3,
+        retryAfterMs: 60_000,
+        code: 'shizuku-user-service-start-failed',
+        guidance: 'Shizuku 用户服务连续 3 次启动即崩溃：系统 ROM 在 LoadedApk.makeApplicationInner 处抛出 NullPointerException。',
+        diagnostics: logs,
+      }),
+    })
+    expect(detailLine(el, 'Shizuku 特权通道')).toContain('用户服务启动失败')
+    const details = el.querySelector('details.dsh-dev-diag')
+    expect(details, '诊断日志必须是可展开的 <details>，不能默认铺满页面').toBeTruthy()
+    expect(details?.querySelector('summary')?.textContent).toContain('诊断日志')
+    expect(details?.querySelector('pre')?.textContent).toContain('makeApplicationInner')
+  })
+
+  it('通道正常时不显示诊断日志块（避免无噪声页面多出一节）', async () => {
+    const el = await render({ shizukuStatus: () => shizukuJson() })
+    expect(el.querySelector('details.dsh-dev-diag')).toBeNull()
+  })
+
   it('反证：重置不得新开定时器（新增常驻轮询与 T1 的 CPU 前科同族）', async () => {
     const setIntervalSpy = vi.spyOn(globalThis, 'setInterval')
     const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
@@ -423,6 +455,45 @@ describe('手机控制纯函数（文案口径）', () => {
     expect(shizukuStateLabel({ ...ready, bound: false, binding: true })).toBe('已授权，通道建立中')
     expect(shizukuStateLabel({ ...ready, bound: false, binding: false })).toBe('已授权，通道未建立')
     expect(shizukuStateLabel(ready)).toBe('通道就绪')
+  })
+
+  it('连续启动失败是独立状态词：不得被「通道未建立」盖住，正在建立时优先', () => {
+    expect(shizukuStateLabel({ ...ready, bound: false, binding: false, startFailed: true }))
+      .toBe('已授权，用户服务启动失败')
+    // 新一次尝试在飞时，事实是「正在建立」，不能拿先前的失败链下定论。
+    expect(shizukuStateLabel({ ...ready, bound: false, binding: true, startFailed: true }))
+      .toBe('已授权，通道建立中')
+  })
+
+  it('启动失败的兜底引导给出降级版本与 ADB 通道', () => {
+    const text = shizukuStepHint({ ...ready, bound: false, startFailed: true })
+    expect(text).toContain('13.5.4')
+    expect(text).toContain('ADB')
+    expect(text).toContain('诊断日志')
+  })
+
+  it('readShizuku 解析失败计数/退避/诊断；坏值回落安全默认', () => {
+    window.androidBridge = {
+      shizukuStatus: () => shizukuJson({
+        bound: false, startFailed: true, connectFailures: 3, retryAfterMs: 60_000, diagnostics: 'stack',
+      }),
+    } as never
+    const parsed = readShizuku()
+    expect(parsed.startFailed).toBe(true)
+    expect(parsed.connectFailures).toBe(3)
+    expect(parsed.retryAfterMs).toBe(60_000)
+    expect(parsed.diagnostics).toBe('stack')
+
+    window.androidBridge = {
+      shizukuStatus: () => shizukuJson({
+        startFailed: 'true', connectFailures: '3', retryAfterMs: '60000', diagnostics: 42,
+      }),
+    } as never
+    const bad = readShizuku()
+    expect(bad.startFailed).toBe(false)
+    expect(bad.connectFailures).toBe(0)
+    expect(bad.retryAfterMs).toBe(0)
+    expect(bad.diagnostics).toBe('')
   })
 
   it('每一态都给出「下一步做什么」，没有只报状态的死句', () => {

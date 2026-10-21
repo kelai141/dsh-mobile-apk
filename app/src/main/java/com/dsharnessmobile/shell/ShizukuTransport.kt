@@ -72,6 +72,23 @@ object ShizukuTransport {
   /** v3：本连接是否已把「应用 uid + 数据目录」回填给 UserService（按连接代次去重）。 */
   @Volatile private var configuredForAge = -1L
 
+  /**
+   * issue #471：连续启动失败达阈值后截取的用户服务启动日志（有界）。
+   *
+   * 真实原因不在 binder 回调里——联发科 ROM 的 `LoadedApk.makeApplicationInner` NPE 只出现在
+   * 子进程 `:dsh-vdisplay` 的 logcat 堆栈中。不抓这段日志，UI 与日志导出只能看到「绑定超时」。
+   * 连接成功或进程重启后清零；用户重置不清（诊断仍有价值）。
+   */
+  @Volatile private var startFailureLogs = ""
+
+  @Volatile private var diagnosingStartFailure = false
+
+  /** 诊断抓取的有界参数（logcat 尾部行数 / 进程输出上限 / 过滤行数 / 文本上限）。 */
+  private const val DIAG_LOGCAT_TAIL = 800
+  private const val DIAG_LOGCAT_BYTES = 256 * 1024
+  private const val DIAG_MAX_LINES = 40
+  private const val DIAG_MAX_CHARS = 6_000
+
   private class BindAttempt(val userArgs: Shizuku.UserServiceArgs, val generation: Long) {
     val latch = CountDownLatch(1)
     val connection: ServiceConnection = object : ServiceConnection {
@@ -79,10 +96,12 @@ object ShizukuTransport {
         synchronized(lock) {
           if (activeAttempt !== this@BindAttempt) return
           val valid = runCatching { binder.pingBinder() }.getOrDefault(false)
-          if (!bindState.onConnected(valid, generation)) return
+          if (!bindState.onConnected(valid, generation, SystemClock.elapsedRealtime())) return
           service = if (valid) ShizukuUserService.Stub.asInterface(binder) else null
           connectedAt = if (valid) SystemClock.elapsedRealtime() else 0L
           configuredForAge = -1L
+          // 通道真的起来了：上一条失败链的诊断不再代表现状。
+          if (valid) startFailureLogs = ""
           latch.countDown()
           if (!valid) {
             activeAttempt = null
@@ -134,7 +153,8 @@ object ShizukuTransport {
       } catch (failure: Throwable) {
         synchronized(lock) {
           if (activeAttempt !== attempt) return@post
-          bindState.onBindThrew(ShizukuBindCodes.bindFailed(failure), attempt.generation)
+          bindState.onBindThrew(
+            ShizukuBindCodes.bindFailed(failure), attempt.generation, SystemClock.elapsedRealtime())
           activeAttempt = null
           attempt.latch.countDown()
         }
@@ -177,6 +197,38 @@ object ShizukuTransport {
     Log.w(TAG, "bind watchdog: remove stale user service (attempts=" + bindState.attempts + ")")
   }
 
+  /**
+   * issue #471：连续启动失败达阈值后，后台截取一次用户服务启动日志。
+   *
+   * 线程纪律：status() 可能在主线程（UI 每 2s 轮询），logcat 子进程绝不在调用线程上跑；
+   * 这里只置位并起一个守护线程，同一失败链只抓一次（[startFailureLogs] 非空即不再抓）。
+   */
+  private fun maybeCollectStartFailureLogs() {
+    if (!bindState.startFailed) return
+    if (startFailureLogs.isNotEmpty() || diagnosingStartFailure) return
+    diagnosingStartFailure = true
+    Thread({
+      try {
+        startFailureLogs = collectStartFailureLogs()
+      } catch (failure: Throwable) {
+        startFailureLogs = "读取启动失败日志时出错：" + ProcIo.errorText(failure)
+      } finally {
+        diagnosingStartFailure = false
+      }
+    }, "dsh-shizuku-diag").apply { isDaemon = true }.start()
+  }
+
+  /** 有界读取 logcat 尾部并只保留启动失败相关行（与 [shizukuDiagnosticsExcerpt] 同口径）。 */
+  private fun collectStartFailureLogs(): String = try {
+    val process = ProcessBuilder(
+      "/system/bin/logcat", "-d", "-v", "threadtime", "-t", DIAG_LOGCAT_TAIL.toString(),
+    ).redirectErrorStream(true).start()
+    val raw = ProcIo.readBounded(process, 10, DIAG_LOGCAT_BYTES).text
+    EngineAuth.redact(shizukuDiagnosticsExcerpt(raw, DIAG_MAX_LINES, DIAG_MAX_CHARS))
+  } catch (failure: Throwable) {
+    "读取启动失败日志时出错：" + ProcIo.errorText(failure)
+  }
+
   private fun args(context: Context): Shizuku.UserServiceArgs = Shizuku.UserServiceArgs(
     ComponentName(context.packageName, ShizukuUserServiceBridge::class.java.name),
   )
@@ -202,10 +254,18 @@ object ShizukuTransport {
     out.put("userServiceAgeMs", if (connectedAt > 0L) SystemClock.elapsedRealtime() - connectedAt else -1)
     // 绑定面三态的可观测出口（0.14.1）：调用方（设置页 / 工具面 / 诊断）据此区分
     // 「尚未发起」「正在建立（确有 bind 在飞）」「已失败」，而不是由一句文案猜。
+    val now = SystemClock.elapsedRealtime()
     out.put("binding", bindState.binding)
     out.put("bindAttempts", bindState.attempts)
-    out.put("bindAgeMs", bindState.attemptAgeMs(SystemClock.elapsedRealtime()))
+    out.put("bindAgeMs", bindState.attemptAgeMs(now))
     out.put("lastError", bindState.lastError)
+    // issue #471：连续失败计数、退避窗口与启动失败诊断——UI 与日志导出据此看到真实原因，
+    // 而不是在「通道建立中」里无限重试。
+    out.put("connectFailures", bindState.failures)
+    out.put("startFailed", bindState.startFailed)
+    out.put("retryAfterMs", bindState.autoRetryAfterMs(now))
+    if (startFailureLogs.isNotEmpty()) out.put("diagnostics", startFailureLogs)
+    maybeCollectStartFailureLogs()
 
     if (!running) {
       // 没连上才分流文案：装了哪个管理器（去启动 / 去授权）还是都没装（去下载）。这是**引导**分流，
@@ -239,11 +299,29 @@ object ShizukuTransport {
       // 三态化（0.14.1）：code 只报「正在建立」当且仅当确有 bind 在飞。
       // 旧实现在这里恒报 connecting + 「正在建立 shell UserService」，把「从未发起」与
       // 「绑定已失败（超时/无效 binder/被拒）」都盖成了同一句——正是本缺陷的文案面。
+      //
+      // issue #471 第四态：连续失败达阈值后报 start-failed，并附上从 logcat 识别出的真实原因
+      // （联发科 ROM 的 LoadedApk.makeApplicationInner NPE → 建议降级 13.5.4 或改 ADB 通道）。
       val binding = bindState.binding
-      val ageMs = bindState.attemptAgeMs(SystemClock.elapsedRealtime())
-      val code = if (binding) CONNECTING_CODE else bindState.lastError.ifBlank { ShizukuBindCodes.NOT_BOUND }
-      val answer = out.put("ok", false).put("code", code)
-        .put("guidance", shizukuBindGuidance(code, binding, ageMs, BIND_WATCHDOG_MS, UiText.isEnglish(context)))
+      val ageMs = bindState.attemptAgeMs(now)
+      val startFailed = bindState.startFailed
+      val english = UiText.isEnglish(context)
+      val code = when {
+        binding -> CONNECTING_CODE
+        startFailed -> ShizukuBindCodes.START_FAILED
+        else -> bindState.lastError.ifBlank { ShizukuBindCodes.NOT_BOUND }
+      }
+      val guidance = if (startFailed && !binding) {
+        shizukuStartFailureGuidance(
+          classifyShizukuStartFailure(startFailureLogs),
+          bindState.failures,
+          bindState.autoRetryAfterMs(now),
+          english,
+        )
+      } else {
+        shizukuBindGuidance(code, binding, ageMs, BIND_WATCHDOG_MS, english)
+      }
+      val answer = out.put("ok", false).put("code", code).put("guidance", guidance)
       if (binding) answer.put("retryAfterMs", BIND_TIMEOUT_MS)
       return answer
     }
@@ -274,6 +352,15 @@ object ShizukuTransport {
     if (current.optBoolean("bound")) return
     // 已有绑定在飞（binding=true）时不重复发起——Shizuku.bindUserService 幂等但没必要抖动。
     if (bindState.binding) return
+    // issue #471：连续启动失败后按指数退避（15s → 30s → … → 300s）。status() 每 2s 被轮询一次，
+    // 没有这道闸，一个注定失败的 UserService 会被每 20s 重新拉起、无限重试 676+ 次。
+    // 只约束**自动**重试：用户显式动作（建屏 / 命令 / 重置后）仍走 ensureBound，不被退避挡住。
+    val now = SystemClock.elapsedRealtime()
+    if (!bindState.canAutoRetry(now)) {
+      Log.i(TAG, "kickBind: backoff active, failures=" + bindState.failures +
+        " retryAfterMs=" + bindState.autoRetryAfterMs(now))
+      return
+    }
     Thread({
       runCatching { ensureBound(app) }.onFailure {
         Log.w(TAG, "background bind failed: " + it.javaClass.simpleName + ": " + (it.message ?: ""))
@@ -564,7 +651,7 @@ object ShizukuTransport {
       code.startsWith("shizuku-user-service-bind-failed:") -> BindOutcome.BINDER_THREW
       code == ShizukuBindCodes.CONNECTING || code == ShizukuBindCodes.NOT_BOUND ||
         code == ShizukuBindCodes.BIND_TIMEOUT || code == ShizukuBindCodes.INVALID_BINDER ||
-        code == ShizukuBindCodes.DISCONNECTED -> BindOutcome.TIMEOUT
+        code == ShizukuBindCodes.DISCONNECTED || code == ShizukuBindCodes.START_FAILED -> BindOutcome.TIMEOUT
       else -> BindOutcome.UNKNOWN
     }
   }
