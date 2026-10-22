@@ -3,6 +3,7 @@
 [🌐 English README](README.en.md)
 
 [![QQ群](https://img.shields.io/badge/QQ群-dsh--mobile用户群-12B7F5?logo=tencentqq)](https://qun.qq.com/universal-share/share?ac=1&authKey=C2NW5eWXsV%2FYu5DEkV9Ac%2FqYcXhGCY8C3Lga40KNCfE4AOjzlSeAaRGvWZqc3ADV&busi_data=eyJncm91cENvZGUiOiIxMTA5NDkzOTkyIiwidG9rZW4iOiJjTTRDM3pwNjRLTE8rbkZBVjRDbnFVWlBOdU04aGJaS3FaSG1xZWFXbm5ZNXphbEJBOXdGMGw2N0V3YnpabnhaIiwidWluIjoiMzc1NDY4MDE3NSJ9&data=NzUYIVyoUDsINSstug9aQ6Kf4EUx-hhDegPFaPS-1RD-p_4eE02WN773yEIujclrFYtWRDkLyDa-YDtWj2bKjg&svctype=4&tempid=h5_group_info)
+[![QQ2群](https://img.shields.io/badge/QQ2群-dsh--mobile用户2群-12B7F5?logo=tencentqq)](qrcode/qqcommunity-2.png)
 ![DeepSeek Harness](https://img.shields.io/badge/DeepSeek_Harness-blue?style=flat&logo=DeepSeek&logoSize=auto&color=%232D5F9E)
 ![Android](https://img.shields.io/badge/Android-blue?style=flat&logo=Android&logoSize=auto&color=%2397CA00)
 
@@ -234,8 +235,10 @@ gr12-cmd（armv7l 需求）、cmyfqwq（覆盖安装兼容反馈）。
 ## 欢迎加入用户群反馈
 
 <img src="qrcode/qqcommunity-1.png" alt="dsh-mobile 用户群二维码（群号 1109493992）" width="320">
+<img src="qrcode/qqcommunity-2.png" alt="dsh-mobile 用户2群二维码（群号 1038381236）" width="320">
 
 欢迎加入 dsh-mobile 用户群反馈：使用问题、机型兼容、功能建议都可以在群里直接提。
+一群已满或无法加入时，请扫码加入二群（群号 1038381236）。
 
 
 ## 支持我们

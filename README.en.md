@@ -3,6 +3,7 @@
 [🌐 中文说明 / 中文 README](README.md)
 
 [![QQ群](https://img.shields.io/badge/QQ群-dsh--mobile用户群-12B7F5?logo=tencentqq)](https://qun.qq.com/universal-share/share?ac=1&authKey=C2NW5eWXsV%2FYu5DEkV9Ac%2FqYcXhGCY8C3Lga40KNCfE4AOjzlSeAaRGvWZqc3ADV&busi_data=eyJncm91cENvZGUiOiIxMTA5NDkzOTkyIiwidG9rZW4iOiJjTTRDM3pwNjRLTE8rbkZBVjRDbnFVWlBOdU04aGJaS3FaSG1xZWFXbm5ZNXphbEJBOXdGMGw2N0V3YnpabnhaIiwidWluIjoiMzc1NDY4MDE3NSJ9&data=NzUYIVyoUDsINSstug9aQ6Kf4EUx-hhDegPFaPS-1RD-p_4eE02WN773yEIujclrFYtWRDkLyDa-YDtWj2bKjg&svctype=4&tempid=h5_group_info)
+[![QQ Group 2](https://img.shields.io/badge/QQ_Group_2-dsh--mobile_users_2-12B7F5?logo=tencentqq)](qrcode/qqcommunity-2.png)
 ![DeepSeek Harness](https://img.shields.io/badge/DeepSeek_Harness-blue?style=flat&logo=DeepSeek&logoSize=auto&color=%232D5F9E)
 ![Android](https://img.shields.io/badge/Android-blue?style=flat&logo=Android&logoSize=auto&color=%2397CA00)
 
@@ -263,9 +264,10 @@ expansion. Development and maintenance conventions live in each repository's `AG
 ## Join the user group
 
 <img src="qrcode/qqcommunity-1.png" alt="dsh-mobile user group QR code (group no. 1109493992)" width="320">
+<img src="qrcode/qqcommunity-2.png" alt="dsh-mobile user group 2 QR code (group no. 1038381236)" width="320">
 
 Join the dsh-mobile user group for feedback: usage questions, device compatibility and feature
-requests are all welcome there.
+requests are all welcome there. If group 1 is full, scan the group 2 QR code above (group no. 1038381236).
 
 
 ## Support us / 支持我们
