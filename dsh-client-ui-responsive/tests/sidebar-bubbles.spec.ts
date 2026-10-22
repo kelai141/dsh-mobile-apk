@@ -64,7 +64,7 @@ beforeEach(() => {
   vi.stubGlobal('matchMedia', () => ({ get matches() { return narrow }, addEventListener: vi.fn(), removeEventListener: vi.fn() }))
   const viewport = Object.assign(new EventTarget(), { width: 360, height: 720, offsetLeft: 0, offsetTop: 0 })
   vi.stubGlobal('visualViewport', viewport)
-  document.body.innerHTML = '<div data-dsh-frame data-sidebar-collapsed><div data-rightbar-col><div data-sidebar-right-panel="fullscreen" data-sidebar-right-open data-sidebar-right-session="owner"><div data-dockkit-host="dock"><section data-dockkit-pane="p" data-dockkit-pane-active><header><div data-dockkit-strip="p"><div data-dockkit-strip-tabs="p"></div><button data-sidebar-right-mode="push" aria-label="退出全屏"><svg /></button><button data-sidebar-right-toggle aria-label="收起工作面板"><svg /></button><button data-dockkit-add aria-label="新建标签"><svg /></button></div></header><div data-tab-body><input value="draft" /><div data-terminal>running</div></div></section></div></div></div></div>'
+  document.body.innerHTML = '<div data-dsh-frame data-sidebar-collapsed><div data-rightbar-col><div data-sidebar-right-panel="fullscreen" data-sidebar-right-open data-sidebar-right-session="owner"><div data-dockkit-host="dock"><section data-dockkit-pane="p" data-dockkit-pane-active><header><div data-dockkit-strip="p"><div data-dockkit-strip-tabs="p"></div><button data-sidebar-right-mode="push" aria-label="退出全屏"><svg /></button><button data-sidebar-right-toggle aria-label="收起工作面板"><svg /></button><button data-dockkit-add-tab aria-label="新建标签"><svg /></button></div></header><div data-tab-body><input value="draft" /><div data-terminal>running</div></div></section></div></div></div></div>'
   panel = document.querySelector('[data-sidebar-right-panel]')!
   vi.spyOn(panel, 'getBoundingClientRect').mockImplementation(() => rect(0, 0, 360, 720))
   vi.spyOn(panel.querySelector<HTMLElement>('[data-dockkit-strip]')!, 'getBoundingClientRect').mockImplementation(() => rect(0, 0, 360, 48))
@@ -208,7 +208,7 @@ describe('narrow navigation over native tabs', () => {
     const replacement = old.cloneNode(true) as HTMLElement
     replacement.removeAttribute('data-dsh-bubble-native'); replacement.removeAttribute('aria-hidden')
     const add = vi.fn(), collapse = vi.fn()
-    replacement.querySelector('[data-dockkit-add]')!.addEventListener('click', add)
+    replacement.querySelector('[data-dockkit-add-tab]')!.addEventListener('click', add)
     replacement.querySelector('[data-sidebar-right-toggle]')!.addEventListener('click', collapse)
     old.replaceWith(replacement); await flush(); toggle().click()
     popover().querySelector<HTMLButtonElement>('[aria-label="新建标签"]')!.click()
@@ -219,7 +219,7 @@ describe('narrow navigation over native tabs', () => {
     expect(replacement.getAttribute('aria-hidden')).toBe('true')
   })
   it('proxies the existing chrome and add action including disabled controls', () => {
-    const add = vi.fn(); panel.querySelector('[data-dockkit-add]')!.addEventListener('click', add)
+    const add = vi.fn(); panel.querySelector('[data-dockkit-add-tab]')!.addEventListener('click', add)
     toggle().click()
     popover().querySelector<HTMLButtonElement>('[aria-label="新建标签"]')!.click()
     expect(add).toHaveBeenCalledTimes(1)
@@ -344,6 +344,15 @@ describe('workspace drag safety', () => {
     bubbles.attach(); toggle().click(); geometry()
     return navigation
   }
+  it('0.14.9：带工作区时弹层仍提供「新建标签」，代理原按钮打开标签选择', () => {
+    workspaceNavigation()
+    const add = vi.fn()
+    panel.querySelector('[data-dockkit-add-tab]')!.addEventListener('click', add)
+    const proxy = popover().querySelector<HTMLButtonElement>('[aria-label="新建标签"]')
+    expect(proxy).not.toBeNull()
+    proxy!.click()
+    expect(add).toHaveBeenCalledTimes(1)
+  })
   it('keeps the 24px safety buffer out of split mode and restores cancellation without committing order', () => {
     const navigation = workspaceNavigation()
     pointer('pointerdown', select('child'), 150, 130); vi.advanceTimersByTime(400)

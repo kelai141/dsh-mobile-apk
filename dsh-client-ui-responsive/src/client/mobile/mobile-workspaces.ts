@@ -433,6 +433,44 @@ export class MobileWorkspaces implements WorkspaceNavigation {
       const ratio = splitFraction(vertical ? event.clientY - bounds.top : event.clientX - bounds.left, vertical ? bounds.height : bounds.width)
       grid.style.setProperty('--dsh-workspace-preview-ratio', String(ratio))
       this.paintRatio(grid, this.swapped.has(this.session!) ? 1 - ratio : ratio, vertical)
+    } else if (drag.moved) {
+      this.dragSwapVisual(event.clientX, event.clientY, drag.pane)
+    }
+  }
+
+  /** 当前布局里的窗格 section（只取真实两窗格，忽略浮动窗/隐藏宿主）。 */
+  private paneSections(): HTMLElement[] {
+    if (!this.panel) return []
+    const ids = new Set(this.panes().map(pane => pane.id))
+    return [...this.panel.querySelectorAll<HTMLElement>('[data-dockkit-pane]')]
+      .filter(node => node.dataset.dockkitPane !== undefined && ids.has(node.dataset.dockkitPane as PaneId))
+  }
+
+  /** 指针下的窗格 id。用矩形判定而不是 elementFromPoint：白条拖动时会跟着手指盖住指针。 */
+  private paneAt(x: number, y: number): PaneId | undefined {
+    for (const section of this.paneSections()) {
+      const rect = section.getBoundingClientRect()
+      if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) return section.dataset.dockkitPane as PaneId
+    }
+    return undefined
+  }
+
+  /**
+   * 拖动白条换位的跟手反馈（0.14.9 用户反馈「换位没有动画演示」）：
+   * 白条本身随手指移动，指针所在窗格高亮为交换目标；松手后由 swap() 的 FLIP 动画完成换位。
+   */
+  private dragSwapVisual(x: number, y: number, source: PaneId | undefined): void {
+    const drag = this.gesture
+    if (!drag) return
+    const grip = this.pointerOwner
+    if (grip) {
+      grip.style.transform = `translate(${x - drag.startX}px, ${y - drag.startY}px)`
+      grip.style.zIndex = '6'
+    }
+    const target = this.paneAt(x, y)
+    for (const section of this.paneSections()) {
+      section.toggleAttribute('data-dsh-workspace-swap-target',
+        target !== undefined && target !== source && section.dataset.dockkitPane === target)
     }
   }
   private readonly onUp = (event: PointerEvent): void => {
@@ -444,23 +482,43 @@ export class MobileWorkspaces implements WorkspaceNavigation {
         const grid = this.panel?.querySelector<HTMLElement>('[data-dockkit-split]'), raw = Number(grid?.style.getPropertyValue('--dsh-workspace-preview-ratio'))
         if (Number.isFinite(raw) && raw > 0 && raw < 1) { const ratio = this.swapped.has(session) ? 1 - raw : raw; store.actions.resizeSplit(session, layout.rootId as SplitId, [ratio, 1 - ratio]) }
       } else {
-        const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>('[data-dockkit-pane]')
-        if (target && target.dataset.dockkitPane !== drag.pane) this.swap()
+        const target = this.paneAt(event.clientX, event.clientY)
+        if (target !== undefined && target !== drag.pane) this.swap()
       }
     }
     this.onCancel(); this.refresh()
   }
   private swap(): void {
     if (!this.session || this.panes().length !== 2) return
+    // FLIP：先量旧位置，刷新到新排布后再从旧位置的偏移量动画回零，两个窗格对向滑动完成换位。
+    const sections = this.paneSections()
+    const before = new Map(sections.map(section => [section, section.getBoundingClientRect()]))
     if (this.swapped.has(this.session)) this.swapped.delete(this.session); else this.swapped.add(this.session)
     try { localStorage.setItem('dsh-mobile-workspace-swap:' + this.session, this.swapped.has(this.session) ? '1' : '0') } catch { /* private storage */ }
     this.refresh()
+    if (typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+    requestAnimationFrame(() => {
+      for (const section of sections) {
+        const previous = before.get(section)
+        if (!previous) continue
+        const current = section.getBoundingClientRect()
+        const dx = previous.left - current.left, dy = previous.top - current.top
+        if (dx === 0 && dy === 0) continue
+        if (typeof section.animate !== 'function') continue
+        section.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }],
+          { duration: 220, easing: 'cubic-bezier(.2,.7,.2,1)' })
+      }
+    })
   }
   private readonly onCancel = (): void => {
     if (this.pointerOwner && this.gesture) {
       if (this.pointerOwner.hasPointerCapture?.(this.gesture.pointer)) this.pointerOwner.releasePointerCapture(this.gesture.pointer)
       this.pointerOwner.removeAttribute('data-dockkit-pointer')
+      // 白条拖动时的跟手位移与层级只在手势期间存在，任何出口都要清掉，避免白条停在半路。
+      this.pointerOwner.style.removeProperty('transform')
+      this.pointerOwner.style.removeProperty('z-index')
     }
+    for (const section of this.paneSections()) section.removeAttribute('data-dsh-workspace-swap-target')
     this.pointerOwner = undefined
     this.gesture = undefined; this.snapshotAtPress = undefined
     document.documentElement.removeAttribute('data-dsh-workspace-dragging')

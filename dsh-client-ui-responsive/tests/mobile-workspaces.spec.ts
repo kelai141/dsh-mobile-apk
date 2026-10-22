@@ -17,6 +17,7 @@ import {
   type PaneId, type TabId, type TabRecord, type LayoutOp, type LayoutState, type FloatRect, type SplitId,
 } from '@deepseek-ai/dsh-client-ui-dockkit'
 import { DIVIDER_HIT_SIZE, MobileWorkspaces, retainWorkspaceTypes, splitFraction } from '../src/client/mobile/mobile-workspaces.ts'
+import { MOBILE_WORKSPACES_CSS } from '../src/client/mobile/mobile-workspaces.css.ts'
 
 const SESSION = 'workspace-session'
 const drafts = new Map<string, { text: string }>()
@@ -25,6 +26,11 @@ const mounted: MobileWorkspaces[] = []
 describe('workspace divider fraction geometry', () => {
   it('uses one 20px hit track for both the accessible divider and the fraction math', () => {
     expect(DIVIDER_HIT_SIZE).toBe(20)
+  })
+
+  it('0.14.9：中轴线用可见的四级文本色与 4px 标尺，深色下不再隐形', () => {
+    expect(MOBILE_WORKSPACES_CSS).toContain('--dsw-alias-label-tertiary')
+    expect(MOBILE_WORKSPACES_CSS).toContain('height: 4px')
   })
 
   it.each([400, 800, 600])('keeps both content tracks at least 128px with the shared divider track at extent %i', extent => {
@@ -465,6 +471,34 @@ describe('mobile workspace navigation over native Dockkit planners', () => {
     expect(document.documentElement.hasAttribute('data-dsh-workspace-dragging')).toBe(false)
     expect(h.grid.style.getPropertyValue('--dsh-workspace-preview-ratio')).toBe('')
     expect(startSizes).toEqual([0.5, 0.5])
+    h.workspaces.detach()
+  })
+
+  it('0.14.9：拖动白条跟手并高亮目标窗格，松手交换两个窗格的物理位置', async () => {
+    viewport()
+    const h = makeHarness()
+    expect(h.workspaces.split()).toBe(true)
+    await h.flush()
+    const sections = [...h.panel.querySelectorAll<HTMLElement>('[data-dockkit-pane]')]
+    expect(sections).toHaveLength(2)
+    const grip = sections[0]!.querySelector<HTMLElement>('[data-workspace-grip]')!
+    expect(grip).not.toBeNull()
+    const swappedKey = 'dsh-mobile-workspace-swap:' + SESSION
+    expect(localStorage.getItem(swappedKey)).toBeNull()
+
+    pointer('pointerdown', grip, 150, 60)
+    pointer('pointermove', document, 480, 200)
+    // 跟手：白条随手指位移；目标窗格高亮，源窗格不高亮。
+    expect(grip.style.transform).toContain('translate')
+    expect(sections[1]!.hasAttribute('data-dsh-workspace-swap-target')).toBe(true)
+    expect(sections[0]!.hasAttribute('data-dsh-workspace-swap-target')).toBe(false)
+
+    pointer('pointerup', document, 480, 200)
+    await h.flush()
+    expect(grip.style.transform).toBe('')
+    expect(sections[1]!.hasAttribute('data-dsh-workspace-swap-target')).toBe(false)
+    // 交换已提交：本地换位状态翻转（物理槽位由刷新时的 data-dsh-workspace-slot 映射落地）。
+    expect(localStorage.getItem(swappedKey)).toBe('1')
     h.workspaces.detach()
   })
 

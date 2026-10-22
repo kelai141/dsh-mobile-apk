@@ -10,11 +10,17 @@ export const MOBILE_WORKSPACES_CSS = `
   [data-dsh-workspaces='2'] [data-dockkit-divider] { background: transparent; display: block; min-width: var(--dsh-divider-hit, 20px); min-height: var(--dsh-divider-hit, 20px); padding: 0; border: 0; touch-action: none !important; position: relative; }
   [data-dsh-workspaces='2'][data-dsh-workspace-orientation='vertical'] [data-dockkit-divider] { width: 100%; height: var(--dsh-divider-hit, 20px); }
   [data-dsh-workspaces='2'][data-dsh-workspace-orientation='horizontal'] [data-dockkit-divider] { width: var(--dsh-divider-hit, 20px); height: 100%; }
-  [data-dsh-workspaces='2'] [data-dockkit-divider]::before { content: ''; position: absolute; background: var(--dsw-alias-border-l2); border-radius: 999px; box-shadow: none; }
-  [data-dsh-workspaces='2'][data-dsh-workspace-orientation='vertical'] [data-dockkit-divider]::before { left: calc(50% - 18px); right: calc(50% - 18px); top: calc(50% - 1px); height: 2px; }
-  [data-dsh-workspaces='2'][data-dsh-workspace-orientation='horizontal'] [data-dockkit-divider]::before { top: calc(50% - 18px); bottom: calc(50% - 18px); left: calc(50% - 1px); width: 2px; }
+  /* 0.14.9：中轴线此前只用 border-l2 的 2px 细线，深色下几乎不可见（用户反馈「透明」）。
+     加粗到 4px、拉长到 48px，并改用三级文本色；拖动/聚焦时高亮为主文本色。 */
+  /* 尺寸必须显式写 width/height：上游对这条 ::before 另有显式宽度规则，只靠 left+right
+     拉伸会被它压成 0.5px（0.14.9 实机 computed width 实证），线就永远看不见。 */
+  [data-dsh-workspaces='2'] [data-dockkit-divider]::before { content: ''; position: absolute; background: var(--dsw-alias-label-tertiary, var(--dsw-alias-border-l4)); border-radius: 999px; box-shadow: none; opacity: .9; right: auto; bottom: auto; }
+  [data-dsh-workspaces='2'][data-dsh-workspace-orientation='vertical'] [data-dockkit-divider]::before { left: calc(50% - 24px); top: calc(50% - 2px); width: 48px; height: 4px; }
+  [data-dsh-workspaces='2'][data-dsh-workspace-orientation='horizontal'] [data-dockkit-divider]::before { left: calc(50% - 2px); top: calc(50% - 24px); width: 4px; height: 48px; }
   [data-dsh-workspaces='2'] [data-dockkit-divider]:focus-visible { outline: none; }
-  [data-dsh-workspaces='2'] [data-dockkit-divider]:focus-visible::before { background: var(--dsw-alias-label-primary); }
+  [data-dsh-workspaces='2'] [data-dockkit-divider]:focus-visible::before,
+  [data-dsh-workspaces='2'] [data-dockkit-divider][data-dockkit-pointer]::before { background: var(--dsw-alias-label-primary); opacity: 1; }
+  [data-dsh-workspaces='2'] [data-dockkit-divider][data-dockkit-pointer]::before { box-shadow: 0 0 0 6px rgba(128, 128, 128, .18); }
   [data-dsh-workspaces='2'][data-dsh-workspace-orientation='vertical'] [data-dockkit-divider] { cursor: row-resize; }
   [data-dsh-workspaces='2'][data-dsh-workspace-orientation='horizontal'] [data-dockkit-divider] { cursor: col-resize; }
   [data-dsh-workspaces] .dsh-workspace-bar { position: absolute; inset: 0 0 auto; height: 44px; display: flex; align-items: flex-start; justify-content: center; padding: 0; color: var(--dsw-alias-label-secondary); background: transparent; pointer-events: none; z-index: 3; box-sizing: border-box; }
@@ -24,6 +30,10 @@ export const MOBILE_WORKSPACES_CSS = `
   [data-dsh-workspaces] .dsh-workspace-grip { cursor: grab; touch-action: none !important; margin-right: auto; }
   [data-dsh-workspaces] .dsh-workspace-grip::after { content: ''; position: absolute; width: 1px; height: 1px; overflow: hidden; }
   [data-dsh-workspaces] .dsh-workspace-grip span { display: block; width: 26px; height: 3px; border-radius: 999px; background: var(--dsh-bubble-pill-indicator); opacity: 1; box-shadow: none; }
+  /* 0.14.9：白条拖动换位时跟手移动并高亮目标窗格；松手后 FLIP 动画完成对向滑动。 */
+  [data-dsh-workspaces] .dsh-workspace-grip[data-dockkit-pointer] { cursor: grabbing; }
+  [data-dsh-workspaces] .dsh-workspace-grip[data-dockkit-pointer] span { box-shadow: 0 3px 10px rgba(0, 0, 0, .35); }
+  [data-dsh-workspaces] [data-dsh-workspace-swap-target] { outline: 2px dashed var(--dsw-alias-link); outline-offset: -3px; }
   [data-dsh-workspaces] .dsh-workspace-close { margin-left: auto; font-size: 20px; font-weight: 300; opacity: 1; color: var(--dsw-alias-label-secondary); }
   [data-dsh-workspaces] .dsh-workspace-close:hover { color: var(--dsw-alias-label-primary); }
   [data-dsh-workspaces] .dsh-workspace-picker { position: absolute; inset: 44px 0 0; overflow: auto; padding: 16px; background: transparent; color: var(--dsw-alias-label-primary); z-index: 2; }

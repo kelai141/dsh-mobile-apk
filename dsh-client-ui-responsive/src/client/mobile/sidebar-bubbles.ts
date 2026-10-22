@@ -380,7 +380,10 @@ export class SidebarBubbles {
   private syncControls(current: BubbleTab | undefined): void {
     if (!this.panel || !this.header || !this.actions || !this.toggle) return
     const originals = [...this.panel.querySelectorAll<HTMLButtonElement>(STRIP + ' button')].filter(node => {
-      if (this.options.workspaces && !node.matches('[data-sidebar-right-mode], [data-sidebar-right-toggle]')) return false
+      // 0.14.9：workspaces 档也要代理条带上的「新建标签」（data-dockkit-add-tab）。此前只保留
+      // 两个窗格控制，原生条带又被气泡层隐藏，移动端根本没有新建标签的入口 —— 只能绕回
+      // 开始页去开标签。
+      if (this.options.workspaces && !node.matches('[data-sidebar-right-mode], [data-sidebar-right-toggle], [data-dockkit-add-tab]')) return false
       if (node.closest('[data-dockkit-tab]')) return false
       return node.matches('[data-sidebar-right-mode], [data-sidebar-right-toggle]') || node.closest('[data-dockkit-strip]')?.getAttribute('data-dockkit-strip') === current?.pane
     })
