@@ -170,7 +170,6 @@ class MainActivity : ComponentActivity() {
     splashTimeout = null
     val overlay = splashOverlay ?: return
     if (!overlay.isActive) return
-    android.util.Log.i(SplashOverlay.PROBE_TAG, "finishSplash reason=$reason")
     overlay.dismiss(animate)
     LogCollector.log("dsh-splash", "video finished: " + reason)
   }

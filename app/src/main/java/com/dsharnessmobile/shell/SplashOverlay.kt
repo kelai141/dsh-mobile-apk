@@ -37,7 +37,6 @@ internal class SplashOverlay(
    */
   fun play(path: String): Boolean {
     if (isActive) return true
-    android.util.Log.i(PROBE_TAG, "overlay play path=$path")
     dismissed = false
     prepared = false
     val view = TextureView(container.context).apply {
@@ -63,7 +62,6 @@ internal class SplashOverlay(
     root.bringToFront()
     view.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
       override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
-        android.util.Log.i(PROBE_TAG, "surface available ${width}x$height dismissed=$dismissed")
         if (dismissed) return
         startPlayer(path, surface)
       }
@@ -84,7 +82,6 @@ internal class SplashOverlay(
 
   /** Fade out and remove. Idempotent; safe to call before the first frame arrives. */
   fun dismiss(animate: Boolean = true, onDone: (() -> Unit)? = null) {
-    android.util.Log.i(PROBE_TAG, "dismiss animate=$animate dismissed=$dismissed")
     if (dismissed) { onDone?.invoke(); return }
     dismissed = true
     val view = textureView
@@ -138,27 +135,22 @@ internal class SplashOverlay(
         applyCover(width, height)
       }
       media.setOnPreparedListener {
-        android.util.Log.i(PROBE_TAG, "prepared ${it.videoWidth}x${it.videoHeight} dismissed=$dismissed")
         if (dismissed) { releasePlayer(); return@setOnPreparedListener }
         prepared = true
         it.start()
         applyCover(it.videoWidth, it.videoHeight)
       }
       media.setOnErrorListener { _, what, extra ->
-        android.util.Log.i(PROBE_TAG, "media error what=$what extra=$extra")
         fail("decode") // The caller falls back to the guide page.
         true
       }
       media.prepareAsync()
-      android.util.Log.i(PROBE_TAG, "prepareAsync issued")
     } catch (t: Throwable) {
-      android.util.Log.i(PROBE_TAG, "player setup failed: ${t.javaClass.simpleName}: ${t.message}")
       fail("io")
     }
   }
 
   private fun fail(code: String) {
-    android.util.Log.i(PROBE_TAG, "fail code=$code dismissed=$dismissed")
     if (dismissed) return
     dismissed = true
     releasePlayer()
@@ -215,7 +207,5 @@ internal class SplashOverlay(
 
   companion object {
     private const val FADE_MS = 260L
-    /** Temporary probe tag for the 0.14.9 splash crash/toggle investigation. */
-    internal const val PROBE_TAG = "dsh-splash-probe"
   }
 }

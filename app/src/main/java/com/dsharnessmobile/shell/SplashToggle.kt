@@ -6,8 +6,6 @@ import android.content.res.ColorStateList
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.RectF
-import android.view.Gravity
-import android.view.MotionEvent
 import android.view.View
 import android.widget.FrameLayout
 
@@ -49,29 +47,13 @@ internal class SplashToggle(private val context: Context) : FrameLayout(context)
     layoutParams = LayoutParams(dp(64), dp(48))
     background = DsUi.ripple(DsUi.roundRect(android.graphics.Color.TRANSPARENT, dp(24).toFloat()), context.getColor(R.color.ds_accent_soft))
     setOnClickListener {
-      android.util.Log.i(SplashOverlay.PROBE_TAG, "toggle click before checked=$isChecked enabled=$isEnabled")
       setChecked(!isChecked, notify = true)
-      android.util.Log.i(SplashOverlay.PROBE_TAG, "toggle click after checked=$isChecked onChanged=${onChanged != null}")
     }
-  }
-
-  override fun onTouchEvent(event: MotionEvent): Boolean {
-    if (event.actionMasked == MotionEvent.ACTION_DOWN || event.actionMasked == MotionEvent.ACTION_UP) {
-      android.util.Log.i(
-        SplashOverlay.PROBE_TAG,
-        "toggle touch action=${event.actionMasked} x=${event.x.toInt()} y=${event.y.toInt()} enabled=$isEnabled",
-      )
-    }
-    return super.onTouchEvent(event)
   }
 
   fun setChecked(value: Boolean, notify: Boolean) {
     val next = value
     val changed = next != isChecked
-    android.util.Log.i(
-      SplashOverlay.PROBE_TAG,
-      "setChecked next=$next changed=$changed notify=$notify onChanged=${onChanged != null}",
-    )
     isChecked = next
     refreshStateDescription()
     animator?.cancel()

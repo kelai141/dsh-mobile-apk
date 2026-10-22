@@ -31,7 +31,6 @@ internal class SplashSettingsPage(
   init {
     toggle = SplashToggle.create(activity, SplashStore.autoStart(activity)) { enabled ->
       val applied = SplashStore.setAutoStart(activity, enabled)
-      android.util.Log.i(SplashOverlay.PROBE_TAG, "settings onChanged enabled=$enabled applied=$applied")
       if (applied != enabled) {
         toggle.setChecked(applied, notify = false)
         toast(t("设置没有保存成功，请重试。", "The setting was not saved. Try again."))

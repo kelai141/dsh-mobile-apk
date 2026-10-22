@@ -48,17 +48,13 @@ internal object SplashStore {
     } else {
       null
     }
-    val result = SplashPolicy.autoStartEnabled(stored)
-    android.util.Log.i(SplashOverlay.PROBE_TAG, "autoStart stored=$stored result=$result")
-    return result
+    return SplashPolicy.autoStartEnabled(stored)
   }
 
   fun setAutoStart(context: Context, enabled: Boolean): Boolean {
     context.getSharedPreferences(SplashPolicy.PREFS, Context.MODE_PRIVATE)
       .edit().putBoolean(SplashPolicy.KEY_AUTOSTART, enabled).apply()
-    val result = autoStart(context)
-    android.util.Log.i(SplashOverlay.PROBE_TAG, "setAutoStart requested=$enabled result=$result")
-    return result
+    return autoStart(context)
   }
 
   /**
