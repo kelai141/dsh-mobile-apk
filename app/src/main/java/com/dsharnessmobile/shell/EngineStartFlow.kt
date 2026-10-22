@@ -735,6 +735,19 @@ internal class EngineStartFlow(private val activity: MainActivity) {
             },
           )
           requireCurrentEngineFlow(generation)
+          if (!ok && activity.engineManager.lastRefreshDeferred) {
+            // 0.14.9：另一条启动流正在刷新同一个快照——**让行不是失败**。
+            // 旧实现把 refreshSnapshot 的 false 一律当失败，第二个入口（新 Activity / 重开应用）
+            // 会写 boot-fail 并显示「运行时更新失败」，而刷新其实还在持有者线程里正常进行。
+            // 这里只留一行让行记录并退出本线程：刷新完成后由持有者拉起引擎；若持有者已随
+            // Activity 销毁，下一次入口的探活会接手。
+            LogCollector.writeBootFail(
+              activity, "snapshot-refresh-deferred",
+              "本次启动请求撞上正在进行的快照刷新，已让行（非失败）：未重复解压、未改动运行时；"
+                + "由持有刷新的启动流在完成后拉起引擎。",
+            )
+            return@Thread
+          }
           if (!ok) {
             // 任务 19：失败终态落盘（快照解压失败是「启动起不来」的已知成因之一）。
             // 【0.14.1 升级路径 P0】必须带上**真因**：`refreshSnapshot` 只回布尔值，真因挂在

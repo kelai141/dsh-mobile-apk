@@ -209,6 +209,7 @@ class ShizukuBindStateTest {
       ShizukuBindCodes.BIND_TIMEOUT,
       ShizukuBindCodes.INVALID_BINDER,
       ShizukuBindCodes.DISCONNECTED,
+      ShizukuBindCodes.START_FAILED,
       "shizuku-user-service-bind-failed:IllegalStateException",
       "shizuku-something-new",
     )
@@ -250,6 +251,7 @@ class ShizukuBindStateTest {
       ShizukuBindCodes.DISCONNECTED,
       ShizukuBindCodes.INVALID_BINDER,
       ShizukuBindCodes.RESET,
+      ShizukuBindCodes.START_FAILED,
       "shizuku-user-service-bind-failed:IllegalStateException",
       "shizuku-something-new",
     )
@@ -556,6 +558,209 @@ class ShizukuBindStateTest {
     assertFalse(
       "status() 的 ok 必须保持就绪判据，不得被动作面语义污染",
       statusBody.contains(".put(\"ok\", true).put(\"reset\", true)"),
+    )
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // issue #471：连续启动失败的暴露、指数退避与联发科 ROM NPE 识别
+  // ══════════════════════════════════════════════════════════════════════════════
+  //
+  // 现场：MTK ROM 在 LoadedApk.makeApplicationInner 抛 NPE，UserService 子进程 System.exit(1)，
+  // 客户端每 ~20s 重试一次、676+ 次全失败，界面永远只说「通道建立中」，真实原因从未露出。
+  // 本组锁住四件事：失败计数到阈值 / 自动重试指数退避 / 成功与重置清零 / 从日志认出现场并给动作。
+
+  @Test
+  fun retryDelayGrowsExponentiallyAndIsCapped() {
+    assertEquals("没有失败就不该有退避", 0L, retryDelayMs(0))
+    assertEquals(15_000L, retryDelayMs(1))
+    assertEquals(30_000L, retryDelayMs(2))
+    assertEquals(60_000L, retryDelayMs(3))
+    assertEquals(120_000L, retryDelayMs(4))
+    assertEquals(240_000L, retryDelayMs(5))
+    assertEquals("超过上限必须收敛到 5 分钟", 300_000L, retryDelayMs(6))
+    assertEquals("任意多次失败也不得超过上限", 300_000L, retryDelayMs(50))
+  }
+
+  @Test
+  fun threeConsecutiveStartFailuresArmTheStartFailedState() {
+    val s = ShizukuBindState(watchdog)
+    repeat(2) { i ->
+      val at = i * 1_000L
+      s.beginAttempt(at)
+      s.onBindThrew("shizuku-user-service-bind-failed:RuntimeException", s.currentGeneration, at + 1L)
+    }
+    assertEquals(2, s.failures)
+    assertFalse("两次失败还不算「连续启动失败」态", s.startFailed)
+
+    s.beginAttempt(10_000L)
+    s.onBindThrew("shizuku-user-service-bind-failed:RuntimeException", s.currentGeneration, 10_001L)
+    assertTrue("第三次连续失败必须进入 start-failed 态（UI 据此暴露真实原因）", s.startFailed)
+    assertEquals(ShizukuBindState.START_FAILURE_THRESHOLD, s.failures)
+  }
+
+  @Test
+  fun invalidBinderCallbacksAlsoCountAsStartFailures() {
+    val s = ShizukuBindState(watchdog)
+    repeat(3) { i ->
+      val at = i * 100L
+      s.beginAttempt(at)
+      s.onConnected(binderValid = false, callbackGeneration = s.currentGeneration, now = at + 1L)
+    }
+    assertEquals("无效 binder 与超时同属启动失败", 3, s.failures)
+    assertTrue(s.startFailed)
+  }
+
+  @Test
+  fun automaticRetryWaitsForTheBackoffWindow() {
+    val s = ShizukuBindState(watchdog)
+    s.beginAttempt(0L)
+    s.onBindThrew("boom", s.currentGeneration, 1_000L)
+    assertEquals("首次失败后等 15s", 15_000L, s.autoRetryAfterMs(1_000L))
+    assertFalse("窗口内不得自动重试（这正是 676 次重试风暴的闸）", s.canAutoRetry(15_999L))
+    assertTrue(s.canAutoRetry(16_000L))
+    assertEquals(0L, s.autoRetryAfterMs(20_000L))
+
+    s.beginAttempt(16_000L)
+    s.onBindThrew("boom", s.currentGeneration, 16_001L)
+    assertEquals("连续第二次失败退避翻倍", 30_000L, s.autoRetryAfterMs(16_001L))
+  }
+
+  @Test
+  fun reapingAZombieBindCountsAsAStartFailure() {
+    val s = ShizukuBindState(watchdog)
+    s.beginAttempt(0L)
+    s.reapIfStale(watchdog + 1)
+    assertEquals("看门狗回收的僵尸绑定同样是启动失败", 1, s.failures)
+    assertEquals(15_000L, s.autoRetryAfterMs(watchdog + 1))
+  }
+
+  @Test
+  fun aSuccessfulConnectionClearsTheFailureStreakAndBackoff() {
+    val s = ShizukuBindState(watchdog)
+    repeat(3) { i ->
+      s.beginAttempt(i * 100L)
+      s.onBindThrew("boom", s.currentGeneration, i * 100L + 1L)
+    }
+    assertTrue(s.startFailed)
+
+    s.beginAttempt(50_000L)
+    s.onConnected(binderValid = true, callbackGeneration = s.currentGeneration, now = 50_001L)
+    assertEquals("连上后失败链必须清零", 0, s.failures)
+    assertFalse(s.startFailed)
+    assertTrue("连上后不存在退避窗口", s.canAutoRetry(50_001L))
+  }
+
+  @Test
+  fun aUserResetClearsTheFailureStreakSoRetryIsImmediate() {
+    val s = ShizukuBindState(watchdog)
+    repeat(3) { i ->
+      s.beginAttempt(i * 100L)
+      s.onBindThrew("boom", s.currentGeneration, i * 100L + 1L)
+    }
+    assertFalse(s.canAutoRetry(1_000L))
+    s.onReset()
+    assertEquals("用户显式重置后失败链清零", 0, s.failures)
+    assertTrue("重置后必须可立刻重试，而不是继续等退避", s.canAutoRetry(1_000L))
+    assertTrue(s.beginAttempt(1_000L))
+  }
+
+  @Test
+  fun theMtkRomCrashIsRecognizedFromTheChildProcessStack() {
+    val mtk = """
+      E AndroidRuntime: FATAL EXCEPTION: main
+      E AndroidRuntime: Process: com.dsharnessmobile.shell:dsh-vdisplay, PID: 1234
+      E AndroidRuntime: java.lang.NullPointerException
+      E AndroidRuntime:     at android.app.LoadedApk.makeApplicationInner(LoadedApk.java:1500)
+      E AndroidRuntime:     at android.app.ActivityThread.handleBindApplication(ActivityThread.java:7000)
+    """.trimIndent()
+    assertEquals(
+      "makeApplicationInner + LoadedApk 的 NPE 必须被认成 ROM 注入崩溃",
+      ShizukuStartFailureKind.ROM_LOADED_APK_NPE,
+      classifyShizukuStartFailure(mtk),
+    )
+    assertEquals(
+      "LoadedApk + NullPointerException 的组合也足以定形",
+      ShizukuStartFailureKind.ROM_LOADED_APK_NPE,
+      classifyShizukuStartFailure("LoadedApk: NullPointerException while making application"),
+    )
+    assertEquals(ShizukuStartFailureKind.NONE, classifyShizukuStartFailure(""))
+    assertEquals("无关内容不得冒充已知形态", ShizukuStartFailureKind.UNKNOWN, classifyShizukuStartFailure("plain text"))
+  }
+
+  @Test
+  fun aGenericChildCrashIsNotBlamedOnTheRom() {
+    val crash = """
+      E AndroidRuntime: FATAL EXCEPTION: main
+      E AndroidRuntime: Process: com.dsharnessmobile.shell:dsh-vdisplay, PID: 4321
+      E AndroidRuntime: java.lang.IllegalStateException: boom
+      E AndroidRuntime: ShizukuServiceStarter: main exited with System.exit(1)
+    """.trimIndent()
+    assertEquals(
+      "普通子进程崩溃只报「启动后退出」，不得误导用户去降级 Shizuku",
+      ShizukuStartFailureKind.PROCESS_EXITED,
+      classifyShizukuStartFailure(crash),
+    )
+  }
+
+  @Test
+  fun theRomGuidanceOffersDowngradeAndAdbChannel() {
+    val text = shizukuStartFailureGuidance(
+      ShizukuStartFailureKind.ROM_LOADED_APK_NPE, failures = 3, retryAfterMs = 60_000L,
+    )
+    assertTrue("必须给出临时规避版本：$text", text.contains("13.5.4"))
+    assertTrue("必须给出替代通道：$text", text.contains("ADB"))
+    assertTrue("必须写出连续失败次数：$text", text.contains("3 次"))
+    assertTrue("必须写出下一次重试时间：$text", text.contains("60s"))
+    assertFalse("启动失败不是「正在建立」：$text", text.contains("正在建立"))
+  }
+
+  @Test
+  fun englishStartFailureGuidanceStaysEnglish() {
+    for (kind in ShizukuStartFailureKind.values()) {
+      val text = shizukuStartFailureGuidance(kind, failures = 3, retryAfterMs = 60_000L, english = true)
+      assertTrue("英文引导不得为空（kind=$kind）", text.isNotBlank())
+      assertFalse("英文引导不得混入中文（kind=$kind）：$text", Regex("[\\u4e00-\\u9fff]").containsMatchIn(text))
+    }
+  }
+
+  @Test
+  fun diagnosticsExcerptKeepsOnlyStartupFailureLines() {
+    val raw = """
+      I/ActivityManager( 100): unrelated line
+      E/AndroidRuntime( 200): FATAL EXCEPTION: main
+      E/AndroidRuntime( 200): Process: com.dsharnessmobile.shell:dsh-vdisplay, PID: 2
+      E/AndroidRuntime( 200): java.lang.NullPointerException
+      E/AndroidRuntime( 200):     at android.app.LoadedApk.makeApplicationInner(LoadedApk.java:1)
+      E/AndroidRuntime( 200):     at android.app.ActivityThread.handleBindApplication(ActivityThread.java:2)
+      I/Other( 300): noise
+    """.trimIndent()
+    val excerpt = shizukuDiagnosticsExcerpt(raw)
+    assertTrue(excerpt.contains("makeApplicationInner"))
+    assertTrue("不带 token 的堆栈续行必须保留（否则用户看不到调用链）：$excerpt", excerpt.contains("handleBindApplication"))
+    assertTrue(excerpt.contains("dsh-vdisplay"))
+    assertFalse("无关行不得进入诊断：$excerpt", excerpt.contains("unrelated"))
+    assertFalse("无关行不得进入诊断：$excerpt", excerpt.contains("noise"))
+    assertTrue("没有匹配行时必须如实说明", shizukuDiagnosticsExcerpt("no related lines").contains("没有匹配到"))
+  }
+
+  /**
+   * 接线断言（与 resetConnection 的源码级断言同手法）：[ShizukuTransport] 是 Android 面、
+   * 无 JVM 注入点，所以「退避闸真的接在自动重试上」「诊断字段真的进了 status()」只能从源码判。
+   */
+  @Test
+  fun transportWiresTheBackoffGateAndStartFailureDiagnostics() {
+    val src = File("src/main/java/com/dsharnessmobile/shell/ShizukuTransport.kt").readText()
+    assertTrue("status 必须暴露连续失败次数", src.contains("out.put(\"connectFailures\", bindState.failures)"))
+    assertTrue("status 必须暴露启动失败态", src.contains("out.put(\"startFailed\", bindState.startFailed)"))
+    assertTrue("status 必须暴露下一次自动重试时间", src.contains("out.put(\"retryAfterMs\", bindState.autoRetryAfterMs(now))"))
+    assertTrue("诊断日志必须随状态暴露", src.contains("out.put(\"diagnostics\", startFailureLogs)"))
+    assertTrue("诊断必须有界读取 logcat", src.contains("ProcIo.readBounded(process, 10, DIAG_LOGCAT_BYTES)"))
+    val kickStart = src.indexOf("fun kickBind(context: Context)")
+    assertTrue("kickBind 必须在场", kickStart >= 0)
+    val kick = src.substring(kickStart, minOf(src.length, kickStart + 3_000))
+    assertTrue(
+      "自动重试必须先过指数退避闸（否则 2s 轮询会继续每 20s 拉起注定失败的子进程）",
+      kick.contains("bindState.canAutoRetry(now)"),
     )
   }
 }

@@ -114,7 +114,9 @@ const IME_INSET_VAR = '--dsh-android-ime-bottom'
 const REORDER_ATTR = 'data-dsh-sidebar-reorder'
 /** 预先标记真正横向溢出的滚动容器，供常驻 CSS 保留其原生横向平移。 */
 const HORIZONTAL_SCROLL_ATTR = 'data-dsh-horizontal-scroll'
-const INTERACTIVE = 'input, textarea, select, button, label, a, summary, [contenteditable="true"], [role="button"], [role="tab"], [role="menu"], [role="menuitem"], [role="textbox"], [role="searchbox"], [role="combobox"], [aria-haspopup], [data-trigger-menu]'
+// A floating pane owns its own move/resize gestures. Letting the drawer arbiter claim a
+// horizontal press on its header closed the whole right column while the float moved.
+const INTERACTIVE = 'input, textarea, select, button, label, a, summary, [contenteditable="true"], [role="button"], [role="tab"], [role="menu"], [role="menuitem"], [role="textbox"], [role="searchbox"], [role="combobox"], [aria-haspopup], [data-trigger-menu], [data-dockkit-float]'
 
 export interface SidebarGestureActions {
   mobileForm(): boolean

@@ -84,7 +84,7 @@ export const DEV_SECTION_CSS: string = `
 .dsh-dev-btn-active {
   border-color: var(--dsw-alias-state-success-primary, var(--dsw-alias-border-l3));
   background: var(--dsw-alias-state-success-primary, var(--dsw-alias-button-elevated-fill));
-  color: var(--dsw-alias-label-on-emphasis, var(--dsw-alias-label-primary));
+  color: var(--dsw-alias-label-primary-inverted);
 }
 
 .dsh-dev-danger {
@@ -285,6 +285,32 @@ export const DEV_SECTION_CSS: string = `
   color: var(--dsw-alias-label-secondary);
   /* 同上：导出路径、缓存目录等长串必须能断行（设备实测 412px 下无此规则会横向溢出）。 */
   overflow-wrap: anywhere;
+}
+
+/* issue #471：启动失败诊断（可展开的子进程堆栈）。 */
+.dsh-dev-diag {
+  margin: 2px 0 8px;
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
+}
+.dsh-dev-diag summary {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+.dsh-dev-diag pre {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .dsh-dev-warn {

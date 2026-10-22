@@ -27,6 +27,7 @@
 - 构建期 B1：`scripts/patches/data/sidebar-bubble-reorder.mjs` 通过原 `placeTab` 提交同分栏排序并保留活动页；发布包/Android 源码构建双形态夹具和拒绝写入反例由 `scripts/patches/tests/sidebar-bubble-reorder.test.mjs` 执行。
 - 多任务验收：`scripts/verify-mobile-workspaces.mjs`，独立编排真实 CDP/ADB 场景；未运行或证据不足的项不得写 PASS。
 - 构建期 B2：`scripts/patches/data/sidebar-keep-wide-B2.mjs` 让手机形态收起态仍挂载宽内容（`wide` 恒真）并取消收起态内联宽度冻结，把抽屉内容的 React 挂载从手势 touchmove 帧上移走；两条锚点必须同打，单独打 `wide` 会因 `lastWideWidth` 的 56px 初值露出压扁抽屉。真值表、幂等、三向负控与 runner 集成由 `scripts/patches/tests/sidebar-keep-wide-B2.test.mjs` 执行。
+- 构建期 472：`scripts/patches/data/inspector-worker-expose-internals-472.mjs` 把 `dsh-experimental-inspector` 的 `spawnWorker()` 从 `execArgv: []` 改为 `["--expose-internals"]`，否则 Worker 丢掉壳侧启动参数，android-arm64 上 `internal/modules/esm/loader` 必失败；锚点唯一性、幂等、三向拒绝与 runner 集成由 `scripts/patches/tests/inspector-worker-expose-internals-472.test.mjs` 执行。
 - 验收入口：`scripts/verify-sidebar-bubbles.mjs` 在真实 WebView 上读取业务语义，ADB 执行点击、滑动、长按、取消与返回并保存截图。宽屏使用 `--wide`；`--owner` 可选择专用验收会话。详见 `docs/maintenance/sidebar-bubbles-2026-10-17.md`。
 
 ## 0.14.5-fx-1 实施补充（2026-10-09）
@@ -2104,6 +2105,9 @@ scripts/patches/data/sidebar-bubble-reorder.mjs
 scripts/patches/tests/sidebar-bubble-reorder.test.mjs
 scripts/patches/data/sidebar-keep-wide-B2.mjs
 scripts/patches/tests/sidebar-keep-wide-B2.test.mjs
+scripts/patches/data/inspector-worker-expose-internals-472.mjs
+scripts/patches/tests/inspector-worker-expose-internals-472.test.mjs
+glob:scripts/patches/tests/fixtures/dsh-experimental-inspector-0.2.1-rc.2/**
 glob:scripts/patches/tests/fixtures/dsh-client-ui-sidebar-0.2.1-rc.2/**
 glob:scripts/patches/tests/fixtures/dsh-client-ui-sidebar-right-0.2.0-rc.2/**
 glob:scripts/patches/tests/fixtures/dsh-client-ui-sidebar-right-mobile-0.2.0-rc.2/**

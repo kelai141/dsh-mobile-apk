@@ -183,7 +183,9 @@
       "summary": "每个同步 flush 按名称单次索引 Loader 条目，错误回调后失效；nearestPackage 已解析的 manifest 在 resolveMeta 内复用。保留同步构造错误、启动 settle 顺序及运行期/HMR即时语义",
       "provenance": "2026-10-06 MuMu 0.14.5 受控细分：client 构造 flush 193 次 Loader 遍历、38021 行；typert 初始 flush 193 次 qualifies、24181 行。独立CPU样本证实反复遍历热点；C4总体预算仍须无诊断冷启动复测，不以局部耗时改善认绿。",
       "marker": "dsh-mobile registry scan C4",
-      "requiredMarkers": ["dsh-mobile gateway client source G1"]
+      "requiredMarkers": [
+        "dsh-mobile gateway client source G1"
+      ]
     },
     {
       "id": "client-index-loader-barrier-G2",
@@ -349,6 +351,14 @@
       "summary": "手机形态让左抽屉收起态仍挂载宽内容（wide 恒真）+ 收起时不写 56px 内联宽度冻结；把 260 元素的 React 挂载从手势 touchmove 帧上移走",
       "provenance": "2026-10-18 侧边栏手势真机实测：开方向拖动期 136ms 帧停顿 vs 关方向 69ms，根因是收起态卸载宽内容后手势内 ensureOpen 触发重挂载",
       "marker": "dsh-mobile sidebar keep wide (B2)"
+    },
+    {
+      "id": "inspector-worker-expose-internals-472",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-experimental-inspector/lib/index.js",
+      "scope": "engine",
+      "summary": "inspector 的 Worker 不再清空 execArgv：显式传 --expose-internals，使 android-arm64 上 requireBuiltin 回退可用",
+      "provenance": "2026-10-21 apk issue #472：node-addon-require-builtin 无 android-arm64 预编译件，Worker 内 internal/modules/esm/loader 必 MODULE_NOT_FOUND（设备实测）",
+      "marker": "dsh-mobile inspector worker expose-internals (472)"
     }
   ],
   "retired": [

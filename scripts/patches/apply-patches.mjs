@@ -28,6 +28,7 @@ import { CLIENT_INDEX_LOADER_BARRIER_MARKER, planClientIndexLoaderBarrier } from
 import { resolveEnginePatchFile } from './resolve-engine-patch-target.mjs'
 import { hasSidebarReorder, patchSidebarReorder } from './data/sidebar-bubble-reorder.mjs'
 import { hasSidebarKeepWide, patchSidebarKeepWide } from './data/sidebar-keep-wide-B2.mjs'
+import { hasInspectorWorkerExposeInternals, patchInspectorWorkerExposeInternals } from './data/inspector-worker-expose-internals-472.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const registry = JSON.parse(readFileSync(join(HERE, 'registry.json'), 'utf8'))
@@ -156,6 +157,15 @@ const IMPLS = {
     file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar/lib/client.js',
     check: hasSidebarKeepWide,
     apply: patchSidebarKeepWide,
+  },
+
+  // issue #472：inspector 的 Worker 用 execArgv: [] 清空继承，丢掉了启动命令里的
+  // --expose-internals；android-arm64 没有 require-builtin 预编译件，Worker 内必失败。
+  'inspector-worker-expose-internals-472': {
+    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-experimental-inspector/lib/index.js',
+    scope: 'engine',
+    check: hasInspectorWorkerExposeInternals,
+    apply: patchInspectorWorkerExposeInternals,
   },
 
   // Raw npm pins do not include pnpm patchedDependencies; retain the official six-provider patch.

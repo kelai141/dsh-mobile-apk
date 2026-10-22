@@ -170,6 +170,7 @@ class MainActivity : ComponentActivity() {
     splashTimeout = null
     val overlay = splashOverlay ?: return
     if (!overlay.isActive) return
+    android.util.Log.i(SplashOverlay.PROBE_TAG, "finishSplash reason=$reason")
     overlay.dismiss(animate)
     LogCollector.log("dsh-splash", "video finished: " + reason)
   }
@@ -445,8 +446,18 @@ class MainActivity : ComponentActivity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
-    userClosedEngine = (savedInstanceState?.getBoolean("dsh.engine-user-closed", false) ?: false) ||
-      EngineService.userShutdown || EngineService.isUserShutdownPersisted(this)
+    // 0.14.9：「打开应用后自动启动」是用户的显式意图，冷启动时优先于上一次的持久化停机标记。
+    // 旧行为把「划过任务卡/手动停止」留下的 userShutdown 一路带到下次打开，开关明明开着却
+    // 停在启动页——看起来就是开关失效。同一次会话内的停止仍由 savedInstanceState 保留，
+    // 只有真正的冷启动（savedInstanceState == null）才按开关清除持久标记。
+    val autoStartOnOpen = SplashStore.autoStart(this)
+    userClosedEngine = if (savedInstanceState == null && autoStartOnOpen) {
+      EngineService.setUserShutdown(this, false)
+      false
+    } else {
+      (savedInstanceState?.getBoolean("dsh.engine-user-closed", false) ?: false) ||
+        EngineService.userShutdown || EngineService.isUserShutdownPersisted(this)
+    }
     if (userClosedEngine) EngineService.userShutdown = true
     pageRecovery.restoreRecreationBudget(savedInstanceState?.getBoolean("dsh.renderer-recreation-attempted", false) ?: false)
     // 0.13.3 W2：引擎鉴权模块绑定应用上下文（EngineProbe 等 object 调用方的 cookie 来源）。
@@ -969,13 +980,21 @@ class MainActivity : ComponentActivity() {
   private fun installBackGate() {
     onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
       override fun handleOnBackStarted(backEvent: androidx.activity.BackEventCompat) {
+        // 开屏视频在播时，返回手势只用于关视频，不把管理页的返回动画卷进来。
+        if (splashOverlay?.isActive == true) return
         if (guideViewReady && guideView.visibility == View.VISIBLE) guideRenderer.management.beginBack()
       }
       override fun handleOnBackProgressed(backEvent: androidx.activity.BackEventCompat) {
+        if (splashOverlay?.isActive == true) return
         guideRenderer.management.progressBack(backEvent.progress)
       }
       override fun handleOnBackCancelled() { guideRenderer.management.cancelBack() }
       override fun handleOnBackPressed() {
+        // 0.14.9：开屏视频播放时，系统返回（手势或按键）先关闭视频并消费本次返回。
+        if (splashOverlay?.isActive == true) {
+          finishSplash("back")
+          return
+        }
         if (guideViewReady && guideView.visibility == View.VISIBLE && guideRenderer.management.back()) return
         val canGoBack = webViewReady && webView.canGoBack()
         val pageStack = webViewReady && backGateState.pageStackAvailable

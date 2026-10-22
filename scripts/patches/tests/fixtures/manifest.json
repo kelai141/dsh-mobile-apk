@@ -1237,6 +1237,31 @@
       "patchIds": [
         "sidebar-keep-wide-B2"
       ]
+    },
+    "dsh-experimental-inspector-0.2.1-rc.2": {
+      "source": "engine-tgz",
+      "engine": "0.2.1-rc.2",
+      "package": "@deepseek-ai/dsh-experimental-inspector@0.2.1-rc.2",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-experimental-inspector-0.2.1-rc.2.tgz",
+        "tarballSha256": "40aaf759a33110fc20c993694e34a38f9fedbbadfa2ad456b48db34836bfdac9",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "b675c02b8c59303ea02e1a4646d455f15701d56da8c70b80ce3e5fbbebfd2adc",
+        "package.json": "8fa8b089e35ff0ee884c21e570006004d153489185d26f6c3f2afed8a9864aad"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-experimental-inspector/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-experimental-inspector/package.json"
+      },
+      "patchIds": [
+        "inspector-worker-expose-internals-472"
+      ]
     }
   },
   "capture": {
@@ -1248,6 +1273,6 @@
       ]
     },
     "overlaySha256": "87486df7cf65e8199902e3b855987aad7ba155693bb9b69ab7efedf2168afb2a",
-    "registrySha256": "c93ded50bab0e8d8b4ac400729045ccef4c8c1445c1027ed8e58af69aba5ced8"
+    "registrySha256": "a979590e275e4b66cbda2b379a8784dd24f5f26f1aa4a5322b5717f0efe57b79"
   }
 }

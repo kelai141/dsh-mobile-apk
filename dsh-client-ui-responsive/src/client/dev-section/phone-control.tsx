@@ -57,6 +57,14 @@ interface ShizukuStatus {
   granted: boolean
   bound: boolean
   binding: boolean
+  /** issue #471：连续启动失败次数（壳侧 connectFailures）。 */
+  connectFailures?: number
+  /** 连续失败已达阈值：用户服务启动即崩，真实原因见 diagnostics。 */
+  startFailed?: boolean
+  /** 距离下一次自动重试的毫秒数（壳侧指数退避）。 */
+  retryAfterMs?: number
+  /** 壳侧截取的启动失败诊断日志（有界 logcat 片段）。 */
+  diagnostics?: string
   guidance: string
 }
 
@@ -140,6 +148,10 @@ const SHIZUKU_UNREADABLE: ShizukuStatus = {
   granted: false,
   bound: false,
   binding: false,
+  connectFailures: 0,
+  startFailed: false,
+  retryAfterMs: 0,
+  diagnostics: '',
   guidance: '',
 }
 
@@ -231,9 +243,14 @@ export function shizukuStateLabel(status: ShizukuStatus): string {
   if (!status.installed) return tr('未安装', 'Not installed')
   if (!status.running) return tr('已安装，Shizuku 未启动', 'Installed, Shizuku not running')
   if (!status.granted) return tr('已启动，尚未授权', 'Running, not granted')
-  if (!status.bound) return status.binding
-    ? tr('已授权，通道建立中', 'Granted, connecting')
-    : tr('已授权，通道未建立', 'Granted, not connected')
+  if (!status.bound) {
+    if (status.binding) return tr('已授权，通道建立中', 'Granted, connecting')
+    // issue #471：连续启动失败是一条独立的事实，不得继续被「通道未建立」一笔带过。
+    if (status.startFailed === true) {
+      return tr('已授权，用户服务启动失败', 'Granted, UserService failed to start')
+    }
+    return tr('已授权，通道未建立', 'Granted, not connected')
+  }
   return tr('通道就绪', 'Channel ready')
 }
 
@@ -243,6 +260,12 @@ export function shizukuStepHint(status: ShizukuStatus): string {
   if (!status.installed) return tr('点「下载 Shizuku」到发布页装好，再回来点「打开 Shizuku」。', 'Tap Download Shizuku, install it, then come back and tap Open Shizuku.')
   if (!status.running) return tr('点「打开 Shizuku」，在应用内按提示用无线调试启动它（重启设备后需要重做一次）。', 'Tap Open Shizuku and start it there with wireless debugging; repeat after a reboot.')
   if (!status.granted) return tr('点「打开 Shizuku」，在里面允许本应用使用 Shizuku——授权只能由你亲手完成。', 'Tap Open Shizuku and allow this app inside it; only you can grant this.')
+  if (!status.bound && status.startFailed === true) {
+    return tr(
+      '用户服务连续启动失败，展开下方诊断日志查看真实原因。若使用 Shizuku 13.6.0，可降级到 13.5.4，或改用 ADB 通道。',
+      'The UserService keeps failing to start. Expand the startup log below. If you use Shizuku 13.6.0, downgrade to 13.5.4 or switch to the ADB channel.',
+    )
+  }
   if (!status.bound) return tr('状态每 2 秒自动刷新，稍等即可；一直停在这里可以点「打开 Shizuku」重进一次。', 'Status refreshes every 2 seconds; if it stays here, open Shizuku once more.')
   return tr('特权通道已就绪，虚拟屏与特权 shell 可以用了。', 'The privileged channel is ready; virtual screens and the privileged shell work now.')
 }
@@ -360,6 +383,10 @@ export function readShizuku(): ShizukuStatus {
       granted: parsed.granted === true,
       bound: parsed.bound === true,
       binding: parsed.binding === true,
+      connectFailures: typeof parsed.connectFailures === 'number' ? parsed.connectFailures : 0,
+      startFailed: parsed.startFailed === true,
+      retryAfterMs: typeof parsed.retryAfterMs === 'number' ? parsed.retryAfterMs : 0,
+      diagnostics: typeof parsed.diagnostics === 'string' ? parsed.diagnostics : '',
       guidance: typeof parsed.guidance === 'string' ? parsed.guidance : '',
     }
   } catch {
@@ -850,6 +877,14 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
       <p className="dsh-dev-hint">
         {shizuku.guidance !== '' ? shizuku.guidance : shizukuStepHint(shizuku)}
       </p>
+      {/* issue #471：连续启动失败时把壳侧截取的子进程堆栈直接展开给用户/反馈者，
+          不再让真实原因只沉在 logcat 里。 */}
+      {shizuku.diagnostics ? (
+        <details className="dsh-dev-diag">
+          <summary>{tr('查看启动失败诊断日志', 'Show the startup failure log')}</summary>
+          <pre>{shizuku.diagnostics}</pre>
+        </details>
+      ) : null}
       <div className="dsh-dev-row dsh-dev-split">
         <button type="button" className="dsh-dev-btn" onClick={downloadShizuku}>{tr('下载 Shizuku', 'Download Shizuku')}</button>
         <button

@@ -29,6 +29,17 @@ import org.json.JSONObject
  */
 internal class ShizukuBindState(private val watchdogMs: Long) {
 
+  internal companion object {
+    /** issue #471：连续启动失败达到该次数后升级为「启动失败」态（暴露真实原因，不再无声重试）。 */
+    const val START_FAILURE_THRESHOLD = 3
+
+    /** 指数退避基数：首次失败后 15s 再自动重试。 */
+    const val RETRY_BASE_MS = 15_000L
+
+    /** 指数退避上限：无论失败多少次，自动重试间隔不超过 5 分钟。 */
+    const val RETRY_CAP_MS = 300_000L
+  }
+
   private val lock = Any()
   private var bindingFlag = false
   private var bindingSince = 0L
@@ -39,6 +50,15 @@ internal class ShizukuBindState(private val watchdogMs: Long) {
   val currentGeneration: Long get() = synchronized(lock) { generation }
   private var error = ShizukuBindCodes.NOT_BOUND
 
+  /**
+   * 连续启动失败次数（issue #471）：绑定超时 / 发起即抛 / 无效 binder 各记一次。
+   * 连接成功或用户显式重置后清零；断连不算启动失败（那条通道此前确实起来过）。
+   */
+  private var failureCount = 0
+
+  /** 下一次允许**自动**重试的时刻（elapsedRealtime 口径）；0 = 未排期。 */
+  private var nextAttemptAt = 0L
+
   /** 是否确有一次绑定在飞（**只有它才配得上「正在建立」这四个字**）。 */
   val binding: Boolean get() = synchronized(lock) { bindingFlag }
 
@@ -47,6 +67,29 @@ internal class ShizukuBindState(private val watchdogMs: Long) {
 
   /** 最近一次失败/进行中的结构化 code（空串 = 已连上且 binder 有效）。 */
   val lastError: String get() = synchronized(lock) { error }
+
+  /** 连续启动失败次数（issue #471：UI / 诊断据此判断是否已到阈值）。 */
+  val failures: Int get() = synchronized(lock) { failureCount }
+
+  /** 连续失败是否已达 [START_FAILURE_THRESHOLD]：此时 status() 报启动失败并给出真实原因。 */
+  val startFailed: Boolean get() = synchronized(lock) { failureCount >= START_FAILURE_THRESHOLD }
+
+  /** 自动重试是否已解禁（退避窗口已过，或尚无失败记录）。**只约束自动重试**，不挡用户显式动作。 */
+  fun canAutoRetry(now: Long): Boolean = synchronized(lock) { nextAttemptAt == 0L || now >= nextAttemptAt }
+
+  /** 距离下一次自动重试还差的毫秒数；0 = 现在就可以重试（未排期或已到点）。 */
+  fun autoRetryAfterMs(now: Long): Long = synchronized(lock) { (nextAttemptAt - now).coerceAtLeast(0L) }
+
+  /** 记一次启动失败并按指数退避排下一次自动重试（[now] <= 0 时只记账不排期）。 */
+  private fun recordFailure(now: Long) {
+    failureCount += 1
+    nextAttemptAt = if (now > 0L) now + retryDelayMs(failureCount) else 0L
+  }
+
+  private fun clearFailures() {
+    failureCount = 0
+    nextAttemptAt = 0L
+  }
 
   /** 当前这次绑定的已等待毫秒数；未在绑定中返回 -1（**不得**用 0 冒充，0 是合法等待值）。 */
   fun attemptAgeMs(now: Long): Long = synchronized(lock) { if (bindingFlag) now - bindingSince else -1L }
@@ -62,6 +105,7 @@ internal class ShizukuBindState(private val watchdogMs: Long) {
     bindingFlag = false
     generation += 1
     error = ShizukuBindCodes.BIND_TIMEOUT
+    recordFailure(now)
     true
   }
 
@@ -80,10 +124,20 @@ internal class ShizukuBindState(private val watchdogMs: Long) {
   }
 
   /** `onServiceConnected`：binder 无效时**不得**当成连上（与 bound 判据同口径）。 */
-  fun onConnected(binderValid: Boolean, callbackGeneration: Long = currentGeneration): Boolean = synchronized(lock) {
+  fun onConnected(
+    binderValid: Boolean,
+    callbackGeneration: Long = currentGeneration,
+    now: Long = 0L,
+  ): Boolean = synchronized(lock) {
     if (callbackGeneration != generation || !bindingFlag) return false
     bindingFlag = false
-    error = if (binderValid) "" else ShizukuBindCodes.INVALID_BINDER
+    if (binderValid) {
+      error = ""
+      clearFailures()
+    } else {
+      error = ShizukuBindCodes.INVALID_BINDER
+      recordFailure(now)
+    }
     true
   }
 
@@ -96,11 +150,16 @@ internal class ShizukuBindState(private val watchdogMs: Long) {
   }
 
   /** 发起即抛异常：必须复位，否则那个永不回调的闩会把后续调用全挡死。 */
-  fun onBindThrew(errorCode: String, callbackGeneration: Long = currentGeneration): Boolean = synchronized(lock) {
+  fun onBindThrew(
+    errorCode: String,
+    callbackGeneration: Long = currentGeneration,
+    now: Long = 0L,
+  ): Boolean = synchronized(lock) {
     if (callbackGeneration != generation) return false
     bindingFlag = false
     generation += 1
     error = errorCode
+    recordFailure(now)
     true
   }
 
@@ -123,8 +182,23 @@ internal class ShizukuBindState(private val watchdogMs: Long) {
     bindingFlag = false
     generation += 1
     error = ShizukuBindCodes.RESET
+    // 用户显式重置是一次「重新来过」：退避窗口随之解除，否则点了重置还要干等几分钟。
+    clearFailures()
     Unit
   }
+}
+
+/**
+ * 指数退避（issue #471）：第 n 次连续失败后等待 `15s * 2^(n-1)`，上限 5 分钟。
+ *
+ * 现场（issue #471）：联发科 ROM 上 UserService 子进程启动即崩，客户端每 ~20s 重试一次，
+ * 676+ 次全失败且界面永远只说「通道建立中」。退避把注定失败的重试从「20s 一次」降到
+ * 「15s → 30s → 60s → … → 300s」，同时让 UI 有机会把真实原因呈现出来。
+ */
+internal fun retryDelayMs(failures: Int): Long {
+  if (failures <= 0) return 0L
+  val exponent = (failures - 1).coerceAtMost(5)
+  return (ShizukuBindState.RETRY_BASE_MS shl exponent).coerceAtMost(ShizukuBindState.RETRY_CAP_MS)
 }
 
 /** 绑定面的结构化 code（跨层契约：插件 `shellFailureText` 按 `CONNECTING` 分流）。 */
@@ -142,6 +216,12 @@ internal object ShizukuBindCodes {
   const val INVALID_BINDER = "shizuku-user-service-invalid-binder"
 
   const val DISCONNECTED = "shizuku-user-service-disconnected"
+
+  /**
+   * 连续 [ShizukuBindState.START_FAILURE_THRESHOLD] 次启动失败（issue #471）。
+   * 这不是「正在建立」，也不是一次瞬时绑定失败——用户服务反复启动即崩，需要看真实原因。
+   */
+  const val START_FAILED = "shizuku-user-service-start-failed"
 
   /**
    * 用户主动「重置链接」后的态：绑定记账已清空，Shizuku 侧旧 UserService 已被请求移除。
@@ -186,6 +266,10 @@ internal fun shizukuBindGuidance(code: String, binding: Boolean, ageMs: Long, wa
       "The Shizuku UserService disconnected. Retry the same command to reconnect."
     code == ShizukuBindCodes.INVALID_BINDER ->
       "Shizuku returned an invalid binder (the UserService probably failed to start). Check Shizuku is running and retry."
+    code == ShizukuBindCodes.START_FAILED ->
+      "The Shizuku UserService failed to start repeatedly; automatic retries are backing off. " +
+        "Open Phone control to read the captured startup log. If you use Shizuku 13.6.0, " +
+        "downgrade to 13.5.4 or switch to the ADB channel."
     code.startsWith("shizuku-user-service-bind-failed") ->
       "Shizuku refused the channel ($code). Check that Shizuku is running and this app is still granted, then retry."
     code == ShizukuBindCodes.RESET ->
@@ -205,6 +289,9 @@ internal fun shizukuBindGuidance(code: String, binding: Boolean, ageMs: Long, wa
       "Shizuku UserService 已断开。重试同一命令会重新建立连接。"
     code == ShizukuBindCodes.INVALID_BINDER ->
       "Shizuku 返回的 binder 无效（UserService 很可能启动失败）。请在 Shizuku 应用内确认其服务仍在运行后重试。"
+    code == ShizukuBindCodes.START_FAILED ->
+      "Shizuku 用户服务连续启动失败，自动重试已进入退避。请在设置页「手机控制」展开诊断日志查看真实原因；" +
+        "若使用 Shizuku 13.6.0，可降级到 13.5.4，或改用 ADB 通道。"
     code.startsWith("shizuku-user-service-bind-failed") ->
       "Shizuku 拒绝建立通道（$code）。请确认 Shizuku 服务仍在运行、本应用仍被授权后重试。"
     // ── 重置后的态（三态诚实：说清「已做什么 / 现在什么态 / 还不行怎么办」）──────────
@@ -242,3 +329,142 @@ internal fun shizukuBindGuidance(code: String, binding: Boolean, ageMs: Long, wa
  */
 internal fun shizukuResetResponse(status: JSONObject): JSONObject =
   status.put("ok", true).put("reset", true)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// issue #471：连续启动失败的诊断与引导（联发科 ROM + Shizuku 13.6.0）
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// 现场：MTK ROM 在 `LoadedApk.makeApplicationInner` 里调用 `Application.getProcessName()`
+// （Shizuku 以 app_process 启动子进程时返回 null）后 `.equals()` 崩溃；子进程
+// `com.dsharnessmobile.shell:dsh-vdisplay` 随即 `System.exit(1)`，Shizuku 30s 后判 not started。
+// 客户端看到的只是「绑定不回调」——真实原因只存在于 logcat 的子进程堆栈里。
+//
+// 因此连续失败达阈值后，客户端主动截取一段 logcat（有界 + 过滤）随 status 暴露给 UI；
+// 下面的纯函数负责「从日志认出现场」与「把现场翻成下一步动作」。
+
+/** 启动失败的已知形态。 */
+internal enum class ShizukuStartFailureKind { NONE, ROM_LOADED_APK_NPE, PROCESS_EXITED, UNKNOWN }
+
+/** 诊断截取时保留的行特征：用户服务启动链、进程崩溃与 ROM 注入栈。 */
+private val START_FAILURE_TOKENS = listOf(
+  "dsh-vdisplay", "ShizukuServiceStarter", "makeApplicationInner", "LoadedApk",
+  "FATAL EXCEPTION", "System.exit", "NullPointerException", "ShizukuUserService",
+  "rikka.shizuku",
+)
+
+/**
+ * 从 logcat 原文识别启动失败形态（纯函数）。
+ *
+ * 判据纪律：`ROM_LOADED_APK_NPE` 必须同时指向 ROM 注入栈（`makeApplicationInner`，
+ * 或 `LoadedApk` + `NullPointerException`），不能只凭一句 `System.exit` 就归罪 ROM——
+ * 那样会把任何用户服务的普通崩溃都误导到「降级 Shizuku」。
+ */
+internal fun classifyShizukuStartFailure(logs: String): ShizukuStartFailureKind {
+  if (logs.isBlank()) return ShizukuStartFailureKind.NONE
+  if ("makeApplicationInner" in logs ||
+    ("LoadedApk" in logs && "NullPointerException" in logs)
+  ) {
+    return ShizukuStartFailureKind.ROM_LOADED_APK_NPE
+  }
+  if ("FATAL EXCEPTION" in logs || "System.exit" in logs || "has died" in logs) {
+    return ShizukuStartFailureKind.PROCESS_EXITED
+  }
+  return ShizukuStartFailureKind.UNKNOWN
+}
+
+/**
+ * 截取诊断日志尾部：只留与用户服务启动相关的行，行数与字节双重有界。
+ *
+ * 命中行之后最多紧跟 [STACK_CARRY] 条堆栈续行（`at ...` / `Caused by:` / `... N more`）。
+ * 没有这条规则，`java.lang.NullPointerException` 之后的所有帧都会被过滤掉——而「哪个方法
+ * 抛的、被谁调用」正是本 issue 需要暴露给用户的现场。
+ */
+internal fun shizukuDiagnosticsExcerpt(
+  rawLogcat: String,
+  maxLines: Int = 40,
+  maxChars: Int = 6_000,
+): String {
+  val kept = ArrayList<String>()
+  var carry = 0
+  for (line in rawLogcat.lineSequence()) {
+    if (START_FAILURE_TOKENS.any { token -> token in line }) {
+      kept.add(line)
+      carry = STACK_CARRY
+      continue
+    }
+    if (carry > 0 && isStackContinuation(line)) {
+      kept.add(line)
+      carry -= 1
+      continue
+    }
+    carry = 0
+  }
+  if (kept.isEmpty()) {
+    return "logcat 中没有匹配到 UserService 启动失败记录" +
+      "（已查找 dsh-vdisplay / ShizukuServiceStarter / LoadedApk / FATAL EXCEPTION）。"
+  }
+  val tail = kept.takeLast(maxLines.coerceAtLeast(1)).joinToString("\n")
+  return if (tail.length <= maxChars) tail else tail.takeLast(maxChars)
+}
+
+/** 命中行后允许携带的堆栈续行数。 */
+private const val STACK_CARRY = 12
+
+/** logcat 前缀后可能紧跟栈帧（`E/AndroidRuntime( 200):     at ...`），两种线程格式都要认。 */
+private val STACK_FRAME_LINE = Regex(
+  """:\s+at\s+[\w.$]+\(|^\s*at\s+[\w.$]+\(|:\s+Caused by:|^\s*Caused by:|:\s+\.\.\. \d+ more|^\s*\.\.\. \d+ more""",
+)
+
+private fun isStackContinuation(line: String): Boolean =
+  STACK_FRAME_LINE.containsMatchIn(line) ||
+    // 异常头行本身不带匹配 token 时也要留下，否则后面的帧会全部断掉。
+    Regex("""(java|android|dalvik)\.[\w.$]+(Exception|Error)""").containsMatchIn(line)
+
+/**
+ * 连续启动失败的引导文案（纯函数，中英双语，英文不得混入中文）。
+ *
+ * @param kind 从诊断日志识别出的形态。
+ * @param failures 连续失败次数。
+ * @param retryAfterMs 距离下一次自动重试的毫秒数（指数退避）。
+ */
+internal fun shizukuStartFailureGuidance(
+  kind: ShizukuStartFailureKind,
+  failures: Int,
+  retryAfterMs: Long,
+  english: Boolean = false,
+): String {
+  val retrySec = (retryAfterMs.coerceAtLeast(0L) + 999L) / 1000L
+  val nextZh = if (retrySec > 0L) "下一次自动重试在 ${retrySec}s 后。" else "现在可以点「重置链接」后手动重试。"
+  val nextEn = if (retrySec > 0L) "The next automatic retry is in ${retrySec}s." else "You can tap Reset link and retry now."
+  if (english) {
+    return when (kind) {
+      ShizukuStartFailureKind.ROM_LOADED_APK_NPE ->
+        "The Shizuku UserService crashed on all $failures consecutive starts: the system ROM threw " +
+          "a NullPointerException in LoadedApk.makeApplicationInner and the child process called System.exit(1). " +
+          "This is a known conflict between Shizuku 13.6.0 and some MediaTek ROMs; automatic retries cannot fix it. " +
+          "Downgrade Shizuku to 13.5.4 (the temporary workaround) and restart this app, or switch to the ADB channel " +
+          "(wireless debugging). $nextEn"
+      ShizukuStartFailureKind.PROCESS_EXITED ->
+        "The Shizuku UserService exited right after starting, on all $failures consecutive attempts " +
+          "(the child process crash stack is in the startup log on this page). If you use Shizuku 13.6.0, " +
+          "try downgrading to 13.5.4, or switch to the ADB channel. $nextEn"
+      ShizukuStartFailureKind.NONE, ShizukuStartFailureKind.UNKNOWN ->
+        "The Shizuku UserService failed to start $failures times in a row; the diagnosed startup log is shown " +
+          "on this page (collection can take a few seconds; refresh status if it is not there yet). " +
+          "If you use Shizuku 13.6.0 on a MediaTek device, try downgrading to 13.5.4 or switch to the ADB channel. $nextEn"
+    }
+  }
+  return when (kind) {
+    ShizukuStartFailureKind.ROM_LOADED_APK_NPE ->
+      "Shizuku 用户服务连续 $failures 次启动即崩溃：系统 ROM 在 LoadedApk.makeApplicationInner 处抛出" +
+        " NullPointerException，子进程随后 System.exit(1)。这是 Shizuku 13.6.0 与部分联发科（MTK）ROM 的" +
+        "已知冲突，自动重试不会恢复。请把 Shizuku 降级到 13.5.4（临时规避）后重启本应用，或改用 ADB 通道" +
+        "（无线调试）。$nextZh"
+    ShizukuStartFailureKind.PROCESS_EXITED ->
+      "Shizuku 用户服务连续 $failures 次启动后立即退出（子进程崩溃堆栈见本页诊断日志）。" +
+        "若使用 Shizuku 13.6.0，请尝试降级到 13.5.4，或改用 ADB 通道。$nextZh"
+    ShizukuStartFailureKind.NONE, ShizukuStartFailureKind.UNKNOWN ->
+      "Shizuku 用户服务连续 $failures 次启动失败，诊断日志会显示在本页（截取需要数秒，暂未出现可点" +
+        "「刷新状态」）。若使用 Shizuku 13.6.0 且设备为联发科，可降级到 13.5.4 或改用 ADB 通道。$nextZh"
+  }
+}
