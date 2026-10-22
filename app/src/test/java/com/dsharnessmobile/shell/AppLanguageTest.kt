@@ -87,4 +87,13 @@ class AppLanguageTest {
     assertTrue(script.contains("preference:\"en\""))
   }
 
+  @Test
+  fun bootstrapScriptMirrorsUserLanguageChanges() {
+    val script = AppLanguage.bootstrapScript("system", listOf("zh-CN"))
+    assertTrue("设置页切换语言必须回到壳侧", script.contains("setUiLanguage"))
+    // dsh 在页面加载时先用解析结果调一次 onChange；那是自动选择，不是用户选择，
+    // 写回壳偏好会把「跟随系统」钉成某个固定语言。
+    assertTrue("第一次自动发布必须忽略", script.contains("if(first){first=false;return}"))
+  }
+
 }

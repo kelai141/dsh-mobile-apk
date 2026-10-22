@@ -339,8 +339,31 @@ class MainActivity : ComponentActivity() {
       if (guideViewReady) guideView.visibility = View.VISIBLE
       return
     }
+    // 引擎设置页改语言只落偏好、不重建本 Activity；启动页再次出现前补一次重建，
+    // 否则原生文案一直是旧语言，直到下次冷启动。
+    if (refreshUiLanguageIfChanged()) return
     guideRenderer.showGuide()
   }
+
+  /**
+   * 界面语言偏好与当前原生视图树不一致时重建 Activity。
+   *
+   * 两条改语言入口：壳侧管理中心的语言行会自己 recreate()；引擎设置页走桥
+   * `setUiLanguage`，只写偏好与 profile。启动页重新出现时在 UI 线程重建一次，
+   * 让标题、按钮、管理中心与启动页管理页都换成新语言。
+   * @return true 表示已发起重建，调用方不得再操作旧视图。
+   */
+  private fun refreshUiLanguageIfChanged(): Boolean {
+    if (isFinishing || isDestroyed) return false
+    val mode = AppLanguage.mode(this)
+    if (mode == appliedUiLanguage) return false
+    appliedUiLanguage = mode
+    recreate()
+    return true
+  }
+
+  /** 当前原生视图树构建时使用的界面语言（见 refreshUiLanguageIfChanged）。 */
+  private var appliedUiLanguage: String = AppLanguage.MODE_SYSTEM
 
   /** 恢复 WebUI（委托 GuidePageRenderer）。 */
   internal fun showWeb() {
@@ -446,6 +469,9 @@ class MainActivity : ComponentActivity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    // 本实例的原生视图树是按创建时的界面语言构建的；桥在运行期改语言后靠
+    // refreshUiLanguageIfChanged() 在启动页再次出现前重建。
+    appliedUiLanguage = AppLanguage.mode(this)
     // 0.14.9：「打开应用后自动启动」是用户的显式意图，冷启动时优先于上一次的持久化停机标记。
     // 旧行为把「划过任务卡/手动停止」留下的 userShutdown 一路带到下次打开，开关明明开着却
     // 停在启动页——看起来就是开关失效。同一次会话内的停止仍由 savedInstanceState 保留，

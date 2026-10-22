@@ -228,10 +228,16 @@ internal object AppLanguage {
     val preference = if (mode == MODE_SYSTEM) "null" else jsQuote(mode)
     val ordered = languages.filter { it.isNotBlank() }.distinct()
     val tags = (ordered.ifEmpty { listOf(MODE_ZH) }).joinToString(",") { jsQuote(it) }
+    // onChange 的第一次调用是 dsh 发布「它自己解析出的当前语言」，不是用户选择：
+    // 把它写回壳偏好会把「跟随系统」变成固定语言。之后的选择才是用户在设置页
+    // 显式切换，交回壳侧存 ui_language 并同步 profile（壳侧据偏好重建原生界面）。
     return "(function(){try{" +
-      "var tags=[$tags];" +
+      "var tags=[$tags];var first=true;" +
       "globalThis.__DSH_LOCALE__={read:function(){return Promise.resolve({languages:tags,preference:$preference})}," +
-      "onChange:function(){}};" +
+      "onChange:function(locale){if(first){first=false;return}" +
+      "try{var b=window.androidBridge;" +
+      "if(b&&typeof b.setUiLanguage==='function')b.setUiLanguage(String(locale))" +
+      "}catch(e){}}};" +
       "}catch(e){}})();"
   }
 
