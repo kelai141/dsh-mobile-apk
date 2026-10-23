@@ -96,6 +96,13 @@ jobs:
       - name: op 清单跨语言对等门禁
         if: always()
         run: node scripts/check-op-registry-parity.mjs
+      # 镜像前缀表双真源一致性：壳侧 UpdateChecker.MIRROR_PREFIXES 与下载站
+      # webpages/src/assets/release.js 的 MIRROR_TEMPLATES 必须逐条同序。两份表曾漂移成
+      # 3 条 vs 4 条（壳侧缺 ghproxy.net），后果是「应用内下载」与「浏览器下载」走不同
+      # 线路集合，且没有任何一层为不一致负责。顺序即回退优先级，故判据不排序。
+      - name: 镜像前缀表一致性门禁
+        if: always()
+        run: node scripts/check-mirror-parity.mjs
       # 工具名「承诺 vs 实现」（0.14.1）：指引里提到的 android_* 工具名必须真有声明位
       # （android_vdisplay_input 曾被三处文案与 Skill 文档承诺却从未 defineTool）。
       - name: 工具名承诺门禁
