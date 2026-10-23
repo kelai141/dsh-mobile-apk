@@ -2096,6 +2096,8 @@ dsh-client-ui-responsive/src/client/mobile/incoming-runtime.ts
 dsh-client-ui-responsive/tests/incoming-runtime.spec.ts
 dsh-client-ui-responsive/src/client/mobile/mobile-workspaces.ts
 dsh-client-ui-responsive/src/client/mobile/mobile-workspaces.css.ts
+dsh-client-ui-responsive/src/client/mobile/drawer-overlay-dismiss.ts
+dsh-client-ui-responsive/tests/drawer-overlay-dismiss.spec.ts
 scripts/verify-mobile-workspaces.mjs
 dsh-client-ui-responsive/src/client/mobile/sidebar-bubbles.ts
 dsh-client-ui-responsive/src/client/mobile/sidebar-bubbles.css.ts

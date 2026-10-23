@@ -69,6 +69,7 @@ import { TopBarFold } from './mobile/top-bar-fold.ts'
 import { TOP_BAR_FOLD_CSS } from './mobile/top-bar-fold.css.ts'
 import { NewSessionDrawer } from './mobile/new-session-drawer.ts'
 import { SidebarSessionDismiss } from './mobile/sidebar-session-dismiss.ts'
+import { DrawerOverlayDismiss } from './mobile/drawer-overlay-dismiss.ts'
 import { registerConversationDock, ConversationDropZone, conversationAddress, existingConversation, retainDockIdentity, resolveDockSubagent, CONVERSATION_DOCK_CSS } from './mobile/conversation-dock.tsx'
 import { SidebarReorder } from './mobile/sidebar-reorder.ts'
 import { SIDEBAR_REORDER_CSS } from './mobile/sidebar-reorder.css.ts'
@@ -734,6 +735,18 @@ export function apply(ctx: ClientContext): void {
     dismiss.attach()
     return () => { dismiss.detach() }
   }, 'ui-responsive: sidebar conversation selection dismisses drawer')
+
+  // issue #489：抽屉收起时，侧栏里打开的 portal 行菜单（工作区「…」等）仍浮在页面上。
+  // 收起入口不止本插件注入的几条（上游抽屉自己的折叠按钮直通布局服务，包装不到），所以
+  // 不逐条包装动作，而是监听 frame 的 data-sidebar-collapsed「开 → 合」翻转——那是全部
+  // 收起路径的唯一汇总点；翻转时派发一次外部 pointerdown，让各浮层走自己的外部关闭判据。
+  ctx.effect(() => {
+    const overlays = new DrawerOverlayDismiss({
+      mobileForm: () => document.documentElement.hasAttribute('data-dsh-mobile-form'),
+    })
+    overlays.attach()
+    return () => { overlays.detach() }
+  }, 'ui-responsive: drawer collapse dismisses transient overlays')
 
   // 0.14.7（Spec §2.2）侧边栏会话行长按拖动重排。与上面的 MobileSidebarGestures 靠 DOM 属性
   // 互斥（不靠注册顺序）：重排激活期间在 <html> 打标记，R1 手势据此拒绝认领 / 中途放弃。
