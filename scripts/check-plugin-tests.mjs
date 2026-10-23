@@ -21,6 +21,13 @@ const PLUGIN_DIR = join(ROOT, 'plugins')
 /** A test runner must not hold CI forever; a hard timeout keeps the failing unit visible. */
 const TEST_TIMEOUT_MS = 5 * 60 * 1000
 
+/** Kill the whole process group on POSIX so npm/npx grandchildren cannot hold CI open. */
+function runCommand(bin, args, options) {
+  if (process.platform !== 'linux') return spawnSync(bin, args, { ...options, timeout: TEST_TIMEOUT_MS })
+  return spawnSync('timeout', ['--kill-after=10s', Math.ceil(TEST_TIMEOUT_MS / 1000) + 's', bin, ...args],
+    { ...options, timeout: TEST_TIMEOUT_MS + 15_000 })
+}
+
 /** Convert a Windows drive path for the WSL npm installation when it exists. */
 function toWslPath(path) {
   const full = resolve(path)
@@ -72,7 +79,8 @@ for (const plugin of plugins.sort()) {
     ? args
     : ['vitest', 'run', '--root', join(PLUGIN_DIR, plugin), ...files.map((f) => f.slice(join(PLUGIN_DIR, plugin).length + 1))]
   const bin = usesNodeTest ? process.execPath : (process.platform === 'win32' ? 'npx.cmd' : 'npx')
-  const r2 = spawnSync(bin, spawnArgs, { cwd: join(PLUGIN_DIR, plugin), encoding: 'utf8', timeout: TEST_TIMEOUT_MS })
+  console.log('RUN   ' + plugin + '（' + (usesNodeTest ? 'node:test' : 'vitest') + '）')
+  const r2 = runCommand(bin, spawnArgs, { cwd: join(PLUGIN_DIR, plugin), encoding: 'utf8' })
   const out2 = (r2.stdout ?? '') + (r2.stderr ?? '')
   // 通过数：node:test spec 报 'ℹ pass N'；vitest 报 'Tests N passed'。两者都接受，任一为 0 判红。
   // 通过数：node:test spec 报 'ℹ pass N'；vitest 报 'Tests N passed'；Node 20 TAP 报 '# pass N'。
@@ -170,14 +178,14 @@ for (const repo of SUBREPO_TESTS) {
   // ——重试只影响「怎么起 npm」，判据仍是它的退出码与通过数。
   const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm'
   let r3 = useWslNpm
-    ? spawnSync('wsl.exe', ['--cd', wslDir, '--exec', 'env', 'npm_config_cache=/tmp/dsh-mobile-npm-cache', 'npm', 'test'], { cwd: dir, encoding: 'utf8', timeout: TEST_TIMEOUT_MS })
+    ? runCommand('wsl.exe', ['--cd', wslDir, '--exec', 'env', 'npm_config_cache=/tmp/dsh-mobile-npm-cache', 'npm', 'test'], { cwd: dir, encoding: 'utf8' })
     : useNpm
-      ? spawnSync(npmBin, ['test'], { cwd: dir, encoding: 'utf8', timeout: TEST_TIMEOUT_MS })
-      : spawnSync(process.execPath, ['--test', '--test-force-exit', '--test-reporter=spec', ...bare], { cwd: dir, encoding: 'utf8', timeout: TEST_TIMEOUT_MS })
+      ? runCommand(npmBin, ['test'], { cwd: dir, encoding: 'utf8' })
+      : runCommand(process.execPath, ['--test', '--test-force-exit', '--test-reporter=spec', ...bare], { cwd: dir, encoding: 'utf8' })
   if (useNpm && (r3.error !== undefined || r3.status === null)) {
     console.log('NOTE  ' + repo + '：npm 直调失败（' + String(r3.error?.code ?? 'no-status') + '），退到 shell 重试')
     // shell:true 在 Node 24 会打一条 DEP0190 弃用提示（noise，与被测对象无关），子进程关掉它。
-    r3 = spawnSync(npmBin, ['test'], { cwd: dir, encoding: 'utf8', shell: true, env: { ...process.env, NODE_OPTIONS: '--no-deprecation' }, timeout: TEST_TIMEOUT_MS })
+    r3 = runCommand(npmBin, ['test'], { cwd: dir, encoding: 'utf8', shell: true, env: { ...process.env, NODE_OPTIONS: '--no-deprecation' } })
   }
   if (r3.error !== undefined && r3.error !== null) {
     failed += 1
