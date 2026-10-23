@@ -23,6 +23,124 @@ class RepairModelConfigTest {
   }
 
   @Test
+  fun officialDefaultCanBeReadWithoutNodeOrAnIntactRuntimeBundle() {
+    File(home, ".dsh/profiles/web/cordis.patch.yml").writeText("""
+      - id: agent-default-model
+        config:
+          provider: deepseek-official
+          model: deepseek-flash
+    """.trimIndent())
+    File(home, ".dsh/.credentials.yaml").writeText("refs:\n  DEEPSEEK_API_KEY: local-test-secret\n")
+    val result = RepairModelConfig.loadDetailed(home)
+    assertEquals("deepseek-flash", result.connections.single().model)
+    assertEquals("deepseek-official", result.connections.single().provider)
+    assertTrue(result.defaultAvailable)
+    assertTrue(result.sources.any { it.path.endsWith("cordis.patch.yml") && it.status == "parsed" })
+    assertTrue(result.sources.none { it.toString().contains("local-test-secret") })
+  }
+
+  @Test
+  fun finalHomeOverrideDeepMergesProviderAndCanDisableIt() {
+    File(home, ".dsh/profiles/web/cordis.patch.yml").writeText("""
+      - insert:
+        - id: llm-pi-ai
+          name: '@deepseek-ai/dsh-llm-pi-ai'
+          config:
+            providers:
+              custom:
+                apiKeyEnv: CUSTOM_KEY
+                baseURL: https://old.example/v1
+                models:
+                  - id: chosen
+      - id: persona
+        config:
+          prompt: |
+            providers: this is prompt text, not configuration
+            apiKeyEnv: do-not-parse-me
+    """.trimIndent())
+    File(home, ".dsh/.credentials.yaml").writeText("refs:\n  CUSTOM_KEY: test-secret\n")
+    val final = File(home, ".dsh/cordis.patch.yml")
+    final.writeText("""
+      - id: llm-pi-ai
+        config:
+          providers:
+            custom:
+              baseURL: https://repaired.example/v1
+      - id: agent-default-model
+        config:
+          provider: custom
+          model: chosen
+    """.trimIndent())
+    val result = RepairModelConfig.loadDetailed(home)
+    assertEquals("https://repaired.example/v1", result.connections.single().baseUrl)
+    assertEquals("test-secret", result.connections.single().apiKey)
+    final.appendText("\n- id: llm-pi-ai\n  disabled: true\n")
+    assertTrue(RepairModelConfig.load(home).isEmpty())
+  }
+
+  @Test
+  fun selectedBundleConfigurationParticipatesBeforeProfileAndHome() {
+    val profile = File(home, ".dsh/profiles/web")
+    File(profile, "package.json").writeText("""{"dsh":{"profile":{"bundles":["@user/model-config"]}}}""")
+    val bundle = File(profile, "node_modules/@user/model-config").apply { mkdirs() }
+    File(bundle, "package.json").writeText("""{"name":"@user/model-config","dsh":{"bundle":{"patch":"cordis.patch.yml"}}}""")
+    File(bundle, "cordis.patch.yml").writeText("""
+      - insert:
+        - id: llm-deepseek
+          name: '@deepseek-ai/dsh-llm-deepseek'
+      - id: agent-default-model
+        config:
+          provider: deepseek-official
+          model: my-explicit-model
+    """.trimIndent())
+    File(home, ".dsh/.credentials.yaml").writeText("refs:\n  DEEPSEEK_API_KEY: test-secret\n")
+    assertEquals("my-explicit-model", RepairModelConfig.load(home).single().model)
+  }
+
+  @Test
+  fun twoSpaceInsertIndentationIsParsedLikeTheFactoryFourSpaceForm() {
+    File(home, ".dsh/profiles/web/cordis.patch.yml").writeText(
+      """
+      - insert:
+        - id: llm-deepseek
+          name: '@deepseek-ai/dsh-llm-deepseek'
+      - id: agent-default-model
+        config:
+          provider: deepseek-official
+          model: compact-indent
+      """.trimIndent() + "\n",
+    )
+    File(home, ".dsh/.credentials.yaml").writeText("refs:\n  DEEPSEEK_API_KEY: test-secret\n")
+    assertEquals("compact-indent", RepairModelConfig.load(home).single().model)
+  }
+
+  @Test
+  fun missingCredentialsAndAnUnavailableDefaultNeverInventOrSwitchRoutes() {
+    File(home, ".dsh/cordis.patch.yml").writeText("""
+      - id: agent-default-model
+        config:
+          provider: unknown-provider
+          model: must-not-switch
+    """.trimIndent())
+    File(home, ".dsh/settings.yaml").writeText("llm-deepseek:\n  model: legacy-model\n")
+    val missing = RepairModelConfig.loadDetailed(home)
+    assertTrue(missing.connections.isEmpty())
+    assertTrue(!missing.defaultAvailable)
+    val available = RepairModelConfig.loadDetailed(home, mapOf("DEEPSEEK_API_KEY" to "test-secret"))
+    assertEquals("legacy-model", available.connections.single().model)
+    assertTrue("有其它可选连接也不能自动改用它", !available.defaultAvailable)
+  }
+
+  @Test
+  fun opaqueMultilineCredentialsAreNeverGuessedAndMalformedDocumentsAreDiagnosed() {
+    File(home, ".dsh/.credentials.yaml").writeText("refs:\n  DEEPSEEK_API_KEY: |\n    do-not-guess\n")
+    File(home, ".dsh/settings.yaml").writeText("llm-deepseek:\n  model: explicit\n")
+    assertTrue(RepairModelConfig.load(home).isEmpty())
+    File(home, ".dsh/cordis.patch.yml").writeText("- id: x\n    config: invalid-indentation\n")
+    assertTrue(RepairModelConfig.loadDetailed(home).sources.any { it.status == "invalid" })
+  }
+
+  @Test
   fun activeProfileProvidesRoutesAndSelectsTheDshDefault() {
     File(home, ".dsh/profiles/web/cordis.patch.yml").writeText(
       """

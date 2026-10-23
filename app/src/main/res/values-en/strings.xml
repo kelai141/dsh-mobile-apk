@@ -62,12 +62,13 @@
   <string name="a11y_service_label">DeepCode device control</string>
   <string name="a11y_service_summary">Lets the AI read the screen semantically and operate controls</string>
   <string name="a11y_service_description">When enabled, the AI can read the current screen controls (text, description, position) and tap, type, or scroll. It only works while you keep it on, stops as soon as you turn it off, and also requires a session in full-access mode.</string>
-  <string name="ds_start_port_foreign">Local port 3080 is used by another program; this app did not stop it. Close the conflicting app and tap Retry, or restart the device. [port-foreign]</string>
+  <string name="ds_start_port_foreign">The local engine port is used by another program; this app did not stop it. Close the conflicting app and tap Retry, or restart the device. [port-foreign]</string>
   <string name="ds_start_private_denied">The app cannot write its private runtime folder. Public file access does not fix this. Restart the device and reopen the app; if it still fails, open the console and copy the log. Safe mode only removes plugins and cannot repair folder permissions. [private-storage-denied]</string>
   <string name="ds_start_storage_full">The device reports low storage. Free some space, then tap Start in safe mode; that button only removes plugins and frees no space. Do not clear this app data. [storage-full]</string>
   <string name="ds_start_runtime_unavailable">The runtime or a required plugin is not ready. Open the console and copy the log for the reason; safe mode keeps the existing recovery entries. [runtime-unavailable]</string>
   <string name="ds_start_unknown">The startup failure cause is not known yet. Open the console or copy the log and report it; you can also try safe mode to remove third-party plugins temporarily. [start-unknown]</string>
   <string name="ds_start_retry">Retry startup</string>
+  <string name="ds_repair_assistant">Start repair assistant</string>
   <string name="ds_share_log">Share diagnostics</string>
   <string name="ds_share_log_working">Packaging diagnostic logs…</string>
   <string name="ds_share_log_done">Diagnostics %1$s ready; choose an app to send it to</string>

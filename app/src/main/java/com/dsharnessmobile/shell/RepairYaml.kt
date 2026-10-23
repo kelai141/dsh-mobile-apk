@@ -11,6 +11,8 @@ package com.dsharnessmobile.shell
  * constructs rather than silently guessing a route.
  */
 internal sealed class RepairYamlValue {
+  /** An unrelated YAML block (for example a persona prompt); never a usable route scalar. */
+  class Opaque : RepairYamlValue()
   class Scalar(val value: String) : RepairYamlValue()
   class Mapping(val values: LinkedHashMap<String, RepairYamlValue>) : RepairYamlValue()
   class Sequence(val values: MutableList<RepairYamlValue>) : RepairYamlValue()
@@ -23,7 +25,11 @@ internal sealed class RepairYamlValue {
 
 internal object RepairYaml {
   fun parse(text: String): RepairYamlValue {
-    val lines = text.replace("\r\n", "\n").split("\n")
+    if (text.trimStart().startsWith("---")) {
+      val body = text.substring(text.indexOf("---") + 3)
+      return parse(body)
+    }
+    val lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
       .mapIndexedNotNull { index, raw -> parseLine(index + 1, raw) }
     if (lines.isEmpty()) return RepairYamlValue.Mapping(LinkedHashMap())
     val parser = Parser(lines)
@@ -44,7 +50,8 @@ internal object RepairYaml {
 
   private fun stripComment(raw: String): String {
     var quote: Char? = null
-    for (i in raw.indices) {
+    var i = 0
+    while (i < raw.length) {
       val c = raw[i]
       if (quote != null) {
         if (c == quote && (i == 0 || raw[i - 1] != '\\')) quote = null
@@ -53,6 +60,7 @@ internal object RepairYaml {
       } else if (c == '#' && (i == 0 || raw[i - 1].isWhitespace())) {
         return raw.substring(0, i)
       }
+      i++
     }
     return raw
   }
@@ -90,8 +98,7 @@ internal object RepairYaml {
           inline.isEmpty() -> childOrEmpty(indent)
           inline == "{}" -> RepairYamlValue.Mapping(LinkedHashMap())
           inline == "[]" -> RepairYamlValue.Sequence(mutableListOf())
-          inline.startsWith("|") || inline.startsWith(">") ->
-            throw IllegalArgumentException("block scalars are not supported: " + key)
+          isBlockHeader(inline) -> blockScalar(inline, indent)
           inline.startsWith("{") || inline.startsWith("[") -> flow(inline)
           else -> RepairYamlValue.Scalar(unquote(inline))
         }
@@ -111,13 +118,20 @@ internal object RepairYaml {
         when {
           rest.isEmpty() -> values += childOrEmpty(indent)
           rest.startsWith("{") || rest.startsWith("[") -> values += flow(rest)
+          isBlockHeader(rest) -> values += blockScalar(rest, indent)
           splitKey(rest) != null -> {
             val objectIndent = indent + 2
             val valuesInItem = LinkedHashMap<String, RepairYamlValue>()
             val first = splitKey(rest)!!
             val firstValue = first.second.trim()
-            valuesInItem[unquote(first.first)] = if (firstValue.isEmpty()) childOrEmpty(objectIndent)
-              else scalarOrFlow(firstValue)
+            valuesInItem[unquote(first.first)] = when {
+              // The first key used the sequence dash itself as its parent. Valid
+              // YAML may indent its value at the sibling level (two spaces) or
+              // deeper (four spaces); only the former is also the object indent.
+              firstValue.isEmpty() -> childOrEmpty(indent)
+              isBlockHeader(firstValue) -> blockScalar(firstValue, objectIndent)
+              else -> scalarOrFlow(firstValue)
+            }
             while (index < lines.size && lines[index].indent == objectIndent &&
               !lines[index].text.startsWith("-")) {
               val child = lines[index]
@@ -125,8 +139,11 @@ internal object RepairYaml {
                 ?: throw IllegalArgumentException("expected mapping key: " + child.text)
               index++
               val tail = pair.second.trim()
-              valuesInItem[unquote(pair.first)] = if (tail.isEmpty()) childOrEmpty(objectIndent)
-                else scalarOrFlow(tail)
+              valuesInItem[unquote(pair.first)] = when {
+                tail.isEmpty() -> childOrEmpty(objectIndent)
+                isBlockHeader(tail) -> blockScalar(tail, objectIndent)
+                else -> scalarOrFlow(tail)
+              }
             }
             values += RepairYamlValue.Mapping(valuesInItem)
           }
@@ -154,6 +171,19 @@ internal object RepairYaml {
         "[]" -> RepairYamlValue.Sequence(mutableListOf())
         else -> throw IllegalArgumentException("inline flow collections are not supported")
       }
+    }
+
+    /** YAML block scalar header: `|`, `|-`, `|+`, `>`, `>-`, `>+` with an optional indent digit. */
+    private fun isBlockHeader(value: String): Boolean {
+      if (value.isEmpty() || (value[0] != '|' && value[0] != '>')) return false
+      return value.substring(1).matches(Regex("[+-]?[1-9]?"))
+    }
+
+    /** Skip block payloads without interpreting prompts as config keys or guessing credentials. */
+    private fun blockScalar(header: String, parentIndent: Int): RepairYamlValue {
+      require(isBlockHeader(header))
+      while (index < lines.size && lines[index].indent > parentIndent) index++
+      return RepairYamlValue.Opaque()
     }
 
     private fun splitKey(value: String): Pair<String, String>? {

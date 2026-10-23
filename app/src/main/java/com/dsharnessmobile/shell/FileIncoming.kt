@@ -431,7 +431,7 @@ object FileIncoming {
    *  表现为「投递静默失败」——因此投递方与鉴权必须同批发布。 */
   private fun deliverOnce(context: Context, path: String): Boolean {
     return try {
-      val conn = java.net.URL("http://127.0.0.1:3080/api/android/file-incoming")
+      val conn = java.net.URL(EngineEndpoint.url + "/api/android/file-incoming")
         .openConnection(java.net.Proxy.NO_PROXY) as java.net.HttpURLConnection
       conn.requestMethod = "POST"
       conn.doOutput = true

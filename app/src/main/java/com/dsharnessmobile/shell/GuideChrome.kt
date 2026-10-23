@@ -43,6 +43,8 @@ internal class GuideChrome(
    */
   val apkStatus: TextView,
   val apkDownload: Button,
+  /** Secondary startup action: retry the engine, or open the repair assistant. */
+  val repairButton: Button,
   val runtimeChip: TextView,
   val storageChip: TextView,
   val versionLabel: TextView,
@@ -61,6 +63,7 @@ internal class GuideCallbacks(
   val onCopyLog: () -> Unit,
   val onShareLog: () -> Unit,
   val onManagement: () -> Unit = {},
+  val onRepairAssistant: () -> Unit = {},
 )
 
 internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallbacks): GuideChrome {
@@ -437,6 +440,7 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
   val primaryButton = makePrimary()
   val consoleButton = makeSecondary(activity.getString(R.string.ds_open_console), callbacks.onOpenConsole)
   val updateButton = makeSecondary(activity.getString(R.string.ds_check_update), callbacks.onCheckUpdate)
+  val repairButton = makeSecondary(activity.getString(R.string.ds_repair_assistant), callbacks.onRepairAssistant)
 
   // 更新块的两枚新增控件：状态行（次要色小字）+ 下载按钮（与检查按钮同款次级样式，视觉上并列）。
   //
@@ -473,6 +477,17 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
   secondaryRow.addView(consoleButton, half)
   secondaryRow.addView(updateButton, halfEnd)
 
+  // Startup failure keeps both exits visible: retry the engine here, or hand the failure to the
+  // native assistant. The row sits above the sticky primary button so neither action is hidden.
+  val repairRow = LinearLayout(activity).apply {
+    orientation = LinearLayout.HORIZONTAL
+    visibility = View.GONE
+    layoutParams = LinearLayout.LayoutParams(
+      ViewGroup.LayoutParams.MATCH_PARENT, dpix(R.dimen.ds_btn_secondary_height),
+    ).apply { topMargin = dpix(R.dimen.ds_space_8) }
+  }
+  repairRow.addView(repairButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
   val gear = android.widget.ImageButton(activity).apply {
     setImageDrawable(android.graphics.drawable.RotateDrawable().apply {
       drawable = activity.getDrawable(R.drawable.ic_management_gear)
@@ -495,13 +510,18 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
     setOnClickListener { callbacks.onManagement() }
   }
   val actionBlock = LinearLayout(activity).apply {
-    orientation = LinearLayout.HORIZONTAL
-    gravity = Gravity.END or Gravity.BOTTOM
+    orientation = LinearLayout.VERTICAL
     setPadding(0, dpix(R.dimen.ds_space_12), 0, 0)
-    addView(primaryButton, LinearLayout.LayoutParams(0, dpix(R.dimen.ds_btn_height), 1f))
-    addView(gear, LinearLayout.LayoutParams(dpix(R.dimen.ds_btn_height), dpix(R.dimen.ds_btn_height)).apply {
+    val primaryRow = LinearLayout(activity).apply {
+      orientation = LinearLayout.HORIZONTAL
+      gravity = Gravity.END or Gravity.BOTTOM
+    }
+    primaryRow.addView(primaryButton, LinearLayout.LayoutParams(0, dpix(R.dimen.ds_btn_height), 1f))
+    primaryRow.addView(gear, LinearLayout.LayoutParams(dpix(R.dimen.ds_btn_height), dpix(R.dimen.ds_btn_height)).apply {
       marginStart = dpix(R.dimen.ds_space_12)
     })
+    addView(repairRow)
+    addView(primaryRow)
   }
   root.addView(actionBlock)
 
@@ -556,6 +576,7 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
     updateButton = updateButton,
     apkStatus = apkStatus,
     apkDownload = apkDownload,
+    repairButton = repairButton,
     runtimeChip = runtimeChip,
     storageChip = storageChip,
     versionLabel = versionLabel,

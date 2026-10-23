@@ -46,7 +46,8 @@ import {
   authorizePublicReadOnlyRoute,
   sendMobileRouteRejection,
   CONTROL_TOKEN_HEADER,
-  FALLBACK_LOOPBACK_HOSTS,
+  loopbackAuthorities,
+  enginePortFromEnv,
   ConnectionRouteAuth,
 } from './route-auth.js'
 import {
@@ -90,7 +91,8 @@ export {
   authorizeMobileRoute,
   sendMobileRouteRejection,
   CONTROL_TOKEN_HEADER,
-  FALLBACK_LOOPBACK_HOSTS,
+  loopbackAuthorities,
+  enginePortFromEnv,
   // 0.14.0 §4.1：能力分组常量与 facade 名从单一源再导出——工具面预算门禁据此推导「初始可见集」
   // （= 注册集 - 被 capability gate 掩蔽的组），避免门禁另写一份组名单而与实现漂移。
   DEVICE_TOOL_GROUPS,

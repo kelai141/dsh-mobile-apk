@@ -7,6 +7,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.After
+import org.junit.Before
 import org.junit.Test
 import org.w3c.dom.Document
 import org.w3c.dom.Element
@@ -14,10 +16,22 @@ import org.w3c.dom.Element
 /**
  * Cross-layer HTTP contract: admission must agree with platform cleartext availability.
  * 0.14.3 profile isolation changes loopback admission, not the platform HTTP policy:
- * ordinary loopback needs a verified nonDefault profile; protected engine :3080 stays denied.
+ * ordinary loopback needs a verified nonDefault profile; protected engine :4145 stays denied.
  * Pure policy calls exercise URLs; XML parsing excludes comment-only false positives.
  */
 class BrowserHostCleartextConsistencyTest {
+  @Before
+  fun publishProtectedPort() {
+    EngineEndpoint.beginBinding()
+    EngineEndpoint.markGeneration(1)
+    EngineEndpoint.publishReportedPort(4145, 1)
+  }
+
+  @After
+  fun resetEndpoint() {
+    EngineEndpoint.invalidate()
+  }
+
   private fun nsc(): Document {
     val file = listOf(
       File("src/main/res/xml/network_security_config.xml"),
@@ -77,7 +91,7 @@ class BrowserHostCleartextConsistencyTest {
   fun protectedEnginePortStaysBlockedForEveryCanonicalLoopbackAlias() {
     for (scheme in listOf("http", "https", "ws", "wss")) {
       for (host in listOf("127.0.0.1", "localhost", "app.localhost", "127.1", "0x7f000001", "[::1]", "[::ffff:127.0.0.1]")) {
-        val url = "$scheme://$host:03080/api"
+        val url = "$scheme://$host:04145/api"
         assertEquals("protected-engine-origin",
           BrowserHostNavigationPolicy.blockedRequestReason(url, isolatedProfile = true))
         if (scheme == "http" || scheme == "https") {
@@ -99,7 +113,7 @@ class BrowserHostCleartextConsistencyTest {
       assertNotNull(BrowserHostNavigationPolicy.blockedRequestReason(url, isolatedProfile = true))
     }
     assertFalse("可信配置的引擎例外也不能使 Default profile 获得回环资格",
-      BrowserHostNavigationPolicy.normalize("http://localhost:3080/", allowAnonymousEngineAccess = true) != null)
-    assertTrue(BrowserHostNavigationPolicy.normalize("https://example.com:3080/", isolatedProfile = true) != null)
+      BrowserHostNavigationPolicy.normalize("http://localhost:4145/", allowAnonymousEngineAccess = true) != null)
+    assertTrue(BrowserHostNavigationPolicy.normalize("https://example.com:4145/", isolatedProfile = true) != null)
   }
 }

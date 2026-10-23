@@ -60,6 +60,27 @@ class RepairActivity : Activity() {
   private var report: File? = null
   private var pendingActivity: LinearLayout? = null
   private var activeConnection: RepairModelConnection? = null
+  private var modelNotice: LinearLayout? = null
+  private var modelNoticeText: TextView? = null
+  private var reloadModels: Button? = null
+  private var diagnosticsReady = false
+  private var defaultModelAvailable = false
+  private var modelSources = ""
+
+  private fun loadRepairModels(): List<RepairModelConnection> {
+    val result = RepairModelConfig.loadDetailed(applicationContext)
+    defaultModelAvailable = result.defaultAvailable
+    modelSources = result.sources.joinToString("\n") { source ->
+      val status = when (source.status) {
+        "parsed" -> UiText.t(this, "已读取", "Read")
+        "missing" -> UiText.t(this, "不存在", "Missing")
+        "unsafe" -> UiText.t(this, "路径或大小不受支持", "Unsupported path or size")
+        else -> UiText.t(this, "格式无法解析", "Could not parse")
+      }
+      source.path + ": " + status
+    }
+    return result.connections
+  }
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
@@ -99,6 +120,8 @@ class RepairActivity : Activity() {
       addView(conversation, ViewGroup.LayoutParams(-1, -2))
     }
     content.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+    modelNotice = buildModelNotice()
+    content.addView(modelNotice)
     composer = buildComposer()
     content.addView(composer)
     root.addView(content, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -111,23 +134,39 @@ class RepairActivity : Activity() {
     openOrCreateSession(restored?.getString(STATE_SESSION_ID))
     restored?.getString(STATE_INPUT)?.let { input.setText(it) }
     worker = Thread {
-      try {
+      // Diagnostics and model configuration are independent failures. A missing model must not
+      // hide a readable diagnostics report, and a broken report must not disable model reload.
+      val diagnosticsFailure = try {
         report = engine.mirrorDiagnosticsToShared("native-repair")
-        connections = RepairModelConfig.load(applicationContext)
-        require(connections.isNotEmpty()) { "DSH 尚无可用模型配置。请先在 DSH 配置模型与凭据。" }
-        selectedModel = 0
-        selectedEffort = connections[0].defaultReasoningEffort
         diagnosticText = SYSTEM_PROMPT + "\n" + diagnosticContext(engine)
-        runOnUiThread {
-          if (!alive) return@runOnUiThread
-          modelButton.isEnabled = true
-          send.isEnabled = true
-          restoreSelection()
-          if (history.length() == 0) beginAutomaticRepair()
-          else addSystemMessage("已打开最近的修复会话，可以继续补充故障信息。")
-        }
+        diagnosticsReady = report != null
+        null
       } catch (e: Exception) {
-        addSystemMessage("无法启动修复：" + safe(e.message ?: e.javaClass.simpleName))
+        UiText.t(this, "诊断读取失败：", "Could not read diagnostics: ") + e.javaClass.simpleName
+      }
+      val modelFailure = try {
+        connections = loadRepairModels()
+        selectedModel = 0
+        selectedEffort = connections.firstOrNull()?.defaultReasoningEffort
+        if (connections.isEmpty()) UiText.t(this,
+          "未读到可用模型。可在控制台修好配置后重新读取，也可直接重试引擎。",
+          "No model is available. Fix configuration in the console and reload, or retry the engine.") else null
+      } catch (e: Exception) {
+        UiText.t(this, "读取模型配置失败：", "Could not read model configuration: ") + e.javaClass.simpleName
+      }
+      runOnUiThread {
+        if (!alive) return@runOnUiThread
+        restoreSelection()
+        applyModelState(modelFailure)
+        if (diagnosticsFailure != null) addSystemMessage(diagnosticsFailure, "诊断")
+        if (history.length() == 0) {
+          if (diagnosticsReady && connections.isNotEmpty() && defaultModelAvailable) beginAutomaticRepair()
+          else addSystemMessage(
+            UiText.t(this,
+              "修复助手已打开。修好模型或诊断后，可点「重新读取模型配置」再开始。",
+              "The repair assistant is open. Reload the model configuration after fixing it, then continue."),
+          )
+        } else addSystemMessage("已打开最近的修复会话，可以继续补充故障信息。")
       }
     }.apply { name = "dsh-repair-init"; start() }
   }
@@ -195,6 +234,122 @@ class RepairActivity : Activity() {
     styleSendButton(this@RepairActivity, send, running = false)
     addView(send, LinearLayout.LayoutParams(space(46), space(46)).apply { marginStart = space(8) })
   }
+
+  /**
+   * Model availability is a banner, not a page-level failure: diagnostics, the transcript and
+   * every escape route stay usable while the configuration is missing or malformed.
+   */
+  private fun buildModelNotice(): LinearLayout = LinearLayout(this).apply {
+    orientation = LinearLayout.VERTICAL
+    visibility = View.GONE
+    setPadding(space(12), space(8), space(12), space(8))
+    setBackgroundColor(getColor(R.color.ds_surface_muted))
+    modelNoticeText = TextView(this@RepairActivity).apply {
+      setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+      setTextColor(getColor(R.color.ds_text_secondary))
+      setLineSpacing(0f, 1.35f)
+    }
+    addView(modelNoticeText, LinearLayout.LayoutParams(-1, -2))
+    val actions = LinearLayout(this@RepairActivity).apply {
+      orientation = LinearLayout.HORIZONTAL
+      setPadding(0, space(8), 0, 0)
+    }
+    reloadModels = actionButton(UiText.t(this@RepairActivity, "重新读取模型配置", "Reload model configuration")) {
+      reloadModelConfiguration()
+    }
+    val console = actionButton(UiText.t(this@RepairActivity, "打开控制台", "Open console")) { openConsole() }
+    val retry = actionButton(UiText.t(this@RepairActivity, "返回启动页重试引擎", "Back and retry engine")) {
+      returnAndRetry()
+    }
+    actions.addView(reloadModels, LinearLayout.LayoutParams(0, -2, 1f))
+    actions.addView(console, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = space(6) })
+    actions.addView(retry, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = space(6) })
+    addView(actions, LinearLayout.LayoutParams(-1, -2))
+  }
+
+  private fun actionButton(label: String, action: () -> Unit): Button = Button(this).apply {
+    text = label
+    isAllCaps = false
+    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+    setTextColor(getColor(R.color.ds_text_primary))
+    minHeight = space(44)
+    stateListAnimator = null
+    background = DsUi.ripple(DsUi.roundRect(getColor(R.color.ds_surface),
+      resources.getDimension(R.dimen.ds_radius_pill), getColor(R.color.ds_hairline)),
+      getColor(R.color.ds_accent_soft))
+    DsUi.bindPressScale(this, 0.97f)
+    setOnClickListener { action() }
+  }
+
+  private fun applyModelState(failure: String?) {
+    val hasModels = connections.isNotEmpty()
+    modelButton.isEnabled = hasModels
+    send.isEnabled = hasModels
+    modelNoticeText?.text = failure.orEmpty()
+    modelNotice?.visibility = View.VISIBLE
+    modelNoticeText?.visibility = if (failure == null && diagnosticsReady) View.GONE else View.VISIBLE
+    if (failure == null && !diagnosticsReady) {
+      modelNoticeText?.text = UiText.t(this,
+        "无法读取本轮诊断。可打开控制台或返回启动页重试引擎。",
+        "This run's diagnostics could not be read. Open the console or return and retry the engine.")
+    }
+    if (failure != null) modelNoticeText?.append("\n" + modelSources)
+    if (failure == null && hasModels && !defaultModelAvailable) {
+      modelNoticeText?.visibility = View.VISIBLE
+      modelNoticeText?.text = UiText.t(this,
+        "当前默认模型不可用。请点右上角选择模型，再发送修复需求。",
+        "The configured default model is unavailable. Choose a model at the top right before sending a repair request.")
+    }
+    reloadModels?.isEnabled = true
+  }
+
+  private fun reloadModelConfiguration() {
+    if (busy.get()) return
+    reloadModels?.isEnabled = false
+    Thread {
+      val loaded = runCatching { loadRepairModels() }
+      val failure = loaded.exceptionOrNull()?.let {
+        UiText.t(this, "读取模型配置失败：", "Could not read model configuration: ") + it.javaClass.simpleName
+      } ?: if (loaded.getOrDefault(emptyList()).isEmpty()) {
+        UiText.t(this, "未读到可用模型，请检查本地模型配置与凭据。",
+          "No model is available. Check local model configuration and credentials.")
+      } else null
+      val next = loaded.getOrDefault(emptyList())
+      runOnUiThread {
+        if (!alive) return@runOnUiThread
+        connections = next
+        restoreSelection()
+        applyModelState(failure)
+        reloadModels?.isEnabled = true
+        if (failure == null) addSystemMessage(
+          UiText.t(this, "已重新读取模型配置。", "Model configuration reloaded."),
+        )
+      }
+    }.apply { name = "dsh-repair-models"; isDaemon = true; start() }
+  }
+
+  private fun openConsole() {
+    runCatching { startActivity(Intent(this, ConsoleActivity::class.java)) }
+      .onFailure { addSystemMessage(UiText.t(this, "无法打开控制台：", "Could not open the console: ") + it.javaClass.simpleName) }
+  }
+
+  private fun returnAndRetry() {
+    if (busy.get()) {
+      addSystemMessage(UiText.t(this, "请先停止当前修复，再返回启动页。", "Stop the current repair before returning."))
+      return
+    }
+    RepairState.active = false
+    launchStartupPage(retry = true)
+  }
+
+  /** Both exits land on the startup page; only the retry exit carries the one-shot start intent. */
+  private fun launchStartupPage(retry: Boolean) {
+    val intent = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+    if (retry) intent.action = MainActivity.ACTION_RETRY_ENGINE
+    startActivity(intent)
+    finish()
+  }
+
 
   /** Android-native drawer chrome; the same controls also work in landscape. */
   private fun buildConversationDrawer() {
@@ -569,6 +724,7 @@ class RepairActivity : Activity() {
 
   private fun setBusy(value: Boolean) = uiSync {
     input.isEnabled = !value
+    reloadModels?.isEnabled = !value
     modelButton.isEnabled = connections.isNotEmpty()
     send.isEnabled = connections.isNotEmpty()
     styleSendButton(this, send, value)
@@ -1007,9 +1163,7 @@ class RepairActivity : Activity() {
       return
     }
     RepairState.active = false
-    RepairState.reset(this)
-    startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP))
-    finish()
+    launchStartupPage(retry = false)
   }
 
   private fun cancelWork() {

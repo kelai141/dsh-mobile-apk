@@ -13,6 +13,10 @@
 
 ## 补丁清单（详见 registry.json）
 
+- **managed-port-bind-EP1（2026-10-23）**：仅对本壳标记的 IPv4 回环引擎，在真实 `EADDRINUSE` 时回退一次到 `listen(0)`，由操作系统原子分配端口。监听成功后发布实际 `DSH_ENGINE_PORT`，普通调用与其它错误沿用上游语义。无端口扫描，无稳态探测开销。回归见 `tests/managed-port-bind-EP1.test.mjs`。
+
+- **profile-link-skip-PL1（2026-10-23）**：`dsh-app-boot` 扫描 profile 第三方软链时，遇 `EACCES`、`EPERM`、`ENOENT`、`ENOTDIR` 跳过并按名称告警。合法目录链接继续解析，`EIO` 等其它异常仍抛出。不会删除链接或改写用户配置。回归见 `tests/profile-link-skip-PL1.test.mjs`。
+
 - **inspector-worker-expose-internals-472（2026-10-21，apk #472）**：`dsh-experimental-inspector/lib/index.js` 的 `spawnWorker()` 把 `execArgv: []` 改为 `["--expose-internals"]`。上游显式清空继承，丢掉壳侧启动命令里的 flag；`node-addon-require-builtin` 无 android-arm64 预编译件时，Worker 内 `internal/modules/esm/loader` 必 `MODULE_NOT_FOUND`，`/api/experimental-inspector/bootstrap` 每启动两条 404。只加这一个 flag，不继承 `process.execArgv`（避免把 `--inspect` 带进 Worker）。真实夹具、幂等、三向负控与 runner 集成测试见 `tests/inspector-worker-expose-internals-472.test.mjs`。
 - **sidebar-keep-wide-B2（2026-10-18）**：`dsh-client-ui-sidebar/lib/client.js` 让**手机形态**的 `wide` 恒真，收起态仍挂载宽内容；第二条锚点同时取消手机收起态的内联宽度冻结。动机：上游收起 150ms 后卸载宽内容（真机 326 元素 / 54KB 到 66 元素 / 10KB），手机抽屉由手势驱动，`ensureOpen` 的重新挂载正落在手指还按着的帧上（开方向拖动期 136ms vs 关方向 69ms）。两条锚点必须一起打：只改 `wide` 会让 `lastWideWidth` 的 56px 初值生效，跟手首帧看到一帧压扁抽屉。口径收窄为「非桌面 titlebar **且** `data-dsh-mobile-form`」，桌面端零影响，八格真值表只有「手机 + 收起 + 已 settle」一格变化。真实夹具、幂等、三向负控、真值表与 runner 集成测试见 `tests/sidebar-keep-wide-B2.test.mjs`。
 - **sidebar-bubble-reorder-B1（2026-10-17）**：`dsh-client-ui-sidebar-right/lib/client.js` 增加 `reorderIn(session, tab, before)`。复用原 store 的 `placeTab`，恢复原活动标签；仅操作当前挂载会话的 dock 同分栏，拒绝失效会话、浮动页、跨分栏与无效/无变化目标。补丁接受本代 npm 发布包和 Android 源码构建的两条精确锚点；未知或部分损坏字节拒绝写入。真实夹具、幂等、损坏输入和 runner 集成测试见 `tests/sidebar-bubble-reorder.test.mjs`。

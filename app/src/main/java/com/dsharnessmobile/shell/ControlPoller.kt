@@ -45,7 +45,7 @@ class ControlPoller(
 
   companion object {
     private const val TAG = "dsh-a11y"
-    private const val BASE = "http://127.0.0.1:3080"
+    private val BASE: String get() = EngineEndpoint.url
     private const val LONG_POLL_MS = 5000
     private const val CONNECT_TIMEOUT_MS = 2000
     private const val READ_TIMEOUT_MS = 9000

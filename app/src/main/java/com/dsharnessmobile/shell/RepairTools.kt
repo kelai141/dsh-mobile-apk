@@ -188,9 +188,6 @@ internal class RepairTools(
   }
 
   private fun restartEngineExclusive(callGeneration: Long): JSONObject {
-    if (engine.lastAvailability == EngineProbe.EngineAvailability.PORT_FOREIGN) {
-      throw RepairFailure("port-foreign", "3080 由未归属进程占用；拒绝停止或重启")
-    }
     if (generation.get() != callGeneration) throw RepairFailure("cancelled", "重启已取消")
     activeThread = Thread.currentThread()
     try {
@@ -199,7 +196,9 @@ internal class RepairTools(
       // fabricated refusal. Only a reachable, unowned listener is a refusal.
       val stopped = engine.stopOwnedEngine()
       if (!stopped && EngineProbe.portReachable(500)) {
-        throw RepairFailure("restart-refused", engine.lastStartRefusal ?: "端口监听未归属到本壳")
+        // An unowned listener is never stopped. The managed engine can still bind an
+        // OS-assigned fallback port, which is the same path used by normal startup.
+        LogCollector.log("dsh-repair", "restart keeps unowned listener; managed engine will use a fallback port")
       }
       if (generation.get() != callGeneration) throw RepairFailure("cancelled", "重启已取消")
       if (!engine.startEngine(force = true)) {
@@ -241,7 +240,7 @@ internal class RepairTools(
       // ownership is proven; an unknown listener is never termination authority.
       val stopped = engine.stopOwnedEngine()
       if (!stopped && EngineProbe.portReachable(500)) {
-        throw RepairFailure("refresh-refused", "3080 由未归属进程占用；拒绝刷新运行时")
+        throw RepairFailure("refresh-refused", EngineProbe.ENGINE_AUTHORITY + " 由未归属进程占用；拒绝刷新运行时")
       }
       if (generation.get() != callGeneration) throw RepairFailure("cancelled", "刷新已取消")
       engine.clearRefreshLedger()

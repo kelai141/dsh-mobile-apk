@@ -484,8 +484,11 @@ internal class EngineStartFlow(private val activity: MainActivity) {
 
   private fun scheduleEngineRetry(generation: Long, clientFailure: Boolean = false) {
     if (!isCurrentEngineFlow(generation)) return
-    if (RepairState.retryPending || RepairState.required(activity)) return
-    if (engineRetryCount >= 2) { requireNativeRepair(); return }
+    if (!shouldScheduleAutomaticRetry(RepairState.required(activity), engineRetryCount, RepairState.retryPending)) {
+      // Automatic recovery stays bounded. Only an explicit user retry clears the durable gate.
+      if (engineRetryCount >= 2 && !RepairState.required(activity)) requireNativeRepair()
+      return
+    }
     RepairState.retryPending = true
     engineRetryCount++
     val delayMs = 5_000L * engineRetryCount
@@ -547,7 +550,8 @@ internal class EngineStartFlow(private val activity: MainActivity) {
    */
   fun start() {
     if (!canRunEngineWork()) return
-    if (RepairState.required(activity)) { requireNativeRepair(); return }
+    if (startupEntryDecision(RepairState.required(activity), explicitUserRetry = false) ==
+      StartupEntryDecision.BLOCKED_FOR_REPAIR) { requireNativeRepair(); return }
     // EngineManager.ensurePrivateDshData() establishes the active profile and
     // migrates legacy DSH_HOME layouts. The handoff used to happen as a side
     // effect of starting the engine; selecting and validating a model happens
@@ -1353,7 +1357,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
       val decision = safeModeRestartDecision(liveComplete, snapshotFresh, ownedStopOk = false)
       LogCollector.writeBootFail(
         activity, "safe-mode-restart-not-owned",
-        "安全模式重启被拒（decision=" + decision + "）：3080 未被归属到本壳或旧引擎停止失败，" +
+        "安全模式重启被拒（decision=" + decision + "）：" + EngineProbe.ENGINE_AUTHORITY + " 未被归属到本壳或旧引擎停止失败，" +
           "未执行启动以免覆盖未知监听器；安全模式的插件改动本次不生效",
       )
       activity.runOnUiThread { applySafeModeRestartHint(decision) }
@@ -1896,7 +1900,7 @@ internal fun clientPluginFailureRoute(
  *                              就在这条路上：快照未就绪不等于运行时不可用），中间态文案必须如实；
  * - [REFUSE_LIVE_INCOMPLETE]   live 树残缺 ⇒ 绝不先停后启（停掉旧进程只会把用户从「能跑但插件错」
  *                              推到「跑不了」），停在可读错误页；
- * - [REFUSE_OWNERSHIP]         3080 未被归属到本壳 ⇒ 绝不按名字杀未归属监听器（既有护栏）。
+ * - [REFUSE_OWNERSHIP]         当前引擎端点未被归属到本壳 ⇒ 绝不按名字杀未归属监听器（既有护栏）。
  */
 internal enum class SafeModeRestartDecision { PROCEED, PROCEED_SNAPSHOT_STALE, REFUSE_LIVE_INCOMPLETE, REFUSE_OWNERSHIP }
 
@@ -1944,7 +1948,7 @@ internal fun safeModeRestartHint(decision: SafeModeRestartDecision, english: Boo
     SafeModeRestartDecision.REFUSE_LIVE_INCOMPLETE ->
       "Runtime incomplete; the engine was not stopped or restarted, so safe mode does not apply this time."
     SafeModeRestartDecision.REFUSE_OWNERSHIP ->
-      "Port 3080 is not owned by this app; the engine was not restarted, so safe mode does not apply."
+      "The current engine port is not owned by this app; the engine was not restarted, so safe mode does not apply."
   } else when (decision) {
     SafeModeRestartDecision.PROCEED ->
       "正在以安全模式重启运行时…（先停旧引擎，再启动新引擎，请保持前台）"
@@ -1953,7 +1957,7 @@ internal fun safeModeRestartHint(decision: SafeModeRestartDecision, english: Boo
     SafeModeRestartDecision.REFUSE_LIVE_INCOMPLETE ->
       "运行时不完整，未重启引擎：安全模式本次不生效。请先按提示重做运行时。"
     SafeModeRestartDecision.REFUSE_OWNERSHIP ->
-      "3080 端口不属于本应用，未重启引擎：安全模式本次不生效。请先在控制台排查。"
+      "当前引擎端口不属于本应用，未重启引擎：安全模式本次不生效。请先在控制台排查。"
   }
 
 /**

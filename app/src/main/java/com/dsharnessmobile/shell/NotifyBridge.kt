@@ -26,8 +26,8 @@ object NotifyBridge {
 
   const val TAG = "dsh-notify-mux"
   const val STREAM_ID = "dsh-notify-responder"
-  private const val HOST = "127.0.0.1"
-  private const val PORT = 3080
+  private const val HOST = EngineEndpoint.HOST
+  private val PORT: Int get() = EngineEndpoint.port
   private const val PATH = "/api/remote.mux"
 
   /** 投递终局（NT-17：失败必须可见，不得只写日志）。 */

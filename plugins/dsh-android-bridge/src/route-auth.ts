@@ -3,8 +3,41 @@ import { tokenMatches } from './control-queue.js'
 /** Control-token HTTP header shared by Android-owned loopback routes. */
 export const CONTROL_TOKEN_HEADER = 'x-dsh-control-token'
 
-/** Loopback authorities accepted only when a deployment does not provide client-connection. */
-export const FALLBACK_LOOPBACK_HOSTS = ['127.0.0.1:3080', 'localhost:3080'] as const
+/** Environment variable carrying the engine's actual listening port (set by the shell spawn). */
+export const ENGINE_PORT_ENV = 'DSH_ENGINE_PORT'
+
+/** Default engine port when the shell did not pass an explicit value. */
+export const DEFAULT_ENGINE_PORT = 4145
+
+/**
+ * Read the engine port for one authorization decision.
+ *
+ * Missing environment means the documented default. A present value must be a plain decimal port
+ * in 1024..65535; `0`, whitespace, a sign, or any other text returns `null` so callers fail closed.
+ * Never cache this at module scope: the engine module is imported before `server.listen()` updates
+ * the environment, so a top-level array would freeze the pre-bind default.
+ *
+ * @param env - Environment view (injectable for tests).
+ * @returns The listening port, or `null` when the supplied value is invalid.
+ */
+export function enginePortFromEnv(env: Record<string, string | undefined> = process.env): number | null {
+  const raw = env[ENGINE_PORT_ENV]
+  if (raw === undefined) return DEFAULT_ENGINE_PORT
+  if (!/^[0-9]+$/.test(raw)) return null
+  const port = Number(raw)
+  return Number.isSafeInteger(port) && port >= 1024 && port <= 65535 ? port : null
+}
+
+/**
+ * Loopback authorities for the currently selected engine port.
+ *
+ * Only the actual listening port is trusted; every other loopback port is a different origin.
+ * Returns an empty list when the environment is unusable, which makes all callers reject.
+ */
+export function loopbackAuthorities(env: Record<string, string | undefined> = process.env): string[] {
+  const port = enginePortFromEnv(env)
+  return port === null ? [] : [`127.0.0.1:${port}`, `localhost:${port}`]
+}
 
 /** Minimal Node request view required to apply route trust and token checks. */
 export interface MobileRouteRequest {
@@ -75,13 +108,15 @@ export function authorizeMobileRoute(
     }
   }
 
+  const trusted = loopbackAuthorities()
+  if (trusted.length === 0) return { code: 403, body: '' }
   const host = headerOf(request.headers, 'host')?.trim().toLowerCase()
-  if (host === undefined || !FALLBACK_LOOPBACK_HOSTS.some((authority) => authority === host)) {
+  if (host === undefined || !trusted.includes(host)) {
     return { code: 403, body: '' }
   }
   if (headerOf(request.headers, 'sec-fetch-site')?.toLowerCase() === 'cross-site') return { code: 403, body: '' }
   const origin = headerOf(request.headers, 'origin')
-  if (origin !== undefined && origin !== '' && !FALLBACK_LOOPBACK_HOSTS.some((authority) => origin.toLowerCase() === `http://${authority}`)) {
+  if (origin !== undefined && origin !== '' && !trusted.some((authority) => origin.toLowerCase() === `http://${authority}`)) {
     return { code: 403, body: '' }
   }
   return tokenMatches(options.token(), provided)
@@ -112,13 +147,15 @@ export function authorizePublicReadOnlyRoute(
       return { code: 403, body: '' }
     }
   }
+  const trusted = loopbackAuthorities()
+  if (trusted.length === 0) return { code: 403, body: '' }
   const host = headerOf(request.headers, 'host')?.trim().toLowerCase()
-  if (host === undefined || !FALLBACK_LOOPBACK_HOSTS.some((authority) => authority === host)) {
+  if (host === undefined || !trusted.includes(host)) {
     return { code: 403, body: '' }
   }
   if (headerOf(request.headers, 'sec-fetch-site')?.toLowerCase() === 'cross-site') return { code: 403, body: '' }
   const origin = headerOf(request.headers, 'origin')
-  if (origin !== undefined && origin !== '' && !FALLBACK_LOOPBACK_HOSTS.some((authority) => origin.toLowerCase() === `http://${authority}`)) {
+  if (origin !== undefined && origin !== '' && !trusted.some((authority) => origin.toLowerCase() === `http://${authority}`)) {
     return { code: 403, body: '' }
   }
   return undefined

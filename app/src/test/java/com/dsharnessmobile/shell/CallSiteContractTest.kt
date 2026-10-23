@@ -84,7 +84,9 @@ class CallSiteContractTest {
   @Test
   fun configureWebViewDoesNotRefreshTheCookieOnTheMainThread() {
     val configure = memberBody(codeOnly(source("MainActivity.kt")), "private fun configureWebView()")
-    assertTrue("FX-210.5：初始化只允许零网络的本地 cookie", configure.contains("EngineAuth.cookie(this)"))
+    assertTrue("FX-210.5：初始化必须交给确认端点后的导航入口", configure.contains("loadConfirmedEnginePage()"))
+    val load = memberBody(codeOnly(source("MainActivity.kt")), "private fun loadConfirmedEnginePage()")
+    assertTrue("FX-210.5：导航入口只允许零网络的本地 cookie", load.contains("EngineAuth.cookie(this)"))
     val beforeRefresh = configure.substringBefore("EngineAuth.refresh(this)")
     assertTrue("FX-210.5：refresh 只允许出现在后台线程块内", beforeRefresh.contains("Thread {"))
   }

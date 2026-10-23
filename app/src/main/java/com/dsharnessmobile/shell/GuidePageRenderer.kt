@@ -371,22 +371,10 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
           if (pending != null || RootExecutionFence.maintenanceActive) {
             confirmClearMaintenanceLease(pending)
           } else {
-          // 缺陷 D（fx-2）：同一个主按钮在 **Error 相位**下语义不同——它变成「安全模式启动」。
-          // 分叉放在这里而不是换控件：`GuideChrome` 只有一个 primaryButton，
-          // 复用它的既有样式/锁态/无障碍面比新增按钮更少出事面（也避免用 Phase==Error 之外的判据）。
-          if (lastGuidePhase == GuidePhase.Error) {
-            RepairState.requireRepair(activity)
-            activity.startActivity(Intent(activity, RepairActivity::class.java))
-          }
-          else {
-            activity.engineFlow.engineRetryCount = 0 // 手动重试归零自动重试计数
-            // 0.14.1 D2：同时清空**跨进程**的快照刷新失败账本。用户显式点「重试」就是要求
-            // 「再试一次刷新」；不清账的话降级闸门会让他永远拿不到那次刷新，按钮就成了摆设。
-            activity.engineManager.clearRefreshLedger()
-            // Explicit start: replay the launch video even if the automatic path already
-            // played it once in this Activity.
-            activity.startEngineFlow(splash = true)
-          }
+          // The primary button is always the user's explicit retry. It clears the durable
+          // native-repair gate once, then starts for real. The assistant is a separate,
+          // always-visible secondary action, so an external repair never needs the assistant.
+          activity.retryEngineExplicitly()
           }
         },
         onOpenConsole = { activity.startActivity(Intent(activity, ConsoleActivity::class.java)) },
@@ -399,6 +387,10 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
         // 功能 B（0.14.6）：故障诊断包分享。入口可见性由 refreshGuideMeta 按证据点亮。
         onShareLog = { shareGuideLog() },
         onManagement = { management.toggle() },
+        onRepairAssistant = {
+          RepairState.requireRepair(activity)
+          activity.startActivity(Intent(activity, RepairActivity::class.java))
+        },
       ),
     )
     engineStatus = chrome.engineStatus
@@ -435,10 +427,10 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
 
   fun applyGuidePhase(phase: GuidePhase, title: String, hint: String? = null) {
     lastGuidePhase = phase
-    // Error is always the native repair handoff. A foreign 3080 listener still
-    // cannot be repaired by the assistant, so it keeps the retry action.
-    startupRetryAction = phase == GuidePhase.Error &&
-      !startupFailureAllowsOwnershipRepair(activity.engineManager.lastStartRefusalCode)
+    // Error keeps the explicit retry as the primary action. The repair assistant is offered
+    // alongside it and receives the current diagnostics; a foreign listener is a device-level
+    // conflict that neither action can clear, so its copy keeps telling the user to close it.
+    startupRetryAction = phase == GuidePhase.Error
     startupOwnershipRepairAllowed = startupFailureAllowsOwnershipRepair(activity.engineManager.lastStartRefusalCode)
     engineStatus.text = title
     (engineStatus.parent as View).visibility = if (phase == GuidePhase.Idle || phase == GuidePhase.Info) View.GONE else View.VISIBLE
@@ -477,9 +469,6 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
     chrome.primaryButton.text = when {
       leasePending -> activity.getString(R.string.ds_clear_isolation)
       phase == GuidePhase.Closed -> activity.getString(R.string.ds_restart)
-      // 缺陷 D（fx-2）：启动失败时主按钮是「安全模式启动」而不是「重试」。
-      // 用户口径：失败的当下，重试往往只是再撞一次同一堵墙；能自救的那条路是带着上下文进安全模式。
-      phase == GuidePhase.Error -> UiText.t(activity, "启动修复助手", "Start repair assistant")
       startupRetryAction -> activity.getString(R.string.ds_start_retry)
       phase == GuidePhase.Recovering -> activity.getString(R.string.ds_recovering)
       phase == GuidePhase.Starting || phase == GuidePhase.Extracting -> activity.getString(R.string.ds_starting)
@@ -488,6 +477,10 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
       // 其余（Idle / Info）＝尚未启动或中性事实陈述，主按钮是「启动引擎」
       else -> activity.getString(R.string.ds_start_engine)
     }
+    // The assistant row appears with a failure phase and stays available even when the durable
+    // repair gate is set; its absence was what forced users to open the assistant to retry.
+    (chrome.repairButton.parent as? View)?.visibility =
+      if (phase == GuidePhase.Error) View.VISIBLE else View.GONE
 
     val showProgress = busy
     progressBar.visibility = if (showProgress) View.VISIBLE else View.GONE

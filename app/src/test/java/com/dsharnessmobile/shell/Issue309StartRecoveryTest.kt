@@ -344,10 +344,10 @@ class Issue309StartRecoveryTest {
   @Test
   fun `stale refusal facts are cleared on every startEngine entry`() {
     val manager = code("EngineManager.kt")
-    val entry = between(manager, "fun startEngine(port: Int = 3080, force: Boolean = false): Boolean {", "snapshotFingerprintProblem()")
+    val entry = between(manager, "fun startEngine(", "snapshotFingerprintProblem()")
     assertTrue("入口必须先清原因码", entry.contains("lastStartRefusalCode = null"))
     assertTrue("入口必须同时清确诊项", entry.contains("lastStartRefusalConfirmed = emptyList()"))
-    val beforeFirstReturn = manager.substringAfter("fun startEngine(port: Int = 3080, force: Boolean = false): Boolean {").substringBefore("return false")
+    val beforeFirstReturn = manager.substringAfter("fun startEngine(").substringBefore("return false")
     assertTrue(
       "清码必须早于第一条 return false（否则残留码仍会被当成本次结论）",
       beforeFirstReturn.contains("lastStartRefusalCode = null"),

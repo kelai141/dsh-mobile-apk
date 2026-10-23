@@ -67,6 +67,7 @@ const prior = {
   DSH_HOME: process.env.DSH_HOME,
   DSH_CONTROL_TOKEN_TEST: process.env.DSH_CONTROL_TOKEN_TEST,
   DSH_CONTROL_TOKEN: process.env.DSH_CONTROL_TOKEN,
+  DSH_ENGINE_PORT: process.env.DSH_ENGINE_PORT,
 }
 const cleanups = []
 const pendingEffects = []
@@ -118,13 +119,16 @@ try {
   process.env.DSH_HOME = home
   process.env.DSH_CONTROL_TOKEN_TEST = '1'
   process.env.DSH_CONTROL_TOKEN = token
+  process.env.DSH_ENGINE_PORT = '4145'
+  const engineHost = '127.0.0.1:4145'
   const mod = await import(pathToFileURL(target).href + '?undo-api-auth-test=1')
   const routes = []
   const browserRejection = (req) => {
+    const port = process.env.DSH_ENGINE_PORT ?? '4145'
     const host = req.headers?.host
     const origin = req.headers?.origin
-    if (host !== '127.0.0.1:3080' && host !== 'localhost:3080') return 403
-    if (origin !== undefined && origin !== 'http://127.0.0.1:3080' && origin !== 'http://localhost:3080') return 403
+    if (host !== '127.0.0.1:' + port && host !== 'localhost:' + port) return 403
+    if (origin !== undefined && origin !== 'http://127.0.0.1:' + port && origin !== 'http://localhost:' + port) return 403
     return 401
   }
   let connection = { requestRejection: browserRejection }
@@ -173,7 +177,7 @@ try {
   }
 
   if (undo !== undefined) {
-    const noCredential = request('GET', '/api/undo/status', { host: '127.0.0.1:3080' })
+    const noCredential = request('GET', '/api/undo/status', { host: engineHost })
     const unauthorized = responseRecorder()
     await dispatched.handler(noCredential, unauthorized)
     check('unauthenticated read through the longer prefix receives 401', unauthorized.out.status === 401, JSON.stringify(unauthorized.out))
@@ -183,10 +187,10 @@ try {
     check('forged Host is rejected before data disclosure', forgedHost.out.status === 403 && forgedHost.out.body === undefined, JSON.stringify(forgedHost.out))
 
     const forgedOrigin = responseRecorder()
-    await undo.handler(request('GET', '/api/undo/status', { host: '127.0.0.1:3080', origin: 'https://attacker.invalid' }), forgedOrigin)
+    await undo.handler(request('GET', '/api/undo/status', { host: engineHost, origin: 'https://attacker.invalid' }), forgedOrigin)
     check('cross-origin request is rejected before data disclosure', forgedOrigin.out.status === 403 && forgedOrigin.out.body === undefined, JSON.stringify(forgedOrigin.out))
 
-    const rejectedMutation = request('POST', '/api/undo/remove', { host: '127.0.0.1:3080' }, { rejectBodyRead: true })
+    const rejectedMutation = request('POST', '/api/undo/remove', { host: engineHost }, { rejectBodyRead: true })
     const mutationOut = responseRecorder()
     await undo.handler(rejectedMutation, mutationOut)
     check('unauthenticated mutation returns 401 before reading its body', mutationOut.out.status === 401 && rejectedMutation.bodyRead === false, JSON.stringify(mutationOut.out))
@@ -194,20 +198,29 @@ try {
     let browserAuthCalls = 0
     connection = { requestRejection: () => { browserAuthCalls++; return 401 } }
     const tokenOut = responseRecorder()
-    await undo.handler(request('GET', '/api/undo/status', { host: '127.0.0.1:3080', 'x-dsh-control-token': token }), tokenOut)
+    await undo.handler(request('GET', '/api/undo/status', { host: engineHost, 'x-dsh-control-token': token }), tokenOut)
     check('valid control token reaches the read handler after trusted browser rejection',
       tokenOut.out.status === 200 && tokenOut.out.headers['cache-control'] === 'no-store' && browserAuthCalls === 1,
       JSON.stringify(tokenOut.out))
 
     connection = undefined
     const fallbackTokenOut = responseRecorder()
-    await undo.handler(request('GET', '/api/undo/status', { host: '127.0.0.1:3080', 'x-dsh-control-token': token }), fallbackTokenOut)
+    await undo.handler(request('GET', '/api/undo/status', { host: engineHost, 'x-dsh-control-token': token }), fallbackTokenOut)
     check('mobile token fallback remains fail-closed but usable without connection', fallbackTokenOut.out.status === 200, JSON.stringify(fallbackTokenOut.out))
+
+    process.env.DSH_ENGINE_PORT = '55231'
+    const stalePort = responseRecorder()
+    await undo.handler(request('GET', '/api/undo/status', { host: engineHost, 'x-dsh-control-token': token }), stalePort)
+    check('fallback port is read per request and the previous authority is rejected', stalePort.out.status === 403, JSON.stringify(stalePort.out))
+    const reboundPort = responseRecorder()
+    await undo.handler(request('GET', '/api/undo/status', { host: '127.0.0.1:55231', 'x-dsh-control-token': token }), reboundPort)
+    check('the newly published fallback authority is accepted', reboundPort.out.status === 200, JSON.stringify(reboundPort.out))
+    process.env.DSH_ENGINE_PORT = '4145'
 
     process.env.DSH_CONTROL_TOKEN = ''
     connection = { requestRejection: () => undefined }
     const cookieOut = responseRecorder()
-    await undo.handler(request('GET', '/api/undo/status', { host: '127.0.0.1:3080' }), cookieOut)
+    await undo.handler(request('GET', '/api/undo/status', { host: engineHost }), cookieOut)
     check('authenticated browser session reaches the read handler', cookieOut.out.status === 200, JSON.stringify(cookieOut.out))
   }
 } finally {

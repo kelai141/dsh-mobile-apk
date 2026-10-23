@@ -15,8 +15,35 @@ internal object RepairState {
     prefs(context).edit().putInt("retries", count).commit()
   }
   fun requireRepair(context: Context) { prefs(context).edit().putBoolean("required", true).commit() }
-  fun reset(context: Context) {
-    prefs(context).edit().putBoolean("required", false).putInt("retries", 0).commit()
+
+  /**
+   * Clears the durable native-repair gate for an explicit
+   * user retry (startup page button, or "return and retry" from the repair assistant).
+   * Automatic startup/retry paths never call it, so they cannot spend the two-attempt
+   * budget again by looping through the gate.
+   */
+  fun beginUserRetry(context: Context): Boolean {
+    if (!clearGate(context)) return false
+    active = false
     retryPending = false
+    return true
   }
+
+  /** Successful health convergence also clears the failure ledger; it is not a new attempt. */
+  fun reset(context: Context) {
+    if (clearGate(context)) retryPending = false
+  }
+
+  private fun clearGate(context: Context): Boolean =
+    prefs(context).edit().putBoolean("required", false).putInt("retries", 0).commit()
 }
+
+/** Decision for one startup entry; explicit user retry is the only way past the persistent gate. */
+internal enum class StartupEntryDecision { BLOCKED_FOR_REPAIR, START }
+
+internal fun startupEntryDecision(required: Boolean, explicitUserRetry: Boolean): StartupEntryDecision =
+  if (required && !explicitUserRetry) StartupEntryDecision.BLOCKED_FOR_REPAIR else StartupEntryDecision.START
+
+/** Automatic retries stay bounded and stay behind the durable gate. */
+internal fun shouldScheduleAutomaticRetry(required: Boolean, retries: Int, retryPending: Boolean): Boolean =
+  !required && !retryPending && retries < 2

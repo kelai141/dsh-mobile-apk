@@ -27,12 +27,38 @@ import { factsFromEnv, factsCacheReset, pickFacts, readFacts, type ControlFace, 
 //  ② 改成独立模块 `./route-auth.js` 后仍然死：注入链只替换**已存在**的成员、只为**整包缺席**
 //     的包补文件，新文件不会进快照 → ERR_MODULE_NOT_FOUND。
 //  故鉴权内联在本文件（包内成员集合保持与基座一致：index/facts/tier/contract）。
-const TRUSTED_HOSTS = ['127.0.0.1:3080', 'localhost:3080']
+const ENGINE_PORT_ENV = 'DSH_ENGINE_PORT'
+const DEFAULT_ENGINE_PORT = 4145
 const CONTROL_TOKEN_HEADER = 'x-dsh-control-token'
 const CONTROL_TOKEN_TEST_ENV = 'DSH_CONTROL_TOKEN_TEST'
 const CONTROL_TOKEN_ENV = 'DSH_CONTROL_TOKEN'
 const MIN_TOKEN_LENGTH = 8
 const SHELL_PREFS_DEFAULT = '/data/user/0/com.dsharnessmobile.shell/shared_prefs/dsh-adb.xml'
+
+/**
+ * Resolve the engine port for one request.
+ *
+ * The shell exports `DSH_ENGINE_PORT` with the port the engine actually bound. Missing means the
+ * documented default; a present but non-decimal or out-of-range value is invalid. This is read per
+ * request on purpose: the module is imported before `server.listen()` updates the variable, so a
+ * module-level array would pin the pre-bind default.
+ *
+ * @param env - Environment view (injectable for tests).
+ * @returns The port, or `null` when the environment value is invalid.
+ */
+export function enginePortFromEnv(env: Record<string, string | undefined> = process.env): number | null {
+  const raw = env[ENGINE_PORT_ENV]
+  if (raw === undefined) return DEFAULT_ENGINE_PORT
+  if (!/^[0-9]+$/.test(raw)) return null
+  const port = Number(raw)
+  return Number.isSafeInteger(port) && port >= 1024 && port <= 65535 ? port : null
+}
+
+/** Trusted loopback authorities for the selected engine port; empty when the env is invalid. */
+export function trustedHosts(env: Record<string, string | undefined> = process.env): string[] {
+  const port = enginePortFromEnv(env)
+  return port === null ? [] : ['127.0.0.1:' + port, 'localhost:' + port]
+}
 
 /** 鉴权只需要的最小请求面（Node IncomingMessage 满足）。 */
 interface RouteRequestLike {
@@ -116,10 +142,11 @@ export function authorizeIncomingRoute(req: RouteRequestLike, options: AuthOptio
     }
   }
   const host = authHeaderOf(req.headers, 'host')?.trim().toLowerCase()
-  if (host === undefined || !TRUSTED_HOSTS.includes(host)) return { code: 403, body: '' }
+  const trusted = trustedHosts()
+  if (trusted.length === 0 || host === undefined || !trusted.includes(host)) return { code: 403, body: '' }
   if (authHeaderOf(req.headers, 'sec-fetch-site')?.toLowerCase() === 'cross-site') return { code: 403, body: '' }
   const origin = authHeaderOf(req.headers, 'origin')
-  if (origin !== undefined && origin !== '' && !TRUSTED_HOSTS.some((h) => origin.toLowerCase() === 'http://' + h)) {
+  if (origin !== undefined && origin !== '' && !trusted.some((h) => origin.toLowerCase() === 'http://' + h)) {
     return { code: 403, body: '' }
   }
   return tokenMatches(options.token(), provided)

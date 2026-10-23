@@ -5,9 +5,23 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNull
+import org.junit.After
+import org.junit.Before
 import org.junit.Test
 
 class BrowserHostNavigationPolicyTest {
+  @Before
+  fun publishProtectedPort() {
+    EngineEndpoint.beginBinding()
+    EngineEndpoint.markGeneration(1)
+    EngineEndpoint.publishReportedPort(4145, 1)
+  }
+
+  @After
+  fun resetEndpoint() {
+    EngineEndpoint.invalidate()
+  }
+
   @Test
   fun normalizesOrdinaryHttpAddresses() {
     assertEquals("https://example.com", BrowserHostNavigationPolicy.normalize("example.com"))
@@ -18,7 +32,7 @@ class BrowserHostNavigationPolicyTest {
   @Test
   fun rejectsLocalTrustedAndNonHttpSchemes() {
     for (value in listOf(
-      "http://127.0.0.1:3080/", "http://localhost:3080/", "http://0.0.0.0/",
+      "http://127.0.0.1:4145/", "http://localhost:4145/", "http://0.0.0.0/",
       "http://[::1]/", "javascript:alert(1)", "file:///sdcard/a.txt", "content://provider/a", "data:text/html,x",
     )) {
       assertNull("must reject $value", BrowserHostNavigationPolicy.normalize(value))
@@ -52,21 +66,21 @@ class BrowserHostNavigationPolicyTest {
   //
   // 旧实现 `isLocalHost` 只认 `localhost` / `0.0.0.0` / `::1` / `127.` 前缀 / `::ffff:127.` 前缀，
   // 从不把 host 规范化成 IP；而 Chromium 会把这些写法统统解析成 127.0.0.1：
-  //   http://2130706433:3080/   十进制整数
-  //   http://0x7f000001:3080/   十六进制
-  //   http://017700000001:3080/ 八进制
-  //   http://0177.0.0.1:3080/   混合八进制的点分写法
-  //   http://127.1:3080/        inet_aton 的「最后一段填充剩余字节」
+  //   http://2130706433:4145/   十进制整数
+  //   http://0x7f000001:4145/   十六进制
+  //   http://017700000001:4145/ 八进制
+  //   http://0177.0.0.1:4145/   混合八进制的点分写法
+  //   http://127.1:4145/        inet_aton 的「最后一段填充剩余字节」
   //   http://[::ffff:7f00:1]/   IPv4-mapped IPv6
-  //   http://localhost.:3080/   结尾点（FQDN 根点）
+  //   http://localhost.:4145/   结尾点（FQDN 根点）
   // 叠加「引擎鉴权 cookie 在进程级 CookieManager 里」，绕过的后果是**以已登录身份读引擎 API**。
   @Test
   fun rejectsLoopbackEquivalentsThatChromiumNormalizesToIp() {
     for (value in listOf(
-      "http://2130706433:3080/", "http://0x7f000001:3080/", "http://017700000001:3080/",
-      "http://0177.0.0.1:3080/", "http://0177.0.0.1/", "http://127.1:3080/", "http://127.0.1/",
+      "http://2130706433:4145/", "http://0x7f000001:4145/", "http://017700000001:4145/",
+      "http://0177.0.0.1:4145/", "http://0177.0.0.1/", "http://127.1:4145/", "http://127.0.1/",
       "http://[::ffff:7f00:1]/", "http://[::ffff:127.0.0.1]/", "http://[0:0:0:0:0:ffff:7f00:1]/",
-      "http://localhost.:3080/", "http://LOCALHOST/", "http://localhost./",
+      "http://localhost.:4145/", "http://LOCALHOST/", "http://localhost./",
       "http://[::1]/", "http://[0:0:0:0:0:0:0:1]/", "http://0/", "http://0.0.0.0/",
     )) {
       assertNull("必须拒绝回环等价写法：$value", BrowserHostNavigationPolicy.normalize(value))
@@ -96,10 +110,10 @@ class BrowserHostNavigationPolicyTest {
   @Test
   fun requestFilterBlocksLoopbackAndLinkLocalTargets() {
     for (case in listOf(
-      "http://127.0.0.1:3080/" to "loopback",
-      "http://2130706433:3080/" to "loopback",
-      "http://localhost:3080/api/x" to "loopback",
-      "http://[::ffff:7f00:1]:3080/" to "loopback",
+      "http://127.0.0.1:4145/" to "loopback",
+      "http://2130706433:4145/" to "loopback",
+      "http://localhost:4145/api/x" to "loopback",
+      "http://[::ffff:7f00:1]:4145/" to "loopback",
       "http://0.0.0.0/" to "unspecified",
       "http://169.254.169.254/latest/meta-data/" to "link-local",
       "http://[fe80::1]/" to "link-local",
@@ -160,7 +174,7 @@ class BrowserHostNavigationPolicyTest {
     for (host in listOf("127.0.0.1", "127.1", "2130706433", "0x7f000001", "017700000001",
       "0177.0.0.1", "localhost", "LOCALHOST.", "app.localhost", "[::1]", "[::ffff:7f00:1]")) {
       for (scheme in listOf("http", "https")) {
-        val url = "$scheme://$host:3080/api/anonymous-check"
+        val url = "$scheme://$host:4145/api/anonymous-check"
         assertNull(url, BrowserHostNavigationPolicy.normalize(url, isolatedProfile = true))
         assertEquals(url, "protected-engine-origin",
           BrowserHostNavigationPolicy.blockedRequestReason(url, isolatedProfile = true))
@@ -170,7 +184,7 @@ class BrowserHostNavigationPolicyTest {
 
   @Test
   fun anonymousEngineOptInIsExplicitAndCannotSubstituteForProfileIsolation() {
-    val url = "http://127.0.0.1:3080/"
+    val url = "http://127.0.0.1:4145/"
     assertNull(BrowserHostNavigationPolicy.normalize(url, allowAnonymousEngineAccess = true))
     assertEquals("loopback", BrowserHostNavigationPolicy.blockedRequestReason(url, allowAnonymousEngineAccess = true))
     assertEquals(url, BrowserHostNavigationPolicy.normalize(url,
@@ -233,7 +247,7 @@ class BrowserHostNavigationPolicyTest {
     assertEquals("loopback", BrowserHostNavigationPolicy.blockedRequestReason("ws://127.0.0.1:9090/socket"))
     assertNull(BrowserHostNavigationPolicy.blockedRequestReason("ws://127.0.0.1:9090/socket", isolatedProfile = true))
     assertEquals("protected-engine-origin", BrowserHostNavigationPolicy.blockedRequestReason(
-      "wss://localhost:3080/socket", isolatedProfile = true))
+      "wss://localhost:4145/socket", isolatedProfile = true))
     assertNull(BrowserHostNavigationPolicy.normalize("ws://127.0.0.1:9090/socket", isolatedProfile = true))
   }
 

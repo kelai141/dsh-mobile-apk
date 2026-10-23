@@ -12,7 +12,7 @@ import java.net.URL
 
 /**
  * 引擎源判定：精确匹配本机引擎的 scheme/host/port（防前缀欺骗，
- * 如 127.0.0.1:30800 或 127.0.0.1:3080.evil.com 误判为引擎源）。
+ * 如 127.0.0.1:41450 或 127.0.0.1:4145.evil.com 误判为引擎源）。
  */
 internal fun isEngineSource(url: String): Boolean = EngineProbe.isEngineOrigin(url)
 

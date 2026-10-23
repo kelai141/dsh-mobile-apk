@@ -12,7 +12,7 @@ import java.net.URI
  * This is a literal-host policy, not a DNS/network firewall (no DNS on the request hot path).
  */
 internal object BrowserHostNavigationPolicy {
-  private const val PROTECTED_ENGINE_PORT = 3080
+  private val PROTECTED_ENGINE_PORT: Int get() = EngineEndpoint.port
 
   /** Rebuild the actual load URL from the same canonical host used for admission. */
   fun normalize(

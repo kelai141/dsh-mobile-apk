@@ -8,6 +8,22 @@
   ],
   "states": [
     {
+      "id": "engine-loopback-endpoint",
+      "holder": "壳侧 EngineEndpoint；绑定结果由当前世代的自有引擎产生",
+      "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/EngineAuth.kt:tokenFromCurrentLog → EngineEndpoint.kt:publishReportedPort",
+      "sourceOfTruth": "本轮自有引擎 server.address().port；.engine-endpoint.json 只保存下次启动偏好，不构成引擎归属证明",
+      "syncPath": "EngineProbe、Cookie、WebView、HTTP 与 Mux 读内存端点；EP1 在监听完成时更新 DSH_ENGINE_PORT，插件按请求读取；绑定中端口 0 拒绝发送",
+      "evidence": { "kind": "grep", "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/EngineEndpoint.kt", "pattern": "publishReportedPort" }
+    },
+    {
+      "id": "native-startup-repair-gate",
+      "holder": "RepairState",
+      "writePath": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/RepairState.kt:requireRepair / beginUserRetry / reset",
+      "sourceOfTruth": "自动重试预算耗尽与用户显式重试意图",
+      "syncPath": "普通启动/回前台保留故障页；用户点重试清 required/retries 再走原启动链；助手是独立可选出口",
+      "evidence": { "kind": "grep", "file": "dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt", "pattern": "retryEngineExplicitly" }
+    },
+    {
       "id": "external-linux-environment",
       "holder": "用户显式注入的外部 linuxBootstrap 服务；APK 只提供宿主适配与展示",
       "writePath": "plugins/dsh-android-linux-env/src/linux-environment.ts:registerLinuxEnvironmentRoutes → linuxBootstrap.install/reinstall/uninstall/setAutoUpdateEnabled",

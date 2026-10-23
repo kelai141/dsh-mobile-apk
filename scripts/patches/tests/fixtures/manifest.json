@@ -964,6 +964,7 @@
         "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/package.json"
       },
       "patchIds": [
+        "profile-link-skip-PL1",
         "boot-third-party-isolation-G3"
       ]
     },
@@ -1262,6 +1263,31 @@
       "patchIds": [
         "inspector-worker-expose-internals-472"
       ]
+    },
+    "dsh-host-webserver-0.2.1-rc.2": {
+      "source": "engine-tgz",
+      "engine": "0.2.1-rc.2",
+      "package": "@deepseek-ai/dsh-host-webserver@0.2.1-rc.2",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-host-webserver-0.2.1-rc.2.tgz",
+        "tarballSha256": "fe58d2488887cc53c953c3d765d379ceb9f1fe0cbac29f22ebf6895dcd73f872",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "08907285802f0edd3aeb68c91fb443be2804879ab3d41104c4600424be06f3ab",
+        "package.json": "9e9d4a506e4bed1d76acc0decee79dbc7d4a211fc95449bbbf505cbd5579995f"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-webserver/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-webserver/package.json"
+      },
+      "patchIds": [
+        "managed-port-bind-EP1"
+      ]
     }
   },
   "capture": {
@@ -1273,6 +1299,6 @@
       ]
     },
     "overlaySha256": "87486df7cf65e8199902e3b855987aad7ba155693bb9b69ab7efedf2168afb2a",
-    "registrySha256": "a979590e275e4b66cbda2b379a8784dd24f5f26f1aa4a5322b5717f0efe57b79"
+    "registrySha256": "281a8bc500eec846c5de0c9b07aa90ab4de83c64526af3248c2926f344c9bf1d"
   }
 }

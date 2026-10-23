@@ -2,6 +2,22 @@
   "$comment": "vendor 固化插件补丁登记表（apply-patches.mjs 消费；id 必须与 IMPLS 一一对应，启动时交叉校验）。marker 语义见 README。",
   "patches": [
     {
+      "id": "managed-port-bind-EP1",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-webserver/lib/index.js",
+      "scope": "engine",
+      "summary": "本壳引擎仅在 EADDRINUSE 时回退一次到 OS 原子分配端口，并发布实际监听端点",
+      "provenance": "2026-10-23 同机多 DSH 宿主端口冲突；Node listen(0) 与上游 getOrigin 实际监听地址同源",
+      "marker": "dsh-mobile managed atomic port bind (EP1)"
+    },
+    {
+      "id": "profile-link-skip-PL1",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js",
+      "scope": "engine",
+      "summary": "profile 第三方软链遇权限、缺失或非目录错误时跳过并告警，保留其它链接与系统故障诊断",
+      "provenance": "2026-10-23 启动事故：共享存储插件软链 EACCES 阻断 profile 组合",
+      "marker": "dsh-mobile profile link skip (PL1)"
+    },
+    {
       "id": "sidebar-bubble-reorder-B1",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar-right/lib/client.js",
       "scope": "engine",

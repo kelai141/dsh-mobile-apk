@@ -109,13 +109,18 @@ object PluginMounts {
     }
   }
 
-  internal data class HardBundleSelectionRepair(val changed: Boolean, val failure: String? = null)
+  internal data class HardBundleSelectionRepair(
+    val changed: Boolean,
+    val failure: String? = null,
+    val warnings: List<String> = emptyList(),
+  )
 
   /**
    * Reconcile only the factory bundles bound by the current Hard manifest into the live web
-   * profile. Bundle identities must resolve from the installed engine tree with the exact version
-   * and patch digest recorded by that manifest. User bundles and all other package fields remain
-   * untouched. A failure is returned before writing anything.
+   * profile. Only exact installed identities may be added automatically. Identity drift is a
+   * diagnostic, not a launch veto: an external repair may deliberately change a bundle patch.
+   * Such a bundle does not gain Hard ownership (Safe Mode and health promotion still verify it).
+   * User selections and all other package fields remain untouched.
    */
   internal fun ensureHardBundlesSelected(
     profilePackage: File,
@@ -129,13 +134,6 @@ object PluginMounts {
       } || expected.map { it.name }.distinct().size != expected.size) {
       return HardBundleSelectionRepair(false, "Hard manifest factory bundle identities are empty, malformed, or ambiguous")
     }
-    val exactInstalled = resolveBundleLayers(
-      installModules, expected.map { it.name }, profileModules = null, allowContainedSymlinks = false,
-    ) ?: return HardBundleSelectionRepair(false, "Installed factory bundle package or patch identity is missing or unsafe")
-    if (exactInstalled.map { it.identity }.toSet() != expected) {
-      return HardBundleSelectionRepair(false, "Installed factory bundle identity does not match the Hard manifest")
-    }
-
     val profileDir = profilePackage.parentFile
       ?: return HardBundleSelectionRepair(false, "Web profile package path has no parent")
     if (!Files.isRegularFile(profilePackage.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS) ||
@@ -177,8 +175,26 @@ object PluginMounts {
         return HardBundleSelectionRepair(false, "Web profile bundle selection contains an invalid or duplicate entry")
       }
     }
-    val missing = expected.map { it.name }.filterNot(selected::contains)
-    if (missing.isEmpty()) return HardBundleSelectionRepair(changed = false)
+    val warnings = ArrayList<String>()
+    val missing = ArrayList<String>()
+    for (bundle in expected.sortedBy { it.name }) {
+      val actual = resolveBundleLayers(
+        installModules, listOf(bundle.name), profileModules = null, allowContainedSymlinks = false,
+      )?.singleOrNull()?.identity
+      if (actual != bundle) {
+        // Package identities contain no credentials or user patch contents. Include both hashes
+        // so a manual repair can distinguish a changed patch from a different package version.
+        warnings += "Factory bundle differs: name=" + bundle.name +
+          " path=" + File(installModules, bundle.name).absolutePath +
+          " expectedVersion=" + bundle.version + " expectedPatchSha256=" + bundle.patchSha256 +
+          " actualVersion=" + (actual?.version ?: "unavailable") +
+          " actualPatchSha256=" + (actual?.patchSha256 ?: "unavailable") +
+          "; kept user state; not added or trusted as Hard"
+      } else if (bundle.name !in selected) {
+        missing += bundle.name
+      }
+    }
+    if (missing.isEmpty()) return HardBundleSelectionRepair(changed = false, warnings = warnings)
 
     for (name in missing) bundles.put(name)
     profile.put("bundles", bundles)
@@ -186,7 +202,7 @@ object PluginMounts {
     manifest.put("dsh", dsh)
     return try {
       writeTextAtomically(profilePackage, manifest.toString(2))
-      HardBundleSelectionRepair(changed = true)
+      HardBundleSelectionRepair(changed = true, warnings = warnings)
     } catch (_: Throwable) {
       HardBundleSelectionRepair(false, "Could not atomically update web profile package.json")
     }

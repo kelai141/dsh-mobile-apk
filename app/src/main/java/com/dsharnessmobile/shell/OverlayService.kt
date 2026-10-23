@@ -706,7 +706,7 @@ class OverlayService : Service() {
         code = -1
         // 0.13.3 W2: one cookie round-trip — on 401 refresh the cookie and retry once.
         for (attempt in 0..1) {
-          val conn = URL("http://127.0.0.1:3080/api/" + method).openConnection(java.net.Proxy.NO_PROXY) as HttpURLConnection
+          val conn = URL(EngineEndpoint.url + "/api/" + method).openConnection(java.net.Proxy.NO_PROXY) as HttpURLConnection
           conn.requestMethod = "POST"
           conn.doOutput = true
           conn.connectTimeout = 3000

@@ -163,7 +163,7 @@ class PluginMountsTest {
   }
 
   @Test
-  fun hardBundleRepairRejectsInstalledIdentityMismatchWithoutWriting() {
+  fun hardBundleRepairReportsInstalledIdentityMismatchWithoutBlockingManualRepair() {
     val root = Files.createTempDirectory("hard-bundle-repair-identity-").toFile()
     try {
       val modules = File(root, "usr/lib/node_modules/@deepseek-ai/dsh/node_modules")
@@ -175,13 +175,61 @@ class PluginMountsTest {
       val wrongHash = actual.copy(patchSha256 = "0".repeat(64))
       val hard = PluginMounts.HardManifest("a".repeat(64), emptySet(), factoryBundles = setOf(wrongHash))
 
-      assertNotNull(PluginMounts.ensureHardBundlesSelected(profile, modules, hard).failure)
+      val drift = PluginMounts.ensureHardBundlesSelected(profile, modules, hard)
+      assertNull(drift.failure)
+      assertFalse(drift.changed)
+      assertTrue(drift.warnings.single().contains("expectedPatchSha256=" + wrongHash.patchSha256))
+      assertTrue(drift.warnings.single().contains("actualPatchSha256=" + actual.patchSha256))
       assertEquals(original, profile.readText())
 
       val wrongNameIdentity = actual.copy(name = "@deepseek-ai/impostor")
       val mismatchedHard = PluginMounts.HardManifest("a".repeat(64), emptySet(), factoryBundles = setOf(wrongNameIdentity))
-      assertNotNull(PluginMounts.ensureHardBundlesSelected(profile, modules, mismatchedHard).failure)
+      val missing = PluginMounts.ensureHardBundlesSelected(profile, modules, mismatchedHard)
+      assertNull(missing.failure)
+      assertTrue(missing.warnings.single().contains("actualVersion=unavailable"))
       assertEquals(original, profile.readText())
+    } finally { root.deleteRecursively() }
+  }
+
+  @Test
+  fun selectedManuallyRepairedBundleIsPreservedAndNotPromotedToHard() {
+    val root = Files.createTempDirectory("hard-bundle-manual-").toFile()
+    try {
+      val modules = File(root, "usr/lib/node_modules/@deepseek-ai/dsh/node_modules")
+      val originalIdentity = writeFactoryBundle(modules, "@deepseek-ai/dsh-base", "factory patch\n")
+      val profile = File(root, "home/.dsh/profiles/web/package.json")
+      profile.parentFile.mkdirs()
+      val original = """{"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base","@user/soft"]}}}"""
+      profile.writeText(original)
+      File(modules, originalIdentity.name + "/cordis.patch.yml").writeText("manually repaired patch\n")
+      val hard = PluginMounts.HardManifest("a".repeat(64), emptySet(), factoryBundles = setOf(originalIdentity))
+      val result = PluginMounts.ensureHardBundlesSelected(profile, modules, hard)
+      assertNull(result.failure)
+      assertFalse(result.changed)
+      assertEquals(original, profile.readText())
+      assertEquals(setOf(originalIdentity), hard.factoryBundles)
+      assertTrue(result.warnings.single().contains("not added or trusted as Hard"))
+    } finally { root.deleteRecursively() }
+  }
+
+  @Test
+  fun driftedBundleDoesNotPreventRepairOfAnotherExactlyVerifiedMissingBundle() {
+    val root = Files.createTempDirectory("hard-bundle-partial-").toFile()
+    try {
+      val modules = File(root, "usr/lib/node_modules/@deepseek-ai/dsh/node_modules")
+      val base = writeFactoryBundle(modules, "@deepseek-ai/dsh-base", "base patch\n")
+      val web = writeFactoryBundle(modules, "@deepseek-ai/dsh-web-app", "web patch\n")
+      File(modules, base.name + "/cordis.patch.yml").writeText("repaired base patch\n")
+      val profile = File(root, "home/.dsh/profiles/web/package.json")
+      profile.parentFile.mkdirs()
+      profile.writeText("""{"dsh":{"profile":{"bundles":["@user/soft"]}}}""")
+      val hard = PluginMounts.HardManifest("a".repeat(64), emptySet(), factoryBundles = setOf(base, web))
+      val result = PluginMounts.ensureHardBundlesSelected(profile, modules, hard)
+      assertNull(result.failure)
+      assertTrue(result.changed)
+      assertEquals(1, result.warnings.size)
+      val selected = JSONObject(profile.readText()).getJSONObject("dsh").getJSONObject("profile").getJSONArray("bundles")
+      assertEquals(listOf("@user/soft", web.name), (0 until selected.length()).map { selected.getString(it) })
     } finally { root.deleteRecursively() }
   }
 

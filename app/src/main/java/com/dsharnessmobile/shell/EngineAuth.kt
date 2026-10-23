@@ -22,14 +22,14 @@ import org.json.JSONObject
  * machine client that must speak HTTP to the engine, so it carries the cookie:
  *
  * - P0 (primary): parse the official launch-token URL line from engine.log
- *   (`dsh web: http://127.0.0.1:3080/?token=…`, printed once per engine
+ *   (`dsh web: http://127.0.0.1:4145/?token=…`, printed once per engine
  *   process; web-app printUrl :211) and exchange it once at `GET /?token=` —
  *   the engine answers 303 + Set-Cookie. The cookie is opaque to us.
  * - P1 (fallback): mint the cookie ourselves from the persistent signing
  *   secret in `files/home/.dsh/.credentials.yaml`
  *   (records["client-connection/browser-session"].payload.secret) — exact
  *   algorithm per research §1.4: value `v1.<b64url(payload)>.<b64url(HMAC-SHA256(secret, body))>`,
- *   name `dsh-auth-<b64url(sha256(authority))>`, authority `127.0.0.1:3080`.
+ *   name `dsh-auth-<b64url(sha256(authority))>`, authority `127.0.0.1:4145` by default.
  *   javax.crypto/MessageDigest standard parts only.
  *
  * Because the signing secret persists across engine restarts, a cookie keeps
@@ -45,11 +45,12 @@ object EngineAuth {
   private const val TAG = "dsh-engine-auth"
   private const val PREFS = "dsh_engine_auth"
   private const val KEY_COOKIE = "cookie"
-  const val AUTHORITY = "127.0.0.1:3080"
-  const val BASE_URL = "http://$AUTHORITY"
+  val AUTHORITY: String get() = EngineEndpoint.authority
+  val BASE_URL: String get() = EngineEndpoint.url
   private const val COOKIE_NAME_PREFIX = "dsh-auth-"
   private const val TOKEN_LINE = "dsh web: "
   internal val TOKEN_RE = Regex("""dsh web: \S*/\?token=([A-Za-z0-9_\-]{40,})""")
+  private val ENDPOINT_LINE_RE = Regex("""dsh web: (http://127\.0\.0\.1:\d+/\?token=[A-Za-z0-9_\-]{40,})""")
   /**
    * **脱敏专用**正则（与 [TOKEN_RE] 刻意分开，0.14.1 单测实测抓出的缺陷）：
    * [TOKEN_RE] 带 `{40,}` 长度下限——那是**提取**令牌时防误命中用的（短串可能是普通文本），
@@ -157,6 +158,7 @@ object EngineAuth {
    * callers (EngineProbe is a Kotlin object) can still attach cookies.
    */
   fun initContext(context: Context) {
+    EngineEndpoint.init(context)
     appContext = context.applicationContext
     // ST-10：同一绑定点也把进程级上下文交给 ShellAppContext——桥 getImmersiveMode() 没有
     // Context 形参，这是它读壳侧权威值的唯一入口（MainActivity.onCreate 已先于桥安装调用）。
@@ -164,6 +166,11 @@ object EngineAuth {
   }
 
   private fun ctx(): Context? = appContext
+
+  /** Startup polling alone reads the log; normal requests use the published in-memory endpoint. */
+  internal fun refreshReportedEndpoint() {
+    if (EngineEndpoint.awaitingBind) ctx()?.let { tokenFromLog(it) }
+  }
 
   /**
    * 标记「本代引擎已 spawn」（由 EngineManager 在 spawn 点调用）。
@@ -173,6 +180,7 @@ object EngineAuth {
    */
   fun markGenerationStart(atMs: Long) {
     generationStartAt = atMs
+    EngineEndpoint.markGeneration(atMs)
     // 换代会作废内存里的 cookie 缓存吗？**不会**：cookie 由持久签名密钥签发，跨重启有效
     // （类注释已述）。这里只重置「本代起点」，不动 cookie。
   }
@@ -182,6 +190,7 @@ object EngineAuth {
 
   /** Current cookie (memory cache first), or null when none is stored. */
   fun cookie(context: Context): String? {
+    if (!EngineEndpoint.confirmed) return null
     cached?.let { if (stillValid(it)) return it }
     val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     val stored = prefs.getString(KEY_COOKIE, null)
@@ -198,6 +207,7 @@ object EngineAuth {
    * a stored cookie. Callers keep their own Proxy.NO_PROXY and timeouts.
    */
   fun attach(conn: HttpURLConnection) {
+    if (!EngineProbe.isEngineOrigin(conn.url.toString())) return
     val c = ctx() ?: return
     val cookie = cookie(c) ?: return
     conn.setRequestProperty("Cookie", cookie)
@@ -208,6 +218,7 @@ object EngineAuth {
    * depend on initContext ordering.
    */
   fun attach(context: Context, conn: HttpURLConnection) {
+    if (!EngineProbe.isEngineOrigin(conn.url.toString())) return
     val cookie = cookie(context) ?: return
     conn.setRequestProperty("Cookie", cookie)
   }
@@ -262,6 +273,8 @@ object EngineAuth {
    *   App（ST-13 判据：≤10s 恢复）。force 时先 invalidate（内存 + prefs）再重取。
    */
   internal fun refresh(context: Context, force: Boolean): String? {
+    refreshReportedEndpoint()
+    if (!EngineEndpoint.confirmed) return null
     val startedAt = System.currentTimeMillis()
     val app = context.applicationContext
     synchronized(this) {
@@ -323,7 +336,12 @@ object EngineAuth {
         val read = input.read(tail)
         tail.copyOf(if (read > 0) read else 0)
       }
-      TOKEN_RE.findAll(String(bytes, StandardCharsets.UTF_8)).lastOrNull()?.groupValues?.get(1)
+      val text = String(bytes, StandardCharsets.UTF_8)
+      val token = TOKEN_RE.findAll(text).lastOrNull()?.groupValues?.get(1) ?: return null
+      val line = ENDPOINT_LINE_RE.findAll(text).lastOrNull()?.groupValues?.get(1)
+      val bound = line?.let(EngineEndpoint::reportedPort)
+      if (bound != null) EngineEndpoint.publishReportedPort(bound, generationStartMs)
+      token
     } catch (_: Exception) {
       null
     }
@@ -446,7 +464,8 @@ object EngineAuth {
     if (parts.size != 3 || parts[0] != "v1") return false
     return try {
       val payload = JSONObject(String(Base64.getUrlDecoder().decode(parts[1]), StandardCharsets.UTF_8))
-      payload.optLong("expiresAt", 0L) > System.currentTimeMillis()
+      payload.optLong("expiresAt", 0L) > System.currentTimeMillis() &&
+        payload.optString("authority") == AUTHORITY && cookie.substringBefore('=') == cookieName(AUTHORITY)
     } catch (_: Exception) {
       false
     }

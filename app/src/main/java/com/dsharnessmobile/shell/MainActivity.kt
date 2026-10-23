@@ -263,6 +263,8 @@ class MainActivity : ComponentActivity() {
     /** 虚拟屏空闲回收扫描间隔（判定阈值在 VdisplayController.IDLE_RECLAIM_MS = 10 分钟）。 */
     private const val VDISPLAY_REAP_INTERVAL_MS = 2 * 60 * 1000L
     const val ACTION_UPDATE = "com.dsharnessmobile.shell.action.UPDATE"
+    /** Set by the repair assistant's "back and retry" action; consumed once by onCreate. */
+    const val ACTION_RETRY_ENGINE = "com.dsharnessmobile.shell.action.RETRY_ENGINE"
 
     /** #120：显式拒绝哨兵路径前缀（引擎侧识别为拒绝而非取消，见 host-web-compat）。
      *  协议：`__dsh_pick_refused__:<reason>`，reason = permission-denied | android-10。 */
@@ -292,13 +294,10 @@ class MainActivity : ComponentActivity() {
   /** 引擎启动流（委托 EngineStartFlow.start）。 */
   internal fun startEngineFlow(splash: Boolean = false) {
     if (isFinishing || isDestroyed) return
-    if (RepairState.required(this)) {
+    if (startupEntryDecision(RepairState.required(this), explicitUserRetry = false) ==
+      StartupEntryDecision.BLOCKED_FOR_REPAIR) {
       showGuide()
-      applyGuidePhase(
-        GuidePhase.Error,
-        UiText.t(this, "引擎仍无法启动", "The engine still will not start"),
-        UiText.t(this, "已自动重试两次。可启动修复助手，自动读取本轮诊断并修复运行时。", "Automatic retry failed twice. The repair assistant can read this failure and repair the runtime."),
-      )
+      applyRepairRequiredGuide()
       return
     }
     // CONTRACT §4：显式启动出口（用户点「重试」/错误页的「安全模式启动」）先解除插件失败 latch，
@@ -319,6 +318,33 @@ class MainActivity : ComponentActivity() {
     } else {
       engineFlow.start()
     }
+  }
+
+  /**
+   * Explicit user retry: the only startup entry that clears the durable native-repair gate.
+   * Automatic callers (onCreate/onResume/monitor) keep using [startEngineFlow], so external
+   * repairs are usable without opening the assistant and the automatic retry budget stays bounded.
+   */
+  internal fun retryEngineExplicitly() {
+    if (isFinishing || isDestroyed) return
+    if (!RepairState.beginUserRetry(this)) {
+      applyGuidePhase(GuidePhase.Error, UiText.t(this,
+        "无法保存重试状态，请重试。", "Could not save retry state. Please try again."))
+      return
+    }
+    engineFlow.engineRetryCount = 0
+    engineManager.clearRefreshLedger()
+    startEngineFlow(splash = true)
+  }
+
+  private fun applyRepairRequiredGuide() {
+    applyGuidePhase(
+      GuidePhase.Error,
+      UiText.t(this, "引擎仍无法启动", "The engine still will not start"),
+      UiText.t(this,
+        "自动重试已用完。可先重试引擎；若仍有问题，再打开修复助手读取诊断。",
+        "Automatic retries are used up. Retry the engine first; open the repair assistant only if it still fails."),
+    )
   }
 
   /** 引导页状态渲染（委托 GuidePageRenderer；EngineStartFlow/前台监控经此驱动）。 */
@@ -389,6 +415,10 @@ class MainActivity : ComponentActivity() {
       }
       reloadEnginePage()
     }
+    val current = runCatching { webView.url }.getOrNull()
+    if (current.isNullOrBlank() || current == "about:blank" || !EngineProbe.isEngineOrigin(current)) {
+      loadConfirmedEnginePage()
+    }
     guideRenderer.showWeb()
     engineFlow.startFreezeWatchdog()
   }
@@ -424,8 +454,33 @@ class MainActivity : ComponentActivity() {
   /** Automatic page refreshes coalesce while paused and never issue background navigation. */
   internal fun reloadEnginePage() {
     if (userClosedEngine || isFinishing || isDestroyed) return
+    if (!EngineEndpoint.confirmed || EngineEndpoint.port <= 0) return
     pageRecovery.requestReload()
+    val current = runCatching { webView.url }.getOrNull()
+    if (current.isNullOrBlank() || current == "about:blank" || !EngineProbe.isEngineOrigin(current)) {
+      loadConfirmedEnginePage()
+      return
+    }
     recoverPageIfPending()
+  }
+
+  /** Navigate only after this process's engine generation has published a real port. */
+  private fun loadConfirmedEnginePage() {
+    if (!EngineEndpoint.confirmed || EngineEndpoint.port <= 0 || !webViewReady) return
+    val authCookie = EngineAuth.cookie(this)
+    if (authCookie != null) {
+      try {
+        android.webkit.CookieManager.getInstance().setCookie(EngineProbe.ENGINE_URL, authCookie)
+      } catch (t: Throwable) {
+        Log.w("dsh-engine-auth", "CookieManager injection failed: " + t.message)
+      }
+      webView.loadUrl(EngineProbe.ENGINE_URL)
+    } else {
+      val token = EngineAuth.tokenFromLog(this)
+      webView.loadUrl(if (token != null) EngineProbe.ENGINE_URL + "/?token=" + token else EngineProbe.ENGINE_URL)
+      initialAuthRecoveryPending = true
+      webView.post { startInitialEngineAuthRecovery() }
+    }
   }
 
   internal fun retryFailedEnginePage() {
@@ -616,7 +671,12 @@ class MainActivity : ComponentActivity() {
     try { AdbKeyboardService.ensureNonce(this) } catch (_: Throwable) {
     }
     // Testable update trigger: adb am start -n .../.MainActivity -a com.dsharnessmobile.shell.action.UPDATE
-    if (intent?.action == ACTION_UPDATE) {
+    if (intent?.action == ACTION_RETRY_ENGINE) {
+      // The assistant's "back and retry" hands over a one-shot user intent. Clear it before
+      // automatic startup so a later resume cannot replay the retry on its own.
+      intent.action = null
+      retryEngineExplicitly()
+    } else if (intent?.action == ACTION_UPDATE) {
       engineFlow.runUpdate()
     } else {
       // 来件接线（VIEW/SEND 外部来件）已迁至 FileIncoming.processIncomingIntent：
@@ -665,6 +725,11 @@ class MainActivity : ComponentActivity() {
     super.onNewIntent(intent)
     // SINGLE_TOP：应用已在前台时点击通知走这里（此前**没有这个覆写**，intent 直接丢掉）。
     setIntent(intent)
+    if (intent.action == ACTION_RETRY_ENGINE) {
+      intent.action = null
+      retryEngineExplicitly()
+      return
+    }
     consumeNotifyRoute(intent)
   }
 
@@ -714,11 +779,7 @@ class MainActivity : ComponentActivity() {
     pageRecovery.resume()
     if (!RepairState.active && RepairState.required(this)) {
       showGuide()
-      applyGuidePhase(
-        GuidePhase.Error,
-        UiText.t(this, "引擎仍无法启动", "The engine still will not start"),
-        UiText.t(this, "已自动重试两次。可启动修复助手，自动读取本轮诊断并修复运行时。", "Automatic retry failed twice. The repair assistant can read this failure and repair the runtime."),
-      )
+      applyRepairRequiredGuide()
       return
     }
     if (recoverPageIfPending()) {
@@ -1484,22 +1545,13 @@ class MainActivity : ComponentActivity() {
     // FX-210.5：此处只取**零网络**的本地缓存 cookie（预置 cookie 有效即用）；同步 refresh
     // 含最长 8s 的 HTTP 且持 EngineAuth 锁（排队可达 ~16s），原先在 onCreate 主线程同步调用
     // 会冻结首帧——已迁到下面的后台重试线程（首个尝试立即执行）。
-    val authCookie = EngineAuth.cookie(this)
-    if (authCookie != null) {
-      try {
-        android.webkit.CookieManager.getInstance().setCookie(EngineProbe.ENGINE_URL, authCookie)
-      } catch (t: Throwable) {
-        Log.w("dsh-engine-auth", "CookieManager injection failed: " + t.message)
-      }
-      webView.loadUrl(EngineProbe.ENGINE_URL)
+    // The saved port is only a preference. Navigation waits for this process's child to
+    // publish its current-generation port; otherwise a foreign listener could receive the
+    // WebView's cookie or token before the engine is confirmed.
+    if (EngineEndpoint.confirmed && EngineEndpoint.port > 0) {
+      loadConfirmedEnginePage()
     } else {
-      val token = EngineAuth.tokenFromLog(this)
-      webView.loadUrl(if (token != null) EngineProbe.ENGINE_URL + "/?token=" + token else EngineProbe.ENGINE_URL)
-      // 全新安装首启竞态自愈（0.13.3 模拟器实测）：引擎冷启动期 token 行尚未打印，
-      // 首次 refresh/tokenFromLog 均落空 → WebView 载入 401 文案页。仅前台定期重试，
-      // 拿到 cookie 即注入 CookieManager 并重载一次（用户无感自愈，120s 预算封顶）。
-      initialAuthRecoveryPending = true
-      webView.post { startInitialEngineAuthRecovery() }
+      initialAuthRecoveryPending = false
     }
   }
 

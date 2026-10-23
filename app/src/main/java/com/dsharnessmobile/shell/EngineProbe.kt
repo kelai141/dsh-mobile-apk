@@ -11,7 +11,8 @@ import android.content.Context
 import org.json.JSONObject
 
 /**
- * Probes the local dsh web engine (127.0.0.1:3080) from the shell side.
+ * Probes the local dsh web engine at the endpoint selected at spawn time
+ * (EngineEndpoint; default 127.0.0.1:4145) from the shell side.
  *
  * #118 (2026-09): every connection to the local engine port must bypass the
  * system HTTP proxy. `URL.openConnection()` defaults to the `ProxySelector`
@@ -24,9 +25,9 @@ import org.json.JSONObject
  *
  * ── M.1（apk issue #272）：本文件同时持有「引擎可用性」的两条语义判据 ────────────────
  *
- * 3080 端口上「有东西在听」与「这是我们的引擎」是两件事。旧实现 `EngineManager.startEngine`
+ * 引擎端口上「有东西在听」与「这是我们的引擎」是两件事。旧实现 `EngineManager.startEngine`
  * 只要 `portReachable()` 为真就**静默 return true**（当作「已有引擎可用」），不启动、不报错；
- * 任何占用 3080 的非本引擎进程都会让壳层永久停在假象里，用户永远进不去且无任何提示。
+ * 任何占用该端口的非本引擎进程都会让壳层永久停在假象里，用户永远进不去且无任何提示。
  *
  * 另一条同族缺陷：`check()` 把 401 与 200/303 一律算 `running=true`。无 cookie 时 GET /
  * **本来就返回 401**（引擎的鉴权栅栏），所以「需要重新认证」被当成「健康」⇒ 壳侧自愈链
@@ -55,7 +56,7 @@ object EngineProbe {
     OUR_PROCESS,
     /** HTTP 应答且可佐证是我们自己的引擎（200 已认证 / 303 令牌交换 / 401+本代 token 行）。 */
     OUR_HTTP,
-    /** 端口能连、但既非本进程托管、日志/指纹也对不上 ⇒ 有别的进程占着 3080。 */
+    /** 端口能连、但既非本进程托管、日志/指纹也对不上 ⇒ 有别的进程占着引擎端口。 */
     PORT_FOREIGN,
     /** 端口不可连。 */
     DOWN,
@@ -91,8 +92,8 @@ object EngineProbe {
   /** Exact local engine origin comparison, independent of Android Uri for JVM policy tests. */
   internal fun isEngineOrigin(url: String): Boolean = try {
     val uri = java.net.URI(url)
-    uri.scheme.equals("http", ignoreCase = true) &&
-      uri.host.equals("127.0.0.1", ignoreCase = true) && uri.port == 3080 && uri.rawUserInfo == null
+    ENGINE_PORT > 0 && uri.scheme.equals("http", ignoreCase = true) &&
+      uri.host.equals(ENGINE_HOST, ignoreCase = true) && uri.port == ENGINE_PORT && uri.rawUserInfo == null
   } catch (_: Exception) {
     false
   }
@@ -129,10 +130,17 @@ object EngineProbe {
 
 
 
-  const val ENGINE_URL = "http://127.0.0.1:3080"
-
-  private const val ENGINE_HOST = "127.0.0.1"
-  private const val ENGINE_PORT = 3080
+  /**
+   * 引擎端点的兼容读口：唯一真源是 [EngineEndpoint]（启动期选定并持久化）。
+   *
+   * 这些必须是 getter：绑定期间端口为 0，publish 后才变成实际端口。缓存成 val/const
+   * 会让探活、WebView、cookie 各拿各的旧值。调用方不得把返回值再存进字段。
+   */
+  val ENGINE_PORT: Int get() = EngineEndpoint.port
+  val ENGINE_HOST: String get() = EngineEndpoint.HOST
+  val ENGINE_URL: String get() = EngineEndpoint.url
+  /** HTTP Host / cookie authority 形态（host:port）。 */
+  val ENGINE_AUTHORITY: String get() = EngineEndpoint.authority
 
   /**
    * One-shot reachability probe. Safe on any thread (never the main thread).
@@ -144,6 +152,11 @@ object EngineProbe {
    *   engine) from "refused" (port not open — engine actually down).
    */
   fun check(timeoutMs: Int = 800): JSONObject {
+    // 主线程实现：只读内存里的上报端点；绑定期不得发请求（端口 0 不是可连地址）。
+    EngineAuth.refreshReportedEndpoint()
+    if (EngineEndpoint.awaitingBind || EngineEndpoint.port <= 0) return JSONObject()
+      .put("running", false).put("listening", false).put("auth", "unknown")
+      .put("error", "awaiting-endpoint")
     val start = System.currentTimeMillis()
     return try {
       // Proxy.NO_PROXY: bypass the system proxy selector (see class doc, #118).
@@ -292,6 +305,8 @@ object EngineProbe {
    * @return true when the port accepts connections.
    */
   fun portReachable(timeoutMs: Int = 1000): Boolean {
+    // 端口 0 是「尚未绑定」哨兵，绝不能拿去 Socket 连接（会误连 0 或被系统改写）。
+    if (EngineEndpoint.awaitingBind || EngineEndpoint.port <= 0) return false
     return try {
       val sock = Socket(Proxy.NO_PROXY)
       try {

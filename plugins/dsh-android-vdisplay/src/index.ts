@@ -49,8 +49,28 @@ interface WsRes {
   end(body: string): void
 }
 
-/** 回环白名单（与 dsh-android-bridge/route-auth.js 的 FALLBACK_LOOPBACK_HOSTS 同源；跨包不 import 类型）。 */
-const LOOPBACK_AUTHORITIES = ['127.0.0.1:3080', 'localhost:3080'] as const
+const ENGINE_PORT_ENV = 'DSH_ENGINE_PORT'
+const DEFAULT_ENGINE_PORT = 4145
+
+/**
+ * 当前引擎端口（每次请求读 env；与 bridge 的 loopbackAuthorities 同口径，跨包不 import 值）。
+ *
+ * 壳侧 spawn 时注入 `DSH_ENGINE_PORT`；缺失按默认 4145，存在但非十进制/越界则返回 null。
+ * 不得在模块顶层缓存：插件 import 早于 server.listen() 写 env，缓存会钉死未绑定前的默认值。
+ */
+export function enginePortFromEnv(env: Record<string, string | undefined> = process.env): number | null {
+  const raw = env[ENGINE_PORT_ENV]
+  if (raw === undefined) return DEFAULT_ENGINE_PORT
+  if (!/^[0-9]+$/.test(raw)) return null
+  const port = Number(raw)
+  return Number.isSafeInteger(port) && port >= 1024 && port <= 65535 ? port : null
+}
+
+/** 只信任实际监听端口对应的回环 authority；env 非法时返回空表（调用方一律拒绝）。 */
+export function loopbackAuthorities(env: Record<string, string | undefined> = process.env): string[] {
+  const port = enginePortFromEnv(env)
+  return port === null ? [] : ['127.0.0.1:' + port, 'localhost:' + port]
+}
 
 /**
  * review C12：公开只读状态路由的回环栅栏——载荷只有元数据（不要求令牌），但必须拒绝
@@ -69,10 +89,11 @@ function publicRouteRejected(req: WsReq, connection?: { requestRejection?(r: unk
     return typeof v === 'string' ? v : Array.isArray(v) ? v[0] : undefined
   }
   const host = headerOf('host')?.trim().toLowerCase()
-  if (host === undefined || !LOOPBACK_AUTHORITIES.some((authority) => authority === host)) return true
+  const trusted = loopbackAuthorities()
+  if (trusted.length === 0 || host === undefined || !trusted.includes(host)) return true
   if (headerOf('sec-fetch-site')?.toLowerCase() === 'cross-site') return true
   const origin = headerOf('origin')
-  if (origin !== undefined && origin !== '' && !LOOPBACK_AUTHORITIES.some((authority) => origin.toLowerCase() === 'http://' + authority)) {
+  if (origin !== undefined && origin !== '' && !trusted.some((authority) => origin.toLowerCase() === 'http://' + authority)) {
     return true
   }
   return false

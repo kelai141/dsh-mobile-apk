@@ -18,7 +18,8 @@ process.env.DSH_CONTROL_TOKEN = TOKEN
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dsh-file-open-boot-'))
 
 const { apply } = await import('../lib/index.js')
-const { TRUSTED_HOSTS, CONTROL_TOKEN_HEADER, authorizeIncomingRoute } = await import('../lib/route-auth.js')
+const { loopbackAuthorities, CONTROL_TOKEN_HEADER, authorizeIncomingRoute } = await import('../lib/route-auth.js')
+const TRUSTED_HOSTS = loopbackAuthorities()
 
 const ROUTES = {
   list: '/api/android/file-incoming',
@@ -192,7 +193,7 @@ test('FX-205.4 篡改 Host（DNS rebinding 形态）→ 403 / 空体 / 零变化
   const { ctx } = makeCtx()
   await boot(ctx)
   const before = snapshot(ws)
-  for (const host of ['evil.example', 'evil.example:3080', '127.0.0.1:3081']) {
+  for (const host of ['evil.example', 'evil.example:4145', '127.0.0.1:3081']) {
     const res = await call(ctx, ROUTES.clean, {
       method: 'POST',
       headers: { host, [CONTROL_TOKEN_HEADER]: TOKEN },
@@ -540,7 +541,7 @@ test('queue read leaves legacy records for the client-side blank-session handoff
 })
 
 test('鉴权纯函数：trusted host 列表与令牌头常量与壳侧契约一致', () => {
-  assert.deepEqual([...TRUSTED_HOSTS].sort(), ['127.0.0.1:3080', 'localhost:3080'].sort())
+  assert.deepEqual([...TRUSTED_HOSTS].sort(), ['127.0.0.1:4145', 'localhost:4145'].sort())
   assert.equal(CONTROL_TOKEN_HEADER, 'x-dsh-control-token')
   assert.equal(authorizeIncomingRoute({ headers: {} }, { token: () => TOKEN }).code, 403, '缺 Host 一律拒')
   assert.equal(

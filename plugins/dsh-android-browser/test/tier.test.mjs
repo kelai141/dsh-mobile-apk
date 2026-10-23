@@ -34,7 +34,7 @@ async function call(harness, { method = 'GET', headers = {}, token = TOKEN } = {
   const route = harness.routes.get(BROWSER_ROUTES.status)
   assert.ok(route, '状态路由必须注册')
   // 注意：token 默认值不能写成 undefined（解构默认值会补回 TOKEN）；传空串表示"不带令牌头"。
-  const req = { method, headers: { host: '127.0.0.1:3080', ...(token ? { 'x-dsh-control-token': token } : {}), ...headers } }
+  const req = { method, headers: { host: '127.0.0.1:4145', ...(token ? { 'x-dsh-control-token': token } : {}), ...headers } }
   const res = { code: 0, body: undefined, headers: {}, writeHead(code, h) { this.code = code; this.headers = h ?? {} }, end(b) { this.body = b ?? '' } }
   await route.handler(req, res)
   return res
@@ -189,7 +189,7 @@ test('状态路由：connection 的动态 authority 保持权威，401 可由当
   })
   apply(dynamic.ctx)
   const tokenAccepted = await call(dynamic, { headers: { host: 'dsh.example.test:9443' } })
-  assert.equal(tokenAccepted.code, 200, '动态 authority 不得被本地 3080 常量误拒')
+  assert.equal(tokenAccepted.code, 200, '动态 authority 不得被本地 4145 常量误拒')
   const forged = await call(dynamic, { headers: { host: 'attacker.invalid' } })
   assert.equal(forged.code, 403, 'connection 的 403 不得被 control token 绕过')
 })

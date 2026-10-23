@@ -37,7 +37,8 @@ class Issue342StartupDiagnosticTest {
     assertTrue(failure.indexOf(guard) < failure.indexOf("scheduleEngineRetry(generation)"))
     val guide = source("GuidePageRenderer.kt")
     assertTrue(guide.contains("if (phase == GuidePhase.Error && startupOwnershipRepairAllowed &&"))
-    assertTrue(guide.contains("if (lastGuidePhase == GuidePhase.Error) {"))
+    assertTrue(guide.contains("activity.retryEngineExplicitly()"))
+    assertTrue(guide.contains("onRepairAssistant = {"))
     assertTrue(guide.contains("phase == GuidePhase.Error && !startupOwnershipRepairAllowed"))
   }
 
@@ -71,9 +72,12 @@ class Issue342StartupDiagnosticTest {
     assertFalse(owner.running)
   }
 
-  @Test fun `all foreign port branches record structured cause and clear stale cause`() {
+  @Test fun `foreign listeners use OS allocation and do not bypass owned child cleanup`() {
     val start = source("EngineManager.kt").substringAfter("fun startEngine(").substringBefore("fun settingsDocumentPath")
-    assertEquals(4, Regex("lastStartRefusalCode = REFUSAL_PORT_FOREIGN").findAll(start).count())
+    assertTrue(start.contains("if (availability == EngineProbe.EngineAvailability.PORT_FOREIGN) 0 else port"))
+    assertTrue(start.contains("if (managedProcessAlive && !killExistingEngine())"))
+    assertTrue(start.contains("EngineEndpoint.beginBinding()"))
+    assertTrue(start.contains("\"DSH_MOBILE_MANAGED_ENGINE\" to \"1\""))
     assertTrue(start.indexOf("lastStartRefusal = null") < start.indexOf("snapshotFingerprintProblem()"))
     assertTrue(start.indexOf("lastStartRefusalCode = null") < start.indexOf("snapshotFingerprintProblem()"))
   }

@@ -119,7 +119,7 @@ class UpdateManager(private val context: Context) {
         onStatus(UpdateStatus(UpdateOutcome.Working, "切换运行时…"))
         // Stop only an engine child held by this app process; never broad-match a listener by argv.
         if (!manager.stopOwnedEngine()) {
-          throw IllegalStateException("运行时更新已拒绝：3080 监听进程未归属到本壳，未停止外部进程")
+          throw IllegalStateException("运行时更新已拒绝：" + EngineProbe.ENGINE_AUTHORITY + " 监听进程未归属到本壳，未停止外部进程")
         }
         SnapshotTransaction.swap(
           filesDir = context.filesDir,

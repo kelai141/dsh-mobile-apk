@@ -9,7 +9,8 @@ import {
   authorizeMobileRoute,
   sendMobileRouteRejection,
   CONTROL_TOKEN_HEADER,
-  FALLBACK_LOOPBACK_HOSTS,
+  enginePortFromEnv,
+  loopbackAuthorities,
   type ConnectionRouteAuth,
   type MobileRouteAuthOptions,
   type MobileRouteRejection,
@@ -17,8 +18,8 @@ import {
   type MobileRouteResponse,
 } from '@dsh-android/dsh-android-bridge'
 
-/** Loopback fallback authorities used only when client-connection is unavailable. */
-export const TRUSTED_HOSTS = FALLBACK_LOOPBACK_HOSTS
+/** Loopback fallback authorities for the engine port selected for this request. */
+export { enginePortFromEnv, loopbackAuthorities }
 
 /** Shared Android control-token header. */
 export { CONTROL_TOKEN_HEADER }

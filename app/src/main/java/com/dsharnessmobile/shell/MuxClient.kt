@@ -12,7 +12,7 @@ import java.security.SecureRandom
 
 /**
  * 极简 WebSocket 客户端（0.13.3 W3 传输面重做，0.13.2 版为 /api/events.mux 单向下行）：
- * 连引擎网关流复用器 ws://127.0.0.1:3080/api/remote.mux（dsh-api-gateway，
+ * 连引擎网关流复用器 ws://127.0.0.1:4145/api/remote.mux（dsh-api-gateway，
  * REMOTE_STREAM_MUX_PATH），open `$events` 逻辑流转发审批/提问 waterfall 帧与
  * api-session/status emit 帧。应答走 HTTP POST /api/$events/result（OverlayPanel）。
  *
@@ -124,8 +124,11 @@ class MuxClient(
   }
 
   private fun connectAndServe() {
+    // Capture one immutable endpoint per connection, rather than the constructor's old port.
+    val activePort = if (host == EngineEndpoint.HOST) EngineEndpoint.port else port
+    if (activePort <= 0) throw java.io.IOException("engine endpoint is not bound")
     val s = Socket()
-    s.connect(InetSocketAddress(host, port), 3000)
+    s.connect(InetSocketAddress(host, activePort), 3000)
     socket = s
     val key = Base64.encodeToString(ByteArray(16).also { SecureRandom().nextBytes(it) }, Base64.NO_WRAP)
     // W3：upgrade 同过 connection 鉴权栅栏——握手带浏览器 Cookie（现取，重连吃到刷新后的值）。
@@ -134,7 +137,7 @@ class MuxClient(
     val cookieHeader = if (cookie.isNotEmpty()) "Cookie: $cookie\r\n" else ""
     val out = s.getOutputStream()
     out.write((
-      "GET $path HTTP/1.1\r\nHost: $host:$port\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
+      "GET $path HTTP/1.1\r\nHost: $host:$activePort\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
         "Sec-WebSocket-Key: $key\r\nSec-WebSocket-Version: 13\r\n" + cookieHeader + "\r\n"
       ).toByteArray(Charsets.US_ASCII))
     out.flush()
