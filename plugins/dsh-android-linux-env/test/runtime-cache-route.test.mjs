@@ -38,7 +38,7 @@ function makeRes() {
 async function call(harness, path, {
   method = 'GET',
   token = TOKEN,
-  host = '127.0.0.1:3080',
+  host = '127.0.0.1:4145',
 } = {}) {
   const route = harness.routes.get(path)
   assert.ok(route, '路由必须注册：' + path)
@@ -66,7 +66,7 @@ function fixture() {
   write(join(home, 'cache', 'attachments', 'request-images', 'ab', 'hash'), 'ENGINE-OWNED')
   // 白名单命中项（有据可查的可再生产物）：V8 编译缓存。
   write(join(home, '.node-compile-cache', 'v8', 'blob.bin'), 'V8-COMPILE-CACHE')
-  write(join(files, 'engine.log'), 'dsh web: http://127.0.0.1:3080/?token=CURRENT\n')
+  write(join(files, 'engine.log'), 'dsh web: http://127.0.0.1:4145/?token=CURRENT\n')
   write(join(files, 'engine.log.1'), 'OLD-GEN-1\n')
   write(join(files, 'engine.log.2'), 'OLD-GEN-2\n')
   return { root, home, files }

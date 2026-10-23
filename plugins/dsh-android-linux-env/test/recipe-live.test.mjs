@@ -23,7 +23,7 @@ function makeCtx(services = {}) {
   return { ctx: target, routes, tools }
 }
 
-async function callRoute(harness, path, req = { method: 'GET', headers: { host: '127.0.0.1:3080' } }) {
+async function callRoute(harness, path, req = { method: 'GET', headers: { host: '127.0.0.1:4145' } }) {
   const route = harness.routes.get(path)
   assert.ok(route, '路由必须注册：' + path)
   const res = { code: 0, body: '', headers: {}, writeHead(c, h) { this.code = c; this.headers = h ?? {} }, end(b) { this.body = b ?? '' } }
@@ -109,7 +109,7 @@ test('#222：环境 exact 路由在读取状态/配方前拒绝未认证与伪�
     const route = harness.routes.get(path)
     assert.ok(route, '路由必须注册：' + path)
     const unauthorized = { code: 0, body: '', headers: {}, writeHead(c, h) { this.code = c; this.headers = h ?? {} }, end(b) { this.body = b ?? '' } }
-    await route.handler({ method: 'GET', headers: { host: '127.0.0.1:3080' } }, unauthorized)
+    await route.handler({ method: 'GET', headers: { host: '127.0.0.1:4145' } }, unauthorized)
     assert.equal(unauthorized.code, 401, path + ' 未认证必须 401')
     assert.equal(unauthorized.headers['cache-control'], 'no-store')
     assert.ok(!unauthorized.body.includes('workspace') && !unauthorized.body.includes('profilePatch'), path + ' 未认证不得泄漏环境内容')

@@ -54,7 +54,7 @@ function fixture() {
   // ── 快照在途标志（绝对不删） ──
   write(join(root, 'files', '.snapshot-transaction'), '{"phase":"staged"}\n')
   // ── 引擎日志：当前代 + 历史代 ──
-  write(join(files, CURRENT_ENGINE_LOG), 'dsh web: http://127.0.0.1:3080/?token=CURRENT\n')
+  write(join(files, CURRENT_ENGINE_LOG), 'dsh web: http://127.0.0.1:4145/?token=CURRENT\n')
   write(join(files, 'engine.log.1'), 'OLD-GEN-1\n')
   write(join(files, 'engine.log.2'), 'OLD-GEN-2-LONGER\n')
   return { root, home, files }

@@ -32,7 +32,7 @@ async function callRoute(harness, path) {
   const route = harness.routes.get(path)
   assert.ok(route, '路由必须注册：' + path)
   const res = { code: 0, body: '', headers: {}, writeHead(c, h) { this.code = c; this.headers = h ?? {} }, end(b) { this.body = b ?? '' } }
-  await route.handler({ method: 'GET', headers: { host: '127.0.0.1:3080' } }, res)
+  await route.handler({ method: 'GET', headers: { host: '127.0.0.1:4145' } }, res)
   assert.equal(res.code, 200)
   return JSON.parse(res.body)
 }

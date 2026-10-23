@@ -39,7 +39,7 @@ function harness(bootstrap = makeBootstrap()) {  const routes = new Map()
   return {
     bootstrap, routes,
     dispose: () => disposers.forEach(fn => fn()),
-    async call(action, { method = action === 'status' ? 'GET' : 'POST', body = { confirmed: true }, token = TOKEN, host = '127.0.0.1:3080' } = {}) {
+    async call(action, { method = action === 'status' ? 'GET' : 'POST', body = { confirmed: true }, token = TOKEN, host = '127.0.0.1:4145' } = {}) {
       const req = Readable.from([Buffer.from(typeof body === 'string' ? body : JSON.stringify(body))])
       req.method = method
       req.headers = { host, 'x-dsh-control-token': token }
