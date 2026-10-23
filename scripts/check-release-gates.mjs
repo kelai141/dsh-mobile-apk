@@ -80,6 +80,11 @@ const GATES = [
   // 于是这三条在缺省范围 virtual-only 下被壳侧范围门拦死：android_web_dump、WebView ref 路径、
   // 以及点击生效校验（verifyClick 读 `state`）在缺省范围下全不可用，而引擎侧毫无察觉。
   { script: 'check-op-registry-parity.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
+  // 镜像前缀表双真源一致性（本轮调查发现）：壳侧 UpdateChecker.MIRROR_PREFIXES 与下载站
+  // webpages/src/assets/release.js 的 MIRROR_TEMPLATES 必须逐条同序。两份表曾漂移成 3 条 vs 4 条
+  // （壳侧缺 ghproxy.net），后果是「应用内下载」与「浏览器下载」走不同的线路集合，而没有任何一层
+  // 为不一致负责。顺序即回退优先级，故判据**不排序**：位置对调也算差异。
+  { script: 'check-mirror-parity.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
   { script: 'check-runtime-assets.mjs', ciApk: false, ciCoord: false, needsSnapshot: true },
   // 机密门禁（review C3）：归档不可读/成员为空 = 硬失败（旧实现垃圾文件也 PASS 的假绿）；严格档 --require。
   { script: 'check-snapshot-secrets.mjs', ciApk: false, ciCoord: false, needsSnapshot: true },

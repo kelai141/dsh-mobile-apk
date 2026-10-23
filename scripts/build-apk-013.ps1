@@ -165,6 +165,12 @@ Write-Host "== op 清单跨语言对等门禁 =="
 node (Join-Path $Root "scripts\check-op-registry-parity.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "两份「会读设备屏的 op」清单不一致，拒绝打包"; exit 1 }
 
+# 镜像前缀表双真源一致性：壳侧 UpdateChecker.MIRROR_PREFIXES 与下载站 MIRROR_TEMPLATES 必须逐条同序。
+# 顺序即回退优先级（第一档 8s、末位 30s），位置对调就是行为错，故判据不排序。离线可跑，无需快照。
+Write-Host "== 镜像前缀表一致性门禁 =="
+node (Join-Path $Root "scripts\check-mirror-parity.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "两份镜像前缀表不一致（应用内下载与浏览器下载会走不同线路），拒绝打包"; exit 1 }
+
 # 工具名「承诺 vs 实现」（0.14.1）：指引里提到的 android_* 工具名必须真有声明位。
 # 原形：android_vdisplay_input 被三处模型可见文案与 Skill 文档承诺却从未 defineTool（坑 163）。
 Write-Host "== 工具名承诺门禁 =="

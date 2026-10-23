@@ -14,7 +14,6 @@ import { useShellState } from '../mobile/use-shell-state.ts'
 import { describeHttpFailure, noticeDataAttrs, type Notice } from '../user-copy.ts'
 import { tr } from '../i18n.ts'
 import { RuntimeCacheRow } from './runtime-cache.tsx'
-import { ApkUpdateRow } from './apk-update.tsx'
 import type { PropsRenderSlots, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: pulls in the settings.section owner share (erased at build time, types only).
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -356,11 +355,11 @@ export function DevSection({ renderSlot }: DevSectionProps) {
           同一功能双实现是审查档 §5 的结构性根因，故这里只留指路、不再渲染同一组控件。 */}
       <p className="dsh-dev-hint">{tr('第三方模型能力在「设置 → 模型能力」里。', 'Third-party model options live in Settings > Model capabilities.')}</p>
 
-      {/* 0.14.6（用户指令「更新不应该是只更新快照，应该是下载 apk 然后更新」）：应用自更新入口。
-          此前该状态机与入口只存在于引导页渲染器里，而健康态 showWeb() 把引导页藏起来
-          => 健康状态下没有任何更新入口（能力在、入口无）。壳侧已把状态机提为单一真源，
-          本行与引导页按钮读同一份状态，故两入口不会打架。 */}
-      <ApkUpdateRow />
+      {/* 0.15.0 提级：应用自更新入口已从开发者选项**提级**为设置页一级分区「应用更新」
+          （用户拍板「更新块继续放设置页、从开发者选项提出来」）。真因同「通知」与「模型能力」：
+          真实用户不走开发者选项，入口埋在这里等于不可达。
+          同一功能双实现是审查档 §5 的结构性根因，故这里只留指路、不再渲染同一组控件。 */}
+      <p className="dsh-dev-hint">{tr('应用更新在「设置 → 应用更新」里。', 'App updates live in Settings > App updates.')}</p>
 
       {/* 0.14.1 批 3（P3-5）：通知设置已从开发者选项**提级**为设置页一级分区「通知」。
           这里只留指路（同功能双实现是审查档 §5 的结构性根因，故不重复渲染同一组开关）。 */}

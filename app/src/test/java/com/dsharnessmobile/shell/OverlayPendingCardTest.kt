@@ -138,9 +138,18 @@ class OverlayPendingCardTest {
     val renderer = codeOnly(source("GuidePageRenderer.kt"))
     assertTrue("必须存在「授权后继续安装」这一可点态", renderer.contains("ds_apk_grant_install"))
     assertTrue("需授权相位必须渲染为可点", renderer.contains("STATE_NEED_PERMISSION"))
-    val permIdx = renderer.indexOf("STATE_NEED_PERMISSION")
-    val permBody = renderer.substring(permIdx, (permIdx + 400).coerceAtMost(renderer.length))
-    assertTrue("权限缺失分支必须把按钮复原为可点", permBody.contains("enabled = true"))
+    // 拆成「检查」/「下载」两枚按钮后，这条判据落在**下载按钮**上：续继安装归它，而检查按钮在该相位
+    // 是禁用的。旧写法取 STATE_NEED_PERMISSION 之后 400 字符的窗口找 enabled = true，拆按钮后那段
+    // 窗口里先出现的是检查按钮的禁用，会误判成红——故改成直接断言该分支的下载按钮渲染。
+    val permIdx = renderer.indexOf("ApkUpdateState.STATE_NEED_PERMISSION ->")
+    assertTrue("需授权相位分支必须存在", permIdx >= 0)
+    val permBody = renderer.substring(permIdx, (permIdx + 800).coerceAtMost(renderer.length))
+    assertTrue("续继安装的按钮文案必须仍是「授权后继续安装」", permBody.contains("ds_apk_grant_install"))
+    val downloadRender = permBody.substringAfter("setDownloadButton(activity.getString(R.string.ds_apk_grant_install)")
+    assertTrue(
+      "权限缺失时的下载按钮必须可点（P0-3：旧缺陷是卡在禁用的「下载中 100%」）",
+      downloadRender.contains("enabled = true"),
+    )
 
     val controller = codeOnly(source("ApkUpdateAction.kt"))
     val canIdx = controller.indexOf("if (!UpdateChecker.canInstall(activity))")

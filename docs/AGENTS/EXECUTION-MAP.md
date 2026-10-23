@@ -112,7 +112,7 @@ sequenceDiagram
 ### 阶段 4：后台维护（低频）
 
 - 看门狗持续探活/退避/熔断（`WatchdogV2.kt:109`）；日志采集与轮转（`LogCollector`）；
-- APK 更新：引导页/设置页经 `AndroidBridge.apkUpdate(action)` 驱动 `ApkUpdateController`（唯一状态机与推进者）→ `UpdateChecker` 下载校验 → 系统安装器；快照更新链已下线，`startUpdateCheck` 在本版**已无任何调用点**（定义保留于 `EngineStartFlow.kt:549`；`UpdateManagerPolicyTest.kt:58` 与 `ForegroundPageRecoveryWiringTest.kt:47` 按该签名切片，**不得当死代码删除**）。manifest 未配置仍 fail-closed；当前职责见§6 K03。
+- APK 更新：设置页一级分区「应用更新」（与原生管理中心）经 `AndroidBridge.apkUpdate(action)` 驱动 `ApkUpdateController`（唯一状态机与推进者）→ `UpdateChecker` 六档确认链 + 下载校验 → 系统安装器；快照更新链已下线，`startUpdateCheck` 在本版**已无任何调用点**（定义保留于 `EngineStartFlow.kt:549`；`UpdateManagerPolicyTest.kt:58` 与 `ForegroundPageRecoveryWiringTest.kt:47` 按该签名切片，**不得当死代码删除**）。manifest 未配置仍 fail-closed；当前职责见§6 K03。
 - 残渣回收与标记恢复（`SnapshotTransaction.kt:190` / `EngineManager.kt:238`）。
 
 ### 横向：构建与验收链
@@ -429,7 +429,7 @@ sequenceDiagram
 | K01 | 引擎侧页面契约 | onConsoleMessage 消费 dsh-boot-ready 与 dsh-boot-stall 两个前缀，判据由页面侧 readyWatch 发布 | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:667 |
 | K01 | 来件与选择器 | onCreate 投递 VIEW/SEND 来件，桥回调接 DirectoryPickerController/MediaPickController/FileIncoming | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:266 |
 | K01 | 快照与更新面 | 检查更新按钮与启动前快照刷新走 UpdateManager，自动回撤走 UndoGate 加 SnapshotTransaction | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:294 |
-| K01 | APK 更新动作 | 引导页按钮与设置页那一行**读同一份**状态（`ApkUpdateController`，Activity 作用域）；动作经唯一桥入口 `AndroidBridge.apkUpdate(action=status\|check\|install)` 发起，**不占用相位与主按钮**，且壳侧对 `window.__dshBridge` 写入面为 0 | app/src/main/java/com/dsharnessmobile/shell/ApkUpdateAction.kt:228 |
+| K01 | APK 更新动作 | 检查按钮与下载按钮**各自独立**（可用性相同、语义分离），与管理中心/设置页那一行**读同一份**状态（`ApkUpdateController`，Activity 作用域）；动作经唯一桥入口 `AndroidBridge.apkUpdate(action=status\|check\|install)` 发起，**不占用相位与主按钮**，且壳侧对 `window.__dshBridge` 写入面为 0 | app/src/main/java/com/dsharnessmobile/shell/ApkUpdateAction.kt:245 |
 | K01 | 内置控制台 | 引导页与控制台按钮 START ConsoleActivity，其 ConsoleSession 用与引擎同源的 shellEnv 起快照 bash | app/src/main/java/com/dsharnessmobile/shell/ConsoleSession.kt:33 |
 | K01 | 系统外部角色 | BootReceiver 接 ACTION_BOOT_COMPLETED 决定是否自启前台服务，分享面板经 VIEW/SEND 进本 Activity | app/src/main/java/com/dsharnessmobile/shell/BootReceiver.kt:24 |
 | K02 | K01 | 启动全程用引导页阶段承载文案，成功才切 WebUI | EngineStartFlow.kt:445-479、MainActivity.kt:145-155 |

@@ -26,51 +26,79 @@ internal class GuideManagementController(
   private lateinit var management: LinearLayout
   private var detail: View? = null
   private var pluginPage: PluginManagementPage? = null
-  private lateinit var feedback: TextView
   private var storageStatus: TextView? = null
   private var splashPage: SplashSettingsPage? = null
   val isOpen get() = destination != "home" || progress > 0f
   val savedPage get() = destination
   private fun dp(n: Int) = (n * activity.resources.displayMetrics.density).toInt()
+  /** 按 dimens.xml 取像素高度：按钮高度必须与全应用同一把尺（52/48dp），不在这里另立常量。 */
+  private fun dimenPx(id: Int) = activity.resources.getDimensionPixelSize(id)
   private fun t(zh: String, en: String) = UiText.t(activity, zh, en)
 
   fun build() {
     management = column()
     management.addView(label(t("管理中心", "Management"), 26f))
     management.addView(label(t("DeepCode · 应用与运行时", "DeepCode · App and runtime"), 14f))
-    // Keep the same update Button instance so ApkUpdateController retains all states and actions.
     row(t("打开控制台", "Open console"), t("终端与运行日志", "Terminal and logs")) {
       activity.startActivity(Intent(activity, ConsoleActivity::class.java))
     }
     row(t("插件管理", "Plugins"), t("启停与配置", "Enable and configure")) { showPlugins() }
-    (chrome.updateButton.parent as? ViewGroup)?.removeView(chrome.updateButton)
-    management.addView(chrome.updateButton.apply {
-      minHeight = dp(72)
-      gravity = Gravity.START or Gravity.CENTER_VERTICAL
-      setPadding(dp(20), dp(12), dp(20), dp(12))
-      textSize = 16f
-      background = DsUi.ripple(DsUi.roundRect(activity.getColor(R.color.ds_surface), dp(8).toFloat()), activity.getColor(R.color.ds_accent_soft))
-      layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) }
-    })
+    management.addView(updateBlock())
     row(t("存储管理", "Storage"), t("数据、容量与导出", "Data, space, exports")) { showStorage() }
     // 启动页管理（0.14.9）：开屏视频与「打开应用后自动启动」属于启动面，
     // 放进管理中心而不是引擎 Web UI 的设置中心——引擎没起来时也必须能改。
     row(t("启动页管理", "Startup screen"), t("开屏视频与自动启动", "Launch video and auto start")) { showSplash() }
     languageRow()
-    feedback = label("", 14f)
-    management.addView(feedback)
     val scroll = ScrollView(activity).apply {
       isFillViewport = true
       addView(management)
     }
     chrome.managementHost.addView(scroll, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER_HORIZONTAL))
-    activity.apkUpdate.observe { feedback.text = chrome.statusHint.text }
+    // 为什么这里**不再**注册第二个观察者：旧代码是 observe { feedback.text = chrome.statusHint.text }，
+    // 它抄的那行提示文本在 APK 更新路径上没有任何写入方（更新结果写的是更新块自己的状态行），
+    // 所以这段渲染既搬不出状态、又在单槽时代把 GuidePageRenderer 的 renderApkUpdate 顶掉——用户点了
+    // 「检查更新」按钮完全不变化，根因就在这里。更新块的三枚控件由 GuidePageRenderer.renderApkUpdate
+    // 统一渲染（它在 buildGuideView 里注册的就是同一次观察），本面板只负责把控件摆上去。
+    // 重复注册第二个观察者只会让同一份状态被渲染两遍、并把「谁是唯一渲染者」重新变模糊。
     chrome.managementHost.addOnLayoutChangeListener { _, l, _, r, _, _, _, _, _ ->
       val width = minOf(r - l, dp(600))
       if (management.layoutParams.width != width) {
         management.layoutParams = (management.layoutParams as FrameLayout.LayoutParams).apply { this.width = width; gravity = Gravity.CENTER_HORIZONTAL }
       }
     }
+  }
+
+  /**
+   * 更新块：状态行在上，检查 / 下载两枚按钮在下（横向两等分）。
+   *
+   * 为什么状态行必须与按钮分开：旧形态把版本号写进按钮文案，而按钮是固定高的单行控件——
+   * 长版本号（v0.13.7fx-1）在真机上被截断（GuideChrome 里那条 maxLines=1 的实测约束正是为此）。
+   * 版本号挪到独立一行后，按钮文案只剩「检查更新」「下载」这类短词，截断问题从根上消失。
+   *
+   * 为什么三枚控件都用**实例**而不是新建：更新状态与动作只由 Activity 作用域的 ApkUpdateController
+   * 持有，GuideChrome 造出来的这三枚读的就是它；另造一套控件就会与引导页那一份状态打架。
+   * 检查按钮走的是既有路径（从原父节点摘下来再挂进来），另外两枚构建期无父节点，这里直接认领。
+   */
+  private fun updateBlock(): View {
+    val block = column().apply {
+      setPadding(dp(20), dp(12), dp(20), dp(12))
+      // 与相邻的 row 同款外边距：更新块是一块内容，不是贴在面板边缘的裸控件。
+      layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) }
+    }
+    (chrome.updateButton.parent as? ViewGroup)?.removeView(chrome.updateButton)
+    (chrome.apkStatus.parent as? ViewGroup)?.removeView(chrome.apkStatus)
+    (chrome.apkDownload.parent as? ViewGroup)?.removeView(chrome.apkDownload)
+    block.addView(chrome.apkStatus, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
+    val buttons = LinearLayout(activity).apply {
+      orientation = LinearLayout.HORIZONTAL
+      // 与状态行留出间距，两枚按钮视觉上并列（各占一半，中间 8dp 缝）。
+      layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) }
+    }
+    val buttonHeight = dimenPx(R.dimen.ds_btn_secondary_height)
+    buttons.addView(chrome.updateButton, LinearLayout.LayoutParams(0, buttonHeight, 1f))
+    buttons.addView(chrome.apkDownload, LinearLayout.LayoutParams(0, buttonHeight, 1f).apply { marginStart = dp(8) })
+    block.addView(buttons)
+    return block
   }
 
   private fun column() = LinearLayout(activity).apply {

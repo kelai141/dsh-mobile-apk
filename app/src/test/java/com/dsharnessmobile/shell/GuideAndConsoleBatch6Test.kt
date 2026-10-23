@@ -379,6 +379,70 @@ class GuideAndConsoleBatch6Test {
     )
   }
 
+  // ── 更新块：状态行 + 两枚各发各的动作的按钮 ─────────────────────────────
+
+  @Test
+  fun `更新块的两枚按钮必须各自硬绑定动作`() {
+    // 旧形态是一枚按钮承载「检查 → 确认下载 → 续继安装」三种语义，点了哪一步全靠状态推断；
+    // 拆开之后两个回调各接一个控制器入口，撤掉任一条接线或用回推断式入口都会判红。
+    val chrome = codeOnly(source("GuideChrome.kt"))
+    assertTrue("检查按钮必须接 onCheckUpdate", chrome.contains("makeSecondary(activity.getString(R.string.ds_check_update), callbacks.onCheckUpdate)"))
+    assertTrue("下载按钮必须接 onDownloadUpdate", chrome.contains("callbacks.onDownloadUpdate()"))
+    val renderer = codeOnly(source("GuidePageRenderer.kt"))
+    assertTrue("检查按钮只发 check", renderer.contains("activity.apkUpdate.onCheckPressed()"))
+    assertTrue("下载按钮只发 download", renderer.contains("onDownloadUpdate = { activity.apkUpdate.onDownloadPressed() }"))
+    assertFalse("不得再出现一枚按钮推断三步的旧入口", renderer.contains("onButtonPressed"))
+  }
+
+  @Test
+  fun `更新块的状态行与下载按钮由管理中心认领`() {
+    // 更新块落在管理中心：状态行在上、两枚按钮横排在下。控件由 GuideChrome 造、由本控制器挂，
+    // 构建期不认领父节点——否则中心改布局时两处都要改，且 addView 会因已有父节点直接抛异常。
+    val chrome = codeOnly(source("GuideChrome.kt"))
+    assertTrue("必须有状态行字段", chrome.contains("val apkStatus: TextView"))
+    assertTrue("必须有下载按钮字段", chrome.contains("val apkDownload: Button"))
+    assertFalse("状态行不得挂在任何布局里", chrome.contains("addView(apkStatus"))
+    assertFalse("下载按钮不得挂在任何布局里", chrome.contains("addView(apkDownload"))
+    val management = codeOnly(source("GuideManagementController.kt"))
+    assertTrue("管理中心必须认领状态行", management.contains("block.addView(chrome.apkStatus"))
+    assertTrue("管理中心必须认领下载按钮", management.contains("buttons.addView(chrome.apkDownload"))
+    assertTrue("检查按钮仍走「先摘再挂」的既有路径", management.contains("(chrome.updateButton.parent as? ViewGroup)?.removeView(chrome.updateButton)"))
+  }
+
+  @Test
+  fun `可用状态的检查按钮必须禁用而不是放任误点`() {
+    // 用户拍板：发现新版时禁用检查按钮。beginCheck() 会清掉已确认的新版载荷，误点一次就得
+    // 重新联网再确认一遍；禁用是保护载荷。可用态的下载按钮才是这时的唯一动作。
+    val renderer = codeOnly(source("GuidePageRenderer.kt"))
+    val available = renderer.substringAfter("ApkUpdateState.STATE_AVAILABLE ->")
+      .substringBefore("ApkUpdateState.STATE_DOWNLOADING ->")
+    assertTrue("可用态必须渲染版本号", available.contains("R.string.ds_apk_version_available"))
+    assertTrue("可用态的检查按钮必须禁用", available.contains("setCheckButton(check, enabled = false)"))
+    assertTrue("可用态的下载按钮必须可点", available.contains("R.string.ds_apk_download), enabled = true"))
+  }
+
+  @Test
+  fun `更新块文案必须中英成对且都有引用点`() {
+    // 新增文案最容易漏的一侧是英文资源：中文能跑、英文界面掉回中文或空串，只有切语言才看得见。
+    // 这里对三枚新串做两件事：中英两侧都存在（键名逐条对齐），且 Kotlin 侧确有引用点（没有就是死资源）。
+    val zh = File("src/main/res/values/strings.xml").takeIf { it.isFile }
+      ?: File("app/src/main/res/values/strings.xml")
+    val en = File("src/main/res/values-en/strings.xml").takeIf { it.isFile }
+      ?: File("app/src/main/res/values-en/strings.xml")
+    val zhText = zh.readText()
+    val enText = en.readText()
+    val renderer = codeOnly(source("GuidePageRenderer.kt"))
+    for (key in listOf("ds_apk_not_checked", "ds_apk_download", "ds_apk_version_available")) {
+      assertTrue("中文资源必须新增 $key", zhText.contains("<string name=\"$key\">"))
+      assertTrue("英文资源必须成对提供 $key", enText.contains("<string name=\"$key\">"))
+      assertTrue("$key 必须有引用点（否则是死资源）", renderer.contains("R.string.$key"))
+    }
+    // 拆按钮后「再点一次同一按钮」已不成立：留着这句就是让用户去点一个不会下载的按钮。
+    val available = zhText.lines().first { it.contains("<string name=\"ds_apk_available\">") }
+    assertFalse("已发现新版的文案不得再让用户点同一枚按钮", available.contains("同一按钮"))
+    assertTrue("必须改为引导点「下载」", available.contains("下载"))
+  }
+
   // ── S1-13 / S1-14 / S1-15：首屏解释、版本号、最大宽度 ────────────────────
 
   @Test
@@ -394,9 +458,13 @@ class GuideAndConsoleBatch6Test {
   @Test
   fun `版本号 pill 必须单行省略且宽度受限`() {
     val chrome = codeOnly(source("GuideChrome.kt"))
-    assertTrue("单行", chrome.contains("maxLines = 1"))
-    assertTrue("省略号", chrome.contains("ellipsize = TextUtils.TruncateAt.END"))
-    assertTrue("宽度上限（否则长版本号把标题挤成两行）", chrome.contains("maxWidth = (res.displayMetrics.widthPixels * 0.34f).toInt()"))
+    // 按字段名定位那一段再断言：更新块新增了另一个带 maxLines 的控件（状态行），
+    // 整文件 contains 会被它顺带满足，这条用例就失去了判别力。
+    val pill = chrome.substringAfter("val versionLabel = TextView(activity)")
+      .substringBefore("val brandBlock =")
+    assertTrue("单行", pill.contains("maxLines = 1"))
+    assertTrue("省略号", pill.contains("ellipsize = TextUtils.TruncateAt.END"))
+    assertTrue("宽度上限（否则长版本号把标题挤成两行）", pill.contains("maxWidth = (res.displayMetrics.widthPixels * 0.34f).toInt()"))
   }
 
   @Test

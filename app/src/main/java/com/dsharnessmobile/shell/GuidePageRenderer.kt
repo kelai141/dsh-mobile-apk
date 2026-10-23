@@ -390,7 +390,10 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
           }
         },
         onOpenConsole = { activity.startActivity(Intent(activity, ConsoleActivity::class.java)) },
-        onCheckUpdate = { onUpdateButton() }, // 读的是 Activity 作用域的唯一状态机
+        onCheckUpdate = { onCheckButton() }, // 读的是 Activity 作用域的唯一状态机
+        // 下载按钮与检查按钮各自硬绑定一个动作：由渲染层按状态决定哪一枚该露、该禁用，
+        // 而不是让一枚按钮去猜「这一次点击是检查还是下载」——那个推断正是误清载荷的来源。
+        onDownloadUpdate = { activity.apkUpdate.onDownloadPressed() },
         onGrantStorage = { activity.dirPickerController.requestStorageGrant() },
         onCopyLog = { copyGuideLog() },
         // 功能 B（0.14.6）：故障诊断包分享。入口可见性由 refreshGuideMeta 按证据点亮。
@@ -409,6 +412,9 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
     chrome.versionLabel.text = "v" + BuildConfig.VERSION_NAME
     refreshGuideMeta()
     management.build()
+    // 注册时那次回调发生在 chrome 建好之前（状态行/下载按钮还没挂进管理中心），等于空跑一次；
+    // 界面装配完成后补渲染一次，首屏才是当前真实状态，而不是「文本空着、按钮全隐」。
+    renderApkUpdate()
     return chrome.root
   }
 
@@ -825,14 +831,25 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
     }
   }
 
-  /** 测试界面「检查更新」按钮：手动检查 APK 自更新（用户拍板：不自动检查）。
-   *  同按钮三态 = 检查 → （发现新版）二次确认 → 下载安装；已有下载好的包则直接续继安装。 */
-  private fun onUpdateButton() {
-    // 三态语义（检查 → 二次确认下载 → 安装）由控制器统一决定；渲染只跟着状态走。
-    activity.apkUpdate.onButtonPressed()
+  /** 更新块「检查更新」按钮：只发检查（用户拍板：不自动检查，只在点击时查）。
+   *  下载 / 续继安装归另一枚按钮——拆开之后「检查」不会再顺手把已确认的新版丢掉。 */
+  private fun onCheckButton() {
+    activity.apkUpdate.onCheckPressed()
   }
 
-  private fun setUpdateButton(label: String, enabled: Boolean) {
+  /**
+   * 状态行：版本号 / 进度 / 失败原文都写这里，不再借按钮文案或提示行承载。
+   *
+   * 控件构建期是 GONE（它由管理中心认领后才进视图树），这里每次渲染都显式点亮：
+   * 状态行在任何状态下都有话要说（没有更新动作时也要如实说「尚未检查」）。
+   */
+  private fun setApkStatus(text: String) {
+    chrome.apkStatus.visibility = View.VISIBLE
+    chrome.apkStatus.text = text
+  }
+
+  /** 检查按钮：文案与可点性分开设，状态表逐行对照时不会串。 */
+  private fun setCheckButton(label: String, enabled: Boolean) {
     // 固定高按钮 + 长版本号（v0.13.7fx-1）会换行截断（device 实测）——单行 + 省略号
     chrome.updateButton.maxLines = 1
     chrome.updateButton.ellipsize = android.text.TextUtils.TruncateAt.END
@@ -841,67 +858,118 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
     chrome.updateButton.alpha = if (enabled) 1f else 0.55f
   }
 
-  private fun apkHint(msg: String) = pushHint(msg, HintSource.SIDE)
+  /**
+   * 下载按钮：label 为 null 表示本状态没有可下载或可续继的东西，整枚隐藏。
+   *
+   * 为什么隐藏而不是留着禁用：在「尚未检查」「已是最新」这些态里它既没有目标也没有动作，
+   * 留一枚点了必然没反应的按钮，只会让用户以为功能坏了。
+   */
+  private fun setDownloadButton(label: String?, enabled: Boolean) {
+    val button = chrome.apkDownload
+    if (label == null) {
+      button.visibility = View.GONE
+      return
+    }
+    button.visibility = View.VISIBLE
+    button.maxLines = 1
+    button.ellipsize = android.text.TextUtils.TruncateAt.END
+    button.text = label
+    // 无障碍描述随文案复位：否则「发现新版」那句会一直挂在这枚按钮上，跨状态后描述与事实不符。
+    button.contentDescription = label
+    button.isEnabled = enabled
+    button.alpha = if (enabled) 1f else 0.55f
+  }
 
   private fun sizeText(bytes: Long): String =
     if (bytes <= 0) "" else "%.1f MB".format(bytes / 1048576.0)
 
   /**
-   * 渲染更新按钮与提示行（**唯一渲染点**）：状态来自 [ApkUpdateController]，本类不再持有任何更新状态。
+   * 更新块的**唯一渲染点**：状态来自 [ApkUpdateController]，本类不再持有任何更新状态。
    *
-   * 这样引导页与设置页那一行读的是同一份状态——用户在引导页下载到 50%，设置页看到的就是 50%
-   * （旧实现两份状态会长出「能力在、入口无 / 入口有、状态不一致」这类幽灵缺陷）。
+   * 三个控件各管各的事，取代旧形态「一枚按钮承载检查 / 确认下载 / 续继安装三种语义」：
+   *  - 状态行写版本号、进度或失败原文（长版本号不再挤进固定高按钮，真机截断问题随之消失）；
+   *  - 检查按钮只发检查，下载按钮只发下载 / 续继安装，二者由 [GuideChrome] 各自绑定回调。
+   *
+   * **结构性保证**（用户硬判据：「更新失败不影响正常启动，启动页下方按钮是启动而不是别的」）：
+   * 本渲染只碰更新块内的这三枚控件——相位与主按钮的锁态、文案、可点性一概不参与，「更新中」
+   * 这一相位在 APK 路径上根本不会出现（旧实现占用相位 => 主按钮变「更新中」且被锁 => 用户
+   * 更新失败后连启动都点不到，这正是用户截图里的形态）。
    */
   internal fun renderApkUpdate() {
-    // **结构性保证**（用户硬判据：「更新失败不影响正常启动，启动页下方按钮是启动而不是别的」）：
-    // 本渲染只改次级提示与**次级**按钮文案（chrome.updateButton 是次级行里的那一枚），
-    // 绝不触碰主按钮与相位——「更新中」这一相位在 APK 路径上根本不再出现。
-    // 旧实现让更新动作占用相位（applyGuidePhase(Updating)）=> 主按钮变「更新中」且被锁 =>
-    // 用户在更新失败后连启动都点不到（用户截图正是这个形态）。
     if (!::chrome.isInitialized) return
     val s = activity.apkUpdate.stateName()
     val tag = activity.apkUpdate.tag()
+    val check = activity.getString(R.string.ds_check_update)
+    val size = sizeText(activity.apkUpdate.sizeBytes())
     when (s) {
+      ApkUpdateState.STATE_IDLE -> {
+        setApkStatus(activity.getString(R.string.ds_apk_not_checked))
+        setCheckButton(check, enabled = true)
+        setDownloadButton(null, enabled = false)
+      }
       ApkUpdateState.STATE_CHECKING -> {
-        setUpdateButton(activity.getString(R.string.ds_apk_checking), enabled = false)
-        apkHint(activity.getString(R.string.ds_apk_checking))
+        setApkStatus(activity.getString(R.string.ds_apk_checking))
+        setCheckButton(activity.getString(R.string.ds_apk_checking), enabled = false)
+        setDownloadButton(null, enabled = false)
       }
       ApkUpdateState.STATE_UP_TO_DATE -> {
         val v = activity.apkUpdate.version() ?: ("v" + UpdateChecker.currentVersion())
-        setUpdateButton(activity.getString(R.string.ds_check_update), enabled = true)
         // 0.14.6：**不再链式调用引擎快照更新**（那条链已下线：UpdateManager.DEFAULT_MANIFEST_URL 为空、
         // 零生产覆盖点 ⇒ 必然只回「本版不提供在线更新」）。留着只会让用户以为在更新应用。
-        apkHint(activity.getString(R.string.ds_apk_latest, v))
+        setApkStatus(activity.getString(R.string.ds_apk_latest, v))
+        setCheckButton(check, enabled = true)
+        setDownloadButton(null, enabled = false)
       }
       ApkUpdateState.STATE_AVAILABLE -> {
-        setUpdateButton(activity.getString(R.string.ds_apk_confirm, tag ?: ""), enabled = true)
-        apkHint(
-          activity.getString(
-            R.string.ds_apk_available, tag ?: "", "v" + UpdateChecker.currentVersion(),
-            sizeText(activity.apkUpdate.sizeBytes()),
-          ),
+        setApkStatus(activity.getString(R.string.ds_apk_version_available, tag ?: "", "v" + UpdateChecker.currentVersion(), size))
+        // 检查按钮在此**禁用**：重新检查会把已确认的新版载荷作废（beginCheck 会清掉它），
+        // 用户误点一次就得重新联网再查一遍——禁用是保护载荷，不是限制操作。
+        setCheckButton(check, enabled = false)
+        setDownloadButton(activity.getString(R.string.ds_apk_download), enabled = true)
+        // 读屏用户拿不到「版本号在上、按钮在下」的版面关系：把这句「下的是什么版本」挂到下载按钮上，
+        // 否则它只会被念成「下载」，用户无从判断点下去会装哪一版。
+        chrome.apkDownload.contentDescription = activity.getString(
+          R.string.ds_apk_available, tag ?: "", "v" + UpdateChecker.currentVersion(), size,
         )
       }
       ApkUpdateState.STATE_DOWNLOADING -> {
         val pct = activity.apkUpdate.percent()
-        setUpdateButton(activity.getString(R.string.ds_apk_downloading, pct), enabled = false)
+        val label = activity.getString(R.string.ds_apk_downloading, pct)
+        setApkStatus(label)
+        setCheckButton(check, enabled = false)
+        setDownloadButton(label, enabled = false)
       }
       ApkUpdateState.STATE_NEED_PERMISSION -> {
         // S1-10：授权页是否真的拉起由控制器如实判定；这里只按事实渲染可点按钮。
-        setUpdateButton(activity.getString(R.string.ds_apk_grant_install), enabled = true)
-        apkHint(activity.getString(R.string.ds_apk_need_permission))
+        setApkStatus(activity.getString(R.string.ds_apk_need_permission))
+        setCheckButton(check, enabled = false)
+        setDownloadButton(activity.getString(R.string.ds_apk_grant_install), enabled = true)
       }
       ApkUpdateState.STATE_INSTALLING -> {
-        setUpdateButton(activity.getString(R.string.ds_check_update), enabled = true)
-        apkHint(activity.getString(R.string.ds_apk_installing))
+        // 装载器已接手，载荷也已消费完：这里恢复可检查（再查一轮不会丢任何东西）。
+        setApkStatus(activity.getString(R.string.ds_apk_installing))
+        setCheckButton(check, enabled = true)
+        setDownloadButton(null, enabled = false)
       }
       ApkUpdateState.STATE_FAILED -> {
-        // 失败如实报分类原因（UpdateChecker 的 8 类 + 下载/校验/安装器 3 类），不再链快照更新。
-    val reason = activity.apkUpdate.reason() ?: UiText.t(activity, "检查更新未完成——可重试，或复制日志反馈", "The update check did not finish. Retry, or copy the log and report it.")
-        setUpdateButton(activity.getString(R.string.ds_check_update), enabled = true)
-        apkHint(reason)
+        // 失败原因**原样**展示：翻译或截断都会把「哪一步坏了、下一步做什么」这两条信息弄丢，
+        // 而这些原因本来就是给人看的（分类说明由控制器落盘，这里不二次加工）。
+        setApkStatus(activity.apkUpdate.reason() ?: UiText.t(activity, "检查更新未完成——可重试，或复制日志反馈", "The update check did not finish. Retry, or copy the log and report it."))
+        setCheckButton(check, enabled = true)
+        // 只有手里还攥着一个已下载校验过的包时，失败态才有第二个动作可给（重试安装）；
+        // 否则「下载」按下去也算不出该做什么，绝不摆一枚点了没反应的按钮。
+        if (activity.apkUpdate.hasReadyArtifact()) {
+          setDownloadButton(activity.getString(R.string.ds_apk_retry_install), enabled = true)
+        } else {
+          setDownloadButton(null, enabled = false)
+        }
       }
-      else -> setUpdateButton(activity.getString(R.string.ds_check_update), enabled = true)
+      else -> {
+        // 未知状态不猜语义：回到「尚未检查」并只留检查这一个动作。
+        setApkStatus(activity.getString(R.string.ds_apk_not_checked))
+        setCheckButton(check, enabled = true)
+        setDownloadButton(null, enabled = false)
+      }
     }
   }
 

@@ -86,6 +86,7 @@ const GATE_SCRIPTS = [
   'check-tool-output-schema.mjs',
   'check-control-ops.mjs',
   'check-op-registry-parity.mjs',
+  'check-mirror-parity.mjs',
   'check-tool-name-promises.mjs',
   'check-state-registry.mjs',
   'check-bridge-symmetry.mjs',
@@ -214,6 +215,10 @@ try {
   // 漂移即「virtual-only 下点击生效校验/WebView ref 路径全不可用」（坑 162）。离线可跑。
   log('门禁：op 清单跨语言对等…')
   run('node', [gate('check-op-registry-parity.mjs')])
+  // 镜像前缀表双真源（本轮）：壳侧 MIRROR_PREFIXES 与下载站 MIRROR_TEMPLATES 逐条同序。
+  // 两条表曾漂移成 3 条 vs 4 条，后果是「应用内下载」与「浏览器下载」走不同线路集合。离线可跑。
+  log('门禁：镜像前缀表一致性…')
+  run('node', [gate('check-mirror-parity.mjs')])
   // 工具名「承诺 vs 实现」（0.14.1）：指引里提到的 android_* 工具名必须真有声明位（坑 163 同族预防）。
   log('门禁：工具名承诺 vs 实现…')
   run('node', [gate('check-tool-name-promises.mjs')])

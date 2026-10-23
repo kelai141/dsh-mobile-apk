@@ -34,6 +34,15 @@ internal class GuideChrome(
   val primaryButton: Button,
   val consoleButton: Button,
   val updateButton: Button,
+  /**
+   * 更新块的状态行（版本号 / 下载进度 / 失败原文）与下载按钮（检查、下载两枚各发各的动作）。
+   *
+   * 为什么这两枚**不在本文件挂任何父节点**：更新块住在管理中心，管理中心面板由
+   * GuideManagementController 搭建。每枚控件只有一个父节点，由使用者决定归属，构建期先认领会让
+   * 别处 addView 直接抛 IllegalStateException；而中心的"检查更新"是按需搬进去的，搬与不搬都要能编译、能单测。
+   */
+  val apkStatus: TextView,
+  val apkDownload: Button,
   val runtimeChip: TextView,
   val storageChip: TextView,
   val versionLabel: TextView,
@@ -46,6 +55,8 @@ internal class GuideCallbacks(
   val onStartEngine: () -> Unit,
   val onOpenConsole: () -> Unit,
   val onCheckUpdate: () -> Unit,
+  /** 下载按钮：只做「开始下载 / 续继安装」，与检查按钮各自硬绑定，不再由一枚按钮推断下一步。 */
+  val onDownloadUpdate: () -> Unit,
   val onGrantStorage: () -> Unit,
   val onCopyLog: () -> Unit,
   val onShareLog: () -> Unit,
@@ -427,6 +438,26 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
   val consoleButton = makeSecondary(activity.getString(R.string.ds_open_console), callbacks.onOpenConsole)
   val updateButton = makeSecondary(activity.getString(R.string.ds_check_update), callbacks.onCheckUpdate)
 
+  // 更新块的两枚新增控件：状态行（次要色小字）+ 下载按钮（与检查按钮同款次级样式，视觉上并列）。
+  //
+  // 两枚都**不加入任何布局**，默认 GONE，由管理中心的更新块决定何时挂上去：更新块落在哪里是
+  // 使用者的事，控件自己认领父节点就会把"将来换落点"变成"改两处"。检查按钮那条既有路径
+  // （管理中心 build 里先摘下来再挂进去）是同一判据的既有实现，这里只是不再走一遍"先挂在
+  // 死布局里、再被摘走"的弯路。
+  val apkStatus = TextView(activity).apply {
+    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+    // 次要色：状态行是次级信息，与管理中心的分区标题（ds_text_primary）同级会抢读者的注意力。
+    setTextColor(color(R.color.ds_text_secondary))
+    setLineSpacing(0f, 1.3f)
+    // 失败原因与版本行都可能偏长：允许折两行，超出交给省略号（不撑高更新块、不截断到别的控件）。
+    maxLines = 2
+    ellipsize = TextUtils.TruncateAt.END
+    visibility = View.GONE
+  }
+  val apkDownload = makeSecondary(activity.getString(R.string.ds_apk_download)) {
+    callbacks.onDownloadUpdate()
+  }.apply { visibility = View.GONE }
+
   val secondaryRow = LinearLayout(activity).apply {
     orientation = LinearLayout.HORIZONTAL
     val lp = LinearLayout.LayoutParams(
@@ -523,6 +554,8 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
     primaryButton = primaryButton,
     consoleButton = consoleButton,
     updateButton = updateButton,
+    apkStatus = apkStatus,
+    apkDownload = apkDownload,
     runtimeChip = runtimeChip,
     storageChip = storageChip,
     versionLabel = versionLabel,

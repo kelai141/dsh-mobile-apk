@@ -48,6 +48,7 @@ import { openSessionForNotify, type SessionOpenFace } from './mobile/notify-land
 import { DevSection } from './dev-section/DevSection.tsx'
 import { PhoneControlSection } from './dev-section/phone-control.tsx'
 import { NotifySettingsSection } from './dev-section/notify-settings.tsx'
+import { ApkUpdateSection } from './dev-section/apk-update.tsx'
 import { DEV_SECTION_CSS } from './dev-section/dev-section.css.ts'
 import { GeneralSettings } from './general-settings/GeneralSettings.tsx'
 import { tr } from './i18n.ts'
@@ -297,6 +298,17 @@ export function apply(ctx: ClientContext): void {
     // 开发者选项子区（2026-08-23）：ADB 授权面板等安卓调试设施挂进此槽——不开独立导航行。
     children: { 'settings.dev.item': { kind: 'list', scope: 'root' } },
   }, DevSection))
+
+  // 应用更新（用户拍板「更新块继续放设置页、从开发者选项提出来」）：应用怎么更新是每个用户都要用到的
+  // 能力，此前唯一入口埋在开发者选项里（对普通用户不可达）——提级为设置页一级分区。
+  // order 96：排在通知（97）/ 手机控制（98）/ 开发者选项（99）之前——它是「维护本应用自身」的动作，
+  // 与那三项「配置应用行为」的性质不同，放列表更靠上的位置用户才找得到。
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'android-apk-update',
+    order: 96,
+    label: () => tr('应用更新', 'App updates'),
+  }, ApkUpdateSection))
 
   // 通知（0.14.1 批 3 / P3-5）：提醒方式与「关掉会怎样」是每个用户都要做的决定，
   // 此前唯一入口埋在开发者选项里（对普通用户不可达）——提级为设置页一级分区。

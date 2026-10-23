@@ -23,8 +23,10 @@
   <string name="ds_check_update">Check for updates</string>
   <string name="ds_apk_checking">Checking…</string>
   <string name="ds_apk_latest">APK is up to date %1$s</string>
-  <string name="ds_apk_confirm">Download and install %1$s</string>
-  <string name="ds_apk_available">New APK %1$s found (current %2$s, %3$s). Tap the same button again to download and install.</string>
+  <string name="ds_apk_not_checked">Not checked yet</string>
+  <string name="ds_apk_download">Download</string>
+  <string name="ds_apk_version_available">New version %1$s (current %2$s, %3$s)</string>
+  <string name="ds_apk_available">New APK %1$s found (current %2$s, %3$s). Tap Download to fetch and install.</string>
   <string name="ds_apk_downloading">Downloading %1$d%%</string>
   <string name="ds_apk_download_hint">Downloading %1$s (%2$s) from the mirror chain; keep the app in the foreground</string>
   <string name="ds_apk_retry">Retry downloading and installing %1$s</string>

@@ -2,6 +2,8 @@ package com.dsharnessmobile.shell
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.json.JSONObject
@@ -20,6 +22,19 @@ import java.io.File
  * （该文件由发布链实测产出），改名即判红。
  *
  * 未覆盖：真实网络/设备层（见本文件末尾注释与验收记录）。
+ *
+ * 本轮（多源确认链 + MANIFEST 摘要）定下的**两条口径**，测试与实现只按它们对齐：
+ *
+ * 1. `CheckResult.Available.tag` **一律带 v**（`v0.14.9`）。`parseManifest` 按契约从资产名取的
+ *    捕获组是**裸版本号**（`0.14.9`），归一发生在 `classifyFacts` 一处——只归一处，否则 MANIFEST
+ *    那一档会拼出 `/releases/download/0.14.9/...` 这种必然 404 的地址，而版本号看着是对的。
+ *    带 v 也与 GitHub `tag_name`、站点 `releases.json`、状态机既有用例一致；渲染层据此插值。
+ *
+ * 2. `apkUrl` **以数据源自带的地址为准，缺字段才按发布链形态拼**。只有 GitHub API 有
+ *    `browser_download_url`，故 API 那一档原样透传（`bothAbisHitTheirOwnAsset` 断言的就是这条）；
+ *    MANIFEST 与 `releases.json` 没有 URL 字段，由 `assetDownloadUrl` 拼出同一形态的地址，
+ *    镜像前缀在下载时再逐级回退。反过来"判定层必须自带 URL"会让没有该字段的两个源各自发明拼法，
+ *    重新变成"哪个源先成功就换一种行为"。
  */
 class UpdateCheckerTest {
 
@@ -180,6 +195,10 @@ class UpdateCheckerTest {
     val arm = UpdateChecker.classifyLatestBody(body, listOf("arm64-v8a", "armeabi-v7a"), "arm64")
     assertTrue("arm64 设备应命中 arm64 资产", arm is UpdateChecker.CheckResult.Available)
     assertEquals("dsh-mobile-apk-v99.0.0-arm64.apk", (arm as UpdateChecker.CheckResult.Available).name)
+    // apkUrl 口径（本轮定下的契约）：**以数据源自带的地址为准，缺字段才按发布链形态拼**。
+    // 三条源里只有 GitHub API 有 browser_download_url，所以 API 这一档原样透传（本用例走的正是这条）；
+    // MANIFEST 与 releases.json 没有 URL 字段，由 classifyFacts 用 assetDownloadUrl 拼出同一形态的地址。
+    // 不把"判定层必须自带 URL"当契约：那会让没有该字段的两个源各自发明拼法，回到"哪个源先成功就换一种行为"。
     assertEquals("https://example.test/arm64.apk", arm.apkUrl)
 
     val x86 = UpdateChecker.classifyLatestBody(body, listOf("x86_64", "arm64-v8a", "x86"), "x86_64")
@@ -325,12 +344,330 @@ class UpdateCheckerTest {
     assertTrue(newer is UpdateChecker.CheckResult.Available)
   }
 
+  // ── 摘要口径（本轮重构）：sha256 是**摘要本身**，来自 MANIFEST / releases.json ──────────
+
+  /**
+   * 2026-10-22 实测的 v0.14.9 MANIFEST.txt 形态（12 行）。
+   *
+   * 前两行**逐字取自实测输出**（.deploy-tmp/update-refactor/02-source-probes.md ①D）；
+   * 其余行按同一份 12 条资产清单同形补齐（摘要同形占位，不可当作真实校验值）。
+   * 保留整份样本而不是只留两行 Apk：MANIFEST 里**大多数行不是 apk**，解析器必须能穿过它们，
+   * 只喂 apk 行会掩盖"遇到非 apk 行就崩"这类缺陷。
+   */
+  private val realManifest: String = listOf(
+    "38e8421be56a96323893bcc80286203749ff806fb140f185c883f6cc5512c049  apk/dsh-mobile-apk-v0.14.9-arm64.apk  161996841",
+    "13dd5991a6c2ebfe0598451ea348dc1b162effa24bc1780ac5e293b20fcaa072  apk/dsh-mobile-apk-v0.14.9-x86_64.apk  158532117",
+    "0000000000000000000000000000000000000000000000000000000000000001  apk/snapshot-arm64.tar.xz  743512345",
+    "0000000000000000000000000000000000000000000000000000000000000002  apk/snapshot-x86_64.tar.xz  741234567",
+    "0000000000000000000000000000000000000000000000000000000000000003  apk/MANIFEST.txt  1387",
+    "0000000000000000000000000000000000000000000000000000000000000004  plugins/dsh-android-bridge-0.2.4.tgz  41234",
+    "0000000000000000000000000000000000000000000000000000000000000005  plugins/dsh-android-manage-0.3.0.tgz  51234",
+    "0000000000000000000000000000000000000000000000000000000000000006  plugins/dsh-android-model-capability-0.2.1.tgz  31234",
+    "0000000000000000000000000000000000000000000000000000000000000007  clients/dsh-client-ui-responsive-0.3.3.tgz  61234",
+    "0000000000000000000000000000000000000000000000000000000000000008  clients/dsh-host-web-compat-0.1.14.tgz  21234",
+    "0000000000000000000000000000000000000000000000000000000000000009  notes.md  10234",
+    "000000000000000000000000000000000000000000000000000000000000000a  sha256sums.txt  2048",
+  ).joinToString("\n") + "\n"
+
   @Test
-  fun sha256AssetIsPickedUpWhenPresent() {
-    val apk = apkAsset(newerTag, "arm64")
-    val sha = Triple(apk.first + ".sha256", "https://example.test/a.sha256", 1L)
-    val r = UpdateChecker.classifyLatestBody(releaseJson(newerTag, listOf(apk, sha)), listOf("arm64-v8a"), "arm64")
-    assertEquals("https://example.test/a.sha256", (r as UpdateChecker.CheckResult.Available).sha256Url)
+  fun realManifestYieldsTagSizesAndDigests() {
+    val facts = UpdateChecker.parseManifest(realManifest)
+    // 契约：正则 ^dsh-mobile-apk-v(.+)-(arm64-v8a|arm64|x86_64)\.apk$ 的捕获组 1 是**裸版本号**（不含 v）。
+    // 归一成带 v 的展示形态是 classifyFacts 的事（见 availableCarriesDigestFromManifest 的 a.tag 断言）。
+    assertEquals("版本号只能从 apk 资产名里取", "0.14.9", facts.tag)
+    // 路径取 basename：MANIFEST 里是 apk/xxx.apk，选包与取摘要都必须按资产名对齐（API 与站点同构）。
+    assertEquals(161996841L, facts.sizes["dsh-mobile-apk-v0.14.9-arm64.apk"])
+    assertEquals(158532117L, facts.sizes["dsh-mobile-apk-v0.14.9-x86_64.apk"])
+    assertEquals(
+      "38e8421be56a96323893bcc80286203749ff806fb140f185c883f6cc5512c049",
+      facts.sha256["dsh-mobile-apk-v0.14.9-arm64.apk"],
+    )
+    assertEquals(
+      "13dd5991a6c2ebfe0598451ea348dc1b162effa24bc1780ac5e293b20fcaa072",
+      facts.sha256["dsh-mobile-apk-v0.14.9-x86_64.apk"],
+    )
+    // 非 apk 行（快照 / 插件 / MANIFEST 自身）必须原样进清单，且不得让解析中断：
+    // 它们在 12 行里占多数，只喂 apk 行的测试会掩盖"遇到别的行就崩"这类缺陷。
+    assertEquals(12, facts.sizes.size)
+    assertEquals(12, facts.sha256.size)
+    assertTrue("非 apk 资产的摘要同样要收下（下载前校验快照/插件不是本函数的事，但数据不能丢）", facts.sha256.containsKey("snapshot-arm64.tar.xz"))
+  }
+
+  @Test
+  fun availableCarriesDigestFromManifest() {
+    // 反证核心：真实 MANIFEST 口径下，Available.sha256 **必须非空**。
+    // 旧实现去找 {apk}.sha256 资产，而发布链从不产出该资产 => 摘要恒为 null、下载后校验从不执行。
+    // 刻意用一个远低于样本 tag 的当前版本：这样断言的是"摘要取到了"，而不是
+    // "今天恰好还没升到 0.14.9"。依赖真当前版本会让这条用例在下次升版时假红。
+    val cur = "0.13.0"
+    val r = UpdateChecker.classifyFacts(UpdateChecker.parseManifest(realManifest), listOf("arm64-v8a"), "arm64", cur)
+    assertTrue("应发现新版", r is UpdateChecker.CheckResult.Available)
+    val a = r as UpdateChecker.CheckResult.Available
+    // tag 契约：Available.tag **一律带 v**（与 GitHub tag_name、站点 JSON、既有状态机用例一致）。
+    // parseManifest 的捕获组本身是裸版本号（契约规定），归一发生在 classifyFacts —— 只归一处，
+    // 否则 MANIFEST 那一档的下载地址会拼成 /releases/download/0.14.9/... 这种必然 404 的形态。
+    assertEquals("v0.14.9", a.tag)
+    assertEquals("dsh-mobile-apk-v0.14.9-arm64.apk", a.name)
+    assertEquals(161996841L, a.sizeBytes)
+    assertEquals(
+      "MANIFEST 口径下摘要必须取到（否则下载后校验形同虚设）",
+      "38e8421be56a96323893bcc80286203749ff806fb140f185c883f6cc5512c049",
+      a.sha256,
+    )
+    // 下载地址按发布链形态拼出，镜像回退在 download() 里做。
+    assertEquals(
+      "https://github.com/kelai141/dsh-mobile-apk/releases/download/v0.14.9/dsh-mobile-apk-v0.14.9-arm64.apk",
+      a.apkUrl,
+    )
+    // x86_64 设备拿到的必须是本族的摘要（家族间不得串值）。
+    val x = UpdateChecker.classifyFacts(UpdateChecker.parseManifest(realManifest), listOf("x86_64"), "x86_64", cur)
+    assertEquals(
+      "13dd5991a6c2ebfe0598451ea348dc1b162effa24bc1780ac5e293b20fcaa072",
+      (x as UpdateChecker.CheckResult.Available).sha256,
+    )
+  }
+
+  @Test
+  fun sameTagFromManifestIsUpToDateAndEmptyDigestIsNeverFabricated() {
+    // 同版样本 => UpToDate（摘要不参与"有没有新版"的判定，但也不能因此伪造一个）。
+    val same = UpdateChecker.classifyFacts(UpdateChecker.parseManifest(realManifest), listOf("arm64-v8a"), "arm64", "0.14.9")
+    assertTrue(same is UpdateChecker.CheckResult.UpToDate)
+    // 数据源没给摘要 => null（不是空串）。空串语义是"给了值但校验失败"，与实际不符。
+    val noDigest = UpdateChecker.LatestFacts(
+      "v99.0.0",
+      mapOf("dsh-mobile-apk-v99.0.0-arm64.apk" to 10L),
+      emptyMap(),
+    )
+    val r = UpdateChecker.classifyFacts(noDigest, listOf("arm64-v8a"), "arm64", "0.13.0")
+    assertNull("未提供摘要必须是 null，空串语义不同", (r as UpdateChecker.CheckResult.Available).sha256)
+  }
+
+  @Test
+  fun manifestWithoutApkLineIsParseFailureNotDeviceUnsupported() {
+    // 缺 apk 行 => 判不出本机架构 => 必须先于"没有适配包"报解析失败（保守，不把数据残缺说成设备不支持）。
+    val noApk = "0000000000000000000000000000000000000000000000000000000000000001  notes.md  10234\n"
+    val e = assertThrows(IllegalArgumentException::class.java) { UpdateChecker.parseManifest(noApk) }
+    assertEquals(
+      "MANIFEST 缺 apk 行必须归解析类",
+      UpdateChecker.CheckResult.FailureKind.PARSE,
+      UpdateChecker.classifyTransportFailure(e).kind,
+    )
+    // 反向：分类文案不得声称本机架构没有版本。
+    assertFalse(UpdateChecker.classifyTransportFailure(e).reason.contains("没有适配本机"))
+  }
+
+  @Test
+  fun malformedManifestLineIsRejectedConservatively() {
+    // 任一非空行格式不符即整体拒绝：拿一份部分可信的清单做完整性校验，比不校验更危险。
+    val bad = realManifest + "这是一行坏数据\n"
+    assertThrows(IllegalArgumentException::class.java) { UpdateChecker.parseManifest(bad) }
+    // 两代 arm64 命名混在同一份清单里 = 两次发布的产物被拼起来，摘要不再对任何一件资产成立。
+    val mixed = listOf(
+      "38e8421be56a96323893bcc80286203749ff806fb140f185c883f6cc5512c049  apk/dsh-mobile-apk-v0.14.9-arm64.apk  161996841",
+      "13dd5991a6c2ebfe0598451ea348dc1b162effa24bc1780ac5e293b20fcaa072  apk/dsh-mobile-apk-v0.14.8-x86_64.apk  158532117",
+    ).joinToString("\n")
+    assertThrows(IllegalArgumentException::class.java) { UpdateChecker.parseManifest(mixed) }
+  }
+
+  @Test
+  fun manifestMissingThisAbiIsClassifiedAsMissingPackage() {
+    // arm64 设备 + 只有 x86_64 行 => NO_COMPATIBLE_APK（不是"已是最新"，也不是解析失败）。
+    val x86Only = "13dd5991a6c2ebfe0598451ea348dc1b162effa24bc1780ac5e293b20fcaa072  apk/dsh-mobile-apk-v0.14.9-x86_64.apk  158532117\n"
+    val r = UpdateChecker.classifyFacts(UpdateChecker.parseManifest(x86Only), listOf("arm64-v8a"), "arm64", "0.13.0")
+    assertEquals(UpdateChecker.CheckResult.FailureKind.NO_COMPATIBLE_APK, (r as UpdateChecker.CheckResult.Failed).kind)
+  }
+
+  @Test
+  fun pagesReleaseJsonMapsFamilyDigestOntoAssetName() {
+    // Pages 站的 sha256 是**按 ABI 家族**给的，不是按资产名；必须挂到本族实际存在的那个资产名上。
+    val json = "{\"tag\":\"v0.14.9\",\"assets\":[" +
+      "{\"name\":\"dsh-mobile-apk-v0.14.9-arm64.apk\",\"size\":161996841}," +
+      "{\"name\":\"dsh-mobile-apk-v0.14.9-x86_64.apk\",\"size\":158532117}]," +
+      "\"sha256\":{\"arm64\":\"38E8421BE56A96323893BCC80286203749FF806FB140F185C883F6CC5512C049\"," +
+      "\"x86_64\":\"13dd5991a6c2ebfe0598451ea348dc1b162effa24bc1780ac5e293b20fcaa072\"}}"
+    val facts = UpdateChecker.parsePagesReleaseJson(json)
+    assertEquals("v0.14.9", facts.tag)
+    // 摘要必须归一小写：大小写差异不得让校验比对判失败。
+    assertEquals(
+      "38e8421be56a96323893bcc80286203749ff806fb140f185c883f6cc5512c049",
+      facts.sha256["dsh-mobile-apk-v0.14.9-arm64.apk"],
+    )
+    assertEquals(
+      "13dd5991a6c2ebfe0598451ea348dc1b162effa24bc1780ac5e293b20fcaa072",
+      facts.sha256["dsh-mobile-apk-v0.14.9-x86_64.apk"],
+    )
+    val r = UpdateChecker.classifyFacts(facts, listOf("arm64-v8a"), "arm64", "0.13.0")
+    assertEquals(
+      "38e8421be56a96323893bcc80286203749ff806fb140f185c883f6cc5512c049",
+      (r as UpdateChecker.CheckResult.Available).sha256,
+    )
+    // 历史命名（-arm64-v8a）同样要能挂上家族摘要。
+    val legacy = "{\"tag\":\"v0.14.9\",\"assets\":[{\"name\":\"dsh-mobile-apk-v0.14.9-arm64-v8a.apk\",\"size\":1}]," +
+      "\"sha256\":{\"arm64\":\"38e8421be56a96323893bcc80286203749ff806fb140f185c883f6cc5512c049\"}}"
+    assertEquals(
+      "38e8421be56a96323893bcc80286203749ff806fb140f185c883f6cc5512c049",
+      UpdateChecker.parsePagesReleaseJson(legacy).sha256["dsh-mobile-apk-v0.14.9-arm64-v8a.apk"],
+    )
+  }
+
+  @Test
+  fun pagesReleaseJsonWithoutTagIsParseFailure() {
+    for (bad in listOf("{}", "{\"tag\":\"   \"}", "not-json")) {
+      val e = assertThrows(Exception::class.java) { UpdateChecker.parsePagesReleaseJson(bad) }
+      assertEquals(
+        "畸形 releases.json 必须归解析类：" + bad,
+        UpdateChecker.CheckResult.FailureKind.PARSE,
+        UpdateChecker.classifyTransportFailure(e).kind,
+      )
+    }
+  }
+
+  // ── 确认链：只有至少一档成功解析出版本号，才允许 UpToDate ────────────────────────
+
+  private val armDevice = listOf("arm64-v8a", "armeabi-v7a")
+
+  @Test
+  fun allSourcesDownIsFailedNotUpToDate() {
+    // 纪律判据：所有源都失败时**绝不**返回 UpToDate。"查不到"与"没有新版"是两件事。
+    val attempts = listOf<Pair<String, () -> UpdateChecker.SourceProbe>>(
+      "gh-proxy" to { UpdateChecker.SourceProbe.Unreachable(java.net.UnknownHostException("gh-proxy.com")) },
+      "ghfast" to { UpdateChecker.SourceProbe.Unreachable(java.net.SocketTimeoutException("ghfast.top")) },
+      "pages" to { UpdateChecker.SourceProbe.Unreachable(java.net.ConnectException("github.io")) },
+      "api" to { UpdateChecker.SourceProbe.Unreachable(java.net.UnknownHostException("api.github.com")) },
+    )
+    val r = UpdateChecker.runChain(attempts, armDevice, "arm64", "0.14.9")
+    assertTrue("全源不可达必须报失败，不得谎称已是最新，实得 " + r, r is UpdateChecker.CheckResult.Failed)
+    assertEquals(UpdateChecker.CheckResult.FailureKind.NETWORK, (r as UpdateChecker.CheckResult.Failed).kind)
+  }
+
+  @Test
+  fun httpErrorAnywhereMakesItApiHttpNotNetwork() {
+    // 任一源拿到 HTTP 响应错误 => 数据/服务异常（换网络也没用），不得与"网络不可达"混为一谈。
+    val attempts = listOf<Pair<String, () -> UpdateChecker.SourceProbe>>(
+      "gh-proxy" to { UpdateChecker.SourceProbe.Unreachable(java.net.UnknownHostException("gh-proxy.com")) },
+      "pages" to {
+        UpdateChecker.SourceProbe.Rejected(
+          UpdateChecker.CheckResult.FailureKind.API_HTTP,
+          "检查失败：更新数据源返回 HTTP 502（服务端或网络代理异常）——请稍后重试",
+        )
+      },
+      "api" to { UpdateChecker.SourceProbe.Unreachable(java.net.SocketTimeoutException("api")) },
+    )
+    val r = UpdateChecker.runChain(attempts, armDevice, "arm64", "0.14.9") as UpdateChecker.CheckResult.Failed
+    assertEquals(UpdateChecker.CheckResult.FailureKind.API_HTTP, r.kind)
+    assertTrue(r.reason.contains("502"))
+
+    // 限流优先级最高：它唯一能"等一会儿再来"，且只可能来自 API。
+    val limited = UpdateChecker.aggregateFailure(
+      listOf(UpdateChecker.CheckResult.FailureKind.RATE_LIMITED to "限流"),
+      listOf(java.net.UnknownHostException("x")),
+    )
+    assertEquals(UpdateChecker.CheckResult.FailureKind.RATE_LIMITED, limited.kind)
+  }
+
+  @Test
+  fun firstSourceThatYieldsTagWinsAndStopsTheChain() {
+    // 任一档成功返回就**立即**返回，不继续往下走：后面的档只会更慢。
+    var tailCalls = 0
+    val attempts = listOf<Pair<String, () -> UpdateChecker.SourceProbe>>(
+      "gh-proxy" to { UpdateChecker.SourceProbe.Unreachable(java.net.UnknownHostException("x")) },
+      "ghfast" to { UpdateChecker.SourceProbe.Parsed(UpdateChecker.parseManifest(realManifest)) },
+      "github" to { tailCalls++; UpdateChecker.SourceProbe.Unreachable(java.net.UnknownHostException("y")) },
+      "api" to { tailCalls++; UpdateChecker.SourceProbe.Unreachable(java.net.UnknownHostException("z")) },
+    )
+    val r = UpdateChecker.runChain(attempts, armDevice, "arm64", "0.13.0")
+    assertTrue(r is UpdateChecker.CheckResult.Available)
+    assertEquals("成功那一档必须立刻收口", 0, tailCalls)
+    // 成功档拿到的是同版 => UpToDate 才是允许的（因为确实有一档解析出了版本号）。
+    val same = UpdateChecker.runChain(attempts, armDevice, "arm64", "0.14.9")
+    assertTrue(same is UpdateChecker.CheckResult.UpToDate)
+  }
+
+  @Test
+  fun mirrorPrefixesMatchContractOrder() {
+    // 顺序即回退优先级：与下载站 MIRROR_TEMPLATES 逐条同序（门禁 scripts/check-mirror-parity.mjs 也守这条）。
+    assertEquals(
+      listOf(
+        "https://github.com/",
+        "https://gh-proxy.com/https://github.com/",
+        "https://ghfast.top/https://github.com/",
+        "https://ghproxy.net/https://github.com/",
+      ),
+      UpdateChecker.MIRROR_PREFIXES,
+    )
+    // 每档独立超时，且末位 ghproxy.net 必须显著更宽（实测 25-34s，作主源会把检查拖成半分钟）。
+    assertEquals(8_000, UpdateChecker.timeoutFor("gh-proxy"))
+    assertEquals(8_000, UpdateChecker.timeoutFor("pages"))
+    assertEquals(15_000, UpdateChecker.timeoutFor("ghfast"))
+    assertEquals(15_000, UpdateChecker.timeoutFor("github"))
+    assertEquals(30_000, UpdateChecker.timeoutFor("ghproxy.net"))
+    assertEquals(15_000, UpdateChecker.timeoutFor("api"))
+  }
+
+  /**
+   * 六档确认链的**接线顺序**（契约 A 节）：gh-proxy -> ghfast -> github -> pages -> ghproxy.net -> api。
+   *
+   * 为什么必须用源码结构断言钉住（而不是只测 runChain）：runChain 的用例证明的是"成功即停、
+   * 全挂不谎报"，它对**传进去的顺序**一无所知。把 pages 挪到第一位、或把 ghproxy.net 提前，
+   * 上面所有用例依旧全绿——而用户点一次检查就可能要干等半分钟（实测 ghproxy.net 25-34s）。
+   * 顺序即用户等待时间，属于行为，不是风格。
+   *
+   * 判据按**出现下标**而不是行号：区间调整、加注释、换行都不会误判；只有真的调换顺序才变红。
+   */
+  @Test
+  fun confirmationChainWiringOrderIsPinned() {
+    val src = repoSource("UpdateChecker.kt")
+    val body = src.substringAfter("private fun probeSources()").substringBefore("private fun fetchText")
+    assertTrue("probeSources 必须存在（六档接线点）", body.isNotBlank())
+
+    val order = listOf("gh-proxy", "ghfast", "github", "pages", "ghproxy.net", "api")
+    val positions = order.map { name -> name to body.indexOf("\"" + name + "\" to {") }
+    // 每一档都必须真的出现在接线表里（缺一档 = 该源根本没被尝试，用户少一条可用线路）。
+    positions.forEach { (name, at) ->
+      assertTrue("确认链里找不到源 " + name + " 的接线", at >= 0)
+    }
+    assertEquals(
+      "六档顺序必须与契约一致（顺序即回退优先级，也直接决定最坏等待时间）",
+      positions.map { it.second }.sorted(),
+      positions.map { it.second },
+    )
+
+    // 每档超时必须与名字**配对**绑定，不能张冠李戴：把 ghproxy.net 的 30s 挂到第一档上，
+    // 顺序看着对、实际每次检查先等半分钟——这种错只有逐对核对才抓得住。
+    val expected = linkedMapOf(
+      "gh-proxy" to 8_000,
+      "ghfast" to 15_000,
+      "github" to 15_000,
+      "pages" to 8_000,
+      "ghproxy.net" to 30_000,
+      "api" to 15_000,
+    )
+    for ((name, ms) in expected) {
+      assertEquals(
+        "档 " + name + " 的超时必须与名字配对（见 timeoutFor）",
+        ms.toLong(),
+        UpdateChecker.timeoutFor(name).toLong(),
+      )
+    }
+    // 接线表里每一行都必须显式带自己的名字去取超时（而不是共用一个常量），否则逐档独立超时会退化成全局一个值。
+    for (name in expected.keys - setOf("api")) {
+      assertTrue(
+        "档 " + name + " 必须用自己的名字取超时（timeoutFor(\"" + name + "\")）",
+        body.contains("timeoutFor(\"" + name + "\")"),
+      )
+    }
+    // ghproxy.net 是末位的慢档：它在接线表里的位置必须晚于 pages 之外的其它所有档（用它自己的下标比）。
+    assertTrue(
+      "ghproxy.net 只能末位兜底（实测 25-34s，作主源会把检查拖成半分钟）",
+      body.indexOf("\"ghproxy.net\" to {") > body.indexOf("\"github\" to {") &&
+        body.indexOf("\"ghproxy.net\" to {") > body.indexOf("\"pages\" to {") &&
+        body.indexOf("\"ghproxy.net\" to {") > body.indexOf("\"ghfast\" to {"),
+    )
+    // api.github.com 是最后兜底（未认证 60 次/小时/IP 且配额被共享），必须排在所有镜像档之后。
+    assertTrue(
+      "api 必须排在五档镜像/站点之后（额度稀缺，只能兜底）",
+      body.indexOf("\"api\" to {") > body.indexOf("\"ghproxy.net\" to {"),
+    )
   }
 
   @Test

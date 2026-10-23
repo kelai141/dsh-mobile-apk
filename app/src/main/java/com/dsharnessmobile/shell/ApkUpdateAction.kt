@@ -38,6 +38,14 @@ internal class ApkUpdateState {
   private var tag: String? = null
   private var name: String? = null
   private var sizeBytes: Long = 0L
+  /**
+   * 本次发布声明的产物摘要（小写十六进制）。null = 发布方**没有提供**校验值。
+   *
+   * 为什么在这里留一份而不是每次回查 [UpdateChecker.CheckResult]：快照是渲染层唯一能读到的事实面，
+   * 而 Available 只在检查那一瞬间在场。缺失时快照里直接不出现该字段——界面据此如实说明
+   * 「本次发布未提供校验值」，不能把「缺席」说成「已校验通过」。
+   */
+  private var sha256: String? = null
   private var percent: Int = -1
   private var reused: Boolean = false
   private var reason: String? = null
@@ -54,8 +62,16 @@ internal class ApkUpdateState {
    * `state:"failed"` 与 `canStart:true` 并存 => 页面按契约改发 install => 壳侧回 busy =>
    * 用户点重试永远得到「上一次更新动作仍在进行中」，除杀应用外无出路。
    * 现在只有一个真源（state），分裂在结构上不可能出现，并由 [ApkUpdateController.invariantViolation] 断言。
+   *
+   * `hasReadyArtifact` 走**入参**而不是本类字段：那个事实的持有者是控制器（readyToInstall 的生命周期
+   * 与 state 刻意不同，见控制器字段说明），在 state 里再存一份就是第二个真源——正是上面这段讲的病。
+   * 本类只负责把给进来的事实按统一形状写进 JSON，且**每个相位都写**：页面按「缺席即没有」兼容，
+   * 但恒有布尔值才是干净事实，也不会被误读成「这一相位不适用」。
+   *
+   * @param ok 这次调用受理了没有（不表示更新成功）。
+   * @param hasReadyArtifact 已下载且校验通过、仍在等安装的包是否还在（由控制器传入）。
    */
-  fun snapshotJson(ok: Boolean = true): String = synchronized(lock) {
+  fun snapshotJson(ok: Boolean = true, hasReadyArtifact: Boolean = false): String = synchronized(lock) {
     val o = JSONObject()
     o.put("ok", ok)
     o.put("state", state)
@@ -64,11 +80,13 @@ internal class ApkUpdateState {
     name?.let { o.put("name", it) }
     current?.let { o.put("current", it) }
     if (sizeBytes > 0) o.put("sizeBytes", sizeBytes)
+    sha256?.let { o.put("sha256", it) }
     if (percent >= 0) o.put("percent", percent)
     if (state == STATE_INSTALLING) o.put("reused", reused)
     reason?.let { o.put("reason", it) }
     kind?.let { o.put("kind", it) }
     o.put("canStart", state == STATE_AVAILABLE)
+    o.put("hasReadyArtifact", hasReadyArtifact)
     o.toString()
   }
 
@@ -107,6 +125,8 @@ internal class ApkUpdateState {
     if (busy()) return false
     state = STATE_CHECKING
     version = null; tag = null; name = null; sizeBytes = 0; percent = -1; reused = false
+    // 新一轮检查带的是新发布的元数据：上一轮的摘要留着会把旧值贴到这次的结果上。
+    sha256 = null
     reason = null; kind = null
     true
   }
@@ -122,6 +142,7 @@ internal class ApkUpdateState {
       is UpdateChecker.CheckResult.Available -> {
         state = STATE_AVAILABLE
         tag = result.tag; name = result.name; sizeBytes = result.sizeBytes
+        sha256 = result.sha256
         current = currentVersion
       }
       is UpdateChecker.CheckResult.Failed -> {
@@ -160,6 +181,8 @@ internal class ApkUpdateState {
     reason = reasonText
     kind = kindName
     percent = -1
+    // 失败的产物已删除：这份摘要不再对应任何在场文件，留着就成了一句没根据的「已校验」。
+    sha256 = null
   }
 
   /** 下载完成且产物校验通过、系统安装器已拉起（reused = 复用了上次下好的包，没重复拉 169MB）。 */
@@ -189,6 +212,8 @@ internal class ApkUpdateState {
     reason = reasonText
     kind = kindName
     percent = -1
+    // 同上：失败态不保留一份找不到对应文件的摘要。
+    sha256 = null
   }
 
   fun awaitingPermission(): Boolean = synchronized(lock) { state == STATE_NEED_PERMISSION }
@@ -221,7 +246,8 @@ internal class ApkUpdateState {
  *    （`"status"` / `"check"` / `"install"`），再「轮询读 status」收敛（同步桥不能回 Promise，
  *    故不能用 await）；壳侧**不向 `window.__dshBridge` 写任何回调** —— 那个共享对象被页面侧
  *    PICKER_SCRIPT 整体赋值且有幂等守卫，挂回调有「被整体跳过」或「覆盖掉 onDirectoryPicked」的风险；
- *  - 引导页按钮经 [onButtonPressed] 发起、经 [observe] 渲染（与设置页共用同一份状态）。
+ *  - 引导页两个按钮经 [onCheckPressed] / [onDownloadPressed] 发起、经 [observe] 渲染
+ *    （与设置页共用同一份状态与同一对受理入口：桥面的 check/install 就是转发到这两个方法）。
  *
  * @param onEvent 事件出口（函数名 + JSON），由 Activity 注入并投递到页面；默认空实现 = 无页面消费。
  */
@@ -251,8 +277,15 @@ internal class ApkUpdateController(private val activity: Activity) {
    * 不变量由 [invariantViolation] 断言（测试逐相位钉住）。
    */
   @Volatile private var currentResult: UpdateChecker.CheckResult.Available? = null
-  /** 界面渲染回调（引导页注册；状态每变一次通知一次）。 */
-  @Volatile private var observer: (() -> Unit)? = null
+  /**
+   * 界面渲染回调的**多播**登记表（引导页与管理中心都要注册；状态每变一次通知一次）。
+   *
+   * 为什么必须是多播而不是单个槽位：单槽位是「后注册者夺槽」结构，第二个消费方一注册，
+   * 第一个就再也收不到通知——启动页那张更新卡片因此永不刷新（用户点第一次没反馈、
+   * 点第二次才静默开始下载 169MB）。两个消费方本就不该互相顶替，槽位形态本身就是缺陷。
+   * 登记表的读写由 [ObserverRegistry] 自己加锁：登记/取消发生在 UI 线程，通知也可能来自工作线程。
+   */
+  private val observers = ObserverRegistry()
   /**
    * **终态兜底定时器**（缺陷修复，见 [ApkUpdateState.Companion.CHECK_TIMEOUT_MS] 的说明）。
    * 每次进入进行中相位都重新武装；落到任何终态或释放即解除。到点必收敛，不依赖回执到达。
@@ -283,16 +316,27 @@ internal class ApkUpdateController(private val activity: Activity) {
     return null
   }
 
-  /** 引导页等界面注册渲染回调：**读的就是本对象的状态**（单一真源）。 */
-  fun observe(render: () -> Unit) {
-    observer = render
+  /**
+   * 界面注册渲染回调：**读的就是本对象的状态**（单一真源）。
+   *
+   * 注册即先渲染一次（否则新出现的消费方要等下一次状态变化才有内容）；返回的句柄用于注销，
+   * 视图销毁时必须调用，否则已死的渲染闭包会一直被通知到。
+   * @return 取消句柄（幂等：重复调用无副作用）。
+   */
+  fun observe(render: () -> Unit): () -> Unit {
+    observers.add(render)
     render()
+    return { observers.remove(render) }
   }
 
   private fun notifyChanged() {
-    val r = observer ?: return
+    if (observers.size() == 0) return
     if (activity.isFinishing || activity.isDestroyed) return
-    activity.runOnUiThread { if (!activity.isFinishing && !activity.isDestroyed) r() }
+    activity.runOnUiThread {
+      if (activity.isFinishing || activity.isDestroyed) return@runOnUiThread
+      // 在 UI 线程重新取快照：投递到执行之间被注销的观察者，不该再收到这一次通知。
+      observers.dispatch()
+    }
   }
 
   /**
@@ -300,7 +344,10 @@ internal class ApkUpdateController(private val activity: Activity) {
    * 未知动作只读——绝不因为页面传了个没见过的动作就推进状态机。
    */
   fun handleBridgeAction(action: String): String =
-    ApkUpdateController.route(action, { statusJson() }, { check() }, { start() })
+    // check / install 与原生按钮走**同一对**受理入口：两条面各维护一套受理条件，迟早给出
+    // 不同答案（页面显示的按钮与壳侧会不会受理脱节）。下载入口已把续继链算进去，并把拒绝原因
+    // 做成机器可读的 code（busy / no-pending / not-available）——回执面因此没有丢。
+    ApkUpdateController.route(action, { statusJson() }, { onCheckPressed(); statusJson() }, { onDownloadPressed() })
 
   /** 引导页/设置页渲染用的只读状态视图（**读的就是那份唯一状态**）。 */
   fun stateName(): String = state.stateName()
@@ -311,10 +358,32 @@ internal class ApkUpdateController(private val activity: Activity) {
   fun percent(): Int = state.percentValue()
 
   /**
+   * 已下载且校验通过、还在等安装的包是否仍在。
+   *
+   * 判据给渲染层用：失败态只有「手上还有一个验证过的包」时重试安装才真的会受理，
+   * 否则按钮点下去只是再失败一次。这是 [readyToInstall] 的只读面——渲染层不可能靠
+   * kind 之类旁证推断出它（那是假判据）。
+   */
+  fun hasReadyArtifact(): Boolean = readyToInstall != null
+
+  /**
+   * 快照的统一出口：state 的那份对外事实 + 控制器私有载荷派生出的 `hasReadyArtifact`。
+   *
+   * 为什么由控制器传而不是在 [ApkUpdateState] 里存一个字段：readyToInstall 的生命周期与 state
+   * 刻意不同（见字段说明），在 state 里再存一份同义标记就是本文件反复警告的双源温床。
+   * 这里只是把**已有的**只读事实（[hasReadyArtifact]）作为入参交给 state 写进同一份 JSON。
+   *
+   * `hasReadyArtifact` 每个相位都发、恒为布尔：页面据此决定失败态要不要露出「重试安装」。
+   * 若缺席，页面只能按旁证猜——那会把按钮摆在点了必然被拒的相位上。
+   */
+  private fun snapshotObject(ok: Boolean = true): JSONObject =
+    JSONObject(state.snapshotJson(ok, hasReadyArtifact()))
+
+  /**
    * 只读当前状态 JSON（不发起任何网络/安装动作）。唯一消费方是桥面 `status` 动作。
    * 状态内容的结构化事实与回调载荷同源，页面文案自出。
    */
-  fun statusJson(): String = state.snapshotJson()
+  fun statusJson(): String = snapshotObject().toString()
 
   // ── 终态兜底（收敛保证） ─────────────────────────────────────────────────────
 
@@ -343,7 +412,7 @@ internal class ApkUpdateController(private val activity: Activity) {
    */
   fun release() {
     disarmWatchdog()
-    observer = null
+    observers.clear()
     if (!state.busy()) return
     // 载荷与相位成对作废（同 fail()）：不变量在任何退出路径上都成立。
     currentResult = null
@@ -380,7 +449,7 @@ internal class ApkUpdateController(private val activity: Activity) {
     armWatchdog(CHECK_TIMEOUT_MS)
     notifyChanged()
     Thread({ runCheck() }, "dsh-apk-update-check").start()
-    return JSONObject(state.snapshotJson()).put("code", "accepted").toString()
+    return snapshotObject().put("code", "accepted").toString()
   }
 
   /**
@@ -392,6 +461,10 @@ internal class ApkUpdateController(private val activity: Activity) {
    *  · 没有待装新版 → `no-pending`；· 确实在途 → `busy`；· 其余（如 failed/up-to-date）→ `not-available`。
    */
   fun start(): String {
+    // 「下载」这个动作不是只有一种含义：包已经下好并校验通过、只等授权或重试安装时，
+    // 它走的是续继链（载荷是 readyToInstall，不是 currentResult）。页面上的「授权后继续安装」
+    // 与原生下载按钮发的是同一个动作，此处不先看续继链，那条路就只有原生一侧能走通。
+    if (readyToInstall != null || state.awaitingPermission()) return onDownloadPressed()
     val pending = currentResult
     if (pending == null) return reject("no-pending", "没有待安装的新版本，请先点「检查更新」")
     if (!state.beginDownload()) {
@@ -401,7 +474,7 @@ internal class ApkUpdateController(private val activity: Activity) {
     armWatchdog(downloadTimeoutMs(pending.sizeBytes))
     settle() // 页面立刻看到 downloading（两段式：受理 + 轮询读状态面）
     Thread({ downloadAndInstall(pending) }, "dsh-apk-update-download").start()
-    return JSONObject(state.snapshotJson()).put("code", "accepted").toString()
+    return snapshotObject().put("code", "accepted").toString()
   }
 
   /**
@@ -409,23 +482,44 @@ internal class ApkUpdateController(private val activity: Activity) {
    * 附带当前状态字段，页面据此重水合，不做乐观置位。
    */
   private fun reject(code: String, reason: String): String =
-    JSONObject(state.snapshotJson(false)).put("code", code).put("reason", reason).toString()
+    snapshotObject(false).put("code", code).put("reason", reason).toString()
 
   // ── 引导页动作（与桥面共用同一状态） ────────────────────────────────────────
 
   /**
-   * 引导页同一按钮的三态语义（检查 → 二次确认下载 → 安装）。
+   * 原生界面的「检查更新」按钮：**只发检查**。
    *
-   * 分档**只读状态**、不读私有字段：与设置页那一行（客户端按 `canStart` 决定发 install 还是 check）
-   * 完全同一套判据。旧实现按 `apkPending != null` 决定，于是下载失败后按钮仍去 start()，
-   * 而 start() 又因状态不对拒绝——点下去毫无反应。
+   * 为什么不再让同一个按钮兼任三态：按钮语义随状态漂移时，用户点下去会得到什么取决于
+   * 「上一次操作到哪一步」，同一枚按钮有时检查、有时静默开始下载 169MB。现在检查与下载
+   * 各有自己的按钮，且受理判据与渲染层同源（available 态的检查按钮由渲染层禁用，
+   * 因为 beginCheck 会清掉待下载载荷——两处表达式一致，见 [ApkUpdateState.snapshotJson] 的 canStart）。
    */
-  fun onButtonPressed() {
+  fun onCheckPressed() {
     if (state.busy()) return
-    when {
-      readyToInstall != null || state.awaitingPermission() -> continueInstallIfPermitted()
+    check()
+  }
+
+  /**
+   * 原生界面的「下载并安装」按钮：只做「开始下载 / 续继安装」。
+   *
+   * 分档**只读状态**、不读私有字段：与设置页那一行完全同一套判据。先看续继链（已有下好的包
+   * 或正等授权），再看能否开始下载，其余情况什么都不做——状态机没走到那一步时，
+   * 受理与否由状态本身回答。
+   *
+   * 返回受理回执，供桥面的 `install` 动作原样回给页面（原生按钮忽略返回值即可）：
+   * 桥面若自己另写一套受理条件，两条面迟早给出不同答案。
+   */
+  fun onDownloadPressed(): String {
+    if (state.busy()) return reject("busy", "上一次更新动作仍在进行中，请稍候")
+    return when {
+      readyToInstall != null || state.awaitingPermission() -> {
+        continueInstallIfPermitted()
+        snapshotObject().put("code", "accepted").toString()
+      }
       state.stateName() == ApkUpdateState.STATE_AVAILABLE -> start()
-      else -> check()
+      // 剩余相位（idle / up-to-date / 没有待装包的 failed）本来就没有可下载的东西。
+      // 这里不能说「受理了」：回执要如实，页面才不会按一个不会发生的事实去渲染。
+      else -> reject("not-available", "当前状态（" + state.stateName() + "）没有可下载的新版本，请先点「检查更新」")
     }
   }
 
@@ -448,7 +542,9 @@ internal class ApkUpdateController(private val activity: Activity) {
     val dest = File(UpdateChecker.updatesDir(activity), r.name)
     var reused = false
     try {
-      val expectedSha = r.sha256Url?.let { UpdateChecker.downloadText(it) }
+      // 摘要随元数据一起来（MANIFEST / releases.json 已带 sha256 列）。旧实现把 sha256Url 当资产去下载，
+      // 而发布链从来没产出过 .sha256 附件——那一步恒定失败，校验链因此长期形同虚设。
+      val expectedSha = r.sha256
       fun artifactVerdict(): ApkArtifactVerdict = verifyApkArtifact(
         fileExists = dest.exists(),
         actualBytes = dest.length(),
@@ -630,4 +726,42 @@ internal class ApkUpdateController(private val activity: Activity) {
   }
 }
 
+/**
+ * 渲染回调的登记表（多播）。
+ *
+ * 为什么单独抽出来：登记/注销/通知是纯粹的表操作，与 Activity、Handler 无关，因此能在 JVM
+ * 单测里逐条钉住「两个消费方都被通知」「注销后不再通知」——这正是单槽位实现漏掉的那条缺陷。
+ * 抽在这里也让 [ApkUpdateController] 只负责「什么时候通知」，不掺「通知谁」的簿记。
+ */
+internal class ObserverRegistry {
+
+  private val lock = Any()
+  private val list = mutableListOf<() -> Unit>()
+
+  /** 追加登记；同一回调重复登记按列表语义允许多次（每个句柄各自注销自己那一次）。 */
+  fun add(render: () -> Unit) {
+    synchronized(lock) { list.add(render) }
+  }
+
+  /** 注销一次登记；已注销（或列表已被清空）时无事发生，便于句柄被重复调用。 */
+  fun remove(render: () -> Unit) {
+    synchronized(lock) { list.remove(render) }
+  }
+
+  /** 通知遍历用的快照：回调里登记/注销都不会改变本次遍历的对象。 */
+  fun snapshot(): List<() -> Unit> = synchronized(lock) { list.toList() }
+
+  /** 逐个回调当前全部观察者（生产路径由 [ApkUpdateController.notifyChanged] 投递到 UI 线程后调用）。 */
+  fun dispatch() {
+    snapshot().forEach { it() }
+  }
+
+  /** 清空全部登记（界面销毁时释放）。 */
+  fun clear() {
+    synchronized(lock) { list.clear() }
+  }
+
+  /** 当前登记数（诊断与测试用）。 */
+  fun size(): Int = synchronized(lock) { list.size }
+}
 

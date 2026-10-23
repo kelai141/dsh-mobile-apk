@@ -31,11 +31,15 @@
   <string name="ds_undoing">回撤中</string>
   <string name="ds_open_console">打开控制台</string>
   <string name="ds_check_update">检查更新</string>
-  <!-- 0.13.8 批 H：启动页 APK 自更新（仅手动；同按钮二次确认；下载后自动拉起授权/安装） -->
+  <!-- 0.13.8 批 H：APK 自更新（仅手动；检查与下载是两枚独立按钮；下载后自动拉起授权/安装） -->
   <string name="ds_apk_checking">检查中…</string>
   <string name="ds_apk_latest">APK 已是最新 %1$s</string>
-  <string name="ds_apk_confirm">下载并安装 %1$s</string>
-  <string name="ds_apk_available">发现新版 APK %1$s（当前 %2$s，%3$s）——再点一次同一按钮开始下载并安装</string>
+  <string name="ds_apk_not_checked">尚未检查</string>
+  <string name="ds_apk_download">下载</string>
+  <!-- 版本号进独立状态行后，按钮文案只剩短词——长版本号不会再被固定高按钮截断 -->
+  <string name="ds_apk_version_available">新版本 %1$s（当前 %2$s，%3$s）</string>
+  <!-- ds_apk_confirm（下载并安装 %s）随单按钮三态一起下线：版本号进状态行后，没有哪个控件再需要它 -->
+  <string name="ds_apk_available">发现新版 APK %1$s（当前 %2$s，%3$s）——点「下载」开始下载并安装</string>
   <string name="ds_apk_downloading">下载中 %1$d%%</string>
   <string name="ds_apk_download_hint">正在从镜像链下载 %1$s（%2$s）——请保持应用在前台</string>
   <string name="ds_apk_retry">重试下载并安装 %1$s</string>

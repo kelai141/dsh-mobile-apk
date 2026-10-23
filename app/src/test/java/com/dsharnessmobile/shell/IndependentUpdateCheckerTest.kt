@@ -4,6 +4,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -267,5 +269,85 @@ class IndependentUpdateCheckerTest {
     assertFalse("x86_64 候选里不得出现 arm64", x86.any { it.contains("arm64") })
     // 主口径 = 发布链产物名（第一个），这是本地落盘名与旧断言依赖的契约
     assertEquals("dsh-mobile-apk-v1.2.3-arm64.apk", UpdateChecker.assetName("v1.2.3", "arm64"))
+  }
+
+  // ── 本轮重构（task-4）的独立反证：多源确认链 + MANIFEST 摘要 ──────────────────────
+  //
+  // 下面这些用例由 tester 独立推导，不复用实现方的样本文件；重点是**反例**：
+  //  - 反例 6：任一/全部源失败时，绝不允许出现 UpToDate（"查不到"不是"没有新版"）。
+  //  - 反例 7：MANIFEST 里没有可识别的 apk 行 => 解析失败，不得退化成"没有本机架构的包"。
+  //  - 反证 8：摘要缺失时给 null 而不是空串（语义不同，下游据此决定界面上是否声明"已校验"）。
+
+  /** 一档源的最小可测形态（[UpdateChecker.SourceProbe] 是 internal 的，测试与实现同模块）。 */
+  private fun down(host: String) = UpdateChecker.SourceProbe.Unreachable(java.net.UnknownHostException(host))
+
+  @Test
+  fun everySourceFailingNeverYieldsUpToDate() {
+    // 要点：这条用例的失败形态覆盖"全部/部分"两档，且当前版本取得足够高（任何 tag 都比它低），
+    // 于是"若实现偷偷返回 UpToDate"一定被抓住，不会被版本比较的巧合掩盖。
+    val allDown = listOf<Pair<String, () -> UpdateChecker.SourceProbe>>(
+      "gh-proxy" to { down("gh-proxy.com") },
+      "ghfast" to { down("ghfast.top") },
+      "github" to { down("github.com") },
+      "pages" to { down("kelai141.github.io") },
+      "ghproxy.net" to { down("ghproxy.net") },
+      "api" to { down("api.github.com") },
+    )
+    val r = UpdateChecker.runChain(allDown, ARM64_DEVICE, "arm64", "99.99.99")
+    assertTrue("六档全挂时不得说已是最新，实得 " + r, r is UpdateChecker.CheckResult.Failed)
+
+    // 只有数据类失败（没有连接失败）同样不得 UpToDate，且必须归到"服务/数据"侧而不是"网络"。
+    val dataFailures = listOf<Pair<String, () -> UpdateChecker.SourceProbe>>(
+      "pages" to {
+        UpdateChecker.SourceProbe.Rejected(
+          UpdateChecker.CheckResult.FailureKind.PARSE,
+          "检查失败：更新接口返回的内容无法解析（可能被网络中间页替换）——请稍后重试",
+        )
+      },
+    )
+    val r2 = UpdateChecker.runChain(dataFailures, ARM64_DEVICE, "arm64", "99.99.99") as UpdateChecker.CheckResult.Failed
+    assertEquals(UpdateChecker.CheckResult.FailureKind.PARSE, r2.kind)
+    assertFalse("数据失败不得被说成架构问题", r2.reason.contains("没有适配本机"))
+  }
+
+  @Test
+  fun manifestWithoutVersionedApkIsParseFailure() {
+    // 只有非 apk 行 => 判不出版本号 => 必须抛（调用方归 PARSE），绝不能当成"没有本机架构的包"。
+    val noApk = "00000000000000000000000000000000000000000000000000000000000000aa  notes.md  12\n"
+    assertThrows(IllegalArgumentException::class.java) { UpdateChecker.parseManifest(noApk) }
+  }
+
+  @Test
+  fun missingDigestIsNullNotEmptyString() {
+    // 摘要缺失的语义是"本次发布没有提供校验值"，下游据此在界面如实说明；
+    // 空串会被读成"提供了值但校验失败"，那是另一回事（也更容易被静默吞掉）。
+    val facts = UpdateChecker.LatestFacts("v99.0.0", mapOf("dsh-mobile-apk-v99.0.0-arm64.apk" to 1L), emptyMap())
+    val r = UpdateChecker.classifyFacts(facts, ARM64_DEVICE, "arm64", "0.13.0") as UpdateChecker.CheckResult.Available
+    assertNull("未提供摘要必须是 null，空串会被读成『给了值但校验失败』", r.sha256)
+  }
+
+  @Test
+  fun manifestDigestReachesAvailableAndIsLowercase() {
+    // 摘要必须以小写十六进制进入 Available：下游直接拿它和实际文件比对，
+    // 大小写差异会让校验误判失败（"文件坏了"的假警报）。
+    val manifest = listOf(
+      "38E8421BE56A96323893BCC80286203749FF806FB140F185C883F6CC5512C049  apk/dsh-mobile-apk-v99.0.0-arm64.apk  1",
+      "13DD5991A6C2EBFE0598451EA348DC1B162EFFA24BC1780AC5E293B20FCAA072  apk/dsh-mobile-apk-v99.0.0-x86_64.apk  1",
+    ).joinToString("\n")
+    val r = UpdateChecker.classifyFacts(UpdateChecker.parseManifest(manifest), ARM64_DEVICE, "arm64", "0.13.0")
+    assertEquals(
+      "38e8421be56a96323893bcc80286203749ff806fb140f185c883f6cc5512c049",
+      (r as UpdateChecker.CheckResult.Available).sha256,
+    )
+  }
+
+  @Test
+  fun mirrorTableIsFourInContractOrder() {
+    // 顺序即回退优先级；条数与顺序都必须与下载站 MIRROR_TEMPLATES 一致（门禁另有一条逐字比对）。
+    assertEquals(4, UpdateChecker.MIRROR_PREFIXES.size)
+    assertEquals("https://github.com/", UpdateChecker.MIRROR_PREFIXES[0])
+    assertEquals("https://gh-proxy.com/https://github.com/", UpdateChecker.MIRROR_PREFIXES[1])
+    assertEquals("https://ghfast.top/https://github.com/", UpdateChecker.MIRROR_PREFIXES[2])
+    assertEquals("https://ghproxy.net/https://github.com/", UpdateChecker.MIRROR_PREFIXES[3])
   }
 }
