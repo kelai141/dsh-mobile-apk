@@ -245,7 +245,11 @@ object EngineProbe {
       if (row.opt("enabled") !is Boolean) return false
       val enabled = row.optBoolean("enabled", false)
       val phase = row.optString("fiberPhase", "")
-      if (hard.entries.any { it.id == id && it.name == name }) seenHard.add(PluginMounts.HardEntry(id, name))
+      // Loader inventory prefixes root rows with `include:` while the embedded manifest stores
+      // the bare row id. Match by module name and either spelling; a renamed module still fails.
+      hard.entries.firstOrNull {
+        it.name == name && (it.id == id || (it.id != null && id == "include:" + it.id))
+      }?.let { seenHard.add(it) }
       if (enabled && phase != "active") return false
     }
     if (!seenHard.containsAll(hard.entries)) return false

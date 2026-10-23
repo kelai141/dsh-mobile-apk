@@ -6,6 +6,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.After
+import org.junit.Before
 import org.junit.Test
 
 /**
@@ -20,6 +22,17 @@ import org.junit.Test
  * 判据全部抽成 [EngineProbe] 内的纯函数，故本测试不依赖设备/网络。
  */
 class EngineProbeTest {
+  @Before
+  fun publishProtectedPort() {
+    EngineEndpoint.beginBinding()
+    EngineEndpoint.markGeneration(1)
+    EngineEndpoint.publishReportedPort(4145, 1)
+  }
+
+  @After
+  fun resetEndpoint() {
+    EngineEndpoint.invalidate()
+  }
 
   @Test
   fun `Soft完整健康要求Hard fibers preset fibers session和modelCatalog`() {
@@ -42,6 +55,9 @@ class EngineProbeTest {
       .put("routableProviders", JSONArray().put("local")).put("groups", JSONArray()).put("failures", JSONArray())))
 
     assertTrue(EngineProbe.completeSoftHealthEvidence(inventory, sessions, catalog, hard))
+    val prefixedInventory = JSONObject(inventory.toString().replace("\"entryId\":\"factory\"", "\"entryId\":\"include:factory\""))
+    assertTrue("Loader `include:` ids must match the bare manifest row id",
+      EngineProbe.completeSoftHealthEvidence(prefixedInventory, sessions, catalog, hard))
     assertFalse("preset pending fiber must keep digest Candidate", EngineProbe.completeSoftHealthEvidence(
       JSONObject(inventory.toString().replace("active", "pending")), sessions, catalog, hard,
     ))
