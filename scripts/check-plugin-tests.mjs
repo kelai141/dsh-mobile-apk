@@ -63,7 +63,7 @@ for (const plugin of plugins.sort()) {
   // 同时看所有测试文件：一个插件可能混用（任一文件用 node:test 即按 node:test 跑）。
   const usesNodeTest = files.some((f) => /from 'node:test'/.test(readFileSync(f, 'utf8')))
   const args = usesNodeTest
-    ? ['--test', '--test-reporter=spec', ...files.map((f) => f.slice(join(PLUGIN_DIR, plugin).length + 1))]
+    ? ['--test', '--test-force-exit', '--test-reporter=spec', ...files.map((f) => f.slice(join(PLUGIN_DIR, plugin).length + 1))]
     : ['vitest', 'run', ...files.map((f) => f.slice(join(PLUGIN_DIR, plugin).length + 1))]
   // 不用 shell:true——execPath 在 Windows 上含空格（'C:\Program Files\...'），shell 会把它拆断
   // （首次跑本门禁实测到该误报）。直接以 argv 形式 spawn，由内核处理路径。
@@ -173,7 +173,7 @@ for (const repo of SUBREPO_TESTS) {
     ? spawnSync('wsl.exe', ['--cd', wslDir, '--exec', 'env', 'npm_config_cache=/tmp/dsh-mobile-npm-cache', 'npm', 'test'], { cwd: dir, encoding: 'utf8', timeout: TEST_TIMEOUT_MS })
     : useNpm
       ? spawnSync(npmBin, ['test'], { cwd: dir, encoding: 'utf8', timeout: TEST_TIMEOUT_MS })
-      : spawnSync(process.execPath, ['--test', '--test-reporter=spec', ...bare], { cwd: dir, encoding: 'utf8', timeout: TEST_TIMEOUT_MS })
+      : spawnSync(process.execPath, ['--test', '--test-force-exit', '--test-reporter=spec', ...bare], { cwd: dir, encoding: 'utf8', timeout: TEST_TIMEOUT_MS })
   if (useNpm && (r3.error !== undefined || r3.status === null)) {
     console.log('NOTE  ' + repo + '：npm 直调失败（' + String(r3.error?.code ?? 'no-status') + '），退到 shell 重试')
     // shell:true 在 Node 24 会打一条 DEP0190 弃用提示（noise，与被测对象无关），子进程关掉它。
