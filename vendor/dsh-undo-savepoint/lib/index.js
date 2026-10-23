@@ -992,6 +992,22 @@ export function apply(ctx, config = {}) {
       const testMode = process.env.DSH_CONTROL_TOKEN_TEST;
       return testMode === '1' || testMode === 'true' ? valid(process.env.DSH_CONTROL_TOKEN) ?? fromPrefs : fromPrefs;
     };
+    // The engine may bind an OS-assigned fallback port. Read it per request so the
+    // route cannot keep trusting the default after the shell publishes the real port.
+    const dshMobileUndoEnginePort = () => {
+      const raw = process.env.DSH_ENGINE_PORT;
+      if (raw === undefined) return 4145;
+      if (!/^[0-9]+$/.test(raw)) return null;
+      const port = Number(raw);
+      return Number.isSafeInteger(port) && port >= 1024 && port <= 65535 ? port : null;
+    };
+    const dshMobileUndoAuthority = (value, origin = false) => {
+      const port = dshMobileUndoEnginePort();
+      if (port === null || typeof value !== 'string') return false;
+      const normalized = value.trim().toLowerCase();
+      const prefix = origin ? 'http://' : '';
+      return normalized === prefix + '127.0.0.1:' + port || normalized === prefix + 'localhost:' + port;
+    };
     const dshMobileUndoAuthorize = (req) => {
       let connection;
       try { connection = ctx.get?.('connection'); } catch { connection = undefined; }
@@ -1005,10 +1021,10 @@ export function apply(ctx, config = {}) {
         } catch { return { status: 401 }; }
       }
       const host = dshMobileUndoHeader(req, 'host')?.trim().toLowerCase();
-      if (host !== '127.0.0.1:3080' && host !== 'localhost:3080') return { status: 403 };
+      if (!dshMobileUndoAuthority(host)) return { status: 403 };
       if (dshMobileUndoHeader(req, 'sec-fetch-site')?.toLowerCase() === 'cross-site') return { status: 403 };
       const origin = dshMobileUndoHeader(req, 'origin');
-      if (origin && origin.toLowerCase() !== 'http://127.0.0.1:3080' && origin.toLowerCase() !== 'http://localhost:3080') return { status: 403 };
+      if (origin && !dshMobileUndoAuthority(origin, true)) return { status: 403 };
       const controlToken = dshMobileUndoControlToken();
       return controlToken !== undefined && controlToken === dshMobileUndoHeader(req, 'x-dsh-control-token') ? undefined : { status: 401 };
     };
