@@ -113,13 +113,13 @@
 | # | 协作者 | 主要贡献 |
 |---|---|---|
 | 1 | [@snoworwind](https://github.com/snoworwind) | 可来源审计的 ARM64 构建链、来源链可复现性修复、快照面板层级与遮罩修复 |
-| 2 | [@cmyfqwq](https://github.com/cmyfqwq) | AI root 权限授权面、root 租约清算与判据写实、入口拆锁性能优化 |
+| 2 | [@cmyfqwq](https://github.com/cmyfqwq) | AI root 权限授权开关与应用级 root 授权面、root 租约清算判据改写为真绑定实证、入口拆锁落地 |
 | 3 | [@wen0531](https://github.com/wen0531) | 快照内 git SHELL_PATH 重定位、arm64 资产名口径、文件写入回退、预设播种修复 |
 | 4 | [@lemonhub-io](https://github.com/lemonhub-io) | 应用命名与图标、版本号收编为单一来源、启动页与控制台 UI 重构、前端产物语言统计治理 |
 | 5 | [@SinBC227](https://github.com/SinBC227) | 图片输入与视觉读图、剪贴板桥、LaTeX 流式渲染、字体大小与沉浸式状态栏 |
-| 6 | [@Ni-ShuWu](https://github.com/Ni-ShuWu) | README 徽章、入口清算拆锁方案 |
+| 6 | [@Ni-ShuWu](https://github.com/Ni-ShuWu) | 入口清算拆锁方案与反证用例（已采纳落地）、README 徽章 |
 | 7 | [@MCMR-JIM](https://github.com/MCMR-JIM) | 侧栏排序与拖放竞争修复、验收风险分档文档 |
-| 8 | [@adeahejshshsh](https://github.com/adeahejshshsh) | 语言跟随系统的启动期解析、通用设置行规对齐 |
+| 8 | [@adeahejshshsh](https://github.com/adeahejshshsh) | 语言跟随系统的启动期解析、通用设置行规对齐、源码审查 issue |
 
 另外感谢最早一批通过 issue 与 PR 帮我们定位问题的成员：cdwlll、haitunlang、TACONailoong、X-SCI-TECH、Yangerwei、gr12-cmd，以及所有提交反馈与建议的用户。
 
