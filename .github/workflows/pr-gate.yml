@@ -168,6 +168,8 @@ jobs:
           node scripts/check-bridge-symmetry.mjs
           node scripts/check-gate-skips.mjs
           node scripts/check-kotlin-comments.mjs
+          # 中英文案一致性（0.15.0）：资源键集合成对 + tr() 双参数；漏英文时 Android 静默回退中文。
+          node scripts/check-i18n-parity.mjs
           # 执行地图覆盖与锚点（0.14.2 D7）：纳入聚合声明集后，apk 侧 CI 也必须有独立调用点。
           node scripts/check-code-map.mjs
           node scripts/check-build-chain-abort.mjs

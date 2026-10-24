@@ -97,6 +97,7 @@ const GATE_SCRIPTS = [
   'check-combo-cache.mjs',
   'check-strip-noop.mjs',
   'check-kotlin-comments.mjs',
+  'check-i18n-parity.mjs',
   'check-build-chain-abort.mjs',
   'check-snapshot-file-modes.mjs',
   'check-third-party.mjs',
@@ -199,6 +200,8 @@ try {
   run('node', [gate('check-engine-heap-floor.mjs')])
   log('门禁：Kotlin 注释嵌套…')
   run('node', [gate('check-kotlin-comments.mjs')])
+  log('门禁：中英文案一致性…')
+  run('node', [gate('check-i18n-parity.mjs')])
   log('门禁：构建链中止语义（任一 ABI 被拒 = 非 0）…')
   run('node', [gate('check-build-chain-abort.mjs')])
   log('门禁：子进程有界读…')

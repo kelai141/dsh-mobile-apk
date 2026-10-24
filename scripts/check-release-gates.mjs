@@ -103,6 +103,7 @@ const GATES = [
   { script: 'check-inject-completeness.mjs', ciApk: false, ciCoord: false, needsSnapshot: true },
   // Kotlin 块注释嵌套静态检查（KDoc 里写 node_modules/** 会吞掉整个文件；dev-shell 实测）。
   { script: 'check-kotlin-comments.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
+  { script: 'check-i18n-parity.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
   // 构建链中止语义（任一 ABI 被拒 = 整链非 0；0.13.8-b 实锤：arm64 被拒后仍 exit 0 交付单 ABI 产物）。
   { script: 'check-build-chain-abort.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
   // 剥离清单后置断言（ST-16）：清单项在产物里必须不存在 + 反 no-op（基座命中的必须消失）。

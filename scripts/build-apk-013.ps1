@@ -126,6 +126,12 @@ Write-Host "== Kotlin 注释嵌套门禁 =="
 node (Join-Path $Root "scripts\check-kotlin-comments.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "Kotlin 块注释嵌套，拒绝打包"; exit 1 }
 
+# 中英文案一致性（0.15.0）：资源键集合成对 + tr() 必须带两个非空参数。
+# 漏一条英文时 Android 会静默回退中文，构建/单测/CI 全绿——只有这道门禁能拦。
+Write-Host "== 中英文案一致性门禁 =="
+node (Join-Path $Root "scripts\check-i18n-parity.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "中英文案不一致，拒绝打包"; exit 1 }
+
 # 引擎 V8 堆下限双源一致性（0.14.8）：壳侧 shellEnv() 与快照内启动器必须给出同一 clamp 区间
 # （单边漂移 ⇒「引擎起来了、code run 仍 OOM」这类最难查的形态）
 Write-Host "== 引擎堆下限一致性门禁 =="
