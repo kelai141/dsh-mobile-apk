@@ -35,9 +35,9 @@
     {
       "id": "market-D-server",
       "target": "dshmarketplace-plugin/lib/index.js",
-      "summary": "搜索响应 compat/compatNote 富化（Wc()）+ mobile: 前缀过滤 desktop 条目 + COMPAT_MAP 幂等刷新",
-      "provenance": "0.13.2 W1（patch D server 侧）；兼容性数据出码 scripts/patches/data/compat-map.json",
-      "marker": "function Wc("
+      "summary": "搜索响应 compat/compatNote 富化（Wc()）+ 独立 mobile=1 参数只放行 compat===\"ok\" + COMPAT_MAP 幂等刷新",
+      "provenance": "0.13.2 W1（patch D server 侧）；apk issue #507 改为独立参数与 ok-only 判据（旧判据 compat!==\"desktop\" 会把 unknown/native 全放行）；兼容性数据出码 scripts/patches/data/compat-map.json",
+      "marker": "function Wc( 且 /* dsh-mobile market mobile filter (507) */"
     },
     {
       "id": "market-route-auth-U2",
@@ -49,9 +49,9 @@
     {
       "id": "market-D-client",
       "target": "dshmarketplace-plugin/lib/client.js",
-      "summary": "卡片兼容徽章（dshm-compat 四色）+ 搜索框「仅移动端可用」复选框",
-      "provenance": "0.13.2 W1（patch D client 侧）",
-      "marker": "dshm-compat"
+      "summary": "卡片兼容徽章（dshm-compat 四色）+ 与搜索词解耦的「仅移动端可用」复选框（独立 mobile=1 参数）+ 勾选后空态说明「其余未验证」",
+      "provenance": "0.13.2 W1（patch D client 侧）；apk issue #507 解耦过滤状态与搜索词（旧实现把 mobile: 前缀写进搜索框，吞掉用户输入）",
+      "marker": "dshm-compat 且 mobile=1 且 mobileEmpty"
     },
     {
       "id": "undo-E1",

@@ -1,5 +1,5 @@
 {
-  "$comment": "补丁 D 的兼容性数据（原硬编码于 patch-marketplace.mjs，Phase 2a 出码为数据文件）。compatMap 按 fullName 末段匹配；compatNote 为 compat 值 → 用户可见说明。增补别名只改本文件——apply-patches --apply 会对已修补文件做 map 幂等刷新。",
+  "$comment": "补丁 D 的兼容性数据（原硬编码于 patch-marketplace.mjs，Phase 2a 出码为数据文件）。compatMap 按 fullName 末段匹配；compatNote 为 compat 值 → 用户可见说明。增补别名只改本文件——apply-patches --apply 会对已修补文件做 map 幂等刷新。**apk issue #507 起，'仅移动端可用' 只放行 compat==='ok'**：本表是白名单，未登记的包一律 unknown，因此『勾选后列表变短』是预期行为而不是缺陷；想让某个插件出现在勾选结果里，就在这里加一行 ok。",
   "compatMap": {
     "modlens": "ok",
     "dsh-better-sidebar": "ok",

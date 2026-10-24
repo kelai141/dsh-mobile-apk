@@ -36,6 +36,30 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const registry = JSON.parse(readFileSync(join(HERE, 'registry.json'), 'utf8'))
 const compat = JSON.parse(readFileSync(join(HERE, 'data', 'compat-map.json'), 'utf8'))
 
+// issue #507 的语义版本标记：勾选「仅移动端可用」时只放行 compat==="ok"，且过滤状态走独立的
+// mobile=1 查询参数（不再编码进搜索词）。marker 进**产物字节**，作为 check() 的判据——只认旧 marker
+// 的 check() 会把旧行为误判为「已应用」。ASCII 常量，避免源码里出现全角/中文导致编码歧义。
+const D_MOBILE_MARKER = '/* dsh-mobile market mobile filter (507) */'
+
+// 勾选「仅移动端可用」后列表为空的文案。不说「没搜到」——那会让人以为是自己搜错了；
+// 真实原因是白名单只登记了明确验证过的包，其余条目 compat 仍是 unknown。
+const EN_MOBILE_EMPTY = 'No mobile-verified plugin matched. Everything else has not been verified on Android yet \u2014 untick to browse it.'
+const ZH_MOBILE_EMPTY = '没有移动端已验证的插件匹配。其余插件的安卓兼容性还没验证过——取消勾选可以看到全部。'
+/** 生成一个 ASCII 安全的 JS 字符串字面量（非 ASCII 一律 \uXXXX，含代理对）。
+ *  上游 0.1.7 的两个 bundle 本身就是纯 ASCII（全量扫描 0 个非 ASCII 字符），
+ *  我们的补丁也要守住这条：直出中文会让产物在打包链的转码环节出现字节漂移。 */
+const jsAsciiString = (value) => '"' + [...value].map((ch) => {
+  const cp = ch.codePointAt(0)
+  if (ch === '"') return '\\"'
+  if (ch === '\\') return '\\\\'
+  if (cp >= 0x20 && cp <= 0x7e) return ch
+  if (cp <= 0xffff) return '\\u' + cp.toString(16).toUpperCase().padStart(4, '0')
+  // 代理对：拆成两个 \uXXXX，JS 源码里是合法且等价的写法
+  const hi = Math.floor((cp - 0x10000) / 0x400) + 0xd800
+  const lo = ((cp - 0x10000) % 0x400) + 0xdc00
+  return '\\u' + hi.toString(16).toUpperCase().padStart(4, '0') + '\\u' + lo.toString(16).toUpperCase().padStart(4, '0')
+}).join('') + '"'
+
 // ── dshmarketplace-plugin：A（pre-execute 守卫）已于 0.1.7 退役 ──────────────
 // 上游 0.1.7 自己修好了这个 waterfall 崩溃：listener 工厂 `function b(t=c){return async(r,n)=>{
 // let e=()=>typeof n=="function"?n():{kind:"allow"},...return s??e()}}` —— 每条路径都返回一个
@@ -263,34 +287,57 @@ const IMPLS = {
   //   installable===false = 0、install 为空 = 0；未通过的 400 条里 installable===false = 85。
   // 退役记录见 registry.json 的 retired 段与 vendor PATCHES.md。
 
-  // ── marketplace D-server：搜索响应 compat 富化 + mobile: 过滤（含 COMPAT_MAP 幂等刷新）──
+  // ── marketplace D-server：搜索响应 compat 富化 + 移动端过滤（含 COMPAT_MAP 幂等刷新）──
+  // apk issue #507：「仅移动端可用」名实不符。旧实现把过滤状态编码进搜索词（q 以 "mobile: " 开头），
+  // 且过滤判据是 compat !== "desktop" —— 而 compat 的默认值是白名单未命中的 "unknown"
+  // （compat-map.json 仅 23 条，目录 4000+ 条）⇒ 勾选实际只剔除 7 个已知桌面独占插件，
+  // 标着「原生?」「未验证」的条目照样显示。两条一起改：
+  //   ① 过滤状态改用**独立查询参数 mobile=1**，不再与 q 共用一份状态（手动输入 mobile: 也不再被吞）；
+  //   ② 勾选时只放行 compat === "ok"（白名单里明确验证过移动端可用的），不再默认放行 unknown。
+  // 语义变了，marker 随之升级：check() 必须同时认「新参数 + 新判据」，否则已修补的旧形态
+  // （热推树/上次构建的 vendor）会被误判为「已应用」而保留旧行为——issue #507 正是这样活到发布版的。
   'market-D-server': {
     file: 'dshmarketplace-plugin/lib/index.js',
-    check: (s) => s.includes('function Wc('),
+    // marker 必须能区分「新形态」与「#507 第一版（原地改 results，会把缓存删短）」——
+    // 只认 D_MOBILE_MARKER 时两者都通过，实测把原地改的版本判成「已应用」而跳过修复。
+    check: (s) => s.includes('function Wc(') && s.includes('_c={..._c,results:') && s.includes(D_MOBILE_MARKER),
     apply: (s) => {
       const MAP = JSON.stringify(compat.compatMap)
       const NOTE = JSON.stringify(compat.compatNote)
-      if (s.includes('function Wc(')) {
-        // 幂等 + map 强制同步（别名增补等数据更新直接反映到已修补文件）
-        const mapRe = /let _=\{.*?\},e=String\(t\.fullName/
-        if (!mapRe.test(s)) throw new Error('D map 锚点未命中——请人工核对')
-        return s.replace(mapRe, `let _=${MAP},e=String(t.fullName`)
-      }
       const D_SRV = `function Wc(t){let _=${MAP},e=String(t.fullName??"").split("#").pop().split("/").pop().toLowerCase(),f=_?.[e]??"unknown",n=${NOTE}[f];return{...t,compat:f,compatNote:n}}`
-      // 0.1.7 重新 minify：apply 函数名与搜索端点标识符都变了（qt 绑定仍在，handler 内是 c/（l,200,p(a))）。
-      // 插入锚点用 apply 函数声明，缺失时回落到 export-name 绑定；两者都失配则明确报错（check 会拒打包）。
-      const INSERT_BEFORE = s.includes('function Dt(t){') ? 'function Dt(t){' : (s.includes('var qt=') ? 'var qt=' : null)
-      if (INSERT_BEFORE === null) throw new Error('D 插入锚点未命中——apply 函数与 export 绑定都不在场，请人工核对')
-      // 0.1.7 的服务端搜索 handler：上游新增 installCheck:"passed"，我们只在这段前后加 mobile: 过滤与富化。
-      const OLD = 'let a=await c({q:s.searchParams.get("q")??void 0,category:s.searchParams.get("category")??void 0,limit:s.searchParams.get("limit")??60,installCheck:"passed"});l(e,200,p(a))'
-      const NEW = 'let _q=s.searchParams.get("q")??void 0,_m=String(_q??"").startsWith("mobile:");if(_m)_q=String(_q).slice(7).trim()||void 0;let a=await c({q:_q,category:s.searchParams.get("category")??void 0,limit:s.searchParams.get("limit")??60,installCheck:"passed"});a.results=(a.results??[]).map(x=>Wc(x));if(_m)a.results=a.results.filter(x=>x.compat!=="desktop");l(e,200,p(a))'
-      s = s.replace(INSERT_BEFORE, D_SRV + INSERT_BEFORE)
-      if (!s.includes(OLD)) {
-        const i = s.indexOf('searchParams.get("q")')
-        throw new Error('D 搜索端点锚点未命中——上游 handler 可能已变：' + (i >= 0 ? s.slice(i, i + 120) : '（找不到 q 参数段）'))
+      if (!s.includes('function Wc(')) {
+        // 0.1.7 重新 minify：apply 函数名与搜索端点标识符都变了（qt 绑定仍在，handler 内是 c/（l,200,p(a))）。
+        // 插入锚点用 apply 函数声明，缺失时回落到 export-name 绑定；两者都失配则明确报错（check 会拒打包）。
+        const INSERT_BEFORE = s.includes('function Dt(t){') ? 'function Dt(t){' : (s.includes('var qt=') ? 'var qt=' : null)
+        if (INSERT_BEFORE === null) throw new Error('D 插入锚点未命中——apply 函数与 export 绑定都不在场，请人工核对')
+        s = s.replace(INSERT_BEFORE, D_SRV + INSERT_BEFORE)
       }
-      s = s.replace(OLD, NEW)
-      if (!s.includes('function Wc(') || !s.includes('compat!=="desktop"')) throw new Error('D-server 复核失败——不写回')
+      // 幂等 + map 强制同步（别名增补等数据更新直接反映到已修补文件）
+      const mapRe = /let _=\{.*?\},e=String\(t\.fullName/
+      if (!mapRe.test(s)) throw new Error('D map 锚点未命中——请人工核对')
+      s = s.replace(mapRe, `let _=${MAP},e=String(t.fullName`)
+      // 搜索 handler：上游原形、旧 D 形态（mobile: 前缀）、新形态三者都收敛到同一段实现。
+      // 0.1.7 的服务端 handler 上游新增了 installCheck:"passed"，锚点按该字节写。
+      const HANDLER_TAIL = ',category:s.searchParams.get("category")??void 0,limit:s.searchParams.get("limit")??60,installCheck:"passed"});'
+      const OLD_UPSTREAM = `let a=await c({q:s.searchParams.get("q")??void 0${HANDLER_TAIL}l(e,200,p(a))`
+      const OLD_PATCHED = `let _q=s.searchParams.get("q")??void 0,_m=String(_q??"").startsWith("mobile:");if(_m)_q=String(_q).slice(7).trim()||void 0;let a=await c({q:_q${HANDLER_TAIL}a.results=(a.results??[]).map(x=>Wc(x));if(_m)a.results=a.results.filter(x=>x.compat!=="desktop");l(e,200,p(a))`
+      // 中间代（#507 第一版）：判据已改 ok-only，但仍**原地写 a.results**。
+      const OLD_MUTATING = `let _m=s.searchParams.get("mobile")==="1",a=await c({q:s.searchParams.get("q")??void 0${HANDLER_TAIL}a.results=(a.results??[]).map(x=>Wc(x));if(_m)a.results=a.results.filter(x=>x.compat==="ok");${D_MOBILE_MARKER}l(e,200,p(a))`
+      // **不得原地改 results**：c() 有进程内缓存（同 URL 返回同一个对象，见 production 的 k.set(n,{data:o})），
+      // 原地 filter 会把缓存里的未过滤列表一并删短。实测：勾选后 9 条，再取消勾选仍然是 9 条
+      // （原始 60 条回不来）——用户会以为「取消勾选没反应」。故一律展开成新对象再过滤。
+      const NEW = `let _m=s.searchParams.get("mobile")==="1",_c=await c({q:s.searchParams.get("q")??void 0${HANDLER_TAIL}_c={..._c,results:(_c.results??[]).map(x=>Wc(x))};if(_m)_c.results=_c.results.filter(x=>x.compat==="ok");${D_MOBILE_MARKER}l(e,200,p(_c))`
+      if (s.includes(NEW)) return s
+      if (s.includes(OLD_MUTATING)) s = s.replace(OLD_MUTATING, NEW)
+      else if (s.includes(OLD_PATCHED)) s = s.replace(OLD_PATCHED, NEW)
+      else if (s.includes(OLD_UPSTREAM)) s = s.replace(OLD_UPSTREAM, NEW)
+      else {
+        const i = s.indexOf('searchParams.get("q")')
+        throw new Error('D 搜索端点锚点未命中——上游 handler 可能已变：' + (i >= 0 ? s.slice(i, i + 160) : '（找不到 q 参数段）'))
+      }
+      if (!s.includes('function Wc(') || !s.includes('compat==="ok"') || !s.includes(D_MOBILE_MARKER)) {
+        throw new Error('D-server 复核失败——不写回')
+      }
       return s
     },
   },
@@ -338,29 +385,100 @@ const IMPLS = {
     },
   },
 
+  // apk issue #507 的客户端侧：过滤状态必须与搜索词解耦。
+  // 旧实现把「仅移动端可用」编码进搜索词（勾选后搜索框里真的出现 "mobile: " 前缀，用户可见），
+  // 于是 ① 用户输入以 mobile: 开头的关键字会被服务端当过滤标记吞掉；② 清空搜索框再勾选得到
+  // 只有前缀没有关键字的怪状态。现在过滤状态是独立的 React state（_mo/_setMo），
+  // 只以 mobile=1 查询参数下发；搜索框永远只显示用户真正的关键字。
+  // 空列表也要说清原因：勾选后若「ok」条目为零，提示「其余插件尚未验证移动端兼容性」，
+  // 而不是复用 upsteam 的「换个能力试试」——那句话会让用户以为是自己搜错了。
   'market-D-client': {
     file: 'dshmarketplace-plugin/lib/client.js',
-    check: (s) => s.includes('dshm-compat'),
+    check: (s) => s.includes('dshm-compat') && s.includes('mobile=1') && s.includes('mobileEmpty'),
     apply: (s) => {
       const HELPERS = `function Uq(e){return e==="ok"?"#2f9e68":e==="desktop"?"#b96a2a":e==="native"?"#8a5fc0":"#8a8f98"}function Uw(e){return e==="ok"?"移动可用":e==="desktop"?"仅桌面":e==="native"?"原生?":"未验证"}`
       const HELPERS_ANCHOR = 'var B=Object.create;var h=Object.defineProperty;'
       const BADGE_OLD = 'i?s.default.createElement("span",{className:"dshm-risk"},e.riskFlags.join(" \\xB7 ")):null,s.default.createElement("a",{href:e.url,target:"_blank",rel:"noopener"},r("details"))'
       const BADGE_NEW = 'i?s.default.createElement("span",{className:"dshm-risk"},e.riskFlags.join(" \\xB7 ")):null,s.default.createElement("span",{className:"dshm-compat",style:{margin:"0 0 0 6px",fontSize:11,padding:"0 6px",borderRadius:4,color:"#fff",background:Uq(e.compat)}},Uw(e.compat)),s.default.createElement("a",{href:e.url,target:"_blank",rel:"noopener"},r("details"))'
+      // 请求面：把过滤状态作为**独立参数**下发，q 只装关键字。
+      const FETCH_OLD = 'fetch(`${J}?limit=60${e?`&q=${encodeURIComponent(e)}`:""}`)'
+      const FETCH_NEW = 'fetch(`${J}?limit=60${e?`&q=${encodeURIComponent(e)}`:""}${o?"&mobile=1":""}`)'
+      const DEPS_OLD = '}),()=>{a=!0}},[e]),t}'
+      const DEPS_NEW = '}),()=>{a=!0}},[e,o]),t}'
+      const K_OLD = '{status:l,results:c}=K(i)'
+      const K_NEW = '{status:l,results:c}=K(i,mo)'
+      // K 是取数 hook，过滤开关是它的第二个入参（要进 useEffect 依赖数组，否则勾选后不重取）。
+      const KSIG_OLD = 'function K(e){let[t,r]=s.default.useState({status:"idle",results:[]});'
+      const KSIG_NEW = 'function K(e,o){let[t,r]=s.default.useState({status:"idle",results:[]});'
+      // 状态：搜索词 n 与过滤开关 mo 从此各占一份 state。
+      const STATE_OLD = 'let a=U(t),[n,m]=s.default.useState(r),i=V(n)'
+      const STATE_NEW = 'let a=U(t),[n,m]=s.default.useState(r),[mo,_setMo]=s.default.useState(!1),i=V(n)'
+      // 过滤控件：勾选状态来自 mo，不再从搜索词前缀反解（搜索框也不再被写入前缀）。
       const FILTER_OLD = 'onChange:o=>m(o.target.value)}),l==="loading"'
-      const FILTER_NEW = 'onChange:o=>m(o.target.value)}),s.default.createElement("label",{style:{marginLeft:10,display:"inline-flex",alignItems:"center",gap:4,fontSize:13}},s.default.createElement("input",{type:"checkbox",checked:/^mobile:/.test(n),onChange:o=>{let v=(n||"").replace(/^mobile:\\s*/,"");m(o.target.checked?"mobile: "+v:v)}}),"仅移动端可用"),l==="loading"'
-      if (!s.includes(HELPERS_ANCHOR)) throw new Error('D 助手锚点未命中——请人工核对')
-      s = s.replace(HELPERS_ANCHOR, HELPERS + HELPERS_ANCHOR)
-      if (!s.includes(BADGE_OLD)) {
-        const i = s.indexOf('dshm-risk"')
-        throw new Error('D 徽章锚点未命中——dshm-risk 段已变：' + (i >= 0 ? s.slice(i, i + 120) : '（找不到段）'))
+      const FILTER_NEW = 'onChange:o=>m(o.target.value)}),s.default.createElement("label",{style:{marginLeft:10,display:"inline-flex",alignItems:"center",gap:4,fontSize:13}},s.default.createElement("input",{type:"checkbox",checked:mo,onChange:o=>_setMo(o.target.checked)}),"仅移动端可用"),l==="loading"'
+      // 空态文案：勾选过滤且结果为空时说明是「未验证」而不是「没搜到」。
+      const EMPTY_OLD = 'l==="ready"&&z.length===0?s.default.createElement("p",{className:"dshm-state"},e("empty")):null'
+      const EMPTY_NEW = 'l==="ready"&&z.length===0?s.default.createElement("p",{className:"dshm-state"},e(mo?"mobileEmpty":"empty")):null'
+      // 文案：中英文各补一条（中文用 \\u 转义保持产物 ASCII 安全，用现成解码器写回明文）。
+      const EN_OLD = 'empty:"Nothing matched.'
+      const ZH_OLD = 'empty:"\\u6CA1\\u6709'
+
+      // 旧 D 形态（把过滤编码进搜索词）先退回上游形态——已热推过的树、上次构建留下的树
+      // 都要能收敛到新形态，否则 check() 判「未应用」而 apply() 锚点又只认上游字节，会卡死。
+      // 注意：LEGACY 段 = 上游尾巴 + label 段；还原时只能留下上游尾巴，多写一份 FILTER_OLD
+      // 会把 onChange 重复成两遍（实测踩到：产物 15438 vs 15406 字节）。
+      const FILTER_TAIL = 'onChange:o=>m(o.target.value)}),l==="loading"'
+      const LEGACY_FILTER = 'onChange:o=>m(o.target.value)}),s.default.createElement("label",{style:{marginLeft:10,display:"inline-flex",alignItems:"center",gap:4,fontSize:13}},s.default.createElement("input",{type:"checkbox",checked:/^mobile:/.test(n),onChange:o=>{let v=(n||"").replace(/^mobile:\\s*/,"");m(o.target.checked?"mobile: "+v:v)}}),"仅移动端可用"),l==="loading"'
+      if (s.includes(LEGACY_FILTER)) s = s.replace(LEGACY_FILTER, FILTER_TAIL)
+
+      if (!s.includes('function Uq(')) {
+        if (!s.includes(HELPERS_ANCHOR)) throw new Error('D 助手锚点未命中——请人工核对')
+        s = s.replace(HELPERS_ANCHOR, HELPERS + HELPERS_ANCHOR)
       }
-      s = s.replace(BADGE_OLD, BADGE_NEW)
-      if (!s.includes(FILTER_OLD)) {
-        const j = s.indexOf('dshm-search"')
-        throw new Error('D 过滤锚点未命中——搜索框段已变：' + (j >= 0 ? s.slice(j, j + 100) : '（找不到段）'))
+      // 每个替换都按「新形态已在 = 跳过；否则旧形态必须在场」收敛，逐条可重入。
+      const STEPS = [
+        ['徽章', BADGE_OLD, BADGE_NEW],
+        ['搜索框', FILTER_OLD, FILTER_NEW],
+        ['请求', FETCH_OLD, FETCH_NEW],
+        ['依赖数组', DEPS_OLD, DEPS_NEW],
+        ['取数 hook 签名', KSIG_OLD, KSIG_NEW],
+        ['Hook 调用', K_OLD, K_NEW],
+        ['状态声明', STATE_OLD, STATE_NEW],
+        ['空态', EMPTY_OLD, EMPTY_NEW],
+      ]
+      for (const [label, oldText, newText] of STEPS) {
+        if (s.includes(newText)) continue
+        if (!s.includes(oldText)) {
+          const j = s.indexOf('dshm-search"')
+          throw new Error('D 客户端锚点未命中（' + label + '）——上游客户端字节可能已变：' + (j >= 0 ? s.slice(j, j + 120) : '（找不到 dshm-search 段）'))
+        }
+        s = s.replace(oldText, newText)
       }
-      s = s.replace(FILTER_OLD, FILTER_NEW)
-      if (!s.includes('dshm-compat') || !s.includes('仅移动端可用')) throw new Error('D-client 复核失败——不写回')
+      // 文案注入：EN 与 ZH 各一条，紧跟 upstream 的 empty 键（保持同一对象内、逗号分隔）。
+      if (!s.includes('mobileEmpty:')) {
+        const enIdx = s.indexOf(EN_OLD)
+        const enEnd = s.indexOf(',loading:', enIdx)
+        if (enIdx < 0 || enEnd < 0) throw new Error('D 英文字案锚点未命中——请人工核对 empty 键')
+        s = s.slice(0, enEnd) + ',mobileEmpty:' + jsAsciiString(EN_MOBILE_EMPTY) + s.slice(enEnd)
+        const zhIdx = s.indexOf(ZH_OLD)
+        const zhEnd = s.indexOf(',loading:', zhIdx)
+        if (zhIdx < 0 || zhEnd < 0) throw new Error('D 中文字案锚点未命中——请人工核对 empty 键')
+        s = s.slice(0, zhEnd) + ',mobileEmpty:' + jsAsciiString(ZH_MOBILE_EMPTY) + s.slice(zhEnd)
+      }
+      if (!s.includes('dshm-compat') || !s.includes('仅移动端可用') || !s.includes('mobile=1') || !s.includes('mobileEmpty')) {
+        throw new Error('D-client 复核失败——不写回')
+      }
+      // 新增文案必须与 upstream 相邻字案的形态一致：源码里是 \uXXXX 转义，不是裸中文。
+      // 上游 0.1.7 的 client bundle 本身就是纯 ASCII（全量扫描 0 个非 ASCII 字节），
+      // 旧 D 补丁的「仅移动端可用」等中文是既有例外；新文案不再扩大这个面。
+      // 校验方式：把注入的字面量解回来，必须等于原文；且源码侧不得出现裸中文。
+      for (const [label, text] of [['EN', EN_MOBILE_EMPTY], ['ZH', ZH_MOBILE_EMPTY]]) {
+        const lit = jsAsciiString(text)
+        if (!s.includes(',mobileEmpty:' + lit)) throw new Error('D-client 复核失败——' + label + ' mobileEmpty 字面量未按转义形态写入')
+        if ([...lit].some((ch) => ch.codePointAt(0) > 0x7e)) throw new Error('D-client 复核失败——' + label + ' 字面量含裸非 ASCII 字符')
+        // 转义必须能被 JS 正确解码：逐字符核对，防双重转义（\\uXXXX 会被显示成字面量）。
+        if (JSON.parse(lit) !== text) throw new Error('D-client 复核失败——' + label + ' 转义解码不一致（疑似双重转义）')
+      }
       return s
     },
   },

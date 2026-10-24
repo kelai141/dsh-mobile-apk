@@ -13,15 +13,12 @@
 
 ## 补丁清单（详见 registry.json）
 
-- **managed-port-bind-EP1（2026-10-23）**：仅对本壳标记的 IPv4 回环引擎，在真实 `EADDRINUSE` 时回退一次到 `listen(0)`，由操作系统原子分配端口。监听成功后发布实际 `DSH_ENGINE_PORT`，普通调用与其它错误沿用上游语义。无端口扫描，无稳态探测开销。回归见 `tests/managed-port-bind-EP1.test.mjs`。
-
-- **profile-link-skip-PL1（2026-10-23）**：`dsh-app-boot` 扫描 profile 第三方软链时，遇 `EACCES`、`EPERM`、`ENOENT`、`ENOTDIR` 跳过并按名称告警。合法目录链接继续解析，`EIO` 等其它异常仍抛出。不会删除链接或改写用户配置。回归见 `tests/profile-link-skip-PL1.test.mjs`。
-
 - **inspector-worker-expose-internals-472（2026-10-21，apk #472）**：`dsh-experimental-inspector/lib/index.js` 的 `spawnWorker()` 把 `execArgv: []` 改为 `["--expose-internals"]`。上游显式清空继承，丢掉壳侧启动命令里的 flag；`node-addon-require-builtin` 无 android-arm64 预编译件时，Worker 内 `internal/modules/esm/loader` 必 `MODULE_NOT_FOUND`，`/api/experimental-inspector/bootstrap` 每启动两条 404。只加这一个 flag，不继承 `process.execArgv`（避免把 `--inspect` 带进 Worker）。真实夹具、幂等、三向负控与 runner 集成测试见 `tests/inspector-worker-expose-internals-472.test.mjs`。
 - **sidebar-keep-wide-B2（2026-10-18）**：`dsh-client-ui-sidebar/lib/client.js` 让**手机形态**的 `wide` 恒真，收起态仍挂载宽内容；第二条锚点同时取消手机收起态的内联宽度冻结。动机：上游收起 150ms 后卸载宽内容（真机 326 元素 / 54KB 到 66 元素 / 10KB），手机抽屉由手势驱动，`ensureOpen` 的重新挂载正落在手指还按着的帧上（开方向拖动期 136ms vs 关方向 69ms）。两条锚点必须一起打：只改 `wide` 会让 `lastWideWidth` 的 56px 初值生效，跟手首帧看到一帧压扁抽屉。口径收窄为「非桌面 titlebar **且** `data-dsh-mobile-form`」，桌面端零影响，八格真值表只有「手机 + 收起 + 已 settle」一格变化。真实夹具、幂等、三向负控、真值表与 runner 集成测试见 `tests/sidebar-keep-wide-B2.test.mjs`。
 - **sidebar-bubble-reorder-B1（2026-10-17）**：`dsh-client-ui-sidebar-right/lib/client.js` 增加 `reorderIn(session, tab, before)`。复用原 store 的 `placeTab`，恢复原活动标签；仅操作当前挂载会话的 dock 同分栏，拒绝失效会话、浮动页、跨分栏与无效/无变化目标。补丁接受本代 npm 发布包和 Android 源码构建的两条精确锚点；未知或部分损坏字节拒绝写入。真实夹具、幂等、损坏输入和 runner 集成测试见 `tests/sidebar-bubble-reorder.test.mjs`。
 
-- **dshmarketplace-plugin 0.1.5**：A pre-execute 守卫（全工具崩溃）、B execPath 安全化（apk#83/#89 bad ELF magic）、C 不可安装置灰（soft：锚点失配仅告警不拒打包）、D 移动兼容徽章 + `mobile:` 过滤（server/client 两侧）、**U2 exact 路由鉴权**（search/install 复用 `connection.requestRejection()`，缺服务也 401）。
+- **dshmarketplace-plugin 0.1.5**：A pre-execute 守卫（全工具崩溃）、B execPath 安全化（apk#83/#89 bad ELF magic）、C 不可安装置灰（soft：锚点失配仅告警不拒打包）、D 移动兼容徽章 + **独立 `mobile=1` 过滤**（server/client 两侧；apk#507）、**U2 exact 路由鉴权**（search/install 复用 `connection.requestRejection()`，缺服务也 401）。
+- **market-D 的 #507 修正（2026-10-24，apk issue #507）**：勾选「仅移动端可用」此前的实际语义是「排除已知桌面独占」，不是「只显示移动端可用」——过滤判据 `compat !== "desktop"`，而 `compat` 在白名单（`data/compat-map.json`，仅 23 条）未命中时的默认值是 `unknown`，于是 `native` 与 `unknown` 条目照样通过（默认 60 条实测：ok 9 / native 2 / desktop 1 / unknown 48）。两处同批修正：① 判据改为只放行 `compat === "ok"`；② 过滤状态从搜索词里拆出来，改走独立查询参数 `mobile=1`——旧实现把 `mobile: ` 前缀写进搜索框（用户可见），并让服务端 `slice(7)` 吞掉任何以 `mobile:` 开头的真实关键字。客户端勾选后若列表为空，提示「其余插件的安卓兼容性还没验证过」，不再复用上游「换个能力试试」。行为回归见 `tests/market-mobile-filter-507.test.mjs`（从上游原始字节起跑，负控可证伪）。
 - **dsh-undo-savepoint 0.3.8**：E1-E7 移动端裁剪（头部只留快照徽章、移除快捷键行与全局键盘监听、徽章宽度封顶）+ **E8 徽章折叠成小绿点**（2026-09-10 用户定例：360dp 竖屏头部已被模式徽章/打开方式/…/右栏键占满，文字徽章挤标题且更窄处错位；数量与含义挪进 title/aria-label，点击行为不变，20x20 圆形后置 CSS 覆盖胶囊样式——注意 E7 的 marker 串保持不动，改它会让 E7 误判未应用后二次施加失配）+ **U1 `/api/undo` 鉴权**（Host/Origin/浏览器会话或壳侧实时 controlToken，所有读写均在 body/快照操作前失败关闭）。
 
 ## 用法
