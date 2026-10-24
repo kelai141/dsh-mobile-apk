@@ -18,6 +18,7 @@
  *    否则保留壳侧回读值并如实显示失败原因（拒绝乐观置位）。
  */
 import { useCallback, useState } from 'react'
+import { Button, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useShellState } from '../mobile/use-shell-state.ts'
 import { describeImportance, describeNotifyWriteFailure, noticeDataAttrs, type Notice } from '../user-copy.ts'
 import { tr } from '../i18n.ts'
@@ -192,16 +193,21 @@ export function NotifySettingsRow() {
 
   return (
     <div className="dsh-dev-notify" data-plugin="dev-notify-settings">
-      <label className="dsh-dev-row dsh-dev-switch">
-        <input
-          type="checkbox"
-          role="switch"
-          aria-label={tr('前台抑制通知', 'Suppress while in front')}
-          checked={suppress}
-          onChange={(event) => { write('suppressForeground', event.target.checked) }}
-        />
-        <span>{tr('应用在前台时不弹工作汇报（改为延后，回后台补投）', 'No report pop-ups while the app is in front; they are queued and delivered later')}</span>
-      </label>
+      <div className="dsh-gs-row">
+        <div className="dsh-gs-text">
+          <div className="dsh-gs-title">{tr('前台抑制通知', 'Suppress while in front')}</div>
+          <div className="dsh-gs-desc">
+            {tr('应用在前台时不弹工作汇报（改为延后，回后台补投）', 'No report pop-ups while the app is in front; they are queued and delivered later')}
+          </div>
+        </div>
+        <div className="dsh-gs-control">
+          <Switch
+            checked={suppress}
+            onChange={(next) => { write('suppressForeground', next) }}
+            label={tr('前台抑制通知', 'Suppress while in front')}
+          />
+        </div>
+      </div>
       {/* 精简（0.14.7-B D5）：两段合成一段——开关行已经说明「开启 = 前台不弹」，这里只补
           「延后到哪、什么时候补投、哪些分类永不受影响」。 */}
       <p className="dsh-dev-hint">
@@ -210,37 +216,33 @@ export function NotifySettingsRow() {
         {tr('。开启后命中的工作汇报进入待投队列，回后台或再次关闭抑制时补投（队列有 TTL 与容量上限）；提问与授权请求永不受此项影响。', '. Queued reports are delivered when the app goes back or suppression is turned off (the queue is bounded). Questions and approvals are never suppressed.')}
       </p>
 
-      <div className="dsh-dev-notify-cats">
-        {CATEGORY_LABELS.map(([key, label, consequence]) => (
-          <div key={key} className="dsh-dev-notify-cat">
-            <label className="dsh-dev-row dsh-dev-switch">
-              <input
-                type="checkbox"
-                role="switch"
-                aria-label={label}
-                checked={categories[key] === true}
-                onChange={(event) => { write('cat.' + key, event.target.checked) }}
-              />
-              <span>{label}</span>
-            </label>
-            <p className="dsh-dev-hint">{consequence}</p>
+      {CATEGORY_LABELS.map(([key, label, consequence]) => (
+        <div key={key} className="dsh-gs-row">
+          <div className="dsh-gs-text">
+            <div className="dsh-gs-title">{label}</div>
+            <div className="dsh-gs-desc">{consequence}</div>
           </div>
-        ))}
-      </div>
-      <div className="dsh-dev-row dsh-dev-split">
-        <button
-          type="button"
-          className="dsh-dev-btn"
+          <div className="dsh-gs-control">
+            <Switch
+              checked={categories[key] === true}
+              onChange={(next) => { write('cat.' + key, next) }}
+              label={label}
+            />
+          </div>
+        </div>
+      ))}
+      <div className="dsh-dev-row dsh-dev-actions">
+        <Button
+          size="sm"
           onClick={() => {
             setSelfCheckTried(true)
             setSelfCheck(readSelfCheck())
           }}
         >
           {tr('通知自检', 'Check notifications')}
-        </button>
-        <button
-          type="button"
-          className="dsh-dev-btn"
+        </Button>
+        <Button
+          size="sm"
           onClick={() => {
             let ok = false
             try {
@@ -252,14 +254,11 @@ export function NotifySettingsRow() {
           }}
         >
           {tr('系统通知设置', 'System notification settings')}
-        </button>
-      </div>
-      {/* S3-26：自证「哪几类真的能到达」。渠道状态看上面的自检，这里看**实际到达效果**——
-          「我把提问提醒关了 / 系统降级了渠道之后，任务完成还会不会提醒我」是这一族最实际的疑问。 */}
-      <div className="dsh-dev-row">
-        <button
-          type="button"
-          className="dsh-dev-btn"
+        </Button>
+        {/* S3-26：自证「哪几类真的能到达」。渠道状态看上面的自检，这里看**实际到达效果**——
+            「我把提问提醒关了 / 系统降级了渠道之后，任务完成还会不会提醒我」是这一族最实际的疑问。 */}
+        <Button
+          size="sm"
           onClick={() => {
             let posted = 0
             try {
@@ -275,7 +274,7 @@ export function NotifySettingsRow() {
           }}
         >
           {tr('发送测试通知', 'Send a test notification')}
-        </button>
+        </Button>
       </div>
       {selfCheckTried && selfCheck === null && (
         <p className="dsh-dev-warn">{tr('自检不可用（桥未装配或壳侧上下文未绑定）。', 'The self-check is unavailable (bridge missing or not bound).')}</p>

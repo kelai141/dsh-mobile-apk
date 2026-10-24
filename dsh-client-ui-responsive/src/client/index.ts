@@ -51,6 +51,7 @@ import { PhoneControlSection } from './dev-section/phone-control.tsx'
 import { NotifySettingsSection } from './dev-section/notify-settings.tsx'
 import { ApkUpdateSection } from './dev-section/apk-update.tsx'
 import { DEV_SECTION_CSS } from './dev-section/dev-section.css.ts'
+import { MARKETPLACE_CSS } from './marketplace/marketplace.css.ts'
 import { GeneralSettings } from './general-settings/GeneralSettings.tsx'
 import { GENERAL_SETTINGS_CSS } from './general-settings/general-settings.css.ts'
 import { tr } from './i18n.ts'
@@ -351,6 +352,11 @@ export function apply(ctx: ClientContext): void {
   // （14/20 标题 + 12/18 说明 + 右侧控件 + 0.5px 分隔线），不能沿用开发者选项那套
   // 动作行样式（用户反馈「设置页有些 UI 很突兀」）。
   ctx.effect(() => injectStyle('general-settings', GENERAL_SETTINGS_CSS), 'ui-responsive: android general-settings styles')
+
+  // 插件市场（设置 → 内置插件）由第三方插件 dshmarketplace-plugin 渲染，自带一套
+  // 「纸色 + 铜色」主题（等宽标题、1px 直角描边、38px 搜索框）。这里只做样式覆盖，
+  // 把它拉到与本页其余分区同一套上游行规，不碰对方的行为与数据。
+  ctx.effect(() => injectStyle('marketplace', MARKETPLACE_CSS), 'ui-responsive: marketplace row alignment')
   ctx.slots.inject('settings.general.item', () => ctx.slots.register({
     name: 'settings.general.item',
     id: 'android-general',

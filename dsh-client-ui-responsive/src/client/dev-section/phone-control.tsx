@@ -22,6 +22,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useShellState } from '../mobile/use-shell-state.ts'
 import { describeCallReason } from '../user-copy.ts'
+import { Button, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
 import { tr } from '../i18n.ts'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -850,6 +851,7 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
   return (
     <section
       className="dsh-screen-control-card"
+      data-plugin="dev-phone-control"
       aria-labelledby="dsh-phone-control-title"
       {...(vdisplay.displayId === undefined ? {} : { 'data-display-id': String(vdisplay.displayId) })}
     >
@@ -964,17 +966,38 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
             <p className="dsh-dev-hint">{tr('可用通道：', 'Channel: ')}{rootGrant.channelRoot ? 'Shizuku root' : tr('应用 su root', 'app su root')}{tr('。应用获得授权不等于已允许 AI 使用。', '. An app grant does not by itself allow the model.')}</p>
           )}
           <button type="button" className="dsh-dev-link" onClick={openRootDisclaimer}>{tr('阅读《AI root 权限免责声明》', 'Read the root access disclaimer')}</button>
-          <label className="dsh-screen-scope-row dsh-root-toggle-row">
-            <span><strong>{tr('已阅读免责声明', 'Disclaimer read')}</strong><small>{tr('理解 root 操作可能修改或删除系统与个人数据，并承担相应风险。应用升级不需重新确认（免责声明内容更新时才需）；撤销同意会同时关闭 AI 开关。', 'Root operations can change or delete system and personal data, and you accept that risk. App updates keep this consent; revoking it also turns model access off.')}</small></span>
-            <input type="checkbox" aria-label={tr('已阅读免责声明', 'Disclaimer read')} checked={rootGrant.consentValid}
-              disabled={!rootGrant.readable} onChange={(event) => toggleRootConsent(event.target.checked)} />
-          </label>
-          <label className="dsh-screen-scope-row dsh-root-toggle-row">
-            <span><strong>{tr('授权 AI 使用 root', 'Allow model root access')}</strong><small>{rootGrant.honesty || tr('这是策略与知情同意开关，不是技术沙箱。关闭后 AI 的 root 执行路径会被拒绝。', 'This is a policy and consent switch, not a sandbox. When off, model root execution is refused.')}</small></span>
-            <input type="checkbox" role="switch" aria-label={tr('授权 AI 使用 root', 'Allow model root access')} checked={rootGrant.granted}
-              disabled={!rootGrant.readable || (!rootGrant.granted && (!canToggleRootGrant(rootGrant) || !rootGrant.consentValid))}
-              onChange={(event) => toggleRootGrant(event.target.checked)} />
-          </label>
+          <div className="dsh-gs-row">
+            <div className="dsh-gs-text">
+              <div className="dsh-gs-title">{tr('已阅读免责声明', 'Disclaimer read')}</div>
+              <div className="dsh-gs-desc">
+                {tr('理解 root 操作可能修改或删除系统与个人数据，并承担相应风险。应用升级不需重新确认（免责声明内容更新时才需）；撤销同意会同时关闭 AI 开关。', 'Root operations can change or delete system and personal data, and you accept that risk. App updates keep this consent; revoking it also turns model access off.')}
+              </div>
+            </div>
+            <div className="dsh-gs-control">
+              <Switch
+                checked={rootGrant.consentValid}
+                disabled={!rootGrant.readable}
+                onChange={(next) => toggleRootConsent(next)}
+                label={tr('已阅读免责声明', 'Disclaimer read')}
+              />
+            </div>
+          </div>
+          <div className="dsh-gs-row">
+            <div className="dsh-gs-text">
+              <div className="dsh-gs-title">{tr('授权 AI 使用 root', 'Allow model root access')}</div>
+              <div className="dsh-gs-desc">
+                {rootGrant.honesty || tr('这是策略与知情同意开关，不是技术沙箱。关闭后 AI 的 root 执行路径会被拒绝。', 'This is a policy and consent switch, not a sandbox. When off, model root execution is refused.')}
+              </div>
+            </div>
+            <div className="dsh-gs-control">
+              <Switch
+                checked={rootGrant.granted}
+                disabled={!rootGrant.readable || (!rootGrant.granted && (!canToggleRootGrant(rootGrant) || !rootGrant.consentValid))}
+                onChange={(next) => toggleRootGrant(next)}
+                label={tr('授权 AI 使用 root', 'Allow model root access')}
+              />
+            </div>
+          </div>
           {rootGrant.readable && canToggleRootGrant(rootGrant) && !rootGrant.consentValid ? (
             <p className="dsh-dev-hint">{tr('请先阅读并确认免责声明，才能开启 AI root 权限。', 'Read and accept the disclaimer before turning on model root access.')}</p>
           ) : null}
@@ -1021,20 +1044,23 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
         </select>
       </label>
 
-      <label className="dsh-screen-scope-row">
-        <span>
-          <strong>{tr('虚拟屏浮窗（退后台自动显示）', 'Virtual screen window (shown in the background)')}</strong>
+      <div className="dsh-gs-row">
+        <div className="dsh-gs-text">
+          <div className="dsh-gs-title">{tr('虚拟屏浮窗（退后台自动显示）', 'Virtual screen window (shown in the background)')}</div>
           {/* P5-6：与开发者选项里的「悬浮球」去混淆。两者都叫「浮」，但一个是**虚拟屏只读画面**，
               一个是**任务面板入口**——旧文案各说各的，用户在两页之间对不上号。 */}
-          <small>{tr('只读浮窗：退后台时显示虚拟屏画面，前台只在侧栏可见。不是开发者选项里的「悬浮球」（那个是任务面板入口）。', 'Read-only window: it shows the virtual screen in the background and only in the sidebar in front. It is not the floating ball in developer options.')}</small>
-        </span>
-        <input
-          aria-label={tr('虚拟屏浮窗（退后台自动显示）', 'Virtual screen window')}
-          type="checkbox"
-          checked={floatOn}
-          onChange={(event) => setFloat(event.target.checked)}
-        />
-      </label>
+          <div className="dsh-gs-desc">
+            {tr('只读浮窗：退后台时显示虚拟屏画面，前台只在侧栏可见。不是开发者选项里的「悬浮球」（那个是任务面板入口）。', 'Read-only window: it shows the virtual screen in the background and only in the sidebar in front. It is not the floating ball in developer options.')}
+          </div>
+        </div>
+        <div className="dsh-gs-control">
+          <Switch
+            checked={floatOn}
+            onChange={(next) => setFloat(next)}
+            label={tr('虚拟屏浮窗（退后台自动显示）', 'Virtual screen window')}
+          />
+        </div>
+      </div>
 
       <div className="dsh-screen-control-detail">
         <strong>{tr('无障碍通道', 'Accessibility channel')}</strong>

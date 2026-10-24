@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { NotifySettingsRow } from '../src/client/dev-section/notify-settings.tsx'
+import { toggleOf } from './toggle.ts'
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -58,9 +59,7 @@ function buttonByText(el: HTMLElement, text: string): HTMLButtonElement {
 }
 
 function switchByLabel(el: HTMLElement, label: string): HTMLInputElement {
-  const input = el.querySelector('input[aria-label="' + label + '"]')
-  if (input === null) throw new Error('找不到开关：' + label)
-  return input as HTMLInputElement
+  return toggleOf(el, label)
 }
 
 /** 壳侧快照工厂（五类默认全开）。 */
@@ -282,8 +281,10 @@ describe('NotifySettingsRow（块J FIX-4 设置页入口）', () => {
     const { bridge } = makeBridge({})
     setBridge(bridge)
     const el = await render()
-    const labels = [...el.querySelectorAll('.dsh-dev-notify-cat input[role="switch"]')]
-      .map((input) => input.getAttribute('aria-label'))
+    // 第一行是「前台抑制」，五个分类从第二行起。
+    const labels = [...el.querySelectorAll('button[role="switch"]')]
+      .slice(1)
+      .map((button) => button.getAttribute('aria-label'))
     // 这五个词必须与壳侧 `UserCopy.notifyCategory` + `NotifyCenter.Face.label` 逐字一致
     // （Kotlin 侧 `UserCopyTest.faceLabelsShareTheSingleTable` 钉住那一半）。
     expect(labels).toEqual(['工作汇报', '提问', '授权请求', '待办进度', '后台动态'])

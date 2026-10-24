@@ -4,6 +4,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
+import { toggleOf } from './toggle.ts'
 import {
   PhoneControlSection,
   settleLinkCall,
@@ -144,11 +145,11 @@ describe('PhoneControlSection（手机控制设置页）', () => {
     const getVdisplayFloatEnabled = vi.fn(() => enabled)
     const setVdisplayFloatEnabled = vi.fn((next: boolean) => { enabled = next })
     const el = await render({ getVdisplayFloatEnabled, setVdisplayFloatEnabled })
-    const toggle = el.querySelector('input[aria-label="虚拟屏浮窗（退后台自动显示）"]') as HTMLInputElement
+    const toggle = toggleOf(el, '虚拟屏浮窗（退后台自动显示）')
     expect(toggle.checked).toBe(true)
     await act(async () => { toggle.click() })
     expect(setVdisplayFloatEnabled).toHaveBeenCalledWith(false)
-    expect((el.querySelector('input[aria-label="虚拟屏浮窗（退后台自动显示）"]') as HTMLInputElement).checked).toBe(false)
+    expect(toggleOf(el, '虚拟屏浮窗（退后台自动显示）').checked).toBe(false)
   })
 
   // P5-6：与开发者选项里的「悬浮球」去混淆——两处都叫「浮」，必须各说各是什么，
@@ -569,10 +570,8 @@ function rootAccessJson(over: Record<string, unknown> = {}): string {
 }
 
 describe('AI root 权限开关（issue #262 方案 A）', () => {
-  const grantedInput = (el: HTMLElement) =>
-    el.querySelector('input[aria-label="授权 AI 使用 root"]') as HTMLInputElement
-  const consentInput = (el: HTMLElement) =>
-    el.querySelector('input[aria-label="已阅读免责声明"]') as HTMLInputElement
+  const grantedInput = (el: HTMLElement) => toggleOf(el, '授权 AI 使用 root')
+  const consentInput = (el: HTMLElement) => toggleOf(el, '已阅读免责声明')
 
   it('两条 root 路径均不可用：AI 开关置灰，但同意和免责声明仍可读可撤销', async () => {
     const el = await render({
@@ -875,7 +874,7 @@ describe('应用级 Root 授权面（2026-09-30 主人定例）', () => {
     expect(groups[0]!.textContent).toContain('1. 应用 root 授权')
     expect(groups[0]!.querySelector('input')).toBeNull()
     expect(groups[1]!.textContent).toContain('2. AI root 权限')
-    expect(groups[1]!.querySelectorAll('input')).toHaveLength(2)
+    expect(groups[1]!.querySelectorAll('button[role="switch"]')).toHaveLength(2)
     const maintenance = groups[2] as HTMLDetailsElement
     expect(maintenance.open).toBe(false)
     expect(maintenance.querySelector('summary')!.textContent).toBe('文件属主维护')
@@ -931,8 +930,8 @@ describe('Root 桥回执形状与失败呈现', () => {
   it('坏 root 状态在页面上不可读，两开关均不可点，文档入口仍保留', async () => {
     const el = await render({ rootGrantState: () => '[{"granted":true}]', rootAccessState: () => 'null' })
     expect(detailLine(el, '2. AI root 权限')).toContain('状态不可读')
-    expect((el.querySelector('input[aria-label="授权 AI 使用 root"]') as HTMLInputElement).disabled).toBe(true)
-    expect((el.querySelector('input[aria-label="已阅读免责声明"]') as HTMLInputElement).disabled).toBe(true)
+    expect(toggleOf(el, '授权 AI 使用 root').disabled).toBe(true)
+    expect(toggleOf(el, '已阅读免责声明').disabled).toBe(true)
     expect(buttonByText(el, '阅读《AI root 权限免责声明》').disabled).toBe(false)
   })
 
@@ -944,13 +943,13 @@ describe('Root 桥回执形状与失败呈现', () => {
     { label: '拒收', raw: '{"ok":false,"reason":"consent-required"}' },
   ])('同意写入 $label 不谎报成功也不泄漏机器码', async ({ raw }) => {
     const el = await render({ rootGrantState: () => rootGrantJson(), setRootConsent: () => raw })
-    await act(async () => { (el.querySelector('input[aria-label="已阅读免责声明"]') as HTMLInputElement).click() })
+    await act(async () => { toggleOf(el, '已阅读免责声明').click() })
     const receipt = el.querySelector('.dsh-root-step [role="status"]')!
     expect(receipt.className).toContain('dsh-dev-error')
     expect(receipt.textContent).toContain('记录「已阅读」失败')
     expect(receipt.textContent).not.toContain('future-native-private-code')
     expect(receipt.textContent).not.toContain('已记录「已阅读」')
-    expect((el.querySelector('input[aria-label="已阅读免责声明"]') as HTMLInputElement).checked).toBe(false)
+    expect(toggleOf(el, '已阅读免责声明').checked).toBe(false)
   })
 
   it('request-started 是等待而非已开启；当前同意失效后不得自动续开', async () => {
@@ -964,7 +963,7 @@ describe('Root 桥回执形状与失败呈现', () => {
       rootAccessState: () => rootAccessJson({ state: rootGranted ? 'granted' : 'requesting', granted: rootGranted, requesting: !rootGranted }),
       setRootGranted,
     })
-    await act(async () => { (el.querySelector('input[aria-label="授权 AI 使用 root"]') as HTMLInputElement).click() })
+    await act(async () => { toggleOf(el, '授权 AI 使用 root').click() })
     expect(el.textContent).toContain('正在检测 root 授权')
     expect(el.textContent).not.toContain('开启 AI root 权限失败')
     expect(el.textContent).not.toContain('已开启 AI root 权限：')
@@ -973,7 +972,7 @@ describe('Root 桥回执形状与失败呈现', () => {
     rootGranted = true
     await act(async () => { vi.advanceTimersByTime(2_000) })
     expect(setRootGranted).toHaveBeenCalledTimes(1)
-    expect((el.querySelector('input[aria-label="授权 AI 使用 root"]') as HTMLInputElement).checked).toBe(false)
+    expect(toggleOf(el, '授权 AI 使用 root').checked).toBe(false)
   })
 
   it('检测应用 root 成功只更新事实面，不自动开启 AI 策略门', async () => {
@@ -993,7 +992,7 @@ describe('Root 桥回执形状与失败呈现', () => {
     await act(async () => { vi.advanceTimersByTime(2_000) })
     expect(detailLine(el, '1. 应用 root 授权')).toContain('已授权（uid 0）')
     expect(setRootGranted).not.toHaveBeenCalled()
-    expect((el.querySelector('input[aria-label="授权 AI 使用 root"]') as HTMLInputElement).checked).toBe(false)
+    expect(toggleOf(el, '授权 AI 使用 root').checked).toBe(false)
   })
 })
 
