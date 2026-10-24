@@ -108,9 +108,20 @@ Not supported yet — requests are welcome at the issue tracker.
 
 ## Acknowledgements
 
-**Thanks to every community member for the feedback and contributions!** Special thanks to cdwlll (environment reports), haitunlang (MIUI 12 compatibility), TACONailoong (legacy WebView compatibility), X-SCI-TECH (PR contribution), Yangerwei (file-race feedback), gr12-cmd (armv7l request), and cmyfqwq (in-place-upgrade feedback).
+This project is built together with its community. Below are the eight most active contributors, ordered by code contribution (the maintainer is not listed):
 
-Want to help develop? See [`CONTRIBUTING.md`](CONTRIBUTING.md). We especially need compatibility testing on vendor WebViews (Huawei / Honor / Xiaomi), support for more devices (armv7l), and Shizuku channel work.
+| # | Contributor | Main contributions |
+|---|---|---|
+| 1 | [@snoworwind](https://github.com/snoworwind) | Source-auditable ARM64 build chain, source-chain reproducibility fixes, snapshot panel layering and overlay fixes |
+| 2 | [@cmyfqwq](https://github.com/cmyfqwq) | AI root authorization surface, root lease settlement and criteria, lock-splitting performance work |
+| 3 | [@wen0531](https://github.com/wen0531) | In-snapshot git SHELL_PATH relocation, arm64 asset naming, file-write fallback, preset seeding fix |
+| 4 | [@lemonhub-io](https://github.com/lemonhub-io) | App naming and icon, single-source version, launch and console UI rework, vendored-bundle language stats cleanup |
+| 5 | [@SinBC227](https://github.com/SinBC227) | Image input and vision reading, clipboard bridge, LaTeX streaming render, font size and immersive status bar |
+| 6 | [@Ni-ShuWu](https://github.com/Ni-ShuWu) | README badges, lock-splitting proposal for entry settlement |
+| 7 | [@MCMR-JIM](https://github.com/MCMR-JIM) | Sidebar sorting and drag-drop fix, risk-tiered verification docs |
+| 8 | [@adeahejshshsh](https://github.com/adeahejshshsh) | Language follow-system resolved at startup, settings row style alignment |
+
+We also thank the early members who helped us pin down problems through issues and pull requests: cdwlll, haitunlang, TACONailoong, X-SCI-TECH, Yangerwei, gr12-cmd, and everyone who sent feedback and suggestions.
 
 ## Join the user group
 
