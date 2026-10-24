@@ -28,6 +28,7 @@ const patchRunner = join(repoRoot, 'scripts', 'patches', 'apply-patches.mjs')
 // 上游 0.1.7 的两个 bundle 以 npm 发布包为准，此处按「去补丁」还原：
 // 直接读 vendor/ 再逆向剥掉我们加的段太脆，改为从 tgz 解出的原始字节出发。
 import { createHash } from 'node:crypto'
+import { FIXTURES_DIR } from './lib/fixture.mjs'
 
 /** 上游 0.1.7 原始 bundle 的 sha256（npm 发布包，逐字节固定）。 */
 const UPSTREAM_SHA256 = {
@@ -35,9 +36,11 @@ const UPSTREAM_SHA256 = {
   'client.js': '57f96e5491e827b4eb2e19f803acff8963eb6dcdbc4469de3e16e3ba0718f066',
 }
 
-/** 上游原始字节取自入库夹具（fixtures/dshmarketplace-plugin-0.1.7，来自 npm 发布包解包）。
+/** 上游原始字节取自入库夹具（来自 npm 发布包解包），目录名经 fixture.mjs 解析，
+ *  不在此写死版本（写死会被 check-patch-fixtures 判红，且追版后静默失效）。
  *  必须入库：只放 .deploy-tmp（已被 gitignore）的话，CI 与别的机器上这条回归会直接缺席。 */
-const UPSTREAM_DIR = join(here, 'fixtures', 'dshmarketplace-plugin-0.1.7')
+const UPSTREAM_PKG = 'dshmarketplace-plugin'
+const UPSTREAM_DIR = join(FIXTURES_DIR, UPSTREAM_PKG + '-0.1.7')
 
 /** 读上游原始字节并按 sha256 核对：hash 不符 = 夹具被改过，必须判错而不是静默放行。 */
 function upstreamBytes(name) {

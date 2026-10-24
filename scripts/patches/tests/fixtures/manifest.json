@@ -1288,6 +1288,21 @@
       "patchIds": [
         "managed-port-bind-EP1"
       ]
+    },
+    "dshmarketplace-plugin-0.1.7": {
+      "source": "synthetic",
+      "package": "dshmarketplace-plugin@0.1.7",
+      "files": [
+        "lib/index.js",
+        "lib/client.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "2c2190271c159fd555931bef092b4e0666c2bc08fa26502ac7a440296a5245e3",
+        "lib/client.js": "57f96e5491e827b4eb2e19f803acff8963eb6dcdbc4469de3e16e3ba0718f066",
+        "package.json": "aa259ee5450c6ddd1941f177a7fdb3c144fac442cbd22a4c2536e74abda6e14b"
+      },
+      "reason": "第三方 vendored 包（dshmarketplace-plugin）的上游 0.1.7 原始字节，取自 npm 发布包 dshmarketplace-plugin-0.1.7.tgz。它不是引擎构建产物，故不随 contract.baseline 走 engine-tgz 通道；补丁 market-D 必须对「未打补丁的上游字节」回归，否则测的是补丁输出而非补丁实现（issue #507 的负控曾因此假绿）。"
     }
   },
   "capture": {
@@ -1299,6 +1314,6 @@
       ]
     },
     "overlaySha256": "87486df7cf65e8199902e3b855987aad7ba155693bb9b69ab7efedf2168afb2a",
-    "registrySha256": "281a8bc500eec846c5de0c9b07aa90ab4de83c64526af3248c2926f344c9bf1d"
+    "registrySha256": "731e5084274d4c70b071ad6d5156aa8bf7a9bc054d4f5943b308cc65a04f7b2f"
   }
 }
