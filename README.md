@@ -108,18 +108,18 @@
 
 ## 致谢
 
-这个项目是靠社区一起做出来的。下面按代码贡献排序，致谢贡献最多的八位协作者（维护者本人不计入）：
+这个项目是靠社区一起做出来的。下面按代码贡献行数排序，致谢贡献最多的八位协作者（维护者本人与 AI 账号不计入；统计排除上游构建产物与 lockfile）：
 
 | # | 协作者 | 主要贡献 |
 |---|---|---|
 | 1 | [@snoworwind](https://github.com/snoworwind) | 可来源审计的 ARM64 构建链、来源链可复现性修复、快照面板层级与遮罩修复 |
 | 2 | [@cmyfqwq](https://github.com/cmyfqwq) | AI root 权限授权开关与应用级 root 授权面、root 租约清算判据改写为真绑定实证、入口拆锁落地 |
-| 3 | [@wen0531](https://github.com/wen0531) | 快照内 git SHELL_PATH 重定位、arm64 资产名口径、文件写入回退、预设播种修复 |
-| 4 | [@lemonhub-io](https://github.com/lemonhub-io) | 应用命名与图标、版本号收编为单一来源、启动页与控制台 UI 重构、前端产物语言统计治理 |
-| 5 | [@SinBC227](https://github.com/SinBC227) | 图片输入与视觉读图、剪贴板桥、LaTeX 流式渲染、字体大小与沉浸式状态栏 |
-| 6 | [@Ni-ShuWu](https://github.com/Ni-ShuWu) | 入口清算拆锁方案与反证用例（已采纳落地）、README 徽章 |
-| 7 | [@MCMR-JIM](https://github.com/MCMR-JIM) | 侧栏排序与拖放竞争修复、验收风险分档文档 |
-| 8 | [@adeahejshshsh](https://github.com/adeahejshshsh) | 语言跟随系统的启动期解析、通用设置行规对齐、源码审查 issue |
+| 3 | [@lemonhub-io](https://github.com/lemonhub-io) | 启动页与控制台 UI 重构、原生界面的设计令牌体系、应用命名与图标、版本号收编为单一来源 |
+| 4 | [@daum110715](https://github.com/daum110715) | 下载页整体改版为瑞士国际主义排印风格（网格、字阶、等宽数据） |
+| 5 | [@SinBC227](https://github.com/SinBC227) | 图片输入与视觉读图（含华为 WebView 兼容）、剪贴板桥、LaTeX 流式渲染、字体大小与沉浸式状态栏 |
+| 6 | [@adeahejshshsh](https://github.com/adeahejshshsh) | 通用设置里安卓自建项的行规与控件重做、语言跟随系统改为启动时解析 |
+| 7 | [@wen0531](https://github.com/wen0531) | 快照内 git SHELL_PATH 重定位、arm64 资产名口径、文件写入回退、预设播种修复 |
+| 8 | [@FuRongJun-1999](https://github.com/FuRongJun-1999) | 灵枢（AEIS）长期记忆框架的快照构建工具与手机端测试指引 |
 
 另外感谢最早一批通过 issue 与 PR 帮我们定位问题的成员：cdwlll、haitunlang、TACONailoong、X-SCI-TECH、Yangerwei、gr12-cmd，以及所有提交反馈与建议的用户。
 

@@ -108,18 +108,18 @@ Not supported yet — requests are welcome at the issue tracker.
 
 ## Acknowledgements
 
-This project is built together with its community. Below are the eight most active contributors, ordered by code contribution (the maintainer is not listed):
+This project is built together with its community. Below are the eight most active contributors, ordered by lines of code contributed (the maintainer and AI accounts are not listed; upstream build artifacts and lockfiles are excluded):
 
 | # | Contributor | Main contributions |
 |---|---|---|
 | 1 | [@snoworwind](https://github.com/snoworwind) | Source-auditable ARM64 build chain, source-chain reproducibility fixes, snapshot panel layering and overlay fixes |
 | 2 | [@cmyfqwq](https://github.com/cmyfqwq) | AI root-permission grant switch and app-level root grant surface, root-lease clearing rewritten around real binding evidence, lock-splitting rollout |
-| 3 | [@wen0531](https://github.com/wen0531) | In-snapshot git SHELL_PATH relocation, arm64 asset naming, file-write fallback, preset seeding fix |
-| 4 | [@lemonhub-io](https://github.com/lemonhub-io) | App naming and icon, single-source version, launch and console UI rework, vendored-bundle language stats cleanup |
-| 5 | [@SinBC227](https://github.com/SinBC227) | Image input and vision reading, clipboard bridge, LaTeX streaming render, font size and immersive status bar |
-| 6 | [@Ni-ShuWu](https://github.com/Ni-ShuWu) | Lock-splitting proposal and counter-test for entry settlement (adopted), README badges |
-| 7 | [@MCMR-JIM](https://github.com/MCMR-JIM) | Sidebar sorting and drag-drop fix, risk-tiered verification docs |
-| 8 | [@adeahejshshsh](https://github.com/adeahejshshsh) | Language follow-system resolved at startup, settings row style alignment, source-review issues |
+| 3 | [@lemonhub-io](https://github.com/lemonhub-io) | Launch and console UI rework, design-token system for native screens, app naming and icon, single-source version |
+| 4 | [@daum110715](https://github.com/daum110715) | Download page rework in Swiss International Typographic style (grid, type scale, tabular data) |
+| 5 | [@SinBC227](https://github.com/SinBC227) | Image input and vision reading (incl. Huawei WebView compatibility), clipboard bridge, LaTeX streaming render, font size and immersive status bar |
+| 6 | [@adeahejshshsh](https://github.com/adeahejshshsh) | Android-only settings rows rebuilt to upstream row style, language follow-system resolved at startup |
+| 7 | [@wen0531](https://github.com/wen0531) | In-snapshot git SHELL_PATH relocation, arm64 asset naming, file-write fallback, preset seeding fix |
+| 8 | [@FuRongJun-1999](https://github.com/FuRongJun-1999) | Snapshot build tool and on-device test guide for the Lingshu (AEIS) long-term memory framework |
 
 We also thank the early members who helped us pin down problems through issues and pull requests: cdwlll, haitunlang, TACONailoong, X-SCI-TECH, Yangerwei, gr12-cmd, and everyone who sent feedback and suggestions.
 
