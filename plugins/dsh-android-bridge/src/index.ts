@@ -1617,8 +1617,9 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
   // F0.3 引擎事件桥（最小版，2026-08-24）：session 事件 → 「任务完成」标记文件。
   // 壳侧 WatchdogV2 每 5s 探活周期顺带消费标记 → 系统通知栏弹「任务完成」（POST_NOTIFICATIONS
   // 已由壳首启授权）。引擎→壳方向无页面依赖（不依赖 androidBridge/WebView 上下文）——
-  // 标记文件路经 files/home/.dsh/.task-done.ndjson，壳读后清空。事件面：assistant/message
-  // （agent 完成一轮完整输出）+ assistant/message.interrupted（被打断不弹）。
+  // 标记文件路经 files/home/.dsh/.task-done.ndjson，壳读后清空。
+  // 事件面：**turn/end 写入，aborted 不写**（issue #561）。此前挂在 assistant/message 上——每收到
+  // 一条 assistant 消息就写一行，于是任务其实还在跑（引擎侧仍显示「运行中」）通知栏已弹「任务完成」。
   const TASK_DONE_MARKER = (process.env.DSH_HOME ?? '/data/user/0/com.dsharnessmobile.shell/files/home/.dsh') + '/.task-done.ndjson'
   const appendTaskMarker = (sessionId: unknown, title: string | undefined, text: string) => {
     try {
@@ -1757,8 +1758,8 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
             const content = (ev.data as { message?: { content?: unknown } })?.message?.content
             const text = visibleText(content)
             notifyState.setSummary(sessId, text)
-            // 兼容期：老壳仍读 .task-done.ndjson（新壳只读 .notify.ndjson，双读不双发）。
-            appendTaskMarker(sessId, notifyState.titleFor(sessId), summarize(text, 80) || '任务完成')
+            // 这里**只累积摘要，不写旧信道标记**（issue #561）：assistant/message 每条消息都会到，
+            // 在此写 .task-done.ndjson 等于任务中途就投递「任务完成」。真实写入点见下方 turn/end 分支。
             break
           }
           case 'deliverables/presented':
@@ -1787,6 +1788,14 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
               )
             }
             const report = notifyState.endTurn({ sessionId: sessId, turn: ev.data?.turn, reason: ev.data?.reason, now })
+            // 旧信道 `.task-done.ndjson`（老壳仍读它）：与本次 report 同源同刻写入（issue #561）。
+            // 判据复用 shouldPopupReport——只在该轮结局会弹通知时写，aborted/interrupted 不写，
+            // 与 NT-05 新信道的 popup 语义一致。字段取该轮 report：sessionId / title / summary，
+            // 摘要为空时回落「任务完成」（与老壳的通知正文文案兼容）。
+            // 时序：turn/end 之后才写，故任务执行期间 notification 栏不会再出现「任务完成」。
+            if (shouldPopupReport(report.outcome)) {
+              appendTaskMarker(report.sessionId, report.title, report.summary || '任务完成')
+            }
             appendNotify({
               kind: 'report',
               outcome: report.outcome,

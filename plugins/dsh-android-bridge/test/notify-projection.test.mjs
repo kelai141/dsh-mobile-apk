@@ -344,7 +344,12 @@ function notifyChannelsFrom(events) {
     try { raw = readFileSync(join(dir, name), 'utf8') } catch { return [] }
     return raw.split('\n').filter((line) => line.trim() !== '').map((line) => JSON.parse(line))
   }
-  return { notify: readLines('.notify.ndjson'), live: readLines('.live.ndjson') }
+  return {
+    notify: readLines('.notify.ndjson'),
+    live: readLines('.live.ndjson'),
+    // 旧信道（issue #561）：老壳的通知来源，写入时机必须与 turn/end 同刻。
+    taskDone: readLines('.task-done.ndjson'),
+  }
 }
 
 // 思考段刻意排在正文之前（上游常态），且带一个只属于思考的标记串供反证引用。
@@ -413,6 +418,64 @@ test('D5 源码门禁：不得再出现「按字段取值拼 content」的写法
     'D5：不得再按字段取值拼 content（思考块与正文块共用 text 字段名，必须按 type 过滤）',
   )
   assert.match(code, /visibleText\(content\)/, 'D5：两条 assistant/message 路径都必须走 visibleText')
+})
+
+// ── issue #561：旧信道 .task-done.ndjson 的写入时机（中途不得弹「任务完成」）──────────
+//
+// 缺陷本体（v0.14.9 用户实测）：任务还在跑（引擎侧显示「运行中 19m」），通知栏已弹「任务完成」。
+// 根因是 appendTaskMarker 写在 `case 'assistant/message'` 分支里——每收到一条 assistant 消息
+// 就写一行标记，不等 turn/end。壳侧 NotifyStore.notifyChannelActive 是进程内开关，只有先消费到
+// 一条 report/silent 才置位，所以任务跑到一半（尚无 report 行）时旧信道照常投递。
+// 修法：写入点移到 turn/end，判据复用 shouldPopupReport（aborted/interrupted 不写）。
+// 下面三条覆盖「不写 / 写一条 / aborted 不写」，第一条即负控：写入点放回 assistant/message 即红。
+
+test('issue #561：assistant/message 不写 task marker（任务中途不得弹「任务完成」）', () => {
+  const { taskDone } = notifyChannelsFrom([
+    { type: 'turn/start', data: { turn: 1 } },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '第一步做完了' }] } } },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '第二步做完了' }] } } },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '第三步正在做' }] } } },
+  ])
+  assert.deepEqual(taskDone, [], 'assistant/message 期间旧信道必须一行都不写（否则中途就弹完成）')
+})
+
+test('issue #561：turn/end(completed) 恰好写一条，字段取该轮 report', () => {
+  const { taskDone, notify } = notifyChannelsFrom([
+    { type: 'session/title', data: { title: '跑门禁' } },
+    { type: 'turn/start', data: { turn: 1 } },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '中间进度' }] } } },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: VISIBLE_TEXT }] } } },
+    { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+  ])
+  const report = notify.find((e) => e.kind === 'report')
+  assert.ok(report, '新信道必须同时写出 report 行')
+  assert.equal(taskDone.length, 1, '一轮只写一条标记（不得按 assistant 消息条数写）')
+  assert.equal(taskDone[0].sessionId, report.sessionId, 'sessionId 取该轮 report')
+  assert.equal(taskDone[0].title, report.title, 'title 取该轮 report')
+  assert.equal(taskDone[0].title, '跑门禁', '标题必须来自 session/title')
+  assert.equal(taskDone[0].text, report.summary, 'text 取该轮 report 的 summary')
+  assert.equal(taskDone[0].text, VISIBLE_TEXT, '摘要必须是该轮最后的可见正文')
+})
+
+test('issue #561：摘要为空时 text 回落「任务完成」，不写空正文', () => {
+  const { taskDone } = notifyChannelsFrom([
+    { type: 'turn/start', data: { turn: 1 } },
+    { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+  ])
+  assert.equal(taskDone.length, 1)
+  assert.equal(taskDone[0].text, '任务完成')
+})
+
+test('issue #561：turn/end(aborted) 不写 task marker，但新信道照常投递 report', () => {
+  const { taskDone, notify } = notifyChannelsFrom([
+    { type: 'turn/start', data: { turn: 1 } },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '做到一半被按停' }] } } },
+    { type: 'turn/end', data: { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } } },
+  ])
+  assert.deepEqual(taskDone, [], 'aborted 不写旧信道标记（与 NT-05 新信道一致：用户自己按停不弹）')
+  const report = notify.find((e) => e.kind === 'report')
+  assert.ok(report, '新信道仍须投递 report 条目（不得静默丢失）')
+  assert.equal(report.popup, false)
 })
 
 // ── 0.14.1 D6：报告栏可滚动正文（摘要之外必须真的有可滚的内容）────────────────────
