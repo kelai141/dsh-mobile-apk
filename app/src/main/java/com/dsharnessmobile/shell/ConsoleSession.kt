@@ -10,8 +10,14 @@ import java.io.File
  * thread, and streams output back to the UI via a Listener. Works even when the engine is not
  * running (for diagnosing engine startup failures); the process dies with the Activity.
  *
- * Non-PTY interaction (bash -i): no job-control prompts, commands run line by line; full PTY
- * (script -q -c bash) is planned for a later iteration.
+ * Terminal environment: the child gets TERM/TERMINFO/VIMRUNTIME from [ConsoleTerminalEnv]. Without
+ * them the snapshot's ncurses and vim fall back to their Termux build-time prefixes, which do not
+ * exist under this app domain — "terminals database is inaccessible", "TERM environment variable
+ * not set." and "E1187: Failed to source defaults.vim" all trace back to that missing wiring.
+ *
+ * Output: control sequences are stripped by [ConsoleAnsiStripper] because the page (console.html)
+ * is a plain-text container. Non-PTY interaction (bash -i) still has no job control; a real PTY via
+ * script(1) is a later iteration and will replace this stripping layer.
  */
 class ConsoleSession(private val context: Context) {
 
@@ -52,6 +58,7 @@ class ConsoleSession(private val context: Context) {
   private var process: Process? = null
   private var closed = false
   private var generation = 0
+  private val stripper = ConsoleAnsiStripper()
 
   /** Start bash; on failure report the reason via listener.onStatus and return false. */
   fun start(listener: Listener): Boolean {
@@ -76,6 +83,9 @@ class ConsoleSession(private val context: Context) {
       fun build(argv: List<String>): ProcessBuilder =
         ProcessBuilder(argv).also { p ->
           p.environment().putAll(engineManager.shellEnv())
+          // 终端环境必须在**子进程启动前**就在环境里：bash -i 起来时 TERM 已定，
+          // 之后再 export 改变不了已经初始化的 ncurses 程序。
+          p.environment().putAll(ConsoleTerminalEnv.terminalEnv(engineManager.usrDir))
           p.environment()["PS1"] = "dsh:\\w$ "
           p.redirectErrorStream(true)
         }
@@ -90,22 +100,22 @@ class ConsoleSession(private val context: Context) {
         build(listOf("/system/bin/linker64") + argv).start()
       }
       process = proc
+      stripper.reset()
       val reader = Thread {
         try {
-          proc.inputStream.bufferedReader().use { r ->
+          proc.inputStream.reader(Charsets.UTF_8).use { r ->
+            // 逐字符 read() 已经在跑（行缓冲的实测依据见下），这里只把「一个字符」攒成块再交给
+            // 剥离器：剥离器按字符推进，整块喂入既少建临时字符串，也让它跨块的序列状态自然接续。
+            val raw = CharArray(1024)
             val sb = StringBuilder()
             while (true) {
-              val c = r.read()
-              if (c < 0) break
-              // Collapse \r to \n (output carries CR without PTY); ignore bell (avoids UI noise).
-              if (c == '\r'.code) {
-                sb.append('\n')
-              } else if (c != '\u0007'.code) {
-                sb.append(c.toChar())
-              }
+              val n = r.read(raw)
+              if (n < 0) break
+              // 控制序列剥离 + CR 折行 + C0 丢弃统一在 [ConsoleAnsiStripper] 里做（有单测）。
+              sb.append(stripper.feed(String(raw, 0, n)))
               // Line buffering: small output (echo etc.) must not wait for the 4096 threshold —
               // on-device measurement showed whole-block buffering stalls output until the next chunk/EOF.
-              if (c == '\n'.code || sb.length >= 4096) {
+              if (sb.length >= 4096 || sb.indexOf("\n") >= 0) {
                 val chunk = sb.toString()
                 sb.setLength(0)
                 if (generation == gen) listener.onOutput(chunk)

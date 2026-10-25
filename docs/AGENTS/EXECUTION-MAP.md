@@ -433,7 +433,7 @@ sequenceDiagram
 | K01 | 来件与选择器 | onCreate 投递 VIEW/SEND 来件，桥回调接 DirectoryPickerController/MediaPickController/FileIncoming | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:266 |
 | K01 | 快照与更新面 | 检查更新按钮与启动前快照刷新走 UpdateManager，自动回撤走 UndoGate 加 SnapshotTransaction | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:294 |
 | K01 | APK 更新动作 | 检查按钮与下载按钮**各自独立**（可用性相同、语义分离），与管理中心/设置页那一行**读同一份**状态（`ApkUpdateController`，Activity 作用域）；动作经唯一桥入口 `AndroidBridge.apkUpdate(action=status\|check\|install)` 发起，**不占用相位与主按钮**，且壳侧对 `window.__dshBridge` 写入面为 0 | app/src/main/java/com/dsharnessmobile/shell/ApkUpdateAction.kt:245 |
-| K01 | 内置控制台 | 引导页与控制台按钮 START ConsoleActivity，其 ConsoleSession 用与引擎同源的 shellEnv 起快照 bash | app/src/main/java/com/dsharnessmobile/shell/ConsoleSession.kt:33 |
+| K01 | 内置控制台 | 引导页与控制台按钮 START ConsoleActivity，其 ConsoleSession 用与引擎同源的 shellEnv 起快照 bash，并叠加 ConsoleTerminalEnv 的 TERM/TERMINFO/VIMRUNTIME（缺这三个 TUI 一律起不来） | app/src/main/java/com/dsharnessmobile/shell/ConsoleSession.kt:32 |
 | K01 | 系统外部角色 | BootReceiver 接 ACTION_BOOT_COMPLETED 决定是否自启前台服务，分享面板经 VIEW/SEND 进本 Activity | app/src/main/java/com/dsharnessmobile/shell/BootReceiver.kt:24 |
 | K02 | K01 | 启动全程用引导页阶段承载文案，成功才切 WebUI | EngineStartFlow.kt:445-479、MainActivity.kt:145-155 |
 | K02 | K03 | 刷新期禁启动、事务恢复、update-pending 健康 3 拍才删 usr-old 三处握手；刷新窗口内的启动请求**不得静默丢弃**（0.14.8 P1）：`start()`/`restart()` 拿不到世代所有权时按 destroyed/running 分开处置，running 走 boot-fail 留痕 + 有界等待后自动续跑；安全模式重启在停旧引擎前先判事务 journal | EngineManager.kt:813、1344-1369；EngineStartFlow.kt:700、1580 |
@@ -441,7 +441,7 @@ sequenceDiagram
 | K02 | UndoGate | 看门狗 UNDO、启动超时与客户端插件树失败共用闸门：可点名时外科拔除非 Hard 插件；整份回撤只用当前 snapshot fingerprint 下的壳侧 HEALTHY known-good ID；被拒后复位锁存以继续引擎重试 | EngineService.kt:207-293、EngineStartFlow.kt:345-390、UndoGate.kt:278-434 |
 | K02 | 通知链 NotifyStore/NotifyCenter | 每拍按字节偏移消费 .task-done.ndjson，双读不双发 | WatchdogV2.kt:258-309、NotifyCenter.kt:188 |
 | K02 | 控制载体 ControlCarrier | 随前台引擎服务起停，a11y 关着也承载 browser*/vd* | EngineService.kt:43 |
-| K02 | ConsoleSession | 复用 usrDir 与 shellEnv 起交互 shell，不起第二个引擎 | ConsoleSession.kt:33-50 |
+| K02 | ConsoleSession | 复用 usrDir 与 shellEnv 起交互 shell，不起第二个引擎；输出经 ConsoleAnsiStripper 剥掉控制序列后上屏（页面是纯文本容器） | ConsoleSession.kt:32-47 |
 | K02 | 门禁 check-boot-budget | files/boot-segments.log 是该门禁的唯一产物 | LogCollector.kt:395-424 |
 | K03 | 引导与启动 | refreshSnapshot 的进度/失败文案与恢复前置由启动流拉起，刷新期 snapshotRefreshing 闸门禁止拉引擎 | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:427 |
 | K03 | 引擎探活与看门狗 | 每 5 秒一拍 onEngineProbe 驱动 .update-pending 的 usr-old 确认或回退 | app/src/main/java/com/dsharnessmobile/shell/EngineService.kt:348 |
@@ -2192,6 +2192,8 @@ app/src/main/java/com/dsharnessmobile/shell/WebUiChrome.kt
 app/src/main/java/com/dsharnessmobile/shell/WebViewShim.kt
 app/src/main/java/com/dsharnessmobile/shell/ConsoleActivity.kt
 app/src/main/java/com/dsharnessmobile/shell/ConsoleSession.kt
+app/src/main/java/com/dsharnessmobile/shell/ConsoleTerminalEnv.kt
+app/src/main/java/com/dsharnessmobile/shell/ConsoleAnsiStripper.kt
 app/src/main/java/com/dsharnessmobile/shell/BootReceiver.kt
 app/src/main/java/com/dsharnessmobile/shell/ShimmerTextView.kt
 app/src/main/java/com/dsharnessmobile/shell/DsUi.kt
