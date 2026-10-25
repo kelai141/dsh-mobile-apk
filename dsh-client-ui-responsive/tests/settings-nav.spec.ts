@@ -186,6 +186,22 @@ describe('重新打开设置后不沿用旧历史', () => {
   })
 })
 
+describe('从列表进入任意分区后返回，应回到列表（不得跳去通用设置）', () => {
+  it('进入「开发者选项」后返回 -> home，而不是停在通用设置', async () => {
+    // 上游默认把第一行（通用设置）标成 aria-current，进详情页后它才挪到目标行。
+    // 过渡期若照常记账，会把通用设置误记成「上一页」——真机表现为从任何二级页返回都跳通用设置。
+    const handle = buildPanel(['通用设置', '开发者选项'], '通用设置')
+    nav = new MobileSettingsNav()
+    nav.attach()
+    await settle()
+    handle.rows.get('开发者选项')!.click()
+    await settle()
+    back(handle.panel).click()
+    await settle()
+    expect(handle.panel.getAttribute('data-dsh-settings-level'), '应回到列表').toBe('home')
+  })
+})
+
 describe('二级页之间跳转与逐页返回', () => {
   it('详情页里换到另一个分区后，返回回到上一页而不是列表', async () => {
     const handle = buildPanel(['通用设置', '关于'], '通用设置')

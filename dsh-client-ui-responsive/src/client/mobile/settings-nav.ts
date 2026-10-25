@@ -241,6 +241,14 @@ export class MobileSettingsNav {
   private currentLabel: string | null = null
   /** 上一个二级页分区名：返回键据此回到「上一页」而不是一路退回列表。 */
   private previousLabel: string | null = null
+  /**
+   * 当前详情页是否已经「落定」：`aria-current` 追上了用户点的那一行。
+   *
+   * 刚进详情页时上游的 `aria-current` 还停在默认的第一行（通用设置），要等它挪到目标行。
+   * 这段过渡期如果照常记账，就会把「通用设置」误记成上一页——表现为**从任何二级页返回
+   * 都跳到通用设置**（用户反馈）。
+   */
+  private settled = false
   /** 面板刚打开、用户还没动过：此时压掉上游默认选中行的背景（不改 aria-current）。 */
   private freshPanel = false
   /** 刚进入二级页时先上屏的标题（等上游把 `aria-current` 挪到目标行后即可撤下）。 */
@@ -368,6 +376,7 @@ export class MobileSettingsNav {
           // 再按一次返回又跳回 B（往返循环，永远回不到列表）。
           this.previousLabel = null
           this.currentLabel = previous
+          this.settled = true
           this.pendingTitle = previous
           ;(row as HTMLElement).click()
           return
@@ -394,6 +403,7 @@ export class MobileSettingsNav {
     // 返回键会跳到用户根本没去过的分区。
     this.currentLabel = rowLabel(button) || null
     this.previousLabel = null
+    this.settled = false
     this.level = LEVEL_DETAIL
     this.focusTarget = 'back'
     this.sync()
@@ -403,6 +413,7 @@ export class MobileSettingsNav {
     this.level = LEVEL_HOME
     this.pendingTitle = null
     this.previousLabel = null
+    this.settled = false
     this.focusTarget = 'row'
     this.sync()
   }
@@ -598,9 +609,15 @@ export class MobileSettingsNav {
     }
     const activeLabel = rowLabel(panel.querySelector(ACTIVE_ROW_SELECTOR) ?? panel.ownerDocument.createElement('span'))
     // 记录分区切换：详情页里从 A 换到 B 时把 A 记成「上一页」，返回键据此回到 A。
+    // 但进入详情页后的过渡期（aria-current 还在默认第一行）不记，否则每个分区都会把
+    // 「通用设置」误记成上一页。
     if (activeLabel !== '') {
-      if (this.currentLabel !== null && activeLabel !== this.currentLabel) this.previousLabel = this.currentLabel
-      this.currentLabel = activeLabel
+      if (!this.settled) {
+        if (activeLabel === this.currentLabel) this.settled = true
+      } else if (activeLabel !== this.currentLabel) {
+        this.previousLabel = this.currentLabel
+        this.currentLabel = activeLabel
+      }
     }
     if (this.pendingTitle !== null) {
       this.writeTitle(title, this.pendingTitle)
