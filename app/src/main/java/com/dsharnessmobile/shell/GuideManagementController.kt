@@ -43,6 +43,9 @@ internal class GuideManagementController(
       activity.startActivity(Intent(activity, ConsoleActivity::class.java))
     }
     row(t("插件管理", "Plugins"), t("启停与配置", "Enable and configure")) { showPlugins() }
+    // 软件源（issue：移动端手动改源门槛高）。放在壳侧而不是引擎 Web UI：
+    // 换源只改快照里的一个文本文件，引擎坏了也应该能换。不新增桥方法、不新增 control op。
+    sourceRow()
     management.addView(updateBlock())
     row(t("存储管理", "Storage"), t("数据、容量与导出", "Data, space, exports")) { showStorage() }
     // 启动页管理（0.14.9）：开屏视频与「打开应用后自动启动」属于启动面，
@@ -136,6 +139,64 @@ internal class GuideManagementController(
 
   fun toggle() {
     if (destination == "home") navigate("management") else navigate("home")
+  }
+
+  /**
+   * 软件源行：显示当前源，点一下循环切换。
+   *
+   * 为什么用"循环"而不是弹出选择列表：这个面板的既有交互全是"点一行做一件事"
+   * （语言行也是循环三态）。换源需要跑一次 apt-get update（实测 2 秒级），
+   * 三态循环 + 状态回显足够，且不需要新造一个选择器页面。
+   *
+   * 为什么状态要回显：换源是**会失败**的操作（源不可达即回滚）。
+   * 只给一个动作不给结果，用户无法知道到底换没换成——语言行可以这么写，这里不行。
+   */
+  private fun sourceRow() {
+    val engine = EngineManager(activity, EngineManager.ensurePickToken())
+    val words = column().apply { setPadding(dp(20), dp(12), dp(20), dp(12)) }
+    val title = label(t("软件源", "Package source"), 16f).apply { setPadding(0, 0, 0, 0) }
+    val value = label(sourceSummary(engine.usrDir), 13f).apply {
+      setPadding(0, dp(4), 0, 0)
+      setTextColor(activity.getColor(R.color.ds_text_secondary))
+    }
+    words.addView(title)
+    words.addView(value)
+    val card = LinearLayout(activity).apply {
+      orientation = LinearLayout.HORIZONTAL
+      gravity = Gravity.CENTER_VERTICAL
+      setPadding(dp(20), dp(12), dp(20), dp(12))
+      minimumHeight = dp(72)
+      background = DsUi.ripple(DsUi.roundRect(activity.getColor(R.color.ds_surface), dp(8).toFloat()), activity.getColor(R.color.ds_accent_soft))
+      layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) }
+      isClickable = true
+      isFocusable = true
+      contentDescription = t("软件源", "Package source") + "，" + sourceSummary(engine.usrDir)
+      addView(words, LinearLayout.LayoutParams(0, -2, 1f))
+      val action = label(t("切换", "Change"), 14f).apply { setTextColor(activity.getColor(R.color.ds_accent)) }
+      addView(action)
+      setOnClickListener {
+        // 换源要跑 apt-get update（秒级），期间禁用回执避免用户重复点出并发写。
+        isEnabled = false
+        action.text = t("切换中…", "Switching...")
+        Thread {
+          val next = SourceSettings.nextMirror(engine.usrDir)
+          val result = SourceSettings.switchTo(activity, next)
+          activity.runOnUiThread {
+            value.text = if (result.ok) sourceSummary(engine.usrDir) else result.message
+            action.text = t("切换", "Change")
+            isEnabled = true
+          }
+        }.apply { isDaemon = true }.start()
+      }
+    }
+    management.addView(card)
+  }
+
+  /** 当前源的展示文案：认识就写名字，不认识就如实说"自定义"而不是猜。 */
+  private fun sourceSummary(prefix: java.io.File): String {
+    val current = SourceSettings.currentMirror(prefix)
+      ?: return t("自定义（未在清单内）", "Custom (not in list)")
+    return if (AppLanguage.mode(activity) == AppLanguage.MODE_EN) current.labelEn else current.labelZh
   }
 
   /** Language row: a tap cycles system -> zh -> en for both the shell and dsh. */
