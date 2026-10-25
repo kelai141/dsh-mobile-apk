@@ -113,7 +113,12 @@ export class SettingsDocumentAction {
   attach(): void {
     document.addEventListener('click', this.onClick, true)
     this.observer?.disconnect()
-    this.observer = new MutationObserver(() => this.hideUpstreamAction())
+    // 观察器必须挂在 body 上（要能看见对话框出现），但**只有这波变更碰到对话框才扫按钮**。
+    // 设置对话框开着时聊天仍在流式输出，body 下每秒几十次变更——旧实现每次都把对话框里的
+    // 按钮全扫一遍，而这些变更根本没碰对话框（判据见 touchedSettingsDialog）。
+    this.observer = new MutationObserver((records) => {
+      if (this.touchedSettingsDialog(records)) this.hideUpstreamAction()
+    })
     this.observer.observe(document.body, { childList: true, subtree: true })
     this.hideUpstreamAction()
   }
@@ -125,6 +130,33 @@ export class SettingsDocumentAction {
   }
 
   private observer?: MutationObserver
+
+  /**
+   * 这波 DOM 变更是否碰到了设置对话框（判据只看 mutation records，不做子树遍历）。
+   *
+   * 为什么不能沿用「每次都扫」：对话框开着时聊天流式输出会持续改写 body 下的节点，
+   * 旧实现每次都把 `dialog.querySelectorAll('button')` 跑一遍并按 textContent 逐个 trim。
+   * 这些变更绝大多数与对话框无关，扫了等于白跑。
+   *
+   * 反过来也必须覆盖真实需要的两种变更：
+   *  1. 变更发生在对话框内部（切换分区时表头按钮被重建）；
+   *  2. 对话框本身刚被挂上来（新增节点是对话框、或其祖先、或其后代）。
+   *
+   * 判据只用 records 里的 target/addedNodes 做 contains 比较，不额外查 DOM。
+   */
+  private touchedSettingsDialog(records: MutationRecord[]): boolean {
+    const dialog = document.querySelector('[data-dsh-settings-dialog]')
+    if (dialog === null) return false
+    for (const record of records) {
+      const target = record.target
+      if (target === dialog || dialog.contains(target)) return true
+      for (const node of record.addedNodes) {
+        if (node === dialog || dialog.contains(node)) return true
+        if (node instanceof Element && node.contains(dialog)) return true
+      }
+    }
+    return false
+  }
 
   /**
    * 0.15.0 用户定例：入口收敛到「设置 → 开发者选项 → 配置文件」那一行。
