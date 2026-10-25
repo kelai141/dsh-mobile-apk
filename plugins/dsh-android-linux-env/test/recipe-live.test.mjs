@@ -110,7 +110,10 @@ test('#222：环境 exact 路由在读取状态/配方前拒绝未认证与伪�
     assert.ok(route, '路由必须注册：' + path)
     const unauthorized = { code: 0, body: '', headers: {}, writeHead(c, h) { this.code = c; this.headers = h ?? {} }, end(b) { this.body = b ?? '' } }
     await route.handler({ method: 'GET', headers: { host: '127.0.0.1:4145' } }, unauthorized)
-    assert.equal(unauthorized.code, 401, path + ' 未认证必须 401')
+    // connection 服务缺席时，authorizeMobileRoute 走 fail-closed，一律 403（bridge route-auth.ts:
+    // 「任何异常一律 403」）。原断言写的 401 是 connection **在场**、只缺 browser-session 的形态；
+    // 本用例构造的正是 connection=undefined，故期望值必须是 403。
+    assert.equal(unauthorized.code, 403, path + ' 未认证必须 403（connection 缺席时 fail-closed）')
     assert.equal(unauthorized.headers['cache-control'], 'no-store')
     assert.ok(!unauthorized.body.includes('workspace') && !unauthorized.body.includes('profilePatch'), path + ' 未认证不得泄漏环境内容')
 
