@@ -333,6 +333,9 @@ class EngineManager(private val context: Context, private val pickToken: String?
         filesDir,
         SnapshotTransaction.Marker(SnapshotTransaction.Phase.STAGED, fingerprint, startedAt),
       )
+      // 软件源是 usr 树里的用户选择，而下面这次 swap 会**整体替换 usr**：
+      // 必须在换树前记下意图，换树后重放，否则用户换的源会在每次升级时被抹回出厂值。
+      val rememberedSource = SourceSettings.captureSelection(usrDir)
       val swapNotes = SnapshotTransaction.swap(
         filesDir = filesDir,
         stagedRoot = stage,
@@ -347,6 +350,11 @@ class EngineManager(private val context: Context, private val pickToken: String?
       )
       // #214：profiles 合并期间的工厂语义纠正逐条留档（升级现场可追溯，不只依赖 UI 文案）。
       for (note in swapNotes) LogCollector.log(TAG, "profile patch reconciled during swap: " + note)
+      // 重放用户选的软件源（见 rememberedSource 处的说明）。失败不影响刷新结果。
+      if (rememberedSource != null) {
+        val replayed = SourceSettings.replaySelection(usrDir, rememberedSource)
+        LogCollector.log(TAG, "source mirror replayed after snapshot refresh: " + rememberedSource + " ok=" + replayed)
+      }
       // Commit point: the fingerprint is durable only after the swap completed.
       writeFingerprint(fingerprint)
       SnapshotTransaction.finish(filesDir)
