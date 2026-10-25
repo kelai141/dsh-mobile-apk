@@ -31,8 +31,12 @@ import org.json.JSONObject
  * [forwardMotion] 换算成远端视图坐标后跨 Binder 重放；坐标换算 = 平移宿主矩形原点 +
  * 缩放到该 tab 投影尺寸。
  *
- * 线程模型：Binder 调用在调用方线程（BrowserHost 主线程）同步执行；回调到达 binder
- * 线程后立即转存，派发统一走构造时给定的 listener（由 BrowserHost 指定线程语义）。
+ * 线程模型：触摸转发 [forwardMotion] 是 oneway（issue #540）——宿主 SurfaceView 的触摸
+ * 回调只做一次非阻塞 Binder 投递就返回，**不再有 UI 线程上的同步 Binder 往返**；触摸回调
+ * 恒返回「已消费」，投递是否真被远端处理不可知（合帧与重放由渲染进程负责）。其余原语
+ * （evaluateJs/dispatchTap/dispatchKey/capture/tabState）仍同步执行，因为它们需要回执。
+ * 回调到达 binder 线程后立即转存，派发统一走构造时给定的 listener（由 BrowserHost 指定
+ * 线程语义）。
  */
 internal class RemoteRendererHost(
   context: Context,
@@ -202,22 +206,29 @@ internal class RemoteRendererHost(
   private fun forwardMotionOfActiveTab(surface: SurfaceView, event: MotionEvent): Boolean {
     val tabId = activeInputTab ?: return false
     val api = renderer ?: return false
+    // 没有投影尺寸就无法换算坐标，这类事件只能留给上层（返回 false 表示未消费）。
     val size = projectionSizes[tabId] ?: return false
     val rect = visibleRect(surface)
     if (rect.isEmpty || rect.width() <= 0 || rect.height() <= 0) return false
     val mapped = MotionEvent.obtain(event)
-    mapped.offsetLocation(-rect.left.toFloat(), -rect.top.toFloat())
-    val scaleX = size.first.toFloat() / rect.width()
-    val scaleY = size.second.toFloat() / rect.height()
-    mapped.setLocation(mapped.x * scaleX, mapped.y * scaleY)
-    val handled = runCatching {
-      api.forwardMotion(
-        tabId, mapped.actionMasked, mapped.downTime, mapped.eventTime,
-        mapped.x, mapped.y, mapped.pressure, mapped.size, mapped.metaState,
-      )
-    }.getOrDefault(false)
-    mapped.recycle()
-    return handled
+    try {
+      mapped.offsetLocation(-rect.left.toFloat(), -rect.top.toFloat())
+      val scaleX = size.first.toFloat() / rect.width()
+      val scaleY = size.second.toFloat() / rect.height()
+      mapped.setLocation(mapped.x * scaleX, mapped.y * scaleY)
+      // oneway：投递即返回，没有返回值可读（Binder 已死才可能抛异常，异常也只吞掉）。
+      runCatching {
+        api.forwardMotion(
+          tabId, mapped.actionMasked, mapped.downTime, mapped.eventTime,
+          mapped.x, mapped.y, mapped.pressure, mapped.size, mapped.metaState,
+        )
+      }
+    } finally {
+      mapped.recycle()
+    }
+    // 有 tabId 且拿到投影尺寸就按「已消费」返回：一次 MOVE 若回 false，系统会认为
+    // 本次手势被放弃，后续 MOVE 直接不再派发——手势就断在半路。
+    return true
   }
 
   private fun visibleRect(surface: View): Rect {

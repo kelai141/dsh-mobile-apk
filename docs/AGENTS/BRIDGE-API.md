@@ -48,6 +48,18 @@ exportConfig返回实际path与可能含provider密钥的共享目录警告hint�
 
 页面恢复由ForegroundPageRecoveryPolicy限定前台generation和一次quiet retry/recreate，不把destroyed WebView重新reload；Activity recreation重绑所有holder且保留userClosed/userShutdown，不重启共享引擎。新增fixture仅登记、未执行；详见 [外部测试需求](<docs/0.14.3-TEST-REQUIREMENTS.md>)。
 
+### 2.4 tier-2 浏览器兼容档的渲染器契约（IBrowserRenderer，issue #540）
+
+tier-2（`isolationTier=process-suffix`）把浏览器视图放在 `:browser` 进程，主进程经
+`app/src/main/aidl/com/dsharnessmobile/shell/IBrowserRenderer.aidl` 驱动它。这份 AIDL 不属
+`androidBridge`/`consoleBridge` 门禁面，但它是桥协议，签名与语义变更同样受本档约束。
+
+| 方法 | 签名 | 语义边界 |
+|---|---|---|
+| `forwardMotion` | **`oneway void`**（`tabId, action, downTime, eventTime, x, y, pressure, size, metaState`） | 每帧触摸路径。oneway 的代价是**返回值语义丢失**：主进程触摸回调恒按「已消费」处理（一次 MOVE 回 false 会被系统当成手势结束，后续 MOVE 直接不再派发），投递结果不计入任何 UI 线程。合帧在渲染侧 `MotionCoalescer`：DOWN/UP/CANCEL 保序保留、连续 MOVE 只留最后一条、队列上限 64 且溢出优先丢最老的 MOVE。改前是同步 `boolean` + 渲染侧 `FutureTask.get(10s)`，一次滑动 20 余次同步 Binder 往返，渲染主线程忙时把主进程主线程一起挂住（issue #540）。 |
+| `dispatchTap` / `dispatchKey` | 保持 `boolean`（同步） | 一次性工具调用，返回值要如实报给模型，且不在每帧触摸路径上，因此不走 oneway。 |
+| 其余（`start`/`ensureTab`/`loadUrl`/`relayout`/`evaluateJs`/`capture`/`tabState`/`tabIds`/`flushCookies`/`clearBrowsingData`） | 同步回执 | 调用方需要「做了没有」的真实结算，选型理由同上。 |
+
 ## 3. 历史增量（不作为当前构建或验收证据）
 
 ## 0.13.3 W2/W3/W10 桥协议增量

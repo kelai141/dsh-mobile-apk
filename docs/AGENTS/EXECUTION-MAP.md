@@ -2101,6 +2101,8 @@ app/src/main/java/com/dsharnessmobile/shell/BrowserIsolationTier.kt
 app/src/main/java/com/dsharnessmobile/shell/BrowserProcessService.kt
 app/src/main/java/com/dsharnessmobile/shell/BrowserTabResources.kt
 app/src/main/java/com/dsharnessmobile/shell/RemoteRendererHost.kt
+app/src/main/java/com/dsharnessmobile/shell/MotionCoalescer.kt
+app/src/test/java/com/dsharnessmobile/shell/MotionCoalescerTest.kt
 app/src/debug/java/com/dsharnessmobile/shell/BrowserRendererHostActivity.kt
 app/src/androidTest/java/com/dsharnessmobile/shell/BrowserRendererServiceTest.kt
 -->

@@ -2075,3 +2075,20 @@ JVM 边界测试在 `EngineBootInstrumentationTest`（取值与 clamp 边界、�
 341. **把 APK 更新入口从"开发者选项"提级时必须同时补导航短说明与图标**：`settings-nav.ts` 有两张按 `index.ts` 里注册的 **label 字面量**为键的表——`OWN_SECTION_DESCRIPTIONS`（一级行短说明，zh/en 各一份）与 `OWN_SECTION_ICONS`（内联 SVG 几何，取自上游 artwork）。新增一个 `settings.section` 注册项若只改 `index.ts`：`settings-nav.spec` 中"我方自有分区必须拿到短说明"的用例当场变红；图标则**不会红**（它的"图标互不相同"用例只构造三行，新分区不在其中），表现为新分区悄悄退回上游通用齿轮。修法：三处同改（注册 + 两张表），且图标几何必须逐字取自上游（`ui-primitives/src/icons/index.tsx` 的 `*OutlineArtwork`，viewBox 与 stroke 宽度同一档），不许自造。另注意该模块的 `sectionIcon()` 只支持"**首段**填充、其余描边"，目标图标的填充段不在首位时要么换图标、要么在注释里写明为什么表达不了。
 
 342. **多 agent 并行改同一个 Gradle 工程时，单测必须串行**：多个构建同时写 `app/build` 时，`bundleDebugClassesToRuntimeJar` 会在 `intermediates/runtime_app_classes_jar/.../classes.jar` 上撞文件锁，报 `FileSystemException: 另一个程序正在使用此文件`。这个形态**看起来像构建失败**（编译阶段是绿的），极易被误判成自己的代码有问题，从而去改本来没坏的源码。同样地，上一轮测试留下的 Kotlin/Java 守护进程会占着 `build/test-results/.../binary/output.bin`，让 **下一轮**在任何代码改动前就以 `Unable to delete directory` 失败。纪律：① 并行开发时由一人统一串行跑单测，其他人只做静态自查并如实写"未跑 Gradle"；② 复跑前先清 `build/test-results/testDebugUnitTest`，并确认没有上一轮的守护进程在跑；③ 归因前先看结果 XML 的 mtime 是不是本轮——拿旧 XML 当新结果会得出完全错误的结论。
+
+343. **每帧触摸路径上的同步 Binder：一次滑动 20 余次往返，把主进程主线程挂到 ANR 边缘（issue #540，2026-10-25）**
+
+现象：tier-2（`process-suffix`）浏览器档里滑一次网页，主进程主线程整段停顿，偶发 `ANR in com.dsharnessmobile.shell`；渲染进程主线程被占满时必卡（issue 复现者在 MuMu 上实测单事件约 180ms，一次滑动约 4s）。
+
+真因：`IBrowserRenderer.forwardMotion` 声明成同步 `boolean`，主进程宿主 SurfaceView 的 `onTouchListener` 在 UI 线程同步调用它；渲染侧实现走 `onMain{}`（`FutureTask.get(10s)` 排队等渲染进程主线程）。一次滑动约 22 条事件 = 22 次同步 Binder 往返，把「渲染进程忙」原样传导成「调用方主线程阻塞」。返回值本身没人真正需要：触摸回调只关心「要不要继续收后续 MOVE」——回 false 会被系统当成手势结束。
+
+修法（维护者在 issue 评论里拍板的最小改法）：
+1. `forwardMotion` 改 `oneway void`，投递即返回；主进程触摸回调恒按「已消费」返回。`dispatchTap`/`dispatchKey` 保持同步 `boolean`：一次性工具调用、返回值要如实报给模型，不在每帧路径上。
+2. 渲染侧新增纯 Kotlin `MotionCoalescer` 与按 tab 的 `TabMotionQueues`：DOWN/UP/CANCEL 保序保留、连续 MOVE 只留最后一条、上限 64 且溢出优先丢最老的 MOVE；binder 线程只入队，主线程 drain 时逐条 `obtain`/`dispatchTouchEvent`/`recycle`，取不到 live tab 整批丢弃；destroyTab / destroyAll / onRenderProcessGone 即 `forget`。
+
+复验证据：
+- 代码层：`MotionCoalescerTest` 8 例全绿；**负控**把合帧判据改成「新 MOVE 追加」后 3 例立刻变红（`consecutiveMovesCollapseToTheSingleLastOne` / `downMoveMoveUpKeepsOrderAndCoalescesTheMoves` / `tabsAreIsolatedFromEachOther`）；`check-bridge-symmetry` / `check-code-map` / `check-kotlin-test-count` 均 PASS。
+- 设备层（MuMu `127.0.0.1:16416`，SDK 35，WebView 110.0.5481.154）：tier-2 确已激活（`isolationTier=process-suffix`、`multiProfileSupported=false`、`:browser` 进程在场）。真实 `adb shell input swipe` 经 oneway 路径把中文维基百科页滚到底（`scrollY` 0 → 2118，6 次滑动），宿主进程主线程 `delayacct_blkio_ticks` 增量 **0**，5 次滑动期间 utime 仅 0.19s；页面 JS 忙等 9s 期间连发 3 次滑动，主线程仍 0 阻塞、`logcat` 无任何 ANR / `Input dispatching timed out` 行。
+- 同机代价对照：单次同步 AIDL 往返实测 **24.4ms/次**（`tabState` 20 次均摊）；与旧实现同一条 `onMain{FutureTask.get(10s)}` 通道的 `dispatchTap` 在「页面 JS 忙等」窗口内阻塞 81.9ms 才返回（该通道确实排在渲染进程主线程后面）。按一次滑动 22 条事件算，旧实现的同步代价下界约 0.54s，忙时按 issue 的 180ms/次约 4s。
+- 未量到（如实登记）：没能在本机把 `:browser` 主线程占满到 9s 级复现「必 ANR」档——JS 忙等占住的是 sandboxed renderer 进程，不是 `:browser` 主线程；「改动前」同机对照包未单独构建，改动前的量化取自本机同步往返实测与 issue 复现者数据。
+- 既存限制（不在本 PR 范围）：生产布局里 `BrowserHost` 把宿主 SurfaceView 加到 root 的 index 0，引擎 WebView 全屏压在上面；`browserHostShow` + 手动 stage 下投影既不可见、也收不到 `input swipe`（本轮实测远端 `scrollY` 不动）。设备层触摸测量因此在 debug 源集的 `BrowserRendererHostActivity`（SurfaceView 在最上层、同一条 forwardMotion 路径）上完成，临时取证钩子未提交。

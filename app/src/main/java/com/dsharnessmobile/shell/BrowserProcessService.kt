@@ -40,6 +40,7 @@ import java.io.FileOutputStream
 import java.util.concurrent.Callable
 import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import org.json.JSONArray
@@ -66,6 +67,10 @@ import org.json.JSONObject
  *
  * 宿主 token（spike 实锤）：ensureTab 必须携带主进程窗口 token，否则 SCVH setView 在
  * grantInputChannel 撞 INTERNAL_SYSTEM_WINDOW。
+ *
+ * 触摸路径（issue #540）：forwardMotion 是 oneway，binder 线程只入队；主线程 drain 时按
+ * [MotionCoalescer] 的合帧结果逐条重放（DOWN/UP/CANCEL 保序、连续 MOVE 只留最后一条）。
+ * 不再有「渲染进程主线程忙 → 主进程主线程跟着等」的同步 Binder 往返。
  */
 class BrowserProcessService : Service() {
 
@@ -73,6 +78,8 @@ class BrowserProcessService : Service() {
     const val SUFFIX = "dsh-browser-v1"
     private const val MAIN_TIMEOUT_S = 10L
     private const val BLOCKED_REQUEST_LOG_LIMIT = 8
+    /** 单 tab 待发触摸上限（见 [MotionCoalescer.DEFAULT_CAPACITY]）。 */
+    private const val MOTION_QUEUE_CAPACITY = MotionCoalescer.DEFAULT_CAPACITY
   }
 
   private val main = Handler(Looper.getMainLooper())
@@ -82,6 +89,10 @@ class BrowserProcessService : Service() {
   @Volatile private var allowAnonymousEngineAccess = false
   private val tabs = LinkedHashMap<String, RemoteTab>()
   private var jsSeq = AtomicInteger(0)
+
+  /** tabId → 待重放的触摸样本（binder 线程入队，主线程合帧后重放）。 */
+  private val motionQueues = TabMotionQueues(MOTION_QUEUE_CAPACITY, MotionEvent.ACTION_MOVE)
+  private val motionDrainPending = AtomicBoolean(false)
 
   override fun onCreate() {
     super.onCreate()
@@ -144,12 +155,14 @@ class BrowserProcessService : Service() {
     }
 
     override fun destroyTab(tabId: String?): String = onMain {
+      tabId?.let { motionQueues.forget(it) }
       val removed = tabs.remove(tabId)
       removed?.destroy()
       JSONObject().put("ok", true).put("tabId", tabId ?: "").put("removed", removed != null).toString()
     }
 
     override fun destroyAll() {
+      motionQueues.clear()
       onMain {
         tabs.values.forEach { it.destroy() }
         tabs.clear()
@@ -225,18 +238,23 @@ class BrowserProcessService : Service() {
       }
     }
 
+    /**
+     * oneway 触摸转发（issue #540）：只在 binder 线程入队，不撞主线程、不等待任何结算。
+     *
+     * 旧实现走 `onMain`（FutureTask.get(10s)）：一次滑动 20 余条事件 = 20 余次同步 Binder
+     * 往返，渲染进程主线程一忙，主进程主线程就跟着挂住，逼近 ANR 阈。现在投递即返回，
+     * 主线程只按合帧后的结果重放（见 [drainMotion]）。
+     */
     override fun forwardMotion(
       tabId: String?, action: Int, downTime: Long, eventTime: Long,
       x: Float, y: Float, pressure: Float, size: Float, metaState: Int,
-    ): Boolean = onMain {
-      val tab = liveTab(tabId) ?: return@onMain false
-      try {
-        val event = MotionEvent.obtain(downTime, eventTime, action, x, y, pressure, size, metaState, 1f, 1f, 0, 0)
-        tab.view.dispatchTouchEvent(event)
-        true
-      } catch (_: Throwable) {
-        false
-      }
+    ) {
+      val id = tabId?.takeIf { it.isNotBlank() } ?: return
+      motionQueues.offer(
+        id,
+        MotionCoalescer.Sample(action, downTime, eventTime, x, y, pressure, size, metaState),
+      )
+      scheduleMotionDrain()
     }
 
     override fun capture(tabId: String?, fd: ParcelFileDescriptor?, maxWidthPx: Int, maxHeightPx: Int): Boolean = onMain {
@@ -293,6 +311,44 @@ class BrowserProcessService : Service() {
     .put("suffixDirExists", File(filesDir.parentFile, "app_webview_" + SUFFIX).exists())
     .put("allowAnonymousEngineAccess", allowAnonymousEngineAccess)
     .put("tabCount", tabs.size)
+
+  /**
+   * 安排一次主线程 drain。同一批入队只排一次：已有 drain 在排/在跑时不重复 post。
+   * 允许「多排一次」的空跑（入队与置标志之间存在窗口），代价是空队列 drain，不做等待。
+   */
+  private fun scheduleMotionDrain() {
+    if (!motionDrainPending.compareAndSet(false, true)) return
+    main.post { drainMotion() }
+  }
+
+  /**
+   * 主线程重放合帧后的触摸：逐条 obtain / dispatchTouchEvent / recycle。
+   * 取不到 live tab 就整批丢弃（tab 已销毁或渲染进程已崩，事件无处可去）。
+   * 不 sleep、不等待：主线程开销 = 实际待发条数（连续 MOVE 已被合帧）。
+   */
+  private fun drainMotion() {
+    motionDrainPending.set(false)
+    for ((tabId, samples) in motionQueues.drainAll()) {
+      val tab = tabs[tabId]?.takeIf { it.alive } ?: continue
+      for (sample in samples) {
+        val event = try {
+          MotionEvent.obtain(
+            sample.downTime, sample.eventTime, sample.action, sample.x, sample.y,
+            sample.pressure, sample.size, sample.metaState, 1f, 1f, 0, 0,
+          )
+        } catch (_: Throwable) {
+          null
+        } ?: continue
+        try {
+          tab.view.dispatchTouchEvent(event)
+        } catch (_: Throwable) {
+          // 单条失败不影响后续：远端 WebView 自己决定是否消费。
+        } finally {
+          event.recycle()
+        }
+      }
+    }
+  }
 
   private fun <T> onMain(block: () -> T): T {
     val task = FutureTask(Callable { block() })
@@ -469,6 +525,7 @@ class BrowserProcessService : Service() {
           emit(id, JSONObject().put("type", "renderGone").put("reason", reason))
           // 主进程据此 destroyTab+ensureTab 重建（recycle 语义）；此处只清投影与引用。
           alive = false
+          motionQueues.forget(id)
           destroyProjection()
           view.destroy()
           return true
