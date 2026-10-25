@@ -38,6 +38,7 @@
     { "surface": "androidBridge", "method": "requestAllFilesAccess", "reason": "页面侧类型面未声明；设置页权限引导由壳侧 Intent 承担" },
     { "surface": "androidBridge", "method": "getPickToken", "reason": "页面侧类型面未声明；token 由引擎侧 pick 端点消费，页面不读" },
     { "surface": "backGateBridge", "method": "getBackAvailable", "reason": "页面侧只声明了上行 setAvailable；getter 供设备侧断言/自证，页面声明待补（本轮登记为已知缺口，不假绿）" },
+    { "surface": "consoleBridge", "method": "writeRaw", "reason": "页面走 writeKeys（编码串），不走 writeRaw：WebView 的桥在字符串参数含 \\n/\\r 时整次调用静默消失（设备实测：writeRaw(\"PLAIN\") 有输出，writeRaw(\"WITHNL\\n\") 连日志都没有），而控制台要送的方向键/Ctrl-C/Tab 全属这类字符，故页面必须先编码。writeRaw 保留给壳内 submit 与调试用（不经 JS 桥，没有该限制）。" },
     { "surface": "consoleBridge", "method": "ready", "reason": "页面不轮询 ready()：会话状态由壳侧主动 pushStatus() 推给页面（ConsoleActivity.kt:68/114），页面用推来的 state==='ready' 驱动按钮使能，故无调用点。保留为壳侧只读探针面（供调试与外部断言）；G-6 把它纳入扫描面后必须登记，否则删掉它不会有任何门禁报警" }
   ],
   "tsOnly": [],

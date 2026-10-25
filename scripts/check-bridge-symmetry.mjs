@@ -226,10 +226,11 @@ function selfTest() {
     if (!ok) st.push(label)
   }
   const surface = { id: 'consoleBridge' }
-  const shell = ['submit', 'engineStatus', 'close', 'restart', 'copyText', 'ready']
-  const page = ['engineStatus', 'submit', 'close', 'copyText', 'restart']
+  const shell = ['submit', 'engineStatus', 'close', 'restart', 'copyText', 'ready', 'resize', 'writeKeys', 'writeRaw', 'hasPty']
+  const page = ['engineStatus', 'submit', 'close', 'copyText', 'restart', 'resize', 'writeKeys', 'hasPty']
 
-  // ① 正向：真实现状（壳侧 6 / 页面调用点 5）→ 只有 ready 是 kotlinOnly，无 tsOnly。
+  // ① 正向：真实现状（壳侧 10 / 页面调用点 8）→ ready 与 writeRaw 是 kotlinOnly，无 tsOnly。
+  //    writeRaw 只由 submit 在壳内调用，页面走 writeKeys（控制字符必须编码过桥）。
   {
     const d = diffSurface(surface, shell, page)
     check('① 现状：kotlinOnly 恰为 [consoleBridge/ready]，tsOnly 为空',
@@ -244,19 +245,19 @@ function selfTest() {
       d.tsOnly.includes('consoleBridge/copyText'), JSON.stringify(d.tsOnly))
   }
 
-  // ③ 反向：仅把壳侧 6 个删到 1 个 → 其余 4 个页面调用点全部悬空（成批删也抓得住）。
+  // ③ 反向：仅把壳侧留 1 个 → 其余页面调用点全部悬空（成批删也抓得住）。
   {
     const d = diffSurface(surface, ['submit'], page)
-    check('③ 反向：壳侧只剩 submit → 其余 4 个页面调用点全部 tsOnly',
-      d.tsOnly.length === 4 && !d.tsOnly.includes('consoleBridge/submit'), JSON.stringify(d.tsOnly))
+    check('③ 反向：壳侧只剩 submit → 其余 7 个页面调用点全部 tsOnly',
+      d.tsOnly.length === 7 && !d.tsOnly.includes('consoleBridge/submit'), JSON.stringify(d.tsOnly))
   }
 
   // ④ 反向：页面调用点解析失效（jsCallMarker 改名 → 空集）→ 全部壳侧方法报 kotlinOnly
   //    （这就是「取面失效」的形态：不是静默全绿，而是整面漂移可判）。
   {
     const d = diffSurface(surface, shell, [])
-    check('④ 反向：页面取面空集 → 6 个壳侧方法全 kotlinOnly（取面失效不静默）',
-      d.kotlinOnly.length === 6, JSON.stringify(d.kotlinOnly))
+    check('④ 反向：页面取面空集 → 10 个壳侧方法全 kotlinOnly（取面失效不静默）',
+      d.kotlinOnly.length === 10, JSON.stringify(d.kotlinOnly))
   }
 
   // ⑤ 反向：只写不读的 setter 必须进 setterWithoutGetter。
@@ -288,8 +289,10 @@ function selfTest() {
   {
     const htmlPath = resolveRepoPath('dsh-mobile-apk/app/src/main/assets/console.html')
     const found = htmlPath === null ? [] : jsCallSites(readFileSync(htmlPath, 'utf8'), 'window.consoleBridge')
-    check('⑦ jsCallSites 从真 console.html 取到 5 个调用点',
-      found.length === 5 && found.includes('submit') && found.includes('engineStatus'), JSON.stringify(found))
+    check('⑦ jsCallSites 从真 console.html 取到 8 个调用点',
+      found.length === 8 && found.includes('submit') && found.includes('engineStatus'), JSON.stringify(found))
+    check('⑦b 页面用的是编码通道 writeKeys（控制字符必须编码过桥）',
+      found.includes('writeKeys'), JSON.stringify(found))
   }
 
   // ⑧ 反向：坏输入（marker 不在文本里）→ 空集，不抛错。

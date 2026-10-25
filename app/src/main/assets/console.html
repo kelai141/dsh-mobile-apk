@@ -125,6 +125,25 @@
       <button class="chip" type="button" data-cmd="df -h">df</button>
       <button class="chip" type="button" data-cmd="echo $HOME && pwd">pwd</button>
     </div>
+    <style>
+      /* 按键条：真 PTY 下这些控制字符才有意义（无 PTY 时壳侧仍会收到，但 bash 不响应）。 */
+      #ctlrow { display: flex; gap: 6px; padding: 0 12px 6px; overflow-x: auto; }
+      #ctlrow .ctl {
+        flex: 0 0 auto; min-width: 44px; padding: 6px 10px; font-size: 12px;
+        background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.14);
+        border-radius: 8px; font-family: inherit;
+      }
+      #ctlrow .ctl:active { background: rgba(255,255,255,0.2); }
+    </style>
+    <div id="ctlrow">
+      <button class="ctl" type="button" data-send="\t" title="补全">Tab</button>
+      <button class="ctl" type="button" data-send="\x03" title="中断当前程序">Ctrl-C</button>
+      <button class="ctl" type="button" data-send="\x04" title="结束输入">Ctrl-D</button>
+      <button class="ctl" type="button" data-send="\e[A" title="上一条">↑</button>
+      <button class="ctl" type="button" data-send="\e[B" title="下一条">↓</button>
+      <button class="ctl" type="button" data-send="\e[C" title="右移">→</button>
+      <button class="ctl" type="button" data-send="\e[D" title="左移">←</button>
+    </div>
     <div id="inputrow">
       <div id="cmdwrap">
         <input id="cmd" type="text" placeholder="输入命令，回车执行" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send">
@@ -276,16 +295,94 @@
     var node = document.createElement('span');
     node.textContent = '\n';
     output.appendChild(node);
-    var prompt = document.createElement('span');
-    prompt.className = 'prompt';
-    prompt.textContent = '$ ';
-    output.appendChild(prompt);
-    var echo = document.createElement('span');
-    echo.textContent = text + '\n';
-    output.appendChild(echo);
+    // 真 PTY 下 bash 自己会回显输入（还带行编辑、历史替换），页面再画一遍就成了两份。
+    // 所以这里只画换行分隔，命令本身由 PTY 的回显给出。
+    // 无 PTY 时没有回显，才需要页面补上——判据取壳侧报的 hasPty，不靠猜。
+    if (!pageHasPty) {
+      var prompt = document.createElement('span');
+      prompt.className = 'prompt';
+      prompt.textContent = '$ ';
+      output.appendChild(prompt);
+      var echo = document.createElement('span');
+      echo.textContent = text + '\n';
+      output.appendChild(echo);
+    }
     trimOutput();
     scrollBottom();
     try { window.consoleBridge.submit(text); } catch (e) {}
+  }
+
+  // ── 窗口尺寸上报（PTY 化之后才有意义）────────────────────────────────────
+  // 真 PTY 的尺寸由壳侧 stty 设定，而壳侧不知道页面的字符网格是多少：这里按当前字体
+  // 度量估算「一屏能放多少列/行」并上报。不做这一步，vim/top 会按 80x24 或 0x0 排版，
+  // 宽屏设备上表现为右侧大片空白、窄屏上表现为折行错乱。
+  // 壳侧报的"有没有真 PTY"。决定两件事：要不要自己画命令回显、按键条能不能用。
+  var pageHasPty = false;
+  var lastCols = 0, lastRows = 0;
+  function pushSize() {
+    if (!window.consoleBridge || !window.consoleBridge.resize) return;
+    var probe = document.createElement('span');
+    var cs = window.getComputedStyle(output);
+    probe.style.font = cs.font || (cs.fontSize + ' ' + cs.fontFamily);
+    probe.style.position = 'absolute';
+    probe.style.visibility = 'hidden';
+    probe.style.whiteSpace = 'pre';
+    probe.textContent = '0000000000';
+    document.body.appendChild(probe);
+    var chW = probe.getBoundingClientRect().width / 10;
+    document.body.removeChild(probe);
+    // 行高优先取计算值的像素，取不到时退回 1.2 倍字号（等宽字体的常见行距）。
+    var lineH = parseFloat(cs.lineHeight);
+    if (!lineH || isNaN(lineH)) lineH = parseFloat(cs.fontSize) * 1.2;
+    if (!chW || !lineH) return;
+    var cols = Math.max(20, Math.floor(output.clientWidth / chW));
+    var rows = Math.max(5, Math.floor(output.clientHeight / lineH));
+    if (cols === lastCols && rows === lastRows) return;
+    lastCols = cols;
+    lastRows = rows;
+    try { window.consoleBridge.resize(cols, rows); } catch (e) {}
+  }
+  /**
+   * 按键条是否可用：只有真 PTY 才有意义。
+   *
+   * 无 PTY 时 bash 不是在终端里跑的，Tab/Ctrl-C/方向键要么无效要么被当作普通字符，
+   * 留着可点的按钮等于骗点击。这里按壳侧事实禁用并给出原因。
+   */
+  function syncCtlAvailability() {
+    var hasPty = false;
+    try { hasPty = !!(window.consoleBridge && window.consoleBridge.hasPty && window.consoleBridge.hasPty()); } catch (e) {}
+    pageHasPty = hasPty;
+    var btns = document.querySelectorAll('#ctlrow .ctl');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].disabled = !hasPty;
+      btns[i].title = hasPty ? btns[i].getAttribute('data-title') || btns[i].title : '当前会话没有真 PTY，按键不生效';
+    }
+    var row = document.getElementById('ctlrow');
+    if (row) row.style.opacity = hasPty ? '1' : '0.45';
+    return hasPty;
+  }
+  // 就绪之后再问一次：会话是异步拉起的，页面脚本比 session.start() 早执行。
+  var ptyPoll = setInterval(function () {
+    if (syncCtlAvailability()) clearInterval(ptyPoll);
+  }, 500);
+  setTimeout(function () { if (!syncCtlAvailability()) setTimeout(syncCtlAvailability, 2000); }, 0);
+
+  window.addEventListener('resize', pushSize);
+  window.addEventListener('orientationchange', function () { setTimeout(pushSize, 120); });
+  setTimeout(pushSize, 0);
+
+  // 按键条：直接把控制字符写进 PTY（不经 submit，不追加换行）。
+  var ctlButtons = document.querySelectorAll('#ctlrow .ctl');
+  for (var i = 0; i < ctlButtons.length; i++) {
+    ctlButtons[i].addEventListener('click', function (e) {
+      var seq = e.currentTarget.getAttribute('data-send');
+      if (!seq) return;
+      // 必须走 writeKeys（编码串）：WebView 的桥在字符串参数含 \n/\r 时整次调用静默消失，
+      // 而按键里全是这类控制字符。编码规则见 ConsoleActivity.decodeKeySequence。
+      try { window.consoleBridge.writeKeys(seq); } catch (err) {}
+      // 把焦点还给输入框，否则连续按键要反复点。
+      if (!cmd.disabled) cmd.focus();
+    });
   }
 
   send.addEventListener('click', submit);

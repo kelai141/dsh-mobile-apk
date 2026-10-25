@@ -145,7 +145,9 @@ class ConsoleActivity : ComponentActivity() {
       // 且引擎已死时控制台仍可用，正是这条口令存在的理由。
       val action = parseSafeCommand(command)
       if (action == null) {
-        session.writeCommand(command)
+        // 同样不能带裸换行过桥（见 [writeKeys]）：命令本身来自输入框，可能含换行，
+        // 直接拼 "\n" 会让整次调用静默消失，于是提交命令失效。
+        session.writeRaw(ConsoleKeyCodec.decode(command) + "\n")
         return
       }
       val engine = EngineManager(this@ConsoleActivity)
@@ -200,5 +202,50 @@ class ConsoleActivity : ComponentActivity() {
 
     @JavascriptInterface
     fun ready(): Boolean = session.isAlive()
+
+    /**
+     * 页面尺寸变化时下发（PTY 化之后才有意义）。
+     *
+     * 不接这一步的话 PTY 初始是 0x0 或 80x24 的固定值，vim/top 会按错误宽度排版——
+     * 界面上看就是花屏或半屏空白。
+     */
+    @JavascriptInterface
+    fun resize(cols: Int, rows: Int) {
+      session.resize(cols, rows)
+    }
+
+    /**
+     * 写入一段按键。**参数必须是编码后的串**，不能直接传控制字符。
+     *
+     * 为什么：Android WebView 的 @JavascriptInterface 在字符串参数含 \n / \r 时
+     * **整个调用不会到达 Java 侧**——不抛异常、不留日志，桥接调用静默消失。
+     * 设备实测：writeRaw("PLAIN") 有日志，"WITHNL\n" 与 "WITHCR\r" 连日志都没有。
+     * 而控制台要送的方向键、Ctrl-C、Tab 全是这类字符，所以必须换一种编码。
+     *
+     * 编码规则（见 [decodeKeySequence]）：
+     *   \n -> LF，\r -> CR，\t -> TAB，\\ -> 反斜杠，\e -> ESC(0x1B)，
+     *   \xHH -> 原始字节。其余字符原样（含可打印的 \u001b 以 \e 表达）。
+     *
+     * @param encoded 编码后的按键串。
+     */
+    @JavascriptInterface
+    fun writeKeys(encoded: String) {
+      session.writeRaw(ConsoleKeyCodec.decode(encoded))
+    }
+
+    /**
+     * 写入原样文本（不追加换行）。
+     *
+     * 仅用于**不含控制字符**的场景：参数里一旦有 \n/\r，WebView 桥会静默吞掉整次调用。
+     * 页面侧一律走 [writeKeys]（编码串）；这个方法留给壳内与调试。
+     *
+     * @param text 纯文本。
+     */
+    @JavascriptInterface
+    fun writeRaw(text: String) = session.writeRaw(text)
+
+    /** 当前是否真 PTY（页面据此决定按键条是否可用）。 */
+    @JavascriptInterface
+    fun hasPty(): Boolean = session.hasPty()
   }
 }

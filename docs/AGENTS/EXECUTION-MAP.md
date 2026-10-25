@@ -2081,6 +2081,7 @@ node scripts/verify-client-plugin-fail-recovery.mjs --self-test   # 客户端插
 
 <!-- COVERAGE
 scripts/verify-console-terminal-env.mjs
+scripts/verify-console-pty.mjs
 scripts/verify-source-mirror.mjs
 scripts/check-api-route-auth-artifact.test.mjs
 scripts/lib/snapshot-route-auth.mjs
@@ -2195,6 +2196,8 @@ app/src/main/java/com/dsharnessmobile/shell/WebUiChrome.kt
 app/src/main/java/com/dsharnessmobile/shell/WebViewShim.kt
 app/src/main/java/com/dsharnessmobile/shell/ConsoleActivity.kt
 app/src/main/java/com/dsharnessmobile/shell/ConsoleSession.kt
+app/src/main/java/com/dsharnessmobile/shell/ConsolePty.kt
+app/src/main/java/com/dsharnessmobile/shell/ConsoleKeyCodec.kt
 app/src/main/java/com/dsharnessmobile/shell/ConsoleTerminalEnv.kt
 app/src/main/java/com/dsharnessmobile/shell/ConsoleAnsiStripper.kt
 app/src/main/java/com/dsharnessmobile/shell/SourceMirror.kt
