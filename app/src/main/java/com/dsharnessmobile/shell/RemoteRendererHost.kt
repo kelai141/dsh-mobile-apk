@@ -279,16 +279,52 @@ internal class RemoteRendererHost(
   fun dispatchKey(tabId: String, keyCode: Int): Boolean =
     runCatching { renderer?.dispatchKey(tabId, keyCode) == true }.getOrDefault(false)
 
-  /** 截图 → 字节（自建管道、读远端 PNG；失败回 null）。 */
+  /**
+   * 截图 → 字节（自建管道、读远端 PNG；失败回 null）。
+   *
+   * 读端必须与 `capture` 的 binder 调用**并发**跑（issue #607 修）：远端在调用内同步
+   * `bitmap.compress` 写管道，而管道缓冲只有 64KiB——「先等 capture 返回、再开始读」会让
+   * 远端写阻塞在半途、宿主等 binder 永不读，双端互等（宿主主线程随即 ANR）。
+   *
+   * 每个出口（成功 / 回执失败 / 异常 / join 超时 / 被中断）都必须把读线程和两个文件描述符
+   * 一起收干净：远端在回执失败或超时放弃后**仍可能持有写端**，直接 return 会把它留成孤儿
+   * 读线程，每失败一次积一个线程加一对 fd。取消有界与轮询细节见 [CapturePipeDrain]。
+   */
   fun capturePng(tabId: String, maxWidth: Int, maxHeight: Int): ByteArray? = runCatching {
     val api = renderer ?: return@runCatching null
     val pipe = android.os.ParcelFileDescriptor.createPipe()
-    try {
-      if (!api.capture(tabId, pipe[1], maxWidth, maxHeight)) return@runCatching null
-    } finally {
-      pipe[1].close()
-    }
-    java.io.FileInputStream(pipe[0].fileDescriptor).use { it.readBytes() }
+    val readerStream = android.os.ParcelFileDescriptor.AutoCloseInputStream(pipe[0])
+    // 空闲排空（30s）是失败/超时路径的保险丝：接不到任何新字节就放弃读线程，
+    // 不顺带拒绝「回执为真但 PNG 为 0 字节」这种正常情形。
+    val drained = CapturePipeDrain.drain(
+      read = { buffer, cancelled ->
+        val poll = android.system.StructPollfd().apply {
+          fd = pipe[0].fileDescriptor
+          events = (android.system.OsConstants.POLLIN or android.system.OsConstants.POLLHUP).toShort()
+        }
+        var idleMs = 0L
+        while (!cancelled.get()) {
+          val ready = android.system.Os.poll(arrayOf(poll), CapturePipeDrain.POLL_INTERVAL_MS)
+          if (ready < 0) throw java.io.IOException("capture pipe poll failed")
+          if (ready > 0 || cancelled.get()) break
+          idleMs += CapturePipeDrain.POLL_INTERVAL_MS.toLong()
+          if (idleMs >= CapturePipeDrain.DEFAULT_JOIN_TIMEOUT_MS) throw java.io.IOException("capture pipe idle timeout")
+        }
+        if (cancelled.get()) return@drain CapturePipeDrain.EOF
+        val errors = android.system.OsConstants.POLLERR or android.system.OsConstants.POLLNVAL
+        if (poll.revents.toInt() and errors != 0) throw java.io.IOException("capture pipe failed")
+        readerStream.read(buffer)
+      },
+      // 顺序要紧：先关写端（远端写端已关时才是真 EOF），再关读端（打断轮询中的读线程）。
+      closeReader = {
+        runCatching { pipe[1].close() }
+        runCatching { readerStream.close() }
+      },
+      startCapture = { api.capture(tabId, pipe[1], maxWidth, maxHeight) },
+    )
+    // 空载荷判据来自 #582 的既有语义（回执为真却拿到 0 字节按失败处理），本 PR 只做线程与
+    // 描述符回收，**没有**改这个语义——下面这条 takeIf 在 #582 之前就在线上了。
+    drained?.takeIf { it.isNotEmpty() }
   }.getOrNull()
 
   /** tab 状态快照（JSON；远端不可达回 null）。 */
