@@ -141,6 +141,35 @@ class RendererCapturePipeTest {
   }
 
   /**
+   * 判据 6（远端释放 Binder 副本）：远端 `RemoteTab.capture` 必须关闭 Binder 传进来的写端。
+   *
+   * `FileOutputStream(fd.fileDescriptor)` 包出来的流**不会**关闭底层描述符，只关流等于把 Binder
+   * 复制出来的那份写端留在远端进程里——宿主再怎么关自己的写端，管道仍有一个写端开着，读端永远
+   * 等不到 EOF，成功截图会被 join 超时误判成失败（#630 真机实测：15.248 秒后返回 null）。
+   *
+   * 判据：`AutoCloseOutputStream` 关闭后，底层 fd 必须不可再用。
+   */
+  @Test
+  fun remoteCaptureReleasesItsBinderDescriptor() {
+    val pipe = ParcelFileDescriptor.createPipe()
+    val readEnd = pipe[0]
+    val writeEnd = pipe[1]
+    try {
+      val probe = ParcelFileDescriptor.dup(writeEnd.fileDescriptor)
+      val rawFd = probe.fileDescriptor
+      ParcelFileDescriptor.AutoCloseOutputStream(probe).use { it.write(1) }
+      val stillOpen = runCatching {
+        java.io.FileInputStream(rawFd).use { it.read() }
+        true
+      }.getOrDefault(false)
+      assertTrue("AutoCloseOutputStream 关闭后底层 fd 必须失效（远端不得留着 Binder 副本）", !stillOpen)
+    } finally {
+      runCatching { readEnd.close() }
+      runCatching { writeEnd.close() }
+    }
+  }
+
+  /**
    * 判据 5（主线程不再等满）：失败回执必须**立即**返回，而不是把调用方拖到 10s 主线程超时。
    * 这里直接在测试线程上计时，阈值取 5s（真实主线程场景由设备手工验收覆盖）。
    */
