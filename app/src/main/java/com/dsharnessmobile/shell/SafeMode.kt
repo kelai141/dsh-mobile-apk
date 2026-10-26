@@ -80,7 +80,7 @@ internal object SafeMode {
       if (!TOP_INSERT.containsMatchIn(line)) { out.add(line); i += 1; continue }
       // 收集本组：从 insert 行到下一个列 0 非空行之前。
       var end = i + 1
-      while (end < lines.size && !TOP_LEVEL.containsMatchIn(lines[end])) end += 1
+      while (end < lines.size && !endsInsertGroup(lines[end])) end += 1
       val body = lines.subList(i + 1, end)
       // 组内子条目缩进 = 组内第一个列表项的缩进。
       val itemIndent = body.firstOrNull { ITEM.containsMatchIn(it) }
@@ -103,7 +103,15 @@ internal object SafeMode {
     return out.joinToString("\n")
   }
 
-  private val TOP_LEVEL = Regex("""^-(?:\s|$)""")
+  /**
+   * insert 组的终止边界 = **任何列 0 非空行**（列表项、注释都算），而不仅是顶层列表项。
+   *
+   * 子条目恒有缩进，列 0 的内容不可能属于组内。旧判据只认 `^-(?:\s|$)`，于是 insert 组后
+   * 跟随的列 0 注释会被吞进组体、随第三方条目过滤一起被静默丢弃——与本函数文档「其余内容
+   * 逐字保留」直接矛盾（退出安全模式时靠备份还原，但过程里注释确实消失过）。
+   */
+  private fun endsInsertGroup(line: String): Boolean = line.isNotBlank() && !line[0].isWhitespace()
+
   private val TOP_INSERT = Regex("""^- insert:\s*$""")
   private val ITEM = Regex("""^(\s*)-\s+(id|name):""")
   private val NAME_KEY = Regex("""^\s*-?\s*name:\s*['"]?([^'"\s]+)""")
@@ -519,7 +527,26 @@ internal object SafeMode {
     val legacy = File(autoDir, "safe-mode-state.json")
     val currentExists = Files.exists(current.toPath(), LinkOption.NOFOLLOW_LINKS)
     val legacyExists = Files.exists(legacy.toPath(), LinkOption.NOFOLLOW_LINKS)
-    if (currentExists && legacyExists) return "安全模式同时存在新旧状态文件，拒绝猜测恢复来源。"
+    if (currentExists && legacyExists) {
+      // 崩溃窗口：迁移的写序是「原子写 current → 删 legacy」，在两步之间被打断就会两份并存。
+      // 而它们**逐字节相同**（current 正是 legacy 的副本）。旧实现一律拒绝且不给出路，
+      // 用户被永久锁在「拒绝猜测恢复来源」上：enter / exit / status 全部不可用，只能手改文件。
+      // 内容一致即收敛为「删旧继续」；只有真正不一致（另一来源正在写）才保留拒绝。
+      val identical = runCatching {
+        Files.isRegularFile(current.toPath(), LinkOption.NOFOLLOW_LINKS) &&
+          Files.isRegularFile(legacy.toPath(), LinkOption.NOFOLLOW_LINKS) &&
+          Files.readAllBytes(current.toPath()).contentEquals(Files.readAllBytes(legacy.toPath()))
+      }.getOrDefault(false)
+      if (!identical) {
+        return "安全模式同时存在新旧状态文件且内容不一致，拒绝猜测恢复来源（可在控制台比对两份文件后手动处理）。"
+      }
+      return try {
+        if (!legacy.delete()) error("旧状态迁移后无法清理")
+        null
+      } catch (t: Throwable) {
+        "旧安全模式状态无法安全迁移，已保留恢复来源并拒绝操作：" + (t.message ?: t.javaClass.simpleName)
+      }
+    }
     if (!legacyExists) return null
     return try {
       if (!Files.isRegularFile(legacy.toPath(), LinkOption.NOFOLLOW_LINKS)) error("旧状态不是普通文件")
@@ -629,7 +656,7 @@ internal object SafeMode {
     while (i < lines.size) {
       if (!TOP_INSERT.matches(lines[i])) { i++; continue }
       var end = i + 1
-      while (end < lines.size && !TOP_LEVEL.matches(lines[end])) end++
+      while (end < lines.size && !endsInsertGroup(lines[end])) end++
       val body = lines.subList(i + 1, end)
       val indent = body.firstOrNull { ITEM.containsMatchIn(it) }?.indexOfFirst { !it.isWhitespace() }
       if (indent != null) for (chunk in insertChildChunks(body, indent)) out += InsertEntry(itemId(chunk.lines), itemName(chunk.lines))
@@ -646,7 +673,7 @@ internal object SafeMode {
     while (i < lines.size) {
       if (!TOP_INSERT.containsMatchIn(lines[i])) { i += 1; continue }
       var end = i + 1
-      while (end < lines.size && !TOP_LEVEL.containsMatchIn(lines[end])) end += 1
+      while (end < lines.size && !endsInsertGroup(lines[end])) end += 1
       val body = lines.subList(i + 1, end)
       val itemIndent = body.firstOrNull { ITEM.containsMatchIn(it) }
         ?.let { it.indexOfFirst { c -> !c.isWhitespace() } }
