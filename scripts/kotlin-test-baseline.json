@@ -27,6 +27,7 @@
     "BrowserOverlayContractTest": 7,
     "BrowserOverlayPolicyTest": 9,
     "CallSiteContractTest": 35,
+    "CapturePipeDrainTest": 10,
     "ClientPluginFailRouteTest": 25,
     "ClientRollbackGateTest": 24,
     "ConsoleAnsiStripperTest": 12,
