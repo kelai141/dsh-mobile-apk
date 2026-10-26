@@ -2113,7 +2113,10 @@ app/src/debug/java/com/dsharnessmobile/shell/BrowserRendererHostActivity.kt
 app/src/androidTest/java/com/dsharnessmobile/shell/BrowserRendererServiceTest.kt
 app/src/main/java/com/dsharnessmobile/shell/CapturePipeDrain.kt
 app/src/test/java/com/dsharnessmobile/shell/CapturePipeDrainTest.kt
+app/src/androidTest/java/com/dsharnessmobile/shell/RendererCapturePipeDeviceTest.kt
 -->
+
+Capture pipe ownership: `RemoteRendererHost.capturePng` starts draining before the Binder call, closes the host write descriptor in the capture callback's `finally`, and only then lets `CapturePipeDrain` join the reader. `BrowserProcessService.RemoteTab.capture` owns its Binder duplicate through `AutoCloseOutputStream` and releases it even if drawing fails. Both writers must close before EOF can arrive. `RendererCapturePipeDeviceTest` exercises a valid PNG larger than the pipe buffer, a real renderer Binder capture, retained remote writers, rejected and exceptional receipts, empty payloads, and interrupted cancellation on Android.
 
 设置页设备导航：verify-webview-015 在桌面形态经账号菜单进入设置与手机控制，仍要求真实重置按钮存在、启用且有尺寸；缺少入口、页签或按钮的负控均判红。
 

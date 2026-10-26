@@ -294,8 +294,7 @@ internal class RemoteRendererHost(
     val api = renderer ?: return@runCatching null
     val pipe = android.os.ParcelFileDescriptor.createPipe()
     val readerStream = android.os.ParcelFileDescriptor.AutoCloseInputStream(pipe[0])
-    // 空闲排空（30s）是失败/超时路径的保险丝：接不到任何新字节就放弃读线程，
-    // 不顺带拒绝「回执为真但 PNG 为 0 字节」这种正常情形。
+    // Bound idle reads even when the remote side retains a duplicate writer.
     val drained = CapturePipeDrain.drain(
       read = { buffer, cancelled ->
         val poll = android.system.StructPollfd().apply {
@@ -320,10 +319,16 @@ internal class RemoteRendererHost(
         runCatching { pipe[1].close() }
         runCatching { readerStream.close() }
       },
-      startCapture = { api.capture(tabId, pipe[1], maxWidth, maxHeight) },
+      startCapture = {
+        try {
+          api.capture(tabId, pipe[1], maxWidth, maxHeight)
+        } finally {
+          // Binder owns a duplicate. Close the host writer before joining so remote closure produces EOF.
+          runCatching { pipe[1].close() }
+        }
+      },
     )
-    // 空载荷判据来自 #582 的既有语义（回执为真却拿到 0 字节按失败处理），本 PR 只做线程与
-    // 描述符回收，**没有**改这个语义——下面这条 takeIf 在 #582 之前就在线上了。
+    // A successful receipt without PNG bytes is still unusable to the caller.
     drained?.takeIf { it.isNotEmpty() }
   }.getOrNull()
 

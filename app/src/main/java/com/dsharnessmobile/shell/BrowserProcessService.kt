@@ -636,14 +636,17 @@ class BrowserProcessService : Service() {
       val canvas = Canvas(bitmap)
       if (scale != 1f) canvas.scale(scale, scale)
       view.draw(canvas)
-      // 注意：fd 是管道端，fsync 会抛 SyncNotSupported——压缩后直接 flush 由 use 关闭收尾。
-      FileOutputStream(fd.fileDescriptor).use { out ->
+      // Own the parcelled descriptor: a stream constructed from its raw FileDescriptor does not close it.
+      ParcelFileDescriptor.AutoCloseOutputStream(fd).use { out ->
         bitmap.compress(Bitmap.CompressFormat.PNG, 90, out)
       }
       bitmap.recycle()
       true
     } catch (_: Throwable) {
       false
+    } finally {
+      // Also release the Binder duplicate if allocation or drawing fails before opening the stream.
+      runCatching { fd.close() }
     }
 
     fun stateJson(): JSONObject = JSONObject()
