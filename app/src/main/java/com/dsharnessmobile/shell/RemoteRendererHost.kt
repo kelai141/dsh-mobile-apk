@@ -268,29 +268,65 @@ internal class RemoteRendererHost(
     val api = renderer ?: return@runCatching null
     val pipe = android.os.ParcelFileDescriptor.createPipe()
     val drained = java.io.ByteArrayOutputStream()
+    val cancelled = java.util.concurrent.atomic.AtomicBoolean(false)
+    val readFailed = java.util.concurrent.atomic.AtomicBoolean(false)
     val reader = Thread {
       try {
-        java.io.FileInputStream(pipe[0].fileDescriptor).use { input ->
+        android.os.ParcelFileDescriptor.AutoCloseInputStream(pipe[0]).use { input ->
+          val poll = android.system.StructPollfd().apply {
+            fd = pipe[0].fileDescriptor
+            events = (android.system.OsConstants.POLLIN or android.system.OsConstants.POLLHUP).toShort()
+          }
           val buf = ByteArray(64 * 1024)
-          while (true) {
+          while (!cancelled.get()) {
+            if (android.system.Os.poll(arrayOf(poll), 100) == 0) continue
+            if (cancelled.get()) break
+            val errors = android.system.OsConstants.POLLERR or android.system.OsConstants.POLLNVAL
+            if (poll.revents.toInt() and errors != 0) throw java.io.IOException("capture pipe failed")
             val n = input.read(buf)
             if (n < 0) break
             drained.write(buf, 0, n)
           }
         }
       } catch (_: Throwable) {
-        // 远端提前关写端 / 管道断裂：保留已排空的部分，由调用方按 capture 回执结算。
+        if (!cancelled.get()) readFailed.set(true)
       }
     }.apply { isDaemon = true; name = "dsh-shot-pipe-reader" }
-    reader.start()
     try {
-      if (!api.capture(tabId, pipe[1], maxWidth, maxHeight)) return@runCatching null
+      reader.start()
+      val captured = try {
+        api.capture(tabId, pipe[1], maxWidth, maxHeight)
+      } finally {
+        pipe[1].close()
+      }
+      if (!captured) return@runCatching null
+      try {
+        reader.join(captureJoinTimeoutMs)
+      } catch (_: InterruptedException) {
+        Thread.currentThread().interrupt()
+        return@runCatching null
+      }
+      if (reader.isAlive) return@runCatching null
+      if (readFailed.get()) return@runCatching null
+      drained.toByteArray().takeIf { it.isNotEmpty() }
     } finally {
-      pipe[1].close()
+      // Polling makes cancellation bounded even when the remote retains its writer.
+      cancelled.set(true)
+      runCatching { pipe[1].close() }
+      runCatching { pipe[0].close() }
+      var interrupted = Thread.interrupted()
+      val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(500)
+      while (reader.isAlive) {
+        val remaining = deadline - System.nanoTime()
+        if (remaining <= 0) break
+        try {
+          reader.join(TimeUnit.NANOSECONDS.toMillis(remaining).coerceAtLeast(1))
+        } catch (_: InterruptedException) {
+          interrupted = true
+        }
+      }
+      if (interrupted) Thread.currentThread().interrupt()
     }
-    reader.join(captureJoinTimeoutMs)
-    if (reader.isAlive) return@runCatching null
-    drained.toByteArray()
   }.getOrNull()
 
   /** tab 状态快照（JSON；远端不可达回 null）。 */
