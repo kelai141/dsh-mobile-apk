@@ -82,13 +82,13 @@ try {
     ['Array.fromAsync shim', 'Array.fromAsync=async function'],
     // ES2023 change-array-by-copy（2026-10-26：旧内核缺 toSorted -> 模型胶囊消失）。四条分别锁
     // 「这一段真的送到页面」，语义对照在 scripts/array-copy-polyfills.test.mjs（本文件只锁送达）。
-    ['Array.prototype.toSorted shim', 'AP.toSorted=function'],
-    ['Array.prototype.toReversed shim', 'AP.toReversed=function'],
-    ['Array.prototype.toSpliced shim', 'AP.toSpliced=function'],
-    ['Array.prototype.with shim', 'AP.with=function'],
+    ['Array.prototype.toSorted shim', "Object.defineProperty(AP,'toSorted'"],
+    ['Array.prototype.toReversed shim', "Object.defineProperty(AP,'toReversed'"],
+    ['Array.prototype.toSpliced shim', "Object.defineProperty(AP,'toSpliced'"],
+    ['Array.prototype.with shim', "Object.defineProperty(AP,'with'"],
     // 同批审计补的 ES2022 对（与本批报障无关，见 lib/index.js 的注释）。
-    ['Array.prototype.findLast shim', 'AP.findLast=function'],
-    ['Array.prototype.findLastIndex shim', 'AP.findLastIndex=function'],
+    ['Array.prototype.findLast shim', "Object.defineProperty(AP,'findLast'"],
+    ['Array.prototype.findLastIndex shim', "Object.defineProperty(AP,'findLastIndex'"],
     ['AbortSignal.any polyfill', 'AbortSignal.any=function'],
     ['directory-picker bridge', 'x-dsh-pick-token'],
     ['theme bridge', '__dshThemeBridge'],

@@ -187,3 +187,21 @@ test('正证：findLast/findLastIndex 逐例与原生实现一致', () => {
     assert.equal(actual, expected, label + '：原生 = ' + expected + '，补丁 = ' + actual)
   }
 })
+
+
+test('missing array methods preserve native property descriptors and array enumeration', () => {
+  const names = [...METHODS, 'findLast', 'findLastIndex']
+  const { context, before } = realmMissing(names)
+  assert.equal(before, names.map(() => 'undefined').join('/'))
+  runInContext(BODY, context)
+  const result = JSON.parse(runInContext(
+    '(function(){var keys=[];for(var key in [3,1])keys.push(key);return JSON.stringify({'
+    + 'keys:keys,descriptors:' + JSON.stringify(names) + '.map(function(name){'
+    + 'var d=Object.getOwnPropertyDescriptor(Array.prototype,name);'
+    + 'return {name:name,enumerable:d.enumerable,writable:d.writable,configurable:d.configurable}'
+    + '})})})()', context))
+  assert.deepEqual(result.keys, ['0', '1'])
+  assert.deepEqual(result.descriptors, names.map(name => ({
+    name, enumerable: false, writable: true, configurable: true,
+  })))
+})

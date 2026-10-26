@@ -119,10 +119,10 @@ const POLYFILLS = [
     var copyOf=function(o){var len=o.length>>>0,out=new Array(len),i=0;for(;i<len;i++){out[i]=o[i]}return out};
     var checkedCmp=function(cmp){if(cmp!==undefined&&typeof cmp!=='function')throw new TypeError('The comparison function must be either a function or undefined');return cmp};
     var toInt=function(n){var x=Number(n);if(x!==x)return 0;if(x===Infinity||x===-Infinity)return x;return x<0?Math.ceil(x):Math.floor(x)};
-    if(typeof AP.toSorted==='undefined'){AP.toSorted=function(cmp){checkedCmp(cmp);var out=copyOf(Object(this));return AP.sort.call(out,cmp)}}
-    if(typeof AP.toReversed==='undefined'){AP.toReversed=function(){var src=copyOf(Object(this)),len=src.length,out=new Array(len),i=0;for(;i<len;i++){out[i]=src[len-1-i]}return out}}
-    if(typeof AP.toSpliced==='undefined'){AP.toSpliced=function(){var out=copyOf(Object(this));AP.splice.apply(out,arguments);return out}}
-    if(typeof AP.with==='undefined'){AP.with=function(index,value){var o=Object(this),len=o.length>>>0,rel=toInt(index),actual=rel<0?len+rel:rel;if(actual<0||actual>=len)throw new RangeError('Invalid index');var out=copyOf(o);out[actual]=value;return out}}
+    if(typeof AP.toSorted==='undefined'){Object.defineProperty(AP,'toSorted',{configurable:true,writable:true,enumerable:false,value:function(cmp){checkedCmp(cmp);var out=copyOf(Object(this));return AP.sort.call(out,cmp)}})}
+    if(typeof AP.toReversed==='undefined'){Object.defineProperty(AP,'toReversed',{configurable:true,writable:true,enumerable:false,value:function(){var src=copyOf(Object(this)),len=src.length,out=new Array(len),i=0;for(;i<len;i++){out[i]=src[len-1-i]}return out}})}
+    if(typeof AP.toSpliced==='undefined'){Object.defineProperty(AP,'toSpliced',{configurable:true,writable:true,enumerable:false,value:function(){var out=copyOf(Object(this));AP.splice.apply(out,arguments);return out}})}
+    if(typeof AP.with==='undefined'){Object.defineProperty(AP,'with',{configurable:true,writable:true,enumerable:false,value:function(index,value){var o=Object(this),len=o.length>>>0,rel=toInt(index),actual=rel<0?len+rel:rel;if(actual<0||actual>=len)throw new RangeError('Invalid index');var out=copyOf(o);out[actual]=value;return out}})}
   })();`,
 
   // ── Array.prototype.findLast / findLastIndex (2026-10-26 同批审计) ─────────────────
@@ -150,8 +150,8 @@ const POLYFILLS = [
       return wantIndex?-1:void 0;
     };
     var checked=function(predicate){if(typeof predicate!=='function')throw new TypeError('predicate must be a function');return predicate};
-    if(typeof AP.findLast==='undefined'){AP.findLast=function(predicate,thisArg){var o=Object(this);checked(predicate);return scan(o,predicate,thisArg,false)}}
-    if(typeof AP.findLastIndex==='undefined'){AP.findLastIndex=function(predicate,thisArg){var o=Object(this);checked(predicate);return scan(o,predicate,thisArg,true)}}
+    if(typeof AP.findLast==='undefined'){Object.defineProperty(AP,'findLast',{configurable:true,writable:true,enumerable:false,value:function(predicate,thisArg){var o=Object(this);checked(predicate);return scan(o,predicate,thisArg,false)}})}
+    if(typeof AP.findLastIndex==='undefined'){Object.defineProperty(AP,'findLastIndex',{configurable:true,writable:true,enumerable:false,value:function(predicate,thisArg){var o=Object(this);checked(predicate);return scan(o,predicate,thisArg,true)}})}
   })();`,
 ];
 
