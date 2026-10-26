@@ -2493,3 +2493,10 @@ app/src/main/java/com/dsharnessmobile/shell/ApkUpdateAction.kt
 - [B02] 漂移：`历史 BRIDGE-API 副本（当前契约见§6 K04）` 说聚合入口「`--list` 现数，当前 17 项」，源码 `scripts/check-release-gates.mjs:28`（`GATES` 数组）是 27 项（同仓 `docs/AGENTS/build-and-env.md:48` 写的是 27 项，两份文档自相矛盾）。
 - [B02] 漂移：5 个门禁脚本的两仓副本行尾不同（协调仓 CRLF、apk 仓 LF），`cmp` 字节不等、归一化后内容一致：`scripts/check-boot-budget.mjs`、`scripts/check-browser-syntax-floor.mjs`、`scripts/check-build-parallel-cap.mjs`、`scripts/check-snapshot-builder-output.mjs`、`scripts/check-tool-output-schema.mjs`；镜像门禁只按「仅行尾差异」告警放行（`scripts/check-patch-mirror.mjs:339`）——「逐字节镜像」在行尾层不成立。
 - [B02] 漂移：`scripts/check-code-map.mjs` 只在 apk 仓存在（协调仓 `scripts/` 无此文件），且未被列进 `scripts/check-patch-mirror.mjs:160` 起的 `MIRROR_TOP` → 这条新门禁自身没有镜像守护。
+
+Profile normalization publication (#608): EngineManager.normalizeLegacySinglePointPatch delegates to ProfilePatchPublication.normalize. A unique synchronized rollback copy precedes verified atomic publication. ProfilePatchPublicationTest covers backup ownership and rejected publication; ProfileNormalizationDeviceTest drives the production startup method on isolated profiles.
+
+<!-- COVERAGE
+app/src/main/java/com/dsharnessmobile/shell/ProfilePatchPublication.kt
+app/src/androidTest/java/com/dsharnessmobile/shell/ProfileNormalizationDeviceTest.kt
+-->

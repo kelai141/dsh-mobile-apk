@@ -43,7 +43,7 @@ class AuditR7R8SourceTest {
   @Test
   fun `M-8A normalize备份写失败置failed且不动live`() {
     val text = source("EngineManager.kt")
-    val at = text.indexOf("normalize backup failed (live untouched")
+    val at = text.indexOf("normalize failed (live untouched")
     assertTrue("M-8A 修复标记必须在场（锚点漂移需同步本测试）", at >= 0)
     val segment = text.substring((at - 400).coerceAtLeast(0), (at + 200).coerceAtLeast(0).coerceAtMost(text.length))
     assertTrue("备份失败必须置 failed（marker 不写、下次启动重试）", segment.contains("failed = true"))
