@@ -54,6 +54,19 @@ const check = (label, ok, detail) => {
 }
 
 // ── 轻量 XML 解析（结构感知，非字面量 grep）──────────────────────────────────
+/** Decode each XML attribute once, matching the value Android receives. */
+function decodeXmlAttribute(value) {
+  const named = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }
+  return value.replace(/&(amp|lt|gt|quot|apos|#x[0-9a-fA-F]+|#[0-9]+);/g, (reference, entity) => {
+    if (!entity.startsWith('#')) return named[entity]
+    const code = entity.startsWith('#x') ? Number.parseInt(entity.slice(2), 16) : Number(entity.slice(1))
+    if (code < 1 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) {
+      throw new Error('Invalid XML character reference: ' + reference)
+    }
+    return String.fromCodePoint(code)
+  })
+}
+
 /** 解析为 { name, attrs, children, parent, selfClosing } 节点树；注释/CDATA/声明按类型跳过。 */
 function parseXml(text) {
   const doc = { name: '#document', attrs: {}, children: [], parent: null, text: '' }
@@ -81,7 +94,7 @@ function parseXml(text) {
     const attrs = {}
     const attrRe = /([\w.:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g
     let a
-    while ((a = attrRe.exec(rawAttrs)) !== null) attrs[a[1]] = a[2] ?? a[3]
+    while ((a = attrRe.exec(rawAttrs)) !== null) attrs[a[1]] = decodeXmlAttribute(a[2] ?? a[3])
     const node = { name, attrs, children: [], parent: stack[stack.length - 1], selfClosing: slash === '/' }
     node.parent.children.push(node)
     if (slash !== '/') stack.push(node)
@@ -223,6 +236,16 @@ if (argv.includes('--self-test')) {
     parsed.error ?? wide.map((node) => node.attrs.name).join(','))
   check('--self-test：窄目录映射不误判为宽映射',
     parsed.nodes.filter((node) => node.attrs.name === 'narrow').every((node) => !isWideFileProviderPath(node)))
+  for (const path of ['&#46;', '&#x2e;', 'tmp/&#46;&#46;', '&#x2e;&#x2e;/outside']) {
+    const fixture = fileProviderPathNodes('<paths><external-path name="encoded" path="' + path + '" /></paths>')
+    check('--self-test: encoded wide path is recognized: ' + path,
+      fixture.error === null && fixture.nodes.length === 1 && isWideFileProviderPath(fixture.nodes[0]))
+  }
+  for (const path of ['Documents/&#46;hidden', '&amp;#46;', 'home/tmp']) {
+    const fixture = fileProviderPathNodes('<paths><files-path name="narrow" path="' + path + '" /></paths>')
+    check('--self-test: narrow XML path remains narrow: ' + path,
+      fixture.error === null && fixture.nodes.length === 1 && !isWideFileProviderPath(fixture.nodes[0]))
+  }
   const expected = new Map([...FILE_PROVIDER_CALLER_ALLOWLIST].map(([file, value]) => [file, value.references]))
   const selfTestRoot = mkdtempSync(join(tmpdir(), 'manifest-hardening-fileprovider-'))
   try {

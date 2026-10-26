@@ -1672,6 +1672,8 @@ flowchart TD
 
 ### 构建、门禁与设备验收
 
+FileProvider XML path regression coverage: `scripts/check-manifest-hardening.test.mjs` invokes `scripts/check-manifest-hardening.mjs` against complete fixture trees. Attribute decoding precedes range classification; encoded broad roots must activate the same caller allowlist as literal roots.
+
 #### B01 构建链与快照注入
 
 - **0.14.3当前**：官方639ed015/0.2.0-rc.2、pi-ai0.87.1；PTC A1 host/child及官方streaming020六provider在registry/runner，G2 requires streaming020、A1 requires L1。source reconcile展开additionalTargets、exact verifier后同步同包pnpm物理副本，最终source snapshot复用。普通snapshot post-apply已统一runner --check复核companion/exact verifier（streaming描述marker不当产物literal）；新runtime assets、组件lib/镜像与双ABI tester构建/hash仍待父任务，不填造测量。见 [补丁台账](<dsh-mobile-apk/docs/AGENTS/RUNTIME-PATCHES.md>)。
