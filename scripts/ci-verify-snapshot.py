@@ -49,15 +49,31 @@ AUTHORITATIVE_PATCH_NAME = 'profile-web.cordis.patch.yml'
 
 
 def app_id_from_gradle() -> str:
-    """Read applicationId from the APK repo's build.gradle.kts. Works both in
-    CI (workflow root is the dsh-mobile-apk checkout, this script lives under
-    <root>/dsh-mobile/scripts/) and locally (<root>/dsh-mobile-apk/)."""
+    """Read applicationId from the APK repo's build.gradle.kts.
+
+    Covers every layout this script is actually launched from (2026-10-26: the
+    first two candidates below were the only ones and they both missed the
+    self-contained APK-repo layout, so the cloud chain read None and would have
+    rejected every build the moment this gate was wired in):
+
+      A. coordinator root with a nested APK checkout — local build-apk-013.ps1
+         <root>/scripts/ci-verify-snapshot.py + <root>/dsh-mobile-apk/app/...
+      B. self-contained APK repo root — cloud build-apk.mjs
+         <apk>/scripts/ci-verify-snapshot.py + <apk>/app/...
+      C. CI workflow root that is the APK checkout
+         <work>/dsh-mobile/scripts/ci-verify-snapshot.py + <work>/app/...
+
+    A missing applicationId is a FAILURE at the call site (no silent default):
+    the whole point of the gate is that package name and baked-in paths agree.
+    """
     script = os.path.abspath(__file__)
-    root2 = os.path.dirname(os.path.dirname(script))
+    script_dir = os.path.dirname(script)
+    root2 = os.path.dirname(script_dir)
     root3 = os.path.dirname(root2)
     candidates = (
-        os.path.join(root3, 'app', 'build.gradle.kts'),            # CI layout: <work>/app/...
-        os.path.join(root2, 'dsh-mobile-apk', 'app', 'build.gradle.kts'),  # local layout: <root>/dsh-mobile-apk/app/...
+        os.path.join(root2, 'app', 'build.gradle.kts'),            # B: self-contained APK repo root
+        os.path.join(root3, 'app', 'build.gradle.kts'),            # C: CI layout <work>/app/...
+        os.path.join(root2, 'dsh-mobile-apk', 'app', 'build.gradle.kts'),  # A: <root>/dsh-mobile-apk/app/...
     )
     for gradle in candidates:
         try:
@@ -79,11 +95,12 @@ def authoritative_patch_path() -> str:
     root2 = os.path.dirname(script_dir)
     root3 = os.path.dirname(root2)
     candidates = (
-        os.path.join(script_dir, AUTHORITATIVE_PATCH_NAME),                                # CI: <work>/dsh-mobile/scripts/
-        os.path.normpath(os.path.join(root2, '..', 'scripts', AUTHORITATIVE_PATCH_NAME)),  # local: <root>/scripts/
-        os.path.join(root3, 'scripts', AUTHORITATIVE_PATCH_NAME),
-        os.path.join(root2, 'scripts', AUTHORITATIVE_PATCH_NAME),
+        os.path.join(script_dir, AUTHORITATIVE_PATCH_NAME),                                # same dir as the gate (every layout)
+        os.path.join(root2, 'scripts', AUTHORITATIVE_PATCH_NAME),                          # B: self-contained APK repo root
+        os.path.normpath(os.path.join(root2, '..', 'scripts', AUTHORITATIVE_PATCH_NAME)),  # A: coordinator root
+        os.path.join(root3, 'scripts', AUTHORITATIVE_PATCH_NAME),                          # C: CI layout
         os.path.join(root3, 'dsh-mobile', 'scripts', AUTHORITATIVE_PATCH_NAME),
+        os.path.join(root2, 'dsh-mobile-apk', 'scripts', AUTHORITATIVE_PATCH_NAME),
     )
     seen = []
     for cand in candidates:
