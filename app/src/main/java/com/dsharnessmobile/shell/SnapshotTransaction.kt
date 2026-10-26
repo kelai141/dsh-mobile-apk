@@ -188,6 +188,11 @@ internal object SnapshotTransaction {
     val tmp = File(filesDir, TMP_MARKER_NAME)
     val target = markerFile(filesDir)
     try {
+      // Renaming over an empty directory is platform-dependent. Recovery authority must
+      // always be a regular file; reject unexpected types without following links.
+      if (Files.exists(target.toPath(), NOFOLLOW_LINKS) && !Files.isRegularFile(target.toPath(), NOFOLLOW_LINKS)) {
+        throw IOException("Transaction journal target is not a regular file: " + target.absolutePath)
+      }
       // ① 完整内容先落 tmp（同一个 filesDir，rename 必在同一文件系统内）。
       tmp.writeText(text)
       // ② 原子覆盖目标：**不再先删**（见上方注释）。

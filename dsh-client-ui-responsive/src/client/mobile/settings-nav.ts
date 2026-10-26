@@ -644,8 +644,18 @@ export class MobileSettingsNav {
       return
     }
     if (target === 'row') {
-      const row = panel.querySelector<HTMLElement>(ACTIVE_ROW_SELECTOR)
-      if (row !== null && !row.hasAttribute('disabled')) row.focus()
+      const visible = (row: HTMLElement): boolean => {
+        if (row.hasAttribute('disabled') || row.closest('[hidden], [inert]') !== null) return false
+        for (let node: HTMLElement | null = row; node !== null && node !== panel; node = node.parentElement) {
+          const style = window.getComputedStyle(node)
+          if (style.display === 'none' || style.visibility === 'hidden') return false
+        }
+        return true
+      }
+      const active = panel.querySelector<HTMLElement>(ACTIVE_ROW_SELECTOR)
+      const row = active !== null && visible(active) ? active
+        : [...panel.querySelectorAll<HTMLElement>('nav button')].find(visible)
+      row?.focus()
     }
   }
 }

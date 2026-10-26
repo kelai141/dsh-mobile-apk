@@ -335,6 +335,19 @@ describe('二级页：点一级分类进入', () => {
 })
 
 describe('逐级返回', () => {
+  it('returns focus to a visible row when the active About row is hidden', () => {
+    const handle = buildPanel(['通用设置', '关于'])
+    nav = new MobileSettingsNav()
+    nav.attach()
+    const about = handle.rows.get('关于')!
+    about.style.display = 'none'
+    about.click()
+    back(handle.panel).click()
+    expect(handle.panel.getAttribute('data-dsh-settings-level')).toBe('home')
+    expect(document.activeElement).toBe(handle.rows.get('通用设置'))
+    expect(about.getAttribute('aria-current')).toBe('true')
+  })
+
   it('二级页返回 -> 首页，焦点回到当前一级行，内容列节点原样（未保存编辑不丢）', () => {
     const handle = buildPanel(['开发者选项'])
     nav = new MobileSettingsNav()

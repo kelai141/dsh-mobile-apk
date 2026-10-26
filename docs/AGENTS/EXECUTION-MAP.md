@@ -684,6 +684,8 @@ sequenceDiagram
 
 ### 壳侧（Kotlin，app/src/main/java/com/dsharnessmobile/shell/）
 
+Journal publication (#593): `SnapshotTransaction.writeMarker` validates an existing recovery-authority path as a regular file without following links before writing its temporary file. Unexpected types fail with `snapshot-marker-write` and preserve the target. `SnapshotTransactionTest` covers empty and populated directory targets alongside normal marker replacement.
+
 APK download isolation (#592): each `UpdateChecker.download` attempt creates and cleans its own staging file. `ApkUpdateController` supplies an active-generation predicate and serializes final publication with epoch changes through `publicationLock`. Cancelled attempts cannot publish or delete a retry's staged bytes. `UpdateDownloadIsolationTest` exercises overlapping attempts, cancellation at publication, failed-read cleanup and complete successful delivery through controlled connections.
 
 Terminal output delivery (#591): `ConsoleSession` sends stripped PTY text through `ConsoleOutputBatcher`, which emits at the size threshold or an independently scheduled deadline. Ready/error/exit frames force a flush, and the reader's `finally` closes the batcher so EOF and exceptions release its scheduler. `ConsoleOutputBatcherTest` covers idle prompts, ordering, deadline cancellation and final draining.
@@ -1558,6 +1560,8 @@ flowchart TD
 ```
 
 ### 注入层子仓
+
+Settings entry recovery (#563): `dsh-client-ui-responsive/src/client/mobile/about-entry.ts` repairs the adapter-owned About button beside each handled version row, including after module reload, and limits mutation-triggered scans to the settings dialog. `dsh-client-ui-responsive/src/client/mobile/settings-nav.ts` returns focus to a visible enabled navigation row when the active row is hidden. Regression coverage lives in `about-entry.spec.ts` and `settings-nav.spec.ts` under the package tests directory.
 
 #### S01 引擎侧注入层（三个子仓）
 

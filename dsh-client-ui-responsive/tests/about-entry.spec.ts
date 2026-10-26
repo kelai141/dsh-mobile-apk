@@ -221,6 +221,44 @@ describe('关于入口（独立页面）', () => {
     expect(host.querySelector<HTMLElement>('#nav-about')!.style.display).not.toBe('none')
   })
 
+  it('restores a removed entry beside an already handled version row', async () => {
+    const host = seed('<div id="v">当前版本：0.2.1-rc.2</div><nav><button id="nav-about">关于</button></nav>')
+    cleanup = installAboutEntry()
+    await tick()
+    host.querySelector('[data-dsh-about-entry]')!.remove()
+    await tick()
+    expect(host.querySelectorAll('[data-dsh-about-entry]')).toHaveLength(1)
+    const clicked: string[] = []
+    host.querySelector('#nav-about')!.addEventListener('click', () => clicked.push('about'))
+    host.querySelector<HTMLButtonElement>('[data-dsh-about-entry]')!.click()
+    expect(clicked).toEqual(['about'])
+  })
+
+  it('recovers handled DOM and engine version in a fresh module instance', async () => {
+    const host = seed('<div id="v" data-dsh-about-source="0.2.1-rc.3" style="display:none">当前版本：0.2.1-rc.3</div><nav><button id="nav-about">关于</button></nav>')
+    vi.resetModules()
+    const fresh = await import('../src/client/mobile/about-entry.ts')
+    cleanup = fresh.installAboutEntry()
+    await tick()
+    expect(fresh.getEngineVersion()).toBe('0.2.1-rc.3')
+    expect(host.querySelectorAll('[data-dsh-about-entry]')).toHaveLength(1)
+    expect(host.querySelector<HTMLElement>('#nav-about')!.style.display).toBe('none')
+  })
+
+  it('does not rescan settings for unrelated chat mutations', async () => {
+    const host = seed('<div id="v">当前版本：0.2.1-rc.2</div>')
+    cleanup = installAboutEntry()
+    await tick()
+    const scan = vi.spyOn(host, 'querySelectorAll')
+    const chat = document.createElement('div')
+    document.body.appendChild(chat)
+    await tick()
+    chat.appendChild(document.createElement('span'))
+    await tick()
+    expect(scan).not.toHaveBeenCalled()
+    scan.mockRestore()
+  })
+
   it('重复渲染不会插入第二个入口', async () => {
     const host = seed('<div id="v">当前版本：0.2.1-rc.2</div>')
     cleanup = installAboutEntry()
