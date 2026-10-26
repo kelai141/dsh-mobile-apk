@@ -36,6 +36,19 @@
   `check-bridge-symmetry` / `check-gate-skips` / `check-i18n-parity` / `check-release-gates` /
   `check-build-chain-abort` / `check-bounded-io` / `check-engine-heap-floor` 全过。
 
-## 未做设备验证
+## 设备层验证（MuMu x86_64 127.0.0.1:16576，SDK 35）
 
-管道生命周期是 L2 面，本轮没有设备。设备层需补验的判据见 PR 描述。
+新增 `RendererCapturePipeTest`（androidTest），用真实 `ParcelFileDescriptor` 管道驱动生产
+`capturePng`，远端回执由 `IBrowserRenderer` 动态代理伪造。5 例在设备上全绿：
+
+1. 回执 false 且远端保留写端：返回 null 后 `dsh-shot-pipe-reader` 已不存在；
+2. 回执 true 但远端不结束写入：预算内返回 null，读线程已回收；
+3. 256KiB 大载荷在远端仍在写时被并发排空，字节完整；
+4. 连续 10 次失败后宿主 fd 不增长；
+5. 失败回执立即返回（不等满 10s 主线程超时）。
+
+**设备层抓到一个单测没覆盖的真缺陷**：初版 `drain` 把宿主自己的 `pipe[1]` 留到 finally 才关，
+读端因此永远等不到 EOF——256KiB 的正常载荷被 join 超时误判成 null。JVM 单测用假读实现，
+读实现自己返回 EOF，所以掩盖了这条。修法是在 `startCapture` 返回后**立刻**关本端写端
+（`closeWriter`），并补一条只在「写端已关」时才返回 EOF 的 JVM 回归用例。
+设备层从 5 例 2 红变为 5 例全绿。

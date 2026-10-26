@@ -14,6 +14,8 @@
 
 ## 2. 构建与验证命令
 
+Build scripts, profiles and source-extracted host compatibility code use LF so POSIX consumers and exact-context tests agree across checkouts. Official patches, captured patch fixtures, the patch registry, the engine overlay manifest, distributed license texts, the verbatim browser stylesheet, cross-language screen-scope fixtures and the legacy recovery core retain exact bytes with `-text`. `node --test scripts/check-upstream-patch-bytes.test.mjs` checks actual bytes and checkout filtering with `core.autocrlf=true`; PR CI runs this regression before build gates.
+
 FileProvider path classification decodes XML attribute references exactly once before normalization. Decimal and hexadecimal representations of `.` or `..` retain the same broad-path policy as literal characters. `node --test scripts/check-manifest-hardening.test.mjs` exercises the complete gate with encoded broad paths, registered and unregistered callers, and narrow-path controls; it also runs in PR CI.
 
 **FileProvider 宽映射调用点门禁**：`scripts/check-manifest-hardening.mjs` 从 manifest 的 `FILE_PROVIDER_PATHS` metadata 读取实际 paths XML；当任一路径映射回到 provider 基目录、越出基目录或使用 `root-path` 时，递归扫描 Java/Kotlin 源码，并要求 `getUriForFile` 标识符命中的相对路径与数量逐项匹配登记表。源码注释或字符串中的示例也计入命中数。移动、增加或删除调用点时，更新脚本中的清单和用途说明。PR CI 先跑 `node scripts/check-manifest-hardening.mjs --self-test`，再跑真实树判据 `node scripts/check-manifest-hardening.mjs`。

@@ -566,16 +566,16 @@ object UpdateChecker {
     else -> 15_000
   }
 
-  private fun probeSources(): CheckResult {
+  private fun probeSources(deadline: UpdateCheckDeadline): CheckResult {
     val abis = deviceAbis()
     val latestPath = REPO + "/releases/latest/download/MANIFEST.txt"
     val attempts: List<Pair<String, () -> SourceProbe>> = listOf(
-      "gh-proxy" to { probeManifest(MIRROR_PREFIXES[1] + latestPath, timeoutFor("gh-proxy")) },
-      "ghfast" to { probeManifest(MIRROR_PREFIXES[2] + latestPath, timeoutFor("ghfast")) },
-      "github" to { probeManifest(MIRROR_PREFIXES[0] + latestPath, timeoutFor("github")) },
-      "pages" to { probePages(SITE_URL + "data/releases.json", timeoutFor("pages")) },
-      "ghproxy.net" to { probeManifest(MIRROR_PREFIXES[3] + latestPath, timeoutFor("ghproxy.net")) },
-      "api" to { probeApi(timeoutFor("api")) },
+      "gh-proxy" to { probeManifest(MIRROR_PREFIXES[1] + latestPath, timeoutFor("gh-proxy"), deadline) },
+      "ghfast" to { probeManifest(MIRROR_PREFIXES[2] + latestPath, timeoutFor("ghfast"), deadline) },
+      "github" to { probeManifest(MIRROR_PREFIXES[0] + latestPath, timeoutFor("github"), deadline) },
+      "pages" to { probePages(SITE_URL + "data/releases.json", timeoutFor("pages"), deadline) },
+      "ghproxy.net" to { probeManifest(MIRROR_PREFIXES[3] + latestPath, timeoutFor("ghproxy.net"), deadline) },
+      "api" to { probeApi(timeoutFor("api"), deadline) },
     )
     return runChain(attempts, abis, abiFrom(abis), currentVersion())
   }
@@ -609,17 +609,33 @@ object UpdateChecker {
    * 盲跟任意 302 + `readBytes()` 无上限，镜像方一条 302 就能把摘要权威源劫到任意主机并
    * 无限流式输出。
    */
-  private fun fetchText(url: String, timeoutMs: Int, accept: String?): String {
+  private val metadataTimers = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { task ->
+    Thread(task, "dsh-update-metadata-deadline").apply { isDaemon = true }
+  }
+
+  internal fun fetchText(
+    url: String,
+    timeoutMs: Int,
+    accept: String?,
+    checkDeadline: UpdateCheckDeadline,
+    openConnection: (URL) -> HttpURLConnection = { it.openConnection(Proxy.NO_PROXY) as HttpURLConnection },
+  ): String {
+    val deadline = checkDeadline.source(timeoutMs)
     var current = url
     var hops = 0
     while (true) {
-      val conn = URL(current).openConnection(Proxy.NO_PROXY) as HttpURLConnection
+      deadline.remainingMs()
+      val conn = openConnection(URL(current))
+      val cancellation = metadataTimers.schedule(
+        { runCatching { conn.disconnect() } }, deadline.remainingMs(), java.util.concurrent.TimeUnit.MILLISECONDS,
+      )
       try {
-        conn.connectTimeout = timeoutMs
-        conn.readTimeout = timeoutMs
+        conn.connectTimeout = deadline.timeoutMs(timeoutMs)
+        conn.readTimeout = deadline.timeoutMs(timeoutMs)
         conn.instanceFollowRedirects = false
         accept?.let { conn.setRequestProperty("Accept", it) }
         val code = conn.responseCode
+        deadline.remainingMs()
         if (code in 300..399 && code != 304) {
           val location = conn.getHeaderField("Location")
             ?: throw HttpStatusException(code, url, conn.getHeaderField("x-ratelimit-remaining"), conn.getHeaderField("retry-after"))
@@ -645,7 +661,9 @@ object UpdateChecker {
           val buf = java.io.ByteArrayOutputStream()
           val chunk = ByteArray(8 * 1024)
           while (true) {
+            conn.readTimeout = deadline.timeoutMs(timeoutMs)
             val n = input.read(chunk)
+            deadline.remainingMs()
             if (n < 0) break
             if (buf.size() + n > METADATA_MAX_BYTES) {
               throw IllegalStateException("元数据超过 " + METADATA_MAX_BYTES + " 字节上限（不是合法的 MANIFEST/releases.json）")
@@ -655,6 +673,7 @@ object UpdateChecker {
           buf.toString(Charsets.UTF_8)
         }
       } finally {
+        cancellation.cancel(false)
         runCatching { conn.disconnect() }
       }
     }
@@ -690,20 +709,20 @@ object UpdateChecker {
     else -> SourceProbe.Unreachable(e)
   }
 
-  private fun probeManifest(url: String, timeoutMs: Int): SourceProbe = try {
-    SourceProbe.Parsed(parseManifest(fetchText(url, timeoutMs, null)))
+  private fun probeManifest(url: String, timeoutMs: Int, deadline: UpdateCheckDeadline): SourceProbe = try {
+    SourceProbe.Parsed(parseManifest(fetchText(url, timeoutMs, null, deadline)))
   } catch (e: Exception) {
     probeFailure(e)
   }
 
-  private fun probePages(url: String, timeoutMs: Int): SourceProbe = try {
-    SourceProbe.Parsed(parsePagesReleaseJson(fetchText(url, timeoutMs, null)))
+  private fun probePages(url: String, timeoutMs: Int, deadline: UpdateCheckDeadline): SourceProbe = try {
+    SourceProbe.Parsed(parsePagesReleaseJson(fetchText(url, timeoutMs, null, deadline)))
   } catch (e: Exception) {
     probeFailure(e)
   }
 
-  private fun probeApi(timeoutMs: Int): SourceProbe = try {
-    val latest = parseLatestRelease(fetchText("$API/repos/$REPO/releases/latest", timeoutMs, "application/vnd.github+json"))
+  private fun probeApi(timeoutMs: Int, deadline: UpdateCheckDeadline): SourceProbe = try {
+    val latest = parseLatestRelease(fetchText("$API/repos/$REPO/releases/latest", timeoutMs, "application/vnd.github+json", deadline))
     SourceProbe.Parsed(LatestFacts(latest.tag, latest.assets.associate { it.name to it.sizeBytes }, emptyMap()))
   } catch (e: Exception) {
     probeFailure(e)
@@ -718,8 +737,10 @@ object UpdateChecker {
    *
    * 元数据只取小文件（MANIFEST 约 1.4KB / releases.json 约 1.3KB），169MB 的 APK 才走镜像下载链（[download]）。
    */
-  fun checkLatest(): CheckResult = try {
-    probeSources()
+  fun checkLatest(): CheckResult = checkLatest(UpdateCheckDeadline.start())
+
+  internal fun checkLatest(deadline: UpdateCheckDeadline): CheckResult = try {
+    probeSources(deadline)
   } catch (e: Exception) {
     android.util.Log.w(TAG, "check chain failed: " + (e.message ?: e.javaClass.simpleName))
     classifyTransportFailure(e)

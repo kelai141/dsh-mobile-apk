@@ -233,8 +233,8 @@ function selfTest() {
   //    writeRaw 只由 submit 在壳内调用，页面走 writeKeys（控制字符必须编码过桥）。
   {
     const d = diffSurface(surface, shell, page)
-    check('① 现状：kotlinOnly 恰为 [consoleBridge/ready]，tsOnly 为空',
-      JSON.stringify(d.kotlinOnly) === JSON.stringify(['consoleBridge/ready']) && d.tsOnly.length === 0,
+    check('① 现状：kotlinOnly 恰为 [consoleBridge/ready, consoleBridge/writeRaw]，tsOnly 为空',
+      JSON.stringify(d.kotlinOnly) === JSON.stringify(['consoleBridge/ready', 'consoleBridge/writeRaw']) && d.tsOnly.length === 0,
       JSON.stringify(d))
   }
 

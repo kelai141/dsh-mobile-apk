@@ -3,6 +3,28 @@
 # autocrlf 会把 LF 检出成 CRLF → 门禁在别的机器必然假红，且引擎启动时触发多余整文件覆盖。
 app/src/main/assets/patched/*.js linguist-vendored -text
 app/src/main/assets/patched/*.html linguist-vendored -text
+# Build scripts and profiles are also consumed by POSIX tools and exact-context tests.
+scripts/**/*.mjs text eol=lf
+scripts/**/*.json text eol=lf
+scripts/**/*.yml text eol=lf
+scripts/**/*.sh text eol=lf
+scripts/**/*.py text eol=lf
+scripts/**/*.ps1 text eol=lf
+# Official patches have registered byte digests; checkout must preserve them exactly.
+scripts/patches/upstream/*.patch -text
+# Captured fixture identities and their input manifests are also byte-bound.
+scripts/patches/tests/fixtures/** -text
+scripts/patches/registry.json -text
+scripts/snapshot-config/engine-overlay.json -text
+vendor/dsh-undo-savepoint/lib/core.mjs -text
+# Distributed license copies are validated against registered byte digests.
+LICENSES/** -text
+# The upstream browser stylesheet is retained verbatim under its source manifest.
+dsh-client-ui-responsive/src/client/mobile/upstream-browser/view/Browser.module.css -text
+# Cross-language fixtures and source-extracted compatibility tests require LF.
+plugins/dsh-android-bridge/test/fixtures/screen-scope-cases.json -text
+app/src/test/resources/screen-scope/screen-scope-cases.json -text
+dsh-host-web-compat/lib/*.js text eol=lf
 # 底座归档（build-snapshot 输入）走 Git LFS（体积大）
 base/*.tar.xz filter=lfs diff=lfs merge=lfs -text
 

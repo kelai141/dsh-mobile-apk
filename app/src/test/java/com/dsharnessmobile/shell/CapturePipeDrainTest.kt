@@ -62,6 +62,7 @@ class CapturePipeDrainTest {
           n
         }
       },
+      closeWriter = {},
       closeReader = {},
       startCapture = {
         // 关键判据：发起 capture 时读端必须**已经在读**。若读端要在 capture 返回后才开始，
@@ -87,6 +88,7 @@ class CapturePipeDrainTest {
     val fixture = RetainedWriterFixture()
     val drained = CapturePipeDrain.drain(
       read = fixture.read,
+      closeWriter = {},
       closeReader = {},
       startCapture = {
         // 回执在「读线程已经读写端」之后才返回：这才是远端持有写端的真实次序。
@@ -107,6 +109,7 @@ class CapturePipeDrainTest {
     val fixture = RetainedWriterFixture()
     val drained = CapturePipeDrain.drain(
       read = fixture.read,
+      closeWriter = {},
       closeReader = {},
       startCapture = {
         assertTrue("读线程必须先进入读取", fixture.entered.await(2, TimeUnit.SECONDS))
@@ -129,7 +132,8 @@ class CapturePipeDrainTest {
     val thrown = try {
       CapturePipeDrain.drain(
         read = fixture.read,
-        closeReader = {},
+        closeWriter = {},
+      closeReader = {},
         startCapture = {
           assertTrue("读线程必须先进入读取", fixture.entered.await(2, TimeUnit.SECONDS))
           throw IllegalStateException("fixture capture failure")
@@ -157,12 +161,50 @@ class CapturePipeDrainTest {
     }
   }
 
+  /**
+   * 设备层实测踩到的回归（#627 自测）：`closeWriter` 必须在 `startCapture` 返回后**立刻**被调用。
+   *
+   * 宿主自己还握着写端时，读端永远等不到 EOF——256KiB 的正常载荷会被 join 超时误判成失败。
+   * 判据用真实语义：写端开着就不返回 EOF（真实管道在这里阻塞），关掉才返回 EOF。
+   */
+  @Test
+  fun writerIsClosedRightAfterCaptureSoTheReaderSeesEof() {
+    val before = readers()
+    val expected = ByteArray(128 * 1024) { (it % 241).toByte() }
+    val writerOpen = AtomicBoolean(true)
+    val offset = AtomicInteger(0)
+    val drained = CapturePipeDrain.drain(
+      read = { buffer, _ ->
+        val at = offset.get()
+        if (at < expected.size) {
+          val n = minOf(buffer.size, expected.size - at)
+          System.arraycopy(expected, at, buffer, 0, n)
+          offset.addAndGet(n)
+          n
+        } else if (writerOpen.get()) {
+          // 写端还开着：真实管道在这里阻塞，这里用短睡眠模拟「没有新数据」。
+          Thread.sleep(5)
+          0
+        } else {
+          CapturePipeDrain.EOF
+        }
+      },
+      closeWriter = { writerOpen.set(false) },
+      closeReader = {},
+      startCapture = { true },
+      joinTimeoutMs = 2_000,
+    )
+    assertArrayEquals("写端必须及时关闭，否则 128KiB 正常载荷会被误判成超时", expected, drained)
+    assertNoLeak(before)
+  }
+
   /** 读端失败（例如 POLLERR）必须判失败，不能把半截字节当截图交出去。 */
   @Test(timeout = TEST_TIMEOUT_MS)
   fun readFailureIsNeverReportedAsASuccessfulCapture() {
     val before = readers()
     val drained = CapturePipeDrain.drain(
       read = { _, _ -> throw IOException("fixture pipe failure") },
+      closeWriter = {},
       closeReader = {},
       startCapture = { true },
       joinTimeoutMs = 2_000,
@@ -182,7 +224,8 @@ class CapturePipeDrainTest {
           while (!cancelled.get()) Thread.sleep(5)
           CapturePipeDrain.EOF
         },
-        closeReader = {},
+        closeWriter = {},
+      closeReader = {},
         startCapture = { true },
         joinTimeoutMs = 5_000,
       )
@@ -209,6 +252,7 @@ class CapturePipeDrainTest {
     val before = readers()
     val drained = CapturePipeDrain.drain(
       read = { _, _ -> CapturePipeDrain.EOF },
+      closeWriter = {},
       closeReader = {},
       startCapture = { true },
     )
@@ -226,6 +270,7 @@ class CapturePipeDrainTest {
         while (!cancelled.get()) Thread.sleep(5)
         CapturePipeDrain.EOF
       },
+      closeWriter = {},
       closeReader = { throw IllegalStateException("fixture close failure") },
       startCapture = { false },
     )
@@ -240,6 +285,7 @@ class CapturePipeDrainTest {
     val closed = AtomicInteger(0)
     val drained = CapturePipeDrain.drain(
       read = { buffer, _ -> if (buffer.isEmpty()) CapturePipeDrain.EOF else CapturePipeDrain.EOF },
+      closeWriter = {},
       closeReader = { closed.incrementAndGet() },
       startCapture = { true },
     )
@@ -261,6 +307,7 @@ class CapturePipeDrainTest {
         Thread.sleep(3_000)
         CapturePipeDrain.EOF
       },
+      closeWriter = {},
       closeReader = {},
       startCapture = { false },
       cancelJoinTimeoutMs = 300,

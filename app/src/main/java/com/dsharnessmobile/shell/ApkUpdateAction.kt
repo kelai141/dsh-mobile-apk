@@ -305,6 +305,7 @@ internal class ApkUpdateController(private val activity: Activity) {
    */
   private val epoch = java.util.concurrent.atomic.AtomicInteger(0)
   private val publicationLock = Any()
+  private var checkDeadline: UpdateCheckDeadline? = null
 
   private fun advanceEpoch(): Int = synchronized(publicationLock) { epoch.incrementAndGet() }
 
@@ -476,9 +477,11 @@ internal class ApkUpdateController(private val activity: Activity) {
       }
       val e = advanceEpoch()
       currentResult = null // 进入 checking：旧载荷（若有）立即作废，避免与新一轮检查的结果混用
-      armWatchdog(CHECK_TIMEOUT_MS)
+      val deadline = UpdateCheckDeadline.start(isActive = { isCurrentEpoch(e) })
+      checkDeadline = deadline
+      armWatchdog(deadline.remainingMs())
       notifyChanged()
-      Thread({ runCheck(e) }, "dsh-apk-update-check").start()
+      Thread({ runCheck(e, deadline) }, "dsh-apk-update-check").start()
       return snapshotObject().put("code", "accepted").toString()
     }
   }
@@ -561,9 +564,9 @@ internal class ApkUpdateController(private val activity: Activity) {
 
   // ── 内部推进 ────────────────────────────────────────────────────────────────
 
-  private fun runCheck(e: Int) {
+  private fun runCheck(e: Int, deadline: UpdateCheckDeadline) {
     val r = try {
-      UpdateChecker.checkLatest()
+      UpdateChecker.checkLatest(deadline)
     } catch (t: Throwable) {
       android.util.Log.w(TAG, "check threw: " + (t.message ?: t.javaClass.simpleName))
       UpdateChecker.CheckResult.Failed("检查更新未完成（详细原因已写入日志）——可重试，或复制日志反馈")
@@ -575,6 +578,10 @@ internal class ApkUpdateController(private val activity: Activity) {
   internal fun publishCheckResult(r: UpdateChecker.CheckResult, e: Int) {
     synchronized(publicationLock) {
       if (!isCurrentEpoch(e)) return
+      if (runCatching { checkDeadline?.remainingMs() }.isFailure) {
+        onTimeout()
+        return
+      }
       if (r is UpdateChecker.CheckResult.Available) currentResult = r else currentResult = null
       state.onCheckResult(r, UpdateChecker.currentVersion())
       settle()
@@ -782,18 +789,16 @@ internal class ApkUpdateController(private val activity: Activity) {
      */
     fun timeoutReason(stateName: String): String? = when (stateName) {
       ApkUpdateState.STATE_CHECKING ->
-        "检查更新超时（30 秒内没有拿到结果）——请检查网络后重试；这不是本机架构的问题"
+        // 秒数取自 [CHECK_TIMEOUT_MS]，避免预算改动后文案继续写死旧值（曾写死「30 秒」，
+        // 而实际预算已从 120 秒抬到 200 秒——用户按文案判断"超时不对劲"时会被误导）。
+        "检查更新超时（" + (CHECK_TIMEOUT_MS / 1000) + " 秒内没有拿到结果）——请检查网络后重试；这不是本机架构的问题"
       ApkUpdateState.STATE_DOWNLOADING ->
         "下载超时——网络过慢或已中断，本次已放弃；可稍后重试（不会安装未完成或未校验通过的包）"
       else -> null
     }
 
-    /**
-     * 元数据检查上限。M-s1（2026-10-25 审计）：必须**覆盖确认链的最坏耗时**——六档串行、
-     * 每档连接+读取双超时（8+15+15+8+30+15 秒档位），加上排队与重试余量约 2 分钟；旧值 30s
-     * 会在链路还在正常推进时就把检查判成超时失败（慢网下必然误杀）。
-     */
-    const val CHECK_TIMEOUT_MS = 120_000L
+    /** Shared total budget; each source and redirect also consumes this deadline. */
+    const val CHECK_TIMEOUT_MS = UpdateCheckDeadline.TOTAL_MS
     /** 下载上限下限（小包也不会秒判超时）。 */
     const val DOWNLOAD_TIMEOUT_MIN_MS = 3 * 60_000L
     /** 下载上限上限（169MB 在慢网上也不至于被误判）。 */

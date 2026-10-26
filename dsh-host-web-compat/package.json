@@ -1,7 +1,7 @@
 {
   "name": "@dsh-android/dsh-host-web-compat",
   "description": "Host plugin: legacy-browser polyfills + Android directory-picker bridge (SAF via WebView JS bridge) for the shell APK",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "type": "module",
   "main": "lib/index.js",
   "files": [
@@ -9,7 +9,7 @@
   ],
   "private": true,
   "scripts": {
-    "test": "node --test --test-reporter=spec scripts/open-path-session.test.mjs scripts/boot-watchdog.test.mjs scripts/file-click-defer.test.mjs scripts/array-copy-polyfills.test.mjs && node scripts/smoke-injections.mjs"
+    "test": "node --test --test-reporter=spec scripts/open-path-session.test.mjs scripts/boot-watchdog.test.mjs scripts/file-click-defer.test.mjs scripts/array-copy-polyfills.test.mjs scripts/polyfill-property-descriptors.test.mjs && node scripts/smoke-injections.mjs"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.5"

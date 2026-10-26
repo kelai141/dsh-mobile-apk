@@ -142,6 +142,8 @@ For console keyboard changes, measure both the visual viewport and the native IM
 
 套件清单与参数约定见 `AGENTS.md` §2 的表（`verify-webview-015` / `verify-state-sync` / `verify-browser-host` / `verify-browser-panel` / `verify-vdisplay-viewer` / `verify-vdisplay-float` / `verify-engine-log-copy`）。
 
+`verify-webview-015.mjs` supports the Chinese and English accessible names for settings, account menus, phone control, reset links and attachment commands. Its account-menu probe prefers the explicit accessible name over unrelated More buttons. Run `node scripts/verify-webview-015.mjs --self-test` for the locale and missing/disabled-control regressions; PR CI runs the same tests. Resolve a fresh WebView target before each device run.
+
 硬性约束（违反会**静默连错目标**）：
 
 - 每个套件**单独跑**，跑前重建 WebView target：`adb shell "cat /proc/net/unix | grep webview_devtools"` → `adb forward tcp:29225 localabstract:webview_devtools_remote_<pid>`；

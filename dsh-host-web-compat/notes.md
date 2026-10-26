@@ -1,3 +1,18 @@
+# 数组兼容方法改为不可枚举安装（issue #621）
+
+- 缺陷：0.1.15 的六个 ES2022/ES2023 数组方法（`toSorted/toReversed/toSpliced/with/findLast/findLastIndex`）
+  用 `Array.prototype.x = function ...` 安装，属性因此**可枚举**；普通数组的 `for...in` 会多返回六个
+  方法名（原生内建全部不可枚举），同批的 `at` 与 `replaceAll` 是同一个写法缺口。
+- 修法：一律改用 `Object.defineProperty`，保持 `writable/configurable`、关闭 `enumerable`；
+  判缺守卫与语义实现不变，原生在场时仍然一个字节都不改。
+- 回归：`scripts/polyfill-property-descriptors.test.mjs`（反证 / 描述符与原生对齐 / for...in 只见到下标 /
+  可用性 / 原生不被覆盖 / 负控 / 源码契约共 6 例）；`scripts/smoke-injections.mjs` 的送达标记改认新形态。
+- 负控：把 `lib/index.js` 换回修前版本，同一份回归 2 例判红（描述符 + 源码契约），smoke 7 条标记判红；
+  恢复后全绿。
+- 版本：0.1.15 -> 0.1.16。
+
+---
+
 # 老内核缺失数组内建（toSorted 四件套 + findLast 对）
 
 - 报障形态：Android 应用内 WebView（内核 < Chrome 110）模型胶囊不显示，/model 只有搜索框 + 红字

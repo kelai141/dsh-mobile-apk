@@ -218,7 +218,7 @@ class ApkUpdateObserverTest {
     assertTrue("检查按钮只发检查", checkBody.contains("check()"))
     assertFalse("检查按钮不得顺带发起下载", checkBody.contains("start()"))
 
-    val downloadBody = code.substringAfter("fun onDownloadPressed(): String {").substringBefore("private fun runCheck(e: Int)")
+    val downloadBody = code.substringAfter("fun onDownloadPressed(): String {").substringBefore("private fun runCheck(")
     assertTrue("续继链必须在下载按钮这一侧", downloadBody.contains("continueInstallIfPermitted()"))
     assertTrue("available 才允许开始下载", downloadBody.contains("STATE_AVAILABLE"))
     assertFalse("下载按钮不得改发检查", downloadBody.contains("check()"))
@@ -239,7 +239,7 @@ class ApkUpdateObserverTest {
     assertTrue(code.contains("const val ACTION_INSTALL = \"install\""))
 
     // 回执不得退化成「一律 OK」：下载入口必须给得出拒绝原因。
-    val downloadBody = code.substringAfter("fun onDownloadPressed(): String {").substringBefore("private fun runCheck(e: Int)")
+    val downloadBody = code.substringAfter("fun onDownloadPressed(): String {").substringBefore("private fun runCheck(")
     assertTrue("忙时必须回 busy", downloadBody.contains("reject(\"busy\""))
     assertTrue("无可下载相位必须如实拒绝", downloadBody.contains("not-available"))
   }

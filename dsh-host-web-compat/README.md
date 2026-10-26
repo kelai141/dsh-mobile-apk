@@ -124,6 +124,11 @@ Snippets live in the `POLYFILLS` array; the assembly rule is `POLYFILL_SCRIPT_BO
 - `apply()` parse-checks the assembled markup with `new Function` at load and throws on failure
   (loud failure beats a silent downgrade).
 - **Shim the real structure, not just the name**: the global `Iterator` must be a constructor whose `.prototype` IS `%IteratorPrototype%` (bundled code such as pdfjs patches `Iterator.prototype.x` directly), and iterator wrappers must inherit that same prototype or chained helpers break.
+- **Install prototype builtins with `Object.defineProperty` and `enumerable: false`** (issue #621): an
+  assignment produces an enumerable property, so a plain array or string `for...in` then yields method
+  names and treats functions as data. The criterion lives in
+  `scripts/polyfill-property-descriptors.test.mjs` (including "a native method in place is left byte-for-byte
+  untouched" and a source contract).
 
 ## Tests
 

@@ -23,9 +23,12 @@ const POLYFILLS = [
   // (issue #79: "Object.hasOwn is not a function"). Same semantics as Object.prototype.hasOwnProperty.call.
   `if(typeof Object.hasOwn==='undefined'){Object.hasOwn=function(o,k){return Object.prototype.hasOwnProperty.call(o,k)}}`,
   // Array.prototype.at: Chrome 92+/Safari 15.4+; missing on older WebViews.
-  `if(typeof Array.prototype.at==='undefined'){Array.prototype.at=function(i){var l=this.length,t=Number(i)||0;if(t<0)t=Math.max(l+t,0);return t<0||t>=l?undefined:this[t]}}`,
+  // 属性必须不可枚举（issue #621）：赋值式安装让 `for...in` 遍历数组时额外返回方法名，原生内建不可枚举。
+  `if(typeof Array.prototype.at==='undefined'){Object.defineProperty(Array.prototype,'at',{value:function(i){var l=this.length,t=Number(i)||0;if(t<0)t=Math.max(l+t,0);return t<0||t>=l?undefined:this[t]},writable:true,configurable:true,enumerable:false})}`,
   // String.prototype.replaceAll: Chrome 85+/Safari 13.1+; optional last API on Chromium<85 WebViews.
-  `if(typeof String.prototype.replaceAll==='undefined'){String.prototype.replaceAll=function(s,r){if(s instanceof RegExp)throw new TypeError('replaceAll: search must be a string');return this.split(s).join(r)}}`,
+  // 同 issue #621：原型上的赋值安装是可枚举的，任何字符串的 for...in 都会多出方法名——改用
+  // Object.defineProperty 保持不可枚举（其余段落里的 Set / Iterator 助手本来就是 defineProperty）。
+  `if(typeof String.prototype.replaceAll==='undefined'){Object.defineProperty(String.prototype,'replaceAll',{value:function(s,r){if(s instanceof RegExp)throw new TypeError('replaceAll: search must be a string');return this.split(s).join(r)},writable:true,configurable:true,enumerable:false})}`,
   // crypto.randomUUID: Chrome 92+ and requires a secure context; MIUI12-era WebViews (Chromium 87)
   // lack it while still offering crypto.getRandomValues (issue #110: randomUUID is not a function).
   // RFC 4122 v4: set version/variant bits, hex lowercase, canonical dashes.
@@ -116,13 +119,16 @@ const POLYFILLS = [
     var AP=Array.prototype;
     if(!AP)return;
     if(typeof AP.toSorted!=='undefined'&&typeof AP.toReversed!=='undefined'&&typeof AP.toSpliced!=='undefined'&&typeof AP.with!=='undefined')return;
+    // 一律用 Object.defineProperty 安装：赋值式安装会让方法成为**可枚举**属性，普通数组的
+    // for...in 遍历会额外返回这些方法名（issue #621），原生内建全部是不可枚举的。
+    var defNonEnum=function(name,fn){Object.defineProperty(AP,name,{value:fn,writable:true,configurable:true,enumerable:false})};
     var copyOf=function(o){var len=o.length>>>0,out=new Array(len),i=0;for(;i<len;i++){out[i]=o[i]}return out};
     var checkedCmp=function(cmp){if(cmp!==undefined&&typeof cmp!=='function')throw new TypeError('The comparison function must be either a function or undefined');return cmp};
     var toInt=function(n){var x=Number(n);if(x!==x)return 0;if(x===Infinity||x===-Infinity)return x;return x<0?Math.ceil(x):Math.floor(x)};
-    if(typeof AP.toSorted==='undefined'){AP.toSorted=function(cmp){checkedCmp(cmp);var out=copyOf(Object(this));return AP.sort.call(out,cmp)}}
-    if(typeof AP.toReversed==='undefined'){AP.toReversed=function(){var src=copyOf(Object(this)),len=src.length,out=new Array(len),i=0;for(;i<len;i++){out[i]=src[len-1-i]}return out}}
-    if(typeof AP.toSpliced==='undefined'){AP.toSpliced=function(){var out=copyOf(Object(this));AP.splice.apply(out,arguments);return out}}
-    if(typeof AP.with==='undefined'){AP.with=function(index,value){var o=Object(this),len=o.length>>>0,rel=toInt(index),actual=rel<0?len+rel:rel;if(actual<0||actual>=len)throw new RangeError('Invalid index');var out=copyOf(o);out[actual]=value;return out}}
+    if(typeof AP.toSorted==='undefined'){defNonEnum('toSorted',function(cmp){checkedCmp(cmp);var out=copyOf(Object(this));return AP.sort.call(out,cmp)})}
+    if(typeof AP.toReversed==='undefined'){defNonEnum('toReversed',function(){var src=copyOf(Object(this)),len=src.length,out=new Array(len),i=0;for(;i<len;i++){out[i]=src[len-1-i]}return out})}
+    if(typeof AP.toSpliced==='undefined'){defNonEnum('toSpliced',function(){var out=copyOf(Object(this));AP.splice.apply(out,arguments);return out})}
+    if(typeof AP.with==='undefined'){defNonEnum('with',function(index,value){var o=Object(this),len=o.length>>>0,rel=toInt(index),actual=rel<0?len+rel:rel;if(actual<0||actual>=len)throw new RangeError('Invalid index');var out=copyOf(o);out[actual]=value;return out})}
   })();`,
 
   // ── Array.prototype.findLast / findLastIndex (2026-10-26 同批审计) ─────────────────
@@ -149,9 +155,11 @@ const POLYFILLS = [
       for(;i>=0;i--){v=o[i];if(predicate.call(thisArg,v,i,o))return wantIndex?i:v}
       return wantIndex?-1:void 0;
     };
+    // 同上一段：必须不可枚举（issue #621）。
+    var defNonEnum=function(name,fn){Object.defineProperty(AP,name,{value:fn,writable:true,configurable:true,enumerable:false})};
     var checked=function(predicate){if(typeof predicate!=='function')throw new TypeError('predicate must be a function');return predicate};
-    if(typeof AP.findLast==='undefined'){AP.findLast=function(predicate,thisArg){var o=Object(this);checked(predicate);return scan(o,predicate,thisArg,false)}}
-    if(typeof AP.findLastIndex==='undefined'){AP.findLastIndex=function(predicate,thisArg){var o=Object(this);checked(predicate);return scan(o,predicate,thisArg,true)}}
+    if(typeof AP.findLast==='undefined'){defNonEnum('findLast',function(predicate,thisArg){var o=Object(this);checked(predicate);return scan(o,predicate,thisArg,false)})}
+    if(typeof AP.findLastIndex==='undefined'){defNonEnum('findLastIndex',function(predicate,thisArg){var o=Object(this);checked(predicate);return scan(o,predicate,thisArg,true)})}
   })();`,
 ];
 

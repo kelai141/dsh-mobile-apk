@@ -730,6 +730,12 @@ Terminal output delivery (#591): `ConsoleSession` sends stripped PTY text throug
     / `armWatchdog`（`:321`）/ `disarmWatchdog`（`:326`）/ `onTimeout`（`:335`）/ `timeoutReason`（纯函数 `:607`）/ `release`（`:344`）；
     check（`:380`）与 download（`:401`）两处都 arm，任何终态必落如实文案。
     反例锚点 `UpdateCheckerTest.kt:364`（`timeoutAlwaysConvergesToHonestTerminalText`）。
+  - **不变量 2a（元数据检查共用同一条期限）**：`UpdateCheckDeadline` 从受理贯穿到结果发布——
+    六档来源共用一条单调时钟总期限（`UpdateCheckDeadline.TOTAL_MS` = 200 秒，覆盖六档 182 秒的
+    连接/读取子预算），每档子期限跨重定向不刷新、连接与读取都从中扣；到期由 `metadataTimers`
+    主动断开阻塞连接，发布侧在 epoch 锁内再查一次期限（`ApkUpdateAction.kt:578-589`）。
+    因此"迟到的有效兜底结果"不会作废，"超时"也不会被一条迟到的成功结果伪造成成功。
+    正/负控：`UpdateCheckDeadlineTest`（10 例，把 `TOTAL_MS` 改回 120 秒即判红）。
   - **不变量 2b（单一真源：`canStart` 与受理判据必须同表达式）**：`canStart` 直接由 state 派生
     （`snapshotJson` 的 `state == STATE_AVAILABLE`，`:71`），与 `beginDownload()`（`:140`）的受理判据**同一表达式**。
     旧实现把 `canStart` 绑在一个独立的「有没有待装新版」字段上，其语义**弱于**真实受理条件（`state == available` **且** 该字段非空），
@@ -1676,6 +1682,8 @@ flowchart TD
 
 ### 构建、门禁与设备验收
 
+Hash-bound build inputs (#597): `.gitattributes` preserves official patches, distributed SDK licenses, the verbatim browser stylesheet, captured fixtures, cross-language screen-scope fixtures and their registry/overlay identity manifests as exact bytes. `scripts/check-upstream-patch-bytes.test.mjs` verifies the registered patch and capture digests against actual files and Git checkout filtering with autocrlf enabled.
+
 FileProvider XML path regression coverage: `scripts/check-manifest-hardening.test.mjs` invokes `scripts/check-manifest-hardening.mjs` against complete fixture trees. Attribute decoding precedes range classification; encoded broad roots must activate the same caller allowlist as literal roots.
 
 #### B01 构建链与快照注入
@@ -2113,10 +2121,9 @@ app/src/debug/java/com/dsharnessmobile/shell/BrowserRendererHostActivity.kt
 app/src/androidTest/java/com/dsharnessmobile/shell/BrowserRendererServiceTest.kt
 app/src/main/java/com/dsharnessmobile/shell/CapturePipeDrain.kt
 app/src/test/java/com/dsharnessmobile/shell/CapturePipeDrainTest.kt
+app/src/androidTest/java/com/dsharnessmobile/shell/RendererCapturePipeTest.kt
 app/src/androidTest/java/com/dsharnessmobile/shell/RendererCapturePipeDeviceTest.kt
 -->
-
-Capture pipe ownership: `RemoteRendererHost.capturePng` starts draining before the Binder call, closes the host write descriptor in the capture callback's `finally`, and only then lets `CapturePipeDrain` join the reader. `BrowserProcessService.RemoteTab.capture` owns its Binder duplicate through `AutoCloseOutputStream` and releases it even if drawing fails. Both writers must close before EOF can arrive. `RendererCapturePipeDeviceTest` exercises a valid PNG larger than the pipe buffer, a real renderer Binder capture, retained remote writers, rejected and exceptional receipts, empty payloads, and interrupted cancellation on Android.
 
 设置页设备导航：verify-webview-015 在桌面形态经账号菜单进入设置与手机控制，仍要求真实重置按钮存在、启用且有尺寸；缺少入口、页签或按钮的负控均判红。
 
@@ -2238,6 +2245,8 @@ app/src/main/java/com/dsharnessmobile/shell/SnapshotUserData.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotFileMode.kt
 app/src/main/java/com/dsharnessmobile/shell/UpdateManager.kt
 app/src/main/java/com/dsharnessmobile/shell/UpdateChecker.kt
+app/src/main/java/com/dsharnessmobile/shell/UpdateCheckDeadline.kt
+app/src/androidTest/java/com/dsharnessmobile/shell/UpdateCheckDeadlineDeviceTest.kt
 app/src/main/java/com/dsharnessmobile/shell/DownloadSaver.kt
 app/src/main/java/com/dsharnessmobile/shell/FactoryProfilePatch.kt
 app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt
@@ -2506,9 +2515,13 @@ app/src/main/java/com/dsharnessmobile/shell/ApkUpdateAction.kt
 - [B02] 漂移：5 个门禁脚本的两仓副本行尾不同（协调仓 CRLF、apk 仓 LF），`cmp` 字节不等、归一化后内容一致：`scripts/check-boot-budget.mjs`、`scripts/check-browser-syntax-floor.mjs`、`scripts/check-build-parallel-cap.mjs`、`scripts/check-snapshot-builder-output.mjs`、`scripts/check-tool-output-schema.mjs`；镜像门禁只按「仅行尾差异」告警放行（`scripts/check-patch-mirror.mjs:339`）——「逐字节镜像」在行尾层不成立。
 - [B02] 漂移：`scripts/check-code-map.mjs` 只在 apk 仓存在（协调仓 `scripts/` 无此文件），且未被列进 `scripts/check-patch-mirror.mjs:160` 起的 `MIRROR_TOP` → 这条新门禁自身没有镜像守护。
 
+WebView verification locales (#600): scripts/verify-webview-015.mjs resolves Chinese and English accessible names, prioritizes the account-menu trigger and retains missing/disabled-control failures. scripts/verify-webview-settings.test.mjs covers both navigation paths and attachment labels; PR CI installs its declared UI test dependencies and runs the same self-test. Device invocation remains positional WebSocket with a fresh target per run.
+
 APK epoch publication (#605): ApkUpdateController.publishCheckResult, failDownload and onDownloadProgress validate ownership and mutate state under publicationLock. Admission, timeout/release invalidation and installer handoff use the same lock. Network operations and hashing remain outside the lock; rejected-artifact deletion checks ownership again before deletion. ApkUpdateEpochPublicationTest controls production state-lock interleavings for result, failure and progress.
 
 [B03] Console keyboard geometry (#602): ConsoleActivity.refreshInsets compares the screen-relative WebView bottom and visible window frame, then consoleImeOverlap removes already-resized space. app/src/main/assets/console.html separates navigation padding from IME occlusion and compacts controls for short usable viewports. ConsoleImeOverlapTest covers resized, unresized and positioned views; scripts/console-keyboard-layout.test.mjs covers page state, resize and keyboard restoration.
 Console input admission (#599): ConsoleSession.completePtyHandshake validates the relay generation and replays pending input under the same lock used by writeRaw and protocol-frame writes. Readiness is published after replay; failed replay stays unavailable. ConsoleInputHandshakeTest exercises ready/admission overlap, replay order, stale handshakes, literal fallback input and replay failure.
 
 Console reader settlement (#606): ConsoleSession.start sends initial status before starting its reader. ConsoleSession.readOutput drains and closes the output batcher, clears current PTY readiness and reports EOF unless an explicit exit frame already notified the listener. ConsoleReaderExitTest drives the production reader through controlled process streams and stale generations.
+
+Capture EOF integration: RendererCapturePipeDeviceTest passes a valid PNG larger than 256 KiB through the production host adapter and binds the actual :browser service to require a decodable PNG before the join deadline. These cases complement retained-writer and cancellation checks in RendererCapturePipeTest. Host writer closure is owned by CapturePipeDrain's closeWriter callback before reader.join; BrowserProcessService owns and closes its Binder duplicate.

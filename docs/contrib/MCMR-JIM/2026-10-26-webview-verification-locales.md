@@ -1,0 +1,5 @@
+# Locale-aware WebView verification
+
+**Locale-specific device selectors report false failures (#600).** The WebView verifier searched only Chinese accessible names while the interface also supports English. Existing Settings and attachment controls were therefore reported absent on a working English device. The probes accept both supported names and reuse the shared settings opener introduced by #617, preserving its explicit account-menu priority and visible-section checks.
+
+Fourteen regressions cover both locales, ambiguous More buttons, absent controls and disabled reset links. A controlled mutation disabling account-menu priority fails the ambiguity cases. Restoring the old locale selectors previously failed five cases. The original 39-check suite passed on Android 15/WebView 124 in portrait and landscape. After integrating the shared opener, a new device probe could not run because the app had no running main process; it is not counted as passing. The current integration is verified by the fourteen offline regressions and controlled negative test. Code-map validation passed. This change updates verification scripts, not app runtime behavior.

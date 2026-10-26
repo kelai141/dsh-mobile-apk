@@ -617,7 +617,8 @@ class UpdateCheckerTest {
   @Test
   fun confirmationChainWiringOrderIsPinned() {
     val src = repoSource("UpdateChecker.kt")
-    val body = src.substringAfter("private fun probeSources()").substringBefore("private fun fetchText")
+    assertTrue(src.contains("private fun probeSources(deadline: UpdateCheckDeadline)"))
+    val body = src.substringAfter("private fun probeSources(deadline: UpdateCheckDeadline)").substringBefore("internal fun fetchText")
     assertTrue("probeSources 必须存在（六档接线点）", body.isNotBlank())
 
     val order = listOf("gh-proxy", "ghfast", "github", "pages", "ghproxy.net", "api")

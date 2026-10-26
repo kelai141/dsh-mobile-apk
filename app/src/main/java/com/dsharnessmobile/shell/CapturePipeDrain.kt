@@ -48,7 +48,10 @@ internal object CapturePipeDrain {
    * @param read 在**读线程**上执行的单次阻塞读：返回读到的字节数，[EOF] 表示写端已关。
    *   实现必须自行响应 `cancelled`（生产实现用有界 `poll` 轮询，否则取消无界）。
    *   抛异常 = 读失败（例如管道 `POLLERR`），按失败结算。
-   * @param closeReader 收尾时放掉读端（生产实现同时关写端）；允许重复调用、允许抛异常。
+   * @param closeWriter 在 `startCapture` 返回（或抛出）后**立刻**调用，用于关掉**本端**的写端。
+   *   这是读端能拿到 EOF 的唯一条件：宿主自己还握着 `pipe[1]` 时，远端那边关没关都不算数，
+   *   `read` 会一直阻塞到 join 超时（设备层实测踩到：256KiB 正常载荷被判成 null）。
+   * @param closeReader 收尾时放掉读端；允许重复调用、允许抛异常。
    * @param startCapture 读线程就绪后调用，返回远端回执（true = 远端声称已写完）。
    *   它抛出的异常**原样向上抛**（保留堆栈，调用方自己决定怎么记账），但其线程与描述符
    *   一定已在 finally 里收干净。只有它返回 true 才结算字节。
@@ -56,6 +59,7 @@ internal object CapturePipeDrain {
    */
   fun drain(
     read: (buffer: ByteArray, cancelled: AtomicBoolean) -> Int,
+    closeWriter: () -> Unit,
     closeReader: () -> Unit,
     startCapture: () -> Boolean,
     joinTimeoutMs: Long = DEFAULT_JOIN_TIMEOUT_MS,
@@ -94,7 +98,13 @@ internal object CapturePipeDrain {
         interrupted = true
         return null
       }
-      if (!startCapture()) return null
+      val captured = try {
+        startCapture()
+      } finally {
+        // 本端写端必须在这里关：否则读端等不到 EOF，正常截图会被 join 超时误判成失败。
+        runCatching { closeWriter() }
+      }
+      if (!captured) return null
       try {
         reader.join(joinTimeoutMs)
       } catch (_: InterruptedException) {

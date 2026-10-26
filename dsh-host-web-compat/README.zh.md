@@ -114,6 +114,9 @@
   `Iterator is not defined`，排查花了整整一轮）。
 - `apply()` 在装载期对装配结果做 `new Function` 解析断言，不合格直接抛错（响亮失败优先于静默降级）。
 - **垫片要按真实现的结构补**：全局 `Iterator` 必须是构造器且 `.prototype === %IteratorPrototype%`（pdfjs 等打包代码会用 `Iterator.prototype.x` 直接打补丁），迭代器包装器必须继承同一原型，否则链式助手断链（见坑 61）。
+- **原型上的内建一律用 `Object.defineProperty` 安装，`enumerable` 必须为 `false`**（issue #621）：赋值安装
+  会得到可枚举属性，普通数组 / 字符串的 `for...in` 随即多出方法名，把函数当成数据。判据在
+  `scripts/polyfill-property-descriptors.test.mjs`（含「原生在场时一个字节都不改」与源码契约两条）。
 
 ## 测试
 
