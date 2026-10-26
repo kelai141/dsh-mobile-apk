@@ -280,11 +280,24 @@ if (peer) {
     // 防重放静默回退别人的内容）。两个仓都可能作为重放源，脚本必须同源——单边演进 = 一侧拿旧判据
     // 放行一次会覆盖别人的重放，且该次事故不可逆（远端历史已被改写）。
     'scripts/replay-guard.mjs',
-    // 0.14.1：Kotlin 单测数量回归门禁与基线。apk 仓的 check-release-gates.mjs 已把它列进清单，
-    // 但脚本与基线此前**只存在于协调仓** → apk 侧聚合门禁会因「脚本缺席」判红（云端自包含构建同理）。
-    // 门禁脚本自身 = 防线，必须与产物面同源；基线只许升档（--update-baseline 拒绝降级）。
+    // 0.14.1：Kotlin 单测数量回归门禁。apk 仓的 check-release-gates.mjs 已把它列进清单，
+    // 但脚本此前**只存在于协调仓** → apk 侧聚合门禁会因「脚本缺席」判红（云端自包含构建同理）。
+    // 门禁脚本自身 = 防线，必须与产物面同源。
     'scripts/check-kotlin-test-count.mjs',
-    'scripts/kotlin-test-baseline.json',
+    // ── 基线 JSON 刻意**不**入镜像面（2026-10-27，issue #156；PR #158 / #159 实测后移除）──
+    // 别再把它加回来。它和上面那个门禁脚本不是同一类东西：
+    //   - **apk 仓是唯一真源**。它是「Kotlin 单测只许升不许降」的计数基线，由 apk 仓的
+    //     check-kotlin-test-count.mjs 消费。协调仓既没有 Kotlin 测试源目录
+    //     （app/src/test/java/com/dsharnessmobile/shell 缺席，跑该门禁直接 exit 2），
+    //     也没有任何门禁读它（check-release-gates.mjs 里该条是 ciApk:false / ciCoord:false
+    //     / sink:'apk-ci'，即只在 apk 仓 CI 跑）。
+    //   - 它**每合一个带 Kotlin 单测的 PR 就变一次**（2026-10-27 上午就变了 5 次）。
+    //     纳入逐字节比对的实际效果只有周期性假红：当天已空转两次——#158 刚把协调仓追平到
+    //     1859，apk 侧下一个 PR 立刻推到 1865，镜像门禁再次判红。
+    //   - 这种「纯镜像载体」留在逐字节比对面里等于给真漂移制造噪音背景：红得越频繁，
+    //     真红越容易被当作「又是那个基线」而放过。
+    // 结论：门禁脚本镜像（上面那条保留），基线不镜像（本条移除）。要在协调仓核 Kotlin
+    // 用例数，去 apk 仓看，别在本仓留副本。
     // 0.13.8-b 批 B2（ST-25/26/31 + §7.2）：制度性门禁、度量入口与 A1 seed 模块同样双仓同源
     // （云端自包含构建会跑它们；单边演进 = 云端跑旧门禁/旧 seed）。
     'scripts/check-state-registry.mjs',
