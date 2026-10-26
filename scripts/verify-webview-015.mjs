@@ -81,6 +81,15 @@ const OPEN_SETTINGS_SRC = `const openSettings = async () => { const direct = [..
  *
  * 失败态带上 steps，下次一眼看出卡在哪一步；打不开就如实判红，不用缺失冒充绿。
  */
+/**
+ * 「已退役的 Session-header 入口是否复活」的页内探针（双语）。
+ *
+ * 这是**否定**判据：中英文可访问名任一命中都算复活 → 调用方要求 `present === false`。
+ * 单独抽成 const 是为了让 scripts/verify-webview-settings.test.mjs 能原样取出真源码求值
+ * （无反引号、无插值），从而给这条判据配可证伪的负控。
+ */
+const RETIRED_OPEN_ENTRY_PROBE = `(() => { const active = !!document.querySelector('[data-dsh-frame] [data-phase="active"]'); const labels = ['在文件中打开', 'Open in file manager']; const hits = labels.filter((label) => document.querySelector('[aria-label="' + label + '"]') !== null); return { active, present: hits.length > 0, hits } })()`
+
 // Match the supported accessible names without depending on the active UI locale.
 const FILE_BUTTON_PROBE = `(() => { const btn = document.querySelector('button[aria-label="添加文件或调用指令"], button[aria-label="Add files or run commands"]'); if (!btn) return 'absent'; return getComputedStyle(btn).display !== 'none'; })()`
 
@@ -129,8 +138,12 @@ const checks = [
   // 0.14.2 P5 已按用户反馈退役 Session-header 文件夹入口；
   // dsh-client-ui-responsive/src/client/index.ts:352-356 记录删除注册的原因，组件仍供 open-with tab 使用。
   // 此断言验证退役状态在空白页和活动会话中都成立，避免把历史 UI 入口误报为产品回归。
-  ['已退役的 Session-header「在文件中打开」入口不存在（两方向都判）',
-    "(() => { const active = !!document.querySelector('[data-dsh-frame] [data-phase=\"active\"]'); return { active, present: !!document.querySelector('[aria-label=\"在文件中打开\"]') } })()",
+  //
+  // 双语（#601 后续）：本断言是「不存在」判据，所以中英文**任一**命中都算「入口复活」→ 判红。
+  // 只认中文时，英文界面下把入口加回来会恒真假绿（组件 OpenInFileManagerAction.tsx 的
+  // LABEL 目前只有中文；一旦上游/适配层给它配英文可访问名，旧判据就漏了）。
+  ['已退役的 Session-header「在文件中打开」入口不存在（两方向都判，中英文任一复活即红）',
+    RETIRED_OPEN_ENTRY_PROBE,
     (v) => !!v && v.present === false],
   ['桥 openPathChooser 已注入', "typeof window.androidBridge?.openPathChooser === 'function'", true],
   ['桥 downloadDebugLogs 已退役', "typeof window.androidBridge?.downloadDebugLogs === 'undefined'", true],

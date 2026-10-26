@@ -14,6 +14,8 @@ const openerDeclaration = source.split('\n').find(line => line.startsWith('const
 const probe = vm.runInNewContext('const MOBILE_FORM_MAX_WIDTH = 767; ' + openerDeclaration + '; ' + declaration + '; RESET_BUTTON_PROBE');
 const fileDeclaration = source.split('\n').find(line => line.startsWith('const FILE_BUTTON_PROBE ='));
 const fileProbe = vm.runInNewContext(fileDeclaration + '; FILE_BUTTON_PROBE');
+const retiredDeclaration = source.split('\n').find(line => line.startsWith('const RETIRED_OPEN_ENTRY_PROBE ='));
+const retiredProbe = vm.runInNewContext(retiredDeclaration + '; RETIRED_OPEN_ENTRY_PROBE');
 
 async function exercise({ entry = 'more', control = true, reset = true, disabled = false, locale = 'zh', decoy = false } = {}) {
   const dom = new JSDOM('<body></body>', { runScripts: 'outside-only' });
@@ -151,5 +153,36 @@ test('attachment probe still rejects missing and hidden controls', async () => {
     assert.equal(await dom.window.eval(fileProbe), false);
     dom.window.document.querySelector('button').remove();
     assert.equal(await dom.window.eval(fileProbe), 'absent');
+  } finally { dom.window.close(); }
+});
+
+// 退役入口判据是「不存在」：中英文**任一**复活都必须判红。
+// 只认中文时，英文界面下把入口加回来会恒真假绿——这组用例就是钉住那一面。
+for (const label of ['在文件中打开', 'Open in file manager']) {
+  test('retired open-entry probe detects a revived control: ' + label, () => {
+    const dom = new JSDOM('<button aria-label="' + label + '"></button>', { runScripts: 'outside-only' });
+    try {
+      const verdict = dom.window.eval(retiredProbe);
+      assert.equal(verdict.present, true, 'revived control must be reported as present');
+      assert.deepEqual(Array.from(verdict.hits), [label]);
+    } finally { dom.window.close(); }
+  });
+}
+
+test('retired open-entry probe stays green when both locales are absent', () => {
+  const dom = new JSDOM('<button aria-label="无关按钮"></button>', { runScripts: 'outside-only' });
+  try {
+    const verdict = dom.window.eval(retiredProbe);
+    assert.equal(verdict.present, false);
+    assert.deepEqual(Array.from(verdict.hits), []);
+  } finally { dom.window.close(); }
+});
+
+test('retired open-entry probe reports every hit when both locales revive', () => {
+  const dom = new JSDOM('<button aria-label="在文件中打开"></button><button aria-label="Open in file manager"></button>', { runScripts: 'outside-only' });
+  try {
+    const verdict = dom.window.eval(retiredProbe);
+    assert.equal(verdict.present, true);
+    assert.equal(verdict.hits.length, 2);
   } finally { dom.window.close(); }
 });
