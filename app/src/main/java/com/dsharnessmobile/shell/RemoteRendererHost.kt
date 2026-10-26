@@ -315,7 +315,9 @@ internal class RemoteRendererHost(
         if (poll.revents.toInt() and errors != 0) throw java.io.IOException("capture pipe failed")
         readerStream.read(buffer)
       },
-      // 顺序要紧：先关写端（远端写端已关时才是真 EOF），再关读端（打断轮询中的读线程）。
+      // 宿主自己的写端：capture 一返回就得关，否则读端永远等不到 EOF。
+      closeWriter = { runCatching { pipe[1].close() } },
+      // 收尾时再关一次写端（幂等）并放掉读端，打断轮询中的读线程。
       closeReader = {
         runCatching { pipe[1].close() }
         runCatching { readerStream.close() }
