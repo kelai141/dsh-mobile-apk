@@ -96,6 +96,23 @@ const POLYFILLS = [
   })();`,
   // Array.fromAsync: Chrome 121+；文档/会话分页装配可能用到。
   `if(typeof Array.fromAsync==='undefined'){Array.fromAsync=async function(items,mapFn){var out=[],i=0;for await (var v of items){out.push(mapFn?await mapFn(v,i++):v)}return out}}`,
+
+  // ── ES2023 非变异数组方法（2026-10-26，用户真机 WebView 110 实锤）──────────────────
+  // 现象：输入框控件行的模型胶囊整块不显示；点开 `/model` 只有「搜索模型…」+ 红字
+  // `groups.toSorted is not a function` + 重试，看不到任何模型行。
+  // 真因：上游 ui-model-selection 的 orderModelProviders 在 **render 里**调
+  // `groups.toSorted(...)`（同族：ui-settings-models 的模型行排序、ui-schedule 的定时任务排序），
+  // 而 toSorted/toReversed/toSpliced/with 是 ES2023 方法（Chrome 110+ 才有）——旧内核缺位即
+  // TypeError，胶囊所在的渲染路径整块崩掉。桌面 Chrome ≥110 不复现，只在 Android/旧内核暴露。
+  // 口径同既有条目：上游只读，在外围补洞、不改上游字节。语义按规范实现（不改入参、返回副本）；
+  // `with` 的越界判据是 [-length, length-1]，越界抛 RangeError。TypedArray 的同名方法不在本次
+  // 范围（已装 bundle 里没有调用点），需要时另立条目。
+  `(function(){var P=typeof Array!=='undefined'&&Array.prototype;if(!P)return;var def=function(n,f){if(typeof P[n]==='undefined')Object.defineProperty(P,n,{value:f,writable:true,configurable:true})};
+    def('toSorted',function(compare){return P.slice.call(this).sort(compare)});
+    def('toReversed',function(){return P.slice.call(this).reverse()});
+    def('toSpliced',function(){var out=P.slice.call(this);P.splice.apply(out,arguments);return out});
+    def('with',function(index,value){var out=P.slice.call(this);var i=Math.trunc(Number(index));if(!isFinite(i)||i<-out.length||i>=out.length)throw new RangeError('Invalid index');if(i<0)i+=out.length;out[i]=value;return out});
+  })();`,
 ];
 
 // Boot watchdog (2026-08-17, issue #36): when the page stays on "Loading plugins…" for over 40s,

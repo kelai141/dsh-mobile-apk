@@ -79,6 +79,10 @@ try {
     ['Iterator constructor shape (Iterator.prototype)', 'Object.defineProperty(IteratorCtor,\'prototype\''],
     ['Object.groupBy shim', 'Object.groupBy=function'],
     ['Set.prototype.union shim', "def('union'"],
+    // 2026-10-26 WebView 110：上游 orderModelProviders 在 render 里调 groups.toSorted(...)，缺位即
+    // 「模型胶囊不渲染 + /model 红字 groups.toSorted is not a function」。这里只锁「补丁送达页面」；
+    // 行为（非变异语义 / 越界 / 幂等 / 非枚举）由 es2023-immutable-array.test.mjs 的 realm 用例判。
+    ['ES2023 immutable array methods', "def('toSorted'"],
     ['Array.fromAsync shim', 'Array.fromAsync=async function'],
     ['AbortSignal.any polyfill', 'AbortSignal.any=function'],
     ['directory-picker bridge', 'x-dsh-pick-token'],

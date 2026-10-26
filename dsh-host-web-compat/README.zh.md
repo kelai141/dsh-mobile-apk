@@ -47,6 +47,7 @@
 | `Object.groupBy` / `Map.groupBy` | 缺失时 | Chrome 117+ |
 | `Set.prototype` 集合方法 | 缺失时 | Chrome 122+（union/intersection/difference/symmetricDifference/isSubsetOf/isSupersetOf/isDisjointFrom） |
 | `Array.fromAsync` | 缺失时 | Chrome 121+ |
+| `Array.prototype.toSorted` / `toReversed` / `toSpliced` / `with` | 缺失时 | Chrome 110+（ES2023）；上游 `ui-model-selection` 在 render 里调 `groups.toSorted(...)`，缺位即模型胶囊不渲染、`/model` 报 `groups.toSorted is not a function` |
 
 幂等：已存在则跳过。全部片段拼成**一个** `<script>`，因此每个片段必须以完整语句结尾
 （见「开发约束」）。

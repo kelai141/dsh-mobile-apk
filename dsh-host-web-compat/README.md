@@ -50,6 +50,7 @@ The plugin injects idempotent polyfills at the HTML level — no browser-side ch
 | `Object.groupBy` / `Map.groupBy` | missing | Chrome 117+ |
 | `Set.prototype` set methods | missing | Chrome 122+ (union/intersection/difference/symmetricDifference/isSubsetOf/isSupersetOf/isDisjointFrom) |
 | `Array.fromAsync` | missing | Chrome 121+ |
+| `Array.prototype.toSorted` / `toReversed` / `toSpliced` / `with` | missing | Chrome 110+ (ES2023); upstream `ui-model-selection` calls `groups.toSorted(...)` inside render, so without it the model capsule never renders and `/model` shows `groups.toSorted is not a function` |
 
 Idempotent: skipped when already present. Every snippet shares **one** `<script>` element, so each
 one must end on a complete statement (see Development constraints).

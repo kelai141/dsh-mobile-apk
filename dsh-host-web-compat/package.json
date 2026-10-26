@@ -9,7 +9,7 @@
   ],
   "private": true,
   "scripts": {
-    "test": "node --test --test-reporter=spec scripts/open-path-session.test.mjs scripts/boot-watchdog.test.mjs scripts/file-click-defer.test.mjs && node scripts/smoke-injections.mjs"
+    "test": "node --test --test-reporter=spec scripts/open-path-session.test.mjs scripts/boot-watchdog.test.mjs scripts/file-click-defer.test.mjs scripts/es2023-immutable-array.test.mjs && node scripts/smoke-injections.mjs"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.5"
