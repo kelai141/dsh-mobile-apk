@@ -2127,6 +2127,8 @@ app/src/main/java/com/dsharnessmobile/shell/CapturePipeDrain.kt
 app/src/test/java/com/dsharnessmobile/shell/CapturePipeDrainTest.kt
 app/src/androidTest/java/com/dsharnessmobile/shell/RendererCapturePipeTest.kt
 app/src/androidTest/java/com/dsharnessmobile/shell/RendererCapturePipeDeviceTest.kt
+app/src/main/java/com/dsharnessmobile/shell/ProfileNormalizeBackup.kt
+app/src/test/java/com/dsharnessmobile/shell/ProfileNormalizeBackupTest.kt
 -->
 
 设置页设备导航：verify-webview-015 在桌面形态经账号菜单进入设置与手机控制，仍要求真实重置按钮存在、启用且有尺寸；缺少入口、页签或按钮的负控均判红。
@@ -2527,5 +2529,3 @@ APK epoch publication (#605): ApkUpdateController.publishCheckResult, failDownlo
 Console input admission (#599): ConsoleSession.completePtyHandshake validates the relay generation and replays pending input under the same lock used by writeRaw and protocol-frame writes. Readiness is published after replay; failed replay stays unavailable. ConsoleInputHandshakeTest exercises ready/admission overlap, replay order, stale handshakes, literal fallback input and replay failure.
 
 Console reader settlement (#606): ConsoleSession.start sends initial status before starting its reader. ConsoleSession.readOutput drains and closes the output batcher, clears current PTY readiness and reports EOF unless an explicit exit frame already notified the listener. ConsoleReaderExitTest drives the production reader through controlled process streams and stale generations.
-
-Capture EOF integration: RendererCapturePipeDeviceTest passes a valid PNG larger than 256 KiB through the production host adapter and binds the actual :browser service to require a decodable PNG before the join deadline. These cases complement retained-writer and cancellation checks in RendererCapturePipeTest. Host writer closure is owned by CapturePipeDrain's closeWriter callback before reader.join; BrowserProcessService owns and closes its Binder duplicate.

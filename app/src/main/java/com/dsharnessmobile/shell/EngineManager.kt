@@ -2001,9 +2001,17 @@ class EngineManager(private val context: Context, private val pickToken: String?
           failed = true
           continue
         }
-        val backup = File(target.parentFile, target.name + ".pre-" + BuildConfig.VERSION_NAME + ".bak")
-        if (!backup.exists()) {
-          try { backup.writeText(live) } catch (_: Throwable) {}
+        // issue #608：备份是否有效不看「路径存不存在」，而是看有没有一份**本次原文**的完整副本。
+        // 旧实现按路径判存在，历史残留目录/半截文件都能冒充成功备份——live 改了却没有回滚来源。
+        // 现在每次尝试落一份自己的备份；-failed 标记区分失败尝试，成功与失败配额分开、各自只留最近 3 份。
+        val backup = try {
+          ProfileNormalizeBackup.write(target, live, failed = false)
+        } catch (t: Throwable) {
+          // 备份写不出来就不能改 live（与 repairProfilePatch 的「A failed backup or publication must
+          // leave the live profile untouched」同纪律）；置 failed ⇒ 不写 marker、下次启动重试。
+          failed = true
+          Log.w(TAG, "profile patch normalize backup failed (live untouched; retried next boot): " + target.absolutePath, t)
+          continue
         }
         val tmp = File(target.parentFile, target.name + ".normalize.tmp")
         try {
@@ -2015,6 +2023,8 @@ class EngineManager(private val context: Context, private val pickToken: String?
         } catch (t: Throwable) {
           failed = true
           SnapshotFs.deletePath(tmp)
+          // 发布失败：另记一份带失败标记的备份，成功配额不受影响（失败尝试不得挤掉有效备份）。
+          runCatching { ProfileNormalizeBackup.write(target, live, failed = true) }
           Log.w(TAG, "profile patch normalize write failed (retried next boot): " + target.absolutePath, t)
           continue
         }
