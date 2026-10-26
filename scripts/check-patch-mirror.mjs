@@ -256,6 +256,12 @@ if (peer) {
     'scripts/state-registry.json',
     'scripts/check-bridge-symmetry.mjs',
     'scripts/bridge-symmetry-baseline.json',
+    // 0.15.0 中英文案一致性门禁（2026-10-27，issue #156 / PR #157）：权威源在 apk 仓
+    // （判据输入 app/src/main/res 与 dsh-client-ui-responsive 都在 apk 布局里）。
+    // 但 check-release-gates.mjs 是双仓逐字节镜像的聚合清单、必然声明本门禁，所以它必须两仓都在场；
+    // 一旦两仓各有一份而不入册，就复制了「单边改判据、镜像门禁看不见」的老路（#156 A 组 11 个文件的漂移）。
+    // 故纳入镜像面：两仓逐字节同源。协调仓无 Android 树时走具名 SKIP 并计数，apk 仓照常真跑判据。
+    'scripts/check-i18n-parity.mjs',
     'scripts/check-gate-skips.mjs',
     'scripts/check-perf-instrumentation.mjs',
     'scripts/check-perf-instrumentation.test.mjs',

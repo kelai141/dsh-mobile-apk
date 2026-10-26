@@ -11,8 +11,22 @@
 //  A. 资源层：values/ 与 values-en/ 的 string 键集合必须一致（按 translatable 过滤）；
 //  B. 代码层：dsh-client-ui-responsive/src 下每个 tr(...) 必须带两个非空字符串参数。
 //
-// 用法：node scripts/check-i18n-parity.mjs [--root <仓库根>] [--self-test]
-// 退出码：0 = 通过；1 = 命中不一致；2 = 根定位失败。
+// 用法：node scripts/check-i18n-parity.mjs [--root <仓库根>] [--self-test] [--require]
+// 退出码：0 = 通过；1 = 命中不一致；2 = 根定位失败（显式 --root 给了但目录不存在）。
+//
+// ── 双仓同源（2026-10-27，issue #156 / PR #157）──────────────────────────────
+// **权威源在 apk 仓**（本文件的判据输入 app/src/main/res 与 dsh-client-ui-responsive
+// 都在 apk 仓布局里）。协调仓没有 Android 树，但它的门禁聚合清单 check-release-gates.mjs
+// 是双仓逐字节镜像的，因此也必须声明本门禁——两边要么都声明要么都不声明，不能单边演进。
+//
+// 于是本文件同时存在于两仓，并已登记进 scripts/check-patch-mirror.mjs 的 MIRROR_TOP：
+// **两仓必须逐字节一致**，任一侧单边改判据都会被镜像门禁拦下。
+//
+// 在协调仓（无 app/src/main/res）下，本门禁走**具名 SKIP 并计入 SKIP 计数**（照
+// check-engine-heap-floor.mjs 的范式），而不是静默跳过、也不是判红：
+//   SKIP(#1)  本仓无 Android 树（app/src/main/res 缺席；本门禁由 apk 仓 CI 执行）
+// 传 --require（构建/发布链严格档）时缺输入即判红，不得以 SKIP 结案。
+// apk 仓布局下照常真跑判据，不因这个分支变成永远 SKIP——负控见 PR #157 描述。
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -22,6 +36,11 @@ const ROOT = dirname(HERE)
 const argv = process.argv.slice(2)
 const argOf = (n, d) => { const i = argv.indexOf('--' + n); return i >= 0 ? (argv[i + 1] ?? d) : d }
 const SELF_TEST = argv.includes('--self-test')
+/** --require：输入缺席不得以 SKIP 结案（构建/发布链严格档，与 check-engine-heap-floor 同口径）。 */
+const REQUIRE = argv.includes('--require')
+/** SKIP 计数器：check-gate-skips.mjs 要求任何 SKIP 输出带 SKIP(#n) 计数，否则算静默跳过。 */
+let skipped = 0
+const skip = (msg) => { skipped += 1; console.log('SKIP(#' + skipped + ')  ' + msg) }
 
 /** 解析 Android strings XML，返回 name -> 文本（跳过 translatable="false"）。 */
 export function parseStringsXml(text) {
@@ -216,8 +235,19 @@ function main() {
   const root = rootArg !== null ? rootArg : ROOT
   const resDir = join(root, 'app/src/main/res')
   if (!existsSync(resDir)) {
-    console.error('CHECK-I18N-PARITY FAILED：找不到 ' + resDir + '（用 --root 指定仓库根）')
-    return 2
+    // 显式给了 --root 却找不到 => 调用方指错了路，必须判红（不得被下面的 SKIP 分支吞掉）。
+    if (rootArg !== null) {
+      console.error('CHECK-I18N-PARITY FAILED：找不到 ' + resDir + '（用 --root 指定仓库根）')
+      return 2
+    }
+    // 没给 --root 且本仓无 Android 树 => 协调仓布局。具名 SKIP 并计数，不静默、不判红。
+    if (REQUIRE) {
+      console.error('CHECK-I18N-PARITY FAILED（--require 档不得 SKIP：本仓无 ' + resDir + '）')
+      return 1
+    }
+    skip('本仓无 Android 树（' + 'app/src/main/res' + ' 缺席；本门禁由 apk 仓 CI 执行）')
+    console.log('CHECK-I18N-PARITY PASSED（SKIP=' + skipped + '；协调仓布局，判据不在本仓输入面）')
+    return 0
   }
 
   const problems = []
