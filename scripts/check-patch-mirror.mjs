@@ -43,6 +43,41 @@ const check = (label, ok, detail) => {
   console.log((ok ? 'PASS  ' : 'FAIL  ') + label + (ok || detail === undefined ? '' : ' -> ' + detail))
   if (!ok) failures.push(label)
 }
+/**
+ * 本仓 .gitignore 是否忽略了这个镜像面路径——用于区分「本仓缺席但按设计如此」与「条目失效」。
+ *
+ * 背景（issue #156 C 组，2026-10-27）：`dsh-shell-termux` / `dsh-host-web-compat` /
+ * `dsh-client-ui-responsive` 在协调仓是 **由本地 Junction（Windows）/ 符号链接提供的镜像面**，
+ * 路径本身写进协调仓 .gitignore。正常本地布局下它们天然在场且天然同源；但在**裸检出**
+ * （干净 clone / git worktree / CI 未检出对端）下它们必然缺席。
+ *
+ * 修复前：这种缺席被判 FAILED，导致「用干净检出跑 --require-peer」这个标准验证场景恒红，
+ * 任何人做镜像体检都要先踩一次假红（本次诊断就踩了）。修复后：仅当
+ *   ① 本仓路径确实不存在，**且**
+ *   ② 该路径被本仓 .gitignore 忽略（说明缺席是按设计，不是条目写错），**且**
+ *   ③ 对端确实带着这个路径（说明镜像面本身健康，只是本侧由链接提供）
+ * 三条同时成立才记具名 SKIP。**任一条不成立仍然 FAILED**——目录存在但内容不同、
+ * 对端也没有、或条目根本不在 gitignore 里（= MIRROR_TOP 条目确实失效），一律照旧判红。
+ *
+ * @param rel 镜像面相对路径（MIRROR_TOP 条目）。
+ * @returns 该路径是否被本仓 .gitignore 忽略。
+ */
+function ignoredByOwnRepo(rel) {
+  const gitignore = join(ROOT, '.gitignore')
+  if (!existsSync(gitignore)) return false
+  const target = rel.replace(/\\/g, '/').replace(/\/+$/, '')
+  for (const rawLine of readFileSync(gitignore, 'utf8').split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (line === '' || line.startsWith('#')) continue
+    // 只认「目录形态」的忽略规则：/name/ 或 /name 或 name/。其余（通配、反选）一律不认，
+    // 宁可判红也不放过真漂移。
+    const m = /^\/?([A-Za-z0-9._-]+)\/?$/.exec(line)
+    if (m === null) continue
+    if (m[1] === target) return true
+  }
+  return false
+}
+
 /** 比较结果：same = 原始字节一致；eol = 仅行尾差异（工作树 autocrlf 噪声，告警不拦）；
  *  content = 归一后仍不同（真实漂移，FAIL）。 */
 const cmp = (a, b) => {
@@ -400,7 +435,16 @@ if (peer) {
   for (const rel of MIRROR_TOP) {
     const mine = join(ROOT, rel)
     const theirs = join(peer, rel)
-    if (!existsSync(mine)) { check(`镜像面源文件在场: ${rel}`, false, '本仓缺席（MIRROR_TOP 条目失效）'); continue }
+    if (!existsSync(mine)) {
+      // 三条同时成立才 SKIP（细则见 ignoredByOwnRepo 注释）；否则仍然是 FAILED。
+      const peerHasIt = existsSync(theirs) || existsSync(join(peer, rel.split('/')[0]))
+      if (ignoredByOwnRepo(rel) && peerHasIt) {
+        skip(`镜像面目录在裸检出下缺席: ${rel}（本仓 .gitignore 忽略，正常本地布局由 Junction / 符号链接指向对端提供）`)
+      } else {
+        check(`镜像面源文件在场: ${rel}`, false, '本仓缺席（MIRROR_TOP 条目失效：既未被本仓 .gitignore 忽略，对端也没有）')
+      }
+      continue
+    }
     if (statSync(mine).isDirectory()) {
       if (!existsSync(theirs)) { skip(`镜像目录: ${rel}（对端无此目录）`); continue }
       const mineFiles = walkAll(mine).filter((x) => mirrorKept(rel, x))
