@@ -46,6 +46,9 @@ jobs:
   build:
     if: ${{ !inputs.source_audit }}
     runs-on: ubuntu-latest
+    # 实测：build job 历史最长 23 分 47 秒（2026-08-27 run 33098313385 / 33146339496），
+    # 取 60 分钟，约 2.5 倍余量。原先是平台默认 360 分钟，卡死一次会白烧 6 小时 runner。
+    timeout-minutes: 60
     strategy:
       matrix:
         abi: ${{ fromJSON(inputs.abi == 'both' && '["arm64","x86_64"]' || format('["{0}"]', inputs.abi)) }}

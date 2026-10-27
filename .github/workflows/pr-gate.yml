@@ -21,6 +21,9 @@ jobs:
   static:
     name: 冲突标记与敏感信息扫描
     runs-on: ubuntu-latest
+    # 实测：static job 历史最长约 2 分 40 秒（28 个步骤，最慢的是插件构建 26s、
+    # 工具输出 schema 契约 42s、插件单测 38s），取 15 分钟约 5.6 倍余量。
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -203,6 +206,9 @@ jobs:
   compile:
     name: Kotlin 编译门禁
     runs-on: ubuntu-latest
+    # 实测：compile job 历史最长约 1 分 25 秒。取 20 分钟是因为首次无 Gradle 缓存时
+    # 依赖下载会显著变慢，这一档不能按缓存命中的数值定。
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -250,6 +256,8 @@ jobs:
   maintenance:
     name: 维护文档一致性（提示）
     runs-on: ubuntu-latest
+    # 实测：maintenance job 约 12 秒，取 10 分钟。
+    timeout-minutes: 10
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4

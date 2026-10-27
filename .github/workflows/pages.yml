@@ -33,6 +33,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # 该链实测整链约 30 秒（见文件头注释），15 分钟已是 30 倍余量。
+    timeout-minutes: 15
     permissions:
       contents: read
       pages: read
@@ -79,6 +81,8 @@ jobs:
   deploy:
     needs: [build]
     runs-on: ubuntu-latest
+    # 部署步骤紧随 build，同量级，取 15 分钟。
+    timeout-minutes: 15
     permissions:
       pages: write
       id-token: write

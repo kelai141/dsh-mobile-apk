@@ -40,6 +40,8 @@ jobs:
   # 独立 job：这是整链最重的一段（本地约 4 分钟/ABI），且不需要 gradle；失败时可只重跑它。
   snapshot:
     runs-on: ubuntu-latest
+    # 实测：snapshot job 历史最长 4 分 39 秒（2026-10-22 run 39780515378），取 30 分钟约 6 倍余量。
+    timeout-minutes: 30
     strategy:
       matrix:
         abi: [arm64, x86_64]
@@ -145,6 +147,9 @@ jobs:
   release:
     needs: [snapshot]
     runs-on: ubuntu-latest
+    # 实测：release job 历史最长 23 分 47 秒（2026-10-17 run 39045994319，双 ABI 全链含全量门禁），
+    # 取 90 分钟约 3.8 倍余量。发布链是最不该被误杀的一条。
+    timeout-minutes: 90
     permissions:
       contents: read
       actions: read
@@ -332,6 +337,8 @@ jobs:
     needs: [release]
     if: ${{ needs.release.result == 'success' }}
     runs-on: ubuntu-latest
+    # 实测：publish job 历史约 49 秒，取 20 分钟。上传大资产受网络影响，不宜贴着实测值定。
+    timeout-minutes: 20
     permissions:
       contents: write
       actions: read

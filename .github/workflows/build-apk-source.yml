@@ -16,6 +16,9 @@ permissions:
 jobs:
   build-arm64:
     runs-on: ubuntu-latest
+    # 该 workflow 从未有过完成的 run（无实测数据），按 build-apk 同型任务的实测最长 23 分钟
+    # 留足 2.5 倍余量取值。宁可宽松也不能把正常的重构建判死。
+    timeout-minutes: 60
     env:
       DSH_APK_DIR: ${{ github.workspace }}
     steps:
