@@ -24,6 +24,13 @@ on:
         type: string
         default: ''
 
+# 并发控制（2026-10-28）：发布链绝不取消，也绝不允许两次并行。两次同时发布会在同一 tag 上
+# 抢传资产，而 GitHub 的资产上传是逐文件覆盖语义，混出来的 Release 事后无法分辨哪个文件来自哪次构建。
+# group 不带 ref：发布是全局单飞的，不同分支同时发版同样要排队。
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
   actions: read

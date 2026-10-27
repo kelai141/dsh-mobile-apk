@@ -7,6 +7,13 @@ on:
   push:
     branches: [main]
 
+# 并发控制（2026-10-28）：同一分支连推两次会并发跑两份 PR Gate。两份都烧 runner，
+# 而且旧的那份可能后完成——它带着旧的检出状态给自己的检查项盖章，看起来是绿的，实际验的不是最新代码。
+# PR 上用 cancel-in-progress 让新推覆盖旧的；push 到 main 不取消，避免主干上的检查被后一次推挤掉。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
