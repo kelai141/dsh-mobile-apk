@@ -860,7 +860,7 @@ flowchart TD
 - **嵌套与线程**：
   - 主线程（系统回调）：`onServiceConnected`/`onAccessibilityEvent`/`onInterrupt`/`onUnbind`/`onDestroy`；`mainHandler`（:442）只用来承接 `takeScreenshot` 的 Executor 与 `evaluateJavascript` 调用。
   - 工作线程 `dsh-control-poller`：`ControlPoller.loop → execute → runOp → ControlCarrier.handle → DeviceControlService.handle → handle*` 全在同一线程串行；`handleScreenshot` 的 `latch.await(12s)`（:802）、`tapAt` 的 `await(3s)`、`handleScroll` 的 `await(4s)`、`pressAt` 的 `await(duration+2s)`、`evalWebScript` 的 `await(6s)` 都在这个线程上阻塞等待主线程回调，期间整条控制队列停摆（Binder 侧 `AccessibilityNodeInfo` 读写也在此线程）。
-  - 工作线程 `dsh-a11y-heartbeat`：每 2s 写 `controlHeartbeat`（`ControlPoller.kt:74-85`，仅当 `ControlCarrier.a11y != null`）。
+  - 工作线程 `dsh-a11y-heartbeat`：每 5s 写一次 `controlHeartbeat`（节拍常量 `HEARTBEAT_INTERVAL_MS=5_000`，`ControlPoller.kt:65`；线程启动与循环见 `:119` / `:77` 的 `runHeartbeatLoop`），**仅当 `ControlCarrier.a11y != null`**（`ControlCarrier.kt:84`）。消费方新鲜窗口 20s（`index.ts:313` `A11Y_FRESH_MS`），余量 4 倍，由 `A11yHeartbeatCadenceTest` 锁住。
   - ADB 键盘：`onReceive` 在应用主线程 → `AdbKeyboardService.handle → commitText` 直调 `currentInputConnection`（`AdbKeyboardService.kt:60`），不经过控制队列，也不经过无障碍。
 - **耦合**（点名符号）：
   - 引擎侧（K04）：`ControlProtocolV2.SUPPORTED_OPS`（`ControlProtocolV2.kt:46`）/`PV`/`Row`/`F_*` 与 `ControlPoller.envelope` 的 `caps`（`:170`）；`scripts/check-control-ops.mjs` 按行首引号解析 `handle` 分支名，所以 browser*/vd*/sh* 分支必须逐条留在 `handle` 里（:634-664）——**但它们运行时不可达**（`ControlCarrier` 已先分流），读代码时不要以为这些 op 在无障碍侧执行。
@@ -868,7 +868,7 @@ flowchart TD
   - 偏好键：`dsh-adb.xml`（`PREFS` :42）的 `a11yEnabled`/`controlToken`/`controlHeartbeat`（:246-258，token 18 字节 base64url，:235）；屏幕范围 `dsh_screen_scope`/`scope`（`ScreenScope.kt:49`，K05 只读：:672、:703，写面在设置页 `MainActivity.kt:772`）。
   - 路径：截图落 `filesDir/home/tmp/dsh-tmp`（:770），与引擎 `TMPDIR`（`EngineManager.kt:1442`）/`DSH_FILES_DIR`（:1439）同源；`pruneShots` 只认同目录下 `shot-` 前缀（:1175）；`AdbKeyboardService.nonceFile` = `filesDir/adb-keyboard-nonce`（`AdbKeyboardService.kt:122`，引擎 `adbKeyboardAuthArg` 读同一文件，`index.ts:42`）。
   - 常量与纯函数：`MAX_NODES=4000` / `MAX_DEPTH=40` / `TREE_BUDGET_MS=3000` / `TOKEN_BYTES=18`（:48-52）、`WindowPick.order`（:409，回归 `WindowPickTest.kt`）、`GlobalActionCatalog.TABLE`（`GlobalActionCatalog.kt:23`，回归 `GlobalActionCatalogTest.kt`）、`WEB_SNAPSHOT_JS`/`WEB_ACTION_JS`（:60/:131）依赖 `MainActivity.webViewRef`（:852）。
-  - 心跳口径：引擎 `a11ySource()`（`index.ts:829-840`）只认 `queue`（`pollAgeMs`）或 `heartbeat` 且同一 20s 窗口（`A11Y_FRESH_MS`，`index.ts:305`）。
+  - 心跳口径：引擎 `a11ySource()`（`index.ts:924`）**只认 `heartbeat` 与 `off` 两态**——prefs 声明 `a11yEnabled=true` **且** `controlHeartbeat` 落在同一 20s 窗口（`A11Y_FRESH_MS`，`index.ts:313`）才算在线，否则 fail-closed 判 `off`。控制轮询的新鲜度（`pollAgeMs`）**不再是 a11y 证据**：两者是独立生命线，轮询按设计在 a11y 关闭时照跑，早期把它当在线判据正是 #648 的误报源；现以 `pollingFacts()`（`index.ts:945`）作为独立诊断面单独暴露，不参与该判定。
 - **关键坐标**：
   - `app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:607` — `handle` 唯一入口与 op 分支表（六面登记门禁的解析面）
   - `app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:678` — `REAL_SCREEN_OPS`（范围门覆盖面，含 state/webSnapshot/webAction）
