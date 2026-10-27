@@ -68,12 +68,64 @@ if (snapshotAbi !== 'x86_64' && snapshotAbi !== 'aarch64') {
     + '"); this asset cannot run on any supported device')
 }
 console.log('DEV-FAST snapshot ABI = ' + snapshotAbi)
-if (!wantedAbi) {
-  console.log('DEV-FAST: no --abi given, so the ABI above is NOT checked against any target; pass --abi <x86_64|aarch64> to make it a hard requirement')
-} else if (wantedAbi !== snapshotAbi) {
-  throw new Error('snapshot ABI is ' + snapshotAbi + ' but --abi says ' + wantedAbi
-    + ': installing a ' + snapshotAbi + ' snapshot on a ' + wantedAbi
-    + ' device dies at exec with "CANNOT LINK EXECUTABLE houdini64", and the package still looks fine to "am start -W". Rebuild or fetch a ' + wantedAbi + ' snapshot, or drop --abi if you really mean it')
+// When the caller did not say which ABI they are targeting, ask the device they are about to
+// install on instead of quietly skipping the check. Inferring here is what turns the guard from
+// advisory into a real requirement on the common path: the whole failure mode is "I did not think
+// about ABI", so a guard that only fires when you remember to pass --abi guards nothing.
+//
+// Inference must never break a build: no adb, no device or several devices all mean "cannot tell",
+// which falls back to the advisory message rather than throwing.
+function abiFromConnectedDevice() {
+  const serial = process.env.ANDROID_SERIAL || process.env.ADB_SERIAL || null
+  const list = spawnSync('adb', ['devices'], { encoding: 'utf8', timeout: 5000 })
+  if (list.status !== 0 || !list.stdout) return { abi: null, why: 'adb unavailable' }
+  const ready = list.stdout.split('\n').slice(1)
+    .map((line) => line.trim().split(/\s+/))
+    .filter((cols) => cols[1] === 'device')
+    .map((cols) => cols[0])
+  if (ready.length === 0) return { abi: null, why: 'no device' }
+  // abilist[0] is the preferred ABI. Some x86_64 emulators also advertise arm64-v8a through houdini
+  // translation, but translated binaries still cannot exec when their own machine type is wrong
+  // (that is the houdini64 CANNOT LINK failure), so only the primary ABI counts.
+  const primary = (devices) => devices.map((device) => {
+    const prop = spawnSync('adb', ['-s', device, 'shell', 'getprop', 'ro.product.cpu.abilist'],
+      { encoding: 'utf8', timeout: 5000 })
+    const first = (prop.stdout || '').trim().split(',')[0].trim()
+    if (prop.status !== 0 || !first) return null
+    if (first === 'x86_64') return 'x86_64'
+    if (first === 'arm64-v8a' || first === 'arm64') return 'aarch64'
+    return null
+  })
+  if (serial) {
+    const [abi] = primary([serial])
+    return abi
+      ? { abi, why: serial }
+      : { abi: null, why: 'cannot read a supported primary ABI from ' + serial }
+  }
+  // Several devices are normal here (a dev box with a few emulators). They almost always share one
+  // ABI, and refusing to infer in that case would silently disable the guard on exactly the machines
+  // that need it. Only a genuine mix is ambiguous.
+  const abis = primary(ready)
+  if (abis.some((abi) => !abi)) return { abi: null, why: 'cannot read a supported primary ABI from ' + ready.join(', ') }
+  const distinct = [...new Set(abis)]
+  if (distinct.length > 1) return { abi: null, why: ready.length + ' devices disagree (' + distinct.join(' vs ') + '), set ANDROID_SERIAL' }
+  return { abi: distinct[0], why: ready.join(', ') }
+}
+let effectiveAbi = wantedAbi
+if (!effectiveAbi) {
+  const inferred = abiFromConnectedDevice()
+  if (inferred.abi) {
+    effectiveAbi = inferred.abi
+    console.log('DEV-FAST: no --abi given; inferred ' + inferred.abi + ' from connected device ' + inferred.why)
+  } else {
+    console.log('DEV-FAST: no --abi given and no target inferred (' + inferred.why + '), so the ABI above is NOT checked; pass --abi <x86_64|aarch64> to make it a hard requirement')
+  }
+}
+if (effectiveAbi && effectiveAbi !== snapshotAbi) {
+  throw new Error('snapshot ABI is ' + snapshotAbi + ' but the target is ' + effectiveAbi
+    + (wantedAbi ? ' (from --abi)' : ' (inferred from the connected device)')
+    + ': installing a ' + snapshotAbi + ' snapshot on a ' + effectiveAbi
+    + ' device dies at exec with "CANNOT LINK EXECUTABLE houdini64", and the package still looks fine to "am start -W". Rebuild or fetch a ' + effectiveAbi + ' snapshot, or pass the matching --abi if you really mean it')
 }
 if (abiOnly) {
   console.log('DEV-FAST: --abi-only, stopping before Gradle')
