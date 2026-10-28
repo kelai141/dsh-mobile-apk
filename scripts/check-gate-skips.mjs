@@ -27,6 +27,92 @@ const check = (label, ok, detail) => {
   if (!ok) failures.push(label)
 }
 // 布局无关解析：协调仓根用 dsh-mobile-apk/...；apk 自包含根落到同名相对路径。
+const DECLARED_RE = /\{ script: '([a-z0-9-]+\.mjs)'/g
+/** 从聚合入口源码提取声明集合（纯函数：自测可直接喂合成文本）。 */
+const parseDeclared = (text) => [...text.matchAll(DECLARED_RE)].map((m) => m[1])
+
+/**
+ * 宽松「出现过这个名字」扫描。
+ *
+ * **只可用于正向断言**（声明集合 ⊆ 本链提到的），**绝不可用来判「是否真的执行」**：
+ * 它会把 GATE_SCRIPTS 声明数组里的字符串字面量也算成"调用过"，于是反向断言自我满足。
+ * 这条纪律由 `--self-test` 守住（见文件末）。
+ */
+const parseInvoked = (text) =>
+  // 兼容两种写法：'check-x.mjs'（node 侧数组/helper）与 "scripts\check-x.mjs"（PowerShell 调用）。
+  [...new Set([...text.matchAll(/["'\\/](check-[a-z0-9-]+\.mjs|elf-check\.mjs)/g)].map((m) => m[1]))]
+
+/**
+ * 执行点解析（纯函数）：只认「真的会 spawn 这个门禁」的写法。
+ *   - node 链：`gate('check-x.mjs')`（数组字面量没有 gate(...) 包裹，天然排除）
+ *   - pwsh 链：行首（可带 `$var =`）`node ... scripts\check-x.mjs`，注释行不命中
+ */
+const parseExecutionSites = (text, isNode) => {
+  const out = new Set()
+  if (isNode) {
+    for (const m of text.matchAll(/gate\(\s*['"]([a-z0-9-]+\.mjs|elf-check\.mjs)['"]\s*\)/g)) out.add(m[1])
+  } else {
+    for (const m of text.matchAll(/^\s*(?:\$\w+\s*=\s*)?node\s+[^\n]*?scripts[\\/](check-[a-z0-9-]+\.mjs|elf-check\.mjs)/gm)) out.add(m[1])
+  }
+  return out
+}
+
+/** SKIP 发射点判据（纯函数）：只认「字符串字面量以 SKIP 开头」的 console 调用。 */
+const emitsSkip = (line) => /console\.(?:log|error)\(\s*[`'"]\s*(?:FAIL\s+)?SKIP/.test(line)
+
+// ── --self-test：无仓库依赖的判别力自检（含故意失败样本）──────────────────────
+// 为什么必须有：本门禁曾经有过一次「声明即视为调用」的自满足缺陷（build-apk.mjs 声明 37 项、
+// 真实执行 36 项，差的正是只登记未接线的 check-dead-tokens，而旧断言 PASSED）。那次修法是把
+// 宽松扫描换成执行点扫描，但**没有任何用例守住这个区别**——把 executionSites 退回 invokedIn 实现，
+// 全仓门禁依旧全绿。下面 ② 就是那条区别的独家守门人。
+if (argv.includes('--self-test')) {
+  const failuresBefore = failures.length
+  // ① 声明提取：只认 `{ script: 'x.mjs' }` 单引号形态（聚合入口的唯一写法）。
+  check('[self-test] 声明提取认 { script: \'x.mjs\' }',
+    parseDeclared("const G = [{ script: 'check-a.mjs', label: 'A' }, { script: 'check-b.mjs' }]").join(',') === 'check-a.mjs,check-b.mjs')
+  check('[self-test] 声明提取不吃双引号/裸字符串（写错形态会立刻暴露）',
+    parseDeclared('{ script: "check-a.mjs" }').length === 0)
+
+  // ② 独家守护：声明数组字面量 —— 宽松扫描必须命中，执行点扫描必须不命中。
+  const declOnly = "const GATE_SCRIPTS = [\n  'check-a.mjs',\n  'check-b.mjs',\n]\n"
+  check('[self-test] 宽松扫描认得出声明字面量（它本来就该命中）', parseInvoked(declOnly).length === 2)
+  check('[self-test] 执行点扫描不把声明字面量当执行（防自满足）',
+    parseExecutionSites(declOnly, true).size === 0, '命中=' + [...parseExecutionSites(declOnly, true)].join(','))
+
+  // ③④ node 链：只有 gate(...) 包裹才算执行点。
+  check('[self-test] node 链 gate(\'x\') 命中', parseExecutionSites("gate('check-a.mjs')", true).has('check-a.mjs'))
+  check('[self-test] node 链 gate("x") 双引号同样命中', parseExecutionSites('gate("check-b.mjs")', true).has('check-b.mjs'))
+  check('[self-test] node 链 数组下标写法不算执行点', parseExecutionSites('GATE_SCRIPTS[0]', true).size === 0)
+  check('[self-test] node 链 gate(x) 无引号变量不算执行点', parseExecutionSites('gate(name)', true).size === 0)
+
+  // ⑤⑥⑦ pwsh 链：行首 node ... scripts\check-x.mjs 才算；注释与字符串里的不算。
+  check('[self-test] pwsh 链 node ... scripts\\check-x.mjs 命中',
+    parseExecutionSites('node "$PSScriptRoot\\scripts\\check-a.mjs"', false).has('check-a.mjs'))
+  check('[self-test] pwsh 链 带 $var = 前置同样命中',
+    parseExecutionSites('$r = node scripts/check-b.mjs --x', false).has('check-b.mjs'))
+  check('[self-test] pwsh 链 注释行不算执行点', parseExecutionSites('# node scripts\\check-a.mjs', false).size === 0)
+  check('[self-test] pwsh 链 字符串里提到不算执行点',
+    parseExecutionSites('Write-Host "见 scripts\\check-a.mjs"', false).size === 0)
+
+  // ⑧⑨⑩ SKIP 发射点判据：计数形态与未计数形态都要命中（否则后者判不出），纯文案提及不命中。
+  // 样本必须**拆开拼接**：写成字面量会让本文件自己出现「console 点 log 左括号 引号 紧接 SKIP」
+  // 的连续串，从而被本门禁自己的 SKIP 审计当成发射点命中（自指陷阱；实测报过 3 处，注释里提到同样算）。
+  const S = (...parts) => parts.join('')
+  check('[self-test] SKIP 计数形态命中', emitsSkip(S('console.', 'log(', "'SKIP(#1)  x'")))
+  check('[self-test] SKIP 未计数形态也命中（否则它判不出未计数）', emitsSkip(S('console.', 'log(', "'SKIP foo'")))
+  check('[self-test] SKIP 带 FAIL 前缀命中', emitsSkip(S('console.', 'error(', "'FAIL SKIP bar'")))
+  check('[self-test] 文案里提到 SKIP 但非发射点不命中', !emitsSkip('// 这里会打印 SKIP 行'))
+  check('[self-test] console.warn 不在面内（口径与实现一致：只认 log/error）', !emitsSkip("console.warn('SKIP x')"))
+
+  const added = failures.length - failuresBefore
+  if (added > 0) {
+    console.error('CHECK-GATE-SKIPS SELF-TEST FAILED（' + added + ' 项）')
+    process.exit(1)
+  }
+  console.log('CHECK-GATE-SKIPS SELF-TEST PASSED（16 项判别力断言）')
+  process.exit(0)
+}
+
 const resolveRepoPath = (rel) => {
   const cands = String(rel).startsWith('dsh-mobile-apk/') ? [rel, String(rel).slice('dsh-mobile-apk/'.length)] : [rel]
   const hit = cands.find((c) => existsSync(join(ROOT, c)))
@@ -37,16 +123,14 @@ const readIf = (rel) => { const p = resolveRepoPath(rel); return p === null ? nu
 // ── 1. 声明集合 vs 实际文件 vs 两条链 ───────────────────────────────────────
 const aggText = readIf('scripts/check-release-gates.mjs')
 if (aggText === null) { console.error('CHECK-GATE-SKIPS FAILED：缺 scripts/check-release-gates.mjs'); process.exit(2) }
-const declared = [...aggText.matchAll(/\{ script: '([a-z0-9-]+\.mjs)'/g)].map((m) => m[1])
+const declared = parseDeclared(aggText)
 check('声明集合非空', declared.length > 0, 'gates=' + declared.length)
 const missingFiles = declared.filter((g) => !existsSync(join(SCRIPTS, g)))
 check('声明集合里的门禁全部在场', missingFiles.length === 0, '缺: ' + missingFiles.join(', '))
 
 const invokedIn = (rel) => {
   const text = readIf(rel)
-  if (text === null) return null
-  // 兼容两种写法：'check-x.mjs'（node 侧数组/helper）与 "scripts\check-x.mjs"（PowerShell 调用）。
-  return [...new Set([...text.matchAll(/["'\\/](check-[a-z0-9-]+\.mjs|elf-check\.mjs)/g)].map((m) => m[1]))]
+  return text === null ? null : parseInvoked(text)
 }
 /**
  * 执行点解析（0.14.2 实修）：只认「真的会 spawn 这个门禁」的写法，不认声明数组里的字符串字面量。
@@ -67,13 +151,7 @@ const invokedIn = (rel) => {
 const executionSites = (rel) => {
   const text = readIf(rel)
   if (text === null) return null
-  const out = new Set()
-  if (rel.endsWith('.mjs')) {
-    for (const m of text.matchAll(/gate\(\s*['"]([a-z0-9-]+\.mjs|elf-check\.mjs)['"]\s*\)/g)) out.add(m[1])
-  } else {
-    for (const m of text.matchAll(/^\s*(?:\$\w+\s*=\s*)?node\s+[^\n]*?scripts[\\/](check-[a-z0-9-]+\.mjs|elf-check\.mjs)/gm)) out.add(m[1])
-  }
-  return out
+  return parseExecutionSites(text, rel.endsWith('.mjs'))
 }
 const CHAINS = ['scripts/build-apk-013.ps1', 'dsh-mobile-apk/scripts/build-apk.mjs']
 const declaredSet = new Set(declared)
@@ -114,7 +192,7 @@ for (const file of gateFiles) {
   const text = readFileSync(join(SCRIPTS, file), 'utf8')
   const lines = text.split('\n')
   // 只认「字符串字面量以 SKIP 开头」的发射点：审计/门禁文案里提到 SKIP 不算（否则本脚本自命中）。
-  const skipLines = lines.filter((l) => /console\.(?:log|error)\(\s*[`'"]\s*(?:FAIL\s+)?SKIP/.test(l))
+  const skipLines = lines.filter(emitsSkip)
   if (skipLines.length === 0) { skipAudit.push({ file, sites: 0, counted: true }); continue }
   const hasSummary = /SKIP=/.test(text)
   const uncounted = skipLines.filter((l) => !/#/.test(l) && !/SKIP=/.test(l))
