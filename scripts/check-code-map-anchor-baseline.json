@@ -1114,7 +1114,7 @@
       ""
     ],
     "ApkUpdateAction.kt:578": [
-      "internal fun publishCheckResult(r: UpdateChecker.CheckResult, e: Int) {"
+      "private fun runCheck(e: Int, deadline: UpdateCheckDeadline) {"
     ],
     "BackGate.kt:126": [
       "* 页面 → 壳的返回层栈上行接口（window.dshBackBridge）。"
@@ -1900,13 +1900,13 @@
       "* 超限轮转一代，与 boot-diag.log 同口径。"
     ],
     "UpdateCheckerTest.kt:364": [
-      "\"0000000000000000000000000000000000000000000000000000000000000005  plugins/dsh-android-manage-0.3.0.tgz  51234\","
+      "assertTrue(newer is UpdateChecker.CheckResult.Available)"
     ],
     "UpdateCheckerTest.kt:393": [
-      "assertTrue(\"非 apk 资产的摘要同样要收下（下载前校验快照/插件不是本函数的事，但数据不能丢）\", facts.sha256.containsKey(\"snapshot-arm64.tar.xz\"))"
+      "fun realManifestYieldsTagSizesAndDigests() {"
     ],
     "UpdateCheckerTest.kt:426": [
-      "(x as UpdateChecker.CheckResult.Available).sha256,"
+      "// tag 契约：Available.tag **一律带 v**（与 GitHub tag_name、站点 JSON、既有状态机用例一致）。"
     ],
     "UpdateManager.kt:84": [
       "if (!actual.equals(expectedSha, ignoreCase = true)) {"
@@ -2437,10 +2437,10 @@
       "\"（DirectoryStream 是 Iterable，Kotlin 的 toList() 是 stdlib 扩展，无 API 级别依赖）。命中：\\n\" +"
     ],
     "app/src/test/java/com/dsharnessmobile/shell/ApkArtifactCheckTest.kt:25": [
-      "@Test"
+      "/** 两条路径的输入形状一致，判定必须逐条相同。 */"
     ],
     "app/src/test/java/com/dsharnessmobile/shell/ApkArtifactCheckTest.kt:36": [
-      ")"
+      "Case(false, 0L, 100L, null, true),         // 文件不存在"
     ],
     "app/src/test/java/com/dsharnessmobile/shell/BackGateTest.kt:126": [
       "@Test"
@@ -2716,10 +2716,10 @@
       "@Test"
     ],
     "app/src/test/java/com/dsharnessmobile/shell/UpdateCheckerTest.kt:15": [
-      "* ② 资产命名（**与线上发布链产物名逐字一致**）；"
+      "* ③ 失败原因分类（真实缺失兼容包 / 网络 / 限流 / 发布数据异常 / 解析 / ABI 识别）。"
     ],
     "app/src/test/java/com/dsharnessmobile/shell/UpdateCheckerTest.kt:60": [
-      "@Test"
+      "fun fxRevisionNumberIsCompared() {"
     ],
     "app/src/test/java/com/dsharnessmobile/shell/VdisplayArbitrationTest.kt:14": [
       "@Test"
@@ -3210,13 +3210,11 @@
     "index.js:2198": [
       "* @returns compact facts and child-local failures; complete child event arrays are released after extraction.",
       "* Collect each related child's own descriptor through existing historical codecs.",
-      "additionalProperties: false,",
       "const incidental = new Set([",
       "function signature(pattern) {",
       "let total = 0;",
       "return true;",
       "}",
-      "});",
       "};"
     ],
     "index.ts:1038": [
