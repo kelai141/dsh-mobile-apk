@@ -746,6 +746,116 @@
       "why": "跳过终结符后耗尽 ⇒ 没有载荷可展开（shell 会读 stdin，但这条命令本身不含屏命令词）；与 S-10e 成对，防「见 -- 即拒」。"
     },
     {
+      "name": "S-12a 变量作载荷：脚本内容来自运行时",
+      "command": "sh -c \"$CMD\"",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "小米 14 Pro（SDK 37）实测 `CMD='echo X'; sh -c \"$CMD\"` 打印了标记 ⇒ 脚本内容由变量决定。静态只看得到一个 `$CMD`，执行什么完全不可知 ⇒ 与 `sh /x.sh`（脚本文件）同档。"
+    },
+    {
+      "name": "S-12b 命令替换作载荷",
+      "command": "sh -c \"$(cat /sdcard/x.sh)\"",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "小米 14 Pro（SDK 37）实测 `printf 'echo X' > /data/local/tmp/s.sh; sh -c \"$(cat /data/local/tmp/s.sh)\"` 打印了标记 ⇒ 脚本内容来自文件。旧实现把 `$(…)` 里的 `cat …` 当普通段展开后判 allow（等价于把 `sh /x.sh` 放行）。"
+    },
+    {
+      "name": "S-12c 无反引号的反引号载荷",
+      "command": "sh -c `cat /sdcard/x.sh`",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "小米 14 Pro（SDK 37）实测 同一形态不带双引号也执行。这一条的替换在**顶层切段**时就被展开（段里不留反引号字符），故只能在切段当场按「buf 是否停在载荷位置」判定（`PAYLOAD_SLOT_TAIL`）；只靠段级判据认不出来。"
+    },
+    {
+      "name": "S-12d trap 的载荷来自运行时",
+      "command": "trap \"$(cat /sdcard/x.sh)\" EXIT",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "小米 14 Pro（SDK 37）实测 `trap \"$(cat /data/local/tmp/s.sh)\" EXIT` 在退出时打印了标记。"
+    },
+    {
+      "name": "S-12e eval 的载荷来自运行时",
+      "command": "eval \"$(cat /sdcard/x.sh)\"",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "小米 14 Pro（SDK 37）实测 `eval \"$(cat /data/local/tmp/s.sh)\"` 打印了标记。"
+    },
+    {
+      "name": "S-12f 多段命令里第二段的命令名来自运行时",
+      "command": "sh -c \"echo hi; $(cat /sdcard/x.sh)\"",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "与 S-12b 同源：替换位于**第二段的命令位置**，同样不可判。只看载荷首词会漏掉这种形态。"
+    },
+    {
+      "name": "S-12g 顶层命令名本身是替换",
+      "command": "\"$(date)\" --flag",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "命令名由替换输出决定 ⇒ 静态判不了它执行什么（真机上 `\"$(echo screencap)\" -p /x` 会执行 screencap）。这一条由段首词判据（`isRuntimeCommandName`）拦住。"
+    },
+    {
+      "name": "对照 参数位置的替换不得误拦",
+      "command": "echo \"$(date)\"",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "替换只产出参数值，命令身份仍是 `echo` ⇒ 不得判拒。若把「段里出现 `$(`」写宽，会把大量正常命令一起拒掉。"
+    },
+    {
+      "name": "对照 载荷里含替换但首词静态",
+      "command": "sh -c 'echo $(date)'",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "脚本内容静态可见（`echo` + 参数），运行时只影响参数值 ⇒ 放行。与 S-12f 成对：区别是替换是否落在**命令位置**。"
+    },
+    {
+      "name": "对照 变量赋值里的替换不得误拦",
+      "command": "x=$(cat /tmp/f); echo $x",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "赋值右侧的替换产出的是**值**，不是命令名；`echo $x` 的 `$x` 在参数位置 ⇒ 两条都不得判拒。"
+    },
+    {
+      "name": "对照 载荷已给时后续参数替换不得误拦",
+      "command": "sh -c \"a b\" $(date)",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "`-c` 的脚本是静态的 `\"a b\"`，后面的替换只是 `$0`/`$1` 之类的尾随 argv ⇒ 不得误拦（`PAYLOAD_SLOT_TAIL` 只看「替换前 buf 是否停在载荷位置」，此处已过载荷位置）。"
+    },
+    {
       "name": "S-13a 组合短选项 -lc 里的 c 同样吃载荷",
       "command": "sh -lc 'screencap -p /sdcard/real.png'",
       "ownedTargets": [

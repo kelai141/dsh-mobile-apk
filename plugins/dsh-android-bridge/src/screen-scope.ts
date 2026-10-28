@@ -331,6 +331,35 @@ export function interpreterPayloadUnparsed(segment: string): boolean {
   return false
 }
 
+/**
+ * 段**命令名位置**上是不是运行时值（`$CMD`、`$(…)`、`` `…` ``）。
+ *
+ * 小米 14 Pro（SDK 37）实测都会真的执行变量/文件里的内容：
+ *   `CMD='echo X'; sh -c "$CMD"` → `X`
+ *   `sh -c "$(cat /data/local/tmp/s.sh)"` → 文件里的命令
+ *   `sh -c "\`cat /data/local/tmp/s.sh\`"` → 同上
+ *   `trap "$(cat …)" EXIT` / `eval "$(cat …)"` → 同上
+ * 与 `sh /x.sh`（脚本文件）同一性质：执行什么静态看不到 ⇒ fail-closed。
+ *
+ * 只看**段首词**：参数位置的替换（`echo "$(date)"`、`x=$(cat f); echo $x`）不改变命令身份，不得误拦。
+ */
+/**
+ * 「当前段已经走到**载荷位置**」的尾巴判据（`sh -c ` / `eval ` / `trap ` 之后）。
+ *
+ * 用来认**不带引号**的运行时载荷：`` sh -c `cat /sdcard/x.sh` `` 的反引号在顶层切段时就被展开，
+ * 段里不再留反引号字符，段级判据看不见它 —— 只能在切段当场看「替换前那段 buf 是否停在载荷位置」。
+ * 带引号的同型形态（`sh -c "$CMD"`）由 `payloadIsRuntimeValue` 覆盖。
+ * `sh -c "a b" $(date)` 这种「载荷已给、替换在下一个参数」的形态**不命中**（脚本静态可见）。
+ */
+const PAYLOAD_SLOT_TAIL = /(?:^|[ \t])(?:-[^\s]*c|eval|trap)[ \t]+$/
+
+function isRuntimeCommandName(segment: string): boolean {
+  const head = firstShellWord(segment.trim()).word
+  // `$'…'` / `$"…"` 是 **ANSI-C 引号**（静态字面量），不是变量引用 —— 不得误拦（S-7c）。
+  if (head.startsWith('$\'') || head.startsWith('$"')) return false
+  return head.startsWith('$') || head.startsWith('`')
+}
+
 /** 去掉一层首尾成对的引号（`sh -c "…"` 的载荷取值）。不成对则原样返回。 */
 function unwrapOneQuote(text: string): string {
   const trimmed = text.trim()
@@ -397,12 +426,19 @@ export function splitCommandSegments(command: string): CommandSegments {
       if (ch === '`') {
         const end = backtickEnd(text, i + 1)
         if (end < 0) { unparsed = true; buf += text.slice(i); i = text.length; continue }
+        // **命令位置**上的命令替换：替换结果是运行时文本，会被当成命令执行 ⇒ 执行什么静态不可判
+        // （`sh -c "\`cat /sdcard/x.sh\`"` 真机实测执行文件内容）。参数位置的替换不影响命令身份；
+        // 但**载荷位置**上的替换（`` sh -c \`cat f\` ``）等于整段脚本来自运行时，同样 fail-closed。
+        if (buf.trim().length === 0 || PAYLOAD_SLOT_TAIL.test(buf)) unparsed = true
         scan(text.slice(i + 1, end), depth + 1)
         buf += ' '; i = end + 1; continue
       }
       if (ch === '$' && text[i + 1] === '(') {
         const end = parenEnd(text, i + 2)
         if (end < 0) { unparsed = true; buf += text.slice(i); i = text.length; continue }
+        // 同上：`sh -c "$(cat /sdcard/x.sh)"` / `sh -c "echo hi; $(cat x.sh)"` 的第二段都是
+        // 「命令名来自运行时」⇒ 与 `sh /x.sh`（脚本文件）同档，fail-closed。
+        if (buf.trim().length === 0 || PAYLOAD_SLOT_TAIL.test(buf)) unparsed = true
         scan(text.slice(i + 2, end), depth + 1)
         buf += ' '; i = end + 1; continue
       }
@@ -608,6 +644,8 @@ export function screenCommandVerdict(
   if (unparsed) return 'deny-unparsed'
   for (const segment of segments) {
     const bare = stripQuotedText(segment)
+    // 命令名来自运行时（`$CMD` / `"$(cat /sdcard/x.sh)"` / 反引号）：执行什么静态不可判。
+    if (isRuntimeCommandName(segment)) return 'deny-unparsed'
     // 载荷不可见的解释器调用：静态判不了，fail-closed。
     if (interpreterPayloadUnparsed(bare)) return 'deny-unparsed'
     const options = displayOptionsIn(bare)

@@ -179,6 +179,30 @@ internal object ShellOps {
   }
 
   /**
+   * 「当前段已经走到**载荷位置**」的尾巴判据（`sh -c ` / `eval ` / `trap ` 之后），与引擎侧同名。
+   *
+   * 用来认**不带引号**的运行时载荷：`` sh -c `cat /sdcard/x.sh` `` 的反引号在顶层切段时就被展开，
+   * 段里不再留反引号字符，段级判据看不见它 —— 只能在切段当场看「替换前那段 buf 是否停在载荷位置」。
+   * `sh -c "a b" $(date)` 这种「载荷已给、替换在下一个参数」的形态不命中（脚本静态可见）。
+   */
+  private val PAYLOAD_SLOT_TAIL = Regex("""(?:^|[ \t])(?:-[^\s]*c|eval|trap)[ \t]+$""")
+
+  /**
+   * 段**命令名位置**上是不是运行时值（`$CMD`、`$(…)`、反引号）。
+   *
+   * 小米 14 Pro（SDK 37）实测都会真的执行变量/文件里的内容：`sh -c "$CMD"`、
+   * `sh -c "$(cat /sdcard/x.sh)"`、`` sh -c `cat /sdcard/x.sh` ``、`trap "$(cat …)" EXIT`、
+   * `eval "$(cat …)"` —— 与 `sh /x.sh`（脚本文件）同一性质：静态看不到执行什么 ⇒ fail-closed。
+   * 只看**段首词**：参数位置的替换不改变命令身份，不得误拦；`$'…'` / `$"…"` 是 ANSI-C 引号
+   * （静态字面量），必须排除。
+   */
+  private fun isRuntimeCommandName(segment: String): Boolean {
+    val head = firstShellWord(segment.trim()).first
+    if (head.startsWith("$'") || head.startsWith("$\"")) return false
+    return head.startsWith("$") || head.startsWith("`")
+  }
+
+  /**
    * `sh -c '<内层>'` 形式（含 `/system/bin/sh`、`busybox sh`、`su` 等包装）。
    *
    * 末段必须是「短选项**簇**且簇尾是 `c`」（`-[a-zA-Z]*c`），不能只认光杆 `-c`：
@@ -458,6 +482,8 @@ internal object ShellOps {
     if (parsed.unparsed) return ScreenCommandVerdict.DENY_UNPARSED
     for (segment in parsed.segments) {
       val bare = stripQuotedText(segment)
+      // 命令名来自运行时（`$CMD` / `"$(cat /sdcard/x.sh)"` / 反引号）：执行什么静态不可判。
+      if (isRuntimeCommandName(segment)) return ScreenCommandVerdict.DENY_UNPARSED
       // 裸解释器段：管道/重定向喂 shell 的载荷对判定器不可见（#509），fail-closed。
       if (interpreterPayloadUnparsed(bare)) {
         return ScreenCommandVerdict.DENY_UNPARSED
@@ -603,6 +629,10 @@ internal object ShellOps {
             i = text.length
             continue
           }
+          // **命令位置**上的命令替换：替换结果是运行时文本、会被当成命令执行 ⇒ 执行什么静态不可判
+          // （`sh -c "\`cat /sdcard/x.sh\`"` 真机实测执行文件内容）；**载荷位置**上的替换
+          // （`` sh -c \`cat f\` ``）等于整段脚本来自运行时，同样 fail-closed。参数位置的替换不影响命令身份。
+          if (buf.isBlank() || PAYLOAD_SLOT_TAIL.containsMatchIn(buf)) unparsed = true
           scan(text.substring(i + 1, end), depth + 1)
           buf.append(' ')
           i = end + 1
@@ -616,6 +646,9 @@ internal object ShellOps {
             i = text.length
             continue
           }
+          // 同上：`sh -c "$(cat /sdcard/x.sh)"` / `sh -c "echo hi; $(cat x.sh)"` 的第二段都是
+          // 「命令名来自运行时」⇒ 与 `sh /x.sh`（脚本文件）同档，fail-closed。
+          if (buf.isBlank() || PAYLOAD_SLOT_TAIL.containsMatchIn(buf)) unparsed = true
           scan(text.substring(i + 2, end), depth + 1)
           buf.append(' ')
           i = end + 1
