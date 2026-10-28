@@ -233,11 +233,13 @@ export function splitCommandSegments(command: string): CommandSegments {
   const scan = (text: string, depth: number): void => {
     if (depth > MAX_NESTING) { unparsed = true; return }
     let buf = ''
-    const flush = (): void => { segments.push(buf); buf = '' }
+    // 词首状态（注释判定用，见下方 `#` 分支）。分隔符/空白把它置位，其它字符（含转义对）清除。
+    let atWordStart = true
+    const flush = (): void => { segments.push(buf); buf = ''; atWordStart = true }
     let i = 0
     while (i < text.length) {
       const ch = text[i]
-      if (ch === '\\') { buf += text.slice(i, i + 2); i += 2; continue }
+      if (ch === '\\') { buf += text.slice(i, i + 2); i += 2; atWordStart = false; continue }
       if (ch === "'") {
         const end = text.indexOf("'", i + 1)
         if (end < 0) { unparsed = true; buf += text.slice(i); i = text.length; continue }
@@ -282,10 +284,11 @@ export function splitCommandSegments(command: string): CommandSegments {
         scan(text.slice(i + 2, end), depth + 1)
         buf += ' '; i = end + 1; continue
       }
-      // shell 注释：`#` 位于**词首**（行首，或空白 / `;` / `&` / `|` 之后）时，直到行尾都不执行。
-      // 不剥它会把 `echo hi # screencap -p /sdcard/x.png` 里的注释文本当命令词面 ⇒ 误拦合法命令。
-      // 词中间的 `#`（`a#b`）与转义 `\#` 不是注释，前面已由反斜杠/引号分支处理。
-      if (ch === '#' && (buf.length === 0 || /[\s;&|]$/.test(buf))) {
+      // shell 注释：`#` 只有在**词首**才开注释。词首＝未转义、未引用的 ASCII 空白 / `;` / `&` / `|`
+      // 之后（由 atWordStart 显式跟踪）——不能用「buf 末尾是 \s」判定：`echo\ #; screencap …` 里
+      // 那个空格是**转义的**（属于词内容），`#` 因此是 echo 的参数而不是注释，screencap 照跑
+      // （dash 实测：`echo\ #; echo REACHED` 会执行 REACHED）。同理 VT/FF/CR/NBSP 都不是分隔符。
+      if (ch === '#' && atWordStart) {
         const lineEnd = text.indexOf('\n', i)
         i = lineEnd < 0 ? text.length : lineEnd
         continue
@@ -297,6 +300,8 @@ export function splitCommandSegments(command: string): CommandSegments {
         i += text[i + 1] === ch ? 2 : 1
         continue
       }
+      if (ch === ' ' || ch === '\t') atWordStart = true
+      else atWordStart = false
       buf += ch; i += 1
     }
     flush()
@@ -329,26 +334,44 @@ export function splitCommandSegments(command: string): CommandSegments {
 export function stripQuotedText(text: string): string {
   let out = ''
   let i = 0
+  // 只对**段内第一个词**（命令词位置）做 quote removal —— shell 在查找命令前会剥掉那里的引号，
+  // 所以 `"screencap" -p /sdcard/x` 真的会执行 screencap（dash 实测），旧实现把引号段一律抹平
+  // ⇒ 命令词位置上的引号内容也被抹掉 ⇒ 整条判 allow（2026-10-28 自查，安全侧漏拦）。
+  // 反之参数位置的引号必须继续抹掉：`echo "screencap"` 只是打印，抹掉才对
+  // （fixture「双引号内纯文本不得误拦」）。故判据是「第一个词内」，不是「每个词首」。
+  let inFirstWord = true
   while (i < text.length) {
     const ch = text[i]
     if (ch === '\\') {
       out += i + 1 < text.length ? text[i + 1] : ''
       i += 2
+      inFirstWord = false
       continue
     }
-    if (ch === "'" || ch === '"') {
-      const quote = ch
-      let j = i + 1
+    // `$'…'` / `$"…"`（ANSI-C 与本地化引号）在词首同样属于命令词：dash/bash 实测 `$'screencap' -p …` 会执行。
+    const ansiC = inFirstWord && ch === '$' && (text[i + 1] === "'" || text[i + 1] === '"')
+    if (ch === "'" || ch === '"' || ansiC) {
+      const quote = ansiC ? text[i + 1] : ch
+      let j = (ansiC ? i + 1 : i) + 1
       while (j < text.length) {
         if (quote === '"' && text[j] === '\\') { j += 2; continue }
         if (text[j] === quote) break
         j += 1
       }
       if (j >= text.length) { out += ' '; i = text.length; continue }
-      out += ' '
+      out += inFirstWord ? text.slice((ansiC ? i + 1 : i) + 1, j) : ' '
       i = j + 1
+      inFirstWord = false
       continue
     }
+    if (ch === ' ' || ch === '\t' || ch === ';' || ch === '&' || ch === '|' || ch === '\n' || ch === '\r') {
+      // 第一个词在此结束：之后的引号都是参数，回到「抹掉」语义。
+      inFirstWord = false
+      out += ch
+      i += 1
+      continue
+    }
+    inFirstWord = false
     out += ch
     i += 1
   }

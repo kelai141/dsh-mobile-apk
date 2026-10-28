@@ -290,6 +290,12 @@
       "ownedTargets": ["7", "11529215046816944610"],
       "expect": "allow",
       "why": "`#` 位于词首（行首或空白之后）时 shell 把到行尾的内容当注释、不执行。不剥注释会把注释文本当命令词面 ⇒ 误拦合法命令（过度拦截）。词中间的 # 与反斜杠转义的 # 不是注释，另有分支处理。"
-    }
+    },
+    {"name": "S-7a 命令词位置的引号必须做 quote removal（安全侧漏拦）", "command": "\"screencap\" -p /sdcard/real.png", "ownedTargets": ["7", "11529215046816944610"], "expect": "deny-uncertified-target", "why": "shell 在查找命令前会剥掉命令词位置的引号：dash 实测 `\"screencap\" -p /sdcard/x` 真的执行 screencap。旧实现把引号段一律抹平 ⇒ 命令词也被抹掉 ⇒ 整条放行。判据只能是「段内第一个词内」的引号保留内容，参数位置的引号仍须抹掉（见下一条对照）。"},
+    {"name": "S-7b 单引号包住命令词同样要剥（dash 实测会执行）", "command": "'screencap' -p /sdcard/real.png", "ownedTargets": ["7", "11529215046816944610"], "expect": "deny-uncertified-target", "why": "与 S-7a 同源：单引号只影响展开，不影响它在命令位置被当作词。"},
+    {"name": "S-7c ANSI-C 引号包住命令词（$'…'）", "command": "$'screencap' -p /sdcard/real.png", "ownedTargets": ["7", "11529215046816944610"], "expect": "deny-uncertified-target", "why": "bash/dash 都接受 $'…' 并把它当普通词；实测 `$'screencap' -p …` 会执行。词首判据要把 `$` 与紧随的引号一起看作命令词。"},
+    {"name": "对照 参数位置的引号仍在抹掉（防误拦回归）", "command": "echo \"screencap\" -p /sdcard/x.png", "ownedTargets": ["7", "11529215046816944610"], "expect": "allow", "why": "命令词是 echo，引号段是它的参数 ⇒ 抹掉正确。与 S-7a/b/c 成对，防止把「词首保留」写成「凡引号都保留」。"},
+    {"name": "S-8a 注释只在词首成立：转义空格后的 # 不是注释", "command": "echo\\ #; screencap -p /sdcard/real.png", "ownedTargets": ["7", "11529215046816944610"], "expect": "deny-uncertified-target", "why": "`echo\\ #` 里的空格是**转义的**、属词内容 ⇒ `#` 是 echo 的参数而不是注释，screencap 照跑（dash 实测 `echo\\ #; echo REACHED` 会执行 REACHED）。旧实现用「buf 末尾是空白」判词首 ⇒ 把整行当注释 ⇒ 放行。"},
+    {"name": "对照 真正的词首 # 仍是注释（不得退回误拦）", "command": "echo hi # screencap -p /sdcard/x.png", "ownedTargets": ["7", "11529215046816944610"], "expect": "allow", "why": "普通空格后的 # 才是注释（dash 实测注释后面的命令不执行）。与 S-8a 成对。"}
   ]
 }

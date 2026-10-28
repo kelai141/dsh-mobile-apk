@@ -380,9 +380,12 @@ internal object ShellOps {
         return
       }
       val buf = StringBuilder()
+      // 词首状态（注释判定用，见下方 `#` 分支）：分隔符/空白置位，其它字符（含转义对）清除。
+      var atWordStart = true
       fun flush() {
         segments.add(buf.toString())
         buf.setLength(0)
+        atWordStart = true
       }
       var i = 0
       while (i < text.length) {
@@ -390,6 +393,7 @@ internal object ShellOps {
         if (ch == '\\') {
           buf.append(text, i, minOf(i + 2, text.length))
           i += 2
+          atWordStart = false
           continue
         }
         if (ch == '\'') {
@@ -402,6 +406,7 @@ internal object ShellOps {
           }
           buf.append(text, i, end + 1)
           i = end + 1
+          atWordStart = false
           continue
         }
         if (ch == '"') {
@@ -447,6 +452,7 @@ internal object ShellOps {
           }
           buf.append(text, i, j + 1)
           i = j + 1
+          atWordStart = false
           continue
         }
         if (ch == '`') {
@@ -475,9 +481,11 @@ internal object ShellOps {
           i = end + 1
           continue
         }
-            // shell 注释：`#` 位于**词首**（行首，或空白 / `;` / `&` / `|` 之后）时，直到行尾都不执行。
-            // 不剥它会把 `echo hi # screencap -p /sdcard/x.png` 里的注释文本当命令词面 ⇒ 误拦合法命令。
-            if (ch == '#' && (buf.isEmpty() || buf.last().isWhitespace() || buf.last() in ";&|")) {
+            // shell 注释：`#` 只有在**词首**才开注释。词首＝未转义、未引用的 ASCII 空白 / `;` / `&` / `|`
+            // 之后（atWordStart 显式跟踪）—— 不能用「buf 末尾是空白」判定：`echo\ #; screencap …` 里
+            // 那个空格是**转义的**（属词内容），`#` 因此是 echo 的参数而不是注释，screencap 照跑
+            // （dash 实测 `echo\ #; echo REACHED` 会执行 REACHED）；VT/FF/CR/NBSP 也不是分隔符。
+            if (ch == '#' && atWordStart) {
               val lineEnd = text.indexOf('\n', i)
               i = if (lineEnd < 0) text.length else lineEnd
               continue
@@ -492,6 +500,7 @@ internal object ShellOps {
           i += if (i + 1 < text.length && text[i + 1] == ch) 2 else 1
           continue
         }
+        if (ch == ' ' || ch == '\t') atWordStart = true else atWordStart = false
         buf.append(ch)
         i += 1
       }
@@ -590,16 +599,24 @@ internal object ShellOps {
   internal fun stripQuotedText(text: String): String {
     val out = StringBuilder()
     var i = 0
+    // 只对**段内第一个词**（命令词位置）做 quote removal —— shell 在查找命令前会剥掉那里的引号，
+    // 所以 `"screencap" -p /sdcard/x` 真的会执行 screencap（dash 实测），旧实现把引号段一律抹平
+    // ⇒ 命令词位置上的引号内容也被抹掉 ⇒ 整条放行（2026-10-28 自查，安全侧漏拦，与引擎侧同源）。
+    // 参数位置的引号必须继续抹掉：`echo "screencap"` 只是打印（fixture 有这条对照）。
+    var inFirstWord = true
     while (i < text.length) {
       val ch = text[i]
       if (ch == '\\') {
         if (i + 1 < text.length) out.append(text[i + 1])
         i += 2
+        inFirstWord = false
         continue
       }
-      if (ch == '\'' || ch == '"') {
-        val quote = ch
-        var j = i + 1
+      // `$'…'` / `$"…"` 在词首同样属于命令词：dash/bash 实测 `$'screencap' -p …` 会执行。
+      val ansiC = inFirstWord && ch == '$' && i + 1 < text.length && (text[i + 1] == '\'' || text[i + 1] == '"')
+      if (ch == '\'' || ch == '"' || ansiC) {
+        val quote = if (ansiC) text[i + 1] else ch
+        var j = (if (ansiC) i + 1 else i) + 1
         while (j < text.length) {
           if (quote == '"' && text[j] == '\\') {
             j += 2
@@ -613,10 +630,19 @@ internal object ShellOps {
           i = text.length
           continue
         }
-        out.append(' ')
+        if (inFirstWord) out.append(text, (if (ansiC) i + 1 else i) + 1, j) else out.append(' ')
         i = j + 1
+        inFirstWord = false
         continue
       }
+      if (ch == ' ' || ch == '\t' || ch == ';' || ch == '&' || ch == '|' || ch == '\n' || ch == '\r') {
+        // 第一个词在此结束：之后的引号都是参数，回到「抹掉」语义。
+        inFirstWord = false
+        out.append(ch)
+        i += 1
+        continue
+      }
+      inFirstWord = false
       out.append(ch)
       i += 1
     }
