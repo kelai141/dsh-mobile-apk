@@ -100,51 +100,59 @@ const executionSites = (rel, textOverride) => {
 // 全仓门禁依旧全绿。下面 ② 就是那条区别的独家守门人。
 const NODE_CHAIN = 'scripts/build-apk.mjs'
 const PWSH_CHAIN = 'scripts/build-apk-013.ps1'
-if (argv.includes('--self-test')) {
-  const failuresBefore = failures.length
+const selfTest = (silent) => {
+  const fails = []
+  const t = (label, ok, detail) => {
+    if (!ok) fails.push(label + (detail === undefined ? '' : ' -> ' + detail))
+    else if (!silent) console.log('PASS  [self-test] ' + label)
+  }
   // ① 声明提取：只认 `{ script: 'x.mjs' }` 单引号形态（聚合入口的唯一写法）。
-  check('[self-test] 声明提取认 { script: \'x.mjs\' }',
+  t('声明提取认 { script: \'x.mjs\' }',
     parseDeclared("const G = [{ script: 'check-a.mjs', label: 'A' }, { script: 'check-b.mjs' }]").join(',') === 'check-a.mjs,check-b.mjs')
-  check('[self-test] 声明提取不吃双引号/裸字符串（写错形态会立刻暴露）',
+  t('声明提取不吃双引号/裸字符串（写错形态会立刻暴露）',
     parseDeclared('{ script: "check-a.mjs" }').length === 0)
 
   // ② 独家守护：声明数组字面量 —— 宽松扫描必须命中，执行点扫描必须不命中。
   const declOnly = "const GATE_SCRIPTS = [\n  'check-a.mjs',\n  'check-b.mjs',\n]\n"
-  check('[self-test] 宽松扫描认得出声明字面量（它本来就该命中）', parseInvoked(declOnly).length === 2)
-  check('[self-test] 执行点扫描不把声明字面量当执行（防自满足）',
+  t('宽松扫描认得出声明字面量（它本来就该命中）', parseInvoked(declOnly).length === 2)
+  t('执行点扫描不把声明字面量当执行（防自满足）',
     executionSites(NODE_CHAIN, declOnly).size === 0, '命中=' + [...executionSites(NODE_CHAIN, declOnly)].join(','))
 
   // ③④ node 链：只有 gate(...) 包裹才算执行点。
-  check('[self-test] node 链 gate(\'x\') 命中', executionSites(NODE_CHAIN, "gate('check-a.mjs')").has('check-a.mjs'))
-  check('[self-test] node 链 gate("x") 双引号同样命中', executionSites(NODE_CHAIN, 'gate("check-b.mjs")').has('check-b.mjs'))
-  check('[self-test] node 链 数组下标写法不算执行点', executionSites(NODE_CHAIN, 'GATE_SCRIPTS[0]').size === 0)
-  check('[self-test] node 链 gate(x) 无引号变量不算执行点', executionSites(NODE_CHAIN, 'gate(name)').size === 0)
+  t('node 链 gate(\'x\') 命中', executionSites(NODE_CHAIN, "gate('check-a.mjs')").has('check-a.mjs'))
+  t('node 链 gate("x") 双引号同样命中', executionSites(NODE_CHAIN, 'gate("check-b.mjs")').has('check-b.mjs'))
+  t('node 链 数组下标写法不算执行点', executionSites(NODE_CHAIN, 'GATE_SCRIPTS[0]').size === 0)
+  t('node 链 gate(x) 无引号变量不算执行点', executionSites(NODE_CHAIN, 'gate(name)').size === 0)
 
   // ⑤⑥⑦ pwsh 链：行首 node ... scripts\check-x.mjs 才算；注释与字符串里的不算。
-  check('[self-test] pwsh 链 node ... scripts\\check-x.mjs 命中',
+  t('pwsh 链 node ... scripts\\check-x.mjs 命中',
     executionSites(PWSH_CHAIN, 'node "$PSScriptRoot\\scripts\\check-a.mjs"').has('check-a.mjs'))
-  check('[self-test] pwsh 链 带 $var = 前置同样命中',
+  t('pwsh 链 带 $var = 前置同样命中',
     executionSites(PWSH_CHAIN, '$r = node scripts/check-b.mjs --x').has('check-b.mjs'))
-  check('[self-test] pwsh 链 注释行不算执行点', executionSites(PWSH_CHAIN, '# node scripts\\check-a.mjs').size === 0)
-  check('[self-test] pwsh 链 字符串里提到不算执行点',
+  t('pwsh 链 注释行不算执行点', executionSites(PWSH_CHAIN, '# node scripts\\check-a.mjs').size === 0)
+  t('pwsh 链 字符串里提到不算执行点',
     executionSites(PWSH_CHAIN, 'Write-Host "见 scripts\\check-a.mjs"').size === 0)
 
   // ⑧⑨⑩ SKIP 发射点判据：计数形态与未计数形态都要命中（否则后者判不出），纯文案提及不命中。
   // 样本必须**拆开拼接**：写成字面量会让本文件自己出现「console 点 log 左括号 引号 紧接 SKIP」
   // 的连续串，从而被本门禁自己的 SKIP 审计当成发射点命中（自指陷阱；实测报过 3 处，注释里提到同样算）。
   const S = (...parts) => parts.join('')
-  check('[self-test] SKIP 计数形态命中', emitsSkip(S('console.', 'log(', "'SKIP(#1)  x'")))
-  check('[self-test] SKIP 未计数形态也命中（否则它判不出未计数）', emitsSkip(S('console.', 'log(', "'SKIP foo'")))
-  check('[self-test] SKIP 带 FAIL 前缀命中', emitsSkip(S('console.', 'error(', "'FAIL SKIP bar'")))
-  check('[self-test] 文案里提到 SKIP 但非发射点不命中', !emitsSkip('// 这里会打印 SKIP 行'))
-  check('[self-test] console.warn 不在面内（口径与实现一致：只认 log/error）', !emitsSkip("console.warn('SKIP x')"))
+  t('SKIP 计数形态命中', emitsSkip(S('console.', 'log(', "'SKIP(#1)  x'")))
+  t('SKIP 未计数形态也命中（否则它判不出未计数）', emitsSkip(S('console.', 'log(', "'SKIP foo'")))
+  t('SKIP 带 FAIL 前缀命中', emitsSkip(S('console.', 'error(', "'FAIL SKIP bar'")))
+  t('文案里提到 SKIP 但非发射点不命中', !emitsSkip('// 这里会打印 SKIP 行'))
+  t('console.warn 不在面内（口径与实现一致：只认 log/error）', !emitsSkip("console.warn('SKIP x')"))
 
-  const added = failures.length - failuresBefore
-  if (added > 0) {
-    console.error('CHECK-GATE-SKIPS SELF-TEST FAILED（' + added + ' 项）')
+  return fails
+}
+
+if (argv.includes('--self-test')) {
+  const stFails = selfTest(false)
+  if (stFails.length > 0) {
+    console.error('CHECK-GATE-SKIPS SELF-TEST FAILED（' + stFails.length + ' 项）：' + stFails.join('；'))
     process.exit(1)
   }
-  console.log('CHECK-GATE-SKIPS SELF-TEST PASSED（16 项判别力断言）')
+  console.log('CHECK-GATE-SKIPS SELF-TEST PASSED（17 项判别力断言）')
   process.exit(0)
 }
 
