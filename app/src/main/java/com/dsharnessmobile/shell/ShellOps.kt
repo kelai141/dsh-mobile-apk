@@ -47,6 +47,36 @@ internal object ShellOps {
    */
   private val MALFORMED_DISPLAY_OPTION = Regex("""(?:^|[ \t])-d(?:[ \t]*=[ \t]*\S|(?![0-9\s])\S)""")
 
+  /**
+   * 词内引号（命令名被引号拆分）：`scr''eencap` / `scr"e"encap` 在 shell 里都等价于 `screencap`，
+   * 但 stripQuotedText 会把引号内容抹掉（空引号对什么都不留）⇒ 词面看不到命令名 ⇒ 放行。
+   * 真机实测（2026-10-28，小米 14 Pro / SDK 37）：`scr''eencap -p /sdcard/t.png` ⇒ RC=0 且出图，
+   * 与正常 screencap 同字节。只看**进入引号**那一刻，且必须状态机（单正则会把闭合引号误判）。
+   * `$'…'` 只在 `$` 处于词首时属正常语法；`$` 前还有普通字符则是词内拼接（`s$'cre'encap`）。
+   */
+  private fun hasGluedQuote(text: String): Boolean {
+    var quote = '\u0000'
+    for (i in text.indices) {
+      val ch = text[i]
+      if (quote == '\u0000') {
+        if (ch != '"' && ch != '\'') continue
+        val prev = if (i > 0) text[i - 1] else '\u0000'
+        val anchor = if (prev == '$') (if (i > 1) text[i - 2] else '\u0000') else prev
+        if (anchor != '\u0000' && anchor !in " \t;&|()<>") return true
+        quote = ch
+      } else if (ch == quote) {
+        quote = '\u0000'
+      }
+    }
+    return false
+  }
+
+  /**
+   * 反斜杠续行把命令名拆到下一行（`scr\<换行>eencap` 等价于 `screencap`）。
+   * 真机实测：RC=0，出图 2862760 B，与正常 screencap 同字节。两侧都紧邻非空白才算拼接。
+   */
+  private val GLUED_LINE_CONTINUATION = Regex("""[^\s]\\\r?\n[^\s]""")
+
   /** 命令词家族：每个家族自带「哪种拼写才算它的目标屏」（与引擎侧 `SCREEN_COMMAND_FAMILIES` 同表）。 */
   private data class ScreenFamily(val name: String, val pattern: Regex, val targetFlags: List<String>)
 
@@ -646,6 +676,10 @@ internal object ShellOps {
       }
       // 命令词用 glob 拼出屏幕命令名（`/system/bin/scr?encap`）：词面不等于执行词 ⇒ 不可判。
       if (globExpandsToScreenCommand(segment)) return ScreenCommandVerdict.DENY_UNPARSED
+      // 命令名被引号拆开（`scr''eencap` / `s$'cre'encap`）：指纹先被 stripQuotedText 抹平。
+      if (hasGluedQuote(segment)) return ScreenCommandVerdict.DENY_UNPARSED
+      // 反斜杠续行把命令名拆到下一行（`scr\<换行>eencap`）——两半都不可信。
+      if (GLUED_LINE_CONTINUATION.containsMatchIn(segment)) return ScreenCommandVerdict.DENY_UNPARSED
       // 裸解释器段：管道/重定向喂 shell 的载荷对判定器不可见（#509），fail-closed。
       if (interpreterPayloadUnparsed(bare)) {
         return ScreenCommandVerdict.DENY_UNPARSED

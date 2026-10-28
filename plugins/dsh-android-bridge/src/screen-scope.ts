@@ -119,6 +119,43 @@ export interface DisplayOption {
  */
 const MALFORMED_DISPLAY_OPTION = /(?:^|[ \t])-d(?:[ \t]*=[ \t]*\S|(?![0-9\s])\S)/
 
+/**
+ * 词内引号（命令名被引号拆分）：`scr''eencap` / `scr"e"encap` 在 shell 里都等价于 `screencap`，
+ * 但 `stripQuotedText` 会把引号内容抹掉（空引号对什么都不留）⇒ 命令词面里看不到 `screencap`
+ * ⇒ 一路放行。真机实测（2026-10-28，小米 14 Pro / SDK 37）：
+ *   `scr''eencap -p /sdcard/t.png` ⇒ RC=0，出图 2857682 B；正常 `screencap` 2858029 B —— 等价。
+ * 判据只看**进入引号**那一刻：正常 shell 用法里引号总在词边界（`echo "a b"`），出现在词内部
+ * 就意味着这个 token 被拆开拼接，命令词面已不可信 ⇒ fail-closed。
+ * 必须写成状态机而不是单正则：闭合引号同样「紧邻非空白」（`sh -c "…200"` 的收尾引号），
+ * 单正则会把这类正常写法一起误拦（实测误拦 35/96 条 fixture）。
+ * `$'…'`（ANSI-C）与 `$"…"`（本地化）只在 `$` 处于**词首**时属正常语法；`$` 前面还有普通字符
+ * 则是词内拼接（`s$'cre'encap` 展开为 `screencap`，真机实测可执行）。
+ */
+function hasGluedQuote(text: string): boolean {
+  let quote = ''
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]
+    if (quote === '') {
+      if (ch !== '"' && ch !== "'") continue
+      const prev = i > 0 ? text[i - 1] : ''
+      const anchor = prev === '$' ? (i > 1 ? text[i - 2] : '') : prev
+      if (anchor !== '' && !/[\s;&|()<>]/.test(anchor)) return true
+      quote = ch
+    } else if (ch === quote) {
+      quote = ''
+    }
+  }
+  return false
+}
+
+/**
+ * 反斜杠续行把命令名拆到下一行（`scr\<换行>eencap` 在 shell 里等价于 `screencap`）。
+ * `stripQuotedText` 不动续行 ⇒ 词面看到 `scr` + 换行 + `eencap` ⇒ 匹配不到家族 ⇒ 放行。
+ * 真机实测：`scr\<换行>eencap -p /sdcard/t-c.png` ⇒ RC=0，出图 2862760 B（与 screencap 同字节）。
+ * 判据：续行**两侧都紧邻非空白**才算拼接；`screencap\<换行> -p …` 是正常续行，保持既有判据。
+ */
+const GLUED_LINE_CONTINUATION = /[^\s]\\\r?\n[^\s]/
+
 export function displayOptionsIn(text: string): DisplayOption[] {
   const out: DisplayOption[] = []
   for (const m of text.matchAll(/(?:^|[ \t])-d[ \t]*(\d+)/g)) {
@@ -818,6 +855,10 @@ export function screenCommandVerdict(
     if (AWK_EXEC_PAYLOAD.test(segment)) return 'deny-unparsed'
     // 命令词用 glob 拼出屏幕命令名（`/system/bin/scr?encap`）：词面不等于执行词 ⇒ 不可判。
     if (globExpandsToScreenCommand(segment)) return 'deny-unparsed'
+    // 命令名被引号拆开（`scr''eencap` / `s$'cre'encap`）：指纹先被 stripQuotedText 抹平，词面不可信。
+    if (hasGluedQuote(segment)) return 'deny-unparsed'
+    // 反斜杠续行把命令名拆到下一行（`scr\<换行>eencap`）——两半都不可信。
+    if (GLUED_LINE_CONTINUATION.test(segment)) return 'deny-unparsed'
     // 载荷不可见的解释器调用：静态判不了，fail-closed。
     if (interpreterPayloadUnparsed(bare)) return 'deny-unparsed'
     const options = displayOptionsIn(bare)

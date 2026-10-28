@@ -1504,6 +1504,76 @@
       ],
       "expect": "allow",
       "why": "确认 glob 判据没有把既有正常路径（-d 指向已注册虚拟屏）一起拦掉。"
+    },
+    {
+      "name": "S-18a 空引号拼接命令名（scr''eencap）必须判拒",
+      "command": "scr''eencap -p /sdcard/x.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "真机实测等价于 screencap（RC=0 且出图）；空引号对被 stripQuotedText 抹平后词面看不到命令名 ⇒ 必须 fail-closed。"
+    },
+    {
+      "name": "S-18b 引号内插字符拼接命令名（scr\"e\"encap）必须判拒",
+      "command": "scr\"e\"encap -p /sdcard/x.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "拼接后同样是 screencap；判据只看「引号紧邻非空白」，不依赖具体拆法。"
+    },
+    {
+      "name": "S-18c 对照 词边界引号（echo \"a b\"）仍放行",
+      "command": "echo \"a b\"",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "与 S-18a/b 成对：正常 shell 用法的引号出现在空白之后，不得误拒，防「见到引号就拒」。"
+    },
+    {
+      "name": "S-18d 词内 ANSI-C 引号拼接（s$'cre'encap）必须判拒",
+      "command": "s$'cre'encap -p /sdcard/x.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "真机实测展开为 screencap（RC=0，出图 2857999 B 与对照同字节）；`$` 前面还有普通字符 ⇒ 词内拼接。"
+    },
+    {
+      "name": "S-18e 对照 词首 ANSI-C 引号（$'screencap'）仍走原判据",
+      "command": "$'screencap' -p /sdcard/real.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "与 S-18d 成对：`$` 在词首属正常语法，应保持既有 quote removal 语义而非退化成 deny-unparsed。"
+    },
+    {
+      "name": "S-18f 反斜杠续行拼接命令名（scr\\<换行>eencap）必须判拒",
+      "command": "scr\\\neencap -p /sdcard/x.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "真机实测 RC=0 且出图 2862760 B，与正常 screencap 同字节；续行两侧都紧邻非空白 ⇒ 命令名被拆开。"
+    },
+    {
+      "name": "S-18g 对照 续行后接空格（screencap\\<换行> -p …）保持原判据",
+      "command": "screencap\\\n -p /sdcard/x.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "与 S-18f 成对：续行后是空格即正常续行（等价 screencap -p …，无 -d ⇒ 未认证），不得退化成 deny-unparsed。"
     }
   ]
 }
