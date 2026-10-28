@@ -47,6 +47,18 @@ const DOC_REL = argOf('doc', 'docs/AGENTS/EXECUTION-MAP.md')
 const LIST_ONLY = argv.includes('--list')
 const SELF_TEST = argv.includes('--self-test')
 const REFRESH_ANCHOR_BASELINE = argv.includes('--refresh-anchor-baseline')
+/**
+ * 显式允许「基线内容漂移」被吸收进 `--refresh-anchor-baseline`。
+ *
+ * 为什么需要这个开关（修的是哪条假绿）：
+ * 旧路径刷新时直接按当前源码重铺 `sourceLines`，**静默**把「某行内容已被改」洗成合法基线——
+ * 校验立刻绿，而刷新日志只有一句 `baseline refreshed: N legacy references`，
+ * 看不到是**哪一行**从什么变成了什么。已发生的内容改动因此无法被复核。
+ *
+ * 修后：默认**拒绝**刷新并逐条打印 expected/actual；只有显式传本开关才允许，
+ * 且逐条打印「allow 了哪些漂移」。
+ */
+const FORCE_ANCHOR_DRIFT = argv.includes('--force-drift')
 const DERIVE_ANCHORS = argv.includes('--derive-anchors')
 const DERIVE_DRY_RUN = argv.includes('--derive-dry-run')
 /** CI 等价性检查：apk 仓在被独立检出时没有协调仓父目录，--no-parent 用来本地预演那种情形。 */
@@ -495,6 +507,33 @@ function countLegacyReferences(anchors) {
     counts[key] = (counts[key] ?? 0) + 1
   }
   return counts
+}
+
+/**
+ * 计算 legacy 行号锚点的「当前行内容」并检出**内容漂移**（纯函数，便于自测）。
+ *
+ * 漂移定义：某 key 的当前内容里出现了基线里没有的行 —— 即该行被改写过。
+ * 只是「行被删/合并」不算漂移（那是 moved 分支负责）。
+ *
+ * @returns sourceLines 供写盘；contentDrift 供调用方决定拒或（显式 --force-drift 时）记录；
+ *          missing 为读不到内容的 key。
+ */
+export function planLegacySourceLines(references, sourceLineBaseline, fsView) {
+  const sourceLines = {}
+  const contentDrift = []
+  const missing = []
+  for (const key of [...references].sort()) {
+    const split = key.lastIndexOf(':')
+    const contents = fsView.lineContents(key.slice(0, split), Number(key.slice(split + 1)))
+    if (contents.length === 0) { missing.push(key); continue }
+    const actual = [...new Set(contents.map((candidate) => candidate.text))].sort()
+    const expected = Array.isArray(sourceLineBaseline[key])
+      ? [...new Set(sourceLineBaseline[key])].sort()
+      : []
+    if (actual.some((line) => !expected.includes(line))) contentDrift.push({ key, expected, actual })
+    sourceLines[key] = actual
+  }
+  return { sourceLines, contentDrift, missing }
 }
 
 function increasedLegacyReferences(anchors, baselineCounts) {
@@ -1047,7 +1086,31 @@ function selfTest() {
     lines.push((ok ? '  ok   ' : '  FAIL ') + name + ': matched ' + issues.length + ' / expected ' + want
       + (ok ? '' : ' -> ' + issues.map((i) => i.kind).join(',')))
   }
-  const ok = pass === cases.length
+  // ── 内容漂移负控（对应 --force-drift）──────────────────────────────
+  //
+  // 两个方向都要判得出，否则这个开关本身不可信：
+  //   ① 内容被改写 -> 必须检出漂移（默认刷新据此拒）；
+  //   ② 内容未变   -> 必须不误报（否则正常刷新会被无端拦住）。
+  const driftCases = []
+  {
+    const base = { 'app/a.kt:2': ['fun ready()'] }
+    const changed = mk({ 'app/a.kt': ['header', 'changed body()', 'fun helper()'] })
+    const plan = planLegacySourceLines(new Set(Object.keys(base)), base, changed)
+    driftCases.push([
+      'DRIFT 内容漂移被检出（expected/actual 都要报出）',
+      plan.contentDrift.length === 1
+        && plan.contentDrift[0].expected[0] === 'fun ready()'
+        && plan.contentDrift[0].actual[0] === 'changed body()',
+    ])
+    const same = mk({ 'app/a.kt': ['header', 'fun ready()', 'fun helper()'] })
+    const plan2 = planLegacySourceLines(new Set(Object.keys(base)), base, same)
+    driftCases.push(['DRIFT 内容未变不误报', plan2.contentDrift.length === 0])
+  }
+  for (const [name, okc] of driftCases) {
+    if (okc) pass += 1
+    lines.push((okc ? '  ok   ' : '  FAIL ') + name)
+  }
+  const ok = pass === cases.length + driftCases.length
   console.log((ok ? 'CHECK-CODE-MAP SELF-TEST PASSED' : 'CHECK-CODE-MAP SELF-TEST FAILED'))
   for (const l of lines) console.log(l)
   process.exit(ok ? 0 : 1)
@@ -1149,15 +1212,27 @@ if (isMain) {
       console.error('Cannot refresh baseline for new references; add #expect=<encoded-fragment>: ' + unknown.slice(0, 20).join(', '))
       process.exit(1)
     }
-    const sourceLines = {}
-    for (const key of [...references].sort()) {
-      const split = key.lastIndexOf(':')
-      const contents = fsView.lineContents(key.slice(0, split), Number(key.slice(split + 1)))
-      if (contents.length === 0) {
-        console.error('Cannot refresh missing reference content: ' + key)
-        process.exit(1)
+    const plan = planLegacySourceLines(references, sourceLineBaseline, fsView)
+    if (plan.missing.length > 0) {
+      console.error('Cannot refresh missing reference content: ' + plan.missing.slice(0, 20).join(', '))
+      process.exit(1)
+    }
+    const { sourceLines, contentDrift } = plan
+    if (contentDrift.length > 0 && !FORCE_ANCHOR_DRIFT) {
+      console.error('Cannot refresh changed source content without --force-drift:')
+      for (const d of contentDrift) {
+        console.error('  - ' + d.key + ': expected ' + JSON.stringify(d.expected)
+          + ', actual ' + JSON.stringify(d.actual))
       }
-      sourceLines[key] = [...new Set(contents.map((candidate) => candidate.text))].sort()
+      console.error('These are real content changes. Review them, then re-run with --force-drift to record them.')
+      process.exit(1)
+    }
+    if (contentDrift.length > 0 && FORCE_ANCHOR_DRIFT) {
+      console.warn('Explicit --force-drift is recording these reviewed content changes:')
+      for (const d of contentDrift) {
+        console.warn('  - ' + d.key + ': expected ' + JSON.stringify(d.expected)
+          + ', actual ' + JSON.stringify(d.actual))
+      }
     }
     // 符号锚点：缓存「符号体归一化结果」。行号**不写入基线**——它只是缓存。
     const symbols = { ...(anchorBaselineSymbols()) }
