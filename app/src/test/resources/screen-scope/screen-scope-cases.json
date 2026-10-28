@@ -1294,6 +1294,126 @@
       ],
       "expect": "allow",
       "why": "引号内不执行，stripQuotedText 后无命令词面 ⇒ 必须放行。"
+    },
+    {
+      "name": "S-20a wm dump-visible-window-views 读真实屏窗口视图树必须判拒",
+      "command": "wm dump-visible-window-views",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "真机 RC=0，65704 B 的 ZIP（PK 头），内含 com.miui.home/com.miui.home.launcher.Launcher、LauncherOverlayWindow:com.miui.personalassistant 等每个窗口的 View 层级 ⇒ 与 uiautomator dump 同级的读真实屏 UI。修前白名单不含它 ⇒ 整条放行。"
+    },
+    {
+      "name": "S-20b wm dismiss-keyguard 解锁真实屏必须判拒",
+      "command": "wm dismiss-keyguard",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "真机 RC=0，直接 dismiss 真实屏的 keyguard。修前不在白名单 ⇒ 放行。"
+    },
+    {
+      "name": "S-20c wm reset 重置显示覆盖必须判拒",
+      "command": "wm reset",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "无 -d 时 reset 的是 display 0（真实屏）的 size/density/rotation 覆盖。修前放行。"
+    },
+    {
+      "name": "S-20d wm disable-blur 改真实屏显示效果必须判拒",
+      "command": "wm disable-blur true",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "写 Settings.Global 的 blur 开关（真机 uid 2000 下被 SecurityException 拦，但判据看命令面能不能操作真实屏显示）。"
+    },
+    {
+      "name": "S-20e 对照 dump-visible-window-views 带 -d 已注册 token 也救不了（子命令不解析 -d）",
+      "command": "wm dump-visible-window-views -d 7",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "真机 wm dump-visible-window-views -d 47 仍 dump 出真实屏窗口树（65702 B，同一批窗口名）⇒ -d 被忽略，不能当目标屏凭据。这是 wm-no-target 家族存在的理由。"
+    },
+    {
+      "name": "S-20f 对照 wm get-* 纯查询必须放行",
+      "command": "wm get-ignore-orientation-request",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "与 S-20a~d 成对：wm 的只读 get-* 不改显示状态、不读屏内容，反向表不得把它们卷进来。"
+    },
+    {
+      "name": "S-20g 对照 wm help 必须放行",
+      "command": "wm help",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "纯帮助文本，无副作用。"
+    },
+    {
+      "name": "S-20h 对照 裸 wm 必须放行",
+      "command": "wm",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "无子命令时 wm 打印帮助（真机实测），不得判成待认证的屏幕命令。"
+    },
+    {
+      "name": "S-20i 对照 wm reset 带已注册虚拟屏 -d 仍算自证放行",
+      "command": "wm reset -d 7",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "真机 wm reset -d 47 输出 Reset all settings for displayId=47 ⇒ reset 确实解析 -d，带已注册虚拟屏 token 属范围内操作。"
+    },
+    {
+      "name": "S-20j 对照 引号内的 wm 子命令只是文本不得误拦",
+      "command": "echo \"wm dump-visible-window-views\"",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "引号内不执行，stripQuotedText 抹掉后无命令词面 ⇒ 必须放行（与 S-18 一系列同一口径）。"
+    },
+    {
+      "name": "S-20k wm scaling 改真实屏缩放必须判拒（反向表专属面）",
+      "command": "wm scaling auto",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "scaling 不在 wm-no-target 里（它解析 -d），只能由反向表拦：修前白名单不含 scaling ⇒ 放行。与 S-20a~d 分开，专门锁反向表本身而不是 wm-no-target。"
+    },
+    {
+      "name": "S-20l wm set-letterbox-style 改真实屏显示覆盖必须判拒（反向表专属面）",
+      "command": "wm set-letterbox-style",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "同上：新版本 ROM 才有的子命令，白名单式判据必然漏，反向表默认拒。"
     }
   ]
 }

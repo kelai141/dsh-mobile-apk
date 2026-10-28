@@ -615,13 +615,30 @@ const SCREEN_COMMAND_FAMILIES: readonly ScreenCommandFamily[] = [
       /\binput[ \t]+(?:[a-z][a-z0-9_-]*[ \t]+)?(?:tap|swipe|roll|draganddrop|motionevent|text|keyevent|keycombination|press)\b/i,
     targetFlags: ALL_DISPLAY_FLAGS,
   },
-  // `wm` 的改屏子命令。`user-rotation` / `fixed-to-user-rotation` 语义同样是「改真实屏显示参数」
-  // （本机 MIUI 上实测 `wm user-rotation lock 1` 返回 0 但 mRotation 不变，但别的 ROM 会生效 ——
-  // 判据看的是命令能不能操作真实屏，不是这一台有没有生效）。
+  // `wm` 是窗口管理器命令面。修前用**子命令白名单**（size|density|overscan|user-rotation|
+  // fixed-to-user-rotation），而 `wm` 实际有 20+ 子命令 ⇒ 白名单之外的一律放行。2026-10-29 自查实测：
+  //   `wm dump-visible-window-views`   RC=0，65704 B 的 ZIP（PK 头），内含
+  //       `com.miui.home/com.miui.home.launcher.Launcher`、
+  //       `LauncherOverlayWindow:com.miui.personalassistant` 等每个窗口的 View 层级
+  //       ⇒ 与 `uiautomator dump` 同级的「读真实屏 UI」；
+  //   `wm dismiss-keyguard`            RC=0（解锁真实屏）；
+  //   `wm reset` / `wm disable-blur`   RC=0（重置 / 改真实屏显示覆盖）。
+  // 改成**反向表**：除 `help` 与 `get-*`（纯查询）之外的每个子命令都进家族 —— 新增子命令默认拒
+  // （fail-closed），不再随 ROM 升版本静默漏拦。`wm -d 47 <cmd>` 真机实测 "Unknown command: -d"
+  // ⇒ `-d` 只跟在子命令之后，不需要穿透前导选项。
   {
     name: 'wm',
-    pattern: /\bwm[ \t]+(?:size|density|overscan|user-rotation|fixed-to-user-rotation)\b/i,
+    pattern: /\bwm[ \t]+(?!help\b|get-)[a-z][a-z-]*/i,
     targetFlags: ALL_DISPLAY_FLAGS,
+  },
+  // 其中三个子命令**不解析 `-d`**：`wm dump-visible-window-views -d 47` 真机仍 dump 出真实屏
+  // 窗口树（65702 B，同一批窗口名）、`wm dismiss-keyguard -d 47` RC=0 照常解锁、
+  // `wm disable-blur` 把 `-d 47` 当 blur 参数（随后 SecurityException 拒绝 —— uid 2000 无写权限）。
+  // 它们无法自证目标屏 ⇒ 必须与 `dumpsys` 同档恒拒，否则 `-d <已注册虚拟屏 token>` 就是通行证。
+  {
+    name: 'wm-no-target',
+    pattern: /\bwm[ \t]+(?:dump-visible-window-views|dismiss-keyguard|disable-blur)\b/i,
+    targetFlags: [],
   },
   // `cmd window <size|density|scaling|user-rotation|dismiss-keyguard>` 是 `wm` 的等价拼写：
   // 小米 14 Pro 实测 `cmd window size 900x1600` 真的把真实屏改成 `Override size: 900x1600`

@@ -68,11 +68,21 @@ internal object ShellOps {
       ),
       ALL_DISPLAY_FLAGS,
     ),
-    // `wm` 的改屏子命令（`user-rotation` 在本机 MIUI 上未生效，但命令语义同样是改真实屏）。
+    // `wm` 是窗口管理器命令面：20+ 子命令里只有 `help` 与 `get-*` 是纯查询，其余每个都改显示状态
+    // 或 dump **真实屏**的窗口视图树。修前的子命令白名单让 `wm dump-visible-window-views`
+    // （真机 65704 B 的 View 层级 ZIP）、`wm dismiss-keyguard`（解锁真实屏）、`wm reset`、
+    // `wm disable-blur` 全数放行（2026-10-29 自查）。改成反向表：新增子命令默认拒。
     ScreenFamily(
       "wm",
-      Regex("""\bwm[ \t]+(?:size|density|overscan|user-rotation|fixed-to-user-rotation)\b""", RegexOption.IGNORE_CASE),
+      Regex("""\bwm[ \t]+(?!help\b|get-)[a-z][a-z-]*""", RegexOption.IGNORE_CASE),
       ALL_DISPLAY_FLAGS,
+    ),
+    // 不解析 `-d` 的三个子命令（真机实测 `wm dump-visible-window-views -d 47` 仍 dump 真实屏，
+    // `wm dismiss-keyguard -d 47` RC=0 照常解锁）⇒ 无法自证目标屏，与 `dumpsys` 同档恒拒。
+    ScreenFamily(
+      "wm-no-target",
+      Regex("""\bwm[ \t]+(?:dump-visible-window-views|dismiss-keyguard|disable-blur)\b""", RegexOption.IGNORE_CASE),
+      emptyList(),
     ),
     // `cmd window …` 是 `wm` 的等价拼写（实测 `cmd window size 900x1600` 真改真实屏）；
     // 目标屏参数是**子命令内**的 `[-d DISPLAY_ID]`（实测 `cmd window size 900x1600 -d 7` 被接受）。
