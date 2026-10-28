@@ -2,7 +2,6 @@ package com.dsharnessmobile.shell
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -177,7 +176,8 @@ class UpdateCheckerTest {
   /** 造一份 release JSON（字段与 GitHub API 对齐，只含判定所需面）。 */
   private fun releaseJson(tag: String, assets: List<Triple<String, String, Long>>): String {
     val items = assets.joinToString(",") { (n, u, s) ->
-      "{\"name\":\"$n\",\"browser_download_url\":\"$u\",\"size\":$s}"
+      val digest = if (n.endsWith(".apk")) ",\"digest\":\"sha256:${"a".repeat(64)}\"" else ""
+      "{\"name\":\"$n\",\"browser_download_url\":\"$u\",\"size\":$s$digest}"
     }
     return "{\"tag_name\":\"$tag\",\"assets\":[$items]}"
   }
@@ -195,6 +195,7 @@ class UpdateCheckerTest {
     val arm = UpdateChecker.classifyLatestBody(body, listOf("arm64-v8a", "armeabi-v7a"), "arm64")
     assertTrue("arm64 设备应命中 arm64 资产", arm is UpdateChecker.CheckResult.Available)
     assertEquals("dsh-mobile-apk-v99.0.0-arm64.apk", (arm as UpdateChecker.CheckResult.Available).name)
+    assertEquals("a".repeat(64), arm.sha256)
     // apkUrl 口径（本轮定下的契约）：**以数据源自带的地址为准，缺字段才按发布链形态拼**。
     // 三条源里只有 GitHub API 有 browser_download_url，所以 API 这一档原样透传（本用例走的正是这条）；
     // MANIFEST 与 releases.json 没有 URL 字段，由 classifyFacts 用 assetDownloadUrl 拼出同一形态的地址。
@@ -204,6 +205,25 @@ class UpdateCheckerTest {
     val x86 = UpdateChecker.classifyLatestBody(body, listOf("x86_64", "arm64-v8a", "x86"), "x86_64")
     assertTrue(x86 is UpdateChecker.CheckResult.Available)
     assertEquals("dsh-mobile-apk-v99.0.0-x86_64.apk", (x86 as UpdateChecker.CheckResult.Available).name)
+  }
+
+  @Test
+  fun latestReleaseApiDigestIsParsedAndRequiredForUpdates() {
+    val digest = "b".repeat(64)
+    val body = "{\"tag_name\":\"v99.0.0\",\"assets\":[" +
+      "{\"name\":\"dsh-mobile-apk-v99.0.0-arm64.apk\",\"browser_download_url\":\"https://example.test/arm64.apk\",\"size\":100,\"digest\":\"sha256:$digest\"}]}"
+    val parsed = UpdateChecker.parseLatestRelease(body)
+    assertEquals(digest, parsed.assets.single().sha256)
+    val result = UpdateChecker.classifyLatestBody(body, listOf("arm64-v8a"), "arm64")
+    assertEquals(digest, (result as UpdateChecker.CheckResult.Available).sha256)
+
+    val missingDigest = body.replace(",\"digest\":\"sha256:$digest\"", "")
+    val rejected = UpdateChecker.classifyLatestBody(missingDigest, listOf("arm64-v8a"), "arm64") as UpdateChecker.CheckResult.Failed
+    assertEquals(UpdateChecker.CheckResult.FailureKind.RELEASE_DATA_BROKEN, rejected.kind)
+    assertTrue(rejected.reason.contains("SHA-256"))
+
+    val malformedDigest = body.replace("sha256:$digest", "sha512:$digest")
+    assertThrows(IllegalArgumentException::class.java) { UpdateChecker.parseLatestRelease(malformedDigest) }
   }
 
   @Test
@@ -396,7 +416,7 @@ class UpdateCheckerTest {
   @Test
   fun availableCarriesDigestFromManifest() {
     // 反证核心：真实 MANIFEST 口径下，Available.sha256 **必须非空**。
-    // 旧实现去找 {apk}.sha256 资产，而发布链从不产出该资产 => 摘要恒为 null、下载后校验从不执行。
+    // GitHub API 现在从 APK 资产 digest 字段提供摘要，下载后会进入与 MANIFEST 相同的字节校验。
     // 刻意用一个远低于样本 tag 的当前版本：这样断言的是"摘要取到了"，而不是
     // "今天恰好还没升到 0.14.9"。依赖真当前版本会让这条用例在下次升版时假红。
     val cur = "0.13.0"
@@ -432,14 +452,14 @@ class UpdateCheckerTest {
     // 同版样本 => UpToDate（摘要不参与"有没有新版"的判定，但也不能因此伪造一个）。
     val same = UpdateChecker.classifyFacts(UpdateChecker.parseManifest(realManifest), listOf("arm64-v8a"), "arm64", "0.14.9")
     assertTrue(same is UpdateChecker.CheckResult.UpToDate)
-    // 数据源没给摘要 => null（不是空串）。空串语义是"给了值但校验失败"，与实际不符。
+    // 新版元数据没有摘要时，不得生成可安装更新。
     val noDigest = UpdateChecker.LatestFacts(
       "v99.0.0",
       mapOf("dsh-mobile-apk-v99.0.0-arm64.apk" to 10L),
       emptyMap(),
     )
-    val r = UpdateChecker.classifyFacts(noDigest, listOf("arm64-v8a"), "arm64", "0.13.0")
-    assertNull("未提供摘要必须是 null，空串语义不同", (r as UpdateChecker.CheckResult.Available).sha256)
+    val r = UpdateChecker.classifyFacts(noDigest, listOf("arm64-v8a"), "arm64", "0.13.0") as UpdateChecker.CheckResult.Failed
+    assertEquals(UpdateChecker.CheckResult.FailureKind.RELEASE_DATA_BROKEN, r.kind)
   }
 
   @Test
@@ -830,7 +850,7 @@ class UpdateCheckerTest {
     val s = ApkUpdateState()
     s.beginCheck()
     s.onCheckResult(
-      UpdateChecker.CheckResult.Available("v99.0.0", "dsh-mobile-apk-v99.0.0-arm64.apk", "u", null, 169_000_000L),
+      UpdateChecker.CheckResult.Available("v99.0.0", "dsh-mobile-apk-v99.0.0-arm64.apk", "u", "a".repeat(64), 169_000_000L),
       "0.14.5-fx-2",
     )
     assertEquals(ApkUpdateState.STATE_AVAILABLE, s.stateName())
@@ -861,7 +881,7 @@ class UpdateCheckerTest {
     // => 页面按契约改发 install => 壳侧回 busy => 点重试永远说「上一次更新动作仍在进行中」。
     val s = ApkUpdateState()
     s.beginCheck()
-    s.onCheckResult(UpdateChecker.CheckResult.Available("v99.0.0", "a.apk", "u", null, 10L), "0.14.5-fx-2")
+    s.onCheckResult(UpdateChecker.CheckResult.Available("v99.0.0", "a.apk", "u", "a".repeat(64), 10L), "0.14.5-fx-2")
     assertTrue("发现新版后应可 start", JSONObject(s.snapshotJson()).getBoolean("canStart"))
     s.beginDownload()
     s.onDownloadFailed("下载失败：镜像链全部不可用（直连与加速镜像均失败）——请稍后重试", ApkUpdateState.KIND_DOWNLOAD_FAILED)
@@ -877,7 +897,7 @@ class UpdateCheckerTest {
     for (kinds in listOf(ApkUpdateState.KIND_DOWNLOAD_FAILED, ApkUpdateState.KIND_ARTIFACT_REJECTED, ApkUpdateState.KIND_TIMEOUT)) {
       val s = ApkUpdateState()
       s.beginCheck()
-      s.onCheckResult(UpdateChecker.CheckResult.Available("v99.0.0", "a.apk", "u", null, 1L), "0.14.5-fx-2")
+      s.onCheckResult(UpdateChecker.CheckResult.Available("v99.0.0", "a.apk", "u", "a".repeat(64), 1L), "0.14.5-fx-2")
       s.beginDownload()
       s.onDownloadFailed("下载失败：" + kinds, kinds)
       val j = JSONObject(s.snapshotJson())
@@ -901,7 +921,7 @@ class UpdateCheckerTest {
     s.onCheckResult(UpdateChecker.CheckResult.UpToDate, "0.14.5-fx-2")
     assertFalse("up-to-date 不可 start", canStart())
     s.beginCheck()
-    s.onCheckResult(UpdateChecker.CheckResult.Available("v99.0.0", "a.apk", "u", null, 1L), "0.14.5-fx-2")
+    s.onCheckResult(UpdateChecker.CheckResult.Available("v99.0.0", "a.apk", "u", "a".repeat(64), 1L), "0.14.5-fx-2")
     assertTrue("available 可 start", canStart())
     assertTrue("beginDownload 必须同样受理", s.beginDownload())
     s.onDownloadProgress(50); assertFalse("downloading 不可再 start", canStart())
@@ -909,7 +929,7 @@ class UpdateCheckerTest {
     // need-permission 是中间相位：不可 start（下载已完成），但续继链不受影响。
     val s3 = ApkUpdateState()
     s3.beginCheck()
-    s3.onCheckResult(UpdateChecker.CheckResult.Available("v99.0.0", "a.apk", "u", null, 1L), "0.14.5-fx-2")
+    s3.onCheckResult(UpdateChecker.CheckResult.Available("v99.0.0", "a.apk", "u", "a".repeat(64), 1L), "0.14.5-fx-2")
     s3.beginDownload(); s3.onNeedPermission()
     assertFalse("need-permission 不可 start", JSONObject(s3.snapshotJson()).getBoolean("canStart"))
     assertTrue("need-permission 必须仍被识别为等授权（续继链的判据）", s3.awaitingPermission())
@@ -920,12 +940,12 @@ class UpdateCheckerTest {
     // 端到端不变量：下载失败后**必须能**回到可重试（check -> available），而不是卡死在 failed。
     val s = ApkUpdateState()
     s.beginCheck()
-    s.onCheckResult(UpdateChecker.CheckResult.Available("v99.0.0", "a.apk", "u", null, 1L), "0.14.5-fx-2")
+    s.onCheckResult(UpdateChecker.CheckResult.Available("v99.0.0", "a.apk", "u", "a".repeat(64), 1L), "0.14.5-fx-2")
     s.beginDownload()
     s.onDownloadFailed("下载失败：sha256 校验不匹配（文件已删除，请重试）", ApkUpdateState.KIND_ARTIFACT_REJECTED)
     assertFalse("失败后不可直接 start（需要重新取元数据）", s.beginDownload())
     assertTrue("失败后必须能重新发起检查（重试通道不能被堵死）", s.beginCheck())
-    s.onCheckResult(UpdateChecker.CheckResult.Available("v99.0.0", "a.apk", "u", null, 1L), "0.14.5-fx-2")
+    s.onCheckResult(UpdateChecker.CheckResult.Available("v99.0.0", "a.apk", "u", "a".repeat(64), 1L), "0.14.5-fx-2")
     assertEquals(ApkUpdateState.STATE_AVAILABLE, s.stateName())
     assertTrue("重试后必须能再次开始下载", s.beginDownload())
   }
@@ -936,7 +956,7 @@ class UpdateCheckerTest {
     // 而不是谎称「上一次更新动作仍在进行中」。
     val s = ApkUpdateState()
     s.beginCheck()
-    s.onCheckResult(UpdateChecker.CheckResult.Available("v99.0.0", "a.apk", "u", null, 1L), "0.14.5-fx-2")
+    s.onCheckResult(UpdateChecker.CheckResult.Available("v99.0.0", "a.apk", "u", "a".repeat(64), 1L), "0.14.5-fx-2")
     s.onDownloadFailed("下载失败：镜像链全部不可用", ApkUpdateState.KIND_DOWNLOAD_FAILED)
     assertFalse("失败态无在途动作 => 不得被判为 busy", s.busy())
     assertTrue("失败态仍可受理新的检查（重试通道）", s.beginCheck())
@@ -957,7 +977,7 @@ class UpdateCheckerTest {
   fun needPermissionIsItsOwnState() {
     val s = ApkUpdateState()
     s.beginCheck()
-    s.onCheckResult(UpdateChecker.CheckResult.Available("v99.0.0", "a.apk", "u", null, 1L), "0.14.5-fx-2")
+    s.onCheckResult(UpdateChecker.CheckResult.Available("v99.0.0", "a.apk", "u", "a".repeat(64), 1L), "0.14.5-fx-2")
     s.beginDownload()
     s.onNeedPermission()
     assertEquals(ApkUpdateState.STATE_NEED_PERMISSION, s.stateName())

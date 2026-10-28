@@ -8,8 +8,8 @@ package com.dsharnessmobile.shell
  * 上判定相反：缓存路径更严、下载路径更松。校验强度必须由本函数唯一决定：
  *
  * 1. 文件必须存在；
- * 2. 元数据给了大小（>0）时，实际字节数必须相等（截断包/半包在此拦下）；
- * 3. 元数据给了 sha256 时，必须校验通过（缺失 sha256 资产 = 跳过该步，与既有口径一致）。
+ * 2. 元数据必须提供有效的 SHA-256，且实际摘要必须匹配；
+ * 3. 元数据给了大小（>0）时，实际字节数必须相等（截断包/半包在此拦下）。
  *
  * 调用方（GuidePageRenderer 的缓存分支与新下载分支）只做一件事：用同形参数调本函数，
  * 不再各自维护「严格程度」。撤掉本函数（或让任一路径绕过它）→ ApkArtifactCheckTest 变红。
@@ -28,16 +28,15 @@ internal fun verifyApkArtifact(
   sha256Matches: (String) -> Boolean,
 ): ApkArtifactVerdict {
   if (!fileExists) return ApkArtifactVerdict.Reject("安装包不存在")
-  // M-s5（2026-10-25 审计）：元数据**一项校验依据都不给**（无大小、无摘要）时必须拒绝——
-  // 旧实现「双缺席 ⇒ 跳过全部检查 ⇒ Accept」会把任意截断包/错误页放行进安装器。
-  if (expectedBytes <= 0 && expectedSha256 == null) {
-    return ApkArtifactVerdict.Reject("元数据既没有大小也没有 sha256，无法校验产物（拒绝放行）")
-  }
+  val sha256 = expectedSha256?.trim()?.takeIf { SHA256_HEX.matches(it) }?.lowercase()
+    ?: return ApkArtifactVerdict.Reject("元数据缺少有效 sha256，无法校验产物（拒绝放行）")
   if (expectedBytes > 0 && actualBytes != expectedBytes) {
     return ApkArtifactVerdict.Reject("大小不符（期望 ${expectedBytes} 字节，实际 ${actualBytes} 字节）")
   }
-  if (expectedSha256 != null && !sha256Matches(expectedSha256)) {
+  if (!sha256Matches(sha256)) {
     return ApkArtifactVerdict.Reject("sha256 校验不匹配")
   }
   return ApkArtifactVerdict.Accept
 }
+
+private val SHA256_HEX = Regex("^[0-9a-fA-F]{64}$")

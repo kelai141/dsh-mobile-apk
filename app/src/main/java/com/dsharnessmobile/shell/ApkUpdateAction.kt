@@ -39,7 +39,7 @@ internal class ApkUpdateState {
   private var name: String? = null
   private var sizeBytes: Long = 0L
   /**
-   * 本次发布声明的产物摘要（小写十六进制）。null = 发布方**没有提供**校验值。
+   * 本次发布声明的产物摘要（小写十六进制）。可下载更新必须带有有效摘要。
    *
    * 为什么在这里留一份而不是每次回查 [UpdateChecker.CheckResult]：快照是渲染层唯一能读到的事实面，
    * 而 Available 只在检查那一瞬间在场。缺失时快照里直接不出现该字段——界面据此如实说明
@@ -270,6 +270,17 @@ internal class ApkUpdateController(private val activity: Activity) {
   @Volatile private var readyToInstall: File? = null
 
   /**
+   * 「已校验、允许安装」的产物 + 它的校验依据（issue #676）。
+   *
+   * 为什么必须留依据：install() 旧实现只判 `dest.exists()`。「安装未知应用」授权页可以停留任意久，
+   * 期间另一个持 All Files Access 的应用完全能把同名 APK 换成别的字节——等用户授权回来，装进
+   * 安装器的是 T0 时刻的校验结论、T1 时刻的字节。所以这里把结论连同大小/摘要一起存下，
+   * 拉起安装器**之前**重跑一次 [verifyApkArtifact]（成本是一次 169MB 的 SHA-256，1-2 秒）。
+   */
+  private data class VerifiedArtifact(val file: File, val expectedBytes: Long, val expectedSha256: String)
+  @Volatile private var verifiedArtifact: VerifiedArtifact? = null
+
+  /**
    * 已检查到的新版（下载入口的载荷）。
    *
    * **生命周期判据 = 「是否还有一条路会用到它」**（与 [readyToInstall] 同一口径，但取值不同）：
@@ -387,7 +398,7 @@ internal class ApkUpdateController(private val activity: Activity) {
    * 否则按钮点下去只是再失败一次。这是 [readyToInstall] 的只读面——渲染层不可能靠
    * kind 之类旁证推断出它（那是假判据）。
    */
-  fun hasReadyArtifact(): Boolean = readyToInstall != null
+  fun hasReadyArtifact(): Boolean = readyToInstall?.isFile == true
 
   /**
    * 快照的统一出口：state 的那份对外事实 + 控制器私有载荷派生出的 `hasReadyArtifact`。
@@ -590,7 +601,21 @@ internal class ApkUpdateController(private val activity: Activity) {
 
   /** 下载 → 校验 → 安装（复用既有下载链与 [verifyApkArtifact]，判定强度与旧引导页路径完全一致）。 */
   private fun downloadAndInstall(r: UpdateChecker.CheckResult.Available, e: Int) {
-    val dest = File(UpdateChecker.updatesDir(activity), r.name)
+    // 名字来自发布元数据 ⇒ 必须过形态白名单与 canonical 父目录判据（见 resolveUpdateTarget）。
+    // 直接 File(updatesDir, r.name) 会让带分隔符的 tag 落到任意可写目录，而下面的
+    // pruneUpdatesDir(dest.parentFile) 会跟着在那个目录里删 `*.apk`/`*.tmp`。
+    val dir = UpdateChecker.updatesDir(activity)
+    val dest = UpdateChecker.resolveUpdateTarget(dir, r.name)
+      ?: run {
+        fail(
+          "更新产物的文件名不合法（发布元数据可疑）——请稍后重试或到 GitHub Releases 手动下载",
+          ApkUpdateState.KIND_ARTIFACT_REJECTED,
+        )
+        return
+      }
+    // issue #676：动手前先清一次目录（留本次目标包），否则每换一版就多一个 169MB 的旧包，
+    // 中断下载留下的 .tmp 也永远没人收拾。
+    runCatching { UpdateChecker.pruneUpdatesDir(dest.parentFile ?: return, r.name) }
     var reused = false
     try {
       // 摘要随元数据一起来（MANIFEST / releases.json 已带 sha256 列）。旧实现把 sha256Url 当资产去下载，
@@ -606,11 +631,10 @@ internal class ApkUpdateController(private val activity: Activity) {
       if (artifactVerdict() is ApkArtifactVerdict.Accept) {
         reused = true // 上次下完但没装成（授权中断/安装取消）→ 复用已验证的包，不重复拉 169MB
       } else {
-        // #513：元数据缺 sha256 时第三方镜像产物无摘要可校验——只允许官方直连（fail-closed）。
         val used = UpdateChecker.download(
           r.apkUrl, dest,
           { pct -> onDownloadProgress(pct, e) },
-          allowMirrors = expectedSha != null,
+          allowMirrors = true,
           isActive = { isCurrentEpoch(e) },
           publishIfActive = { publish ->
             synchronized(publicationLock) {
@@ -642,6 +666,8 @@ internal class ApkUpdateController(private val activity: Activity) {
       failDownload("下载失败：" + (t.message ?: "未知原因") + "——请稍后重试", ApkUpdateState.KIND_DOWNLOAD_FAILED, e)
       return
     }
+    // issue #676：把这次的校验依据绑在产物上（下面 install() 拉起安装器前会用它重验字节）。
+    verifiedArtifact = VerifiedArtifact(dest, r.sizeBytes, r.sha256)
     val reusedFlag = reused
     // 注意：此处**不**清载荷——install() 在 UI 线程跑且可能落到「需授权」相位，而那一刻才离开
     // downloading。载荷的清零与相位切换成对发生（见 install/failDownload），不变量因此始终成立。
@@ -677,7 +703,39 @@ internal class ApkUpdateController(private val activity: Activity) {
         return
       }
       if (!dest.exists()) {
+        // 成组清载荷：这个分支是"作者已经预见到会被清理"的那一支，与下面另两个失败分支一样，
+        // 必须把续继链的载荷一起清掉。否则 `readyToInstall` 恒指向一个不存在的文件 ⇒
+        // `start()` 永远把请求交给续继链、`hasReadyArtifact()` 恒 true（页面一直摆着「重试安装」），
+        // 而真正的新版**永远下不下来**（点「下载并安装」被 redirect 到续继链 → 又落回这支）。
+        readyToInstall = null
+        currentResult = null
+        verifiedArtifact = null
         fail("安装包已不存在（可能被清理）——请重新检查更新", ApkUpdateState.KIND_ARTIFACT_REJECTED)
+        return
+      }
+      // issue #676：授权页可以停任意久，文件在此期间可能被换掉。拉起安装器之前按**当初的校验依据**
+      // 重跑一次；字节对不上就拒绝安装（并清掉续继载荷，避免下次「继续安装」把同一个坏包装进去）。
+      val verified = verifiedArtifact
+      if (verified == null || verified.file.canonicalFile != dest.canonicalFile) {
+        readyToInstall = null
+        currentResult = null
+        verifiedArtifact = null
+        fail("安装包的校验依据已丢失（应用可能被重启）——请重新检查更新", ApkUpdateState.KIND_ARTIFACT_REJECTED)
+        return
+      }
+      val recheck = verifyApkArtifact(
+        fileExists = dest.exists(),
+        actualBytes = dest.length(),
+        expectedBytes = verified.expectedBytes,
+        expectedSha256 = verified.expectedSha256,
+        sha256Matches = { UpdateChecker.verifySha256(dest, it) },
+      )
+      if (recheck !is ApkArtifactVerdict.Accept) {
+        val why = (recheck as? ApkArtifactVerdict.Reject)?.reason ?: "产物校验未通过"
+        readyToInstall = null
+        currentResult = null
+        verifiedArtifact = null
+        fail("安装前复验失败：" + why + "——已拒绝安装，请重新检查更新", ApkUpdateState.KIND_ARTIFACT_REJECTED)
         return
       }
       if (!UpdateChecker.canInstall(activity)) {
@@ -699,6 +757,9 @@ internal class ApkUpdateController(private val activity: Activity) {
       if (UpdateChecker.invokeInstaller(activity, dest)) {
         readyToInstall = null
         currentResult = null
+        // issue #676：安装器已拉起，这次的校验依据用完即弃——留着只会让下一轮误以为
+        // "手里还有个已校验的包"（真正的依据必须来自本轮的 downloadAndInstall）。
+        verifiedArtifact = null
         state.onInstalling(reused)
         settle()
       } else {

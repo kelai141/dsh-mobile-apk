@@ -65,20 +65,43 @@ object UpdateChecker {
   fun updatesDir(context: Context): File =
     File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOCUMENTS), "dshdata/updates")
 
+  /**
+   * 清扫更新目录（issue #676）：只保留本次要装的那一个包，删掉更早的 APK 与中断留下的 `.tmp`。
+   *
+   * 为什么需要：`updatesDir` 落在公共外部存储（`Documents/dshdata/updates`），全仓只有"写"没有"删"。
+   * 每换一版就多一个 169MB 的包；下载被进程中断时 `.tmp` 还会留在原地（`finally` 只在正常退出时跑）。
+   *
+   * 判据刻意保守：只删 `*.apk`（且不是 [keepName]）与 `*.tmp`，只删普通文件——不碰目录、不跟符号链接。
+   * 返回实际删除个数（0 = 没有可删的，也算正常结果）。
+   */
+  internal fun pruneUpdatesDir(dir: File, keepName: String?): Int {
+    val entries = dir.listFiles() ?: return 0
+    var removed = 0
+    for (file in entries) {
+      if (!file.isFile) continue
+      val name = file.name
+      val staleApk = name.endsWith(".apk", ignoreCase = true) && name != keepName
+      val staleTmp = name.endsWith(".tmp", ignoreCase = true)
+      if (!staleApk && !staleTmp) continue
+      if (runCatching { file.delete() }.getOrDefault(false)) removed++
+    }
+    return removed
+  }
+
   sealed class CheckResult {
     /** 已是最新（latest.tag == 当前版本）。 */
     data object UpToDate : CheckResult()
     /**
      * 发现新版：tag + 双 ABI 资产 URL（按设备 ABI 已选好）。
      *
-     * [sha256] 是**摘要本身**（64 位十六进制小写），不是摘要文件的 URL；null = 本次发布的数据源里
-     * 没有提供摘要，调用方下载后只能靠系统安装器的签名校验兜底，界面必须如实说明而不是沉默跳过。
+     * [sha256] 是**摘要本身**（64 位十六进制小写），不是摘要文件的 URL。没有有效摘要的 APK
+     * 不会生成可安装更新，避免把完整性校验降级成仅比较文件大小。
      */
     data class Available(
       val tag: String,
       val name: String,
       val apkUrl: String,
-      val sha256: String?,
+      val sha256: String,
       val sizeBytes: Long,
     ) : CheckResult()
 
@@ -149,6 +172,38 @@ object UpdateChecker {
    * `.github/workflows/release.yml`（唯一线上发布入口）与 `scripts/build-apk-013.ps1` 的
    * `--artifact-name` 形态并逐字比对——**发布链改名即判红**，不靠人记得同步。
    */
+  /**
+   * 产物文件名的形态白名单（**安全边界**，2026-10-28 自查）。
+   *
+   * 名字最上游来自发布元数据（Pages `releases.json` 的 tag/asset 名、API 的 tag_name/asset），
+   * `assetNameCandidates` 只是把 tag 原样插值进 `dsh-mobile-apk-v<tag>-<abi>.apk`。带分隔符的
+   * tag（`v9../../../Documents/x`）会让 `File(updatesDir, name)` 落到**任意可写目录**，
+   * 而 batch4 起 `pruneUpdatesDir(dest.parentFile)` 的作用域也跟着被元数据决定 ⇒ 能删/写别的目录里
+   * 的 `*.apk`/`*.tmp`。修法两层：名字形态白名单 + canonical 父目录必须等于 updatesDir。
+   */
+  internal val ARTIFACT_NAME = Regex("""^[A-Za-z0-9][A-Za-z0-9._+\-]{0,127}\.apk$""")
+
+  internal fun isSafeArtifactName(name: String): Boolean =
+    ARTIFACT_NAME.matches(name) && File(name).name == name && File(name).parentFile == null
+
+  /**
+   * 把元数据给的文件名解析成 updatesDir 里的安全路径；不安全返回 null（调用方按"产物不可用"拒绝）。
+   * 两道判据都要：形态白名单挡住 `../`、绝对路径、尾随空格与大小写变体；canonical 比对挡住
+   * 符号链接/`..` 归一化之后仍然逃出目录的情形（形态合法但落点在外面的构造）。
+   */
+  internal fun resolveUpdateTarget(dir: File, name: String): File? {
+    if (!isSafeArtifactName(name)) return null
+    val raw = File(dir, name)
+    // 名字本身是符号链接就直接拒：`canonicalFile` 对**指向不存在目标**的链接不解引用，
+    // 此时 parent 仍等于 dir、判据会放行，而写入会跟着链接落到目录外。
+    if (runCatching { java.nio.file.Files.isSymbolicLink(raw.toPath()) }.getOrDefault(true)) return null
+    return runCatching {
+      val dirReal = dir.canonicalFile
+      val fileReal = raw.canonicalFile
+      if (fileReal.parentFile == dirReal) fileReal else null
+    }.getOrNull()
+  }
+
   fun assetNameCandidates(tag: String, abi: String): List<String> {
     val v = tag.removePrefix("v")
     val releaseAbis = if (abi == "arm64") listOf("arm64", "arm64-v8a") else listOf(abi)
@@ -165,7 +220,7 @@ object UpdateChecker {
   fun assetName(tag: String, abi: String): String = assetNameCandidates(tag, abi).first()
 
   /** 一件发布资产（只取判定所需字段；不引入 JSON 对象到判定层，便于 JVM 单测）。 */
-  internal data class ReleaseAssetRef(val name: String, val url: String, val sizeBytes: Long)
+  internal data class ReleaseAssetRef(val name: String, val url: String, val sizeBytes: Long, val sha256: String?)
 
   /** 解析后的 latest release：tag + 资产清单。 */
   internal data class LatestRelease(val tag: String, val assets: List<ReleaseAssetRef>)
@@ -186,7 +241,8 @@ object UpdateChecker {
       val a = arr.optJSONObject(i) ?: continue
       val name = a.optString("name", "").trim()
       if (name.isEmpty()) continue
-      assets += ReleaseAssetRef(name, a.optString("browser_download_url", "").trim(), a.optLong("size", 0L))
+      val sha256 = if (APK_NAME_TAG.matches(name)) parseReleaseAssetSha256(a.opt("digest")) else null
+      assets += ReleaseAssetRef(name, a.optString("browser_download_url", "").trim(), a.optLong("size", 0L), sha256)
     }
     return LatestRelease(tag, assets)
   }
@@ -304,6 +360,12 @@ object UpdateChecker {
     val sha256: Map<String, String>,
   )
 
+  private fun factsFromRelease(release: LatestRelease): LatestFacts = LatestFacts(
+    release.tag,
+    release.assets.associate { it.name to it.sizeBytes },
+    release.assets.mapNotNull { asset -> asset.sha256?.let { asset.name to it } }.toMap(),
+  )
+
   /** 发布链产物名里的版本号与架构。为什么从文件名取：MANIFEST.txt 实测 12 行只有三列，没有 tag 字段。 */
   private val APK_NAME_TAG = Regex("^dsh-mobile-apk-v(.+)-(arm64-v8a|arm64|x86_64)\\.apk$")
 
@@ -311,6 +373,15 @@ object UpdateChecker {
   private val MANIFEST_LINE = Regex("^(\\S+)\\s+(\\S+)\\s+(\\S+)$")
 
   private val SHA256_HEX = Regex("^[0-9a-fA-F]{64}$")
+  private val RELEASE_ASSET_SHA256 = Regex("^sha256:([0-9a-fA-F]{64})$", RegexOption.IGNORE_CASE)
+
+  private fun parseReleaseAssetSha256(value: Any?): String? {
+    if (value == null || value == JSONObject.NULL) return null
+    require(value is String) { "latest release APK digest 不是字符串" }
+    val match = RELEASE_ASSET_SHA256.matchEntire(value.trim())
+      ?: throw IllegalArgumentException("latest release APK digest 不是有效的 SHA-256")
+    return match.groupValues[1].lowercase()
+  }
 
   /**
    * 解析 MANIFEST.txt（三列：sha256 相对路径 字节数）。失败**抛异常**，由调用方归类 PARSE。
@@ -392,8 +463,8 @@ object UpdateChecker {
    * **顺序是契约的一部分**：先确认"有本机可用的包"，再比版本——反过来会让"发布侧漏了本机架构的包"
    * 被"已是最新"掩盖，用户永远等不到适配版本，也不会看到任何异常。
    *
-   * 摘要只从 [LatestFacts.sha256] 里按**选中资产名**取：取不到就是 null（本次发布未提供校验值），
-   * 绝不用邻家资产或空串顶替——那会把"没提供"变成"提供了但校验失败"。
+   * 摘要只从 [LatestFacts.sha256] 里按**选中资产名**取。缺失或无效时拒绝提供可安装更新，
+   * 不用邻家资产或文件大小替代摘要校验。
    */
   internal fun classifyFacts(
     facts: LatestFacts,
@@ -415,11 +486,16 @@ object UpdateChecker {
     val hit = assetNameCandidates(tag, family).firstOrNull { facts.sizes.containsKey(it) }
       ?: return classifyAssetFailure(tag, family, deviceAbis, facts.sizes.keys.toList())
     if (!isNewer(tag, currentVersion)) return CheckResult.UpToDate
+    val sha256 = facts.sha256[hit]?.takeIf { SHA256_HEX.matches(it) }?.lowercase()
+      ?: return CheckResult.Failed(
+        "检查失败：发布数据异常——APK 资产缺少有效 SHA-256，已拒绝提供更新包",
+        CheckResult.FailureKind.RELEASE_DATA_BROKEN,
+      )
     return CheckResult.Available(
       tag,
       hit,
       assetDownloadUrl(tag, hit),
-      facts.sha256[hit],
+      sha256,
       facts.sizes[hit] ?: 0L,
     )
   }
@@ -454,9 +530,9 @@ object UpdateChecker {
         CheckResult.FailureKind.RELEASE_DATA_BROKEN,
       )
     }
-    // API 资产清单里没有摘要字段（发布链不产 .sha256 资产），故这里摘要恒为 null——如实说明，不编造。
+    // 保留 API 的真实下载地址，同时把 APK assets[].digest 纳入统一摘要判据。
     val verdict = classifyFacts(
-      LatestFacts(latest.tag, latest.assets.associate { it.name to it.sizeBytes }, emptyMap()),
+      factsFromRelease(latest),
       deviceAbis,
       family,
       currentVersion(),
@@ -723,7 +799,7 @@ object UpdateChecker {
 
   private fun probeApi(timeoutMs: Int, deadline: UpdateCheckDeadline): SourceProbe = try {
     val latest = parseLatestRelease(fetchText("$API/repos/$REPO/releases/latest", timeoutMs, "application/vnd.github+json", deadline))
-    SourceProbe.Parsed(LatestFacts(latest.tag, latest.assets.associate { it.name to it.sizeBytes }, emptyMap()))
+    SourceProbe.Parsed(factsFromRelease(latest))
   } catch (e: Exception) {
     probeFailure(e)
   }
@@ -769,7 +845,12 @@ object UpdateChecker {
    *  tag 形如 v0.13.8 / 0.13.8 / v0.13.7fx-2 / v0.13.7-rc.1（rc 段不参与比较）。
    *  FX-209.2：两侧同口径剥后缀（BuildConfig.VERSION_NAME 亦可能是 0.14.0-preview）。 */
   fun isNewer(tag: String, current: String): Boolean {
-    fun parts(v: String) = Regex("\\d+").findAll(stripPrereleaseSuffix(v)).map { it.value.toLongOrNull() ?: 0L }.toList()
+    // SemVer 的 build metadata（`+build.7`）**不参与优先级**：不切掉的话 `v0.14.5+build.7`
+    // 会比 `0.14.5` 多出一个数字组 [.., 7] > [.., 0] ⇒ 每轮检查都报"发现新版"，
+    // 随后去要 `…-v0.14.5+build.7-arm64.apk` 必然不存在，最终把"版本号写法"错报成
+    // "没有适配本机架构的包"（与 0.14.6 修掉的那类错误归类同源）。
+    fun parts(v: String) =
+      Regex("\\d+").findAll(stripPrereleaseSuffix(v.substringBefore('+'))).map { it.value.toLongOrNull() ?: 0L }.toList()
     val a = parts(tag); val b = parts(current)
     for (i in 0 until maxOf(a.size, b.size)) {
       val x = a.getOrElse(i) { 0L }; val y = b.getOrElse(i) { 0L }

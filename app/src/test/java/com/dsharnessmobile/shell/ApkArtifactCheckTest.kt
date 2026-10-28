@@ -11,6 +11,7 @@ import org.junit.Test
  * 同一份截断/半包/被替换产物在两条路径上判定相反（缓存更严、下载更松）。
  */
 class ApkArtifactCheckTest {
+  private val validSha256 = "a".repeat(64)
 
   /** 一条异常输入（两条路径的输入形状一致：文件、实际字节数、元数据大小、可选 sha）。 */
   private class Case(
@@ -25,13 +26,13 @@ class ApkArtifactCheckTest {
   @Test
   fun cachePathAndDownloadPathJudgeIdenticallyForEveryAbnormalInput() {
     val cases = listOf(
-      Case(true, 100L, 100L, null, true),        // 正常
-      Case(true, 99L, 100L, null, true),         // 截断/半包（旧下载分支会接受）
-      Case(true, 101L, 100L, null, true),        // 多写
-      Case(true, 100L, 100L, "abc", false),      // sha 不符
-      Case(true, 100L, 100L, "abc", true),       // sha 符合
-      Case(true, 100L, 0L, "abc", true),         // 无大小 → sha-only 校验仍可判定
-      Case(true, 100L, 0L, null, true),          // M-s5：无大小也无 sha → 拒收（不再放行）
+      Case(true, 100L, 100L, validSha256, true), // 正常
+      Case(true, 99L, 100L, validSha256, true),  // 截断/半包（旧下载分支会接受）
+      Case(true, 101L, 100L, validSha256, true), // 多写
+      Case(true, 100L, 100L, validSha256, false), // sha 不符
+      Case(true, 100L, 100L, validSha256, true),  // sha 符合
+      Case(true, 100L, 0L, validSha256, true),    // 无大小 → sha-only 校验仍可判定
+      Case(true, 100L, 0L, null, true),          // 缺 sha，即使文件大小匹配也拒收
       Case(false, 0L, 100L, null, true),         // 文件不存在
     )
     for (c in cases) {
@@ -42,27 +43,39 @@ class ApkArtifactCheckTest {
   }
 
   @Test
-  fun truncatedArtifactIsRejectedEvenWithoutAnyShaAsset() {
+  fun truncatedArtifactIsRejectedWhenDigestMatchesButSizeDoesNot() {
     val v = verifyApkArtifact(fileExists = true, actualBytes = 1_000L, expectedBytes = 2_000L,
-      expectedSha256 = null, sha256Matches = { true })
+      expectedSha256 = validSha256, sha256Matches = { true })
     assertTrue(v is ApkArtifactVerdict.Reject)
     assertTrue((v as ApkArtifactVerdict.Reject).reason.contains("大小不符"))
   }
 
   @Test
   fun shaMismatchIsRejectedEvenWhenSizeMatches() {
-    val v = verifyApkArtifact(true, 2_000L, 2_000L, "deadbeef") { false }
+    val v = verifyApkArtifact(true, 2_000L, 2_000L, validSha256) { false }
     assertTrue(v is ApkArtifactVerdict.Reject)
     assertTrue((v as ApkArtifactVerdict.Reject).reason.contains("sha256"))
   }
 
   @Test
   fun missingSizeMetadataStillLetsShaDecide() {
-    assertTrue(verifyApkArtifact(true, 123L, 0L, "x") { true } is ApkArtifactVerdict.Accept)
-    assertTrue(verifyApkArtifact(true, 123L, 0L, "x") { false } is ApkArtifactVerdict.Reject)
+    assertTrue(verifyApkArtifact(true, 123L, 0L, validSha256) { true } is ApkArtifactVerdict.Accept)
+    assertTrue(verifyApkArtifact(true, 123L, 0L, validSha256) { false } is ApkArtifactVerdict.Reject)
   }
 
-  /** M-s5（2026-10-25 审计）：元数据一项校验依据都不给（无大小、无 sha）时必须拒收。 */
+  @Test
+  fun missingShaIsRejectedEvenWhenSizeMatches() {
+    val v = verifyApkArtifact(true, 123L, 123L, null) { error("digest callback must not run") }
+    assertTrue(v is ApkArtifactVerdict.Reject)
+    assertTrue((v as ApkArtifactVerdict.Reject).reason.contains("sha256"))
+  }
+
+  @Test
+  fun malformedShaIsRejectedEvenWhenSizeMatches() {
+    assertTrue(verifyApkArtifact(true, 123L, 123L, "deadbeef") { error("digest callback must not run") } is ApkArtifactVerdict.Reject)
+  }
+
+  /** Metadata without a usable SHA-256 is rejected even when the reported size matches. */
   @Test
   fun metadataWithoutAnyEvidenceIsRejected() {
     val v = verifyApkArtifact(true, 123L, 0L, null) { true }

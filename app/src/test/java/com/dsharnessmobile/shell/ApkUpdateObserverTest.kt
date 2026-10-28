@@ -93,9 +93,9 @@ class ApkUpdateObserverTest {
     assertEquals(1, r.size())
   }
 
-  // ── 摘要字段：缺失时必须能被渲染层区分出来，不得说成「已校验」 ────────────────────
+  // ── 只有带有效摘要的结果才能进入可下载状态 ─────────────────────────────────────
 
-  private fun availableWith(sha256: String?, name: String = "dsh-mobile-apk-v99.0.0-arm64.apk"): String {
+  private fun availableWith(sha256: String, name: String = "dsh-mobile-apk-v99.0.0-arm64.apk"): String {
     val s = ApkUpdateState()
     s.beginCheck()
     s.onCheckResult(UpdateChecker.CheckResult.Available("v99.0.0", name, "https://example.test/a.apk", sha256, 169_000_000L), "0.14.5-fx-2")
@@ -110,10 +110,21 @@ class ApkUpdateObserverTest {
   }
 
   @Test
-  fun missingDigestIsAbsentFieldNotBlankOrFakeValue() {
-    // 「本次发布未提供校验值」只能靠字段缺席表达：写空串或占位值都会让渲染层误判成已校验。
-    val j = JSONObject(availableWith(null))
-    assertFalse("未提供摘要时不得出现 sha256 字段", j.has("sha256"))
+  fun releasesWithoutAnyDigestNeverBecomeAvailable() {
+    // #728 之后「未提供摘要」不再是 Available(sha256=null) 这种形态，而是根本没有可安装更新。
+    // 这条用例守住分流点：摘要缺失必须落 Failed(RELEASE_DATA_BROKEN)，不能退化成"已发现新版"。
+    val facts = UpdateChecker.LatestFacts(
+      "v99.0.0",
+      mapOf("dsh-mobile-apk-v99.0.0-arm64.apk" to 169_000_000L),
+      emptyMap(),
+    )
+    val r = UpdateChecker.classifyFacts(facts, listOf("arm64-v8a"), "arm64", "0.14.5-fx-2")
+    assertTrue("缺摘要必须判失败，不得给可安装更新：" + r, r is UpdateChecker.CheckResult.Failed)
+    assertEquals(
+      "分类必须是发布数据异常（不是设备不支持）",
+      UpdateChecker.CheckResult.FailureKind.RELEASE_DATA_BROKEN,
+      (r as UpdateChecker.CheckResult.Failed).kind,
+    )
   }
 
   @Test
@@ -144,13 +155,13 @@ class ApkUpdateObserverTest {
     )
     assertTrue(JSONObject(s.snapshotJson()).has("sha256"))
 
-    // 第二轮发布没带摘要：上一轮的摘要绝不能贴到这一轮上（否则界面会把旧值当本次结果）。
+    // 第二轮发布摘要不同：上一轮的值绝不能贴到这一轮上（否则界面会把旧值当本次结果）。
     s.beginCheck()
     s.onCheckResult(
-      UpdateChecker.CheckResult.Available("v99.0.1", "a.apk", "https://example.test/a.apk", null, 10L),
+      UpdateChecker.CheckResult.Available("v99.0.1", "a.apk", "https://example.test/a.apk", "c".repeat(64), 10L),
       "0.14.5-fx-2",
     )
-    assertFalse("新一轮未提供摘要时字段必须缺席", JSONObject(s.snapshotJson()).has("sha256"))
+    assertEquals("新一轮必须携带自己的摘要", "c".repeat(64), JSONObject(s.snapshotJson()).getString("sha256"))
   }
 
   // ── 待装包事实：页面渲染失败态「重试安装」的唯一依据 ────────────────────────────
@@ -165,7 +176,7 @@ class ApkUpdateObserverTest {
 
     s.beginCheck()
     assertTrue("checking 相位也要有", JSONObject(s.snapshotJson()).has("hasReadyArtifact"))
-    s.onCheckResult(UpdateChecker.CheckResult.Available("v99.0.0", "a.apk", "https://example.test/a.apk", null, 10L), "0.14.5-fx-2")
+    s.onCheckResult(UpdateChecker.CheckResult.Available("v99.0.0", "a.apk", "https://example.test/a.apk", "a".repeat(64), 10L), "0.14.5-fx-2")
     assertTrue("available 相位也要有", JSONObject(s.snapshotJson()).has("hasReadyArtifact"))
     assertEquals(ApkUpdateState.STATE_AVAILABLE, facts(s))
   }
@@ -185,7 +196,7 @@ class ApkUpdateObserverTest {
     // 页面只有拿到 hasReadyArtifact=true 才敢摆「重试安装」；这条是本轮新增 UI 的唯一依据。
     val s = ApkUpdateState()
     s.beginCheck()
-    s.onCheckResult(UpdateChecker.CheckResult.Available("v99.0.0", "a.apk", "https://example.test/a.apk", null, 10L), "0.14.5-fx-2")
+    s.onCheckResult(UpdateChecker.CheckResult.Available("v99.0.0", "a.apk", "https://example.test/a.apk", "a".repeat(64), 10L), "0.14.5-fx-2")
     s.beginDownload()
     s.onFailed("安装器拉起失败，请再点「下载并安装」重试", ApkUpdateState.KIND_INSTALLER_UNAVAILABLE)
     assertEquals(ApkUpdateState.STATE_FAILED, s.stateName())
