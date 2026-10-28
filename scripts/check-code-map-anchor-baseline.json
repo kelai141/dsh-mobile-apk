@@ -3427,6 +3427,7 @@
       "let total = 0;",
       "return true;",
       "}",
+      "});",
       "};"
     ],
     "index.ts:1038": [
@@ -4367,10 +4368,10 @@
       "* 本迭代要求的门禁集合（唯一声明处）。"
     ],
     "scripts/check-runtime-assets.mjs:126": [
-      "const dir = snapshotExtractDir()"
+      "*/"
     ],
     "scripts/check-runtime-assets.mjs:96": [
-      "// 而它是 `tar -xO -f <160MB tar> <单个成员>`。**xz 不可随机寻址——取一个成员 = 全量解码一遍。**"
+      ""
     ],
     "scripts/check-snapshot-builder-output.mjs:156": [
       "const writesTar = text.includes(\"join(OUT_DIR, 'snapshot.tar.xz')\")"
