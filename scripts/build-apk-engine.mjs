@@ -94,13 +94,13 @@ export function assembleApk(options, runner = spawnSync) {
 }
 
 /** Validate the exact output scope used by a caller (directory or files). */
-export function verifyApks({ directories = [], files = [], signatureGate = join(SCRIPT_DIR, 'check-apk-signatures.mjs'), selfTest = true, log = console.log }, runner = spawnSync) {
+export function verifyApks({ directories = [], files = [], signatureGate = join(SCRIPT_DIR, 'check-apk-signatures.mjs'), keystore = join(SCRIPT_DIR, '..', 'keystore', 'debug.keystore'), selfTest = true, log = console.log }, runner = spawnSync) {
   log('验证最终输出 APK 的 v1/v2/v3 签名…')
   if (selfTest) execute(process.execPath, [signatureGate, '--self-test'], { cwd: SCRIPT_DIR }, runner)
   const targets = [...directories.flatMap((directory) => ['--dir', resolve(directory)]),
     ...files.flatMap((file) => ['--apk', resolve(file)])]
   if (!targets.length) throw new Error('signature verification requires at least one directory or APK')
-  execute(process.execPath, [signatureGate, ...targets], { cwd: SCRIPT_DIR }, runner)
+  execute(process.execPath, [signatureGate, ...targets, '--keystore', resolve(keystore)], { cwd: SCRIPT_DIR }, runner)
 }
 
 export function parseArgs(argv) {
@@ -128,6 +128,7 @@ function main(argv) {
     verifyApks({
       directories: options.dir ? [options.dir] : [],
       files: options.apk ? [options.apk] : [],
+      keystore: options.keystore ? resolve(options.keystore) : undefined,
       selfTest: !options.skipSelfTest,
       signatureGate: options.signatureGate ? resolve(options.signatureGate) : undefined,
     })

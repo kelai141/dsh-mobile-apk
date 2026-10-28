@@ -50,8 +50,8 @@ export function evaluateVerification({ exitCode, output, expectedCertificateSha2
   const missing = REQUIRED.filter((scheme) => !schemes[scheme])
   const certificates = readCertificateDigests(output)
   const expected = expectedCertificateSha256?.replaceAll(':', '').toLowerCase()
-  const certificateMatches = expected === undefined ||
-    (/^[0-9a-f]{64}$/.test(expected) && certificates.length > 0 && certificates.every(digest => digest === expected))
+  const certificateMatches = /^[0-9a-f]{64}$/.test(expected ?? '') &&
+    certificates.length > 0 && certificates.every(digest => digest === expected)
   return { ok: exitCode === 0 && missing.length === 0 && certificateMatches, exitCode, schemes, missing, certificates, certificateMatches }
 }
 
@@ -112,27 +112,27 @@ function parseArgs(args) {
 }
 
 function runSelfTest() {
+  const expectedCertificate = 'ab'.repeat(32)
+  const certificateOutput = '\nSigner #1 certificate SHA-256 digest: ' + expectedCertificate
   const full = [
     'Verifies',
     'Verified using v1 scheme (JAR signing): true',
     'Verified using v2 scheme (APK Signature Scheme v2): true',
     'Verified using v3 scheme (APK Signature Scheme v3): true',
-  ].join('\n')
-  const expectedCertificate = 'ab'.repeat(32)
-  const certificateOutput = '\nSigner #1 certificate SHA-256 digest: ' + expectedCertificate
+  ].join('\n') + certificateOutput
   const cases = [
     ['all schemes present', 0, full, true],
     ['v1 absent', 0, full.replace(/^Verified using v1 scheme.*(?:\r?\n|$)/im, ''), false],
     ['v2 absent', 0, full.replace(/^Verified using v2 scheme.*(?:\r?\n|$)/im, ''), false],
     ['v3 absent', 0, full.replace(/^Verified using v3 scheme.*(?:\r?\n|$)/im, ''), false],
     ['nonzero apksigner exit', 1, full, false],
-    ['matching signing identity', 0, full + certificateOutput, true, expectedCertificate],
-    ['absent signing identity', 0, full, false, expectedCertificate],
-    ['wrong signing identity', 0, full + certificateOutput, false, 'cd'.repeat(32)],
+    ['matching signing identity', 0, full, true, expectedCertificate],
+    ['absent signing identity', 0, full.replace(certificateOutput, ''), false, expectedCertificate],
+    ['wrong signing identity', 0, full.replace(expectedCertificate, 'cd'.repeat(32)), false, expectedCertificate],
   ]
   let failures = 0
   for (const [name, exitCode, output, expected, expectedCertificateSha256] of cases) {
-    const actual = evaluateVerification({ exitCode, output, expectedCertificateSha256 }).ok
+    const actual = evaluateVerification({ exitCode, output, expectedCertificateSha256: expectedCertificateSha256 ?? expectedCertificate }).ok
     const ok = actual === expected
     console.log(`${ok ? 'PASS' : 'FAIL'} self-test ${name}: expected=${expected} actual=${actual}`)
     if (!ok) failures += 1
@@ -149,11 +149,12 @@ function main() {
     return fail(error.message)
   }
   if (options.help) {
-    console.log('Usage: node scripts/check-apk-signatures.mjs (--apk FILE | --dir DIR)+ [--apksigner PATH] [--keystore FILE] [--self-test]')
+    console.log('Usage: node scripts/check-apk-signatures.mjs (--apk FILE | --dir DIR)+ --keystore FILE [--apksigner PATH] [--self-test]')
     return
   }
   if (options.selfTest) return runSelfTest()
   if (!options.apks.length && !options.dirs.length) return fail('provide at least one --apk or --dir')
+  if (!options.keystore) return fail('--keystore is required for APK verification')
   const apksigner = resolveApksigner(options.apksigner)
   if (!apksigner || !fs.existsSync(apksigner)) return fail('apksigner not found; pass --apksigner or set ANDROID_HOME/ANDROID_SDK_ROOT')
   let expectedCertificateSha256
