@@ -392,3 +392,90 @@ test('合法整数必须原样保留：0 与负哨兵不得为了拒浮点一起
     assert.equal(JSON.stringify(d.value.rotation), String(want), `rot ${label} 不得变成 JSON null`)
   }
 })
+
+// ── 输入契约不变量：任何畸形载荷都不得抛异常（2026-10-28 自查，固定种子 240 例） ──────────
+//
+// 契约来自 protocol-v2.ts 文件头：「任何结构问题都返回 ok:false（失败关闭；绝不静默产出空节点表）」。
+// 这条契约此前**零测试**——全仓没有一处 `assert.throws` / `rejects` 覆盖 `decodeV2`，于是
+// 「某个畸形载荷把整个工具调用炸掉、而不是返回一条可读错误」这类回归没有任何东西拦得住。
+//
+// 用固定种子而不是真随机：CI 上可复现，失败能按同一种子重放。断言与实现契约对齐（不得 throw、
+// 被接受时数值干净），不是凭"畸形载荷应该长什么样"的直觉。
+//
+// 反证方向（实测，证明它不是与既有用例重叠）：把 `str` 的类型守卫从 `return {ok:false}` 改成
+// `throw new Error(...)` ⇒ **只有本用例变红，既有用例全绿**——因为它们都喂合法的 `str: []`，
+// 从没验证过这条守卫的「失败关闭」语义。本用例守的是既有用例够不到的那些组合。
+// 相反方向的诚实说明：把 `isIntArray` 改回 `Number.isFinite`、或把 `o` 守卫改成 throw，
+// 变红的是既有定向用例而不是本用例（这两条已被更精确的断言先接住）——那种重叠是好事，不必为
+// "让 fuzz 也红"去削弱定向用例。
+test('输入契约：畸形载荷一律不得抛异常，被接受者必须数值干净（固定种子 240 例）', () => {
+  const mulberry32 = (a) => () => {
+    a |= 0; a = (a + 0x6D2B79F5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+  const rnd = mulberry32(0x20261028)
+  const pickOne = (list) => list[Math.floor(rnd() * list.length)]
+  const NASTY = [0, -1, 1, 0.5, -0.5, 1.5, 1e9, -1e9, NaN, Infinity, -Infinity, '', 'x', '12',
+    null, undefined, true, false, {}, [], [[1]], { a: 1 }]
+  const maybeArray = () => {
+    const len = Math.floor(rnd() * 4)
+    return Array.from({ length: len }, () => pickOne(NASTY))
+  }
+  const fields = ['v', 'gen', 'rot', 'scr', 'str', 'n', 'raw', 'd', 'p', 'f', 'c', 'k', 'r', 'w',
+    't', 's', 'b', 'o', 'view', 'truncated']
+  const junkValue = (depth) => {
+    if (depth > 2) return pickOne(NASTY)
+    const kind = Math.floor(rnd() * 6)
+    if (kind === 0) return maybeArray()
+    if (kind === 1) return pickOne(NASTY)
+    if (kind === 2) {
+      const o = {}
+      for (const key of fields) if (rnd() < 0.5) o[key] = junkValue(depth + 1)
+      return o
+    }
+    return pickOne(NASTY)
+  }
+  const junkPayload = () => {
+    const base = {
+      v: 2, gen: 1, rot: 0, scr: [100, 200], str: [], n: 0,
+      o: [], d: [], p: [], f: [], c: [], k: [], r: [], w: [], t: [], s: [], b: [],
+    }
+    for (const key of Object.keys(base)) if (rnd() < 0.35) base[key] = junkValue(0)
+    return base
+  }
+
+  let accepted = 0
+  for (let i = 0; i < 240; i++) {
+    const payload = rnd() < 0.5 ? junkPayload() : junkValue(0)
+    let r
+    assert.doesNotThrow(() => { r = decodeV2(payload) }, '第 ' + i + ' 例：畸形载荷不得抛异常（契约是失败关闭，不是崩溃）')
+    assert.equal(typeof r?.ok, 'boolean', '第 ' + i + ' 例：必须返回 {ok:boolean}')
+    if (!r.ok) {
+      assert.equal(typeof r.error, 'string', '第 ' + i + ' 例：拒绝时必须带可读原因')
+      assert.notEqual(r.error, '', '第 ' + i + ' 例：拒绝原因不得为空串')
+      continue
+    }
+    accepted += 1
+    const v = r.value
+    // 被接受 ⇒ 对外数值必须干净整数（NaN/小数会让引擎整值拒绝或让下游静默变值）
+    for (const [label, val] of [['gen', v.gen], ['rotation', v.rotation],
+      ['screen.w', v.screen.w], ['screen.h', v.screen.h], ['rawCount', v.rawCount]]) {
+      assert.ok(Number.isInteger(val), '第 ' + i + ' 例：' + label + ' 必须是整数（收到 ' + String(val) + '）')
+    }
+    assert.ok(Array.isArray(v.rows), '第 ' + i + ' 例：rows 必须是数组')
+    assert.equal(v.rows.length, v.origRow.length, '第 ' + i + ' 例：rows 与 origRow 长度必须一致')
+    assert.equal(v.rows.length, v.actionableAncestor.length, '第 ' + i + ' 例：rows 与 actionableAncestor 长度必须一致')
+    for (const row of v.rows) {
+      for (const key of ['x', 'y', 'w', 'h', 'cx', 'cy', 'depth']) {
+        assert.ok(Number.isInteger(row[key]), '第 ' + i + ' 例：row.' + key + ' 必须是整数（收到 ' + String(row[key]) + '）')
+      }
+      for (const key of ['text', 'desc', 'cls', 'pkg', 'rid', 'windowId']) {
+        assert.equal(typeof row[key], 'string', '第 ' + i + ' 例：row.' + key + ' 必须是字符串')
+      }
+    }
+  }
+  // 防御：随机集必须真的既有拒绝也有接受，否则「全拒绝」会让上面的接受分支永远不跑（假绿）
+  assert.ok(accepted > 0, '240 例里必须至少有一例被接受，否则断言只覆盖了拒绝路径')
+})
