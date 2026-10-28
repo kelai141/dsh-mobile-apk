@@ -44,7 +44,6 @@
     "UndoGate.kt:279": 1,
     "app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:196": 2,
     "app/src/main/java/com/dsharnessmobile/shell/UpdateManager.kt:69": 1,
-    "plugins/dsh-android-bridge/src/screen-scope.ts:200": 1,
     "plugins/dsh-android-browser/src/tools.ts:281": 2,
     "plugins/dsh-android-browser/src/tools.ts:33": 2,
     "scripts/check-kotlin-test-count.mjs:129": 3,
@@ -112,7 +111,6 @@
     "MainActivity.kt:502": 2,
     "MuxClient.kt:45": 2,
     "DeviceControlService.kt:678": 2,
-    "plugins/dsh-android-bridge/src/screen-scope.ts:70": 2,
     "index.ts:991": 3,
     "plugins/dsh-android-manage/src/index.ts:2031": 2,
     "index.ts:394": 2,
@@ -129,7 +127,6 @@
     "docs/AGENTS/ACCESSIBILITY-API.md:167": 3,
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:353": 3,
     "app/src/main/java/com/dsharnessmobile/shell/GlobalActionCatalog.kt:33": 3,
-    "plugins/dsh-android-bridge/src/screen-scope.ts:242": 1,
     "index.ts:1052": 1,
     "ShizukuUserService.kt:70": 1,
     "index.ts:1063": 1,
@@ -326,10 +323,6 @@
     "app/src/test/java/com/dsharnessmobile/shell/WatchdogMarkerConsumeTest.kt:69": 1,
     "app/src/test/java/com/dsharnessmobile/shell/WindowPickTest.kt:22": 1,
     "app/src/test/java/com/dsharnessmobile/shell/WindowPickTest.kt:40": 1,
-    "screen-scope.ts:200": 2,
-    "screen-scope.ts:203": 2,
-    "screen-scope.ts:293": 2,
-    "screen-scope.ts:405": 2,
     "index.ts:1038": 2,
     "index.ts:1074": 2,
     "index.ts:393": 2,
@@ -341,7 +334,6 @@
     "control-queue.ts:139": 3,
     "plugins/dsh-android-browser/src/tools.ts:262": 3,
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:701": 3,
-    "plugins/dsh-android-bridge/src/screen-scope.ts:366": 2,
     "plugins/dsh-android-manage/src/index.ts:1494": 2,
     "plugins/dsh-android-manage/src/index.ts:901": 2,
     "docs/AGENTS/gotchas.md:178": 3,
@@ -483,7 +475,6 @@
     "plugins/dsh-android-manage/src/index.ts:1899": 1,
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:770": 1,
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:852": 1,
-    "plugins/dsh-android-bridge/src/screen-scope.ts:405": 2,
     "app/src/main/java/com/dsharnessmobile/shell/ControlCarrier.kt:107": 1,
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:661": 1,
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:771": 1,
@@ -771,13 +762,10 @@
     "index.ts:1664": 1,
     "index.ts:263": 1,
     "control-queue.ts:230": 1,
-    "screen-scope.ts:549": 1,
     "index.ts:165": 1,
-    "screen-scope.ts:25": 1,
     "index.ts:1463": 1,
     "shell-ops.ts:17": 1,
     "control-policy.ts:79": 1,
-    "screen-scope.ts:70": 1,
     "index.ts:428": 2,
     "index.ts:453": 1,
     "plugins/dsh-android-vdisplay/src/status.ts:190": 1,
@@ -789,7 +777,6 @@
     "plugins/dsh-android-bridge/src/control-queue.ts:139": 1,
     "index.ts:472": 1,
     "plugins/dsh-android-bridge/test/screen-scope.test.mjs:779": 1,
-    "screen-scope.ts:569": 1,
     "control-queue.ts:140": 1,
     "control-queue.ts:227": 1,
     "lossless-json.ts:30": 1,
@@ -3762,21 +3749,6 @@
     "plugins/dsh-android-bridge/src/route-auth.ts:4": [
       "export const CONTROL_TOKEN_HEADER = 'x-dsh-control-token'"
     ],
-    "plugins/dsh-android-bridge/src/screen-scope.ts:200": [
-      "const ch = text[i]"
-    ],
-    "plugins/dsh-android-bridge/src/screen-scope.ts:242": [
-      "*"
-    ],
-    "plugins/dsh-android-bridge/src/screen-scope.ts:366": [
-      "return head.startsWith('$') || head.startsWith('`')"
-    ],
-    "plugins/dsh-android-bridge/src/screen-scope.ts:405": [
-      "if (ch === '\"') {"
-    ],
-    "plugins/dsh-android-bridge/src/screen-scope.ts:70": [
-      "*/"
-    ],
     "plugins/dsh-android-bridge/src/shell-ops.ts:120": [
       "export function translateAdbLine(line: string): ShellLineTranslation {"
     ],
@@ -4025,30 +3997,6 @@
     ],
     "reference-menu.ts:45": [
       "const GESTURES = ['pointerdown', 'mousedown', 'click'] as const"
-    ],
-    "screen-scope.ts:200": [
-      "const ch = text[i]"
-    ],
-    "screen-scope.ts:203": [
-      "const quote = ch"
-    ],
-    "screen-scope.ts:25": [
-      "const SHELL_SCREEN_SCOPE_PREFS_DEFAULT = '/data/user/0/com.dsharnessmobile.shell/shared_prefs/dsh_screen_scope.xml'"
-    ],
-    "screen-scope.ts:293": [
-      "let rest = text"
-    ],
-    "screen-scope.ts:405": [
-      "if (ch === '\"') {"
-    ],
-    "screen-scope.ts:549": [
-      "export function stripDisplayOptions(text: string): string {"
-    ],
-    "screen-scope.ts:569": [
-      "/** 家族名（诊断与 fixture 用）。 */"
-    ],
-    "screen-scope.ts:70": [
-      "*/"
     ],
     "scripts/api-route-auth-policy.json:126": [
       "\"id\": \"linux-environment-check\","
@@ -4520,7 +4468,18 @@
     "plugins/dsh-android-bridge/src/index.ts#collectText": "function collectText(x: unknown): string {\nif (x === null || x === undefined) return ''\nif (typeof x === 'string') return x\nconst o = x as Record<string, unknown>\nif (typeof o.text === 'string') return o.text\ntry { return JSON.stringify(x) } catch { return '' }\n}",
     "plugins/dsh-android-bridge/src/index.ts#AdbStatus": "export interface AdbStatus {\ntier: PrivilegeTier\n/** 完全访问档位（All Files Access，系统权限；门1 前置） */\nfullAccess: boolean\n/** 写面档位（shell-termux sandboxMode；第二独立前置，非 danger 不构成开放条件） */\nwriteMode?: string\n/** 系统无线调试已开启（第一道人门，应用不可程序化开启） */\nwirelessDebugOn?: boolean\n/** 应用内「允许访问」开关（第二道人门，默认关闭） */\nallowSwitchOn?: boolean\n/** 已配对（第三道人门；0.14 起 = 真实 adb pair 握手成功） */\npaired?: boolean\n/** 通道连接状态（配对后 adb connect 探活缓存；0.14 真实通道） */\nconnected?: boolean\n/** 到期/错误信息（未授权时为引导文案） */\nmessage?: string\n}",
     "plugins/dsh-android-bridge/src/index.ts#INTERNAL_PRIVILEGED": "const INTERNAL_PRIVILEGED: Record<string, { why: string; allows: (command: string) => boolean }> = {\n'sf-token-lookup': {\nwhy: '屏幕范围判定自身要核对 SurfaceFlinger 的虚拟屏 token；这条 dumpsys 读命令是判定的组成部分，与档位无关',\nallows: (command) => command.trim() === \"dumpsys SurfaceFlinger | grep -E '^(Virtual Display | name=)'\",\n},\n'animation-scales': {\nwhy: 'manage 的动画三开关读写（uiautomator dump 需要事件流安静）；形态由 isAnimationScaleCommand 逐条钉死',\nallows: isAnimationScaleCommand,\n},\n}",
-    "plugins/dsh-android-bridge/src/index.ts#shellControlToken": "export function shellControlToken(): string | undefined {\nreturn controlTokenFrom(process.env, readShellAdbState())\n}"
+    "plugins/dsh-android-bridge/src/index.ts#shellControlToken": "export function shellControlToken(): string | undefined {\nreturn controlTokenFrom(process.env, readShellAdbState())\n}",
+    "plugins/dsh-android-bridge/src/screen-scope.ts#splitCommandSegments": "export function splitCommandSegments(command: string): CommandSegments {\nconst segments: string[] = []\nlet unparsed = false\nconst scan = (text: string, depth: number): void => {\nif (depth > MAX_NESTING) { unparsed = true; return }\nlet buf = ''\n// 词首状态（注释判定用，见下方 `#` 分支）。分隔符/空白把它置位，其它字符（含转义对）清除。\nlet atWordStart = true\nconst flush = (): void => { segments.push(buf); buf = ''; atWordStart = true }\nlet i = 0\nwhile (i < text.length) {\nconst ch = text[i]\nif (ch === '\\\\') { buf += text.slice(i, i + 2); i += 2; atWordStart = false; continue }\nif (ch === \"'\") {\nconst end = text.indexOf(\"'\", i + 1)\nif (end < 0) { unparsed = true; buf += text.slice(i); i = text.length; continue }\nbuf += text.slice(i, end + 1); i = end + 1; continue\n}\nif (ch === '\"') {\nlet j = i + 1\nwhile (j < text.length) {\nconst inner = text[j]\nif (inner === '\\\\') { j += 2; continue }\nif (inner === '\"') break\n// 双引号内的 `$(...)` 与反引号**会执行**（单引号才不执行）：必须按原文递归扫，\n// 否则 `echo \"$(screencap -p /sdcard/real.png)\"` 会把真实屏命令当纯文本放行（issue #674）。\nif (inner === '`') {\nconst end = backtickEnd(text, j + 1)\nif (end < 0) { unparsed = true; j = text.length; break }\nscan(text.slice(j + 1, end), depth + 1)\nj = end + 1\ncontinue\n}\nif (inner === '$' && text[j + 1] === '(') {\nconst end = parenEnd(text, j + 2)\nif (end < 0) { unparsed = true; j = text.length; break }\nscan(text.slice(j + 2, end), depth + 1)\nj = end + 1\ncontinue\n}\nj += 1\n}\nif (j >= text.length) { unparsed = true; buf += text.slice(i); i = text.length; continue }\nbuf += text.slice(i, j + 1); i = j + 1; continue\n}\nif (ch === '`') {\nconst end = backtickEnd(text, i + 1)\nif (end < 0) { unparsed = true; buf += text.slice(i); i = text.length; continue }\n// **命令位置**上的命令替换：替换结果是运行时文本，会被当成命令执行 ⇒ 执行什么静态不可判\n// （`sh -c \"\\`cat /sdcard/x.sh\\`\"` 真机实测执行文件内容）。参数位置的替换不影响命令身份；\n// 但**载荷位置**上的替换（`` sh -c \\`cat f\\` ``）等于整段脚本来自运行时，同样 fail-closed。\nif (buf.trim().length === 0 || PAYLOAD_SLOT_TAIL.test(buf)) unparsed = true\nscan(text.slice(i + 1, end), depth + 1)\nbuf += ' '; i = end + 1; continue\n}\nif (ch === '$' && text[i + 1] === '(') {\nconst end = parenEnd(text, i + 2)\nif (end < 0) { unparsed = true; buf += text.slice(i); i = text.length; continue }\n// 同上：`sh -c \"$(cat /sdcard/x.sh)\"` / `sh -c \"echo hi; $(cat x.sh)\"` 的第二段都是\n// 「命令名来自运行时」⇒ 与 `sh /x.sh`（脚本文件）同档，fail-closed。\nif (buf.trim().length === 0 || PAYLOAD_SLOT_TAIL.test(buf)) unparsed = true\nscan(text.slice(i + 2, end), depth + 1)\nbuf += ' '; i = end + 1; continue\n}\n// shell 注释：`#` 只有在**词首**才开注释。词首＝未转义、未引用的 ASCII 空白 / `;` / `&` / `|`\n// 之后（由 atWordStart 显式跟踪）——不能用「buf 末尾是 \\s」判定：`echo\\ #; screencap …` 里\n// 那个空格是**转义的**（属于词内容），`#` 因此是 echo 的参数而不是注释，screencap 照跑\n// （dash 实测：`echo\\ #; echo REACHED` 会执行 REACHED）。同理 VT/FF/CR/NBSP 都不是分隔符。\nif (ch === '#' && atWordStart) {\nconst lineEnd = text.indexOf('\\n', i)\ni = lineEnd < 0 ? text.length : lineEnd\ncontinue\n}\nif (ch === ';' || ch === '\\n' || ch === '\\r') { flush(); i += 1; continue }\nif (ch === '&' || ch === '|') {\n// `&&` / `||` 与单个 `&` / `|` 都是分隔符；两个字符都要吃掉。\nflush()\ni += text[i + 1] === ch ? 2 : 1\ncontinue\n}\nif (ch === ' ' || ch === '\\t') atWordStart = true\nelse atWordStart = false\nbuf += ch; i += 1\n}\nflush()\n}\nscan(command, 0)\n// `sh -c` 载荷是**再看一层**的入口：它整段都在引号里（`stripQuotedText` 会把它抹掉），\n// 必须用**原文**匹配、再解一层引号把内层当命令扫。工作队列让嵌套的 `sh -c \"sh -c …\"` 也被展开\n// （载荷是子串，必然收缩；上限 16 层只是防御性护栏）。\nconst pending = segments.slice()\nfor (let round = 0; pending.length > 0 && round < 16; round += 1) {\nconst segment = pending.shift() as string\n// `sh -c` 与 `eval` 都是「载荷会被再解释一遍」的入口，两者都要展开（issue #674 同类）。\nconst payload = SHELL_C_PAYLOAD.exec(segment) ?? EVAL_PAYLOAD.exec(segment) ?? TRAP_PAYLOAD.exec(segment)\nif (payload === null) continue\n// 取载荷的**第一个词**（不是整段剩余）：`sh -c 'cmd' sh`、`eval 'cmd' foo`、`trap 'cmd' EXIT`\n// 的尾随 argv 会让「整段首尾成对」判据失效，从而整段不展开（安全侧漏拦）。\n// `--` 是**选项终结符**，不是载荷：`trap -- 'cmd' EXIT` 真机会执行 cmd（见 `firstPayloadWord`）。\nconst inner = firstPayloadWord(payload[1])\nif (inner.length === 0) continue\nconst before = segments.length\nscan(inner, 1)\npending.push(...segments.slice(before))\n}\nreturn { segments, unparsed }\n}",
+    "plugins/dsh-android-bridge/src/screen-scope.ts#parenEnd": "function parenEnd(text: string, from: number): number {\nlet depth = 1\nlet i = from\nwhile (i < text.length) {\nconst ch = text[i]\nif (ch === '\\\\') { i += 2; continue }\nif (ch === \"'\" || ch === '\"') {\nconst quote = ch\ni += 1\nwhile (i < text.length) {\nif (quote === '\"' && text[i] === '\\\\') { i += 2; continue }\nif (text[i] === quote) break\ni += 1\n}\ni += 1\ncontinue\n}\nif (ch === '(') depth += 1\nelse if (ch === ')') {\ndepth -= 1\nif (depth === 0) return i\n}\ni += 1\n}\nreturn -1\n}",
+    "screen-scope.ts#parenEnd": "function parenEnd(text: string, from: number): number {\nlet depth = 1\nlet i = from\nwhile (i < text.length) {\nconst ch = text[i]\nif (ch === '\\\\') { i += 2; continue }\nif (ch === \"'\" || ch === '\"') {\nconst quote = ch\ni += 1\nwhile (i < text.length) {\nif (quote === '\"' && text[i] === '\\\\') { i += 2; continue }\nif (text[i] === quote) break\ni += 1\n}\ni += 1\ncontinue\n}\nif (ch === '(') depth += 1\nelse if (ch === ')') {\ndepth -= 1\nif (depth === 0) return i\n}\ni += 1\n}\nreturn -1\n}",
+    "screen-scope.ts#firstPayloadWord": "function firstPayloadWord(text: string): string {\nlet rest = text\nfor (let guard = 0; guard < 8; guard += 1) {\nconst { word, rest: remainder } = firstShellWord(rest)\nif (word !== '--') return word\nrest = remainder\n}\nreturn ''\n}",
+    "screen-scope.ts#splitCommandSegments": "export function splitCommandSegments(command: string): CommandSegments {\nconst segments: string[] = []\nlet unparsed = false\nconst scan = (text: string, depth: number): void => {\nif (depth > MAX_NESTING) { unparsed = true; return }\nlet buf = ''\n// 词首状态（注释判定用，见下方 `#` 分支）。分隔符/空白把它置位，其它字符（含转义对）清除。\nlet atWordStart = true\nconst flush = (): void => { segments.push(buf); buf = ''; atWordStart = true }\nlet i = 0\nwhile (i < text.length) {\nconst ch = text[i]\nif (ch === '\\\\') { buf += text.slice(i, i + 2); i += 2; atWordStart = false; continue }\nif (ch === \"'\") {\nconst end = text.indexOf(\"'\", i + 1)\nif (end < 0) { unparsed = true; buf += text.slice(i); i = text.length; continue }\nbuf += text.slice(i, end + 1); i = end + 1; continue\n}\nif (ch === '\"') {\nlet j = i + 1\nwhile (j < text.length) {\nconst inner = text[j]\nif (inner === '\\\\') { j += 2; continue }\nif (inner === '\"') break\n// 双引号内的 `$(...)` 与反引号**会执行**（单引号才不执行）：必须按原文递归扫，\n// 否则 `echo \"$(screencap -p /sdcard/real.png)\"` 会把真实屏命令当纯文本放行（issue #674）。\nif (inner === '`') {\nconst end = backtickEnd(text, j + 1)\nif (end < 0) { unparsed = true; j = text.length; break }\nscan(text.slice(j + 1, end), depth + 1)\nj = end + 1\ncontinue\n}\nif (inner === '$' && text[j + 1] === '(') {\nconst end = parenEnd(text, j + 2)\nif (end < 0) { unparsed = true; j = text.length; break }\nscan(text.slice(j + 2, end), depth + 1)\nj = end + 1\ncontinue\n}\nj += 1\n}\nif (j >= text.length) { unparsed = true; buf += text.slice(i); i = text.length; continue }\nbuf += text.slice(i, j + 1); i = j + 1; continue\n}\nif (ch === '`') {\nconst end = backtickEnd(text, i + 1)\nif (end < 0) { unparsed = true; buf += text.slice(i); i = text.length; continue }\n// **命令位置**上的命令替换：替换结果是运行时文本，会被当成命令执行 ⇒ 执行什么静态不可判\n// （`sh -c \"\\`cat /sdcard/x.sh\\`\"` 真机实测执行文件内容）。参数位置的替换不影响命令身份；\n// 但**载荷位置**上的替换（`` sh -c \\`cat f\\` ``）等于整段脚本来自运行时，同样 fail-closed。\nif (buf.trim().length === 0 || PAYLOAD_SLOT_TAIL.test(buf)) unparsed = true\nscan(text.slice(i + 1, end), depth + 1)\nbuf += ' '; i = end + 1; continue\n}\nif (ch === '$' && text[i + 1] === '(') {\nconst end = parenEnd(text, i + 2)\nif (end < 0) { unparsed = true; buf += text.slice(i); i = text.length; continue }\n// 同上：`sh -c \"$(cat /sdcard/x.sh)\"` / `sh -c \"echo hi; $(cat x.sh)\"` 的第二段都是\n// 「命令名来自运行时」⇒ 与 `sh /x.sh`（脚本文件）同档，fail-closed。\nif (buf.trim().length === 0 || PAYLOAD_SLOT_TAIL.test(buf)) unparsed = true\nscan(text.slice(i + 2, end), depth + 1)\nbuf += ' '; i = end + 1; continue\n}\n// shell 注释：`#` 只有在**词首**才开注释。词首＝未转义、未引用的 ASCII 空白 / `;` / `&` / `|`\n// 之后（由 atWordStart 显式跟踪）——不能用「buf 末尾是 \\s」判定：`echo\\ #; screencap …` 里\n// 那个空格是**转义的**（属于词内容），`#` 因此是 echo 的参数而不是注释，screencap 照跑\n// （dash 实测：`echo\\ #; echo REACHED` 会执行 REACHED）。同理 VT/FF/CR/NBSP 都不是分隔符。\nif (ch === '#' && atWordStart) {\nconst lineEnd = text.indexOf('\\n', i)\ni = lineEnd < 0 ? text.length : lineEnd\ncontinue\n}\nif (ch === ';' || ch === '\\n' || ch === '\\r') { flush(); i += 1; continue }\nif (ch === '&' || ch === '|') {\n// `&&` / `||` 与单个 `&` / `|` 都是分隔符；两个字符都要吃掉。\nflush()\ni += text[i + 1] === ch ? 2 : 1\ncontinue\n}\nif (ch === ' ' || ch === '\\t') atWordStart = true\nelse atWordStart = false\nbuf += ch; i += 1\n}\nflush()\n}\nscan(command, 0)\n// `sh -c` 载荷是**再看一层**的入口：它整段都在引号里（`stripQuotedText` 会把它抹掉），\n// 必须用**原文**匹配、再解一层引号把内层当命令扫。工作队列让嵌套的 `sh -c \"sh -c …\"` 也被展开\n// （载荷是子串，必然收缩；上限 16 层只是防御性护栏）。\nconst pending = segments.slice()\nfor (let round = 0; pending.length > 0 && round < 16; round += 1) {\nconst segment = pending.shift() as string\n// `sh -c` 与 `eval` 都是「载荷会被再解释一遍」的入口，两者都要展开（issue #674 同类）。\nconst payload = SHELL_C_PAYLOAD.exec(segment) ?? EVAL_PAYLOAD.exec(segment) ?? TRAP_PAYLOAD.exec(segment)\nif (payload === null) continue\n// 取载荷的**第一个词**（不是整段剩余）：`sh -c 'cmd' sh`、`eval 'cmd' foo`、`trap 'cmd' EXIT`\n// 的尾随 argv 会让「整段首尾成对」判据失效，从而整段不展开（安全侧漏拦）。\n// `--` 是**选项终结符**，不是载荷：`trap -- 'cmd' EXIT` 真机会执行 cmd（见 `firstPayloadWord`）。\nconst inner = firstPayloadWord(payload[1])\nif (inner.length === 0) continue\nconst before = segments.length\nscan(inner, 1)\npending.push(...segments.slice(before))\n}\nreturn { segments, unparsed }\n}",
+    "plugins/dsh-android-bridge/src/screen-scope.ts#isRuntimeCommandName": "function isRuntimeCommandName(segment: string): boolean {\nconst head = firstShellWord(segment.trim()).word\n// `$'…'` / `$\"…\"` 是 **ANSI-C 引号**（静态字面量），不是变量引用 —— 不得误拦（S-7c）。\nif (head.startsWith('$\\'') || head.startsWith('$\"')) return false\nreturn head.startsWith('$') || head.startsWith('`')\n}",
+    "screen-scope.ts#stripDisplayOptions": "export function stripDisplayOptions(text: string): string {\nreturn text\n.replace(/(?:^|[ \\t])-d[ \\t]*\\d+/g, ' ')\n.replace(/(?:^|[ \\t])(?:--display|--display-id)[ \\t=]+\\d+/g, ' ')\n}",
+    "screen-scope.ts#SHELL_SCREEN_SCOPE_PREFS_DEFAULT": "const SHELL_SCREEN_SCOPE_PREFS_DEFAULT = '/data/user/0/com.dsharnessmobile.shell/shared_prefs/dsh_screen_scope.xml'",
+    "screen-scope.ts#ScreenCommandFamily": "interface ScreenCommandFamily {\n/** 家族名（诊断与 fixture 用）。 */\nname: string\n/** 归一化文本上的命令词面。 */\npattern: RegExp\n/**\n* 可作「目标屏认证」的拼写白名单；**空数组 = 该命令没有目标屏参数** ⇒ 在 virtual-only 下\n* 任何命中本家族的命令都无法自证，一律拒绝（无参 `screencap`、`uiautomator dump`、\n* `dumpsys window`、`monkey -p x 1` 都属这一类：它们读的就是**默认屏**）。\n*/\ntargetFlags: readonly string[]\n}",
+    "plugins/dsh-android-bridge/src/screen-scope.ts#REAL_SCREEN_CONTROL_OPS": "export const REAL_SCREEN_CONTROL_OPS: readonly string[] = [\n'snapshot', 'click', 'longClick', 'setText', 'scroll', 'global', 'screenshot', 'nodeText',\n]",
+    "plugins/dsh-android-bridge/src/screen-scope.ts#EVAL_PAYLOAD": "const EVAL_PAYLOAD = /(?:^|[ \\t;&|(])eval[ \\t]+([\\s\\S]*)$/"
   },
   "symbolHashes": {
     "ShellOps.kt#flush@4396e093": true,
@@ -4556,6 +4515,17 @@
     "plugins/dsh-android-bridge/src/index.ts#AndroidPrivilegeService@ebfde3d9": true,
     "plugins/dsh-android-bridge/src/index.ts#tools@d29b06bf": true,
     "plugins/dsh-android-bridge/src/index.ts#AndroidPrivilegeService@8d64a30d": true,
-    "plugins/dsh-android-bridge/src/index.ts#AndroidPrivilegeService@d10b36aa": true
+    "plugins/dsh-android-bridge/src/index.ts#AndroidPrivilegeService@d10b36aa": true,
+    "plugins/dsh-android-bridge/src/screen-scope.ts#splitCommandSegments@45477a92": true,
+    "plugins/dsh-android-bridge/src/screen-scope.ts#parenEnd@558b76d8": true,
+    "screen-scope.ts#parenEnd@558b76d8": true,
+    "screen-scope.ts#parenEnd@37e270c3": true,
+    "screen-scope.ts#firstPayloadWord@31086794": true,
+    "screen-scope.ts#splitCommandSegments@45553518": true,
+    "plugins/dsh-android-bridge/src/screen-scope.ts#isRuntimeCommandName@4aaf2930": true,
+    "plugins/dsh-android-bridge/src/screen-scope.ts#splitCommandSegments@45553518": true,
+    "screen-scope.ts#stripDisplayOptions@8be576bd": true,
+    "screen-scope.ts#SHELL_SCREEN_SCOPE_PREFS_DEFAULT@6b9fb7f0": true,
+    "screen-scope.ts#ScreenCommandFamily@3fdfac35": true
   }
 }
