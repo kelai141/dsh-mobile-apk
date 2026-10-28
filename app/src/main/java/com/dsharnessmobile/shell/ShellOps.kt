@@ -27,7 +27,25 @@ internal object ShellOps {
    * 取值不数值化：`screencap -d` 吃的是 SurfaceFlinger display token，设备实测虚拟屏形如
    * `11529215046816944610`——超出 `Long` 上界，数值化即失真（见坑 147）。
    */
-  private val DISPLAY_OPTION = Regex("""(?:^|[ \t])(-d|--display|--display-id)[ \t=]+(\d+)""")
+  /**
+   * 短选项 `-d` 与长选项的取值语法**不同**，不能共用一个正则（与引擎侧同源）：
+   *   - `-d` 是 getopt 短选项 ⇒ `-d7`（粘连）与 `-d 7`（空格）合法，**`-d=7` 不合法**：
+   *     AOSP 用 `atoi(optarg)`，`atoi("=7") == 0` ⇒ 实际读/操作的是 display **0**（真实屏）。
+   *     旧正则用 `[ \t=]+` 让 `-d=7` 吃到了 `7`，于是拿它当"已注册虚拟屏 7"的凭据放行（漏拦）；
+   *     同时 `-d7` 因为缺分隔符反而认不出来（误拦）。
+   *   - 长选项 `--display` / `--display-id` 才接受 `=`。
+   */
+  private val SHORT_DISPLAY_OPTION = Regex("""(?:^|[ \t])-d[ \t]*(\d+)""")
+  private val LONG_DISPLAY_OPTION = Regex("""(?:^|[ \t])(--display|--display-id)[ \t=]+(\d+)""")
+
+  /**
+   * 「形似 display 选项但取值不是纯数字」的形态（`-d=7`、`-dx`）。
+   *
+   * 为什么要单独判：`-d=7` 的真实值是 `=7`（`atoi` 后为 0），所以它**不能**被当成"已认证 7"；
+   * 也**不能**被当成"没有 display 选项"就放行 —— 它在不同工具下可能落到默认屏 0（真实屏）。
+   * 两侧都必须 fail-closed。注意 `-d7` 是合法粘连形态，前瞻要排除数字。
+   */
+  private val MALFORMED_DISPLAY_OPTION = Regex("""(?:^|[ \t])-d(?:[ \t]*=[ \t]*\S|(?![0-9\s])\S)""")
 
   /** 命令词家族：每个家族自带「哪种拼写才算它的目标屏」（与引擎侧 `SCREEN_COMMAND_FAMILIES` 同表）。 */
   private data class ScreenFamily(val name: String, val pattern: Regex, val targetFlags: List<String>)
@@ -39,8 +57,13 @@ internal object ShellOps {
     ScreenFamily("screenrecord", Regex("""\bscreenrecord\b""", RegexOption.IGNORE_CASE), ALL_DISPLAY_FLAGS),
     ScreenFamily(
       "input",
-      Regex("""\binput[ \t]+(?:tap|swipe|roll|draganddrop|motionevent|text|keyevent|keycombination)\b""",
-        RegexOption.IGNORE_CASE),
+      // 正式语法是 `input [<source>] [-d DISPLAY_ID] <command> [<arg>…]`：source 是位置词
+      // （touchscreen/keyboard/…），漏了它整类命令都进不了命令词面；`press` 是其新命令，同族。
+      Regex(
+        """\binput[ \t]+(?:(?:touchscreen|keyboard|mouse|joystick|touchnavigation|trackball|stylus|dpad|gamepad|rotaryencoder)[ \t]+)?""" +
+          """(?:tap|swipe|roll|draganddrop|motionevent|text|keyevent|keycombination|press)\b""",
+        RegexOption.IGNORE_CASE,
+      ),
       ALL_DISPLAY_FLAGS,
     ),
     ScreenFamily("wm", Regex("""\bwm[ \t]+(?:size|density|overscan)\b""", RegexOption.IGNORE_CASE), ALL_DISPLAY_FLAGS),
@@ -51,6 +74,15 @@ internal object ShellOps {
     ScreenFamily("am", Regex("""\bam[ \t]+(?:start|start-activity|force-stop|kill)\b""", RegexOption.IGNORE_CASE),
       listOf("--display", "--display-id")),
     ScreenFamily("monkey", Regex("""\bmonkey\b""", RegexOption.IGNORE_CASE), listOf("--display", "--display-id")),
+    // `cmd activity <start-activity|start|force-stop|kill>` 与 `am start` 走同一个
+    // ActivityManagerShellCommand（无 `--display` 时默认 display 0）——只认 `am` 会把这条等价拼写
+    // 整类放行。`--display` 才是它的目标屏参数。
+    ScreenFamily(
+      "cmd-activity",
+      Regex("""\bcmd[ \t]+activity[ \t]+(?:start-activity|start|force-stop|kill|stop-app)\b""",
+        RegexOption.IGNORE_CASE),
+      listOf("--display", "--display-id"),
+    ),
   )
 
   /** SurfaceFlinger 的虚拟屏 token 行 / 其后的 name= 行（设备实测形态，见坑 147）。 */
@@ -232,12 +264,13 @@ internal object ShellOps {
       if (BARE_SHELL_SEGMENT.matches(stripQuotedText(segment).trim())) return false
       val bare = stripQuotedText(segment)
       val options = displayOptionsIn(bare)
+      if (MALFORMED_DISPLAY_OPTION.containsMatchIn(bare)) return false
       val normalized = stripDisplayOptions(bare)
       val families = SCREEN_FAMILIES.filter { it.pattern.containsMatchIn(normalized) }
       for (family in families) {
-        val relevant = options.filter { it.first in family.targetFlags }
+        val relevant = options.filter { it.flag in family.targetFlags }
         if (family.targetFlags.isEmpty() && options.isNotEmpty()) return false
-        if (relevant.any { it.second != "0" }) return false
+        if (relevant.any { it.value != "0" }) return false
       }
     }
     return true
@@ -340,6 +373,9 @@ internal object ShellOps {
         return ScreenCommandVerdict.DENY_UNPARSED
       }
       val options = displayOptionsIn(bare)
+      if (MALFORMED_DISPLAY_OPTION.containsMatchIn(bare)) {
+        return ScreenCommandVerdict.DENY_UNCERTIFIED_TARGET
+      }
       val normalized = stripDisplayOptions(bare)
       val families = SCREEN_FAMILIES.filter { it.pattern.containsMatchIn(normalized) }
       if (families.isEmpty()) {
@@ -349,7 +385,13 @@ internal object ShellOps {
       }
       for (family in families) {
         if (family.targetFlags.isEmpty()) return ScreenCommandVerdict.DENY_UNCERTIFIED_TARGET
-        val owned = options.filter { it.first in family.targetFlags }.map { it.second }
+        // `input` 的 `-d` 只在 **command 词之前**有意义：`input tap 1 2 -d 7` 里的 `-d 7` 是 tap 的
+        // 多余 argv，真实 input 仍操作默认 display 0（Android 只在 command 前解析 -d）。全段扫描会让
+        // 尾随 `-d <owned>` 变成"已认证"的通行证（与引擎侧同源修法）。
+        val limit = if (family.name == "input") inputCommandIndex(bare) else bare.length
+        val owned = options
+          .filter { it.flag in family.targetFlags && it.index < limit }
+          .map { it.value }
         // 该家族必须在**本段内**自证：参数缺席、或任一值不属于已注册虚拟屏 → 拒（不得只认证其中一个）。
         if (owned.isEmpty()) return ScreenCommandVerdict.DENY_UNCERTIFIED_TARGET
         if (!owned.all { ownsTarget(it) }) return ScreenCommandVerdict.DENY_UNCERTIFIED_TARGET
@@ -357,6 +399,14 @@ internal object ShellOps {
     }
     return ScreenCommandVerdict.ALLOW
   }
+
+  private val INPUT_COMMAND =
+    Regex("""\b(?:tap|swipe|roll|draganddrop|motionevent|text|keyevent|keycombination|press)\b""",
+      RegexOption.IGNORE_CASE)
+
+  /** `input` 家族里 command 词的位置（「只有它之前的 `-d` 才算凭据」的边界）。 */
+  private fun inputCommandIndex(text: String): Int =
+    INPUT_COMMAND.find(text)?.range?.first ?: text.length
 
   /** 引号感知切段结果（与引擎侧 `CommandSegments` 同构）。 */
   internal class ParsedCommand(val segments: List<String>, val unparsed: Boolean)
@@ -650,11 +700,21 @@ internal object ShellOps {
   }
 
   /** 把目标屏参数整体抹成空白（命令词匹配前归一化，使 `input -d 0 tap …` 也进命令词面）。 */
-  internal fun stripDisplayOptions(text: String): String = DISPLAY_OPTION.replace(text, " ")
+  internal fun stripDisplayOptions(text: String): String =
+    LONG_DISPLAY_OPTION.replace(SHORT_DISPLAY_OPTION.replace(text, " "), " ")
 
   /** 命令里的全部目标屏参数（拼写 + 原样数字串）。 */
-  internal fun displayOptionsIn(text: String): List<Pair<String, String>> =
-    DISPLAY_OPTION.findAll(text).map { it.groupValues[1] to it.groupValues[2] }.toList()
+  /** 目标屏选项：flag / 原始值 / 在文本里的起始下标（下标用于 input 的「只在 command 前才算」）。 */
+  internal data class DisplayOption(val flag: String, val value: String, val index: Int)
+
+  internal fun displayOptionsIn(text: String): List<DisplayOption> {
+    val out = ArrayList<DisplayOption>()
+    for (m in SHORT_DISPLAY_OPTION.findAll(text)) out.add(DisplayOption("-d", m.groupValues[1], m.range.first))
+    for (m in LONG_DISPLAY_OPTION.findAll(text)) {
+      out.add(DisplayOption(m.groupValues[1], m.groupValues[2], m.range.first))
+    }
+    return out.sortedBy { it.index }
+  }
 
   /**
    * 当前**已注册**虚拟屏的 SF token 集合（块G F6）。经 Shizuku shell 通道读
@@ -728,7 +788,7 @@ internal object ShellOps {
    * 数值化即失真（见坑 147）。与引擎侧 `adbCommandDisplayTokens` 的取法一致。
    */
   internal fun commandDisplayTokens(command: String): List<String> =
-    displayOptionsIn(command).map { it.second }
+    displayOptionsIn(command).map { it.value }
 
   /**
    * 落一条审计。

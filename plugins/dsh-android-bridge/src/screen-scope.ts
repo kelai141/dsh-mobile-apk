@@ -96,15 +96,38 @@ export interface DisplayOption {
   flag: string
   /** 原始十进制串（未数值化）。 */
   value: string
+  /** 该选项在文本里的起始下标（用于「只认命令词之前」的家族，见 `input`）。 */
+  index: number
 }
 
-/** 扫描命令里出现的全部目标屏参数（含三种拼写，值原样字符串）。 */
+/**
+ * 扫描命令里出现的全部目标屏参数（含三种拼写，值原样字符串）。
+ *
+ * 短选项 `-d` 与长选项的**取值语法不同**，不能共用一个正则：
+ *   - `-d` 是 getopt 短选项 ⇒ `-d7`（粘连）与 `-d 7`（空格）合法，**`-d=7` 不合法**。
+ *     AOSP 用 `atoi(optarg)`，`atoi("=7") == 0` ⇒ 实际读/操作的是 display **0**（真实屏）。
+ *     旧实现用 `[ \t=]+` 让 `-d=7` 吃到了 `7`，于是拿它当"已注册虚拟屏 7"的凭据放行
+ *     （2026-10-28 自查，安全侧漏拦）；同时 `-d7` 因为缺分隔符反而认不出来（误拦）。
+ *   - 长选项 `--display` / `--display-id` 才接受 `=`。
+ */
+/**
+ * 「形似 display 选项但取值不是纯数字」的形态（`-d=7`、`-dx`）。
+ *
+ * 为什么要单独判：`-d=7` 的真实值是 `=7`（`atoi` 后为 0），所以它**不能**被当成"已认证 7"；
+ * 但也**不能**被当成"没有 display 选项"就放行 —— 它在不同工具下可能落到默认屏 0（真实屏）。
+ * 两侧都必须 fail-closed：段里一旦出现这种形态，直接拒。
+ */
+const MALFORMED_DISPLAY_OPTION = /(?:^|[ \t])-d(?:[ \t]*=[ \t]*\S|(?![0-9\s])\S)/
+
 export function displayOptionsIn(text: string): DisplayOption[] {
   const out: DisplayOption[] = []
-  for (const m of text.matchAll(/(?:^|[ \t])(-d|--display|--display-id)[ \t=]+(\d+)/g)) {
-    out.push({ flag: m[1], value: m[2] })
+  for (const m of text.matchAll(/(?:^|[ \t])-d[ \t]*(\d+)/g)) {
+    out.push({ flag: '-d', value: m[1], index: m.index ?? 0 })
   }
-  return out
+  for (const m of text.matchAll(/(?:^|[ \t])(--display|--display-id)[ \t=]+(\d+)/g)) {
+    out.push({ flag: m[1], value: m[2], index: m.index ?? 0 })
+  }
+  return out.sort((a, b) => a.index - b.index)
 }
 
 /**
@@ -380,7 +403,9 @@ export function stripQuotedText(text: string): string {
 
 /** 把目标屏参数整体抹成空白（命令词匹配前归一化，使 `input -d 0 tap …` 也进命令词面）。 */
 export function stripDisplayOptions(text: string): string {
-  return text.replace(/(?:^|[ \t])(?:-d|--display|--display-id)[ \t=]+\d+/g, ' ')
+  return text
+    .replace(/(?:^|[ \t])-d[ \t]*\d+/g, ' ')
+    .replace(/(?:^|[ \t])(?:--display|--display-id)[ \t=]+\d+/g, ' ')
 }
 
 // ── 命令词家族：每个家族自带「哪种拼写才算它的目标屏」 ──────────────────────────
@@ -417,7 +442,11 @@ const SCREEN_COMMAND_FAMILIES: readonly ScreenCommandFamily[] = [
   { name: 'screenrecord', pattern: /\bscreenrecord\b/i, targetFlags: ALL_DISPLAY_FLAGS },
   {
     name: 'input',
-    pattern: /\binput[ \t]+(?:tap|swipe|roll|draganddrop|motionevent|text|keyevent|keycombination)\b/i,
+    // 正式语法是 `input [<source>] [-d DISPLAY_ID] <command> [<arg>…]`：source 是位置词
+    // （touchscreen/keyboard/…），漏了它整类命令都进不了命令词面（`input touchscreen tap 500 800`
+    // 实测放行）。`press` 是 0.14 起的新命令，同族。
+    pattern:
+      /\binput[ \t]+(?:(?:touchscreen|keyboard|mouse|joystick|touchnavigation|trackball|stylus|dpad|gamepad|rotaryencoder)[ \t]+)?(?:tap|swipe|roll|draganddrop|motionevent|text|keyevent|keycombination|press)\b/i,
     targetFlags: ALL_DISPLAY_FLAGS,
   },
   { name: 'wm', pattern: /\bwm[ \t]+(?:size|density|overscan)\b/i, targetFlags: ALL_DISPLAY_FLAGS },
@@ -427,6 +456,14 @@ const SCREEN_COMMAND_FAMILIES: readonly ScreenCommandFamily[] = [
   // `am` 的显示参数是 `--display`；`-d` 是 Intent data，**不得**作为目标屏凭据（见上）。
   { name: 'am', pattern: /\bam[ \t]+(?:start|start-activity|force-stop|kill)\b/i, targetFlags: ['--display', '--display-id'] },
   { name: 'monkey', pattern: /\bmonkey\b/i, targetFlags: ['--display', '--display-id'] },
+  // `cmd activity <start-activity|start|force-stop|kill>` 与 `am start` 走同一个
+  // ActivityManagerShellCommand（无 `--display` 时默认 display 0）——只认 `am` 会把这条等价
+  // 拼写整类放行（2026-10-28 自查）。`--display` 才是它的目标屏参数。
+  {
+    name: 'cmd-activity',
+    pattern: /\bcmd[ \t]+activity[ \t]+(?:start-activity|start|force-stop|kill|stop-app)\b/i,
+    targetFlags: ['--display', '--display-id'],
+  },
 ]
 
 /** 命令（归一化后）命中哪些命令词家族。 */
@@ -470,6 +507,7 @@ export function screenCommandVerdict(
   for (const segment of segments) {
     const bare = stripQuotedText(segment)
     const options = displayOptionsIn(bare)
+    if (MALFORMED_DISPLAY_OPTION.test(bare)) return 'deny-uncertified-target'
     const families = SCREEN_COMMAND_FAMILIES.filter(
       (family) => family.pattern.test(stripDisplayOptions(bare)),
     )
@@ -480,8 +518,12 @@ export function screenCommandVerdict(
     }
     for (const family of families) {
       if (family.targetFlags.length === 0) return 'deny-uncertified-target'
+      // `input` 的 `-d` 只在 **command 词之前**有意义：`input tap 1 2 -d 7` 里的 `-d 7` 是 tap 的
+      // 多余 argv，真实 input 仍操作默认 display 0（Android 的 input 只在 command 前解析 -d）。
+      // 旧实现做全段扫描 ⇒ 尾随 `-d <owned>` 反而成了"已认证"的通行证（2026-10-28 自查）。
+      const limit = family.name === 'input' ? inputCommandIndex(bare) : bare.length
       const owned = options
-        .filter((option) => family.targetFlags.includes(option.flag))
+        .filter((option) => family.targetFlags.includes(option.flag) && option.index < limit)
         .map((option) => option.value)
       // 该家族必须在**本段内**自证：参数缺席、或任一值不属于已注册虚拟屏 → 拒（不得只认证其中一个）。
       if (owned.length === 0) return 'deny-uncertified-target'
@@ -489,6 +531,15 @@ export function screenCommandVerdict(
     }
   }
   return 'allow'
+}
+
+/** `input` 家族里 command 词的位置（用作「只有它之前的 `-d` 才算凭据」的边界）。 */
+const INPUT_COMMAND_RE =
+  /\b(?:tap|swipe|roll|draganddrop|motionevent|text|keyevent|keycombination|press)\b/i
+
+function inputCommandIndex(text: string): number {
+  const m = INPUT_COMMAND_RE.exec(text)
+  return m === null ? text.length : (m.index ?? text.length)
 }
 
 /** 由注册表投影构造「该值是否属于已注册虚拟屏」的判据（两个 id 空间都按原样字符串比对）。 */

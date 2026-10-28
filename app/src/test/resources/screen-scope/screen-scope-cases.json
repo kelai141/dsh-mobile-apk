@@ -464,6 +464,86 @@
       ],
       "expect": "allow",
       "why": "普通空格后的 # 才是注释（dash 实测注释后面的命令不执行）。与 S-8a 成对。"
+    },
+    {
+      "name": "S-9a 短选项粘连 -d7 是合法 display 值（误拦回归）",
+      "command": "screencap -d7 -p /sdcard/a.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "`-d` 是 getopt 短选项，`-d7` 与 `-d 7` 等价（本机 getopt/atoi 实测 optarg=7 ⇒ display 7）。旧实现要求 `[ \\t=]+` 分隔符，认不出粘连形态 ⇒ 已注册的虚拟屏反而被拒。"
+    },
+    {
+      "name": "S-9b -d=7 不是合法 display 值（真实屏 0，漏拦）",
+      "command": "screencap -d=7 -p /sdcard/real.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "AOSP 用 atoi(optarg)，`atoi(\"=7\") == 0` ⇒ 实际抓的是 display 0（真实屏）。旧实现把 `=7` 里的 7 当凭据放行；新实现既不认它是 7，也因 malformed 形态 fail-closed。"
+    },
+    {
+      "name": "S-9c input 的 source 位置词不得让命令消失",
+      "command": "input touchscreen tap 500 800",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "正式语法 `input [<source>] [-d ID] <command>`：`touchscreen` 是 source 位置词。旧命令词面要求动词紧跟 input ⇒ 整类命令进不了判定面 ⇒ 放行真实屏。"
+    },
+    {
+      "name": "S-9d input press 同族",
+      "command": "input press",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "`press` 是 input 的命令之一，与 tap/keyevent 同族。"
+    },
+    {
+      "name": "S-9e input 的尾随 -d 不算凭据",
+      "command": "input tap 1 2 -d 7",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "Android 的 input 只在 command **之前**解析 `-d`；尾随 `-d 7` 是 tap 的多余 argv，实际仍操作默认 display 0。旧实现全段扫描 ⇒ 尾随 owned 值成了通行证。"
+    },
+    {
+      "name": "对照 input 的 command 前 -d 仍是合法凭据",
+      "command": "input -d 7 tap 1 2",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "与 S-9e 成对：位置合法且值已注册 ⇒ 放行。"
+    },
+    {
+      "name": "S-9f cmd activity 是 am start 的等价拼写",
+      "command": "cmd activity start-activity -n com.example/.Main",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "`cmd activity start-activity` 与 `am start` 走同一个 ActivityManagerShellCommand，无 `--display` 时默认 display 0。只认 `am` 会把这条等价拼写整类放行。"
+    },
+    {
+      "name": "对照 cmd activity 带 --display 已注册值放行",
+      "command": "cmd activity start-activity --display 7 -n com.example/.Main",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "与 S-9f 成对：`--display` 才是它的目标屏参数。"
     }
   ]
 }
