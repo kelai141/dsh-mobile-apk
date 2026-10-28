@@ -1,4 +1,4 @@
-# 屏幕范围门禁：短选项**簇**里的 `c` 同样吃载荷（`sh -lc` / `-ec` / `-xc` 绕过）
+# 屏幕范围门禁：短选项形态没算全（簇 `-lc` 与带参 `-o errexit` 两种绕过）
 
 ## 现象
 
@@ -54,17 +54,39 @@ su -lc 'screencap -p /sdcard/real.png'    → allow ❌
 
 两侧同构改（引擎侧 `SHELL_C_PAYLOAD`、壳侧同名 `Regex`）。
 
+## 同一判据的第二个缺口：带独立参数的短选项 `-o` / `+o`
+
+前置组 `(?:-[^\s]+[ \t]+)*` 只认「整词 `-xxx`」，而 `-o errexit` 里的 `errexit` 是**独立参数词**
+（既不 `-` 开头、也不在选项簇里）⇒ 前置组卡住 ⇒ 整条不匹配 ⇒ 载荷不展开 ⇒ 放行。
+
+真机实测（同一台，mksh）：
+
+| 在设备上执行 | 观测 |
+|---|---|
+| `sh -o errexit -c 'echo O_ERREXIT_RAN'` | 打印 `O_ERREXIT_RAN` |
+| `sh +o errexit -c 'echo PLUS_O_RAN'` | 打印 `PLUS_O_RAN` |
+
+修法：前置组加一条**排在最前**的分支 `[+-]o[ \t]+\S+[ \t]+`：
+
+```
+… [ \t]+(?:[+-]o[ \t]+\S+[ \t]+|-[^\s]+[ \t]+)*-[a-zA-Z]*c[ \t]+([\s\S]*)$
+```
+
+必须排前：否则 `-o` 会先被整词分支 `-[^\s]+` 吃掉，剩下的 `errexit` 无处可去，等于没修。
+
 ## 复验证据
 
-- 跨语言 fixture 72 → **78** 例（`S-13a`..`S-13d` + 2 条 `allow` 对照），壳侧副本由
+- 跨语言 fixture 72 → **82** 例（`S-13a`..`S-13d`、`S-14a`/`S-14b` + 4 条 `allow` 对照），壳侧副本由
   `node scripts/gen-screen-scope-fixture.mjs` 机器同步（`WRITE PASSED`）
-- 引擎侧 `node --test test/screen-scope.test.mjs` → **47 pass / 0 fail**（78 例逐条断言）
+- 引擎侧 `node --test test/screen-scope.test.mjs` → **47 pass / 0 fail**（82 例逐条断言）
 - 壳侧 `:app:testDebugUnitTest --tests ShellOpsScreenCommandFixtureTest` → **10 tests / 0 failures**
-- **变异反证（引擎侧）**：尾部退回光杆 `-c` ⇒ **4 条红**：`S-13a` / `S-13b` / `S-13c` / `S-13d`
-  全部 `deny-uncertified-target` → `allow`；回滚后 47 pass
+- **变异反证（引擎侧）**：
+  - 尾部退回光杆 `-c` ⇒ **4 条红**：`S-13a` / `S-13b` / `S-13c` / `S-13d` 全部 `deny-uncertified-target` → `allow`
+  - 撤掉 `[+-]o` 分支 ⇒ **2 条红**：`S-14a` / `S-14b` → `allow`
+  - 回滚后 82 例全绿
 - **变异反证（壳侧）**：同一变异打进 `ShellOps.kt` ⇒ `everyFixtureCaseMatchesTheKotlinVerdict` 红
-- 误拦方向的对照：`sh -lc 'echo hi'`、`sh -lc 'screencap -p -d 7 /sdcard/virtual.png'`
-  （后者展开后自带已注册 `-d 7`）修复后仍 `allow`
+- 误拦方向的四条对照修复后仍 `allow`：`sh -lc 'echo hi'`、`sh -lc 'screencap -p -d 7 /sdcard/virtual.png'`、
+  `sh -o errexit -c 'echo hi'`、`sh -o errexit -c 'screencap -p -d 7 /sdcard/virtual.png'`
 
 ## 已知边界
 
@@ -72,6 +94,12 @@ su -lc 'screencap -p /sdcard/real.png'    → allow ❌
    逐选项知道吃几个参数（`-o` 吃 1、`-c` 吃 1、`-x` 吃 0…），属另一个量级的解析器工作。
 2. 组合簇里 `c` **不在尾部**的写法（`-cx`）不会被本轮规则命中；实测语义上 `-cx` 等价于 `-c x`
    （脚本内容就是 `x`），不构成真实绕过路径，故未纳入。
+3. **`env -S '<cmdline>'` 不修**：Linux 上它会把字符串拆成 argv 执行（`env -S 'screencap -p /x'`
+   等价于直接跑 screencap），但小米 14 Pro 的 toybox 0.8.13 `env` 只支持 `[-0i] [-e FILE] [-u NAME]`、
+   实测报 `env: Unknown option 'S'` ⇒ **设备上不是真实路径**。按「真机确证才算缺陷」的口径不纳入，
+   记在这里备查（哪天设备换 toybox 或换判定基线，这条要重新评估）。
+4. 「任意语言执行器」仍是固有边界（`awk 'BEGIN{system(…)}'`、`perl -e`、`python3 -c` 都 `allow`）；
+   本门禁是判据层不是沙箱层。
 
 ## 未做设备验证（阻塞原因）
 
