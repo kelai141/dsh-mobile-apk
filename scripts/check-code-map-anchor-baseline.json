@@ -1528,55 +1528,55 @@
       "const val STREAM_ID = \"dsh-notify-responder\""
     ],
     "NotifyBridge.kt:328": [
-      "for (attempt in 0..1) {"
+      ".put(\"method\", \"\\$events/result\")"
     ],
     "NotifyCenter.kt:1048": [
-      "*   用静默渠道 + 静默标志投递（条目仍可见），不再 heads-up。"
-    ],
-    "NotifyCenter.kt:145": [
       ""
     ],
+    "NotifyCenter.kt:145": [
+      "fun of(category: String): Face? = values().firstOrNull { it.category == category }"
+    ],
     "NotifyCenter.kt:161": [
-      "/**"
+      "@Volatile"
     ],
     "NotifyCenter.kt:188": [
-      "private fun flash(msg: String) {"
+      "flash(\"「\" + UserCopy.notifyCategory(category) + \"」通知已被系统降级为静默——请到系统设置里改回\")"
     ],
     "NotifyCenter.kt:257": [
-      "* @return 迁移后的生效值"
+      "*  - 存量升级：无键（旧默认造出的抑制）→ 生效值 false（被修好）；"
     ],
     "NotifyCenter.kt:33": [
       "const val PREFS = \"dsh-notify\""
     ],
     "NotifyCenter.kt:370": [
-      "/** S3-2：被本次迁移**替代**的旧候选（调用方负责删除，避免同名重复渠道）。 */"
+      "val channelId: String?,"
     ],
     "NotifyCenter.kt:401": [
-      "!fact.userSetImportance -> continue // 历史代码建错 → 下一个候选（S3）"
+      "retire = candidates.take(index).filter { facts[it] != null },"
     ],
     "NotifyCenter.kt:527": [
-      "return renamed"
+      "renameChannelIfNeeded(manager, id, face)"
     ],
     "NotifyCenter.kt:550": [
-      "* @param manager - 系统通知管理器。"
+      "* 纯判据部分（[channelRenameNeeded]）抽成顶层函数以便 JVM 直测；本方法只做 Android 胶水。"
     ],
     "NotifyCenter.kt:612": [
-      "row.put(\"guidance\", if (ch != null && ch.importance < face.importance && ch.hasUserSetImportance()) {"
+      "row.put(\"userSetImportance\", ch?.hasUserSetImportance() ?: false)"
     ],
     "NotifyCenter.kt:631": [
-      "* 现在两侧同源：本方法（自检面用）与页面侧 `describeImportance` 覆盖同一档位集合，且都不回数字。"
+      "* 渠道重要性 → 人话（唯一真源 [UserCopy.importance]，P3-1）。"
     ],
     "NotifyCenter.kt:676": [
-      ""
+      "// 竞态最坏结果是少去重一次（多打一次横幅），不值得为它引入锁序。"
     ],
     "NotifyCenter.kt:829": [
-      "\"report\" -> Face.REPORT"
+      "}"
     ],
     "NotifyCenter.kt:84": [
-      "* （他人已答 / 引擎撤销）或本机提交结算。常量保留为 0，让这条决定**显式可 grep**。"
+      "* 旧值是 30 分钟，行为是 `setTimeoutAfter` 到点撤掉通知——而引擎侧的提问**没有超时**"
     ],
     "NotifyCenter.kt:850": [
-      "}"
+      "if (categoryOff) {"
     ],
     "NotifyDecisionQueue.kt:192": [
       "fun enqueue(context: Context, decision: Decision): Boolean {"
@@ -2269,28 +2269,28 @@
       "when (value.optString(\"type\")) {"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyBridge.kt:304": [
-      ")"
+      "// 用户面对「Approve this plan」只能盲批（N2）。"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:141": [
-      "companion object {"
+      "*/"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:145": [
-      ""
+      "fun of(category: String): Face? = values().firstOrNull { it.category == category }"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:161": [
-      "/**"
+      "@Volatile"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:345": [
-      "/**"
+      "/** 设置项 key（与 prefs 键同名字面量集中一处，避免设置页/迁移两处漂移）。 */"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:49": [
-      "private const val KEY_SUPPRESS_FOREGROUND = \"suppressForeground\""
+      ""
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:589": [
-      "for (face in Face.values()) {"
+      "// 用户是否关掉了「弹出」：应用不可读（getUserLockedFields 是 @hide @SystemApi 且不含该字段）"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:828": [
-      "\"todo\" -> Face.TODO"
+      "return Result.RESOLVED"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyDecisionQueue.kt:266": [
       "* 超出墙钟预算 -> FAILED + 可见「提交失败，点击重试」。"
@@ -3210,7 +3210,6 @@
     "index.js:2198": [
       "* @returns compact facts and child-local failures; complete child event arrays are released after extraction.",
       "* Collect each related child's own descriptor through existing historical codecs.",
-      "additionalProperties: false,",
       "const incidental = new Set([",
       "function signature(pattern) {",
       "let total = 0;",

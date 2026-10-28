@@ -44,6 +44,9 @@ object NotifyCenter {
   const val EXTRA_TARGET_SESSION = "dsh.notify.session"
   /** 目标**agent** id（辅助键：会话尚未建立时的兜底匹配，与 sessionId 不是同一个东西）。 */
   const val EXTRA_TARGET_AGENT = "dsh.notify.agent"
+  /** detail 渲染上限（字符）：保留足够判断的首段，超出截断并显示省略号。 */
+  internal const val DETAIL_LIMIT = 800
+
   private const val KEY_CHANNELS_INITIALIZED = "channelsInitialized"
   private const val KEY_SELECTED_PREFIX = "channel."
   private const val KEY_SUPPRESS_FOREGROUND = "suppressForeground"
@@ -1160,9 +1163,15 @@ object NotifyCenter {
 
   /** 正文脱敏：绝对路径截断 + token 形态遮挡（§5.6；不改写 engine.log 本体）。 */
   fun sanitize(text: String): String {
+    val s = redact(text)
+    return if (s.length > 180) s.take(179) + "…" else s
+  }
+
+  /** 正文脱敏（不带截断）：sanitize 与 detail 渲染共用，避免两套正则漂移。 */
+  internal fun redact(text: String): String {
     var s = text.replace(Regex("""(/data/[^\s:，。；]+)"""), "[路径]")
     s = s.replace(Regex("""(?i)\b(token|secret|password|apikey|api_key)=([^\s&]+)"""), "\$1=***")
-    return if (s.length > 180) s.take(179) + "…" else s
+    return s
   }
 
   /** 通知点击只能拉起 Activity（Android 12+ trampoline 禁令：动作一律广播）。 */
@@ -1229,10 +1238,24 @@ object NotifyCenter {
    * 旧行为：正文只 join 各问的 `question`，而选项多于两个的问句在通知里没有任何动作——用户看到
    * 三四个选项的问句，却发现通知栏里点不出东西，也没人告诉他去应用里答。
    */
-  private fun questionBigText(entry: NotifyEntry): String {
+  internal fun questionBigText(entry: NotifyEntry): String {
     val lines = entry.questions.map { it.question }.filter { it.isNotBlank() }
     val body = if (lines.isEmpty()) "引擎正在等待你的回答" else lines.joinToString("\n")
-    return if (questionNeedsAppEntry(entry)) body + "\n（本题选项多于两个，请打开应用作答）" else body
+    // N2（0.14.11）：plan-review 这类交互把正文（计划全文）放在 detail，旧实现只拼 question，
+    // 于是通知栏里只有问题加两个按钮，用户看不到计划就要批。
+    val details = entry.questions.map { it.detail.trim() }.filter { it.isNotBlank() }
+    val withDetail = if (details.isEmpty()) body else
+      body + "\n\n" + clipDetail(details.joinToString("\n\n"))
+    return if (questionNeedsAppEntry(entry)) withDetail + "\n（本题选项多于两个，请打开应用作答）" else withDetail
+  }
+
+  /**
+   * detail 的长度上限与脱敏：通知正文有系统上限，且计划里可能带绝对路径 / 令牌形态（§5.6 同一纪律）。
+   * 截断必须可见（结尾省略号），不让用户以为自己看到的是全文。
+   */
+  private fun clipDetail(text: String): String {
+    val redacted = redact(text)
+    return if (redacted.length <= DETAIL_LIMIT) redacted else redacted.take(DETAIL_LIMIT).trimEnd() + "…"
   }
 
   /**
@@ -1471,6 +1494,8 @@ internal fun channelRenameNeeded(
   val header: String = "",
   val question: String = "",
   val options: List<String> = emptyList(),
+  /** 正文（plan-review 的计划全文走这里）；旧实现不读，导致通知里只有问题没有内容。 */
+  val detail: String = "",
 )
 
 /**
