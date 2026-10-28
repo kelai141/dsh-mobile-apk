@@ -1,0 +1,598 @@
+{
+  "_doc": [
+    "screen-scope 三层验收用 A/B 两组命令（2026-10-29 定）。",
+    "",
+    "A 组：新判据必须**拦下**（expectClass=deny）。逐条来自五个 screen-scope PR 的权威 fixture，",
+    "      expect 是精确判定值（deny-unparsed / deny-uncertified-target / deny-orphan-target-token）。",
+    "B 组：新判据必须**放行**的对照（expectClass=allow），用于证明没有过度拦截。",
+    "",
+    "为什么单独一份文件：PR 正文里埋命令无法被脚本消费，也无法在 main 上做负控。",
+    "本文件由 scripts/verify-screen-scope-01410.mjs 读取；改判据时同步改这里。",
+    "",
+    "ownedTargets 语义：判据的 isOwnedTarget(raw) 对列出的原始串返回 true，其余 false。",
+    "",
+    "baselineVerdictOnMain 字段：合并任何 screen-scope 修复**之前**（main 5282816e）实测到的判定。",
+    "用途：verify-screen-scope-01410.mjs --layer=judge 用它算「判别力」——A 组里有多少条在修前没被拦下。",
+    "这个数字必须显著大于 0，否则脚本本身是假绿（说明它判不出好坏）。"
+  ],
+  "groups": {
+    "A": [
+      {
+        "caseId": "S-23a",
+        "name": "S-23a awk 的 system() 执行屏幕命令必须判拒",
+        "command": "awk 'BEGIN{system(\"screencap -p /sdcard/x.png\")}'",
+        "expect": "deny-unparsed",
+        "expectClass": "deny",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 803,
+        "sourceLabel": "awk system() 载荷不可见",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-23b",
+        "name": "S-23b awk 的绝对路径形式同样判拒",
+        "command": "/system/bin/awk 'BEGIN{system(\"screencap -p f\")}'",
+        "expect": "deny-unparsed",
+        "expectClass": "deny",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 803,
+        "sourceLabel": "awk system() 载荷不可见",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-23c",
+        "name": "S-23c busybox awk 同族",
+        "command": "busybox awk 'BEGIN{system(\"screencap -p f\")}'",
+        "expect": "deny-unparsed",
+        "expectClass": "deny",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 803,
+        "sourceLabel": "awk system() 载荷不可见",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-22a",
+        "name": "S-22a input 的 source 词 touchpad（枚举漏项）必须判拒",
+        "command": "input touchpad tap 9999 9999",
+        "expect": "deny-uncertified-target",
+        "expectClass": "deny",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 802,
+        "sourceLabel": "input source 白名单漏 touchpad",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-22b",
+        "name": "S-22b input touchpad swipe 同族",
+        "command": "input touchpad swipe 9999 9999 9999 9999",
+        "expect": "deny-uncertified-target",
+        "expectClass": "deny",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 802,
+        "sourceLabel": "input source 白名单漏 touchpad",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-22c",
+        "name": "S-22c input touchpad 带 -d 0 必须判拒",
+        "command": "input touchpad -d 0 tap 9999 9999",
+        "expect": "deny-uncertified-target",
+        "expectClass": "deny",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 802,
+        "sourceLabel": "input source 白名单漏 touchpad",
+        "baselineVerdictOnMain": "deny-orphan-target-token"
+      },
+      {
+        "caseId": "S-22e",
+        "name": "S-22e 对照 非 source 词保守拒（真机本来就 Unknown command）",
+        "command": "input bogus tap 1 2",
+        "expect": "deny-uncertified-target",
+        "expectClass": "deny",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 802,
+        "sourceLabel": "input source 白名单漏 touchpad",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-20a",
+        "name": "S-20a wm dump-visible-window-views 读真实屏窗口视图树必须判拒",
+        "command": "wm dump-visible-window-views",
+        "expect": "deny-uncertified-target",
+        "expectClass": "deny",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 799,
+        "sourceLabel": "wm 子命令白名单漏拦",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-20b",
+        "name": "S-20b wm dismiss-keyguard 解锁真实屏必须判拒",
+        "command": "wm dismiss-keyguard",
+        "expect": "deny-uncertified-target",
+        "expectClass": "deny",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 799,
+        "sourceLabel": "wm 子命令白名单漏拦",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-20c",
+        "name": "S-20c wm reset 重置显示覆盖必须判拒",
+        "command": "wm reset",
+        "expect": "deny-uncertified-target",
+        "expectClass": "deny",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 799,
+        "sourceLabel": "wm 子命令白名单漏拦",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-20d",
+        "name": "S-20d wm disable-blur 改真实屏显示效果必须判拒",
+        "command": "wm disable-blur true",
+        "expect": "deny-uncertified-target",
+        "expectClass": "deny",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 799,
+        "sourceLabel": "wm 子命令白名单漏拦",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-20e",
+        "name": "S-20e 对照 dump-visible-window-views 带 -d 已注册 token 也救不了（子命令不解析 -d）",
+        "command": "wm dump-visible-window-views -d 7",
+        "expect": "deny-uncertified-target",
+        "expectClass": "deny",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 799,
+        "sourceLabel": "wm 子命令白名单漏拦",
+        "baselineVerdictOnMain": "deny-orphan-target-token"
+      },
+      {
+        "caseId": "S-20k",
+        "name": "S-20k wm scaling 改真实屏缩放必须判拒（反向表专属面）",
+        "command": "wm scaling auto",
+        "expect": "deny-uncertified-target",
+        "expectClass": "deny",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 799,
+        "sourceLabel": "wm 子命令白名单漏拦",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-20l",
+        "name": "S-20l wm set-letterbox-style 改真实屏显示覆盖必须判拒（反向表专属面）",
+        "command": "wm set-letterbox-style",
+        "expect": "deny-uncertified-target",
+        "expectClass": "deny",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 799,
+        "sourceLabel": "wm 子命令白名单漏拦",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-19a",
+        "name": "S-19a glob ? 拼出命令名（/system/bin/scr?encap）必须判拒",
+        "command": "/system/bin/scr?encap -p /sdcard/x.png",
+        "expect": "deny-unparsed",
+        "expectClass": "deny",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 790,
+        "sourceLabel": "命令词用 glob 拼出屏幕命令名",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-19b",
+        "name": "S-19b glob 字符类拼出命令名（/system/bin/[s]creencap）必须判拒",
+        "command": "/system/bin/[s]creencap -p /sdcard/x.png",
+        "expect": "deny-unparsed",
+        "expectClass": "deny",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 790,
+        "sourceLabel": "命令词用 glob 拼出屏幕命令名",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-19c",
+        "name": "S-19c glob 星号拼出命令名（/system/bin/scree*cap）必须判拒",
+        "command": "/system/bin/scree*cap -p /sdcard/x.png",
+        "expect": "deny-unparsed",
+        "expectClass": "deny",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 790,
+        "sourceLabel": "命令词用 glob 拼出屏幕命令名",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-19d",
+        "name": "S-19d 子命令位 glob（cmd win?ow）必须判拒",
+        "command": "cmd win?ow size 900x1600",
+        "expect": "deny-unparsed",
+        "expectClass": "deny",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 790,
+        "sourceLabel": "命令词用 glob 拼出屏幕命令名",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-19e",
+        "name": "S-19e 子命令位 glob（input t?p）必须判拒",
+        "command": "input t?p 1 2",
+        "expect": "deny-unparsed",
+        "expectClass": "deny",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 790,
+        "sourceLabel": "命令词用 glob 拼出屏幕命令名",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-18a",
+        "name": "S-18a 空引号拼接命令名（scr''eencap）必须判拒",
+        "command": "scr''eencap -p /sdcard/x.png",
+        "expect": "deny-unparsed",
+        "expectClass": "deny",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 786,
+        "sourceLabel": "命令名被引号/续行拆开",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-18b",
+        "name": "S-18b 引号内插字符拼接命令名（scr\"e\"encap）必须判拒",
+        "command": "scr\"e\"encap -p /sdcard/x.png",
+        "expect": "deny-unparsed",
+        "expectClass": "deny",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 786,
+        "sourceLabel": "命令名被引号/续行拆开",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-18d",
+        "name": "S-18d 词内 ANSI-C 引号拼接（s$'cre'encap）必须判拒",
+        "command": "s$'cre'encap -p /sdcard/x.png",
+        "expect": "deny-unparsed",
+        "expectClass": "deny",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 786,
+        "sourceLabel": "命令名被引号/续行拆开",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-18e",
+        "name": "S-18e 对照 词首 ANSI-C 引号（$'screencap'）仍走原判据",
+        "command": "$'screencap' -p /sdcard/real.png",
+        "expect": "deny-uncertified-target",
+        "expectClass": "deny",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 786,
+        "sourceLabel": "命令名被引号/续行拆开",
+        "baselineVerdictOnMain": "deny-uncertified-target"
+      },
+      {
+        "caseId": "S-18f",
+        "name": "S-18f 反斜杠续行拼接命令名（scr\\<换行>eencap）必须判拒",
+        "command": "scr\\\neencap -p /sdcard/x.png",
+        "expect": "deny-unparsed",
+        "expectClass": "deny",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 786,
+        "sourceLabel": "命令名被引号/续行拆开",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-18g",
+        "name": "S-18g 对照 续行后接空格（screencap\\<换行> -p …）保持原判据",
+        "command": "screencap\\\n -p /sdcard/x.png",
+        "expect": "deny-uncertified-target",
+        "expectClass": "deny",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 786,
+        "sourceLabel": "命令名被引号/续行拆开",
+        "baselineVerdictOnMain": "deny-uncertified-target"
+      }
+    ],
+    "B": [
+      {
+        "caseId": "S-23d",
+        "name": "S-23d 对照 awk 正常打印必须放行",
+        "command": "awk '{print $1}' /sdcard/a.txt",
+        "expect": "allow",
+        "expectClass": "allow",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 803,
+        "sourceLabel": "awk system() 载荷不可见",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-23e",
+        "name": "S-23e 对照 awk -F 字段分隔符放行",
+        "command": "awk -F: '{print $1}' /etc/hosts",
+        "expect": "allow",
+        "expectClass": "allow",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 803,
+        "sourceLabel": "awk system() 载荷不可见",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-23f",
+        "name": "S-23f 对照 引号内的 awk system 只是文本",
+        "command": "echo \"awk system(\"",
+        "expect": "allow",
+        "expectClass": "allow",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 803,
+        "sourceLabel": "awk system() 载荷不可见",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-23g",
+        "name": "S-23g 对照 printf 里的 awk 词不误拦",
+        "command": "printf '%s' awk",
+        "expect": "allow",
+        "expectClass": "allow",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 803,
+        "sourceLabel": "awk system() 载荷不可见",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-22d",
+        "name": "S-22d 对照 input touchpad 带已注册虚拟屏 仍放行",
+        "command": "input touchpad -d 7 tap 1 2",
+        "expect": "allow",
+        "expectClass": "allow",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 802,
+        "sourceLabel": "input source 白名单漏 touchpad",
+        "baselineVerdictOnMain": "deny-orphan-target-token"
+      },
+      {
+        "caseId": "S-22f",
+        "name": "S-22f 对照 引号内的 input touchpad 只是文本",
+        "command": "echo \"input touchpad tap 1 2\"",
+        "expect": "allow",
+        "expectClass": "allow",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 802,
+        "sourceLabel": "input source 白名单漏 touchpad",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-20f",
+        "name": "S-20f 对照 wm get-* 纯查询必须放行",
+        "command": "wm get-ignore-orientation-request",
+        "expect": "allow",
+        "expectClass": "allow",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 799,
+        "sourceLabel": "wm 子命令白名单漏拦",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-20g",
+        "name": "S-20g 对照 wm help 必须放行",
+        "command": "wm help",
+        "expect": "allow",
+        "expectClass": "allow",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 799,
+        "sourceLabel": "wm 子命令白名单漏拦",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-20h",
+        "name": "S-20h 对照 裸 wm 必须放行",
+        "command": "wm",
+        "expect": "allow",
+        "expectClass": "allow",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 799,
+        "sourceLabel": "wm 子命令白名单漏拦",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-20i",
+        "name": "S-20i 对照 wm reset 带已注册虚拟屏 -d 仍算自证放行",
+        "command": "wm reset -d 7",
+        "expect": "allow",
+        "expectClass": "allow",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 799,
+        "sourceLabel": "wm 子命令白名单漏拦",
+        "baselineVerdictOnMain": "deny-orphan-target-token"
+      },
+      {
+        "caseId": "S-20j",
+        "name": "S-20j 对照 引号内的 wm 子命令只是文本不得误拦",
+        "command": "echo \"wm dump-visible-window-views\"",
+        "expect": "allow",
+        "expectClass": "allow",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 799,
+        "sourceLabel": "wm 子命令白名单漏拦",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-19f",
+        "name": "S-19f 对照 参数位 glob（ls /sdcard/*.png）仍放行",
+        "command": "ls /sdcard/*.png",
+        "expect": "allow",
+        "expectClass": "allow",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 790,
+        "sourceLabel": "命令词用 glob 拼出屏幕命令名",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-19g",
+        "name": "S-19g 对照 参数位 glob（rm /sdcard/x*）仍放行",
+        "command": "rm /sdcard/x*",
+        "expect": "allow",
+        "expectClass": "allow",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 790,
+        "sourceLabel": "命令词用 glob 拼出屏幕命令名",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-19h",
+        "name": "S-19h 对照 引号内 glob 不展开（\"/system/bin/scr?encap\"）仍放行",
+        "command": "\"/system/bin/scr?encap\" -p /sdcard/x.png",
+        "expect": "allow",
+        "expectClass": "allow",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 790,
+        "sourceLabel": "命令词用 glob 拼出屏幕命令名",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-19i",
+        "name": "S-19i 对照 已认证目标屏的 screencap 仍放行",
+        "command": "screencap -d 7 -p /sdcard/x.png",
+        "expect": "allow",
+        "expectClass": "allow",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 790,
+        "sourceLabel": "命令词用 glob 拼出屏幕命令名",
+        "baselineVerdictOnMain": "allow"
+      },
+      {
+        "caseId": "S-18c",
+        "name": "S-18c 对照 词边界引号（echo \"a b\"）仍放行",
+        "command": "echo \"a b\"",
+        "expect": "allow",
+        "expectClass": "allow",
+        "ownedTargets": [
+          "7",
+          "11529215046816944610"
+        ],
+        "sourcePr": 786,
+        "sourceLabel": "命令名被引号/续行拆开",
+        "baselineVerdictOnMain": "allow"
+      }
+    ]
+  }
+}
