@@ -530,9 +530,14 @@ function tools(ctx: Context, priv: PrivilegeFace) {
       '用于界面观察闭环（配合 android_ui_dump 的语义清单核对渲染结果）。' +
       '无障碍通道优先（API 30+，无需 ADB），否则走 ADB screencap。未授权失败关闭。' +
       '当前模型不声明图像输入时回退为返回文件路径（此时再用 read_image）。' +
-      '可传 textRedact: true 获得文本脱敏摘要（避免敏感屏幕内容进入上下文）。',
+      '**textRedact 尚未实现**：本工具没有 OCR/文本提取能力，传 true 会被明确拒绝'
+      + '（而不是静默返回完整截图、让人以为已经脱敏）。要避免像素级内容进入上下文，'
+      + '请改用 android_ui_dump / android_ui_tree 拿结构文本，或不调用本工具。',
     parameters: {
-      textRedact: { type: 'boolean', description: '文本脱敏摘要模式（默认 false 返回图像/路径）' },
+      textRedact: {
+        type: 'boolean',
+        description: '**未实现**：传 true 会被拒绝（本工具无 OCR/文本提取能力；静默返回完整截图等于假装脱敏）',
+      },
       screenId: SCREEN_PARAM,
     },
     output: {
@@ -574,6 +579,21 @@ function tools(ctx: Context, priv: PrivilegeFace) {
     },
     execute: async (args: { textRedact?: boolean; screenId?: string }, exec) => {
       const textRedact = args?.textRedact === true
+      // 死参数修法（2026-10-28 自查）：`textRedact` 此前只在 schema 与工具描述里承诺「获得文本脱敏
+      // 摘要（避免敏感屏幕内容进入上下文）」，实现里**读完就丢**——传 true 与不传的返回值逐字相同
+      // （同样返回 imagePath + 图像 + 宽高，同样调 `screenshot` op 且不带任何脱敏参数）。
+      // 于是模型以为已脱敏、把完整截图读进上下文。本工具没有 OCR/文本提取能力，做不到脱敏，
+      // 故 fail-closed：明确拒绝并给替代路径，而不是静默返回图像。
+      if (textRedact) {
+        return {
+          imagePath: '',
+          denied: false,
+          text: 'textRedact（文本脱敏摘要）**尚未实现**，已拒绝本次截图以免误以为已脱敏——'
+            + '本工具没有 OCR/文本提取能力，传 true 只会拿到完整图像（敏感内容照样进上下文）。'
+            + '要避免像素级内容进入上下文：改用 android_ui_dump / android_ui_tree 拿结构文本，'
+            + '或不调用本工具。',
+        }
+      }
       const screenId = args?.screenId
       const a = await guard('screenshot', args as Record<string, unknown>, exec as { agent?: { session?: unknown } })
       if (!a.ok) return { imagePath: '', denied: true, text: a.guidance }
