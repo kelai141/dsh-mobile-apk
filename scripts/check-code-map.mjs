@@ -186,8 +186,13 @@ function definitionSitesOf(lines, name) {
     const t = lines[i]
     // valueDecl 先行短路：`val bare = stripQuotedText(segment)` 这种值声明
     // 之前会被 bareMember 的「name(args)」形态误判成方法定义。
+    // valueDecl 只用来**屏蔽 bareMember**，不能连 withKeyword 一起跳。
+    // 实测教训：早先直接 `if (valueDecl.test(t)) continue`，把 `const val MAX_TABS = 8`
+    // 这种带关键字的真定义也跳过了，于是 definitionSitesOf 返回 0 处，
+    // 推导报「同名符号 0 处」。valueDecl 的本意只是防止 `val bare = f(x)` 被当成方法定义。
+    if (withKeyword.test(t)) { sites.push(i); continue }
     if (valueDecl.test(t)) continue
-    if (withKeyword.test(t) || bareMember.test(t)) sites.push(i)
+    if (bareMember.test(t)) sites.push(i)
   }
   return sites
 }
@@ -257,49 +262,57 @@ function symbolAt(lines, symbol) {
 
 /** 从 startLine 起找配对花括号的结束行下标（0-based）；无花括号时退化为「到空行为止」。 */
 function matchingBrace(lines, startLine) {
-  // 从**函数/类型的体起始位置**开始配平，不能从行首第一个 { 开始。
+  // 判断某个定义行的**体**在哪一行结束。三种形态：
+  //   a) 带花括号体   fun f() { ... }        -> 配对的 }
+  //   b) 单行定义     const val MAX_TABS = 8  -> 本行
+  //   c) 表达式体     fun f() = expr         -> 通常是本行或下一行
   //
-  // 实测教训（两个都踩过）：
-  // 1) TS 签名里的内联类型字面量  function tools(x: { a: R } = ...) {  —— 同一行内闭合，
-  //    从行首算就立刻配平，整个函数体被判成一行。
-  // 2) TS 返回类型里的泛型字面量  async f(line: string): Promise<{ ok: boolean }> {
-  //    Promise<{...}> 的 { 在 () 外，只数圆括号不够，仍会误判。
+  // 实测踩过的坑（都在真实仓上复现）：
+  // 1) TS 签名里的内联类型字面量 { a: R } 同行闭合 -> 整个函数体被判成一行
+  // 2) TS 返回类型里的泛型字面量 Promise<{ ok: boolean }> -> 同上（只数圆括号不够）
+  // 3) 单行 val/const 常量后面紧跟 KDoc，被误当成「体从下一处 { 开始」，
+  //    结果 const val MAX_TABS = 8 的体被算到几十行之后（BrowserHost.kt 实测）
   //
-  // 做法：找体起始 { 时，跳过圆括号/方括号/**尖括号**内的内容。
-  // 尖括号只用于跳过类型实参，遇到不成对的 < 就当普通字符（不影响后续配平）。
+  // 关键：先看**本行**有没有体（花括号，或 = 后面的表达式）。本行就能收尾的，
+  // 不要再往后找。
+  const head = lines[startLine] || ''
+  // 本行是否有花括号位于签名之外
   let depth = 0
   let angle = 0
-  let bodyLine = -1
-  let bodyCol = -1
-  for (let i = startLine; i < lines.length; i += 1) {
-    const t = lines[i]
-    let found = false
-    for (let c = 0; c < t.length; c += 1) {
-      const ch = t[c]
-      if (ch === '(' || ch === '[') depth += 1
-      else if (ch === ')' || ch === ']') depth -= 1
-      else if (ch === '<' && /[A-Za-z0-9_$>]/.test(t[c - 1] || '')) angle += 1
-      else if (ch === '>' && angle > 0) angle -= 1
-      else if (ch === '{' && depth === 0 && angle === 0) { bodyLine = i; bodyCol = c; found = true; break }
-    }
-    if (found) break
-    // 无花括号体的单表达式定义：碰到空行就认为定义结束
-    if (i > startLine && t.trim() === '') return i - 1
+  let braceCol = -1
+  for (let c = 0; c < head.length; c += 1) {
+    const ch = head[c]
+    if (ch === '(' || ch === '[') depth += 1
+    else if (ch === ')' || ch === ']') depth -= 1
+    else if (ch === '<' && /[A-Za-z0-9_$>]/.test(head[c - 1] || '')) angle += 1
+    else if (ch === '>' && angle > 0) angle -= 1
+    else if (ch === '{' && depth === 0 && angle === 0) { braceCol = c; break }
   }
-  if (bodyLine < 0) return Math.min(startLine, lines.length - 1)
-  // 2) 从体起始 { 之后继续配平
+  if (braceCol < 0) {
+    // 本行没有体花括号：单行定义，或表达式体延续到下一行（缩进更深且无空行）
+    const next = lines[startLine + 1]
+    if (next !== undefined && next.trim() !== '' && /^\s{4,}\S/.test(next)) {
+      // 表达式体延续：逐行吃到缩进回退或空行为止
+      for (let i = startLine + 1; i < lines.length; i += 1) {
+        if (lines[i].trim() === '') return i - 1
+        if (!/^\s{4,}\S/.test(lines[i])) return i - 1
+      }
+    }
+    return startLine
+  }
+  // 有体花括号：从该位置之后配平
   let d = 0
   let opened = false
-  for (let i = bodyLine; i < lines.length; i += 1) {
+  for (let i = startLine; i < lines.length; i += 1) {
     const t = lines[i]
-    const from = i === bodyLine ? bodyCol : 0
+    const from = i === startLine ? braceCol : 0
     for (let c = from; c < t.length; c += 1) {
       const ch = t[c]
       if (ch === '{') { d += 1; opened = true }
       else if (ch === '}') { d -= 1; if (opened && d === 0) return i }
     }
   }
-  return opened ? -1 : Math.min(startLine, lines.length - 1)
+  return opened ? -1 : startLine
 }
 
 /** 符号体归一化：逐行 trim、丢空行、连续空白压成一个空格。 */
@@ -396,6 +409,9 @@ function deriveSymbolAnchor(lines, line, contentHash) {
     for (const j of blockDepthOf(lineIdx)) {
       const t = lines[j]
       // 类/对象体起始行不算「函数体」：那时该行是文件的直接成员（如顶层 const）
+      // companion object / 嵌套 object 是**类体**不是函数体，其中的常量是类成员。
+      if (/^\s*(?:(?:private|public|internal|protected)\s+)*companion\s+object\b/.test(t)) continue
+      if (/^\s*(?:(?:private|public|internal|protected)\s+)*object\s+[A-Za-z_$]/.test(t)) continue
       if (/^\s*(?:(?:export|default|declare|abstract|open|final|data|sealed)\s+)*(?:class|interface|enum|namespace|module)\s+[A-Za-z_$]/.test(t)) continue
       if (/^\s*(?:export\s+)?(?:const|let|var)\s+[A-Za-z_$][A-Za-z0-9_$]*\s*(?::[^=]*)?=\s*\{\s*$/.test(t)) continue
       return true
