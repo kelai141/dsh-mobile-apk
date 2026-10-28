@@ -147,7 +147,11 @@ class DeviceControlService : AccessibilityService() {
   var el = null;
   var key = String(a.ref || '').replace(/^w/, '');
   if (key && reg && reg.map[key]) { el = reg.map[key]; if (el && !el.isConnected) el = null; }
-  if (!el && a.sel) { try { el = document.querySelector(a.sel); } catch (e) { el = null; } }
+  var selErr = null;
+  if (!el && a.sel) {
+    try { el = document.querySelector(a.sel); }
+    catch (e) { selErr = (e && e.message) ? String(e.message) : 'invalid selector'; el = null; }
+  }
   if (!el && a.text){
     var want = String(a.text).replace(/\s+/g,' ').trim().toLowerCase();
     var list = candidates(), exact = null, partial = null;
@@ -171,7 +175,14 @@ class DeviceControlService : AccessibilityService() {
       if (tag){ for (var m = 0; m < list2.length; m++){ if (list2[m].tagName.toLowerCase() === tag){ el = list2[m]; break; } } }
     }
   }
-  if (!el) return JSON.stringify({ok:false,error:'未找到目标元素（ref/sel/text/role 均无匹配）'});
+  if (!el) {
+    // 选择器语法错与「选择器语法对但没匹配到」是两件事：前者模型该改选择器，后者该换 text/role
+    // 或者等页面渲染。原来两种情况共用一句「未找到目标元素」，前者会被引向反复重试同一条错误
+    // 选择器（与 #777 / WEB_SNAPSHOT_JS 那次同类）。
+    return JSON.stringify({ok:false,error: selErr
+      ? '选择器语法错误（' + String(a.sel) + '：' + selErr + '）；ref/text/role 也无匹配'
+      : '未找到目标元素（ref/sel/text/role 均无匹配）'});
+  }
   try { el.scrollIntoView({block:'center', inline:'center'}); } catch (e) {}
   var info = {tag: el.tagName.toLowerCase(), text: textOf(el).slice(0,60)};
   var via = key ? 'ref' : (a.sel ? 'selector' : (a.text ? 'text' : 'role'));

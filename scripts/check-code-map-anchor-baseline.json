@@ -1210,22 +1210,22 @@
       "*/"
     ],
     "DeviceControlService.kt:452": [
-      "data class Fact(val id: Int, val active: Boolean, val focused: Boolean, val hasRoot: Boolean)"
+      ""
     ],
     "DeviceControlService.kt:607": [
       "}"
     ],
     "DeviceControlService.kt:678": [
-      "\"snapshot\" -> handleSnapshot(args)"
+      "// 0.14.1 块G F4（注释更正）：本服务**已承载虚拟屏**——`realScreenScopeError` 会经"
     ],
     "DeviceControlService.kt:703": [
-      "\"browserViewport\" -> BrowserHostHolder.control(op, args)"
+      "// 服务的控制队列承载；浏览器 WebView 由 MainActivity 持有，经 BrowserHostHolder 路由。"
     ],
     "DeviceControlService.kt:852": [
-      "}"
+      "// （issue #127）。工具层读完即删，这里只留 LRU 兜底清理。"
     ],
     "DeviceControlService.kt:964": [
-      "*/"
+      "private fun error(message: String): JSONObject = JSONObject().put(\"__error\", message)"
     ],
     "DownloadSaver.kt:101": [
       "throw java.io.IOException(\"HTTP \" + code)"
@@ -2086,43 +2086,43 @@
       ""
     ],
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:409": [
-      "}"
+      "snapshotWindowId = -1"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:444": [
-      "*"
+      "if (root != null) { firstRoot = root; break }"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:496": [
-      "}"
+      "override fun onServiceConnected() {"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:607": [
       "}"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:634": [
-      "*/"
+      "private fun screenSize(): Pair<Int, Int> {"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:652": [
-      "if (path.isEmpty()) return null"
+      "val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:661": [
-      "}"
+      "/** 按路径重新定位节点（不复用快照里的节点对象——页面可能已重建）。 */"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:678": [
-      "\"snapshot\" -> handleSnapshot(args)"
+      "// 0.14.1 块G F4（注释更正）：本服务**已承载虚拟屏**——`realScreenScopeError` 会经"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:701": [
-      "\"browserState\" -> BrowserHostHolder.control(op, args)"
+      "// 门禁 A 项断言「handle 分支集合 == SUPPORTED_OPS」；每个 op 单独一行，静态门禁按行首"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:718": [
-      "// 特权 shell 通道同样是 native/privileged 面（0.14.0 §6：替换内置 adb），分发在 ShellOps；"
+      "\"browserCloseTab\" -> BrowserHostHolder.control(op, args)"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:745": [
-      "* 三条都不带 `screenId` ⇒ 默认 `real` ⇒ 被本范围门拦死；而 `virtual-only` 是缺省范围（fail-closed），"
+      "return result"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:770": [
-      "* 虚拟屏的 displayId 一律由壳侧注册表裁决，不接受调用方指定。"
+      "invalidated = true"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:852": [
-      "}"
+      "// （issue #127）。工具层读完即删，这里只留 LRU 兜底清理。"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/DownloadSaver.kt:101": [
       "throw java.io.IOException(\"HTTP \" + code)"
@@ -3210,6 +3210,7 @@
     "index.js:2198": [
       "* @returns compact facts and child-local failures; complete child event arrays are released after extraction.",
       "* Collect each related child's own descriptor through existing historical codecs.",
+      "additionalProperties: false,",
       "const incidental = new Set([",
       "function signature(pattern) {",
       "let total = 0;",
