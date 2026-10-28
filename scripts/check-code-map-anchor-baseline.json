@@ -3210,7 +3210,6 @@
     "index.js:2198": [
       "* @returns compact facts and child-local failures; complete child event arrays are released after extraction.",
       "* Collect each related child's own descriptor through existing historical codecs.",
-      "additionalProperties: false,",
       "const incidental = new Set([",
       "function signature(pattern) {",
       "let total = 0;",
