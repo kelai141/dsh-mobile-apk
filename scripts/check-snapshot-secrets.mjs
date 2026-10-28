@@ -41,6 +41,71 @@
 import { execFileSync } from 'node:child_process'
 import { TAR } from './lib/shell.mjs'
 
+// ── --self-test：判别力自证（2026-10-29 补；此前这条门禁零判别力面）───────────────────
+//
+// 判据是「归档成员路径 + settings.yaml 内容」，造真实 tar.xz 才跑得起来，所以此前只能看它对
+// 真快照说 PASS，看不出它在本该红的时候会不会红。这里现场做五个**极小**归档，覆盖：
+//   该绿 1 条、路径级该红 1 条、内容级该红 1 条、两个「不是发行快照」的硬失败前提。
+// 注意 tar 用**显式列举顶层目录**打包（不是 -C dir .），否则成员名带 './' 前缀，
+// 而 settings.yaml 那条判据是精确相等比较，会被前缀差异漏掉。
+if (process.argv.includes('--self-test')) {
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join, dirname } = await import('node:path')
+  const { fileURLToPath } = await import('node:url')
+
+  const selfPath = fileURLToPath(import.meta.url)
+  const ENGINE = 'node_modules/@deepseek-ai/dsh/index.js'
+  const runGate = (archive) => {
+    try {
+      const out = execFileSync(process.execPath, [selfPath, archive], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+      return { code: 0, out }
+    } catch (error) {
+      return { code: error.status ?? 1, out: String(error.stdout ?? '') + String(error.stderr ?? '') }
+    }
+  }
+  const buildArchive = (tag, entries) => {
+    const dir = mkdtempSync(join(tmpdir(), 'snapsecret-src-'))
+    for (const e of entries) {
+      const full = join(dir, e.path)
+      mkdirSync(dirname(full), { recursive: true })
+      writeFileSync(full, e.content ?? 'x')
+    }
+    const tops = [...new Set(entries.map((e) => e.path.split('/')[0]))]
+    const archive = join(tmpdir(), 'snapsecret-' + tag + '-' + process.pid + '.tar.xz')
+    execFileSync(TAR, ['-cJf', archive, '-C', dir, ...tops], { stdio: ['ignore', 'pipe', 'pipe'] })
+    rmSync(dir, { recursive: true, force: true })
+    return archive
+  }
+
+  const base = [{ path: 'usr/bin/true' }, { path: ENGINE }]
+  const clean = buildArchive('clean', [...base, { path: 'home/.dsh/settings.yaml', content: 'model: x\n' }])
+  const creds = buildArchive('creds', [...base, { path: 'home/.dsh/.credentials', content: '{}' }])
+  const sk = buildArchive('sk', [...base, { path: 'home/.dsh/settings.yaml', content: 'apiKey: sk-abc123\n' }])
+  const noEngine = buildArchive('noengine', [{ path: 'usr/bin/true' }])
+  const noUsr = buildArchive('nousr', [{ path: ENGINE }])
+
+  const checks = [
+    ['合规快照（usr/ + 引擎包 + 干净 settings.yaml）→ PASSED 且 exit 0', clean, (r) => r.code === 0 && r.out.includes('SNAPSHOT_SECRET_CHECK_PASSED')],
+    ['含 home/.dsh/.credentials → FAILED 且 exit 1', creds, (r) => r.code === 1 && r.out.includes('FAIL[credentials]')],
+    ['settings.yaml 含 sk- 实际值 → FAILED（内容级）', sk, (r) => r.code === 1 && r.out.includes('FAIL[settings-yaml-secret]')],
+    ['缺 @deepseek-ai/dsh 引擎包 → 硬失败（不是发行快照）', noEngine, (r) => r.code === 1 && r.out.includes('不是发行快照')],
+    ['缺 usr/ 前缀 → 硬失败', noUsr, (r) => r.code === 1 && r.out.includes('没有 usr/ 前缀')],
+  ]
+  let bad = 0
+  for (const [label, archive, verify] of checks) {
+    const result = runGate(archive)
+    const ok = verify(result)
+    console.log((ok ? 'PASS  ' : 'FAIL  ') + label + (ok ? '' : '  -> exit=' + result.code + ' out=' + result.out.trim().slice(0, 200)))
+    if (!ok) bad += 1
+  }
+  for (const a of [clean, creds, sk, noEngine, noUsr]) rmSync(a, { force: true })
+  console.log(bad === 0
+    ? 'SNAPSHOT_SECRET_SELF_TEST_PASSED（' + checks.length + ' 项）'
+    : 'SNAPSHOT_SECRET_SELF_TEST_FAILED（' + bad + ' 项）')
+  process.exit(bad === 0 ? 0 : 1)
+}
+
 const args = process.argv.slice(2)
 const snap = args.find((a) => !a.startsWith('--'))
 const REQUIRE = args.includes('--require') || process.env.DSH_REQUIRE_SNAPSHOT_SECRETS === '1'
