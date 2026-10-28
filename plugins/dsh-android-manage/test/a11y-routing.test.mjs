@@ -237,7 +237,7 @@ test('android_screenshot 的 ADB 回落对虚拟屏必须传 SF token（不是 d
     return { ok: true, stdout: '/tmp/dsh-shot-1.png\n-rw-rw-rw- 1 shell shell 1234 dsh-shot-1.png' }
   }
   const { byName } = applyManage(face)
-  const r = await byName('android_screenshot').execute({ screenId: 'virtual-1', textRedact: true }, exec)
+  const r = await byName('android_screenshot').execute({ screenId: 'virtual-1' }, exec)
   const line = calls.adbLine.find((l) => /screencap/.test(l))
   assert.ok(line, 'ADB 回落路径必须真的发起 screencap')
   assert.match(line, /screencap -p -d 11529215046816944610/, '必须把 SF token 落到 screencap 上')
@@ -256,7 +256,7 @@ test('android_screenshot 虚拟屏反查不到 SF token 时必须 fail-closed（
   face.execAdbShell = async (cmd) => { calls.adbShell.push(cmd); return { ok: true, stdout: '    name="mumuscreen000"\n' } }
   face.execAdbLine = async (line) => { calls.adbLine.push(line); return { ok: true, stdout: '' } }
   const { byName } = applyManage(face)
-  const r = await byName('android_screenshot').execute({ screenId: 'virtual-1', textRedact: true }, exec)
+  const r = await byName('android_screenshot').execute({ screenId: 'virtual-1' }, exec)
   assert.ok(!calls.adbLine.some((l) => /screencap/.test(l)), '反查失败时不得发起任何 screencap')
   assert.match(String(r.text ?? ''), /SurfaceFlinger display token 解析不到/, '必须如实说明反查失败')
   assert.match(String(r.text ?? ''), /不会/, '必须显式声明不回落 displayId 或真实屏')
@@ -265,7 +265,7 @@ test('android_screenshot 虚拟屏反查不到 SF token 时必须 fail-closed（
 test('android_screenshot 不带 screenId 时抓默认屏（语义不变）', async () => {
   const { face, calls } = makeFace({ backend: 'adb' })
   const { byName } = applyManage(face)
-  await byName('android_screenshot').execute({ textRedact: true }, exec)
+  await byName('android_screenshot').execute({}, exec)
   const line = calls.adbLine.find((l) => /screencap/.test(l))
   assert.ok(line, '应发起 screencap')
   assert.ok(!/-d \d+/.test(line), '未指定屏时不得注入 -d（保持真实屏默认语义）')
