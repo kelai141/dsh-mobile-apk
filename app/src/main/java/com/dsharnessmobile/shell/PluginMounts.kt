@@ -473,6 +473,38 @@ object PluginMounts {
    * 只允许对 insert 子条目做隔离；顶层 `- id:` 是对已有 Hard entry 的配置覆盖，不是插件来源。
    * 禁用 override 使用和 profile editor 相同的 Cordis PatchOptions 语义，原始 insert 内容不作修改。
    */
+  /** Finds the owning direct entry header while ignoring nested config list items. */
+  private fun directItemStart(lines: List<String>, index: Int): Int? {
+    var groupStart = index
+    while (groupStart >= 0 && !TOP_LEVEL.matches(lines[groupStart])) groupStart--
+    if (groupStart < 0) return null
+    if (ITEM_LINE.matchEntire(lines[groupStart]) != null) return groupStart
+    if (!TOP_INSERT.matches(lines[groupStart])) return null
+
+    var groupEnd = groupStart + 1
+    while (groupEnd < lines.size && !TOP_LEVEL.matches(lines[groupEnd])) groupEnd++
+    val itemIndent = (groupStart + 1 until groupEnd)
+      .mapNotNull { ITEM_LINE.matchEntire(lines[it])?.groupValues?.get(1)?.length }
+      .minOrNull() ?: return null
+    for (probe in index downTo groupStart + 1) {
+      val match = ITEM_LINE.matchEntire(lines[probe]) ?: continue
+      if (match.groupValues[1].length == itemIndent) return probe
+    }
+    return null
+  }
+
+  /** Only treat keys at the owning entry's mapping level as plugin identity fields. */
+  private fun isEntryKeyLine(lines: List<String>, index: Int): Boolean {
+    val itemStart = directItemStart(lines, index) ?: return false
+    // A list key is an entry header only when it is the direct insert child (or a top-level entry).
+    if (ITEM_LINE.matchEntire(lines[index]) != null) return index == itemStart
+    val header = ITEM_LINE.matchEntire(lines[itemStart]) ?: return false
+    val entryIndent = header.groupValues[1].length
+    val keyOffset = lines[itemStart].substring(entryIndent).indexOfFirst { it.isLetter() }
+    val fieldIndent = lines[index].indexOfFirst { !it.isWhitespace() }
+    return keyOffset >= 0 && fieldIndent == entryIndent + keyOffset
+  }
+
   fun removeEntry(patchText: String, name: String?, id: String?): String? {
     val wanted = listOfNotNull(name?.trim()?.trim('\'', '"'), id?.trim()).filter { it.isNotEmpty() }
     if (wanted.isEmpty()) return null
@@ -480,18 +512,21 @@ object PluginMounts {
     val hits = ArrayList<Int>()
     for (i in lines.indices) {
       val trimmed = lines[i].trim()
-      if (trimmed.startsWith("name:")) {
-        val v = trimmed.removePrefix("name:").trim().trim('\'', '"')
-        if (wanted.contains(v)) hits.add(i)
+      // name may be a regular entry key or the first key on a list item without an id.
+      if (trimmed.startsWith("name:") || trimmed.startsWith("- name:")) {
+        val v = trimmed.removePrefix("- ").removePrefix("name:").trim().trim('\'', '"')
+        // Ignore config-subtree fields that happen to use the same name.
+        if (wanted.contains(v) && isEntryKeyLine(lines, i)) hits.add(i)
       } else if (trimmed.startsWith("- id:")) {
         val v = trimmed.removePrefix("- id:").trim().trim('\'', '"')
-        if (name == null && wanted.contains(v)) hits.add(i)
+        if (name == null && wanted.contains(v) && isEntryKeyLine(lines, i)) hits.add(i)
       }
     }
     if (hits.isEmpty()) return null
     var removed = 0
-    // 从后往前删，索引不失效；同一条目命中多次也只删一次（用已删区间去重）。
-    for (hit in hits.sortedDescending()) {
+    // Map matches to entry starts and deduplicate before deleting from the end.
+    val itemHits = hits.mapNotNull { directItemStart(lines, it) }.distinct().sortedDescending()
+    for (hit in itemHits) {
       var start = hit
       while (start >= 0 && !TOP_LEVEL.matches(lines[start])) start--
       if (start < 0) return null // 找不到顶层起点：宁可不删，也不猜

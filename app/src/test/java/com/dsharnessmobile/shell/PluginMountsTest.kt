@@ -804,4 +804,99 @@ class PluginMountsTest {
       afterChild,
     )
   }
+
+  // ---- 2026-10-28 regression: identity matching must ignore nested config fields ----
+
+  @Test
+  fun configSubtreeNameDoesNotDeleteAProductEntry() {
+    // A product config may contain a name equal to the plugin being removed.
+    val patch = listOf(
+      "- insert:",
+      "    - id: prod-one",
+      "      name: '@dsh-android/prod-one'",
+      "      config:",
+      "        name: evil",
+      "    - id: evil",
+      "      name: evil",
+    ).joinToString("\n") + "\n"
+    val out = PluginMounts.removeEntry(patch, "evil", null)
+    assertNotNull("The matching third-party entry should be removed", out)
+    assertTrue("The product entry must remain: " + out, out!!.contains("- id: prod-one"))
+    assertTrue("The product config must remain intact: " + out, out.contains("name: evil"))
+    assertFalse("The matching third-party entry should be removed", out.contains("id: evil"))
+  }
+
+  @Test
+  fun nameAsTheItemFirstKeyStillMatches() {
+    // An entry whose first key is name must still match without an id field.
+    val patch = listOf(
+      "- insert:",
+      "    - name: evil-pkg",
+      "      config:",
+      "        x: 1",
+    ).joinToString("\n") + "\n"
+    val out = PluginMounts.removeEntry(patch, "evil-pkg", null)
+    assertNotNull("An entry with name as its first key should still match", out)
+    assertFalse("The matching entry should be removed: " + out, out!!.contains("evil-pkg"))
+  }
+
+  @Test
+  fun nestedConfigListNameDoesNotDeleteProductConfigEntry() {
+    val patch = listOf(
+      "- insert:",
+      "    - id: product",
+      "      name: product-package",
+      "      config:",
+      "        aliases:",
+      "          - name: target",
+      "            value: 1",
+      "    - id: target",
+      "      name: target",
+    ).joinToString("\n") + "\n"
+
+    val out = PluginMounts.removeEntry(patch, "target", null)
+
+    assertNotNull("The matching plugin entry should be removed", out)
+    assertTrue("The matching nested config item must remain: " + out, out!!.contains("          - name: target"))
+    assertFalse("The direct plugin entry should be removed: " + out, out.lines().any { it == "    - id: target" })
+  }
+
+  @Test
+  fun nestedConfigListIdDoesNotDeleteProductConfigEntry() {
+    val patch = listOf(
+      "- insert:",
+      "    - id: product",
+      "      name: product-package",
+      "      config:",
+      "        mappings:",
+      "          - id: target",
+      "            value: 1",
+      "    - id: target",
+      "      name: target-package",
+    ).joinToString("\n") + "\n"
+
+    val out = PluginMounts.removeEntry(patch, null, "target")
+
+    assertNotNull("The matching plugin entry should be removed", out)
+    assertTrue("The matching nested config item must remain: " + out, out!!.contains("          - id: target"))
+    assertFalse("The direct plugin entry should be removed: " + out, out.lines().any { it == "    - id: target" })
+  }
+
+  @Test
+  fun removingByIdDoesNotDeleteTheFollowingSiblingWhenBothKeysMatch() {
+    val patch = listOf(
+      "- insert:",
+      "    - id: target",
+      "      name: target",
+      "    - id: keep",
+      "      name: keep",
+    ).joinToString("\n") + "\n"
+
+    val out = PluginMounts.removeEntry(patch, null, "target")
+
+    assertNotNull("The matching plugin entry should be removed", out)
+    assertTrue("The unmatched sibling must remain: " + out, out!!.contains("    - id: keep"))
+    assertTrue("The sibling name must remain: " + out, out.contains("      name: keep"))
+    assertFalse("The matching entry should be removed: " + out, out.contains("    - id: target"))
+  }
 }
