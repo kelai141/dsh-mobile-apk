@@ -178,9 +178,16 @@ internal object ShellOps {
     return ""
   }
 
-  /** `sh -c '<内层>'` 形式（含 `/system/bin/sh`、`busybox sh`、`su` 等包装）。 */
+  /**
+   * `sh -c '<内层>'` 形式（含 `/system/bin/sh`、`busybox sh`、`su` 等包装）。
+   *
+   * 末段必须是「短选项**簇**且簇尾是 `c`」（`-[a-zA-Z]*c`），不能只认光杆 `-c`：
+   * `sh -lc '…'` / `sh -ec '…'` / `sh -xc '…'` / `su -lc '…'` 的 `c` 都在组合簇里，光杆 `-c`
+   * 匹配不到 ⇒ 载荷不展开 ⇒ 该段无命令词 ⇒ 放行。小米 14 Pro（SDK 37，mksh）实测四种簇形态
+   * 都会真的执行引号里的脚本（设备无 bash，Linux 侧同样成立）；`-l -c` 分离写法旧实现本来能认。
+   */
   private val SHELL_C_PAYLOAD = Regex(
-    """(?:^|[ \t])(?:[^\s]*/)?(?:sh|bash|mksh|ash|dash|zsh|busybox|toybox|su)[ \t]+(?:-[^\s]+[ \t]+)*-c[ \t]+([\s\S]*)$""",
+    """(?:^|[ \t])(?:[^\s]*/)?(?:sh|bash|mksh|ash|dash|zsh|busybox|toybox|su)[ \t]+(?:-[^\s]+[ \t]+)*-[a-zA-Z]*c[ \t]+([\s\S]*)$""",
   )
 
   /**

@@ -744,6 +744,66 @@
       ],
       "expect": "allow",
       "why": "跳过终结符后耗尽 ⇒ 没有载荷可展开（shell 会读 stdin，但这条命令本身不含屏命令词）；与 S-10e 成对，防「见 -- 即拒」。"
+    },
+    {
+      "name": "S-13a 组合短选项 -lc 里的 c 同样吃载荷",
+      "command": "sh -lc 'screencap -p /sdcard/real.png'",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "小米 14 Pro（SDK 37，/system/bin/sh = mksh）实测 `sh -lc 'echo SH_LC_RAN'` 打印了标记。旧实现的载荷正则要求**光杆** `-c`，`-lc` 匹配不到 ⇒ 载荷不展开 ⇒ 该段无命令词、无目标屏参数 ⇒ 放行。`-lc` 是 cron / systemd / 登录 shell 的常见写法，命中率比手写变体高得多。"
+    },
+    {
+      "name": "S-13b 组合短选项 -ec",
+      "command": "sh -ec 'screencap -p /sdcard/real.png'",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "小米 14 Pro（SDK 37，/system/bin/sh = mksh）实测 `sh -ec 'echo SH_EC_RAN'` 打印了标记。`-ec` 是「出错即退出 + 执行脚本」的常见组合。"
+    },
+    {
+      "name": "S-13c 组合短选项 -xc",
+      "command": "bash -xc 'input tap 1 2'",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "小米 14 Pro（SDK 37，/system/bin/sh = mksh）实测 `sh -xc 'echo SH_XC_RAN'` 打印了标记（并回显了 `+ echo …` 的 xtrace）。设备上没有 bash，但 Linux 侧同样成立。"
+    },
+    {
+      "name": "S-13d su 的组合短选项 -lc",
+      "command": "su -lc 'screencap -p /sdcard/real.png'",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "小米 14 Pro（SDK 37，/system/bin/sh = mksh）实测 `su -lc 'echo SU_LC_RAN'` 打印了标记（KernelSU 的 su 也认这个组合）。`su` 本来就在包装器名单里，但载荷正则同样只看光杆 `-c`。"
+    },
+    {
+      "name": "对照 -lc 载荷无害仍放行",
+      "command": "sh -lc 'echo hi'",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "与 S-13a 成对：展开后载荷是 `echo hi`，不碰真实屏。"
+    },
+    {
+      "name": "对照 -lc 载荷带已注册目标屏仍放行",
+      "command": "sh -lc 'screencap -p -d 7 /sdcard/virtual.png'",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "与 S-13a 成对且更严格：展开后自带已注册 `-d 7` ⇒ 必须放行。若把「出现 `-l` 之类就拒」写宽，合法虚拟屏截图会被一起拦掉。"
     }
   ]
 }
