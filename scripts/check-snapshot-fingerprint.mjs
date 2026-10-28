@@ -12,6 +12,7 @@
 //   --require  构建链/发布链用：tar 缺席即失败（不得 SKIP exit 0）。也可用 DSH_REQUIRE_SNAPSHOT_FINGERPRINT=1。
 //   --root     仅用于反向验证或非标准布局；缺省自动探测「含 app/src/main 的树」。
 // 退出码：0 = 通过（或 CI 净检出下明确计数并打印的 SKIP）；1 = 不一致 / 声明缺席 / 树定位失败。
+import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs'
 import { join, dirname, relative, resolve } from 'node:path'
@@ -19,6 +20,65 @@ import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = dirname(HERE)
+// ── --self-test：判别力自证（2026-10-29 补；此前这条门禁零判别力面）──────────────────
+//
+// 这条门禁守的是「assets/snapshot.tar.xz 的 sha256 == snapshot.sha256 声明值」—— 手工替换 tar
+// 的唯一机器校验。它本身支持 --root，所以自证可以造五棵临时树，把六个判据分支全打一遍：
+// 匹配 / 不匹配 / 声明缺席 / 声明格式非法 / tar 缺席（SKIP）/ tar 缺席 + --require（硬失败）。
+if (process.argv.includes('--self-test')) {
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import('node:fs')
+  const { createHash: hashOf } = await import('node:crypto')
+  const { tmpdir } = await import('node:os')
+
+  const selfPath = fileURLToPath(import.meta.url)
+  const runGate = (treeArgs) => {
+    try {
+      const out = execFileSync(process.execPath, [selfPath, ...treeArgs], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+      return { code: 0, out }
+    } catch (error) {
+      return { code: error.status ?? 1, out: String(error.stdout ?? '') + String(error.stderr ?? '') }
+    }
+  }
+  const buildTree = (tag, opts) => {
+    const dir = mkdtempSync(join(tmpdir(), 'snapfp-' + tag + '-'))
+    mkdirSync(join(dir, 'app', 'src', 'main', 'assets'), { recursive: true })
+    const bytes = opts.bytes ?? 'snapshot-bytes'
+    if (opts.tar !== false) writeFileSync(join(dir, 'app', 'src', 'main', 'assets', 'snapshot.tar.xz'), bytes)
+    if (opts.sha === 'auto') {
+      writeFileSync(join(dir, 'app', 'src', 'main', 'assets', 'snapshot.sha256'), hashOf('sha256').update(bytes).digest('hex') + '\n')
+    } else if (typeof opts.sha === 'string') {
+      writeFileSync(join(dir, 'app', 'src', 'main', 'assets', 'snapshot.sha256'), opts.sha)
+    }
+    return dir
+  }
+
+  const match = buildTree('match', { sha: 'auto' })
+  const mismatch = buildTree('mismatch', { sha: 'f'.repeat(64) })
+  const noSha = buildTree('nosha', {})
+  const badSha = buildTree('badsha', { sha: 'NOT-A-SHA' })
+  const noTar = buildTree('notar', { tar: false, sha: 'auto' })
+
+  const checks = [
+    ['tar 与声明一致 → PASSED 且 exit 0', runGate(['--root', match]), (r) => r.code === 0 && r.out.includes('SNAPSHOT-FINGERPRINT CHECK PASSED')],
+    ['声明与 tar 不一致 → FAILED 且指出「手工替换」', runGate(['--root', mismatch]), (r) => r.code === 1 && r.out.includes('指纹与快照不一致') && r.out.includes('手工替换')],
+    ['声明缺席 → FAILED（无法对账）', runGate(['--root', noSha]), (r) => r.code === 1 && r.out.includes('指纹声明缺席')],
+    ['声明格式非法 → FAILED（不是 64 位小写十六进制）', runGate(['--root', badSha]), (r) => r.code === 1 && r.out.includes('指纹声明格式非法')],
+    ['tar 缺席（非 --require）→ SKIP 且 exit 0、带 SKIP=1', runGate(['--root', noTar]), (r) => r.code === 0 && r.out.includes('SKIP=1')],
+    ['tar 缺席 + --require → 硬失败 exit 1', runGate(['--root', noTar, '--require']), (r) => r.code === 1 && r.out.includes('快照 tar 不在场')],
+  ]
+  let bad = 0
+  for (const [label, result, verify] of checks) {
+    const ok = verify(result)
+    console.log((ok ? 'PASS  ' : 'FAIL  ') + label + (ok ? '' : '  -> exit=' + result.code + ' out=' + result.out.trim().slice(0, 200)))
+    if (!ok) bad += 1
+  }
+  for (const dir of [match, mismatch, noSha, badSha, noTar]) rmSync(dir, { recursive: true, force: true })
+  console.log(bad === 0
+    ? 'SNAPSHOT_FP_SELF_TEST_PASSED（' + checks.length + ' 项）'
+    : 'SNAPSHOT_FP_SELF_TEST_FAILED（' + bad + ' 项）')
+  process.exit(bad === 0 ? 0 : 1)
+}
+
 const argv = process.argv.slice(2)
 const rootIdx = argv.indexOf('--root')
 const OVERRIDE = rootIdx >= 0 ? argv[rootIdx + 1] : process.env.DSH_APK_ROOT
