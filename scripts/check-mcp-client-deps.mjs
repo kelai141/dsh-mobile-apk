@@ -28,6 +28,80 @@ import { TAR } from './lib/shell.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = dirname(HERE)
+// ── --self-test：判别力自证（2026-10-29 补；此前这条门禁零判别力面）──────────────────
+//
+// 它守的是「快照内 @deepseek-ai/dsh-mcp-client 的运行期依赖**闭包**必须可解析」——
+// 那条真实用户诊断包里的 boot 硬崩（Cannot find package '@modelcontextprotocol/client'）
+// 就是这条判据的由来。自证造四个极小快照（--snapshot 指向），把六个分支全打一遍，
+// 其中「传递闭包缺」那条专门证明它查的是闭包而不是一层。
+if (process.argv.includes('--self-test')) {
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+
+  const selfPath = fileURLToPath(import.meta.url)
+  const NM = 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules'
+  const runGate = (gateArgs) => {
+    try {
+      const out = execFileSync(process.execPath, [selfPath, ...gateArgs], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+      return { code: 0, out }
+    } catch (error) {
+      return { code: error.status ?? 1, out: String(error.stdout ?? '') + String(error.stderr ?? '') }
+    }
+  }
+  /** pkgs: { 包名: { dependencies } }；包名带 @scope 的会落到 @scope/name 子目录。 */
+  const buildSnapshot = (tag, pkgs) => {
+    const dir = mkdtempSync(join(tmpdir(), 'mcpsnap-' + tag + '-'))
+    const nmDir = join(dir, ...NM.split('/'))
+    for (const [name, meta] of Object.entries(pkgs)) {
+      const pkgDir = join(nmDir, ...name.split('/'))
+      mkdirSync(pkgDir, { recursive: true })
+      writeFileSync(join(pkgDir, 'package.json'),
+        JSON.stringify({ name, version: '1.0.0', dependencies: meta.dependencies ?? {} }))
+    }
+    const tops = ['usr']
+    const archive = join(tmpdir(), 'mcpsnap-' + tag + '-' + process.pid + '.tar.xz')
+    execFileSync(TAR, ['-cJf', archive, '-C', dir, ...tops], { stdio: ['ignore', 'pipe', 'pipe'] })
+    rmSync(dir, { recursive: true, force: true })
+    return archive
+  }
+
+  const HOST = '@deepseek-ai/dsh-mcp-client'
+  const ok = buildSnapshot('ok', {
+    [HOST]: { dependencies: { 'dep-a': '^1' } },
+    'dep-a': { dependencies: {} },
+  })
+  const oneLevel = buildSnapshot('onelevel', {
+    [HOST]: { dependencies: { 'dep-a': '^1', 'dep-missing': '^1' } },
+    'dep-a': {},
+  })
+  const transitive = buildSnapshot('transitive', {
+    [HOST]: { dependencies: { 'dep-a': '^1' } },
+    'dep-a': { dependencies: { 'dep-deep-missing': '^2' } },
+  })
+  const noHost = buildSnapshot('nohost', { 'dep-a': {} })
+  const absent = join(tmpdir(), 'mcpsnap-absent-' + process.pid + '.tar.xz')
+
+  const checks = [
+    ['合规快照（宿主只依赖在场的 dep-a）→ PASSED 且 exit 0', runGate(['--snapshot', ok]), (r) => r.code === 0 && r.out.includes('CHECK-MCP-CLIENT-DEPS PASSED')],
+    ['一层依赖缺 → FAILED 且点名 MISS 与设备后果', runGate(['--snapshot', oneLevel]), (r) => r.code === 1 && r.out.includes('MISS  dep-missing') && r.out.includes('ERR_MODULE_NOT_FOUND')],
+    ['传递闭包缺（dep-a 依赖 dep-deep-missing）→ FAILED（证明查的是闭包不是一层）', runGate(['--snapshot', transitive]), (r) => r.code === 1 && r.out.includes('dep-deep-missing')],
+    ['快照缺席（非 --require）→ SKIP(#1) 且 exit 0', runGate(['--snapshot', absent]), (r) => r.code === 0 && r.out.includes('SKIP(#1)')],
+    ['快照缺席 + --require → 硬失败 exit 1', runGate(['--snapshot', absent, '--require']), (r) => r.code === 1 && r.out.includes('CHECK-MCP-CLIENT-DEPS FAILED')],
+    ['宿主包不在快照 → SKIP(#2)（上游裁包/改名，本门禁不适用）', runGate(['--snapshot', noHost]), (r) => r.code === 0 && r.out.includes('SKIP(#2)')],
+  ]
+  let bad = 0
+  for (const [label, result, verify] of checks) {
+    const pass = verify(result)
+    console.log((pass ? 'PASS  ' : 'FAIL  ') + label + (pass ? '' : '  -> exit=' + result.code + ' out=' + result.out.trim().slice(0, 240)))
+    if (!pass) bad += 1
+  }
+  for (const a of [ok, oneLevel, transitive, noHost]) rmSync(a, { force: true })
+  console.log(bad === 0
+    ? 'MCP_CLIENT_DEPS_SELF_TEST_PASSED（' + checks.length + ' 项）'
+    : 'MCP_CLIENT_DEPS_SELF_TEST_FAILED（' + bad + ' 项）')
+  process.exit(bad === 0 ? 0 : 1)
+}
+
 const args = process.argv.slice(2)
 let ABI = 'x86_64'
 let SNAP_OVERRIDE = null
