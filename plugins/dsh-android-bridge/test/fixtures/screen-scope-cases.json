@@ -315,6 +315,69 @@
     {"name": "S-11c source 点命令同样不可见", "command": ". /tmp/x.sh", "ownedTargets": ["7", "11529215046816944610"], "expect": "deny-unparsed", "why": "`.`/`source` 把文件内容当命令执行，静态不可判。"},
     {"name": "S-11d env 包装的解释器", "command": "env sh", "ownedTargets": ["7", "11529215046816944610"], "expect": "deny-unparsed", "why": "包装器不改变「载荷不可见」这一事实。"},
     {"name": "S-11e timeout 包装的解释器", "command": "timeout 5 sh -s", "ownedTargets": ["7", "11529215046816944610"], "expect": "deny-unparsed", "why": "包装器 + 数字参数都要跳过才认得出命令词。"},
-    {"name": "对照 sh 只是 echo 的参数（不得误拦）", "command": "echo sh -s", "ownedTargets": ["7", "11529215046816944610"], "expect": "allow", "why": "命令词是 echo，`sh -s` 只是它的参数 ⇒ 不执行。与 S-11a 成对，防止把「出现解释器名」写成「凡出现就拒」。"}
+    {"name": "对照 sh 只是 echo 的参数（不得误拦）", "command": "echo sh -s", "ownedTargets": ["7", "11529215046816944610"], "expect": "allow", "why": "命令词是 echo，`sh -s` 只是它的参数 ⇒ 不执行。与 S-11a 成对，防止把「出现解释器名」写成「凡出现就拒」。"},
+    {
+      "name": "S-10d trap 的 -- 是选项终结符，不是载荷",
+      "command": "trap -- 'screencap -p /sdcard/real.png' EXIT",
+      "ownedTargets": ["7", "11529215046816944610"],
+      "expect": "deny-uncertified-target",
+      "why": "小米 14 Pro（/system/bin/sh = mksh，SDK 37）实测 `trap -- \"echo TRAP_DASHES_RAN\" EXIT` 打印了标记 ⇒ 真载荷照跑。旧实现把载荷第一词 `--` 当命令 ⇒ 内层 screencap 被丢弃 ⇒ 该段无命令词、无目标屏参数 ⇒ 放行（读真实屏）。"
+    },
+    {
+      "name": "S-10e sh -c 的 -- 同理",
+      "command": "sh -c -- 'screencap -p /sdcard/real.png'",
+      "ownedTargets": ["7", "11529215046816944610"],
+      "expect": "deny-uncertified-target",
+      "why": "小米 14 Pro（/system/bin/sh = mksh，SDK 37）实测 `sh -c -- 'echo SH_C_DASHES_RAN'` 打印了标记（本机 dash / bash / busybox sh 同样执行）。`-c` 之后的裸 `--` 由 shell 自己吃掉，脚本串是它后面的那个词。"
+    },
+    {
+      "name": "S-10f eval 的 -- 同理",
+      "command": "eval -- 'input tap 1 2'",
+      "ownedTargets": ["7", "11529215046816944610"],
+      "expect": "deny-uncertified-target",
+      "why": "小米 14 Pro（/system/bin/sh = mksh，SDK 37）实测 `eval -- \"echo EVAL_DASHES_RAN\"` 打印了标记（本机 bash 同样执行；dash/busybox 的 eval 不认 `--`，落 `not found` —— 但三者对「载荷在哪个位置」的理解都要求跳过终结符，故按 mksh 行为 fail-closed）。"
+    },
+    {
+      "name": "S-10g -- 被引号包裹时同样是终结符",
+      "command": "trap \"--\" 'screencap -p /sdcard/real.png' EXIT",
+      "ownedTargets": ["7", "11529215046816944610"],
+      "expect": "deny-uncertified-target",
+      "why": "小米 14 Pro（/system/bin/sh = mksh，SDK 37）实测 `trap \"--\" \"echo Q_TRAP_RAN\" EXIT` 打印了标记；`sh -c \"--\" 'echo …'`、`eval \"--\" \"echo …\"` 同样执行。引号只影响 shell 词法，不影响选项解析 ⇒ 判据必须用**解引号后**的词是否等于 `--`。"
+    },
+    {
+      "name": "S-10h 跳过 -- 之后仍要真的认证虚拟屏（防一律拒）",
+      "command": "sh -c -- 'screencap -p -d 7 /sdcard/virtual.png'",
+      "ownedTargets": ["7", "11529215046816944610"],
+      "expect": "allow",
+      "why": "与 S-10e 成对：展开后载荷自带已注册 `-d 7` ⇒ 必须放行。若把「出现 `--` 就拒」写成判据，会把合法的虚拟屏截图一起拦掉。"
+    },
+    {
+      "name": "S-10i 嵌套 -- 也要逐层展开",
+      "command": "sh -c -- \"sh -c -- 'screencap -p /sdcard/real.png'\"",
+      "ownedTargets": ["7", "11529215046816944610"],
+      "expect": "deny-uncertified-target",
+      "why": "工作队列的逐层展开必须在每一层都跳过 `--`；只修最外层等于把嵌套形态留成洞。"
+    },
+    {
+      "name": "对照 trap -- 无害载荷仍放行",
+      "command": "trap -- 'echo hi' EXIT",
+      "ownedTargets": ["7", "11529215046816944610"],
+      "expect": "allow",
+      "why": "与 S-10d 成对：跳过终结符后载荷不碰真实屏。"
+    },
+    {
+      "name": "对照 trap -p 只是查询，不得误拦",
+      "command": "trap -p",
+      "ownedTargets": ["7", "11529215046816944610"],
+      "expect": "allow",
+      "why": "`-p` 不是 `--`，仍按「取第一个词」处理（该段无命令词）；若把「跳过一切选项词」写成判据，`trap -p` 之类查询命令会变成可拒绝面。"
+    },
+    {
+      "name": "对照 sh -c -- 无载荷不得误拦",
+      "command": "sh -c --",
+      "ownedTargets": ["7", "11529215046816944610"],
+      "expect": "allow",
+      "why": "跳过终结符后耗尽 ⇒ 没有载荷可展开（shell 会读 stdin，但这条命令本身不含屏命令词）；与 S-10e 成对，防「见 -- 即拒」。"
+    }
   ]
 }

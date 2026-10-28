@@ -158,6 +158,26 @@ internal object ShellOps {
     return text.substring(i, j) to text.substring(j)
   }
 
+  /**
+   * 载荷里第一个**非选项终结符**词：`--` 只是选项终结符，真正的载荷在它后面。
+   *
+   * 与引擎侧 `firstPayloadWord` 同源（2026-10-28 自查实测，安全侧漏拦）：
+   * `trap -- 'screencap -p /sdcard/real.png' EXIT` / `sh -c -- '…'` / `eval -- '…'` 的载荷以
+   * `--` 开头，旧实现直接把它当载荷 ⇒ 真正的内层命令被丢弃 ⇒ 该段无屏幕命令词、
+   * 无目标屏参数 ⇒ 放行（读真实屏）。小米 14 Pro（`/system/bin/sh` = mksh，SDK 37）实测三条
+   * **都会真的执行 `--` 后面的命令**；`--` 被引号包裹时同样是终结符
+   * （`trap "--" 'cmd' EXIT` 真机实测执行），故判据用**解引号后**的词是否恰好等于 `--`。
+   */
+  private fun firstPayloadWord(text: String): String {
+    var rest = text
+    for (guard in 0 until 8) {
+      val (word, remainder) = firstShellWord(rest)
+      if (word != "--") return word
+      rest = remainder
+    }
+    return ""
+  }
+
   /** `sh -c '<内层>'` 形式（含 `/system/bin/sh`、`busybox sh`、`su` 等包装）。 */
   private val SHELL_C_PAYLOAD = Regex(
     """(?:^|[ \t])(?:[^\s]*/)?(?:sh|bash|mksh|ash|dash|zsh|busybox|toybox|su)[ \t]+(?:-[^\s]+[ \t]+)*-c[ \t]+([\s\S]*)$""",
@@ -632,7 +652,8 @@ internal object ShellOps {
         ?: continue
       // 取载荷的**第一个词**（不是整段剩余）：`sh -c 'cmd' sh` / `eval 'cmd' foo` / `trap 'cmd' EXIT`
       // 的尾随 argv 会让「整段首尾成对」判据失效，从而整段不展开（安全侧漏拦，与引擎侧同源）。
-      val inner = firstShellWord(payload.groupValues[1]).first
+      // `--` 是**选项终结符**，不是载荷：`trap -- 'cmd' EXIT` 真机会执行 cmd（见 `firstPayloadWord`）。
+      val inner = firstPayloadWord(payload.groupValues[1])
       if (inner.isEmpty()) continue
       val before = segments.size
       scan(inner, 1)

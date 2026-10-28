@@ -265,6 +265,26 @@ function firstShellWord(text: string): { word: string; rest: string } {
   return { word: text.slice(i, j), rest: text.slice(j) }
 }
 
+/**
+ * 载荷里第一个**非选项终结符**词：`--` 只是选项终结符，真正的载荷在它后面。
+ *
+ * 缺陷形态（2026-10-28 自查实测，安全侧漏拦）：`trap -- 'screencap -p /sdcard/real.png' EXIT`、
+ * `sh -c -- '…'`、`eval -- '…'` 的 `payload[1]` 以 `--` 开头，旧实现直接把它当载荷 ⇒ 真正的内层
+ * 命令被丢弃 ⇒ 该段既无屏幕命令词、也无目标屏参数 ⇒ `continue` 放行（读真实屏）。
+ * 小米 14 Pro（`/system/bin/sh` = mksh，SDK 37）实测三条**都会真的执行 `--` 后面的命令**；
+ * 本机 dash / bash / busybox sh 同样执行。`--` 被引号包裹时也是终结符
+ * （`trap "--" 'cmd' EXIT` 真机实测执行），故判据用**解引号后**的词是否恰好等于 `--`。
+ */
+function firstPayloadWord(text: string): string {
+  let rest = text
+  for (let guard = 0; guard < 8; guard += 1) {
+    const { word, rest: remainder } = firstShellWord(rest)
+    if (word !== '--') return word
+    rest = remainder
+  }
+  return ''
+}
+
 const INTERPRETER_NAMES = new Set(['sh', 'bash', 'mksh', 'ash', 'dash', 'zsh'])
 const INTERPRETER_WRAPPERS = new Set(['env', 'timeout', 'nohup', 'xargs', 'busybox', 'toybox', 'su', 'command', 'exec'])
 
@@ -406,7 +426,8 @@ export function splitCommandSegments(command: string): CommandSegments {
     if (payload === null) continue
     // 取载荷的**第一个词**（不是整段剩余）：`sh -c 'cmd' sh`、`eval 'cmd' foo`、`trap 'cmd' EXIT`
     // 的尾随 argv 会让「整段首尾成对」判据失效，从而整段不展开（安全侧漏拦）。
-    const inner = firstShellWord(payload[1]).word
+    // `--` 是**选项终结符**，不是载荷：`trap -- 'cmd' EXIT` 真机会执行 cmd（见 `firstPayloadWord`）。
+    const inner = firstPayloadWord(payload[1])
     if (inner.length === 0) continue
     const before = segments.length
     scan(inner, 1)
