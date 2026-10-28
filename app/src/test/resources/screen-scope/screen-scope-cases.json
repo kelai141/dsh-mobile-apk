@@ -1414,6 +1414,96 @@
       ],
       "expect": "deny-uncertified-target",
       "why": "同上：新版本 ROM 才有的子命令，白名单式判据必然漏，反向表默认拒。"
+    },
+    {
+      "name": "S-19a glob ? 拼出命令名（/system/bin/scr?encap）必须判拒",
+      "command": "/system/bin/scr?encap -p /sdcard/x.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "真机实测（小米 14 Pro / SDK 37 / mksh）glob 展开为 /system/bin/screencap，RC=0 出图 2861741 B，与对照同字节；词面无 screencap ⇒ 修前一路放行。"
+    },
+    {
+      "name": "S-19b glob 字符类拼出命令名（/system/bin/[s]creencap）必须判拒",
+      "command": "/system/bin/[s]creencap -p /sdcard/x.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "同上，真机展开为 /system/bin/screencap，RC=0 出图 2861741 B。"
+    },
+    {
+      "name": "S-19c glob 星号拼出命令名（/system/bin/scree*cap）必须判拒",
+      "command": "/system/bin/scree*cap -p /sdcard/x.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "真机展开为 /system/bin/screencap，RC=0 出图 2861649 B（与正常 screencap 同字节）。"
+    },
+    {
+      "name": "S-19d 子命令位 glob（cmd win?ow）必须判拒",
+      "command": "cmd win?ow size 900x1600",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "`cmd window size` 是 wm 的等价拼写、真改真实屏；glob 让家族 pattern 匹配不到 ⇒ 必须 fail-closed。"
+    },
+    {
+      "name": "S-19e 子命令位 glob（input t?p）必须判拒",
+      "command": "input t?p 1 2",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "input 的 tap 子命令能向真实屏注入触摸；子命令位被 glob 拆开时词面不可判。"
+    },
+    {
+      "name": "S-19f 对照 参数位 glob（ls /sdcard/*.png）仍放行",
+      "command": "ls /sdcard/*.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "与 S-19a~e 成对：glob 只出现在参数位不改变命令身份，误拦会挡掉正常文件操作。"
+    },
+    {
+      "name": "S-19g 对照 参数位 glob（rm /sdcard/x*）仍放行",
+      "command": "rm /sdcard/x*",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "同上：命令词无 glob 即安全，不得因参数里有 * 就拒。"
+    },
+    {
+      "name": "S-19h 对照 引号内 glob 不展开（\"/system/bin/scr?encap\"）仍放行",
+      "command": "\"/system/bin/scr?encap\" -p /sdcard/x.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "真机实测引号内 glob 不展开，执行字面量 ⇒ RC=127 inaccessible or not found，属「allow 但不可利用」。"
+    },
+    {
+      "name": "S-19i 对照 已认证目标屏的 screencap 仍放行",
+      "command": "screencap -d 7 -p /sdcard/x.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "确认 glob 判据没有把既有正常路径（-d 指向已注册虚拟屏）一起拦掉。"
     }
   ]
 }

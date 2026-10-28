@@ -247,6 +247,104 @@ internal object ShellOps {
     return head.startsWith("$") || head.startsWith("`")
   }
 
+  /** shell glob 元字符是否出现在**引号外**（引号内的 `*`/`?` 不展开，不参与判定）。 */
+  private fun hasUnquotedGlob(text: String): Boolean {
+    var quote = '\u0000'
+    var i = 0
+    while (i < text.length) {
+      val ch = text[i]
+      if (quote == '\u0000') {
+        if (ch == '"' || ch == '\'') {
+          quote = ch
+          i += 1
+          continue
+        }
+        if (ch == '\\') {
+          i += 2
+          continue
+        }
+        if (ch == '*' || ch == '?' || ch == '[') return true
+      } else if (ch == quote) {
+        quote = '\u0000'
+      }
+      i += 1
+    }
+    return false
+  }
+
+  /**
+   * 经典贪心 glob 匹配（`*` / `?` / `[abc]` / `[!abc]` 单字符集）。
+   *
+   * 为什么不用「转成正则再 match」：glob 与正则元字符大面积重叠，转换本身就是新的判定面
+   * （`$`、反斜杠、`[` 的转义漏一处就是漏拦或误拦）。这里逐字符走指针，只有 4 个分支，
+   * 行为可逐条 fixture 核对。不支持范围写法（`[a-z]`）—— 判据只需回答「这个名字能不能拼出
+   * 已知命令名」，单字符集足够。
+   */
+  private fun globMatch(pattern: String, subject: String): Boolean {
+    var pi = 0
+    var si = 0
+    var starPi = -1
+    var starSi = 0
+    while (si < subject.length) {
+      val pc = if (pi < pattern.length) pattern[pi] else '\u0000'
+      if (pi < pattern.length && (pc == '?' || pc == subject[si])) {
+        pi += 1
+        si += 1
+      } else if (pi < pattern.length && pc == '[') {
+        val close = pattern.indexOf(']', pi + 1)
+        if (close < 0) return false
+        var body = pattern.substring(pi + 1, close)
+        val negate = body.startsWith("!")
+        if (negate) body = body.substring(1)
+        val hit = body.contains(subject[si])
+        if (hit == negate) return false
+        pi = close + 1
+        si += 1
+      } else if (pi < pattern.length && pc == '*') {
+        starPi = pi
+        starSi = si
+        pi += 1
+      } else if (starPi >= 0) {
+        pi = starPi + 1
+        starSi += 1
+        si = starSi
+      } else {
+        return false
+      }
+    }
+    while (pi < pattern.length && pattern[pi] == '*') pi += 1
+    return pi == pattern.length
+  }
+
+  private fun globExpandsToScreenCommand(segment: String): Boolean {
+    if (!hasUnquotedGlob(segment)) return false
+    val head = firstShellWord(segment.trim()).first
+    val base = head.substringAfterLast('/')
+    if (base.any { it == '*' || it == '?' || it == '[' }) {
+      if (SCREEN_EXECUTABLE_NAMES.any { globMatch(base, it) }) return true
+    }
+    return base in SCREEN_SUBCOMMAND_HEADS
+  }
+
+  /**
+   * 命令词用 glob 拼出屏幕命令名（`/system/bin/scr?encap` / `[s]creencap` / `scree*cap`）：
+   * shell 先展开再执行，而词面与任何家族 pattern 都不匹配 ⇒ 一路放行。
+   * 真机实测（2026-10-28，小米 14 Pro / SDK 37 / mksh），均 RC=0 且出图与对照同字节：
+   * `/system/bin/scr?encap` 2861741 B、`/system/bin/[s]creencap` 2861741 B、
+   * `/system/bin/scree*cap` 2861649 B、对照 `screencap` 2861649 B。
+   * 只认**引号外**的 glob：`"/system/bin/scr?encap"` 不展开（真机 RC=127），属无害字面量。
+   * 参数位的 glob 不改变命令身份 —— `ls /sdcard/x*.png`、`rm /sdcard/x*` 必须继续放行（不得误拦）。
+   */
+  private val SCREEN_EXECUTABLE_NAMES = listOf(
+    "screencap", "screenrecord", "input", "wm", "uiautomator", "dumpsys",
+    "sendevent", "getevent", "monkey", "am",
+  )
+
+  /** 这些可执行名本身无害，但**子命令位**才决定是否碰真实屏（`cmd win?ow size 900x1600`）。 */
+  private val SCREEN_SUBCOMMAND_HEADS = listOf(
+    "cmd", "wm", "input", "am", "dumpsys", "uiautomator", "monkey", "sendevent", "getevent",
+  )
+
   /**
    * `awk` 的 `system(…)` 能执行任意命令，而程序文本通常整段在引号里 —— stripQuotedText 之后
    * 命令词面只剩 `awk`，载荷里的屏幕命令完全不可见。
@@ -546,6 +644,8 @@ internal object ShellOps {
       if (AWK_EXEC_PAYLOAD.containsMatchIn(segment)) {
         return ScreenCommandVerdict.DENY_UNPARSED
       }
+      // 命令词用 glob 拼出屏幕命令名（`/system/bin/scr?encap`）：词面不等于执行词 ⇒ 不可判。
+      if (globExpandsToScreenCommand(segment)) return ScreenCommandVerdict.DENY_UNPARSED
       // 裸解释器段：管道/重定向喂 shell 的载荷对判定器不可见（#509），fail-closed。
       if (interpreterPayloadUnparsed(bare)) {
         return ScreenCommandVerdict.DENY_UNPARSED

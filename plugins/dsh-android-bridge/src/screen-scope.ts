@@ -378,6 +378,97 @@ function isRuntimeCommandName(segment: string): boolean {
  */
 const AWK_EXEC_PAYLOAD =
   /^[ \t]*(?:[^\s]*\/)?(?:busybox[ \t]+|toybox[ \t]+)?awk\b[^;|&]*\bsystem[ \t]*\(/i
+/** shell glob 元字符是否出现在**引号外**（引号内的 `*`/`?` 不展开，不参与判定）。 */
+function hasUnquotedGlob(text: string): boolean {
+  let quote = ''
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]
+    if (quote === '') {
+      if (ch === '"' || ch === "'") {
+        quote = ch
+        continue
+      }
+      if (ch === '\\') {
+        i += 1
+        continue
+      }
+      if (ch === '*' || ch === '?' || ch === '[') return true
+    } else if (ch === quote) {
+      quote = ''
+    }
+  }
+  return false
+}
+
+/**
+ * 经典贪心 glob 匹配（`*` / `?` / `[abc]` / `[!abc]` 单字符集）。
+ * 与壳侧 `ShellOps.globMatch` 逐分支同构 —— 两侧算法一致比「各自实现、口头等价」容易核对，
+ * 也避开「转成正则再 match」那一步自身的转义判定面（`$` / 反斜杠 / `[` 漏一处就是漏拦或误拦）。
+ * 不支持范围写法（`[a-z]`）：判据只需回答「这个名字能不能拼出已知命令名」，单字符集足够。
+ */
+function globMatch(pattern: string, subject: string): boolean {
+  let pi = 0
+  let si = 0
+  let starPi = -1
+  let starSi = 0
+  while (si < subject.length) {
+    const pc = pi < pattern.length ? pattern[pi] : ''
+    if (pi < pattern.length && (pc === '?' || pc === subject[si])) {
+      pi += 1
+      si += 1
+    } else if (pi < pattern.length && pc === '[') {
+      const close = pattern.indexOf(']', pi + 1)
+      if (close < 0) return false
+      let body = pattern.slice(pi + 1, close)
+      const negate = body.startsWith('!')
+      if (negate) body = body.slice(1)
+      const hit = body.includes(subject[si])
+      if (hit === negate) return false
+      pi = close + 1
+      si += 1
+    } else if (pi < pattern.length && pc === '*') {
+      starPi = pi
+      starSi = si
+      pi += 1
+    } else if (starPi >= 0) {
+      pi = starPi + 1
+      starSi += 1
+      si = starSi
+    } else {
+      return false
+    }
+  }
+  while (pi < pattern.length && pattern[pi] === '*') pi += 1
+  return pi === pattern.length
+}
+
+/**
+ * 命令词用 glob 拼出屏幕命令名（`/system/bin/scr?encap` / `[s]creencap` / `scree*cap`）：
+ * shell 会先展开成 `screencap` 再执行，而词面与任何家族 pattern 都不匹配 ⇒ 一路放行。
+ * 真机实测（2026-10-28，小米 14 Pro / SDK 37 / mksh），均 RC=0 且出图与对照同字节：
+ *   `/system/bin/scr?encap` 2861741 B、`/system/bin/[s]creencap` 2861741 B、
+ *   `/system/bin/scree*cap` 2861649 B、对照 `screencap` 2861649 B。
+ * 只认**引号外**的 glob：`"/system/bin/scr?encap"` 不展开（真机 RC=127），属无害字面量。
+ * 参数位的 glob 不改变命令身份 —— `ls /sdcard/*.png`、`rm /sdcard/x*` 必须继续放行。
+ */
+const SCREEN_EXECUTABLE_NAMES = [
+  'screencap', 'screenrecord', 'input', 'wm', 'uiautomator', 'dumpsys',
+  'sendevent', 'getevent', 'monkey', 'am',
+]
+/** 这些可执行名本身无害，但**子命令位**才决定是否碰真实屏（`cmd win?ow size 900x1600`）。 */
+const SCREEN_SUBCOMMAND_HEADS = [
+  'cmd', 'wm', 'input', 'am', 'dumpsys', 'uiautomator', 'monkey', 'sendevent', 'getevent',
+]
+
+function globExpandsToScreenCommand(segment: string): boolean {
+  if (!hasUnquotedGlob(segment)) return false
+  const head = firstShellWord(segment.trim()).word
+  const base = head.slice(head.lastIndexOf('/') + 1)
+  if (/[*?\[]/.test(base)) {
+    if (SCREEN_EXECUTABLE_NAMES.some((name) => globMatch(base, name))) return true
+  }
+  return SCREEN_SUBCOMMAND_HEADS.includes(base)
+}
 
 /** 去掉一层首尾成对的引号（`sh -c "…"` 的载荷取值）。不成对则原样返回。 */
 function unwrapOneQuote(text: string): string {
@@ -725,6 +816,8 @@ export function screenCommandVerdict(
     if (isRuntimeCommandName(segment)) return 'deny-unparsed'
     // `awk` 的 system() 载荷不可见（程序文本在引号里）⇒ fail-closed。
     if (AWK_EXEC_PAYLOAD.test(segment)) return 'deny-unparsed'
+    // 命令词用 glob 拼出屏幕命令名（`/system/bin/scr?encap`）：词面不等于执行词 ⇒ 不可判。
+    if (globExpandsToScreenCommand(segment)) return 'deny-unparsed'
     // 载荷不可见的解释器调用：静态判不了，fail-closed。
     if (interpreterPayloadUnparsed(bare)) return 'deny-unparsed'
     const options = displayOptionsIn(bare)
