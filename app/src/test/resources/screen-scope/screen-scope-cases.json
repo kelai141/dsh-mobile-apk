@@ -954,6 +954,26 @@
       ],
       "expect": "allow",
       "why": "与 S-14a 成对且更严格：展开后自带已注册 `-d 7` ⇒ 必须放行，防「见到 -o 就拒」。"
+    },
+    {
+      "name": "S-9g 非屏幕命令里的畸形 -d 也 fail-closed（唯一门槛在 MALFORMED）",
+      "command": "echo -d=7",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "`displayOptionsIn` 认不出 `-d=7` ⇒ options 为空；而本段没有屏幕命令词 ⇒ 走「非屏幕命令段」分支，那里只拦「携带目标屏凭据」（options.length>0）。若没有 MALFORMED 判据，这条会 continue 放行。变异验证：把 MALFORMED_DISPLAY_OPTION 改成永不匹配，本用例由 deny 变 allow，且其余用例全部仍绿 ⇒ 它是这条路径唯一的守门人。"
+    },
+    {
+      "name": "S-9h 非屏幕命令里的 -dx（短选项后跟非数字）同样 fail-closed",
+      "command": "ls -dx",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "同 S-9g，覆盖 MALFORMED 正则的第二支 `(?![0-9\\s])\\S`（短选项后紧跟非数字、且非空白）。"
     }
   ]
 }
