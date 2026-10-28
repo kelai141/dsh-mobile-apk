@@ -192,6 +192,13 @@ export function installClipboardModelDrafts(): () => void {
     // whole document for each of those frames and the streaming UI pays for it (2026-10-28
     // scan M3; same shape as the about-entry observer's dialog filter).
     const scopes = [...document.querySelectorAll(EDITOR_SCOPE)]
+    const removedTrackedEditor = records.some(record =>
+      [...record.removedNodes].some(node => node instanceof Element
+        && [...editors.keys()].some(owner => node === owner || node.contains(owner))))
+    if (removedTrackedEditor) {
+      scan()
+      return
+    }
     if (scopes.length === 0) return
     const withinScope = (node: Node): boolean =>
       node instanceof Element && scopes.some(scope => scope.contains(node))

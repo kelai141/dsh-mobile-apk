@@ -45,7 +45,11 @@ async function setup(locale = 'en', onboarding = false) {
   root = createRoot(host)
   await act(async () => root!.render(<Editor />))
   const request = vi.fn()
-  ;(window as unknown as { androidBridge: unknown }).androidBridge = { requestClipboardText: request }
+  const cancel = vi.fn()
+  ;(window as unknown as { androidBridge: unknown }).androidBridge = {
+    requestClipboardText: request,
+    cancelClipboardText: cancel,
+  }
   dispose = installClipboardModelDrafts()
   const click = async (label: string) => {
     const button = [...host.querySelectorAll('button')].find(b => b.textContent === label)
@@ -57,7 +61,7 @@ async function setup(locale = 'en', onboarding = false) {
       detail: { requestId, ok: text !== undefined, text },
     })))
   }
-  return { host, saves, request, click, deliver, state: () => JSON.parse(host.querySelector('output')!.textContent!) }
+  return { host, saves, request, cancel, click, deliver, state: () => JSON.parse(host.querySelector('output')!.textContent!) }
 }
 
 describe('clipboard configuration into React drafts', () => {
@@ -197,5 +201,22 @@ describe('clipboard configuration into React drafts', () => {
     const panel = document.querySelector('[data-dsh-clipboard-draft]')
     expect(panel).not.toBeNull()
     expect(panel!.textContent).toContain('API key: hidden')
+  })
+
+  /** Removing the last dialog must dispose its editor and cancel any in-flight native read. */
+  it('disposes tracked editors when the last dialog is removed', async () => {
+    const ui = await setup()
+    await ui.click('Fill from clipboard')
+    expect(ui.request).toHaveBeenCalledOnce()
+    const requestId = ui.request.mock.calls[0][0]
+
+    await act(async () => { root!.unmount(); root = undefined })
+    await flushObservers()
+
+    expect(ui.cancel).toHaveBeenCalledOnce()
+    expect(ui.cancel).toHaveBeenCalledWith(requestId)
+    await ui.deliver('late-secret', requestId)
+    expect(ui.host.textContent).not.toContain('late-secret')
+    expect(ui.host.querySelector('[data-dsh-clipboard-draft]')).toBeNull()
   })
 })
