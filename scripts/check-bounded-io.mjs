@@ -16,12 +16,66 @@
 //
 // 豁免通道只有一个且必须写明理由：在命中行或上一行加注释 `bounded-io-exempt: <理由>`。
 // 放宽正则而漏报比误报更危险——任何新增豁免都要在 PR 里给出理由。
-import { readdirSync, statSync, readFileSync, existsSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync, statSync, readFileSync, existsSync } from 'node:fs'
 import { join, dirname, relative, resolve, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = dirname(HERE)
+// ── --self-test：判别力自证（2026-10-29 补；此前这条门禁零判别力面）──────────────────
+//
+// 这条门禁的两处历史缺陷都值得钉住：①旧正则漏掉「无 .use 的裸读」⇒ 46 个 Kotlin 文件零命中
+// exit 0 的假绿；②ROOT 固定导致在协调仓根跑时 SKIP exit 0 的空转。自证造合成树（--root），
+// 把「命中 / 两种历史形态 / 豁免通道 / ProcIo.kt 本体豁免 / 树定位失败」六个分支全打一遍。
+if (process.argv.includes('--self-test')) {
+  const { tmpdir } = await import('node:os')
+
+  const selfPath = fileURLToPath(import.meta.url)
+  const runGate = (treeArgs) => {
+    try {
+      const out = execFileSync(process.execPath, [selfPath, ...treeArgs], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+      return { code: 0, out }
+    } catch (error) {
+      return { code: error.status ?? 1, out: String(error.stdout ?? '') + String(error.stderr ?? '') }
+    }
+  }
+  const buildTree = (tag, sources) => {
+    const dir = mkdtempSync(join(tmpdir(), 'boundedio-' + tag + '-'))
+    const pkg = join(dir, 'app', 'src', 'main', 'java', 'com', 'x')
+    mkdirSync(pkg, { recursive: true })
+    for (const [name, body] of Object.entries(sources)) writeFileSync(join(pkg, name), body)
+    return dir
+  }
+
+  const OK = buildTree('ok', { 'Fine.kt': 'class Fine { fun f() = ProcIo.readBounded(p) }\n' })
+  const bare = buildTree('bare', { 'Bad.kt': 'val s = stream.bufferedReader().readText()\n' })
+  const use = buildTree('use', { 'Bad.kt': 'val s = proc.inputStream.bufferedReader().use { it.readText() }\n' })
+  const exempt = buildTree('exempt', { 'Ok.kt': '// bounded-io-exempt: 合成夹具，自证豁免通道\nval s = stream.bufferedReader().readText()\n' })
+  const procio = buildTree('procio', { 'ProcIo.kt': 'val s = stream.bufferedReader().readText()\n' })
+  const noTree = mkdtempSync(join(tmpdir(), 'boundedio-empty-'))
+
+  const checks = [
+    ['合规树（无裸读）→ PASSED 且 exit 0', runGate(['--root', OK]), (r) => r.code === 0 && r.out.includes('BOUNDED-IO CHECK PASSED')],
+    ['裸 readText（无 .use，历史缺陷形态 1）→ FAILED', runGate(['--root', bare]), (r) => r.code === 1 && r.out.includes('裸 readText')],
+    ['proc.inputStream.bufferedReader().use { it.readText() } → FAILED', runGate(['--root', use]), (r) => r.code === 1 && r.out.includes('BOUNDED-IO CHECK FAILED')],
+    ['命中行带 bounded-io-exempt 注释 → PASSED（豁免通道有效）', runGate(['--root', exempt]), (r) => r.code === 0 && r.out.includes('BOUNDED-IO CHECK PASSED')],
+    ['ProcIo.kt 本体豁免（并发排水是它的职责）→ PASSED', runGate(['--root', procio]), (r) => r.code === 0 && r.out.includes('BOUNDED-IO CHECK PASSED')],
+    ['无 app/src/main/java 的树 → 树定位失败 exit 1', runGate(['--root', noTree]), (r) => r.code === 1 && r.out.includes('找不到含 app/src/main/java 的树')],
+  ]
+  let bad = 0
+  for (const [label, result, verify] of checks) {
+    const ok = verify(result)
+    console.log((ok ? 'PASS  ' : 'FAIL  ') + label + (ok ? '' : '  -> exit=' + result.code + ' out=' + result.out.trim().slice(0, 200)))
+    if (!ok) bad += 1
+  }
+  for (const dir of [OK, bare, use, exempt, procio, noTree]) rmSync(dir, { recursive: true, force: true })
+  console.log(bad === 0
+    ? 'BOUNDED_IO_SELF_TEST_PASSED（' + checks.length + ' 项）'
+    : 'BOUNDED_IO_SELF_TEST_FAILED（' + bad + ' 项）')
+  process.exit(bad === 0 ? 0 : 1)
+}
+
 const argv = process.argv.slice(2)
 const rootIdx = argv.indexOf('--root')
 const OVERRIDE = rootIdx >= 0 ? argv[rootIdx + 1] : process.env.DSH_APK_ROOT
