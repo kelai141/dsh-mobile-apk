@@ -185,9 +185,14 @@ internal object ShellOps {
    * `sh -lc '…'` / `sh -ec '…'` / `sh -xc '…'` / `su -lc '…'` 的 `c` 都在组合簇里，光杆 `-c`
    * 匹配不到 ⇒ 载荷不展开 ⇒ 该段无命令词 ⇒ 放行。小米 14 Pro（SDK 37，mksh）实测四种簇形态
    * 都会真的执行引号里的脚本（设备无 bash，Linux 侧同样成立）；`-l -c` 分离写法旧实现本来能认。
+   *
+   * 前置组还要能跳过**带独立参数的短选项**（`-o` / `+o` 各吃一个词）：`sh -o errexit -c '…'` 里
+   * `errexit` 既不是 `-` 开头也不在选项簇里，旧前置组会卡在它上面 ⇒ 整条不匹配 ⇒ 载荷不展开 ⇒ 放行。
+   * 小米 14 Pro（mksh）实测 `sh -o errexit -c 'echo X'` 与 `sh +o errexit -c 'echo X'` 都会真的执行。
+   * `[+-]o` 必须排在 `-[^\s]+` **前面**，否则 `-o` 会被整词分支先吃掉、剩下 `errexit` 无处可去。
    */
   private val SHELL_C_PAYLOAD = Regex(
-    """(?:^|[ \t])(?:[^\s]*/)?(?:sh|bash|mksh|ash|dash|zsh|busybox|toybox|su)[ \t]+(?:-[^\s]+[ \t]+)*-[a-zA-Z]*c[ \t]+([\s\S]*)$""",
+    """(?:^|[ \t])(?:[^\s]*/)?(?:sh|bash|mksh|ash|dash|zsh|busybox|toybox|su)[ \t]+(?:[+-]o[ \t]+\S+[ \t]+|-[^\s]+[ \t]+)*-[a-zA-Z]*c[ \t]+([\s\S]*)$""",
   )
 
   /**

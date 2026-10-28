@@ -420,6 +420,34 @@
       "ownedTargets": ["7", "11529215046816944610"],
       "expect": "allow",
       "why": "与 S-13a 成对且更严格：展开后自带已注册 `-d 7` ⇒ 必须放行。若把「出现 `-l` 之类就拒」写宽，合法虚拟屏截图会被一起拦掉。"
+    },
+    {
+      "name": "S-14a 带独立参数的短选项 -o 之后仍有载荷",
+      "command": "sh -o errexit -c 'screencap -p /sdcard/real.png'",
+      "ownedTargets": ["7", "11529215046816944610"],
+      "expect": "deny-uncertified-target",
+      "why": "小米 14 Pro（SDK 37，/system/bin/sh = mksh）实测 `sh -o errexit -c 'echo O_ERREXIT_RAN'` 打印了标记。`-o` 吃一个独立参数 `errexit`，旧前置组只认「整词 `-xxx`」，卡在 `errexit` 上 ⇒ 整条不匹配 ⇒ 载荷不展开 ⇒ 放行。"
+    },
+    {
+      "name": "S-14b 关闭式短选项 +o 同样吃参数",
+      "command": "sh +o errexit -c 'screencap -p /sdcard/real.png'",
+      "ownedTargets": ["7", "11529215046816944610"],
+      "expect": "deny-uncertified-target",
+      "why": "小米 14 Pro（SDK 37，/system/bin/sh = mksh）实测 `sh +o errexit -c 'echo PLUS_O_RAN'` 打印了标记。`+o` 是 `-o` 的关闭形式，同样吃一个参数；只补 `-o` 会漏这一支。"
+    },
+    {
+      "name": "对照 -o errexit 下的无害载荷放行",
+      "command": "sh -o errexit -c 'echo hi'",
+      "ownedTargets": ["7", "11529215046816944610"],
+      "expect": "allow",
+      "why": "与 S-14a 成对：展开后是 `echo hi`，不碰真实屏。"
+    },
+    {
+      "name": "对照 -o errexit 下的已注册目标屏放行",
+      "command": "sh -o errexit -c 'screencap -p -d 7 /sdcard/virtual.png'",
+      "ownedTargets": ["7", "11529215046816944610"],
+      "expect": "allow",
+      "why": "与 S-14a 成对且更严格：展开后自带已注册 `-d 7` ⇒ 必须放行，防「见到 -o 就拒」。"
     }
   ]
 }
