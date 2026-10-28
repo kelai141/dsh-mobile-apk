@@ -200,7 +200,9 @@ test('解析等价性门禁：父子关系与独立递归实现一致（抽样�
         `<node index="0" text="L1" resource-id="id/l1" class="android.widget.TextView" ${ATTRS} clickable="false" scrollable="false" bounds="[0,0][100,100]" />` +
         `<node index="1" text="L2" resource-id="id/l2" class="android.widget.TextView" ${ATTRS} clickable="false" scrollable="false" bounds="[0,100][100,200]" />` +
       `</node>` +
-      `<node index="1" text="R" resource-id="id/right" class="android.widget.TextView" ${ATTRS} clickable="false" scrollable="false" bounds="[540,0][100,100]" />` +
+      // bounds 原来写成 [540,0][100,100]（右边界小于左边界）⇒ parseBounds 判 w<0 直接丢节点，
+      // 于是这份「5 节点」夹具实际只有 4 个幸存者，期望表里 '0.1' 那条从来没被验证过。
+      `<node index="1" text="R" resource-id="id/right" class="android.widget.TextView" ${ATTRS} clickable="false" scrollable="false" bounds="[540,0][640,100]" />` +
     `</node>`,
   )
   const { raw } = parseUiTreeXml(xml)
@@ -218,6 +220,12 @@ test('解析等价性门禁：父子关系与独立递归实现一致（抽样�
     assert.equal(r.parentId, e.parent, `id=${r.id} 父链不符`)
   }
   assert.equal(raw.length, Object.keys(expected).length)
+  // 期望表里的 `depth` 此前是**死字段**——只比了 parentId，没人比 depth，于是实现把根算成 1
+  // （`id.split('.').length` 漏 `-1`）也一直绿。现在真断言：按 DFS 顺序必须是 0 起始的层级序列，
+  // 且根必须是 0（2026-10-29 自查：V2 编码侧 rowsFromRaw 一直是 0 起始，两条路径差 1）。
+  const pruned = pruneNodes(raw)
+  assert.deepEqual(pruned.nodes.map((n) => n.depth), Object.keys(expected).map((k) => expected[k].depth),
+    'depth 序列必须 0 起始（与期望表一致，旧实现整体 +1）')
 })
 
 test('FX-212.4：根下 11 个顺序兄弟按屏幕顺序输出 btn0..btn10（数字段比较，不是整串字典序）', () => {

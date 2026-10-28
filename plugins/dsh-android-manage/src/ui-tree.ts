@@ -230,7 +230,10 @@ export function pruneNodes(
       cy: bounds.cy,
       w: bounds.w,
       h: bounds.h,
-      depth: r.id === '' ? 0 : r.id.split('.').length,
+      // 0 起始：根（原始 id '0'）depth=0。旧实现漏了 -1 ⇒ 根算成 1，而 V2 编码侧的
+      // `rowsFromRaw` 一直是 `length - 1`（0 起始）⇒ 两条路径的深度差 1，渲染缩进整体偏一级
+      // （2026-10-29 自查：同一份三层 XML，pruneNodes 给 1/2/3，rowsFromRaw 给 0/1/2）。
+      depth: r.id === '' ? 0 : r.id.split('.').length - 1,
       clickable,
       scrollable,
       editable,
