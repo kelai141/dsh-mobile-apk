@@ -80,6 +80,15 @@ internal object ShellOps {
   )
 
   /**
+   * `eval <载荷>`：载荷会被 shell **再解释一遍**（等价于把那段文本当命令粘回来执行）。
+   *
+   * 为什么必须单独列：`eval "screencap -p /sdcard/real.png"` 的引号内容会被引号抹除逻辑吃掉，
+   * 命令词面里看不到 `screencap` ⇒ 只靠 [SHELL_C_PAYLOAD] 时它一路放行（2026-10-28 自查实测：
+   * 引擎侧同一形态也漏，两侧必须同改）。与 `sh -c` 同型：拿原文载荷、解一层引号、递归扫。
+   */
+  private val EVAL_PAYLOAD = Regex("""(?:^|[ \t;&|(])eval[ \t]+([\s\S]*)$""")
+
+  /**
    * 屏幕范围判定的结果码——与引擎侧 `ScreenCommandVerdict` 的字符串**逐字相同**，
    * 由跨语言 fixture（`scripts/gen-screen-scope-fixture.mjs`）双向锁死。
    */
@@ -466,6 +475,13 @@ internal object ShellOps {
           i = end + 1
           continue
         }
+            // shell 注释：`#` 位于**词首**（行首，或空白 / `;` / `&` / `|` 之后）时，直到行尾都不执行。
+            // 不剥它会把 `echo hi # screencap -p /sdcard/x.png` 里的注释文本当命令词面 ⇒ 误拦合法命令。
+            if (ch == '#' && (buf.isEmpty() || buf.last().isWhitespace() || buf.last() in ";&|")) {
+              val lineEnd = text.indexOf('\n', i)
+              i = if (lineEnd < 0) text.length else lineEnd
+              continue
+            }
         if (ch == ';' || ch == '\n' || ch == '\r') {
           flush()
           i += 1
@@ -492,7 +508,8 @@ internal object ShellOps {
     while (pending.isNotEmpty() && round < 16) {
       round += 1
       val segment = pending.removeFirst()
-      val payload = SHELL_C_PAYLOAD.find(segment) ?: continue
+      // `sh -c` 与 `eval` 都是「载荷会被再解释一遍」的入口，两者都要展开（issue #674 同类）。
+      val payload = SHELL_C_PAYLOAD.find(segment) ?: EVAL_PAYLOAD.find(segment) ?: continue
       val inner = unwrapOneQuote(payload.groupValues[1])
       if (inner.isEmpty()) continue
       val before = segments.size

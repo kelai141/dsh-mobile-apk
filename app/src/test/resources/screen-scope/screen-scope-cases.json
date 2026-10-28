@@ -354,6 +354,56 @@
       ],
       "expect": "allow",
       "why": "双引号内没有 $() / 反引号 ⇒ 不产生独立执行体；引号内文本被 stripQuotedText 抹掉 ⇒ 不命中命令词面。递归扫描不得把纯文本当成命令（防过度拦截）。"
+    },
+    {
+      "name": "S-5a eval 双引号载荷必须被展开（issue #674 同类漏拦）",
+      "command": "eval \"screencap -p /sdcard/real.png\"",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "eval 会把引号内文本再解释一遍（等价于把那段当命令粘回来执行）。只认 sh/su -c 时，引号内容会被引号抹除逻辑吃掉 ⇒ 命令词面看不到 screencap ⇒ 一路放行。2026-10-28 自查实测复现。"
+    },
+    {
+      "name": "S-5b eval 单引号载荷同样要展开",
+      "command": "eval 'input tap 1 2'",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "eval 的载荷在解释前不做末次引号剥离以外的处理：单引号只是让**外层** shell 不展开，eval 拿到的是 input tap 1 2 本身。两侧实现都必须按原文再扫一层。"
+    },
+    {
+      "name": "S-5c 分号后的 eval 也要展开（不得靠首段判定）",
+      "command": "echo ok; eval \"screencap -p /sdcard/real.png\"",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "分隔符后的 eval 与前缀命令同等危险：切段之后每段都要过「再解释一层」的展开，不能只判第一段。"
+    },
+    {
+      "name": "对照 eval 内无屏命令不得误拦",
+      "command": "eval \"echo hi\"",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "展开 eval 载荷后仍需按命令词面判定：echo 不碰真实屏 ⇒ 放行（防把「凡是 eval 就拦」写成规则）。"
+    },
+    {
+      "name": "S-6a shell 注释不计入命令词面",
+      "command": "echo hi # screencap -p /sdcard/x.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "`#` 位于词首（行首或空白之后）时 shell 把到行尾的内容当注释、不执行。不剥注释会把注释文本当命令词面 ⇒ 误拦合法命令（过度拦截）。词中间的 # 与反斜杠转义的 # 不是注释，另有分支处理。"
     }
   ]
 }

@@ -200,6 +200,15 @@ function parenEnd(text: string, from: number): number {
 /** `sh -c '<内层>'` 形式的嵌套执行体（含 `/system/bin/sh`、`busybox sh`、`su` 等包装）。 */
 const SHELL_C_PAYLOAD = /(?:^|[ \t])(?:[^\s]*\/)?(?:sh|bash|mksh|ash|dash|zsh|busybox|toybox|su)[ \t]+(?:-[^\s]+[ \t]+)*-c[ \t]+([\s\S]*)$/
 
+/**
+ * `eval <payload>`：载荷会被 shell **再解释一遍**（等价于把那段文本当命令粘回来执行）。
+ *
+ * 为什么必须单独列：`eval "screencap -p /sdcard/real.png"` 的引号内容会被 `stripQuotedText`
+ * 抹掉，命令词面里看不到 `screencap` ⇒ 只靠 `sh -c` 那条正则时它**一路放行**（2026-10-28 自查实测）。
+ * 与 `sh -c` 同型处理：拿**原文**载荷、解一层引号、递归扫。前面的分界符覆盖 `;` / `&&` / `||` / 管道。
+ */
+const EVAL_PAYLOAD = /(?:^|[ \t;&|(])eval[ \t]+([\s\S]*)$/
+
 /** 去掉一层首尾成对的引号（`sh -c "…"` 的载荷取值）。不成对则原样返回。 */
 function unwrapOneQuote(text: string): string {
   const trimmed = text.trim()
@@ -273,6 +282,14 @@ export function splitCommandSegments(command: string): CommandSegments {
         scan(text.slice(i + 2, end), depth + 1)
         buf += ' '; i = end + 1; continue
       }
+      // shell 注释：`#` 位于**词首**（行首，或空白 / `;` / `&` / `|` 之后）时，直到行尾都不执行。
+      // 不剥它会把 `echo hi # screencap -p /sdcard/x.png` 里的注释文本当命令词面 ⇒ 误拦合法命令。
+      // 词中间的 `#`（`a#b`）与转义 `\#` 不是注释，前面已由反斜杠/引号分支处理。
+      if (ch === '#' && (buf.length === 0 || /[\s;&|]$/.test(buf))) {
+        const lineEnd = text.indexOf('\n', i)
+        i = lineEnd < 0 ? text.length : lineEnd
+        continue
+      }
       if (ch === ';' || ch === '\n' || ch === '\r') { flush(); i += 1; continue }
       if (ch === '&' || ch === '|') {
         // `&&` / `||` 与单个 `&` / `|` 都是分隔符；两个字符都要吃掉。
@@ -291,7 +308,8 @@ export function splitCommandSegments(command: string): CommandSegments {
   const pending = segments.slice()
   for (let round = 0; pending.length > 0 && round < 16; round += 1) {
     const segment = pending.shift() as string
-    const payload = SHELL_C_PAYLOAD.exec(segment)
+    // `sh -c` 与 `eval` 都是「载荷会被再解释一遍」的入口，两者都要展开（issue #674 同类）。
+    const payload = SHELL_C_PAYLOAD.exec(segment) ?? EVAL_PAYLOAD.exec(segment)
     if (payload === null) continue
     const inner = unwrapOneQuote(payload[1])
     if (inner.length === 0) continue
