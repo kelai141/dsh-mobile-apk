@@ -600,10 +600,19 @@ const SCREEN_COMMAND_FAMILIES: readonly ScreenCommandFamily[] = [
   {
     name: 'input',
     // 正式语法是 `input [<source>] [-d DISPLAY_ID] <command> [<arg>…]`：source 是位置词
-    // （touchscreen/keyboard/…），漏了它整类命令都进不了命令词面（`input touchscreen tap 500 800`
+    // （touchscreen/touchpad/…），漏了它整类命令都进不了命令词面（`input touchscreen tap 500 800`
     // 实测放行）。`press` 是 0.14 起的新命令，同族。
+    //
+    // source 用**通配**而不是列举：2026-10-29 自查发现枚举里少了 `touchpad`
+    // （`input` 裸跑打印的 source 清单里有它，属 InputDevice.SOURCE_TOUCHPAD），于是
+    //   `input touchpad tap 9999 9999`             RC=0（与 `input touchscreen tap` 只差一个 source 词）
+    //   `input touchpad swipe 9999 9999 9999 9999` RC=0
+    //   `input touchpad -d 0 tap 9999 9999`         RC=0
+    // 三条全部通过，而门禁判 allow。非 source 的词（`input bogus tap`）真机本来就报
+    // `Unknown command: bogus` ⇒ 多拦无风险；而新 ROM 新增 source 时通配不会漏
+    // （枚举式判据的失效方向是放行，与 `wm` 那处同源）。
     pattern:
-      /\binput[ \t]+(?:(?:touchscreen|keyboard|mouse|joystick|touchnavigation|trackball|stylus|dpad|gamepad|rotaryencoder)[ \t]+)?(?:tap|swipe|roll|draganddrop|motionevent|text|keyevent|keycombination|press)\b/i,
+      /\binput[ \t]+(?:[a-z][a-z0-9_-]*[ \t]+)?(?:tap|swipe|roll|draganddrop|motionevent|text|keyevent|keycombination|press)\b/i,
     targetFlags: ALL_DISPLAY_FLAGS,
   },
   // `wm` 的改屏子命令。`user-rotation` / `fixed-to-user-rotation` 语义同样是「改真实屏显示参数」

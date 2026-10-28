@@ -58,9 +58,11 @@ internal object ShellOps {
     ScreenFamily(
       "input",
       // 正式语法是 `input [<source>] [-d DISPLAY_ID] <command> [<arg>…]`：source 是位置词
-      // （touchscreen/keyboard/…），漏了它整类命令都进不了命令词面；`press` 是其新命令，同族。
+      // （touchscreen/touchpad/…），漏了它整类命令都进不了命令词面；`press` 是其新命令，同族。
+      // source 用通配而不是列举：枚举里少了 `touchpad`（真机 `input` 裸跑列出它），
+      // `input touchpad tap 9999 9999` / `swipe` / `-d 0 tap` 三条 RC=0 而门禁判 allow（2026-10-29 自查）。
       Regex(
-        """\binput[ \t]+(?:(?:touchscreen|keyboard|mouse|joystick|touchnavigation|trackball|stylus|dpad|gamepad|rotaryencoder)[ \t]+)?""" +
+        """\binput[ \t]+(?:[a-z][a-z0-9_-]*[ \t]+)?""" +
           """(?:tap|swipe|roll|draganddrop|motionevent|text|keyevent|keycombination|press)\b""",
         RegexOption.IGNORE_CASE,
       ),

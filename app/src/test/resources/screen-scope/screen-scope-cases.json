@@ -1234,6 +1234,66 @@
       ],
       "expect": "allow",
       "why": "同上：awk 只作参数，不是命令词。"
+    },
+    {
+      "name": "S-22a input 的 source 词 touchpad（枚举漏项）必须判拒",
+      "command": "input touchpad tap 9999 9999",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "真机 RC=0（同一解析路径，只多一个 source 词）；input 裸跑列出的 source 清单里有 touchpad（InputDevice.SOURCE_TOUCHPAD），而修前的枚举少了它 ⇒ families 空 ⇒ allow。"
+    },
+    {
+      "name": "S-22b input touchpad swipe 同族",
+      "command": "input touchpad swipe 9999 9999 9999 9999",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "与 S-22a 同一漏项的不同命令词。真机 RC=0。"
+    },
+    {
+      "name": "S-22c input touchpad 带 -d 0 必须判拒",
+      "command": "input touchpad -d 0 tap 9999 9999",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "真机 RC=0。修前因 families 空、但有 -d 凭据 ⇒ 退化成 deny-orphan-target-token（同拒但语义不对），修后应按 input 家族正常判定为未认证目标。"
+    },
+    {
+      "name": "S-22d 对照 input touchpad 带已注册虚拟屏 仍放行",
+      "command": "input touchpad -d 7 tap 1 2",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "source 通配后 touchpad 同样能走自证路径，不得把它整类拒掉（防过度拦截）。"
+    },
+    {
+      "name": "S-22e 对照 非 source 词保守拒（真机本来就 Unknown command）",
+      "command": "input bogus tap 1 2",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "真机 input bogus tap 报 Unknown command: bogus ⇒ 无合法用途；通配 source 后落入 input 家族，方向是保守拒。"
+    },
+    {
+      "name": "S-22f 对照 引号内的 input touchpad 只是文本",
+      "command": "echo \"input touchpad tap 1 2\"",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "引号内不执行，stripQuotedText 后无命令词面 ⇒ 必须放行。"
     }
   ]
 }
