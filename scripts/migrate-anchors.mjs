@@ -76,9 +76,19 @@ for (const m of text.matchAll(RE)) {
     report.blocked.push({ ref: whole, reason: '旧 #expect 内容不在该行，拒绝迁移', text: lineText.trim().slice(0, 60) })
     continue
   }
-  const target = d.symbol === null
-    ? rel + '@' + d.hash
-    : rel + '#' + d.symbol + '@' + d.hash
+  // d.symbol === null 表示「没有包围符号，只能全文唯一内容匹配」。
+  // 这种情况**不能**产出 `path@hash`——那不是合法的锚点语法（缺 #Symbol 段），
+  // 门禁的耦合边证据正则不认，会报「缺 path:line 或 path#Symbol 证据」（实测 index.ts）。
+  // 内容锚一律保持 legacy 形式 + #expect，等人工判断是否值得迁移。
+  if (d.symbol === null) {
+    report.blocked.push({
+      ref: whole,
+      reason: '无包围符号（只能全文唯一内容匹配），保持 legacy',
+      text: lineText.trim().slice(0, 60),
+    })
+    continue
+  }
+  const target = rel + '#' + d.symbol + '@' + d.hash
   report.migratable.push({ ref: whole, target, kind: d.kind, text: lineText.trim().slice(0, 60) })
   rewrites.set(rel + ':' + line, target)
 }

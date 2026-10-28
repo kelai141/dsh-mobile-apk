@@ -161,7 +161,7 @@ function definitionSitesOf(lines, name) {
   const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const withKeyword = new RegExp(
     '^\\s*(?:(?:private|public|internal|protected|export|default|override|suspend|inline|operator|abstract|open|final|static|async|const|data|sealed|enum|lateinit|readonly)\\s+)*'
-    + '(?:fun|class|object|interface|val|var|let|function|type|def|struct|enum)\\s+'
+    + '(?:fun|class|object|interface|val|var|let|const|function|type|def|struct|enum)\\s+'
     + esc + '(?![A-Za-z0-9_$])',
   )
   // TS 类方法形态（`name(args) {`）没有关键字，必须单独认。
@@ -217,7 +217,9 @@ function symbolAt(lines, symbol) {
     // keywordForm 只认 `const name` 后面直接跟名字，遇到 `=` 就断了，所以这里单独认。
     const constForm = new RegExp(
       '^\\s*(?:(?:export|default)\\s+)*(?:const|let|var)\\s+'
-      + esc + '\\s*(?::[^=]+)?=\\s*',
+      // 类型标注里可以有 `=>`（如 `Record<string, { allows: (c: string) => boolean }>`），
+      // 所以不能简单用 [^=]+ 排除所有等号；只把「孤立的 = 」当成赋值号。
+      + esc + '\\s*(?::(?:(?!=>)[^=])*)?=\\s*',
     )
     for (let i = fromLine; i < toLine; i += 1) {
       const t = lines[i]
@@ -255,13 +257,47 @@ function symbolAt(lines, symbol) {
 
 /** 从 startLine 起找配对花括号的结束行下标（0-based）；无花括号时退化为「到空行为止」。 */
 function matchingBrace(lines, startLine) {
+  // 从**函数/类型的体起始位置**开始配平，不能从行首第一个 { 开始。
+  //
+  // 实测教训（两个都踩过）：
+  // 1) TS 签名里的内联类型字面量  function tools(x: { a: R } = ...) {  —— 同一行内闭合，
+  //    从行首算就立刻配平，整个函数体被判成一行。
+  // 2) TS 返回类型里的泛型字面量  async f(line: string): Promise<{ ok: boolean }> {
+  //    Promise<{...}> 的 { 在 () 外，只数圆括号不够，仍会误判。
+  //
+  // 做法：找体起始 { 时，跳过圆括号/方括号/**尖括号**内的内容。
+  // 尖括号只用于跳过类型实参，遇到不成对的 < 就当普通字符（不影响后续配平）。
   let depth = 0
-  let opened = false
+  let angle = 0
+  let bodyLine = -1
+  let bodyCol = -1
   for (let i = startLine; i < lines.length; i += 1) {
-    for (const ch of lines[i]) {
-      if (ch === '{') { depth += 1; opened = true } else if (ch === '}') { depth -= 1; if (opened && depth === 0) return i }
+    const t = lines[i]
+    let found = false
+    for (let c = 0; c < t.length; c += 1) {
+      const ch = t[c]
+      if (ch === '(' || ch === '[') depth += 1
+      else if (ch === ')' || ch === ']') depth -= 1
+      else if (ch === '<' && /[A-Za-z0-9_$>]/.test(t[c - 1] || '')) angle += 1
+      else if (ch === '>' && angle > 0) angle -= 1
+      else if (ch === '{' && depth === 0 && angle === 0) { bodyLine = i; bodyCol = c; found = true; break }
     }
-    if (!opened && i > startLine && lines[i].trim() === '') return i - 1
+    if (found) break
+    // 无花括号体的单表达式定义：碰到空行就认为定义结束
+    if (i > startLine && t.trim() === '') return i - 1
+  }
+  if (bodyLine < 0) return Math.min(startLine, lines.length - 1)
+  // 2) 从体起始 { 之后继续配平
+  let d = 0
+  let opened = false
+  for (let i = bodyLine; i < lines.length; i += 1) {
+    const t = lines[i]
+    const from = i === bodyLine ? bodyCol : 0
+    for (let c = from; c < t.length; c += 1) {
+      const ch = t[c]
+      if (ch === '{') { d += 1; opened = true }
+      else if (ch === '}') { d -= 1; if (opened && d === 0) return i }
+    }
   }
   return opened ? -1 : Math.min(startLine, lines.length - 1)
 }
@@ -306,7 +342,7 @@ function anchorBaselineSymbolHashes() {
  * 返回 { ok: true, symbol, hash, line } 或 { ok: false, reason }。
  */
 function deriveSymbolAnchor(lines, line, contentHash) {
-  const defRe = /^\s*(?:(?:private|public|internal|protected|export|default|override|suspend|inline|operator|abstract|open|final|static|async|const|data|sealed|enum|lateinit)\s+)*(?:fun|class|object|interface|val|var|let|function|type|def|struct|enum)\s+([A-Za-z_$][A-Za-z0-9_$]*)/
+  const defRe = /^\s*(?:(?:private|public|internal|protected|export|default|override|suspend|inline|operator|abstract|open|final|static|async|const|data|sealed|enum|lateinit)\s+)*(?:fun|class|object|interface|val|var|let|const|function|type|def|struct|enum)\s+([A-Za-z_$][A-Za-z0-9_$]*)/
   const classRe = /^\s*(?:(?:private|public|internal|protected|export|default|abstract|open|final|data|sealed|enum|static)\s+)*(?:class|object|interface)\s+([A-Za-z_$][A-Za-z0-9_$]*)/
   const idx = Math.min(Math.max(line - 1, 0), lines.length - 1)
 
@@ -338,22 +374,45 @@ function deriveSymbolAnchor(lines, line, contentHash) {
   // 判据用**花括号深度**而不是「向上找 fun」：向上找会被更近的局部 val 挡住
   // （实测 ShellOps.kt:317 的 `val viaSu` 向上先遇到 315 行的 `val channelBroken`，
   // 没走到 292 行的 `fun exec`，于是被当成类成员）。
-  const braceDepthAt = (lineIdx) => {
-    let depth = 0
-    for (let i = 0; i <= lineIdx && i < lines.length; i += 1) {
-      for (const ch of lines[i]) {
-        if (ch === '{') depth += 1
-        else if (ch === '}') depth -= 1
-      }
+  /** 该行是否落在**某个块体**内部（即它是局部声明，不是文件或类体直接成员）。 */
+  //
+  // 不试图识别「哪个函数」——那要正确解析签名（含跨行、含内联类型字面量），
+  // 实测反复踩坑：async controlExec(op: ...,
+  //   timeoutMs?: number): Promise<X> { 这种跨行签名，逐行匹配必然漏。
+  //
+  // 改用反向验证：从目标行向上找任意一个 { 所在行，若它的配对 } 覆盖目标行，
+  // 就说明目标行嵌在某个块里。再排除「该 { 属于类/对象体」的情形即可。
+  const blockDepthOf = (lineIdx) => {
+    // 找到覆盖 lineIdx 的所有块起始行
+    const enclosing = []
+    for (let j = lineIdx - 1; j >= 0; j -= 1) {
+      if (!lines[j].includes('{')) continue
+      const close = matchingBrace(lines, j)
+      if (close >= lineIdx) enclosing.push(j)
     }
-    return depth
+    return enclosing
   }
+  const hasEnclosingFun = (lineIdx) => {
+    for (const j of blockDepthOf(lineIdx)) {
+      const t = lines[j]
+      // 类/对象体起始行不算「函数体」：那时该行是文件的直接成员（如顶层 const）
+      if (/^\s*(?:(?:export|default|declare|abstract|open|final|data|sealed)\s+)*(?:class|interface|enum|namespace|module)\s+[A-Za-z_$]/.test(t)) continue
+      if (/^\s*(?:export\s+)?(?:const|let|var)\s+[A-Za-z_$][A-Za-z0-9_$]*\s*(?::[^=]*)?=\s*\{\s*$/.test(t)) continue
+      return true
+    }
+    return false
+  }
+
+  // 判据：该 val/var/const/let 是否落在**某个函数体内**。
+  //
+  // 不能用「数全文字符里的花括号」算深度——源码里有大量字符串、正则、模板字面量
+  // 含 {}，计数必然错（实测 index.ts 里方法体内的 const 被算成深度 1，
+  // 于是 5 个局部 `const decision` 全被当成类成员，产出 #Class.decision 指到局部变量）。
+  // 改用 hasEnclosingFun：它基于 matchingBrace，能正确处理注释与字符串里的花括号。
   const isLocalValueDecl = (lineIdx) => {
     const t = lines[lineIdx]
-    if (!/^\s*(?:(?:private|public|internal|protected|lateinit|override|const)\s+)*(?:val|var)\s/.test(t)) return false
-    // 类体直接成员 = 深度 1（object/class 的各占一层）；>= 2 说明嵌在函数/代码块里。
-    // 顶层文件级 val（Kotlin 不允许，TS 允许）= 深度 0，也算符号。
-    return braceDepthAt(lineIdx) >= 2
+    if (!/^\s*(?:(?:private|public|internal|protected|lateinit|override|const|export)\s+)*(?:val|var|let|const)\s/.test(t)) return false
+    return hasEnclosingFun(lineIdx)
   }
   for (let i = idx; i >= 0; i -= 1) {
     const dm = lines[i].match(defRe)
@@ -381,9 +440,13 @@ function deriveSymbolAnchor(lines, line, contentHash) {
   }
 
   // 2) 同名符号是否唯一
-  const nameRe = new RegExp('(?:^|[^A-Za-z0-9_$])' + symbol.replace(/[.*+?^$\{\}()|[\]\\]/g, '\\$&') + '(?![A-Za-z0-9_$])')
-  let sameName = 0
-  for (const l of lines) if (defRe.test(l) && nameRe.test(l)) sameName += 1
+  // 2) 同名符号是否唯一
+  //
+  // 必须复用 definitionSitesOf，不能用「行内任意位置出现该名字」来数。
+  // 实测教训：早期版本用 defRe + nameRe 的宽匹配，this.a11yFacts() 的调用点
+  // 也满足 defRe，于是只有 1 处定义的 a11yFacts（index.ts）被数成 2 处、判成
+  // 「同名符号 2 处且推导不出宿主类名」。这和 #793 是同一类 bug 的另一个入口。
+  const sameName = definitionSitesOf(lines, symbol).length
 
   // contentHash 为 null 说明目标行是空行 / 纯空白：没有可判内容，不能产出符号锚点
   // （否则会得到 `#Sym@null`，判定时永远「匹配」，等于把判据废掉）。
