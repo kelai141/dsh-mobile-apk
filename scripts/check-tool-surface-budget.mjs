@@ -11,6 +11,7 @@
 //   node scripts/check-tool-surface-budget.mjs             # 门禁（超阈值 exit 1）
 //   node scripts/check-tool-surface-budget.mjs --report    # 只打印分量明细
 //   node scripts/check-tool-surface-budget.mjs --update    # 用当前实测重写基线（人工确认后）
+//   node scripts/check-tool-surface-budget.mjs --root <dir> # 只给测试用：把插件树与基线换成临时目录
 //
 // 退出码：0 = 通过；1 = 超预算或运行失败。
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
@@ -18,8 +19,10 @@ import { join, dirname, relative } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const ROOT = dirname(HERE)
 const argv = process.argv.slice(2)
+/** `--root <dir>` 只给测试用（把六个插件、bridge 的导出与基线全换成临时树）；正常门禁不变。 */
+const rootArgIdx = argv.indexOf('--root')
+const ROOT = rootArgIdx >= 0 ? argv[rootArgIdx + 1] : dirname(HERE)
 const reportOnly = argv.includes('--report')
 const update = argv.includes('--update')
 const rel = (p) => relative(ROOT, p).replace(/\\/g, '/')
@@ -36,7 +39,7 @@ const PLUGINS = [
 ]
 
 /** 预算：字节 + 允许的相对漂移；基线文件由 --update 生成。 */
-const BASELINE_FILE = join(HERE, 'tool-surface-budget.json')
+const BASELINE_FILE = join(ROOT, 'scripts', 'tool-surface-budget.json')
 
 /** 递归桩：任意属性返回可调用桩，任意调用返回桩（不抛、不真执行）。 */
 function makeStub() {
