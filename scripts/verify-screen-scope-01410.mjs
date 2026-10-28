@@ -36,7 +36,15 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(HERE, '..')
 const argv = process.argv.slice(2)
-const argOf = (n) => { const i = argv.indexOf('--' + n); return i >= 0 ? argv[i + 1] : undefined }
+// 同时支持 --key=value 与 --key value 两种写法。
+// 实测教训：只支持空格形式时 `--layer=device` 被忽略、静默落回默认 judge 层，
+// 输出看起来是绿的那套 41 条，其实根本没采设备证据（2026-10-29 实机踩到）。
+const argOf = (n) => {
+  const eq = argv.find((a) => a.startsWith('--' + n + '='))
+  if (eq !== undefined) return eq.slice(n.length + 3)
+  const i = argv.indexOf('--' + n)
+  return i >= 0 ? argv[i + 1] : undefined
+}
 const has = (n) => argv.includes('--' + n)
 
 const LAYER = argOf('layer') ?? 'judge'
@@ -46,7 +54,14 @@ const RECEIPTS = argOf('receipts')
 const FIXTURE = argOf('fixture') ?? join(ROOT, 'scripts/fixtures/screen-scope-acceptance-20261029.json')
 const VERBOSE = has('verbose')
 const STAMP = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-const EVID = argOf('evidence-dir') ?? join(ROOT, '.deploy-tmp', 'screen-scope-01410', STAMP)
+// device 层的 before/after 必须落在**同一个**证据目录，否则 after 找不到基线
+// （实测：用时间戳目录时 after 报「找不到 before 基线」而退出 2）。
+// 故设备层固定为 device-<serial>，其余层仍用时间戳归档。
+const SERIAL_SLUG = (argOf('serial') ?? 'default').replace(/[^A-Za-z0-9._-]/g, '_')
+const EVID = argOf('evidence-dir')
+  ?? (argOf('layer') === 'device'
+    ? join(ROOT, '.deploy-tmp', 'screen-scope-01410', 'device-' + SERIAL_SLUG)
+    : join(ROOT, '.deploy-tmp', 'screen-scope-01410', STAMP))
 const JSON_OUT = argOf('json') ?? join(EVID, 'result-' + LAYER + (PHASE ? '-' + PHASE : '') + '.json')
 
 const SRC_JUDGE = join(ROOT, 'plugins/dsh-android-bridge/src/screen-scope.ts')
@@ -211,13 +226,13 @@ async function runDevice() {
 
   const checks = [
     {
-      id: 'D1', name: 'A 组跑完后真实屏像素未变（截图 sha256 相同）',
+      id: 'D1', name: '验收期间真实屏像素未变（截图 sha256 相同）',
       pass: shotSame,
       evidence: [before.sfPath, snap.sfPath, join(EVID, 'screencap-before.b64'), join(EVID, 'screencap-after.b64')],
       detail: shotSame ? '一致' : 'before=' + before.screencapSha256 + ' after=' + snap.screencapSha256,
     },
     {
-      id: 'D2', name: 'A 组跑完后虚拟屏 token 集合未变（未新增/未丢失）',
+      id: 'D2', name: '验收期间虚拟屏 token 集合未变（未新增/未丢失）',
       pass: lost.length === 0 && gained.length === 0,
       evidence: [before.sfPath, snap.sfPath],
       detail: lost.length === 0 && gained.length === 0
@@ -230,6 +245,7 @@ async function runDevice() {
     layer: 'device', phase: 'after', ok,
     before: beforePath, after: snapPath, checks,
     tokenDelta: { lost, gained },
+    betweenPhases: argOf('between') ?? '未声明（用 --between 记录两次采样之间实际执行了什么）',
   }, null, 2) + '\n', 'utf8')
   for (const c of checks) console.log((c.pass ? '  PASS  ' : '  FAIL  ') + c.id + ' ' + c.name + ' :: ' + c.detail)
   return ok ? 0 : 1
