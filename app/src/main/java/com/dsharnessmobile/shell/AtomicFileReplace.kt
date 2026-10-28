@@ -1,6 +1,7 @@
 package com.dsharnessmobile.shell
 
 import java.io.File
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 
@@ -26,5 +27,19 @@ internal object AtomicFileReplace {
         false
       }
     }
+  }
+
+  /** Write a complete sibling file first; a failed publish must never truncate the old target. */
+  fun writeText(
+    target: File,
+    value: String,
+    publisher: (File, File) -> Boolean = ::publish,
+  ) {
+    val parent = target.parentFile ?: throw IOException("Target has no parent directory")
+    val tmp = File(parent, target.name + ".tmp")
+    tmp.writeText(value)
+    if (publisher(tmp, target)) return
+    tmp.delete()
+    throw IOException("Could not atomically replace ${target.name}")
   }
 }

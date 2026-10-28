@@ -728,16 +728,11 @@ class EngineManager(private val context: Context, private val pickToken: String?
 
   /** The fingerprint is the transaction commit point, so it is written atomically. */
   private fun writeFingerprint(fingerprint: String) {
-    val target = fingerprintFile()
-    val tmp = File(target.parentFile, target.name + ".tmp")
-    tmp.writeText(fingerprint)
-    // #685：注释承诺 atomic，旧实现却「先删 target 再 rename」——删除与改名之间被杀，
-    // 指纹文件消失，下次启动按指纹缺失走重装配。AtomicFileReplace 的替换期间目标路径
-    // 始终存在（ATOMIC_MOVE，不支持时退单次 REPLACE_EXISTING move，同样不先删）。
-    if (!AtomicFileReplace.publish(tmp, target)) {
-      target.writeText(fingerprint)
-      SnapshotFs.deletePath(tmp)
-    }
+    // #685 / #713: 指纹是快照事务的提交点。旧实现在发布失败后还要 target.writeText(...)
+    // 直写一次 —— 那一步会截断旧指纹（发布失败反而拿走了恢复点）。改走
+    // AtomicFileReplace.writeText: 先写完整临时文件，发布不成功就抛错且不碰目标，
+    // 让快照事务走既有回滚路径。
+    AtomicFileReplace.writeText(fingerprintFile(), fingerprint)
   }
 
   private fun writeOnlineSnapshotIdentity(base: String, archive: String) {
