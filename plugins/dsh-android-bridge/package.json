@@ -29,7 +29,7 @@
   "scripts": {
     "build": "tsc -p . && tsc -p tsconfig.client.json --noEmit && node build-client.mjs",
     "typecheck": "tsc -p . --noEmit && tsc -p tsconfig.client.json --noEmit",
-    "test": "npm run build && node --test test/capability-gate.test.mjs test/capability-unlock-persistence.test.mjs test/control.test.mjs test/protocol-negotiation.test.mjs test/notify-projection.test.mjs test/privilege-status.test.mjs test/wireless-live.test.mjs test/a11y-freshness.test.mjs test/route-auth.test.mjs test/engine-port-auth.test.mjs test/screen-scope.test.mjs test/shell-ops.test.mjs"
+    "test": "npm run build && node --test test/capability-gate.test.mjs test/capability-unlock-persistence.test.mjs test/control.test.mjs test/protocol-negotiation.test.mjs test/notify-projection.test.mjs test/privilege-status.test.mjs test/wireless-live.test.mjs test/a11y-freshness.test.mjs test/route-auth.test.mjs test/engine-port-auth.test.mjs test/screen-scope.test.mjs test/screen-scope-handler.test.mjs test/shell-ops.test.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.5",
