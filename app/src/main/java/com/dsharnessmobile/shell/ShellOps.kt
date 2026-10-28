@@ -103,8 +103,60 @@ internal object ShellOps {
    * 由 SHELL_C_PAYLOAD 展开队列正常判定）。故裸解释器段一律按看不懂拒绝（fail-closed），
    * 与引擎侧 `screen-scope.ts` 的同构判据同批演进（fixture 权威源用例另行补充）。
    */
-  private val BARE_SHELL_SEGMENT =
-    Regex("""^(?:(?:[^\s/]*/)+)?(?:(?:xargs|busybox|toybox)[ \t]+)*(?:sh|bash|mksh|ash|dash|zsh)$""", RegexOption.IGNORE_CASE)
+  private val INTERPRETER_NAMES = setOf("sh", "bash", "mksh", "ash", "dash", "zsh")
+  private val INTERPRETER_WRAPPERS =
+    setOf("env", "timeout", "nohup", "xargs", "busybox", "toybox", "su", "command", "exec")
+
+  /**
+   * 该段的命令词是不是「载荷对判定器不可见」的解释器调用（#509 的放宽版，与引擎侧
+   * `interpreterPayloadUnparsed` 逐条同源）。
+   *
+   * 只有 `sh -c '<可见载荷>'` 能被展开后判定；其余载荷都来自**运行时**：
+   * `sh -s` / `sh -e` / 无参 `sh`（读 stdin）、`sh /tmp/x.sh`、`. /tmp/x.sh`、`source x`，
+   * 以及经 `env`/`timeout`/`xargs`/`busybox` 包装的同族形态 —— 一律 fail-closed。
+   * 旧实现只认「整段恰好等于解释器名」这一条最窄形态，`sh -s`/`sh file`/`.` 全部放行。
+   */
+  private fun interpreterPayloadUnparsed(segment: String): Boolean {
+    var text = segment.trim()
+    for (guard in 0 until 8) {
+      val parsed = firstShellWord(text)
+      val word = parsed.first
+      if (word.isEmpty()) return false
+      val base = word.substringAfterLast('/')
+      // 变量赋值前缀、包装器、包装器自己的选项/数字参数都不改变「命令词」。
+      if (Regex("""^[A-Za-z_][A-Za-z0-9_]*=""").containsMatchIn(word)) { text = parsed.second.trim(); continue }
+      if (base in INTERPRETER_WRAPPERS || word.startsWith("-") || Regex("""^\d+$""").matches(word)) {
+        text = parsed.second.trim()
+        continue
+      }
+      if (base == "." || base == "source") return true
+      if (base in INTERPRETER_NAMES) {
+        return !Regex("""(?:^|[ \t])-[^\s]*c[^\s]*(?:[ \t]|$)""").containsMatchIn(parsed.second)
+      }
+      return false
+    }
+    return false
+  }
+
+  /** 取 shell 文本第一个词（quote-aware，去包裹引号）与其剩余；与引擎侧 `firstShellWord` 同源。 */
+  private fun firstShellWord(text: String): Pair<String, String> {
+    var i = 0
+    while (i < text.length && (text[i] == ' ' || text[i] == '\t')) i += 1
+    if (i >= text.length) return "" to ""
+    val quote = text[i]
+    if (quote == '\'' || quote == '"') {
+      var j = i + 1
+      while (j < text.length) {
+        if (quote == '"' && text[j] == '\\') { j += 2; continue }
+        if (text[j] == quote) return text.substring(i + 1, j) to text.substring(j + 1)
+        j += 1
+      }
+      return text.substring(i + 1) to ""
+    }
+    var j = i
+    while (j < text.length && text[j] !in " \t;&|") j += 1
+    return text.substring(i, j) to text.substring(j)
+  }
 
   /** `sh -c '<内层>'` 形式（含 `/system/bin/sh`、`busybox sh`、`su` 等包装）。 */
   private val SHELL_C_PAYLOAD = Regex(
@@ -119,6 +171,12 @@ internal object ShellOps {
    * 引擎侧同一形态也漏，两侧必须同改）。与 `sh -c` 同型：拿原文载荷、解一层引号、递归扫。
    */
   private val EVAL_PAYLOAD = Regex("""(?:^|[ \t;&|(])eval[ \t]+([\s\S]*)$""")
+
+  /**
+   * `trap <载荷> <信号…>`：第一个参数是**要执行的命令**，退出/收到信号时 shell 会照跑。
+   * 与 `eval` / `sh -c` 并列进「载荷再解释一遍」入口（引擎侧同名入口，fixture 双向锁死）。
+   */
+  private val TRAP_PAYLOAD = Regex("""(?:^|[ \t;&|(])trap[ \t]+([\s\S]*)$""")
 
   /**
    * 屏幕范围判定的结果码——与引擎侧 `ScreenCommandVerdict` 的字符串**逐字相同**，
@@ -261,7 +319,7 @@ internal object ShellOps {
     if (parsed.unparsed) return false
     for (segment in parsed.segments) {
       // 裸解释器段同 virtual-only：载荷不可见即不可证明（连「目标是不是物理屏 0」都无从核对）。
-      if (BARE_SHELL_SEGMENT.matches(stripQuotedText(segment).trim())) return false
+      if (interpreterPayloadUnparsed(stripQuotedText(segment))) return false
       val bare = stripQuotedText(segment)
       val options = displayOptionsIn(bare)
       if (MALFORMED_DISPLAY_OPTION.containsMatchIn(bare)) return false
@@ -369,7 +427,7 @@ internal object ShellOps {
     for (segment in parsed.segments) {
       val bare = stripQuotedText(segment)
       // 裸解释器段：管道/重定向喂 shell 的载荷对判定器不可见（#509），fail-closed。
-      if (BARE_SHELL_SEGMENT.matches(bare.trim())) {
+      if (interpreterPayloadUnparsed(bare)) {
         return ScreenCommandVerdict.DENY_UNPARSED
       }
       val options = displayOptionsIn(bare)
@@ -568,8 +626,13 @@ internal object ShellOps {
       round += 1
       val segment = pending.removeFirst()
       // `sh -c` 与 `eval` 都是「载荷会被再解释一遍」的入口，两者都要展开（issue #674 同类）。
-      val payload = SHELL_C_PAYLOAD.find(segment) ?: EVAL_PAYLOAD.find(segment) ?: continue
-      val inner = unwrapOneQuote(payload.groupValues[1])
+      val payload = SHELL_C_PAYLOAD.find(segment)
+        ?: EVAL_PAYLOAD.find(segment)
+        ?: TRAP_PAYLOAD.find(segment)
+        ?: continue
+      // 取载荷的**第一个词**（不是整段剩余）：`sh -c 'cmd' sh` / `eval 'cmd' foo` / `trap 'cmd' EXIT`
+      // 的尾随 argv 会让「整段首尾成对」判据失效，从而整段不展开（安全侧漏拦，与引擎侧同源）。
+      val inner = firstShellWord(payload.groupValues[1]).first
       if (inner.isEmpty()) continue
       val before = segments.size
       scan(inner, 1)

@@ -232,6 +232,71 @@ const SHELL_C_PAYLOAD = /(?:^|[ \t])(?:[^\s]*\/)?(?:sh|bash|mksh|ash|dash|zsh|bu
  */
 const EVAL_PAYLOAD = /(?:^|[ \t;&|(])eval[ \t]+([\s\S]*)$/
 
+/**
+ * `trap <payload> <signals…>`：第一个参数是**要执行的命令**，退出/收到信号时 shell 会照跑。
+ * 与 `eval` / `sh -c` 并列进"载荷再解释"入口（2026-10-28 自查：`trap 'screencap …' EXIT` 实测可执行且被放行）。
+ */
+const TRAP_PAYLOAD = /(?:^|[ \t;&|(])trap[ \t]+([\s\S]*)$/
+
+/**
+ * 取 shell 文本的**第一个词**（quote-aware，去掉包裹它的引号）。
+ *
+ * 为什么载荷不能再用 `unwrapOneQuote(整个剩余)`：`sh -c 'screencap …' sh` 的剩余串是
+ * `'screencap …' sh`，首尾不同一个引号 ⇒ 旧实现判定"不成对"、整段不展开 ⇒ 载荷里的真实屏命令
+ * 一路放行（2026-10-28 自查，安全侧漏拦）。shell 只把 `-c` 的**第一个词**当脚本，尾随的是 $0/$1。
+ * `trap` 同理（第一个参数是要执行的命令，后面是信号名）。
+ */
+function firstShellWord(text: string): { word: string; rest: string } {
+  let i = 0
+  while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i += 1
+  if (i >= text.length) return { word: '', rest: '' }
+  const quote = text[i]
+  if (quote === '\'' || quote === '"') {
+    let j = i + 1
+    while (j < text.length) {
+      if (quote === '"' && text[j] === '\\') { j += 2; continue }
+      if (text[j] === quote) return { word: text.slice(i + 1, j), rest: text.slice(j + 1) }
+      j += 1
+    }
+    return { word: text.slice(i + 1), rest: '' } // 未闭合：按剩余全部当载荷（fail-closed 方向）
+  }
+  let j = i
+  while (j < text.length && !/[ \t;&|]/.test(text[j])) j += 1
+  return { word: text.slice(i, j), rest: text.slice(j) }
+}
+
+const INTERPRETER_NAMES = new Set(['sh', 'bash', 'mksh', 'ash', 'dash', 'zsh'])
+const INTERPRETER_WRAPPERS = new Set(['env', 'timeout', 'nohup', 'xargs', 'busybox', 'toybox', 'su', 'command', 'exec'])
+
+/**
+ * 该段的命令词是不是「载荷对判定器不可见」的解释器调用（#509 的放宽版）。
+ *
+ * 只有 `sh -c '<可见载荷>'` 能被展开后判定；其余形态的载荷都来自**运行时**，静态看不到：
+ *   - `sh -s` / `sh -e` / 无参 `sh`（读 stdin）；
+ *   - `sh /tmp/x.sh`、`. /tmp/x.sh`、`source x`（读脚本文件）；
+ *   - 经 `env` / `timeout` / `xargs` / `busybox` 包装的同族形态。
+ * 这些一律 deny-unparsed（fail-closed）。旧实现只有「整段恰好等于解释器名」这一条最窄规则，
+ * 且**只在壳侧**——引擎侧连 `| sh` 都放行（两层漂移，fixture 也没锁住）。
+ */
+export function interpreterPayloadUnparsed(segment: string): boolean {
+  let text = segment.trim()
+  for (let guard = 0; guard < 8; guard += 1) {
+    const { word, rest } = firstShellWord(text)
+    if (word.length === 0) return false
+    const base = word.replace(/^.*\//, '')
+    // 变量赋值前缀、包装器、包装器自己的选项/数字参数都不改变"命令词"。
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) { text = rest.trim(); continue }
+    if (INTERPRETER_WRAPPERS.has(base) || word.startsWith('-') || /^\d+$/.test(word)) {
+      text = rest.trim()
+      continue
+    }
+    if (base === '.' || base === 'source') return true
+    if (INTERPRETER_NAMES.has(base)) return !/(?:^|[ \t])-[^\s]*c[^\s]*(?:[ \t]|$)/.test(rest)
+    return false
+  }
+  return false
+}
+
 /** 去掉一层首尾成对的引号（`sh -c "…"` 的载荷取值）。不成对则原样返回。 */
 function unwrapOneQuote(text: string): string {
   const trimmed = text.trim()
@@ -337,9 +402,11 @@ export function splitCommandSegments(command: string): CommandSegments {
   for (let round = 0; pending.length > 0 && round < 16; round += 1) {
     const segment = pending.shift() as string
     // `sh -c` 与 `eval` 都是「载荷会被再解释一遍」的入口，两者都要展开（issue #674 同类）。
-    const payload = SHELL_C_PAYLOAD.exec(segment) ?? EVAL_PAYLOAD.exec(segment)
+    const payload = SHELL_C_PAYLOAD.exec(segment) ?? EVAL_PAYLOAD.exec(segment) ?? TRAP_PAYLOAD.exec(segment)
     if (payload === null) continue
-    const inner = unwrapOneQuote(payload[1])
+    // 取载荷的**第一个词**（不是整段剩余）：`sh -c 'cmd' sh`、`eval 'cmd' foo`、`trap 'cmd' EXIT`
+    // 的尾随 argv 会让「整段首尾成对」判据失效，从而整段不展开（安全侧漏拦）。
+    const inner = firstShellWord(payload[1]).word
     if (inner.length === 0) continue
     const before = segments.length
     scan(inner, 1)
@@ -506,6 +573,8 @@ export function screenCommandVerdict(
   if (unparsed) return 'deny-unparsed'
   for (const segment of segments) {
     const bare = stripQuotedText(segment)
+    // 载荷不可见的解释器调用：静态判不了，fail-closed。
+    if (interpreterPayloadUnparsed(bare)) return 'deny-unparsed'
     const options = displayOptionsIn(bare)
     if (MALFORMED_DISPLAY_OPTION.test(bare)) return 'deny-uncertified-target'
     const families = SCREEN_COMMAND_FAMILIES.filter(
