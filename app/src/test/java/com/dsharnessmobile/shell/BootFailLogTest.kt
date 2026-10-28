@@ -70,7 +70,7 @@ class BootFailLogTest {
   fun booleanFailurePathIsExplicitlyMarkedRatherThanLeftEmpty() {
     // 多数失败分支是布尔判定（startEngine()==false / refreshSnapshot()==false），没有异常对象。
     // 必须**显式标注**「无可读异常」，绝不留空 —— 空字段会让读的人以为漏采。
-    LogCollector.writeBootFailTo(files, "engine-start-false", "EngineManager.startEngine() 判为 REFUSED（引擎未 spawn）", null, 1L)
+    LogCollector.writeBootFailTo(files, "engine-start-false", "EngineManager.startEngine() 返回 false", null, 1L)
     val text = failFile().readText()
     assertTrue(text.contains("stage=engine-start-false"))
     assertTrue(text.contains("error=none(boolean-failure-path)"))
@@ -163,7 +163,7 @@ class BootFailLogTest {
     val sites = Regex("LogCollector\\.writeBootFail\\(").findAll(src).count()
     assertTrue("失败调用点必须真接线（实测 $sites 处，至少 5）", sites >= 5)
     for (stage in listOf(
-      "engine-start-false",        // startEngine() 判为 REFUSED（三态契约，issue #720）
+      "engine-start-false",        // startEngine() 返回 false
       "process-died-during-boot",  // 进程死亡（44 次 t_listen=-1 的主要形态）
       "boot-budget-exceeded",      // 预算内未就绪
       "snapshot-refresh-failed",   // 快照解压失败
@@ -378,5 +378,20 @@ class BootFailLogTest {
     )
     assertFalse("stack 里的 launch token 必须被脱敏", line.contains("SECRETTOKENVALUE1234567890"))
     assertTrue("stack 段必须仍在（脱敏不是丢弃）", line.contains("probe failed: http://127.0.0.1:3080/?token=***"))
+  }
+
+  @Test
+  fun bootDiagDetailAndPageRuntimeAreRedacted() {
+    val line = LogCollector.bootDiagLine(
+      source = "page-console",
+      detail = "url=http://127.0.0.1:3080/?token=DETAILSECRET1234567890",
+      pageSideRuntime = "url=http://127.0.0.1:3080/?token=RUNTIMESECRET1234567890",
+      segments = "snapshot=ready",
+    )
+
+    assertFalse(line.contains("DETAILSECRET1234567890"))
+    assertFalse(line.contains("RUNTIMESECRET1234567890"))
+    assertTrue(line.contains("token=***"))
+    assertTrue(line.contains("snapshot=ready"))
   }
 }
