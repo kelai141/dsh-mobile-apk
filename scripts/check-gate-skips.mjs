@@ -148,6 +148,17 @@ if (argv.includes('--self-test')) {
   process.exit(0)
 }
 
+// 判据自证：主体每次运行都先自证判别力（静默，仅失败时出声）。
+// 变异 —— 例如把 executionSites 退回 invokedIn 的宽松实现 —— 会在这里当场被判红，
+// 不依赖任何人记得传 --self-test。
+{
+  const stFails = selfTest(true)
+  if (stFails.length > 0) {
+    console.error('CHECK-GATE-SKIPS FAILED：判据自证不通过（' + stFails.length + ' 项）—— ' + stFails.join('；'))
+    process.exit(1)
+  }
+}
+
 // ── 1. 声明集合 vs 实际文件 vs 两条链 ───────────────────────────────────────
 const aggText = readIf('scripts/check-release-gates.mjs')
 if (aggText === null) { console.error('CHECK-GATE-SKIPS FAILED：缺 scripts/check-release-gates.mjs'); process.exit(2) }
