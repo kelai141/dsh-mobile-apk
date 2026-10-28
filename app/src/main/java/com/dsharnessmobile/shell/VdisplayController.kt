@@ -92,7 +92,7 @@ object VdisplayController {
   private const val IDLE_RECLAIM_MS = 10 * 60 * 1000L
 
   /** 刷新某块屏（或全部）的使用时间；由所有会「用到屏」的操作调用。 */
-  private fun touch(alias: String?) {
+  private fun touch(alias: String?) = synchronized(lock) {
     val now = android.os.SystemClock.elapsedRealtime()
     if (alias == null) records.values.forEach { it.lastUsedAt = now }
     else records[alias]?.lastUsedAt = now
