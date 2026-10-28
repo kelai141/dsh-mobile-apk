@@ -105,3 +105,10 @@ slot-guard 注释与本日审计报告。
 引擎启动失败后不再依赖快照内 UndoGate 作为唯一的用户修复路径。壳侧原生助手读取真实启动诊断与 DSH 现有模型配置，可以使用界定的 `read`、`write`、`list`、`bash`、`engine_status`、`restart_engine`、`refresh_runtime` 工具，并在修复后重新启动与验证。助手自身被打进 APK，启动时不受插件或 WebView 失败影响。
 
 当前验证范围是单个开发模拟器上的真实新会话、连续工具批次、停止与重新打开；本次仅是快速验证，不作完整三层验收，也不进入发版候选。尚未在 arm64 真机验证。对话栏横向布局、浅深色对比度、模型与推理强度切换、历史会话与新会话仍需在当前安装包上做人工回归；发布前必须补齐这些项目并完成正式包验收。
+
+## screen-scope 五个修复（#803 #802 #799 #790 #786）的验收缺口（2026-10-29）
+
+| 项 | 当前事实 | 结论 / 后续 |
+|---|---|---|
+| CDP（模型 transport）层未验 | 已验档位：代码层（judge 41/41、Kotlin \`ScreenScopeTest\` 5 例）+ handler 接线层（A 组 25/25 拦下、B 组 16/16 放行）+ 设备副作用层（B 组 16 条实机执行，前后截图 sha256 与 \`dumpsys SurfaceFlinger\` token 集合均一致）。**CDP 层未验**：需要模型 transport 把 A/B 组经 \`android_shell_exec\` 真正下发，当前会话无 bridge 工具面。验收任务由外部模型经 adb 编排，非设备内模型（设备未配 LLM）。 | 跟进 issue #834 钉住 A/B 组 41 条断言清单；bridge transport 就绪后跑 \`node scripts/verify-screen-scope-01410.mjs --layer=bridge --receipts=<json>\` 收口 |
+| \`S-22d\` / \`S-20i\` 仅由 judge 层覆盖，真机未确认 | 这两条（\`input touchpad -d 7 tap 1 2\`、\`wm reset -d 7\`）依赖「目标确为已注册虚拟屏则放行」。handler 层构造 service 时不注入 controlQueue（为保证零设备 I/O），拿不到虚拟屏注册表，故这两条在该层被跳过，仅由纯函数层（judge）覆盖。设备层跑的是 B 组其余 14 条。 | 真机确认方式见 #834：先建虚拟屏拿到已注册 displayId，再下发这两条断言放行 |
