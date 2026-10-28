@@ -64,7 +64,14 @@ for (const m of text.matchAll(RE)) {
   const legacyExpect = rest && rest.startsWith('#expect=') ? decodeURIComponent(rest.slice(8)) : null
   // --only 支持**后缀匹配**：文档里同一个文件可能写成裸名（ShellOps.kt）
   // 或全路径（app/src/main/java/.../ShellOps.kt），只按全等匹配会漏掉一半。
-  if (ONLY && ![...ONLY].some((o) => rel === o || rel.endsWith('/' + o))) continue
+  // --only 支持**双向后缀匹配**：文档里同一个文件可能写成裸名（screen-scope.ts）、
+  // 相对路径（src/screen-scope.ts）或全路径（plugins/dsh-android-bridge/src/screen-scope.ts），
+  // 而调用方传的也是其中某一种。只要一方是另一方以 / 分隔的后缀就算命中。
+  if (ONLY && ![...ONLY].some((o) => {
+    const a = rel.toLowerCase()
+    const b = o.toLowerCase()
+    return a === b || a.endsWith('/' + b) || b.endsWith('/' + a)
+  })) continue
   const lines = fsView.sourceLines(rel)
   if (lines === null) { report.blocked.push({ ref: whole, reason: '文件不存在或裸名多候选（不猜）' }); continue }
   const line = Number(lineStr)
