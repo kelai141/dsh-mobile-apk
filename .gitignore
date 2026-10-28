@@ -40,5 +40,13 @@ out/
 # 内含 ProgramData\Microsoft\Windows\Caches\*.db）。它不是仓库内容，任何提交都不该带上。
 %SystemDrive%/
 
+# 同族的幻影目录：仓库内两份 .npmrc 曾把 npm 缓存写死成 Windows 绝对路径
+# （cache=D:/coding/dsh-mobile/.npm-cache）。非 Windows 主机把 `D:/coding/...` 当成相对路径，
+# 于是每次 npm 调用都在仓库里新建 `D:/coding/dsh-mobile/.npm-cache/_logs/`（真实事故：
+# 2026-10-25 曾把 702 个这样的文件提交进 PR）。
+# 生成源已移除（两份 .npmrc 不再入库，缓存改由环境变量 npm_config_cache 在脚本内设定，
+# 与 build-release.ps1 / check-plugin-tests.mjs 的既有做法一致）；这里保留忽略项兜住本地遗留与旧检出。
+D:/
+
 # gh CLI 在 CWD 下落的设备状态（我这边只读调用产生，非仓库内容）
 .local/
