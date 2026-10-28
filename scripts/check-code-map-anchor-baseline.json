@@ -1941,19 +1941,19 @@
       "} else {"
     ],
     "VdisplayController.kt:529": [
-      "return status(context.applicationContext)"
+      ".put(\"viewerId\", id)"
     ],
     "VdisplayController.kt:554": [
-      ""
+      "}"
     ],
     "VdisplayController.kt:721": [
-      "appContext,"
+      "//      （owner 本人也拒；SafeActivityOptions.checkPermissions 依据的是 START_ACTIVITIES_FROM_BACKGROUND"
     ],
     "VdisplayController.kt:753": [
-      "//   - 读不到       → ok=true  vd-launched-unverified（明写「不构成落点证明」并给出复核手段）"
+      "// **退出码 0 不等于落在目标屏。** 2026-09-19 设备实测：目标包已在真实屏有 task 时，"
     ],
     "VdisplayController.kt:766": [
-      "+ \"ActivityRecord（应用可能已崩溃/退出）——本次不构成落点证明，请用 android_ui_dump 复核该屏内容。\" + amTail)"
+      "return out.put(\"ok\", true).put(\"code\", \"vd-launched-unverified\")"
     ],
     "VdisplayController.kt:84": [
       "*"
@@ -2385,7 +2385,7 @@
       "val display: VirtualDisplay,"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:608": [
-      "*"
+      "out.put(\"guidance\", \"Android 设置已由 Shizuku 拉起到 ${record.alias}（displayId=$id）。\")"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:84": [
       "*"
@@ -2721,10 +2721,10 @@
       "fun fxRevisionNumberIsCompared() {"
     ],
     "app/src/test/java/com/dsharnessmobile/shell/VdisplayArbitrationTest.kt:14": [
-      "@Test"
+      ""
     ],
     "app/src/test/java/com/dsharnessmobile/shell/VdisplayArbitrationTest.kt:30": [
-      "@Test"
+      ""
     ],
     "app/src/test/java/com/dsharnessmobile/shell/W3ShellContractTest.kt:107": [
       "// `AdbLiveProbeTest.kt`（TTL 内复用 / 过期重探 / 失败不冒充实测成功 / TCP 探测区分端口，4 项全绿）。"

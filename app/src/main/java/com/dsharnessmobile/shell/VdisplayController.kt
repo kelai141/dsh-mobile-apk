@@ -519,10 +519,20 @@ object VdisplayController {
           .put("target", record.alias)
           .put("guidance", "虚拟屏 ${record.alias} 正由查看器 $owner 显示；同一 Surface 不能同时挂到两个查看器。")
       }
+      // D4（0.14.11）：旧写法先落归属再 setSurface，并把 setSurface 的失败 runCatching 吞掉；
+      // 而 presenting 由 viewerSurface 非空推出 ⇒ 黑屏也报「已挂」。现在先请求输出面，
+      // 成功才落归属；失败回结构化原因、不占用目标（下一次打开查看器还能正常绑）。
+      val applied = runCatching { record.display.setSurface(surface) }.isSuccess
+      if (!applied) {
+        return status(context.applicationContext).put("ok", false)
+          .put("code", "attach-surface-failed")
+          .put("viewerId", id)
+          .put("target", record.alias)
+          .put("guidance", "虚拟屏 " + record.alias + " 的输出面切换失败（Surface 已失效或被系统拒绝）；画面不会显示，请重新打开查看器。")
+      }
       record.viewerId = id
       record.viewerSurface = surface
       selectedAlias = record.alias
-      runCatching { record.display.setSurface(surface) }
       generation += 1
     }
     Log.i(TAG, "viewer=$id attached to ${record.alias} displayId=${record.displayId}")
