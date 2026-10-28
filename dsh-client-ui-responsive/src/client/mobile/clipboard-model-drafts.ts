@@ -186,7 +186,26 @@ export function installClipboardModelDrafts(): () => void {
       editors.set(owner, attachEditor(owner, key))
     }
   }
-  const observer = new MutationObserver(scan)
+  const observer = new MutationObserver((records) => {
+    // Only dialog-scoped churn can add, mutate or remove a provider editor. This effect runs
+    // for the whole app lifetime and the chat stream mutates the DOM every frame — rescan the
+    // whole document for each of those frames and the streaming UI pays for it (2026-10-28
+    // scan M3; same shape as the about-entry observer's dialog filter).
+    const scopes = [...document.querySelectorAll(EDITOR_SCOPE)]
+    const removedTrackedEditor = records.some(record =>
+      [...record.removedNodes].some(node => node instanceof Element
+        && [...editors.keys()].some(owner => node === owner || node.contains(owner))))
+    if (removedTrackedEditor) {
+      scan()
+      return
+    }
+    if (scopes.length === 0) return
+    const withinScope = (node: Node): boolean =>
+      node instanceof Element && scopes.some(scope => scope.contains(node))
+    const touched = records.some(record => withinScope(record.target)
+      || [...record.addedNodes].some(withinScope))
+    if (touched) scan()
+  })
   observer.observe(document.body, { childList: true, subtree: true, attributes: true,
     attributeFilter: ['class', 'style', 'hidden', 'aria-hidden', 'inert', 'data-dsh-settings-level'] })
   scan()

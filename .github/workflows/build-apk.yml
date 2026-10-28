@@ -29,10 +29,10 @@ on:
         type: boolean
         default: false
 
-# 并发控制（2026-10-28）：手动重建入口。同一分支并行跑两份会互相覆盖 build 目录与 artifact，
-# 且两个 run 都成功时看不出用的是哪份产物。排队串行，不取消——中途砍掉会留下不完整产物。
+# Keep the manual entry group separate from the reusable source workflow group. In source-audit mode,
+# the caller waits for that workflow, so sharing a workflow-level group would block the nested run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: build-apk-entry-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:

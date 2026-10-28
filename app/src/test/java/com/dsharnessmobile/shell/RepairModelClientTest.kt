@@ -54,4 +54,15 @@ class RepairModelClientTest {
     val client = RepairModelClient()
     assertEquals("模型接口错误：quota exceeded", client.gatewayErrorOf("""{"error":{"message":"quota exceeded"}}""", "sk-x"))
   }
+
+  /** M4（2026-10-28 扫描）：空 apiKey 时不得走字面 replace("")——那会在每个字符间插 *** 把消息毁成乱码。 */
+  @Test
+  fun gatewayErrorWithEmptyApiKeyKeepsTheMessageIntact() {
+    val client = RepairModelClient()
+    assertEquals(
+      "空凭据没有可打码的内容，消息必须原样保留",
+      "模型接口错误：quota exceeded",
+      client.gatewayErrorOf("""{"error":{"message":"quota exceeded"}}""", ""),
+    )
+  }
 }

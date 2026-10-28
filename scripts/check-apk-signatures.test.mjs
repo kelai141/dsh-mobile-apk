@@ -13,10 +13,18 @@ const full = [
   'Verified using v3 scheme (APK Signature Scheme v3): true',
   'Number of signers: 1',
 ].join('\n')
+const expectedCertificate = '12'.repeat(32)
+const signed = full + '\nSigner #1 certificate SHA-256 digest: ' + expectedCertificate
 
 test('accepts successful apksigner output only when v1, v2, and v3 are true', () => {
   assert.deepEqual(readSchemes(full), { v1: true, v2: true, v3: true })
-  assert.equal(evaluateVerification({ exitCode: 0, output: full }).ok, true)
+  assert.equal(evaluateVerification({ exitCode: 0, output: signed, expectedCertificateSha256: expectedCertificate }).ok, true)
+})
+
+test('fails closed when the expected signing identity is absent', () => {
+  const result = evaluateVerification({ exitCode: 0, output: signed })
+  assert.equal(result.ok, false)
+  assert.equal(result.certificateMatches, false)
 })
 
 test('verifies v1 against the lowest SDK supported by the generated SHA-256 JAR signature', () => {
@@ -36,32 +44,32 @@ test('Windows SDK verification keeps APK paths as arguments without passing them
 
 for (const scheme of ['v1', 'v2', 'v3']) {
   test(`rejects APK when only ${scheme} is absent`, () => {
-    const output = full.replace(new RegExp(`^Verified using ${scheme} scheme.*(?:\\r?\\n|$)`, 'im'), '')
-    const result = evaluateVerification({ exitCode: 0, output })
+    const output = signed.replace(new RegExp(`^Verified using ${scheme} scheme.*(?:\\r?\\n|$)`, 'im'), '')
+    const result = evaluateVerification({ exitCode: 0, output, expectedCertificateSha256: expectedCertificate })
     assert.equal(result.ok, false)
     assert.deepEqual(result.missing, [scheme])
   })
 
   test(`rejects APK when only ${scheme} is false`, () => {
-    const output = full.replace(new RegExp(`(Verified using ${scheme} scheme \\([^\\r\\n]*?\\):\\s*)true`, 'i'), '$1false')
-    const result = evaluateVerification({ exitCode: 0, output })
+    const output = signed.replace(new RegExp(`(Verified using ${scheme} scheme \\([^\\r\\n]*?\\):\\s*)true`, 'i'), '$1false')
+    const result = evaluateVerification({ exitCode: 0, output, expectedCertificateSha256: expectedCertificate })
     assert.equal(result.ok, false)
     assert.deepEqual(result.missing, [scheme])
   })
 }
 
 test('rejects nonzero apksigner exit even when all scheme lines claim true', () => {
-  assert.equal(evaluateVerification({ exitCode: 1, output: full }).ok, false)
+  assert.equal(evaluateVerification({ exitCode: 1, output: signed, expectedCertificateSha256: expectedCertificate }).ok, false)
 })
 
 test('rejects absent scheme lines and noisy output', () => {
-  const result = evaluateVerification({ exitCode: 0, output: 'Verification failed\n' })
+  const result = evaluateVerification({ exitCode: 0, output: 'Verification failed\n', expectedCertificateSha256: expectedCertificate })
   assert.equal(result.ok, false)
   assert.deepEqual(result.missing, ['v1', 'v2', 'v3'])
 })
 
 test('requires the repository signing identity independently of valid signature schemes', () => {
-  const expected = '12'.repeat(32)
+  const expected = expectedCertificate
   const cert = `V2 Signer: certificate SHA-256 digest: ${expected}`
   assert.deepEqual(readCertificateDigests(cert), [expected])
   assert.equal(evaluateVerification({ exitCode: 0, output: full + '\n' + cert, expectedCertificateSha256: expected }).ok, true)
@@ -84,6 +92,13 @@ test('an explicit keystore option cannot silently disable identity verification 
   const result = spawnSync(process.execPath, [fileURLToPath(new URL('./check-apk-signatures.mjs', import.meta.url)), '--apk', 'final.apk', '--keystore'], { encoding: 'utf8' })
   assert.equal(result.status, 1)
   assert.match(result.stderr, /missing value for --keystore/)
+})
+
+test('APK verification rejects an omitted keystore before looking for apksigner', () => {
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL('./check-apk-signatures.mjs', import.meta.url)), '--apk', 'final.apk'], { encoding: 'utf8' })
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /--keystore is required for APK verification/)
+  assert.doesNotMatch(result.stderr, /apksigner not found/)
 })
 
 test('Gradle debug and release variants explicitly use the all-schemes signing config', () => {

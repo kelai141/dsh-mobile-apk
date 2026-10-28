@@ -237,4 +237,41 @@ class ProfileNormalizeBackupTest {
     val backup = ProfileNormalizeBackup.write(live, text, failed = false, now = 5_000)
     assertTrue("刚写的备份必须立即可用", ProfileNormalizeBackup.isValid(backup, text))
   }
+
+  // ── 跨版本收尾：旧版本前缀的备份在 prune 时被收走（2026-10-28 扫描 M1）───────────────
+
+  /**
+   * 备份名带 [BuildConfig.VERSION_NAME]，升级后旧前缀的文件不再被 [managed] 计数——
+   * 不收走的话每升一版漏一批孤儿 .bak，与有界保留的意图矛盾。prune（经 write 触发）
+   * 必须把它们收走，同时当前版本配额原样工作。
+   */
+  @Test
+  fun backupsFromPriorVersionsAreSweptOnPrune() {
+    val live = target()
+    val staleSuccess = File(live.parentFile, live.name + ".pre-0.0.1-0000000000099.bak")
+    staleSuccess.writeText("older-version-attempt\n")
+    val staleFailed = File(live.parentFile, live.name + ".pre-0.0.1-0000000000100-failed.bak")
+    staleFailed.writeText("older-version-failure\n")
+
+    ProfileNormalizeBackup.write(live, "current-attempt\n", failed = false, now = 1_000)
+
+    assertFalse("旧版本成功备份必须被收走", staleSuccess.exists())
+    assertFalse("旧版本失败备份必须被收走", staleFailed.exists())
+    assertEquals("当前版本配额照常", 1, ProfileNormalizeBackup.successfulBackups(live).size)
+  }
+
+  /** 收尾只动本对象命名样式（.pre-<版本>-<13位序号>[.failed].bak）的文件，同目录邻居绝不碰。 */
+  @Test
+  fun versionSweepSparesFilesThatDoNotMatchTheManagedShape() {
+    val live = target()
+    val pending = File(live.parentFile, live.name + ".normalize-pending-3f2b1c9d-1e2f-4a5b-8c7d-6e5f4a3b2c1d.bak")
+    pending.writeText("pending original\n")
+    val notASequence = File(live.parentFile, live.name + ".pre-0.0.1-not-a-13-digit-sequence.bak")
+    notASequence.writeText("repair-style residue\n")
+
+    ProfileNormalizeBackup.write(live, "current-attempt\n", failed = false, now = 1_000)
+
+    assertTrue("pending 原文必须保留", pending.exists())
+    assertTrue("非 13 位序号的文件不属于本对象命名空间", notASequence.exists())
+  }
 }

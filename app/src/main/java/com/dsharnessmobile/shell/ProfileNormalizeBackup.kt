@@ -111,7 +111,7 @@ internal object ProfileNormalizeBackup {
   }
 
   /**
-   * 裁剪历史备份：成功配额与失败配额各自算、互不挤占。
+   * 裁剪历史备份：成功配额与失败配额各自算、互不挤占；再收走跨版本孤儿（[dropStaleVersions]）。
    *
    * 只动本对象自己命名的文件（`<目标名>.pre-<版本>-<13位序号>[-failed].bak`），
    * `repairProfilePatch` 用 UUID 命名的既有多份备份不受影响。
@@ -119,6 +119,7 @@ internal object ProfileNormalizeBackup {
   @Synchronized fun prune(target: File) {
     drop(managed(target).filterNot { isFailed(it) }, KEEP_ATTEMPTS)
     drop(managed(target).filter { isFailed(it) }, KEEP_FAILED_ATTEMPTS)
+    dropStaleVersions(target)
   }
 
   /** 该目录下本对象管理的成功备份（按时间序，供测试与诊断用）。 */
@@ -129,10 +130,40 @@ internal object ProfileNormalizeBackup {
 
   private fun isFailed(file: File): Boolean = file.name.endsWith(FAILED_MARK + SUFFIX)
 
+  private fun currentPrefix(target: File): String =
+    target.name + ".pre-" + BuildConfig.VERSION_NAME + SEQ_DASH
+
   private fun sequence(target: File, file: File): Long? {
-    val prefix = target.name + ".pre-" + BuildConfig.VERSION_NAME + SEQ_DASH
-    val pattern = Regex(Regex.escape(prefix) + "([0-9]{13})(?:-failed)?\\.bak")
+    val pattern = Regex(Regex.escape(currentPrefix(target)) + "([0-9]{13})(?:-failed)?\\.bak")
     return pattern.matchEntire(file.name)?.groupValues?.get(1)?.toLongOrNull()
+  }
+
+  /**
+   * 收走**旧版本**前缀的备份（2026-10-28 扫描 M1）。
+   *
+   * 缺陷形态：备份名与 [managed]/[sequence] 都带 [BuildConfig.VERSION_NAME]，升级后旧版本
+   * 前缀的文件不再被任何配额计数、也永远不会被 [prune] 清理——每升一版就漏一批孤儿 .bak，
+   * 与「有界保留」的设计意图直接矛盾。
+   *
+   * 语义：跨版本备份的保留期到版本升级为止（新版本首写时 live 的原文由
+   * [ProfileNormalizationPublication.prepare] 的 pending 副本先行保护，与版本命名无关，
+   * 所以清掉旧备份不会制造「没有恢复点」的窗口）。只删本对象命名样式的文件——
+   * `<目标名>.pre-<任意版本>-<13位序号>[-failed].bak`，且不以当前版本前缀开头。
+   * 当前版本的排除用前缀串比对而不是正则分组：currentPrefix 以 SEQ_DASH 结尾，
+   * "0.14.9-" 不会误匹配 "0.14.90-" 这类互为前缀的版本号。
+   */
+  private fun dropStaleVersions(target: File) {
+    val parent = target.absoluteFile.parentFile ?: return
+    val current = currentPrefix(target)
+    val pattern = Regex(
+      Regex.escape(target.name + ".pre-") + "(.+)" + Regex.escape(SEQ_DASH) +
+        "[0-9]{13}(?:-failed)?" + Regex.escape(SUFFIX),
+    )
+    val stale = (parent.listFiles() ?: emptyArray()).filter {
+      pattern.matchEntire(it.name) != null && !it.name.startsWith(current) &&
+        Files.isRegularFile(it.toPath(), LinkOption.NOFOLLOW_LINKS)
+    }
+    for (file in stale) runCatching { SnapshotFs.deletePath(file) }
   }
 
   private fun drop(ordered: List<File>, keep: Int) {

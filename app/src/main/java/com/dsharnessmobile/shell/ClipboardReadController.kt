@@ -24,10 +24,20 @@ internal class ClipboardReadController(
   /** Queue no clipboard access until the user confirms the native prompt. */
   fun request(requestId: String) {
     check(Looper.myLooper() == Looper.getMainLooper())
+    // 非法 requestId 必须静默丢弃：回执要把它拼进 evaluateJavascript，未过白名单的串就是注入面。
     if (!requestId.matches(Regex("[A-Za-z0-9_-]{8,64}"))) return
+    // WebView 不在时没有回执信道（evaluateJavascript 需要 view），只能靠页面侧超时兜底。
     val view = page() ?: return
-    val url = view.url ?: return
-    if (!trusted(url) || !activity.hasWindowFocus() || activity.isFinishing || activity.isDestroyed) return
+    val url = view.url
+    // 2026-10-28 扫描 M2：这组「壳侧受理失败」必须给回执——旧实现直接 return，用户点
+    // 「从剪贴板填充」后要白等满页面侧 35s 超时才知道没受理（切回应用瞬间点击即触发：
+    // hasWindowFocus 还没恢复）。与 busy 同型：deny 要如实，不能让页面猜。
+    if (url == null || !trusted(url) || !activity.hasWindowFocus() ||
+      activity.isFinishing || activity.isDestroyed
+    ) {
+      reply(view, requestId, JSONObject().put("ok", false).put("reason", "unavailable"))
+      return
+    }
     if (pending != null) {
       // A busy reply must not replace or invalidate the first consent request.
       reply(view, requestId, JSONObject().put("ok", false).put("reason", "busy"))
@@ -99,10 +109,14 @@ internal class ClipboardReadController(
   /** Deliver JSON as data; neither clipboard text nor failures enter logs. */
   private fun reply(view: WebView, requestId: String, payload: JSONObject) {
     payload.put("requestId", requestId)
-    view.evaluateJavascript(
-      "window.dispatchEvent(new CustomEvent('dsh:clipboard-text',{detail:" +
-        escapeLineSeparators(payload.toString()) + "}));",
-      null,
-    )
+    // 受理失败/取消路径可能在 isFinishing 边缘调进来：view 正在销毁时 evaluateJavascript
+    // 会抛 IllegalStateException——回执本就没有恢复路径，吞掉比让调用线程炸掉正确。
+    runCatching {
+      view.evaluateJavascript(
+        "window.dispatchEvent(new CustomEvent('dsh:clipboard-text',{detail:" +
+          escapeLineSeparators(payload.toString()) + "}));",
+        null,
+      )
+    }
   }
 }

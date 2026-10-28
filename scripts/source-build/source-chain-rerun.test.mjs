@@ -34,6 +34,53 @@ const linux = { skip: process.platform !== 'linux' }
 const buildYaml = readFileSync(join(ROOT, '.github/workflows/build-apk.yml'), 'utf8').replaceAll('\r\n', '\n')
 const pluginDirs = JSON.parse(readFileSync(join(ROOT, 'scripts/plugin-dirs.json'), 'utf8')).dirs
 const buildableDirs = pluginDirs.filter(d => JSON.parse(readFileSync(join(ROOT, d, 'package.json'), 'utf8')).scripts?.build)
+function workflowConcurrencyGroup(source) {
+  const lines = source.replaceAll('\r\n', '\n').split('\n')
+  const start = lines.findIndex(line => line === 'concurrency:')
+  if (start < 0) return null
+  for (const line of lines.slice(start + 1)) {
+    if (line.trim() === '') continue
+    if (!/^\s/.test(line)) break
+    const match = line.match(/^  group:\s*(.*?)\s*$/)
+    if (match) return match[1].replace(/^(?:"(.*)"|'(.*)')$/, (_, doubleQuoted, singleQuoted) => doubleQuoted ?? singleQuoted)
+  }
+  return null
+}
+function resolveConcurrencyGroup(template, workflow, ref) {
+  return template
+    .replaceAll('${{ github.workflow }}', workflow)
+    .replaceAll('${{ github.ref }}', ref)
+}
+function assertDistinctConcurrencyGroups(caller, called, context) {
+  const callerGroup = resolveConcurrencyGroup(caller, context.workflow, context.ref)
+  const calledGroup = resolveConcurrencyGroup(called, context.workflow, context.ref)
+  if (callerGroup === calledGroup) throw new Error('caller and called workflow share concurrency group ' + callerGroup)
+  return { callerGroup, calledGroup }
+}
+test('source-audit caller and reusable workflow use separate concurrency namespaces', () => {
+  assert.match(buildYaml, /source-audit:[\s\S]*?uses: \.\/\.github\/workflows\/build-apk-source\.yml/)
+  assert.match(yaml, /^  workflow_call:\s*$/m)
+  const callerGroup = workflowConcurrencyGroup(buildYaml)
+  const sourceGroup = workflowConcurrencyGroup(yaml)
+  assert.ok(callerGroup)
+  assert.ok(sourceGroup)
+  const context = { workflow: 'build-apk', ref: 'refs/heads/concurrency-test' }
+  const resolved = assertDistinctConcurrencyGroups(callerGroup, sourceGroup, context)
+  assert.equal(resolved.callerGroup, 'build-apk-entry-refs/heads/concurrency-test')
+  assert.equal(resolved.calledGroup, 'build-apk-source-refs/heads/concurrency-test')
+  assert.equal(
+    resolveConcurrencyGroup(sourceGroup, 'build-apk', context.ref),
+    resolveConcurrencyGroup(sourceGroup, 'build-apk-source', context.ref),
+    'direct dispatch and nested source calls must serialize together',
+  )
+
+  const oldGroup = '${{ github.workflow }}-${{ github.ref }}'
+  assert.throws(
+    () => assertDistinctConcurrencyGroups(oldGroup, oldGroup, context),
+    /share concurrency group/,
+    'negative control must reject the former shared caller/callee group',
+  )
+})
 function preparePluginBuild(root) {
   mkdirSync(join(root, 'scripts'), { recursive: true })
   mkdirSync(join(root, 'bin'))

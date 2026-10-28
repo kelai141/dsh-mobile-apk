@@ -222,12 +222,15 @@ internal class RepairModelClient {
    * - `error.message` 为 null / JSONObject.NULL 时不算错误：`optString` 会把 null 产出成
    *   `"null"` 字符串，旧实现即误抛「模型接口错误：null」并丢弃正常回答。
    * - 回显消息与 [post] 的 HTTP 错误路径同口径替换 apiKey，防网关错误回显凭据。
+   *   例外（2026-10-28 扫描 M4）：apiKey 为空串时字面 `replace("")` 会在每个字符间插 `***`，
+   *   把消息毁成乱码——没有可脱敏的凭据就原样放行（空凭据本就发不出有效请求）。
    */
   internal fun gatewayErrorOf(response: String, apiKey: String): String? {
     val errorObject = runCatching { JSONObject(response).optJSONObject("error") }.getOrNull() ?: return null
     if (response.contains("\"tool_calls\"")) return null
     val message = (errorObject.opt("message") as? String)?.takeIf { it.isNotBlank() } ?: return null
-    return "模型接口错误：" + message.replace(apiKey, "***").take(300)
+    val redacted = if (apiKey.isEmpty()) message else message.replace(apiKey, "***")
+    return "模型接口错误：" + redacted.take(300)
   }
 
   private fun post(connection: RepairModelConnection, endpoint: String, body: String): String {

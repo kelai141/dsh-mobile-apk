@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
   workflow_call:
 
-# 并发控制（2026-10-28）：这是云端从源重建的入口，两个 run 并行会争同一份 artifact 名字。
-# 这里只做排队串行，不取消：重建链跑到一半被砍会留下半成品 artifact。
+# Use a stable source-build group for direct dispatches and reusable calls. The caller has its own
+# namespace, while both source-build entry paths remain serialized for the same ref.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: build-apk-source-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
