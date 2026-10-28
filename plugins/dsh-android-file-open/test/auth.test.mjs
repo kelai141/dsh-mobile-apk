@@ -596,3 +596,61 @@ test('鉴权纯函数：trusted host 列表与令牌头常量与壳侧契约一�
   assert.equal(authorizeIncomingRoute({ headers: { host: HOST } }, { token: () => undefined }).code, 401)
   assert.equal(authorizeIncomingRoute({ headers: { host: 'evil.example' } }, { token: () => TOKEN }).code, 403)
 })
+
+// ── 2026-10-28 自查（只读审计产出，三处）───────────────────────────────────────
+
+test('自查F1 源已消失时 claim 必须收敛记录（否则每轮重载都白建空会话）', async () => {
+  const ws = freshWorkspace()
+  const incoming = join(ws, 'gone.jpg')
+  writeFileSync(incoming, 'img')
+  const { ctx } = makeCtx()
+  await boot(ctx)
+  const delivered = await call(ctx, ROUTES.list, { method: 'POST', headers: legit(), body: { path: incoming } })
+  assert.equal(delivered.code, 200)
+  const listed = await call(ctx, ROUTES.list, { method: 'GET', headers: legit() })
+  const entry = (JSON.parse(listed.body).items ?? [])[0]
+  assert.ok(entry && entry.entryId, '投递后应能列出条目：' + listed.body)
+  rmSync(incoming, { force: true }) // 模拟「包被清理 / 用户搬走」
+  const claimed = await call(ctx, ROUTES.claim, {
+    method: 'POST',
+    headers: legit(),
+    body: { entryId: entry.entryId, sessionId: 'session-00000000-stub1' },
+  })
+  assert.equal(claimed.code, 410)
+  // 关键断言：记录必须跟着消失。留着它 => 每次 claim 都 410，而浏览器对 claim 失败是静默 return，
+  // 于是每轮重载都先建一张空会话再死在这条 410 上（僵尸草稿）。
+  const after = await call(ctx, ROUTES.list, { method: 'GET', headers: legit() })
+  assert.equal(after.code, 200)
+  const body = JSON.parse(after.body)
+  const items = Array.isArray(body.items) ? body.items : []
+  assert.equal(items.length, 0, '源消失后队列里不得再留着这条记录：' + JSON.stringify(items))
+})
+
+test('自查F2 /clean 的 .sessions 豁免必须按路径前缀，不得只看 basename', async () => {
+  const ws = freshWorkspace()
+  const sessionsDir = join(ws, '.sessions')
+  mkdirSync(sessionsDir, { recursive: true })
+  const record = join(sessionsDir, 'deadbeef.json')
+  writeFileSync(record, '{"session":1}')
+  // 清单里出现 .sessions 下的文件：basename 是 deadbeef.json 而不是 .sessions ⇒ 旧判据会放行。
+  writeFileSync(join(ws, '.tool-temp.ndjson'), record + '\n')
+  const { ctx } = makeCtx()
+  await boot(ctx)
+  const res = await call(ctx, ROUTES.clean, { method: 'POST', headers: legit() })
+  assert.equal(res.code, 200)
+  assert.equal(existsSync(record), true, '宿主会话记录不得被当自有临时项删掉')
+})
+
+test('自查F6 413 必须能真正送达：不得先拆连接再写状态行', () => {
+  const src = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  const lines = src.split('\n')
+  let checked = 0
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!lines[i].includes('res.writeHead(413')) continue
+    checked += 1
+    // 往前看两行：不得出现「先 destroy」
+    const before = lines.slice(Math.max(0, i - 2), i).join('\n')
+    assert.equal(before.includes('req.destroy()'), false, '413 之前不得 req.destroy()（会变成 ECONNRESET）：第 ' + (i + 1) + ' 行')
+  }
+  assert.ok(checked >= 6, '应覆盖到全部 413 分支，实际 ' + checked)
+})

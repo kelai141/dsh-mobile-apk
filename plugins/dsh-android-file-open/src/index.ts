@@ -101,7 +101,11 @@ function ownedInsideWorkspace(owned: string): string | null {
   const wsReal = canonicalPath(tmpWorkspace())
   const real = canonicalPath(resolve(owned))
   if (real === wsReal || !real.startsWith(wsReal + sep)) return null
-  if (basename(real) === '.sessions') return null
+  // 豁免必须按**路径前缀**判，不能只看 basename：清单里出现 `.sessions/<record>.json` 时
+  // basename 是 record 名而不是 `.sessions`，旧判据放行 ⇒ 宿主的会话记录被当"自有临时项"删掉
+  // （`/clean` 还是递归删，目录一并带走）。同 gotcha「前缀混用」的教训。
+  const sessionsDir = join(wsReal, '.sessions')
+  if (real === sessionsDir || real.startsWith(sessionsDir + sep)) return null
   return real
 }
 
@@ -593,18 +597,24 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
         const timeout = setTimeout(() => {
           if (settled) return
           settled = true
-          try { req.destroy() } catch { /* noop */ }
+          // 先答复、再丢请求体：`req.destroy()` 会立刻拆掉底层 socket，之后的 writeHead 写不出去，
+          // 客户端只能看到 ECONNRESET 而不是 413（契约上等于不可达）。`resume()` 只丢弃剩余请求体、
+          // 不拆连接，413 才能真正送达。
           res.writeHead(413, { 'content-type': 'application/json' })
           res.end(JSON.stringify({ ok: false, error: 'body too large or timeout' }))
+          try { (req as unknown as { resume?: () => void }).resume?.() } catch { /* already ended */ }
         }, 5000)
         req.on('data', (b: Buffer) => {
           if (settled) return
           body += b.toString()
           if (body.length > MAX_BODY) {
             settled = true
-            try { req.destroy() } catch { /* noop */ }
+            // 先答复、再丢请求体：`req.destroy()` 会立刻拆掉底层 socket，之后的 writeHead 写不出去，
+            // 客户端只能看到 ECONNRESET 而不是 413（契约上等于不可达）。`resume()` 只丢弃剩余请求体、
+            // 不拆连接，413 才能真正送达。
             res.writeHead(413, { 'content-type': 'application/json' })
             res.end(JSON.stringify({ ok: false, error: 'body too large' }))
+            try { (req as unknown as { resume?: () => void }).resume?.() } catch { /* already ended */ }
           }
         })
         req.on('end', () => {
@@ -646,18 +656,24 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
         const timeout = setTimeout(() => {
           if (settled) return
           settled = true
-          try { req.destroy() } catch { /* request is already terminal */ }
+          // 先答复、再丢请求体：`req.destroy()` 会立刻拆掉底层 socket，之后的 writeHead 写不出去，
+          // 客户端只能看到 ECONNRESET 而不是 413（契约上等于不可达）。`resume()` 只丢弃剩余请求体、
+          // 不拆连接，413 才能真正送达。
           res.writeHead(413, { 'content-type': 'application/json', 'cache-control': 'no-store' })
           res.end(JSON.stringify({ ok: false, error: 'claim timeout' }))
+          try { (req as unknown as { resume?: () => void }).resume?.() } catch { /* already ended */ }
         }, 5000)
         req.on('data', (chunk: Buffer) => {
           if (settled) return
           body += chunk.toString()
           if (body.length > 4096) {
             settled = true
-            try { req.destroy() } catch { /* request is already terminal */ }
+            // 先答复、再丢请求体：`req.destroy()` 会立刻拆掉底层 socket，之后的 writeHead 写不出去，
+            // 客户端只能看到 ECONNRESET 而不是 413（契约上等于不可达）。`resume()` 只丢弃剩余请求体、
+            // 不拆连接，413 才能真正送达。
             res.writeHead(413, { 'content-type': 'application/json', 'cache-control': 'no-store' })
             res.end(JSON.stringify({ ok: false, error: 'claim body too large' }))
+            try { (req as unknown as { resume?: () => void }).resume?.() } catch { /* already ended */ }
           }
         })
         req.on('end', () => {
@@ -683,13 +699,20 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
               return
             }
             const path = safeResolveInside(resolve(tmpWorkspace()), item.path)
+            // 源已经不在（被清理、被搬走、被换成目录）时，**记录必须跟着清掉**：否则这条队列项
+            // 永远留着，每次 claim 都 410，而浏览器侧对 claim 的失败是静默 return —— 每轮重载都会
+            // 先建一张空会话再死在这条 410 上（review C10 同族：僵尸草稿 + 空会话堆积）。
+            // 记录的语义是「还有可交付的字节」，字节没了记录就没有意义（与 content 的 410 立刻杀
+            // lease 是同一口径，三处处置必须一致）。
             if (path === null || !existsSync(path)) {
+              rmSync(join(queueDir(), item.file), { force: true })
               res.writeHead(410, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
               res.end(JSON.stringify({ ok: false, error: 'incoming source expired' }))
               return
             }
             const current = statSync(path)
             if (!current.isFile()) {
+              rmSync(join(queueDir(), item.file), { force: true })
               res.writeHead(410, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
               res.end(JSON.stringify({ ok: false, error: 'incoming source is not a file' }))
               return
@@ -802,18 +825,24 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
         const timeout = setTimeout(() => {
           if (settled) return
           settled = true
-          try { req.destroy() } catch { /* request is already terminal */ }
+          // 先答复、再丢请求体：`req.destroy()` 会立刻拆掉底层 socket，之后的 writeHead 写不出去，
+          // 客户端只能看到 ECONNRESET 而不是 413（契约上等于不可达）。`resume()` 只丢弃剩余请求体、
+          // 不拆连接，413 才能真正送达。
           res.writeHead(413, { 'content-type': 'application/json', 'cache-control': 'no-store' })
           res.end(JSON.stringify({ ok: false, error: 'completion timeout' }))
+          try { (req as unknown as { resume?: () => void }).resume?.() } catch { /* already ended */ }
         }, 5000)
         req.on('data', (chunk: Buffer) => {
           if (settled) return
           body += chunk.toString()
           if (body.length > 2048) {
             settled = true
-            try { req.destroy() } catch { /* request is already terminal */ }
+            // 先答复、再丢请求体：`req.destroy()` 会立刻拆掉底层 socket，之后的 writeHead 写不出去，
+            // 客户端只能看到 ECONNRESET 而不是 413（契约上等于不可达）。`resume()` 只丢弃剩余请求体、
+            // 不拆连接，413 才能真正送达。
             res.writeHead(413, { 'content-type': 'application/json', 'cache-control': 'no-store' })
             res.end(JSON.stringify({ ok: false, error: 'completion body too large' }))
+            try { (req as unknown as { resume?: () => void }).resume?.() } catch { /* already ended */ }
           }
         })
         req.on('end', () => {
