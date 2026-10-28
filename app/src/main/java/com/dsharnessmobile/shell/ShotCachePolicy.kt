@@ -97,11 +97,18 @@ internal object ShotCachePolicy {
       return false
     }
     prune(dir, nowMs, ttlMs, maxFiles, maxBytes, preserve = capture)
-    val remaining = try {
-      dir.listFiles()?.filter { it.isFile && isManagedShot(it) }.orEmpty()
+    // A successful capture requires a listing so the cache limits can be verified.
+    val files = try {
+      dir.listFiles()
     } catch (_: Exception) {
+      delete(capture)
       return false
     }
+    if (files == null) {
+      delete(capture)
+      return false
+    }
+    val remaining = files.filter { it.isFile && isManagedShot(it) }
     val withinLimits = remaining.size <= maxFiles && remaining.sumOf { sizeOf(it) } <= maxBytes
     if (!withinLimits) delete(capture)
     return withinLimits && capture.isFile
