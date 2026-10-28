@@ -3210,7 +3210,6 @@
     "index.js:2198": [
       "* @returns compact facts and child-local failures; complete child event arrays are released after extraction.",
       "* Collect each related child's own descriptor through existing historical codecs.",
-      "additionalProperties: false,",
       "const incidental = new Set([",
       "function signature(pattern) {",
       "let total = 0;",
@@ -3961,7 +3960,7 @@
       "const c5skip = absent.results.find((x) => x.id === 'C5')"
     ],
     "scripts/check-bounded-io.mjs:54": [
-      "// 只对「子进程/连接流」命中；HTTP 与文件流的读有各自超时语义，不在此列。"
+      "const exempt = buildTree('exempt', { 'Ok.kt': '// bounded-io-exempt: 合成夹具，自证豁免通道\\nval s = stream.bufferedReader().readText()\\n' })"
     ],
     "scripts/check-bridge-symmetry.mjs:1": [
       "#!/usr/bin/env node"
