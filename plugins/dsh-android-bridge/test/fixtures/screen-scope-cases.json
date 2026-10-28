@@ -545,6 +545,196 @@
       ],
       "expect": "deny-uncertified-target",
       "why": "同 S-9g，覆盖 MALFORMED 正则的第二支 `(?![0-9\\s])\\S`（短选项后紧跟非数字、且非空白）。"
+    },
+    {
+      "name": "S-15a 直接写 input 设备（sendevent）恒拒",
+      "command": "sendevent /dev/input/event1 3 57 1",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "小米 14 Pro（SDK 37）实测 shell 直写被拒（Permission denied），但 `su -c` 下 RC=0；`sendevent` 能向 /dev/input/* 注入任意事件（含触摸坐标），而它**没有目标屏参数** ⇒ 永远自证不了「作用于已注册虚拟屏」，与 `uiautomator` 同档恒拒。修前整条放行。"
+    },
+    {
+      "name": "S-15b su -c 下的 sendevent 同样可达（载荷展开后仍要拦）",
+      "command": "su -c 'sendevent /dev/input/event1 0 0 0'",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "小米 14 Pro（SDK 37）实测 `su -c 'sendevent /dev/input/event1 0 0 0'` 返回 RC=0（设备已 root 时真能写）。`su -c` 的载荷本来就会被本门禁展开重扫，但 `sendevent` 不在任何家族里 ⇒ 修前整条放行。"
+    },
+    {
+      "name": "S-15c 读 input 设备（getevent）也恒拒",
+      "command": "getevent -lt /dev/input/event1",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "小米 14 Pro（SDK 37）实测 `getevent -p` 能列出输入设备并读回触摸/按键事件；它同样没有目标屏参数 ⇒ 无法证明读的是虚拟屏的输入 ⇒ 恒拒（与 `dumpsys` 读信息一律拒同一口径）。"
+    },
+    {
+      "name": "对照 只列举 /dev/input 目录不算操作设备",
+      "command": "ls -l /dev/input",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "判据是**命令词**不是路径：`ls /dev/input` 只是列目录，不注入也不读事件 ⇒ 必须放行（防「见到 /dev/input 就拒」）。"
+    },
+    {
+      "name": "S-16a cmd window 是 wm 的等价拼写（改真实屏分辨率）",
+      "command": "cmd window size 900x1600",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "小米 14 Pro（SDK 37）实测 `cmd window size 900x1600` 真的把真实屏改成 `Override size: 900x1600`（`wm size reset` 才恢复）；而 `wm size` 早就在家族里 ⇒ 只认 `wm` 会把这条等价拼写整类放行（与 `am` / `cmd activity` 同型）。"
+    },
+    {
+      "name": "S-16b cmd window 的目标屏参数在子命令内（-d 可自证）",
+      "command": "cmd window size 900x1600 -d 7",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "小米 14 Pro（SDK 37）实测 `cmd window size … -d 7` 实测被接受（返回 `Physical size: 0x0`，因为 7 号屏不存在）。它的 `-d` 出现在**子命令之后**，不是全局选项 —— 门禁按全文扫 options，所以带已注册虚拟屏 id 时应放行。"
+    },
+    {
+      "name": "S-16c cmd display 用 --id 而非 -d，无法自证 ⇒ 恒拒",
+      "command": "cmd display set-brightness 100",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "`cmd display set-brightness|set-user-preferred-display-mode|…` 同样改真实屏（亮度/显示模式），但目标屏参数是 `--id DISPLAY_ID`，既不在 ALL_DISPLAY_FLAGS 里、也不是 ScreenTarget 的两种 id 空间之一 ⇒ 与 `dumpsys` 同档恒拒。"
+    },
+    {
+      "name": "S-16d wm user-rotation 同属改屏子命令",
+      "command": "wm user-rotation lock 1",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "小米 14 Pro（SDK 37）实测本机 MIUI 上 `wm user-rotation lock 1` 返回 0 但 `mRotation` 恒定不变（与 `settings put system user_rotation` 一样被 ROM 忽略）；判据看的是「命令能否操作真实屏」而不是这一台有没有生效 —— 别的 ROM 会真的转屏。"
+    },
+    {
+      "name": "对照 wm size 带虚拟屏 id 仍放行（细化后不得误伤虚拟屏）",
+      "command": "wm size 900x1600 -d 7",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "把 `wm` 子命令表扩大后，带已注册虚拟屏 id 的用例必须仍然放行：`wm size … -d 7` 的 `-d` 是它的目标屏参数（原就支持）⇒ 不得因新增 `user-rotation` 而改变这一路径的行为。"
+    },
+    {
+      "name": "S-17a dumpsys activity top 会打出完整 View Hierarchy",
+      "command": "dumpsys activity top",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "小米 14 Pro（SDK 37）实测 `dumpsys activity top` 输出里含 `View Hierarchy:`（DecorView → LinearLayout → FrameLayout → WebView，逐行带 `0,0-1440,3200` 这类 bounds）与 `android.widget.TextView{… 42,0-699,103}` 等控件行 —— 与 `uiautomator dump` 同级的「读真实屏 UI」。修前 `dumpsys` 家族只覆盖 `window|display|input` ⇒ 整条放行。"
+    },
+    {
+      "name": "S-17b dumpsys activity activities 同样泄漏屏几何",
+      "command": "dumpsys activity activities",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "同族的 `activities` 子命令也会带每个 Task/Activity 的 `displayId` 与窗口 bounds ⇒ 一并按 `dumpsys` 档恒拒。"
+    },
+    {
+      "name": "对照 dumpsys battery 与屏无关，必须仍放行",
+      "command": "dumpsys battery",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "扩大 `dumpsys` 子命令表时不得顺手把整个 `dumpsys` 都拒掉：`battery`/`meminfo` 这类与屏无关的 dump 不在射程内（判据仍是子命令，不是命令名本身）。"
+    },
+    {
+      "name": "S-11f nice 包装裸解释器：载荷同样不可见",
+      "command": "echo 'screencap -p /sdcard/x.png' | nice sh",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "小米 14 Pro（SDK 37）实测 `echo NICE_RAN | nice sh` 打印了标记 ⇒ 真的执行了 stdin 里的脚本。裸 `| sh` 判 deny-unparsed，但包装词不在白名单时循环停在 `nice` 上返回 false（当成「不是解释器」）⇒ 多套一层包装即可绕过 #509 的裸解释器判据。"
+    },
+    {
+      "name": "S-11g setsid 包装（带自己的选项）",
+      "command": "echo 'screencap -p /sdcard/x.png' | setsid -w sh",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "小米 14 Pro（SDK 37）实测 `setsid -w sh` 打印了标记。注意 `-w` 是 setsid 自己的选项，必须先跳过包装器再跳过选项才认得出裸 `sh`。"
+    },
+    {
+      "name": "S-11h ionice 包装裸解释器",
+      "command": "echo 'screencap -p /sdcard/x.png' | ionice sh",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "小米 14 Pro（SDK 37）实测 `ionice sh` 打印了标记（ionice 在 /system/bin）。"
+    },
+    {
+      "name": "S-11i taskset 包装（带数字参数）",
+      "command": "echo 'screencap -p /sdcard/x.png' | taskset 1 sh",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "小米 14 Pro（SDK 37）实测 `taskset 1 sh` 打印了标记。`1` 是纯数字参数，判定器本来就跳过纯数字词，故只需 taskset 在包装器白名单里。"
+    },
+    {
+      "name": "S-11j 不带管道同样成立（sh 读 stdin 即可）",
+      "command": "nice -n 5 sh",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "`-n 5` 是 nice 自己的选项，需先跳包装器再跳选项与数字。"
+    },
+    {
+      "name": "对照 nice 包装普通命令不得误拦",
+      "command": "nice -n 5 getprop ro.product.model",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "与 S-11j 成对：载荷是 getprop，不读 stdin、不执行脚本。防止把「出现包装词就拒」写宽。"
+    },
+    {
+      "name": "对照 nice 后跟普通命令同样放行",
+      "command": "nice echo hi",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "无选项形态的对照。"
     }
   ]
 }
