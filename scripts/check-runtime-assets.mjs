@@ -17,6 +17,7 @@
 // 现支持 `--require`：构建链/发布链调用时，快照/资产/registry 任一缺席即**失败**（不得 SKIP）。
 // 并且 ABI 由调用方传入（build-apk-013.ps1 按当前 ABI 传参），不再固定 x86_64。
 //
+//   --root <dir>  只给测试用：把 registry / 资产目录 / 行为回归脚本换成临时树（不碰真实仓库）
 // 用法：node scripts/check-runtime-assets.mjs [abi] [--snapshot <tar>] [--require]
 //   abi         arm64 | x86_64（缺省 x86_64，仅兼容手工调用）
 //   --snapshot  显式快照 tar（发布链用 dsh-mobile-apk/snapshot/snapshot-<abi>.tar.xz）
@@ -36,6 +37,9 @@ import { execFileSync, spawnSync } from 'node:child_process'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = dirname(HERE)
 const args = process.argv.slice(2)
+/** `--root <dir>` 只给测试用：把 registry / 资产目录 / 行为回归脚本全换成临时树；正常门禁不变。 */
+const rootArgIdx = args.indexOf('--root')
+const TEST_ROOT = rootArgIdx >= 0 ? args[rootArgIdx + 1] : null
 let ABI = 'x86_64'
 let SNAP_OVERRIDE = null
 let REQUIRE = process.env.DSH_REQUIRE_SNAPSHOT_ASSETS === '1'
@@ -50,11 +54,11 @@ for (let i = 0; i < args.length; i += 1) {
 // CI/local source chains provide the exact APK root; prefer it over layout guessing.
 // Without this override, a self-contained checkout can be misread as a coordination
 // root when a same-named directory exists, sending the strict gate to a phantom path.
-const APK_DIR = process.env.DSH_APK_DIR
+const APK_DIR = TEST_ROOT ?? (process.env.DSH_APK_DIR
   ? resolve(process.env.DSH_APK_DIR)
   : existsSync(join(ROOT, 'dsh-mobile-apk'))
     ? join(ROOT, 'dsh-mobile-apk')
-    : ROOT
+    : ROOT)
 const SNAP = SNAP_OVERRIDE ? SNAP_OVERRIDE : join(ROOT, '.deploy-tmp', 'snapshot-013', ABI, 'snapshot.tar.xz')
 const SNAPSHOT_NAME = basename(SNAP)
 const ASSETS = join(APK_DIR, 'app', 'src', 'main', 'assets', 'patched')
@@ -78,7 +82,7 @@ if (!existsSync(join(ROOT, 'scripts', 'patches', 'registry.json'))) {
   process.exit(0)
 }
 
-const registry = JSON.parse(readFileSync(join(ROOT, 'scripts', 'patches', 'registry.json'), 'utf8'))
+const registry = JSON.parse(readFileSync(join(TEST_ROOT ?? ROOT, 'scripts', 'patches', 'registry.json'), 'utf8'))
 const patches = (registry.patches ?? []).filter((p) => p.scope === 'engine' && p.marker)
 const assets = readdirSync(ASSETS).filter((f) => f.endsWith('.js'))
 if (assets.length === 0) { skip('assets/patched 下没有 .js 资产'); process.exit(0) }
@@ -256,7 +260,7 @@ if (checked === 0) {
 // （构建期补丁自己带缺陷）字节比对会绿；行为断言是第二道锁（review C1 判据）。
 for (const { asset, test } of BEHAVIOR_TESTS) {
   if (!assets.includes(asset)) continue
-  const testPath = join(ROOT, 'scripts', 'patches', 'tests', test)
+  const testPath = join(TEST_ROOT ?? ROOT, 'scripts', 'patches', 'tests', test)
   if (!existsSync(testPath)) {
     skipAsset(`行为回归脚本缺席：scripts/patches/tests/${test}（镜像面不完整？）`)
     continue
