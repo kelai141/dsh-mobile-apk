@@ -316,6 +316,18 @@ export function resolveRef(
     value = value.slice(0, scopeMatch.index)
   }
   const t = value.trim()
+  // 空值必须在进匹配之前拒掉。`text:` / `desc:` / `rid:` 是**线性字段比对**，空串会命中
+  // 「该字段恰好为空」的节点——目录里只要只剩一个空文本节点（很常见：说明性 TextView、
+  // 占位 View），`text:` 就会静默命中它并返回 ok。模型漏写值的手误于是变成一次**看似成功
+  // 的点击**，落到一个完全无关的节点上。`id:` 因为 byId 没有 "" 键天然被拒，四条前缀行为
+  // 不一致，这里统一 fail-closed。
+  if (t === '') {
+    return {
+      ok: false,
+      error: `ref "${kind}:" 的值不能为空——请写成 ${kind}:<具体值>`
+        + (kind === 'text' || kind === 'desc' ? `（例如 ${kind}:确定）` : '（例如 rid:com.app:id/btn）'),
+    }
+  }
   let pool = nodes
   if (scopeId !== '') {
     const scope = byId.get(scopeId)
