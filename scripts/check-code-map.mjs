@@ -210,7 +210,7 @@ function symbolAt(lines, symbol) {
   const findIn = (fromLine, toLine, name) => {
     const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     const keywordForm = new RegExp(
-      '^\\s*(?:(?:private|public|internal|protected|export|default|override|suspend|inline|operator|abstract|open|final|static|async|const|data|sealed|enum|lateinit|readonly)[ ]+)*'
+      '^\\s*(?:(?:private|public|internal|protected|export|default|override|suspend|inline|operator|abstract|open|final|static|async|const|data|sealed|enum|lateinit|readonly|inner|companion)[ ]+)*'
       + '(?:fun|class|object|interface|val|var|let|function|type|def|struct|enum)[ ]+'
       + esc + '(?![A-Za-z0-9_$])',
     )
@@ -356,7 +356,7 @@ function anchorBaselineSymbolHashes() {
  */
 function deriveSymbolAnchor(lines, line, contentHash) {
   const defRe = /^\s*(?:(?:private|public|internal|protected|export|default|override|suspend|inline|operator|abstract|open|final|static|async|const|data|sealed|enum|lateinit)\s+)*(?:fun|class|object|interface|val|var|let|const|function|type|def|struct|enum)\s+([A-Za-z_$][A-Za-z0-9_$]*)/
-  const classRe = /^\s*(?:(?:private|public|internal|protected|export|default|abstract|open|final|data|sealed|enum|static)\s+)*(?:class|object|interface)\s+([A-Za-z_$][A-Za-z0-9_$]*)/
+  const classRe = /^\s*(?:(?:private|public|internal|protected|export|default|abstract|open|final|data|sealed|enum|static|inner|companion)\s+)*(?:class|object|interface)\s+([A-Za-z_$][A-Za-z0-9_$]*)/
   const idx = Math.min(Math.max(line - 1, 0), lines.length - 1)
 
   // 1) 向上找包围符号；同时按**花括号深度**判定宿主类（消歧用）。
