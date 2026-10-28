@@ -119,16 +119,18 @@ const selfTest = (silent) => {
     executionSites(NODE_CHAIN, declOnly).size === 0, '命中=' + [...executionSites(NODE_CHAIN, declOnly)].join(','))
 
   // ③④ node 链：只有 gate(...) 包裹才算执行点。
-  t('node 链 gate(\'x\') 命中', executionSites(NODE_CHAIN, "gate('check-a.mjs')").has('check-a.mjs'))
-  t('node 链 gate("x") 双引号同样命中', executionSites(NODE_CHAIN, 'gate("check-b.mjs")').has('check-b.mjs'))
+  // 断言刻意见用 [...].includes 而不是 .has：包装层若被退回返回数组的实现，
+  // .has 会抛 TypeError（红是红了，但报错不可读），[...].includes 会优雅判红。
+  t('node 链 gate(\'x\') 命中', [...executionSites(NODE_CHAIN, "gate('check-a.mjs')")].includes('check-a.mjs'))
+  t('node 链 gate("x") 双引号同样命中', [...executionSites(NODE_CHAIN, 'gate("check-b.mjs")')].includes('check-b.mjs'))
   t('node 链 数组下标写法不算执行点', executionSites(NODE_CHAIN, 'GATE_SCRIPTS[0]').size === 0)
   t('node 链 gate(x) 无引号变量不算执行点', executionSites(NODE_CHAIN, 'gate(name)').size === 0)
 
   // ⑤⑥⑦ pwsh 链：行首 node ... scripts\check-x.mjs 才算；注释与字符串里的不算。
   t('pwsh 链 node ... scripts\\check-x.mjs 命中',
-    executionSites(PWSH_CHAIN, 'node "$PSScriptRoot\\scripts\\check-a.mjs"').has('check-a.mjs'))
+    [...executionSites(PWSH_CHAIN, 'node "$PSScriptRoot\\scripts\\check-a.mjs"')].includes('check-a.mjs'))
   t('pwsh 链 带 $var = 前置同样命中',
-    executionSites(PWSH_CHAIN, '$r = node scripts/check-b.mjs --x').has('check-b.mjs'))
+    [...executionSites(PWSH_CHAIN, '$r = node scripts/check-b.mjs --x')].includes('check-b.mjs'))
   t('pwsh 链 注释行不算执行点', executionSites(PWSH_CHAIN, '# node scripts\\check-a.mjs').size === 0)
   t('pwsh 链 字符串里提到不算执行点',
     executionSites(PWSH_CHAIN, 'Write-Host "见 scripts\\check-a.mjs"').size === 0)
