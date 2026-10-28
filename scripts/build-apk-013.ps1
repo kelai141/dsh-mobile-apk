@@ -217,10 +217,25 @@ if ($LASTEXITCODE -ne 0) { Write-Host "构建并发吃满全部核心（模拟�
 # Kotlin 单测数量反回归（0.14.1 P0）：CI 从不跑 Kotlin 单测（pr-gate 只 compileDebugKotlin），
 # 417 例契约断言此前只在本地手动跑过；且「只按退出码判」分不清「全绿」与「一个用例都没跑」
 # （测试类被删/改名/漏编译时 exit 仍 0）。本门禁逐类比对基线（只许升）+ 断言无缺席 + 结果新鲜。
-# 注意时序：本步在 gradle 构建**之前**，故用的是**上一次**的测试结果——若尚无结果则显式
-# SKIP(#1) 计数（不计入绿）。真正的「本次构建前必须重跑单测」由发布链步骤保证（见 build-release.ps1）。
+#
+# 判据必须**由本次构建自己产出**（issue #677）：此前这里带 --allow-missing，而全链从不执行
+# :app:testDebugUnitTest —— 干净检出上结果目录缺席就 SKIP(#1) 然后 exit 0，那条 P0 反回归
+# 判据在本地链上一次都不生效，产物仍打印「门禁通过」。注释里「由发布链保证」也不成立：
+# build-release.ps1 全程没有 testDebugUnitTest 调用点。现改为先跑单测再判，缺结果直接红。
+Write-Host "== Kotlin 单测（:app:testDebugUnitTest 全量；门禁前置，issue #677）=="
+Push-Location $apkDir
+try {
+    if (Test-Path (Join-Path $apkDir "gradlew.bat")) { $gradlew = Join-Path $apkDir "gradlew.bat" }
+    elseif (Test-Path (Join-Path $apkDir "gradlew")) { $gradlew = Join-Path $apkDir "gradlew" }
+    else { Write-Host "找不到 gradlew，无法产出 Kotlin 单测结果，拒绝打包"; exit 1 }
+    & $gradlew ":app:testDebugUnitTest" --no-daemon --console=plain
+    if ($LASTEXITCODE -ne 0) { Write-Host "Kotlin 单测未通过，拒绝打包"; exit 1 }
+} finally {
+    Pop-Location
+}
+
 Write-Host "== Kotlin 单测数量反回归门禁 =="
-node (Join-Path $Root "scripts\check-kotlin-test-count.mjs") --allow-missing 2>&1
+node (Join-Path $Root "scripts\check-kotlin-test-count.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "Kotlin 单测防线数量/新鲜度不达标（可能有用例被删或结果陈旧），拒绝打包"; exit 1 }
 
 # 执行地图覆盖与锚点门禁（0.14.2 D7）：此前只被 apk 仓 CI 调用，本地链与发布链的声明集里
