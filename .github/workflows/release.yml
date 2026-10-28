@@ -390,10 +390,47 @@ jobs:
   # Creating a draft with GITHUB_TOKEN does not emit a new workflow-triggering release event.
   # Explicitly refresh Pages here; only the latest public stable release is eligible.
   # Publishing the draft later also triggers pages.yml via release: published.
+  #
+  # **必须以 main ref 派发，不得用可复用工作流调用。**
+  #
+  # 缺陷形态（0.14.10 实锤，run 40777025435）：原来写 `uses: ./.github/workflows/pages.yml`。
+  # 可复用工作流的 deployment ref 继承**调用方**的 ref —— 本次是发版分支 release/0.14.10；
+  # 而仓库 github-pages 环境的 deployment-branch-policies 只放行 branch:main 与 tag:v*，
+  # 于是 deploy job 被策略直接拒绝（sync-pages / deploy: failure），站点没有更新。
+  # 改为 `gh workflow run --ref main`：新起一次 ref=main 的独立运行，
+  # deployment ref 恒为 main，策略必然放行。
+  #
+  # 附带两点改进：
+  #   1. 不再与本次 release 运行同生共死 —— 发布产物此时已全部上传完毕，
+  #      刷新站点失败不该把整条发版判红，故失败只告警不中断；
+  #   2. 真正的站点更新仍由 pages.yml 的 `release: published` 兜底
+  #      （ref=refs/tags/v*，走 tag:v* 策略，0.14.10 实测成功）。
+  #
+  # 注意（0.14.10 实测澄清，勿误判为缺陷）：本 job 跑在「draft 刚建好、尚未转正式版」时，
+  # `/releases/latest` 按 GitHub 语义**不返回 draft**，仍指向上一个正式版，
+  # 因此这一跑构建出的就是上一个版本（本次日志实测：`[build] 版本 v0.14.9`）。
+  # 这不是缓存、不是竞态、也不是 build.mjs 的逻辑错误——build.mjs 对 draft 是 fail-closed 的
+  # （normalize() 里 `json.draft || json.prerelease || !json.published_at` 直接抛错），
+  # 能构建出旧版本恰恰证明它拿到的是上一个**正式版**。
+  # 站点真正翻到新版本由 draft 转正式版时触发的 `release: published` 完成。
   sync-pages:
     needs: [publish]
+    runs-on: ubuntu-latest
+    # 只是一次工作流派发，秒级；取 5 分钟。
+    timeout-minutes: 5
     permissions:
       contents: read
-      pages: write
-      id-token: write
-    uses: ./.github/workflows/pages.yml
+      actions: write
+    steps:
+      - name: 以 main ref 派发站点刷新（deployment 分支策略只放行 main 与 tag）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh workflow run pages.yml --ref main; then
+            echo "已派发 pages.yml（ref=main），deployment ref 恒为 main"
+          else
+            echo "::warning::派发 pages.yml 失败；站点将在 draft 转正式版时由 release:published 自动更新"
+          fi

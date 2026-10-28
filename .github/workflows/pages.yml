@@ -21,7 +21,14 @@ on:
   release:
     types: [published]
   workflow_dispatch:
-  workflow_call:
+  # 刻意**不提供** workflow_call。
+  #
+  # 理由（0.14.10 实锤，run 40777025435）：可复用工作流的 deployment ref 继承调用方 ref。
+  # release.yml 原来用 `uses: ./.github/workflows/pages.yml` 调用，调用方跑在发版分支
+  # release/0.14.10 上，于是 github-pages 环境的 deployment-branch-policies（只放行
+  # branch:main 与 tag:v*）直接把 deploy job 拒掉。
+  # 现在调用方改用 `gh workflow run --ref main`，deployment ref 恒为 main；
+  # 这里一并删掉 workflow_call，避免有人再以 `uses:` 方式引回来重新踩同一个坑。
 
 permissions:
   contents: read
