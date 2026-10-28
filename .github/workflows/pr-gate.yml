@@ -145,6 +145,15 @@ jobs:
           # manage 将引擎校验器列为固定 devDependency；准备阶段的已解析 lock/npm ci 已安装它。
           # 契约脚本直接导入该真实校验器，缺席仍判红，不重新解析第二套依赖图。
           node scripts/check-tool-output-schema.mjs
+      # 门禁脚本自身的测试面（0.14.11 补）：这三个 .test.mjs 此前除 docs 外零引用，
+      # 「补齐测试面」事实上没有生效 —— 测试存在、可判别，但没有任何调用点，回归那天一样没人拦。
+      # 它们守的都是「登记链/镜像面/工具面预算」这类改一处要同步多处的漂移门禁。
+      - name: 门禁脚本自测面（control-ops / patch-mirror / tool-surface-budget）
+        if: always()
+        run: |
+          node --test scripts/check-control-ops.test.mjs
+          node --test scripts/check-patch-mirror.test.mjs
+          node --test scripts/check-tool-surface-budget.test.mjs
       # 壳侧加固语义（NSC / backup 规则 / exported）与子进程有界读（0.13.8-b FX-208.4 / E1）
       - name: 壳侧加固与有界读门禁
         if: always()
