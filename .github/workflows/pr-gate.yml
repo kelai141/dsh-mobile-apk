@@ -30,6 +30,9 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v4
         with: { node-version: '24' }
+      - name: 快照门禁回归
+        if: always()
+        run: python3 scripts/ci-verify-snapshot.py --self-test
       # APK assembly/version/signature contracts are small Node-only regressions; run them on every PR
       # instead of waiting for a manual local build or the release workflow to exercise them.
       - name: Console keyboard layout regressions

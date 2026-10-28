@@ -219,6 +219,8 @@ def scan(snapshot: str, expect: str, plugin_dirs):
                     if rel.endswith('.map'):
                         fail.append(f'private sourcemap ({profile}): {n}')
                         continue
+                    if profile not in ASSEMBLY_PROFILES:
+                        continue
                     h = hashlib.sha256(tf.extractfile(m).read()).hexdigest()
                     want = expected[pkg].get(rel)
                     if want is None:
@@ -278,7 +280,20 @@ def scan(snapshot: str, expect: str, plugin_dirs):
           f'profiles checked={sorted(profile_patches)}, ELF={expect})')
 
 
+def run_self_test() -> int:
+    import unittest
+
+    suite = unittest.defaultTestLoader.discover(
+        os.path.dirname(os.path.abspath(__file__)),
+        pattern='test_ci_verify_snapshot.py',
+    )
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    return 0 if result.wasSuccessful() else 1
+
+
 if __name__ == '__main__':
+    if sys.argv[1:] == ['--self-test']:
+        sys.exit(run_self_test())
     if len(sys.argv) < 4:
         print(__doc__)
         sys.exit(2)

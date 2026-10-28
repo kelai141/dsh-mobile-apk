@@ -258,6 +258,7 @@ if (peer) {
     'scripts/check-snapshot-secrets.mjs',
     'scripts/inject-all.py',
     'scripts/ci-verify-snapshot.py',
+    'scripts/test_ci_verify_snapshot.py',
     'scripts/build-snapshot-013.mjs',
     'scripts/lib/shell.mjs',
     // 0.14.1：软链自净化模块（快照归档前归一化旧 Termux 前缀软链）同样双仓同源。
