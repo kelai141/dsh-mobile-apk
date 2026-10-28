@@ -17,7 +17,7 @@ import { existsSync, statSync, readdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
-import { stalenessTrigger, arbitrateFreshness } from './lib/product-freshness.mjs'
+import { arbitrateFreshness } from './lib/product-freshness.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = dirname(HERE)
@@ -26,9 +26,104 @@ const LIB = join(ROOT, PLUGIN, 'lib', 'protocol-v2.js')
 const TEST = join(ROOT, PLUGIN, 'test', 'protocol-v2.test.mjs')
 const FIXTURES = join(ROOT, PLUGIN, 'test', 'fixtures')
 
+const srcDir = join(ROOT, PLUGIN, 'src')
+const libDir = join(ROOT, PLUGIN, 'lib')
+
 const fail = (msg) => {
   console.error('CHECK-PROTOCOL-V2 FAILED：' + msg)
   process.exit(1)
+}
+
+/**
+ * lib 时效：**逐文件配对**比较 src/x.ts ↔ lib/x.js。
+ *
+ * 旧实现是「最新的 src」比「最新的 lib」（各取 mtime 最大值），于是 lib/ 里的**孤儿产物**
+ * （src 已删、js 残留：coord-basis / node-list / screen-fields / semantic-fail）会把 lib 侧
+ * 最大值抬到最新 ⇒ stale 恒为 false ⇒ **整段陈旧检查被跳过**。
+ * 2026-10-28 实测（改 src/protocol-v2.ts 内容但不重建，再 touch 一个孤儿 js）：
+ *   不 touch 孤儿 → FAILED（构建产物陈旧：重建后 1 个产物内容不同：protocol-v2.js）
+ *   touch 孤儿   → PASSED（rc=0，假绿）
+ * 这与本门禁的自我定位（「绝不拿旧产物判绿」）直接冲突，所以改配对比较：孤儿产物不参与。
+ */
+const mtimeOf = (dir, name) => {
+  try {
+    const st = statSync(join(dir, name))
+    return st.isFile() ? st.mtimeMs : 0
+  } catch {
+    return 0
+  }
+}
+
+/** 纯函数（供自证用）：给定 src→js 配对与 mtime，判是否陈旧。jsMs === null 表示产物缺席。 */
+const decideStaleness = (pairs) => {
+  let sNewest = { ms: 0, file: '' }
+  let lNewest = { ms: 0, file: '' }
+  for (const p of pairs) {
+    if (p.tsMs > sNewest.ms) sNewest = { ms: p.tsMs, file: p.ts }
+    if (p.jsMs !== null && p.jsMs > lNewest.ms) lNewest = { ms: p.jsMs, file: p.js }
+    // 产物缺席：mtime 无从比较，按陈旧处理（本门禁姿态是不放过）
+    if (p.jsMs === null) {
+      return { s: { ms: p.tsMs, file: p.ts }, l: { ms: 0, file: p.js }, stale: true, reason: 'missing' }
+    }
+    // 配对比较：只有「这个 .ts 比它自己的 .js 新」才算陈旧；别的文件（含孤儿）一概不参与
+    if (p.tsMs > p.jsMs) {
+      return { s: { ms: p.tsMs, file: p.ts }, l: { ms: p.jsMs, file: p.js }, stale: true, reason: 'paired' }
+    }
+  }
+  return { s: sNewest, l: lNewest, stale: false, reason: 'fresh' }
+}
+
+const pair = (ts, tsMs, js, jsMs) => ({ ts, tsMs, js, jsMs })
+
+/**
+ * 判据自证（无仓库依赖）。
+ * 第 ② 条是「孤儿产物掩盖假绿」那个口子的独家守门人：旧实现「最新 ts(300) vs 最新 js(400)」
+ * 会判新鲜从而漏判，配对比较必须判陈旧。
+ * 自证内建在主体里（读取仓库状态之前静默跑一遍）——`--self-test` 在这套门禁体系里没有统一的
+ * 调用机制，单加一个开关守不住东西。
+ */
+const selfTest = (silent) => {
+  const fails = []
+  const t = (label, ok, detail) => {
+    if (!ok) fails.push(label + (detail === undefined ? '' : ' -> ' + detail))
+    else if (!silent) console.log('PASS  [self-test] ' + label)
+  }
+
+  t('全配对新鲜 ⇒ stale=false',
+    decideStaleness([pair('a.ts', 100, 'a.js', 100), pair('b.ts', 100, 'b.js', 100)]).stale === false)
+
+  // 独家守护：配对的 a 陈旧，但 b 的 js 比所有 ts 都新（孤儿产物的等价形态）
+  const shadowed = decideStaleness([pair('a.ts', 300, 'a.js', 250), pair('b.ts', 100, 'b.js', 400)])
+  t('配对陈旧不被「更新的别的产物」掩盖（孤儿假绿守门人）', shadowed.stale === true, 'stale=' + shadowed.stale)
+  t('被掩盖时如实报出是哪一对陈旧', shadowed.s?.file === 'a.ts' && shadowed.l?.file === 'a.js',
+    's=' + (shadowed.s && shadowed.s.file) + ' l=' + (shadowed.l && shadowed.l.file))
+
+  const missing = decideStaleness([pair('a.ts', 100, 'a.js', null)])
+  t('配对产物缺席 ⇒ stale=true 且 reason=missing',
+    missing.stale === true && missing.reason === 'missing', missing.reason)
+
+  t('空配对集合 ⇒ stale=false', decideStaleness([]).stale === false)
+
+  return fails
+}
+
+if (process.argv.includes('--self-test')) {
+  const stFails = selfTest(false)
+  if (stFails.length > 0) {
+    console.error('CHECK-PROTOCOL-V2 SELF-TEST FAILED（' + stFails.length + ' 项）：' + stFails.join('；'))
+    process.exit(1)
+  }
+  console.log('CHECK-PROTOCOL-V2 SELF-TEST PASSED（5 项判别力断言）')
+  process.exit(0)
+}
+
+// 判据自证：主体每次运行都先静默自证（变异会被这里当场抓到）
+{
+  const stFails = selfTest(true)
+  if (stFails.length > 0) {
+    console.error('CHECK-PROTOCOL-V2 FAILED：判据自证不通过（' + stFails.length + ' 项）—— ' + stFails.join('；'))
+    process.exit(1)
+  }
 }
 
 if (!existsSync(TEST)) fail(`测试文件缺席：${TEST}`)
@@ -38,26 +133,17 @@ if (!existsSync(LIB)) {
   fail(`构建产物缺席：${LIB}\n  先构建：cd ${PLUGIN} && npm run build（注入链会自动构建，纯门禁场景需手动）`)
 }
 
-/** lib 时效：任一 src/*.ts 比 lib/*.js 新只是**触发**，真伪由重建哈希裁决（0.14.1 W1）。 */
-const newest = (dir, ext) => {
-  let newestMs = 0
-  let newestFile = ''
-  for (const name of readdirSync(dir)) {
-    const full = join(dir, name)
-    const st = statSync(full)
-    if (st.isDirectory()) continue
-    if (!name.endsWith(ext)) continue
-    if (st.mtimeMs > newestMs) { newestMs = st.mtimeMs; newestFile = name }
-  }
-  return { ms: newestMs, file: newestFile }
-}
-const srcDir = join(ROOT, PLUGIN, 'src')
-const libDir = join(ROOT, PLUGIN, 'lib')
 const staleness = () => {
-  const s = newest(srcDir, '.ts')
-  const l = newest(libDir, '.js')
-  return { s, l, stale: s.ms > l.ms }
+  const pairs = readdirSync(srcDir)
+    .filter((name) => name.endsWith('.ts'))
+    .map((name) => {
+      const js = name.replace(/\.ts$/, '.js')
+      const jsMs = existsSync(join(libDir, js)) ? mtimeOf(libDir, js) : null
+      return { ts: name, tsMs: mtimeOf(srcDir, name), js, jsMs }
+    })
+  return decideStaleness(pairs)
 }
+
 const cur = staleness()
 if (cur.stale) {
   const arb = arbitrateFreshness(join(ROOT, PLUGIN), { root: ROOT })
