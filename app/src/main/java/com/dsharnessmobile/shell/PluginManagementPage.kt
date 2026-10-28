@@ -675,7 +675,8 @@ internal class PluginManagementPage(
         activity.runOnUiThread {
           if (disposed || activity.isFinishing || activity.isDestroyed) return@runOnUiThread
           button.isEnabled = true
-          Toast.makeText(activity, "配置已保存：${result.optString("application", "已应用")}", Toast.LENGTH_SHORT).show()
+          val applied = result.optString("application", t("已应用", "applied"))
+          Toast.makeText(activity, t("配置已保存：", "Configuration saved: ") + applied, Toast.LENGTH_SHORT).show()
           openDetail(row)
         }
       } catch (t: Throwable) {

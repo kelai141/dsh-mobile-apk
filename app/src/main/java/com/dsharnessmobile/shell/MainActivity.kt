@@ -1881,7 +1881,15 @@ class MainActivity : ComponentActivity() {
         Log.w(TAG, "openAccessibilitySettings failed: " + t.message)
       }
     }
-    Toast.makeText(this, "无法打开系统设置，请手动前往 系统设置 → 无障碍", Toast.LENGTH_LONG).show()
+    Toast.makeText(
+      this,
+      UiText.t(
+        this,
+        "无法打开系统设置，请手动前往 系统设置 → 无障碍",
+        "Could not open system settings. Open Settings > Accessibility manually.",
+      ),
+      Toast.LENGTH_LONG,
+    ).show()
   }
 
   private fun keepScreenOn(enable: Boolean) {

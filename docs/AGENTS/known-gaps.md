@@ -112,3 +112,10 @@ slot-guard 注释与本日审计报告。
 |---|---|---|
 | CDP（模型 transport）层未验 | 已验档位：代码层（judge 41/41、Kotlin \`ScreenScopeTest\` 5 例）+ handler 接线层（A 组 25/25 拦下、B 组 16/16 放行）+ 设备副作用层（B 组 16 条实机执行，前后截图 sha256 与 \`dumpsys SurfaceFlinger\` token 集合均一致）。**CDP 层未验**：需要模型 transport 把 A/B 组经 \`android_shell_exec\` 真正下发，当前会话无 bridge 工具面。验收任务由外部模型经 adb 编排，非设备内模型（设备未配 LLM）。 | 跟进 issue #834 钉住 A/B 组 41 条断言清单；bridge transport 就绪后跑 \`node scripts/verify-screen-scope-01410.mjs --layer=bridge --receipts=<json>\` 收口 |
 | \`S-22d\` / \`S-20i\` 仅由 judge 层覆盖，真机未确认 | 这两条（\`input touchpad -d 7 tap 1 2\`、\`wm reset -d 7\`）依赖「目标确为已注册虚拟屏则放行」。handler 层构造 service 时不注入 controlQueue（为保证零设备 I/O），拿不到虚拟屏注册表，故这两条在该层被跳过，仅由纯函数层（judge）覆盖。设备层跑的是 B 组其余 14 条。 | 真机确认方式见 #834：先建虚拟屏拿到已注册 displayId，再下发这两条断言放行 |
+
+## 文案面剩余缺口（2026-10-29）
+
+| 项 | 当前事实 | 结论 / 后续 |
+|---|---|---|
+| 测试通知的标题/正文只有中文 | `NotifyCenter.sendTestAll` 的五条测试通知用了写死的中文字面量（「测试提问」「测试会话」「已完成 · 这是一条工作汇报测试」等）。把 UI 语言切成英文后，系统通知栏里这五条仍显示中文（真机截图已确认），而开关点击后的落点提示已正确显示英文。 | 面只出现在「发送测试通知」自证按钮，不影响真实事件通知（真实通知的标题/正文由引擎帧提供）。修法：把 `sendTest` 里的字面量改成 `UiText.t(app, zh, en)`，并在 `AppLanguageTest` 补一条形态断言。 |
+| 原生离线插件面板无双语 helper | `PluginOfflinePanel.kt` 全文没有 `UiText.t`/`t(zh,en)`，其「已启用/已停用，重启引擎后生效」「修改失败」等提示只有中文。 | 与本次修的两处同一类问题，但该面板整体缺英文（不是漏一处），单独收口更合适。 |
