@@ -805,12 +805,11 @@ class PluginMountsTest {
     )
   }
 
-  // ---- 2026-10-28 自查：name 命中收窄到条目键层（config 子树里的同名 name 不得误删） ----
+  // ---- 2026-10-28 regression: identity matching must ignore nested config fields ----
 
   @Test
   fun configSubtreeNameDoesNotDeleteAProductEntry() {
-    // 场景：要移除插件 evil；但某个**产品**条目的 config 里恰好有 `name: evil`
-    // （插件自己的显示名字段）。全深度匹配会把这个产品条目连带删掉。
+    // A product config may contain a name equal to the plugin being removed.
     val patch = listOf(
       "- insert:",
       "    - id: prod-one",
@@ -821,15 +820,15 @@ class PluginMountsTest {
       "      name: evil",
     ).joinToString("\n") + "\n"
     val out = PluginMounts.removeEntry(patch, "evil", null)
-    assertNotNull("真第三方条目仍应被摘除", out)
-    assertTrue("产品条目必须保留：" + out, out!!.contains("- id: prod-one"))
-    assertTrue("产品的 config 子树必须逐字保留：" + out, out.contains("name: evil"))
-    assertFalse("真第三方条目应被摘除", out.contains("id: evil"))
+    assertNotNull("The matching third-party entry should be removed", out)
+    assertTrue("The product entry must remain: " + out, out!!.contains("- id: prod-one"))
+    assertTrue("The product config must remain intact: " + out, out.contains("name: evil"))
+    assertFalse("The matching third-party entry should be removed", out.contains("id: evil"))
   }
 
   @Test
   fun nameAsTheItemFirstKeyStillMatches() {
-    // 条目首键本身就是 name（没有 `- id:`）时，键层判据必须仍然命中。
+    // An entry whose first key is name must still match without an id field.
     val patch = listOf(
       "- insert:",
       "    - name: evil-pkg",
@@ -837,7 +836,67 @@ class PluginMountsTest {
       "        x: 1",
     ).joinToString("\n") + "\n"
     val out = PluginMounts.removeEntry(patch, "evil-pkg", null)
-    assertNotNull("首键为 name 的条目仍要能按 name 移除", out)
-    assertFalse("该条目应被摘除：" + out, out!!.contains("evil-pkg"))
+    assertNotNull("An entry with name as its first key should still match", out)
+    assertFalse("The matching entry should be removed: " + out, out!!.contains("evil-pkg"))
+  }
+
+  @Test
+  fun nestedConfigListNameDoesNotDeleteProductConfigEntry() {
+    val patch = listOf(
+      "- insert:",
+      "    - id: product",
+      "      name: product-package",
+      "      config:",
+      "        aliases:",
+      "          - name: target",
+      "            value: 1",
+      "    - id: target",
+      "      name: target",
+    ).joinToString("\n") + "\n"
+
+    val out = PluginMounts.removeEntry(patch, "target", null)
+
+    assertNotNull("The matching plugin entry should be removed", out)
+    assertTrue("The matching nested config item must remain: " + out, out!!.contains("          - name: target"))
+    assertFalse("The direct plugin entry should be removed: " + out, out.lines().any { it == "    - id: target" })
+  }
+
+  @Test
+  fun nestedConfigListIdDoesNotDeleteProductConfigEntry() {
+    val patch = listOf(
+      "- insert:",
+      "    - id: product",
+      "      name: product-package",
+      "      config:",
+      "        mappings:",
+      "          - id: target",
+      "            value: 1",
+      "    - id: target",
+      "      name: target-package",
+    ).joinToString("\n") + "\n"
+
+    val out = PluginMounts.removeEntry(patch, null, "target")
+
+    assertNotNull("The matching plugin entry should be removed", out)
+    assertTrue("The matching nested config item must remain: " + out, out!!.contains("          - id: target"))
+    assertFalse("The direct plugin entry should be removed: " + out, out.lines().any { it == "    - id: target" })
+  }
+
+  @Test
+  fun removingByIdDoesNotDeleteTheFollowingSiblingWhenBothKeysMatch() {
+    val patch = listOf(
+      "- insert:",
+      "    - id: target",
+      "      name: target",
+      "    - id: keep",
+      "      name: keep",
+    ).joinToString("\n") + "\n"
+
+    val out = PluginMounts.removeEntry(patch, null, "target")
+
+    assertNotNull("The matching plugin entry should be removed", out)
+    assertTrue("The unmatched sibling must remain: " + out, out!!.contains("    - id: keep"))
+    assertTrue("The sibling name must remain: " + out, out.contains("      name: keep"))
+    assertFalse("The matching entry should be removed: " + out, out.contains("    - id: target"))
   }
 }
