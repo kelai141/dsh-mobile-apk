@@ -19,6 +19,7 @@
 //   F. longClick 存量漂移专项：壳侧在场而引擎 ControlOp/A11Y_OPS 缺席 → 必须收口（或进 known-gaps）
 //
 // 用法：node scripts/check-control-ops.mjs [--shell-root <含 app/src/main 的树>] [--plugin-root <含 plugins/ 的树>]
+//        [--gaps <known-gaps json>] [--ledger <控制 op 台账 json>]（后两个主要供测试隔离）
 // 退出码：0 = 通过；1 = 登记漂移（拒打包/拒合）或树定位失败。
 import { readFileSync, existsSync } from 'node:fs'
 import { join, dirname, relative } from 'node:path'
@@ -172,7 +173,9 @@ show('manage 工具面', manageOps)
 // manage 不承载它们——但主体仍必须与 handle/SUPPORTED_OPS 一致（A/B/C 项不变）。
 // review §2.3（2026-09-14）：旧实现把「台账缺失」降级 WARN 不判红——一次并批提交的秒级并发窗口
 // 就足以让 D 项整段失效，属假绿。现改为：短重试（3 × 150ms）消化并发窗口；仍缺段/不可解析即 FAIL。
-const PENDING_PATH = join(ROOT, 'scripts', 'control-ops-pending.json')
+/** 台账路径。`--ledger <file>` 只给测试用（`scripts/check-control-ops.test.mjs` 要拿临时台账把
+ *  六面判据完全隔离出来）；正常门禁一律读仓库台账。 */
+const PENDING_PATH = optOf('ledger') ?? join(ROOT, 'scripts', 'control-ops-pending.json')
 let ledger = null
 let ledgerError = null
 for (let attempt = 0; attempt < 3 && ledger === null; attempt += 1) {
