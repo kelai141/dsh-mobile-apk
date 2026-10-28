@@ -21,11 +21,35 @@ const PLUGIN_DIR = join(ROOT, 'plugins')
 /** A test runner must not hold CI forever; a hard timeout keeps the failing unit visible. */
 const TEST_TIMEOUT_MS = 5 * 60 * 1000
 
+/**
+ * 测试运行环境：`NODE_ENV` 必须由门禁自己钉住，**不能继承调用者**。
+ *
+ * 为什么（2026-10-28 实测，与上面 ANSI 那条同族——都是"环境差异导致假红"）：父进程带着
+ * `NODE_ENV=production` 时，`dsh-client-ui-responsive` 的 vitest 会把 `react` 解析成 production 构建，
+ * `act(...)` 直接抛 `act(...) is not supported in production builds of React` ⇒ **239 例假红**；
+ * 同一份代码在 `NODE_ENV=test` / `development` 下 **939 例全过**。也就是说门禁的结论取决于
+ * "谁在什么 shell 里跑的"，本地复现不出 CI 的结果——而门禁的全部价值就是给出与调用环境无关的判定。
+ *
+ * 钉在唯一入口（`runCommand` 里合并），而不是逐个调用点补：调用点显式传的 `env` 也覆盖不掉它，
+ * 于是"某处忘了设"在结构上不可能发生。`--self-test` 直接验证这条语义，不依赖任何插件。
+ */
+const TEST_NODE_ENV = 'test'
+
+/**
+ * 合并子进程环境：**始终**基于 `process.env` 展开。
+ * 只写 `{...extra}` 会丢掉 PATH 等变量（调用点只传一个 `NODE_OPTIONS` 时尤其致命），
+ * 唯独 `NODE_ENV` 由门禁强制——放在最后，所以调用点覆盖不掉它。
+ */
+function testEnv(extra) {
+  return { ...process.env, ...(extra ?? {}), NODE_ENV: TEST_NODE_ENV }
+}
+
 /** Kill the whole process group on POSIX so npm/npx grandchildren cannot hold CI open. */
 function runCommand(bin, args, options) {
-  if (process.platform !== 'linux') return spawnSync(bin, args, { ...options, timeout: TEST_TIMEOUT_MS })
+  const merged = { ...options, env: testEnv(options?.env) }
+  if (process.platform !== 'linux') return spawnSync(bin, args, { ...merged, timeout: TEST_TIMEOUT_MS })
   return spawnSync('timeout', ['--kill-after=10s', Math.ceil(TEST_TIMEOUT_MS / 1000) + 's', bin, ...args],
-    { ...options, timeout: TEST_TIMEOUT_MS + 15_000 })
+    { ...merged, timeout: TEST_TIMEOUT_MS + 15_000 })
 }
 
 /** Convert a Windows drive path for the WSL npm installation when it exists. */
@@ -51,6 +75,44 @@ const plugins = existsSync(PLUGIN_DIR)
   ? readdirSync(PLUGIN_DIR).filter((n) => existsSync(join(PLUGIN_DIR, n, 'package.json')))
   : []
 if (plugins.length === 0) { console.error('CHECK-PLUGIN-TESTS FAILED：找不到任何插件'); process.exit(1) }
+
+// ── --self-test：验证「子进程 NODE_ENV 被钉住」这条语义本身 ────────────────────────
+// 不跑任何插件测试（那会把自检变成分钟级）：只问子进程「你看到的 NODE_ENV 是什么」。
+// 三类调用形态各一条，因为踩到的正是「调用点传了 env 就覆盖掉全局设定」这一类：
+//   1) 调用点显式指定 NODE_ENV=production —— 必须被门禁改写（否则就是本轮那个 239 例假红）；
+//   2) 调用点只传一个无关变量（NODE_OPTIONS）—— NODE_ENV 要钉住，且 PATH 不能被吞掉
+//      （吞掉 PATH 的直接后果是子进程根本起不来，那是比假红更糟的假绿：什么都测不了还报通过）；
+//   3) 完全不传 env —— 走默认合并路径。
+if (process.argv.includes('--self-test')) {
+  const probe = (extraEnv) => {
+    const r = runCommand(process.execPath,
+      ['-e', 'process.stdout.write(String(process.env.NODE_ENV))'],
+      { cwd: ROOT, encoding: 'utf8', env: extraEnv })
+    return { got: (r.stdout ?? '').trim(), status: r.status, err: r.error?.code ?? null }
+  }
+  const checks = [
+    ['调用点指定 NODE_ENV=production', probe({ NODE_ENV: 'production' })],
+    ['调用点只传 NODE_OPTIONS', probe({ NODE_OPTIONS: '--no-deprecation' })],
+    ['调用点完全不传 env', probe(undefined)],
+  ]
+  let bad = 0
+  for (const [label, r] of checks) {
+    if (r.status !== 0) {
+      bad += 1
+      console.error('FAIL  [self-test] ' + label + '：子进程起不来（status=' + String(r.status) + ', error=' + String(r.err) + '）——PATH 等基础变量被吞掉了')
+      continue
+    }
+    if (r.got !== TEST_NODE_ENV) {
+      bad += 1
+      console.error('FAIL  [self-test] ' + label + '：子进程看到 NODE_ENV=' + JSON.stringify(r.got) + '，应为 ' + JSON.stringify(TEST_NODE_ENV))
+      continue
+    }
+    console.log('PASS  [self-test] ' + label + ' → NODE_ENV=' + TEST_NODE_ENV)
+  }
+  if (bad > 0) { console.error('CHECK-PLUGIN-TESTS SELF-TEST FAILED（' + bad + '/' + checks.length + ' 项）'); process.exit(1) }
+  console.log('CHECK-PLUGIN-TESTS SELF-TEST PASSED（' + checks.length + ' 类调用形态下 NODE_ENV 均被钉成 ' + TEST_NODE_ENV + '）')
+  process.exit(0)
+}
 
 let ran = 0
 let failed = 0
