@@ -10,6 +10,10 @@ import tarfile
 import tempfile
 import unittest
 
+# 本文件在镜像面内（check-patch-mirror.mjs 的 MIRROR_TOP），协调仓只有一份镜像副本，
+# 那里没有 app/build.gradle.kts。门禁的 applicationId 读取因此必须可注入（issue #736）：
+# 不注入就要读宿主真实文件，宿主一换这套自测必红，而两侧又必须逐字节相同 —— 无法本地绕过。
+TEST_APP_ID = 'com.dsharnessmobile.shell'
 
 SCRIPT = Path(__file__).with_name('ci-verify-snapshot.py')
 SPEC = importlib.util.spec_from_file_location('ci_verify_snapshot_gate', SCRIPT)
@@ -72,11 +76,11 @@ class SnapshotGateNegativeControlTests(unittest.TestCase):
             output.write(buffer.getvalue())
         return archive
 
-    def run_gate(self, archive):
+    def run_gate(self, archive, app_id=TEST_APP_ID):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             try:
-                GATE.scan(str(archive), 'x86_64', [str(self.plugin)])
+                GATE.scan(str(archive), 'x86_64', [str(self.plugin)], gradle_reader=lambda: app_id)
             except SystemExit as error:
                 return output.getvalue(), error.code
         return output.getvalue(), 0
@@ -101,6 +105,14 @@ class SnapshotGateNegativeControlTests(unittest.TestCase):
         result, status = self.run_gate(archive)
         self.assertEqual(status, 1)
         self.assertIn('negative-control profile "headless-bad" was overwritten', result)
+
+    def test_missing_application_id_still_rejects(self):
+        # 注入化之后必须仍然守得住「读不到 applicationId 就判红」这条判据：
+        # 若把 scan() 里的 None 分支删掉，这条会变绿并暴露回归。
+        archive = self.snapshot()
+        result, status = self.run_gate(archive, app_id=None)
+        self.assertEqual(status, 1)
+        self.assertIn('applicationId not found in app/build.gradle.kts', result)
 
     def test_negative_control_private_sourcemap_still_rejects(self):
         archive = self.snapshot(extra_members={
