@@ -51,8 +51,20 @@ export function isV2Payload(data: unknown): boolean {
     (data as Record<string, unknown>).v === 2
 }
 
+/**
+ * 整数列守卫。名字承诺的是**整数**，实现就必须是整数——只查 `Number.isFinite` 会让浮点整列静默穿过，
+ * 而下游每一处都按整数语义消费，于是"合法"的浮点会变成**另一个值**而不是一条错误：
+ *   · 符号表下标（`t`/`s`/`c`/`k`/`r`/`w`）浮点 ⇒ `S[0.5]` 取不到 ⇒ `?? ''` ⇒ 文本/包名**静默变空串**；
+ *   · `p`（可操作祖先列）浮点 ⇒ 写进 `Int32Array` 被 ToInt32 截断 ⇒ `0.5` 变成 `0`（指向**别的行**）；
+ *   · `f`（位标志）浮点 ⇒ 位运算前 ToInt32 截断 ⇒ `1.9` 被读成 clickable；
+ *   · `d`（深度）浮点 ⇒ 预序父链重建按浮点比较 ⇒ 父子关系错乱；
+ *   · `b`/`scr` 浮点 ⇒ 坐标与屏幕基准带小数 ⇒ 点击落点偏移。
+ * `o` 列此前单独复查过 `Number.isInteger`（说明缺口已知），但只补了一列；这里把判据提到唯一入口，
+ * 让"某列忘了复查"在结构上不可能发生。壳侧 Kotlin 的 `gen: Long` / `rotation: Int` / `width: Int`
+ * 与 TS 编码器产出的都是整数，合法快照不受影响。
+ */
 const isIntArray = (v: unknown): v is number[] =>
-  Array.isArray(v) && v.every((x) => typeof x === 'number' && Number.isFinite(x))
+  Array.isArray(v) && v.every((x) => Number.isInteger(x))
 
 /** 常数广播取值（§S2.3）：长度 1 且 n>1 ⇒ 整列同值。 */
 const pick = (arr: number[], i: number, n: number): number => (arr.length === 1 && n > 1 ? arr[0] : arr[i])
@@ -65,11 +77,19 @@ export function decodeV2(data: unknown): DecodeResult {
   const d = data as Record<string, unknown>
   if (d.v !== 2) return { ok: false, error: `不支持的协议版本 v=${String(d.v)}（本引擎支持 v=2）` }
 
+  // `gen` 与 `rot` 是同一组整数元数据（壳侧 `gen: Long` / `rotation: Int`），必须同一口径校验。
+  // 曾经只有 `gen` 有守卫、`rot` 没有：`rot:"abc"` / `rot:NaN` 会算出 `rotation=NaN` 并原样透出，
+  // 而 NaN 不是合法 JSON ⇒ 工具返回值在引擎侧被**整值拒绝**（#204/#258 同族：模型拿不到任何数据）。
+  // `rot ?? 0` 让缺省与 `null` 落到 0，保持既有兼容；只有"给了但不能解析成整数"才失败关闭。
   const gen = Number(d.gen)
   const rot = Number(d.rot ?? 0)
   const scr = d.scr
-  if (!Number.isFinite(gen)) return { ok: false, error: 'gen 缺失或非数字' }
-  if (!isIntArray(scr) || scr.length !== 2) return { ok: false, error: 'scr 必须是 [宽, 高]' }
+  if (!Number.isInteger(gen)) return { ok: false, error: 'gen 缺失或非整数' }
+  if (!Number.isInteger(rot)) return { ok: false, error: `rot 必须是整数（收到 ${String(d.rot)}）` }
+  // 判据拆开写：类型与长度各自一条错误。合并成 `!isIntArray || length` 时，一个浮点值会报成
+  // 「长度必须为 4n=8（收到 8）」——长度明明是对的，模型会照着错误消息去改长度。判据分叉，文案必须跟着分叉。
+  if (!isIntArray(scr)) return { ok: false, error: 'scr 必须是整数数组（[宽, 高]，物理像素）' }
+  if (scr.length !== 2) return { ok: false, error: `scr 必须是 [宽, 高] 两项（收到 ${scr.length} 项）` }
 
   const str = d.str
   if (!Array.isArray(str) || !str.every((s) => typeof s === 'string')) return { ok: false, error: 'str 必须是字符串数组' }
@@ -103,15 +123,18 @@ export function decodeV2(data: unknown): DecodeResult {
     cols[key] = col
   }
   const b = d.b
-  if (!isIntArray(b) || b.length !== n * 4) {
-    return { ok: false, error: `b 长度必须为 4n=${n * 4}（收到 ${Array.isArray(b) ? b.length : '非数组'}）` }
+  if (!isIntArray(b)) return { ok: false, error: 'b 必须是整数数组（每行 x,y,w,h 四个整数像素）' }
+  if (b.length !== n * 4) {
+    return { ok: false, error: `b 长度必须为 4n=${n * 4}（收到 ${b.length}）` }
   }
 
   // FX-206.1（P0）：句柄必须指回**壳侧 walk 全量行表**的原始行号。载荷行下标 fi 只是列内位置，
   // 壳侧 resolveTarget 用 rows[handle] 索引全量表；两者只在「没有节点被过滤」时偶然相等
   // （探针 393 行 → 86 行下 86/86 全错位）。缺列即失败关闭：宁可不给清单，也不能给出会点错的句柄。
   const o = d.o
-  if (!isIntArray(o)) return { ok: false, error: 'o 必须是整数数组（载荷行下标 → 原始行号映射）——壳侧编码器过旧，请更新 APK' }
+  if (!isIntArray(o)) {
+    return { ok: false, error: 'o 必须是整数数组（载荷行下标 → 原始行号映射）——壳侧编码器过旧或载荷含非整数，请更新 APK 后重试' }
+  }
   if (o.length !== 1 && o.length !== n) {
     return { ok: false, error: `o 长度 ${o.length} 既不是 1（广播）也不是 n=${n}` }
   }

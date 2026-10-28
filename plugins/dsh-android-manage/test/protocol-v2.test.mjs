@@ -298,3 +298,97 @@ test('容量断言：1 MiB 上限下壳侧 4000 节点结构性不可达', () =>
   const cap = Math.floor(1048576 / perRow)
   assert.ok(cap > 4000, `1 MiB 可容 ${cap} 行，必须超过壳侧 MAX_NODES=4000`)
 })
+
+// ── 输入数值类型：整数列不得被浮点静默穿透（2026-10-28 自查） ─────────────────────
+//
+// 缺口形态：`isIntArray` 名字承诺整数，实现只查 `Number.isFinite`。于是一个含小数的列会整列"合法"通过，
+// 而下游每一处都按整数语义消费，浮点不会报错、只会**变成另一个值**：
+//   · 符号表下标（t/s/c/k/r/w）⇒ `S[0.5]` 取不到 ⇒ `?? ''` ⇒ 文本/包名静默变空串；
+//   · p（可操作祖先）⇒ 写进 Int32Array 被 ToInt32 截断 ⇒ 0.5 变 0（指向别的行）；
+//   · f（位标志）⇒ 位运算前 ToInt32 ⇒ 1.9 被读成 clickable；
+//   · d（深度）⇒ 预序父链按浮点比较 ⇒ 父子关系错乱；
+//   · b / scr ⇒ 坐标与屏幕基准带小数 ⇒ 点击落点偏移。
+// 修法：判据提到唯一入口（isIntArray 用 Number.isInteger），让"某列忘记复查"结构上不可能发生
+// （o 列此前单独复查过 Number.isInteger，正说明缺口已知但没推广）。
+// 反证方向：把 isIntArray 改回 Number.isFinite，下列 12 个用例逐列变红。
+
+/** 2 行全整数裸载荷（各列都是合法整数；0 与 -1 哨兵也在其中）。 */
+const INT_BASE = {
+  v: 2, gen: 1, rot: 0, scr: [100, 200], str: ['Abc', 'Btn'], n: 2,
+  o: [0, 1], d: [0, 1], p: [-1, 0], f: [0, 1], c: [-1, -1], k: [-1, -1],
+  r: [-1, -1], w: [-1, -1], t: [0, 1], s: [-1, -1],
+  b: [0, 0, 100, 20, 0, 20, 100, 20],
+}
+
+test('整数列含浮点一律失败关闭（不得静默截断成另一个值）', () => {
+  assert.equal(decodeV2(INT_BASE).ok, true, '对照：全整数载荷必须接受')
+
+  const cases = [
+    ['scr', { scr: [100.5, 200] }],
+    ['b', { b: [0.5, 0, 100, 20, 0, 20, 100, 20] }],
+    ['o', { o: [0, 1.5] }],
+    ['d', { d: [0, 1.5] }],
+    ['p', { p: [-1, 0.5] }],
+    ['f', { f: [0, 1.5] }],
+    ['c', { c: [-1, 0.5] }],
+    ['k', { k: [-1, 0.5] }],
+    ['r', { r: [-1, 0.5] }],
+    ['w', { w: [-1, 0.5] }],
+    ['t', { t: [0, 0.5] }],
+    ['s', { s: [-1, 0.5] }],
+  ]
+  for (const [key, patch] of cases) {
+    const r = decodeV2({ ...INT_BASE, ...patch })
+    assert.equal(r.ok, false, `${key} 列含浮点必须失败关闭（放行等于让下游读到另一个值）`)
+    assert.match(r.error, new RegExp(`${key} 必须是整数`), `${key} 的错误必须指向"非整数"这一真因`)
+  }
+})
+
+test('错误文案必须指向真因：长度是对的就不能报成长度不对', () => {
+  // 判据合并成 `!isIntArray(b) || b.length !== n*4` 时，浮点会报成「长度必须为 4n=8（收到 8）」，
+  // 模型照着这条去改长度，永远修不到浮点。类型与长度必须各自成条。
+  const bFloat = decodeV2({ ...INT_BASE, b: [0.5, 0, 100, 20, 0, 20, 100, 20] })
+  assert.equal(bFloat.ok, false)
+  assert.doesNotMatch(bFloat.error, /长度/, 'b 长度是对的（8 = 4n），文案不得指向长度')
+
+  const scrFloat = decodeV2({ ...INT_BASE, scr: [100.5, 200] })
+  assert.equal(scrFloat.ok, false)
+  assert.match(scrFloat.error, /整数数组/, 'scr 浮点必须报成数值类型问题')
+
+  const bShort = decodeV2({ ...INT_BASE, b: [0, 0, 100, 20] })
+  assert.equal(bShort.ok, false)
+  assert.match(bShort.error, /长度/, '真的长度不对就必须报长度')
+})
+
+test('gen / rot 必须是整数：NaN 不得透传成 JSON null（#204 同族）', () => {
+  assert.equal(decodeV2({ ...INT_BASE, gen: 1.5 }).ok, false, 'gen 浮点必须拒绝')
+  assert.match(decodeV2({ ...INT_BASE, gen: 1.5 }).error, /gen/)
+
+  for (const bad of ['abc', NaN, {}, 1.5, Infinity, -Infinity]) {
+    const r = decodeV2({ ...INT_BASE, rot: bad })
+    assert.equal(r.ok, false, `rot=${String(bad)} 必须失败关闭`)
+    assert.match(r.error, /rot 必须是整数/, '错误必须点名 rot')
+  }
+})
+
+test('合法整数必须原样保留：0 与负哨兵不得为了拒浮点一起被拒', () => {
+  const r = decodeV2(INT_BASE)
+  assert.equal(r.ok, true)
+  assert.deepEqual([...r.value.actionableAncestor], [-1, 0], 'p 列的 -1（无祖先）与 0 都是合法值')
+  assert.deepEqual(r.value.screen, { w: 100, h: 200 })
+  assert.equal(r.value.rows[0].text, 'Abc', '符号表下标 0 必须仍取到文本')
+  assert.equal(r.value.rows[1].text, 'Btn')
+  assert.equal(r.value.rows[0].clickable, false)
+  assert.equal(r.value.rows[1].clickable, true, 'f 列 1 = clickable 必须保留')
+
+  // rot 的合法取值与缺省口径（null 当缺省 → 0），且必须序列化成数字 0 而不是 null
+  for (const [label, patch, want] of [
+    ['缺省', {}, 0], ['null', { rot: null }, 0], ['undefined', { rot: undefined }, 0],
+    ['0', { rot: 0 }, 0], ['90', { rot: 90 }, 90], ['180', { rot: 180 }, 180], ['270', { rot: 270 }, 270],
+  ]) {
+    const d = decodeV2({ ...INT_BASE, ...patch })
+    assert.equal(d.ok, true, `rot ${label} 必须接受`)
+    assert.equal(d.value.rotation, want, `rot ${label} 必须原样保留`)
+    assert.equal(JSON.stringify(d.value.rotation), String(want), `rot ${label} 不得变成 JSON null`)
+  }
+})
