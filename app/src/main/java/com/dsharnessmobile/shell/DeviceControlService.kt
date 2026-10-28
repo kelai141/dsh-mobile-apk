@@ -59,7 +59,16 @@ class DeviceControlService : AccessibilityService() {
     private const val WEB_SNAPSHOT_JS = """
 (function(){
   var rootSel = __ROOT__;
-  var root = rootSel ? document.querySelector(rootSel) : document.body;
+  var root;
+  try {
+    root = rootSel ? document.querySelector(rootSel) : document.body;
+  } catch (e) {
+    // 非法 CSS 选择器（如 '[[['）在 querySelector 里抛 DOMException（W3C：SyntaxError）。不接住
+    // 的话整个 IIFE 抛错，evaluateJavascript 回 "null"，壳侧只能报「结果解析失败（页面可能正在
+    // 跳转）」——把「选择器语法错」误报成「页面在跳」会把模型引向反复重试而不是改选择器
+    // （与 #777 的「id 形态用错误报成页面已变化」同一类死循环引导）。
+    return JSON.stringify({ok:false,error:'根选择器语法错误：' + rootSel + '（' + (e && e.message ? e.message : 'invalid selector') + '）'});
+  }
   if (!root) return JSON.stringify({ok:false,error:'根选择器无匹配：' + rootSel});
   var reg = window.__dshWebRefs || (window.__dshWebRefs = {n:0,map:{}});
   reg.map = {}; reg.n = 0;
