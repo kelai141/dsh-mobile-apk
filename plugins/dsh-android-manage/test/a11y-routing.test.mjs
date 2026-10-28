@@ -560,3 +560,51 @@ test('act_input 虚拟屏路径：壳侧拒绝时如实转述，不得谎报成�
   assert.equal(r.ok, false, '壳侧说没成，工具面不得说成功')
   assert.match(r.text, /虚拟屏幕尚未创建/)
 })
+
+// ── 未知值不得编造成 0（2026-10-28 自查；"绝不编造默认值"契约的违反面） ──────────────
+//
+// 修前实测（探针）：
+//   A. 壳侧不回 `clicked.x/y` 时，返回体硬给 `x:0, y:0`、文案写「实际坐标 0,0」——
+//      而**同一句文案**里 `basisFields` 会如实说「基准未回显：壳侧版本较旧」⇒ 一个返回体两套口径。
+//   B. `web_dump` 同一句里 `vw`/`vh` 未知报 `?`，`scrollY` 未知却报 `0` ⇒ 模型会把
+//      「壳侧没回显」误读成「页面没滚动」。
+// 反向必须一起守：壳侧真回显时，坐标与滚动量要如实带出（不许为了拒未知把合法值也丢掉）。
+test('未知值不得编造成 0：归一化点击的坐标如实缺席（不谎报 0,0）', async () => {
+  const { face } = makeFace({ backend: 'a11y' })
+  const { byName } = applyManage(face)
+  // makeFace 的 controlExec 对 click 返回 {done:true}——不回 x/y，等价于老壳侧
+  const r = await byName('android_ui_click').execute({ nx: 0.5, ny: 0.5 }, exec)
+  assert.equal(r.ok, true, JSON.stringify(r).slice(0, 160))
+  assert.equal(r.x, undefined, '壳侧未回显时 x 必须缺席（不是 0）')
+  assert.equal(r.y, undefined, '壳侧未回显时 y 必须缺席（不是 0）')
+  assert.match(String(r.text), /实际坐标 未回显/, '文案必须如实说未回显')
+  assert.ok(!/实际坐标 0,0/.test(String(r.text)), '不得谎报 0,0')
+})
+
+test('未知值不得编造成 0：web_dump 的 scrollY 与 vw/vh 口径一致', async () => {
+  const { face } = makeFace({ backend: 'a11y' })
+  face.controlExec = async (op) => (op === 'webSnapshot'
+    ? { ok: true, data: { ok: true, nodes: [] } }   // 不回 vw/vh/scrollY
+    : { ok: true, data: { done: true } })
+  const { byName } = applyManage(face)
+  const r = await byName('android_web_dump').execute({}, exec)
+  const line = String(r.text).split('\n')[0]
+  assert.match(line, /视口 \?x\?/, 'vw/vh 未知报 ?')
+  assert.match(line, /滚动 \?/, 'scrollY 未知也必须报 ?（修前报 0）')
+})
+
+test('反向：壳侧真回显时坐标与滚动量必须如实带出（不得为了拒未知而一起丢掉）', async () => {
+  const { face } = makeFace({ backend: 'a11y' })
+  face.controlExec = async (op) => {
+    if (op === 'click') return { ok: true, data: { done: true, x: 540, y: 1200 } }
+    if (op === 'webSnapshot') return { ok: true, data: { ok: true, vw: 412, vh: 915, scrollY: 204, nodes: [] } }
+    return { ok: true, data: { done: true } }
+  }
+  const { byName } = applyManage(face)
+  const c = await byName('android_ui_click').execute({ nx: 0.5, ny: 0.5 }, exec)
+  assert.equal(c.x, 540, '壳侧真回显时 x 必须带出')
+  assert.equal(c.y, 1200, '壳侧真回显时 y 必须带出')
+  assert.match(String(c.text), /实际坐标 540,1200/)
+  const w = await byName('android_web_dump').execute({}, exec)
+  assert.match(String(w.text).split('\n')[0], /视口 412x915，滚动 204/)
+})

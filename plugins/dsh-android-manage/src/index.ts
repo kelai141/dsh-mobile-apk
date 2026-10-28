@@ -1730,12 +1730,25 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
         const verdict = await verifyClick(undefined, exec as ExecLike, false)
         // issue #258：回显壳侧所用的归一化基准（basis/basisWidth/basisHeight）。
         const basis = coordBasisNote(r.data)
+        // 实际点击坐标只在壳侧**真回显**时才带（2026-10-28 自查）。
+        //
+        // 修前写 `x: clicked.x ?? 0, y: clicked.y ?? 0`：老壳侧不回 x/y 时编造 0，模型据此
+        // 以为点在了屏幕左上角。更刺眼的是**同一个返回体里两套口径**——紧邻的 basisFields
+        // 遵守「不编造默认值」，文案会如实说「基准未回显：壳侧版本较旧」，而坐标却谎报 0,0
+        // （探针实测文案：「实际坐标 0,0，（基准未回显：壳侧版本较旧）」）。
+        // 顺带把非有限值一并拒：NaN/Infinity 不是合法 JSON，引擎 {type:'number'} 会整值拒绝
+        // （#204/#258 同族）。schema 里 x/y 非 required，缺席是合法的。
+        const clickedXY = typeof clicked.x === 'number' && Number.isFinite(clicked.x)
+          && typeof clicked.y === 'number' && Number.isFinite(clicked.y)
+          ? { x: clicked.x, y: clicked.y }
+          : null
         return {
           ok: true, denied: false, ref: '', id: `norm(${nx!.toFixed(3)},${ny!.toFixed(3)})`, label: '归一化坐标',
-          x: clicked.x ?? 0, y: clicked.y ?? 0,
+          ...(clickedXY ?? {}),
           ...basisFields(r.data),
           text: `已按归一化坐标 (${nx!.toFixed(3)},${ny!.toFixed(3)}) 点击（无障碍通道，实际坐标 `
-            + `${Math.round(clicked.x ?? 0)},${Math.round(clicked.y ?? 0)}，${basis}）；${verdict}`,
+            + (clickedXY === null ? '未回显' : `${Math.round(clickedXY.x)},${Math.round(clickedXY.y)}`)
+            + `，${basis}）；${verdict}`,
         }
       }
       let cx = 0; let cy = 0; let hitId = ''; let label = ''
@@ -2196,7 +2209,10 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
         ...(typeof data.url === 'string' ? { url: data.url } : {}),
         ...(typeof data.title === 'string' ? { title: data.title } : {}),
         nodes: nodes as WebNode[],
-        text: `WebView DOM 快照：${data.title ?? ''} ${data.url ?? ''}（视口 ${data.vw ?? '?'}x${data.vh ?? '?'}，滚动 ${data.scrollY ?? 0}；`
+        // 同一句文案里未知值的口径必须一致（2026-10-28 自查）：`vw`/`vh` 未知时报 `?`，
+        // 而 `scrollY` 未知时却报 `0` —— 模型会把「壳侧没回显」误读成「页面没滚动」
+        // （在长列表里恰好会导到「已到顶」的错判）。这里统一成 `?`。
+        text: `WebView DOM 快照：${data.title ?? ''} ${data.url ?? ''}（视口 ${data.vw ?? '?'}x${data.vh ?? '?'}，滚动 ${typeof data.scrollY === 'number' && Number.isFinite(data.scrollY) ? data.scrollY : '?'}；`
           + `命中 ${data.total ?? nodes.length} 个可交互元素，返回 ${nodes.length} 个）\n` + lines.join('\n')
           + '\n点击用 ref=wN，或 css:<选择器> / text:<文本> / role:<role>。',
       }
