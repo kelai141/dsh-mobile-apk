@@ -206,7 +206,7 @@ function shellPrefsPath(): string | null {
   return null
 }
 
-/** SharedPreferences XML → 布尔/字符串状态；不存在/解析失败返回 undefined（上层回落 env）。 */
+/** Parse SharedPreferences XML; keep an omitted a11y declaration distinct from explicit false. */
 export function parseAdbPrefsXml(xml: string): ShellAdbPrefs | null {
   const mAllow = /<boolean\s+name="allowSwitch"\s+value="(true|false)"\s*\/?>/.exec(xml)
   const mPair = /<boolean\s+name="paired"\s+value="(true|false)"\s*\/?>/.exec(xml)
@@ -230,7 +230,7 @@ export function parseAdbPrefsXml(xml: string): ShellAdbPrefs | null {
     connected: mConnected ? mConnected[1] === 'true' : false,
     pairPort: mPairPort?.[1] || undefined,
     connectPort: mConnectPort?.[1] || undefined,
-    a11yEnabled: mA11y ? mA11y[1] === 'true' : false,
+    a11yEnabled: mA11y ? mA11y[1] === 'true' : undefined,
     controlToken: mToken?.[1] || undefined,
     controlHeartbeat: mHeartbeat ? Number(mHeartbeat[1]) : undefined,
     fullAccess: mFullAccess ? mFullAccess[1] === 'true' : undefined,
@@ -318,16 +318,19 @@ export const A11Y_FRESH_MS = 20_000
  */
 const CAPS_PROBE_TTL_MS = 10_000
 
+export type A11ySource = 'heartbeat' | 'disabled' | 'stale' | 'unknown'
+
+export interface A11yAvailabilityFacts {
+  enabled: boolean
+  source: A11ySource
+  heartbeatAgeMs: number | null
+}
+
 export interface ControlGateFacts {
   a11yEnabled: boolean
-  /**
-   * 无障碍在线判定的**来源标注**——heartbeat=壳侧独立心跳线程新鲜，off=不新鲜。
-   *
-   * #648：旧口径里还有一个 `queue`（控制队列取活新鲜即判在线），已删除——轮询设计上就是
-   * a11y 关着也能跑，用它当 a11y 证据会把「服务已死但轮询还活着」误报成可用。轮询新鲜度
-   * 改由下方的 {@link polling} 单独暴露。
-   */
-  a11ySource: 'heartbeat' | 'off'
+  /** Positive evidence, explicit disablement, stale heartbeat, and unobserved state stay distinct. */
+  a11ySource: A11ySource
+  a11yHeartbeatAgeMs: number | null
   /**
    * #648：壳侧控制轮询的存活事实（**不是**无障碍证据，两者相互独立）。
    *
@@ -836,15 +839,15 @@ export class AndroidPrivilegeService {
    */
   gateFor(session?: unknown): { ok: true; via?: 'a11y' | 'adb' | 'shizuku' } | { ok: false; guidance: string; gates?: ControlGateFacts } {
     const st = this.status()
-    const a11ySource = this.a11ySource()
-    const a11y = a11ySource !== 'off'
+    const a11y = this.a11yFacts()
     // 0.13.8 #172：能力门只由「引擎级三道门 + 会话档位实时门」决定——部署默认写面
     // 档位（tier）降级为视图字段，不再参与门禁（坑 29：勿把部署默认当死锁）。
     const adbReady = engineLevelReady(st)
     const shizukuReady = this.shizukuReady()
     const gates: ControlGateFacts = {
-      a11yEnabled: a11y,
-      a11ySource,
+      a11yEnabled: a11y.enabled,
+      a11ySource: a11y.source,
+      a11yHeartbeatAgeMs: a11y.heartbeatAgeMs,
       polling: this.pollingFacts(),
       fullAccess: st.fullAccess === true,
       allowSwitch: st.allowSwitchOn === true,
@@ -863,7 +866,7 @@ export class AndroidPrivilegeService {
         guidance: `会话档位为 ${mode ?? '未知'}，设备控制面要求 danger-full-access（无障碍通道同样受此门约束）——会话内 /permission danger-full-access 可即时开放`,
       }
     }
-    if (a11y) return { ok: true, via: 'a11y' }
+    if (a11y.enabled) return { ok: true, via: 'a11y' }
     if (shizukuReady) return { ok: true, via: 'shizuku' }
     if (adbReady) return { ok: true, via: 'adb' }
     return {
@@ -902,38 +905,33 @@ export class AndroidPrivilegeService {
     return readShellAdbState()?.connectPort
   }
 
-  /**
-   * 无障碍在线的**判定来源**。prefs 的 a11yEnabled 会在进程被 force-stop 后变成僵尸
-   * true（onDestroy 不保证执行），所以必须再叠一层新鲜心跳：
-   *  - heartbeat：壳侧独立心跳线程写的 live prefs 键 controlHeartbeat 新鲜；
-   *  - off：心跳不新鲜 / prefs 未声明 a11yEnabled（fail-closed）。
-   *
-   * **#648 修正：控制队列的 pollAgeMs 已从本判定中移除。**
-   * 旧实现还有一条 `queue`：pollAgeMs 新鲜即判在线。那是误报源——轮询与无障碍是两条
-   * 独立的生命线，而且轮询**设计上就是 a11y 关着也能跑**：
-   *  - `ControlCarrier` 由 `EngineService.kt:63` 启动，与 a11y 服务无关（0.14.0 承载拆离，
-   *    `ControlCarrier.kt:8` 原文「把长轮询从无障碍服务拆出——a11y 关着也能跑」）；
-   *  - 心跳写端有 a11y 守卫（`ControlCarrier.kt:84`：`if (a11y != null) heartbeat(...)`），
-   *    轮询写端没有（`control-queue.ts:170` 每轮无条件刷新 lastTakeAt）。
-   * 于是 a11y 服务死掉后轮询照旧新鲜，旧判定把「轮询活着」当成「a11y 活着」，报 queue →
-   * a11yEnabled=true，而实际每条 a11y op 都返回 a11y-unavailable（#648 现场）。
-   *
-   * 轮询新鲜度本身是有用的诊断事实，但它是**另一件事**，现以 {@link ControlGateFacts.polling}
-   * 单独暴露，不再冒充无障碍证据。
-   */
-  a11ySource(): 'heartbeat' | 'off' {
+  /** Keep routing fail-closed while preserving disabled, stale, and unobserved diagnostics. */
+  a11yFacts(): A11yAvailabilityFacts {
     const live = readShellAdbState()
-    if (live?.a11yEnabled !== true) return 'off'
-    const heartbeat = live.controlHeartbeat
-    if (typeof heartbeat === 'number' && Number.isFinite(heartbeat) && Date.now() - heartbeat < A11Y_FRESH_MS) {
-      return 'heartbeat'
+    if (!live || live.a11yEnabled === undefined) {
+      return { enabled: false, source: 'unknown', heartbeatAgeMs: null }
     }
-    return 'off'
+    if (live.a11yEnabled === false) {
+      return { enabled: false, source: 'disabled', heartbeatAgeMs: null }
+    }
+    const heartbeat = live.controlHeartbeat
+    if (typeof heartbeat !== 'number' || !Number.isFinite(heartbeat)) {
+      return { enabled: false, source: 'stale', heartbeatAgeMs: null }
+    }
+    const ageMs = Math.max(0, Date.now() - heartbeat)
+    if (ageMs < A11Y_FRESH_MS) {
+      return { enabled: true, source: 'heartbeat', heartbeatAgeMs: ageMs }
+    }
+    return { enabled: false, source: 'stale', heartbeatAgeMs: ageMs }
+  }
+
+  a11ySource(): A11ySource {
+    return this.a11yFacts().source
   }
 
   /** 0.13.5 W4：无障碍服务是否**真的活着**（只认 prefs 声明 + 新鲜心跳）。 */
   a11yEnabled(): boolean {
-    return this.a11ySource() !== 'off'
+    return this.a11yFacts().enabled
   }
 
   /**
@@ -953,10 +951,11 @@ export class AndroidPrivilegeService {
     const st = this.status()
     // 0.13.8 #172：同 gateFor——部署档位视图不参与能力门。
     const adbReady = engineLevelReady(st)
-    const a11ySource = this.a11ySource()
+    const a11y = this.a11yFacts()
     return {
-      a11yEnabled: a11ySource !== 'off',
-      a11ySource,
+      a11yEnabled: a11y.enabled,
+      a11ySource: a11y.source,
+      a11yHeartbeatAgeMs: a11y.heartbeatAgeMs,
       polling: this.pollingFacts(),
       fullAccess: st.fullAccess === true,
       allowSwitch: st.allowSwitchOn === true,
@@ -1336,7 +1335,7 @@ export const PRIVILEGE_STATUS_OUTPUT_SCHEMA: Record<string, unknown> = {
     writeMode: { type: 'string' },
     deviceModel: { type: 'string', description: '当前绑定设备型号（连接校验缓存；空=未知）' },
     message: { type: 'string' },
-    gates: { type: 'object', additionalProperties: true, description: '结构化授权事实（a11yEnabled/fullAccess/allowSwitch/paired/wirelessDebug/adbReady）' },
+    gates: { type: 'object', additionalProperties: true, description: '结构化授权事实（a11yEnabled/a11ySource/a11yHeartbeatAgeMs/fullAccess/allowSwitch/paired/wirelessDebug/adbReady）' },
     control: { type: 'object', additionalProperties: true, description: '控制通道运行时状态（a11yEnabled/queue/tokenConfigured）' },
     route: { type: 'object', additionalProperties: true, description: '每个常用操作走哪条通道/为什么/另一条缺什么（结构化路由）' },
     shell: { type: 'object', additionalProperties: true, description: '壳侧声明的协议版本与能力（caps.ops/view/gz）与协商结论' },
@@ -1387,13 +1386,17 @@ export function buildPrivilegeStatusToolPayload(
     const d = svc.controlDecision(op, session)
     // 0.14.0 §6：特权面 = Shizuku（内置 adb 退役）；无障碍仍是内容面的首选通道。
     const altPrivileged = facts.adbReady === true || facts.shizukuReady === true
-    const altA11y = svc.a11yEnabled()
+    const a11y = svc.a11yFacts()
     route[op] = {
       backend: d.backend,
       reason: d.reason,
       alternative: d.backend === 'a11y'
         ? { backend: 'shizuku', available: altPrivileged, missing: altPrivileged ? null : '设置页「手机控制」：安装 / 启动 / 授权 Shizuku' }
-        : { backend: 'a11y', available: altA11y, missing: altA11y ? null : '系统设置 → 无障碍 → 开启「DeepCode 设备控制」' },
+        : a11y.enabled
+          ? { backend: 'a11y', available: true, source: a11y.source, missing: null }
+          : a11y.source === 'disabled'
+            ? { backend: 'a11y', available: false, source: a11y.source, missing: a11yAlternativeHint(a11y.source) }
+            : { backend: 'a11y', source: a11y.source, missing: a11yAlternativeHint(a11y.source) },
     }
   }
   const queue = svc.controlStats()
@@ -1408,6 +1411,29 @@ export function buildPrivilegeStatusToolPayload(
     },
     control: { a11yEnabled: svc.a11yEnabled(), queue, tokenConfigured: controlTokenConfigured },
   }) as Record<string, JsonValue>
+}
+
+export function a11yStatusText(source: A11ySource, heartbeatAgeMs: number | null): string {
+  if (source === 'heartbeat') return '已开启（可用·来源 heartbeat）'
+  if (source === 'disabled') return '未开启（壳侧偏好明确关闭）'
+  if (source === 'stale' && heartbeatAgeMs !== null) {
+    return `心跳已过期 ${Math.round(heartbeatAgeMs / 1000)} 秒，服务状态未确认（按不可用处理）`
+  }
+  if (source === 'stale') return '心跳缺失，服务状态未确认（按不可用处理）'
+  return '状态未知（未读取到无障碍状态，按不可用处理）'
+}
+
+function a11yUnavailableText(source: A11ySource): string {
+  if (source === 'disabled') return '无障碍已确认未开启'
+  if (source === 'stale') return '无障碍状态未确认（心跳陈旧）'
+  if (source === 'unknown') return '无障碍状态未知'
+  return '无障碍通道不可用'
+}
+
+function a11yAlternativeHint(source: A11ySource): string {
+  if (source === 'disabled') return '系统设置 → 无障碍 → 开启「DeepCode 设备控制」'
+  if (source === 'stale') return '无障碍心跳陈旧、服务状态未确认；可直接试一次目标操作，再按结构化结果选择备用通道'
+  return '无障碍状态未知；可直接试一次目标操作，再按结构化结果选择备用通道'
 }
 
 function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record<string, unknown>): Record<string, unknown>; run(spec: Record<string, unknown>): Promise<Record<string, unknown>> }, controlTokenConfigured: () => boolean = () => false) {
@@ -1430,6 +1456,7 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
         const v = value as Record<string, unknown>
         const gates = v.gates as ControlGateFacts | undefined
         const control = v.control as { tokenConfigured?: boolean } | undefined
+        const a11ySource = gates?.a11ySource ?? 'unknown'
         // #648：轮询新鲜度与无障碍是两条独立的生命线，**必须分两行渲染**。
         // 旧实现把「壳侧轮询在线」挂在「无障碍通道」这一行上，看起来像是无障碍也可用的佐证，
         // 而 a11y 已死时轮询照样在线——那正是 #648 让调用方误判的原因。
@@ -1443,9 +1470,7 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
           type: 'text',
           text: [
             `授权档位 ${String(v.tier)}${v.deviceModel ? ' · ' + String(v.deviceModel) : ''}`,
-            '无障碍通道：' + (gates?.a11yEnabled
-              ? '已开启（可用·来源 ' + String(gates?.a11ySource ?? 'unknown') + '）'
-              : '未开启')
+            '无障碍通道：' + a11yStatusText(a11ySource, gates?.a11yHeartbeatAgeMs ?? null)
               + (control?.tokenConfigured === true ? ' · 令牌已配置' : ''),
             pollingLine,
             `ADB 通道：${gates?.adbReady ? '已就绪' : `未就绪（完全访问=${String(gates?.fullAccess)} 允许访问=${String(gates?.allowSwitch)} 配对=${String(gates?.paired)} 无线调试=${String(gates?.wirelessDebug)}）`}`,
@@ -1461,9 +1486,9 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
             // 0.14.1：无障碍关时**不得再把模型引向 android_ui_dump**——那条路在纯 Shizuku 下恒不可用，
             // 会白撞一堵墙；此时控件树的唯一来源是 android_ui_tree（与 ui_dump 同形，可 ref 操作）。
             gates?.a11yEnabled ? '结论：设备控制可用（走无障碍通道）——下一步用 android_ui_dump 拿语义清单'
-              : gates?.shizukuReady === true ? '结论：设备控制可用（走 Shizuku 特权通道）——**无障碍未开启，控件树用 android_ui_tree**（与 android_ui_dump 同形、可 ref 操作）'
-                : gates?.adbReady ? '结论：设备控制可用（走 ADB 通道）——**无障碍未开启，控件树用 android_ui_tree**'
-                : '结论：不可用——开启任一通道即可（推荐无障碍：系统设置 → 无障碍 → DeepCode 设备控制，一步即用）',
+              : gates?.shizukuReady === true ? `结论：设备控制可用（走 Shizuku 特权通道）——**${a11yUnavailableText(a11ySource)}，控件树用 android_ui_tree**（与 android_ui_dump 同形、可 ref 操作）`
+                : gates?.adbReady ? `结论：设备控制可用（走 ADB 通道）——**${a11yUnavailableText(a11ySource)}，控件树用 android_ui_tree**`
+                  : `结论：不可用——${a11yUnavailableText(a11ySource)}；开启任一可用通道即可（推荐无障碍：系统设置 → 无障碍 → DeepCode 设备控制）`,
             v.message ? `通道说明：${String(v.message)}` : '',
             (() => {
               const shell = v.shell as { protocol?: { shell?: number; engine?: number; ok?: boolean; reason?: string }; caps?: { ops?: unknown[] } | null } | undefined
@@ -1887,9 +1912,13 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
       const shizuku = await svc.shizukuChannelProbed()
       // **未知时必须整体缺席该键**，不得写成 `shizuku: undefined`——工具出口会把它判成
       // 「返回值含 undefined 成员」（无损 JSON 契约），整条工具返回值被拒、模型拿不到任何数据。
-      return shizuku === undefined
-        ? { a11y: svc.a11yEnabled() }
-        : { a11y: svc.a11yEnabled(), shizuku }
+      const a11y = svc.a11yFacts()
+      const a11yChannel = a11y.source === 'heartbeat'
+        ? { a11y: true }
+        : a11y.source === 'disabled' ? { a11y: false } : {}
+      const heartbeat = a11y.heartbeatAgeMs === null ? {} : { a11yHeartbeatAgeMs: a11y.heartbeatAgeMs }
+      const facts = { ...a11yChannel, a11ySource: a11y.source, ...heartbeat }
+      return shizuku === undefined ? facts : { ...facts, shizuku }
     },
   )
   // 状态端点（浏览端面/设置页查询与展示）。**只读**：无任何写面——授权变更经

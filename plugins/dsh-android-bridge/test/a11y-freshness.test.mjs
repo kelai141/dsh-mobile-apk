@@ -14,7 +14,7 @@
 //   a11y-unavailable。设备上实测（16544）：dumpsys 的 Bound services 为空、
 //   系统 enabled_accessibility_services 为 null，但 EngineService 还活着、轮询新鲜。
 //
-// 新口径：a11ySource 只认 prefs 声明的 a11yEnabled + **新鲜心跳**（'heartbeat' | 'off'）。
+// New diagnostics distinguish fresh, disabled, stale, and unobserved states; routing accepts only fresh heartbeats.
 // 轮询新鲜度仍有诊断价值，但它是另一件事，改由 gates.polling = { active, ageMs } 暴露。
 //
 // 判据（必须一直成立）：
@@ -29,7 +29,9 @@ import { join } from 'node:path'
 import {
   A11Y_FRESH_MS,
   AndroidPrivilegeService,
+  a11yStatusText,
   buildPrivilegeStatusToolPayload,
+  parseAdbPrefsXml,
 } from '../lib/index.js'
 import { ControlQueue } from '../lib/control-queue.js'
 
@@ -72,10 +74,11 @@ test('#648：轮询新鲜但心跳陈旧 → a11y 判离线（旧口径会误报
   const svc = service(freshQueue())
   // 先确认前提真的成立：队列确实新鲜。若这条不成立，下面的断言就测不到东西。
   assert.ok(svc.pollingFacts().active === true, '前提：队列必须新鲜')
-  assert.equal(svc.a11ySource(), 'off', '轮询活着不代表 a11y 活着')
+  assert.equal(svc.a11ySource(), 'stale', '轮询活着不代表 a11y 活着；陈旧心跳应保留为独立状态')
   assert.equal(svc.a11yEnabled(), false)
   // 但轮询这个事实本身不能被丢掉。
   assert.equal(svc.gateFacts().polling.active, true, '轮询在线这一诊断事实必须保留')
+  assert.ok(svc.gateFacts().a11yHeartbeatAgeMs >= 5 * 60 * 1000)
 })
 
 test('#648：误报形态走真实工具出口也判离线（不是只测 helper）', () => {
@@ -85,12 +88,17 @@ test('#648：误报形态走真实工具出口也判离线（不是只测 helper
   const payload = buildPrivilegeStatusToolPayload(svc, undefined, false)
   const gates = payload.gates
   assert.equal(gates.a11yEnabled, false, 'gates.a11yEnabled 不得因轮询新鲜而变真')
-  assert.equal(gates.a11ySource, 'off')
+  assert.equal(gates.a11ySource, 'stale')
+  assert.ok(gates.a11yHeartbeatAgeMs >= 5 * 60 * 1000)
   assert.equal(gates.polling.active, true, 'gates.polling 仍如实报告轮询在线')
-  // 路由面也不得因为轮询新鲜就把 a11y 当可用：所有 op 的另一条通道都应标 a11y 不可用。
+  assert.match(payload.route.snapshot.alternative.missing, /心跳陈旧/)
+  assert.equal(payload.route.snapshot.alternative.source, 'stale')
+  assert.equal('available' in payload.route.snapshot.alternative, false, 'stale must not be exposed as confirmed unavailable')
+  // Route execution remains fail-closed; the diagnostic alternative stays explicitly unconfirmed.
   for (const [, route] of Object.entries(payload.route)) {
     const alt = route.alternative
-    assert.equal(alt.available, false, 'a11y 已死，替代通道不得报可用')
+    assert.equal('available' in alt, false, 'stale a11y must not be represented as a confirmed false')
+    assert.equal(alt.source, 'stale')
     assert.match(String(alt.missing), /无障碍/, '缺什么要如实写')
   }
 })
@@ -117,24 +125,60 @@ test('心跳新鲜 + 队列也新鲜 → 来源仍是 heartbeat（queue 不再�
 test('心跳与队列都陈旧 → 离线（fail-closed）', () => {
   prefs('<boolean name="a11yEnabled" value="true" />\n<long name="controlHeartbeat" value="' + (Date.now() - 5 * 60 * 1000) + '" />\n')
   const svc = service(staleQueue)
-  assert.equal(svc.a11ySource(), 'off')
+  assert.equal(svc.a11ySource(), 'stale')
   assert.equal(svc.a11yEnabled(), false)
-  assert.equal(svc.gateFacts().a11ySource, 'off')
+  assert.equal(svc.gateFacts().a11ySource, 'stale')
   assert.equal(svc.gateFacts().polling.active, false)
 })
 
-test('prefs 未声明 a11yEnabled → 离线，哪怕心跳很新', () => {
+test('explicit disablement remains distinct from a stale heartbeat', () => {
   prefs('<boolean name="a11yEnabled" value="false" />\n<long name="controlHeartbeat" value="' + Date.now() + '" />\n')
   const svc = service(staleQueue)
-  assert.equal(svc.a11ySource(), 'off')
+  assert.equal(svc.a11ySource(), 'disabled')
   assert.equal(svc.a11yEnabled(), false)
+  assert.equal(svc.gateFacts().a11yHeartbeatAgeMs, null)
+  const payload = buildPrivilegeStatusToolPayload(svc, undefined, false)
+  assert.equal(payload.route.snapshot.alternative.source, 'disabled')
+  assert.equal(payload.route.snapshot.alternative.available, false)
+})
+
+test('missing a11y declaration remains unknown and fails closed', () => {
+  prefs('<boolean name="allowSwitch" value="false" />\n<long name="controlHeartbeat" value="' + Date.now() + '" />\n')
+  const svc = service(staleQueue)
+  assert.equal(svc.a11ySource(), 'unknown')
+  assert.equal(svc.a11yEnabled(), false)
+  assert.equal(svc.gateFacts().a11yHeartbeatAgeMs, null)
+  assert.equal(parseAdbPrefsXml('<map><boolean name="allowSwitch" value="false" /></map>').a11yEnabled, undefined)
+  const payload = buildPrivilegeStatusToolPayload(svc, undefined, false)
+  assert.equal(payload.route.snapshot.alternative.source, 'unknown')
+  assert.equal('available' in payload.route.snapshot.alternative, false)
 })
 
 test('无 prefs 文件 → 离线且队列在场也不假装在线', () => {
   process.env.DSH_ADB_PREFS_PATH = join(tmpdir(), 'definitely-missing-dsh-a11y.xml')
   const svc = service(freshQueue())
-  assert.equal(svc.a11ySource(), 'off')
+  assert.equal(svc.a11ySource(), 'unknown')
   assert.equal(svc.a11yEnabled(), false)
+})
+
+test('enabled pref without a heartbeat stays fail-closed but reports a stale state', () => {
+  prefs('<boolean name="a11yEnabled" value="true" />\n')
+  const svc = service(staleQueue)
+  assert.equal(svc.a11ySource(), 'stale')
+  assert.equal(svc.a11yEnabled(), false)
+  assert.equal(svc.gateFacts().a11yHeartbeatAgeMs, null)
+})
+
+test('privilege status text distinguishes disabled, stale, and unknown states', () => {
+  const disabled = a11yStatusText('disabled', null)
+  const stale = a11yStatusText('stale', 45_000)
+  const staleWithoutAge = a11yStatusText('stale', null)
+  const unknown = a11yStatusText('unknown', null)
+  assert.match(disabled, /明确关闭/)
+  assert.match(stale, /心跳已过期 45 秒/)
+  assert.match(staleWithoutAge, /心跳缺失/)
+  assert.match(unknown, /状态未知/)
+  assert.equal(new Set([disabled, stale, staleWithoutAge, unknown]).size, 4)
 })
 
 test('轮询诊断面：从未轮询时 ageMs 为 null 且 active=false', () => {
