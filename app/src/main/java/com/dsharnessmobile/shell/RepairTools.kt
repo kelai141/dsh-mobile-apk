@@ -204,15 +204,16 @@ internal class RepairTools(
       // issue #684：让行（快照刷新中）不是拒启，文案必须如实区分——用户点「重启引擎」
       // 却得到「引擎启动被拒」会被误导去找一个不存在的故障。
       val restartOutcome = engine.startEngine(force = true)
-      if (restartOutcome != EngineStartOutcome.STARTED) {
-        throw RepairFailure(
-          "restart-failed",
-          if (restartOutcome == EngineStartOutcome.DEFERRED_REFRESHING) {
-            "快照刷新进行中，本次重启已让行（非失败）：刷新完成后由启动流拉起引擎"
-          } else {
-            engine.lastStartRefusal ?: "EngineManager.startEngine(force=true) 被拒"
-          },
-        )
+      // issue #720：让行（快照刷新中）是**有意延后**，不是失败。它绝不能走 RepairFailure——那条路
+      // 会被 execute() 转成 errorJson(code="restart-failed")，工具面把"已让行"呈现成"重启失败"，
+      // 修复助手据此重试或回报失败，恰好撞上正在写快照的持有者。这里直接返回结构化 deferral：
+      // restarted=false / deferred=true / 稳定 reason，并且**不再 spawn**（让行语义就是「不抢」）。
+      when (restartDisposition(restartOutcome)) {
+        RestartDisposition.DEFERRED -> return deferredRestartResult(generation.get() != callGeneration)
+        RestartDisposition.FAILED ->
+          throw RepairFailure("restart-failed", engine.lastStartRefusal ?: "EngineManager.startEngine(force=true) 被拒")
+        // STARTED（以及将来新增的「可继续」态）落到下面的存活判据。
+        RestartDisposition.PROCEED -> Unit
       }
       val deadline = System.currentTimeMillis() + RESTART_HTTP_WAIT_MS
       var http = EngineProbe.check(HTTP_TIMEOUT_MS)
@@ -312,8 +313,40 @@ internal class RepairTools(
     internal const val MAX_BASH_TIMEOUT_MS = 120_000L
     internal const val HTTP_TIMEOUT_MS = 1_200
     internal const val RESTART_HTTP_WAIT_MS = 45_000L
+
+    /** `restart_engine` 让行时的稳定 reason（issue #720：结构化 deferral 的可判读字段）。 */
+    internal const val DEFERRED_REASON_SNAPSHOT_REFRESH = "snapshot-refresh-in-flight"
   }
 }
+
+/**
+ * `restart_engine` 对引擎三态的处理方式（issue #720）。
+ *
+ * 抽成纯函数是为了**逐态回归**：以前这里只有一个布尔或一个 err_code，让行与失败在工具面
+ * 长成同一个样子，修复助手于是把"刻意不抢快照"读成"重启失败"并重试。
+ *
+ * 放在文件级（不在 companion 内）是为了让测试直接调用，不必先造 RepairTools 实例（那要 Context）。
+ */
+internal enum class RestartDisposition { PROCEED, DEFERRED, FAILED }
+
+internal fun restartDisposition(outcome: EngineStartOutcome): RestartDisposition = when (outcome) {
+  EngineStartOutcome.STARTED -> RestartDisposition.PROCEED
+  EngineStartOutcome.DEFERRED_REFRESHING -> RestartDisposition.DEFERRED
+  EngineStartOutcome.REFUSED -> RestartDisposition.FAILED
+}
+
+/**
+ * 让行的结构化结果：`restarted=false` / `deferred=true` / 稳定 reason。
+ *
+ * 它必须是**成功形状**（不是 errorJson）——调用方据此判断"这次没重启，但也不是失败"，
+ * 从而不去重试、不去抢正在写快照的持有者。
+ */
+internal fun deferredRestartResult(cancelled: Boolean): JSONObject = JSONObject()
+  .put("restarted", false)
+  .put("deferred", true)
+  .put("reason", RepairTools.DEFERRED_REASON_SNAPSHOT_REFRESH)
+  .put("detail", "快照刷新进行中，本次重启已让行（非失败）：刷新完成后由启动流拉起引擎")
+  .put("cancelled", cancelled)
 
 /** Bounded, sanitized filesystem operations shared by [RepairTools] and JVM tests. */
 internal class RepairToolsFs(

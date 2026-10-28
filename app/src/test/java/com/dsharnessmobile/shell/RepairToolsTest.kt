@@ -41,6 +41,52 @@ class RepairToolsTest {
     )
   }
 
+  // ---- issue #720：restart_engine 的三态映射（逐态回归，不再靠"看文案") ----
+
+  @Test
+  fun `三态映射：STARTED 继续走存活判据，DEFERRED 让行，REFUSED 失败`() {
+    assertEquals(RestartDisposition.PROCEED, restartDisposition(EngineStartOutcome.STARTED))
+    assertEquals(
+      RestartDisposition.DEFERRED,
+      restartDisposition(EngineStartOutcome.DEFERRED_REFRESHING),
+    )
+    assertEquals(RestartDisposition.FAILED, restartDisposition(EngineStartOutcome.REFUSED))
+  }
+
+  @Test
+  fun `让行结果是成功形状：restarted=false 且 deferred=true 且 reason 稳定`() {
+    val deferred = deferredRestartResult(cancelled = false)
+    assertFalse("让行不是重启成功", deferred.getBoolean("restarted"))
+    assertTrue("必须显式标记 deferred，否则调用方只能靠文案猜", deferred.getBoolean("deferred"))
+    assertEquals(
+      RepairTools.DEFERRED_REASON_SNAPSHOT_REFRESH,
+      deferred.getString("reason"),
+    )
+    assertEquals("snapshot-refresh-in-flight", deferred.getString("reason"))
+    assertFalse(deferred.getBoolean("cancelled"))
+    assertTrue("要有可读解释", deferred.getString("detail").contains("让行"))
+  }
+
+  @Test
+  fun `让行结果带取消标记，且绝不带错误码字段`() {
+    val cancelled = deferredRestartResult(cancelled = true)
+    assertTrue(cancelled.getBoolean("cancelled"))
+    // 关键反证：让行结果一旦带 error/code，工具面就会把它渲染成失败（issue #720 的现场）。
+    assertFalse(cancelled.has("error"))
+    assertFalse(cancelled.has("code"))
+  }
+
+  @Test
+  fun `反证：DEFERRED 不得被当成失败态映射`() {
+    // 旧实现把让行与拒启并成同一条 restart-failed；这条断言把那种回归钉死。
+    assertFalse(
+      restartDisposition(EngineStartOutcome.DEFERRED_REFRESHING) == RestartDisposition.FAILED,
+    )
+    assertFalse(
+      restartDisposition(EngineStartOutcome.DEFERRED_REFRESHING) == RestartDisposition.PROCEED,
+    )
+  }
+
   @After
   fun tearDown() {
     base.deleteRecursively()
