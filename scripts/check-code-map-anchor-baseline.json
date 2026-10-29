@@ -981,7 +981,6 @@
     "scripts/patches/data/registry-scan-c4.mjs:11": 1,
     "scripts/patches/data/client-index-loader-barrier.mjs:3": 1,
     "scripts/patches/data/undo-safe-transaction-snippet.mjs:1": 1,
-    "apply-patches.mjs:519": 1,
     "scripts/build-apk-013.ps1:427": 2,
     "scripts/build-snapshot-013.mjs:31": 1,
     "scripts/build-snapshot-013.mjs:297": 1,
@@ -2758,13 +2757,10 @@
       "@Test"
     ],
     "apply-patches.mjs:1568": [
-      "check: (s) => s.includes('dsh-mobile exclusive publish (F7)')"
+      "//   ① publish 站（publishCurrentExclusive，rename 之前）：占位成功=我们赢，输家得到 EEXIST 并"
     ],
     "apply-patches.mjs:1596": [
       "}"
-    ],
-    "apply-patches.mjs:519": [
-      "el('p', '{className:\"dshm-summary\"}', 'k(o,a)'),"
     ],
     "attachment-picker-menu.ts:184": [
       "return node.matches(SLOT_SELECTOR) || node.querySelector(SLOT_SELECTOR) !== null"
@@ -4076,16 +4072,16 @@
       "SNAP_PKG_ROOT=\"${DSH_SNAPSHOT_PKG_ROOT:-/data/user/0/com.dsharnessmobile.shell}\""
     ],
     "scripts/patches/apply-patches.mjs:122": [
-      "}"
+      "if (m) out.add(m[1].replace(/^['\"]|['\"]$/g, ''))"
     ],
     "scripts/patches/apply-patches.mjs:1568": [
-      "check: (s) => s.includes('dsh-mobile exclusive publish (F7)')"
+      "//   ① publish 站（publishCurrentExclusive，rename 之前）：占位成功=我们赢，输家得到 EEXIST 并"
     ],
     "scripts/patches/apply-patches.mjs:1583": [
-      "if (legacyStart < 0 || legacyEndMark < 0) {"
+      "// 必须显式判为未收敛，否则「已应用」的幂等判定会把坏文件永远留在原地。"
     ],
     "scripts/patches/apply-patches.mjs:865": [
-      ""
+      ".replace(/\\n$/, '').replace(/\\n/g, s.includes('\\r\\n') ? '\\r\\n' : '\\n') + (s.includes('\\r\\n') ? '\\r\\n' : '\\n')"
     ],
     "scripts/patches/data/client-index-loader-barrier.mjs:3": [
       "export function planClientIndexLoaderBarrier(source) {"

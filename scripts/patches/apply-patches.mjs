@@ -30,6 +30,7 @@ import { hasSidebarReorder, patchSidebarReorder } from './data/sidebar-bubble-re
 import { hasSidebarKeepWide, patchSidebarKeepWide } from './data/sidebar-keep-wide-B2.mjs'
 import { hasInspectorWorkerExposeInternals, patchInspectorWorkerExposeInternals } from './data/inspector-worker-expose-internals-472.mjs'
 import { hasProfileLinkSkip, patchProfileLinkSkip } from './data/profile-link-skip-PL1.mjs'
+import { hasTerminalShellCandidates, patchTerminalShellCandidates } from './data/terminal-shell-candidates-T1.mjs'
 import { hasManagedPortBind, patchManagedPortBind } from './data/managed-port-bind-EP1.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -481,6 +482,16 @@ const IMPLS = {
       }
       return s
     },
+  },
+
+  // ── terminal-shell-candidates-T1：Android 上系统 cmd 被当成 shell 候选 ──
+  // 默认候选表是桌面口径（含 Windows 的 cmd）；Android 上 cmd 解析到 /system/bin/cmd，
+  // 选中必然退出（No service specified）。只在 Windows 保留 cmd.exe。
+  'terminal-shell-candidates-T1': {
+    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-api-terminal-controller/lib/index.js',
+    scope: 'engine',
+    check: hasTerminalShellCandidates,
+    apply: patchTerminalShellCandidates,
   },
 
   // ── marketplace E：按仓库折叠（一行一仓，展开列子包）──
