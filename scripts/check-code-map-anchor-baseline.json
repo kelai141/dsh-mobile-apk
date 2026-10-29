@@ -2757,10 +2757,10 @@
       "@Test"
     ],
     "apply-patches.mjs:1568": [
-      "return s"
+      "if ((s.match(/dsh-mobile link->rename fallback/g) || []).length !== 2) throw new Error('spj-migration-link 复核失败——不写回')"
     ],
     "apply-patches.mjs:1596": [
-      "//    边界 = 旧块注释起、到紧随其后的 helper 占位调用止；helper 占位调用是 v2 正确形态，保留。"
+      "// ⓪ 收敛 v1 双占位形态（0.14.0-preview 坏资产的修复必由路径；无该形态则 no-op）。"
     ],
     "attachment-picker-menu.ts:184": [
       "return node.matches(SLOT_SELECTOR) || node.querySelector(SLOT_SELECTOR) !== null"
@@ -4075,13 +4075,13 @@
       "const m = /^\\s*-?\\s*name:\\s*(.+?)\\s*$/.exec(line)"
     ],
     "scripts/patches/apply-patches.mjs:1568": [
-      "return s"
+      "if ((s.match(/dsh-mobile link->rename fallback/g) || []).length !== 2) throw new Error('spj-migration-link 复核失败——不写回')"
     ],
     "scripts/patches/apply-patches.mjs:1583": [
-      "// 否则留下 0 字节目标：它会被当成「已存在」让之后每次发布都输掉占位竞争，且被读日志侧当成损坏文件。"
+      "// 两站占位成功后若 rename 失败（IO 错/权限），必须 unlink 回收占位（dshMobileReleaseClaim）——"
     ],
     "scripts/patches/apply-patches.mjs:865": [
-      "// 上游文件是 CRLF：锚点用正则匹配（\\r?\\n），否则跨行锚点永远失配（实测踩到）。"
+      "!/entry\\.id == null \\|\\| entry\\.id === id/.test(s)) return s"
     ],
     "scripts/patches/data/client-index-loader-barrier.mjs:3": [
       "export function planClientIndexLoaderBarrier(source) {"

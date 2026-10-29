@@ -493,6 +493,7 @@ const IMPLS = {
     scope: 'engine',
     check: hasTerminalShellCandidates,
     apply: patchTerminalShellCandidates,
+  },
   // ── zsh-fpath-A1：内置 zsh 开屏三行 function definition file not found ──
   // 该快照的 zsh 编译期 fpath 指向 /data/data/com.termux/...（本应用不存在），
   // 而函数在 <prefix>/share/zsh/functions。补 fpath + 给注册加守卫。

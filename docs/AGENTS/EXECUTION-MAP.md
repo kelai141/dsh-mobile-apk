@@ -1757,7 +1757,7 @@ FileProvider XML path regression coverage: `scripts/check-manifest-hardening.tes
   - `scripts/build-apk-engine.mjs:33` / `:86`（共用 assemble 与签名验证入口）；调用测试锁住本地、云端、发布三路汇合：`scripts/build-apk-engine.test.mjs:121`
   - `scripts/patches/data/registry-scan-c4.mjs:11`（同步 flush 的 Loader 临时索引与 manifest 复用；详细设备计时/预算见 RUNTIME-PATCHES §7.6，自动补给的异步 checkpoint 见 model-capability README）
   - `scripts/patches/data/client-index-loader-barrier.mjs:3`（G2：首页HTML在快照插件图前等待同一host Loader收敛；静态资源不参与等待）
-  - `scripts/patches/data/undo-safe-transaction-snippet.mjs:1`（Safe Mode 事务代码模板；由 `apply-patches.mjs:539#expect=el%28%27p%27%2C%20%27%7BclassName%3A%22dshm-summary%22%7D%27%2C%20%27k%28o%2Ca%29%27%29%2C` 注入 vendor 快照代码）
+  - `scripts/patches/data/undo-safe-transaction-snippet.mjs:1`（Safe Mode 事务代码模板；由 `apply-patches.mjs:540#expect=el%28%27p%27%2C%20%27%7BclassName%3A%22dshm-summary%22%7D%27%2C%20%27k%28o%2Ca%29%27%29%2C` 注入 vendor 快照代码）
   - `scripts/build-apk-013.ps1:427`（被拒非空即 exit 1 的收口）
   - `scripts/build-snapshot-013.mjs:31`（Windows 宿主重入 WSL 的判据）
   - `scripts/build-snapshot-013.mjs:297`（引擎树补丁 --apply --scope engine）
