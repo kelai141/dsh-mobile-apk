@@ -2875,16 +2875,16 @@
       "if (rel.endsWith('.map') || rel.endsWith('/')) continue   // 目录条目（lib/、lib/types/）不是成员"
     ],
     "check-patch-mirror.mjs:109": [
-      "const regSet = new Set(regIds)"
+      "regIds = JSON.parse(readFileSync(regPath, 'utf8')).patches.map((p) => p.id)"
     ],
     "check-patch-mounts.mjs:28": [
       "const TOP_ITEM = /^-(?:\\s|$)/"
     ],
     "check-release-gates.mjs:136": [
-      "//      有产物即**真检**（超预算 exit 1），无产物则明确标 `SKIP(real-data)` 并退 `--self-test`"
+      "// `A11Y_OPS` 后端能力清单的陈旧拷贝，多带 `state`/`webSnapshot`/`webAction` 三条**不读设备屏**的 op，"
     ],
     "check-release-gates.mjs:28": [
-      "* 本迭代要求的门禁集合（唯一声明处）。"
+      "/**"
     ],
     "check-snapshot-asset.ps1:26": [
       "$h2 = (Get-FileHash $SnapshotPath -Algorithm SHA256).Hash.ToLower()"
@@ -3998,19 +3998,19 @@
       "const args = [':app:testDebugUnitTest', '--no-daemon', '--console=plain']"
     ],
     "scripts/check-patch-mirror.mjs:109": [
-      "const regSet = new Set(regIds)"
+      "regIds = JSON.parse(readFileSync(regPath, 'utf8')).patches.map((p) => p.id)"
     ],
     "scripts/check-patch-mirror.mjs:170": [
-      "const onlyMine = mineData.filter((r) => !peerData.includes(r))"
+      "const out = []"
     ],
     "scripts/check-patch-mirror.mjs:231": [
-      "'LICENSES/Shizuku-API-MIT.txt',"
+      "const MIRROR_TOP = ["
     ],
     "scripts/check-patch-mirror.mjs:339": [
-      "'plugins/dsh-android-linux-env',"
+      "'dsh-host-web-compat',"
     ],
     "scripts/check-patch-mirror.mjs:347": [
-      "'scripts/check-api-route-auth.mjs',"
+      "'dsh-shell-termux',"
     ],
     "scripts/check-plugin-tests.mjs:33": [
       "* 钉在唯一入口（`runCommand` 里合并），而不是逐个调用点补：调用点显式传的 `env` 也覆盖不掉它，"
@@ -4019,28 +4019,28 @@
       ""
     ],
     "scripts/check-release-gates.mjs:104": [
-      "// Kotlin 块注释嵌套静态检查（KDoc 里写 node_modules/** 会吞掉整个文件；dev-shell 实测）。"
+      "// （rc.1 实测：真树断 9 条而 16 个补丁测试全绿）。"
     ],
     "scripts/check-release-gates.mjs:135": [
-      "//      `.deploy-tmp/boot-budget/{boot-segments.log,engine.log}` 顺序发现**设备原始产物**；"
+      "// `REAL_SCREEN_OPS` 必须逐条相同。设备实测缺陷 B4 的根因就是它们不一致——壳侧那份是"
     ],
     "scripts/check-release-gates.mjs:152": [
-      "// 构建并发上限（0.14.1 用户拍板的系统级约束）：构建期压缩/解压不得吃满全部逻辑核（原为 `xz -T0`"
+      "// 0.13.8-b B2（ST-25/26/31 + §7.2 度量）：制度性门禁与性能度量入口一并进声明集合，"
     ],
     "scripts/check-release-gates.mjs:164": [
-      "// **之后**（同 job，结果目录已就位、无 SKIP），并去掉 build-apk.mjs 的 --allow-missing。"
+      "// 构建链中止语义（任一 ABI 被拒 = 整链非 0；0.13.8-b 实锤：arm64 被拒后仍 exit 0 交付单 ABI 产物）。"
     ],
     "scripts/check-release-gates.mjs:191": [
-      "//     且下方断言会核验该接管方真的调用了它（否则就是「移出去就没人跑」= 静默降级防线）。"
+      "//   a. 默认档（无参数）——按 `--segments/--probe` > `DSH_BOOT_SEGMENTS`/`DSH_BOOT_PROBE` >"
     ],
     "scripts/check-release-gates.mjs:212": [
-      "const SOURCE_GATES = ["
+      "{ script: 'check-build-parallel-cap.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },"
     ],
     "scripts/check-release-gates.mjs:246": [
-      "}"
+      "//   · releaseSink !== false ⇒ 发布链 --run 段执行（默认）；"
     ],
     "scripts/check-release-gates.mjs:28": [
-      "* 本迭代要求的门禁集合（唯一声明处）。"
+      "/**"
     ],
     "scripts/check-runtime-assets.mjs:126": [
       "*/"
