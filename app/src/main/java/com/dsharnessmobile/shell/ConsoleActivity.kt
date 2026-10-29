@@ -25,6 +25,14 @@ class ConsoleActivity : ComponentActivity() {
 
   private lateinit var webView: WebView
   private val session = ConsoleSession(this)
+
+  @Volatile private var startPending = false
+  private val pendingStartRunnable = Runnable { startSessionNow() }
+
+  private companion object {
+    /** issue #871 兜底：页面异常（不调 resize）时最多等这么久就照常启动。 */
+    const val START_DEFER_MS = 600L
+  }
   private val handler = android.os.Handler(android.os.Looper.getMainLooper())
   private var sessionStarted = false
 
@@ -146,8 +154,16 @@ class ConsoleActivity : ComponentActivity() {
     webView.loadUrl("file:///android_asset/console.html")
   }
 
-  override fun onStart() {
-    super.onStart()
+  /**
+   * issue #871：真正拉起会话。首次 resize 到达或兜底超时触发，谁先算谁。
+   *
+   * 为什么不能一上来就启动：PTY 若按 DEFAULT_COLS/ROWS（80x24）建，shell 会先在这个宽度画一次
+   * 提示符；随后页面首帧 pushSize() 下发真实尺寸 → SIGWINCH → zle 重绘 ⇒ 首屏出现**两行提示符**。
+   */
+  private fun startSessionNow() {
+    if (sessionStarted || sessionStarting) return
+    startPending = false
+    handler.removeCallbacks(pendingStartRunnable)
     if (sessionStarted || sessionStarting) return
     // M-c4（2026-10-25 审计）：start 全程是文件 IO（bash 存在性、relay 解包、spawn）——旧实现
     // 在主线程跑，慢盘上 onStart 直接卡帧。挪后台线程；状态经 handler 回主线程照常上屏。
@@ -159,6 +175,13 @@ class ConsoleActivity : ComponentActivity() {
         sessionStarting = false
       }
     }.apply { isDaemon = true; name = "dsh-console-start" }.start()
+  }
+
+  override fun onStart() {
+    super.onStart()
+    if (sessionStarted || sessionStarting || startPending) return
+    startPending = true
+    handler.postDelayed(pendingStartRunnable, START_DEFER_MS)
   }
 
   override fun onDestroy() {
@@ -255,7 +278,9 @@ class ConsoleActivity : ComponentActivity() {
      */
     @JavascriptInterface
     fun resize(cols: Int, rows: Int) {
+      // issue #871：尺寸要在 PTY 建起来**之前**就落进会话，这样首绘即用真实宽度。
       session.resize(cols, rows)
+      if (startPending) startSessionNow()
     }
 
     /**
