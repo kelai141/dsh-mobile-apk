@@ -16,6 +16,16 @@ import { execFileSync, execSync } from 'node:child_process'
 
 export const IS_WSL_HOST = process.platform === 'win32'
 
+/** Construct the WSL re-entry command without letting values become shell syntax. */
+export function wslNodeCommand(root, script, args, variables) {
+  const quote = (value) => "'" + String(value).replace(/'/g, "'\\''") + "'"
+  const env = Object.entries(variables).map(([key, value]) => {
+    if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new Error('invalid environment variable name')
+    return `${key}=${quote(value)}`
+  })
+  return `cd ${quote(root)} && env ${env.join(' ')} node ${quote(script)} ${args.map(quote).join(' ')}`
+}
+
 /**
  * tar 可执行文件的**显式定位**（0.14.1 W1 / 批 4 收口）。
  *

@@ -14,7 +14,7 @@ import { mkdirSync, existsSync, writeFileSync, readFileSync, readdirSync, rmSync
 import { join, dirname, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
-import { wslPath, sh as wsl, XZ_THREADS } from './lib/shell.mjs'
+import { wslPath, sh as wsl, XZ_THREADS, wslNodeCommand } from './lib/shell.mjs'
 import { sanitizeSymlinks } from './lib/symlink-sanitize.mjs'
 import { relocateGitShellPath } from './lib/git-shell-path.mjs'
 
@@ -30,19 +30,13 @@ if (!['arm64', 'x86_64'].includes(ABI)) { console.error('用法: node build-snap
 // 只有最终 tar.xz 写回 D:。故 Windows 上直接把自己重新执行进 WSL。
 // DSH_NO_WSL_REEXEC=1 跳过（调试/无 WSL 环境回退到旧的 D: 工作区）。
 if (process.platform === 'win32' && process.env.DSH_NO_WSL_REEXEC !== '1') {
-  const forwarded = ['DSH_SNAPSHOT_STAGE', 'SOURCE_DATE_EPOCH', 'DSH_INJECT_PRESET']
-    .filter((key) => process.env[key])
-    .map((key) => `${key}=${JSON.stringify(process.env[key])}`)
-    .join(' ')
-  const inner = `cd ${wslPath(ROOT)} && node scripts/build-snapshot-013.mjs ${ABI}`
-  const command = forwarded ? `${forwarded} ${inner}` : inner
-  log0(`Windows 宿主 → 转入 WSL 内执行（工作区落 ext4）：${inner}`)
-  try {
-    execSync(`wsl.exe -e bash -lc ${JSON.stringify(command)}`, { stdio: 'inherit' })
-    process.exit(0)
-  } catch (error) {
-    process.exit(typeof error.status === 'number' ? error.status : 1)
-  }
+  const forwarded = Object.fromEntries(['DSH_SNAPSHOT_STAGE', 'SOURCE_DATE_EPOCH', 'DSH_INJECT_PRESET']
+    .filter((key) => process.env[key]).map((key) => [key, process.env[key]]))
+  const command = wslNodeCommand(wslPath(ROOT), 'scripts/build-snapshot-013.mjs', [ABI], forwarded)
+  log0('Windows 宿主 → 转入 WSL 内执行（工作区落 ext4）')
+  const child = spawnSync('wsl.exe', ['-e', 'bash', '-lc', command], { stdio: 'inherit' })
+  if (child.error) console.error(child.error.message)
+  process.exit(child.status ?? 1)
 }
 function log0(msg) { console.log(`[build-013/${ABI}] ${msg}`) }
 

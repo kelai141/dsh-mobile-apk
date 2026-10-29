@@ -363,8 +363,7 @@
     "inject-snapshot.py:106": 2,
     "build-release.ps1:109": 2,
     "docs/AGENTS/build-and-env.md:32": 3,
-    "scripts/build-snapshot-013.mjs:985": 7,
-    "scripts/lib/shell.mjs:31": 5,
+    "scripts/build-snapshot-013.mjs:979": 7,
     "scripts/check-release-gates.mjs:28": 8,
     "build-and-env.md:48": 3,
     "docs/AGENTS/build-and-env.md:48": 5,
@@ -516,7 +515,7 @@
     "dsh-shell-termux/src/index.ts:39": 1,
     "dsh-host-web-compat/scripts/boot-watchdog.test.mjs:231": 2,
     "scripts/profile-web.cordis.patch.yml:7": 1,
-    "scripts/build-snapshot-013.mjs:933": 1,
+    "scripts/build-snapshot-013.mjs:927": 1,
     "scripts/plugin-dirs.json:1": 1,
     "scripts/patches/apply-patches.mjs:1583": 1,
     "scripts/check-patch-mirror.mjs:109": 1,
@@ -548,9 +547,9 @@
     "dsh-host-web-compat/lib/index.js:895": 2,
     "EngineManager.kt:1463": 2,
     "inject-all.py:336": 2,
-    "build-snapshot-013.mjs:366": 2,
+    "build-snapshot-013.mjs:360": 2,
     "build-apk-013.ps1:229": 2,
-    "build-snapshot-013.mjs:315": 2,
+    "build-snapshot-013.mjs:309": 2,
     "scripts/build-apk.mjs:61": 4,
     "scripts/check-patch-mirror.mjs:339": 4,
     "scripts/check-boot-budget.mjs:681": 3,
@@ -817,7 +816,7 @@
     "plugins/dsh-android-file-open/src/index.ts:36": 1,
     "plugins/dsh-android-linux-env/src/index.ts:30": 1,
     "plugins/dsh-android-linux-env/src/index.ts:72": 1,
-    "scripts/build-snapshot-013.mjs:456": 1,
+    "scripts/build-snapshot-013.mjs:450": 1,
     "EngineManager.kt:1314": 1,
     "EngineManager.kt:1316": 1,
     "plugins/dsh-android-file-open/src/index.ts:431": 3,
@@ -945,15 +944,15 @@
     "build-snapshot-013.mjs:31": 1,
     "build-apk-013.ps1:37": 1,
     "check-build-chain-abort.mjs:53": 1,
-    "build-snapshot-013.mjs:40": 1,
+    "build-snapshot-013.mjs:37": 1,
     "check-inject-completeness.mjs:37": 1,
     "check-patch-mounts.mjs:28": 1,
-    "build-snapshot-013.mjs:294": 1,
+    "build-snapshot-013.mjs:288": 1,
     "build-apk-013.ps1:211": 1,
-    "build-snapshot-013.mjs:300": 1,
+    "build-snapshot-013.mjs:294": 1,
     "apply-patches.mjs:1596": 1,
     "inject-all.py:174": 1,
-    "build-snapshot-013.mjs:982": 1,
+    "build-snapshot-013.mjs:976": 1,
     "inject-all.py:304": 1,
     "inject-all.py:32": 1,
     "check-inject-completeness.mjs:28": 1,
@@ -969,10 +968,10 @@
     "scripts/patches/data/undo-safe-transaction-snippet.mjs:1": 1,
     "scripts/build-apk-013.ps1:427": 2,
     "scripts/build-snapshot-013.mjs:31": 1,
-    "scripts/build-snapshot-013.mjs:297": 1,
+    "scripts/build-snapshot-013.mjs:291": 1,
     "scripts/inject-all.py:321": 1,
     "check-inject-completeness.mjs:98": 1,
-    "build-snapshot-013.mjs:1029": 1,
+    "build-snapshot-013.mjs:1023": 1,
     "check-snapshot-asset.ps1:26": 1,
     "scripts/build-release.ps1:60": 2,
     "scripts/check-plugin-tests.mjs:54": 1,
@@ -984,7 +983,7 @@
     "scripts/check-release-gates.mjs:212": 1,
     ".github/workflows/pr-gate.yml:11": 1,
     ".github/workflows/pr-gate.yml:113": 1,
-    "scripts/build-snapshot-013.mjs:169": 1,
+    "scripts/build-snapshot-013.mjs:163": 1,
     "scripts/check-browser-syntax-floor.mjs:658": 1,
     "scripts/check-patch-mirror.mjs:347": 1,
     "scripts/check-release-gates.mjs:152": 1,
@@ -2793,28 +2792,28 @@
     "build-release.ps1:89": [
       "# Release output is regenerated as a unit. Old APKs must not survive into this version's"
     ],
-    "build-snapshot-013.mjs:1029": [
+    "build-snapshot-013.mjs:1023": [
       "// 两者都不是：上游 0.1.7-rc.1 全仓已无此名（被改名/删除），而设备基座的引擎树还带着它们"
     ],
-    "build-snapshot-013.mjs:294": [
+    "build-snapshot-013.mjs:288": [
       "// keepUnpublished 断言：登记表内包必须仍在树内（防未来误删）"
     ],
-    "build-snapshot-013.mjs:300": [
+    "build-snapshot-013.mjs:294": [
       "}"
     ],
     "build-snapshot-013.mjs:31": [
       "// DSH_NO_WSL_REEXEC=1 跳过（调试/无 WSL 环境回退到旧的 D: 工作区）。"
     ],
-    "build-snapshot-013.mjs:315": [
+    "build-snapshot-013.mjs:309": [
       "//"
     ],
-    "build-snapshot-013.mjs:366": [
+    "build-snapshot-013.mjs:360": [
       "log('引擎树补丁行为回归 arkweb-resource-protocol-H1: PASS')"
     ],
-    "build-snapshot-013.mjs:40": [
-      "try {"
+    "build-snapshot-013.mjs:37": [
+      "const child = spawnSync('wsl.exe', ['-e', 'bash', '-lc', command], { stdio: 'inherit' })"
     ],
-    "build-snapshot-013.mjs:982": [
+    "build-snapshot-013.mjs:976": [
       "const mapPart = SLIM.sourcemapDelete ? `find \"${wslPath(join(STAGE, 'root', 'usr'))}\" -name '*.map' -delete 2>/dev/null || true` : ''"
     ],
     "check-build-chain-abort.mjs:53": [
@@ -3869,22 +3868,22 @@
     "scripts/build-release.ps1:60": [
       "# 真因（实测）：这两个输入 tar 由 build-apk-013.ps1 产出，而它**已经**对它们跑过自己的内联门禁集；"
     ],
-    "scripts/build-snapshot-013.mjs:169": [
+    "scripts/build-snapshot-013.mjs:163": [
       "// F4 安装链（2026-08-23）：清陈旧 pnpm 状态记录——base-dsh 提取自运行设备，其"
     ],
-    "scripts/build-snapshot-013.mjs:297": [
+    "scripts/build-snapshot-013.mjs:291": [
       "if (!existsSync(join(overlayPkgDir(name), 'package.json'))) {"
     ],
     "scripts/build-snapshot-013.mjs:31": [
       "// DSH_NO_WSL_REEXEC=1 跳过（调试/无 WSL 环境回退到旧的 D: 工作区）。"
     ],
-    "scripts/build-snapshot-013.mjs:456": [
+    "scripts/build-snapshot-013.mjs:450": [
       "execSync(`node \"${generator}\" --engine-root \"${join(STAGE, 'root')}\" --out \"${outFile}\"`, { encoding: 'utf8', stdio: 'inherit' })"
     ],
-    "scripts/build-snapshot-013.mjs:933": [
+    "scripts/build-snapshot-013.mjs:927": [
       "copyFileSync(entity, link)"
     ],
-    "scripts/build-snapshot-013.mjs:985": [
+    "scripts/build-snapshot-013.mjs:979": [
       "${mapPart}"
     ],
     "scripts/check-boot-budget.mjs:609": [
@@ -4006,9 +4005,6 @@
     ],
     "scripts/inject-all.py:321": [
       "for pkg in sorted(dsh_names - seen_dsh.get(prof, set())):"
-    ],
-    "scripts/lib/shell.mjs:31": [
-      "export const resolveTar = () => {"
     ],
     "scripts/make-snapshot.sh:8": [
       "SNAP_PKG_ROOT=\"${DSH_SNAPSHOT_PKG_ROOT:-/data/user/0/com.dsharnessmobile.shell}\""
@@ -4415,6 +4411,7 @@
     "plugins/dsh-android-bridge/src/index.ts#resolved@e33053de": true,
     "app/src/main/java/com/dsharnessmobile/shell/ShellOps.kt#decideScreenCommand@a7bc2be4": true,
     "plugins/dsh-android-bridge/src/index.ts#tools@64f58ab4": true,
-    "plugins/dsh-android-bridge/src/index.ts#AndroidPrivilegeService@6ac56c46": true
+    "plugins/dsh-android-bridge/src/index.ts#AndroidPrivilegeService@6ac56c46": true,
+    "scripts/lib/shell.mjs#resolveTar@9ff85e3d": true
   }
 }
