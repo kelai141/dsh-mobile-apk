@@ -78,22 +78,22 @@ internal object RepairModelConfig {
   internal fun loadDetailed(home: File, environment: Map<String, String> = emptyMap()): RepairModelLoad {
     val dsh = File(home, ".dsh")
     val sources = ArrayList<RepairModelSource>()
-    fun read(file: File): RepairYamlValue? {
-      val path = file.toPath().normalize().let { home.parentFile.toPath().normalize().relativize(it).toString() }
-      if (!file.isFile) { sources += RepairModelSource(path, "missing"); return null }
+    fun rel(file: File): String =
+      file.toPath().normalize().let { home.parentFile.toPath().normalize().relativize(it).toString() }
+    fun readInto(sink: MutableList<RepairModelSource>, file: File): RepairYamlValue? {
+      val path = rel(file)
+      if (!file.isFile) { sink += RepairModelSource(path, "missing"); return null }
       if (java.nio.file.Files.isSymbolicLink(file.toPath()) || file.length() > 2 * 1024 * 1024) {
-        sources += RepairModelSource(path, "unsafe"); return null
+        sink += RepairModelSource(path, "unsafe"); return null
       }
       val root = runCatching { RepairYaml.parse(file.readText()) }.getOrNull()
-      sources += RepairModelSource(path, if (root == null) "invalid" else "parsed")
+      sink += RepairModelSource(path, if (root == null) "invalid" else "parsed")
       return root
     }
-    val credentialRoot = read(File(dsh, ".credentials.yaml")) as? RepairYamlValue.Mapping
+    val credentialRoot = readInto(sources, File(dsh, ".credentials.yaml")) as? RepairYamlValue.Mapping
     val credentials = credentialRoot?.mapping("refs")?.values?.mapNotNull { (key, value) ->
       (value as? RepairYamlValue.Scalar)?.value?.takeIf { it.isNotBlank() }?.let { key to it }
     }?.toMap().orEmpty()
-    val configs = LinkedHashMap<String, RepairYamlValue.Mapping>()
-    val disabled = HashMap<String, Boolean>()
     val names = mapOf("llm-pi-ai" to "@deepseek-ai/dsh-llm-pi-ai",
       "llm-deepseek" to "@deepseek-ai/dsh-llm-deepseek", "agent-default-model" to "@deepseek-ai/dsh-agent-default-model")
     fun merge(before: RepairYamlValue.Mapping?, after: RepairYamlValue.Mapping): RepairYamlValue.Mapping {
@@ -102,58 +102,114 @@ internal object RepairModelConfig {
         if (value is RepairYamlValue.Mapping) merge(values[key] as? RepairYamlValue.Mapping, value) else value
       return RepairYamlValue.Mapping(values)
     }
-    fun apply(root: RepairYamlValue?, depth: Int = 0) {
-      if (depth > 32) return
-      val sequence = root as? RepairYamlValue.Sequence ?: return
-      for (value in sequence.values) {
-        val entry = value as? RepairYamlValue.Mapping ?: continue
-        apply(entry.sequence("insert"), depth + 1)
-        val id = entry.string("id") ?: continue
-        if (id !in names || (entry.string("name") != null && entry.string("name") != names[id])) continue
-        if (entry.string("disabled") in setOf("true", "false")) disabled[id] = entry.string("disabled") == "true"
-        val config = entry.mapping("config")
-        // An inserted provider with no explicit config still has its schema defaults.
-        if (config != null) configs[id] = merge(configs[id], config)
-        else if (entry.string("name") == names[id]) configs.putIfAbsent(id, RepairYamlValue.Mapping(LinkedHashMap()))
+    // 一层配置读出来的东西：既可能是候选，也可能「找到了条目但一条都不可用」（缺凭据等）。
+    // 后者必须能被上层判读，否则「没配置」与「配了但缺凭据」在 UI 上是同一句话。
+    class Layer {
+      val configs = LinkedHashMap<String, RepairYamlValue.Mapping>()
+      val disabled = HashMap<String, Boolean>()
+      fun apply(root: RepairYamlValue?, depth: Int = 0) {
+        if (depth > 32) return
+        val sequence = root as? RepairYamlValue.Sequence ?: return
+        for (value in sequence.values) {
+          val entry = value as? RepairYamlValue.Mapping ?: continue
+          apply(entry.sequence("insert"), depth + 1)
+          val id = entry.string("id") ?: continue
+          if (id !in names || (entry.string("name") != null && entry.string("name") != names[id])) continue
+          if (entry.string("disabled") in setOf("true", "false")) disabled[id] = entry.string("disabled") == "true"
+          val config = entry.mapping("config")
+          // An inserted provider with no explicit config still has its schema defaults.
+          if (config != null) configs[id] = merge(configs[id], config)
+          else if (entry.string("name") == names[id]) configs.putIfAbsent(id, RepairYamlValue.Mapping(LinkedHashMap()))
+        }
       }
     }
-    val settings = File(dsh, "settings.yaml")
-    if (!File(dsh, "settings.yaml.imported").isFile) {
-      val root = read(settings) as? RepairYamlValue.Mapping
-      for (id in names.keys) root?.mapping(id)?.let { configs[id] = it }
+    class Resolved {
+      val connections = ArrayList<RepairModelConnection>()
+      var selected: Pair<String, String>? = null
+      var selectedEffort: String? = null
+      var blocked: String? = null
     }
-    val profileDir = File(dsh, "profiles/web")
-    for (document in selectedBundlePatches(home, profileDir)) apply(read(document))
-    apply(read(File(profileDir, "cordis.patch.yml")))
-    apply(read(File(dsh, "cordis.patch.yml")))
-    val connections = ArrayList<RepairModelConnection>()
-    var selected: Pair<String, String>? = null
-    var selectedEffort: String? = null
-    if (disabled["agent-default-model"] != true) configs["agent-default-model"]?.let { config ->
-      val provider = config.string("provider")
-      val model = config.string("model")
-      if (!provider.isNullOrBlank() && !model.isNullOrBlank()) selected = provider to model
-      selectedEffort = config.string("reasoningEffort")
+    // 叠层语义不变：settings.yaml 是**底**，patch 覆盖它。旧实现只在「没迁移过」时铺这层底，
+    // 迁移过就整层跳过——marker 于是从「历史标记」变成了「以后别读旧文件」的开关。
+    // 但 marker 只证明曾经迁过，不证明迁移目标现在还在：patch 丢了/坏了/只含 persona 时，
+    // 两边都不读，候选数为 0（社群 2026-10-30 的现场）。所以这层底改成**按需铺**。
+    fun buildLayer(includeLegacy: Boolean, sink: MutableList<RepairModelSource>): Layer {
+      val layer = Layer()
+      val legacy = File(dsh, "settings.yaml")
+      if (includeLegacy) {
+        val root = readInto(sink, legacy) as? RepairYamlValue.Mapping
+        for (id in names.keys) root?.mapping(id)?.let { layer.configs[id] = it }
+      } else {
+        // 这轮按优先级没铺这层底，但仍要如实交代它的状态：文件在就记「跳过」，不在就记「不存在」。
+        // 旧实现连「有个文件被跳过了」都不记，用户拿到的唯一结论是「未读到可用模型」，
+        // 无从判断是没配置、没读到、还是读到了但不可用。
+        sink += RepairModelSource(rel(legacy), if (legacy.isFile) "skipped-legacy" else "missing")
+      }
+      val profileDir = File(dsh, "profiles/web")
+      for (document in selectedBundlePatches(home, profileDir)) layer.apply(readInto(sink, document))
+      layer.apply(readInto(sink, File(profileDir, "cordis.patch.yml")))
+      layer.apply(readInto(sink, File(dsh, "cordis.patch.yml")))
+      return layer
     }
-    if (disabled["llm-pi-ai"] != true) configs["llm-pi-ai"]?.let { addPiAi(it, credentials + environment.filterValues { it.isNotBlank() }.filterKeys { it !in credentials }, connections) }
-    if (disabled["llm-deepseek"] != true) {
-      val explicit = configs["llm-deepseek"]
-      // A user-selected official route is sufficient even if the runtime bundle is damaged.
-      val official = explicit ?: selected?.takeIf { it.first == "deepseek-official" }
-        ?.let { RepairYamlValue.Mapping(LinkedHashMap()) }
-      if (official != null) addOfficial(official, credentials, environment, connections,
-        selected?.takeIf { it.first == "deepseek-official" }?.second)
+    val allCredentials = credentials + environment.filterValues { it.isNotBlank() }.filterKeys { it !in credentials }
+    fun resolve(layer: Layer): Resolved {
+      val out = Resolved()
+      if (layer.disabled["agent-default-model"] != true) layer.configs["agent-default-model"]?.let { config ->
+        val provider = config.string("provider")
+        val model = config.string("model")
+        if (!provider.isNullOrBlank() && !model.isNullOrBlank()) out.selected = provider to model
+        out.selectedEffort = config.string("reasoningEffort")
+      }
+      // 缺凭据必须留痕：用户配了 provider 却没候选，和用户根本没配，是两种完全不同的修法。
+      fun note(reason: String) { if (out.blocked == null) out.blocked = reason }
+      if (layer.disabled["llm-pi-ai"] != true) layer.configs["llm-pi-ai"]?.let {
+        addPiAi(it, allCredentials, out.connections, ::note)
+      }
+      if (layer.disabled["llm-deepseek"] != true) {
+        val explicit = layer.configs["llm-deepseek"]
+        // A user-selected official route is sufficient even if the runtime bundle is damaged.
+        val official = explicit ?: out.selected?.takeIf { it.first == "deepseek-official" }
+          ?.let { RepairYamlValue.Mapping(LinkedHashMap()) }
+        if (official != null) addOfficial(official, credentials, environment, out.connections,
+          out.selected?.takeIf { it.first == "deepseek-official" }?.second, ::note)
+      }
+      return out
     }
-    val attempts = connections.map { connection ->
+    val migrated = File(dsh, "settings.yaml.imported").isFile
+    val primarySources = ArrayList<RepairModelSource>()
+    var resolved = resolve(buildLayer(includeLegacy = !migrated, primarySources))
+    var finalSources: MutableList<RepairModelSource> = primarySources
+    var blockedReason = resolved.blocked
+    // 回落只在「一条候选都没有」时发生。不按「文件在不在」判——用户可能把配置写在旧文件里，
+    // 而新文件存在却只含 persona；那种情况同样需要回落。
+    if (resolved.connections.isEmpty() && migrated) {
+      val fallbackSources = ArrayList<RepairModelSource>()
+      val fallback = resolve(buildLayer(includeLegacy = true, fallbackSources))
+      if (fallback.connections.isNotEmpty()) {
+        resolved = fallback
+        blockedReason = null
+        fallbackSources += RepairModelSource(rel(File(dsh, "settings.yaml")), "fallback-used")
+        finalSources = fallbackSources
+      } else if (blockedReason == null) {
+        // 两层都没候选：优先保留「配了但缺凭据」这种可执行的说明，而不是笼统的「没配置」。
+        blockedReason = fallback.blocked
+      }
+    }
+    sources += finalSources
+    // 有配置却一条候选都没产出来：把原因写进来源表，UI 才有话可说。
+    if (resolved.connections.isEmpty()) blockedReason?.let { reason ->
+      sources += RepairModelSource(rel(File(dsh, "settings.yaml")), reason)
+    }
+    val attempts = resolved.connections.map { connection ->
       val efforts = connection.reasoningEfforts
-      val default = selectedEffort?.takeIf { wanted -> efforts.any { it.id == wanted } }
+      val default = resolved.selectedEffort?.takeIf { wanted -> efforts.any { it.id == wanted } }
         ?: efforts.firstOrNull { it.id != "off" }?.id
         ?: efforts.firstOrNull()?.id
       connection.copy(defaultReasoningEffort = default)
     }
-    val ordered = order(attempts, selected)
-    val defaultAvailable = if (selected == null) ordered.size == 1 else ordered.any {
-      it.provider == selected!!.first && it.model == selected!!.second
+    val ordered = order(attempts, resolved.selected)
+    val defaultAvailable = if (resolved.selected == null) ordered.size == 1 else ordered.any {
+      it.provider == resolved.selected!!.first && it.model == resolved.selected!!.second
     }
     return RepairModelLoad(ordered, sources, defaultAvailable)
   }
@@ -214,12 +270,17 @@ internal object RepairModelConfig {
     config: RepairYamlValue.Mapping,
     credentials: Map<String, String>,
     out: MutableList<RepairModelConnection>,
+    noteBlocked: (String) -> Unit = {},
   ) {
     val providers = config.mapping("providers") ?: return
     for ((route, value) in providers.values) {
       val profile = value as? RepairYamlValue.Mapping ?: continue
-      val ref = profile.string("apiKeyEnv") ?: continue
-      val key = credentials[ref] ?: continue
+      // 缺 apiKeyEnv / 缺凭据都是「配了但用不了」，不是「没配」。旧实现一律静默 continue，
+      // UI 只能说「未读到可用模型」，用户无从判断该去补什么。
+      val ref = profile.string("apiKeyEnv")
+      if (ref == null) { noteBlocked("no-credential"); continue }
+      val key = credentials[ref]
+      if (key == null) { noteBlocked("no-credential"); continue }
       val base = profile.string("baseURL") ?: continue
       val api = profile.string("api") ?: "openai-completions"
       val display = profile.string("displayName") ?: route
@@ -257,9 +318,11 @@ internal object RepairModelConfig {
     environment: Map<String, String>,
     out: MutableList<RepairModelConnection>,
     selectedModel: String? = null,
+    noteBlocked: (String) -> Unit = {},
   ) {
     val ref = config.string("apiKeyEnv") ?: "DEEPSEEK_API_KEY"
-    val key = credentials[ref] ?: environment[ref]?.takeIf { it.isNotBlank() } ?: return
+    val key = credentials[ref] ?: environment[ref]?.takeIf { it.isNotBlank() }
+      ?: run { noteBlocked("no-credential"); return }
     val base = config.string("baseURL") ?: "https://api.deepseek.com/anthropic"
     val models = config.sequence("models")?.values?.mapNotNull { item ->
       val model = item as? RepairYamlValue.Mapping ?: return@mapNotNull null

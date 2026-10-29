@@ -1818,6 +1818,16 @@ class EngineManager(private val context: Context, private val pickToken: String?
         File(dir, "info.txt").writeText(EngineAuth.redact(buildDiagnosticsText(reason)))
       } catch (_: Throwable) {
       }
+      // 修复助手的模型来源证据（候选数 + 每份配置的路径与解析状态）。
+      // 它平时落在 filesDir，引擎已死、助手又打不开时用户没有任何可达路径；
+      // 这里只读复制一份进诊断包，原件不动，方便用户用文件管理器直接取出反馈。
+      try {
+        val evidence = File(context.filesDir, "repair-model-source.json")
+        if (evidence.isFile && evidence.length() <= 256 * 1024) {
+          File(dir, evidence.name).writeText(evidence.readText())
+        }
+      } catch (_: Throwable) {
+      }
       try {
         val p = ProcessBuilder("logcat", "-d", "-v", "threadtime", "-t", "400").redirectErrorStream(true).start()
         // 0.13.8 #173：有界读（原 readBytes 无 waitFor，会冻结看门狗调度线程）

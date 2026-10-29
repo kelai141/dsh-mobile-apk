@@ -73,11 +73,20 @@ class RepairActivity : Activity() {
   private fun loadRepairModels(): List<RepairModelConnection> {
     val result = RepairModelConfig.loadDetailed(applicationContext)
     defaultModelAvailable = result.defaultAvailable
+    // 状态必须说清「为什么没候选」，而不是只报一个「未读到可用模型」。
+    // 用户拿着这句话无法区分：没配置 / 配置读不到 / 读到了但缺凭据——三种修法完全不同。
     modelSources = result.sources.joinToString("\n") { source ->
       val status = when (source.status) {
         "parsed" -> UiText.t(this, "已读取", "Read")
         "missing" -> UiText.t(this, "不存在", "Missing")
         "unsafe" -> UiText.t(this, "路径或大小不受支持", "Unsupported path or size")
+        "invalid" -> UiText.t(this, "格式无法解析", "Could not parse")
+        // 迁移后按优先级没读它。文件可能完好，只是这轮不是活动配置。
+        "skipped-legacy" -> UiText.t(this, "已迁移，本轮未读取", "Migrated; not read this run")
+        // 活动配置读不出候选，已回落读它。
+        "fallback-used" -> UiText.t(this, "活动配置无可用候选，已回落到此文件", "Used as fallback")
+        // 配置本身是好的，缺的是凭据。
+        "no-credential" -> UiText.t(this, "配置可用但缺少凭据（API key）", "Configured but missing credential")
         else -> UiText.t(this, "格式无法解析", "Could not parse")
       }
       source.path + ": " + status
