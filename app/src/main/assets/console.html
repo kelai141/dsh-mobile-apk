@@ -527,7 +527,6 @@
   var EN = false;
   function applyLang() {
     document.documentElement.lang = 'en';
-    document.documentElement.lang = 'en';
     var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
     var node;
     while ((node = walker.nextNode())) {
@@ -549,9 +548,37 @@
       if (p && MAP[p]) ph[i].setAttribute('placeholder', MAP[p]);
     }
   }
+  // #872：切回中文必须**回滚已替换的英文文本**。旧实现只把 documentElement.lang 改回 'zh-CN'
+  // 就 return，按钮/提示/placeholder 仍是英文，用户必须重载页面才恢复。
+  // 反向表由 MAP 现算，避免两处维护漂移。
+  var RIM = {};
+  for (var zk in MAP) { if (Object.prototype.hasOwnProperty.call(MAP, zk)) RIM[MAP[zk]] = zk; }
+  function revertLang() {
+    document.documentElement.lang = 'zh-CN';
+    var w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+    var nd;
+    while ((nd = w.nextNode())) {
+      var t = (nd.nodeValue || '').trim();
+      if (RIM[t]) nd.nodeValue = (nd.nodeValue || '').replace(t, RIM[t]);
+    }
+    // 延迟标签的 'Engine' 是正则替换进去的，精确匹配捞不到，单独反向处理。
+    var w2 = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+    var n2;
+    while ((n2 = w2.nextNode())) {
+      var v = n2.nodeValue || '';
+      if (v.indexOf('Engine') >= 0) n2.nodeValue = v.replace(/Engine/g, '引擎');
+    }
+    var title = document.querySelector('title');
+    if (title && title.textContent === 'DeepCode Console') title.textContent = '控制台';
+    var ph = document.querySelectorAll('input, textarea');
+    for (var j = 0; j < ph.length; j++) {
+      var p = ph[j].getAttribute('placeholder');
+      if (p && RIM[p]) ph[j].setAttribute('placeholder', RIM[p]);
+    }
+  }
   window.__dshConsoleSetLang = function (english) {
     EN = !!english;
-    if (!EN) { document.documentElement.lang = 'zh-CN'; return }
+    if (!EN) { revertLang(); return }
     applyLang();
   };
   // 状态行与按钮由壳侧 pushStatus 重渲染，必须持续应用，否则会被覆盖回中文。
