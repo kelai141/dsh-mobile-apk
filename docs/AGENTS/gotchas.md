@@ -5,6 +5,32 @@
 > grep 用法：`grep -n "<坑号>\." docs/AGENTS/gotchas.md` 或按关键词（如 `borrowSession`、`MANAGE_EXTERNAL_STORAGE`、`store-rehome`）定位。
 > 维护约定：新坑追加到文末并递增编号；修复后保留条目（教训与历史归档）。
 
+## 解冲突：「保留双方」只对并列追加安全，同结构内部必须内联合并
+
+**实锤两次（2026-10-29，同一个错犯了两遍）：**
+
+| 场景 | 后果 |
+|---|---|
+| `NotifyStructureBatch8Test.kt`：两侧各加 `@Test`，但冲突块切在**函数体中间** | 「保留双方」把 KDoc 与函数体拼断，`SyntaxError: Expecting an element` |
+| `scripts/patches/apply-patches.mjs`：两侧各往**同一个 `IMPLS` 对象**加一条实现 | 「保留双方」并列拼两段，缺收尾 `},`，`SyntaxError: Unexpected token 'const'`（报错落在文件很后面的 `const regIds`，与真正的错点无关） |
+
+### 规则
+
+1. **先判断冲突块在什么结构里**：同一 `{}` / 同一函数体 / 同一数组 / 同一表格 / 独立顶层声明。
+2. **并列追加**（数组元素、列表项、表格行、彼此独立的 `@Test` 函数）→ 才能「保留双方」。
+3. **同一对象字面量 / 同一语句列表 / 同一函数体内部** → **内联合并**：把两侧成员合进同一个结构的内部，收尾符号只留一份。
+4. **解完必须跑结构级检查，不能只看门禁绿**：
+   - `node --check` **全部** `.js`/`.mjs`（不是只查改动的那个）；
+   - `JSON.parse` 每个改过的 JSON；
+   - `tsc --noEmit`（TS 侧）；
+   - Kotlin 编译（`:app:compileDebugUnitTestKotlin` 或 `:app:testDebugUnitTest`）；
+   - 再跑 `check-code-map`。
+
+**为什么门禁绿不够**：`check-code-map` 只查文档锚点与覆盖，不解析 JS 语法。上面两次都是 `check-code-map` 绿、`node --check` 才红——而且红的位置离真正的错点很远，靠读报错行号找不到根因。
+
+### 附带教训：夹具哈希不要手改
+
+`scripts/check-patch-fixtures.mjs:41` 拿 `manifest.capture.registrySha256` 与 `sha256(registry.json)` 比对。改 registry 后它必然失配——**手改哈希能让它绿，但那只是仪式**：`overlaySha256` / `discoveredTargets` 来自真实构建，新补丁没有对真实字节验证过。正确动作是重新捕获（需真实构建），否则就是假绿。
 ## 6. 关键实现细节与坑（每次踩坑必须登记）
 
 1. **realpath 前缀混用（B7 运行时表现，已修）**：Android 上 `/data/user/0` 可能是 `/data/data` 的软链——只把「文件侧」realpath 后再与未 realpath 的 ws 比较必拒。修复：`safeResolveInside` **两侧都 realpath**（ws 侧失败按原样参与），symlink 目标按 `dirname(rel)` 解析（`../../LICENSES` 从 `doc/<pkg>/` 出发 = `share/LICENSES`）。**新路径校验代码一律双侧规范化。**
