@@ -715,6 +715,11 @@ class MainActivity : ComponentActivity() {
    * 把 id 送进去、并在送不进去时**说话**（不静默）。
    */
   private var pendingNotifySession: String? = null
+  // 落点重试：冷启动时页面往往还没装好会话视图，__dshOpenSession 会先回 false。
+  // 旧实现拿到 false 就一次性放弃并弹失败提示 ⇒ 用户点通知冷启动**经常落空**。
+  private var notifyRouteAttempts = 0
+  private val NOTIFY_ROUTE_MAX_ATTEMPTS = 12
+  private val NOTIFY_ROUTE_RETRY_MS = 800L
 
   private fun consumeNotifyRoute(intent: Intent?) {
     // 交互类通知（提问 / 审批）只带 EXTRA_TARGET_AGENT，旧实现只读 session 键 ⇒ 点开不落点。
@@ -724,6 +729,7 @@ class MainActivity : ComponentActivity() {
       intent?.getStringExtra(NotifyCenter.EXTRA_TARGET_AGENT),
     ) ?: return
     pendingNotifySession = session
+    notifyRouteAttempts = 0
     deliverNotifyRoute()
   }
 
@@ -751,7 +757,14 @@ class MainActivity : ComponentActivity() {
       webView.evaluateJavascript(script) { raw ->
         if (!pageRecovery.accepts(generation)) { pendingNotifySession = session; return@evaluateJavascript }
         if (raw?.trim() != "true") {
-          // 落点失败必须可见：会话可能已被删除，或页面还没装好会话视图。
+          // 冷启动竞态：页面还没装好会话视图时 __dshOpenSession 会先回 false。
+          // 有界重试（最多 12 次 / 约 10s）后再判失败——只有真删除/真不可开才弹失败提示。
+          if (notifyRouteAttempts < NOTIFY_ROUTE_MAX_ATTEMPTS) {
+            notifyRouteAttempts += 1
+            pendingNotifySession = session
+            webView.postDelayed({ deliverNotifyRoute() }, NOTIFY_ROUTE_RETRY_MS)
+            return@evaluateJavascript
+          }
           notifyRouteFailed()
         }
       }

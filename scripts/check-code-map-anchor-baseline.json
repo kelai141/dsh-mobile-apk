@@ -1387,22 +1387,22 @@
       "\"unreadable\""
     ],
     "MainActivity.kt:1030": [
-      "engineFlow.destroy() // Invalidate and cancel startup callers before destroying their page owners."
+      "override fun onSaveInstanceState(outState: Bundle) {"
     ],
     "MainActivity.kt:1054": [
-      "if (BrowserHostHolder.host === browserHost) BrowserHostHolder.host = null"
+      "// 兜底释放：Activity 销毁时清掉可能仍持有的屏幕常亮锁。"
     ],
     "MainActivity.kt:1057": [
-      "themeRetryRunnable?.let { webView.removeCallbacks(it) }"
+      "screenWakeLock?.release()"
     ],
     "MainActivity.kt:1076": [
-      "*"
+      "// the user asked to interrupt an active agent turn."
     ],
     "MainActivity.kt:1164": [
-      "// 0.13.3：textZoom 持久化退役（D6 收益省略）——上游 ui-theme fontSize 原生管内容字号。"
+      "val script = AppLanguage.bootstrapScript(AppLanguage.mode(this), AppLanguage.systemLanguages(this))"
     ],
     "MainActivity.kt:1167": [
-      "// the page. Inject it before the first load so the engine UI and the shell"
+      "Log.w(TAG, \"locale bootstrap could not be installed: \" + t.message)"
     ],
     "MainActivity.kt:145": [
       "/**"
@@ -1447,49 +1447,49 @@
       "webSystemLeftInset = pxToCssPx(maxOf(bars.left, cutout.left), density)"
     ],
     "MainActivity.kt:719": [
-      "private fun consumeNotifyRoute(intent: Intent?) {"
+      "// 旧实现拿到 false 就一次性放弃并弹失败提示 ⇒ 用户点通知冷启动**经常落空**。"
     ],
     "MainActivity.kt:769": [
-      "this,"
+      "}"
     ],
     "MainActivity.kt:772": [
-      ").show()"
+      "Log.w(\"dsh-notify\", \"notify route failed: \" + t.message)"
     ],
     "MainActivity.kt:78": [
       "/** System insets in CSS px, cached until the engine page is ready to receive them. */"
     ],
     "MainActivity.kt:782": [
-      ""
+      "this,"
     ],
     "MainActivity.kt:784": [
-      "super.onResume()"
+      "Toast.LENGTH_LONG,"
     ],
     "MainActivity.kt:788": [
-      "// Resume passive observation of the one already authorized attempt. Do not spawn or reset retries."
+      "}"
     ],
     "MainActivity.kt:793": [
-      "applyRepairRequiredGuide()"
+      "/** 首启向导已移除（决策 2026-08-23）：初始页（GuideChrome 运行时状态/解压进度/崩溃/日志）"
     ],
     "MainActivity.kt:803": [
-      "// 把人按回错误页；那时后续的启动路径会给出新的相位。"
+      "return"
     ],
     "MainActivity.kt:812": [
-      ")"
+      "}"
     ],
     "MainActivity.kt:815": [
-      "pendingAuthRejectedUrl?.let { url ->"
+      "// latch 仍为真才呈现——若期间用户已显式重试/进了安全模式（latch 已清），这里就不该再"
     ],
     "MainActivity.kt:822": [
-      "// （特权面改由 Shizuku 承载，不再有需要回前台收敛的门1 prefs）。"
+      "GuidePhase.Error,"
     ],
     "MainActivity.kt:850": [
-      "runOnUiThread {"
+      "if (!userClosedEngine) {"
     ],
     "MainActivity.kt:880": [
-      "pushSystemDark(webView)"
+      "guideRenderer.refreshGuideMeta()"
     ],
     "MainActivity.kt:923": [
-      "val generation = pageRecovery.generation"
+      "runOnUiThread { guideRenderer.refreshGuideMeta() }"
     ],
     "MobileChrome.tsx:35": [
       "?? null"
@@ -2200,10 +2200,10 @@
       "/**"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1030": [
-      "engineFlow.destroy() // Invalidate and cancel startup callers before destroying their page owners."
+      "override fun onSaveInstanceState(outState: Bundle) {"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1113": [
-      "// 层穷尽：交回 Activity 默认行为。重新 dispatch（而非直接 finish()）保持与"
+      "if (guideViewReady && guideView.visibility == View.VISIBLE && guideRenderer.management.back()) return"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:137": [
       "/** 覆盖层所在的根视图；超时兜底的 post/removeCallbacks 都挂在它上面。 */"
@@ -2239,22 +2239,22 @@
       "configureWebView()"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:719": [
-      "private fun consumeNotifyRoute(intent: Intent?) {"
+      "// 旧实现拿到 false 就一次性放弃并弹失败提示 ⇒ 用户点通知冷启动**经常落空**。"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:771": [
-      "Toast.LENGTH_LONG,"
+      "} catch (t: Throwable) {"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:812": [
-      ")"
+      "}"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:815": [
-      "pendingAuthRejectedUrl?.let { url ->"
+      "// latch 仍为真才呈现——若期间用户已显式重试/进了安全模式（latch 已清），这里就不该再"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:89": [
       "private val pickToken: String = EngineManager.ensurePickToken()"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:923": [
-      "val generation = pageRecovery.generation"
+      "runOnUiThread { guideRenderer.refreshGuideMeta() }"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MuxClient.kt:172": [
       "sendFrame(out, 0x1, streamOpen.toByteArray(Charsets.UTF_8))"

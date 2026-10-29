@@ -885,8 +885,19 @@ export function apply(ctx: ClientContext): void {
    * 不把异常抛出去（抛出去会在桥层被吞成 undefined，壳侧就分不清「失败」与「未实现」）。
    */
   ctx.effect(() => {
+    // 0.14.9 真机缺陷（2026-10-29）：旧实现把 ctx.sessions 当落点面传进去，而它**没有 open()**
+    // —— face.open(id) 抛 TypeError 被 notify-landing 的 catch 吞成 false ⇒ 点任何通知都落不到会话
+    // （用户只看到「无法打开该会话」）。rc.2 起导航归 uiWorkspace：open 必须走
+    // uiWorkspace().openSession(id)，sessions 只负责身份/scope 判定。
+    const landingFace: SessionOpenFace = {
+      open: (id) => {
+        const ui = ctx.get('uiWorkspace') as unknown as { openSession(id: unknown): void }
+        ui.openSession(id)
+      },
+      scope: (id) => (ctx.sessions as unknown as SessionOpenFace).scope(id),
+    }
     const open = (sessionId: unknown): boolean =>
-      openSessionForNotify(ctx.sessions as unknown as SessionOpenFace, sessionId)
+      openSessionForNotify(landingFace, sessionId)
     ;(window as unknown as Record<string, unknown>).__dshOpenSession = open
     return () => {
       delete (window as unknown as Record<string, unknown>).__dshOpenSession
