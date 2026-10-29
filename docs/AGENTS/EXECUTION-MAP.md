@@ -60,6 +60,7 @@
 - 构建期 472：`scripts/patches/data/inspector-worker-expose-internals-472.mjs` 把 `dsh-experimental-inspector` 的 `spawnWorker()` 从 `execArgv: []` 改为 `["--expose-internals"]`，否则 Worker 丢掉壳侧启动参数，android-arm64 上 `internal/modules/esm/loader` 必失败；锚点唯一性、幂等、三向拒绝与 runner 集成由 `scripts/patches/tests/inspector-worker-expose-internals-472.test.mjs` 执行。
 - K01 / K02：`MainActivity.retryEngineExplicitly()` 只在用户明确重试时清除 `RepairState` 的 `native-repair/required` 与重试计数；普通启动和回前台保留故障页，不再要求先进入助手。故障页同时提供重试与助手入口。`RepairActivity` 分开处理模型读取和诊断导出失败，提供重新读配置、控制台和返回重试。`PluginMounts.ensureHardBundlesSelected()` 仅自动补入精确身份匹配的工厂 bundle；身份漂移记录期望/实际摘要，不覆盖外部修复，也不否决普通启动。Safe Mode 与可信恢复判据不变。回归：`RepairGateTest.kt`、`PluginMountsTest.kt`。
 - 构建期 T1：`scripts/patches/data/terminal-shell-candidates-T1.mjs` 让 `dsh-api-terminal-controller` 的 `discoverShells` 跳过 Android 上的系统 `cmd`（只在 Windows 保留 `cmd.exe`）——默认候选表是桌面口径，`cmd` 在 Android 上解析到 `/system/bin/cmd`，选中必然退出（`No service specified` / 退出码 20）。回归 `scripts/patches/tests/terminal-shell-candidates-T1.test.mjs`。
+- 构建期 A1：`scripts/patches/data/subprocess-zsh-fpath-A1.mjs` 给 `dsh-subprocess-local` 生成的 zsh 初始化脚本补 `fpath`（本快照的 `share/zsh/functions`）并给 `add-zsh-hook` / `add-zle-hook-widget` 注册加函数存在性守卫，修 issue #867 的开屏三行 `function definition file not found`；幂等与锚点缺失拒绝写回由 `scripts/patches/tests/zsh-fpath-A1.test.mjs` 执行。
 - 构建期 PL1：`scripts/patches/data/profile-link-skip-PL1.mjs` 仅在 profile 链接扫描链上跳过权限、目标缺失或非目录错误并告警；系统错误继续抛出。回归 `scripts/patches/tests/profile-link-skip-PL1.test.mjs`。
 - K02 端点：`EngineEndpoint.kt` 持有内存端点与 `.engine-endpoint.json`；默认 4145，文件中的旧端口只是下次启动偏好，当前世代确认前有效端口恒为 0，所有请求拒绝发送；仅当前 spawn 世代的 token 日志可发布真实地址。子进程停止、死亡或启动失败时立即 `invalidate()`，旧端口不会继续接收 WebView/Cookie 请求。构建期 `scripts/patches/data/managed-port-bind-EP1.mjs` 在本壳标记且 IPv4 回环绑定遇 `EADDRINUSE` 时回退一次到 `listen(0)`，并更新进程内 `DSH_ENGINE_PORT`。探活、Cookie、WebView、Mux 与路由鉴权读取同一端点；热路径没有磁盘读或端口扫描。回归 `EngineEndpointTest.kt` 与 `scripts/patches/tests/managed-port-bind-EP1.test.mjs`。
 - 验收入口：`scripts/verify-sidebar-bubbles.mjs` 在真实 WebView 上读取业务语义，ADB 执行点击、滑动、长按、取消与返回并保存截图。宽屏使用 `--wide`；`--owner` 可选择专用验收会话。详见 `docs/maintenance/sidebar-bubbles-2026-10-17.md`。
@@ -2199,6 +2200,7 @@ scripts/patches/tests/sidebar-keep-wide-B2.test.mjs
 scripts/patches/data/inspector-worker-expose-internals-472.mjs
 scripts/patches/data/profile-link-skip-PL1.mjs
 scripts/patches/data/terminal-shell-candidates-T1.mjs
+scripts/patches/data/subprocess-zsh-fpath-A1.mjs
 scripts/patches/data/managed-port-bind-EP1.mjs
 scripts/patches/tests/inspector-worker-expose-internals-472.test.mjs
 glob:scripts/patches/tests/fixtures/dsh-experimental-inspector-0.2.1-rc.2/**

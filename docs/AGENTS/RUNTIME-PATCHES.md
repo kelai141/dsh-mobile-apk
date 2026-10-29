@@ -119,6 +119,7 @@
 | `market-L-mobile-count` | undefined | `dshmarketplace-plugin/lib/client.js` |
 | `settings-account-feedback-entry` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-account/lib/client.js` |
 | `terminal-shell-candidates-T1` | undefined | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-api-terminal-controller/lib/index.js` |
+| `zsh-fpath-A1` | undefined | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/lib/index.js` |
 
 已退役登记：`market-A`、`market-C`、`atomic-stale-lock-F4`。历史章节保留退役前语义；活动状态以本表和 registry 为准。
 <!-- generated:active-registry:end -->

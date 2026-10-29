@@ -2762,6 +2762,9 @@
     "apply-patches.mjs:1596": [
       "}"
     ],
+    "apply-patches.mjs:519": [
+      "el('span', '{className:\"dshm-stars\"}', '\"\\\\u2605 \",Number(o.stars??0).toLocaleString()'))"
+    ],
     "attachment-picker-menu.ts:184": [
       "return node.matches(SLOT_SELECTOR) || node.querySelector(SLOT_SELECTOR) !== null"
     ],

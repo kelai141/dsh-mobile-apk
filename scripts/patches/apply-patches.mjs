@@ -31,6 +31,7 @@ import { hasSidebarKeepWide, patchSidebarKeepWide } from './data/sidebar-keep-wi
 import { hasInspectorWorkerExposeInternals, patchInspectorWorkerExposeInternals } from './data/inspector-worker-expose-internals-472.mjs'
 import { hasProfileLinkSkip, patchProfileLinkSkip } from './data/profile-link-skip-PL1.mjs'
 import { hasTerminalShellCandidates, patchTerminalShellCandidates } from './data/terminal-shell-candidates-T1.mjs'
+import { hasZshFpath, patchZshFpath } from './data/subprocess-zsh-fpath-A1.mjs'
 import { hasManagedPortBind, patchManagedPortBind } from './data/managed-port-bind-EP1.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -492,6 +493,14 @@ const IMPLS = {
     scope: 'engine',
     check: hasTerminalShellCandidates,
     apply: patchTerminalShellCandidates,
+  // ── zsh-fpath-A1：内置 zsh 开屏三行 function definition file not found ──
+  // 该快照的 zsh 编译期 fpath 指向 /data/data/com.termux/...（本应用不存在），
+  // 而函数在 <prefix>/share/zsh/functions。补 fpath + 给注册加守卫。
+  'zsh-fpath-A1': {
+    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/lib/index.js',
+    scope: 'engine',
+    check: hasZshFpath,
+    apply: patchZshFpath,
   },
 
   // ── marketplace E：按仓库折叠（一行一仓，展开列子包）──
