@@ -720,16 +720,23 @@ export function checkDoc(text, universe, fsView, anchorBaseline = ANCHOR_BASELIN
     }
     const key = path + '#' + symbol
     if (symbolHash !== undefined) {
-      const bodyHashes = new Set(hit.body.split('\n').map((l) => contentHashOf(l)))
+      // #807：判据是**唯一性**，不是成员性 —— 旧实现用 Set 做 `has`，符号体内任意一行匹配就算过，
+      // 内容重复出现时永不判红，锚点被废掉（永绿假锚点）。耦合边证据走 EVIDENCE_RE 纯正则、不经这里。
+      const bodyLines = hit.body.split('\n')
+      const occurrences = bodyLines.filter((l) => contentHashOf(l) === symbolHash).length
       const expected = (anchorBaseline.symbolHashes ?? {})[key + '@' + symbolHash]
       if (expected === undefined) {
         push('symbol-unbaselined', 'Symbol-hash anchor has no baseline entry (run --refresh-anchor-baseline): '
           + key + '@' + symbolHash)
         return
       }
-      if (!bodyHashes.has(symbolHash)) {
+      if (occurrences === 0) {
         push('symbol-content-drift', 'Anchored line content vanished from ' + key + '@' + symbolHash
           + '（定义行 ' + hit.line + '）; rerun --refresh-anchor-baseline after review')
+      } else if (occurrences > 1) {
+        push('symbol-content-ambiguous', 'Anchored line content appears ' + occurrences
+          + ' times in ' + key + '@' + symbolHash + '; the anchor cannot pin a single line —'
+          + ' narrow the symbol or pick a unique line')
       }
       return
     }
@@ -1292,6 +1299,34 @@ function selfTest() {
     ])
   }
 
+  // ── #807 负控 + 放行例（判据：@hash 必须在符号体内唯一）─────────────
+  //
+  // 应在什么形态红：同一行内容在符号体内出现 >1 次 —— 锚点钉不住唯一一行，
+  //   改了其中一处、另几处仍匹配 ⇒ 永绿假锚点。
+  // 什么形态会误红：① 耦合边证据走 EVIDENCE_RE 纯正则、不经本函数的符号解析，
+  //   必须不受影响（见下方 COUPLING 块为空时不应产生 bad-coupling）；
+  //   ② 内容唯一时不得红。
+  {
+    const mkDoc = (h) => ['# T', '', '<!-- COVERAGE -->', 'app/a.kt', '<!-- COVERAGE-END -->', '',
+      '<!-- TABLE-ROW -->', '| B01 | x | `app/a.kt#f@' + h + '` |', '<!-- TABLE-ROW-END -->', '',
+      '<!-- COUPLING -->', '<!-- COUPLING-END -->', ''].join(String.fromCharCode(10))
+    const dupLines = ['fun f() {', '  log()', '  log()', '}']
+    const unoLines = ['fun f() {', '  once()', '}']
+    const hd = contentHashOf('  log()')
+    const hu = contentHashOf('  once()')
+    const rDup = checkDoc(mkDoc(hd), universe, mk({ 'app/a.kt': dupLines }), {
+      symbols: { 'app/a.kt#f': dupLines.join(String.fromCharCode(10)) },
+      symbolHashes: { ['app/a.kt#f@' + hd]: true },
+    })
+    const rUno = checkDoc(mkDoc(hu), universe, mk({ 'app/a.kt': unoLines }), {
+      symbols: { 'app/a.kt#f': unoLines.join(String.fromCharCode(10)) },
+      symbolHashes: { ['app/a.kt#f@' + hu]: true },
+    })
+    driftCases.push(['AMB #807 内容在符号体内重复必须判红',
+      rDup.issues.some((i) => i.kind === 'symbol-content-ambiguous')])
+    driftCases.push(['AMB #807 内容唯一不得误红（含耦合边证据不受影响）',
+      !rUno.issues.some((i) => i.kind === 'symbol-content-ambiguous')])
+  }
   for (const [name, okc] of driftCases) {
     if (okc) pass += 1
     lines.push((okc ? '  ok   ' : '  FAIL ') + name)

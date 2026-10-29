@@ -793,7 +793,6 @@
     "plugins/dsh-android-vdisplay/src/index.ts:162": 1,
     "VdisplayController.kt:233": 1,
     "plugins/dsh-android-vdisplay/src/client/index.ts:93": 1,
-    "dsh-client-ui-responsive/src/client/index.ts:192": 1,
     "facts.ts:50": 1,
     "index.ts:69": 1,
     "index.ts:31": 1,
@@ -838,7 +837,6 @@
     "app/src/main/java/com/dsharnessmobile/shell/FileIncoming.kt:97": 2,
     "dsh-host-web-compat/lib/index.js:770": 2,
     "index.ts:125": 1,
-    "dsh-client-ui-responsive/src/client/index.ts:352": 1,
     "form-marker.ts:88": 1,
     "mobile-form.css.ts:26": 1,
     "mobile-settings.css.ts:15": 2,
@@ -3056,12 +3054,6 @@
     "dsh-client-ui-responsive/src/client/enter-guard.ts:63": [
       "if (window.innerWidth > MOBILE_FORM_MAX_WIDTH) return"
     ],
-    "dsh-client-ui-responsive/src/client/index.ts:192": [
-      "return () => { marker.detach() }"
-    ],
-    "dsh-client-ui-responsive/src/client/index.ts:352": [
-      "// Android general-settings rows (issue #59): immersive status-bar toggle."
-    ],
     "dsh-client-ui-responsive/src/client/mobile/attachment-picker-menu.ts:184": [
       ""
     ],
@@ -3211,6 +3203,7 @@
       "let total = 0;",
       "return true;",
       "}",
+      "});",
       "};"
     ],
     "index.ts:1038": [
@@ -3235,7 +3228,7 @@
       "/** Host session service minimum: a blank session is created without calling prompt or append. */",
       "// 块G F4b（0.14.1）：`web_dump` 同型移出——它读的是**壳自有 WebView**（DSH 自己的 Web UI，",
       "export type { ScreenAccessDecision, ScreenId, UserScreenScope } from './screen-scope.js'",
-      "import { createIncomingDraftRuntime } from './mobile/incoming-runtime.ts'",
+      "import type { NativeBrowserControlsInjected } from './mobile/native-browser-adapter.ts'",
       "private readonly termuxVersion: string",
       "try {"
     ],
@@ -3243,7 +3236,6 @@
       "* @param req - 请求事实（method/headers）。",
       "* 手动关机（0.14.0）：销毁本机全部虚拟屏，与设置页「强制销毁」同口径。",
       "* 缺陷形态（用户两轮阻碍之一）：各调用点传的是**手搓的子集**，例如",
-      "/** Required services: composition, copy/theme faces, the runtime sessions, and the frame's panel actions. */",
       "const missing: string[] = missingBinaries.includes('bash')",
       "export interface AdbStatus {",
       "sessionIds?: readonly unknown[]",
@@ -3261,11 +3253,11 @@
     "index.ts:142": [
       "",
       "* permission presets read. Enforcement is the Android app domain, not a",
+      "/** Session service methods used by the process-local external attachment hand-off. */",
       "// **必须用异步面**：`virtual-N` → displayId 要经壳侧 vdInfo 注册表解析，同步面做不到，",
       "additionalProperties: false,",
       "const candidate = bridge[method]",
       "id: string",
-      "scope(id: unknown): unknown | undefined",
       "}"
     ],
     "index.ts:1438": [
@@ -3295,6 +3287,7 @@
       "* 随后整轮都在错误前提下排查。**对模型不可发现的参数等于不存在的参数。**",
       "//",
       "TERMUX_VERSION: this.termuxVersion,",
+      "document.head.appendChild(style)",
       "sessionId: string",
       "try {"
     ],
@@ -3312,11 +3305,11 @@
     ],
     "index.ts:251": [
       "",
+      "// 卡片自身的单击（侧栏预览）保持原样。左侧方向由 DEFAULT_OPEN_MODE 决定。",
+      "// 可见性判据（0.14.0 设备实测修正，与浏览器侧同源）：**必须把「侧栏已收起」算进去**。",
       "? '——本机未给出整屏尺寸，本次按**当前窗口**换算，多窗口下可能偏左'",
-      "? snap.screens.find((s) => s.kind === 'virtual')?.alias",
       "additionalProperties: false,",
       "const bashVersion = await this.readBashVersion()",
-      "const disposeStyle = injectStyle('trajectory-details', TRAJECTORY_DETAILS_CSS)",
       "function enqueueSession(path: string): { ok: boolean; entryId?: string; message: string } {",
       "return {",
       "writeModeSource: { type: 'string', description: '档位来源：sandboxPolicy.session / sandboxPolicy.default / env-fallback' },"
@@ -3324,43 +3317,44 @@
     "index.ts:263": [
       "/**",
       "/** First line of `bash --version`, or undefined when bash cannot report it. */",
-      "// text-overflow: ellipsis，而 banner 里的状态胶囊与复制按钮不可收缩，把命令挤进窄",
       "browserWebViewAvailable: { type: 'boolean', required: true },",
       "const d = (data ?? {}) as { basis?: unknown; basisWidth?: unknown; basisHeight?: unknown }",
       "if (typeof data.displayId === 'number') out.displayId = data.displayId",
+      "nativeBridge()?.vdisplayBounds?.(JSON.stringify({",
+      "return (path: string, mime: string) => (method as (...a: [string, string]) => string).apply(bridge, [path, mime])",
       "ts: new Date().toISOString(),",
-      "window.addEventListener('resize', publishBounds)",
       "},"
     ],
     "index.ts:281": [
       "",
-      "// its 100% height (the layout viewport does not shrink on Android 16",
       "// 无线调试」的实时事实）；旧壳无该键 → 回落 paired（旧的间接证明语义）。",
       "displayId: { type: 'integer' },",
       "output: {",
+      "useEffect(() => {",
       "}",
       "} catch { /* 审计目录不可建：落审计失败不改变删除结果 */ }",
-      "},"
+      "},",
+      "}, 'ui-responsive: delivery file card capsule')"
     ],
     "index.ts:295": [
+      "",
       "* 扫描计划 → UI 载荷。**绝不下发绝对路径**：只给稳定 id、类别、`$DSH_HOME`/`$DSH_FILES_DIR`",
       "? writeMode === 'danger-full-access'",
-      "const bridge = new ThemeBridge()",
       "const realInScope = scope === 'real-only' || scope === 'all'",
       "let ctxRef: Context | undefined",
       "name: 'android_vdisplay_create',",
-      "return undefined",
-      "}"
+      "observer.detach()",
+      "return undefined"
     ],
     "index.ts:298": [
       "",
       "* @returns 只读载荷。",
       "* 装配：档位工具 + 只读面板状态路由。",
       "+ '「虚拟屏」查看器，真实屏不受影响。失败时返回结构化 code/guidance（能力缺项、通道未就绪等），'",
-      "// watchStageVisibility 事件通道负责，不再依赖这一拍。",
+      "// 占用态变化立即重发 bounds（原生层让位）。",
       ": undefined",
       "const virtuals: Array<{ screenId: string; displayId?: number }> = []",
-      "}, 'ui-responsive: theme bridge')"
+      "}, 'ui-responsive: trajectory details full-viewport overlay + :has() fallback')"
     ],
     "index.ts:31": [
       "/**",
@@ -3374,47 +3368,47 @@
       "} from './route-auth.js'"
     ],
     "index.ts:313": [
-      "",
       "* @returns 条目 id；注册面缺失或失败时 undefined（调用方省略 workspaceId，会话仍能建但未分组）。",
+      "// 与浏览器侧同口径（那里也是 refresh + publishBounds 同批，并同样有事件通道）。",
       "const authOptions = (): AuthOptions => ({",
+      "const guard = new EnterGuard()",
       "export const A11Y_FRESH_MS = 20_000",
       "{",
       "}",
-      "}))",
-      "}, DevSection))"
+      "}))"
     ],
     "index.ts:368": [
+      "",
       "*",
       "/\\bchmod\\s+-R\\s+\\d{3,4}\\s+\\//,",
-      "ctx.effect(() => installAboutEntry(), 'ui-responsive: about entry')",
       "for (const t of tools(ctx, svc)) ctx.tools.register(t)",
+      "id: 'android-notify',",
       "if (typeof a.screenId === 'string' && a.screenId !== '') payload.target = a.screenId",
-      "}",
-      "}, tr('关闭全部', 'Close all'))),"
+      "}"
     ],
     "index.ts:380": [
       "",
       "'shutdown', 'reboot', 'poweroff', 'halt',",
-      "* 随 fiber 释放回收）。sidebarRightTabs 缺席时只告警不抛错（fail-closed，不阻断客户端启动）。",
-      "// 市场插件据此打开它的浮层；该浮层由 market-J-fullpage 补丁做成整页（满屏 + 返回页头）。",
       "auth: authOptions,",
       "const next = ensureChain.then(run, run)",
-      "if (!Number.isInteger(d) || d < 0 || d > 20_000) return rejectInput('swipe 的 duration 需为 0-20000 毫秒') as never"
+      "if (!Number.isInteger(d) || d < 0 || d > 20_000) return rejectInput('swipe 的 duration 需为 0-20000 毫秒') as never",
+      "}, String(screen.alias.replace('virtual-', '')))),"
     ],
     "index.ts:393": [
       "",
+      "// and the UI registers the row at settings.general.item after the built-ins.",
       ": {}",
-      "const sidebar = ctx.get('sidebarRight') as SidebarRightController | undefined",
       "const workspaceId = await incomingWorkspaceId()",
       "if (raw.length === 0 || raw.length > 500) return rejectInput('text 长度需为 1-500 字符') as never",
-      "sendMobileRouteRejection(res, rejection)"
+      "sendMobileRouteRejection(res, rejection)",
+      "}"
     ],
     "index.ts:394": [
+      "",
       "/** ADB 通道附加黑名单（shell uid=2000 执行面比 app uid 更危险：系统级配置/权限写面一律拒绝）。 */",
-      "// ── Frame-wide entries ──────────────────────────────────────────────────",
+      "// 行骨架走独立样式表：本分区与上游通用设置同页，必须共用同一套行规",
       "const controller = sessionControllerOf()",
       "const sizeNote = sizeFields.width === undefined ? '?' : String(sizeFields.width)",
-      "if (sidebar === undefined) return () => {}",
       "payload.text = raw",
       "return"
     ],
@@ -3422,7 +3416,7 @@
       "* documented default; a present but non-decimal or out-of-range value is invalid. This is read per",
       "const MAX_CONTENT_BYTES = 256 * 1024 * 1024",
       "export const PROBE_BINARIES = ['bash', 'ls', 'cat', 'grep', 'find', 'sed', 'cp', 'mv', 'rm', 'mkdir', 'rg'] as const",
-      "import { TrajectoryPanelsObserver } from './trajectory-panels-observer.ts'",
+      "import { COMPOSER_INSETS_CSS } from './composer-insets.css.ts'",
       "interface SandboxPolicyFace {",
       "method?: string",
       "}",
@@ -3430,9 +3424,9 @@
       "} from './ime-broadcast.js'"
     ],
     "index.ts:428": [
+      "",
       "//",
-      "ctx.effect(() => injectStyle('tap-highlight', TAP_HIGHLIGHT_CSS), 'ui-responsive: clear WebView tap highlight')",
-      "if (collapsedNow()) { pending = true; return }",
+      "// 旧实现每 800ms 无条件 openTab，用户收起侧栏后会被下一拍拽开、点 × 收起也会被切回来",
       "res.end(JSON.stringify({ ok: false, error: 'GET only' }))",
       "rmSync(filePath, { force: true })",
       "wsvc.register({",
@@ -3441,52 +3435,53 @@
     "index.ts:432": [
       "...sizeFields,",
       "/** apply 注入的宿主面（命令面/工作区面按调用实时经 ctx.get 读取）。 */",
-      "ctx.effect(() => injectStyle('sidebar-reorder', SIDEBAR_REORDER_CSS), 'ui-responsive: sidebar reorder feedback')",
+      "/** 收起期间出现过、等待用户展开后补落位。 */",
+      "// ── Frame-wide entries ──────────────────────────────────────────────────",
       "export interface ControlAuth {",
       "if (req.method !== undefined && req.method !== 'GET') {",
-      "seenActive = false",
       "},"
     ],
     "index.ts:444": [
       "*  - `vdInfo`/`vdCreate`/`vdDestroy`/`state`/`snapshot`/`nodeText`/`screenshot`/`web*`：读面或",
       "+ '图像就在本结果里，无需再调用 read_image；像素坐标换算用归一化 nx/ny。',",
-      "// background thread and reports through window.__dshExportResult. The bridge",
+      "// The drawer toggle, moved into upstream's own header row (0.14.2 P4).",
       "function safeResolveInside(ws: string, path: string): string | null {",
-      "return () => {}",
+      "pending = false",
       "sendJson(res, 200, await readVdToolSnapshot(faceOf()))",
       "}"
     ],
     "index.ts:453": [
       "* 代次变化或 invalidated=true 即判定界面确实变了；否则明确回报「未观察到变化」，",
+      "/* 侧栏未挂载：下一拍重试（seenActive 未置位，保持可重试） */",
       "/** 动画三开关（manage 的 android_env_prepare 读写面）。 */",
-      "id: 'open',",
-      "name: 'shell.overlay',",
+      "name: 'conversation.header.leading',",
       "wsReal = wsLex"
     ],
     "index.ts:472": [
-      "// ── Native \"open with\" wiring ───────────────────────────────────────────",
+      "// 0.14.7 竖屏顶栏插件 UI 折叠：座位里实际挂载的插件节点整体改由浮动面板呈现（不搬 React 节点，",
       "// 但紧接着的 `android_ui_dump` 明确显示 Switch 从 `[已选中]` 变为未选中——**点击其实成功了**。",
-      "// 侧边栏终端的屏上九键条（0.14.2 T4）。",
       "const INTERNAL_PRIVILEGED: Record<string, { why: string; allows: (command: string) => boolean }> = {",
-      "output: {"
+      "output: {",
+      "title: () => tr('虚拟屏', 'Virtual screen'),"
     ],
     "index.ts:477": [
       "'animation-scales': {",
       "// ok/error 是本工具的**错误出口**：队列目录不可读/不可建时（EACCES 等）必须返回",
-      "// registration is gone and no other site re-adds it. The component file stays",
       "// 「校验本身不可靠」与「点击落空」是两件事，模型据此决定「重试」还是「放弃」，不能混。",
-      "// 从而让「终端底边 <= 键条顶边」成为布局不变量而非调数值的结果。"
+      "fold.attach()",
+      "icon: VirtualScreenGlyph,"
     ],
     "index.ts:517": [
+      "",
       "*",
       ".map((f) => ({ f, t: statSync(join(dir, f)).mtimeMs }))",
-      "return () => { marker.detach() }",
+      "return () => { watch?.dispose() }",
       "try { purgeStaleUnclaimed('boot') } catch { /* 清理失败不阻断装配 */ }"
     ],
     "index.ts:584": [
       "// （同样返回 imagePath + 图像 + 宽高，同样调 `screenshot` op 且不带任何脱敏参数）。",
+      "bubbles.attach()",
       "bytes,",
-      "name: 'sidebar.right.pane.tab', key, locale: namespace, store,",
       "readonly #shellFace?: { resolve?(spec: Record<string, unknown>): Record<string, unknown>; run(spec: Record<string, unknown>): Promise<Record<string, unknown>> }"
     ],
     "index.ts:69": [
@@ -3496,13 +3491,14 @@
       "export interface IncomingRes {",
       "export {",
       "extraPath?: string[]",
-      "import { MOBILE_TABLE_CSS } from './mobile/mobile-table.css.ts'",
+      "import { ExportResultChannel, reportUserFacingResult, type ExportResultPayload } from './export-result.ts'",
       "}",
       "} catch { /* 记账失败不阻断投递：该项退化为 TTL/生命周期清理 */ }"
     ],
     "index.ts:909": [
       "",
       "a11yFacts(): A11yAvailabilityFacts {",
+      "window.removeEventListener('focus', onVisible)",
       "}"
     ],
     "index.ts:949": [
@@ -4464,6 +4460,15 @@
     "ShellOps.kt#INPUT_COMMAND@6b740b06": true,
     "app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#Workspace@2d8e2fc0": true,
     "app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#TAB_ID@295e9cbd": true,
-    "scripts/check-code-map.mjs#UNIVERSE@60d8a536": true
+    "scripts/check-code-map.mjs#UNIVERSE@60d8a536": true,
+    "app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#applyRendererEvent@ac0c54d0": true,
+    "app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#shouldInterceptRequest@db2ebba9": true,
+    "ShellOps.kt#ShellOps.SCREEN_FAMILIES@40309832": true,
+    "ShellOps.kt#ShellOps@8ec4985b": true,
+    "BrowserHost.kt#ensureViewFor@8c879bf2": true,
+    "plugins/dsh-android-bridge/src/index.ts#resolved@e33053de": true,
+    "app/src/main/java/com/dsharnessmobile/shell/ShellOps.kt#decideScreenCommand@a7bc2be4": true,
+    "plugins/dsh-android-bridge/src/index.ts#tools@64f58ab4": true,
+    "plugins/dsh-android-bridge/src/index.ts#AndroidPrivilegeService@6ac56c46": true
   }
 }
