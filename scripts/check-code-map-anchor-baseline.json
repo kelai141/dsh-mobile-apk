@@ -4142,10 +4142,10 @@
       "export function prefsUpsertCommand(key, on, prefsName = 'dsh_settings') {"
     ],
     "scripts/verify-state-sync.mjs:244": [
-      "console.log((r.ok ? 'PASS  ' : 'FAIL  ') + c.id + ' [真源=' + (on ? 'on' : 'off') + '] ' + r.ms + 'ms  ' + r.detail)"
+      "}"
     ],
     "scripts/verify-state-sync.mjs:247": [
-      "const failed = results.filter((r) => !r.ok)"
+      "console.log('')"
     ],
     "scripts/verify-vdisplay-float.mjs:4": [
       "// verify-vdisplay-viewer 已覆盖：自动露出（两相）/ 关闭不销毁 / 重开重挂 / 实时选择器 / 多查看器仲裁 / 销毁。"
@@ -4292,13 +4292,13 @@
       "export function prefsUpsertCommand(key, on, prefsName = 'dsh_settings') {"
     ],
     "verify-state-sync.mjs:161": [
-      "expect: (on) => on,"
+      "},"
     ],
     "verify-state-sync.mjs:246": [
-      "}"
+      "const ok = failed.length === 1 && failed[0].id.includes('ST-02') && failed[0].on === true"
     ],
     "verify-state-sync.mjs:248": [
-      "const ok = failed.length === 1 && failed[0].id.includes('ST-02') && failed[0].on === true"
+      "console.log('SELF-TEST ' + (ok ? 'PASSED' : 'FAILED')"
     ],
     "verify-state-sync.mjs:27": [
       "* 静默改指到 B。并行跑两台设备时，A 的后续 CDP 解析会连到 B 且**不报错**（拿到一个合法 ws）。"
