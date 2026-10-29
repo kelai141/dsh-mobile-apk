@@ -1456,10 +1456,20 @@ class EngineManager(private val context: Context, private val pickToken: String?
     // from the trusted manifest may be added; user Soft selections and pins remain intact.
     val hard = PluginMounts.ensureHard(context, PluginMounts.currentFingerprint(context))
     if (hard == null) {
-      return refuse(
-        REFUSAL_HARD_BUNDLE_SELECTION,
-        "当前版本 Hard 插件清单缺失或与运行时快照不匹配；拒绝启动引擎，profile 未修改",
-      )
+      // #908：旧文案只说「Hard 插件清单缺失或与运行时快照不匹配」，**不说缺哪个文件、期望什么指纹** ——
+      // 排查者必须先读源码才知道是 assets/plugin-hard-manifest.json。实测为此多花了十几轮。
+      // 现在按可判定的事实分三档点名：指纹不可用 / 资产缺席 / 资产与快照不匹配。
+      val expected = PluginMounts.currentFingerprint(context)
+      val assetPresent = runCatching {
+        context.assets.list("")?.contains(PluginMounts.HARD_ASSET) == true
+      }.getOrDefault(false)
+      val cause = when {
+        expected == null -> "当前快照指纹不可用（运行时快照未就绪），无法校验 Hard 插件清单"
+        !assetPresent -> "缺 assets/" + PluginMounts.HARD_ASSET +
+          "（该文件是构建产物、被 .gitignore 忽略）；期望快照指纹 " + expected.take(12)
+        else -> "assets/" + PluginMounts.HARD_ASSET + " 的指纹与当前快照不匹配；期望 " + expected.take(12)
+      }
+      return refuse(REFUSAL_HARD_BUNDLE_SELECTION, cause + "；拒绝启动引擎，profile 未修改")
     }
     val hardBundleRepair = PluginMounts.ensureHardBundlesSelected(
       File(homeDir, ".dsh/profiles/web/package.json"),
