@@ -2310,3 +2310,20 @@ JVM 边界测试在 `EngineBootInstrumentationTest`（取值与 clamp 边界、�
     **为什么能潜伏这么久**：两道门禁之间漏了一格——① registry ↔ IMPLS 的 id 集合校验只比 **id**，不比 `scope`；② `check-patch-fixtures.mjs` 的 B 段按 `patch.scope ?? 'vendor'` 过滤，缺 scope 的 engine 补丁被**静默当成 vendor 跳过**，于是「每个 engine 补丁目标必须恰有一份当前代真夹具」这条判据对它们根本不执行（实测这两条夹具数都是 0 而 CI 全绿）。已补 D 段（PR #943）：registry 缺 scope 而实现声明 engine → 直接判红。
 
     **附带教训**：修完后 `RUNTIME-PATCHES.md` 的生成块会判红，diff 里 scope 列原为 `undefined`——**那个 `undefined` 就是缺 scope 的可见症状**，跑 `node scripts/check-maintenance-docs.mjs --write` 重新生成即可；夹具台账也要 `probe-engine-anchors.mjs --fixtures` 重捕（`capture.registrySha256` 必然失配）。
+
+360. **夹具与真实 DOM 同错时，再多测试也只能证明「内部自洽」（2026-10-30 实锤，#941 / #949 / #950 三次同源）。** 一天内撞了三次同一形态的错：**选择器按猜的结构写，夹具又照着猜的结构造，于是测试全绿而真机全废。**
+
+    **① 「+」映射行恒 0（#941）。** 上游整条链是自洽的：按钮 `aria-haspopup="listbox"` → 弹层 `role="listbox"`（`MenuView.tsx:132`）→ 每项 `role="option"`。插件却写 `[role="menu"]`——上游根本没有这个角色。夹具更配合：假菜单先造一层 `role="menu"` 再套 `role="listbox"`，于是 24 条测试全绿。实机同一次点击：`[role="menu"]` 为 null，`[role="option"]` 有 **9 项**。
+
+    **②③ 文件卡片胶囊不挂（#949 单文件 / #950 多文件）。** 上游把按钮包在 `FileOpenAnchor` 里，真实 DOM 是 `div[data-single] > span > button` 和 `ul > li > span > button`；插件写 `:scope > button` 与 `li > button`（都假设按钮是直接子级），两条分支都匹配不到。夹具同样少了那一层 span（`card.append(header, hidden)`），30 条测试全绿。
+
+    **共同点不是「选择器写错」这个表面现象，而是判断依据的来源**：结构是**猜的**，夹具又按猜的结论造，于是两边同错、互相印证。
+
+    **判别方法**：凡按 DOM 结构做增强，先取一次真实结构再写选择器——
+    - 用 CDP 在真机上打印 `el.outerHTML` 或逐层 `tagName + role + className`；
+    - **优先用语义属性**（`aria-haspopup`、`role`、`aria-describedby`、`data-*`），别用「几层父子」这种脆结构；
+    - 夹具必须照抄真实 DOM 层级，**多一层少一层都不行**——夹具的作用是复现真机，不是复现想象。
+
+    **最省的证伪手段**：写完选择器先在真机跑一次 `document.querySelector(选择器)`，返回 null 就是结构猜错了。这一步 10 秒，能省掉一轮完整构建（本轮每次构建 + 装机约 20 分钟）。
+
+    **附带的判定原则**：测试通过只证明「代码与夹具一致」，不证明「代码与产品一致」。夹具是**真机的代理**，代理失真时测试越绿越危险。
