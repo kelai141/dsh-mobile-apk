@@ -5,6 +5,30 @@
 > grep 用法：`grep -n "<坑号>\." docs/AGENTS/gotchas.md` 或按关键词（如 `borrowSession`、`MANAGE_EXTERNAL_STORAGE`、`store-rehome`）定位。
 > 维护约定：新坑追加到文末并递增编号；修复后保留条目（教训与历史归档）。
 
+## 禁止裸 `splice` 改代码（同一个错犯了三次，升级为硬规则）
+
+### 实锤
+
+| 次 | 场景 | 后果 |
+|---|---|---|
+| 1 | `NotifyStructureBatch8Test.kt` 冲突按行拼接 | KDoc 与函数体拼断，`SyntaxError` |
+| 2 | `EngineManager.kt` 的 `if (hard == null) {` 块 splice 计数错**多留一行** | 花括号不平衡 → 报错出现在 `UpdateManager.kt` / `WatchdogV2.kt`（`Unresolved reference onlineUpdateActive`），极易误判成 main 坏了 |
+| 3 | `console.html` 的 `__dshConsoleSetLang` 块实际 **5 行**只 splice 了 **3 行** | 留重复 `applyLang(); };` → 第二个 script 块 `SyntaxError` |
+
+### 四条硬规则
+
+1. **禁止裸 `splice` 改代码** —— 首选锚定**字符串**替换（`old` 含足够前后文保证唯一）；必须按行时，splice 前后**断言首尾行原文**（打印出来对一眼），`n` 从实际读出结果来，**不能凭印象**。
+2. **splice 后必跑该语言的语法检查再谈功能验证** —— `node --check`（JS/MJS/内联 script）/ `tsc --noEmit`（TS）/ `:app:compileDebugKotlin`（Kotlin）/ `JSON.parse`。**顺序不能反**：语法都不通过，功能验证的结论没有任何意义。
+3. **报错出现在「别的文件」时先怀疑自己刚改的那一块** —— 块界错位的典型形态是「真正出问题的文件一条错都不报，错误全落在下游受害者上」。排查顺序：`git diff` 看自己改的文件有无重复语句头 / 缺失右花括号 → 数括号配平 → **最后**才看别的文件。
+4. **临时文件的「写→用→删」必须在同一次成功执行内闭合** —— 删除步骤不能跑在可能失败的使用步骤之后。这叫生命周期问题，不只是脚本问题：任何「生成产物 → 消费产物 → 清理产物」的流程都算（构建、测试夹具、迁移脚本）。
+
+**规则 4 的实锤（同一次会话连栽三次）：**
+
+- 上游那次调用自己先失败（JS 语法错），`_blk.txt` **根本没写出来**；
+- 下一条命令是 `node _ins.mjs` 然后 `Remove-Item _blk.txt` —— 脚本因 ENOENT 失败，**但删除照样把原料抹了**；
+- 于是下一轮又没有输入，重复失败三次。
+
+做法：小内容直接**内嵌进执行脚本**（不落中间文件）；必须落文件时，`Remove-Item` 放在同一条命令的**最后**且仅在成功分支执行（先判退出码再删）。
 ## 改 Kotlin 控制流后：先看**本文件**括号平衡，再看别的文件报错
 
 **实锤（2026-10-29，一次误判差点以为 main 坏了）。**
