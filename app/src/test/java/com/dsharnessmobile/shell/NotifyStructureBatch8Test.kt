@@ -265,40 +265,6 @@ class NotifyStructureBatch8Test {
   }
 
   /**
-   * N2（0.14.11）：plan-review 的计划正文放在 `detail`，旧实现只拼 question，
-   * 于是通知栏里只有「Approve this plan and leave plan mode?」+ 按钮 —— 用户盲批。
-   */
-  @Test
-  fun questionBodyCarriesThePlanDetail() {
-    val review = NotifyQuestion("plan-review", "Plan review", "Approve this plan and leave plan mode?", listOf("Approve", "Keep planning"))
-    val plan = "# 迁移到新队列\n- 先落盘再投递\n- 退避封顶 60s"
-    val withDetail = review.copy(detail = plan)
-    val entry = NotifyEntry(kind = "question", eventId = "e1", questions = listOf(withDetail))
-    val body = NotifyCenter.questionBigText(entry)
-    assertTrue("必须带上正文（否则用户看不到计划就要批）", body.contains("迁移到新队列"))
-    assertTrue("问题本身仍在", body.contains("Approve this plan"))
-
-    val noDetail = NotifyCenter.questionBigText(NotifyEntry(kind = "question", eventId = "e2", questions = listOf(review)))
-    assertFalse("没有正文时不得凭空造", noDetail.contains("迁移到新队列"))
-
-    val long = "# 长计划\n" + "x".repeat(NotifyCenter.DETAIL_LIMIT + 200)
-    val clipped = NotifyCenter.questionBigText(
-      NotifyEntry(kind = "question", eventId = "e3", questions = listOf(review.copy(detail = long))),
-    )
-    assertTrue("超长必须截断且截断可见", clipped.endsWith("…"))
-    assertTrue("截断后长度受控", clipped.length < NotifyCenter.DETAIL_LIMIT + 200)
-
-    val withPath = NotifyCenter.questionBigText(
-      NotifyEntry(
-        kind = "question", eventId = "e4",
-        questions = listOf(review.copy(detail = "计划：读取 /data/data/com.dsharnessmobile.shell/files/x 后继续")),
-      ),
-    )
-    assertTrue("正文同样要脱敏（绝对路径）", withPath.contains("[路径]"))
-    assertFalse("不得原样带出绝对路径", withPath.contains("/data/data/"))
-
-    val bridge = codeOnly(source("src/main/java/com/dsharnessmobile/shell/NotifyBridge.kt"))
-    assertTrue("解析侧必须读 detail 字段", bridge.contains("q.optString(\"detail\""))
    * N5（0.14.11）：失败通知里的「你所提交的内容」曾经是**原始 JSON**。
    *
    * 现场形状来自 NotifyActionReceiver.outcomeFor（线上唯一构造点），不是想象出来的：
@@ -337,5 +303,42 @@ class NotifyStructureBatch8Test {
     val rendered = summary("{\"kind\":\"result\",\"value\":{\"answers\":[{\"id\":\"q1\",\"selected\":[\"方案A\"]}]}}")
     assertFalse("不得把原始 JSON 甩到用户脸上", rendered.contains("{") || rendered.contains("answers"))
     assertEquals("空对象不编造", "", summary("{}"))
+  }
+
+  /**
+   * N2（0.14.11）：plan-review 的计划正文放在 `detail`，旧实现只拼 question，
+   * 于是通知栏里只有「Approve this plan and leave plan mode?」+ 按钮 —— 用户盲批。
+   */
+  @Test
+  fun questionBodyCarriesThePlanDetail() {
+    val review = NotifyQuestion("plan-review", "Plan review", "Approve this plan and leave plan mode?", listOf("Approve", "Keep planning"))
+    val plan = "# 迁移到新队列\n- 先落盘再投递\n- 退避封顶 60s"
+    val withDetail = review.copy(detail = plan)
+    val entry = NotifyEntry(kind = "question", eventId = "e1", questions = listOf(withDetail))
+    val body = NotifyCenter.questionBigText(entry)
+    assertTrue("必须带上正文（否则用户看不到计划就要批）", body.contains("迁移到新队列"))
+    assertTrue("问题本身仍在", body.contains("Approve this plan"))
+
+    val noDetail = NotifyCenter.questionBigText(NotifyEntry(kind = "question", eventId = "e2", questions = listOf(review)))
+    assertFalse("没有正文时不得凭空造", noDetail.contains("迁移到新队列"))
+
+    val long = "# 长计划\n" + "x".repeat(NotifyCenter.DETAIL_LIMIT + 200)
+    val clipped = NotifyCenter.questionBigText(
+      NotifyEntry(kind = "question", eventId = "e3", questions = listOf(review.copy(detail = long))),
+    )
+    assertTrue("超长必须截断且截断可见", clipped.endsWith("…"))
+    assertTrue("截断后长度受控", clipped.length < NotifyCenter.DETAIL_LIMIT + 200)
+
+    val withPath = NotifyCenter.questionBigText(
+      NotifyEntry(
+        kind = "question", eventId = "e4",
+        questions = listOf(review.copy(detail = "计划：读取 /data/data/com.dsharnessmobile.shell/files/x 后继续")),
+      ),
+    )
+    assertTrue("正文同样要脱敏（绝对路径）", withPath.contains("[路径]"))
+    assertFalse("不得原样带出绝对路径", withPath.contains("/data/data/"))
+
+    val bridge = codeOnly(source("src/main/java/com/dsharnessmobile/shell/NotifyBridge.kt"))
+    assertTrue("解析侧必须读 detail 字段", bridge.contains("q.optString(\"detail\""))
   }
 }
