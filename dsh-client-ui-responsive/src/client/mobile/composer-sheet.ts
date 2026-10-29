@@ -29,8 +29,16 @@ import { zh, en, type ComposerSheetKey } from './composer-sheet.locales.ts'
 /** 上游「+」：ui-conversation 里唯一 aria-haspopup="listbox" 的按钮（MenuView 是 combobox）。 */
 const ADD_BUTTON_SELECTOR = '[data-composer-card] button[aria-haspopup="listbox"]'
 const CARD_SELECTOR = '[data-composer-card]'
-/** 上游「+」弹层的根：MenuView 落在 MenuSurface 上，role=menu。 */
-const UPSTREAM_MENU_SELECTOR = '[data-composer-card] [role="menu"]'
+/**
+ * 上游「+」弹层的根。
+ *
+ * **是 role="listbox"，不是 role="menu"**（MenuView.tsx:132）。上游整条链自洽：
+ * 按钮 aria-haspopup="listbox" → 弹层 role="listbox" → 每项 role="option"。
+ * 曾经写成 [role="menu"]，查不到就把「选择器错」误判成「上游不渲染菜单」，
+ * 导致映射行长期恒 0（实机取证：同一次点击 [role="menu"] 为 null 而
+ * [role="option"] 有 9 项）。
+ */
+const UPSTREAM_MENU_SELECTOR = '[data-composer-card] [role="listbox"]'
 /** 弹层里的可选项（MenuView 的每条命令/文件项）。 */
 const UPSTREAM_OPTION_SELECTOR = '[role="option"]'
 /** 上游隐藏的 multiple file input：拍照/照片/本地文件都走它。 */

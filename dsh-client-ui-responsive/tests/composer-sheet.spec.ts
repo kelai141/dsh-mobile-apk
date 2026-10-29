@@ -77,20 +77,23 @@ function buildComposer(labels: readonly (readonly [string, string | null])[]): {
 
   // 「+」被点（或我们派发点击）后，上游把菜单挂到卡片里。
   add.addEventListener('click', () => {
-    if (card.querySelector('[role="menu"]') !== null) return
-    const menu = document.createElement('div')
-    menu.setAttribute('role', 'menu')
+    if (card.querySelector('[role="listbox"]') !== null) return
+    // 真实上游结构（MenuView.tsx:132）：MenuSurface 的 [data-trigger-menu] 里直接
+    // 是 role="listbox"，**没有** role="menu" 这一层。夹具照抄这个形状，
+    // 否则选择器写错也测不出来。
+    const surface = document.createElement('div')
+    surface.setAttribute('data-trigger-menu', '')
     const list = document.createElement('div')
     list.setAttribute('role', 'listbox')
     for (const [label, description] of labels) list.append(option(label, description))
-    menu.append(list)
-    card.append(menu)
+    surface.append(list)
+    card.append(surface)
     add.setAttribute('aria-expanded', 'true')
   })
   // 上游 MenuView 的 Esc 关闭。
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return
-    card.querySelector('[role="menu"]')?.remove()
+    card.querySelector('[data-trigger-menu]')?.remove()
     add.setAttribute('aria-expanded', 'false')
   })
   return { add, input, card }
@@ -156,7 +159,7 @@ describe('「+」底部 sheet：结构', () => {
     expect(document.querySelector(BACKDROP)).not.toBeNull()
     // 上游菜单只被临时借用来读项，读完必须关掉，不能盖在 sheet 上。
     // （用户那次点击被 stopImmediatePropagation 拦掉，所以它根本没开过。）
-    expect(card.querySelector('[role="menu"]')).toBeNull()
+    expect(card.querySelector('[role="listbox"]')).toBeNull()
   })
 })
 
@@ -236,7 +239,7 @@ describe('「+」底部 sheet：自动映射上游菜单', () => {
   it('打开后上游菜单被关掉，不会盖在 sheet 上', async () => {
     const { card } = buildComposer([['甲', null]])
     await openSheet()
-    expect(card.querySelector('[role="menu"]')).toBeNull()
+    expect(card.querySelector('[role="listbox"]')).toBeNull()
   })
 })
 
@@ -383,16 +386,16 @@ describe('「+」底部 sheet：#929 焦点顺序（复现真机 MenuView 的焦
     card.append(tools)
     document.body.append(card)
     add.addEventListener('click', () => {
-      if (card.querySelector('[role="menu"]') !== null) return
+      if (card.querySelector('[role="listbox"]') !== null) return
       // 真机判据：编辑器不持焦点 -> 菜单不开 -> 读到 0 项。
       if (document.activeElement !== editor) return
-      const menu = document.createElement('div')
-      menu.setAttribute('role', 'menu')
+      const surface = document.createElement('div')
+      surface.setAttribute('data-trigger-menu', '')
       const list = document.createElement('div')
       list.setAttribute('role', 'listbox')
       for (const [label, description] of labels) list.append(option(label, description))
-      menu.append(list)
-      card.append(menu)
+      surface.append(list)
+      card.append(surface)
       add.setAttribute('aria-expanded', 'true')
     })
     return { add, card }
