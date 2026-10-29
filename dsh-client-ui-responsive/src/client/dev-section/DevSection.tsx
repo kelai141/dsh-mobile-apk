@@ -271,9 +271,10 @@ export function DevSection({ renderSlot }: DevSectionProps) {
   const importConfig = useCallback(() => {
     try {
       const raw = window.androidBridge?.importConfig?.()
-      const j = JSON.parse(raw ?? '{}') as { ok?: boolean; hint?: string; error?: string }
+      const j = JSON.parse(raw ?? '{}') as { ok?: boolean; hint?: string; error?: string; backup?: string }
       setConfigMsg(j.ok
-        ? tr('已导入并生效（原配置备份为 settings.yaml.import-backup）。', 'Imported and applied (the previous file is settings.yaml.import-backup). ') + (j.hint ?? '')
+        ? tr('已导入并生效（原配置备份为 ', 'Imported and applied (the previous file is ') +
+          (j.backup ?? '*.import-backup') + tr('）。', '). ') + (j.hint ?? '')
         : tr('导入失败：', 'Import failed: ') + (j.error ?? tr('未知错误', 'unknown error')))
     } catch {
       setConfigMsg(tr('导入失败：应用内连接不可用（仅安卓应用内可用）——请重新打开应用后重试', 'Import failed: the app bridge is unavailable. Reopen the app and try again.'))

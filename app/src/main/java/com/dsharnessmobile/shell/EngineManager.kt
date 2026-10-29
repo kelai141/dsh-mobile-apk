@@ -1638,8 +1638,12 @@ class EngineManager(private val context: Context, private val pickToken: String?
     val dshRoot = File(homeDir, ".dsh")
     val file = if (importing) SnapshotUserData.importConfiguration(dshRoot, dshDataDir)
       else SnapshotUserData.exportConfiguration(dshRoot, dshDataDir)
+    // 备份名由实现决定（配置文件迁移过：settings.yaml -> cordis.patch.yml），
+    // 这里按同一规则现算并回传，避免前端文案写死文件名后与真实文件对不上（真机缺陷 2026-10-29）。
+    val backup = if (importing) File(file.parentFile, file.name + ".import-backup").name else null
     LogCollector.log(TAG, "active configuration " + (if (importing) "imported: " else "exported: ") + file.name)
     org.json.JSONObject().put("ok", true).put("path", file.absolutePath)
+      .apply { if (backup != null) put("backup", backup) }
       .put("hint", if (importing) "已写入活动配置；引擎会热加载，未生效时可手动重启引擎"
         else "导出的是活动配置，可能包含供应商密钥；共享目录中的副本请妥善保管").toString()
   } catch (t: Throwable) {
