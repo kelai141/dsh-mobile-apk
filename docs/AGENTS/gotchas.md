@@ -5,6 +5,30 @@
 > grep 用法：`grep -n "<坑号>\." docs/AGENTS/gotchas.md` 或按关键词（如 `borrowSession`、`MANAGE_EXTERNAL_STORAGE`、`store-rehome`）定位。
 > 维护约定：新坑追加到文末并递增编号；修复后保留条目（教训与历史归档）。
 
+## 工具输出的「通道与类型」也会骗人（PowerShell 实锤）
+
+**实锤（2026-10-30）：** 跑 `node scripts/check-code-map.mjs --refresh-anchor-baseline --force-drift` 想读拒绝原因，写成：
+
+```powershell
+node scripts/check-code-map.mjs ... 2>&1 | Select-Object -Last 8 | ForEach-Object { $_.Substring(0, 150) }
+```
+
+结果满屏 `InvalidOperation: ... does not contain a method named 'Substring'` —— 因为 node 的 stderr 被 `2>&1` 合流后是 **`ErrorRecord` 对象**，不是字符串。`Select-Object -Last` 也只对**行**有效，对对象流无效。
+
+更坑的是：**过滤后一条目标行都没打出来**，看起来像「守卫没触发」，实际是我的读取方式把输出吞了。为此多花了两轮。
+
+### 正确写法
+
+```powershell
+$o = (node script.mjs ... 2>&1 | Out-String)   # 先 Out-String 拍平成文本
+$o -split [char]10 | Where-Object { $_ -match 'Refusing|allow' }
+```
+
+### 判据（三条）
+
+1. 外部程序输出**先 `Out-String`**，再切分/正则；不要直接对管道结果调字符串方法。
+2. `2>&1` 之后拿到的是 `ErrorRecord` 还是 `string`，**取决于有没有 `Out-String`** —— 别假设。
+3. **「一条都没匹配到」永远先怀疑读取方式**，再怀疑程序没输出。这和「失败文案被兜底值吞掉」是同一族：真因被工具层的表示形式掩盖了。
 ## 禁止裸 `splice` 改代码（同一个错犯了三次，升级为硬规则）
 
 ### 实锤

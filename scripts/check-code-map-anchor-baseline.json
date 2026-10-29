@@ -2980,16 +2980,16 @@
       "已知会制造**假失败**的环境残留（先清再判）："
     ],
     "docs/AGENTS/gotchas.md:103": [
-      "### worktree 里手动起引擎的最小前提"
+      "## debug 包起不来引擎：assets 里三个 gitignored 构建产物必须同版本配对"
     ],
     "docs/AGENTS/gotchas.md:178": [
-      "8. **run-as 引号地狱 / adb 二进制传输**：PowerShell 双引号内 `$var` 本地展开；二进制经 `adb exec-out`/push 传输。"
+      "1. **先判断冲突块在什么结构里**：同一 `{}` / 同一函数体 / 同一数组 / 同一表格 / 独立顶层声明。"
     ],
     "docs/AGENTS/gotchas.md:44": [
-      ""
+      "1. **禁止裸 `splice` 改代码** —— 首选锚定**字符串**替换（`old` 含足够前后文保证唯一）；必须按行时，splice 前后**断言首尾行原文**（打印出来对一眼），`n` 从实际读出结果来，**不能凭印象**。"
     ],
     "docs/AGENTS/gotchas.md:74": [
-      "### 实例"
+      "2. 再数该文件 `{` / `}` 是否配平；"
     ],
     "docs/AGENTS/modules.md:36": [
       "| **SnapshotFs.kt** | 符号链接安全的文件原语（0.13.3 新增；0.14.1 修 API 越级崩溃） | `exists/isSymbolicLink/deletePath/move/createDirectories`——全部 NOFOLLOW：递归删除绝不穿透链接进用户数据；**目录枚举用 `Files.newDirectoryStream`（`DirectoryStream` 是 Iterable）而非 `Files.list(...).toList()`**——后者是 Java `Stream.toList()`、**API 34 才提供**，minSdk 26 下真机抛 `NoSuchMethodError`（Error，`catch(Exception)` 抓不住），曾让快照事务恢复永久卡死；防线见 `ApiLevelGuardTest`（坑 153） |"
