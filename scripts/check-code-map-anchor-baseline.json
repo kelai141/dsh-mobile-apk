@@ -3018,16 +3018,16 @@
       "已知会制造**假失败**的环境残留（先清再判）："
     ],
     "docs/AGENTS/gotchas.md:103": [
-      ""
+      "4. **pnpm 是市场安装的硬依赖（已固化进快照构建）**：`dsh plugin add` spawns `pnpm`（apps/cli plugin.ts）；快照缺 pnpm → `pnpm not found on PATH`；且**陈旧 pnpm 状态记录**（base-dsh 里的 `.modules.yaml`/`.pnpm-workspace-state`/`pnpm-lock`）指向旧 store → `ERR_PNPM_UNEXPECTED_STORE`——build-snapshot-013.mjs 已装配 pnpm 10.12.1 standalone（npm tgz + `usr/bin/pnpm` shim）并清理这三种记录。**市场目录里的部分插件（如 humanizer-ru）不在 npm，安装 404 属上游目录数据，不是本链路缺陷。**"
     ],
     "docs/AGENTS/gotchas.md:178": [
-      "壳侧不设工作目录 → 新会话 cwd=`/` → `@` 菜单列的是设备根目录（acct/apex/cache…），用户看到「@文件功能无法使用」"
+      "52. **点击无生效校验（#129）→ 新增便宜 `state` op**：`AccessibilityService` 的窗口/内容/滚动事件已维护 `invalidated` 标记与快照代次 `generation`，但只在 dump 时暴露。修复：新增 `state` op 返回 `{gen, invalidated, enabled}`（**不建树**），`android_ui_click` 点后 260ms 读一次并回报「已生效/未观察到变化」；同时把 `ACTION_CLICK` 的节点中心 / 手势落点回填到 `x/y`（此前 a11y 归一化路径恒返回 0）。新增 op 必须同时进引擎侧 `ControlOp` 与 `A11Y_OPS`（坑 47 同族）。grep `handleState`。"
     ],
     "docs/AGENTS/gotchas.md:44": [
-      "| `NotifyStructureBatch8Test.kt`：两侧各加 `@Test`，但冲突块切在**函数体中间** | 「保留双方」把 KDoc 与函数体拼断，`SyntaxError: Expecting an element` |"
+      "**实锤（2026-10-29）：`#883` 就是这样丢的。**"
     ],
     "docs/AGENTS/gotchas.md:74": [
-      "9. **template 字符串反斜杠**（页面注入）：`\\n` 双写。"
+      "**实锤两次（2026-10-29，同一个错犯了两遍）：**"
     ],
     "docs/AGENTS/modules.md:36": [
       "| **SnapshotUserData.kt** | 用户配置保留、legacy backup 与活动配置传输 | `prepareStagedSnapshot` 保留 `settings.yaml.imported` 并抑制工厂 reseed；`configurationDocument` 选择真实 web profile patch；`exportConfiguration/importConfiguration` 原子替换/导入备份，旧共享 YAML 不覆盖已迁移 patch；`retireReseededFactorySettings` 仅隔离已知空工厂模板。legacy backup 不复活已迁移 YAML。 |"

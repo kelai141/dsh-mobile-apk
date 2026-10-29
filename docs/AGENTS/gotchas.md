@@ -5,6 +5,40 @@
 > grep 用法：`grep -n "<坑号>\." docs/AGENTS/gotchas.md` 或按关键词（如 `borrowSession`、`MANAGE_EXTERNAL_STORAGE`、`store-rehome`）定位。
 > 维护约定：新坑追加到文末并递增编号；修复后保留条目（教训与历史归档）。
 
+## debug 包起不来引擎：assets 里三个 gitignored 构建产物必须同版本配对
+
+**实锤（2026-10-29，查了十几轮）。** debug 包装到设备后引擎起不来，UI 只报泛化文案；真因分两层，都藏在 `.gitignore` 里。
+
+### 坑 1：`snapshot.sha256` 与 `snapshot.tar.xz` 必须自洽
+
+`EngineManager.kt:102-140` 的**启动前预检**比的是两个内嵌资产互相自洽（`assets/snapshot.sha256` 的声明值 vs `assets/snapshot.tar.xz` 的实际 sha256），**与 app 版本、引擎版本都无关**。失配时报 `[runtime-unavailable]`。
+
+两者都是构建产物：`.gitignore:6`（tar.xz）与 `.gitignore:12`（sha256）。**不能只链接其中一个**，也不能链接不同版本的一对。
+
+### 坑 2：`plugin-hard-manifest.json` 也必须一起带，且同版本
+
+`.gitignore:14` 忽略它，但 `EngineManager.kt:1461` 的 `PluginMounts.ensureHard(context, PluginMounts.currentFingerprint(context))` **按运行时快照指纹**查这份清单。缺了或版本不符，报 `stage=hard-bundle-selection-unverified`：
+
+```
+detail=EngineManager.startEngine() 拒启（未拉起引擎进程）：当前版本 Hard 插件清单缺失或与运行时快照不匹配
+```
+
+实测三种配对**全部同一个错**：0.14.10 快照 + 缺清单 / v0.14.9 快照 + 0.14.10 清单 / 0.14.10 快照 + 0.14.10 清单。
+
+### 结论
+
+`installDebug` 出来的包在这套环境里很难过这两道校验。**要跑引擎相关 / UI 级验收，应该用发布链产出的包**（`build-apk-013.ps1 -Fast` 会同时生成快照与 Hard 清单，天然配对），而不是 debug 包。
+
+### worktree 里手动起引擎的最小前提
+
+```powershell
+foreach ($f in @('snapshot.tar.xz','snapshot.sha256','plugin-hard-manifest.json')) {
+  New-Item -ItemType HardLink -Path "app/src/main/assets/$f" -Target "<用户工作区>/app/src/main/assets/$f"
+}
+```
+
+三者版本必须一致；混搭比缺失更难查（报错文案完全相同）。
+
 ## 合堆叠 PR：下层禁带 --delete-branch
 
 **实锤（2026-10-29）：`#883` 就是这样丢的。**
