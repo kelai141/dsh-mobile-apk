@@ -1108,15 +1108,23 @@ function selfTest() {
   }
   // ── #808 / #810 负控（此前无覆盖：改回原实现后 self-test 与门禁都不红）──────
   //
-  // 断言取在**真实代码结构**上，不是手写样本：
-  //   片段 = app/src/main/java/com/dsharnessmobile/shell/RepairConversationStore.kt 第 16-36 行。
-  //   其中 val id 出现两次：data class 构造属性（类成员）与 fun list 体内的局部 val。
+  // 断言取在**真实代码**上，不是手写样本。以下两段为**内嵌片段**，本文件因此不依赖仓库；
+  // 源码改动后请按下表对照更新（改的是真实行为，不是让断言迁就代码）。
+  //
+  // 来源：app/src/main/java/com/dsharnessmobile/shell/RepairConversationStore.kt
+  // 取的是**整篇**（该文件 1-138 行），不是裁剪片段 —— 裁剪会破坏花括号配平：
+  //   该文件里 `fun list(...)` 的体结束于原第 37 行，而 `internal object RepairConversationStore {`
+  //   结束于文件末行。只截 16-36 行会让 `matchingBrace` 算错闭合行 → `hasEnclosingFun` 判错 →
+  //   夹具会**假失败**（实测踩过两次）。
+  //
+  // 涉及的**两个**同名声明（都叫 `id`，这是本条用例的核心）：
+  //   ① 原第 17 行  `  val id: String,`                    —— `internal data class RepairConversation` 的构造属性，**类成员**
+  //   ② 原第 33 行  `      val id = ref.optString("id")`   —— `internal object RepairConversationStore` 里 `fun list(...)` 体内的**局部 val**
+  //
+  // #810 断言：对 ② 那一行调 `deriveAnchorFor` 必须回落成外层函数 `list`，不能解析成 `id`。
+  //   实测（origin/main）：{ok:true, symbol:'list', hash:'c1301759', line:31, kind:'symbol'}。
+  //   把 `isLocalValueDecl` 改成恒 `false` 后，② 会被当成成员 → symbol 变 `id` → 断言变红。
   {
-    // #810：局部 val 不得成为符号；推导应回落到**外层函数**。
-    // 实测（origin/main）：局部那行 -> {ok:true, symbol:'list'}；若把 isLocalValueDecl 改成恒 false，
-    // 它就会解析成 symbol:'id'（局部被当成成员），本断言立即变红。
-    // 整文件作样本（138 行）：片段裁剪会破坏花括号配平，导致 matchingBrace 失真。
-    // 来源：app/src/main/java/com/dsharnessmobile/shell/RepairConversationStore.kt
     const RC_LINES = [
       "package com.dsharnessmobile.shell",
       "",
