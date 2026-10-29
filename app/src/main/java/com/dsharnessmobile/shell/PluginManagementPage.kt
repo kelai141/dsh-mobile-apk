@@ -234,7 +234,7 @@ internal class PluginManagementPage(
   private fun paintChip(view: TextView, selected: Boolean) {
     view.setTextColor(if (selected) textOnAccent else white)
     view.background = rounded(if (selected) accent else gray4, 18)
-    view.contentDescription = "${view.text}${if (selected) "，已选" else ""}"
+    view.contentDescription = view.text.toString() + if (selected) t("，已选", ", selected") else ""
   }
 
   private fun load() {
@@ -536,7 +536,7 @@ internal class PluginManagementPage(
         android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
       setPadding(dp(12), dp(10), dp(12), dp(10))
       background = rounded(gray4, 8)
-      contentDescription = "$nsName 高级 JSON 配置"
+      contentDescription = "$nsName " + t("高级 JSON 配置", "advanced JSON config")
     }
     val editorLp = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8); bottomMargin = dp(8) }
     page.addView(editor, editorLp)
@@ -551,7 +551,7 @@ internal class PluginManagementPage(
         setSingleLine(true)
         setPadding(dp(10), dp(8), dp(10), dp(8))
         background = rounded(gray4, 8)
-        contentDescription = "设置敏感配置 ${path.joinToString(".")}"
+        contentDescription = t("设置敏感配置", "Set sensitive config") + " " + path.joinToString(".")
       }
       secretInputs[path] = secret
       page.addView(secret, LinearLayout.LayoutParams(-1, dp(44)).apply { bottomMargin = dp(6) })
@@ -818,7 +818,7 @@ internal class PluginManagementPage(
       textOn = ""
       textOff = ""
       showText = false
-      contentDescription = "插件启用开关"
+      contentDescription = t("插件启用开关", "Plugin enabled switch")
       minWidth = dp(52)
       minHeight = dp(48)
       thumbTintList = android.content.res.ColorStateList(
