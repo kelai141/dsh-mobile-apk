@@ -15,7 +15,7 @@
   "private": true,
   "scripts": {
     "build": "tsc -p .",
-    "test": "npm run build && node --test test/tier.test.mjs"
+    "test": "npm run build && node --test test/tier.test.mjs test/browser-receipt.test.mjs test/browser-target.test.mjs"
   },
   "dependencies": {},
   "peerDependencies": {
