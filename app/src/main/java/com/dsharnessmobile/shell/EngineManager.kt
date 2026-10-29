@@ -1456,10 +1456,20 @@ class EngineManager(private val context: Context, private val pickToken: String?
     // from the trusted manifest may be added; user Soft selections and pins remain intact.
     val hard = PluginMounts.ensureHard(context, PluginMounts.currentFingerprint(context))
     if (hard == null) {
-      return refuse(
-        REFUSAL_HARD_BUNDLE_SELECTION,
-        "当前版本 Hard 插件清单缺失或与运行时快照不匹配；拒绝启动引擎，profile 未修改",
-      )
+      // #908：旧文案只说「Hard 插件清单缺失或与运行时快照不匹配」，**不说缺哪个文件、期望什么指纹** ——
+      // 排查者必须先读源码才知道是 assets/plugin-hard-manifest.json。实测为此多花了十几轮。
+      // 现在按可判定的事实分三档点名：指纹不可用 / 资产缺席 / 资产与快照不匹配。
+      val expected = PluginMounts.currentFingerprint(context)
+      val assetPresent = runCatching {
+        context.assets.list("")?.contains(PluginMounts.HARD_ASSET) == true
+      }.getOrDefault(false)
+      val cause = when {
+        expected == null -> "当前快照指纹不可用（运行时快照未就绪），无法校验 Hard 插件清单"
+        !assetPresent -> "缺 assets/" + PluginMounts.HARD_ASSET +
+          "（该文件是构建产物、被 .gitignore 忽略）；期望快照指纹 " + expected.take(12)
+        else -> "assets/" + PluginMounts.HARD_ASSET + " 的指纹与当前快照不匹配；期望 " + expected.take(12)
+      }
+      return refuse(REFUSAL_HARD_BUNDLE_SELECTION, cause + "；拒绝启动引擎，profile 未修改")
     }
     val hardBundleRepair = PluginMounts.ensureHardBundlesSelected(
       File(homeDir, ".dsh/profiles/web/package.json"),
@@ -1638,8 +1648,12 @@ class EngineManager(private val context: Context, private val pickToken: String?
     val dshRoot = File(homeDir, ".dsh")
     val file = if (importing) SnapshotUserData.importConfiguration(dshRoot, dshDataDir)
       else SnapshotUserData.exportConfiguration(dshRoot, dshDataDir)
+    // 备份名由实现决定（配置文件迁移过：settings.yaml -> cordis.patch.yml），
+    // 这里按同一规则现算并回传，避免前端文案写死文件名后与真实文件对不上（真机缺陷 2026-10-29）。
+    val backup = if (importing) File(file.parentFile, file.name + ".import-backup").name else null
     LogCollector.log(TAG, "active configuration " + (if (importing) "imported: " else "exported: ") + file.name)
     org.json.JSONObject().put("ok", true).put("path", file.absolutePath)
+      .apply { if (backup != null) put("backup", backup) }
       .put("hint", if (importing) "已写入活动配置；引擎会热加载，未生效时可手动重启引擎"
         else "导出的是活动配置，可能包含供应商密钥；共享目录中的副本请妥善保管").toString()
   } catch (t: Throwable) {
@@ -1812,6 +1826,16 @@ class EngineManager(private val context: Context, private val pickToken: String?
       }
       try {
         File(dir, "info.txt").writeText(EngineAuth.redact(buildDiagnosticsText(reason)))
+      } catch (_: Throwable) {
+      }
+      // 修复助手的模型来源证据（候选数 + 每份配置的路径与解析状态）。
+      // 它平时落在 filesDir，引擎已死、助手又打不开时用户没有任何可达路径；
+      // 这里只读复制一份进诊断包，原件不动，方便用户用文件管理器直接取出反馈。
+      try {
+        val evidence = File(context.filesDir, "repair-model-source.json")
+        if (evidence.isFile && evidence.length() <= 256 * 1024) {
+          File(dir, evidence.name).writeText(evidence.readText())
+        }
       } catch (_: Throwable) {
       }
       try {

@@ -371,7 +371,7 @@ class OverlayPanel(private val svc: OverlayService) {
 
     // 输入行：输入框 + 蓝圆发送（白箭头 IconSendOutline16）+ 红圆停止（白方块 rx=3）
     val input = EditText(svc).apply {
-      hint = inputHintFor(false, false)
+      hint = inputHintFor(false, false, UiText.isEnglish(svc))
       textSize = 13f
       isSingleLine = true
       inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
@@ -1257,18 +1257,38 @@ class OverlayPanel(private val svc: OverlayService) {
     }
   }
 
+  /**
+   * 语言切换后重设**常驻** View 的文案。
+   *
+   * picker 窗口每次打开都会重建，所以 [updatePickerRowText] / [refreshInputHint] 会自然跟上；
+   * 而顶行的「隐藏」「查看汇报」是在面板创建时一次性 `t(...)` 赋值、之后不再重建——
+   * 不在这里补一遍，切语言后它们会永远停在上一次的语言（真机缺陷 2026-10-29）。
+   */
+  internal fun applyLanguage() {
+    hideEntryView?.apply {
+      text = t("隐藏", "Hide")
+      contentDescription = t("隐藏悬浮球", "Hide floating ball")
+    }
+    reportEntryView?.apply {
+      text = t("查看汇报", "View report")
+      contentDescription = t("查看工作汇报", "View work report")
+    }
+    // 目标行与输入提示也一并重算：面板开着时切语言，它们同样不会自己重建（内部会顺带刷新 hint）。
+    updatePickerRowText()
+  }
+
   /** Target row text (new-session placeholder or "<label>(current)"). */
   internal fun updatePickerRowText() {
     val row = sessionPicker ?: return
     val current = pickerSessions.firstOrNull { it.id == svc.activeSessionId }
     row.text = if (svc.activeSessionId.isEmpty()) "\uff0b \u65b0\u4f1a\u8bdd"
-    else sessionRowText(current?.label)
+    else sessionRowText(current?.label, UiText.isEnglish(svc))
     refreshInputHint()
   }
 
   /** 输入框提示语随忙态/目标会话变化（S2-11：空闲态发的是新一轮/新会话，不是插话）。 */
   private fun refreshInputHint() {
-    inputBox?.hint = inputHintFor(svc.sessionBusy, svc.activeSessionId.isNotEmpty())
+    inputBox?.hint = inputHintFor(svc.sessionBusy, svc.activeSessionId.isNotEmpty(), UiText.isEnglish(svc))
   }
 
   /** Light refresh on auto-follow (G2: no refetch, no window rebuild — marks only). */
@@ -1459,10 +1479,10 @@ internal const val SESSION_UNKNOWN_LABEL = "未命名会话"
  * 选 mode=steer/queue，空闲时开的是新一轮；目标会话为空时还会先 `session/create` 新建会话。
  * 用错词会让用户误判「这句话会被塞进正在跑的轮次」，或反过来以为空闲时不能发。
  */
-internal fun inputHintFor(busy: Boolean, hasSession: Boolean): String = when {
-  busy -> "发消息可插话…"
-  hasSession -> "发消息开新一轮…"
-  else -> "发消息新建会话…"
+internal fun inputHintFor(busy: Boolean, hasSession: Boolean, english: Boolean = false): String = when {
+  busy -> if (english) "Type to interject…" else "发消息可插话…"
+  hasSession -> if (english) "Type to start a new round…" else "发消息开新一轮…"
+  else -> if (english) "Type to start a new session…" else "发消息新建会话…"
 }
 
 /**
@@ -1473,8 +1493,13 @@ internal fun inputHintFor(busy: Boolean, hasSession: Boolean): String = when {
  * 且截断后既认不出也搜不到。现在一律落到「未命名会话（当前）」：用户至少知道
  * 「这就是当前目标」，而不是面对一串 id。
  */
-internal fun sessionRowText(label: String?): String =
-  (label?.takeIf { it.isNotBlank() } ?: SESSION_UNKNOWN_LABEL) + "（当前）"
+internal fun sessionRowText(label: String?, english: Boolean = false): String =
+  (label?.takeIf { it.isNotBlank() }
+    ?: if (english) SESSION_UNKNOWN_LABEL_EN else SESSION_UNKNOWN_LABEL) +
+    if (english) " (current)" else "（当前）"
+
+/** 未命名会话的英文占位（与 [SESSION_UNKNOWN_LABEL] 同义）。 */
+internal const val SESSION_UNKNOWN_LABEL_EN = "Untitled session"
 
 /** 审批二次确认的有效窗口：超窗即撤臂，避免陈旧待确认态把后来的一次单击变成放行。 */
 internal const val APPROVAL_ARM_MS = 10_000L

@@ -49,6 +49,11 @@ if (process.argv.includes('--self-test')) {
     } else if (typeof opts.sha === 'string') {
       writeFileSync(join(dir, 'app', 'src', 'main', 'assets', 'snapshot.sha256'), opts.sha)
     }
+    // #920：Hard 插件清单也是内嵌构建产物（.gitignore:14 忽略）。默认在场，
+    // 让既有 match 用例继续只测指纹；缺席场景由专门的 noManifest 树覆盖。
+    if (opts.manifest !== false) {
+      writeFileSync(join(dir, 'app', 'src', 'main', 'assets', 'plugin-hard-manifest.json'), '{\"entries\":[]}')
+    }
     return dir
   }
 
@@ -57,8 +62,17 @@ if (process.argv.includes('--self-test')) {
   const noSha = buildTree('nosha', {})
   const badSha = buildTree('badsha', { sha: 'NOT-A-SHA' })
   const noTar = buildTree('notar', { tar: false, sha: 'auto' })
+  const noManifest = buildTree('nomanifest', { sha: 'auto', manifest: false })
 
   const checks = [
+    // #920：清单缺席 + --require 必须硬失败并点名文件（不能只证明「加上去就绿了」）
+    ['Hard 插件清单缺席 + --require → FAILED 且点名 plugin-hard-manifest.json',
+      runGate(['--root', noManifest, '--require']),
+      (r) => r.code === 1 && r.out.includes('plugin-hard-manifest.json')],
+    // #920：CI 净检出（无 tar，连带无清单）→ 仍 SKIP 且计数可见，不得静默绿
+    ['净检出（无 tar）→ SKIP 且 SKIP=1 计数可见，不因清单缺席而 red',
+      runGate(['--root', noTar]),
+      (r) => r.code === 0 && r.out.includes('SKIP=1')],
     ['tar 与声明一致 → PASSED 且 exit 0', runGate(['--root', match]), (r) => r.code === 0 && r.out.includes('SNAPSHOT-FINGERPRINT CHECK PASSED')],
     ['声明与 tar 不一致 → FAILED 且指出「手工替换」', runGate(['--root', mismatch]), (r) => r.code === 1 && r.out.includes('指纹与快照不一致') && r.out.includes('手工替换')],
     ['声明缺席 → FAILED（无法对账）', runGate(['--root', noSha]), (r) => r.code === 1 && r.out.includes('指纹声明缺席')],
@@ -132,4 +146,11 @@ if (actual !== declared) {
     + '  修复：重跑构建链（拷贝 tar 后自动重写声明值），勿手工编辑声明值')
 }
 console.log('PASS  ' + rel(TAR) + ' == ' + rel(SHA_FILE) + '（sha256=' + actual + '）')
+// #920：同一族另一份内嵌资产。tar 在场即要求清单也在场 —— 缺失时运行期 EngineManager
+// 会以 hard-bundle-selection-unverified 拒绝启动引擎，而用户只看到抽象文案（#908/#920）。
+const HARD = join(ASSETS, 'plugin-hard-manifest.json')
+if (!existsSync(HARD)) {
+  fail('Hard 插件清单缺席（' + rel(HARD) + '）——tar 在场却没有该构建产物；运行期会以 hard-bundle-selection-unverified 拒绝启动引擎（#908/#920）；构建链会在拷贝 tar 后一并产出该文件（build-apk-013.ps1 / build-apk.mjs）')
+}
+console.log('PASS  ' + rel(HARD) + ' 在场（Hard 插件清单，' + statSync(HARD).size + ' B）')
 console.log('SNAPSHOT-FINGERPRINT CHECK PASSED')

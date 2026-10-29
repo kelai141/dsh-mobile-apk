@@ -144,6 +144,16 @@ const FILE_PROVIDER_CALLER_ALLOWLIST = new Map([
     references: 1,
     reason: '安装器出口；APK 落在 Documents/dshdata 的更窄映射内',
   }],
+  ['java/com/dsharnessmobile/shell/FileExternalBridge.kt', {
+    references: 2,
+    reason: '外部打开/转发出口；允许面与 PathOpen 共用（FileIncoming.isReaderAllowed + 外部存储根），'
+      + '参数只有设备路径 + MIME，不接受页面传 Uri，且父目录不可授权时干脆不提供目录项',
+  }],
+  ['java/com/dsharnessmobile/shell/PhotoCapture.kt', {
+    references: 1,
+    reason: '原生拍照出口；落点是 cacheDir/attachments 的更窄映射（cache-path name=photo_attachments），'
+      + '且 Uri 由本仓 PhotoCapture.outputDir/rawDir 派生，不接受页面传路径',
+  }],
 ])
 
 function fileProviderPathsResources(manifest) {

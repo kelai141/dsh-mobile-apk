@@ -2,25 +2,27 @@ import test, { after, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import {
-  chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync,
+  chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-// `check-patch-mirror.mjs`（499 行）守「双仓补丁镜像逐字节一致」，但此前**零测试面**：
-// 把 `cmp()` 改成恒等、或把某条清单比对删掉，CI 不会有任何反应。
+// check-patch-mirror.mjs 的镜像判别自证。
 //
-// 这里不改脚本本身（它把 ROOT 写死在十几处，为测试动主干的风险大于收益），而是拿**真实仓库当本侧**、
-// 拿临时目录当对端：`--peer` 本来就接受任意目录（只要含 `scripts/patches/registry.json`）。
-// 对端只造本用例要断言的那几块（patches 三件 + data/ + tests/ + 一个文件型镜像面 + 一个目录型镜像面），
-// 其余 90 多条清单条目走脚本既有的「对端无此文件 ⇒ SKIP」路径 —— 跑得快，也不会因清单增删而假红。
-// peer 只造一次（data + tests 约 12 MB），各用例在它上面破坏再恢复。
+// 2026-10-28 政策：构建 / 门禁 / 校验脚本以 dsh-mobile-apk 为准，协调仓副本差异属正常；
+// 仍要逐字节守的是 scripts/patches/** 与插件 / 子仓镜像目录。本文件给出三组判据：
+//   正控：scripts/ 脚本（含 check-patch-mirror.mjs 自身）差异 -> 必须 PASS；
+//   负控：patch 漂移 -> 必须 FAIL；
+//   负控：plugin 内容漂移 / 清单漂移 -> 必须 FAIL。
+// 被删掉的旧断言（脚本差一个字节就判红）正是本次修掉的误报来源。
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO = dirname(HERE)
 const SCRIPT = join(HERE, 'check-patch-mirror.mjs')
 const PATCHES = ['registry.json', 'apply-patches.mjs', 'README.md']
-const FILE_ENTRY = 'scripts/build-apk-013.ps1'
+const SCRIPT_ENTRY = 'scripts/build-apk-013.ps1'
+const SELF_ENTRY = 'scripts/check-patch-mirror.mjs'
+const CONFIG_ENTRY = 'scripts/control-ops-pending.json'
 
 /**
  * 把复制出来的树权限放开：仓库里的镜像面在磁盘上常是只读位，`cpSync` 会原样保留 ——
@@ -42,7 +44,7 @@ function relax(p) {
   }
 }
 
-/** 从脚本源码的 MIRROR_TOP 里挑第一个目录型条目（插件 / 子仓目录）做清单比对用例。 */
+/** 从脚本源码的 MIRROR_TOP 里挑第一个**实体目录**条目（插件 / 子仓目录）做清单比对用例。 */
 function firstDirEntry() {
   const src = readFileSync(SCRIPT, 'utf8')
   const start = src.indexOf('const MIRROR_TOP = [')
@@ -50,17 +52,23 @@ function firstDirEntry() {
   const entries = [...src.slice(start, src.indexOf(']', start)).matchAll(/^\s*'([^']+)',/gm)].map((m) => m[1])
   const hit = entries.find((rel) => {
     const abs = join(REPO, rel)
-    return existsSync(abs) && statSync(abs).isDirectory()
+    try {
+      // lstat：协调仓的 dsh-host-web-compat 等是符号链接，复制对端会指向真实树，
+      // 后续破坏性用例会误删真实文件，必须跳过。
+      return lstatSync(abs).isDirectory()
+    } catch {
+      return false
+    }
   })
-  assert.ok(hit, 'MIRROR_TOP 里没有目录型条目，本用例需要调整')
+  assert.ok(hit, 'MIRROR_TOP 里没有实体目录条目，本用例需要调整')
   return hit
 }
 
-/** 递归找目录里的第一个普通文件。 */
+/** 递归找目录里的第一个普通文件（不跟随符号链接）。 */
 function firstFile(dir) {
   for (const name of readdirSync(dir)) {
     const full = join(dir, name)
-    const st = statSync(full)
+    const st = lstatSync(full)
     if (st.isDirectory()) {
       const inner = firstFile(full)
       if (inner) return inner
@@ -76,6 +84,23 @@ function run(args) {
   return { status: result.status, out: (result.stdout ?? '') + (result.stderr ?? '') }
 }
 
+/**
+ * 对端缺席用例必须跑在**隔离布局**里：协调仓根下真实存在 dsh-mobile-apk，
+ * 主脚本的候选链会把它当成对端，`--peer <不存在>` 就永远测不到「缺席」分支。
+ * 这里复制一份脚本 + 最小 patches 面到没有 nested APK 的临时根再跑。
+ */
+function runWithoutPeer(args) {
+  const base = mkdtempSync(join(tmpdir(), 'patch-isolated-'))
+  const root = join(base, 'repo')
+  mkdirSync(join(root, 'scripts', 'patches'), { recursive: true })
+  cpSync(SCRIPT, join(root, 'scripts', 'check-patch-mirror.mjs'))
+  for (const f of ['registry.json', 'apply-patches.mjs']) {
+    cpSync(join(REPO, 'scripts', 'patches', f), join(root, 'scripts', 'patches', f))
+  }
+  const result = spawnSync(process.execPath, [join(root, 'scripts', 'check-patch-mirror.mjs'), ...args], { encoding: 'utf8' })
+  return { status: result.status, out: (result.stdout ?? '') + (result.stderr ?? ''), base }
+}
+
 let peer = null
 let dirEntry = null
 
@@ -87,11 +112,10 @@ before(() => {
   for (const sub of ['data', 'tests']) {
     cpSync(join(REPO, 'scripts', 'patches', sub), join(peer, 'scripts', 'patches', sub), { recursive: true })
   }
-  cpSync(join(REPO, FILE_ENTRY), join(peer, FILE_ENTRY))
+  for (const rel of [SCRIPT_ENTRY, SELF_ENTRY, CONFIG_ENTRY]) cpSync(join(REPO, rel), join(peer, rel))
   cpSync(join(REPO, dirEntry), join(peer, dirEntry), { recursive: true })
   relax(peer)
 })
-
 after(() => {
   if (peer === null) return
   relax(peer)
@@ -101,27 +125,72 @@ after(() => {
 test('与本侧逐字节一致的对端树通过（其余清单条目走 SKIP）', () => {
   const { status, out } = run(['--peer', peer])
   assert.equal(status, 0, out)
-  assert.match(out, /PASS  镜像一致: scripts\/build-apk-013\.ps1/)
-  assert.match(out, /PASS  镜像目录清单一致: /)
+  assert.match(out, /PASS {2}镜像目录清单一致: /)
+  assert.match(out, /APK-CANONICAL /)
   assert.match(out, /CHECK-PATCH-MIRROR PASSED/)
+  assert.doesNotMatch(out, /FAIL {2}/)
 })
 
-test('对端某个镜像文件差一个字节就判红（cmp 不是恒等）', () => {
-  const target = join(peer, FILE_ENTRY)
+test('负控：共享控制协议配置漂移仍判红，不能当作脚本副本忽略', () => {
+  const target = join(peer, CONFIG_ENTRY)
   const original = readFileSync(target)
   try {
-    chmodSync(target, 0o644)
-    writeFileSync(target, Buffer.concat([original, Buffer.from('\n# drift\n')]))
+    writeFileSync(target, Buffer.concat([original, Buffer.from('\n ')]))
     const { status, out } = run(['--peer', peer])
     assert.equal(status, 1, out)
-    assert.match(out, /FAIL  镜像一致: scripts\/build-apk-013\.ps1/)
+    assert.match(out, /FAIL {2}镜像一致: scripts\/control-ops-pending\.json/)
+  } finally { writeFileSync(target, original) }
+})
+
+test('正控：scripts/ 构建脚本差异属正常，不判红也不要求同步', () => {
+  const targets = [SCRIPT_ENTRY, SELF_ENTRY]
+  const originals = new Map(targets.map((rel) => [rel, readFileSync(join(peer, rel))]))
+  try {
+    for (const rel of targets) {
+      const target = join(peer, rel)
+      chmodSync(target, 0o644)
+      writeFileSync(target, Buffer.concat([originals.get(rel), Buffer.from('\n# canonical drift is allowed by policy\n')]))
+    }
+    const { status, out } = run(['--peer', peer])
+    assert.equal(status, 0, out)
+    assert.match(out, /APK-CANONICAL {2}\d+ 项 scripts\/ 脚本条目/)
+    assert.doesNotMatch(out, /FAIL {2}镜像一致: scripts\/(build-apk-013\.ps1|check-patch-mirror\.mjs)/)
   } finally {
-    chmodSync(target, 0o644)
+    for (const rel of targets) {
+      chmodSync(join(peer, rel), 0o644)
+      writeFileSync(join(peer, rel), originals.get(rel))
+    }
+  }
+})
+
+test('负控：patch 漂移必须判红（scripts/patches/** 仍逐字节镜像）', () => {
+  const target = join(peer, 'scripts', 'patches', 'README.md')
+  const original = readFileSync(target)
+  try {
+    writeFileSync(target, Buffer.concat([original, Buffer.from('\n# patch drift\n')]))
+    const { status, out } = run(['--peer', peer])
+    assert.equal(status, 1, out)
+    assert.match(out, /FAIL {2}镜像一致: scripts\/patches\/README\.md/)
+  } finally {
     writeFileSync(target, original)
   }
 })
 
-test('对端目录型镜像面少一个文件就判红（清单比对不是只看根路径）', () => {
+test('负控：plugin 内容漂移必须判红（插件镜像面仍是真判据）', () => {
+  const victim = firstFile(join(peer, dirEntry))
+  assert.ok(victim, '对端目录里没有文件')
+  const original = readFileSync(victim)
+  try {
+    writeFileSync(victim, Buffer.concat([original, Buffer.from('\n// plugin drift\n')]))
+    const { status, out } = run(['--peer', peer])
+    assert.equal(status, 1, out)
+    assert.match(out, /FAIL {2}镜像目录内容一致: /)
+  } finally {
+    writeFileSync(victim, original)
+  }
+})
+
+test('负控：plugin 清单一侧少文件必须判红（清单比对不是只看根路径）', () => {
   const victim = firstFile(join(peer, dirEntry))
   assert.ok(victim, '对端目录里没有文件')
   const original = readFileSync(victim)
@@ -129,7 +198,7 @@ test('对端目录型镜像面少一个文件就判红（清单比对不是只�
     unlinkSync(victim)
     const { status, out } = run(['--peer', peer])
     assert.equal(status, 1, out)
-    assert.match(out, /FAIL  镜像目录清单一致: /)
+    assert.match(out, /FAIL {2}镜像目录清单一致: /)
   } finally {
     chmodSync(dirname(victim), 0o755)
     writeFileSync(victim, original)
@@ -137,18 +206,21 @@ test('对端目录型镜像面少一个文件就判红（清单比对不是只�
 })
 
 test('--require-peer 下对端缺席必须判红，不得以 SKIP 结案', () => {
-  const missing = join(tmpdir(), 'patch-peer-absent-' + process.pid)
-  assert.ok(!existsSync(missing))
-  const { status, out } = run(['--peer', missing, '--require-peer'])
-  assert.equal(status, 1, out)
-  assert.match(out, /FAIL  --require-peer：对端树必须在场/)
+  const { status, out, base } = runWithoutPeer(['--peer', join(tmpdir(), 'patch-peer-absent-' + process.pid), '--require-peer'])
+  try {
+    assert.equal(status, 1, out)
+    assert.match(out, /FAIL {2}--require-peer：对端树必须在场/)
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
 })
-
 test('不带 --require-peer 时对端缺席降级为具名 SKIP 且计数', () => {
-  const missing = join(tmpdir(), 'patch-peer-absent-skip-' + process.pid)
-  assert.ok(!existsSync(missing))
-  const { status, out } = run(['--peer', missing])
-  assert.equal(status, 0, out)
-  assert.match(out, /SKIP\(#1\)  镜像层：对端树不在场/)
-  assert.match(out, /CHECK-PATCH-MIRROR PASSED/)
+  const { status, out, base } = runWithoutPeer(['--peer', join(tmpdir(), 'patch-peer-absent-skip-' + process.pid)])
+  try {
+    assert.equal(status, 0, out)
+    assert.match(out, /SKIP\(#1\) {2}镜像层：对端树不在场/)
+    assert.match(out, /CHECK-PATCH-MIRROR PASSED/)
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
 })

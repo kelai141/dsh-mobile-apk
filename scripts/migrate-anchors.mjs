@@ -39,6 +39,57 @@ const ONLY = argv.indexOf('--only') > 0
   ? new Set(argv[argv.indexOf('--only') + 1].split(',').map((s) => s.trim()).filter(Boolean))
   : null
 
+/**
+ * `--only` 的匹配判据（**双向**后缀匹配）。
+ *
+ * #811 缺陷：旧实现只做单向 `rel.endsWith('/' + only)`，即「文档路径以给定名结尾」。
+ * 但文档里同一文件常见三种写法——裸名（`ShellOps.kt`）、相对路径（`src/ShellOps.kt`）、
+ * 全路径（`app/src/main/java/.../ShellOps.kt`），而调用方传的也是其中某一种。
+ * 单向匹配在「文档写裸名、调用方给全路径」时必然漏掉 ⇒ **静默跳过一半锚点**，
+ * dry-run 数字看起来正常，实际只迁了一半。
+ *
+ * 双向三条件：全等 / rel 以 only 结尾 / **only 以 rel 结尾**（后者是 #811 补的）。
+ *
+ * @param rel 文档里的路径原文
+ * @param only 调用方给的 `--only` 集合
+ * @returns 是否命中
+ */
+export function onlyMatches(rel, only) {
+  const a = String(rel).toLowerCase()
+  for (const o of only) {
+    const b = String(o).toLowerCase()
+    if (a === b || a.endsWith('/' + b) || b.endsWith('/' + a)) return true
+  }
+  return false
+}
+
+const SELF_TEST = argv.includes('--self-test')
+if (SELF_TEST) {
+  // 每条断言都必须能在判据退化时变红——否则自检本身是假的。
+  const cases = [
+    // 空集合 = 什么都不命中（`--only` 缺席由调用方用 ONLY=null 表达，不走本判据）
+    ['EMPTY_SET_MATCHES_NOTHING', false, 'app/a.kt', []],
+    ['EXACT', true, 'app/a.kt', ['app/a.kt']],
+    ['DOC_FULL__ONLY_BARE', true, 'app/src/main/java/x/ShellOps.kt', ['ShellOps.kt']],
+    // ↓ #811 的核心：文档写裸名、调用方给全路径。单向匹配在此恒 false。
+    ['DOC_BARE__ONLY_FULL', true, 'ShellOps.kt', ['app/src/main/java/x/ShellOps.kt']],
+    ['DOC_REL__ONLY_FULL', true, 'src/screen-scope.ts', ['plugins/b/src/screen-scope.ts']],
+    ['NO_FALSE_POSITIVE', false, 'app/a.kt', ['app/b.kt']],
+    ['NO_SUBSTRING_FALSE_POSITIVE', false, 'app/ab.kt', ['b.kt']],
+  ]
+  let failed = 0
+  for (const [name, want, rel, list] of cases) {
+    const got = onlyMatches(rel, list)
+    const ok = got === want
+    if (!ok) failed += 1
+    console.log((ok ? '  ok   ' : '  FAIL ') + name + ': onlyMatches(' + JSON.stringify(rel)
+      + ', ' + JSON.stringify(list) + ') = ' + got + ' / want ' + want)
+  }
+  console.log((failed === 0 ? 'MIGRATE-ANCHORS SELF-TEST PASSED' : 'MIGRATE-ANCHORS SELF-TEST FAILED')
+    + '（' + (cases.length - failed) + '/' + cases.length + '）')
+  process.exit(failed === 0 ? 0 : 1)
+}
+
 const fsView = makeFsViewForMigration(ROOT, join(ROOT, '..'))
 
 const text = readFileSync(DOC, 'utf8')
@@ -67,11 +118,7 @@ for (const m of text.matchAll(RE)) {
   // --only 支持**双向后缀匹配**：文档里同一个文件可能写成裸名（screen-scope.ts）、
   // 相对路径（src/screen-scope.ts）或全路径（plugins/dsh-android-bridge/src/screen-scope.ts），
   // 而调用方传的也是其中某一种。只要一方是另一方以 / 分隔的后缀就算命中。
-  if (ONLY && ![...ONLY].some((o) => {
-    const a = rel.toLowerCase()
-    const b = o.toLowerCase()
-    return a === b || a.endsWith('/' + b) || b.endsWith('/' + a)
-  })) continue
+  if (ONLY && !onlyMatches(rel, ONLY)) continue
   const lines = fsView.sourceLines(rel)
   if (lines === null) { report.blocked.push({ ref: whole, reason: '文件不存在或裸名多候选（不猜）' }); continue }
   const line = Number(lineStr)

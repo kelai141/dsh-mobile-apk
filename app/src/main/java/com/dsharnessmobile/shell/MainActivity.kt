@@ -131,6 +131,8 @@ class MainActivity : ComponentActivity() {
   internal val mediaPickerController = MediaPickController(this)
   /** 启动页视频的系统选择器与有界拷贝（注册必须在 STARTED 之前）。 */
   internal val splashImportController = SplashImportController(this)
+  /** 原生拍照（权限 launcher + 相机 ActivityResult 必须在 STARTED 之前注册）。 */
+  internal val photoCaptureController = PhotoCaptureController(this)
 
   /** 开屏视频覆盖层；在 onCreate 建好 root 之后初始化。 */
   private var splashOverlay: SplashOverlay? = null
@@ -1472,6 +1474,9 @@ class MainActivity : ComponentActivity() {
           // 渠道展示名只在创建那一刻取一次：语言一变就必须重建，否则系统设置里的类别名不跟语言走
           //（真机缺陷 2026-10-29：切英文后仍显示「授权请求 / 工作汇报 / 后台动态」）。
           runCatching { NotifyCenter.syncChannelNames(this) }
+          // 常驻浮层面板的固定文案也只在创建时读过 t(...)，不重设就永远停在上一次的语言
+          //（真机缺陷 2026-10-29：切英文后「隐藏 / 查看汇报」仍是中文）。
+          runCatching { OverlayService.instance?.panel?.applyLanguage() }
           stored
         },
         onSettingsPathRequest = { engineManager.settingsDocumentPath() },
@@ -1486,6 +1491,9 @@ class MainActivity : ComponentActivity() {
         } },
         // 0.14.6：设置页「检查更新」——动作与引导页按钮共用同一状态机（ApkUpdateController）。
         onApkUpdate = { action -> apkUpdate.handleBridgeAction(action) },
+        // 原生拍照：只受理并立即返回，最终回执经 window.__dshBridge.onPhotoCaptured 推回页面
+        // （相机是外部 Activity，取景时间不可预知，同步桥会把 JS 线程堵到用户按快门）。
+        onCapturePhoto = { action -> photoCaptureController.handleBridgeAction(action) },
         pickToken = pickToken,
         onRestartEngine = { engineFlow.restart() },  // S3-15：返回 Boolean，页面据此如实反馈
         onShutdownToGuide = { engineFlow.shutdownToGuide() },
@@ -1516,6 +1524,11 @@ class MainActivity : ComponentActivity() {
         onOpenNativePath = { path -> FileIncoming.openWithExternalReader(this, path) },
         // 0.13.7：上游 0.1.5「在外部应用打开」的 Android 落点——系统选择器（MT 管理器 / 系统文件管理）。
         onOpenPathChooser = { path, mode -> PathOpen.openChooser(this, path, mode) },
+        // 0.15.0：文件「外部打开 / 转发」到别的应用——chooser 聚合 ACTION_VIEW + ACTION_SEND，
+        // 两条接收面并列出候选（只发一条会漏掉另一半应用）。
+        onOpenFileExternal = { path, mime, kind ->
+          FileExternalBridge.openOrShare(this, path, mime, kind, UiText.isEnglish(this))
+        },
         // 0.14.0：内置 adb 退役——原 ADB 授权面（shell / 状态 / 允许开关 / 配对 / 端口发现）
         // 的四个桥方法已从 AndroidBridge 移除；特权执行改由 Shizuku UserService（设置页「手机控制」）。
         // 0.13.2 W7：悬浮球开关（控制器处理 overlay 权限引导；onResume 补启已授权的开关）。

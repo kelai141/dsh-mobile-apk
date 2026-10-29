@@ -135,7 +135,7 @@ adb -s <serial> install -r -t out\v<版本>\dsh-mobile-apk-v<版本>-arm64.apk
 4. **一切改动走 PR**：建分支 → 提交（`<type>: <描述>`）→ 推分支 → 开 PR（1-3 标签）→ CI 绿 → 合并 → 删分支。**禁止直接 push `main`**。例外仅限不改仓库内容的外部动作（Release 资产、issue 评论与开关、标签）。
 5. **子仓镜像（幽灵缺陷防线）**：`dsh-client-ui-responsive` / `dsh-host-web-compat` / `dsh-shell-termux` 与协调仓根级目录同源（协调仓那边是符号链接指向本仓），直接在本仓修改即可，没有镜像动作。协调仓独有的源码只有 `plugins/dsh-android-*`：那边改动或 bump 版本后，**必须 robocopy 镜像到本仓 `plugins/<同名目录>`**（src + package.json + **`lib/` 产物**）。漏了 → 云端自包含构建注入旧副本，**编译通过但功能缺失**。
    - 只同步**镜像清单内的文件**，切勿对 `scripts/` 等目录整体 `/MIR`——会删掉本仓独有的设备脚本（真实事故）。
-6. **补丁镜像面**：`scripts/patches/**`、`scripts/check-patch-mirror.mjs`、`scripts/build-apk-013.ps1` 等是协调仓的**逐字节镜像**，单边演进即拒。补丁改动**先合本仓镜像 PR，再合协调仓权威源 PR**。
+6. **补丁镜像面**：`scripts/patches/**` 仍逐字节镜像，补丁改动**先合本仓镜像 PR，再合协调仓权威源 PR**。构建、门禁与校验脚本以本仓为准，协调仓同名历史副本不再要求字节一致；协调仓构建入口委派本仓执行。插件镜像仍按铁律 5，共享 JSON/YAML 配置仍检查一致。
 7. **禁 emoji**：提交信息、PR 标题/描述、文档、标签一律不用。
 8. **工作区卫生**：`.deploy-tmp` 只增不减会拖垮开发机（实测 2026-10-14 达 34.8 GB / 313,393 文件，是开发机第一大空间消耗，文件数本身就在拖慢目录遍历类工具）。每完成一轮交付，在协调仓根跑 `node scripts/clean-deploy-tmp.mjs`（默认 dry-run，`--apply` 执行）。判定口径与保留清单见该脚本头注释；**注册的 git worktree 与近 3 天内活动过的目录一律保留**。
 

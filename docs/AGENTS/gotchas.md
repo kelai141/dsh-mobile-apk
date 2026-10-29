@@ -5,6 +5,167 @@
 > grep 用法：`grep -n "<坑号>\." docs/AGENTS/gotchas.md` 或按关键词（如 `borrowSession`、`MANAGE_EXTERNAL_STORAGE`、`store-rehome`）定位。
 > 维护约定：新坑追加到文末并递增编号；修复后保留条目（教训与历史归档）。
 
+## 禁止裸 `splice` 改代码（同一个错犯了三次，升级为硬规则）
+
+### 实锤
+
+| 次 | 场景 | 后果 |
+|---|---|---|
+| 1 | `NotifyStructureBatch8Test.kt` 冲突按行拼接 | KDoc 与函数体拼断，`SyntaxError` |
+| 2 | `EngineManager.kt` 的 `if (hard == null) {` 块 splice 计数错**多留一行** | 花括号不平衡 → 报错出现在 `UpdateManager.kt` / `WatchdogV2.kt`（`Unresolved reference onlineUpdateActive`），极易误判成 main 坏了 |
+| 3 | `console.html` 的 `__dshConsoleSetLang` 块实际 **5 行**只 splice 了 **3 行** | 留重复 `applyLang(); };` → 第二个 script 块 `SyntaxError` |
+
+### 四条硬规则
+
+1. **禁止裸 `splice` 改代码** —— 首选锚定**字符串**替换（`old` 含足够前后文保证唯一）；必须按行时，splice 前后**断言首尾行原文**（打印出来对一眼），`n` 从实际读出结果来，**不能凭印象**。
+2. **splice 后必跑该语言的语法检查再谈功能验证** —— `node --check`（JS/MJS/内联 script）/ `tsc --noEmit`（TS）/ `:app:compileDebugKotlin`（Kotlin）/ `JSON.parse`。**顺序不能反**：语法都不通过，功能验证的结论没有任何意义。
+3. **报错出现在「别的文件」时先怀疑自己刚改的那一块** —— 块界错位的典型形态是「真正出问题的文件一条错都不报，错误全落在下游受害者上」。排查顺序：`git diff` 看自己改的文件有无重复语句头 / 缺失右花括号 → 数括号配平 → **最后**才看别的文件。
+4. **临时文件的「写→用→删」必须在同一次成功执行内闭合** —— 删除步骤不能跑在可能失败的使用步骤之后。这叫生命周期问题，不只是脚本问题：任何「生成产物 → 消费产物 → 清理产物」的流程都算（构建、测试夹具、迁移脚本）。
+
+**规则 4 的实锤（同一次会话连栽三次）：**
+
+- 上游那次调用自己先失败（JS 语法错），`_blk.txt` **根本没写出来**；
+- 下一条命令是 `node _ins.mjs` 然后 `Remove-Item _blk.txt` —— 脚本因 ENOENT 失败，**但删除照样把原料抹了**；
+- 于是下一轮又没有输入，重复失败三次。
+
+做法：小内容直接**内嵌进执行脚本**（不落中间文件）；必须落文件时，`Remove-Item` 放在同一条命令的**最后**且仅在成功分支执行（先判退出码再删）。
+## 改 Kotlin 控制流后：先看**本文件**括号平衡，再看别的文件报错
+
+**实锤（2026-10-29，一次误判差点以为 main 坏了）。**
+
+用脚本按行 `splice()` 改 `EngineManager.kt` 的 `if (hard == null) {` 块时，**边界算错多留了一行**，文件里出现两个连续的 `if (hard == null) {` → 花括号不平衡 → 类体提前闭合。
+
+**报错却出现在完全无关的文件里**：
+
+```
+e: UpdateManager.kt:160  Unresolved reference 'onlineUpdateActive'
+e: WatchdogV2.kt:334     Unresolved reference 'START_COOLDOWN_MS'
+```
+
+这些符号本是 `EngineManager` 的成员 —— 类体提前关闭后它们不存在了。**第一反应很容易是「main 编译坏了」，实际是我改的文件少了一个 `}`。**
+
+### 判据（顺序不要反）
+
+1. 先 `git diff origin/main -- <你改的那个文件>`，看有没有**重复的语句头**或**缺失的 `}`**；
+2. 再数该文件 `{` / `}` 是否配平；
+3. 最后才看别的文件的报错 —— 它们多半是**受害者**，不是病因。
+
+### 顺带：Kotlin 不接受行首 `+`
+
+多行字符串拼接的 `+` 必须写在**上一行行尾**。写成行首会报 `Syntax error: Expecting '->'`。
+
+## 改「门禁自身判据」的 PR：合前必须报批（#826）
+
+**硬规则。** 触及以下任一项即属此列：
+
+- `scripts/check-*.mjs` 的**判据逻辑**（新增 / 放宽 / 收紧断言）；
+- 门禁的**白名单 / allowlist**（放行一个原本会被拒的项 —— 白名单正是门禁被削弱的典型入口）；
+- `scripts/*-baseline.json` 的**语义内容**。（纯行号重铺的 `*-anchor-baseline.json` 属构建产物，**不算**判据。）
+
+### 合前必须满足两条
+
+1. **负控能变红**：构造一个应被拒的输入，门禁必须 `FAIL`。只证明「加上去就绿了」不算。`--self-test` 要同时有**拒绝例**与**放行例** —— 只测拒绝无法排除「一律拒绝」这种空防线。
+2. **描述写清**：修的是哪条假绿 / 修前怎么绿 / 修后怎么红。
+
+### 为什么
+
+门禁是唯一能拦住「看起来绿其实没验」的那层。放宽它而无人复核，等于把后面所有结论的可信度一起降级。
+
+### 实例
+
+- `#844`（`--force-drift`）：两条 DRIFT 自检（重复判红 / 未变不误报）+ 修前 exit 0 / 修后 exit 1 实测；
+- `#898`（`#808`/`#810` 负控）：两条各自 revert 验红，且**只红自己那条**；
+- `#899`：`FILE_PROVIDER_CALLER_ALLOWLIST` 放行一个调用点 → 所有者具名批准 + 三条条件（精确到 path 前缀 / 负控证明仍会拒 / PR 与发版 notes 写清权限面）。
+## debug 包起不来引擎：assets 里三个 gitignored 构建产物必须同版本配对
+
+**实锤（2026-10-29，查了十几轮）。** debug 包装到设备后引擎起不来，UI 只报泛化文案；真因分两层，都藏在 `.gitignore` 里。
+
+### 坑 1：`snapshot.sha256` 与 `snapshot.tar.xz` 必须自洽
+
+`EngineManager.kt:102-140` 的**启动前预检**比的是两个内嵌资产互相自洽（`assets/snapshot.sha256` 的声明值 vs `assets/snapshot.tar.xz` 的实际 sha256），**与 app 版本、引擎版本都无关**。失配时报 `[runtime-unavailable]`。
+
+两者都是构建产物：`.gitignore:6`（tar.xz）与 `.gitignore:12`（sha256）。**不能只链接其中一个**，也不能链接不同版本的一对。
+
+### 坑 2：`plugin-hard-manifest.json` 也必须一起带，且同版本
+
+`.gitignore:14` 忽略它，但 `EngineManager.kt:1461` 的 `PluginMounts.ensureHard(context, PluginMounts.currentFingerprint(context))` **按运行时快照指纹**查这份清单。缺了或版本不符，报 `stage=hard-bundle-selection-unverified`：
+
+```
+detail=EngineManager.startEngine() 拒启（未拉起引擎进程）：当前版本 Hard 插件清单缺失或与运行时快照不匹配
+```
+
+实测三种配对**全部同一个错**：0.14.10 快照 + 缺清单 / v0.14.9 快照 + 0.14.10 清单 / 0.14.10 快照 + 0.14.10 清单。
+
+### 结论
+
+`installDebug` 出来的包在这套环境里很难过这两道校验。**要跑引擎相关 / UI 级验收，应该用发布链产出的包**（`build-apk-013.ps1 -Fast` 会同时生成快照与 Hard 清单，天然配对），而不是 debug 包。
+
+### worktree 里手动起引擎的最小前提
+
+```powershell
+foreach ($f in @('snapshot.tar.xz','snapshot.sha256','plugin-hard-manifest.json')) {
+  New-Item -ItemType HardLink -Path "app/src/main/assets/$f" -Target "<用户工作区>/app/src/main/assets/$f"
+}
+```
+
+三者版本必须一致；混搭比缺失更难查（报错文案完全相同）。
+
+## 合堆叠 PR：下层禁带 --delete-branch
+
+**实锤（2026-10-29）：`#883` 就是这样丢的。**
+
+`#883` 的 base 是 `#882` 的分支（堆叠 PR）。合 `#882` 时带了 `--delete-branch`，GitHub 立刻删掉该分支，**基于它的 `#883` 被连带自动关闭**。之后：
+
+```
+gh pr edit 883 --base main   -> Cannot change the base branch of a closed pull request
+gh pr reopen 883            -> Could not open the pull request
+```
+
+**PR 不可恢复**：内容还在分支上，但该 PR 已成死链。
+
+### 正确顺序
+
+```
+1. 合下层 PR（不带 --delete-branch）
+2. 把上层 PR 的 base 改成 main（gh pr edit <N> --base main）
+3. 等上层 CI 绿后合上层
+4. 最后再删各分支
+```
+
+### 已经丢了怎么办
+
+用**旧分支**开新 PR（base=main），描述里链回被关闭的原 PR，写清原因与「内容相同」。不要试图 reopen —— GitHub 对 base 分支已删除的 PR 拒绝 reopen。
+
+### 判断能否带 --delete-branch
+
+先查有没有别的开放 PR 以本 PR 的分支为 base（`gh pr list --json baseRefName` 过滤）；有就不能带。
+
+## 解冲突：「保留双方」只对并列追加安全，同结构内部必须内联合并
+
+**实锤两次（2026-10-29，同一个错犯了两遍）：**
+
+| 场景 | 后果 |
+|---|---|
+| `NotifyStructureBatch8Test.kt`：两侧各加 `@Test`，但冲突块切在**函数体中间** | 「保留双方」把 KDoc 与函数体拼断，`SyntaxError: Expecting an element` |
+| `scripts/patches/apply-patches.mjs`：两侧各往**同一个 `IMPLS` 对象**加一条实现 | 「保留双方」并列拼两段，缺收尾 `},`，`SyntaxError: Unexpected token 'const'`（报错落在文件很后面的 `const regIds`，与真正的错点无关） |
+
+### 规则
+
+1. **先判断冲突块在什么结构里**：同一 `{}` / 同一函数体 / 同一数组 / 同一表格 / 独立顶层声明。
+2. **并列追加**（数组元素、列表项、表格行、彼此独立的 `@Test` 函数）→ 才能「保留双方」。
+3. **同一对象字面量 / 同一语句列表 / 同一函数体内部** → **内联合并**：把两侧成员合进同一个结构的内部，收尾符号只留一份。
+4. **解完必须跑结构级检查，不能只看门禁绿**：
+   - `node --check` **全部** `.js`/`.mjs`（不是只查改动的那个）；
+   - `JSON.parse` 每个改过的 JSON；
+   - `tsc --noEmit`（TS 侧）；
+   - Kotlin 编译（`:app:compileDebugUnitTestKotlin` 或 `:app:testDebugUnitTest`）；
+   - 再跑 `check-code-map`。
+
+**为什么门禁绿不够**：`check-code-map` 只查文档锚点与覆盖，不解析 JS 语法。上面两次都是 `check-code-map` 绿、`node --check` 才红——而且红的位置离真正的错点很远，靠读报错行号找不到根因。
+
+### 附带教训：夹具哈希不要手改
+
+`scripts/check-patch-fixtures.mjs:41` 拿 `manifest.capture.registrySha256` 与 `sha256(registry.json)` 比对。改 registry 后它必然失配——**手改哈希能让它绿，但那只是仪式**：`overlaySha256` / `discoveredTargets` 来自真实构建，新补丁没有对真实字节验证过。正确动作是重新捕获（需真实构建），否则就是假绿。
 ## 6. 关键实现细节与坑（每次踩坑必须登记）
 
 1. **realpath 前缀混用（B7 运行时表现，已修）**：Android 上 `/data/user/0` 可能是 `/data/data` 的软链——只把「文件侧」realpath 后再与未 realpath 的 ws 比较必拒。修复：`safeResolveInside` **两侧都 realpath**（ws 侧失败按原样参与），symlink 目标按 `dirname(rel)` 解析（`../../LICENSES` 从 `doc/<pkg>/` 出发 = `share/LICENSES`）。**新路径校验代码一律双侧规范化。**

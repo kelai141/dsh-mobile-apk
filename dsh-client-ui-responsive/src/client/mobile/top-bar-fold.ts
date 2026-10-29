@@ -23,7 +23,7 @@ import { HeaderPopups } from './header-popups.ts'
 
 /** 上游标题栏插件 UI 的座位（稳定属性，非 hashed 类名）。 */
 const ACTIONS_SELECTOR = 'div[data-slot="conversation.session.header.actions"]'
-/** 上游视图标签条（ConversationSession.tsx:143 的稳定锚点）。箭头挂在**它的父行**上，不挂它内部。 */
+/** 上游视图标签条（ConversationSession.tsx:143 的稳定锚点）。箭头挂在**它内部**末位。 */
 const TABS_SELECTOR = '[data-conversation-tabs]'
 /** 承载标题行 containment 的那一行（上游 .titleRow 带 container-type: inline-size）。 */
 const TITLE_ROW_FALLBACK = 'div[data-slot="conversation.session.header"] > div'
@@ -241,8 +241,13 @@ export class TopBarFold {
    * 又往行尾追加节点（例如「…」菜单晚一步出现），箭头就不再是最右了。
    */
   private ensureArrow(): void {
-    const tabs = document.querySelector<HTMLElement>(TABS_SELECTOR)
-    const host = tabs?.parentElement ?? null
+    // 挂进标签条**本身**，不是它的父行。
+    //
+    // 父行里还有「…」菜单等兄弟节点，把箭头 append 到父行只能保证它是**父行**的末位，
+    // 与「标签行最右侧」不是一回事（实机实测：父行末位时箭头 x=548，视口宽 600，
+    // 而最后一个标签的右边界只有 112，中间空出整段）。挂进标签条后箭头紧贴最后一个
+    // 标签，才是需求说的位置。
+    const host = document.querySelector<HTMLElement>(TABS_SELECTOR)
     if (host === null) return
     if (this.arrow !== null && this.arrowHost === host && host.lastElementChild === this.arrow) return
     // 方向对但位置不是末位：原地重挂即可，不必重建按钮（保焦点/保已绑监听）。

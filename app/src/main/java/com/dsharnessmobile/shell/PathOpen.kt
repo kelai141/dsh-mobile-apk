@@ -92,7 +92,16 @@ object PathOpen {
    * 不因这条放宽（2026-08-23 安全审计 CRITICAL 的结论只针对那条引擎驱动出口）。
    * 应用私有区仍严格：`.dsh` 其余部分（.credentials.yaml 等）永不进选择器。
    */
-  private fun isChooserAllowed(activity: MainActivity, file: File): Boolean {
+  fun isChooserAllowed(activity: MainActivity, file: File): Boolean = isChooserAllowedFor(activity, file)
+
+  /**
+   * 允许面判定（[isChooserAllowed] 的实现体；0.15.0 起对 [FileExternalBridge] 开放）。
+   *
+   * 为什么让两个出口共用同一份判据：openFileExternal / shareFile 与 openPathChooser
+   * 做的是同一件事（把设备路径变成可交给别的应用的 Uri），允许面若各写一份，必然漂移成
+   * 「某个按钮能分享、另一个不能」这种无法解释的差异。
+   */
+  internal fun isChooserAllowedFor(activity: MainActivity, file: File): Boolean {
     if (FileIncoming.isReaderAllowed(activity, file)) return true
     return try {
       val canon = file.canonicalPath

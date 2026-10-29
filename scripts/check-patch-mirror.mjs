@@ -15,11 +15,16 @@
 // <root>/..（该目录含 scripts/patches 即认）。对端缺席时镜像层跳过并提示（CI 单仓
 // checkout 场景应显式 checkout 对端后运行，见两仓 pr-gate.yml）。
 //
-// 用法：node scripts/check-patch-mirror.mjs [--self] [--peer <dir>]
+// 2026-10-28 政策：构建 / 门禁 / 校验脚本以 dsh-mobile-apk 仓为准，本仓只留历史副本。
+// 因此 `scripts/**` 的脚本条目不再逐字节比对（差异属正常）；真正的镜像面仍是
+// `scripts/patches/**`（本文件 A/B 两层照旧）与插件 / 子仓镜像目录。
+//
+// 用法：node scripts/check-patch-mirror.mjs [--self] [--peer <dir>] [--self-test]
 // 退出码：0 = 全部通过；1 = 失败（构建链与 CI 以此拒打包/拒合并）。
 import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs'
 import { join, dirname, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { spawnSync } from 'node:child_process'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = dirname(HERE)
@@ -30,6 +35,13 @@ const SELF_ONLY = argv.includes('--self')
 // review C7：CI 跨仓检出必须硬失败——对端缺席不得以 SKIP 结案（否则检出步骤一旦被软化，
 // 镜像防线静默消失）。CI / 发布链一律带 --require-peer。
 const REQUIRE_PEER = argv.includes('--require-peer')
+
+// L1 门禁自证入口：政策正控（脚本差异正常）与负控（patch / plugin 漂移必须判红）
+// 都在配套的 check-patch-mirror.test.mjs 里。这里只做转接，避免把判据复制成第二份。
+if (argv.includes('--self-test')) {
+  const result = spawnSync(process.execPath, ['--test', join(HERE, 'check-patch-mirror.test.mjs')], { stdio: 'inherit' })
+  process.exit(result.status === 0 ? 0 : 1)
+}
 
 const failures = []
 // ST-31：任何 SKIP 必须计数（发布链要求 SKIP=0；本门禁的 SKIP 只有一种合法形态——
@@ -213,10 +225,9 @@ if (peer) {
   } catch (e) {
     check('tests/ 目录可枚举', false, String(e).slice(0, 200))
   }
-  // 门禁链自身也在镜像面（0.13.8 批 H 补线）：build-apk-013.ps1 与两个常驻门禁脚本
-  // 单边演进同样造成「云端自包含构建跑旧门禁/旧脚本」的幽灵面——本仓曾出现
-  // bounded-io 门禁只落在 apk 兜、协调仓脚本仍带 Join-Path 拼写缺陷而无人察觉。
-  // 对端缺该文件时跳过（apk 仓独占脚本合法）。
+  // 以下构建 / 门禁脚本条目自 2026-10-28 政策起以 APK 仓为准：本文件会按 scripts/ 前缀
+  // 跳过它们的字节比对（见下方 isApkCanonicalScript），保留清单只为记录历史镜像面。
+  // 真正仍逐字节守的是 scripts/patches/** 与插件 / 子仓目录。
   const MIRROR_TOP = [
     'scripts/build-apk-013.ps1',
     // Shared per-ABI terminal build stage, used by both the local and portable
@@ -238,10 +249,8 @@ if (peer) {
     'scripts/gen-model-catalog.mjs',
     'scripts/resolve-version-suffix.mjs',
     'scripts/resolve-version-suffix.test.mjs',
-    // 门禁脚本**自身**也必须在镜像面（AGENTS.md 铁律 6 明文声明：「scripts/patches/** 与
-    // scripts/check-patch-mirror.mjs 是双仓逐字节镜像，单边演进必拒」）。此前它没被自己列进
-    // MIRROR_TOP，于是 apk 副本可以长期落后而本门禁**永远不会报**——本轮实测就是如此
-    // （coord 306 行 vs apk 305 行，差 P0-c 的 manage 条目）。自指条目是本门禁唯一的自守面。
+    // 自指条目按 2026-10-28 政策同样不比字节（APK 为 canonical）：本仓副本可以落后，
+    // 但本门禁仍会守住 patches 与插件面。旧实现把自身列入逐字节比对，已随政策修正。
     'scripts/check-patch-mirror.mjs',
     // The UI provider E2E helper accepts credential material; its secrecy guards
     // and extracted-function regression must not drift in the APK mirror.
@@ -400,8 +409,8 @@ if (peer) {
     // 冷启动预算门禁（0.14.1 块F P0-2）：脚本 + 其消费的探针口径实现都双仓同源——只有一侧更新
     // 判据会让另一侧以旧口径判绿（设备实测的 -1 正是「口径不同步」类事故）。
     'scripts/check-boot-budget.mjs',
-    // 快照构建器产出面门禁（0.14.1 P0 反回归）：它断言「两树同版: build-snapshot-013.mjs」，
-    // 故必须自身也在镜像面——脚本若单边演进，云端链就不会跑这条反回归防线。
+    // 快照构建器产出面门禁（0.14.1 P0 反回归）：条目保留；按 2026-10-28 政策，
+    // 脚本差异不比字节（APK canonical），它自身的产出面 / 路径同源判据仍由聚合链执行。
     'scripts/check-snapshot-builder-output.mjs',
     // 浏览器语法下限门禁（0.14.1 块C G-1）：构建期降级原语 + 判据都双仓同源——云端自包含构建会用
     // apk 仓副本跑降级与判据，单边演进 = 两侧对「发往浏览器的 bundle 语法下限」口径分裂。
@@ -446,7 +455,19 @@ if (peer) {
     /\.tgz$/,
   ]
   const mirrorKept = (rel, x) => !MIRROR_SKIP.some((re) => re.test(rel + '/' + x))
+  /**
+   * 2026-10-28 政策：构建 / 门禁 / 校验脚本由 dsh-mobile-apk 维护，协调仓副本不再要求同步。
+   * `scripts/patches/**` 不在此面（它由上方 MIRROR_FILES / data / tests 段单独逐字节守），
+   * 这里只排除可执行脚本扩展名；共享 JSON/YAML 配置继续比对，不能因目录名而被一起排除。
+   */
+  const isApkCanonicalScript = (rel) => rel.startsWith('scripts/') &&
+    !rel.startsWith('scripts/patches/') && /\.(?:mjs|cjs|js|py|ps1|sh)$/.test(rel)
+  let canonicalSkipped = 0
   for (const rel of MIRROR_TOP) {
+    if (isApkCanonicalScript(rel)) {
+      canonicalSkipped += 1
+      continue
+    }
     const mine = join(ROOT, rel)
     const theirs = join(peer, rel)
     if (!existsSync(mine)) {
@@ -489,6 +510,9 @@ if (peer) {
   }
   if (eolWarns.length > 0) {
     console.log(`WARN  仅行尾差异（git blob 层一致则无碍；本机为工作树 autocrlf 噪声）: [${eolWarns.join(', ')}]`)
+  }
+  if (canonicalSkipped > 0) {
+    console.log(`APK-CANONICAL  ${canonicalSkipped} 项 scripts/ 脚本条目按 2026-10-28 政策不比字节（以 dsh-mobile-apk 为准；不计 SKIP）`)
   }
 }
 

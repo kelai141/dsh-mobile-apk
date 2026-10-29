@@ -155,7 +155,7 @@ internal object UserCopy {
    */
   fun reportMetaLine(durationLabel: String, toolCount: Int, app: android.content.Context? = null): String {
     val parts = ArrayList<String>(2)
-    if (durationLabel.isNotBlank()) parts.add("用时 $durationLabel")
+    if (durationLabel.isNotBlank()) parts.add(UiText.t(app, "用时 $durationLabel", "Duration $durationLabel"))
     parts.add(UiText.t(app, "工具 ×$toolCount", "Tools ×$toolCount"))
     return parts.joinToString(" · ")
   }

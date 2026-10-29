@@ -21,6 +21,7 @@
 //   node scripts/check-code-map.mjs --refresh-anchor-baseline # Refresh reviewed legacy anchor snapshots
 // 退出码：0 = 通过；1 = 有失败项；2 = 前置不满足（文档缺失/文档缺账本块）。
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { refreshCompletenessProblem } from './lib/refresh-guard.mjs'
 import { dirname, join, relative, resolve as resolvePath } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createHash } from 'node:crypto'
@@ -719,16 +720,23 @@ export function checkDoc(text, universe, fsView, anchorBaseline = ANCHOR_BASELIN
     }
     const key = path + '#' + symbol
     if (symbolHash !== undefined) {
-      const bodyHashes = new Set(hit.body.split('\n').map((l) => contentHashOf(l)))
+      // #807：判据是**唯一性**，不是成员性 —— 旧实现用 Set 做 `has`，符号体内任意一行匹配就算过，
+      // 内容重复出现时永不判红，锚点被废掉（永绿假锚点）。耦合边证据走 EVIDENCE_RE 纯正则、不经这里。
+      const bodyLines = hit.body.split('\n')
+      const occurrences = bodyLines.filter((l) => contentHashOf(l) === symbolHash).length
       const expected = (anchorBaseline.symbolHashes ?? {})[key + '@' + symbolHash]
       if (expected === undefined) {
         push('symbol-unbaselined', 'Symbol-hash anchor has no baseline entry (run --refresh-anchor-baseline): '
           + key + '@' + symbolHash)
         return
       }
-      if (!bodyHashes.has(symbolHash)) {
+      if (occurrences === 0) {
         push('symbol-content-drift', 'Anchored line content vanished from ' + key + '@' + symbolHash
           + '（定义行 ' + hit.line + '）; rerun --refresh-anchor-baseline after review')
+      } else if (occurrences > 1) {
+        push('symbol-content-ambiguous', 'Anchored line content appears ' + occurrences
+          + ' times in ' + key + '@' + symbolHash + '; the anchor cannot pin a single line —'
+          + ' narrow the symbol or pick a unique line')
       }
       return
     }
@@ -1106,6 +1114,219 @@ function selfTest() {
     const plan2 = planLegacySourceLines(new Set(Object.keys(base)), base, same)
     driftCases.push(['DRIFT 内容未变不误报', plan2.contentDrift.length === 0])
   }
+  // ── #808 / #810 负控（此前无覆盖：改回原实现后 self-test 与门禁都不红）──────
+  //
+  // 断言取在**真实代码**上，不是手写样本。以下两段为**内嵌片段**，本文件因此不依赖仓库；
+  // 源码改动后请按下表对照更新（改的是真实行为，不是让断言迁就代码）。
+  //
+  // 来源：app/src/main/java/com/dsharnessmobile/shell/RepairConversationStore.kt
+  // 取的是**整篇**（该文件 1-138 行），不是裁剪片段 —— 裁剪会破坏花括号配平：
+  //   该文件里 `fun list(...)` 的体结束于原第 37 行，而 `internal object RepairConversationStore {`
+  //   结束于文件末行。只截 16-36 行会让 `matchingBrace` 算错闭合行 → `hasEnclosingFun` 判错 →
+  //   夹具会**假失败**（实测踩过两次）。
+  //
+  // 涉及的**两个**同名声明（都叫 `id`，这是本条用例的核心）：
+  //   ① 原第 17 行  `  val id: String,`                    —— `internal data class RepairConversation` 的构造属性，**类成员**
+  //   ② 原第 33 行  `      val id = ref.optString("id")`   —— `internal object RepairConversationStore` 里 `fun list(...)` 体内的**局部 val**
+  //
+  // #810 断言：对 ② 那一行调 `deriveAnchorFor` 必须回落成外层函数 `list`，不能解析成 `id`。
+  //   实测（origin/main）：{ok:true, symbol:'list', hash:'c1301759', line:31, kind:'symbol'}。
+  //   把 `isLocalValueDecl` 改成恒 `false` 后，② 会被当成成员 → symbol 变 `id` → 断言变红。
+  {
+    const RC_LINES = [
+      "package com.dsharnessmobile.shell",
+      "",
+      "import java.io.File",
+      "import java.util.UUID",
+      "import org.json.JSONArray",
+      "import org.json.JSONObject",
+      "",
+      "/** A compact reference shown in the native conversation drawer. */",
+      "internal data class RepairConversationRef(val id: String, val title: String)",
+      "",
+      "/**",
+      " * A durable repair conversation. Request history and visible events are stored",
+      " * separately: history keeps provider responses byte-for-byte stable, while",
+      " * events reproduce tool cards and notices without changing model context.",
+      " */",
+      "internal data class RepairConversation(",
+      "  val id: String,",
+      "  val title: String,",
+      "  val history: JSONArray,",
+      "  val events: JSONArray,",
+      "  val modelIdentity: String? = null,",
+      "  val reasoningEffort: String? = null,",
+      ")",
+      "",
+      "/** Private JSON storage for the native repair chat. No external runtime is used. */",
+      "internal object RepairConversationStore {",
+      "  private const val MAX_CONVERSATIONS = 50",
+      "  private const val INDEX_FILE = \"index.json\"",
+      "  private val lock = Any()",
+      "",
+      "  fun list(rootDir: File): List<RepairConversationRef> = synchronized(lock) {",
+      "    readIndex(rootDir).mapNotNull { ref ->",
+      "      val id = ref.optString(\"id\")",
+      "      if (!validId(id) || !sessionFile(rootDir, id).isFile) return@mapNotNull null",
+      "      RepairConversationRef(id, ref.optString(\"title\").ifBlank { \"修复会话\" })",
+      "    }",
+      "  }",
+      "",
+      "  fun create(rootDir: File, title: String = \"新的修复\"): RepairConversation = synchronized(lock) {",
+      "    val id = UUID.randomUUID().toString()",
+      "    val session = RepairConversation(id, title, JSONArray(), JSONArray())",
+      "    writeSession(rootDir, session)",
+      "    val refs = readIndex(rootDir).filter { it.optString(\"id\") != id }.toMutableList()",
+      "    refs.add(0, JSONObject().put(\"id\", id).put(\"title\", title))",
+      "    writeIndex(rootDir, refs.take(MAX_CONVERSATIONS))",
+      "    prune(rootDir, refs.take(MAX_CONVERSATIONS))",
+      "    session",
+      "  }",
+      "",
+      "  fun load(rootDir: File, id: String): RepairConversation? = synchronized(lock) {",
+      "    if (!validId(id)) return null",
+      "    val file = sessionFile(rootDir, id)",
+      "    if (!file.isFile) return null",
+      "    val root = runCatching { JSONObject(file.readText()) }.getOrNull() ?: return null",
+      "    val title = root.optString(\"title\").ifBlank { \"修复会话\" }",
+      "    RepairConversation(",
+      "      id = root.optString(\"id\").takeIf(::validId) ?: id,",
+      "      title = title,",
+      "      history = root.optJSONArray(\"history\") ?: JSONArray(),",
+      "      events = root.optJSONArray(\"events\") ?: JSONArray(),",
+      "      modelIdentity = root.optString(\"modelIdentity\").takeIf { it.isNotBlank() },",
+      "      reasoningEffort = root.optString(\"reasoningEffort\").takeIf { it.isNotBlank() },",
+      "    )",
+      "  }",
+      "",
+      "  fun save(rootDir: File, session: RepairConversation) = synchronized(lock) {",
+      "    require(validId(session.id)) { \"invalid conversation id\" }",
+      "    writeSession(rootDir, session)",
+      "    val refs = readIndex(rootDir).filter { it.optString(\"id\") != session.id }.toMutableList()",
+      "    refs.add(0, JSONObject().put(\"id\", session.id).put(\"title\", session.title))",
+      "    writeIndex(rootDir, refs.take(MAX_CONVERSATIONS))",
+      "    prune(rootDir, refs.take(MAX_CONVERSATIONS))",
+      "  }",
+      "",
+      "  fun delete(rootDir: File, id: String) = synchronized(lock) {",
+      "    if (!validId(id)) return@synchronized",
+      "    sessionFile(rootDir, id).delete()",
+      "    writeIndex(rootDir, readIndex(rootDir).filter { it.optString(\"id\") != id })",
+      "  }",
+      "",
+      "  private fun validId(id: String): Boolean = id.matches(Regex(\"[A-Za-z0-9-]{8,80}\"))",
+      "",
+      "  private fun root(rootDir: File): File =",
+      "    File(rootDir, \"native-repair/conversations\").apply { mkdirs() }",
+      "",
+      "  private fun sessionFile(rootDir: File, id: String): File {",
+      "    require(validId(id)) { \"invalid conversation id\" }",
+      "    return File(root(rootDir), \"session-\" + id + \".json\")",
+      "  }",
+      "",
+      "  private fun readIndex(rootDir: File): MutableList<JSONObject> {",
+      "    val file = File(root(rootDir), INDEX_FILE)",
+      "    if (!file.isFile) return mutableListOf()",
+      "    val array = runCatching { JSONArray(file.readText()) }.getOrNull() ?: return mutableListOf()",
+      "    val result = mutableListOf<JSONObject>()",
+      "    for (i in 0 until array.length()) {",
+      "      array.optJSONObject(i)?.let { result += JSONObject(it.toString()) }",
+      "    }",
+      "    return result",
+      "  }",
+      "",
+      "  private fun writeIndex(rootDir: File, refs: List<JSONObject>) {",
+      "    val array = JSONArray()",
+      "    refs.forEach { array.put(JSONObject(it.toString())) }",
+      "    atomicWrite(File(root(rootDir), INDEX_FILE), array.toString())",
+      "  }",
+      "",
+      "  private fun writeSession(rootDir: File, session: RepairConversation) {",
+      "    val root = JSONObject()",
+      "      .put(\"id\", session.id)",
+      "      .put(\"title\", session.title)",
+      "      .put(\"history\", JSONArray(session.history.toString()))",
+      "      .put(\"events\", JSONArray(session.events.toString()))",
+      "    session.modelIdentity?.let { root.put(\"modelIdentity\", it) }",
+      "    session.reasoningEffort?.let { root.put(\"reasoningEffort\", it) }",
+      "    atomicWrite(sessionFile(rootDir, session.id), root.toString())",
+      "  }",
+      "",
+      "  private fun prune(rootDir: File, retained: List<JSONObject>) {",
+      "    val ids = retained.mapTo(HashSet()) { it.optString(\"id\") }",
+      "    root(rootDir).listFiles { file -> file.name.startsWith(\"session-\") }.orEmpty().forEach { file ->",
+      "      val id = file.name.removePrefix(\"session-\").removeSuffix(\".json\")",
+      "      if (id !in ids) file.delete()",
+      "    }",
+      "  }",
+      "",
+      "  private fun atomicWrite(target: File, text: String) {",
+      "    val temp = File(target.parentFile, target.name + \".tmp\")",
+      "    temp.writeText(text)",
+      "    // 复用仓内标准（Files.move ATOMIC_MOVE + 不先删目标的单次回退）：renameTo 在部分文件系统上",
+      "    // 失败的旧回退是直写 target，崩溃窗口内半写文件会被 load 的容错当「不存在」整段丢弃（#511）。",
+      "    if (!AtomicFileReplace.publish(temp, target)) {",
+      "      target.writeText(text)",
+      "      temp.delete()",
+      "    }",
+      "  }",
+      "}",
+      ""
+    ]
+    const idxLocalVal = RC_LINES.findIndex((l) => l.includes('val id = ref.optString'))
+    const rLocal = idxLocalVal < 0 ? { ok: false, symbol: '' } : deriveAnchorFor(RC_LINES, idxLocalVal + 1)
+    driftCases.push([
+      'DEF #810 局部 val 不成为符号（应回落到外层 fun list）',
+      rLocal.ok === true && rLocal.symbol === 'list',
+    ])
+
+    // #808：同名符号只出现在注释 / 调用点时不得计入定义处。
+    // 实测：definitionSitesOf 对样本只返回 1 处；去掉 bareMember 的「行首是 name 且无 =」收紧后
+    // 会把 flush() 调用点也算进来（返回 2），本断言变红。
+    const src808 = [
+      'fun helper() {',
+      '  // flush() 在注释里出现',
+      '  flush()',
+      '}',
+      '',
+      'fun flush() {',
+      '  return 1',
+      '}',
+    ]
+    driftCases.push([
+      'DEF #808 注释/调用点不算定义（应为 1 处）',
+      definitionSitesOf(src808, 'flush').length === 1,
+    ])
+  }
+
+  // ── #807 负控 + 放行例（判据：@hash 必须在符号体内唯一）─────────────
+  //
+  // 应在什么形态红：同一行内容在符号体内出现 >1 次 —— 锚点钉不住唯一一行，
+  //   改了其中一处、另几处仍匹配 ⇒ 永绿假锚点。
+  // 什么形态会误红：① 耦合边证据走 EVIDENCE_RE 纯正则、不经本函数的符号解析，
+  //   必须不受影响（见下方 COUPLING 块为空时不应产生 bad-coupling）；
+  //   ② 内容唯一时不得红。
+  {
+    const mkDoc = (h) => ['# T', '', '<!-- COVERAGE -->', 'app/a.kt', '<!-- COVERAGE-END -->', '',
+      '<!-- TABLE-ROW -->', '| B01 | x | `app/a.kt#f@' + h + '` |', '<!-- TABLE-ROW-END -->', '',
+      '<!-- COUPLING -->', '<!-- COUPLING-END -->', ''].join(String.fromCharCode(10))
+    const dupLines = ['fun f() {', '  log()', '  log()', '}']
+    const unoLines = ['fun f() {', '  once()', '}']
+    const hd = contentHashOf('  log()')
+    const hu = contentHashOf('  once()')
+    const rDup = checkDoc(mkDoc(hd), universe, mk({ 'app/a.kt': dupLines }), {
+      symbols: { 'app/a.kt#f': dupLines.join(String.fromCharCode(10)) },
+      symbolHashes: { ['app/a.kt#f@' + hd]: true },
+    })
+    const rUno = checkDoc(mkDoc(hu), universe, mk({ 'app/a.kt': unoLines }), {
+      symbols: { 'app/a.kt#f': unoLines.join(String.fromCharCode(10)) },
+      symbolHashes: { ['app/a.kt#f@' + hu]: true },
+    })
+    driftCases.push(['AMB #807 内容在符号体内重复必须判红',
+      rDup.issues.some((i) => i.kind === 'symbol-content-ambiguous')])
+    driftCases.push(['AMB #807 内容唯一不得误红（含耦合边证据不受影响）',
+      !rUno.issues.some((i) => i.kind === 'symbol-content-ambiguous')])
+  }
   for (const [name, okc] of driftCases) {
     if (okc) pass += 1
     lines.push((okc ? '  ok   ' : '  FAIL ') + name)
@@ -1262,6 +1483,16 @@ if (isMain) {
         }
         symbolHashes[a.path + '#' + a.symbol + '@' + a.symbolHash] = true
       }
+    }
+    // #868：写盘前断言，禁止「静默丢符号锚点基线」。判据与自检见 scripts/lib/refresh-guard.mjs。
+    const refreshGuard = refreshCompletenessProblem(
+      symbolKeys, symbols, symbolHashes,
+      Object.keys(anchorBaselineSymbols()), Object.keys(anchorBaselineSymbolHashes()),
+    )
+    if (refreshGuard !== null) {
+      console.error('Refusing to refresh: ' + refreshGuard)
+      console.error('This is how a silent baseline downgrade happens — check whether the anchors changed form.')
+      process.exit(1)
     }
     writeFileSync(ANCHOR_BASELINE_ABS, JSON.stringify({
       formatVersion: 2,

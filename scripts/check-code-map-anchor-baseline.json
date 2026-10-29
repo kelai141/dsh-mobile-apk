@@ -793,7 +793,6 @@
     "plugins/dsh-android-vdisplay/src/index.ts:162": 1,
     "VdisplayController.kt:233": 1,
     "plugins/dsh-android-vdisplay/src/client/index.ts:93": 1,
-    "dsh-client-ui-responsive/src/client/index.ts:192": 1,
     "facts.ts:50": 1,
     "index.ts:69": 1,
     "index.ts:31": 1,
@@ -838,7 +837,6 @@
     "app/src/main/java/com/dsharnessmobile/shell/FileIncoming.kt:97": 2,
     "dsh-host-web-compat/lib/index.js:770": 2,
     "index.ts:125": 1,
-    "dsh-client-ui-responsive/src/client/index.ts:352": 1,
     "form-marker.ts:88": 1,
     "mobile-form.css.ts:26": 1,
     "mobile-settings.css.ts:15": 2,
@@ -981,7 +979,6 @@
     "scripts/patches/data/registry-scan-c4.mjs:11": 1,
     "scripts/patches/data/client-index-loader-barrier.mjs:3": 1,
     "scripts/patches/data/undo-safe-transaction-snippet.mjs:1": 1,
-    "apply-patches.mjs:519": 1,
     "scripts/build-apk-013.ps1:427": 2,
     "scripts/build-snapshot-013.mjs:31": 1,
     "scripts/build-snapshot-013.mjs:297": 1,
@@ -1096,19 +1093,19 @@
       "background = android.graphics.drawable.ColorDrawable(0xFFF2F2F2.toInt())"
     ],
     "AndroidBridge.kt:319": [
-      "/**"
+      "}"
     ],
     "AndroidBridge.kt:325": [
-      "@JavascriptInterface"
+      "/**"
     ],
     "AndroidBridge.kt:375": [
-      "fun setOverlayEnabled(enable: Boolean): Boolean = onSetOverlayEnabled(enable)"
+      ""
     ],
     "AndroidBridge.kt:423": [
-      "fun browserHostViewport(viewport: String): String = onBrowserHostViewport(viewport)"
+      "/** Persist one normalized screen scope selected from the DSH settings surface. */"
     ],
     "AndroidBridge.kt:611": [
-      "* 立即返回 `{ok, code:repair-started|repair-running, running, startedAt, ...}`；"
+      "* 2026-09-30 主人定例：应用级 root 授权状态读面（**纯读，永不触发授权弹窗**）。"
     ],
     "ApkUpdateAction.kt:261": [
       ""
@@ -1246,13 +1243,13 @@
       "val missing = RuntimeTree.missingEntries("
     ],
     "EngineManager.kt:1463": [
-      "}"
+      "val assetPresent = runCatching {"
     ],
     "EngineManager.kt:1464": [
-      "val hardBundleRepair = PluginMounts.ensureHardBundlesSelected("
+      "context.assets.list(\"\")?.contains(PluginMounts.HARD_ASSET) == true"
     ],
     "EngineManager.kt:1552": [
-      "// the flag is the official engine CLI switch (see bin.js docs)."
+      "// （快照刷新中 / 引擎已在跑）。故 provisionPublicRepo 另由 MainActivity 的 onCreate/onResume"
     ],
     "EngineManager.kt:238": [
       "//"
@@ -1387,109 +1384,109 @@
       "\"unreadable\""
     ],
     "MainActivity.kt:1030": [
-      "override fun onSaveInstanceState(outState: Bundle) {"
-    ],
-    "MainActivity.kt:1054": [
-      "// 兜底释放：Activity 销毁时清掉可能仍持有的屏幕常亮锁。"
-    ],
-    "MainActivity.kt:1057": [
-      "screenWakeLock?.release()"
-    ],
-    "MainActivity.kt:1076": [
-      "// the user asked to interrupt an active agent turn."
-    ],
-    "MainActivity.kt:1164": [
-      "val script = AppLanguage.bootstrapScript(AppLanguage.mode(this), AppLanguage.systemLanguages(this))"
-    ],
-    "MainActivity.kt:1167": [
-      "Log.w(TAG, \"locale bootstrap could not be installed: \" + t.message)"
-    ],
-    "MainActivity.kt:145": [
-      "/**"
-    ],
-    "MainActivity.kt:191": [
-      "/** 崩溃标记：记录未捕获异常摘要，下次启动测试界面提示（不吞异常）。 */"
-    ],
-    "MainActivity.kt:296": [
-      "internal fun startEngineFlow(splash: Boolean = false) {"
-    ],
-    "MainActivity.kt:306": [
-      "// 否则刚被 latch 挡下的 showWeb 会让这一次显式启动看不到任何结果。"
-    ],
-    "MainActivity.kt:354": [
-      "guideRenderer.applyGuidePhase(phase, title, hint).also {"
-    ],
-    "MainActivity.kt:422": [
-      "loadConfirmedEnginePage()"
-    ],
-    "MainActivity.kt:475": [
-      "android.webkit.CookieManager.getInstance().setCookie(EngineProbe.ENGINE_URL, authCookie)"
-    ],
-    "MainActivity.kt:502": [
-      "enginePageFailed = false"
-    ],
-    "MainActivity.kt:514": [
-      "true // onResume must not access the dead WebView after exposing the native recovery outlet."
-    ],
-    "MainActivity.kt:544": [
-      "pageRecovery.restoreRecreationBudget(savedInstanceState?.getBoolean(\"dsh.renderer-recreation-attempted\", false) ?: false)"
-    ],
-    "MainActivity.kt:565": [
-      "LogCollector.start(this)"
-    ],
-    "MainActivity.kt:569": [
-      "WindowCompat.setDecorFitsSystemWindows(window, false)"
-    ],
-    "MainActivity.kt:605": [
       "}"
     ],
+    "MainActivity.kt:1054": [
+      "dirPickerController.cancelTtl()"
+    ],
+    "MainActivity.kt:1057": [
+      "try {"
+    ],
+    "MainActivity.kt:1076": [
+      "// EngineService owns the child lifecycle. An Activity can be recreated by"
+    ],
+    "MainActivity.kt:1164": [
+      "private fun installLocaleBootstrap() {"
+    ],
+    "MainActivity.kt:1167": [
+      "WebViewCompat.addDocumentStartJavaScript(webView, script, setOf(\"*\"))"
+    ],
+    "MainActivity.kt:145": [
+      "private val uiChrome = WebUiChrome(this)"
+    ],
+    "MainActivity.kt:191": [
+      "}"
+    ],
+    "MainActivity.kt:296": [
+      ""
+    ],
+    "MainActivity.kt:306": [
+      "}"
+    ],
+    "MainActivity.kt:354": [
+      "/** 引导页状态渲染（委托 GuidePageRenderer；EngineStartFlow/前台监控经此驱动）。 */"
+    ],
+    "MainActivity.kt:422": [
+      "val current = runCatching { webView.url }.getOrNull()"
+    ],
+    "MainActivity.kt:475": [
+      "if (authCookie != null) {"
+    ],
+    "MainActivity.kt:502": [
+      "pendingEngineCookie = null"
+    ],
+    "MainActivity.kt:514": [
+      "UiText.t(this, \"自动重建已尝试一次；请在此手动重试或查看日志，不会循环重建页面。\", \"An automatic rebuild was tried once. Retry here or check the log; the page will not be rebuilt in a loop.\"),"
+    ],
+    "MainActivity.kt:544": [
+      "}"
+    ],
+    "MainActivity.kt:565": [
+      "// 开发者日志开关已开（上次会话）：进程启动即恢复收集。"
+    ],
+    "MainActivity.kt:569": [
+      "}"
+    ],
+    "MainActivity.kt:605": [
+      "// 就看不出来。设中性深色，使「没渲染出来」一眼可辨（与引导页同色系，避免闪白）。"
+    ],
     "MainActivity.kt:642": [
-      "webSystemLeftInset = pxToCssPx(maxOf(bars.left, cutout.left), density)"
+      "webSystemBottomInset = pxToCssPx(maxOf(bars.bottom, mandatoryGestures), density)"
     ],
     "MainActivity.kt:719": [
-      "// 旧实现拿到 false 就一次性放弃并弹失败提示 ⇒ 用户点通知冷启动**经常落空**。"
+      "private var pendingNotifySession: String? = null"
     ],
     "MainActivity.kt:769": [
       "}"
     ],
     "MainActivity.kt:772": [
-      "Log.w(\"dsh-notify\", \"notify route failed: \" + t.message)"
+      "}"
     ],
     "MainActivity.kt:78": [
       "/** System insets in CSS px, cached until the engine page is ready to receive them. */"
     ],
     "MainActivity.kt:782": [
-      "this,"
+      "try {"
     ],
     "MainActivity.kt:784": [
-      "Toast.LENGTH_LONG,"
+      "this,"
     ],
     "MainActivity.kt:788": [
-      "}"
+      "} catch (_: Throwable) {"
     ],
     "MainActivity.kt:793": [
-      "/** 首启向导已移除（决策 2026-08-23）：初始页（GuideChrome 运行时状态/解压进度/崩溃/日志）"
+      "/** 任务移除清理见 EngineService.onTaskRemoved（生命周期礼仪 F5.3：让位+尽力清理，不反弹）。 */"
     ],
     "MainActivity.kt:803": [
-      "return"
+      "// Resume passive observation of the one already authorized attempt. Do not spawn or reset retries."
     ],
     "MainActivity.kt:812": [
-      "}"
+      "if (!userClosedEngine) engineFlow.startEngineService() // Native fallback/recreation does not disable task protection."
     ],
     "MainActivity.kt:815": [
-      "// latch 仍为真才呈现——若期间用户已显式重试/进了安全模式（latch 已清），这里就不该再"
+      "if (pendingWebPresentation) showWeb()"
     ],
     "MainActivity.kt:822": [
-      "GuidePhase.Error,"
+      "showGuide()"
     ],
     "MainActivity.kt:850": [
-      "if (!userClosedEngine) {"
+      "val autoStart = SplashStore.autoStart(this)"
     ],
     "MainActivity.kt:880": [
-      "guideRenderer.refreshGuideMeta()"
+      "// 仅当 WebView 未展示（引导页/首次启动）时才探测并重路由；相册/文件选择器"
     ],
     "MainActivity.kt:923": [
-      "runOnUiThread { guideRenderer.refreshGuideMeta() }"
+      "{"
     ],
     "MobileChrome.tsx:35": [
       "?? null"
@@ -1726,10 +1723,10 @@
       "return false"
     ],
     "OverlayReport.kt:348": [
-      "* 缺陷现场：有摘要、无正文（`body` 字段缺失的旧条目）时，[reportBodyText] 按设计回落 summary，"
+      "*"
     ],
     "OverlayReport.kt:370": [
-      "* 但**不得低于 300dp**（横屏 1600x900 时 40% 只有 240dp，比下限 140dp 只多 100dp），"
+      "/**"
     ],
     "OverlayService.kt:106": [
       "/** 完成位（会话维、带消费标记）。**必须放在服务级字段**：面板收起态要能存活"
@@ -2008,13 +2005,13 @@
       "jvmTarget = \"17\""
     ],
     "app/src/main/AndroidManifest.xml:158": [
-      "android:windowSoftInputMode=\"adjustResize\" />"
+      "android:configChanges=\"orientation|screenSize|screenLayout|keyboardHidden\""
     ],
     "app/src/main/AndroidManifest.xml:65": [
-      "0.14.8 #413：targetSdk 26+ 的 manifest 接收器收不到**隐式**广播（设备实测 0 个接收者），"
+      "<meta-data"
     ],
     "app/src/main/AndroidManifest.xml:98": [
-      "<!-- 0.13.0 F2/M3.4：开机自启接收器（恢复用户上次同意的运行状态；restart 后需已启动过）。 -->"
+      "</intent-filter>"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/AdbKeyboardReceiver.kt:25": [
       "* 实例——即使某天平台把隐式广播重新投递给 manifest 接收器，也不会提交两遍。"
@@ -2023,19 +2020,19 @@
       "var instance: AdbKeyboardService? = null"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:319": [
-      "/**"
+      "}"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:333": [
-      ""
+      "*/"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:375": [
-      "fun setOverlayEnabled(enable: Boolean): Boolean = onSetOverlayEnabled(enable)"
+      ""
     ],
     "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:423": [
-      "fun browserHostViewport(viewport: String): String = onBrowserHostViewport(viewport)"
+      "/** Persist one normalized screen scope selected from the DSH settings surface. */"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:425": [
-      "/** Close (destroy) the BrowserHost page; the workbench can be opened fresh afterwards. */"
+      "fun setScreenScope(scope: String): String = onSetScreenScope(scope)"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/ApkUpdateAction.kt:228": [
       "const val STATE_UP_TO_DATE = \"up-to-date\""
@@ -2200,61 +2197,61 @@
       "/**"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1030": [
-      "override fun onSaveInstanceState(outState: Bundle) {"
+      "}"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1113": [
-      "if (guideViewReady && guideView.visibility == View.VISIBLE && guideRenderer.management.back()) return"
+      "return"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:137": [
-      "/** 覆盖层所在的根视图；超时兜底的 post/removeCallbacks 都挂在它上面。 */"
+      "/** 开屏视频覆盖层；在 onCreate 建好 root 之后初始化。 */"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:160": [
-      "// 页面尚未显示时 guideView 在根视图里是可见的；视频盖在它上面不改变任何布局。"
+      "splashPlayed = true"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:193": [
-      "/** 用户主动关闭后，前台监控与任何尚未结束的启动线程不得重新展示 WebUI。 */"
+      "/** 崩溃标记：记录未捕获异常摘要，下次启动测试界面提示（不吞异常）。 */"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:205": [
-      ").show()"
+      "getString(R.string.ds_notify_denied_note),"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:206": [
-      "}"
+      "Toast.LENGTH_LONG,"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:255": [
-      "* §2.4：ES2022 类静态块（`static{}`）需要 Chromium 94+；低于此值的产物会在**解析期**整体"
-    ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:266": [
-      "const val ACTION_UPDATE = \"com.dsharnessmobile.shell.action.UPDATE\""
-    ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:296": [
-      "internal fun startEngineFlow(splash: Boolean = false) {"
-    ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:391": [
       ""
     ],
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:266": [
+      "/** 虚拟屏空闲回收扫描间隔（判定阈值在 VdisplayController.IDLE_RECLAIM_MS = 10 分钟）。 */"
+    ],
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:296": [
+      ""
+    ],
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:391": [
+      "return true"
+    ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:605": [
-      "}"
+      "// 就看不出来。设中性深色，使「没渲染出来」一眼可辨（与引导页同色系，避免闪白）。"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:667": [
-      "configureWebView()"
-    ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:719": [
-      "// 旧实现拿到 false 就一次性放弃并弹失败提示 ⇒ 用户点通知冷启动**经常落空**。"
-    ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:771": [
-      "} catch (t: Throwable) {"
-    ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:812": [
       "}"
     ],
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:719": [
+      "private var pendingNotifySession: String? = null"
+    ],
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:771": [
+      "}"
+    ],
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:812": [
+      "if (!userClosedEngine) engineFlow.startEngineService() // Native fallback/recreation does not disable task protection."
+    ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:815": [
-      "// latch 仍为真才呈现——若期间用户已显式重试/进了安全模式（latch 已清），这里就不该再"
+      "if (pendingWebPresentation) showWeb()"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:89": [
       "private val pickToken: String = EngineManager.ensurePickToken()"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:923": [
-      "runOnUiThread { guideRenderer.refreshGuideMeta() }"
+      "{"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MuxClient.kt:172": [
       "sendFrame(out, 0x1, streamOpen.toByteArray(Charsets.UTF_8))"
@@ -2758,19 +2755,16 @@
       "@Test"
     ],
     "apply-patches.mjs:1568": [
-      "check: (s) => s.includes('dsh-mobile exclusive publish (F7)')"
+      "if ((s.match(/dsh-mobile link->rename fallback/g) || []).length !== 2) throw new Error('spj-migration-link 复核失败——不写回')"
     ],
     "apply-patches.mjs:1596": [
-      "}"
-    ],
-    "apply-patches.mjs:519": [
-      "el('p', '{className:\"dshm-summary\"}', 'k(o,a)'),"
+      "// ⓪ 收敛 v1 双占位形态（0.14.0-preview 坏资产的修复必由路径；无该形态则 no-op）。"
     ],
     "attachment-picker-menu.ts:184": [
-      "return node.matches(SLOT_SELECTOR) || node.querySelector(SLOT_SELECTOR) !== null"
+      ""
     ],
     "attachment-picker-menu.ts:215": [
-      "if (!entry.anchor.isConnected || !entry.trigger.isConnected) this.mounted.splice(index, 1)"
+      "private syncMounts(): void {"
     ],
     "back-stack.spec.ts:259": [
       ""
@@ -2875,16 +2869,16 @@
       "if (rel.endsWith('.map') || rel.endsWith('/')) continue   // 目录条目（lib/、lib/types/）不是成员"
     ],
     "check-patch-mirror.mjs:109": [
-      "const regSet = new Set(regIds)"
+      "regIds = JSON.parse(readFileSync(regPath, 'utf8')).patches.map((p) => p.id)"
     ],
     "check-patch-mounts.mjs:28": [
       "const TOP_ITEM = /^-(?:\\s|$)/"
     ],
     "check-release-gates.mjs:136": [
-      "//      有产物即**真检**（超预算 exit 1），无产物则明确标 `SKIP(real-data)` 并退 `--self-test`"
+      "// `A11Y_OPS` 后端能力清单的陈旧拷贝，多带 `state`/`webSnapshot`/`webAction` 三条**不读设备屏**的 op，"
     ],
     "check-release-gates.mjs:28": [
-      "* 本迭代要求的门禁集合（唯一声明处）。"
+      "/**"
     ],
     "check-snapshot-asset.ps1:26": [
       "$h2 = (Get-FileHash $SnapshotPath -Algorithm SHA256).Hash.ToLower()"
@@ -3022,22 +3016,22 @@
       "已知会制造**假失败**的环境残留（先清再判）："
     ],
     "docs/AGENTS/gotchas.md:103": [
-      ""
+      "### worktree 里手动起引擎的最小前提"
     ],
     "docs/AGENTS/gotchas.md:178": [
-      "含 `undefined` 成员的整值被拒收（不是丢字段，是整条结果失败）。铁律：可选键缺省**整键不发**，"
+      "8. **run-as 引号地狱 / adb 二进制传输**：PowerShell 双引号内 `$var` 本地展开；二进制经 `adb exec-out`/push 传输。"
     ],
     "docs/AGENTS/gotchas.md:44": [
-      "35. **requestLegacyExternalStorage 对 targetSdk≥30 应用无效（#120/MT 调研，2026-09-02 实锤）**：该 flag 仅对「targetSdk≤29 + 运行在 Android 10」生效；targetSdk≥30（含 34）应用即使运行在 Android 10 设备上 flag 也被忽略（SO 63365334 / cgeo #10386 / 小米适配指南多源实锤）→ Android 10 上 SAF 树授权不解锁 FUSE 原始路径、bash 走不了 ContentResolver → 非 root 下「读用户任意目录作工作区」不可达成。落地：SDK 26-28（无分区存储）运行时 READ/WRITE 权限放行；SDK 29 保留拒绝但显式 reason（`__dsh_pick_refused__:android-10`）而非伪装取消；SDK 30+ 维持 All Files Access。"
-    ],
-    "docs/AGENTS/gotchas.md:74": [
       ""
     ],
+    "docs/AGENTS/gotchas.md:74": [
+      "### 实例"
+    ],
     "docs/AGENTS/modules.md:36": [
-      "| **SnapshotUserData.kt** | 用户配置保留、legacy backup 与活动配置传输 | `prepareStagedSnapshot` 保留 `settings.yaml.imported` 并抑制工厂 reseed；`configurationDocument` 选择真实 web profile patch；`exportConfiguration/importConfiguration` 原子替换/导入备份，旧共享 YAML 不覆盖已迁移 patch；`retireReseededFactorySettings` 仅隔离已知空工厂模板。legacy backup 不复活已迁移 YAML。 |"
+      "| **SnapshotFs.kt** | 符号链接安全的文件原语（0.13.3 新增；0.14.1 修 API 越级崩溃） | `exists/isSymbolicLink/deletePath/move/createDirectories`——全部 NOFOLLOW：递归删除绝不穿透链接进用户数据；**目录枚举用 `Files.newDirectoryStream`（`DirectoryStream` 是 Iterable）而非 `Files.list(...).toList()`**——后者是 Java `Stream.toList()`、**API 34 才提供**，minSdk 26 下真机抛 `NoSuchMethodError`（Error，`catch(Exception)` 抓不住），曾让快照事务恢复永久卡死；防线见 `ApiLevelGuardTest`（坑 153） |"
     ],
     "docs/AGENTS/modules.md:39": [
-      "| **MainActivity.kt / RepairState.kt / RepairActivity.kt** | Explicit retry and late cold-start observation | `retryEngineExplicitly` / `ACTION_RETRY_ENGINE` clear the durable gate and retry count only for explicit retry. `mayObserveColdStart` permits passive health observation of the already authorized in-flight cold attempt; resume does not spawn or reset its budget. The assistant keeps model loading and diagnostic export failures separate. |"
+      "| **PluginMounts.kt / EngineManager.kt** 的启动前 Hard bundle 迁移 | 每次 `startEngine()` 决策前调用 `ensureHardBundlesSelected` | 仅自动追加 name/version/patch digest 与可信清单完全匹配的缺失 nested bundle，保留 Soft、依赖 pin 与未知字段。身份漂移逐项记录期望/实际摘要，不阻断普通启动或覆盖手工修复；坏 JSON、缺少权威清单和歧义结构仍拒绝。Safe Mode 与可信恢复继续严格验身份。 |"
     ],
     "docs/archive/known-gaps-pre-0.14.5-2026-10-07.md:170": [
       "不是 a11y 能力缺失。F1（`bridge/index.ts:832-838` 按 `args.screenId` 经 `screenAccessResolved` 判定）"
@@ -3060,14 +3054,8 @@
     "dsh-client-ui-responsive/src/client/enter-guard.ts:63": [
       "if (window.innerWidth > MOBILE_FORM_MAX_WIDTH) return"
     ],
-    "dsh-client-ui-responsive/src/client/index.ts:192": [
-      "return () => { marker.detach() }"
-    ],
-    "dsh-client-ui-responsive/src/client/index.ts:352": [
-      "// Android general-settings rows (issue #59): immersive status-bar toggle."
-    ],
     "dsh-client-ui-responsive/src/client/mobile/attachment-picker-menu.ts:184": [
-      "return node.matches(SLOT_SELECTOR) || node.querySelector(SLOT_SELECTOR) !== null"
+      ""
     ],
     "dsh-client-ui-responsive/src/client/mobile/back-stack.ts:334": [
       "private layers: BackLayer[] = []"
@@ -3215,6 +3203,7 @@
       "let total = 0;",
       "return true;",
       "}",
+      "});",
       "};"
     ],
     "index.ts:1038": [
@@ -3239,7 +3228,7 @@
       "/** Host session service minimum: a blank session is created without calling prompt or append. */",
       "// 块G F4b（0.14.1）：`web_dump` 同型移出——它读的是**壳自有 WebView**（DSH 自己的 Web UI，",
       "export type { ScreenAccessDecision, ScreenId, UserScreenScope } from './screen-scope.js'",
-      "import { createIncomingDraftRuntime } from './mobile/incoming-runtime.ts'",
+      "import type { NativeBrowserControlsInjected } from './mobile/native-browser-adapter.ts'",
       "private readonly termuxVersion: string",
       "try {"
     ],
@@ -3247,7 +3236,6 @@
       "* @param req - 请求事实（method/headers）。",
       "* 手动关机（0.14.0）：销毁本机全部虚拟屏，与设置页「强制销毁」同口径。",
       "* 缺陷形态（用户两轮阻碍之一）：各调用点传的是**手搓的子集**，例如",
-      "/** Required services: composition, copy/theme faces, the runtime sessions, and the frame's panel actions. */",
       "const missing: string[] = missingBinaries.includes('bash')",
       "export interface AdbStatus {",
       "sessionIds?: readonly unknown[]",
@@ -3265,11 +3253,11 @@
     "index.ts:142": [
       "",
       "* permission presets read. Enforcement is the Android app domain, not a",
+      "/** Session service methods used by the process-local external attachment hand-off. */",
       "// **必须用异步面**：`virtual-N` → displayId 要经壳侧 vdInfo 注册表解析，同步面做不到，",
       "additionalProperties: false,",
       "const candidate = bridge[method]",
       "id: string",
-      "scope(id: unknown): unknown | undefined",
       "}"
     ],
     "index.ts:1438": [
@@ -3299,6 +3287,7 @@
       "* 随后整轮都在错误前提下排查。**对模型不可发现的参数等于不存在的参数。**",
       "//",
       "TERMUX_VERSION: this.termuxVersion,",
+      "document.head.appendChild(style)",
       "sessionId: string",
       "try {"
     ],
@@ -3316,11 +3305,11 @@
     ],
     "index.ts:251": [
       "",
+      "// 卡片自身的单击（侧栏预览）保持原样。左侧方向由 DEFAULT_OPEN_MODE 决定。",
+      "// 可见性判据（0.14.0 设备实测修正，与浏览器侧同源）：**必须把「侧栏已收起」算进去**。",
       "? '——本机未给出整屏尺寸，本次按**当前窗口**换算，多窗口下可能偏左'",
-      "? snap.screens.find((s) => s.kind === 'virtual')?.alias",
       "additionalProperties: false,",
       "const bashVersion = await this.readBashVersion()",
-      "const disposeStyle = injectStyle('trajectory-details', TRAJECTORY_DETAILS_CSS)",
       "function enqueueSession(path: string): { ok: boolean; entryId?: string; message: string } {",
       "return {",
       "writeModeSource: { type: 'string', description: '档位来源：sandboxPolicy.session / sandboxPolicy.default / env-fallback' },"
@@ -3328,43 +3317,44 @@
     "index.ts:263": [
       "/**",
       "/** First line of `bash --version`, or undefined when bash cannot report it. */",
-      "// text-overflow: ellipsis，而 banner 里的状态胶囊与复制按钮不可收缩，把命令挤进窄",
       "browserWebViewAvailable: { type: 'boolean', required: true },",
       "const d = (data ?? {}) as { basis?: unknown; basisWidth?: unknown; basisHeight?: unknown }",
       "if (typeof data.displayId === 'number') out.displayId = data.displayId",
+      "nativeBridge()?.vdisplayBounds?.(JSON.stringify({",
+      "return (path: string, mime: string) => (method as (...a: [string, string]) => string).apply(bridge, [path, mime])",
       "ts: new Date().toISOString(),",
-      "window.addEventListener('resize', publishBounds)",
       "},"
     ],
     "index.ts:281": [
       "",
-      "// its 100% height (the layout viewport does not shrink on Android 16",
       "// 无线调试」的实时事实）；旧壳无该键 → 回落 paired（旧的间接证明语义）。",
       "displayId: { type: 'integer' },",
       "output: {",
+      "useEffect(() => {",
       "}",
       "} catch { /* 审计目录不可建：落审计失败不改变删除结果 */ }",
-      "},"
+      "},",
+      "}, 'ui-responsive: delivery file card capsule')"
     ],
     "index.ts:295": [
+      "",
       "* 扫描计划 → UI 载荷。**绝不下发绝对路径**：只给稳定 id、类别、`$DSH_HOME`/`$DSH_FILES_DIR`",
       "? writeMode === 'danger-full-access'",
-      "const bridge = new ThemeBridge()",
       "const realInScope = scope === 'real-only' || scope === 'all'",
       "let ctxRef: Context | undefined",
       "name: 'android_vdisplay_create',",
-      "return undefined",
-      "}"
+      "observer.detach()",
+      "return undefined"
     ],
     "index.ts:298": [
       "",
       "* @returns 只读载荷。",
       "* 装配：档位工具 + 只读面板状态路由。",
       "+ '「虚拟屏」查看器，真实屏不受影响。失败时返回结构化 code/guidance（能力缺项、通道未就绪等），'",
-      "// watchStageVisibility 事件通道负责，不再依赖这一拍。",
+      "// 占用态变化立即重发 bounds（原生层让位）。",
       ": undefined",
       "const virtuals: Array<{ screenId: string; displayId?: number }> = []",
-      "}, 'ui-responsive: theme bridge')"
+      "}, 'ui-responsive: trajectory details full-viewport overlay + :has() fallback')"
     ],
     "index.ts:31": [
       "/**",
@@ -3378,47 +3368,47 @@
       "} from './route-auth.js'"
     ],
     "index.ts:313": [
-      "",
       "* @returns 条目 id；注册面缺失或失败时 undefined（调用方省略 workspaceId，会话仍能建但未分组）。",
+      "// 与浏览器侧同口径（那里也是 refresh + publishBounds 同批，并同样有事件通道）。",
       "const authOptions = (): AuthOptions => ({",
+      "const guard = new EnterGuard()",
       "export const A11Y_FRESH_MS = 20_000",
       "{",
       "}",
-      "}))",
-      "}, DevSection))"
+      "}))"
     ],
     "index.ts:368": [
+      "",
       "*",
       "/\\bchmod\\s+-R\\s+\\d{3,4}\\s+\\//,",
-      "ctx.effect(() => installAboutEntry(), 'ui-responsive: about entry')",
       "for (const t of tools(ctx, svc)) ctx.tools.register(t)",
+      "id: 'android-notify',",
       "if (typeof a.screenId === 'string' && a.screenId !== '') payload.target = a.screenId",
-      "}",
-      "}, tr('关闭全部', 'Close all'))),"
+      "}"
     ],
     "index.ts:380": [
       "",
       "'shutdown', 'reboot', 'poweroff', 'halt',",
-      "* 随 fiber 释放回收）。sidebarRightTabs 缺席时只告警不抛错（fail-closed，不阻断客户端启动）。",
-      "// 市场插件据此打开它的浮层；该浮层由 market-J-fullpage 补丁做成整页（满屏 + 返回页头）。",
       "auth: authOptions,",
       "const next = ensureChain.then(run, run)",
-      "if (!Number.isInteger(d) || d < 0 || d > 20_000) return rejectInput('swipe 的 duration 需为 0-20000 毫秒') as never"
+      "if (!Number.isInteger(d) || d < 0 || d > 20_000) return rejectInput('swipe 的 duration 需为 0-20000 毫秒') as never",
+      "}, String(screen.alias.replace('virtual-', '')))),"
     ],
     "index.ts:393": [
       "",
+      "// and the UI registers the row at settings.general.item after the built-ins.",
       ": {}",
-      "const sidebar = ctx.get('sidebarRight') as SidebarRightController | undefined",
       "const workspaceId = await incomingWorkspaceId()",
       "if (raw.length === 0 || raw.length > 500) return rejectInput('text 长度需为 1-500 字符') as never",
-      "sendMobileRouteRejection(res, rejection)"
+      "sendMobileRouteRejection(res, rejection)",
+      "}"
     ],
     "index.ts:394": [
+      "",
       "/** ADB 通道附加黑名单（shell uid=2000 执行面比 app uid 更危险：系统级配置/权限写面一律拒绝）。 */",
-      "// ── Frame-wide entries ──────────────────────────────────────────────────",
+      "// 行骨架走独立样式表：本分区与上游通用设置同页，必须共用同一套行规",
       "const controller = sessionControllerOf()",
       "const sizeNote = sizeFields.width === undefined ? '?' : String(sizeFields.width)",
-      "if (sidebar === undefined) return () => {}",
       "payload.text = raw",
       "return"
     ],
@@ -3426,7 +3416,7 @@
       "* documented default; a present but non-decimal or out-of-range value is invalid. This is read per",
       "const MAX_CONTENT_BYTES = 256 * 1024 * 1024",
       "export const PROBE_BINARIES = ['bash', 'ls', 'cat', 'grep', 'find', 'sed', 'cp', 'mv', 'rm', 'mkdir', 'rg'] as const",
-      "import { TrajectoryPanelsObserver } from './trajectory-panels-observer.ts'",
+      "import { COMPOSER_INSETS_CSS } from './composer-insets.css.ts'",
       "interface SandboxPolicyFace {",
       "method?: string",
       "}",
@@ -3434,9 +3424,9 @@
       "} from './ime-broadcast.js'"
     ],
     "index.ts:428": [
+      "",
       "//",
-      "ctx.effect(() => injectStyle('tap-highlight', TAP_HIGHLIGHT_CSS), 'ui-responsive: clear WebView tap highlight')",
-      "if (collapsedNow()) { pending = true; return }",
+      "// 旧实现每 800ms 无条件 openTab，用户收起侧栏后会被下一拍拽开、点 × 收起也会被切回来",
       "res.end(JSON.stringify({ ok: false, error: 'GET only' }))",
       "rmSync(filePath, { force: true })",
       "wsvc.register({",
@@ -3445,52 +3435,53 @@
     "index.ts:432": [
       "...sizeFields,",
       "/** apply 注入的宿主面（命令面/工作区面按调用实时经 ctx.get 读取）。 */",
-      "ctx.effect(() => injectStyle('sidebar-reorder', SIDEBAR_REORDER_CSS), 'ui-responsive: sidebar reorder feedback')",
+      "/** 收起期间出现过、等待用户展开后补落位。 */",
+      "// ── Frame-wide entries ──────────────────────────────────────────────────",
       "export interface ControlAuth {",
       "if (req.method !== undefined && req.method !== 'GET') {",
-      "seenActive = false",
       "},"
     ],
     "index.ts:444": [
       "*  - `vdInfo`/`vdCreate`/`vdDestroy`/`state`/`snapshot`/`nodeText`/`screenshot`/`web*`：读面或",
       "+ '图像就在本结果里，无需再调用 read_image；像素坐标换算用归一化 nx/ny。',",
-      "// background thread and reports through window.__dshExportResult. The bridge",
+      "// The drawer toggle, moved into upstream's own header row (0.14.2 P4).",
       "function safeResolveInside(ws: string, path: string): string | null {",
-      "return () => {}",
+      "pending = false",
       "sendJson(res, 200, await readVdToolSnapshot(faceOf()))",
       "}"
     ],
     "index.ts:453": [
       "* 代次变化或 invalidated=true 即判定界面确实变了；否则明确回报「未观察到变化」，",
+      "/* 侧栏未挂载：下一拍重试（seenActive 未置位，保持可重试） */",
       "/** 动画三开关（manage 的 android_env_prepare 读写面）。 */",
-      "id: 'open',",
-      "name: 'shell.overlay',",
+      "name: 'conversation.header.leading',",
       "wsReal = wsLex"
     ],
     "index.ts:472": [
-      "// ── Native \"open with\" wiring ───────────────────────────────────────────",
+      "// 0.14.7 竖屏顶栏插件 UI 折叠：座位里实际挂载的插件节点整体改由浮动面板呈现（不搬 React 节点，",
       "// 但紧接着的 `android_ui_dump` 明确显示 Switch 从 `[已选中]` 变为未选中——**点击其实成功了**。",
-      "// 侧边栏终端的屏上九键条（0.14.2 T4）。",
       "const INTERNAL_PRIVILEGED: Record<string, { why: string; allows: (command: string) => boolean }> = {",
-      "output: {"
+      "output: {",
+      "title: () => tr('虚拟屏', 'Virtual screen'),"
     ],
     "index.ts:477": [
       "'animation-scales': {",
       "// ok/error 是本工具的**错误出口**：队列目录不可读/不可建时（EACCES 等）必须返回",
-      "// registration is gone and no other site re-adds it. The component file stays",
       "// 「校验本身不可靠」与「点击落空」是两件事，模型据此决定「重试」还是「放弃」，不能混。",
-      "// 从而让「终端底边 <= 键条顶边」成为布局不变量而非调数值的结果。"
+      "fold.attach()",
+      "icon: VirtualScreenGlyph,"
     ],
     "index.ts:517": [
+      "",
       "*",
       ".map((f) => ({ f, t: statSync(join(dir, f)).mtimeMs }))",
-      "return () => { marker.detach() }",
+      "return () => { watch?.dispose() }",
       "try { purgeStaleUnclaimed('boot') } catch { /* 清理失败不阻断装配 */ }"
     ],
     "index.ts:584": [
       "// （同样返回 imagePath + 图像 + 宽高，同样调 `screenshot` op 且不带任何脱敏参数）。",
+      "bubbles.attach()",
       "bytes,",
-      "name: 'sidebar.right.pane.tab', key, locale: namespace, store,",
       "readonly #shellFace?: { resolve?(spec: Record<string, unknown>): Record<string, unknown>; run(spec: Record<string, unknown>): Promise<Record<string, unknown>> }"
     ],
     "index.ts:69": [
@@ -3500,13 +3491,14 @@
       "export interface IncomingRes {",
       "export {",
       "extraPath?: string[]",
-      "import { MOBILE_TABLE_CSS } from './mobile/mobile-table.css.ts'",
+      "import { ExportResultChannel, reportUserFacingResult, type ExportResultPayload } from './export-result.ts'",
       "}",
       "} catch { /* 记账失败不阻断投递：该项退化为 TTL/生命周期清理 */ }"
     ],
     "index.ts:909": [
       "",
       "a11yFacts(): A11yAvailabilityFacts {",
+      "window.removeEventListener('focus', onVisible)",
       "}"
     ],
     "index.ts:949": [
@@ -3998,19 +3990,19 @@
       "const args = [':app:testDebugUnitTest', '--no-daemon', '--console=plain']"
     ],
     "scripts/check-patch-mirror.mjs:109": [
-      "const regSet = new Set(regIds)"
+      "regIds = JSON.parse(readFileSync(regPath, 'utf8')).patches.map((p) => p.id)"
     ],
     "scripts/check-patch-mirror.mjs:170": [
-      "const onlyMine = mineData.filter((r) => !peerData.includes(r))"
+      "const out = []"
     ],
     "scripts/check-patch-mirror.mjs:231": [
-      "'LICENSES/Shizuku-API-MIT.txt',"
+      "const MIRROR_TOP = ["
     ],
     "scripts/check-patch-mirror.mjs:339": [
-      "'plugins/dsh-android-linux-env',"
+      "'dsh-host-web-compat',"
     ],
     "scripts/check-patch-mirror.mjs:347": [
-      "'scripts/check-api-route-auth.mjs',"
+      "'dsh-shell-termux',"
     ],
     "scripts/check-plugin-tests.mjs:33": [
       "* 钉在唯一入口（`runCommand` 里合并），而不是逐个调用点补：调用点显式传的 `env` 也覆盖不掉它，"
@@ -4019,28 +4011,28 @@
       ""
     ],
     "scripts/check-release-gates.mjs:104": [
-      "// Kotlin 块注释嵌套静态检查（KDoc 里写 node_modules/** 会吞掉整个文件；dev-shell 实测）。"
+      "// （rc.1 实测：真树断 9 条而 16 个补丁测试全绿）。"
     ],
     "scripts/check-release-gates.mjs:135": [
-      "//      `.deploy-tmp/boot-budget/{boot-segments.log,engine.log}` 顺序发现**设备原始产物**；"
+      "// `REAL_SCREEN_OPS` 必须逐条相同。设备实测缺陷 B4 的根因就是它们不一致——壳侧那份是"
     ],
     "scripts/check-release-gates.mjs:152": [
-      "// 构建并发上限（0.14.1 用户拍板的系统级约束）：构建期压缩/解压不得吃满全部逻辑核（原为 `xz -T0`"
+      "// 0.13.8-b B2（ST-25/26/31 + §7.2 度量）：制度性门禁与性能度量入口一并进声明集合，"
     ],
     "scripts/check-release-gates.mjs:164": [
-      "// **之后**（同 job，结果目录已就位、无 SKIP），并去掉 build-apk.mjs 的 --allow-missing。"
+      "// 构建链中止语义（任一 ABI 被拒 = 整链非 0；0.13.8-b 实锤：arm64 被拒后仍 exit 0 交付单 ABI 产物）。"
     ],
     "scripts/check-release-gates.mjs:191": [
-      "//     且下方断言会核验该接管方真的调用了它（否则就是「移出去就没人跑」= 静默降级防线）。"
+      "//   a. 默认档（无参数）——按 `--segments/--probe` > `DSH_BOOT_SEGMENTS`/`DSH_BOOT_PROBE` >"
     ],
     "scripts/check-release-gates.mjs:212": [
-      "const SOURCE_GATES = ["
+      "{ script: 'check-build-parallel-cap.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },"
     ],
     "scripts/check-release-gates.mjs:246": [
-      "}"
+      "//   · releaseSink !== false ⇒ 发布链 --run 段执行（默认）；"
     ],
     "scripts/check-release-gates.mjs:28": [
-      "* 本迭代要求的门禁集合（唯一声明处）。"
+      "/**"
     ],
     "scripts/check-runtime-assets.mjs:126": [
       "*/"
@@ -4076,16 +4068,16 @@
       "SNAP_PKG_ROOT=\"${DSH_SNAPSHOT_PKG_ROOT:-/data/user/0/com.dsharnessmobile.shell}\""
     ],
     "scripts/patches/apply-patches.mjs:122": [
-      "}"
+      "const m = /^\\s*-?\\s*name:\\s*(.+?)\\s*$/.exec(line)"
     ],
     "scripts/patches/apply-patches.mjs:1568": [
-      "check: (s) => s.includes('dsh-mobile exclusive publish (F7)')"
+      "if ((s.match(/dsh-mobile link->rename fallback/g) || []).length !== 2) throw new Error('spj-migration-link 复核失败——不写回')"
     ],
     "scripts/patches/apply-patches.mjs:1583": [
-      "if (legacyStart < 0 || legacyEndMark < 0) {"
+      "// 两站占位成功后若 rename 失败（IO 错/权限），必须 unlink 回收占位（dshMobileReleaseClaim）——"
     ],
     "scripts/patches/apply-patches.mjs:865": [
-      ""
+      "!/entry\\.id == null \\|\\| entry\\.id === id/.test(s)) return s"
     ],
     "scripts/patches/data/client-index-loader-barrier.mjs:3": [
       "export function planClientIndexLoaderBarrier(source) {"
@@ -4468,6 +4460,15 @@
     "ShellOps.kt#INPUT_COMMAND@6b740b06": true,
     "app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#Workspace@2d8e2fc0": true,
     "app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#TAB_ID@295e9cbd": true,
-    "scripts/check-code-map.mjs#UNIVERSE@60d8a536": true
+    "scripts/check-code-map.mjs#UNIVERSE@60d8a536": true,
+    "app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#applyRendererEvent@ac0c54d0": true,
+    "app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#shouldInterceptRequest@db2ebba9": true,
+    "ShellOps.kt#ShellOps.SCREEN_FAMILIES@40309832": true,
+    "ShellOps.kt#ShellOps@8ec4985b": true,
+    "BrowserHost.kt#ensureViewFor@8c879bf2": true,
+    "plugins/dsh-android-bridge/src/index.ts#resolved@e33053de": true,
+    "app/src/main/java/com/dsharnessmobile/shell/ShellOps.kt#decideScreenCommand@a7bc2be4": true,
+    "plugins/dsh-android-bridge/src/index.ts#tools@64f58ab4": true,
+    "plugins/dsh-android-bridge/src/index.ts#AndroidPrivilegeService@6ac56c46": true
   }
 }

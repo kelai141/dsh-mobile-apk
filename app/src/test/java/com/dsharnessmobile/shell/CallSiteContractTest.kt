@@ -575,7 +575,7 @@ class CallSiteContractTest {
     val recall = codeOnly(source("OverlayRecall.kt"))
     assertTrue("J-A4：条必须有窗口参数（懒建）", recall.contains("WindowManager.LayoutParams("))
     assertTrue("J-A4：条窗口必须 NOT_FOCUSABLE（否则顶掉输入法）", recall.contains("FLAG_NOT_FOCUSABLE"))
-    assertTrue("J-A4：条必须在场时认得出自己（uiautomator/无障碍）", recall.contains("contentDescription = \"唤回悬浮球\""))
+    assertTrue("J-A4：条必须在场时认得出自己（uiautomator/无障碍）", recall.contains("contentDescription = UiText.t(svc, \"唤回悬浮球\""))
     assertTrue("J-A4：条的唯一点击动作是召回", recall.contains("svc.recallBall()"))
   }
 

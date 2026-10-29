@@ -201,8 +201,8 @@ class OverlayBatch5Test {
     assertTrue("停止必须有无障碍名", panel.contains("roundButton(\"overlay-stop\", R.drawable.dsh_ic_stop, 12, 0xFFE04848.toInt(), t(\"停止当前任务\", \"Stop current task\"))"))
     assertTrue("外层命中区撑到热区下限、内层保持 36dp 观感", panel.contains("FrameLayout.LayoutParams((36 * dp).toInt(), (36 * dp).toInt(), Gravity.CENTER)"))
     val report = codeOnly(source("OverlayReport.kt"))
-    assertTrue("回报栏关闭键必须有无障碍名", report.contains("contentDescription = \"关闭工作汇报\""))
-    assertTrue("手柄行必须有无障碍名", report.contains("contentDescription = \"上下拖动调整汇报栏高度\""))
+    assertTrue("回报栏关闭键必须有无障碍名", report.contains("contentDescription = UiText.t(svc, \"关闭工作汇报\", \"Close work report\")"))
+    assertTrue("手柄行必须有无障碍名", report.contains("contentDescription = UiText.t(svc, \"上下拖动调整汇报栏高度\", \"Drag to resize the report panel\")"))
   }
 
   // ── P5-1：状态行必须有可见入口，长按仍可用 ─────────────────────────────────
@@ -235,7 +235,7 @@ class OverlayBatch5Test {
   fun `元信息三行必须排在正文全文之前`() {
     val report = codeOnly(source("OverlayReport.kt"))
     val metaLoop = report.indexOf("for ((i, line) in lines.withIndex())")
-    val bodyBlock = report.indexOf("if (!reportBodyRedundant(entry, full))")
+    val bodyBlock = report.indexOf("if (!reportBodyRedundant(entry, full, svc))")
     assertTrue("元信息循环必须在场", metaLoop > 0)
     assertTrue("正文块必须在场", bodyBlock > 0)
     assertTrue(

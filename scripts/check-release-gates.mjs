@@ -11,6 +11,7 @@
 //   node scripts/check-release-gates.mjs                      # 静态接线断言（CI 可直接跑）
 //   node scripts/check-release-gates.mjs --list               # 打印声明的门禁集合
 //   node scripts/check-release-gates.mjs --run [--snapshot-dir <dir>]   # 顺序执行门禁集（发布链用）
+//   node scripts/check-release-gates.mjs --self-test                   # 构建 canonical 路由的正控 / 负控自证
 // 退出码：0 = 通过；1 = 接线缺口 / 门禁失败 / 树定位失败。
 import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join, dirname, relative, resolve } from 'node:path'
@@ -23,6 +24,62 @@ const argv = process.argv.slice(2)
 const RUN = argv.includes('--run')
 const argOf = (name) => { const i = argv.indexOf('--' + name); return i >= 0 ? argv[i + 1] : undefined }
 const rel = (p) => relative(ROOT, p).replace(/\\/g, '/')
+
+/**
+ * 2026-10-28 政策：构建脚本以 dsh-mobile-apk 为准，协调仓副本只作历史回退，字节差异属正常。
+ * 本判据只守三件事：
+ *   1. 协调仓布局下父入口真的委派 APK canonical（参数 / 退出码透传）；
+ *   2. canonical 仍保留 #677 的 Kotlin 单测前置；
+ *   3. canonical 不得回退到 --allow-missing。
+ * 父副本与 canonical 的字节差异不再判红（旧实现正是因此让主线 Fast 恒红）。
+ */
+const evaluateBuildCanonicalPolicy = ({ parentPs1 = '', parentMjs = '', canonicalPs1 = null, requireDelegation = true }) => {
+  const failures = []
+  const norm = (s) => String(s ?? '').replace(/\\/g, '/')
+  if (requireDelegation) {
+    const ps1 = norm(parentPs1)
+    if (!ps1.includes('dsh-mobile-apk/scripts/build-apk-013.ps1')) failures.push('build-apk-013.ps1 未委派 APK canonical 入口')
+    if (!ps1.includes('LASTEXITCODE')) failures.push('build-apk-013.ps1 委派未透传退出码')
+    const mjs = norm(parentMjs)
+    if (!mjs.includes("'dsh-mobile-apk'") || !mjs.includes('build-apk.mjs')) failures.push('build-apk.mjs 未委派 APK canonical 入口')
+    if (!mjs.includes('process.exit')) failures.push('build-apk.mjs 委派未透传退出码')
+  }
+  if (canonicalPs1 !== null) {
+    const canonical = norm(canonicalPs1)
+    if (!canonical.includes(':app:testDebugUnitTest')) failures.push('APK canonical 缺 #677 单测前置（:app:testDebugUnitTest）')
+    // 只认真正的调用行：canonical 的注释里会解释「此前带 --allow-missing」，那不是回退。
+    const allowMissingCall = canonical.split(/\r?\n/).find((line) => (
+      line.includes('check-kotlin-test-count.mjs') && line.includes('--allow-missing') && !/^\s*#/.test(line)
+    ))
+    if (allowMissingCall !== undefined) failures.push('APK canonical 回退到 --allow-missing')
+  }
+  return failures
+}
+
+// L1 门禁自证：政策正控（脚本差异正常）与负控（委派缺失 / #677 前置回退）各两例。
+if (argv.includes('--self-test')) {
+  const delegatePs1 = "if (Test-Path $canonical) { & pwsh -File dsh-mobile-apk/scripts/build-apk-013.ps1; exit $LASTEXITCODE }"
+  const delegateMjs = "const c = join(ROOT, 'dsh-mobile-apk', 'scripts', 'build-apk.mjs'); process.exit(r.status)"
+  const canonical = "& $gradlew ':app:testDebugUnitTest' --no-daemon; node scripts/check-kotlin-test-count.mjs"
+  const cases = [
+    { name: '正控：父入口委派 + canonical 保留 #677', input: { parentPs1: delegatePs1, parentMjs: delegateMjs, canonicalPs1: canonical }, want: 0 },
+    { name: '正控：父副本与 canonical 字节不同（政策允许）', input: { parentPs1: delegatePs1 + '\n# 本仓历史副本差异', parentMjs: delegateMjs + '\n// historical copy drift', canonicalPs1: canonical }, want: 0 },
+    { name: '负控：父 PowerShell 入口缺委派', input: { parentPs1: 'node scripts\\check-x.mjs', parentMjs: delegateMjs, canonicalPs1: canonical }, want: 1 },
+    { name: '负控：父 Node 入口缺委派', input: { parentPs1: delegatePs1, parentMjs: 'const GATE_SCRIPTS = []', canonicalPs1: canonical }, want: 1 },
+    { name: '负控：canonical 缺 #677 单测前置', input: { parentPs1: delegatePs1, parentMjs: delegateMjs, canonicalPs1: 'node scripts/check-kotlin-test-count.mjs' }, want: 1 },
+    { name: '负控：canonical 回退 --allow-missing', input: { parentPs1: delegatePs1, parentMjs: delegateMjs, canonicalPs1: canonical + '\nnode scripts/check-kotlin-test-count.mjs --allow-missing' }, want: 1 },
+  ]
+  let bad = 0
+  for (const c of cases) {
+    const failuresForCase = evaluateBuildCanonicalPolicy(c.input)
+    const ok = c.want === 0 ? failuresForCase.length === 0 : failuresForCase.length > 0
+    console.log((ok ? 'PASS  ' : 'FAIL  ') + 'self-test ' + c.name + (ok ? '' : ' -> ' + failuresForCase.join('；')))
+    if (!ok) bad += 1
+  }
+  console.log('CHECK-RELEASE-GATES SELF-TEST ' + (bad === 0 ? 'PASSED' : 'FAILED'))
+  process.exit(bad === 0 ? 0 : 1)
+}
+
 
 /**
  * 本迭代要求的门禁集合（唯一声明处）。
@@ -342,13 +399,32 @@ check('build-release.ps1 $pluginSrcs ⊇ build-apk-013.ps1 $pluginDirs（差集�
 check('release-plugin-src-gaps.json 无过期条目', staleGap.length === 0,
   '已不再缺失却仍声明: ' + staleGap.map((g) => g.plugin).join(', '))
 
-// ── 3. 两树同版（同源文件逐字节由 check-patch-mirror 守；此处守本次新增/改动的接线文件）──
-for (const f of ['scripts/build-release.ps1', 'scripts/build-apk-013.ps1']) {
-  const a = join(ROOT, f)
-  const b = join(ROOT, 'dsh-mobile-apk', f)
-  if (!existsSync(b)) { check('两树同版: ' + f, true, '（对端缺席，跳过）'); continue }
-  const same = readFileSync(a).equals(readFileSync(b))
-  check('两树同版: ' + f, same, '逐字节不一致（autocrlf 噪声也会计入——请同步镜像）')
+// ── 3. 构建脚本 canonical 路由（2026-10-28 政策）────────────────────────────
+// 两仓构建脚本不再要求逐字节同版：dsh-mobile-apk 是 canonical，协调仓只留历史副本。
+// 这里改守「父入口委派 + canonical 的 #677 前置仍在」，避免副本回退被静默接受。
+{
+  const canonicalPs1 = apkSelfContained
+    ? join(ROOT, 'scripts', 'build-apk-013.ps1')
+    : join(APK_TREE, 'scripts', 'build-apk-013.ps1')
+  if (apkSelfContained) {
+    const failuresForCanonical = evaluateBuildCanonicalPolicy({
+      canonicalPs1: readFileSync(canonicalPs1, 'utf8'),
+      requireDelegation: false,
+    })
+    check('APK canonical build-apk-013.ps1 保留 #677 单测前置（无 --allow-missing 回退）',
+      failuresForCanonical.length === 0, failuresForCanonical.join('；'))
+  } else if (existsSync(canonicalPs1)) {
+    const failuresForRouting = evaluateBuildCanonicalPolicy({
+      parentPs1: readFileSync(join(ROOT, 'scripts', 'build-apk-013.ps1'), 'utf8'),
+      parentMjs: readFileSync(join(ROOT, 'scripts', 'build-apk.mjs'), 'utf8'),
+      canonicalPs1: readFileSync(canonicalPs1, 'utf8'),
+    })
+    check('父构建入口委派 APK canonical，且 canonical 保留 #677 单测前置（脚本差异不判红）',
+      failuresForRouting.length === 0, failuresForRouting.join('；'))
+    console.log('APK-CANONICAL  构建脚本以 ' + rel(canonicalPs1) + ' 为准；本仓 scripts/build-apk-013.ps1 / build-apk.mjs 副本差异属正常')
+  } else {
+    skipStatic('构建脚本 canonical 路由', '协调仓布局下 apk 树不在场（自包含 CI 各自核 canonical）')
+  }
 }
 
 // ── 3a. 构建/门禁脚本必须可被 node 解析（0.14.2 补线）─────────────────────

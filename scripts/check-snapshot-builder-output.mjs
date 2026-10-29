@@ -174,19 +174,10 @@ function runChecks() {
       portable.includes(RUNTIME_ASSET_GATE_PORTABLE),
       '必须把当前 ABI 的 snapIn 传给 --snapshot；默认值会错误读取旧 stage tar')
   }
-  // 镜像侧同版（铁律 6：单边演进 = 云端跑到旧构建器）
+  // 2026-10-28 政策：构建 / 门禁脚本以 dsh-mobile-apk 为准，协调仓副本只作历史回退。
+  // 两树字节差异不再判红；本门禁继续守构建器产出面、配置键闭合与路径同源。
   if (existsSync(MIRROR_CHAIN)) {
-    const a = readFileSync(APK_CHAIN)
-    const b = readFileSync(MIRROR_CHAIN)
-    check('两树同版: scripts/build-apk-013.ps1', a.equals(b),
-      '逐字节不一致（云端自包含构建会读对端旧副本）')
-  }
-  const MIRROR_BUILDER = join(ROOT, 'dsh-mobile-apk', 'scripts', 'build-snapshot-013.mjs')
-  if (existsSync(MIRROR_BUILDER)) {
-    const a = readFileSync(BUILDER)
-    const b = readFileSync(MIRROR_BUILDER)
-    check('两树同版: scripts/build-snapshot-013.mjs', a.equals(b),
-      '逐字节不一致——单边演进即云端/本地构建器行为分裂（本次事故的对端面）')
+    console.log('APK-CANONICAL  构建脚本以 dsh-mobile-apk 为准（2026-10-28 政策）；两树字节差异不计为失败')
   }
 }
 

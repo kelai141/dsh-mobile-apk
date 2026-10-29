@@ -141,8 +141,12 @@ export const MOBILE_SETTINGS_CSS: string = `
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;
     grid-template-areas: 'icon label chevron' 'icon desc chevron';
-    gap: 2px 12px;
+    /* 行间隙归零、说明自带 2px 上边距：两种行的行盒高度只由内容决定，
+       图标跨两行时的中线才有确定值（真正解决下沉的是下面那条 other 行规则）。 */
+    gap: 0 12px;
     align-items: center;
+    /* 行按内容高度整体居中，不被 min-height 拉伸。 */
+    align-content: center;
     box-sizing: border-box;
     width: 100%;
     height: auto;
@@ -151,6 +155,8 @@ export const MOBILE_SETTINGS_CSS: string = `
     border-radius: var(--dsw-radius-md);
   }
 
+  /* 默认跨两行、在整块里居中（与上游 navIcon 的观感一致）。
+     只有「无说明」的行改成只占第一行，见下面 other 行那条规则。 */
   html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > nav button > svg {
     grid-area: icon;
     align-self: center;
@@ -158,6 +164,14 @@ export const MOBILE_SETTINGS_CSS: string = `
 
   /* 自有分区的图标：上游对我方 id 只给通用齿轮，故换成本分区自己的图标（见 settings-nav.ts）。
      每行只留一个可见图标 —— 上游那个被加标记后不占空间，收回时去掉标记即原样复原。 */
+  /* 没有灰字说明的行（上游/第三方分区）：图标只占第一行并与标题居中。
+     这正是第一版整体上移的效果，但只作用在无说明行上——有说明的行仍跨两行、
+     在「标题+说明」整块居中，不会被顶高（用户两轮实报的口径）。
+     判据用 settings-nav.ts 打的行标记：own = 我方分区（都带说明），other = 其余。 */
+  html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > nav button[data-dsh-settings-nav='other'] > svg {
+    grid-row: 1;
+  }
+
   html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > nav button > svg[data-dsh-settings-nav-icon-hidden] {
     display: none;
   }
@@ -178,6 +192,7 @@ export const MOBILE_SETTINGS_CSS: string = `
   }
 
   html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > nav button > span[data-dsh-settings-nav-desc] {
+    margin-top: 2px;
     grid-area: desc;
     min-width: 0;
     overflow: hidden;

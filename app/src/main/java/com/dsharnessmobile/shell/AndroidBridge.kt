@@ -51,6 +51,12 @@ class AndroidBridge(
   /** 0.13.7：系统「打开方式」选择器（MT 管理器 / 系统文件管理…）。返回 JSON {ok, reason?}。 */
   private val onOpenPathChooser: (path: String, mode: String?) -> String =
     { _, _ -> """{"ok":false,"reason":"bridge not wired"}""" },
+  /**
+   * 0.15.0：文件「外部打开 / 转发」到别的应用（chooser 聚合 ACTION_VIEW + ACTION_SEND）。
+   * kind 取 [FileExternalBridge.KIND_OPEN] / [FileExternalBridge.KIND_SHARE]；返回 JSON {ok, error?}。
+   */
+  private val onOpenFileExternal: (path: String, mime: String?, kind: String) -> String =
+    { _, _, _ -> """{"ok":false,"error":"no-receiver"}""" },
   /** 0.13.2 W7：悬浮球开关态（持久化，OverlayController）。 */
   private val onGetOverlayEnabled: () -> Boolean = { false },
   /** 0.13.2 W7：悬浮球开关（未授 overlay 权限时由控制器发起系统授权引导）。返回是否已启动。 */
@@ -169,6 +175,16 @@ class AndroidBridge(
    * 同步桥不能回 Promise，长动作只能「发起 + 轮询 status」，故状态机放在壳侧（ApkUpdateAction）。
    */
   private val onApkUpdate: (String) -> String = { _ -> """{"ok":false,"state":"idle","reason":"bridge not wired"}""" },
+  /**
+   * 原生拍照（WebView「加号」面板的拍照瓦片）。
+   *
+   * 为什么签名是 `(action) -> String` 而不是直接返回结果：相机是**外部 Activity**，用户取景
+   * 时间不可预知。同步桥会阻塞 WebView 的 JS 线程直到用户按快门（整页假死），因此这里只受理
+   * 并立即返回 `{ok:true,accepted:true}`；最终结果由控制器在主线程用
+   * `window.__dshBridge.onPhotoCaptured(payload)` 推回页面。
+   * 接线在 MainActivity（那里才有 webView 与 Activity 作用域的 launcher）。
+   */
+  private val onCapturePhoto: ((action: String) -> String)? = null,
   private val onNotifySelfCheck: () -> String = {
     val app = ShellAppContext.get()
     if (app == null) """{"ok":false,"reason":"no-shell-context"}"""
@@ -305,6 +321,32 @@ class AndroidBridge(
   /** 0.13.7：把路径交给系统选择器（MT 管理器 / 系统文件管理…；返回 JSON {ok, reason?}）。 */
   @JavascriptInterface
   fun openPathChooser(path: String, mode: String?): String = onOpenPathChooser(path, mode)
+
+  /**
+   * 0.15.0：用别的应用打开这个文件（主意图 ACTION_VIEW + ACTION_SEND 作并列候选）。
+   *
+   * 参数名与顺序固定：页面按 (path, mime) 调用。
+   *
+   * @param path 设备绝对路径（必须在允许面内）。
+   * @param mime 文件 MIME；空串 = 让系统按 Uri 推断。
+   * @returns JSON {ok:true} 或 {ok:false, error:"no-receiver"|"uri-denied"|"io"|"bad-request", detail?}。
+   */
+  @JavascriptInterface
+  fun openFileExternal(path: String, mime: String): String =
+    onOpenFileExternal(path, mime, FileExternalBridge.KIND_OPEN)
+
+  /**
+   * 0.15.0：把这个文件转发给别的应用（主意图 ACTION_SEND + ACTION_VIEW 作并列候选）。
+   *
+   * 参数名与顺序固定：页面按 (path, mime) 调用。
+   *
+   * @param path 设备绝对路径（必须在允许面内）。
+   * @param mime 文件 MIME；空串 = 让系统按 Uri 推断。
+   * @returns JSON {ok:true} 或 {ok:false, error:"no-receiver"|"uri-denied"|"io"|"bad-request", detail?}。
+   */
+  @JavascriptInterface
+  fun shareFile(path: String, mime: String): String =
+    onOpenFileExternal(path, mime, FileExternalBridge.KIND_SHARE)
 
   /** Open the system screen granting All Files Access (special permission). */
   @JavascriptInterface
@@ -659,6 +701,28 @@ class AndroidBridge(
    * 返回 `{ok, channels:[{category,label,channelId,importance,enabled,silenced?}], degraded:[...]}`
    * ——页面据此显示「系统已降级，应用无法调回」并给出直达系统设置的入口（此前这条信息零调用点）。
    */
+  /**
+   * 原生拍照：发起一次系统相机取景，结果经 [PhotoCapture.okPayload] / [PhotoCapture.errorPayload]
+   * 的 JSON 回到页面（进程内回调，见 [onCapturePhoto]）。
+   *
+   * 为什么返回「已受理」而不是最终结果：见 [onCapturePhoto] 的说明——相机等待时间不可预知。
+   * 页面拿到 `{ok:true,accepted:true}` 只表示**请求已受理**，不表示拍到了；
+   * 拍的成败由回执里的 `ok` + `code` 决定（与 apkUpdate 的「ok 只表示受理」同一口径）。
+   *
+   * @param action 目前只有 `capture`（拍照）。留 action 参数是为了与 apkUpdate 同形，
+   *   后续若加「重拍」之类的动作不必再动桥面。
+   * @returns 受理结果 JSON；桥未接线时 `{ok:false,code:"not-wired"}`。
+   */
+  @JavascriptInterface
+  fun capturePhoto(action: String): String {
+    val handler = onCapturePhoto ?: return """{"ok":false,"code":"not-wired"}"""
+    return try {
+      handler(action)
+    } catch (t: Throwable) {
+      """{"ok":false,"code":"failed","detail":""" + JSONObject.quote(t.message ?: t.javaClass.simpleName) + "}"
+    }
+  }
+
   @JavascriptInterface
   fun notifySelfCheck(): String = onNotifySelfCheck()
 
