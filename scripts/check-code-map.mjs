@@ -21,6 +21,7 @@
 //   node scripts/check-code-map.mjs --refresh-anchor-baseline # Refresh reviewed legacy anchor snapshots
 // 退出码：0 = 通过；1 = 有失败项；2 = 前置不满足（文档缺失/文档缺账本块）。
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { refreshCompletenessProblem } from './lib/refresh-guard.mjs'
 import { dirname, join, relative, resolve as resolvePath } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createHash } from 'node:crypto'
@@ -1447,6 +1448,16 @@ if (isMain) {
         }
         symbolHashes[a.path + '#' + a.symbol + '@' + a.symbolHash] = true
       }
+    }
+    // #868：写盘前断言，禁止「静默丢符号锚点基线」。判据与自检见 scripts/lib/refresh-guard.mjs。
+    const refreshGuard = refreshCompletenessProblem(
+      symbolKeys, symbols, symbolHashes,
+      Object.keys(anchorBaselineSymbols()), Object.keys(anchorBaselineSymbolHashes()),
+    )
+    if (refreshGuard !== null) {
+      console.error('Refusing to refresh: ' + refreshGuard)
+      console.error('This is how a silent baseline downgrade happens — check whether the anchors changed form.')
+      process.exit(1)
     }
     writeFileSync(ANCHOR_BASELINE_ABS, JSON.stringify({
       formatVersion: 2,
