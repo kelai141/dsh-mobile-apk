@@ -132,10 +132,33 @@ class ConsoleActivity : ComponentActivity() {
     WebViewShim.applyBaseline(webView.settings)
     // Re-push status after page load: bash may be ready in onStart while console.html's
     // JS bridge is defined later — early evaluateJavascript calls are silently dropped.
+
+    // issue #864：控制台页面的 console 此前**没有任何消费端**（本 Activity 没装 webChromeClient），
+    // 所以页面里的 console.log 只进 logcat、进不了诊断。这里补一个：只拦我们的量测行，
+    // 其余一律返回 false 交回默认处理（不改变页面既有的日志行为）。
+    webView.webChromeClient = object : android.webkit.WebChromeClient() {
+      override fun onConsoleMessage(message: android.webkit.ConsoleMessage?): Boolean {
+        val text = message?.message() ?: return false
+        // 判据用通用字段名 `imeOcclusion`（只出现在 debug 资源的 JS 里）；
+        // release 变体里 BuildConfig.DEBUG 恒 false，且从不注入该 asset。
+        if (BuildConfig.DEBUG && text.contains("\"imeOcclusion\"")) {
+          LogCollector.writeBootDiag(this@ConsoleActivity, "console-metrics", text.substringAfter('{', text))
+          return true
+        }
+        return false
+      }
+    }
     webView.webViewClient = object : android.webkit.WebViewClient() {
       override fun onPageFinished(view: android.webkit.WebView, url: String) {
         super.onPageFinished(view, url)
         pageReady = true
+        // issue #864：debug 变体注入布局量测上报（release 无该 asset，open 抛异常即跳过）。
+        // 量测面只在 debug 存在：见 app/src/debug/assets/console-metrics.js。
+        if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+          try {
+            webView.evaluateJavascript(assets.open("console-metrics.js").bufferedReader().use { it.readText() }, null)
+          } catch (_: Throwable) { /* release 无此 asset：量测面不存在，静默跳过 */ }
+        }
         // 控制台页面是静态 asset，语言要由壳侧注入（与其它原生面同一判据 UiText.isEnglish）。
         evalPage("window.__dshConsoleSetLang && window.__dshConsoleSetLang(" +
           UiText.isEnglish(this@ConsoleActivity) + ")")

@@ -2980,16 +2980,16 @@
       "已知会制造**假失败**的环境残留（先清再判）："
     ],
     "docs/AGENTS/gotchas.md:103": [
-      "- 下一条命令是 `node _ins.mjs` 然后 `Remove-Item _blk.txt` —— 脚本因 ENOENT 失败，**但删除照样把原料抹了**；"
+      ""
     ],
     "docs/AGENTS/gotchas.md:178": [
-      "### worktree 里手动起引擎的最小前提"
+      "2. **splice 后必跑该语言的语法检查再谈功能验证** —— `node --check`（JS/MJS/内联 script）/ `tsc --noEmit`（TS）/ `:app:compileDebugKotlin`（Kotlin）/ `JSON.parse`。**顺序不能反**：语法都不通过，功能验证的结论没有任何意义。"
     ],
     "docs/AGENTS/gotchas.md:44": [
-      "`SnapshotUserData.configurationDocument()` 已把判据收敛到一处（有 marker 或 patch 存在 ⇒ patch 是活动配置），"
+      "但输出里仍可能有几行，`Where-Object` 过滤后得到 0 条 —— 看起来像「APK 里没有这个条目」，其实是**工具不认这个格式**。"
     ],
     "docs/AGENTS/gotchas.md:74": [
-      "$o = (node script.mjs ... 2>&1 | Out-String)   # 先 Out-String 拍平成文本"
+      "补消费端时别忘了这一半，否则「页面在打日志、诊断里一条没有」。"
     ],
     "docs/AGENTS/modules.md:36": [
       "| **SnapshotFs.kt** | 符号链接安全的文件原语（0.13.3 新增；0.14.1 修 API 越级崩溃） | `exists/isSymbolicLink/deletePath/move/createDirectories`——全部 NOFOLLOW：递归删除绝不穿透链接进用户数据；**目录枚举用 `Files.newDirectoryStream`（`DirectoryStream` 是 Iterable）而非 `Files.list(...).toList()`**——后者是 Java `Stream.toList()`、**API 34 才提供**，minSdk 26 下真机抛 `NoSuchMethodError`（Error，`catch(Exception)` 抓不住），曾让快照事务恢复永久卡死；防线见 `ApiLevelGuardTest`（坑 153） |"

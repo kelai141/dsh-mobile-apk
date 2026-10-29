@@ -5,6 +5,88 @@
 > grep 用法：`grep -n "<坑号>\." docs/AGENTS/gotchas.md` 或按关键词（如 `borrowSession`、`MANAGE_EXTERNAL_STORAGE`、`store-rehome`）定位。
 > 维护约定：新坑追加到文末并递增编号；修复后保留条目（教训与历史归档）。
 
+## WebView 远程调试（CDP）的两个坑：`force-stop` 后调试面为 0、以及**两个** devtools socket（#864）
+
+### 坑 1：`am force-stop` 之后只起 `ConsoleDebugAlias`，`webview_devtools_remote_*` 根本不存在
+
+`setWebContentsDebuggingEnabled(true)` 只在两处调用：
+
+```
+app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1180   if (debuggable) android.webkit.WebView.setWebContentsDebuggingEnabled(true)
+app/src/main/java/com/dsharnessmobile/shell/BrowserProcessService.kt:116
+```
+
+所以「force-stop 清半开连接 → 直接起控制台别名」这条路**不会**有调试面：
+
+```
+adb shell cat /proc/net/unix | grep -c webview_devtools   ->  0
+```
+
+必须先起 `MainActivity` 再起别名，同一条命令才有值（实测 2）。
+
+**判据**：`forward` 建好了但 `curl /json` 报 socket hang up / 空结果时，先查这一条，别急着怀疑 hostname 或 Origin。
+
+### 坑 2：有两个 devtools socket，`/json` 会聚合、`adb forward` 只指向一个
+
+```
+webview_devtools_remote_2161   -> /json pages=0            （干扰项：0 个页面）
+webview_devtools_remote_2046   -> /json pages=2，含 console.html   <- 应用主进程 pid
+```
+
+`localabstract:webview_devtools_remote_<pid>` 里的 `<pid>` 要用 `pidof` 取的应用主进程 pid；
+`/proc/net/unix` 里出现的**另一个** socket 不要用。
+
+**症状**：`/json` 返回 `[]` 或没有目标页 —— 不是页面没加载，是连错了 socket。
+
+### 附带两条「查证方法本身错」的教训
+
+- **`tar -tf` 在 Windows 上是 GNU tar，读不了 APK（zip）**：会报 `does not look like a tar archive`，
+  但输出里仍可能有几行，`Where-Object` 过滤后得到 0 条 —— 看起来像「APK 里没有这个条目」，其实是**工具不认这个格式**。
+  要查 APK 条目用 `[System.IO.Compression.ZipFile]::OpenRead()`。
+- **`run-as <pkg> ls assets/...` 证明不了 APK 里有/没有某个 asset**：`assets/` 在 APK 内部，
+  `run-as` 看的是应用数据目录。要查 APK 资产只能解 APK。
+
+### 本机 CDP 的当前状态（供后续判断）
+
+| 面 | 结果 |
+|---|---|
+| `curl http://localhost:9223/json/version` | HTTP 200，`Chrome/110.0.5481.154`、`Protocol-Version: 1.3` |
+| `ws://localhost:9223/devtools/page/<id>` | **连 101 都收不到**（`upgrade` 事件从不触发，8s `handshakeTimeout` 也不报错） |
+
+结论：本机属「HTTP 通 / WS 不通」，量测改走**页面 console → boot-diag** 通道（见下条）。
+
+## 控制台布局量测：走页面 console + `boot-diag`，不走 CDP（#864）
+
+`dsh-console-metrics.js` 只存在于 **`app/src/debug/assets/`**（debug 变体），
+`ConsoleActivity.onPageFinished` 里在 `debuggable` 为真时把它 `evaluateJavascript` 注入；
+页面每发一行 `[dsh-console-metrics] {json}`，`ConsoleActivity` 的 `webChromeClient.onConsoleMessage`
+就把它写进 `boot-diag.log`（`source=console-metrics`）——复用既有诊断通道，不新开日志。
+
+读法（无需 WebSocket）：
+
+```
+adb shell run-as com.dsharnessmobile.shell cat files/boot-diag.log | grep console-metrics
+```
+
+**两个坑（都踩过）**：
+
+1. **`ConsoleActivity` 原先没有 `webChromeClient`** —— 控制台页面的 `console.log` 只进 logcat、进不了诊断。
+   补消费端时别忘了这一半，否则「页面在打日志、诊断里一条没有」。
+2. **前缀字符串不能写在 `src/main`** —— 否则 release 产物里也 grep 得到。
+   放在 `src/debug/assets/` 的 JS 里，Kotlin 侧只按通用字段名（`imeOcclusion`）识别。
+    注意：`src/debug` 与 `src/main` 放**同名同包 Kotlin 类**会 `Redeclaration` 编译失败（Java 资源可以覆盖，Kotlin 类不行）。
+
+### 实测值（MuMu 实例 5，900x1600 @ density 320，WebView Chrome 110，debug 包）
+
+```
+tag=load  imeOcclusion=0px  insetBottom=0px  innerHeight=800  visualViewportHeight=800  compact=false  dpr=2
+```
+
+`innerHeight(800) * dpr(2) = 1600` = 屏幕物理高 ⇒ **CSS px == dp**（`width=device-width` 下），
+所以 Kotlin 侧 `px / density` 换算到 CSS px 是对的，不存在单位错配。
+
+（键盘弹起态在本实例量不出来：`dumpsys input_method` 的 `mInputShown` 恒 `false`，点击输入区也不弹键盘。）
+
 ## 引擎启动会把 `settings.yaml` 迁进 profile patch 并删掉原文件（#934）
 
 **这不是缺陷，是既有迁移设计** —— 但它决定了一类故障现场的形态，所以必须知道。
