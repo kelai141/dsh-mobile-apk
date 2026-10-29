@@ -15,7 +15,7 @@
   "private": true,
   "scripts": {
     "build": "tsc -p .",
-    "test": "npm run build && node --test test/ui-tree.test.mjs test/protocol-v2.test.mjs test/detail-store.test.mjs test/a11y-routing.test.mjs test/tool-output-schema.test.mjs test/coord-basis.test.mjs test/boot-ready-audit.test.mjs test/ime-broadcast.test.mjs test/session-scope.test.mjs test/screenshot-size-unknown.test.mjs test/screenshot-textredact.test.mjs test/ui-tree-parity.test.mjs test/ui-tree-ref-empty-value.test.mjs test/ui-tree-ref-hint.test.mjs test/vd-shot.test.mjs"
+    "test": "npm run build && node --test test/*.test.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.5",

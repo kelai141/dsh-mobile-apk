@@ -10,7 +10,7 @@
 //   2) 没有 test 目录 → WARN 不拦（避免把「历史欠账」当阻塞项），但在输出里点名，让缺口可见。
 //
 // 真实执行插件自己的 test/*.test.mjs，不做静态提取。
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -118,10 +118,53 @@ let ran = 0
 let failed = 0
 const noTests = []
 
+/**
+ * 递归枚举插件 `test/` 下的测试文件（**子目录也算**）。
+ *
+ * 旧实现是 `readdirSync(testDir)` 顶层扫 —— 子目录里的 `*.test.mjs` 不会被跑，
+ * 而 `test` 脚本的 `test/*.test.mjs` glob 也是顶层匹配，于是两边**同时**漏，谁也不会报。
+ */
+const collectTestFiles = (dir) => {
+  if (!existsSync(dir)) return []
+  const out = []
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, entry.name)
+    if (entry.isDirectory()) { out.push(...collectTestFiles(p)); continue }
+    if (entry.name.endsWith('.test.mjs') || entry.name.endsWith('.test.ts')) out.push(p)
+  }
+  return out
+}
+
+/**
+ * 插件自身 `test` 脚本**能覆盖到**的文件数（元断言的左操作数）。
+ *
+ * - 脚本用 `test/*.test.mjs` glob ⇒ 顶层文件数；
+ * - 脚本用显式清单 ⇒ 清单里 `test/xxx.test.mjs` 的条数。
+ */
+const scriptCoverage = (testDir, script) => {
+  const flat = existsSync(testDir)
+    ? readdirSync(testDir).filter((f) => f.endsWith('.test.mjs') || f.endsWith('.test.ts'))
+    : []
+  if (/test\/\*\.test\.mjs/.test(script)) return flat.length
+  return [...script.matchAll(/test\/([A-Za-z0-9_.\-]+\.test\.mjs)/g)].length
+}
+
+const pluginTestScript = (plugin) => {
+  try { return JSON.parse(readFileSync(join(PLUGIN_DIR, plugin, 'package.json'), 'utf8')).scripts?.test ?? '' }
+  catch { return '' }
+}
 for (const plugin of plugins.sort()) {
   const testDir = join(PLUGIN_DIR, plugin, 'test')
   if (!existsSync(testDir)) { noTests.push(plugin); continue }
-  const files = readdirSync(testDir).filter((f) => f.endsWith('.test.mjs') || f.endsWith('.test.ts')).map((f) => join(testDir, f))
+  const files = collectTestFiles(testDir)
+  // issue #957：本地 `npm test` 与门禁必须用**同一份发现逻辑**，否则本地会漏跑而没人知道。
+  // 元断言：脚本覆盖数 == 递归发现数。改 glob 成单个文件名、或把测试挪进子目录，都会在这里判红。
+  const covered = scriptCoverage(testDir, pluginTestScript(plugin))
+  if (covered !== files.length) {
+    console.error('FAIL  ' + plugin + ' 的本地 npm test 覆盖 ' + covered + ' 个测试文件，门禁递归发现 '
+      + files.length + ' 个 —— 本地会漏跑或两处发现逻辑不一致')
+    failed += 1
+  }
   if (files.length === 0) { noTests.push(plugin); continue }
   ran += 1
   // 运行器按文件内容自动判定：本仓 6 个插件用 node:test，client/UI 侧用 vitest。
