@@ -17,8 +17,8 @@
  * - the directory is renamed first so a concurrent scan cannot observe a
  *   half-deleted session, then removed recursively.
  */
-import { readdir, rename, rm, stat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdir, readdir, rename, rm, stat } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 
 /** Session ids are the storage unit name; anything else is a path-injection attempt. */
 export const SESSION_ID_PATTERN = /^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -186,4 +186,45 @@ export async function sweepGraveyards(home) {
     }
   }
   return removed
+}
+
+/** 坏会话的隔离目录名。放在会话所在的工作区目录下，**不在扫描路径上**。 */
+export const QUARANTINE_DIR = '.corrupt'
+
+/**
+ * issue #912：把一个**读不出历史**的会话隔离起来 —— **移动而不是删除**。
+ *
+ * 为什么是隔离而不是修上游：v0→v1 迁移拒绝某条 `user/message` 是上游判定
+ *（`session-format-v0-to-v1`），修它要 engine 补丁 + 真实夹具（当前造不出来，见 #919 同族阻塞）。
+ * 而读不出历史的会话**本身已不可用**，用户真正需要的是「别再挡着我」+「数据还能拿回来」。
+ *
+ * 语义保证：
+ * - 目标 `<工作区>/.corrupt/<id>.<时间戳>` 不在 `findSessionDir` 的扫描路径上 ⇒ 会话列表里不再出现；
+ * - **不动其它会话**（只 rename 命中的那一个目录）；
+ * - **可逆**：文件原样保留，把目录 rename 回去即恢复；
+ * - 时间戳后缀使重复隔离不会互相覆盖（也不会盖掉上一次的隔离件）。
+ *
+ * @param {object} options - 隔离输入。
+ * @param {string} options.home - 绝对 `DSH_HOME`。
+ * @param {string} options.sessionId - 要隔离的会话 id。
+ * @param {boolean} [options.isActive] - 是否有运行中的工作（true 即拒绝）。
+ * @param {(info: { sessionId: string, dir: string }) => Promise<void>} [options.beforeResolve] - 目录确认后的记账。
+ * @param {(level: 'info'|'warn'|'error', message: string, extra?: object) => void} [options.logger] - 步骤日志。
+ * @returns {Promise<{ ok: true, sessionId: string, dir: string, quarantinedTo: string, restorable: true }>} 隔离结果。
+ * @throws {SessionDeleteError} 非法 id / 不存在 / 多义 / 仍在运行。
+ */
+export async function quarantineStoredSession({ home, sessionId, isActive, beforeResolve, logger }) {
+  const log = typeof logger === 'function' ? logger : () => {}
+  assertSessionId(sessionId)
+  if (isActive === true) {
+    throw new SessionDeleteError('session-active', 'the conversation is running; stop it before quarantining', { sessionId })
+  }
+  const dir = await findSessionDir(sessionsRoot(home), sessionId)
+  if (typeof beforeResolve === 'function') await beforeResolve({ sessionId, dir })
+  const trash = join(dirname(dir), QUARANTINE_DIR)
+  await mkdir(trash, { recursive: true })
+  const target = join(trash, sessionId + '.' + Date.now())
+  await rename(dir, target)
+  log('info', 'session quarantined', { sessionId, path: target })
+  return { ok: true, sessionId, dir, quarantinedTo: target, restorable: true }
 }
