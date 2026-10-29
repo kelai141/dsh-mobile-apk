@@ -242,8 +242,13 @@ export class ComposerSheet {
   private open(button: HTMLElement): void {
     this.close()
     const t = this.text()
+    // 顺序有讲究：**先读上游菜单，再 blur**。
+    // 上游 MenuView 只在编辑器持有焦点时才肯开（它把自己绑在 draft editor 的 caret 上），
+    // 先 blur 会让 readUpstreamRows 读到 0 项，sheet 就只剩三块瓦片（实机复现过：
+    // 面板文案只有「拍照照片本地文件」）。读完之后再压焦点，键盘照样不会弹。
+    const rows = this.buildRows()
     const active = document.activeElement
-    // 键盘抑制必须在打开之前：先把焦点挪走，再临时把 inputmode 改成 none，
+    // 键盘抑制：把焦点挪走，再临时把 inputmode 改成 none，
     // 这样 sheet 内任何可聚焦元素被点时都不会唤起键盘。
     if (active instanceof HTMLElement) active.blur()
     this.suppressInputMode()
@@ -260,7 +265,7 @@ export class ComposerSheet {
     panel.setAttribute('aria-label', t('sheetLabel'))
 
     panel.append(this.buildTiles(t))
-    panel.append(this.buildRows())
+    panel.append(rows)
 
     backdrop.append(panel)
     document.body.append(backdrop)

@@ -204,6 +204,20 @@ describe('「+」底部 sheet：自动映射上游菜单', () => {
     expect(document.querySelectorAll(ROW)).toHaveLength(0)
   })
 
+  it('焦点在编辑器上时也能读到菜单项（读菜单不能被 blur 抢先）', () => {
+    // 上游 MenuView 只在编辑器有焦点时才开；若 open() 先 blur 再读，映射永远是 0 行。
+    // 实机复现过：面板文案只剩「拍照照片本地文件」。
+    const editor = buildEditor()
+    buildComposer([['甲', null], ['乙', '说明']])
+    editor.focus()
+    sheet.attach()
+    document.querySelector<HTMLElement>(ADD)!.click()
+    const rows = [...document.querySelectorAll(ROW)]
+    expect(rows).toHaveLength(2)
+    // 读完之后焦点仍必须被压走（键盘不能弹）
+    expect(document.activeElement).not.toBe(editor)
+  })
+
   it('打开后上游菜单被关掉，不会盖在 sheet 上', () => {
     const { card } = buildComposer([['甲', null]])
     openSheet()
