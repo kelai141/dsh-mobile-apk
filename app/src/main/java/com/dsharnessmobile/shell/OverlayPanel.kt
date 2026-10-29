@@ -26,6 +26,8 @@ class OverlayPanel(private val svc: OverlayService) {
 
   // 主题（色板/明暗判定在 OverlayTheme，构造注入服务即 Context）
   private val theme = OverlayTheme(svc)
+  // 双语入口（面板此前整页只有中文：切英文后按钮/状态仍是中文，2026-10-29 真机确认）。
+  private fun t(zh: String, en: String): String = UiText.t(svc, zh, en)
   private fun isDarkTheme() = theme.isDarkTheme()
   private fun themeColors() = theme.themeColors()
 
@@ -225,11 +227,11 @@ class OverlayPanel(private val svc: OverlayService) {
     // 过滤，条目带触摸反馈；选择动作即时、显式（A-R6 的 Spinner 异步回调竞态随之消失）。
     val pickerRowText = TextView(svc).apply {
       tag = "overlay-sessionpicker"
-      contentDescription = "选择发送对话"
+      contentDescription = t("选择发送对话", "Choose conversation")
       textSize = 13f
       setTypeface(null, android.graphics.Typeface.BOLD)
       setTextColor(c.idleText)
-      text = "＋ 新会话"
+      text = t("＋ 新会话", "＋ New session")
       maxLines = 1
       ellipsize = android.text.TextUtils.TruncateAt.END
       minHeight = (MIN_TOUCH_TARGET_DP * dp).toInt()
@@ -245,7 +247,7 @@ class OverlayPanel(private val svc: OverlayService) {
     sessionPicker = pickerRowText
 
     val status = ShimmerTextView(svc).apply {
-      text = "空闲"
+      text = t("空闲", "Idle")
       textSize = 13f
       setTypeface(null, android.graphics.Typeface.BOLD)
       setTextColor(c.idleText)
@@ -287,7 +289,7 @@ class OverlayPanel(private val svc: OverlayService) {
     // 做法与批 5 同口径：外层 FrameLayout 撑到 44dp 命中区，内层 20dp 图标保持观感；
     // 为不让选择行白长 20dp，行的上下内边距在下面按需收紧。
     val close = FrameLayout(svc).apply {
-      contentDescription = "收起面板"
+      contentDescription = t("收起面板", "Collapse panel")
       isClickable = true
       setOnClickListener { svc.hidePanel() }
       addView(ImageView(svc).apply {
@@ -309,13 +311,13 @@ class OverlayPanel(private val svc: OverlayService) {
     // 也不需要新色值——文字取主题 chevron 强调色）。热区同 S2-18 口径（≥44dp）。
     val hideEntry = TextView(svc).apply {
       tag = "overlay-hide-entry"
-      text = "隐藏"
+      text = t("隐藏", "Hide")
       textSize = 12f
       setTextColor(c.chevron)
       gravity = Gravity.CENTER
       minHeight = (MIN_TOUCH_TARGET_DP * dp).toInt()
       minWidth = (MIN_TOUCH_TARGET_DP * dp).toInt()
-      contentDescription = "隐藏悬浮球"
+      contentDescription = t("隐藏悬浮球", "Hide floating ball")
       isClickable = true
       setOnClickListener { svc.hideBall() }
       DsUi.bindPressScale(this)
@@ -343,14 +345,14 @@ class OverlayPanel(private val svc: OverlayService) {
     // 见 §4「明确不做」），但发现路径不再只依赖隐藏手势。
     val reportEntry = TextView(svc).apply {
       tag = "overlay-report-entry"
-      text = "查看汇报"
+      text = t("查看汇报", "View report")
       textSize = 11f
       setTextColor(c.chevron)
       gravity = Gravity.CENTER
       // 热区与批 5 同口径：可点元素不小于触摸目标下限（见 MIN_TOUCH_TARGET_DP）。
       minHeight = (MIN_TOUCH_TARGET_DP * dp).toInt()
       minWidth = (MIN_TOUCH_TARGET_DP * dp).toInt()
-      contentDescription = "查看工作汇报"
+      contentDescription = t("查看工作汇报", "View work report")
       isClickable = true
       setOnClickListener { svc.toggleReportBar() }
       DsUi.bindPressScale(this)
@@ -403,10 +405,10 @@ class OverlayPanel(private val svc: OverlayService) {
         }, FrameLayout.LayoutParams((36 * dp).toInt(), (36 * dp).toInt(), Gravity.CENTER))
       }
 
-    val send = roundButton("overlay-send", R.drawable.dsh_ic_send, 16, 0xFF4176E6.toInt(), "发送") { svc.requestSend() }
+    val send = roundButton("overlay-send", R.drawable.dsh_ic_send, 16, 0xFF4176E6.toInt(), t("发送", "Send")) { svc.requestSend() }
     sendBtn = send
 
-    val stop = roundButton("overlay-stop", R.drawable.dsh_ic_stop, 12, 0xFFE04848.toInt(), "停止当前任务") { svc.requestStop() }
+    val stop = roundButton("overlay-stop", R.drawable.dsh_ic_stop, 12, 0xFFE04848.toInt(), t("停止当前任务", "Stop current task")) { svc.requestStop() }
     stopBtn = stop
 
     val row2 = LinearLayout(svc).apply {
@@ -702,13 +704,13 @@ class OverlayPanel(private val svc: OverlayService) {
         textSize = 12f
         setTextColor(0xFFB8860B.toInt())
         setTypeface(null, android.graphics.Typeface.BOLD)
-        text = "权限审批"
+        text = t("权限审批", "Approval request")
       }
       box.addView(title)
       val body = TextView(svc).apply {
         textSize = 13f
         setTextColor(textColor)
-        text = listOf("工具 ${a.toolName}", a.reason).filter { it.isNotBlank() }.joinToString("：")
+        text = listOf(t("工具 ${a.toolName}", "Tool ${a.toolName}"), a.reason).filter { it.isNotBlank() }.joinToString("：")
       }
       box.addView(body)
       val buttonRow = LinearLayout(svc).apply { orientation = LinearLayout.HORIZONTAL }
@@ -717,7 +719,7 @@ class OverlayPanel(private val svc: OverlayService) {
       // 10 秒内再点同一按钮才真正放行。超出窗口即重新进入待确认（不让陈旧状态吞掉一次单击）。
       val armed = approvalArmed(approvalArmedId, approvalArmedAtMs, a.eventId, System.currentTimeMillis())
       buttonRow.addView(
-        pendingChip(if (armed) "确认批准（执行）" else "批准一次", filled = true, red = false, dp) {
+        pendingChip(if (armed) t("确认批准（执行）", "Confirm approval (run)") else t("批准一次", "Allow once"), filled = true, red = false, dp) {
           if (!armed) {
             approvalArmedId = a.eventId
             approvalArmedAtMs = System.currentTimeMillis()
@@ -730,12 +732,12 @@ class OverlayPanel(private val svc: OverlayService) {
         lpChip(dp),
       )
       if (armed) {
-        buttonRow.addView(pendingChip("取消", filled = false, red = false, dp) {
+        buttonRow.addView(pendingChip(t("取消", "Cancel"), filled = false, red = false, dp) {
           approvalArmedId = null
           renderPendingCard(true)
         }, lpChip(dp))
       }
-      buttonRow.addView(pendingChip("拒绝", filled = false, red = true, dp) {
+      buttonRow.addView(pendingChip(t("拒绝", "Reject"), filled = false, red = true, dp) {
         approvalArmedId = null
         respondApproval(a, "rejected")
       }, lpChip(dp))
@@ -761,7 +763,7 @@ class OverlayPanel(private val svc: OverlayService) {
     header.addView(TextView(svc).apply {
       textSize = 11f
       setTextColor(subColor)
-      text = item.optString("header", "").ifBlank { "问题 ${qPage + 1}" }
+      text = item.optString("header", "").ifBlank { t("问题 ${qPage + 1}", "Question ${qPage + 1}") }
     }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
     header.addView(TextView(svc).apply {
       text = "✕"
@@ -792,7 +794,7 @@ class OverlayPanel(private val svc: OverlayService) {
       val optsHidden = optionsHiddenCount(optsTotal, expanded)
       for (oi in 0 until optsShown) {
         val o = opts.optJSONObject(oi) ?: continue
-        val label = o.optString("label").ifBlank { "选项${oi + 1}" }
+        val label = o.optString("label").ifBlank { t("选项${oi + 1}", "Option ${oi + 1}") }
         val on = if (multi) multiSel[qid]?.contains(label) == true else qSingle[qid] == label
         val row = LinearLayout(svc).apply {
           orientation = LinearLayout.HORIZONTAL
@@ -838,12 +840,12 @@ class OverlayPanel(private val svc: OverlayService) {
       if (optsHidden > 0) {
         // 明示「还有什么」，并给出展开入口（再一次点击回到折叠态，避免卡面失控）。
         box.addView(TextView(svc).apply {
-          text = "还有 $optsHidden 项（点此展开全部 $optsTotal 项）"
+          text = t("还有 $optsHidden 项（点此展开全部 $optsTotal 项）", "$optsHidden more (tap to show all $optsTotal)")
           textSize = 12f
           setTextColor(0xFF4176E6.toInt())
           setPadding((6 * dp).toInt(), (8 * dp).toInt(), (6 * dp).toInt(), (8 * dp).toInt())
           minHeight = (44 * dp).toInt()
-          contentDescription = "展开剩余 $optsHidden 个选项"
+          contentDescription = t("展开剩余 $optsHidden 个选项", "Expand remaining $optsHidden options")
           isClickable = true
           setOnClickListener { qOptsExpanded.add(qid); renderPendingCard(true) }
         })
@@ -867,7 +869,7 @@ class OverlayPanel(private val svc: OverlayService) {
       background = GradientDrawable().apply { cornerRadius = 5 * dp; setColor(0x33808080) }
     }, LinearLayout.LayoutParams((18 * dp).toInt(), (18 * dp).toInt()).apply { marginEnd = (8 * dp).toInt() })
     val edit = EditText(svc).apply {
-      hint = "输入你的答案"
+      hint = t("输入你的答案", "Type your answer")
       textSize = 13f
       isSingleLine = true
       setTextColor(textColor)
@@ -916,7 +918,7 @@ class OverlayPanel(private val svc: OverlayService) {
         alpha = if (qPage > 0) 1f else 0.4f
         minWidth = (44 * dp).toInt()
         minHeight = (44 * dp).toInt()
-        contentDescription = "上一题"
+        contentDescription = t("上一题", "Previous")
         isEnabled = qPage > 0
         isClickable = qPage > 0
         if (qPage > 0) setOnClickListener { qPage = pagerIndex(qPage, n, -1); renderPendingCard(true) }
@@ -935,29 +937,29 @@ class OverlayPanel(private val svc: OverlayService) {
         alpha = if (qPage < n - 1) 1f else 0.4f
         minWidth = (44 * dp).toInt()
         minHeight = (44 * dp).toInt()
-        contentDescription = "下一题"
+        contentDescription = t("下一题", "Next")
         isEnabled = qPage < n - 1
         isClickable = qPage < n - 1
         if (qPage < n - 1) setOnClickListener { qPage = pagerIndex(qPage, n, +1); renderPendingCard(true) }
       })
       foot.addView(View(svc), LinearLayout.LayoutParams(0, 1, 1f))
       if (qPage > 0) {
-        foot.addView(pendingChip("跳过本题", filled = false, red = false, dp) {
+        foot.addView(pendingChip(t("跳过本题", "Skip this question"), filled = false, red = false, dp) {
           qSingle.remove(qid); qCustom.remove(qid); multiSel.remove(qid)
           qPage = (qPage + 1).coerceAtMost(n - 1)
           renderPendingCard(true)
         }, lpChip(dp))
       }
       val last = qPage == n - 1
-      foot.addView(pendingChip(if (last) "提交" else "下一题", filled = true, red = false, dp) {
+      foot.addView(pendingChip(if (last) t("提交", "Submit") else t("下一题", "Next"), filled = true, red = false, dp) {
         if (!last) { qPage++; renderPendingCard(true); return@pendingChip }
         respondQuestion(qe)
       }, lpChip(dp))
     } else {
       foot.addView(View(svc), LinearLayout.LayoutParams(0, 1, 1f))
       // 单问多选无自动提交路径 → 给「提交」；单选点选项即答、自定义走键盘 DONE 即答
-      if (multi) foot.addView(pendingChip("提交", filled = true, red = false, dp) { respondQuestion(qe) }, lpChip(dp))
-      foot.addView(pendingChip("跳过", filled = false, red = false, dp) { dismissQuestion(qe) }, lpChip(dp))
+      if (multi) foot.addView(pendingChip(t("提交", "Submit"), filled = true, red = false, dp) { respondQuestion(qe) }, lpChip(dp))
+      foot.addView(pendingChip(t("跳过", "Skip"), filled = false, red = false, dp) { dismissQuestion(qe) }, lpChip(dp))
     }
     box.addView(foot, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
     box.visibility = View.VISIBLE
@@ -1028,9 +1030,9 @@ class OverlayPanel(private val svc: OverlayService) {
         }
         // 批准后轮次继续（工具真正执行），下个 live 事件前先亮工作态（同发送空窗逻辑）
         svc.markBusyOptimistic()
-        svc.flashStatus(if (outcome == "allowed-once") "已批准（等待引擎确认）" else "已拒绝")
+        svc.flashStatus(if (outcome == "allowed-once") t("已批准（等待引擎确认）", "Approved (waiting for the engine)") else t("已拒绝", "Rejected"))
         onPendingChanged()
-      } else svc.flashStatus("应答失败")
+      } else svc.flashStatus(t("应答失败", "Failed to answer"))
     }
   }
 
@@ -1066,9 +1068,9 @@ class OverlayPanel(private val svc: OverlayService) {
         }
         // 作答后轮次继续，下个 live 事件前先亮工作态（同发送空窗逻辑）
         svc.markBusyOptimistic()
-        svc.flashStatus("已回答（等待引擎确认）")
+        svc.flashStatus(t("已回答（等待引擎确认）", "Answered (waiting for the engine)"))
         onPendingChanged()
-      } else svc.flashStatus("应答失败")
+      } else svc.flashStatus(t("应答失败", "Failed to answer"))
     }
   }
 
@@ -1091,9 +1093,9 @@ class OverlayPanel(private val svc: OverlayService) {
             }
           }, 15_000)
         }
-        svc.flashStatus("已跳过")
+        svc.flashStatus(t("已跳过", "Skipped"))
         onPendingChanged()
-      } else svc.flashStatus("应答失败")
+      } else svc.flashStatus(t("应答失败", "Failed to answer"))
     }
   }
 
@@ -1128,12 +1130,12 @@ class OverlayPanel(private val svc: OverlayService) {
         if (svc.pendingKind == "question") {
           (it as ShimmerTextView).setShimmering(false)
           animateTextColor(it, 0xFFB8860B.toInt())
-          setStatusText(it, "等待你的回答…")
+          setStatusText(it, t("等待你的回答…", "Waiting for your answer…"))
           setAmberBreathing(it, true)
         } else if (svc.pendingKind == "approval") {
           (it as ShimmerTextView).setShimmering(false)
           animateTextColor(it, 0xFFB8860B.toInt())
-          setStatusText(it, "等待权限审批…")
+          setStatusText(it, t("等待权限审批…", "Waiting for approval…"))
           setAmberBreathing(it, true)
         } else if (svc.sessionBusy) {
           setAmberBreathing(it, false)
@@ -1165,11 +1167,11 @@ class OverlayPanel(private val svc: OverlayService) {
           (it as ShimmerTextView).setShimmering(false)
           setAmberBreathing(it, false)
           animateTextColor(it, 0xFF8A8F98.toInt())
-          setStatusText(it, if (svc.engineRunning) "空闲" else "引擎离线")
+          setStatusText(it, if (svc.engineRunning) t("空闲", "Idle") else t("引擎离线", "Engine offline"))
         }
       }
       toolChip?.let {
-        if (svc.toolCount > 0) { it.text = "工具 ×${svc.toolCount}"; it.visibility = View.VISIBLE }
+        if (svc.toolCount > 0) { it.text = t("工具 ×${svc.toolCount}", "Tools ×${svc.toolCount}"); it.visibility = View.VISIBLE }
         else it.visibility = View.GONE
       }
       updateClock()
@@ -1181,7 +1183,7 @@ class OverlayPanel(private val svc: OverlayService) {
         it.alpha = if (canStop) 1f else 0.35f
         it.isEnabled = canStop
         it.isClickable = canStop
-        it.contentDescription = if (canStop) "停止当前任务" else "停止当前任务（当前没有运行中的任务）"
+        it.contentDescription = if (canStop) t("停止当前任务", "Stop current task") else t("停止当前任务（当前没有运行中的任务）", "Stop current task (nothing is running)")
       }
       renderPendingCard()
     }
@@ -1202,7 +1204,7 @@ class OverlayPanel(private val svc: OverlayService) {
     svc.postRpc("session/list", JSONObject().put("_request", JSONObject())) { code, body ->
       pickerSessions.clear()
       // S2-9：失败要如实（旧实现把非 200 静默当空列表 → 页脚写「共 0 个会话」，失败被画成合法空态）。
-      pickerLoadError = if (code == 200) "" else "会话列表读取失败（HTTP $code）"
+      pickerLoadError = if (code == 200) "" else t("会话列表读取失败（HTTP $code）", "Failed to load sessions (HTTP $code)")
       // 0.13.5: default target = the running session, else the most recent non-blank one.
       var runningId = ""
       var recentId = ""
@@ -1325,7 +1327,7 @@ class OverlayPanel(private val svc: OverlayService) {
     val footer = TextView(svc).apply {
       val failed = pickerLoadError.isNotEmpty()
       text = when {
-        failed -> pickerLoadError + "（点此重试）"
+        failed -> pickerLoadError + t("（点此重试）", " (tap to retry)")
         !pickerShowAll && pickerSessions.size > 8 -> "\u5168\u90e8\u4f1a\u8bdd\uff08" + pickerSessions.size + "\uff09"
         else -> "\u5171 " + pickerSessions.size + " \u4e2a\u4f1a\u8bdd"
       }
@@ -1338,11 +1340,11 @@ class OverlayPanel(private val svc: OverlayService) {
       if (failed) {
         // S2-9：失败必须能重试。旧实现把 code != 200 静默当空列表，页脚于是写「共 0 个会话」
         // ——把失败画成了合法空态，用户以为「本来就没有会话」，且没有任何重试路径。
-        contentDescription = "会话列表读取失败，点此重试"
+        contentDescription = t("会话列表读取失败，点此重试", "Failed to load sessions, tap to retry")
         minHeight = (44 * dp).toInt()
         background = DsUi.ripple(DsUi.roundRect(Color.TRANSPARENT, 8 * dp), if (isDarkTheme()) 0x22FFFFFF.toInt() else 0x22000000.toInt())
         setOnClickListener {
-          svc.flashStatus("正在重新读取会话…")
+          svc.flashStatus(t("正在重新读取会话…", "Reloading sessions…"))
           refreshSessionPicker()
         }
       } else if (!pickerShowAll && pickerSessions.size > 8) {

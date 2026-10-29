@@ -641,11 +641,11 @@ class OverlayService : Service() {
         main.postDelayed({
           if (expanded && !sessionBusy && pendingKind.isEmpty() && !panelOccupied) {
             hidePanel()
-            if (dropped) flashStatus("已完成")
+            if (dropped) flashStatus(t("已完成", "Done"))
           }
         }, 900)
       } else if (dropped && expanded) {
-        flashStatus("已完成")
+        flashStatus(t("已完成", "Done"))
       }
     }
     if (expanded) panel.updateBallOnly() else updateBallOnly()
@@ -737,12 +737,12 @@ class OverlayService : Service() {
     // 注释此前就写着「不再静默 return」，而代码里这一行一直在静默返回（P0-6 复核发现：
     // 注释说的修法与代码不一致）。按钮现已按忙态真正禁用，此支只剩「渲染与点击之间的竞态」，
     // 仍要给出可见回执——用户视角里「点了没反应」正是这样产生的。
-    if (!sessionBusy) { flashStatus("当前没有正在运行的任务"); return }
-    if (!engineRunning) { flashStatus("引擎离线，无法停止"); return }
-    if (activeSessionId.isEmpty()) { flashStatus("无活动会话"); return }
+    if (!sessionBusy) { flashStatus(t("当前没有正在运行的任务", "Nothing is running right now")); return }
+    if (!engineRunning) { flashStatus(t("引擎离线，无法停止", "Engine is offline; cannot stop")); return }
+    if (activeSessionId.isEmpty()) { flashStatus(t("无活动会话", "No active session")); return }
     setHalo(Halo.WORKING)
     postRpc("session/cancel", JSONObject().put("request", JSONObject().put("sessionId", activeSessionId))) { code, body ->
-      if (code == 200) flashStatus("已发送停止指令") else flashStatus("停止失败（HTTP $code）")
+      if (code == 200) flashStatus(t("已发送停止指令", "Stop request sent")) else flashStatus(t("停止失败（HTTP $code）", "Stop failed (HTTP $code)"))
     }
   }
 
@@ -750,7 +750,7 @@ class OverlayService : Service() {
   internal fun requestSend() {
     val text = panel.inputBox?.text?.toString()?.trim() ?: return
     if (text.isEmpty()) return
-    if (!engineRunning) { flashStatus("引擎离线"); return }
+    if (!engineRunning) { flashStatus(t("引擎离线", "Engine offline")); return }
     panel.inputBox?.setText("")
     val steer = sessionBusy   // 发送前的忙态决定模式与提示语（成功回调里已被乐观置忙覆盖）
     // 0.1.2-rc.1 SessionPromptRequest：requestId 必填（幂等键）+ sessionId/mode/content
@@ -766,11 +766,11 @@ class OverlayService : Service() {
           // 发送成功：立即亮工作态（乐观忙态）——live 事件（turn_start/tool_call）到来前
           // 原本显示「空闲」，实测被用户点名（2026-09-05）；45s 无 live 确认由探活兜底回退。
           markBusyOptimistic()
-          flashStatus(if (steer) "已插话" else "已发送")
+          flashStatus(if (steer) t("已插话", "Interjected") else t("已发送", "Sent"))
         } else {
           // 发送失败：回填已输入文本 + 提示（避免用户以为发出去了——#4）
           panel.inputBox?.setText(text)
-          flashStatus("发送失败（HTTP $code）")
+          flashStatus(t("发送失败（HTTP $code）", "Send failed (HTTP $code)"))
         }
       }
     }
@@ -791,11 +791,11 @@ class OverlayService : Service() {
             send.run()
           } else {
             panel.inputBox?.setText(text)
-            flashStatus("建会话失败（解析）")
+            flashStatus(t("建会话失败（解析）", "Failed to create session (parse error)"))
           }
         } else {
           panel.inputBox?.setText(text)
-          flashStatus("建会话失败（HTTP $code）")
+          flashStatus(t("建会话失败（HTTP $code）", "Failed to create session (HTTP $code)"))
         }
       }
     } else {
@@ -818,6 +818,9 @@ class OverlayService : Service() {
   }
 
   /** 面板状态行短暂提示（发送/停止结果）。 */
+  // 面板状态行文案走双语（与 OverlayPanel 同一入口；切英文后这些提示此前仍是中文）。
+  private fun t(zh: String, en: String): String = UiText.t(this, zh, en)
+
   internal fun flashStatus(msg: String) {
     main.post {
       val st = panel.statusText ?: return@post
@@ -862,7 +865,7 @@ class OverlayService : Service() {
       // S2-2：失败不得只写日志（用户按了三下，什么都没发生）。面板此刻必然是展开态
       // （该手势挂在展开面板的状态行上），故 flashStatus 一定可见。
       LogCollector.log("dsh-overlay", "jump to app failed: " + (e.message ?: e.javaClass.simpleName))
-      flashStatus("跳转失败，请手动切到 DSH")
+      flashStatus(t("跳转失败，请手动切到 DSH", "Could not switch; open DSH manually"))
     }
   }
 

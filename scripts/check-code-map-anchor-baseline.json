@@ -1645,70 +1645,70 @@
       "fun startWatcher() {"
     ],
     "OverlayPanel.kt:1060": [
-      "svc.main.postDelayed({"
+      "if (entry != null) {"
     ],
     "OverlayPanel.kt:112": [
-      "when (j.optString(\"type\")) {"
+      "private fun handleMuxFrame(text: String) {"
     ],
     "OverlayPanel.kt:1174": [
-      "}"
+      "if (svc.toolCount > 0) { it.text = t(\"工具 ×${svc.toolCount}\", \"Tools ×${svc.toolCount}\"); it.visibility = View.VISIBLE }"
     ],
     "OverlayPanel.kt:1177": [
-      "// 「if (!sessionBusy) return」——静默返回，什么都不发生。现在视觉与行为一致："
+      "updateClock()"
     ],
     "OverlayPanel.kt:177": [
-      "}"
+      "pendingGen.remove(id)"
     ],
     "OverlayPanel.kt:179": [
-      "\"emit\" -> {"
+      "}"
     ],
     "OverlayPanel.kt:204": [
-      ""
+      "return null"
     ],
     "OverlayPanel.kt:24": [
       "*  状态模板 template_thinking/template_tool）+ 待答卡（MuxClient 提问/审批官方风格卡片渲染 + POST /api/respond 应答）。 */"
     ],
     "OverlayPanel.kt:308": [
-      "// 用文字入口而非新图标：与状态行「查看汇报」同一先例（本仓不为一个入口新建 drawable，"
+      "// 带上一个不可撤销的歧义（长按误触 = 球没了，还要去屏缘找条）。"
     ],
     "OverlayPanel.kt:309": [
-      "// 也不需要新色值——文字取主题 chevron 强调色）。热区同 S2-18 口径（≥44dp）。"
+      "//"
     ],
     "OverlayPanel.kt:387": [
       "}"
     ],
     "OverlayPanel.kt:423": [
-      "background = GradientDrawable().apply {"
+      "val unit = LinearLayout(svc).apply {"
     ],
     "OverlayPanel.kt:489": [
-      "*  只替换标签部分、保留同一后缀提示——既保证失败态不显示「已完成」，又让提示语只有一处真源。"
+      "/** 块H-A1：完成态常驻文案（并入 overlay_display prefs，与上述两个模板同族，可覆写）。"
     ],
     "OverlayPanel.kt:616": [
-      ""
+      "marginEnd = (8 * dp).toInt()"
     ],
     "OverlayPanel.kt:69": [
-      "//   审批 outcome={kind:\"result\",value:\"allowed-once\"|\"rejected\"}（值=审批词汇原字符串）；"
+      "//   emit = {type:\"emit\",event,args}（api-session/status → args:[agentId,running] 忙态锚点）。"
     ],
     "OverlayPanel.kt:73": [
-      "@Volatile private var eventsClientId: String = \"\"   // ready 帧分配；应答与流实例绑定"
+      "//   提问跳过 outcome={kind:\"rejected\",error:{name,message}}；审批无取消通道。"
     ],
     "OverlayPanel.kt:818": [
-      "gravity = Gravity.CENTER"
+      "textSize = 11f"
     ],
     "OverlayPanel.kt:824": [
-      "setTextColor(textColor)"
+      "text = label"
     ],
     "OverlayPanel.kt:835": [
-      "setMargins(0, 0, 0, (4 * dp).toInt())"
+      "}, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = (8 * dp).toInt() })"
     ],
     "OverlayPanel.kt:87": [
-      "* 审批「批准一次」的二次确认态（P0-9）。"
+      "private val qOptsExpanded = HashSet<String>()"
     ],
     "OverlayPanel.kt:904": [
-      "}"
+      "orientation = LinearLayout.HORIZONTAL"
     ],
     "OverlayPanel.kt:947": [
-      "qPage = (qPage + 1).coerceAtMost(n - 1)"
+      "foot.addView(pendingChip(t(\"跳过本题\", \"Skip this question\"), filled = false, red = false, dp) {"
     ],
     "OverlayReport.kt:164": [
       "* 为什么不直接量栏体：ScrollView 在栏内是 `weight=1`（要随拖拽伸缩），而 weight 子项在"
@@ -2311,7 +2311,7 @@
       "private fun liveFile(): File = File(File(svc.filesDir, \"home/.dsh\"), \".live.ndjson\")"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/OverlayPanel.kt:87": [
-      "* 审批「批准一次」的二次确认态（P0-9）。"
+      "private val qOptsExpanded = HashSet<String>()"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/OverlayReport.kt:180": [
       "return bar.measuredHeight"

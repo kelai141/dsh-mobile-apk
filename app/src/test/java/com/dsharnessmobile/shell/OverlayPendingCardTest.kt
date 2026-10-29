@@ -109,7 +109,7 @@ class OverlayPendingCardTest {
       code.contains("pendingChip(\"批准一次\", filled = true, red = false, dp) { respondApproval(a, \"allowed-once\") }"),
     )
     assertTrue("待确认态必须有可见标签", code.contains("确认批准（执行）"))
-    assertTrue("待确认态必须能取消", code.contains("pendingChip(\"取消\""))
+    assertTrue("待确认态必须能取消", code.contains("pendingChip(t(\"取消\", \"Cancel\")"))
     assertTrue("换卡必须撤臂", code.contains("approvalArmedId = null\n    }"))
   }
 
@@ -126,7 +126,7 @@ class OverlayPendingCardTest {
       "requestStop 不得在无轮次时静默 return（用户视角就是「点了没反应」，P0-6）",
       stopBody.contains("if (!sessionBusy) return\n"),
     )
-    assertTrue("无轮次时必须给出可见回执", stopBody.contains("flashStatus(\"当前没有正在运行的任务\")"))
+    assertTrue("无轮次时必须给出可见回执", stopBody.contains("t(\"当前没有正在运行的任务\", \"Nothing is running right now\")"))
   }
 
   // ── P0-3：按钮卡在禁用的「下载中 100%」 ──────────────────────────────────

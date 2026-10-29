@@ -519,7 +519,7 @@ class CallSiteContractTest {
   @Test
   fun theHideEntryLivesInThePanelAndCallsHideBall() {
     val panel = codeOnly(source("OverlayPanel.kt"))
-    assertTrue("J-A1：面板必须有「隐藏悬浮球」入口（可发现性：不得只靠手势）", panel.contains("contentDescription = \"隐藏悬浮球\""))
+    assertTrue("J-A1：面板必须有「隐藏悬浮球」入口（可发现性：不得只靠手势）", panel.contains("t(\"隐藏悬浮球\", \"Hide floating ball\")"))
     assertTrue("J-A1：入口必须挂进顶行（与 ✕ 收起并排）", panel.contains("overlay-hide-entry"))
     assertTrue("J-A1：点击必须走 svc.hideBall()", panel.contains("setOnClickListener { svc.hideBall() }"))
     assertTrue("J-A1：换肤必须同步该入口颜色（漏了会留旧主题灰）", panel.contains("hideEntryView?.setTextColor(c.chevron)"))
