@@ -1828,10 +1828,10 @@
       "return out.put(\"ok\", false).put(\"code\", \"shizuku-not-running\")"
     ],
     "ShizukuTransport.kt:806": [
-      "true"
+      ""
     ],
     "ShizukuTransport.kt:821": [
-      "lease.beforeRpc(remote)?.let { return it }"
+      "}.getOrDefault(false)"
     ],
     "ShizukuTransport.kt:98": [
       "val valid = runCatching { binder.pingBinder() }.getOrDefault(false)"

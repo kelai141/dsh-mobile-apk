@@ -622,7 +622,17 @@ object ShizukuTransport {
     dispatched: Boolean,
     leaseUnknown: Boolean,
     maintenanceActive: Boolean,
-  ): Boolean = channel == RootChannel.ABSENT && !dispatched && !leaseUnknown && !maintenanceActive
+    leaseStale: Boolean = false,
+  ): Boolean {
+    // 三个否决项恒成立：已派发 / 状态不可信 / 维护在飞 —— 任一为真都不许自动清。
+    if (dispatched || leaseUnknown || maintenanceActive) return false
+    // ① 通道确实不存在：隔离没有可串行化的对象。
+    if (channel == RootChannel.ABSENT) return true
+    // ② issue #658：租约**从未派发**且已陈旧。按构造不存在在飞的特权工作（dispatched 为空意味着
+    // begin() 之后没走到 markDispatched），所以通道是否存在都不影响安全性；不清的代价是引擎
+    // 一直卡在「等待属主维护」直到整机重启。
+    return leaseStale
+  }
 
   /**
    * 唯一的 root 通道判据（**两条消费面同源**：入口清算与维护 worker 都用它）。
@@ -713,15 +723,19 @@ object ShizukuTransport {
     // 复审第四轮：`unknown` 是**明确否决项**——「没有派发证据」≠「证明没有派发」
     // （markDispatched 写不进时只置 unknown；恢复别的进程的租约也会 unknown）。
     val leaseUnknown = lease?.optBoolean("unknown") == true || RootMaintenanceLease.unknown(app)
-    val allowed = autoClearAllowed(probe.state, dispatched, leaseUnknown, RootExecutionFence.maintenanceActive)
+    // issue #658：陈旧且从未派发的租约也允许自动清（通道是否存在不再是否决项）。
+    val leaseStale = RootMaintenanceLease.stale(app)
+    val allowed = autoClearAllowed(probe.state, dispatched, leaseUnknown, RootExecutionFence.maintenanceActive, leaseStale)
     LeaseClearProbe.record(app, probe, decisive = true, dispatched = dispatched, allowed = allowed,
       leaseUnknown = leaseUnknown)
     if (!allowed) return false
     return RootMaintenanceLease.clearWhenNoRootChannel(app) {
       // 锁内复核（判断—清除之间）：通道可能复活、维护可能刚好开始、租约可能刚被派发、
       // 或租约状态刚变成不可信（unknown）⇒ 任一变化都不得清除。
-      !RootExecutionFence.maintenanceActive && !RootAccess.isGranted(app) &&
-        !RootMaintenanceLease.dispatched(app) && !RootMaintenanceLease.unknown(app)
+      !RootExecutionFence.maintenanceActive &&
+        !RootMaintenanceLease.dispatched(app) && !RootMaintenanceLease.unknown(app) &&
+        // issue #658：陈旧路径不要求「通道已消失」；非陈旧路径保持原有的 isGranted 复核。
+        (!RootAccess.isGranted(app) || RootMaintenanceLease.stale(app))
     }
   }
 
