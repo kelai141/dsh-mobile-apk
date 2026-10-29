@@ -293,7 +293,12 @@ object ShizukuTransport {
     out.put("granted", granted)
     if (!granted) {
       return out.put("ok", false).put("code", "shizuku-denied")
-        .put("guidance", UiText.t(context, "尚未获得 Shizuku 授权。点击创建虚拟屏后会由 Shizuku 管理器显示用户确认；DSH 不会自行授予权限。", "Shizuku access is not granted yet. Creating a virtual screen asks Shizuku for confirmation; DSH never grants it by itself."))
+        .put("guidance", UiText.t(
+            context,
+            // 建屏只由模型驱动（面板不提供创建按钮），旧文案让用户「点击创建」——指了个不存在的控件。
+            "尚未获得 Shizuku 授权。让 AI 创建虚拟屏时，Shizuku 管理器会显示用户确认；DSH 不会自行授予权限。",
+            "Shizuku access is not granted yet. When the AI creates a virtual screen, Shizuku asks you for confirmation; DSH never grants it by itself.",
+          ))
     }
     if (service?.asBinder()?.pingBinder() != true) {
       // 三态化（0.14.1）：code 只报「正在建立」当且仅当确有 bind 在飞。
@@ -393,7 +398,14 @@ object ShizukuTransport {
       return status(context)
         .put("requested", requested)
         .put("code", if (requested) "shizuku-permission-requested" else "shizuku-denied")
-        .put("guidance", "已向 Shizuku 发起授权请求；请在其系统确认页批准后再次点击创建虚拟屏。")
+        .put(
+          "guidance",
+          UiText.t(
+            context,
+            "已向 Shizuku 发起授权请求；请在其系统确认页批准后让 AI 再创建一次虚拟屏。",
+            "A Shizuku permission request was sent. Approve it in the system prompt, then let the AI create the virtual screen again.",
+          ),
+        )
     }
     if (service?.asBinder()?.pingBinder() == true) return status(context)
 

@@ -1846,10 +1846,10 @@
       "return out.put(\"ok\", false).put(\"code\", \"shizuku-not-running\")"
     ],
     "ShizukuTransport.kt:806": [
-      "if (remote == null) return refusal ?: unavailableShell()"
+      "true"
     ],
     "ShizukuTransport.kt:821": [
-      "return try {"
+      "lease.beforeRpc(remote)?.let { return it }"
     ],
     "ShizukuTransport.kt:98": [
       "val valid = runCatching { binder.pingBinder() }.getOrDefault(false)"
@@ -1942,19 +1942,19 @@
       "} else {"
     ],
     "VdisplayController.kt:529": [
-      "fun releaseViewerSurface(context: Context, viewerId: String, surface: Surface? = null): JSONObject {"
+      "return status(context.applicationContext)"
     ],
     "VdisplayController.kt:554": [
-      "*/"
+      ""
     ],
     "VdisplayController.kt:721": [
-      ".lineSequence().map { it.trim() }.lastOrNull { it.contains(\"/\") } ?: \"\""
+      "appContext,"
     ],
     "VdisplayController.kt:753": [
-      ".put(\"guidance\", \"已请求把 \" + pkg + \" 拉起到 \" + record.alias + \"（displayId=\" + id + \"），但**落点回读不可用**\""
+      "//   - 读不到       → ok=true  vd-launched-unverified（明写「不构成落点证明」并给出复核手段）"
     ],
     "VdisplayController.kt:766": [
-      ".put(\"guidance\", \"拉起未落在虚拟屏：\" + pkg + \" 实际出现在 displayId=\" + landed.joinToString(\",\")"
+      "+ \"ActivityRecord（应用可能已崩溃/退出）——本次不构成落点证明，请用 android_ui_dump 复核该屏内容。\" + amTail)"
     ],
     "VdisplayController.kt:84": [
       "*"
@@ -2380,13 +2380,13 @@
       "* rejected with `screen-not-selectable`; an unknown alias is `screen-not-found`."
     ],
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:495": [
-      "* Attach one viewer Surface to a target with viewer arbitration."
+      "return status(context.applicationContext)"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:60": [
       "val display: VirtualDisplay,"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:608": [
-      "* 一条不存在的路**。提示与能力不一致，比直接拒绝更糟。"
+      "*"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:84": [
       "*"

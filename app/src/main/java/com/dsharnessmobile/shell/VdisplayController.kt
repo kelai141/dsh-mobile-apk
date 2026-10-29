@@ -283,7 +283,7 @@ object VdisplayController {
     }
     if (privileged.optBoolean("ok")) {
       return out.put("ok", true).put("state", "ready").put("code", "vdisplay-ready")
-        .put("guidance", "Shizuku 已授权且 shell UserService 已就绪；可创建虚拟屏幕 1。")
+        .put("guidance", UiText.t(context, "Shizuku 已授权且 shell UserService 已就绪；AI 可创建 1 块虚拟屏。", "Shizuku is granted and the shell UserService is ready; the AI can create 1 virtual screen."))
     }
     return out.put("ok", false).put("state", "blocked")
       .put("code", privileged.optString("code", lastCode))
@@ -481,7 +481,11 @@ object VdisplayController {
         .put("guidance", if (normalized == ScreenTargets.REAL) {
           "真实屏幕不允许镜像，不能作为查看器目标。"
         } else {
-          "没有名为 $normalized 的 " + UserCopy.APP_NAME + " 虚拟屏；先创建虚拟屏。"
+          UiText.t(
+            context,
+            "没有名为 $normalized 的 " + UserCopy.APP_NAME + " 虚拟屏；先让 AI 创建虚拟屏。",
+            "No " + UserCopy.APP_NAME + " virtual screen named $normalized; ask the AI to create one first.",
+          )
         })
     synchronized(lock) {
       selectedAlias = record.alias
