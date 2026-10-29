@@ -2757,13 +2757,10 @@
       "@Test"
     ],
     "apply-patches.mjs:1568": [
-      "//   ① publish 站（publishCurrentExclusive，rename 之前）：占位成功=我们赢，输家得到 EEXIST 并"
+      "return s"
     ],
     "apply-patches.mjs:1596": [
-      "}"
-    ],
-    "apply-patches.mjs:519": [
-      "el('span', '{className:\"dshm-stars\"}', '\"\\\\u2605 \",Number(o.stars??0).toLocaleString()'))"
+      "//    边界 = 旧块注释起、到紧随其后的 helper 占位调用止；helper 占位调用是 v2 正确形态，保留。"
     ],
     "attachment-picker-menu.ts:184": [
       "return node.matches(SLOT_SELECTOR) || node.querySelector(SLOT_SELECTOR) !== null"
@@ -4075,16 +4072,16 @@
       "SNAP_PKG_ROOT=\"${DSH_SNAPSHOT_PKG_ROOT:-/data/user/0/com.dsharnessmobile.shell}\""
     ],
     "scripts/patches/apply-patches.mjs:122": [
-      "if (m) out.add(m[1].replace(/^['\"]|['\"]$/g, ''))"
+      "const m = /^\\s*-?\\s*name:\\s*(.+?)\\s*$/.exec(line)"
     ],
     "scripts/patches/apply-patches.mjs:1568": [
-      "//   ① publish 站（publishCurrentExclusive，rename 之前）：占位成功=我们赢，输家得到 EEXIST 并"
+      "return s"
     ],
     "scripts/patches/apply-patches.mjs:1583": [
-      "// 必须显式判为未收敛，否则「已应用」的幂等判定会把坏文件永远留在原地。"
+      "// 否则留下 0 字节目标：它会被当成「已存在」让之后每次发布都输掉占位竞争，且被读日志侧当成损坏文件。"
     ],
     "scripts/patches/apply-patches.mjs:865": [
-      ".replace(/\\n$/, '').replace(/\\n/g, s.includes('\\r\\n') ? '\\r\\n' : '\\n') + (s.includes('\\r\\n') ? '\\r\\n' : '\\n')"
+      "// 上游文件是 CRLF：锚点用正则匹配（\\r?\\n），否则跨行锚点永远失配（实测踩到）。"
     ],
     "scripts/patches/data/client-index-loader-barrier.mjs:3": [
       "export function planClientIndexLoaderBarrier(source) {"
