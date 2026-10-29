@@ -229,9 +229,16 @@ export class TopBarFold {
     this.styleSnapshot.set('--dsh-topbar-fold-max-height', element.style.getPropertyValue('--dsh-topbar-fold-max-height'))
   }
 
-  /** 确保折叠箭头挂在视图标签条最右（标签条不在场则不动）。 */
+  /**
+   * 确保折叠箭头挂在**标签行**最右（标签行不在场则不动）。
+   *
+   * 挂到 `[data-conversation-tabs]` 的**父节点**而不是它自己：上游的视图菜单（「…」）
+   * 是标签条的兄弟节点，挂在标签条内部的话箭头只会落在最后一个 tab 之后，到不了最右。
+   * 父节点就是那一行容器（`div.tabs`），箭头作为它的末项 + `margin-left:auto` 才是真最右。
+   */
   private ensureArrow(): void {
-    const host = document.querySelector<HTMLElement>(TABS_SELECTOR)
+    const tabs = document.querySelector<HTMLElement>(TABS_SELECTOR)
+    const host = tabs?.parentElement ?? null
     if (host === null) return
     if (this.arrow !== null && this.arrowHost === host && host.contains(this.arrow)) return
     this.removeArrow()

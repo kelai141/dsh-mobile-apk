@@ -116,14 +116,28 @@ afterEach(() => {
   document.body.innerHTML = ''
 })
 
+describe('视图菜单与折叠箭头的位置', () => {
+  it('隐藏上游视图菜单「…」（它是标签条的兄弟节点，不是子节点）', () => {
+    expect(TOP_BAR_FOLD_CSS).toMatch(/\[data-conversation-tabs\]\s*\+\s*\*/)
+  })
+
+  it('折叠箭头靠最右（margin-left:auto）', () => {
+    expect(TOP_BAR_FOLD_CSS).toMatch(/\[data-dsh-topbar-fold-arrow\]\s*\{[^}]*margin-left:\s*auto/)
+  })
+})
+
 describe('D 项：竖屏顶栏插件 UI 折叠', () => {
   it('手机竖屏：箭头挂在视图标签条最右，且顶栏原生控件仍保留', async () => {
     fold.attach()
     await flush()
     const tabs = document.querySelector('[data-conversation-tabs]')!
+    const row = tabs.parentElement!
     const arrow = state().arrow!
     expect(arrow).not.toBeNull()
-    expect(tabs.lastElementChild).toBe(arrow)
+    // 挂在标签行（标签条的父节点）末位：上游的「…」是标签条的兄弟节点，
+    // 挂在标签条内部只能排到最后一个 tab 之后，到不了最右。
+    expect(arrow.parentElement).toBe(row)
+    expect(row.lastElementChild).toBe(arrow)
     // 标题、两个侧边栏按钮（左 toggle / 右展开）与三点菜单都不是我们动的
     expect(document.querySelector('[data-dsh-sidebar-toggle]')).not.toBeNull()
     expect(document.querySelector('.titleRow nav')?.textContent).toContain('月度现金流核算与报告')
