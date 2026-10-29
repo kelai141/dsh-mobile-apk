@@ -2149,7 +2149,7 @@
       "// 相位已由本函数入口切到 Starting（启动即有反馈），这里不再重复切换——"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/FactoryProfilePatch.kt:79": [
-      "* （同一个包重新 insert 一次，只为塞 config）。该写法引入**服务供给单点**："
+      "*/"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/FileIncoming.kt:32": [
       "fun tmpWorkspace(context: Context): File ="
