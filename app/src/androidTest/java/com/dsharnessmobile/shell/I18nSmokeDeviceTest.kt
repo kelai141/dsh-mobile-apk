@@ -157,4 +157,58 @@ class I18nSmokeDeviceTest {
     assertTrue("ZH 分类名必须含中文；实得=" + zh, cjk.containsMatchIn(zh))
     assertTrue("中英必须不同（否则等于没做 i18n）；en=" + en + " zh=" + zh, en != zh)
   }
+
+  // ── #863：锁屏公版文案（publicVersion）也要跟随语言 ─────────────────
+
+  /**
+   * 锁屏/锁屏样式下系统展示的是 `Notification.publicVersion`，**不是**主通知的 extras。
+   * #863 修的就是这条路径上的 `有一项需要你的决定`。
+   *
+   * 观察点：`publicVersion.extras[EXTRA_TEXT]` 在 EN 下无 CJK、ZH 下含 CJK。
+   * 反向保护：publicVersion 必须存在且文本非空（否则「无 CJK」在空串上恒成立）。
+   *
+   * 前提：公版只在 `face.popup` 的通知上设置（提问/审批），故用 kind=question 构造。
+   */
+  @Test
+  fun lockScreenPublicVersionCopyFollowsLanguage() {
+    setLang("en")
+    assertTrue("前提：EN 模式必须生效", UiText.isEnglish(ctx))
+    val enPub = postQuestionAndGetPublicText()
+    assertTrue("前提：publicVersion 必须存在且文本非空；实得=" + enPub, enPub.isNotBlank())
+    assertFalse("EN 下锁屏公版文案不得含中文；实得=" + enPub, cjk.containsMatchIn(enPub))
+
+    setLang("zh")
+    assertFalse("前提：ZH 模式必须生效", UiText.isEnglish(ctx))
+    val zhPub = postQuestionAndGetPublicText()
+    assertTrue("ZH 下锁屏公版文案必须含中文；实得=" + zhPub, cjk.containsMatchIn(zhPub))
+  }
+
+  private fun postQuestionAndGetPublicText(): String {
+    nm.cancelAll()
+    Thread.sleep(200)
+    val uniq = (++seq).toString()
+    NotifyCenter.notifyEvent(
+      ctx,
+      NotifyEntry(
+        kind = "question",
+        title = "",
+        text = "",
+        event = "",
+        sessionId = "i18n-smoke-q",
+        eventId = "i18n-smoke-q" + uniq,
+        outcome = "",
+      ),
+      foreground = false,
+    )
+    var hit: android.service.notification.StatusBarNotification? = null
+    for (i in 0 until 25) {
+      Thread.sleep(150)
+      hit = nm.activeNotifications.firstOrNull()
+      if (hit != null) break
+    }
+    assertNotNull("提问通知必须真的落盘", hit)
+    val pub = hit!!.notification.publicVersion
+    assertNotNull("该通知必须带 publicVersion（锁屏公版）", pub)
+    return pub!!.extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim().orEmpty()
+  }
 }
