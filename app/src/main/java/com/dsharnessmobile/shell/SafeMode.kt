@@ -37,6 +37,10 @@ import java.security.MessageDigest
 internal object SafeMode {
 
   /** 状态文件名（与离线 CLI / vendor 插件同名同目录，三方共享同一份状态）。 */
+  /** issue #683：状态机两阶段。`writing` = 已落盘但 patch 未必写完；`active` = 全部完成。 */
+  internal const val PHASE_WRITING = "writing"
+  internal const val PHASE_ACTIVE = "active"
+
   const val STATE_FILE = "safe-mode.json"
 
   /**
@@ -230,7 +234,14 @@ internal object SafeMode {
           return Result(false, "安全模式状态绑定到 profile ${existing.optString("profile")}，拒绝按 web 状态处理。")
         }
         if (existing.optBoolean("active", false)) {
-          return Result(true, "安全模式已开启；保留现有恢复档，未重复改写。", existing.optString("snapshotId", ""))
+          // issue #683：`phase=writing` 表示上次进入**中途失败**（状态已落盘、patch 可能没写完）。
+          // 这种不许早退报成功，必须往下重写一遍。
+          // `active=true` 且**没有** phase 的，是 #683 之前的旧状态文件 —— 视为已完成（升级兼容），
+          // 否则老用户升级后第一次点「安全模式启动」就会被判成「不收敛」。
+          val phase = existing.optString("phase", "")
+          if (phase != PHASE_WRITING) {
+            return Result(true, "安全模式已开启；保留现有恢复档，未重复改写。", existing.optString("snapshotId", ""))
+          }
         }
       } catch (t: Throwable) {
         return Result(false, "安全模式状态文件损坏（" + t.javaClass.simpleName + "），已拒绝覆盖；请先恢复状态文件。")
@@ -285,7 +296,10 @@ internal object SafeMode {
       // ④ 先落状态：此后无论何时崩溃，off 都能凭备份整份还原。
       atomicWrite(stateFile, (
         org.json.JSONObject()
-          .put("active", true)
+          // issue #683：先落 `phase=writing` 而不是 `active=true` —— 备份路径照旧早早记下，
+          // 便于中途崩溃时 off 仍能整份还原；但「已生效」这个结论要等 ⑤ 全部写完才给。
+          .put("active", false)
+          .put("phase", PHASE_WRITING)
           .put("profile", "web")
           .put("enteredAt", java.time.Instant.now().toString())
           .put("by", "shell-guide-button")
@@ -305,6 +319,11 @@ internal object SafeMode {
       atomicWrite(patch, filtered.toByteArray(Charsets.UTF_8))
       if (homeExisted) atomicWrite(homePatch, "# dsh safe mode (home level)\n[]\n".toByteArray(Charsets.UTF_8))
       if (packageSelection?.bytes != null) atomicWrite(packageFile, packageSelection.bytes)
+      // issue #683：⑤ 全部写成功之后才把状态抬到 active —— 中间任何一步失败，状态都停在
+      // phase=writing，下次进入能凭它识别并重写，而不是早退报成功。
+      val done = org.json.JSONObject(stateFile.readText())
+      done.put("active", true).put("phase", PHASE_ACTIVE)
+      atomicWrite(stateFile, done.toString(2).toByteArray(Charsets.UTF_8))
       val removed = removedPluginNames(String(original, Charsets.UTF_8), hardEntries.orEmpty())
       Result(
         true,
