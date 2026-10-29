@@ -1069,14 +1069,20 @@ object NotifyCenter {
     when (face) {
       Face.SILENT -> {
         b.setContentTitle(entry.displayTitle())
-        b.setContentText(entry.text.ifBlank { "引擎状态更新" })
+        b.setContentText(entry.text.ifBlank { UiText.t(app, "引擎状态更新", "Engine status update") })
         b.setSilent(true) // 第二道保险（javadoc 明写它同时阻止 peek）
-        if (entry.count > 1) b.setSubText("共 " + entry.count + " 条")
+        if (entry.count > 1) b.setSubText(UiText.t(app, "共 " + entry.count + " 条", entry.count.toString() + " updates"))
       }
       Face.TODO -> {
         b.setContentTitle(entry.displayTitle())
-        b.setContentText(if (entry.current.isBlank()) "步骤 " + entry.done + "/" + entry.total else "当前：" + entry.current)
-        b.setSubText("步骤 " + entry.done + "/" + entry.total)
+        b.setContentText(
+          if (entry.current.isBlank()) {
+            UiText.t(app, "步骤 " + entry.done + "/" + entry.total, "Step " + entry.done + "/" + entry.total)
+          } else {
+            UiText.t(app, "当前：" + entry.current, "Current: " + entry.current)
+          },
+        )
+        b.setSubText(UiText.t(app, "步骤 " + entry.done + "/" + entry.total, "Step " + entry.done + "/" + entry.total))
         b.setProgress(entry.total.coerceAtLeast(0), entry.done.coerceAtLeast(0), false)
         b.setSilent(true)
         b.setCategory(NotificationCompat.CATEGORY_PROGRESS)
@@ -1107,12 +1113,14 @@ object NotifyCenter {
         // S3-8：旧标题恒为类别词「需要授权」，把引擎给的**具体对象**（工具名）丢在正文里——用户
         // 一眼看到「需要授权」四个字，不知道要放行什么。标题带上具体对象，类别词只作兜底。
         b.setContentTitle(
-          entry.toolName.ifBlank { null }?.let { "「" + it + "」需要授权" }
+          entry.toolName.ifBlank { null }?.let {
+            UiText.t(app, "「" + it + "」需要授权", "「" + it + "」needs approval")
+          }
             ?: entry.displayTitle().ifBlank { UserCopy.notifyCategory(Face.APPROVAL.category) },
         )
-        b.setContentText(approvalLine(entry))
-        b.setStyle(NotificationCompat.BigTextStyle().bigText(approvalLine(entry) + "\n仅本次生效"))
-        b.setSubText("仅本次生效")
+        b.setContentText(approvalLine(app, entry))
+        b.setStyle(NotificationCompat.BigTextStyle().bigText(approvalLine(app, entry) + "\n" + UiText.t(app, "仅本次生效", "Applies once")))
+        b.setSubText(UiText.t(app, "仅本次生效", "Applies once"))
         b.setPriority(NotificationCompat.PRIORITY_HIGH)
         addApprovalActions(app, b, entry)
       }
@@ -1158,10 +1166,14 @@ object NotifyCenter {
    * 审批正文（S3-7）：保留被操作目标的可辨识末段，而不是把整条路径抹成 `[路径]`。
    * 用户要确认的**正是那个目标**；抹掉它等于让用户在不知道放行什么的情况下点「批准一次」。
    */
-  private fun approvalLine(entry: NotifyEntry): String {
-    val tool = entry.toolName.ifBlank { "未知工具" }
+  private fun approvalLine(app: Context, entry: NotifyEntry): String {
+    val tool = entry.toolName.ifBlank { UiText.t(app, "未知工具", "unknown tool") }
     val reason = entry.reason.trim()
-    return if (reason.isBlank()) "工具 " + tool + " 请求执行" else "工具 " + tool + "：" + redactPathsKeepingTail(reason)
+    return if (reason.isBlank()) {
+      UiText.t(app, "工具 " + tool + " 请求执行", "Tool " + tool + " wants to run")
+    } else {
+      UiText.t(app, "工具 " + tool + "：" + redactPathsKeepingTail(reason), "Tool " + tool + ": " + redactPathsKeepingTail(reason))
+    }
   }
 
   /** 正文脱敏：绝对路径截断 + token 形态遮挡（§5.6；不改写 engine.log 本体）。 */
@@ -1454,19 +1466,43 @@ object NotifyCenter {
   }
 
   /** 发送测试通知（设置页自证按钮；按类各一条；权限缺失时二次请求由界面负责）。 */
+  /** 发送测试通知（设置页自证按钮；按类各一条；权限缺失时二次请求由界面负责）。 */
   fun sendTest(context: Context, category: String): Result {
+    val app = context.applicationContext
+    // 文案面（0.14.11）：这五条是用户点「发送测试通知」后看得见的通知，切到英文后仍是中文。
+    // 标题/正文与其它原生文案走同一条 UiText.t。
     val entry = when (category) {
-      "todo" -> NotifyEntry(kind = "todo", sessionId = "test", total = 5, done = 2, current = "测试进度")
+      "todo" -> NotifyEntry(
+        kind = "todo", sessionId = "test", total = 5, done = 2,
+        current = UiText.t(app, "测试进度", "Test progress"),
+      )
       "report" -> NotifyEntry(
-        kind = "report", sessionId = "test", title = "测试会话", outcome = "completed",
-        outcomeLabel = "已完成", summary = "这是一条工作汇报测试", durationMs = 12_000, toolCount = 3,
+        kind = "report", sessionId = "test", outcome = "completed",
+        title = UiText.t(app, "测试会话", "Test session"),
+        outcomeLabel = UiText.t(app, "已完成", "Completed"),
+        summary = UiText.t(app, "这是一条工作汇报测试", "This is a work-report notification test"),
+        durationMs = 12_000, toolCount = 3,
       )
       "question" -> NotifyEntry(
         kind = "question", eventId = "test-q",
-        questions = listOf(NotifyQuestion("q1", "测试提问", "现在方便吗？", emptyList())),
+        questions = listOf(
+          NotifyQuestion(
+            "q1",
+            UiText.t(app, "测试提问", "Test question"),
+            UiText.t(app, "现在方便吗？", "Is now a good time?"),
+            emptyList(),
+          ),
+        ),
       )
-      "approval" -> NotifyEntry(kind = "approval", eventId = "test-a", toolName = "bash", reason = "测试授权请求")
-      else -> NotifyEntry(kind = "silent", event = "test", title = "后台动态测试", text = "引擎状态正常")
+      "approval" -> NotifyEntry(
+        kind = "approval", eventId = "test-a", toolName = "bash",
+        reason = UiText.t(app, "测试授权请求", "Test approval request"),
+      )
+      else -> NotifyEntry(
+        kind = "silent", event = "test",
+        title = UiText.t(app, "后台动态测试", "Background activity test"),
+        text = UiText.t(app, "引擎状态正常", "Engine status is healthy"),
+      )
     }
     return notifyEvent(context, entry)
   }

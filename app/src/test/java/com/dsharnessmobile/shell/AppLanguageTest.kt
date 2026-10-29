@@ -192,4 +192,22 @@ class AppLanguageTest {
     return file.readText()
   }
 
+  /**
+   * 测试通知也是用户看得见的（「发送测试通知」按钮），标题/正文必须随语言走。
+   * 现象：切英文后系统通知栏里那五条仍是中文（真机截图确认过）。判据钉在源码形态上。
+   */
+  @Test
+  fun testNotificationsCarryBothLanguages() {
+    val center = source("src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt")
+    assertTrue("测试提问必须双语", center.contains("UiText.t(app, \"测试提问\", \"Test question\")"))
+    assertTrue("测试会话必须双语", center.contains("\"Test session\""))
+    assertTrue("后台动态必须双语", center.contains("\"Background activity test\""))
+    assertTrue("审批标题必须双语", center.contains("needs approval"))
+    assertTrue("审批副标题必须双语", center.contains("Applies once"))
+    assertFalse(
+      "不得回到只有中文的测试通知",
+      center.contains("NotifyQuestion(\"q1\", \"测试提问\", \"现在方便吗？\""),
+    )
+  }
+
 }
