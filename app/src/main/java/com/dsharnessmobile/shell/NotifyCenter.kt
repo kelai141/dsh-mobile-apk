@@ -1136,7 +1136,7 @@ object NotifyCenter {
         b.setContentTitle(first?.header?.ifBlank { null } ?: UserCopy.notifyCategory(Face.QUESTION.category))
         // S3-4：旧写法是 `first?.question ?: entry.text.ifBlank {...}`——`first.question` 是**空串**
         // （非 null）时 elvis 不触发，通知正文于是空白。`ifBlank { null }` 才能让空串也落到兜底。
-        b.setContentText(first?.question?.ifBlank { null } ?: entry.text.ifBlank { "引擎正在等待你的回答" })
+        b.setContentText(first?.question?.ifBlank { null } ?: entry.text.ifBlank { UiText.t(app, "引擎正在等待你的回答", "The engine is waiting for your answer") })
         b.setStyle(NotificationCompat.BigTextStyle().bigText(questionBigText(entry)))
         b.setPriority(NotificationCompat.PRIORITY_HIGH)
         // S3-6：**不再** setTimeoutAfter(30 分钟)。引擎侧的提问没有超时，而通知栏是唯一的作答入口
@@ -1175,7 +1175,8 @@ object NotifyCenter {
         NotificationCompat.Builder(app, channelId)
           .setSmallIcon(android.R.drawable.stat_notify_chat)
           .setContentTitle(UserCopy.APP_NAME)
-          .setContentText("有一项需要你的决定")
+          // 锁屏公版文案同样要跟语言走（2026-10-29 真机：EN 下这条仍是中文）。
+          .setContentText(UiText.t(app, "有一项需要你的决定", "There is a decision waiting for you"))
           .build(),
       )
     }
