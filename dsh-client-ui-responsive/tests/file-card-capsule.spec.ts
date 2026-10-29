@@ -58,21 +58,28 @@ function buildSingleCard(path: string, opts: { onOpen?: () => void } = {}): HTML
   return header
 }
 
-/** 多文件卡片：ul > li > button + hidden span。 */
+/**
+ * 多文件卡片：`ul > li > span(FileOpenAnchor) > button` + hidden span。
+ *
+ * 与单文件同理，上游每行的按钮也被 FileOpenAnchor 的 span 包住，
+ * 不是 li 的直接子元素（实机取证）。夹具照抄这一层。
+ */
 function buildMultiCard(paths: readonly string[]): HTMLElement {
   const card = document.createElement('div')
   card.setAttribute('data-changed-files', '')
   const list = document.createElement('ul')
   paths.forEach((path, index) => {
     const li = document.createElement('li')
+    const anchor = document.createElement('span')
     const row = document.createElement('button')
     row.type = 'button'
     row.setAttribute('aria-describedby', 'row-' + index)
+    anchor.append(row)
     const hidden = document.createElement('span')
     hidden.id = 'row-' + index
     hidden.hidden = true
     hidden.textContent = path
-    li.append(row, hidden)
+    li.append(anchor, hidden)
     list.append(li)
   })
   card.append(list)

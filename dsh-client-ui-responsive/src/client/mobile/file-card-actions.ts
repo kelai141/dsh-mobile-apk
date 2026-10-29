@@ -228,9 +228,11 @@ export class FileCardCapsule {
         const header = card.querySelector<HTMLElement>('button[aria-describedby]')
         if (header !== null) this.ensureCapsule(header, card)
       } else {
-        for (const row of card.querySelectorAll<HTMLElement>('li > button')) {
-          const host = row.parentElement
-          if (host !== null) this.ensureCapsule(row, host)
+        // 多文件卡片：每行同样是 `li > span(FileOpenAnchor) > button`，按钮不是 li 的
+        // 直接子元素，所以 `li > button` 也匹配不到（实机取证）。按 li 逐个取行内按钮。
+        for (const row of card.querySelectorAll<HTMLElement>('li')) {
+          const anchor = row.querySelector<HTMLElement>('button[aria-describedby]')
+          if (anchor !== null) this.ensureCapsule(anchor, row)
         }
       }
     }
