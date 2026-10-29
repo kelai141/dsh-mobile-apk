@@ -1531,7 +1531,7 @@
       ".put(\"method\", \"\\$events/result\")"
     ],
     "NotifyCenter.kt:1048": [
-      ")"
+      "manager.notify("
     ],
     "NotifyCenter.kt:145": [
       "/** 渠道说明（跟随语言）。 */"
@@ -1558,25 +1558,25 @@
       "for (face in Face.values()) {"
     ],
     "NotifyCenter.kt:550": [
-      "ch.enableVibration(true)"
+      "renamed += 1"
     ],
     "NotifyCenter.kt:612": [
-      "out.put(\"permissionLabel\", if (granted) \"已授予\" else \"未授予（任务完成不会提醒）\")"
+      "const val UNDETECTABLE = \"无法检测\""
     ],
     "NotifyCenter.kt:631": [
-      "} else {"
+      "val selected = channelFor(app, face)"
     ],
     "NotifyCenter.kt:676": [
-      ""
+      ".putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, app.packageName)"
     ],
     "NotifyCenter.kt:829": [
-      "// The exception has already been caught. Persist the event before allowing the cursor to"
+      "* 六类事件投递入口（NotifyStore / NotifyBridge 的唯一出口）。"
     ],
     "NotifyCenter.kt:84": [
       "* 旧值是 30 分钟，行为是 `setTimeoutAfter` 到点撤掉通知——而引擎侧的提问**没有超时**"
     ],
     "NotifyCenter.kt:850": [
-      "cancelSystemNotification(app, entry.eventId)"
+      "}"
     ],
     "NotifyDecisionQueue.kt:192": [
       "@Synchronized"
@@ -2287,10 +2287,10 @@
       ""
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:589": [
-      "app: Context,"
+      "return"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:828": [
-      "NotifyProbe.log(app, \"dsh-notify\", \"notifyEvent THREW kind=\" + entry.kind + \": \" + t)"
+      "/**"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyDecisionQueue.kt:266": [
       "* NOT_READY（应答流/引擎未就绪）的统一处置：预算内 -> 独立计数 + 指数退避重排；"
