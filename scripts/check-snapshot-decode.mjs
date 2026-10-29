@@ -295,6 +295,9 @@ if (SELF_TEST || SELF_TEST_RUNTIME) {
       writeFileSync(fingerprintTar, validBytes)
       const actualHash = createHash('sha256').update(validBytes).digest('hex')
       writeFileSync(fingerprintFile, actualHash + '\n')
+      // #920：指纹门禁现在还要求 plugin-hard-manifest.json 在场，本夹具树一并补上，
+      // 否则「正向：实际指纹门禁接受匹配的 SHA-256」会被清单缺席判红（与被测判据无关）。
+      writeFileSync(join(assets, 'plugin-hard-manifest.json'), '{"entries":[]}')
       const fingerprintGate = join(ROOT, 'scripts', 'check-snapshot-fingerprint.mjs')
       const matchingHash = spawnSync(process.execPath, [fingerprintGate, '--require', '--root', fingerprintRoot], { encoding: 'utf8' })
       check('正向：实际指纹门禁接受匹配的 SHA-256', matchingHash.status === 0 && matchingHash.stdout.includes('SNAPSHOT-FINGERPRINT CHECK PASSED'))
