@@ -115,7 +115,7 @@ export const MARKETPLACE_CSS: string = `
   height: 16px;
   border-radius: 50%;
   corner-shape: round;
-  background: var(--dsw-alias-switch-thumb);
+  background: var(--dsw-alias-bg-base);
   transition: transform 120ms ease, background 120ms ease;
 }
 
