@@ -355,3 +355,61 @@ describe('样式表守则', () => {
     expect(COMPOSER_SHEET_CSS).toMatch(/\[data-dsh-composer-sheet-tiles\]\s*\{[^}]*grid-template-columns:\s*repeat\(3,\s*1fr\)/)
   })
 })
+describe('「+」底部 sheet：#929 焦点顺序（复现真机 MenuView 的焦点要求）', () => {
+  /**
+   * 真机行为：上游 MenuView 把自己绑在 draft editor 的 caret 上，**编辑器不持焦点就不开菜单**。
+   * 现有 buildComposer 无条件生成菜单，所以旧实现「先 blur 再读」在 jsdom 里永远绿 ——
+   * 这正是 #892 能带着「未验」合并、设备上映射行永远 0 的原因。
+   */
+  function buildFocusGatedComposer(
+    labels: readonly (readonly [string, string | null])[],
+    editor: HTMLElement,
+  ): { add: HTMLButtonElement; card: HTMLElement } {
+    const card = document.createElement('div')
+    card.setAttribute('data-composer-card', '')
+    const tools = document.createElement('div')
+    tools.className = 'tools'
+    const add = document.createElement('button')
+    add.type = 'button'
+    add.setAttribute('aria-haspopup', 'listbox')
+    add.setAttribute('aria-expanded', 'false')
+    add.setAttribute('aria-label', '添加文件或调用指令')
+    tools.append(add)
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.multiple = true
+    input.hidden = true
+    tools.append(input)
+    card.append(tools)
+    document.body.append(card)
+    add.addEventListener('click', () => {
+      if (card.querySelector('[role="menu"]') !== null) return
+      // 真机判据：编辑器不持焦点 -> 菜单不开 -> 读到 0 项。
+      if (document.activeElement !== editor) return
+      const menu = document.createElement('div')
+      menu.setAttribute('role', 'menu')
+      const list = document.createElement('div')
+      list.setAttribute('role', 'listbox')
+      for (const [label, description] of labels) list.append(option(label, description))
+      menu.append(list)
+      card.append(menu)
+      add.setAttribute('aria-expanded', 'true')
+    })
+    return { add, card }
+  }
+
+  it('编辑器持焦点时才读得到上游项（先 blur 即 0 行）', async () => {
+    const editor = buildEditor()
+    buildFocusGatedComposer([['调用指令', '/ 开头的指令']], editor)
+    editor.focus()
+    expect(document.activeElement).toBe(editor)
+    sheet.attach()
+    document.querySelector<HTMLElement>(ADD)!.click()
+    await settle()
+    const rows = [...document.querySelectorAll(ROW)]
+    expect(rows).toHaveLength(1)
+    expect(rows[0].querySelector('[data-dsh-composer-sheet-row-title]')?.textContent).toBe('调用指令')
+    // 读完之后焦点必须已被压掉：sheet 停留期间不能有键盘。
+    expect(document.activeElement).not.toBe(editor)
+  })
+})

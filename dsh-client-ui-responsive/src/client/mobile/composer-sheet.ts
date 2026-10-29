@@ -261,9 +261,10 @@ export class ComposerSheet {
     // 否则 fillRows 会在挂载前完成、被自己的「仍在面板里」守卫丢掉（实测 mapped=3 却写不进去）。
     const rows = this.buildRows()
     const active = document.activeElement
-    // 键盘抑制：把焦点挪走，再临时把 inputmode 改成 none，
-    // 这样 sheet 内任何可聚焦元素被点时都不会唤起键盘。
-    if (active instanceof HTMLElement) active.blur()
+    // 键盘抑制：**先只改 inputmode，不要 blur**（issue #929）。
+    // 上游 MenuView 把自己绑在 draft editor 的 caret 上，编辑器不持焦点它就不肯开；
+    // 先 blur 会让 readUpstreamRows 读到 0 项 —— 这是「映射行永远 0」的真因，
+    // 而且 jsdom 里的假菜单不要求焦点，所以 spec 抓不到（#892 因此带着「未验」合了）。
     this.suppressInputMode()
     this.previousExpanded = button.getAttribute('aria-expanded')
 
@@ -286,10 +287,14 @@ export class ComposerSheet {
     button.setAttribute('aria-expanded', 'true')
     // 到这里 backdrop 已经挂到 body 上（this.backdrop 也已赋值），读菜单拿到的
     // 行才有地方写。顺序不能提前：见 fillRows 的注释。
-    void this.fillRows(rows)
-    // 映射过程要开一次上游菜单，那一步会调 focusDraftEditor：再压一次焦点，
-    // sheet 停留期间绝不能有键盘。
-    this.blurActiveEditor()
+    // issue #929：等映射读完**再**压焦点。旧实现用 `void` 丢掉了 Promise，
+    // 紧接着的 blurActiveEditor() 会在读菜单**之前**跑 —— 等于又白读一次。
+    void this.fillRows(rows).finally(() => {
+      if (active instanceof HTMLElement) active.blur()
+      // 映射过程会开一次上游菜单、那一步会调 focusDraftEditor：再压一次焦点，
+      // 保证 sheet 停留期间不会有键盘。
+      this.blurActiveEditor()
+    })
   }
 
   private buildTiles(t: (key: ComposerSheetKey) => string): HTMLElement {
