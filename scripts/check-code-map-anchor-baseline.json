@@ -3016,16 +3016,16 @@
       "已知会制造**假失败**的环境残留（先清再判）："
     ],
     "docs/AGENTS/gotchas.md:103": [
-      "4. **pnpm 是市场安装的硬依赖（已固化进快照构建）**：`dsh plugin add` spawns `pnpm`（apps/cli plugin.ts）；快照缺 pnpm → `pnpm not found on PATH`；且**陈旧 pnpm 状态记录**（base-dsh 里的 `.modules.yaml`/`.pnpm-workspace-state`/`pnpm-lock`）指向旧 store → `ERR_PNPM_UNEXPECTED_STORE`——build-snapshot-013.mjs 已装配 pnpm 10.12.1 standalone（npm tgz + `usr/bin/pnpm` shim）并清理这三种记录。**市场目录里的部分插件（如 humanizer-ru）不在 npm，安装 404 属上游目录数据，不是本链路缺陷。**"
+      ""
     ],
     "docs/AGENTS/gotchas.md:178": [
-      "52. **点击无生效校验（#129）→ 新增便宜 `state` op**：`AccessibilityService` 的窗口/内容/滚动事件已维护 `invalidated` 标记与快照代次 `generation`，但只在 dump 时暴露。修复：新增 `state` op 返回 `{gen, invalidated, enabled}`（**不建树**），`android_ui_click` 点后 260ms 读一次并回报「已生效/未观察到变化」；同时把 `ACTION_CLICK` 的节点中心 / 手势落点回填到 `x/y`（此前 a11y 归一化路径恒返回 0）。新增 op 必须同时进引擎侧 `ControlOp` 与 `A11Y_OPS`（坑 47 同族）。grep `handleState`。"
+      "32. **adb forward 静默失效（2026-08-29 实锤）**：APK 重装/USB 重枚举后宿主 forward 清空 → 宿主探活 000，但设备内正常（用户 WebView 秒起）——「引擎挂了」的判断必须先 `adb forward --list` 再重 forward，否则误诊。"
     ],
     "docs/AGENTS/gotchas.md:44": [
-      "**实锤（2026-10-29）：`#883` 就是这样丢的。**"
+      "2. **描述写清**：修的是哪条假绿 / 修前怎么绿 / 修后怎么红。"
     ],
     "docs/AGENTS/gotchas.md:74": [
-      "**实锤两次（2026-10-29，同一个错犯了两遍）：**"
+      ""
     ],
     "docs/AGENTS/modules.md:36": [
       "| **SnapshotFs.kt** | 符号链接安全的文件原语（0.13.3 新增；0.14.1 修 API 越级崩溃） | `exists/isSymbolicLink/deletePath/move/createDirectories`——全部 NOFOLLOW：递归删除绝不穿透链接进用户数据；**目录枚举用 `Files.newDirectoryStream`（`DirectoryStream` 是 Iterable）而非 `Files.list(...).toList()`**——后者是 Java `Stream.toList()`、**API 34 才提供**，minSdk 26 下真机抛 `NoSuchMethodError`（Error，`catch(Exception)` 抓不住），曾让快照事务恢复永久卡死；防线见 `ApiLevelGuardTest`（坑 153） |"
