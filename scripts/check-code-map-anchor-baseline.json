@@ -1804,22 +1804,22 @@
       "onTurnStart()"
     ],
     "OverlayService.kt:669": [
-      "// S2-14（本批修）：**待答态同样要排除**。旧判据只看完成文案，于是球处在"
+      "setHalo(deriveHalo())"
     ],
     "OverlayService.kt:683": [
-      "probeHandle?.let { main.removeCallbacks(it) }"
+      "}.start()"
     ],
     "OverlayService.kt:737": [
-      "// 注释此前就写着「不再静默 return」，而代码里这一行一直在静默返回（P0-6 复核发现："
+      "}.start()"
     ],
     "OverlayService.kt:765": [
-      "if (code == 200) {"
+      ".put(\"mode\", if (steer) \"steer\" else \"queue\")"
     ],
     "OverlayService.kt:775": [
-      "}"
+      "} else {"
     ],
     "OverlayService.kt:783": [
-      "if (code == 200) {"
+      "// 目标=「新会话」：先 create 再 prompt（用户拍板项：自动建会话为默认）。"
     ],
     "OverlayService.kt:85": [
       "// ── 引擎维/会话维状态（协作类经 internal 共享） ──────────────────"
@@ -2332,7 +2332,7 @@
       "* 临时工作区 workspaceId（0.13.5）：读 `home/.dsh/storages/workspace.json`，取 title=临时工作区 的条目"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:706": [
-      "code = -1"
+      "val envelope = JSONObject()"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/PluginMounts.kt:41": [
       ""
