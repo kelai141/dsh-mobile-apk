@@ -5,6 +5,36 @@
 > grep 用法：`grep -n "<坑号>\." docs/AGENTS/gotchas.md` 或按关键词（如 `borrowSession`、`MANAGE_EXTERNAL_STORAGE`、`store-rehome`）定位。
 > 维护约定：新坑追加到文末并递增编号；修复后保留条目（教训与历史归档）。
 
+## 合堆叠 PR：下层禁带 --delete-branch
+
+**实锤（2026-10-29）：`#883` 就是这样丢的。**
+
+`#883` 的 base 是 `#882` 的分支（堆叠 PR）。合 `#882` 时带了 `--delete-branch`，GitHub 立刻删掉该分支，**基于它的 `#883` 被连带自动关闭**。之后：
+
+```
+gh pr edit 883 --base main   -> Cannot change the base branch of a closed pull request
+gh pr reopen 883            -> Could not open the pull request
+```
+
+**PR 不可恢复**：内容还在分支上，但该 PR 已成死链。
+
+### 正确顺序
+
+```
+1. 合下层 PR（不带 --delete-branch）
+2. 把上层 PR 的 base 改成 main（gh pr edit <N> --base main）
+3. 等上层 CI 绿后合上层
+4. 最后再删各分支
+```
+
+### 已经丢了怎么办
+
+用**旧分支**开新 PR（base=main），描述里链回被关闭的原 PR，写清原因与「内容相同」。不要试图 reopen —— GitHub 对 base 分支已删除的 PR 拒绝 reopen。
+
+### 判断能否带 --delete-branch
+
+先查有没有别的开放 PR 以本 PR 的分支为 base（`gh pr list --json baseRefName` 过滤）；有就不能带。
+
 ## 解冲突：「保留双方」只对并列追加安全，同结构内部必须内联合并
 
 **实锤两次（2026-10-29，同一个错犯了两遍）：**
