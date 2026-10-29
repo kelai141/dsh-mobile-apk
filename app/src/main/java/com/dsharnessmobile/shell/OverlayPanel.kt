@@ -1257,6 +1257,26 @@ class OverlayPanel(private val svc: OverlayService) {
     }
   }
 
+  /**
+   * 语言切换后重设**常驻** View 的文案。
+   *
+   * picker 窗口每次打开都会重建，所以 [updatePickerRowText] / [refreshInputHint] 会自然跟上；
+   * 而顶行的「隐藏」「查看汇报」是在面板创建时一次性 `t(...)` 赋值、之后不再重建——
+   * 不在这里补一遍，切语言后它们会永远停在上一次的语言（真机缺陷 2026-10-29）。
+   */
+  internal fun applyLanguage() {
+    hideEntryView?.apply {
+      text = t("隐藏", "Hide")
+      contentDescription = t("隐藏悬浮球", "Hide floating ball")
+    }
+    reportEntryView?.apply {
+      text = t("查看汇报", "View report")
+      contentDescription = t("查看工作汇报", "View work report")
+    }
+    // 目标行与输入提示也一并重算：面板开着时切语言，它们同样不会自己重建（内部会顺带刷新 hint）。
+    updatePickerRowText()
+  }
+
   /** Target row text (new-session placeholder or "<label>(current)"). */
   internal fun updatePickerRowText() {
     val row = sessionPicker ?: return

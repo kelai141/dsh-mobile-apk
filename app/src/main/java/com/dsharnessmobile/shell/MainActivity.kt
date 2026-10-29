@@ -1472,6 +1472,9 @@ class MainActivity : ComponentActivity() {
           // 渠道展示名只在创建那一刻取一次：语言一变就必须重建，否则系统设置里的类别名不跟语言走
           //（真机缺陷 2026-10-29：切英文后仍显示「授权请求 / 工作汇报 / 后台动态」）。
           runCatching { NotifyCenter.syncChannelNames(this) }
+          // 常驻浮层面板的固定文案也只在创建时读过 t(...)，不重设就永远停在上一次的语言
+          //（真机缺陷 2026-10-29：切英文后「隐藏 / 查看汇报」仍是中文）。
+          runCatching { OverlayService.instance?.panel?.applyLanguage() }
           stored
         },
         onSettingsPathRequest = { engineManager.settingsDocumentPath() },
