@@ -27,7 +27,7 @@ for (let attempt = 0; attempt < 60 && !target; attempt++) {
     const pid = adb(['shell', 'pidof', 'com.dsharnessmobile.shell']).trim()
     port = adb(['forward', 'tcp:0', 'localabstract:webview_devtools_remote_' + pid]).trim()
     const targets = await fetch('http://127.0.0.1:' + port + '/json/list').then(r => r.json())
-    target = targets.find(t => t.type === 'page' && t.url.startsWith('http://127.0.0.1:3080'))
+    target = targets.find(t => t.type === 'page' && /^http:\/\/127\.0\.0\.1:\d+\//.test(t.url))
   } catch (error) { discoveryError = String(error) }
   if (!target) { if (port) adb(['forward','--remove','tcp:'+port]); await delay(500) }
 }

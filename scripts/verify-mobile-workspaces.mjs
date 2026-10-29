@@ -512,7 +512,7 @@ async function connect() {
   while(Date.now()<deadline) {
     try {
       const roster=await fetch(`http://127.0.0.1:${wsPort}/json/list`).then(r=>r.json())
-      cdpTarget=roster.find(t=>t.type==='page'&&t.url.startsWith('http://127.0.0.1:3080'))
+      cdpTarget=roster.find(t=>t.type==='page'&&/^http:\/\/127\.0\.0\.1:\d+\//.test(t.url))
       if(cdpTarget?.webSocketDebuggerUrl) break
     } catch {}
     await delay(300)
@@ -538,7 +538,7 @@ async function ensureConnection() {
   if (!ws || ws.readyState !== WebSocket.OPEN || pid !== cdpPid) { await connect(); return }
   try {
     const roster=await fetch(`http://127.0.0.1:${wsPort}/json/list`).then(r=>r.json())
-    const live=roster.find(t=>t.type==='page'&&t.url.startsWith('http://127.0.0.1:3080'))
+    const live=roster.find(t=>t.type==='page'&&/^http:\/\/127\.0\.0\.1:\d+\//.test(t.url))
     if (!live?.webSocketDebuggerUrl || live.id !== cdpTarget?.id || live.webSocketDebuggerUrl !== cdpTarget?.webSocketDebuggerUrl) { await connect(); return }
     cdpTarget = live
   } catch { await connect() }
