@@ -420,6 +420,10 @@ export class ComposerSheet {
     if (card === null) return fallback
     const openedHere = card.querySelector(UPSTREAM_MENU_SELECTOR) === null
     if (openedHere) {
+      // **先把焦点还给编辑器**：上游 MenuView 绑在 draft editor 的 caret 上，编辑器
+      // 不持焦点时点击「+」只置 aria-expanded、菜单节点不挂载（实机复现：同一按钮，
+      // 带焦点派发 menus=1 opts=9，无焦点派发恒 0 —— sheet 的 open() 恰好总是先 blur）。
+      this.refocusEditor()
       this.replaying = true
       this.borrowing = true
       try {
@@ -513,6 +517,18 @@ export class ComposerSheet {
   private blurActiveEditor(): void {
     const active = document.activeElement
     if (active instanceof HTMLElement && active !== document.body) active.blur()
+  }
+
+  /**
+   * 把焦点还上游编辑器（读菜单借用期间用，键盘由 inputmode=none 压住）。
+   *
+   * 上游 MenuView 的打开依赖编辑器持有焦点（绑在 draft editor 的 caret 上），
+   * 没有焦点时点「+」只翻转 aria-expanded，菜单节点不会挂载。
+   */
+  private refocusEditor(): void {
+    const card = this.addButton?.closest(CARD_SELECTOR) ?? document.querySelector(CARD_SELECTOR)
+    const editor = card?.querySelector<HTMLElement>('[data-composer-input]') ?? null
+    if (editor !== null && !editor.contains(document.activeElement)) editor.focus()
   }
 
   /** 拍照 / 照片 / 本地文件：都交给上游那个 hidden multiple file input。 */
