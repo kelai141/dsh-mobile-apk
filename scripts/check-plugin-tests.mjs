@@ -10,9 +10,11 @@
 //   2) 没有 test 目录 → WARN 不拦（避免把「历史欠账」当阻塞项），但在输出里点名，让缺口可见。
 //
 // 真实执行插件自己的 test/*.test.mjs，不做静态提取。
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, realpathSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import assert from 'node:assert/strict'
+import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve, relative, matchesGlob } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -54,9 +56,34 @@ function runCommand(bin, args, options) {
 
 /** Convert a Windows drive path for the WSL npm installation when it exists. */
 function toWslPath(path) {
-  const full = resolve(path)
+  // Resolve Windows junctions before WSL sees their Windows-style targets.
+  const full = realpathSync(resolve(path))
   const match = /^([a-z]):[\\/](.*)$/i.exec(full)
   return match ? `/mnt/${match[1].toLowerCase()}/${match[2].replaceAll('\\', '/')}` : null
+}
+
+function checkResolvedWslPath(actual, expected) {
+  if (actual !== expected) throw new Error(`WSL 测试路径不是实际目录: ${actual} != ${expected}`)
+}
+
+/** 原生 npm 优先；仅 Windows UI 的 ENOENT/EINVAL 启动错误允许回退 WSL。 */
+function runSubrepoNpm(dir, repo, run = runCommand, spawn = spawnSync, platform = process.platform, wslPath = toWslPath) {
+  const cwd = realpathSync(dir)
+  const npmBin = platform === 'win32' ? 'npm.cmd' : 'npm'
+  let result = run(npmBin, ['test'], { cwd, encoding: 'utf8', shell: platform === 'win32' })
+  let useWslNpm = false
+  if (platform === 'win32' && repo === 'dsh-client-ui-responsive' && ['ENOENT', 'EINVAL'].includes(result.error?.code)) {
+    const wslDir = wslPath(cwd)
+    const ready = wslDir === null ? null : spawn('wsl.exe', [
+      '--cd', wslDir, '--exec', 'bash', '-lc', 'command -v npm >/dev/null && test -e node_modules/.bin/vitest',
+    ], { encoding: 'utf8', timeout: TEST_TIMEOUT_MS })
+    if (ready?.status === 0 && ready.error === undefined) {
+      console.log('NOTE  ' + repo + '：本机 npm 无法启动，尝试 WSL')
+      useWslNpm = true
+      result = run('wsl.exe', ['--cd', wslDir, '--exec', 'env', 'npm_config_cache=/tmp/dsh-mobile-npm-cache', 'npm', 'test'], { cwd, encoding: 'utf8' })
+    }
+  }
+  return { result, useWslNpm }
 }
 
 /**
@@ -71,6 +98,38 @@ function stripAnsi(text) {
   return text.replace(/\[[0-9;]*[A-Za-z]/g, '')
 }
 
+/**
+ * 递归枚举插件 `test/` 下的测试文件（**子目录也算**）。
+ *
+ * 旧实现是 `readdirSync(testDir)` 顶层扫 —— 子目录里的 `*.test.mjs` 不会被跑，
+ * 而 `test` 脚本的 `test/*.test.mjs` glob 也是顶层匹配，于是两边**同时**漏，谁也不会报。
+ */
+const collectTestFiles = (dir) => {
+  if (!existsSync(dir)) return []
+  const out = []
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, entry.name)
+    if (entry.isDirectory()) { out.push(...collectTestFiles(p)); continue }
+    if (entry.isFile() && (entry.name.endsWith('.test.mjs') || entry.name.endsWith('.test.ts'))) out.push(p)
+  }
+  return out.sort()
+}
+
+/**
+ * 插件自身 `test` 脚本**能覆盖到**的文件数（元断言的左操作数）。
+ *
+ * - 脚本用 `test/*.test.mjs` glob ⇒ 顶层文件数；
+ * - 显式清单与 glob 均按真实路径匹配；重复文件和不存在的文件不能凑数。
+ * - mjs / ts 与嵌套目录按各自模式匹配，覆盖数必须等于递归发现数。
+ */
+const scriptCoverage = (testDir, script) => {
+  const patterns = [...script.matchAll(/(?:\.\/)?test\/[^\s"';&|]+/g)].map((m) => m[0].replace(/^\.\//, ''))
+  return collectTestFiles(testDir).filter((file) => {
+    const name = relative(dirname(testDir), file).replaceAll('\\', '/')
+    return patterns.some((pattern) => matchesGlob(name, pattern))
+  }).length
+}
+
 const plugins = existsSync(PLUGIN_DIR)
   ? readdirSync(PLUGIN_DIR).filter((n) => existsSync(join(PLUGIN_DIR, n, 'package.json')))
   : []
@@ -83,7 +142,7 @@ if (plugins.length === 0) { console.error('CHECK-PLUGIN-TESTS FAILED：找不到
 //   2) 调用点只传一个无关变量（NODE_OPTIONS）—— NODE_ENV 要钉住，且 PATH 不能被吞掉
 //      （吞掉 PATH 的直接后果是子进程根本起不来，那是比假红更糟的假绿：什么都测不了还报通过）；
 //   3) 完全不传 env —— 走默认合并路径。
-if (process.argv.includes('--self-test')) {
+if (process.argv.includes('--self-test') || process.argv.includes('--self-test-negative')) {
   const probe = (extraEnv) => {
     const r = runCommand(process.execPath,
       ['-e', 'process.stdout.write(String(process.env.NODE_ENV))'],
@@ -109,45 +168,90 @@ if (process.argv.includes('--self-test')) {
     }
     console.log('PASS  [self-test] ' + label + ' → NODE_ENV=' + TEST_NODE_ENV)
   }
-  if (bad > 0) { console.error('CHECK-PLUGIN-TESTS SELF-TEST FAILED（' + bad + '/' + checks.length + ' 项）'); process.exit(1) }
-  console.log('CHECK-PLUGIN-TESTS SELF-TEST PASSED（' + checks.length + ' 类调用形态下 NODE_ENV 均被钉成 ' + TEST_NODE_ENV + '）')
+  let assertions = checks.length
+  const verify = (label, fn) => {
+    assertions += 1
+    try { fn(); console.log('PASS  [self-test] ' + label) }
+    catch (error) { bad += 1; console.error('FAIL  [self-test] ' + label + '：' + error.message) }
+  }
+  const fixture = mkdtempSync(join(tmpdir(), 'plugin-gate-self-'))
+  try {
+    const actual = join(fixture, 'actual package')
+    const link = join(fixture, 'junction package')
+    const testDir = join(actual, 'test')
+    mkdirSync(join(testDir, 'nested'), { recursive: true })
+    writeFileSync(join(testDir, 'a.test.mjs'), '')
+    writeFileSync(join(testDir, 'b.test.ts'), '')
+    writeFileSync(join(testDir, 'nested', 'c.test.mjs'), '')
+    symlinkSync(actual, link, process.platform === 'win32' ? 'junction' : 'dir')
+    verify('真实联接路径解析（含空格）', () => {
+      assert.equal(realpathSync(link), realpathSync(actual))
+      if (process.platform === 'win32') {
+        assert.match(toWslPath(link), /^\/mnt\/[a-z]\//)
+        checkResolvedWslPath(toWslPath(link), toWslPath(actual))
+        assert.ok(!toWslPath(link).includes('junction package'))
+      }
+    })
+    verify('#957 递归发现 mjs/ts 与嵌套测试', () => assert.equal(collectTestFiles(testDir).length, 3))
+    verify('#957 顶层 mjs glob 不得假装覆盖 ts/嵌套测试', () => assert.equal(scriptCoverage(testDir, 'node --test test/*.test.mjs'), 1))
+    verify('#957 递归 glob 覆盖全部文件', () => assert.equal(scriptCoverage(testDir, 'node --test "test/**/*.test.{mjs,ts}"'), 3))
+    verify('#957 显式嵌套清单覆盖全部文件', () => assert.equal(scriptCoverage(testDir, 'node --test test/a.test.mjs test/b.test.ts test/nested/c.test.mjs'), 3))
+    verify('#957 重复/不存在的清单不能凑够覆盖数', () => assert.equal(scriptCoverage(testDir, 'node --test test/a.test.mjs test/a.test.mjs test/absent.test.ts'), 1))
+    const okResult = { status: 0, stdout: '', stderr: '' }
+    for (const scenario of [
+      { label: '原生成功', native: okResult, fallback: false },
+      { label: '真实测试失败不回退', native: { status: 1 }, fallback: false },
+      { label: '无状态且无启动错误不回退', native: { status: null }, fallback: false },
+      { label: 'ENOENT 可回退', native: { status: null, error: { code: 'ENOENT' } }, fallback: true },
+      { label: 'EINVAL 可回退', native: { status: null, error: { code: 'EINVAL' } }, fallback: true },
+      { label: 'ETIMEDOUT 不回退', native: { status: null, error: { code: 'ETIMEDOUT' } }, fallback: false },
+      { label: 'EACCES 不回退', native: { status: null, error: { code: 'EACCES' } }, fallback: false },
+      { label: 'WSL 不可用保留原生错误', native: { status: null, error: { code: 'ENOENT' } }, ready: 1, fallback: false },
+    ]) {
+      verify('runner ' + scenario.label, () => {
+        const calls = []
+        const run = (bin, args, options) => {
+          calls.push({ bin, args, options })
+          return calls.length === 1 ? scenario.native : okResult
+        }
+        const spawn = () => { calls.push({ bin: 'WSL probe' }); return { status: scenario.ready ?? 0 } }
+        const result = runSubrepoNpm(link, 'dsh-client-ui-responsive', run, spawn, 'win32', () => '/mnt/c/actual package')
+        assert.equal(calls[0].bin, 'npm.cmd')
+        assert.equal(calls[0].options.cwd, realpathSync(actual))
+        assert.equal(calls[0].options.shell, true)
+        assert.equal(result.useWslNpm, scenario.fallback)
+        const probed = ['ENOENT', 'EINVAL'].includes(scenario.native.error?.code)
+        assert.equal(calls.length, scenario.fallback ? 3 : probed ? 2 : 1)
+        assert.equal(result.result, scenario.fallback ? okResult : scenario.native)
+      })
+    }
+    verify('路径受控负控（错误联接路径必须判红）', () => {
+      checkResolvedWslPath('/mnt/c/actual/package', process.argv.includes('--self-test-negative')
+        ? '/mnt/c/junction/package' : '/mnt/c/actual/package')
+    })
+    // 只枚举当前插件的文件与 npm 脚本，不执行任何真实插件测试。
+    for (const plugin of plugins.sort()) {
+      const dir = join(PLUGIN_DIR, plugin, 'test')
+      if (!existsSync(dir)) continue
+      verify('#957 当前插件覆盖 ' + plugin, () => {
+        const script = JSON.parse(readFileSync(join(PLUGIN_DIR, plugin, 'package.json'), 'utf8')).scripts?.test ?? ''
+        const found = collectTestFiles(dir).length
+        assert.equal(scriptCoverage(dir, script), found)
+        console.log('INFO  ' + plugin + '：npm 覆盖 = 递归发现 = ' + found + ' 个文件（未执行）')
+      })
+    }
+  } finally {
+    // fixture 是本次 mkdtempSync 创建的独立临时目录；删除联接本身，不改实际仓库。
+    rmSync(fixture, { recursive: true, force: true })
+  }
+  if (bad > 0) { console.error('CHECK-PLUGIN-TESTS SELF-TEST FAILED（' + bad + '/' + assertions + ' 项）'); process.exit(1) }
+  console.log('CHECK-PLUGIN-TESTS SELF-TEST PASSED（' + assertions + ' 项）')
   process.exit(0)
 }
 
 let ran = 0
 let failed = 0
 const noTests = []
-
-/**
- * 递归枚举插件 `test/` 下的测试文件（**子目录也算**）。
- *
- * 旧实现是 `readdirSync(testDir)` 顶层扫 —— 子目录里的 `*.test.mjs` 不会被跑，
- * 而 `test` 脚本的 `test/*.test.mjs` glob 也是顶层匹配，于是两边**同时**漏，谁也不会报。
- */
-const collectTestFiles = (dir) => {
-  if (!existsSync(dir)) return []
-  const out = []
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const p = join(dir, entry.name)
-    if (entry.isDirectory()) { out.push(...collectTestFiles(p)); continue }
-    if (entry.name.endsWith('.test.mjs') || entry.name.endsWith('.test.ts')) out.push(p)
-  }
-  return out
-}
-
-/**
- * 插件自身 `test` 脚本**能覆盖到**的文件数（元断言的左操作数）。
- *
- * - 脚本用 `test/*.test.mjs` glob ⇒ 顶层文件数；
- * - 脚本用显式清单 ⇒ 清单里 `test/xxx.test.mjs` 的条数。
- */
-const scriptCoverage = (testDir, script) => {
-  const flat = existsSync(testDir)
-    ? readdirSync(testDir).filter((f) => f.endsWith('.test.mjs') || f.endsWith('.test.ts'))
-    : []
-  if (/test\/\*\.test\.mjs/.test(script)) return flat.length
-  return [...script.matchAll(/test\/([A-Za-z0-9_.\-]+\.test\.mjs)/g)].length
-}
 
 /**
  * issue #957：本地 test 脚本必须是**可识别的 glob 形态**，不允许回退成显式清单。
@@ -198,7 +302,6 @@ for (const plugin of plugins.sort()) {
   ran += 1
   // 运行器按文件内容自动判定：本仓 6 个插件用 node:test，client/UI 侧用 vitest。
   // 写死任一个都会把另一种判成失败（首次跑本门禁即实测到该误报）。
-  const { readFileSync } = await import('node:fs')
   // 扫**全文件**而非固定行窗口：注释头长度不定，只看前 N 行会把 import 挡在窗口外
   // （首次跑本门禁实测到：vdisplay 的 16 行注释把 node:test import 挤到第 17 行，检测漏判）。
   // 同时看所有测试文件：一个插件可能混用（任一文件用 node:test 即按 node:test 跑）。
@@ -302,25 +405,11 @@ for (const repo of SUBREPO_TESTS) {
   }
   ran += 1
   const useNpm = hasDeps && typeof pkg.scripts?.test === 'string'
-  const wslDir = process.platform === 'win32' && repo === 'dsh-client-ui-responsive' ? toWslPath(dir) : null
-  const wslReady = wslDir === null ? null : spawnSync('wsl.exe', [
-    '--cd', wslDir, '--exec', 'bash', '-lc', 'command -v npm >/dev/null && test -e node_modules/.bin/vitest',
-  ], { encoding: 'utf8' })
-  const useWslNpm = useNpm && wslReady !== null && wslReady.error === undefined && wslReady.status === 0
-  // Windows 上 `spawnSync('npm.cmd')` 在无 shell 时可能直接 ENOENT/EINVAL（本机实测：errno 无输出、
-  // status 为空），于是「测试明明全绿」却被判红。这里先直调，spawn 失败再退到 shell:true 重试
-  // ——重试只影响「怎么起 npm」，判据仍是它的退出码与通过数。
-  const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm'
-  let r3 = useWslNpm
-    ? runCommand('wsl.exe', ['--cd', wslDir, '--exec', 'env', 'npm_config_cache=/tmp/dsh-mobile-npm-cache', 'npm', 'test'], { cwd: dir, encoding: 'utf8' })
-    : useNpm
-      ? runCommand(npmBin, ['test'], { cwd: dir, encoding: 'utf8' })
-      : runCommand(process.execPath, ['--test', '--test-force-exit', '--test-reporter=spec', ...bare], { cwd: dir, encoding: 'utf8' })
-  if (useNpm && (r3.error !== undefined || r3.status === null)) {
-    console.log('NOTE  ' + repo + '：npm 直调失败（' + String(r3.error?.code ?? 'no-status') + '），退到 shell 重试')
-    // shell:true 在 Node 24 会打一条 DEP0190 弃用提示（noise，与被测对象无关），子进程关掉它。
-    r3 = runCommand(npmBin, ['test'], { cwd: dir, encoding: 'utf8', shell: true, env: { ...process.env, NODE_OPTIONS: '--no-deprecation' } })
-  }
+  const npmRun = useNpm ? runSubrepoNpm(dir, repo) : null
+  const useWslNpm = npmRun?.useWslNpm ?? false
+  const r3 = useNpm
+    ? npmRun.result
+    : runCommand(process.execPath, ['--test', '--test-force-exit', '--test-reporter=spec', ...bare], { cwd: realpathSync(dir), encoding: 'utf8' })
   if (r3.error !== undefined && r3.error !== null) {
     failed += 1
     console.error('FAIL  ' + repo + ' 的子仓测试无法启动：' + String(r3.error.message) + (r3.error.code === 'ETIMEDOUT' ? '（timeout=' + TEST_TIMEOUT_MS + 'ms）' : ''))

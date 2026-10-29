@@ -378,7 +378,7 @@
     "scripts/check-release-gates.mjs:246": 6,
     ".github/workflows/pr-gate.yml:64": 2,
     "scripts/check-snapshot-builder-output.mjs:156": 2,
-    "scripts/check-plugin-tests.mjs:33": 3,
+    "scripts/check-plugin-tests.mjs:35": 3,
     ".github/workflows/pr-gate.yml:41": 3,
     "scripts/check-runtime-assets.mjs:96": 3,
     "VdisplayController.kt:753": 2,
@@ -974,7 +974,7 @@
     "build-snapshot-013.mjs:1023": 1,
     "check-snapshot-asset.ps1:26": 1,
     "scripts/build-release.ps1:60": 2,
-    "scripts/check-plugin-tests.mjs:54": 1,
+    "scripts/check-plugin-tests.mjs:56": 1,
     "scripts/build-apk-013.ps1:174": 1,
     "scripts/check-release-gates.mjs:164": 1,
     "scripts/check-patch-mirror.mjs:170": 1,
@@ -3949,10 +3949,10 @@
     "scripts/check-patch-mirror.mjs:347": [
       "'dsh-shell-termux',"
     ],
-    "scripts/check-plugin-tests.mjs:33": [
+    "scripts/check-plugin-tests.mjs:35": [
       "* 钉在唯一入口（`runCommand` 里合并），而不是逐个调用点补：调用点显式传的 `env` 也覆盖不掉它，"
     ],
-    "scripts/check-plugin-tests.mjs:54": [
+    "scripts/check-plugin-tests.mjs:56": [
       ""
     ],
     "scripts/check-release-gates.mjs:104": [
