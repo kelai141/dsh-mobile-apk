@@ -338,7 +338,15 @@ export function mountKeybar(host: KeybarHost): KeybarHandle {
   const reconcile = (): void => {
     if (disposed) return
     const roots = doc.querySelectorAll<HTMLElement>(TERMINAL_ROOT_SELECTOR)
-    const current = roots[roots.length - 1]
+    // issue #690：优先挂回**本实例自己的** host.root。分栏 / 多终端时，按根挂载的路径
+    // （本文件 :427-443 的 `for (const root of roots)`）本来就是这么做的，这里却取了
+    // 「全页最后一个根」，于是两条键条叠在同一个终端下、另一个终端没有键条，
+    // 而按键仍发往各自的 host.root ⇒ 按下的键进了另一块屏。
+    // 只有 host.root 已脱离文档（终端被销毁 / 重建）时才退化到「最后一个根」。
+    const own = host.root
+    const current = own.isConnected && own.matches(TERMINAL_ROOT_SELECTOR)
+      ? own
+      : roots[roots.length - 1]
     if (current === undefined) {
       bar.remove()
       noticeEl.remove()
