@@ -21,6 +21,12 @@
   <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
   <!-- 0.13.2 W7：悬浮球（系统级悬浮窗，用户经设置页授予；OverlayController 引导）。 -->
   <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+  <!-- 原生拍照（WebView 加号面板的拍照瓦片）：运行时申请，拒绝时桥回 permission-denied 且不弹二次窗。
+       uses-feature 声明 required=false —— 拍照是可选能力，没有相机的设备仍要能装本应用并跑引擎
+       （缺它时相机分支回 camera-unavailable，其余功能不受影响）。 -->
+  <uses-permission android:name="android.permission.CAMERA" />
+  <uses-feature android:name="android.hardware.camera" android:required="false" />
+  <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
   <application
     android:label="@string/app_name"

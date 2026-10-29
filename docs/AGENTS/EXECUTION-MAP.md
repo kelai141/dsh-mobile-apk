@@ -2133,6 +2133,9 @@ Use `#expect=<URI-encoded-substring>` inside the inline code reference for new o
 注入成员检查：plugin-dirs 的 externals 是当前注入集，retiredExternals 只保留历史源码位置。check-inject-completeness 对每个活动包和两个装配 profile 继续全量判定；自检包含缺活动包和缺成员的拒绝反例。
 
 <!-- COVERAGE
+app/src/main/java/com/dsharnessmobile/shell/PhotoCapture.kt
+app/src/main/java/com/dsharnessmobile/shell/PhotoCaptureController.kt
+app/src/test/java/com/dsharnessmobile/shell/PhotoCaptureTest.kt
 scripts/verify-console-terminal-env.mjs
 scripts/verify-console-pty.mjs
 scripts/verify-source-mirror.mjs

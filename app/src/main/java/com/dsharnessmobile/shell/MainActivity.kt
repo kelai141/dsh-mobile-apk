@@ -131,6 +131,8 @@ class MainActivity : ComponentActivity() {
   internal val mediaPickerController = MediaPickController(this)
   /** 启动页视频的系统选择器与有界拷贝（注册必须在 STARTED 之前）。 */
   internal val splashImportController = SplashImportController(this)
+  /** 原生拍照（权限 launcher + 相机 ActivityResult 必须在 STARTED 之前注册）。 */
+  internal val photoCaptureController = PhotoCaptureController(this)
 
   /** 开屏视频覆盖层；在 onCreate 建好 root 之后初始化。 */
   private var splashOverlay: SplashOverlay? = null
@@ -1486,6 +1488,9 @@ class MainActivity : ComponentActivity() {
         } },
         // 0.14.6：设置页「检查更新」——动作与引导页按钮共用同一状态机（ApkUpdateController）。
         onApkUpdate = { action -> apkUpdate.handleBridgeAction(action) },
+        // 原生拍照：只受理并立即返回，最终回执经 window.__dshBridge.onPhotoCaptured 推回页面
+        // （相机是外部 Activity，取景时间不可预知，同步桥会把 JS 线程堵到用户按快门）。
+        onCapturePhoto = { action -> photoCaptureController.handleBridgeAction(action) },
         pickToken = pickToken,
         onRestartEngine = { engineFlow.restart() },  // S3-15：返回 Boolean，页面据此如实反馈
         onShutdownToGuide = { engineFlow.shutdownToGuide() },
