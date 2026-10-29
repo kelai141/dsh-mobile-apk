@@ -198,11 +198,6 @@ jobs:
           [ "$VER" = "${{ inputs.version }}" ] || { echo "::error::versionName($VER) != 输入——先改 build.gradle.kts 并走 PR"; exit 1; }
           echo "ver=$VER" >> "$GITHUB_ENV"
           echo "code=$CODE" >> "$GITHUB_ENV"
-      - name: 准备固定签名 keystore（与历史发布同一把）
-        run: |
-          mkdir -p "$ANDROID_USER_HOME/.android"
-          cp keystore/debug.keystore "$ANDROID_USER_HOME/.android/debug.keystore"
-          ls -l "$ANDROID_USER_HOME/.android/debug.keystore"
       - name: 准备 Android SDK build-tools（apksigner 供产出侧签名断言）
         run: |
           yes | sudo "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" >/dev/null 2>&1 || true
@@ -289,6 +284,15 @@ jobs:
           done
           count=$(find plugins -maxdepth 1 -name '*.tgz' | wc -l)
           [ "$count" -eq 3 ] || { echo "::error::子仓 tgz 必须恰好 3 件"; exit 1; }
+      - name: 准备固定签名 keystore（与历史发布同一把）
+        # 注意：这一步**不是**隔离措施。签名密钥是仓库文件 `keystore/debug.keystore`，
+        # 从 checkout 那一刻起任何脚本都能读到（Gradle 在 app/build.gradle.kts:50 直接 pin 它）。
+        # 这里只是按 issue #735 的 B 方案，把这次**多余拷贝**推到构建与依赖安装之后，
+        # 减少一份密钥材料在盘上的存活时间；完整隔离需要 A（受保护 Environment + 独立签名作业）。
+        run: |
+          mkdir -p "$ANDROID_USER_HOME/.android"
+          cp keystore/debug.keystore "$ANDROID_USER_HOME/.android/debug.keystore"
+          ls -l "$ANDROID_USER_HOME/.android/debug.keystore"
       - name: 归集发布资产（APK + 注入后快照 + 子仓 tgz）
         shell: bash
         run: |
