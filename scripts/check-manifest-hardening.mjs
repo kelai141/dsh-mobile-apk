@@ -330,6 +330,7 @@ const EXPORTED_ALLOW = new Map([
   ['.BootReceiver', { reason: 'BOOT_COMPLETED（受保护系统广播）', guard: 'permission' }],
   ['rikka.shizuku.ShizukuProvider', { reason: 'Shizuku 官方 Binder bootstrap；INTERACT_ACROSS_USERS_FULL 保护 provider', guard: 'permission' }],
 ])
+
 const PROTECTED_SYSTEM_ACTIONS = new Set([
   'android.intent.action.BOOT_COMPLETED',
   'android.intent.action.LOCKED_BOOT_COMPLETED',
@@ -338,6 +339,43 @@ const PROTECTED_SYSTEM_ACTIONS = new Set([
   'android.intent.action.TIMEZONE_CHANGED',
 ])
 const COMPONENTS = ['activity', 'service', 'receiver', 'provider', 'activity-alias']
+
+// #864：debug-only 的导出组件白名单（仅 app/src/debug/AndroidManifest.xml 生效）。
+// 这些名字**不得**出现在 main（release）清单里 —— 出现即视为 debug 面泄漏到发布产物。
+// name -> { reason, guard }
+const DEBUG_EXPORTED_ALLOW = new Map([
+  ['.ConsoleDebugAlias', { reason: '控制台 CDP 量测通路（ConsoleActivity 未导出，adb 起不来）；仅 debug 构建', guard: 'debug-only' }],
+])
+
+// #864 断言 ①：debug 清单里 exported="true" 的组件必须逐条登记。
+// （新增未登记的 debug 公开口即拒，与 main 清单的 EXPORTED_ALLOW 同口径。）
+{
+  const debugManifestPath = join(APK_ROOT, 'app', 'src', 'debug', 'AndroidManifest.xml')
+  const debugText = read(debugManifestPath)
+  if (debugText !== null) {
+    const debugRoot = parseXml(debugText)
+    const exportedDebug = debugRoot === null ? [] : descendants(debugRoot, 'application').flatMap((a) =>
+      COMPONENTS.flatMap((tag) => descendants(a, tag)))
+      .filter((c) => c.attrs['android:exported'] === 'true')
+      .map((c) => c.attrs['android:name'])
+    for (const name of exportedDebug) {
+      check('debug 导出组件已登记：' + name, DEBUG_EXPORTED_ALLOW.has(name),
+        '在 scripts/check-manifest-hardening.mjs 的 DEBUG_EXPORTED_ALLOW 里登记理由')
+    }
+    for (const [name, meta] of DEBUG_EXPORTED_ALLOW) {
+      check('登记的 debug 导出组件仍在场：' + name, exportedDebug.includes(name), 'meta=' + meta.guard)
+    }
+  }
+}
+
+// #864 断言 ②（release 泄漏）：main 清单里不得出现任何 debug-only 组件名。
+if (manifestText !== null) {
+  for (const name of DEBUG_EXPORTED_ALLOW.keys()) {
+    const bare = name.replace(/^\./, '')
+    check('release 清单不得含 debug-only 组件：' + name,
+      !manifestText.includes(bare), 'grep 命中即为 debug 面泄漏到发布产物')
+  }
+}
 
 /** 源码级来源校验（review §2.3）：去注释后要求**调用形态** isTrustedSender( —— 旧实现只查子串，
  * 注释里提一句就能假绿。字符串字面量近似不计（该标识符不出现在 UI 文案）。 */

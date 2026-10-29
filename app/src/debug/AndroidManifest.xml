@@ -18,6 +18,18 @@
       android:name=".BrowserRendererHostActivity"
       android:exported="false"
       android:theme="@android:style/Theme.Material.NoActionBar" />
+  
+    <!-- #864 量测通路（仅 debug）：ConsoleActivity 是 android:exported="false" 的（安全设计见 #682），
+         所以 adb shell（uid 2000）起不来它，控制台的 WebView 也就拿不到 CDP —— IME 量测做不了。
+         本别名**只在 debug 构建存在**；release 清单出现它会被 scripts/check-manifest-hardening.mjs 判红。
+         未加 android:permission 的原因：adb shell 无法持有 signature 级自定义权限，加了就量不到；
+         边界靠「debug-only + 门禁断言 release 为 0」守住，而不是靠权限。 -->
+    <activity-alias
+      android:name=".ConsoleDebugAlias"
+      android:targetActivity=".ConsoleActivity"
+      android:exported="true"
+      android:label="Console (debug)" />
+
   </application>
 
 </manifest>
