@@ -25,6 +25,10 @@
  * goes with the session; a failure to mount must never propagate into the plugin body, because that
  * body is the phone runtime the user asked to keep alive.
  */
+import { observeDocumentLanguage } from '../i18n.ts'
+
+/** 语言观察器只装一次（触发按钮会被反复重建）。 */
+let triggerLangWatched = false
 const MENU_ATTR = 'data-dsh-attachment-picker-menu'
 const ITEM_ATTR = 'data-dsh-attachment-picker-item'
 const TRIGGER_ATTR = 'data-dsh-attachment-picker-trigger'
@@ -232,6 +236,14 @@ export class AttachmentPickerMenuEnhancer {
 
   private createTrigger(): HTMLButtonElement {
     const copy = copyForDocument()
+    // 语言变化时回写已挂载触发按钮的无障碍名（真机：切英文后按钮仍是「上传附件」）。
+    if (!triggerLangWatched) {
+      triggerLangWatched = true
+      observeDocumentLanguage(() => {
+        const fresh = copyForDocument()
+        for (const entry of this.mounted) entry.trigger.setAttribute('aria-label', fresh.file)
+      })
+    }
     const button = document.createElement('button')
     button.type = 'button'
     button.className = 'dsh-attachment-picker-trigger'

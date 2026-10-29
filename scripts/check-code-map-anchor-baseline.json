@@ -2763,10 +2763,10 @@
       "// ⓪ 收敛 v1 双占位形态（0.14.0-preview 坏资产的修复必由路径；无该形态则 no-op）。"
     ],
     "attachment-picker-menu.ts:184": [
-      "return node.matches(SLOT_SELECTOR) || node.querySelector(SLOT_SELECTOR) !== null"
+      ""
     ],
     "attachment-picker-menu.ts:215": [
-      "if (!entry.anchor.isConnected || !entry.trigger.isConnected) this.mounted.splice(index, 1)"
+      "private syncMounts(): void {"
     ],
     "back-stack.spec.ts:259": [
       ""
@@ -3063,7 +3063,7 @@
       "// Android general-settings rows (issue #59): immersive status-bar toggle."
     ],
     "dsh-client-ui-responsive/src/client/mobile/attachment-picker-menu.ts:184": [
-      "return node.matches(SLOT_SELECTOR) || node.querySelector(SLOT_SELECTOR) !== null"
+      ""
     ],
     "dsh-client-ui-responsive/src/client/mobile/back-stack.ts:334": [
       "private layers: BackLayer[] = []"
