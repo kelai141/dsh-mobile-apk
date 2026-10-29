@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -8,6 +8,24 @@ import { test } from 'node:test'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const checker = join(root, 'scripts/check-manifest-hardening.mjs')
+
+/**
+ * 从门禁脚本现读已登记的 FileProvider 调用点（去掉 .kt 后缀）。
+ *
+ * 为什么读源码而不在夹具里再抄一份：allowlist 是判据的唯一真源。抄一份就有两个真源，
+ * 新增调用点时漏改本文件会表现成「门禁红」，而真正的门禁其实是对的——那种红最耗时，
+ * 因为它看起来像功能坏了。
+ */
+function registeredFileProviderCallers() {
+  const source = readFileSync(checker, 'utf8')
+  const block = source.slice(source.indexOf('FILE_PROVIDER_CALLER_ALLOWLIST'))
+  const names = []
+  const re = /'java\/com\/dsharnessmobile\/shell\/([A-Za-z0-9_]+)\.kt'/g
+  let m
+  while ((m = re.exec(block)) !== null) names.push(m[1])
+  if (names.length === 0) throw new Error('未能从 check-manifest-hardening.mjs 读到已登记调用点')
+  return names
+}
 
 function fixture(t, path, rogue = false) {
   const dir = mkdtempSync(join(tmpdir(), 'manifest-xml-reference-'))
@@ -20,12 +38,13 @@ function fixture(t, path, rogue = false) {
     ...['file_paths', 'network_security_config', 'backup_rules', 'data_extraction_rules']
       .map(name => `app/src/main/res/xml/${name}.xml`),
     'app/src/test/java/com/dsharnessmobile/shell/BrowserHostCleartextConsistencyTest.kt',
-    // 必须与 check-manifest-hardening.mjs 的 FILE_PROVIDER_CALLER_ALLOWLIST 一一对应：
-    // 少拷一个已登记调用点，门禁就报「登记调用点缺席」，这条正向用例会以「门禁红」的形式失败。
-    // AdbKeyboardReceiver 不在 allowlist 里（fixture 里只用于别的一致性断言）。
-    ...[
-      'FileIncoming', 'LogShare', 'PathOpen', 'UpdateChecker', 'PhotoCapture', 'AdbKeyboardReceiver',
-    ].map(name => `app/src/main/java/com/dsharnessmobile/shell/${name}.kt`),
+    // 已登记调用点必须**全部**拷进来：少拷一个，门禁就报「登记调用点缺席」，
+    // 这条正向用例会以「门禁红」的形式失败。清单从门禁脚本现读（见上面的 helper），
+    // 只拷本树真实存在的文件——分支之间文件集合不同，缺失的不属于本夹具的责任。
+    ...registeredFileProviderCallers()
+      .filter(name => existsSync(join(root, `app/src/main/java/com/dsharnessmobile/shell/${name}.kt`)))
+      .map(name => `app/src/main/java/com/dsharnessmobile/shell/${name}.kt`),
+    'app/src/main/java/com/dsharnessmobile/shell/AdbKeyboardReceiver.kt',
   ]
   for (const file of files) {
     const dest = join(dir, file)
