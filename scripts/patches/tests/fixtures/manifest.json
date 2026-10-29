@@ -1716,19 +1716,23 @@
         "inputKind": "published-tarball"
       },
       "files": [
+        "lib/index.js",
         "lib/runner-launch-B2zsQ1Dz.js",
         "package.json"
       ],
       "fileSha256": {
         "lib/runner-launch-B2zsQ1Dz.js": "6df08adc4a27f278878a5f4cde8b551b51e647b922ac7d6591fd62d272ced153",
-        "package.json": "d752f9edbe663eaf94f86ff4b53a1731f4ebbdfe125876e92ee619c2b6547ae2"
+        "package.json": "d752f9edbe663eaf94f86ff4b53a1731f4ebbdfe125876e92ee619c2b6547ae2",
+        "lib/index.js": "2964d94d6aa735f79e5cd5f54035a9d73b371e8060dda7e3bf666593428c04f4"
       },
       "targets": {
         "lib/runner-launch-B2zsQ1Dz.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/lib/runner-launch-B2zsQ1Dz.js",
-        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/package.json"
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/package.json",
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/lib/index.js"
       },
       "patchIds": [
-        "terminal-inspector-android-D1"
+        "terminal-inspector-android-D1",
+        "zsh-fpath-A1"
       ]
     },
     "pi-ai-0.2.1-rc.3": {
@@ -1951,6 +1955,31 @@
       "patchIds": [
         "settings-account-feedback-entry"
       ]
+    },
+    "dsh-api-terminal-controller-0.2.1-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.1-rc.3",
+      "package": "@deepseek-ai/dsh-api-terminal-controller@0.2.1-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-api-terminal-controller-0.2.1-rc.3.tgz",
+        "tarballSha256": "009f8cfc9e156ac5c30e0246aa1197a6e891097f841a5437efc224701b5145bc",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "0cefb34efc0cae1da14dfbcdcad6c899422e052add9238d0442a97d71ed98cdf",
+        "package.json": "b3245d82a7e81f24b52d1a8637685bebccde1e58a4b1aad9347fde80fe00e386"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-api-terminal-controller/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-api-terminal-controller/package.json"
+      },
+      "patchIds": [
+        "terminal-shell-candidates-T1"
+      ]
     }
   },
   "capture": {
@@ -1962,7 +1991,6 @@
       ]
     },
     "overlaySha256": "0e5a7f49f0145857a4b6c3f0f8b8594c401a50c526505a112c3740bcf86c8993",
-    "registrySha256": "3d5f23a3ebc017b5bef3595ed4f7476733170fc5602fc1dbd59797427cb459c8",
-    "registrySha256": "c62fbbf215df332b69276516439a6fe3850f9547539fed00ace315316f01e9c4"
+    "registrySha256": "84499a77d12b0c28918b47cd5d4090c5116b153a08b8bd581af00a1f2b5526b9"
   }
 }
