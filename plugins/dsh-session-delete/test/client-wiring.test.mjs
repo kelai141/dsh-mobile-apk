@@ -122,7 +122,9 @@ test('menu item click opens the overlay and the confirm button sends the request
     },
   }
   module.apply(ctx)
-  assert.equal(registrations.length, 2, 'expected menu item + overlay registrations')
+  // issue #912：注册数由 2 → 3（delete 菜单项 + **quarantine 菜单项** + overlay）。
+  // 两个菜单入口并存是有意的：既要能「隔离保留」，也要能「彻底删除」。
+  assert.equal(registrations.length, 3, 'expected two menu item registrations + overlay')
 
   const menu = registrations.find((r) => r.def.name === 'sidebar.workspaces.session.menu.item')
   const overlay = registrations.find((r) => r.def.name === 'shell.overlay')
@@ -326,4 +328,36 @@ test('a deleted session whose sidebar row survives triggers one reload', async (
   for (let i = 0; i < 12; i += 1) await Promise.resolve()
   await new Promise((resolve) => setTimeout(resolve, 450))
   assert.equal(reloads.length, 1, 'the surviving row must force one reload')
+})
+// issue #912：防「为腾位置把隔离入口删掉」。
+//
+// 这条断言刻意同时检查 **delete** 与 **quarantine** 两个菜单注册都在 ——
+// 单独检查 quarantine 存在，无法发现「两个都被合并成一个」这种退化。
+test('菜单里同时存在删除与隔离两个入口', () => {
+  const { module, react } = loadClient()
+  const registrations = []
+  const ctx = {
+    get: () => undefined,
+    effect: (fn) => { const d = fn(); return d },
+    locale: { register: () => () => {} },
+    slots: {
+      inject: (_name, factory) => { registrations.push(factory()) },
+      register: (def, component) => ({ def, component }),
+    },
+  }
+  module.apply(ctx)
+  const menuItems = registrations.filter((r) => r.def.name === 'sidebar.workspaces.session.menu.item')
+  assert.equal(menuItems.length, 2, '必须是两个独立菜单注册，不是合并成一个')
+  const ids = menuItems.map((r) => r.def.id).sort()
+  assert.deepEqual(ids, ['delete', 'quarantine'], '两个入口的 id 必须是 delete 与 quarantine')
+  // 隔离入口必须能渲染出可见文案，且文案里出现「恢复」——它是「不是删除」的唯一提示。
+  const quarantine = menuItems.find((r) => r.def.id === 'quarantine')
+  const tree = quarantine.component({
+    sessionId: 'session-12345678-1234-4abc-8def-1234567890ab',
+    displayTitle: 'T',
+    useMenuOpenState: () => [false, () => {}],
+    t: (key) => (key === 'menu.quarantine' ? '隔离（不删除，可恢复）' : key),
+  })
+  assert.equal(typeof tree.props.onSelect, 'function', 'quarantine 菜单项必须暴露 onSelect')
+  assert.match(String(tree.props.children[0]), /恢复/, '隔离入口文案必须说明可恢复')
 })

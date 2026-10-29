@@ -63,13 +63,14 @@
          * @param {string} sessionId - session to delete.
          * @returns {Promise<{ok: boolean, status: number, json: () => Promise<object>}>} XHR result.
          */
-        function postDelete(sessionId) {
+        function postDelete(sessionId, action) {
           // 用 XHR 而不是 fetch：XHR 的 timeout 由浏览器网络栈保证触发，fetch 的
           // AbortSignal 在部分 WebView 上对已入队/半开连接不生效（现场：弹窗无限转）。
           return new Promise(function (resolve, reject) {
             var xhr = new XMLHttpRequest()
             xhr.open('POST', '/api/session-delete', true)
             xhr.setRequestHeader('content-type', 'application/json')
+            // issue #912：action 缺省即 delete（服务端同样缺省），隔离显式传 'quarantine'。
             xhr.timeout = REQUEST_TIMEOUT_MS
             xhr.onload = function () {
               resolve({
@@ -99,7 +100,7 @@
               error.name = 'AbortError'
               reject(error)
             }
-            xhr.send(JSON.stringify({ sessionId: sessionId }))
+            xhr.send(JSON.stringify(action === undefined ? { sessionId: sessionId } : { sessionId: sessionId, action: action }))
           })
         }
 
@@ -199,6 +200,13 @@
           'error.unload': '无法从内存卸载这条对话，未删除任何文件。请稍后重试。',
           'error.gone': '这条对话已经不在了。',
           'close': '关闭',
+          // issue #912：隔离不是删除 —— 文案必须让人一眼看出文件还在。
+          'menu.quarantine': '隔离（不删除，可恢复）',
+          'confirm.quarantineTitle': '隔离这条对话',
+          'confirm.quarantineDesc': '「{title}」会移到同目录的 .corrupt/ 下：它从列表里消失，但文件仍在、随时可恢复。',
+          'quarantining': '正在隔离…',
+          'quarantine.ok': '已隔离到：{path}（文件仍在，可恢复）',
+          'error.alreadyQuarantined': '这条对话已经隔离过了，文件仍在：{path}',
         }
         var en = {
           'menu.delete': 'Delete conversation',
@@ -213,6 +221,12 @@
           'error.unload': 'Could not unload this conversation from memory, so nothing was deleted. Try again later.',
           'error.gone': 'This conversation no longer exists.',
           'close': 'Close',
+          'menu.quarantine': 'Quarantine (keeps files, restorable)',
+          'confirm.quarantineTitle': 'Quarantine this conversation',
+          'confirm.quarantineDesc': '"{title}" moves into .corrupt/ next to it: it leaves the list, but the files stay and can be restored.',
+          'quarantining': 'Quarantining…',
+          'quarantine.ok': 'Quarantined to: {path} (files kept, restorable)',
+          'error.alreadyQuarantined': 'This conversation is already quarantined; the files are kept at: {path}',
         }
 
         var cancelStyle = {
@@ -412,6 +426,26 @@
          * @param {string} sessionId - target session.
          * @returns {Promise<void>} resolves after the post-delete transition started.
          */
+        /**
+         * issue #912：发起隔离。**不复用** [runDelete] 的重试与续做逻辑：
+         * 删除有「404 视为已删」的幂等语义，隔离没有 —— 隔离的 409 `already-quarantined` 必须原样回给用户。
+         * @param {string} sessionId - 会话 id。
+         * @returns {Promise<object>} 服务端响应体（含 quarantinedTo）。
+         */
+        function runQuarantine(sessionId) {
+          return postDelete(sessionId, 'quarantine').then(function (res) {
+            return res.json().then(function (body) {
+              if (!res.ok || body.ok === false) {
+                var error = new Error(body.message || ('HTTP ' + res.status))
+                error.code = body.error
+                error.paths = body.paths
+                throw error
+              }
+              return body
+            })
+          })
+        }
+
         function runDelete(sessionId) {
           return attemptDelete(sessionId, 0).then(function (data) {
             localTrace('deleted', { sessionId: sessionId, alreadyGone: data.alreadyGone === true })
@@ -446,6 +480,29 @@
         }
 
         /**
+         * issue #912：隔离入口。文案刻意不含「删除」二字（除了「不删除」这句说明）——
+         * 用户看到 `删除` 会以为历史没了，实际文件仍在。
+         * @param {object} props - slot props（同 [DeleteSessionMenuItem]）。
+         * @returns {object} React element.
+         */
+        function QuarantineSessionMenuItem(props) {
+          var setMenuOpen = props.useMenuOpenState()[1]
+          var t = props.t
+          return h(primitives.MenuItemButton, {
+            onSelect: function () {
+              trace('info', 'quarantine item selected', { sessionId: props.sessionId })
+              localTrace('quarantine-selected', { sessionId: props.sessionId })
+              setMenuOpen(false)
+              setPending({
+                sessionId: props.sessionId,
+                title: props.displayTitle || props.sessionId,
+                kind: 'quarantine',
+              })
+            },
+          }, t('menu.quarantine'))
+        }
+
+        /**
          * Overlay dialog: confirms and performs the deletion.
          * @param {object} props - slot props (`t`).
          * @returns {object|null} React element or null while idle.
@@ -472,6 +529,11 @@
           var errorPair = react.useState(null)
           var error = errorPair[0]
           var setError = errorPair[1]
+          // issue #912：隔离成功后要把**绝对路径**显示成可复制文本（用户要能自行备份/提 issue）。
+          var donePair = react.useState(null)
+          var done = donePair[0]
+          var setDone = donePair[1]
+          var quarantine = target.kind === 'quarantine'
 
           function close() {
             if (busy) return
@@ -490,6 +552,20 @@
             })
             setBusy(true)
             setError(null)
+            if (quarantine) {
+              // 隔离不写待办、不挂看门狗、不重载页面：它不会留下「半完成」的文件状态，
+              // 也不需要跨重载续做（服务端要么搬走了要么没动）。
+              runQuarantine(sessionId)
+                .then(function (body) { setBusy(false); setDone(body.quarantinedTo || '') })
+                .catch(function (reason) {
+                  setBusy(false)
+                  var code = reason && reason.code
+                  var path = reason && Array.isArray(reason.paths) && reason.paths.length > 0 ? reason.paths[reason.paths.length - 1] : ''
+                  if (code === 'already-quarantined') { setDone(path); return }
+                  setError(String(reason && reason.message ? reason.message : reason))
+                })
+              return
+            }
             // 请求卡死时不再让弹窗无限转：落待办 + 看门狗，超时就重载页面，
             // 重载后插件自动续做这条删除（幂等：404 视为已删）。
             savePending(sessionId)
@@ -525,14 +601,24 @@
           return h(primitives.Modal, {
             open: true,
             onClose: close,
-            title: t('confirm.title'),
+            title: quarantine ? t('confirm.quarantineTitle') : t('confirm.title'),
             closeLabel: t('close'),
-            description: t('confirm.desc', { title: target.title }),
+            description: quarantine ? t('confirm.quarantineDesc', { title: target.title }) : t('confirm.desc', { title: target.title }),
             footer: h('div', { style: { display: 'flex', gap: '8px', justifyContent: 'flex-end' } },
               h('button', { type: 'button', style: cancelStyle, disabled: busy, onClick: close }, t('cancel')),
               h('button', { type: 'button', style: deleteStyle, disabled: busy, onClick: confirmDelete },
-                busy ? t('deleting') : t('delete'))),
-          }, error === null ? null : h('p', {
+                busy ? (quarantine ? t('quarantining') : t('deleting')) : (quarantine ? t('menu.quarantine') : t('delete')))),
+          }, done === null ? null : h('div', { role: 'status', style: { margin: '8px 0 0' } },
+            h('p', { style: { margin: '0 0 6px', fontSize: '12px', color: 'var(--dsw-alias-state-success-primary)' } },
+              t('quarantine.ok', { path: done })),
+            h('input', {
+              type: 'text',
+              readOnly: true,
+              value: done,
+              onFocus: function (event) { try { event.target.select() } catch (_) { /* ignore */ } },
+              style: { width: '100%', fontFamily: 'ui-monospace, monospace', fontSize: '12px', padding: '4px 6px' },
+            })),
+          error === null ? null : h('p', {
             role: 'alert',
             style: { margin: '8px 0 0', color: 'var(--dsw-alias-state-error-primary)', fontSize: '12px', lineHeight: '18px' },
           }, t('error', { message: error })))
@@ -594,6 +680,17 @@
               order: 500,
               locale: NS,
             }, DeleteSessionMenuItem)
+          })
+          // issue #912：**单独**注册隔离入口（不塞进 DeleteSessionMenuItem 返回两个节点 ——
+          // 那个返回值被 slot 当单个节点渲染，返回数组在旧内核上可能整块不显示）。
+          // 两个入口并存是有意的：既要能「隔离保留」，也要能「彻底删除」。
+          ctx.slots.inject('sidebar.workspaces.session.menu.item', function () {
+            return ctx.slots.register({
+              name: 'sidebar.workspaces.session.menu.item',
+              id: 'quarantine',
+              order: 490,
+              locale: NS,
+            }, QuarantineSessionMenuItem)
           })
           ctx.slots.inject('shell.overlay', function () {
             return ctx.slots.register({
