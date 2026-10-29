@@ -417,9 +417,13 @@ export class SidebarBubbles {
       else this.actions.append(proxy)
     }
     if (this.options.workspaces) {
-      const split = button('dsh-bubble-control'); split.textContent = '分栏'; split.setAttribute('aria-label', '创建双工作区'); split.dataset.dshWorkspaceSplit = '';
+      const split = button('dsh-bubble-control'); split.dataset.dshWorkspaceSplit = ''
+      split.textContent = this.options.t('split')
+      split.setAttribute('aria-label', this.options.t('splitLabel'))
       split.addEventListener('click', () => { if (this.options.workspaces?.split()) this.setOpen(false) })
-      const float = button('dsh-bubble-control'); float.textContent = '小窗'; float.setAttribute('aria-label', '将当前标签小窗化'); float.dataset.dshWorkspaceFloat = '';
+      const float = button('dsh-bubble-control'); float.dataset.dshWorkspaceFloat = ''
+      float.textContent = this.options.t('float')
+      float.setAttribute('aria-label', this.options.t('floatLabel'))
       float.addEventListener('click', () => { if (this.options.workspaces?.float()) this.setOpen(false) })
       this.actions.append(split, float)
     }
