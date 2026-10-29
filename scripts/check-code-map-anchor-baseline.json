@@ -3021,13 +3021,13 @@
       ""
     ],
     "docs/AGENTS/gotchas.md:178": [
-      "铁律：门禁判定只允许「设备全局事实 + 会话实时档位」，任何部署常量进判定即缺陷。"
+      "壳侧不设工作目录 → 新会话 cwd=`/` → `@` 菜单列的是设备根目录（acct/apex/cache…），用户看到「@文件功能无法使用」"
     ],
     "docs/AGENTS/gotchas.md:44": [
-      "9. **template 字符串反斜杠**（页面注入）：`\\n` 双写。"
+      "| `NotifyStructureBatch8Test.kt`：两侧各加 `@Test`，但冲突块切在**函数体中间** | 「保留双方」把 KDoc 与函数体拼断，`SyntaxError: Expecting an element` |"
     ],
     "docs/AGENTS/gotchas.md:74": [
-      "38. **rc.2 锁定型运行时补丁在引擎升级时抹掉新引擎代码（0.13.3 模拟器实锤，prompt 链阻断）**：assets/patched 的 session-persistence-jsonl/attachment-local 等是 0.1.1-rc.2 原版整文件（无 delta），0.1.2-rc.1 引擎启动前 applyRuntimePatches 整文件覆盖 → 新代码被旧版回退（persistence.borrowSession is not a function → 一切会话写入/发送全断）。**修复/约定**：升级引擎时逐补丁核对上游是否原生覆盖（能退役则退役——fs-local/primitives 已退役）；重出 asset 必须从新版本包文件改起（RUNTIME-PATCHES.md §3-2）；本次重出 SPJ/ATT 的最小 delta = link(2) 失败 EACCES/EPERM/ENOTSUP → rename 回退（grep \"rebuild-runtime-patches\" 见协调仓 .tmp-upgrade 备忘）。grep `borrowSession`。"
+      "9. **template 字符串反斜杠**（页面注入）：`\\n` 双写。"
     ],
     "docs/AGENTS/modules.md:36": [
       "| **SnapshotUserData.kt** | 用户配置保留、legacy backup 与活动配置传输 | `prepareStagedSnapshot` 保留 `settings.yaml.imported` 并抑制工厂 reseed；`configurationDocument` 选择真实 web profile patch；`exportConfiguration/importConfiguration` 原子替换/导入备份，旧共享 YAML 不覆盖已迁移 patch；`retireReseededFactorySettings` 仅隔离已知空工厂模板。legacy backup 不复活已迁移 YAML。 |"
