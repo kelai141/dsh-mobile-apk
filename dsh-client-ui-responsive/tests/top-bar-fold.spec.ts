@@ -140,8 +140,10 @@ describe('视图菜单与折叠箭头的位置', () => {
     expect(TOP_BAR_FOLD_CSS).not.toMatch(/\[data-conversation-tabs\]\s*\+\s*\*(?!\S)/)
   })
 
-  it('折叠箭头靠最右（margin-left:auto）', () => {
-    expect(TOP_BAR_FOLD_CSS).toMatch(/\[data-dsh-topbar-fold-arrow\]\s*\{[^}]*margin-left:\s*auto/)
+  it('折叠箭头不得用 margin-left:auto 贴整行最右', () => {
+    // 需求是「标签行最右侧、紧贴最后一个标签」，不是「整行最右」。
+    // 实机实测：带 auto 时箭头 x=548（视口 600），最后标签右边界只有 112。
+    expect(TOP_BAR_FOLD_CSS).not.toMatch(/\[data-dsh-topbar-fold-arrow\]\s*\{[^}]*margin-left:\s*auto/)
   })
 
   it('箭头不会被「隐藏 … 菜单」的规则命中（自证不误伤）', async () => {
@@ -157,64 +159,69 @@ describe('视图菜单与折叠箭头的位置', () => {
 })
 
 describe('D 项：竖屏顶栏插件 UI 折叠', () => {
-  it('手机竖屏：箭头是标签行的最后一个元素，且顶栏原生控件仍保留', async () => {
+  it('手机竖屏：箭头是标签条内部的最后一个元素，且顶栏原生控件仍保留', async () => {
     fold.attach()
     await flush()
     const tabs = document.querySelector('[data-conversation-tabs]')!
     const row = tabs.parentElement!
     const arrow = state().arrow!
     expect(arrow).not.toBeNull()
-    // 硬判据：箭头在标签行（标签条的父节点）里，且是末位。
-    expect(arrow.parentElement).toBe(row)
-    expect(row.lastElementChild).toBe(arrow)
-    // 反证：箭头绝不能在标签条内部 —— 进去就会被 React 追加的标签顶到中间。
-    expect(tabs.contains(arrow)).toBe(false)
+    // 硬判据：箭头在**标签条内部**末位，紧贴最后一个视图标签。
+    expect(arrow.parentElement).toBe(tabs)
+    expect(tabs.lastElementChild).toBe(arrow)
+    // 反证：不得停在父行 —— 父行末位是「整行最右」，与标签群之间会空出一段。
+    expect(row.lastElementChild).not.toBe(arrow)
     // 标题、两个侧边栏按钮（左 toggle / 右展开）都不是我们动的
     expect(document.querySelector('[data-dsh-sidebar-toggle]')).not.toBeNull()
     expect(document.querySelector('.titleRow nav')?.textContent).toContain('月度现金流核算与报告')
   })
 
-  it('标签行子元素顺序被钉住：视图标签在前，箭头在末尾', async () => {
+  it('标签条子元素顺序被钉住：视图标签在前，箭头在末尾', async () => {
     fold.attach()
     await flush()
-    const row = document.querySelector<HTMLElement>('.tabs')!
+    const tablist = document.querySelector<HTMLElement>('[data-conversation-tabs]')!
     const arrow = state().arrow!
-    // 顺序断言（不是「包含」断言）：行的直接子元素只允许是 视图标签条 + 箭头；
-    // 「…」菜单已被 CSS 隐藏（仍在 DOM 里），但箭头必须排在它后面。
-    const order = [...row.children]
-    expect(order[0].hasAttribute('data-conversation-tabs')).toBe(true)
+    // 顺序断言（不是「包含」断言）：对话、轨迹、箭头，箭头必须是最后一个。
+    const order = [...tablist.children]
+    expect(order.map(child => child.getAttribute('role') ?? child.getAttribute(ARROW_ATTR))).toEqual([
+      'tab',
+      'tab',
+      '',
+    ])
     expect(order[order.length - 1]).toBe(arrow)
-    // 视图标签条内部不得混入箭头 —— 这是「夹在两个标签之间」缺陷的唯一成因。
-    const tablist = row.querySelector<HTMLElement>('[data-conversation-tabs]')!
-    expect([...tablist.children].every(child => !child.hasAttribute(ARROW_ATTR))).toBe(true)
+    // 反证：箭头不能夹在两个标签之间。
+    expect(order[0]).not.toBe(arrow)
+    expect(order[1]).not.toBe(arrow)
   })
 
-  it('React 往标签条追加新标签后，箭头仍在行末位（不回退到标签之间）', async () => {
+  it('React 往标签条追加新标签后，箭头被重排回末位（不回退到标签之间）', async () => {
     fold.attach()
     await flush()
-    const row = document.querySelector<HTMLElement>('.tabs')!
-    const tablist = row.querySelector<HTMLElement>('[data-conversation-tabs]')!
+    const tablist = document.querySelector<HTMLElement>('[data-conversation-tabs]')!
     const arrow = state().arrow!
-    // React 认为自己是 tablist 的唯一 owner：它会直接 appendChild 自己的标签。
+    // React 认为自己是 tablist 的唯一 owner：它会直接 appendChild 自己的标签，
+    // 这次 append 会把箭头顶到倒数第二位 —— 正是「夹在两个标签之间」的成因。
     const late = document.createElement('button')
     late.setAttribute('role', 'tab')
-    late.textContent = '轨迹'
+    late.textContent = '差异'
     tablist.appendChild(late)
     await flush()
+    // 复用同一个箭头（不重建，保焦点与监听），并把它排回末位。
     expect(state().arrow).toBe(arrow)
-    expect(tablist.contains(arrow)).toBe(false)
-    expect(row.lastElementChild).toBe(arrow)
+    expect(tablist.lastElementChild).toBe(arrow)
+    expect(late.nextElementSibling).toBe(arrow)
   })
 
-  it('「…」菜单晚一步出现时，箭头被重新排到行末位', async () => {
+  it('「…」菜单晚一步出现时，不影响箭头在标签条内的末位', async () => {
     document.body.innerHTML = ''
     buildHeader(1, true, false)
     fold.attach()
     await flush()
     const row = document.querySelector<HTMLElement>('.tabs')!
+    const tablist = row.querySelector<HTMLElement>('[data-conversation-tabs]')!
     const arrow = state().arrow!
-    expect(row.lastElementChild).toBe(arrow)
-    // 上游菜单异步挂载到行尾：箭头必须让位到菜单之后，而不是停在中途。
+    expect(tablist.lastElementChild).toBe(arrow)
+    // 上游「…」菜单异步挂到父行尾：它属于父行，不该把箭头挤出标签条。
     const menu = document.createElement('button')
     menu.setAttribute('aria-haspopup', 'menu')
     menu.textContent = '…'
@@ -222,8 +229,8 @@ describe('D 项：竖屏顶栏插件 UI 折叠', () => {
     await flush()
     await flush()
     expect(state().arrow).toBe(arrow)
-    expect(row.lastElementChild).toBe(arrow)
-    expect(menu.nextElementSibling).toBe(arrow)
+    expect(tablist.lastElementChild).toBe(arrow)
+    expect(arrow.parentElement).toBe(tablist)
   })
 
   it('重进手机竖屏默认收起：座位整块离场，面板节点集合为空', async () => {

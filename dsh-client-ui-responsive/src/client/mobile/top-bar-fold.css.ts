@@ -15,11 +15,12 @@
  * 30px 高的行里。这与 snapshot-panels.css.ts 处理同一个问题的先例一致（那里也是打开面板时
  * 临时把 containment 换成 normal）。
  *
- * 箭头挂在 [data-conversation-tabs] 的**父行**上（该属性是稳定锚点，见 ConversationSession.tsx:143），
- * 且始终是那一行的末位。不挂进标签条内部：标签条由 React 拥有（visibleViewLimit 变化时它往
- * 自己末尾 append 标签），箭头一旦在内部，就对不上下一次 append 之后的位置，看起来就夹在两个
- * 视图标签之间了。不按「对话」「轨迹」文字匹配 —— 视图标签由 conversation.view 插槽注册，
- * 文案可变可增。
+ * 箭头挂在 [data-conversation-tabs] **内部**的末位（该属性是稳定锚点，见
+ * ConversationSession.tsx:143）。ensureArrow 每轮同步都复检「我是不是最后一个子节点」，
+ * 上游往标签条 append 新标签后，箭头会被重新 append 回末位，因此不会夹在两个标签中间。
+ *
+ * 不挂父行：父行里还有「…」菜单等兄弟节点，父行末位不等于标签行末位（见 ensureArrow 注释）。
+ * 不按「对话」「轨迹」文字匹配 —— 视图标签由 conversation.view 插槽注册，文案可变可增。
  */
 export const TOP_BAR_FOLD_CSS: string = `
 /* 关闭态：座位内容整体离场，顶栏只剩标题、两个侧边栏按钮与三点菜单。 */
@@ -69,13 +70,14 @@ html[data-dsh-mobile-form] [data-conversation-tabs] + [aria-haspopup='menu'] {
   display: none;
 }
 
-/* 折叠箭头：紧凑、与两个侧边栏按钮同一视觉重量，靠右。 */
+/* 折叠箭头：紧凑、与两个侧边栏按钮同一视觉重量，**紧贴最后一个视图标签**。
+   不能写 margin-left:auto —— 那会把它推到整行最右端，与标签群之间空出一大段
+   （实机实测：箭头 x=548、视口宽 600，最后一个标签右边界仅 112）。 */
 html[data-dsh-mobile-form] [data-dsh-topbar-fold-arrow] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: none;
-  margin-left: auto;
   width: 24px;
   height: 24px;
   padding: 0;
