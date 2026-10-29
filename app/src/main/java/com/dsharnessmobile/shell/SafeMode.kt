@@ -362,7 +362,12 @@ internal object SafeMode {
     val st = try { org.json.JSONObject(stateFile.readText()) } catch (t: Throwable) {
       return Result(false, "安全模式状态文件损坏（" + t.javaClass.simpleName + "），已拒绝退出以免误改文件；备份仍在 " + selectedAutoDir.absolutePath)
     }
-    if (!st.optBoolean("active", false)) return Result(false, "安全模式状态未标记为开启，已拒绝退出")
+    // issue #683：`phase=writing` 是「已落盘但 patch 未写完」的**部分态**，它必须仍可退出还原 ——
+    // 这正是本条要求的可收敛性。只认 `active=true` 会把用户锁死在「半进不出」。
+    val exitPhase = st.optString("phase", "")
+    if (!st.optBoolean("active", false) && exitPhase != PHASE_WRITING) {
+      return Result(false, "安全模式状态未标记为开启，已拒绝退出")
+    }
     if (st.has("profile") && st.optString("profile") != "web") return Result(false, "安全模式状态绑定到 profile ${st.optString("profile")}，拒绝从 web profile 写回。")
     val backupPath = st.optString("backup", "")
     if (backupPath.isEmpty()) return Result(false, "状态文件缺少 backup 字段，已拒绝退出")
