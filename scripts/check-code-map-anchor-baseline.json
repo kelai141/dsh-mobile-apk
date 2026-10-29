@@ -1243,13 +1243,13 @@
       "val missing = RuntimeTree.missingEntries("
     ],
     "EngineManager.kt:1463": [
-      "}"
+      "val assetPresent = runCatching {"
     ],
     "EngineManager.kt:1464": [
-      "val hardBundleRepair = PluginMounts.ensureHardBundlesSelected("
+      "context.assets.list(\"\")?.contains(PluginMounts.HARD_ASSET) == true"
     ],
     "EngineManager.kt:1552": [
-      "// the flag is the official engine CLI switch (see bin.js docs)."
+      "// （快照刷新中 / 引擎已在跑）。故 provisionPublicRepo 另由 MainActivity 的 onCreate/onResume"
     ],
     "EngineManager.kt:238": [
       "//"
