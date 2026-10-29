@@ -133,6 +133,15 @@ export class ComposerSheet {
   private replaying = false
 
   /**
+   * 正在「借用」上游菜单（开一次 → 读项 → 用 Escape 关掉）。
+   *
+   * 借用期间我们自己派发的 Escape 会同样到达本类的 onKeyDown：不设这道闸，
+   * 关上游菜单的那一下会顺手把整张 sheet 关掉（实测：容器已挂、行写不进去，
+   * 因为面板刚好在这一步自我关闭）。
+   */
+  private borrowing = false
+
+  /**
    * 捕获阶段拦「+」。
    *
    * 用捕获 + stopImmediatePropagation 而不是只 preventDefault：上游 onClick 会调
@@ -163,6 +172,8 @@ export class ComposerSheet {
   }
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {
+    // 借用上游菜单时派发的 Escape 只用来关上游菜单，不能连锁关掉 sheet（见 borrowing）。
+    if (this.borrowing) return
     if (event.key !== 'Escape' || this.backdrop === null) return
     event.preventDefault()
     event.stopPropagation()
@@ -246,6 +257,8 @@ export class ComposerSheet {
     // 上游 MenuView 只在编辑器持有焦点时才肯开（它把自己绑在 draft editor 的 caret 上），
     // 先 blur 会让 readUpstreamRows 读到 0 项，sheet 就只剩三块瓦片（实机复现过：
     // 面板文案只有「拍照照片本地文件」）。读完之后再压焦点，键盘照样不会弹。
+    // 行容器先建好但**不读菜单**：读菜单必须等 backdrop 挂上之后再做，
+    // 否则 fillRows 会在挂载前完成、被自己的「仍在面板里」守卫丢掉（实测 mapped=3 却写不进去）。
     const rows = this.buildRows()
     const active = document.activeElement
     // 键盘抑制：把焦点挪走，再临时把 inputmode 改成 none，
@@ -271,6 +284,9 @@ export class ComposerSheet {
     document.body.append(backdrop)
     this.backdrop = backdrop
     button.setAttribute('aria-expanded', 'true')
+    // 到这里 backdrop 已经挂到 body 上（this.backdrop 也已赋值），读菜单拿到的
+    // 行才有地方写。顺序不能提前：见 fillRows 的注释。
+    void this.fillRows(rows)
     // 映射过程要开一次上游菜单，那一步会调 focusDraftEditor：再压一次焦点，
     // sheet 停留期间绝不能有键盘。
     this.blurActiveEditor()
@@ -310,11 +326,34 @@ export class ComposerSheet {
    * 菜单不在场（上游改了实现 / 焦点门不让开）时只留三块瓦片，不报错：映射是增强，
    * 不是这张 sheet 的存在前提。
    */
+  /**
+   * 造映射行的容器，并异步填内容。
+   *
+   * 容器同步返回（三块瓦片立刻可见），行在拿到上游菜单之后补进去 —— 因为读菜单
+   * 必须跨一次 React 提交（见 withUpstreamMenu）。
+   * @returns 空的行容器；内容稍后填入。
+   */
   private buildRows(): HTMLElement {
     const rows = document.createElement('div')
     rows.setAttribute(ROWS_ATTR, '')
-    for (const row of this.readUpstreamRows()) rows.append(this.buildRow(row))
     return rows
+  }
+
+  /**
+   * 读上游菜单项并填进容器。
+   *
+   * 目标已被关闭/替换时丢弃结果：用户在等待期间点掉了 sheet，就不能再往旧容器里写。
+   * @param rows - 行容器。
+   */
+  private async fillRows(rows: HTMLElement): Promise<void> {
+    const mapped = await this.readUpstreamRows()
+    if (mapped.length === 0) return
+    // 只丢「这张 sheet 已经关了」的结果：关掉后 rows 会随 backdrop 离场，
+    // 再往里写就是往死节点里写。**不能**用 rows.isConnected 判断 —— 读菜单要跨
+    // 一次上游提交，这几帧里面板可能还没挂到 body 上（实测：读到了 9 个上游项，
+    // 却因为此刻未挂载而整批丢弃，面板只剩三块瓦片）。
+    if (this.backdrop === null || !this.backdrop.contains(rows)) return
+    for (const row of mapped) rows.append(this.buildRow(row))
   }
 
   private buildRow(row: MappedRow): HTMLElement {
@@ -362,7 +401,19 @@ export class ComposerSheet {
    * 上游 onClick 会先 focusDraftEditor 唤起键盘，所以每次开完都补一次 blur —— 配合
    * inputmode=none，用户看不到键盘。
    */
-  private withUpstreamMenu<T>(run: (options: HTMLElement[]) => T, fallback: T): T {
+  /**
+   * 让上游菜单开出来，等 React 提交完再读，读完关掉。
+   *
+   * **必须跨一帧**：React 的 onClick 是委托在 root 上的合成事件，它 setState 之后
+   * 菜单要到下一次提交才会挂进 DOM。派发 click 后立刻 querySelector 永远是 null
+   * （实机复现：菜单能点开、但同一次同步求值里读不到任何 [role=option]）。
+   * 这里用 requestAnimationFrame 等一次提交，再读。
+   *
+   * @param run - 拿到 option 列表后执行的读取。
+   * @param fallback - 菜单始终不出现时的返回值。
+   * @returns run 的结果，或 fallback。
+   */
+  private async withUpstreamMenu<T>(run: (options: HTMLElement[]) => T, fallback: T): Promise<T> {
     const button = this.addButton ?? document.querySelector<HTMLElement>(ADD_BUTTON_SELECTOR)
     if (button === null) return fallback
     const card = button.closest(CARD_SELECTOR)
@@ -370,11 +421,15 @@ export class ComposerSheet {
     const openedHere = card.querySelector(UPSTREAM_MENU_SELECTOR) === null
     if (openedHere) {
       this.replaying = true
+      this.borrowing = true
       try {
         button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
       } finally {
         this.replaying = false
       }
+      // 等上游把菜单提交进 DOM：轮询到它真的出现（或超时），
+      // 单等一帧不够 —— 实测菜单在这台设备上要过一个宏任务才挂进卡片。
+      await this.waitForMenu(card)
     }
     const menu = card.querySelector(UPSTREAM_MENU_SELECTOR)
     if (menu === null) return fallback
@@ -385,13 +440,46 @@ export class ComposerSheet {
         // 用 Esc（上游自己的关法）收起，不直接 remove 别人的 DOM。
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
       }
+      // 借完就还：之后用户按 Esc 必须能正常关掉 sheet。
+      this.borrowing = false
       // 上游刚刚把焦点给了编辑器：重新压回去，键盘才不会跟着冒出来。
       this.blurActiveEditor()
     }
   }
 
+  /**
+   * 等一次渲染提交。
+   *
+   * 先排一个 rAF（拿到 Commit 之后的时机），再用一个宏任务兜底：
+   * 某些 WebView 在页面不可见时不给 rAF 回调，纯 rAF 会让整个 sheet 挂住。
+   * @returns 提交时机已过。
+   */
+  /**
+   * 等上游菜单挂进卡片。
+   *
+   * 逐帧轮询而不是固定延时：菜单到达时机取决于上游的提交与（可能的）动画帧，
+   * 固定等待在快机上浪费、在慢机上不够。超时后照常返回，由调用方按「没读到」
+   * 处理 —— 映射是增强，不是面板的前提。
+   * @param card - 上游卡片（菜单挂在它里面）。
+   * @returns 菜单已出现（或已超时）。
+   */
+  private waitForMenu(card: Element): Promise<void> {
+    return new Promise<void>((resolve) => {
+      let waited = 0
+      const step = (): void => {
+        if (card.querySelector(UPSTREAM_MENU_SELECTOR) !== null || waited >= 3000) {
+          resolve()
+          return
+        }
+        waited += 25
+        setTimeout(step, 25)
+      }
+      step()
+    })
+  }
+
   /** 读上游菜单的项（打开-读-关），失败时返回空（只留三块瓦片）。 */
-  private readUpstreamRows(): MappedRow[] {
+  private readUpstreamRows(): Promise<MappedRow[]> {
     return this.withUpstreamMenu((options) => options.map((option, index): MappedRow => {
       const name = (option.querySelector<HTMLElement>('[class*="itemName"]')?.textContent ?? '').trim()
       const label = (option.getAttribute('aria-label') ?? '').trim()
@@ -412,7 +500,7 @@ export class ComposerSheet {
    * onPick（防止焦点从编辑器被抢走），合成 click 不会触发它。
    */
   private dispatch(index: number): void {
-    this.withUpstreamMenu((options) => {
+    void this.withUpstreamMenu((options) => {
       const option = options[index]
       if (option === undefined) return
       // 不带 view：jsdom 的 window 不是 node 的 global，传了会抛

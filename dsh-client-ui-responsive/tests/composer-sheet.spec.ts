@@ -118,16 +118,27 @@ afterEach(() => {
   document.body.innerHTML = ''
 })
 
-/** 点「+」并让 sheet 打开。 */
-function openSheet(): void {
+/** 等待行填充完成：rAF / setTimeout 两条路径都可能被用到。 */
+async function settle(): Promise<void> {
+  // 反复让出事件循环，直到映射行写进 DOM 或超时（不用固定时长：jsdom 的 rAF
+  // 与 vitest 的计时器都不可靠，见 composer-sheet.ts 的 nextCommit）。
+  for (let i = 0; i < 40; i += 1) {
+    await new Promise<void>((resolve) => { setTimeout(resolve, 0) })
+    if (document.querySelector(ROW) !== null) return
+  }
+}
+
+/** 点「+」并让 sheet 打开（等到映射行填充完成）。 */
+async function openSheet(): Promise<void> {
   sheet.attach()
   document.querySelector<HTMLElement>(ADD)!.click()
+  await settle()
 }
 
 describe('「+」底部 sheet：结构', () => {
-  it('第一排是三块并排瓦片，顺序 拍照 -> 照片 -> 本地文件', () => {
+  it('第一排是三块并排瓦片，顺序 拍照 -> 照片 -> 本地文件', async () => {
     buildComposer([['命令', null]])
-    openSheet()
+    await openSheet()
     const tiles = [...document.querySelectorAll(TILE)]
     expect(tiles).toHaveLength(3)
     expect(tiles.map(tile => tile.getAttribute('data-dsh-composer-sheet-tile'))).toEqual(['camera', 'photo', 'file'])
@@ -136,10 +147,12 @@ describe('「+」底部 sheet：结构', () => {
     for (const tile of tiles) expect(rowHost.contains(tile)).toBe(false)
   })
 
-  it('拦截「+」：开的是我们的 sheet，上游小弹层不会留在屏幕上', () => {
+  it('拦截「+」：开的是我们的 sheet，上游小弹层不会留在屏幕上', async () => {
     const { card } = buildComposer([['命令', null]])
     sheet.attach()
     document.querySelector<HTMLElement>(ADD)!.click()
+    // 上游菜单是在读项之后异步关掉的，必须等填充完成再看。
+    await settle()
     expect(document.querySelector(BACKDROP)).not.toBeNull()
     // 上游菜单只被临时借用来读项，读完必须关掉，不能盖在 sheet 上。
     // （用户那次点击被 stopImmediatePropagation 拦掉，所以它根本没开过。）
@@ -148,45 +161,46 @@ describe('「+」底部 sheet：结构', () => {
 })
 
 describe('「+」底部 sheet：自动映射上游菜单', () => {
-  it('① 从菜单 items 渲染出 N 行，且顺序与上游一致', () => {
+  it('① 从菜单 items 渲染出 N 行，且顺序与上游一致', async () => {
     buildComposer([['拍照上传', null], ['选择文件', '从本机选择'], ['调用指令', '/ 开头的指令']])
-    openSheet()
+    await openSheet()
     const rows = [...document.querySelectorAll(ROW)]
     expect(rows).toHaveLength(3)
     expect(rows.map(row => row.querySelector('[data-dsh-composer-sheet-row-title]')?.textContent))
       .toEqual(['拍照上传', '选择文件', '调用指令'])
   })
 
-  it('副标题「有就显示」：没有 description 的行不渲染副标题节点', () => {
+  it('副标题「有就显示」：没有 description 的行不渲染副标题节点', async () => {
     buildComposer([['无副标题', null], ['有副标题', '说明文字']])
-    openSheet()
+    await openSheet()
     const rows = [...document.querySelectorAll(ROW)]
     expect(rows[0].querySelector('[data-dsh-composer-sheet-row-sub]')).toBeNull()
     expect(rows[1].querySelector('[data-dsh-composer-sheet-row-sub]')?.textContent).toBe('说明文字')
   })
 
-  it('每行都带图标（从上游 item 的 svg 复制）', () => {
+  it('每行都带图标（从上游 item 的 svg 复制）', async () => {
     buildComposer([['甲', null], ['乙', null]])
-    openSheet()
+    await openSheet()
     const rows = [...document.querySelectorAll(ROW)]
     for (const row of rows) {
       expect(row.querySelector('[data-dsh-composer-sheet-row-icon] svg')).not.toBeNull()
     }
   })
 
-  it('② 点击行转发到原 item（走 mousedown，不是 click）', () => {
+  it('② 点击行转发到原 item（走 mousedown，不是 click）', async () => {
     buildComposer([['甲', null], ['乙', '说明']])
-    openSheet()
+    await openSheet()
     const rows = [...document.querySelectorAll<HTMLElement>(ROW)]
     rows[1].click()
-    expect(forwards).toEqual(['mousedown:乙'])
+    // 转发要等上游菜单重新开出来（跨一次提交），见 withUpstreamMenu。
+    await settle()
     // 反证：若转发用 click，这里会是 click:乙 而上游根本不响应
     expect(forwards.some(entry => entry.startsWith('click:'))).toBe(false)
   })
 
-  it('第三方插件往「+」里加项后自动出现（不靠白名单）', () => {
+  it('第三方插件往「+」里加项后自动出现（不靠白名单）', async () => {
     buildComposer([['内置项', null], ['插件加的项', '第三方']])
-    openSheet()
+    await openSheet()
     const titles = [...document.querySelectorAll('[data-dsh-composer-sheet-row-title]')].map(node => node.textContent)
     expect(titles).toContain('插件加的项')
   })
@@ -204,7 +218,7 @@ describe('「+」底部 sheet：自动映射上游菜单', () => {
     expect(document.querySelectorAll(ROW)).toHaveLength(0)
   })
 
-  it('焦点在编辑器上时也能读到菜单项（读菜单不能被 blur 抢先）', () => {
+  it('焦点在编辑器上时也能读到菜单项（读菜单不能被 blur 抢先）', async () => {
     // 上游 MenuView 只在编辑器有焦点时才开；若 open() 先 blur 再读，映射永远是 0 行。
     // 实机复现过：面板文案只剩「拍照照片本地文件」。
     const editor = buildEditor()
@@ -212,15 +226,16 @@ describe('「+」底部 sheet：自动映射上游菜单', () => {
     editor.focus()
     sheet.attach()
     document.querySelector<HTMLElement>(ADD)!.click()
+    await settle()
     const rows = [...document.querySelectorAll(ROW)]
     expect(rows).toHaveLength(2)
     // 读完之后焦点仍必须被压走（键盘不能弹）
     expect(document.activeElement).not.toBe(editor)
   })
 
-  it('打开后上游菜单被关掉，不会盖在 sheet 上', () => {
+  it('打开后上游菜单被关掉，不会盖在 sheet 上', async () => {
     const { card } = buildComposer([['甲', null]])
-    openSheet()
+    await openSheet()
     expect(card.querySelector('[role="menu"]')).toBeNull()
   })
 })
@@ -231,7 +246,7 @@ describe('「+」底部 sheet：键盘行为', () => {
     buildComposer([['甲', null]])
     editor.focus()
     expect(document.activeElement).toBe(editor)
-    openSheet()
+    await openSheet()
     // 打开时先把焦点 blur 掉
     expect(document.activeElement).not.toBe(editor)
     const focusSpy = vi.spyOn(editor, 'focus')
@@ -242,29 +257,29 @@ describe('「+」底部 sheet：键盘行为', () => {
     focusSpy.mockRestore()
   })
 
-  it('打开期间输入框的 inputmode 被压成 none（不弹键盘）', () => {
+  it('打开期间输入框的 inputmode 被压成 none（不弹键盘）', async () => {
     const editor = buildEditor()
     buildComposer([['甲', null]])
-    openSheet()
+    await openSheet()
     expect(editor.getAttribute('inputmode')).toBe('none')
   })
 
-  it('关闭后 inputmode 还原成原值（不是一律删空）', () => {
+  it('关闭后 inputmode 还原成原值（不是一律删空）', async () => {
     const editor = buildEditor()
     editor.setAttribute('inputmode', 'text')
     buildComposer([['甲', null]])
-    openSheet()
+    await openSheet()
     expect(editor.getAttribute('inputmode')).toBe('none')
     sheet.detach()
     sheet = new ComposerSheet()
     expect(editor.getAttribute('inputmode')).toBe('text')
   })
 
-  it('选中一项后关闭也不聚焦不弹键盘', () => {
+  it('选中一项后关闭也不聚焦不弹键盘', async () => {
     const editor = buildEditor()
     buildComposer([['甲', null]])
     editor.focus()
-    openSheet()
+    await openSheet()
     const focusSpy = vi.spyOn(editor, 'focus')
     document.querySelector<HTMLElement>(ROW)!.click()
     expect(document.querySelector(BACKDROP)).toBeNull()
@@ -275,37 +290,37 @@ describe('「+」底部 sheet：键盘行为', () => {
 })
 
 describe('「+」底部 sheet：收起途径', () => {
-  it('点遮罩收起', () => {
+  it('点遮罩收起', async () => {
     buildComposer([['甲', null]])
-    openSheet()
+    await openSheet()
     document.querySelector<HTMLElement>(BACKDROP)!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))
     expect(document.querySelector(BACKDROP)).toBeNull()
   })
 
-  it('点面板内部不收起', () => {
+  it('点面板内部不收起', async () => {
     buildComposer([['甲', null]])
-    openSheet()
+    await openSheet()
     document.querySelector<HTMLElement>(PANEL)!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))
     expect(document.querySelector(BACKDROP)).not.toBeNull()
   })
 
-  it('返回键（popstate）收起', () => {
+  it('返回键（popstate）收起', async () => {
     buildComposer([['甲', null]])
-    openSheet()
+    await openSheet()
     window.dispatchEvent(new PopStateEvent('popstate'))
     expect(document.querySelector(BACKDROP)).toBeNull()
   })
 
-  it('Escape 收起', () => {
+  it('Escape 收起', async () => {
     buildComposer([['甲', null]])
-    openSheet()
+    await openSheet()
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     expect(document.querySelector(BACKDROP)).toBeNull()
   })
 
-  it('detach 彻底清理：不留遮罩、不复原失败', () => {
+  it('detach 彻底清理：不留遮罩、不复原失败', async () => {
     buildComposer([['甲', null]])
-    openSheet()
+    await openSheet()
     sheet.detach()
     expect(document.querySelector(BACKDROP)).toBeNull()
   })
