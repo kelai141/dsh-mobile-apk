@@ -2138,6 +2138,8 @@ app/src/main/java/com/dsharnessmobile/shell/FileExternalBridge.kt
 app/src/main/java/com/dsharnessmobile/shell/PhotoCapture.kt
 app/src/main/java/com/dsharnessmobile/shell/PhotoCaptureController.kt
 app/src/test/java/com/dsharnessmobile/shell/PhotoCaptureTest.kt
+app/src/main/java/com/dsharnessmobile/shell/UpdateCardLayout.kt
+app/src/test/java/com/dsharnessmobile/shell/UpdateCardLayoutTest.kt
 scripts/verify-console-terminal-env.mjs
 scripts/verify-console-pty.mjs
 scripts/verify-source-mirror.mjs

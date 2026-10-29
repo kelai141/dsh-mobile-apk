@@ -96,22 +96,38 @@ internal class GuideManagementController(
     (chrome.updateButton.parent as? ViewGroup)?.removeView(chrome.updateButton)
     (chrome.apkStatus.parent as? ViewGroup)?.removeView(chrome.apkStatus)
     (chrome.apkDownload.parent as? ViewGroup)?.removeView(chrome.apkDownload)
+    (chrome.apkSecondaryLink.parent as? ViewGroup)?.removeView(chrome.apkSecondaryLink)
     // 标题行：14sp 主色 —— 与 WebView 卡片的 .dsh-gs-title / 卡头（font-size 14px）同档。
     // 为什么卡片需要一个标题：WebView 那张卡有卡头（分区名），这里若只有一行状态小字，
     // 两个入口关掉其中一个就分不清它是「更新」还是别的行内提示。
     block.addView(cardTitle())
     // 状态行：12sp 次要色 + 18sp 行高 —— 与 .dsh-gs-desc（font-size 12px / line-height 18px）同档。
     block.addView(chrome.apkStatus, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
-    val buttons = LinearLayout(activity).apply {
+    // 动作区（0.15.0 改版）：**主按钮只有一个**，另一个降为卡内右侧的轻量文字链接。
+    //
+    // 为什么不再两枚等宽并列：用户看图后的反馈是「偏重」，要「克制」。两枚同宽灰块在
+    // 视觉上没有主次，而这两件事（检查 / 下载）本来就有先后——先查才谈得上下载，
+    // 下载出现时检查也该让位。谁当主由 [UpdateCardLayout.layoutFor] 按状态算，这里只照着摆。
+    //
+    // 为什么主按钮仍占满整行、次入口贴在**同一行**右侧：这样状态切换时行高不变（主按钮高度
+    // 恒为 48dp），卡片不会因为「这次有没有次入口」而跳一格。
+    val actions = LinearLayout(activity).apply {
       orientation = LinearLayout.HORIZONTAL
-      // 与状态行留出间距（与 WebView 卡片 grid gap 同量级），两枚按钮视觉上并列。
+      gravity = Gravity.CENTER_VERTICAL
       layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) }
     }
     // 按钮高度 48dp 是本改动**有意不跟** WebView 的一处：WebView 那边是 Button size="sm"（28px），
     // 那是鼠标指针的尺寸；这里手指要点，48dp 才够（本仓既有次级按钮同一把尺 ds_btn_secondary_height）。
     val buttonHeight = dimenPx(R.dimen.ds_btn_secondary_height)
-    buttons.addView(chrome.updateButton, LinearLayout.LayoutParams(0, buttonHeight, 1f))
-    buttons.addView(chrome.apkDownload, LinearLayout.LayoutParams(0, buttonHeight, 1f).apply { marginStart = dp(8) })
+    actions.addView(chrome.updateButton, LinearLayout.LayoutParams(0, buttonHeight, 1f))
+    // 下载那枚与主按钮**互斥**：它当主的时候占满整行，不当主的时候整个 GONE
+    // （见 GuidePageRenderer.setDownloadButton 的 label==null 分支）。两者权重都是 1，
+    // 但同一时刻只有一个 VISIBLE，所以实际宽度各自都是整行。
+    actions.addView(chrome.apkDownload, LinearLayout.LayoutParams(0, buttonHeight, 1f))
+    actions.addView(
+      chrome.apkSecondaryLink,
+      LinearLayout.LayoutParams(-2, buttonHeight).apply { marginStart = dp(8) },
+    )
     // 这两枚按钮是启动页造的（makeSecondary：胶囊圆角 999dp + hairline 描边 + 15sp 文字），
     // 而卡片里其它面都是小圆角实心块——搬进来后圆角与描边明显不是一套，
     // 这就是「检查更新按钮风格和其他按钮不契合」。按卡片口径就地重绘，不改启动页那份原型。
@@ -132,7 +148,7 @@ internal class GuideManagementController(
       button.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 14f)
       button.setTextColor(activity.getColor(R.color.ds_text_primary))
     }
-    block.addView(buttons)
+    block.addView(actions)
     return block
   }
 

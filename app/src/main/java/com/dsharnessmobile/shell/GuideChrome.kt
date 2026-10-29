@@ -43,6 +43,15 @@ internal class GuideChrome(
    */
   val apkStatus: TextView,
   val apkDownload: Button,
+  /**
+   * 0.15.0：更新卡的**次入口**（文字链接），与主按钮二选一承担动作。
+   *
+   * 为什么不复用 apkDownload：用户口径是「主按钮只有一个，另一个降为卡内右侧的轻量
+   * 文字链接」。同一枚控件既要当等宽主按钮又要当文字链接，只能靠运行时改 LayoutParams ——
+   * 那会在每次状态切换时重排整张卡，滚动位置也会跳。两枚各自静态，由 [UpdateCardLayout]
+   * 决定谁出现。
+   */
+  val apkSecondaryLink: TextView,
   /** Secondary startup action: retry the engine, or open the repair assistant. */
   val repairButton: Button,
   val runtimeChip: TextView,
@@ -465,6 +474,28 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
     callbacks.onDownloadUpdate()
   }.apply { visibility = View.GONE }
 
+  /**
+   * 次入口：轻量文字链接（无底色、无描边，14sp 次要色）。
+   *
+   * 为什么不给底色：用户口径是「另一个降为卡内右侧的轻量文字链接」——它要让位给主按钮，
+   * 一旦与主按钮同款等宽灰块，克制就没了。触控面仍按 48dp（[minimumHeight]）保证好点，
+   * 只是**画**得像文本。
+   */
+  val apkSecondaryLink = TextView(activity).apply {
+    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+    setTextColor(color(R.color.ds_text_secondary))
+    gravity = Gravity.CENTER
+    includeFontPadding = false
+    minimumHeight = dpix(R.dimen.ds_btn_secondary_height)
+    isClickable = true
+    isFocusable = true
+    background = DsUi.ripple(
+      DsUi.roundRect(android.graphics.Color.TRANSPARENT, 0f),
+      color(R.color.ds_accent_soft),
+    )
+    visibility = View.GONE
+  }
+
   val secondaryRow = LinearLayout(activity).apply {
     orientation = LinearLayout.HORIZONTAL
     val lp = LinearLayout.LayoutParams(
@@ -579,6 +610,7 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
     updateButton = updateButton,
     apkStatus = apkStatus,
     apkDownload = apkDownload,
+    apkSecondaryLink = apkSecondaryLink,
     repairButton = repairButton,
     runtimeChip = runtimeChip,
     storageChip = storageChip,

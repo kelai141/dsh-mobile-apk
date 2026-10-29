@@ -136,8 +136,17 @@ class GuideUpdateCardTokenTest {
     val management = codeOnly(source("GuideManagementController.kt"))
     val body = bodyAfter(management, "private fun updateBlock(): View {")
     // 两枚控件都被摆进同一行，但仍是**两个** addView：合并成一枚就无从区分检查与下载。
-    assertTrue("检查按钮必须仍独立摆入", body.contains("buttons.addView(chrome.updateButton"))
-    assertTrue("下载按钮必须仍独立摆入", body.contains("buttons.addView(chrome.apkDownload"))
+    // 0.15.0：承载行改名 actions（主按钮独占一行 + 次入口文字链接）。
+    // 判据不变——两枚仍是**两个独立 addView**，合并成一枚才判红。
+    assertTrue(
+      "检查按钮必须仍独立摆入",
+      Regex("actions\\.addView\\(\\s*chrome\\.updateButton").containsMatchIn(body),
+    )
+    // 0.15.0：承载行改名 actions（同上）。两枚仍是两个独立 addView。
+    assertTrue(
+      "下载按钮必须仍独立摆入",
+      Regex("actions\\.addView\\(\\s*chrome\\.apkDownload").containsMatchIn(body),
+    )
     // 卡片只是容器：不设点击、不设焦点，读屏不会被它合并或截断。
     val card = bodyAfter(management, "private fun updateCard() = LinearLayout(activity).apply {")
     assertTrue("卡片必须显式不可点击", card.contains("isClickable = false"))
