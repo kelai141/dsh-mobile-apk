@@ -434,16 +434,18 @@
       "marker": "__dshContactUs"
     },
     {
-      "id": "terminal-shell-candidates-T1",
-      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-api-terminal-controller/lib/index.js",
-      "summary": "discoverShells 收编候选时跳过 Android 上的系统 cmd（只在 Windows 保留 cmd.exe）",
-      "provenance": "issue #873：终端 shell 列表里出现 cmd，选中即退出（No service specified / 退出码 20）",
-      "marker": "not a shell",
       "id": "zsh-fpath-A1",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/lib/index.js",
       "summary": "给生成的 zsh 初始化脚本补 fpath（快照 functions 目录）并给 add-zsh-hook/add-zle-hook-widget 注册加守卫",
       "provenance": "issue #867：内置 zsh 开屏三行 function definition file not found（fpath 指向 Termux 路径）",
       "marker": "_dsh_fn"
+    },
+    {
+      "id": "terminal-shell-candidates-T1",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-api-terminal-controller/lib/index.js",
+      "summary": "discoverShells 收编候选时跳过 Android 上的系统 cmd（只在 Windows 保留 cmd.exe）",
+      "provenance": "issue #873：终端 shell 列表里出现 cmd，选中即退出（No service specified / 退出码 20）",
+      "marker": "not a shell"
     }
   ],
   "retired": [
