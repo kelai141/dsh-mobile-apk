@@ -2599,6 +2599,8 @@ app/src/androidTest/java/com/dsharnessmobile/shell/ClipboardReadDeviceTest.kt
 app/src/androidTest/java/com/dsharnessmobile/shell/I18nSmokeDeviceTest.kt
 app/src/androidTest/java/com/dsharnessmobile/shell/VdisplayGuidanceDeviceTest.kt
 app/src/androidTest/java/com/dsharnessmobile/shell/NotifyRouteDeviceTest.kt
+app/src/androidTest/java/com/dsharnessmobile/shell/RepairModelFallbackDeviceTest.kt
+app/src/androidTest/java/com/dsharnessmobile/shell/RepairUiFallbackDeviceTest.kt
 -->
 
 Telemetry snapshot closure: check-engine-overlay retains each dependency's declared requirement and resolves the actual nested package from the mounted telemetry consumer. Exact-version mismatches and missing transitive runtime packages reject the archive. The isolated overlay pins prevent upgrading unrelated consumers' root packages. Validation and the unresolved startup-budget distinction are recorded in docs/contrib/MCMR-JIM/2026-10-27-telemetry-runtime-closure.md.
