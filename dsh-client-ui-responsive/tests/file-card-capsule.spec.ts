@@ -32,20 +32,28 @@ function makeBridge(answer: (kind: 'open' | 'share') => string | undefined): Fil
   }
 }
 
-/** 单文件卡片：上游 singleFile 分支的形状。 */
+/**
+ * 单文件卡片：上游 singleFile 分支的形状。
+ *
+ * 上游把 header 包在 FileOpenAnchor 里（ChangedFiles.tsx:70-75 的 `<>` 分支），
+ * 实际 DOM 是 `div[data-single] > span > button`，**不是**直接子元素。
+ * 夹具必须照抄这一层，否则 `:scope > button` 那种写法测不出来（实机取证）。
+ */
 function buildSingleCard(path: string, opts: { onOpen?: () => void } = {}): HTMLButtonElement {
   const card = document.createElement('div')
   card.setAttribute('data-changed-files', '')
   card.setAttribute('data-single', '')
+  const anchor = document.createElement('span')
   const header = document.createElement('button')
   header.type = 'button'
   header.setAttribute('aria-describedby', 'p-desc')
   header.addEventListener('click', () => { opts.onOpen?.() })
+  anchor.append(header)
   const hidden = document.createElement('span')
   hidden.id = 'p-desc'
   hidden.hidden = true
   hidden.textContent = path
-  card.append(header, hidden)
+  card.append(anchor, hidden)
   document.body.append(card)
   return header
 }

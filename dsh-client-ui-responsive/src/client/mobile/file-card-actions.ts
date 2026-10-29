@@ -221,8 +221,12 @@ export class FileCardCapsule {
     for (const card of document.querySelectorAll<HTMLElement>(CARD_SELECTOR)) {
       const single = card.hasAttribute('data-single')
       if (single) {
-        const header = card.querySelector<HTMLElement>(':scope > button')
-        if (header !== null) this.ensureCapsule(header, header.parentElement)
+        // 单文件卡片：上游把 header 包在 FileOpenAnchor 里（div > span > button），
+        // 不是卡片的直接子元素，所以不能写 :scope > button（实机取证：那条恒 NULL）。
+        // 落点用卡片自身——按钮的 parentElement 是 FileOpenAnchor 的 span，挂进去会被
+        // 上游重渲染吞掉，而且胶囊会挤在按钮内部而不是卡片角落。
+        const header = card.querySelector<HTMLElement>('button[aria-describedby]')
+        if (header !== null) this.ensureCapsule(header, card)
       } else {
         for (const row of card.querySelectorAll<HTMLElement>('li > button')) {
           const host = row.parentElement
