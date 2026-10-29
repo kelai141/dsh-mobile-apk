@@ -449,10 +449,13 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
   // （管理中心 build 里先摘下来再挂进去）是同一判据的既有实现，这里只是不再走一遍"先挂在
   // 死布局里、再被摘走"的弯路。
   val apkStatus = TextView(activity).apply {
-    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-    // 次要色：状态行是次级信息，与管理中心的分区标题（ds_text_primary）同级会抢读者的注意力。
+    // 12sp + 1.5 倍行距（即 18sp 行高）= WebView 设置卡片里 .dsh-gs-desc 的那一档
+    // （font-size: 12px; line-height: 18px）。此前是 13sp/1.3 倍，两侧并排时字号与行距都不是一套。
+    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+    setLineSpacing(0f, 1.5f)
+    // 次要色：状态行是次级信息，与卡片标题（ds_text_primary）同级会抢读者的注意力。
+    // 这一档也正好是 .dsh-gs-desc 的 --dsw-alias-label-secondary。
     setTextColor(color(R.color.ds_text_secondary))
-    setLineSpacing(0f, 1.3f)
     // 失败原因与版本行都可能偏长：允许折两行，超出交给省略号（不撑高更新块、不截断到别的控件）。
     maxLines = 2
     ellipsize = TextUtils.TruncateAt.END

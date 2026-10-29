@@ -72,7 +72,7 @@ internal class GuideManagementController(
   }
 
   /**
-   * 更新块：状态行在上，检查 / 下载两枚按钮在下（横向两等分）。
+   * 更新块：一张卡片，里面「标题 / 状态行 / 检查与下载两枚按钮」。
    *
    * 为什么状态行必须与按钮分开：旧形态把版本号写进按钮文案，而按钮是固定高的单行控件——
    * 长版本号（v0.13.7fx-1）在真机上被截断（GuideChrome 里那条 maxLines=1 的实测约束正是为此）。
@@ -81,38 +81,82 @@ internal class GuideManagementController(
    * 为什么三枚控件都用**实例**而不是新建：更新状态与动作只由 Activity 作用域的 ApkUpdateController
    * 持有，GuideChrome 造出来的这三枚读的就是它；另造一套控件就会与引导页那一份状态打架。
    * 检查按钮走的是既有路径（从原父节点摘下来再挂进来），另外两枚构建期无父节点，这里直接认领。
+   *
+   * 为什么**保留两枚独立按钮、只把它们包进一张卡片**（用户硬约束，别顺手合并）：检查与下载各自
+   * 硬绑一个动作（见 GuideCallbacks.onCheckUpdate / onDownloadUpdate）。把两枚合成一枚、由它推断
+   * 「这次点击该检查还是该下载」，正是历史上误清已确认载荷的来源；卡片只是外面那层视觉容器，
+   * 不承担任何状态推断，也不承担任何点击。
+   *
+   * 卡片外壳规格对齐 WebView 设置页的 `.dsh-screen-control-card`（#860 之后「应用更新」分区就用它），
+   * 于是启动页这张卡与管理中心那张卡是同一套尺寸与字号，不是一个页面一套。逐项对照见 [updateCard]，
+   * 取值收在 [DsUi.settingsCardBackground] / [DsUi.settingsCardPaddingPx]，改一处两边一起变。
    */
   private fun updateBlock(): View {
-    val block = column().apply {
-      setPadding(dp(20), dp(12), dp(20), dp(12))
-      // 与相邻的 row 同款外边距：更新块是一块内容，不是贴在面板边缘的裸控件。
-      layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) }
-    }
+    val block = updateCard()
     (chrome.updateButton.parent as? ViewGroup)?.removeView(chrome.updateButton)
     (chrome.apkStatus.parent as? ViewGroup)?.removeView(chrome.apkStatus)
     (chrome.apkDownload.parent as? ViewGroup)?.removeView(chrome.apkDownload)
-    block.addView(chrome.apkStatus, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
+    // 标题行：14sp 主色 —— 与 WebView 卡片的 .dsh-gs-title / 卡头（font-size 14px）同档。
+    // 为什么卡片需要一个标题：WebView 那张卡有卡头（分区名），这里若只有一行状态小字，
+    // 两个入口关掉其中一个就分不清它是「更新」还是别的行内提示。
+    block.addView(cardTitle())
+    // 状态行：12sp 次要色 + 18sp 行高 —— 与 .dsh-gs-desc（font-size 12px / line-height 18px）同档。
+    block.addView(chrome.apkStatus, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
     val buttons = LinearLayout(activity).apply {
       orientation = LinearLayout.HORIZONTAL
-      // 与状态行留出间距，两枚按钮视觉上并列（各占一半，中间 8dp 缝）。
+      // 与状态行留出间距（与 WebView 卡片 grid gap 同量级），两枚按钮视觉上并列。
       layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) }
     }
+    // 按钮高度 48dp 是本改动**有意不跟** WebView 的一处：WebView 那边是 Button size="sm"（28px），
+    // 那是鼠标指针的尺寸；这里手指要点，48dp 才够（本仓既有次级按钮同一把尺 ds_btn_secondary_height）。
     val buttonHeight = dimenPx(R.dimen.ds_btn_secondary_height)
     buttons.addView(chrome.updateButton, LinearLayout.LayoutParams(0, buttonHeight, 1f))
     buttons.addView(chrome.apkDownload, LinearLayout.LayoutParams(0, buttonHeight, 1f).apply { marginStart = dp(8) })
     // 这两枚按钮是启动页造的（makeSecondary：胶囊圆角 999dp + hairline 描边 + 15sp 文字），
-    // 而管理中心里所有行都是 8dp 圆角的实心卡片、正文 16sp——搬进来后圆角与描边明显不是一套，
-    // 这就是「检查更新按钮风格和其他按钮不契合」。按面板口径就地重绘，不改启动页那份原型。
+    // 而卡片里其它面都是小圆角实心块——搬进来后圆角与描边明显不是一套，
+    // 这就是「检查更新按钮风格和其他按钮不契合」。按卡片口径就地重绘，不改启动页那份原型。
+    //
+    // 圆角 8dp = WebView 侧 Button size="sm" 的 --dsw-radius-sm（8px），两侧按钮圆角同值。
+    // 字号 14sp = WebView 侧 Button 基础档 font-size 14px（.button），不用 sm 档的 12px：
+    // 按钮高度在这里是 48dp（见上），12px 字在 48dp 的块里会显得又空又小。
+    //
+    // 填充色必须是 ds_button_surface 而**不能**是 ds_surface：后者与卡片底色是同一个 token，
+    // 一旦按钮住进卡片里，它就会和卡片融为一体、看不出边界（旧形态下按钮直接坐在面板底色上，
+    // 两者刚好有对比，所以那时写 ds_surface 没暴露）。ds_button_surface 是这套设计里
+    // 专为「按钮面」准备的 token，晴/暗两套底色上都有对比。
     for (button in listOf(chrome.updateButton, chrome.apkDownload)) {
       button.background = DsUi.ripple(
-        DsUi.roundRect(activity.getColor(R.color.ds_surface), dp(8).toFloat()),
+        DsUi.roundRect(activity.getColor(R.color.ds_button_surface), dp(8).toFloat()),
         activity.getColor(R.color.ds_accent_soft),
       )
-      button.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 15f)
+      button.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 14f)
       button.setTextColor(activity.getColor(R.color.ds_text_primary))
     }
     block.addView(buttons)
     return block
+  }
+
+  /** 更新卡的外壳（背景 / 圆角 / 描边 / 内边距），规格全部取自 DsUi 的那两个函数。 */
+  private fun updateCard() = LinearLayout(activity).apply {
+    orientation = LinearLayout.VERTICAL
+    DsUi.settingsCardPaddingPx(activity).let { setPadding(it[0], it[1], it[2], it[3]) }
+    background = DsUi.settingsCardBackground(activity)
+    // 与相邻的 row 同款外边距：更新卡是这一列里的一张卡，不是贴在面板边缘的裸控件。
+    // 水平方向不加任何外边距——卡片宽度由本列（column 的 4dp 内边距）决定，与其它 row 左右对齐。
+    layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) }
+    // 无障碍：本容器**刻意不设**点击/焦点/读屏语义。它只是背景与留白，两枚按钮的语义不改、
+    // 仍是各自独立的可聚焦控件；读屏不会被这张卡片合并或截断。
+    isClickable = false
+    isFocusable = false
+  }
+
+  /** 更新卡的标题行：14sp 主色，与 WebView 卡片标题同档。 */
+  private fun cardTitle() = TextView(activity).apply {
+    text = t("应用更新", "App updates")
+    setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 14f)
+    setTextColor(activity.getColor(R.color.ds_text_primary))
+    includeFontPadding = false
+    layoutParams = LinearLayout.LayoutParams(-1, -2)
   }
 
   private fun column() = LinearLayout(activity).apply {

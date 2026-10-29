@@ -283,7 +283,7 @@ Android API 面登记见 `docs/AGENTS/ANDROID-API-USAGE.md` §1/§3/§4/§8；�
 ## 原生管理入口（2026-10-16）
 
 - `GuideChrome.kt`：启动页与底部主操作、六齿管理按钮。
-- `GuideManagementController.kt`：启动页 / 管理中心 / 插件与存储三级导航，0°/240°可逆过渡和预测返回进度。管理页打开期间，`GuidePageRenderer.showWeb()` 保留导航上下文。
+- `GuideManagementController.kt`：启动页 / 管理中心 / 插件与存储三级导航，0°/240°可逆过渡和预测返回进度。管理页打开期间，`GuidePageRenderer.showWeb()` 保留导航上下文。更新块（`updateBlock()` / `updateCard()`）是一张设置页卡片，内含标题行、状态行与检查 / 下载两枚各自独立的按钮（不合并——合并就得按状态推断「这次点击该检查还是该下载」，那是历史上误清已确认载荷的来源）。卡片外壳规格对齐 WebView 设置页的 `.dsh-screen-control-card`（`#860`）：背景 `ds_surface`、圆角 `ds_radius_settings_card`（12dp，对应上游 `dsw-radius-md` 12px）、描边 `ds_hairline` 1 物理像素、四边 `ds_space_12` 内边距；文字层级同 `.dsh-gs-title` / `.dsh-gs-desc`（标题 14sp 主色、状态 12sp/1.5 倍行距次要色）。取值只从 `DsUi.settingsCardBackground` / `DsUi.settingsCardPaddingPx` 取，调用方不重复写 token。
 - `PluginManagementRepository.kt`：鉴权 RPC、Hard 清单过滤和变更校验，复用运行时插件管理与配置事务。
 - `PluginManagementPage.kt`：真实插件列表、搜索筛选、原生 Switch 与配置详情；网络读取不占用主线程。
 
