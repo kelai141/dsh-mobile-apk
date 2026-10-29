@@ -1579,19 +1579,19 @@
       "if (categoryOff) {"
     ],
     "NotifyDecisionQueue.kt:192": [
-      "fun enqueue(context: Context, decision: Decision): Boolean {"
+      "@Synchronized"
     ],
     "NotifyDecisionQueue.kt:194": [
-      "LogCollector.log(TAG, \"decision ignored (requestId LRU): \" + decision.requestId)"
+      "if (!lru.accept(decision.requestId)) {"
     ],
     "NotifyDecisionQueue.kt:28": [
-      "const val FILE_NAME = \"notify-decisions.ndjson\""
+      "const val TAG = \"dsh-notify\""
     ],
     "NotifyDecisionQueue.kt:310": [
-      "}"
+      "return if (failed) Flush.FAILED else Flush.WAITING"
     ],
     "NotifyDecisionQueue.kt:323": [
-      "// 提交者不会收到；不结算则通知停在「正在发送」（NT-16 判据）。"
+      "// DEF-NOTIFY-03（设备实测）：提交成功必须**立即本地结算**——网关只给其它持有者发 cancel，"
     ],
     "NotifyProbe.kt:21": [
       "const val FILE_NAME = \"notify-responder.log\""
@@ -2293,7 +2293,7 @@
       "return Result.RESOLVED"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyDecisionQueue.kt:266": [
-      "* 超出墙钟预算 -> FAILED + 可见「提交失败，点击重试」。"
+      "* NOT_READY（应答流/引擎未就绪）的统一处置：预算内 -> 独立计数 + 指数退避重排；"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyStore.kt:321": [
       "dedupeKey = j.optString(\"dedupeKey\", \"\"),"

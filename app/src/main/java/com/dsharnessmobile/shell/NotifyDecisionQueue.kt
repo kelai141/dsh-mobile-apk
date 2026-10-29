@@ -3,6 +3,7 @@ package com.dsharnessmobile.shell
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.security.MessageDigest
@@ -384,15 +385,62 @@ object NotifyDecisionQueue {
    */
   internal fun answerSummary(decision: Decision): String {
     val o = try { JSONObject(decision.outcomeJson) } catch (_: Exception) { return "" }
-    val raw = when {
-      o.optString("value").isNotBlank() -> o.optString("value")
-      o.optString("label").isNotBlank() -> o.optString("label")
-      o.optString("text").isNotBlank() -> o.optString("text")
-      o.optString("option").isNotBlank() -> o.optString("option")
-      o.optString("outcome").isNotBlank() -> o.optString("outcome")
-      else -> o.optString("type")
+    // 线上真实形状（NotifyActionReceiver.outcomeFor）：
+    //   审批 -> {"kind":"result","value":"allowed-once"}
+    //   选答/回复 -> {"kind":"result","value":{"answers":[{"id":..,"selected":[..],"custom":..}]}}
+    // 旧实现只取 o.optString("value")：对**对象**形态 optString 会返回它的 JSON 文本，于是失败通知里
+    // 出现「你所提交的内容：{"answers":[{"id":"q1",…}]}」——用户看不懂的原始 JSON（N5）。
+    val raw = when (val value = o.opt("value")) {
+      is JSONObject -> answersSummary(value)
+      is String -> value
+      is JSONArray -> joinJsonArray(value)
+      else -> flatSummary(o)
     }
     return raw.trim().replace(Regex("\\s+"), " ")
+  }
+
+  /** {"answers":[{"id","selected":[…],"custom"}]} -> 人话一行；取不到给空串（不编造）。 */
+  private fun answersSummary(value: JSONObject): String {
+    val answers = value.optJSONArray("answers") ?: return ""
+    val parts = ArrayList<String>(answers.length())
+    for (i in 0 until answers.length()) {
+      val a = answers.optJSONObject(i) ?: continue
+      val custom = a.optString("custom").trim()
+      val selected = a.optJSONArray("selected")?.let { joinJsonArray(it) }?.trim().orEmpty()
+      val text = when {
+        custom.isNotEmpty() && selected.isNotEmpty() -> custom + "（" + selected + "）"
+        custom.isNotEmpty() -> custom
+        else -> selected
+      }
+      if (text.isNotEmpty()) parts.add(text)
+    }
+    return parts.joinToString("；")
+  }
+
+  /** 数组项可能是字符串，也可能是 {label}/{text} 对象（选项对象形态）。 */
+  private fun joinJsonArray(arr: JSONArray): String {
+    val parts = ArrayList<String>(arr.length())
+    for (i in 0 until arr.length()) {
+      when (val v = arr.opt(i)) {
+        is String -> if (v.isNotBlank()) parts.add(v.trim())
+        is JSONObject -> {
+          val label = v.optString("label").ifBlank { v.optString("text") }
+          if (label.isNotBlank()) parts.add(label.trim())
+        }
+        null -> Unit
+        else -> parts.add(v.toString())
+      }
+    }
+    return parts.joinToString("、")
+  }
+
+  /** 老存档/第三方写法的扁平形态（label/text/option/outcome/type）。 */
+  private fun flatSummary(o: JSONObject): String = when {
+    o.optString("label").isNotBlank() -> o.optString("label")
+    o.optString("text").isNotBlank() -> o.optString("text")
+    o.optString("option").isNotBlank() -> o.optString("option")
+    o.optString("outcome").isNotBlank() -> o.optString("outcome")
+    else -> o.optString("type")
   }
 
   /** 指数退避重试（<=60s）；同一时刻只排一个。 */
