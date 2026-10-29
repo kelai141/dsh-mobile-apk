@@ -56,7 +56,7 @@ class OverlayReport(private val svc: OverlayService) {
     val lines = reportLines(entry)
 
     val title = TextView(svc).apply {
-      text = "工作汇报"
+      text = UiText.t(svc, "工作汇报", "Work report")
       textSize = 13f
       setTypeface(null, android.graphics.Typeface.BOLD)
       setTextColor(c.inputText)
