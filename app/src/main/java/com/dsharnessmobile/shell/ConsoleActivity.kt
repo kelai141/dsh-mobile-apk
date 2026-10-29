@@ -128,6 +128,9 @@ class ConsoleActivity : ComponentActivity() {
       override fun onPageFinished(view: android.webkit.WebView, url: String) {
         super.onPageFinished(view, url)
         pageReady = true
+        // 控制台页面是静态 asset，语言要由壳侧注入（与其它原生面同一判据 UiText.isEnglish）。
+        evalPage("window.__dshConsoleSetLang && window.__dshConsoleSetLang(" +
+          UiText.isEnglish(this@ConsoleActivity) + ")")
         lastStatus?.let { pushStatus(lastState, it) }
         pushInsets()
       }

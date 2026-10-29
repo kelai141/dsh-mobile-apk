@@ -494,5 +494,70 @@
   setInterval(refreshEngine, 3000);
 })();
 </script>
+
+<script>
+/* 双语（2026-10-29）：控制台此前整页 zh-CN，切英文后按钮/提示仍是中文。
+   壳侧在 onPageFinished 调 __dshConsoleSetLang(UiText.isEnglish(this))。
+   只替换与下表**完全相等**的文本节点，避免动到终端输出。 */
+(function () {
+  var MAP = {
+    '返回': 'Back',
+    '控制台': 'Console',
+    '复制': 'Copy',
+    '清空': 'Clear',
+    '重连': 'Reconnect',
+    '补全': 'Complete',
+    '上一条': 'Previous',
+    '下一条': 'Next',
+    '中断当前程序': 'Interrupt',
+    '输入命令，回车执行': 'Type a command and press Enter',
+    '返回管理中心': 'Back to management',
+    '重连控制台': 'Reconnect console',
+    '点此立即重新检测引擎': 'Tap to re-check the engine',
+    '有没有真 PTY': 'Is it a real PTY?',
+    '右移': 'Move right',
+    '左移': 'Move left',
+    '结束输入': 'End input',
+    '引擎': 'Engine',
+    'bash 已就绪（快照 Termux 环境，真 PTY）': 'bash ready (snapshot Termux, real PTY)',
+    'bash 已就绪（快照 Termux 环境，无 PTY）': 'bash ready (snapshot Termux, no PTY)',
+    'bash 已就绪（快照 Termux 环境，正在建立 PTY）': 'bash ready (snapshot Termux, creating PTY)',
+    '快照内嵌 Termux bash。引擎未运行时也可排查启动失败。': 'Snapshot-embedded Termux bash. You can debug startup failures even when the engine is not running.'
+  };
+  var EN = false;
+  function applyLang() {
+    document.documentElement.lang = 'en';
+    document.documentElement.lang = 'en';
+    var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+    var node;
+    while ((node = walker.nextNode())) {
+      var t = (node.nodeValue || '').trim();
+      if (MAP[t]) node.nodeValue = (node.nodeValue || '').replace(t, MAP[t]);
+    }
+    // 延迟标签（引擎 29ms）是「标签 + 数字」同一文本节点，精确匹配不到，单独正则处理。
+    var walker2 = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+    var n2;
+    while ((n2 = walker2.nextNode())) {
+      var v = n2.nodeValue || '';
+      if (v.indexOf('引擎') >= 0) n2.nodeValue = v.replace(/引擎/g, 'Engine');
+    }
+    var title = document.querySelector('title');
+    if (title && title.textContent && title.textContent.indexOf('控制台') >= 0) title.textContent = 'DeepCode Console';
+    var ph = document.querySelectorAll('input, textarea');
+    for (var i = 0; i < ph.length; i++) {
+      var p = ph[i].getAttribute('placeholder');
+      if (p && MAP[p]) ph[i].setAttribute('placeholder', MAP[p]);
+    }
+  }
+  window.__dshConsoleSetLang = function (english) {
+    EN = !!english;
+    if (!EN) { document.documentElement.lang = 'zh-CN'; return }
+    applyLang();
+  };
+  // 状态行与按钮由壳侧 pushStatus 重渲染，必须持续应用，否则会被覆盖回中文。
+  new MutationObserver(function () { if (EN) applyLang() })
+    .observe(document.body, { childList: true, subtree: true, characterData: true });
+})();
+</script>
 </body>
 </html>
