@@ -21,6 +21,7 @@
  * 执行通道说明：本版经 ctx.androidPrivilege 状态机与审计面落地（桥执行实现随壳侧 adbShell 原语
  * 就绪后接通）；未授权时全部工具返回引导——与 PRD "未授权时全部失败关闭" 语义一致。
  */
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { type JsonValue } from '@deepseek-ai/dsh-util-values'
@@ -851,6 +852,8 @@ function tools(ctx: Context, priv: PrivilegeFace) {
         fingerprint: fp,
         rawCount: pruned.rawCount,
       }
+      // #688 第一步：双写（读取侧仍用旧单槽，行为不变）。
+      uiCaches.set(cacheKey(), uiCache)
       return {
         ok: true,
         denied: false,
@@ -1550,6 +1553,8 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
           rawCount: pruned.rawCount,
           v2,
         }
+        // #688 第一步：双写（读取侧仍用旧单槽，行为不变）。
+        uiCaches.set(cacheKey(), uiCache)
         const fg = await foregroundInfo()
         const dumpPkg = pruned.nodes.find((n) => String(n.pkg || '') !== '')?.pkg ?? ''
         const mismatch = fg !== null && dumpPkg !== '' && fg.pkg !== dumpPkg
@@ -2626,6 +2631,46 @@ function registerBootReadyAudit(ctx: Context): void {
   }, 'dsh-android-manage: boot readiness audit')
 }
 
+/**
+ * issue #688：`uiCache` 原本是模块级单槽，没有 session 维 —— 先 dump 虚拟屏再 dump 真实屏，
+ * 拿虚拟屏的 ref 去点真实屏就会点到错的控件。改成按会话键的 Map。
+ *
+ * 会话键来源与 dsh-android-browser 完全一致（那边早已这么做）：工具的 `execute` 被包一层，
+ * 期间把归属会话放进 AsyncLocalStorage；键 = `sessionScope.getStore() ?? '__anonymous__'`。
+ * 会话身份取自 `exec.agent.session`（字符串，或带 `.id` 的对象）。
+ *
+ * 拿不到会话时回落 `'__anonymous__'` —— 这是**显式降级**，不是编一个假 key 把缓存分开：
+ * 所有无会话调用共享同一个桶，行为与旧单槽等价。
+ */
+const sessionScope = new AsyncLocalStorage<string>()
+const sessionOf = (exec: unknown): string | undefined => {
+  const session = (exec as { agent?: { session?: unknown } } | undefined)?.agent?.session
+  if (typeof session === 'string' && session !== '') return session
+  if (session !== null && session !== undefined && typeof session === 'object') {
+    const id = (session as { id?: unknown }).id
+    if (typeof id === 'string' && id !== '') return id
+  }
+  return undefined
+}
+const cacheKey = (): string => sessionScope.getStore() ?? '__anonymous__'
+/** 把会话放进作用域：只包 `execute`，不改其它成员。 */
+const withSessionScope = <T,>(tool: T): T => {
+  const t = tool as unknown as { execute?: unknown }
+  const original = t.execute
+  if (typeof original !== 'function') return tool
+  const run = original as (args: unknown, exec: unknown) => unknown
+  return {
+    ...(tool as Record<string, unknown>),
+    execute: (args: unknown, exec: unknown) => {
+      const session = sessionOf(exec)
+      return session === undefined ? run(args, exec) : sessionScope.run(session, () => run(args, exec))
+    },
+  } as T
+}
+
+/** 按会话键的 UI 快照表（#688 第一步：与旧单槽**双写**，读取侧暂不动）。 */
+const uiCaches = new Map<string, unknown>()
+
 export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
   const priv = (ctx as unknown as { androidPrivilege?: PrivilegeFace }).androidPrivilege
   if (!priv) {
@@ -2635,7 +2680,8 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
     gateFor: () => ({ ok: false, guidance: '授权桥（dsh-android-bridge）未装配' }),
     audit: () => {},
   }
-  for (const t of tools(ctx, face)) ctx.tools.register(t)
+  // #688：注册前统一包一层会话作用域（与 dsh-android-browser 同做法）。
+  for (const t of tools(ctx, face).map(withSessionScope)) ctx.tools.register(t)
 
   // 启动就绪审计（异步、不阻塞 boot、异常不上抛）。
   registerBootReadyAudit(ctx)
