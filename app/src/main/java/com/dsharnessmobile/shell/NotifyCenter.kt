@@ -99,6 +99,7 @@ object NotifyCenter {
   enum class Face(
     val category: String,
     val description: String,
+    val descriptionEn: String,
     val candidates: List<String>,
     val importance: Int,
     val popup: Boolean,
@@ -112,23 +113,23 @@ object NotifyCenter {
     val interactive: Boolean,
   ) {
     SILENT(
-      "silent", "看门狗与引擎状态；静默更新，不弹出",
+      "silent", "看门狗与引擎状态；静默更新，不弹出", "Watchdog and engine status; silent updates, no popup",
       listOf("dsh-silent"), NotificationManager.IMPORTANCE_LOW, false, false,
     ),
     TODO(
-      "todo", "任务步骤进度；静默更新，不弹出",
+      "todo", "任务步骤进度；静默更新，不弹出", "Task step progress; silent updates, no popup",
       listOf("dsh-todo-progress"), NotificationManager.IMPORTANCE_LOW, false, false,
     ),
     REPORT(
-      "report", "每轮任务结束的汇报；需要出现在锁屏之上",
+      "report", "每轮任务结束的汇报；需要出现在锁屏之上", "End-of-run report; must appear above the lock screen",
       listOf("dsh-report", "dsh-report-h2"), NotificationManager.IMPORTANCE_HIGH, true, false,
     ),
     QUESTION(
-      "question", "引擎向你提问；可直接在通知栏回复",
+      "question", "引擎向你提问；可直接在通知栏回复", "The engine asks you something; you can reply from the shade",
       listOf("dsh-question", "dsh-question-h2"), NotificationManager.IMPORTANCE_HIGH, true, true,
     ),
     APPROVAL(
-      "approval", "工具执行前的授权请求；请确认不是他人代答",
+      "approval", "工具执行前的授权请求；请确认不是他人代答", "Approval request before a tool runs; make sure nobody else answers",
       listOf("dsh-auth", "dsh-auth-h2", "dsh-auth-h3"), NotificationManager.IMPORTANCE_HIGH, true, true,
     );
 
@@ -139,7 +140,10 @@ object NotifyCenter {
      * 把「提问」写在设置页，同一个东西两个名字（审查档 §4.3）；本批把用词收到一处，
      * 这里派生取值，设置页标签同源于同一张表。
      */
-    val label: String get() = UserCopy.notifyCategory(category)
+    fun label(app: Context? = null): String = UserCopy.notifyCategory(category, app)
+
+    /** 渠道说明（跟随语言）。 */
+    fun descriptionText(app: Context? = null): String = UiText.t(app, description, descriptionEn)
 
     companion object {
       fun of(category: String): Face? = values().firstOrNull { it.category == category }
@@ -468,7 +472,7 @@ object NotifyCenter {
       }
     }
     if (chosen != null && selection.create) {
-      manager.createNotificationChannel(buildChannel(chosen, face))
+      manager.createNotificationChannel(buildChannel(chosen, face, app))
       val created = manager.getNotificationChannel(chosen)
       // 少数 ROM 会把新建渠道的 importance 打回默认值：这里以设备实际值为准再判一次。
       if (created != null && created.importance < face.importance) {
@@ -483,7 +487,7 @@ object NotifyCenter {
       // （S3-13 要的正是两侧同名，光改字面量不够）。
       // 这里按 id 校正展示名与说明：**用渠道当前 importance 重建**，不尝试提升/降低 importance,
       // 因此不会干扰「用户改过的重要性」判定（那是降级检测的输入）。
-      renameChannelIfNeeded(manager, chosen, face)
+      renameChannelIfNeeded(manager, chosen, face, app)
     }
     prefs(app).edit()
       .putBoolean(KEY_CHANNELS_INITIALIZED, true)
@@ -523,16 +527,24 @@ object NotifyCenter {
     for (face in Face.values()) {
       val id = channelFor(app, face) ?: continue
       val existing = manager.getNotificationChannel(id) ?: continue
-      if (!channelRenameNeeded(existing.name?.toString().orEmpty(), existing.description, face.label, face.description)) continue
-      renameChannelIfNeeded(manager, id, face)
+      if (!channelRenameNeeded(
+          existing.name?.toString().orEmpty(),
+          existing.description,
+          face.label(app),
+          face.descriptionText(app),
+        )
+      ) {
+        continue
+      }
+      renameChannelIfNeeded(manager, id, face, app)
       renamed += 1
     }
     return renamed
   }
 
-  private fun buildChannel(id: String, face: Face): NotificationChannel {
-    val ch = NotificationChannel(id, face.label, face.importance)
-    ch.description = face.description
+  private fun buildChannel(id: String, face: Face, app: Context): NotificationChannel {
+    val ch = NotificationChannel(id, face.label(app), face.importance)
+    ch.description = face.descriptionText(app)
     ch.setShowBadge(true)
     if (face.popup) {
       ch.enableVibration(true)
@@ -554,18 +566,30 @@ object NotifyCenter {
    * @param id - 已选中的渠道 id。
    * @param face - 该渠道对应的语义。
    */
-  private fun renameChannelIfNeeded(manager: NotificationManager, id: String, face: Face) {
+  private fun renameChannelIfNeeded(manager: NotificationManager, id: String, face: Face, app: Context) {
     val existing = manager.getNotificationChannel(id) ?: return
-    if (!channelRenameNeeded(existing.name?.toString().orEmpty(), existing.description, face.label, face.description)) return
-    manager.createNotificationChannel(buildChannelKeepingImportance(existing, face))
-    LogCollector.log("dsh-notify", "channel " + face.category + " renamed to '" + face.label + "' (id=" + id +
+    if (!channelRenameNeeded(
+        existing.name?.toString().orEmpty(),
+        existing.description,
+        face.label(app),
+        face.descriptionText(app),
+      )
+    ) {
+      return
+    }
+    manager.createNotificationChannel(buildChannelKeepingImportance(existing, face, app))
+    LogCollector.log("dsh-notify", "channel " + face.category + " renamed to '" + face.label(app) + "' (id=" + id +
       ", importance kept=" + existing.importance + ")")
   }
 
   /** 按既有渠道的**当前** importance 重建，只改展示名与说明（其余保持系统现状）。 */
-  private fun buildChannelKeepingImportance(existing: NotificationChannel, face: Face): NotificationChannel {
-    val ch = NotificationChannel(existing.id, face.label, existing.importance)
-    ch.description = face.description
+  private fun buildChannelKeepingImportance(
+    existing: NotificationChannel,
+    face: Face,
+    app: Context,
+  ): NotificationChannel {
+    val ch = NotificationChannel(existing.id, face.label(app), existing.importance)
+    ch.description = face.descriptionText(app)
     ch.setShowBadge(true)
     ch.enableVibration(existing.shouldVibrate())
     ch.setSound(existing.sound, existing.audioAttributes)
@@ -592,7 +616,7 @@ object NotifyCenter {
     for (face in Face.values()) {
       val row = JSONObject()
       row.put("category", face.category)
-      row.put("label", face.label)
+      row.put("label", face.label(app))
       val selected = channelFor(app, face)
       row.put("selected", selected ?: "")
       row.put("popup", face.popup)
@@ -889,7 +913,7 @@ object NotifyCenter {
     // 探针与一行 flashStatus（面板收起时看不到），用户看到一条不响的提问通知却不知道原因。这里让
     // 「为什么静默 + 怎么恢复」**跟着通知本身走**：通知在哪儿，解释就在哪儿。
     val degradedNotice = if (channelId == null && face.interactive) {
-      "系统已把「" + face.label + "」通知降级为静默——到系统设置里可恢复"
+      "系统已把「" + face.label(app) + "」通知降级为静默——到系统设置里可恢复"
     } else null
     if (fallback == null) {
       // 连静默渠道都不可用（极端：用户逐个降级）——明确记录，绝不静默失败

@@ -1531,52 +1531,52 @@
       ".put(\"method\", \"\\$events/result\")"
     ],
     "NotifyCenter.kt:1048": [
-      ""
+      ")"
     ],
     "NotifyCenter.kt:145": [
-      "fun of(category: String): Face? = values().firstOrNull { it.category == category }"
+      "/** 渠道说明（跟随语言）。 */"
     ],
     "NotifyCenter.kt:161": [
-      "@Volatile"
+      "/** 渠道被用户降级 → 该语义只能静默（设置页显示降级文案）。 */"
     ],
     "NotifyCenter.kt:188": [
-      "flash(\"「\" + UserCopy.notifyCategory(category) + \"」通知已被系统降级为静默——请到系统设置里改回\")"
+      "}"
     ],
     "NotifyCenter.kt:257": [
-      "*  - 存量升级：无键（旧默认造出的抑制）→ 生效值 false（被修好）；"
+      "* 3. schema 代次保证**只跑一次**：升级后用户再手动改开关，不会被下一轮启动的迁移抹掉。"
     ],
     "NotifyCenter.kt:33": [
       "const val PREFS = \"dsh-notify\""
     ],
     "NotifyCenter.kt:370": [
-      "val channelId: String?,"
+      "* @param reason 可 grep 的判定原因（selected / create / migrated / user-demoted / exhausted）"
     ],
     "NotifyCenter.kt:401": [
-      "retire = candidates.take(index).filter { facts[it] != null },"
+      "if (index == 0) \"create\" else \"migrated\","
     ],
     "NotifyCenter.kt:527": [
-      "renameChannelIfNeeded(manager, id, face)"
+      "for (face in Face.values()) {"
     ],
     "NotifyCenter.kt:550": [
-      "* 纯判据部分（[channelRenameNeeded]）抽成顶层函数以便 JVM 直测；本方法只做 Android 胶水。"
+      "ch.enableVibration(true)"
     ],
     "NotifyCenter.kt:612": [
-      "row.put(\"userSetImportance\", ch?.hasUserSetImportance() ?: false)"
+      "out.put(\"permissionLabel\", if (granted) \"已授予\" else \"未授予（任务完成不会提醒）\")"
     ],
     "NotifyCenter.kt:631": [
-      "* 渠道重要性 → 人话（唯一真源 [UserCopy.importance]，P3-1）。"
+      "} else {"
     ],
     "NotifyCenter.kt:676": [
-      "// 竞态最坏结果是少去重一次（多打一次横幅），不值得为它引入锁序。"
+      ""
     ],
     "NotifyCenter.kt:829": [
-      "}"
+      "// The exception has already been caught. Persist the event before allowing the cursor to"
     ],
     "NotifyCenter.kt:84": [
       "* 旧值是 30 分钟，行为是 `setTimeoutAfter` 到点撤掉通知——而引擎侧的提问**没有超时**"
     ],
     "NotifyCenter.kt:850": [
-      "if (categoryOff) {"
+      "cancelSystemNotification(app, entry.eventId)"
     ],
     "NotifyDecisionQueue.kt:192": [
       "@Synchronized"
@@ -2272,25 +2272,25 @@
       "// 用户面对「Approve this plan」只能盲批（N2）。"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:141": [
-      "*/"
+      "* 这里派生取值，设置页标签同源于同一张表。"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:145": [
-      "fun of(category: String): Face? = values().firstOrNull { it.category == category }"
+      "/** 渠道说明（跟随语言）。 */"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:161": [
-      "@Volatile"
+      "/** 渠道被用户降级 → 该语义只能静默（设置页显示降级文案）。 */"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:345": [
-      "/** 设置项 key（与 prefs 键同名字面量集中一处，避免设置页/迁移两处漂移）。 */"
+      "\" readBack=\" + readBack + \" ok=\" + ok)"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:49": [
       ""
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:589": [
-      "// 用户是否关掉了「弹出」：应用不可读（getUserLockedFields 是 @hide @SystemApi 且不含该字段）"
+      "app: Context,"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:828": [
-      "return Result.RESOLVED"
+      "NotifyProbe.log(app, \"dsh-notify\", \"notifyEvent THREW kind=\" + entry.kind + \": \" + t)"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyDecisionQueue.kt:266": [
       "* NOT_READY（应答流/引擎未就绪）的统一处置：预算内 -> 独立计数 + 指数退避重排；"

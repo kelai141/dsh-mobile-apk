@@ -1456,6 +1456,9 @@ class MainActivity : ComponentActivity() {
         onSetUiLanguage = { mode ->
           val stored = AppLanguage.setMode(this, mode)
           AppLanguage.syncDshLocale(this)
+          // 渠道展示名只在创建那一刻取一次：语言一变就必须重建，否则系统设置里的类别名不跟语言走
+          //（真机缺陷 2026-10-29：切英文后仍显示「授权请求 / 工作汇报 / 后台动态」）。
+          runCatching { NotifyCenter.syncChannelNames(this) }
           stored
         },
         onSettingsPathRequest = { engineManager.settingsDocumentPath() },
