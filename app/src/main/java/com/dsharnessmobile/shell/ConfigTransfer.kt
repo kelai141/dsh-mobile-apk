@@ -50,15 +50,19 @@ internal class ConfigTransfer(private val homeDir: File, private val dshDataDir:
       if (!src.exists()) return """{"ok":false,"error":"未找到 exports/config/settings.yaml（请先导出）"}"""
       val dst = File(homeDir, ".dsh/settings.yaml")
       // 导入前留一份私有侧备份（防误导入坏配置后无法回退）。
+      // 备份名跟着**实际文件名**走，不写死 settings.yaml —— 与 EngineManager/SnapshotUserData
+      // 另外两条导入路径同一口径，避免目标文件改名后备份落到错误名字上。
+      var backupName: String? = null
       if (dst.exists()) {
-        val bak = File(dst.parentFile, "settings.yaml.import-backup")
+        val bak = File(dst.parentFile, dst.name + ".import-backup")
         dst.copyTo(bak, overwrite = true)
+        backupName = bak.name
       }
       val tmp = File(dst.parentFile, ".settings.yaml.import-tmp")
       src.copyTo(tmp, overwrite = true)
       if (!tmp.renameTo(dst)) throw java.io.IOException("rename failed")
       LogCollector.log("dsh-shell", "config imported from " + src.absolutePath)
-      """{"ok":true,"path":"${dst.absolutePath.replace("\\", "\\\\")}","hint":"引擎会热加载；若未生效请开发者选项里重启引擎"}"""
+      """{"ok":true,"path":"${dst.absolutePath.replace("\\", "\\\\")}","backup":"${backupName ?: ""}","hint":"引擎会热加载；若未生效请开发者选项里重启引擎"}"""
     } catch (t: Throwable) {
       Log.w("dsh-shell", "config import failed", t)
       """{"ok":false,"error":"${(t.message ?: "导入失败").replace("\"", "'")}"}"""
