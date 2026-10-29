@@ -3021,13 +3021,13 @@
       ""
     ],
     "docs/AGENTS/gotchas.md:178": [
-      "含 `undefined` 成员的整值被拒收（不是丢字段，是整条结果失败）。铁律：可选键缺省**整键不发**，"
+      "铁律：门禁判定只允许「设备全局事实 + 会话实时档位」，任何部署常量进判定即缺陷。"
     ],
     "docs/AGENTS/gotchas.md:44": [
-      "35. **requestLegacyExternalStorage 对 targetSdk≥30 应用无效（#120/MT 调研，2026-09-02 实锤）**：该 flag 仅对「targetSdk≤29 + 运行在 Android 10」生效；targetSdk≥30（含 34）应用即使运行在 Android 10 设备上 flag 也被忽略（SO 63365334 / cgeo #10386 / 小米适配指南多源实锤）→ Android 10 上 SAF 树授权不解锁 FUSE 原始路径、bash 走不了 ContentResolver → 非 root 下「读用户任意目录作工作区」不可达成。落地：SDK 26-28（无分区存储）运行时 READ/WRITE 权限放行；SDK 29 保留拒绝但显式 reason（`__dsh_pick_refused__:android-10`）而非伪装取消；SDK 30+ 维持 All Files Access。"
+      "9. **template 字符串反斜杠**（页面注入）：`\\n` 双写。"
     ],
     "docs/AGENTS/gotchas.md:74": [
-      ""
+      "38. **rc.2 锁定型运行时补丁在引擎升级时抹掉新引擎代码（0.13.3 模拟器实锤，prompt 链阻断）**：assets/patched 的 session-persistence-jsonl/attachment-local 等是 0.1.1-rc.2 原版整文件（无 delta），0.1.2-rc.1 引擎启动前 applyRuntimePatches 整文件覆盖 → 新代码被旧版回退（persistence.borrowSession is not a function → 一切会话写入/发送全断）。**修复/约定**：升级引擎时逐补丁核对上游是否原生覆盖（能退役则退役——fs-local/primitives 已退役）；重出 asset 必须从新版本包文件改起（RUNTIME-PATCHES.md §3-2）；本次重出 SPJ/ATT 的最小 delta = link(2) 失败 EACCES/EPERM/ENOTSUP → rename 回退（grep \"rebuild-runtime-patches\" 见协调仓 .tmp-upgrade 备忘）。grep `borrowSession`。"
     ],
     "docs/AGENTS/modules.md:36": [
       "| **SnapshotUserData.kt** | 用户配置保留、legacy backup 与活动配置传输 | `prepareStagedSnapshot` 保留 `settings.yaml.imported` 并抑制工厂 reseed；`configurationDocument` 选择真实 web profile patch；`exportConfiguration/importConfiguration` 原子替换/导入备份，旧共享 YAML 不覆盖已迁移 patch；`retireReseededFactorySettings` 仅隔离已知空工厂模板。legacy backup 不复活已迁移 YAML。 |"
