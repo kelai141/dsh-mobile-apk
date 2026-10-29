@@ -30,6 +30,33 @@ const check = (label, ok, detail) => {
   console.log((ok ? 'PASS  ' : 'FAIL  ') + label + (ok || detail === undefined ? '' : ' -> ' + detail))
 }
 
+/**
+ * 从 apply-patches.mjs 源码里读出每个补丁实现声明的 scope。
+ *
+ * 为什么读源码而不是 import：apply-patches.mjs 是可直接执行的脚本，顶层就做参数解析与
+ * 文件读写，import 会触发它的主流程。这里只按行提取 `'<id>': { ... scope: 'engine' ... }`。
+ * @param source - apply-patches.mjs 全文。
+ * @returns 补丁 id -> 声明的 scope（未声明的不在表里）。
+ */
+function implScopeOf(source) {
+  const scopes = new Map()
+  const lines = source.split(/\r?\n/)
+  const start = lines.findIndex((line) => line.includes('const IMPLS = {'))
+  if (start < 0) return scopes
+  let current = null
+  for (let i = start + 1; i < lines.length; i += 1) {
+    const line = lines[i]
+    if (line === '}') break
+    const idMatch = /^ {2}'([^']+)': \{$/.exec(line)
+    if (idMatch !== null) { current = idMatch[1]; continue }
+    if (current === null) continue
+    const scopeMatch = /^ {4}scope: '([^']+)',$/.exec(line)
+    if (scopeMatch !== null) scopes.set(current, scopeMatch[1])
+    if (line === '  },') current = null
+  }
+  return scopes
+}
+
 /** 对一棵 fixtures/tests 树跑三条断言，返回失败列表（--self-test 用临时树驱动反例）。 */
 function audit(fixturesDir, testsDir, baseline, sourceCommit = null, registry = null) {
   const out = []
@@ -121,6 +148,18 @@ function audit(fixturesDir, testsDir, baseline, sourceCommit = null, registry = 
       }
     } else out.push(`夹具 source 未知: ${dir} = ${meta.source}`)
   }
+  // D scope 与实现同步：registry 缺 scope 而 IMPLS 声明 engine -> 红（issue #888）。
+  //
+  // 为什么必须单独判：下面的 B 段按 `patch.scope ?? 'vendor'` 过滤，缺字段的 engine 补丁
+  // 会被静默当成 vendor 跳过，于是「每个 engine 补丁的目标必须恰有一份当前代真夹具」
+  // 这条判据对它们根本不执行。两道门禁（registry↔IMPLS 的 id 集合校验只比 id 不比 scope）
+  // 之间正好漏这一格：实测 T1/A1 两条的夹具数都是 0，而 CI 全绿。
+  const implScopes = implScopeOf(readFileSync(join(HERE, 'patches', 'apply-patches.mjs'), 'utf8'))
+  for (const patch of [...(registry?.patches ?? []), ...(registry?.retired ?? [])]) {
+    if (patch.scope !== undefined) continue
+    if (implScopes.get(patch.id) !== 'engine') continue
+    out.push('registry 条目缺 scope 但实现声明 engine（会被 B 段静默跳过）: ' + patch.id)
+  }
   // 多文件补丁：所有目标必须由当前代真产物提供；主文件存在不能洗绿缺席的 companion。
   for (const patch of [...(registry?.patches ?? []), ...(registry?.retired ?? [])]) {
     if ((patch.scope ?? 'vendor') !== 'engine') continue
@@ -160,7 +199,7 @@ if (SELF_TEST) {
   // 反证：每条断言都必须能在被破坏时变红——否则门禁本身是假的。
   const base = mkdtempSync(join(tmpdir(), 'patch-fixtures-'))
   try {
-    const mk = (name, mut) => {
+    const mk = (name, mut, registry = null) => {
       const fx = join(base, name, 'fixtures'); const ts = join(base, name, 'tests')
       mkdirSync(join(fx, 'dsh-demo-0.9.9-rc.1', 'lib'), { recursive: true })
       mkdirSync(ts, { recursive: true })
@@ -178,7 +217,7 @@ if (SELF_TEST) {
       }))
       writeFileSync(join(ts, 'demo.test.mjs'), "const FIXTURE = 'x'\n")
       mut({ fx, ts })
-      return audit(fx, ts, '0.9.9-rc.1')
+      return audit(fx, ts, '0.9.9-rc.1', null, registry)
     }
     const cases = [
       { label: '反证：夹具未随版判红', want: true, run: ({ fx }) => {
@@ -205,6 +244,14 @@ if (SELF_TEST) {
         writeFileSync(join(ts, 'demo.test.mjs'), "const F = join(here, 'fixtures', 'dsh-demo-0.1.5-rc.1', 'lib', 'index.js')\n")
       } },
     ]
+    // 反例 8 走另一条入口：registry 缺 scope 但实现声明 engine（issue #888）。
+    // 它必须由 D 段抓住——否则 B 段按 `scope ?? 'vendor'` 把这条 engine 补丁静默跳过。
+    const missingScope = mk('case-scope', () => {}, {
+      patches: [{ id: 'zsh-fpath-A1', target: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/lib/index.js' }],
+    })
+    check('反例 8 被抓住（反证：registry 缺 scope 而实现声明 engine）',
+      missingScope.some((m) => m.includes('缺 scope 但实现声明 engine')),
+      missingScope.join(' | ') || '没有判红，门禁失效')
     let i = 0
     for (const c of cases) {
       i++
