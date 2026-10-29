@@ -1234,31 +1234,31 @@
       "private const val PREFS = \"dsh_engine_auth\""
     ],
     "EngineManager.kt:1314": [
-      "log = { message -> Log.i(TAG, message) },"
+      "*  marker string (the v1→v2 asset-update failure)."
     ],
     "EngineManager.kt:1316": [
-      "when (outcome) {"
+      "private fun applyAssetPatch(asset: String, target: File) {"
     ],
     "EngineManager.kt:1442": [
-      "val missing = RuntimeTree.missingEntries("
+      "//"
     ],
     "EngineManager.kt:1463": [
-      "val assetPresent = runCatching {"
+      "val confirmed = RuntimeTree.confirmedDamage(missing)"
     ],
     "EngineManager.kt:1464": [
-      "context.assets.list(\"\")?.contains(PluginMounts.HARD_ASSET) == true"
+      "lastStartRefusalConfirmed = confirmed"
     ],
     "EngineManager.kt:1552": [
-      "// （快照刷新中 / 引擎已在跑）。故 provisionPublicRepo 另由 MainActivity 的 onCreate/onResume"
+      "// 收益之前不动。每步的耗时进 engine.log 与 logcat（[EngineStartPreludeProbe]），"
     ],
     "EngineManager.kt:238": [
       "//"
     ],
     "EngineManager.kt:790": [
-      "* 这里是它**唯一的读取方**（诊断包 info.txt 的 `runtime_tree_damage` 行）——"
+      "fun liveRuntimeComplete(): Boolean {"
     ],
     "EngineManager.kt:813": [
-      "* 是否应当跳过自动刷新、以现有运行时启动（0.14.1 D2）。判据全在 [SnapshotRefreshPolicy]："
+      "null"
     ],
     "EngineProbe.kt:51": [
       "* 这样 WatchdogV2 一行都不用改，破坏性阶梯语义完全不动——「修缺陷」不制造安全回归。"
@@ -1294,10 +1294,10 @@
       "// Root maintenance/transaction recovery must never wait on the Service main thread."
     ],
     "EngineStartFlow.kt:1143": [
-      "*/"
+      "* 续跑一次，又撞回 L700 —— 那只是把静默丢弃换成忙等。"
     ],
     "EngineStartFlow.kt:1150": [
-      "waitedMs = 0L"
+      "override fun run() {"
     ],
     "EngineStartFlow.kt:206": [
       "// 现场：新机首装首启 `shell-stall` 记 `stalledMs=352525`（352s），而同一轮页面在首个 HTTP"

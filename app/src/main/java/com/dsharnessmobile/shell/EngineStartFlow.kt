@@ -787,7 +787,11 @@ internal class EngineStartFlow(private val activity: MainActivity) {
             // snapshot-delete-residue / snapshot-move-blocked / snapshot-foreign-owner）。
             // 有了码，boot-fail.log 的一行就说清「是哪一类失败」，不必翻栈。
             val refreshCause = activity.engineManager.lastRefreshFailure
-            val refreshCode = activity.engineManager.lastRefreshFailureCode ?: "snapshot-refresh-failed"
+            // issue #921：真因码与「未归类」必须渲染成不同字符串（不再共用一个兜底值）。
+        val refreshCode = EngineManager.refreshFailureLabel(
+            activity.engineManager.lastRefreshFailureCode,
+            activity.engineManager.lastRefreshFailureUnclassified,
+        )
             activity.engineManager.lastStartRefusalCode = refreshCause?.let {
               activity.engineManager.startupExceptionCode(it)
             } ?: EngineManager.REFUSAL_RUNTIME_UNAVAILABLE

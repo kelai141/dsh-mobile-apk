@@ -390,7 +390,10 @@ class EngineManager(private val context: Context, private val pickToken: String?
       lastRefreshFailure = t
       // issue #271 ④：把**失败归类**（错误码）挂出来，供 boot 侧给「可直接照做」的文案，
       // 而不是让用户看到一句无指向的「运行时更新失败」+ 90s 超时。
-      lastRefreshFailureCode = (t as? SnapshotFsException)?.code ?: "snapshot-refresh-failed"
+      // issue #921：解包根因，真因码一律保留；确实没有码时留 null 并标记「未归类」。
+      val (realCode, unclassified) = refreshFailureState(t)
+      lastRefreshFailureCode = realCode
+      lastRefreshFailureUnclassified = unclassified
       try {
         val marker = SnapshotTransaction.readMarker(filesDir)
         if (marker != null) {
@@ -430,6 +433,17 @@ class EngineManager(private val context: Context, private val pickToken: String?
    */
   @Volatile
   var lastRefreshFailureCode: String? = null
+
+  /**
+   * issue #921：本次刷新失败的**真因是否未归类**。
+   *
+   * 旧实现在 catch 里写 `?.code ?: "snapshot-refresh-failed"`，把两种不同的情况压成同一个字符串：
+   *   1) 异常携带真因码、只是被包了一层（`IOException(cause = SnapshotFsException(...))`）→ **真码被丢掉**；
+   *   2) 异常确实没有码 → 此时兜底才是对的。
+   * 现在：真因码一律解包保留（见 [findSnapshotFsException]）；确实没有码时 `lastRefreshFailureCode` 保持 null，
+   * 由本标记表达「未归类」，渲染层据此给出**不同**的文案（见 [refreshFailureLabel]）。
+   */
+  var lastRefreshFailureUnclassified: Boolean = false
 
   /**
    * 上一次 [refreshSnapshot] 的 false 是不是**被让行**（另一条快照事务在飞）而不是失败（0.14.8 P1）。
@@ -921,7 +935,10 @@ class EngineManager(private val context: Context, private val pickToken: String?
       Log.e(TAG, "snapshot extract failed", t)
       // D-1 的落点：异常 + 归类码。`extract` 抛出的若是解码器异常，类名与栈原样保留在 cause 链上。
       lastRefreshFailure = t
-      lastRefreshFailureCode = (t as? SnapshotFsException)?.code ?: CODE_EXTRACT_FAILED
+      // issue #921：同 :393 的口径 —— 真因码保留，无码则 null + 未归类标记。
+      val rootCause2 = findSnapshotFsException(t)
+      lastRefreshFailureCode = rootCause2?.code ?: CODE_EXTRACT_FAILED
+      lastRefreshFailureUnclassified = rootCause2 == null
       false
     }
   }
@@ -2570,6 +2587,39 @@ description: 手机操控纪律：无障碍语义树优先、ref 语义点击/�
   const val REFUSAL_PRIVATE_STORAGE_DENIED = "private-storage-denied"
   const val REFUSAL_STORAGE_FULL = "storage-full"
   const val REFUSAL_RUNTIME_UNAVAILABLE = "runtime-unavailable"
+
+  /** issue #921：**未归类**刷新失败的渲染码。与 "snapshot-refresh-failed" 刻意分开。 */
+  const val CODE_REFRESH_UNCLASSIFIED = "snapshot-refresh-unclassified"
+
+  /** 沿 cause 链找最内层的 [SnapshotFsException]，把被包装的真因码解出来。 */
+  /**
+   * issue #921：把一次刷新失败归纳成 (真因码, 是否未归类)。
+   *
+   * 抽成纯函数是为了让「无码 ⇒ null 且未归类」这条要求能被纯 JVM 单测真正钉住 ——
+   * 否则它只能靠读 catch 块代码自证，那不是测试。
+   */
+  internal fun refreshFailureState(t: Throwable?): Pair<String?, Boolean> {
+    val root = findSnapshotFsException(t)
+    return (root?.code) to (root == null)
+  }
+  internal fun findSnapshotFsException(t: Throwable?): SnapshotFsException? {
+    var cur = t
+    var guard = 0
+    while (cur != null && guard < 16) {
+      if (cur is SnapshotFsException) return cur
+      cur = cur.cause
+      guard += 1
+    }
+    return null
+  }
+
+  /**
+   * issue #921：把「真因码 / 未归类」渲染成**必须不同**的字符串。
+   * 抽成纯函数是为了能在纯 JVM 单测里钉住「两者不相等」（不依赖 Activity）。
+   */
+  fun refreshFailureLabel(code: String?, unclassified: Boolean): String =
+    code
+      ?: if (unclassified) CODE_REFRESH_UNCLASSIFIED else "snapshot-refresh-failed"
 
   /**
    * 拒绝启动原因码：live 运行时树残缺（issue #309）。
