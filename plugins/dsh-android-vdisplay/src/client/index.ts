@@ -84,7 +84,7 @@ interface TabDefinition {
   kind: string
   priority?: 'extension' | 'builtin' | 'fallback'
   title: () => string
-  guide?: Array<{ id: string; order: number; title: () => string; description: () => string }>
+  guide?: Array<{ id: string; order: number; title: () => string; description: () => string; icon?: (props: { size?: number; className?: string }) => ReactElement }> // icon 缺省时上游落到占位立方体
 }
 /** 结构化注册面（上游 SidebarRightTabRegistry 的最小面）。 */
 interface TabRegistry {
@@ -210,6 +210,28 @@ function watchStageVisibility(publish: () => void): () => void {
  * Panel: 编号列表（选择查看哪块虚拟屏）+ 原生画面工位。
  * 空态「暂无虚拟屏」；占用态「由会话 X 使用中」（不渲染任何操作面）。
  */
+/**
+ * 虚拟屏的 guide 图标：主屏 + 右下副屏。
+ *
+ * 上游 guide 条目没有 `icon` 时落到占位立方体（`entry.icon ?? CubeGlyph`），
+ * 在「工作区文件/新建终端/浏览器」这排图标里看着像个不相干的东西；这里给一个
+ * 一眼能认成「屏幕」的形状，颜色走 `currentColor`，跟随主题。
+ *
+ * @param props 上游传入的尺寸与类名。
+ * @returns 图标元素。
+ */
+function VirtualScreenGlyph(props: { size?: number; className?: string }): ReactElement {
+  const size = props.size ?? 26
+  return createElement('svg', {
+    width: size, height: size, viewBox: '0 0 24 24', fill: 'none',
+    stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round',
+    className: props.className, 'aria-hidden': true,
+  },
+  createElement('rect', { x: 2.5, y: 4, width: 15, height: 10.5, rx: 1.6 }),
+  createElement('path', { d: 'M6 18h7.5' }),
+  createElement('rect', { x: 15.5, y: 9.5, width: 6, height: 9.5, rx: 1.4 }))
+}
+
 function VdPanel(props: { sessionId?: unknown }): ReactElement {
   const sessionKey = typeof props.sessionId === 'string' ? props.sessionId : ''
   const stageRef = useRef<HTMLDivElement>(null)
@@ -452,6 +474,7 @@ export function apply(ctx: ClientContext): void {
         // 0.1.7 起 guide 条目必填 id（上游按 [providerId, entry.id] 键控，唯一性只在 provider 内判定）
         id: 'open',
         order: 40,
+        icon: VirtualScreenGlyph,
     title: () => tr('虚拟屏', 'Virtual screen'),
     description: () => tr('在独立屏幕上运行第三方 App（Shizuku 特权通道），不挤占用户前台。',
       'Run third-party apps on a separate display through Shizuku without taking over the foreground.'),

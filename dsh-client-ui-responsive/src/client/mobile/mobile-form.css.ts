@@ -158,4 +158,12 @@ html[data-dsh-mobile-form] button[aria-haspopup='menu'][aria-label='更多'],
 html[data-dsh-mobile-form] button[aria-haspopup='menu'][aria-label='More'] {
   display: none;
 }
+
+/* 「更多工具」入口（上游 sidebar-right 的 guide 页最后一张卡）：用户定例移除。
+   它是 guide 列表里唯一带 aria-haspopup=menu 的按钮；按中英两种 aria-label 精确命中，
+   不依赖 hashed 类名。 */
+html[data-dsh-mobile-form] button[aria-haspopup='menu'][aria-label='更多工具'],
+html[data-dsh-mobile-form] button[aria-haspopup='menu'][aria-label='More tools'] {
+  display: none;
+}
 `
