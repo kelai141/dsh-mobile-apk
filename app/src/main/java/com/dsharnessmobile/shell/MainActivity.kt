@@ -1516,6 +1516,11 @@ class MainActivity : ComponentActivity() {
         onOpenNativePath = { path -> FileIncoming.openWithExternalReader(this, path) },
         // 0.13.7：上游 0.1.5「在外部应用打开」的 Android 落点——系统选择器（MT 管理器 / 系统文件管理）。
         onOpenPathChooser = { path, mode -> PathOpen.openChooser(this, path, mode) },
+        // 0.15.0：文件「外部打开 / 转发」到别的应用——chooser 聚合 ACTION_VIEW + ACTION_SEND，
+        // 两条接收面并列出候选（只发一条会漏掉另一半应用）。
+        onOpenFileExternal = { path, mime, kind ->
+          FileExternalBridge.openOrShare(this, path, mime, kind, UiText.isEnglish(this))
+        },
         // 0.14.0：内置 adb 退役——原 ADB 授权面（shell / 状态 / 允许开关 / 配对 / 端口发现）
         // 的四个桥方法已从 AndroidBridge 移除；特权执行改由 Shizuku UserService（设置页「手机控制」）。
         // 0.13.2 W7：悬浮球开关（控制器处理 overlay 权限引导；onResume 补启已授权的开关）。

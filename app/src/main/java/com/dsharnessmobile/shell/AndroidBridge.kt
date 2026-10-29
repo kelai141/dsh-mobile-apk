@@ -51,6 +51,12 @@ class AndroidBridge(
   /** 0.13.7：系统「打开方式」选择器（MT 管理器 / 系统文件管理…）。返回 JSON {ok, reason?}。 */
   private val onOpenPathChooser: (path: String, mode: String?) -> String =
     { _, _ -> """{"ok":false,"reason":"bridge not wired"}""" },
+  /**
+   * 0.15.0：文件「外部打开 / 转发」到别的应用（chooser 聚合 ACTION_VIEW + ACTION_SEND）。
+   * kind 取 [FileExternalBridge.KIND_OPEN] / [FileExternalBridge.KIND_SHARE]；返回 JSON {ok, error?}。
+   */
+  private val onOpenFileExternal: (path: String, mime: String?, kind: String) -> String =
+    { _, _, _ -> """{"ok":false,"error":"no-receiver"}""" },
   /** 0.13.2 W7：悬浮球开关态（持久化，OverlayController）。 */
   private val onGetOverlayEnabled: () -> Boolean = { false },
   /** 0.13.2 W7：悬浮球开关（未授 overlay 权限时由控制器发起系统授权引导）。返回是否已启动。 */
@@ -305,6 +311,32 @@ class AndroidBridge(
   /** 0.13.7：把路径交给系统选择器（MT 管理器 / 系统文件管理…；返回 JSON {ok, reason?}）。 */
   @JavascriptInterface
   fun openPathChooser(path: String, mode: String?): String = onOpenPathChooser(path, mode)
+
+  /**
+   * 0.15.0：用别的应用打开这个文件（主意图 ACTION_VIEW + ACTION_SEND 作并列候选）。
+   *
+   * 参数名与顺序固定：页面按 (path, mime) 调用。
+   *
+   * @param path 设备绝对路径（必须在允许面内）。
+   * @param mime 文件 MIME；空串 = 让系统按 Uri 推断。
+   * @returns JSON {ok:true} 或 {ok:false, error:"no-receiver"|"uri-denied"|"io"|"bad-request", detail?}。
+   */
+  @JavascriptInterface
+  fun openFileExternal(path: String, mime: String): String =
+    onOpenFileExternal(path, mime, FileExternalBridge.KIND_OPEN)
+
+  /**
+   * 0.15.0：把这个文件转发给别的应用（主意图 ACTION_SEND + ACTION_VIEW 作并列候选）。
+   *
+   * 参数名与顺序固定：页面按 (path, mime) 调用。
+   *
+   * @param path 设备绝对路径（必须在允许面内）。
+   * @param mime 文件 MIME；空串 = 让系统按 Uri 推断。
+   * @returns JSON {ok:true} 或 {ok:false, error:"no-receiver"|"uri-denied"|"io"|"bad-request", detail?}。
+   */
+  @JavascriptInterface
+  fun shareFile(path: String, mime: String): String =
+    onOpenFileExternal(path, mime, FileExternalBridge.KIND_SHARE)
 
   /** Open the system screen granting All Files Access (special permission). */
   @JavascriptInterface

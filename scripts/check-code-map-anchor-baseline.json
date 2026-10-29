@@ -1095,19 +1095,19 @@
       "background = android.graphics.drawable.ColorDrawable(0xFFF2F2F2.toInt())"
     ],
     "AndroidBridge.kt:319": [
-      "/**"
+      "*"
     ],
     "AndroidBridge.kt:325": [
-      "@JavascriptInterface"
+      "fun openFileExternal(path: String, mime: String): String ="
     ],
     "AndroidBridge.kt:375": [
-      "fun setOverlayEnabled(enable: Boolean): Boolean = onSetOverlayEnabled(enable)"
+      "onOpenConsole()"
     ],
     "AndroidBridge.kt:423": [
-      "fun browserHostViewport(viewport: String): String = onBrowserHostViewport(viewport)"
+      "fun browserHostStatus(): String = onBrowserHostStatus()"
     ],
     "AndroidBridge.kt:611": [
-      "* 立即返回 `{ok, code:repair-started|repair-running, running, startedAt, ...}`；"
+      "return RootAccess.state(app).put(\"ok\", true).toString()"
     ],
     "ApkUpdateAction.kt:261": [
       ""
@@ -2022,19 +2022,19 @@
       "var instance: AdbKeyboardService? = null"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:319": [
-      "/**"
+      "*"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:333": [
-      ""
+      "* @param path 设备绝对路径（必须在允许面内）。"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:375": [
-      "fun setOverlayEnabled(enable: Boolean): Boolean = onSetOverlayEnabled(enable)"
+      "onOpenConsole()"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:423": [
-      "fun browserHostViewport(viewport: String): String = onBrowserHostViewport(viewport)"
+      "fun browserHostStatus(): String = onBrowserHostStatus()"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:425": [
-      "/** Close (destroy) the BrowserHost page; the workbench can be opened fresh afterwards. */"
+      "/** Session/occurrence-addressed browser commands for the trusted native adapter. */"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/ApkUpdateAction.kt:228": [
       "const val STATE_UP_TO_DATE = \"up-to-date\""

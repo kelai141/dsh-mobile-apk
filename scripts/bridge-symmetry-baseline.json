@@ -87,6 +87,16 @@
       "method": "ready",
       "reason": "页面不轮询 ready()：会话状态由壳侧主动 pushStatus() 推给页面（ConsoleActivity.kt:68/114），页面用推来的 state==='ready' 驱动按钮使能，故无调用点。保留为壳侧只读探针面（供调试与外部断言）；G-6 把它纳入扫描面后必须登记，否则删掉它不会有任何门禁报警"
     },
+    {
+      "surface": "androidBridge",
+      "method": "openFileExternal",
+      "reason": "文件外部打开：壳侧实现先落地，页面侧类型面（dsh-client-ui-responsive/src/client/android-bridge.ts）按用户明确边界「不碰 WebView 侧 TS/CSS」本轮不改。参数名与顺序已固定为 (path, mime)，另一会话按此调用即可；主意图 ACTION_VIEW，ACTION_SEND 与父目录定位作并列候选。页面侧接线由后续 WebView 侧 PR 补齐，补齐后本条目必须删除（本门禁的 stale 检查会点名）。"
+    },
+    {
+      "surface": "androidBridge",
+      "method": "shareFile",
+      "reason": "文件转发：同 openFileExternal 的边界（壳侧先落地、页面侧本轮不改）。语义与其互补——主意图 ACTION_SEND + EXTRA_STREAM，ACTION_VIEW 与父目录定位作并列候选。参数名与顺序固定为 (path, mime)。页面侧接线后本条目必须删除。"
+    },
     { "surface": "consoleBridge", "method": "writeRaw", "reason": "页面走 writeKeys（编码串），不走 writeRaw：WebView 的桥在字符串参数含 \\n/\\r 时整次调用静默消失（设备实测：writeRaw(\"PLAIN\") 有输出，writeRaw(\"WITHNL\\n\") 连日志都没有），而控制台要送的方向键/Ctrl-C/Tab 全属这类字符，故页面必须先编码。writeRaw 保留给壳内 submit 与调试用（不经 JS 桥，没有该限制）。" }
   ],
   "tsOnly": [],
