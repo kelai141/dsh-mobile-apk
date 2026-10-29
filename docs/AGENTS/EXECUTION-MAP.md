@@ -2250,6 +2250,7 @@ app/src/main/java/com/dsharnessmobile/shell/RepairActivity.kt
 app/src/main/java/com/dsharnessmobile/shell/RepairConversationStore.kt
 app/src/main/java/com/dsharnessmobile/shell/RepairModelClient.kt
 app/src/main/java/com/dsharnessmobile/shell/RepairModelConfig.kt
+app/src/main/java/com/dsharnessmobile/shell/RepairModelNotice.kt
 app/src/main/java/com/dsharnessmobile/shell/EngineEndpoint.kt
 app/src/main/java/com/dsharnessmobile/shell/RepairState.kt
 app/src/main/java/com/dsharnessmobile/shell/RepairToolCallParser.kt

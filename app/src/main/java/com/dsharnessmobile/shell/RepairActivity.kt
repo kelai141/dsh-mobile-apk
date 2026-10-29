@@ -294,23 +294,31 @@ class RepairActivity : Activity() {
   }
 
   private fun applyModelState(failure: String?) {
-    val hasModels = connections.isNotEmpty()
-    modelButton.isEnabled = hasModels
-    send.isEnabled = hasModels
-    modelNoticeText?.text = failure.orEmpty()
-    modelNotice?.visibility = View.VISIBLE
-    modelNoticeText?.visibility = if (failure == null && diagnosticsReady) View.GONE else View.VISIBLE
-    if (failure == null && !diagnosticsReady) {
-      modelNoticeText?.text = UiText.t(this,
+    // 判定在 RepairModelNotice（纯函数、可单测）；这里只把结果落到 View 上。
+    // 分开的理由：文案归属原先只能靠拉起 Activity 才验得到，而拉起 Activity 会读真实
+    // filesDir/home，在真机上等于污染用户配置。
+    val notice = RepairModelNotice.present(
+      failure = failure,
+      candidateCount = connections.size,
+      defaultModelAvailable = defaultModelAvailable,
+      diagnosticsReady = diagnosticsReady,
+      noModelText = UiText.t(this,
+        "未读到可用模型。可在控制台修好配置后重新读取，也可直接重试引擎。",
+        "No model is available. Fix configuration in the console and reload, or retry the engine."),
+      noDiagnosticsText = UiText.t(this,
         "无法读取本轮诊断。可打开控制台或返回启动页重试引擎。",
-        "This run's diagnostics could not be read. Open the console or return and retry the engine.")
-    }
-    if (failure != null) modelNoticeText?.append("\n" + modelSources)
-    if (failure == null && hasModels && !defaultModelAvailable) {
-      modelNoticeText?.visibility = View.VISIBLE
-      modelNoticeText?.text = UiText.t(this,
+        "This run's diagnostics could not be read. Open the console or return and retry the engine."),
+      defaultUnavailableText = UiText.t(this,
         "当前默认模型不可用。请点右上角选择模型，再发送修复需求。",
-        "The configured default model is unavailable. Choose a model at the top right before sending a repair request.")
+        "The configured default model is unavailable. Choose a model at the top right before sending a repair request."),
+    )
+    modelButton.isEnabled = notice.modelControlsEnabled
+    send.isEnabled = notice.modelControlsEnabled
+    modelNotice?.visibility = if (notice.visible) View.VISIBLE else View.GONE
+    modelNoticeText?.text = notice.text.orEmpty()
+    modelNoticeText?.visibility = if (notice.visible) View.VISIBLE else View.GONE
+    if (notice.appendSources && modelSources.isNotEmpty()) {
+      modelNoticeText?.append("\n" + modelSources)
     }
     reloadModels?.isEnabled = true
   }
