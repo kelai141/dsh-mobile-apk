@@ -2135,6 +2135,9 @@ Use `#expect=<URI-encoded-substring>` inside the inline code reference for new o
 
 <!-- COVERAGE
 app/src/main/java/com/dsharnessmobile/shell/FileExternalBridge.kt
+app/src/main/java/com/dsharnessmobile/shell/PhotoCapture.kt
+app/src/main/java/com/dsharnessmobile/shell/PhotoCaptureController.kt
+app/src/test/java/com/dsharnessmobile/shell/PhotoCaptureTest.kt
 scripts/verify-console-terminal-env.mjs
 scripts/verify-console-pty.mjs
 scripts/verify-source-mirror.mjs

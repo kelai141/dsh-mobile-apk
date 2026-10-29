@@ -175,6 +175,16 @@ class AndroidBridge(
    * 同步桥不能回 Promise，长动作只能「发起 + 轮询 status」，故状态机放在壳侧（ApkUpdateAction）。
    */
   private val onApkUpdate: (String) -> String = { _ -> """{"ok":false,"state":"idle","reason":"bridge not wired"}""" },
+  /**
+   * 原生拍照（WebView「加号」面板的拍照瓦片）。
+   *
+   * 为什么签名是 `(action) -> String` 而不是直接返回结果：相机是**外部 Activity**，用户取景
+   * 时间不可预知。同步桥会阻塞 WebView 的 JS 线程直到用户按快门（整页假死），因此这里只受理
+   * 并立即返回 `{ok:true,accepted:true}`；最终结果由控制器在主线程用
+   * `window.__dshBridge.onPhotoCaptured(payload)` 推回页面。
+   * 接线在 MainActivity（那里才有 webView 与 Activity 作用域的 launcher）。
+   */
+  private val onCapturePhoto: ((action: String) -> String)? = null,
   private val onNotifySelfCheck: () -> String = {
     val app = ShellAppContext.get()
     if (app == null) """{"ok":false,"reason":"no-shell-context"}"""
@@ -691,6 +701,28 @@ class AndroidBridge(
    * 返回 `{ok, channels:[{category,label,channelId,importance,enabled,silenced?}], degraded:[...]}`
    * ——页面据此显示「系统已降级，应用无法调回」并给出直达系统设置的入口（此前这条信息零调用点）。
    */
+  /**
+   * 原生拍照：发起一次系统相机取景，结果经 [PhotoCapture.okPayload] / [PhotoCapture.errorPayload]
+   * 的 JSON 回到页面（进程内回调，见 [onCapturePhoto]）。
+   *
+   * 为什么返回「已受理」而不是最终结果：见 [onCapturePhoto] 的说明——相机等待时间不可预知。
+   * 页面拿到 `{ok:true,accepted:true}` 只表示**请求已受理**，不表示拍到了；
+   * 拍的成败由回执里的 `ok` + `code` 决定（与 apkUpdate 的「ok 只表示受理」同一口径）。
+   *
+   * @param action 目前只有 `capture`（拍照）。留 action 参数是为了与 apkUpdate 同形，
+   *   后续若加「重拍」之类的动作不必再动桥面。
+   * @returns 受理结果 JSON；桥未接线时 `{ok:false,code:"not-wired"}`。
+   */
+  @JavascriptInterface
+  fun capturePhoto(action: String): String {
+    val handler = onCapturePhoto ?: return """{"ok":false,"code":"not-wired"}"""
+    return try {
+      handler(action)
+    } catch (t: Throwable) {
+      """{"ok":false,"code":"failed","detail":""" + JSONObject.quote(t.message ?: t.javaClass.simpleName) + "}"
+    }
+  }
+
   @JavascriptInterface
   fun notifySelfCheck(): String = onNotifySelfCheck()
 

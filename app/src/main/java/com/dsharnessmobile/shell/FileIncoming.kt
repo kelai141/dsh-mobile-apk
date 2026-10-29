@@ -532,6 +532,41 @@ object FileIncoming {
   }
 
   /**
+   * 把**已在临时工作区内**的文件交给既有来件通路（拍照等壳侧自产来件的入口）。
+   *
+   * 为什么单独开一个入口而不是让调用方自己 enqueuePending + flushPending：
+   * 「记账 → 入待发清单 → 短促重试 → 引擎受理」是一个整体，投递预留计数（activeDeliveries）
+   * 必须在整段里持有，否则「刚入队就划掉应用」会让 cleanupTmp 把在途来件与清单一起删掉
+   * （FX-211.2 的现场）。调用方只负责把文件**拷进**临时工作区；之后的投递全在这里，
+   * 且与「外部分享一个文件进来」走的是同一段代码，不会出现第二条投递链。
+   *
+   * @param context 宿主上下文。
+   * @param copied 已落在 [tmpWorkspace] 内的文件（调用方应已用 [copyIn] 拷入）。
+   * @param notify 投递结果提示（主线程回调；title, text）。
+   */
+  fun processIncomingPath(context: Context, copied: File, notify: (title: String, text: String) -> Unit) {
+    val main = android.os.Handler(android.os.Looper.getMainLooper())
+    ioExecutor.execute {
+      try {
+        withIncomingDeliveryAfterSweep(pendingLock, activeDeliveries, { sweepExpired(context) }) {
+          recordOpening(context, copied.absolutePath)
+          LogCollector.log("dsh-file-open", "incoming processed (shell-produced): " + copied.absolutePath)
+          enqueuePending(context, copied.absolutePath)
+          val deadline = System.currentTimeMillis() + 20_000
+          while (System.currentTimeMillis() < deadline) {
+            if (flushPending(context)) return@withIncomingDeliveryAfterSweep
+            try { Thread.sleep(4_000) } catch (_: InterruptedException) { return@withIncomingDeliveryAfterSweep }
+          }
+          main.post { notify("文件投递未确认", "引擎暂未受理，稍后自动重试") }
+        }
+      } catch (t: Throwable) {
+        android.util.Log.w("dsh-file-open", "incoming pipeline failed: " + (t.message ?: t.javaClass.simpleName))
+        main.post { notify("文件投递失败", t.message ?: t.javaClass.simpleName) }
+      }
+    }
+  }
+
+  /**
    * 用外部阅读器打开文件路径（issue #52；自 MainActivity.openNativePathWithReader 迁入）：
    * 引擎 native-path-opener 仅支持 mac/win/linux，Android 上文件提及按钮会失败。路径解析：
    * - /storage/emulated/0/Documents/dshdata/...（导出仓库）→ FileProvider content Uri

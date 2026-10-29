@@ -21,4 +21,9 @@
        不映射 cacheDir 整体——那是给下载/图片缓存等无关内容开口子。
        ZIP 内容本身由 LogShare 白名单 + LogSanitizer 单出口脱敏把关。 -->
   <cache-path name="log_share" path="log-share/" />
+  <!-- 原生拍照的成品（cacheDir/attachments/）：相机应用要按我们给的 content Uri **写入**，
+        所以这条映射不能省。范围只到 attachments/ 这一层，原图在它的 raw/ 子目录里——
+        cache-path 的子目录一并被覆盖，而压缩成功后原图立刻删除，正常状态下包里只剩成品。
+        同样不映射 cacheDir 整体。 -->
+  <cache-path name="photo_attachments" path="attachments/" />
 </paths>

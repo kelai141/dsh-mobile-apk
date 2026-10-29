@@ -1093,6 +1093,7 @@
       "background = android.graphics.drawable.ColorDrawable(0xFFF2F2F2.toInt())"
     ],
     "AndroidBridge.kt:319": [
+<<<<<<< HEAD
       "*"
     ],
     "AndroidBridge.kt:325": [
@@ -1106,6 +1107,21 @@
     ],
     "AndroidBridge.kt:611": [
       "return RootAccess.state(app).put(\"ok\", true).toString()"
+=======
+      "/** Open the system screen granting All Files Access (special permission). */"
+    ],
+    "AndroidBridge.kt:325": [
+      "/** One-shot session token for the directory-picker bridge (validated by the engine-side pick endpoint; null = disabled). */"
+    ],
+    "AndroidBridge.kt:375": [
+      "*/"
+    ],
+    "AndroidBridge.kt:423": [
+      "/** Reload the BrowserHost page. */"
+    ],
+    "AndroidBridge.kt:611": [
+      "*"
+>>>>>>> p899
     ],
     "ApkUpdateAction.kt:261": [
       ""
@@ -1384,109 +1400,109 @@
       "\"unreadable\""
     ],
     "MainActivity.kt:1030": [
-      "override fun onSaveInstanceState(outState: Bundle) {"
-    ],
-    "MainActivity.kt:1054": [
-      "// 兜底释放：Activity 销毁时清掉可能仍持有的屏幕常亮锁。"
-    ],
-    "MainActivity.kt:1057": [
-      "screenWakeLock?.release()"
-    ],
-    "MainActivity.kt:1076": [
-      "// the user asked to interrupt an active agent turn."
-    ],
-    "MainActivity.kt:1164": [
-      "val script = AppLanguage.bootstrapScript(AppLanguage.mode(this), AppLanguage.systemLanguages(this))"
-    ],
-    "MainActivity.kt:1167": [
-      "Log.w(TAG, \"locale bootstrap could not be installed: \" + t.message)"
-    ],
-    "MainActivity.kt:145": [
-      "/**"
-    ],
-    "MainActivity.kt:191": [
-      "/** 崩溃标记：记录未捕获异常摘要，下次启动测试界面提示（不吞异常）。 */"
-    ],
-    "MainActivity.kt:296": [
-      "internal fun startEngineFlow(splash: Boolean = false) {"
-    ],
-    "MainActivity.kt:306": [
-      "// 否则刚被 latch 挡下的 showWeb 会让这一次显式启动看不到任何结果。"
-    ],
-    "MainActivity.kt:354": [
-      "guideRenderer.applyGuidePhase(phase, title, hint).also {"
-    ],
-    "MainActivity.kt:422": [
-      "loadConfirmedEnginePage()"
-    ],
-    "MainActivity.kt:475": [
-      "android.webkit.CookieManager.getInstance().setCookie(EngineProbe.ENGINE_URL, authCookie)"
-    ],
-    "MainActivity.kt:502": [
-      "enginePageFailed = false"
-    ],
-    "MainActivity.kt:514": [
-      "true // onResume must not access the dead WebView after exposing the native recovery outlet."
-    ],
-    "MainActivity.kt:544": [
-      "pageRecovery.restoreRecreationBudget(savedInstanceState?.getBoolean(\"dsh.renderer-recreation-attempted\", false) ?: false)"
-    ],
-    "MainActivity.kt:565": [
-      "LogCollector.start(this)"
-    ],
-    "MainActivity.kt:569": [
-      "WindowCompat.setDecorFitsSystemWindows(window, false)"
-    ],
-    "MainActivity.kt:605": [
       "}"
     ],
+    "MainActivity.kt:1054": [
+      "dirPickerController.cancelTtl()"
+    ],
+    "MainActivity.kt:1057": [
+      "try {"
+    ],
+    "MainActivity.kt:1076": [
+      "// EngineService owns the child lifecycle. An Activity can be recreated by"
+    ],
+    "MainActivity.kt:1164": [
+      "private fun installLocaleBootstrap() {"
+    ],
+    "MainActivity.kt:1167": [
+      "WebViewCompat.addDocumentStartJavaScript(webView, script, setOf(\"*\"))"
+    ],
+    "MainActivity.kt:145": [
+      "private val uiChrome = WebUiChrome(this)"
+    ],
+    "MainActivity.kt:191": [
+      "}"
+    ],
+    "MainActivity.kt:296": [
+      ""
+    ],
+    "MainActivity.kt:306": [
+      "}"
+    ],
+    "MainActivity.kt:354": [
+      "/** 引导页状态渲染（委托 GuidePageRenderer；EngineStartFlow/前台监控经此驱动）。 */"
+    ],
+    "MainActivity.kt:422": [
+      "val current = runCatching { webView.url }.getOrNull()"
+    ],
+    "MainActivity.kt:475": [
+      "if (authCookie != null) {"
+    ],
+    "MainActivity.kt:502": [
+      "pendingEngineCookie = null"
+    ],
+    "MainActivity.kt:514": [
+      "UiText.t(this, \"自动重建已尝试一次；请在此手动重试或查看日志，不会循环重建页面。\", \"An automatic rebuild was tried once. Retry here or check the log; the page will not be rebuilt in a loop.\"),"
+    ],
+    "MainActivity.kt:544": [
+      "}"
+    ],
+    "MainActivity.kt:565": [
+      "// 开发者日志开关已开（上次会话）：进程启动即恢复收集。"
+    ],
+    "MainActivity.kt:569": [
+      "}"
+    ],
+    "MainActivity.kt:605": [
+      "// 就看不出来。设中性深色，使「没渲染出来」一眼可辨（与引导页同色系，避免闪白）。"
+    ],
     "MainActivity.kt:642": [
-      "webSystemLeftInset = pxToCssPx(maxOf(bars.left, cutout.left), density)"
+      "webSystemBottomInset = pxToCssPx(maxOf(bars.bottom, mandatoryGestures), density)"
     ],
     "MainActivity.kt:719": [
-      "// 旧实现拿到 false 就一次性放弃并弹失败提示 ⇒ 用户点通知冷启动**经常落空**。"
+      "private var pendingNotifySession: String? = null"
     ],
     "MainActivity.kt:769": [
       "}"
     ],
     "MainActivity.kt:772": [
-      "Log.w(\"dsh-notify\", \"notify route failed: \" + t.message)"
+      "}"
     ],
     "MainActivity.kt:78": [
       "/** System insets in CSS px, cached until the engine page is ready to receive them. */"
     ],
     "MainActivity.kt:782": [
-      "this,"
+      "try {"
     ],
     "MainActivity.kt:784": [
-      "Toast.LENGTH_LONG,"
+      "this,"
     ],
     "MainActivity.kt:788": [
-      "}"
+      "} catch (_: Throwable) {"
     ],
     "MainActivity.kt:793": [
-      "/** 首启向导已移除（决策 2026-08-23）：初始页（GuideChrome 运行时状态/解压进度/崩溃/日志）"
+      "/** 任务移除清理见 EngineService.onTaskRemoved（生命周期礼仪 F5.3：让位+尽力清理，不反弹）。 */"
     ],
     "MainActivity.kt:803": [
-      "return"
+      "// Resume passive observation of the one already authorized attempt. Do not spawn or reset retries."
     ],
     "MainActivity.kt:812": [
-      "}"
+      "if (!userClosedEngine) engineFlow.startEngineService() // Native fallback/recreation does not disable task protection."
     ],
     "MainActivity.kt:815": [
-      "// latch 仍为真才呈现——若期间用户已显式重试/进了安全模式（latch 已清），这里就不该再"
+      "if (pendingWebPresentation) showWeb()"
     ],
     "MainActivity.kt:822": [
-      "GuidePhase.Error,"
+      "showGuide()"
     ],
     "MainActivity.kt:850": [
-      "if (!userClosedEngine) {"
+      "val autoStart = SplashStore.autoStart(this)"
     ],
     "MainActivity.kt:880": [
-      "guideRenderer.refreshGuideMeta()"
+      "// 仅当 WebView 未展示（引导页/首次启动）时才探测并重路由；相册/文件选择器"
     ],
     "MainActivity.kt:923": [
-      "runOnUiThread { guideRenderer.refreshGuideMeta() }"
+      "{"
     ],
     "MobileChrome.tsx:35": [
       "?? null"
@@ -2005,13 +2021,13 @@
       "jvmTarget = \"17\""
     ],
     "app/src/main/AndroidManifest.xml:158": [
-      "android:windowSoftInputMode=\"adjustResize\" />"
+      "android:configChanges=\"orientation|screenSize|screenLayout|keyboardHidden\""
     ],
     "app/src/main/AndroidManifest.xml:65": [
-      "0.14.8 #413：targetSdk 26+ 的 manifest 接收器收不到**隐式**广播（设备实测 0 个接收者），"
+      "<meta-data"
     ],
     "app/src/main/AndroidManifest.xml:98": [
-      "<!-- 0.13.0 F2/M3.4：开机自启接收器（恢复用户上次同意的运行状态；restart 后需已启动过）。 -->"
+      "</intent-filter>"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/AdbKeyboardReceiver.kt:25": [
       "* 实例——即使某天平台把隐式广播重新投递给 manifest 接收器，也不会提交两遍。"
@@ -2020,6 +2036,7 @@
       "var instance: AdbKeyboardService? = null"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:319": [
+<<<<<<< HEAD
       "*"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:333": [
@@ -2033,6 +2050,21 @@
     ],
     "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:425": [
       "/** Session/occurrence-addressed browser commands for the trusted native adapter. */"
+=======
+      "/** Open the system screen granting All Files Access (special permission). */"
+    ],
+    "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:333": [
+      "* 「重启中…」的忙碌态——旧实现是 void，页面只能假装忙碌两秒再自己变回。"
+    ],
+    "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:375": [
+      "*/"
+    ],
+    "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:423": [
+      "/** Reload the BrowserHost page. */"
+    ],
+    "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:425": [
+      "fun browserHostReload(): String = onBrowserHostReload()"
+>>>>>>> p899
     ],
     "app/src/main/java/com/dsharnessmobile/shell/ApkUpdateAction.kt:228": [
       "const val STATE_UP_TO_DATE = \"up-to-date\""
@@ -2197,61 +2229,61 @@
       "/**"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1030": [
-      "override fun onSaveInstanceState(outState: Bundle) {"
+      "}"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1113": [
-      "if (guideViewReady && guideView.visibility == View.VISIBLE && guideRenderer.management.back()) return"
+      "return"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:137": [
-      "/** 覆盖层所在的根视图；超时兜底的 post/removeCallbacks 都挂在它上面。 */"
+      "/** 开屏视频覆盖层；在 onCreate 建好 root 之后初始化。 */"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:160": [
-      "// 页面尚未显示时 guideView 在根视图里是可见的；视频盖在它上面不改变任何布局。"
+      "splashPlayed = true"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:193": [
-      "/** 用户主动关闭后，前台监控与任何尚未结束的启动线程不得重新展示 WebUI。 */"
+      "/** 崩溃标记：记录未捕获异常摘要，下次启动测试界面提示（不吞异常）。 */"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:205": [
-      ").show()"
+      "getString(R.string.ds_notify_denied_note),"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:206": [
-      "}"
+      "Toast.LENGTH_LONG,"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:255": [
-      "* §2.4：ES2022 类静态块（`static{}`）需要 Chromium 94+；低于此值的产物会在**解析期**整体"
-    ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:266": [
-      "const val ACTION_UPDATE = \"com.dsharnessmobile.shell.action.UPDATE\""
-    ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:296": [
-      "internal fun startEngineFlow(splash: Boolean = false) {"
-    ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:391": [
       ""
     ],
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:266": [
+      "/** 虚拟屏空闲回收扫描间隔（判定阈值在 VdisplayController.IDLE_RECLAIM_MS = 10 分钟）。 */"
+    ],
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:296": [
+      ""
+    ],
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:391": [
+      "return true"
+    ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:605": [
-      "}"
+      "// 就看不出来。设中性深色，使「没渲染出来」一眼可辨（与引导页同色系，避免闪白）。"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:667": [
-      "configureWebView()"
-    ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:719": [
-      "// 旧实现拿到 false 就一次性放弃并弹失败提示 ⇒ 用户点通知冷启动**经常落空**。"
-    ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:771": [
-      "} catch (t: Throwable) {"
-    ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:812": [
       "}"
     ],
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:719": [
+      "private var pendingNotifySession: String? = null"
+    ],
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:771": [
+      "}"
+    ],
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:812": [
+      "if (!userClosedEngine) engineFlow.startEngineService() // Native fallback/recreation does not disable task protection."
+    ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:815": [
-      "// latch 仍为真才呈现——若期间用户已显式重试/进了安全模式（latch 已清），这里就不该再"
+      "if (pendingWebPresentation) showWeb()"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:89": [
       "private val pickToken: String = EngineManager.ensurePickToken()"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:923": [
-      "runOnUiThread { guideRenderer.refreshGuideMeta() }"
+      "{"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MuxClient.kt:172": [
       "sendFrame(out, 0x1, streamOpen.toByteArray(Charsets.UTF_8))"
