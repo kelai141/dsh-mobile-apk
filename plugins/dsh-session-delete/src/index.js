@@ -303,10 +303,10 @@ export async function removeSession(ctx, sessionId) {
  */
 function failureOf(error) {
   const code = error instanceof SessionDeleteError ? error.code : 'delete-failed'
-  const status = code === 'invalid-id' || code === 'invalid-body'
+  const status = code === 'invalid-id' || code === 'invalid-body' || code === 'invalid-action'
     ? 400
     : code === 'not-found' ? 404
-      : code === 'session-active' || code === 'activity-unknown' || code === 'unload-failed' || code === 'ambiguous' ? 409
+      : code === 'session-active' || code === 'activity-unknown' || code === 'unload-failed' || code === 'already-quarantined' || code === 'ambiguous' ? 409
         : 500
   return { status, code, message: String(error?.message ?? error) }
 }
@@ -367,8 +367,16 @@ export function apply(ctx) {
       }
       try {
         const body = await readJsonBody(req)
-        log(ctx, 'info', 'request parsed', { sessionId: body?.sessionId })
-        const result = await removeSession(ctx, body?.sessionId)
+        log(ctx, 'info', 'request parsed', { sessionId: body?.sessionId, action: body?.action })
+        // issue #912：隔离动作（移动而非删除）。错误码与 delete 完全分开 ——
+        // 调用方据 `already-quarantined` 才能告诉用户「文件还在，可恢复」。
+        const action = body?.action ?? 'delete'
+        if (action !== 'delete' && action !== 'quarantine') {
+          throw new SessionDeleteError('invalid-action', 'unknown action: ' + String(action), { action })
+        }
+        const result = action === 'quarantine'
+          ? await quarantineSession(ctx, body?.sessionId)
+          : await removeSession(ctx, body?.sessionId)
         log(ctx, 'info', 'route completed', { sessionId: result.sessionId, ms: Date.now() - startedAt })
         sendJson(res, 200, result)
       } catch (error) {

@@ -213,13 +213,57 @@ export const QUARANTINE_DIR = '.corrupt'
  * @returns {Promise<{ ok: true, sessionId: string, dir: string, quarantinedTo: string, restorable: true }>} 隔离结果。
  * @throws {SessionDeleteError} 非法 id / 不存在 / 多义 / 仍在运行。
  */
+
+/**
+ * 找出某个会话**已被隔离**的目录（`<工作区>/.corrupt/<id>.<时间戳>`）。
+ *
+ * 为什么需要它：会话被移出扫描路径后，`findSessionDir` 只会报 `not-found` —— 那会把
+ * 「已经隔离过」说成「不存在」，用户以为数据丢了。两者的处置完全不同（前者应提示可恢复）。
+ *
+ * @param {string} root - `<home>/sessions`。
+ * @param {string} sessionId - 已校验的 id。
+ * @returns {Promise<string[]>} 命中的隔离目录绝对路径（按名字排序，旧→新）。
+ */
+export async function findQuarantinedDirs(root, sessionId) {
+  let entries
+  try { entries = await readdir(root, { withFileTypes: true }) } catch { return [] }
+  const hits = []
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    const trash = join(root, entry.name, QUARANTINE_DIR)
+    let names
+    try { names = await readdir(trash) } catch { continue }
+    for (const name of names.filter((n) => n.startsWith(sessionId + '.'))) {
+      hits.push(join(trash, name))
+    }
+  }
+  return hits.sort()
+}
+
 export async function quarantineStoredSession({ home, sessionId, isActive, beforeResolve, logger }) {
   const log = typeof logger === 'function' ? logger : () => {}
   assertSessionId(sessionId)
   if (isActive === true) {
     throw new SessionDeleteError('session-active', 'the conversation is running; stop it before quarantining', { sessionId })
   }
-  const dir = await findSessionDir(sessionsRoot(home), sessionId)
+  const root = sessionsRoot(home)
+  let dir
+  try {
+    dir = await findSessionDir(root, sessionId)
+  } catch (error) {
+    // issue #912：已隔离的会话不在扫描路径上，`findSessionDir` 只会报 not-found。
+    // 这里必须与「真的不存在」区分 —— 前者要告诉用户「文件还在，可恢复」。
+    if (error instanceof SessionDeleteError && error.code === 'not-found') {
+      const already = await findQuarantinedDirs(root, sessionId)
+      if (already.length > 0) {
+        throw new SessionDeleteError('already-quarantined', 'this session is already quarantined; the files are kept and can be restored', {
+          sessionId,
+          paths: already,
+        })
+      }
+    }
+    throw error
+  }
   if (typeof beforeResolve === 'function') await beforeResolve({ sessionId, dir })
   const trash = join(dirname(dir), QUARANTINE_DIR)
   await mkdir(trash, { recursive: true })

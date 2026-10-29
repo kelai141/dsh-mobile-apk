@@ -19,6 +19,7 @@ import { test } from 'node:test'
 import {
   QUARANTINE_DIR,
   SessionDeleteError,
+  findQuarantinedDirs,
   findSessionDir,
   quarantineStoredSession,
   sessionsRoot,
@@ -77,4 +78,17 @@ test('④ 仍在运行的会话拒绝隔离（不替用户动活会话）', asyn
     quarantineStoredSession({ home, sessionId: ID, isActive: true }),
     (error) => error instanceof SessionDeleteError && error.code === 'session-active',
   )
+})
+test('⑤ 已隔离的会话报 already-quarantined，而不是「不存在」', async () => {
+  const home = await homeWith([ID])
+  const first = await quarantineStoredSession({ home, sessionId: ID })
+  await assert.rejects(
+    quarantineStoredSession({ home, sessionId: ID }),
+    (error) => error instanceof SessionDeleteError && error.code === 'already-quarantined'
+      // 错误里必须带出隔离件路径 —— 否则用户拿不到「文件还在」的证据
+      && Array.isArray(error.details?.paths) && error.details.paths.includes(first.quarantinedTo),
+  )
+  // 再次隔离不得产生第二份、也不得删掉第一份
+  const hits = await findQuarantinedDirs(sessionsRoot(home), ID)
+  assert.deepEqual(hits, [first.quarantinedTo])
 })
