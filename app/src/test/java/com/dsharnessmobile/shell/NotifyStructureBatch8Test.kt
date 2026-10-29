@@ -169,7 +169,7 @@ class NotifyStructureBatch8Test {
   fun approvalTitleNamesTheConcreteSubject() {
     val code = centerCode()
     assertTrue("标题必须用工具名（具体对象）", code.contains("「\" + it + \"」需要授权"))
-    assertTrue("没有工具名时才回落类别词", code.contains("entry.displayTitle().ifBlank { UserCopy.notifyCategory(Face.APPROVAL.category) }"))
+    assertTrue("没有工具名时才回落类别词（i18n 后回落词也要跟随语言，故带 app）", code.contains("entry.displayTitle(app).ifBlank { UserCopy.notifyCategory(Face.APPROVAL.category, app) }"))
   }
 
   // ── S3-9 本机提交 vs 别处已答/引擎撤销 ─────────────────────────────────
