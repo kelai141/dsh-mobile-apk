@@ -74,4 +74,20 @@ class UpdateCheckerSuffixTest {
         "https://evil.example.com/x.apk")))
     assertEquals("空链拒绝", false, UpdateChecker.redirectChainAllowed(emptyList()))
   }
+
+  // ---- 2026-10-28 自查：SemVer build metadata（+xxx）不参与优先级 ----
+
+  @Test
+  fun `build metadata 不得让同一个版本被判成更新`() {
+    // 不切掉 `+…` 时 parts 会多出一个数字组 [.., 7] > [.., 0] ⇒ 每轮报"发现新版"，
+    // 然后去要一个不存在的 asset 名，最终把"版本号写法"错报成"没有适配架构的包"。
+    assertFalse("v0.14.5+build.7 不高于 0.14.5", UpdateChecker.isNewer("v0.14.5+build.7", "0.14.5"))
+    assertFalse("0.14.5+build.7 与 0.14.5+build.9 同级", UpdateChecker.isNewer("v0.14.5+build.7", "0.14.5+build.9"))
+    // 反向：真正更高的版本仍要判出来（切 +build 不能把比较弄坏）
+    assertTrue("0.14.6 高于 0.14.5", UpdateChecker.isNewer("v0.14.6+build.1", "0.14.5+build.9"))
+    assertTrue("0.14.5 高于 0.14.4", UpdateChecker.isNewer("v0.14.5", "0.14.4"))
+    // 既有两种命名不受影响
+    assertTrue("fx 修订号仍参与", UpdateChecker.isNewer("v0.13.7fx-2", "0.13.7fx-1"))
+    assertFalse("rc 段仍不参与", UpdateChecker.isNewer("v0.13.7-rc.1", "0.13.7"))
+  }
 }

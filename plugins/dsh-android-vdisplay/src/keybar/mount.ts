@@ -334,12 +334,18 @@ export function mountKeybar(host: KeybarHost): KeybarHandle {
     host.style.setProperty(KEYBAR_INSET_VAR, inset + 'px')
   }
 
-  /** 自愈挂载：键条必须是 .root 的最后一个子节点（保证「终端底边 <= 键条顶边」）。 */
+  /**
+   * 自愈挂载：键条必须是**本实例那个根**的最后一个子节点（保证「终端底边 <= 键条顶边」）。
+   *
+   * 为什么不能用「全页最后一个终端根」（issue #690）：分栏/多终端根时，每个根各有自己的
+   * 键条实例，实例 A 的 reconcile 也去抢最后一根 ⇒ 两条键条叠在同一个根下、另一个根没有键条；
+   * 而按键仍按 `host.root` 发往各自的 textarea ⇒ 界面显示在 B、输入进的是 A。
+   */
   const reconcile = (): void => {
     if (disposed) return
-    const roots = doc.querySelectorAll<HTMLElement>(TERMINAL_ROOT_SELECTOR)
-    const current = roots[roots.length - 1]
+    const current: HTMLElement | undefined = host.root.isConnected ? host.root : undefined
     if (current === undefined) {
+      // 自己的根已经离开文档（React 卸载/历史 tab 被摘）⇒ 本实例收摊，等按根挂载那一轮重建。
       bar.remove()
       noticeEl.remove()
       if (insetHost !== null) { insetHost.style.removeProperty(KEYBAR_INSET_VAR); insetHost = null }

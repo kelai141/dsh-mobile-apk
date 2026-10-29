@@ -25,6 +25,72 @@ import org.junit.rules.TemporaryFolder
 class SafeModeTest {
   private fun digest(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
+  /**
+   * issue #683：进入流程「先落状态、后改 patch」，patch 写失败时状态必须回滚。
+   *
+   * 不回滚的后果（现场）：状态已 active，下一次点按钮命中早退、返回成功并去重启引擎，
+   * 而该摘的第三方 insert 条目永远没被摘掉 —— 用户看到「安全模式已生效」却仍报同样的插件失败。
+   */
+  @Test
+  fun `patch 写失败时状态文件必须回滚，第二次进入会真的重写`() {
+    val dir = Files.createTempDirectory("safe-mode-rollback").toFile()
+    val patch = File(dir, "patch.yml")
+    val home = File(dir, "home.yml")
+    val auto = File(dir, "auto")
+    val entries = setOf(PluginMounts.HardEntry("own", "@deepseek-ai/own"))
+    patch.writeText(
+      "- insert:\n  - id: third\n    name: '@someone/third'\n  - id: own\n    name: '@deepseek-ai/own'\n",
+    )
+    val stateFile = File(auto, SafeMode.STATE_FILE)
+    var failPatchWrite = true
+    val result = SafeMode.enter(
+      patch, home, auto, "rollback", hardEntries = entries,
+      atomicWrite = { target, bytes ->
+        // 状态文件写成功、patch 写失败 —— 这正是 issue 描述的那一步。
+        if (failPatchWrite && target.canonicalFile == patch.canonicalFile) throw java.io.IOException("ENOSPC")
+        target.parentFile?.mkdirs()
+        target.writeBytes(bytes)
+      },
+    )
+    assertFalse("patch 写失败必须回 ok=false", result.ok)
+    assertTrue("失败回执要带真因", result.message.contains("ENOSPC"))
+    assertFalse("状态文件必须回滚到进入前（否则下次进入按 active 早退）", stateFile.isFile)
+
+    // 第二次进入（这次不再失败）：必须真的把第三方条目摘掉，而不是回一句「已开启」。
+    failPatchWrite = false
+    val again = SafeMode.enter(patch, home, auto, "rollback-2", hardEntries = entries)
+    assertTrue(again.ok)
+    assertFalse("第三方 insert 条目必须已被摘除", patch.readText().contains("third"))
+  }
+
+  /**
+   * issue #683：`active` 不能单独作为「已生效」的判据。
+   *
+   * 造出「状态已 active、live patch 仍是原样」的半成品，再进一次必须真的补写；
+   * 旧实现会在这里直接返回 ok=true（用户被告知已开启，插件失败照旧）。
+   */
+  @Test
+  fun `状态 active 但 live 未改时不得早退，必须补写`() {
+    val dir = Files.createTempDirectory("safe-mode-halfstate").toFile()
+    val patch = File(dir, "patch.yml")
+    val home = File(dir, "home.yml")
+    val auto = File(dir, "auto")
+    val entries = setOf(PluginMounts.HardEntry("own", "@deepseek-ai/own"))
+    val original = "- insert:\n  - id: third\n    name: '@someone/third'\n  - id: own\n    name: '@deepseek-ai/own'\n"
+    patch.writeText(original)
+    auto.mkdirs()
+    // 半成品状态：active=true、profile=web，但 patch 一个字节都没改。
+    File(auto, SafeMode.STATE_FILE).writeText(
+      "{\"active\":true,\"profile\":\"web\",\"enteredAt\":\"2026-10-28T00:00:00Z\",\"snapshotId\":\"half\"}",
+    )
+    assertFalse("前提：live patch 此刻确实还没被改成安全形态", SafeMode.livePatchLooksSafe(patch, entries))
+
+    val result = SafeMode.enter(patch, home, auto, "halfstate", hardEntries = entries)
+    assertTrue("半成品必须能被补写（不得早退成 ok=true 却不改文件）", result.ok)
+    assertFalse("第三方条目必须已被摘除", patch.readText().contains("third"))
+    assertTrue("补写后形态判据必须成立", SafeMode.livePatchLooksSafe(patch, entries))
+  }
+
   @Test
   fun `缺失归属清单时拒绝开启且不改配置`() {
     val dir = Files.createTempDirectory("safe-mode-no-hard-manifest").toFile()
