@@ -2300,3 +2300,13 @@ JVM 边界测试在 `EngineBootInstrumentationTest`（取值与 clamp 边界、�
 357. **APK 三方案全真仍不能证明签名者身份 (#678)**：原签名门禁在 `expectedCertificateSha256` 缺省时把证书判据当作恒真；共享组装器又没有把固定 keystore 传给本地和 portable 验证入口，所以替换密钥后的 APK 仍可能只凭 v1/v2/v3 都为真而被接受。修法：APK 验证必须提供 keystore，证书指纹无效、缺失或任一签名者不匹配均判红；共享组装器默认传入仓库固定的 `keystore/debug.keystore`，直接调用的 workflow 继续显式传入。`check-apk-signatures.test.mjs` 覆盖缺预期身份、缺证书、错误证书与多签名者，并以真实 CLI 负控证明不带 `--keystore` 在运行 `apksigner` 前失败；`build-apk-engine.test.mjs` 锁定共享终端默认值与显式覆盖参数。复验：`node --test scripts/check-apk-signatures.test.mjs scripts/build-apk-engine.test.mjs`、签名门禁 `--self-test` 与 `check-patch-mirror.mjs --self-test`。
 
 358. **判定了「引号内的命令替换」还不够——`eval` 与 shell 注释是同一张网上的两个洞（2026-10-28 自查，issue #674 同类）。** `eval "screencap -p /sdcard/real.png"` 会被执行，但 `stripQuotedText` 把引号内容抹成空白 ⇒ 命令词面里没有 `screencap` ⇒ 只认 `sh/su -c` 时它**一路放行**（安全侧漏拦）；反过来 `echo hi # screencap -p /sdcard/x.png` 里的注释文本会被当命令词面 ⇒ **误拦合法命令**（可用性侧过度拦截）。修法：把 `eval` 当作与 `sh -c` 并列的「载荷会被再解释一遍」入口（`EVAL_PAYLOAD`，分界符要含 `;`/`&&`/`||`/`|`/`(`），并在切段时按 shell 规则剥掉**词首** `#` 到行尾。两侧（TS/Kotlin）必须同改，fixture `S-5a..c` 与 `S-6a` 锁死。**教训：判定语义的新增分支要双向测——既测「原来漏的现在拦住」，也测「原来误拦的现在放行」，只测一侧就会把 fail-closed 写成 fail-broken。**
+
+359. **门禁报「目标文件缺失」时，先查 registry 与实现的 scope 是否不同步，不要先怀疑目录没生成（2026-10-30 实锤，issue #888 / PR #939）。** Fast 与 release 链在「vendor 补丁校验/施加失败」处拒打包，报错是 `[fail] terminal-shell-candidates-T1: 目标文件缺失 usr/lib/node_modules/...`，路径里带着 **`vendor/`** 前缀。直觉反应是「`vendor/usr` 没生成」，于是去补目录——**方向完全错了**：那个路径本就不该存在。
+
+    真因是 `registry.json` 里 `zsh-fpath-A1` 与 `terminal-shell-candidates-T1` 两条**漏了 `scope` 字段**。`apply-patches.mjs` 用 registry 做 scope 过滤，空值落到默认 `vendor`，于是拿仓库根的 `vendor/` 当根去拼 `usr/lib/...`，必然 ENOENT。而实现侧（`apply-patches.mjs` 的 `IMPLS`）这两条**本来就写着 `scope: 'engine'`**——是 registry 与实现不同步。
+
+    **判别方法**：报错路径含 `vendor/usr/` 这类不该存在的组合时，直接 `grep` 该补丁 id 在 `registry.json` 与 `IMPLS` 里的 `scope`，两边比对；不要先动文件系统。
+
+    **为什么能潜伏这么久**：两道门禁之间漏了一格——① registry ↔ IMPLS 的 id 集合校验只比 **id**，不比 `scope`；② `check-patch-fixtures.mjs` 的 B 段按 `patch.scope ?? 'vendor'` 过滤，缺 scope 的 engine 补丁被**静默当成 vendor 跳过**，于是「每个 engine 补丁目标必须恰有一份当前代真夹具」这条判据对它们根本不执行（实测这两条夹具数都是 0 而 CI 全绿）。已补 D 段（PR #943）：registry 缺 scope 而实现声明 engine → 直接判红。
+
+    **附带教训**：修完后 `RUNTIME-PATCHES.md` 的生成块会判红，diff 里 scope 列原为 `undefined`——**那个 `undefined` 就是缺 scope 的可见症状**，跑 `node scripts/check-maintenance-docs.mjs --write` 重新生成即可；夹具台账也要 `probe-engine-anchors.mjs --fixtures` 重捕（`capture.registrySha256` 必然失配）。
