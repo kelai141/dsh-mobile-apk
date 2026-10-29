@@ -44,7 +44,7 @@ async function render(): Promise<HTMLElement> {
 
 /** 主行（含两枚按钮）的文本。 */
 function rowText(el: HTMLElement): string {
-  return el.querySelector('.dsh-dev-row')?.textContent ?? ''
+  return el.querySelector('.dsh-gs-row')?.textContent ?? ''
 }
 
 /**
@@ -216,7 +216,7 @@ describe('读不到 ≠ 合法空态', () => {
     expect(rowText(el)).toContain('读不到')
     expect(rowText(el)).not.toContain('已是最新')
     expect(rowText(el)).not.toContain('未检查')
-    expect(el.querySelector('.dsh-dev-row')?.getAttribute('data-apk-state')).toBe('unavailable')
+    expect(el.querySelector('.dsh-gs-row')?.getAttribute('data-apk-state')).toBe('unavailable')
   })
 
   it('桥返回不可解析内容时同样按「读不到」处理（不抛、不冒充）', async () => {
@@ -225,7 +225,7 @@ describe('读不到 ≠ 合法空态', () => {
     })
     const el = await render()
     expect(rowText(el)).toContain('读不到')
-    expect(el.querySelector('.dsh-dev-row')?.getAttribute('data-apk-state')).toBe('unavailable')
+    expect(el.querySelector('.dsh-gs-row')?.getAttribute('data-apk-state')).toBe('unavailable')
   })
 })
 
@@ -340,27 +340,31 @@ describe('回执与轮询纪律', () => {
   it('说明段说清「只手动、不自动」与更新的是 APK', async () => {
     bridgeWith('idle')
     const el = await render()
-    const hint = el.querySelector('.dsh-dev-hint')?.textContent ?? ''
+    // 说明段现在挂在行内的灰色说明里（卡片保留、框内用上游行骨架）。
+    const hint = [...el.querySelectorAll('.dsh-gs-desc')].map((n) => n.textContent ?? '').join(' ')
     expect(hint).toContain('只在你点击时')
     expect(hint).toContain('APK')
   })
 })
 
 describe('分区形态（从开发者选项提级）', () => {
-  it('ApkUpdateSection 是可挂进 settings.section 的分区：卡片 + 标题 + 同一行内容', async () => {
+  it('ApkUpdateSection 是可挂进 settings.section 的分区：卡片外壳 + 框内行骨架', async () => {
     bridgeWith('idle')
     host = document.createElement('div')
     document.body.appendChild(host)
     root = createRoot(host)
     await act(async () => { root!.render(<ApkUpdateSection close={() => {}} />) })
+    // 外壳仍是设置页统一的卡片（用户要求保留「一个框包住」的形态）。
     const section = host.querySelector('section.dsh-screen-control-card')
     expect(section, '分区用设置页统一的卡片外壳').not.toBeNull()
-    // 标题由 aria-labelledby 指到本分区标题，读屏与视觉标题同源。
     const titleId = section!.getAttribute('aria-labelledby') ?? ''
     expect(titleId).not.toBe('')
     expect(host.querySelector('#' + titleId)?.textContent).toBe('应用更新')
-    // 内容仍是那一行（两枚按钮在场），不是另写一套实现。
-    expect(host.querySelector('[data-plugin="dev-apk-update"]')).not.toBeNull()
+    // 框内是上游行骨架（标题在左、控件在右），不再套第二层描边盒子。
+    const root0 = host.querySelector('[data-plugin="dev-apk-update"]')!
+    expect(root0.classList.contains('dsh-dev-cache'), '框内不再套第二层盒子').toBe(false)
+    expect(root0.querySelector('.dsh-gs-row'), '框内至少一行').not.toBeNull()
+    expect(root0.querySelector('.dsh-gs-title')?.textContent).toBe('检查更新')
     expect(button(host, 'check')).not.toBeNull()
   })
 

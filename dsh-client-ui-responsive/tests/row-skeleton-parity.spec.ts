@@ -48,9 +48,10 @@ function decls(css: string, selectorSource: RegExp): Record<string, string> {
   return out
 }
 
-// 只看「基础行」那一块：把 .dsh-gs-row.dsh-gs-stacked（上下堆叠变体，gap 故意不同）
-// 排除掉，否则后者会覆盖前者，把变体的 gap 当成基准值。
-const ROW = /\.dsh-gs-row(?![\w.-])/
+// 只看「基础行」那一块：把 .dsh-gs-row.dsh-gs-stacked（上下堆叠变体，gap 故意不同）与
+// .dsh-gs-row:last-child（末行去分隔线的局部覆盖）都排除掉，否则后者会覆盖前者，
+// 把变体的值当成基准值。
+const ROW = /\.dsh-gs-row(?![\w.:-])/
 
 describe('行骨架一致性', () => {
   it('三页的行内距、间距与分隔线跟通用设置一致', () => {

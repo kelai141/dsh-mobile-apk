@@ -18,14 +18,16 @@ export const DEV_SECTION_CSS: string = `
    与同页上游行并排就是用户反馈的「有些 UI 很突兀」。 */
 [data-plugin='dev-section'],
 [data-plugin='dev-notify-settings'],
-[data-plugin='dev-phone-control'] {
+[data-plugin='dev-phone-control'],
+[data-plugin='dev-apk-update'] {
   display: flex;
   flex-direction: column;
 }
 
 [data-plugin='dev-section'] .dsh-gs-row,
 [data-plugin='dev-notify-settings'] .dsh-gs-row,
-[data-plugin='dev-phone-control'] .dsh-gs-row {
+[data-plugin='dev-phone-control'] .dsh-gs-row,
+[data-plugin='dev-apk-update'] .dsh-gs-row {
   box-sizing: border-box;
   display: flex;
   align-items: center;
@@ -55,15 +57,22 @@ export const DEV_SECTION_CSS: string = `
    general-settings.css.ts——在只有本包、没有该表的构建里（例如 0.14.9 基线），
    .dsh-gs-title / .dsh-gs-desc 会完全没有样式，标题与灰色说明会长得一模一样。
    作用域限死在本页三个根下，不会污染其它分区。 */
+/* 卡片内的行：最后一行不画分隔线（框已经收边，多一条线只是噪音）。 */
+[data-plugin='dev-apk-update'] .dsh-gs-row:last-child {
+  border-bottom: 0;
+}
+
 [data-plugin='dev-section'] .dsh-gs-text,
 [data-plugin='dev-notify-settings'] .dsh-gs-text,
-[data-plugin='dev-phone-control'] .dsh-gs-text {
+[data-plugin='dev-phone-control'] .dsh-gs-text,
+[data-plugin='dev-apk-update'] .dsh-gs-text {
   min-width: 0;
 }
 
 [data-plugin='dev-section'] .dsh-gs-title,
 [data-plugin='dev-notify-settings'] .dsh-gs-title,
-[data-plugin='dev-phone-control'] .dsh-gs-title {
+[data-plugin='dev-phone-control'] .dsh-gs-title,
+[data-plugin='dev-apk-update'] .dsh-gs-title {
   color: var(--dsw-alias-label-primary);
   font-size: 14px;
   line-height: 20px;
@@ -71,7 +80,8 @@ export const DEV_SECTION_CSS: string = `
 
 [data-plugin='dev-section'] .dsh-gs-desc,
 [data-plugin='dev-notify-settings'] .dsh-gs-desc,
-[data-plugin='dev-phone-control'] .dsh-gs-desc {
+[data-plugin='dev-phone-control'] .dsh-gs-desc,
+[data-plugin='dev-apk-update'] .dsh-gs-desc {
   margin-top: 4px;
   color: var(--dsw-alias-label-secondary);
   font-size: 12px;
@@ -82,7 +92,8 @@ export const DEV_SECTION_CSS: string = `
 
 [data-plugin='dev-section'] .dsh-gs-control,
 [data-plugin='dev-notify-settings'] .dsh-gs-control,
-[data-plugin='dev-phone-control'] .dsh-gs-control {
+[data-plugin='dev-phone-control'] .dsh-gs-control,
+[data-plugin='dev-apk-update'] .dsh-gs-control {
   display: flex;
   flex: none;
   align-items: center;
