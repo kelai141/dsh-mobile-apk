@@ -20,8 +20,12 @@ function fixture(t, path, rogue = false) {
     ...['file_paths', 'network_security_config', 'backup_rules', 'data_extraction_rules']
       .map(name => `app/src/main/res/xml/${name}.xml`),
     'app/src/test/java/com/dsharnessmobile/shell/BrowserHostCleartextConsistencyTest.kt',
-    ...['FileIncoming', 'LogShare', 'PathOpen', 'UpdateChecker', 'AdbKeyboardReceiver']
-      .map(name => `app/src/main/java/com/dsharnessmobile/shell/${name}.kt`),
+    // 必须与 check-manifest-hardening.mjs 的 FILE_PROVIDER_CALLER_ALLOWLIST 一一对应：
+    // 少拷一个已登记调用点，门禁就报「登记调用点缺席」，这条正向用例会以「门禁红」的形式失败。
+    // AdbKeyboardReceiver 不在 allowlist 里（fixture 里只用于别的一致性断言）。
+    ...[
+      'FileIncoming', 'LogShare', 'PathOpen', 'UpdateChecker', 'PhotoCapture', 'AdbKeyboardReceiver',
+    ].map(name => `app/src/main/java/com/dsharnessmobile/shell/${name}.kt`),
   ]
   for (const file of files) {
     const dest = join(dir, file)
