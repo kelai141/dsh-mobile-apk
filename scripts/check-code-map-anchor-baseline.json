@@ -1093,35 +1093,19 @@
       "background = android.graphics.drawable.ColorDrawable(0xFFF2F2F2.toInt())"
     ],
     "AndroidBridge.kt:319": [
-<<<<<<< HEAD
-      "*"
+      "}"
     ],
     "AndroidBridge.kt:325": [
-      "fun openFileExternal(path: String, mime: String): String ="
+      "/**"
     ],
     "AndroidBridge.kt:375": [
-      "onOpenConsole()"
+      ""
     ],
     "AndroidBridge.kt:423": [
-      "fun browserHostStatus(): String = onBrowserHostStatus()"
+      "/** Persist one normalized screen scope selected from the DSH settings surface. */"
     ],
     "AndroidBridge.kt:611": [
-      "return RootAccess.state(app).put(\"ok\", true).toString()"
-=======
-      "/** Open the system screen granting All Files Access (special permission). */"
-    ],
-    "AndroidBridge.kt:325": [
-      "/** One-shot session token for the directory-picker bridge (validated by the engine-side pick endpoint; null = disabled). */"
-    ],
-    "AndroidBridge.kt:375": [
-      "*/"
-    ],
-    "AndroidBridge.kt:423": [
-      "/** Reload the BrowserHost page. */"
-    ],
-    "AndroidBridge.kt:611": [
-      "*"
->>>>>>> p899
+      "* 2026-09-30 主人定例：应用级 root 授权状态读面（**纯读，永不触发授权弹窗**）。"
     ],
     "ApkUpdateAction.kt:261": [
       ""
@@ -2036,35 +2020,19 @@
       "var instance: AdbKeyboardService? = null"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:319": [
-<<<<<<< HEAD
-      "*"
+      "}"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:333": [
-      "* @param path 设备绝对路径（必须在允许面内）。"
-    ],
-    "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:375": [
-      "onOpenConsole()"
-    ],
-    "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:423": [
-      "fun browserHostStatus(): String = onBrowserHostStatus()"
-    ],
-    "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:425": [
-      "/** Session/occurrence-addressed browser commands for the trusted native adapter. */"
-=======
-      "/** Open the system screen granting All Files Access (special permission). */"
-    ],
-    "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:333": [
-      "* 「重启中…」的忙碌态——旧实现是 void，页面只能假装忙碌两秒再自己变回。"
-    ],
-    "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:375": [
       "*/"
     ],
+    "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:375": [
+      ""
+    ],
     "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:423": [
-      "/** Reload the BrowserHost page. */"
+      "/** Persist one normalized screen scope selected from the DSH settings surface. */"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:425": [
-      "fun browserHostReload(): String = onBrowserHostReload()"
->>>>>>> p899
+      "fun setScreenScope(scope: String): String = onSetScreenScope(scope)"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/ApkUpdateAction.kt:228": [
       "const val STATE_UP_TO_DATE = \"up-to-date\""
@@ -3060,10 +3028,10 @@
       "**实锤两次（2026-10-29，同一个错犯了两遍）：**"
     ],
     "docs/AGENTS/modules.md:36": [
-      "| **SnapshotUserData.kt** | 用户配置保留、legacy backup 与活动配置传输 | `prepareStagedSnapshot` 保留 `settings.yaml.imported` 并抑制工厂 reseed；`configurationDocument` 选择真实 web profile patch；`exportConfiguration/importConfiguration` 原子替换/导入备份，旧共享 YAML 不覆盖已迁移 patch；`retireReseededFactorySettings` 仅隔离已知空工厂模板。legacy backup 不复活已迁移 YAML。 |"
+      "| **SnapshotFs.kt** | 符号链接安全的文件原语（0.13.3 新增；0.14.1 修 API 越级崩溃） | `exists/isSymbolicLink/deletePath/move/createDirectories`——全部 NOFOLLOW：递归删除绝不穿透链接进用户数据；**目录枚举用 `Files.newDirectoryStream`（`DirectoryStream` 是 Iterable）而非 `Files.list(...).toList()`**——后者是 Java `Stream.toList()`、**API 34 才提供**，minSdk 26 下真机抛 `NoSuchMethodError`（Error，`catch(Exception)` 抓不住），曾让快照事务恢复永久卡死；防线见 `ApiLevelGuardTest`（坑 153） |"
     ],
     "docs/AGENTS/modules.md:39": [
-      "| **MainActivity.kt / RepairState.kt / RepairActivity.kt** | Explicit retry and late cold-start observation | `retryEngineExplicitly` / `ACTION_RETRY_ENGINE` clear the durable gate and retry count only for explicit retry. `mayObserveColdStart` permits passive health observation of the already authorized in-flight cold attempt; resume does not spawn or reset its budget. The assistant keeps model loading and diagnostic export failures separate. |"
+      "| **PluginMounts.kt / EngineManager.kt** 的启动前 Hard bundle 迁移 | 每次 `startEngine()` 决策前调用 `ensureHardBundlesSelected` | 仅自动追加 name/version/patch digest 与可信清单完全匹配的缺失 nested bundle，保留 Soft、依赖 pin 与未知字段。身份漂移逐项记录期望/实际摘要，不阻断普通启动或覆盖手工修复；坏 JSON、缺少权威清单和歧义结构仍拒绝。Safe Mode 与可信恢复继续严格验身份。 |"
     ],
     "docs/archive/known-gaps-pre-0.14.5-2026-10-07.md:170": [
       "不是 a11y 能力缺失。F1（`bridge/index.ts:832-838` 按 `args.screenId` 经 `screenAccessResolved` 判定）"
@@ -3235,6 +3203,7 @@
       "let total = 0;",
       "return true;",
       "}",
+      "});",
       "};"
     ],
     "index.ts:1038": [
