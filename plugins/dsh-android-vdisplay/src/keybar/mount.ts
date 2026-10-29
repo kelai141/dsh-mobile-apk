@@ -334,20 +334,25 @@ export function mountKeybar(host: KeybarHost): KeybarHandle {
     host.style.setProperty(KEYBAR_INSET_VAR, inset + 'px')
   }
 
-  /** 自愈挂载：键条必须是 .root 的最后一个子节点（保证「终端底边 <= 键条顶边」）。 */
+  /**
+   * 自愈挂载：键条必须是**本实例那个根**的最后一个子节点（保证「终端底边 <= 键条顶边」）。
+   *
+   * 为什么不能用「全页最后一个终端根」（issue #690）：分栏/多终端根时，每个根各有自己的
+   * 键条实例，实例 A 的 reconcile 也去抢最后一根 ⇒ 两条键条叠在同一个根下、另一个根没有键条；
+   * 而按键仍按 `host.root` 发往各自的 textarea ⇒ 界面显示在 B、输入进的是 A。
+   */
   const reconcile = (): void => {
     if (disposed) return
-    const roots = doc.querySelectorAll<HTMLElement>(TERMINAL_ROOT_SELECTOR)
-    // issue #690：优先挂回**本实例自己的** host.root。分栏 / 多终端时，按根挂载的路径
-    // （本文件 :427-443 的 `for (const root of roots)`）本来就是这么做的，这里却取了
-    // 「全页最后一个根」，于是两条键条叠在同一个终端下、另一个终端没有键条，
-    // 而按键仍发往各自的 host.root ⇒ 按下的键进了另一块屏。
-    // 只有 host.root 已脱离文档（终端被销毁 / 重建）时才退化到「最后一个根」。
+    // issue #690：只认**本实例自己的** host.root，且它必须仍在文档里、仍是终端根。
+    // 绝不退化到「全页最后一个根」：分栏 / 多终端时每个根各有自己的键条实例，
+    // 抢最后一根会让两条键条叠在同一个终端下、另一个终端没有键条，而按键仍发往各自的
+    // host.root ⇒ 按下的键进了另一块屏。自己的根已脱离文档（终端被销毁 / 重建）时本实例
+    // 收摊，交给下面按根挂载那一轮（`for (const root of roots)`）重建。
     const own = host.root
-    const current = own.isConnected && own.matches(TERMINAL_ROOT_SELECTOR)
-      ? own
-      : roots[roots.length - 1]
+    const current: HTMLElement | undefined =
+      own.isConnected && own.matches(TERMINAL_ROOT_SELECTOR) ? own : undefined
     if (current === undefined) {
+      // 自己的根已经离开文档（React 卸载/历史 tab 被摘）⇒ 本实例收摊，等按根挂载那一轮重建。
       bar.remove()
       noticeEl.remove()
       if (insetHost !== null) { insetHost.style.removeProperty(KEYBAR_INSET_VAR); insetHost = null }

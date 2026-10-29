@@ -159,4 +159,50 @@ class SafeModeInsertBoundaryTest {
     assertTrue("文案必须说明两份文件不一致：" + status.message, status.message.contains("不一致"))
     assertTrue("文案必须给出处置指引：" + status.message, status.message.contains("控制台") || status.message.contains("手动"))
   }
+
+  // ---- 2026-10-28 自查：config 子树的 name 不得参与条目归属判定（误摘方向） ----
+
+  @Test
+  fun `config 里有 name 的产品条目必须保留`() {
+    // 旧实现取「片段里第一个 name:」⇒ 取到 config 里的那个 ⇒ 与 Hard 清单的 name 不匹配
+    // ⇒ 判成第三方整条摘掉。而文档承诺「没有 name 就保留（宁可不摘也不误伤）」。
+    val patch = listOf(
+      "- insert:",
+      "    - id: prod-one",
+      "      config:",
+      "        name: whatever-the-plugin-calls-itself",
+    ).joinToString("\n") + "\n"
+    val entries = setOf(PluginMounts.HardEntry("prod-one", "prod-one-pkg"))
+    val filtered = SafeMode.filterThirdPartyInserts(patch, entries)
+    assertTrue("没有键层 name 的条目不得被摘：" + filtered, filtered.contains("- id: prod-one"))
+    assertTrue(filtered.contains("name: whatever-the-plugin-calls-itself"))
+  }
+
+  @Test
+  fun `config 里再深一层 name 的第三方条目仍要摘`() {
+    val patch = listOf(
+      "- insert:",
+      "    - id: evil",
+      "      name: evil-pkg",
+      "      config:",
+      "        name: nested-must-not-matter",
+    ).joinToString("\n") + "\n"
+    val entries = setOf(PluginMounts.HardEntry("prod-one", "prod-one-pkg"))
+    val filtered = SafeMode.filterThirdPartyInserts(patch, entries)
+    assertFalse("真第三方（键层 name 不匹配）必须摘掉：" + filtered, filtered.contains("- id: evil"))
+  }
+
+  @Test
+  fun `键层 name 在 config 之后出现时仍按最浅缩进认出来`() {
+    val patch = listOf(
+      "- insert:",
+      "    - id: prod-one",
+      "      config:",
+      "        name: shadow-inside-config",
+      "      name: prod-one-pkg",
+    ).joinToString("\n") + "\n"
+    val entries = setOf(PluginMounts.HardEntry("prod-one", "prod-one-pkg"))
+    val filtered = SafeMode.filterThirdPartyInserts(patch, entries)
+    assertTrue("键层 name 与 Hard 清单一致 ⇒ 保留：" + filtered, filtered.contains("- id: prod-one"))
+  }
 }

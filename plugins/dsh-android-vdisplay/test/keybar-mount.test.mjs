@@ -77,6 +77,66 @@ test('落点：键条是终端根的**最后一个**子元素（终端底边不�
   handle.dispose()
 })
 
+/** 多根宿主：每个根各一个 .xterm-helper-textarea 与独立写通道（分栏与 keep-mounted 都是这个形状）。 */
+function multiRootSetup(rootCount = 2) {
+  const section = '<section data-sidebar-terminal><div class="screen"><div class="xterm">'
+    + '<textarea class="xterm-helper-textarea"></textarea></div></div></section>'
+  const dom = new JSDOM('<!doctype html><html><head></head><body>' + section.repeat(rootCount) + '</body></html>',
+    { pretendToBeVisual: true })
+  const doc = dom.window.document
+  const roots = [...doc.querySelectorAll('[data-sidebar-terminal]')]
+  const writes = roots.map(() => [])
+  const handles = roots.map((root, index) => mountKeybar({
+    root,
+    write: (data) => { writes[index].push(data); return true },
+    applicationCursorKeys: () => false,
+  }))
+  return { dom, doc, roots, handles, writes }
+}
+
+test('#690 分栏：两个终端根各有一条键条，不存在「两条都叠在最后一根」', { skip: SKIP && 'jsdom 不可用' }, () => {
+  const { roots, handles } = multiRootSetup(2)
+  for (const [index, root] of roots.entries()) {
+    const bars = root.querySelectorAll('[' + KEYBAR_ATTR + ']')
+    assert.equal(bars.length, 1, '根 #' + index + ' 必须恰有一条键条（旧实现会把两条都搬到最后一根）')
+    assert.equal(root.lastElementChild, root.querySelector('[' + KEYBAR_NOTICE_ATTR + ']'),
+      '根 #' + index + ' 的提示面必须是最后一个子元素')
+  }
+  handles.forEach((handle) => handle.dispose())
+})
+test('#690 分栏：按 B 的键只打到 B 的终端，不回响到 A', { skip: SKIP && 'jsdom 不可用' }, () => {
+  const { roots, handles } = multiRootSetup(2)
+  // 有 textarea 时通路 (c) 优先：合成 keydown 交给 xterm 自己映射，**不**调直写通道。
+  // 所以断言「事件进了哪个终端的 textarea」，而不是 write 收到了什么字节。
+  const seen = roots.map(() => [])
+  roots.forEach((root, index) => {
+    root.querySelector('.xterm-helper-textarea')
+      .addEventListener('keydown', (event) => { seen[index].push(event.key) })
+  })
+  const button = roots[1].querySelector('[' + KEYBAR_ATTR + '] button[data-key="tab"]')
+  assert.ok(button, '第二个根缺 tab 键')
+  button.dispatchEvent(new roots[1].ownerDocument.defaultView.MouseEvent('click', { bubbles: true }))
+  assert.deepEqual(seen[0], [], '第一个终端的 textarea 不该收到按键')
+  assert.equal(seen[1].length, 1, '按键必须进它自己那个终端的 textarea')
+  handles.forEach((handle) => handle.dispose())
+})
+test('#690 keep-mounted：后加入的终端根不得把已有根的键条搬走', { skip: SKIP && 'jsdom 不可用' }, async () => {
+  const { doc, root, handle } = setup()
+  const firstBar = root.querySelector('[' + KEYBAR_ATTR + ']')
+  assert.ok(firstBar, '初始根缺键条')
+  // 页面上再出现一个终端根（开分栏，或历史 tab 被 keep-mounted 留在 DOM 里）。
+  const second = doc.createElement('section')
+  second.setAttribute('data-sidebar-terminal', '')
+  second.innerHTML = '<div class="screen"><div class="xterm"><textarea class="xterm-helper-textarea"></textarea></div></div>'
+  doc.body.append(second)
+  // MutationObserver 是微任务回调。
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(root.querySelector('[' + KEYBAR_ATTR + ']'), firstBar,
+    '已有根的键条必须留在原地（旧实现会把它 append 到新根）')
+  assert.equal(second.querySelector('[' + KEYBAR_ATTR + ']'), null,
+    '没有实例的根不得凭空出现键条')
+  handle.dispose()
+})
 test('键条九键齐备，顺序与语义层一致，且每个键有 aria-label', { skip: SKIP && 'jsdom 不可用' }, () => {
   const { doc, handle } = setup()
   const keys = [...doc.querySelectorAll('[' + KEYBAR_ATTR + '] button')].map((b) => b.dataset.key)

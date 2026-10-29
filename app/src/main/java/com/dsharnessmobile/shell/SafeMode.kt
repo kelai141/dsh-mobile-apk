@@ -95,7 +95,7 @@ internal object SafeMode {
       if (itemIndent == null) { out.add(line); out.addAll(body); i = end; continue }
       val kept = ArrayList<String>()
       for (item in insertChildChunks(body, itemIndent)) {
-        val name = itemName(item.lines)
+        val name = itemName(item.lines, itemIndent)
         val id = itemId(item.lines)
         if (name != null && !isProductOwned(name, hardEntries, id)) continue // 第三方条目：整条摘掉
         kept.addAll(item.lines)
@@ -227,6 +227,11 @@ internal object SafeMode {
     }
     if (!id.matches(Regex("[A-Za-z0-9._-]{1,80}"))) return Result(false, "安全模式档案 id 不合法，已拒绝进入。")
     val stateFile = File(selectedAutoDir, STATE_FILE)
+    // 进入前的状态字节（issue #683：失败必须回滚，不能留下 active=true 的半成品）。
+    val stateBefore: ByteArray? = if (stateFile.isFile) runCatching { stateFile.readBytes() }.getOrNull() else null
+    // live patch 的进入前字节：失败时用来区分「一个字节都没动」（回滚状态安全）与「已被部分改写」
+    // （必须留着状态才能 off 还原）。
+    val patchBytesBefore: ByteArray? = if (patch.isFile) runCatching { patch.readBytes() }.getOrNull() else null
     if (Files.exists(stateFile.toPath(), LinkOption.NOFOLLOW_LINKS) && !Files.isRegularFile(stateFile.toPath(), LinkOption.NOFOLLOW_LINKS)) {
       return Result(false, "安全模式状态不是普通文件，已拒绝读取或覆盖。")
     }
@@ -241,10 +246,15 @@ internal object SafeMode {
         if (existing.optBoolean("active", false)) {
           // issue #683：`phase=writing` 表示上次进入**中途失败**（状态已落盘、patch 可能没写完）。
           // 这种不许早退报成功，必须往下重写一遍。
-          // `active=true` 且**没有** phase 的，是 #683 之前的旧状态文件 —— 视为已完成（升级兼容），
+          // `active=true` 且**没有** phase 的，是 #683 之前的旧状态文件 —— 状态机视为已完成（升级兼容），
           // 否则老用户升级后第一次点「安全模式启动」就会被判成「不收敛」。
+          //
+          // 但状态机只是**必要**条件：`active` 只能证明「状态落过盘」，不能证明 live 文件已经改成
+          // 安全形态——进入流程是「先落状态、后改 patch」，中间任一步失败（ENOSPC / EACCES / 进程被杀）
+          // 都会留下半成品。此时若按 active 早退，用户会被告知「已开启」并去重启引擎，而该摘的第三方
+          // 条目永远没被摘掉，页面继续报同样的插件失败。所以再加一道**形态判据**：两条都成立才早退。
           val phase = existing.optString("phase", "")
-          if (phase != PHASE_WRITING) {
+          if (phase != PHASE_WRITING && livePatchLooksSafe(patch, hardEntries)) {
             return Result(true, "安全模式已开启；保留现有恢复档，未重复改写。", existing.optString("snapshotId", ""))
           }
         }
@@ -379,8 +389,42 @@ internal object SafeMode {
         effectiveId,
       )
     } catch (t: Throwable) {
+      // issue #683：进入失败就把状态文件回滚到进入前——否则下一次进入会命中 active 早退，
+      // 被摘除的第三方条目永远不会补写（用户看到「已生效」却仍报同样的插件失败）。
+      // 回滚本身失败也不能掩盖失败回执：真因优先回给用户。
+      runCatching {
+        // 但有一条例外：如果 live patch 已经被**部分改写**（写了一半就失败/被杀），状态必须留着——
+        // 那时 off 是唯一能把 live 文件还原回去的路，删状态等于把用户锁在半坏的配置上。
+        // 生产路径的 atomicWrite 是「先写 .tmp 再 rename」，失败时 live 不变；这里做内容比对，
+        // 是为了让注入式（非原子）写入的中断现场也能被正确区分。
+        val patchUntouched = if (patchBytesBefore == null) {
+          !patch.isFile
+        } else {
+          patch.isFile && runCatching { patch.readBytes().contentEquals(patchBytesBefore) }.getOrDefault(false)
+        }
+        if (patchUntouched) {
+          if (stateBefore == null) stateFile.delete() else atomicWrite(stateFile, stateBefore)
+        }
+      }
       // 失败回执不得吞掉真因（用户要拿它去修）。
       Result(false, "进入安全模式失败：" + t.javaClass.simpleName + ": " + (t.message ?: "无消息"))
+    }
+  }
+
+  /**
+   * live patch 是否**已经**处于安全模式形态（issue #683）。
+   *
+   * 判据：把当前 patch 再过滤一次，结果与原文逐字相同 ⇒ 第三方 insert 条目已不在里面。
+   * 这是可判读的形态判据，不依赖状态文件——「状态已 active、live 文件没改」正是半成品的特征，
+   * 也是这个 issue 的现场。
+   */
+  internal fun livePatchLooksSafe(patch: File, hardEntries: Set<PluginMounts.HardEntry>?): Boolean {
+    if (!patch.isFile) return false
+    return try {
+      val text = patch.readText()
+      filterThirdPartyInserts(text, hardEntries.orEmpty()) == text
+    } catch (t: Throwable) {
+      false
     }
   }
 
@@ -712,8 +756,30 @@ internal object SafeMode {
   }
 
   /** 条目的包名：取条目片段里**第一个** `name:`（条目自身的 name 行总在 config 之前）。 */
-  private fun itemName(chunk: List<String>): String? =
-    chunk.firstNotNullOfOrNull { NAME_KEY.find(it)?.groupValues?.get(1)?.trim('\'', '"') }
+  /**
+   * 条目的包名：只认**条目键层**（与首键同列）的 `name:`。
+   *
+   * 为什么不能取「片段里第一个 name:」：`config:` 子树里出现 `name:` 很常见（插件配置字段），
+   * 那样「只有 `id:`、没有 `name:`」的条目会被判成「有 name 且名字不匹配」⇒ 整条被当第三方摘掉，
+   * 与本函数文档「子条目若没有 name 就保留（宁可不摘也不误伤；摘错一个能跑的比漏摘一个更糟）」
+   * 直接矛盾 —— 2026-10-28 自查实测到这条误摘（python 等价算法复现后落到 JVM 用例）。
+   *
+   * 判据：首键所在列（`    - id: x` 里 `id` 的列）＝键层列；只有与该列**同列**的行才算条目自己的键。
+   * 更深的一律是某个子块的内容（`config:` 里的 `name:` 缩进必然更大），一律不参与归属判定。
+   * 首键本身就是 name（`- name: x`）时直接取它。
+   */
+  private fun itemName(chunk: List<String>, itemIndent: Int): String? {
+    val header = chunk.firstOrNull { ITEM.containsMatchIn(it) } ?: return null
+    NAME_KEY.find(header)?.let { return it.groupValues[1].trim('\'', '"') }
+    val keyColumn = header.indexOfFirst { it.isLetter() }
+    if (keyColumn <= itemIndent) return null
+    for (line in chunk) {
+      if (line.isBlank() || line === header) continue
+      if (line.indexOfFirst { c -> !c.isWhitespace() } != keyColumn) continue
+      NAME_KEY.find(line)?.let { return it.groupValues[1].trim('\'', '"') }
+    }
+    return null
+  }
 
   private fun itemId(chunk: List<String>): String? = chunk.firstNotNullOfOrNull {
     Regex("""^\s*-\s+id:\s*['"]?([^'"\s]+)""").find(it)?.groupValues?.get(1)
@@ -729,7 +795,7 @@ internal object SafeMode {
       while (end < lines.size && !endsInsertGroup(lines[end])) end++
       val body = lines.subList(i + 1, end)
       val indent = body.firstOrNull { ITEM.containsMatchIn(it) }?.indexOfFirst { !it.isWhitespace() }
-      if (indent != null) for (chunk in insertChildChunks(body, indent)) out += InsertEntry(itemId(chunk.lines), itemName(chunk.lines))
+      if (indent != null) for (chunk in insertChildChunks(body, indent)) out += InsertEntry(itemId(chunk.lines), itemName(chunk.lines, indent))
       i = end
     }
     return out
@@ -748,7 +814,7 @@ internal object SafeMode {
       val itemIndent = body.firstOrNull { ITEM.containsMatchIn(it) }
         ?.let { it.indexOfFirst { c -> !c.isWhitespace() } }
       if (itemIndent != null) {
-        for (child in insertChildChunks(body, itemIndent)) itemName(child.lines)?.let { out.add(it) }
+        for (child in insertChildChunks(body, itemIndent)) itemName(child.lines, itemIndent)?.let { out.add(it) }
       }
       i = end
     }
