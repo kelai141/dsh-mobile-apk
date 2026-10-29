@@ -27,13 +27,15 @@ internal class ConfigTransfer(private val homeDir: File, private val dshDataDir:
   /** 导出私有 settings.yaml 到共享 exports/config/。返回 JSON {ok, path?, error?}。 */
   fun exportToShared(): String {
     return try {
-      val src = File(homeDir, ".dsh/settings.yaml")
-      if (!src.exists()) return """{"ok":false,"error":"settings.yaml 不存在（引擎尚未初始化？）"}"""
+      // 活动配置随迁移变名（settings.yaml → profiles/web/cordis.patch.yml），
+      // 导出必须按 configurationDocument 动态判名，否则迁移后会导出失败并谎报「引擎尚未初始化」。
+      val src = SnapshotUserData.configurationDocument(File(homeDir, ".dsh"))
+      if (!src.exists()) return """{"ok":false,"error":"活动配置尚未生成（请等引擎初始化完成后再导出）"}"""
       val dstDir = File(File(dshDataDir, "exports"), "config")
       dstDir.mkdirs()
-      val tmp = File(dstDir, ".settings.yaml.tmp")
+      val tmp = File(dstDir, "." + src.name + ".tmp")
       src.copyTo(tmp, overwrite = true)
-      val dst = File(dstDir, "settings.yaml")
+      val dst = File(dstDir, src.name)
       if (!tmp.renameTo(dst)) throw java.io.IOException("rename failed")
       LogCollector.log("dsh-shell", "config exported to " + dst.absolutePath)
       """{"ok":true,"path":"${dst.absolutePath.replace("\\", "\\\\")}"}"""
@@ -46,9 +48,13 @@ internal class ConfigTransfer(private val homeDir: File, private val dshDataDir:
   /** 导入共享 exports/config/settings.yaml 到私有 DSH_HOME（引擎 chokidar 热加载）。返回 JSON 同上。 */
   fun importFromShared(): String {
     return try {
-      val src = File(File(dshDataDir, "exports"), "config/settings.yaml")
-      if (!src.exists()) return """{"ok":false,"error":"未找到 exports/config/settings.yaml（请先导出）"}"""
-      val dst = File(homeDir, ".dsh/settings.yaml")
+      // 活动配置**不是**固定叫 settings.yaml：迁移后是 profiles/web/cordis.patch.yml。
+      // 导出走 SnapshotUserData.exportConfiguration（它用 configurationDocument 动态判名），
+      // 这里若仍写死 settings.yaml，就会去找一个永远不会被导出的文件名 → 导入必然失败（真机缺陷）。
+      val dshHome = File(homeDir, ".dsh")
+      val dst = SnapshotUserData.configurationDocument(dshHome)
+      val src = File(File(File(dshDataDir, "exports"), "config"), dst.name)
+      if (!src.exists()) return """{"ok":false,"error":"未找到 exports/config/" + dst.name + "（请先导出当前活动配置）"}"""
       // 导入前留一份私有侧备份（防误导入坏配置后无法回退）。
       if (dst.exists()) {
         val bak = File(dst.parentFile, "settings.yaml.import-backup")

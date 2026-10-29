@@ -1141,7 +1141,7 @@
       "\"http://8.8.8.8/style.css\","
     ],
     "ConfigTransfer.kt:117": [
-      "\"window.__dshBridge?.onDirectoryPicked?.(\" + jsString(callback) + \", \" + jsString(path) + \")\", null,"
+      "// MANAGE_APP_OPS_MODES），异步执行不阻塞 pick 结算；真机验证归 Phase 5。"
     ],
     "ConsoleActivity.kt:105": [
       "super.onCreate(savedInstanceState)"
@@ -3203,6 +3203,7 @@
       "let total = 0;",
       "return true;",
       "}",
+      "});",
       "};"
     ],
     "index.ts:1038": [
