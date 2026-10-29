@@ -3157,8 +3157,8 @@
       "function signature(pattern) {",
       "let total = 0;",
       "return true;",
-      "return { ok: false, denied: false, count: 0, nodes: [], text: 'WebView DOM 快照失败：' + r.error };",
       "}",
+      "},",
       "};"
     ],
     "index.ts:1038": [
@@ -3189,11 +3189,11 @@
     ],
     "index.ts:1255": [
       "* 原始设备行执行（manage 等消费：screencap+pull 组合、uiautomator dump+pull）。",
-      "let detailHandle = ''"
+      "const publishDetail = ("
     ],
     "index.ts:1416": [
-      "export function a11yStatusText(source: A11ySource, heartbeatAgeMs: number | null): string {",
-      "}"
+      "",
+      "export function a11yStatusText(source: A11ySource, heartbeatAgeMs: number | null): string {"
     ],
     "index.ts:142": [
       "",
@@ -3206,23 +3206,23 @@
     ],
     "index.ts:1438": [
       "",
-      "return m2 ? { pkg: m2[1], activity: m2[2] } : null"
+      "if (handle === undefined || handle === '') return false"
     ],
     "index.ts:1444": [
-      "+ '提供 dump/click/input/scroll 语义操作）；特权 shell 通道由 Shizuku 承载（设置页「手机控制」安装、启动并授权后：'",
-      "if (!priv.execAdbLine) return { w: 0, h: 0 }"
+      "",
+      "+ '提供 dump/click/input/scroll 语义操作）；特权 shell 通道由 Shizuku 承载（设置页「手机控制」安装、启动并授权后：'"
     ],
     "index.ts:1463": [
-      "+ '需 danger-full-access；无障碍未开启时改用 android_ui_tree（uiautomator，返回同形节点清单）。',",
+      "const m2 = /([\\w.]+)\\/([\\w.$]+)/.exec(r2.ok ? r2.stdout : '')",
       "const polling = gates?.polling"
     ],
     "index.ts:1558": [
-      "const fg = await foregroundInfo()",
+      "if (v2) uiCacheOf()!.v2 = v2",
       "writeAudit({ action: 'termux-channel', args: { command }, result: 'ok' })"
     ],
     "index.ts:1612": [
-      "}",
-      "},"
+      "note: `无障碍通道（backend=a11y，协议 ${v2 ? 'V2 列式' : 'V1'}）：id 仅在最近一次 dump 内有效；页面变化后请重新 dump`,",
+      "}"
     ],
     "index.ts:165": [
       "",
@@ -3237,15 +3237,15 @@
     ],
     "index.ts:1664": [
       "const sandboxPolicy = (ctx as unknown as {",
-      "ok: false, denied: false,"
+      "},"
     ],
     "index.ts:1669": [
-      "// 虚拟屏「坐标模式」的真实执行面（0.14.0 用户实报修复）。",
+      "const a = await guard('ui_click', args as Record<string, unknown>, exec as { agent?: { session?: unknown } })",
       "}).shell"
     ],
     "index.ts:1899": [
-      "ctx.logger?.('dsh-android-bridge')?.warn?.('task-done marker listener failed: ' + String((e as Error).message))",
-      "render: (_args, v: Record<string, unknown>) => ["
+      "'语义滚动：按控件引用（可选）或屏幕方向滚动。有 ref 时在节点 bounds 内滑动；' +",
+      "ctx.logger?.('dsh-android-bridge')?.warn?.('task-done marker listener failed: ' + String((e as Error).message))"
     ],
     "index.ts:251": [
       "",
@@ -3681,16 +3681,16 @@
       "// 壳侧 handleWebSnapshot 走 MainActivity.webViewRef），既没有 `screenId` 参数也与设备屏无关。"
     ],
     "plugins/dsh-android-manage/src/index.ts:1268": [
-      "h ^= s.charCodeAt(i)"
+      "return { handle: '', path: '', hint: '' }"
     ],
     "plugins/dsh-android-manage/src/index.ts:1300": [
-      "return decision ?? { backend: 'adb' as const, reason: '控制策略面缺席（bridge 未提供 controlDecision）——按 ADB 通道处理' }"
+      "return 'fp' + h.toString(16).padStart(8, '0')"
     ],
     "plugins/dsh-android-manage/src/index.ts:133": [
       "* 这也解释了为什么同一族工具有的能路由、有的不能：差别只在调用点是否碰巧把 screenId 抄进去了。"
     ],
     "plugins/dsh-android-manage/src/index.ts:1341": [
-      "): { ok: boolean; denied: boolean; text: string; actionMode?: string; screenId?: string; guidance?: string } => {"
+      "env_prepare: '无障碍通道下动画与输入法这两项都不需要本工具',"
     ],
     "plugins/dsh-android-manage/src/index.ts:137": [
       "// S-5：把本次调用的会话绑定到**当前异步上下文**——bridge 的服务面据此复查档位。"
@@ -3699,34 +3699,34 @@
       "// 为什么在这里绑：本插件的私有面调用点有 40+ 处（分散在各 helper 里，多数拿不到 exec），"
     ],
     "plugins/dsh-android-manage/src/index.ts:1494": [
-      "+ '③ 或用 android_vdisplay_status 复核屏幕是否还在。'"
+      "output: treeOutput(),"
     ],
     "plugins/dsh-android-manage/src/index.ts:1507": [
-      "}"
+      "// 这里给到 15s；仍失败则明确指引「先 android_ui_global back 退出重页面再 dump」。"
     ],
     "plugins/dsh-android-manage/src/index.ts:1519": [
-      "pruned = { ...built, rawCount: v2.rawCount }"
+      "? '② 纯 Shizuku 下虚拟屏改用 android_vdisplay_input（tap/swipe/keyevent/text，坐标基于该屏像素）；'"
     ],
     "plugins/dsh-android-manage/src/index.ts:152": [
       "}"
     ],
     "plugins/dsh-android-manage/src/index.ts:1537": [
-      "const rawScreen = data.screen as { w?: unknown; h?: unknown } | undefined"
+      "if (!dec.ok) {"
     ],
     "plugins/dsh-android-manage/src/index.ts:1899": [
-      "render: (_args, v: Record<string, unknown>) => ["
+      "'语义滚动：按控件引用（可选）或屏幕方向滚动。有 ref 时在节点 bounds 内滑动；' +"
     ],
     "plugins/dsh-android-manage/src/index.ts:1999": [
-      "render: (_args, v: Record<string, unknown>) => ["
+      "'含自动 IME 引导：探测当前输入法、临时切到内嵌 ADB 输入通道、注入后还原。' +"
     ],
     "plugins/dsh-android-manage/src/index.ts:2031": [
-      "// 0.13.5 W4：无障碍通道优先（ACTION_SET_TEXT 原子写入——绕开 IME 切换与丢字问题 F5）"
+      "const a = await guard('ui_input', args as Record<string, unknown>, exec as { agent?: { session?: unknown } })"
     ],
     "plugins/dsh-android-manage/src/index.ts:2283": [
-      "animations: { type: 'boolean', description: '是否处理动画（默认 true）' },"
+      "// D6：可选字段按 typeof 判定——undefined/null 一律整键不发（{type:'string'} 收 null 同样整值拒绝）。"
     ],
     "plugins/dsh-android-manage/src/index.ts:2286": [
-      "setImeDefault: { type: 'boolean', description: 'true = 同时设为默认输入法（默认 false，仅启用）' },"
+      "nodes: nodes as WebNode[],"
     ],
     "plugins/dsh-android-manage/src/index.ts:394": [
       ": {}"
