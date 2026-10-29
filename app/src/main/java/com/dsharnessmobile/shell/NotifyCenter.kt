@@ -539,6 +539,17 @@ object NotifyCenter {
       renameChannelIfNeeded(manager, id, face, app)
       renamed += 1
     }
+    // 引擎前台服务渠道（EngineService 建，名字含中文「引擎」）也要跟着语言走，
+    // 否则切英文后通知设置里仍能看到「DeepCode 引擎」。
+    val engineCh = manager.getNotificationChannel("engine")
+    if (engineCh != null) {
+      val want = UserCopy.APP_NAME + UiText.t(app, " 引擎", " engine")
+      if (engineCh.name?.toString().orEmpty() != want) {
+        engineCh.name = want
+        manager.createNotificationChannel(engineCh)
+        renamed += 1
+      }
+    }
     return renamed
   }
 
@@ -1092,13 +1103,13 @@ object NotifyCenter {
       .setWhen(System.currentTimeMillis())
     when (face) {
       Face.SILENT -> {
-        b.setContentTitle(entry.displayTitle())
+        b.setContentTitle(entry.displayTitle(app))
         b.setContentText(entry.text.ifBlank { UiText.t(app, "引擎状态更新", "Engine status update") })
         b.setSilent(true) // 第二道保险（javadoc 明写它同时阻止 peek）
         if (entry.count > 1) b.setSubText(UiText.t(app, "共 " + entry.count + " 条", entry.count.toString() + " updates"))
       }
       Face.TODO -> {
-        b.setContentTitle(entry.displayTitle())
+        b.setContentTitle(entry.displayTitle(app))
         b.setContentText(
           if (entry.current.isBlank()) {
             UiText.t(app, "步骤 " + entry.done + "/" + entry.total, "Step " + entry.done + "/" + entry.total)
@@ -1113,10 +1124,10 @@ object NotifyCenter {
         b.setOnlyAlertOnce(true)
       }
       Face.REPORT -> {
-        b.setContentTitle(entry.displayTitle())
-        b.setContentText(reportLine(entry))
-        b.setStyle(NotificationCompat.BigTextStyle().bigText(reportBigText(entry)))
-        b.setSubText(UserCopy.reportMetaLine(entry.durationLabel(), entry.toolCount))
+        b.setContentTitle(entry.displayTitle(app))
+        b.setContentText(reportLine(entry, app))
+        b.setStyle(NotificationCompat.BigTextStyle().bigText(reportBigText(entry, app)))
+        b.setSubText(UserCopy.reportMetaLine(entry.durationLabel(), entry.toolCount, app))
         if (!silentOverride) b.setPriority(NotificationCompat.PRIORITY_HIGH)
       }
       Face.QUESTION -> {
@@ -1140,7 +1151,7 @@ object NotifyCenter {
           entry.toolName.ifBlank { null }?.let {
             UiText.t(app, "「" + it + "」需要授权", "「" + it + "」needs approval")
           }
-            ?: entry.displayTitle().ifBlank { UserCopy.notifyCategory(Face.APPROVAL.category) },
+            ?: entry.displayTitle(app).ifBlank { UserCopy.notifyCategory(Face.APPROVAL.category, app) },
         )
         b.setContentText(approvalLine(app, entry))
         b.setStyle(NotificationCompat.BigTextStyle().bigText(approvalLine(app, entry) + "\n" + UiText.t(app, "仅本次生效", "Applies once")))
@@ -1171,17 +1182,18 @@ object NotifyCenter {
     return b.build()
   }
 
-  private fun reportLine(entry: NotifyEntry): String {
-    val head = entry.outcomeLabel.ifBlank { entry.outcomeLabel() }
+  private fun reportLine(entry: NotifyEntry, app: android.content.Context): String {
+    val head = entry.outcomeLabel.ifBlank { entry.outcomeLabel(app) }
     val summary = if (entry.summary.isNotBlank()) entry.summary else entry.text
     return if (summary.isBlank()) head else head + " · " + summary
   }
 
-  private fun reportBigText(entry: NotifyEntry): String {
-    val sb = StringBuilder(reportLine(entry))
-    sb.append("\n").append(UserCopy.reportMetaLine(entry.durationLabel(), entry.toolCount))
+  private fun reportBigText(entry: NotifyEntry, app: android.content.Context): String {
+    val sb = StringBuilder(reportLine(entry, app))
+    sb.append("\n").append(UserCopy.reportMetaLine(entry.durationLabel(), entry.toolCount, app))
     if (entry.presentedFiles.isNotEmpty()) {
-      sb.append("\n产出：").append(entry.presentedFiles.joinToString("、"))
+      sb.append("\n").append(UiText.t(app, "产出：", "Output: "))
+        .append(entry.presentedFiles.joinToString(UiText.t(app, "、", ", ")))
     }
     return sb.toString()
   }
@@ -1614,22 +1626,22 @@ data class NotifyEntry(
   val questions: List<NotifyQuestion> = emptyList(),
   val target: String? = null,
 ) {
-  fun displayTitle(): String = title.ifBlank {
+  fun displayTitle(app: android.content.Context? = null): String = title.ifBlank {
     if (kind == "report") {
-      UserCopy.notifyCategory(NotifyCenter.Face.REPORT.category)
+      UserCopy.notifyCategory(NotifyCenter.Face.REPORT.category, app)
     } else {
       UserCopy.APP_NAME
     }
   }
 
-  fun outcomeLabel(): String = when (outcome) {
-    "completed" -> "已完成"
-    "error" -> "失败"
-    "blocked" -> "被阻塞"
-    "aborted" -> "已中止"
-    "max-tokens" -> "输出超限"
-    "interrupted" -> "被中断"
-    else -> if (outcome.isBlank()) "" else "结果未知"
+  fun outcomeLabel(app: android.content.Context? = null): String = when (outcome) {
+    "completed" -> UiText.t(app, "已完成", "Completed")
+    "error" -> UiText.t(app, "失败", "Failed")
+    "blocked" -> UiText.t(app, "被阻塞", "Blocked")
+    "aborted" -> UiText.t(app, "已中止", "Aborted")
+    "max-tokens" -> UiText.t(app, "输出超限", "Output limit reached")
+    "interrupted" -> UiText.t(app, "被中断", "Interrupted")
+    else -> if (outcome.isBlank()) "" else UiText.t(app, "结果未知", "Unknown result")
   }
 
   /**
