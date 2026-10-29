@@ -90,4 +90,59 @@ internal object RepairModelNotice {
       )
     }
   }
+
+  /**
+   * 来源表里每条文件的「状态」该显示成什么。
+   *
+   * 抽出来的理由和 [present] 相同：这段原先内联在 `RepairActivity.loadRepairModels`，
+   * 靠 `UiText.t(this, ...)` 直接产出文案，于是「缺凭据时说什么」只能靠拉起 Activity 才验得到。
+   * 现在映射独立，中英文案由调用方传入，判定结果可被单测直接钉住。
+   *
+   * 用户拿着「未读到可用模型」无法区分三种完全不同的修法：没配置 / 配置读不到 / 读到了但缺凭据。
+   * 所以每个状态都必须有各自的说法，不能退化成一句泛泛的「格式无法解析」。
+   *
+   * @param status `RepairModelConfig` 产出的状态码。
+   * @param labels 状态码到文案的映射；未登记的状态回落到 [fallback]。
+   * @param fallback 未登记状态的说法。
+   * @returns 该状态对应的用户可读文案。
+   */
+  fun statusLabel(status: String, labels: Map<String, String>, fallback: String): String =
+    labels[status] ?: fallback
+
+  /** 已知状态码。UI 必须为每一个提供文案，单测守着这份清单与实现不脱节。 */
+  internal val KNOWN_STATUSES = listOf(
+    "parsed",
+    "missing",
+    "unsafe",
+    "invalid",
+    "skipped-legacy",
+    "fallback-used",
+    "no-credential",
+  )
+
+  /**
+   * 状态码到文案的映射（生产用这一份）。
+   *
+   * 放在这里而不是 UI 里，是为了让单测钉**同一份表**：
+   * 若测试自己另写一份，删掉某个状态它照样绿，等于没守。
+   *
+   * @param english 是否英文界面。
+   * @returns 状态码到文案的映射。
+   */
+  fun statusLabels(english: Boolean): Map<String, String> = mapOf(
+    "parsed" to if (english) "Read" else "已读取",
+    "missing" to if (english) "Missing" else "不存在",
+    "unsafe" to if (english) "Unsupported path or size" else "路径或大小不受支持",
+    "invalid" to if (english) "Could not parse" else "格式无法解析",
+    // 迁移后按优先级没读它。文件可能完好，只是这轮不是活动配置。
+    "skipped-legacy" to if (english) "Migrated; not read this run" else "已迁移，本轮未读取",
+    // 活动配置读不出候选，已回落读它。
+    "fallback-used" to if (english) "Used as fallback" else "活动配置无可用候选，已回落到此文件",
+    // 配置本身是好的，缺的是凭据。
+    "no-credential" to if (english) "Configured but missing credential" else "配置可用但缺少凭据（API key）",
+  )
+
+  /** 未登记状态的说法。与 `invalid` 同句是有意的：未知状态最接近「解析失败」。 */
+  fun statusFallback(english: Boolean): String =
+    if (english) "Could not parse" else "格式无法解析"
 }

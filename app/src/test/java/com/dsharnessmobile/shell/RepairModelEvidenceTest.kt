@@ -46,20 +46,22 @@ class RepairModelEvidenceTest {
       "parsed", "missing", "unsafe", "invalid",
       "skipped-legacy", "fallback-used", "no-credential",
     )
-    val ui = codeOnly(source("RepairActivity.kt"))
+    // 文案表在 RepairModelNotice.statusLabels（生产代码用的那一份），不在 RepairActivity 里。
+    val ui = codeOnly(source("RepairModelNotice.kt"))
     for (status in produced) {
       assertTrue("UI 必须为状态 " + status + " 给出说明",
-        ui.contains("\"" + status + "\" ->"))
+        ui.contains("\"" + status + "\" to "))
     }
   }
 
   @Test
   fun `缺凭据与没配置必须是两句不同的话`() {
     // 这两种情况的修法完全不同：一个去补 API key，一个去写配置。
-    val ui = codeOnly(source("RepairActivity.kt"))
-    val noCred = ui.substringAfter("\"no-credential\" ->").substringBefore("\"invalid\" ->");
+    // 文案表在 RepairModelNotice.statusLabels（生产代码用的那一份）。
+    val ui = codeOnly(source("RepairModelNotice.kt"))
+    val noCred = ui.substringAfter("\"no-credential\" to").substringBefore("\n")
     assertTrue("缺凭据要明确说缺凭据", noCred.contains("凭据"))
-    val missing = ui.substringAfter("\"missing\" ->").substringBefore("\"unsafe\" ->");
+    val missing = ui.substringAfter("\"missing\" to").substringBefore("\n")
     assertFalse("「不存在」不能说成缺凭据", missing.contains("凭据"))
   }
 
