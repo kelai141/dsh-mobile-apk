@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { wslNodeCommand } from './shell.mjs'
+import { wslNodeCommand } from './lib/shell.mjs'
 
 test('WSL 重入把隔离目录传给 node，且环境变量不能执行 shell 语法', () => {
   const value = "/tmp/dsh stage's $(printf injected)"
