@@ -5,6 +5,57 @@
 > grep 用法：`grep -n "<坑号>\." docs/AGENTS/gotchas.md` 或按关键词（如 `borrowSession`、`MANAGE_EXTERNAL_STORAGE`、`store-rehome`）定位。
 > 维护约定：新坑追加到文末并递增编号；修复后保留条目（教训与历史归档）。
 
+## 引擎启动会把 `settings.yaml` 迁进 profile patch 并删掉原文件（#934）
+
+**这不是缺陷，是既有迁移设计** —— 但它决定了一类故障现场的形态，所以必须知道。
+
+引擎每次启动会把 `$DSH_HOME/settings.yaml` 并入 `profiles/web/cordis.patch.yml`，然后**删除** `settings.yaml`。
+
+### 归属：不是壳侧删的
+
+壳侧 `SnapshotUserData.prepareStagedSnapshot()` 只对**解压临时目录**（`stagedDsh`）做 discard：
+
+```kotlin
+// 调用点是 discard(File(stagedDsh, "settings.yaml"), ...) —— staged，不是 live
+```
+
+`app/src/main/java` 里搜不到任何删除 live `settings.yaml` 的代码。删除发生在引擎（node）侧的迁移逻辑。
+
+### 为什么重要：两件事互斥
+
+> **「有 `settings.yaml`」** 与 **「引擎跑过一次」** 是互斥的。
+
+于是「配置搞坏、进不了安全模式」这类现场**只有一种可能形态**：
+
+```
+引擎没完成迁移就死了
+  ⇒ settings.yaml 还在
+  ⇒ profiles/web/cordis.patch.yml 缺失，或只含非模型键
+```
+
+这正是 #924 修的那个 bug 的场景：`RepairModelConfig` 曾用 `settings.yaml.imported` 这个 marker 当
+「以后别读 settings.yaml」的开关，于是上述形态下**两边都不读**、候选数为 0，修复助手报「未读到可用模型」——
+而它本来最该救这个场景。#924 之后 marker 只决定优先级，候选为 0 时回落读 `settings.yaml`（标 `fallback-used`）。
+
+### 对后续改动的约束
+
+1. **修复助手不能假设 `settings.yaml` 长期存在。** 引擎跑过一轮它就没了；只能靠回落读到「引擎没跑完」的现场。
+2. **任何在引擎启动后读配置的逻辑，都要按「活动配置是 profile patch」来写。**
+   `SnapshotUserData.configurationDocument()` 已把判据收敛到一处（有 marker 或 patch 存在 ⇒ patch 是活动配置），
+   **新增读取方应复用它，不要各自判 marker**。
+3. **诊断证据要能区分「文件不存在」与「文件被迁移」。** #924 引入的 `skipped-legacy` / `fallback-used` /
+   `no-credential` 就是为此；新增状态时 UI 必须同步给出可判读的说明。
+
+### 实测记录（MuMu `127.0.0.1:16544`，`0.14.9-DEV-FAST` / vcode 53，两次独立复现）
+
+```
+# 启动前
+  files/home/.dsh/settings.yaml                      253 B
+  files/home/.dsh/profiles/web/cordis.patch.yml       41 B   # 只有 persona
+# 启动后
+  files/home/.dsh/settings.yaml                      不存在
+  files/home/.dsh/profiles/web/cordis.patch.yml    17173 B   # 引擎重建，含 provider
+```
 ## 工具输出的「通道与类型」也会骗人（PowerShell 实锤）
 
 **实锤（2026-10-30）：** 跑 `node scripts/check-code-map.mjs --refresh-anchor-baseline --force-drift` 想读拒绝原因，写成：
