@@ -534,6 +534,9 @@ class MainActivity : ComponentActivity() {
     // 旧行为把「划过任务卡/手动停止」留下的 userShutdown 一路带到下次打开，开关明明开着却
     // 停在启动页——看起来就是开关失效。同一次会话内的停止仍由 savedInstanceState 保留，
     // 只有真正的冷启动（savedInstanceState == null）才按开关清除持久标记。
+    // issue #945：覆盖安装后先把**上一版的**起动意图归一，再读开关。
+    // 顺序不能反：若先读 `autoStart`，残留的 false 会直接决定下面的分支，归一等于没做。
+    StartupPrefsNormalizer.resetOnUpgrade(this)
     val autoStartOnOpen = SplashStore.autoStart(this)
     userClosedEngine = if (savedInstanceState == null && autoStartOnOpen) {
       EngineService.setUserShutdown(this, false)

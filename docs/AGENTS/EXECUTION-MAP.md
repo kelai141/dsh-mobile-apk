@@ -2262,6 +2262,7 @@ app/src/main/java/com/dsharnessmobile/shell/GuideChrome.kt
 app/src/main/java/com/dsharnessmobile/shell/GuideManagementController.kt
 app/src/main/java/com/dsharnessmobile/shell/SplashPolicy.kt
 app/src/main/java/com/dsharnessmobile/shell/SplashStore.kt
+app/src/main/java/com/dsharnessmobile/shell/StartupPrefsNormalizer.kt
 app/src/main/java/com/dsharnessmobile/shell/SplashOverlay.kt
 app/src/main/java/com/dsharnessmobile/shell/SplashToggle.kt
 app/src/main/java/com/dsharnessmobile/shell/SplashSettingsPage.kt

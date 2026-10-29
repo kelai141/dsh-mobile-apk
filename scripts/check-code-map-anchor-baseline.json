@@ -1369,22 +1369,22 @@
       "\"unreadable\""
     ],
     "MainActivity.kt:1030": [
-      "}"
+      "vdisplayFloat.show()"
     ],
     "MainActivity.kt:1054": [
-      "dirPickerController.cancelTtl()"
+      "if (::webView.isInitialized && webViewRef === webView) webViewRef = null"
     ],
     "MainActivity.kt:1057": [
-      "try {"
+      "dirPickerController.cancelTtl()"
     ],
     "MainActivity.kt:1076": [
-      "// EngineService owns the child lifecycle. An Activity can be recreated by"
+      "webView.destroy()"
     ],
     "MainActivity.kt:1164": [
-      "private fun installLocaleBootstrap() {"
+      "* language the shell never applied. The script reads the shell preference on"
     ],
     "MainActivity.kt:1167": [
-      "WebViewCompat.addDocumentStartJavaScript(webView, script, setOf(\"*\"))"
+      "private fun installLocaleBootstrap() {"
     ],
     "MainActivity.kt:145": [
       "private val uiChrome = WebUiChrome(this)"
@@ -1414,25 +1414,25 @@
       "UiText.t(this, \"自动重建已尝试一次；请在此手动重试或查看日志，不会循环重建页面。\", \"An automatic rebuild was tried once. Retry here or check the log; the page will not be rebuilt in a loop.\"),"
     ],
     "MainActivity.kt:544": [
-      "}"
+      "} else {"
     ],
     "MainActivity.kt:565": [
-      "// 开发者日志开关已开（上次会话）：进程启动即恢复收集。"
+      "crashInfo = try { crashFile.readText() } catch (_: Exception) { null }"
     ],
     "MainActivity.kt:569": [
-      "}"
+      "if (DevLogPrefs.isEnabled(this)) {"
     ],
     "MainActivity.kt:605": [
-      "// 就看不出来。设中性深色，使「没渲染出来」一眼可辨（与引导页同色系，避免闪白）。"
+      "id = View.generateViewId()"
     ],
     "MainActivity.kt:642": [
-      "webSystemBottomInset = pxToCssPx(maxOf(bars.bottom, mandatoryGestures), density)"
+      "// would cover the mobile top bar / settings header (issue #135). bars.top"
     ],
     "MainActivity.kt:719": [
-      "private var pendingNotifySession: String? = null"
+      "* 落点由**页面**执行（`window.__dshOpenSession`，页面才有会话视图与切换能力）；壳侧只负责"
     ],
     "MainActivity.kt:769": [
-      "}"
+      "pendingNotifySession = session"
     ],
     "MainActivity.kt:772": [
       "}"
@@ -1441,37 +1441,37 @@
       "/** System insets in CSS px, cached until the engine page is ready to receive them. */"
     ],
     "MainActivity.kt:782": [
-      "try {"
+      "private fun notifyRouteFailed() {"
     ],
     "MainActivity.kt:784": [
-      "this,"
+      "if (!pageUiActive) return@runOnUiThread"
     ],
     "MainActivity.kt:788": [
-      "} catch (_: Throwable) {"
+      "UiText.t(this, \"无法打开对应的会话（可能已被删除）——请从会话列表手动选择\", \"Could not open that session (it may have been deleted). Pick it from the session list.\"),"
     ],
     "MainActivity.kt:793": [
-      "/** 任务移除清理见 EngineService.onTaskRemoved（生命周期礼仪 F5.3：让位+尽力清理，不反弹）。 */"
+      "}"
     ],
     "MainActivity.kt:803": [
-      "// Resume passive observation of the one already authorized attempt. Do not spawn or reset retries."
+      "pageRecovery.resume()"
     ],
     "MainActivity.kt:812": [
-      "if (!userClosedEngine) engineFlow.startEngineService() // Native fallback/recreation does not disable task protection."
+      "return"
     ],
     "MainActivity.kt:815": [
-      "if (pendingWebPresentation) showWeb()"
+      "if (!userClosedEngine) engineFlow.startEngineService() // Native fallback/recreation does not disable task protection."
     ],
     "MainActivity.kt:822": [
-      "showGuide()"
+      "if (pendingClientPluginFailurePresentation) {"
     ],
     "MainActivity.kt:850": [
-      "val autoStart = SplashStore.autoStart(this)"
+      "// 名称同步失败不得影响启动（渠道本身仍可用，只是可能显示旧词）。"
     ],
     "MainActivity.kt:880": [
-      "// 仅当 WebView 未展示（引导页/首次启动）时才探测并重路由；相册/文件选择器"
+      "OverlayController.settlePendingEnable(this)"
     ],
     "MainActivity.kt:923": [
-      "{"
+      "internal fun provisionPublicRepoAndRefreshChip(trigger: String) {"
     ],
     "MobileChrome.tsx:35": [
       "?? null"
@@ -2182,10 +2182,10 @@
       "/**"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1030": [
-      "}"
+      "vdisplayFloat.show()"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1113": [
-      "return"
+      "// 0.14.9：开屏视频播放时，系统返回（手势或按键）先关闭视频并消费本次返回。"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:137": [
       "/** 开屏视频覆盖层；在 onCreate 建好 root 之后初始化。 */"
@@ -2215,28 +2215,28 @@
       "return true"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:605": [
-      "// 就看不出来。设中性深色，使「没渲染出来」一眼可辨（与引导页同色系，避免闪白）。"
+      "id = View.generateViewId()"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:667": [
-      "}"
+      ")"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:719": [
-      "private var pendingNotifySession: String? = null"
+      "* 落点由**页面**执行（`window.__dshOpenSession`，页面才有会话视图与切换能力）；壳侧只负责"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:771": [
-      "}"
+      "return@evaluateJavascript"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:812": [
-      "if (!userClosedEngine) engineFlow.startEngineService() // Native fallback/recreation does not disable task protection."
+      "return"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:815": [
-      "if (pendingWebPresentation) showWeb()"
+      "if (!userClosedEngine) engineFlow.startEngineService() // Native fallback/recreation does not disable task protection."
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:89": [
       "private val pickToken: String = EngineManager.ensurePickToken()"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:923": [
-      "{"
+      "internal fun provisionPublicRepoAndRefreshChip(trigger: String) {"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MuxClient.kt:172": [
       "sendFrame(out, 0x1, streamOpen.toByteArray(Charsets.UTF_8))"
