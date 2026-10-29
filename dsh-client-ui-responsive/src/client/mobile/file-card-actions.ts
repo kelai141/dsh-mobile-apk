@@ -54,9 +54,20 @@ const MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
   apk: 'application/vnd.android.package-archive',
 }
 
-/** 一条卡片动作的运行结果。 */
+/**
+ * 一条卡片动作的运行结果。
+ *
+ * `error` 是壳侧的错误码，**壳侧是唯一真源**：FileExternalBridge.errorPayload 写的是
+ * `{"ok":false,"error":"<code>"}`，四枚码见 FileExternalBridge.ERROR_*（no-receiver /
+ * uri-denied / io / bad-request）。本模块只读这一处，不另立一套。
+ *
+ * `reason` 是**向后兼容**旧壳的遗留字段，见 readAnswer 的注释。
+ */
 export interface CardBridgeResult {
   readonly ok: boolean
+  /** 壳侧错误码（`error` 字段原值）。成功时缺失。 */
+  readonly error?: string
+  /** 插件内部判据（empty-answer / malformed-answer / unavailable）。不来自壳侧。 */
   readonly reason?: string
 }
 
@@ -76,15 +87,39 @@ export interface FileCardBridge {
   shareFile?: (path: string, mime: string) => string | undefined
 }
 
-/** 把桥返回的 JSON 读成结果；非 JSON 或抛异常都按失败处理，不抛给 UI。 */
+/**
+ * 把桥返回的 JSON 读成结果；非 JSON 或抛异常都按失败处理，不抛给 UI。
+ *
+ * ## 字段以壳侧为唯一真源
+ * FileExternalBridge.errorPayload 产出的是 `{"ok":false,"error":"<code>"}`——
+ * 字段名是 **error**，不是 reason。本函数只认 error。
+ *
+ * ## 向后兼容（待旧版壳退场后删除）
+ * 早期壳（≤ 0.14.9 的某些包）回的是 `{"ok":false,"reason":"no-handler"}`：
+ * 字段名是 reason，取值名是 no-handler。旧包可能还在用户机器上，所以 error 缺失时
+ * 退回读 reason，并把取值 no-handler 归一到 no-receiver，让下游只判一个值。
+ *
+ * **删除条件**：确认无 ≤0.14.9 的壳在用后，删掉 LEGACY_REASON_* 与下面那段归一，
+ * 只留 answer.error 一条路径。届时 readAnswer 会短一半。
+ */
+const LEGACY_REASON_FIELD = 'reason'
+const LEGACY_REASON_NO_HANDLER = 'no-handler'
+/** 旧壳的取值 → 壳侧现行错误码。 */
+const SHELL_ERROR_NO_RECEIVER = 'no-receiver'
+
 function readAnswer(raw: unknown): CardBridgeResult {
   if (typeof raw !== 'string' || raw === '') return { ok: false, reason: 'empty-answer' }
   try {
-    const answer = JSON.parse(raw) as { ok?: unknown; reason?: unknown }
-    return {
-      ok: answer.ok === true,
-      reason: typeof answer.reason === 'string' ? answer.reason : undefined,
+    const answer = JSON.parse(raw) as { ok?: unknown; error?: unknown; reason?: unknown }
+    if (answer.ok === true) return { ok: true }
+    // 壳侧现行字段。
+    if (typeof answer.error === 'string' && answer.error !== '') return { ok: false, error: answer.error }
+    // 向后兼容旧壳：仅当 error 缺失时才看 reason。见上方删除条件。
+    const legacy = answer[LEGACY_REASON_FIELD]
+    if (typeof legacy === 'string' && legacy !== '') {
+      return { ok: false, error: legacy === LEGACY_REASON_NO_HANDLER ? SHELL_ERROR_NO_RECEIVER : legacy }
     }
+    return { ok: false }
   } catch {
     // 桥返回了非 JSON：当作壳侧故障，和显式拒绝走同一条失败路径。
     return { ok: false, reason: 'malformed-answer' }
@@ -357,9 +392,22 @@ export class FileCardCapsule {
     }
   }
 
-  /** 记录「确证没有外部接收方」，并让已渲染的胶囊收起左段。 */
+  /**
+   * 记录「确证没有外部接收方」，并让已渲染的胶囊收起左段。
+   *
+   * ## 只有 no-receiver 才算「确证」
+   * 判据是壳侧的 `error === 'no-receiver'`——探活为空 / startActivity 抛 ActivityNotFound，
+   * 都是「这台机器上确实没人接」的确证。
+   *
+   * 其余错误码（uri-denied / io / bad-request）**不收起左段**：它们是这一次调用的失败
+   * （路径越界、读不到文件、调用方传错参数），不代表机器没有外部应用。把它们当永久无能力，
+   * 会把偶发失败升级成不可恢复的状态——用户挪对路径后按钮也回不来了。
+   *
+   * 注意：`reason` 字段这里是插件内部码（unavailable / empty-answer / malformed-answer），
+   * 不参与本判据；壳侧码一律走 `error`。
+   */
   private finish(result: CardBridgeResult, action: CardAction): CardBridgeResult {
-    if (action === 'external' && !result.ok && result.reason === 'no-handler' && !this.externalMissing) {
+    if (action === 'external' && !result.ok && result.error === SHELL_ERROR_NO_RECEIVER && !this.externalMissing) {
       this.externalMissing = true
       for (const capsule of document.querySelectorAll('[' + CAPSULE_ATTR + ']')) {
         capsule.querySelector('[' + EXTERNAL_ATTR + ']')?.remove()

@@ -232,7 +232,62 @@ describe('卡片胶囊：行为', () => {
     expect(box.hasAttribute('data-dsh-file-capsule-share-only')).toBe(true)
   })
 
-  it('④b 壳侧答 no-handler 后左段永久收起（不留点了报错的按钮）', async () => {
+  // ④b–④e 钉住「确证无接收方 → 收起左段」的判据。
+  // 壳侧真源：FileExternalBridge.errorPayload 产出 {"ok":false,"error":"no-receiver"}。
+  // 历史缺陷：插件曾读 reason === 'no-handler'，字段名与取值名双双错位，这段降级在真机上是死代码。
+
+  it('④b 壳侧答 error=no-receiver 后左段永久收起（不留点了报错的按钮）', async () => {
+    buildSingleCard('/work/a.md')
+    const bridge = makeBridge(() => '{"ok":false,"error":"no-receiver"}')
+    capsule = new FileCardCapsule(() => bridge, COPY)
+    capsule.attach()
+    await flush()
+    document.querySelector<HTMLElement>(EXTERNAL)!.click()
+    expect(capsule.externalAvailable()).toBe(false)
+    expect(document.querySelector(EXTERNAL)).toBeNull()
+    expect(document.querySelector(SHARE)).not.toBeNull()
+    expect(document.querySelector(CAPSULE)!.hasAttribute('data-dsh-file-capsule-share-only')).toBe(true)
+  })
+
+  it('④c 壳侧答 ok=true 时不收起左段', async () => {
+    buildSingleCard('/work/a.md')
+    const bridge = makeBridge(() => '{"ok":true}')
+    capsule = new FileCardCapsule(() => bridge, COPY)
+    capsule.attach()
+    await flush()
+    document.querySelector<HTMLElement>(EXTERNAL)!.click()
+    expect(capsule.externalAvailable()).toBe(true)
+    expect(document.querySelector(EXTERNAL)).not.toBeNull()
+  })
+
+  it('④d 未知 error 保留左段且不永久收起（偶发失败不等于永久无能力）', async () => {
+    buildSingleCard('/work/a.md')
+    // uri-denied / io / bad-request 都是「这一次调用失败」，不代表机器没有外部应用。
+    for (const code of ['uri-denied', 'io', 'bad-request', 'future-unknown-code']) {
+      buildSingleCard('/work/a.md')
+      const bridge = makeBridge(() => JSON.stringify({ ok: false, error: code }))
+      capsule = new FileCardCapsule(() => bridge, COPY)
+      capsule.attach()
+      await flush()
+      document.querySelector<HTMLElement>(EXTERNAL)!.click()
+      expect(capsule.externalAvailable(), code + ' 不应被当成永久无能力').toBe(true)
+      expect(document.querySelector(EXTERNAL), code + ' 后左段应保留').not.toBeNull()
+      capsule.detach()
+    }
+  })
+
+  it('④e-1 error 与 reason 同时存在时以 error 为准（壳侧是唯一真源）', async () => {
+    buildSingleCard('/work/a.md')
+    // 旧壳字段 reason=no-handler 与壳侧 error=io 并存：必须听 error，不能收起左段。
+    const bridge = makeBridge(() => '{"ok":false,"error":"io","reason":"no-handler"}')
+    capsule = new FileCardCapsule(() => bridge, COPY)
+    capsule.attach()
+    await flush()
+    document.querySelector<HTMLElement>(EXTERNAL)!.click()
+    expect(capsule.externalAvailable(), 'error 在场时不得退回 reason').toBe(true)
+  })
+
+  it('④e 旧壳 reason=no-handler 归一为 no-receiver（向后兼容，待旧版退场后删）', async () => {
     buildSingleCard('/work/a.md')
     const bridge = makeBridge(() => '{"ok":false,"reason":"no-handler"}')
     capsule = new FileCardCapsule(() => bridge, COPY)
@@ -241,7 +296,6 @@ describe('卡片胶囊：行为', () => {
     document.querySelector<HTMLElement>(EXTERNAL)!.click()
     expect(capsule.externalAvailable()).toBe(false)
     expect(document.querySelector(EXTERNAL)).toBeNull()
-    expect(document.querySelector(SHARE)).not.toBeNull()
   })
 
   it('桥抛异常时按失败返回，不向 DOM 事件里抛', async () => {
@@ -275,7 +329,7 @@ describe('卡片胶囊：行为', () => {
     const bridge = makeBridge(() => '{"ok":true}')
     face = bridge
     expect(capsule.externalAvailable()).toBe(true)
-    expect(capsule.act('share', '/work/a.md')).toEqual({ ok: true, reason: undefined })
+    expect(capsule.act('share', '/work/a.md')).toEqual({ ok: true })
     expect(bridge.calls.share).toEqual([['/work/a.md', 'text/markdown']])
   })
 
