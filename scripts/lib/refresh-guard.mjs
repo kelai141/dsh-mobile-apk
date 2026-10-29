@@ -43,6 +43,31 @@ export function refreshCompletenessProblem(symbolKeys, symbols, symbolHashes, pr
 
 // 仅**直接执行**时跑自检；被 check-code-map.mjs import 时不得劫持它的 --self-test
 // （实测：不加这层判断，门禁的 --self-test 会跑到这里就 process.exit，把门禁自检整个吞掉）。
+/**
+ * `sourceLines` 段的**下降守卫**（#868 的补齐面）。
+ *
+ * 背景：`planLegacySourceLines` 只按**当前** references 重建 `sourceLines` —— 引用消失的 key
+ * 会被静默丢掉。这件事有两种完全相反的含义：
+ *
+ *   · **合法的陈旧键清理**：分支落后于 main、或某条 legacy 引用已从文档移除；
+ *   · **静默降级**：解析退化导致 references 变少，基线被洗小，下一轮就以「未登记」红。
+ *
+ * 两者在形状上不可区分，所以**不无条件拦，也不无条件放**：要求显式声明。
+ * 默认拒绝并列出被丢弃的键；加 `--allow-source-lines-drop` 才放行（并仍打印清单供审阅）。
+ *
+ * @param prevKeys 旧基线里的 sourceLines 键
+ * @param nextKeys 即将写入的 sourceLines 键
+ * @param allow 是否已显式声明允许下降
+ * @returns null = 可以写盘；字符串 = 拒绝原因
+ */
+export function sourceLinesDropProblem(prevKeys, nextKeys, allow) {
+  if (allow) return null
+  const next = new Set(nextKeys)
+  const dropped = prevKeys.filter((k) => !next.has(k))
+  if (dropped.length === 0) return null
+  return 'sourceLines would drop ' + dropped.length + ' key(s): ' + dropped.slice(0, 12).join(', ')
+    + (dropped.length > 12 ? ' …' : '')
+}
 const SELF_TEST = process.argv.includes('--self-test')
   && String(process.argv[1] || '').includes('refresh-guard')
 if (SELF_TEST) {
@@ -72,7 +97,22 @@ if (SELF_TEST) {
     if (!ok) failed += 1
     console.log((ok ? '  ok   ' : '  FAIL ') + name + ': ' + (got === null ? 'null' : 'refused'))
   }
+  // #868 补齐面：sourceLines 下降必须显式声明
+  const cases2 = [
+    ['SLOK_NO_DROP', null, ['a.kt:1'], ['a.kt:1'], false],
+    ['SLREFUSE_DROP', 'drop', ['a.kt:1', 'b.kt:2'], ['a.kt:1'], false],
+    ['SLALLOW_DROP', null, ['a.kt:1', 'b.kt:2'], ['a.kt:1'], true],
+    ['SLREFUSE_ALL_DROPPED', 'drop', ['a.kt:1'], [], false],
+  ]
+  let failed2 = 0
+  for (const [name, want, prev, next, allow] of cases2) {
+    const got = sourceLinesDropProblem(prev, next, allow)
+    const ok = want === null ? got === null : (got !== null && got.length > 0)
+    if (!ok) failed2 += 1
+    console.log((ok ? '  ok   ' : '  FAIL ') + name + ': ' + (got === null ? 'null' : 'refused'))
+  }
+  failed += failed2
   console.log((failed === 0 ? 'REFRESH-GUARD SELF-TEST PASSED' : 'REFRESH-GUARD SELF-TEST FAILED')
-    + '（' + (cases.length - failed) + '/' + cases.length + '）')
+    + '（' + (cases.length + cases2.length - failed) + '/' + (cases.length + cases2.length) + '）')
   process.exit(failed === 0 ? 0 : 1)
 }

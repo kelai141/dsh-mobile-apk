@@ -21,7 +21,7 @@
 //   node scripts/check-code-map.mjs --refresh-anchor-baseline # Refresh reviewed legacy anchor snapshots
 // 退出码：0 = 通过；1 = 有失败项；2 = 前置不满足（文档缺失/文档缺账本块）。
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
-import { refreshCompletenessProblem } from './lib/refresh-guard.mjs'
+import { refreshCompletenessProblem, sourceLinesDropProblem } from './lib/refresh-guard.mjs'
 import { dirname, join, relative, resolve as resolvePath } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createHash } from 'node:crypto'
@@ -60,6 +60,9 @@ const REFRESH_ANCHOR_BASELINE = argv.includes('--refresh-anchor-baseline')
  * 且逐条打印「allow 了哪些漂移」。
  */
 const FORCE_ANCHOR_DRIFT = argv.includes('--force-drift')
+// issue #868 补齐面：sourceLines 段下降（陈旧键被清理）必须显式声明，否则拒绝写盘。
+// 合法清理与静默降级形状相同，不能靠猜，只能靠声明。
+const ALLOW_SOURCE_LINES_DROP = argv.includes('--allow-source-lines-drop')
 const DERIVE_ANCHORS = argv.includes('--derive-anchors')
 const DERIVE_DRY_RUN = argv.includes('--derive-dry-run')
 /** CI 等价性检查：apk 仓在被独立检出时没有协调仓父目录，--no-parent 用来本地预演那种情形。 */
@@ -1485,6 +1488,18 @@ if (isMain) {
       }
     }
     // #868：写盘前断言，禁止「静默丢符号锚点基线」。判据与自检见 scripts/lib/refresh-guard.mjs。
+    // #868 补齐面：sourceLines 下降要么是合法陈旧键清理，要么是静默降级 —— 两者形状相同，
+    // 所以要求显式 --allow-source-lines-drop。拒绝时列出被丢弃的键，供人工判定属于哪一种。
+    const slGuard = sourceLinesDropProblem(
+      Object.keys((ANCHOR_BASELINE && ANCHOR_BASELINE.sourceLines) || {}),
+      Object.keys(sourceLines),
+      ALLOW_SOURCE_LINES_DROP,
+    )
+    if (slGuard !== null) {
+      console.error('Refusing to refresh: ' + slGuard)
+      console.error('If this is a legitimate stale-key cleanup, re-run with --allow-source-lines-drop.')
+      process.exit(1)
+    }
     const refreshGuard = refreshCompletenessProblem(
       symbolKeys, symbols, symbolHashes,
       Object.keys(anchorBaselineSymbols()), Object.keys(anchorBaselineSymbolHashes()),
