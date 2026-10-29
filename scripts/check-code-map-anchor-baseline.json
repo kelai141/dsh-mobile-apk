@@ -3019,13 +3019,13 @@
       ""
     ],
     "docs/AGENTS/gotchas.md:178": [
-      "32. **adb forward 静默失效（2026-08-29 实锤）**：APK 重装/USB 重枚举后宿主 forward 清空 → 宿主探活 000，但设备内正常（用户 WebView 秒起）——「引擎挂了」的判断必须先 `adb forward --list` 再重 forward，否则误诊。"
+      "17. **错位目录（issue #80 P5）**：relocate-snapshot 曾把包内绝对路径 `/data/data/com.termux` 当相对路径搬进 usr 树（`usr/data/data/...`）——纯冗余；构建链 7e 无条件删除 `usr/data`。"
     ],
     "docs/AGENTS/gotchas.md:44": [
-      "2. **描述写清**：修的是哪条假绿 / 修前怎么绿 / 修后怎么红。"
+      "### 顺带：Kotlin 不接受行首 `+`"
     ],
     "docs/AGENTS/gotchas.md:74": [
-      ""
+      "### 坑 1：`snapshot.sha256` 与 `snapshot.tar.xz` 必须自洽"
     ],
     "docs/AGENTS/modules.md:36": [
       "| **SnapshotFs.kt** | 符号链接安全的文件原语（0.13.3 新增；0.14.1 修 API 越级崩溃） | `exists/isSymbolicLink/deletePath/move/createDirectories`——全部 NOFOLLOW：递归删除绝不穿透链接进用户数据；**目录枚举用 `Files.newDirectoryStream`（`DirectoryStream` 是 Iterable）而非 `Files.list(...).toList()`**——后者是 Java `Stream.toList()`、**API 34 才提供**，minSdk 26 下真机抛 `NoSuchMethodError`（Error，`catch(Exception)` 抓不住），曾让快照事务恢复永久卡死；防线见 `ApiLevelGuardTest`（坑 153） |"

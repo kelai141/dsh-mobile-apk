@@ -5,6 +5,21 @@
 > grep 用法：`grep -n "<坑号>\." docs/AGENTS/gotchas.md` 或按关键词（如 `borrowSession`、`MANAGE_EXTERNAL_STORAGE`、`store-rehome`）定位。
 > 维护约定：新坑追加到文末并递增编号；修复后保留条目（教训与历史归档）。
 
+## 禁止裸 `splice` 改代码（同一个错犯了三次，升级为硬规则）
+
+### 实锤
+
+| 次 | 场景 | 后果 |
+|---|---|---|
+| 1 | `NotifyStructureBatch8Test.kt` 冲突按行拼接 | KDoc 与函数体拼断，`SyntaxError` |
+| 2 | `EngineManager.kt` 的 `if (hard == null) {` 块 splice 计数错**多留一行** | 花括号不平衡 → 报错出现在 `UpdateManager.kt` / `WatchdogV2.kt`（`Unresolved reference onlineUpdateActive`），极易误判成 main 坏了 |
+| 3 | `console.html` 的 `__dshConsoleSetLang` 块实际 **5 行**只 splice 了 **3 行** | 留重复 `applyLang(); };` → 第二个 script 块 `SyntaxError: Unexpected token ;` |
+
+### 三条硬规则
+
+1. **禁止裸 `splice` 改代码** —— 首选锚定**字符串**替换（`old` 含足够前后文保证唯一）；必须按行时，splice 前后**断言首尾行原文**（打印出来对一眼），`n` 从实际读出结果来，**不能凭印象**。
+2. **splice 后必跑该语言的语法检查再谈功能验证** —— `node --check`（JS/MJS/内联 script）/ `tsc --noEmit`（TS）/ `:app:compileDebugKotlin`（Kotlin）/ `JSON.parse`。**顺序不能反**：语法都不通过，功能验证的结论没有任何意义。
+3. **报错出现在「别的文件」时先怀疑自己刚改的那一块** —— 块界错位的典型形态是「真正出问题的文件一条错都不报，错误全落在下游受害者上」。排查顺序：`git diff` 看自己改的文件有无重复语句头/缺失右花括号 → 数括号配平 → **最后**才看别的文件。
 ## 改 Kotlin 控制流后：先看**本文件**括号平衡，再看别的文件报错
 
 **实锤（2026-10-29，一次误判差点以为 main 坏了）。**
