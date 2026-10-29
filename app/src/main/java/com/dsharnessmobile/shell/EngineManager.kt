@@ -1987,6 +1987,8 @@ class EngineManager(private val context: Context, private val pickToken: String?
         .map { File(it, "cordis.patch.yml") }
         .filter { it.isFile }
       var repaired = 0
+      // issue #903：哪些退役条目被移除（含备份文件名），收齐后写进可导出诊断。
+      val retiredReports = mutableListOf<String>()
       for (target in targets) {
         val live = try { target.readText() } catch (_: Throwable) { failed = true; continue }
         val result = FactoryProfilePatch.repairRetiredEntries(
@@ -2023,6 +2025,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
           continue
         }
         repaired++
+        FactoryProfilePatch.retiredRemovalReport(before, after, backup.name)?.let { retiredReports += it }
         LogCollector.log(
           TAG,
           "profile patch repaired (" + (target.parentFile?.name ?: "?") + "): " +
@@ -2034,6 +2037,16 @@ class EngineManager(private val context: Context, private val pickToken: String?
         LogCollector.log(TAG, "profile patch repair deferred (partial failure; retried next start)")
       } else {
         marker.writeText("repaired=" + repaired + " targets=" + targets.size + " at " + System.currentTimeMillis() + "\n")
+        if (repaired > 0 && retiredReports.isNotEmpty()) {
+          // issue #903：退役是**设计行为**，但此前只进开发日志 → 用户每次更新后都以为是 bug、
+          // 手工加回去、下次再被移除。这里写进**可导出诊断**（诊断包可见），
+          // 文案刻意用「已退役」而不是「删除你的配置」，并附备份文件名便于回看差异。
+          LogCollector.writeBootDiag(
+            context,
+            "profile-patch-retire",
+            "已退役条目被移除（设计行为，非用户配置损坏）：" + retiredReports.joinToString("; "),
+          )
+        }
         if (repaired > 0) {
           LogCollector.log(TAG, "profile patch repair (apk #214): " + repaired + " profile(s) cleaned; marker=" + marker.name)
         }

@@ -71,6 +71,18 @@ internal object FactoryProfilePatch {
    * 工厂安装项的启动迁移由 `EngineManager.repairProfilePatch()` 负责。
    */
   internal val RETIRED_FACTORY_ENTRIES = mapOf("dsh-undo-savepoint" to "dsh-undo-savepoint")
+  /**
+   * issue #903：退役条目的**可读报告**（进可导出诊断，不是只进开发日志）。
+   *
+   * 文案刻意用「已退役」而不是「删除你的配置」—— 前者解释了为什么，后者会让用户继续手工加回去。
+   * 并附备份文件名，用户可据此回看差异。
+   */
+  internal fun retiredRemovalReport(before: Set<String>, after: Set<String>, backupName: String): String? {
+    val removed = before - after
+    if (removed.isEmpty()) return null
+    return "已退役条目被移除（设计行为，非用户配置损坏）：" + removed.sorted().joinToString(",") +
+      "（备份 " + backupName + "）"
+  }
 
   /**
    * 旧「单点」写法的两个 id（0.14.2-fx-2 归一迁移，见 [normalizeLegacyAgentDefaultModel]）。
