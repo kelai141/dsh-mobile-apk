@@ -112,6 +112,11 @@ const VD_STYLE = `
 .dsh-vdisplay-shutdown{margin-left:auto;border-color:var(--dsw-alias-border-l4);color:var(--dsw-alias-label-secondary)}
 .dsh-vdisplay-shutdown:hover{border-color:#e5534b;color:#e5534b}
 .dsh-vdisplay-stage{position:relative;flex:1 1 180px;min-height:180px;overflow:hidden;border-radius:12px;background:var(--dsw-alias-bg-layer-2)}
+/* 空舞台提示（0.14.11）：空屏 / 未连接 / 状态不可用三者在用户眼里都是「一块黑」，
+   看不出是在等画面还是已经坏了。舞台内叠一句居中说明，presenting 后由 1s 轮询自动摘掉。 */
+.dsh-vdisplay-stage-hint{position:absolute;inset:0;margin:0;display:flex;align-items:center;justify-content:center;padding:0 16px;text-align:center;font:var(--dsw-font-markdown-small);color:var(--dsw-alias-label-secondary);pointer-events:none}
+/* 状态不可用（未授权/通道未就绪）时把壳侧 guidance 搬到用户当前这一屏，而不是让人去设置页找。 */
+.dsh-vdisplay-detail{margin:0;padding:0 10px;font:var(--dsw-font-markdown-small);color:var(--dsw-alias-label-secondary);white-space:pre-wrap}
 `
 
 type NativeVdisplayBridge = {
@@ -260,11 +265,18 @@ function VdPanel(props: { sessionId?: unknown }): ReactElement {
       // 原生 SurfaceView 在 WebView 之上，不藏它的话弹层会被虚拟屏画面整块盖住，
       // 用户看到的是「点开三个点，结果被一块黑色虚拟屏挡住」。收起后 next publish 自动恢复。
       const overlapped = document.documentElement.hasAttribute('data-dsh-popover-open')
+      // 应用退后台时判据必须转 false（0.14.11，D1）：后台期间 WebView 的 JS 仍在跑，旧判据六项全不变，
+      // 于是继续下发 visible:true；此时 Surface 已交给浮窗，壳侧 attach 被判 viewer-target-occupied，
+      // 舞台被置 GONE 并进入 30s 冻结——用户按 Home 去用别的应用再回来，侧栏空白最长 30 秒，
+      // 收起/展开也修不好（冻结只由 onDisplayAdded 或 30s 到期解除）。
+      // visibilitychange 已在 watchStageVisibility 里挂了事件通道，所以这里只需要把「后台」算进判据，
+      // 回前台那一拍会自动重发 visible:true，壳侧走正常 reattach 路径。
+      const backgrounded = document.visibilityState === 'hidden'
       nativeBridge()?.vdisplayBounds?.(JSON.stringify({
         left: rect.left, top: rect.top, width: rect.width, height: rect.height,
         viewportWidth: window.innerWidth, viewportHeight: window.innerHeight,
-        visible: !occupiedRef.current && !collapsed && !hidden && !overlapped && snap.state === 'active' &&
-          rect.width > 1 && rect.height > 1,
+        visible: !occupiedRef.current && !collapsed && !hidden && !overlapped && !backgrounded &&
+          snap.state === 'active' && rect.width > 1 && rect.height > 1,
         viewerId: VIEWER_ID,
         // 目标屏别名兜底（0.14.0 设备实锤）：`snap.selected` 在面板刚打开 / 状态未拉到 / 该屏刚被
         // 销毁时为空，壳侧便会退回「按舞台宽高比」拉伸（用户报「自适应缩放不对」）。
@@ -358,6 +370,22 @@ function VdPanel(props: { sessionId?: unknown }): ReactElement {
   }
 
   const screens = snap.screens.filter((screen) => screen.kind === 'virtual')
+  /** 当前该看哪块屏（与 publishBounds 的目标退化口径一致：选中 → 唯一活跃屏）。 */
+  const stageTarget = snap.selected ?? (screens.length === 1 ? screens[0]?.alias : undefined)
+  /**
+   * 是否已有画面挂上。判据只能用壳侧回执里**已验证**的 viewers[]：
+   * viewerId 由宿主生成（页面下发的会被丢弃），所以只能按 target 对齐；
+   * target 未知时不挑指定屏，任一 presenting 即算有画面。
+   */
+  const presenting = snap.viewers.some((viewer) => viewer.presenting &&
+    (stageTarget === undefined || viewer.target === stageTarget))
+  /** 状态不可用时的真因文案（壳侧 guidance 已映射进 detail）；active 态不显示。 */
+  const detailText = snap.state === 'active' ? '' : snap.detail
+  const stageHint = screens.length === 0 || presenting
+    ? ''
+    : snap.state === 'active'
+      ? tr('尚未在虚拟屏上显示内容', 'Nothing is showing on the virtual screen yet')
+      : tr('状态不可用，画面未连接', 'Status unavailable — picture not connected')
 
   if (occupied) {
     return createElement('div', { className: 'dsh-vdisplay-panel', 'data-state': snap.state },
@@ -368,7 +396,7 @@ function VdPanel(props: { sessionId?: unknown }): ReactElement {
 
   return createElement('div', { className: 'dsh-vdisplay-panel', 'data-state': snap.state },
     screens.length === 0
-      ? createElement('p', { className: 'dsh-vdisplay-empty' }, tr('暂无虚拟屏', 'No virtual screens'))
+      ? createElement('p', { className: 'dsh-vdisplay-empty' }, detailText !== '' ? detailText : tr('暂无虚拟屏', 'No virtual screens'))
       : createElement('div', { className: 'dsh-vdisplay-list' },
         screens.map((screen) => createElement('button', {
           key: screen.alias,
@@ -388,7 +416,17 @@ function VdPanel(props: { sessionId?: unknown }): ReactElement {
           'data-action': 'shutdown-all',
           onClick: shutdownAll,
         }, tr('关闭全部', 'Close all'))),
-    createElement('div', { ref: stageRef, className: 'dsh-vdisplay-stage', 'data-testid': 'vdisplay-stage' }),
+    screens.length > 0 && detailText !== ''
+      ? createElement('p', { className: 'dsh-vdisplay-detail' }, detailText)
+      : null,
+    createElement('div', {
+      ref: stageRef,
+      className: 'dsh-vdisplay-stage',
+      'data-testid': 'vdisplay-stage',
+      'data-presenting': presenting ? 'true' : 'false',
+    }, stageHint !== ''
+      ? createElement('p', { className: 'dsh-vdisplay-stage-hint' }, stageHint)
+      : null),
   )
 }
 

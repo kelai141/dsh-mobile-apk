@@ -4,6 +4,8 @@ import android.content.Context
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.util.DisplayMetrics
 import android.view.Gravity
@@ -40,6 +42,8 @@ internal class VdisplayFloat(private val activity: MainActivity) {
     private const val HANDLE_WIDTH_DP = 22
     private const val HANDLE_HEIGHT_DP = 64
     private const val COLLAPSE_SWIPE_DP = 28
+    /** 屏存活看护节拍（1s：不销毁屏、只读一次 activeSize）。 */
+    private const val ALIVE_CHECK_MS = 1000L
     private const val SURFACE_COLOR = 0x66202024
     private val HANDLE_COLOR = 0xCC202024.toInt()
     private const val GRIP_COLOR = 0x59FFFFFF
@@ -70,6 +74,16 @@ internal class VdisplayFloat(private val activity: MainActivity) {
   private var dragging = false
 
   /**
+   * 屏存活看护（0.14.11，D3）：浮窗原本只在 onStop 出现、只在 onStart 消失，中间没有任何
+   * 「屏还在不在」的判据。于是 AI 在后台把虚拟屏 destroy / 空闲回收 / 强制销毁之后，浮窗继续
+   * 显示 SurfaceFlinger 保留的最后一帧——用户看到一张已经不存在的画面，而且浮窗上的「叉」
+   * 只把它收成贴边把手，关不掉。这里用 1s 节拍比对真源 activeSize()：屏没了就收场，
+   * 屏换了尺寸就跟着重算宽高比。
+   */
+  private val aliveHandler = Handler(Looper.getMainLooper())
+  private var aliveCheck: Runnable? = null
+
+  /**
    * 显示浮窗（幂等；仅主线程调用——MainActivity.onStop）。
    * @return 是否处于可见状态（权限/开关/虚拟屏任一不满足即 false）。
    */
@@ -81,6 +95,7 @@ internal class VdisplayFloat(private val activity: MainActivity) {
     val existing = container
     if (existing != null) {
       if (collapsed) expand() else attachSurface()
+      startAliveWatch()
       return true
     }
     val metrics = displayMetrics()
@@ -108,11 +123,55 @@ internal class VdisplayFloat(private val activity: MainActivity) {
     }
     container = built
     attachSurface()
+    startAliveWatch()
     return true
+  }
+
+  /** 屏存活看护：屏没了立刻 hide（不留在死屏最后一帧），换尺寸就重算比例。 */
+  private fun startAliveWatch() {
+    stopAliveWatch()
+    val tick = object : Runnable {
+      override fun run() {
+        if (container == null) { aliveCheck = null; return }
+        val size = VdisplayController.activeSize()
+        if (size == null) {
+          // 屏已被销毁/回收：浮窗必须跟着收场（用户无法从这个窗口里收掉它）。
+          hide()
+          return
+        }
+        val next = size.second.toDouble() / size.first.toDouble().coerceAtLeast(1.0)
+        if (abs(next - aspect) > 0.01) {
+          aspect = next
+          applyAspect()
+        }
+        aliveHandler.postDelayed(this, ALIVE_CHECK_MS)
+      }
+    }
+    aliveCheck = tick
+    aliveHandler.postDelayed(tick, ALIVE_CHECK_MS)
+  }
+
+  private fun stopAliveWatch() {
+    aliveCheck?.let { aliveHandler.removeCallbacks(it) }
+    aliveCheck = null
+  }
+
+  /** 按当前 aspect 重算高（宽沿用窗口现值，夹在本窗允许的比例区间内）。 */
+  private fun applyAspect() {
+    val p = params ?: return
+    val view = container ?: return
+    val metrics = displayMetrics()
+    val shortSide = minOf(metrics.widthPixels, metrics.heightPixels)
+    val width = p.width.coerceIn((shortSide * MIN_RATIO).roundToInt().coerceAtLeast(dp(120)),
+      (shortSide * MAX_RATIO).roundToInt())
+    p.width = width
+    p.height = (width * aspect).roundToInt().coerceAtLeast(dp(120))
+    runCatching { wm.updateViewLayout(view, p) }
   }
 
   /** 回前台：隐藏浮窗并把 Surface 交还侧栏查看器（幂等；仅主线程调用）。 */
   fun hide() {
+    stopAliveWatch()
     hideClose()
     releaseSurface()
     container?.let { view -> runCatching { wm.removeView(view) } }

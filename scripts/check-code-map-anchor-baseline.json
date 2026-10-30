@@ -1923,19 +1923,19 @@
       "} else {"
     ],
     "VdisplayController.kt:529": [
-      "return status(context.applicationContext)"
+      ".put(\"viewerId\", id)"
     ],
     "VdisplayController.kt:554": [
-      ""
+      "}"
     ],
     "VdisplayController.kt:721": [
-      "appContext,"
+      "//      （owner 本人也拒；SafeActivityOptions.checkPermissions 依据的是 START_ACTIVITIES_FROM_BACKGROUND"
     ],
     "VdisplayController.kt:753": [
-      "//   - 读不到       → ok=true  vd-launched-unverified（明写「不构成落点证明」并给出复核手段）"
+      "// **退出码 0 不等于落在目标屏。** 2026-09-19 设备实测：目标包已在真实屏有 task 时，"
     ],
     "VdisplayController.kt:766": [
-      "+ \"ActivityRecord（应用可能已崩溃/退出）——本次不构成落点证明，请用 android_ui_dump 复核该屏内容。\" + amTail)"
+      "return out.put(\"ok\", true).put(\"code\", \"vd-launched-unverified\")"
     ],
     "VdisplayController.kt:84": [
       "*"
@@ -2367,7 +2367,7 @@
       "val display: VirtualDisplay,"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:608": [
-      "*"
+      "out.put(\"guidance\", \"Android 设置已由 Shizuku 拉起到 ${record.alias}（displayId=$id）。\")"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:84": [
       "*"
@@ -2376,7 +2376,7 @@
       "private fun touch(alias: String?) = synchronized(lock) {"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayFloat.kt:76": [
-      "fun show(): Boolean {"
+      "/**"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayHost.kt:157": [
       "fullscreen = false"
@@ -2703,10 +2703,10 @@
       "fun fxRevisionNumberIsCompared() {"
     ],
     "app/src/test/java/com/dsharnessmobile/shell/VdisplayArbitrationTest.kt:14": [
-      "@Test"
+      ""
     ],
     "app/src/test/java/com/dsharnessmobile/shell/VdisplayArbitrationTest.kt:30": [
-      "@Test"
+      ""
     ],
     "app/src/test/java/com/dsharnessmobile/shell/W3ShellContractTest.kt:107": [
       "// `AdbLiveProbeTest.kt`（TTL 内复用 / 过期重探 / 失败不冒充实测成功 / TCP 探测区分端口，4 项全绿）。"
@@ -3157,7 +3157,6 @@
       "let total = 0;",
       "return true;",
       "}",
-      "},",
       "};"
     ],
     "index.ts:1038": [
@@ -3200,7 +3199,6 @@
       "* permission presets read. Enforcement is the Android app domain, not a",
       "// S-5：把本次调用的会话绑定到**当前异步上下文**——bridge 的服务面据此复查档位。",
       "additionalProperties: false,",
-      "const candidate = bridge[method]",
       "id: string",
       "}"
     ],
@@ -3227,7 +3225,7 @@
     "index.ts:165": [
       "",
       "* ADS 授权持久面（0.13.0 F1.7 设置页闭环，2026-08-23；Shizuku 对照收紧）：",
-      "* 所以 `ResizeObserver` 与 `window.resize` 都不触发；旧实现唯一的兜底是 1s 轮询，",
+      "* 把「侧栏收起/展开、切标签页、面板被隐藏」变成**事件驱动**的即时可见性下发。",
       "* 目标屏幕参数（SPEC §2.2 / §4.2）：real 默认，virtual-N 走虚拟屏；语义树需无障碍。",
       "//",
       "TERMUX_VERSION: this.termuxVersion,",
@@ -3251,9 +3249,9 @@
       "",
       "*/",
       "// locale/change 后换绑：sheet 每次打开都读最新的 t。",
-      "// 可见性判据（0.14.0 设备实测修正，与浏览器侧同源）：**必须把「侧栏已收起」算进去**。",
       "additionalProperties: false,",
       "const bashVersion = await this.readBashVersion()",
+      "const publishBounds = useCallback(() => {",
       "function enqueueSession(path: string): { ok: boolean; entryId?: string; message: string } {",
       "return {",
       "writeModeSource: { type: 'string', description: '档位来源：sandboxPolicy.session / sandboxPolicy.default / env-fallback' },"
@@ -3263,8 +3261,8 @@
       "/** First line of `bash --version`, or undefined when bash cannot report it. */",
       "// 按方法名读取而不是走 AndroidShellBridge 的成员：那两个方法由壳侧另一个会话落地，",
       "browserWebViewAvailable: { type: 'boolean', required: true },",
+      "const hidden = getComputedStyle(stage).display === 'none' || getComputedStyle(stage).visibility === 'hidden'",
       "if (typeof data.displayId === 'number') out.displayId = data.displayId",
-      "nativeBridge()?.vdisplayBounds?.(JSON.stringify({",
       "schema: {",
       "ts: new Date().toISOString(),",
       "},"
@@ -3272,19 +3270,19 @@
     "index.ts:281": [
       "",
       "// 无线调试」的实时事实）；旧壳无该键 → 回落 paired（旧的间接证明语义）。",
+      "// 目标屏别名兜底（0.14.0 设备实锤）：`snap.selected` 在面板刚打开 / 状态未拉到 / 该屏刚被",
       "const capsule = new FileCardCapsule(bridgeFace, {",
       "const info = await priv.controlExec?.('vdInfo', {})",
       "displayId: { type: 'integer' },",
-      "useEffect(() => {",
       "}",
       "} catch { /* 审计目录不可建：落审计失败不改变删除结果 */ }",
       "},"
     ],
     "index.ts:295": [
-      "",
       "* 扫描计划 → UI 载荷。**绝不下发绝对路径**：只给稳定 id、类别、`$DSH_HOME`/`$DSH_FILES_DIR`",
       "// Overlay it full-viewport so it has real reading space (fixed escapes the",
       "? writeMode === 'danger-full-access'",
+      "const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(publishBounds)",
       "let ctxRef: Context | undefined",
       "name: 'android_vdisplay_create',",
       "return undefined",
@@ -3295,7 +3293,7 @@
       "* @returns 只读载荷。",
       "* 装配：档位工具 + 只读面板状态路由。",
       "+ '「虚拟屏」查看器，真实屏不受影响。失败时返回结构化 code/guidance（能力缺项、通道未就绪等），'",
-      "// 占用态变化立即重发 bounds（原生层让位）。",
+      "// 事件驱动的可见性下发（0.14.0 用户实报「收起后还要延迟一下才消失」的直接修复）。",
       ": undefined",
       "]",
       "const disposeStyle = injectStyle('trajectory-details', TRAJECTORY_DETAILS_CSS)"
@@ -3313,16 +3311,15 @@
     ],
     "index.ts:313": [
       "* @returns 条目 id；注册面缺失或失败时 undefined（调用方省略 workspaceId，会话仍能建但未分组）。",
-      "// 与浏览器侧同口径（那里也是 refresh + publishBounds 同批，并同样有事件通道）。",
       "// 输出区 scrollWidth 310 / clientWidth 249。TERMINAL_BLOCK_CSS 重绑两个 whitespace",
       "const authOptions = (): AuthOptions => ({",
       "export const A11Y_FRESH_MS = 20_000",
+      "publishBounds()",
       "}",
       "})",
       "}))"
     ],
     "index.ts:368": [
-      "",
       "/\\bchmod\\s+-R\\s+\\d{3,4}\\s+\\//,",
       "filePath: string, width: number | undefined, height: number | undefined, exec: ExecLike, channelNote: string,",
       "for (const t of tools(ctx, svc)) ctx.tools.register(t)",
@@ -3335,9 +3332,9 @@
       "...sizeFields,",
       "auth: authOptions,",
       "const next = ensureChain.then(run, run)",
+      "const presenting = snap.viewers.some((viewer) => viewer.presenting &&",
       "if (!Number.isInteger(d) || d < 0 || d > 20_000) return rejectInput('swipe 的 duration 需为 0-20000 毫秒') as never",
-      "}, NotifySettingsSection))",
-      "}, String(screen.alias.replace('virtual-', '')))),"
+      "}, NotifySettingsSection))"
     ],
     "index.ts:393": [
       "",
@@ -3346,10 +3343,10 @@
       "if (raw.length === 0 || raw.length > 500) return rejectInput('text 长度需为 1-500 字符') as never",
       "return fallback('；无法解析当前模型路由，请用 read_image 读该路径')",
       "sendMobileRouteRejection(res, rejection)",
-      "}"
+      "tr('由会话 ', 'In use by session ') + String(snap.ownerSessionId ?? '').slice(-6)"
     ],
     "index.ts:394": [
-      "",
+      "+ tr(' 使用中', '')))",
       "/** ADB 通道附加黑名单（shell uid=2000 执行面比 app uid 更危险：系统级配置/权限写面一律拒绝）。 */",
       "// 0.14.x 的壳侧同名分区（存在 ≠ 启用，未启用时本就没有任何入口）。",
       "const controller = sessionControllerOf()",
@@ -3370,7 +3367,7 @@
     ],
     "index.ts:428": [
       "//",
-      "// 旧实现每 800ms 无条件 openTab，用户收起侧栏后会被下一拍拽开、点 × 收起也会被切回来",
+      "? createElement('p', { className: 'dsh-vdisplay-stage-hint' }, stageHint)",
       "ctx.effect(() => registerMarketplaceAction(ctx.slots, ctx), 'ui-responsive: marketplace menu entry')",
       "res.end(JSON.stringify({ ok: false, error: 'GET only' }))",
       "return fallback('；内联读图失败（' + String((e as Error).message) + '），请用 read_image 读该路径')",
@@ -3378,9 +3375,9 @@
       "}"
     ],
     "index.ts:432": [
+      "",
       "/**",
       "/** apply 注入的宿主面（命令面/工作区面按调用实时经 ctx.get 读取）。 */",
-      "/** 收起期间出现过、等待用户展开后补落位。 */",
       "export interface ControlAuth {",
       "if (req.method !== undefined && req.method !== 'GET') {",
       "name: 'settings.general.item',",
@@ -3390,36 +3387,36 @@
       "*  - `vdInfo`/`vdCreate`/`vdDestroy`/`state`/`snapshot`/`nodeText`/`screenshot`/`web*`：读面或",
       "// issue #258 §5.1：坐标点击的校验只比较**全局画面**变化，并不验证是否命中目标——",
       "// layer, see below). The mask covers the frame while the drawer is open.",
+      "ctx.effect(() => {",
       "function safeResolveInside(ws: string, path: string): string | null {",
-      "pending = false",
       "sendJson(res, 200, await readVdToolSnapshot(faceOf()))",
       "}"
     ],
     "index.ts:453": [
-      "/* 侧栏未挂载：下一拍重试（seenActive 未置位，保持可重试） */",
       "/** 动画三开关（manage 的 android_env_prepare 读写面）。 */",
       "// The drawer toggle, moved into upstream's own header row (0.14.2 P4).",
       "// 但紧接着的 `android_ui_dump` 明确显示 Switch 从 `[已选中]` 变为未选中——**点击其实成功了**。",
+      "const sidebar = ctx.get('sidebarRight') as SidebarRightController | undefined",
       "wsReal = wsLex"
     ],
     "index.ts:472": [
       "",
+      "// 同浏览器侧：权威收起信号 = 上游展开控件是否在场（`data-rightbar-collapsed` 是常量，不可用）。",
       "const INTERNAL_PRIVILEGED: Record<string, { why: string; allows: (command: string) => boolean }> = {",
       "for (const m of r.stdout.matchAll(/R:(\\w+)=(\\S+)/g)) out[m[1]] = m[2]",
-      "output: {",
-      "title: () => tr('虚拟屏', 'Virtual screen'),"
+      "output: {"
     ],
     "index.ts:477": [
       "'animation-scales': {",
       "*  音乐类 App 播放条常驻动画使窗口永不 idle（\"could not get idle state\" 实锤根因）。 */",
       "// 0.14.7 长按拖动重排：只驱动上游既有的 DnD handler（触摸屏没有原生 drag 触发路径），",
       "// ok/error 是本工具的**错误出口**：队列目录不可读/不可建时（EACCES 等）必须返回",
-      "icon: VirtualScreenGlyph,"
+      "if (document.querySelector('[data-testid=vdisplay-stage]') !== null) return"
     ],
     "index.ts:517": [
       "*",
+      "description: () => tr('在独立屏幕上运行第三方 App（Shizuku 特权通道），不挤占用户前台。',",
       "parameters: {",
-      "return () => { watch?.dispose() }",
       "try { purgeStaleUnclaimed('boot') } catch { /* 清理失败不阻断装配 */ }",
       "}, 'ui-responsive: session-log dialog :has() fallback')"
     ],
@@ -3756,10 +3753,10 @@
       "test('F4b：virtual-only 下 android_web_dump 不得被屏幕范围门拒绝（它读的是壳自有 WebView）', async () => {"
     ],
     "plugins/dsh-android-vdisplay/src/client/index.ts:171": [
-      "*"
+      "* 于是原生覆盖层的消失要等下一拍——用户感知到的就是那一下延迟。"
     ],
     "plugins/dsh-android-vdisplay/src/client/index.ts:194": [
-      "// 不藏起来的话弹层会被虚拟屏画面整块盖住（用户实报）。"
+      "subtree: true,"
     ],
     "plugins/dsh-android-vdisplay/src/client/index.ts:83": [
       "id: string"

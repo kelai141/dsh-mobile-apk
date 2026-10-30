@@ -519,10 +519,20 @@ object VdisplayController {
           .put("target", record.alias)
           .put("guidance", "虚拟屏 ${record.alias} 正由查看器 $owner 显示；同一 Surface 不能同时挂到两个查看器。")
       }
+      // D4（0.14.11）：旧写法先落归属再 setSurface，并把 setSurface 的失败 runCatching 吞掉；
+      // 而 presenting 由 viewerSurface 非空推出 ⇒ 黑屏也报「已挂」。现在先请求输出面，
+      // 成功才落归属；失败回结构化原因、不占用目标（下一次打开查看器还能正常绑）。
+      val applied = runCatching { record.display.setSurface(surface) }.isSuccess
+      if (!applied) {
+        return status(context.applicationContext).put("ok", false)
+          .put("code", "attach-surface-failed")
+          .put("viewerId", id)
+          .put("target", record.alias)
+          .put("guidance", "虚拟屏 " + record.alias + " 的输出面切换失败（Surface 已失效或被系统拒绝）；画面不会显示，请重新打开查看器。")
+      }
       record.viewerId = id
       record.viewerSurface = surface
       selectedAlias = record.alias
-      runCatching { record.display.setSurface(surface) }
       generation += 1
     }
     Log.i(TAG, "viewer=$id attached to ${record.alias} displayId=${record.displayId}")
@@ -818,6 +828,19 @@ object VdisplayController {
     return JSONObject().put("ok", false).put("code", "vdisplay-session-busy").put("op", op)
       .put("ownerSessionId", current)
       .put("guidance", "虚拟屏正由另一个会话使用；请回到该会话，或由用户在设置页强制销毁。")
+  }
+
+  /**
+   * 该 viewer 是否**仍然**持有一块屏的 Surface（0.14.11，D5 / PR #833）。
+   *
+   * 宿主只在 releaseViewerSurface / surfaceDestroyed 时复位自己的 attached；屏被
+   * destroy / 空闲回收 / 强制销毁时 records 会被清掉，宿主的 attached 却留成 true ⇒
+   * applyStageBounds 的 if (!attached) 永远不成立，新建的屏再也挂不上（侧栏永久旧帧）。
+   * 宿主据此每帧自查真源，把「屏不在了」变成已知事实，而不是等轮询间接发现。
+   */
+  internal fun holdsViewerSurface(viewerId: String): Boolean {
+    val id = viewerId.trim().ifBlank { "files-sidebar" }
+    synchronized(lock) { return records.values.any { it.viewerId == id && it.viewerSurface != null } }
   }
 
   /** 当前选中（或第一块）虚拟屏的分辨率；无屏返回 null（浮窗按此保持宽高比）。 */

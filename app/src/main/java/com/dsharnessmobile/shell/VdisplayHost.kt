@@ -313,6 +313,11 @@ internal class VdisplayHost(
     // onDisplayAdded unfreezes immediately).
     stageVisible = true
     if (surface.visibility != View.VISIBLE) surface.visibility = View.VISIBLE
+    // D5（0.14.11）：屏被销毁 / 空闲回收 / 强制销毁时 controller 的 records 被清掉，而宿主的
+    // attached 只在 releaseViewerSurface / surfaceDestroyed 复位 ⇒ 这条 if (!attached) 永远不成立，
+    // 重建出来的屏再也挂不上（侧栏永久停在旧帧，用户只能收起/展开侧栏或切前后台）。
+    // 每帧读一次真源（只读、幂等）：本 viewer 已不再持有任何 Surface 时先把 attached 归零。
+    if (attached && !VdisplayController.holdsViewerSurface(viewerId)) attached = false
     if (!attached) surface.holder.surface?.takeIf { it.isValid }?.let { bindSurface(it) }
     updateFullscreenButton(frame)
   }
