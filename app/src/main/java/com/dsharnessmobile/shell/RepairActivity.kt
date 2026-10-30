@@ -646,7 +646,10 @@ class RepairActivity : Activity() {
     // array element from any temporary gateway envelope fields.
     history.put(JSONObject(answer.toString()))
           lastTextual = RepairToolCallParser.textualToolCalls(answer)
-          val reasoning = answer.optString("reasoning_content", "")
+          // issue #1014：取值走 RepairToolCallParser.reasoningText —— Android 的 org.json 会把
+          // JSONObject.NULL 渲染成字符串 "null"，直接 optString + isNotBlank 会把它当成真实推理，
+          // 于是多出一张正文只有 null 的「思考」卡并被 recordEvent 写进会话事件（重开会话仍在）。
+          val reasoning = RepairToolCallParser.reasoningText(answer)
           if (reasoning.isNotBlank()) {
             removePendingActivity()
             recordEvent(JSONObject().put("type", "reasoning").put("text", reasoning))
