@@ -459,6 +459,84 @@ internal object PhotoCapture {
     return json.toString()
   }
 
+
+  // ── 在途拍照的跨进程恢复（issue #1007）──────────────────────────────────────
+
+  /**
+   * 在途状态的落盘文件名（放 cacheDir，与 attachments 同级）。
+   *
+   * 为什么必须落盘而不是 savedInstanceState：旋转不会重建 Activity（AndroidManifest 的
+   * MainActivity 声明了 configChanges=orientation|screenSize|...），所以重建路径**只有**
+   * 进程死亡。savedInstanceState 跟着进程走，进程没了它也没了；而相机结果由系统在新进程里
+   * 投给新实例的 launcher —— 这正是「桥已回 accepted:true、页面永远等不到 onPhotoCaptured」
+   * 的那条路径。能跨进程的只有文件。
+   */
+  internal const val PENDING_FILE = "photo-pending.json"
+
+  /** 在途状态的最长信任期：超过它说明那次拍照再也不会回来了，按丢失收尾而不是永远占住单槽。 */
+  internal const val PENDING_STALE_MS = 15 * 60 * 1000L
+
+  /** 落盘的在途记录（路径用绝对路径字符串：跨进程只有字节，没有 File 对象）。 */
+  internal data class PendingRecord(val raw: String, val target: String, val startedAt: Long)
+
+  /** 恢复判定结果：没有 / 可以续上 / 已丢失（必须给一条回执，不能静默）。 */
+  internal sealed class PendingRecovery {
+    object None : PendingRecovery()
+    data class Resume(val raw: File, val target: File) : PendingRecovery()
+    data class Lost(val reason: String) : PendingRecovery()
+  }
+
+  /** 在途状态文件的位置（纯函数，单测直接断言，不碰 Context）。 */
+  internal fun pendingStateFile(cacheDir: File): File = File(cacheDir, PENDING_FILE)
+
+  /** 序列化一条在途记录（受理拍照时写，任何终局路径都删）。 */
+  internal fun encodePending(raw: File, target: File, startedAt: Long): String = JSONObject()
+    .put("raw", raw.absolutePath)
+    .put("target", target.absolutePath)
+    .put("startedAt", startedAt)
+    .toString()
+
+  /** 解析在途记录；任何解析失败/字段缺失都返回 null（等价于「没有在途」）。 */
+  internal fun decodePending(text: String): PendingRecord? {
+    val json = runCatching { JSONObject(text) }.getOrNull() ?: return null
+    val raw = json.optString("raw", "")
+    val target = json.optString("target", "")
+    val startedAt = json.optLong("startedAt", 0L)
+    if (raw.isBlank() || target.isBlank() || startedAt <= 0L) return null
+    return PendingRecord(raw, target, startedAt)
+  }
+
+  /**
+   * 判定一条在途记录还能不能续上。
+   *
+   * 四条判据（顺序即优先级）：路径必须落在拍照自己的两个目录内（防坏文件把恢复引到别处）、
+   * 不能超过 [staleAfterMs]、原图必须存在且非空。都不满足才判 [PendingRecovery.Lost] ——
+   * 丢失时必须给出结构化回执，因为页面在等 onPhotoCaptured，静默就是原缺陷。
+   */
+  internal fun classifyPending(
+    record: PendingRecord?,
+    rawDir: File,
+    outputDir: File,
+    now: Long,
+    staleAfterMs: Long = PENDING_STALE_MS,
+  ): PendingRecovery {
+    if (record == null) return PendingRecovery.None
+    val raw = File(record.raw)
+    val target = File(record.target)
+    if (!inside(rawDir, raw) || !inside(outputDir, target)) return PendingRecovery.Lost("path-outside-capture-dirs")
+    if (now - record.startedAt > staleAfterMs) return PendingRecovery.Lost("stale")
+    if (!raw.isFile) return PendingRecovery.Lost("raw-missing")
+    if (raw.length() <= 0L) return PendingRecovery.Lost("raw-empty")
+    return PendingRecovery.Resume(raw, target)
+  }
+
+  /** file 是否在 dir 之内（规范化后按路径前缀比较；不解析符号链接之外的东西）。 */
+  private fun inside(dir: File, file: File): Boolean {
+    val dirPath = runCatching { dir.canonicalFile }.getOrNull()?.path ?: return false
+    val filePath = runCatching { file.canonicalFile }.getOrNull()?.path ?: return false
+    return filePath == dirPath || filePath.startsWith(dirPath + File.separator)
+  }
+
   /** 启动失败归类：相机不存在 / 权限被拒 / 其余一律当「被占用或起不来」。 */
   internal fun classifyLaunchFailure(error: Throwable): String = when (error) {
     is ActivityNotFoundException -> CODE_CAMERA_UNAVAILABLE

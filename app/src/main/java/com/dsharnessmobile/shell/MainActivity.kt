@@ -1376,6 +1376,8 @@ class MainActivity : ComponentActivity() {
         // P0-1：冷启动时点的通知，落点要等这一帧之后页面才有会话视图（文档级就绪 ≠ 会话列表就绪，
         // 故页面侧的回执为 false 时会给出可见提示，而不是静默失败）。
         if (isEngineSource(url)) deliverNotifyRoute()
+        // issue #1007：进程死亡后恢复出来的拍照在途状态若已判丢失，回执要等到页面就绪才送得出去。
+        if (isEngineSource(url)) photoCaptureController.flushDeferredReceipt()
         // 0.14.2-fx-2 缺口：恢复期「拒绝回滚」的提示要在**页面就绪后**注入（引导页会被 showWeb 盖掉）。
         // 挂在这里的两个理由：① 文档级就绪；② 页面**重载**后补注不丢（进程内存里留着文案）。
         if (isEngineSource(url)) deliverRecoveryNotice()
