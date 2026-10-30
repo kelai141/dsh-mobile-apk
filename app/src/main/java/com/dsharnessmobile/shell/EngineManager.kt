@@ -443,7 +443,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
    * 现在：真因码一律解包保留（见 [findSnapshotFsException]）；确实没有码时 `lastRefreshFailureCode` 保持 null，
    * 由本标记表达「未归类」，渲染层据此给出**不同**的文案（见 [refreshFailureLabel]）。
    */
-  var lastRefreshFailureUnclassified: Boolean = false
+  @Volatile var lastRefreshFailureUnclassified: Boolean = false   // #1008：写点在刷新线程 catch，读点在 UI 线程
 
   /**
    * 上一次 [refreshSnapshot] 的 false 是不是**被让行**（另一条快照事务在飞）而不是失败（0.14.8 P1）。

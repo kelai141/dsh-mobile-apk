@@ -450,6 +450,7 @@ sequenceDiagram
 
 ## 4. 耦合矩阵（块 → 块）
 
+
 | 从 | 到 | 关系 | 证据 |
 |---|---|---|---|
 | K01 | 引擎进程与快照面 | EngineStartFlow 在工作线程调 refreshSnapshot/startEngine/engineProcessAlive，Activity 侧只传 Activity 与 pickToken | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:408 |
@@ -795,7 +796,7 @@ Terminal output delivery (#591): `ConsoleSession` sends stripped PTY text throug
 
 - **一句话**：页面里的 `window.androidBridge` / `window.dshBackBridge` 方法面，加壳侧两条对引擎的 HTTP/WS 通道（浏览器 cookie 鉴权、控制队列长轮询）与崩溃自动回撤闸门，共同构成「模型动作怎么落到这台手机上、结果怎么回填、出事怎么自救」的底座。
 - **入口/触发**：
-  - 页面 JS 同步调 `window.androidBridge.*`（现状：71 个 `@JavascriptInterface` 注解、70 个唯一方法名（`browserHostShow` 为重载），唯一安装点 `MainActivity.kt:719-799`；2026-10-11 实测修正，旧值 53/52）与 `window.dshBackBridge.*`（`BackGate.kt:132-148`，仅 2 个方法）；另有 `consoleBridge`（`ConsoleActivity.kt:105`）挂在控制台 WebView。
+  - 页面 JS 同步调 `window.androidBridge.*`（现状：71 个 `@JavascriptInterface` 注解、70 个唯一方法名（`browserHostShow` 为重载），唯一安装点 `MainActivity.kt:719-799`；2026-10-11 实测修正，旧值 53/52）与 `window.dshBackBridge.*`（`BackGate.kt:132-148`，仅 2 个方法）；另有 `consoleBridge`（`ConsoleActivity.kt:112#expect=webView.getLocationOnScreen(location)`）挂在控制台 WebView。
   - `EngineService.onCreate` → `ControlCarrier.ensureStarted`（`EngineService.kt:43`）；无障碍服务连接时同入口（`DeviceControlService.kt:452-453`）。轮询/心跳由此起步。
   - 任一出厂 HTTP 调用方（`EngineProbe.kt:51`、`DownloadSaver.kt:101`、`NotifyBridge.kt:328`、`OverlayPanel.kt:824`、`OverlayService.kt:580`、`MuxClient.kt:91`）在发请求前向 `EngineAuth` 取值。
   - 看门狗 tick 的 `undoReady`（`EngineService.kt:134`）与启动流（`EngineStartFlow.kt:349`）触发 `UndoGate`。
@@ -2154,6 +2155,8 @@ app/src/debug/AndroidManifest.xml
 注入成员检查：plugin-dirs 的 externals 是当前注入集，retiredExternals 只保留历史源码位置。check-inject-completeness 对每个活动包和两个装配 profile 继续全量判定；自检包含缺活动包和缺成员的拒绝反例。
 
 <!-- COVERAGE
+app/src/main/java/com/dsharnessmobile/shell/ConsoleSessionStartGuard.kt
+app/src/test/java/com/dsharnessmobile/shell/ConsoleSessionSingleStartGuardTest.kt
 app/src/main/java/com/dsharnessmobile/shell/FileExternalBridge.kt
 app/src/main/java/com/dsharnessmobile/shell/PhotoCapture.kt
 app/src/main/java/com/dsharnessmobile/shell/PhotoCaptureController.kt
