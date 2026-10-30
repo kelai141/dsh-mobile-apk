@@ -68,7 +68,7 @@ class RepairUiFallbackDeviceTest {
   }
 
   @Test
-  fun 对照组_零候选时界面按钮必须禁用() {
+  fun 对照组_零候选时模型选择器禁用而发送键保持可用() {
     File(dsh, "settings.yaml.imported").writeText(SETTINGS)
     File(dsh, "settings.yaml").delete()
     File(dsh, ".credentials.yaml").writeText(CREDENTIALS)
@@ -77,8 +77,8 @@ class RepairUiFallbackDeviceTest {
     val result = RepairModelConfig.loadDetailed(home)
     val statuses = result.sources.joinToString { it.path + "=" + it.status }
     assertTrue("对照组必须零候选：" + statuses, result.connections.isEmpty())
-    // applyModelState 用 hasModels 控制 modelButton.isEnabled / send.isEnabled；
-    // connections 为空 ⇒ 两者都禁用 ⇒ 用户无法发送。
+    // issue #1012 起 applyModelState 分开控制：modelButton 跟随 modelControlsEnabled（0 候选禁用），
+    // send 跟随 sendEnabled（保持可用，点击由 RepairModelNotice.composer 判定并保留草稿）。
     assertFalse("零候选时默认模型不可用", result.defaultAvailable)
     assertTrue("来源必须记 missing：" + statuses,
       result.sources.any { it.path.endsWith("settings.yaml") && it.status == "missing" })

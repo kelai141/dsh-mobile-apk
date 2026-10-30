@@ -79,10 +79,13 @@ class RepairActivity : Activity() {
   private var diagnosticsReady = false
   private var defaultModelAvailable = false
   private var modelSources = ""
+  /** 配置树的根（`home/.dsh`）整个不存在：运行时还没解出来，不是没配模型（issue #1012）。 */
+  private var modelRootMissing = false
 
   private fun loadRepairModels(): List<RepairModelConnection> {
     val result = RepairModelConfig.loadDetailed(applicationContext)
     defaultModelAvailable = result.defaultAvailable
+    modelRootMissing = result.rootMissing
     // 状态必须说清「为什么没候选」，而不是只报一个「未读到可用模型」。
     // 用户拿着这句话无法区分：没配置 / 配置读不到 / 读到了但缺凭据——三种修法完全不同。
     // 文案表本身也放在 RepairModelNotice（statusLabels），单测钉的是**生产代码用的那份表**；
@@ -162,9 +165,10 @@ class RepairActivity : Activity() {
         connections = loadRepairModels()
         selectedModel = 0
         selectedEffort = connections.firstOrNull()?.defaultReasoningEffort
-        if (connections.isEmpty()) UiText.t(this,
-          "未读到可用模型。可在控制台修好配置后重新读取，也可直接重试引擎。",
-          "No model is available. Fix configuration in the console and reload, or retry the engine.") else null
+        // 0 候选**不在这里**合成一句话（issue #1012）：failure 是「读取本身失败」，
+        // 优先级压过一切。若把「没候选」也塞进 failure，rootMissing 分支永远轮不到，
+        // 用户看到的还是那句「未读到可用模型」。说什么由 RepairModelNotice.present 决定。
+        null
       } catch (e: Exception) {
         UiText.t(this, "读取模型配置失败：", "Could not read model configuration: ") + e.javaClass.simpleName
       }
@@ -313,9 +317,14 @@ class RepairActivity : Activity() {
       defaultUnavailableText = UiText.t(this,
         "当前默认模型不可用。请点右上角选择模型，再发送修复需求。",
         "The configured default model is unavailable. Choose a model at the top right before sending a repair request."),
+      rootMissing = modelRootMissing,
+      rootMissingText = UiText.t(this,
+        "运行时还没解出来（配置目录尚不存在）。这不是模型没配好——请返回启动页重试引擎，等快照解压完成后再回来看。也可打开控制台查看启动日志。",
+        "The runtime has not been extracted yet; the configuration directory does not exist. This is not a missing model: go back and retry the engine, then return once the snapshot finishes extracting. The console shows the startup log."),
     )
     modelButton.isEnabled = notice.modelControlsEnabled
-    send.isEnabled = notice.modelControlsEnabled
+    // 发送键与模型选择分开（issue #1012 A3）：0 候选时选择器确实没得选，但发送不该一起关。
+    send.isEnabled = notice.sendEnabled
     modelNotice?.visibility = if (notice.visible) View.VISIBLE else View.GONE
     modelNoticeText?.text = notice.text.orEmpty()
     modelNoticeText?.visibility = if (notice.visible) View.VISIBLE else View.GONE
@@ -330,12 +339,10 @@ class RepairActivity : Activity() {
     reloadModels?.isEnabled = false
     Thread {
       val loaded = runCatching { loadRepairModels() }
+      // 同上（issue #1012）：只有「读取抛错」才是 failure；0 候选交给 present() 判该说哪句。
       val failure = loaded.exceptionOrNull()?.let {
         UiText.t(this, "读取模型配置失败：", "Could not read model configuration: ") + it.javaClass.simpleName
-      } ?: if (loaded.getOrDefault(emptyList()).isEmpty()) {
-        UiText.t(this, "未读到可用模型，请检查本地模型配置与凭据。",
-          "No model is available. Check local model configuration and credentials.")
-      } else null
+      }
       val next = loaded.getOrDefault(emptyList())
       runOnUiThread {
         if (!alive) return@runOnUiThread
@@ -343,7 +350,9 @@ class RepairActivity : Activity() {
         restoreSelection()
         applyModelState(failure)
         reloadModels?.isEnabled = true
-        if (failure == null) addSystemMessage(
+        // 只有真的读到了候选才说「已重新读取」：0 候选时上面那句横幅才是用户该看的，
+        // 再补一句「已重新读取」会让人以为已经好了（issue #1012）。
+        if (failure == null && next.isNotEmpty()) addSystemMessage(
           UiText.t(this, "已重新读取模型配置。", "Model configuration reloaded."),
         )
       }
@@ -625,16 +634,23 @@ class RepairActivity : Activity() {
   }
 
   private fun submit() {
-    val text = input.text.toString().trim()
     if (busy.get()) return
-    if (text.isNotEmpty()) {
-      input.setText("")
-      runAgent(text)
-    } else {
-      // Do not append a duplicate prompt when the user taps send on an empty
-      // composer. Chat history must reflect what was actually typed.
+    val text = input.text.toString().trim()
+    // 判定在 RepairModelNotice（纯函数、可单测）；这里只落结果。
+    // 关键顺序（issue #1012 A3）：先按判定确认真的要发，再清空输入。
+    // 旧实现先 input.setText("") 再在 runAgent() 里无候选时静默 return——
+    // 用户打的字凭空消失且界面毫无反应。
+    val decision = RepairModelNotice.composer(connections.size, text)
+    // Do not append a duplicate prompt when the user taps send on an empty composer.
+    if (!decision.send && !decision.notifyNoModel) return
+    if (decision.notifyNoModel) {
+      addSystemMessage(UiText.t(this,
+        "没有可用模型，这条消息没有发出，内容已保留在输入框。请先重新读取模型配置，或返回启动页重试引擎。",
+        "No model is available, so this message was not sent. Your draft is kept in the composer. Reload the model configuration, or go back and retry the engine."))
       return
     }
+    input.setText("")
+    runAgent(text)
   }
 
   private fun runAgent(prompt: String) {
@@ -773,9 +789,14 @@ class RepairActivity : Activity() {
         runOnUiThread {
           if (alive) {
             setBusy(false)
+            // 两个 issue 在这几行的并集解：#1017 把这一处从「主线程再整份解析一遍配置」改成
+            // 复用 worker 上已经解好的 refreshed（那个只返回候选的窄入口已被 #1017 删除，
+            // 唯一解码点只剩后台的 loadRepairModels）；#1012 A3 的判据（发送键不按候选数关）
+            // 保留 —— 两者互不矛盾。
             connections = refreshed
             selectedModel = selectedModel.coerceIn(0, refreshed.lastIndex.coerceAtLeast(0))
-            send.isEnabled = refreshed.isNotEmpty()
+            // 与 applyModelState / setBusy 同一条规则（issue #1012 A3）：发送键不按候选数关。
+            send.isEnabled = true
             modelButton.isEnabled = refreshed.isNotEmpty()
           }
         }
@@ -787,7 +808,9 @@ class RepairActivity : Activity() {
     input.isEnabled = !value
     reloadModels?.isEnabled = !value
     modelButton.isEnabled = connections.isNotEmpty()
-    send.isEnabled = connections.isNotEmpty()
+    // 发送键在空闲态始终可点（issue #1012 A3）；0 候选时点击由 submit() 给出可见提示
+    // 并保留草稿，而不是让用户对着一颗点不动的按钮猜。
+    send.isEnabled = true
     styleSendButton(this, send, value)
   }
 

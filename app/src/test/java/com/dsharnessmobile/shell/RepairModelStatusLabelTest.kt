@@ -83,7 +83,20 @@ class RepairModelStatusLabelTest {
       val previous = seen.put(text, status)
       assertTrue("状态 $status 与 $previous 文案重复：$text", previous == null)
     }
-    assertEquals("已知状态数应与实现一致", 7, RepairModelNotice.KNOWN_STATUSES.size)
+    assertEquals("已知状态数应与实现一致", 8, RepairModelNotice.KNOWN_STATUSES.size)
+  }
+
+  // ── 5.5 根缺失（issue #1012）：必须与「文件不存在」可区分 ─────────────────
+
+  @Test
+  fun `根缺失不能与单个文件不存在同句`() {
+    // 两者修法相反：一个回启动页重试引擎（等快照解出来），一个去写配置。
+    val rootMissing = label("root-missing")
+    val missing = label("missing")
+    assertNotEquals("根缺失与「文件不存在」不能同句", missing, rootMissing)
+    assertNotEquals("根缺失也不能落到兜底句", fallback, rootMissing)
+    assertTrue("必须点明是运行时没解出来，实际：" + rootMissing,
+      rootMissing.contains("运行时"))
   }
 
   // ── 6. 未登记状态回落，不抛错 ─────────────────────────────────────────────
