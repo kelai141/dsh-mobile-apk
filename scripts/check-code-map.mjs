@@ -66,6 +66,24 @@ const ALLOW_SOURCE_LINES_DROP = argv.includes('--allow-source-lines-drop')
 // issue #1023 补齐面：耦合边段的减少（整节被删 / 边被移除）必须显式声明，否则拒绝判绿。
 // 与 --allow-source-lines-drop 同形制：合法删除与静默丢失形状相同，只能靠显式声明区分。
 const ALLOW_COUPLING_DROP = argv.includes('--allow-coupling-drop')
+/**
+ * issue #1003：符号锚点段的下降守卫同样必须有显式逃生口。
+ *
+ * 为什么必须补：`refreshCompletenessProblem` 的 `allowDrop` 形参此前**没有任何调用方传值**，
+ * 于是一旦命中就再无出路——合法清理也只能手改基线 JSON（正是守卫消息自己建议的做法）。
+ * 判据有、出口没有 = 判据在教人绕过判据；形参存在但恒为默认值，等价于死代码。
+ */
+const ALLOW_SYMBOL_DROP = argv.includes('--allow-symbol-drop')
+/**
+ * 比例阈值覆盖（0..1）。解析不出数值时保持 undefined，交给 resolveSymbolDropRatio 回落默认——
+ * 让「参数写错」表现为「按默认值判并在日志里报当前阈值」，而不是「门禁崩溃」或「门禁被静默关掉」。
+ */
+const SYMBOL_DROP_MAX_RATIO = (() => {
+  const raw = argOf('symbol-drop-max-ratio', undefined)
+  if (raw === undefined) return undefined
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) ? parsed : undefined
+})()
 const DERIVE_ANCHORS = argv.includes('--derive-anchors')
 const DERIVE_DRY_RUN = argv.includes('--derive-dry-run')
 /** CI 等价性检查：apk 仓在被独立检出时没有协调仓父目录，--no-parent 用来本地预演那种情形。 */
@@ -1869,13 +1887,16 @@ if (isMain) {
       console.error('If this is a legitimate stale-key cleanup, re-run with --allow-source-lines-drop.')
       process.exit(1)
     }
+    // issue #1003：把「允许下降」与「比例阈值」两个入口真正接上。
+    // 上一版形参存在却从未传值，等于守卫没有出口——合法清理只能手改基线 JSON。
     const refreshGuard = refreshCompletenessProblem(
       symbolKeys, symbols, symbolHashes,
       Object.keys(anchorBaselineSymbols()), Object.keys(anchorBaselineSymbolHashes()),
+      ALLOW_SYMBOL_DROP,
+      { maxRatio: SYMBOL_DROP_MAX_RATIO },
     )
     if (refreshGuard !== null) {
       console.error('Refusing to refresh: ' + refreshGuard)
-      console.error('This is how a silent baseline downgrade happens — check whether the anchors changed form.')
       process.exit(1)
     }
     // #1023：耦合边基线。刷新侧与校验侧用**同一份** key 生成器（couplingBaselineEntries），

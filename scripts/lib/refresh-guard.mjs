@@ -25,27 +25,92 @@
  */
 
 /**
- * 符号锚点段的**下降守卫**（issue #1003）。口径与同一个模块里的 `sourceLinesDropProblem` 一致：
- * 形状相同的两种含义（合法清理 vs 解析退化）不可区分，所以**不无条件拦、也不无条件放**，
- * 默认拒绝并列出被丢掉的键，显式声明才放行。
+ * 比例阈值的**默认值**（issue #1003）。
  *
- * @param {string[]} prevKeys 旧基线里的符号锚点键
- * @param {string[]} nextKeys 本轮解析出的符号锚点键
- * @param {boolean} allow 是否已显式声明允许下降
- * @returns {string|null} null = 可以写盘；字符串 = 拒绝原因
+ * 为什么用「比例」而不是「条数」：符号锚点总数随仓演进，绝对值没有可比性。
+ * 实测两种真实形态相差一个数量级以上——
+ *   · 正常清理 / 锚点换形态：本仓实测 59 -> 58（1.7%）、93 -> 81（12.9%），必须放行；
+ *   · 解析器退化（#868 形态）：132 -> 60（54.5%），必须判红。
+ * 20% 把两者分在两侧，且留足余量：锚点迁移这类整批换形态通常一次到位到 0% 或只剩小幅残留，
+ * 不会停在中间地带。
  */
-export function symbolDropProblem(prevKeys, nextKeys, allow) {
-  if (allow) return null
+export const DEFAULT_SYMBOL_DROP_RATIO = 0.2
+/**
+ * 绝对条数的**下限**，与比例阈值同时成立才判红。
+ *
+ * 为什么还要这一层：分母很小时比例会剧烈放大——基线只有 2 条时删 1 条就是 50%，
+ * 直接判红会把「刚建基线、还在调整」的正常阶段钉死。加绝对下限后，
+ * 小分母抖动走 allow 通道，大分母退化走阈值通道，两条路都留了出口。
+ */
+export const DEFAULT_SYMBOL_DROP_MIN_COUNT = 3
+
+/**
+ * 解析生效的比例阈值：显式实参 > 环境变量 > 默认值。
+ *
+ * 三个入口都要有，因为三种调用者的处境不同：
+ *   · 门禁本体（check-code-map.mjs）用实参，便于 --symbol-drop-max-ratio 覆盖；
+ *   · CI / 本地一次性排查用环境变量，不必拼命令行；
+ *   · 自检用显式实参，断言不依赖外部环境（否则自检会随机器配置飘）。
+ * 非法值一律回落默认：污染的环境变量不能变成「把门禁关掉」的开关。
+ */
+export function resolveSymbolDropRatio(explicit) {
+  if (typeof explicit === 'number' && Number.isFinite(explicit) && explicit >= 0 && explicit <= 1) return explicit
+  const raw = process.env.DSH_CODE_MAP_SYMBOL_DROP_RATIO
+  if (raw !== undefined && raw !== '') {
+    const parsed = Number(raw)
+    if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 1) return parsed
+  }
+  return DEFAULT_SYMBOL_DROP_RATIO
+}
+
+/**
+ * 符号锚点段的**下降守卫**（issue #1003）。
+ *
+ * 判据：本轮文档解析出的符号锚点比旧基线**少**，且**同时**满足
+ *   ① 少掉的条数 >= minCount（默认 3）
+ *   ② 少掉的占比 > maxRatio（默认 20%）
+ *
+ * 为什么不能照抄同模块 `sourceLinesDropProblem` 的「有下降就拒」：
+ * `sourceLines` 是**按当前引用重建**的（引用消失 ⇒ 键真的从基线消失），那边「基线有、现在没有」
+ * 就是字面意义上的「会丢」。`symbols` / `symbolHashes` 不是——`check-code-map.mjs` 写盘时
+ * 先展开旧基线再叠加本轮锚点（`symbols = { ...anchorBaselineSymbols() }`），**从不删键**。
+ * 所以这里比出来的「下降」并不等于「落盘会丢」，它真正的含义是**文档侧的符号锚点面变小了**，
+ * 也就是解析退化的信号。判据按这个语义定阈值，而不是按「会不会丢」定零容忍。
+ *
+ * 零容忍版本的实测后果：基线里只要有一个文档已不再引用的陈旧键（任何一次锚点迁移都会留下），
+ * refresh 就永久被拒，而落盘结果里那个键根本不会消失。本仓实测即
+ * `ShellOps.kt#INTERPRETER_NAMES`（59 -> 58，1.7%）把 refresh 钉死，唯一出路是手改基线 JSON
+ * ——而这恰是守卫消息自己建议的做法，等于判据在教人绕过判据。
+ *
+ * @param {string[]} prevKeys 旧基线里该段的键
+ * @param {string[]} nextKeys 本轮文档解析出的键
+ * @param {{allow?: boolean, maxRatio?: number, minCount?: number}} [options]
+ * @returns {string|null} null = 可以写盘；字符串 = 拒绝原因（含真因与两条出路）
+ */
+export function symbolDropProblem(prevKeys, nextKeys, options = {}) {
+  const opts = options ?? {}
+  if (opts.allow === true) return null
+  if (prevKeys.length === 0) return null
   const next = new Set(nextKeys)
   const dropped = prevKeys.filter((k) => !next.has(k))
   if (dropped.length === 0) return null
-  // 必须同时给出**比例**，不能只给条数：132→60 与 132→131 的事故等级差一个数量级，
-  // 只报「drop 72 key(s)」看不出前者是解析退化、后者是正常清理。
-  const pct = prevKeys.length === 0 ? 0 : Math.round((dropped.length / prevKeys.length) * 1000) / 10
-  return 'symbol anchors would drop ' + dropped.length + '/' + prevKeys.length + ' (' + pct + '%): '
+  const minCount = typeof opts.minCount === 'number' ? opts.minCount : DEFAULT_SYMBOL_DROP_MIN_COUNT
+  const maxRatio = resolveSymbolDropRatio(opts.maxRatio)
+  if (dropped.length < minCount) return null
+  const ratio = dropped.length / prevKeys.length
+  // 严格大于：恰好等于阈值仍放行。阈值是「超过即红」的分界线，
+  // 把等号算进红会让「按阈值配的那个具体数字」变成不可用的配置（实际生效值永远比写的大一档）。
+  if (ratio <= maxRatio) return null
+  const pct = Math.round(ratio * 1000) / 10
+  const limitPct = Math.round(maxRatio * 1000) / 10
+  return 'symbol anchors would drop ' + dropped.length + '/' + prevKeys.length + ' (' + pct + '%)'
+    + ', above the ' + limitPct + '% threshold: '
     + dropped.slice(0, 12).join(', ') + (dropped.length > 12 ? ' …' : '')
-    + '；若确认是合法的锚点清理，先从 scripts/check-code-map-anchor-baseline.json 的 symbols/symbolHashes'
-    + ' 段删掉这些键（删改会进 git diff，可复核）再重跑刷新'
+    + '。真因通常是**文档侧的符号锚点面变小了**（解析器退化、或一批锚点换了形态），'
+    + '不是基线缺登记——先看这些键是否仍在 docs/AGENTS/EXECUTION-MAP.md 里被引用：'
+    + '仍在 => 解析退化，修解析器；已删 => 合法清理，加 --allow-symbol-drop 后重跑。'
+    + '阈值可用 --symbol-drop-max-ratio <0..1> 或环境变量 DSH_CODE_MAP_SYMBOL_DROP_RATIO 调整'
+    + '（当前 ' + limitPct + '%，绝对下限 ' + minCount + ' 条）。'
 }
 
 /**
@@ -54,24 +119,36 @@ export function symbolDropProblem(prevKeys, nextKeys, allow) {
  * @param symbolHashes 即将写入的 symbolHashes 段
  * @param prevSymbols 旧基线里 symbols 的键
  * @param prevHashes 旧基线里 symbolHashes 的键
- * @param allowDrop 显式声明「允许符号锚点下降」（issue #1003；默认 false = 拒绝部分丢）
+ * @param allowDrop 显式声明「允许符号锚点下降」（issue #1003）
+ * @param dropOptions {maxRatio?, minCount?} 阈值覆盖；缺省走 symbolDropProblem 的默认值与环境变量
  * @returns null = 可以写盘；字符串 = 拒绝原因
  */
-export function refreshCompletenessProblem(symbolKeys, symbols, symbolHashes, prevSymbols, prevHashes, allowDrop = false) {
+export function refreshCompletenessProblem(
+  symbolKeys, symbols, symbolHashes, prevSymbols, prevHashes, allowDrop = false, dropOptions = {},
+) {
   if (symbolKeys.length === 0 && (prevSymbols.length > 0 || prevHashes.length > 0)) {
     return 'the document no longer yields ANY symbol anchor, but the previous baseline had '
       + prevSymbols.length + ' symbols / ' + prevHashes.length + ' hashes'
   }
-  // issue #1003：部分丢（132 → 60）与全丢同属「基线静默降级」，必须同一口径拒绝。
+  // issue #1003：部分丢与全丢同属「文档侧锚点面退化」，用同一口径（比例阈值见 symbolDropProblem）。
   // 全丢那条判据保留在外层：它的文案更具体（点名「一条都不剩」），且自检按文案钉住。
-  const drop = symbolDropProblem(prevSymbols, symbolKeys.map((a) => a.path + '#' + a.symbol), allowDrop)
+  const opts = { ...(dropOptions ?? {}), allow: allowDrop === true }
+  const drop = symbolDropProblem(prevSymbols, symbolKeys.map((a) => a.path + '#' + a.symbol), opts)
   if (drop !== null) return drop
-  const dropHash = symbolDropProblem(
-    prevHashes,
-    symbolKeys.filter((a) => a.symbolHash !== undefined).map((a) => a.path + '#' + a.symbol + '@' + a.symbolHash),
-    allowDrop,
-  )
-  if (dropHash !== null) return dropHash
+  // **只有 `symbols` 段能用「基线 vs 文档」的比例当退化信号**，`symbolHashes` 段不能 —— 两者的
+  // 陈旧键产生率差一个量级，这是实测出来的，不是设计偏好：
+  //
+  //   · `symbols` 键 = `path#Symbol`。某个符号整条从文档消失才留一条陈旧键，很罕见。
+  //     本仓实测 59 -> 58，只有 1 条（`ShellOps.kt#INTERPRETER_NAMES`）。
+  //   · `symbolHashes` 键 = `path#Symbol@hash`。任何**被锚定的那一行内容**改动，旧 hash 就永久退休；
+  //     而基线写盘是并集（`{ ...旧基线 }` 再叠加本轮），从不删键。于是该段陈旧键随仓龄**单调累积**，
+  //     baseline-vs-doc 的比例只增不减。本仓实测 94 -> 75：丢的 19 条里 **18 条是同一符号换了 @hash**
+  //     （symbols 段仍然在），只有 1 条是真的符号整条消失。
+  //
+  // 所以对 hash 段用比例阈值，等于给 refresh 装了一个**倒计时**：今天 20.2% 已经越线，
+  // 明天只会更高。上一版（零容忍、且两段同判）因此在干净 main 上就已把 refresh 钉死。
+  // hash 段该管的不是「条数变少」，而是「本轮解析出的 @hash 有没有真的进基线」——那是下面
+  // missHash 的判据，它按本轮锚点逐个核对，与陈旧键多少无关。这里保留全丢兜底即可（外层已覆盖）。
   const missSym = symbolKeys
     .filter((a) => !Object.hasOwn(symbols, a.path + '#' + a.symbol))
     .map((a) => a.path + '#' + a.symbol)
@@ -142,18 +219,40 @@ if (SELF_TEST) {
     ['REFUSE_MISSING_HASH', 'miss', [k('a.kt', 'f', 'h1')], { 'a.kt#f': 'body' }, {}, [], []],
     // ⑥ 旧基线为空、文档也为空 -> 允许（首次建基线）
     ['OK_FIRST_TIME_EMPTY', null, [], {}, {}, [], []],
-    // ⑦ issue #1003：部分丢（132 → 60）必须拒绝 —— 旧实现这里返回 null
+    // ⑦ issue #1003：大幅部分丢（132 -> 60 = 54.5%）必须拒绝 —— 解析退化的典型形态。
     ['REFUSE_PARTIAL_DROP_132_TO_60', 'drop',
       asAnchors(keys(60)), Object.fromEntries(keys(60).map((key) => [key, 'body'])), {},
       keys(132), []],
-    // ⑧ 少量丢（131 → 130）同样要拒绝：门槛不是「丢多少」，而是「有没有声明」
-    ['REFUSE_PARTIAL_DROP_131_TO_130', 'drop',
-      asAnchors(keys(130)), Object.fromEntries(keys(130).map((key) => [key, 'body'])), {},
-      keys(131), []],
-    // ⑨ 显式声明后部分丢放行（合法陈旧键清理的口子）
+    // ⑧ issue #1003：**小幅**下降必须放行。零容忍版本在这里误报，真因是写盘为并集（从不删键），
+    //    所以「文档少引用几条」并不等于「基线会丢」。本仓实测形态即 59 -> 58（1.7%，
+    //    陈旧键 ShellOps.kt#INTERPRETER_NAMES）。
+    ['OK_SMALL_DROP_59_TO_58', null,
+      asAnchors(keys(58)), Object.fromEntries(keys(58).map((key) => [key, 'body'])), {},
+      keys(59), []],
+    // ⑨ 恰好落在阈值上放行；刚越过阈值判红 —— 钉住「超过才红」这个边界口径，
+    //    否则配置的百分比会不可用（实际生效值永远比写的大一档）。
+    ['OK_AT_THRESHOLD_100_TO_80', null,
+      asAnchors(keys(80)), Object.fromEntries(keys(80).map((key) => [key, 'body'])), {},
+      keys(100), []],
+    ['REFUSE_JUST_OVER_THRESHOLD_100_TO_79', 'drop',
+      asAnchors(keys(79)), Object.fromEntries(keys(79).map((key) => [key, 'body'])), {},
+      keys(100), []],
+    // ⑩ 小分母抖动放行：基线只有 2 条时删 1 条 = 50%，比例看着吓人但属正常调整。
+    //    绝对下限（默认 3 条）挡的就是这一类，不能只看比例。
+    ['OK_SMALL_DENOMINATOR_2_TO_1', null,
+      asAnchors(keys(1)), Object.fromEntries(keys(1).map((key) => [key, 'body'])), {},
+      keys(2), []],
+    // ⑪ 显式声明后部分丢放行（合法陈旧键清理的口子）
     ['OK_PARTIAL_DROP_ALLOWED', null,
       asAnchors(keys(60)), Object.fromEntries(keys(60).map((key) => [key, 'body'])), {},
       keys(132), [], true],
+    // ⑫ issue #1003 的**根因回归位**：`symbolHashes` 段的陈旧键随仓龄单调累积（hash 轮换），
+    //    不能拿「基线 vs 文档」的比例当退化信号，否则 refresh 只是早晚被锁死。
+    //    本仓实测形态：symbols 只丢 1 条，而 hashes 丢 19/94（20.2%，其中 18 条是同一符号换了 @hash）。
+    //    这条断言钉死「hash 段下降不得单独判红」——把它改回参与比例判定，本用例即变红。
+    ['OK_STALE_HASH_ROTATION_94_TO_75', null,
+      [k('a.kt', 'f', 'h1')], { 'a.kt#f': 'body' }, { 'a.kt#f@h1': true },
+      ['a.kt#f'], Array.from({ length: 94 }, (_, i) => 'a.kt#f@stale' + i)],
     // ⑩ 数量增加不判红（新增锚点是正常演进）
     ['OK_GROWTH', null,
       asAnchors(keys(140)), Object.fromEntries(keys(140).map((key) => [key, 'body'])), {},
@@ -180,14 +279,40 @@ if (SELF_TEST) {
     if (!ok) failed2 += 1
     console.log((ok ? '  ok   ' : '  FAIL ') + name + ': ' + (got === null ? 'null' : 'refused'))
   }
-  // #1003：下降守卫自身必须报出比例（只报条数看不出事故等级）
-  const dropMsg = symbolDropProblem(keys(132), keys(60), false) ?? ''
+  // #1003：下降守卫的报错必须给出**比例 + 阈值 + 真因 + 两条出路**。
+  // 只报条数看不出事故等级；只报「拒绝」会让读日志的人去改基线而不是查解析器。
+  const dropMsg = symbolDropProblem(keys(132), keys(60), {}) ?? ''
   const ratio = /\((\d+(?:\.\d+)?)%\)/.exec(dropMsg)
   const ratioOk = ratio !== null && Math.abs(Number(ratio[1]) - 54.5) < 0.2
   if (!ratioOk) failed2 += 1
   console.log((ratioOk ? '  ok   ' : '  FAIL ') + 'SYMBOL_DROP_REPORTS_RATIO: ' + (dropMsg === '' ? 'null' : dropMsg.slice(0, 60)))
+  // 同一条消息必须点明真因（文档侧锚点面变小，不是基线缺登记）与两条出路。
+  const causeOk = /解析器退化/.test(dropMsg) && /--allow-symbol-drop/.test(dropMsg) && /DSH_CODE_MAP_SYMBOL_DROP_RATIO/.test(dropMsg)
+  if (!causeOk) failed2 += 1
+  console.log((causeOk ? '  ok   ' : '  FAIL ') + 'SYMBOL_DROP_REPORTS_CAUSE_AND_ESCAPE')
+  // 阈值可配置：显式实参 > 环境变量 > 默认值，且非法值一律回落默认（不能让坏配置把门禁关掉）。
+  const thresholds = [
+    ['默认值 0.2', resolveSymbolDropRatio(undefined), 0.2],
+    ['显式实参优先', resolveSymbolDropRatio(0.5), 0.5],
+    ['非法实参 2 -> 默认', resolveSymbolDropRatio(2), 0.2],
+    ['非法实参 NaN -> 默认', resolveSymbolDropRatio(Number.NaN), 0.2],
+  ]
+  const prevEnv = process.env.DSH_CODE_MAP_SYMBOL_DROP_RATIO
+  process.env.DSH_CODE_MAP_SYMBOL_DROP_RATIO = '0.4'
+  thresholds.push(['环境变量生效', resolveSymbolDropRatio(undefined), 0.4])
+  thresholds.push(['环境变量被实参覆盖', resolveSymbolDropRatio(0.1), 0.1])
+  process.env.DSH_CODE_MAP_SYMBOL_DROP_RATIO = 'bogus'
+  thresholds.push(['环境变量非法 -> 默认', resolveSymbolDropRatio(undefined), 0.2])
+  if (prevEnv === undefined) delete process.env.DSH_CODE_MAP_SYMBOL_DROP_RATIO
+  else process.env.DSH_CODE_MAP_SYMBOL_DROP_RATIO = prevEnv
+  for (const [name, got, want] of thresholds) {
+    const ok = got === want
+    if (!ok) failed2 += 1
+    console.log((ok ? '  ok   ' : '  FAIL ') + 'SYMBOL_DROP_RATIO_' + name + ': ' + got + ' / ' + want)
+  }
   failed += failed2
+  const total = cases.length + cases2.length + 1 + 2 + thresholds.length
   console.log((failed === 0 ? 'REFRESH-GUARD SELF-TEST PASSED' : 'REFRESH-GUARD SELF-TEST FAILED')
-    + '（' + (cases.length + cases2.length + 1 - failed) + '/' + (cases.length + cases2.length + 1) + '）')
+    + '（' + (total - failed) + '/' + total + '）')
   process.exit(failed === 0 ? 0 : 1)
 }
