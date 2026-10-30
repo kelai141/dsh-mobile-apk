@@ -100,7 +100,6 @@ await new Promise((r) => setTimeout(r, 1800))
 
 const fresh = contexts.slice(before)
 const byOrigin = (o) => fresh.filter((c) => c.origin === o)
-const rows = []
 
 /**
  * 5 秒轮询：单点取样证明不了「全程」。
@@ -180,19 +179,50 @@ if (!frameCtx) {
   rows.push({ assert: 'N5 子帧解析期可见性（补充）', expect: 'undefined', got: parseProbe.value, pass: parseProbe.value === 'undefined' })
 }
 
-// ── 同源子帧正控（条件 4）──────────────────────────────────────────────
-const sameOrigin = fresh.filter((c) => c.origin && c.origin.startsWith('http'))
-const soCtx = sameOrigin.length ? sameOrigin[sameOrigin.length - 1] : null
-if (soCtx) {
-  const r = await evalIn(soCtx.id, probeScript(PROBES.read))
-  const t = await evalIn(soCtx.id, 'typeof window.androidBridge')
-  rows.push({ assert: 'P3 同源子帧 read 可用（条件 4：不误伤 artifact 预览）', expect: 'reachable', got: { probe: r.value, typeofBridge: t.value }, pass: !!(r.value && r.value.reachable) })
-} else {
-  rows.push({ assert: 'P3 同源子帧 read', expect: 'reachable', got: 'no same-origin context observed', pass: false })
+// ── 同源子帧正控（条件 4：不误伤 HTML artifact 预览）────────────────────
+//
+// 必须造**真实同源**的 iframe（真实 URL，父子真同源），不能用 srcdoc 模拟：
+// 实测 srcdoc + sandbox=allow-same-origin 的帧仍是不透明 origin（location.origin 为 "null"），
+// 它的执行上下文虽然报 http origin，但那是父文档的 origin 标签，帧内其实拿不到父的桥。
+// 用 srcdoc 当正控会得到一个假 FAIL。
+const beforeSame = contexts.length
+await evalIn(null, `(() => {
+  const old = document.getElementById('gq-so'); if (old) old.remove()
+  const f = document.createElement('iframe')
+  f.id = 'gq-so'
+  f.src = location.origin + '/'
+  document.body.appendChild(f)
+  return 1
+})()`)
+await new Promise((r) => setTimeout(r, 4000))
+
+const sameCandidates = contexts
+  .slice(beforeSame)
+  .filter((c) => c.origin && c.origin.startsWith('http'))
+
+let p3pass = false
+let p3got = 'no same-origin context observed'
+for (const c of sameCandidates) {
+  // 用帧自己的 canary 判定：allowed 且 top=false 才是真正的同源子帧放行。
+  const can = await evalIn(c.id, "document.documentElement.getAttribute('data-dsh-bridge-guard')")
+  let parsed = null
+  try { parsed = can.value ? JSON.parse(can.value) : null } catch { parsed = null }
+  if (!parsed || parsed.top !== false) continue
+  const r = await evalIn(c.id, probeScript(PROBES.read))
+  const t = await evalIn(c.id, 'typeof window.androidBridge')
+  p3got = { canary: parsed, probe: r.value, typeofBridge: t.value }
+  p3pass = !!(r.value && r.value.reachable) && t.value === 'object' && parsed.allowed === true
+  if (p3pass) break
 }
+rows.push({
+  assert: 'P3 真实同源子帧 read 可用（条件 4：不误伤 artifact 预览）',
+  expect: 'allowed + reachable',
+  got: p3got,
+  pass: p3pass,
+})
 
 // 清理
-await evalIn(null, "(() => { for (const id of ['gq-a','gq-b','gq-c']) { const o = document.getElementById(id); if (o) o.remove() } return 1 })()")
+await evalIn(null, "(() => { for (const id of ['gq-a','gq-b','gq-c','gq-so']) { const o = document.getElementById(id); if (o) o.remove() } return 1 })()")
 
 const failed = rows.filter((r) => !r.pass)
 console.log('== verify-bridge-frame-guard ==')
