@@ -22,6 +22,58 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const APK_ROOT = resolve(HERE, '..')
 
+/**
+ * 剥掉注释（行注释 + 块注释），保留换行与字符偏移。
+ *
+ * issue #1054 ①：两个解析器都在**原始文本**上跑正则，于是被注释掉的前缀条目仍会被算进
+ * 集合——把壳侧第 4 条前缀注释掉，门禁照样打印「共 4 条」通过，而运行期的活清单只剩 3 条。
+ * 这正是本门禁立项要拦的「壳侧 3 / 站点 4」形态。
+ *
+ * 为什么不用正则一把梭：// 会出现在字符串里（"https://github.com/" 就含 //），
+ * 必须先按引号状态走一遍状态机，只在「代码态」里认注释起始。
+ *
+ * @param {string} text 源码
+ * @returns {string} 与原文**等长**的掩码文本（注释内容抹成空格，换行保留）
+ */
+export function stripComments(text) {
+  // 引号字符用常量表示：源码里直接写裸引号会让本文件自身难以维护（踩过）。
+  const DQ = String.fromCharCode(34)
+  const SQ = String.fromCharCode(39)
+  const out = text.split('')
+  const n = text.length
+  const blank = (j) => { if (j < n && text[j] !== '\n' && text[j] !== '\r') out[j] = ' ' }
+  let i = 0
+  while (i < n) {
+    const c = text[i]
+    const next = text[i + 1]
+    if (c === '/' && next === '/') {
+      let j = i
+      while (j < n && text[j] !== '\n') { blank(j); j += 1 }
+      i = j
+      continue
+    }
+    if (c === '/' && next === '*') {
+      let j = i
+      while (j < n && !(text[j] === '*' && text[j + 1] === '/')) { blank(j); j += 1 }
+      blank(j)
+      blank(j + 1)
+      i = j + 2
+      continue
+    }
+    // 字符串/字符字面量整体跳过（内部可能含 // 或 /*）
+    if (c === DQ || c === SQ || c.charCodeAt(0) === 96) {
+      let j = i + 1
+      while (j < n && text[j] !== c) {
+        if (text[j] === '\\') j += 1
+        j += 1
+      }
+      i = j + 1
+      continue
+    }
+    i += 1
+  }
+  return out.join('')
+}
 /** 两个布局下的相对坐标（apk 仓自包含 / 协调仓带子目录）。 */
 function locate(rel) {
   const candidates = [join(APK_ROOT, rel), join(APK_ROOT, 'dsh-mobile-apk', rel)]
@@ -31,14 +83,16 @@ function locate(rel) {
 
 /** 壳侧面：`internal val MIRROR_PREFIXES: List<String> = listOf( "https://github.com/", ... )` */
 export function parseShellMirrors(text) {
-  const m = /MIRROR_PREFIXES[^=]*=\s*listOf\(([\s\S]*?)\)/.exec(text)
+  // issue #1054 ①：先剥注释，否则被注释掉的条目仍被算进集合（假绿）。
+  const m = /MIRROR_PREFIXES[^=]*=\s*listOf\(([\s\S]*?)\)/.exec(stripComments(text))
   if (m === null) return null
   return [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1])
 }
 
 /** 站点面：`MIRROR_TEMPLATES = [ { id: 'github', ..., prefix: 'https://github.com/', ... }, ... ]` */
 export function parseSiteMirrors(text) {
-  const m = /MIRROR_TEMPLATES\s*=\s*\[([\s\S]*?)\n\]/.exec(text)
+  // issue #1054 ①：站点侧同理（注释掉的 prefix 不算在册）。
+  const m = /MIRROR_TEMPLATES\s*=\s*\[([\s\S]*?)\n\]/.exec(stripComments(text))
   if (m === null) return null
   return [...m[1].matchAll(/prefix:\s*'([^']+)'/g)].map((x) => x[1])
 }
@@ -60,6 +114,7 @@ if (shell.length === 0 || site.length === 0) {
 }
 
 function selfTest() {
+  const NL = String.fromCharCode(10)
   let failed = 0
   const cases = [
     ['正例：两侧同 4 条同序', ['a/', 'b/', 'c/', 'd/'], ['a/', 'b/', 'c/', 'd/'], true],
@@ -80,6 +135,37 @@ function selfTest() {
     failed += 1
     console.error('SELF-TEST FAIL：顺序差异未被单独识别')
   }
+  // issue #1054 ①：被注释掉的前缀条目**不得**算在册（两侧各一条负控）。
+  const shellCommented = [
+    'internal val MIRROR_PREFIXES: List<String> = listOf(',
+    '  "https://github.com/",',
+    '  // "https://ghproxy.net/https://github.com/",',
+    '  "https://ghfast.top/https://github.com/",',
+    ')',
+  ].join(NL)
+  const shellCommentedParsed = parseShellMirrors(shellCommented)
+  if (shellCommentedParsed === null || shellCommentedParsed.length !== 2) {
+    failed += 1
+    console.error('SELF-TEST FAIL：#1054 壳侧被注释掉的前缀必须被剥掉（期望 2 条，实得 ' + (shellCommentedParsed === null ? 'null' : shellCommentedParsed.length) + '）')
+  }
+  const siteCommented = [
+    "export const MIRROR_TEMPLATES = [",
+    "  { id: 'github', prefix: 'https://github.com/' },",
+    "  // { id: 'ghproxy.net', prefix: 'https://ghproxy.net/https://github.com/' },",
+    "]",
+  ].join(NL)
+  const siteCommentedParsed = parseSiteMirrors(siteCommented)
+  if (siteCommentedParsed === null || siteCommentedParsed.length !== 1) {
+    failed += 1
+    console.error('SELF-TEST FAIL：#1054 站点侧被注释掉的前缀必须被剥掉（期望 1 条，实得 ' + (siteCommentedParsed === null ? 'null' : siteCommentedParsed.length) + '）')
+  }
+  // 放行例：字符串里的 // 不得被当成注释起点（URL 自带 //，剥错会把整条前缀吃掉）。
+  const urlSample = 'internal val MIRROR_PREFIXES: List<String> = listOf(' + NL + '  "https://github.com/",' + NL + ')'
+  const urlParsed = parseShellMirrors(urlSample)
+  if (urlParsed === null || urlParsed.length !== 1 || urlParsed[0] !== 'https://github.com/') {
+    failed += 1
+    console.error('SELF-TEST FAIL：#1054 字符串内的 // 不得被当成注释（URL 被吃掉了）')
+  }
   // 解析器判别力
   const shellSample = 'internal val MIRROR_PREFIXES: List<String> = listOf(\n  "https://github.com/",\n  "https://gh-proxy.com/https://github.com/",\n)'
   const siteSample = "export const MIRROR_TEMPLATES = [\n  { id: 'github', prefix: 'https://github.com/' },\n  { id: 'gh-proxy', prefix: 'https://gh-proxy.com/https://github.com/' },\n]"
@@ -94,7 +180,7 @@ function selfTest() {
     console.error('CHECK-MIRROR-PARITY SELF-TEST FAILED（' + failed + ' 例）')
     process.exit(1)
   }
-  console.log('CHECK-MIRROR-PARITY SELF-TEST PASSED（' + (cases.length + 5) + ' 例：正/反/顺序/锚点缺失）')
+  console.log('CHECK-MIRROR-PARITY SELF-TEST PASSED（' + (cases.length + 9) + ' 例：正/反/顺序/锚点缺失）')
 }
 
 function main() {
