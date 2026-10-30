@@ -368,6 +368,36 @@ const DEBUG_EXPORTED_ALLOW = new Map([
   }
 }
 
+// issue #1051：`app/src/release/AndroidManifest.xml` 此前**从不被读**。
+//
+// 它同样会与 main 合并进发布产物，所以它的 `exported` 组件与 allowBackup/cleartext
+// 属于**发布面**；不读等于整面不受检查（新增一个 release-only 导出组件不会被拦）。
+const RELEASE_EXPORTED_ALLOW = new Map()
+{
+  const releaseManifestPath = join(APK_ROOT, 'app', 'src', 'release', 'AndroidManifest.xml')
+  const releaseText = read(releaseManifestPath)
+  if (releaseText === null) {
+    console.log('NOTE  app/src/release/AndroidManifest.xml 不在场（release 变体判据跳过）')
+  } else {
+    const releaseRoot = parseXml(releaseText)
+    const apps = releaseRoot === null ? [] : descendants(releaseRoot, 'application')
+    const exportedRelease = apps.flatMap((a) => COMPONENTS.flatMap((tag) => descendants(a, tag)))
+      .filter((c) => c.attrs['android:exported'] === 'true')
+      .map((c) => c.attrs['android:name'])
+    for (const name of exportedRelease) {
+      check('release 变体导出组件已登记：' + name, RELEASE_EXPORTED_ALLOW.has(name),
+        '在 scripts/check-manifest-hardening.mjs 的 RELEASE_EXPORTED_ALLOW 里登记理由')
+    }
+    for (const name of RELEASE_EXPORTED_ALLOW.keys()) {
+      check('登记的 release 导出组件仍在场：' + name, exportedRelease.includes(name))
+    }
+    for (const app of apps) {
+      check('release 变体不得 allowBackup="true"', app.attrs['android:allowBackup'] !== 'true', releaseManifestPath)
+      check('release 变体不得 usesCleartextTraffic="true"', app.attrs['android:usesCleartextTraffic'] !== 'true', releaseManifestPath)
+    }
+  }
+}
+
 // #864 断言 ②（release 泄漏）：main 清单里不得出现任何 debug-only 组件名。
 if (manifestText !== null) {
   for (const name of DEBUG_EXPORTED_ALLOW.keys()) {
