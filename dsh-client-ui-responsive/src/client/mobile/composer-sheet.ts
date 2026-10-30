@@ -61,6 +61,23 @@ const TILES_ATTR = 'data-dsh-composer-sheet-tiles'
 const TILE_ATTR = 'data-dsh-composer-sheet-tile'
 const ROWS_ATTR = 'data-dsh-composer-sheet-rows'
 const ROW_ATTR = 'data-dsh-composer-sheet-row'
+/**
+ * 横屏 / 桌面形态标记：挂在 backdrop 上，CSS 据此切成「锚在 + 上的卡片」，
+ * 不再画全屏遮罩、不再贴底。
+ *
+ * 判据与 CSS 里那段媒体查询逐字对应；改一处必须改两处。竖屏手机不命中，
+ * 仍是原来的底部 sheet（用户定例保持）。
+ */
+const ANCHORED_ATTR = 'data-dsh-composer-sheet-anchored'
+const ANCHORED_MEDIA = '(orientation: landscape) and (max-height: 500px), (min-width: 768px)'
+/** 卡片与「+」之间的间隙（规格 8px）。 */
+const ANCHOR_GAP_PX = 8
+/** 卡片宽度上限（像手机，不像平板）；与 CSS 里的 min(360px, calc(100vw - 24px)) 一致。 */
+const ANCHOR_MAX_WIDTH_PX = 360
+/** 视口边距：卡片离左右边缘至少留这么多，避免贴边。 */
+const ANCHOR_VIEWPORT_MARGIN_PX = 12
+/** 卡片高度上限（规格 min(70vh, 480px)）。 */
+const ANCHOR_MAX_HEIGHT_PX = 480
 
 type TileKind = 'camera' | 'photo' | 'file'
 
@@ -312,6 +329,97 @@ export class ComposerSheet {
     return this.backdrop?.querySelector<HTMLElement>('[' + PANEL_ATTR + ']') ?? null
   }
 
+  /** 当前是否卡片形态（横屏 / 桌面）。 */
+  private isAnchoredForm(): boolean {
+    if (typeof window.matchMedia !== 'function') return false
+    return window.matchMedia(ANCHORED_MEDIA).matches
+  }
+
+  /**
+   * 把面板锚到「+」按钮上。
+   *
+   * 几何全部由内联样式写入（带 !important），CSS 只管外观：这样竖屏贴底与横屏
+   * 锚定能共用同一个 panel 元素，切形态时把内联值撤掉即可回到 CSS。
+   *
+   * @param button - 「+」按钮（几何锚点）。
+   */
+  private placeAnchored(button: HTMLElement): void {
+    const backdrop = this.backdrop
+    const panel = this.panel()
+    if (backdrop === null || panel === null) return
+    const plus = button.getBoundingClientRect()
+    const viewportW = window.innerWidth
+    const viewportH = window.innerHeight
+    // 左边缘对齐「+」，但不越过左侧安全边距（「+」贴左边时留一点呼吸）。
+    const left = Math.max(ANCHOR_VIEWPORT_MARGIN_PX, plus.left)
+    // 宽度三重夹取：
+    //   1. 上限 360；
+    //   2. 视口减两侧边距（窄视口不被拉出屏幕）；
+    //   3. 视口减「卡片左边缘到右边的可用宽度」——加号靠右时卡片只能向左收，
+    //      否则左对齐加号会把右半截顶出屏幕。这条是 max-width: calc(100vw - 2*plusLeft)
+    //      的等价实现，但按实际 left 算，比用 plusLeft 更准（left 可能被上一条夹过）。
+    const width = Math.min(
+      ANCHOR_MAX_WIDTH_PX,
+      viewportW - ANCHOR_VIEWPORT_MARGIN_PX * 2,
+      viewportW - left - ANCHOR_VIEWPORT_MARGIN_PX,
+    )
+    // 上方可用高度 = 「+」顶边 - 间隙 - 顶部安全边距。
+    const spaceAbove = plus.top - ANCHOR_GAP_PX - ANCHOR_VIEWPORT_MARGIN_PX
+    // 最小可用高度：三瓦片 96 + 内边距 24。低于它就没有展示价值，翻到下方。
+    const minUseful = 96 + 24
+    const openUpward = spaceAbove >= minUseful
+    // 高度上限再按实际可用空间收紧，避免卡片顶出屏幕。
+    const maxHeight = Math.min(
+      ANCHOR_MAX_HEIGHT_PX,
+      viewportH * 0.7,
+      Math.max(minUseful, openUpward ? spaceAbove : viewportH - plus.bottom - ANCHOR_GAP_PX - ANCHOR_VIEWPORT_MARGIN_PX),
+    )
+    panel.style.setProperty('position', 'fixed', 'important')
+    panel.style.setProperty('left', left + 'px', 'important')
+    panel.style.setProperty('width', width + 'px', 'important')
+    panel.style.setProperty('max-height', maxHeight + 'px', 'important')
+    if (openUpward) {
+      // 自下展开：底边贴「+」上沿再留 8px。
+      panel.style.setProperty('bottom', (viewportH - plus.top + ANCHOR_GAP_PX) + 'px', 'important')
+      panel.style.removeProperty('top')
+      panel.setAttribute('data-dsh-composer-sheet-dir', 'up')
+    } else {
+      // 下方展开：顶边贴「+」下沿再留 8px。
+      panel.style.setProperty('top', (plus.bottom + ANCHOR_GAP_PX) + 'px', 'important')
+      panel.style.removeProperty('bottom')
+      panel.setAttribute('data-dsh-composer-sheet-dir', 'down')
+    }
+  }
+
+  /** 形态切换 / 尺寸变化时重算锚点；竖屏形态下把内联几何全部撤掉，交回 CSS 贴底。 */
+  private readonly relayout = (): void => {
+    const backdrop = this.backdrop
+    const panel = this.panel()
+    const button = this.addButton
+    if (backdrop === null || panel === null) return
+    if (this.isAnchoredForm() && button !== null) {
+      backdrop.setAttribute(ANCHORED_ATTR, '')
+      panel.setAttribute('aria-modal', 'false')
+      this.placeAnchored(button)
+      return
+    }
+    backdrop.removeAttribute(ANCHORED_ATTR)
+    panel.setAttribute('aria-modal', 'true')
+    panel.style.removeProperty('position')
+    panel.style.removeProperty('left')
+    panel.style.removeProperty('width')
+    panel.style.removeProperty('max-height')
+    panel.style.removeProperty('bottom')
+    panel.style.removeProperty('top')
+    panel.removeAttribute('data-dsh-composer-sheet-dir')
+  }
+
+  /** 视口变化（转屏 / 改窗口大小）时重算；只在卡片开着时有意义。 */
+  private readonly onViewportChange = (): void => {
+    if (this.backdrop === null) return
+    this.relayout()
+  }
+
   private open(button: HTMLElement): void {
     this.close()
     const t = this.text()
@@ -347,6 +455,11 @@ export class ComposerSheet {
     document.body.append(backdrop)
     this.backdrop = backdrop
     button.setAttribute('aria-expanded', 'true')
+    // 形态判定与锚定几何：backdrop 挂上之后立刻算一次（横屏卡片要贴「+」）。
+    this.relayout()
+    // 转屏 / 改窗口大小时重算锚点；close() 里解绑。
+    window.addEventListener('resize', this.onViewportChange)
+    window.addEventListener('orientationchange', this.onViewportChange)
     this.lockBodyScroll()
     // 到这里 backdrop 已经挂到 body 上（this.backdrop 也已赋值），读菜单拿到的
     // 行才有地方写。顺序不能提前：见 fillRows 的注释。
@@ -363,6 +476,11 @@ export class ComposerSheet {
       // 映射过程会开一次上游菜单、那一步会调 focusDraftEditor：再压一次焦点，
       // 保证 sheet 停留期间不会有键盘。
       this.blurActiveEditor()
+      // 焦点进入第一项（规格 7）：必须放在**压焦点之后**。
+      // 写在打开时同步段会被这里的 blurActiveEditor 清掉（实测 activeElement 退回 body）。
+      // 瓦片是 <button>，focus 不会唤起软键盘（编辑器才是会被唤起的那个）。
+      const first = this.panel()?.querySelector<HTMLElement>('[' + TILE_ATTR + ']')
+      if (first !== null && first !== undefined) first.focus({ preventScroll: true })
     })
   }
 
@@ -710,6 +828,8 @@ export class ComposerSheet {
     // 关掉 sheet 时借用一定结束：万一借用段还没走到自己的 finally，这里的复位
     // 保证 Escape 立刻可用（#1001）。
     this.borrowing = false
+    window.removeEventListener('resize', this.onViewportChange)
+    window.removeEventListener('orientationchange', this.onViewportChange)
     if (this.backdrop !== null) {
       this.backdrop.remove()
       this.backdrop = null

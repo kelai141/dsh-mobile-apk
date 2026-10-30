@@ -123,4 +123,51 @@ export const COMPOSER_SHEET_CSS = `
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* 横屏 / 桌面形态：不画全屏遮罩，面板变成锚在「+」上的原生卡片。
+   判据与 composer-sheet.ts 的 ANCHORED_MEDIA 逐字对应；改一处必须改两处。
+   几何（位置 / 宽度 / 最大高度）由脚本内联写入并带 !important，这里只画外观。
+   竖屏手机不命中本段，仍是上面的贴底 sheet。 */
+@media (orientation: landscape) and (max-height: 500px), (min-width: 768px) {
+  [data-dsh-composer-sheet-backdrop][data-dsh-composer-sheet-anchored] {
+    /* 保持铺满全屏、保持接收事件，只是不画任何东西：
+       点外部关闭要有一个真的能接住点击的层。若用 pointer-events: none，
+       点击会直接落到下面的页面 / iframe / ShadowRoot 上，panel.contains(target)
+       永远看不到它，卡片就关不掉。 */
+    position: fixed;
+    inset: 0;
+    background: transparent;
+    display: block;
+    pointer-events: auto;
+  }
+  [data-dsh-composer-sheet-backdrop][data-dsh-composer-sheet-anchored] > [data-dsh-composer-sheet-panel] {
+    pointer-events: auto;
+    box-sizing: border-box;
+    overflow-y: auto;
+    padding: 10px;
+    /* CSS 层的兜底夹取：脚本按实际 left 算宽度，这里再按视口压一道，
+       两者互为保险（脚本是主判据，这条防内联值在极端尺寸下溢出）。 */
+    max-width: calc(100vw - 24px);
+    border: 0.5px solid var(--dsw-alias-border-l3, rgba(128, 128, 128, 0.35));
+    /* 四角都圆（与竖屏贴底只圆上方两角不同）。 */
+    border-radius: 18px;
+    background: var(--dsw-alias-bg-layer-1, var(--dsw-alias-bg-base));
+    color: var(--dsw-alias-label-primary, inherit);
+    font: var(--dsw-font-markdown-base, inherit);
+    /* 阴影方向跟着展开方向走：向上展开时向上投，向下展开时向下投。 */
+    box-shadow: 0 -6px 28px rgba(0, 0, 0, 0.32), 0 2px 10px rgba(0, 0, 0, 0.18);
+    transform-origin: bottom left;
+    animation: dsh-composer-card-in 120ms ease-out;
+  }
+  /* 向下展开时阴影翻到下方，视觉上才「从 + 底下长出来」。 */
+  [data-dsh-composer-sheet-backdrop][data-dsh-composer-sheet-anchored]
+    > [data-dsh-composer-sheet-panel][data-dsh-composer-sheet-dir='down'] {
+    box-shadow: 0 6px 28px rgba(0, 0, 0, 0.32), 0 2px 10px rgba(0, 0, 0, 0.18);
+    transform-origin: top left;
+  }
+  @keyframes dsh-composer-card-in {
+    from { transform: scale(0.96); opacity: 0; }
+    to { transform: scale(1); opacity: 1; }
+  }
+}
 `
