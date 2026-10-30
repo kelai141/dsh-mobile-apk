@@ -25,19 +25,21 @@ for(i=0;i<signals.length;i++){
   if(!s||typeof s.aborted!=='boolean'||typeof s.addEventListener!=='function')throw new TypeError('AbortSignal.any: argument is not an AbortSignal')
   list.push(s)
 }
+/* 源已中止：直接短路——不挂任何监听，reason 取该源本体（规范要求，不自造 AbortError）。 */
+for(i=0;i<list.length;i++){
+  if(list[i].aborted){var short=new AbortController();short.abort(list[i].reason);return short.signal}
+}
 var c=new AbortController()
+/* cleanup 只摘源监听。结果信号自身的监听**从不挂**：中止由 onAbort 直接调 c.abort() 完成，
+   这样就不会出现「200 个源却数到 201 个监听」和一个摘不掉的自我监听（#1055 ③）。 */
 function cleanup(){for(var j=0;j<list.length;j++){try{list[j].removeEventListener('abort',onAbort)}catch(e){}}}
 function onAbort(ev){
-  var src=ev&&ev.target?ev.target:null
   cleanup()
-  if(!c.signal.aborted)c.abort(src&&'reason' in src?src.reason:undefined)
-}
-for(i=0;i<list.length;i++){
-  if(list[i].aborted){c.abort(list[i].reason);return c.signal}
+  if(c.signal.aborted)return
+  var src=ev&&ev.target?ev.target:null
+  c.abort(src&&'reason' in src?src.reason:undefined)
 }
 for(i=0;i<list.length;i++)list[i].addEventListener('abort',onAbort)
-if(c.signal.aborted)cleanup()
-else c.signal.addEventListener('abort',cleanup,{once:true})
 return c.signal
 }}`,
   // AbortSignal.timeout: Chrome 103+/Node 17.3+; the Android-12-era WebView (Chromium<103) lacks it
@@ -110,7 +112,8 @@ globalThis.structuredClone=function(value,options){
   // issue #1055 ⑤：缺 ToIntegerOrInfinity。旧式 `Number(i)||0` 不截断小数、且把 -Infinity 夹到 0：
   // `[10,20,30].at(1.5)` 得 undefined（原生 20）、`.at('1.5')` 同样、`.at(-Infinity)` 得 10（原生 undefined）。
   // 按规范：ToObject 接收者 + ToIntegerOrInfinity 索引（截断小数、±Infinity 保持符号）+ 负数从尾部数。
-  `if(typeof Array.prototype.at==='undefined'){Object.defineProperty(Array.prototype,'at',{value:function(index){
+  `if(typeof Array.prototype.at==='undefined'){Object.defineProperty(Array.prototype,'at',{value:function(index){'use strict';
+if(this===null||this===undefined)throw new TypeError('Array.prototype.at called on null or undefined')
 var O=Object(this),len=O.length>>>0
 var n=Number(index)
 if(n!==n)n=0
@@ -128,7 +131,8 @@ return O[k]
   // 空搜索串不插入首尾（原生 `'abc'.replaceAll('','-')` 是 `'-a-b-c-'`）。
   // 按规范实现：字符串搜索走 GetSubstitution 替换模式；函数搜索取其返回值；空串首尾也插入；
   // RegExp 且无 g 标志抛 TypeError（与原生一致）。
-  `if(typeof String.prototype.replaceAll==='undefined'){Object.defineProperty(String.prototype,'replaceAll',{value:function(search,replace){
+  `if(typeof String.prototype.replaceAll==='undefined'){Object.defineProperty(String.prototype,'replaceAll',{value:function(search,replace){'use strict';
+if(this===null||this===undefined)throw new TypeError('String.prototype.replaceAll called on null or undefined')
 var str=String(this)
 if(search instanceof RegExp){
   if(search.global!==true)throw new TypeError('replaceAll must be called with a global RegExp')
@@ -148,7 +152,8 @@ while((idx=str.indexOf(needle,from))!==-1){
 }
 return result+str.slice(from)
 function applySub(pattern,matched,whole,position,original){
-  return pattern.replace(/\$([$&\u0060'])/g,function(m,kind){
+  /* 模板串里 \\$ 才是正则的美元转义：写成 \$ 会被模板吃掉，变成行尾锚点 /$/，$& 永不替换。 */
+  return pattern.replace(/\\$([$&\u0060'])/g,function(m,kind){
     if(kind==='$')return '$'
     if(kind==='&')return matched
     if(kind==='\u0060')return original.slice(0,position)
@@ -820,14 +825,29 @@ window.matchMedia=function(q){
   function remove(cb){var i=own.indexOf(cb);if(i>=0)own.splice(i,1)}
   mql={
     get matches(){
-      // 把本条查询里 prefers-color-scheme 的期望值替换成当前主题标志，其余条件仍交原生求值。
-      var want=/prefers-color-scheme\s*:\s*(dark|light)/i.exec(q)
+      // 主题那一段按 dark 标志求值，其余条件仍交原生——规范语义：整条查询是各段 AND。
+      /* 注意：本段整体在模板串里，正则里的空白类要写**两层**反斜杠才留得住（写成一层会被模板吃掉，
+         正则退化成「字面量 s」，永远命中不了，② 那一整片用例就是这么失效的）。下面已按两层写。 */
+      var want=/prefers-color-scheme\\s*:\\s*([a-z-]+)/i.exec(q)
       if(want===null)return dark
-      var expected=want[1].toLowerCase()==='dark'
+      // 只有 dark / light 两个取值与主题标志有关；其它取值（no-preference 等）在**任何**主题下
+      // 都不成立——旧写法把它们当成「不是 dark」，深色下就算成满足，no-preference 于是错判为 true。
+      var pref=want[1].toLowerCase()
+      if(pref!=='dark'&&pref!=='light')return false
+      var expected=pref==='dark'
+      // 这一段不满足就整条不满足（AND 短路），不必再问原生。
       if(expected!==dark)return false
-      // 主题那一段已满足：把该段换成恒真（去掉它），剩余条件交原生。
-      var rest=q.replace(/prefers-color-scheme\s*:\s*(dark|light)/i,'all')
-      var r=queryDarkPart(rest)
+      // 这一段满足：其余条件交原生。用纯字符串切分而不是正则——本段整体在模板串里，
+      // 正则在模板串中要写四层反斜杠才留得住，极易被吃掉（#1055 的 ② 就是这么整片失效的）。
+      var groups=q.split(' and ')
+      var rest=[]
+      for(var gi=0;gi<groups.length;gi++){
+        if(groups[gi].toLowerCase().indexOf('prefers-color-scheme')<0)rest.push(groups[gi])
+      }
+      // 剩余条件为空 ⇒ 整条即为真，不必再问原生（把主题段删空会留下 "()"，
+      // 空壳不是可求值的特性段，原生桩对它给 false，会把整条错误地压成 false）。
+      if(rest.length===0)return true
+      var r=queryDarkPart(rest.join(' and '))
       return r===null?true:r
     },
     get media(){return q},
@@ -1459,8 +1479,12 @@ export function apply(ctx) {
   // guard would wrongly skip the whole POLYFILL_SCRIPT (including PICKER_SCRIPT: the dir-pick poll
   // loop + upload buttons), breaking directory picking and file upload (measured on device/MuMu,
   // 2026-08-16).
+  // 注入必须用**函数**替换，不能把 POLYFILL_SCRIPT 当替换字符串：String.prototype.replace 的替换串
+  // 里 `$&` / `$'` / `$`` / `$$` 是特殊模式，polyfill 源码里恰好含这些序列（replaceAll 的
+  // 替换模式实现、正则里的美元转义），整段脚本会被改写成报废字节、页面解析失败（smoke 的
+  // 「script #2 parses」实测会红）。这与本文件 ④ replaceAll 缺陷是同一类错误的另一面（#1055）。
   ctx.webServer.tapIndex((html) =>
-    html.includes('x-dsh-pick-token') ? html : html.replace('</head>', POLYFILL_SCRIPT + '</head>')
+    html.includes('x-dsh-pick-token') ? html : html.replace('</head>', () => POLYFILL_SCRIPT + '</head>')
   );
 
   // §2.3（0.14.1 块C）静态失败占位：**独立于**上面的 pick-token 幂等判据注入。

@@ -324,11 +324,15 @@ test('②正证：onchange / addListener / removeListener / media 全部按规�
     + '})()')
   assert.equal(realm.run('window.__m.media'), '(prefers-color-scheme: light)')
   assert.equal(realm.run('window.__calls.length'), 0, 'addListener 同样不得在订阅时同步回调')
-  realm.run('window.__dshThemeBridge.setDark(true)')
-  assert.equal(realm.run('window.__calls.join(",")'), 'onchange:false,legacy:false',
-    '浅色查询在深色下的 matches 必须是 false（旧实现恒返回 dark）')
-  realm.run('window.__m.removeListener(window.__legacy); window.__m.onchange=null')
+  // 注入口先把 dark 置成壳侧真值（本夹具 androidDark 默认 true），所以这里必须**改变**主题才谈得上
+  // 「change」：规范里 MediaQueryList 只在取值变化时派发 change，setDark 同值不触发也是上一条用例
+  // 明确钉住的行为。旧写法直接 setDark(true)（本来就 true）是空操作，却在旧实现下"看起来通过"过，
+  // 换成会真正翻转的 setDark(false) 之后，断言才真的在测 onchange / addListener 的派发。
   realm.run('window.__dshThemeBridge.setDark(false)')
+  assert.equal(realm.run('window.__calls.join(",")'), 'onchange:true,legacy:true',
+    '浅色查询在浅色主题下 matches 必须是 true，且 onchange 与 addListener 都要收到')
+  realm.run('window.__m.removeListener(window.__legacy); window.__m.onchange=null')
+  realm.run('window.__dshThemeBridge.setDark(true)')
   assert.equal(realm.run('window.__calls.length'), 2, '移除后的监听不得再被调用')
 })
 
