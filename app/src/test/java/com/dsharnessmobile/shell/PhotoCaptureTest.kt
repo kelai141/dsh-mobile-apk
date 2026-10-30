@@ -202,8 +202,10 @@ class PhotoCaptureTest {
   }
 
   @Test
-  fun `清理只留最近 N 张成品并清空原图`() {
-    // 用户要求「原图可删」：成品留最近 N 张，原图一个不留。
+  fun `清理只留最近 N 张成品并清掉非保留的原图`() {
+    // 用户要求「原图可删」：成品留最近 N 张，**压完即删的普通原图**一个不留。
+    // issue #995 起这句话不再等于「raw 目录清空」——压缩失败被保留的那张必须活下来，
+    // 它由下面「失败保留的原图不会被下一次拍照的清理删掉」单独钉住。
     val photoDir = tempDir("photo-out")
     val rawDir = tempDir("photo-raw")
     try {
@@ -221,8 +223,8 @@ class PhotoCaptureTest {
 
       val leftPhotos = photoDir.listFiles()!!.filter { it.name.startsWith(PhotoCapture.PHOTO_PREFIX) }
       assertEquals("成品必须只留最近 10 张", 10, leftPhotos.size)
-      assertEquals("原图必须一个不留", 0, rawDir.listFiles()!!.size)
-      assertEquals("总共应删掉 5 张成品 + 3 张原图", 8, removed)
+      assertEquals("普通原图（压完即删）必须一个不留", 0, rawDir.listFiles()!!.size)
+      assertEquals("总共应删掉 5 张成品 + 3 张普通原图", 8, removed)
       assertTrue("非照片文件不得被清理误删", unrelated.isFile)
     } finally {
       photoDir.deleteRecursively()
@@ -250,7 +252,138 @@ class PhotoCaptureTest {
     }
   }
 
+  // ── 3b. 压缩失败的原图必须真的留得住（issue #995）────────────────────────
+  // 旧断言「raw 目录清空」与文案「原图已保留，可稍后重试」互斥：sweepOld 每次受理拍照都先跑一遍
+  // （PhotoCaptureController.capture → sweepOld），keep = 0 会把上一张失败保留的原图删掉，
+  // 而那是那张照片的**唯一副本**（从未投递成功）。下面三段把「保留」钉成可判定事实：
+  // 保留位在 raw/ 里改用独立后缀 .keep 落名，清理只回收超件数 / 超时间窗的那些。
+
+  /** 保留位的落名后缀（磁盘契约：清理与人工排查都按它认人）。 */
+  private val keepSuffix = ".keep"
+
+  /** 造一张「压缩失败被保留」的原图（走生产代码自己的命名函数，只加保留后缀）。 */
+  private fun keptRaw(rawDir: File, now: Long): File {
+    val (rawName, _) = PhotoCapture.namesFor(now)
+    return File(rawDir, rawName + keepSuffix).apply { writeText("broken") }
+  }
+
   @Test
+  fun `压缩失败保留的原图不会被下一次拍照的清理删掉`() {
+    // 复现 issue #995：压缩失败 → 原图留在 raw/ → 用户再拍一次（受理即先跑 sweepOld）→ 原图必须还在。
+    val photoDir = tempDir("photo-keep-out")
+    val rawDir = tempDir("photo-keep-raw")
+    try {
+      val now = System.currentTimeMillis()
+      val kept = keptRaw(rawDir, now)
+      val plain = File(rawDir, PhotoCapture.namesFor(now - 5_000L).first).apply { writeText("plain") }
+      assertTrue("前置：保留位原件必须在场", kept.isFile)
+
+      // 这一句就是用户「再拍一次」时控制器跑的那一步（PhotoCaptureController.capture）。
+      val removed = PhotoCapture.sweepOld(photoDir, rawDir, keep = 10)
+
+      assertTrue("压缩失败的原图是它唯一的副本，下一次拍照的清理不得删它", kept.isFile)
+      assertTrue("同批的普通原图照旧清掉", !plain.exists())
+      assertEquals("本次清理只该删掉那 1 个普通原图（实际 " + removed + " 个）", 1, removed)
+    } finally {
+      photoDir.deleteRecursively()
+      rawDir.deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `保留位按件数与时间窗双上限有界回收`() {
+    // 不能无限增长：保留位同时受「最多 3 件」与「不超过 24h」两道约束，超出的按名字时间序先删最旧的。
+    val photoDir = tempDir("photo-bounded-out")
+    val rawDir = tempDir("photo-bounded-raw")
+    try {
+      val now = System.currentTimeMillis()
+      val stamps = (0 until 5).map { PhotoCapture.namesFor(now - it * 1_000L).first }
+      stamps.forEach { File(rawDir, it + keepSuffix).writeText("kept") }
+
+      PhotoCapture.sweepOld(photoDir, rawDir, keep = 10)
+
+      val left = rawDir.listFiles()!!.map { it.name }.sortedDescending()
+      assertEquals("保留位最多 3 件（实际留下 " + left + "）", 3, left.size)
+      assertEquals("留下的必须是最新的三枚",
+        stamps.take(3).map { it + keepSuffix }.sortedDescending(), left)
+    } finally {
+      photoDir.deleteRecursively()
+      rawDir.deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `保留位超出时间窗即回收`() {
+    // 件数没超标也必须有界：过 24h 的保留件一律回收（否则失败一次留一张，raw/ 只增不减）。
+    val photoDir = tempDir("photo-window-out")
+    val rawDir = tempDir("photo-window-raw")
+    try {
+      val dayMs = 24L * 60L * 60L * 1000L
+      val now = System.currentTimeMillis()
+      val expired = keptRaw(rawDir, now - dayMs - 60_000L)
+      val fresh = keptRaw(rawDir, now - 60_000L)
+      assertTrue("前置：过期与新鲜两件都在场", expired.isFile && fresh.isFile)
+
+      val removed = PhotoCapture.sweepOld(photoDir, rawDir, keep = 10)
+
+      assertFalse("超出 24h 时间窗的保留件必须被回收", expired.exists())
+      assertTrue("窗内的保留件必须留下", fresh.isFile)
+      assertEquals("只该回收过期的那 1 件", 1, removed)
+    } finally {
+      photoDir.deleteRecursively()
+      rawDir.deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `压缩失败时把原图真的改名进保留位`() {
+    // 「保留」必须落成磁盘事实：失败分支调 keepRaw 改名（同目录 rename），回执 detail 指的就是
+    // 那个新路径。只「不删」的话它和普通原图同名同形，下一次 sweepOld 无法区分（issue #995）。
+    val rawDir = tempDir("photo-rename-raw")
+    try {
+      val now = System.currentTimeMillis()
+      val plain = File(rawDir, PhotoCapture.namesFor(now).first).apply { writeText("broken") }
+
+      val kept = PhotoCapture.keepRaw(plain)
+
+      assertEquals("改名后的落点必须是保留位名",
+        PhotoCapture.namesFor(now).first + keepSuffix, kept.name)
+      assertTrue("改名后文件必须在场", kept.isFile)
+      assertEquals("内容不得在改名中丢失", "broken", kept.readText())
+      assertFalse("原名的普通原图不得残留（否则会被当垃圾清掉）", plain.exists())
+      // 幂等：对已经是保留位的文件再调一次不得叠出 .keep.keep。
+      assertEquals("keepRaw 必须幂等", kept.name, PhotoCapture.keepRaw(kept).name)
+    } finally {
+      rawDir.deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `保留位与普通原图在同一目录里互不误伤`() {
+    // 结构性判据：普通原图（今次压缩成功后即删）照旧一个不留，而保留位不受影响；
+    // 两者同处 raw/，名字上保留位必须能被单独识别，否则清理只能靠目录隔离。
+    val photoDir = tempDir("photo-mix-out")
+    val rawDir = tempDir("photo-mix-raw")
+    try {
+      val now = System.currentTimeMillis()
+      val kept = keptRaw(rawDir, now)
+      val plain = File(rawDir, PhotoCapture.namesFor(now - 5_000L).first).apply { writeText("plain") }
+      assertTrue("保留位名字必须带独立后缀，实际 " + kept.name, kept.name.endsWith(keepSuffix))
+      assertTrue("保留位名字不得被当成普通原图（普通原图以 raw- 开头且不带 .keep）",
+        !PhotoCapture.namesFor(now).first.endsWith(keepSuffix))
+
+      val removed = PhotoCapture.sweepOld(photoDir, rawDir, keep = 10)
+
+      assertTrue("普通原图照旧清掉", !plain.exists())
+      assertTrue("保留位必须活下来", kept.isFile)
+      assertEquals("本轮的清理只删了 1 个普通原图", 1, removed)
+    } finally {
+      photoDir.deleteRecursively()
+      rawDir.deleteRecursively()
+    }
+  }
+
+
   fun `成品与原图分两个目录而不是靠前缀共存`() {
     // 用户要求「原图可删」：同目录时清理必须靠前缀区分成品与原图，一旦改名就互相误删。
     // 分目录是结构性隔离——这条断言目录名常量确实是两层。
@@ -297,5 +430,14 @@ class PhotoCaptureTest {
     // 成功分支才删原图。
     val successPart = controller.substringAfter("// 压缩成功 → 原图使命完成")
     assertTrue("压缩成功后才删原图", successPart.contains("job.raw.delete()"))
+    // 失败分支必须**真的改名**进保留位，并把新路径报出去（issue #995）。
+    // 只 return 不删是不够的：下一次拍照的 sweepOld 认不出它，承诺当场作废。
+    assertTrue("压缩失败分支必须调用 keepRaw 把原图移进保留位",
+      failureBranch.contains("PhotoCapture.keepRaw("))
+    assertTrue("回执 detail 必须指向保留位的新路径（不是旧路径）",
+      failureBranch.contains("kept.absolutePath"))
+    // 控制器每次受理拍照都会先跑清理——保留位必须由 sweepOld 豁免，而不是靠「下次别删」。
+    assertTrue("受理拍照时必须先跑 sweepOld（保留位的有界回收就在这里）",
+      controller.contains("PhotoCapture.sweepOld("))
   }
 }

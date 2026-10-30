@@ -91,7 +91,8 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
     val names = PhotoCapture.namesFor(System.currentTimeMillis())
     val raw = File(PhotoCapture.rawDir(activity), names.first)
     val target = File(PhotoCapture.outputDir(activity), names.second)
-    // 清历史：成品留最近 N 张、历史原图全清（本次原图在压缩成功后也立刻删）。
+    // 清历史：成品留最近 N 张、普通原图全清、压缩失败的保留位按件数/时间窗有界回收
+    // （本次原图在压缩成功后立刻删；失败则改名进保留位，见 finish）。
     PhotoCapture.sweepOld(PhotoCapture.outputDir(activity), PhotoCapture.rawDir(activity))
     val job = Pending(raw = raw, target = target, reply = reply)
     pending = job
@@ -145,9 +146,12 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
     Thread({
       val bytes = PhotoCapture.compress(job.raw, job.target)
       if (bytes == null || bytes <= 0L) {
-        // 压缩失败：**保留原图**（用户刚拍的那张不能丢），把原图路径一并报出去。
+        // 压缩失败：**保留原图**（用户刚拍的那张是唯一副本，不能丢）。这里真的改名落进
+        // 保留位（issue #995）：只「不删」的话它和「拍完就删」的普通原图同名同形，下一次
+        // 拍照的 sweepOld 会把它当垃圾清掉——承诺必须落成磁盘上可判定的事实。
+        val kept = PhotoCapture.keepRaw(job.raw)
         val payload = PhotoCapture.errorPayload(
-          UiText.isEnglish(activity), PhotoCapture.CODE_COMPRESS_FAILED, job.raw.absolutePath,
+          UiText.isEnglish(activity), PhotoCapture.CODE_COMPRESS_FAILED, kept.absolutePath,
         )
         activity.runOnUiThread { job.reply(payload) }
         return@Thread
