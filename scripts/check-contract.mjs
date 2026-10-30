@@ -36,33 +36,15 @@ const DOC_PATH = resolve(flagValue('--doc') ?? join(root, 'docs', 'UPSTREAM-CONT
 const SLOTS_SOURCE = flagValue('--slots-source')
 const issues = []
 const REQUIRE = argv.includes('--require')
-/**
- * issue #1114：依赖树缺席时默认 exit 2（硬失败），只有显式传它才以 0 结案。
- *
- * 谁该传：`--self-test` 的对照组（它验的是**判据逻辑**，不是「上游树就绪」）、以及
- * 任何确实处在「依赖尚未就绪」合法阶段的调用点。构建链与发版链**一律不传** ——
- * 那两条链的前提就是上游树已在场，缺席必须当场暴露而不是静默结案。
- */
-const ALLOW_MISSING = argv.includes('--allow-missing')
-let skipped = 0
+let skipped = 0, hardSkip = 0
 /** 仓库相对路径（仅用于报错文案）。0.14.2 rc.2 追版实修：§9 的两处报错此前调用了**从未定义**的
  *  `rel()` —— rc.1 时文档含基线字样，该分支从未走到；换基线后第一次判红即 `ReferenceError` 崩溃，
  *  把「该判红」变成「门禁自己炸」，判据在追版路径上不可读。 */
 const rel = (p) => { const r = resolve(p).slice(root.length + 1); return r.split('\\').join('/') }
 const ok = (msg) => console.log('  OK  ' + msg)
 const fail = (msg) => { issues.push(msg); console.log('  FAIL ' + msg) }
-/**
- * 依赖缺席计数器（issue #1114）。
- *
- * `skip` 与 `softSkip` 的区别是「这一侧负不负责这条判据」：
- *   - softSkip：自包含树里协调仓独有输入，合法缺席，不是缺口；
- *   - skip（本函数）：**该验却验不了**，是缺口。以前它只打一行就放过，现在必须让
- *     最终退出码反映出来（见文件末尾的 hardSkip 分支）。
- */
-let hardSkip = 0
 const skip = (msg) => {
-  skipped += 1
-  hardSkip += 1
+  skipped += 1; hardSkip += 1
   if (REQUIRE) issues.push('SKIP: ' + msg)
   console.log('  SKIP(#' + skipped + ')  ' + msg + (REQUIRE ? ' —— --require 档不得 SKIP' : ''))
 }
@@ -895,6 +877,15 @@ console.log('== 9. 人读契约文档与登记表同源（G-8：它会误导开�
     } else ok('文档已声明自己非权威源并指向 contract.json')
   }
 }
+
+/**
+ * issue #1114：依赖树缺席时默认 exit 2（硬失败），只有显式传它才以 0 结案。
+ *
+ * 谁该传：`--self-test` 的对照组（它验的是**判据逻辑**，不是「上游树就绪」）、以及
+ * 任何确实处在「依赖尚未就绪」合法阶段的调用点。构建链与发版链**一律不传** ——
+ * 那两条链的前提就是上游树已在场，缺席必须当场暴露而不是静默结案。
+ */
+const ALLOW_MISSING = argv.includes('--allow-missing')
 
 if (skipped > 0) console.log('SKIP=' + skipped)
 
