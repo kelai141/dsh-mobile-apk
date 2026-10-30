@@ -306,13 +306,13 @@ export function apply(ctx: ClientContext): void {
     }
   }, 'ui-responsive: trajectory details full-viewport overlay + :has() fallback')
 
-  // 手机端终端卡片排版（社区截图）：上游命令行的 white-space 是 pre 且带
-  // text-overflow: ellipsis，而 banner 里的状态胶囊与复制按钮不可收缩，把命令挤进窄
-  // 列——长命令于是被省略号截断、右侧留下大片空白，输出区还会横滑。实测（emulator-5562
-  // 引擎 WebView）：命令内容 537px 落在 376px 盒子里（隐藏 161px；360px 视口下 401px），
-  // 输出区 scrollWidth 310 / clientWidth 249。TERMINAL_BLOCK_CSS 重绑两个 whitespace
-  // 变量为 pre-wrap、让 banner 换行且命令行独取整行、并解除 banner 的 150px 上限。
-  // 仅手机形态生效，横屏与桌面不改。
+  // 手机端终端卡片排版（社区截图）：banner 里的状态胶囊与复制按钮不可收缩，把命令挤进
+  // 窄列——长命令放不下、右侧留下大片空白，输出区还会横滑。折行走两个可重绑自定义属性：
+  // --dsl-terminal-line-whitespace 由 .line 直接消费；命令行的 --dsl-terminal-command-
+  // whitespace 要先经 .command 读进 --dsl-command-whitespace、再由 CommandText 的 .text 消费，
+  // 两跳跨两个哈希类名，上游改名即静默退回 pre。故 TERMINAL_BLOCK_CSS 在 command 结构选择器
+  // 上自己声明 white-space: pre-wrap，并重绑 line 变量、让 banner 换行且命令行独取整行、
+  // 解除 banner 的 150px 上限。仅手机形态生效，横屏与桌面不改（详据见该 css 文件头）。
   ctx.effect(() => injectStyle('terminal-block', TERMINAL_BLOCK_CSS), 'ui-responsive: mobile terminal card layout')
 
   // Mobile Enter guard: on the mobile form the soft-keyboard Enter key must
