@@ -264,12 +264,58 @@
 
   var consoleBottomInset = 0;
   var consoleImeOverlap = 0;
+
+  /**
+   * issue #864：把 IME 遮挡量换算到 **CSS px**（纯函数，供 JVM/Node 直测）。
+   *
+   * 真机现场（V2425A / Android 16 / 1260x2800 @560dpi，dpr 3.5，CSS 视口 360x800）：
+   * IME 区域高 **1105 设备像素**。它被当成 CSS px 直接用了，于是
+   *   - `height: calc(100% - var(--ime-occlusion))` -> `800 - 1105 < 0` 高度塔成 0；
+   *   - compact 判据 `innerHeight - max(bottom, ime)` -> `800 - 1105 = -305 < 0` -> **误判 compact**。
+   * 结果就是内容被压成一行、下面留一大块空白。
+   *
+   * 取值顺序（**优先不依赖 dpr 的那条**）：
+   *  1. `visualViewport`：`innerHeight - visualViewport.height` **天然是 CSS px**，
+   *     不依赖 dpr、也不依赖 ROM 对 insets 的实现；
+   *  2. 拿不到 `visualViewport` 时用收到的值兜底 —— 但只有当它**明显超过视口高度**时
+   *     才视为设备像素并除以 dpr（否则会误伤本来就已经是 CSS px 的输入）。
+   *
+   * @param {number} innerHeight `window.innerHeight`（CSS px）。
+   * @param {number} visualViewportHeight `visualViewport.height`（CSS px）；不可用时传 0/NaN。
+   * @param {number} devicePixelRatio `window.devicePixelRatio`。
+   * @param {number} rawIme 收到的遮挡量（单位未知：可能是设备像素，也可能是 CSS px）。
+   * @returns {number} 遮挡量的 CSS px 值，恒 >= 0。
+   */
+  function consoleImeCssPx(innerHeight, visualViewportHeight, devicePixelRatio, rawIme) {
+    var h = Number(innerHeight) || 0;
+    var vv = Number(visualViewportHeight) || 0;
+    var raw = Number(rawIme) || 0;
+    if (raw <= 0) return 0;
+    if (vv > 0 && h > 0) {
+      var fromViewport = h - vv;
+      if (fromViewport > 0.5) return fromViewport;
+    }
+    var dpr = Number(devicePixelRatio) || 0;
+    // 只在「明显超过视口高度」时按设备像素处理：这样已按 CSS px 传入的调用方不受影响。
+    if (dpr > 1 && h > 0 && raw > h) return raw / dpr;
+    return raw;
+  }
+
   function updateConsoleLayout() {
     var root = document.documentElement;
     root.style.setProperty('--inset-bottom', consoleBottomInset + 'px');
-    // Navigation padding already reserves its part of the keyboard overlap.
-    root.style.setProperty('--ime-occlusion', Math.max(0, consoleImeOverlap - consoleBottomInset) + 'px');
-    root.toggleAttribute('data-console-compact', window.innerHeight - Math.max(consoleBottomInset, consoleImeOverlap) < 320);
+    // issue #864：navigation padding 已经占掉了它那份 IME 重叠，先减掉再换单位。
+    var rawOverlap = Math.max(0, consoleImeOverlap - consoleBottomInset);
+    var vv = window.visualViewport;
+    var imeCss = consoleImeCssPx(
+      window.innerHeight,
+      vv && typeof vv.height === 'number' ? vv.height : 0,
+      window.devicePixelRatio || 0,
+      rawOverlap,
+    );
+    root.style.setProperty('--ime-occlusion', imeCss + 'px');
+    // compact 判据同样按 CSS px：`innerHeight - imeCss > 0` 时不得进入 compact。
+    root.toggleAttribute('data-console-compact', window.innerHeight - Math.max(consoleBottomInset, imeCss) < 320);
   }
   window.__consoleInsets = function (top, bottom, ime) {
     consoleBottomInset = Math.max(0, bottom || 0);
