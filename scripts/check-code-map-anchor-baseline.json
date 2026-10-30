@@ -104,7 +104,7 @@
     "plugins/dsh-android-manage/src/index.ts:2034": 2,
     "index.ts:394": 2,
     "plugins/dsh-android-bridge/test/screen-scope.test.mjs:336": 2,
-    "plugins/dsh-android-manage/test/a11y-routing.test.mjs:479": 2,
+    "plugins/dsh-android-manage/test/a11y-routing.test.mjs:488": 2,
     "GlobalActionCatalog.kt:33": 2,
     "docs/AGENTS/ACCESSIBILITY-API.md:99": 5,
     "GlobalActionCatalog.kt:47": 2,
@@ -3758,7 +3758,7 @@
     "plugins/dsh-android-manage/src/protocol-v2.ts:114": [
       "}"
     ],
-    "plugins/dsh-android-manage/test/a11y-routing.test.mjs:479": [
+    "plugins/dsh-android-manage/test/a11y-routing.test.mjs:488": [
       "test('F4b：virtual-only 下 android_web_dump 不得被屏幕范围门拒绝（它读的是壳自有 WebView）', async () => {"
     ],
     "plugins/dsh-android-vdisplay/src/client/index.ts:171": [
