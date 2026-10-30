@@ -924,7 +924,7 @@ object NotifyCenter {
     // 探针与一行 flashStatus（面板收起时看不到），用户看到一条不响的提问通知却不知道原因。这里让
     // 「为什么静默 + 怎么恢复」**跟着通知本身走**：通知在哪儿，解释就在哪儿。
     val degradedNotice = if (channelId == null && face.interactive) {
-      "系统已把「" + face.label(app) + "」通知降级为静默——到系统设置里可恢复"
+      degradedNoticeText(face.label(app), UiText.isEnglish(app))
     } else null
     if (fallback == null) {
       // 连静默渠道都不可用（极端：用户逐个降级）——明确记录，绝不静默失败
@@ -1476,6 +1476,19 @@ object NotifyCenter {
   /** 失败通知的独立 ID 桶（S3-12：不得覆盖原提问/审批通知的 ID）。 */
   internal fun failureId(kind: String, eventId: String): Int =
     stableId("dsh-failure:" + kind.lowercase() + ":" + eventId)
+
+  /**
+   * 渠道被系统降级时随通知走的说明（S3-1 / #992）。
+   *
+   * 拆成纯函数是为了让「英文态」在 JVM 单测里可达——旧实现把整句写在 `notifyEvent` 里，
+   * 只有 `face.label(app)` 跟语言走，整句模板不跟（英文界面下露中文）。
+   */
+  internal fun degradedNoticeText(categoryLabel: String, english: Boolean): String =
+    if (english) {
+      "The system has silenced \"" + categoryLabel + "\" notifications; restore them in system settings"
+    } else {
+      "系统已把「" + categoryLabel + "」通知降级为静默——到系统设置里可恢复"
+    }
 
   /**
    * 发送**全部五类**测试通知（设置页「通知」分区的自证按钮；0.14.1 批 8 / S3-26）。
