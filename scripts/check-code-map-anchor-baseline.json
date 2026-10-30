@@ -3152,29 +3152,29 @@
     "index.js:2198": [
       "* @returns compact facts and child-local failures; complete child event arrays are released after extraction.",
       "* Collect each related child's own descriptor through existing historical codecs.",
+      "await restoreAnimScales({});",
       "const incidental = new Set([",
       "function signature(pattern) {",
       "let total = 0;",
       "return true;",
       "}",
-      "},",
       "};"
     ],
     "index.ts:1038": [
-      "payload.x = args.x",
+      "return { ok: false, denied: false, text: 'tap 需要合法整数坐标 (x, y)' }",
       "writeAudit({ action: 'privileged-internal', call: internal, op, command: command ?? '', result: ok ? 'ok' : 'denied-internal-shape' })"
     ],
     "index.ts:1052": [
-      "return { ok: false, denied: false, text: 'keyevent 需要合法整数 keycode（0-255）' }",
-      "}"
+      "}",
+      "} else if (verb === 'keyevent') {"
     ],
     "index.ts:1063": [
       "* 0.13.5 W4：把一个壳桥操作交给壳侧执行。",
-      "} else {"
+      "}"
     ],
     "index.ts:1074": [
-      "if (!this.#controlQueue) return { ok: false, error: '控制队列未装配（插件未挂载 webServer？）' }",
-      "}"
+      "+ (data.guidance ?? (vd?.ok === true ? '壳侧拒绝' : (vd?.error ?? '控制通道未接通')))",
+      "if (!this.#controlQueue) return { ok: false, error: '控制队列未装配（插件未挂载 webServer？）' }"
     ],
     "index.ts:112": [
       "",
@@ -3189,11 +3189,11 @@
     ],
     "index.ts:1255": [
       "* 原始设备行执行（manage 等消费：screencap+pull 组合、uiautomator dump+pull）。",
-      "ok: false,"
+      "const unchangedResponse = (fp: string, gen?: number) => ({"
     ],
     "index.ts:1416": [
-      "export function a11yStatusText(source: A11ySource, heartbeatAgeMs: number | null): string {",
-      "if (!dec.ok) {"
+      "const forceFresh = args?.fresh === true",
+      "export function a11yStatusText(source: A11ySource, heartbeatAgeMs: number | null): string {"
     ],
     "index.ts:142": [
       "",
@@ -3206,22 +3206,22 @@
     ],
     "index.ts:1438": [
       "",
-      "return unchangedResponse(fp, gen)"
+      "+ (targetScreen !== 'real'"
     ],
     "index.ts:1444": [
       "+ '提供 dump/click/input/scroll 语义操作）；特权 shell 通道由 Shizuku 承载（设置页「手机控制」安装、启动并授权后：'",
-      "const rawH = Number(rawScreen?.h)"
+      "const data = (r.data ?? {}) as A11ySnapshot"
     ],
     "index.ts:1463": [
-      "const fg = await foregroundInfo()",
-      "const polling = gates?.polling"
+      "const polling = gates?.polling",
+      "v2 = dec.value"
     ],
     "index.ts:1558": [
-      "// **归一化坐标在虚拟屏上是歧义的，必须拒绝**（0.14.0 模拟器实锤的新缺陷）。",
-      "writeAudit({ action: 'termux-channel', args: { command }, result: 'ok' })"
+      "writeAudit({ action: 'termux-channel', args: { command }, result: 'ok' })",
+      "},"
     ],
     "index.ts:1612": [
-      "// text:/desc:/rid: 一律走快照模型（resolveRef 的 text 分支恢复可达）。",
+      "+ '请改用 x/y（绝对像素，基于 ' + screenId + ' 自身尺寸；可先 android_vdisplay_status 看该屏宽高），或先用 android_ui_dump 拿 ref。',",
       "}"
     ],
     "index.ts:165": [
@@ -3236,16 +3236,16 @@
       "try {"
     ],
     "index.ts:1664": [
-      "const r = await a11yExec(clickOp, payload)",
-      "const sandboxPolicy = (ctx as unknown as {"
+      "const sandboxPolicy = (ctx as unknown as {",
+      "if (wd.ok === false) return { ok: false, denied: false, text: 'WebView 点击失败：' + (wd.error ?? '未知') }"
     ],
     "index.ts:1669": [
-      "// 宁可如实报「未能确认」，也不给模型一个错误的「点击失败」结论。",
+      "return {",
       "}).shell"
     ],
     "index.ts:1899": [
       "ctx.logger?.('dsh-android-bridge')?.warn?.('task-done marker listener failed: ' + String((e as Error).message))",
-      "text: { type: 'string' },"
+      "from = [sx, dir === 'up' ? area.y2 - Math.floor(dy / 2) : area.y1 + Math.floor(dy / 2)]"
     ],
     "index.ts:251": [
       "",
@@ -3441,18 +3441,18 @@
       "} catch { /* 记账失败不阻断投递：该项退化为 TTL/生命周期清理 */ }"
     ],
     "index.ts:909": [
+      "+ '限制：① 只读默认屏（uiautomator 的 `--display` 实测不生效，见坑 165），虚拟屏请用 android_ui_dump 或坐标注入；'",
       "a11yFacts(): A11yAvailabilityFacts {",
       "if (document.visibilityState === 'visible') poll()",
-      "parameters: { fresh: { type: 'boolean', description: 'true = 跳过「界面未变」快路径，强制完整重抓（默认 false）' } },",
       "}"
     ],
     "index.ts:949": [
       "/** 0.13.5 W4：结构化授权事实（两条通道各自的门）。 */",
-      "return () => {",
-      "try {"
+      "// 0.14 真实通道：getprop + dumpsys 只读面（厂商差异：vivo 等对 dumpsys 部分过滤时如实降级）。",
+      "return () => {"
     ],
     "index.ts:991": [
-      "parameters: {",
+      "'**指定 screenId=virtual-N 时改由壳侧注入到该虚拟屏**（`input -d <该屏 displayId>`，argv 原生构造，' +",
       "}"
     ],
     "inject-all.py:174": [
@@ -3675,22 +3675,22 @@
       "*"
     ],
     "plugins/dsh-android-manage/src/index.ts:1071": [
-      "text: '虚拟屏输入失败：'"
+      "return {"
     ],
     "plugins/dsh-android-manage/src/index.ts:114": [
       "// Every route that can observe or manipulate an Android display goes through this one scope gate"
     ],
     "plugins/dsh-android-manage/src/index.ts:1268": [
-      "* 单独成字段 + schema 声明后，它在结构上就是「可执行的下一步」。"
+      ""
     ],
     "plugins/dsh-android-manage/src/index.ts:1300": [
-      "screen?: { w: number; h: number }"
+      "}"
     ],
     "plugins/dsh-android-manage/src/index.ts:133": [
       "*   guard('ui_click', { ref, nx, ny }, exec)"
     ],
     "plugins/dsh-android-manage/src/index.ts:1341": [
-      "const r2 = await priv.execAdbLine(`adb shell dumpsys activity activities | grep -m1 ResumedActivity`)"
+      "screen?: { w: number; h: number }"
     ],
     "plugins/dsh-android-manage/src/index.ts:137": [
       "*"
@@ -3699,34 +3699,34 @@
       "* 这也解释了为什么同一族工具有的能路由、有的不能：差别只在调用点是否碰巧把 screenId 抄进去了。"
     ],
     "plugins/dsh-android-manage/src/index.ts:1494": [
-      "text: `控件清单（无障碍通道，${v2 ? (v2.truncated ? '已截断：壳侧建树预算耗尽，仅含部分子树，缺失区域请重新 dump' : '未截断') : '截断状态未知（V1 载荷不带该字段）'}）：${pruned.nodes.length} 个节点（原始 ${pruned.rawCount}，剔除 ${pruned.rawCount - pruned.nodes.length} 个零尺寸/完全重复节点，屏幕 ${screen.w}x${screen.h}；前台 ${fg?.pkg ?? '?'}/${fg?.activity ?? '?'}）`"
+      "screen,"
     ],
     "plugins/dsh-android-manage/src/index.ts:1507": [
-      "'虚拟屏坐标用 x/y 绝对像素 + screenId。目标不可点自动回退最近可点祖先；不在最近 dump 中返回引导。' +"
+      "const webNode = pruned.nodes.find((n) => /WebView/i.test(String(n.type || '')))"
     ],
     "plugins/dsh-android-manage/src/index.ts:1519": [
-      "schema: {"
+      "rotation: v2?.rotation ?? data.rotation ?? 0,"
     ],
     "plugins/dsh-android-manage/src/index.ts:152": [
       "? await priv.screenAccessResolved(requested)"
     ],
     "plugins/dsh-android-manage/src/index.ts:1537": [
-      "basisHeight: BASIS_HEIGHT_PROP,"
+      "}"
     ],
     "plugins/dsh-android-manage/src/index.ts:1899": [
-      "text: { type: 'string' },"
+      "from = [sx, dir === 'up' ? area.y2 - Math.floor(dy / 2) : area.y1 + Math.floor(dy / 2)]"
     ],
     "plugins/dsh-android-manage/src/index.ts:1999": [
-      "if (raw) {"
+      "// ADBKeyboard 协议：am broadcast -n <接收器组件> -a ADB_INPUT_TEXT / ADB_CLEAR_TEXT --es msg <文本>。"
     ],
     "plugins/dsh-android-manage/src/index.ts:2031": [
-      "ok: false,"
+      "try {"
     ],
     "plugins/dsh-android-manage/src/index.ts:2283": [
-      "properties: {"
+      "notDone.push('输入法未启用（请在「设置 → 系统 → 语言与输入法」里手动启用「DSH 设备键盘」后重试'"
     ],
     "plugins/dsh-android-manage/src/index.ts:2286": [
-      "pkg: { type: 'string' },"
+      "const cur = await priv.execAdbShell(`settings get secure default_input_method`)"
     ],
     "plugins/dsh-android-manage/src/index.ts:394": [
       "}"
@@ -3747,7 +3747,7 @@
       "if (!a.ok) return { ok: false, denied: true, text: a.guidance }"
     ],
     "plugins/dsh-android-manage/src/index.ts:901": [
-      "const uiTree = defineTool({"
+      "})"
     ],
     "plugins/dsh-android-manage/src/protocol-v2.ts:114": [
       "}"

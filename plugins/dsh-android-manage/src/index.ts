@@ -832,8 +832,10 @@ function tools(ctx: Context, priv: PrivilegeFace) {
         fingerprint: fp,
         rawCount: pruned.rawCount,
       }
-      // #688 第一步：双写（读取侧仍用旧单槽，行为不变）。
-      uiCaches.set(cacheKey(), snap)
+      // issue #984：经唯一写入口落表（写入时就地回收过期/超额条目）。
+      // 早前这里是「#688 第一步：双写（读取侧仍用旧单槽）」——读取侧早已全部切到 uiCacheOf()，
+      // 那句注释是失真残留，一并改掉。
+      uiCacheStore(cacheKey(), snap)
       return {
         ok: true,
         denied: false,
@@ -1164,6 +1166,45 @@ properties: {
     rawCount?: number
     v2?: V2Decoded
   }
+  /**
+   * issue #984：UI 快照表的**容量上限**（按会话键的 Map 必须有界）。
+   *
+   * 缺陷形态：#688 第二步把单槽改成按会话键的 Map 之后，这张表只增不减——没有 delete / clear /
+   * 容量上限 / 过期清扫，`UI_CACHE_TTL` 只参与**读侧**判定。于是每个做过 UI 工具的会话都会在
+   * 进程里永久留一整棵控件树（nodes + byId + byOrig + parentByOrig，大页面数千节点）；长跑引擎
+   * 一个进程开几十个会话，内存单调增长，旧条目永远不会因为 TTL 过期而释放。
+   *
+   * 上限取 8 的理由：这张表服务的只是「模型读完清单、想几下、再回来点」的短窗口（TTL 10 分钟）。
+   * 一个进程里真正同时在用控件树的会话是个位数；8 对正常用法零影响，对「只增不减」则是硬边界。
+   * 每棵树最多几十 KB，8 棵即上限数十 KB～几 MB，可接受。
+   */
+  const UI_CACHE_MAX_ENTRIES = 8
+  /**
+   * issue #984：**唯一写入入口**。写入前先清理：① 过期条目（TTL 已过的读侧本来就用不了）；
+   * ② 超出容量时淘汰最久未写入的条目（`ts` 最小者）。
+   *
+   * 为什么淘汰按 `ts` 而不是 Map 的插入顺序：`ts` 就是「这个会话最近一次 dump 的时刻」，
+   * 而快路径命中时会刷新 `ts`（见 dump 的两条快路径）——按它淘汰即 LRU，保留的正是还在用的会话。
+   *
+   * 为什么必须在**写入**时回收而不是定时器：定时器要随插件实例销毁，还要在测试里可复现；
+   * 而写入点是唯一的增长点，就地回收天然不会漏（也不依赖 GC 时机）。
+   */
+  const uiCacheStore = (key: string, snap: UiCacheSnapshot): void => {
+    const now = Date.now()
+    for (const [k, entry] of uiCaches) {
+      if (now - entry.ts > UI_CACHE_TTL) uiCaches.delete(k)
+    }
+    uiCaches.set(key, snap)
+    while (uiCaches.size > UI_CACHE_MAX_ENTRIES) {
+      let oldestKey: string | null = null
+      let oldestTs = Infinity
+      for (const [k, entry] of uiCaches) {
+        if (entry.ts < oldestTs) { oldestTs = entry.ts; oldestKey = k }
+      }
+      if (oldestKey === null) break
+      uiCaches.delete(oldestKey)
+    }
+  }
   const uiCacheOf = (): UiCacheSnapshot | null =>
     (uiCaches.get(cacheKey()) as UiCacheSnapshot | null) ?? null
 
@@ -1458,8 +1499,8 @@ properties: {
           rawCount: pruned.rawCount,
           v2,
         }
-        // #688 第一步：双写（读取侧仍用旧单槽，行为不变）。
-        uiCaches.set(cacheKey(), snap)
+        // issue #984：经唯一写入口落表（写入时就地回收过期/超额条目）。
+        uiCacheStore(cacheKey(), snap)
         const fg = await foregroundInfo()
         const dumpPkg = pruned.nodes.find((n) => String(n.pkg || '') !== '')?.pkg ?? ''
         const mismatch = fg !== null && dumpPkg !== '' && fg.pkg !== dumpPkg
