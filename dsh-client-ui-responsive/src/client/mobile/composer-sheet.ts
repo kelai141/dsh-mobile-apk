@@ -41,8 +41,19 @@ const CARD_SELECTOR = '[data-composer-card]'
 const UPSTREAM_MENU_SELECTOR = '[data-composer-card] [role="listbox"]'
 /** 弹层里的可选项（MenuView 的每条命令/文件项）。 */
 const UPSTREAM_OPTION_SELECTOR = '[role="option"]'
+/** 等上游菜单出现的轮询间隔与超时（超时后按「没读到」处理，只留三块瓦片）。 */
+const MENU_POLL_INTERVAL_MS = 25
+const MENU_WAIT_TIMEOUT_MS = 3000
 /** 上游隐藏的 multiple file input：拍照/照片/本地文件都走它。 */
 const FILE_INPUT_SELECTOR = 'input[type="file"][multiple]'
+/**
+ * 上游编辑器根元素（ComposerContentEditable 渲染的 contenteditable div）。
+ *
+ * Lexical 把 keydown 挂在这个元素上，关「+」菜单的链路就从这里起（#998）。
+ */
+const EDITOR_ROOT_SELECTOR = '[data-composer-input]'
+/** 编辑器根元素缺失时的退化判据（上游不再打 data-composer-input）。 */
+const EDITABLE_SELECTOR = '[contenteditable="true"]'
 
 const BACKDROP_ATTR = 'data-dsh-composer-sheet-backdrop'
 const PANEL_ATTR = 'data-dsh-composer-sheet-panel'
@@ -101,6 +112,33 @@ function readSubtitle(option: HTMLElement): string {
   return ''
 }
 
+/** 卡片里当前读得到的上游选项（菜单容器不在场时是空表）。 */
+function findOptions(card: Element): HTMLElement[] {
+  const menu = card.querySelector(UPSTREAM_MENU_SELECTOR)
+  if (menu === null) return []
+  return [...menu.querySelectorAll<HTMLElement>(UPSTREAM_OPTION_SELECTOR)]
+}
+
+/**
+ * 关掉上游「+」菜单时 Escape 的派发目标。
+ *
+ * 上游的关闭链挂在**编辑器根元素**上（Lexical 在 contenteditable 上监听 keydown），
+ * 而 document.dispatchEvent 的传播路径只有 [document, window]，根本到不了那个元素，
+ * 菜单就留在屏幕上（#998）。所以在编辑器根上派发，让它自己冒泡回 document ——
+ * 这样两套监听（Lexical 的元素级、MenuView 的 document 级）都能收到。
+ *
+ * 退化目标是 **card 本身**，这是最后手段而不是等价修法：card 也是 document 的后代，
+ * 事件能冒泡到 document 级监听，所以「与旧行为等价、不会让菜单卡死」——
+ * 但它**触发不了**挂在上游编辑器根上的元素级监听（Lexical 那一套）。
+ * 也就是说退化只保住「菜单还能关」，保不住真正要修的那条链路；
+ * 一旦上游改掉 data-composer-input，这条退化路径应当被当成待修的信号。
+ * @param card - 上游合成器卡片（菜单与编辑器都挂在它里面）。
+ * @returns 派发 Escape 的目标元素。
+ */
+function upstreamEscapeTarget(card: Element): Element {
+  return card.querySelector(EDITOR_ROOT_SELECTOR) ?? card.querySelector(EDITABLE_SELECTOR) ?? card
+}
+
 /**
  * 拦截「+」并管理底部 sheet。
  * attach 挂事件与观察器，detach 完全卸掉（HMR 安全：不留 document 监听）。
@@ -139,6 +177,22 @@ export class ComposerSheet {
    * -> 派发 click -> onClickCapture ... 会无限递归（实测 RangeError: Maximum call stack size exceeded）。
    */
   private replaying = false
+
+  /**
+   * 打开代次：每次 open() 自增，close() 也自增。
+   *
+   * open() 里读上游菜单的收尾是异步的，用户完全可能在它跑完之前就关掉 sheet
+   * （下滑 / 点遮罩 / 返回键）。收尾一旦无条件执行，就会把**用户此刻**的焦点
+   * blur 掉，正在用的键盘被凭空收回（#999）。收尾前比对代次即可识别这种过期回调。
+   */
+  private generation = 0
+  /**
+   * 被折叠的滚动容器（通常是 body）→ 打开前的 overflow 原值。
+   *
+   * 只存快照、关闭时按原样还原：无条件写 style.removeProperty 会把别处
+   * （或用户自己）设的 overflow 一起抹掉（#1009）。
+   */
+  private readonly overflowSnapshot = new Map<HTMLElement, string>()
 
   /**
    * 正在「借用」上游菜单（开一次 → 读项 → 用 Escape 关掉）。
@@ -293,16 +347,46 @@ export class ComposerSheet {
     document.body.append(backdrop)
     this.backdrop = backdrop
     button.setAttribute('aria-expanded', 'true')
+    this.lockBodyScroll()
     // 到这里 backdrop 已经挂到 body 上（this.backdrop 也已赋值），读菜单拿到的
     // 行才有地方写。顺序不能提前：见 fillRows 的注释。
     // issue #929：等映射读完**再**压焦点。旧实现用 `void` 丢掉了 Promise，
     // 紧接着的 blurActiveEditor() 会在读菜单**之前**跑 —— 等于又白读一次。
+    const generation = this.generation
     void this.fillRows(rows).finally(() => {
+      // issue #999：收尾只在「这次打开的 sheet 还开着」时做 —— 代次没变，且这块
+      // backdrop 仍是当前那块、还挂在文档里。用户已经关掉的话，这里的 blur 会打断
+      // 他此刻的输入（键盘自己缩回）。
+      if (this.generation !== generation) return
+      if (this.backdrop !== backdrop || !backdrop.isConnected) return
       if (active instanceof HTMLElement) active.blur()
       // 映射过程会开一次上游菜单、那一步会调 focusDraftEditor：再压一次焦点，
       // 保证 sheet 停留期间不会有键盘。
       this.blurActiveEditor()
     })
+  }
+
+  /**
+   * 打开期间锁住背景滚动（aria-modal=true 的会话框不能滚后面那一页，#1009）。
+   *
+   * 选的是「快照 + 还原 body 的 overflow」：快照能保证不覆盖别处设过的值，
+   * 也不引入 position:fixed 那套会重置滚动位置的副作用（键盘与滚动位置都会因此跳）。
+   * 滚动锁随 close() 一起还原，所以 Sheet 不会跨开关泄留状态。
+   */
+  private lockBodyScroll(): void {
+    if (this.overflowSnapshot.size > 0) return
+    const body = document.body
+    this.overflowSnapshot.set(body, body.style.overflow)
+    body.style.overflow = 'hidden'
+  }
+
+  /** 按快照还原背景滚动（没有快照就什么都不做，不无条件清空）。 */
+  private restoreBodyScroll(): void {
+    for (const [element, previous] of this.overflowSnapshot) {
+      if (previous === '') element.style.removeProperty('overflow')
+      else element.style.overflow = previous
+    }
+    this.overflowSnapshot.clear()
   }
 
   private buildTiles(t: (key: ComposerSheetKey) => string): HTMLElement {
@@ -432,36 +516,59 @@ export class ComposerSheet {
     const card = button.closest(CARD_SELECTOR)
     if (card === null) return fallback
     const openedHere = card.querySelector(UPSTREAM_MENU_SELECTOR) === null
-    if (openedHere) {
-      // **先把焦点还给编辑器**：上游 MenuView 绑在 draft editor 的 caret 上，编辑器
-      // 不持焦点时点击「+」只置 aria-expanded、菜单节点不挂载（实机复现：同一按钮，
-      // 带焦点派发 menus=1 opts=9，无焦点派发恒 0 —— sheet 的 open() 恰好总是先 blur）。
-      this.refocusEditor()
-      this.replaying = true
-      this.borrowing = true
-      try {
-        button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
-      } finally {
-        this.replaying = false
-      }
-      // 等上游把菜单提交进 DOM：轮询到它真的出现（或超时），
-      // 单等一帧不够 —— 实测菜单在这台设备上要过一个宏任务才挂进卡片。
-      await this.waitForMenu(card)
-    }
-    const menu = card.querySelector(UPSTREAM_MENU_SELECTOR)
-    if (menu === null) return fallback
+    // 这次借用属于哪一代：借用期间 sheet 可能已经被关掉，收尾就不能再去碰用户的焦点（#999）。
+    const generation = this.generation
+    // 借用闸从「派发打开」之前就合上，到**函数真正退出**才断开（#1001）：
+    // 以前复位写在菜单读到之后的 finally 里，菜单没读到时那条早退路径会把它永远留在 true，
+    // 用户此后再按 Escape 都关不掉 sheet。
+    this.borrowing = true
     try {
-      return run([...menu.querySelectorAll<HTMLElement>(UPSTREAM_OPTION_SELECTOR)])
-    } finally {
-      if (openedHere && menu.isConnected) {
-        // 用 Esc（上游自己的关法）收起，不直接 remove 别人的 DOM。
-        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      if (openedHere) {
+        // **先把焦点还给编辑器**：上游 MenuView 绑在 draft editor 的 caret 上，编辑器
+        // 不持焦点时点击「+」只置 aria-expanded、菜单节点不挂载（实机复现：同一按钮，
+        // 带焦点派发 menus=1 opts=9，无焦点派发恒 0 —— sheet 的 open() 恰好总是先 blur）。
+        this.refocusEditor()
+        this.replaying = true
+        try {
+          button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+        } finally {
+          this.replaying = false
+        }
+        // 等上游把菜单**和选项**提交进 DOM：轮询到选项真的出现（或超时），
+        // 单等一帧不够 —— 实测菜单在这台设备上要过一个宏任务才挂进卡片（#1002）。
+        await this.waitForMenu(card)
       }
+      const menu = card.querySelector(UPSTREAM_MENU_SELECTOR)
+      const options = menu === null ? [] : [...menu.querySelectorAll<HTMLElement>(UPSTREAM_OPTION_SELECTOR)]
+      try {
+        return run(options)
+      } finally {
+        this.closeUpstreamMenu(card, openedHere)
+      }
+    } finally {
       // 借完就还：之后用户按 Esc 必须能正常关掉 sheet。
       this.borrowing = false
       // 上游刚刚把焦点给了编辑器：重新压回去，键盘才不会跟着冒出来。
-      this.blurActiveEditor()
+      // 只在 sheet 还开着这次借用的那一代时做 —— 用户已经关掉的话，这一下会把他
+      // 此刻正在用的输入框 blur 掉，键盘自己缩回（#999）。
+      if (this.generation === generation) this.blurActiveEditor()
     }
+  }
+
+  /**
+   * 用上游自己的关法收起「+」菜单（不直接 remove 别人的 DOM）。
+   *
+   * Escape 必须派发到编辑器根元素：document.dispatchEvent 的传播路径只有
+   * [document, window]，到不了 Lexical 挂在编辑器上的 keydown，菜单不卸载（#998）。
+   * @param card - 上游合成器卡片。
+   * @param openedHere - 这次是不是我们自己开的（不是就不关，避免关掉用户的菜单）。
+   */
+  private closeUpstreamMenu(card: Element, openedHere: boolean): void {
+    if (!openedHere) return
+    const menu = card.querySelector(UPSTREAM_MENU_SELECTOR)
+    // 已经关掉了（用户自己按了 Esc / 点掉了）：不再空派发。
+    if (menu === null || !menu.isConnected) return
+    upstreamEscapeTarget(card).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
   }
 
   /**
@@ -484,12 +591,14 @@ export class ComposerSheet {
     return new Promise<void>((resolve) => {
       let waited = 0
       const step = (): void => {
-        if (card.querySelector(UPSTREAM_MENU_SELECTOR) !== null || waited >= 3000) {
+        // 判据必须是**选项**，不能只看容器：上游常先提交容器、下一帧才填 [role=option]，
+        // 只等容器会在这两帧之间 resolve，读到的是一张空表（#1002）。
+        if (findOptions(card).length > 0 || waited >= MENU_WAIT_TIMEOUT_MS) {
           resolve()
           return
         }
-        waited += 25
-        setTimeout(step, 25)
+        waited += MENU_POLL_INTERVAL_MS
+        setTimeout(step, MENU_POLL_INTERVAL_MS)
       }
       step()
     })
@@ -596,6 +705,11 @@ export class ComposerSheet {
    * 刻意**不**调用任何 focus()：见文件头「键盘行为」。除还原 inputmode 外不碰焦点。
    */
   private close(): void {
+    // 先让代次失效：open() 里还在跑的 fillRows 收尾拿到的是旧代次，之后一律不再碰焦点（#999）。
+    this.generation += 1
+    // 关掉 sheet 时借用一定结束：万一借用段还没走到自己的 finally，这里的复位
+    // 保证 Escape 立刻可用（#1001）。
+    this.borrowing = false
     if (this.backdrop !== null) {
       this.backdrop.remove()
       this.backdrop = null
@@ -606,5 +720,6 @@ export class ComposerSheet {
       this.previousExpanded = null
     }
     this.restoreInputMode()
+    this.restoreBodyScroll()
   }
 }

@@ -8,6 +8,8 @@ export const COMPOSER_SHEET_CSS = `
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
+  /* aria-modal=true：滚到端点不许把滚动链交给背后的页面（#1009）。 */
+  overscroll-behavior: contain;
 }
 [data-dsh-composer-sheet-panel] {
   box-sizing: border-box;
@@ -15,6 +17,8 @@ export const COMPOSER_SHEET_CSS = `
   max-height: 82vh;
   overflow-y: auto;
   padding: 12px 12px calc(12px + env(safe-area-inset-bottom, 0px));
+  /* 面板自己的 overflow-y 在纵向滚到端点后不把滚动交给背后那一页。 */
+  overscroll-behavior-y: contain;
   border-radius: 18px 18px 0 0;
   border-top: 0.5px solid var(--dsw-alias-border-l3, rgba(128, 128, 128, 0.35));
   background: var(--dsw-alias-bg-layer-1, var(--dsw-alias-bg-base));

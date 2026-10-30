@@ -48,15 +48,8 @@ function option(label: string, description: string | null): HTMLButtonElement {
   return item
 }
 
-/**
- * 搭出合成器 + 上游「+」菜单。
- * @param labels - 上游菜单里要出现的项（标签、可选副标题）。
- */
-function buildComposer(labels: readonly (readonly [string, string | null])[]): {
-  add: HTMLButtonElement
-  input: HTMLInputElement
-  card: HTMLElement
-} {
+/** 上游合成器卡片的壳：card > tools > （+ 与 hidden file input）。 */
+function buildCard(): { add: HTMLButtonElement; input: HTMLInputElement; card: HTMLElement } {
   const card = document.createElement('div')
   card.setAttribute('data-composer-card', '')
   const tools = document.createElement('div')
@@ -74,28 +67,88 @@ function buildComposer(labels: readonly (readonly [string, string | null])[]): {
   tools.append(input)
   card.append(tools)
   document.body.append(card)
+  return { add, input, card }
+}
 
-  // 「+」被点（或我们派发点击）后，上游把菜单挂到卡片里。
-  add.addEventListener('click', () => {
-    if (card.querySelector('[role="listbox"]') !== null) return
-    // 真实上游结构（MenuView.tsx:132）：MenuSurface 的 [data-trigger-menu] 里直接
-    // 是 role="listbox"，**没有** role="menu" 这一层。夹具照抄这个形状，
-    // 否则选择器写错也测不出来。
-    const surface = document.createElement('div')
-    surface.setAttribute('data-trigger-menu', '')
-    const list = document.createElement('div')
-    list.setAttribute('role', 'listbox')
-    for (const [label, description] of labels) list.append(option(label, description))
-    surface.append(list)
-    card.append(surface)
-    add.setAttribute('aria-expanded', 'true')
-  })
-  // 上游 MenuView 的 Esc 关闭。
-  document.addEventListener('keydown', (event) => {
+/**
+ * 上游「+」菜单的 Esc 关闭，挂在**编辑器根元素**上。
+ *
+ * 真机链路：Lexical 把 keydown 挂在 contenteditable 上（上游 ComposerContentEditable
+ * 渲染的 [data-composer-input]），MenuView 的 document 监听收的是冒泡到那里的同一个事件。
+ * 夹具照抄这个形状：只挂元素级监听 —— 直接 document.dispatchEvent 的 Escape
+ * 传播路径只有 [document, window]，到不了这里，也就复现不出 #998 的 bug。
+ */
+function wireEscapeOnEditor(editor: HTMLElement, card: HTMLElement, add: HTMLButtonElement): void {
+  editor.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return
     card.querySelector('[data-trigger-menu]')?.remove()
     add.setAttribute('aria-expanded', 'false')
   })
+}
+
+/** 上游编辑器根元素（真机上是 contenteditable div）。 */
+function buildComposerEditor(): HTMLElement {
+  const editor = document.createElement('div')
+  editor.setAttribute('data-composer-input', '')
+  editor.setAttribute('contenteditable', 'true')
+  editor.setAttribute('role', 'textbox')
+  return editor
+}
+
+/**
+ * 点「+」后上游把菜单挂到卡片里。
+ * @param card - 卡片。
+ * @param add - 「+」。
+ * @param labels - 上游菜单里要出现的项（标签、可选副标题）。
+ * @param delays - 提交节奏：menuDelayMs 控制容器什么时候挂、fillDelayMs 控制容器挂上后
+ *   **再过几毫秒才填选项**（真机上游会先提交容器、下一帧才填 [role=option]）。
+ *   缺省 0 = 同一帧挂完填完。
+ */
+function wireUpstreamMenu(
+  card: HTMLElement,
+  add: HTMLButtonElement,
+  labels: readonly (readonly [string, string | null])[],
+  delays: { menuDelayMs?: number; fillDelayMs?: number } = {},
+): void {
+  const { menuDelayMs = 0, fillDelayMs = 0 } = delays
+  add.addEventListener('click', () => {
+    if (card.querySelector('[role="listbox"]') !== null) return
+    const mount = (): void => {
+      // 真实上游结构（MenuView.tsx:132）：MenuSurface 的 [data-trigger-menu] 里直接
+      // 是 role="listbox"，**没有** role="menu" 这一层。夹具照抄这个形状，
+      // 否则选择器写错也测不出来。
+      const surface = document.createElement('div')
+      surface.setAttribute('data-trigger-menu', '')
+      const list = document.createElement('div')
+      list.setAttribute('role', 'listbox')
+      surface.append(list)
+      card.append(surface)
+      const fill = (): void => {
+        for (const [label, description] of labels) list.append(option(label, description))
+      }
+      if (fillDelayMs <= 0) fill()
+      else setTimeout(fill, fillDelayMs)
+    }
+    if (menuDelayMs <= 0) mount()
+    else setTimeout(mount, menuDelayMs)
+    add.setAttribute('aria-expanded', 'true')
+  })
+}
+
+/**
+ * 搭出合成器 + 上游「+」菜单。
+ * @param labels - 上游菜单里要出现的项（标签、可选副标题）。
+ */
+function buildComposer(labels: readonly (readonly [string, string | null])[]): {
+  add: HTMLButtonElement
+  input: HTMLInputElement
+  card: HTMLElement
+} {
+  const { add, input, card } = buildCard()
+  const editor = buildComposerEditor()
+  card.insertBefore(editor, card.firstChild)
+  wireUpstreamMenu(card, add, labels)
+  wireEscapeOnEditor(editor, card, add)
   return { add, input, card }
 }
 
@@ -106,6 +159,11 @@ function buildEditor(): HTMLElement {
   editor.setAttribute('role', 'textbox')
   document.body.append(editor)
   return editor
+}
+
+/** 读借用闸的当前值（用户看不见它，但残留时 Escape 会被永久吞掉）。 */
+function borrowingOf(target: ComposerSheet): boolean {
+  return (target as unknown as { borrowing: boolean }).borrowing
 }
 
 let sheet: ComposerSheet
@@ -127,6 +185,19 @@ async function settle(): Promise<void> {
   // 与 vitest 的计时器都不可靠，见 composer-sheet.ts 的 nextCommit）。
   for (let i = 0; i < 40; i += 1) {
     await new Promise<void>((resolve) => { setTimeout(resolve, 0) })
+    if (document.querySelector(ROW) !== null) return
+  }
+}
+
+/**
+ * 同上，但给「上游晚一步才给数据」的路径留足时间（默认最多等 1s）。
+ *
+ * settle() 只让出几十个空任务，够不到上游那 25ms 一轮的轮询；这类用例自己定截止时间。
+ */
+async function settleSlow(timeoutMs = 1000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    await new Promise<void>((resolve) => { setTimeout(resolve, 5) })
     if (document.querySelector(ROW) !== null) return
   }
 }
@@ -194,10 +265,15 @@ describe('「+」底部 sheet：自动映射上游菜单', () => {
     buildComposer([['甲', null], ['乙', '说明']])
     await openSheet()
     const rows = [...document.querySelectorAll<HTMLElement>(ROW)]
+    // 正向钉住「转发到了哪一项」：只断言「没有 click」在转发全断时也成立
+    // （forwards 是空数组，.some() 恒 false），等于什么都没守（#1010）。
+    expect(rows.map(row => row.getAttribute('aria-label'))).toEqual(['甲', '乙 — 说明'])
     rows[1].click()
     // 转发要等上游菜单重新开出来（跨一次提交），见 withUpstreamMenu。
     await settle()
+    expect(forwards).toContain('mousedown:乙')
     // 反证：若转发用 click，这里会是 click:乙 而上游根本不响应
+    expect(forwards).not.toContain('click:乙')
     expect(forwards.some(entry => entry.startsWith('click:'))).toBe(false)
   })
 
@@ -327,6 +403,146 @@ describe('「+」底部 sheet：收起途径', () => {
     sheet.detach()
     expect(document.querySelector(BACKDROP)).toBeNull()
   })
+
+  it('编辑器根不在场时退化为 card 上的 Escape（菜单照样关掉）', async () => {
+    // 上游不再打 data-composer-input / contenteditable 时的退化路径：
+    // card 上仍派发 Escape（bubbles），所以挂在 card 自己的关闭监听照样收到。
+    const { add, card } = buildCard()
+    wireUpstreamMenu(card, add, [['甲', null]])
+    card.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return
+      card.querySelector('[data-trigger-menu]')?.remove()
+      add.setAttribute('aria-expanded', 'false')
+    })
+    sheet.attach()
+    document.querySelector<HTMLElement>(ADD)!.click()
+    await settle()
+    expect(card.querySelector('[role="listbox"]')).toBeNull()
+  })
+})
+
+describe('「+」底部 sheet：#998 关上游菜单的 Escape 落点', () => {
+  it('Escape 派发到编辑器根元素，不是 document', async () => {
+    // 真机链路：Lexical 把 keydown 挂在编辑器根上，document.dispatchEvent 的传播路径
+    // 只有 [document, window]，到不了那里 —— 上游菜单留在屏幕上。
+    const { card } = buildComposer([['甲', null]])
+    const editor = card.querySelector<HTMLElement>('[data-composer-input]')!
+    const seen: string[] = []
+    editor.addEventListener('keydown', (event) => { seen.push(event.key) })
+    await openSheet()
+    expect(seen).toContain('Escape')
+    expect(card.querySelector('[role="listbox"]')).toBeNull()
+  })
+})
+
+describe('「+」底部 sheet：#1001 借用闸必须复位', () => {
+  it('上游菜单读不到时借用闸已复位：之后按 Escape 能关掉 sheet', async () => {
+    // 借用闸若漏在 true，onKeyDown 会把用户的 Escape 当成「我们自己关上游菜单的那一下」吞掉。
+    // 卡片里没有编辑器、也没有能开出菜单的东西：读菜单必然空手而归（早退路径）。
+    // 那条路径要先等满 3s 超时，这里用假计时器把这段等待快进掉（判据不变）。
+    const { add } = buildCard()
+    add.addEventListener('click', () => {})
+    sheet.attach()
+    vi.useFakeTimers()
+    try {
+      document.querySelector<HTMLElement>(ADD)!.click()
+      await vi.advanceTimersByTimeAsync(3100)
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(document.querySelector(BACKDROP)).not.toBeNull()
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    expect(document.querySelector(BACKDROP)).toBeNull()
+  })
+
+  it('关闭 sheet 时借用闸一起复位（不留残留）', async () => {
+    // 借用闸只在借用段内合上，复位是异步的；用户中途关掉时 close() 必须立刻把它扳回来，
+    // 否则下一次按下 Escape 会被当成「我们自己关上游菜单的那一下」吞掉。用户看不见这把闸，
+    // 所以直接看实例状态（这是它唯一会被观察到的地方）。
+    // 卡片里没有能开出菜单的东西：借用只能等到 3s 超时，闸会一直合着。
+    const { add } = buildCard()
+    add.addEventListener('click', () => {})
+    sheet.attach()
+    vi.useFakeTimers()
+    try {
+      document.querySelector<HTMLElement>(ADD)!.click()
+      await vi.advanceTimersByTimeAsync(50)
+      expect(borrowingOf(sheet)).toBe(true)
+      window.dispatchEvent(new PopStateEvent('popstate'))
+      expect(document.querySelector(BACKDROP)).toBeNull()
+      expect(borrowingOf(sheet)).toBe(false)
+      // 让那次借用自己走完超时，别把悬挂的计时器留给后面的用例。
+      await vi.advanceTimersByTimeAsync(3100)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('「+」底部 sheet：#1002 等的是选项不是容器', () => {
+  it('上游先挂容器、稍后才填选项：仍能映射出全部行', async () => {
+    // 只等容器会在这两帧之间 resolve，读到 0 项，面板只剩三块瓦片。
+    const { add, card } = buildCard()
+    card.insertBefore(buildComposerEditor(), card.firstChild)
+    wireUpstreamMenu(card, add, [['甲', null], ['乙', '说明']], { fillDelayMs: 150 })
+    sheet.attach()
+    document.querySelector<HTMLElement>(ADD)!.click()
+    await settleSlow()
+    const titles = [...document.querySelectorAll('[data-dsh-composer-sheet-row-title]')]
+      .map(node => node.textContent)
+    expect(titles).toEqual(['甲', '乙'])
+  })
+})
+
+describe('「+」底部 sheet：#999 收尾不碰已关闭之后的焦点', () => {
+  it('读菜单期间用户关掉 sheet：迟到的收尾不得 blur 用户此刻的焦点', async () => {
+    // 上游慢一拍才给菜单：收尾一定落在 close() 之后。
+    const { add, card } = buildCard()
+    card.insertBefore(buildComposerEditor(), card.firstChild)
+    wireUpstreamMenu(card, add, [['甲', null]], { menuDelayMs: 150 })
+    sheet.attach()
+    document.querySelector<HTMLElement>(ADD)!.click()
+    // 用户此刻在别处输入（sheet 已经关了，键盘应该留着）。
+    document.querySelector<HTMLElement>(BACKDROP)!
+      .dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))
+    expect(document.querySelector(BACKDROP)).toBeNull()
+    const typing = buildEditor()
+    typing.focus()
+    expect(document.activeElement).toBe(typing)
+    await new Promise<void>((resolve) => { setTimeout(resolve, 350) })
+    expect(document.activeElement).toBe(typing)
+  })
+})
+
+describe('「+」底部 sheet：#1009 打开时锁背景滚动', () => {
+  it('打开时 body overflow 置 hidden，关闭按快照还原（不是一律清空）', async () => {
+    document.body.style.overflow = 'scroll'
+    buildComposer([['甲', null]])
+    await openSheet()
+    expect(document.body.style.overflow).toBe('hidden')
+    document.querySelector<HTMLElement>(BACKDROP)!
+      .dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))
+    expect(document.body.style.overflow).toBe('scroll')
+  })
+
+  it('打开前 body 没有 overflow 时，关闭后回到「没有」而不是留下空串', async () => {
+    document.body.removeAttribute('style')
+    buildComposer([['甲', null]])
+    await openSheet()
+    expect(document.body.style.overflow).toBe('hidden')
+    document.querySelector<HTMLElement>(BACKDROP)!
+      .dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))
+    expect(document.body.style.overflow).toBe('')
+  })
+})
+
+describe('「+」底部 sheet：#1009 样式表滚动约束', () => {
+  it('遮罩与面板都加 overscroll-behavior: contain', () => {
+    expect(COMPOSER_SHEET_CSS)
+      .toMatch(/\[data-dsh-composer-sheet-backdrop\]\s*\{[^}]*overscroll-behavior:\s*contain/)
+    expect(COMPOSER_SHEET_CSS)
+      .toMatch(/\[data-dsh-composer-sheet-panel\]\s*\{[^}]*overscroll-behavior-y:\s*contain/)
+  })
 })
 
 describe('回形针按钮已下线', () => {
@@ -368,26 +584,10 @@ describe('「+」底部 sheet：#929 焦点顺序（复现真机 MenuView 的焦
     labels: readonly (readonly [string, string | null])[],
     editor: HTMLElement,
   ): { add: HTMLButtonElement; card: HTMLElement } {
-    const card = document.createElement('div')
-    card.setAttribute('data-composer-card', '')
-    const tools = document.createElement('div')
-    tools.className = 'tools'
-    const add = document.createElement('button')
-    add.type = 'button'
-    add.setAttribute('aria-haspopup', 'listbox')
-    add.setAttribute('aria-expanded', 'false')
-    add.setAttribute('aria-label', '添加文件或调用指令')
-    tools.append(add)
-    const input = document.createElement('input')
-    input.type = 'file'
-    input.multiple = true
-    input.hidden = true
-    tools.append(input)
-    card.append(tools)
-    document.body.append(card)
+    const { add, card } = buildCard()
+    // 真机判据：编辑器不持焦点 -> 菜单不开 -> 读到 0 项。
     add.addEventListener('click', () => {
       if (card.querySelector('[role="listbox"]') !== null) return
-      // 真机判据：编辑器不持焦点 -> 菜单不开 -> 读到 0 项。
       if (document.activeElement !== editor) return
       const surface = document.createElement('div')
       surface.setAttribute('data-trigger-menu', '')
