@@ -16,6 +16,19 @@
  *
  * 用法：
  *   node scripts/verify-bridge-frame-guard.mjs --ws 29225 [--json out.json]
+ *   node scripts/verify-bridge-frame-guard.mjs --self-test   # 无需设备：只验前置判据本身
+ *
+ * ── 两个会让人白跑一遍的设备侧前置（都已在下方做断言或说明）──────────────────
+ *
+ * 1) socket 要 forward 到**主进程**，不是渲染进程。
+ *    WebView 会同时暴露多个 `webview_devtools_remote_<pid>`：主进程那个的 /json/list 里
+ *    才有引擎 page；渲染进程那个返回**空列表**。挂错了不会报错，只会安静地「什么都没验到」，
+ *    看起来很像「应用没起来」。所以本脚本开头有一条前置断言（见 precondition 段），
+ *    看不到引擎 page 直接 exit 2 并指出这个可能。
+ *
+ * 2) 全新安装后，引擎页面前面会挡一个「预览版说明」对话框。
+ *    没点掉它，引擎页面根本不会加载，CDP 里自然没有 page。这不是缺陷，是首次启动的说明页。
+ *    自动化跑之前先确认这一屏已经点过（`input tap` 那个「继续」），否则同样会撞上上面的空列表。
  */
 import { writeFileSync } from 'node:fs'
 
@@ -27,14 +40,95 @@ function argOf(name, fallback) {
 const PORT = Number(argOf('ws', '29225'))
 const JSON_OUT = argOf('json', null)
 
-const listRaw = await fetch('http://127.0.0.1:' + PORT + '/json/list')
+/**
+ * 引擎页判据。抽成常量，让 --self-test 能对同一份规则做正控/负控，
+ * 避免「自检断言的是另一份规则」这种假绿。
+ */
+const ENGINE_PAGE_RE = /^http:\/\/127\.0\.0\.1:\d+\//
+
+/**
+ * --self-test：不需要设备，只验前置判据本身。
+ *
+ * 为什么值得有：这条前置的全部价值就是「挂错 socket 时立刻停下并说清原因」。
+ * 它是判据代码，判据本身就该有正控与负控，否则哪天正则写宽了（比如放行任意 url）
+ * 也照样「通过」，等于把假绿的门槛又装回去。
+ */
+if (process.argv.includes('--self-test')) {
+  const cases = [
+    { url: 'http://127.0.0.1:4145/', want: true, why: '默认端口引擎页' },
+    { url: 'http://127.0.0.1:3080/', want: true, why: '本机实际端口也是引擎页' },
+    { url: 'http://127.0.0.1:4145/#/chat', want: true, why: '带 hash 的路由页' },
+    { url: 'about:blank', want: false, why: '空白页不是引擎页' },
+    { url: 'https://127.0.0.1:4145/', want: false, why: 'https 不是引擎页（引擎是 http）' },
+    { url: 'http://localhost:4145/', want: false, why: 'localhost 与 127.0.0.1 不同源，不能放行' },
+    { url: 'http://192.168.1.9:4145/', want: false, why: '非回环地址不是引擎页' },
+    { url: '', want: false, why: '空 url 不是引擎页' },
+  ]
+  let failed = 0
+  for (const c of cases) {
+    const got = ENGINE_PAGE_RE.test(c.url)
+    const ok = got === c.want
+    if (!ok) failed += 1
+    console.log((ok ? 'PASS ' : 'FAIL ') + JSON.stringify(c.url) + ' -> ' + got + '（期望 ' + c.want + '：' + c.why + '）')
+  }
+  console.log('--self-test: ' + (cases.length - failed) + '/' + cases.length + ' 通过')
+  process.exit(failed === 0 ? 0 : 1)
+}
+
+let listRaw
+try {
+  listRaw = await fetch('http://127.0.0.1:' + PORT + '/json/list')
+} catch (e) {
+  // 端口没 forward 时 fetch 会抛，不接住就是一段栈回溯——既不像判据也不指出下一步。
+  console.error(
+    '前置不满足：连不上 http://127.0.0.1:' + PORT + '（' + (e && e.message ? e.message : e) + '）。\n' +
+    '  先做端口转发：\n' +
+    '    adb -s <serial> shell "cat /proc/net/unix" | grep webview_devtools_remote\n' +
+    '    adb -s <serial> forward tcp:' + PORT + ' localabstract:webview_devtools_remote_<pid>\n' +
+    '  注意 webview_devtools_remote_<pid> 有多个，要选**主进程**那个（渲染进程的空列表）。',
+  )
+  process.exit(2)
+}
 if (!listRaw.ok) {
-  console.error('CDP 列表不可读（先 adb forward tcp:' + PORT + ' localabstract:webview_devtools_remote_<pid>）')
+  console.error('前置不满足：CDP 列表不可读（HTTP ' + listRaw.status + '）。先确认 adb forward 到了主进程 socket。')
   process.exit(2)
 }
 const pages = await listRaw.json()
-const page = pages.find((p) => p.type === 'page')
-if (!page) { console.error('没有 page target') ; process.exit(2) }
+
+/**
+ * 前置判据（第一道，在连 WS 之前）：/json/list 里必须已经有**引擎页**。
+ *
+ * 这一道比后面的 Target.getTargets 更早、也更重要：挂错 socket 时最常见的结果就是列表为空，
+ * 这时连 WS 都会失败（渲染进程 socket 没有 page），后面的断言根本没机会跑。
+ */
+const pageList = pages.filter((p) => p.type === 'page')
+const engineInList = pageList.find((p) => ENGINE_PAGE_RE.test(p.url || ''))
+if (!engineInList) {
+  console.error(
+    '前置不满足：CDP 列表里没有引擎 page（http://127.0.0.1:<port>/）。\n' +
+    '  实际看到：' + (pageList.map((p) => JSON.stringify(p.url)).join(', ') || '<无 page target>') + '\n' +
+    '  最可能：--ws ' + PORT + ' forward 到了**渲染进程** socket——那边 page 列表为空，\n' +
+    '          连 WS 都连不上，看起来很像「应用没起来」。\n' +
+    '  其次：全新安装后的「预览版说明」对话框还没点掉，引擎页因此没加载。\n' +
+    '  逐个 socket 试：adb -s <serial> shell "cat /proc/net/unix" | grep webview_devtools_remote\n' +
+    '  再 forward 到能列出引擎页的那个。',
+  )
+  process.exit(2)
+}
+
+const page = engineInList
+if (!page) {
+  console.error(
+    '前置不满足：CDP 里没有 page target。\n' +
+    '  最可能的原因：--ws ' + PORT + ' forward 到了**渲染进程**的 socket。\n' +
+    '  WebView 会同时暴露多个 webview_devtools_remote_<pid>，只有主进程那个的 /json/list\n' +
+    '  才有引擎 page；渲染进程那个返回空列表，且不会报错。\n' +
+    '  另一个可能：全新安装后的「预览版说明」对话框还没点掉，引擎页因此没加载。\n' +
+    '  逐个 socket 试：adb -s <serial> shell "cat /proc/net/unix" | grep webview_devtools_remote\n' +
+    '  再 adb -s <serial> forward tcp:' + PORT + ' localabstract:webview_devtools_remote_<pid>',
+  )
+  process.exit(2)
+}
 
 const ws = new WebSocket(page.webSocketDebuggerUrl)
 let seq = 0
@@ -66,6 +160,28 @@ const evalIn = async (contextId, expression) => {
 await send('Runtime.enable', {})
 await send('Page.enable', {})
 await new Promise((r) => setTimeout(r, 500))
+
+/**
+ * 前置断言：连上的这个 socket 必须真的能看到**引擎页面**。
+ *
+ * 为什么要单独断言：仅凭 /json/list 有一个 page 就往下跑是不够的——挂错 socket 时它可能是
+ * 空白页或别的 WebView；那样后面所有帧断言都会「通过」，但验的不是引擎页面，属假绿。
+ * 这里用 Target.getTargets 再确认一次目标 URL 是引擎 origin，不匹配就 exit 2。
+ */
+const targets = await send('Target.getTargets', {})
+const targetInfos = (targets.result && targets.result.targetInfos) || []
+const pageTargets = targetInfos.filter((t) => t.type === 'page')
+const engineTarget = pageTargets.find((t) => /^http:\/\/127\.0\.0\.1:\d+\//.test(t.url || ''))
+if (!engineTarget) {
+  console.error(
+    '前置不满足：连上了 CDP，但看不到引擎 page（http://127.0.0.1:<port>/）。\n' +
+    '  实际看到：' + (pageTargets.map((t) => JSON.stringify(t.url)).join(', ') || '<无 page target>') + '\n' +
+    '  最可能：--ws ' + PORT + ' forward 到了渲染进程 socket（那边 page 列表为空或不是引擎页）。\n' +
+    '  其次：全新安装后的「预览版说明」对话框未点掉，引擎页还没加载。',
+  )
+  process.exit(2)
+}
+console.log('前置 OK：引擎 page = ' + engineTarget.url)
 
 /** 三类探针：读 / 凭据 / 写。写操作用可逆的 setImmersiveMode，避免副作用。 */
 const PROBES = {
