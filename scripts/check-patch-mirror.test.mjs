@@ -94,6 +94,11 @@ function runWithoutPeer(args) {
   const root = join(base, 'repo')
   mkdirSync(join(root, 'scripts', 'patches'), { recursive: true })
   cpSync(SCRIPT, join(root, 'scripts', 'check-patch-mirror.mjs'))
+  // issue #779（及其来源分支）给 check-patch-mirror.mjs 加了对 scripts/lib/patch-mirror-parse.mjs 的
+  // 静态 import（逐字节比较与 gitignore 判据下沉到该库）。隔离树若不带上这个库，主脚本一加载就
+  // ERR_MODULE_NOT_FOUND —— 表现是「对端缺席」用例全红，但真因是夹具缺文件、不是门禁行为变了。
+  mkdirSync(join(root, 'scripts', 'lib'), { recursive: true })
+  cpSync(join(REPO, 'scripts', 'lib', 'patch-mirror-parse.mjs'), join(root, 'scripts', 'lib', 'patch-mirror-parse.mjs'))
   for (const f of ['registry.json', 'apply-patches.mjs']) {
     cpSync(join(REPO, 'scripts', 'patches', f), join(root, 'scripts', 'patches', f))
   }

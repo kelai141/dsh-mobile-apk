@@ -1,6 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+// issue #779/#973：走**单一真源**解析 tar。Windows 上裸 'tar' 解析到 Git 的 GNU tar，
+// 它把 `-cJf C:\\...` 里的盘符当**远端主机**，报 `Cannot connect to C: resolve failed`；
+// 实现侧早已用 resolveTar()/TAR 修过（scripts/lib/shell.mjs），测试侧必须同源。
+import { TAR } from './lib/shell.mjs'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
@@ -32,7 +36,7 @@ function makeSnapshot(files) {
   const tar = join(root, 'snap.tar.xz')
   // 显式列目录（不要 `-C stage .`）：那会产出 `./usr/...` 成员名，`startsWith('usr/')` 就不成立。
   const tops = [...new Set(Object.keys(all).map((k) => k.split('/')[0]))]
-  execFileSync('tar', ['-cJf', tar, '-C', stage, ...tops])
+  execFileSync(TAR, ['-cJf', tar, '-C', stage, ...tops])
   return { tar, cleanup: () => rmSync(root, { recursive: true, force: true }) }
 }
 
@@ -84,7 +88,7 @@ test('不是发行快照时必须硬失败，不接受空集假绿', () => {
   mkdirSync(join(stage, 'home'), { recursive: true })
   writeFileSync(join(stage, 'home/readme.txt'), 'x')
   const tar = join(root, 'bad.tar.xz')
-  execFileSync('tar', ['-cJf', tar, '-C', stage, 'home'])
+  execFileSync(TAR, ['-cJf', tar, '-C', stage, 'home'])
   try {
     const r = runGate(tar)
     assert.equal(r.code, 1, '缺 usr/ 却通过 = 假绿：' + r.out)
