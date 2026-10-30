@@ -5,6 +5,88 @@
 > grep 用法：`grep -n "<坑号>\." docs/AGENTS/gotchas.md` 或按关键词（如 `borrowSession`、`MANAGE_EXTERNAL_STORAGE`、`store-rehome`）定位。
 > 维护约定：新坑追加到文末并递增编号；修复后保留条目（教训与历史归档）。
 
+## 量 `innerHeight` 必须同时记朝向，否则会被读成「CSS px != dp」（#864 实锤）
+
+两个实例、同一份代码，数值看起来互相矛盾：
+
+| 实例 | `wm size` | `wm density` | `dpr` | `innerHeight` | `innerHeight*dpr` | 朝向 |
+|---|---|---|---|---|---|---|
+| 5 | 900x1600 | 320 | 2 | **800** | 1600 = 高度 | 竖屏（`SurfaceOrientation: 0`） |
+| 6 | 900x1600 | 240 | 1.5 | **600** | 900 = **宽度** | **横屏（`SurfaceOrientation: 1`）** |
+
+实例 6 单看 `600*1.5=900` 会得出「对不上屏幕高 1600 ⇒ CSS px 不是 dp」的**错误结论**。
+实际上它横过来了：物理变成 **1600x900**，`900/1.5 = 600` 正是 dp 高度。
+
+**正确表述**：`innerHeight * dpr` = **当前朝向下**视口高度方向的物理像素数；`wm size` 报的是**未旋转**的尺寸，
+所以它永远只对上其中一个方向。
+
+判据：
+
+```
+adb shell dumpsys input | grep -i SurfaceOrientation    # 0=竖 1=90deg 2=180 3=270
+```
+
+**结论仍然成立**：`CSS px == dp`（`width=device-width` 下），Kotlin 侧 `px / density` 换到 CSS px 是对的 ——
+但**只报 `innerHeight` 不报朝向**会让人（包括未来的自己）算错。
+
+## 「看得见却留不下」：页面在打日志、诊断里一条没有（#864 实锤）
+
+这类盲区比普通 bug 难查，因为**症状是「静默」而不是「报错」**：页面的 `console.log` 你
+在 logcat 里看得见、用 `adb logcat | grep` 也能抓到，于是很容易认定「日志通了」——
+但**诊断包里一条都没有**，事后复盘时那段现场等于不存在。
+
+### 本次实例：`ConsoleActivity` 原本没有 `webChromeClient`
+
+控制台页面（`assets/console.html`）跑在 `ConsoleActivity` 的 WebView 里，
+而那个 Activity **没有装 `webChromeClient`**：
+
+```
+Select-String -Path app/src/main/java/com/dsharnessmobile/shell/ConsoleActivity.kt -Pattern 'webChromeClient|onConsoleMessage'
+  （空）
+```
+
+于是：页面的 `console.log` → logcat（有）→ `boot-diag.log`（**没有**），中间缺的就是消费端。
+
+对照：应用主 WebView 在 `MainActivity.onConsoleMessage` 里有完整的三前缀消费，
+所以 `[dsh-boot-ready]` / `[dsh-boot-stall]` / `[dsh-boot-failed]` 能落盘 —— **只有控制台这条线是断的**。
+
+### 怎么避免同类盲区
+
+**判据不是「日志出现」，而是「日志能被导出」**。加任何页面侧上报前先确认三件事都在：
+
+| 面 | 查法 |
+|---|---|
+| 生产者：页面真的发了吗 | `adb logcat -d | grep <前缀>` |
+| 消费者：那个 WebView 有 `webChromeClient.onConsoleMessage` 吗 | 在**对应 Activity** 里 grep |
+| 落局面：写出后文件真有这一行 | `adb shell run-as <pkg> cat files/boot-diag.log \| grep <source>` |
+
+**三缺一就是「看得见却留不下」。** 只验第一条会得到假的「已接通」。
+
+### 连带教训：`run-as ls assets/` 证明不了 APK 里有某个 asset
+
+`assets/` 在 APK **内部**，`run-as` 看的是应用数据目录：
+
+```
+adb shell run-as com.dsharnessmobile.shell ls -l assets/console-metrics.js
+  -> No such file or directory        （这不代表 APK 里没有）
+```
+
+同理 Windows 的 `tar` 是 GNU 版，**读不了 APK（zip）**，报 `does not look like a tar archive` 后
+过滤得到的 0 条会被误读成「APK 里没这个条目」。要查 APK 内容只能用解压库（`[IO.Compression.ZipFile]`）。
+
+## 真机/模拟器上「键盘弹起态」量不出来时的排查顺序（#864）
+
+MuMu 常有**硬键盘连接**导致软键盘不弹，`mInputShown` 恒 `false`。按序试：
+
+```
+adb shell settings put secure show_ime_with_hard_keyboard 1
+adb shell ime list -s                                        # 确认有可用 IME
+adb shell dumpsys input_method | grep -E 'mInputShown|mCurMethodId'
+```
+
+仍为 `false` 就换实例或真机；都不行则把「键盘弹起态不可观测」记为**已知缺口**，
+**不要拿弹起前的值去推双扣方向** —— 那等于用 A 面的数编 B 面的结论。
+
 ## WebView 远程调试（CDP）的两个坑：`force-stop` 后调试面为 0、以及**两个** devtools socket（#864）
 
 ### 坑 1：`am force-stop` 之后只起 `ConsoleDebugAlias`，`webview_devtools_remote_*` 根本不存在

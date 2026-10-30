@@ -2980,16 +2980,16 @@
       "已知会制造**假失败**的环境残留（先清再判）："
     ],
     "docs/AGENTS/gotchas.md:103": [
-      ""
+      "```"
     ],
     "docs/AGENTS/gotchas.md:178": [
-      "2. **splice 后必跑该语言的语法检查再谈功能验证** —— `node --check`（JS/MJS/内联 script）/ `tsc --noEmit`（TS）/ `:app:compileDebugKotlin`（Kotlin）/ `JSON.parse`。**顺序不能反**：语法都不通过，功能验证的结论没有任何意义。"
+      "### 归属：不是壳侧删的"
     ],
     "docs/AGENTS/gotchas.md:44": [
-      "但输出里仍可能有几行，`Where-Object` 过滤后得到 0 条 —— 看起来像「APK 里没有这个条目」，其实是**工具不认这个格式**。"
+      "Select-String -Path app/src/main/java/com/dsharnessmobile/shell/ConsoleActivity.kt -Pattern 'webChromeClient|onConsoleMessage'"
     ],
     "docs/AGENTS/gotchas.md:74": [
-      "补消费端时别忘了这一半，否则「页面在打日志、诊断里一条没有」。"
+      "同理 Windows 的 `tar` 是 GNU 版，**读不了 APK（zip）**，报 `does not look like a tar archive` 后"
     ],
     "docs/AGENTS/modules.md:36": [
       "| **SnapshotFs.kt** | 符号链接安全的文件原语（0.13.3 新增；0.14.1 修 API 越级崩溃） | `exists/isSymbolicLink/deletePath/move/createDirectories`——全部 NOFOLLOW：递归删除绝不穿透链接进用户数据；**目录枚举用 `Files.newDirectoryStream`（`DirectoryStream` 是 Iterable）而非 `Files.list(...).toList()`**——后者是 Java `Stream.toList()`、**API 34 才提供**，minSdk 26 下真机抛 `NoSuchMethodError`（Error，`catch(Exception)` 抓不住），曾让快照事务恢复永久卡死；防线见 `ApiLevelGuardTest`（坑 153） |"
