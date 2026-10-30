@@ -2657,3 +2657,37 @@ node -e "import('file:///'+process.cwd()+'/scripts/check-code-map.mjs').then(m=>
 幂等：同一 `--only` 连跑两次，第二次 `改写 0 处引用`，基线与文档 SHA-256 都不变。
 
 ⇒ 注意 `--only` 只解决**作用域**，不解决**推导**：它复用 `deriveAnchorFor` / `deriveSymbolAnchor`，与 `--derive-anchors` 同一套逻辑（两套推导必然漂移，而漂移正是锚点要解决的问题）。所以内容在符号体内不唯一时它照样硬失败——那时该做的是换一行锚、或给 `#expect`，不是绕过门禁。
+364. **会整体改写受版本控制文件的工具，默认行为必须是「不改动」——`--derive-anchors` 曾默认落盘（2026-10-30 实修）。**
+
+现象：`node scripts/check-code-map.mjs --derive-anchors` 一条命令就把整份 `EXECUTION-MAP.md` 改写掉：实测 1169 处引用、693+/693-。它本来是个「锚点形态迁移工具」，却和**校验路径共用同一个入口**，而且**默认就 writeFileSync**。
+
+真因：把「危险动作」写成了默认值。这个脚本日常被这样调用——
+
+```
+node scripts/check-code-map.mjs            # 校验，天天跑
+node scripts/check-code-map.mjs --self-test
+```
+
+手指记住的是 `--derive-` 前缀，`--derive-anchors` 与 `--derive-dry-run` 只差一个词。误跑前者 = 整份文档被改写，而且从 diff 里根本看不出「你只想试一下」。我自己就这么踩过一次，靠 `git checkout` 才恢复。
+
+修法：**默认 dry-run**，只打印将改动的条数与前后 sha256；必须显式 `--write` 才落盘。
+
+```
+$ node scripts/check-code-map.mjs --derive-anchors
+DRY-RUN（未落盘）：
+  将改写 1169 处引用 -> docs/AGENTS/EXECUTION-MAP.md
+  sha256 docs/AGENTS/EXECUTION-MAP.md: 5a11e5ebc8257613 -> 2908c39a5d139d13
+  文件字节未改动。
+  确认无误后加上 --write 落盘
+EXIT=0
+
+$ node scripts/check-code-map.mjs --derive-anchors --write
+已落盘（--write）：
+  改写 1169 处引用 -> ...
+```
+
+两条负控（缺一即这个保护没在盯）：①**不加 `--write` -> 文件字节 SHA-256 不变且 exit 0**，并打印「dry-run / 未落盘」字样；②加 `--write` -> 文件真的被写入。只测②会漏掉「默认仍然是写」这种回归。
+
+usage 首行写死了这条：`--derive-anchors 与 --only 默认 dry-run 不落盘，必须显式加 --write`。
+
+⇒ 同族判据：凡「一条命令能大范围改写受版本控制文件」的工具，问一句「默认值是哪边」。默认可写 + 与常用入口共用一个前缀，是误操作的标准配方。反过来，默认不可写 + 显式开关，误跑最多得到一段报告。

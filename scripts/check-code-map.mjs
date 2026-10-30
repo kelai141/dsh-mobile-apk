@@ -13,13 +13,19 @@
 //   4. 排版：mermaid 围栏成对、块内不得出现 style/classDef/linkStyle（渲染兼容），
 //      文档不得含 emoji（仓铁律）。
 //
-// 用法：
+// 用法（注意：--derive-anchors 与 --only 默认 **dry-run 不落盘**，必须显式加 --write）：
 //   node scripts/check-code-map.mjs                 # 校验（默认文档 docs/AGENTS/EXECUTION-MAP.md）
 //   node scripts/check-code-map.mjs --list          # 只打印账本盘点，不判红
 //   node scripts/check-code-map.mjs --doc <path>    # 换文档（调试用）
 //   node scripts/check-code-map.mjs --self-test     # 无仓库依赖的判别力自检（含故意失败样本）
 //   node scripts/check-code-map.mjs --refresh-anchor-baseline # Refresh reviewed legacy anchor snapshots
-// 退出码：0 = 通过；1 = 有失败项；2 = 前置不满足（文档缺失/文档缺账本块）。
+//   node scripts/check-code-map.mjs --only <path>[,<path>] [--write] # 只刷指定文件的锚点（默认 dry-run）
+//   node scripts/check-code-map.mjs --derive-anchors [--write]       # 全量推导迁移（默认 dry-run）
+// 退出码：0 = 通过；1 = 有失败项；2 = 前置不满足（文档缺失/文档缺账本块/参数越界）。
+//
+// **误跑保护**：--derive-anchors 会整体改写受版本控制的 EXECUTION-MAP.md（实测 1246 条锚点、
+// 上千行 diff）。它默认只报告「将改动多少条、前后 sha256」，**不碰磁盘**；确认后加 --write 才落盘。
+// 这条与「禁止直接 push main」同性质：会大范围改写文件的操作必须显式表达意图。
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { refreshCompletenessProblem, sourceLinesDropProblem } from './lib/refresh-guard.mjs'
 import { dirname, join, relative, resolve as resolvePath } from 'node:path'
@@ -107,6 +113,19 @@ const ONLY_RAW = (() => {
   if (raw === undefined || raw.startsWith('--')) return { error: '--only 需要一个路径参数（逗号分隔）' }
   return { paths: raw.split(',').map((s) => s.trim()).filter(Boolean) }
 })()
+/**
+ * `--derive-anchors` 的**落盘开关**：默认 dry-run，必须显式 `--write` 才改文件。
+ *
+ * 为什么：`--derive-anchors` 会一次性改写整份执行地图的所有 legacy 锚点（实测 1246 条、
+ * diff 规模上千行）。它本来是个「迁移工具」，却和校验路径共用同一个入口、且**默认就落盘**——
+ * 误跑一次（比如本想跑 `--derive-dry-run` 却打成了 `--derive-anchors`）就会把整份文档
+ * 改掉，且很难从 diff 里看出改了什么。这个坑我自己踩过：误跑后整份 EXECUTION-MAP.md
+ * 696+/696-，靠 `git checkout` 才恢复。
+ *
+ * 一个会整体改写受版本控制文档的工具，默认行为必须是**不改动**。
+ * 想落盘就明确说 `--write`——这条与仓里「禁止直接 push main」同一性质：危险动作必须显式。
+ */
+const DERIVE_WRITE = argv.includes('--write')
 /** CI 等价性检查：apk 仓在被独立检出时没有协调仓父目录，--no-parent 用来本地预演那种情形。 */
 const NO_PARENT = argv.includes('--no-parent')
 const ANCHOR_BASELINE_REL = 'scripts/check-code-map-anchor-baseline.json'
@@ -1902,7 +1921,8 @@ if (isMain) {
       }
       process.exit(0)
     }
-    // 真正改写文档：把 `path:line` 文本替换成推导出的符号锚点
+    /* 先把改写后的文本算出来（纯字符串操作，不碰磁盘）。
+     * 落盘与否由 DERIVE_WRITE 决定 —— 默认 dry-run，见 DERIVE_WRITE 处的说明。 */
     let out = text
     let replaced = 0
     for (const [key, target] of rewrites) {
@@ -1910,8 +1930,26 @@ if (isMain) {
       const re = new RegExp(esc + '(?!#expect=)', 'g')
       out = out.replace(re, () => { replaced += 1; return target })
     }
+    const shaOf = (s) => createHash('sha256').update(s, 'utf8').digest('hex')
+    const shaBefore = shaOf(text)
+    const shaAfter = shaOf(out)
+
+    if (!DERIVE_WRITE) {
+      // 默认 dry-run：只报告，不改文件。
+      console.log('')
+      console.log('DRY-RUN（未落盘）：')
+      console.log('  将改写 ' + replaced + ' 处引用 -> ' + DOC_REL)
+      console.log('  sha256 ' + DOC_REL + ': ' + shaBefore.slice(0, 16) + ' -> ' + shaAfter.slice(0, 16))
+      console.log('  文件字节未改动。')
+      console.log('  确认无误后加上 --write 落盘：node scripts/check-code-map.mjs --derive-anchors --write')
+      process.exit(0)
+    }
+
     writeFileSync(docAbs, out)
-    console.log('  已改写 ' + replaced + ' 处引用 -> ' + DOC_REL)
+    console.log('')
+    console.log('已落盘（--write）：')
+    console.log('  改写 ' + replaced + ' 处引用 -> ' + DOC_REL)
+    console.log('  sha256 ' + DOC_REL + ': ' + shaBefore.slice(0, 16) + ' -> ' + shaAfter.slice(0, 16))
     console.log('  下一步：node scripts/check-code-map.mjs --refresh-anchor-baseline')
     process.exit(0)
   }
