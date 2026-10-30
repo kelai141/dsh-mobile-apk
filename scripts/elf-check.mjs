@@ -55,14 +55,28 @@ if (want === undefined) {
 const wslArc = wslPath(target)
 const tmpWin = join(dirname(target), '.elfnode-tmp-' + abi + '-' + process.pid)
 const tmpWsl = wslPath(tmpWin)
+// 全量落盘的中间文件：见下方注释，不能用「tar | head」管道。
+const fullWin = join(dirname(target), '.elfnode-full-' + abi + '-' + process.pid)
+const fullWsl = wslPath(fullWin)
 
 try {
   // 取 node 头部 20 字节（ELF 头 + e_machine），写文件而非捕获 stdout（避开 WSL 噪音）；
-  //   Linux 下原生 bash 走同一文件路径，两分支一致、结果干净
-  sh(`tar -xOf "${wslArc}" usr/bin/node 2>/dev/null | head -c 20 > "${tmpWsl}"`, { maxBuffer: 96 * 1024 * 1024 })
+  //   Linux 下原生 bash 走同一文件路径，两分支一致、结果干净。
+  //
+  // 为什么分两步、不写成 `tar -xOf … | head -c 20`（issue #1182）：
+  //   `sh()` 自 #1121 起给整行加 `set -o pipefail`（那是为 #1074 修的，必须保留）。
+  //   `head -c 20` 读够 20 字节就关闭管道，上游 tar 立刻收到 SIGPIPE 并以 141 退出，
+  //   pipefail 于是把「消费者提前退出」当成失败 —— 这不是归档有问题，是管道语义。
+  //   改成「先全量落盘，再截断」：两步各自独立取退出码，不依赖 pipefail 的行为，
+  //   也不必给这一行单独关 pipefail（那会让真正的 tar 失败重新变得不可见）。
+  //   代价是一次全量解压（node 约 100MB），换来判据语义正确。
+  sh(`tar -xOf "${wslArc}" usr/bin/node 2>/dev/null > "${fullWsl}"`, { maxBuffer: 96 * 1024 * 1024 })
+  sh(`head -c 20 "${fullWsl}" > "${tmpWsl}"`)
 } catch (e) {
   console.error('  usr/bin/node 提取失败: ' + e.message)
   process.exit(1)
+} finally {
+  try { rmSync(fullWin, { force: true }) } catch { /* 忽略清理失败 */ }
 }
 
 let buf
