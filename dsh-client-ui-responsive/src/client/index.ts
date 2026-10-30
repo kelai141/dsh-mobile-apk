@@ -47,7 +47,7 @@ import { TrajectoryPanelsObserver } from './trajectory-panels-observer.ts'
 import { SnapshotPanelsObserver } from './snapshot-panels-observer.ts'
 import { SNAPSHOT_PANELS_CSS } from './snapshot-panels.css.ts'
 import { ComposerPopupGuard } from './composer-popup-guard.ts'
-import { SESSION_LOG_DIALOG_HIDE_CSS } from './session-log-dialog.css.ts'
+import { SESSION_LOG_DIALOG_HIDE_CSS, SHELL_OUTCOME_ATTR } from './session-log-dialog.css.ts'
 import { SessionLogDialogObserver } from './session-log-dialog-observer.ts'
 import { openSessionForNotify, type SessionOpenFace } from './mobile/notify-landing.ts'
 import { DevSection } from './dev-section/DevSection.tsx'
@@ -879,11 +879,30 @@ export function apply(ctx: ClientContext): void {
       if (typeof payload.ok !== 'boolean' || typeof payload.title !== 'string' || typeof payload.detail !== 'string') return
       exportChannel.show(payload)
     }
+    // Whether the shell owns the outcome right now (#919). Set on the same DOM
+    // event the dialog reads, cleared when that dialog folds — so the upstream
+    // error modal is suppressed exactly while the shell's dialog is up, never on
+    // a guessed time window.
+    const markOutcomeShown = (shown: boolean): void => {
+      if (shown) document.documentElement.setAttribute(SHELL_OUTCOME_ATTR, '')
+      else document.documentElement.removeAttribute(SHELL_OUTCOME_ATTR)
+    }
+    const onResultWithMark = (event: Event): void => {
+      onResult(event)
+      if (exportChannel.getSnapshot().open) markOutcomeShown(true)
+    }
     const bridge = (payload: ExportResultPayload): void => { reportUserFacingResult(payload) }
     window.__dshExportResult = bridge
-    window.addEventListener('dsh:export-result', onResult)
+    window.addEventListener('dsh:export-result', onResultWithMark)
+    // The dialog closes through this channel, so its snapshot is the single
+    // place the mark can be cleared — no second bookkeeping path.
+    const unsubscribe = exportChannel.subscribe(() => {
+      if (!exportChannel.getSnapshot().open) markOutcomeShown(false)
+    })
     return () => {
-      window.removeEventListener('dsh:export-result', onResult)
+      window.removeEventListener('dsh:export-result', onResultWithMark)
+      unsubscribe()
+      markOutcomeShown(false)
       delete window.__dshExportResult
     }
   }, 'ui-responsive: export result dialog bridge')
