@@ -950,4 +950,23 @@ export function apply(ctx: ClientContext): void {
       delete (window as unknown as Record<string, unknown>).__dshOpenSession
     }
   }, 'ui-responsive: notification landing (openSession)')
+  // issue #960 文案止损：自定义模型提供商卡片上的两行提示。
+  //
+  // 挂上游**官方扩展位** `settings.models.provider-card`（keyed slot，按 settingsNs 分发）：
+  // 自定义 provider 的 ns 是 `llm-pi-ai`，所以只有它命中；官方 provider（llm-deepseek 等）不会出现本提示。
+  // 不改上游源码、也不做 DOM 注入 —— 这是上游声明给外部插件用的座位。
+  ctx.slots.inject('settings.models.provider-card', () => ctx.slots.register({
+    name: 'settings.models.provider-card',
+    id: 'android-custom-provider-hint',
+    key: CUSTOM_PROVIDER_NS,
+    order: 90,
+    locale: providerHintNS,
+  } as never, CustomProviderHint as never))
 }
+
+
+// issue #960 文案止损：自定义 provider 卡片的提示。
+// 刻意把 import 放在**文件末尾** —— ESM 的 import 会被提升到模块初始化前执行，语义不受位置影响；
+// 放这里可以让上面所有既有符号锚点行号一个都不动（插在 import 区会让 `export function apply` 整体下移，
+// check-code-map 判 bad-anchor-content）。
+import { CustomProviderHint, CUSTOM_PROVIDER_NS, LOCALE_NS as providerHintNS, zh as providerHintZh, en as providerHintEn } from './models/provider-hint.tsx'

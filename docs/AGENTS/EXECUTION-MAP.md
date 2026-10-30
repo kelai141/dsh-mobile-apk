@@ -2199,6 +2199,8 @@ scripts/verify-mobile-workspaces.mjs
 dsh-client-ui-responsive/src/client/mobile/sidebar-bubbles.ts
 dsh-client-ui-responsive/src/client/mobile/sidebar-bubbles.css.ts
 dsh-client-ui-responsive/src/client/mobile/sidebar-bubbles.locales.ts
+dsh-client-ui-responsive/src/client/models/provider-hint.tsx
+dsh-client-ui-responsive/src/client/models/provider-hint.locales.ts
 scripts/verify-sidebar-bubbles.mjs
 scripts/patches/data/sidebar-bubble-reorder.mjs
 scripts/patches/tests/sidebar-bubble-reorder.test.mjs
