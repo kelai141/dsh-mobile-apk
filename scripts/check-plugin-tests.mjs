@@ -149,6 +149,29 @@ const scriptCoverage = (testDir, script) => {
   return [...script.matchAll(/test\/([A-Za-z0-9_.\-]+\.test\.mjs)/g)].length
 }
 
+/**
+ * issue #957：本地 test 脚本必须是**可识别的 glob 形态**，不允许回退成显式清单。
+ *
+ * 为什么单独立一条：`scriptCoverage` 对两种形态都算得出数来，于是「有人把 glob 改回显式清单」
+ * 只要清单暂时是完整的，元断言照样绿 —— 而它下一轮新增测试文件时就静默少跑。
+ * 这类「当下正确、以后必错」的写法必须被形态判据挡在门外，不能靠人数数。
+ *
+ * @param {string} plugin 插件名（用于错误文案）。
+ * @param {string} script `package.json` 的 test 脚本。
+ * @returns {string|null} null = 合规；否则返回判红理由。
+ */
+const scriptFormProblem = (plugin, script) => {
+  const trimmed = String(script || '').trim()
+  if (trimmed === '') return plugin + ' 有测试文件但没有 test 脚本'
+  // 显式清单：出现任何 test/<名字>.test.mjs 即判红（glob 用的是 test/*.test.mjs，不会命中这条）
+  if (/test\/[A-Za-z0-9_.-]+\.test\.mjs/.test(trimmed)) {
+    return plugin + ' 的 test 脚本是**显式清单**，必须是 glob：node --test test/*.test.mjs（脚本：' + trimmed + '）'
+  }
+  if (!/test\/\*\.test\.mjs/.test(trimmed)) {
+    return plugin + ' 的 test 脚本不是可识别的 glob 形态（脚本：' + trimmed + '）'
+  }
+  return null
+}
 const pluginTestScript = (plugin) => {
   try { return JSON.parse(readFileSync(join(PLUGIN_DIR, plugin, 'package.json'), 'utf8')).scripts?.test ?? '' }
   catch { return '' }
@@ -159,6 +182,12 @@ for (const plugin of plugins.sort()) {
   const files = collectTestFiles(testDir)
   // issue #957：本地 `npm test` 与门禁必须用**同一份发现逻辑**，否则本地会漏跑而没人知道。
   // 元断言：脚本覆盖数 == 递归发现数。改 glob 成单个文件名、或把测试挪进子目录，都会在这里判红。
+  // issue #957：先判**形态**（glob），再判覆盖数 —— 形态错要单独报，否则只会看到一个数字对不上。
+  const formProblem = scriptFormProblem(plugin, pluginTestScript(plugin))
+  if (formProblem !== null) {
+    console.error('FAIL  ' + formProblem)
+    failed += 1
+  }
   const covered = scriptCoverage(testDir, pluginTestScript(plugin))
   if (covered !== files.length) {
     console.error('FAIL  ' + plugin + ' 的本地 npm test 覆盖 ' + covered + ' 个测试文件，门禁递归发现 '
