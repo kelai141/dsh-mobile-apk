@@ -1756,13 +1756,13 @@ FileProvider XML path regression coverage: `scripts/check-manifest-hardening.tes
   - 门禁集是唯一声明处 `check-release-gates.mjs:28-104`（现数 27 项），本地链必须逐条出现其脚本名，聚合入口只由 build-release.ps1 与 CI 调用。
 - **关键坐标**：
   - `scripts/build-apk-013.ps1:182`（逐 ABI 主循环；-OnlyAbi/-Fast 只改循环范围）
-  - `scripts/build-apk-013.ps1:283`（inject-all.py 单 pass 注入调用）
-  - `scripts/build-apk-013.ps1:510#expect=(Join-Path%20%24Root%20%22scripts%5Cbuild-apk-engine.mjs%22)%2C%20%22assemble%22%2C`（`$engineArgs` 把出包交给共享终端引擎；ps1 自己不直接调 gradle，出包唯一一步是引擎里的 `:app:assembleRelease`）
+  - `scripts/build-apk-013.ps1:401#expect=python%20(Join-Path%20%24Root%20%22scripts%5Cinject-all.py%22)%20%24snap`（inject-all.py 单 pass 注入调用）
+  - `scripts/build-apk-013.ps1:538#expect=(Join-Path%20%24Root%20%22scripts%5Cbuild-apk-engine.mjs%22)%2C%20%22assemble%22%2C`（`$engineArgs` 把出包交给共享终端引擎；ps1 自己不直接调 gradle，出包唯一一步是引擎里的 `:app:assembleRelease`）
   - `scripts/build-apk-engine.mjs:54#expect=export%20function%20assembleApk(options%2C%20runner%20%3D%20spawnSync)%20%7B` / `:144#expect=export%20function%20verifyApks(%7B%20directories%20%3D%20%5B%5D%2C%20files%20%3D%20%5B%5D%2C%20signatureGate`（共用 assemble 与签名验证入口；`assembleApk` 的 `buildType` 缺省 release、可选 debug，单点派生 Gradle 任务与产物目录）；调用测试锁住本地、云端、发布三路汇合：`scripts/build-apk-engine.test.mjs:51#expect=assert.deepEqual(args%2C%20%5B'%3Aapp%3AassembleRelease'`
   - `scripts/patches/data/registry-scan-c4.mjs:11`（同步 flush 的 Loader 临时索引与 manifest 复用；详细设备计时/预算见 RUNTIME-PATCHES §7.6，自动补给的异步 checkpoint 见 model-capability README）
   - `scripts/patches/data/client-index-loader-barrier.mjs:3`（G2：首页HTML在快照插件图前等待同一host Loader收敛；静态资源不参与等待）
   - `scripts/patches/data/undo-safe-transaction-snippet.mjs:1`（Safe Mode 事务代码模板；由 `apply-patches.mjs:540#expect=el%28%27p%27%2C%20%27%7BclassName%3A%22dshm-summary%22%7D%27%2C%20%27k%28o%2Ca%29%27%29%2C` 注入 vendor 快照代码）
-  - `scripts/build-apk-013.ps1:427`（被拒非空即 exit 1 的收口）
+  - `scripts/build-apk-013.ps1:619#expect=if%20(%24rejectedAbis.Count%20-gt%200)%20%7B%20Write-Host%20%22%E6%9C%89%20ABI%20%E8%A2%AB%E9%97%A8%E7%A6%81%E6%8B%92%E7%BB%9D%E2%80%94%E2%80%94%E4%B8%8D%E5%8F%91%E7%89%88%EF%BC%88exit%201%EF%BC%89%22%3B%20exit%201%20%7D`（被拒非空即 exit 1 的收口）
   - `scripts/build-snapshot-013.mjs:31`（Windows 宿主重入 WSL 的判据）
   - `scripts/build-snapshot-013.mjs:291`（引擎树补丁 --apply --scope engine）
   - `scripts/build-snapshot-013.mjs:979`（归档 tar | xz，快照产物的唯一产出点）
@@ -1867,7 +1867,7 @@ flowchart LR
   4. **发布链**：`scripts/build-release.ps1`——`node scripts/check-release-gates.mjs`（静态接线）→ `--run --require`（注入前）→ 手工快照注入 → `--run --require`（注入后产物体）→ gradle。
 - **运行顺序**（什么时候跑 / 被谁触发 / 跑完交给谁）：
   - **提交期（秒级到分钟级）**：pr-gate `static` 作业按「文本扫描 → 补丁自洽 → npm 构建前置 → 协议/契约/登记 → 加固/路由 → 冷启动预算 → 快照构建器产出面 → 接线聚合 → 制度性门禁 → 工具面预算」推进（见下表），全绿后交 `compile` 作业；`compile` 绿即 PR 可评审。这一步**不依赖快照**，也不接触设备。
-  - **本地构建期**：`build-apk-013.ps1` 在注入之前跑完注入前门禁段；任一项非 0 立即 `exit 1`（不打包）。逐 ABI 循环内，注入后门禁失败走 `Deny-Abi` 记账并 `continue`，循环结束后若 `$rejectedAbis.Count > 0` 则整链 `exit 1`（`scripts/build-apk-013.ps1:427`）——控制权在此交还给调用者（人），不自动重试。
+  - **本地构建期**：`build-apk-013.ps1` 在注入之前跑完注入前门禁段；任一项非 0 立即 `exit 1`（不打包）。逐 ABI 循环内，注入后门禁失败走 `Deny-Abi` 记账并 `continue`，循环结束后若 `$rejectedAbis.Count > 0` 则整链 `exit 1`（`scripts/build-apk-013.ps1:450#expect=node%20(Join-Path%20%24Root%20%22scripts%5Ccheck-snapshot-file-modes.mjs%22)%20%24snapIn%202%3E%261`）——控制权在此交还给调用者（人），不自动重试。
   - **发布期**：`build-release.ps1` 先 `git status --porcelain` 脏检查（含协调仓根的 `plugins/scripts/vendor/LICENSES` 面），再跑聚合入口；`--require` 档下任何 SKIP 即中止组装（`scripts/build-release.ps1:60`、`:147`）。
   - **跑完交给谁**：门禁本身不产出交付物，只以退出码裁决；通过后控制权依次交给注入链（`scripts/inject-all.py`）、共享终端引擎的 gradle（`:app:assembleRelease`，构建类型由 `assembleApk({ buildType })` 决定）、上传/发布步骤。
 - **嵌套与线程**：
