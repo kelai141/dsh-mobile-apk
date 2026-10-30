@@ -53,8 +53,12 @@ internal data class RepairModelLoad(
 
 /** Reads bundle → profile → HOME layers without starting Node or asking a live engine. */
 internal object RepairModelConfig {
-  fun load(context: Context): List<RepairModelConnection> = loadDetailed(context).connections
-
+  /**
+   * 唯一的 Context 入口。**只保留完整形态**（#1017）：旧的
+   * `load(context): List<RepairModelConnection>` 只返回候选，正好让调用方在主线程
+   * 顺手解析一遍、再在后台完整解析一遍——一次打开解析两遍。删掉这个窄入口，
+   * 调用方只能拿到 [RepairModelLoad]（含来源与默认可用性），也就只能在后台调一次。
+   */
   fun loadDetailed(context: Context): RepairModelLoad {
     val result = loadDetailed(File(context.filesDir, "home"),
       mapOf("DEEPSEEK_API_KEY" to privateKey(context, "deepseek-key.txt")))

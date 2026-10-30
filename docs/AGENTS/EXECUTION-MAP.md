@@ -2249,6 +2249,7 @@ scripts/patches/upstream/pi-ai-1.1.0.patch
 glob:dsh-client-ui-responsive/src/client/mobile/upstream-browser/**
 app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt
 app/src/main/java/com/dsharnessmobile/shell/RepairActivity.kt
+app/src/main/java/com/dsharnessmobile/shell/RepairSessionWriter.kt
 app/src/main/java/com/dsharnessmobile/shell/RepairConversationStore.kt
 app/src/main/java/com/dsharnessmobile/shell/RepairModelClient.kt
 app/src/main/java/com/dsharnessmobile/shell/RepairModelConfig.kt

@@ -66,6 +66,16 @@ class RepairActivity : Activity() {
   private var modelNotice: LinearLayout? = null
   private var modelNoticeText: TextView? = null
   private var reloadModels: Button? = null
+  // #1017：候选在后台解码，打开会话时先把会话偏好的模型身份/强度寄存在这里。
+  private var pendingIdentity: String? = null
+  private var pendingEffort: String? = null
+  /**
+   * 会话落盘器。所有 `saveCurrentSession()` 都只是提交快照，序列化与磁盘写发生在
+   * `dsh-repair-session-writer` 线程上；onDestroy 会 flush 到落盘为止。
+   */
+  private val sessionWriter = RepairSessionWriter { session ->
+    RepairConversationStore.save(filesDir, session)
+  }
   private var diagnosticsReady = false
   private var defaultModelAvailable = false
   private var modelSources = ""
@@ -472,10 +482,16 @@ class RepairActivity : Activity() {
     runAgent("自动读取本轮诊断文件，检查运行时，定位并修复启动失败。使用工具实际执行修复并验证，不要只给建议。")
   }
 
+  /**
+   * 打开（或新建）会话。**只做会话本身的事**：配置解码不在这里。
+   *
+   * #1017：这里原先调 `RepairModelConfig.load(applicationContext)`，于是 onCreate（主线程）
+   * 先把整份模型配置解析一遍，紧接着 worker 里的 `loadRepairModels()` 又把同一份配置完整
+   * 解析第二遍——一次打开解析两遍，且第一遍在主线程（还会顺带原子写一次
+   * `repair-model-source.json`）。现在唯一解码点是后台的 `loadRepairModels()`；
+   * 这里只记下恢复出的模型偏好，等候选到达后由 `restoreSelection()` 落定。
+   */
   private fun openOrCreateSession(restoredId: String? = null) {
-    connections = runCatching { RepairModelConfig.load(applicationContext) }.getOrDefault(emptyList())
-    selectedModel = 0
-    selectedEffort = connections.firstOrNull()?.defaultReasoningEffort
     val session = restoredId?.let { RepairConversationStore.load(filesDir, it) }
       ?: RepairConversationStore.create(filesDir)
     currentSessionId = session.id
@@ -483,7 +499,9 @@ class RepairActivity : Activity() {
     history = JSONArray(session.history.toString())
     eventLog = JSONArray(session.events.toString())
     if (RepairToolCallParser.completeInterruptedTail(history)) saveCurrentSession()
-    restoreSelection(session)
+    // 候选尚未解码：先把会话里记下的身份/强度留下，等 connections 到位后再解析成索引。
+    pendingIdentity = session.modelIdentity
+    pendingEffort = session.reasoningEffort
     renderEvents(session.events)
   }
 
@@ -515,14 +533,25 @@ class RepairActivity : Activity() {
     scrollToBottom()
   }
 
+  /**
+   * 把「会话偏好的模型 + 推理强度」解析成当前候选下标。
+   *
+   * #1017：候选改为后台解码后，打开会话时 connections 还是空的，偏好只能先记在
+   * [pendingIdentity]/[pendingEffort] 里，等 worker 拿到候选再落定（显式传 session 的
+   * 路径——切会话——仍以传入的会话为准）。否则恢复会话会静默退回第一个候选。
+   */
   private fun restoreSelection(session: RepairConversation? = null) {
-    val identity = session?.modelIdentity
+    val identity = session?.modelIdentity ?: pendingIdentity
     val index = connections.indexOfFirst { it.identity == identity }
     selectedModel = if (index >= 0) index else 0
-    val wanted = session?.reasoningEffort
+    val wanted = session?.reasoningEffort ?: pendingEffort
     selectedEffort = wanted?.takeIf { effort ->
       connections.getOrNull(selectedModel)?.reasoningEfforts?.any { it.id == effort } == true
     } ?: connections.getOrNull(selectedModel)?.defaultReasoningEffort
+    if (connections.isNotEmpty()) {
+      pendingIdentity = null
+      pendingEffort = null
+    }
   }
 
   private fun renderEvents(events: JSONArray) {
@@ -557,6 +586,19 @@ class RepairActivity : Activity() {
     saveCurrentSession()
   }
 
+  /**
+   * 冻结当前会话并**提交**给写线程。
+   *
+   * #1017：修前这里在调用线程上做两件重活——把 history/events 各过一遍 `toString()` +
+   * 重新解析（整份会话 JSON 的序列化/反序列化），然后 `RepairConversationStore.save` 原子
+   * 落盘并重写索引、扫描目录。调用点包含主线程路径（自动开修、切会话、关模型面板、
+   * onDestroy），等于把整份会话的序列化与文件 IO 压在主线程上。
+   *
+   * 现在：主线程只做 O(元素数) 的结构深拷贝（不起整份字符串），落盘交给
+   * [RepairSessionWriter] 的单线程串行写。顺序语义由写线程保证——同一时刻只有一笔在写，
+   * 且提交之间以最新一笔覆盖旧的，所以「切会话时先存旧、再载新」不会出现旧数据覆盖新数据。
+   * 退出（onDestroy）显式 [RepairSessionWriter.flush]，最后一笔不丢。
+   */
   private fun saveCurrentSession() {
     val id = currentSessionId ?: return
     var firstUser = ""
@@ -566,14 +608,13 @@ class RepairActivity : Activity() {
     }
     if (firstUser.isNotBlank()) currentTitle = firstUser.lineSequence().firstOrNull()
       ?.trim()?.take(48)?.takeIf { it.isNotBlank() } ?: currentTitle
-    RepairConversationStore.save(
-      filesDir,
+    sessionWriter.submit(
       RepairConversation(
         id = id,
         title = currentTitle,
-        history = JSONArray(history.toString()),
-        events = JSONArray(eventLog.toString()),
-        modelIdentity = connections.getOrNull(selectedModel)?.identity,
+        history = RepairSessionJson.copy(history),
+        events = RepairSessionJson.copy(eventLog),
+        modelIdentity = connections.getOrNull(selectedModel)?.identity ?: pendingIdentity,
         reasoningEffort = selectedEffort,
       ),
     )
@@ -725,12 +766,17 @@ class RepairActivity : Activity() {
         connections.forEach { it.clearCredential() }
         saveCurrentSession()
         busy.set(false)
+        // #1017：本轮结束要重新读配置（凭据在上面已从连接对象上抹掉，下一轮必须重新取），
+        // 但整份解码原先发生在 runOnUiThread 里 = 主线程上又解析一遍配置。这里改走与
+        // 打开时同一个解码入口 loadRepairModels()，仍在 worker 线程上，主线程只拿到结果赋值。
+        val refreshed = runCatching { loadRepairModels() }.getOrDefault(emptyList())
         runOnUiThread {
           if (alive) {
             setBusy(false)
-            connections = runCatching { RepairModelConfig.load(applicationContext) }.getOrDefault(emptyList())
-            send.isEnabled = connections.isNotEmpty()
-            modelButton.isEnabled = connections.isNotEmpty()
+            connections = refreshed
+            selectedModel = selectedModel.coerceIn(0, refreshed.lastIndex.coerceAtLeast(0))
+            send.isEnabled = refreshed.isNotEmpty()
+            modelButton.isEnabled = refreshed.isNotEmpty()
           }
         }
       }
@@ -1207,6 +1253,9 @@ class RepairActivity : Activity() {
     alive = false
     cancelWork()
     saveCurrentSession()
+    // #1017：落盘已经在写线程上，退出前必须等到它落完，否则切后台/旋转后的最后一笔会话会丢。
+    // flush 超时会在调用线程把最后一笔同步写完，宁慢不丢。
+    sessionWriter.flush()
     RepairState.active = false
     super.onDestroy()
   }
