@@ -160,7 +160,7 @@ sequenceDiagram
 
 | ID | 名称 | 一句话职责 | 入口/触发 | 阶段 | 依赖 | 被谁拉起 | 关键文件 | 耦合 |
 |---|---|---|---|---|---|---|---|---|
-| K01 | 启动与引导面 | 点开 App 到引擎页面可见的进程入口、引导页与 WebView 宿主 | LAUNCHER 图标、VIEW/SEND 来件、ACTION_UPDATE | 引导与启动 | 引擎进程与快照面、鉴权探活、诊断落盘 | 系统启动器与分享面板、BootReceiver、悬浮球跳转 | MainActivity.kt,EngineStartFlow.kt,GuidePageRenderer.kt,ForegroundPageRecoveryPolicy.kt | 高 |
+| K01 | 启动与引导面 | 点开 App 到引擎页面可见的进程入口、引导页与 WebView 宿主 | LAUNCHER 图标、VIEW/SEND 来件（`ACTION_UPDATE` 的 adb 触发入口已随 #682 移除） | 引导与启动 | 引擎进程与快照面、鉴权探活、诊断落盘 | 系统启动器与分享面板、BootReceiver、悬浮球跳转 | MainActivity.kt,EngineStartFlow.kt,GuidePageRenderer.kt,ForegroundPageRecoveryPolicy.kt | 高 |
 | K02 | 引擎生命周期与保活 | 起 node 引擎、Activity独立观察启动准备窗、5s 探活、看门狗重启熔断与日志落盘 | EngineStartFlow.start及生命周期结束后排队启动前台服务、EngineService先前台提升后初始化及5s tick | 引导与启动 | K01,K03 | MainActivity、BootReceiver、EngineStartFlow | EngineManager.kt,EngineService.kt,WatchdogV2.kt,LogCollector.kt | 高 |
 | K03 | 快照事务与更新链 | 内嵌快照暂存交换事务与回滚（插件故障走**清单式外科拔除**，不整份回滚），兼在线更新与清单合并 | 启动流判指纹不新鲜 / 引导页检查更新 / WebView 下载 | 快照与更新 | 引导启动流、引擎探活、构建快照资产 | EngineStartFlow.runFlow、EngineService 看门狗、引导页按钮、MainActivity 的 WebView 回调 | SnapshotTransaction.kt,SnapshotFs.kt,SnapshotRefreshPolicy.kt,PublicRepoProvision.kt,UpdateManager.kt,PluginMounts.kt,SnapshotUserData.kt,SnapshotFingerprintPolicy.kt,ProfilePackageManifest.kt | 高 |
 | K04 | 桥与控制协议面 | 页面 JS 桥面、引擎鉴权与控制队列承载 | 页面调 androidBridge；EngineService 起控制承载 | 稳态控制 | 引导与启动（EngineService/MainActivity）、无障碍与虚拟屏宿主、快照与更新（UndoGate） | MainActivity 装桥；EngineService.onCreate 起 ControlCarrier；看门狗 tick 调 UndoGate | app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt,app/src/main/java/com/dsharnessmobile/shell/ClipboardReadController.kt,app/src/main/java/com/dsharnessmobile/shell/ControlPoller.kt,app/src/main/java/com/dsharnessmobile/shell/EngineAuth.kt,app/src/main/java/com/dsharnessmobile/shell/ControlProtocolV2.kt | 高 |
@@ -782,8 +782,17 @@ Terminal output delivery (#591): `ConsoleSession` sends stripped PTY text throug
     真有在途动作回 `busy`（`:398`）、其余（failed/up-to-date 等）回 `not-available`（`:399`）。
     旧实现只要 `currentResult` 非空就回 `busy`，这正是上述死循环的用户可见形态。
     **例外（显式化，勿误以为全线都有兜底）**：快照联调路径 `runUpdate`（`EngineStartFlow.kt:1143`）**无超时兜底**；
-    它由 `MainActivity.kt:475-476` 的 `ACTION_UPDATE`（`:197`，manifest 未声明）即 **adb 显式 intent** 触发，普通用户不可达；
+    它的 adb 显式 intent 触发入口**已随 #682 移除**（`ACTION_UPDATE` 的处理分支直接删除：导出的 launcher Activity 无法区分「adb 联调」与「任意第三方应用」，两者走的是同一条显式组件 intent，故收口；`runUpdate` 定义保留在 `EngineStartFlow.kt`，但当前无任何外部 intent 入口）；
     回执守卫在 `EngineStartFlow.kt:1150`，代次作废即静默丢弃回执、不落终态。见 `docs/AGENTS/known-gaps.md`。
+    
+    > **补记（#1028）：为什么不能把 `#773` 分支的文档整份合进 main**
+    > 本轮恢复这句时试过三条路，都被门禁当场挡下，记录以免后来者重走：
+    > 1. **直接取 PR 分支的文档** → 其中 900+ 条锚点指向搬迁后的代码行，`check-code-map` 判 `bad-anchor-content`；
+    > 2. **手工补 `#expect=`** → 散文/区间引用（如 `:927-960,1023`）会被门禁把**整行**当成期望值，反而写坏 6 处；
+    > 3. **`--derive-anchors`** → 会改写 1200+ 处引用并造出无效符号锚点（例如给 SnapshotTransaction 的 finish 造符号锚，而其内容不在符号体内），刷新当场失败。
+    >
+    > 最终做法：**只取那几句正文**（`#682` 入口移除 + `@JavascriptInterface` 计数），粘进 main 版本对应位置，
+    > 锚点全部沿用 main 现有形态（新增引用必须带 `#expect=<行内容前缀>`）。
   - **不变量 3（不碰共享页面桥对象）**：壳侧对 `window.__dshBridge` 写入面 = 0。
     反例锚点 `UpdateCheckerTest.kt:426`（`updatePathNeverTouchesTheSharedPageBridgeObject`）。
   - **快照链已下线**：`startUpdateCheck` 无任何调用点（定义保留于 `EngineStartFlow.kt:549`，两个测试按该签名切片，不得当死代码删除）。
@@ -796,7 +805,7 @@ Terminal output delivery (#591): `ConsoleSession` sends stripped PTY text throug
 
 - **一句话**：页面里的 `window.androidBridge` / `window.dshBackBridge` 方法面，加壳侧两条对引擎的 HTTP/WS 通道（浏览器 cookie 鉴权、控制队列长轮询）与崩溃自动回撤闸门，共同构成「模型动作怎么落到这台手机上、结果怎么回填、出事怎么自救」的底座。
 - **入口/触发**：
-  - 页面 JS 同步调 `window.androidBridge.*`（现状：71 个 `@JavascriptInterface` 注解、70 个唯一方法名（`browserHostShow` 为重载），唯一安装点 `MainActivity.kt:724-804`；2026-10-11 实测修正，旧值 53/52）与 `window.dshBackBridge.*`（`BackGate.kt:132-148`，仅 2 个方法）；另有 `consoleBridge`（`ConsoleActivity.kt:112#expect=webView.getLocationOnScreen(location)`）挂在控制台 WebView。
+  - 页面 JS 同步调 `window.androidBridge.*`（现状：80 个 `@JavascriptInterface` 注解，唯一安装点 `MainActivity.kt:1531#expect=webView.addJavascriptInterface(`；#773 的帧来源守卫合入后每个入口都过 `trusted{}`/`checkTrustedFrame()`，由 `check-bridge-symmetry` 的静态判据守住）与 `window.dshBackBridge.*`（`BackGate.kt:132-148`，仅 2 个方法）；另有 `consoleBridge`（`ConsoleActivity.kt:112#expect=webView.getLocationOnScreen(location)`）挂在控制台 WebView。
   - `EngineService.onCreate` → `ControlCarrier.ensureStarted`（`EngineService.kt:43`）；无障碍服务连接时同入口（`DeviceControlService.kt:452-453`）。轮询/心跳由此起步。
   - 任一出厂 HTTP 调用方（`EngineProbe.kt:51`、`DownloadSaver.kt:101`、`NotifyBridge.kt:328`、`OverlayPanel.kt:822`、`OverlayService.kt:580`、`MuxClient.kt:91`）在发请求前向 `EngineAuth` 取值。
   - 看门狗 tick 的 `undoReady`（`EngineService.kt:134`）与启动流（`EngineStartFlow.kt:349`）触发 `UndoGate`。
