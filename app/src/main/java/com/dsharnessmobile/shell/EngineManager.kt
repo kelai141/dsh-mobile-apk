@@ -1586,9 +1586,13 @@ class EngineManager(private val context: Context, private val pickToken: String?
         nodeBin.absolutePath, "--expose-internals", dshBin.absolutePath, "web", "--port", bindPort.toString(), "--no-open",
       )
       EngineEndpoint.beginBinding()
+      // issue #963 第 2 步：用户 Python 包区前置进 PYTHONPATH。
+      // 只在 `<files>/python-packages/py3.X` **已存在**时设置（本步不创建它），
+      // 因此对现有设备是**零行为变化**；迁移与建目录是第 3 步。
+      val pythonPath = PythonPackages.pythonPath(context.filesDir, usrDir)
       val started = startWithArgs(args, shellEnv() + mapOf(
         "DSH_MOBILE_MANAGED_ENGINE" to "1", "DSH_ENGINE_PORT" to bindPort.toString(),
-      ))
+      ) + if (pythonPath == null) emptyMap() else mapOf("PYTHONPATH" to pythonPath))
       engineProcess = started
       // A managed Node server retries EADDRINUSE only once, using the OS-assigned ephemeral port.
       // Nothing sends requests until its current-generation token URL publishes the bound port.
