@@ -5,6 +5,37 @@
 > grep 用法：`grep -n "<坑号>\." docs/AGENTS/gotchas.md` 或按关键词（如 `borrowSession`、`MANAGE_EXTERNAL_STORAGE`、`store-rehome`）定位。
 > 维护约定：新坑追加到文末并递增编号；修复后保留条目（教训与历史归档）。
 
+## 提交前必须 `git status --porcelain` 核一遍待提交清单（2026-10-30 实锤）
+
+一次多文件 PR 里，我用 `git add -A` 收尾，把**三个本该分开的改动**连同三个 `_p*.md` 草稿
+一起塞进了同一个提交 —— PR 描述只讲了一件事，diff 里却有 9 个文件：
+
+```
+_p1031.md                        <- 写 PR 描述用的草稿
+_p1049.md
+_p1051.md
+scripts/check-apk-signatures-dir.test.mjs
+scripts/check-apk-signatures.mjs
+scripts/check-manifest-hardening.mjs
+scripts/check-tool-surface-budget.mjs
+scripts/check-tool-surface-budget.test.mjs
+scripts/lib/tool-surface-plugins.mjs
+```
+
+后果不是「多几个文件」这么轻：拆分时要重建分支、从提交里逐文件取出，中间**丢过一次改动**（apksig 那处）
+并重放了一遍才推上去。自己给自己制造噪音，代价是几轮 git 手术。
+
+### 规矩
+
+```powershell
+git status --porcelain      # 提交前必看：待提交清单是不是我打算提交的那几个
+git add <path1> <path2>     # 按 PR 分组逐个 add，不要 `-A`
+git status --porcelain      # add 后再看一遍，确认没有 _p*.md / _tmp / 产物混入
+```
+
+**多文件 PR 尤其要看**：`-A` 会连草稿、临时脚本、构建产物一起收。
+草稿文件写 PR 描述后就该删，不要留在工作区里等 `-A` 把它捡走。
+
 ## 量 `innerHeight` 必须同时记朝向，否则会被读成「CSS px != dp」（#864 实锤）
 
 两个实例、同一份代码，数值看起来互相矛盾：
