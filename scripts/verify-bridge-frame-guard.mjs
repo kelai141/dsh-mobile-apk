@@ -102,42 +102,93 @@ const fresh = contexts.slice(before)
 const byOrigin = (o) => fresh.filter((c) => c.origin === o)
 const rows = []
 
-// P1 主帧正控
+/**
+ * 5 秒轮询：单点取样证明不了「全程」。
+ *
+ * 为什么必须轮询：addJavascriptInterface 是 WebView 实例级注入，子帧里它**可能晚于**
+ * document-start —— 若守卫先跑，delete 就是空操作，桥随后照旧出现，方案整体失效。
+ * 所以要在 load 之后持续取样，确认全程没有一次变成 object。
+ */
+const POLL_MS = 5000
+const POLL_STEP = 250
+
+const pollTypeof = async (contextId, label) => {
+  const samples = []
+  const started = Date.now()
+  while (Date.now() - started < POLL_MS) {
+    const r = await evalIn(contextId, 'typeof window.androidBridge')
+    samples.push({ t: Date.now() - started, value: r.value === undefined ? 'undefined' : r.value })
+    await new Promise((res) => setTimeout(res, POLL_STEP))
+  }
+  const distinct = [...new Set(samples.map((s) => s.value))]
+  return { label, samples: samples.length, distinct, everObject: samples.some((s) => s.value === 'object'), first: samples[0], last: samples[samples.length - 1] }
+}
+
+const rows = []
+
+// ── 主帧：canary + 5 秒轮询必须始终 object ──────────────────────────────
+const canary = await evalIn(null, "document.documentElement.getAttribute('data-dsh-bridge-guard')")
+let canaryObj = null
+try { canaryObj = canary.value ? JSON.parse(canary.value) : null } catch { canaryObj = null }
+rows.push({ assert: 'C1 主帧 canary 属性存在', expect: 'present', got: canaryObj, pass: !!canaryObj })
+if (canaryObj) {
+  rows.push({ assert: 'C2 canary.supported', expect: 'true', got: canaryObj.supported, pass: canaryObj.supported === true })
+  rows.push({ assert: 'C3 canary.top（主帧）', expect: 'true', got: canaryObj.top, pass: canaryObj.top === true })
+  rows.push({ assert: 'C4 canary.applied（主帧应 allowed）', expect: 'allowed', got: canaryObj.applied, pass: canaryObj.applied === 'allowed' })
+  rows.push({ assert: 'C5 canary.after（主帧应 object）', expect: 'object', got: canaryObj.after, pass: canaryObj.after === 'object' })
+}
+
+const mainPoll = await pollTypeof(null, 'main')
+rows.push({
+  assert: 'P1 主帧 5 秒轮询必须始终 object（不得出现 undefined）',
+  expect: 'all object', got: mainPoll, pass: mainPoll.distinct.length === 1 && mainPoll.distinct[0] === 'object',
+})
+
+// 主帧三类方法正控
 for (const name of Object.values(PROBES)) {
   const r = await evalIn(null, probeScript(name))
-  rows.push({ assert: 'P1 主帧 ' + name, expect: 'reachable', got: r.value, pass: !!(r.value && r.value.reachable) })
+  rows.push({ assert: 'P2 主帧 ' + name, expect: 'reachable', got: r.value, pass: !!(r.value && r.value.reachable) })
 }
 
-// N1/N2 跨源子帧负控（origin 为 null 的那些）
+// ── opaque 子帧：5 秒轮询必须始终 undefined ─────────────────────────────
 const opaque = byOrigin('://').concat(byOrigin('null'))
 const frameCtx = opaque.length ? opaque[opaque.length - 1] : null
-if (frameCtx) {
+if (!frameCtx) {
+  rows.push({ assert: 'N0 opaque 子帧可见', expect: 'observed', got: 'no opaque context', pass: false })
+} else {
+  const framePoll = await pollTypeof(frameCtx.id, 'opaque-frame')
+  rows.push({
+    assert: 'N1 opaque 子帧 5 秒轮询必须始终 undefined（不得出现 object）',
+    expect: 'all undefined', got: framePoll, pass: framePoll.distinct.length === 1 && framePoll.distinct[0] === 'undefined',
+  })
+
   for (const name of Object.values(PROBES)) {
     const r = await evalIn(frameCtx.id, probeScript(name))
-    const unreachable = !(r.value && r.value.reachable)
-    rows.push({ assert: 'N1 opaque 子帧 ' + name, expect: 'unreachable', got: r.value || r.thrown, pass: unreachable })
+    rows.push({ assert: 'N2 opaque 子帧 ' + name, expect: 'unreachable', got: r.value || r.thrown, pass: !(r.value && r.value.reachable) })
   }
-  const t = await evalIn(frameCtx.id, 'typeof window.androidBridge')
-  rows.push({ assert: 'N2 opaque 子帧 typeof', expect: 'undefined', got: t.value, pass: t.value === 'undefined' })
 
-  // P3 同源子帧正控：origin 等于引擎 origin 的帧必须仍可用
-  const sameOrigin = fresh.filter((c) => c.origin && c.origin.startsWith('http'))
-  const soCtx = sameOrigin.length ? sameOrigin[sameOrigin.length - 1] : null
-  if (soCtx) {
-    const r = await evalIn(soCtx.id, probeScript(PROBES.read))
-    rows.push({ assert: 'P3 同源子帧 read', expect: 'reachable', got: r.value, pass: !!(r.value && r.value.reachable) })
-  } else {
-    rows.push({ assert: 'P3 同源子帧 read', expect: 'reachable', got: 'no same-origin context observed', pass: false })
-  }
-} else {
-  rows.push({ assert: 'N1/N2 opaque 子帧', expect: 'observed', got: 'no opaque context', pass: false })
+  const t = await evalIn(frameCtx.id, 'typeof window.androidBridge')
+  rows.push({ assert: 'N3 opaque 子帧 typeof', expect: 'undefined', got: t.value, pass: t.value === 'undefined' })
+
+  const fc = await evalIn(frameCtx.id, "document.documentElement.getAttribute('data-dsh-bridge-guard')")
+  let fcObj = null
+  try { fcObj = fc.value ? JSON.parse(fc.value) : null } catch { fcObj = null }
+  rows.push({ assert: 'N4 子帧 canary.applied 应为 sealed', expect: 'sealed', got: fcObj && fcObj.applied, pass: !!(fcObj && fcObj.applied === 'sealed') })
+
+  // 子帧解析期内联脚本看到的值（时间轴上的一点，作为补充而非唯一证据）
+  const parseProbe = await evalIn(frameCtx.id, 'window.__parseTimeBridge === undefined ? "not-set" : window.__parseTimeBridge')
+  rows.push({ assert: 'N5 子帧解析期可见性（补充）', expect: 'undefined', got: parseProbe.value, pass: parseProbe.value === 'undefined' })
 }
 
-// N3 解析期可见性
-const parseCtx = opaque.length ? opaque[opaque.length - 1] : null
-if (parseCtx) {
-  const r = await evalIn(parseCtx.id, 'window.__parseTimeBridge')
-  rows.push({ assert: 'N3 子帧解析期可见性', expect: 'undefined', got: r.value, pass: r.value === 'undefined' })
+// ── 同源子帧正控（条件 4）──────────────────────────────────────────────
+const sameOrigin = fresh.filter((c) => c.origin && c.origin.startsWith('http'))
+const soCtx = sameOrigin.length ? sameOrigin[sameOrigin.length - 1] : null
+if (soCtx) {
+  const r = await evalIn(soCtx.id, probeScript(PROBES.read))
+  const t = await evalIn(soCtx.id, 'typeof window.androidBridge')
+  rows.push({ assert: 'P3 同源子帧 read 可用（条件 4：不误伤 artifact 预览）', expect: 'reachable', got: { probe: r.value, typeofBridge: t.value }, pass: !!(r.value && r.value.reachable) })
+} else {
+  rows.push({ assert: 'P3 同源子帧 read', expect: 'reachable', got: 'no same-origin context observed', pass: false })
 }
 
 // 清理
@@ -148,7 +199,7 @@ console.log('== verify-bridge-frame-guard ==')
 for (const r of rows) console.log((r.pass ? 'PASS ' : 'FAIL ') + r.assert + ' | expect=' + r.expect + ' | got=' + JSON.stringify(r.got))
 console.log('合计 ' + (rows.length - failed.length) + '/' + rows.length + ' 通过')
 if (JSON_OUT) {
-  writeFileSync(JSON_OUT, JSON.stringify({ layer: 'device', goal: 'window.androidBridge frame origin guard (#686)', rows, ok: failed.length === 0 }, null, 2))
+  writeFileSync(JSON_OUT, JSON.stringify({ layer: 'device', goal: 'window.androidBridge frame origin guard (#686)', pollMs: POLL_MS, rows, ok: failed.length === 0 }, null, 2))
   console.log('证据: ' + JSON_OUT)
 }
 ws.close()

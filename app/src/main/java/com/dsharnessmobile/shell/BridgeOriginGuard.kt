@@ -61,18 +61,22 @@ internal object BridgeOriginGuard {
         sb.append("(function () {\n")
         sb.append("  var ALLOWED = ").append(originsJson).append(";\n")
         sb.append("  var SECRET = \"").append(escapeJs(pickSecret)).append("\";\n")
+        // 诊断 canary：未来任何人都能在设备上复核这一层是否生效、以及当刻的判据取值。
+        // 落在 <html data-dsh-bridge-guard='{...}'> 上（不是全局变量——条件 5 要求零新增全局）。
+        sb.append("  var C = { supported: true, atStart: typeof window.androidBridge,\n")
+        sb.append("            top: null, origin: null, allowed: null, applied: null, after: null };\n")
         sb.append("  try {\n")
         sb.append("    var isTop = window.top === window;\n")
         sb.append("    var origin = location.origin;\n")
         sb.append("    var listed = ALLOWED.indexOf(origin) !== -1;\n")
-        // 放行判据：**顶层帧**（不论 origin，覆盖主帧的 null 期）
-        //       或 origin 命中真实引擎白名单（覆盖同源 iframe，如 HTML artifact 预览）。
-        //
-        // 这里刻意**不**把 origin === 'null' 单独作为放行条件。'null' 是不透明 origin，
-        // sandbox 攻击帧的 location.origin 恰好也是 'null'——把 'null' 当放行条件等于把
-        // 整类攻击帧放进来（实测：sandbox="allow-scripts" 子帧 origin 即 'null'）。
-        // 主帧的 null 期已由 isTop 兜住，无需再列 'null'。
-        sb.append("    if (isTop || listed) {\n")
+        // 放行判据：顶层帧（不论 origin，覆盖实测到的「主帧 origin 为 null」）
+        //           或 origin 命中真实引擎白名单（覆盖同源 iframe，如 HTML artifact 预览）。
+        // 刻意**不**把 origin === 'null' 列为放行条件：sandbox 攻击帧的 location.origin
+        // 恰是 'null'，列进来等于放行整类攻击帧。主帧的 null 期已由 isTop 兜住。
+        sb.append("    var allowed = isTop || listed;\n")
+        sb.append("    C.top = isTop; C.origin = origin; C.allowed = allowed;\n")
+        sb.append("    if (allowed) {\n")
+        sb.append("      C.applied = 'allowed';\n")
         sb.append("      if (isTop) {\n")
         sb.append("        try {\n")
         sb.append("          Object.defineProperty(window, '__dshPickSecret', {\n")
@@ -80,20 +84,38 @@ internal object BridgeOriginGuard {
         sb.append("          });\n")
         sb.append("        } catch (e) {}\n")
         sb.append("      }\n")
-        sb.append("      return;\n")
+        sb.append("    } else {\n")
+        sb.append("      C.applied = 'sealed';\n")
+        sb.append("      try { delete window.androidBridge; } catch (e) {}\n")
+        sb.append("      try {\n")
+        sb.append("        Object.defineProperty(window, 'androidBridge', {\n")
+        sb.append("          value: undefined, writable: false, configurable: false, enumerable: false\n")
+        sb.append("        });\n")
+        sb.append("      } catch (e) {}\n")
         sb.append("    }\n")
-        sb.append("    try { delete window.androidBridge; } catch (e) {}\n")
+        sb.append("    C.after = typeof window.androidBridge;\n")
+        sb.append("  } catch (e) { C.error = String(e); }\n")
+        // document-start 时 document.documentElement **尚不存在**（设备实测 hasDocEl:false），
+        // 因此 canary 必须等 <html> 出现后再写：先试一次，失败就挂 MutationObserver +
+        // readystatechange 兜底，直到写上为止。
+        sb.append("  function publish() {\n")
         sb.append("    try {\n")
-        sb.append("      Object.defineProperty(window, 'androidBridge', {\n")
-        sb.append("        value: undefined, writable: false, configurable: false, enumerable: false\n")
-        sb.append("      });\n")
+        sb.append("      var el = document.documentElement;\n")
+        sb.append("      if (!el) return false;\n")
+        sb.append("      el.setAttribute('data-dsh-bridge-guard', JSON.stringify(C));\n")
+        sb.append("      return true;\n")
+        sb.append("    } catch (e) { return false; }\n")
+        sb.append("  }\n")
+        sb.append("  if (!publish()) {\n")
+        sb.append("    try {\n")
+        sb.append("      var mo = new MutationObserver(function () { if (publish()) mo.disconnect(); });\n")
+        sb.append("      mo.observe(document, { childList: true, subtree: true });\n")
+        sb.append("      document.addEventListener('readystatechange', function () { publish(); });\n")
         sb.append("    } catch (e) {}\n")
-        sb.append("  } catch (e) {\n")
         sb.append("  }\n")
         sb.append("})();\n")
         return sb.toString()
     }
-
     /** JS 字符串字面量转义：只处理会提前终止字面量的字符，够本用途。 */
     private fun escapeJs(raw: String): String {
         val out = StringBuilder(raw.length + 8)

@@ -32,13 +32,28 @@ class BridgeOriginGuardTest {
     // 必须是 isTop || listed 两条；**不得**把 origin === 'null' 当放行条件——
     // sandbox 攻击帧的 location.origin 正是 'null'，列进来等于放行整类攻击帧
     // （实测：sandbox="allow-scripts" 子帧 origin === 'null'）。主帧的 null 期由 isTop 兜住。
-    assertTrue("放行判据必须是 isTop || listed", js.contains("if (isTop || listed)"))
+    assertTrue("放行判据必须是 isTop || listed", js.contains("var allowed = isTop || listed"))
     assertFalse(
       "不得把 'null' 当作放行条件：那会放行所有 opaque 子帧（正是本 issue 的攻击面）",
       js.contains("origin === 'null'"),
     )
     assertTrue("非放行帧必须 delete 桥", js.contains("delete window.androidBridge"))
     assertFalse("守卫自身不得抛到页面", js.contains("throw "))
+  }
+
+  @Test
+  fun scriptPublishesCanaryOnHtmlNotAsGlobal() {
+    val js = BridgeOriginGuard.script(listOf(engine), "s")
+    // canary 必须落在 <html data-dsh-bridge-guard>：未来任何人都能在设备上复核。
+    assertTrue("必须写 data-dsh-bridge-guard 属性", js.contains("data-dsh-bridge-guard"))
+    assertTrue("canary 必须带 feature 支持与当刻桥可见性", js.contains("atStart"))
+    assertTrue("canary 必须带顶层帧判据", js.contains("C.top = isTop"))
+    assertTrue("canary 必须带 origin", js.contains("C.origin = origin"))
+    // document-start 时 documentElement 尚不存在（设备实测 hasDocEl:false），必须延后发布。
+    assertTrue("documentElement 未就绪时必须兜底延后", js.contains("MutationObserver"))
+    assertTrue("必须能返回是否已发布", js.contains("function publish()"))
+    // 条件 5：canary 不得挂成全局变量。
+    assertFalse("canary 不得挂全局（条件 5：零新增全局）", js.contains("window.__dshBridgeGuard ="))
   }
 
   @Test
