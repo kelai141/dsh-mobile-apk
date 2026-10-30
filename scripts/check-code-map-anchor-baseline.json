@@ -456,7 +456,6 @@
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:661": 1,
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:771": 1,
     "app/src/main/java/com/dsharnessmobile/shell/FileIncoming.kt:332": 1,
-    "scripts/check-bounded-io.mjs:54": 1,
     "app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:550": 1,
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:324": 1,
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:608": 1,
@@ -1019,7 +1018,8 @@
     "verify-browser-host.mjs:58": 1,
     "verify-state-sync.mjs:161": 1,
     "docs/AGENTS/gotchas.md:44": 1,
-    "MainActivity.kt:514": 1
+    "MainActivity.kt:514": 1,
+    "scripts/check-bounded-io.mjs:239": 1
   },
   "sourceLines": {
     ".github/workflows/build-apk-source.yml:134": [
@@ -3894,9 +3894,6 @@
     "scripts/check-boot-budget.mjs:681": [
       "const c5skip = absent.results.find((x) => x.id === 'C5')"
     ],
-    "scripts/check-bounded-io.mjs:54": [
-      "const exempt = buildTree('exempt', { 'Ok.kt': '// bounded-io-exempt: 合成夹具，自证豁免通道\\nval s = stream.bufferedReader().readText()\\n' })"
-    ],
     "scripts/check-bridge-symmetry.mjs:1": [
       "#!/usr/bin/env node"
     ],
@@ -4256,6 +4253,9 @@
     ],
     "verify-webview-015.mjs:97": [
       ""
+    ],
+    "scripts/check-bounded-io.mjs:239": [
+      "const exempt = buildTree('exempt', { 'Ok.kt': '// bounded-io-exempt: 合成夹具，自证豁免通道\\nval s = stream.bufferedReader().readText()\\n' })"
     ]
   },
   "symbols": {
