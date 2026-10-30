@@ -29,7 +29,12 @@ class OverlayPendingCardTest {
     return f.readText()
   }
 
-  /** 只留代码行（注释里会复述旧实现作为背景，直接对全文断言会被自己的说明判红）。 */
+  /** 只留代码行（注释里会复述旧实现作为背景，直接对全文断言会被自己的说明判红）。
+   *
+   * 注意：这里剥的是**整行注释**（行首即 `//` 或 `*`）。**不能**把「代码 + 行尾注释」的行也剥掉——
+   * 那样 \`maxLines = 2; ellipsize = ... // #1045\` 这种合法写法会在判据眼里消失，
+   * 判据于是假绿（本轮实测踩到过）。
+   */
   private fun codeOnly(src: String): String = src.lineSequence()
     .filterNot {
       val t = it.trimStart()
@@ -227,12 +232,13 @@ class OverlayPendingCardTest {
   @Test
   fun `每处 maxLines 都必须配 ellipsize，不得硬切文本`() {
     val code = codeOnly(source("OverlayPanel.kt"))
-    // 逐块找 "maxLines = N"：同一 apply 块内（到下一个 } 之前）必须出现 ellipsize。
+    // 逐块找 "maxLines = N"：同一行或紧邻 6 行内必须有 ellipsize。
+    // 注意**必须**把「同一行」算进去：ellipsize 写在与 maxLines 同一行是合法且常见的形态，
+    // 只查"后续几行"会漏判（本轮实测：先写成同线形态，这条判据曾经假绿过一次）。
     val lines = code.lines()
     val missing = ArrayList<String>()
     for ((i, line) in lines.withIndex()) {
       if (!line.contains("maxLines = ")) continue
-      // 向后看 6 行内是否有 ellipsize（同一 apply 块的属性通常紧邻）。
       val window = (i..minOf(i + 6, lines.lastIndex)).joinToString("\n") { lines[it] }
       if (!window.contains("ellipsize = ")) missing += (i + 1).toString() + ": " + line.trim()
     }
