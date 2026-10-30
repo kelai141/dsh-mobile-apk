@@ -565,8 +565,10 @@ Write-Host "== 最终 APK 签名门禁（v1 + v2 + v3；apksigner 原始输出�
 node (Join-Path $Root "scripts\check-apk-signatures.mjs") --self-test
 if ($LASTEXITCODE -ne 0) { throw "APK 签名门禁自测失败" }
 # 产物形态门禁（与签名同一「最终产物」关口）：签名全绿不区分 debug/release 变体。
-# 全链跑 :app:assembleDebug，且 app/build.gradle.kts 里 debug/release 共用 signingConfigs.repoDebug，
-# 于是 0.14.9 的发布产物就是 debug 变体（badging 含 application-debuggable）而签名门禁全绿。
+# 出包由 build-apk-engine.mjs 走 release 变体（issue #1118 起缺省 release，本脚本不自己拼
+# assembleDebug），故本段现在是**回归哨兵**而非恒红断言：一旦变体被改回 debug 即判红。
+# 历史：0.14.9 的发布产物曾是 debug 变体（badging 含 application-debuggable）而签名门禁全绿——
+# 因为当时全链跑 :app:assembleDebug，且 app/build.gradle.kts 里 debug/release 共用 signingConfigs.repoDebug。
 # --require：刚打出 APK 的机器必有 SDK；aapt2 缺席即判红，不以 SKIP 结案。
 Write-Host "== 最终 APK 产物形态门禁（不得含 application-debuggable）=="
 node (Join-Path $Root "scripts\check-apk-form.mjs") --self-test
