@@ -19,9 +19,9 @@ internal fun isEngineSource(url: String): Boolean = EngineProbe.isEngineOrigin(u
 /** 会话日志导出端点路径（WebView 内双拦截识别用）。 */
 internal const val SESSION_EXPORT_PATH = "/api/session.export"
 
-/** 命中判定：引擎源 + 会话导出路径 + GET（HEAD 是前端预检，不得触发跳转）。 */
+/** 命中判定：引擎源 + 会话导出路径 + GET 或 HEAD（issue #919 壳侧一半；HEAD 是插件预检，只回状态码不下载）。 */
 internal fun isSessionExport(url: String, method: String): Boolean {
-  return method == "GET" && isEngineSource(url) && url.contains(SESSION_EXPORT_PATH)
+  return (method == "GET" || method == "HEAD") && isEngineSource(url) && url.contains(SESSION_EXPORT_PATH)
 }
 
 /**
@@ -251,4 +251,54 @@ internal class DownloadSaver(private val activity: MainActivity, private val dsh
     /** 导出文件大小上限（防恶意/异常大文件 OOM）。 */
     private const val MAX_DOWNLOAD_BYTES = 200L * 1024 * 1024
   }
+  /**
+   * 会话导出端点的 **HEAD 预检**（issue #919 壳侧一半）：只探测并回状态码，**不触发下载**。
+   *
+   * 为什么必须与下载分开：引擎插件发 HEAD 只是想知道端点通不通。若把它也送进
+   * [downloadToDownloads]，一次导出会落两份文件（预检一份、真下载一份），而且用户会收到
+   * 两条「已导出」通知。这里只走一次无 body 的请求，把状态码落进日志与导出结果通道，
+   * 让插件能拿到确定答复。
+   *
+   * 与 GET 通道共用鉴权与代理口径：`Proxy.NO_PROXY` 直连 + [EngineAuth.attach]（401 自愈换一次），
+   * 否则预检会被浏览器信任栅栏或系统代理判成失败，插件据此走进错误分支——那正是本 issue 的现象。
+   *
+   * @param url 引擎同源的会话导出地址。
+   */
+  fun probeSessionExport(url: String) {
+    if (!isEngineSource(url)) return
+    Thread {
+      var conn: HttpURLConnection? = null
+      try {
+        var code = -1
+        for (attempt in 0..1) {
+          val c = URL(url).openConnection(java.net.Proxy.NO_PROXY) as HttpURLConnection
+          conn = c
+          c.connectTimeout = 15_000
+          c.readTimeout = 15_000
+          // HEAD：不带 body。服务端按 RFC 7231 只回头，这里也只读状态码。
+          c.requestMethod = "HEAD"
+          EngineAuth.attach(activity.applicationContext, c)
+          code = c.responseCode
+          if (code == 401 && attempt == 0) {
+            EngineAuth.handleUnauthorized(activity.applicationContext)
+            conn?.disconnect()
+            continue
+          }
+          break
+        }
+        LogCollector.log("dsh-export", "session.export HEAD preflight: HTTP " + code)
+        activity.runOnUiThread { pushExportResult(code == HttpURLConnection.HTTP_OK, "HEAD " + code) }
+      } catch (t: Throwable) {
+        val message = t.message ?: t.javaClass.simpleName
+        LogCollector.log("dsh-export", "session.export HEAD preflight failed: " + message)
+        activity.runOnUiThread { pushExportResult(false, "HEAD failed: " + message) }
+      } finally {
+        conn?.disconnect()
+      }
+    }.apply { isDaemon = true }.start()
+  }
+
 }
+
+/** HEAD 预检判定（只回状态码、不触发下载；issue #919 壳侧一半）。 */
+internal fun isSessionExportPreflight(method: String): Boolean = method == "HEAD"

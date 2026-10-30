@@ -333,7 +333,9 @@ object FileIncoming {
   }
 
   /** 来件 IO 专用单线程执行器（0.13.8 #174：onCreate 前台零 IO——尺寸不可预知的拷贝
-   *  与首帧事务曾同线串行，200MB 提供方可达数十秒 = 无上界阻塞）。daemon = 不阻断进程退出。 */
+   *  与首帧事务曾同线串行，200MB 提供方可达数十秒 = 无上界阻塞）。daemon = 不阻断进程退出。
+   *  issue #1006：本执行器只做 IO，不得承载投递重试的有界等待（重试已搬到类尾的
+   *  deliveryRetryExecutor；旧实现在这条单线程上跑 20s 重试循环，后一个来件要排队等满窗口）。 */
   private val ioExecutor: java.util.concurrent.ExecutorService =
     java.util.concurrent.Executors.newSingleThreadExecutor { r ->
       Thread(r, "dsh-file-incoming").apply { isDaemon = true }
@@ -519,11 +521,10 @@ object FileIncoming {
           // 引擎侧插件端点：路径交给 dsh-android-file-open 强制新会话。
           // 待发清单 + 短促重试（引擎就绪钩子会再补投，冷启动不再丢件）：
           enqueuePending(context, target.absolutePath)
-          val deadline = System.currentTimeMillis() + 20_000
-          while (System.currentTimeMillis() < deadline) {
-            if (flushPending(context)) return@withIncomingDeliveryAfterSweep
-            try { Thread.sleep(4_000) } catch (_: InterruptedException) { return@withIncomingDeliveryAfterSweep }
-          }
+          // issue #1006：重试不在这条单线程上——否则后一个来件要排队等满 20s（旧实现把
+          // 20s 重试循环放在 ioExecutor 上）。拷贝与入队已完成，等待受理交给类尾的
+          // deliveryRetryExecutor；下面这行在 IO 线程上同步返回。
+          retryDelivery(context, deliveryRetryBudgetMs) { }
         }
       } catch (t: Throwable) {
         android.util.Log.w("dsh-file-open", "incoming pipeline failed: " + (t.message ?: t.javaClass.simpleName))
@@ -552,11 +553,10 @@ object FileIncoming {
           recordOpening(context, copied.absolutePath)
           LogCollector.log("dsh-file-open", "incoming processed (shell-produced): " + copied.absolutePath)
           enqueuePending(context, copied.absolutePath)
-          val deadline = System.currentTimeMillis() + 20_000
-          while (System.currentTimeMillis() < deadline) {
-            if (flushPending(context)) return@withIncomingDeliveryAfterSweep
-            try { Thread.sleep(4_000) } catch (_: InterruptedException) { return@withIncomingDeliveryAfterSweep }
-          }
+        }
+        // issue #1006：重试**不在这条单线程上**——否则后一个来件要排队等满 20s。
+        // 拷贝与入队已经完成，这里只把「等待受理」交给独立的重试线程。
+        retryDelivery(context, deliveryRetryBudgetMs) {
           main.post { notify("文件投递未确认", "引擎暂未受理，稍后自动重试") }
         }
       } catch (t: Throwable) {
@@ -619,6 +619,56 @@ object FileIncoming {
       roots.any { root -> canon == root || canon.startsWith(root + java.io.File.separator) }
     } catch (_: Exception) {
       false
+    }
+  }
+
+  /**
+   * 投递重试专用执行器（issue #1006）：**每个来件一个线程**，不与会话/拷贝串行。
+   *
+   * 为什么必须与 ioExecutor 分开：重试是「等待 + 轮询」，最长 20s，且大部分时间在 Thread.sleep。
+   * 把它放在单线程上等于让 IO 队列为一个纯等待付阻塞代价。这里用 cached pool（线程在等待期间
+   * 不占 CPU，且来件本就低频），daemon 同样不阻断进程退出。
+   *
+   * 放在类尾而非 ioExecutor 旁边：既有 EXECUTION-MAP 锚点按行号引用本文件 30+ 处，插在中段会
+   * 让它们整体位移（本轮实测 13 条漂移）。新增成员集中在末尾可保持零位移。
+   */
+  private val deliveryRetryExecutor: java.util.concurrent.ExecutorService =
+    java.util.concurrent.Executors.newCachedThreadPool { r ->
+      Thread(r, "dsh-file-deliver").apply { isDaemon = true }
+    }
+
+  /** 投递重试的总预算与间隔（issue #1006；与 0.13.8 起的 20s / 4s 口径完全一致）。 */
+  private val deliveryRetryBudgetMs = 20_000L
+  private val deliveryRetryIntervalMs = 4_000L
+
+  /**
+   * 有界投递重试（issue #1006）：把「等待 + flushPending」这段从 IO 线程搬到
+   * [deliveryRetryExecutor]，并在整段里持有投递预留计数。
+   *
+   * 为什么不复用 [withIncomingDeliveryAfterSweep]：那个函数把 sweep 与预留做成一个原子步，
+   * 而这里**必须**在拷贝完成、已入待发清单之后才开始（sweep 若在重试期再跑一次，会把刚入队的
+   * 路径当过期条目清掉）。所以这里只做「预留 → 重试 → 释放」，与调用方已完成的拷贝段解耦。
+   */
+  private fun retryDelivery(context: Context, deadlineMs: Long, onExhausted: () -> Unit) {
+    deliveryRetryExecutor.execute {
+      activeDeliveries.incrementAndGet()
+      try {
+        val deadline = System.currentTimeMillis() + deadlineMs
+        while (System.currentTimeMillis() < deadline) {
+          if (flushPending(context)) return@execute
+          try {
+            Thread.sleep(deliveryRetryIntervalMs)
+          } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            return@execute
+          }
+        }
+        onExhausted()
+      } catch (t: Throwable) {
+        android.util.Log.w("dsh-file-open", "delivery retry failed: " + (t.message ?: t.javaClass.simpleName))
+      } finally {
+        activeDeliveries.decrementAndGet()
+      }
     }
   }
 }

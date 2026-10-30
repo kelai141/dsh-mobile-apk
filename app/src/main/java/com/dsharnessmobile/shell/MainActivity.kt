@@ -1226,8 +1226,16 @@ class MainActivity : ComponentActivity() {
         // sec-fetch-site 标记，会被 dsh 的 /api browser-trust fence 拒绝
         // （403 forbidden，防 DNS rebinding/跨站）。改为 app 内下载：
         // HttpURLConnection 无浏览器标记 → fence 放行（MuMu 实测验证）。
+        // issue #919 壳侧一半：引擎插件在真下载前先发 HEAD 预检。旧判据只认 GET ⇒ HEAD 落到下面
+        // 的 isEngineSource 分支交给 WebView 自己导航 ⇒ 插件拿到的是导航结果而不是导出通道 ⇒
+        // 进错误分支，而那个错误弹窗被 Web 侧 CSS 隐藏 ⇒ 用户看到「什么也没发生」。
+        // HEAD 必须拦，但**不得**触发下载（一次导出只该落一份文件），只回状态码。
         if (isSessionExport(url, request.method)) {
-          downloadSaver.downloadToDownloads(url, null)
+          if (isSessionExportPreflight(request.method)) {
+            downloadSaver.probeSessionExport(url)
+          } else {
+            downloadSaver.downloadToDownloads(url, null)
+          }
           return true
         }
         // 只允许引擎同源页面留在 WebView（特权桥 + 下载能力仅对引擎可信）；

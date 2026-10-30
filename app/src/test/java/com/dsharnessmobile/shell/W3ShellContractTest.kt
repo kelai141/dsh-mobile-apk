@@ -372,7 +372,19 @@ class W3ShellContractTest {
     val pipeline = code.substringAfter("fun processIncomingIntent")
     val reservation = pipeline.indexOf("withIncomingDeliveryAfterSweep(pendingLock, activeDeliveries, { sweepExpired(context) })")
     val enqueue = pipeline.indexOf("enqueuePending(context, target.absolutePath)")
-    val retry = pipeline.indexOf("while (System.currentTimeMillis() < deadline)")
+    // issue #1006：20s 重试已从「IO 单线程内联」搬到独立的 retryDelivery（否则后一个来件要排队
+    // 等满 20s）。所以这里不再找内联的 while，而是断言两件**语义**：
+    //  ① 入口把重试委托给 retryDelivery（重试没有被删掉）；
+    //  ② retryDelivery 自己在整段里持有投递预留计数（finally 归还）——这正是本条契约原本要守的
+    //    「重试期不得释放预留，否则划掉应用会把在途来件删光」。
+    val retry = pipeline.indexOf("retryDelivery(context, deliveryRetryBudgetMs)")
+    val retryBody = memberBody(code, "private fun retryDelivery(")
+    val retryInc = retryBody.indexOf("activeDeliveries.incrementAndGet()")
+    val retryLoop = retryBody.indexOf("while (System.currentTimeMillis() < deadline)")
+    val retryDec = retryBody.indexOf("activeDeliveries.decrementAndGet()")
+    assertTrue("重试必须仍存在（委托到 retryDelivery，不得靠删掉重试来消除阻塞）", retry > 0)
+    assertTrue("重试期必须先持有投递预留计数", retryInc >= 0 && retryLoop > retryInc)
+    assertTrue("投递预留必须在 finally 中归还", retryDec > retryLoop && retryBody.contains("finally"))
     val reservationBody = memberBody(code, "internal fun <T> withIncomingDeliveryAfterSweep(")
     val sweep = reservationBody.indexOf("sweep()")
     val inc = reservationBody.indexOf("deliveries.incrementAndGet()")
@@ -384,7 +396,8 @@ class W3ShellContractTest {
     assertTrue("守卫必须先预留再执行投递", inc in 0 until body)
     assertTrue("投递预留必须在 finally 中归还", release > body && dec > release)
     assertTrue("入待发清单必须经预留包装执行", reservation in 0 until enqueue)
-    assertTrue("20s 重试必须在同一投递包装内", retry > enqueue && !pipeline.substring(reservation, retry).contains("activeDeliveries.decrementAndGet()"))
+    assertTrue("入待发清单必须先于发起重试", retry > enqueue)
+    // 重试不再内联，故「同一包装内」由 retryDelivery 的 finally 保证（见上方三条断言）。
     val cleanup = code.substringAfter("fun cleanupTmp(context: Context)")
     assertTrue(
       "全清必须同时看「拷贝」与「投递/重试」两个计数",
