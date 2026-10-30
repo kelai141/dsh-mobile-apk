@@ -57,15 +57,19 @@ export function assembleApk(options, runner = spawnSync) {
   const assetSnapshot = join(assetDir, 'snapshot.tar.xz')
   const fingerprint = join(assetDir, 'snapshot.sha256')
   const intermediates = join(resolvedApkDir, 'app', 'build', 'intermediates', 'assets')
-  const debugOutput = join(resolvedApkDir, 'app', 'build', 'outputs', 'apk', 'debug')
-  const builtApk = join(debugOutput, 'app-debug.apk')
+  // 发布资产必须来自 release 变体（issue #1118）：assembleDebug 的产物带
+  // android:debuggable，会开放 adb attach 与 WebView 远程调试，部分 ROM 也会拒装。
+  // 签名配置在 release / debug 两边同为 repoDebug，所以切变体不换证书，
+  // 现有用户的覆盖升级不受影响（实测 -r 安装无 INSTALL_FAILED_UPDATE_INCOMPATIBLE）。
+  const variantOutput = join(resolvedApkDir, 'app', 'build', 'outputs', 'apk', 'release')
+  const builtApk = join(variantOutput, 'app-release.apk')
   const deliveredApk = join(resolvedOutputDir, artifactName)
 
   mkdirSync(assetDir, { recursive: true })
   mkdirSync(resolvedOutputDir, { recursive: true })
   // Never let a successful no-op/incremental Gradle invocation reuse an older APK.
   // Release mode preserves unrelated intermediates, but the terminal APK output is always fresh.
-  rmSync(debugOutput, { recursive: true, force: true })
+  rmSync(variantOutput, { recursive: true, force: true })
   if (clean) {
     rmSync(intermediates, { recursive: true, force: true })
   }
@@ -83,7 +87,7 @@ export function assembleApk(options, runner = spawnSync) {
   execute(process.execPath, [fingerprintGate, '--require'], { cwd: SCRIPT_DIR }, runner)
 
   const gradle = gradleCommand ?? (process.platform === 'win32' ? 'gradlew.bat' : './gradlew')
-  const gradleArgs = [':app:assembleDebug', '--no-daemon', `-PversionNameSuffix=${suffix}`]
+  const gradleArgs = [':app:assembleRelease', '--no-daemon', `-PversionNameSuffix=${suffix}`]
   log(`Gradle: ${gradle} ${gradleArgs.join(' ')}`)
   execute(gradle, gradleArgs, { cwd: resolvedApkDir, shell: process.platform === 'win32' }, runner)
 
@@ -101,9 +105,11 @@ export function assembleApk(options, runner = spawnSync) {
  *   - signature: v1/v2/v3 all true, signing certificate == the repository keystore;
  *   - form: `aapt2 dump badging` must not contain `application-debuggable`.
  * Why they belong together: a correct signature says nothing about the variant.
- * The 0.14.9 release artifacts were debug variants (the whole chain runs
+ * The 0.14.9 release artifacts were debug variants (the chain ran
  * `:app:assembleDebug` while debug and release share signingConfigs.repoDebug), so
  * they passed the signature gate with v1/v2/v3 all true and were still debuggable.
+ * Since issue #1118 the chain builds `:app:assembleRelease` instead, so the form
+ * stage is now a regression guard rather than a permanently-red assertion.
  * The form stage runs with `--require`: on a machine that just built an APK the SDK
  * is necessarily present, so an unresolvable aapt2 is a real defect, not an excuse
  * to skip the judgement.

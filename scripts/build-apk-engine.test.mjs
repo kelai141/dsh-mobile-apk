@@ -21,7 +21,7 @@ function fixture(t) {
 test('shared terminal engine installs snapshot and fingerprint, builds, then copies the caller-named artifact', (t) => {
   const f = fixture(t)
   const oldIntermediates = join(f.apkDir, 'app', 'build', 'intermediates', 'assets', 'stale')
-  const oldOutput = join(f.apkDir, 'app', 'build', 'outputs', 'apk', 'debug', 'stale.apk')
+  const oldOutput = join(f.apkDir, 'app', 'build', 'outputs', 'apk', 'release', 'stale.apk')
   mkdirSync(join(oldIntermediates, '..'), { recursive: true })
   mkdirSync(join(oldOutput, '..'), { recursive: true })
   writeFileSync(oldIntermediates, 'stale')
@@ -36,8 +36,9 @@ test('shared terminal engine installs snapshot and fingerprint, builds, then cop
       return { status: 0 }
     }
     assert.equal(command, process.platform === 'win32' ? 'gradlew.bat' : './gradlew')
-    assert.deepEqual(args, [':app:assembleDebug', '--no-daemon', '-PversionNameSuffix=-preview'])
-    const built = join(f.apkDir, 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk')
+    // 发布资产从 release 变体产出（issue #1118）：debug 变体带 android:debuggable。
+    assert.deepEqual(args, [':app:assembleRelease', '--no-daemon', '-PversionNameSuffix=-preview'])
+    const built = join(f.apkDir, 'app', 'build', 'outputs', 'apk', 'release', 'app-release.apk')
     mkdirSync(join(built, '..'), { recursive: true })
     writeFileSync(built, Buffer.from('signed-test-apk'))
     return { status: 0 }
@@ -108,7 +109,7 @@ test('release mode preserves existing intermediates when clean is not requested'
     if (args[0]?.endsWith('check-snapshot-fingerprint.mjs')) return { status: 0 }
     if (args[0]?.endsWith('build-hard-manifest.mjs')) return { status: 0 }
     assert.equal(command, 'custom-gradle')
-    const built = join(f.apkDir, 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk')
+    const built = join(f.apkDir, 'app', 'build', 'outputs', 'apk', 'release', 'app-release.apk')
     mkdirSync(join(built, '..'), { recursive: true })
     writeFileSync(built, 'release-apk')
     return { status: 0 }
@@ -118,9 +119,9 @@ test('release mode preserves existing intermediates when clean is not requested'
 
 test('every assemble removes stale APK output before Gradle so a zero-work success cannot deliver it', (t) => {
   const f = fixture(t)
-  const debugOutput = join(f.apkDir, 'app', 'build', 'outputs', 'apk', 'debug')
-  mkdirSync(debugOutput, { recursive: true })
-  writeFileSync(join(debugOutput, 'app-debug.apk'), 'stale-apk')
+  const variantOutput = join(f.apkDir, 'app', 'build', 'outputs', 'apk', 'release')
+  mkdirSync(variantOutput, { recursive: true })
+  writeFileSync(join(variantOutput, 'app-release.apk'), 'stale-apk')
   assert.throws(() => assembleApk({
     snapshot: f.snapshot, apkDir: f.apkDir, outputDir: f.outputDir,
     artifactName: 'fresh.apk', fingerprintGate: '/tools/check-snapshot-fingerprint.mjs', log() {},
