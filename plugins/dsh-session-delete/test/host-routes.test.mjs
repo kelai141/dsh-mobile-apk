@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { apply, removeSession } from '../src/index.js'
+import { quarantineStoredSession } from '../src/session-delete.js'
 
 // apply() 注册路由前会对 DSH_HOME 跑一次 graveyard 清扫（best-effort）。
 // 测试进程必须把它钉在临时目录上：否则开发机上真实 ~/.dsh/sessions 里若有
@@ -181,4 +182,38 @@ test('the version route returns a stamp', async () => {
   assert.equal(res.status, 200)
   assert.equal(typeof res.json.stamp, 'string')
   assert.notEqual(res.json.stamp, '')
+})
+
+// issue #983：已隔离的会话再点一次「隔离」，宿主必须把隔离件路径**带回客户端**——
+// 它是「文件仍在、可恢复」的唯一证据。修复前 failureOf() 只返回 { status, code, message }，
+// 细节落在 error.details.paths 上从不外带，于是回包里没有 paths，客户端只能渲染空路径横幅。
+test('already-quarantined 的回包带 paths（issue #983）', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-routes-quarantined-'))
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  const id = 'session-99999999-9999-4999-8999-999999999999'
+  try {
+    const dir = await makeSession(home, id)
+    const first = await quarantineStoredSession({ home, sessionId: id })
+    assert.equal(first.quarantinedTo.startsWith(dir), false, '隔离件必须在 .corrupt 下，不在原位')
+    const { routes } = makeHost({ sessions: { get: () => undefined }, waterfall: async () => [], registry: {} })
+    const res = await call(routes, '/api/session-delete', request('POST', { sessionId: id, action: 'quarantine' }))
+    assert.equal(res.status, 409)
+    assert.equal(res.json.error, 'already-quarantined')
+    assert.equal(Array.isArray(res.json.paths), true, '回包必须带 paths 数组')
+    assert.deepEqual(res.json.paths, [first.quarantinedTo], 'paths 必须就是隔离件路径')
+  } finally {
+    if (previous === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previous
+  }
+})
+
+// issue #983：paths 只给 already-quarantined。别的错误码乱塞字段会把内部细节漏给前端，
+// 也会让客户端误以为「有路径 = 已隔离」。
+test('其他错误码的回包不带 paths 字段（issue #983）', async () => {
+  const { routes } = makeHost({ sessions: { get: () => undefined }, waterfall: async () => [] })
+  const res = await call(routes, '/api/session-delete', request('POST', { sessionId: 'session-cccccccc-cccc-4ccc-8ccc-cccccccccccc' }))
+  assert.equal(res.status, 404)
+  assert.equal(res.json.error, 'not-found')
+  assert.equal(Object.prototype.hasOwnProperty.call(res.json, 'paths'), false, 'not-found 不得携带 paths')
 })

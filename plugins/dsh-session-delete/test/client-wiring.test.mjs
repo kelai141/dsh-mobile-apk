@@ -35,6 +35,13 @@ function createReact() {
       index = 0
       return fn(props)
     },
+    // issue #983/#1000：弹窗是「点确认 → setDone/setError → 再渲染」两段式。
+    // 上面的 render() 会把 hooks 清空（重新挂载语义），读不到状态更新后的树；
+    // 这里保留 hook 值、只把游标归零，等价于 React 的一次重渲染。
+    renderKeepingState(fn, props) {
+      index = 0
+      return fn(props)
+    },
   }
 }
 
@@ -61,6 +68,7 @@ function loadClient(options = {}) {
     storage.set('dsh.session-delete.pending', JSON.stringify({ sessionId: options.pending, at: Date.now() }))
   }
   const toasts = []
+  const fetches = []
   const context = {
     window: {
       __ModuleLoader__: { load: ({ factory: f }) => { factory = f } },
@@ -96,7 +104,10 @@ function loadClient(options = {}) {
     performance: { getEntriesByType: () => [] },
     XMLHttpRequest: FakeXHR,
     AbortSignal: { timeout: () => ({}) },
-    fetch: () => Promise.resolve({ ok: true, json: () => Promise.resolve({}) }),
+    fetch: (url, init) => {
+      fetches.push({ url, init })
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    },
     setTimeout, clearTimeout, console,
     Symbol, JSON, Number, Date, String, Object, Array, Promise, RegExp, Error,
   }
@@ -106,7 +117,7 @@ function loadClient(options = {}) {
   vm.runInContext(SOURCE, sandbox)
   assert.equal(typeof factory, 'function', 'client bundle did not call __ModuleLoader__.load')
   const module = factory((id) => (id === 'react' ? react : primitives))
-  return { module, react, sent, FakeXHR, sandbox, reloads, storage, toasts }
+  return { module, react, sent, FakeXHR, sandbox, reloads, storage, toasts, fetches }
 }
 
 test('menu item click opens the overlay and the confirm button sends the request', async () => {
@@ -360,4 +371,227 @@ test('菜单里同时存在删除与隔离两个入口', () => {
   })
   assert.equal(typeof tree.props.onSelect, 'function', 'quarantine 菜单项必须暴露 onSelect')
   assert.match(String(tree.props.children[0]), /恢复/, '隔离入口文案必须说明可恢复')
+})
+
+// ───────────────────────── issue #983 / #1000 ─────────────────────────
+
+/** 递归收集树上的字符串子节点（渲染文案断言用）。 */
+function textNodes(node, out = []) {
+  if (node === null || node === undefined) return out
+  if (typeof node === 'string') { out.push(node); return out }
+  if (Array.isArray(node)) { for (const child of node) textNodes(child, out); return out }
+  if (typeof node === 'object' && node.props) {
+    textNodes(node.props.children ?? null, out)
+    if (node.props.title) textNodes(node.props.title, out)
+    if (node.props.description) textNodes(node.props.description, out)
+    if (node.props.value) textNodes(node.props.value, out)
+  }
+  return out
+}
+
+/** 找第一个带指定 role 的节点（role=alert ⇒ 非成功提示）。 */
+function findByRole(node, role) {
+  if (node === null || node === undefined || typeof node !== 'object') return null
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const hit = findByRole(child, role)
+      if (hit !== null) return hit
+    }
+    return null
+  }
+  if (node.props && node.props.role === role) return node
+  if (node.props) {
+    const hit = findByRole(node.props.children ?? null, role)
+    if (hit !== null) return hit
+  }
+  return null
+}
+
+/**
+ * 打开**隔离**确认框并点确认，把服务端回包灌进 XHR，返回状态更新后的弹窗树。
+ *
+ * 隔离弹窗只能由 quarantine 菜单项打开（pending.kind === 'quarantine'），所以走菜单。
+ * 状态更新必须用 renderKeepingState：react.render 会清空 hook（重新挂载语义），
+ * 读不到 setDone/setError 之后的样子。
+ */
+async function clickQuarantineThen(options, respond) {
+  const sessionId = options.sessionId
+  const loaded = loadClient({ ...options })
+  const { module, react, FakeXHR } = loaded
+  const registrations = []
+  module.apply({
+    get: () => undefined,
+    effect: (fn) => fn(),
+    locale: { register: () => () => {} },
+    slots: { inject: (_n, f) => { registrations.push(f()) }, register: (def, component) => ({ def, component }) },
+  })
+  const overlay = registrations.find((r) => r.def.name === 'shell.overlay')
+  const menu = registrations.find((r) => r.def.name === 'sidebar.workspaces.session.menu.item' && r.def.id === 'quarantine')
+  assert.ok(menu && overlay, 'quarantine menu + overlay must both be registered')
+  const t = (key, params) => (params === undefined ? key : key + '(' + JSON.stringify(params) + ')')
+  const menuTree = react.render(menu.component, { sessionId, displayTitle: 'x', useMenuOpenState: () => [true, () => {}], t })
+  menuTree.props.onSelect()
+  const outer = react.render(overlay.component, { t })
+  assert.ok(outer !== null, 'the quarantine confirm must open')
+  const inner = react.render(outer.type, outer.props)
+  inner.props.footer.props.children[1].props.onClick()
+  const xhr = FakeXHR.instances.at(-1)
+  respond(xhr)
+  xhr.onload()
+  for (let i = 0; i < 16; i += 1) await Promise.resolve()
+  const tree = react.renderKeepingState(outer.type, outer.props)
+  /**
+   * 关掉弹窗（等价于点「取消」/ Modal 的 onClose）。
+   * issue #1000 的时序：隔离成功先显示可复制路径，**关窗之后**才做行清理
+   * （否则重载会立刻把刚显示的路径冲掉）。所以行清理只能在 close() 之后断言。
+   */
+  const close = () => {
+    const latest = react.renderKeepingState(outer.type, outer.props)
+    const cancel = latest.props.footer.props.children[0]
+    cancel.props.onClick()
+    return react.renderKeepingState(outer.type, outer.props)
+  }
+  return { ...loaded, tree, close }
+}
+
+const QID = 'session-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+const KEPT = '/home/.dsh/sessions/--w--/.corrupt/' + QID + '.1700000000000'
+
+// issue #983：重复点「隔离」拿到 409 already-quarantined、服务端给了 paths 时，
+// 客户端必须渲染**非成功**提示（error.alreadyQuarantined，带 path）。
+// 修复前 reason.paths 读不到（宿主不外带）⇒ path 是空串 ⇒ done 被塞成 '' ⇒ 走成功横幅 quarantine.ok。
+test('已隔离（服务端带 paths）不得渲染成功横幅，用 error.alreadyQuarantined（issue #983）', async () => {
+  const { tree } = await clickQuarantineThen({ sessionId: QID, rowPresent: false }, (xhr) => {
+    xhr.status = 409
+    xhr.responseText = JSON.stringify({ ok: false, error: 'already-quarantined', message: 'already', paths: [KEPT] })
+  })
+  const joined = textNodes(tree).join(' | ')
+  assert.equal(joined.includes('quarantine.ok'), false, '失败不得复用成功文案 quarantine.ok，实际：' + joined)
+  const alert = findByRole(tree, 'alert')
+  assert.ok(alert !== null, '必须渲染一个非成功的提示（role=alert），实际树：' + JSON.stringify(textNodes(tree)))
+  const alertText = textNodes(alert).join(' ')
+  assert.equal(alertText.startsWith('error.alreadyQuarantined'), true, '必须用已有文案 error.alreadyQuarantined，实际：' + alertText)
+  assert.equal(alertText.includes(KEPT), true, '文案必须带出服务端给的路径，实际：' + alertText)
+})
+
+// issue #983：老宿主不回 paths（或回空数组）时不得渲染空路径文案。
+// 「已隔离到：（文件仍在，可恢复）」这种空路径横幅正是本 issue 的现场。
+test('已隔离但服务端没给 paths 时不得渲染空路径（issue #983）', async () => {
+  for (const body of [
+    { ok: false, error: 'already-quarantined', message: 'already' },
+    { ok: false, error: 'already-quarantined', message: 'already', paths: [] },
+  ]) {
+    const { tree } = await clickQuarantineThen({ sessionId: QID, rowPresent: false }, (xhr) => {
+      xhr.status = 409
+      xhr.responseText = JSON.stringify(body)
+    })
+    const joined = textNodes(tree).join(' | ')
+    assert.equal(joined.includes('quarantine.ok'), false, '不得走成功文案，实际：' + joined)
+    assert.equal(joined.includes('""'), false, '不得渲染空路径参数，实际：' + joined)
+    const alert = findByRole(tree, 'alert')
+    assert.ok(alert !== null, '必须给出可见提示，实际：' + joined)
+    assert.equal(textNodes(alert).join(' ').trim() === '', false, '提示文案不得为空')
+  }
+})
+
+// issue #1000：隔离成功后必须走**与删除相同**的行清理机制（挂载中 reload / 未挂载延迟复查行）。
+// 修复前隔离成功只 setDone(...)，界面什么都不做 ⇒ 侧栏行仍在原地、点开仍是坏会话。
+//
+// 时序（本 issue 明确要求想清楚）：**先显示可复制路径，关窗之后才做行清理**。
+// 理由：清理一旦判定要重载，页面立刻刷新，刚显示的隔离件绝对路径就没了 ——
+// 而那个路径正是用户要抄下来备份 / 贴进 issue 的东西。删除分支不显示路径，
+// 所以在成功回调里直接清理；两条路径共用同一个清理实现，只是触发点不同。
+test('隔离成功后侧栏行仍在 ⇒ 关窗后与删除一样触发一次 reload（issue #1000）', async () => {
+  const { reloads, close, tree } = await clickQuarantineThen({ sessionId: QID, rowPresent: true }, (xhr) => {
+    xhr.status = 200
+    xhr.responseText = JSON.stringify({ ok: true, sessionId: QID, quarantinedTo: KEPT, restorable: true })
+  })
+  // 关闭之前：成功横幅 + 可复制路径必须还在（这是保留既有行为的判据）。
+  const before = textNodes(tree).join(' | ')
+  assert.equal(before.includes(KEPT), true, '关窗之前必须仍显示可复制路径，实际：' + before)
+  assert.equal(reloads.length, 0, '路径还在显示时不得立刻重载（否则路径被冲掉）')
+  close()
+  await new Promise((resolve) => setTimeout(resolve, 450))
+  assert.equal(reloads.length, 1, '行仍在 ⇒ 关窗后必须重载（与删除分支同一机制），实际 ' + reloads.length + ' 次')
+})
+
+// issue #1000：隔离的是**当前挂载**的会话 ⇒ 关窗后立即 reload（与删除分支同一判定）。
+test('隔离当前挂载的会话 ⇒ 关窗后立即 reload（issue #1000）', async () => {
+  const { reloads, close } = await clickQuarantineThen({ sessionId: QID, mountedId: QID }, (xhr) => {
+    xhr.status = 200
+    xhr.responseText = JSON.stringify({ ok: true, sessionId: QID, quarantinedTo: KEPT, restorable: true })
+  })
+  assert.equal(reloads.length, 0, '关窗之前不得重载')
+  close()
+  assert.equal(reloads.length, 1, '挂载中的会话被隔离后必须重载')
+})
+
+// issue #1000 的时序细节：先失败（已隔离过）再成功，关窗必须仍然清理，
+// 且不能把上一次的旧路径留在成功横幅里。
+test('先失败后成功：关窗仍清理且不残留旧路径（issue #983/#1000）', async () => {
+  const sessionId = QID
+  const { module, react, FakeXHR, reloads } = loadClient({ sessionId, rowPresent: true })
+  const registrations = []
+  module.apply({
+    get: () => undefined,
+    effect: (fn) => fn(),
+    locale: { register: () => () => {} },
+    slots: { inject: (_n, f) => { registrations.push(f()) }, register: (def, component) => ({ def, component }) },
+  })
+  const overlay = registrations.find((r) => r.def.name === 'shell.overlay')
+  const menu = registrations.find((r) => r.def.name === 'sidebar.workspaces.session.menu.item' && r.def.id === 'quarantine')
+  const t = (key, params) => (params === undefined ? key : key + '(' + JSON.stringify(params) + ')')
+  react.render(menu.component, { sessionId, displayTitle: 'x', useMenuOpenState: () => [true, () => {}], t }).props.onSelect()
+  const outer = react.render(overlay.component, { t })
+  const inner = react.render(outer.type, outer.props)
+  const confirm = () => inner.props.footer.props.children[1].props.onClick()
+
+  // 第一次：已隔离过
+  confirm()
+  const first = FakeXHR.instances.at(-1)
+  first.status = 409
+  first.responseText = JSON.stringify({ ok: false, error: 'already-quarantined', message: 'already', paths: [KEPT] })
+  first.onload()
+  for (let i = 0; i < 16; i += 1) await Promise.resolve()
+  assert.equal(textNodes(react.renderKeepingState(outer.type, outer.props)).join(' ').includes('quarantine.ok'), false, '失败不得显示成功横幅')
+
+  // 第二次：这次真的搬走了（例如用户先恢复了文件再隔离）
+  confirm()
+  const second = FakeXHR.instances.at(-1)
+  const NEW_PATH = '/home/.dsh/sessions/--w--/.corrupt/' + QID + '.1800000000000'
+  second.status = 200
+  second.responseText = JSON.stringify({ ok: true, sessionId, quarantinedTo: NEW_PATH, restorable: true })
+  second.onload()
+  for (let i = 0; i < 16; i += 1) await Promise.resolve()
+  const okText = textNodes(react.renderKeepingState(outer.type, outer.props)).join(' | ')
+  assert.equal(okText.includes(NEW_PATH), true, '成功横幅必须显示新路径，实际：' + okText)
+  assert.equal(okText.includes(KEPT), false, '不得残留上一次失败的旧路径，实际：' + okText)
+  assert.equal(okText.includes('alreadyQuarantined'), false, '成功之后不得还挂着失败提示，实际：' + okText)
+
+  react.renderKeepingState(outer.type, outer.props).props.footer.props.children[0].props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 450))
+  assert.equal(reloads.length, 1, '成功过 ⇒ 关窗必须清理行，实际 ' + reloads.length + ' 次')
+})
+
+// issue #1000 的反向判据：**已隔离过**（非成功）不得触发行清理。
+// 那条会话本来就已经不在列表里了，重载只会打断用户读「文件在哪」。
+test('已隔离过不触发行清理（issue #1000 反向判据）', async () => {
+  const { reloads, close } = await clickQuarantineThen({ sessionId: QID, mountedId: QID }, (xhr) => {
+    xhr.status = 409
+    xhr.responseText = JSON.stringify({ ok: false, error: 'already-quarantined', message: 'already', paths: [KEPT] })
+  })
+  close()
+  await new Promise((resolve) => setTimeout(resolve, 450))
+  assert.equal(reloads.length, 0, '非成功结果不得触发重载，实际 ' + reloads.length + ' 次')
+})
+
+// issue #1000：共用机制的反证 —— 不复制第二份逻辑。
+// 行探针（[data-row-key=session:<id>]）只允许有一处：复制一份清理逻辑必然让它变成两处。
+test('删除与隔离共用同一个行清理实现，不是第二份复制（issue #1000）', () => {
+  const client = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  const probes = client.match(/data-row-key=/g) ?? []
+  assert.equal(probes.length, 1, '行探针只能有一处（复制第二份清理逻辑会变成 2 处），实际 ' + probes.length)
+  const shared = client.match(/function\s+\w*[Rr]ow\w*\s*\(/g) ?? []
+  assert.equal(shared.length >= 1, true, '必须抽出可复用的行清理函数，实际：' + JSON.stringify(shared))
+  assert.equal(/alreadyGone:\s*data\.alreadyGone/.test(client), true, '删除专有的 alreadyGone 标记必须留在删除侧')
 })

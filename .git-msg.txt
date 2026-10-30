@@ -1,0 +1,18 @@
+fix(session-delete): 已隔离不再渲染空路径成功横幅 + 隔离成功后把行从界面拿掉（#983 #1000）
+
+#983：already-quarantined 是【非成功】结果，却被塞进成功横幅。三处串起来丢的——
+抛出处把 paths 放在 error.details 里，failureOf() 只回 { status, code, message }，
+客户端读不到 reason.paths 就当空串，setDone('')（不是 null）于是渲染
+「已隔离到：（文件仍在，可恢复）」。修法：failureOf 只在 already-quarantined 上
+外带 paths（别的错误码不塞字段，避免客户端误以为「有路径 = 已隔离」）；客户端把这条
+走独立的非成功展示槽 notice，用一直没被调用的 error.alreadyQuarantined 文案；
+服务端没给 paths（老宿主）时用不带 {path} 的降级文案，三种情况都不出现空路径。
+
+#1000：隔离分支没有 afterDeleted 那段行清理，成功后侧栏行仍在、点开还是坏会话。
+把通用部分抽成 removeSessionRowFromUi()，删除与隔离共用一份实现（复制第二份 =
+两份判据迟早漂移）。隔离的时序刻意与删除不同：成功回包带的是可复制的隔离件绝对路径，
+用户要读它抄它，而清理一旦判定需要重载页面就刷新——所以隔离走「先显示路径、关窗才切
+界面」，删除不显示路径所以在成功回调里直接清理。行清理由「这次真的成功过」的闩驱动，
+不用 done，否则用户再点一次确认就把展示状态当成了事实。
+
+新增 7 条用例（host-routes 1 条 + client-wiring 6 条），在未修代码上全红、修后全绿。
