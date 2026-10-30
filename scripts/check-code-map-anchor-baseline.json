@@ -351,7 +351,6 @@
     ".github/workflows/pr-gate.yml:140": 1,
     "scripts/build-apk.mjs:197": 1,
     "scripts/build-apk-013.ps1:145": 2,
-    "scripts/check-release-gates.mjs:104": 1,
     ".github/workflows/pr-gate.yml:91": 1,
     "scripts/build-apk.mjs:347": 1,
     "scripts/build-apk-013.ps1:388": 2,
@@ -528,7 +527,6 @@
     "AGENTS.md:21": 3,
     "scripts/profile-web.cordis.patch.yml:128": 3,
     "scripts/check-patch-mirror.mjs:231": 3,
-    "scripts/check-release-gates.mjs:246": 6,
     ".github/workflows/pr-gate.yml:64": 2,
     "scripts/check-snapshot-builder-output.mjs:156": 2,
     "scripts/check-plugin-tests.mjs:35": 3,
@@ -671,13 +669,11 @@
     "scripts/plugin-dirs.json:1": 1,
     "scripts/patches/apply-patches.mjs:1583": 1,
     "scripts/check-patch-mirror.mjs:109": 1,
-    "scripts/check-release-gates.mjs:191": 1,
     ".github/workflows/build-apk-source.yml:134": 1,
     "scripts/patches/registry.json:211": 1,
     "scripts/patches/apply-patches.mjs:122": 1,
     "scripts/source-build/reconcile-engine-patch-copies.mjs:58": 1,
     "scripts/source-build/check-dsh-source-snapshot.mjs:25": 1,
-    "scripts/check-release-gates.mjs:135": 1,
     "scripts/check-boot-budget.mjs:671": 1,
     "scripts/check-runtime-assets.mjs:126": 1,
     "scripts/check-boot-budget.mjs:609": 1,
@@ -1092,7 +1088,6 @@
     "back-stack.ts:95": 1,
     "docs/AGENTS/gotchas.md:103": 2,
     "dsh-client-ui-responsive/src/client/dev-section/notify-settings.tsx:66": 2,
-    "check-release-gates.mjs:136": 1,
     "build-snapshot-013.mjs:31": 1,
     "build-apk-013.ps1:37": 1,
     "check-build-chain-abort.mjs:53": 1,
@@ -1128,18 +1123,13 @@
     "scripts/build-release.ps1:60": 2,
     "scripts/check-plugin-tests.mjs:56": 1,
     "scripts/build-apk-013.ps1:174": 1,
-    "scripts/check-release-gates.mjs:164": 1,
     "scripts/check-patch-mirror.mjs:170": 1,
-    "scripts/check-gate-skips.mjs:62": 2,
     ".github/workflows/pr-gate.yml:40": 1,
-    "scripts/check-release-gates.mjs:212": 1,
     ".github/workflows/pr-gate.yml:11": 1,
     ".github/workflows/pr-gate.yml:113": 1,
     "scripts/build-snapshot-013.mjs:163": 1,
     "scripts/check-browser-syntax-floor.mjs:658": 1,
     "scripts/check-patch-mirror.mjs:347": 1,
-    "scripts/check-release-gates.mjs:152": 1,
-    "scripts/check-gate-skips.mjs:40": 1,
     ".github/workflows/pr-gate.yml:82": 1,
     "scripts/check-contract.mjs:165": 1,
     "scripts/check-browser-syntax-floor.mjs:535": 1,
@@ -1172,7 +1162,17 @@
     "verify-state-sync.mjs:161": 1,
     "docs/AGENTS/gotchas.md:44": 1,
     "MainActivity.kt:514": 1,
-    "scripts/check-bounded-io.mjs:239": 1
+    "scripts/check-bounded-io.mjs:239": 1,
+    "scripts/check-gate-skips.mjs:77": 1,
+    "scripts/check-gate-skips.mjs:197": 2,
+    "scripts/check-release-gates.mjs:166": 1,
+    "scripts/check-release-gates.mjs:183": 1,
+    "scripts/check-release-gates.mjs:195": 1,
+    "scripts/check-release-gates.mjs:222": 1,
+    "scripts/check-release-gates.mjs:243": 1,
+    "scripts/check-release-gates.mjs:290": 6,
+    "check-release-gates.mjs:167": 1,
+    "scripts/check-release-gates.mjs:167": 1
   },
   "sourceLines": {
     ".github/workflows/build-apk-source.yml:134": [
@@ -2990,9 +2990,6 @@
     "check-patch-mounts.mjs:28": [
       "const TOP_ITEM = /^-(?:\\s|$)/"
     ],
-    "check-release-gates.mjs:136": [
-      "// `A11Y_OPS` 后端能力清单的陈旧拷贝，多带 `state`/`webSnapshot`/`webAction` 三条**不读设备屏**的 op，"
-    ],
     "check-release-gates.mjs:28": [
       "/**"
     ],
@@ -4035,12 +4032,6 @@
     "scripts/check-contract.mjs:165": [
       "for (const e of readdirSync(dir, { withFileTypes: true })) {"
     ],
-    "scripts/check-gate-skips.mjs:40": [
-      "const parseInvoked = (text) =>"
-    ],
-    "scripts/check-gate-skips.mjs:62": [
-      "const resolveRepoPath = (rel) => {"
-    ],
     "scripts/check-inject-completeness.mjs:100": [
       "/** package.json files 字段声明的发布面（glob 展开；无该字段 = 空集）。 */"
     ],
@@ -4076,27 +4067,6 @@
     ],
     "scripts/check-plugin-tests.mjs:56": [
       ""
-    ],
-    "scripts/check-release-gates.mjs:104": [
-      "// （rc.1 实测：真树断 9 条而 16 个补丁测试全绿）。"
-    ],
-    "scripts/check-release-gates.mjs:135": [
-      "// `REAL_SCREEN_OPS` 必须逐条相同。设备实测缺陷 B4 的根因就是它们不一致——壳侧那份是"
-    ],
-    "scripts/check-release-gates.mjs:152": [
-      "// 0.13.8-b B2（ST-25/26/31 + §7.2 度量）：制度性门禁与性能度量入口一并进声明集合，"
-    ],
-    "scripts/check-release-gates.mjs:164": [
-      "// 构建链中止语义（任一 ABI 被拒 = 整链非 0；0.13.8-b 实锤：arm64 被拒后仍 exit 0 交付单 ABI 产物）。"
-    ],
-    "scripts/check-release-gates.mjs:191": [
-      "//   a. 默认档（无参数）——按 `--segments/--probe` > `DSH_BOOT_SEGMENTS`/`DSH_BOOT_PROBE` >"
-    ],
-    "scripts/check-release-gates.mjs:212": [
-      "{ script: 'check-build-parallel-cap.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },"
-    ],
-    "scripts/check-release-gates.mjs:246": [
-      "//   · releaseSink !== false ⇒ 发布链 --run 段执行（默认）；"
     ],
     "scripts/check-release-gates.mjs:28": [
       "/**"
@@ -4382,6 +4352,36 @@
     ],
     "scripts/check-bounded-io.mjs:239": [
       "const exempt = buildTree('exempt', { 'Ok.kt': '// bounded-io-exempt: 合成夹具，自证豁免通道\\nval s = stream.bufferedReader().readText()\\n' })"
+    ],
+    "scripts/check-gate-skips.mjs:77": [
+      "const parseInvoked = (text) =>"
+    ],
+    "scripts/check-gate-skips.mjs:197": [
+      "const resolveRepoPath = (rel) => {"
+    ],
+    "scripts/check-release-gates.mjs:166": [
+      "// `REAL_SCREEN_OPS` 必须逐条相同。设备实测缺陷 B4 的根因就是它们不一致——壳侧那份是"
+    ],
+    "scripts/check-release-gates.mjs:183": [
+      "// 0.13.8-b B2（ST-25/26/31 + §7.2 度量）：制度性门禁与性能度量入口一并进声明集合，"
+    ],
+    "scripts/check-release-gates.mjs:195": [
+      "// 构建链中止语义（任一 ABI 被拒 = 整链非 0；0.13.8-b 实锤：arm64 被拒后仍 exit 0 交付单 ABI 产物）。"
+    ],
+    "scripts/check-release-gates.mjs:222": [
+      "//   a. 默认档（无参数）——按 `--segments/--probe` > `DSH_BOOT_SEGMENTS`/`DSH_BOOT_PROBE` >"
+    ],
+    "scripts/check-release-gates.mjs:243": [
+      "{ script: 'check-build-parallel-cap.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },"
+    ],
+    "scripts/check-release-gates.mjs:290": [
+      "//   · releaseSink !== false ⇒ 发布链 --run 段执行（默认）；"
+    ],
+    "check-release-gates.mjs:167": [
+      "// `A11Y_OPS` 后端能力清单的陈旧拷贝，多带 `state`/`webSnapshot`/`webAction` 三条**不读设备屏**的 op，"
+    ],
+    "scripts/check-release-gates.mjs:167": [
+      "// `A11Y_OPS` 后端能力清单的陈旧拷贝，多带 `state`/`webSnapshot`/`webAction` 三条**不读设备屏**的 op，"
     ]
   },
   "symbols": {

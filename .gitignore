@@ -55,3 +55,4 @@ D:/
 # dsh-client-ui-responsive/ 下的幻影目录，目录名里的 ':' 落库时被写成私用区字符 U+F03A
 # （字节 EF 80 BA），所以字面量 `D:/` 匹配不到它。存量已于 2026-10-28 清理。
 **/.npm-cache/
+.git-msg-*.txt
