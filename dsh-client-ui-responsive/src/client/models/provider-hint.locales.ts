@@ -2,11 +2,11 @@
 export const NS = 'android-custom-provider-hint'
 
 export const zh = {
-  'hint.catalog': '以下列表来自内置目录，不代表当前端点。',
-  'hint.manual': '建议手动添加模型：填上端点实际返回的模型名即可。',
+  'hint.catalog': '下面的列表来自内置目录，不代表当前端点；请用“添加模型”手动填入端点返回的模型。',
+
 }
 
 export const en = {
-  'hint.catalog': 'The list below comes from the built-in catalog, not from this endpoint.',
-  'hint.manual': 'Adding models manually is recommended: enter the model ids your endpoint actually returns.',
+  'hint.catalog': 'The list below comes from the built-in catalog, not from this endpoint; use "Add model" to enter the models your endpoint actually returns.',
+
 }

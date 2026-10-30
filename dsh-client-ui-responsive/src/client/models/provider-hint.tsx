@@ -37,11 +37,11 @@ export { NS as LOCALE_NS, zh, en }
 
 /** 组件 props：只用到框架注入的 `t`。 */
 export interface ProviderHintProps {
-  t: (key: 'hint.catalog' | 'hint.manual') => string
+  t: (key: 'hint.catalog') => string
 }
 
 /**
- * 自定义 provider 卡片上的两行提示：先说明列表来源，再建议手动添加。
+ * 自定义 provider 卡片上的一行提示：说明列表来源，并指引用「添加模型」手动补。
  *
  * 刻意**不做成错误样式** —— 它不是失败，是「你可能被这份列表误导」。
  */
@@ -61,7 +61,6 @@ export function CustomProviderHint(props: ProviderHintProps): ReactElement {
       }}
     >
       <div>{t('hint.catalog')}</div>
-      <div style={{ marginTop: '2px' }}>{t('hint.manual')}</div>
     </div>
   )
 }

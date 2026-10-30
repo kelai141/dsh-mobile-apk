@@ -20,25 +20,31 @@ const render = (lang: 'zh' | 'en') => {
 }
 
 describe('自定义 provider 提示（#960 文案止损）', () => {
-  it('注册键是自定义 provider 的命名空间，官方 provider 不会命中', () => {
+  it('注册键是**自定义** provider 的命名空间，任何官方 provider 都不会命中', () => {
     expect(CUSTOM_PROVIDER_NS).toBe('llm-pi-ai')
-    // 官方 provider 的命名空间（上游 DeepSeekOnboardingDialog 用 llm-deepseek 判定）
-    expect(CUSTOM_PROVIDER_NS).not.toBe('llm-deepseek')
+    // 官方 provider 的命名空间（上游 DeepSeekOnboardingDialog 用 llm-deepseek 判定；其余为常见官方族）。
+    // 这条就是「官方卡片里出现即红」的**契约级**判据：keyed 槽按 settingsNs 分发，
+    // 键一旦改成官方 ns，提示就会出现在官方卡片上 —— 那时本断言先红。
+    const OFFICIAL_NAMESPACES = ['llm-deepseek', 'llm-anthropic', 'llm-openai', 'llm-google']
+    for (const ns of OFFICIAL_NAMESPACES) {
+      expect(CUSTOM_PROVIDER_NS, '注册键不得等于官方 provider 命名空间: ' + ns).not.toBe(ns)
+    }
   })
 
-  it('中文提示同时说明「列表来自内置目录」与「建议手动添加」', () => {
+  it('中文提示说明「列表来自内置目录」并指向「添加模型」手动填', () => {
     const html = render('zh')
     expect(html).toContain('data-dsh-custom-provider-hint')
-    expect(html).toContain('内置目录')
+    expect(html).toContain('下面的列表来自内置目录')
     expect(html).toContain('不代表当前端点')
-    expect(html).toContain('手动添加模型')
+    expect(html).toContain('添加模型')
+    expect(html).toContain('手动填入端点返回的模型')
   })
 
   it('英文提示等价', () => {
     const html = render('en')
     expect(html).toContain('built-in catalog')
     expect(html).toContain('not from this endpoint')
-    expect(html).toContain('manually')
+    expect(html).toContain('Add model')
   })
 
   it('不是错误样式：提示文案里不出现「失败/错误/error/failed」', () => {
