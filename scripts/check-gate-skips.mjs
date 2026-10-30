@@ -420,6 +420,16 @@ const AUDIT_BASELINE = new Map([
     reason: '净检出无 tar 时以 SKIP 结案，不打印 PASS/FAIL 判据行',
     until: '2026-12-31',
   }],
+  // check-tool-output-schema：本条是**本轮新判据首次看见的既有缺口**，且该门禁不在本组写域内。
+  // 净检出里 `@deepseek-ai/dsh-tools` 是各插件的 peerDependency，`npm install` 不会带进来，
+  // 于是它打印 SKIP(#1) + SKIP=1 后直接 exit 0，没有 PASS/FAIL 判据行。发布链调用前已由
+  // 「准备插件产物」段构建完毕，故严格档下它真会真检；净 checkout 的门禁自审里以 SKIP 结案
+  // 是设计内行为。到期 2026-12-31 前要把「净检出下先建产物」接进 CI 门禁自审。
+  ['check-tool-output-schema.mjs', {
+    kinds: ['no-verdict'],
+    reason: '净检出无 @deepseek-ai/dsh-tools（peerDependency 不进 npm install）时打印 SKIP(#1)+SKIP=1 后 exit 0，无 PASS/FAIL 判据行；发布链调用前已构建插件产物故严格档真检',
+    until: '2026-12-31',
+  }],
 ])
 
 const ZERO_CRITERIA_REGISTER = new Map([
