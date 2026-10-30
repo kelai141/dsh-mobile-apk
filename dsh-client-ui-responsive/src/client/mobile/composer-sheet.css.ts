@@ -65,6 +65,13 @@ export const COMPOSER_SHEET_CSS = `
 /* 第二段：上游「+」菜单项的映射行（图标 + 标题 + 副标题）。 */
 [data-dsh-composer-sheet-rows] {
   display: grid;
+  /* 显式 minmax(0, 1fr) 而不是隐式 auto 轨道：
+     auto 轨道按 min-content 撑开，而副标题是 nowrap，min-content 等于整句宽度，
+     长副标题会把整行顶出卡片（实测 360 宽的卡片里行宽涨到 367，副标题右边界
+     到 690，落在卡片外）。minmax(0,1fr) 让轨道可收缩到 0，超长文本由
+     text-overflow: ellipsis 收尾。 */
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   gap: 2px;
   margin-top: 10px;
 }
@@ -77,6 +84,9 @@ export const COMPOSER_SHEET_CSS = `
   gap: 10px;
   box-sizing: border-box;
   width: 100%;
+  /* flex 子项默认 min-width:auto，长副标题会把行撑破容器；显式清零。 */
+  min-width: 0;
+  max-width: 100%;
   min-height: 46px;
   padding: 6px 10px;
   border: 0;
@@ -107,6 +117,9 @@ export const COMPOSER_SHEET_CSS = `
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+  /* 真正裁掉溢出：子项 min-width:0 只允许收缩，父层还得有 overflow 才切。
+     没有这一行，nowrap 文本仍会画出容器外（实测副标题落到卡片右边）。 */
+  overflow: hidden;
 }
 [data-dsh-composer-sheet-row-title] {
   font-size: 14px;
@@ -122,5 +135,52 @@ export const COMPOSER_SHEET_CSS = `
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 横屏 / 桌面形态：不画全屏遮罩，面板变成锚在「+」上的原生卡片。
+   判据与 composer-sheet.ts 的 ANCHORED_MEDIA 逐字对应；改一处必须改两处。
+   几何（位置 / 宽度 / 最大高度）由脚本内联写入并带 !important，这里只画外观。
+   竖屏手机不命中本段，仍是上面的贴底 sheet。 */
+@media (orientation: landscape) and (max-height: 500px), (min-width: 768px) {
+  [data-dsh-composer-sheet-backdrop][data-dsh-composer-sheet-anchored] {
+    /* 保持铺满全屏、保持接收事件，只是不画任何东西：
+       点外部关闭要有一个真的能接住点击的层。若用 pointer-events: none，
+       点击会直接落到下面的页面 / iframe / ShadowRoot 上，panel.contains(target)
+       永远看不到它，卡片就关不掉。 */
+    position: fixed;
+    inset: 0;
+    background: transparent;
+    display: block;
+    pointer-events: auto;
+  }
+  [data-dsh-composer-sheet-backdrop][data-dsh-composer-sheet-anchored] > [data-dsh-composer-sheet-panel] {
+    pointer-events: auto;
+    box-sizing: border-box;
+    overflow-y: auto;
+    padding: 10px;
+    /* CSS 层兜底夹取：脚本按实际 left 算宽度，这里再按视口压一道，
+       两者互为保险（脚本是主判据，这条防内联值在极端尺寸下溢出）。 */
+    max-width: calc(100vw - 24px);
+    border: 0.5px solid var(--dsw-alias-border-l3, rgba(128, 128, 128, 0.35));
+    /* 四角都圆（与竖屏贴底只圆上方两角不同）。 */
+    border-radius: 18px;
+    background: var(--dsw-alias-bg-layer-1, var(--dsw-alias-bg-base));
+    color: var(--dsw-alias-label-primary, inherit);
+    font: var(--dsw-font-markdown-base, inherit);
+    /* 阴影方向跟着展开方向走：向上展开时向上投，向下展开时向下投。 */
+    box-shadow: 0 -6px 28px rgba(0, 0, 0, 0.32), 0 2px 10px rgba(0, 0, 0, 0.18);
+    transform-origin: bottom left;
+    animation: dsh-composer-card-in 120ms ease-out;
+  }
+  /* 向下展开时阴影翻到下方，视觉上才「从 + 底下长出来」。 */
+  [data-dsh-composer-sheet-backdrop][data-dsh-composer-sheet-anchored]
+    > [data-dsh-composer-sheet-panel][data-dsh-composer-sheet-dir='down'] {
+    box-shadow: 0 6px 28px rgba(0, 0, 0, 0.32), 0 2px 10px rgba(0, 0, 0, 0.18);
+    transform-origin: top left;
+  }
+  @keyframes dsh-composer-card-in {
+    from { transform: scale(0.96); opacity: 0; }
+    to { transform: scale(1); opacity: 1; }
+  }
 }
 `

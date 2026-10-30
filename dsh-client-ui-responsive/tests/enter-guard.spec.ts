@@ -183,6 +183,26 @@ describe('EnterGuard 判据：触屏优先，宽度只在问不到指针时兜�
     expect(gestures).toHaveLength(1)
   })
 
+  /**
+   * 有意取舍：`pointer: fine` + 窄视口 → **不拦截**（Enter 发送）。
+   *
+   * 为什么这不是漏洞：`(pointer: coarse)` 描述的是**主指针**。细指针意味着主输入是
+   * 鼠标 / 触控板，窄窗口只是「桌面窗口被缩窄」，不是手机形态 —— 用户手边有键盘，
+   * Enter 发送是上游原生语义。Android 上即使接了鼠标，`pointer` 仍由主输入决定，
+   * 所以真实手机的软键盘 Enter 不会被这格放给上游（那是 `pointer: coarse` 的路径）。
+   *
+   * 换掉这个取舍必须同时改测试名，避免它被静默反转。
+   */
+  it('desktop with fine pointer keeps Enter-to-send even in a narrow frame', () => {
+    stubMatchMedia(false)
+    mount()
+    // 窄视口：pre-#1040 的纯宽度判据会在这里拦截，指针判据说不。
+    expect(window.innerWidth).toBeLessThanOrEqual(MOBILE_FORM_MAX_WIDTH)
+    const narrowEvent = fireEnter(cardTextarea())
+    expect(narrowEvent.defaultPrevented).toBe(false)
+    expect(document.execCommand).not.toHaveBeenCalled()
+  })
+
   it('桌面细指针（pointer: coarse 为 false）：不拦截，交还上游（宽窄视口都一样）', () => {
     stubMatchMedia(false)
     mount()
