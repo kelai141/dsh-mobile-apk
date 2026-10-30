@@ -551,10 +551,8 @@
     "UpdateCheckerTest.kt:364": 1,
     "ApkUpdateAction.kt:578": 1,
     "EngineStartFlow.kt:1143": 1,
-    "MainActivity.kt:475": 1,
     "EngineStartFlow.kt:1150": 1,
     "UpdateCheckerTest.kt:426": 1,
-    "MainActivity.kt:724": 1,
     "BackGate.kt:132": 1,
     "DeviceControlService.kt:452": 1,
     "EngineProbe.kt:51": 1,
@@ -1499,9 +1497,6 @@
     "MainActivity.kt:422": [
       "// 正是 CONTRACT §0 点名的**重载环**（页面每次渲染完毕就再次发 ready → 又回到同一页）。"
     ],
-    "MainActivity.kt:475": [
-      "/** Automatic page refreshes coalesce while paused and never issue background navigation. */"
-    ],
     "MainActivity.kt:507": [
       "initialAuthRecoveryPending = true"
     ],
@@ -1522,9 +1517,6 @@
     ],
     "MainActivity.kt:647": [
       "// 早退、onResume 的探活发现引擎活着也不再走启动流程 → 授权之后没有任何东西会再跑一次建目录，"
-    ],
-    "MainActivity.kt:724": [
-      "FileIncoming.processIncomingIntent(this, intent) { title, text -> showTestNotification(title, text) }"
     ],
     "MainActivity.kt:774": [
       "val session = pendingNotifySession ?: return"
