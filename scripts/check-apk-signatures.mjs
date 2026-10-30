@@ -5,6 +5,24 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { X509Certificate } from 'node:crypto'
 
+/** issue #1032：递归收集 `.apk`，**跟随符号链接**（Dirent 对链接两种判定都为 false）。 */
+export const collectApkFiles = (dir) => {
+  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return null
+  const out = []
+  const pending = [path.resolve(dir)]
+  while (pending.length) {
+    const current = pending.pop()
+    for (const entry of fs.readdirSync(current)) {
+      const candidate = path.join(current, entry)
+      let stat = null
+      try { stat = fs.statSync(candidate) } catch { continue }
+      if (stat.isDirectory()) pending.push(candidate)
+      else if (stat.isFile() && entry.toLowerCase().endsWith('.apk')) out.push(candidate)
+    }
+  }
+  return out
+}
+
 const REQUIRED = ['v1', 'v2', 'v3']
 // The produced APKs use SHA-256 for JAR/v1 signatures. apksigner defaults
 // verification's minimum SDK from the APK manifest (26), where it omits v1
@@ -56,9 +74,13 @@ export function evaluateVerification({ exitCode, output, expectedCertificateSha2
 }
 
 export function readKeystoreCertificate(keystore) {
-  const keytool = javaTool('keytool')
+  // issue #1031：alias/口令此前硬编码，只对自带 debug keystore 成立；改为可覆盖。
+const KEYSTORE_ALIAS = process.env.DSH_APK_KEYSTORE_ALIAS || 'androiddebugkey'
+const KEYSTORE_PASS = process.env.DSH_APK_KEYSTORE_PASS || 'android'
+
+const keytool = javaTool('keytool')
   const result = spawnSync(keytool, ['-exportcert', '-rfc', '-keystore', path.resolve(keystore),
-    '-alias', 'androiddebugkey', '-storepass', 'android'], { encoding: 'utf8', windowsHide: true })
+    '-alias', KEYSTORE_ALIAS, '-storepass', KEYSTORE_PASS], { encoding: 'utf8', windowsHide: true })
   if (result.error || result.status !== 0) throw new Error('cannot export the repository signing certificate from ' + keystore)
   const pem = result.stdout.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/)?.[0]
   if (!pem) throw new Error('keytool did not return a certificate')
@@ -164,16 +186,9 @@ function main() {
   }
   const files = [...options.apks]
   for (const dir of options.dirs) {
-    if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return fail(`not a directory: ${dir}`)
-    const pending = [path.resolve(dir)]
-    while (pending.length) {
-      const current = pending.pop()
-      for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
-        const candidate = path.join(current, entry.name)
-        if (entry.isDirectory()) pending.push(candidate)
-        else if (entry.isFile() && entry.name.toLowerCase().endsWith('.apk')) files.push(candidate)
-      }
-    }
+    const found = collectApkFiles(dir)
+    if (found === null) return fail(`not a directory: ${dir}`)
+    files.push(...found)
   }
   const unique = [...new Set(files.map((file) => path.resolve(file)))].sort()
   if (!unique.length) return fail('no APK files found in the supplied paths')
