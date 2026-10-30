@@ -15,7 +15,7 @@
 // 退出码：0 = 通过；1 = 失败（构建链与 CI 以此拒打包/拒合并）。
 import { existsSync, statSync, readdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { arbitrateFreshness } from './lib/product-freshness.mjs'
 
@@ -104,7 +104,196 @@ const selfTest = (silent) => {
 
   t('空配对集合 ⇒ stale=false', decideStaleness([]).stale === false)
 
+  // ── 值域套件判据（issue #1025）：用合成解码器喂结果矩阵，逐条钉住 ──────────────
+  // 合成解码器按「载荷里有没有 knownGap 标记」返回结果，与真实解码器解耦。
+  const fake = (rejectIds) => (payload) => ({ ok: !rejectIds.includes(payload.id) })
+  const S = (...parts) => parts.join('')
+  const gapCase = { id: 'g', payload: { id: 'g' }, expect: 'known-gap', reason: '因', since: '2026-10', issue: '#1' }
+  const rejCase = { id: 'r', payload: { id: 'r' }, expect: 'reject' }
+
+  const okMatrix = runDomainSuite([rejCase, gapCase], fake(['r']))
+  t('值域表：reject 被拒 + known-gap 被接受 ⇒ 无 problem，缺口清单列出 1 条',
+    okMatrix.problems.length === 0 && okMatrix.knownGaps.length === 1 && okMatrix.accepted.length === 1,
+    JSON.stringify(okMatrix))
+
+  const domAcc = runDomainSuite([rejCase], fake([]))
+  t('值域表：expect=reject 而实际 ACCEPT ⇒ domain-accepted',
+    domAcc.problems.some((p) => p.startsWith('值域负控被接受（domain-accepted）')), JSON.stringify(domAcc.problems))
+
+  const stale = runDomainSuite([gapCase], fake(['g']))
+  t('值域表：known-gap 而实际 REJECT ⇒ known-gap-stale（修好了没销账必须红）',
+    stale.problems.some((p) => p.startsWith('已知缺口已不再复现（known-gap-stale）')), JSON.stringify(stale.problems))
+
+  const noField = runDomainSuite([{ id: 'g', payload: {}, expect: 'known-gap', reason: '因' }], fake([]))
+  t('值域表：known-gap 缺 since/issue ⇒ 红',
+    noField.problems.some((p) => p.includes('known-gap 登记缺字段')), JSON.stringify(noField.problems))
+
+  const badExpect = runDomainSuite([{ id: 'x', payload: {}, expect: 'rejects' }], fake([]))
+  t('值域表：未知 expect 值 ⇒ 红',
+    badExpect.problems.some((p) => p.includes('未知的 expect 值')), JSON.stringify(badExpect.problems))
+
+  const empty = runDomainSuite([], fake([]))
+  t('值域表：表为空 ⇒ 红（判据等于没写）',
+    empty.problems.some((p) => p.includes('值域负控表为空')), JSON.stringify(empty.problems))
+
+  t('值域表：expect 值域恰为 reject / known-gap 两种（口径不走样）',
+    S(...DOMAIN_CASES.map((c) => c.expect)).replace(/reject|known-gap/g, '') === '',
+    [...new Set(DOMAIN_CASES.map((c) => c.expect))].join(','))
+
   return fails
+}
+
+// ── 值域半边（2026-10-30，issue #1025）────────────────────────────────────────
+//
+// 门禁此前只守住「列长度 / 列顺序 / b 与 o 的边界」，解码器**输入侧的值域**半边没实现：
+// 标量 null、符号索引、depth 上界、祖先索引顺序都不校验，坏载荷仍然解出 ok:true。
+// 其中 n:null 会退化成 n=0 的**空树**，正是测试自己那条「坏载荷一律失败关闭（不静默产出空树）」
+// 所禁止的形态。
+//
+// 本轮实测（针对构建产物 lib/protocol-v2.js，仓库 main=b2551951）：
+//   已拒：P4b d:[-5,1] -> REJECT「d[0]=-5 非法：深度必须是非负整数」
+//   已拒：P5  p:[0,5]  -> REJECT「p[1]=5 越界…」
+//   （这两条是解码器后来补上的校验，issue 正文写的时候还没有——所以它们在这里是**真判据**：
+//    谁把这两条输入侧校验改回去，门禁立刻红。）
+//   仍放行：n:null / 符号索引越界或负数 / d 上界越域 / d 跳变 / p 向前引用与自引用
+//
+// 处置（BRIEF 硬规矩「不碰产品代码」优先）：值域判据在门禁侧**真正实现出来**（表格驱动 +
+// 双向比对），但把「解码器输入侧尚未校验」的那几条登记为 known-gap（shrink-only），
+// 而不是继续假装守住、也不是让真实树当场变红。
+//
+// 销账方式：修 plugins/dsh-android-manage/src/protocol-v2.ts 的输入侧校验，然后把对应条目
+// 从 expect:'known-gap' 改成 expect:'reject'（改回 known-gap 会立刻 known-gap-stale 判红）。
+
+/** 2 行合法裸载荷基线（值域负控都在这上面打补丁，只改一条判据）。 */
+export const DOMAIN_BASE = {
+  v: 2, gen: 1, rot: 0, scr: [100, 200], str: ['Abc', 'Btn'], n: 2,
+  o: [0, 1], d: [0, 1], p: [-1, 0], f: [0, 0], c: [0, 1], k: [0, 0],
+  r: [0, 0], w: [0, 0], t: [0, 1], s: [-1, -1],
+  b: [0, 0, 100, 20, 0, 20, 100, 20],
+}
+/** 补丁式载荷构造：只覆盖给定的列。 */
+export const domainPayload = (patch = {}) => ({ ...DOMAIN_BASE, ...patch })
+
+/**
+ * 值域负控表。每条形如 { id, payload, expect, reason?, since?, issue? }。
+ *
+ * expect 只有两个合法值：
+ *   'reject'    解码器必须 REJECT。实际 ACCEPT = 红（domain-accepted）。
+ *   'known-gap' 已知缺口：解码器目前 ACCEPT。实际 REJECT = 红（known-gap-stale）——
+ *               解码器修好了却没销账，必须把它改成 'reject'（跟 check-script-tests 的
+ *               KNOWN_FAIL「多了少了都红」同一口径）。known-gap 每条必须带 reason/since/issue。
+ */
+export const DOMAIN_CASES = [
+  // ── 真判据（解码器输入侧已校验；谁改回去谁红）──────────────────────────────
+  {
+    id: 'P4b d:-5（负深度）',
+    payload: domainPayload({ d: [-5, 1] }),
+    expect: 'reject',
+  },
+  {
+    id: 'P5 p:5（祖先行下标越界，n=2）',
+    payload: domainPayload({ p: [0, 5] }),
+    expect: 'reject',
+  },
+  // ── 已登记缺口（shrink-only；销账 = 修 src/protocol-v2.ts 的输入侧校验后改成 'reject'）──
+  {
+    id: 'P3b n:null（退化成 n=0 空树）',
+    payload: domainPayload({
+      n: null, d: [], p: [], f: [], c: [], k: [], r: [], w: [], t: [], s: [], b: [], o: [],
+    }),
+    expect: 'known-gap',
+    reason: '解码器输入侧把 n 交给 Number()，Number(null)=0 于是 n:null 通过「非负整数」检查，解出空树而不是失败关闭',
+    since: '2026-10',
+    issue: '#1025',
+  },
+  {
+    id: 'P2 t:999（符号索引越界，str 只有 2 项）',
+    payload: domainPayload({ t: [999, 1] }),
+    expect: 'known-gap',
+    reason: 'sym() 对越界下标回落成空串（S[k] ?? ""），标签静默变空而不是失败关闭',
+    since: '2026-10',
+    issue: '#1025',
+  },
+  {
+    id: 'P2b t:-2（符号索引负数）',
+    payload: domainPayload({ t: [-2, 1] }),
+    expect: 'known-gap',
+    reason: 'sym() 对负数下标直接返回空串，标签静默变空而不是失败关闭',
+    since: '2026-10',
+    issue: '#1025',
+  },
+  {
+    id: 'P4 d:999（深度上界越域）',
+    payload: domainPayload({ d: [0, 999] }),
+    expect: 'known-gap',
+    reason: 'd 只校验了「非负整数」，上界没有域——编码器产出的深度由 id 点号层数决定（远小于 n），越域值会直接喂进 parentId/subtreeEnd 重建',
+    since: '2026-10',
+    issue: '#1025',
+  },
+  {
+    id: 'P4c d:[0,5] 跳变（预序深度跳层）',
+    payload: domainPayload({ d: [0, 5] }),
+    expect: 'known-gap',
+    reason: '预序相邻行的深度跳变超过 1 时父子链与子树区间都会错，但输入侧没有跳变校验',
+    since: '2026-10',
+    issue: '#1025',
+  },
+  {
+    id: 'P5b p:[1,0]（祖先向前引用/倒序）',
+    payload: domainPayload({ p: [1, 0] }),
+    expect: 'known-gap',
+    reason: 'p 只校验了范围 [-1, n)，没有校验「祖先必须在本行之前」（预序顺序）',
+    since: '2026-10',
+    issue: '#1025',
+  },
+  {
+    id: 'P5c p:[1,1]（祖先自引用）',
+    payload: domainPayload({ p: [1, 1] }),
+    expect: 'known-gap',
+    reason: 'p[i]=i 指向自身，同样落在 [-1, n) 范围内被放行，下游会拼出指向自己的 ref',
+    since: '2026-10',
+    issue: '#1025',
+  },
+]
+
+/**
+ * 值域套件判据（纯函数，供 --self-test 直接钉）。
+ *
+ * @param {{id: string, expect: string, reason?: string, since?: string, issue?: string}[]} cases 负控表
+ * @param {(c: any) => {ok: boolean}} decode 解码器（注入便于自证）
+ * @returns {{problems: string[], knownGaps: string[], accepted: string[]}}
+ */
+export const runDomainSuite = (cases, decode) => {
+  const problems = []
+  const knownGaps = []
+  const accepted = []
+  for (const c of cases) {
+    const id = c.id === undefined ? '<无 id>' : c.id
+    if (c.expect === 'reject' || c.expect === 'known-gap') {
+      if (c.expect === 'known-gap') {
+        const lacks = ['reason', 'since', 'issue'].filter((k) => !c[k])
+        if (lacks.length > 0) {
+          problems.push('known-gap 登记缺字段（' + lacks.join('/') + ' 必填）：' + id)
+          continue
+        }
+      }
+    } else {
+      problems.push('未知的 expect 值「' + String(c.expect) + '」：' + id + '（只认 reject / known-gap）')
+      continue
+    }
+    const r = decode(c.payload)
+    if (c.expect === 'reject') {
+      if (r.ok) problems.push('值域负控被接受（domain-accepted）：' + id)
+      else accepted.push(id)
+    } else if (r.ok) {
+      knownGaps.push(id + '（' + c.reason + '；since ' + c.since + '，' + c.issue + '）')
+    } else {
+      problems.push('已知缺口已不再复现（known-gap-stale）：' + id + ' —— 解码器现在会拒绝它，'
+        + '请把该条 expect 改成 \'reject\' 销账（保持 known-gap 会让缺口清单失真）')
+    }
+  }
+  if (cases.length === 0) problems.push('值域负控表为空 —— 判据等于没写')
+  return { problems, knownGaps, accepted }
 }
 
 if (process.argv.includes('--self-test')) {
@@ -113,7 +302,7 @@ if (process.argv.includes('--self-test')) {
     console.error('CHECK-PROTOCOL-V2 SELF-TEST FAILED（' + stFails.length + ' 项）：' + stFails.join('；'))
     process.exit(1)
   }
-  console.log('CHECK-PROTOCOL-V2 SELF-TEST PASSED（5 项判别力断言）')
+  console.log('CHECK-PROTOCOL-V2 SELF-TEST PASSED（12 项判别力断言：5 条产物时效配对 + 7 条值域负控表判据）')
   process.exit(0)
 }
 
@@ -181,4 +370,22 @@ if (run.status !== 0) {
 const passN = Number((/^ℹ pass (\d+)/m.exec(out) ?? /^# pass (\d+)/m.exec(out))?.[1] ?? '0')
 if (passN <= 0) fail(`协议 V2 测试未产生有效通过数（全 skip = 假绿，pass=${passN}）`)
 console.log('PASS  协议 V2 往返 + 体积门禁' + (summary ? `（${summary}）` : ''))
+
+// ── 值域负控（issue #1025）：直接驱动构建产物的 decodeV2，逐条双向比对 ─────────────
+const v2 = await import(pathToFileURL(LIB).href)
+const domain = runDomainSuite(DOMAIN_CASES, (payload) => v2.decodeV2(payload))
+if (domain.problems.length > 0) {
+  for (const p of domain.problems) console.error('  - ' + p)
+  fail(`值域负控未通过（${domain.problems.length} 项）`)
+}
+console.log('PASS  值域负控（' + domain.accepted.length + ' 条真判据 REJECT；'
+  + domain.knownGaps.length + ' 条已知缺口登记在案）')
+if (domain.knownGaps.length > 0) {
+  // 已知缺口必须**打印**：登记表不是静默通道（shrink-only：只许减少，销账方式见上）。
+  console.log('KNOWN-GAP  值域半边尚未在解码器输入侧实现（共 ' + domain.knownGaps.length + ' 条，shrink-only）：')
+  for (const g of domain.knownGaps) console.log('  KNOWN-GAP  ' + g)
+  console.log('KNOWN-GAP  销账方式：修 plugins/dsh-android-manage/src/protocol-v2.ts 的输入侧校验，'
+    + '再把 scripts/check-protocol-v2.mjs 里对应条目从 expect:\'known-gap\' 改成 expect:\'reject\''
+    + '（留在 known-gap 会以 known-gap-stale 判红）')
+}
 console.log('CHECK-PROTOCOL-V2 PASSED')
