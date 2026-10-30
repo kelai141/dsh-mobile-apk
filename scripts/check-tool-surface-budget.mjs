@@ -17,6 +17,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, dirname, relative } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { PLUGINS } from './lib/tool-surface-plugins.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const argv = process.argv.slice(2)
@@ -28,15 +29,7 @@ const update = argv.includes('--update')
 const rel = (p) => relative(ROOT, p).replace(/\\/g, '/')
 const fail = (msg) => { console.error('CHECK-TOOL-SURFACE-BUDGET FAILED：' + msg); process.exit(1) }
 
-/** 模型面工具名空间：只统计这些插件注册的工具。 */
-const PLUGINS = [
-  'dsh-android-bridge',
-  'dsh-android-manage',
-  'dsh-android-browser',
-  'dsh-android-vdisplay',
-  'dsh-android-file-open',
-  'dsh-android-linux-env',
-]
+
 
 /** 预算：字节 + 允许的相对漂移；基线文件由 --update 生成。 */
 const BASELINE_FILE = join(ROOT, 'scripts', 'tool-surface-budget.json')
