@@ -16,8 +16,18 @@ import assert from 'node:assert/strict'
 import { pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
+
+// #679 硬切后壳侧只认 nonce，所以本套件必须提供一份可读的 nonce——否则 android_ui_input
+// 会在**发广播之前**就返回「nonce 不可用」，本文件要验的「无权威结果码时的文案」那条路径
+// 根本走不到（实测：不提供 nonce 时断言会拿到 nonce 报错文案）。
+const NONCE_DIR = mkdtempSync(join(tmpdir(), 'kb-honesty-'))
+writeFileSync(join(NONCE_DIR, 'adb-keyboard-nonce'), 'test-nonce\n')
+process.env.DSH_FILES_DIR = NONCE_DIR
+
 const mod = await import(pathToFileURL(join(HERE, '..', 'lib', 'index.js')).href)
 const ime = await import(pathToFileURL(join(HERE, '..', 'lib', 'ime-broadcast.js')).href)
 

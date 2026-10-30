@@ -5,8 +5,17 @@ import assert from 'node:assert/strict'
 import { pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
+
+// #679 硬切后壳侧只认 nonce；android_ui_input 会在发广播前检查它。本套件验的是 a11y/adb 路由与
+// 回读口径，必须能走到发广播那一步，所以提供一份可读 nonce（否则会拿到「nonce 不可用」文案）。
+const NONCE_DIR = mkdtempSync(join(tmpdir(), 'kb-a11y-'))
+writeFileSync(join(NONCE_DIR, 'adb-keyboard-nonce'), 'test-nonce\n')
+process.env.DSH_FILES_DIR = NONCE_DIR
+
 const mod = await import(pathToFileURL(join(HERE, '..', 'lib', 'index.js')).href)
 
 function makeFace({ backend = 'a11y' } = {}) {
