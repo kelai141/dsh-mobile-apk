@@ -1739,7 +1739,7 @@ FileProvider XML path regression coverage: `scripts/check-manifest-hardening.tes
   - 第 1 段（快照构建，无注入）：Windows 宿主自重重入 WSL（`build-snapshot-013.mjs:31-45`，可用 `DSH_NO_WSL_REEXEC=1` 关闭）→ 基座与 base-dsh 解压到 ext4 stage（`:120-126`，`xz -dT「XZ_THREADS 线程」 | tar -x`）→ 机密剥离 + seed settings.yaml + patchReload 出厂值（`:134-153`）→ 剥离清单后置断言（`:168-175`）→ 引擎 overlay 逐包 tgz 覆盖（`:192-275`，登记表 snapshot-config/engine-overlay.json）→ 引擎树补丁 `apply-patches.mjs --apply --scope engine` 并逐条复查 marker、再跑四项行为回归（`:291-350`）→ chrome87 语法降级 + 复扫（`:366-413`）→ combo 缓存预计算（`:415-447`）→ 能力目录快照（`:449-460`）→ Termux 索引/依赖闭包/deb 下载校验/提取（`:462-599`）→ dpkg status 初始化（`:601-615`）→ shebang 与 RUNPATH 重写（`:617-624`）→ 三缺陷固化 tar/git/rg + cordis.patch.yml 权威覆盖（`:626-693`）→ pnpm/canvas/apt-dpkg wrapper/install-clang.sh（`:694-864`）→ 错位目录剔除与瘦身（`:866-925`）→ 软链自净化（`:933-966`）→ 归档 `tar -c --mtime=@「固定纪元」 | xz -T「XZ_THREADS 线程」 -6` 并写 snapshot.sha256（`:968-989`）→ 归档内 LICENSES、旧 Termux 前缀软链、A1 出厂值三道自检（`:997-1046`）。产出 `.deploy-tmp/snapshot-013/「abi」/snapshot.tar.xz`。
   - 第 2 段（打包编排）：循环外先跑静态门禁（`build-apk-013.ps1:37-146`，含补丁镜像 `:38`、契约 `:45`、状态登记/桥对称/SKIP 纪律 `:51-58`、中止语义自检 `:62`、指纹预检 `:69`、manifest/注释/有界读/路由鉴权/协议 V2/工具 schema/控制 op/插件单测/冷启动预算/构建器产出面/并发上限/Kotlin 单测数量）→ pi-ai 目录 diff（`:150-161`，信息性不拒）→ 读 build.gradle.kts 版本定 out 目录（`:164-165`）→ 逐 ABI（arm64、x86_64 顺序，`:182`）：overlay 抽验（`:193`）→ vendor 补丁门禁（`:211`）→ 注入段语法降级到暂存副本（`:229-264`，vendor 是入库跟踪文件，禁就地改写）→ 注入段 combo 增量预计算（`:270-276`）→ `inject-all.py` 单 pass 注入（`:283`）→ 挂载集（`:287`）、注入成员完整性（`:291`）、combo 覆盖（`:295`）、语法下限复扫（`:303`）、工具面预算（`:308`）、注入后鉴权（`:312`）、strip 后置（`:316`）→ 权限模式（`:326`）、第三方合规（`:338`）、许可资产入 assets（`:341-344`）、机密（`:350`）、elf（`:355`）、运行时补丁资产（`:365`）、A1 出厂值（`:370`）→ 清 assets 残留并写 snapshot.tar.xz + snapshot.sha256（`:377-381`）→ 指纹 `--require` 严格对账（`:384`）→ `gradlew :app:assembleDebug -PversionNameSuffix=`（`:388`）→ 拷到 `out/v「版本」/dsh-mobile-apk-v「版本」「后缀」-「abi」.apk`（`:391`）。
   - 第 3 段（可选归档）：`-ExportSnapshots` 导出注入后快照 + 写 .sha256，并用 `check-snapshot-asset.ps1` 比对 APK 内嵌快照逐字节一致（`:403-420`）→ 交发布链/上传面。
-  - **APK 终端组装共用段**：本地 `build-apk-013.ps1`、云端 `build-apk.yml → build-apk.mjs`、发布 `build-release.ps1` 都把已准备好的 ABI 快照交给 `build-apk-engine.mjs assemble`；该引擎负责复制快照、写 SHA-256 指纹、严格跑 `check-snapshot-fingerprint.mjs --require`、Gradle `:app:assembleDebug`、复制命名产物。三条调用路径随后都对最终输出目录运行 `build-apk-engine.mjs verify`，由 `check-apk-signatures.mjs` 调 `apksigner verify --verbose` 并要求 v1/v2/v3 全为 true；云端 workflow 另有一次目录/单 APK 签名复核。（0.14.5：原先 `build-snapshot.yml` 那条独立快照构建工作流直接调用 Gradle、不属于这里描述的共享终端引擎链；**该 workflow 已删除**，现在只有下列三条路径属于终端组装面。）
+  - **APK 终端组装共用段**：本地 `build-apk-013.ps1`、云端 `build-apk.yml → build-apk.mjs`、发布 `build-release.ps1` 都把已准备好的 ABI 快照交给 `build-apk-engine.mjs assemble`；该引擎负责复制快照、写 SHA-256 指纹、严格跑 `check-snapshot-fingerprint.mjs --require`、Gradle `:app:assembleRelease`（issue #1118 起的发布变体；构建类型由 `assembleApk({ buildType })` 单点派生，缺省 `release`、可选 `debug`，同一参数同时决定 Gradle 任务、陈旧产物清理目录与取产物目录 `app/build/outputs/apk/<buildType>/app-<buildType>.apk`）、复制命名产物。开发迭代用的 `scripts/build-apk-dev-fast.mjs` 刻意留在 `:app:assembleDebug`，不走这条共用段。三条调用路径随后都对最终输出目录运行 `build-apk-engine.mjs verify`，由 `check-apk-signatures.mjs` 调 `apksigner verify --verbose` 并要求 v1/v2/v3 全为 true；云端 workflow 另有一次目录/单 APK 签名复核。（0.14.5：原先 `build-snapshot.yml` 那条独立快照构建工作流直接调用 Gradle、不属于这里描述的共享终端引擎链；**该 workflow 已删除**，现在只有下列三条路径属于终端组装面。）
   - 收口：任一 ABI 被门禁拒绝或零产出 → 打印汇总后 `exit 1`（`:427-428`），由 `check-build-chain-abort.mjs:53-89` 静态锁住记账纪律。
 - **嵌套与线程**：主线程 = PowerShell 编排，逐 ABI 串行；每 ABI 一次 `gradlew --no-daemon`（`:388`，独立 JVM）。快照段在 Windows 上是父子进程：父进程 `spawnSync('wsl.exe', ['-e', 'bash', '-lc', command])`（`build-snapshot-013.mjs:37`）只转发退出码，子进程在 WSL 的 ext4 stage 里跑完全链，压缩/解压线程数统一取 `scripts/lib/shell.mjs#resolveTar@9ff85e3d` 的 XZ_THREADS（默认 8，`DSH_CPU_THREADS` 可覆写）。Python 注入（inject-all.py）与 node 门禁都是子进程调用、各自单线程；调用深度最多 3 层（ps1 → node/python 工具；build-snapshot → apply-patches.mjs → 其内部再无 spawn）。
 - **耦合**：
@@ -1754,8 +1754,8 @@ FileProvider XML path regression coverage: `scripts/check-manifest-hardening.tes
 - **关键坐标**：
   - `scripts/build-apk-013.ps1:182`（逐 ABI 主循环；-OnlyAbi/-Fast 只改循环范围）
   - `scripts/build-apk-013.ps1:283`（inject-all.py 单 pass 注入调用）
-  - `scripts/build-apk-013.ps1:388`（gradle assembleDebug，出包唯一一步）
-  - `scripts/build-apk-engine.mjs:33` / `:90`（共用 assemble 与签名验证入口）；调用测试锁住本地、云端、发布三路汇合：`scripts/build-apk-engine.test.mjs:40#expect=assert.deepEqual(args%2C%20%5B'%3Aapp%3AassembleRelease'`
+  - `scripts/build-apk-013.ps1:510#expect=(Join-Path%20%24Root%20%22scripts%5Cbuild-apk-engine.mjs%22)%2C%20%22assemble%22%2C`（`$engineArgs` 把出包交给共享终端引擎；ps1 自己不直接调 gradle，出包唯一一步是引擎里的 `:app:assembleRelease`）
+  - `scripts/build-apk-engine.mjs:54#expect=export%20function%20assembleApk(options%2C%20runner%20%3D%20spawnSync)%20%7B` / `:144#expect=export%20function%20verifyApks(%7B%20directories%20%3D%20%5B%5D%2C%20files%20%3D%20%5B%5D%2C%20signatureGate`（共用 assemble 与签名验证入口；`assembleApk` 的 `buildType` 缺省 release、可选 debug，单点派生 Gradle 任务与产物目录）；调用测试锁住本地、云端、发布三路汇合：`scripts/build-apk-engine.test.mjs:41#expect=assert.deepEqual(args%2C%20%5B'%3Aapp%3AassembleRelease'`
   - `scripts/patches/data/registry-scan-c4.mjs:11`（同步 flush 的 Loader 临时索引与 manifest 复用；详细设备计时/预算见 RUNTIME-PATCHES §7.6，自动补给的异步 checkpoint 见 model-capability README）
   - `scripts/patches/data/client-index-loader-barrier.mjs:3`（G2：首页HTML在快照插件图前等待同一host Loader收敛；静态资源不参与等待）
   - `scripts/patches/data/undo-safe-transaction-snippet.mjs:1`（Safe Mode 事务代码模板；由 `apply-patches.mjs:540#expect=el%28%27p%27%2C%20%27%7BclassName%3A%22dshm-summary%22%7D%27%2C%20%27k%28o%2Ca%29%27%29%2C` 注入 vendor 快照代码）
@@ -1818,7 +1818,7 @@ flowchart TD
   P -->|"失败"| Q["Deny-Abi 记账 跳过本 ABI"]
   P -->|"通过"| R["写 assets 快照与指纹 严格对账"]
   Q --> S{"有 ABI 被拒 或 零产出"}
-  R --> T["gradle assembleDebug 出 APK"]
+  R --> T["共用终端引擎 gradle assembleRelease 出 APK"]
   T --> U["可选 导出快照资产并核对 APK 内嵌"]
   U --> S
   S -->|"是"| X
@@ -1849,7 +1849,7 @@ flowchart LR
   E --> L["快照构建 本地镜像只提供验过的 Termux 文件"]
   K --> L
   L --> M["既有注入与门禁"]
-  M --> N["assembleDebug arm64 APK"]
+  M --> N["assembleRelease arm64 APK"]
   N --> O["APK SHA-256 与来源清单"]
 ```
 
@@ -1866,7 +1866,7 @@ flowchart LR
   - **提交期（秒级到分钟级）**：pr-gate `static` 作业按「文本扫描 → 补丁自洽 → npm 构建前置 → 协议/契约/登记 → 加固/路由 → 冷启动预算 → 快照构建器产出面 → 接线聚合 → 制度性门禁 → 工具面预算」推进（见下表），全绿后交 `compile` 作业；`compile` 绿即 PR 可评审。这一步**不依赖快照**，也不接触设备。
   - **本地构建期**：`build-apk-013.ps1` 在注入之前跑完注入前门禁段；任一项非 0 立即 `exit 1`（不打包）。逐 ABI 循环内，注入后门禁失败走 `Deny-Abi` 记账并 `continue`，循环结束后若 `$rejectedAbis.Count > 0` 则整链 `exit 1`（`scripts/build-apk-013.ps1:427`）——控制权在此交还给调用者（人），不自动重试。
   - **发布期**：`build-release.ps1` 先 `git status --porcelain` 脏检查（含协调仓根的 `plugins/scripts/vendor/LICENSES` 面），再跑聚合入口；`--require` 档下任何 SKIP 即中止组装（`scripts/build-release.ps1:60`、`:147`）。
-  - **跑完交给谁**：门禁本身不产出交付物，只以退出码裁决；通过后控制权依次交给注入链（`scripts/inject-all.py`）、gradle（`:app:assembleDebug`）、上传/发布步骤。
+  - **跑完交给谁**：门禁本身不产出交付物，只以退出码裁决；通过后控制权依次交给注入链（`scripts/inject-all.py`）、共享终端引擎的 gradle（`:app:assembleRelease`，构建类型由 `assembleApk({ buildType })` 决定）、上传/发布步骤。
 - **嵌套与线程**：
   1. `build-apk-013.ps1`【PowerShell 主线程】→ `node scripts/check-*.mjs`【每个门禁一个短命进程，串行，`$LASTEXITCODE` 判定】→ 门禁内部多为单线程流式读 tar（`scripts/check-runtime-assets.mjs` 另 `spawnSync` 跑行为回归测试）。
   2. `check-release-gates.mjs --run`【node 主线程】→ `spawnSync(process.execPath, [scripts/<gate>])`【逐个子进程，串行，`maxBuffer` 128MB】→ 子进程 stdout 回写父进程，父进程用 `/SKIP=(\d+)/` 累计 SKIP（`scripts/check-release-gates.mjs:657#expect=const%20m%20%3D%20%2FSKIP%3D(`）。
@@ -1972,7 +1972,7 @@ flowchart LR
    b. 注入段：`apply-patches.mjs`（vendor 补丁）→ `check-browser-syntax-floor.mjs --degrade`（vendor 暂存副本降级，**必须在 combo 预计算之前**）→ `lib/combo-precompute.mjs` → `inject-all.py`（单 pass 全 profile 注入）。
    c. 注入后门禁：patch-mounts → inject-completeness（快照）→ combo-cache（快照）→ browser-syntax-floor `--scan`（快照）→ tool-surface-budget（npm）→ api-route-auth `--snapshot`（快照）→ strip-noop（快照）。
    d. 产物与资产门禁：snapshot-file-modes → third-party（快照）→ 许可资产拷贝 → snapshot-secrets `--require`（快照）→ elf-check（快照）→ runtime-assets `--require`（快照）→ perf-instrumentation `--require --snapshot`（快照）。
-   e. `check-snapshot-fingerprint.mjs --require`（写入 assets 后复核）→ gradle `:app:assembleDebug`。
+   e. `check-snapshot-fingerprint.mjs --require`（写入 assets 后复核）→ 共享终端引擎 `build-apk-engine.mjs assemble` 跑 gradle `:app:assembleRelease`（`buildType` 缺省 release）。
 3. `-ExportSnapshots` 档：导出 `snapshot-<abi>.tar.xz` 后跑 `check-snapshot-asset.ps1`（APK 内嵌与发布快照一致性）。
 4. 尾部：`$rejectedAbis.Count > 0` 或 `$producedAbis.Count -eq 0` → `exit 1`。
 

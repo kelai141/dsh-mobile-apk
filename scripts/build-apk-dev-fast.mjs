@@ -1,7 +1,19 @@
 #!/usr/bin/env node
 // Local-only APK repack for shell/UI iteration. This intentionally skips every
 // release gate and requires an existing snapshot asset in the APK project.
-// Never publish this artifact: it is unsigned-release, ungated and unverified.
+// Never publish this artifact: it is ungated and unverified.
+//
+// DELIBERATE DEBUG VARIANT — do not "fix" this into assembleRelease.
+// This script runs `:app:assembleDebug` on purpose: it is the fast local iteration
+// path, its output is `application-debuggable` by design, and that flag is exactly
+// what `scripts/check-apk-form.mjs` rejects at the final-artifact checkpoint. The
+// formal packaging chain (local build-apk-013.ps1, cloud build-apk.mjs, release
+// build-release.ps1) routes through `scripts/build-apk-engine.mjs`, whose
+// `assembleApk()` defaults to `buildType: 'release'` and drives `:app:assembleRelease`.
+// So the split is: dev-fast = debug variant, everything that ships = release variant.
+// If you change one of these two Gradle tasks, read the other one first: the two
+// chains intentionally differ, so "the other chain says assembleDebug" is not by
+// itself evidence that this one is wrong (or right).
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync } from 'node:fs'

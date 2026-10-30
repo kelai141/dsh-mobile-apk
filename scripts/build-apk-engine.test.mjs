@@ -5,7 +5,8 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { assembleApk, parseArgs, verifyApks } from './build-apk-engine.mjs'
+import { BUILD_TYPES, assembleApk, parseArgs, verifyApks } from './build-apk-engine.mjs'
+import { evaluateBadging } from './check-apk-form.mjs'
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'dsh-build-engine-'))
@@ -117,18 +118,66 @@ test('release mode preserves existing intermediates when clean is not requested'
   assert.equal(readFileSync(marker, 'utf8'), 'existing')
 })
 
-test('every assemble removes stale APK output before Gradle so a zero-work success cannot deliver it', (t) => {
+test('every assemble removes stale APK output of the SELECTED variant before Gradle so a zero-work success cannot deliver it', (t) => {
   const f = fixture(t)
-  const variantOutput = join(f.apkDir, 'app', 'build', 'outputs', 'apk', 'release')
-  mkdirSync(variantOutput, { recursive: true })
-  writeFileSync(join(variantOutput, 'app-release.apk'), 'stale-apk')
+  const releaseOutput = join(f.apkDir, 'app', 'build', 'outputs', 'apk', 'release')
+  const debugOutput = join(f.apkDir, 'app', 'build', 'outputs', 'apk', 'debug')
+  mkdirSync(releaseOutput, { recursive: true })
+  mkdirSync(debugOutput, { recursive: true })
+  writeFileSync(join(releaseOutput, 'app-release.apk'), 'stale-release-apk')
+  // 另一个变体的陈旧产物：既不得被当成本次交付物，也不该被误清（清理范围 = 所选变体）。
+  writeFileSync(join(debugOutput, 'app-debug.apk'), 'stale-debug-apk')
   assert.throws(() => assembleApk({
     snapshot: f.snapshot, apkDir: f.apkDir, outputDir: f.outputDir,
     artifactName: 'fresh.apk', fingerprintGate: '/tools/check-snapshot-fingerprint.mjs', log() {},
   }, (command, args) => args[0]?.endsWith('check-snapshot-fingerprint.mjs')
     ? { status: 0 }
     : { status: 0 }), /APK is missing/)
+  assert.equal(existsSync(join(releaseOutput, 'app-release.apk')), false, '所选变体（release）的陈旧产物必须已被清掉')
+  assert.equal(readFileSync(join(debugOutput, 'app-debug.apk'), 'utf8'), 'stale-debug-apk', '未选变体的目录不在清理范围内')
   assert.equal(existsSync(join(f.outputDir, 'fresh.apk')), false)
+})
+
+test('buildType selects both the Gradle task and the variant output directory', (t) => {
+  const f = fixture(t)
+  const seen = []
+  assembleApk({
+    snapshot: f.snapshot, apkDir: f.apkDir, outputDir: f.outputDir,
+    artifactName: 'debug-variant.apk', buildType: 'debug',
+    fingerprintGate: '/tools/check-snapshot-fingerprint.mjs', log() {},
+  }, (command, args) => {
+    if (args[0]?.endsWith('check-snapshot-fingerprint.mjs')) return { status: 0 }
+    if (args[0]?.endsWith('build-hard-manifest.mjs')) return { status: 0 }
+    seen.push(args)
+    const built = join(f.apkDir, 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk')
+    mkdirSync(join(built, '..'), { recursive: true })
+    writeFileSync(built, 'debug-variant-apk')
+    return { status: 0 }
+  })
+  // 构建类型没有被写死成 release：这是「受控负控」与将来 official 变体可用的前提。
+  assert.deepEqual(seen[0], [':app:assembleDebug', '--no-daemon', '-PversionNameSuffix='])
+  assert.equal(readFileSync(join(f.outputDir, 'debug-variant.apk'), 'utf8'), 'debug-variant-apk')
+})
+
+test('an unknown buildType fails before Gradle runs instead of surfacing as a missing APK', (t) => {
+  const f = fixture(t)
+  let gradleCalls = 0
+  assert.throws(() => assembleApk({
+    snapshot: f.snapshot, apkDir: f.apkDir, outputDir: f.outputDir,
+    artifactName: 'typo.apk', buildType: 'relese',
+    fingerprintGate: '/tools/check-snapshot-fingerprint.mjs', log() {},
+  }, (command, args) => {
+    if (args[0]?.endsWith('check-snapshot-fingerprint.mjs')) return { status: 0 }
+    if (args[0]?.endsWith('build-hard-manifest.mjs')) return { status: 0 }
+    gradleCalls += 1
+    return { status: 0 }
+  }), /unsupported buildType "relese"/)
+  assert.equal(gradleCalls, 0, '拼错构建类型时不得先跑一次全量 Gradle 再报「APK is missing」')
+})
+
+test('assemble --build-type is parsed into the option the engine reads', () => {
+  assert.equal(parseArgs(['assemble', '--build-type', 'debug']).buildType, 'debug')
+  assert.deepEqual(BUILD_TYPES, ['release', 'debug'])
 })
 
 test('shared final-artifact stage self-tests and verifies signatures then form of the caller-selected scope', () => {
@@ -153,6 +202,64 @@ test('shared final-artifact stage self-tests and verifies signatures then form o
   assert.equal(calls[1].options.shell, false, 'signature gate must use Node directly on Windows')
   assert.equal(calls[2].options.shell, false, 'form gate must use Node directly on Windows')
   assert.equal(calls[3].options.shell, false, 'form gate must use Node directly on Windows')
+})
+
+test('受控负控：把构建类型改回 debug 后，最终产物形态门禁必须判红并中止交付（release 同一路径判绿）', (t) => {
+  // 双向受控负控：同一个 assemble + verify 终端段，只改 buildType 一个输入。
+  // 判红不是「模拟一个失败」，而是把该变体真实的 badging 交给 check-apk-form.mjs 的**同一个判定函数**
+  // （evaluateBadging）算出的结论 —— 判据与生产同源，不是测试自己另写一份。
+  const releaseBadging = [
+    "package: name='com.dsharnessmobile.shell' versionCode='53' versionName='0.14.9'",
+    "minSdkVersion:'26'",
+    "targetSdkVersion:'34'",
+    "launchable-activity: name='com.dsharnessmobile.shell.MainActivity'  label='' icon=''",
+  ].join('\n')
+  const debugBadging = releaseBadging.replace('launchable-activity:', 'application-debuggable\nlaunchable-activity:')
+  const releaseVerdict = evaluateBadging({ exitCode: 0, output: releaseBadging })
+  const debugVerdict = evaluateBadging({ exitCode: 0, output: debugBadging })
+  assert.equal(releaseVerdict.ok, true)
+  assert.equal(debugVerdict.ok, false)
+
+  const run = (buildType, verdict) => {
+    const f = fixture(t)
+    const delivered = assembleApk({
+      snapshot: f.snapshot, apkDir: f.apkDir, outputDir: f.outputDir,
+      artifactName: buildType + '.apk', buildType,
+      fingerprintGate: '/tools/check-snapshot-fingerprint.mjs', log() {},
+    }, (command, args) => {
+      if (args[0]?.endsWith('check-snapshot-fingerprint.mjs')) return { status: 0 }
+      if (args[0]?.endsWith('build-hard-manifest.mjs')) return { status: 0 }
+      // Gradle 任务必须跟着 buildType 走：debug 档不得被 release 任务悄悄顶替。
+      assert.equal(args[0], buildType === 'debug' ? ':app:assembleDebug' : ':app:assembleRelease')
+      const built = join(f.apkDir, 'app', 'build', 'outputs', 'apk', buildType, 'app-' + buildType + '.apk')
+      mkdirSync(join(built, '..'), { recursive: true })
+      writeFileSync(built, buildType + '-variant')
+      return { status: 0 }
+    })
+    const calls = []
+    const verify = () => verifyApks({
+      files: [delivered],
+      signatureGate: '/tools/check-apk-signatures.mjs',
+      formGate: '/tools/check-apk-form.mjs',
+      keystore: '/release/debug.keystore',
+      log() {},
+    }, (command, args) => {
+      calls.push(args)
+      if (args[0] === '/tools/check-apk-form.mjs' && args.includes('--require')) return { status: verdict.ok ? 0 : 1 }
+      return { status: 0 }
+    })
+    return { verify, calls, delivered }
+  }
+
+  // release 档：形态判绿，终端段正常返回，形态段确实以 --require 调过。
+  const release = run('release', releaseVerdict)
+  assert.doesNotThrow(release.verify)
+  assert.deepEqual(release.calls.at(-1), ['/tools/check-apk-form.mjs', '--apk', resolve(release.delivered), '--require'])
+
+  // debug 档：同一段必须判红中止 —— 否则「构建类型回退」会静默交付 debuggable 产物。
+  const debug = run('debug', debugVerdict)
+  assert.throws(debug.verify, /failed \(1\)/)
+  assert.deepEqual(debug.calls.at(-1), ['/tools/check-apk-form.mjs', '--apk', resolve(debug.delivered), '--require'])
 })
 
 test('a debuggable form rejection aborts the terminal stage just like a bad signature', () => {

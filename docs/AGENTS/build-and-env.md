@@ -63,14 +63,16 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 + `--offline --rerun-tasks`，而开发链（`build-apk-013.ps1`）用项目 wrapper 且不带 `--offline` —— 系统 gradle 的依赖缓存里
 没有本工程的 AndroidX 产物，离线档下 arm64-v8a/x86_64 组装**必失败**（`No cached version of androidx.webkit:webkit:1.12.1
 available for offline mode`，22s 即 break），且该行把 gradle 输出重定向进 `$null`，日志里只剩一句 `APK build failed (…)`。
-现统一走项目 wrapper。`build-release.ps1 -Version 0.14.5` 的参数是最终版本名，因此传给 Gradle 的 `versionNameSuffix` 为空；测试构建可显式用 `-VersionSuffix "-preview"`（最终目录/包名为 `0.14.5-preview`），或传完整标签 `-Version "0.14.5-preview"`。脚本基于 Gradle 中的 `0.14.5` 派生后缀，拒绝不匹配的完整版本，避免把 `0.14.5` 再拼到自身后面；派生逻辑由 `scripts/resolve-version-suffix.mjs` 与 Node 回归用例覆盖。Gradle调用示例：`.\gradlew.bat :app:assembleDebug --no-daemon "-PversionNameSuffix=$VersionSuffix"`。**改任何一条链的调用前先问：另一条链是不是这条命令**（详档见坑 194）。
+现统一走项目 wrapper。`build-release.ps1 -Version 0.14.5` 的参数是最终版本名，因此传给 Gradle 的 `versionNameSuffix` 为空；测试构建可显式用 `-VersionSuffix "-preview"`（最终目录/包名为 `0.14.5-preview`），或传完整标签 `-Version "0.14.5-preview"`。脚本基于 Gradle 中的 `0.14.5` 派生后缀，拒绝不匹配的完整版本，避免把 `0.14.5` 再拼到自身后面；派生逻辑由 `scripts/resolve-version-suffix.mjs` 与 Node 回归用例覆盖。该链**不直接调 Gradle**：它把快照与后缀交给共享终端引擎 `build-apk-engine.mjs assemble`，由引擎按 `buildType`（缺省 `release`）派生出 `:app:assembleRelease --no-daemon -PversionNameSuffix=$VersionSuffix` 与产物路径 `app/build/outputs/apk/release/app-release.apk`。**改任何一条链的调用前先问：另一条链是不是这条命令**——但先确认两条链**本来就该同口径**：出包链与开发迭代链在构建变体上是**刻意不同**的（见下段），别把分工当漏改。
+
+**构建变体：出包走 release，开发迭代走 debug（0.14.11，issue #1118）**：三条正式链（本地 `build-apk-013.ps1`、云端 `build-apk.mjs`、发布 `build-release.ps1`）都经 `build-apk-engine.mjs` 的 `assembleApk()`，其 `buildType` **缺省 `release`**，因此 Gradle 任务是 `:app:assembleRelease`、产物是 `app/build/outputs/apk/release/app-release.apk`。**同一参数单点派生三样东西**——Gradle 任务、清理陈旧产物的目录、取产物的目录——所以三处不会各自漂移（此前是三个写死 `release` 的字面量，改变体要改三处，漏一处只表现为「清 A 目录却从 B 目录取」的假绿）。可选 `debug` 保留给受控负控与将来 `official` 之类的变体，命令行开关是 `--build-type`；未知值在 Gradle 之前就抛错。开发迭代脚本 `scripts/build-apk-dev-fast.mjs` **刻意**留在 `:app:assembleDebug`（它的产物就是 `application-debuggable`，会被 `check-apk-form.mjs` 判红，故禁作发布资产）——这是分工，不是漏改，脚本头注释已写明。为什么必须切：debug 与 release 在 `app/build.gradle.kts` 里**共用** `signingConfigs.repoDebug`，签名门禁对变体完全无感，0.14.9 的发布产物因此是「签名全绿但 debuggable」的 debug 变体；形态判据现由 `check-apk-form.mjs` 在最终产物关口把守（两条构建链都跑），而受控负控保证「构建类型被改回 debug」时它真的会红。
 
 **快照构建入口已收敛为单一链（0.14.5，删除已死的并行 workflow）**：apk 仓原有的 `.github/workflows/build-snapshot.yml`
 已删除，连同只服务它的 `docs/ci-snapshot-build.md` 与 `scripts/upload-snapshot-input.mjs`。四路证据：
 ① 它的输入是 draft release tag `snapshot-input` 的资产，由 `upload-snapshot-input.mjs` 上传，而**全仓没有任何 workflow 调用该上传脚本**（输入源在 CI 里无人维护）；
 ② 它的触发 `push: branches: ['release/*']` 指向 v0.12.4/v0.12.5 时代的分支——`release.yml` 只建 draft Release，**此后不再创建 `release/*` 分支**，该触发已死；
 ③ 功能被 `build-apk.yml` 覆盖且后者更完整——它只走 `inject-snapshot.py` 的**三包注入**，不做引擎 overlay / 引擎补丁 / 语法降级（EXECUTION-MAP 曾自记「仍带坑 63 语义」）；
-④ 它**绕过**共享终端组装引擎 `build-apk-engine.mjs`，直接调 Gradle `:app:assembleDebug`。
+④ 它**绕过**共享终端组装引擎 `build-apk-engine.mjs`，直接调 Gradle（当时的变体是 `:app:assembleDebug`；现出包链已由共用引擎统一为 `:app:assembleRelease`，见上段）。
 ⇒ 属 §14「测试和 Release 使用不同构建逻辑」「重复而没有新增信息的过度防御」。现在快照构建只有两条活链：
 `build-apk.yml`（自包含，源重建）与 `release.yml`（发布，Build Once → 同 artifact 提升）。
 **将来若需要快照专用产物，走这两条，不要再新建第三条。**

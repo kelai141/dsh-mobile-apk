@@ -29,9 +29,27 @@ function execute(command, args, options = {}, runner = spawnSync) {
 }
 
 /**
+ * Build types the terminal stage knows how to drive.
+ *
+ * Why an explicit list instead of "whatever string the caller passed": the build
+ * type decides BOTH the Gradle task (`:app:assemble<Type>`) and the directory
+ * Gradle writes into (`app/build/outputs/apk/<type>`). A typo would otherwise
+ * surface three steps later as "Gradle succeeded but APK is missing", after a
+ * full build. `release` is the production default (issue #1118); `debug` stays
+ * selectable because the variant negative-control test needs it, and because a
+ * future `official`-style type must be addable without rewriting this function.
+ */
+export const BUILD_TYPES = ['release', 'debug']
+
+/**
  * Run the common APK assembly terminal stage. Callers own ABI selection,
  * gates, injection and artifact naming; this function owns assets, Gradle,
  * copying and strict fingerprint verification.
+ *
+ * `buildType` selects the Gradle variant and defaults to `release` (issue #1118).
+ * It is a parameter rather than a literal because the variant is exactly the thing
+ * that must stay testable: a regression that flips it back to `debug` has to be
+ * catchable by a test, and that test needs to be able to ask for `debug` on purpose.
  */
 export function assembleApk(options, runner = spawnSync) {
   const {
@@ -40,6 +58,7 @@ export function assembleApk(options, runner = spawnSync) {
     outputDir,
     artifactName,
     suffix = '',
+    buildType = 'release',
     gradleCommand,
     clean = false,
     log = console.log,
@@ -61,8 +80,15 @@ export function assembleApk(options, runner = spawnSync) {
   // android:debuggable，会开放 adb attach 与 WebView 远程调试，部分 ROM 也会拒装。
   // 签名配置在 release / debug 两边同为 repoDebug，所以切变体不换证书，
   // 现有用户的覆盖升级不受影响（实测 -r 安装无 INSTALL_FAILED_UPDATE_INCOMPATIBLE）。
-  const variantOutput = join(resolvedApkDir, 'app', 'build', 'outputs', 'apk', 'release')
-  const builtApk = join(variantOutput, 'app-release.apk')
+  //
+  // 变体由 buildType 单点派生：Gradle 任务、陈旧产物清理目录、取产物目录三处必须
+  // 同一个值。此前这三处是各自写死 'release' 的字面量，改变体要改三处且漏一处不会
+  // 当场报错——只会表现为「清掉了 A 目录却从 B 目录取产物」这种假绿。
+  if (!BUILD_TYPES.includes(buildType)) {
+    throw new Error(`unsupported buildType "${buildType}" (expected one of: ${BUILD_TYPES.join(', ')})`)
+  }
+  const variantOutput = join(resolvedApkDir, 'app', 'build', 'outputs', 'apk', buildType)
+  const builtApk = join(variantOutput, `app-${buildType}.apk`)
   const deliveredApk = join(resolvedOutputDir, artifactName)
 
   mkdirSync(assetDir, { recursive: true })
@@ -87,11 +113,11 @@ export function assembleApk(options, runner = spawnSync) {
   execute(process.execPath, [fingerprintGate, '--require'], { cwd: SCRIPT_DIR }, runner)
 
   const gradle = gradleCommand ?? (process.platform === 'win32' ? 'gradlew.bat' : './gradlew')
-  const gradleArgs = [':app:assembleRelease', '--no-daemon', `-PversionNameSuffix=${suffix}`]
+  const gradleArgs = [`:app:assemble${buildType === 'release' ? 'Release' : 'Debug'}`, '--no-daemon', `-PversionNameSuffix=${suffix}`]
   log(`Gradle: ${gradle} ${gradleArgs.join(' ')}`)
   execute(gradle, gradleArgs, { cwd: resolvedApkDir, shell: process.platform === 'win32' }, runner)
 
-  if (!existsSync(builtApk)) throw new Error(`Gradle succeeded but APK is missing: ${builtApk}`)
+  if (!existsSync(builtApk)) throw new Error(`Gradle succeeded but APK is missing: ${builtApk} (buildType=${buildType})`)
   copyFileSync(builtApk, deliveredApk)
   log(`产物: ${deliveredApk}`)
   return deliveredApk
@@ -108,8 +134,9 @@ export function assembleApk(options, runner = spawnSync) {
  * The 0.14.9 release artifacts were debug variants (the chain ran
  * `:app:assembleDebug` while debug and release share signingConfigs.repoDebug), so
  * they passed the signature gate with v1/v2/v3 all true and were still debuggable.
- * Since issue #1118 the chain builds `:app:assembleRelease` instead, so the form
- * stage is now a regression guard rather than a permanently-red assertion.
+ * Since issue #1118 the chain builds `:app:assembleRelease` by default, so the form
+ * stage is now a regression guard rather than a permanently-red assertion — and it
+ * stays the thing that catches a build type silently flipped back to `debug`.
  * The form stage runs with `--require`: on a machine that just built an APK the SDK
  * is necessarily present, so an unresolvable aapt2 is a real defect, not an excuse
  * to skip the judgement.
@@ -158,7 +185,8 @@ function main(argv) {
     })
     return
   }
-  throw new Error('usage: node scripts/build-apk-engine.mjs assemble|verify [options]')
+  throw new Error('usage: node scripts/build-apk-engine.mjs assemble|verify [options]'
+    + ' (assemble: --snapshot --apk-dir --output-dir --artifact-name [--suffix] [--build-type release|debug] [--clean] [--gradle])')
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
