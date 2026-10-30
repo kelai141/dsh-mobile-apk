@@ -45,10 +45,30 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
   private var deferredReceipt: String? = null
 
   /**
-   * 构造即恢复：MainActivity 的字段初始化就会建出本控制器，而进程死亡后系统把相机结果投给
-   * **新实例**。恢复必须发生在这里（而不是某个 onResume），否则结果可能先于恢复到达。
+   * **构造里不得读 `activity.cacheDir`**（P0 冷启崩溃）。
+   *
+   * 缺陷现场：本控制器由 MainActivity 的**字段初始化**建出
+   * （`internal val photoCaptureController = PhotoCaptureController(this)`）。那一刻 Activity 还没跑完
+   * attachBaseContext，`Context.getCacheDir()` 直接 NPE：
+   * `FATAL: NullPointerException: 'android.content.Context.getCacheDir()' on a null object reference`
+   * —— 任何包在全新安装后冷启必崩。旧实现在这里调 restorePendingState()，而它第一行就走
+   * pendingStateFile() → activity.cacheDir。
+   *
+   * 时序约束与修法：
+   *  - 构造必须留在字段初始化（ActivityResult launcher 要在 STARTED 之前注册）；
+   *  - 但**恢复**改到 MainActivity.onCreate 里 super.onCreate 之后第一件事调 [restoreNow]。
+   *    这仍早于任何相机结果投递——结果只能经 onNewIntent / onActivityResult 进来，两者都在
+   *    onCreate 之后，所以「恢复早于结果」的保证不变。
    */
   init {
+    // 刻意留空：此处 Context 尚未 attach，任何碰 cacheDir/filesDir 的初始化都必须走 restoreNow()。
+  }
+
+  /**
+   * 在 MainActivity.onCreate（**super.onCreate 之后**）调用：此时 Context 已 attach，cacheDir 可用。
+   * 幂等：没有在途状态时 restorePendingState() 只做一次 `isFile` 判断。
+   */
+  fun restoreNow() {
     restorePendingState()
   }
 

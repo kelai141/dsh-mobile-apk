@@ -546,7 +546,7 @@ class MainActivity : ComponentActivity() {
     super.onCreate(savedInstanceState)
     // 本实例的原生视图树是按创建时的界面语言构建的；桥在运行期改语言后靠
     // refreshUiLanguageIfChanged() 在启动页再次出现前重建。
-    appliedUiLanguage = AppLanguage.mode(this)
+    photoCaptureController.restoreNow(); appliedUiLanguage = AppLanguage.mode(this) // P0：恢复必须在这里（super.onCreate 之后），不能放控制器 init——那时未 attachBaseContext，cacheDir 为 null ⇒ getCacheDir() NPE。相机结果只经 onNewIntent/onActivityResult 投递，都在 onCreate 之后，时序不变。
     // 0.14.9：「打开应用后自动启动」是用户的显式意图，冷启动时优先于上一次的持久化停机标记。
     // 旧行为把「划过任务卡/手动停止」留下的 userShutdown 一路带到下次打开，开关明明开着却
     // 停在启动页——看起来就是开关失效。同一次会话内的停止仍由 savedInstanceState 保留，
