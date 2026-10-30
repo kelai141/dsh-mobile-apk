@@ -130,16 +130,40 @@ test('every assemble removes stale APK output before Gradle so a zero-work succe
   assert.equal(existsSync(join(f.outputDir, 'fresh.apk')), false)
 })
 
-test('shared signature stage self-tests and verifies the caller-selected artifact scope', () => {
+test('shared final-artifact stage self-tests and verifies signatures then form of the caller-selected scope', () => {
   const calls = []
-  verifyApks({ directories: ['/release/apk'], signatureGate: '/tools/check-apk-signatures.mjs', keystore: '/release/debug.keystore', log() {} },
-    (command, args, options) => { calls.push({ command, args, options }); return { status: 0 } })
-  assert.equal(calls.length, 2)
+  verifyApks({
+    directories: ['/release/apk'],
+    signatureGate: '/tools/check-apk-signatures.mjs',
+    formGate: '/tools/check-apk-form.mjs',
+    keystore: '/release/debug.keystore',
+    log() {},
+  }, (command, args, options) => { calls.push({ command, args, options }); return { status: 0 } })
+  // Both judgements are properties of the delivered bytes, so they share one checkpoint:
+  // self-test + verify for the signature gate, then self-test + verify for the form gate.
+  assert.equal(calls.length, 4)
   assert.deepEqual(calls[0].args, ['/tools/check-apk-signatures.mjs', '--self-test'])
   assert.deepEqual(calls[1].args, ['/tools/check-apk-signatures.mjs', '--dir', resolve('/release/apk'), '--keystore', resolve('/release/debug.keystore')])
+  assert.deepEqual(calls[2].args, ['/tools/check-apk-form.mjs', '--self-test'])
+  // --require: a build machine ships an SDK, so an unresolvable aapt2 must fail rather than skip.
+  assert.deepEqual(calls[3].args, ['/tools/check-apk-form.mjs', '--dir', resolve('/release/apk'), '--require'])
   assert.equal(calls[0].command, process.execPath)
   assert.equal(calls[0].options.shell, false, 'signature gate must use Node directly on Windows')
   assert.equal(calls[1].options.shell, false, 'signature gate must use Node directly on Windows')
+  assert.equal(calls[2].options.shell, false, 'form gate must use Node directly on Windows')
+  assert.equal(calls[3].options.shell, false, 'form gate must use Node directly on Windows')
+})
+
+test('a debuggable form rejection aborts the terminal stage just like a bad signature', () => {
+  // 签名全绿 + 形态判红：这正是 0.14.9 发布产物的真实形态（debug 变体但签名完全正确），
+  // 故形态门禁判红必须与签名判红一样中止交付，而不是被前一步的绿掩盖。
+  assert.throws(() => verifyApks({
+    directories: ['/release/apk'],
+    signatureGate: '/tools/check-apk-signatures.mjs',
+    formGate: '/tools/check-apk-form.mjs',
+    keystore: '/release/debug.keystore',
+    log() {},
+  }, (command, args) => (args[0] === '/tools/check-apk-form.mjs' ? { status: 1 } : { status: 0 })), /failed \(1\)/)
 })
 
 test('verify --skip-self-test is parsed as a boolean and skips the second self-test', () => {
@@ -148,13 +172,19 @@ test('verify --skip-self-test is parsed as a boolean and skips the second self-t
   const calls = []
   verifyApks({ directories: [options.dir], selfTest: !options.skipSelfTest, log() {} },
     (command, args) => { calls.push(args); return { status: 0 } })
-  assert.equal(calls.length, 1)
+  assert.equal(calls.length, 2)
   assert.deepEqual(calls[0], [
     fileURLToPath(new URL('./check-apk-signatures.mjs', import.meta.url)),
     '--dir', resolve('/release/apk'), '--keystore',
     fileURLToPath(new URL('../keystore/debug.keystore', import.meta.url)),
   ])
   assert.equal(calls[0].includes('--self-test'), false)
+  // --skip-self-test 同时关掉两道门禁的自证，但两道门禁本身都必须真跑。
+  assert.deepEqual(calls[1], [
+    fileURLToPath(new URL('./check-apk-form.mjs', import.meta.url)),
+    '--dir', resolve('/release/apk'), '--require',
+  ])
+  assert.equal(calls[1].includes('--self-test'), false)
 })
 
 test('local, portable, and release entry points all route their terminal stage through the shared engine', () => {

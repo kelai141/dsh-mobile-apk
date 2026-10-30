@@ -564,6 +564,15 @@ $rejectedList = (($rejectedAbis | Select-Object -Unique) -join ", ")
 Write-Host "== 最终 APK 签名门禁（v1 + v2 + v3；apksigner 原始输出与退出码留在日志）=="
 node (Join-Path $Root "scripts\check-apk-signatures.mjs") --self-test
 if ($LASTEXITCODE -ne 0) { throw "APK 签名门禁自测失败" }
+# 产物形态门禁（与签名同一「最终产物」关口）：签名全绿不区分 debug/release 变体。
+# 全链跑 :app:assembleDebug，且 app/build.gradle.kts 里 debug/release 共用 signingConfigs.repoDebug，
+# 于是 0.14.9 的发布产物就是 debug 变体（badging 含 application-debuggable）而签名门禁全绿。
+# --require：刚打出 APK 的机器必有 SDK；aapt2 缺席即判红，不以 SKIP 结案。
+Write-Host "== 最终 APK 产物形态门禁（不得含 application-debuggable）=="
+node (Join-Path $Root "scripts\check-apk-form.mjs") --self-test
+if ($LASTEXITCODE -ne 0) { throw "APK 产物形态门禁自测失败" }
+node (Join-Path $Root "scripts\check-apk-form.mjs") --dir $Out --require
+if ($LASTEXITCODE -ne 0) { throw "最终 APK 是 debuggable 变体（badging 含 application-debuggable），拒绝交付" }
 node (Join-Path $Root "scripts\build-apk-engine.mjs") verify --dir $Out --skip-self-test
 if ($LASTEXITCODE -ne 0) { throw "最终 APK 缺少 v1/v2/v3 全部签名，拒绝交付" }
 Write-Host "=== 汇总。已产出 ABI: [$producedList] / 被拒 ABI: [$rejectedList] ==="

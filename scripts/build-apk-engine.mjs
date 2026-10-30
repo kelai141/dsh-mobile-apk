@@ -93,14 +93,31 @@ export function assembleApk(options, runner = spawnSync) {
   return deliveredApk
 }
 
-/** Validate the exact output scope used by a caller (directory or files). */
-export function verifyApks({ directories = [], files = [], signatureGate = join(SCRIPT_DIR, 'check-apk-signatures.mjs'), keystore = join(SCRIPT_DIR, '..', 'keystore', 'debug.keystore'), selfTest = true, log = console.log }, runner = spawnSync) {
-  log('验证最终输出 APK 的 v1/v2/v3 签名…')
-  if (selfTest) execute(process.execPath, [signatureGate, '--self-test'], { cwd: SCRIPT_DIR }, runner)
+/**
+ * Validate the exact output scope used by a caller (directory or files).
+ *
+ * Two judgements share this single "final artifact" checkpoint because both are
+ * properties of the delivered bytes, not of the build inputs:
+ *   - signature: v1/v2/v3 all true, signing certificate == the repository keystore;
+ *   - form: `aapt2 dump badging` must not contain `application-debuggable`.
+ * Why they belong together: a correct signature says nothing about the variant.
+ * The 0.14.9 release artifacts were debug variants (the whole chain runs
+ * `:app:assembleDebug` while debug and release share signingConfigs.repoDebug), so
+ * they passed the signature gate with v1/v2/v3 all true and were still debuggable.
+ * The form stage runs with `--require`: on a machine that just built an APK the SDK
+ * is necessarily present, so an unresolvable aapt2 is a real defect, not an excuse
+ * to skip the judgement.
+ */
+export function verifyApks({ directories = [], files = [], signatureGate = join(SCRIPT_DIR, 'check-apk-signatures.mjs'), formGate = join(SCRIPT_DIR, 'check-apk-form.mjs'), keystore = join(SCRIPT_DIR, '..', 'keystore', 'debug.keystore'), selfTest = true, log = console.log }, runner = spawnSync) {
   const targets = [...directories.flatMap((directory) => ['--dir', resolve(directory)]),
     ...files.flatMap((file) => ['--apk', resolve(file)])]
   if (!targets.length) throw new Error('signature verification requires at least one directory or APK')
+  log('验证最终输出 APK 的 v1/v2/v3 签名…')
+  if (selfTest) execute(process.execPath, [signatureGate, '--self-test'], { cwd: SCRIPT_DIR }, runner)
   execute(process.execPath, [signatureGate, ...targets, '--keystore', resolve(keystore)], { cwd: SCRIPT_DIR }, runner)
+  log('验证最终输出 APK 的产物形态（不得含 application-debuggable）…')
+  if (selfTest) execute(process.execPath, [formGate, '--self-test'], { cwd: SCRIPT_DIR }, runner)
+  execute(process.execPath, [formGate, ...targets, '--require'], { cwd: SCRIPT_DIR }, runner)
 }
 
 export function parseArgs(argv) {
@@ -131,6 +148,7 @@ function main(argv) {
       keystore: options.keystore ? resolve(options.keystore) : undefined,
       selfTest: !options.skipSelfTest,
       signatureGate: options.signatureGate ? resolve(options.signatureGate) : undefined,
+      formGate: options.formGate ? resolve(options.formGate) : undefined,
     })
     return
   }

@@ -227,6 +227,19 @@ const GATES = [
   // It also runs before packaging; needsSnapshot=false because it reads the tree and docs only.
   // The APK workflow invokes this gate after Kotlin compilation and before package checks.
   { script: 'check-code-map.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
+  // APK 产物形态门禁（0.14.11）：最终产物 badging 不得含独立行 `application-debuggable`。
+  // 缺的判据（0.14.9 实测）：整条链跑 `:app:assembleDebug`，而 app/build.gradle.kts 里 debug/release
+  // **共用** signingConfigs.repoDebug —— 发布产物本质是 debug 变体（badging 第 112 行即
+  // `application-debuggable`，应用可被任意调试器 attach），而签名门禁只看 v1/v2/v3 + 证书身份，
+  // 对此**完全无感**：一份签名完全正确的 debug 变体照样全绿。两条判据同属「交付字节的属性」，
+  // 故接线口径也一致：都在两条构建链的最终产物关口跑。
+  // 归属：输入是**最终 APK**（out/v<ver>/*.apk）。pr-gate 的 CI 不产出 APK，硬接只会得到一个
+  // 永久 SKIP 或以空集冒充通过，故 ciApk/ciCoord 皆 false（与 check-apk-signatures.mjs 同一归属：
+  // 产物面门禁只跑在拥有其输入的构建链上）。
+  // releaseSink:false —— 发布链的 2f 段（--run --require）跑在 APK 构建**之前**，那时 out/ 里还没有
+  // 本次产物；在那里跑它验的是上一次构建的残留甚至空集（与 check-snapshot-decode.mjs 同一时序陷阱）。
+  // 真实执行点是两条构建链的「最终产物」关口（build-apk-engine.mjs verify 的形态段），sink 断言会核验它。
+  { script: 'check-apk-form.mjs', ciApk: false, ciCoord: false, needsSnapshot: false, releaseSink: false, sink: 'local-chain' },
   // MCP client 运行期依赖闭包（0.14.2-fx-2 H-1）：真实用户诊断包 engine.log:138 六世代全崩在
   // `Cannot find package '@modelcontextprotocol/client'`——它**不在我们装配的行面上**（用户自己挂的
   // entry），故 check-engine-overlay 的正向闭包结构性看不见它。判据 = 宿主包运行期依赖的**闭包**
