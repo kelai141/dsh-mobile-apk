@@ -2122,14 +2122,25 @@ flowchart TD
 ```bash
 node scripts/check-code-map.mjs           # Check coverage, pinned source lines, IDs, and coupling evidence
 node scripts/check-code-map.mjs --list    # Inventory only
-node scripts/check-code-map.mjs --self-test   # 17 self-tests, including in-range and moved-anchor failures
+node scripts/check-code-map.mjs --self-test   # 32 self-tests, including in-range, moved-anchor, symbol-body, universe-scope and ambiguity failures
 node scripts/check-code-map.mjs --refresh-anchor-baseline # Refresh reviewed legacy source-line snapshots
 node scripts/verify-client-plugin-fail-recovery.mjs --self-test   # 客户端插件失败链的离线自检（不碰 adb）
 ```
 
 Use `#expect=<URI-encoded-substring>` inside the inline code reference for new or moved anchors. The baseline refresh command rejects new unannotated coordinates and increases in legacy-coordinate occurrence counts; review its diff before committing source-line updates.
 
-覆盖全域（脚本里定义，构建产物与第三方目录除外）：`app/src/**/*.kt` 与 `AndroidManifest.xml`、`plugins/*/{src,test}/**`、三个子仓 src/lib、`scripts/{check-,verify-,build-,inject-}*` 与 `scripts/patches/**`、`scripts/snapshot-config/**`。
+覆盖全域（脚本里定义，构建产物与第三方目录除外）：`app/src` 下**编译进产物的源与接口**（`*.kt`、`*.kts`、`*.java`、`*.aidl` 与 main/debug/release 源集的 `AndroidManifest.xml`；不含 `res/**`、`assets/**`、`*resources/**`）、`plugins/*/{src,test}/**`、三个子仓 src/lib、`scripts/{check-,verify-,build-,inject-}*` 与 `scripts/patches/**`、`scripts/snapshot-config/**`。
+
+`app/src` 的口径按「这个文件变了，产物行为会不会变」定，不是按「它在不在 app/src 下」定（#1022）：跨进程接口（`aidl/`）与 Java 源都算产物源，资源与随包资产不算（它们分别由资源/资产类门禁守）。下面这 5 个文件因此需要显式登记 —— 新增同类文件时同样要登记，不会被任何 glob 自动收走。
+
+<!-- COVERAGE
+# #1022：app/src 全域按「产物源/接口」重定义后新纳入的 5 个文件（4 个跨进程接口 + debug 源集清单）
+app/src/main/aidl/com/dsharnessmobile/shell/ShizukuUserService.aidl
+app/src/main/aidl/com/dsharnessmobile/shell/IBrowserRenderer.aidl
+app/src/main/aidl/com/dsharnessmobile/shell/IBrowserRendererCallback.aidl
+app/src/debug/aidl/com/dsharnessmobile/shell/IBrowserSpike.aidl
+app/src/debug/AndroidManifest.xml
+-->
 
 注入成员检查：plugin-dirs 的 externals 是当前注入集，retiredExternals 只保留历史源码位置。check-inject-completeness 对每个活动包和两个装配 profile 继续全量判定；自检包含缺活动包和缺成员的拒绝反例。
 

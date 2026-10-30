@@ -73,9 +73,33 @@ const ANCHOR_BASELINE = existsSync(ANCHOR_BASELINE_ABS)
   ? JSON.parse(readFileSync(ANCHOR_BASELINE_ABS, 'utf8'))
   : {}
 
-/** 覆盖全域：地图必须能定位到的文件集合（构建产物与第三方目录除外）。 */
+/**
+ * 覆盖全域：地图必须能定位到的文件集合（构建产物与第三方目录除外）。
+ *
+ * app/src 的口径（#1022）：**收「编译进产物的源/接口」，不收资源与资产**。
+ *
+ * 旧实现只认 main/AndroidManifest.xml + *.kt，于是同一个目录里 *.java / *.aidl
+ * 可以凭空出现而不被任何查点覆盖，门禁照样绿。这不是理论缺口：aidl/ 下的接口文件是
+ * 跨进程契约（ShizukuUserService、IBrowserRenderer 等），改动它们等于改桥面，
+ * 却完全不在「新文件必须进地图」这条判据里。
+ *
+ * 收进来的：*.kt *.kts（Kotlin 源与构建脚本）、*.java（Java 源）、*.aidl（跨进程接口定义），
+ * 以及**产物源集**（main/debug/release）根的 AndroidManifest.xml（构建输入）。
+ * test/androidTest 的清单是测试运行器的夹具、不参与产物，故不收。
+ * 刻意**不收**的：res/**（资源）、assets/**（随包资产，含快照与补丁 JS，它们由
+ * check-runtime-assets / check-snapshot-* 各自守）、*resources/**（测试夹具，由对应测试自己读）。
+ * 判据是「这个文件变了，产物行为会不会变」，不是「它在不在 app/src 下」。
+ */
+const APP_SRC_MANIFEST = /^(?:main|debug|release)\/AndroidManifest[.]xml$/
+const APP_SRC_CODE = /[.](?:kt|kts|java|aidl)$/
+const APP_SRC_NON_CODE = /^(?:[^/]+\/)?(?:res|assets)\//
+export function isAppSrcUniverseEntry(rel) {
+  if (APP_SRC_MANIFEST.test(rel)) return true
+  if (!APP_SRC_CODE.test(rel)) return false
+  return !APP_SRC_NON_CODE.test(rel) && !/(?:^|\/)resources\//.test(rel)
+}
 const UNIVERSE = [
-  { root: 'app/src', keep: (p) => p === 'main/AndroidManifest.xml' || p.endsWith('.kt') },
+  { root: 'app/src', keep: isAppSrcUniverseEntry },
   { root: 'plugins', keep: (p) => /^[^/]+\/(src|test)\/[^/]+/.test(p) && /\.(ts|tsx|mjs|js)$/.test(p) },
   { root: 'dsh-client-ui-responsive/src', keep: (p) => /\.(ts|tsx|css)$/.test(p) },
   { root: 'dsh-host-web-compat/lib', keep: (p) => /\.(js|ts|d\.ts)$/.test(p) },
@@ -1329,6 +1353,36 @@ function selfTest() {
       rDup.issues.some((i) => i.kind === 'symbol-content-ambiguous')])
     driftCases.push(['AMB #807 内容唯一不得误红（含耦合边证据不受影响）',
       !rUno.issues.some((i) => i.kind === 'symbol-content-ambiguous')])
+  }
+  // ── #1022 全域口径（app/src 收「产物源/接口」，不收资源与资产）────────────
+  //
+  // 为什么这条判据必须在自检里：`keep` 谓词写松（回到只认 .kt）时真实树照样 PASS，
+  // 门禁与自检都不会红 —— 缺口只能靠这条纯函数断言守住。
+  // 判据三向：① 产物源/接口必须收（否则新文件可绕过登记）；
+  // ② 资源/资产/测试夹具必须不收（否则地图被迫登记随包资产，噪音淹没真信号）；
+  // ③ 只有产物源集的清单收（test/androidTest 清单是测试夹具，不是构建输入）。
+  {
+    const mustKeep = [
+      'main/java/com/dsharnessmobile/shell/ShellOps.kt',
+      'main/java/com/dsharnessmobile/shell/Legacy.java',
+      'main/aidl/com/dsharnessmobile/shell/ShizukuUserService.aidl',
+      'debug/aidl/com/dsharnessmobile/shell/IBrowserSpike.aidl',
+      'main/AndroidManifest.xml',
+      'debug/AndroidManifest.xml',
+    ]
+    const mustDrop = [
+      'main/res/values/strings.xml',
+      'main/assets/console.html',
+      'main/assets/patched/fs-local-index.js',
+      'test/resources/protocol-v2/expected-v2.json',
+      'androidTest/AndroidManifest.xml',
+      'main/java/com/dsharnessmobile/shell/notes.md',
+    ]
+    const kept = mustKeep.filter((p) => isAppSrcUniverseEntry(p))
+    const leaked = mustDrop.filter((p) => isAppSrcUniverseEntry(p))
+    driftCases.push(['UNI #1022 产物源/接口（kt/kts/java/aidl/产物清单）必须入全域',
+      kept.length === mustKeep.length])
+    driftCases.push(['UNI #1022 资源/资产/测试夹具不得入全域', leaked.length === 0])
   }
   for (const [name, okc] of driftCases) {
     if (okc) pass += 1
