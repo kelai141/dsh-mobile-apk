@@ -552,6 +552,27 @@ const INTERNAL_PRIVILEGED: Record<string, { why: string; allows: (command: strin
  * 「假失败 + 副作用已发生」——模型按失败重试即**二次执行**（点击/输入/写入类 op 非幂等）。
  * 单测 test/screen-scope.test.mjs 钉住这条不变量。
  */
+/**
+ * issue #1065：a11y / input 类 op 的**引擎侧入队时限**（壳侧预算 = 它减去 CONTROL_EXEC_MARGIN_MS）。
+ *
+ * 与 sh\* 的 S-6 同一形状：壳侧先到点（放弃继续等、但动作已经在设备上发生），引擎侧后到点
+ * （还在收结果窗口），这样「动作已发生」不会因为引擎侧提前放弃而被报成失败。
+ * 取 8000ms 是因为它本来就是本类的历史默认值（README / control-queue 的默认），
+ * 只是此前壳侧完全不知道这个数字。
+ */
+export const CONTROL_EXEC_TIMEOUT_MS = 8_000
+/** 壳侧预算相对引擎侧入队时限的余量（与 S-6 的 20s/25s 同比例留 5s 太小，这里留 2s 足够）。 */
+export const CONTROL_EXEC_MARGIN_MS = 2_000
+
+/**
+ * input 类是「会让设备产生副作用」的语义动作——迟到结果必须被正确归因（不能报假失败）。
+ * 纯读面（snapshot / screenshot / nodeText / state / web\*）不在列：它们的读没有副作用，
+ * 迟到重试是安全的；neverA11y 族（browser\* / vd\*）由各自通道承载。
+ */
+export function inputClassOp(op: string): boolean {
+  return op === 'click' || op === 'longClick' || op === 'setText' || op === 'scroll' || op === 'global'
+}
+
 export const SHELL_EXEC_TIMEOUT_MS = 20_000
 /** 引擎侧入队超时：必须**大于**壳侧执行时限（见上）。 */
 export const SHELL_QUEUE_TIMEOUT_MS = 25_000
@@ -1243,7 +1264,26 @@ export class AndroidPrivilegeService {
         return { ok: false, error: decision.reason + ': ' + decision.guidance }
       }
     }
-    return this.#controlQueue.enqueue(op, args, timeoutMs)
+    // issue #1065：S-6 的「壳侧时限 < 引擎侧入队时限」不变量此前**只对 sh\* 成立**——sh\* 的调用点
+    // 显式传了 SHELL_EXEC_TIMEOUT_MS/SHELL_QUEUE_TIMEOUT_MS 两个值；而 input 类 op（click /
+    // longClick / setText / scroll / global）的调用点不传 timeoutMs，队列默认 8000ms，**壳侧没有
+    // 对应预算**。后果与 S-6 当初修的那个形态完全一样，只是换了 op 家族：壳侧执行慢于引擎侧截止
+    // ⇒ 迟到结果被丢弃 ⇒「点击其实已经在设备上发生了」却回失败 ⇒ 模型重试一个**非幂等**动作
+    // （发送 / 提交表单 / 删除），副作用被放大。
+    //
+    // 修法：把壳侧执行时限**一并下发**（args.timeoutMs），并让引擎侧入队时限比它多留余量。
+    // 为什么下发而不是在壳侧写死：壳侧按 args.timeoutMs 决定「还值不值得继续等」，而引擎侧按
+    // 入队时限决定「还等不等结果」——两者必须同源，否则又回到「两个时限各说各话」。
+    const engineBudget = timeoutMs ?? CONTROL_EXEC_TIMEOUT_MS
+    // 壳侧预算必须由**这一次的**引擎预算推出来（不能写死）：否则调用方传了更短的入队时限时，
+    // 壳侧预算反而更长 —— 又变成两个时限各说各话。留 20% 或 2s（取小者）作余量。
+    const margin = Math.min(CONTROL_EXEC_MARGIN_MS, Math.floor(engineBudget / 5))
+    const shellBudget = Math.max(1, engineBudget - margin)
+    // 只对「真的会让设备产生副作用」的 input 类 op 下发；纯读面与 neverA11y 族按各自通道的
+    // 默认跑（读没有副作用，迟到重试是安全的）。
+    const carryShellBudget = inputClassOp(op) && typeof (args as { timeoutMs?: unknown }).timeoutMs !== 'number'
+    const argsWithBudget = carryShellBudget ? { ...args, timeoutMs: shellBudget } : args
+    return this.#controlQueue.enqueue(op, argsWithBudget, engineBudget)
   }
 
   /**
@@ -1364,7 +1404,15 @@ export class AndroidPrivilegeService {
         const r = await this.controlExec('shExec', { command: step.command, timeoutMs: SHELL_EXEC_TIMEOUT_MS }, SHELL_QUEUE_TIMEOUT_MS, auth)
         if (!r.ok) return { ok: false, stdout: out, guidance: r.error }
         const data = (r.data ?? {}) as Record<string, unknown>
-        out += typeof data.stdout === 'string' ? data.stdout : ''
+        const stdout = typeof data.stdout === 'string' ? data.stdout : ''
+        out += stdout
+        // issue #1061：壳侧回执的 data.ok **必须**看。壳侧判据是
+        // `ok = complete && !truncated && exit == 0`（ShizukuUserService），所以 data.ok=false 同时覆盖
+        // 「非零退出」与「输出被截断」两种真实故障。只判传输层 r.ok 的后果：两种故障都被报成
+        // ok:true，错误文本混在 stdout 里交给调用方（manage 的截图 / uiautomator dump / 前台应用 /
+        // wm size 全部按 r.ok 分支 ⇒「工具报成功、输出里其实是错误」或「截断当完整清单」）。
+        // 同一函数的 pull/push 分支与 #execAdbShell 一直是对的，只有这里漏了。
+        if (data.ok !== true) return { ok: false, stdout: out.slice(0, 128 * 1024), guidance: shellFailureText(data) }
         continue
       }
       const r = step.kind === 'pull'
