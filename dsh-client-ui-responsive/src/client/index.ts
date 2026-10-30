@@ -255,14 +255,14 @@ export function apply(ctx: ClientContext): void {
     }, 'ui-responsive: composer + bottom sheet')
   })
 
-  // 交付文件卡片（换行汇总卡）上的两段胶囊：另一种打开方式 + 转发。
+  // 交付文件卡片（换行汇总卡）上的两段胶囊：用其他应用打开 + 转发。
   // 卡片是上游只读包 ui-deliverables 的 ChangedFiles，没有文件级操作插槽，故按 DOM 增强；
-  // 卡片自身的单击（侧栏预览）保持原样。左侧方向由 DEFAULT_OPEN_MODE 决定。
+  // 卡片单击（侧栏预览）保持原样；左段固定「用其他应用打开」（#991 无可反向的默认模式常量）。
   ctx.effect(() => injectStyle('file-card-capsule', FILE_CARD_CAPSULE_CSS), 'ui-responsive: delivery file card capsule styles')
   // 桥是壳侧在页面脚本之后注入的，所以每次动作时才读 window，不在装配期捕获一份快照。
   // 按方法名读取而不是走 AndroidShellBridge 的成员：那两个方法由壳侧另一个会话落地，
-  // 先声明会留下 tsOnly 悬空面（check-bridge-symmetry）。方法不在场即 undefined，
-  // FileCardCapsule 把它当「不可用」处理。
+  // 先声明会留下 tsOnly 悬空面（check-bridge-symmetry）。方法不在场即 undefined，不是终态
+  // （#990）：这一轮不渲染左段，桥注入后下次扫描补回；只有壳侧答 no-receiver 才永久收起。
   // 每次调用都重新查 window：壳侧注入晚于插件装配，缓存一份会在首批卡片上永远拿到 undefined。
   const bridgeFace = (): FileCardBridge => {
     const read = (name: 'openFileExternal' | 'shareFile') => {

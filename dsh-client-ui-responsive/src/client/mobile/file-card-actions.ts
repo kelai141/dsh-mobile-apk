@@ -1,5 +1,5 @@
 /**
- * 交付文件卡片（换行汇总卡）上的两段胶囊：另一种打开方式 + 转发。
+ * 交付文件卡片（换行汇总卡）上的两段胶囊：用其他应用打开 + 转发。
  *
  * 卡片本身是上游 ui-deliverables 的 ChangedFiles（只读包，不能改），它没有文件级操作插槽，
  * 所以这里按 DOM 增强：找到卡片、读出该文件的绝对设备路径、挂上胶囊。卡片自身的单击行为
@@ -10,17 +10,14 @@
  * 里面就是 resolveWorkspacePath 之后的绝对设备路径（ChangedFiles.tsx:52/75 单文件、
  * :85/94 多文件行）。照这个可访问性接线取值，比按样式类定位稳定得多。
  *
- * ## 为什么左侧可以反向
- * DEFAULT_OPEN_MODE 是这一处唯一的默认开口假设。胶囊左段永远是「另一种」打开方式：
- * 默认是侧栏 → 左段是外部应用（open-in-new）；默认改成外部应用 → 左段变成侧栏预览。
- * 以后加快捷设置行，只改这个常量，不用动组件。
+ * ## 左段为什么固定是「用其他应用打开」
+ * 曾经有一个 DEFAULT_OPEN_MODE 常量，设想是「默认单击是侧栏预览 → 左段是外部应用；把常量改成
+ * 外部应用 → 左段变成侧栏预览」。#991 判定这个设想不成立并删掉了它：卡片的单击行为属于上游
+ * ChangedFiles，本模块明确不改写、也无法改写（ChangedFiles 是只读包）。常量只能反向左段、
+ * 反向不了卡片本身——一旦把它改成 external，卡片单击仍是侧栏预览、左段也变成侧栏预览，外部
+ * 打开能力反而凭空消失。所以左段就写死为它实际做的事：用其他应用打开。要加真正的「默认打开
+ * 方式」设置行，前提是上游给出改写卡片单击的插槽，那时再引入模式概念。
  */
-
-/** 单击卡片的默认打开方式。加设置行时只改这里，胶囊左段自动反向。 */
-export const DEFAULT_OPEN_MODE: OpenMode = 'sidebar'
-
-/** 单击卡片时的目标：侧边栏预览，或交给外部应用。 */
-export type OpenMode = 'sidebar' | 'external'
 
 /** 在卡片上执行的两种动作。 */
 export type CardAction = 'external' | 'share'
@@ -30,6 +27,8 @@ const CAPSULE_ATTR = 'data-dsh-file-capsule'
 const EXTERNAL_ATTR = 'data-dsh-file-capsule-external'
 const SHARE_ATTR = 'data-dsh-file-capsule-share'
 const SEPARATOR_ATTR = 'data-dsh-file-capsule-separator'
+/** 只剩转发时的标记：左段不在场，样式据此不拉满整行。 */
+const SHARE_ONLY_ATTR = 'data-dsh-file-capsule-share-only'
 
 /** 胶囊自身的标记选择器（本模块自产节点的唯一判据，避免手拼方括号）。 */
 const CAPSULE_SELECTOR = '[' + CAPSULE_ATTR + ']'
@@ -235,8 +234,15 @@ export class FileCardCapsule {
   private bridge: () => FileCardBridge
   private copy: FileCardCopy
   private attached = false
-  /** 已被证明没有外部接收方：不再展示左段（避免留一个点了报错的按钮）。 */
-  private externalMissing = false
+  /**
+   * 壳侧是否**确证**过这台机器没有外部接收方（终态）。
+   *
+   * 只有壳侧回 `error === 'no-receiver'` 才算确证，见 {@link finish}。
+   * **桥方法不在场不是确证**（issue #990）：桥由壳侧在页面脚本之后注入，晚注入是本类明确
+   * 支持的场景（`bridge` 是每次动作取值的函数）；把「还没注入」当作「没人接」会让左段
+   * 永久消失，桥后来出现了也救不回来。旧实现正是在 act() 的 early return 里置位，故有此事。
+   */
+  private noReceiverConfirmed = false
   /** 这一拍待重扫的卡片（Set 去重：同一张卡被多条记录点到只扫一次）。 */
   private pending = new Set<HTMLElement>()
   /** 合批标志：本拍是否已排过一次扫描。 */
@@ -264,15 +270,19 @@ export class FileCardCapsule {
   }
 
   /**
-   * 左侧那一段是否可用。
+   * 左侧那一段是否可用（是否可以渲染、以及是否可以保留在已渲染的胶囊里）。
    *
-   * 桥不存在（桌面/旧壳）→ 不可用。桥在但曾被答 no-handler → 也不可用。
-   * 真正的「先问有没有接收方」需要壳侧提供一个查询方法；当前协议只有两个执行方法，
-   * 所以这里用「桥在 + 尚未被证明没有」这条判据，宁可先显示、一旦确证就永久隐藏。
-   * @returns 是否渲染左段。
+   * 判据 = **桥方法在场** 且 **壳侧尚未确证没有接收方**。两种「不行」的区别是本类语义的核心：
+   * - 桥方法不在场（桌面 / 旧壳 / 壳侧还没注入）→ 只是**这一轮不确定**，不是无能力：
+   *   下一次 scan（桥出现后）会重新渲染左段，已经渲染成「只剩转发」的胶囊也会被补回左段。
+   * - 壳侧答 no-receiver → **确证**这台机器没人接，终态收起（见 {@link finish}）。
+   *
+   * 真正的「先问有没有接收方」需要壳侧提供查询方法；当前协议只有两个执行方法，所以这里用
+   * 「桥在 + 尚未被确证没有」这条判据，宁可先显示、一旦确证才收起。
+   * @returns 是否渲染/保留左段。
    */
   externalAvailable(): boolean {
-    return typeof this.bridge().openFileExternal === 'function' && !this.externalMissing
+    return typeof this.bridge().openFileExternal === 'function' && !this.noReceiverConfirmed
   }
 
   attach(): void {
@@ -403,15 +413,42 @@ export class FileCardCapsule {
 
   /**
    * 为一行文件挂胶囊。
+   *
+   * 已挂过的胶囊不是直接跳过：桥缺席时渲染出来的胶囊只有转发，壳侧晚注入桥之后必须能补回左段
+   * （#990 的用户可见后果）。补挂判据仍是 {@link externalAvailable}，所以被 no-receiver 确证
+   * 收起过的胶囊不会被补回来。
    * @param anchor - 该行的可点元素（上游写的 aria-describedby 指向绝对路径）。
    * @param host - 胶囊的落点（卡片自身或该行 li）。
    */
   private ensureCapsule(anchor: HTMLElement, host: HTMLElement | null): void {
     if (host === null) return
-    if (host.querySelector(':scope > [' + CAPSULE_ATTR + ']') !== null) return
+    const existing = host.querySelector<HTMLElement>(':scope > [' + CAPSULE_ATTR + ']')
+    if (existing !== null) {
+      this.restoreExternalSegment(existing, anchor)
+      return
+    }
     const path = this.pathOf(anchor)
     if (path === undefined) return
-    host.append(this.buildCapsule(anchor, path))
+    host.append(this.buildCapsule(path))
+  }
+
+  /**
+   * 给「只剩转发」的胶囊补回左段（桥晚注入后重新可用）。
+   *
+   * 幂等且可重入：左段已在场、桥仍不在场、上游没写路径、或已被壳侧确证没有接收方，都原地返回。
+   * @param capsule - 已渲染的胶囊。
+   * @param anchor - 该行的可点元素（用来重新取绝对路径）。
+   */
+  private restoreExternalSegment(capsule: HTMLElement, anchor: HTMLElement): void {
+    if (capsule.querySelector('[' + EXTERNAL_ATTR + ']') !== null) return
+    if (!this.externalAvailable()) return
+    const share = capsule.querySelector<HTMLElement>('[' + SHARE_ATTR + ']')
+    if (share === null) return
+    const path = this.pathOf(anchor)
+    if (path === undefined) return
+    capsule.insertBefore(this.buildExternalSegment(path), share)
+    capsule.insertBefore(this.buildSeparator(), share)
+    capsule.removeAttribute(SHARE_ONLY_ATTR)
   }
 
   /**
@@ -430,37 +467,60 @@ export class FileCardCapsule {
     return text === undefined || text === '' ? undefined : text
   }
 
-  private buildCapsule(anchor: HTMLElement, path: string): HTMLElement {
+  /**
+   * 造一条胶囊。
+   * @param path - 该文件的绝对设备路径。
+   * @returns 胶囊容器：左段在桥可用时才有，右段恒在。
+   */
+  private buildCapsule(path: string): HTMLElement {
     const capsule = document.createElement('div')
     capsule.setAttribute(CAPSULE_ATTR, '')
-    const name = nameOf(path)
-    const external = this.buildSegment(EXTERNAL_ATTR, ICON_FOLDER, this.copy.external(name), CHIP_ATTR)
+    if (this.externalAvailable()) {
+      capsule.append(this.buildExternalSegment(path), this.buildSeparator())
+    } else {
+      // 没有左段：整条胶囊只剩转发，不留空壳。桥晚注入后由 restoreExternalSegment 补回。
+      capsule.setAttribute(SHARE_ONLY_ATTR, '')
+    }
+    capsule.append(this.buildShareSegment(path))
+    return capsule
+  }
+
+  /**
+   * 左段：带描边小块的文件夹按钮，点击走 openFileExternal。
+   * @param path - 该文件的绝对设备路径。
+   * @returns 左段按钮。
+   */
+  private buildExternalSegment(path: string): HTMLButtonElement {
+    const external = this.buildSegment(EXTERNAL_ATTR, ICON_FOLDER, this.copy.external(nameOf(path)), CHIP_ATTR)
     external.addEventListener('click', (event) => {
       event.preventDefault()
       event.stopPropagation()
       this.act('external', path)
     })
-    capsule.append(external)
-    if (this.externalAvailable()) {
-      const separator = document.createElement('span')
-      separator.setAttribute(SEPARATOR_ATTR, '')
-      separator.setAttribute('aria-hidden', 'true')
-      capsule.append(separator)
-    } else {
-      // 没有左段：整条胶囊只剩转发，不留空壳。
-      capsule.setAttribute('data-dsh-file-capsule-share-only', '')
-      external.remove()
-    }
+    return external
+  }
+
+  /**
+   * 右段：纸飞机按钮，点击走 shareFile。
+   * @param path - 该文件的绝对设备路径。
+   * @returns 右段按钮。
+   */
+  private buildShareSegment(path: string): HTMLButtonElement {
     const share = this.buildSegment(SHARE_ATTR, ICON_SHARE, this.copy.share)
     share.addEventListener('click', (event) => {
       event.preventDefault()
       event.stopPropagation()
       this.act('share', path)
     })
-    capsule.append(share)
-    // 左段存在时它占大头；这里把 anchor 记在数据集上，供默认模式反向时使用。
-    capsule.setAttribute('data-dsh-file-capsule-target', anchor.getAttribute('typeof') ?? '')
-    return capsule
+    return share
+  }
+
+  /** 段间 1px 分隔线。 */
+  private buildSeparator(): HTMLElement {
+    const separator = document.createElement('span')
+    separator.setAttribute(SEPARATOR_ATTR, '')
+    separator.setAttribute('aria-hidden', 'true')
+    return separator
   }
 
   /**
@@ -492,21 +552,24 @@ export class FileCardCapsule {
 
   /**
    * 执行一种动作。两者都走桥、都不抛给 UI。
+   *
+   * ## 桥方法不在场 ≠ 「没有外部接收方」（issue #990）
+   * 这里**不置任何终态**：桥不在场只说明这一轮还不知道能不能开（桌面 / 旧壳 / 壳侧尚未注入），
+   * 置位会让左段永久消失、晚注入的桥也救不回来。确证只有一个来源——壳侧明确回
+   * `error === 'no-receiver'`，由 {@link finish} 写。
    * @param action - external 或 share。
    * @param path - 绝对设备路径。
    */
   act(action: CardAction, path: string): CardBridgeResult {
     const mime = mimeOf(path)
+    const bridge = this.bridge()
     if (action === 'share') {
-      const call = this.bridge().shareFile
+      const call = bridge.shareFile
       if (typeof call !== 'function') return { ok: false, reason: 'unavailable' }
       return this.finish(readAnswer(this.safely(() => call(path, mime))), action)
     }
-    const call = this.bridge().openFileExternal
-    if (typeof call !== 'function') {
-      this.externalMissing = true
-      return { ok: false, reason: 'unavailable' }
-    }
+    const call = bridge.openFileExternal
+    if (typeof call !== 'function') return { ok: false, reason: 'unavailable' }
     return this.finish(readAnswer(this.safely(() => call(path, mime))), action)
   }
 
@@ -525,7 +588,8 @@ export class FileCardCapsule {
    *
    * ## 只有 no-receiver 才算「确证」
    * 判据是壳侧的 `error === 'no-receiver'`——探活为空 / startActivity 抛 ActivityNotFound，
-   * 都是「这台机器上确实没人接」的确证。
+   * 都是「这台机器上确实没人接」的确证。这是本类**唯一**写终态的地方：桥缺席（unavailable）
+   * 走不到这里，所以晚注入的桥仍能恢复左段（issue #990）。
    *
    * 其余错误码（uri-denied / io / bad-request）**不收起左段**：它们是这一次调用的失败
    * （路径越界、读不到文件、调用方传错参数），不代表机器没有外部应用。把它们当永久无能力，
@@ -535,23 +599,14 @@ export class FileCardCapsule {
    * 不参与本判据；壳侧码一律走 `error`。
    */
   private finish(result: CardBridgeResult, action: CardAction): CardBridgeResult {
-    if (action === 'external' && !result.ok && result.error === SHELL_ERROR_NO_RECEIVER && !this.externalMissing) {
-      this.externalMissing = true
+    if (action === 'external' && !result.ok && result.error === SHELL_ERROR_NO_RECEIVER && !this.noReceiverConfirmed) {
+      this.noReceiverConfirmed = true
       for (const capsule of document.querySelectorAll('[' + CAPSULE_ATTR + ']')) {
         capsule.querySelector('[' + EXTERNAL_ATTR + ']')?.remove()
         capsule.querySelector('[' + SEPARATOR_ATTR + ']')?.remove()
-        capsule.setAttribute('data-dsh-file-capsule-share-only', '')
+        capsule.setAttribute(SHARE_ONLY_ATTR, '')
       }
     }
     return result
   }
-}
-
-/**
- * 左段对应的动作：永远是「另一种」打开方式。
- * @param mode - 当前默认打开方式。
- * @returns 左段该执行的动作。
- */
-export function otherModeOf(mode: OpenMode): OpenMode {
-  return mode === 'sidebar' ? 'external' : 'sidebar'
 }

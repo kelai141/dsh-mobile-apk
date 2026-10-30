@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// 交付文件卡片的两段胶囊：另一种打开方式 + 转发。
+// 交付文件卡片的两段胶囊：用其他应用打开 + 转发。
 //
 // 夹具照上游 ui-deliverables/ChangedFiles.tsx 的真实可访问性接线搭：
 //   div[data-changed-files][data-single]
@@ -9,8 +9,9 @@
 // 上游没有文件级操作插槽，胶囊靠这段 DOM 接线取路径，不靠样式类。
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import {
-  FileCardCapsule, DEFAULT_OPEN_MODE, mimeOf, otherModeOf, type FileCardBridge,
+  FileCardCapsule, mimeOf, type FileCardBridge,
 } from '../src/client/mobile/file-card-actions.ts'
+import * as fileCardActions from '../src/client/mobile/file-card-actions.ts'
 import { FILE_CARD_CAPSULE_CSS } from '../src/client/mobile/file-card-capsule.css.ts'
 
 const CAPSULE = '[data-dsh-file-capsule]'
@@ -182,8 +183,6 @@ describe('卡片胶囊：行为', () => {
     capsule = new FileCardCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
     capsule.attach()
     await flush()
-    // 默认模式是侧栏
-    expect(DEFAULT_OPEN_MODE).toBe('sidebar')
     header.click()
     expect(onOpen).toHaveBeenCalledTimes(1)
   })
@@ -296,6 +295,73 @@ describe('卡片胶囊：行为', () => {
     document.querySelector<HTMLElement>(EXTERNAL)!.click()
     expect(capsule.externalAvailable()).toBe(false)
     expect(document.querySelector(EXTERNAL)).toBeNull()
+  })
+
+  // ④f–④h 钉住 #990：**桥方法不在场不是「没有外部接收方」**。
+  // 桥由壳侧在页面脚本之后注入，晚注入是本类明确支持的场景（bridge 是每次取值的函数）。
+  // 历史缺陷：act() 在 openFileExternal 不在场时直接置 externalMissing = true，把「还没注入」
+  // 当成「没人接」——那是终态，桥后来出现了左段也永远回不来（用户可见：只剩转发，无法恢复）。
+
+  it('④f 桥缺席时点一次左段不置终态：桥晚注入后 externalAvailable() 重新为 true（#990 反证）', async () => {
+    buildSingleCard('/work/a.md')
+    let face: FileCardBridge = {}
+    capsule = new FileCardCapsule(() => face, COPY)
+    capsule.attach()
+    await flush()
+    // 装配期桥缺席：本轮渲染不出左段，但这只是「不确定」。
+    expect(document.querySelector(EXTERNAL)).toBeNull()
+    // 用户在桥缺席时点了左段（此时按钮不在场，直接走 act 模拟同一条代码路径）。
+    expect(capsule.act('external', '/work/a.md')).toEqual({ ok: false, reason: 'unavailable' })
+    // 桥仍然缺席：当然还不可用，但这只是当下的判断，不是终态。
+    expect(capsule.externalAvailable()).toBe(false)
+    // 壳侧此刻才注入桥。
+    face = makeBridge(() => '{"ok":true}')
+    expect(capsule.externalAvailable(), '桥出现后必须重新可用（旧实现是终态，这条必红）').toBe(true)
+  })
+
+  it('④g 桥晚注入后，已渲染的「只剩转发」胶囊补回左段与分隔线（#990 用户可见面）', async () => {
+    buildSingleCard('/work/a.md')
+    let face: FileCardBridge = {}
+    capsule = new FileCardCapsule(() => face, COPY)
+    capsule.attach()
+    await flush()
+    const box = document.querySelector<HTMLElement>(CAPSULE)!
+    expect(box.hasAttribute('data-dsh-file-capsule-share-only')).toBe(true)
+    capsule.act('external', '/work/a.md')
+    // 壳侧注入桥后，下一次扫描要把左段补回来——不能永远停在「只剩转发」。
+    face = makeBridge(() => '{"ok":true}')
+    // 用卡片内的变更触发一次重扫（卡片重渲染的形状）：只依赖「卡片子树变化会重扫」这条契约，
+    // 不依赖「整份文档任何变更都重扫」——后者正是 #985 要收掉的。
+    document.querySelector('[data-changed-files]')!.append(document.createElement('span'))
+    await flush()
+    const restored = document.querySelector<HTMLElement>(CAPSULE)!
+    expect(restored.querySelector(EXTERNAL), '已渲染的胶囊必须补回左段').not.toBeNull()
+    expect(restored.querySelector(SEPARATOR), '补回左段时分隔线一起回来').not.toBeNull()
+    expect(restored.hasAttribute('data-dsh-file-capsule-share-only'), '补回后不再是 share-only').toBe(false)
+    expect([...restored.children].map(node => node.hasAttribute('data-dsh-file-capsule-external') ? 'external' : node.hasAttribute('data-dsh-file-capsule-share') ? 'share' : 'sep'))
+      .toEqual(['external', 'sep', 'share'])
+    // 补回来的左段仍然是真按钮：点它确实走桥。
+    const bridge = makeBridge(() => '{"ok":true}')
+    face = bridge
+    restored.querySelector<HTMLElement>(EXTERNAL)!.click()
+    expect(bridge.calls.external).toEqual([['/work/a.md', 'text/markdown']])
+  })
+
+  it('④h 已确证 no-receiver 后桥重绑也不复活左段（终态只由壳侧确证触发）', async () => {
+    buildSingleCard('/work/a.md')
+    let face: FileCardBridge = makeBridge(() => '{"ok":false,"error":"no-receiver"}')
+    capsule = new FileCardCapsule(() => face, COPY)
+    capsule.attach()
+    await flush()
+    document.querySelector<HTMLElement>(EXTERNAL)!.click()
+    expect(capsule.externalAvailable()).toBe(false)
+    // 换一份可用的桥（例如壳侧重连）也不该把「这台机器没人接」的结论翻掉。
+    face = makeBridge(() => '{"ok":true}')
+    document.querySelector('[data-changed-files]')!.append(document.createElement('span'))
+    await flush()
+    expect(capsule.externalAvailable()).toBe(false)
+    expect(document.querySelector(EXTERNAL)).toBeNull()
+    expect(document.querySelector(SHARE)).not.toBeNull()
   })
 
   it('桥抛异常时按失败返回，不向 DOM 事件里抛', async () => {
@@ -695,14 +761,29 @@ describe('#985 观察面：合批 + 限定子树', () => {
   })
 })
 
-describe('卡片胶囊：默认模式反向', () => {
-  it('otherModeOf 把默认取反', () => {
-    expect(otherModeOf('sidebar')).toBe('external')
-    expect(otherModeOf('external')).toBe('sidebar')
+describe('#991 左段固定为外部打开（无「默认模式」常量）', () => {
+  it('胶囊左段不导出任何「默认打开方式」常量或取反函数（删掉的死面不许回潮）', () => {
+    // #991：DEFAULT_OPEN_MODE / otherModeOf / OpenMode 在 src/ 内零读取点，只是钉常量本身，
+    // 改常量不改变任何行为。接上逻辑也不成立——卡片的单击属于上游只读包 ChangedFiles，
+    // 本模块改不动它；反向左段会让卡片单击（侧栏预览）与左段（也变成侧栏预览）撞车、
+    // 外部打开凭空消失。所以删掉，并在这里钉住它不会以上述任一形态回来。
+    expect(Object.keys(fileCardActions)).not.toContain('DEFAULT_OPEN_MODE')
+    expect(Object.keys(fileCardActions)).not.toContain('otherModeOf')
   })
 
-  it('默认值是单一常量（加设置行时只改它）', () => {
-    expect(DEFAULT_OPEN_MODE).toBe('sidebar')
+  it('左段恒为「用其他应用打开」：aria-label 走 external 文案、点击走 openFileExternal', async () => {
+    // 这条替代原先钉常量的「默认值是单一常量」：断言真实行为，而不是断言一个无人读的值。
+    const bridge = makeBridge(() => '{"ok":true}')
+    buildSingleCard('/work/report.md')
+    capsule = new FileCardCapsule(() => bridge, COPY)
+    capsule.attach()
+    await flush()
+    const external = document.querySelector<HTMLElement>(EXTERNAL)!
+    expect(external.getAttribute('aria-label')).toBe('用其他应用打开：report.md')
+    external.click()
+    expect(bridge.calls.external).toEqual([['/work/report.md', 'text/markdown']])
+    // 卡片单击的默认动作仍由上游决定，本模块不参与（没有「模式」可改写它）。
+    expect(document.querySelector(CAPSULE)!.hasAttribute('data-dsh-file-capsule-share-only')).toBe(false)
   })
 })
 
