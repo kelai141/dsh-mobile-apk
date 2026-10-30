@@ -101,7 +101,7 @@
     "MuxClient.kt:45": 2,
     "DeviceControlService.kt:678": 2,
     "index.ts:991": 3,
-    "plugins/dsh-android-manage/src/index.ts:2031": 2,
+    "plugins/dsh-android-manage/src/index.ts:2034": 2,
     "index.ts:394": 2,
     "plugins/dsh-android-bridge/test/screen-scope.test.mjs:336": 2,
     "plugins/dsh-android-manage/test/a11y-routing.test.mjs:479": 2,
@@ -320,7 +320,7 @@
     "plugins/dsh-android-bridge/src/lossless-json.ts:1": 3,
     "plugins/dsh-android-bridge/test/privilege-status.test.mjs:1": 3,
     "plugins/dsh-android-manage/src/index.ts:7": 3,
-    "plugins/dsh-android-manage/src/index.ts:2283": 5,
+    "plugins/dsh-android-manage/src/index.ts:2286": 5,
     "tools.ts:281": 2,
     "contract.ts:136": 2,
     "tools.ts:33": 4,
@@ -741,7 +741,7 @@
     "notify-projection.ts:37": 1,
     "docs/archive/known-gaps-pre-0.14.5-2026-10-07.md:170": 2,
     "docs/AGENTS/ARCHITECTURE.md:151": 2,
-    "plugins/dsh-android-manage/src/index.ts:2286": 1,
+    "plugins/dsh-android-manage/src/index.ts:2289": 1,
     "app/src/main/java/com/dsharnessmobile/shell/AdbKeyboardService.kt:166": 1,
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:255": 1,
     "plugins/dsh-android-manage/src/index.ts:1300": 1,
@@ -3725,13 +3725,13 @@
     "plugins/dsh-android-manage/src/index.ts:1999": [
       "if (wantKb) {"
     ],
-    "plugins/dsh-android-manage/src/index.ts:2031": [
-      "}"
-    ],
-    "plugins/dsh-android-manage/src/index.ts:2283": [
+    "plugins/dsh-android-manage/src/index.ts:2034": [
       "}"
     ],
     "plugins/dsh-android-manage/src/index.ts:2286": [
+      "}"
+    ],
+    "plugins/dsh-android-manage/src/index.ts:2289": [
       "const en = await priv.execAdbShell(`ime enable ${IME_ID}`)"
     ],
     "plugins/dsh-android-manage/src/index.ts:394": [
