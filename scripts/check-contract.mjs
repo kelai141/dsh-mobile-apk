@@ -36,6 +36,14 @@ const DOC_PATH = resolve(flagValue('--doc') ?? join(root, 'docs', 'UPSTREAM-CONT
 const SLOTS_SOURCE = flagValue('--slots-source')
 const issues = []
 const REQUIRE = argv.includes('--require')
+/**
+ * issue #1114：依赖树缺席时默认 exit 2（硬失败），只有显式传它才以 0 结案。
+ *
+ * 谁该传：`--self-test` 的对照组（它验的是**判据逻辑**，不是「上游树就绪」）、以及
+ * 任何确实处在「依赖尚未就绪」合法阶段的调用点。构建链与发版链**一律不传** ——
+ * 那两条链的前提就是上游树已在场，缺席必须当场暴露而不是静默结案。
+ */
+const ALLOW_MISSING = argv.includes('--allow-missing')
 let skipped = 0
 /** 仓库相对路径（仅用于报错文案）。0.14.2 rc.2 追版实修：§9 的两处报错此前调用了**从未定义**的
  *  `rel()` —— rc.1 时文档含基线字样，该分支从未走到；换基线后第一次判红即 `ReferenceError` 崩溃，
@@ -43,8 +51,18 @@ let skipped = 0
 const rel = (p) => { const r = resolve(p).slice(root.length + 1); return r.split('\\').join('/') }
 const ok = (msg) => console.log('  OK  ' + msg)
 const fail = (msg) => { issues.push(msg); console.log('  FAIL ' + msg) }
+/**
+ * 依赖缺席计数器（issue #1114）。
+ *
+ * `skip` 与 `softSkip` 的区别是「这一侧负不负责这条判据」：
+ *   - softSkip：自包含树里协调仓独有输入，合法缺席，不是缺口；
+ *   - skip（本函数）：**该验却验不了**，是缺口。以前它只打一行就放过，现在必须让
+ *     最终退出码反映出来（见文件末尾的 hardSkip 分支）。
+ */
+let hardSkip = 0
 const skip = (msg) => {
   skipped += 1
+  hardSkip += 1
   if (REQUIRE) issues.push('SKIP: ' + msg)
   console.log('  SKIP(#' + skipped + ')  ' + msg + (REQUIRE ? ' —— --require 档不得 SKIP' : ''))
 }
@@ -879,11 +897,36 @@ console.log('== 9. 人读契约文档与登记表同源（G-8：它会误导开�
 }
 
 if (skipped > 0) console.log('SKIP=' + skipped)
+
+/**
+ * issue #1114：依赖树缺席 ≠ 通过。
+ *
+ * 旧行为：上游声明文件不在场时只打一条 `SKIP(#n)` 就继续，最后照样 `CONTRACT PASS`。
+ * 于是「槽位声明面」这整段在干净 checkout 里**从未被执行过**，却一直报绿。
+ *
+ * 三态必须可区分（与 check-dead-tokens.mjs 同口径）：
+ *   0 = 判据跑了且通过；1 = 判据跑了且不通过；2 = 判据没跑（依赖缺席）。
+ *
+ * 例外：`softSkip` 记的是**自包含树里协调仓独有输入**的合法缺席（APK_SELF_CONTAINED），
+ * 那类不计入 hardSkip —— 它是「这一侧本来就不负责这条判据」，不是「该验却没验」。
+ */
 if (issues.length > 0) {
   console.error('')
   console.error('CONTRACT FAIL (' + issues.length + '):')
   for (const i of issues) console.error('  - ' + i)
   process.exit(1)
+}
+if (hardSkip > 0) {
+  if (!ALLOW_MISSING) {
+    console.error('')
+    console.error('CONTRACT DEPENDENCY-ABSENT (' + hardSkip + ' 处判据未执行):')
+    console.error('  上游树（' + contract.upstreamRepo + '）不在场，' + hardSkip + ' 个槽位声明面没被核对。')
+    console.error('  这不是通过，也不是被测对象有缺陷 —— 是「本次没验」。')
+    console.error('  请先拉取上游树，或在确实无法拉取的场合显式传 --allow-missing 声明接受。')
+    process.exit(2)
+  }
+  console.error('')
+  console.error('CONTRACT SKIPPED（--allow-missing：调用方已显式接受 ' + hardSkip + ' 处判据未执行）')
 }
 console.log('')
 console.log('CONTRACT PASS（SKIP=' + skipped + '）')
@@ -992,8 +1035,11 @@ function runContractSelfTest() {
     // 于是「消费了未登记」这类反例不需要动仓库源码。
     const sPath = kase.slotsSource === undefined ? null : join(scratch, 'slots-' + i + '.ts')
     if (sPath !== null) writeFileSync(sPath, kase.slotsSource(c))
+    /* --allow-missing：自证验的是**判据逻辑**，不是「上游树就绪」。
+     * issue #1114 之后，依赖缺席会让门禁 exit 2 —— 若不传它，缺上游 checkout 的布局里
+     * 全部用例都会因 exit 2 而"红"，自证就变成在测环境而不是测判据。 */
     const r = spawnSync(process.execPath,
-      [gateFile, '--contract', cPath, '--profile', pPath, ...(dPath === null ? [] : ['--doc', dPath]), ...(sPath === null ? [] : ['--slots-source', sPath]), ...(kase.extra ?? [])],
+      [gateFile, '--contract', cPath, '--profile', pPath, '--allow-missing', ...(dPath === null ? [] : ['--doc', dPath]), ...(sPath === null ? [] : ['--slots-source', sPath]), ...(kase.extra ?? [])],
       { encoding: 'utf8' })
     const out = (r.stdout ?? '') + (r.stderr ?? '')
     const firstFail = (out.split(/\r?\n/).find(l => /^\s+FAIL/.test(l)) ?? '').trim()

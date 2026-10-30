@@ -24,6 +24,7 @@
 // 退出码：0 = 通过（或显式 SKIP）；1 = 有死 token / --require 下有 SKIP；2 = 用法错误。
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -49,24 +50,37 @@ const ALLOW_MISSING = argv.includes('--allow-missing')
  * 却什么都没校验的门禁。两个构建链调用点（build-apk.mjs / build-apk-013.ps1）都不传 --require，
  * 所以「严格档才判红」等于默认入口永远不判。
  *
- * 处置（写域约束下的最诚实形态）：**零判据这件事必须自己说出来**。
- *   - 打印机器可识别的 NO-CRITERIA 行，供 check-gate-skips.mjs 的零判据审计抓；
- *   - 传 --allow-missing 时明确记为「调用方显式接受」，不再是静默；
- *   - --require 档在此之前已经判红（SKIP 不得结案）。
- * 把默认档直接改成 exit 1 需要同时给两条构建链的调用点补 --allow-missing（本组写域之外），
- * 否则主分支的构建链会当场红 —— 那不是本组能单独完成的改动，故这里保留 exit 0，
- * 但把「零判据」变成可审计、可判红的事实。
+ * 处置（issue #1114 收口）：**依赖缺席 = exit 2 硬失败**。
+ *
+ * 为什么从 exit 0 改成 exit 2（而不是 exit 1）：三态必须可区分，否则调用方与人都读不懂。
+ *   - 0 = 判据跑了且通过；
+ *   - 1 = 判据跑了且**不通过**（真缺陷，比如引用了已删除的令牌）；
+ *   - 2 = **判据根本没跑**（依赖树缺席）—— 这不是"通过"，也不是"被测对象有问题"，
+ *         而是"这次没验"。把它报成 0 就是 issue #1114 的静默恒绿；报成 1 又会让人以为
+ *         代码有缺陷、去改根本不相关的地方。
+ *
+ * 事实依据（issue #1114 实测）：`.deploy-tmp` 被 .gitignore 忽略，只在第一次跑构建链
+ * 或云端 `build-apk-source.yml` 里才落盘。所以**任何人在第一次构建之前，这个门禁都是绿的**。
+ * 更糟的是它不在 PR 门禁集合里（GATES 登记 ciApk:false / ciCoord:true），唯一会真判的场合
+ * 是构建链与发版链 —— 而那两条链自己也**不负责**填充上游树（见 build-apk-source.yml:134-150），
+ * 于是缺陷一路绿到有人真的去构建。
+ *
+ * 逃生口：`--allow-missing` 显式声明「本次接受零判据」，仍以 0 结案但打印明确原因。
+ * 调用点若确实处在「依赖尚未就绪」的合法阶段，应当显式传它 —— 静默才是要消灭的东西。
  */
 function noCriteriaExit(why) {
-  if (!ALLOW_MISSING) {
-    // 机器可识别的零判据标记：check-gate-skips.mjs 会把它当成「该门禁本次没有执行任何判据」，
-    // 并要求在 ZERO_CRITERIA_REGISTER 里登记（reason + until），否则判红。
+  if (ALLOW_MISSING) {
     console.log('NO-CRITERIA  本次没有执行任何判据（' + why + '）')
-    console.log('CHECK-DEAD-TOKENS NO-CRITERIA（零判据结案；调用点须显式传 --allow-missing 或在审计表登记）')
+    console.log('CHECK-DEAD-TOKENS SKIPPED（--allow-missing：调用方已显式接受本次零判据）')
     process.exit(0)
   }
-  console.log('CHECK-DEAD-TOKENS SKIPPED（--allow-missing：调用方已显式接受本次零判据）')
-  process.exit(0)
+  // 机器可识别的零判据标记：check-gate-skips.mjs 会把它当成「该门禁本次没有执行任何判据」。
+  console.log('NO-CRITERIA  本次没有执行任何判据（' + why + '）')
+  console.error('CHECK-DEAD-TOKENS DEPENDENCY-ABSENT：判据未执行（' + why + '）')
+  console.error('  这不是通过，也不是被测对象有缺陷 —— 是「本次没验」。')
+  console.error('  请先跑构建链拉取上游树（.deploy-tmp/deepseek-harness），或显式传 --allow-missing')
+  console.error('  声明本次接受零判据。干净 checkout 里 .deploy-tmp 被 .gitignore 忽略，故默认不通过。')
+  process.exit(2)
 }
 
 let skipped = 0
@@ -353,13 +367,39 @@ if (argv.includes('--self-test')) {
   const emptyDefs = audit([{ token: '--dsw-alias-bg-elevated', file: 'y.css', line: 7 }], new Set(), new Map())
   const okNoDefinitionFace = emptyDefs.dead.size === 1
 
+  /* ⑤ issue #1114：**依赖缺席必须非 0 退出**（这是本门禁此前最大的假绿面）。
+   *
+   * 上面 ①-④ 验的都是「判据写得对不对」，但它们的共同前提是「判据真的跑到了」。
+   * #1114 的缺陷恰恰在那个前提上：上游树缺席时门禁 exit 0，于是再正确的判据也从未执行。
+   *
+   * 这条自证必须**真的起子进程**去跑自己 —— 因为在同一进程里调 noCriteriaExit() 会直接
+   * process.exit，拿不到退出码。用 --root 指向一个不存在的目录来制造「依赖缺席」，
+   * 与真实场景（.deploy-tmp 被 gitignore 忽略）同一条代码路径。
+   */
+  const { spawnSync } = await import('node:child_process')
+  const missingRoot = join(tmpdir(), 'dead-tokens-selftest-missing-' + process.pid)
+  const runAbsent = (extra) => spawnSync(process.execPath,
+    [fileURLToPath(import.meta.url), '--root', missingRoot, ...extra], { encoding: 'utf8' })
+  const absentDefault = runAbsent([])
+  const absentAllowed = runAbsent(['--allow-missing'])
+  // 默认档：必须 exit 2（不是 0=假绿，也不是 1=让人误以为代码有缺陷）
+  const okAbsentHardFails = absentDefault.status === 2
+    && /DEPENDENCY-ABSENT/.test(String(absentDefault.stderr))
+    && /请先跑构建链拉取上游树/.test(String(absentDefault.stderr))
+  // 逃生口：显式 --allow-missing 必须仍能结案（否则没人能在依赖未就绪时跑其它判据）
+  const okAbsentEscape = absentAllowed.status === 0
+    && /SKIPPED（--allow-missing/.test(String(absentAllowed.stdout))
+
   const allPass = okRefs && okDefsSkipped && okGreen && okRed && okAllow && okNoDefinitionFace
+    && okAbsentHardFails && okAbsentEscape
   console.log((allPass ? 'DEAD-TOKENS SELF-TEST PASSED' : 'DEAD-TOKENS SELF-TEST FAILED')
     + '（引用抽取 ' + got.length + '/3；定义处不计入 ' + (okDefsSkipped ? '是' : '否')
     + '；全命中判绿 ' + (okGreen ? '是' : '否')
     + '；混入死 token 判红且点名 ' + (okRed ? '是' : '否')
     + '；允许清单豁免 ' + (okAllow ? '是' : '否')
-    + '；定义面为空仍判红 ' + (okNoDefinitionFace ? '是' : '否') + '）')
+    + '；定义面为空仍判红 ' + (okNoDefinitionFace ? '是' : '否')
+    + '；#1114 依赖缺席 exit 2 ' + (okAbsentHardFails ? '是' : '否')
+    + '；#1114 --allow-missing 仍可结案 ' + (okAbsentEscape ? '是' : '否') + '）')
   process.exit(allPass ? 0 : 1)
 }
 
