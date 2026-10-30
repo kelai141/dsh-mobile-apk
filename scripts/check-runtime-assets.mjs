@@ -68,13 +68,27 @@ const fail = (msg) => {
   console.error('CHECK-RUNTIME-ASSETS FAILED：' + msg)
   process.exit(1)
 }
+/**
+ * 记一次 SKIP 并打印**具名汇总行**（issue #1154）。
+ *
+ * 为什么汇总行必须在这里打：早退分支（L78 起四处）原本直接 `process.exit(0)`，
+ * 而唯一的 `SKIP=` 汇总在脚本末尾的 PASSED 分支 —— 于是「无快照」这条最常走的路
+ * 打印了 SKIP 行却没有汇总，审计侧只能判「no-summary」，靠 AUDIT_BASELINE 登记兜着。
+ * 那套登记在双环境下不可能同时成立（本地有快照→真跑通过，CI 无快照→恒 SKIP），
+ * 销账必然倒挂。把「没验」写成一句机器能读的话，登记表就不需要了。
+ * @param msg - SKIP 原因（会进审计日志）。
+ */
 const skip = (msg) => {
   if (REQUIRE) fail(msg + '\n  严格模式（--require）：构建链/发布链不得以 SKIP 结案（快照/资产必须在场）')
   skipped += 1
   console.log('SKIP(#' + skipped + ')  ' + msg)
+  // 具名结论行：与 PASSED/FAILED 同形（门禁名 + 大写状态 + 括号内证据 + SKIP=n），
+  // 让 check-gate-skips 的通用规则认得出「这是明确结案，不是零判据」。
+  console.log('CHECK-RUNTIME-ASSETS SKIPPED（' + msg + '；SKIP=' + skipped + '）')
   return false
 }
 
+// 四处早退都走 skip()，汇总行由 skip() 统一打印（见其注释）。
 if (!existsSync(ASSETS)) { skip(`无运行时资产目录（${ASSETS}）——协调仓或未注入的树`); process.exit(0) }
 if (!existsSync(SNAP)) { skip(`快照不在场（${SNAP}，abi=${ABI}）——先构建快照再跑本门禁`); process.exit(0) }
 if (!existsSync(join(ROOT, 'scripts', 'patches', 'registry.json'))) {

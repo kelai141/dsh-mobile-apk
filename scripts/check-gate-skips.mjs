@@ -416,16 +416,13 @@ const AUDIT_BASELINE = new Map([
     reason: '真数据分支打印 SKIP(#1)(real-data) 后不打印 SKIP= 汇总（汇总只在 PASSED/FAILED 分支），也不打印判据行',
     until: '2026-12-31',
   }],
-  ['check-runtime-assets.mjs', {
-    kinds: ['no-summary', 'no-verdict'],
-    reason: 'SKIP(#1)（快照不在场）后直接 exit 0：脚本内唯一的 SKIP= 与 PASS 都在 PASSED 分支',
-    until: '2026-12-31',
-  }],
-  ['check-mcp-client-deps.mjs', {
-    kinds: ['no-verdict'],
-    reason: '以 SKIP 结案时只打印 SKIP 行与 SKIP=1，没有机器判据行（PASS/FAIL）',
-    until: '2026-12-31',
-  }],
+  // 已销账（2026-10-31，#1154）：check-runtime-assets 与 check-mcp-client-deps 两条登记已删除。
+  // 它们兜的都是「以 SKIP 结案时没有汇总行 / 没有判据行」。真修法不是删登记，而是让那两条门禁
+  // 在 SKIP 分支**自己打印具名结论行**（CHECK-RUNTIME-ASSETS SKIPPED（…；SKIP=n） /
+  // CHECK-MCP-CLIENT-DEPS SKIPPED（…；SKIP=n）），与 PASSED/FAILED 同形。
+  // 这样有快照时真跑通过、无快照时是「明确结案」而不是「零判据」——登记表随之不再需要，
+  // 销账倒挂也消失：删登记这个动作在双环境下原本不可能同时成立（本地有快照→缺口不复现，
+  // CI 无快照→恒 SKIP），现在两侧都自洽。
   ['check-snapshot-fingerprint.mjs', {
     kinds: ['no-verdict'],
     reason: '净检出无 tar 时以 SKIP 结案，不打印 PASS/FAIL 判据行',

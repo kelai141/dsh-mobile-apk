@@ -126,6 +126,11 @@ if (!existsSync(SNAP)) {
   if (REQUIRE) fail(msg + '\n  严格模式（--require）：构建链/发布链不得以 SKIP 结案')
   console.log('SKIP(#1)  ' + msg)                                             // SKIP #1：快照缺席（发布链 --require 下改判红）
   console.log('SKIP=1（本门禁在快照缺席时以 SKIP 结案，发布链 --require 强制齐全）')
+  // 具名结论行（issue #1154）：只有 SKIP 行 + SKIP=1 时，审计侧判「no-verdict」（有 SKIP 面却没有
+  // 任何判据行，可能零判据结案），只能靠 AUDIT_BASELINE 登记兜着；而那套登记在双环境下不可能同时
+  // 成立（本地有快照→真跑通过，CI 无快照→恒 SKIP），销账必然倒挂。补一行与 PASSED/FAILED 同形的
+  // SKIP 结论，审计就能直接读懂「这是明确结案」，登记表随之不需要。
+  console.log('CHECK-MCP-CLIENT-DEPS SKIPPED（快照不在场，' + ABI + '；SKIP=1）')
   process.exit(0)
 }
 
@@ -198,6 +203,8 @@ if (host === null) {
   // 宿主包不在快照里：说明上游裁掉了它（或被改名）。这本身要人看一眼，但不属于本门禁的判据面。
   console.log('SKIP(#2)  快照内无 ' + WATCHED + '（上游裁包/改名？）——本门禁不适用，请核对上游依赖图')   // SKIP #2：宿主包被上游裁掉/改名
   console.log('SKIP=1（宿主包不在快照内时以 SKIP 结案；发布链 --require 强制齐全）')
+  // 具名结论行，理由同 SKIP #1（见上）。
+  console.log('CHECK-MCP-CLIENT-DEPS SKIPPED（快照内无宿主包，' + ABI + '；SKIP=1）')
   process.exit(0)
 }
 
