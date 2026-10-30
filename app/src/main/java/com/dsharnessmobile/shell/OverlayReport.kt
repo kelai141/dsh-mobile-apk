@@ -354,14 +354,17 @@ internal fun reportBodyText(entry: NotifyEntry?, app: android.content.Context? =
  * 或等于整条首行。不做子串/相似度近似——那会把「摘要里恰好包含正文」误判成重复而**丢掉内容**，
  * 比重复显示更严重。空正文一律判多余（没有块可渲染）。
  */
-internal fun reportBodyRedundant(entry: NotifyEntry?, full: String, app: android.content.Context? = null): Boolean {
+internal fun reportBodyRedundant(entry: NotifyEntry?, full: String, app: android.content.Context? = null): Boolean =
+  reportBodyRedundant(entry, full, UiText.isEnglish(app))
+
+/** 同一判据，语言已解析（#986：纯函数入口，JVM 单测能覆盖英文分支）。 */
+internal fun reportBodyRedundant(entry: NotifyEntry?, full: String, english: Boolean): Boolean {
   val f = full.trim()
   if (f.isEmpty()) return true
   if (entry == null) return false
-  // 英文界面下不能直接用 entry.outcomeLabel（它是通知发出时存下的中文标签）：
-  // 按 outcome 重新算，并把「工作汇报」兜底也交给 UiText。
-  val head = entry.outcomeLabel.ifBlank { entry.outcomeLabel(app) }
-    .ifBlank { UiText.t(app, "工作汇报", "Work report") }
+  // 首行与这里必须同口径：判重拿的是**当前语言**的 head，否则英文态会把正文误判成
+  // 「与首行重复」而整段吞掉（内容丢失比重复显示更严重）。
+  val head = reportOutcomeHead(entry, english)
   val summary = entry.summary.ifBlank { entry.text }.trim()
   if (summary.isEmpty()) return false
   return f == summary || f == (head + " · " + summary).trim()
@@ -447,28 +450,42 @@ internal fun reportBarHeightAfterDrag(startHeight: Int, dragUp: Int, minHeight: 
  *
  * **完整正文刻意不在这里**：它是独立的可滚动区（[reportBodyText]）。三行是「汇报的元信息」，
  * 正文是「汇报内容」，语义不同；混进本表会让既有口径 `lines[0] == head · summary` 无法再表达。
+ *
+ * 语言解析有两个入口，函数体**只有一份**：`Context` 版把语言解出来后转调 [reportLines] 的
+ * `english` 重载。这份双入口不是为了测试而分叉——`isEnglish(null)` 恒 false，`Context` 单入口
+ * 会让英文分支在 JVM 单测里不可达，而「英文态首行仍是中文」正是这样活下来的。
  */
-internal fun reportLines(entry: NotifyEntry?, app: android.content.Context? = null): List<String> {
-  val english = UiText.isEnglish(app)
+internal fun reportLines(entry: NotifyEntry?, english: Boolean): List<String> {
   if (entry == null) return if (english) {
     listOf("No report yet", "A report shows up here after one round finishes")
   } else {
     listOf("暂无汇报内容", "完成一轮对话后这里会显示汇报")
   }
-  // 英文界面下不能直接用 entry.outcomeLabel（它是通知发出时存下的中文标签）：
-  // 按 outcome 重新算，并把「工作汇报」兜底也交给 UiText。
-  val head = entry.outcomeLabel.ifBlank { entry.outcomeLabel(app) }
-    .ifBlank { UiText.t(app, "工作汇报", "Work report") }
+  val head = reportOutcomeHead(entry, english)
   val summary = entry.summary.ifBlank { entry.text }
   val out = ArrayList<String>(3)
   out.add(if (summary.isBlank()) head else head + " · " + summary)
-  out.add(UserCopy.reportMetaLine(entry.durationLabel(), entry.toolCount, app))
+  out.add(UserCopy.reportMetaLine(entry.durationLabel(), entry.toolCount, english))
   if (entry.presentedFiles.isNotEmpty()) {
     out.add((if (english) "Files: " else "产出：") +
       entry.presentedFiles.joinToString(if (english) ", " else "、"))
   }
   return out
 }
+
+/**
+ * 汇报结论标签（#986 的唯一真源）：**按当前语言重新算**，不用条目里落库的 `outcomeLabel`。
+ *
+ * 缺陷现场：`outcomeLabel` 是通知**发出时**按当时语言写进条目的字符串（见 NotifyCenter.sendTest
+ * 与 notify-projection），语言切换不会重算；旧实现 `entry.outcomeLabel.ifBlank { … }` 让它
+ * 永远优先，注释却声称「按 outcome 重新算」——注释与实现相反，英文态首行因此仍是「已完成」。
+ * 兜底顺序：outcome → 引擎给的空标签 → 「工作汇报 / Work report」。
+ */
+internal fun reportOutcomeHead(entry: NotifyEntry, english: Boolean): String =
+  entry.outcomeLabel(english).ifBlank { UiText.t(english, "工作汇报", "Work report") }
+
+internal fun reportLines(entry: NotifyEntry?, app: android.content.Context? = null): List<String> =
+  reportLines(entry, UiText.isEnglish(app))
 
 /**
  * 块H 状态行手势的**纯裁决逻辑**（顶层函数，JVM 可直接测——A3 的两条防误触判据在这里判红）。

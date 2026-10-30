@@ -1184,7 +1184,9 @@ object NotifyCenter {
   }
 
   private fun reportLine(entry: NotifyEntry, app: android.content.Context): String {
-    val head = entry.outcomeLabel.ifBlank { entry.outcomeLabel(app) }
+    // #986：与汇报栏同口径——`entry.outcomeLabel` 是**投递时**按当时语言落库的字符串，
+    // 语言切换不会重算，所以这里也必须按 outcome 用当前语言重算，不能让它优先。
+    val head = reportOutcomeHead(entry, UiText.isEnglish(app))
     val summary = if (entry.summary.isNotBlank()) entry.summary else entry.text
     return if (summary.isBlank()) head else head + " · " + summary
   }
@@ -1635,14 +1637,17 @@ data class NotifyEntry(
     }
   }
 
-  fun outcomeLabel(app: android.content.Context? = null): String = when (outcome) {
-    "completed" -> UiText.t(app, "已完成", "Completed")
-    "error" -> UiText.t(app, "失败", "Failed")
-    "blocked" -> UiText.t(app, "被阻塞", "Blocked")
-    "aborted" -> UiText.t(app, "已中止", "Aborted")
-    "max-tokens" -> UiText.t(app, "输出超限", "Output limit reached")
-    "interrupted" -> UiText.t(app, "被中断", "Interrupted")
-    else -> if (outcome.isBlank()) "" else UiText.t(app, "结果未知", "Unknown result")
+  fun outcomeLabel(app: android.content.Context? = null): String = outcomeLabel(UiText.isEnglish(app))
+
+  /** 同一张表，语言已解析（#986：纯函数入口，JVM 单测能覆盖英文分支）。 */
+  fun outcomeLabel(english: Boolean): String = when (outcome) {
+    "completed" -> UiText.t(english, "已完成", "Completed")
+    "error" -> UiText.t(english, "失败", "Failed")
+    "blocked" -> UiText.t(english, "被阻塞", "Blocked")
+    "aborted" -> UiText.t(english, "已中止", "Aborted")
+    "max-tokens" -> UiText.t(english, "输出超限", "Output limit reached")
+    "interrupted" -> UiText.t(english, "被中断", "Interrupted")
+    else -> if (outcome.isBlank()) "" else UiText.t(english, "结果未知", "Unknown result")
   }
 
   /**
