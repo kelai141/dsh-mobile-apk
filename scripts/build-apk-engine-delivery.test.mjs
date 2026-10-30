@@ -122,6 +122,11 @@ test('portable chain clears stale APKs from its delivery directory before buildi
   assert.match(portable, /endsWith\('\.apk'\)/, '清理面是 *.apk（不得按目录清空，会误伤 snapshot-*.tar.xz）');
   const local = readFileSync(new URL('./build-apk-013.ps1', import.meta.url), 'utf8')
   const release = readFileSync(new URL('./build-release.ps1', import.meta.url), 'utf8')
-  assert.match(local, /Get-ChildItem \$Out -Filter '\*\.apk' -File -Recurse \| Remove-Item -Force/);
+  /* issue #1078：本地链的预清理改成「只清本次产出 ABI」，不再无条件递归删 $Out。
+   * 无条件的那个写法会把另一个 ABI 已验签的产物也删掉（完整构建后再跑 -OnlyAbi/-Fast，
+   * 发布目录只剩 1/2 ABI 而 exit 0）。发布链（build-release.ps1）产的是双 ABI 全集，
+   * 无条件清空在它那里仍然正确，故那条保持原样。 */
+  assert.doesNotMatch(local, /Get-ChildItem \$Out -Filter '\*\.apk' -File -Recurse \| Remove-Item -Force/)
+  assert.match(local, /\$abisThisRun = @\(/)
   assert.match(release, /Get-ChildItem \$apkDir -Filter '\*\.apk' -File -Recurse \| Remove-Item -Force/);
 })

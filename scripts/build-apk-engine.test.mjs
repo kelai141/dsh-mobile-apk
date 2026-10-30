@@ -331,7 +331,11 @@ test('local, portable, and release entry points all route their terminal stage t
   assert.match(local, /build-apk-engine\.mjs[\s\S]*?"assemble"/)
   assert.match(local, /if \(-not \[string\]::IsNullOrEmpty\(\$Suffix\)\) \{ \$engineArgs \+= @\("--suffix", \$Suffix\) \}/)
   assert.doesNotMatch(localArgsBlock, /"--suffix", \$Suffix/)
-  assert.match(local, /Get-ChildItem \$Out -Filter '\*\.apk' -File -Recurse \| Remove-Item -Force/)
+  /* issue #1078：本地链的预清理**不再**无条件递归删 $Out 下所有 APK —— 那会删掉另一个 ABI
+   * 已验签的产物（完整构建后再跑 -OnlyAbi/-Fast，发布目录只剩 1/2 ABI 而 exit 0）。
+   * 现在按本次产出 ABI 过滤。此断言从「必须有旧写法」改为「必须没有旧写法，且有新写法」。 */
+  assert.doesNotMatch(local, /Get-ChildItem \$Out -Filter '\*\.apk' -File -Recurse \| Remove-Item -Force/)
+  assert.match(local, /\$abisThisRun = @\(/)
   assert.match(local, /build-apk-engine\.mjs"\) verify --dir \$Out/)
   assert.match(portable, /import \{ assembleApk, verifyApks \} from '\.\/build-apk-engine\.mjs'/)
   assert.match(portable, /const finalApk = assembleApk\(/)
