@@ -40,7 +40,8 @@ function runnerFor(f, { signatureStatus = 0, record = [] } = {}) {
       return { status: signatureStatus }
     }
     record.push('gradle')
-    const built = join(f.apkDir, 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk')
+    // 打包切到 release 变体（issue #1118）：debug 变体带 android:debuggable，#1119 的产物形态门禁会拒。
+const built = join(f.apkDir, 'app', 'build', 'outputs', 'apk', 'release', 'app-release.apk')
     mkdirSync(join(built, '..'), { recursive: true })
     writeFileSync(built, Buffer.from('fresh-apk-bytes'))
     return { status: 0 }
@@ -70,7 +71,7 @@ test('negative control: signature failure never leaves the APK in the delivery d
   assert.deepEqual(readdirSync(f.outputDir), [], '陈旧产物也必须在构建开始时清掉')
   // 顺序判据：验签必须在拷贝之前 —— 用「验签时交付目录里还没有新产物」来钉死
   assert.ok(record.includes('signature'), '本次构建必须真的跑过签名门禁')
-  assert.ok(record.filter((r) => r.startsWith('signature-target:')).join('').includes('app-debug.apk'),
+  assert.ok(record.filter((r) => r.startsWith('signature-target:')).join('').includes('app-release.apk'),
     '验签判据必须指向 Gradle 产物，而不是交付目录里的那份拷贝')
   assert.ok(record.indexOf('signature') < record.indexOf('gradle') || record.includes('gradle'),
     '签名段必须在 Gradle 之后（对产物验签）')
