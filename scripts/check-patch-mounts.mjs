@@ -25,14 +25,13 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-
-/** SKIP 计数器（check-gate-skips.mjs 要求每条 SKIP 行自带 (#n) 计数）。 */
-let skipped = 0
-
 const TOP_ITEM = /^-(?:\s|$)/
 const TOP_ENTRY = /^(?:-\s+id:|-\s+name:)/
 const ENTRY_ITEM = /^(\s*)-\s+(id|name):\s*(.*)$/
 const KEY_NAME = /^(\s*)name:\s*(.*)$/
+
+/** SKIP 计数器（check-gate-skips.mjs 要求每条 SKIP 行自带 (#n) 计数）。 */
+let skipped = 0
 
 /** 去掉 YAML 标量的引号与行尾注释。 */
 function scalar(value) {
