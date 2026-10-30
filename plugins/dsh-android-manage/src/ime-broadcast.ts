@@ -41,11 +41,11 @@ export function shellQuote(raw: string): string {
 
 /**
  * 读取键盘广播 nonce（应用私有文件，引擎与壳同 uid 可读）。
- * 文件缺失（旧壳 / 桌面宿主）返回空串 = 不带 auth 参数。
- * #679 之后壳侧**不再有 uid 白名单兜底**（uid 2000 的隐式信任已撤销，Shizuku 应用可冒用）：
- * 新壳对不带 auth 的广播一律拒绝——引擎路径不受影响（nonce 文件由壳 onCreate 幂等创建，
- * 引擎与本应用同 uid 读得到）；桌面宿主经 adb 驱动键盘输入的旧用法需要目标端先启动过一次应用，
- * 且 nonce 无法经 adb 读取（应用私有域），此类直发在新壳上会被拒（result=3）。
+ *
+ * #679 之后壳侧**没有任何 uid 白名单**（shell 与 root 的隐式信任都已撤销——Shizuku 两种模式
+ * 都会把对应身份借给已授权第三方应用），所以 nonce 是**唯一**凭据，取不到就等于发不出去。
+ * 本函数保留只是为了让「命令构造」这一层仍可被单测驱动；真实调用方应改用
+ * [adbKeyboardAuthState] 拿到结构化原因，而不是把空串当成「不带 auth 也能发」。
  */
 export function adbKeyboardAuth(filesDir: string | undefined): string {
   if (!filesDir) return ''
@@ -57,14 +57,47 @@ export function adbKeyboardAuth(filesDir: string | undefined): string {
 }
 
 /**
+ * nonce 可用性（#679 硬切后这是**唯一**凭据，所以取不到必须能说清是哪一种取不到）。
+ *
+ * 为什么另给一个结构化版本：`adbKeyboardAuth` 把三种失败压成同一个空串，调用方无法区分原因，
+ * 也就给不出可自助的报错。实测三种情形（见 PR）：变量未设 / 文件不存在 / 文件存在但只有空白
+ * 全部返回空串；只有文件存在且有值才拿到 token。
+ *
+ * 注意：nonce **没有过期概念**——壳侧 `ensureNonce` 一旦写入就永久复用（无时间戳、无 TTL、
+ * 无轮换），所以不存在「文件在但过期」这一态。
+ */
+export type KeyboardAuthState =
+  | { ok: true; auth: string }
+  | { ok: false; reason: string }
+
+export function adbKeyboardAuthState(filesDir: string | undefined): KeyboardAuthState {
+  if (!filesDir) return { ok: false, reason: 'DSH_FILES_DIR 未设置' }
+  let raw: string
+  try {
+    raw = readFileSync(join(filesDir, 'adb-keyboard-nonce'), 'utf8').trim()
+  } catch {
+    return { ok: false, reason: 'nonce 文件不存在或不可读' }
+  }
+  if (!raw) return { ok: false, reason: 'nonce 文件为空' }
+  return { ok: true, auth: raw }
+}
+
+/**
  * 构造一次键盘广播命令。
  *
  * `-n` 是 #413 的关键：不点名组件时，targetSdk 34 应用的 manifest 接收器**收不到**
  * 隐式广播，命令照样返回 result=0，现场表现就是「链路全绿、文本不动」。
+ *
+ * #679：`auth` 为空时**直接抛错**，不再构造一条注定被壳侧拒收（result=3）的命令。
+ * 理由：壳侧已撤销 uid 白名单，只认 nonce；空 auth 的命令 100% 会被拒，发出去只会
+ * 让调用方看到「广播完成但 result=3」，把「凭据缺失」伪装成「来源被拒」。
+ * 调用方应先用 [adbKeyboardAuthState] 取原因并向用户给出可自助的报错。
  */
 export function adbKeyboardBroadcast(action: string, msg: string | null | undefined, auth: string): string {
-  const parts = [`am broadcast -n ${KB_RECEIVER} -a ${action}`]
-  if (auth) parts.push(`--es auth ${shellQuote(auth)}`)
+  if (!auth) {
+    throw new Error('keyboard auth nonce is required (#679: no uid fallback in shell)')
+  }
+  const parts = [`am broadcast -n ${KB_RECEIVER} -a ${action}`, `--es auth ${shellQuote(auth)}`]
   if (typeof msg === 'string' && msg.length > 0) parts.push(`--es msg ${shellQuote(msg)}`)
   return parts.join(' ')
 }

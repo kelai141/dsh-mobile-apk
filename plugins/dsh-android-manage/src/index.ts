@@ -41,6 +41,7 @@ import {
   KB_ACTION_INPUT,
   KB_RESULT,
   adbKeyboardAuth,
+  adbKeyboardAuthState,
   adbKeyboardBroadcast,
   isCommitAccepted,
   hasAuthoritativeCommit,
@@ -2001,13 +2002,29 @@ properties: {
         // 本应用 0.13.2 起内嵌同协议 IME。F5 修复：ime enable 只入列不生效（广播被静默丢弃）——
         // 探测当前默认 IME → 临时 ime set 切到本通道 → 注入 → 还原原 IME（借道不劫持）。
         const execShell = priv.execAdbShell
+        // #679：nonce 是**唯一**凭据（壳侧已撤销 shell/root 的 uid 白名单），所以先确认它可用，
+        // 再去做 ime enable/ime set——否则会先把用户输入法切走、最后却发不出去，
+        // 且报错会伪装成「来源被拒(result=3)」而不是「凭据缺失」。
+        const authState = adbKeyboardAuthState(process.env.DSH_FILES_DIR)
+        if (!authState.ok) {
+          return {
+            ok: false,
+            denied: false,
+            channel: 'adbkeyboard',
+            text:
+              '未执行：键盘 nonce 不可用（' + authState.reason + '）。' +
+              '壳侧已不再信任 uid 白名单（#679：Shizuku 的 shell 与 root 模式都能把身份借给第三方应用），' +
+              '没有 nonce 就发不出广播。最常见原因是壳与插件不同版——请安装同版本的 APK 与快照。' +
+              '诊断：adb shell run-as com.dsharnessmobile.shell cat files/boot-diag.log' +
+              '（查 adb-keyboard-nonce-unavailable / adb-keyboard-nonce-write-failed）',
+          }
+        }
+        const auth = authState.auth
         const cur = await execShell(`settings get secure default_input_method`).catch(() => ({ ok: false, stdout: '' }))
         const prev = (cur.ok ? cur.stdout : '').trim().replace(/^"|"$/g, '')
         await execShell(`ime enable ${IME_ID}`).catch(() => undefined)
         const needSwitch = prev.length > 0 && prev !== IME_ID
         if (needSwitch) await execShell(`ime set ${IME_ID}`).catch(() => undefined)
-        // 0.13.8 #183 / #413：来源校验 nonce（壳侧私有文件，引擎与壳同 uid 可读）+ 点名组件。
-        const auth = adbKeyboardAuth(process.env.DSH_FILES_DIR)
         type KbSend = { ok: boolean; stdout: string; guidance?: string; code: number | null }
         const sendKb = async (action: string, msg?: string): Promise<KbSend> => {
           const line = adbKeyboardBroadcast(action, msg, auth)

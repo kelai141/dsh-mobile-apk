@@ -697,7 +697,21 @@ class MainActivity : ComponentActivity() {
     reportWebViewVersion("onCreate")
     // 0.13.8 #183：键盘广播 nonce（应用私有文件，引擎子进程经 DSH_FILES_DIR 读取，
     // manage 插件广播时 --es auth 携带；幂等）。
-    try { AdbKeyboardService.ensureNonce(this) } catch (_: Throwable) {
+    //
+    // #679：写失败必须**可见**。壳侧已撤销 uid 白名单（只认 nonce），所以 nonce 不存在就等于
+    // android_ui_input 的广播全链路失效；旧实现 catch 后什么都不做，用户只看到「中文输入没反应」，
+    // logcat 也常拿不到。这里记 Log.e + 写 boot-diag（可 run-as cat 取回的自助面）。
+    // 不重试、不回落旧口径——nonce 缺失时引擎侧会收到结构化错误并明确告知原因。
+    try {
+      AdbKeyboardService.ensureNonce(this)
+    } catch (t: Throwable) {
+      val reason = t.message ?: t.javaClass.simpleName
+      android.util.Log.e("dsh-adb-kb", "keyboard nonce unavailable at startup: " + reason)
+      try {
+        LogCollector.writeBootDiag(this, "adb-keyboard-nonce-write-failed", reason)
+      } catch (_: Throwable) {
+        // 诊断写不进去时至少 Log.e 已留下；不影响启动。
+      }
     }
     // #682 收口：外部可达的特权 action 已全部移除——重试改为进程内一次性标志
     // （见 pendingSelfRetry）；ACTION_UPDATE 的 adb 触发入口直接删除（runUpdate 定义
