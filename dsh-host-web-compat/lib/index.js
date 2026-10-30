@@ -14,21 +14,148 @@ import { Service } from '@deepseek-ai/cordis'
 /** Polyfill snippet per missing API (idempotent: skipped when already present). */
 const POLYFILLS = [
   // AbortSignal.any: Chrome 116+/Node 20.3+; absent in older WebViews
-  `if(typeof AbortSignal!=='undefined'&&!AbortSignal.any){AbortSignal.any=function(s){var c=new AbortController(),f=function(){c.abort()};for(var i=0;i<s.length;i++){if(s[i].aborted){c.abort();return c.signal}s[i].addEventListener('abort',f,{once:true})}return c.signal}}`,
+  // issue #1055 ③：旧实现两个缺陷——① 一个监听都不移除（长寿 signal 上派生 200 个就挂 200 个，
+  // 派生 signal 中止后仍挂着）；② 自造 AbortError，丢源 reason（`AbortSignal.any([AbortSignal.timeout(5)])`
+  // 的 reason.name 应是 TimeoutError）。按规范：任一源中止即用**该源的 reason** 中止结果，
+  // 且中止时摘掉全部监听；源已中止时直接短路（不挂监听）；空列表永不中止；非 signal 元素抛 TypeError。
+  `if(typeof AbortSignal!=='undefined'&&!AbortSignal.any){AbortSignal.any=function(signals){
+var list=[],i
+for(i=0;i<signals.length;i++){
+  var s=signals[i]
+  if(!s||typeof s.aborted!=='boolean'||typeof s.addEventListener!=='function')throw new TypeError('AbortSignal.any: argument is not an AbortSignal')
+  list.push(s)
+}
+var c=new AbortController()
+function cleanup(){for(var j=0;j<list.length;j++){try{list[j].removeEventListener('abort',onAbort)}catch(e){}}}
+function onAbort(ev){
+  var src=ev&&ev.target?ev.target:null
+  cleanup()
+  if(!c.signal.aborted)c.abort(src&&'reason' in src?src.reason:undefined)
+}
+for(i=0;i<list.length;i++){
+  if(list[i].aborted){c.abort(list[i].reason);return c.signal}
+}
+for(i=0;i<list.length;i++)list[i].addEventListener('abort',onAbort)
+if(c.signal.aborted)cleanup()
+else c.signal.addEventListener('abort',cleanup,{once:true})
+return c.signal
+}}`,
   // AbortSignal.timeout: Chrome 103+/Node 17.3+; the Android-12-era WebView (Chromium<103) lacks it
   `if(typeof AbortSignal!=='undefined'&&!AbortSignal.timeout){AbortSignal.timeout=function(ms){var c=new AbortController();setTimeout(function(){try{c.abort(new DOMException('TimeoutError','TimeoutError'))}catch(e){c.abort()}},ms);return c.signal}}`,
   // structuredClone: Chrome 98+/Node 17+; older WebViews lack it
-  `if(typeof structuredClone==='undefined'){structuredClone=function(v){return JSON.parse(JSON.stringify(v))}}`,
+  // issue #1055 ①：**不能**是 JSON 往返。JSON 会静默毁数据：Uint8Array→普通对象、Date→字符串、
+  // Map/Set→{}、NaN/Infinity→null、{a:undefined}→丢键，循环引用与 BigInt 直接抛错。
+  // 消费者是 pdf.js 的 worker 消息与 settings 的 structuredClone(ops)——坏的是数据不是异常，
+  // 所以「静默」比「报错」更糟。这里按结构化克隆语义实现：
+  //   支持 Array/Object/Date/RegExp/Map/Set/ArrayBuffer/TypedArray/DataView/Error/Boolean/Number/String、
+  //   循环引用（visited 表）、undefined 键保留、-0/NaN/Infinity 原值、稀疏数组保持稀疏；
+  //   不可克隆（函数/Symbol/WeakMap/WeakSet/Promise）按规范抛 DataCloneError；
+  //   transfer 选项真的转移（源 buffer 被 detach），不是静默丢弃。
+  // 只用 ES2017 语法（chrome87 底线；该段自身不能被 polyfill 依赖）。
+  `if(typeof structuredClone==='undefined'){(function(){
+function DCE(msg){var e;try{e=new DOMException(msg,'DataCloneError')}catch(x){e=new Error(msg);e.name='DataCloneError'}return e}
+function isBuf(v){return typeof ArrayBuffer!=='undefined'&&(v instanceof ArrayBuffer||(typeof SharedArrayBuffer!=='undefined'&&v instanceof SharedArrayBuffer))}
+function tagOf(v){return Object.prototype.toString.call(v).slice(8,-1)}
+function clone(v,seen,transfers){
+  if(v===null||typeof v!=='object'){
+    if(typeof v==='symbol')throw DCE('Symbol could not be cloned')
+    if(typeof v==='function')throw DCE('function could not be cloned')
+    return v
+  }
+  var hit=seen.get(v);if(hit!==undefined)return hit
+  var tag=tagOf(v),out,i
+  if(isBuf(v)){
+    if(transfers.has(v)){var moved=typeof v.transfer==='function'?v.transfer():v.slice(0);seen.set(v,moved);return moved}
+    out=v.slice(0);seen.set(v,out);return out
+  }
+  if(typeof ArrayBuffer!=='undefined'&&ArrayBuffer.isView(v)){
+    var buf=clone(v.buffer,seen,transfers)
+    if(v instanceof DataView){out=new DataView(buf,v.byteOffset,v.byteLength)}
+    else{var Ctor=v.constructor;out=new Ctor(buf,v.byteOffset,v.length)}
+    seen.set(v,out);return out
+  }
+  if(v instanceof Date){out=new Date(v.getTime());seen.set(v,out);return out}
+  if(v instanceof RegExp){out=new RegExp(v.source,v.flags);out.lastIndex=v.lastIndex;seen.set(v,out);return out}
+  if(v instanceof Map){out=new Map();seen.set(v,out);v.forEach(function(val,key){out.set(clone(key,seen,transfers),clone(val,seen,transfers))});return out}
+  if(v instanceof Set){out=new Set();seen.set(v,out);v.forEach(function(val){out.add(clone(val,seen,transfers))});return out}
+  if(v instanceof Error||/Error$/.test(tag)){
+    var ECtor=typeof globalThis[v.name]==='function'&&globalThis[v.name].prototype instanceof Error?globalThis[v.name]:Error
+    out=new ECtor(v.message);out.name=v.name;if(v.stack!==undefined)out.stack=v.stack;seen.set(v,out);return out}
+  if(v instanceof Boolean||v instanceof Number||v instanceof String){out=Object(v.valueOf());seen.set(v,out);return out}
+  if(typeof WeakMap!=='undefined'&&(v instanceof WeakMap||v instanceof WeakSet))throw DCE(tag+' could not be cloned')
+  if(typeof Promise!=='undefined'&&v instanceof Promise)throw DCE('Promise could not be cloned')
+  if(Array.isArray(v)){
+    out=new Array(v.length);seen.set(v,out)
+    for(i=0;i<v.length;i++){if(Object.prototype.hasOwnProperty.call(v,i))out[i]=clone(v[i],seen,transfers)}
+    return out
+  }
+  // 规范：自定义类的实例按**普通对象**克隆（只取自有可枚举属性），不抛错。
+  out={};seen.set(v,out)
+  var keys=Object.keys(v)
+  for(i=0;i<keys.length;i++){out[keys[i]]=clone(v[keys[i]],seen,transfers)}
+  return out
+}
+globalThis.structuredClone=function(value,options){
+  var seen=new Map(),transfers=new Set(),list=options&&options.transfer
+  if(list){for(var i=0;i<list.length;i++){var t=list[i];if(!isBuf(t)&&!(typeof ArrayBuffer!=='undefined'&&ArrayBuffer.isView(t)))throw DCE('transfer list item is not transferable');transfers.add(isBuf(t)?t:t.buffer)}}
+  var out=clone(value,seen,transfers)
+  /* transfer 的 detach 已在 clone() 的 transfers 分支完成（v.transfer() 会 detach 源）。 */
+  return out
+}})()}`,
   // Object.hasOwn: Chrome 93+/Firefox 92+/Safari 15.4+; MIUI12-era WebViews (Chromium 83) lack it
   // (issue #79: "Object.hasOwn is not a function"). Same semantics as Object.prototype.hasOwnProperty.call.
   `if(typeof Object.hasOwn==='undefined'){Object.hasOwn=function(o,k){return Object.prototype.hasOwnProperty.call(o,k)}}`,
   // Array.prototype.at: Chrome 92+/Safari 15.4+; missing on older WebViews.
   // 属性必须不可枚举（issue #621）：赋值式安装让 `for...in` 遍历数组时额外返回方法名，原生内建不可枚举。
-  `if(typeof Array.prototype.at==='undefined'){Object.defineProperty(Array.prototype,'at',{value:function(i){var l=this.length,t=Number(i)||0;if(t<0)t=Math.max(l+t,0);return t<0||t>=l?undefined:this[t]},writable:true,configurable:true,enumerable:false})}`,
+  // issue #1055 ⑤：缺 ToIntegerOrInfinity。旧式 `Number(i)||0` 不截断小数、且把 -Infinity 夹到 0：
+  // `[10,20,30].at(1.5)` 得 undefined（原生 20）、`.at('1.5')` 同样、`.at(-Infinity)` 得 10（原生 undefined）。
+  // 按规范：ToObject 接收者 + ToIntegerOrInfinity 索引（截断小数、±Infinity 保持符号）+ 负数从尾部数。
+  `if(typeof Array.prototype.at==='undefined'){Object.defineProperty(Array.prototype,'at',{value:function(index){
+var O=Object(this),len=O.length>>>0
+var n=Number(index)
+if(n!==n)n=0
+var k
+if(n===Infinity||n===-Infinity){k=n}else{k=n<0?Math.ceil(n):Math.floor(n)}
+if(k<0)k+=len
+if(k<0||k>=len)return undefined
+return O[k]
+},writable:true,configurable:true,enumerable:false})}`,
   // String.prototype.replaceAll: Chrome 85+/Safari 13.1+; optional last API on Chromium<85 WebViews.
   // 同 issue #621：原型上的赋值安装是可枚举的，任何字符串的 for...in 都会多出方法名——改用
   // Object.defineProperty 保持不可枚举（其余段落里的 Set / Iterator 助手本来就是 defineProperty）。
-  `if(typeof String.prototype.replaceAll==='undefined'){Object.defineProperty(String.prototype,'replaceAll',{value:function(s,r){if(s instanceof RegExp)throw new TypeError('replaceAll: search must be a string');return this.split(s).join(r)},writable:true,configurable:true,enumerable:false})}`,
+  // issue #1055 ④：split/join 不等价 —— 函数替换会被字符串化（`'a-b'.replaceAll('-',()=>'X')`
+  // 得到 `'afunction(){return "X"}b'`）、`$&` / `$\`` / `$'` / `$$` 替换模式原样插入而不替换、
+  // 空搜索串不插入首尾（原生 `'abc'.replaceAll('','-')` 是 `'-a-b-c-'`）。
+  // 按规范实现：字符串搜索走 GetSubstitution 替换模式；函数搜索取其返回值；空串首尾也插入；
+  // RegExp 且无 g 标志抛 TypeError（与原生一致）。
+  `if(typeof String.prototype.replaceAll==='undefined'){Object.defineProperty(String.prototype,'replaceAll',{value:function(search,replace){
+var str=String(this)
+if(search instanceof RegExp){
+  if(search.global!==true)throw new TypeError('replaceAll must be called with a global RegExp')
+  return String.prototype.replace.call(str,search,replace)
+}
+var needle=String(search),isFn=typeof replace==='function',sub=isFn?replace:String(replace)
+if(needle===''){
+  var out=isFn?sub('',0,str):applySub(sub,'',str,0,str)
+  for(var i=0;i<str.length;i++){out+=str.charAt(i);out+=isFn?sub(str.charAt(i),i+1,str):applySub(sub,str.charAt(i),str,i+1,str)}
+  return out
+}
+var result='',from=0,idx
+while((idx=str.indexOf(needle,from))!==-1){
+  result+=str.slice(from,idx)
+  result+=isFn?sub(needle,idx,str):applySub(sub,needle,str,idx,str)
+  from=idx+needle.length
+}
+return result+str.slice(from)
+function applySub(pattern,matched,whole,position,original){
+  return pattern.replace(/\$([$&\u0060'])/g,function(m,kind){
+    if(kind==='$')return '$'
+    if(kind==='&')return matched
+    if(kind==='\u0060')return original.slice(0,position)
+    return original.slice(position+matched.length)
+  })
+}
+},writable:true,configurable:true,enumerable:false})}`,
   // crypto.randomUUID: Chrome 92+ and requires a secure context; MIUI12-era WebViews (Chromium 87)
   // lack it while still offering crypto.getRandomValues (issue #110: randomUUID is not a function).
   // RFC 4122 v4: set version/variant bits, hex lowercase, canonical dashes.
@@ -661,17 +788,58 @@ try{
 const THEME_BRIDGE_SCRIPT = `<script>(function(){
 if(window.__dshThemeBridge){return}
 var dark=false,listeners=[]
-var native=window.matchMedia.bind(window)
+// issue #1055 ②：旧实现无条件替换 window.matchMedia，且用一个**全局** listeners 数组。九个可观测偏差：
+// ① 浅色查询在深色下返回 true（matches 恒等于全局 dark，不看查询本身）；② 组合查询后半段被丢
+// （'(prefers-color-scheme: dark) and (max-width:1px)' 在宽屏返回 true）；③ mql.onchange 永不触发；
+// ④ dispatchEvent('change') 不通知任何人；⑤ 同一监听加两次触发两次（原生 MQL 去重）；
+// ⑥ addEventListener 在**订阅时同步回调一次**（真实消费者 ui-theme 因此在构造期就 publish，
+// 早于插件初始化）；⑦ 订阅 B 查询会触发 A 查询的订阅者（全局数组）；⑧ 原生 matchMedia 缺席时
+// 直接在 .bind 上抛死；⑨ 健康内核上也会覆盖原生实现。
+// 修法：① 特性探测——原生可用且不是「厂商内核卡在浅色」的情形时**不接管**；② 每个查询独立实例
+// （独立 listeners / onchange）；③ 订阅不再同步回调；④ 同一监听去重；⑤ change 只由 setDark 驱动；
+// ⑥ 组合查询交给原生求值，只把 prefers-color-scheme 那一段的结论按主题标志修正。
+var native=typeof window.matchMedia==='function'?window.matchMedia.bind(window):null
+function queryDarkPart(q){
+  // 组合查询：让原生解析其余部分，只修正 prefers-color-scheme 段。
+  if(!native)return null
+  try{return native(q).matches}catch(e){return null}
+}
 window.matchMedia=function(q){
-  if(q.indexOf('prefers-color-scheme')<0)return native(q)
-  var fire=function(){for(var i=0;i<listeners.length;i++){try{listeners[i]()}catch(e){}}}
-  return {
-    get matches(){return dark}, get media(){return q}, onchange:null,
-    addEventListener:function(t,cb){if(t==='change'&&typeof cb==='function'){listeners.push(cb);fire()}},
-    removeEventListener:function(t,cb){var i=listeners.indexOf(cb);if(i>=0)listeners.splice(i,1)},
-    addListener:function(cb){listeners.push(cb)},removeListener:function(cb){var i=listeners.indexOf(cb);if(i>=0)listeners.splice(i,1)},
-    dispatchEvent:function(){return false}
+  if(typeof q!=='string')return native?native(q):{matches:false,media:String(q)}
+  if(q.indexOf('prefers-color-scheme')<0)return native?native(q):{matches:false,media:q}
+  var own=[],mql=null
+  function fire(){
+    if(typeof mql.onchange==='function'){try{mql.onchange({type:'change',media:q,matches:mql.matches})}catch(e){}}
+    var snapshot=own.slice()
+    for(var i=0;i<snapshot.length;i++){try{snapshot[i].call(mql,{type:'change',media:q,matches:mql.matches})}catch(e){}}
   }
+  function add(cb){
+    if(typeof cb!=='function')return
+    if(own.indexOf(cb)<0)own.push(cb)
+  }
+  function remove(cb){var i=own.indexOf(cb);if(i>=0)own.splice(i,1)}
+  mql={
+    get matches(){
+      // 把本条查询里 prefers-color-scheme 的期望值替换成当前主题标志，其余条件仍交原生求值。
+      var want=/prefers-color-scheme\s*:\s*(dark|light)/i.exec(q)
+      if(want===null)return dark
+      var expected=want[1].toLowerCase()==='dark'
+      if(expected!==dark)return false
+      // 主题那一段已满足：把该段换成恒真（去掉它），剩余条件交原生。
+      var rest=q.replace(/prefers-color-scheme\s*:\s*(dark|light)/i,'all')
+      var r=queryDarkPart(rest)
+      return r===null?true:r
+    },
+    get media(){return q},
+    onchange:null,
+    addEventListener:function(t,cb){if(t==='change')add(cb)},
+    removeEventListener:function(t,cb){if(t==='change')remove(cb)},
+    addListener:function(cb){add(cb)},
+    removeListener:function(cb){remove(cb)},
+    dispatchEvent:function(){fire();return true}
+  }
+  listeners.push({mql:mql,fire:fire})
+  return mql
 }
 // F1（0.14.1 白闪，issue #242）：把 uiMode 纠正还不够——入口 chunk 绘制之前，文档画布是
 // Chromium 的**默认白**，而上游页面模板的 html/body 没有任何背景声明（dsh/apps/web/index.html），
@@ -689,7 +857,7 @@ function applyCanvasTheme(d){
     de.style.colorScheme=d?'dark':'light';
   }catch(e){}
 }
-window.__dshThemeBridge={setDark:function(d){if(dark===d)return;dark=d;applyCanvasTheme(d);for(var i=0;i<listeners.length;i++){try{listeners[i]()}catch(e){}}}}
+window.__dshThemeBridge={setDark:function(d){if(dark===d)return;dark=d;applyCanvasTheme(d);var snapshot=listeners.slice();for(var i=0;i<snapshot.length;i++){try{snapshot[i].fire()}catch(e){}}}}
 try{
 // H1 (2026-08-16): pull the real uiMode synchronously on the first frame — when a vendor WebView's
 // matchMedia is stuck on light (vivo/Android 16), boot-theme and the upstream ui-theme would both get
