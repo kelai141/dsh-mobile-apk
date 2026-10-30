@@ -25,6 +25,56 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
+ * 修复助手整页文案（#1011 ①）。
+ *
+ * 缺陷现场：这一页是原生面，绝大多数控件文案是内联中文字面量——切英文后整页仍是中文。
+ * 收成一张表，`RepairActivity` 建视图时按当前语言取一份（页面重建即跟随语言）。
+ * 只收**界面文案**：引擎/模型名、会话标题、诊断正文都是数据，不在表内。
+ */
+internal data class RepairAssistantCopy(
+  val send: String,
+  val inputHint: String,
+  val thinking: String,
+  val completed: String,
+  val conversationsTitle: String,
+  val newConversation: String,
+  val recent: String,
+  val noConversations: String,
+  val current: String,
+  val modelSheetTitle: String,
+  val close: String,
+) {
+  /** 逐字段快照（测试用来遍历「每个字段都双语」）。 */
+  fun snapshot(): Map<String, String> = linkedMapOf(
+    "send" to send,
+    "inputHint" to inputHint,
+    "thinking" to thinking,
+    "completed" to completed,
+    "conversationsTitle" to conversationsTitle,
+    "newConversation" to newConversation,
+    "recent" to recent,
+    "noConversations" to noConversations,
+    "current" to current,
+    "modelSheetTitle" to modelSheetTitle,
+    "close" to close,
+  )
+}
+
+/** 取当前语言的一份文案（#1011 ①）。纯函数：`english` 已解析，JVM 单测两个方向都能断言。 */
+internal fun repairAssistantCopy(english: Boolean): RepairAssistantCopy = RepairAssistantCopy(
+  send = UiText.t(english, "发送", "Send"),
+  inputHint = UiText.t(english, "补充故障信息", "Describe the problem"),
+  thinking = UiText.t(english, "思考", "Thinking"),
+  completed = UiText.t(english, "完成", "Done"),
+  conversationsTitle = UiText.t(english, "修复会话", "Repair sessions"),
+  newConversation = UiText.t(english, "新建对话", "New conversation"),
+  recent = UiText.t(english, "近期", "Recent"),
+  noConversations = UiText.t(english, "还没有修复会话", "No repair sessions yet"),
+  current = UiText.t(english, "当前", "Current"),
+  modelSheetTitle = UiText.t(english, "模型与推理", "Model and reasoning"),
+  close = UiText.t(english, "关闭", "Close"),
+)
+/**
  * Native startup repair chat. The surface deliberately does not depend on Node,
  * WebView, plugins, or the extracted snapshot.
  */
@@ -46,6 +96,11 @@ class RepairActivity : Activity() {
   private var eventLog = JSONArray()
   private var currentSessionId: String? = null
   private var currentTitle = "新的修复"
+  /** 整页文案表（#1011 ①）：建视图时按当前语言取一份，控件一律读它，不再内联中文字面量。 */
+  private val copy: RepairAssistantCopy by lazy { repairAssistantCopy(UiText.isEnglish(this)) }
+
+  /** 行内双语（#1011 ①）：消息体/提示语这类只在一处出现的文案，中英就写在同一行。 */
+  private fun s(zh: String, en: String): String = UiText.t(this, zh, en)
   private var drawerScrim: View? = null
   private var drawer: LinearLayout? = null
   private lateinit var drawerList: LinearLayout
@@ -176,7 +231,7 @@ class RepairActivity : Activity() {
         if (!alive) return@runOnUiThread
         restoreSelection()
         applyModelState(modelFailure)
-        if (diagnosticsFailure != null) addSystemMessage(diagnosticsFailure, "诊断")
+        if (diagnosticsFailure != null) addSystemMessage(diagnosticsFailure, s("诊断", "Diagnostics"))
         if (history.length() == 0) {
           if (diagnosticsReady && connections.isNotEmpty() && defaultModelAvailable) beginAutomaticRepair()
           else addSystemMessage(
@@ -184,7 +239,7 @@ class RepairActivity : Activity() {
               "修复助手已打开。修好模型或诊断后，可点「重新读取模型配置」再开始。",
               "The repair assistant is open. Reload the model configuration after fixing it, then continue."),
           )
-        } else addSystemMessage("已打开最近的修复会话，可以继续补充故障信息。")
+        } else addSystemMessage(s("已打开最近的修复会话，可以继续补充故障信息。", "Reopened the most recent repair session; keep adding details."))
       }
     }.apply { name = "dsh-repair-init"; start() }
   }
@@ -199,10 +254,10 @@ class RepairActivity : Activity() {
       gravity = Gravity.CENTER_HORIZONTAL
     }
     navigationCluster.addView(
-      iconButton(R.drawable.repair_ic_back, "返回启动页") { returnToLauncher() },
+      iconButton(R.drawable.repair_ic_back, s("返回启动页", "Back to the start page")) { returnToLauncher() },
       LinearLayout.LayoutParams(space(42), space(42)),
     )
-    historyButton = iconButton(R.drawable.repair_ic_history, "打开修复会话") {
+    historyButton = iconButton(R.drawable.repair_ic_history, s("打开修复会话", "Open repair sessions")) {
       openConversationDrawer()
     }
     navigationCluster.addView(
@@ -214,7 +269,7 @@ class RepairActivity : Activity() {
     addView(View(this@RepairActivity), LinearLayout.LayoutParams(0, -1, 1f))
     // Keep the header quiet: navigation on the left, one circular model
     // picker on the right. Selection details stay inside the picker.
-    modelButton = iconButton(R.drawable.repair_ic_model, "选择模型与推理强度") {
+    modelButton = iconButton(R.drawable.repair_ic_model, s("选择模型与推理强度", "Choose model and reasoning effort")) {
       showModelSheet()
     }
     modelButton.isEnabled = false
@@ -227,7 +282,7 @@ class RepairActivity : Activity() {
     setPadding(space(12), space(8), space(12), space(12))
     setBackgroundColor(getColor(R.color.ds_bg))
     input = EditText(this@RepairActivity).apply {
-      hint = "补充故障信息"
+      hint = copy.inputHint
       inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES or
         InputType.TYPE_TEXT_FLAG_MULTI_LINE
       maxLines = 4
@@ -244,7 +299,7 @@ class RepairActivity : Activity() {
       setImageResource(R.drawable.dsh_ic_send)
       scaleType = ImageView.ScaleType.CENTER
       setPadding(space(13), space(13), space(13), space(13))
-      contentDescription = "发送"
+      contentDescription = copy.send
       isEnabled = false
       DsUi.bindPressScale(this)
       setOnClickListener { onSendButton() }
@@ -399,14 +454,14 @@ class RepairActivity : Activity() {
     }
     val panel = drawer!!
     panel.addView(TextView(this).apply {
-      text = "修复会话"
+      text = copy.conversationsTitle
       setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
       setTextColor(getColor(R.color.ds_text_primary))
       typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
       setPadding(space(10), space(6), space(10), space(10))
     })
     panel.addView(TextView(this).apply {
-      text = "新建对话"
+      text = copy.newConversation
       setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
       setTextColor(getColor(R.color.ds_accent))
       setPadding(space(10), space(10), space(10), space(10))
@@ -418,7 +473,7 @@ class RepairActivity : Activity() {
       setOnClickListener { createNewConversation() }
     }, LinearLayout.LayoutParams(-1, -2))
     panel.addView(TextView(this).apply {
-      text = "近期"
+      text = copy.recent
       setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
       setTextColor(getColor(R.color.ds_text_secondary))
       setPadding(space(10), space(16), space(10), space(6))
@@ -439,7 +494,7 @@ class RepairActivity : Activity() {
     val refs = RepairConversationStore.list(filesDir)
     if (refs.isEmpty()) {
       drawerList.addView(TextView(this).apply {
-        text = "还没有修复会话"
+        text = copy.noConversations
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
         setTextColor(getColor(R.color.ds_text_secondary))
         setPadding(space(10), space(12), space(10), space(12))
@@ -467,7 +522,7 @@ class RepairActivity : Activity() {
           else getColor(R.color.ds_text_primary))
       })
       if (ref.id == currentSessionId) item.addView(TextView(this).apply {
-        text = "当前"
+        text = copy.current
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
         setTextColor(getColor(R.color.ds_text_secondary))
         setPadding(0, space(2), 0, 0)
@@ -486,8 +541,8 @@ class RepairActivity : Activity() {
   private fun beginAutomaticRepair() {
     history.put(JSONObject().put("role", "system").put("content", diagnosticText.orEmpty()))
     saveCurrentSession()
-    addSystemMessage("引擎未能启动。我会自动读取本轮诊断，检查运行时并尝试修复。")
-    addSystemMessage("已收集本轮诊断", "诊断已就绪")
+    addSystemMessage(s("引擎未能启动。我会自动读取本轮诊断，检查运行时并尝试修复。", "The engine did not start. I will read this run's diagnostics, check the runtime and try to repair it."))
+    addSystemMessage(s("已收集本轮诊断", "Collected this run's diagnostics"), s("诊断已就绪", "Diagnostics ready"))
     runAgent("自动读取本轮诊断文件，检查运行时，定位并修复启动失败。使用工具实际执行修复并验证，不要只给建议。")
   }
 
@@ -570,7 +625,7 @@ class RepairActivity : Activity() {
         "user" -> addUserMessage(event.optString("text"))
         "assistant" -> addAssistantMessage(event.optString("text"))
         "reasoning" -> addReasoningCard(event.optString("text"))
-        "system" -> addSystemMessage(event.optString("text"), event.optString("label").ifBlank { "修复助手" })
+        "system" -> addSystemMessage(event.optString("text"), event.optString("label").ifBlank { s("修复助手", "Repair assistant") })
         "tool" -> addRestoredToolCard(event.optString("name"), event.optString("summary"))
         "diagnostic" -> {
           // Protocol evidence stays in the durable event log for the next repair
@@ -645,7 +700,8 @@ class RepairActivity : Activity() {
     if (!decision.send && !decision.notifyNoModel) return
     if (decision.notifyNoModel) {
       addSystemMessage(UiText.t(this,
-        "没有可用模型，这条消息没有发出，内容已保留在输入框。请先重新读取模型配置，或返回启动页重试引擎。",
+        s("没有可用模型，这条消息没有发出，内容已保留在输入框。请先重新读取模型配置，或返回启动页重试引擎。",
+        "No model is available, so this message was not sent. Your text is kept in the input box; reload the model configuration or retry the engine from the start page."),
         "No model is available, so this message was not sent. Your draft is kept in the composer. Reload the model configuration, or go back and retry the engine."))
       return
     }
@@ -668,7 +724,7 @@ class RepairActivity : Activity() {
     recordEvent(JSONObject().put("type", "user").put("text", prompt))
     addUserMessage(prompt)
     history.put(JSONObject().put("role", "user").put("content", safe(prompt)))
-    pendingActivity = addActivity("正在分析诊断")
+    pendingActivity = addActivity(s("正在分析诊断", "Analysing diagnostics"))
     worker = Thread {
       try {
         val activeClient = RepairModelClient()
@@ -727,17 +783,17 @@ class RepairActivity : Activity() {
             val name = fn.getString("name")
             val callId = call.optString("id", "")
             removePendingActivity()
-            pendingActivity = addToolCard(name, "正在执行")
+            pendingActivity = addToolCard(name, s("正在执行", "Running"))
             val result = try {
               safe(tools.execute(name, JSONObject(fn.optString("arguments", "{}"))))
             } catch (e: InterruptedException) { throw e }
-            catch (e: Exception) { safe("工具失败：" + (e.message ?: e.javaClass.simpleName)) }
+            catch (e: Exception) { safe(s("工具失败：", "Tool failed: ") + (e.message ?: e.javaClass.simpleName)) }
             if (lastTextual) {
               // Text DSML has no gateway-level tool id. Returning an invented id
               // in a tool role causes the next turn to be rejected. Give the model
               // the observation as data and keep the JSON protocol valid.
             history.put(JSONObject().put("role", "user").put("content",
-              "工具 " + name + " 的执行结果：\n" + result))
+              s("工具 ", "Tool ") + name + s(" 的执行结果：\n", " result:\n") + result))
             } else {
               history.put(JSONObject().put("role", "tool")
                 .put("tool_call_id", callId).put("content", result))
@@ -745,11 +801,11 @@ class RepairActivity : Activity() {
             recordEvent(JSONObject().put("type", "tool").put("name", name).put("summary", toolSummary(result)))
             finishToolCard(result)
           }
-          if (!completed) pendingActivity = addActivity("继续分析修复结果")
+          if (!completed) pendingActivity = addActivity(s("继续分析修复结果", "Analysing the repair result"))
         }
         if (!completed) {
           removePendingActivity()
-          addSystemMessage("本轮已达到 40 次模型调用。可补充信息后继续；当前状态不代表已修复。")
+          addSystemMessage(s("本轮已达到 40 次模型调用。可补充信息后继续；当前状态不代表已修复。", "This turn reached 40 model calls. Add details to continue; the current state does not mean it is fixed."))
         }
       } catch (_: InterruptedException) {
         // FutureTask.get and tool cancellation both surface as an interrupt.
@@ -760,7 +816,7 @@ class RepairActivity : Activity() {
         saveCurrentSession()
         if (alive) {
           runCatching { removePendingActivity() }
-          runCatching { addSystemMessage("已停止修复。已完成的文件修改仍然保留。") }
+          runCatching { addSystemMessage(s("已停止修复。已完成的文件修改仍然保留。", "Repair stopped. File changes already made are kept.")) }
         }
       } catch (e: Exception) {
         if (!alive) return@Thread
@@ -770,12 +826,12 @@ class RepairActivity : Activity() {
           RepairToolCallParser.completeInterruptedTail(history)
           saveCurrentSession()
           runCatching { removePendingActivity() }
-          runCatching { addSystemMessage("已停止修复。已完成的文件修改仍然保留。") }
+          runCatching { addSystemMessage(s("已停止修复。已完成的文件修改仍然保留。", "Repair stopped. File changes already made are kept.")) }
           return@Thread
         }
         if (alive) {
           runCatching { removePendingActivity() }
-          runCatching { addSystemMessage("修复中断：" + safe(e.message ?: e.javaClass.simpleName)) }
+          runCatching { addSystemMessage(s("修复中断：", "Repair interrupted: ") + safe(e.message ?: e.javaClass.simpleName)) }
         }
       } finally {
         client = null
@@ -817,7 +873,7 @@ class RepairActivity : Activity() {
   /** One circular control swaps send and stop without changing color hierarchy. */
   private fun styleSendButton(activity: Activity, button: ImageButton, running: Boolean) {
     button.setImageResource(if (running) R.drawable.dsh_ic_stop else R.drawable.dsh_ic_send)
-    button.contentDescription = if (running) "停止" else "发送"
+    button.contentDescription = if (running) s("停止", "Stop") else s("发送", "Send")
     button.setColorFilter(activity.getColor(R.color.ds_text_on_accent))
     button.background = DsUi.ripple(
       DsUi.oval(activity.getColor(R.color.ds_accent)),
@@ -871,7 +927,7 @@ class RepairActivity : Activity() {
     // Its text is selectable and expands fully, so the user can inspect the
     // provider's own words without confusing them with the final answer.
     val toggle = TextView(this).apply {
-      this.text = "思考"
+      this.text = copy.thinking
       setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
       setTextColor(getColor(R.color.ds_text_secondary))
       typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
@@ -891,19 +947,19 @@ class RepairActivity : Activity() {
     toggle.setOnClickListener {
       val show = detail.visibility != View.VISIBLE
       detail.visibility = if (show) View.VISIBLE else View.GONE
-      toggle.text = if (show) "思考  ▾" else "思考  ▸"
+      toggle.text = if (show) copy.thinking + "  ▾" else copy.thinking + "  ▸"
     }
     row.addView(toggle, LinearLayout.LayoutParams(-2, -2))
     row.addView(detail, LinearLayout.LayoutParams(-1, -2))
     addToConversation(row)
   }
 
-  private fun addSystemMessage(text: String, label: String = "修复助手") = uiSync {
+  private fun addSystemMessage(text: String, label: String = s("修复助手", "Repair assistant")) = uiSync {
     val row = LinearLayout(this).apply {
       orientation = LinearLayout.VERTICAL
       setPadding(space(12), space(4), space(28), space(4))
     }
-    if (label != "修复助手") {
+    if (label != s("修复助手", "Repair assistant")) {
       row.addView(TextView(this).apply {
         this.text = label
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
@@ -923,7 +979,7 @@ class RepairActivity : Activity() {
   }
 
   private fun addRestoredToolCard(name: String, summary: String) = uiSync {
-    val card = addToolCard(name, "完成")
+    val card = addToolCard(name, s("完成", "Done"))
     val title = card.getChildAt(0) as? LinearLayout
     title?.findViewWithTag<TextView>("tool-status")?.setTextColor(getColor(R.color.ds_ok))
     card.findViewWithTag<TextView>("tool-detail")?.text = summary
@@ -1011,7 +1067,7 @@ class RepairActivity : Activity() {
       card ?: return@uiSync
       val title = card.getChildAt(0) as? LinearLayout ?: return@uiSync
       val status = title.findViewWithTag<TextView>("tool-status")
-      status?.text = "完成  ▸"
+      status?.text = copy.completed + "  ▸"
       status?.setTextColor(getColor(R.color.ds_ok))
       card.findViewWithTag<TextView>("tool-detail")?.text = summary
       scrollToBottom()
@@ -1078,7 +1134,7 @@ class RepairActivity : Activity() {
         setPadding(space(12), space(10), space(12), space(4))
       })
     }
-    addSection("模型")
+    addSection(s("模型", "Model"))
     var modelDialog: AlertDialog? = null
     for ((index, connection) in connections.withIndex()) {
       content.addView(TextView(this).apply {
@@ -1098,7 +1154,7 @@ class RepairActivity : Activity() {
       })
     }
     val effortTitle = content.childCount
-    addSection("推理强度")
+    addSection(s("推理强度", "Reasoning effort"))
     val effortStart = content.childCount
     val effortHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
     fun fillEfforts() {
@@ -1106,7 +1162,7 @@ class RepairActivity : Activity() {
       val efforts = connections[selectedModel].reasoningEfforts
       if (efforts.isEmpty()) {
         effortHost.addView(TextView(this).apply {
-          text = "该模型未声明可调档位"
+          text = s("该模型未声明可调档位", "This model declares no adjustable effort levels")
           setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
           setTextColor(getColor(R.color.ds_text_secondary))
           setPadding(space(12), space(6), space(12), space(8))
@@ -1128,9 +1184,9 @@ class RepairActivity : Activity() {
     fillEfforts()
     content.addView(effortHost)
     modelDialog = AlertDialog.Builder(this)
-      .setTitle("模型与推理")
+      .setTitle(copy.modelSheetTitle)
       .setView(ScrollView(this).apply { addView(content) })
-      .setNegativeButton("关闭", null)
+      .setNegativeButton(copy.close, null)
       .show()
     modelDialog!!.setOnDismissListener {
       saveCurrentSession()
@@ -1186,18 +1242,18 @@ class RepairActivity : Activity() {
 
   private fun diagnosticContext(engine: EngineManager): String {
     val dir = report
-    val lines = StringBuilder("运行时目录：${engine.usrDir.absolutePath}\n用户目录：${engine.homeDir.absolutePath}\n")
-    if (dir == null) lines.append("本轮诊断目录创建失败，请通过工具读取应用日志。\n")
+    val lines = StringBuilder(s("运行时目录：", "Runtime dir: ") + "${engine.usrDir.absolutePath}\n" + s("用户目录：", "Home dir: ") + "${engine.homeDir.absolutePath}\n")
+    if (dir == null) lines.append(s("本轮诊断目录创建失败，请通过工具读取应用日志。\n", "Could not create this run's diagnostics directory; read the app log with the tools instead.\n"))
     else {
-      lines.append("本轮诊断目录：${dir.absolutePath}\n")
+      lines.append(s("本轮诊断目录：", "Diagnostics dir: ") + "${dir.absolutePath}\n")
       if (!dir.canonicalPath.startsWith(engine.dshDataDir.canonicalPath + File.separator)) {
-        lines.append("公共目录不可写，本轮诊断保存在上述应用私有目录。\n")
+        lines.append(s("公共目录不可写，本轮诊断保存在上述应用私有目录。\n", "The shared directory is not writable; this run's diagnostics are in the app-private directory above.\n"))
       }
       dir.listFiles()?.filter { it.isFile }?.sortedBy { it.name }?.forEach {
         lines.append("诊断文件：[${it.name}](${it.toURI()}) 路径=${it.absolutePath}\n")
       }
     }
-    lines.append("启动失败摘要：\n")
+    lines.append(s("启动失败摘要：\n", "Startup failure summary:\n"))
     val failure = File(filesDir, "boot-fail.log")
     if (failure.isFile) {
       java.io.RandomAccessFile(failure, "r").use {
@@ -1211,13 +1267,13 @@ class RepairActivity : Activity() {
   }
 
   private fun toolTitle(name: String): String = when (name) {
-    "read" -> "读取文件"
-    "write" -> "写入修复"
-    "list" -> "查看目录"
-    "bash" -> "运行命令"
-    "engine_status" -> "检查引擎"
-    "restart_engine" -> "重启引擎"
-    "refresh_runtime" -> "刷新运行时"
+    "read" -> s("读取文件", "Read file")
+    "write" -> s("写入修复", "Write repair")
+    "list" -> s("查看目录", "List directory")
+    "bash" -> s("运行命令", "Run command")
+    "engine_status" -> s("检查引擎", "Check engine")
+    "restart_engine" -> s("重启引擎", "Restart engine")
+    "refresh_runtime" -> s("刷新运行时", "Refresh runtime")
     else -> name
   }
 
@@ -1225,15 +1281,15 @@ class RepairActivity : Activity() {
     val value = runCatching { JSONObject(raw) }.getOrNull() ?: return raw.take(4000)
     return when {
       value.has("content") -> value.optString("path") + "\n" + value.optString("content").take(4000)
-      value.has("entries") -> "返回 " + (value.optJSONArray("entries")?.length() ?: 0) + " 个条目"
-      value.has("output") -> "退出码 " + value.optString("exitCode", "?") + "\n" + value.optString("output").take(4000)
-      value.has("ok") -> if (value.optBoolean("ok")) "操作成功" else "操作未成功"
+      value.has("entries") -> s("返回 ", "Returned ") + (value.optJSONArray("entries")?.length() ?: 0) + s(" 个条目", " entries")
+      value.has("output") -> s("退出码 ", "Exit code ") + value.optString("exitCode", "?") + "\n" + value.optString("output").take(4000)
+      value.has("ok") -> if (value.optBoolean("ok")) s("操作成功", "Operation succeeded") else s("操作未成功", "Operation did not succeed")
       else -> raw.take(4000)
     }
   }
 
   private fun safe(text: String): String {
-    var result = LogSanitizer.sanitizeOrNull(text) ?: "[脱敏失败，已省略内容]"
+    var result = LogSanitizer.sanitizeOrNull(text) ?: s("[脱敏失败，已省略内容]", "[Redaction failed; content omitted]")
     connections.forEach { connection ->
       if (connection.apiKey.isNotEmpty()) result = result.replace(connection.apiKey, "***")
       connection.headers.values.filter { it.length >= 8 }.forEach { result = result.replace(it, "***") }
@@ -1243,7 +1299,7 @@ class RepairActivity : Activity() {
 
   private fun returnToLauncher() {
     if (busy.get()) {
-      addSystemMessage("请先停止当前修复，再返回启动页。")
+      addSystemMessage(s("请先停止当前修复，再返回启动页。", "Stop the current repair before returning to the start page."))
       return
     }
     RepairState.active = false

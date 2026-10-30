@@ -1341,13 +1341,15 @@ object NotifyCenter {
   private fun addQuestionActions(app: Context, b: NotificationCompat.Builder, entry: NotifyEntry) {
     // 动作 1：直接回复（RemoteInput）。只有回复动作开 mutable——结果经 ClipData 注入，
     // FLAG_IMMUTABLE 会让回复静默失败（§6.3.1 / NT-16）。
+    // #1011 ②：通知栏按钮是系统画的，`RemoteInput` label 与 Action 标题各要一份，两处都跟语言走。
+    val replyLabel = replyActionLabel(UiText.isEnglish(app))
     val remote = RemoteInput.Builder(NotifyActionReceiver.REPLY_KEY)
-      .setLabel("回复")
+      .setLabel(replyLabel)
       .build()
     val firstQuestionId = entry.questions.firstOrNull()?.id
     val reply = NotificationCompat.Action.Builder(
       android.R.drawable.ic_menu_send,
-      "回复",
+      replyLabel,
       actionPending(app, entry, NotifyActionReceiver.ACTION_REPLY, mutable = true, questionId = firstQuestionId),
     )
       .addRemoteInput(remote)
@@ -1476,6 +1478,14 @@ object NotifyCenter {
   /** 失败通知的独立 ID 桶（S3-12：不得覆盖原提问/审批通知的 ID）。 */
   internal fun failureId(kind: String, eventId: String): Int =
     stableId("dsh-failure:" + kind.lowercase() + ":" + eventId)
+
+  /**
+   * 通知动作按钮「回复」的标题（#1011 ②）。
+   *
+   * 通知栏那枚按钮是系统画的，`RemoteInput` 的 label 与 `Action` 标题各要一份——
+   * 旧实现两处都写死中文，英文界面下仍是「回复」。
+   */
+  internal fun replyActionLabel(english: Boolean): String = UiText.t(english, "回复", "Reply")
 
   /**
    * 渠道被系统降级时随通知走的说明（S3-1 / #992）。
