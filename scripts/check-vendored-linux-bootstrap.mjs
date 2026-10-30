@@ -23,7 +23,7 @@
  *   node scripts/check-vendored-linux-bootstrap.mjs --print       # regenerate the digest table
  */
 import { createHash } from 'node:crypto'
-import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs'
+import { readdirSync, readFileSync, existsSync, statSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -54,7 +54,22 @@ const MANIFEST = {
 const ADDED = ['build.mjs', 'package.json']
 
 /** `lib/` is a build product (gitignored, rebuilt by `npm run build`); `node_modules` is never vendored. */
-const IGNORED_DIRS = new Set(['node_modules', 'lib', '.git'])
+//
+// issue #1198：**`lib/` 不能对「禁止载荷」扫描隐身**。
+//
+// 旧实现把 lib/ 和 node_modules 一起塞进 IGNORED_DIRS，而 vendoredFiles() 的同一趟 walk
+// 同时喂「文件集断言」和 checkForbiddenPayloads —— 于是 lib/ 对**两者**都不可见。
+// 但同一文件 :139 自己写着「lib/ 是快照注入器会打进包的产物目录」。
+// 结果：往 plugins/dsh-linux-bootstrap/lib/ 放 rootfs.deb 与 node，门禁全绿。
+//
+// 修法：把「不进文件集清单」与「不做载荷扫描」拆成两个集合。
+//   - SKIP_FROM_MANIFEST：lib/（构建产物，文件集哈希清单本来就不该含它）、.git
+//   - SKIP_FROM_SCAN：只有 .git（版本控制内部，不是交付面）
+//   - node_modules：两者都跳过（依赖树不属于本仓 vendoring 面）
+// lib/ 仍在文件集断言之外（它的内容随构建变化，写进哈希清单会天天漂），
+// 但**必须**过载荷扫描 —— 它正是会被打进包的那个目录。
+const SKIP_FROM_MANIFEST = new Set(['node_modules', 'lib', '.git'])
+const SKIP_FROM_SCAN = new Set(['node_modules', '.git'])
 
 /**
  * The vendoring must never carry the pieces that stay Release-only. Each entry is a claim we can
@@ -75,10 +90,29 @@ const digestOf = (path) => createHash('sha256').update(normalize(readFileSync(pa
 function vendoredFiles(dir = PACKAGE_DIR, prefix = '') {
   const out = []
   for (const name of readdirSync(dir).sort()) {
-    if (IGNORED_DIRS.has(name)) continue
+    if (SKIP_FROM_MANIFEST.has(name)) continue
     const full = join(dir, name)
     const rel = prefix ? `${prefix}/${name}` : name
     if (statSync(full).isDirectory()) out.push(...vendoredFiles(full, rel))
+    else out.push(rel)
+  }
+  return out
+}
+
+/**
+ * 需要做**载荷扫描**的文件（issue #1198）。
+ *
+ * 与 vendoredFiles 的差别只有一处：**包含 lib/**。
+ * lib/ 是构建产物，不该进哈希清单（内容随构建变），但它是会被打进包的目录 ——
+ * 「不得夹带二进制/归档载荷」这条承诺必须覆盖它，否则整条承诺在唯一相关的地方失效。
+ */
+function scannableFiles(dir = PACKAGE_DIR, prefix = '') {
+  const out = []
+  for (const name of readdirSync(dir).sort()) {
+    if (SKIP_FROM_SCAN.has(name)) continue
+    const full = join(dir, name)
+    const rel = prefix ? `${prefix}/${name}` : name
+    if (statSync(full).isDirectory()) out.push(...scannableFiles(full, rel))
     else out.push(rel)
   }
   return out
@@ -152,7 +186,10 @@ function run({ quiet = false } = {}) {
   }
 
   // 4. nothing Release-only may enter the repo through this directory.
-  const forbidden = checkForbiddenPayloads(actual)
+  // issue #1198：载荷扫描用**更宽的**文件集（含 lib/），文件集断言仍用 actual（不含 lib/）。
+// 两者故意不同：lib/ 内容随构建变化，不该进哈希清单；但它会被打进包，必须过载荷扫描。
+const scannable = scannableFiles()
+const forbidden = checkForbiddenPayloads(scannable)
   if (forbidden.length === 0) ok('no binary/archive payload, runtime plugin, rootfs or Node vendored')
   else fail(`forbidden payload vendored: ${forbidden.join('; ')}`)
 
@@ -207,6 +244,31 @@ function selfTest() {
     if (passed) console.log('SELF-TEST PASSED  ' + control.label)
     else { console.log('SELF-TEST FAILED  ' + control.label + ` — produced: ${JSON.stringify(produced)}`); bad += 1 }
   }
+  // issue #1198 正控（语义与上面几条不同：它们验证「能判红」，这条验证「机制接线正确」）：
+  // lib/ 不进文件集清单（构建产物），但**必须**进载荷扫描集 —— 它是会被打进包的目录。
+  // 临时造一个 lib/ 载荷来验证，不依赖当前 lib/ 里恰好有文件（构建产物可能缺席）。
+  {
+    const probeDir = join(PACKAGE_DIR, 'lib')
+    const probe = join(probeDir, '__probe_payload.deb')
+    const hadDir = existsSync(probeDir)
+    let posBad = []
+    try {
+      mkdirSync(probeDir, { recursive: true })
+      writeFileSync(probe, 'x')
+      const scan = scannableFiles()
+      if (!scan.some((f) => f === 'lib/__probe_payload.deb')) posBad.push('lib/ 不在载荷扫描集里')
+      if (!checkForbiddenPayloads(scan).some((f) => f.includes('__probe_payload.deb'))) posBad.push('lib/ 里的 .deb 未被判禁止')
+      if (vendoredFiles().some((f) => f.startsWith('lib/'))) posBad.push('lib/ 不该进哈希清单')
+    } finally {
+      try { rmSync(probe, { force: true }) } catch { /* ignore */ }
+      if (!hadDir) { try { rmSync(probeDir, { recursive: true, force: true }) } catch { /* ignore */ } }
+    }
+    if (posBad.length > 0) {
+      console.log('SELF-TEST FAILED  positive control: lib/ is inside the payload scan (issue #1198) — ' + posBad.join('; '))
+      bad += 1
+    } else console.log('SELF-TEST PASSED  positive control: lib/ is inside the payload scan (issue #1198)')
+  }
+
   if (bad > 0) process.exit(1)
   console.log(`SELF-TEST PASSED（正控 1 项 + 负控 ${controls.length} 项）`)
 }
