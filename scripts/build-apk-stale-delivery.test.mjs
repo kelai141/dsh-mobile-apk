@@ -18,7 +18,11 @@ const apksignerProbe = spawnSync(process.execPath, [GATE, '--apk', join(ROOT, 'n
 const apksignerMissing = /apksigner not found/.test(String(apksignerProbe.stderr ?? '') + String(apksignerProbe.stdout ?? ''));
 const needsApksigner = { skip: apksignerMissing ? '本机没有 apksigner（无 Android SDK），该层无法取证' : false };
 
-const runGate = (dir) => spawnSync(process.execPath, [GATE, '--dir', dir, '--keystore', KEYSTORE], { encoding: 'utf8', windowsHide: true });
+// issue #1138：keystore 凭据不再有内置默认值，调用方必须显式声明 alias 与口令。
+// 本测试用仓库自带 debug keystore，凭据即它的公开值（与 build-apk-engine 的 REPO_DEBUG_KEYSTORE_CREDENTIALS 同源）。
+const runGate = (dir) => spawnSync(process.execPath,
+  [GATE, '--dir', dir, '--keystore', KEYSTORE, '--keystore-alias', 'androiddebugkey', '--keystore-pass', 'android'],
+  { encoding: 'utf8', windowsHide: true });
 
 test('negative control: a stale unverified APK in the delivery dir keeps the signature gate red', needsApksigner, () => {
   const root = mkdtempSync(join(tmpdir(), 'stale-1077-'))

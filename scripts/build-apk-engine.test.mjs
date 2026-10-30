@@ -251,6 +251,9 @@ test('受控负控：把构建类型改回 debug 后，最终产物形态门禁�
     }, (command, args) => {
       if (args[0]?.endsWith('check-snapshot-fingerprint.mjs')) return { status: 0 }
       if (args[0]?.endsWith('build-hard-manifest.mjs')) return { status: 0 }
+      // issue #1077：终端阶段在拷贝前先跑签名与形态两段门禁，它们不是 Gradle 调用。
+      if (args[0]?.endsWith('check-apk-signatures.mjs')) return { status: 0 }
+      if (args[0]?.endsWith('check-apk-form.mjs')) return { status: 0 }
       // Gradle 任务必须跟着 buildType 走：debug 档不得被 release 任务悄悄顶替。
       assert.equal(args[0], buildType === 'debug' ? ':app:assembleDebug' : ':app:assembleRelease')
       const built = join(f.apkDir, 'app', 'build', 'outputs', 'apk', buildType, 'app-' + buildType + '.apk')
