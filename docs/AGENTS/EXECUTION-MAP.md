@@ -2501,6 +2501,8 @@ scripts/build-hard-manifest.mjs
 scripts/build-hard-manifest.test.mjs
 scripts/build-release.ps1
 scripts/build-snapshot-arm64.mjs
+# issue #1074：归档段退出码判据（tar 失败不得被 xz 的 0 掩盖，构建链内部逻辑 L1）
+scripts/check-snapshot-archive-exit-code.test.mjs
 glob:scripts/check-*.mjs
 scripts/check-snapshot-asset.ps1
 scripts/check-snapshot-secrets.ps1

@@ -14,7 +14,7 @@ import { mkdirSync, existsSync, writeFileSync, readFileSync, readdirSync, rmSync
 import { join, dirname, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
-import { wslPath, sh as wsl, XZ_THREADS, wslNodeCommand } from './lib/shell.mjs'
+import { wslPath, sh as wsl, shStatus, XZ_THREADS, wslNodeCommand } from './lib/shell.mjs'
 import { sanitizeSymlinks } from './lib/symlink-sanitize.mjs'
 import { relocateGitShellPath } from './lib/git-shell-path.mjs'
 
@@ -112,11 +112,11 @@ mkdirSync(join(STAGE, 'root'), { recursive: true })
 // **并发上限 8（0.14.1 用户拍板，系统级约束）**：此处原为 `-dT0`（吃满 16 逻辑核），会把开发机
 // 撑满 → 同时运行的 MuMu 模拟器卡顿/系统不稳；「模拟器优先」是铁律 2。统一用 shell.mjs 的 XZ_THREADS。
 log('解压基座（WSL）…')
-wsl(`set -o pipefail; mkdir -p "${wslPath(join(STAGE, 'root'))}" && xz -dT${XZ_THREADS} -c "${wslPath(baseTar)}" | tar -x -C "${wslPath(join(STAGE, 'root'))}" && du -sh ${wslPath(join(STAGE, 'root', 'usr'))} | cut -f1`)
+wsl(`mkdir -p "${wslPath(join(STAGE, 'root'))}" && xz -dT${XZ_THREADS} -c "${wslPath(baseTar)}" | tar -x -C "${wslPath(join(STAGE, 'root'))}" && du -sh ${wslPath(join(STAGE, 'root', 'usr'))} | cut -f1`)
 // home/.dsh 配置层在独立基座包（架构无关），一并合并
 const baseDsh = join(BASE_DIR, 'base-dsh.tar.xz')
 if (existsSync(baseDsh)) {
-  wsl(`set -o pipefail; xz -dT${XZ_THREADS} -c "${wslPath(baseDsh)}" | tar -x -C "${wslPath(join(STAGE, 'root'))}"`)
+  wsl(`xz -dT${XZ_THREADS} -c "${wslPath(baseDsh)}" | tar -x -C "${wslPath(join(STAGE, 'root'))}"`)
   log('合并 base-dsh（home/.dsh 配置层）')
 }
 // 🔒 机密剥离（安全审计 C1，2026-08-23）：base-dsh 是从运行中设备提取的配置层，
@@ -1194,11 +1194,37 @@ rmSync(archive, { force: true })
 // 多花 3-5 分钟）。统一 `--mtime=@<固定纪元>`（GNU tar）后，同一输入的产物字节稳定；inject-all.py
 // 新增文件同样取固定 mtime（SOURCE_DATE_EPOCH 可覆写）。
 const SOURCE_DATE_EPOCH = process.env.SOURCE_DATE_EPOCH ?? '1704067200'
-wsl(`
-  cd "${wslPath(join(STAGE, 'root'))}" && \
-  tar -c --mtime=@${SOURCE_DATE_EPOCH} usr home/.dsh home/.gitconfig 2>/dev/null | xz -T${XZ_THREADS} -6 > "${wslPath(archive)}" && \
-  ls -lh "${wslPath(archive)}"
-`)
+// 归档 = **两段而不是一条流水线**（issue #1074）。原因不是风格，是判据：
+// 旧写法 `tar … 2>/dev/null | xz … > snapshot.tar.xz` 即使 sh() 已开 pipefail 也不够——
+// 真因有两层：
+//   ① 管道状态默认只看最后一段（xz）。xz 对「读到的残缺流」照样 exit 0，于是 tar 层面的
+//      失败（成员缺失 / 文件不可读 / 读到一半被改）全部不可见；
+//   ② 即便开了 pipefail，`2>/dev/null` 也把**唯一的现场**（tar 报的到底是哪个成员）扔了，
+//      事后只能看到「某处失败」。
+// 改成分段执行：tar 先落 tar 中间件，明确拿它自己的退出码；这一段的 stderr 不再丢弃，
+// 失败时把 tar 的原话带进报错。xz 再单独压，压缩失败同样中止。
+// 中间件长度上限：完整快照 tar 约 700MB 级（xz 后 300MB 级），不能用内存缓冲承接。
+const archiveTar = join(OUT_DIR, 'snapshot.tar')
+rmSync(archiveTar, { force: true })
+const tarRun = shStatus(`cd "${wslPath(join(STAGE, 'root'))}" && tar -c --mtime=@${SOURCE_DATE_EPOCH} usr home/.dsh home/.gitconfig > "${wslPath(archiveTar)}"`)
+if (tarRun.status !== 0) {
+  // tar 非 0 = 归档成员不齐（典型：home/.gitconfig 没生成、某成员读到一半被改）。
+  // 此时**不得**继续算 sha256：那份残缺归档会被指纹化并作为构建输入发出去（issue #1074 实证）。
+  console.error(`归档失败：tar 退出码 ${tarRun.status}（成员不齐或不可读，残缺归档不得进入指纹与发布）`)
+  console.error((tarRun.stderr || tarRun.stdout || '').trim().split('\n').slice(-20).join('\n'))
+  rmSync(archiveTar, { force: true })
+  process.exit(1)
+}
+const xzRun = shStatus(`xz -T${XZ_THREADS} -6 -c "${wslPath(archiveTar)}" > "${wslPath(archive)}"`)
+if (xzRun.status !== 0) {
+  console.error(`归档失败：xz 压缩退出码 ${xzRun.status}（tar 中间件在 ${archiveTar}）`)
+  console.error((xzRun.stderr || xzRun.stdout || '').trim().split('\n').slice(-20).join('\n'))
+  rmSync(archiveTar, { force: true })
+  process.exit(1)
+}
+// 中间件只在归档段存在：留着会与 xz 产物混淆成第二份「快照」（体积也翻倍）。
+rmSync(archiveTar, { force: true })
+log(`归档 ${(statSync(archive).size / 1024 / 1024).toFixed(1)} MB`)
 const sha = createHash('sha256').update(readFileSync(archive)).digest('hex')
 writeFileSync(join(OUT_DIR, 'snapshot.sha256'), sha)
 // 归档后自检（2026-08-23：x86 曾出现「stage 有、归档无」的 LICENSES 目录怪癖——防再犯）。
