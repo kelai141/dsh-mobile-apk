@@ -2823,16 +2823,16 @@
       "// check-inject-completeness.mjs — 注入面成员完整性门禁（0.0.13 → 0.13.8-b P0 修复；坑 63 的活体复现防线）。"
     ],
     "check-inject-completeness.mjs:28": [
-      "const result = spawnSync(process.execPath, ['--test', join(HERE, 'check-inject-completeness.test.mjs'), join(HERE, 'build-injection-staging.test.mjs')], { stdio: 'inherit' })"
+      "//   ③ lib → 非 lib 的相对导入被无条件降级成 WARN，措辞还是「源码侧现象」——源包明明有那个文件。"
     ],
     "check-inject-completeness.mjs:37": [
-      "const check = (label, ok, detail) => {"
+      "import { basename, dirname, join, posix } from 'node:path'"
     ],
     "check-inject-completeness.mjs:98": [
-      "if (rel.endsWith('.map') || rel.endsWith('/')) continue   // 目录条目（lib/、lib/types/）不是成员"
+      "}"
     ],
     "check-patch-mirror.mjs:109": [
-      "try {"
+      "let regIds = []"
     ],
     "check-patch-mounts.mjs:28": [
       "const TOP_ITEM = /^-(?:\\s|$)/"
@@ -3916,7 +3916,7 @@
       "const resolveRepoPath = (rel) => {"
     ],
     "scripts/check-inject-completeness.mjs:100": [
-      "}"
+      "/** package.json files 字段声明的发布面（glob 展开；无该字段 = 空集）。 */"
     ],
     "scripts/check-kotlin-test-count.mjs:106": [
       "const head = readFileSync(full, 'utf8').slice(0, 2000)"
@@ -3931,19 +3931,19 @@
       "const args = [':app:testDebugUnitTest', '--no-daemon', '--console=plain']"
     ],
     "scripts/check-patch-mirror.mjs:109": [
-      "try {"
+      "let regIds = []"
     ],
     "scripts/check-patch-mirror.mjs:170": [
-      "const walkFiles = (dir, prefix = '') => {"
+      "const walk = (dir, prefix) => {"
     ],
     "scripts/check-patch-mirror.mjs:231": [
-      "// 真正仍逐字节守的是 scripts/patches/** 与插件 / 子仓目录。"
+      "'scripts/e2e-provider-ui.ps1',"
     ],
     "scripts/check-patch-mirror.mjs:339": [
-      "// apk 仓那一侧同理（同名副本随 apk 仓提交，故 CI 检出 apk 仓即得）。"
+      "'scripts/check-snapshot-fingerprint.mjs',"
     ],
     "scripts/check-patch-mirror.mjs:347": [
-      "'plugins/dsh-android-manage',"
+      "'scripts/control-ops-known-gaps.json',"
     ],
     "scripts/check-plugin-tests.mjs:35": [
       "* 钉在唯一入口（`runCommand` 里合并），而不是逐个调用点补：调用点显式传的 `env` 也覆盖不掉它，"
@@ -3985,7 +3985,7 @@
       "const writesTar = text.includes(\"join(OUT_DIR, 'snapshot.tar.xz')\")"
     ],
     "scripts/check-tool-output-schema.mjs:153": [
-      "if (!prop || typeof prop !== 'object') return undefined"
+      "{"
     ],
     "scripts/check-tool-output-schema.mjs:7": [
       "//   1) lib/ 时效检查：任一 src/*.ts 比 lib/*.js 新只是**触发**，真伪由重建哈希裁决"

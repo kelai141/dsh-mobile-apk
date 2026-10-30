@@ -2009,7 +2009,7 @@ flowchart LR
 
 - 漂移：`历史 BRIDGE-API 副本（当前契约见§6 K04）` 说聚合入口「`--list` 现数，当前 17 项」，源码 `scripts/check-release-gates.mjs:28`（`GATES` 数组）是 27 项（同仓 `docs/AGENTS/build-and-env.md:48` 写的是 27 项，两份文档自相矛盾）。
 - 漂移：5 个门禁脚本的两仓副本行尾不同（协调仓 CRLF、apk 仓 LF），`cmp` 字节不等、归一化后内容一致：`scripts/check-boot-budget.mjs`、`scripts/check-browser-syntax-floor.mjs`、`scripts/check-build-parallel-cap.mjs`、`scripts/check-snapshot-builder-output.mjs`、`scripts/check-tool-output-schema.mjs`；镜像门禁只按「仅行尾差异」告警放行（`scripts/check-patch-mirror.mjs:339`）——「逐字节镜像」在行尾层不成立。
-- Resolved: `scripts/check-code-map.mjs` is registered in `MIRROR_TOP` (`scripts/check-patch-mirror.mjs:380#expect=scripts%2Fcheck-code-map.mjs`), the aggregate gate, both APK build chains, and APK CI. The coordination CI intentionally does not run this APK-specific map gate.
+- Resolved: `scripts/check-code-map.mjs` is registered in `MIRROR_TOP` (`scripts/check-patch-mirror.mjs:353#expect=scripts%2Fcheck-code-map.mjs`), the aggregate gate, both APK build chains, and APK CI. The coordination CI intentionally does not run this APK-specific map gate.
 
 ```mermaid
 flowchart TD
@@ -2587,7 +2587,7 @@ app/src/main/java/com/dsharnessmobile/shell/ApkUpdateAction.kt
 - [B01] 漂移：`AGENTS.md:21` 说 `vendor/`（marketplace / undo-savepoint / dsh-model-sync），源码实际 `vendor/` 只有 `dsh-undo-savepoint` 与 `dshmarketplace-plugin`（model-sync 已随 0.14.1 整体摘除，见 `scripts/profile-web.cordis.patch.yml:128-138` 与 `scripts/check-patch-mirror.mjs:231-233`）。
 - [B02] 漂移：`历史 BRIDGE-API 副本（当前契约见§6 K04）` 说聚合入口「`--list` 现数，当前 17 项」，源码 `scripts/check-release-gates.mjs:28`（`GATES` 数组）是 27 项（同仓 `docs/AGENTS/build-and-env.md:48` 写的是 27 项，两份文档自相矛盾）。
 - [B02] 漂移：5 个门禁脚本的两仓副本行尾不同（协调仓 CRLF、apk 仓 LF），`cmp` 字节不等、归一化后内容一致：`scripts/check-boot-budget.mjs`、`scripts/check-browser-syntax-floor.mjs`、`scripts/check-build-parallel-cap.mjs`、`scripts/check-snapshot-builder-output.mjs`、`scripts/check-tool-output-schema.mjs`；镜像门禁只按「仅行尾差异」告警放行（`scripts/check-patch-mirror.mjs:339`）——「逐字节镜像」在行尾层不成立。
-- [B02] Resolved: `scripts/check-code-map.mjs` is registered in `MIRROR_TOP` (`scripts/check-patch-mirror.mjs:380#expect=scripts%2Fcheck-code-map.mjs`), the aggregate gate, both APK build chains, and APK CI. The coordination CI intentionally does not run this APK-specific map gate.
+- [B02] Resolved: `scripts/check-code-map.mjs` is registered in `MIRROR_TOP` (`scripts/check-patch-mirror.mjs:353#expect=scripts%2Fcheck-code-map.mjs`), the aggregate gate, both APK build chains, and APK CI. The coordination CI intentionally does not run this APK-specific map gate.
 
 WebView verification locales (#600): scripts/verify-webview-015.mjs resolves Chinese and English accessible names, prioritizes the account-menu trigger and retains missing/disabled-control failures. scripts/verify-webview-settings.test.mjs covers both navigation paths and attachment labels; PR CI installs its declared UI test dependencies and runs the same self-test. Device invocation remains positional WebSocket with a fresh target per run.
 
