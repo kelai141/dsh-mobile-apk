@@ -297,7 +297,18 @@ if (SELF_TEST || SELF_TEST_RUNTIME) {
       writeFileSync(fingerprintFile, actualHash + '\n')
       // #920：指纹门禁现在还要求 plugin-hard-manifest.json 在场，本夹具树一并补上，
       // 否则「正向：实际指纹门禁接受匹配的 SHA-256」会被清单缺席判红（与被测判据无关）。
-      writeFileSync(join(assets, 'plugin-hard-manifest.json'), '{"entries":[]}')
+      // #993：清单判据从「在场」提到「可解析且非空壳」，所以夹具必须是**可用**形态
+      // （schema + 非空 entries + 非空且为 entries 子集的 profileEntries）。
+      // 空 entries 正是 #993 要判红的形态，继续用它会让本用例在无关判据上变红。
+      writeFileSync(join(assets, 'plugin-hard-manifest.json'), JSON.stringify({
+        schema: 2,
+        complete: true,
+        fingerprint: actualHash,
+        entries: [{ id: 'fixture@1.0.0', name: '@dsh-android/fixture' }],
+        profileEntries: [{ id: 'fixture@1.0.0', name: '@dsh-android/fixture' }],
+        factoryBundles: [],
+        names: ['@dsh-android/fixture'],
+      }))
       const fingerprintGate = join(ROOT, 'scripts', 'check-snapshot-fingerprint.mjs')
       const matchingHash = spawnSync(process.execPath, [fingerprintGate, '--require', '--root', fingerprintRoot], { encoding: 'utf8' })
       check('正向：实际指纹门禁接受匹配的 SHA-256', matchingHash.status === 0 && matchingHash.stdout.includes('SNAPSHOT-FINGERPRINT CHECK PASSED'))
