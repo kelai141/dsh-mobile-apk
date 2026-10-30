@@ -141,13 +141,44 @@ export function assembleApk(options, runner = spawnSync) {
  * is necessarily present, so an unresolvable aapt2 is a real defect, not an excuse
  * to skip the judgement.
  */
-export function verifyApks({ directories = [], files = [], signatureGate = join(SCRIPT_DIR, 'check-apk-signatures.mjs'), formGate = join(SCRIPT_DIR, 'check-apk-form.mjs'), keystore = join(SCRIPT_DIR, '..', 'keystore', 'debug.keystore'), selfTest = true, log = console.log }, runner = spawnSync) {
+/**
+ * issue #1031（后半）：keystore 的 alias 与口令**没有任何内置兜底**，必须由调用方显式声明。
+ *
+ * 病灶形态：旧实现在检查器里写 `process.env.DSH_APK_KEYSTORE_ALIAS || 'androiddebugkey'`。
+ * 这两个字面量只对仓库自带的那把 debug keystore 成立，而检查器要被任意 `--keystore` 调用——
+ * 于是换成任何一把真实发布钥（alias/口令都不同）时 keytool 必然导出失败，报
+ * 「cannot export the repository signing certificate」，而那份 APK 的签名完全合法、
+ * 锚也已按文档同步。实测：证书合法 + alias=releasekey + 非默认口令 -> exit 1。
+ *
+ * 修法分两层，职责不同：
+ *   - 检查器（check-apk-signatures.mjs）：**零默认值**。凭据缺席即判红并点名补法，
+ *     绝不回落到任何字面量。它不知道调用方拿的是哪把钥匙，也就没有资格猜。
+ *   - 本引擎：它是**唯一**同时选定 keystore 路径与凭据的地方（默认 `keystore/debug.keystore`
+ *     配下面这份公开凭据）。配对关系写在一处、可被读见，不是散落的猜测。
+ * 换发布钥的调用方有两条路且都不必改代码：`--keystore-alias/--keystore-pass`，或
+ * `DSH_APK_KEYSTORE_ALIAS/DSH_APK_KEYSTORE_PASS`（优先级：CLI > 环境变量 > 本常量）。
+ */
+export const REPO_DEBUG_KEYSTORE_CREDENTIALS = Object.freeze({ alias: 'androiddebugkey', pass: 'android' })
+
+/** 凭据优先级：显式参数 > 环境变量 > 仓库 debug keystore 的公开凭据。 */
+export function resolveEngineKeystoreCredentials({ keystoreAlias, keystorePass, env = process.env } = {}) {
+  return {
+    alias: keystoreAlias ?? (env?.DSH_APK_KEYSTORE_ALIAS || REPO_DEBUG_KEYSTORE_CREDENTIALS.alias),
+    pass: keystorePass ?? (env?.DSH_APK_KEYSTORE_PASS || REPO_DEBUG_KEYSTORE_CREDENTIALS.pass),
+  }
+}
+
+export function verifyApks({ directories = [], files = [], signatureGate = join(SCRIPT_DIR, 'check-apk-signatures.mjs'), formGate = join(SCRIPT_DIR, 'check-apk-form.mjs'), keystore = join(SCRIPT_DIR, '..', 'keystore', 'debug.keystore'), keystoreAlias, keystorePass, selfTest = true, log = console.log }, runner = spawnSync) {
   const targets = [...directories.flatMap((directory) => ['--dir', resolve(directory)]),
     ...files.flatMap((file) => ['--apk', resolve(file)])]
   if (!targets.length) throw new Error('signature verification requires at least one directory or APK')
+  // 环境变量必须能穿透本引擎：否则引擎恒传显式 flag 会把调用方的环境变量压掉，
+  // 那条「不改代码就能换钥」的路就只剩 CLI 一条（实测过这个缺口）。
+  const { alias, pass } = resolveEngineKeystoreCredentials({ keystoreAlias, keystorePass })
   log('验证最终输出 APK 的 v1/v2/v3 签名…')
   if (selfTest) execute(process.execPath, [signatureGate, '--self-test'], { cwd: SCRIPT_DIR }, runner)
-  execute(process.execPath, [signatureGate, ...targets, '--keystore', resolve(keystore)], { cwd: SCRIPT_DIR }, runner)
+  execute(process.execPath, [signatureGate, ...targets, '--keystore', resolve(keystore),
+    '--keystore-alias', alias, '--keystore-pass', pass], { cwd: SCRIPT_DIR }, runner)
   log('验证最终输出 APK 的产物形态（不得含 application-debuggable）…')
   if (selfTest) execute(process.execPath, [formGate, '--self-test'], { cwd: SCRIPT_DIR }, runner)
   execute(process.execPath, [formGate, ...targets, '--require'], { cwd: SCRIPT_DIR }, runner)
@@ -179,6 +210,9 @@ function main(argv) {
       directories: options.dir ? [options.dir] : [],
       files: options.apk ? [options.apk] : [],
       keystore: options.keystore ? resolve(options.keystore) : undefined,
+      // issue #1031：显式覆盖 keystore 凭据（换发布钥的调用方走这里，不必改代码）。
+      keystoreAlias: options.keystoreAlias,
+      keystorePass: options.keystorePass,
       selfTest: !options.skipSelfTest,
       signatureGate: options.signatureGate ? resolve(options.signatureGate) : undefined,
       formGate: options.formGate ? resolve(options.formGate) : undefined,

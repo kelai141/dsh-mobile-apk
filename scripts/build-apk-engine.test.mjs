@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { BUILD_TYPES, assembleApk, parseArgs, verifyApks } from './build-apk-engine.mjs'
+import { BUILD_TYPES, assembleApk, parseArgs, verifyApks, resolveEngineKeystoreCredentials } from './build-apk-engine.mjs'
 import { evaluateBadging } from './check-apk-form.mjs'
 
 function fixture(t) {
@@ -193,7 +193,9 @@ test('shared final-artifact stage self-tests and verifies signatures then form o
   // self-test + verify for the signature gate, then self-test + verify for the form gate.
   assert.equal(calls.length, 4)
   assert.deepEqual(calls[0].args, ['/tools/check-apk-signatures.mjs', '--self-test'])
-  assert.deepEqual(calls[1].args, ['/tools/check-apk-signatures.mjs', '--dir', resolve('/release/apk'), '--keystore', resolve('/release/debug.keystore')])
+  // issue #1031：keystore 凭据必须显式传给检查器——门禁不再内置「猜一个默认值」的回落。
+  assert.deepEqual(calls[1].args, ['/tools/check-apk-signatures.mjs', '--dir', resolve('/release/apk'), '--keystore', resolve('/release/debug.keystore'),
+    '--keystore-alias', 'androiddebugkey', '--keystore-pass', 'android'])
   assert.deepEqual(calls[2].args, ['/tools/check-apk-form.mjs', '--self-test'])
   // --require: a build machine ships an SDK, so an unresolvable aapt2 must fail rather than skip.
   assert.deepEqual(calls[3].args, ['/tools/check-apk-form.mjs', '--dir', resolve('/release/apk'), '--require'])
@@ -285,6 +287,8 @@ test('verify --skip-self-test is parsed as a boolean and skips the second self-t
     fileURLToPath(new URL('./check-apk-signatures.mjs', import.meta.url)),
     '--dir', resolve('/release/apk'), '--keystore',
     fileURLToPath(new URL('../keystore/debug.keystore', import.meta.url)),
+    // 仓库那份 debug keystore 的公开凭据（与 app/build.gradle.kts 的 repoDebug 同源）。
+    '--keystore-alias', 'androiddebugkey', '--keystore-pass', 'android',
   ])
   assert.equal(calls[0].includes('--self-test'), false)
   // --skip-self-test 同时关掉两道门禁的自证，但两道门禁本身都必须真跑。
@@ -323,4 +327,42 @@ test('portable inject-all uses the host Python command just like the snapshot bu
   assert.match(portable, /const PYTHON = process\.platform === 'win32' \? 'python' : 'python3'/)
   assert.match(portable, /run\(PYTHON,\s*\[\s*join\(ROOT, 'scripts', 'inject-all\.py'/)
   assert.doesNotMatch(portable, /run\('python',\s*\[\s*join\(ROOT, 'scripts', 'inject-all\.py'/)
+})
+
+// ─── issue #1031（后半）：keystore 凭据的优先级与「不改代码换钥」两条路 ────────────────
+// 门禁本身零默认值；引擎是唯一同时选定 keystore 路径与凭据的地方。这三条钉住优先级，
+// 因为「引擎恒传显式 flag」曾把调用方的环境变量压掉 —— 那条路会静默只剩 CLI 一条。
+
+test('引擎凭据优先级：显式参数 > 环境变量 > 仓库 debug keystore 的公开凭据', () => {
+  assert.deepEqual(resolveEngineKeystoreCredentials({ env: {} }), { alias: 'androiddebugkey', pass: 'android' })
+  assert.deepEqual(
+    resolveEngineKeystoreCredentials({ env: { DSH_APK_KEYSTORE_ALIAS: 'releasekey', DSH_APK_KEYSTORE_PASS: 'S3cret-Release' } }),
+    { alias: 'releasekey', pass: 'S3cret-Release' })
+  assert.deepEqual(
+    resolveEngineKeystoreCredentials({ keystoreAlias: 'clikey', keystorePass: 'clipass',
+      env: { DSH_APK_KEYSTORE_ALIAS: 'releasekey', DSH_APK_KEYSTORE_PASS: 'S3cret-Release' } }),
+    { alias: 'clikey', pass: 'clipass' })
+})
+
+test('引擎把解析后的凭据逐字传给检查器（环境变量必须能穿透）', () => {
+  const calls = []
+  verifyApks({ directories: ['/release/apk'], signatureGate: '/tools/check-apk-signatures.mjs',
+    formGate: '/tools/check-apk-form.mjs', keystore: '/release/debug.keystore', selfTest: false, log() {} },
+  (command, args) => { calls.push(args); return { status: 0 } })
+  const verify = calls.find((args) => args.includes('--keystore'))
+  // 检查器拿到的必须是显式凭据：它自己不再有任何默认值可回落。
+  assert.ok(verify.includes('--keystore-alias') && verify.includes('--keystore-pass'))
+  assert.equal(verify[verify.indexOf('--keystore-alias') + 1], 'androiddebugkey')
+  assert.equal(verify[verify.indexOf('--keystore-pass') + 1], 'android')
+})
+
+test('引擎显式凭据覆盖：换发布钥的调用方不必改代码', () => {
+  const calls = []
+  verifyApks({ directories: ['/release/apk'], signatureGate: '/tools/check-apk-signatures.mjs',
+    formGate: '/tools/check-apk-form.mjs', keystore: '/release/release.keystore',
+    keystoreAlias: 'releasekey', keystorePass: 'S3cret-Release', selfTest: false, log() {} },
+  (command, args) => { calls.push(args); return { status: 0 } })
+  const verify = calls.find((args) => args.includes('--keystore'))
+  assert.equal(verify[verify.indexOf('--keystore-alias') + 1], 'releasekey')
+  assert.equal(verify[verify.indexOf('--keystore-pass') + 1], 'S3cret-Release')
 })
