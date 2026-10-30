@@ -116,6 +116,55 @@ const collectTestFiles = (dir) => {
 }
 
 /**
+ * 该插件被测试直接读的构建产物清单（issue #1143）。
+ *
+ * 为什么要先探这一步再跑测试
+ * --------------------------
+ * lib/ 是构建产物（.gitignore 忽略各插件下的 lib 目录），净检出必然没有。而本 runner
+ * 直连 node --test / vitest，**不经过**插件 npm test 里的 npm run build 前置。
+ * 于是缺产物时测试在 **import 期**就抛（如 dsh-session-delete 的 client-wiring.test.mjs:9
+ * 里那句 readFileSync 指向 ../lib/client.js），node --test 记 0 pass —— 判据文案却报成
+ * 「单测未通过」或「全 skip = 假绿」，**把缺产物误导成代码缺陷**，指引人去改本来正确的代码。
+ *
+ * CI 上是绿的：.github/workflows/pr-gate.yml 的准备段在调本门禁前已逐个插件跑 npm run build。
+ * 所以缺产物只在本地净检出/未构建的链上出现 —— 那属于**环境未就绪**，不是判据结论。
+ * 按仓库既有惯例（用法/前置不满足 = exit 2）单列一态，并给出可操作命令。
+ *
+ * 只探**测试真的会读**的那些文件：从测试源码里抽 ../lib/<name> 形式的路径（含子路径），
+ * 再加 lib/index.js（插件入口，被注入链与多数测试依赖）。抽不到任何引用时只探 lib/index.js，
+ * 不凭猜想列一堆文件。
+ *
+ * @param pluginDir 插件目录绝对路径
+ * @param testFiles 该插件的测试文件绝对路径列表
+ * @returns {{missing: Array<{rel: string, cmd: string}>}} 缺失产物及对应的可操作命令
+ */
+export function missingBuildArtifacts(pluginDir, testFiles) {
+  const want = new Set(['lib/index.js'])
+  for (const f of testFiles) {
+    let src = ''
+    try { src = readFileSync(f, 'utf8') } catch { continue }
+    // 只认 `../lib/<path>` 这种从 test/ 往插件根走的形态；`../src/...` 不是产物，不探。
+    for (const m of src.matchAll(/\.\.\/lib\/([A-Za-z0-9_.\/-]+)/g)) {
+      const rel = 'lib/' + m[1].replace(/[\u0027\u0022\u0060).,;]+$/, '')
+      if (rel.includes('..')) continue
+      want.add(rel)
+    }
+  }
+  const pkg = (() => {
+    try { return JSON.parse(readFileSync(join(pluginDir, 'package.json'), 'utf8')) } catch { return null }
+  })()
+  const hasBuild = typeof pkg?.scripts?.build === 'string' && pkg.scripts.build.trim() !== ''
+  const missing = []
+  for (const rel of [...want].sort()) {
+    if (existsSync(join(pluginDir, rel))) continue
+    const cmd = hasBuild
+      ? 'cd ' + pluginDir + ' && npm run build'
+      : '(该插件未声明 build 脚本，产物应由上游构建链产出) ' + join(pluginDir, rel)
+    missing.push({ rel, cmd })
+  }
+  return { missing }
+}
+/**
  * 从 `package.json` 的 test 脚本里抽出**测试路径模式集合**。
  *
  * 这是形态判据与覆盖数判据的**唯一解析入口**（#989）。两条判据此前各写一份解析：
@@ -147,30 +196,9 @@ const scriptCoverage = (testDir, script) => {
   }).length
 }
 
-// issue #1143：插件构建有**跨包依赖顺序**——dsh-android-linux-env 的 package.json 依赖
-// `file:../../dsh-shell-termux`（根目录那个包，不在这里的 plugins/ 下），所以它必须先被构建，
-// 否则 linux-env 的 tsc 报 TS2307 Cannot find module '@dsh-android/dsh-shell-termux'。
-//
-// .github/workflows/pr-gate.yml 的「准备插件产物」段正是按 scripts/plugin-dirs.json 的顺序
-// 逐个 `npm run build`（termux 在清单首位，注释写明「linux-env 编译依赖它的 lib」）。
-// 这里沿用同一份顺序来源，避免两处对构建序各自拍脑袋——顺序错了只会在 linux-env 上炸，
-// 而那看起来像「插件构建失败」，真因却在别处的构建序。
-const pluginOrder = (() => {
-  try {
-    const { dirs } = JSON.parse(readFileSync(join(ROOT, 'scripts', 'plugin-dirs.json'), 'utf8'))
-    return dirs.filter((d) => d.startsWith('plugins/')).map((d) => d.slice('plugins/'.length))
-  } catch { return [] }
-})()
-const pluginsOnDisk = existsSync(PLUGIN_DIR)
+const plugins = existsSync(PLUGIN_DIR)
   ? readdirSync(PLUGIN_DIR).filter((n) => existsSync(join(PLUGIN_DIR, n, 'package.json')))
   : []
-// 清单里有的按清单位置排前，其余按名字排后（磁盘上新增但还没登记的插件也要跑，不能被静默漏掉）。
-const orderIndex = new Map(pluginOrder.map((n, i) => [n, i]))
-const plugins = [...pluginsOnDisk].sort((a, b) => {
-  const ia = orderIndex.has(a) ? orderIndex.get(a) : Number.MAX_SAFE_INTEGER
-  const ib = orderIndex.has(b) ? orderIndex.get(b) : Number.MAX_SAFE_INTEGER
-  return ia !== ib ? ia - ib : a.localeCompare(b)
-})
 if (plugins.length === 0) { console.error('CHECK-PLUGIN-TESTS FAILED：找不到任何插件'); process.exit(1) }
 
 // ── --self-test：验证「子进程 NODE_ENV 被钉住」这条语义本身 ────────────────────────
@@ -268,6 +296,51 @@ if (process.argv.includes('--self-test') || process.argv.includes('--self-test-n
       }
     })
     verify('#957 递归发现 mjs/ts 与嵌套测试', () => assert.equal(collectTestFiles(testDir).length, 3))
+    /* ── #1143：缺构建产物必须与「测试失败」分开（前者 exit 2，后者 exit 1）─────
+     * 缺产物时测试在 import 期就抛，node --test 记 0 pass；若走旧的单一判据，会被报成
+     * 「单测未通过」或「全 skip = 假绿」——指向改代码，而代码本来是对的。
+     * 这里钉住探针的三件事：能认出测试真的会读的 lib 文件、不把 src 当产物、抽不到时回落 lib/index.js。 */
+    verify('#1143 探针认出测试真读的产物（含子路径），且不把 src 当产物', () => {
+      const pd = join(actual, 'probe-plugin')
+      mkdirSync(join(pd, 'test'), { recursive: true })
+      writeFileSync(join(pd, 'package.json'), JSON.stringify({ scripts: { build: 'node build.mjs' } }))
+      // 测试直接读 lib/client.js 与 lib/sub/thing.js；另引 ../src/x.js（不是产物，不该被探）
+      const tf = join(pd, 'test', 'probe.test.mjs')
+      writeFileSync(tf, [
+        "readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')",
+        "readFileSync(new URL('../lib/sub/thing.js', import.meta.url), 'utf8')",
+        "import('../src/x.js')",
+      ].join('\n'))
+      const miss = missingBuildArtifacts(pd, [tf]).missing.map((m) => m.rel).sort()
+      assert.deepEqual(miss, ['lib/client.js', 'lib/index.js', 'lib/sub/thing.js'], '应探出三个缺失产物：' + JSON.stringify(miss))
+      assert.ok(!miss.some((r) => r.includes('src')), 'src 不是产物，不得出现在缺失清单')
+      // 命令必须可操作且点名该插件目录
+      const cmd = missingBuildArtifacts(pd, [tf]).missing[0].cmd
+      assert.ok(cmd.includes('npm run build'), '缺产物要给出可操作命令，实际：' + cmd)
+      assert.ok(cmd.includes('probe-plugin'), '命令必须点名具体插件目录，实际：' + cmd)
+      // 产物补上后不再报缺
+      mkdirSync(join(pd, 'lib', 'sub'), { recursive: true })
+      for (const rel of ['index.js', 'client.js', 'sub/thing.js']) writeFileSync(join(pd, 'lib', rel), '')
+      assert.equal(missingBuildArtifacts(pd, [tf]).missing.length, 0, '产物齐了就不该再报缺')
+    })
+    verify('#1143 探针抽不到引用时只探 lib/index.js（不凭猜想列一堆）', () => {
+      const pd = join(actual, 'probe-bare')
+      mkdirSync(join(pd, 'test'), { recursive: true })
+      writeFileSync(join(pd, 'package.json'), JSON.stringify({ scripts: { build: 'node b.mjs' } }))
+      const tf = join(pd, 'test', 'bare.test.mjs')
+      writeFileSync(tf, "import { test } from 'node:test'\ntest('x', () => {})")
+      const miss = missingBuildArtifacts(pd, [tf]).missing.map((m) => m.rel)
+      assert.deepEqual(miss, ['lib/index.js'], '只该探入口文件，实际：' + JSON.stringify(miss))
+    })
+    verify('#1143 未声明 build 脚本时不给「npm run build」这种跑不通的命令', () => {
+      const pd = join(actual, 'probe-nobuild')
+      mkdirSync(join(pd, 'test'), { recursive: true })
+      writeFileSync(join(pd, 'package.json'), JSON.stringify({ scripts: { test: 'node --test test/*.test.mjs' } }))
+      const tf = join(pd, 'test', 'n.test.mjs')
+      writeFileSync(tf, "import { test } from 'node:test'\ntest('x', () => {})")
+      const cmd = missingBuildArtifacts(pd, [tf]).missing[0].cmd
+      assert.ok(!cmd.includes('npm run build'), '没声明 build 就不能让人去跑它，实际：' + cmd)
+    })
     /* ── #989：形态判据与覆盖数判据必须共用同一个解析器（testPathTokens）──────────
      * 原来形态判据用三条手写正则，只认顶层 glob 那一种写法，把递归 glob 判成「不可识别的
      * 形态」；而同一文件里的 scriptCoverage 用另一套 matchAll 抽模式，把它正确当成覆盖全部。
@@ -380,35 +453,9 @@ if (process.argv.includes('--self-test') || process.argv.includes('--self-test-n
 
 let ran = 0
 let failed = 0
+// issue #1143：缺构建产物的插件单列一态（exit 2，不算失败也不计入已跑）。
+const missingArtifactPlugins = []
 const noTests = []
-
-// issue #1143：先构建**根级**的 dsh-shell-termux —— plugins/dsh-android-linux-env 依赖
-// `file:../../dsh-shell-termux`，不先建它的 lib 就跑 linux-env 的 tsc 会报 TS2307。
-// CI 的准备段把它排在 plugin-dirs.json 首位正是这个原因；不在此处重复，linux-env 必红。
-{
-  const termuxDir = join(ROOT, 'dsh-shell-termux')
-  const termuxPkg = join(termuxDir, 'package.json')
-  // 与下面各插件同一口径：**总是构建**（不因「lib 已在场」而跳过 —— 那份产物可能来自旧源码，
-  // 跳过等于让测试断言一份陈旧产物。构建脚本只跑本地 tsc/node，不联网）。
-  if (existsSync(termuxPkg)) {
-    const buildScript = (() => {
-      try { return JSON.parse(readFileSync(termuxPkg, 'utf8')).scripts?.build ?? null } catch { return null }
-    })()
-    if (buildScript) {
-      const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm'
-      console.log('BUILD dsh-shell-termux（' + buildScript + '，linux-env 的编译前置）')
-      const rb = runCommand(npmBin, ['run', 'build', '--silent'], {
-        cwd: termuxDir, encoding: 'utf8', shell: process.platform === 'win32',
-      })
-      const outB = stripAnsi((rb.stdout ?? '') + (rb.stderr ?? ''))
-      if (rb.status !== 0) {
-        failed += 1
-        console.error('FAIL  dsh-shell-termux 构建失败（它是 plugins/dsh-android-linux-env 的编译前置）')
-        console.error(outB.split('\n').slice(-25).join('\n'))
-      }
-    }
-  }
-}
 
 const pluginTestScript = (plugin) => {
   try { return JSON.parse(readFileSync(join(PLUGIN_DIR, plugin, 'package.json'), 'utf8')).scripts?.test ?? '' }
@@ -433,42 +480,14 @@ for (const plugin of plugins.sort()) {
     failed += 1
   }
   if (files.length === 0) { noTests.push(plugin); continue }
-  // issue #1143：**跑测试前先构建**（本 runner 直接 spawn node --test / vitest，不经过插件的 npm test）。
-  //
-  // 真因：各插件 package.json 里 `test: "npm run build && node --test ..."` 自带构建前置，
-  // 但本 runner 直连测试运行器，绕过了它。7 个插件的 test 脚本都带 build，唯独
-  // dsh-session-delete 没有 —— 于是 test/client-wiring.test.mjs 第 9 行
-  // `readFileSync(new URL('../lib/client.js', ...))` 在净检出上 ENOENT（lib/ 是构建产物，未入仓）。
-  // CI 上表现为「单测未产生有效通过数（全 skip = 假绿）」：测试在 import 期就抛，node --test 记 0 pass，
-  // 正好撞上 #957 那条假绿判据。
-  //
-  // 修法取向：**在 runner 里补构建**，而不是要求每个测试改写成兼容 src/。
-  // 理由：lib/ 才是插件的交付产物，测试断言的是产物行为；让测试读 src 等于把判据挪离交付面，
-  // 且每加一个读产物的测试就要再改一次。一次构建、后续测试直接跑，成本也更低。
-  //
-  // 只对**声明了 build 脚本**的插件构建：build 缺失 = 该插件没有产物面，不能替它跑一个不存在的脚本。
-  //
-  // 注意：**不放宽下方「全 skip = 假绿」（passN2 <= 0）那条判据**。构建失败必须在这里显式判红并
-  // 带出构建日志——绝不能靠 pass 数为 0 去兜，那样真因会被埋进一句「全 skip」里。
-  const buildScript = (() => {
-    try { return JSON.parse(readFileSync(join(PLUGIN_DIR, plugin, 'package.json'), 'utf8')).scripts?.build ?? null } catch { return null }
-  })()
-  if (buildScript) {
-    const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm'
-    console.log('BUILD ' + plugin + '（' + buildScript + '）')
-    // Windows 上 spawnSync 直连 npm.cmd 会 EINVAL（与 L73 runSubrepoNpm 同一个坑，本仓既有写法是
-    // 在 win32 显式开 shell）——这里照同一口径，否则构建永远 EINVAL，被判成「插件构建失败」。
-    const rb = runCommand(npmBin, ['run', 'build', '--silent'], {
-      cwd: join(PLUGIN_DIR, plugin), encoding: 'utf8', shell: process.platform === 'win32',
-    })
-    const outB = stripAnsi((rb.stdout ?? '') + (rb.stderr ?? ''))
-    if (rb.status !== 0) {
-      failed += 1
-      console.error('FAIL  ' + plugin + ' 构建失败（门禁跑测试前必须先把 lib/ 产物建出来；测试读的是交付产物，不是 src）'
-        + (rb.error?.code === 'ETIMEDOUT' ? ' timeout=' + TEST_TIMEOUT_MS + 'ms' : ''))
-      console.error(outB.split('\n').slice(-25).join('\n'))
-      continue
-    }
+  // issue #1143：**先区分「缺构建产物」与「测试失败」**。
+  // 缺产物是环境未就绪（exit 2），不是判据结论；报成「单测未通过」会误导人去改正确的代码。
+  // 「全 skip = 假绿」那条判据原样保留在下方，继续抓真正的假绿。
+  const artifacts = missingBuildArtifacts(join(PLUGIN_DIR, plugin), files)
+  if (artifacts.missing.length > 0) {
+    // 详情统一在收口处打印（一遍、聚在一起），避免与其它插件的 RUN/PASS 行交错。
+    missingArtifactPlugins.push({ plugin, missing: artifacts.missing })
+    continue
   }
   ran += 1
   // 运行器按文件内容自动判定：本仓 6 个插件用 node:test，client/UI 侧用 vitest。
@@ -603,6 +622,21 @@ for (const repo of SUBREPO_TESTS) {
   } else {
     console.log('PASS  ' + repo + '（' + how + ' / ' + passN3 + ' 项通过）')
   }
+}
+
+// issue #1143：缺构建产物单列一态（exit 2 = 环境未就绪，不是判据结论）。
+// 放在 failed 判定**之前**：缺产物时根本没有任何测试被判过，报「N 个单测单元有问题」是错的；
+// 而且 exit 2 与 exit 1 在仓库惯例里含义不同（1 = 判据不满足；2 = 用法/前置不满足），
+// 混用会让人去查本来正确的代码。
+if (missingArtifactPlugins.length > 0) {
+  console.error('CHECK-PLUGIN-TESTS 未作判定（exit 2）：' + missingArtifactPlugins.length + ' 个插件缺构建产物')
+  console.error('  这不是单测失败。CI 的准备段会先构建，故 CI 上不会出现；本地跑之前请先构建：')
+  for (const p of missingArtifactPlugins) {
+    console.error('  ' + p.plugin + '：' + p.missing.map((m) => m.rel).join(', '))
+    for (const cmd of [...new Set(p.missing.map((m) => m.cmd))]) console.error('    ' + cmd)
+  }
+  console.error('SKIP=' + skipped)
+  process.exit(2)
 }
 
 if (failed > 0) {
