@@ -31,10 +31,10 @@ internal class ConfigTransfer(private val homeDir: File, private val dshDataDir:
       if (!src.exists()) return """{"ok":false,"error":"settings.yaml 不存在（引擎尚未初始化？）"}"""
       val dstDir = File(File(dshDataDir, "exports"), "config")
       dstDir.mkdirs()
-      val tmp = File(dstDir, ".settings.yaml.tmp")
-      src.copyTo(tmp, overwrite = true)
       val dst = File(dstDir, "settings.yaml")
-      if (!tmp.renameTo(dst)) throw java.io.IOException("rename failed")
+      // 唯一临时名 + fsync + 原子发布（#1057）：固定名 tmp 并发导出会互相踩，无 fsync 则
+      // 可能把还没落盘的半份配置当新值发布出去。
+      AtomicFileReplace.writeText(dst, src.readText())
       LogCollector.log("dsh-shell", "config exported to " + dst.absolutePath)
       """{"ok":true,"path":"${dst.absolutePath.replace("\\", "\\\\")}"}"""
     } catch (t: Throwable) {
@@ -54,9 +54,8 @@ internal class ConfigTransfer(private val homeDir: File, private val dshDataDir:
         val bak = File(dst.parentFile, "settings.yaml.import-backup")
         dst.copyTo(bak, overwrite = true)
       }
-      val tmp = File(dst.parentFile, ".settings.yaml.import-tmp")
-      src.copyTo(tmp, overwrite = true)
-      if (!tmp.renameTo(dst)) throw java.io.IOException("rename failed")
+      val bytes = src.readBytes()
+      AtomicFileReplace.writeBytes(dst, bytes)
       LogCollector.log("dsh-shell", "config imported from " + src.absolutePath)
       """{"ok":true,"path":"${dst.absolutePath.replace("\\", "\\\\")}","hint":"引擎会热加载；若未生效请开发者选项里重启引擎"}"""
     } catch (t: Throwable) {

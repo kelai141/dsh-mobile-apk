@@ -36,13 +36,21 @@ internal object RepairConversationStore {
     }
   }
 
-  fun create(rootDir: File, title: String = "新的修复"): RepairConversation = synchronized(lock) {
+  /**
+   * @param publish 发布实现（默认 [AtomicFileReplace.publish]）；只有 JVM 单测注入失败实现，
+   *   用来证明「发布失败不会改写既有会话文件」（#1057）。
+   */
+  fun create(
+    rootDir: File,
+    title: String = "新的修复",
+    publish: (File, File) -> Boolean = AtomicFileReplace::publish,
+  ): RepairConversation = synchronized(lock) {
     val id = UUID.randomUUID().toString()
     val session = RepairConversation(id, title, JSONArray(), JSONArray())
-    writeSession(rootDir, session)
+    writeSession(rootDir, session, publish)
     val refs = readIndex(rootDir).filter { it.optString("id") != id }.toMutableList()
     refs.add(0, JSONObject().put("id", id).put("title", title))
-    writeIndex(rootDir, refs.take(MAX_CONVERSATIONS))
+    writeIndex(rootDir, refs.take(MAX_CONVERSATIONS), publish)
     prune(rootDir, refs.take(MAX_CONVERSATIONS))
     session
   }
@@ -63,12 +71,17 @@ internal object RepairConversationStore {
     )
   }
 
-  fun save(rootDir: File, session: RepairConversation) = synchronized(lock) {
+  /** @param publish 同 [create]：默认 [AtomicFileReplace.publish]，仅单测注入失败实现。 */
+  fun save(
+    rootDir: File,
+    session: RepairConversation,
+    publish: (File, File) -> Boolean = AtomicFileReplace::publish,
+  ) = synchronized(lock) {
     require(validId(session.id)) { "invalid conversation id" }
-    writeSession(rootDir, session)
+    writeSession(rootDir, session, publish)
     val refs = readIndex(rootDir).filter { it.optString("id") != session.id }.toMutableList()
     refs.add(0, JSONObject().put("id", session.id).put("title", session.title))
-    writeIndex(rootDir, refs.take(MAX_CONVERSATIONS))
+    writeIndex(rootDir, refs.take(MAX_CONVERSATIONS), publish)
     prune(rootDir, refs.take(MAX_CONVERSATIONS))
   }
 
@@ -99,13 +112,21 @@ internal object RepairConversationStore {
     return result
   }
 
-  private fun writeIndex(rootDir: File, refs: List<JSONObject>) {
+  private fun writeIndex(
+    rootDir: File,
+    refs: List<JSONObject>,
+    publish: (File, File) -> Boolean = AtomicFileReplace::publish,
+  ) {
     val array = JSONArray()
     refs.forEach { array.put(JSONObject(it.toString())) }
-    atomicWrite(File(root(rootDir), INDEX_FILE), array.toString())
+    atomicWrite(File(root(rootDir), INDEX_FILE), array.toString(), publish)
   }
 
-  private fun writeSession(rootDir: File, session: RepairConversation) {
+  private fun writeSession(
+    rootDir: File,
+    session: RepairConversation,
+    publish: (File, File) -> Boolean = AtomicFileReplace::publish,
+  ) {
     val root = JSONObject()
       .put("id", session.id)
       .put("title", session.title)
@@ -113,7 +134,7 @@ internal object RepairConversationStore {
       .put("events", JSONArray(session.events.toString()))
     session.modelIdentity?.let { root.put("modelIdentity", it) }
     session.reasoningEffort?.let { root.put("reasoningEffort", it) }
-    atomicWrite(sessionFile(rootDir, session.id), root.toString())
+    atomicWrite(sessionFile(rootDir, session.id), root.toString(), publish)
   }
 
   private fun prune(rootDir: File, retained: List<JSONObject>) {
@@ -124,14 +145,21 @@ internal object RepairConversationStore {
     }
   }
 
-  private fun atomicWrite(target: File, text: String) {
-    val temp = File(target.parentFile, target.name + ".tmp")
-    temp.writeText(text)
-    // 复用仓内标准（Files.move ATOMIC_MOVE + 不先删目标的单次回退）：renameTo 在部分文件系统上
-    // 失败的旧回退是直写 target，崩溃窗口内半写文件会被 load 的容错当「不存在」整段丢弃（#511）。
-    if (!AtomicFileReplace.publish(temp, target)) {
-      target.writeText(text)
-      temp.delete()
-    }
+  /**
+   * 索引与单个会话文件的落盘。
+   *
+   * 旧实现自建固定名 `<target>.tmp` + 失败回退直写 target：直写会在崩溃窗口内留下半写
+   * JSON，而 [load] 的容错把「解析失败」当成「不存在」——整段会话就这样静默消失（#511）。
+   * #1057 把落盘收敛到唯一入口：唯一临时名 + fsync，发布失败抛错且**不碰目标**。
+   *
+   * @param publish 发布实现（默认 [AtomicFileReplace.publish]）。与 [SnapshotTransaction.writeTextAtomic]
+   *   同款「注入式」惯例：只在 JVM 单测里传失败实现，用来证明发布失败时目标保持原值。
+   */
+  private fun atomicWrite(
+    target: File,
+    text: String,
+    publish: (File, File) -> Boolean = AtomicFileReplace::publish,
+  ) {
+    AtomicFileReplace.writeText(target, text, publish)
   }
 }

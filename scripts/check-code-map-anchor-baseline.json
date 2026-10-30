@@ -1124,7 +1124,7 @@
       "\"http://8.8.8.8/style.css\","
     ],
     "ConfigTransfer.kt:117": [
-      "\"window.__dshBridge?.onDirectoryPicked?.(\" + jsString(callback) + \", \" + jsString(path) + \")\", null,"
+      ")"
     ],
     "ConsoleActivity.kt:105": [
       "webView.getLocationOnScreen(location)"
@@ -1217,31 +1217,31 @@
       "private const val PREFS = \"dsh_engine_auth\""
     ],
     "EngineManager.kt:1314": [
-      "*  marker string (the v1→v2 asset-update failure)."
+      "*/"
     ],
     "EngineManager.kt:1316": [
-      "private fun applyAssetPatch(asset: String, target: File) {"
+      "// Patches track bundle layouts: when the runtime no longer ships the patched package"
     ],
     "EngineManager.kt:1442": [
-      "//"
+      "// 判据复用既有的 [liveRuntimeComplete]（降级闸门用的就是它，口径单一）：live 不完整时"
     ],
     "EngineManager.kt:1463": [
-      "val confirmed = RuntimeTree.confirmedDamage(missing)"
-    ],
-    "EngineManager.kt:1464": [
       "lastStartRefusalConfirmed = confirmed"
     ],
+    "EngineManager.kt:1464": [
+      "lastStartRefusalEvidence = liveRuntimeEvidence(missing, confirmed)"
+    ],
     "EngineManager.kt:1552": [
-      "// 收益之前不动。每步的耗时进 engine.log 与 logcat（[EngineStartPreludeProbe]），"
+      "// 汇总一行 prelude-total，供设备侧 `grep prelude` 直接读出瓶颈。"
     ],
     "EngineManager.kt:238": [
       "//"
     ],
     "EngineManager.kt:790": [
-      "fun liveRuntimeComplete(): Boolean {"
+      "val missing = RuntimeTree.missingEntries("
     ],
     "EngineManager.kt:813": [
-      "null"
+      "}"
     ],
     "EngineProbe.kt:51": [
       "* 这样 WatchdogV2 一行都不用改，破坏性阶梯语义完全不动——「修缺陷」不制造安全回归。"
@@ -1568,10 +1568,10 @@
       "const val TAG = \"dsh-notify\""
     ],
     "NotifyDecisionQueue.kt:310": [
-      "return if (failed) Flush.FAILED else Flush.WAITING"
+      "if (!NotifyBridge.isReady()) {"
     ],
     "NotifyDecisionQueue.kt:323": [
-      "// DEF-NOTIFY-03（设备实测）：提交成功必须**立即本地结算**——网关只给其它持有者发 cancel，"
+      "when (status) {"
     ],
     "NotifyProbe.kt:21": [
       "const val FILE_NAME = \"notify-responder.log\""
@@ -1850,25 +1850,25 @@
       "fun deletePathStrict("
     ],
     "SnapshotTransaction.kt:190": [
-      "try {"
+      "// Renaming over an empty directory is platform-dependent. Recovery authority must"
     ],
     "SnapshotTransaction.kt:196": [
-      "// ① 完整内容先落 tmp（同一个 filesDir，rename 必在同一文件系统内）。"
+      "// 无 fsync 的 tmp+rename 在掉电时可能发布出半份 journal）。"
     ],
     "SnapshotTransaction.kt:313": [
-      "* **绝不无条件删**：半程事务（marker 为 SWAPPING 但被丢/不可读）的 `previous` 是**唯一**"
+      "* @returns 实际回收的条目名（供调用方写日志；空 = 无残渣）。"
     ],
     "SnapshotTransaction.kt:546": [
-      "* 符号链接三动作（默认 java.nio）。注入原因见 [LinkPrimitives]：链接类缺陷在本机"
+      "links: LinkPrimitives = PRODUCTION_LINKS,"
     ],
     "SnapshotTransaction.kt:626": [
-      ")"
+      "if (SnapshotFs.exists(liveChild) && child.name !in SnapshotUserData.factorySnapshotNames) {"
     ],
     "SnapshotTransaction.kt:688": [
-      "* `userFacingFiles` 的语义），所以 `cordis.patch.yml` 与 `node_modules` 里的第三方包在升级时"
+      "* 清单里的挂载条目仍在 3 处 —— 插件照旧加载、照旧写用户的模型设置，"
     ],
     "SnapshotTransaction.kt:798": [
-      "SnapshotFs.deletePath(previousProfiles)"
+      "// ①b 备份对账（issue #273 ①）：残缺就**响亮失败**，绝不让它走到 ② 被当成可信备份。"
     ],
     "UndoGate.kt:165": [
       "* 调用方已经把「只花一次预算」花在自己身上（clientPluginTreeRecoverySpent），这里只回答"
@@ -2273,7 +2273,7 @@
       "/**"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyDecisionQueue.kt:266": [
-      "* NOT_READY（应答流/引擎未就绪）的统一处置：预算内 -> 独立计数 + 指数退避重排；"
+      "@Volatile"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyStore.kt:321": [
       "dedupeKey = j.optString(\"dedupeKey\", \"\"),"
@@ -2327,7 +2327,7 @@
       "* (dsh's credentials provider fails loud on world-readable secrets) and"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/SnapshotTransaction.kt:283": [
-      "//   ① 非容忍类 `Throwable`（OutOfMemoryError / StackOverflowError 等）**刻意**仍然原样抛出；"
+      "// 清理失败可以下一轮重试，marker 残留却会让「下一轮」也永远走同一条路。"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/SourceSettings.kt:88": [
       "val prefix = engine.usrDir"

@@ -239,10 +239,10 @@ internal object LogShare {
         zip.write(manifest.toByteArray(Charsets.UTF_8))
         zip.closeEntry()
       }
-      if (zipFile.exists()) zipFile.delete()
-      if (!tmp.renameTo(zipFile)) {
-        java.nio.file.Files.move(tmp.toPath(), zipFile.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
-      }
+      // #1057：包是**已完成的字节**，交给唯一原子写入口它才能保证「写完 + fsync + 原子发布」。
+      // 旧实现是先 delete(zipFile) 再 rename（失败退 Files.move）：delete 之后被杀就没有包，
+      // 而两条发布路径都不 fsync，掉电时可能发布出半截 zip。
+      AtomicFileReplace.writeBytes(zipFile, tmp.readBytes())
       PackResult(true, zipFile, report)
     } catch (t: Throwable) {
       // 压缩失败：清掉半截临时文件（B6），并如实返回原因。

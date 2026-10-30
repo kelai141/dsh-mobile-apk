@@ -174,8 +174,8 @@ internal object SnapshotTransaction {
    *
    * 现在：① 先写 tmp（原样保留，它让「写一半被杀」最多留下一个可清理的 tmp）；
    *       ② 直接 rename 覆盖目标，不再预删；
-   *       ③ rename 失败（个别挂载）才退化为直写——此时目标**本来就不存在**（见 ②），
-   *          直写等价于「创建」，不存在「先删后写」的窗口。
+   *       ③ **没有直写回退**（#1057 删掉）：临时名唯一、写完 fsync，发布失败即抛。
+   *          旧 ③ 的「rename 失败才直写」在目标确实存在（覆盖写）时就是一个半写窗口。
    *
    * 另：marker 是恢复权威，**写不进去就绝不能继续动树**。旧实现把这个失败咽掉，
    * 调用方带着「可能没有 journal」的状态继续 replaceEntry——那是最危险的一种继续。
@@ -185,7 +185,6 @@ internal object SnapshotTransaction {
    */
   fun writeMarker(filesDir: File, marker: Marker) {
     val text = render(marker)
-    val tmp = File(filesDir, TMP_MARKER_NAME)
     val target = markerFile(filesDir)
     try {
       // Renaming over an empty directory is platform-dependent. Recovery authority must
@@ -193,18 +192,14 @@ internal object SnapshotTransaction {
       if (Files.exists(target.toPath(), NOFOLLOW_LINKS) && !Files.isRegularFile(target.toPath(), NOFOLLOW_LINKS)) {
         throw IOException("Transaction journal target is not a regular file: " + target.absolutePath)
       }
-      // ① 完整内容先落 tmp（同一个 filesDir，rename 必在同一文件系统内）。
-      tmp.writeText(text)
-      // ② 原子覆盖目标：**不再先删**（见上方注释）。
-      if (!tmp.renameTo(target)) {
-        // 个别挂载不支持 rename 覆盖；此时目标只可能是「不存在」（没有任何路径删过它），
-        // 直写等价于创建，不留窗口。
-        target.writeText(text)
-        SnapshotFs.deletePath(tmp)
-      }
+      // 完整内容落盘并 fsync 后再发布（#1057：唯一临时名替代了固定名 TMP_MARKER_NAME，
+      // 无 fsync 的 tmp+rename 在掉电时可能发布出半份 journal）。
+      // 这里只借 [AtomicFileReplace] 的「唯一名 + fsync + 原子发布」，异常语义仍是本事务自己的
+      // SnapshotFsException + .pre-* 留证 —— 发布失败时抛出的 IOException 由下面的 catch 归一。
+      AtomicFileReplace.writeText(target, text)
     } catch (t: Throwable) {
       // 写不进 journal = 事务不得继续：继续动树就是「可能没有恢复点」。
-      SnapshotFs.deletePath(tmp)
+      // 临时文件由 [AtomicFileReplace] 自己清理（失败路径不留残留）。
       if (t is SnapshotFsException) throw t
       throw SnapshotFsException(
         code = CODE_MARKER_WRITE,
@@ -257,6 +252,8 @@ internal object SnapshotTransaction {
 
   fun clearMarker(filesDir: File) {
     SnapshotFs.deletePath(markerFile(filesDir))
+    // 历史遗留清理：写入路径已改用唯一临时名（#1057），但**已经在设备上**的旧版本可能留下
+    // 固定名残留，这里继续把它当残留清掉（只删、不写，没有新窗口）。
     SnapshotFs.deletePath(File(filesDir, TMP_MARKER_NAME))
   }
 

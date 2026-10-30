@@ -751,9 +751,8 @@ class EngineManager(private val context: Context, private val pickToken: String?
 
   private fun writeOnlineSnapshotIdentity(base: String, archive: String) {
     val target = File(context.filesDir, ONLINE_SNAPSHOT_NAME)
-    val tmp = File(context.filesDir, ONLINE_SNAPSHOT_NAME + ".tmp")
-    tmp.writeText("base=$base\narchive=$archive\n")
-    SnapshotFs.move(tmp, target)
+    // #1057：身份文件是快照来源的真源，旧实现是固定名 .tmp + 无 fsync 的 move。
+    AtomicFileReplace.writeText(target, "base=" + base + "\narchive=" + archive + "\n")
   }
 
   private fun commitOnlineUpdateIfPending(): Boolean {
@@ -2097,21 +2096,15 @@ class EngineManager(private val context: Context, private val pickToken: String?
           failed = true
           continue
         }
-        val tmp = File(target.parentFile, target.name + ".normalize.tmp")
-        var publicationStarted = false
         // Protect the original first; classify and prune only after publication has returned.
         val backup = try {
           ProfileNormalizationPublication.publish(target, live) {
-            publicationStarted = true
-            tmp.writeText(result.text)
-            if (!tmp.renameTo(target)) {
-              target.writeText(result.text)
-              SnapshotFs.deletePath(tmp)
-            }
+            // #1057：旧实现是固定名 .normalize.tmp + renameTo 失败回退直写 target。
+            // 这里的目标是引擎加载的 cordis.patch.yml，半份 YAML 会让 profile 整段失效。
+            AtomicFileReplace.writeText(target, result.text)
           }
         } catch (t: Throwable) {
           failed = true
-          if (publicationStarted) SnapshotFs.deletePath(tmp)
           Log.w(TAG, "profile patch normalize attempt failed (original protected; retried next boot): " + target.absolutePath, t)
           continue
         }

@@ -231,20 +231,24 @@ object NotifyDecisionQueue {
     }
   }
 
-  /** 压缩：只保留未完成项（临时文件 + 原子替换；回退直写会让 fold 跳过半写行——用户作答静默丢失）。 */
+  /**
+   * 压缩：只保留未完成项（唯一临时名 + fsync + 原子替换，见 [AtomicFileReplace]）。
+   *
+   * @param publish 发布实现（默认 [AtomicFileReplace.publish]）；只有 JVM 单测注入失败实现，
+   *   用来证明「发布失败不改写决策文件」（#1057）。
+   */
   @Synchronized
-  fun compact(context: Context) {
+  fun compact(
+    context: Context,
+    publish: (File, File) -> Boolean = AtomicFileReplace::publish,
+  ) {
     try {
       val f = file(context)
       val keep = load(context).filter { it.state == State.PENDING.wire || it.state == State.FAILED.wire }
-      val tmp = File(f.parentFile, FILE_NAME + ".tmp")
-      tmp.writeText(keep.joinToString("") { serialize(it) + "\n" })
-      // 同款纪律已见 RepairConversationStore（#518）：renameTo 失败的直写回退非原子，
-      // 崩溃窗口内半写行会被 fold 的 parse 跳过——决策（用户作答）静默丢失。
-      if (!AtomicFileReplace.publish(tmp, f)) {
-        f.writeText(tmp.readText())
-        tmp.delete()
-      }
+      // #1057：旧的固定名 tmp + 「publish 失败就 f.writeText(...)」直写回退必须去掉——
+      // 直写不是原子替换，崩溃窗口内的半写行会被 fold 的 parse 跳过，用户作答静默丢失。
+      // 发布失败会抛 IOException，由下面的 catch 记账（旧实现会「静默降级成直写并当成成功」）。
+      AtomicFileReplace.writeText(f, keep.joinToString("") { serialize(it) + "\n" }, publish)
       LogCollector.log(TAG, "decision file compacted, kept=" + keep.size)
     } catch (t: Throwable) {
       LogCollector.log(TAG, "decision compact failed: " + t.message)
