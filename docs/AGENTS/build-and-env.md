@@ -177,6 +177,86 @@ Harness按固定0.2.0-rc.2源码完成全仓构建；prepare-harness-vendor-over
 | ABI 匹配 | debug 包默认 x86_64 快照，装 arm64 真机必崩；构建/安装前核对（3.2 步 4） | 坑 18 |
 | 工作树行尾噪声 | `git status` 的 ` M` 与 `check-patch-mirror` 的「仅行尾差异」WARN 常来自 autocrlf（一侧检出为 CRLF），**不是**内容漂移。先逐字节复核（`cmp a b` / `git diff --ignore-cr-at-eol`）再决定要不要动文件，别按噪声改内容 | 铁律 5/6 |
 
+### 3.5 Windows + WSL 本地全链前置（2026-10-31 实测补齐）
+
+> **一句话**：`build-apk-013.ps1` 在净检出上**跑不到底**。下面是一次从零开始的独立 worktree 上实测到的**五轮阻塞点**，以及让链往前走的**五条前置**。照这份清单准备，可以少烧 5 轮 × 1-6 分钟。
+
+#### 五轮阻塞点（净检出 → 逐轮修复后）
+
+| 轮 | 耗时 | 阻塞点 | 属于 |
+|---|---|---|---|
+| 1 | 29s | `dsh-shell-termux` 的 `tsc` 报 15 个 `TS2307 Cannot find module` | 缺 10 个包的 `node_modules` |
+| 2 | 103s | `check-dead-tokens`：上游令牌定义面不在场 | 缺 `.deploy-tmp/deepseek-harness` |
+| 3 | 105s | 上游树 `package.json` 是 `0.2.1-rc.2`，契约要求 `0.2.1-rc.3` | 复制错了源树 |
+| 4 | 162s | 上游树 `describe` 读到 `v0.14.9-520-g5df44cdc`（套壳仓的 tag） | 复制时排除了 `.git` |
+| 5 | **386s** | `check-gate-skips` 3 项 FAIL | 见下方「已知门禁倒挂」，**不是环境没配好** |
+
+轮 5 已进入静态门禁尾段，未到注入/assemble，故**没有产物**。
+
+#### 五条前置（按顺序做，每条都可复用）
+
+**① 基座目录布局**
+`build-snapshot-013.mjs` 要求 `.deploy-tmp/{arm64,x64}-base/base-usr.tar.xz`，而仓里给的是 `base/base-usr-<abi>.tar.xz`：
+```powershell
+foreach ($p in @(@('x86_64','x64-base','base-usr-x86_64.tar.xz'), @('arm64','arm64-base','base-usr-arm64.tar.xz'))) {
+  $d = ".deploy-tmp\$($p[1])"; New-Item -ItemType Directory -Force -Path $d | Out-Null
+  Copy-Item "base\$($p[2])" "$d\base-usr.tar.xz" -Force
+  Copy-Item "base\base-dsh.tar.xz" "$d\base-dsh.tar.xz" -Force
+}
+```
+
+**② `typescript@5.9.3`（不是 7.x）+ `esbuild`**
+`check-browser-syntax-floor` 判据 1 要**真实 TS 解析器**，缺席即 `exit 2`（拒绝文本判据替代）。
+代码从 `<dir>/lib/typescript.js` 加载——**`typescript@7.x` 没有这个文件**，装了也解析不到。必须 5.x：
+```powershell
+npm install --no-save --no-package-lock typescript@5 esbuild
+node -e "console.log(typeof require('./node_modules/typescript/lib/typescript.js').createSourceFile)"
+```
+
+**③ 10 个包各自 `npm ci`**
+`scripts/plugin-dirs.json` 里的 `dirs` 逐个装（`dsh-host-web-compat` 无 lock，跳过）：
+```powershell
+$dirs = (Get-Content scripts\plugin-dirs.json -Raw | ConvertFrom-Json).dirs
+foreach ($d in $dirs) {
+  if (-not (Test-Path (Join-Path $d 'package-lock.json'))) { continue }
+  Push-Location $d; npm ci --no-audit --no-fund; Pop-Location
+}
+```
+注意：第 138-149 行（3.2 步 7）写的是 `npm install`；有 lock 的包用 `npm ci` 更稳（不会改写 lock）。
+
+**④ 上游树必须带 `.git`，且必须是 `dsh-v0.2.1-rc.3`**
+`check-contract` 比对的不是 `package.json` 版本，而是 `git describe` / `HEAD`。两条硬要求：
+- **用 `D:\coding\dsh-mobile\dsh`**（`describe=dsh-v0.2.1-rc.3`、`HEAD=1f81c047…`），**不要**用主工作区那份 `.deploy-tmp/deepseek-harness`（是 `rc.2`，必红）；
+- **robocopy 不要加 `/XD .git`**，否则 `describe` 会回退到套壳仓的 tag 而判红：
+```powershell
+robocopy "D:\coding\dsh-mobile\dsh" ".deploy-tmp\deepseek-harness" /E /NFL /NDL /NJH /NJS /NP
+git -C .deploy-tmp\deepseek-harness describe --tags   # 必须打印 dsh-v0.2.1-rc.3
+```
+
+**⑤ 官方快照要校大小**
+`gh release download` 会静默截断（实测首轮下到 4.4MB / 2.9MB）。必须核对字节数：
+```powershell
+gh release download v<ver> -R kelai141/dsh-mobile-apk -p "snapshot-*.tar.xz" -D .deploy-tmp\snapdl --clobber
+# v0.14.10: arm64=157948528  x86_64=153914720
+```
+放到位：`.deploy-tmp/snapshot-013/<abi>/snapshot.tar.xz`。**这样跑的是「打包链 + 门禁」，不是「快照构建链」**——快照来源是已发布资产，报告里要写清这个边界。
+
+#### 已知门禁倒挂（不是环境问题，别白折腾）
+
+装齐环境后 `check-gate-skips` 会报 3 项 FAIL，而净检出只报 1 项——**环境越完整越多红**：
+
+| FAIL | 真因 | 追踪 |
+|---|---|---|
+| `check-contract` 在 `--require` 下仍以 SKIP=1 结案 | 自包含树的合法缺席被门禁自己单方面豁免 | issue #1153 |
+| `check-runtime-assets` / `check-mcp-client-deps` 审计基线未复现 | 依赖装齐后缺口不再复现，销账规则要求删 `AUDIT_BASELINE` 登记 | issue #1154 |
+| `check-tool-output-schema` 有 SKIP 面却无判据行 | 净检出缺依赖走「校验器缺席」分支 | CI 有依赖即绿 |
+
+**在 #1153 / #1154 修复前，本地全链到 `check-gate-skips` 必然停住**；这不是配置能绕过的，别为此去改 `AUDIT_BASELINE`（那是让本地污染规范基线）。
+
+#### 跨平台完整性说明
+
+`build-snapshot-013.mjs` 的 `termux-elf-cleaner` 步骤在 WSL/Linux 上**必然失败**（它是 Android ELF，interpreter `/system/bin/linker64`，宿主无此文件 → status 127，且该调用无跳过开关）。详见 issue #1147。故 Windows 上**本地重建快照**目前不可达，只能用已发布快照（本节的路径 ⑤）。
+
 ## 更新记录表
 
 | 日期 | 版本 | 内容 | 更新者 |
