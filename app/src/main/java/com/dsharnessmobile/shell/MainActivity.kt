@@ -488,6 +488,11 @@ class MainActivity : ComponentActivity() {
   /** Navigate only after this process's engine generation has published a real port. */
   private fun loadConfirmedEnginePage() {
     if (!EngineEndpoint.confirmed || EngineEndpoint.port <= 0 || !webViewReady) return
+    // #686 第二层：在此注册守卫——此刻 EngineEndpoint 端口已确定，守卫里可以用**精确**
+    // origin（EngineProbe.ENGINE_URL）。早注册 + 通配会让本机其它端口的页面拿到桥，
+    // 早注册 + 精确值又可能拿到未确定的端口，所以选「晚注册 + 精确值」。
+    // document-start 脚本对**其后**创建的文档生效，所以必须早于下面的 loadUrl。
+    installBridgeOriginGuard()
     val authCookie = EngineAuth.cookie(this)
     if (authCookie != null) {
       try {
@@ -1205,11 +1210,19 @@ class MainActivity : ComponentActivity() {
    * 老内核上第二层不存在，只剩第一层，属已知风险，PR 里单独登记。
    */
   private fun installBridgeOriginGuard() {
-    val origins = linkedSetOf<String>()
-    // 端口是运行期确定的（引擎每次启动可能换端口，见 #1130），不写死字面量。
-    if (EngineEndpoint.port > 0) {
-      origins.add("http://" + EngineProbe.ENGINE_HOST + ":" + EngineEndpoint.port)
+    // 端口未确定就**不注册**，并报可见告警：不回退通配（http://127.0.0.1:* 会让本机任何
+    // 其他端口的页面拿到桥，风险面比现状更大），也不用未确定的值（会把合法主帧误封）。
+    if (!EngineEndpoint.confirmed || EngineEndpoint.port <= 0) {
+      Log.w(TAG, "WARNING: bridge frame origin guard NOT installed (engine port not confirmed yet); cross-origin subframes can still reach window.androidBridge (#686)")
+      try {
+        LogCollector.writeBootDiag(this, "bridge-guard-port-unconfirmed", "EngineEndpoint.port=" + EngineEndpoint.port + " confirmed=" + EngineEndpoint.confirmed)
+      } catch (t: Throwable) {
+        Log.w(TAG, "bridge guard port diag failed: " + t.message)
+      }
+      return
     }
+    // 精确 origin：只用 EngineEndpoint 的持久化值（EngineProbe.ENGINE_URL 派生于它）。
+    val origins = listOf(EngineProbe.ENGINE_URL)
     if (!BridgeOriginGuard.install(webView, origins)) {
       // 可见告警：老内核降级。写日志 + 落启动诊断，运营侧能查到，不静默。
       Log.w(TAG, "WARNING: bridge frame origin guard NOT installed (kernel lacks DOCUMENT_START_SCRIPT); cross-origin subframes can still reach window.androidBridge (#686)")
@@ -1253,8 +1266,6 @@ class MainActivity : ComponentActivity() {
     // the page. Inject it before the first load so the engine UI and the shell
     // agree on the language from the first frame.
     installLocaleBootstrap()
-    // #686 第二层：桥帧来源守卫。必须在 addJavascriptInterface 之前、首次 loadUrl 之前。
-    installBridgeOriginGuard()
     webView.webViewClient = object : WebViewClient() {
       override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
         val url = request.url.toString()

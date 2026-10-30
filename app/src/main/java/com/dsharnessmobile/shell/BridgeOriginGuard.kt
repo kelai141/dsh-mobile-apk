@@ -38,7 +38,7 @@ import androidx.webkit.WebViewFeature
  * 拆解条件
  * ------
  * 上游若让 addJavascriptInterface 具备按帧粒度，或本仓改为「主帧与子帧分 WebView」，
- * 本文件与 BridgePickToken 的 secret 二层即可整体删除。
+ * 本文件即整体删除。
  */
 internal object BridgeOriginGuard {
 
@@ -50,17 +50,14 @@ internal object BridgeOriginGuard {
      * @param engineOrigins 允许持有桥的 origin 白名单；至少包含当前引擎 origin
      *   （http://127.0.0.1:<引擎端口>）。端口是运行期确定的（引擎每次启动可能换端口），
      *   所以**不写死字面量**，由调用方按 EngineEndpoint 现值拼入。
-     * @param pickSecret 主帧内部签发 pick token 用的随机 secret；见 BridgePickToken。
-     *   只有拿到它才能让 getPickToken(secret) 返回真值。
      */
-    fun script(engineOrigins: Collection<String>, pickSecret: String): String {
+    fun script(engineOrigins: Collection<String>): String {
         val originsJson = engineOrigins
             .filter { it.isNotBlank() }
             .joinToString(separator = ",", prefix = "[", postfix = "]") { "\"" + escapeJs(it) + "\"" }
         val sb = StringBuilder()
         sb.append("(function () {\n")
         sb.append("  var ALLOWED = ").append(originsJson).append(";\n")
-        sb.append("  var SECRET = \"").append(escapeJs(pickSecret)).append("\";\n")
         // 诊断 canary：未来任何人都能在设备上复核这一层是否生效、以及当刻的判据取值。
         // 落在 <html data-dsh-bridge-guard='{...}'> 上（不是全局变量——条件 5 要求零新增全局）。
         sb.append("  var C = { supported: true, atStart: typeof window.androidBridge,\n")
@@ -77,13 +74,6 @@ internal object BridgeOriginGuard {
         sb.append("    C.top = isTop; C.origin = origin; C.allowed = allowed;\n")
         sb.append("    if (allowed) {\n")
         sb.append("      C.applied = 'allowed';\n")
-        sb.append("      if (isTop) {\n")
-        sb.append("        try {\n")
-        sb.append("          Object.defineProperty(window, '__dshPickSecret', {\n")
-        sb.append("            value: SECRET, writable: false, configurable: false, enumerable: false\n")
-        sb.append("          });\n")
-        sb.append("        } catch (e) {}\n")
-        sb.append("      }\n")
         sb.append("    } else {\n")
         sb.append("      C.applied = 'sealed';\n")
         sb.append("      try { delete window.androidBridge; } catch (e) {}\n")
@@ -149,7 +139,7 @@ internal object BridgeOriginGuard {
         return try {
             WebViewCompat.addDocumentStartJavaScript(
                 webView,
-                script(engineOrigins, BridgePickToken.current()),
+                script(engineOrigins),
                 setOf("*"),
             )
             Log.i(TAG, "bridge frame guard installed for " + engineOrigins.size + " origin(s)")

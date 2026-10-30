@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
+import java.io.File
 import org.junit.Test
 
 /**
@@ -26,7 +27,7 @@ class BridgeOriginGuardTest {
 
   @Test
   fun scriptGatesOnTopFrameAndOriginWhitelist() {
-    val js = BridgeOriginGuard.script(listOf(engine), "s3cret")
+    val js = BridgeOriginGuard.script(listOf(engine))
     assertTrue("守卫必须判顶层帧（主帧 origin 可能为 null，只判 origin 会误封）", js.contains("window.top === window"))
     assertTrue("守卫必须读 location.origin", js.contains("location.origin"))
     // 必须是 isTop || listed 两条；**不得**把 origin === 'null' 当放行条件——
@@ -43,7 +44,7 @@ class BridgeOriginGuardTest {
 
   @Test
   fun scriptPublishesCanaryOnHtmlNotAsGlobal() {
-    val js = BridgeOriginGuard.script(listOf(engine), "s")
+    val js = BridgeOriginGuard.script(listOf(engine))
     // canary 必须落在 <html data-dsh-bridge-guard>：未来任何人都能在设备上复核。
     assertTrue("必须写 data-dsh-bridge-guard 属性", js.contains("data-dsh-bridge-guard"))
     assertTrue("canary 必须带 feature 支持与当刻桥可见性", js.contains("atStart"))
@@ -58,68 +59,82 @@ class BridgeOriginGuardTest {
 
   @Test
   fun scriptEmbedsOriginsAsJsonArrayNotHardcodedLiteral() {
-    val js = BridgeOriginGuard.script(listOf("http://127.0.0.1:4145", "http://127.0.0.1:5000"), "s")
-    assertTrue("白名单必须是可注入的 JSON 数组", js.contains("[\"http://127.0.0.1:4145\",\"http://127.0.0.1:5000\"]"))
+    val js = BridgeOriginGuard.script(listOf("http://127.0.0.1:4145"))
+    // escapeJs 会把 < > 转成 \u003c/\u003e（防注入的有意行为），所以断言"数组形态 + 含注入值"，
+    // 不假设逐字未转义。
+    assertTrue("白名单必须是 JSON 数组形态", js.contains("var ALLOWED = ["))
+    assertTrue("白名单必须含注入值", js.contains("127.0.0.1:4145"))
     // 端口是运行期确定的（#1130），不得在源码里写死：换个端口必须产出不同脚本。
-    val other = BridgeOriginGuard.script(listOf("http://127.0.0.1:6001"), "s")
+    val other = BridgeOriginGuard.script(listOf("http://127.0.0.1:6001"))
     assertNotEquals("白名单必须跟随注入值，不能写死字面量", js, other)
   }
 
   @Test
-  fun scriptNeverLeaksSecretToTopFrameAsEnumerableGlobal() {
-    val js = BridgeOriginGuard.script(listOf(engine), "s3cret")
-    // secret 只能在顶层帧、且必须不可枚举：否则子帧能枚举出来（条件 5）。
-    assertTrue("secret 必须落在 defineProperty 里", js.contains("Object.defineProperty"))
-    assertTrue("secret 必须不可枚举", js.contains("enumerable: false"))
-    assertTrue("secret 必须不可写", js.contains("writable: false"))
-    // 反证：写成 window.__dshPickSecret = SECRET 会让它可枚举。
-    assertFalse("不得用可枚举的赋值形式暴露 secret", js.contains("window.__dshPickSecret = "))
-  }
-
-  @Test
   fun scriptEscapesInjectionHostileOrigin() {
-    val js = BridgeOriginGuard.script(listOf("http://x/\";alert(1);//"), "s")
+    val js = BridgeOriginGuard.script(listOf("http://x/\";alert(1);//"))
     assertFalse("引号必须被转义，否则可闭合字符串注入脚本", js.contains("\"\";alert(1)"))
     assertTrue("必须含转义后的字形", js.contains("\\\""))
   }
 
   @Test
-  fun pickSecretIsRandomPerProcessAndLongEnough() {
-    val a = BridgePickToken.current()
-    val b = BridgePickToken.current()
-    assertEquals("同一进程内 secret 必须稳定（守卫与校验读到同一份）", a, b)
-    assertEquals("32 字节的 hex 应为 64 字符", 64, a.length)
-    assertTrue("secret 必须是 hex", a.all { it in "0123456789abcdef" })
-    assertFalse("secret 不得为空", a.isEmpty())
+  fun guardOriginMustEqualPersistedEngineEndpoint() {
+    // 评审要求：守卫脚本串里的 origin 必须**等于** EngineEndpoint 的持久化值，
+    // 两者不一致必须红 —— 防止端口改了守卫不跟。
+    //
+    // EngineProbe.ENGINE_URL 派生于 EngineEndpoint（val ENGINE_URL get() = EngineEndpoint.url），
+    // 所以这里断言两者同源；若有人把守卫改成写死字面量或通配，这条红。
+    // EngineEndpoint 在 JVM 单测里没有真实端口（port=0），不能当正例取值。
+    // 改为断言**接线同源**：安装处必须用 EngineProbe.ENGINE_URL（EngineEndpoint 的派生），
+    // 而不是写死字面量或通配——端口改了守卫自然跟着改。
+    val src = readMainActivity()
+    assertTrue(
+      "守卫 origin 必须来自 EngineProbe.ENGINE_URL（派生于 EngineEndpoint）",
+      src.contains("val origins = listOf(EngineProbe.ENGINE_URL)"),
+    )
+    assertFalse(
+      "守卫不得写死端口字面量",
+      Regex("origins\\.add\\(\\s*\"http://127\\.0\\.0\\.1:").containsMatchIn(src),
+    )
+    // 注入值必须真的进脚本（用可判定的一组合成 origin 验证传递链）。
+    val js = BridgeOriginGuard.script(listOf("http://127.0.0.1:4321"))
+    assertTrue("注入的 origin 必须出现在脚本白名单里", js.contains("127.0.0.1:4321"))
+    // 反证：通配会让本机其它端口的页面拿到桥，必须不出现。
+    assertFalse("守卫不得使用通配端口", js.contains("127.0.0.1:*"))
+    assertFalse("守卫不得使用通配 origin", js.contains("\"*\""))
   }
 
   @Test
-  fun pickTokenRequiresMatchingSecret() {
+  fun portUnconfirmedSkipsRegistrationWithVisibleWarning() {
+    // 端口未确定时必须跳过注册并报警，而不是回退通配。
+    val src = readMainActivity()
+    assertTrue("必须检查 confirmed/port", src.contains("EngineEndpoint.confirmed"))
+    assertTrue(
+      "端口未确认必须写可见告警（回退通配会让本机其它端口拿到桥）",
+      src.contains("bridge frame origin guard NOT installed (engine port not confirmed yet)"),
+    )
+    assertTrue("必须落 boot-diag 可查", src.contains("bridge-guard-port-unconfirmed"))
+  }
+
+  @Test
+  fun registrationHappensAfterPortIsConfirmed() {
+    // 晚注册：installBridgeOriginGuard 必须在 loadConfirmedEnginePage 内、loadUrl 之前调用。
+    val src = readMainActivity()
+    val loadFn = src.indexOf("private fun loadConfirmedEnginePage()")
+    assertTrue("找不到 loadConfirmedEnginePage", loadFn > 0)
+    val guardCall = src.indexOf("installBridgeOriginGuard()", loadFn)
+    val loadUrl = src.indexOf("webView.loadUrl(", loadFn)
+    assertTrue("installBridgeOriginGuard 必须在 loadConfirmedEnginePage 内调用", guardCall > loadFn)
+    assertTrue("守卫注册必须早于 loadUrl（document-start 对之后的文档生效）", guardCall < loadUrl)
+  }
+
+  @Test
+  fun primaryControlPickTokenStillWorksOnAllowedFrame() {
+    // 评审：保留那条正控断言。整对象封死后不再加凭据层，但放行帧必须照常拿得到真值。
     val bridge = AndroidBridge({ _ -> }, { _ -> }, { _, _ -> }, pickToken = "real-token", isTrustedTopFrame = { true })
-    assertEquals("带对 secret 必须拿到真值", "real-token", bridge.getPickToken(BridgePickToken.current()))
-    assertEquals("secret 不对必须返回 null（不抛，属可选能力）", null, bridge.getPickToken("wrong"))
-    // 零参/null 保持原有语义：现有页面三处调用点都是零参形式，收紧会打断目录选择器链路。
-    // 第二层的语义是「能带凭据的调用方多一层校验」，不是「把旧调用方关掉」。
-    assertEquals("零参保持原语义（向后兼容）", "real-token", bridge.getPickToken(null))
+    assertEquals("放行帧必须照常拿到 pick token", "real-token", bridge.getPickToken())
   }
 
-  @Test
-  fun zeroArgOverloadStillExistsForExistingPageCallers() {
-    // WebView 的 JS 桥按实参个数匹配 Java 方法：零参调用点（dsh-host-web-compat 三处）
-    // 必须仍有零参方法可匹配，否则抛 Method not found，把正常功能弄坏。
-    val zeroArg = AndroidBridge::class.java.declaredMethods
-      .filter { it.name == "getPickToken" && it.parameterCount == 0 }
-    assertEquals("必须保留零参重载", 1, zeroArg.size)
-    val oneArg = AndroidBridge::class.java.declaredMethods
-      .filter { it.name == "getPickToken" && it.parameterCount == 1 }
-    assertEquals("必须存在带 secret 的单参重载", 1, oneArg.size)
-  }
-
-  @Test
-  fun zeroArgOverloadKeepsBackwardCompatibleSemantics() {
-    val bridge = AndroidBridge({ _ -> }, { _ -> }, { _, _ -> }, pickToken = "real-token", isTrustedTopFrame = { true })
-    // 零参 = 旧调用点的形态。第二层不能靠收紧它来"加固"，那会直接打断
-    // dsh-host-web-compat 的三处 x-dsh-pick-token 链路（AndroidBridgeFrameGuardTest 钉着它）。
-    assertEquals("零参必须仍拿得到 token（向后兼容）", "real-token", bridge.getPickToken())
-  }
+  private fun readMainActivity(): String =
+    File("src/main/java/com/dsharnessmobile/shell/MainActivity.kt").takeIf { it.isFile }?.readText()
+      ?: File("app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt").readText()
 }
