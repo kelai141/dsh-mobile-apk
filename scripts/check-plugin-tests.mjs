@@ -147,9 +147,30 @@ const scriptCoverage = (testDir, script) => {
   }).length
 }
 
-const plugins = existsSync(PLUGIN_DIR)
+// issue #1143：插件构建有**跨包依赖顺序**——dsh-android-linux-env 的 package.json 依赖
+// `file:../../dsh-shell-termux`（根目录那个包，不在这里的 plugins/ 下），所以它必须先被构建，
+// 否则 linux-env 的 tsc 报 TS2307 Cannot find module '@dsh-android/dsh-shell-termux'。
+//
+// .github/workflows/pr-gate.yml 的「准备插件产物」段正是按 scripts/plugin-dirs.json 的顺序
+// 逐个 `npm run build`（termux 在清单首位，注释写明「linux-env 编译依赖它的 lib」）。
+// 这里沿用同一份顺序来源，避免两处对构建序各自拍脑袋——顺序错了只会在 linux-env 上炸，
+// 而那看起来像「插件构建失败」，真因却在别处的构建序。
+const pluginOrder = (() => {
+  try {
+    const { dirs } = JSON.parse(readFileSync(join(ROOT, 'scripts', 'plugin-dirs.json'), 'utf8'))
+    return dirs.filter((d) => d.startsWith('plugins/')).map((d) => d.slice('plugins/'.length))
+  } catch { return [] }
+})()
+const pluginsOnDisk = existsSync(PLUGIN_DIR)
   ? readdirSync(PLUGIN_DIR).filter((n) => existsSync(join(PLUGIN_DIR, n, 'package.json')))
   : []
+// 清单里有的按清单位置排前，其余按名字排后（磁盘上新增但还没登记的插件也要跑，不能被静默漏掉）。
+const orderIndex = new Map(pluginOrder.map((n, i) => [n, i]))
+const plugins = [...pluginsOnDisk].sort((a, b) => {
+  const ia = orderIndex.has(a) ? orderIndex.get(a) : Number.MAX_SAFE_INTEGER
+  const ib = orderIndex.has(b) ? orderIndex.get(b) : Number.MAX_SAFE_INTEGER
+  return ia !== ib ? ia - ib : a.localeCompare(b)
+})
 if (plugins.length === 0) { console.error('CHECK-PLUGIN-TESTS FAILED：找不到任何插件'); process.exit(1) }
 
 // ── --self-test：验证「子进程 NODE_ENV 被钉住」这条语义本身 ────────────────────────
@@ -361,6 +382,34 @@ let ran = 0
 let failed = 0
 const noTests = []
 
+// issue #1143：先构建**根级**的 dsh-shell-termux —— plugins/dsh-android-linux-env 依赖
+// `file:../../dsh-shell-termux`，不先建它的 lib 就跑 linux-env 的 tsc 会报 TS2307。
+// CI 的准备段把它排在 plugin-dirs.json 首位正是这个原因；不在此处重复，linux-env 必红。
+{
+  const termuxDir = join(ROOT, 'dsh-shell-termux')
+  const termuxPkg = join(termuxDir, 'package.json')
+  // 与下面各插件同一口径：**总是构建**（不因「lib 已在场」而跳过 —— 那份产物可能来自旧源码，
+  // 跳过等于让测试断言一份陈旧产物。构建脚本只跑本地 tsc/node，不联网）。
+  if (existsSync(termuxPkg)) {
+    const buildScript = (() => {
+      try { return JSON.parse(readFileSync(termuxPkg, 'utf8')).scripts?.build ?? null } catch { return null }
+    })()
+    if (buildScript) {
+      const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+      console.log('BUILD dsh-shell-termux（' + buildScript + '，linux-env 的编译前置）')
+      const rb = runCommand(npmBin, ['run', 'build', '--silent'], {
+        cwd: termuxDir, encoding: 'utf8', shell: process.platform === 'win32',
+      })
+      const outB = stripAnsi((rb.stdout ?? '') + (rb.stderr ?? ''))
+      if (rb.status !== 0) {
+        failed += 1
+        console.error('FAIL  dsh-shell-termux 构建失败（它是 plugins/dsh-android-linux-env 的编译前置）')
+        console.error(outB.split('\n').slice(-25).join('\n'))
+      }
+    }
+  }
+}
+
 const pluginTestScript = (plugin) => {
   try { return JSON.parse(readFileSync(join(PLUGIN_DIR, plugin, 'package.json'), 'utf8')).scripts?.test ?? '' }
   catch { return '' }
@@ -384,6 +433,43 @@ for (const plugin of plugins.sort()) {
     failed += 1
   }
   if (files.length === 0) { noTests.push(plugin); continue }
+  // issue #1143：**跑测试前先构建**（本 runner 直接 spawn node --test / vitest，不经过插件的 npm test）。
+  //
+  // 真因：各插件 package.json 里 `test: "npm run build && node --test ..."` 自带构建前置，
+  // 但本 runner 直连测试运行器，绕过了它。7 个插件的 test 脚本都带 build，唯独
+  // dsh-session-delete 没有 —— 于是 test/client-wiring.test.mjs 第 9 行
+  // `readFileSync(new URL('../lib/client.js', ...))` 在净检出上 ENOENT（lib/ 是构建产物，未入仓）。
+  // CI 上表现为「单测未产生有效通过数（全 skip = 假绿）」：测试在 import 期就抛，node --test 记 0 pass，
+  // 正好撞上 #957 那条假绿判据。
+  //
+  // 修法取向：**在 runner 里补构建**，而不是要求每个测试改写成兼容 src/。
+  // 理由：lib/ 才是插件的交付产物，测试断言的是产物行为；让测试读 src 等于把判据挪离交付面，
+  // 且每加一个读产物的测试就要再改一次。一次构建、后续测试直接跑，成本也更低。
+  //
+  // 只对**声明了 build 脚本**的插件构建：build 缺失 = 该插件没有产物面，不能替它跑一个不存在的脚本。
+  //
+  // 注意：**不放宽下方「全 skip = 假绿」（passN2 <= 0）那条判据**。构建失败必须在这里显式判红并
+  // 带出构建日志——绝不能靠 pass 数为 0 去兜，那样真因会被埋进一句「全 skip」里。
+  const buildScript = (() => {
+    try { return JSON.parse(readFileSync(join(PLUGIN_DIR, plugin, 'package.json'), 'utf8')).scripts?.build ?? null } catch { return null }
+  })()
+  if (buildScript) {
+    const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+    console.log('BUILD ' + plugin + '（' + buildScript + '）')
+    // Windows 上 spawnSync 直连 npm.cmd 会 EINVAL（与 L73 runSubrepoNpm 同一个坑，本仓既有写法是
+    // 在 win32 显式开 shell）——这里照同一口径，否则构建永远 EINVAL，被判成「插件构建失败」。
+    const rb = runCommand(npmBin, ['run', 'build', '--silent'], {
+      cwd: join(PLUGIN_DIR, plugin), encoding: 'utf8', shell: process.platform === 'win32',
+    })
+    const outB = stripAnsi((rb.stdout ?? '') + (rb.stderr ?? ''))
+    if (rb.status !== 0) {
+      failed += 1
+      console.error('FAIL  ' + plugin + ' 构建失败（门禁跑测试前必须先把 lib/ 产物建出来；测试读的是交付产物，不是 src）'
+        + (rb.error?.code === 'ETIMEDOUT' ? ' timeout=' + TEST_TIMEOUT_MS + 'ms' : ''))
+      console.error(outB.split('\n').slice(-25).join('\n'))
+      continue
+    }
+  }
   ran += 1
   // 运行器按文件内容自动判定：本仓 6 个插件用 node:test，client/UI 侧用 vitest。
   // 写死任一个都会把另一种判成失败（首次跑本门禁即实测到该误报）。
