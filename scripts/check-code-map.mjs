@@ -86,6 +86,27 @@ const SYMBOL_DROP_MAX_RATIO = (() => {
 })()
 const DERIVE_ANCHORS = argv.includes('--derive-anchors')
 const DERIVE_DRY_RUN = argv.includes('--derive-dry-run')
+/**
+ * `--only <path>[,<path>...]`：**只**把列出的文件的锚点推导成符号形态，其余一概不动。
+ *
+ * 为什么需要它：`--derive-anchors` 会一次性改写整份执行地图的所有 legacy 锚点
+ * （实测 1392 条、696+/696-），把一个单点改动变成无法评审的巨型 diff。
+ * 实际最常见的场景是「我这次只动了三个文件，只想刷这三个文件」——此前只能手工算行号差
+ * 再逐条改坐标，非常脆（#1075 那批因此返工过一次）。
+ *
+ * 四条判据，每条都能判红：
+ *   1. 越界即错：路径不在执行地图里、或该文件在文档中没有任何锚点 -> 报错退出，不得静默跳过；
+ *   2. 只动 listed：未列出的文件在文档里一字不改；
+ *   3. 推不出锚点仍硬失败：绝不回退成行号锚（那正是要淘汰的形态）；
+ *   4. 与 --refresh-anchor-baseline 联用时，先改写文档、再重铺基线。
+ */
+const ONLY_RAW = (() => {
+  const i = argv.indexOf('--only')
+  if (i < 0) return null
+  const raw = argv[i + 1]
+  if (raw === undefined || raw.startsWith('--')) return { error: '--only 需要一个路径参数（逗号分隔）' }
+  return { paths: raw.split(',').map((s) => s.trim()).filter(Boolean) }
+})()
 /** CI 等价性检查：apk 仓在被独立检出时没有协调仓父目录，--no-parent 用来本地预演那种情形。 */
 const NO_PARENT = argv.includes('--no-parent')
 const ANCHOR_BASELINE_REL = 'scripts/check-code-map-anchor-baseline.json'
@@ -1754,13 +1775,96 @@ if (isMain) {
     console.error('CHECK-CODE-MAP FAILED：地图文档不存在：' + DOC_REL + '（先写文档，或 --doc 指定）')
     process.exit(2)
   }
-  const text = readFileSync(docAbs, 'utf8')
+  // let：--only 改写文档后需要重新读入，详见下方那段。其余路径只读一次。
+  let text = readFileSync(docAbs, 'utf8')
   const universe = collectUniverse(REPO)
   const fsView = makeFsView(REPO, NO_PARENT ? null : PARENT)
   // ── 推导迁移 / dry-run（用户决定 1）──────────────────────────────────────
   // 把 legacy 锚点（path:line + 该行内容）推导成可自愈的符号锚点：
   //   能唯一推导出符号 -> `path#Symbol@<内容哈希>`
   //   内容在全文不唯一 / 同名多符号且推不出宿主类 -> 保持 legacy 并列出，不猜
+  /* ── --only：只刷指定文件的锚点（说明见 ONLY_RAW 处）────────────────────────
+   *
+   * 推导逻辑与 --derive-anchors **完全复用**，不另写一套——两套推导必然漂移，
+   * 而漂移正是锚点要解决的问题。差别只在作用域：这里先按 listed 过滤 anchors。
+   */
+  if (ONLY_RAW !== null) {
+    if (ONLY_RAW.error) {
+      console.error('CHECK-CODE-MAP FAILED：' + ONLY_RAW.error)
+      process.exit(2)
+    }
+    const onlySet = new Set(ONLY_RAW.paths.map((s) => norm(s)))
+    const parsed = parseDoc(text)
+
+    /* 判据 1：越界即错。两种越界分开报，因为成因不同：
+     *   (a) 路径压根不在文档里 -> 拼错了，或该文件不属于地图；
+     *   (b) 文件在文档里但**没有任何锚点** -> 没有可刷的坐标。
+     * 都必须报错退出，不得静默跳过（静默跳过 = 「我以为刷了，其实没刷」）。 */
+    const mentioned = new Set()
+    for (const m of text.matchAll(/([A-Za-z0-9_./-]+\.(?:mjs|ps1|kt|ts|js|json|md|py|yml|yaml))/g)) {
+      mentioned.add(norm(m[1]))
+    }
+    const notInDoc = [...onlySet].filter((x) => !mentioned.has(x))
+    if (notInDoc.length > 0) {
+      console.error('CHECK-CODE-MAP FAILED：--only 给了执行地图里没有的路径（拼错，或该文件不属于地图）：')
+      for (const x of notInDoc) console.error('  - ' + x)
+      process.exit(2)
+    }
+    const anchoredPaths = new Set(parsed.anchors.map((a) => norm(a.path)))
+    const noAnchor = [...onlySet].filter((x) => !anchoredPaths.has(x))
+    if (noAnchor.length > 0) {
+      console.error('CHECK-CODE-MAP FAILED：--only 给了在执行地图里**没有任何锚点**的路径（没有可刷的坐标）：')
+      for (const x of noAnchor) console.error('  - ' + x)
+      process.exit(2)
+    }
+
+    const report = { symbol: [], disambiguated: [], content: [], failed: [] }
+    const rewrites = new Map()
+    for (const a of parsed.anchors) {
+      if (a.symbolForm) continue                      // 已是符号锚点，无需推导
+      if (!onlySet.has(norm(a.path))) continue        // 判据 2：只动 listed
+      const src = fsView.sourceLines(a.path)
+      if (src === null) { report.failed.push({ key: a.path + ':' + a.line, reason: '文件不存在' }); continue }
+      const lineText = src[a.line - 1]
+      if (lineText === undefined) { report.failed.push({ key: a.path + ':' + a.line, reason: '行号越界' }); continue }
+      const hash = contentHashOf(lineText)
+      const d = deriveSymbolAnchor(src, a.line, hash)
+      if (!d.ok) { report.failed.push({ key: a.path + ':' + a.line, reason: d.reason, text: lineText.trim().slice(0, 60) }); continue }
+      const target = d.symbol === null
+        ? a.path + '@' + d.hash
+        : a.path + '#' + d.symbol + '@' + d.hash
+      report[d.kind].push({ key: a.path + ':' + a.line, target, text: lineText.trim().slice(0, 60) })
+      rewrites.set(a.path + ':' + a.line, target)
+    }
+
+    // 判据 3：推不出锚点仍硬失败，绝不回退成行号锚。
+    if (report.failed.length > 0) {
+      console.error('CHECK-CODE-MAP FAILED：--only 的文件里有 ' + report.failed.length
+        + ' 条锚点推不出符号形态（不会回退成行号锚）：')
+      for (const f of report.failed) {
+        console.error('  - ' + f.key + '  ' + f.reason + (f.text ? '  | ' + f.text : ''))
+      }
+      console.error('  处置：给这些行补 #expect=<编码后的行前缀>，或把锚点移到有符号的行上。')
+      process.exit(1)
+    }
+
+    let out = text
+    let replaced = 0
+    for (const [key, target] of rewrites) {
+      const esc = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const re = new RegExp(esc + '(?!#expect=)', 'g')
+      out = out.replace(re, () => { replaced += 1; return target })
+    }
+    if (out !== text) writeFileSync(docAbs, out)
+    console.log('--only 作用域：' + [...onlySet].join(', '))
+    console.log('  改写 ' + replaced + ' 处引用 -> ' + DOC_REL + '（其余文件一字未动）')
+    if (!REFRESH_ANCHOR_BASELINE) process.exit(0)
+    /* 与 --refresh-anchor-baseline 联用：继续往下重铺基线。
+     * 文档刚被改写过，必须用**新内容**重新解析，否则下面看到的是旧锚点集，
+     * 会把刚改出来的符号锚当成「新引用」而判红。 */
+    if (out !== text) text = readFileSync(docAbs, 'utf8')
+  }
+
   if (DERIVE_ANCHORS || DERIVE_DRY_RUN) {
     const parsed = parseDoc(text)
     const report = { symbol: [], disambiguated: [], content: [], failed: [] }
