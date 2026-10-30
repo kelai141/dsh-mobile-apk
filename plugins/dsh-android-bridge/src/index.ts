@@ -391,6 +391,60 @@ function looksDangerous(command: string): boolean {
   return false
 }
 
+/**
+ * issue #1063：`shRemove` 的**路径载荷**危险检查。
+ *
+ * 缺陷形态：危险命令黑名单 (`looksDangerousAdb`) 只挂在 `op === 'shExec'` 上，而它的判据读的是
+ * `args.command`。`shRemove` 的载荷是 `args.remote`（一条绝对路径），于是
+ * `controlExec('shRemove', { remote: '/' })` 穿过 #controlExec 的全部检查，直达
+ * `ShellOps.remove` → `ShizukuUserService.removePath` → `SnapshotFs.deletePath`（**递归**）。
+ *
+ * 判据取向与命令黑名单相反：删除是破坏性且**不可撤销**的操作，所以这里用**白名单**——
+ * 只放行明确位于临时/缓存根之下的路径，其余一律拒。理由：
+ *   - 黑名单只能枚举已知的危险根，而 `/data/user/0/<pkg>` / `/data/misc` / `/apex` 这类
+ *     等价破坏面永远列不完；漏一个就是一次不可恢复的删除。
+ *   - 本插件自己的用法只有「清 dsh-tmp 临时产物」，白名单没有表达力损失。
+ *
+ * 规范化在**判定前**做（`..` 折叠、冗余斜杠、末尾斜杠），否则 `/data/local/tmp/../..`
+ * 会绕过前缀匹配。规范化只做纯词法展开，**不**解析符号链接（调用点在引擎侧，链接触达不到）。
+ *
+ * @param remote - `shRemove` 的目标路径（调用方给的原始值）。
+ * @returns true = 必须拒绝。
+ */
+function looksDangerousRemovePath(remote: unknown): boolean {
+  if (typeof remote !== 'string') return true
+  const raw = remote.trim()
+  if (raw === '') return true
+  // 只接受绝对路径：相对路径在 shell 里按 cwd 解析，落点不可预测 ⇒ fail-closed。
+  if (!raw.startsWith('/')) return true
+  // 含 NUL / 换行 / 通配符 / 命令替换等「展开后不是这条路径」的形态，一律不做猜测。
+  if (/[\u0000\n\r]/.test(raw)) return true
+  if (/[*?[\]{}~`$]/.test(raw)) return true
+  // 词法规范化：折叠 //、/./，按段处理 /../（到根为止）。
+  const parts: string[] = []
+  for (const seg of raw.split('/')) {
+    if (seg === '' || seg === '.') continue
+    if (seg === '..') { parts.pop(); continue }
+    parts.push(seg)
+  }
+  const norm = '/' + parts.join('/')
+  // 删除整个文件系统（规范化后就是根）。
+  if (norm === '/') return true
+  /**
+   * 允许删除的根（白名单）。只列本仓自己会写的临时/缓存面：
+   *   - `/data/local/tmp`（Shizuku/Termux 侧临时产物）
+   *   - `/sdcard/Android/data/<pkg>`（应用自有外部目录；**不含**裸 `/sdcard`）
+   * 注意 `/sdcard/Android/data` 这一整个父层**不**放行：别的应用的数据也在里面。
+   */
+  const ALLOWED_ROOTS = [
+    '/data/local/tmp',
+    '/sdcard/Android/data/com.dsharnessmobile.shell',
+    '/storage/emulated/0/Android/data/com.dsharnessmobile.shell',
+  ]
+  // 必须**严格位于**某个允许根之下（等于根本身也不放行：那是清空整个临时面）。
+  return !ALLOWED_ROOTS.some((root) => norm.startsWith(root + '/'))
+}
+
 /** ADB 通道附加黑名单（shell uid=2000 执行面比 app uid 更危险：系统级配置/权限写面一律拒绝）。 */
 function looksDangerousAdb(command: string): boolean {
   if (looksDangerous(command)) return true
@@ -441,12 +495,22 @@ export interface ControlAuth {
  * 刻意不在列（各自的理由不同，别一刀切）：
  *  - `browser*`：0.14.0 做过一次**正确方向**的纠偏（浏览器不该被设备控制门锁死，见 control-policy
  *    的注释），本常量不把它加回来；它的权限档位问题走契约侧对齐（审查 §3.2-S5 / H-8）。
- *  - `vdInfo`/`vdCreate`/`vdDestroy`/`state`/`snapshot`/`nodeText`/`screenshot`/`web*`：读面或
- *    管理面，已被范围门与 A11Y_OPS 门覆盖；把它们也纳入会让「读设备状态」也变得过不去。
+ *  - `vdInfo`/`vdCreate`/`vdDestroy`/`state`/`web*`：读面或管理面。`vdInfo`/`state` 只回注册表
+ *    与代次，不含屏幕内容；`web*` 读的是**壳自有 WebView**（DSH 自己的 Web UI），不是设备屏。
+ *    这几个留在清单外是有意的，别顺手加。
+ *
+ * issue #1062：`snapshot`/`screenshot`/`nodeText` **必须在**清单里。
+ * 早前它们被排除，理由写的是「已被范围门与 A11Y_OPS 门覆盖」——这句话是错的：
+ * 范围门只判**屏幕范围**（real/virtual），A11Y 门只判**无障碍是否在线**，两者都不看档位。
+ * 于是 workspace-write 会话在 scope='all' 下能读整屏（`controlExec('screenshot')` 直通执行面），
+ * 而同一调用交给文档策略 decideControl 会被拒（它要求 sessionMode === 'danger-full-access'）。
+ * 判据存在于 control-policy 却不在执行路径上 = 只有诊断面看得到，执行面照旧放行。
+ * 三者都是 REAL_SCREEN_CONTROL_OPS（读设备屏内容），隐私敏感度与 click 同级，故同门。
  */
 const TIER_REQUIRED_OPS: readonly string[] = [
   'shExec', 'shPull', 'shPush', 'shRemove',
   'vdInput', 'vdLaunch', 'vdLaunchApp', 'vdMoveTask',
+  'snapshot', 'screenshot', 'nodeText',
   'click', 'longClick', 'setText', 'scroll', 'global',
 ]
 
@@ -761,13 +825,13 @@ export class AndroidPrivilegeService {
    *
    * fail-closed：命令不可达/超时/解析不出 → 返回空数组（判定侧视为无 token 可核对 → 拒绝）。
    */
-  async #shellSfVirtualDisplayTokens(): Promise<Array<{ alias: string; token: string }>> {
+  async #shellSfVirtualDisplayTokens(auth?: ControlAuth): Promise<Array<{ alias: string; token: string }>> {
     try {
       const r = await this.#controlExec('shExec', {
         // 只取「Virtual Display <token>」与其紧跟的 name= 行；输出 ~25 B。
         command: "dumpsys SurfaceFlinger | grep -E '^(Virtual Display |    name=)'",
         timeoutMs: 15_000,
-      }, SHELL_QUEUE_TIMEOUT_MS, undefined, 'sf-token-lookup')
+      }, SHELL_QUEUE_TIMEOUT_MS, auth, 'sf-token-lookup')
       if (!r.ok) return []
       const data = (r.data ?? {}) as Record<string, unknown>
       const stdout = typeof data.stdout === 'string' ? data.stdout : ''
@@ -785,7 +849,7 @@ export class AndroidPrivilegeService {
    * 时，才去问壳侧注册表核对；目标确为虚拟屏 → 放行。低成本路径（范围含 real / 命令不命中命令面 /
    * 命令无目标屏）零额外往返——不为一条本来就不该拦的命令多打一次 vdInfo。
    */
-  private async adbCommandScopeDenied(command: string): Promise<string | null> {
+  private async adbCommandScopeDenied(command: string, auth?: ControlAuth): Promise<string | null> {
     const scope = this.screenScope()
     const base = realScreenAdbCommandDenied(scope, command)
     if (base === null) return null
@@ -808,7 +872,7 @@ export class AndroidPrivilegeService {
     if (byDisplayId === null) return null
     // displayId 空间不命中：再核对 SurfaceFlinger token（只有这一路需要额外往返与别名集合）。
     if (registry.aliases.length === 0) return byDisplayId
-    const sf = await this.#shellSfVirtualDisplayTokens()
+    const sf = await this.#shellSfVirtualDisplayTokens(auth)
     return realScreenAdbCommandDenied(this.screenScope(), command, {
       virtualDisplayIds: registry.ids,
       virtualAliases: registry.aliases,
@@ -817,8 +881,8 @@ export class AndroidPrivilegeService {
   }
 
   /** 同上，公开面（android_shell_exec 工具执行点在类外，需要经服务对象调用）。 */
-  shellCommandScopeDenied(command: string): Promise<string | null> {
-    return this.adbCommandScopeDenied(command)
+  shellCommandScopeDenied(command: string, auth?: ControlAuth): Promise<string | null> {
+    return this.adbCommandScopeDenied(command, auth)
   }
 
   /**
@@ -1031,10 +1095,15 @@ export class AndroidPrivilegeService {
     const resolved = this.resolveAuth(auth)
     if (internal !== undefined) {
       const entry = INTERNAL_PRIVILEGED[internal]
-      const gate = internal === 'animation-scales'
-        ? (resolved.session === undefined ? { ok: false } : this.gateFor(resolved.session))
-        : { ok: true }
-      const ok = gate.ok && op === 'shExec' && entry !== undefined && command !== undefined && entry.allows(command)
+      // issue #1064：**每条内部键都必须过会话与档位闸**，不允许「内部键 = 免检」。
+      // 原实现只有 animation-scales 过闸，sf-token-lookup 是硬编码 { ok: true }，而它可以经
+      // 公开方法 shellCommandScopeDenied() 触发 ⇒ 任何插件都能让 uid 2000 跑一次
+      // dumpsys SurfaceFlinger。这不是「影响很小所以算了」：它是全文件唯一绕过「没有来源就拒」
+      // 的地方，后来者照着加一条 internal 键就会继承同样的豁免。
+      // 拿不到会话时返回 allowed:false ⇒ 反查拿到空 token 集 ⇒ 屏幕范围判定 fail-closed（拒绝），
+      // 安全方向正确。
+      const internalGate = resolved.session === undefined ? { ok: false } : this.gateFor(resolved.session)
+      const ok = internalGate.ok && op === 'shExec' && entry !== undefined && command !== undefined && entry.allows(command)
       writeAudit({ action: 'privileged-internal', call: internal, op, command: command ?? '', result: ok ? 'ok' : 'denied-internal-shape' })
       if (ok) return { allowed: true, internal: true }
       return {
@@ -1080,6 +1149,20 @@ export class AndroidPrivilegeService {
       if (op === 'shExec' && !decision.internal && command !== undefined && looksDangerousAdb(command)) {
         writeAudit({ action: 'shell-exec', args: { command }, result: 'denied-danger-service' })
         return { ok: false, error: '命令被特权 shell 通道危险检查拦截（服务面拒绝）。' }
+      }
+      // issue #1063：删除路径的危险检查必须挂**在这里**（执行面），而不是工具壳。
+      // 早前只有 shExec 一条，而 shRemove 的载荷是 args.remote —— 判据读 args.command 永远读不到，
+      // 于是 controlExec('shRemove', { remote: '/' }) 直达 uid-2000 的递归删除。
+      if (op === 'shRemove') {
+        const remote = (args as { remote?: unknown }).remote
+        if (looksDangerousRemovePath(remote)) {
+          writeAudit({ action: 'shell-remove', args: { remote }, result: 'denied-danger-path' })
+          return {
+            ok: false,
+            error: '删除路径被特权 shell 通道危险检查拦截（服务面拒绝）：'
+              + '只允许删除明确位于 /data/local/tmp 或本应用自有外部目录之下的路径。',
+          }
+        }
       }
     }
     if (A11Y_OPS.includes(op) && !this.a11yEnabled()) {
@@ -1234,7 +1317,7 @@ export class AndroidPrivilegeService {
     }
     // review C11：raw shell 是绕过页面/工具层的执行面——范围不含 real 时真实屏读写命令在此拒绝。
     // 块G F2：命令显式指定了目标屏（`-d <id>`）时按**目标屏**判定，不再按命令词一刀切。
-    const scopeDenied = await this.adbCommandScopeDenied(command)
+    const scopeDenied = await this.adbCommandScopeDenied(command, auth)
     if (scopeDenied !== null) return { ok: false, stdout: '', guidance: scopeDenied }
     // S-6：壳侧执行时限与引擎入队时限**同时**下发，且入队 > 壳侧（见 SHELL_QUEUE_TIMEOUT_MS 的说明）。
     const r = await this.#controlExec(
@@ -1271,7 +1354,7 @@ export class AndroidPrivilegeService {
     }
     // review C11：screencap+pull / uiautomator dump 等行同样要在执行点复查屏幕范围。
     // 块G F2：`screencap -p -d <虚拟屏 id>` 是**读范围内的屏**，必须与无参 screencap 区分开。
-    const scopeDenied = await this.adbCommandScopeDenied(line)
+    const scopeDenied = await this.adbCommandScopeDenied(line, auth)
     if (scopeDenied !== null) return { ok: false, stdout: '', guidance: scopeDenied }
     const translated = translateAdbLine(line)
     if (!translated.ok) return { ok: false, stdout: '', guidance: translated.error }
