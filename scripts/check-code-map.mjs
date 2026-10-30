@@ -1874,14 +1874,105 @@ if (isMain) {
       const re = new RegExp(esc + '(?!#expect=)', 'g')
       out = out.replace(re, () => { replaced += 1; return target })
     }
-    if (out !== text) writeFileSync(docAbs, out)
+    const shaOf = (s) => createHash('sha256').update(s, 'utf8').digest('hex')
+    const shaBefore = shaOf(text)
+    const shaAfter = shaOf(out)
+
+    /* issue #1179 缺陷 1：--only 必须与 --derive-anchors 同口径 —— 默认 dry-run，--write 才落盘。
+     *
+     * 旧实现直接 writeFileSync：另一个会话按「先跑一次看看」的心态跑了一次，7 处引用
+     * 已经落盘（第二次跑变 0 处）。一个改受版本控制文档的工具，默认行为必须是**不改动**。
+     */
+    if (!DERIVE_WRITE) {
+      console.log('--only 作用域：' + [...onlySet].join(', '))
+      console.log('')
+      console.log('DRY-RUN（未落盘）：')
+      console.log('  将改写 ' + replaced + ' 处引用 -> ' + DOC_REL + '（其余文件一字未动）')
+      console.log('  sha256 ' + DOC_REL + ': ' + shaBefore.slice(0, 16) + ' -> ' + shaAfter.slice(0, 16))
+      const willAdd = []
+      for (const [, target] of rewrites) {
+        const m = /#([A-Za-z_$][A-Za-z0-9_$.]*)@([0-9a-f]+)$/.exec(target)
+        if (m) willAdd.push(target)
+      }
+      console.log('  将新增 ' + willAdd.length + ' 条 symbolHashes 基线条目'
+        + (willAdd.length > 0 ? '（同批落盘，不需再跑 --refresh-anchor-baseline）' : ''))
+      console.log('  文件字节未改动。')
+      console.log('  确认无误后加上 --write 落盘：node scripts/check-code-map.mjs --only '
+        + [...onlySet].join(',') + ' --write')
+      process.exit(0)
+    }
+
+    /* issue #1179 缺陷 2：--only 改出的符号锚必须**同批**写进基线。
+     *
+     * 旧实现只改文档、不碰基线，于是跑完立刻 check-code-map 就报 symbol-unbaselined，
+     * 用户得再跑一次 --refresh-anchor-baseline 收尾 —— 而那条路正是我们要约束的
+     * （refresh 会做全集重写）。--only 自己知道它改了哪几条，就该自己把这几条的基线条目
+     * 写掉：**只动 listed 文件相关的键**，其余键一个不碰。
+     */
+    const nextSymbols = { ...(ANCHOR_BASELINE.symbols ?? {}) }
+    const nextSymbolHashes = { ...(ANCHOR_BASELINE.symbolHashes ?? {}) }
+    const nextSourceLines = { ...(ANCHOR_BASELINE.sourceLines ?? {}) }
+    const touchedHashes = []
+    const retiredSourceLines = []
+
+    for (const [key, target] of rewrites) {
+      // 这条 legacy 锚点退役：它的 sourceLines 键随之退休。
+      if (Object.hasOwn(nextSourceLines, key)) {
+        delete nextSourceLines[key]
+        retiredSourceLines.push(key)
+      }
+      const sym = /^(.+?)#([A-Za-z_$][A-Za-z0-9_$.]*)(?:@([0-9a-f]+))?$/.exec(target)
+      if (!sym) {
+        // 形如 `path@<hash>` 的纯内容锚点（无符号）：只退休 sourceLines，不进 symbols 段。
+        continue
+      }
+      const [, path, symbol, hash] = sym
+      const src = fsView.sourceLines(path)
+      const hit = src === null ? { found: false } : symbolAt(src, symbol)
+      if (!hit.found) {
+        console.error('CHECK-CODE-MAP FAILED：--only 推出来的符号在源码里找不到（不写基线）：'
+          + path + '#' + symbol)
+        process.exit(1)
+      }
+      nextSymbols[path + '#' + symbol] = hit.body
+      if (hash !== undefined) {
+        const { verdict, occurrences } = classifySymbolHashAnchor(hit.body, hash)
+        if (verdict === 'missing') {
+          console.error('CHECK-CODE-MAP FAILED：--only 推出的锚点内容不在符号体内（不写基线）：'
+            + path + '#' + symbol + '@' + hash)
+          process.exit(1)
+        }
+        if (verdict === 'ambiguous') {
+          console.error('CHECK-CODE-MAP FAILED：--only 推出的锚点内容在符号体内出现 '
+            + occurrences + ' 次，无法唯一定位（不写基线）：' + path + '#' + symbol + '@' + hash)
+          console.error('  处置：换一行在符号体内唯一的锚点，或收窄符号（#Class.member）。')
+          process.exit(1)
+        }
+        nextSymbolHashes[path + '#' + symbol + '@' + hash] = true
+        touchedHashes.push(path + '#' + symbol + '@' + hash)
+      }
+    }
+
+    writeFileSync(docAbs, out)
+    const nextBaseline = {
+      ...ANCHOR_BASELINE,
+      symbols: nextSymbols,
+      symbolHashes: nextSymbolHashes,
+      sourceLines: nextSourceLines,
+    }
+    writeFileSync(ANCHOR_BASELINE_ABS, JSON.stringify(nextBaseline, null, 2) + '\n')
+
     console.log('--only 作用域：' + [...onlySet].join(', '))
+    console.log('')
+    console.log('已落盘（--write）：')
     console.log('  改写 ' + replaced + ' 处引用 -> ' + DOC_REL + '（其余文件一字未动）')
-    if (!REFRESH_ANCHOR_BASELINE) process.exit(0)
-    /* 与 --refresh-anchor-baseline 联用：继续往下重铺基线。
-     * 文档刚被改写过，必须用**新内容**重新解析，否则下面看到的是旧锚点集，
-     * 会把刚改出来的符号锚当成「新引用」而判红。 */
-    if (out !== text) text = readFileSync(docAbs, 'utf8')
+    console.log('  sha256 ' + DOC_REL + ': ' + shaBefore.slice(0, 16) + ' -> ' + shaAfter.slice(0, 16))
+    console.log('  基线同批更新：新增 ' + touchedHashes.length + ' 条 symbolHashes'
+      + (retiredSourceLines.length > 0 ? '，退休 ' + retiredSourceLines.length + ' 条 sourceLines' : ''))
+    for (const k of touchedHashes) console.log('    + symbolHashes: ' + k)
+    for (const k of retiredSourceLines) console.log('    - sourceLines: ' + k)
+    console.log('  下一步：node scripts/check-code-map.mjs（这一次就应该是 PASSED）')
+    process.exit(0)
   }
 
   if (DERIVE_ANCHORS || DERIVE_DRY_RUN) {
