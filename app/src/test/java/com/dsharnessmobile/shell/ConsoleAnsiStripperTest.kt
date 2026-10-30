@@ -99,4 +99,30 @@ class ConsoleAnsiStripperTest {
       "\u001b[H\u001b[2Jtermux-change-repo"
     assertEquals("termux-change-repo", s.feed(raw))
   }
+
+  @Test
+  fun delAndC1ControlsNeverReachTheScreen() {
+    // DEL（0x7F）与 C1（0x80–0x9F）都不是可见字符；旧实现只判 `ch < ' '` ⇒ 两者原样上屏
+    // （实测 `a\u007fb` → `[97, 127, 98]`，控制台里就是方块/空白）。
+    assertEquals("DEL 必须丢弃", "ab", ConsoleAnsiStripper().feed("a\u007fb"))
+    assertEquals("普通 C1 必须丢弃", "ab", ConsoleAnsiStripper().feed("a\u0085b"))
+    // 反向：正文里的多字节字符与 tab/换行必须原样保留（修法不得把 CJK 一起吃掉）。
+    assertEquals("CJK 与 tab 保留", "中\t文\n", ConsoleAnsiStripper().feed("中\t文\n"))
+  }
+
+  @Test
+  fun eightBitCsiIsStrippedLikeItsSevenBitForm() {
+    // `\u009b` 是 8 位形式的 CSI，真实终端会照常解析 ⇒ 必须按序列吃掉，不能当正文上屏。
+    val eightBit = ConsoleAnsiStripper().feed("a\u009b1;31mb")
+    assertEquals("8 位 CSI 必须被剥离", "ab", eightBit)
+    val sevenBit = ConsoleAnsiStripper().feed("a\u001b[1;31mb")
+    assertEquals("7 位形式的行为不得改变", "ab", sevenBit)
+  }
+
+  @Test
+  fun repeatedCarriageReturnFoldsOnce() {
+    // 真 PTY 偶尔出现 `\r\r\n`（重绘后清行）。旧实现每个 CR 都输出换行 ⇒ 凭空多一空行。
+    assertEquals("连续 CR 只折一次", "x\ny", ConsoleAnsiStripper().feed("x\r\r\ny"))
+    assertEquals("单个 CRLF 仍是单换行", "x\ny", ConsoleAnsiStripper().feed("x\r\ny"))
+  }
 }

@@ -24,6 +24,7 @@
 import { readFileSync, existsSync } from 'node:fs'
 import { join, dirname, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { quoted, arrayBlock, unionBlock } from './lib/control-ops-parse.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = dirname(HERE)
@@ -76,32 +77,8 @@ const readOrDie = (p) => {
   if (!existsSync(p)) { console.error('CHECK-CONTROL-OPS FAILED：源文件缺席 ' + rel(p)); process.exit(1) }
   return readFileSync(p, 'utf8')
 }
-const quoted = (s) => [...s.matchAll(/'([^']+)'|"([^"]+)"/g)].map((m) => m[1] ?? m[2])
 const failParse = (what) => { console.error('CHECK-CONTROL-OPS FAILED：解析不到 ' + what + '（形态可能已变）'); process.exit(1) }
 
-/** `= [ ... ]` / `= listOf( ... )` 数组块（先定位赋值符，避免命中类型注解里的 []）。 */
-const arrayBlock = (src, mark, open, close) => {
-  const i = src.indexOf(mark)
-  if (i < 0) return null
-  const o = src.indexOf(open, i)
-  if (o < 0) return null
-  const c = src.indexOf(close, o + open.length)
-  return c < 0 ? null : src.slice(o + open.length, c)
-}
-/** 类型联合块：从 mark 起逐行累积，直到某行不再以 \' 或 | 结尾。 */
-const unionBlock = (src, mark) => {
-  const i = src.indexOf(mark)
-  if (i < 0) return null
-  const lines = src.slice(i).split('\n')
-  const out = []
-  for (const line of lines) {
-    out.push(line)
-    const t = line.trim()
-    if (t.length === 0) continue
-    if (!/['|]$/.test(t)) break
-  }
-  return out.join('\n')
-}
 
 // 1) 壳侧 handle when 分支
 const svc = readOrDie(join(SHELL_ROOT, SHELL_MARK))
@@ -334,3 +311,25 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log('CHECK-CONTROL-OPS PASSED')
+
+// ── 内建自测（--self-test）：钉住三个解析原语的行为 ──────────────────────────────
+// 它们决定「六处登记面各自解析出什么」，一错门禁就假绿/假红；原本嵌在顶层直跑的脚本里无法单测。
+if (process.argv.includes('--self-test')) {
+  const eq = (a, b, what) => {
+    if (JSON.stringify(a) !== JSON.stringify(b)) {
+      console.error('SELF-TEST FAILED：' + what + '\n  实得 ' + JSON.stringify(a) + '\n  期望 ' + JSON.stringify(b))
+      process.exit(1)
+    }
+  }
+  eq(quoted(`'a', "b", 'c'`), ['a', 'b', 'c'], 'quoted 收单双引号并按序')
+  eq(quoted('nothing here'), [], 'quoted 无引号返回空')
+  eq(arrayBlock('val X = setOf("a", "b")', 'val X', 'setOf(', ')'), '"a", "b"', 'arrayBlock 正常定位')
+  eq(arrayBlock('nothing', 'val X', 'setOf(', ')'), null, 'arrayBlock 缺 mark 返回 null')
+  eq(arrayBlock('val X = setOf("a"', 'val X', 'setOf(', ')'), null, 'arrayBlock 缺 close 返回 null')
+  eq(quoted(unionBlock("export type C = 'a'\n  // 说明\n  | 'b'\n\nexport interface N {", 'export type C =')), ['a', 'b'], 'unionBlock 跳过 // 注释行（旧实现会漏 b）')
+  eq(quoted(unionBlock("export type C = 'a'\n  /* 说明\n   * 续行\n   */\n  | 'b'\n\nexport interface N {", 'export type C =')), ['a', 'b'], 'unionBlock 跳过 /* */ 块注释')
+  eq(quoted(unionBlock("export type C = 'a'\n\nexport interface N {\n  op: 'zzz'\n}", 'export type C =')), ['a'], 'unionBlock 遇非联合行即停')
+  eq(unionBlock('nothing', 'export type C ='), null, 'unionBlock 缺 mark 返回 null')
+  console.log('SELF-TEST PASSED（9 断言）')
+  process.exit(0)
+}

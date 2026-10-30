@@ -25,6 +25,7 @@ import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs'
 import { join, dirname, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
+import { compareBytes as compareBytesLib, ignoredByGitignore } from './lib/patch-mirror-parse.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = dirname(HERE)
@@ -521,3 +522,35 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log('CHECK-PATCH-MIRROR PASSED（SKIP=' + skipped + '）')
+
+// ── 内建自测（--self-test）：钉住两个判定原语 ────────────────────────────────
+// `compareBytes` 的分界线决定「算 eol 噪声还是算内容漂移」，错了要么放过真漂移、要么被 autocrlf 刷红；
+// `ignoredByGitignore` 的能力边界（只认单段目录规则）也必须钉住，否则「以为它被忽略」会放过真漂移。
+if (process.argv.includes('--self-test')) {
+  const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const eq = (a, b, what) => {
+    if (a !== b) { console.error('SELF-TEST FAILED：' + what + '\n  实得 ' + JSON.stringify(a) + '\n  期望 ' + JSON.stringify(b)); process.exit(1) }
+  }
+  const dir = mkdtempSync(tmpdir() + '/pm-selftest-')
+  try {
+    const w = (name, content) => { const f = dir + '/' + name; writeFileSync(f, content); return f }
+    eq(compareBytesLib(w('a1', 'x\ny\n'), w('b1', 'x\ny\n')), 'same', '同字节 → same')
+    eq(compareBytesLib(w('a2', 'x\ny\n'), w('b2', 'x\r\ny\r\n')), 'eol', '仅行尾差异 → eol')
+    eq(compareBytesLib(w('a3', 'x\ny\n'), w('b3', 'x\nz\n')), 'content', '内容不同 → content')
+    // ignoredByGitignore 的边界：只认单段目录形态
+    const root = dir + '/root'
+    const { mkdirSync } = await import('node:fs')
+    mkdirSync(root, { recursive: true })
+    writeFileSync(root + '/.gitignore', '# 注释\nbuild/\n/libdir\nplugins/*/lib/\nname-no-slash\n')
+    eq(ignoredByGitignore(root, 'build'), true, '单段目录规则命中（build/ → build）')
+    eq(ignoredByGitignore(root, 'libdir'), true, '单段斜杠前缀命中（/libdir）')
+    eq(ignoredByGitignore(root, 'name-no-slash'), true, '单段无斜杠命中')
+    eq(ignoredByGitignore(root, 'plugins/x/lib'), false, '通配多段规则**不认**（fail-closed，必须 false）')
+    eq(ignoredByGitignore(root, 'scripts/build-apk-013.ps1'), false, '多段文件路径**不认**（MIRROR_TOP 全属此类）')
+  } finally {
+    try { rmSync(dir, { recursive: true, force: true }) } catch { /* 清理失败忽略 */ }
+  }
+  console.log('SELF-TEST PASSED（8 断言）')
+  process.exit(0)
+}

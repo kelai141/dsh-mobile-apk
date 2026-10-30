@@ -15,7 +15,11 @@ package com.dsharnessmobile.shell
  *   \\n  -> 换行        \\r  -> 回车        \\t  -> 制表
  *   \\e  -> ESC(0x1B)   \\\\  -> 反斜杠
  *   \\xHH -> 原始字节（HH 为两位十六进制）
- * 其余字符原样保留；无法识别的转义按字面量处理（不吞字符）。
+ * 其余字符原样保留；**无法识别的转义丢弃引导反斜杠、保留字符本身**（`\q` → `q`，`\xZZ` → `xZZ`）。
+ * 这一条有专门用例钉住（`unknownEscapeDropsTheBackslashAndKeepsTheCharacter` 与
+ * `badHexFallsBackToTheEscapedCharacter`）—— 与"不吞字符"的直觉相反，但页面侧已把每个 `\`
+ * 编码成 `\\`，真实输入（含 Windows 路径）不会走到这一支；改实现会让那两条用例变红，
+ * 属有意契约，2026-10-28 复核后维持现状、只把注释与本意对齐。
  */
 internal object ConsoleKeyCodec {
 

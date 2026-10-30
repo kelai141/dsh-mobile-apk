@@ -70,13 +70,18 @@ export interface NodeEntry {
 const ATTR_RE = /([a-zA-Z-]+)="([^"]*)"/g
 
 export function decodeEntities(s: string): string {
+  // `&amp;` **必须最后处理**（且只解一次）：它代表一个字面量 `&`，若提前展开，后续的数字实体
+  // 规则会把 `&amp;#60;`（应显示成 `&#60;`）再解成 `<` —— 双重解码。
+  // 2026-10-28 自查：旧实现把 `&#(\d+);` 排在 `&amp;` 之后，于是**只有数字实体这一支**会双重解码
+  // （`&amp;lt;` 反而正确，因为命名实体都在 `&amp;` 之前 ⇒ 同一个函数两种口径）。
+  // 调用点在 protocol-v2 的 text/desc/rid 解码（控件文本上屏路径）。
   return s
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
-    .replace(/&amp;/g, '&')
     .replace(/&#(\d+);/g, (_m, n: string) => String.fromCodePoint(Number(n)))
+    .replace(/&amp;/g, '&')
 }
 
 /** bounds="[x1,y1][x2,y2]" → {x,y,w,h}；畸形/缺省按零尺寸（0,0,0,0）——V2 编码保留零尺寸节点做骨架。 */
@@ -120,7 +125,12 @@ export function parseUiTreeXml(xml: string): { raw: RawNode[]; rotation: number 
   // 栈帧：index = 本节点在同父下的序号；next = 下一个子节点槽位。
   // 虚拟根永远在栈底，其 index 不参与路径。
   const stack: Array<{ index: number; next: number }> = [{ index: -1, next: 0 }]
-  const re = /<node\s([^>]*?)(\/?)>|<\/node>/g
+  // 属性区必须允许引号内的 `>`：XML 规范只强制转义 `&`、`<` 和定界引号，**字面 `>` 在属性值里合法**
+  // （`text="a>b"`）。旧写法 `[^>]*?` 会在那个 `>` 处截断 ⇒ 该节点**属性全丢** ⇒ 下游 `parseBounds`
+  // 失败 ⇒ 节点被整个丢弃，而 `checkUiTreeParse` 只比节点数、照样报 OK（2026-10-28 自查）。
+  // 实测现状：Android `uiautomator dump` 走 XmlSerializer 会把 `>` 转成 `&gt;`，故当前不可达 ——
+  // 但解析器按语法接受它、自检也要能抓住属性丢光，属纵深防御。
+  const re = /<node\s((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>|<\/node>/g
   let m: RegExpExecArray | null
   while ((m = re.exec(xml)) !== null) {
     if (m[0] === '</node>') {
@@ -156,6 +166,12 @@ export function checkUiTreeParse(xml: string, raw: RawNode[]): { ok: true } | { 
   const tagCount = (xml.match(/<node[\s>]/g) ?? []).length
   if (raw.length !== tagCount) {
     return { ok: false, reason: `节点数不一致：XML 含 ${tagCount} 个 <node> 标签，解析产出 ${raw.length} 条（源 XML 畸形或版本不兼容）` }
+  }
+  // 属性丢光时节点仍在 `raw` 里（只是没有 bounds）⇒ 只比标签数会漏。uiautomator 的每个 `<node>`
+  // 都带 bounds；缺了就是解析断了（例如属性值里有未被转义的 `>` 让属性区提前闭合）。
+  const noBounds = raw.findIndex((r) => typeof r.attrs.bounds !== 'string' || r.attrs.bounds === '')
+  if (noBounds >= 0) {
+    return { ok: false, reason: `第 ${noBounds} 个节点（id "${raw[noBounds].id}"）没有 bounds 属性——属性区解析失败（XML 含未转义的 > 或属性写法异常），解析结果不可信` }
   }
   if (raw.length > 0 && raw[0].id !== '0') {
     return { ok: false, reason: `根节点 id 应为 "0"，实得 "${raw[0].id}"（栈机归位错误）` }
@@ -214,7 +230,12 @@ export function pruneNodes(
     const editable = at.editable === 'true'
     // 0.13.5：不再按「可交互或带标签」剪枝——完整暴露（容器/无标签节点同样给模型，
     // 复杂界面靠结构定位；去重仍保留，避免同一位置同内容的重复行）。
-    const dedupeKey = [text, desc, at.class ?? '', bounds.cx, bounds.cy].join('|')
+    // **分隔符必须是文本里不可能出现的字符**（2026-10-28 自查）：旧实现用 `'|'`，而 UI 文本里
+    // `|` 非常常见（「标题 | 副标题」这类），于是 `text="a|b", desc="c"` 与 `text="a", desc="b|c"`
+    // 拼出同一个 key ⇒ 两个真实节点被当成重复、丢掉一个（模型看到的清单少一项、目标点不到）。
+    // 与 `protocol-v2.ts` 的叶子去重 key 统一用 `\u0000`（那边一直是这么写的 —— 同仓同类判据
+    // 必须共用一份口径）。
+    const dedupeKey = [text, desc, at.class ?? '', bounds.cx, bounds.cy].join('\u0000')
     if (seen.has(dedupeKey)) continue
     seen.add(dedupeKey)
     nodes.push({
@@ -315,11 +336,18 @@ export function resolveRef(
     return { ok: true, node: hit.n }
   }
   // 消歧后缀：#N（第 N 个匹配）/ @nX（限定在 nX 子树内）
-  let occurrence = 0
+  // `null` = **未指定序号**（区别于 `#0`）。旧实现用 0 当哨兵，于是 `text:foo#0` 被静默当成
+  // 「没写序号」⇒ 单候选时直接返回第 1 个、多候选时报「匹配 N 个」，用户看到的都不是
+  // 「#0 非法」——与本函数「绝不静默挑一个」的契约矛盾（2026-10-28 自查）。
+  let occurrence: number | null = null
   let scopeId = ''
   const occMatch = /#(\d+)\s*$/.exec(value)
   if (occMatch) {
-    occurrence = Number(occMatch[1])
+    const n = Number(occMatch[1])
+    if (!Number.isInteger(n) || n < 1) {
+      return { ok: false, error: `${kind} 的序号后缀 #${occMatch[1]} 非法：序号从 1 开始（例：${kind}:${value.slice(0, occMatch.index).slice(0, 20)}#2）` }
+    }
+    occurrence = n
     value = value.slice(0, occMatch.index)
   }
   const scopeMatch = /@(n\d+)\s*$/.exec(value)
@@ -361,7 +389,7 @@ export function resolveRef(
   if (cands.length === 0) {
     return { ok: false, error: `没有 ${kind} 为 "${t.slice(0, 30)}" 的节点${scopeId ? `（作用域 ${scopeId}）` : ''}——请重新取树（android_ui_dump 或 android_ui_tree）确认当前页面` }
   }
-  if (occurrence > 0) {
+  if (occurrence !== null) {
     if (occurrence > cands.length) {
       return { ok: false, error: `${kind} "${t.slice(0, 30)}" 只有 ${cands.length} 个匹配，请求的是第 ${occurrence} 个`, matches: cands.slice(0, 8) }
     }
@@ -416,4 +444,27 @@ export function scopePoolV2(v: { rows: UiNode[]; subtreeEnd: Int32Array }, scope
   if (!Number.isInteger(i) || i < 0 || i >= v.rows.length) return null
   const end = v.subtreeEnd[i]
   return v.rows.slice(i, end > i ? end : i + 1)
+}
+
+/**
+ * 0.13.8 P0-4：树结构指纹（FNV-1a）——「界面未变」快路径的判定依据。
+ * 覆盖定位所需字段（文本/描述/类型/几何/交互性）；任一变化 → 指纹翻转 → 完整重抓。
+ * 纯追加语义：指纹相同只回一行「未变」摘要，绝不改写历史结果（L1）。
+ */
+export function treeFingerprint(nodes: UiNode[]): string {
+  let h = 0x811c9dc5
+  for (const n of nodes) {
+    // **分隔符必须是文本里不可能出现的字符**：这段串是「界面未变」快路径的判据，
+    // 用 `|` 分隔时，同一节点（同 id / 同几何）的文本若恰好从 `("a|b","c")` 变成
+    // `("a","b|c")`，两串逐字节相同 ⇒ 指纹不翻转 ⇒ 回「未变」摘要、模型复用旧引用 ⇒ 点错目标。
+    // 统一用 `\u0000`（与 `pruneNodes` / `protocol-v2` 同口径）。
+    const s = `${n.id}\u0000${n.parentId}\u0000${n.text}\u0000${n.desc}\u0000${n.rid}\u0000${n.type}\u0000${n.cx},${n.cy},${n.w},${n.h}\u0000${n.clickable ? 1 : 0}${n.editable ? 1 : 0}${n.scrollable ? 1 : 0}${n.checked ? 1 : 0}${n.visible ? 1 : 0}`
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i)
+      h = Math.imul(h, 0x01000193) >>> 0
+    }
+    h ^= 0xff
+    h = Math.imul(h, 0x01000193) >>> 0
+  }
+  return 'fp' + h.toString(16).padStart(8, '0')
 }

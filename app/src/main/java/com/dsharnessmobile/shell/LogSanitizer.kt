@@ -64,6 +64,17 @@ internal object LogSanitizer {
   )
 
   /**
+   * 第 8 类：裸 JWT（`eyJ….….…`，既无键名也无 `Authorization` 前缀）。
+   *
+   * 为什么必须单独一类：OAuth 的 `access_token` 与部分 session cookie **本身就是 JWT**，
+   * 日志里最常见的形态是光秃秃一行（`dump: eyJhbGci…`）。`AUTH_HEADER` 只认 header 前缀、
+   * `SENSITIVE_KV` 只认键名 ⇒ 两类都盖不到（2026-10-28 自查实测：整段原样保留）。
+   * 形态足够特征（`eyJ` 开头 = `{"` 的 base64 + 恰好两段 `.` 分隔的 base64url），误伤面很小。
+   * 刻意**只打三段完整形态**：单独一段 `eyJ…` 与普通 base64 分不开，打成码会淹掉正常日志。
+   */
+  private val BARE_JWT = Regex("""\beyJ[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}""")
+
+  /**
    * 第 5 类：敏感键名 + 分隔符（半角冒号/等号与全角冒号）。
    *
    * 只按**键名**判定，不检查值的形状：password: hunter2 与 token: false 都会被打码。
@@ -103,6 +114,7 @@ internal object LogSanitizer {
       var cur = AUTH_HEADER.replace(line) { m -> m.groupValues[1] + m.groupValues[2] + MASK }
       cur = COOKIE_HEADER.replace(cur) { m -> m.groupValues[1] + MASK }
       cur = VENDOR_KEYS.replace(cur) { MASK }
+      cur = BARE_JWT.replace(cur) { MASK }
       cur = SENSITIVE_KV.replace(cur) { m -> m.groupValues[1] + MASK }
       cur = ENV_SECRET_LINE.replace(cur) { m -> m.groupValues[1] + MASK }
       cur = QUERY_SECRET.replace(cur) { m -> m.groupValues[1] + MASK }

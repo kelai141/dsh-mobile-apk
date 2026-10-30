@@ -3,7 +3,7 @@
 // 不可点击目标的「可点击祖先」回退静默失效。本测试锁死该边界。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseUiTreeXml, pruneNodes, resolveRef, findActionableAncestor, checkUiTreeParse } from '../lib/ui-tree.js'
+import { parseUiTreeXml, pruneNodes, treeFingerprint, resolveRef, findActionableAncestor, checkUiTreeParse, decodeEntities } from '../lib/ui-tree.js'
 
 const ATTRS = 'checkable="false" checked="false" enabled="true" focusable="false" focused="false" ' +
   'long-clickable="false" password="false" selected="false" package="com.android.settings"'
@@ -249,4 +249,115 @@ test('FX-212.4：根下 11 个顺序兄弟按屏幕顺序输出 btn0..btn10（�
   let maxJump = 0
   for (let i = 1; i < nodes.length; i++) maxJump = Math.max(maxJump, nodes[i].depth - nodes[i - 1].depth)
   assert.equal(maxJump, 1)
+})
+
+// decodeEntities 在 protocol-v2 的 text/desc/rid 解码路径上（控件文本上屏），此前零覆盖。
+// 2026-10-28 自查：旧实现把 `&#(\d+);` 排在 `&amp;` 之后 ⇒ `&amp;#60;` 被解成 `<`
+// （应显示字面量 `&#60;`），而 `&amp;lt;` 反而是对的 —— 同一个函数两种口径。
+test('decodeEntities：&amp; 只解一次，数字实体不得二次解码', () => {
+  // 修的形态：转义过的数字实体保持字面量
+  assert.equal(decodeEntities('&amp;#60;'), '&#60;')
+  assert.equal(decodeEntities('&amp;amp;'), '&amp;')
+  // 不能被带走的形态：真正的数字实体照样解、命名实体依旧正确、普通 & 解一次
+  assert.equal(decodeEntities('&#60;'), '<')
+  assert.equal(decodeEntities('&#20320;&#22909;'), '你好')
+  assert.equal(decodeEntities('&amp;lt;'), '&lt;')
+  assert.equal(decodeEntities('a &amp; b'), 'a & b')
+  assert.equal(decodeEntities('&lt;b&gt;'), '<b>')
+})
+
+// pruneNodes 的去重键旧实现用 '|' 当分隔符，而 UI 文本里 '|' 很常见（「标题 | 副标题」），
+// 于是 text="a|b"+desc="c" 与 text="a"+desc="b|c" 拼出同一个 key ⇒ 两个真实节点被误去重、
+// 丢掉一个（模型看到的清单少一项、目标点不到）。2026-10-28 改为 '\u0000'，与 protocol-v2 统一。
+test('pruneNodes：去重键不得因文本含分隔符而碰撞，真重复仍去重', () => {
+  const mk = (t, d, i) => ({ attrs: { bounds: '[0,0][10,10]', text: t, 'content-desc': d, class: 'V' }, id: i, parentId: '' })
+  // 修的形态：不同节点（同坐标）必须都保留
+  const distinct = pruneNodes([mk('a|b', 'c', '0.0'), mk('a', 'b|c', '0.1')])
+  assert.equal(distinct.nodes.length, 2, '两个不同节点被误判成重复：' + JSON.stringify(distinct.nodes.map((n) => [n.text, n.desc])))
+  // 不能被带走的形态：真正重复的节点仍要去重
+  const dup = pruneNodes([mk('x', 'y', '0.0'), mk('x', 'y', '0.1')])
+  assert.equal(dup.nodes.length, 1, '真重复没有被去重')
+})
+
+// treeFingerprint 是「界面未变」快路径的判据：同一节点（同 id / 同几何）的文本若恰好从
+// ("a|b","c") 变成 ("a","b|c")，旧实现用 '|' 拼接时两串逐字节相同 ⇒ 指纹不翻转 ⇒ 回「未变」
+// 摘要、模型复用旧引用 ⇒ 点错目标。2026-10-28 统一改用 '\u0000' 分隔。
+test('treeFingerprint：文本含分隔符不得让「界面未变」误判', () => {
+  const mk = (t, d) => ({
+    id: 'n0', parentId: '', text: t, desc: d, rid: '', type: 'V',
+    x: 0, y: 0, cx: 5, cy: 5, w: 10, h: 10,
+    clickable: false, editable: false, scrollable: false, checked: false, visible: true,
+  })
+  assert.notEqual(
+    treeFingerprint([mk('a|b', 'c')]),
+    treeFingerprint([mk('a', 'b|c')]),
+    '两个不同节点得到同一指纹 ⇒ 「界面未变」会被误判',
+  )
+  // 不能被带走的形态：同样的树必须得到同样的指纹（否则每次都判「变了」、快路径失效）
+  assert.equal(treeFingerprint([mk('x', 'y')]), treeFingerprint([mk('x', 'y')]))
+  // 文本变化必须翻转
+  assert.notEqual(treeFingerprint([mk('x', 'y')]), treeFingerprint([mk('x', 'z')]))
+})
+
+// XML 规范只强制转义 &、< 与定界引号，**字面 `>` 在属性值里合法**（text="a>b"）。旧解析器用
+// `[^>]*?` 收属性区，会在那个 `>` 处截断 ⇒ 该节点属性全丢 ⇒ 下游 parseBounds 失败 ⇒ 节点被整个
+// 丢弃，而 checkUiTreeParse 只比节点数、照样报 OK（「绝不静默产出错树」的承诺在这一路失效）。
+// 现状实测：uiautomator dump 走 XmlSerializer 会把 > 转成 &gt;，故当前不可达 —— 属纵深防御。
+test('parseUiTreeXml：属性值里的字面 > 不得让属性区提前闭合；属性丢光时自检必须拒绝', () => {
+  const xml = '<hierarchy rotation="0"><node text="a>b" bounds="[0,0][1,1]" class="V"></node></hierarchy>'
+  const r = parseUiTreeXml(xml)
+  assert.equal(r.raw[0].attrs.text, 'a>b', '字面 > 被当成属性区结束：' + JSON.stringify(r.raw[0].attrs))
+  assert.equal(r.raw[0].attrs.bounds, '[0,0][1,1]')
+  assert.equal(checkUiTreeParse(xml, r.raw).ok, true)
+  // 不能被带走的形态：转义 &gt; 仍按原样保留（由 decodeEntities 负责解码，解析器不参与）
+  const esc = parseUiTreeXml('<hierarchy><node text="a&gt;b" bounds="[0,0][1,1]"></node></hierarchy>')
+  assert.equal(esc.raw[0].attrs.text, 'a&gt;b')
+  // 自检必须抓住「属性丢光」：只有文本没有 bounds 的节点 → REJECT
+  const broken = '<hierarchy><node text="x" class="V"></node></hierarchy>'
+  const b = checkUiTreeParse(broken, parseUiTreeXml(broken).raw)
+  assert.equal(b.ok, false, '缺 bounds 的节点没有被自检抓住')
+})
+
+// resolveRef 的序号后缀是 **1 基**。旧实现用 `occurrence = 0` 当「未指定」哨兵，于是 `text:foo#0`
+// 被静默当成「没写序号」—— 单候选时直接返回第 1 个、多候选时报「匹配 N 个」，用户看到的都不是
+// 「#0 非法」，与本函数「绝不静默挑一个」的契约矛盾。2026-10-28 改为 null 哨兵 + #0 报错。
+test('resolveRef：#0 必须报错（1 基），#N 正常，#00 也算非法', () => {
+  const raw = [
+    { attrs: { bounds: '[0,0][10,10]', text: '设置', class: 'V' }, id: '0', parentId: '' },
+    { attrs: { bounds: '[5,5][15,15]', text: '设置', class: 'V' }, id: '0.0', parentId: '0' },
+  ]
+  const p = pruneNodes(raw)
+  for (const bad of ['text:设置#0', 'text:设置#00']) {
+    const r = resolveRef(p.byId, p.nodes, bad)
+    assert.equal(r.ok, false, bad + ' 被静默接受了：' + JSON.stringify(r.ok ? r.node.id : ''))
+    assert.match(r.error, /序号从 1 开始/, '错误信息没说明 1 基：' + r.error)
+  }
+  // 不能被带走的形态：合法序号仍工作
+  assert.equal(resolveRef(p.byId, p.nodes, 'text:设置#1').node.id, 'n0')
+  assert.equal(resolveRef(p.byId, p.nodes, 'text:设置#2').node.id, 'n1')
+  // 多候选仍「不猜」
+  const multi = resolveRef(p.byId, p.nodes, 'text:设置')
+  assert.equal(multi.ok, false, '多候选被静默挑了一个')
+  assert.ok(Array.isArray(multi.matches) && multi.matches.length === 2)
+})
+
+// **覆盖缺口**（2026-10-28 变异扫描发现）：把 `if (cands.length === 0)` 这个分支变异成永不成立后，
+// 整个测试文件仍然 16/16 全绿 —— 说明没有任何用例断言「引用一个不存在的节点时必须明确报错」。
+// 这个分支很重要：模型引用已被销毁的节点时，必须收到「没有 text 为 X 的节点——请重新取树」，
+// 而不是拿到空 matches / 静默失败。补上反向用例。
+test('resolveRef：找不到节点时必须明确报错，不得静默返回', () => {
+  const raw = [{ attrs: { bounds: '[0,0][10,10]', text: '设置', class: 'V' }, id: '0', parentId: '' }]
+  const p = pruneNodes(raw)
+  for (const ref of ['text:不存在的文本', 'desc:不存在的描述', 'rid:no.such.id']) {
+    const r = resolveRef(p.byId, p.nodes, ref)
+    assert.equal(r.ok, false, ref + ' 找不到却返回了节点：' + (r.ok ? r.node.id : ''))
+    assert.match(r.error, /没有 (text|desc|rid) 为/, '错误信息没说清「没有该文本的节点」：' + r.error)
+    assert.match(r.error, /重新取树/, '错误信息没引导重新取树：' + r.error)
+  }
+  // 不能被带走的形态：存在时必须命中（同一个函数两种结果都测）
+  assert.equal(resolveRef(p.byId, p.nodes, 'text:设置').node.id, 'n0')
+  // id 不存在同样要报错
+  const byId = resolveRef(p.byId, p.nodes, 'id:n999')
+  assert.equal(byId.ok, false)
+  assert.match(byId.error, /不在最近一次取树结果中/)
 })

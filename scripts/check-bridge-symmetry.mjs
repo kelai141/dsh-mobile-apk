@@ -33,7 +33,11 @@ export function kotlinBridgeMethods(text, startMarker) {
   const lines = region.split('\n')
   const names = []
   for (let i = 0; i < lines.length; i += 1) {
-    if (!lines[i].includes('@JavascriptInterface')) continue
+    // 只认**行首**（去缩进后）就是注解的行：注释里提到 `@JavascriptInterface` 的行也含这个词，
+    // 用 includes 会把紧随其后的任意 `fun`（含私有辅助函数）收进桥面清单
+    // （实测：`/** … @JavascriptInterface … */` 之后紧跟 `private fun helper()` 时，
+    // helper 会被当成桥方法 ⇒ 页面侧没有它就误报红，或者把它登记进 kotlinOnly 稀释真实面）。
+    if (!lines[i].trim().startsWith('@JavascriptInterface')) continue
     for (let j = i + 1; j < Math.min(i + 8, lines.length); j += 1) {
       const m = /fun\s+([A-Za-z0-9_]+)\s*\(/.exec(lines[j])
       if (m) { names.push(m[1]); break }

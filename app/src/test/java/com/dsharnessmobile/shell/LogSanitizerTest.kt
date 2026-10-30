@@ -188,4 +188,27 @@ class LogSanitizerTest {
     // 幂等：已打码的文本再打一次不得再变动（避免二次处理把正文吃掉）。
     assertEquals(out, LogSanitizer.redactPrivateKeyBlocks(out))
   }
+
+  @Test
+  fun bareJwtIsMasked() {
+    // 裸 JWT（无键名、无 Authorization 前缀）是真实泄漏形态：OAuth access_token 与部分
+    // session cookie 本身就是 JWT。AUTH_HEADER 只认 header 前缀、SENSITIVE_KV 只认键名。
+    val jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+    val out = LogSanitizer.sanitizeOrNull("dump: $jwt tail") ?: error("sanitize 返回 null")
+    assertFalse("裸 JWT 必须被打码：$out", out.contains("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"))
+    assertTrue("行内其它内容必须保留：$out", out.contains("dump:") && out.contains("tail"))
+  }
+
+  @Test
+  fun ordinaryBase64AndJwtFragmentsStayReadable() {
+    // 反向：只打**三段完整**形态。普通 base64 / 单独一段 eyJ… 不得被打码，
+    // 否则正常日志（图片 data URL、单段载荷）会被淹掉。
+    val png = "icon=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8"
+    val fragment = "header-only eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+    val plain = "text aGVsbG8gd29ybGQ= and eyJub3Rqd3Q"
+    val out = LogSanitizer.sanitizeOrNull(listOf(png, fragment, plain).joinToString("\n")) ?: error("null")
+    assertTrue("图片 data URL 不该被打码：$out", out.contains("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8"))
+    assertTrue("单独一段 eyJ… 不该被打码：$out", out.contains("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"))
+    assertTrue("普通 base64 不该被打码：$out", out.contains("aGVsbG8gd29ybGQ="))
+  }
 }

@@ -54,13 +54,24 @@ internal class ConsoleAnsiStripper {
           ch == '\r' -> state = State.CR
           // 其余 C0 控制字符（BEL 等）一律丢弃：它们没有可见语义，只会进 UI 噪声。
           ch < ' ' && ch != '\n' && ch != '\t' -> Unit
+          // DEL（0x7F）：C0 之外的另一个控制字符，`ch < ' '` 判不到它 ⇒ 会原样上屏
+          // （实测 `a\u007fb` → `[97, 127, 98]`，控制台里就是个方块/空白）。
+          ch == '\u007f' -> Unit
+          // C1 控制字符（0x80–0x9F）：其中 `\u009b` 是 **8 位形式的 CSI**（真实终端会照常解析），
+          // 其余（0x80–0x9A、0x9C–0x9F）没有可见语义。两者都不能当正文输出。
+          ch == '\u009b' -> state = State.CSI
+          ch in '\u0080'..'\u009f' -> Unit
           else -> out.append(ch)
         }
         // CR 的下一个字符决定折叠：LF 只算一个换行；其他字符则 CR 折行、字符按正文
         // 语义重新分发（ESC 引导/控制字符丢弃/普通字符输出——与 TEXT 态逐分支等价）。
         State.CR -> when {
           ch == '\n' -> { out.append('\n'); state = State.TEXT }
-          ch == '\r' -> out.append('\n')
+          // 连续 CR（`\r\r\n`）只该折一次：旧实现每个 CR 都输出一个换行 ⇒ 凭空多一空行。
+          ch == '\r' -> Unit
+          ch == '\u007f' -> Unit
+          ch == '\u009b' -> { out.append('\n'); state = State.CSI }
+          ch in '\u0080'..'\u009f' -> { out.append('\n'); state = State.TEXT }
           ch == '\u001b' -> { out.append('\n'); state = State.ESC }
           ch < ' ' && ch != '\t' -> { out.append('\n'); state = State.TEXT }
           else -> { out.append('\n'); out.append(ch); state = State.TEXT }

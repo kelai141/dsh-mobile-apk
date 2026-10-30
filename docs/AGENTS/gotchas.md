@@ -2542,3 +2542,77 @@ JVM 边界测试在 `EngineBootInstrumentationTest`（取值与 clamp 边界、�
     **最省的证伪手段**：写完选择器先在真机跑一次 `document.querySelector(选择器)`，返回 null 就是结构猜错了。这一步 10 秒，能省掉一轮完整构建（本轮每次构建 + 装机约 20 分钟）。
 
     **附带的判定原则**：测试通过只证明「代码与夹具一致」，不证明「代码与产品一致」。夹具是**真机的代理**，代理失真时测试越绿越危险。
+
+361. **一轮只读复核的「判定干净」清单（2026-10-28，附判据；省得后人把这些当新发现重挖）**：以下八处各自被怀疑过、逐条验完认为当前实现正确，**不要**因为"看起来像那类经典缺陷"就动它——
+    ① `CoordBasisPolicy.resolve`（#258 整屏/窗口基准）：优先级 `maximumWindowMetrics`(API 30+) → `Display.getRealMetrics()` → currentWindow 兜底；全取不到返回 `(0,0)` + `WIRE_WINDOW_CURRENT`（fail-closed，绝不虚报整屏）；click/longClick/snapshot 的 screen 字段/scroll 兜底四条路径共用同一个 `resolve`，不存在"漏改一条就换个入口复发"。
+    ② `parseSfDisplayTokens`(Kotlin) 与 `screenTokensFromSfDump`(TS) **实质等价**：`lines()` vs `split(/\r?\n/)`、`matchEntire(trim())` 自带锚点 vs 显式 `^…$`、`trimEnd()` vs split 已吃掉 `\r` ⇒ 不是漂移，勿按"双份实现必漂移"的直觉去改。
+    ③ `ConsoleKeyCodec.decode` 的**未知转义丢弃引导反斜杠**（`\q` → `q`、`\xZZ` → `xZZ`）是**有意契约**，两条用例钉住（`unknownEscapeDropsTheBackslashAndKeepsTheCharacter`、`badHexFallsBackToTheEscapedCharacter`）；文件头那句"不吞字符"才是笔误（已在 `cb5edc1d` 改注释对齐）。**改了实现那两条会红**，且真实输入走不到那一支（页面侧把 `\` 编码成 `\\`）。
+    ④ `ConsoleOutputBatcher`：`@Synchronized` 可重入不死锁；`deadline.cancel(false)` 之后**已排队**的任务进去会因 `pending.isEmpty()` 直接返回（无害）；`close()` 先置 `closed` 再 flush、`finally` shutdown ⇒ 关停后 `append` 早退不撞 `RejectedExecutionException`。
+    ⑤ `GuidePageRenderer`（1083 行）**没有 HTML 字符串拼接**，全部走 `TextView`/`LinearLayout` ⇒ 不存在"未转义值进模板"那一面。
+    ⑥ `EngineAuth.redact` 与 `LogSanitizer` 是**分工**不是重复：前者只管引擎 URL 的 `[?&]token=`（`{40,}` 长度下限的 `TOKEN_RE` 只用于**提取**，不得拿去脱敏），JSON `"token":`/键值对形态由后者的 `SENSITIVE_KV` 兜 ⇒ 叠加后覆盖完整。
+    ⑦ 路径包含判据**四处都对**：`RepairActivity:1112`、`ShizukuTransport:1056`、`ShizukuUserService:110` 都补了 `File.separator` / `"/"`；`PluginMounts:921/1033/1046` 用 `java.nio.file.Path.startsWith`（**按路径段**比较，`/a/b-evil` 不命中 `/a/b`）。**看到 `X.startsWith(Y)` 先回类型声明确认 receiver**——`String.startsWith` 才是字符前缀那个洞。
+    ⑧ `BrowserHost` 的 `remoteId` 解析（`val slash = remoteId.indexOf('/'); if (slash <= 0) return`）用 `<= 0` 同时挡住 `-1` 与首字符命中 ⇒ 后面两处 `substring` 不会越界；同文件里 `tab.view!!`/`remote!!` 都有前置非空分支或在 `runCatching` 内。
+
+    ⑨ **`plugins/dsh-android-manage/src/protocol-v2.ts` 里两处 `subtreeEnd` 不是重复实现**（2026-10-28 复核）：`:160` 那份在 `decodeV2` 里（顺手重建 `parentId`，因为 V2 不传父 id），`:293` 那份在 `encodeV2` 里（判叶子用）。两处循环**算法一致**（单调栈 + 同深或更浅即出栈），编码侧不需要 parentId 所以少一行赋值。看到"同一个文件里两份同名算法"先确认是不是**解码/编码两个方向**，别急着合并。
+    ⑩ **TS 侧叶子去重 key 与 Kotlin 侧实质等价**：TS `[text, desc, cls, x + Math.floor(w/2), y + Math.floor(h/2)].join('\u0000')` vs Kotlin `text + "\u0000" + desc + … + (x + w/2) + …` —— `Math.floor(w/2)` 与 Kotlin 的 `Int` 除法对正数逐位相同，join 与字符串拼接都得同一串。**唯一理论差异**：`join` 的分隔符与文本里出现 `\u0000` 时会歧义，Kotlin 侧同样有此问题 ⇒ 两侧同病，不构成漂移。
+    ⑪ **`plugins/dsh-android-bridge/src/route-auth.ts` 的端口判据正确**：`enginePortFromEnv` 对 `undefined` 给文档默认 4145、对非 `^[0-9]+$`（含空白/符号/十六进制）给 `null`、对 `Number.isSafeInteger` 之外与 `1024..65535` 之外给 `null`（`0` 自然被区间挡掉）；`loopbackAuthorities` 在端口不可用时返回**空数组** ⇒ 所有调用方 fail-closed。注释里那条「绝不能在模块作用域缓存」是真实约束（engine 模块在 `server.listen()` 之前就被 import，缓存会把 pre-bind 默认值冻住）。
+    ⑫ 以上 TS 面**都有测试覆盖**（`route-auth.test.mjs` / `engine-port-auth.test.mjs` / `screen-scope.test.mjs` 47 例 / `protocol-negotiation.test.mjs`），不存在"判干净但没人测"的情况。
+
+    ⑬ **`plugins/dsh-android-file-open` 的 `purgeStaleUnclaimed` 里 `join(queueDir(), item.file)` 不构成路径逃逸**（2026-10-28 复核，我差点报它）：`item.file` 看着像"清单 JSON 里的字段"，实际是 `readItems()` 里 `readdirSync(dir)` 的目录项名（`file: f`）—— readdir 只返回 basename，**不含 `../`**。判据：**先看那个字段的唯一赋值处，再判它是不是外部可控**。同文件的 `enqueueSession` 有 "ws+sep 边界 + realpath 规范化"（H3 修复），两处删除操作的安全模型不同是因为**入参来源不同**（一个是外部路径、一个是目录项名），不是口径不一致。
+    ⑭ **`canonicalPath` 对不存在路径回落词法 `resolve` 在 `ownedInsideWorkspace` 里无害**：回落会让"指向不存在目标的符号链接"通过 `real === wsReal` 与 `startsWith(wsReal + sep)` 两道判据，但调用方是 `rmSync(target, { recursive: true, force: true })` —— `rm` 遇符号链接**删链接本身、不跟进目标**（`rm -r` 同理）。⇒ 结论安全。**别**照搬"canonical 回落 = 悬空链接漏洞"这条直觉（它在"写入"场景成立、在"删除链接"场景不成立）：判据取决于**下一步动作是否会跟随链接**。
+
+    ⑮ **`MALFORMED_DISPLAY_OPTION` 这条判据当前没有「独家覆盖」——删掉它测试仍然全绿**（2026-10-28 变异验证实测，别当成缺陷去删或者去补）：
+    `MALFORMED_DISPLAY_OPTION = /(?:^|[ \t])-d(?:[ \t]*=[ \t]*\S|(?![0-9\s])\S)/` 拦「形似 display 选项但取值不是纯数字」（`-d=7`、`-dx`）。把它变异成 `false` 后 `screen-scope.test.mjs` **47/47 全绿** —— 原因不是没覆盖，而是**判据重叠**：`-d=7` 已有一条 fixture（`S-9b`），它走的是另一条路——`displayOptionsIn` 认不出 `-d=7` ⇒ 该段无 option ⇒ `family.targetFlags.length === 0` ⇒ 同样 `deny-uncertified-target`。
+    **因为每个需要目标屏的命令家族都要求 `targetFlags` 非空**，所以「认不出 option」与「option 畸形」在当前命令集下**必然同样落进 deny**，MALFORMED 成了双重保险。
+    ⇒ 处置：**保留**（fail-closed 的方向、成本为零），但别误以为它有独立用例守着。**真要动它之前**，先确认「有没有哪个家族的 `targetFlags` 可以为空却仍然 allow」——有的话 MALFORMED 就是那条路的唯一门槛，删了会开洞。
+    ⇒ 顺带记同一轮的有效覆盖（同一 63 条 fixture 上变异实测）：`family.targetFlags.length===0` **红 4**、`owned.length===0` **红 5**、`!owned.every(isOwnedTarget)` **红 15**、首个 `deny-unparsed` **红 1**、`interpreterPayloadUnparsed(bare)` **红 1**、`TRAP_PAYLOAD` 正则（`trap`→`trapZ`）**红 1**。
+
+    ⑯ **`PublicRepoProvision` 的 `status|trigger|nowMs|detail` 落盘格式：`trigger` 不转义 `|` 当前安全，但别给它传带 `|` 的值**（2026-10-28 复核）：
+    `encode()` 用 `|` 拼四段，`fold()` **只折叠换行**（CRLF→空格、CR/LF→空格、trim），**不转义 `|`**。
+    `parseStatus` 只取 `parts[0]` 且要求 `parts.size >= 4`（半截文件判 UNKNOWN，方向正确）；`parseDetail` 用 `parts.drop(3).joinToString("|")` **能正确还原含 `|` 的 detail**。
+    唯一脆弱点在第 2 段：若 `trigger` 含 `|`，`parseTrigger` 会截断、`parseDetail` 会把 `nowMs` 也当成 detail 的一部分。
+    **当前所有实参都是 `PublicRepoProvision.TRIGGER_*` 常量**（`EngineManager` 五处全是 `TRIGGER_ENGINE_START`），所以不构成缺陷 ⇒ **不要改 `fold()` 去转义 `|`**（会改变落盘格式、老文件读不对，收益为零）。真要加带 `|` 的 trigger 时，先给 trigger 单独做一层折叠。
+
+    ⑰ **用不变量跑 fuzz 量 `screen-scope` 的覆盖面：`eval`/`trap` 这两族一度只在 batch3 分支被堵住**（2026-10-28 实测；**该差异已于同日随 #717 合并进 main 而消失**——`3e676a5c` 把 `EVAL_PAYLOAD`/`TRAP_PAYLOAD`/`interpreterPayloadUnparsed` 全部带进 main，本条保留作判据来源与变异覆盖记录）：
+    方法＝不变量 fuzz（不读代码、主动找洞）：固定 8 条真实屏命令词（`screencap -p` / `screenrecord` / `input tap` / `input keyevent` / `wm size` / `uiautomator dump` / `dumpsys window` / `am start`）× 20 种包装（裸写、`sh -c "…"`、`sh -c '…'`、`eval "…"`、`eval '…'`、`trap '…' EXIT`、`trap "…" INT`、`;`/`&&`/`|` 拼接、`(…)`、`{ …; }`、反引号、`$(…)`、`echo 'x' # …`、尾随换行、前后空格、`X=1 …`、`if…fi`、`while…done`），`isOwnedTarget` 恒 `false`（空注册表＝最严），**凡是 allow 就是洞**。
+    **结果**：
+    - `fix/self-audit-…`（基于 main）与 `main`：**160 例里 32 例放行** —— 全部是 `eval` / `trap` 两族（`eval "screencap -p …"`、`eval '…'`、`trap '…' EXIT`、`trap "…" INT` × 8 条命令）。
+    - `fix/issue-batch3-…`：**降到 8 例**，且这 8 例全是 `echo 'x' # screencap …` —— **`#` 后面 shell 本来就不执行，放行是对的**（batch3 加了词首注释剥离）。⇒ **batch3 这 160 例实际 0 真洞**。
+    ⇒ **纪律**：①`eval` / `trap` 的展开修复**只在 #717（batch3）里**；`#719`（batch4）与 `#733`（self-audit）都基于 main，**这两个合并了也不会带上它** —— 如果作者先合 #719/#733 再合 #717，中间窗口里 `eval "screencap …"` 是放行的。真要拆成两个不重叠的批次，得把 `EVAL_PAYLOAD`/`TRAP_PAYLOAD` 那两段单独摘出来。
+    ②写这类 fuzz 时**注释形态要单独分类**（我的不变量一开始把 `echo 'x' # cmd` 也算泄漏，属假阳）——判断"该不该拦"要看**shell 会不会执行**，而不是"命令词有没有出现"。
+
+    ⑱ **`screen-scope.ts` 的引擎侧判据：`#717`（batch3）比 main 多 4 个，其中 3 个在 main/batch4/#733 上仍缺**（2026-10-28 用 diff + 探针逐条坐实）：
+    batch3 相对 main 新增的四条判据（`git diff origin/main fix/issue-batch3 -- plugins/dsh-android-bridge/src/screen-scope.ts`）：
+    ① `MALFORMED_DISPLAY_OPTION`（`-d=7` / `-dx` 形态）—— **其根因已由 #733 的 `2bbb5049` 修掉**（`displayOptionsIn` 短选项不再吃 `=`），所以 main 上这条路已经堵住，batch3 那条成了第二层保险。
+    ② `EVAL_PAYLOAD`（`eval "<cmd>"` 载荷展开）
+    ③ `TRAP_PAYLOAD`（`trap '<cmd>' EXIT` 载荷展开）
+    ④ `interpreterPayloadUnparsed`（含 `SHELL_C_PAYLOAD` 与**裸解释器段** `BARE_SHELL_SEGMENT`）
+    ⇒ **②③④ 当时在 main / batch4 / #733 上仍然缺；现随 #717 合入 main（`3e676a5c`）而补齐**。以下探针结果是**合并前**的对照数据，保留用于复验判据：（`isOwnedTarget` 恒 false，即空注册表最严）：
+    ```
+    "echo 'screencap -p /x.png' | sh"   → main: allow   batch3: deny-unparsed
+    "eval "screencap -p /x.png""       → main: allow   batch3: deny-unparsed
+    "trap 'screencap -p /x.png' EXIT"   → main: allow   batch3: deny-unparsed
+    "sh" / "/system/bin/sh" / "busybox sh" → main: allow   batch3: deny-unparsed
+    ```
+    **为什么 `| sh` 那类特别危险**：`echo '<真实屏命令>' | sh` 里，喂入段被 `stripQuotedText` 抹成空、接收段是裸 `sh`（同样无命令词）⇒ 引擎侧两条都不进屏幕命令词面 ⇒ **allow**，而执行时 `sh` 从 stdin 读到命令照跑。**壳侧 `ShellOps.decideScreenCommand` 的 `BARE_SHELL_SEGMENT` 会 DENY_UNPARSED 兜住**（所以执行点安全），但引擎侧先告诉模型"可以做" ⇒ **误导性错误**（模型收到允许、到壳侧才被拒）。
+    ⇒ **纪律**：①这 3 条判据的修复归属是 `#717`，**不要**在 #733/#719 里重复写（会与 batch3 冲突且重复）；②若作者按 #719 → #733 → #717 的顺序合，中间窗口里这三个形态在引擎侧是放行的（执行点仍安全）；③`ShellOps.kt` 里 `BARE_SHELL_SEGMENT` 的注释声称「与引擎侧 `screen-scope.ts` 的同构判据同批演进」—— **这句话在 main/batch4/#733 上不成立**，只在 batch3 成立；④查这类漂移最快的办法是**同一批探针在两侧各跑一次**（跨语言 fixture 只覆盖已登记的用例，覆盖不到就看不出来）。
+
+    ⑲ **`parseUiTreeXml` + `pruneNodes` 已用「结构不变量 fuzz」验证过（400 例零违反）—— 别再怀疑栈机/裁剪的结构自洽性**（2026-10-28）：
+    方法：随机拼 1~6 个片段（合法开标签 / 自闭合 / 含 `|` 的文本 / 多余 `</node>` / 裸 `<node>`）成 400 条 XML，逐条检查四条不变量：
+    ①`pruneNodes` 输出的 `id` **唯一**（`n0/n1/…` 不重号）；
+    ②`byId.size === nodes.length`（索引与节点一一对应）；
+    ③每个 `parentId` 要么为空、**要么指向存在的 public id**（不悬空）；
+    ④`checkUiTreeParse` 拒收时给出的理由必须属于已知的三类（节点数不一致 / 缺 bounds / 根 id 非 0），不得出现意料外的理由。
+    结果：**400 例 0 违反**，`parse` / `prune` 均未抛异常。
+    ⇒ 这三处此前各修过一个真缺陷（`>` 截断属性区、`|` 分隔符碰撞、自检漏属性丢光），修完之后结构面已经结实；**再往这个方向找只能找到边角**，优先换靶。
+    ⇒ **顺带记一次我自己的误判**：看到 `const { pkg, waitMs = 2500, screenId } = args`（`app_launch`）与 `const { action } = args`（`ui_global`）**没有 `?? {}` 兜底**，就怀疑「模型无参调用会 TypeError」。查签名才发现这两处的字段是**必填**（`pkg: string` / `action: string`），框架会校验并传对象；而另外四处写了 `?? {}` 的，字段是**全可选**（`ref?` / `root?`）。⇒ **「有没有兜底」不能只看写法，要看签名字段是否可选** —— 这是"按形式下结论"的又一次（同 `0mvrty8b` 家族）。
+
+    ⑳ **`splitCommandSegments` / `stripQuotedText` 会把「嵌套体」与「引号内容」替换成**一个空格**——别拿「段必须是原文子串」当不变量**（2026-10-28 我因此误报 44 例）：
+    `screen-scope.ts:257` / `:263` 里反引号与 `$()` 的嵌套体被 `buf += ' '` 占位，`:319` 的 `stripQuotedText` 同理，顶层分隔符（`;` / `\n` / `\r`）由 `flush()` 直接切掉。所以：
+    ```
+    "`\n`$"    → 段 " $"      // 原文里没有 " $" —— 换行被占位成空格，属预期
+    "&;||(`(`"  → 段 " ( "     // 同上
+    ```
+    ⇒ **写不变量/断言时正确的做法**：比「段长度 ≤ 原文长度 + 常数」（用来抓死循环/膨胀）、比「`unparsed` 的段不得被判 ALLOW」，**不要**比「段是原文子串」——占位符会稳定制造假阳。
+    ⇒ 这条与「注释形态假阳」（⑰）同族：**fuzz 的不变量必须建立在实现契约上，而不是建立在对"应该长什么样"的直觉上**。写不变量前先问一句「实现会不会为了可判定性而改写输入？」——会，就别用「等于原文」类断言。
+    ⇒ 顺带记：`splitCommandSegments` 的四条不变量（分隔符只在引号外切段、嵌套执行体再切一层、引号不闭合判拒、`MAX_NESTING = 4`）在 TS 与 Kotlin 两侧**逐条一致**（`MAX_NESTING` 都是 4、`\` 处理都是取两字符、单引号都是找下一个 `'`）；3000 例 fuzz 无死循环、无段长度膨胀。

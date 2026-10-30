@@ -884,4 +884,46 @@ class FactoryProfilePatchTest {
       FactoryProfilePatch.legacyMobileConfigLines("- id: unrelated\n").isEmpty(),
     )
   }
+
+  @Test
+  fun quotedIdIsTheSameIdAsABareOne() {
+    // YAML 里 `- id: 'x'` 与 `- id: x` 是同一个值。旧实现三处 id 正则都用 (\S+) 原样取串 ⇒
+    // 带引号的 live id 与工厂件裸 id 不相等 ⇒ 判"缺失" ⇒ 每次 merge 都再追加一份同一插件。
+    val factory = "- insert:\n    - id: shell-termux\n      name: '@dsh/shell-termux'\n"
+    for (live in listOf(
+      "- insert:\n    - id: 'shell-termux'\n      name: '@dsh/shell-termux'\n",
+      "- insert:\n    - id: \"shell-termux\"\n      name: '@dsh/shell-termux'\n",
+    )) {
+      val out = FactoryProfilePatch.merge(live, factory)
+      val count = Regex("""id:\s*['"]?shell-termux""").findAll(out.text).count()
+      assertEquals("引号只是 YAML 写法 ⇒ 不得重复追加（实际 $count 次）：\n" + out.text, 1, count)
+    }
+    // 反向：工厂带引号、live 裸 —— 两个方向都必须认成同一个 id
+    val quotedFactory = "- insert:\n    - id: 'shell-termux'\n      name: '@dsh/shell-termux'\n"
+    val bareLive = "- insert:\n    - id: shell-termux\n      name: '@dsh/shell-termux'\n"
+    val reversed = FactoryProfilePatch.merge(bareLive, quotedFactory)
+    assertEquals("反向同样不得重复追加：\n" + reversed.text, 1,
+      Regex("""id:\s*['"]?shell-termux""").findAll(reversed.text).count())
+  }
+
+  @Test
+  fun genuinelyMissingEntryIsStillAppended() {
+    // 修法不得把"真的缺"也判成"已在场"（那是把补齐功能弄死）。
+    val factory = "- insert:\n    - id: shell-termux\n      name: a\n    - id: shell-web-compat\n      name: b\n"
+    val live = "- insert:\n    - id: 'shell-termux'\n      name: a\n"
+    val out = FactoryProfilePatch.merge(live, factory)
+    assertEquals("缺的那条仍要补进来：\n" + out.text, 1,
+      Regex("""id:\s*['"]?shell-web-compat""").findAll(out.text).count())
+    assertEquals("已在场的那条只能是 1 份：\n" + out.text, 1,
+      Regex("""id:\s*['"]?shell-termux""").findAll(out.text).count())
+  }
+
+  @Test
+  fun quotedIdWithSpacesIsOneId() {
+    // `- id: 'a b'` 也只得是一个 id（(\S+) 会截成 `'a`）。
+    val factory = "- insert:\n    - id: 'a b'\n      name: x\n"
+    val out = FactoryProfilePatch.merge(factory, factory)
+    assertEquals("含空格的引号 id 不得被截断成两个：\n" + out.text, 1,
+      Regex("""id:\s*["']?a""").findAll(out.text).count())
+  }
 }

@@ -172,8 +172,21 @@ if (hasSettings.length) {
     skipped += 1
     console.log('SKIP(#' + skipped + ')  ' + msg)
   } else {
-    const leakRe = /(sk-|apiKey\s*:\s*\S|api[_-]?key\s*=\s*\S|BEGIN (RSA|OPENSSH|PRIVATE)|dsh web: \S*\/\?token=[A-Za-z0-9_-]{40,})/i
-    const m = leakRe.exec(content)
+    // 0.14.9 自查：旧判据只认 sk- / apiKey / 私钥头 / 引擎 token，**漏掉 `token:` `password:`
+    // `secret:` 这类「键名 + 分隔符」形态**——而 seed 的 settings.yaml 正是 YAML 键值文件，
+    // 与 LogSanitizer.SENSITIVE_KV 的口径不一致（那边覆盖 token/password/secret/credential）。
+    // 值部分要求 ≥4 个非引号字符：`token: ""` 这类占位不算凭据，避免把干净模板判红。
+    const leakRe = new RegExp(
+      '(sk-'
+      + '|BEGIN (RSA|OPENSSH|PRIVATE)'
+      + '|dsh web: \\S*\\/\\?token=[A-Za-z0-9_-]{40,}'
+      // 键名 + 分隔符：**同一族键名统一口径**（apiKey/api_key/token/password/passwd/secret/credential），
+      // 值要求至少一个非引号、非空白字符 ⇒ `apiKey: ""` / `token: ""` 这类空占位不算凭据
+      // （旧判据只对 apiKey 用 `\S`，把空引号也判红；而新加的 token 类若照抄就会跟着误报）。
+      + '|(?:apiKey|api[_-]?key|token|password|passwd|secret|credentials?)\\s*[:=]\\s*["\']?[^\\s"\']{1,}'
+      + ')', 'i')
+    const leakReSrc = (m) => m
+    const m = leakReSrc(leakRe.exec(content))
     if (m) { console.error(`FAIL[settings-yaml-secret]: ${m[0]}`); fail = true }
   }
 }

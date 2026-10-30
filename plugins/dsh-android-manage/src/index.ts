@@ -27,7 +27,11 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { type JsonValue } from '@deepseek-ai/dsh-util-values'
 import { join } from 'node:path'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
-import { parseUiTreeXml, pruneNodes, resolveRef, findActionableAncestor, checkUiTreeParse, type UiNode, actionableAncestorV2, scopePoolV2 } from './ui-tree.js'
+import { coordBasisNote, basisFields, COMPAT_NOTE } from './coord-basis.js'
+import { screenArgs, screenOut, coordinateMode } from './screen-fields.js'
+import { nodeListLines } from './node-list.js'
+import { semanticFail } from './semantic-fail.js'
+import { parseUiTreeXml, pruneNodes, resolveRef, findActionableAncestor, checkUiTreeParse, type UiNode, actionableAncestorV2, scopePoolV2, treeFingerprint } from './ui-tree.js'
 import { cacheFromV2, decodeV2, isV2Payload, type V2Decoded } from './protocol-v2.js'
 import { detailRecord, pageRows, writeDetailStore } from './detail-store.js'
 import { resolveVirtualDisplayToken, vdTokenMissingText } from './vd-shot.js'
@@ -104,6 +108,7 @@ function pickText(v: Record<string, unknown>, ...keys: string[]): string {
     .filter((s) => s.length > 0)
     .join('\n')
 }
+
 
 function tools(ctx: Context, priv: PrivilegeFace) {
   // Every route that can observe or manipulate an Android display goes through this one scope gate
@@ -199,10 +204,6 @@ function tools(ctx: Context, priv: PrivilegeFace) {
    * **投递到壳侧执行**。只做前者的后果（0.14.0 真机实锤）：门按 virtual-N 放行了，
    * 执行却仍落在真实屏——模型看到「参数生效了但画面没变」，比直接拒绝更难排查。
    */
-  const screenArgs = (args: unknown): Record<string, unknown> => {
-    const screenId = (args as { screenId?: unknown } | undefined)?.screenId
-    return typeof screenId === 'string' && screenId !== '' ? { screenId } : {}
-  }
 
   /**
    * 动作模式（SPEC §4.2）：壳侧对每个真实屏 op 回填 `actionMode`。
@@ -229,7 +230,6 @@ function tools(ctx: Context, priv: PrivilegeFace) {
   const SCOPE_PROP = { type: 'string' } as const
 
   /** 壳侧版本兼容标记：老壳侧不回显基准时文案里的这句即为唯一线索（wire 上有测试钉住）。 */
-  const COMPAT_NOTE = '（基准未回显：壳侧版本较旧）'
 
   /**
    * issue #258：**回显归一化基准**。
@@ -242,17 +242,6 @@ function tools(ctx: Context, priv: PrivilegeFace) {
    * 老壳侧（未修版本）不回显基准时，这里**如实标注**而不是假装知道：回显的全部意义就是自证，
    * 猜一个基准等于又制造一个看不见的错。
    */
-  const coordBasisNote = (data: unknown): string => {
-    const d = (data ?? {}) as { basis?: unknown; basisWidth?: unknown; basisHeight?: unknown }
-    if (typeof d.basis !== 'string' || d.basis === '') return COMPAT_NOTE
-    const w = typeof d.basisWidth === 'number' ? d.basisWidth : 0
-    const h = typeof d.basisHeight === 'number' ? d.basisHeight : 0
-    // window-current = 壳侧未拿到整屏尺寸（issue #258 的缺陷基准），必须显式告警。
-    const warn = d.basis === 'window-current'
-      ? '——本机未给出整屏尺寸，本次按**当前窗口**换算，多窗口下可能偏左'
-      : ''
-    return `（基准 ${d.basis} = ${w}x${h}${warn}）`
-  }
 
   /**
    * issue #258：把壳侧回显的基准字段并进工具返回值（schema 已声明 basis/basisWidth/basisHeight）。
@@ -260,15 +249,6 @@ function tools(ctx: Context, priv: PrivilegeFace) {
    * 只在壳侧真的回显时才带键——老壳侧不回显时**不编造** 0 值（那会让「没回显」看起来像
    * 「基准是 0x0」）；文案侧由 [coordBasisNote] 如实标注。
    */
-  const basisFields = (data: unknown): Record<string, unknown> => {
-    const d = (data ?? {}) as { basis?: unknown; basisWidth?: unknown; basisHeight?: unknown }
-    if (typeof d.basis !== 'string' || d.basis === '') return {}
-    return {
-      basis: d.basis,
-      ...(typeof d.basisWidth === 'number' ? { basisWidth: d.basisWidth } : {}),
-      ...(typeof d.basisHeight === 'number' ? { basisHeight: d.basisHeight } : {}),
-    }
-  }
 
   /** 归一化基准回显字段（issue #258；仅 android_ui_click 用，故就地声明不走共享常量）。 */
   const BASIS_PROP = { type: 'string' } as const
@@ -911,62 +891,6 @@ properties: {
   }
 
   /** 共用行渲染体：节点数组 → 模型可见清单文本（两工具唯一的行格式来源）。 */
-  const nodeListLines = (v: Record<string, unknown>): string => {
-      const value = v as Record<string, unknown>
-  const nodes = Array.isArray(value.nodes) ? value.nodes as Array<Record<string, unknown>> : []
-  // 同名/同描述节点**保留但标注序号**（#k，1 基，按 dump 顺序）——模型可用 text:X#k 精确引用；
-  // 解析层对歧义一律拒绝而非静默挑选（见 ui-tree.resolveRef）。
-  const dupCount = new Map<string, number>()
-  for (const n of nodes) {
-    const key = `${String(n.text || '').trim()}|${String(n.desc || '').trim()}`
-    if (key === '|') continue
-    dupCount.set(key, (dupCount.get(key) ?? 0) + 1)
-  }
-  const seenSoFar = new Map<string, number>()
-  let prevPkg = ''
-  let prevWin = ''
-  const lines = nodes.map((n) => {
-    const flags = [
-      n.clickable ? '可点' : '',
-      n.editable ? '可编辑' : '',
-      n.scrollable ? '可滚动' : '',
-      n.checked ? '已选中' : '',
-      n.visible === false ? '不可见' : '',
-    ].filter(Boolean).join('/')
-    const type = String(n.type || '') || 'View'
-    const rid = String(n.rid || '')
-    const parent = String(n.parentId || '')
-    const text = String(n.text || '').trim()
-    const desc = String(n.desc || '').trim()
-    const box = `${String(n.x ?? 0)},${String(n.y ?? 0)} ${String(n.w)}x${String(n.h)}`
-    const depth = typeof n.depth === 'number' ? n.depth : 0
-    const key = `${text}|${desc}`
-    let occ = ''
-    if (key !== '|' && (dupCount.get(key) ?? 0) > 1) {
-      const k = (seenSoFar.get(key) ?? 0) + 1
-      seenSoFar.set(key, k)
-      occ = `#${k}`
-    }
-    const pkg = String(n.pkg || '')
-    const win = String(n.windowId || '')
-    const owner: string[] = []
-    if (pkg !== '' && pkg !== prevPkg) { owner.push(`pkg=${pkg}`); prevPkg = pkg }
-    if (win !== '' && win !== prevWin) { owner.push(`win=${win}`); prevWin = win }
-    const parts = [
-      '  '.repeat(Math.min(depth, 12)) + `${String(n.id)}`,
-      parent ? `^${parent}` : '',
-      `${type}${rid ? '#' + rid : ''}`,
-      `[${flags || '静态'}]`,
-      owner.join(' '),
-      text ? `text="${text}"${occ}` : '',
-      desc ? `desc="${desc}"` : '',
-      !text && !desc ? '(无文本)' : '',
-      `bounds=${box}`,
-    ].filter(Boolean)
-    return parts.join(' ')
-  })
-return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : '')
-  }
 
   /** 两个树工具共用的 output。render 的**参数类型写成 unknown**（逆变安全）；返回值用字面量类型。 */
   const treeOutput = () => ({
@@ -1281,24 +1205,6 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
   let detailHandle = ''
   let detailPath = ''
 
-  /**
-   * 0.13.8 P0-4：树结构指纹（FNV-1a）——「界面未变」快路径的判定依据。
-   * 覆盖定位所需字段（文本/描述/类型/几何/交互性）；任一变化 → 指纹翻转 → 完整重抓。
-   * 纯追加语义：指纹相同只回一行「未变」摘要，绝不改写历史结果（L1）。
-   */
-  const treeFingerprint = (nodes: UiNode[]): string => {
-    let h = 0x811c9dc5
-    for (const n of nodes) {
-      const s = `${n.id}|${n.parentId}|${n.text}|${n.desc}|${n.rid}|${n.type}|${n.cx},${n.cy},${n.w},${n.h}|${n.clickable ? 1 : 0}${n.editable ? 1 : 0}${n.scrollable ? 1 : 0}${n.checked ? 1 : 0}${n.visible ? 1 : 0}`
-      for (let i = 0; i < s.length; i++) {
-        h ^= s.charCodeAt(i)
-        h = Math.imul(h, 0x01000193) >>> 0
-      }
-      h ^= 0xff
-      h = Math.imul(h, 0x01000193) >>> 0
-    }
-    return 'fp' + h.toString(16).padStart(8, '0')
-  }
 
   /**
    * 「界面未变」快路径（P0-4）：指纹一致直接回紧凑摘要，模型可复用上次引用。
@@ -1361,17 +1267,6 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
    * 为什么必须把 guidance 单独带出：模型按字段决定下一步。塞进 text 里它可能只当描述读过去，
    * 单独成字段 + schema 声明后，它在结构上就是「可执行的下一步」。
    */
-  const semanticFail = (
-    r: { error?: string; actionMode?: unknown; screenId?: unknown; guidance?: unknown },
-    prefix: string,
-  ): { ok: boolean; denied: boolean; text: string; actionMode?: string; screenId?: string; guidance?: string } => {
-    const actionMode = typeof r.actionMode === 'string' ? r.actionMode : undefined
-    const out: Record<string, unknown> = { ok: false, denied: false, text: prefix + (r.error ?? '未知失败') }
-    if (actionMode !== undefined) out.actionMode = actionMode
-    if (typeof r.screenId === 'string' && r.screenId !== '') out.screenId = r.screenId
-    if (typeof r.guidance === 'string' && r.guidance !== '') out.guidance = r.guidance
-    return out as { ok: boolean; denied: boolean; text: string; actionMode?: string; screenId?: string; guidance?: string }
-  }
 
   /**
    * 从壳侧返回里取出屏幕三件套 + actionMode，**原样**附到工具返回值上（SPEC §4.2）。
@@ -1383,15 +1278,6 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
    * 缺省策略：壳侧未回填 actionMode 时**不编造**（不发键），让模型按「未知」处理；
    * 编一个 a11y 会让模型以为语义树可用而实际不可用（错误引导比缺失更糟）。
    */
-  const screenOut = (data: unknown): Record<string, unknown> => {
-    const d = (data ?? {}) as { screenId?: unknown; displayId?: unknown; scope?: unknown; actionMode?: unknown }
-    const out: Record<string, unknown> = {}
-    if (typeof d.screenId === 'string' && d.screenId !== '') out.screenId = d.screenId
-    if (typeof d.displayId === 'number') out.displayId = d.displayId
-    if (typeof d.scope === 'string' && d.scope !== '') out.scope = d.scope
-    if (typeof d.actionMode === 'string' && d.actionMode !== '') out.actionMode = d.actionMode
-    return out
-  }
 
   /**
    * 纯 Shizuku（无障碍关）下虚拟屏的**坐标模式**结构化响应（SPEC §4.2）。
@@ -1400,13 +1286,6 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
    * 而应给出 actionMode=coordinate + 可直接照做的引导（改用坐标操作），
    * 让模型在**同一轮**里继续推进任务，而不是停下来问用户。
    */
-  const coordinateMode = (screenId: string, reason: string, guidance: string): Record<string, unknown> => ({
-    ok: false,
-    actionMode: 'coordinate',
-    screenId,
-    reason,
-    guidance,
-  })
 
   /** 0.13.5 W4：无障碍通道往返封装（统一错误文案，超时 8s）。 */
   const a11yExec = async (op: string, args: Record<string, unknown>, timeoutMs = 8000) => {
@@ -1715,7 +1594,11 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
         return {
           ok: true, denied: false,
           ref: '', id: 'abs(' + Math.round(x!) + ',' + Math.round(y!) + ')', label: '虚拟屏坐标',
-          x: typeof data.displayId === 'number' ? data.displayId : 0, y: 0,
+          // 回显**本次点击的坐标**（模型据此自证落点），屏身份由 screenOut 提供。
+          // 2026-10-28 自查：旧实现写成 `x: typeof data.displayId === 'number' ? data.displayId : 0`——
+          // 语义错位（x 里装的是 displayId，真实坐标 180/524 凭空消失），且壳侧回 `displayId: NaN` 时
+          // `typeof NaN === 'number'` 恒真 ⇒ NaN 进返回体（JSON 序列化成 null）。两条都用探针实测过。
+          x: Math.round(x!), y: Math.round(y!),
           ...screenOut(data),
           text: data.guidance ?? ('已在 ' + screenId + ' 注入坐标点击 (' + Math.round(x!) + ',' + Math.round(y!) + ')'),
         }
@@ -2428,8 +2311,12 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
         if (vd.ok !== true || data.ok === false) {
           return {
             ok: false, denied: false, pkg,
+            // 屏身份（含 displayId）只由 screenOut 提供：它带 Number.isFinite 守卫。
+            // 2026-10-28 自查：这里原本**紧跟**一行手写
+            // `...(typeof data.displayId === 'number' ? { displayId: data.displayId } : {})`，
+            // 展开顺序在 screenOut 之后 ⇒ 把带守卫的值**覆盖**掉 ⇒ NaN/Infinity 照样透出
+            // （而 schema 声明 displayId:{type:'integer'}，非整数会让引擎整值拒绝）。删掉那一行即可。
             ...screenOut(data),
-            ...(typeof data.displayId === 'number' ? { displayId: data.displayId } : {}),
             ...(data.landedDisplayIds === undefined ? {} : { landedDisplayIds: data.landedDisplayIds }),
             ...(typeof data.code === 'string' ? { code: data.code } : {}),
             text: '跨屏拉起未确认落在目标屏：' + (data.guidance ?? (vd.ok ? '壳侧拒绝' : vd.error))
@@ -2440,8 +2327,8 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
         return {
           ok: true, denied: false, pkg,
           foreground: '',
+          // 同上：displayId 只从 screenOut 来，不要在这里手写覆盖（会绕过 finite 守卫）。
           ...screenOut(data),
-          ...(typeof data.displayId === 'number' ? { displayId: data.displayId } : {}),
           ...(data.landedDisplayIds === undefined ? {} : { landedDisplayIds: data.landedDisplayIds }),
           ...(typeof data.code === 'string' ? { code: data.code } : {}),
           text: data.guidance ?? ('已在 ' + screenId + ' 上拉起 ' + pkg),
