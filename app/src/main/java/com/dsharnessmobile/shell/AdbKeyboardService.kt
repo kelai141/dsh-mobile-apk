@@ -155,9 +155,6 @@ class AdbKeyboardService : InputMethodService() {
     const val RESULT_BAD_REQUEST = 4
     const val RESULT_NO_CONNECTION = 5
 
-    /** adb shell 的固定 uid（root = 0）——经典 ADBKeyboard 协议由它们直发，无 nonce。 */
-    private const val SHELL_UID = 2000
-
     /** 清空时单侧最多读取的字符数（EditText 上限远小于此值）。 */
     private const val MAX_CLEAR_CHARS = 100_000
 
@@ -204,27 +201,44 @@ class AdbKeyboardService : InputMethodService() {
       return secret
     }
 
-    /** 来源 uid 白名单：root(0) / adb shell(2000)。纯判据，单测直接覆盖。 */
-    fun isTrustedUid(uid: Int): Boolean = uid == 0 || uid == SHELL_UID
+    /**
+     * 唯一**隐式**可信 uid = root(0)。纯判据，单测直接覆盖。
+     *
+     * #679：uid 2000（adb shell）的隐式信任**已撤销**——Shizuku 的核心能力就是让任意第三方
+     * 应用拿到 shell 身份（uid 2000），从 uid 上无法区分「真 adb 会话」与「持 shell 身份的
+     * 应用」；继续信任 2000 等于把输入注入面开放给所有 Shizuku 应用。root 不在此列：能以
+     * uid 0 执行的调用方本已拥有设备全部权限，nonce 对它不构成边界。
+     */
+    fun isTrustedUid(uid: Int): Boolean = uid == 0
 
     /**
-     * 来源校验（0.13.8 #183，详见 AdbKeyboardReceiver 类注释）：
-     * uid 白名单（root/adb shell，`BroadcastReceiver.getSentFromUid()` 取自框架）
-     * 或有效 auth nonce（引擎路径）。
-     *
-     * #413 修正：旧实现反射 `Intent.getSentFromUid()`，而 AOSP 的 Intent **没有**
-     * 这个方法（正确位置是 BroadcastReceiver，API 34 起），反射恒抛 → 白名单恒不生效
-     * → adb shell 直发（不带 nonce）的广播一律被拒。现由调用方传入框架给出的真实 uid。
+     * 来源校验（0.13.8 #183；#679 收紧）：**root(0) 之外一律要求有效 auth nonce**——
+     * `BroadcastReceiver.getSentFromUid()` 取自框架（#413 修正：旧实现反射
+     * `Intent.getSentFromUid()`，AOSP 无此方法，反射恒抛），nonce 文件只在应用私有域
+     * （引擎子进程以应用 uid 运行、经 DSH_FILES_DIR 读取后随广播回传）。
      */
     fun isTrustedSender(context: Context, intent: Intent, senderUid: Int): Boolean {
-      if (isTrustedUid(senderUid)) return true
-      val given = intent.getStringExtra(EXTRA_AUTH) ?: return false
-      val secret = try {
+      val given = intent.getStringExtra(EXTRA_AUTH)
+      val secret = if (isTrustedUid(senderUid)) {
+        null // root 不读 nonce 文件（本已拥有设备全部权限；保持「读文件前先判 uid」的旧序）
+      } else try {
         nonceFile(context).takeIf { it.exists() }?.readText()?.trim()
       } catch (_: Throwable) {
         null
-      } ?: return false
-      return trustNonce(given, secret)
+      }
+      return isTrustedSenderFor(senderUid, given, secret)
+    }
+
+    /**
+     * 纯判据（JVM 单测直接覆盖；[isTrustedSender] 负责从 nonce 文件取 secret 后委托到这里）。
+     * #679：root(0) 之外一律要求 nonce——Shizuku 应用可持 uid 2000，隐式信任只剩 root；
+     * 文件缺失/不可读时 [fileSecret] 为 null，对任何非 root 调用方 fail-closed。
+     */
+    internal fun isTrustedSenderFor(uid: Int, givenNonce: String?, fileSecret: String?): Boolean {
+      if (isTrustedUid(uid)) return true
+      if (givenNonce == null) return false
+      val secret = fileSecret ?: return false
+      return trustNonce(givenNonce, secret)
     }
 
     /** 常量时间比较，防逐字节试探；空 secret 一律拒绝（非空 nonce 才能匹配）。 */

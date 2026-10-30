@@ -354,10 +354,10 @@ class RepairActivity : Activity() {
     launchStartupPage(retry = true)
   }
 
-  /** Both exits land on the startup page; only the retry exit carries the one-shot start intent. */
+  /** Both exits land on the startup page; only the retry exit arms the one-shot in-process flag (#682). */
   private fun launchStartupPage(retry: Boolean) {
     val intent = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-    if (retry) intent.action = MainActivity.ACTION_RETRY_ENGINE
+    if (retry) MainActivity.pendingSelfRetry = true
     startActivity(intent)
     finish()
   }

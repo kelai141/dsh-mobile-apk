@@ -82,12 +82,14 @@ MainActivity
  │   ├─ 可达 → WebView 加载 http://127.0.0.1:3080
  │   └─ 不可达 → guideView（品牌区/状态卡/操作区，入场 stagger 动画）
  ├─ WebView 配置: JS 启用 / DOM storage / file chooser / 系统栏避让（CSS 变量注入）
- ├─ AndroidBridge 注入: 71 个 @JavascriptInterface 注解、70 个唯一方法名（`browserHostShow` 为重载）（见 §2；旧值 20 为历史漂移，2026-10-11 实测修正）
+ ├─ AndroidBridge 注入: 77 个 @JavascriptInterface 注解、76 个唯一方法名（`browserHostShow` 为重载；#686 起每个入口带顶层帧来源门禁）（见 §2；旧值 20/71 为历史漂移，2026-10-28 实测修正）
  ├─ 引擎监控: 3s 轮询（down → 测试界面，up → 恢复 WebUI）
  ├─ 看门狗: EngineService 5s 调度（引擎崩溃自动拉起）
  ├─ 返回键: 先 WebView.canGoBack，否则 finish
  └─ 更新入口: 引导页/设置页 → `AndroidBridge.apkUpdate(action)` → ApkUpdateController（状态机 → 下载 → 校验 → 拉起系统安装器）
-     └─ 联调旁路（非用户可达）: ACTION_UPDATE intent → runUpdate（manifest → 下载 → 校验 → 原子切换；**无超时兜底**，见 known-gaps）
+     └─ 联调旁路: runUpdate（manifest → 下载 → 校验 → 原子切换；**无超时兜底**，见 known-gaps。
+        外部 intent 入口已随 #682 移除——exported launcher 无法区分 adb 联调与第三方应用；
+        重新接线前 runUpdate 无调用点）
 
 ConsoleActivity: assets/console.html（快照内嵌 bash 交互终端，输出裁剪 2000 行）
 

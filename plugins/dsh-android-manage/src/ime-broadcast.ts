@@ -41,7 +41,11 @@ export function shellQuote(raw: string): string {
 
 /**
  * 读取键盘广播 nonce（应用私有文件，引擎与壳同 uid 可读）。
- * 文件缺失（旧壳 / 桌面宿主）返回空串 = 不带 auth 参数，由壳侧 uid 白名单兜底。
+ * 文件缺失（旧壳 / 桌面宿主）返回空串 = 不带 auth 参数。
+ * #679 之后壳侧**不再有 uid 白名单兜底**（uid 2000 的隐式信任已撤销，Shizuku 应用可冒用）：
+ * 新壳对不带 auth 的广播一律拒绝——引擎路径不受影响（nonce 文件由壳 onCreate 幂等创建，
+ * 引擎与本应用同 uid 读得到）；桌面宿主经 adb 驱动键盘输入的旧用法需要目标端先启动过一次应用，
+ * 且 nonce 无法经 adb 读取（应用私有域），此类直发在新壳上会被拒（result=3）。
  */
 export function adbKeyboardAuth(filesDir: string | undefined): string {
   if (!filesDir) return ''

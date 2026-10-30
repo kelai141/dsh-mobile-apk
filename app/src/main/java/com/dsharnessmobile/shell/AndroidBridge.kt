@@ -204,18 +204,51 @@ class AndroidBridge(
     val app = ShellAppContext.get()
     if (app == null) 0 else NotifyCenter.sendTestAll(app)
   },
+  /**
+   * #686：顶层帧来源判据（MainActivity 以 `isEngineSource(webView.url)` 接线，与导航闸门
+   * `shouldOverrideUrlLoading` 同一判据）。默认 fail-closed：未接线即拒——单独构造本类
+   * （单测/复用）时宁可全拒也不裸放。
+   */
+  private val isTrustedTopFrame: () -> Boolean = { false },
 ) {
 
+  /**
+   * #686：桥面入口的顶层帧来源门禁（每个 `@JavascriptInterface` 方法第一件事）。
+   *
+   * `addJavascriptInterface` 把本对象暴露给**每一个 frame**，而壳侧导航闸门
+   * （`shouldOverrideUrlLoading`）只拦主帧——不可信来源此前拿到的是完整能力面。Android
+   * 无法在桥方法里识别「调用者来自哪个 frame」，本门禁守住另一条硬边界：**顶层帧必须始终
+   * 是引擎 origin**（判据与导航闸门同源，见 [isTrustedTopFrame]）。顶层被劫持出引擎 origin
+   * （子帧 top-navigation、外部跳转落回本 WebView）的形态被结构性关死。
+   *
+   * **如实登记的残余缺口**：引擎 origin 顶层**之下**的跨源子帧仍够得到桥面（本门禁按
+   * WebView 级 URL 判定，无法按帧区分）；该形态的可达性未证实（issue #686 按「加固缺口」
+   * 报）。彻底关法是 token 握手（JS 契约变更，跨仓协调），登记为后续项，不在本批范围。
+   */
+  private fun checkTrustedFrame() {
+    if (!isTrustedTopFrame()) throw BridgeFrameDenied()
+  }
+
+  /** 表达式体入口的包裹形式（与 [checkTrustedFrame] 同判据）。 */
+  private fun <T> trusted(block: () -> T): T {
+    checkTrustedFrame()
+    return block()
+  }
+
+  /** #686：不可信来源调用桥方法的结构化拒绝；页面侧表现为 JS 异常。 */
+  class BridgeFrameDenied :
+    SecurityException("androidBridge: untrusted frame (top frame is not the engine origin; #686)")
+
   @JavascriptInterface
-  fun version(): String = BuildConfig.VERSION_NAME
+  fun version(): String = trusted { BuildConfig.VERSION_NAME }
 
   /** Synchronous system-dark query (H1: the first-frame theme bridge pulls the real uiMode,
    *  bypassing vendor WebViews whose matchMedia is stuck on light). */
   @JavascriptInterface
-  fun getSystemDark(): Boolean = onGetSystemDark()
+  fun getSystemDark(): Boolean = trusted { onGetSystemDark() }
 
   @JavascriptInterface
-  fun checkEngine(): String = EngineProbe.check().toString()
+  fun checkEngine(): String = trusted { EngineProbe.check().toString() }
 
   /**
    * Linux 环境资产准备（实验性内部插件，默认不启用）。
@@ -225,24 +258,26 @@ class AndroidBridge(
    * [linuxAssetPrepareStatus] 轮询 —— 下载不得阻塞 WebView 的 JS 线程。
    */
   @JavascriptInterface
-  fun linuxAssetPrepare(specJson: String): String =
-    LinuxAssetPrepare.start(ShellAppContext.get()?.filesDir, specJson)
+  fun linuxAssetPrepare(specJson: String): String = trusted { LinuxAssetPrepare.start(ShellAppContext.get()?.filesDir, specJson) }
 
   @JavascriptInterface
-  fun linuxAssetPrepareStatus(): String = LinuxAssetPrepare.status()
+  fun linuxAssetPrepareStatus(): String = trusted { LinuxAssetPrepare.status() }
 
   @JavascriptInterface
   fun keepScreenOn(enable: Boolean) {
+    checkTrustedFrame()
     onKeepScreen(enable)
   }
 
   @JavascriptInterface
   fun showNotification(title: String, text: String) {
+    checkTrustedFrame()
     onNotify(title, text)
   }
 
   @JavascriptInterface
   fun pickDirectory(callbackId: String) {
+    checkTrustedFrame()
     onPickRequest(callbackId)
   }
 
@@ -253,14 +288,15 @@ class AndroidBridge(
    * "open configuration file" action delegates to a desktop native text editor (apk #152).
    */
   @JavascriptInterface
-  fun settingsPath(): String = onSettingsPathRequest()
+  fun settingsPath(): String = trusted { onSettingsPathRequest() }
 
   /** 配置文档副本的公共路径（空串 = 导出失败）。选择器/FileProvider 只放行这个副本。 */
   @JavascriptInterface
-  fun exportSettingsDocument(): String = onExportSettingsDocument()
+  fun exportSettingsDocument(): String = trusted { onExportSettingsDocument() }
   /** Immersive status bar toggle (true = status bar normally hidden); called by Settings → General. */
   @JavascriptInterface
   fun setImmersiveMode(enable: Boolean) {
+    checkTrustedFrame()
     onSetImmersiveRequest(enable)
   }
 
@@ -269,18 +305,18 @@ class AndroidBridge(
    * 只有 setter 时，用 `adb shell` 直接改壳偏好（绕过页面）后重开设置页显示不一致。
    */
   @JavascriptInterface
-  fun getImmersiveMode(): Boolean = onGetImmersiveMode()
+  fun getImmersiveMode(): Boolean = trusted { onGetImmersiveMode() }
 
   /** Current UI language mode (system / zh / en); the shell preference is the truth source. */
   @JavascriptInterface
-  fun getUiLanguage(): String = onGetUiLanguage()
+  fun getUiLanguage(): String = trusted { onGetUiLanguage() }
 
   /**
    * Store a UI language and sync it to dsh; returns the stored mode.
    * The caller reloads the page, so the new language is visible immediately.
    */
   @JavascriptInterface
-  fun setUiLanguage(mode: String): String = onSetUiLanguage(mode)
+  fun setUiLanguage(mode: String): String = trusted { onSetUiLanguage(mode) }
 
   /**
    * Native clipboard write (navigator.clipboard.writeText in WebView is always rejected on Android
@@ -288,15 +324,15 @@ class AndroidBridge(
    * writeClipboard fails). Returns whether the write succeeded.
    */
   @JavascriptInterface
-  fun copyText(text: String): Boolean = onCopyTextRequest(text)
+  fun copyText(text: String): Boolean = trusted { onCopyTextRequest(text) }
 
   /** Request a foreground native consent prompt; text arrives through dsh:clipboard-text. */
   @JavascriptInterface
-  fun requestClipboardText(requestId: String) = onRequestClipboardText(requestId)
+  fun requestClipboardText(requestId: String) = trusted { onRequestClipboardText(requestId) }
 
   /** Revoke a disposed editor's outstanding native clipboard prompt. */
   @JavascriptInterface
-  fun cancelClipboardText(requestId: String) = onCancelClipboardText(requestId)
+  fun cancelClipboardText(requestId: String) = trusted { onCancelClipboardText(requestId) }
 
   /**
    * 0.13.1 W4：配置导出（私有 settings.yaml -> Documents/dshdata/exports/config/settings.yaml）。
@@ -304,15 +340,16 @@ class AndroidBridge(
    * 导出 -> 文件管理器编辑 -> 导入。返回 JSON {ok, path?, error?}（同步执行，桥线程允许阻塞 IO）。
    */
   @JavascriptInterface
-  fun exportConfig(): String = onExportConfig()
+  fun exportConfig(): String = trusted { onExportConfig() }
 
   /** 0.13.1 W4：配置导入（exports/config/settings.yaml -> 私有 DSH_HOME；引擎 chokidar 热加载）。返回 JSON 同上。 */
   @JavascriptInterface
-  fun importConfig(): String = onImportConfig()
+  fun importConfig(): String = trusted { onImportConfig() }
 
   /** True when the app holds All Files Access (external workspace requirement). */
   @JavascriptInterface
   fun hasAllFilesAccess(): Boolean {
+    checkTrustedFrame()
     // isExternalStorageManager exists only on API 30+; older versions have no such permission model.
     if (android.os.Build.VERSION.SDK_INT < 30) return false
     return android.os.Environment.isExternalStorageManager()
@@ -320,7 +357,7 @@ class AndroidBridge(
 
   /** 0.13.7：把路径交给系统选择器（MT 管理器 / 系统文件管理…；返回 JSON {ok, reason?}）。 */
   @JavascriptInterface
-  fun openPathChooser(path: String, mode: String?): String = onOpenPathChooser(path, mode)
+  fun openPathChooser(path: String, mode: String?): String = trusted { onOpenPathChooser(path, mode) }
 
   /**
    * 0.15.0：用别的应用打开这个文件（主意图 ACTION_VIEW + ACTION_SEND 作并列候选）。
@@ -333,7 +370,8 @@ class AndroidBridge(
    */
   @JavascriptInterface
   fun openFileExternal(path: String, mime: String): String =
-    onOpenFileExternal(path, mime, FileExternalBridge.KIND_OPEN)
+    // #686：表达式体入口用 trusted{} 包裹（与 checkTrustedFrame() 同判据）。
+    trusted { onOpenFileExternal(path, mime, FileExternalBridge.KIND_OPEN) }
 
   /**
    * 0.15.0：把这个文件转发给别的应用（主意图 ACTION_SEND + ACTION_VIEW 作并列候选）。
@@ -346,17 +384,19 @@ class AndroidBridge(
    */
   @JavascriptInterface
   fun shareFile(path: String, mime: String): String =
-    onOpenFileExternal(path, mime, FileExternalBridge.KIND_SHARE)
+    // #686：同上，表达式体用 trusted{} 包裹。
+    trusted { onOpenFileExternal(path, mime, FileExternalBridge.KIND_SHARE) }
 
   /** Open the system screen granting All Files Access (special permission). */
   @JavascriptInterface
   fun requestAllFilesAccess() {
+    checkTrustedFrame()
     onAllFilesAccessRequest()
   }
 
   /** One-shot session token for the directory-picker bridge (validated by the engine-side pick endpoint; null = disabled). */
   @JavascriptInterface
-  fun getPickToken(): String? = pickToken
+  fun getPickToken(): String? = trusted { pickToken }
 
   /**
    * Restart the engine service process: kill the engine, the EngineService watchdog brings it back.
@@ -365,23 +405,26 @@ class AndroidBridge(
    * 「重启中…」的忙碌态——旧实现是 void，页面只能假装忙碌两秒再自己变回。
    */
   @JavascriptInterface
-  fun restartEngine(): Boolean = onRestartEngine()
+  fun restartEngine(): Boolean = trusted { onRestartEngine() }
 
   /** Shut down the harness: stop the engine and fall back to the init (startup/test) screen (no auto-restart). */
   @JavascriptInterface
   fun shutdownToGuide() {
+    checkTrustedFrame()
     onShutdownToGuide()
   }
 
   /** Refresh the Web UI (reloads the current engine page, issue apk#29 requirement 1). */
   @JavascriptInterface
   fun reloadWebUI() {
+    checkTrustedFrame()
     onReloadWebUI()
   }
 
   /** Open the built-in console (snapshot bash interactive terminal; usable for diagnostics even when the engine is down). */
   @JavascriptInterface
   fun openConsole() {
+    checkTrustedFrame()
     onOpenConsole()
   }
 
@@ -389,11 +432,12 @@ class AndroidBridge(
    *  ST-11：返回值 = 偏好 **&&** 采集器在跑——EngineService.onDestroy 无条件停采集器，
    *  此后只回读偏好就是乐观置位（开关显示「开」而日志文件不再增长）。 */
   @JavascriptInterface
-  fun getDevLogEnabled(): Boolean = onGetDevLogEnabled() && LogCollector.isRunning()
+  fun getDevLogEnabled(): Boolean = trusted { onGetDevLogEnabled() && LogCollector.isRunning() }
 
   /** Set the dev debug-log toggle; when on, logs are written daily under dshdata/log/. */
   @JavascriptInterface
   fun setDevLogEnabled(enabled: Boolean) {
+    checkTrustedFrame()
     onSetDevLogEnabled(enabled)
   }
 
@@ -406,39 +450,39 @@ class AndroidBridge(
    * took it. Callers fall back to the engine RPC when false (desktop hosts).
    */
   @JavascriptInterface
-  fun openNativePath(path: String): Boolean = onOpenNativePath(path)
+  fun openNativePath(path: String): Boolean = trusted { onOpenNativePath(path) }
 
   /** 悬浮球开关态（持久化；开发者选项 → 悬浮球）。 */
   @JavascriptInterface
-  fun getOverlayEnabled(): Boolean = onGetOverlayEnabled()
+  fun getOverlayEnabled(): Boolean = trusted { onGetOverlayEnabled() }
 
   /** 悬浮球开关（控制器负责权限引导）；返回当前是否已启动。 */
   @JavascriptInterface
-  fun setOverlayEnabled(enable: Boolean): Boolean = onSetOverlayEnabled(enable)
+  fun setOverlayEnabled(enable: Boolean): Boolean = trusted { onSetOverlayEnabled(enable) }
 
   /** User-owned screen-access scope. Model tools never call this setter. */
   @JavascriptInterface
-  fun getScreenScope(): String = onGetScreenScope()
+  fun getScreenScope(): String = trusted { onGetScreenScope() }
 
   /** Persist one normalized screen scope selected from the DSH settings surface. */
   @JavascriptInterface
-  fun setScreenScope(scope: String): String = onSetScreenScope(scope)
+  fun setScreenScope(scope: String): String = trusted { onSetScreenScope(scope) }
 
   /** CWD for the external-open blank session; source file names and paths remain queue-private. */
   @JavascriptInterface
-  fun incomingWorkspacePath(): String = onIncomingWorkspacePath()
+  fun incomingWorkspacePath(): String = trusted { onIncomingWorkspacePath() }
 
   /** BrowserHost current lifecycle/navigation state for the Files-sidebar workbench. */
   @JavascriptInterface
-  fun browserHostStatus(): String = onBrowserHostStatus()
+  fun browserHostStatus(): String = trusted { onBrowserHostStatus() }
 
   /** Session/occurrence-addressed browser commands for the trusted native adapter. */
   @JavascriptInterface
-  fun browserHostCommand(payload: String): String = onBrowserHostCommand(payload)
+  fun browserHostCommand(payload: String): String = trusted { onBrowserHostCommand(payload) }
 
   /** Lazily create/show BrowserHost and optionally navigate to one http(s) URL. */
   @JavascriptInterface
-  fun browserHostShow(url: String?): String = onBrowserHostShow(url)
+  fun browserHostShow(url: String?): String = trusted { onBrowserHostShow(url) }
 
   /**
    * review C12/C24（2026-09-14 设备实测）：TS 类型面把 url 声明为可选（`browserHostShow?: (url?)`），
@@ -446,81 +490,82 @@ class AndroidBridge(
    * （真机/模拟器实测复现）。这里补零参重载，与显式 `null` 完全同义（再次显示已创建的工作台）。
    */
   @JavascriptInterface
-  fun browserHostShow(): String = onBrowserHostShow(null)
+  fun browserHostShow(): String = trusted { onBrowserHostShow(null) }
 
   /** Hide BrowserHost while retaining the current page in its one-tab workbench. */
   @JavascriptInterface
-  fun browserHostHide(): String = onBrowserHostHide()
+  fun browserHostHide(): String = trusted { onBrowserHostHide() }
 
   /** Reload the BrowserHost page. */
   @JavascriptInterface
-  fun browserHostReload(): String = onBrowserHostReload()
+  fun browserHostReload(): String = trusted { onBrowserHostReload() }
 
   /** Update BrowserHost overlay bounds from the trusted DSH sidebar stage. */
   @JavascriptInterface
-  fun browserHostBounds(bounds: String): String = onBrowserHostBounds(bounds)
+  fun browserHostBounds(bounds: String): String = trusted { onBrowserHostBounds(bounds) }
 
   /** Select a letterboxed BrowserHost viewport without transforming touch coordinates. */
   @JavascriptInterface
-  fun browserHostViewport(viewport: String): String = onBrowserHostViewport(viewport)
+  fun browserHostViewport(viewport: String): String = trusted { onBrowserHostViewport(viewport) }
 
   /** Close (destroy) the BrowserHost page; the workbench can be opened fresh afterwards. */
   @JavascriptInterface
-  fun browserHostClose(): String = onBrowserHostClose()
+  fun browserHostClose(): String = trusted { onBrowserHostClose() }
 
   /** Switch the BrowserHost identity profile (PC / mobile); payload is {profile, ua}. */
   @JavascriptInterface
-  fun browserHostIdentity(payload: String): String = onBrowserHostIdentity(payload)
+  fun browserHostIdentity(payload: String): String = trusted { onBrowserHostIdentity(payload) }
 
   /** Virtual-display state/actions for the trusted Files-sidebar panel. */
   @JavascriptInterface
-  fun vdisplayStatus(): String = onVdisplayStatus()
+  fun vdisplayStatus(): String = trusted { onVdisplayStatus() }
 
   @JavascriptInterface
-  fun vdisplayCreate(): String = onVdisplayCreate()
+  fun vdisplayCreate(): String = trusted { onVdisplayCreate() }
 
   @JavascriptInterface
-  fun vdisplayDestroy(): String = onVdisplayDestroy()
+  fun vdisplayDestroy(): String = trusted { onVdisplayDestroy() }
 
   /** Trusted virtual-screen viewer geometry from the Files-sidebar stage. */
   @JavascriptInterface
-  fun vdisplayBounds(bounds: String): String = onVdisplayBounds(bounds)
+  fun vdisplayBounds(bounds: String): String = trusted { onVdisplayBounds(bounds) }
 
   /** Select the controller-owned presentation target; real screen rejects with a structured code. */
   @JavascriptInterface
-  fun vdisplaySelect(alias: String): String = onVdisplaySelect(alias)
+  fun vdisplaySelect(alias: String): String = trusted { onVdisplaySelect(alias) }
 
   /** 0.14.0：虚拟屏分辨率档位读写（设置页「手机控制」）。 */
   @JavascriptInterface
-  fun getVdisplayScale(): Double = onGetVdisplayScale()
+  fun getVdisplayScale(): Double = trusted { onGetVdisplayScale() }
 
   @JavascriptInterface
-  fun setVdisplayScale(value: Double): Double = onSetVdisplayScale(value)
+  fun setVdisplayScale(value: Double): Double = trusted { onSetVdisplayScale(value) }
 
   /** 0.14.0：退后台自动浮窗开关（设置页「手机控制」）。 */
   @JavascriptInterface
-  fun getVdisplayFloatEnabled(): Boolean = onGetVdisplayFloat()
+  fun getVdisplayFloatEnabled(): Boolean = trusted { onGetVdisplayFloat() }
 
   @JavascriptInterface
-  fun setVdisplayFloatEnabled(enable: Boolean): Boolean = onSetVdisplayFloat(enable)
+  fun setVdisplayFloatEnabled(enable: Boolean): Boolean = trusted { onSetVdisplayFloat(enable) }
 
   /** 0.14.0：强制销毁全部虚拟屏（设置页「手机控制」三连点确认后调用）。 */
   @JavascriptInterface
-  fun forceDestroyVdisplay(): String = onForceDestroyVdisplay()
+  fun forceDestroyVdisplay(): String = trusted { onForceDestroyVdisplay() }
 
   /** 0.13.5 W4：无障碍控制通道状态（设置页展示 + 引导）。 */
   @JavascriptInterface
-  fun a11yStatus(): String = onA11yStatus()
+  fun a11yStatus(): String = trusted { onA11yStatus() }
 
   /** 0.13.5 W4：跳系统无障碍设置页（开启「DSH 设备控制」）。 */
   @JavascriptInterface
   fun openA11ySettings() {
+    checkTrustedFrame()
     onOpenA11ySettings()
   }
 
   /** 0.13.5 W4：一键解锁受限设置（appops set … ACCESS_RESTRICTED_SETTINGS allow，走 Shizuku 特权 shell）。 */
   @JavascriptInterface
-  fun unlockRestrictedSettings(): String = onUnlockRestrictedSettings()
+  fun unlockRestrictedSettings(): String = trusted { onUnlockRestrictedSettings() }
 
   /**
    * 0.14.1 设置页「手机控制」：打开登记在册的外部链接。
@@ -528,7 +573,7 @@ class AndroidBridge(
    * @return JSON `{ok, reason?}`；reason ∈ `unknown-key` / `insecure-url` / `no-handler` / 异常类名。
    */
   @JavascriptInterface
-  fun openExternalLink(key: String): String = onOpenExternalLink(key)
+  fun openExternalLink(key: String): String = trusted { onOpenExternalLink(key) }
 
   /**
    * 0.14.1 设置页「手机控制」：拉起 Shizuku 管理器界面。
@@ -537,14 +582,14 @@ class AndroidBridge(
    * 未安装时回 `{"ok":false,"reason":"not-installed"}`，由页面提示去下载。
    */
   @JavascriptInterface
-  fun openShizukuManager(): String = onOpenShizukuManager()
+  fun openShizukuManager(): String = trusted { onOpenShizukuManager() }
 
   /**
    * 0.14.1 设置页「手机控制」：Shizuku 特权通道状态（页面据此决定「打开 Shizuku」是否可点）。
    * 字段：`installed` / `running` / `granted` / `bound` / `binding` / `code` / `guidance` / `ok`。
    */
   @JavascriptInterface
-  fun shizukuStatus(): String = onShizukuStatus()
+  fun shizukuStatus(): String = trusted { onShizukuStatus() }
 
   /**
    * 0.14.2 P1 设置页「手机控制」：「重置链接」按钮。
@@ -554,7 +599,7 @@ class AndroidBridge(
    * 返回写后回读的 status JSON；**不承诺已修好**——能否恢复取决于 Shizuku 服务本身是否还在运行。
    */
   @JavascriptInterface
-  fun resetShizukuConnection(): String = onResetShizukuConnection()
+  fun resetShizukuConnection(): String = trusted { onResetShizukuConnection() }
 
   /**
    * issue #262 设置页「手机控制」：「AI root 权限」读面（写后回读同源）。
@@ -565,6 +610,7 @@ class AndroidBridge(
    */
   @JavascriptInterface
   fun rootGrantState(): String {
+    checkTrustedFrame()
     val app = ShellAppContext.get()
       ?: return """{"ok":false,"reason":"no-shell-context","canToggle":false,"channelRoot":false}"""
     return RootGrant.state(app, RootGrant.channelUidNow(app)).put("ok", true).toString()
@@ -576,6 +622,7 @@ class AndroidBridge(
    */
   @JavascriptInterface
   fun setRootGranted(on: Boolean): String {
+    checkTrustedFrame()
     val app = ShellAppContext.get()
       ?: return """{"ok":false,"reason":"no-shell-context"}"""
     return RootGrant.setGranted(app, on).toString()
@@ -588,6 +635,7 @@ class AndroidBridge(
    */
   @JavascriptInterface
   fun setRootConsent(on: Boolean): String {
+    checkTrustedFrame()
     val app = ShellAppContext.get()
       ?: return """{"ok":false,"reason":"no-shell-context"}"""
     return RootGrant.setConsent(app, on).toString()
@@ -598,14 +646,14 @@ class AndroidBridge(
    * 离线/随版本/不可远端替换）。页面不传路径，只触发这一条登记过的文档。
    */
   @JavascriptInterface
-  fun openRootDisclaimer(): String = onOpenRootDisclaimer()
+  fun openRootDisclaimer(): String = trusted { onOpenRootDisclaimer() }
 
   /**
    * 2026-09-30：**显式请求 Shizuku 授权**（必须在 UI 线程 + 前台 Activity 上发起，
    * 否则授权对话框落不到用户眼前；由 MainActivity 接线，见 `onRequestShizukuPermission`）。
    */
   @JavascriptInterface
-  fun requestShizukuPermission(): String = onRequestShizukuPermission()
+  fun requestShizukuPermission(): String = trusted { onRequestShizukuPermission() }
 
   /**
    * 2026-09-30 主人定例：应用级 root 授权状态读面（**纯读，永不触发授权弹窗**）。
@@ -616,6 +664,7 @@ class AndroidBridge(
    */
   @JavascriptInterface
   fun rootAccessState(): String {
+    checkTrustedFrame()
     val app = ShellAppContext.get()
       ?: return """{"ok":false,"reason":"no-shell-context","state":"unknown","granted":false}"""
     return RootAccess.state(app).put("ok", true).toString()
@@ -631,6 +680,7 @@ class AndroidBridge(
    */
   @JavascriptInterface
   fun requestRootAccess(): String {
+    checkTrustedFrame()
     val app = ShellAppContext.get()
       ?: return """{"ok":false,"reason":"no-shell-context"}"""
     return RootAccess.requestGrant(app).toString()
@@ -655,6 +705,7 @@ class AndroidBridge(
    */
   @JavascriptInterface
   fun repairRootOwnership(): String {
+    checkTrustedFrame()
     val app = ShellAppContext.get()
       ?: return """{"ok":false,"reason":"no-shell-context"}"""
     return RootOwnershipJobs.request(app).toString()
@@ -668,7 +719,7 @@ class AndroidBridge(
    * @param key 可选：只回读一个设置键（空串 = 全量快照）。回读**始终取壳侧真源**，不回显入参。
    */
   @JavascriptInterface
-  fun getNotifySetting(key: String?): String = onGetNotifySetting(key ?: "")
+  fun getNotifySetting(key: String?): String = trusted { onGetNotifySetting(key ?: "") }
 
   /**
    * 0.14.1 块J FIX-4：通知设置写入（key = `suppressForeground` 或 `cat.<category>`）。
@@ -677,7 +728,7 @@ class AndroidBridge(
    * （拒绝乐观置位，与 `ShellState.DevLogControl` 同纪律）。这是 FIX-4 的唯一页面上行入口。
    */
   @JavascriptInterface
-  fun setNotifySetting(key: String, value: Boolean): String = onSetNotifySetting(key, value)
+  fun setNotifySetting(key: String, value: Boolean): String = trusted { onSetNotifySetting(key, value) }
 
   /**
    * 0.14.6：APK 自更新入口（设置页「检查更新」行）。
@@ -693,7 +744,7 @@ class AndroidBridge(
    * 全程无自动请求：必须用户显式点 `check` / `start`。
    */
   @JavascriptInterface
-  fun apkUpdate(action: String): String = onApkUpdate(action)
+  fun apkUpdate(action: String): String = trusted { onApkUpdate(action) }
 
   /**
    * 0.14.1 批 4：通知自检（每个渠道的系统实际状态 + 是否被降级 + 该走哪个设置页）。
@@ -714,9 +765,12 @@ class AndroidBridge(
    * @returns 受理结果 JSON；桥未接线时 `{ok:false,code:"not-wired"}`。
    */
   @JavascriptInterface
-  fun capturePhoto(action: String): String {
-    val handler = onCapturePhoto ?: return """{"ok":false,"code":"not-wired"}"""
-    return try {
+  fun capturePhoto(action: String): String = trusted {
+    // #686：**每个** `@JavascriptInterface` 第一件事必须是 trusted{} —— 不可信 frame 拿到的是
+    // 完整能力面，导航闸门只拦主帧。本入口在合并 #773 时是唯一漏网的一个
+    //（AndroidBridgeFrameGuardTest.sweep_everyBridgeEntryIsGuardedFailClosed 扫出来的）。
+    val handler = onCapturePhoto
+    if (handler == null) """{"ok":false,"code":"not-wired"}""" else try {
       handler(action)
     } catch (t: Throwable) {
       """{"ok":false,"code":"failed","detail":""" + JSONObject.quote(t.message ?: t.javaClass.simpleName) + "}"
@@ -724,15 +778,15 @@ class AndroidBridge(
   }
 
   @JavascriptInterface
-  fun notifySelfCheck(): String = onNotifySelfCheck()
+  fun notifySelfCheck(): String = trusted { onNotifySelfCheck() }
 
   /** 打开系统的「本应用通知设置」页；返回是否真的拉起（false = 该 ROM 无此页，页面须如实提示）。 */
   @JavascriptInterface
-  fun openNotifyAppSettings(): Boolean = onOpenNotifyAppSettings()
+  fun openNotifyAppSettings(): Boolean = trusted { onOpenNotifyAppSettings() }
 
   /** 打开某个渠道的系统设置页（channelId 由 notifySelfCheck 给出）；返回是否真的拉起。 */
   @JavascriptInterface
-  fun openNotifyChannelSettings(channelId: String): Boolean = onOpenNotifyChannelSettings(channelId)
+  fun openNotifyChannelSettings(channelId: String): Boolean = trusted { onOpenNotifyChannelSettings(channelId) }
 
   /**
    * 发送五类测试通知，返回实际投递条数（0..5）。
@@ -740,7 +794,7 @@ class AndroidBridge(
    * `notifySelfCheck` 给出，本方法给的是**实际到达效果**。
    */
   @JavascriptInterface
-  fun notifySendTest(): Int = onNotifySendTest()
+  fun notifySendTest(): Int = trusted { onNotifySendTest() }
 
   companion object {
     /**

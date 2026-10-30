@@ -169,7 +169,8 @@
       "conversation.header.leading",
       "sidebar.right.pane.tab.title",
       "sidebar.right.tab.menu.item",
-      "android.dock.conversation"
+      "android.dock.conversation",
+      "settings.models.provider-card"
     ],
     "rowId": "ui-layout",
     "enabledRow": "ui-layout",

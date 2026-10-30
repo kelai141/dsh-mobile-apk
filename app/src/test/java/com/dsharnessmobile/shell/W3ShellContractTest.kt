@@ -148,7 +148,7 @@ class W3ShellContractTest {
   @Test
   fun bridgeExposesTheImmersiveGetterBackedByTheShellSource() {
     val code = codeOnly(source("AndroidBridge.kt"))
-    assertTrue("ST-10：桥必须有 getter", code.contains("fun getImmersiveMode(): Boolean = onGetImmersiveMode()"))
+    assertTrue("ST-10：桥必须有 getter（#686 起入口先过顶层帧门禁，真源委托不变）", code.contains("fun getImmersiveMode(): Boolean = trusted { onGetImmersiveMode() }"))
     assertTrue("getter 默认读壳侧单一真源", code.contains("onGetImmersiveMode: () -> Boolean = { ImmersiveMode.current() }"))
   }
 

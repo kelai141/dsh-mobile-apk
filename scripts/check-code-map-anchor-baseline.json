@@ -1062,10 +1062,10 @@
       "| 文件 | 职责一句话 | 被引用 |"
     ],
     "AdbKeyboardReceiver.kt:45": [
-      "override fun onReceive(context: Context, intent: Intent) {"
+      ""
     ],
     "AdbKeyboardReceiver.kt:76": [
-      "fun shouldHandle("
+      "*/"
     ],
     "AdbKeyboardService.kt:106": [
       "val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager ?: return"
@@ -1080,19 +1080,19 @@
       "background = android.graphics.drawable.ColorDrawable(0xFFF2F2F2.toInt())"
     ],
     "AndroidBridge.kt:319": [
-      "}"
+      "fun setUiLanguage(mode: String): String = trusted { onSetUiLanguage(mode) }"
     ],
     "AndroidBridge.kt:325": [
-      "/**"
+      "*/"
     ],
     "AndroidBridge.kt:375": [
       ""
     ],
     "AndroidBridge.kt:423": [
-      "/** Persist one normalized screen scope selected from the DSH settings surface. */"
+      ""
     ],
     "AndroidBridge.kt:611": [
-      "* 2026-09-30 主人定例：应用级 root 授权状态读面（**纯读，永不触发授权弹窗**）。"
+      "@JavascriptInterface"
     ],
     "ApkUpdateAction.kt:261": [
       ""
@@ -1368,22 +1368,22 @@
       "\"unreadable\""
     ],
     "MainActivity.kt:1030": [
-      "vdisplayFloat.show()"
+      "handler.postDelayed(this, VDISPLAY_REAP_INTERVAL_MS)"
     ],
     "MainActivity.kt:1054": [
-      "if (::webView.isInitialized && webViewRef === webView) webViewRef = null"
+      "}"
     ],
     "MainActivity.kt:1057": [
-      "dirPickerController.cancelTtl()"
+      "clipboardRead?.cancel()"
     ],
     "MainActivity.kt:1076": [
-      "webView.destroy()"
+      "screenWakeLock?.release()"
     ],
     "MainActivity.kt:1164": [
-      "* language the shell never applied. The script reads the shell preference on"
+      "view.evaluateJavascript(BackGate.READ_DEPTH_SCRIPT) { raw ->"
     ],
     "MainActivity.kt:1167": [
-      "private fun installLocaleBootstrap() {"
+      "}"
     ],
     "MainActivity.kt:145": [
       "private val uiChrome = WebUiChrome(this)"
@@ -1395,82 +1395,82 @@
       ""
     ],
     "MainActivity.kt:306": [
-      "}"
+      "if (isFinishing || isDestroyed) return"
     ],
     "MainActivity.kt:354": [
-      "/** 引导页状态渲染（委托 GuidePageRenderer；EngineStartFlow/前台监控经此驱动）。 */"
+      "*/"
     ],
     "MainActivity.kt:422": [
-      "val current = runCatching { webView.url }.getOrNull()"
+      "// 正是 CONTRACT §0 点名的**重载环**（页面每次渲染完毕就再次发 ready → 又回到同一页）。"
     ],
     "MainActivity.kt:475": [
-      "if (authCookie != null) {"
+      "/** Automatic page refreshes coalesce while paused and never issue background navigation. */"
     ],
     "MainActivity.kt:502": [
-      "pendingEngineCookie = null"
+      "initialAuthRecoveryPending = true"
     ],
     "MainActivity.kt:514": [
-      "UiText.t(this, \"自动重建已尝试一次；请在此手动重试或查看日志，不会循环重建页面。\", \"An automatic rebuild was tried once. Retry here or check the log; the page will not be rebuilt in a loop.\"),"
+      "ForegroundPageRecoveryPolicy.Recovery.NONE -> false"
     ],
     "MainActivity.kt:544": [
-      "} else {"
+      ""
     ],
     "MainActivity.kt:565": [
-      "crashInfo = try { crashFile.readText() } catch (_: Exception) { null }"
+      "if (userClosedEngine) EngineService.userShutdown = true"
     ],
     "MainActivity.kt:569": [
-      "if (DevLogPrefs.isEnabled(this)) {"
+      "// 崩溃标记：进程级未捕获异常写入 filesDir/.crashed（下次启动测试界面"
     ],
     "MainActivity.kt:605": [
-      "id = View.generateViewId()"
+      "// 系统层面表现为「点开即崩」。改为如实落 boot-diag + 一句话告知 + finish 干净退出；"
     ],
     "MainActivity.kt:642": [
-      "// would cover the mobile top bar / settings header (issue #135). bars.top"
+      "// 早退、onResume 的探活发现引擎活着也不再走启动流程 → 授权之后没有任何东西会再跑一次建目录，"
     ],
     "MainActivity.kt:719": [
-      "* 落点由**页面**执行（`window.__dshOpenSession`，页面才有会话视图与切换能力）；壳侧只负责"
+      "FileIncoming.processIncomingIntent(this, intent) { title, text -> showTestNotification(title, text) }"
     ],
     "MainActivity.kt:769": [
-      "pendingNotifySession = session"
+      "val session = pendingNotifySession ?: return"
     ],
     "MainActivity.kt:772": [
-      "}"
+      "val script = \"(() => { try { return (typeof window.__dshOpenSession === 'function') && window.__dshOpenSession(\" +"
     ],
     "MainActivity.kt:78": [
       "/** System insets in CSS px, cached until the engine page is ready to receive them. */"
     ],
     "MainActivity.kt:782": [
-      "private fun notifyRouteFailed() {"
+      "notifyRouteAttempts += 1"
     ],
     "MainActivity.kt:784": [
-      "if (!pageUiActive) return@runOnUiThread"
+      "webView.postDelayed({ deliverNotifyRoute() }, NOTIFY_ROUTE_RETRY_MS)"
     ],
     "MainActivity.kt:788": [
-      "UiText.t(this, \"无法打开对应的会话（可能已被删除）——请从会话列表手动选择\", \"Could not open that session (it may have been deleted). Pick it from the session list.\"),"
+      "}"
     ],
     "MainActivity.kt:793": [
       "}"
     ],
     "MainActivity.kt:803": [
-      "pageRecovery.resume()"
+      "Toast.LENGTH_LONG,"
     ],
     "MainActivity.kt:812": [
-      "return"
+      "/** 首启向导已移除（决策 2026-08-23）：初始页（GuideChrome 运行时状态/解压进度/崩溃/日志）"
     ],
     "MainActivity.kt:815": [
-      "if (!userClosedEngine) engineFlow.startEngineService() // Native fallback/recreation does not disable task protection."
+      "override fun onResume() {"
     ],
     "MainActivity.kt:822": [
-      "if (pendingClientPluginFailurePresentation) {"
+      "return"
     ],
     "MainActivity.kt:850": [
-      "// 名称同步失败不得影响启动（渠道本身仍可用，只是可能显示旧词）。"
+      "}"
     ],
     "MainActivity.kt:880": [
-      "OverlayController.settlePendingEnable(this)"
+      "// ensureStarted 注册——startService 的 onCreate 同步 emit 首帧，注册晚了会丢帧）。"
     ],
     "MainActivity.kt:923": [
-      "internal fun provisionPublicRepoAndRefreshChip(trigger: String) {"
+      "apkUpdate.settleAfterResume()"
     ],
     "MobileChrome.tsx:35": [
       "?? null"
@@ -2001,22 +2001,22 @@
       "* 实例——即使某天平台把隐式广播重新投递给 manifest 接收器，也不会提交两遍。"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/AdbKeyboardService.kt:166": [
-      "var instance: AdbKeyboardService? = null"
+      "/**"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:319": [
-      "}"
+      "fun setUiLanguage(mode: String): String = trusted { onSetUiLanguage(mode) }"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:333": [
-      "*/"
+      "/** Revoke a disposed editor's outstanding native clipboard prompt. */"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:375": [
       ""
     ],
     "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:423": [
-      "/** Persist one normalized screen scope selected from the DSH settings surface. */"
+      ""
     ],
     "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:425": [
-      "fun setScreenScope(scope: String): String = onSetScreenScope(scope)"
+      "@JavascriptInterface"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/ApkUpdateAction.kt:228": [
       "const val STATE_UP_TO_DATE = \"up-to-date\""
@@ -2181,10 +2181,10 @@
       "/**"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1030": [
-      "vdisplayFloat.show()"
+      "handler.postDelayed(this, VDISPLAY_REAP_INTERVAL_MS)"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1113": [
-      "// 0.14.9：开屏视频播放时，系统返回（手势或按键）先关闭视频并消费本次返回。"
+      "*/"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:137": [
       "/** 开屏视频覆盖层；在 onCreate 建好 root 之后初始化。 */"
@@ -2211,31 +2211,31 @@
       ""
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:391": [
-      "return true"
+      "guideRenderer.showGuide()"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:605": [
-      "id = View.generateViewId()"
+      "// 系统层面表现为「点开即崩」。改为如实落 boot-diag + 一句话告知 + finish 干净退出；"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:667": [
-      ")"
+      "// #197（机制①）：edge-to-edge 下 WebView 的**布局尺寸从不随 IME 变化**（布局视口恒 800），"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:719": [
-      "* 落点由**页面**执行（`window.__dshOpenSession`，页面才有会话视图与切换能力）；壳侧只负责"
+      "FileIncoming.processIncomingIntent(this, intent) { title, text -> showTestNotification(title, text) }"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:771": [
-      "return@evaluateJavascript"
+      "pendingNotifySession = null"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:812": [
-      "return"
+      "/** 首启向导已移除（决策 2026-08-23）：初始页（GuideChrome 运行时状态/解压进度/崩溃/日志）"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:815": [
-      "if (!userClosedEngine) engineFlow.startEngineService() // Native fallback/recreation does not disable task protection."
+      "override fun onResume() {"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:89": [
       "private val pickToken: String = EngineManager.ensurePickToken()"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:923": [
-      "internal fun provisionPublicRepoAndRefreshChip(trigger: String) {"
+      "apkUpdate.settleAfterResume()"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MuxClient.kt:172": [
       "sendFrame(out, 0x1, streamOpen.toByteArray(Charsets.UTF_8))"
@@ -3152,7 +3152,6 @@
     "index.js:2198": [
       "* @returns compact facts and child-local failures; complete child event arrays are released after extraction.",
       "* Collect each related child's own descriptor through existing historical codecs.",
-      "additionalProperties: false,",
       "const incidental = new Set([",
       "function signature(pattern) {",
       "let total = 0;",
@@ -3672,7 +3671,7 @@
       "*"
     ],
     "plugins/dsh-android-manage/src/ime-broadcast.ts:61": [
-      "export function adbKeyboardBroadcast(action: string, msg: string | null | undefined, auth: string): string {"
+      "*"
     ],
     "plugins/dsh-android-manage/src/index.ts:1071": [
       "x2: { type: 'number', description: 'swipe 终点 X' },"

@@ -713,8 +713,13 @@ internal class ApkUpdateController(private val activity: Activity) {
         fail("安装包已不存在（可能被清理）——请重新检查更新", ApkUpdateState.KIND_ARTIFACT_REJECTED)
         return
       }
-      // issue #676：授权页可以停任意久，文件在此期间可能被换掉。拉起安装器之前按**当初的校验依据**
-      // 重跑一次；字节对不上就拒绝安装（并清掉续继载荷，避免下次「继续安装」把同一个坏包装进去）。
+      // 安装前两道**互补**检查，顺序固定（不是二选一，查的不是同一件事）：
+      //  ① issue #676：按**当初的校验依据**重跑字节/摘要校验 —— 授权页可停任意久，文件可能在此期间被换掉。
+      //  ② issue #675：发布者连续性校验 —— 签名证书须与设备上已装的本应用一致。
+      // ① 查「这份产物是不是我下载的那一份」，② 查「签它的是不是官方渠道」。两道都过才允许拉起安装器。
+      //
+      // 清理语义不同，别合并：① 失败**不删文件**（依据丢失 ≠ 文件坏，重下即可），
+      // ② 失败**立刻删除**（被拒产物不留公共可写目录里充当「可重试载荷」）。
       val verified = verifiedArtifact
       if (verified == null || verified.file.canonicalFile != dest.canonicalFile) {
         readyToInstall = null
@@ -736,6 +741,18 @@ internal class ApkUpdateController(private val activity: Activity) {
         currentResult = null
         verifiedArtifact = null
         fail("安装前复验失败：" + why + "——已拒绝安装，请重新检查更新", ApkUpdateState.KIND_ARTIFACT_REJECTED)
+        return
+      }
+      if (!UpdateChecker.signerContinuityHolds(activity, dest)) {
+        LogCollector.log("dsh-update", "install rejected: signer continuity check failed (#675)")
+        dest.delete()
+        readyToInstall = null
+        currentResult = null
+        verifiedArtifact = null
+        fail(
+          "更新包签名证书与本应用不一致，已拒绝安装（可能被篡改或来自非官方渠道）——请回到官方发布页重新获取",
+          ApkUpdateState.KIND_ARTIFACT_REJECTED,
+        )
         return
       }
       if (!UpdateChecker.canInstall(activity)) {

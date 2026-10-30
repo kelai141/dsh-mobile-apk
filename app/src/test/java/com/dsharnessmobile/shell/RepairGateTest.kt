@@ -104,7 +104,7 @@ class RepairGateTest {
     assertTrue("诊断读取失败单独处理", repair.contains("val diagnosticsFailure = try"))
     assertFalse("模型缺失不得再整页 require() 失败", repair.contains("require(connections.isNotEmpty())"))
     assertTrue("重新读取模型配置必须直接读本地来源", repair.contains("RepairModelConfig.loadDetailed(applicationContext)"))
-    assertTrue("返回启动页并重试使用一次性动作", repair.contains("MainActivity.ACTION_RETRY_ENGINE"))
+    assertTrue("返回启动页并重试使用进程内一次性标志（#682：intent action 可被外部应用冒充）", repair.contains("MainActivity.pendingSelfRetry = true"))
     val ordinaryBack = repair.substringAfter("private fun returnToLauncher()").substringBefore("private fun cancelWork")
     assertFalse("普通返回不能消耗一次显式重试", ordinaryBack.contains("RepairState.reset") || ordinaryBack.contains("beginUserRetry"))
     assertTrue("必须有打开控制台入口", repair.contains("ConsoleActivity::class.java"))

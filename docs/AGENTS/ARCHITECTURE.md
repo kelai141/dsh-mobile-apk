@@ -69,7 +69,7 @@
 | 文件 | 职责一句话 | 被引用 |
 |---|---|---|
 | AdbKeyboardService.kt | 内嵌 ADBKeyboard 协议 IME（android_ui_input 中文输入；仅活跃时提交） | 运行期注册 AdbKeyboardReceiver（隐式广播）+ 注销 |
-| AdbKeyboardReceiver.kt | ADB_INPUT_TEXT/ADB_CLEAR_TEXT 广播入口；来源校验（uid 白名单 + nonce）并写回结果码 | manifest 注册（只收点名组件广播）＋ IME 运行期注册（隐式广播） |
+| AdbKeyboardReceiver.kt | ADB_INPUT_TEXT/ADB_CLEAR_TEXT 广播入口；来源校验（root 隐式信任 + nonce；#679 起 uid 2000 不再白名单）并写回结果码 | manifest 注册（只收点名组件广播）＋ IME 运行期注册（隐式广播） |
 | BootReceiver.kt | BOOT_COMPLETED 恢复用户同意状态 + BatteryWhitelist 引导 | manifest 注册（无代码调用方） |
 | ShizukuSupport.kt | Shizuku 反射探活（历史：引导页状态行只读展示） | EngineStartFlow（状态行） |
 | ShizukuProbe.kt | Shizuku 五态探针（absent/not-running/denied/prev11 等错误码 + guidance，fail-closed） | MainActivity、DeviceControlService、VdisplayController |

@@ -130,11 +130,27 @@ class AdbKeyboardContractTest {
   // ── 纯逻辑判据 ──────────────────────────────────────────────────────────────
 
   @Test
-  fun uidWhitelistCoversRootAndAdbShellOnly() {
+  fun onlyRootIsImplicitlyTrustedUid() {
     assertTrue("root", AdbKeyboardService.isTrustedUid(0))
-    assertTrue("adb shell", AdbKeyboardService.isTrustedUid(2000))
+    assertFalse("#679：adb shell(2000) 不再隐式可信——Shizuku 应用可持该身份", AdbKeyboardService.isTrustedUid(2000))
     assertFalse("普通应用 uid 不在白名单", AdbKeyboardService.isTrustedUid(10123))
     assertFalse("取不到发送方（INVALID_UID=-1）不得放行", AdbKeyboardService.isTrustedUid(-1))
+  }
+
+  @Test
+  fun nonRootSenderWithoutNonceIsRejected() {
+    // 纯判据面（[AdbKeyboardService.isTrustedSender] 负责从 nonce 文件收敛出 fileSecret；
+    // JVM 单测没有可实例化的 Context，context→secret 的读文件路径不在此测）。
+    assertFalse("uid 2000 无 nonce 必须拒（#679：Shizuku 冒用面）", AdbKeyboardService.isTrustedSenderFor(2000, null, "any"))
+    assertFalse("uid 2000 带 nonce 但无有效 secret（文件缺失/不可读）同样拒（fail-closed）",
+      AdbKeyboardService.isTrustedSenderFor(2000, "x", null))
+    assertFalse("uid 2000 nonce 不匹配必须拒", AdbKeyboardService.isTrustedSenderFor(2000, "x", "y"))
+    assertTrue("uid 2000 nonce 匹配放行（经典 adb 路径的合法新形态：--es auth 携带 nonce）",
+      AdbKeyboardService.isTrustedSenderFor(2000, "x", "x"))
+    assertFalse("普通应用无 nonce 必须拒", AdbKeyboardService.isTrustedSenderFor(10123, null, "any"))
+    assertTrue("普通应用带有效 nonce 放行（引擎路径，本就以应用 uid 运行）",
+      AdbKeyboardService.isTrustedSenderFor(10123, "x", "x"))
+    assertTrue("root 不要求 nonce（本已拥有设备全部权限）", AdbKeyboardService.isTrustedSenderFor(0, null, null))
   }
 
   @Test

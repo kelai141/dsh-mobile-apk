@@ -37,7 +37,7 @@ class BrowserHostCommandWiringTest {
   @Test
   fun trustedBridgeForwardsPayloadToTheActivityOwnedCommandHost() {
     assertTrue(body("AndroidBridge.kt", "fun browserHostCommand(")
-      .contains("= onBrowserHostCommand(payload)"))
+      .contains("= trusted { onBrowserHostCommand(payload) }"))
     assertTrue(source("MainActivity.kt").contains("onBrowserHostCommand = { payload -> browserHost.command(payload) }"))
     assertTrue(source("MainActivity.kt").contains("onBrowserHostBounds = { bounds -> browserHost.setStageBounds(bounds) }"))
     assertFalse("不可信浏览器 renderer 不能获得原生桥", source("BrowserHost.kt").contains("addJavascriptInterface("))
