@@ -383,6 +383,17 @@ const SKIP_LINE_EXEMPT = new Map([
     reason: 'SKIP 来自插件 lib/ 产物缺席；发布链调用前已构建全部插件产物，净 checkout 自审下缺席属设计内行为。到期前须把产物预构建接进 CI 门禁自审',
     until: '2026-12-31',
   }],
+  // check-contract：口径冲突（issue #1153）。该门禁只读 docs/UPSTREAM-CONTRACT.md，而这份文档是
+  // **协调仓独有**（dsh-mobile/apk 的镜像同步已按常设决定放弃维护，门禁以本仓为准）。
+  // check-contract 自己在自包含树上打印 SKIP(#1) 后以 exit 0 + SKIP=1 结案，并声明「不计入 --require」；
+  // 而本门禁的严格档要求「exit 0 且 SKIP=0」或显式豁免 —— 两条判据对同一情形给出相反结论。
+  //
+  // 登记为豁免而不是放宽判据：真要在自包含树上做文档同源性，得先决定「上游契约文档以哪份为准」，
+  // 那是 #1153 要定的口径，不该由门禁单方面假设。到期前必须收口，否则本条到期判红。
+  ['check-contract.mjs', {
+    reason: 'docs/UPSTREAM-CONTRACT.md 是协调仓独有文档，自包含树（apk 仓）上必然缺席；check-contract 对此外显式打印「自包含树合法缺席，不计入 --require」并以 exit 0 结案（口径冲突见 issue #1153）。到期前须定「上游契约文档以哪份为准」或把该文档纳入 apk 仓',
+    until: '2026-12-31',
+  }],
 ])
 
 /**
