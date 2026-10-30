@@ -325,6 +325,19 @@ function selfTest() {
   }
   console.log('PASS  资产覆盖同源补丁全部 marker（' + assets.length + ' 个资产，快照无关判据；'
     + 'marker 在本仓写在注释里，故本体由判据 0b 的结构断言复核）')
+  // marker 位置盘点：本仓约定是注释，所以这里只报数、不判红；它的用处是让「marker 只是注释」
+  // 这件事在 CI 日志里可见，而不是被一句 PASS 盖住（issue #1072 的认知根因）。
+  let atCode = 0
+  let atCommentOnly = 0
+  for (const asset of assets) {
+    const text = readFileSync(join(ASSETS, asset), 'utf8')
+    for (const patch of sourcesFor(asset)) {
+      if (typeof patch.marker !== 'string' || patch.marker === '') continue
+      if (markerPlacement(text, patch.marker) === 'code') atCode += 1
+      else atCommentOnly += 1
+    }
+  }
+  console.log('INFO  marker 位置：代码位置 ' + atCode + ' 条 / 仅注释 ' + atCommentOnly + ' 条（注释级证据）')
 }
 
 let checked = 0
