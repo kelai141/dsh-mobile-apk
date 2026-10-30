@@ -609,8 +609,59 @@ function publish(report){
     return payload;
   }catch(e){return null}
 }
+// ── 诊断面板的移除路径（issue #1056）──────────────────────────────────────────────────
+// 现象：41 秒才就绪的慢启动会被这块全屏面板一直盖住 —— UI 明明已经可用，用户却只能点「重新加载」
+// 才能退出，等于把一次「正常但慢」的启动变成「永久失败」。
+// 真因两条：
+//   ① 挂出后**没有任何移除路径**：全篇 removeChild 只有静态占位那一处（clearStaticFallback），
+//      本面板一旦 appendChild 就再也没人摘它，挂出即终局；
+//   ② 挂出前的判定**早于**那次最长 3 秒的 HEAD 请求（报告快照取在 HEAD 之前）：页面恰好在这段
+//      时间窗口里渲染完时，判定仍按过期快照走 —— 已经可用的页面照挂面板。
+// 修法：把「谁来撤掉它」与「挂之前是不是真的还卡着」都收在同一个结果性判据上。
+//   ①' 挂出即接管：按与 readyWatch 同一个 rendered() 每 500ms 复看，一旦页面真的渲染出内容就
+//      removeChild 掉面板并停表。判据只看渲染结果、不看时间也不看文案，慢启动同样会被正确摘除。
+//   ②' HEAD 返回后复判一次 pendingBoot()，已就绪就不挂（同一个判据，两处不得分叉，详见 run()）。
+//   ③' 幂等：按 id 去重，重复 show() 只留一个节点并复用同一个复看定时器（叠两层会互相遮挡，
+//      且移除只摘得掉最上面一层）。
+// 面板撤掉**不影响诊断能力**：console.error 的那条 [dsh-boot-stall] 发布行照旧（壳侧 grep 依赖它）。
+var DIAG_PANEL_ID='dsh-boot-diag';
+var DIAG_RECHECK_MS=500;
+// 复看窗口：面板现身后再等这么久仍不渲染，说明确实卡住了 —— 面板留在场上（用户可点重新加载），
+// 但停止复看，不在一个永不就绪的页面上无限打点。
+var DIAG_RECHECK_WINDOW_MS=120000;
+function diagPanel(){
+  try{return document.getElementById(DIAG_PANEL_ID)}catch(e){return null}
+}
+function stopDiagWatch(){
+  if(!window.__dshBootDiagTimer)return;
+  try{clearInterval(window.__dshBootDiagTimer)}catch(e){}
+  window.__dshBootDiagTimer=0;
+}
+function dropDiagPanel(){
+  stopDiagWatch();
+  try{
+    var el=diagPanel();
+    // 必须从 DOM 里摘掉而不是隐藏：它是全屏最高层级，留着照样吃掉点击与读屏焦点。
+    if(el&&el.parentNode)el.parentNode.removeChild(el);
+  }catch(e){}
+}
+function watchDiagPanel(){
+  if(window.__dshBootDiagTimer)return;   // 幂等：同一时刻只允许一个复看定时器
+  var shownAt=Date.now();
+  try{
+    window.__dshBootDiagTimer=setInterval(function(){
+      try{
+        if(!diagPanel()){stopDiagWatch();return}   // 已被别处摘掉（例如用户点了重新加载）：停表
+        if(rendered()){dropDiagPanel();return}      // 页面真的渲染出内容 ⇒ 面板立刻让位
+        if(Date.now()-shownAt>DIAG_RECHECK_WINDOW_MS)stopDiagWatch();
+      }catch(e){}
+    },DIAG_RECHECK_MS);
+  }catch(e){}
+}
 function show(report){
   try{
+    // 幂等（issue #1056 修法 ③）：同一文档只允许一个诊断面板。
+    if(diagPanel())return;
     var d=document.createElement('div');d.id='dsh-boot-diag';
     d.style.cssText='position:fixed;inset:0;z-index:2147483647;background:rgba(8,8,12,.97);color:#e6e6e6;font:14px/1.7 system-ui,-apple-system,sans-serif;padding:20px;overflow:auto';
     // 0.14.1 批 3（P3-2 / P3-3 / P3-6，同时收掉 S3-23）：旧实现把**整份英文 JSON** 铺满全屏，
@@ -640,6 +691,9 @@ function show(report){
     det.appendChild(detSum);det.appendChild(pre);
     d.appendChild(head);d.appendChild(summary);d.appendChild(hint);d.appendChild(b);d.appendChild(det);
     document.body.appendChild(d);
+    // 修法 ①'：挂出的同一刻就接管「谁来撤掉它」。没有这一句，面板一旦 appendChild 就是终局——
+    // 这正是 issue #1056 的现象：页面早已可用，遮罩永不退场。
+    watchDiagPanel();
   }catch(e){}
 }
 async function run(){
@@ -654,9 +708,14 @@ async function run(){
   try{report.rendered=rendered();report.pendingBoot=pendingBoot()}catch(e){report.rendered='unavailable';report.pendingBoot='unavailable'}
   var ac=new AbortController();var timer=setTimeout(function(){ac.abort()},3000);
   try{var res=await fetch(location.href,{method:'HEAD',cache:'no-store',signal:ac.signal});report.engineHttp=res.status}catch(e){report.engineHttp='ERR'}finally{clearTimeout(timer)}
+  // 修法 ②'：HEAD 最多占 3 秒，而上面那份 report 快照取在 HEAD **之前** —— 页面恰好在这段窗口里
+  // 渲染完时，判定仍按过期快照走，于是已经可用的页面照挂全屏面板（issue #1056）。这里用**同一个**
+  // pendingBoot() 复判一次；已就绪就整段退出，不挂面板。（判定函数只有一份，两处不得各写一套。）
+  if(!pendingBoot())return;
   // 壳侧的 onConsoleMessage 抓这一条（T6 写面：读该前缀 → writeBootDiag(source=page-console, detail=该行））。
   // 必须打印**已折叠的单行**（payload.line），不是原始对象——对象经 console 序列化会多行、字段名也不是
   // 壳侧解析的 k=v 口径，两边形对不上。
+  // 诊断行必须照旧打印（壳侧 grep 依赖它）：面板可以撤，诊断能力不撤（issue #1056 修法边界）。
   try{var pub=publish(report);console.error(pub?pub.line:BOOT_STALL_PREFIX+' dsh-boot-diag source=page-stall pageSideRuntime=unavailable detail=unavailable')}catch(e){}
   show(report);
   // 0.14.1 批 3（S3-23）：**不再**在 9 秒后自动 location.reload。
