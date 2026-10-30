@@ -213,4 +213,40 @@ class OverlayPendingCardTest {
     val net = UpdateManager.UpdateFailures.humanize(java.net.UnknownHostException("example.invalid"))
     assertTrue("网络不可达要说清并给下一步", net.contains("网络"))
   }
+
+  // ── issue #1045：设了 maxLines 就必须设 ellipsize ───────────────────────────
+  //
+  // 缺陷形态：只设 maxLines 不设 ellipsize，超长文本被**硬切**——既没有省略号，
+  // 也看不出还有内容。本文件已有一处正确写法（下拉标题 maxLines=1 + TruncateAt.END），
+  // #1045 点是另外两处漏了：待确认气泡（maxLines=2）与选项描述（maxLines=1）。
+  //
+  // 判据是**源码级**：这种「布局属性配对」在 JVM 单测里拿不到真实 TextView
+  // （unitTests.isReturnDefaultValues = true 把 android.* 打桩成默认值），
+  // 只能钉源码形态，并显式标注它不是行为证据。
+
+  @Test
+  fun `每处 maxLines 都必须配 ellipsize，不得硬切文本`() {
+    val code = codeOnly(source("OverlayPanel.kt"))
+    // 逐块找 "maxLines = N"：同一 apply 块内（到下一个 } 之前）必须出现 ellipsize。
+    val lines = code.lines()
+    val missing = ArrayList<String>()
+    for ((i, line) in lines.withIndex()) {
+      if (!line.contains("maxLines = ")) continue
+      // 向后看 6 行内是否有 ellipsize（同一 apply 块的属性通常紧邻）。
+      val window = (i..minOf(i + 6, lines.lastIndex)).joinToString("\n") { lines[it] }
+      if (!window.contains("ellipsize = ")) missing += (i + 1).toString() + ": " + line.trim()
+    }
+    assertTrue("这些 maxLines 没有配 ellipsize（超长文本会被硬切）: " + missing.joinToString(" | "), missing.isEmpty())
+  }
+
+  @Test
+  fun `修复不得靠删掉 maxLines 来消除硬切`() {
+    // 反向判据：把 maxLines 删掉也能让上一条变绿，但那是**另一种**缺陷
+    // （气泡/描述变成无限高，把面板撑爆）。两处必须仍在。
+    val code = codeOnly(source("OverlayPanel.kt"))
+    assertTrue("待确认气泡必须保留 maxLines = 2", code.contains("maxLines = 2"))
+    assertTrue("选项描述必须保留 maxLines = 1", code.contains("maxLines = 1"))
+    val count = Regex("maxLines = ").findAll(code).count()
+    assertTrue("maxLines 出现次数不得减少（现 " + count + " 处，至少 3 处）", count >= 3)
+  }
 }

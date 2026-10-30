@@ -601,6 +601,9 @@ class OverlayPanel(private val svc: OverlayService) {
     text = label
     textSize = 12f
     maxLines = 2
+    // issue #1045：只设 maxLines 不设 ellipsize ⇒ 超长文本被硬切，既没有省略号也看不出还有内容
+    // （与本文件 235-236 行的既有写法不一致，那处是对的）。
+    ellipsize = android.text.TextUtils.TruncateAt.END
     setTextColor(if (filled || red) Color.WHITE else themeColors().inputText)
     background = GradientDrawable().apply {
       cornerRadius = 14 * dp
@@ -832,6 +835,8 @@ class OverlayPanel(private val svc: OverlayService) {
           textSize = 11f
           setTextColor(subColor)
           maxLines = 1
+          // issue #1045：同上，缺 ellipsize 时描述被硬切。
+          ellipsize = android.text.TextUtils.TruncateAt.END
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = (8 * dp).toInt() })
         box.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
           setMargins(0, 0, 0, (4 * dp).toInt())
