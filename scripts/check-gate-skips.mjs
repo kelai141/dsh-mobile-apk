@@ -410,8 +410,54 @@ const SKIP_LINE_EXEMPT = new Map([
  * 并且**缺口消失也要判红**（登记失效，必须删条目）——「多了少了都红」，
  * 否则基线会变成永久静默，正是 issue #1026 要消灭的东西。
  */
+// ── 规范环境判定（issue #1154）─────────────────────────────────────────────
+//
+// 销账判据（下方「审计基线陈旧检查」）的语义是：**登记过的缺口本次没有复现 -> 可能已修好 -> 删条目**。
+// 但「没复现」有两种截然不同的原因：
+//   1. 缺口真的被修好了（判据执行了、通过了）—— 该销账；
+//   2. 本次环境根本没跑到那条判据（缺快照/缺依赖/缺上游树）—— **不能销账**，那不是证据。
+//
+// 现状把两者都当 1，于是出现倒挂：**本地把环境装齐后反而判红**（缺口「没复现」了），
+// 环境越残缺越容易绿。这会教人「别装齐依赖」，方向完全反了。
+//
+// 处置：给每条基线条目声明它依赖的环境前置（requires）。本次环境不满足该前置时，判定为
+// 「本次未跑到」，打印 NOTE 提示以 CI 为准，**不判红、也不销账**。
+// 环境满足时行为完全不变（没复现 = 真修好了 = 必须删条目）。
+//
+// 注：2026-10-31 的 #1176 已让 check-runtime-assets / check-mcp-client-deps 在 SKIP 分支
+// 打印具名结论行，那两条登记随之删除（更根本的修法）。本判定管的是**剩余登记**的同类倒挂 ——
+// 它们里多数仍以 SKIP 结案且无具名判据行。
+const CANONICAL_ENV_PROBES = {
+  // 快照 tar：CI 上由准备段生成；净检出被 .gitignore 忽略，必然缺席。
+  snapshot: () => existsSync('app/src/main/assets/snapshot.tar.xz')
+    || existsSync(join('.deploy-tmp', 'snapshot-013', 'x86_64', 'snapshot.tar.xz')),
+  // 上游令牌定义面：仅协调仓有。
+  upstreamTree: () => existsSync(join('.deploy-tmp', 'deepseek-harness')),
+  // 根级依赖树：npm ci 之后才在。
+  nodeModules: () => existsSync('node_modules'),
+}
+
+/**
+ * 判定某条审计基线登记本次**是否具备判定环境**（纯函数，--self-test 直接钉）。
+ *
+ * 返回未满足的 requirement 名列表：空数组 = 环境齐备，销账判据生效；非空 = 本次没跑到。
+ * 未声明的 requirement 名字一律视为「不满足」（fail-closed）：拼错一个键不能让判据静默通过。
+ *
+ * @param entry AUDIT_BASELINE 的条目（至少含 requires）
+ * @param probes requirement 名 -> () => boolean 的探测表
+ * @returns {string[]} 未满足的 requirement 名
+ */
+export function unmetRequirements(entry, probes) {
+  const requires = entry?.requires ?? []
+  return requires.filter((k) => {
+    const probe = probes?.[k]
+    return typeof probe !== 'function' || probe() !== true
+  })
+}
+
 const AUDIT_BASELINE = new Map([
   ['check-boot-budget.mjs', {
+    requires: ['snapshot', 'upstreamTree'],
     kinds: ['no-summary', 'no-verdict'],
     reason: '真数据分支打印 SKIP(#1)(real-data) 后不打印 SKIP= 汇总（汇总只在 PASSED/FAILED 分支），也不打印判据行',
     until: '2026-12-31',
@@ -424,6 +470,7 @@ const AUDIT_BASELINE = new Map([
   // 销账倒挂也消失：删登记这个动作在双环境下原本不可能同时成立（本地有快照→缺口不复现，
   // CI 无快照→恒 SKIP），现在两侧都自洽。
   ['check-snapshot-fingerprint.mjs', {
+    requires: ['snapshot'],
     kinds: ['no-verdict'],
     reason: '净检出无 tar 时以 SKIP 结案，不打印 PASS/FAIL 判据行',
     until: '2026-12-31',
@@ -556,6 +603,20 @@ const selfTest = (silent) => {
   t('运行期层：拼接后真正打印出来的行照样认得（夹具 2）',
     isSkipLine(S('SK', 'IP(#1)  本仓无 Android 树')) && isCountedSkipLine(S('SK', 'IP(#1)  本仓无 Android 树')))
   t('静态写点：注释里的 SKIP 不计入', countStaticSkipSites(S('// 这里会打印 ', 'SKIP 行')) === 0)
+
+  // 39-43 issue #1154：销账倒挂 —— 「没复现」必须区分「修好了」与「没跑到」
+  const envAll = { snapshot: () => true, upstreamTree: () => true, nodeModules: () => true }
+  const envNone = { snapshot: () => false, upstreamTree: () => false, nodeModules: () => false }
+  t('#1154 环境齐备 -> 销账判据生效（未满足清单为空）',
+    unmetRequirements({ requires: ['snapshot', 'upstreamTree'] }, envAll).length === 0)
+  t('#1154 环境不满足 -> 判定为本次没跑到（不得销账、不得判红）',
+    unmetRequirements({ requires: ['snapshot', 'upstreamTree'] }, envNone).length === 2)
+  t('#1154 部分满足 -> 只报缺的那几个（不因一部分在场就整体放行）',
+    String(unmetRequirements({ requires: ['snapshot', 'upstreamTree'] }, { ...envAll, snapshot: () => false })) === 'snapshot')
+  t('#1154 未声明的 requirement 名字 fail-closed（拼错不能让判据静默通过）',
+    unmetRequirements({ requires: ['snapshoT'] }, envAll).length === 1)
+  t('#1154 无 requires 的条目行为不变（环境不参与判定，照旧销账）',
+    unmetRequirements({ kinds: ['no-verdict'] }, envNone).length === 0)
   return fails
 }
 
@@ -565,7 +626,7 @@ if (argv.includes('--self-test')) {
     console.error('CHECK-GATE-SKIPS SELF-TEST FAILED（' + stFails.length + ' 项）：' + stFails.join('；'))
     process.exit(1)
   }
-  console.log('CHECK-GATE-SKIPS SELF-TEST PASSED（41 项判别力断言：声明提取 / 执行点扫描 / SKIP 行与计数口径 / 运行期审计六态 / 严格档八态 / 判据行 / 零判据标记 / 静态写点）')
+  console.log('CHECK-GATE-SKIPS SELF-TEST PASSED（46 项判别力断言：声明提取 / 执行点扫描 / SKIP 行与计数口径 / 运行期审计六态 / 严格档八态 / 判据行 / 零判据标记 / 静态写点 / 销账环境前置）')
   process.exit(0)
 }
 
@@ -715,13 +776,30 @@ for (let i = 0; i < gateFiles.length; i += 1) {
 }
 
 // 审计基线陈旧检查（多了少了都红）：登记过的缺口如果这次没复现，说明它已被修好 —— 必须删条目。
+//
+// issue #1154：但「没复现」必须先排除「本次根本没跑到」。环境前置不满足时打 NOTE，
+// 既不判红也不销账 —— 否则会出现「本地装齐依赖反而判红」的倒挂，等于惩罚正确的做法。
+let auditNotRun = 0
 for (const [file, entry] of AUDIT_BASELINE) {
   // --only 模式下只审了一条门禁：其余条目本次根本没跑，不能算「陈旧」。
   if (!gateFiles.includes(file)) continue
   if (entry.hit !== true) {
+    const unmet = unmetRequirements(entry, CANONICAL_ENV_PROBES)
+    if (unmet.length > 0) {
+      // 环境不满足：本次那条判据根本没跑到，缺口的存续与否**无证据**。
+      // 这里绝不能判红（否则环境越完整越红），也不能静默（否则这条销账纪律失效）。
+      auditNotRun += 1
+      console.log('NOTE  审计基线销账: ' + file + '（' + (entry.kinds ?? []).join('/') + '）本次未判定')
+      console.log('      环境不满足规范集（缺 ' + unmet.join(' / ') + '）：该缺口本轮没有跑到，'
+        + '既不判红也不销账。销账判据以 CI 为准。')
+      continue
+    }
     check('审计基线销账: ' + file + '（' + (entry.kinds ?? []).join('/') + '）', false,
       '登记过的缺口本次没有复现（可能已修好）：请删掉 AUDIT_BASELINE 里这一条，别让它变成永久静默')
   }
+}
+if (auditNotRun > 0) {
+  console.log('NOTE  审计基线：' + auditNotRun + ' 条因环境不满足规范集未判定，销账结论以 CI 为准')
 }
 
 // ── 4. 发布链 SKIP=0 ───────────────────────────────────────────────────────
