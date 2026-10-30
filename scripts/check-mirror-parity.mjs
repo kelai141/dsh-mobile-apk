@@ -45,6 +45,13 @@ export function parseSiteMirrors(text) {
 
 export function compare(shell, site) {
   // 顺序即回退优先级，所以这里**不排序**：位置对调算差异。
+// issue #1054：两侧同时解析为空时 `0 === 0 && [].every(...)` 为 true ⇒ vacuous 通过。
+// 空集合不表示「一致」，表示解析器失配（前缀表被改名/改形）。任一侧为空必须判红。
+if (shell.length === 0 || site.length === 0) {
+  console.error('MIRROR-PARITY FAILED：前缀表解析为空（壳侧 ' + shell.length + ' 条，站点 ' + site.length + ' 条）——')
+  console.error('  空集合不等于「一致」：多半是锚点被改名或正则失配。')
+  process.exit(1)
+}
   const ok = shell.length === site.length && shell.every((p, i) => p === site[i])
   const missingInShell = site.filter((p) => !shell.includes(p))
   const extraInShell = shell.filter((p) => !site.includes(p))
