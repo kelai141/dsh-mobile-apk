@@ -261,13 +261,18 @@ export function installCapabilityGate(
       if (persisted.has(group)) continue
       try {
         const fiber = scoped.inject(['tools'], (scopedCtx: unknown) => {
-          const tools = (scopedCtx as { tools?: { restrict?: (filter: { deny: string[] }) => unknown } }).tools
+          const tools = (scopedCtx as { tools?: RestrictableToolsFace }).tools
           if (typeof tools?.restrict !== 'function') return
-          tools.restrict({ deny: [...names] })
+          // **不要**依赖这个回调的返回值/副作用做同步判断：cordis 的回调是异步执行的
+          // （fiber.ts 的 _reload 先 await 一个微任务再执行），返回时掩蔽尚未发生。
+          // 锁表登记照旧无条件进行——它代表「这一组已上锁」，与「本次掩蔽了几个名字」无关。
+          restrictGroupNames(tools, names)
         })
         perAgent.set(group, fiber)
       } catch (error) {
-        // 未知工具名（该组未注册）等 → 该组不掩蔽，保持今天的可见性（fail-open，不静默吞工具）。
+        // 走到这里只剩「真正的失败」（没有作用域注入、restrict 报未知名之外的错误）：
+        // 该组不掩蔽，保持既有可见性（fail-open，不静默吞工具）。**未知工具名不再走这条
+        // 路径**——它在 restrictGroupNames 里按名字分片跳过，绝不会因为一个名字未注册就放弃整组。
         ctx.logger?.warn?.('capability gate: group lock skipped (' + group + '): ' + String((error as Error)?.message ?? error))
       }
     }
@@ -585,3 +590,80 @@ export function createFileUnlockStore(options: {
     },
   }
 }
+
+// ---------------------------------------------------------------------------
+// issue #1030：能力组掩蔽按「已注册的名字」分片
+//
+// 本段刻意放在文件末尾而不是 lockAgent 上方：EXECUTION-MAP 的覆盖账本用行号锚定本文件
+// （`capability-gate.ts:250` 指向 lockAgent 内的一行），在中部插入代码会让锚点内容漂移、
+// 把 code-map 门禁判红。放在末尾即可同时满足「不新增文件」与「锚点不动」。
+// ---------------------------------------------------------------------------
+
+/** 作用域 tools 面：本门禁只用 restrict（引擎 EngineToolRegistry.restrict）。 */
+interface RestrictableToolsFace {
+  restrict?: (filter: { deny: string[] }) => unknown
+}
+
+/**
+ * 引擎「名字未知」判据的识别正则（issue #1030）。
+ *
+ * 为什么按报文识别：引擎只抛 Error，不给错误码。报文形态
+ * `tools.restrict() names unknown global tool "x"; known global tools: …`（多个时 tools 复数），
+ * 见 dsh/packages/core/tools/src/index.ts:1122-1126。这里只认这一个判据，其余错误必须继续上抛——
+ * 否则真正的故障（无作用域、空过滤器、保留名）会被静默吞掉。
+ */
+const UNKNOWN_TOOL_NAME_ERROR = /names unknown global tool/
+
+/** 该错误是否为引擎的「名字未注册」判据（可安全跳过该名字）。 */
+function isUnknownToolNameError(error: unknown): boolean {
+  return error instanceof Error && UNKNOWN_TOOL_NAME_ERROR.test(error.message)
+}
+
+/**
+ * 掩蔽一个能力组，**按「当前确实已注册为全局工具」的名字分片**（issue #1030 的修法本体）。
+ *
+ * 现象：phone 组的 17 个名字分布在两个插件里（dsh-android-manage 14 + 本插件 3）。用户禁用
+ * 或加载失败 manage 后，整组一次性 `restrict({ deny: [...] })` 里有 14 个未注册名字 ->
+ * 引擎整次 throw -> 外层 catch 只 warn -> **整组都不掩蔽**，于是用户从未解锁 phone 组，
+ * android_shell_exec 依然可调用（fail-open）。
+ *
+ * 真因：引擎逐个名字校验，而门禁一次性传整组，两者粒度不一致。
+ *
+ * 修法：整组优先整次尝试；引擎判据命中（报告名字未注册）时，退化为**逐名字先探后用**——
+ * 该名字注册了就单独掩蔽，引擎说未注册就跳过。分片后一个都没剩下 = 该组本来就没东西可
+ * 掩蔽，直接跳过（不需要 throw，也不能 fail-open 掉整组）。
+ *
+ * 为什么「先探后用」是安全的：引擎在名字校验**之后**才创建 layer effect
+ * （dsh/packages/core/tools/src/index.ts:1122-1131），throw 时**不产生任何掩蔽副作用**，
+ * catch 掉即等于「没试过」。相比之下读 `schemas()` 预筛不完全等价于引擎的 restrictableNames：
+ * schemas() 只返回 visible，先前已被掩蔽的名字会被误判成「未注册」（偏严）。逐名字尝试与
+ * 引擎判据逐字对齐，且不依赖任何未公开字段。
+ *
+ * 正常路径（一组名字全部已注册）仍然只有**一次** restrict 调用，掩蔽形态与修前完全一致。
+ *
+ * @param tools 作用域 tools 面。
+ * @param names 该能力组的全部工具名。
+ * @throws 非「名字未注册」的错误（真正的失败必须继续上抛，不得静默 fail-open）。
+ */
+function restrictGroupNames(tools: RestrictableToolsFace, names: readonly string[]): void {
+  const restrict = tools.restrict?.bind(tools)
+  if (restrict === undefined) return
+  try {
+    restrict({ deny: [...names] })
+    return
+  } catch (error) {
+    // 只有「名字未注册」才允许退化；其余错误（无作用域 / 空过滤器 / 保留名）照旧上抛。
+    if (!isUnknownToolNameError(error)) throw error
+  }
+  // 退化路径：逐名字尝试，未注册的跳过。每个名字各是一条掩蔽，但都由**同一个组 fiber** 承载，
+  // 解锁时 fiber.dispose() 一次性全部解除。一个名字都没剩下时循环自然空转——该组本来就没东西
+  // 可掩蔽（兄弟插件缺席/被禁用），这是正常形态：既不必 throw，也不得 fail-open 掉整组。
+  for (const name of names) {
+    try {
+      restrict({ deny: [name] })
+    } catch (error) {
+      if (!isUnknownToolNameError(error)) throw error
+    }
+  }
+}
+
