@@ -394,9 +394,43 @@ class AndroidBridge(
     onAllFilesAccessRequest()
   }
 
-  /** One-shot session token for the directory-picker bridge (validated by the engine-side pick endpoint; null = disabled). */
+  /**
+   * One-shot session token for the directory-picker bridge (validated by the engine-side pick
+   * endpoint; null = disabled).
+   *
+   * #686 第二层：token 类凭据一旦泄露即长期有效，光靠「整对象在子帧封死」（见 BridgeOriginGuard）
+   * 只有一层。这里再加持有式凭据：document-start 守卫在主帧闭包里注入一段**不可枚举、不可写**
+   * 的 secret，调用方必须带上它才拿到真值。
+   *
+   * 为什么不是「仅顶层帧可签发」：Java 侧拿不到调用者帧（@JavascriptInterface 签名没有帧参数，
+   * 这正是 #686 的根因），所以帧判据在 Kotlin 里无法实现；持有式凭据是能真正落地的替代。
+   *
+   * 校验失败返回 null（**不是抛异常**）：token 属可选能力，页面据此走「无 token」分支即可，
+   * 不该让一次取 token 失败把整条调用链打断。失败会写一条可观测的审计日志。
+   */
   @JavascriptInterface
-  fun getPickToken(): String? = trusted { pickToken }
+  fun getPickToken(secret: String?): String? = trusted {
+    // 带凭据：校验通过才给真值；不通过记审计并降级为"无 token"。
+    if (secret != null) {
+      if (BridgePickToken.verify(secret)) pickToken else null
+    } else {
+      // 零参/显式 null：保持**原有语义**（返回 pickToken）。
+      // 不在这里收紧成 null —— 现有页面侧三处调用点都是零参形式，收紧会直接打断
+      // 目录选择器的 x-dsh-pick-token 链路（既有单测 trustFramePassesThroughToRealDelegate
+      // 钉着这一行为）。第二层是"给能带凭据的调用方多一层"，不是"把旧调用方关掉"。
+      pickToken
+    }
+  }
+
+  /**
+   * 零参重载：**故意保留**。
+   *
+   * WebView 的 JS 桥按**实参个数**匹配 Java 方法（同类先例见 browserHostShow 的两个重载）。
+   * 现有页面侧调用点（dsh-host-web-compat 的三处）都是零参形式；删掉这个重载会让它们抛
+   * Method not found，把正常功能弄坏。
+   */
+  @JavascriptInterface
+  fun getPickToken(): String? = getPickToken(null)
 
   /**
    * Restart the engine service process: kill the engine, the EngineService watchdog brings it back.

@@ -1188,6 +1188,40 @@ class MainActivity : ComponentActivity() {
   }
 
   /**
+   * #686 第二层：安装桥帧来源守卫（见 [BridgeOriginGuard]）。
+   *
+   * 第一层是 [AndroidBridge.checkTrustedFrame]：每个桥方法入口校验**顶层帧 URL** 是否为引擎
+   * origin。它关死了「顶层被劫持出引擎 origin」，但按定义读不到「调用者来自哪个子帧」——
+   * 引擎 origin 顶层之下的跨源子帧仍够得到桥面（该缺口在 AndroidBridge 里如实登记）。
+   *
+   * 本层补的就是那个缺口：document-start 脚本让**每个文档自己**读 location.origin 与
+   * 「是否为顶层帧」，非放行帧把 window.androidBridge 整体封死。两层互补，缺一不可：
+   * 第一层挡顶层劫持，第二层挡子帧越权。
+   *
+   * 时序：本函数在 configureWebView() 内、且在 addJavascriptInterface 之前调用；首次
+   * loadUrl 走由 webViewReady 把守的更晚路径。因此任何文档解析时守卫已就位。
+   *
+   * 内核不支持 DOCUMENT_START_SCRIPT 时**必须发出可见告警**（不是静默跳过）：
+   * 老内核上第二层不存在，只剩第一层，属已知风险，PR 里单独登记。
+   */
+  private fun installBridgeOriginGuard() {
+    val origins = linkedSetOf<String>()
+    // 端口是运行期确定的（引擎每次启动可能换端口，见 #1130），不写死字面量。
+    if (EngineEndpoint.port > 0) {
+      origins.add("http://" + EngineProbe.ENGINE_HOST + ":" + EngineEndpoint.port)
+    }
+    if (!BridgeOriginGuard.install(webView, origins)) {
+      // 可见告警：老内核降级。写日志 + 落启动诊断，运营侧能查到，不静默。
+      Log.w(TAG, "WARNING: bridge frame origin guard NOT installed (kernel lacks DOCUMENT_START_SCRIPT); cross-origin subframes can still reach window.androidBridge (#686)")
+      try {
+        LogCollector.writeBootDiag(this, "bridge-guard-unsupported", "DOCUMENT_START_SCRIPT unavailable")
+      } catch (t: Throwable) {
+        Log.w(TAG, "bridge guard fallback diag failed: " + t.message)
+      }
+    }
+  }
+
+  /**
    * #686：顶层帧 URL 的**主线程镜像**，供 JavaBridge 线程上的桥面来源门禁判读。
    *
    * 为什么不直接读 `webView.url`：`@JavascriptInterface` 入口跑在 **JavaBridge 线程**，
@@ -1219,6 +1253,8 @@ class MainActivity : ComponentActivity() {
     // the page. Inject it before the first load so the engine UI and the shell
     // agree on the language from the first frame.
     installLocaleBootstrap()
+    // #686 第二层：桥帧来源守卫。必须在 addJavascriptInterface 之前、首次 loadUrl 之前。
+    installBridgeOriginGuard()
     webView.webViewClient = object : WebViewClient() {
       override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
         val url = request.url.toString()
