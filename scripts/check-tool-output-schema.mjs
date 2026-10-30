@@ -256,10 +256,19 @@ if (!validatorFile) {
   // 故按仓库既有 SKIP 纪律处理：**无 `--require` 的调用者（CI）如实记 SKIP(#1)**，不判红也不假装通过；
   // 本地链与发布链一律带 `--require`（`build-apk-013.ps1` 已接），取不到即判红——SKIP 不构成掩盖。
   if (!argv.includes('--require')) {
+    /* issue #1114 同族：环境缺口必须与「判据不成立」区分开。
+     *
+     * 旧行为是 exit 0 + SKIP=1，在净检出（CI 无 node_modules）上把「本轮没验」说成「通过」。
+     * 三态语义：0 = 通过；1 = 判据不成立（代码坏了）；2 = 环境缺口（本轮未验，不是通过）。
+     * 归到 2 之后，调用方能区分「这条门禁绿了」和「这条门禁压根没跑」。
+     */
     console.log('SKIP(#1) 引擎校验器缺席（净检出无 node_modules）：' + validatorCandidates.map(rel).join('、'))
-    console.log('  → 本地/发布链用 --require 强制真跑（取不到即判红）；SKIP 计数见末行')
-    console.log('SKIP=1')
-    process.exit(0)
+    console.log('  SKIP=1')
+    console.log('  这是**环境缺口**，不是通过：本门禁本轮未做任何校验。exit 2 与「判据不成立」的 exit 1 区分。')
+    console.log('  → 补产物的做法：在 plugins/dsh-android-manage 下 npm install（把 peerDependency '
+      + '@deepseek-ai/dsh-tools 装进来），或用 --engine-tools <path> 直接指到引擎的 dsh-tools。')
+    console.log('  → 发布链带 --require 时该缺口直接判红（exit 1），不会静默放过。')
+    process.exit(2)
   }
   fail('找不到引擎校验器 @deepseek-ai/dsh-tools/lib/index.js（与引擎同一函数，不得自造）\n'
     + '  候选：' + validatorCandidates.map(rel).join('、'))

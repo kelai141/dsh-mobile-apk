@@ -508,7 +508,7 @@ sequenceDiagram
 | K06 | 页面桥 AndroidBridge/MainActivity | 范围写面、外部打开、配置导入导出、来件 intent 的接线点 | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:776 |
 | K06 | 引擎 file-open 插件 | 来件经 POST /api/android/file-incoming 建立强制新会话草稿 | app/src/main/java/com/dsharnessmobile/shell/FileIncoming.kt:332 |
 | K06 | 审计块 ControlAudit | 每条 sh* 写一条 audit.ndjson（result 字段硬编码 ok） | app/src/main/java/com/dsharnessmobile/shell/ShellOps.kt#flush@2eda6fab |
-| K06 | 构建门禁块 | check-bounded-io / check-control-ops / gen-screen-scope-fixture 三条门禁约束本块形态 | scripts/check-bounded-io.mjs:239 |
+| K06 | 构建门禁块 | check-bounded-io / check-control-ops / gen-screen-scope-fixture 三条门禁约束本块形态 | scripts/check-bounded-io.mjs#scanSource@0bc35a00 |
 | K06 | 引擎启动流 EngineStartFlow | 引擎就绪时补投待发来件，闭合冷启动竞态 | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:550 |
 | K07 | ShizukuTransport | 建屏前必须 ensureBound，输入/拉起/SF token 反查全走 runController 的固定 argv | app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:324 |
 | K07 | K06 ScreenScope | `vdInput` 在 bridge 服务面校验目标范围，`VdisplayController.input` 在固定 argv 执行前再次校验；显式 target 直接解析，不得被 selected 覆盖 | plugins/dsh-android-bridge/src/index.ts#resolved@e33053de, app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:608 |
