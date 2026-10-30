@@ -372,11 +372,24 @@ class W3ShellContractTest {
     val pipeline = code.substringAfter("fun processIncomingIntent")
     val reservation = pipeline.indexOf("withIncomingDeliveryAfterSweep(pendingLock, activeDeliveries, { sweepExpired(context) })")
     val enqueue = pipeline.indexOf("enqueuePending(context, target.absolutePath)")
-    // issue #1006：20s 重试已从「IO 单线程内联」搬到独立的 retryDelivery（否则后一个来件要排队
-    // 等满 20s）。所以这里不再找内联的 while，而是断言两件**语义**：
-    //  ① 入口把重试委托给 retryDelivery（重试没有被删掉）；
-    //  ② retryDelivery 自己在整段里持有投递预留计数（finally 归还）——这正是本条契约原本要守的
-    //    「重试期不得释放预留，否则划掉应用会把在途来件删光」。
+    // ── 本条契约在 issue #1006 里被**改写**过，为什么这么改写在这里 ──────────────────
+    //
+    // 改的是哪条：本用例原来断言 `pipeline.indexOf("while (System.currentTimeMillis() < deadline)")`
+    // 的位置，即「20s 重试循环必须在投递预留包装内联地出现」。
+    //
+    // 为什么必须改：#1006 的真因正是「那段 20s 阻塞循环跑在 IO 单线程上」，修法就是把重试搬到
+    // 独立的 retryDelivery / deliveryRetryExecutor。于是「内联出现」这个**实现形态**必然消失——
+    // 断言形态等于断言「缺陷必须还在」，修好了反而红。形态断言测的是写法，不是需求。
+    //
+    // 守的是同一条需求：FX-211.2 要求「从拷贝到投递受理的整段里，投递预留计数（activeDeliveries）
+    // 必须一直被持有」。原文靠「内联 while 在包装体里」间接保证，现在改成直接断言两件语义：
+    //  ① 入口把重试委托给 retryDelivery（重试没有被删掉，否则冷启动补投能力就没了）；
+    //  ② retryDelivery 自己 incrementAndGet → 循环 → finally decrementAndGet（预留跨越整个重试期）。
+    //
+    // 负控（已实测，证明改写后仍守得住需求而不是换了个写法）：把 retryDelivery 的
+    // `finally { activeDeliveries.decrementAndGet() }` 去掉 ⇒ 本条用例红，失败原文：
+    //   java.lang.AssertionError: 投递预留必须在 finally 中归还
+    // 若没有这条负控，这个改写就只是「把断言换个位置」，不能证明它仍然有约束力。
     val retry = pipeline.indexOf("retryDelivery(context, deliveryRetryBudgetMs)")
     val retryBody = memberBody(code, "private fun retryDelivery(")
     val retryInc = retryBody.indexOf("activeDeliveries.incrementAndGet()")

@@ -17,6 +17,22 @@ import org.junit.Test
  *  2) 能纯函数化的判定（isSessionExport / isSessionExportPreflight）直接做行为断言。
  *
  * 每条判据都成对：正向抓住缺陷本体，反向守住「不得靠删功能 / 一律拒绝来变绿」。
+ *
+ * ## 必读：本文件的正控陷阱（踩过一次，会同时制造假绿与假红）
+ *
+ * `EngineEndpoint.port` 在「未 bind 或 generation <= 0」时返回 **0**，而 `isEngineOrigin()` 要求
+ * `uri.port == ENGINE_PORT`。也就是说：**只要不先发布端口，`isEngineOrigin` 在 JVM 里恒为 false**。
+ *
+ * 后果是双向的、而且很隐蔽：
+ *  - 所有 `assertTrue("…必须命中…")` 恒**红**——看起来像功能没做对；
+ *  - 所有 `assertFalse("…不得命中…")` 恒**绿**——看起来像防御到位了，其实根本没测到命中路径。
+ *
+ * 「放行例」类断言（`assertFalse`）占了本文件一半，若不先做正控，它们全是**假绿**：一个连 gate
+ * 都没打开的测试，永远能证明「不该过的东西没过」。所以 `@Before` 里先 `EngineEndpoint` 发布一个
+ * 已知端口，并且**必须**有一条真正命中场景的正控（见「放行例」用例里的 `assertTrue("正控：…")`）
+ * 来证明门是开着的。
+ *
+ * 推广到本仓任何「用运行时端点状态判定命中」的测试：先建立正控，再写反例；否则反例没有证明力。
  */
 class IncomingDeliveryAndExportPreflightTest {
 
@@ -145,5 +161,28 @@ class IncomingDeliveryAndExportPreflightTest {
     assertTrue("重试必须仍然存在（不得靠删掉重试来消除阻塞）", code.contains("flushPending(context)"))
     assertTrue("重试必须仍持有投递预留计数（否则划掉应用会清掉在途来件）",
       Regex("retryDelivery[\\s\\S]{0,500}activeDeliveries\\.incrementAndGet\\(\\)").containsMatchIn(code))
+  }
+
+  /**
+   * FX-211.2 的**常驻负控**：retryDelivery 必须在 finally 里归还投递预留计数。
+   *
+   * 为什么单列一条而不是只在 PR 里贴一次负控：去掉 finally 不会让任何功能立刻坏掉，
+   * 只会在「划掉应用」的竞态里静默丢件——那是最难在真机上复现的一类缺陷。所以把「去掉就必须红」
+   * 这件事固化下来：本用例断言 finally 存在、且 decrementAndGet 在 finally 块内（不是只在 try 尾部）。
+   *
+   * 实测负控：删掉 finally { activeDeliveries.decrementAndGet() } ⇒ 本用例红（见 W3ShellContractTest
+   * 同名契约的注释里记录的失败原文）。
+   */
+  @Test
+  fun `重试必须在 finally 里归还投递预留计数`() {
+    val code = codeOnly(source("FileIncoming.kt"))
+    val retryBody = code.substringAfter("private fun retryDelivery(")
+      .substringBefore("private fun enqueuePending(")
+    val inc = retryBody.indexOf("activeDeliveries.incrementAndGet()")
+    val finallyAt = retryBody.indexOf("finally")
+    val dec = retryBody.indexOf("activeDeliveries.decrementAndGet()")
+    assertTrue("重试必须先持有预留计数", inc >= 0)
+    assertTrue("必须有 finally 块", finallyAt > inc)
+    assertTrue("预留计数必须在 finally 里归还（不是只在 try 尾部）", dec > finallyAt)
   }
 }
