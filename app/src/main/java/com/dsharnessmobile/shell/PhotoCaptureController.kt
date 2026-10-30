@@ -45,20 +45,50 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
   private var deferredReceipt: String? = null
 
   /**
-   * 构造即恢复：MainActivity 的字段初始化就会建出本控制器，而进程死亡后系统把相机结果投给
-   * **新实例**。恢复必须发生在这里（而不是某个 onResume），否则结果可能先于恢复到达。
+   * 恢复时机：**不能**在构造期直接读 activity.cacheDir。
+   *
+   * apk #1151 实测（dev-fast 全新安装，冷启必崩）：
+   *   FATAL EXCEPTION: main
+   *   Caused by: NullPointerException: 'android.content.Context.getCacheDir()' on a null object
+   *     at PhotoCaptureController.pendingStateFile(PhotoCaptureController.kt:55)
+   *     at PhotoCaptureController.<init>(MainActivity.kt:135)
+   * 根因：本类是 MainActivity 的**字段初始化**产物（早于 onCreate），那一刻 Activity 的
+   * base context 尚未 attach，ContextWrapper.getCacheDir() 的 mBase 为 null。
+   *
+   * 但「尽早恢复」这个意图必须保留（issue #1007）：进程死亡后系统把相机结果投给**新实例**，
+   * 恢复若拖到 onResume 就可能晚于结果本身。因此改成：构造期只尝试一次，且**绝不抛**
+   * （上下文没就绪就等到下一次自然入口）；真正的保证由 MainActivity 在 onCreate 里调用
+   * [restoreWhenReady] 给出，那已在 attachBaseContext 之后。
    */
-  init {
-    restorePendingState()
-  }
+  private var restored = false
 
-  private fun pendingStateFile(): File = PhotoCapture.pendingStateFile(activity.cacheDir)
+  private fun pendingStateFile(): File? = runCatching {
+    PhotoCapture.pendingStateFile(activity.cacheDir)
+  }.getOrNull()
+
+  /**
+   * 在 Activity 上下文就绪后调用一次（MainActivity.onCreate）。幂等。
+   *
+   * 构造期若已恢复成功则不再重复（避免把已接上的 pending 再覆盖一遍）。
+   */
+  fun restoreWhenReady() {
+    if (restored) return
+    restored = true
+    runCatching { restorePendingState() }.onFailure {
+      LogCollector.log("dsh-photo", "pending state restore failed: " + (it.message ?: it.javaClass.simpleName))
+    }
+  }
 
   /** 受理时落盘。写失败不影响本次拍照（只是丢了跨进程能力），所以只记日志不抛。 */
   private fun persistPendingState(job: Pending) {
+    val file = pendingStateFile()
+    if (file == null) {
+      LogCollector.log("dsh-photo", "pending state persist skipped: context not ready")
+      return
+    }
     try {
       AtomicFileReplace.writeText(
-        pendingStateFile(),
+        file,
         PhotoCapture.encodePending(job.raw, job.target, System.currentTimeMillis()),
       )
     } catch (t: Throwable) {
@@ -67,8 +97,9 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
   }
 
   private fun clearPendingState() {
+    val file = pendingStateFile() ?: return
     try {
-      pendingStateFile().delete()
+      file.delete()
     } catch (t: Throwable) {
       LogCollector.log("dsh-photo", "pending state clear failed: " + (t.message ?: t.javaClass.simpleName))
     }
@@ -81,7 +112,7 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
    * 第三种必须回一条结构化失败 —— 页面在等 onPhotoCaptured，静默就是原缺陷本身。
    */
   private fun restorePendingState() {
-    val file = pendingStateFile()
+    val file = pendingStateFile() ?: return
     if (!file.isFile) return
     val text = runCatching { file.readText() }.getOrNull()
     val record = text?.let { PhotoCapture.decodePending(it) }

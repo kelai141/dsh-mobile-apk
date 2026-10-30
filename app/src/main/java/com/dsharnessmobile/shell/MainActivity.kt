@@ -544,6 +544,12 @@ class MainActivity : ComponentActivity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    // apk #1151：拍照在途状态的恢复必须在上下文就绪后进行。
+    // PhotoCaptureController 是字段初始化产物（早于 onCreate），那一刻 Activity 的 base
+    // context 尚未 attach，构造期读 activity.cacheDir 会 NPE（dev-fast 全新安装冷启必崩）。
+    // 放到这里既保住了 issue #1007 的「尽早恢复」意图（仍在 onCreate 首段、早于任何相机
+    // 结果回调），也保证 ContextWrapper.mBase 已就位。幂等，重复调用无副作用。
+    photoCaptureController.restoreWhenReady()
     // 本实例的原生视图树是按创建时的界面语言构建的；桥在运行期改语言后靠
     // refreshUiLanguageIfChanged() 在启动页再次出现前重建。
     appliedUiLanguage = AppLanguage.mode(this)
