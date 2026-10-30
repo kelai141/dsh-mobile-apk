@@ -75,6 +75,30 @@ function routeRegistrations(source) {
     const literal = /^(['"])(\/api(?:\/[^'"]*)?)\1$/.exec(pathExpression)
     found.push({ kind: kindMatch[2], pathExpression, literalPath: literal?.[2], head: objectHead, index: start })
   }
+  // issue #1050 ②：register(标识符) 形式此前**完全不在扫描面**（只认对象字面量、且每条注册之间
+  // 以「下一个 register」为界，标识符形态一条都看不见）。上游同名扫描器用 objectLiteralOf 解析
+  // 同文件 const 定义，这里采用同一口径：解析得到对象字面量且带 kind + path 才算路由站点。
+  // 解析不到的一律不算（ctx.tools.register(t) 这类循环变量/工具注册不是 WebRoute）。
+  for (const call of source.matchAll(/\bregister\s*\(\s*([A-Za-z_$][\w$]*)\s*\)/g)) {
+    const name = call[1]
+    const object = objectLiteralOf(source, name)
+    if (object === null) continue
+    const kindMatch = /\bkind\s*:\s*(['"])(exact|prefix)\1/.exec(object)
+    const pathMatch = /\bpath\s*:\s*([^,\n}]+)/.exec(object)
+    const shorthandPath = /(?:^|[,\n])\s*path\s*(?:,|\n|})/.test(object)
+    if (kindMatch === null || (pathMatch === null && !shorthandPath)) continue
+    const pathExpression = pathMatch?.[1].trim() ?? 'path'
+    const literal = /^(['"])(\/api(?:\/[^'"]*)?)\1$/.exec(pathExpression)
+    found.push({
+      kind: kindMatch[2],
+      pathExpression,
+      literalPath: literal?.[2],
+      head: object + '\n' + call[0],
+      index: call.index,
+      viaIdentifier: name,
+    })
+  }
+  found.sort((a, b) => a.index - b.index)
   return found
 }
 
@@ -165,9 +189,17 @@ for (const route of routes) {
     if (hit === undefined) {
       check(id + ' 受保护路由的 guard 在注册块内', false, '未在 ' + registrationSource + ' 定位到该注册的容器块')
     } else {
+      // issue #1050 ①：guard 判据必须是**代码位置**的子串，不是裸 includes——
+      // 一行 '// 令牌校验…tokenMatches(token(), body.token)' 就能让旧判据判绿，而 handler 零鉴权。
+      // 剥离只删文本、不造文本，故最坏结果是误判红，不会把缺失的 guard 判绿。
+      const cleanHead = stripSourceComments(hit.head)
+      const guardPresent = callMarker !== '' && cleanHead.includes(callMarker)
+      const commentOnly = !guardPresent && callMarker !== '' && hit.head.includes(callMarker)
       check(id + ' 受保护路由的 guard 在注册块内',
-        marker !== '' && callMarker !== '' && hit.head.includes(callMarker),
-        (callMarker === '' ? '缺 authCallMarker 声明' : '调用形态不在注册块内: ' + callMarker))
+        marker !== '' && guardPresent,
+        (callMarker === '' ? '缺 authCallMarker 声明'
+          : commentOnly ? '调用形态只出现在注释里（剥注释后不在场）: ' + callMarker
+            : '调用形态不在注册块内（已剥注释）: ' + callMarker))
     }
   } else if (route.access === 'public') {
     const marker = typeof route.publicResponseMarker === 'string' ? route.publicResponseMarker : ''
@@ -659,6 +691,26 @@ if (selfTest) {
   check('self-test: comment/string-like candidate fails closed instead of hiding a route', routeRegistrations(commented).length === 2)
   check('self-test: unlisted source/path would be rejected',
     !registrationSources.has('plugins/new-runtime/src/index.ts') && !routePaths.has('/api/self-test-unlisted'))
+  // #1050 ②：register(标识符) 形式的注册必须在扫描面内（同文件 const 对象字面量可解析）
+  const viaIdentifierSource = [
+    "const LEAK_ROUTE = { kind: 'exact', path: '/api/android/control/leak' }",
+    'webServer.register(LEAK_ROUTE)',
+  ].join('\n')
+  const viaIdentifier = routeRegistrations(viaIdentifierSource)
+  check('self-test(#1050②): register(标识符) 解析到同文件 const 对象字面量',
+    viaIdentifier.length === 1 && viaIdentifier[0].literalPath === '/api/android/control/leak'
+      && viaIdentifier[0].viaIdentifier === 'LEAK_ROUTE' && viaIdentifier[0].kind === 'exact')
+  check('self-test(#1050②): 解析不到的标识符（ctx.tools.register(t) 这类）不算路由站点',
+    routeRegistrations('for (const t of tools()) ctx.tools.register(t)').length === 0
+      && routeRegistrations('ctx.tools.register({ name: "android_ui_dump" })').length === 0)
+  // #1050 ①：guard 判据必须剥注释——注释里那句调用形态不得冒充 handler 内的鉴权
+  const commentedGuardHead = "{ kind: 'exact', path: '/api/x', handler: (req, body) => {\n  // tokenMatches(token(), body.token) 临时下线待观察\n  return ok(body)\n} }"
+  const realGuardHead = "{ kind: 'exact', path: '/api/x', handler: (req, body) => {\n  if (!tokenMatches(token(), body.token)) return denied()\n} }"
+  check('self-test(#1050①): 注释掉的 guard 不算「注册块内 guard」',
+    stripSourceComments(commentedGuardHead).includes('tokenMatches(token(), body.token)') === false
+      && commentedGuardHead.includes('tokenMatches(token(), body.token)') === true)
+  check('self-test(#1050①): 真实 guard 调用仍判在场',
+    stripSourceComments(realGuardHead).includes('tokenMatches(token(), body.token)') === true)
   // D2 上游路由面审计的反证夹具（全部走本段的纯函数，不碰仓库文件）。
   const upstreamFixture = [
     "const ROUTE = { kind: 'exact', path: '/api/upstream-fixture' }",

@@ -1,28 +1,24 @@
 #!/usr/bin/env node
-// check-snapshot-builder-output.mjs — 快照构建器**产出面**结构断言（0.14.1 P0 反回归）。
+// check-snapshot-builder-output.mjs — 快照构建器**产出面**结构断言（0.14.1 P0 反回归；issue #1070）。
 //
 // 【为什么必须存在（2026-09-19 实锤）】
-// 提交 `0849579`（0.14.0 正式轮）对 `scripts/build-snapshot-013.mjs` 做了**纯尾部删除**：
-// 父提交 866 行 → 823 行，删掉的正是「§8 归档」整段（`tar -c --mtime … | xz -T0` 产出
-// `snapshot.tar.xz`、写 `snapshot.sha256`、归档内 LICENSES 自检、A1 出厂声明值对账）。
-// 后果**极其隐蔽**：构建器跑到「瘦身完成」就正常 exit 0，**从不产出 tar**；而
-// `build-apk-013.ps1:160` 只判「该路径的 tar 是否存在」——于是**复用上一次的陈旧快照**照常打包，
-// 全链零报错。本次实测：删改后重跑构建器，`snapshot.tar.xz` 的 mtime 仍停在 9/15，而
-// `.deploy-tmp/snapshot-013/x86_64/stage` 已更新到 9/19 —— 「stage 是新的、产物是旧的」。
-// 铁证是配置面留下了**死键**（`SLIM.reflinkGlobs` / `SLIM.orphanGlobalNodePackages` 无消费者），
+// 提交 0849579（0.14.0 正式轮）对 scripts/build-snapshot-013.mjs 做了**纯尾部删除**：866 行 → 823 行，
+// 删掉的正是「§8 归档」整段（tar -c --mtime … | xz -T0 产出 snapshot.tar.xz、写 snapshot.sha256、
+// 归档内 LICENSES 自检、A1 出厂声明值对账）。后果**极其隐蔽**：构建器跑到「瘦身完成」就正常 exit 0，
+// **从不产出 tar**；而 build-apk-013.ps1:160 只判「该路径的 tar 是否存在」——于是复用上一次的陈旧快照
+// 照常打包，全链零报错（实测：stage 已更新，而 snapshot.tar.xz 的 mtime 仍停在前一轮）。
+// 铁证是配置面留下了**死键**（SLIM.reflinkGlobs / SLIM.orphanGlobalNodePackages 无消费者），
 // 说明被删的不只是归档、还有依赖这些键的两步瘦身。
 //
-// 【本门禁的判据（结构化，非 grep 文本在场）】
-//   1. 产出面构造在场：tar 打包命令、sha256 落盘、归档后自检、A1 对账各自必须是**真实调用**
-//      （对源码做语法级子串定位后，再断言其上游依赖符号在同一文件里可解析）；
-//   2. **配置键消费者闭合**：`scripts/snapshot-config/slim.json` 的每个键都必须在本构建器里被
-//      消费——死键 = 某一步被删/被绕过的确定性证据（本次事故的第一手信号）；
-//   3. 产出与判据同源：构建器写出的 tar 路径，必须与 `build-apk-013.ps1` 读取的路径逐字一致
-//      （否则「构建器写 A、打包链读 B」= 同一类静默假绿）。
+// 【本门禁的判据（结构化，非 grep 文本在场）】三条强化：
+//   1. 产出面构造在场：tar / sha256 / LICENSES 自检 / A1 对账各自必须是**真实调用**（再断言依赖符号可解析）——
+//      needle 只出现在注释里不算在场；只作为「声明了却没人调用」的常量字面量也不算在场（复现 A）；
+//   2. **配置键消费者闭合**：slim.json 每个键都必须在构建器**代码位置**被消费——
+//      注释里提一句 SLIM.treeDelete、或写成字符串 'SLIM.treeDelete'，都不构成消费（复现 B）；
+//   3. 产出与判据同源：构建器写出的 tar 路径必须与 build-apk-013.ps1 读取的路径逐字一致。
 // 本门禁不解析产物内容（那是 elf-check / check-snapshot-secrets 等的事），只锁「产出面是否还在」。
 //
-// 用法：node scripts/check-snapshot-builder-output.mjs [--self-test]
-// 退出码：0 = 通过；1 = 判红；2 = 用法/布局错误。
+// 用法：node scripts/check-snapshot-builder-output.mjs [--self-test]（退出码 0 通过 / 1 判红 / 2 用法错误）
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -30,6 +26,7 @@ import { fileURLToPath } from 'node:url'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = dirname(HERE)
 const argv = process.argv.slice(2)
+const BACKTICK = '\u0060'
 
 const BUILDER = join(ROOT, 'scripts', 'build-snapshot-013.mjs')
 const SLIM = join(ROOT, 'scripts', 'snapshot-config', 'slim.json')
@@ -110,20 +107,23 @@ const REQUIRED = [
   },
 ]
 
+
 function runChecks() {
   if (!existsSync(BUILDER)) { check('构建器在场: scripts/build-snapshot-013.mjs', false); return }
   const text = readFileSync(BUILDER, 'utf8')
-  const lines = text.split('\n')
+  const views = scanText(text)
 
   console.log('== 1. 产出面构造在场（每条都要求依赖符号可解析） ==')
   for (const r of REQUIRED) {
-    const codeLines = lines.filter((l) => l.includes(r.needle) && !/^\s*(\/\/|\*)/.test(l))
-    if (codeLines.length === 0) {
-      // 区分「整段被删」与「只剩注释提到」——两者都判红，但文案不同（事故定性不同）
-      const inComment = text.includes(r.needle)
-      check(r.label, false, inComment
+    const presence = needlePresence(text, r.needle)
+    if (!presence.ok) {
+      // 区分三类：整段被删 / 只剩注释 / 降级成没人调用的常量（事故定性不同）
+      const detail = presence.kind === 'comment-only'
         ? '该构造只剩注释/文档提到，真实调用已不在（' + r.why + '）'
-        : '该构造完全缺席（' + r.why + '）')
+        : presence.kind === 'dead-constant'
+          ? '该构造只剩「声明了却没人调用」的常量字面量（' + presence.detail + '）——真实调用已不在（' + r.why + '）'
+          : '该构造完全缺席（' + r.why + '）'
+      check(r.label, false, detail)
       continue
     }
     const missingDeps = (r.deps ?? []).filter((d) => !text.includes(d))
@@ -141,17 +141,17 @@ function runChecks() {
     }
     if (slim) {
       const keys = Object.keys(slim).filter((k) => !k.startsWith('$'))
-      const dead = keys.filter((k) => !text.includes('SLIM.' + k))
+      const dead = keys.filter((k) => !slimKeyConsumed(views.code, k))
       check('slim.json 全部键都被构建器消费（无死键；死键 = 对应步骤已被删）',
         dead.length === 0,
-        '死键: ' + dead.join(', ') + '（本次 0.14.0 事故的第一手信号就是 reflinkGlobs/orphanGlobalNodePackages 变死键）')
+        '死键: ' + dead.join(', ') + '（0.14.0 事故的第一手信号就是 reflinkGlobs/orphanGlobalNodePackages 变死键；'
+          + '注释或字符串里提到 SLIM.键 不算消费）')
     }
   }
 
   console.log('== 3. 产出路径与打包链读取路径同源 ==')
   // 构建器写出的 tar 相对路径 vs 打包链读取的路径，必须指向同一处。
-  const writesOutDir = /const OUT_DIR = join\(ROOT, '\.deploy-tmp', 'snapshot-013', ABI\)/.test(text)
-  check('构建器 OUT_DIR = .deploy-tmp/snapshot-013/<abi>', writesOutDir,
+  check('构建器 OUT_DIR = .deploy-tmp/snapshot-013/<abi>', /const OUT_DIR = join\(ROOT, '\.deploy-tmp', 'snapshot-013', ABI\)/.test(text),
     'OUT_DIR 形状变更：须同步复核打包链读取路径')
   const writesTar = text.includes("join(OUT_DIR, 'snapshot.tar.xz')")
   check('构建器 tar 落点 = <OUT_DIR>/snapshot.tar.xz', writesTar)
@@ -181,55 +181,192 @@ function runChecks() {
   }
 }
 
-// ── --self-test：反向对照必须判红，正向必须判绿（门禁自身的反假绿）──────────────
+/**
+ * 一次扫描得到三份视图（行号/偏移完全一致，便于按位置判「代码 / 字符串 / 注释」）：
+ *   clean —— 注释换空格，字符串原样；
+ *   code  —— 在 clean 之上把字符串**内容**也换空格（引号保留），用它判「这个 needle 是不是代码」；
+ *   literals —— 每个字符串/模板字面量的 [start, end)。
+ * 逐行剥注释，但**模板字面量允许跨行**（构建器的 wsl()/py 脚本都是多行模板）：反引号状态
+ * 跨行保留，并把模板里的 ${…} 表达式当代码看（否则「变量只在模板里被用」会被误判成
+ * 「没人用的常量」，那会制造假红）。单/双引号不跨行——正则里的引号不该把后文吞成字符串。
+ */
+function scanText(text) {
+  const clean = []
+  const code = []
+  const literals = []
+  let index = 0
+  let inBlock = false
+  let quote = null
+  let literalStart = -1
+  let templateExprDepth = 0
+  while (index < text.length) {
+    const c = text[index]
+    const next = text[index + 1]
+    if (inBlock) {
+      if (c === '*' && next === '/') { inBlock = false; clean.push(' ', ' '); code.push(' ', ' '); index += 2; continue }
+      clean.push(c === '\n' ? '\n' : ' ')
+      code.push(c === '\n' ? '\n' : ' ')
+      index += 1
+      continue
+    }
+    if (quote === BACKTICK && templateExprDepth === 0 && c === '$' && next === '{') {
+      templateExprDepth = 1
+      clean.push(c); clean.push('{'); code.push(c); code.push('{'); index += 2; continue
+    }
+    if (quote !== null && templateExprDepth > 0) {
+      // 模板插值表达式内部：按代码处理（花括号配平后回到字面量文本）。
+      if (c === '{') templateExprDepth += 1
+      else if (c === '}') templateExprDepth -= 1
+      clean.push(c)
+      code.push(c === '\n' ? '\n' : c)
+      index += 1
+      continue
+    }
+    if (quote !== null) {
+      if (c === '\\') { clean.push(c, next ?? ''); code.push(' ', ' '); index += 2; continue }
+      clean.push(c)
+      code.push(c === '\n' ? '\n' : ' ')
+      if (c === quote) { quote = null; literals.push({ start: literalStart, end: index + 1 }) }
+      index += 1
+      continue
+    }
+    if (c === '/' && next === '/') {
+      while (index < text.length && text[index] !== '\n') { clean.push(' '); code.push(' '); index += 1 }
+      continue
+    }
+    if (c === '/' && next === '*') { inBlock = true; clean.push(' ', ' '); code.push(' ', ' '); index += 2; continue }
+    if (c === '"' || c === "'" || c === BACKTICK) {
+      quote = c
+      literalStart = index
+      clean.push(c); code.push(c); index += 1
+      continue
+    }
+    clean.push(c); code.push(c); index += 1
+  }
+  return { clean: clean.join(''), code: code.join(''), literals }
+}
+
+/** 该字面量是不是「const|let|var NAME = <字面量>」的右值？是则返回 NAME，否则 null。 */
+function declaredByAssignment(clean, literalStart) {
+  const before = clean.slice(Math.max(0, literalStart - 400), literalStart)
+  const m = /(?:^|[;{}\n])\s*(?:const|let|var)\s+([\w$]+)\s*(?::[^=\n]*)?=\s*$/.exec(before)
+  return m === null ? null : m[1]
+}
+
+/** 标识符在**代码视图**里出现的次数（声明本身算一次）。 */
+function identifierOccurrences(code, name) {
+  const escaped = name.replace(/[.*+?^$()|[\]\\]/g, '\\$&')
+  const pattern = new RegExp('\\b' + escaped + '\\b', 'g')
+  return [...code.matchAll(pattern)].length
+}
+
+/**
+ * needle 是否以**真实调用形态**在场。
+ * @returns {ok, kind, detail?}
+ *   kind: 'code'           —— 出现在代码位置（最直接的真实调用）
+ *         'called-literal' —— 出现在字面量里，但该字面量处在调用/运算位置（或声明的常量确被用到）
+ *         'comment-only'   —— 原始文本有、剥注释后没了 = 只剩注释提到
+ *         'dead-constant'  —— 只作为「声明了却没人调用」的常量字面量（#1070 复现 A）
+ *         'absent'         —— 完全缺席
+ */
+function needlePresence(rawText, needle) {
+  const { clean, code, literals } = scanText(rawText)
+  if (!clean.includes(needle)) {
+    return { ok: false, kind: rawText.includes(needle) ? 'comment-only' : 'absent' }
+  }
+  const positions = []
+  for (let at = clean.indexOf(needle); at >= 0; at = clean.indexOf(needle, at + 1)) positions.push(at)
+  if (positions.some((at) => code.slice(at, at + needle.length) === needle)) return { ok: true, kind: 'code' }
+  const deadNames = []
+  let calledSomewhere = false
+  for (const at of positions) {
+    const literal = literals.find((l) => at >= l.start && at < l.end)
+    if (literal === undefined) { calledSomewhere = true; continue }
+    const name = declaredByAssignment(clean, literal.start)
+    if (name === null) { calledSomewhere = true; continue }
+    if (identifierOccurrences(code, name) > 1) { calledSomewhere = true; continue }
+    deadNames.push(name)
+  }
+  if (calledSomewhere) return { ok: true, kind: 'called-literal' }
+  return { ok: false, kind: 'dead-constant', detail: [...new Set(deadNames)].join(', ') }
+}
+
+/** slim.json 的某个键是否被**代码位置**消费（注释/字符串里提到不算）。 */
+function slimKeyConsumed(codeText, key) {
+  return codeText.includes('SLIM.' + key)
+}
+
+// ── --self-test：每条判据都钉**双向**（能红 / 能绿）────────────────────────────
+// 旧版这里有一条恒真断言（archiveStillReal === true || archiveStillReal === false），
+// 「本门禁自证能防注释洗白」这个结论曾经是空的（issue #1070 ③）。现在每条都必须是
+// 真断言：造出该形态 -> 判据必须红；真实调用 -> 判据必须绿。
 function selfTest() {
   console.log('== 门禁自证（--self-test） ==')
   const st = []
   const probe = (label, cond) => { st.push([label, cond]); console.log((cond ? 'PASS  ' : 'FAIL  ') + label) }
+  const BT = BACKTICK
+  const join2 = (...parts) => parts.join('')
+  const tarNeedle = 'tar -c --mtime=@'
+  const licNeedle = 'usr/share/LICENSES/'
 
+  // ① needle 判据：真实调用 / 行尾注释 / 块注释 / 降级常量 / 被用到的常量
+  const realCall = join2('wsl(', BT, '  cd x && ', tarNeedle, '${E} usr home/.dsh | xz -6 > a', BT, ')')
+  probe('正向：wsl 多行模板里的 tar 调用判在场', needlePresence(realCall, tarNeedle).ok === true)
+  const lineComment = join2('wsl(', BT, 'x', BT, ') // ', tarNeedle, ' 已下线待观察')
+  probe('反向：行尾注释里的 needle 不算在场', needlePresence(lineComment, tarNeedle).ok === false
+    && needlePresence(lineComment, tarNeedle).kind === 'comment-only')
+  const blockComment = join2('/* ', tarNeedle, ' usr home/.dsh */', '\n', 'process.exit(0)', '\n')
+  probe('反向：块注释里的 needle 不算在场', needlePresence(blockComment, tarNeedle).kind === 'comment-only')
+  const deadConst = join2('const ARCHIVE_CMD = ', BT, 'x && ', tarNeedle, '${E} usr home/.dsh | xz -6 > a', BT, '\n')
+  probe('反向（#1070 复现 A）：降级成「没人调用的常量」不算在场', needlePresence(deadConst, tarNeedle).ok === false
+    && needlePresence(deadConst, tarNeedle).kind === 'dead-constant')
+  const usedConst = join2('const PY = ', BT, 'x ', licNeedle, BT, '\nexecSync(PY)\n')
+  probe('正向：声明后确实被调用的常量字面量算在场', needlePresence(usedConst, licNeedle).ok === true)
+  const unusedConst = join2('const PY = ', BT, 'x ', licNeedle, BT, '\n')
+  probe('反向：同一个字面量声明了却没人调用 ⇒ 不算在场', needlePresence(unusedConst, licNeedle).ok === false)
+  probe('反向：完全缺席判 absent', needlePresence('const x = 1\n', tarNeedle).kind === 'absent')
+
+  // ② 配置键消费：只有代码位置算消费（#1070 复现 B）
+  const codeOf = (src) => scanText(src).code
+  probe('正向：for (const e of SLIM.treeDelete ?? []) 算消费',
+    slimKeyConsumed(codeOf('for (const e of SLIM.treeDelete ?? []) { x(e) }\n'), 'treeDelete') === true)
+  probe('反向：注释里提到 SLIM.treeDelete 不算消费',
+    slimKeyConsumed(codeOf('// SLIM.treeDelete\nconst LEGACY = []\n'), 'treeDelete') === false)
+  probe('反向：写成字符串 SLIM.treeDelete 不算消费',
+    slimKeyConsumed(codeOf(join2('const s = ', "'", 'SLIM.treeDelete', "'", '\n')), 'treeDelete') === false)
+
+  // ③ 当前真实构建器必须全绿（正向对照）
   const text = readFileSync(BUILDER, 'utf8')
-  // ① 正向：当前构建器必须通过全部构造在场判据
-  const missingNow = REQUIRED.filter((r) => !text.split('\n').some((l) => l.includes(r.needle) && !/^\s*(\/\/|\*)/.test(l)))
+  const missingNow = REQUIRED.filter((r) => needlePresence(text, r.needle).ok === false)
   probe('正向对照：当前构建器的产出面构造全部在场（缺=' + missingNow.length + '）', missingNow.length === 0)
+  const slim = JSON.parse(readFileSync(SLIM, 'utf8'))
+  const keys = Object.keys(slim).filter((k) => !k.startsWith('$'))
+  const codeNow = scanText(text).code
+  const deadNow = keys.filter((k) => !slimKeyConsumed(codeNow, k))
+  probe('正向对照：现有 slim 键全部在代码位置被消费（死键=' + deadNow.length + '）', keys.length > 0 && deadNow.length === 0)
 
+  // ④ 尾部删除整段归档后必须判红（0.14.0 事故原形）
+  const cut = text.replace(/\n\/\/ ── 8\. 归档[\s\S]*$/, '\n')
+  const missingAfterCut = REQUIRED.filter((r) => needlePresence(cut, r.needle).ok === false)
+  probe('反向对照：尾部删掉归档段后，产出面判据必须判红（实测缺=' + missingAfterCut.length + '）', missingAfterCut.length >= 4)
+
+  // ⑤ 路径同源判据可红
   const localChain = readFileSync(APK_CHAIN, 'utf8')
   const portableChain = readFileSync(PORTABLE_CHAIN, 'utf8')
   probe('正向对照：两条打包链都将最终快照传给运行时资产门禁',
     localChain.includes(RUNTIME_ASSET_GATE_LOCAL) && portableChain.includes(RUNTIME_ASSET_GATE_PORTABLE))
   probe('反向对照：省略 PowerShell --snapshot 会被门禁自测识别',
-    !localChain.replace(' --snapshot $snapIn', '').includes(RUNTIME_ASSET_GATE_LOCAL))
+    localChain.replace(' --snapshot $snapIn', '').includes(RUNTIME_ASSET_GATE_LOCAL) === false)
   probe('反向对照：省略 portable --snapshot 会被门禁自测识别',
-    !portableChain.replace(RUNTIME_ASSET_GATE_PORTABLE,
-      RUNTIME_ASSET_GATE_PORTABLE.replace(", '--snapshot', snapIn", '')).includes(RUNTIME_ASSET_GATE_PORTABLE))
-
-  // ② 反向：模拟本次事故——尾部删除（把归档段整段砍掉）后判据必须判红
-  const cut = text.replace(/\n\/\/ ── 8\. 归档[\s\S]*$/, '\n')
-  const missingAfterCut = REQUIRED.filter((r) => !cut.split('\n').some((l) => l.includes(r.needle) && !/^\s*(\/\/|\*)/.test(l)))
-  probe('反向对照：尾部删掉归档段后，产出面判据必须判红（实测缺=' + missingAfterCut.length + '）', missingAfterCut.length >= 4)
-
-  // ③ 反向：把构造改成「只剩注释」——不得算作在场（防注释假绿）
-  const commentOnly = text.replace(/log\('归档 snapshot\.tar\.xz…'\)/, "// log('归档 snapshot.tar.xz…')")
-  const archiveStillReal = commentOnly.split('\n').some((l) => l.includes('tar -c --mtime=@') && !/^\s*(\/\/|\*)/.test(l))
-  probe('反向对照：仅注释提到归档不得算构造在场', archiveStillReal === true || archiveStillReal === false) // tar 行未被注释，故仍应在场
-  const onlyCommentProbe = '// tar -c --mtime=@ fake\n'
-  const fakeReal = onlyCommentProbe.split('\n').some((l) => l.includes('tar -c --mtime=@') && !/^\s*(\/\/|\*)/.test(l))
-  probe('反向对照：纯注释行不计入产出面构造（防注释假绿）', fakeReal === false)
-
-  // ④ 死键判据可红：构造一个含死键的 slim 必须被判红
-  const slim = JSON.parse(readFileSync(SLIM, 'utf8'))
-  const keys = Object.keys(slim).filter((k) => !k.startsWith('$'))
-  const fakeDead = keys.filter((k) => !text.includes('SLIM.' + k + '_DELETED'))
-  probe('正向对照：现有 slim 键无死键', keys.length > 0 && keys.every((k) => text.includes('SLIM.' + k)))
-  probe('反向对照：死键判据能把「无消费者」的键判出（用构造键验证）', fakeDead.length === keys.length)
-
-  // ⑤ 路径同源判据可红：篡改 OUT_DIR 形状后必须被识别
+    portableChain.replace(RUNTIME_ASSET_GATE_PORTABLE,
+      RUNTIME_ASSET_GATE_PORTABLE.replace(", '--snapshot', snapIn", '')).includes(RUNTIME_ASSET_GATE_PORTABLE) === false)
   const tampered = text.replace("const OUT_DIR = join(ROOT, '.deploy-tmp', 'snapshot-013', ABI)", "const OUT_DIR = join(ROOT, 'elsewhere', ABI)")
-  const stillSame = /const OUT_DIR = join\(ROOT, '\.deploy-tmp', 'snapshot-013', ABI\)/.test(tampered)
-  probe('反向对照：篡改 OUT_DIR 形状后同源判据必须判红', stillSame === false)
+  probe('反向对照：篡改 OUT_DIR 形状后同源判据必须判红',
+    /const OUT_DIR = join\(ROOT, '\.deploy-tmp', 'snapshot-013', ABI\)/.test(tampered) === false)
 
   const bad = st.filter(([, ok]) => !ok)
   console.log(bad.length === 0
-    ? '\nSNAPSHOT-BUILDER-OUTPUT SELF-TEST PASSED'
+    ? '\nSNAPSHOT-BUILDER-OUTPUT SELF-TEST PASSED（' + st.length + ' 项：needle 四形态 + 配置键消费 + 真实树正反向对照）'
     : '\nSNAPSHOT-BUILDER-OUTPUT SELF-TEST FAILED: ' + bad.map(([l]) => l).join('; '))
   process.exit(bad.length === 0 ? 0 : 1)
 }
