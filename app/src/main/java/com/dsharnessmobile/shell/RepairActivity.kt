@@ -30,6 +30,22 @@ import org.json.JSONObject
  * 缺陷现场：这一页是原生面，绝大多数控件文案是内联中文字面量——切英文后整页仍是中文。
  * 收成一张表，`RepairActivity` 建视图时按当前语言取一份（页面重建即跟随语言）。
  * 只收**界面文案**：引擎/模型名、会话标题、诊断正文都是数据，不在表内。
+ *
+ * ## 本文件有三类中文**故意不译**（不是遗漏）
+ *
+ * 判据：译文只送给**人眼/人耳**——界面文案、无障碍 contentDescription、用户可见的错误与状态。
+ * 送给模型、或作为协议键的字符串保持原样。
+ *
+ * 1. **SYSTEM_PROMPT**（文件末尾常量）：它是**给模型的提示词**，不是给用户看的文案。提示词约束
+ *    模型行为，改语言会改变模型对工具名/字段名的对齐（`read`/`bash`/`restart_engine` 这些标识符
+ *    本身也不翻译），收益为零而风险是行为漂移。
+ * 2. **runAgent("自动读取本轮诊断…") 的入参** 与 **toolTitle() 里的工具名标识符**：前者是喂给模型的
+ *    指令文本，后者是 `read`/`write`/`list`/`bash` 这类**协议键**。键是协议的一部分，译了就
+ *    对不上。工具显示名（"读取文件"/"Read file"）是用户可见的，那部分已经译。
+ * 3. **diagnosticContext() 里的诊断正文回显**（`诊断文件：… 路径=…`）：这是 **tool 载荷**，
+ *    SYSTEM_PROMPT 明确让模型去读这个目录；键名与既有诊断包格式绑定，译了模型对不上字段。
+ *
+ * 新增文案时按这条判据归类：给人看的要双语，给模型或当键用的不译。
  */
 internal data class RepairAssistantCopy(
   val send: String,
@@ -95,7 +111,8 @@ class RepairActivity : Activity() {
   private var history = JSONArray()
   private var eventLog = JSONArray()
   private var currentSessionId: String? = null
-  private var currentTitle = "新的修复"
+  /** 会话标题初值。**用户可见**（会写进会话抽屉的会话列表），所以必须跟随语言。 */
+  private var currentTitle = s("新的修复", "New repair")
   /** 整页文案表（#1011 ①）：建视图时按当前语言取一份，控件一律读它，不再内联中文字面量。 */
   private val copy: RepairAssistantCopy by lazy { repairAssistantCopy(UiText.isEnglish(this)) }
 
@@ -1250,6 +1267,8 @@ class RepairActivity : Activity() {
         lines.append(s("公共目录不可写，本轮诊断保存在上述应用私有目录。\n", "The shared directory is not writable; this run's diagnostics are in the app-private directory above.\n"))
       }
       dir.listFiles()?.filter { it.isFile }?.sortedBy { it.name }?.forEach {
+        // 故意不译：诊断正文是喂给模型的载荷（SYSTEM_PROMPT 让它读这个目录），不是界面文案。
+        // 键名与既有诊断包格式、提示词里的说法保持一致，翻译反而会让模型对不上字段。详见文件头说明。
         lines.append("诊断文件：[${it.name}](${it.toURI()}) 路径=${it.absolutePath}\n")
       }
     }
