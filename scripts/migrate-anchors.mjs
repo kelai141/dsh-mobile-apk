@@ -34,10 +34,46 @@ const argv = process.argv.slice(2)
 // 默认 **dry-run**；必须显式 --write 才落盘。这是硬要求：
 // 迁移会改 1600 条锚点的表示形式，误触一次影响面极大。
 const APPLY = argv.includes('--write') || argv.includes('--apply')
-const JSON_OUT = argv.indexOf('--json') > 0 ? argv[argv.indexOf('--json') + 1] : null
-const ONLY = argv.indexOf('--only') > 0
-  ? new Set(argv[argv.indexOf('--only') + 1].split(',').map((s) => s.trim()).filter(Boolean))
+
+/**
+ * 取带值参数的值（issue #997）。
+ *
+ * 缺陷：旧实现用 `argv.indexOf(name) > 0` 判断「参数在场」。`indexOf` 在参数位于
+ * `argv[0]` 时返回 **0**，而 `0 > 0` 为假 ⇒ 参数被**静默忽略**。于是
+ * `node migrate-anchors.mjs --only SnapshotTransaction.kt`（最自然的写法）退化成
+ * 全量迁移 917 条，而写 `--dry --only ...`（把 --only 顶到第二位）才只迁 8 条——
+ * 安全阀在「最自然的写法」下失效，且没有任何提示。
+ *
+ * 修法：用 `>= 0`，并把「末尾无值」与「值是另一个选项」判成用法错误而非 undefined
+ * 静默透传（旧实现在 `--json` 位于末位时把 undefined 传给 writeFileSync 抛 TypeError）。
+ *
+ * @returns {{present: boolean, value: string|null, error: string|null}}
+ */
+function takeValue(name) {
+  const i = argv.indexOf('--' + name)
+  if (i < 0) return { present: false, value: null, error: null }
+  const v = argv[i + 1]
+  if (v === undefined) return { present: true, value: null, error: '--' + name + ' 需要一个值（不能放在末位）' }
+  if (v.startsWith('--')) return { present: true, value: null, error: '--' + name + ' 需要一个值，但后面跟着选项 ' + v }
+  return { present: true, value: v, error: null }
+}
+
+const JSON_ARG = takeValue('json')
+const ONLY_ARG = takeValue('only')
+const ARG_ERROR = JSON_ARG.error || ONLY_ARG.error
+if (ARG_ERROR) {
+  console.error('参数错误：' + ARG_ERROR)
+  process.exit(2)
+}
+const JSON_OUT = JSON_ARG.value
+const ONLY = ONLY_ARG.present
+  ? new Set(String(ONLY_ARG.value).split(',').map((s) => s.trim()).filter(Boolean))
   : null
+// `--only` 给了空集合（例如 `--only ,`）等价于「什么都不迁」，绝不能退化成全量。
+if (ONLY_ARG.present && ONLY.size === 0) {
+  console.error('参数错误：--only 的值为空（若本意是全量，请直接省略 --only）')
+  process.exit(2)
+}
 
 /**
  * `--only` 的匹配判据（**双向**后缀匹配）。
@@ -172,11 +208,29 @@ if (!APPLY) {
 }
 
 const orig = text
+// issue #1004：基线文件也必须能被回滚。旧实现只回滚 DOC，而 --refresh-anchor-baseline
+// 已经先把 symbols / symbolHashes / legacyReferenceCounts 写进基线了；校验失败时仓库停在
+// 「文档是旧表示、基线是迁移后表示」的红态，且不能自愈——下一次 refresh 自己会被
+// sourceLines 守卫拦住。所以先快照基线的原始字节，任何失败分支都一并还原。
+const BASELINE = join(ROOT, 'scripts/check-code-map-anchor-baseline.json')
+const baselineOrig = existsSync(BASELINE) ? readFileSync(BASELINE, 'utf8') : null
+function rollback(why) {
+  writeFileSync(DOC, orig)
+  if (baselineOrig !== null) writeFileSync(BASELINE, baselineOrig)
+  console.error(why + '，文档与基线均已回滚')
+}
 let out = text, replaced = 0
 for (const [key, target] of rewrites) {
   const esc = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  // 一并吃掉紧跟其后的 #expect=...（迁移后由 @hash 承担同样的判据职责）
-  out = out.replace(new RegExp(esc + '(?:#expect=[^\`\\s)|]*)?', 'g'), () => { replaced += 1; return target })
+  // issue #996：旧正则没有边界，path:N 会命中 path:N-M（行号区间）与 path:NMM，
+  // 把区间尾巴粘到迁移后的哈希后面 -> refresh 报「line content not inside symbol body」
+  // -> 整批回滚，而 dry-run 打印成功。带区间的批次因此永远写不完。
+  //
+  // (?![0-9]) 只禁止紧跟更多数字；(?:-[0-9]+)? 把区间尾巴一并吃掉。
+  // 不连 - 一起禁的原因：区间起点本身也是要迁的锚点（旧实现会拆成两条、一错一对），
+  // 正确语义是「起点迁移 + 整个区间归并到起始行的符号」。
+  const re = new RegExp(esc + '(?![0-9])(?:-[0-9]+)?(?:#expect=[^`\\s)|]*)?', 'g')
+  out = out.replace(re, () => { replaced += 1; return target })
 }
 writeFileSync(DOC, out)
 console.log('')
@@ -185,11 +239,13 @@ const rf = spawnSync('node', ['scripts/check-code-map.mjs', '--refresh-anchor-ba
 process.stdout.write(rf.stdout || '')
 if (rf.status !== 0) {
   process.stderr.write(rf.stderr || '')
-  writeFileSync(DOC, orig)
-  console.error('  refresh 失败，文档已回滚')
+  rollback('  refresh 失败')
   process.exit(1)
 }
 const g = spawnSync('node', ['scripts/check-code-map.mjs'], { cwd: ROOT, encoding: 'utf8' })
 process.stdout.write((g.stdout || '') + (g.stderr || ''))
-if (g.status !== 0) { writeFileSync(DOC, orig); console.error('  校验失败，文档已回滚'); process.exit(1) }
+if (g.status !== 0) {
+  rollback('  校验失败')
+  process.exit(1)
+}
 console.log('  迁移成功，门禁 PASSED')
