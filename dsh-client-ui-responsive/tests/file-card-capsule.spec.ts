@@ -357,6 +357,344 @@ describe('卡片胶囊：行为', () => {
   })
 })
 
+/**
+ * 扫描探针：覆写两个 protected 入口来数「扫了几次 / 扫了多大范围」。
+ *
+ * 生产代码里没有为测试留的可变状态——`cardsIn` 是唯一的卡片查询入口，`scanBatch` 是唯一的
+ * 批量扫描出口，观察点就长在真实的调用链上（不是旁路计数器）。
+ */
+class ProbeCapsule extends FileCardCapsule {
+  /** 每次卡片查询的根：'document' = 全文档扫描。 */
+  readonly roots: string[] = []
+  /** 每一批扫了几张卡片。 */
+  readonly batches: number[] = []
+
+  protected override cardsIn(root: ParentNode): HTMLElement[] {
+    this.roots.push(root === document ? 'document' : root === document.documentElement ? 'documentElement' : 'subtree')
+    return super.cardsIn(root)
+  }
+
+  protected override scanBatch(cards: readonly HTMLElement[]): void {
+    this.batches.push(cards.length)
+    super.scanBatch(cards)
+  }
+
+  /** 只看 attach 之后的区间。 */
+  reset(): void {
+    this.roots.length = 0
+    this.batches.length = 0
+  }
+
+  /** 全文档扫描次数。 */
+  get documentScans(): number {
+    return this.roots.filter(root => root === 'document').length
+  }
+}
+
+/** 连观察器回调与合批微任务一起跑完（比 flush 多等两拍，避免批次没落地就断言）。 */
+async function settle(): Promise<void> {
+  for (let round = 0; round < 4; round += 1) await Promise.resolve()
+}
+
+/** 一条卡片的查询次数：只数真正的卡片选择器，别的 querySelectorAll 不算。 */
+function cardScans(spy: { mock: { calls: unknown[][] } }): number {
+  return spy.mock.calls.filter(call => call[0] === '[data-changed-files]').length
+}
+
+let probe: ProbeCapsule
+
+describe('#985 观察面：合批 + 限定子树', () => {
+  afterEach(() => {
+    probe?.detach()
+  })
+
+  it('流式 token 追加不回扫：整份文档零查询、已知卡片零重扫（反证：旧实现每次全文档扫）', async () => {
+    buildSingleCard('/work/a.md')
+    probe = new ProbeCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
+    probe.attach()
+    await settle()
+    // attach 的那一次全文档扫描是允许的；从这以后不该再出现。
+    expect(probe.documentScans).toBe(1)
+    probe.reset()
+
+    const spy = vi.spyOn(document, 'querySelectorAll')
+    const paragraph = document.createElement('p')
+    document.body.append(paragraph)
+    await settle()
+    probe.reset()
+    // 真实的流式形态：一堆叶子节点（token 文本、行内 span）追加进既有段落。
+    for (let index = 0; index < 30; index += 1) {
+      // 主流式形态：文本节点（markdown 增量）+ 行内元素交替追加。
+      paragraph.append('tok' + index)
+      if (index % 3 === 0) paragraph.append(document.createElement('span'))
+    }
+    await settle()
+
+    expect(cardScans(spy), '流式追加时对整份文档做了卡片查询').toBe(0)
+    expect(probe.documentScans, '无关变更重新扫了整份文档').toBe(0)
+    expect(probe.roots, '无关变更不该产生任何卡片查询').toEqual([])
+    expect(probe.batches, '无关变更不该产生扫描批次').toEqual([])
+    spy.mockRestore()
+  })
+
+  it('无关容器插入时只在那个子树里找卡片，绝不下探整份文档', async () => {
+    buildSingleCard('/work/a.md')
+    probe = new ProbeCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
+    probe.attach()
+    await settle()
+    probe.reset()
+
+    // 新消息外层容器带着一棵与卡片无关的子树一次性插进来（React 一次提交的形状）。
+    const message = document.createElement('div')
+    const body = document.createElement('div')
+    body.append(document.createElement('p'), document.createElement('pre'))
+    message.append(body)
+    document.body.append(message)
+    await settle()
+
+    expect(probe.roots, '查询范围被限制在新增子树里').toEqual(['subtree'])
+    expect(probe.documentScans, '无关容器插入不该升级成全文档扫描').toBe(0)
+    expect(probe.batches, '无关子树里没有卡片，不该产生扫描批次').toEqual([])
+  })
+
+  it('已有卡片内部的变更只重扫那一张卡片，不扫整份文档', async () => {
+    const card = buildMultiCard(['/work/a.md'])
+    probe = new ProbeCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
+    probe.attach()
+    await settle()
+    probe.reset()
+
+    // 流式追加一行：上游会往同一个 ul 里插新的 li。
+    const list = card.querySelector('ul')!
+    const li = document.createElement('li')
+    const anchor = document.createElement('span')
+    const row = document.createElement('button')
+    row.type = 'button'
+    row.setAttribute('aria-describedby', 'late-row')
+    anchor.append(row)
+    const hidden = document.createElement('span')
+    hidden.id = 'late-row'
+    hidden.hidden = true
+    hidden.textContent = '/work/late.md'
+    li.append(anchor, hidden)
+    list.append(li)
+    await settle()
+
+    expect(probe.documentScans, '卡片内部变更不该升级成全文档扫描').toBe(0)
+    // 已知卡片内部变更走「登记这张卡」，不做子树查询，也不碰别的卡。
+    expect(probe.roots, '已知卡片不该再做卡片查询').toEqual([])
+    expect(probe.batches, '只重扫那一张卡片').toEqual([1])
+    expect(document.querySelectorAll(CAPSULE)).toHaveLength(2)
+  })
+
+  it('同一拍的六次变更只换一次扫描（microtask 合批，不逐条放大）', async () => {
+    const card = buildMultiCard(['/work/a.md'])
+    probe = new ProbeCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
+    probe.attach()
+    await settle()
+    probe.reset()
+
+    const list = card.querySelector('ul')!
+    for (let index = 0; index < 6; index += 1) {
+      const li = document.createElement('li')
+      const anchor = document.createElement('span')
+      const row = document.createElement('button')
+      row.type = 'button'
+      row.setAttribute('aria-describedby', 'batch-row-' + index)
+      anchor.append(row)
+      const hidden = document.createElement('span')
+      hidden.id = 'batch-row-' + index
+      hidden.hidden = true
+      hidden.textContent = '/work/batch-' + index + '.md'
+      li.append(anchor, hidden)
+      list.append(li)
+    }
+    await settle()
+
+    // 六条记录、同一张卡：一批、一次扫描。逐条扫会得到六个批次。
+    expect(probe.batches, '六次变更被合成一批').toEqual([1])
+    expect(probe.roots, '已知卡片不再做任何卡片查询').toEqual([])
+    // 合批不得把卡片漏掉：六行全部挂上（原有 1 行 + 新增 6 行）。
+    expect(document.querySelectorAll(CAPSULE)).toHaveLength(7)
+  })
+
+  it('跨两个微任务到达的变更仍然各自成批，但都不做全文档扫描', async () => {
+    const card = buildMultiCard(['/work/a.md'])
+    probe = new ProbeCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
+    probe.attach()
+    await settle()
+    probe.reset()
+
+    const list = card.querySelector('ul')!
+    list.append(document.createElement('li'))
+    // 让观察器投递一次、合批微任务落地，再来一次（React 分两次提交的形态）。
+    await settle()
+    list.append(document.createElement('li'))
+    await settle()
+
+    expect(probe.documentScans).toBe(0)
+    expect(probe.batches.length).toBeGreaterThanOrEqual(1)
+    expect(probe.batches.length).toBeLessThanOrEqual(2)
+    expect(probe.batches.every(count => count === 1), '每次都只扫这张卡').toBe(true)
+  })
+
+  it('放行例：新卡片在两次微任务内挂上胶囊（观察器一拍 + 合批一拍，不多等）', async () => {
+    probe = new ProbeCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
+    probe.attach()
+    await settle()
+    probe.reset()
+
+    buildSingleCard('/work/late.md')
+    // 只给两拍：① 观察器回调投递；② 合批微任务落地。多一拍就说明合批把新卡片拖后了。
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(document.querySelectorAll(CAPSULE), '新卡片没有在一拍内被挂上胶囊').toHaveLength(1)
+  })
+
+  it('放行例：attach 之后插入的新卡片一个 microtask 批次内挂上胶囊', async () => {
+    probe = new ProbeCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
+    probe.attach()
+    await settle()
+    probe.reset()
+
+    buildSingleCard('/work/late.md')
+    await settle()
+    expect(document.querySelectorAll(CAPSULE)).toHaveLength(1)
+    expect(probe.documentScans, '发现新卡片不该靠重扫整份文档').toBe(0)
+  })
+
+  it('放行例：卡片插在深层容器里同样被发现', async () => {
+    probe = new ProbeCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
+    probe.attach()
+    await settle()
+    probe.reset()
+
+    const wrapper = document.createElement('div')
+    const inner = document.createElement('div')
+    const message = document.createElement('article')
+    inner.append(message)
+    wrapper.append(inner)
+    document.body.append(wrapper)
+    // buildSingleCard 自己 append 到 body，这里把它搬进深层容器。
+    const header = buildSingleCard('/work/deep.md')
+    const deepCard = header.closest('[data-changed-files]')!
+    message.append(deepCard)
+    await settle()
+
+    expect(document.querySelectorAll(CAPSULE)).toHaveLength(1)
+    expect(probe.documentScans).toBe(0)
+  })
+
+  it('放行例：迟到的路径 span 会在同一张卡片上补扫出胶囊', async () => {
+    // 上游先挂按钮、下一帧才写 aria-describedby 指向的 hidden span（React 分两次提交）。
+    const card = document.createElement('div')
+    card.setAttribute('data-changed-files', '')
+    card.setAttribute('data-single', '')
+    const header = document.createElement('button')
+    header.type = 'button'
+    card.append(header)
+    document.body.append(card)
+
+    probe = new ProbeCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
+    probe.attach()
+    await settle()
+    expect(document.querySelectorAll(CAPSULE)).toHaveLength(0)
+    probe.reset()
+
+    header.setAttribute('aria-describedby', 'late-path')
+    const hidden = document.createElement('span')
+    hidden.id = 'late-path'
+    hidden.hidden = true
+    hidden.textContent = '/work/late.md'
+    card.append(hidden)
+    await settle()
+
+    expect(document.querySelectorAll(CAPSULE)).toHaveLength(1)
+    expect(probe.documentScans).toBe(0)
+  })
+
+  it('卡片被移除后不留失效引用：后续变更既不扫它也不抛错', async () => {
+    const card = buildMultiCard(['/work/a.md', '/work/b.md'])
+    probe = new ProbeCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
+    probe.attach()
+    await settle()
+    expect(document.querySelectorAll(CAPSULE)).toHaveLength(2)
+
+    card.remove()
+    await settle()
+    probe.reset()
+
+    // 被摘掉的子树内部再变一次（React 卸载清理的常见形状）：目标脱树，必须直接跳过。
+    card.querySelector('ul')!.append(document.createElement('li'))
+    await settle()
+    expect(probe.roots, '脱树的目标仍被扫描（持有失效引用）').toEqual([])
+    expect(probe.batches).toEqual([])
+
+    // 新的卡片照常被发现，且不会把已移除的那张带回来。
+    buildSingleCard('/work/c.md')
+    await settle()
+    expect(probe.batches).toEqual([1])
+    expect(document.querySelectorAll(CAPSULE)).toHaveLength(1)
+  })
+
+  it('detach 之后已排队的合批不再执行（HMR 安全）', async () => {
+    probe = new ProbeCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
+    probe.attach()
+    await settle()
+    probe.reset()
+
+    const card = document.createElement('div')
+    card.setAttribute('data-changed-files', '')
+    card.setAttribute('data-single', '')
+    const header = document.createElement('button')
+    header.type = 'button'
+    header.setAttribute('aria-describedby', 'gone-path')
+    card.append(header)
+    document.body.append(card)
+    // 观察器回调已投递、合批微任务还没跑的时候 detach。
+    await Promise.resolve()
+    probe.detach()
+    await settle()
+
+    expect(probe.batches).toEqual([])
+    expect(document.querySelectorAll(CAPSULE)).toHaveLength(0)
+  })
+
+  it('detach 后立刻 re-attach（HMR）：上一轮排队的批次作废，不落到新一轮头上', async () => {
+    probe = new ProbeCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
+    probe.attach()
+    await settle()
+    probe.reset()
+
+    // 先制造一条变更：观察器回调投递、合批微任务已排队，但还没跑。
+    buildSingleCard('/work/a.md')
+    await Promise.resolve()
+
+    probe.detach()
+    probe.attach()
+    // 新一轮的首次扫描已经跑完，从这里只看旧批次会不会漏进来。
+    probe.reset()
+    await settle()
+
+    expect(probe.batches, '上一轮排队的批次落到了新一轮头上').toEqual([])
+    expect(document.querySelectorAll(CAPSULE), 're-attach 后存量卡片应重新挂上').toHaveLength(1)
+  })
+
+  it('自己挂的胶囊不触发回声重扫', async () => {
+    probe = new ProbeCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
+    probe.attach()
+    await settle()
+    probe.reset()
+
+    buildMultiCard(['/work/a.md', '/work/b.md', '/work/c.md'])
+    await settle()
+
+    // 插入一条记录 → 一批扫描；这三次 append 胶囊自己的三条记录不得再换三次扫描。
+    expect(probe.batches).toEqual([1])
+    expect(document.querySelectorAll(CAPSULE)).toHaveLength(3)
+  })
+})
+
 describe('卡片胶囊：默认模式反向', () => {
   it('otherModeOf 把默认取反', () => {
     expect(otherModeOf('sidebar')).toBe('external')

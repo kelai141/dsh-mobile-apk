@@ -31,6 +31,28 @@ const EXTERNAL_ATTR = 'data-dsh-file-capsule-external'
 const SHARE_ATTR = 'data-dsh-file-capsule-share'
 const SEPARATOR_ATTR = 'data-dsh-file-capsule-separator'
 
+/** 胶囊自身的标记选择器（本模块自产节点的唯一判据，避免手拼方括号）。 */
+const CAPSULE_SELECTOR = '[' + CAPSULE_ATTR + ']'
+
+/**
+ * 这批新增节点是不是**全**为本模块自己挂的胶囊。
+ *
+ * 我们 append 胶囊会立刻产生一条 childList 记录，若不认出来就会「自己叫自己」：
+ * 每挂一条胶囊多换一次重扫。判定按「全为自有」而非「含自有」——含别的东西时仍要处理，
+ * 否则混在一条记录里的真实新增会被吞掉。
+ * @param nodes - 变更记录里的新增节点。
+ * @returns 新增节点非空且逐个都在胶囊内（或本身就是胶囊）。
+ */
+function onlyOwnCapsules(nodes: ArrayLike<Node>): boolean {
+  if (nodes.length === 0) return false
+  for (let index = 0; index < nodes.length; index += 1) {
+    const node = nodes[index]
+    const element = node instanceof Element ? node : node.parentElement
+    if (element === null || element.closest(CAPSULE_SELECTOR) === null) return false
+  }
+  return true
+}
+
 /** 扩展名 → MIME。未知一律空串，交给壳侧嗅探（见 android-bridge.ts 的 openFileExternal 注释）。 */
 const MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
   md: 'text/markdown',
@@ -189,6 +211,23 @@ export interface FileCardCopy {
  *
  * attach 挂 MutationObserver，detach 摘干净（HMR 安全）。卡片由 React 管理，我们只在卡片
  * 末尾追加自己的节点，且不监听 React 的渲染，所以不会和它抢 DOM。
+ *
+ * ## 观察策略（#985）：观察面全文档，扫描范围只到「脏卡片」
+ * 流式输出期间 DOM 每拍都在变，旧实现是「回调直接 scan()，每次对整份文档
+ * querySelectorAll(CARD_SELECTOR) 再逐卡片逐行 querySelector」——代价随
+ * 「历史消息数 × 变更次数」增长。现在分两步：
+ *
+ * 1. **回调只登记**：`onMutations` 在记录本身上做廉价判定（脱树 / 无新增元素 /
+ *    全是本模块自产的胶囊 → 直接跳过），只把「这一拍真正要重扫的卡片」放进待办集合，
+ *    然后 `schedule()` 用 pending 标志 + `queueMicrotask` 合批（写法对齐
+ *    `composer-sheet.ts` 的 `schedulePatch`）。
+ * 2. **扫描范围有界**：变更落在已知卡片内部（流式新增行、迟到补写的路径 span）→ 只重扫
+ *    那张卡片；否则只在这个新增子树里找卡片，绝不下探到整份文档。全文档扫描只剩
+ *    attach 的首次 `scanAll()` 一次。
+ *
+ * 「扫了几次 / 扫了多大范围」由 `cardsIn()` 与 `scanBatch()` 两个 protected 方法承担
+ * （用例覆写它们来计数），生产代码里没有为测试留的可变状态；待办集合每拍清空、detach
+ * 也清空，所以不会长期持有已移除卡片的引用。
  */
 export class FileCardCapsule {
   private observer: MutationObserver | null = null
@@ -198,6 +237,12 @@ export class FileCardCapsule {
   private attached = false
   /** 已被证明没有外部接收方：不再展示左段（避免留一个点了报错的按钮）。 */
   private externalMissing = false
+  /** 这一拍待重扫的卡片（Set 去重：同一张卡被多条记录点到只扫一次）。 */
+  private pending = new Set<HTMLElement>()
+  /** 合批标志：本拍是否已排过一次扫描。 */
+  private batchScheduled = false
+  /** 挂载代次：detach 自增，已排队但属于上一轮的合批任务据此作废（HMR 重装不读旧批次）。 */
+  private generation = 0
 
   /**
    * @param bridge - 桥面提供者；每次动作时调用，以便壳侧晚于插件注入也能生效。
@@ -234,8 +279,9 @@ export class FileCardCapsule {
     if (this.attached) return
     this.attached = true
     try {
-      this.scan()
-      this.observer = new MutationObserver(() => { this.scan() })
+      // 唯一一次全文档扫描：挂载时把存量卡片补齐。
+      this.scanAll()
+      this.observer = new MutationObserver((records) => { this.onMutations(records) })
       this.observer.observe(document.documentElement, { childList: true, subtree: true })
     } catch (error) {
       // 手机运行时守卫：卡片增强失败不能影响对话渲染。
@@ -248,28 +294,110 @@ export class FileCardCapsule {
     this.attached = false
     this.observer?.disconnect()
     this.observer = null
+    // 待办里的卡片引用一并放掉：HMR 重装后不能靠上一轮的脏集合继续扫（也不能长期持有已移除的节点）。
+    this.pending.clear()
+    this.batchScheduled = false
+    this.generation += 1
     for (const capsule of document.querySelectorAll('[' + CAPSULE_ATTR + ']')) capsule.remove()
   }
 
-  /** 给还没挂胶囊的文件行补齐。已经是幂等的：已存在就跳过。 */
-  private scan(): void {
-    for (const card of document.querySelectorAll<HTMLElement>(CARD_SELECTOR)) {
-      const single = card.hasAttribute('data-single')
-      if (single) {
-        // 单文件卡片：上游把 header 包在 FileOpenAnchor 里（div > span > button），
-        // 不是卡片的直接子元素，所以不能写 :scope > button（实机取证：那条恒 NULL）。
-        // 落点用卡片自身——按钮的 parentElement 是 FileOpenAnchor 的 span，挂进去会被
-        // 上游重渲染吞掉，而且胶囊会挤在按钮内部而不是卡片角落。
-        const header = card.querySelector<HTMLElement>('button[aria-describedby]')
-        if (header !== null) this.ensureCapsule(header, card)
-      } else {
-        // 多文件卡片：每行同样是 `li > span(FileOpenAnchor) > button`，按钮不是 li 的
-        // 直接子元素，所以 `li > button` 也匹配不到（实机取证）。按 li 逐个取行内按钮。
-        for (const row of card.querySelectorAll<HTMLElement>('li')) {
-          const anchor = row.querySelector<HTMLElement>('button[aria-describedby]')
-          if (anchor !== null) this.ensureCapsule(anchor, row)
-        }
+  /**
+   * 观察器回调：**只登记、不扫描**。
+   *
+   * 流式输出时这个回调每拍都会被叫到，所以这里只做 O(记录数) 的廉价判定，真正的 DOM 遍历
+   * 延到 `schedule()` 合批之后，且只碰待办里的卡片：
+   * - 记录目标已脱树（卡片被移除 / 整枝被替换）→ 跳过，不留失效引用；
+   * - 记录是本模块自己的回声（目标在胶囊里，或新增的正是我们刚挂的胶囊）→ 跳过；
+   * - 记录落在已知卡片内部（流式新增行、迟到的路径 span）→ 只重扫那一张卡片；
+   * - 其余（新卡片被插入别处）→ 只在**新增子树**里找卡片，绝不下探整份文档。
+   * @param records - 本拍投递的变更记录。
+   */
+  private onMutations(records: readonly MutationRecord[]): void {
+    for (const record of records) {
+      const target = record.target
+      // 目标脱树：卡片/容器已经不在文档里，扫它只会拿到失效引用。
+      if (!(target instanceof Element) || !target.isConnected) continue
+      // 本模块自己产出的节点（胶囊自身，或刚挂上去的那一条）：不重扫，避免自己叫自己。
+      if (target.closest(CAPSULE_SELECTOR) !== null) continue
+      if (onlyOwnCapsules(record.addedNodes)) continue
+      const card = target.closest<HTMLElement>(CARD_SELECTOR)
+      if (card !== null) {
+        this.pending.add(card)
+        continue
       }
+      for (const node of record.addedNodes) {
+        if (!(node instanceof Element)) continue
+        // 装不下卡片的叶子元素（流式输出的每个 token 节点）直接跳过，连子树查询都不做。
+        if (node.childElementCount === 0 && !node.matches(CARD_SELECTOR)) continue
+        // 新卡片可能自带整棵子树（多文件卡片一次插入），也可能只是外层容器。
+        for (const found of this.cardsIn(node)) this.pending.add(found)
+      }
+    }
+    if (this.pending.size > 0) this.schedule()
+  }
+
+  /** 合批：同一拍里的多条记录只换一次扫描（同 composer-sheet 的 schedulePatch 写法）。 */
+  private schedule(): void {
+    if (this.batchScheduled) return
+    this.batchScheduled = true
+    const generation = this.generation
+    queueMicrotask(() => {
+      // 已 detach（或 detach 后又 attach）：这一批属于上一轮，直接作废。
+      if (generation !== this.generation) return
+      this.batchScheduled = false
+      if (!this.attached) return
+      const cards = [...this.pending]
+      this.pending.clear()
+      this.scanBatch(cards)
+    })
+  }
+
+  /**
+   * 在给定根里找卡片。**唯一的卡片查询入口**：全文档扫描与子树扫描都走这里，
+   * 所以「扫了几次、扫了多大范围」是可以用例覆写它来数的量（生产代码里没有为测试留的状态）。
+   * @param root - 查询根：`document`（仅 attach 一次）或变更记录里的新增子树。
+   * @returns 该根里（含根本身）的卡片元素。
+   */
+  protected cardsIn(root: ParentNode): HTMLElement[] {
+    const found: HTMLElement[] = []
+    if (root instanceof Element && root.matches(CARD_SELECTOR)) found.push(root as HTMLElement)
+    for (const card of root.querySelectorAll<HTMLElement>(CARD_SELECTOR)) found.push(card)
+    return found
+  }
+
+  /**
+   * 扫描一批卡片。
+   * @param cards - 待扫卡片；合批期间被移出文档的在扫之前剔掉。
+   */
+  protected scanBatch(cards: readonly HTMLElement[]): void {
+    for (const card of cards) {
+      if (!card.isConnected) continue
+      this.scanCard(card)
+    }
+  }
+
+  /** 全文档扫一次。只在 attach 时发生，不要放回观察器回调里。 */
+  private scanAll(): void {
+    this.scanBatch(this.cardsIn(document))
+  }
+
+  /** 给一张卡片里还没挂胶囊的文件行补齐。已经是幂等的：已存在就跳过。 */
+  private scanCard(card: HTMLElement): void {
+    const single = card.hasAttribute('data-single')
+    if (single) {
+      // 单文件卡片：上游把 header 包在 FileOpenAnchor 里（div > span > button），
+      // 不是卡片的直接子元素，所以不能写 :scope > button（实机取证：那条恒 NULL）。
+      // 落点用卡片自身——按钮的 parentElement 是 FileOpenAnchor 的 span，挂进去会被
+      // 上游重渲染吞掉，而且胶囊会挤在按钮内部而不是卡片角落。
+      const header = card.querySelector<HTMLElement>('button[aria-describedby]')
+      if (header !== null) this.ensureCapsule(header, card)
+      return
+    }
+    // 多文件卡片：每行同样是 `li > span(FileOpenAnchor) > button`，按钮不是 li 的
+    // 直接子元素，所以 `li > button` 也匹配不到（实机取证）。按 li 逐个取行内按钮。
+    for (const row of card.querySelectorAll<HTMLElement>('li')) {
+      const anchor = row.querySelector<HTMLElement>('button[aria-describedby]')
+      if (anchor !== null) this.ensureCapsule(anchor, row)
     }
   }
 
