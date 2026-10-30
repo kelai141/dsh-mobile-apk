@@ -19,7 +19,14 @@ import { fileURLToPath } from 'node:url'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO = dirname(HERE)
 const SCRIPT = join(HERE, 'check-patch-mirror.mjs')
-const PATCHES = ['registry.json', 'apply-patches.mjs', 'README.md']
+// issue #1053：镜像面 = scripts/patches/** 的**全量递归**（不再有白名单），对端夹具因此整树复制。
+const PREVIOUSLY_UNCOVERED = [
+  'mimo-thinking-toggle-056.mjs',
+  'pi-upstream-streaming-020.mjs',
+  'ptc-android-native-A1.mjs',
+  'resolve-engine-patch-target.mjs',
+  'upstream/pi-ai-1.1.0.patch',
+]
 const SCRIPT_ENTRY = 'scripts/build-apk-013.ps1'
 const SELF_ENTRY = 'scripts/check-patch-mirror.mjs'
 const CONFIG_ENTRY = 'scripts/control-ops-pending.json'
@@ -113,10 +120,7 @@ before(() => {
   dirEntry = firstDirEntry()
   peer = mkdtempSync(join(tmpdir(), 'patch-peer-'))
   mkdirSync(join(peer, 'scripts', 'patches'), { recursive: true })
-  for (const f of PATCHES) cpSync(join(REPO, 'scripts', 'patches', f), join(peer, 'scripts', 'patches', f))
-  for (const sub of ['data', 'tests']) {
-    cpSync(join(REPO, 'scripts', 'patches', sub), join(peer, 'scripts', 'patches', sub), { recursive: true })
-  }
+  cpSync(join(REPO, 'scripts', 'patches'), join(peer, 'scripts', 'patches'), { recursive: true })
   for (const rel of [SCRIPT_ENTRY, SELF_ENTRY, CONFIG_ENTRY]) cpSync(join(REPO, rel), join(peer, rel))
   cpSync(join(REPO, dirEntry), join(peer, dirEntry), { recursive: true })
   relax(peer)
@@ -175,10 +179,36 @@ test('负控：patch 漂移必须判红（scripts/patches/** 仍逐字节镜像�
     writeFileSync(target, Buffer.concat([original, Buffer.from('\n# patch drift\n')]))
     const { status, out } = run(['--peer', peer])
     assert.equal(status, 1, out)
-    assert.match(out, /FAIL {2}镜像一致: scripts\/patches\/README\.md/)
+    assert.match(out, /FAIL {2}scripts\/patches\/\*\* 共有文件逐字节一致/)
+    assert.match(out, /内容漂移: \[README\.md\]/)
   } finally {
     writeFileSync(target, original)
   }
+})
+
+// ── issue #1053：此前完全不在比对范围的 5 个文件，现在任改一个都必须判红 ──────────────
+test('#1053 负控：apply-patches.mjs 直接 import 的实现漂移必须判红（旧实现 234/239 之外的 5 个文件）', () => {
+  for (const rel of PREVIOUSLY_UNCOVERED) {
+    const target = join(peer, 'scripts', 'patches', rel)
+    assert.ok(existsSync(target), '对端夹具缺文件: ' + rel)
+    const original = readFileSync(target)
+    try {
+      writeFileSync(target, Buffer.concat([original, Buffer.from('\n// DRIFT\n')]))
+      const { status, out } = run(['--peer', peer])
+      assert.equal(status, 1, rel + ' 漂移未判红:\n' + out)
+      assert.match(out, new RegExp('内容漂移: \\[' + rel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\]'), out)
+    } finally { writeFileSync(target, original) }
+  }
+})
+test('#1053 负控：任一侧多一个补丁文件必须判红（清单双向，不用维护白名单）', () => {
+  const target = join(peer, 'scripts', 'patches', 'ghost-patch-999.mjs')
+  try {
+    writeFileSync(target, 'export const ghost = true\n')
+    const { status, out } = run(['--peer', peer])
+    assert.equal(status, 1, out)
+    assert.match(out, /FAIL {2}scripts\/patches\/\*\* 文件清单一致/)
+    assert.match(out, /对端独有: \[ghost-patch-999\.mjs\]/)
+  } finally { rmSync(target, { force: true }) }
 })
 
 test('负控：plugin 内容漂移必须判红（插件镜像面仍是真判据）', () => {

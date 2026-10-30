@@ -31,6 +31,18 @@
 //   G2b   插件覆盖面取自 `scripts/plugin-dirs.json`（装配集真源），不再硬编码单个 manage：
 //         新插件接入自动获得覆盖面，不依赖有人记得手写；并对 browser_* 补 VARIANTS 夹具。
 //
+// ── issue #1034（覆盖面不再硬编码：三条都是「判据只覆盖写出来的形态」）──────────────────
+//   ① 每工具只跑一组实参。`argsFromSchema` 的注释承诺「填满 required + 每个可选键各出现一次」，
+//      但代码只填 required —— 可选分支**结构性不可达**：一个「填了可选键才多返回未声明键」的
+//      工具永远跑不到那条分支。现在按 schema 派生：required 一组 + 每个可选键各一组（与手写
+//      VARIANTS 并集去重）。真树分支数由 150 涨到 369。
+//   ② 工厂式插件被整插件跳过。旧判据 `/defineTool\(\s*\{/` 只认对象字面量形态，于是 makeTool(...)、
+//      defineTool(常量)、工厂返回数组的插件全被判「非工具插件」——它的工具面（未声明键、缺 render）
+//      一条判据都跑不到。现在认 defineTool|makeTool 的任意调用形态；认不出注册集的插件判红而非跳过。
+//   ③ 跳过是唯一的失效形态，却只在「一个插件都没覆盖」时才响：一个健康兄弟插件即可把整插件跳过
+//      掩成绿色。现在每次跳过都进清单、都必须在 SKIP_ALLOW 登记理由（未登记 = 红），登记了却不再
+//      跳过也是红（stale）。纯函数 accountSkips 由主流程与 --self-test 共用同一份实现。
+//
 // 用法：node scripts/check-tool-output-schema.mjs [--plugin <插件目录>] [--engine-tools <dsh-tools 目录或 lib 文件>]
 //   --plugin/--engine-tools 仅用于反向验证的合成夹具；正常门禁无参运行（遍历装配集）。
 // 退出码：0 = 通过；1 = 契约破坏（拒打包/拒合）。
@@ -47,6 +59,115 @@ const argOf = (name) => { const i = argv.indexOf('--' + name); return i >= 0 ? a
 const rel = (p) => relative(ROOT, p).replace(/\\/g, '/')
 const fail = (msg) => { console.error('CHECK-TOOL-OUTPUT-SCHEMA FAILED：' + msg); process.exit(1) }
 const REQUIRE = argv.includes('--require')
+// ── 纯判定原语（issue #1034：主流程与 --self-test 共用同一份实现，避免自检变成第二份判据）──
+const SAMPLE = { string: 'sample', number: 1, integer: 1, boolean: false, array: [], object: {} }
+const propSample = (prop) => {
+  if (!prop || typeof prop !== 'object') return undefined
+  if (Array.isArray(prop.enum) && prop.enum.length > 0) return prop.enum[0]
+  if ('default' in prop) return prop.default
+  return SAMPLE[prop.type]
+}
+/**
+ * issue #1034 ①：由参数 schema 造实参集合——注释承诺的「填满 required + **每个可选键各出现一次**」
+ * 现在真的成立（旧实现只填 required，可选分支**结构性不可达**，于是「mode==='x' 时才多返回一个
+ * 未声明键」这类缺陷永远跑不到：表外工具永远只跑一组实参）。
+ * @returns `{ base, optional }`：base = 只填 required；optional = 每个可选键各自单独填一次的实参。
+ */
+const argsFromSchema = (schema) => {
+  const props = schema?.properties ?? {}
+  const requiredArray = Array.isArray(schema?.required) ? new Set(schema.required) : new Set()
+  const base = {}
+  const optionalKeys = []
+  for (const [key, prop] of Object.entries(props)) {
+    if (prop?.required || requiredArray.has(key)) base[key] = propSample(prop)
+    else optionalKeys.push(key)
+  }
+  return { base, optional: optionalKeys.map((key) => ({ ...base, [key]: propSample(props[key]) })) }
+}
+/** issue #1034 ②：工具声明形态——直接 defineTool({...})、常量 defineTool(TOOL_DEF)、工厂 makeTool(...)。 */
+const TOOL_SOURCE_PATTERN = /(?:defineTool|makeTool)\s*\(/
+/** 源码级取名的可识别形态（与 TOOL_SOURCE_PATTERN 同一组函数名，避免「认得出插件、取不出名字」的盲区）。 */
+const NAME_DECL_PATTERN = /(?:defineTool|makeTool)\(\s*\{[\s\S]{0,600}?name:\s*(?:'([^']+)'|([A-Za-z_$][\w$]*)(?:\.([A-Za-z_$][\w$]*))?)/g
+
+const SKIP_REASON = {
+  NO_ENTRY: '无 src/index.*（不是插件入口）',
+  NO_TOOL_SOURCE: '源码无 defineTool/makeTool（非工具插件）',
+  NO_APPLY: 'lib 无 apply 导出（非插件入口）',
+  STALE_UNARBITRABLE: '构建产物过期且重建不可裁决',
+}
+
+/**
+ * 允许被跳过的插件清单（每条必须写清「为什么它没有模型面契约可校验」）。
+ * 不在这里的插件一旦被跳过就是判红——防止「新插件的工具面整块不进判据」再一次静默发生。
+ */
+const SKIP_ALLOW = new Map([
+  ['dsh-shell-termux', '终端/快照构建面：src/index.ts 只注册服务与 command 面，不定义模型面工具（无 output.schema 可校验）'],
+  ['dsh-client-ui-responsive', 'WebView 侧 UI 组件与样式表（TS/TSX 渲染层），不定义模型面工具'],
+  ['dsh-host-web-compat', 'WebView 兼容层，没有 src/index.*（不是插件入口）'],
+  ['plugins/dsh-session-delete', '会话删除插件：只注册同源 /api 路由与 UI 槽位，不定义模型面工具'],
+])
+
+/**
+ * issue #1034 ③：跳过账目（纯函数；主流程与 --self-test 共用）。
+ * 两个方向都要响：未登记的跳过（新插件的工具面悄悄不进判据）与过期登记（登记了却不再跳过）。
+ * @param skipped - 本轮实际跳过的 `[{ name, reason }]`。
+ * @param allow - 登记表 `Map<name, reason>`。
+ * @returns 问题描述数组（空 = 账目干净）。
+ */
+const accountSkips = (skipped, allow, { checkStale = true } = {}) => {
+  const out = []
+  const names = new Set(skipped.map((s) => s.name))
+  for (const s of skipped) {
+    if (!allow.has(s.name)) {
+      out.push(s.name + '：跳过未登记（' + s.reason + '）——任何跳过的插件都必须在 SKIP_ALLOW 登记理由；'
+        + '未登记的跳过 = 该插件的工具面整块不进判据')
+    }
+  }
+  for (const key of allow.keys()) {
+    if (!checkStale || names.has(key)) continue
+    out.push(key + '：SKIP_ALLOW 登记了该插件会被跳过，但本轮它没有被跳过（stale：它可能已经是工具插件，'
+      + '请删除登记；或跳过形态变了，请更新理由）')
+  }
+  return out
+}
+
+// ── --self-test：纯函数反向对照（issue #1034 的三条覆盖面判据）──────────────────
+if (argv.includes('--self-test')) {
+  const st = []
+  const eq = (label, ok, detail) => {
+    console.log((ok ? 'PASS  ' : 'FAIL  ') + label + (ok || detail === undefined ? '' : ' -> ' + detail))
+    if (!ok) st.push(label)
+  }
+  // ① 可选键变体：每个可选键各出现一次，required 始终在场
+  {
+    const schema = { type: 'object', properties: { path: { type: 'string' }, mode: { type: 'string' }, all: { type: 'boolean' } }, required: ['path'] }
+    const { base, optional } = argsFromSchema(schema)
+    eq('① base 只填 required（path）', JSON.stringify(base) === JSON.stringify({ path: 'sample' }), JSON.stringify(base))
+    eq('① 每个可选键各出现一次（' + optional.length + ' 组）', optional.length === 2
+      && optional.some((a) => a.mode === 'sample') && optional.some((a) => a.all === false)
+      && optional.every((a) => a.path === 'sample'), JSON.stringify(optional))
+    const onlyRequired = argsFromSchema({ type: 'object', properties: { path: { type: 'string' } }, required: ['path'] })
+    eq('① 无可选键时不造多余分支', onlyRequired.optional.length === 0, JSON.stringify(onlyRequired))
+  }
+  // ② 工厂式插件识别：defineTool({...}) / defineTool(常量) / makeTool(...) 都算工具插件
+  {
+    eq('② defineTool({...}) 识别为工具插件', TOOL_SOURCE_PATTERN.test("const t = defineTool({ name: 'x' })"))
+    eq('② defineTool(常量) 识别为工具插件（旧实现整插件跳过）', TOOL_SOURCE_PATTERN.test('const t = defineTool(DEF)'))
+    eq('② makeTool(...) 工厂识别为工具插件（旧实现整插件跳过）', TOOL_SOURCE_PATTERN.test("const t = makeTool({ name: 'synth_hidden' })"))
+    eq('② 纯服务插件不被误判为工具插件', TOOL_SOURCE_PATTERN.test('export function apply(ctx) { ctx.on("x", () => {}) }') === false)
+    const names = [..."const t = makeTool({ name: 'synth_hidden' })".matchAll(NAME_DECL_PATTERN)].map((m) => m[1])
+    eq('② 工厂形态也能取到工具名', names.includes('synth_hidden'), JSON.stringify(names))
+  }
+  // ③ 跳过账目：未登记跳过 = 红；登记且跳过 = 绿；登记却不跳过 = stale 红
+  {
+    eq('③ 未登记的跳过判红', accountSkips([{ name: 'plugins/x', reason: 'src 无 defineTool/makeTool（非工具插件）' }], new Map()).length === 1)
+    eq('③ 登记且真的跳过 = 绿', accountSkips([{ name: 'a', reason: 'r' }], new Map([['a', 'why']])).length === 0)
+    eq('③ 登记了却没跳过 = stale 红', accountSkips([], new Map([['a', 'why']])).length === 1)
+  }
+  console.log(st.length === 0 ? '\nTOOL-OUTPUT-SCHEMA SELF-TEST PASSED' : '\nTOOL-OUTPUT-SCHEMA SELF-TEST FAILED: ' + st.join('; '))
+  process.exit(st.length === 0 ? 0 : 1)
+}
+
 
 /**
  * 从加载失败里取出**缺席的包名**（宿主环境缺口），非环境缺口返回 null。
@@ -148,23 +269,6 @@ if (typeof validateJsonSchemaValue !== 'function') fail('@deepseek-ai/dsh-tools 
 console.log('校验器: ' + rel(validatorFile))
 
 const problems = []
-const SAMPLE = { string: 'sample', number: 1, integer: 1, boolean: false, array: [], object: {} }
-const propSample = (prop) => {
-  if (!prop || typeof prop !== 'object') return undefined
-  if (Array.isArray(prop.enum) && prop.enum.length > 0) return prop.enum[0]
-  if ('default' in prop) return prop.default
-  return SAMPLE[prop.type]
-}
-/** 由参数 schema 造一个「填满 required + 每个可选键各出现一次」的实参集合。 */
-const argsFromSchema = (schema) => {
-  const props = schema?.properties ?? {}
-  const requiredArray = Array.isArray(schema?.required) ? new Set(schema.required) : null
-  const out = {}
-  for (const [key, prop] of Object.entries(props)) {
-    if (prop?.required || requiredArray?.has(key)) out[key] = propSample(prop)
-  }
-  return out
-}
 const VARIANTS = {
   android_ui_dump: [{}, {}],
   android_ui_detail: [{ all: true }, {}],
@@ -230,6 +334,14 @@ const renderedText = (tool, args, value) => {
 }
 
 /**
+ * issue #1034 ③：「跳过」是这个门禁唯一的失效形态，所以**每一次跳过都必须带理由、并逐条登记**。
+ *
+ * 旧实现只在 `covered === 0`（一个插件都没覆盖）时才响——一个健康兄弟插件就能把「整插件被跳过」
+ * 掩成绿色，跳过本身也不进清单、不留理由。现在：未登记的跳过 = 判红；登记了却不再跳过 = 判红（stale）。
+ * 键是插件相对路径（与日志里的 PASS/SKIP 标签同一口径）。
+ */
+
+/**
  * 跑一个插件：lib/ 时效 + 注册完整性 + 逐工具逐分支整值校验 + G2a 渲染层判据。
  *
  * fixture 用两种 `loadState` 模式各跑一遍：loaded 与 error。G2a-2 靠**同一个工具两次 render 的
@@ -242,9 +354,11 @@ async function drivePlugin(pluginDir, mode) {
   const SRC_DIR = join(pluginDir, 'src')
   const LIB_DIR = join(pluginDir, 'lib')
   const LIB = join(LIB_DIR, 'index.js')
-  const SRC = join(SRC_DIR, 'index.ts')
+  // issue #1034 ②：入口不再只认 src/index.ts —— 纯 JS 插件（如 dsh-session-delete）同样有入口。
+  const SRC_FILES = ['index.ts', 'index.tsx', 'index.mts', 'index.cts', 'index.js', 'index.mjs', 'index.cjs']
+  const SRC = SRC_FILES.map((f) => join(SRC_DIR, f)).find((f) => existsSync(f))
   const local = []
-  if (!existsSync(SRC)) { return { local, tools: [], checked: 0, skip: '无 src/index.ts' } }
+  if (SRC === undefined) { return { local, tools: [], checked: 0, skip: SKIP_REASON.NO_ENTRY } }
   // 非工具插件（无 defineTool）直接略过：它们不产出工具契约，纳入覆盖面只会制造噪声。
   // 判定用**全 src 树**（不止 index.ts）：browser 的 defineTool 在 src/tools.ts。
   const allTs = []
@@ -253,12 +367,15 @@ async function drivePlugin(pluginDir, mode) {
       const full = join(dir, name)
       const st = statSync(full)
       if (st.isDirectory()) { if (name !== 'node_modules' && name !== '.git') walkTs(full); continue }
-      if (name.endsWith('.ts')) allTs.push(full)
+      if (/\.(?:ts|tsx|mts|cts|js|mjs|cjs)$/.test(name)) allTs.push(full)
     }
   }
   try { walkTs(SRC_DIR) } catch { /* 无可读 src */ }
   const srcAll = allTs.map((f) => readFileSync(f, 'utf8')).join('\n')
-  if (!/defineTool\(\s*\{/.test(srcAll)) return { local, tools: [], checked: 0, skip: '源码无 defineTool（非工具插件）' }
+  // issue #1034 ②：不再只认 `defineTool({` 字面量形态。**工厂式插件**（makeTool(...) /
+  // defineTool(变量) / 工厂返回数组）同样是工具插件——旧实现把它们整插件判「非工具插件」跳过，
+  // 于是它的工具面（含未声明键、缺 render）一条判据都跑不到，而一个健康兄弟插件就能掩掉这条假绿。
+  if (!TOOL_SOURCE_PATTERN.test(srcAll)) return { local, tools: [], checked: 0, skip: SKIP_REASON.NO_TOOL_SOURCE }
   if (!existsSync(LIB)) {
     local.push('构建产物缺席：' + rel(LIB) + '（先构建：cd ' + rel(pluginDir) + ' && npm install && npm run build）')
     return { local, tools: [], checked: 0 }
@@ -276,7 +393,7 @@ async function drivePlugin(pluginDir, mode) {
         + rel(pluginDir) + ' && npm run build）')
       return { local, tools: [], checked: 0 }
     } else {
-      return { local, tools: [], checked: 0, skip: '构建产物过期（' + trigger.s.file + ' 比 lib/' + trigger.l.file + ' 新）且重建不可裁决：' + arb.detail + '——本插件本轮不判' }
+      return { local, tools: [], checked: 0, skip: SKIP_REASON.STALE_UNARBITRABLE + '（' + trigger.s.file + ' 比 lib/' + trigger.l.file + ' 新）：' + arb.detail + '——本插件本轮不判' }
     }
   }
 
@@ -364,7 +481,7 @@ async function drivePlugin(pluginDir, mode) {
   }
   if (typeof moduleSpec.apply !== 'function') {
     // 无 apply 导出 = 该包不是插件入口（例如纯库/注入层）；如实 SKIP，不判红也不假装通过。
-    return { local, tools: [], checked: 0, skip: 'lib 无 apply 导出（非插件入口）' }
+    return { local, tools: [], checked: 0, skip: SKIP_REASON.NO_APPLY }
   }
   try {
     await moduleSpec.apply(ctx)
@@ -391,7 +508,7 @@ async function drivePlugin(pluginDir, mode) {
     if (!nameConsts.has(m[1])) nameConsts.set(m[1], m[2])
   }
   const declared = new Set()
-  for (const m of srcAll.matchAll(/defineTool\(\s*\{[\s\S]{0,600}?name:\s*(?:'([^']+)'|([A-Za-z_$][\w$]*)(?:\.([A-Za-z_$][\w$]*))?)/g)) {
+  for (const m of srcAll.matchAll(NAME_DECL_PATTERN)) {
     if (m[1] !== undefined) { declared.add(m[1]); continue }
     if (m[3] !== undefined) {
       const viaMap = nameMaps.get(m[2])?.get(m[3])
@@ -436,8 +553,16 @@ async function drivePlugin(pluginDir, mode) {
     if (typeof tool.output.render !== 'function') {
       local.push(tool.name + '：未声明 render（G2a-1）——工具结果无从传达给模型')
     }
-    const base = argsFromSchema(tool.parameters)
-    const variants = (VARIANTS[tool.name] ?? [{}]).map((v) => ({ ...base, ...v }))
+    // issue #1034 ①：schema 派生组（required 一组 + 每个可选键各一组）∪ 手写 VARIANTS，按实参去重。
+    const { base, optional } = argsFromSchema(tool.parameters)
+    const seenArgs = new Set()
+    const variants = [{ ...base }, ...optional, ...(VARIANTS[tool.name] ?? [{}]).map((v) => ({ ...base, ...v }))]
+      .filter((args) => {
+        const key = JSON.stringify(args)
+        if (seenArgs.has(key)) return false
+        seenArgs.add(key)
+        return true
+      })
     let i = 0
     for (const args of variants) {
       i += 1
@@ -535,7 +660,7 @@ for (const dir of pluginDirs) {
       problems.push(name + '：' + r.envGap + ' —— --require 下环境缺口判红（先按 docs/AGENTS/build-and-env.md 装齐 peer 依赖）')
       continue
     }
-    skipped.push(name + ': ' + r.envGap)
+    skipped.push({ name, reason: r.envGap })
     console.log('SKIP(#' + skipped.length + ') ' + name + '（' + r.envGap + '）')
     continue
   }
@@ -546,19 +671,31 @@ for (const dir of pluginDirs) {
     // 同一行），本轮实测被判红。现改为带行内计数器。
     // 注意：本注释不得再逐字包含那条旧文案，否则会被该门禁的静态扫描当成真的发射行
     // （本轮亲自踩过——注释里复述缺陷形态，正是这个门禁自伤的形态）。
-    skipped.push(name + ': ' + r.skip)
-    console.log('SKIP(#' + skipped.length + ') ' + name + '（' + r.skip + '）')
+    // issue #1034 ③：跳过必须**显式登记**（SKIP_ALLOW）。未登记的跳过 = 判红——旧实现只在
+    // covered === 0 时才发现「一个插件都没覆盖」，于是一个健康兄弟插件就能把「整插件被跳过」
+    // 掩成绿色（跳过本身不进清单、不留理由）。
+    // issue #1034 ③：跳过必须进清单并**显式登记**（SKIP_ALLOW）。账目（未登记 / 过期登记）由
+    // accountSkips 统一判——旧实现只在 covered === 0 时才发现「一个插件都没覆盖」，于是一个健康
+    // 兄弟插件就能把「整插件被跳过」掩成绿色（跳过本身不进清单、不留理由）。
+    skipped.push({ name, reason: r.skip })
+    const allowed = SKIP_ALLOW.get(name)
+    console.log('SKIP(#' + skipped.length + ') ' + name + '（' + r.skip + '）'
+      + (allowed === undefined ? '未登记：该插件的工具面不进判据' : '登记理由：' + allowed))
     continue
   }
   for (const p of r.local) problems.push(name + '：' + p)
   totalChecked += r.checked
   covered += 1
-  console.log('PASS  ' + name + '：注册 ' + r.tools.length + ' 个工具，校验 ' + r.checked + ' 个分支（整值 + 渲染层）')
+  // issue #1034 附带修正：有 local 问题就不再打印 PASS（此前会出现「先 PASS 后 FAILED」的日志）。
+  console.log((r.local.length === 0 ? 'PASS  ' : 'FAIL  ') + name + '：注册 ' + r.tools.length
+    + ' 个工具，校验 ' + r.checked + ' 个分支（整值 + 渲染层）')
   const cmp = await compareStates(dir)
   for (const p of cmp.out) problems.push(name + '：' + p)
   totalChecked += cmp.loadedChecked + cmp.errorChecked
 }
-if (covered === 0) fail('装配集内没有任何插件被覆盖（G2b 覆盖面失效）')
+// 覆盖面兜底。不再 fail() 提前退出：先退出会把「跳过未登记」等已经收集到的问题一起吞掉
+// （issue #1034 ③ 的账目在结尾统一结算，这里只记一条问题，让失败汇总说全）。
+if (covered === 0) problems.push('装配集内没有任何插件被覆盖（G2b 覆盖面失效）')
 
 // ── 插件侧深度测试（存在即跑；全 skip = 假绿）────────────────────────────────
 for (const dir of pluginDirs) {
@@ -580,7 +717,16 @@ for (const dir of pluginDirs) {
 }
 
 console.log('运行时校验分支数: ' + totalChecked + '（覆盖插件 ' + covered + ' 个，SKIP ' + skipped.length + ' 个）')
-if (skipped.length > 0) skipped.forEach((s, i) => console.log('SKIP(#' + (i + 1) + ') ' + s))
+// 跳过清单（每条都带 reason；不再重复打印 SKIP(#n)，避免同一 SKIP 在同一份日志里出现两遍）
+if (skipped.length > 0) {
+  console.log('跳过清单（每条都已登记理由）:')
+  for (const s of skipped) console.log('  - ' + s.name + '：' + s.reason)
+}
+// issue #1034 ③：跳过账目——未登记的跳过（新插件的工具面不进判据）与过期登记（登记了却不再跳过）
+// 两端都要响。判据实现在 accountSkips 里（与 --self-test 共用同一份）。
+// stale 方向只在跑**真实装配集**时判：--plugin 合成夹具里其余插件根本不在遍历集合中，
+// 把它们算成「登记了却没跳过」只会制造噪声（夹具不是装配集事实）。
+for (const p of accountSkips(skipped, SKIP_ALLOW, { checkStale: pluginArg === undefined })) problems.push(p)
 console.log('SKIP=' + skipped.length)
 if (problems.length > 0) {
   console.error('CHECK-TOOL-OUTPUT-SCHEMA FAILED（' + problems.length + ' 项）：')
