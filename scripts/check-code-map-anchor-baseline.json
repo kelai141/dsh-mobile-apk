@@ -19,9 +19,9 @@
     "ForegroundPageRecoveryWiringTest.kt:47": 1,
     "SnapshotTransaction.kt:190": 1,
     "EngineManager.kt:238": 1,
-    "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:423": 2,
+    "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:431": 2,
     "app/src/test/java/com/dsharnessmobile/shell/BrowserHostNavigationPolicyTest.kt:129": 1,
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:815": 2,
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:820": 2,
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:84": 2,
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:60": 1,
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:322": 2,
@@ -43,7 +43,7 @@
     "scripts/verify-vdisplay-float.mjs:95": 4,
     "scripts/verify-browser-panel.mjs:123": 3,
     "plugins/dsh-android-file-open/src/index.ts:43": 1,
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:605": 1,
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:610": 1,
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:193": 1,
     "app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:299": 1,
     "app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:274": 1,
@@ -55,7 +55,7 @@
     "scripts/build-apk-013.ps1:166": 3,
     "plugins/dsh-android-vdisplay/test/tools-callable.test.mjs:122": 3,
     "scripts/build-apk-013.ps1:141": 3,
-    "MainActivity.kt:605": 1,
+    "MainActivity.kt:610": 1,
     "GuidePageRenderer.kt:363": 1,
     "EngineStartFlow.kt:96": 1,
     "MainActivity.kt:422": 1,
@@ -64,16 +64,16 @@
     "MainActivity.kt:78": 1,
     "EngineStartFlow.kt:427": 1,
     "MainActivity.kt:191": 1,
-    "MainActivity.kt:850": 3,
+    "MainActivity.kt:855": 3,
     "ARCHITECTURE.md:15": 1,
-    "MainActivity.kt:812": 1,
-    "MainActivity.kt:544": 1,
+    "MainActivity.kt:817": 1,
+    "MainActivity.kt:549": 1,
     "docs/AGENTS/ARCHITECTURE.md:12": 2,
     "docs/AGENTS/ARCHITECTURE.md:15": 2,
     "WebUiChrome.kt:37": 2,
     "LogCollector.kt:458": 1,
-    "MainActivity.kt:569": 1,
-    "MainActivity.kt:822": 1,
+    "MainActivity.kt:574": 1,
+    "MainActivity.kt:827": 1,
     "EngineService.kt:129": 1,
     "WatchdogV2.kt:146": 1,
     "WatchdogV2.kt:96": 1,
@@ -88,7 +88,7 @@
     "app/src/main/java/com/dsharnessmobile/shell/SnapshotTransaction.kt:283": 1,
     "EngineStartFlow.kt:497": 1,
     "app/src/main/java/com/dsharnessmobile/shell/SnapshotExtractor.kt:81": 1,
-    "AndroidBridge.kt:423": 2,
+    "AndroidBridge.kt:431": 2,
     "app/build.gradle.kts:126": 2,
     "BrowserHostNavigationPolicyTest.kt:129": 2,
     "ControlAudit.kt:34": 2,
@@ -97,7 +97,7 @@
     "protocol-v2.ts:235": 2,
     "ControlProtocolV2.kt:21": 2,
     "BackGate.kt:16": 2,
-    "MainActivity.kt:502": 2,
+    "MainActivity.kt:507": 2,
     "MuxClient.kt:45": 2,
     "DeviceControlService.kt:678": 2,
     "index.ts:991": 3,
@@ -123,8 +123,8 @@
     "index.ts:368": 1,
     "index.ts:949": 3,
     "ShizukuUserService.kt:207": 1,
-    "MainActivity.kt:1054": 1,
-    "MainActivity.kt:1076": 1,
+    "MainActivity.kt:1059": 1,
+    "MainActivity.kt:1081": 1,
     "ShizukuUserService.kt:30": 2,
     "ShizukuTransport.kt:821": 2,
     "DeviceControlService.kt:703": 2,
@@ -135,8 +135,8 @@
     "VdisplayController.kt:84": 2,
     "dsh-client-ui-responsive/src/client/mobile/native-browser-adapter.ts:203": 1,
     "browser-tab.tsx:54": 1,
-    "MainActivity.kt:565": 1,
-    "MainActivity.kt:815": 1,
+    "MainActivity.kt:570": 1,
+    "MainActivity.kt:820": 1,
     "BrowserHostNavigationPolicy.kt:87": 1,
     "docs/AGENTS/ARCHITECTURE.md:18": 2,
     "dsh-client-ui-responsive/src/client/mobile/native-browser-presentation.ts:20": 2,
@@ -174,7 +174,7 @@
     "NotifyDecisionQueue.kt:194": 2,
     "NotifyActionReceiver.kt:89": 2,
     "LogCollector.kt:785": 2,
-    "MainActivity.kt:1167": 2,
+    "MainActivity.kt:1172": 2,
     "NotificationContractTest.kt:206": 2,
     "NotifyDecisionQueue.kt:323": 2,
     "NotifyDecisionQueue.kt:310": 2,
@@ -331,7 +331,7 @@
     "tools.ts:73": 2,
     "plugins/dsh-android-vdisplay/src/client/index.ts:83": 2,
     "AndroidBridge.kt:325": 2,
-    "MainActivity.kt:784": 2,
+    "MainActivity.kt:789": 2,
     "dsh-client-ui-responsive/src/client/android-bridge.ts:82": 2,
     "app/src/main/java/com/dsharnessmobile/shell/FileIncoming.kt:35": 2,
     "plugins/dsh-android-file-open/src/index.ts:238": 3,
@@ -371,7 +371,7 @@
     ".github/workflows/pr-gate.yml:41": 3,
     "scripts/check-runtime-assets.mjs:96": 3,
     "VdisplayController.kt:753": 2,
-    "MainActivity.kt:788": 2,
+    "MainActivity.kt:793": 2,
     "verify-state-sync.mjs:248": 2,
     "verify-webview-015.mjs:3": 2,
     "scripts/verify-vdisplay-viewer.mjs:2": 2,
@@ -389,15 +389,15 @@
     "app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:408": 1,
     "app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:700": 1,
     "app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:207": 1,
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:812": 1,
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:817": 1,
     "app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:670": 1,
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1113": 1,
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1118": 1,
     "app/src/main/java/com/dsharnessmobile/shell/WebUiChrome.kt:19": 1,
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:205": 1,
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:391": 1,
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:296": 2,
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:137": 1,
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:667": 1,
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:672": 1,
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:266": 1,
     "app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:294": 1,
     "app/src/main/java/com/dsharnessmobile/shell/ApkUpdateAction.kt:245": 1,
@@ -429,7 +429,7 @@
     "EngineManager.kt:790": 1,
     "MainActivity.kt:354": 1,
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:160": 1,
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:719": 1,
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:724": 1,
     "app/src/main/java/com/dsharnessmobile/shell/ControlCarrier.kt:110": 1,
     "plugins/dsh-android-bridge/src/control-queue.ts:347": 2,
     "app/src/main/java/com/dsharnessmobile/shell/UndoGate.kt:278": 1,
@@ -443,7 +443,7 @@
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:852": 1,
     "app/src/main/java/com/dsharnessmobile/shell/ControlCarrier.kt:107": 1,
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:661": 1,
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:771": 1,
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:776": 1,
     "app/src/main/java/com/dsharnessmobile/shell/FileIncoming.kt:332": 1,
     "scripts/check-bounded-io.mjs:239": 1,
     "app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:550": 1,
@@ -495,9 +495,9 @@
     "scripts/profile-web.cordis.patch.yml:81": 1,
     "plugins/dsh-android-linux-env/src/runtime-cache.ts:40": 1,
     "dsh-client-ui-responsive/src/client/android-bridge.ts:17": 1,
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:923": 1,
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:928": 1,
     "app/src/main/java/com/dsharnessmobile/shell/BackGate.kt:38": 1,
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1030": 1,
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1035": 1,
     "plugins/dsh-android-file-open/src/index.ts:527": 4,
     "dsh-client-ui-responsive/src/client/dev-section/runtime-cache.tsx:91": 1,
     "dsh-shell-termux/src/index.ts:39": 1,
@@ -547,7 +547,7 @@
     "docs/AGENTS/emulator-test-protocol.md:57": 2,
     "app/src/main/java/com/dsharnessmobile/shell/ApkUpdateAction.kt:228": 1,
     "GuidePageRenderer.kt:781": 1,
-    "AndroidBridge.kt:611": 1,
+    "AndroidBridge.kt:619": 1,
     "UpdateCheckerTest.kt:393": 1,
     "ApkUpdateAction.kt:261": 1,
     "UpdateCheckerTest.kt:364": 1,
@@ -556,7 +556,7 @@
     "MainActivity.kt:475": 1,
     "EngineStartFlow.kt:1150": 1,
     "UpdateCheckerTest.kt:426": 1,
-    "MainActivity.kt:719": 1,
+    "MainActivity.kt:724": 1,
     "BackGate.kt:132": 1,
     "DeviceControlService.kt:452": 1,
     "EngineProbe.kt:51": 1,
@@ -583,7 +583,7 @@
     "plugins/dsh-android-manage/src/index.ts:1999": 1,
     "AdbKeyboardService.kt:114": 1,
     "AdbKeyboardReceiver.kt:76": 1,
-    "MainActivity.kt:793": 1,
+    "MainActivity.kt:798": 1,
     "ControlCarrier.kt:110": 1,
     "VdisplayController.kt:133": 1,
     "ControlProtocolV2.kt:96": 1,
@@ -595,7 +595,7 @@
     "ControlProtocolV2.kt:46": 1,
     "ControlCarrier.kt:47": 1,
     "ScreenScope.kt:49": 1,
-    "MainActivity.kt:772": 1,
+    "MainActivity.kt:777": 1,
     "EngineManager.kt:1442": 1,
     "AdbKeyboardService.kt:122": 1,
     "index.ts:42": 1,
@@ -611,7 +611,7 @@
     "VdisplayOps.kt:20": 1,
     "ScreenScope.kt:31": 1,
     "AndroidBridge.kt:319": 2,
-    "MainActivity.kt:782": 1,
+    "MainActivity.kt:787": 1,
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:306": 1,
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:372": 1,
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:474": 1,
@@ -627,7 +627,7 @@
     "VdisplayController.kt:372": 2,
     "VdisplayController.kt:124": 2,
     "VdisplayOps.kt:21": 2,
-    "MainActivity.kt:769": 1,
+    "MainActivity.kt:774": 1,
     "MainActivity.kt:306": 1,
     "EngineService.kt:70": 1,
     "OverlayService.kt:382": 2,
@@ -648,7 +648,7 @@
     "OverlayPanel.kt:387": 1,
     "OverlayController.kt:22": 2,
     "NotifyCenter.kt:161": 1,
-    "MainActivity.kt:642": 1,
+    "MainActivity.kt:647": 1,
     "OverlayService.kt:85": 1,
     "OverlayService.kt:574": 1,
     "MuxClient.kt:46": 1,
@@ -785,7 +785,7 @@
     "VdisplayHost.kt:70": 1,
     "plugins/dsh-android-browser/src/tools.ts:407": 2,
     "docs/AGENTS/ARCHITECTURE.md:17": 2,
-    "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:425": 2,
+    "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:433": 2,
     "VdisplayController.kt:766": 2,
     "VdisplayHost.kt:214": 2,
     "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:333": 2,
@@ -840,7 +840,7 @@
     "index.ts:142": 1,
     "snapshot-panels-observer.ts:47": 1,
     "snapshot-panels.css.ts:15": 1,
-    "MainActivity.kt:923": 1,
+    "MainActivity.kt:928": 1,
     "mobile-form.css.ts:21": 1,
     "composer-insets.css.ts:13": 1,
     "keyboard-boundary.ts:94": 1,
@@ -874,20 +874,20 @@
     "native-browser-adapter.ts:203": 1,
     "native-browser-adapter.ts:202": 1,
     "back-stack.ts:551": 1,
-    "MainActivity.kt:803": 1,
+    "MainActivity.kt:808": 1,
     "BackGate.kt:126": 1,
     "BackGate.kt:38": 1,
     "index.ts:432": 1,
-    "MainActivity.kt:1030": 1,
+    "MainActivity.kt:1035": 1,
     "DownloadSaver.kt:61": 1,
     "theme-bridge.ts:68": 1,
-    "MainActivity.kt:880": 1,
+    "MainActivity.kt:885": 1,
     "ConfigTransfer.kt:117": 1,
     "LogCollector.kt:740": 1,
     "EngineStartFlow.kt:206": 1,
     "LogCollector.kt:755": 1,
     "LogCollector.kt:780": 1,
-    "MainActivity.kt:1057": 1,
+    "MainActivity.kt:1062": 1,
     "EngineStartFlow.kt:317": 1,
     "EngineStartFlow.kt:350": 1,
     "UndoGate.kt:165": 1,
@@ -966,7 +966,7 @@
     "verify-webview-015.mjs:11": 1,
     "verify-vdisplay-viewer.mjs:106": 1,
     "verify-webview-015.mjs:60": 1,
-    "MainActivity.kt:1164": 1,
+    "MainActivity.kt:1169": 1,
     "verify-state-sync.mjs:106": 1,
     "verify-engine-log-copy.mjs:28": 1,
     "device-smoke.ps1:24": 1,
@@ -980,7 +980,7 @@
     "verify-browser-host.mjs:58": 1,
     "verify-state-sync.mjs:161": 1,
     "docs/AGENTS/gotchas.md:44": 1,
-    "MainActivity.kt:514": 1
+    "MainActivity.kt:519": 1
   },
   "couplings": [
     "B01 -> CI 与云端构建链 | 云端 build-apk.mjs 与本地链门禁集差集必须为 0。0.14.5：原先并列的 apk 仓独立快照 workflow `build-snapshot.yml`（走 inject-snapshot.py 三包注入、无引擎 overlay/补丁/语法降级）已删除，快照构建入口收敛为单一链",
@@ -1197,10 +1197,10 @@
     "AndroidBridge.kt:375": [
       ""
     ],
-    "AndroidBridge.kt:423": [
+    "AndroidBridge.kt:431": [
       ""
     ],
-    "AndroidBridge.kt:611": [
+    "AndroidBridge.kt:619": [
       "@JavascriptInterface"
     ],
     "ApkUpdateAction.kt:261": [
@@ -1473,22 +1473,22 @@
     "LogCollector.kt:785": [
       "\"unreadable\""
     ],
-    "MainActivity.kt:1030": [
+    "MainActivity.kt:1035": [
       "handler.postDelayed(this, VDISPLAY_REAP_INTERVAL_MS)"
     ],
-    "MainActivity.kt:1054": [
+    "MainActivity.kt:1059": [
       "}"
     ],
-    "MainActivity.kt:1057": [
+    "MainActivity.kt:1062": [
       "clipboardRead?.cancel()"
     ],
-    "MainActivity.kt:1076": [
+    "MainActivity.kt:1081": [
       "screenWakeLock?.release()"
     ],
-    "MainActivity.kt:1164": [
+    "MainActivity.kt:1169": [
       "view.evaluateJavascript(BackGate.READ_DEPTH_SCRIPT) { raw ->"
     ],
-    "MainActivity.kt:1167": [
+    "MainActivity.kt:1172": [
       "}"
     ],
     "MainActivity.kt:145": [
@@ -1512,70 +1512,70 @@
     "MainActivity.kt:475": [
       "/** Automatic page refreshes coalesce while paused and never issue background navigation. */"
     ],
-    "MainActivity.kt:502": [
+    "MainActivity.kt:507": [
       "initialAuthRecoveryPending = true"
     ],
-    "MainActivity.kt:514": [
+    "MainActivity.kt:519": [
       "ForegroundPageRecoveryPolicy.Recovery.NONE -> false"
     ],
-    "MainActivity.kt:544": [
+    "MainActivity.kt:549": [
       ""
     ],
-    "MainActivity.kt:565": [
+    "MainActivity.kt:570": [
       "if (userClosedEngine) EngineService.userShutdown = true"
     ],
-    "MainActivity.kt:569": [
+    "MainActivity.kt:574": [
       "// 崩溃标记：进程级未捕获异常写入 filesDir/.crashed（下次启动测试界面"
     ],
-    "MainActivity.kt:605": [
+    "MainActivity.kt:610": [
       "// 系统层面表现为「点开即崩」。改为如实落 boot-diag + 一句话告知 + finish 干净退出；"
     ],
-    "MainActivity.kt:642": [
+    "MainActivity.kt:647": [
       "// 早退、onResume 的探活发现引擎活着也不再走启动流程 → 授权之后没有任何东西会再跑一次建目录，"
     ],
-    "MainActivity.kt:719": [
+    "MainActivity.kt:724": [
       "FileIncoming.processIncomingIntent(this, intent) { title, text -> showTestNotification(title, text) }"
     ],
-    "MainActivity.kt:769": [
+    "MainActivity.kt:774": [
       "val session = pendingNotifySession ?: return"
     ],
-    "MainActivity.kt:772": [
+    "MainActivity.kt:777": [
       "val script = \"(() => { try { return (typeof window.__dshOpenSession === 'function') && window.__dshOpenSession(\" +"
     ],
     "MainActivity.kt:78": [
       "/** System insets in CSS px, cached until the engine page is ready to receive them. */"
     ],
-    "MainActivity.kt:782": [
+    "MainActivity.kt:787": [
       "notifyRouteAttempts += 1"
     ],
-    "MainActivity.kt:784": [
+    "MainActivity.kt:789": [
       "webView.postDelayed({ deliverNotifyRoute() }, NOTIFY_ROUTE_RETRY_MS)"
-    ],
-    "MainActivity.kt:788": [
-      "}"
     ],
     "MainActivity.kt:793": [
       "}"
     ],
-    "MainActivity.kt:803": [
-      "Toast.LENGTH_LONG,"
-    ],
-    "MainActivity.kt:812": [
-      "/** 首启向导已移除（决策 2026-08-23）：初始页（GuideChrome 运行时状态/解压进度/崩溃/日志）"
-    ],
-    "MainActivity.kt:815": [
-      "override fun onResume() {"
-    ],
-    "MainActivity.kt:822": [
-      "return"
-    ],
-    "MainActivity.kt:850": [
+    "MainActivity.kt:798": [
       "}"
     ],
-    "MainActivity.kt:880": [
+    "MainActivity.kt:808": [
+      "Toast.LENGTH_LONG,"
+    ],
+    "MainActivity.kt:817": [
+      "/** 首启向导已移除（决策 2026-08-23）：初始页（GuideChrome 运行时状态/解压进度/崩溃/日志）"
+    ],
+    "MainActivity.kt:820": [
+      "override fun onResume() {"
+    ],
+    "MainActivity.kt:827": [
+      "return"
+    ],
+    "MainActivity.kt:855": [
+      "}"
+    ],
+    "MainActivity.kt:885": [
       "// ensureStarted 注册——startService 的 onCreate 同步 emit 首帧，注册晚了会丢帧）。"
     ],
-    "MainActivity.kt:923": [
+    "MainActivity.kt:928": [
       "apkUpdate.settleAfterResume()"
     ],
     "MobileChrome.tsx:35": [
@@ -2109,10 +2109,10 @@
     "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:375": [
       ""
     ],
-    "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:423": [
+    "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:431": [
       ""
     ],
-    "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:425": [
+    "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:433": [
       "@JavascriptInterface"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/ApkUpdateAction.kt:228": [
@@ -2277,10 +2277,10 @@
     "app/src/main/java/com/dsharnessmobile/shell/LogCollector.kt:458": [
       "/**"
     ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1030": [
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1035": [
       "handler.postDelayed(this, VDISPLAY_REAP_INTERVAL_MS)"
     ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1113": [
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1118": [
       "*/"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:137": [
@@ -2310,28 +2310,28 @@
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:391": [
       "guideRenderer.showGuide()"
     ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:605": [
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:610": [
       "// 系统层面表现为「点开即崩」。改为如实落 boot-diag + 一句话告知 + finish 干净退出；"
     ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:667": [
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:672": [
       "// #197（机制①）：edge-to-edge 下 WebView 的**布局尺寸从不随 IME 变化**（布局视口恒 800），"
     ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:719": [
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:724": [
       "FileIncoming.processIncomingIntent(this, intent) { title, text -> showTestNotification(title, text) }"
     ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:771": [
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:776": [
       "pendingNotifySession = null"
     ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:812": [
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:817": [
       "/** 首启向导已移除（决策 2026-08-23）：初始页（GuideChrome 运行时状态/解压进度/崩溃/日志）"
     ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:815": [
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:820": [
       "override fun onResume() {"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:89": [
       "private val pickToken: String = EngineManager.ensurePickToken()"
     ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:923": [
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:928": [
       "apkUpdate.settleAfterResume()"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MuxClient.kt:172": [
