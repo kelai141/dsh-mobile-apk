@@ -176,21 +176,46 @@ export function refreshCompletenessProblem(
  *   · **合法的陈旧键清理**：分支落后于 main、或某条 legacy 引用已从文档移除；
  *   · **静默降级**：解析退化导致 references 变少，基线被洗小，下一轮就以「未登记」红。
  *
- * 两者在形状上不可区分，所以**不无条件拦，也不无条件放**：要求显式声明。
- * 默认拒绝并列出被丢弃的键；加 `--allow-source-lines-drop` 才放行（并仍打印清单供审阅）。
+ * 两者**看起来**形状相同，但 issue #1148 之后它们其实可分：只要问一句
+ * 「这条锚点还在文档里吗？」
+ *
+ *   · 文档里**已经没有**这条锚点  ⇒ 基线留着它就是**陈旧键**，清理它是正确的；
+ *   · 文档里**仍然有**这条锚点，却取不到内容 ⇒ **解析退化/静默降级**，必须判红。
+ *
+ * 所以本函数改成「按证据分类，而不是按旗标一刀切」：
+ *   - 传入 `stillReferenced`（本次文档里确实还存在的 key 集合）时，只有
+ *     `dropped ∩ stillReferenced` 才拒绝；纯陈旧键自动放行并打印；
+ *   - 不传时退回旧行为（全部拒绝），保证任何外部调用方都不会因此悄悄放宽。
+ *
+ * `--allow-source-lines-drop` 保留为显式逃生口：传了就不再做任何拒绝（连降级也放行），
+ * 用于人工确认过「我知道这次要丢什么」的场合。
  *
  * @param prevKeys 旧基线里的 sourceLines 键
  * @param nextKeys 即将写入的 sourceLines 键
  * @param allow 是否已显式声明允许下降
+ * @param stillReferenced 本次文档里仍然存在的 key 集合（用于区分陈旧键与解析退化）
  * @returns null = 可以写盘；字符串 = 拒绝原因
  */
-export function sourceLinesDropProblem(prevKeys, nextKeys, allow) {
+export function sourceLinesDropProblem(prevKeys, nextKeys, allow, stillReferenced) {
   if (allow) return null
   const next = new Set(nextKeys)
   const dropped = prevKeys.filter((k) => !next.has(k))
   if (dropped.length === 0) return null
-  return 'sourceLines would drop ' + dropped.length + ' key(s): ' + dropped.slice(0, 12).join(', ')
-    + (dropped.length > 12 ? ' …' : '')
+  // 未提供分类证据时保持旧口径：一律拒绝（不给外部调用方静默放宽的机会）。
+  if (!(stillReferenced instanceof Set)) {
+    return 'sourceLines would drop ' + dropped.length + ' key(s): ' + dropped.slice(0, 12).join(', ')
+      + (dropped.length > 12 ? ' …' : '')
+  }
+  // 关键判据：锚点还在文档里、却没能写进新基线 = 解析退化，这才是要拦的那种。
+  const degenerate = dropped.filter((k) => stillReferenced.has(k))
+  if (degenerate.length > 0) {
+    return 'sourceLines references still exist in the document but produced no baseline entry: '
+      + degenerate.length + ' key(s): ' + degenerate.slice(0, 12).join(', ')
+      + (degenerate.length > 12 ? ' …' : '')
+      + ' —— 这是解析退化（静默降级），不是陈旧键清理'
+  }
+  // 剩下的都是陈旧键：文档里已经没这条锚点了，清掉是正确的。
+  return null
 }
 const SELF_TEST = process.argv.includes('--self-test')
   && String(process.argv[1] || '').includes('refresh-guard')
@@ -274,10 +299,31 @@ if (SELF_TEST) {
   ]
   let failed2 = 0
   for (const [name, want, prev, next, allow] of cases2) {
+    // 不传第 4 参 = 退回旧口径（一律拒绝）：保证外部调用方拿不到静默放宽。
     const got = sourceLinesDropProblem(prev, next, allow)
     const ok = want === null ? got === null : (got !== null && got.length > 0)
     if (!ok) failed2 += 1
     console.log((ok ? '  ok   ' : '  FAIL ') + name + ': ' + (got === null ? 'null' : 'refused'))
+  }
+  /* issue #1148：传入 stillReferenced 后必须按**证据**分类，而不是一刀切拒绝。
+   * 这是本次改造的核心判据，两条方向都要钉住：
+   *   · 文档里已经没有的 key ⇒ 陈旧键，放行（否则干净 main 上永远刷不了）；
+   *   · 文档里仍然有的 key 却没进新基线 ⇒ 解析退化，必须拒（否则静默降级）。
+   */
+  const cases2b = [
+    // [name, wantRefused, prev, next, stillReferenced]
+    ['SL_STALE_ONLY_PASSES', false, ['gone.kt:1'], [], new Set()],
+    ['SL_DEGENERATE_REFUSED', true, ['alive.kt:1'], [], new Set(['alive.kt:1'])],
+    ['SL_MIXED_REFUSES_IF_ANY_DEGENERATE', true,
+      ['gone.kt:1', 'alive.kt:2'], [], new Set(['alive.kt:2'])],
+    ['SL_NO_DROP_WITH_EVIDENCE', false, ['a.kt:1'], ['a.kt:1'], new Set(['a.kt:1'])],
+  ]
+  for (const [name, wantRefused, prev, next, stillRef] of cases2b) {
+    const got = sourceLinesDropProblem(prev, next, false, stillRef)
+    const refused = got !== null
+    const ok = refused === wantRefused
+    if (!ok) failed2 += 1
+    console.log((ok ? '  ok   ' : '  FAIL ') + name + ': ' + (refused ? 'refused' : 'null'))
   }
   // #1003：下降守卫的报错必须给出**比例 + 阈值 + 真因 + 两条出路**。
   // 只报条数看不出事故等级；只报「拒绝」会让读日志的人去改基线而不是查解析器。
@@ -311,7 +357,7 @@ if (SELF_TEST) {
     console.log((ok ? '  ok   ' : '  FAIL ') + 'SYMBOL_DROP_RATIO_' + name + ': ' + got + ' / ' + want)
   }
   failed += failed2
-  const total = cases.length + cases2.length + 1 + 2 + thresholds.length
+  const total = cases.length + cases2.length + cases2b.length + 1 + 2 + thresholds.length
   console.log((failed === 0 ? 'REFRESH-GUARD SELF-TEST PASSED' : 'REFRESH-GUARD SELF-TEST FAILED')
     + '（' + (total - failed) + '/' + total + '）')
   process.exit(failed === 0 ? 0 : 1)

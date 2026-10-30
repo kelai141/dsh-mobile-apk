@@ -1922,18 +1922,37 @@ if (isMain) {
         symbolHashes[key] = true
       }
     }
-    // #868：写盘前断言，禁止「静默丢符号锚点基线」。判据与自检见 scripts/lib/refresh-guard.mjs。
-    // #868 补齐面：sourceLines 下降要么是合法陈旧键清理，要么是静默降级 —— 两者形状相同，
-    // 所以要求显式 --allow-source-lines-drop。拒绝时列出被丢弃的键，供人工判定属于哪一种。
+    /* issue #1148：sourceLines 段的陈旧键，规则与 symbols 段对齐。
+     *
+     * 以前这里只认「有没有传 --allow-source-lines-drop」：干净 main 上就有几条陈旧键
+     * （锚点已从文档删掉、基线还留着），于是**默认刷新直接 exit 1**，谁都得先想明白
+     * 该不该传那个旗标。那等于把「判断这是陈旧键还是解析退化」推给了人。
+     *
+     * 现在把那个判断交给机器，证据是现成的：**这条锚点还在文档里吗？**
+     *   - 不在 => 陈旧键，本次重写就该丢掉它（并逐条打印，不静默）；
+     *   - 在   => 却没能写进新基线 = 解析退化，仍然判红。
+     * 见 scripts/lib/refresh-guard.mjs 的 sourceLinesDropProblem。
+     */
+    const prevSourceLineKeys = Object.keys((ANCHOR_BASELINE && ANCHOR_BASELINE.sourceLines) || {})
     const slGuard = sourceLinesDropProblem(
-      Object.keys((ANCHOR_BASELINE && ANCHOR_BASELINE.sourceLines) || {}),
+      prevSourceLineKeys,
       Object.keys(sourceLines),
       ALLOW_SOURCE_LINES_DROP,
+      references,   // 本次文档里仍然存在的锚点 key 集合
     )
     if (slGuard !== null) {
       console.error('Refusing to refresh: ' + slGuard)
-      console.error('If this is a legitimate stale-key cleanup, re-run with --allow-source-lines-drop.')
+      console.error('If a human has reviewed exactly what would be dropped, re-run with --allow-source-lines-drop.')
       process.exit(1)
+    }
+    // 陈旧键逐条打印（与 symbols/symbolHashes 段同一纪律：下降必须可见）。
+    const droppedSourceLines = prevSourceLineKeys.filter((k) => !Object.hasOwn(sourceLines, k))
+    if (droppedSourceLines.length > 0) {
+      console.log('Stale baseline keys dropped by this refresh:')
+      for (const k of droppedSourceLines) console.log('  - sourceLines: ' + k)
+      if (droppedSourceLines.length > 40) {
+        console.log('  ... total ' + droppedSourceLines.length + ' sourceLines keys')
+      }
     }
     /*
      * issue #1111：丢弃键必须**逐条报出来**，不能静默。
