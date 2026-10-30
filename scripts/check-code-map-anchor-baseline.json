@@ -1033,7 +1033,7 @@
       "- name: 控制 op 登记链门禁"
     ],
     ".github/workflows/pr-gate.yml:140": [
-      "# 依赖上一步构建出的 8 个包 lib（门禁要求 7 个插件的 lib/index.js 在场，缺产物判红——"
+      "# 其中 check-runtime-assets.test.mjs 已 fail 8 条而 CI 一直绿。已内联的 5 个在脚本内显式豁免。"
     ],
     ".github/workflows/pr-gate.yml:40": [
       "run: node --test scripts/console-keyboard-layout.test.mjs"

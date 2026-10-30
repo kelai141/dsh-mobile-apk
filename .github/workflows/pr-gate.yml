@@ -136,6 +136,12 @@ jobs:
         if: always()
         run: |
           node scripts/check-plugin-tests.mjs
+      # 顶层 scripts/*.test.mjs 门禁（issue #973）：4 处目录级 sweep 都不覆盖顶层，7 个顶层测试无人执行，
+      # 其中 check-runtime-assets.test.mjs 已 fail 8 条而 CI 一直绿。已内联的 5 个在脚本内显式豁免。
+      - name: 顶层脚本测试门禁
+        if: always()
+        run: |
+          node scripts/check-script-tests.mjs
       # 工具返回值 vs output.schema 运行时契约门禁（0.13.8-b 批 B2 T2 / E-10）。
       # 依赖上一步构建出的 8 个包 lib（门禁要求 7 个插件的 lib/index.js 在场，缺产物判红——
       # 原先它只自建 manage 一个，结构上必红：0.14.1 执行地图排查发现，本轮修复）。

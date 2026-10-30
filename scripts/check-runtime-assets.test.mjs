@@ -1,6 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+// issue #973：走**单一真源**解析 tar，别再硬编码 'tar'。
+// Windows 上裸 'tar' 解析到 Git 的 GNU tar，它把 `-f C:\...` 里的盘符当**远端主机**，报
+// `Cannot connect to C: resolve failed`；实现侧早已用 resolveTar()/TAR 修过（提交 da975ac9，注释见
+// scripts/lib/shell.mjs:20-41），本文件是唯一没收敛的那处。
+import { TAR } from './lib/shell.mjs'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -38,10 +43,17 @@ function makeTree({ assetText, snapText, marker = MARKER, behaviorTestOk = true 
   mkdirSync(join(dir, 'app', 'src', 'main', 'assets', 'patched'), { recursive: true })
   writeFileSync(join(dir, 'app', 'src', 'main', 'assets', 'patched', ASSET), assetText)
   // 快照 tar（真实 xz）：成员路径 = TARGET。
-  writeFileSync(join(dir, 'member.js'), snapText)
-  execFileSync('tar', ['-cf', join(dir, 'snap.tar'), '--transform', 's|^member.js|' + TARGET + '|', 'member.js'], { cwd: dir })
+  //
+  // issue #973：**不用 `--transform`** —— 它是 GNU tar 专有；而实现侧为保证 Windows 路径可用，
+  // `TAR` 解析到系统 bsdtar（`C:\Windows\System32\tar.exe`，见 scripts/lib/shell.mjs:31-41），
+  // bsdtar 直接报 `Option --transform is not supported`。
+  // 改成**先按目标路径落盘、再以相对路径打包**：不依赖任何 tar 的替换语法，两种 tar 都对。
+  const stage = join(dir, 'stage')
+  const member = join(stage, TARGET)
+  mkdirSync(dirname(member), { recursive: true })
+  writeFileSync(member, snapText)
+  execFileSync(TAR, ['-cf', join(dir, 'snap.tar'), '-C', stage, TARGET], { cwd: dir })
   execFileSync('xz', ['-z', '-f', join(dir, 'snap.tar')])
-  rmSync(join(dir, 'member.js'))
   return dir
 }
 
