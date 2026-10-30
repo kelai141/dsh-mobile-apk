@@ -36,6 +36,14 @@ test('shared terminal engine installs snapshot and fingerprint, builds, then cop
       writeFileSync(out, JSON.stringify({ schema: 1, complete: true, fingerprint: 'fixture', entries: [{ id: 'factory', name: 'factory-plugin' }] }))
       return { status: 0 }
     }
+    // issue #1077：终端阶段在拷贝进交付目录**之前**就对 Gradle 产物验签。
+    // 这里断言它判的是 am build 的输出，而不是交付目录里那份尚未存在的拷贝。
+    if (args[0]?.endsWith('check-apk-signatures.mjs')) {
+      assert.equal(command, process.execPath)
+      assert.ok(args.includes('--apk'), '签名段必须按文件验，不是按目录')
+      assert.equal(args[args.indexOf('--apk') + 1], join(f.apkDir, 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk'))
+      return { status: 0 }
+    }
     assert.equal(command, process.platform === 'win32' ? 'gradlew.bat' : './gradlew')
     // 发布资产从 release 变体产出（issue #1118）：debug 变体带 android:debuggable。
     assert.deepEqual(args, [':app:assembleRelease', '--no-daemon', '-PversionNameSuffix=-preview'])
@@ -63,7 +71,8 @@ test('shared terminal engine installs snapshot and fingerprint, builds, then cop
   assert.equal(readFileSync(result).toString(), 'signed-test-apk')
   assert.ok(existsSync(join(f.apkDir, 'app', 'src', 'main', 'assets', 'plugin-hard-manifest.json')))
   assert.equal(existsSync(oldIntermediates), false)
-  assert.equal(calls.length, 3)
+  // 4 段：hard-manifest -> fingerprint -> Gradle -> 签名（#1077 把签名提到了拷贝之前）
+  assert.equal(calls.length, 4)
   assert.equal(calls[0].args[0].endsWith('build-hard-manifest.mjs'), true)
   assert.equal(calls[0].args[calls[0].args.indexOf('--snapshot') + 1], resolve(f.snapshot))
   assert.equal(calls[0].args[calls[0].args.indexOf('--out') + 1], join(f.apkDir, 'app', 'src', 'main', 'assets', 'plugin-hard-manifest.json'))
@@ -74,6 +83,8 @@ test('shared terminal engine installs snapshot and fingerprint, builds, then cop
   assert.equal(calls[1].options.shell, false)
   assert.equal(calls[2].options.cwd, resolve(f.apkDir))
   assert.equal(calls[2].options.shell, process.platform === 'win32')
+  assert.equal(calls[3].args[0].endsWith('check-apk-signatures.mjs'), true, '最后一段必须是验签，且在拷贝之前')
+  assert.equal(calls[3].options.cwd, resolve(fileURLToPath(new URL('.', import.meta.url))))
 })
 
 test('fingerprint rejection stops before Gradle and a Gradle failure does not copy an artifact', (t) => {
@@ -109,6 +120,8 @@ test('release mode preserves existing intermediates when clean is not requested'
   }, (command, args) => {
     if (args[0]?.endsWith('check-snapshot-fingerprint.mjs')) return { status: 0 }
     if (args[0]?.endsWith('build-hard-manifest.mjs')) return { status: 0 }
+    // #1077：终端阶段在拷贝前先验签，这一支不得被当成 gradle 调用。
+    if (args[0]?.endsWith('check-apk-signatures.mjs')) return { status: 0 }
     assert.equal(command, 'custom-gradle')
     const built = join(f.apkDir, 'app', 'build', 'outputs', 'apk', 'release', 'app-release.apk')
     mkdirSync(join(built, '..'), { recursive: true })

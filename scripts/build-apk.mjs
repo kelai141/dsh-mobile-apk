@@ -175,6 +175,17 @@ try {
   run(process.execPath, ['--test', gate('check-apk-signatures.test.mjs'), gate('resolve-version-suffix.test.mjs'), gate('build-apk-engine.test.mjs'), gate('build-hard-manifest.test.mjs'), gate('check-perf-instrumentation.test.mjs')])
   mkdirSync(OUT, { recursive: true })
   mkdirSync(work, { recursive: true })
+  // 清掉上一次留在交付目录里的 APK（issue #1077）。
+  //
+  // 真因：本脚本此前只 `mkdirSync(OUT)`，**从不清理**。配合「验签前就拷进交付目录」的老顺序，
+  // 一次签名回归会把未通过验签的包永久留在 out/v<ver>/；而收尾的 `check-apk-signatures --dir`
+  // 是**递归遍历目录**，对任何一个不合格的 *.apk 判红——于是这个版本从此每次构建恒红，
+  // 哪怕当前产物是好的。本地链 build-apk-013.ps1 / 发布链 build-release.ps1 早就在开头做同样
+  // 的清理，portable 链漏了这一步（三条链行为不对称本身就是缺陷）。
+  // 只删 *.apk：out/ 里还有 snapshot-*.tar.xz 等发布资产，按目录清空会误伤。
+  for (const name of readdirSync(OUT)) {
+    if (name.toLowerCase().endsWith('.apk')) rmSync(join(OUT, name), { force: true })
+  }
 
   // ---- 1. 前置：基座/插件/vendor 在场 ----
   requires('snapshot 源', snapSrc)

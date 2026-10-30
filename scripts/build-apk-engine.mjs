@@ -63,6 +63,10 @@ export function assembleApk(options, runner = spawnSync) {
     clean = false,
     log = console.log,
     fingerprintGate = join(SCRIPT_DIR, 'check-snapshot-fingerprint.mjs'),
+    /** 签名门禁脚本；供 verify-back-before-delivery 与测试注入。 */
+    signatureGate = join(SCRIPT_DIR, 'check-apk-signatures.mjs'),
+    /** 交付前是否验签（默认 true）。关掉只有一种正当理由：分阶段构建里签名由别处负全责。 */
+    verifySignatures = true,
   } = options
   if (!snapshot || !apkDir || !outputDir || !artifactName) {
     throw new Error('assemble requires snapshot, apkDir, outputDir, and artifactName')
@@ -96,6 +100,13 @@ export function assembleApk(options, runner = spawnSync) {
   // Never let a successful no-op/incremental Gradle invocation reuse an older APK.
   // Release mode preserves unrelated intermediates, but the terminal APK output is always fresh.
   rmSync(variantOutput, { recursive: true, force: true })
+  // 交付目录里**同名**的旧产物也一并清掉（issue #1077）。
+  //
+  // 只清本函数负责的那一个名字，不碰目录里的其他文件：多 ABI 构建共用同一交付目录，
+  // 按目录清空会删掉本轮另一个 ABI 刚产出的包（那正是「先传后删」类事故的形态）。
+  // 清掉它的意义是让「文件存在」等价于「本次构建产出且已验签」——否则一次失败构建
+  // 留下的旧文件会一直被当成这一轮的交付物。
+  rmSync(deliveredApk, { force: true })
   if (clean) {
     rmSync(intermediates, { recursive: true, force: true })
   }
@@ -118,6 +129,28 @@ export function assembleApk(options, runner = spawnSync) {
   execute(gradle, gradleArgs, { cwd: resolvedApkDir, shell: process.platform === 'win32' }, runner)
 
   if (!existsSync(builtApk)) throw new Error(`Gradle succeeded but APK is missing: ${builtApk} (buildType=${buildType})`)
+
+  // 验签必须在**拷进交付目录之前**（issue #1077）。
+  //
+  // 真因：此前这里直接 `copyFileSync(builtApk, deliveredApk)`，签名判定只在调用方、且发生在
+  // 整个 ABI 循环收尾之后。于是有两个后果：
+  //   ① 从这次拷贝到门禁判红之间，交付目录里存在一个**未通过验签**的 APK——中间任何一步
+  //      （上传、清单、别的门禁扫目录）都会把它当成产物；
+  //   ② 门禁抛出后该文件**不会**被删，下一次构建 `check-apk-signatures --dir` 递归又会命中它，
+  //      于是这个版本从此每次构建恒红，哪怕当前产物是好的。
+  // 把验签挪进终端阶段（拷贝之前）后，「交付目录里的 APK 都是验过的」由构造保证，
+  // 不再依赖调用方记得在哪一步调门禁。调用方的 --dir 复扫保留（它还能兜住陈旧文件）。
+  if (verifySignatures) {
+    const keystorePath = options.keystore ?? join(SCRIPT_DIR, '..', 'keystore', 'debug.keystore')
+    verifyApks({
+      files: [builtApk],
+      keystore: keystorePath,
+      signatureGate,
+      // 调用方各自会跑 --self-test（本地/portable/发布三路都跑过），这里不重复。
+      selfTest: false,
+      log,
+    }, runner)
+  }
   copyFileSync(builtApk, deliveredApk)
   log(`产物: ${deliveredApk}`)
   return deliveredApk
