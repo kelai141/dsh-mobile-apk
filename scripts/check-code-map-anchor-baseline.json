@@ -297,17 +297,17 @@
     "docs/AGENTS/ARCHITECTURE.md:18": 2,
     "dsh-client-ui-responsive/src/client/mobile/native-browser-presentation.ts:20": 2,
     "OverlayService.kt:473": 2,
-    "OverlayPanel.kt:1060": 2,
+    "OverlayPanel.kt:1058": 2,
     "OverlayService.kt:621": 2,
-    "OverlayPanel.kt:179": 2,
-    "OverlayReport.kt:370": 2,
+    "OverlayPanel.kt:177": 2,
+    "OverlayReport.kt:373": 2,
     "OverlayService.kt:502": 2,
     "OverlayService.kt:299": 4,
-    "OverlayPanel.kt:1177": 2,
+    "OverlayPanel.kt:1175": 2,
     "OverlayReport.kt:164": 2,
     "OverlayService.kt:509": 3,
-    "OverlayPanel.kt:947": 2,
-    "OverlayPanel.kt:73": 2,
+    "OverlayPanel.kt:945": 2,
+    "OverlayPanel.kt:71": 2,
     "OverlayService.kt:499": 2,
     "OverlayLiveFeed.kt:160": 2,
     "OverlayService.kt:512": 2,
@@ -316,11 +316,11 @@
     "docs/AGENTS/ARCHITECTURE.md:27": 3,
     "docs/AGENTS/ARCHITECTURE.md:29": 3,
     "docs/AGENTS/modules.md:39": 3,
-    "OverlayPanel.kt:818": 5,
-    "OverlayPanel.kt:616": 3,
-    "OverlayPanel.kt:904": 3,
+    "OverlayPanel.kt:816": 5,
+    "OverlayPanel.kt:614": 3,
+    "OverlayPanel.kt:902": 3,
     "OverlayPanel.kt:24": 3,
-    "OverlayPanel.kt:489": 3,
+    "OverlayPanel.kt:487": 3,
     "OverlayLiveFeed.kt:166": 3,
     "OverlayService.kt:106": 3,
     "OverlayReport.kt:252": 3,
@@ -624,7 +624,7 @@
     "app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:161": 1,
     "app/src/main/java/com/dsharnessmobile/shell/NotifyBridge.kt:304": 1,
     "app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:574": 1,
-    "app/src/main/java/com/dsharnessmobile/shell/OverlayPanel.kt:87": 1,
+    "app/src/main/java/com/dsharnessmobile/shell/OverlayPanel.kt:85": 1,
     "app/src/main/java/com/dsharnessmobile/shell/OverlayLiveFeed.kt:26": 1,
     "app/src/main/AndroidManifest.xml:65": 1,
     "app/src/main/java/com/dsharnessmobile/shell/NotifyBridge.kt:207": 1,
@@ -728,7 +728,7 @@
     "EngineProbe.kt:51": 1,
     "DownloadSaver.kt:101": 1,
     "NotifyBridge.kt:328": 1,
-    "OverlayPanel.kt:824": 2,
+    "OverlayPanel.kt:822": 2,
     "OverlayService.kt:580": 1,
     "MuxClient.kt:91": 1,
     "EngineService.kt:134": 1,
@@ -797,14 +797,14 @@
     "MainActivity.kt:306": 1,
     "EngineService.kt:70": 1,
     "OverlayService.kt:382": 2,
-    "OverlayPanel.kt:309": 1,
+    "OverlayPanel.kt:307": 1,
     "OverlayService.kt:415": 1,
     "OverlayService.kt:436": 1,
     "OverlayService.kt:547": 1,
-    "OverlayPanel.kt:87": 1,
+    "OverlayPanel.kt:85": 1,
     "OverlayLiveFeed.kt:28": 1,
-    "OverlayPanel.kt:423": 1,
-    "OverlayPanel.kt:308": 1,
+    "OverlayPanel.kt:421": 1,
+    "OverlayPanel.kt:306": 1,
     "OverlayService.kt:155": 1,
     "OverlayService.kt:166": 1,
     "OverlayService.kt:143": 1,
@@ -824,18 +824,18 @@
     "OverlayLiveFeed.kt:26": 1,
     "OverlayService.kt:449": 1,
     "OverlayReport.kt:180": 1,
-    "OverlayPanel.kt:1174": 1,
-    "OverlayPanel.kt:204": 1,
+    "OverlayPanel.kt:1172": 1,
+    "OverlayPanel.kt:202": 1,
     "OverlayService.kt:216": 1,
     "OverlayService.kt:252": 1,
     "OverlayService.kt:504": 1,
-    "OverlayPanel.kt:177": 1,
+    "OverlayPanel.kt:175": 1,
     "OverlayHalo.kt:143": 1,
     "OverlayService.kt:232": 1,
     "OverlayService.kt:765": 1,
     "OverlayReport.kt:348": 1,
-    "OverlayPanel.kt:835": 1,
-    "OverlayPanel.kt:112": 1,
+    "OverlayPanel.kt:833": 1,
+    "OverlayPanel.kt:110": 1,
     "EngineService.kt:37": 1,
     "NotifyStore.kt:197": 1,
     "EngineService.kt:123": 1,
@@ -854,7 +854,7 @@
     "NotifyProbe.kt:21": 1,
     "NotifyStore.kt:36": 1,
     "notify-projection.ts:55": 1,
-    "OverlayPanel.kt:69": 1,
+    "OverlayPanel.kt:67": 1,
     "NotifyCenter.kt:84": 1,
     "app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:49": 1,
     "app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:345": 1,
@@ -1778,70 +1778,70 @@
     "OverlayLiveFeed.kt:28": [
       "fun startWatcher() {"
     ],
-    "OverlayPanel.kt:1060": [
+    "OverlayPanel.kt:1058": [
       "if (entry != null) {"
     ],
-    "OverlayPanel.kt:112": [
+    "OverlayPanel.kt:110": [
       "private fun handleMuxFrame(text: String) {"
     ],
-    "OverlayPanel.kt:1174": [
+    "OverlayPanel.kt:1172": [
       "if (svc.toolCount > 0) { it.text = t(\"工具 ×${svc.toolCount}\", \"Tools ×${svc.toolCount}\"); it.visibility = View.VISIBLE }"
     ],
-    "OverlayPanel.kt:1177": [
+    "OverlayPanel.kt:1175": [
       "updateClock()"
     ],
-    "OverlayPanel.kt:177": [
+    "OverlayPanel.kt:175": [
       "pendingGen.remove(id)"
     ],
-    "OverlayPanel.kt:179": [
+    "OverlayPanel.kt:177": [
       "}"
     ],
-    "OverlayPanel.kt:204": [
+    "OverlayPanel.kt:202": [
       "return null"
     ],
     "OverlayPanel.kt:24": [
       "*  状态模板 template_thinking/template_tool）+ 待答卡（MuxClient 提问/审批官方风格卡片渲染 + POST /api/respond 应答）。 */"
     ],
-    "OverlayPanel.kt:308": [
+    "OverlayPanel.kt:306": [
       "// 带上一个不可撤销的歧义（长按误触 = 球没了，还要去屏缘找条）。"
     ],
-    "OverlayPanel.kt:309": [
+    "OverlayPanel.kt:307": [
       "//"
     ],
     "OverlayPanel.kt:387": [
       "}"
     ],
-    "OverlayPanel.kt:423": [
+    "OverlayPanel.kt:421": [
       "val unit = LinearLayout(svc).apply {"
     ],
-    "OverlayPanel.kt:489": [
+    "OverlayPanel.kt:487": [
       "/** 块H-A1：完成态常驻文案（并入 overlay_display prefs，与上述两个模板同族，可覆写）。"
     ],
-    "OverlayPanel.kt:616": [
+    "OverlayPanel.kt:614": [
       "marginEnd = (8 * dp).toInt()"
     ],
-    "OverlayPanel.kt:69": [
+    "OverlayPanel.kt:67": [
       "//   emit = {type:\"emit\",event,args}（api-session/status → args:[agentId,running] 忙态锚点）。"
     ],
-    "OverlayPanel.kt:73": [
+    "OverlayPanel.kt:71": [
       "//   提问跳过 outcome={kind:\"rejected\",error:{name,message}}；审批无取消通道。"
     ],
-    "OverlayPanel.kt:818": [
+    "OverlayPanel.kt:816": [
       "textSize = 11f"
     ],
-    "OverlayPanel.kt:824": [
+    "OverlayPanel.kt:822": [
       "text = label"
     ],
-    "OverlayPanel.kt:835": [
+    "OverlayPanel.kt:833": [
       "}, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = (8 * dp).toInt() })"
     ],
-    "OverlayPanel.kt:87": [
+    "OverlayPanel.kt:85": [
       "private val qOptsExpanded = HashSet<String>()"
     ],
-    "OverlayPanel.kt:904": [
+    "OverlayPanel.kt:902": [
       "orientation = LinearLayout.HORIZONTAL"
     ],
-    "OverlayPanel.kt:947": [
+    "OverlayPanel.kt:945": [
       "foot.addView(pendingChip(t(\"跳过本题\", \"Skip this question\"), filled = false, red = false, dp) {"
     ],
     "OverlayReport.kt:164": [
@@ -1862,7 +1862,7 @@
     "OverlayReport.kt:348": [
       "*"
     ],
-    "OverlayReport.kt:370": [
+    "OverlayReport.kt:373": [
       "/**"
     ],
     "OverlayService.kt:106": [
@@ -2444,7 +2444,7 @@
     "app/src/main/java/com/dsharnessmobile/shell/OverlayLiveFeed.kt:26": [
       "private fun liveFile(): File = File(File(svc.filesDir, \"home/.dsh\"), \".live.ndjson\")"
     ],
-    "app/src/main/java/com/dsharnessmobile/shell/OverlayPanel.kt:87": [
+    "app/src/main/java/com/dsharnessmobile/shell/OverlayPanel.kt:85": [
       "private val qOptsExpanded = HashSet<String>()"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/OverlayReport.kt:180": [
