@@ -3156,20 +3156,16 @@
       "};"
     ],
     "index.ts:1038": [
-      "return decideControl({",
-      "return { ok: false, denied: false, text: 'tap 需要合法整数坐标 (x, y)' }"
+      "const adbReady = engineLevelReady(st)"
     ],
     "index.ts:1052": [
-      "waiting: false, served: 0, failed: 0, lastTakeAt: 0, lastResultAt: 0,",
-      "} else if (verb === 'keyevent') {"
-    ],
-    "index.ts:1063": [
-      "*/",
       "}"
     ],
+    "index.ts:1063": [
+      "adbReady: engineLevelReady(st) || this.shizukuReady(),"
+    ],
     "index.ts:1074": [
-      "+ (data.guidance ?? (vd?.ok === true ? '壳侧拒绝' : (vd?.error ?? '控制通道未接通')))",
-      "return session === undefined ? {} : { session }"
+      "protocol: negotiateProtocol(undefined),"
     ],
     "index.ts:112": [
       "",
@@ -3183,12 +3179,10 @@
       "try {"
     ],
     "index.ts:1255": [
-      "const unchangedResponse = (fp: string, gen?: number) => ({",
-      "return this.#liveModel"
+      "//"
     ],
     "index.ts:1416": [
-      "connected: { type: 'boolean' },",
-      "const forceFresh = args?.fresh === true"
+      "continue"
     ],
     "index.ts:142": [
       "",
@@ -3199,24 +3193,19 @@
       "}"
     ],
     "index.ts:1438": [
-      "): Record<string, unknown> {",
-      "+ (targetScreen !== 'real'"
+      "if (guidance.length > 0) return guidance"
     ],
     "index.ts:1444": [
-      "// 0.13.5 W4：控制通道事实（只读；令牌本身绝不回显）",
-      "const data = (r.data ?? {}) as A11ySnapshot"
+      "}"
     ],
     "index.ts:1463": [
-      "const st = svc.status()",
-      "v2 = dec.value"
+      "paired: { type: 'boolean' },"
     ],
     "index.ts:1558": [
-      "pollingLine,",
-      "},"
+      "if (source === 'disabled') return '无障碍已确认未开启'"
     ],
     "index.ts:1612": [
-      "+ '请改用 x/y（绝对像素，基于 ' + screenId + ' 自身尺寸；可先 android_vdisplay_status 看该屏宽高），或先用 android_ui_dump 拿 ref。',",
-      "type: 'object',"
+      "const caps = (v.shell as { caps?: { shizuku?: unknown } | null } | undefined)?.caps"
     ],
     "index.ts:165": [
       "",
@@ -3230,16 +3219,13 @@
       "try {"
     ],
     "index.ts:1664": [
-      "const shellTool = defineTool({",
-      "if (wd.ok === false) return { ok: false, denied: false, text: 'WebView 点击失败：' + (wd.error ?? '未知') }"
+      "stdout: { type: 'string' },"
     ],
     "index.ts:1669": [
-      "'系统配置写面（settings put/pm grant/appops/mount 等）一律拒绝。' +",
-      "return {"
+      "render: (_args, v: Record<string, unknown>) => ["
     ],
     "index.ts:1899": [
-      "from = [sx, dir === 'up' ? area.y2 - Math.floor(dy / 2) : area.y1 + Math.floor(dy / 2)]",
-      "notifyState.startTurn(sessId, ev.data?.turn, now)"
+      "}) + '\\n')"
     ],
     "index.ts:251": [
       "",
@@ -3417,10 +3403,7 @@
       "}, 'ui-responsive: session-log dialog :has() fallback')"
     ],
     "index.ts:584": [
-      "*",
-      "bytes,",
-      "const r = await a11yExec('screenshot', { ...screenArgs(args) }, 12_000)",
-      "reorder: (session, tab, before) => sidebar.reorderIn(session, tab, before),"
+      "* 热补丁（2026-08-27 真机实锤）：通道结果 → 模型文本。"
     ],
     "index.ts:69": [
       "*/",
@@ -3434,19 +3417,13 @@
       "} catch { /* 记账失败不阻断投递：该项退化为 TTL/生命周期清理 */ }"
     ],
     "index.ts:909": [
-      "+ '限制：① 只读默认屏（uiautomator 的 `--display` 实测不生效，见坑 165），虚拟屏请用 android_ui_dump 或坐标注入；'",
-      "const adbReady = engineLevelReady(st)",
-      "if (document.visibilityState === 'visible') poll()",
-      "}"
+      "/**"
     ],
     "index.ts:949": [
-      "// 0.14 真实通道：getprop + dumpsys 只读面（厂商差异：vivo 等对 dumpsys 部分过滤时如实降级）。",
-      "if (!this.privilegedReady(st)) {",
-      "return () => {"
+      "ok: false,"
     ],
     "index.ts:991": [
-      "",
-      "'**指定 screenId=virtual-N 时改由壳侧注入到该虚拟屏**（`input -d <该屏 displayId>`，argv 原生构造，' +"
+      "}"
     ],
     "inject-all.py:174": [
       "added_files = 0"
