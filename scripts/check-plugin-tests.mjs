@@ -116,14 +116,31 @@ const collectTestFiles = (dir) => {
 }
 
 /**
+ * 从 `package.json` 的 test 脚本里抽出**测试路径模式集合**。
+ *
+ * 这是形态判据与覆盖数判据的**唯一解析入口**（#989）。两条判据此前各写一份解析：
+ * `scriptFormProblem` 用三条手写正则认形态（只认顶层 glob 那一种写法），
+ * `scriptCoverage` 用另一套 `matchAll` 抽模式。同一份脚本于是在两边得到相反结论——
+ * 递归 glob 能覆盖全部文件，却被形态判据判成「不可识别的形态」。
+ * 「同一个事实两处各解析一遍」必然漂移，只是漂到哪种写法上而已。
+ * @param script package.json 的 test 脚本。
+ * @returns 形如 `test/*.test.mjs` 或递归 glob 的模式串（去重、保序）。
+ */
+const testPathTokens = (script) => {
+  const text = String(script ?? '').trim()
+  if (text === '') return []
+  const tokens = text.match(/(?:\.\/)?test\/[^\s"';&|]+/g) ?? []
+  return [...new Set(tokens.map((t) => t.replace(/^\.\//, '')))]
+}
+
+/**
  * 插件自身 `test` 脚本**能覆盖到**的文件数（元断言的左操作数）。
  *
- * - 脚本用 `test/*.test.mjs` glob ⇒ 顶层文件数；
  * - 显式清单与 glob 均按真实路径匹配；重复文件和不存在的文件不能凑数。
  * - mjs / ts 与嵌套目录按各自模式匹配，覆盖数必须等于递归发现数。
  */
 const scriptCoverage = (testDir, script) => {
-  const patterns = [...script.matchAll(/(?:\.\/)?test\/[^\s"';&|]+/g)].map((m) => m[0].replace(/^\.\//, ''))
+  const patterns = testPathTokens(script)
   return collectTestFiles(testDir).filter((file) => {
     const name = relative(dirname(testDir), file).replaceAll('\\', '/')
     return patterns.some((pattern) => matchesGlob(name, pattern))
@@ -142,6 +159,43 @@ if (plugins.length === 0) { console.error('CHECK-PLUGIN-TESTS FAILED：找不到
 //   2) 调用点只传一个无关变量（NODE_OPTIONS）—— NODE_ENV 要钉住，且 PATH 不能被吞掉
 //      （吞掉 PATH 的直接后果是子进程根本起不来，那是比假红更糟的假绿：什么都测不了还报通过）；
 //   3) 完全不传 env —— 走默认合并路径。
+/**
+ * issue #957：本地 test 脚本必须是**可识别的 glob 形态**，不允许回退成显式清单。
+ *
+ * 为什么单独立一条：`scriptCoverage` 对两种形态都算得出数来，于是「有人把 glob 改回显式清单」
+ * 只要清单暂时是完整的，元断言照样绿 —— 而它下一轮新增测试文件时就静默少跑。
+ * 这类「当下正确、以后必错」的写法必须被形态判据挡在门外，不能靠人数数。
+ *
+ * @param {string} plugin 插件名（用于错误文案）。
+ * @param {string} script `package.json` 的 test 脚本。
+ * @returns {string|null} null = 合规；否则返回判红理由。
+ */
+const scriptFormProblem = (plugin, script) => {
+  const trimmed = String(script || '').trim()
+  if (trimmed === '') return plugin + ' 有测试文件但没有 test 脚本'
+  /* 形态判据与覆盖数判据共用 testPathTokens（#989）：否则同一份脚本在两边得到相反结论——
+   * 递归 glob 能覆盖全部文件（scriptCoverage 认），却被手写正则判成「不可识别的形态」。
+   * 判据只认一种写法时，换一种等价写法就零命中。 */
+  const tokens = testPathTokens(trimmed)
+  if (tokens.length === 0) return plugin + ' 的 test 脚本里没有 test/ 路径（脚本：' + trimmed + '）'
+  const GLOB_META = /[*?[\]{}]/
+  // 显式清单：某个 token 既无 glob 元字符、又带扩展名 ⇒ 就是一个具体文件名。
+  const explicit = tokens.filter((t) => !GLOB_META.test(t) && /\.[a-z]+$/i.test(t))
+  if (explicit.length > 0) {
+    return plugin + ' 的 test 脚本是**显式清单**，必须是 glob：node --test test/*.test.mjs（清单项：'
+      + explicit.join(', ') + '；脚本：' + trimmed + '）'
+  }
+  /* 合规 glob：token 里带 glob 元字符即可。
+   * 曾经这里还要求「后缀是测试文件扩展名」，但 `test/**` 这种按目录递归的写法完全合法
+   * （scriptCoverage 认它覆盖全部文件），额外后缀要求只会把它误判成「不可识别的形态」——
+   * 那正是 #989 的同一个病：判据比真实解析多了一条自己的想象。
+   * 现在唯一的要求是「有元字符」；「别写显式清单」由上面的 explicit 分支守。 */
+  if (!tokens.some((t) => GLOB_META.test(t))) {
+    return plugin + ' 的 test 脚本不是可识别的 glob 形态（脚本：' + trimmed + '）'
+  }
+  return null
+}
+
 if (process.argv.includes('--self-test') || process.argv.includes('--self-test-negative')) {
   const probe = (extraEnv) => {
     const r = runCommand(process.execPath,
@@ -193,6 +247,60 @@ if (process.argv.includes('--self-test') || process.argv.includes('--self-test-n
       }
     })
     verify('#957 递归发现 mjs/ts 与嵌套测试', () => assert.equal(collectTestFiles(testDir).length, 3))
+    /* ── #989：形态判据与覆盖数判据必须共用同一个解析器（testPathTokens）──────────
+     * 原来形态判据用三条手写正则，只认顶层 glob 那一种写法，把递归 glob 判成「不可识别的
+     * 形态」；而同一文件里的 scriptCoverage 用另一套 matchAll 抽模式，把它正确当成覆盖全部。
+     * 两条判据对同一份脚本给出相反结论。下面每条都同时钉「形态判据」与「覆盖数」，两边必须一致。 */
+    const formCases = [
+      { script: 'node --test test/*.test.mjs', form: null, cover: 1, label: '顶层 glob：合规' },
+      { script: 'node --test "test/**/*.test.{mjs,ts}"', form: null, cover: 3, label: '递归 glob（带引号 + 花括号）：合规' },
+      // 无花括号的递归 glob 只匹配 .mjs ⇒ 覆盖 a.test.mjs 与 nested/c.test.mjs 两个（b.test.ts 不在内）。
+      { script: 'node --test test/**/*.test.mjs', form: null, cover: 2, label: '递归 glob（无引号）：合规' },
+      { script: 'node --test test/a.test.mjs test/b.test.ts test/nested/c.test.mjs', form: 'explicit', cover: 3, label: '显式清单：判红（形态）' },
+      { script: 'vitest run', form: 'noglob', cover: 0, label: '无 test/ 路径：判红（形态）' },
+      { script: '', form: 'noscript', cover: 0, label: '空脚本：判红（形态）' },
+    ]
+    for (const c of formCases) {
+      verify('#989 形态与覆盖一致：' + c.label, () => {
+        const problem = scriptFormProblem('demo', c.script)
+        const classified = problem === null ? null
+          : problem.includes('显式清单') ? 'explicit'
+            : problem.includes('没有 test/ 路径') ? 'noglob'
+              : problem.includes('没有 test 脚本') ? 'noscript' : 'other'
+        assert.equal(classified, c.form, '形态判据给出 ' + JSON.stringify(classified) + '（问题：' + problem + '）')
+        assert.equal(scriptCoverage(testDir, c.script), c.cover, '覆盖数不一致（' + c.script + '）')
+      })
+    }
+    /* #989 的核心不变量：形态判据**不得**拒绝一个覆盖数判据认得的写法。
+     * 具体地——形态判据判合规的脚本，其 token 必须就是 scriptCoverage 拿去 matchesGlob 的
+     * 那一组（这正是「两条判据共用同一个解析器」的可执行形态）。
+     * 注意不能把它写成「覆盖数 == 递归发现数」：顶层 glob 在含嵌套测试的树上**本来就**只覆盖
+     * 顶层那几个，那是 #957 的正确语义，不是漂移。 */
+    verify('#989 不变量：形态判红「不是可识别的 glob」⇒ 覆盖数必须为 0（否则就是两条判据打架）', () => {
+      const forms = [
+        'node --test test/*.test.mjs',
+        'node --test "test/**/*.test.{mjs,ts}"',
+        'node --test test/**/*.test.mjs',
+        'node --test test/**',
+        'vitest run',
+        'node --test test/a.test.mjs',
+      ]
+      for (const script of forms) {
+        const problem = scriptFormProblem('demo', script)
+        const unrecognized = problem !== null && problem.includes('不是可识别的 glob 形态')
+        if (unrecognized) {
+          // 这正是 #989 的原始形态：形态判据说「认不出」，覆盖数却说「覆盖了 N 个」。
+          assert.equal(scriptCoverage(testDir, script), 0,
+            script + ' 被判「不可识别的形态」，覆盖数却是 ' + scriptCoverage(testDir, script) + '——两条判据在同一份脚本上打架')
+        }
+      }
+      // 递归 glob 必须判合规（这是 #989 的修复本体），
+      // 显式清单与无 test/ 路径必须仍然判红（#957 的规矩不能因 #989 松动）。
+      assert.equal(scriptFormProblem('demo', 'node --test test/**/*.test.mjs'), null, '递归 glob 应判合规')
+      assert.equal(scriptFormProblem('demo', 'node --test "test/**/*.test.{mjs,ts}"'), null, '带引号递归 glob 应判合规')
+      assert.notEqual(scriptFormProblem('demo', 'node --test test/a.test.mjs'), null, '显式清单应判红')
+      assert.notEqual(scriptFormProblem('demo', 'vitest run'), null, '无 test/ 路径应判红')
+    })
     verify('#957 顶层 mjs glob 不得假装覆盖 ts/嵌套测试', () => assert.equal(scriptCoverage(testDir, 'node --test test/*.test.mjs'), 1))
     verify('#957 递归 glob 覆盖全部文件', () => assert.equal(scriptCoverage(testDir, 'node --test "test/**/*.test.{mjs,ts}"'), 3))
     verify('#957 显式嵌套清单覆盖全部文件', () => assert.equal(scriptCoverage(testDir, 'node --test test/a.test.mjs test/b.test.ts test/nested/c.test.mjs'), 3))
@@ -253,29 +361,6 @@ let ran = 0
 let failed = 0
 const noTests = []
 
-/**
- * issue #957：本地 test 脚本必须是**可识别的 glob 形态**，不允许回退成显式清单。
- *
- * 为什么单独立一条：`scriptCoverage` 对两种形态都算得出数来，于是「有人把 glob 改回显式清单」
- * 只要清单暂时是完整的，元断言照样绿 —— 而它下一轮新增测试文件时就静默少跑。
- * 这类「当下正确、以后必错」的写法必须被形态判据挡在门外，不能靠人数数。
- *
- * @param {string} plugin 插件名（用于错误文案）。
- * @param {string} script `package.json` 的 test 脚本。
- * @returns {string|null} null = 合规；否则返回判红理由。
- */
-const scriptFormProblem = (plugin, script) => {
-  const trimmed = String(script || '').trim()
-  if (trimmed === '') return plugin + ' 有测试文件但没有 test 脚本'
-  // 显式清单：出现任何 test/<名字>.test.mjs 即判红（glob 用的是 test/*.test.mjs，不会命中这条）
-  if (/test\/[A-Za-z0-9_.-]+\.test\.mjs/.test(trimmed)) {
-    return plugin + ' 的 test 脚本是**显式清单**，必须是 glob：node --test test/*.test.mjs（脚本：' + trimmed + '）'
-  }
-  if (!/test\/\*\.test\.mjs/.test(trimmed)) {
-    return plugin + ' 的 test 脚本不是可识别的 glob 形态（脚本：' + trimmed + '）'
-  }
-  return null
-}
 const pluginTestScript = (plugin) => {
   try { return JSON.parse(readFileSync(join(PLUGIN_DIR, plugin, 'package.json'), 'utf8')).scripts?.test ?? '' }
   catch { return '' }
