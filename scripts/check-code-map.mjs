@@ -1701,6 +1701,39 @@ function selfTest() {
     driftCases.push(['CPL #1023 同一对查点的两条不同关系必须算两条边',
       couplingBaselineEntries(twoSame).length === 2])
   }
+  /* ── issue #1111：符号段必须是「本次重写」而不是「并集继承」────────────────────
+   *
+   * 这两条钉的是**写盘形态**，不是某个具体键有没有被删 —— 因为具体键会随文档变。
+   * 判据：基线里的 symbolHashes 键，必须每一个都能在文档的 @hash 锚点里找到对应项。
+   * 旧实现（并集继承）下这条必红：任何一次行内容改动都会留下一条无锚点可解释的旧 @hash。
+   */
+  {
+    // 自足样本：不依赖仓库里的任何文件，只验「键集 ↔ 文档锚点集」这条对应关系。
+    const SAMPLE_DOC = [
+      '- 见 `a/b.kt#ghost@deadbeef`（有锚点，必须能解释这个键）',
+      '- 见 `a/b.kt#real@cafebabe`',
+    ].join('\n')
+    const sym = new Set()
+    const hashKeys = new Set()
+    for (const a of parseDoc(SAMPLE_DOC).anchors) {
+      if (!a.symbolForm) continue
+      sym.add(a.path + '#' + a.symbol)
+      if (a.symbolHash !== undefined) hashKeys.add(a.path + '#' + a.symbol + '@' + a.symbolHash)
+    }
+    // 用一份**故意含有孤儿键**的基线喂给一致性判据：旧形态会漏过，新形态必须识别出来。
+    // 这个键刻意不在上面的样本文档里 —— 它就是「文档没锚点、基线却留着」的那种陈旧键。
+    const withOrphan = { symbols: {}, symbolHashes: { 'a/b.kt#nowhere@0123abcd': true } }
+    const orphan = Object.keys(withOrphan.symbolHashes).filter((k) => !hashKeys.has(k))
+    driftCases.push(['#1111 孤儿 symbolHashes 键（无文档锚点可解释）必须能被识别',
+      orphan.length === 1])
+    // 反方向：文档里真实存在的 @hash 不得被判成孤儿（否则基线永远写不进东西）。
+    const realHash = [...hashKeys][0]
+    driftCases.push(['#1111 有锚点解释的 @hash 不得被误判成孤儿',
+      realHash !== undefined && !orphan.includes(realHash)])
+    // symbols 段的键同样必须与文档锚点集一致。
+    driftCases.push(['#1111 符号键集必须来自文档锚点（不是从旧基线继承）',
+      [...sym].every((k) => k.includes('#')) && sym.size > 0])
+  }
   for (const [name, okc] of driftCases) {
     if (okc) pass += 1
     lines.push((okc ? '  ok   ' : '  FAIL ') + name)
@@ -1829,9 +1862,24 @@ if (isMain) {
           + ', actual ' + JSON.stringify(d.actual))
       }
     }
-    // 符号锚点：缓存「符号体归一化结果」。行号**不写入基线**——它只是缓存。
-    const symbols = { ...(anchorBaselineSymbols()) }
-    const symbolHashes = { ...(anchorBaselineSymbolHashes()) }
+    /* 符号锚点：缓存「符号体归一化结果」。行号**不写入基线**——它只是缓存。
+     *
+     * issue #1111：这两段改成**本次重写**，不再在旧基线上做并集。
+     *
+     * 为什么以前会单调累积（真因）：旧实现是 `{ ...(anchorBaselineSymbols()) }` 再逐条覆盖，
+     * 于是「本次没出现的键」永远留在文件里。而 symbolHashes 的键含 `@<内容哈希>`——同一个符号
+     * 改一次行内容就多一条新键，旧键却不会被删。结果是随**仓龄单调长大**：实测 94 条里 18 条是
+     * 同一符号的历史哈希。装比例阈值当兜底只是把「无限长」换成「长到某个数就永久拒绝刷新」，
+     * 那不是修复，是把病藏进倒计时。
+     *
+     * 现在的语义：**基线 == 本次解析出的锚点集**。这才是「基线是最新且合法的」该有的意思，
+     * 也才能让刷新幂等（同样的树刷两次，第二次零变更）。
+     *
+     * 丢弃旧键不是静默降级：下面 droppedSymbols / droppedSymbolHashes 会逐条打印，
+     * 且「推不出锚点」的符号在第 1839 行起就是硬失败（`process.exit(1)`），不是被悄悄丢掉。
+     */
+    const symbols = {}
+    const symbolHashes = {}
     const symbolKeys = parsed.anchors.filter((a) => a.symbolForm)
     for (const a of symbolKeys) {
       const src = fsView.sourceLines(a.path)
@@ -1887,6 +1935,24 @@ if (isMain) {
       console.error('If this is a legitimate stale-key cleanup, re-run with --allow-source-lines-drop.')
       process.exit(1)
     }
+    /*
+     * issue #1111：丢弃键必须**逐条报出来**，不能静默。
+     *
+     * 与 sourceLines / couplings 两条同一条纪律：下降要么是「合法陈旧键清理」，要么是
+     * 「解析退化导致静默降级」——两者形状相同，所以先打印再让下面的一致性判据决定收不收。
+     * 差别在于这里的丢弃是**设计如此**：基线就是本次锚点集，陈旧键本就该消失。
+     */
+    const droppedSymbols = Object.keys(anchorBaselineSymbols()).filter((k) => !Object.hasOwn(symbols, k))
+    const droppedSymbolHashes = Object.keys(anchorBaselineSymbolHashes())
+      .filter((k) => !Object.hasOwn(symbolHashes, k))
+    if (droppedSymbols.length > 0 || droppedSymbolHashes.length > 0) {
+      console.log('Stale baseline keys dropped by this refresh:')
+      for (const k of droppedSymbols) console.log('  - symbols: ' + k)
+      for (const k of droppedSymbolHashes) console.log('  - symbolHashes: ' + k)
+      if (droppedSymbols.length + droppedSymbolHashes.length > 40) {
+        console.log('  ... total ' + (droppedSymbols.length + droppedSymbolHashes.length) + ' keys')
+      }
+    }
     // issue #1003：把「允许下降」与「比例阈值」两个入口真正接上。
     // 上一版形参存在却从未传值，等于守卫没有出口——合法清理只能手改基线 JSON。
     const refreshGuard = refreshCompletenessProblem(
@@ -1897,6 +1963,28 @@ if (isMain) {
     )
     if (refreshGuard !== null) {
       console.error('Refusing to refresh: ' + refreshGuard)
+      process.exit(1)
+    }
+    /*
+     * issue #1111：写盘前的**完整性断言** —— 基线键集必须与本次解析出的锚点集完全一致。
+     *
+     * 因为上面已把 symbols / symbolHashes 改成 `{}` 起手，这条断言在正常路径下恒真；
+     * 它存在的意义是**锁住那个不变量**，让将来任何人若把某一处改回「并集继承」，
+     * 这里立刻炸出来，而不是又悄悄开始累积。这类「守卫当前恒真」的断言是刻意保留的
+     * （与 refresh-guard.mjs 里 missSym/missHash 同一性质）：它防的是未来的退化，不是现在的 bug。
+     */
+    const documentSymbolKeys = new Set(symbolKeys.map((a) => a.path + '#' + a.symbol))
+    const documentSymbolHashKeys = new Set(symbolKeys
+      .filter((a) => a.symbolHash !== undefined)
+      .map((a) => a.path + '#' + a.symbol + '@' + a.symbolHash))
+    const extraSymbols = Object.keys(symbols).filter((k) => !documentSymbolKeys.has(k))
+    const extraHashes = Object.keys(symbolHashes).filter((k) => !documentSymbolHashKeys.has(k))
+    if (extraSymbols.length > 0 || extraHashes.length > 0) {
+      console.error('Refusing to refresh: the new baseline contains keys that no document anchor explains:')
+      for (const k of extraSymbols.slice(0, 20)) console.error('  - symbols: ' + k)
+      for (const k of extraHashes.slice(0, 20)) console.error('  - symbolHashes: ' + k)
+      console.error('The symbols/symbolHashes segments must be rebuilt from this run, never inherited.')
+      console.error('See the comment above their initialisation for why inheritance caused issue #1111.')
       process.exit(1)
     }
     // #1023：耦合边基线。刷新侧与校验侧用**同一份** key 生成器（couplingBaselineEntries），
