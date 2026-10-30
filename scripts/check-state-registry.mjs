@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// check-state-registry.mjs — 状态登记制门禁（0.13.8-b ST-25 / 计划 §4.5）。
+// check-state-registry.mjs — 状态登记制门禁（0.13.8-b ST-25 / 计划 `4.5）。
 //
 // 三层断言：
 //   1. 两份 PR 模板（协调仓 + apk 仓）都在场，且四栏齐全（持有者/写路径/外部真源/同步路径）
@@ -9,9 +9,20 @@
 //   3. 写路径在场：条目的 writePath 必须以存在的文件路径开头（符号部分不校验），
 //      防「登记表指向已删除的文件」这种最典型的 stale。
 //
-// 用法：node scripts/check-state-registry.mjs [--list]
+// issue #1019（判据失效模式：vacuous pass——判据输入来自被检对象自己）：
+//   三处判据在「输入为空」时恒真，等于把自己关掉：
+//   - **四栏字段清单从被检登记表自己读**：`registry.fields ?? [...]`，只写 `"fields": []` 就让
+//     `for (const field of ...)` 一次都不执行，门禁照打「四栏 + evidence 全部可核对」。
+//   - **writePath ":" 命中仓库根**：`String(s.writePath).split(':')[0]` 切出空串，
+//     `join(ROOT, '')` 是仓库根目录、存在，于是「写路径在场」判绿，而它没指向任何文件。
+//   - **evidence(gate) 只判 existsSync**：指向一个目录（如 `scripts`）也过。
+//   修法 = 判据的**字段清单/规模基线不来自被检文件**：`REQUIRED_FIELDS` 在门禁里写死；
+//   writePath 的路径段必须非空且是**文件**；gate evidence 必须是可执行门禁脚本（`check-*.mjs` 等），
+//   不能是目录。同时给登记表补**非空下限**（`states.length > 0` 已有，verdict 也要求 evidence 条数 > 0）。
+//
+// 用法：node scripts/check-state-registry.mjs [--list] [--root <树>] [--self-test]
 // 退出码：0 = 通过；1 = 失败；2 = 登记表/模板不可解析。
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -22,11 +33,107 @@ const argv = process.argv.slice(2)
 const rootIdx = argv.indexOf('--root')
 const ROOT = rootIdx >= 0 ? resolve(argv[rootIdx + 1]) : dirname(HERE)
 
+/**
+ * 四栏（issue #1019）：**门禁自己**持有的必需字段清单，两种形态各一份、**不得**互相顶替。
+ *
+ * - `REQUIRED_FIELDS`：登记表 `state-registry.json` 的**键名**（英文）；
+ * - `TEMPLATE_FIELDS`：PR 模板里的**中文栏名**，模板是给人填的，栏名必须与说明同语言。
+ *
+ * 旧实现里登记表的字段清单来自 `registry.fields ?? [...]` —— 被检登记表决定「要检查哪些字段」，
+ * 写 `"fields": []` 即整条判据消失，而门禁仍然打印「四栏 + evidence 全部可核对」。
+ * 判据的规模/字段基线绝不能从被检对象里读：那是 vacuous pass 的标准形态。
+ */
+export const REQUIRED_FIELDS = ['holder', 'writePath', 'sourceOfTruth', 'syncPath']
+/** PR 模板的四栏名（中文）。与 `REQUIRED_FIELDS` 是同一件事的两种书写面，顺序一一对应。 */
+export const TEMPLATE_FIELDS = ['持有者', '写路径', '外部真源', '同步路径']
+
+/**
+ * writePath 的路径段判定（纯函数，供 --self-test 直接钉住）。
+ *
+ * 逐段检查（多个写路径用 ` + ` 连接）：
+ *   - 段必须**非空**：空串会被 `join(ROOT, '')` 解析成仓库根，而根目录永远存在，
+ *     于是 `writePath: ":"` 这种没有指向任何文件的登记也能通过（issue #1019 第二处）；
+ *   - 段必须是**文件**（不能是目录）：`writePath: "scripts"` 这类指向目录的登记同样是 stale，
+ *     符号部分（`:` 之后）不参与校验。
+ *
+ * @param {string} writePath 登记表里的 writePath 原值。
+ * @param {(rel: string) => string|null} resolveFile 相对路径 → 绝对文件路径（不在场返回 null）。
+ * @returns {string|null} null = 合规；否则返回判红理由。
+ */
+export const writePathProblem = (writePath, resolveFile) => {
+  const text = String(writePath ?? '')
+  if (text.trim() === '') return 'writePath 为空'
+  // 符号部分不校验：`A.kt:sym → B.kt:sym2` 里的 `:` 之后是符号描述。
+  const pathPart = text.split(':')[0].replace(/\\/g, '/')
+  if (pathPart.trim() === '') {
+    // `":"` / `" : sym"` 这类形态：切出空串，而空串被 `join(ROOT, '')` 解析成仓库根（永远存在）。
+    return 'writePath 含空路径段（writePath=' + JSON.stringify(text) + '）——空路径会命中仓库根，'
+      + '「写路径在场」对它恒真'
+  }
+  const segments = pathPart.split(' + ').map((candidate) => candidate.trim())
+  for (const segment of segments) {
+    if (segment === '') {
+      // 空段是真形态：`:` 或 `a.kt: + b.kt` 都会切出空串并被解析成仓库根。
+      return 'writePath 含空路径段（writePath=' + JSON.stringify(text) + '）——空路径会命中仓库根，'
+        + '「写路径在场」对它恒真'
+    }
+    const abs = resolveFile(segment)
+    if (abs === null) return '写路径不在场：' + segment
+    try {
+      if (statSync(abs).isDirectory()) return '写路径是目录而不是文件：' + segment
+    } catch {
+      return '写路径不可读：' + segment
+    }
+  }
+  return null
+}
+
+/**
+ * 门禁 evidence 的目标判定（纯函数）。issue #1019 第三处：旧实现只做 `existsSync`，
+ * `scripts` 这种目录也过——而「门禁脚本在场」这句话对目录毫无意义。
+ *
+ * @param {string} rel evidence.file
+ * @param {string} root 仓库根
+ * @returns {string|null} null = 合规；否则理由。
+ */
+export const gateEvidenceProblem = (rel, root) => {
+  const text = String(rel ?? '').trim()
+  // 有非空下限：空串会被 `join(root, '')` 解析成根目录。
+  if (text === '') return 'evidence(gate) 指向空路径'
+  const abs = join(root, text)
+  if (!existsSync(abs)) return 'evidence(gate) 门禁不在场：' + text
+  let isFile = false
+  try { isFile = statSync(abs).isFile() } catch { isFile = false }
+  if (!isFile) return 'evidence(gate) 指向的不是文件（目录不算门禁脚本）：' + text
+  if (!/\.(mjs|cjs|js|ps1|py|sh)$/.test(text)) {
+    return 'evidence(gate) 不是可执行门禁脚本（后缀须为 mjs/cjs/js/ps1/py/sh）：' + text
+  }
+  return null
+}
+
+/**
+ * 字段清单判定（纯函数）。issue #1019 第一处的直接守门人。
+ *
+ * 为什么单独抽出来：这条判据的失效形态是「循环体一次都不执行」，**输出上完全看不出来**
+ * （既没有 PASS 也没有 FAIL 行）。只能靠「字段清单 ⊆ 门禁自己持有的必需字段」与
+ * 「必需字段一条也不能少」两条结构性断言把它钉住。
+ *
+ * @param {string[]} fields 登记表声明的字段清单。
+ * @returns {string|null} null = 合规；否则理由。
+ */
+export const fieldsProblem = (fields) => {
+  if (!Array.isArray(fields)) return '登记表缺 fields 数组'
+  if (fields.length === 0) return '登记表 fields 为空 —— 四栏判据会被静默关掉（字段清单不得由被检对象自定义为空）'
+  const missing = REQUIRED_FIELDS.filter((f) => !fields.includes(f))
+  if (missing.length > 0) return '登记表 fields 漏必需栏：' + missing.join(', ')
+  return null
+}
+
 // ── --self-test：判别力自证（2026-10-29 补；此前这条门禁零判别力面）──────────────────
 //
 // 它守的是「跨层状态登记制」：PR 模板四栏齐全 + 登记表四栏非空 + id 唯一 + evidence 机器可核对
 // + 写路径必须指向在场文件。此前只能对着真登记表说 PASS，看不出它在本该红的时候会不会红。
-// 自证造合成树（--root），把七个判据分支全打一遍。
+// 自证造合成树（--root），把全部判据分支打一遍，外加 issue #1019 的三处 vacuous 形态。
 if (process.argv.includes('--self-test')) {
   const { execFileSync } = await import('node:child_process')
   const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import('node:fs')
@@ -64,10 +171,13 @@ if (process.argv.includes('--self-test')) {
     mkdirSync(join(dir, 'scripts'), { recursive: true })
     mkdirSync(join(dir, 'app', 'src', 'main', 'java'), { recursive: true })
     writeFileSync(join(dir, 'app', 'src', 'main', 'java', 'X.kt'), 'class X\n')
+    writeFileSync(join(dir, 'scripts', 'check-demo.mjs'), '// demo gate\n')
     writeFileSync(join(dir, '.github', 'PULL_REQUEST_TEMPLATE.md'), opts.template ?? TEMPLATE_OK)
     const states = opts.states ?? [GOOD_STATE]
-    writeFileSync(join(dir, 'scripts', 'state-registry.json'),
-      JSON.stringify({ $comment: 'synthetic', fields: ['holder', 'writePath', 'sourceOfTruth', 'syncPath'], states }, null, 1))
+    const fields = opts.fields === undefined ? REQUIRED_FIELDS : opts.fields
+    const payload = { $comment: 'synthetic', states }
+    if (fields !== null) payload.fields = fields
+    writeFileSync(join(dir, 'scripts', 'state-registry.json'), JSON.stringify(payload, null, 1))
     return dir
   }
 
@@ -88,15 +198,33 @@ if (process.argv.includes('--self-test')) {
   const badWritePath = buildTree('badpath', { states: [{ ...GOOD_STATE, writePath: 'app/src/main/java/Missing.kt:sym' }] })
   const badEvidence = buildTree('badev', { states: [{ ...GOOD_STATE, evidence: { kind: 'file', file: 'app/src/main/java/Nope.kt' } }] })
   const badKind = buildTree('badkind', { states: [{ ...GOOD_STATE, evidence: { kind: 'telepathy', file: 'x' } }] })
+  // issue #1019 的三处 vacuous 形态。
+  const emptyFields = buildTree('emptyfields', { fields: [] })
+  const noFields = buildTree('nofields', { fields: null })
+  const partialFields = buildTree('partialfields', { fields: ['holder'] })
+  const colonWritePath = buildTree('colonpath', { states: [{ ...GOOD_STATE, writePath: ':' }] })
+  const dirWritePath = buildTree('dirpath', { states: [{ ...GOOD_STATE, writePath: 'scripts' }] })
+  const gateDir = buildTree('gatedir', { states: [{ ...GOOD_STATE, evidence: { kind: 'gate', file: 'scripts' } }] })
+  const gateOk = buildTree('gateok', { states: [{ ...GOOD_STATE, evidence: { kind: 'gate', file: 'scripts/check-demo.mjs' } }] })
+  const gateMissing = buildTree('gatemissing', { states: [{ ...GOOD_STATE, evidence: { kind: 'gate', file: 'scripts/check-nope.mjs' } }] })
 
   const checks = [
     ['合规合成树 → PASSED 且 exit 0', runGate(['--root', ok]), (r) => r.code === 0 && r.out.includes('CHECK-STATE-REGISTRY PASSED')],
+    ['evidence(gate) 指向真实门禁脚本 → 放行', runGate(['--root', gateOk]), (r) => r.code === 0 && r.out.includes('CHECK-STATE-REGISTRY PASSED')],
     ['PR 模板缺一栏（外部真源）→ FAILED', runGate(['--root', noField]), (r) => r.code === 1 && r.out.includes('PR 模板四栏齐全')],
     ['登记表 states 为空 → FAILED（跨层状态矩阵起点不得为空）', runGate(['--root', emptyStates]), (r) => r.code === 1 && r.out.includes('登记表非空')],
     ['id 重复 → FAILED', runGate(['--root', dupIds]), (r) => r.code === 1 && r.out.includes('状态 id 唯一且非空')],
     ['writePath 指向已删除文件 → FAILED（最典型的 stale）', runGate(['--root', badWritePath]), (r) => r.code === 1 && r.out.includes('写路径在场')],
     ['evidence(file) 路径不在场 → FAILED', runGate(['--root', badEvidence]), (r) => r.code === 1 && r.out.includes('evidence(file) 在场')],
     ['evidence kind 非法 → FAILED（只认 file|grep|gate）', runGate(['--root', badKind]), (r) => r.code === 1 && r.out.includes('evidence kind 合法')],
+    // ── issue #1019：三处 vacuous pass 的负控 ──────────────────────────────────
+    ['#1019 fields: [] → FAILED（字段清单不得由被检对象关掉）', runGate(['--root', emptyFields]), (r) => r.code === 1 && r.out.includes('fields 为空')],
+    ['#1019 登记表缺 fields 键 → FAILED（不得退回默认值放行）', runGate(['--root', noFields]), (r) => r.code === 1 && r.out.includes('缺 fields 数组')],
+    ['#1019 fields 漏必需栏 → FAILED', runGate(['--root', partialFields]), (r) => r.code === 1 && r.out.includes('fields 漏必需栏')],
+    ['#1019 writePath ":" → FAILED（空路径段命中仓库根，不得放行）', runGate(['--root', colonWritePath]), (r) => r.code === 1 && r.out.includes('空路径段')],
+    ['#1019 writePath 指向目录 → FAILED（目录不是写路径）', runGate(['--root', dirWritePath]), (r) => r.code === 1 && r.out.includes('目录而不是文件')],
+    ['#1019 evidence(gate) 指向目录 → FAILED（目录不算门禁脚本）', runGate(['--root', gateDir]), (r) => r.code === 1 && r.out.includes('不是文件')],
+    ['#1019 evidence(gate) 指向不存在的脚本 → FAILED', runGate(['--root', gateMissing]), (r) => r.code === 1 && r.out.includes('门禁不在场')],
   ]
   let bad = 0
   for (const [label, result, verify] of checks) {
@@ -104,7 +232,10 @@ if (process.argv.includes('--self-test')) {
     console.log((pass ? 'PASS  ' : 'FAIL  ') + label + (pass ? '' : '  -> exit=' + result.code + ' out=' + result.out.trim().slice(0, 200)))
     if (!pass) bad += 1
   }
-  for (const dir of [ok, noField, emptyStates, dupIds, badWritePath, badEvidence, badKind]) rmSync(dir, { recursive: true, force: true })
+  for (const dir of [ok, noField, emptyStates, dupIds, badWritePath, badEvidence, badKind,
+    emptyFields, noFields, partialFields, colonWritePath, dirWritePath, gateDir, gateOk, gateMissing]) {
+    rmSync(dir, { recursive: true, force: true })
+  }
   console.log(bad === 0
     ? 'STATE_REGISTRY_SELF_TEST_PASSED（' + checks.length + ' 项）'
     : 'STATE_REGISTRY_SELF_TEST_FAILED（' + bad + ' 项）')
@@ -128,17 +259,33 @@ const check = (label, ok, detail) => {
 }
 
 // ── 1. PR 模板四栏 ─────────────────────────────────────────────────────────
-const REQUIRED_FIELDS = ['持有者', '写路径', '外部真源', '同步路径']
+/**
+ * 模板形态判据（issue #1019 末段）：旧实现把「协调仓模板」与「apk 仓模板」两条路径都交给
+ * `resolveRepoPath`，而它在 apk 自包含布局下会把同一条 `.github/PULL_REQUEST_TEMPLATE.md`
+ * 解析两次，于是「两份模板各自必须存在」实际只有一份在场也判绿。
+ *
+ * 判据改成**布局相关**：apk 自包含树（根下没有 `dsh-mobile-apk/`）只要求一份模板在场；
+ * 协调仓布局（根下有 `dsh-mobile-apk/`）要求两份各自在场。这样「在场」与「两条路径」
+ * 不再可混淆，也不会把自包含树的正常形态判红。
+ */
 const TEMPLATES = ['.github/PULL_REQUEST_TEMPLATE.md', 'dsh-mobile-apk/.github/PULL_REQUEST_TEMPLATE.md']
-for (const rel of TEMPLATES) {
-  // 布局无关：apk 自包含根下 dsh-mobile-apk/... 落到本仓同名相对路径（两份模板各自必须存在）。
+const COORD_LAYOUT = existsSync(join(ROOT, 'dsh-mobile-apk'))
+const requiredTemplates = COORD_LAYOUT ? TEMPLATES : TEMPLATES.slice(0, 1)
+const seenTemplateFiles = new Set()
+for (const rel of requiredTemplates) {
   const p = resolveRepoPath(rel)
   if (p === null) { check('PR 模板在场: ' + rel, false); continue }
+  seenTemplateFiles.add(p)
   const text = readFileSync(p, 'utf8')
-  const missing = REQUIRED_FIELDS.filter((f) => !text.includes(f))
+  const missing = TEMPLATE_FIELDS.filter((f) => !text.includes(f))
   check('PR 模板四栏齐全: ' + rel, missing.length === 0, '缺: ' + missing.join(', '))
   check('PR 模板带 state-registry 标记: ' + rel, text.includes('state-registry'))
   check('PR 模板要求同步路径附可执行证据: ' + rel, /可执行证据/.test(text))
+}
+// 同一份文件不得被算成「两份模板」：上面已按布局决定要不要两条，这里再钉一次事实。
+if (requiredTemplates.length > 1) {
+  check('两份 PR 模板是**不同文件**（不得同一文件解析两次）', seenTemplateFiles.size === requiredTemplates.length,
+    '仅解析到 ' + seenTemplateFiles.size + ' 个文件')
 }
 
 // ── 2/3. 登记表 ────────────────────────────────────────────────────────────
@@ -154,16 +301,27 @@ const ids = states.map((s) => s.id)
 check('状态 id 唯一且非空', ids.every((id) => typeof id === 'string' && id.trim() !== '') && new Set(ids).size === ids.length,
   '重复: ' + ids.filter((id, i) => ids.indexOf(id) !== i).join(', '))
 
+/**
+ * issue #1019（第一处）：字段清单**不再**从被检登记表读。
+ *
+ * 旧实现 `registry.fields ?? REQUIRED_FIELDS` 的失效形态是「循环体一次都不执行」——
+ * 输出上既没有 PASS 也没有 FAIL，只有一句「四栏 + evidence 全部可核对」的总结，
+ * 肉眼与机器都看不出来。所以现在先把 fields 本身当成一条判据：
+ * 它必须存在、非空、且是 REQUIRED_FIELDS 的超集（多登记的额外栏也照样逐条判非空）。
+ */
+const fieldsDeclared = fieldsProblem(registry.fields)
+check('登记表 fields 声明完整（不得由被检对象关掉四栏判据）', fieldsDeclared === null, String(fieldsDeclared ?? ''))
+const fieldsToCheck = Array.isArray(registry.fields) && registry.fields.length > 0 ? registry.fields : REQUIRED_FIELDS
+
 for (const state of states) {
   const label = 'state ' + state.id
-  for (const field of registry.fields ?? ['holder', 'writePath', 'sourceOfTruth', 'syncPath']) {
+  for (const field of fieldsToCheck) {
     const value = state[field]
     check(label + ' 四栏非空: ' + field, typeof value === 'string' && value.trim() !== '')
   }
-  // 写路径在场（路径部分必须存在）
-  const pathPart = String(state.writePath ?? '').split(':')[0].replace(/\\/g, '/')
-  const pathExists = pathPart.split(' + ').every((candidate) => resolveRepoPath(candidate.trim()) !== null)
-  check(label + ' 写路径在场', pathExists, pathPart)
+  // 写路径在场（路径部分必须存在，且必须是文件 —— 空段/目录都会被判红）
+  const writeProblem = writePathProblem(state.writePath, resolveRepoPath)
+  check(label + ' 写路径在场', writeProblem === null, String(writeProblem ?? state.writePath))
   // evidence 机器可核对
   const ev = state.evidence ?? {}
   if (ev.kind === 'file') {
@@ -176,7 +334,9 @@ for (const state of states) {
       check(label + ' evidence(grep) 命中: ' + ev.pattern, hit, String(ev.file))
     }
   } else if (ev.kind === 'gate') {
-    check(label + ' evidence(gate) 门禁在场', existsSync(join(ROOT, ev.file)), String(ev.file))
+    // issue #1019（第三处）：旧实现只判 existsSync，指向目录也过。
+    const gateProblem = gateEvidenceProblem(ev.file, ROOT)
+    check(label + ' evidence(gate) 门禁在场', gateProblem === null, String(gateProblem ?? ev.file))
   } else {
     check(label + ' evidence kind 合法（file|grep|gate）', false, JSON.stringify(ev.kind))
   }
