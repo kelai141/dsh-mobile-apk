@@ -962,6 +962,16 @@ export function apply(ctx: ClientContext): void {
     order: 90,
     locale: providerHintNS,
   } as never, CustomProviderHint as never))
+  // issue #979：座位上的 `locale: providerHintNS` 只有在同名命名空间**真的注册过**时才有文案；
+  // 未注册时引擎 translate 兜底返回 key，卡片里显示字面量 `hint.catalog`（#960 的文案等于没上屏）。
+  // 座位注册保持无条件执行（不挪进 locale 注入，避免改变座位的可用时机）；locale 注册单独一块，
+  // 照既有四处写法（scope.effect 托管 disposer）。
+  ctx.inject(['locale'], (scope) => {
+    scope.effect(
+      () => scope.locale.register(providerHintNS, { zh: providerHintZh, en: providerHintEn }),
+      'ui-responsive: custom provider hint copy',
+    )
+  })
 }
 
 
