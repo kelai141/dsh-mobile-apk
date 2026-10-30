@@ -288,8 +288,12 @@ if (ghostEngine.length > 0) {
 }
 
 if (missing.length === 0 && unmounted.length === 0 && entryIssues.length === 0 && ghostEngine.length === 0) {
+  // 收口行带 SKIP= 是 check-gate-skips 的纪律：本脚本有「引擎 overlay 不在场」这一处 SKIP，
+  // 汇总必须把它的计数写出来，否则聚合链分不清「没有 SKIP」与「SKIP 了但没人记」。
   console.log('patch mounts ok (双向 + 条目级): ' + injected.size + ' 个注入包全部挂载（' + [...injected].sort().join(', ') + '）'
-    + '；条目 ' + parseEntries(patch).length + ' 条无 id/包名冲突' + (engineKnown === null ? '' : '；@deepseek-ai 前缀 ' + engineKnown.size + ' 个包内有界'))
+    + '；条目 ' + parseEntries(patch).length + ' 条无 id/包名冲突'
+    + (engineKnown === null ? '' : '；@deepseek-ai 前缀 ' + engineKnown.size + ' 个包内有界')
+    + '；SKIP=' + skipped)
   process.exit(0)
 }
 if (missing.length > 0) {
