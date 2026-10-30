@@ -3668,79 +3668,79 @@
       "*"
     ],
     "plugins/dsh-android-manage/src/index.ts:1071": [
-      "return {"
+      "if (vd?.ok !== true || data.ok === false) {"
     ],
     "plugins/dsh-android-manage/src/index.ts:114": [
-      "// Every route that can observe or manipulate an Android display goes through this one scope gate"
+      "function tools(ctx: Context, priv: PrivilegeFace) {"
     ],
     "plugins/dsh-android-manage/src/index.ts:1268": [
-      ""
+      "})"
     ],
     "plugins/dsh-android-manage/src/index.ts:1300": [
       "}"
     ],
     "plugins/dsh-android-manage/src/index.ts:133": [
-      "*   guard('ui_click', { ref, nx, ny }, exec)"
+      "*   guard('ui_dump', {}, exec)      // 只传空对象"
     ],
     "plugins/dsh-android-manage/src/index.ts:1341": [
-      "screen?: { w: number; h: number }"
+      "rotation?: number"
     ],
     "plugins/dsh-android-manage/src/index.ts:137": [
-      "*"
+      "* 「屏幕参数像是没生效」，实际是「参数根本没进门」。"
     ],
     "plugins/dsh-android-manage/src/index.ts:138": [
-      "* 这也解释了为什么同一族工具有的能路由、有的不能：差别只在调用点是否碰巧把 screenId 抄进去了。"
+      "*"
     ],
     "plugins/dsh-android-manage/src/index.ts:1494": [
-      "screen,"
+      "parentByOrig: pruned.parentByOrig,"
     ],
     "plugins/dsh-android-manage/src/index.ts:1507": [
-      "const webNode = pruned.nodes.find((n) => /WebView/i.test(String(n.type || '')))"
+      "const mismatch = fg !== null && dumpPkg !== '' && fg.pkg !== dumpPkg"
     ],
     "plugins/dsh-android-manage/src/index.ts:1519": [
-      "rotation: v2?.rotation ?? data.rotation ?? 0,"
+      "screen,"
     ],
     "plugins/dsh-android-manage/src/index.ts:152": [
-      "? await priv.screenAccessResolved(requested)"
+      "const screen = priv.screenAccessResolved !== undefined"
     ],
     "plugins/dsh-android-manage/src/index.ts:1537": [
-      "}"
+      "+ warn + webHint + detail.hint,"
     ],
     "plugins/dsh-android-manage/src/index.ts:1899": [
-      "from = [sx, dir === 'up' ? area.y2 - Math.floor(dy / 2) : area.y1 + Math.floor(dy / 2)]"
+      "const dy = Math.floor((area.y2 - area.y1) * frac)"
     ],
     "plugins/dsh-android-manage/src/index.ts:1999": [
-      "// ADBKeyboard 协议：am broadcast -n <接收器组件> -a ADB_INPUT_TEXT / ADB_CLEAR_TEXT --es msg <文本>。"
+      "if (wantKb) {"
     ],
     "plugins/dsh-android-manage/src/index.ts:2031": [
-      "try {"
-    ],
-    "plugins/dsh-android-manage/src/index.ts:2283": [
-      "notDone.push('输入法未启用（请在「设置 → 系统 → 语言与输入法」里手动启用「DSH 设备键盘」后重试'"
-    ],
-    "plugins/dsh-android-manage/src/index.ts:2286": [
-      "const cur = await priv.execAdbShell(`settings get secure default_input_method`)"
-    ],
-    "plugins/dsh-android-manage/src/index.ts:394": [
       "}"
     ],
+    "plugins/dsh-android-manage/src/index.ts:2283": [
+      "}"
+    ],
+    "plugins/dsh-android-manage/src/index.ts:2286": [
+      "const en = await priv.execAdbShell(`ime enable ${IME_ID}`)"
+    ],
+    "plugins/dsh-android-manage/src/index.ts:394": [
+      "return fallback('；无法解析当前模型路由，请用 read_image 读该路径')"
+    ],
     "plugins/dsh-android-manage/src/index.ts:517": [
-      "parameters: {"
+      "+ '请改用 android_ui_dump / android_ui_tree 拿结构文本，或不调用本工具。',"
     ],
     "plugins/dsh-android-manage/src/index.ts:571": [
-      "denied: false,"
+      "imagePath: '',"
     ],
     "plugins/dsh-android-manage/src/index.ts:580": [
-      "if (!a.ok) return { imagePath: '', denied: true, text: a.guidance }"
+      "const a = await guard('screenshot', args as Record<string, unknown>, exec as { agent?: { session?: unknown } })"
     ],
     "plugins/dsh-android-manage/src/index.ts:7": [
       "* 工具集（全部经 ctx.androidPrivilege 前置校验 + 审计）："
     ],
     "plugins/dsh-android-manage/src/index.ts:728": [
-      "if (!a.ok) return { ok: false, denied: true, text: a.guidance }"
+      "const a = await guard('ui_detail', args as Record<string, unknown>, exec as { agent?: { session?: unknown } })"
     ],
     "plugins/dsh-android-manage/src/index.ts:901": [
-      "})"
+      "render: (_args: unknown, v: unknown) => [{ type: 'text' as const, text: nodeListLines(v as Record<string, unknown>) }],"
     ],
     "plugins/dsh-android-manage/src/protocol-v2.ts:114": [
       "}"

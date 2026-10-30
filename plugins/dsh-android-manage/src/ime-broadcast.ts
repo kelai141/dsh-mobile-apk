@@ -86,3 +86,19 @@ export function parseBroadcastResult(stdout: string): number | null {
 export function isCommitAccepted(code: number | null): boolean {
   return code === null || code === 0 || code === KB_RESULT.committed
 }
+
+/**
+ * issue #1067：这个结果码是否**有权威证据**说明「已提交」。
+ *
+ * `isCommitAccepted` 的兼容口径把 `null` 与 `0` 也放行（旧壳只回 `result=0`，判红会让
+ * 「新插件 + 旧壳」的热推场景全部误报失败）——但「放行」不等于「证实」。这两个值都取不到
+ * 提交证据：`null` = 那行根本没打印（输出被截断 / ROM 不打印），`0` = `am` 的默认返回值。
+ *
+ * 判据分开的理由：返回文案必须能如实说明。此前 verifyNote 在 `readBack === null` 且
+ * `resultCode !== committed` 时是**空串**，于是一条无法证实的结果被渲染成
+ * 「已输入 xxx（ADBKeyboard）」——正是本文件 `-n` 那次修复要消灭的「链路全绿、文本不动」形态
+ * （a11y 关闭时没有回读兜底，这条是唯一判据）。
+ */
+export function hasAuthoritativeCommit(code: number | null): boolean {
+  return code === KB_RESULT.committed
+}

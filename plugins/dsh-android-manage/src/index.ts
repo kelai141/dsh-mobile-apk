@@ -43,6 +43,7 @@ import {
   adbKeyboardAuth,
   adbKeyboardBroadcast,
   isCommitAccepted,
+  hasAuthoritativeCommit,
   parseBroadcastResult,
 } from './ime-broadcast.js'
 
@@ -2078,9 +2079,15 @@ properties: {
             }
           }
           const act = [clear ? '已清空' : '', raw ? `已输入 ${raw.slice(0, 24)}${raw.length > 24 ? '…' : ''}` : ''].filter(Boolean).join(' + ')
-          const verifyNote = readBack === null
-            ? (resultCode === KB_RESULT.committed ? '，壳侧结果码确认已提交' : '')
-            : '，回读一致'
+          // issue #1067：无回读时，只有**权威结果码**才能宣称已提交。取不到结果码（截断 / ROM
+          // 不打印）与旧壳的 result=0 都只是「兼容性放行」，不是证据——此时必须明说未证实，
+          // 否则工具回 ok:true「已输入」而文本可能压根没进去（a11y 关闭时没有回读兜底，
+          // 这条是唯一判据）。isCommitAccepted 的放行口径不变（旧壳兼容），变的只是文案诚实度。
+          const verifyNote = readBack !== null
+            ? '，回读一致'
+            : (hasAuthoritativeCommit(resultCode)
+              ? '，壳侧结果码确认已提交'
+              : '，未证实例（取不到壳侧结果码，且本通道无回读：文本可能未落地，建议开无障碍后重试或改 channel:"input"）')
           return {
             ok: true,
             denied: false,
