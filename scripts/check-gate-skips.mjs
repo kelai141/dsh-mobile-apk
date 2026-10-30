@@ -416,16 +416,11 @@ const AUDIT_BASELINE = new Map([
     reason: '真数据分支打印 SKIP(#1)(real-data) 后不打印 SKIP= 汇总（汇总只在 PASSED/FAILED 分支），也不打印判据行',
     until: '2026-12-31',
   }],
-  ['check-runtime-assets.mjs', {
-    kinds: ['no-summary', 'no-verdict'],
-    reason: 'SKIP(#1)（快照不在场）后直接 exit 0：脚本内唯一的 SKIP= 与 PASS 都在 PASSED 分支',
-    until: '2026-12-31',
-  }],
-  ['check-mcp-client-deps.mjs', {
-    kinds: ['no-verdict'],
-    reason: '以 SKIP 结案时只打印 SKIP 行与 SKIP=1，没有机器判据行（PASS/FAIL）',
-    until: '2026-12-31',
-  }],
+  // 已销账（2026-10-31，#1154）：check-runtime-assets / check-mcp-client-deps 两条登记已删除。
+  // 它们登记的都是「快照不在场时以 SKIP 结案、无判据行」这一缺口；放入 v0.14.10 官方快照后
+  // 两条门禁都真跑并通过（CHECK-RUNTIME-ASSETS PASSED 核对组合 3 / CHECK-MCP-CLIENT-DEPS PASSED
+  // 17 包全可解析），缺口不再复现 —— 按本表「缺口消失也要判红」的规则必须删条目，
+  // 否则这两条会变成永久静默的后门。
   ['check-snapshot-fingerprint.mjs', {
     kinds: ['no-verdict'],
     reason: '净检出无 tar 时以 SKIP 结案，不打印 PASS/FAIL 判据行',
