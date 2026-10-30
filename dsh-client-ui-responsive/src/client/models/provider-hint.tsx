@@ -54,8 +54,8 @@ export function CustomProviderHint(props: ProviderHintProps): ReactElement {
         margin: '8px 0 0',
         padding: '6px 8px',
         borderRadius: '6px',
-        background: 'var(--dsw-alias-bg-secondary, rgba(127,127,127,0.08))',
-        color: 'var(--dsw-alias-text-secondary, inherit)',
+        background: 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,0.08))',
+        color: 'var(--dsw-alias-label-secondary, inherit)',
         fontSize: '12px',
         lineHeight: '1.5',
       }}

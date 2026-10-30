@@ -224,6 +224,13 @@
         "kind": "list",
         "scope": "session",
         "why": "右栏标签动作菜单座位，承载 Android 原生浏览器控件入口（android-browser.native-controls）。上游实测为 kind=list + scope=session —— 若上游改成 keyed 或收掉，原生控件入口会与既有菜单项互相覆盖或整条消失，本登记即为该事故的判据。"
+      },
+      {
+        "slot": "settings.models.provider-card",
+        "file": "packages/client/ui-settings-models/src/client/slot-contract.ts",
+        "kind": "keyed",
+        "scope": "root",
+        "why": "模型提供商卡片的扩展座位，承载「列表来自内置目录」提示（#976/#960 文案止损）。上游实测 kind=keyed + scope=root（按卡片所属 provider 键控）。它是 slots 里已消费但此前未进 declarations 的一条：上游若改 kind/scope，提示会挂错卡片或整块落空，而界面只是少一行小字、§4b 声明面也盯不住它；本登记即为该事故的判据。"
       }
     ],
     "upstreamUniverse": {
