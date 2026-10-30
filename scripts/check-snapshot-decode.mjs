@@ -83,6 +83,28 @@ export function decideDecode(result) {
   return { ok: true, detail: 'entries=' + entries + ' bytes=' + bytes }
 }
 
+/**
+ * 前置件判据（纯函数，供 --self-test 与主流程共用）——issue #1073 的独家守门人。
+ *
+ * 契约（:28）：0 = 通过**或明确计数并打印的 SKIP**。前置件（java / 解码器 jar）不齐时，
+ * 本门禁能做的最诚实的事是**停下来**并计数 SKIP；继续往下跑只会拿空解码器列表做版本对账，
+ * 产出一条「解码器版本与 build.gradle.kts 声明不同」的 FAILED——真因是「本机没有 java」，
+ * 报告却把人引向 Gradle 版本（issue #1073 实测形态）。
+ *
+ * @param {{ hasJava: boolean, missingJars: string[] }} input
+ * @returns {{ stop: boolean, reasons: string[] }}
+ */
+export function decidePrereq(input) {
+  const reasons = []
+  if (!input.hasJava) reasons.push('java（DSH_JAVA / JAVA_HOME / PATH 都未命中）')
+  if (input.missingJars.length > 0) {
+    reasons.push('Gradle 模块缓存里的解码器 jar：' + input.missingJars.join(', ')
+      + '（用 DSH_XZ_JAR / DSH_COMPRESS_JAR / DSH_IO_JAR / DSH_LANG3_JAR 可显式指定；'
+      + '它们与 app/build.gradle.kts 同版本，缺件时本门禁证明不了设备那套解码器）')
+  }
+  return { stop: reasons.length > 0, reasons }
+}
+
 /** 探针源码：与设备同一套 streaming 解码器（XZCompressorInputStream + TarArchiveInputStream）。 */
 const PROBE_SOURCE = [
   'import java.io.*;',
@@ -237,7 +259,7 @@ function runProbe(java, classpath, tar) {
 // ── 自测：纯判据离线测试；--self-test-runtime 另加真实 Java 解码器/指纹反证 ─────
 if (SELF_TEST || SELF_TEST_RUNTIME) {
   const cases = []
-  const check = (label, ok) => { cases.push({ label, ok }); console.log((ok ? 'PASS  ' : 'FAIL  ') + label) }
+  const check = (label, ok, detail) => { cases.push({ label, ok }); console.log((ok ? 'PASS  ' : 'FAIL  ') + label + (ok || detail === undefined ? '' : '  -> ' + detail)) }
   if (SELF_TEST_RUNTIME) {
     const java = resolveJava()
     const decoder = resolveDecoder()
@@ -329,6 +351,43 @@ if (SELF_TEST || SELF_TEST_RUNTIME) {
     !decideDecode({ status: 0, stdout: 'XZ_DECODE_OK entries=10 bytes=999 declared=1000' }).ok)
   check('反向：无判据行（探针没跑）-> 判红', !decideDecode({ status: 0, stdout: 'noise' }).ok)
   check('反向：java 无法启动 -> 判红', !decideDecode({ error: new Error('spawn java ENOENT') }).ok)
+
+  // ── 前置件判据（issue #1073 的独家守门人）──────────────────────────────────
+  // 真因是「本机没有 java」时，门禁必须**停在这里**并以计数的 SKIP 结案；
+  // 它绝不能继续往下做版本对账（那会拿空解码器列表报出「版本漂移」的假红）。
+  const c1 = decidePrereq({ hasJava: true, missingJars: [] })
+  check('正向：java 与解码器 jar 齐备 -> 不停（照常真跑解压）', c1.stop === false && c1.reasons.length === 0)
+  const c2 = decidePrereq({ hasJava: false, missingJars: [] })
+  check('反向：缺 java -> 必须停下并点名 java（不得继续版本对账）',
+    c2.stop === true && c2.reasons.length === 1 && c2.reasons[0].includes('java'))
+  const c3 = decidePrereq({ hasJava: true, missingJars: ['xz', 'commons-io'] })
+  check('反向：缺解码器 jar -> 必须停下并逐项点名', c3.stop === true && c3.reasons[0].includes('xz, commons-io'))
+  const c4 = decidePrereq({ hasJava: false, missingJars: ['xz'] })
+  check('缺 java 且缺 jar -> 两条独立 SKIP 理由（不得合并成一条含糊 SKIP）', c4.reasons.length === 2)
+  // 端到端：解码器不齐时真实 CLI 必须以「计数的 SKIP + exit 0（非严格档）」结案，
+  // 且**不得**出现「解码器版本与 … 声明不同」这条错误真因。
+  const probeRoot = mkdtempSync(join(tmpdir(), 'snapshot-decode-prereq-'))
+  try {
+    const assetsDir = join(probeRoot, 'app', 'src', 'main', 'assets')
+    mkdirSync(assetsDir, { recursive: true })
+    writeFileSync(join(assetsDir, 'snapshot.tar.xz'), Buffer.from('not-a-real-xz'))
+    const decodeGate = join(ROOT, 'scripts', 'check-snapshot-decode.mjs')
+    const noJars = spawnSync(process.execPath, [decodeGate, '--root', probeRoot], {
+      encoding: 'utf8', env: { ...process.env, DSH_JAVA: '', JAVA_HOME: '', DSH_XZ_JAR: '/nonexistent/xz.jar', DSH_COMPRESS_JAR: '/nonexistent/c.jar', DSH_IO_JAR: '/nonexistent/io.jar', DSH_LANG3_JAR: '/nonexistent/l3.jar' },
+    })
+    const outNoJars = (noJars.stdout ?? '') + (noJars.stderr ?? '')
+    check('端到端：缺解码器 -> 计数 SKIP 并 exit 0（非严格档不假红）',
+      noJars.status === 0 && /SKIP\(#\d+\)/.test(outNoJars) && /SKIP=[1-9]/.test(outNoJars),
+      outNoJars.trim().split('\n').slice(-2).join(' | '))
+    check('端到端：缺解码器 -> 不得报「解码器版本与 … 声明不同」（错误真因）',
+      !outNoJars.includes('声明不同'), outNoJars.includes('声明不同') ? outNoJars.slice(0, 200) : '')
+    const strictNoJars = spawnSync(process.execPath, [decodeGate, '--root', probeRoot, '--require'], {
+      encoding: 'utf8', env: { ...process.env, DSH_JAVA: '', JAVA_HOME: '', DSH_XZ_JAR: '/nonexistent/xz.jar', DSH_COMPRESS_JAR: '/nonexistent/c.jar', DSH_IO_JAR: '/nonexistent/io.jar', DSH_LANG3_JAR: '/nonexistent/l3.jar' },
+    })
+    check('端到端：--require 档下同一输入必须判红（SKIP 不得结案）', strictNoJars.status === 1)
+  } finally {
+    rmSync(probeRoot, { recursive: true, force: true })
+  }
   const bad = cases.filter((c) => !c.ok)
   console.log('SNAPSHOT-DECODE ' + (SELF_TEST_RUNTIME ? 'RUNTIME ' : '') + 'SELF-TEST ' + (bad.length === 0 ? 'PASSED' : 'FAILED') + '（' + cases.length + ' 项）')
   process.exit(bad.length === 0 ? 0 : 1)
@@ -357,13 +416,25 @@ if (EXPLICIT_TAR) {
 }
 
 // ── 解析解码器（与设备同版本）────────────────────────────────────────────────
+//
+// issue #1073：skip() 在**非严格档**只打印并计数，**不改变控制流**——于是「缺 java / 缺解码器 jar」
+// 之后仍会走下面的版本对账，actualVersions 是空串 ⇒ 必然 drift ⇒ fail()，
+// 把合法归档判成「解码器版本漂移」。真因是「本机没有 java」，报告却指向 Gradle 版本，
+// 排查方向被带偏；同时与 :28 的契约（0 = 通过或明确计数打印的 SKIP）冲突。
+//
+// 修法：前置件不齐时**不进入**版本对账与解压，直接在「非严格档」以计数的 SKIP 结案；
+// 严格档由 skip() 自己判红（--require 下不得以 SKIP 结案）。版本对账只在解码器真在场时才有意义。
 const java = resolveJava()
-if (!java) skip('找不到 java（DSH_JAVA / JAVA_HOME / PATH 都未命中）——无法用设备同源解码器真检')
 const decoder = resolveDecoder()
-if (decoder.missing.length > 0) {
-  skip('Gradle 模块缓存里缺解码器 jar：' + decoder.missing.join(', ')
-    + '（用 DSH_XZ_JAR / DSH_COMPRESS_JAR / DSH_IO_JAR / DSH_LANG3_JAR 可显式指定；'
-    + '它们与 app/build.gradle.kts 同版本，缺件时本门禁证明不了设备那套解码器）')
+const prereq = decidePrereq({ hasJava: java !== null, missingJars: decoder.missing })
+if (prereq.stop) {
+  // 每条缺件都计数并具名（一次一个 SKIP(#n)，不合并成一条含糊的 SKIP）。
+  for (const why of prereq.reasons) skip('缺前置件 ' + why)
+  // 非严格档：契约允许「明确计数并打印的 SKIP」。这里必须**停在这里**——继续往下跑只会
+  // 拿空解码器列表做版本对账，产出一条与真因无关的 FAILED（issue #1073 的形态）。
+  console.log('SNAPSHOT-DECODE CHECK SKIPPED（前置件不齐，未执行解压与版本对账）')
+  console.log('SKIP=' + skipTotal)
+  process.exit(0)
 }
 
 const declared = declaredVersions()

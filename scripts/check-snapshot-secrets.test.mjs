@@ -64,7 +64,10 @@ test('干净的 settings.yaml 必须通过（新判据不得把占位模板判�
 test('settings.yaml 里的 token: 值必须判红（旧判据的漏网形态）', () => {
   const r = withSnapshot({ 'home/.dsh/settings.yaml': 'a: 1\ntoken: abc12345\n' }, (tar) => runGate(tar))
   assert.equal(r.code, 1, 'token: 值没被检出：' + r.out)
-  assert.match(r.out, /settings-yaml-secret/)
+  // #1033 之后内容级判据统一用 FAIL[credential-content] 这一条机器标签（旧实现分
+  // settings-yaml-secret 等多条），断言随之对齐；仍要求点名命中的成员，避免只凭标签放行。
+  assert.match(r.out, /FAIL\[credential-content\]/)
+  assert.match(r.out, /settings\.yaml/)
 })
 
 test('password / secret / credential 同族键名也要判红', () => {
@@ -74,11 +77,30 @@ test('password / secret / credential 同族键名也要判红', () => {
   }
 })
 
-test('敏感路径命中（.credentials / sessions / .npmrc）判红', () => {
-  for (const p of ['home/.dsh/.credentials', 'home/.dsh/sessions/x.json', 'home/.npmrc']) {
+test('敏感路径命中（.credentials / sessions）判红', () => {
+  // #1033：.npmrc 已从「路径级判据」改为「内容级判据」——路径名本身不再是证据，
+  // 凭据形态（_authToken 等）才是。所以这条只断言路径级仍然生效的两个，
+  // .npmrc 的两个方向（有凭据判红 / 无凭据不误红）由下面两条用例分别钉住。
+  for (const p of ['home/.dsh/.credentials', 'home/.dsh/sessions/x.json']) {
     const r = withSnapshot({ [p]: 'x' }, (tar) => runGate(tar))
     assert.equal(r.code, 1, p + ' 没被检出：' + r.out)
   }
+})
+
+test('.npmrc 的凭据形态按内容判红，无凭据的 .npmrc 不得误红', () => {
+  // 有凭据：内容里有 _authToken 实际值 -> 必须红（不管它在哪个路径下）。
+  const dirty = withSnapshot(
+    { 'home/.npmrc': '//registry.npmjs.org/:_authToken=npm_9Xk2abcdef\n' },
+    (tar) => runGate(tar),
+  )
+  assert.equal(dirty.code, 1, '.npmrc 里的 _authToken 没被检出：' + dirty.out)
+  assert.match(dirty.out, /FAIL\[credential-content\]/)
+  // 无凭据：只有 registry 的干净 .npmrc -> 必须绿（旧实现按路径名判，这里会假红）。
+  const clean = withSnapshot(
+    { 'home/.npmrc': 'registry=https://registry.npmjs.org/\n' },
+    (tar) => runGate(tar),
+  )
+  assert.equal(clean.code, 0, '干净的 .npmrc 被误判红：' + clean.out)
 })
 
 test('不是发行快照时必须硬失败，不接受空集假绿', () => {
