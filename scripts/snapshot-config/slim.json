@@ -38,6 +38,16 @@
       "root": "usr",
       "ext": ".p12",
       "reason": "同上：PKCS#12 密钥库的另一种扩展名，Android 无消费者；抛同一类私钥泄漏"
+    },
+    {
+      "root": "usr",
+      "ext": ".coveralls.yml",
+      "reason": "Coveralls CI 凭据文件：Android 运行期零消费者。实测 debug 包自带 .coveralls.yml 内含 repo_token（真 token 字符串），随 npm 包公开分发但不是我们的凭据；按「快照不含凭据」的承诺一并剔除，不靠豁免文字过关"
+    },
+    {
+      "root": "usr",
+      "ext": ".coveralls.yaml",
+      "reason": "同上：Coveralls 凭据文件的另一种扩展名"
     }
   ],
   "engineStalePackages": [
