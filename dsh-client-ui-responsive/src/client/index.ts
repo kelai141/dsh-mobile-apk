@@ -93,6 +93,7 @@ import { SidebarBubbles, type BubbleReorderFace } from './mobile/sidebar-bubbles
 import { SIDEBAR_BUBBLES_CSS } from './mobile/sidebar-bubbles.css.ts'
 import { zh as bubblesZh, en as bubblesEn } from './mobile/sidebar-bubbles.locales.ts'
 import { MAIN_PANEL_BACK_CSS } from './mobile/main-panel-back.css.ts'
+import { HIDDEN_BUNDLES_CSS } from './mobile/hidden-bundles.css.ts'
 import { MainPanelBackMount } from './mobile/main-panel-back.ts'
 import { PanelNavDrawer } from './mobile/panel-nav-drawer.ts'
 import { MobileSidebarGestures } from './mobile/sidebar-gestures.ts'
@@ -867,6 +868,14 @@ export function apply(ctx: ClientContext): void {
       disposeStyle()
     }
   }, 'ui-responsive: injected back control for upstream main panels')
+
+  // Two on-demand bundles ship no Android native payload (claude-agent-sdk-linux-* is a
+  // glibc dynamic binary; 0.153.4 of the Codex binary is not static-pie), so they install
+  // and never run. The user's call: hide their entries on the phone form instead of leaving
+  // a row that only leads to a broken install. Upstream is a read-only checkout here, so
+  // this is a stylesheet override keyed on the page's own data attributes, scoped to
+  // `html[data-dsh-mobile-form]` - the desktop and web forms keep both entries.
+  ctx.effect(() => injectStyle('hidden-bundles', HIDDEN_BUNDLES_CSS), 'ui-responsive: hide Android-unusable plugin bundles')
 
   // ── Bridges ─────────────────────────────────────────────────────────────
 
