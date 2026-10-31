@@ -182,9 +182,21 @@ try {
   // 是**递归遍历目录**，对任何一个不合格的 *.apk 判红——于是这个版本从此每次构建恒红，
   // 哪怕当前产物是好的。本地链 build-apk-013.ps1 / 发布链 build-release.ps1 早就在开头做同样
   // 的清理，portable 链漏了这一步（三条链行为不对称本身就是缺陷）。
-  // 只删 *.apk：out/ 里还有 snapshot-*.tar.xz 等发布资产，按目录清空会误伤。
+  // 清理范围必须收窄到**本次要产出的 ABI**（issue #1183）。
+  //
+  // 旧实现无条件删掉 OUT 下所有 *.apk。本脚本每次只产一个 ABI（--abi，默认 arm64），
+  // 所以 portable 链跑 x86_64 时会把 arm64 已验签的产物一并删掉：两条 ABI 分别用本脚本
+  // 出包时，后跑的那次总是把前一次的产物清空，交付目录永远只剩一个 ABI。
+  // 而收尾的 ABI 齐全性检查看的是「本次 produced 与 rejected」，察觉不到「上一次的产物没了」。
+  //
+  // 口径与本地链 build-apk-013.ps1 的 $abisThisRun 一致（#1078）：只清本次产出的 ABI，
+  // 其它 ABI 的既有产物保留。
+  //
+  // 仍只删 *.apk：out/ 里还有 snapshot-*.tar.xz 等发布资产，按目录清空会误伤。
+  // 匹配用产物名尾部的 `-<ABI>.apk`，而不是子串包含 —— 避免 x86_64 被 arm64 之类的串味。
+  const staleSuffix = '-' + ABI + '.apk'
   for (const name of readdirSync(OUT)) {
-    if (name.toLowerCase().endsWith('.apk')) rmSync(join(OUT, name), { force: true })
+    if (name.toLowerCase().endsWith(staleSuffix.toLowerCase())) rmSync(join(OUT, name), { force: true })
   }
 
   // ---- 1. 前置：基座/插件/vendor 在场 ----
