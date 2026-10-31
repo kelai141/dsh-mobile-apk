@@ -24,14 +24,14 @@ import android.os.Process
  * 两个实例的判据互补（[shouldHandle]）：纯隐式只进运行期实例，点名/点名包只进 manifest
  * 实例——即使某天平台把隐式广播重新投递给 manifest 接收器，也不会提交两遍。
  *
- * 0.13.8 #183 来源校验（导出组件默认视为不可信来源）；#679 收紧：广播必须满足其一——
- * ① API 34+ `getSentFromUid() == 0`（root；能以 root 执行的调用方本已拥有设备全部权限）；
- * ② 携带有效 auth nonce（引擎子进程以应用 uid 运行、读得到私有 nonce 文件，
- *    经 manage 插件 `--es auth` 随广播携带；常量时间比较）。
- * **uid 2000（adb shell）不再隐式可信**：Shizuku 让任意第三方应用取得 shell 身份，uid 无法
- * 区分「真 adb」与「持 shell 身份的应用」——adb shell 直发必须改走 nonce（`--es auth`），
- * 不带 nonce 的经典直发一律被拒（拒绝日志会打印框架给出的实际 uid）。
- * 官方输入路径始终携带 nonce，不受本次收紧影响。
+ * 0.13.8 #183 来源校验（导出组件默认视为不可信来源）；#679 定为**单一判据**——广播必须携带
+ * 与 `files/adb-keyboard-nonce` 一致的有效 auth nonce（引擎子进程以应用 uid 运行、读得到该
+ * 私有文件，经 manage 插件 `--es auth` 随广播携带；常量时间比较）。
+ * **uid 不构成凭据**（root 与 adb shell 一视同仁）：Shizuku 的 root/shell 两种模式都能把对应
+ * 身份借给任意第三方应用，uid 无法区分「真 adb/真 root」与「持该身份的应用」；代码里已无任何
+ * uid 白名单——`isTrustedSenderFor` 只看 nonce，nonce 不可用即对所有调用方 fail-closed，`getSentFromUid()`
+ * 仅为拒绝日志而读；adb shell 直发同样必须带 `--es auth`，不带 nonce 的经典直发一律被拒。
+ * **别照「uid 0/2000 可信」的旧说法加白名单，那正是 #679 关掉的口子**；官方输入路径始终带 nonce。
  *
  * 结果码（有序广播才有返回值）：1 已提交 / 2 输入法未就绪 / 3 来源被拒 /
  * 4 请求不合法 / 5 无输入连接。`am broadcast` 会把有序广播的结果码打印成

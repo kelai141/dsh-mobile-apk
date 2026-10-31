@@ -126,9 +126,11 @@ internal object BridgeOriginGuard {
     /**
      * 安装守卫。document-start 脚本在每个文档创建时、**页面自身脚本之前**运行。
      *
-     * 时序依据（本仓代码事实）：installBridgeOriginGuard() 与 addJavascriptInterface 都在
-     * MainActivity.configureWebView() 内，且前者调用点在前；而首次 loadUrl 走由 webViewReady
-     * 把守的更晚路径（loadConfirmedEnginePage()）。因此任何文档解析时守卫都已就位。
+     * 时序依据（本仓代码事实）：装配点在 MainActivity.loadConfirmedEnginePage()（:494）——
+     * installBridgeOriginGuard() 在此调用，紧接着才是同一函数内的 webView.loadUrl()（:502/:505）；
+     * addJavascriptInterface 更早，在 MainActivity.configureWebView()（:1527）。两者都在 onCreate
+     * 主线程串行执行，而文档由 loadUrl 才创建，故任何文档解析时守卫已就位。**不得后移到 loadUrl
+     * 之后**：此后创建的文档拿不到 document-start 脚本，第二层形同不存在。
      *
      * @return true 已安装；false 内核不支持（调用方必须发出**可见告警**，不得静默跳过）。
      */

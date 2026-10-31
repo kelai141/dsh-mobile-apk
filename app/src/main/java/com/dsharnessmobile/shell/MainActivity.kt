@@ -1200,8 +1200,8 @@ class MainActivity : ComponentActivity() {
    * 「是否为顶层帧」，非放行帧把 window.androidBridge 整体封死。两层互补，缺一不可：
    * 第一层挡顶层劫持，第二层挡子帧越权。
    *
-   * 时序：本函数在 configureWebView() 内、且在 addJavascriptInterface 之前调用；首次
-   * loadUrl 走由 webViewReady 把守的更晚路径。因此任何文档解析时守卫已就位。
+   * 时序：唯一调用点在 loadConfirmedEnginePage()（:494），紧随其后就是 webView.loadUrl()（:502/:505）；
+   * addJavascriptInterface 更早在 configureWebView()（:1527），两者同在主线程串行，故守卫必先于任何文档解析。
    *
    * 内核不支持 DOCUMENT_START_SCRIPT 时**必须发出可见告警**（不是静默跳过）：
    * 老内核上第二层不存在，只剩第一层，属已知风险，PR 里单独登记。
