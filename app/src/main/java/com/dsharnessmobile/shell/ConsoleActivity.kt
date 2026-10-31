@@ -34,10 +34,17 @@ class ConsoleActivity : ComponentActivity() {
     const val START_DEFER_MS = 600L
   }
   private val handler = android.os.Handler(android.os.Looper.getMainLooper())
-  private var sessionStarted = false
 
-  /** M-c4（2026-10-25 审计）：start/restart 已挪后台线程——此标记防 onStart 与桥 restart 重入双启。 */
-  @Volatile private var sessionStarting = false
+  /**
+   * issue #1008：「只起一次」的准入不再由本类两个裸标志承担。
+   *
+   * 旧形态在 [startSessionNow] 里「读 sessionStarted/sessionStarting → 清 startPending →
+   * removeCallbacks → 再读一次 → 置 sessionStarting」，**两次检查两次赋值**，而
+   * [ConsoleSession.start] 不幂等：onStart 的延时任务与页面首帧 resize 的桥调用同时进门时，
+   * 两个线程都能看到「没在起」，于是各起一个 PTY（同一界面两条 bash、输出互相串）。
+   * 判定与置位现在合并进 [ConsoleSessionStartGuard] 的一个原子单元；本类只调用它。
+   */
+  private val startGuard = ConsoleSessionStartGuard()
   private var pageReady = false
   private var pendingTopInset = 0f
   private var pendingBottomInset = 0f
@@ -184,27 +191,33 @@ class ConsoleActivity : ComponentActivity() {
    * 提示符；随后页面首帧 pushSize() 下发真实尺寸 → SIGWINCH → zle 重绘 ⇒ 首屏出现**两行提示符**。
    */
   private fun startSessionNow() {
-    if (sessionStarted || sessionStarting) return
     startPending = false
     handler.removeCallbacks(pendingStartRunnable)
-    if (sessionStarted || sessionStarting) return
-    // M-c4（2026-10-25 审计）：start 全程是文件 IO（bash 存在性、relay 解包、spawn）——旧实现
-    // 在主线程跑，慢盘上 onStart 直接卡帧。挪后台线程；状态经 handler 回主线程照常上屏。
-    sessionStarting = true
-    Thread {
-      val ok = session.start(sessionListener)
-      handler.post {
-        sessionStarted = ok
-        sessionStarting = false
-      }
-    }.apply { isDaemon = true; name = "dsh-console-start" }.start()
+    // issue #1008：准入是**一次**原子判定（判定 + 置「启动中」在同一个锁内完成）。
+    // 旧实现在这里做了两遍「读 started/starting → 后置 starting」，两遍之间就是双启窗口。
+    if (!startGuard.claimStart()) return
+    launchSession("dsh-console-start") { session.start(sessionListener) }
   }
 
   override fun onStart() {
     super.onStart()
-    if (sessionStarted || sessionStarting || startPending) return
+    if (startGuard.busy() || startPending) return
     startPending = true
     handler.postDelayed(pendingStartRunnable, START_DEFER_MS)
+  }
+
+  /**
+   * 把 start/restart 这类**全程文件 IO**（bash 存在性、relay 解包、spawn）挪出主线程。
+   *
+   * M-c4（2026-10-25 审计）：旧实现在主线程跑，慢盘上 onStart 直接卡帧。状态经 handler 回主线程。
+   * issue #1008：准入已由 [ConsoleSessionStartGuard] 在**进这里之前**原子取得，线程内不再判定；
+   * 收尾是唯一把「启动中」放下的地方（失败也放，否则一次失败就永久堵住重连）。
+   */
+  private fun launchSession(threadName: String, start: () -> Boolean) {
+    Thread {
+      val ok = start()
+      handler.post { startGuard.settle(ok) }
+    }.apply { isDaemon = true; name = threadName }.start()
   }
 
   override fun onDestroy() {
@@ -266,16 +279,12 @@ class ConsoleActivity : ComponentActivity() {
     @JavascriptInterface
     fun restart() {
       handler.post {
-        if (sessionStarting) return@post
-        sessionStarting = true
+        // issue #1008：与首次启动同一道原子准入。旧实现的两行（判 sessionStarting、置 true）
+        // 同样分开——两次点击各起一条线程、各自 destroy 再 spawn，前一条的进程被后一条盖掉后
+        // 无人回收。已启动时允许重连（这正是「重连」按钮的语义），启动中一律拒绝。
+        if (!startGuard.claimRestart()) return@post
         // M-c4：restart 内含 destroy+start（整段文件 IO），同样离主线程。
-        Thread {
-          val ok = session.restart(sessionListener)
-          handler.post {
-            sessionStarted = ok
-            sessionStarting = false
-          }
-        }.apply { isDaemon = true; name = "dsh-console-restart" }.start()
+        launchSession("dsh-console-restart") { session.restart(sessionListener) }
       }
     }
 

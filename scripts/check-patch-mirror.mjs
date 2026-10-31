@@ -8,8 +8,10 @@
 // 断言两层：
 //   A 自包含一致性（任一仓单独可跑）：registry.json 的补丁 id 集合 == apply-patches.mjs
 //     IMPLS 的实现 id 集合（双向），防「登记了没实现 / 实现了没登记」。
-//   B 镜像一致性（对端树在场时）：registry.json / apply-patches.mjs / README.md 逐字节一致
-//     （CRLF 归一后比对）；tests/ 递归文件清单一致，共有文件逐字节一致。
+//   B 镜像一致性（对端树在场时）：`scripts/patches/**` 的**全量递归**——两侧文件清单双向一致
+//     （新增/删除一个补丁文件即判红），共有文件逐字节一致（CRLF 归一后比对）。
+//     issue #1053：此前只比对 registry.json / apply-patches.mjs / README.md + data/ + tests/（234/239），
+//     根级散文件与 upstream/ 整体不在比对范围；现在**不维护任何白名单**，整个目录都是镜像面。
 //
 // 对端树定位顺序：--peer <dir> > 环境变量 DSH_MIRROR_PEER > <root>/dsh-mobile-apk >
 // <root>/..（该目录含 scripts/patches 即认）。对端缺席时镜像层跳过并提示（CI 单仓
@@ -154,78 +156,49 @@ if (!SELF_ONLY && !peer) {
 if (peer) {
   console.log(`镜像对端: ${relative(dirname(ROOT), peer) || peer}`)
   const eolWarns = []
-  const MIRROR_FILES = ['registry.json', 'apply-patches.mjs', 'README.md']
-  for (const f of MIRROR_FILES) {
-    const mine = join(ROOT, 'scripts', 'patches', f)
-    const theirs = join(peer, 'scripts', 'patches', f)
-    try {
-      const r = cmp(mine, theirs)
-      check(`镜像一致: scripts/patches/${f}`, r !== 'content', r === 'eol' ? '仅行尾差异（见告警）' : undefined)
-      if (r === 'eol') eolWarns.push(`scripts/patches/${f}`)
-    } catch (e) {
-      check(`镜像一致: scripts/patches/${f}`, false, String(e).slice(0, 200))
-    }
-  }
-  // data/ 注入片段也是 scripts/patches/** 的权威源；逐递归清单和内容比对，避免新片段漏镜像。
-  const walkFiles = (dir, prefix = '') => {
+  // ── issue #1053：镜像面 = `scripts/patches/**` 的**全量递归**，不再维护白名单 ──────────────
+  // 旧实现只逐字节比对 registry.json / apply-patches.mjs / README.md，再各自递归 data/ 与 tests/
+  // （实测覆盖 234 / 239 个文件）。漏掉的 5 个是 scripts/patches 根级散文件与 upstream/ 子目录：
+  //   mimo-thinking-toggle-056.mjs、pi-upstream-streaming-020.mjs、
+  //   ptc-android-native-A1.mjs（apply-patches.mjs 直接 import 的实现）、
+  //   resolve-engine-patch-target.mjs、upstream/pi-ai-1.1.0.patch
+  // ——往对端追加内容仍判 PASS：这正是「单边演进 = 云端构建静默缺补丁」要防的形态。
+  // 修法：**不维护任何白名单**，两侧都递归列出 scripts/patches 的全量文件清单（双向比较），
+  // 共有文件逐字节比对。新增/删除一个补丁文件、改一行散文件，都会当场判红。
+  const patchesFiles = (root) => {
     const out = []
-    for (const name of readdirSync(dir)) {
-      const full = join(dir, name)
-      const rel = prefix ? `${prefix}/${name}` : name
-      if (statSync(full).isDirectory()) out.push(...walkFiles(full, rel))
-      else out.push(rel)
+    const walk = (dir, prefix) => {
+      for (const name of readdirSync(dir)) {
+        if (name === 'node_modules' || name === '.git') continue
+        const full = join(dir, name)
+        const relPath = prefix ? prefix + '/' + name : name
+        if (statSync(full).isDirectory()) walk(full, relPath)
+        else out.push(relPath)
+      }
     }
-    return out
+    walk(join(root, 'scripts', 'patches'), '')
+    return out.sort()
   }
   try {
-    const mineData = walkFiles(join(ROOT, 'scripts', 'patches', 'data'))
-    const peerData = walkFiles(join(peer, 'scripts', 'patches', 'data'))
-    const onlyMine = mineData.filter((r) => !peerData.includes(r))
-    const onlyPeer = peerData.filter((r) => !mineData.includes(r))
-    check('data/ 文件清单一致', onlyMine.length === 0 && onlyPeer.length === 0,
-      `本仓独有: [${onlyMine.join(', ')}]；对端独有: [${onlyPeer.join(', ')}]`)
-    const bad = mineData.filter((r) => peerData.includes(r) && cmp(join(ROOT, 'scripts', 'patches', 'data', r), join(peer, 'scripts', 'patches', 'data', r)) === 'content')
-    check('data/ 共有文件逐字节一致', bad.length === 0, `内容漂移: [${bad.join(', ')}]`)
-  } catch (e) { check('data/ 目录可枚举', false, String(e).slice(0, 200)) }
-  // tests/ 递归清单 + 共有文件逐字节
-  // **递归**列清单：0.14.3 实锤——旧实现只列 tests/ 的一层，于是 `fixtures` 被当成一个dir 条目，
-  // 里面的 31 个夹具目录从未参与比对。协调仓已把夹具换到 0.2.0-rc.2，APK 侧仍留着 0.1.7-rc.2 的旧夹具，
-  // 本地镜像门禁却全绿，直到 APK CI 的 check-patch-fixtures 判红 93 项才暴露。
-  const walk = (dir, prefix = '', out = new Map()) => {
-    for (const name of readdirSync(dir)) {
-      const full = join(dir, name)
-      const rel = prefix ? `${prefix}/${name}` : name
-      if (statSync(full).isDirectory()) {
-        out.set(rel, 'dir')
-        walk(full, rel, out)
-      } else out.set(rel, 'file')
-    }
-    return out
-  }
-  let mineTests, peerTests
-  try {
-    mineTests = walk(join(ROOT, 'scripts', 'patches', 'tests'))
-    peerTests = walk(join(peer, 'scripts', 'patches', 'tests'))
-    const mineFiles = [...mineTests.entries()].filter(([, k]) => k === 'file').map(([r]) => r)
-    const peerFiles = [...peerTests.entries()].filter(([, k]) => k === 'file').map(([r]) => r)
-    const onlyMine = mineFiles.filter((r) => !peerTests.has(r))
-    const onlyPeer = peerFiles.filter((r) => !mineTests.has(r))
-    check('tests/ 文件清单一致',
+    const minePatches = patchesFiles(ROOT)
+    const peerPatches = patchesFiles(peer)
+    const onlyMine = minePatches.filter((r) => !peerPatches.includes(r))
+    const onlyPeer = peerPatches.filter((r) => !minePatches.includes(r))
+    check('scripts/patches/** 文件清单一致（' + minePatches.length + ' 文件，全量递归、无白名单）',
       onlyMine.length === 0 && onlyPeer.length === 0,
-      `本仓独有: [${onlyMine.join(', ')}]；对端独有: [${onlyPeer.join(', ')}]`)
-    let badContent = []
-    for (const rel of mineFiles) {
-      if (!peerTests.has(rel)) continue
+      '本仓独有: [' + onlyMine.slice(0, 5).join(', ') + ']；对端独有: [' + onlyPeer.slice(0, 5).join(', ') + ']')
+    const badPatches = []
+    for (const relPath of minePatches) {
+      if (!peerPatches.includes(relPath)) continue
       try {
-        const r = cmp(join(ROOT, 'scripts', 'patches', 'tests', rel), join(peer, 'scripts', 'patches', 'tests', rel))
-        if (r === 'content') badContent.push(rel)
-        else if (r === 'eol') eolWarns.push(`tests/${rel}`)
-      } catch { badContent.push(rel) }
+        const r = cmp(join(ROOT, 'scripts', 'patches', relPath), join(peer, 'scripts', 'patches', relPath))
+        if (r === 'content') badPatches.push(relPath)
+        else if (r === 'eol') eolWarns.push('scripts/patches/' + relPath)
+      } catch { badPatches.push(relPath) }
     }
-    check('tests/ 共有文件逐字节一致', badContent.length === 0, `内容漂移: [${badContent.join(', ')}]`)
-  } catch (e) {
-    check('tests/ 目录可枚举', false, String(e).slice(0, 200))
-  }
+    check('scripts/patches/** 共有文件逐字节一致（' + (minePatches.length - onlyMine.length) + ' 文件）',
+      badPatches.length === 0, '内容漂移: [' + badPatches.slice(0, 5).join(', ') + ']')
+  } catch (e) { check('scripts/patches/** 可枚举', false, String(e).slice(0, 200)) }
   // 以下构建 / 门禁脚本条目自 2026-10-28 政策起以 APK 仓为准：本文件会按 scripts/ 前缀
   // 跳过它们的字节比对（见下方 isApkCanonicalScript），保留清单只为记录历史镜像面。
   // 真正仍逐字节守的是 scripts/patches/** 与插件 / 子仓目录。

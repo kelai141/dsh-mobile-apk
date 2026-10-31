@@ -1574,6 +1574,476 @@
       ],
       "expect": "deny-uncertified-target",
       "why": "与 S-18f 成对：续行后是空格即正常续行（等价 screencap -p …，无 -d ⇒ 未认证），不得退化成 deny-unparsed。"
+    },
+    {
+      "name": "F1-1 -d 的值位是空双引号（atoi(\"\")==0 ⇒ display 0）",
+      "command": "screencap -d \"\" 7",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "真实 argv [\"screencap\",\"-d\",\"\",\"7\"]：-d 的 optarg 是空串，AOSP 用 atoi(optarg) ⇒ atoi(\"\")==0 ⇒ 实际作用 display 0，7 只是输出文件名。旧实现把引号段折叠成一个空格 ⇒ 得到 `screencap -d   7` ⇒ 取值正则把下一个词的 7 当成 -d 的值 ⇒ 拿「已注册虚拟屏 7」发通行证，而命令读真实屏。"
+    },
+    {
+      "name": "F1-2 -d 的值位是空单引号",
+      "command": "screencap -d '' 7",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "同 F1-1：单引号空串在真实 argv 里同样只是一个**空 word**，atoi 为 0 ⇒ display 0。"
+    },
+    {
+      "name": "F1-3 -d 的值位是变量展开",
+      "command": "screencap -d \"$X\" 7",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "-d 的值是一个变量 ⇒ 展开后是任意串 ⇒ 非数字时 atoi 亦为 0。静态不可判，必须 fail-closed。"
+    },
+    {
+      "name": "F1-4 -d 的值位是转义空格",
+      "command": "screencap -d \\ 7",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "转义空格是**词内字符**，不是分隔符 ⇒ 真实 argv [\"screencap\",\"-d\",\" \",\"7\"]，-d 的值是一个空格串 ⇒ atoi 为 0。"
+    },
+    {
+      "name": "F1-5 引号值位 + 输出文件（对照 F1-1 不得只拦某一种排布）",
+      "command": "screencap -d \"\" -p /sdcard/a.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "与 F1-1 同源，只是 -p 与路径换了位置；修法必须按「-d 的值位是不是一个数字词」判，而不是按具体命令形状。"
+    },
+    {
+      "name": "F2-1 位置词之后的 -d（getopt 已停止解析）",
+      "command": "screencap -p /sdcard/a.png -d 7",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "真实 argv […,\"-p\",\"/sdcard/a.png\",\"-d\",\"7\"]：getopt 在 /sdcard/a.png（第一个非选项词）处停止 ⇒ 之后的 -d 只是普通 argv，工具根本不读它 ⇒ display 0。旧实现只给 input 算了边界、screencap 做全段扫描 ⇒ 尾随 -d <已注册> 反而成了「已认证」的通行证。"
+    },
+    {
+      "name": "F2-2 -- 选项终结符之后的 -d",
+      "command": "screencap -- -d 7",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "`--` 是 getopt 的选项终结符 ⇒ 其后全是操作数 ⇒ -d 未被解析 ⇒ display 0。"
+    },
+    {
+      "name": "F2-3 -p 不吃参数 ⇒ 7 就是第一个位置词",
+      "command": "screencap -p 7 -d 7",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "-p 不吃参数（只有 -d 吃）⇒ 7 是第一个非选项词 ⇒ 其后不再解析 ⇒ 第二个 -d 7 无效 ⇒ display 0。"
+    },
+    {
+      "name": "F2-4 位置词之后的 -d 带 SF token",
+      "command": "screencap -p /sdcard/a.png -d 11529215046816944610",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "同 F2-1，用 > 2^53 的 SF token 再验一次：凭据边界与 id 空间无关，不能靠「token 够长」绕过边界。"
+    },
+    {
+      "name": "F2-5 引号空串作为位置词",
+      "command": "screencap -p \"\" -d 7",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "引号包住的空串同样是一个**位置词** ⇒ getopt 在它那里就停了 ⇒ 其后的 -d 无效。这条同时压住 F1 与 F2 的交界：修 F1 时若把引号词也折叠成空格，边界会凭空消失。"
+    },
+    {
+      "name": "F2-6 引号包住的路径词同样是位置词",
+      "command": "screencap -p \"/sdcard/a b.png\" -d 7",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "引号包住的路径是一个词（含空格），仍是位置词 ⇒ getopt 在那里停止解析。"
+    },
+    {
+      "name": "F2-7 -d 自己的取值词不得被当成位置词",
+      "command": "screencap -d 7 -d 99 -p /sdcard/a.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "`-d 7` 的 7 是 -d 的值，不是位置词；若把它当位置词，getopt 会停在它那里，于是第二个 `-d 99` 被静默丢掉 ⇒ 多目标只认证了其中一个。多目标必须逐个命中。"
+    },
+    {
+      "name": "F3-1 dumpsys 全局超时旗标后的 window",
+      "command": "dumpsys -t 10 window",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "AOSP frameworks/base/cmds/dumpsys/dumpsys.cpp 用 getopt_long(argc, argv, \"+t:l\", …)：`-t <秒>` 是全局超时旗标、`-l` 只列服务名 ⇒ 服务名**永不紧贴** `dumpsys`。真实 argv [\"dumpsys\",\"-t\",\"10\",\"window\"] ⇒ 实际服务 window，输出含真实屏 View 层级。旧 pattern 要求 window|display|input|activity 紧跟命令名 ⇒ families=[] ⇒ allow。"
+    },
+    {
+      "name": "F3-2 旗标后的 activity top（完整 View Hierarchy）",
+      "command": "dumpsys -t 10 activity top",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "同上：`dumpsys activity top` 会打出完整 View Hierarchy 与控件 bounds，与 uiautomator dump 同级。"
+    },
+    {
+      "name": "F3-3 tab 分隔的同形态",
+      "command": "dumpsys\t-t\t10\twindow",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "tab 与空格同为 ASCII 空白，真实 argv 与 F3-1 相同 ⇒ 不得因分隔符不同而漏拦。"
+    },
+    {
+      "name": "F3-4 旗标后的 display 服务",
+      "command": "dumpsys -t 10 display",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "display 服务输出几何/显示状态，同样属屏幕面。"
+    },
+    {
+      "name": "F3-5 裸 dumpsys（dump 全部服务，含 window）",
+      "command": "dumpsys",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "裸 dumpsys 会 dump **全部**服务，其中就有 window ⇒ 同样不可放行。修法方向必须是「服务名不能确认安全就命中」，不是「跳过旗标取下一个词」（后者会被 `--abi arm64` 这类自带词形参数的旗标骗过去）。"
+    },
+    {
+      "name": "F3-6 只带旗标、没有服务名",
+      "command": "dumpsys -t 10",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "只带旗标 = 没有服务名 = dump 全部服务 ⇒ 同 F3-5。"
+    },
+    {
+      "name": "F-反证 非屏幕命令的折叠目标屏参数仍按洗白凭据拒",
+      "command": "echo -d \"\" 7",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-orphan-target-token",
+      "why": "F1 改的是「屏幕命令族自己解析 -d」那条路，最容易的副作用是让**非屏幕命令**携带的折叠形态参数不再被认出来。折叠后就是 `-d 7`，历史判据按「洗白凭据」拒；这条拒必须保留——少一条拒就是多一条放行通道。"
+    },
+    {
+      "name": "F1-正控 -d 的值就是那个数字词",
+      "command": "screencap -d 7",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "正控：修 F1 不得把正常用法一起拦掉。-d 的值位就是数字词 7（已注册虚拟屏）⇒ 应放行。"
+    },
+    {
+      "name": "F2-正控 位置词之前带输出路径",
+      "command": "screencap -d 7 -p /sdcard/a.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "正控：-d 在第一个非选项词之前 ⇒ 有效 ⇒ 已认证 7 ⇒ 放行。"
+    },
+    {
+      "name": "F2-正控 -d 在 -p 之后但仍在选项区",
+      "command": "screencap -p -d 7 /sdcard/a.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "正控：-p 不吃参数 ⇒ -d 仍在选项区 ⇒ 有效 ⇒ 放行。"
+    },
+    {
+      "name": "F2-正控 粘连形态 -d7",
+      "command": "screencap -d7 -p /sdcard/a.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "正控：`-d7` 是 getopt 合法粘连形态（-d 的值紧贴）⇒ 有效 ⇒ 放行。这条压住「只认 `-d 7` 空格形态」的过窄修法。"
+    },
+    {
+      "name": "F2-正控 screenrecord 同族",
+      "command": "screenrecord -d 7 /sdcard/a.mp4",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "正控：screenrecord 与 screencap 同为 getopt 工具，修 F2 时两个家族必须一起改、一起仍放行合法形态。"
+    },
+    {
+      "name": "F2-正控 adb shell 包装形态（命令词不在段首）",
+      "command": "adb shell screencap -p -d 7 /data/local/tmp/a.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "正控：本门禁也判 `adb shell …` 包装形态，命令词不在段首 ⇒ getopt 边界必须从**命令词之后**开始数，不能从段首数（否则合法形态会被误拒）。"
+    },
+    {
+      "name": "F3-正控 meminfo 与屏无关",
+      "command": "dumpsys meminfo",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "正控：修 F3 不得把整个 dumpsys 都拒掉。meminfo 与屏无关 ⇒ 必须仍放行。"
+    },
+    {
+      "name": "F3-正控 battery 与屏无关",
+      "command": "dumpsys battery",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "正控：同上。"
+    },
+    {
+      "name": "F3-正控 SurfaceFlinger 反查自身",
+      "command": "dumpsys SurfaceFlinger",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "正控：门禁自己要用 `dumpsys SurfaceFlinger` 反查虚拟屏 token ⇒ 这条必须放行，否则门禁自锁。"
+    },
+    {
+      "name": "F3-正控 SurfaceFlinger 收窄 grep 形态",
+      "command": "dumpsys SurfaceFlinger | grep -E '^(Virtual Display |    name=)'",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "正控：生产路径实际发的就是这条收窄命令 ⇒ 必须放行。"
+    },
+    {
+      "name": "F-正控 普通 echo 不携带目标屏参数",
+      "command": "echo hi",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "正控：反证用例的另一半——不得退化成「凡 echo 就拒」。"
+    },
+    {
+      "name": "F-正控 curl -d 是数据不是目标屏",
+      "command": "curl -d \"a=b\" https://example.test",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "正控：`curl -d` 是常见的「-d 后跟数据」写法，且不在屏幕命令族里 ⇒ 必须仍放行，否则 F1 的改动会把无关命令一起误拦。"
+    },
+    {
+      "name": "G1-a 空引号 -d 紧跟合法 -d（screencap -d7 -d \"\" 0）",
+      "command": "screencap -d7 -d \"\" 0",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "issue #1184：真实 argv [\"-d7\",\"-d\",\"\",\"0\"]。getopt 语义是最后一个 -d 生效，atoi(\"\")=0 ⇒ 实际打在 display 0。旧实现按 \\d+ 过滤，空值那次 -d 整个消失 ⇒ 更早的 -d7 为整条命令背书 ⇒ 回归成 allow。流式建模要求最后一次赋值可解释。"
+    },
+    {
+      "name": "G1-b 转义空白 -d（screencap -d 7 -d \\ 0）",
+      "command": "screencap -d 7 -d \\ 0",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "#1184：`\\ ` 是转义空白，取值为空白占位词而非数字 ⇒ 同理落到 display 0，且不得沿用前一个 -d 7。"
+    },
+    {
+      "name": "G1-c 空值 -d 后接粘连 -d0（screencap -d -d 7 -d0）",
+      "command": "screencap -d -d 7 -d0",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "#1184：getopt 把 `-d` 的下一个词当值；最终 -d0 ⇒ display 0（真实屏）。中间那个 -d 7 不能单独背书。"
+    },
+    {
+      "name": "G1-d 空引号 -d 在合法 -d 之前（screencap -d \"\" -d 7）",
+      "command": "screencap -d \"\" -d 7",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "#1184 正向：流式语义是**最后一次赋值生效**——空值不继承前值，但后续合法赋值可以覆盖它。真实 argv [\"-d\",\"\",\"-d\",\"7\"] ⇒ 最终 display 7（已注册）⇒ 放行。本条证明修法不是「凡出现空值 -d 就一律拒」，而是按最后一次赋值判定。"
+    },
+    {
+      "name": "G2-a 只有空引号 -d（screencap -d \"\" 7）",
+      "command": "screencap -d \"\" 7",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "#1060 F1 已修形态，本条守住不回归：取值为空串 ⇒ display 0，7 只是输出文件名。"
+    },
+    {
+      "name": "G2-b 只有转义空白 -d（screenrecord -d \\ 7 /sdcard/a.mp4）",
+      "command": "screenrecord -d \\ 7 /sdcard/a.mp4",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "#1184：转义空白取值不可解释 ⇒ display 0。"
+    },
+    {
+      "name": "G3-a 正常 -d 7（screencap -d 7 /sdcard/a.png）",
+      "command": "screencap -d 7 /sdcard/a.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "双向判据：流式建模不得把正常形态一起拒掉。getopt 在路径处停止，-d 7 是唯一且合法的目标屏。"
+    },
+    {
+      "name": "G3-b 正常粘连 -d7（screencap -d7 -p /sdcard/a.png）",
+      "command": "screencap -d7 -p /sdcard/a.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "双向判据：粘连形态 -d7 仍必须被正确解析为 display 7。"
+    },
+    {
+      "name": "G3-c 正常两次同一屏（screencap -d 7 -d 7 /sdcard/a.png）",
+      "command": "screencap -d 7 -d 7 /sdcard/a.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "双向判据：最后一次赋值仍是已注册屏 ⇒ 放行（证明流式建模只针对不可解释的取值，不是禁止多次出现）。"
+    },
+    {
+      "name": "G4-a 变量服务名（dumpsys $S）",
+      "command": "dumpsys $S",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "#1184 F3 残留：旧启发式只要求「下一个词不以 - 开头且不是敏感服务」⇒ `$S` 被当作已确认安全而放行；而 S=window 时展开后就是 dumpsys window（真实屏 View 层级）。判据改为：可确认安全的服务名不得含 $ 或反引号。"
+    },
+    {
+      "name": "G4-b 花括号变量（dumpsys ${S}）",
+      "command": "dumpsys ${S}",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "#1184：同上，${S} 同样是展开形式。"
+    },
+    {
+      "name": "G4-c 词内变量（dumpsys win$X）",
+      "command": "dumpsys win$X",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "#1184：词内拼接同样不可判（win$X 可为 window）。"
+    },
+    {
+      "name": "G4-d 赋值后使用（S=window; dumpsys $S）",
+      "command": "S=window; dumpsys $S",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "#1184：赋值与使用在同一命令里，展开后打真实屏；不得只看使用处的词形。"
+    },
+    {
+      "name": "G4-e 反引号服务名（dumpsys `echo window`）",
+      "command": "dumpsys `echo window`",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "#1184：命令替换不可判，与变量同等处理。"
+    },
+    {
+      "name": "G4-f 静态安全服务名（dumpsys meminfo）",
+      "command": "dumpsys meminfo",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "双向判据：与屏无关的服务名必须继续放行，否则紧化会退化成「dumpsys 一律拒」。"
+    },
+    {
+      "name": "G4-g 静态 SurfaceFlinger（dumpsys SurfaceFlinger）",
+      "command": "dumpsys SurfaceFlinger",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "双向判据：既有放行面不得回归。"
     }
   ]
 }

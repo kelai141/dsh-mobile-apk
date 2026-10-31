@@ -116,14 +116,80 @@ const collectTestFiles = (dir) => {
 }
 
 /**
+ * 该插件被测试直接读的构建产物清单（issue #1143）。
+ *
+ * 为什么要先探这一步再跑测试
+ * --------------------------
+ * lib/ 是构建产物（.gitignore 忽略各插件下的 lib 目录），净检出必然没有。而本 runner
+ * 直连 node --test / vitest，**不经过**插件 npm test 里的 npm run build 前置。
+ * 于是缺产物时测试在 **import 期**就抛（如 dsh-session-delete 的 client-wiring.test.mjs:9
+ * 里那句 readFileSync 指向 ../lib/client.js），node --test 记 0 pass —— 判据文案却报成
+ * 「单测未通过」或「全 skip = 假绿」，**把缺产物误导成代码缺陷**，指引人去改本来正确的代码。
+ *
+ * CI 上是绿的：.github/workflows/pr-gate.yml 的准备段在调本门禁前已逐个插件跑 npm run build。
+ * 所以缺产物只在本地净检出/未构建的链上出现 —— 那属于**环境未就绪**，不是判据结论。
+ * 按仓库既有惯例（用法/前置不满足 = exit 2）单列一态，并给出可操作命令。
+ *
+ * 只探**测试真的会读**的那些文件：从测试源码里抽 ../lib/<name> 形式的路径（含子路径），
+ * 再加 lib/index.js（插件入口，被注入链与多数测试依赖）。抽不到任何引用时只探 lib/index.js，
+ * 不凭猜想列一堆文件。
+ *
+ * @param pluginDir 插件目录绝对路径
+ * @param testFiles 该插件的测试文件绝对路径列表
+ * @returns {{missing: Array<{rel: string, cmd: string}>}} 缺失产物及对应的可操作命令
+ */
+export function missingBuildArtifacts(pluginDir, testFiles) {
+  const want = new Set(['lib/index.js'])
+  for (const f of testFiles) {
+    let src = ''
+    try { src = readFileSync(f, 'utf8') } catch { continue }
+    // 只认 `../lib/<path>` 这种从 test/ 往插件根走的形态；`../src/...` 不是产物，不探。
+    for (const m of src.matchAll(/\.\.\/lib\/([A-Za-z0-9_.\/-]+)/g)) {
+      const rel = 'lib/' + m[1].replace(/[\u0027\u0022\u0060).,;]+$/, '')
+      if (rel.includes('..')) continue
+      want.add(rel)
+    }
+  }
+  const pkg = (() => {
+    try { return JSON.parse(readFileSync(join(pluginDir, 'package.json'), 'utf8')) } catch { return null }
+  })()
+  const hasBuild = typeof pkg?.scripts?.build === 'string' && pkg.scripts.build.trim() !== ''
+  const missing = []
+  for (const rel of [...want].sort()) {
+    if (existsSync(join(pluginDir, rel))) continue
+    const cmd = hasBuild
+      ? 'cd ' + pluginDir + ' && npm run build'
+      : '(该插件未声明 build 脚本，产物应由上游构建链产出) ' + join(pluginDir, rel)
+    missing.push({ rel, cmd })
+  }
+  return { missing }
+}
+/**
+ * 从 `package.json` 的 test 脚本里抽出**测试路径模式集合**。
+ *
+ * 这是形态判据与覆盖数判据的**唯一解析入口**（#989）。两条判据此前各写一份解析：
+ * `scriptFormProblem` 用三条手写正则认形态（只认顶层 glob 那一种写法），
+ * `scriptCoverage` 用另一套 `matchAll` 抽模式。同一份脚本于是在两边得到相反结论——
+ * 递归 glob 能覆盖全部文件，却被形态判据判成「不可识别的形态」。
+ * 「同一个事实两处各解析一遍」必然漂移，只是漂到哪种写法上而已。
+ * @param script package.json 的 test 脚本。
+ * @returns 形如 `test/*.test.mjs` 或递归 glob 的模式串（去重、保序）。
+ */
+const testPathTokens = (script) => {
+  const text = String(script ?? '').trim()
+  if (text === '') return []
+  const tokens = text.match(/(?:\.\/)?test\/[^\s"';&|]+/g) ?? []
+  return [...new Set(tokens.map((t) => t.replace(/^\.\//, '')))]
+}
+
+/**
  * 插件自身 `test` 脚本**能覆盖到**的文件数（元断言的左操作数）。
  *
- * - 脚本用 `test/*.test.mjs` glob ⇒ 顶层文件数；
  * - 显式清单与 glob 均按真实路径匹配；重复文件和不存在的文件不能凑数。
  * - mjs / ts 与嵌套目录按各自模式匹配，覆盖数必须等于递归发现数。
  */
 const scriptCoverage = (testDir, script) => {
-  const patterns = [...script.matchAll(/(?:\.\/)?test\/[^\s"';&|]+/g)].map((m) => m[0].replace(/^\.\//, ''))
+  const patterns = testPathTokens(script)
   return collectTestFiles(testDir).filter((file) => {
     const name = relative(dirname(testDir), file).replaceAll('\\', '/')
     return patterns.some((pattern) => matchesGlob(name, pattern))
@@ -142,6 +208,43 @@ if (plugins.length === 0) { console.error('CHECK-PLUGIN-TESTS FAILED：找不到
 //   2) 调用点只传一个无关变量（NODE_OPTIONS）—— NODE_ENV 要钉住，且 PATH 不能被吞掉
 //      （吞掉 PATH 的直接后果是子进程根本起不来，那是比假红更糟的假绿：什么都测不了还报通过）；
 //   3) 完全不传 env —— 走默认合并路径。
+/**
+ * issue #957：本地 test 脚本必须是**可识别的 glob 形态**，不允许回退成显式清单。
+ *
+ * 为什么单独立一条：`scriptCoverage` 对两种形态都算得出数来，于是「有人把 glob 改回显式清单」
+ * 只要清单暂时是完整的，元断言照样绿 —— 而它下一轮新增测试文件时就静默少跑。
+ * 这类「当下正确、以后必错」的写法必须被形态判据挡在门外，不能靠人数数。
+ *
+ * @param {string} plugin 插件名（用于错误文案）。
+ * @param {string} script `package.json` 的 test 脚本。
+ * @returns {string|null} null = 合规；否则返回判红理由。
+ */
+const scriptFormProblem = (plugin, script) => {
+  const trimmed = String(script || '').trim()
+  if (trimmed === '') return plugin + ' 有测试文件但没有 test 脚本'
+  /* 形态判据与覆盖数判据共用 testPathTokens（#989）：否则同一份脚本在两边得到相反结论——
+   * 递归 glob 能覆盖全部文件（scriptCoverage 认），却被手写正则判成「不可识别的形态」。
+   * 判据只认一种写法时，换一种等价写法就零命中。 */
+  const tokens = testPathTokens(trimmed)
+  if (tokens.length === 0) return plugin + ' 的 test 脚本里没有 test/ 路径（脚本：' + trimmed + '）'
+  const GLOB_META = /[*?[\]{}]/
+  // 显式清单：某个 token 既无 glob 元字符、又带扩展名 ⇒ 就是一个具体文件名。
+  const explicit = tokens.filter((t) => !GLOB_META.test(t) && /\.[a-z]+$/i.test(t))
+  if (explicit.length > 0) {
+    return plugin + ' 的 test 脚本是**显式清单**，必须是 glob：node --test test/*.test.mjs（清单项：'
+      + explicit.join(', ') + '；脚本：' + trimmed + '）'
+  }
+  /* 合规 glob：token 里带 glob 元字符即可。
+   * 曾经这里还要求「后缀是测试文件扩展名」，但 `test/**` 这种按目录递归的写法完全合法
+   * （scriptCoverage 认它覆盖全部文件），额外后缀要求只会把它误判成「不可识别的形态」——
+   * 那正是 #989 的同一个病：判据比真实解析多了一条自己的想象。
+   * 现在唯一的要求是「有元字符」；「别写显式清单」由上面的 explicit 分支守。 */
+  if (!tokens.some((t) => GLOB_META.test(t))) {
+    return plugin + ' 的 test 脚本不是可识别的 glob 形态（脚本：' + trimmed + '）'
+  }
+  return null
+}
+
 if (process.argv.includes('--self-test') || process.argv.includes('--self-test-negative')) {
   const probe = (extraEnv) => {
     const r = runCommand(process.execPath,
@@ -193,6 +296,105 @@ if (process.argv.includes('--self-test') || process.argv.includes('--self-test-n
       }
     })
     verify('#957 递归发现 mjs/ts 与嵌套测试', () => assert.equal(collectTestFiles(testDir).length, 3))
+    /* ── #1143：缺构建产物必须与「测试失败」分开（前者 exit 2，后者 exit 1）─────
+     * 缺产物时测试在 import 期就抛，node --test 记 0 pass；若走旧的单一判据，会被报成
+     * 「单测未通过」或「全 skip = 假绿」——指向改代码，而代码本来是对的。
+     * 这里钉住探针的三件事：能认出测试真的会读的 lib 文件、不把 src 当产物、抽不到时回落 lib/index.js。 */
+    verify('#1143 探针认出测试真读的产物（含子路径），且不把 src 当产物', () => {
+      const pd = join(actual, 'probe-plugin')
+      mkdirSync(join(pd, 'test'), { recursive: true })
+      writeFileSync(join(pd, 'package.json'), JSON.stringify({ scripts: { build: 'node build.mjs' } }))
+      // 测试直接读 lib/client.js 与 lib/sub/thing.js；另引 ../src/x.js（不是产物，不该被探）
+      const tf = join(pd, 'test', 'probe.test.mjs')
+      writeFileSync(tf, [
+        "readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')",
+        "readFileSync(new URL('../lib/sub/thing.js', import.meta.url), 'utf8')",
+        "import('../src/x.js')",
+      ].join('\n'))
+      const miss = missingBuildArtifacts(pd, [tf]).missing.map((m) => m.rel).sort()
+      assert.deepEqual(miss, ['lib/client.js', 'lib/index.js', 'lib/sub/thing.js'], '应探出三个缺失产物：' + JSON.stringify(miss))
+      assert.ok(!miss.some((r) => r.includes('src')), 'src 不是产物，不得出现在缺失清单')
+      // 命令必须可操作且点名该插件目录
+      const cmd = missingBuildArtifacts(pd, [tf]).missing[0].cmd
+      assert.ok(cmd.includes('npm run build'), '缺产物要给出可操作命令，实际：' + cmd)
+      assert.ok(cmd.includes('probe-plugin'), '命令必须点名具体插件目录，实际：' + cmd)
+      // 产物补上后不再报缺
+      mkdirSync(join(pd, 'lib', 'sub'), { recursive: true })
+      for (const rel of ['index.js', 'client.js', 'sub/thing.js']) writeFileSync(join(pd, 'lib', rel), '')
+      assert.equal(missingBuildArtifacts(pd, [tf]).missing.length, 0, '产物齐了就不该再报缺')
+    })
+    verify('#1143 探针抽不到引用时只探 lib/index.js（不凭猜想列一堆）', () => {
+      const pd = join(actual, 'probe-bare')
+      mkdirSync(join(pd, 'test'), { recursive: true })
+      writeFileSync(join(pd, 'package.json'), JSON.stringify({ scripts: { build: 'node b.mjs' } }))
+      const tf = join(pd, 'test', 'bare.test.mjs')
+      writeFileSync(tf, "import { test } from 'node:test'\ntest('x', () => {})")
+      const miss = missingBuildArtifacts(pd, [tf]).missing.map((m) => m.rel)
+      assert.deepEqual(miss, ['lib/index.js'], '只该探入口文件，实际：' + JSON.stringify(miss))
+    })
+    verify('#1143 未声明 build 脚本时不给「npm run build」这种跑不通的命令', () => {
+      const pd = join(actual, 'probe-nobuild')
+      mkdirSync(join(pd, 'test'), { recursive: true })
+      writeFileSync(join(pd, 'package.json'), JSON.stringify({ scripts: { test: 'node --test test/*.test.mjs' } }))
+      const tf = join(pd, 'test', 'n.test.mjs')
+      writeFileSync(tf, "import { test } from 'node:test'\ntest('x', () => {})")
+      const cmd = missingBuildArtifacts(pd, [tf]).missing[0].cmd
+      assert.ok(!cmd.includes('npm run build'), '没声明 build 就不能让人去跑它，实际：' + cmd)
+    })
+    /* ── #989：形态判据与覆盖数判据必须共用同一个解析器（testPathTokens）──────────
+     * 原来形态判据用三条手写正则，只认顶层 glob 那一种写法，把递归 glob 判成「不可识别的
+     * 形态」；而同一文件里的 scriptCoverage 用另一套 matchAll 抽模式，把它正确当成覆盖全部。
+     * 两条判据对同一份脚本给出相反结论。下面每条都同时钉「形态判据」与「覆盖数」，两边必须一致。 */
+    const formCases = [
+      { script: 'node --test test/*.test.mjs', form: null, cover: 1, label: '顶层 glob：合规' },
+      { script: 'node --test "test/**/*.test.{mjs,ts}"', form: null, cover: 3, label: '递归 glob（带引号 + 花括号）：合规' },
+      // 无花括号的递归 glob 只匹配 .mjs ⇒ 覆盖 a.test.mjs 与 nested/c.test.mjs 两个（b.test.ts 不在内）。
+      { script: 'node --test test/**/*.test.mjs', form: null, cover: 2, label: '递归 glob（无引号）：合规' },
+      { script: 'node --test test/a.test.mjs test/b.test.ts test/nested/c.test.mjs', form: 'explicit', cover: 3, label: '显式清单：判红（形态）' },
+      { script: 'vitest run', form: 'noglob', cover: 0, label: '无 test/ 路径：判红（形态）' },
+      { script: '', form: 'noscript', cover: 0, label: '空脚本：判红（形态）' },
+    ]
+    for (const c of formCases) {
+      verify('#989 形态与覆盖一致：' + c.label, () => {
+        const problem = scriptFormProblem('demo', c.script)
+        const classified = problem === null ? null
+          : problem.includes('显式清单') ? 'explicit'
+            : problem.includes('没有 test/ 路径') ? 'noglob'
+              : problem.includes('没有 test 脚本') ? 'noscript' : 'other'
+        assert.equal(classified, c.form, '形态判据给出 ' + JSON.stringify(classified) + '（问题：' + problem + '）')
+        assert.equal(scriptCoverage(testDir, c.script), c.cover, '覆盖数不一致（' + c.script + '）')
+      })
+    }
+    /* #989 的核心不变量：形态判据**不得**拒绝一个覆盖数判据认得的写法。
+     * 具体地——形态判据判合规的脚本，其 token 必须就是 scriptCoverage 拿去 matchesGlob 的
+     * 那一组（这正是「两条判据共用同一个解析器」的可执行形态）。
+     * 注意不能把它写成「覆盖数 == 递归发现数」：顶层 glob 在含嵌套测试的树上**本来就**只覆盖
+     * 顶层那几个，那是 #957 的正确语义，不是漂移。 */
+    verify('#989 不变量：形态判红「不是可识别的 glob」⇒ 覆盖数必须为 0（否则就是两条判据打架）', () => {
+      const forms = [
+        'node --test test/*.test.mjs',
+        'node --test "test/**/*.test.{mjs,ts}"',
+        'node --test test/**/*.test.mjs',
+        'node --test test/**',
+        'vitest run',
+        'node --test test/a.test.mjs',
+      ]
+      for (const script of forms) {
+        const problem = scriptFormProblem('demo', script)
+        const unrecognized = problem !== null && problem.includes('不是可识别的 glob 形态')
+        if (unrecognized) {
+          // 这正是 #989 的原始形态：形态判据说「认不出」，覆盖数却说「覆盖了 N 个」。
+          assert.equal(scriptCoverage(testDir, script), 0,
+            script + ' 被判「不可识别的形态」，覆盖数却是 ' + scriptCoverage(testDir, script) + '——两条判据在同一份脚本上打架')
+        }
+      }
+      // 递归 glob 必须判合规（这是 #989 的修复本体），
+      // 显式清单与无 test/ 路径必须仍然判红（#957 的规矩不能因 #989 松动）。
+      assert.equal(scriptFormProblem('demo', 'node --test test/**/*.test.mjs'), null, '递归 glob 应判合规')
+      assert.equal(scriptFormProblem('demo', 'node --test "test/**/*.test.{mjs,ts}"'), null, '带引号递归 glob 应判合规')
+      assert.notEqual(scriptFormProblem('demo', 'node --test test/a.test.mjs'), null, '显式清单应判红')
+      assert.notEqual(scriptFormProblem('demo', 'vitest run'), null, '无 test/ 路径应判红')
+    })
     verify('#957 顶层 mjs glob 不得假装覆盖 ts/嵌套测试', () => assert.equal(scriptCoverage(testDir, 'node --test test/*.test.mjs'), 1))
     verify('#957 递归 glob 覆盖全部文件', () => assert.equal(scriptCoverage(testDir, 'node --test "test/**/*.test.{mjs,ts}"'), 3))
     verify('#957 显式嵌套清单覆盖全部文件', () => assert.equal(scriptCoverage(testDir, 'node --test test/a.test.mjs test/b.test.ts test/nested/c.test.mjs'), 3))
@@ -251,31 +453,10 @@ if (process.argv.includes('--self-test') || process.argv.includes('--self-test-n
 
 let ran = 0
 let failed = 0
+// issue #1143：缺构建产物的插件单列一态（exit 2，不算失败也不计入已跑）。
+const missingArtifactPlugins = []
 const noTests = []
 
-/**
- * issue #957：本地 test 脚本必须是**可识别的 glob 形态**，不允许回退成显式清单。
- *
- * 为什么单独立一条：`scriptCoverage` 对两种形态都算得出数来，于是「有人把 glob 改回显式清单」
- * 只要清单暂时是完整的，元断言照样绿 —— 而它下一轮新增测试文件时就静默少跑。
- * 这类「当下正确、以后必错」的写法必须被形态判据挡在门外，不能靠人数数。
- *
- * @param {string} plugin 插件名（用于错误文案）。
- * @param {string} script `package.json` 的 test 脚本。
- * @returns {string|null} null = 合规；否则返回判红理由。
- */
-const scriptFormProblem = (plugin, script) => {
-  const trimmed = String(script || '').trim()
-  if (trimmed === '') return plugin + ' 有测试文件但没有 test 脚本'
-  // 显式清单：出现任何 test/<名字>.test.mjs 即判红（glob 用的是 test/*.test.mjs，不会命中这条）
-  if (/test\/[A-Za-z0-9_.-]+\.test\.mjs/.test(trimmed)) {
-    return plugin + ' 的 test 脚本是**显式清单**，必须是 glob：node --test test/*.test.mjs（脚本：' + trimmed + '）'
-  }
-  if (!/test\/\*\.test\.mjs/.test(trimmed)) {
-    return plugin + ' 的 test 脚本不是可识别的 glob 形态（脚本：' + trimmed + '）'
-  }
-  return null
-}
 const pluginTestScript = (plugin) => {
   try { return JSON.parse(readFileSync(join(PLUGIN_DIR, plugin, 'package.json'), 'utf8')).scripts?.test ?? '' }
   catch { return '' }
@@ -299,6 +480,15 @@ for (const plugin of plugins.sort()) {
     failed += 1
   }
   if (files.length === 0) { noTests.push(plugin); continue }
+  // issue #1143：**先区分「缺构建产物」与「测试失败」**。
+  // 缺产物是环境未就绪（exit 2），不是判据结论；报成「单测未通过」会误导人去改正确的代码。
+  // 「全 skip = 假绿」那条判据原样保留在下方，继续抓真正的假绿。
+  const artifacts = missingBuildArtifacts(join(PLUGIN_DIR, plugin), files)
+  if (artifacts.missing.length > 0) {
+    // 详情统一在收口处打印（一遍、聚在一起），避免与其它插件的 RUN/PASS 行交错。
+    missingArtifactPlugins.push({ plugin, missing: artifacts.missing })
+    continue
+  }
   ran += 1
   // 运行器按文件内容自动判定：本仓 6 个插件用 node:test，client/UI 侧用 vitest。
   // 写死任一个都会把另一种判成失败（首次跑本门禁即实测到该误报）。
@@ -432,6 +622,21 @@ for (const repo of SUBREPO_TESTS) {
   } else {
     console.log('PASS  ' + repo + '（' + how + ' / ' + passN3 + ' 项通过）')
   }
+}
+
+// issue #1143：缺构建产物单列一态（exit 2 = 环境未就绪，不是判据结论）。
+// 放在 failed 判定**之前**：缺产物时根本没有任何测试被判过，报「N 个单测单元有问题」是错的；
+// 而且 exit 2 与 exit 1 在仓库惯例里含义不同（1 = 判据不满足；2 = 用法/前置不满足），
+// 混用会让人去查本来正确的代码。
+if (missingArtifactPlugins.length > 0) {
+  console.error('CHECK-PLUGIN-TESTS 未作判定（exit 2）：' + missingArtifactPlugins.length + ' 个插件缺构建产物')
+  console.error('  这不是单测失败。CI 的准备段会先构建，故 CI 上不会出现；本地跑之前请先构建：')
+  for (const p of missingArtifactPlugins) {
+    console.error('  ' + p.plugin + '：' + p.missing.map((m) => m.rel).join(', '))
+    for (const cmd of [...new Set(p.missing.map((m) => m.cmd))]) console.error('    ' + cmd)
+  }
+  console.error('SKIP=' + skipped)
+  process.exit(2)
 }
 
 if (failed > 0) {

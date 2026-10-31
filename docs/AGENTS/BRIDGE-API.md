@@ -264,11 +264,3 @@ bootstrap 调用 `linuxPluginHost.install({directory,entry='lib/index.js',config
 
 页面状态由 `normalizeLinuxStatus` 映射，同时接受 Bionilux 定稿字段与此前提案字段；其中两条插件 `releaseUrl` 来自 bootstrap 状态（`pluginReleaseUrls` 或 `plugins.*.releaseUrl`），不拼接默认最新版本。Linux rootfs 是 glibc 运行支持，不是安全沙箱；guest root 不等于 Android root；Termux/Bionic Bash 与 Debian/glibc Linux Bash 分开展示，共享 glibc Node 不替换原有 Termux Node。已安装但 runtime 被手工移除时，页面显式显示「自动更新已停用」并要求重新放回并启用，而不是静默停更。内部 bootstrap 成品接线及真实安装验收状态见 `known-gaps.md`。
 
-
-## Clipboard model draft reads
-
-`androidBridge.requestClipboardText(requestId: string): void` marshals to the main thread. It accepts one `[A-Za-z0-9_-]{8,64}` request from the foreground trusted engine page and presents a native confirmation before accessing the clipboard. Confirmation reads one plain-text item, bounded to 16 KiB; URIs and intents are not resolved. This method neither writes settings nor saves credentials.
-
-`androidBridge.cancelClipboardText(requestId: string): void` revokes only the matching outstanding prompt. Activity pause/destruction, full-page navigation and a 30-second timeout also invalidate it. A stale page receives no secret result.
-
-The asynchronous `dsh:clipboard-text` window event carries `{requestId, ok, text? , reason?}`. A successful result is limited to the original page. Error/cancel replies contain reason codes only; clipboard text is never logged. The UI correlates its own request, validates the configuration, masks the key in the preview and fills a chosen provider's unsaved inputs through normal React input events. Existing Apply remains the only save action. Closing the editor removes its listener, revokes consent and discards the preview.

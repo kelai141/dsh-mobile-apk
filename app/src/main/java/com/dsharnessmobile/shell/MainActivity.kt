@@ -56,7 +56,6 @@ class MainActivity : ComponentActivity() {
     super.attachBaseContext(AppLanguage.wrap(newBase))
   }
 
-  private var clipboardRead: ClipboardReadController? = null
   internal lateinit var webView: WebView
     private set
   /** Lazily-created untrusted BrowserHost surface, geometrically owned by the Files sidebar stage. */
@@ -488,6 +487,11 @@ class MainActivity : ComponentActivity() {
   /** Navigate only after this process's engine generation has published a real port. */
   private fun loadConfirmedEnginePage() {
     if (!EngineEndpoint.confirmed || EngineEndpoint.port <= 0 || !webViewReady) return
+    // #686 第二层：在此注册守卫——此刻 EngineEndpoint 端口已确定，守卫里可以用**精确**
+    // origin（EngineProbe.ENGINE_URL）。早注册 + 通配会让本机其它端口的页面拿到桥，
+    // 早注册 + 精确值又可能拿到未确定的端口，所以选「晚注册 + 精确值」。
+    // document-start 脚本对**其后**创建的文档生效，所以必须早于下面的 loadUrl。
+    installBridgeOriginGuard()
     val authCookie = EngineAuth.cookie(this)
     if (authCookie != null) {
       try {
@@ -546,7 +550,7 @@ class MainActivity : ComponentActivity() {
     super.onCreate(savedInstanceState)
     // 本实例的原生视图树是按创建时的界面语言构建的；桥在运行期改语言后靠
     // refreshUiLanguageIfChanged() 在启动页再次出现前重建。
-    appliedUiLanguage = AppLanguage.mode(this)
+    photoCaptureController.restoreNow(); appliedUiLanguage = AppLanguage.mode(this) // P0：恢复必须在这里（super.onCreate 之后），不能放控制器 init——那时未 attachBaseContext，cacheDir 为 null ⇒ getCacheDir() NPE。相机结果只经 onNewIntent/onActivityResult 投递，都在 onCreate 之后，时序不变。
     // 0.14.9：「打开应用后自动启动」是用户的显式意图，冷启动时优先于上一次的持久化停机标记。
     // 旧行为把「划过任务卡/手动停止」留下的 userShutdown 一路带到下次打开，开关明明开着却
     // 停在启动页——看起来就是开关失效。同一次会话内的停止仍由 savedInstanceState 保留，
@@ -692,8 +696,8 @@ class MainActivity : ComponentActivity() {
     reportWebViewVersion("onCreate")
     // 0.13.8 #183：键盘广播 nonce（应用私有文件，引擎子进程经 DSH_FILES_DIR 读取，
     // manage 插件广播时 --es auth 携带；幂等）。
-    try { AdbKeyboardService.ensureNonce(this) } catch (_: Throwable) {
-    }
+    // #679：写失败必须可见（壳侧已无 uid 兜底，nonce 缺失 = android_ui_input 全链路失效）。
+    try { AdbKeyboardService.ensureNonce(this) } catch (t: Throwable) { reportKeyboardNonceWriteFailure(t) }
     // #682 收口：外部可达的特权 action 已全部移除——重试改为进程内一次性标志
     // （见 pendingSelfRetry）；ACTION_UPDATE 的 adb 触发入口直接删除（runUpdate 定义
     // 保留在 EngineStartFlow，但不再有任何外部 intent 入口——导出的 launcher Activity
@@ -985,7 +989,6 @@ class MainActivity : ComponentActivity() {
   }
 
   override fun onPause() {
-    clipboardRead?.cancel()
     // 退后台不继续解码视频（省电、避免后台播放）；回前台且仍在等引擎时续播。
     splashOverlay?.pause()
     pageRecovery.pause()
@@ -1054,7 +1057,6 @@ class MainActivity : ComponentActivity() {
   }
 
   override fun onDestroy() {
-    clipboardRead?.cancel()
     // 视频必须与播放器一起在这里终结；否则 Activity 重建后播放器仍在后台解码。
     finishSplash("destroy", animate = false)
     splashOverlay = null
@@ -1188,6 +1190,48 @@ class MainActivity : ComponentActivity() {
   }
 
   /**
+   * #686 第二层：安装桥帧来源守卫（见 [BridgeOriginGuard]）。
+   *
+   * 第一层是 [AndroidBridge.checkTrustedFrame]：每个桥方法入口校验**顶层帧 URL** 是否为引擎
+   * origin。它关死了「顶层被劫持出引擎 origin」，但按定义读不到「调用者来自哪个子帧」——
+   * 引擎 origin 顶层之下的跨源子帧仍够得到桥面（该缺口在 AndroidBridge 里如实登记）。
+   *
+   * 本层补的就是那个缺口：document-start 脚本让**每个文档自己**读 location.origin 与
+   * 「是否为顶层帧」，非放行帧把 window.androidBridge 整体封死。两层互补，缺一不可：
+   * 第一层挡顶层劫持，第二层挡子帧越权。
+   *
+   * 时序：本函数在 configureWebView() 内、且在 addJavascriptInterface 之前调用；首次
+   * loadUrl 走由 webViewReady 把守的更晚路径。因此任何文档解析时守卫已就位。
+   *
+   * 内核不支持 DOCUMENT_START_SCRIPT 时**必须发出可见告警**（不是静默跳过）：
+   * 老内核上第二层不存在，只剩第一层，属已知风险，PR 里单独登记。
+   */
+  private fun installBridgeOriginGuard() {
+    // 端口未确定就**不注册**，并报可见告警：不回退通配（http://127.0.0.1:* 会让本机任何
+    // 其他端口的页面拿到桥，风险面比现状更大），也不用未确定的值（会把合法主帧误封）。
+    if (!EngineEndpoint.confirmed || EngineEndpoint.port <= 0) {
+      Log.w(TAG, "WARNING: bridge frame origin guard NOT installed (engine port not confirmed yet); cross-origin subframes can still reach window.androidBridge (#686)")
+      try {
+        LogCollector.writeBootDiag(this, "bridge-guard-port-unconfirmed", "EngineEndpoint.port=" + EngineEndpoint.port + " confirmed=" + EngineEndpoint.confirmed)
+      } catch (t: Throwable) {
+        Log.w(TAG, "bridge guard port diag failed: " + t.message)
+      }
+      return
+    }
+    // 精确 origin：只用 EngineEndpoint 的持久化值（EngineProbe.ENGINE_URL 派生于它）。
+    val origins = listOf(EngineProbe.ENGINE_URL)
+    if (!BridgeOriginGuard.install(webView, origins)) {
+      // 可见告警：老内核降级。写日志 + 落启动诊断，运营侧能查到，不静默。
+      Log.w(TAG, "WARNING: bridge frame origin guard NOT installed (kernel lacks DOCUMENT_START_SCRIPT); cross-origin subframes can still reach window.androidBridge (#686)")
+      try {
+        LogCollector.writeBootDiag(this, "bridge-guard-unsupported", "DOCUMENT_START_SCRIPT unavailable")
+      } catch (t: Throwable) {
+        Log.w(TAG, "bridge guard fallback diag failed: " + t.message)
+      }
+    }
+  }
+
+  /**
    * #686：顶层帧 URL 的**主线程镜像**，供 JavaBridge 线程上的桥面来源门禁判读。
    *
    * 为什么不直接读 `webView.url`：`@JavascriptInterface` 入口跑在 **JavaBridge 线程**，
@@ -1226,8 +1270,16 @@ class MainActivity : ComponentActivity() {
         // sec-fetch-site 标记，会被 dsh 的 /api browser-trust fence 拒绝
         // （403 forbidden，防 DNS rebinding/跨站）。改为 app 内下载：
         // HttpURLConnection 无浏览器标记 → fence 放行（MuMu 实测验证）。
+        // issue #919 壳侧一半：引擎插件在真下载前先发 HEAD 预检。旧判据只认 GET ⇒ HEAD 落到下面
+        // 的 isEngineSource 分支交给 WebView 自己导航 ⇒ 插件拿到的是导航结果而不是导出通道 ⇒
+        // 进错误分支，而那个错误弹窗被 Web 侧 CSS 隐藏 ⇒ 用户看到「什么也没发生」。
+        // HEAD 必须拦，但**不得**触发下载（一次导出只该落一份文件），只回状态码。
         if (isSessionExport(url, request.method)) {
-          downloadSaver.downloadToDownloads(url, null)
+          if (isSessionExportPreflight(request.method)) {
+            downloadSaver.probeSessionExport(url)
+          } else {
+            downloadSaver.downloadToDownloads(url, null)
+          }
           return true
         }
         // 只允许引擎同源页面留在 WebView（特权桥 + 下载能力仅对引擎可信）；
@@ -1339,7 +1391,6 @@ class MainActivity : ComponentActivity() {
         super.onPageStarted(view, url, favicon)
         // #686：主线程镜像顶层帧 URL（桥面门禁在 JavaBridge 线程只读这个字段）。
         trustedTopFrameUrl = url
-        clipboardRead?.cancel()
         if (isEngineSource(url)) enginePageFailed = false
         // 新文档：上一文档的层栈信号作废（页面插件在新文档里重新推）。
         if (isEngineSource(url)) backGateState.onPageStarted()
@@ -1376,6 +1427,8 @@ class MainActivity : ComponentActivity() {
         // P0-1：冷启动时点的通知，落点要等这一帧之后页面才有会话视图（文档级就绪 ≠ 会话列表就绪，
         // 故页面侧的回执为 false 时会给出可见提示，而不是静默失败）。
         if (isEngineSource(url)) deliverNotifyRoute()
+        // issue #1007：进程死亡后恢复出来的拍照在途状态若已判丢失，回执要等到页面就绪才送得出去。
+        if (isEngineSource(url)) photoCaptureController.flushDeferredReceipt()
         // 0.14.2-fx-2 缺口：恢复期「拒绝回滚」的提示要在**页面就绪后**注入（引导页会被 showWeb 盖掉）。
         // 挂在这里的两个理由：① 文档级就绪；② 页面**重载**后补注不丢（进程内存里留着文案）。
         if (isEngineSource(url)) deliverRecoveryNotice()
@@ -1529,13 +1582,6 @@ class MainActivity : ComponentActivity() {
         onSettingsPathRequest = { engineManager.settingsDocumentPath() },
         onExportSettingsDocument = { engineManager.settingsDocumentExport() },
         onCopyTextRequest = { text -> copyTextNative(text) },
-        onCancelClipboardText = { requestId -> runOnUiThread { clipboardRead?.cancel(requestId) } },
-        onRequestClipboardText = { requestId -> runOnUiThread {
-          val controller = clipboardRead ?: ClipboardReadController(
-            this, { if (::webView.isInitialized) webView else null }, { isEngineSource(it) },
-          ).also { clipboardRead = it }
-          controller.request(requestId)
-        } },
         // 0.14.6：设置页「检查更新」——动作与引导页按钮共用同一状态机（ApkUpdateController）。
         onApkUpdate = { action -> apkUpdate.handleBridgeAction(action) },
         // 原生拍照：只受理并立即返回，最终回执经 window.__dshBridge.onPhotoCaptured 推回页面
@@ -2219,6 +2265,25 @@ class MainActivity : ComponentActivity() {
     fun setEnabled(context: Context, enabled: Boolean) {
       context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         .edit().putBoolean(KEY_DEV_LOG, enabled).apply()
+    }
+  }
+
+  /**
+   * #679：nonce 写失败的**可见化**（旧实现 `catch (_: Throwable) {}` 静默吞掉）。
+   *
+   * 为什么必须可见：壳侧已撤销 shell/root 的 uid 白名单，只认 nonce，所以 nonce 不存在就等于
+   * `android_ui_input` 的广播全链路失效；静默时用户只看到「中文输入没反应」，logcat 又常拿不到。
+   * boot-diag 是 `run-as cat` 可取回的自助面，也是发布后定位「壳与插件不同版」的唯一线索。
+   *
+   * 不重试、不回落旧口径：nonce 缺失时引擎侧会收到结构化错误并明确告知原因。
+   */
+  private fun reportKeyboardNonceWriteFailure(t: Throwable) {
+    val reason = t.message ?: t.javaClass.simpleName
+    android.util.Log.e("dsh-adb-kb", "keyboard nonce unavailable at startup: " + reason)
+    try {
+      LogCollector.writeBootDiag(this, "adb-keyboard-nonce-write-failed", reason)
+    } catch (_: Throwable) {
+      // 诊断写不进去时至少 Log.e 已留下；不影响启动。
     }
   }
 }

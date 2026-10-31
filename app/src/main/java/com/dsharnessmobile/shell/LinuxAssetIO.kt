@@ -214,9 +214,11 @@ internal object LinuxAssetIO {
   )
 
   /**
-   * 逐跳校验地下载到 [destination]（tmp + 原子 rename），随后**回验**摘要与字节数。
+   * 逐跳校验地下载到 [destination]（暂存文件 + [AtomicFileReplace] 唯一原子写入口发布），
+   * 随后**回验**摘要与字节数。
    *
-   * 校验发生在 rename 之前：任何失败都不留下半个「看似可用」的资产。
+   * 校验发生在发布之前：任何失败都不留下半个「看似可用」的资产；发布本身也不再先删目标
+   * （#1057），所以「校验失败」与「发布失败」都不会拿掉已有的可用资产。
    */
   fun download(spec: Spec, destination: File, root: File, opener: Opener = HttpOpener): Failure? {
     // 清单字面量先判：摘要是路径段的来源，校验必须早于任何文件系统动作（含下面的 mkdirs/delete）。
@@ -244,11 +246,12 @@ internal object LinuxAssetIO {
         val code = if (digest.bytes != spec.size) CODE_SIZE_MISMATCH else CODE_DIGEST_MISMATCH
         return Failure(code, detail)
       }
-      if (destination.exists()) destination.delete()
-      if (!tmp.renameTo(destination)) {
-        tmp.copyTo(destination, overwrite = true)
-        tmp.delete()
-      }
+      // #1057：校验通过后仍**读回已验证的字节**，再交给唯一原子写入口发布。
+      // 旧实现是「先 delete(destination) 再 rename，失败退 copyTo」——那两步都不是原子的：
+      // delete 后被杀就没有资产，copyTo 覆盖则会留下半份 tar.xz。
+      // 代价是这份资产（压缩包，量级几十 MB）要多读一次；换来的是「要发布的字节 == 已验证的字节」，
+      // 而不是「发布另一次写出的字节」。
+      AtomicFileReplace.writeBytes(destination, tmp.readBytes())
       return null
     } catch (e: Exception) {
       return Failure(CODE_DOWNLOAD_FAILED, e.message ?: e.javaClass.simpleName)

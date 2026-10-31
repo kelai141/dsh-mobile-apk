@@ -202,40 +202,57 @@ class AdbKeyboardService : InputMethodService() {
     }
 
     /**
-     * 唯一**隐式**可信 uid = root(0)。纯判据，单测直接覆盖。
+     * 来源校验（0.13.8 #183；#679 收紧到极致）：**没有任何 uid 被隐式信任，一律只认 nonce**。
      *
-     * #679：uid 2000（adb shell）的隐式信任**已撤销**——Shizuku 的核心能力就是让任意第三方
-     * 应用拿到 shell 身份（uid 2000），从 uid 上无法区分「真 adb 会话」与「持 shell 身份的
-     * 应用」；继续信任 2000 等于把输入注入面开放给所有 Shizuku 应用。root 不在此列：能以
-     * uid 0 执行的调用方本已拥有设备全部权限，nonce 对它不构成边界。
-     */
-    fun isTrustedUid(uid: Int): Boolean = uid == 0
-
-    /**
-     * 来源校验（0.13.8 #183；#679 收紧）：**root(0) 之外一律要求有效 auth nonce**——
-     * `BroadcastReceiver.getSentFromUid()` 取自框架（#413 修正：旧实现反射
-     * `Intent.getSentFromUid()`，AOSP 无此方法，反射恒抛），nonce 文件只在应用私有域
-     * （引擎子进程以应用 uid 运行、经 DSH_FILES_DIR 读取后随广播回传）。
+     * 为什么连 root(0) 的白名单也去掉：Shizuku 的 **shell 与 root 两种模式**都会把对应身份借给
+     * 已授权的第三方应用。也就是说 uid 2000 与 uid 0 都可以被「不是 adb、也不是本应用」的第三方
+     * 代表。从 uid 上无法区分「真 adb/root 会话」与「持该身份的应用」，因此 uid 白名单在这个
+     * 威胁模型下没有任何安全增益，只剩特例与维护成本。唯一的凭据是 nonce（应用私有域，
+     * 引擎子进程以应用 uid 运行、经 DSH_FILES_DIR 读到后随广播回传）。
+     *
+     * nonce 取不到时 **fail loud + fail closed**：记 `Log.e` 并写 boot-diag，然后拒收——
+     * 绝不回落到 uid 白名单（那正是本 issue 的缺陷面），也不静默（静默会让「中文输入没反应」
+     * 无从排查）。
      */
     fun isTrustedSender(context: Context, intent: Intent, senderUid: Int): Boolean {
       val given = intent.getStringExtra(EXTRA_AUTH)
-      val secret = if (isTrustedUid(senderUid)) {
-        null // root 不读 nonce 文件（本已拥有设备全部权限；保持「读文件前先判 uid」的旧序）
-      } else try {
-        nonceFile(context).takeIf { it.exists() }?.readText()?.trim()
-      } catch (_: Throwable) {
+      val secret = try {
+        nonceFile(context).takeIf { it.exists() }?.readText()?.trim()?.takeIf { it.isNotEmpty() }
+      } catch (t: Throwable) {
+        reportNonceUnavailable(context, senderUid, t.message ?: t.javaClass.simpleName)
         null
+      }
+      if (secret == null) {
+        if (given != null) reportNonceUnavailable(context, senderUid, "nonce file missing or empty")
+        return false
       }
       return isTrustedSenderFor(senderUid, given, secret)
     }
 
     /**
+     * nonce 不可用的**可见化**（#679 fail loud）：一行日志 + 一条 boot-diag。
+     *
+     * 为什么必须写 boot-diag：这类失败发生在广播路径上，用户侧只看到「中文输入没反应」，
+     * logcat 又常拿不到；boot-diag 是可 `run-as cat` 取回的自助面，也是发布后定位
+     * 「壳与插件不同版」的唯一线索。
+     */
+    private fun reportNonceUnavailable(context: Context, senderUid: Int, reason: String) {
+      val detail = "senderUid=" + senderUid + " reason=" + reason
+      android.util.Log.e("dsh-adb-kb", "broadcast nonce unavailable; rejecting (no uid fallback): " + detail)
+      try {
+        LogCollector.writeBootDiag(context, "adb-keyboard-nonce-unavailable", detail)
+      } catch (_: Throwable) {
+        // 诊断写不进去也不能让判定放行：上面已记 Log.e，且调用方必然拒收。
+      }
+    }
+
+    /**
      * 纯判据（JVM 单测直接覆盖；[isTrustedSender] 负责从 nonce 文件取 secret 后委托到这里）。
-     * #679：root(0) 之外一律要求 nonce——Shizuku 应用可持 uid 2000，隐式信任只剩 root；
-     * 文件缺失/不可读时 [fileSecret] 为 null，对任何非 root 调用方 fail-closed。
+     * #679：uid 不参与判定——Shizuku 的 shell 与 root 模式都能把身份借给第三方应用，
+     * 所以「哪个 uid 发的」不构成凭据；[fileSecret] 为 null 时对**所有**调用方 fail-closed。
+     * [senderUid] 保留只为拒绝日志里能看出是谁打过来的。
      */
     internal fun isTrustedSenderFor(uid: Int, givenNonce: String?, fileSecret: String?): Boolean {
-      if (isTrustedUid(uid)) return true
       if (givenNonce == null) return false
       val secret = fileSecret ?: return false
       return trustNonce(givenNonce, secret)

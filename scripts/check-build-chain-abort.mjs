@@ -75,12 +75,50 @@ if (!ps1Rel) { check('本地链脚本在场: scripts/build-apk-013.ps1', false) 
   const denyCalls = lines.filter((l) => /Deny-Abi \$abi/.test(l))
   check('per-ABI 拒绝路径存在（断言有对象）', denyCalls.length > 0, '找到 ' + denyCalls.length + ' 处')
 
-  // ── C. elf-check 退出码 ────────────────────────────────────────────────────
-  const elfPiped = lines.filter((l) => /elf-check\.mjs/.test(l) && /\|\s*Select-Object/.test(l))
-  check('elf-check 不得管道直连 Select-Object（会吞退出码语义）', elfPiped.length === 0,
-    elfPiped.map((l) => l.trim()).join(' | '))
+  // ── C. 门禁脚本不得管道直连 Select-Object ──────────────────────────────────
+  //
+  // issue #1075：判据 C 此前**按脚本名**写死成 /elf-check\.mjs/，于是同文件里另外两处
+  // 同形状的写法（check-patch-mounts @ :388、check-third-party @ :439）溜了过去。
+  // 其中 check-third-party 正是 GPL 许可合规门禁：失败时打印「THIRD-PARTY CHECK FAILED」
+  // 加 N 行明细，N >= 4 就超过 Select-Object -First 4 的对象数 =>
+  //   上游 node 被提前终止 => $LASTEXITCODE 变成 $null => `-ne 0` 为 True 但那是空值比较，
+  //   实测语义上 Deny-Abi 不会按预期触发，该 ABI 被计为「已产出」，链打印「=== 完成 ===」并 exit 0。
+  //
+  // 改成**任何** check-*.mjs 直连 Select-Object 都判红：这个坑与具体是哪道门禁无关，
+  // 只与「用管道截断输出」这个动作有关。要截断就先把退出码捕获到变量再截（见 elf-check 的写法）。
+  const gatePiped = lines.filter((l) => /check-[a-z0-9-]+\.mjs/.test(l) && /\|\s*Select-Object/.test(l))
+  check('check-*.mjs 门禁不得管道直连 Select-Object（会吞退出码语义）', gatePiped.length === 0,
+    gatePiped.map((l) => l.trim()).join(' | '))
   check('elf-check 退出码被捕获并判定（$elfCode + Deny-Abi）',
     /\$elfCode\s*=\s*\$LASTEXITCODE/.test(ps1Text) && /\$elfCode -ne 0[^\n]*Deny-Abi/.test(ps1Text))
+
+  // ── C2. 预清理只针对本次产出的 ABI（issue #1078）─────────────────────────────
+  //
+  // 旧写法 `Get-ChildItem $Out -Filter '*.apk' -Recurse | Remove-Item` 在 ABI 循环之前无条件跑，
+  // 于是跑过一次完整构建后再用 -OnlyAbi / -Fast 跑单 ABI 会把另一个 ABI 已验签的产物也删掉，
+  // 本次只产 1 个 ABI、两条尾部守卫都过、exit 0，而发布目录只剩 1/2 ABI。
+  // 判据：预清理必须按「本次产出 ABI」过滤，不得对 $Out 无条件递归删。
+  const unconditionalWipe = lines.filter((l) => /Get-ChildItem\s+\$Out/.test(l)
+    && /Remove-Item/.test(l) && !/\$abisThisRun/.test(l) && !/^\s*#/.test(l))
+  check('预清理不得无条件删除 $Out 下所有 APK（#1078：会删掉另一个 ABI 的产物）',
+    unconditionalWipe.length === 0, unconditionalWipe.map((l) => l.trim()).join(' | '))
+  check('预清理按本次产出 ABI 过滤（$abisThisRun）',
+    /\$abisThisRun\s*=/.test(ps1Text) && /\$abisThisRun/.test(ps1Text))
+
+  // ── C3. 发布快照资产先校验后落盘（issue #1080）───────────────────────────────
+  //
+  // 旧顺序：Copy-Item 拷进 out/ -> 再 check-snapshot-asset；缺 APK 只打警告并跳过校验。
+  // 于是上一次运行的旧 tar 可以带着 .sha256 躺进发布目录，而一致性校验从未发生。
+  // 判据：`Copy-Item $snapIn $outSnap` 必须出现在 check-snapshot-asset 调用**之后**；
+  //       且「缺 APK」分支必须是 Deny-Abi，不得是「警告 + 跳过」。
+  const copyIdx = lines.findIndex((l) => /Copy-Item\s+\$snapIn\s+\$outSnap/.test(l))
+  const verifyIdx = lines.findIndex((l) => /check-snapshot-asset\.ps1/.test(l))
+  check('发布快照资产必须先校验再拷入（#1080：Copy-Item 必须在 check-snapshot-asset 之后）',
+    copyIdx === -1 || verifyIdx === -1 || verifyIdx < copyIdx,
+    copyIdx === -1 ? '未找到 Copy-Item $snapIn $outSnap' : ('verify L' + (verifyIdx + 1) + ' vs copy L' + (copyIdx + 1)))
+  const warnSkip = lines.filter((l) => !/^\s*#/.test(l) && /缺 APK/.test(l) && /警告|跳过/.test(l))
+  check('缺 APK 时不得只警告并跳过一致性校验（#1080：必须 Deny-Abi）',
+    warnSkip.length === 0, warnSkip.map((l) => l.trim()).join(' | '))
 
   // ── 尾部守卫 ──────────────────────────────────────────────────────────────
   check('含「已产出 / 被拒 ABI」汇总行', /汇总。已产出 ABI/.test(ps1Text))

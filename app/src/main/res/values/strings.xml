@@ -99,7 +99,4 @@
   <string name="ds_share_log_working">正在打包诊断日志…</string>
   <string name="ds_share_log_done">已生成诊断包 %1$s，请选择要发送到的应用</string>
   <string name="ds_share_log_failed">分享未成功：%1$s</string>
-  <string name="ds_clipboard_read_title">读取剪贴板？</string>
-  <string name="ds_clipboard_read_detail">读取剪贴板中的模型配置以预览并填入草稿。不会自动保存。</string>
-  <string name="ds_clipboard_read_action">读取并预览</string>
 </resources>

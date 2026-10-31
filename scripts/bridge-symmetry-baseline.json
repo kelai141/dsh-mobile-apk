@@ -132,5 +132,17 @@
       "method": "getDevLogEnabled",
       "reason": "返回 dev 开关偏好，未回读「日志目录是否真在写」的事实值"
     }
+  ],
+  "frameGuardUncovered": [
+    {
+      "surface": "backGateBridge",
+      "reason": "BackGateBridge 暴露给 dshBackBridge（页面层栈信号 + 只读回读），没有接入 #686 的 trusted{}/checkTrustedFrame 机制；该桥只读/只写一个布尔信号，不含文件、命令、屏幕内容等敏感面。接入守卫需要先给 BackGateBridge 一份帧来源判定（与 AndroidBridge.isTrustedTopFrame 同源），属独立改动范围。",
+      "until": "2026-12-31"
+    },
+    {
+      "surface": "consoleBridge",
+      "reason": "ConsoleBridge 只由 ConsoleActivity 自己的 WebView 使用，加载的是 file:///android_asset/console.html（allowFileAccess=false，无远程内容、无第三方页面）。它同样没有接入 #686 的 trusted{}/checkTrustedFrame 机制。该 WebView 的桥面不面向引擎页面，跨源子帧威胁面与 AndroidBridge 不同，接入守卫属独立改动范围。",
+      "until": "2026-12-31"
+    }
   ]
 }

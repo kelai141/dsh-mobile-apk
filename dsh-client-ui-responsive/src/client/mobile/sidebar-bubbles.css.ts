@@ -63,7 +63,7 @@ export const SIDEBAR_BUBBLES_CSS = `
   [data-dsh-bubble-panel] .dsh-bubble-popover {
     position: absolute; z-index: 85; overflow-x: hidden; overflow-y: auto;
     padding: 5px 0; scroll-padding: 8px; overscroll-behavior: contain;
-    touch-action: pan-y pinch-zoom; -webkit-overflow-scrolling: touch;
+    touch-action: pan-y; -webkit-overflow-scrolling: touch;
     user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
     border: 0; border-radius: 0; color: var(--dsh-bubble-pill-text);
     background: transparent; box-shadow: none;
@@ -90,7 +90,7 @@ export const SIDEBAR_BUBBLES_CSS = `
     min-height: 44px; padding: 1px 8px 1px 12px; border: 0; border-radius: inherit;
     background: transparent; color: inherit; font: inherit; text-align: start; cursor: pointer;
     user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
-    touch-action: pan-y pinch-zoom; -webkit-tap-highlight-color: transparent;
+    touch-action: pan-y; -webkit-tap-highlight-color: transparent;
   }
   [data-dsh-bubble-panel] .dsh-bubble-select::before {
     content: ''; display: block; flex: none; width: 3px; height: 22px; border-radius: 3px;

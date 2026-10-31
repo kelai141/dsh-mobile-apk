@@ -77,14 +77,36 @@ internal object ShellOps {
    */
   private val GLUED_LINE_CONTINUATION = Regex("""[^\s]\\\r?\n[^\s]""")
 
+  /**
+   * 「目标屏参数从哪一段起不再有效」的口径（issue #1060 F2，与引擎侧 `optionWindow` 同三档）。
+   *
+   * - [GETOPT]：工具用 getopt 解析短选项，**第一个非选项词**（或 `--`）之后不再解析 ⇒ 之后出现的
+   *   `-d` 只是普通 argv，工具根本没读它 ⇒ 那里的 `-d` 不得当凭据（`screencap` / `screenrecord`）；
+   * - [COMMAND]：工具自带子命令解析器，`-d` 只在**子命令词之前**有效（`input`）；
+   * - [FULL]：整段都算 —— 这类自解析器在子命令与位置参数**之后**仍认目标屏参数
+   *   （设备实测 `wm size 900x1600 -d 7`、`cmd window size 900x1600 -d 7` 都生效）。
+   */
+  private enum class OptionWindow { GETOPT, COMMAND, FULL }
+
   /** 命令词家族：每个家族自带「哪种拼写才算它的目标屏」（与引擎侧 `SCREEN_COMMAND_FAMILIES` 同表）。 */
-  private data class ScreenFamily(val name: String, val pattern: Regex, val targetFlags: List<String>)
+  private data class ScreenFamily(
+    val name: String,
+    val pattern: Regex,
+    val targetFlags: List<String>,
+    val optionWindow: OptionWindow = OptionWindow.FULL,
+  )
 
   private val ALL_DISPLAY_FLAGS = listOf("-d", "--display", "--display-id")
 
   private val SCREEN_FAMILIES = listOf(
-    ScreenFamily("screencap", Regex("""\bscreencap\b""", RegexOption.IGNORE_CASE), ALL_DISPLAY_FLAGS),
-    ScreenFamily("screenrecord", Regex("""\bscreenrecord\b""", RegexOption.IGNORE_CASE), ALL_DISPLAY_FLAGS),
+    // issue #1060 F2：screencap / screenrecord 是 toybox 工具，用 getopt 解析短选项 ⇒ 第一个非选项词
+    // 之后不再解析。旧实现只给 `input` 算了边界、这两个做全段扫描 ⇒
+    // `screencap -p /sdcard/a.png -d 7`、`screencap -- -d 7`、`screencap -p 7 -d 7` 的尾随 -d
+    // 反而成了「已认证」的通行证（真实 display 0）。
+    ScreenFamily("screencap", Regex("""\bscreencap\b""", RegexOption.IGNORE_CASE), ALL_DISPLAY_FLAGS,
+      OptionWindow.GETOPT),
+    ScreenFamily("screenrecord", Regex("""\bscreenrecord\b""", RegexOption.IGNORE_CASE), ALL_DISPLAY_FLAGS,
+      OptionWindow.GETOPT),
     ScreenFamily(
       "input",
       // 正式语法是 `input [<source>] [-d DISPLAY_ID] <command> [<arg>…]`：source 是位置词
@@ -97,6 +119,7 @@ internal object ShellOps {
         RegexOption.IGNORE_CASE,
       ),
       ALL_DISPLAY_FLAGS,
+      OptionWindow.COMMAND,
     ),
     // `wm` 是窗口管理器命令面：20+ 子命令里只有 `help` 与 `get-*` 是纯查询，其余每个都改显示状态
     // 或 dump **真实屏**的窗口视图树。修前的子命令白名单让 `wm dump-visible-window-views`
@@ -129,9 +152,29 @@ internal object ShellOps {
     ScreenFamily("getevent", Regex("""\bgetevent\b""", RegexOption.IGNORE_CASE), emptyList()),
     // `dumpsys activity` 也会打完整 `View Hierarchy:`（含每个控件的 bounds）—— 与 `uiautomator dump`
     // 同级的「读真实屏 UI」，2026-10-28 自查补进来；`battery`/`meminfo` 这类与屏无关的不受影响。
+    //
+    // issue #1060 F3：**服务名永不紧贴 `dumpsys`**。AOSP `frameworks/base/cmds/dumpsys/dumpsys.cpp`
+    // 用 `getopt_long(argc, argv, "+t:l", …)`，`-t <秒>` 是全局超时旗标、`-l` 只列服务名 ⇒
+    // `dumpsys -t 10 window` 的真实 argv 是 ["dumpsys","-t","10","window"]，实际服务 window，
+    // 输出含真实屏 View 层级。旧 pattern 要求服务名紧跟命令名 ⇒ 这一类全部 families=[] ⇒ allow。
+    //
+    // 修法（fail-closed，不新增放行分支）：命中判据改成「服务名**不能确认安全**就命中」——
+    //   ① `dumpsys` 之后紧跟一个**不以 `-` 开头**、**不是**敏感服务、且**不含 `$` / 反引号**的词
+    //      ⇒ 服务名可确认且安全 ⇒ 不命中；
+    //   ② 其余一律命中：紧跟敏感服务 / 紧跟旗标 / 干脆没有服务名 / 服务名是变量或命令替换。
+    //      旗标之后是什么服务**静态不可判**（`--abi arm64` 这类旗标自己带词形参数，任何
+    //      「跳过旗标取下一个词」的推断都会被骗过去），裸 `dumpsys` 更会 dump **全部**服务（含 window）。
+    //
+    // issue #1184（F3 残留）：服务名是**变量**时不得算「已确认安全」。旧启发式只要求
+    // 「下一个词不以 `-` 开头且不是敏感服务」，于是 `dumpsys $S` / `dumpsys ${S}` / `dumpsys win$X`
+    // 全被放行——而 `$S` 完全可能是 `window`（展开后就是 `dumpsys window`，打真实屏 View 层级）。
+    // 判据补一条：可确认安全的服务名不得含 `$` 与反引号（即不得含展开或命令替换）。
     ScreenFamily(
       "dumpsys",
-      Regex("""\bdumpsys[ \t]+(?:window|display|input|activity)\b""", RegexOption.IGNORE_CASE),
+      Regex(
+        "\\bdumpsys\\b(?![ \\t]+(?!-)(?!(?:window|display|input|activity)\\b)(?!\\S*[$\u0060])\\S)",
+        RegexOption.IGNORE_CASE,
+      ),
       emptyList(),
     ),
     // `am` 的显示参数是 `--display`；`-d` 是 Intent data，**不得**作为目标屏凭据。
@@ -684,7 +727,12 @@ internal object ShellOps {
       if (interpreterPayloadUnparsed(bare)) {
         return ScreenCommandVerdict.DENY_UNPARSED
       }
-      val options = displayOptionsIn(bare)
+      // 目标屏参数的**取值**与**边界**另用「保留一个占位词」的版本（issue #1060 F1/F2）：引号词与转义
+      // 空白在真实 argv 里是**独立的词**，抹成空格会让 `-d` 偷走下一个词的值（`-d "" 7`），
+      // 也会让「第一个非选项词」的边界凭空消失（`-p "" -d 7`）。命令词面（家族匹配）仍用上面那个
+      // 默认版本 —— 引号内不是命令词，那里的行为必须与修复前逐字相同。
+      val bareWords = stripQuotedText(segment, keepQuotedWords = true)
+      val options = displayOptionsIn(bareWords)
       if (MALFORMED_DISPLAY_OPTION.containsMatchIn(bare)) {
         return ScreenCommandVerdict.DENY_UNCERTIFIED_TARGET
       }
@@ -692,21 +740,33 @@ internal object ShellOps {
       val families = SCREEN_FAMILIES.filter { it.pattern.containsMatchIn(normalized) }
       if (families.isEmpty()) {
         // 非屏幕命令段：允许，但**不得**携带目标屏凭据（否则就是洗白凭据）。
-        if (options.isNotEmpty()) return ScreenCommandVerdict.DENY_ORPHAN_TARGET_TOKEN
+        // 这里连**抹掉引号**的取值面一起看：`echo -d "" 7` 折叠后是 `-d 7`，历史上按「洗白凭据」拒；
+        // 本轮 F1 只改「屏幕命令族自己解析 -d」那条路，不得顺手把这条拒改成放行
+        // （宁可误拒不可误放——少一条拒就是多一条放行通道）。
+        if (options.isNotEmpty() || displayOptionsIn(bare).isNotEmpty()) {
+          return ScreenCommandVerdict.DENY_ORPHAN_TARGET_TOKEN
+        }
         continue
       }
       for (family in families) {
         if (family.targetFlags.isEmpty()) return ScreenCommandVerdict.DENY_UNCERTIFIED_TARGET
-        // `input` 的 `-d` 只在 **command 词之前**有意义：`input tap 1 2 -d 7` 里的 `-d 7` 是 tap 的
-        // 多余 argv，真实 input 仍操作默认 display 0（Android 只在 command 前解析 -d）。全段扫描会让
-        // 尾随 `-d <owned>` 变成"已认证"的通行证（与引擎侧同源修法）。
-        val limit = if (family.name == "input") inputCommandIndex(bare) else bare.length
+        // 目标屏参数只在**本家族真正解析它**的那一段里算凭据（口径见 [OptionWindow]）。
+        // 旧实现只给 `input` 算了边界、其余家族做全段扫描 ⇒ 尾随 `-d <owned>` 反而成了"已认证"的
+        // 通行证（2026-10-28 自查的 `input` 那处；issue #1060 F2 把同源规则补齐到 getopt 家族）。
+        val limit = familyOptionLimit(family, bareWords)
+        // issue #1184：目标屏参数按流式解释——最后一个赋值生效，空值不继承上一个值。
+        // 只按数字过滤（#1060 F1 的形态）会让「取值是空词」的 -d 整个消失，于是一个更早的
+        // 合法 -d 7 为整条命令背书，而真实作用屏是 display 0。这里要求最后一次赋值可解释。
+        val target = displayTargetIn(bareWords, limit)
+        if (target is DisplayTarget.Unresolved) return ScreenCommandVerdict.DENY_UNCERTIFIED_TARGET
         val owned = options
           .filter { it.flag in family.targetFlags && it.index < limit }
           .map { it.value }
         // 该家族必须在**本段内**自证：参数缺席、或任一值不属于已注册虚拟屏 → 拒（不得只认证其中一个）。
         if (owned.isEmpty()) return ScreenCommandVerdict.DENY_UNCERTIFIED_TARGET
         if (!owned.all { ownsTarget(it) }) return ScreenCommandVerdict.DENY_UNCERTIFIED_TARGET
+        // 流式结论也必须属于已注册虚拟屏（不得只看「出现过某个合法值」）。
+        if (target is DisplayTarget.Explicit && !ownsTarget(target.token)) return ScreenCommandVerdict.DENY_UNCERTIFIED_TARGET
       }
     }
     return ScreenCommandVerdict.ALLOW
@@ -719,6 +779,57 @@ internal object ShellOps {
   /** `input` 家族里 command 词的位置（「只有它之前的 `-d` 才算凭据」的边界）。 */
   private fun inputCommandIndex(text: String): Int =
     INPUT_COMMAND.find(text)?.range?.first ?: text.length
+
+  /** 需要**独立取值词**的目标屏参数拼写（`-d7` / `--display=7` 是粘连形态，不吃下一个词）。 */
+  private val SEPARATE_VALUE_DISPLAY_FLAGS = setOf("-d", "--display", "--display-id")
+
+  /**
+   * getopt 停止解析的下标（issue #1060 F2）：**第一个非选项词**的起始位置；`--` 本身即终点
+   * （其后全是操作数），单横 `-` 在 getopt 里是非选项词。
+   *
+   * 真实 argv 依据（`screencap` / `screenrecord` 是 toybox 工具，用 getopt 解析短选项）：
+   *   `screencap -p /sdcard/a.png -d 7` → ["screencap","-p","/sdcard/a.png","-d","7"]
+   *        getopt 在 /sdcard/a.png（第一个非选项词）处停止 ⇒ `-d 7` 是普通 argv ⇒ display 0；
+   *   `screencap -- -d 7`               → `--` 是选项终结符 ⇒ 其后全是操作数 ⇒ display 0；
+   *   `screencap -p 7 -d 7`             → `-p` 不吃参数（只有 `-d` 吃）⇒ `7` 就是第一个非选项词 ⇒ display 0。
+   * 旧实现只给 `input` 算了边界、其余家族做全段扫描 ⇒ 这三条都被尾随 `-d <已注册>` 洗白成 allow。
+   *
+   * 为什么不逐工具维护「哪些选项吃参数」：那张表一旦漏一个带**词形**参数的选项（`--abi arm64` 之类），
+   * 参数就会被当成位置词，边界判断失效方向是**放行**。故一律按「任何非选项词都终止解析」fail-closed。
+   */
+  private fun getoptStopIndex(text: String, commandWord: String): Int {
+    var i = 0
+    var seenCommand = false
+    while (i < text.length) {
+      while (i < text.length && (text[i] == ' ' || text[i] == '\t')) i += 1
+      if (i >= text.length) break
+      val start = i
+      while (i < text.length && text[i] != ' ' && text[i] != '\t') i += 1
+      val word = text.substring(start, i)
+      if (!seenCommand) {
+        // 命令词**不一定在段首**：本门禁也判 `adb shell screencap …`（adb 包装）这类形态 ⇒ 先找到
+        // 家族自己的命令词（允许绝对路径），再从它后面开始数解析窗口。
+        if (word.substring(word.lastIndexOf('/') + 1).lowercase() == commandWord) seenCommand = true
+        continue
+      }
+      if (word == "--" || word == "-" || !word.startsWith("-")) return start
+      if (SEPARATE_VALUE_DISPLAY_FLAGS.contains(word)) {
+        // `-d 7`：`7` 是这个选项的值，不是位置词 —— 不跳过它就会让 `-d` 被**自己的值**判成
+        // 「第一个非选项词」，于是 `screencap -d 7 -d 99 …` 里的第二个 `-d` 反而被放过。
+        while (i < text.length && (text[i] == ' ' || text[i] == '\t')) i += 1
+        while (i < text.length && text[i] != ' ' && text[i] != '\t') i += 1
+      }
+    }
+    // 命令词根本没以独立词出现（家族是靠别的词面命中的）⇒ 上界 0 ⇒ 任何 `-d` 都不算凭据（fail-closed）。
+    return if (seenCommand) text.length else 0
+  }
+
+  /** 该家族「目标屏参数算凭据」的上界（口径见 [OptionWindow]）。 */
+  private fun familyOptionLimit(family: ScreenFamily, bareWords: String): Int = when (family.optionWindow) {
+    OptionWindow.GETOPT -> getoptStopIndex(bareWords, family.name)
+    OptionWindow.COMMAND -> inputCommandIndex(bareWords)
+    OptionWindow.FULL -> bareWords.length
+  }
 
   /** 引号感知切段结果（与引擎侧 `CommandSegments` 同构）。 */
   internal class ParsedCommand(val segments: List<String>, val unparsed: Boolean)
@@ -965,13 +1076,33 @@ internal object ShellOps {
   }
 
   /**
+   * 引号词 / 转义空白的**占位词**（issue #1060 F1，与引擎侧 `QUOTED_WORD_PLACEHOLDER` 同值）。
+   *
+   * 只在 [stripQuotedText] 的 `keepQuotedWords` 模式出现：真实 argv 里「引号包住的东西」是**一个词**
+   * （哪怕是空串），这个占位符保住这条事实。取值刻意选 SOH —— 不含数字、不以 `-` 开头、
+   * 不匹配任何命令词家族、也不是 ASCII 空白 ⇒ 既不会被当成 `-d` 的值，也不会让 getopt 边界消失。
+   */
+  private const val QUOTED_WORD_PLACEHOLDER = '\u0001'
+
+  /**
    * 把**引号内文本与转义字符**替换成 shell 真正会执行的字面量：
    *  - 引号段整体抹成空白（引号内不是命令词，也不是参数——`echo "screencap"` 不执行它）；
    *  - `\x` 解成 `x`（shell 会消掉反斜杠：`input \-d 0 tap 1 2` 实际执行的就是 `input -d 0 tap 1 2`）。
    *
+   * `keepQuotedWords`（issue #1060 F1）：非首词的引号段与**转义空白**改留一个占位词
+   * （[QUOTED_WORD_PLACEHOLDER]），不再折叠成一个空格。
+   *
+   * 缺陷形态（旧实现的 `out.append(' ')`）：`screencap -d "" 7` 的真实 argv 是
+   * `["screencap","-d","","7"]` —— `-d` 的 optarg 是**空串**，AOSP 用 `atoi(optarg)` ⇒ `atoi("")==0`
+   * ⇒ 实际作用 **display 0（真实屏）**，`7` 只是输出文件名。折叠成 `screencap -d   7` 后，
+   * 取值正则把**下一个词**的 `7` 当成 `-d` 的值 ⇒ 门禁判「已认证虚拟屏 7」并放行，而命令读真实屏。
+   * 占位词让 `-d` 取不到数字值 ⇒ 该家族自证失败 ⇒ `deny-uncertified-target`（fail-closed）。
+   *
+   * 命令词面（家族匹配）**仍用默认模式**：引号内不是命令词，抹成空白才对（`echo "screencap"` 必须放行）。
+   *
    * 与引擎侧 `stripQuotedText` 同规则。
    */
-  internal fun stripQuotedText(text: String): String {
+  internal fun stripQuotedText(text: String, keepQuotedWords: Boolean = false): String {
     val out = StringBuilder()
     var i = 0
     // 只对**段内第一个词**（命令词位置）做 quote removal —— shell 在查找命令前会剥掉那里的引号，
@@ -982,7 +1113,10 @@ internal object ShellOps {
     while (i < text.length) {
       val ch = text[i]
       if (ch == '\\') {
-        if (i + 1 < text.length) out.append(text[i + 1])
+        val escaped = if (i + 1 < text.length) text[i + 1] else '\u0000'
+        // 转义空白是**词内字符**（`-d \ 7` 的 `-d` 值是一个空格串），不是分隔符 ⇒ 取值面必须留一个词。
+        val wordPlaceholder = keepQuotedWords && !inFirstWord && (escaped == ' ' || escaped == '\t')
+        if (i + 1 < text.length) out.append(if (wordPlaceholder) QUOTED_WORD_PLACEHOLDER else escaped)
         i += 2
         inFirstWord = false
         continue
@@ -1005,7 +1139,11 @@ internal object ShellOps {
           i = text.length
           continue
         }
-        if (inFirstWord) out.append(text, (if (ansiC) i + 1 else i) + 1, j) else out.append(' ')
+        if (inFirstWord) {
+          out.append(text, (if (ansiC) i + 1 else i) + 1, j)
+        } else {
+          out.append(if (keepQuotedWords) QUOTED_WORD_PLACEHOLDER else ' ')
+        }
         i = j + 1
         inFirstWord = false
         continue
@@ -1039,6 +1177,57 @@ internal object ShellOps {
       out.add(DisplayOption(m.groupValues[1], m.groupValues[2], m.range.first))
     }
     return out.sortedBy { it.index }
+  }
+
+  /**
+   * 目标屏参数的**流式**解析结果（issue #1184，与引擎侧 `displayTargetIn` 同一口径）。
+   *
+   * 为什么需要它（#1060 F1 的修法引入了新绕过）：[displayOptionsIn] 只记录**值为数字**的
+   * `-d`，于是「取值是空词 / 转义空白」的 `-d` 在结果里完全不出现——没有任何判据要求
+   * 「出现过的每个 `-d` 都必须能被解释」。而 screencap / screenrecord 是 getopt 工具，
+   * 语义是**最后一个 `-d` 生效**：
+   *   `screencap -d7 -d "" 0` ⇒ argv ["-d7","-d","","0"] ⇒ 先 7、再 atoi("")=0 ⇒ display 0，
+   * 前面那个合法的 `-d 7` 于是为一个实际打在真实屏上的命令背书。
+   *
+   * 所以按流式建模：每遇到一个目标屏参数就更新当前目标屏，**空值不继承上一个值**
+   * （它是独立的、无效的一次赋值），最终只看**最后一次**赋值的取值。
+   */
+  internal sealed interface DisplayTarget {
+    /** 窗口内没有出现任何目标屏参数。 */
+    data object None : DisplayTarget
+    /** 最后一次赋值的取值可解释为十进制串，由调用方再与注册表核对。 */
+    data class Explicit(val token: String) : DisplayTarget
+    /** 最后一次赋值的取值不可解释（空词 / 占位词 / 粘连非数字 / 缺值）⇒ 必须 fail-closed。 */
+    data class Unresolved(val token: String) : DisplayTarget
+  }
+
+  private val DECIMAL_ONLY = Regex("""^\d+$""")
+  private val GLUED_WITH_EQUALS = Regex("""^(?:--display-id|--display|-d)=(\S*)$""")
+  private val GLUED_SHORT_NUMERIC = Regex("""^-d(\d+)$""")
+
+  internal fun displayTargetIn(text: String, limit: Int = text.length): DisplayTarget {
+    val bounded = text.substring(0, limit.coerceIn(0, text.length))
+    val tokens = bounded.split(' ', '\t').filter { it.isNotEmpty() }
+    var result: DisplayTarget = DisplayTarget.None
+    var i = 0
+    while (i < tokens.size) {
+      val token = tokens[i]
+      if (token == "-d" || token == "--display" || token == "--display-id") {
+        val value = if (i + 1 < tokens.size) tokens[i + 1] else ""
+        result = if (DECIMAL_ONLY.matches(value)) DisplayTarget.Explicit(value) else DisplayTarget.Unresolved(value)
+        i += 2
+        continue
+      }
+      // 粘连形态：`-d7` / `-d=7` / `--display=7` / `--display-id=7`。
+      // 只认「旗标后紧跟数字或 =」，以免把 `-debug` 之类误当目标屏参数。
+      val glued = GLUED_WITH_EQUALS.find(token) ?: GLUED_SHORT_NUMERIC.find(token)
+      if (glued != null) {
+        val value = glued.groupValues[1]
+        result = if (DECIMAL_ONLY.matches(value)) DisplayTarget.Explicit(value) else DisplayTarget.Unresolved(value)
+      }
+      i += 1
+    }
+    return result
   }
 
   /**

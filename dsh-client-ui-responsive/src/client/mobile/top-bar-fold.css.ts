@@ -15,11 +15,12 @@
  * 30px 高的行里。这与 snapshot-panels.css.ts 处理同一个问题的先例一致（那里也是打开面板时
  * 临时把 containment 换成 normal）。
  *
- * 箭头挂在 [data-conversation-tabs] **内部**的末位（该属性是稳定锚点，见
- * ConversationSession.tsx:143）。ensureArrow 每轮同步都复检「我是不是最后一个子节点」，
- * 上游往标签条 append 新标签后，箭头会被重新 append 回末位，因此不会夹在两个标签中间。
+ * 箭头挂在 [data-conversation-tabs] 的**父行**末位（真机实测 = 上游 div.wSkVaW_tabs，
+ * display:flex; flex-wrap:wrap; align-items:flex-start; gap:16px 20px; padding-left:8px）。
+ * ensureArrow 每轮同步都复检「我是不是父行的最后一个孩子」：父行里还有上游「…」菜单
+ * （span.wSkVaW_viewsMoreAnchor + button[aria-haspopup=menu]）等兄弟节点，它们晚挂或重挂后
+ * 箭头会被重新 append 回末位，因此不会停在菜单左边。
  *
- * 不挂父行：父行里还有「…」菜单等兄弟节点，父行末位不等于标签行末位（见 ensureArrow 注释）。
  * 不按「对话」「轨迹」文字匹配 —— 视图标签由 conversation.view 插槽注册，文案可变可增。
  */
 export const TOP_BAR_FOLD_CSS: string = `
@@ -64,20 +65,68 @@ html[data-dsh-mobile-form] div[data-dsh-topbar-fold-uncontained] {
 
 /* 视图菜单（上游的「…」）：用户定例移除，只保留折叠箭头（#862 的行为，保留）。
    它**不是**标签条的子节点，而是标签条（[data-conversation-tabs]）的兄弟节点。
-   按「兄弟 + 带 menu 语义」精确命中：+ * 是「谁排在我后面就藏谁」的开放规则，
-   折叠箭头同样会被挂到这一行，将来任何插到那里的兄弟节点都会被误伤。 */
+   按「兄弟 + 带 menu 语义」精确命中：+ * 是「谁排在我后面就藏谁」的开放规则。
+   + * 当前不会误伤箭头（菜单有 wrapper），但菜单不在场（上游去掉 / 按
+   visibleViewLimit 收起 / 加载时序）时，箭头会成为相邻兄弟被同一条规则隐藏，
+   用户失去展开入口——推荐 ~ * [aria-haspopup=menu]（见 #1228）。
+
+   已知未命中（真机实测 emulator-5558 / dsh 0.2.1-rc.2，见 #1228）：
+   这条规则在真机上 matches 为 false —— 菜单按钮外面包了一层
+   span.wSkVaW_viewsMoreAnchor，结构是
+     div.wSkVaW_tabs > div.viewTabs[data-conversation-tabs]
+                     > span.wSkVaW_viewsMoreAnchor > button[aria-haspopup=menu]
+   中间隔着那个 span，相邻选择器 + 不成立，所以「更多会话视图」目前并未被隐藏。 */
 html[data-dsh-mobile-form] [data-conversation-tabs] + [aria-haspopup='menu'] {
   display: none;
 }
 
-/* 折叠箭头：紧凑、与两个侧边栏按钮同一视觉重量，**紧贴最后一个视图标签**。
-   不能写 margin-left:auto —— 那会把它推到整行最右端，与标签群之间空出一大段
-   （实机实测：箭头 x=548、视口宽 600，最后一个标签右边界仅 112）。 */
+/* 折叠箭头：紧凑、与两个侧边栏按钮同一视觉重量，**推到整行最右**、与「对话 / 轨迹」文字对齐。
+   以下全部为真机实测（emulator-5558 竖屏 600x1067，dsh 0.2.1-rc.2，真实非空会话）。
+
+   ── 水平：必须「挂父行」+「margin-inline-start: auto」同时成立 ──
+     行 = div.wSkVaW_tabs（display:flex; flex-wrap:wrap; align-items:flex-start;
+                          gap:16px 20px; padding-left:8px; rect x=20 right=572）
+     标签条 = div.wSkVaW_viewTabs[data-conversation-tabs]（flex:0 1 auto; width=内容宽 140.02）
+       箭头在标签条内部、无 auto            -> x=144.02（偏左）
+       箭头在标签条内部 + auto              -> x=144.02（**完全无效**：标签条宽度=内容宽，
+                                             内部没有剩余空间可吃，auto 无处可推）
+       箭头在父行末位、无 auto              -> x=174.02
+       箭头在父行末位 + auto                -> x=548 / right=572
+       箭头在父行末位 + auto + 本规则       -> x=564 / right=588（见下）
+   旧注释说 auto 会「与标签群之间空出一大段」—— 实测在 rc.2 上不成立：挂在标签条内部时
+   auto 根本推不动，只有挂父行才生效。这正是旧实现掉在标签下面且偏左的成因。
+
+   ── margin-inline-end: -16px：吃掉 header padding-right 的一半 ──
+   header 是 padding:10px 28px 0 20px，所以行右边界只到 572，距视口 600 差 28px，
+   超验收线（≤16px）。吃掉 16px 后 right=588、距视口 12px，与右上角按钮群（headerCorner）
+   的既有留白 11.67px 基本一致。已验证 documentElement.scrollWidth === clientWidth === 600，
+   不产生横向溢出，行 overflow 不裁切。
+
+   ── 垂直：对齐「文字中心」，不是按钮盒中心 ──
+   上游 .tab 是 line-height:16px + padding:0 0 9px，所以按钮盒中心比文字中心低
+   (16+9)/2 - 16/2 = 4.5px（实测按钮盒中心 y=86.67、文字中心 y=82.17）。
+   flex-start 让箭头顶到行首，箭头中心在 24/2 = 12px；文字中心在 8px；差 4px，故上移 4px。
+   实测对照：align-self:center -> 差 4.58px；不加 align-self -> 差 4.00px；
+             align-self:flex-start + margin-top:-4px -> 差 **0.00px**（本规则）。
+   -4px 的来路就是上面这条算式（12 - 8），不是调出来的手感值；上游 .tab 的 line-height 或
+   padding-bottom 变了就要按同一算式重算。
+   写 align-self:flex-start 而不是依赖父行 align-items:flex-start：上游一旦改行的
+   align-items，箭头不会被带走。
+
+   ── 换行 ──
+   实测：2 个视图标签不换行；加到 **6 个**标签时行高 25.17 -> 65、箭头掉到第二行（y 74.17 -> 115）；
+   7 个就换行。**刻意不加 nowrap**：实测加 nowrap 后行高变成 82（比 wrap 时的 65 更高、更挤），
+   极端情况下还会把标签压出可点区域。是否换行由父行的 flex-wrap 决定，本规则不碰父行。
+   flex: 0 0 auto 是防御：父行是 flex 容器，箭头既不能被压缩也不能被拉伸。 */
 html[data-dsh-mobile-form] [data-dsh-topbar-fold-arrow] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex: none;
+  flex: 0 0 auto;
+  align-self: flex-start;
+  margin-top: -4px;
+  margin-inline-start: auto;
+  margin-inline-end: -16px;
   width: 24px;
   height: 24px;
   padding: 0;

@@ -118,25 +118,57 @@ export async function deleteStoredSession({ home, sessionId, isActive, beforeRem
     await beforeRemove({ sessionId, dir })
     log('info', 'archive/pin membership cleared', { sessionId })
   }
-  // 目录已确认存在（且归档/置顶清理完成）之后才卸载内存会话：目录不存在 / 不唯一 /
-  // 清理失败都发生在卸载之前，避免「报错但会话已经从内存消失、文件还在」。
-  // 这个钩子失败必须让整次删除失败（调用方据此返回 unload-failed，文件保持原状）。
-  if (typeof afterResolve === 'function') await afterResolve({ sessionId, dir })
+  // issue #1203：顺序必须是**先移目录、后卸载**。
+  //
+  // 旧实现把 afterResolve（卸载内存会话）放在 rename **之前**，而移动是卸载之后唯一的
+  // 步骤。于是 rename 失败（EACCES / ENOSPC / 并发删除）时就正好得到本文件注释声称要
+  // 避免的那个状态：**会话从内存里没了、目录还在磁盘上**——用户看到「删除失败」，
+  // 但会话在界面上已经消失，下次启动又出现。
+  //
+  // 现在：rename 先做（目录离开扫描路径 = 事实上的「已删除」，可恢复式两阶段的第一步），
+  // 移动成功后才卸载内存会话；卸载失败则把目录**移回去**再报错，不留半成品。
   const graveyard = `${dir}.deleting-${Date.now().toString(36)}`
   try {
     log('info', 'moving session directory out of the scan path', { sessionId, from: dir, to: graveyard })
     await rename(dir, graveyard)
-    log('info', 'removing session directory', { sessionId, dir: graveyard })
-    await rm(graveyard, { recursive: true, force: true })
-    log('info', 'session deleted', { sessionId })
   } catch (error) {
     // 并发删除同一会话时目录会先被别人移走：按 not-found 处理，客户端当成功。
     if (error?.code === 'ENOENT') {
       log('warn', 'session directory disappeared before it could be removed', { sessionId, dir })
       throw new SessionDeleteError('not-found', 'session disappeared while deleting', { sessionId, dir })
     }
-    log('error', 'session deletion failed', { sessionId, dir, error: String(error?.message ?? error) })
+    // 移动失败 = 什么都没发生：内存会话仍在，目录仍在原位。这是旧实现在此处唯一正确的行为。
+    log('error', 'session deletion failed while moving the directory', { sessionId, dir, error: String(error?.message ?? error) })
     throw new SessionDeleteError('delete-failed', `could not delete the session directory: ${String(error?.message ?? error)}`, { sessionId, dir })
+  }
+  // 目录已离开扫描路径。卸载失败必须把目录移回去——否则调用方拿到 unload-failed 却
+  // 已经丢了目录，「可恢复」就是假的。
+  if (typeof afterResolve === 'function') {
+    try {
+      await afterResolve({ sessionId, dir })
+    } catch (error) {
+      log('error', 'unload failed after the directory moved; restoring it', { sessionId, dir, error: String(error?.message ?? error) })
+      try {
+        await rename(graveyard, dir)
+      } catch (restoreError) {
+        // 回滚本身失败：目录停在 graveyard（下次 sweep 会清），必须如实说明而不是假装成功。
+        log('error', 'could not restore the session directory after a failed unload', { sessionId, dir, graveyard, error: String(restoreError?.message ?? restoreError) })
+        throw new SessionDeleteError('delete-failed', `could not unload the session and could not restore its directory (kept at ${graveyard})`, { sessionId, dir })
+      }
+      // 卸载钩子抛的 SessionDeleteError 必须原样上抛：它的 code（如 unload-failed）
+      // 决定调用方映射的 HTTP 状态（409 可重试 vs 500），吞掉就丢了语义。
+      if (error instanceof SessionDeleteError) throw error
+      throw new SessionDeleteError('delete-failed', `could not unload the session: ${String(error?.message ?? error)}`, { sessionId, dir })
+    }
+  }
+  try {
+    log('info', 'removing session directory', { sessionId, dir: graveyard })
+    await rm(graveyard, { recursive: true, force: true })
+    log('info', 'session deleted', { sessionId })
+  } catch (error) {
+    // 目录已离开扫描路径、内存也已卸载：对用户来说会话已经没了。残留的 graveyard 由
+    // sweepGraveyard 清（本函数已把它移出扫描路径，不构成「界面没了磁盘还在」）。
+    log('warn', 'session directory removed from the scan path but the final rm failed', { sessionId, graveyard, error: String(error?.message ?? error) })
   }
   return { ok: true, sessionId, dir }
 }
@@ -264,11 +296,36 @@ export async function quarantineStoredSession({ home, sessionId, isActive, befor
     }
     throw error
   }
-  if (typeof beforeResolve === 'function') await beforeResolve({ sessionId, dir })
+  // issue #1203：与 delete 同形 —— 先移目录、后卸载。
+  //
+  // 旧实现 beforeResolve（卸载）在 mkdir/rename **之前**：`.corrupt` 已存在且是普通文件时
+  // mkdir 抛 EEXIST，会话已从内存摘掉而目录仍在扫描路径上。
   const trash = join(dirname(dir), QUARANTINE_DIR)
-  await mkdir(trash, { recursive: true })
   const target = join(trash, sessionId + '.' + Date.now())
-  await rename(dir, target)
+  try {
+    await mkdir(trash, { recursive: true })
+    await rename(dir, target)
+  } catch (error) {
+    log('error', 'session quarantine failed while moving the directory', { sessionId, dir, error: String(error?.message ?? error) })
+    throw new SessionDeleteError('delete-failed', `could not quarantine the session directory: ${String(error?.message ?? error)}`, { sessionId, dir })
+  }
+  if (typeof beforeResolve === 'function') {
+    try {
+      await beforeResolve({ sessionId, dir })
+    } catch (error) {
+      log('error', 'unload failed after quarantine moved the directory; restoring it', { sessionId, dir, error: String(error?.message ?? error) })
+      try {
+        await rename(target, dir)
+      } catch (restoreError) {
+        log('error', 'could not restore the quarantined directory', { sessionId, dir, target, error: String(restoreError?.message ?? restoreError) })
+        throw new SessionDeleteError('delete-failed', `could not unload the session and could not restore its directory (kept at ${target})`, { sessionId, dir })
+      }
+      // 卸载钩子抛的 SessionDeleteError 必须原样上抛：它的 code（如 unload-failed）
+      // 决定调用方映射的 HTTP 状态（409 可重试 vs 500），吞掉就丢了语义。
+      if (error instanceof SessionDeleteError) throw error
+      throw new SessionDeleteError('delete-failed', `could not unload the session: ${String(error?.message ?? error)}`, { sessionId, dir })
+    }
+  }
   log('info', 'session quarantined', { sessionId, path: target })
   return { ok: true, sessionId, dir, quarantinedTo: target, restorable: true }
 }

@@ -268,7 +268,24 @@ $Out = Join-Path $Root ("out\v" + $GradleVer)
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 # This directory contains generated deliverables. Remove old APKs before the dual-ABI run so a
 # stale or extra package cannot pass the final directory-wide signature scan as this build's output.
-Get-ChildItem $Out -Filter '*.apk' -File -Recurse | Remove-Item -Force
+#
+# issue #1078：清理必须**只针对本次会产出的 ABI**。
+# 此前这里是无条件 `Get-ChildItem $Out -Filter '*.apk' -Recurse | Remove-Item`，于是跑过一次
+# 完整构建后再用 -OnlyAbi（或 -Fast，它在参数解析里强制 OnlyAbi=x86_64）跑单 ABI：
+# 预清理把**另一个 ABI 已验签的产物也删了** -> 本次只产 1 个 ABI -> $producedAbis=[该 ABI]、
+# $rejectedAbis=[] -> 尾部两条守卫都过 -> exit 0，而发布目录只剩 1/2 ABI。
+# 与 0.13.8-b 那次「单 ABI 产物发布 = 缺 ABI 的 release」同类，只是触发方式从
+# 「只跑了一个 ABI」变成「跑了第二个 ABI」。check-build-chain-abort 看不见：它只统计本次调用的数组。
+#
+# 判定「本次会产出哪些 ABI」必须与下面循环的实际过滤条件一致（:287 的 continue），
+# 否则清理面与产出面又会分叉 —— 那正是本 issue 的形态。
+$abisThisRun = @(@('arm64', 'x86_64') | Where-Object { -not $OnlyAbi -or $OnlyAbi -eq $_ })
+foreach ($staleName in @(Get-ChildItem $Out -Filter '*.apk' -File -Recurse)) {
+    $isThisRun = $false
+    foreach ($a in $abisThisRun) { if ($staleName.Name -like "*$a*") { $isThisRun = $true; break } }
+    if ($isThisRun) { Remove-Item $staleName.FullName -Force }
+}
+Write-Host ("== 预清理：本次产出 ABI = " + ($abisThisRun -join ', ') + "（其它 ABI 的既有产物保留）==")
 
 # 注入集单一常量（0.13.8-b ST-06 / F-ENV-04）：dirs/externals 都在 scripts/plugin-dirs.json，
 # 与云端链 dsh-mobile-apk/scripts/build-apk.mjs 共用同一份——此前两条链各写一份，云端
@@ -385,8 +402,14 @@ foreach ($abi in @('arm64', 'x86_64')) {
         if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "注入失败"; continue }
         # 防回归（审校 C4 2026-08-23）：patch 挂载集 ⊇ 注入集——缺条目（如 linux-env 漏挂）直接拒打包
         Write-Host "== 挂载集校验（$abi）=="
-        node (Join-Path $Root "scripts\check-patch-mounts.mjs") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") @pluginDirs $market 2>&1 | Select-Object -First 4
-        if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "patch 挂载集校验失败"; continue }
+        # issue #1075：**先收进变量拿退出码，再截断显示**（与下面 elf-check 同一写法）。
+        # 写成 `node ... | Select-Object -First 4` 时，输出一旦超过 4 行，Select-Object 会提前终止上游、
+        # 把 node 杀掉，$LASTEXITCODE 变成 $null —— 「门禁失败」与「输出被截断」在退出码上不可区分，
+        # 于是 Deny-Abi 不触发、该 ABI 被计为已产出、链打印「=== 完成 ===」并 exit 0。
+        $mountsOut = node (Join-Path $Root "scripts\check-patch-mounts.mjs") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") @pluginDirs $market 2>&1
+        $mountsCode = $LASTEXITCODE
+        $mountsOut | Select-Object -First 4
+        if ($mountsCode -ne 0) { Deny-Abi $abi "patch 挂载集校验失败"; continue }
         # 注入面成员完整性（P0：包内新增文件曾被静默丢弃 → tar 里 import 悬空 → 设备侧引擎启动即死）
         Write-Host "== 注入成员完整性门禁（$abi）=="
         node (Join-Path $Root "scripts\check-inject-completeness.mjs") (Join-Path $work "snap-final2.tar.xz") 2>&1
@@ -436,8 +459,13 @@ foreach ($abi in @('arm64', 'x86_64')) {
     }
     # 第三方许可合规（GPL 义务 A1/A2 门禁 2026-08-23）：copyleft 包许可证全文须随快照分发，
     # 矩阵须覆盖 dpkg status 全部包；缺失直接拒绝打包（--- tar 视图：9p 权限不影响判定）。
-    node (Join-Path $Root "scripts\check-third-party.mjs") (Join-Path $work "x") --tar $snapIn --write-notices (Join-Path $Root "THIRD_PARTY_NOTICES.md") 2>&1 | Select-Object -First 4
-    if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "THIRD-PARTY CHECK FAILED（许可合规）"; continue }
+    # issue #1075：GPL 许可合规门禁。与上面 :388 同一个坑——它失败时打印「THIRD-PARTY CHECK FAILED」
+    # 加 N 行明细，N >= 4 就超过 First-4 的对象数，Select-Object 提前终止上游把 node 杀掉，
+    # $LASTEXITCODE 变成 $null，Deny-Abi 不触发，快照不合规却一路 exit 0。先收变量，再截断显示。
+    $thirdPartyOut = node (Join-Path $Root "scripts\check-third-party.mjs") (Join-Path $Root $work "x") --tar $snapIn --write-notices (Join-Path $Root "THIRD_PARTY_NOTICES.md") 2>&1
+    $thirdPartyCode = $LASTEXITCODE
+    $thirdPartyOut | Select-Object -First 4
+    if ($thirdPartyCode -ne 0) { Deny-Abi $abi "THIRD-PARTY CHECK FAILED（许可合规）"; continue }
     # 许可资产（LICENSES 标准文本 + notices）打入 APK assets（A2：随包分发）
     $licAssets = Join-Path $apkDir "app\src\main\assets\licenses"
     New-Item -ItemType Directory -Force -Path $licAssets | Out-Null
@@ -545,17 +573,24 @@ if ($ExportSnapshots) {
         if ($OnlyAbi -and $OnlyAbi -ne $abi) { continue }
         $snapIn = Join-Path $Root ".deploy-tmp\build-\13-$abi\snap-final2.tar.xz"
         if (-not (Test-Path $snapIn)) { Deny-Abi $abi "缺注入后快照 $snapIn（导出失败：发布资产不完整）"; continue }
+        # issue #1080：**先校验，再拷进发布目录**；缺 APK 是硬失败，不是警告。
+        #
+        # 旧顺序是先 Copy-Item 再 check-snapshot-asset，而 APK 不在场那一步只打一行警告。
+        # 于是「上一次运行留下的 snap-final2.tar.xz」可以带着 .sha256 躺进 out/v<ver>/，
+        # 而一致性校验被跳过 —— 正是本段注释要防的「发布快照 != APK 内嵌快照」。
+        # 而且 $snapIn 是从 .deploy-tmp 重新推导的，与本次是否真的产出过该 ABI 无关。
+        #
+        # 现在：没有 APK 就没有可校验的对象，直接判红；只有校验通过才写发布目录。
+        # 这样「发布目录里存在 snapshot-<abi>.tar.xz」就等价于「它已被校验与 APK 内嵌一致」。
+        $apkOut = Join-Path $Out ("dsh-mobile-apk-v" + $GradleVer + $Suffix + "-" + $abi + ".apk")
+        if (-not (Test-Path $apkOut)) { Deny-Abi $abi "缺 APK $apkOut —— 无校验对象，拒绝导出未校验的快照资产（#1080）"; continue }
+        & (Join-Path $PSScriptRoot "check-snapshot-asset.ps1") -ApkPath $apkOut -SnapshotPath $snapIn
+        if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "快照资产与 APK 内嵌不一致（拒绝发布组装）"; continue }
+        # 校验通过后才落盘：拷贝 + 写 sha256。
         $outSnap = Join-Path $Out "snapshot-$abi.tar.xz"
         Copy-Item $snapIn $outSnap -Force
         Set-Content -Path (Join-Path $Out "snapshot-$abi.tar.xz.sha256") -Value ((Get-FileHash $outSnap -Algorithm SHA256).Hash.ToLower()) -NoNewline -Encoding ascii
-        Write-Host "快照资产导出: $outSnap"
-        $apkOut = Join-Path $Out ("dsh-mobile-apk-v" + $GradleVer + $Suffix + "-" + $abi + ".apk")
-        if (Test-Path $apkOut) {
-            & (Join-Path $PSScriptRoot "check-snapshot-asset.ps1") -ApkPath $apkOut -SnapshotPath $outSnap
-            if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "快照资产与 APK 内嵌不一致（拒绝发布组装）"; continue }
-        } else {
-            Write-Host "警告: 缺 APK $apkOut，跳过一致性校验（$abi）"
-        }
+        Write-Host "快照资产导出（已校验）: $outSnap"
     }
 }
 $producedList = (($producedAbis | Select-Object -Unique) -join ", ")
@@ -564,6 +599,17 @@ $rejectedList = (($rejectedAbis | Select-Object -Unique) -join ", ")
 Write-Host "== 最终 APK 签名门禁（v1 + v2 + v3；apksigner 原始输出与退出码留在日志）=="
 node (Join-Path $Root "scripts\check-apk-signatures.mjs") --self-test
 if ($LASTEXITCODE -ne 0) { throw "APK 签名门禁自测失败" }
+# 产物形态门禁（与签名同一「最终产物」关口）：签名全绿不区分 debug/release 变体。
+# 出包由 build-apk-engine.mjs 走 release 变体（issue #1118 起缺省 release，本脚本不自己拼
+# assembleDebug），故本段现在是**回归哨兵**而非恒红断言：一旦变体被改回 debug 即判红。
+# 历史：0.14.9 的发布产物曾是 debug 变体（badging 含 application-debuggable）而签名门禁全绿——
+# 因为当时全链跑 :app:assembleDebug，且 app/build.gradle.kts 里 debug/release 共用 signingConfigs.repoDebug。
+# --require：刚打出 APK 的机器必有 SDK；aapt2 缺席即判红，不以 SKIP 结案。
+Write-Host "== 最终 APK 产物形态门禁（不得含 application-debuggable）=="
+node (Join-Path $Root "scripts\check-apk-form.mjs") --self-test
+if ($LASTEXITCODE -ne 0) { throw "APK 产物形态门禁自测失败" }
+node (Join-Path $Root "scripts\check-apk-form.mjs") --dir $Out --require
+if ($LASTEXITCODE -ne 0) { throw "最终 APK 是 debuggable 变体（badging 含 application-debuggable），拒绝交付" }
 node (Join-Path $Root "scripts\build-apk-engine.mjs") verify --dir $Out --skip-self-test
 if ($LASTEXITCODE -ne 0) { throw "最终 APK 缺少 v1/v2/v3 全部签名，拒绝交付" }
 Write-Host "=== 汇总。已产出 ABI: [$producedList] / 被拒 ABI: [$rejectedList] ==="

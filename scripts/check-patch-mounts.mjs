@@ -22,13 +22,16 @@
 // 用法：node scripts/check-patch-mounts.mjs <patch.yml> <pkg_dir>...
 //       加 --self-test 跑内置正反控（不读文件）。
 // 退出码：0 = 双向一致；1 = 任一方向有缺失（打印缺失清单）；2 = 用法错误。
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
-
+import { existsSync, readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 const TOP_ITEM = /^-(?:\s|$)/
 const TOP_ENTRY = /^(?:-\s+id:|-\s+name:)/
 const ENTRY_ITEM = /^(\s*)-\s+(id|name):\s*(.*)$/
 const KEY_NAME = /^(\s*)name:\s*(.*)$/
+
+/** SKIP 计数器（check-gate-skips.mjs 要求每条 SKIP 行自带 (#n) 计数）。 */
+let skipped = 0
 
 /** 去掉 YAML 标量的引号与行尾注释。 */
 function scalar(value) {
@@ -60,7 +63,12 @@ export function parseEntries(text) {
   }
   const entries = []
   for (const block of blocks) {
-    const isInsert = /^-\s+insert:\s*$/.test(block.head)
+    /* 组头认 YAML 注释（#1036 复现 4）：原来要求**裸** `- insert:`，于是
+     * `- insert:  # group` 不被当成 insert 组 ⇒ 整组子条目一条都不解析 ⇒ 11 个注入包
+     * 全部报「缺少挂载」。一个纯注释就能让整组从判据里消失，而这既不是语法错误也不是
+     * 真实缺挂载——它是**判据只认一种写法**。判法：剥掉行尾注释再比对。 */
+    const headNoComment = block.head.replace(/\s+#.*$/, '').trimEnd()
+    const isInsert = /^-\s+insert:\s*$/.test(headNoComment)
     let entryIndent = 0
     if (isInsert) {
       let min = -1
@@ -73,7 +81,7 @@ export function parseEntries(text) {
       }
       if (min < 0) continue
       entryIndent = min
-    } else if (!TOP_ENTRY.test(block.head)) {
+    } else if (!TOP_ENTRY.test(headNoComment)) {
       continue
     }
     let entry = null
@@ -94,11 +102,54 @@ export function parseEntries(text) {
   return entries.filter((e) => e.id !== null || e.name !== null)
 }
 
-/** 条目名集合（只认条目，不认配置块内的显示名）。 */
+/** 条目名集合（只认条目，不认配置块内的显示名）。遍历用；重数与 id 判据见 entryProblems。 */
 export function mountedNames(text) {
   const out = new Set()
   for (const entry of parseEntries(text)) if (entry.name !== null && entry.name !== '') out.add(entry.name)
   return out
+}
+
+/**
+ * 条目级**集合退化**判据（#1036 复现 1/2/5）：只比包名 Set 会丢掉重数，也完全不看 id。
+ *
+ * 三件事在 Set 里全部不可见，而它们在**装配期**是硬冲突（cordis 按 id 定位条目）：
+ *   · 同一 **id** 出现两次 —— 后者只覆盖/抢占前者，先挂的那个静默不生效；
+ *   · 同一 **包名** 挂两次 —— 同一插件被装配两遍（服务重复注册 / 工具面重复）；
+ *   · 一个 id 只出现一次但被两个**不同**包名共用 —— 同上，第一个静默让位。
+ * 这三种形态的共同点：包名集合完全正确，双向差集一条不报，门禁全绿，而设备上少一块或双注册。
+ *
+ * @param text patch 文件全文。
+ * @returns 问题描述数组（空数组 = 无冲突）。
+ */
+export function entryProblems(text) {
+  const problems = []
+  const ids = new Map()
+  const names = new Map()
+  for (const entry of parseEntries(text)) {
+    if (entry.id !== null && entry.id !== '') ids.set(entry.id, (ids.get(entry.id) ?? 0) + 1)
+    if (entry.name !== null && entry.name !== '') names.set(entry.name, (names.get(entry.name) ?? 0) + 1)
+  }
+  for (const [id, n] of ids) if (n > 1) problems.push('条目 id 重复 ' + n + ' 次: ' + id + '（cordis 按 id 定位，后者抢前者，先挂的静默不生效）')
+  for (const [name, n] of names) if (n > 1) problems.push('包名重复挂载 ' + n + ' 次: ' + name + '（同一插件被装配两遍 = 服务/工具面重复注册）')
+  return problems
+}
+
+/**
+ * `@deepseek-ai/*` 前缀豁免的**边界**（#1036 复现 3）。
+ *
+ * 原实现是 `!n.startsWith('@deepseek-ai/')` 就豁免——于是 patch 里挂一个全仓不存在的
+ * `@deepseek-ai/dsh-retired-xyz` 也全绿：上游删包后留下的空挂载没有任何人说话，
+ * 设备上那一行只是「找不到模块」，而门禁说「双向一致」。
+ * 边界 = 引擎 overlay 的 packages 清单（`scripts/snapshot-config/engine-overlay.json`）——
+ * 那正是注入链要装进快照的引擎包集合，是这条豁免唯一有据可依的判据。
+ *
+ * @param names 挂载包名。
+ * @param known 引擎 overlay 登记的 @deepseek-ai 包名集合（读不到时传 null ⇒ 不判，由调用方报 SKIP）。
+ * @returns 前缀合法但 overlay 里没有的包名。
+ */
+export function unknownEnginePackages(names, known) {
+  if (known === null) return []
+  return [...names].filter((n) => n.startsWith('@deepseek-ai/') && !known.has(n))
 }
 
 if (process.argv.includes('--self-test')) {
@@ -129,13 +180,59 @@ if (process.argv.includes('--self-test')) {
   const want = new Set(['@dsh-android/dsh-shell-termux', '@dsh-android/dsh-host-web-compat', '@deepseek-ai/dsh-llm-pi-ai'])
   const missing = [...want].filter((x) => !got.has(x))
   const extra = [...got].filter((x) => !want.has(x))
-  const ok = missing.length === 0 && extra.length === 0 && got.size === 3
-  console.log((ok ? 'PATCH-MOUNTS SELF-TEST PASSED' : 'PATCH-MOUNTS SELF-TEST FAILED')
-    + '（条目名 ' + got.size + ' / 期望 3；缺 ' + JSON.stringify(missing) + '；多 ' + JSON.stringify(extra) + '）')
-  if (!ok) process.exit(1)
+  const cases = []
+  cases.push(['条目形态与配置块内显示名', missing.length === 0 && extra.length === 0 && got.size === 3,
+    '条目名 ' + got.size + ' / 期望 3；缺 ' + JSON.stringify(missing) + '；多 ' + JSON.stringify(extra)])
+
+  /* ── #1036：四条「Set 看不见」的形态 ────────────────────────────────────────
+   * 这四条的共同点是**包名集合完全正确**，而装配期行为已经错了：
+   * id 冲突 / 包名挂两次 / 前缀豁免挂不存在的包 / 组头带注释让整组消失。
+   * 前三条在原实现里全绿（Set 丢掉重数，也没人看 id），第四条整组不解析 ⇒ 反方向假红。 */
+  const TWO_GROUPS = [
+    '- insert:',
+    "    - id: shell-termux",
+    "      name: '@dsh-android/dsh-shell-termux'",
+    '- insert:',
+    "    - id: host-web-compat",
+    "      name: '@dsh-android/dsh-host-web-compat'",
+  ].join('\n')
+  cases.push(['#1036 合规双 insert 组：无条目级冲突', entryProblems(TWO_GROUPS).length === 0, JSON.stringify(entryProblems(TWO_GROUPS))])
+
+  const dupId = TWO_GROUPS.replace('- insert:\n    - id: host-web-compat', '- insert:\n    - id: shell-termux')
+  cases.push(['#1036 反证：两个条目同一个 id ⇒ 判红（cordis 按 id 定位，后者抢前者）',
+    entryProblems(dupId).some((p) => p.includes('条目 id 重复')), JSON.stringify(entryProblems(dupId))])
+
+  const dupName = TWO_GROUPS.replace("    - id: host-web-compat\n      name: '@dsh-android/dsh-host-web-compat'",
+    "    - id: host-web-compat-dup\n      name: '@dsh-android/dsh-shell-termux'")
+  cases.push(['#1036 反证：同一包名挂两次 ⇒ 判红（同一插件装配两遍）',
+    entryProblems(dupName).some((p) => p.includes('包名重复挂载')), JSON.stringify(entryProblems(dupName))])
+
+  const commentedHead = '- insert:  # group\n    - id: shell-termux\n      name: \'@dsh-android/dsh-shell-termux\''
+  cases.push(['#1036 反证：insert 组头带 YAML 注释 ⇒ 子条目仍要解析出来（原实现整组消失）',
+    mountedNames(commentedHead).has('@dsh-android/dsh-shell-termux'), JSON.stringify([...mountedNames(commentedHead)])])
+
+  const engineNames = new Set(['@deepseek-ai/dsh-llm-pi-ai', '@deepseek-ai/dsh-base'])
+  cases.push(['#1036 反证：@deepseek-ai/* 前缀无边界 ⇒ 挂未登记包判红',
+    unknownEnginePackages(new Set(['@deepseek-ai/dsh-retired-xyz']), engineNames).length === 1,
+    JSON.stringify(unknownEnginePackages(new Set(['@deepseek-ai/dsh-retired-xyz']), engineNames))])
+  cases.push(['#1036 放行例：@deepseek-ai/* 前缀在 overlay 清单内 ⇒ 不判红',
+    unknownEnginePackages(new Set(['@deepseek-ai/dsh-base']), engineNames).length === 0,
+    JSON.stringify(unknownEnginePackages(new Set(['@deepseek-ai/dsh-base']), engineNames))])
+  cases.push(['#1036 放行例：非 @deepseek-ai 包不受前缀豁免边界约束（由双向差集判定）',
+    unknownEnginePackages(new Set(['@dsh-android/x', 'dshmarketplace-plugin']), engineNames).length === 0,
+    JSON.stringify(unknownEnginePackages(new Set(['@dsh-android/x', 'dshmarketplace-plugin']), engineNames))])
+
+  let bad = 0
+  for (const [label, ok, detail] of cases) {
+    console.log((ok ? 'PASS  ' : 'FAIL  ') + label + (ok ? '' : '  -> ' + detail))
+    if (!ok) bad += 1
+  }
+  console.log(bad === 0
+    ? 'PATCH-MOUNTS SELF-TEST PASSED（' + cases.length + ' 项）'
+    : 'PATCH-MOUNTS SELF-TEST FAILED（' + bad + '/' + cases.length + ' 项）')
+  if (bad !== 0) process.exit(1)
   process.exit(0)
 }
-
 const [patchPath, ...dirs] = process.argv.slice(2)
 if (!patchPath || dirs.length === 0) {
   console.error('用法: node scripts/check-patch-mounts.mjs <patch.yml> <pkg_dir>...')
@@ -145,6 +242,24 @@ if (!patchPath || dirs.length === 0) {
 const patch = readFileSync(patchPath, 'utf8')
 // patch 挂载集：**插件条目**的 `name:` 包名（含 `@scope/` 形式；配置块内的显示名不计）。
 const mounted = mountedNames(patch)
+
+/* 条目级集合退化（id 重复 / 包名重复挂载）：包名 Set 看不见，双向差集也一条不报。 */
+const entryIssues = entryProblems(patch)
+
+/* @deepseek-ai/* 的豁免边界：以引擎 overlay 的 packages 清单为准。
+ * overlay 读不到时不判（SKIP 计数），而不是默默放行——「判据看不见输入」必须显式说出来。 */
+const OVERLAY = join(dirname(fileURLToPath(import.meta.url)), 'snapshot-config', 'engine-overlay.json')
+let engineKnown = null
+if (existsSync(OVERLAY)) {
+  try {
+    engineKnown = new Set(Object.keys(JSON.parse(readFileSync(OVERLAY, 'utf8')).packages ?? {}))
+  } catch { engineKnown = null }
+}
+if (engineKnown === null) {
+  skipped += 1
+  console.log('SKIP(#' + skipped + ') @deepseek-ai/* 豁免边界未判（引擎 overlay 不在场或不可解析：snapshot-config/engine-overlay.json）')
+}
+const ghostEngine = unknownEnginePackages(mounted, engineKnown)
 
 const injected = new Set()
 for (const d of dirs) {
@@ -162,8 +277,23 @@ const missing = [...injected].filter((n) => !mounted.has(n))
 const ENGINE_SCOPE = '@deepseek-ai/'
 const unmounted = [...mounted].filter((n) => !injected.has(n) && !n.startsWith(ENGINE_SCOPE))
 
-if (missing.length === 0 && unmounted.length === 0) {
-  console.log('patch mounts ok (双向): ' + injected.size + ' 个注入包全部挂载（' + [...injected].sort().join(', ') + '）')
+if (entryIssues.length > 0) {
+  for (const p of entryIssues) console.error('patch 条目级冲突: ' + p)
+}
+if (ghostEngine.length > 0) {
+  console.error('@deepseek-ai/* 挂载了引擎 overlay 里不存在的包: ' + ghostEngine.join(', '))
+  console.error('（上游删包/改名后留下的空挂载：设备上那一行只会「找不到模块」，'
+    + '而包名双向差集一条都不报。核对 scripts/snapshot-config/engine-overlay.json 的 packages，'
+    + '确认包名后再决定是改名还是删条目）')
+}
+
+if (missing.length === 0 && unmounted.length === 0 && entryIssues.length === 0 && ghostEngine.length === 0) {
+  // 收口行带 SKIP= 是 check-gate-skips 的纪律：本脚本有「引擎 overlay 不在场」这一处 SKIP，
+  // 汇总必须把它的计数写出来，否则聚合链分不清「没有 SKIP」与「SKIP 了但没人记」。
+  console.log('patch mounts ok (双向 + 条目级): ' + injected.size + ' 个注入包全部挂载（' + [...injected].sort().join(', ') + '）'
+    + '；条目 ' + parseEntries(patch).length + ' 条无 id/包名冲突'
+    + (engineKnown === null ? '' : '；@deepseek-ai 前缀 ' + engineKnown.size + ' 个包内有界')
+    + '；SKIP=' + skipped)
   process.exit(0)
 }
 if (missing.length > 0) {

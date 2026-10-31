@@ -2647,3 +2647,106 @@ JVM 边界测试在 `EngineBootInstrumentationTest`（取值与 clamp 边界、�
     ⇒ **写不变量/断言时正确的做法**：比「段长度 ≤ 原文长度 + 常数」（用来抓死循环/膨胀）、比「`unparsed` 的段不得被判 ALLOW」，**不要**比「段是原文子串」——占位符会稳定制造假阳。
     ⇒ 这条与「注释形态假阳」（⑰）同族：**fuzz 的不变量必须建立在实现契约上，而不是建立在对"应该长什么样"的直觉上**。写不变量前先问一句「实现会不会为了可判定性而改写输入？」——会，就别用「等于原文」类断言。
     ⇒ 顺带记：`splitCommandSegments` 的四条不变量（分隔符只在引号外切段、嵌套执行体再切一层、引号不闭合判拒、`MAX_NESTING = 4`）在 TS 与 Kotlin 两侧**逐条一致**（`MAX_NESTING` 都是 4、`\` 处理都是取两字符、单引号都是找下一个 `'`）；3000 例 fuzz 无死循环、无段长度膨胀。
+
+362. **锚点要锚「符号 + 目标行内容」，不要锚绝对行号；行号锚只在确实无符号可指时用，且必须写明理由（2026-10-30 实锤，#791 计划 B 的模板）。**
+
+现象：`EXECUTION-MAP.md` 里 `scripts/check-bounded-io.mjs:239` 这种行号锚，**只要在它上面插一行代码就判红**——不管插的那行跟被锚定的内容有没有关系。我自己就踩过一次：加三行声明 -> `check-code-map` 报 `anchor-content-drift`，最后是靠把新增代码挪到锚点**之后**绕过去的。那是治标：下一个在这个文件里加代码的人会再踩一次。
+
+真因：`path:line` 里的 line 是**绝对行号**，漂移判据比的是「这个行号上的内容变没变」。任何上方插入/删除都会让同一条锚点指向别处，于是它报的不是「你改坏了什么」，而是「你动了这个文件」——**判据表达的东西错了一位**。
+
+修法：改成 `path#Symbol@<hash>`，hash 是**目标行内容**的哈希（不是符号定义行的）。判据变成「该符号体内是否还含这一行内容」，于是：插行不红（内容还在），改内容才红（内容消失）。本仓模板见 `EXECUTION-MAP.md` K06 行 -> `scripts/check-bounded-io.mjs#scanSource@0bc35a00`；早先同形的例子是 `check-contract.mjs#collectConsumedSlots@2c28ea38`（原先也是 `:165` 行号锚，同样害过一次）。
+
+推导方式：用门禁自己的推导器，**不要手工猜**——
+
+```
+node -e "import('file:///'+process.cwd()+'/scripts/check-code-map.mjs').then(m=>{const fs=require('fs');const src=fs.readFileSync('scripts/x.mjs','utf8').split('\n');console.log(JSON.stringify(m.deriveAnchorFor(src,123)))})"
+```
+
+返回 `kind:'symbol'` 就直接用；返回 `kind:'content'`（`symbol:null`）说明该行不在任何具名符号体内（常见于顶层 `if` 自检块、匿名箭头函数里的行），此时才允许保留行号锚，**并在同一条目里写一行理由**，说明为什么指不到符号。
+
+纪律：**不要为了省事跑全量 `--derive-anchors`**。它会一次性把整份 `EXECUTION-MAP.md` 的锚点全改形（实测 1392 条、696+/696-），把一个单点改动变成无法评审的巨型 diff，还容易连带改错语义。只改你**确实需要改**的那几条。迁移 917 条是独立计划，不是顺手做的事。
+
+⇒ 同族判据：任何「按位置定位内容」的校验，位置一变判据就失真。锚点要绑**内容**或**符号**，不能绑**坐标**。
+
+363. **改锚点别手工算行号差，用 `--only <path>`：它只刷你列出的文件，其余一字不动（2026-10-30，`--only` 落地时补记）。**
+
+现象：`--derive-anchors` 会一次性改写整份执行地图的**所有** legacy 锚点（实测 1392 条、696+/696-）。而实际最常见的场景是「这次只动了三个文件，只想刷这三个文件」。此前只能手工算行号差再逐条改坐标——非常脆，`#1075` 那批就因此返工过一次（还顺手把两处语义早已错位的锚点改错了）。
+
+修法：`node scripts/check-code-map.mjs --only <path>[,<path>...] [--refresh-anchor-baseline]`。四条判据，每条都能判红：
+
+- **越界即错**：路径不在执行地图里、或该文件在文档中没有任何锚点 -> exit 2，不静默跳过。静默跳过 = 「我以为刷了，其实没刷」。
+- **只动 listed**：未列出的文件在文档里一字不改（有负控守着，见下）。
+- **推不出锚点仍硬失败**：exit 1，绝不回退成行号锚（那正是要淘汰的形态）。
+- **与 `--refresh-anchor-baseline` 联用**：先改写文档锚点、再用**改后的新内容**重新解析并重铺基线。顺序反了会把刚生成的符号锚当成「新引用」而判红。
+
+三条负控（都要能判红，缺一即这道门禁没在盯）：
+
+1. listed 文件坐标陈旧 -> 被修正（旧行号锚剩余 0/N，且产生 `#Symbol@hash` 形态）；
+2. **未 listed 的文件同时陈旧 -> 必须保持原样**（这条才是「真的只动 listed」的证明，前一条单独存在时，即使实现改成了全量刷也会绿）；
+3. 传不存在的路径 -> exit 非 0。
+
+幂等：同一 `--only` 连跑两次，第二次 `改写 0 处引用`，基线与文档 SHA-256 都不变。
+
+⇒ 注意 `--only` 只解决**作用域**，不解决**推导**：它复用 `deriveAnchorFor` / `deriveSymbolAnchor`，与 `--derive-anchors` 同一套逻辑（两套推导必然漂移，而漂移正是锚点要解决的问题）。所以内容在符号体内不唯一时它照样硬失败——那时该做的是换一行锚、或给 `#expect`，不是绕过门禁。
+364. **会整体改写受版本控制文件的工具，默认行为必须是「不改动」——`--derive-anchors` 曾默认落盘（2026-10-30 实修）。**
+
+现象：`node scripts/check-code-map.mjs --derive-anchors` 一条命令就把整份 `EXECUTION-MAP.md` 改写掉：实测 1169 处引用、693+/693-。它本来是个「锚点形态迁移工具」，却和**校验路径共用同一个入口**，而且**默认就 writeFileSync**。
+
+真因：把「危险动作」写成了默认值。这个脚本日常被这样调用——
+
+```
+node scripts/check-code-map.mjs            # 校验，天天跑
+node scripts/check-code-map.mjs --self-test
+```
+
+手指记住的是 `--derive-` 前缀，`--derive-anchors` 与 `--derive-dry-run` 只差一个词。误跑前者 = 整份文档被改写，而且从 diff 里根本看不出「你只想试一下」。我自己就这么踩过一次，靠 `git checkout` 才恢复。
+
+修法：**默认 dry-run**，只打印将改动的条数与前后 sha256；必须显式 `--write` 才落盘。
+
+```
+$ node scripts/check-code-map.mjs --derive-anchors
+DRY-RUN（未落盘）：
+  将改写 1169 处引用 -> docs/AGENTS/EXECUTION-MAP.md
+  sha256 docs/AGENTS/EXECUTION-MAP.md: 5a11e5ebc8257613 -> 2908c39a5d139d13
+  文件字节未改动。
+  确认无误后加上 --write 落盘
+EXIT=0
+
+$ node scripts/check-code-map.mjs --derive-anchors --write
+已落盘（--write）：
+  改写 1169 处引用 -> ...
+```
+
+两条负控（缺一即这个保护没在盯）：①**不加 `--write` -> 文件字节 SHA-256 不变且 exit 0**，并打印「dry-run / 未落盘」字样；②加 `--write` -> 文件真的被写入。只测②会漏掉「默认仍然是写」这种回归。
+
+usage 首行写死了这条：`--derive-anchors 与 --only 默认 dry-run 不落盘，必须显式加 --write`。
+
+⇒ 同族判据：凡「一条命令能大范围改写受版本控制文件」的工具，问一句「默认值是哪边」。默认可写 + 与常用入口共用一个前缀，是误操作的标准配方。反过来，默认不可写 + 显式开关，误跑最多得到一段报告。
+
+365. **「刷新锚点」是两步，不是一步：改文档坐标（doc）与登记基线条目（baseline）必须同批，否则中间态一定是红的（2026-10-31，`--only` 首次实战撞出）。**
+
+现象：另一个会话按「先跑一次看看」跑了 `--only`，两件事同时出问题：
+
+1. **它以为在 dry-run，实际已经写盘**——`改写 7 处引用` 是真的落到了文件上，第二次跑变 `改写 0 处`；
+2. **改完立刻红**：`check-code-map` 报 2 项 `symbol-unbaselined`，只能再跑一次 `--refresh-anchor-baseline` 收尾，而那条路正是被限制的（它做全集重写）。
+
+真因（两条都不是笔误，是设计缺口）：
+
+- 第 1 条：`--only` 与 `--derive-anchors` 是同一类「改写受版本控制文件」的动作，却只有后者有 dry-run 保护。**同类工具必须同口径**，否则用户按上一个工具的习惯用下一个，就会误写。
+- 第 2 条：锚点数据实际存在**两处**——文档里的 `path#Symbol@hash` 与基线里的 `symbolHashes[path#Symbol@hash]`。改一处不改另一处，`check` 必然判 `symbol-unbaselined`。工具只改了自己「看得见」的那一半，把收尾推给用户，而收尾工具恰好是受限的那个。
+
+修法：
+
+- 默认 dry-run，`--write` 才落盘，并打印「将改写 N 处」+「将新增 M 条 symbolHashes 基线条目」+ 前后 sha256；
+- `--write` 时**同批**写两处：文档坐标 + 该批锚点对应的 `symbolHashes` 条目，同时**退休**被替换掉的 `sourceLines` 键（只动 listed 文件相关的键，其余一个不碰）；
+- 落盘后就地打印「下一步：node scripts/check-code-map.mjs —— 这一次就应该是 PASSED」。
+
+三条负控（缺任一条都证明不了「同批」）：
+
+1. 不带 `--write` -> 文档与基线**字节都不变**，且打印将改数；
+2. 带 `--write` -> 文档真写**且基线同批更新**，随后**一次** `check-code-map` 就 `PASSED`（不需要任何额外命令）；
+3. **只写文档不写基线 -> 必须复现 `symbol-unbaselined` 并 exit 1**。这条是核心：它证明「同批写基线」不是冗余步骤，而是那条缺失的环。前两条单独存在时，一个只改文档的实现也能全绿（只要你事后手工补基线）。
+
+⇒ 同族判据：**凡「一处数据有两份表示」，改一份的工具必须同时改另一份，或者明确拒绝执行。** 把一致性推给用户的下一步操作，等于把红推给用户；而用户的下一个动作通常是「再跑一次别的工具」，那正是最容易做错的时刻。
+
+343. **同一判据在两个平台给出不同结论：`tar -tf` 在 Windows 上输出 CRLF，成员名带尾随 `\r`**：修 `check-combo-cache` 的单文件缓存漏检（#1195）时，构造了一份只含 `home/.dsh/profiles/web/.combo-cache`（无尾斜杠）的 tar 验证判据，Windows 工作树上却判绿、Linux 上判红。真因是判定用路径**分段**比较 `name.split('/').includes('.combo-cache')`，而 Windows 上 `tar -tf` 的输出行尾是 CRLF，分段拿到的是 `'.combo-cache\r'`，与 `'.combo-cache'` 不等——判据静默失效，不报错、不 SKIP、不崩，计数与输出全都「看起来正常」。这类缺陷最容易漏的原因是开发机 Windows / CI Linux：本地绿而 CI 红会被误读成环境问题，反之亦然。修法是**在读入处立即归一化**（`split('\n').map(l => l.replace(/\r/g, '').trim())`），不要指望每条判据各自处理。识别形态：凡是解析外部命令文本输出（`tar -tf`、`git status --porcelain`、`adb shell ls`）再按路径/字段比较的门禁，都该把成员名 `JSON.stringify` 打出来看有没有 `\r`——比读代码快。个人记录见 `docs/contrib/kelai141/2026-10-31-crlf-tar-members.md`。

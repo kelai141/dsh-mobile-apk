@@ -49,12 +49,24 @@ internal data class RepairModelLoad(
   val connections: List<RepairModelConnection>,
   val sources: List<RepairModelSource>,
   val defaultAvailable: Boolean,
+  /**
+   * 配置树的根（`home/.dsh`）整个不存在。
+   *
+   * 与「五个文件各自 missing」不是一回事：后者是用户删了自己的配置，前者是运行时还没解出来
+   * （助手只在引擎连续两次启动失败后被拉起，那正是快照可能不完整的时刻）。两者修法相反——
+   * 一个去写配置，一个回启动页重试引擎——所以必须能被上层判读（issue #1012）。
+   */
+  val rootMissing: Boolean = false,
 )
 
 /** Reads bundle → profile → HOME layers without starting Node or asking a live engine. */
 internal object RepairModelConfig {
-  fun load(context: Context): List<RepairModelConnection> = loadDetailed(context).connections
-
+  /**
+   * 唯一的 Context 入口。**只保留完整形态**（#1017）：旧的
+   * `load(context): List<RepairModelConnection>` 只返回候选，正好让调用方在主线程
+   * 顺手解析一遍、再在后台完整解析一遍——一次打开解析两遍。删掉这个窄入口，
+   * 调用方只能拿到 [RepairModelLoad]（含来源与默认可用性），也就只能在后台调一次。
+   */
   fun loadDetailed(context: Context): RepairModelLoad {
     val result = loadDetailed(File(context.filesDir, "home"),
       mapOf("DEEPSEEK_API_KEY" to privateKey(context, "deepseek-key.txt")))
@@ -77,9 +89,16 @@ internal object RepairModelConfig {
 
   internal fun loadDetailed(home: File, environment: Map<String, String> = emptyMap()): RepairModelLoad {
     val dsh = File(home, ".dsh")
+    // 根整个不在 = 运行时还没解出来，不是「用户的配置被删了」。旧实现继续往下走，
+    // 五个文件各记一条 missing，与用户真删了配置在 UI 上完全同形，于是助手报
+    // 「未读到可用模型」——把一个「先重试引擎」的问题说成「去写配置」（issue #1012）。
+    // 这里直接短路：给出唯一一条 root-missing，上层据此换一句话。
+    if (!dsh.exists()) {
+      return RepairModelLoad(emptyList(), listOf(RepairModelSource(relToHome(home, dsh), "root-missing")),
+        defaultAvailable = false, rootMissing = true)
+    }
     val sources = ArrayList<RepairModelSource>()
-    fun rel(file: File): String =
-      file.toPath().normalize().let { home.parentFile.toPath().normalize().relativize(it).toString() }
+    fun rel(file: File): String = relToHome(home, file)
     fun readInto(sink: MutableList<RepairModelSource>, file: File): RepairYamlValue? {
       val path = rel(file)
       if (!file.isFile) { sink += RepairModelSource(path, "missing"); return null }
@@ -212,6 +231,21 @@ internal object RepairModelConfig {
       it.provider == resolved.selected!!.first && it.model == resolved.selected!!.second
     }
     return RepairModelLoad(ordered, sources, defaultAvailable)
+  }
+
+  /**
+   * 相对 `home` 的父目录给一个文件定位，供来源表展示。
+   *
+   * 抽成私有函数只为一处复用：根缺失的短路分支在 `rel` 之前就要用到同一套定位，
+   * 而 `rel` 是 `loadDetailed` 内的局部函数（依赖 `home`）。
+   *
+   * @param home 运行时 home 目录。
+   * @param file 要展示的配置来源文件。
+   * @returns 相对 `home.parentFile` 的规范化路径。
+   */
+  private fun relToHome(home: File, file: File): String {
+    val root = home.parentFile?.toPath()?.normalize() ?: return file.path
+    return root.relativize(file.toPath().normalize()).toString()
   }
 
   /** Resolve declared patch files like app-boot (installation first), restricted to private data. */

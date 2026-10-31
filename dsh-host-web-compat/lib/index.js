@@ -14,21 +14,153 @@ import { Service } from '@deepseek-ai/cordis'
 /** Polyfill snippet per missing API (idempotent: skipped when already present). */
 const POLYFILLS = [
   // AbortSignal.any: Chrome 116+/Node 20.3+; absent in older WebViews
-  `if(typeof AbortSignal!=='undefined'&&!AbortSignal.any){AbortSignal.any=function(s){var c=new AbortController(),f=function(){c.abort()};for(var i=0;i<s.length;i++){if(s[i].aborted){c.abort();return c.signal}s[i].addEventListener('abort',f,{once:true})}return c.signal}}`,
+  // issue #1055 ③：旧实现两个缺陷——① 一个监听都不移除（长寿 signal 上派生 200 个就挂 200 个，
+  // 派生 signal 中止后仍挂着）；② 自造 AbortError，丢源 reason（`AbortSignal.any([AbortSignal.timeout(5)])`
+  // 的 reason.name 应是 TimeoutError）。按规范：任一源中止即用**该源的 reason** 中止结果，
+  // 且中止时摘掉全部监听；源已中止时直接短路（不挂监听）；空列表永不中止；非 signal 元素抛 TypeError。
+  `if(typeof AbortSignal!=='undefined'&&!AbortSignal.any){AbortSignal.any=function(signals){
+var list=[],i
+for(i=0;i<signals.length;i++){
+  var s=signals[i]
+  if(!s||typeof s.aborted!=='boolean'||typeof s.addEventListener!=='function')throw new TypeError('AbortSignal.any: argument is not an AbortSignal')
+  list.push(s)
+}
+/* 源已中止：直接短路——不挂任何监听，reason 取该源本体（规范要求，不自造 AbortError）。 */
+for(i=0;i<list.length;i++){
+  if(list[i].aborted){var short=new AbortController();short.abort(list[i].reason);return short.signal}
+}
+var c=new AbortController()
+/* cleanup 只摘源监听。结果信号自身的监听**从不挂**：中止由 onAbort 直接调 c.abort() 完成，
+   这样就不会出现「200 个源却数到 201 个监听」和一个摘不掉的自我监听（#1055 ③）。 */
+function cleanup(){for(var j=0;j<list.length;j++){try{list[j].removeEventListener('abort',onAbort)}catch(e){}}}
+function onAbort(ev){
+  cleanup()
+  if(c.signal.aborted)return
+  var src=ev&&ev.target?ev.target:null
+  c.abort(src&&'reason' in src?src.reason:undefined)
+}
+for(i=0;i<list.length;i++)list[i].addEventListener('abort',onAbort)
+return c.signal
+}}`,
   // AbortSignal.timeout: Chrome 103+/Node 17.3+; the Android-12-era WebView (Chromium<103) lacks it
   `if(typeof AbortSignal!=='undefined'&&!AbortSignal.timeout){AbortSignal.timeout=function(ms){var c=new AbortController();setTimeout(function(){try{c.abort(new DOMException('TimeoutError','TimeoutError'))}catch(e){c.abort()}},ms);return c.signal}}`,
   // structuredClone: Chrome 98+/Node 17+; older WebViews lack it
-  `if(typeof structuredClone==='undefined'){structuredClone=function(v){return JSON.parse(JSON.stringify(v))}}`,
+  // issue #1055 ①：**不能**是 JSON 往返。JSON 会静默毁数据：Uint8Array→普通对象、Date→字符串、
+  // Map/Set→{}、NaN/Infinity→null、{a:undefined}→丢键，循环引用与 BigInt 直接抛错。
+  // 消费者是 pdf.js 的 worker 消息与 settings 的 structuredClone(ops)——坏的是数据不是异常，
+  // 所以「静默」比「报错」更糟。这里按结构化克隆语义实现：
+  //   支持 Array/Object/Date/RegExp/Map/Set/ArrayBuffer/TypedArray/DataView/Error/Boolean/Number/String、
+  //   循环引用（visited 表）、undefined 键保留、-0/NaN/Infinity 原值、稀疏数组保持稀疏；
+  //   不可克隆（函数/Symbol/WeakMap/WeakSet/Promise）按规范抛 DataCloneError；
+  //   transfer 选项真的转移（源 buffer 被 detach），不是静默丢弃。
+  // 只用 ES2017 语法（chrome87 底线；该段自身不能被 polyfill 依赖）。
+  `if(typeof structuredClone==='undefined'){(function(){
+function DCE(msg){var e;try{e=new DOMException(msg,'DataCloneError')}catch(x){e=new Error(msg);e.name='DataCloneError'}return e}
+function isBuf(v){return typeof ArrayBuffer!=='undefined'&&(v instanceof ArrayBuffer||(typeof SharedArrayBuffer!=='undefined'&&v instanceof SharedArrayBuffer))}
+function tagOf(v){return Object.prototype.toString.call(v).slice(8,-1)}
+function clone(v,seen,transfers){
+  if(v===null||typeof v!=='object'){
+    if(typeof v==='symbol')throw DCE('Symbol could not be cloned')
+    if(typeof v==='function')throw DCE('function could not be cloned')
+    return v
+  }
+  var hit=seen.get(v);if(hit!==undefined)return hit
+  var tag=tagOf(v),out,i
+  if(isBuf(v)){
+    if(transfers.has(v)){var moved=typeof v.transfer==='function'?v.transfer():v.slice(0);seen.set(v,moved);return moved}
+    out=v.slice(0);seen.set(v,out);return out
+  }
+  if(typeof ArrayBuffer!=='undefined'&&ArrayBuffer.isView(v)){
+    var buf=clone(v.buffer,seen,transfers)
+    if(v instanceof DataView){out=new DataView(buf,v.byteOffset,v.byteLength)}
+    else{var Ctor=v.constructor;out=new Ctor(buf,v.byteOffset,v.length)}
+    seen.set(v,out);return out
+  }
+  if(v instanceof Date){out=new Date(v.getTime());seen.set(v,out);return out}
+  if(v instanceof RegExp){out=new RegExp(v.source,v.flags);out.lastIndex=v.lastIndex;seen.set(v,out);return out}
+  if(v instanceof Map){out=new Map();seen.set(v,out);v.forEach(function(val,key){out.set(clone(key,seen,transfers),clone(val,seen,transfers))});return out}
+  if(v instanceof Set){out=new Set();seen.set(v,out);v.forEach(function(val){out.add(clone(val,seen,transfers))});return out}
+  if(v instanceof Error||/Error$/.test(tag)){
+    var ECtor=typeof globalThis[v.name]==='function'&&globalThis[v.name].prototype instanceof Error?globalThis[v.name]:Error
+    out=new ECtor(v.message);out.name=v.name;if(v.stack!==undefined)out.stack=v.stack;seen.set(v,out);return out}
+  if(v instanceof Boolean||v instanceof Number||v instanceof String){out=Object(v.valueOf());seen.set(v,out);return out}
+  if(typeof WeakMap!=='undefined'&&(v instanceof WeakMap||v instanceof WeakSet))throw DCE(tag+' could not be cloned')
+  if(typeof Promise!=='undefined'&&v instanceof Promise)throw DCE('Promise could not be cloned')
+  if(Array.isArray(v)){
+    out=new Array(v.length);seen.set(v,out)
+    for(i=0;i<v.length;i++){if(Object.prototype.hasOwnProperty.call(v,i))out[i]=clone(v[i],seen,transfers)}
+    return out
+  }
+  // 规范：自定义类的实例按**普通对象**克隆（只取自有可枚举属性），不抛错。
+  out={};seen.set(v,out)
+  var keys=Object.keys(v)
+  for(i=0;i<keys.length;i++){out[keys[i]]=clone(v[keys[i]],seen,transfers)}
+  return out
+}
+globalThis.structuredClone=function(value,options){
+  var seen=new Map(),transfers=new Set(),list=options&&options.transfer
+  if(list){for(var i=0;i<list.length;i++){var t=list[i];if(!isBuf(t)&&!(typeof ArrayBuffer!=='undefined'&&ArrayBuffer.isView(t)))throw DCE('transfer list item is not transferable');transfers.add(isBuf(t)?t:t.buffer)}}
+  var out=clone(value,seen,transfers)
+  /* transfer 的 detach 已在 clone() 的 transfers 分支完成（v.transfer() 会 detach 源）。 */
+  return out
+}})()}`,
   // Object.hasOwn: Chrome 93+/Firefox 92+/Safari 15.4+; MIUI12-era WebViews (Chromium 83) lack it
   // (issue #79: "Object.hasOwn is not a function"). Same semantics as Object.prototype.hasOwnProperty.call.
   `if(typeof Object.hasOwn==='undefined'){Object.hasOwn=function(o,k){return Object.prototype.hasOwnProperty.call(o,k)}}`,
   // Array.prototype.at: Chrome 92+/Safari 15.4+; missing on older WebViews.
   // 属性必须不可枚举（issue #621）：赋值式安装让 `for...in` 遍历数组时额外返回方法名，原生内建不可枚举。
-  `if(typeof Array.prototype.at==='undefined'){Object.defineProperty(Array.prototype,'at',{value:function(i){var l=this.length,t=Number(i)||0;if(t<0)t=Math.max(l+t,0);return t<0||t>=l?undefined:this[t]},writable:true,configurable:true,enumerable:false})}`,
+  // issue #1055 ⑤：缺 ToIntegerOrInfinity。旧式 `Number(i)||0` 不截断小数、且把 -Infinity 夹到 0：
+  // `[10,20,30].at(1.5)` 得 undefined（原生 20）、`.at('1.5')` 同样、`.at(-Infinity)` 得 10（原生 undefined）。
+  // 按规范：ToObject 接收者 + ToIntegerOrInfinity 索引（截断小数、±Infinity 保持符号）+ 负数从尾部数。
+  `if(typeof Array.prototype.at==='undefined'){Object.defineProperty(Array.prototype,'at',{value:function(index){'use strict';
+if(this===null||this===undefined)throw new TypeError('Array.prototype.at called on null or undefined')
+var O=Object(this),len=O.length>>>0
+var n=Number(index)
+if(n!==n)n=0
+var k
+if(n===Infinity||n===-Infinity){k=n}else{k=n<0?Math.ceil(n):Math.floor(n)}
+if(k<0)k+=len
+if(k<0||k>=len)return undefined
+return O[k]
+},writable:true,configurable:true,enumerable:false})}`,
   // String.prototype.replaceAll: Chrome 85+/Safari 13.1+; optional last API on Chromium<85 WebViews.
   // 同 issue #621：原型上的赋值安装是可枚举的，任何字符串的 for...in 都会多出方法名——改用
   // Object.defineProperty 保持不可枚举（其余段落里的 Set / Iterator 助手本来就是 defineProperty）。
-  `if(typeof String.prototype.replaceAll==='undefined'){Object.defineProperty(String.prototype,'replaceAll',{value:function(s,r){if(s instanceof RegExp)throw new TypeError('replaceAll: search must be a string');return this.split(s).join(r)},writable:true,configurable:true,enumerable:false})}`,
+  // issue #1055 ④：split/join 不等价 —— 函数替换会被字符串化（`'a-b'.replaceAll('-',()=>'X')`
+  // 得到 `'afunction(){return "X"}b'`）、`$&` / `$\`` / `$'` / `$$` 替换模式原样插入而不替换、
+  // 空搜索串不插入首尾（原生 `'abc'.replaceAll('','-')` 是 `'-a-b-c-'`）。
+  // 按规范实现：字符串搜索走 GetSubstitution 替换模式；函数搜索取其返回值；空串首尾也插入；
+  // RegExp 且无 g 标志抛 TypeError（与原生一致）。
+  `if(typeof String.prototype.replaceAll==='undefined'){Object.defineProperty(String.prototype,'replaceAll',{value:function(search,replace){'use strict';
+if(this===null||this===undefined)throw new TypeError('String.prototype.replaceAll called on null or undefined')
+var str=String(this)
+if(search instanceof RegExp){
+  if(search.global!==true)throw new TypeError('replaceAll must be called with a global RegExp')
+  return String.prototype.replace.call(str,search,replace)
+}
+var needle=String(search),isFn=typeof replace==='function',sub=isFn?replace:String(replace)
+if(needle===''){
+  var out=isFn?sub('',0,str):applySub(sub,'',str,0,str)
+  for(var i=0;i<str.length;i++){out+=str.charAt(i);out+=isFn?sub(str.charAt(i),i+1,str):applySub(sub,str.charAt(i),str,i+1,str)}
+  return out
+}
+var result='',from=0,idx
+while((idx=str.indexOf(needle,from))!==-1){
+  result+=str.slice(from,idx)
+  result+=isFn?sub(needle,idx,str):applySub(sub,needle,str,idx,str)
+  from=idx+needle.length
+}
+return result+str.slice(from)
+function applySub(pattern,matched,whole,position,original){
+  /* 模板串里 \\$ 才是正则的美元转义：写成 \$ 会被模板吃掉，变成行尾锚点 /$/，$& 永不替换。 */
+  return pattern.replace(/\\$([$&\u0060'])/g,function(m,kind){
+    if(kind==='$')return '$'
+    if(kind==='&')return matched
+    if(kind==='\u0060')return original.slice(0,position)
+    return original.slice(position+matched.length)
+  })
+}
+},writable:true,configurable:true,enumerable:false})}`,
   // crypto.randomUUID: Chrome 92+ and requires a secure context; MIUI12-era WebViews (Chromium 87)
   // lack it while still offering crypto.getRandomValues (issue #110: randomUUID is not a function).
   // RFC 4122 v4: set version/variant bits, hex lowercase, canonical dashes.
@@ -477,8 +609,59 @@ function publish(report){
     return payload;
   }catch(e){return null}
 }
+// ── 诊断面板的移除路径（issue #1056）──────────────────────────────────────────────────
+// 现象：41 秒才就绪的慢启动会被这块全屏面板一直盖住 —— UI 明明已经可用，用户却只能点「重新加载」
+// 才能退出，等于把一次「正常但慢」的启动变成「永久失败」。
+// 真因两条：
+//   ① 挂出后**没有任何移除路径**：全篇 removeChild 只有静态占位那一处（clearStaticFallback），
+//      本面板一旦 appendChild 就再也没人摘它，挂出即终局；
+//   ② 挂出前的判定**早于**那次最长 3 秒的 HEAD 请求（报告快照取在 HEAD 之前）：页面恰好在这段
+//      时间窗口里渲染完时，判定仍按过期快照走 —— 已经可用的页面照挂面板。
+// 修法：把「谁来撤掉它」与「挂之前是不是真的还卡着」都收在同一个结果性判据上。
+//   ①' 挂出即接管：按与 readyWatch 同一个 rendered() 每 500ms 复看，一旦页面真的渲染出内容就
+//      removeChild 掉面板并停表。判据只看渲染结果、不看时间也不看文案，慢启动同样会被正确摘除。
+//   ②' HEAD 返回后复判一次 pendingBoot()，已就绪就不挂（同一个判据，两处不得分叉，详见 run()）。
+//   ③' 幂等：按 id 去重，重复 show() 只留一个节点并复用同一个复看定时器（叠两层会互相遮挡，
+//      且移除只摘得掉最上面一层）。
+// 面板撤掉**不影响诊断能力**：console.error 的那条 [dsh-boot-stall] 发布行照旧（壳侧 grep 依赖它）。
+var DIAG_PANEL_ID='dsh-boot-diag';
+var DIAG_RECHECK_MS=500;
+// 复看窗口：面板现身后再等这么久仍不渲染，说明确实卡住了 —— 面板留在场上（用户可点重新加载），
+// 但停止复看，不在一个永不就绪的页面上无限打点。
+var DIAG_RECHECK_WINDOW_MS=120000;
+function diagPanel(){
+  try{return document.getElementById(DIAG_PANEL_ID)}catch(e){return null}
+}
+function stopDiagWatch(){
+  if(!window.__dshBootDiagTimer)return;
+  try{clearInterval(window.__dshBootDiagTimer)}catch(e){}
+  window.__dshBootDiagTimer=0;
+}
+function dropDiagPanel(){
+  stopDiagWatch();
+  try{
+    var el=diagPanel();
+    // 必须从 DOM 里摘掉而不是隐藏：它是全屏最高层级，留着照样吃掉点击与读屏焦点。
+    if(el&&el.parentNode)el.parentNode.removeChild(el);
+  }catch(e){}
+}
+function watchDiagPanel(){
+  if(window.__dshBootDiagTimer)return;   // 幂等：同一时刻只允许一个复看定时器
+  var shownAt=Date.now();
+  try{
+    window.__dshBootDiagTimer=setInterval(function(){
+      try{
+        if(!diagPanel()){stopDiagWatch();return}   // 已被别处摘掉（例如用户点了重新加载）：停表
+        if(rendered()){dropDiagPanel();return}      // 页面真的渲染出内容 ⇒ 面板立刻让位
+        if(Date.now()-shownAt>DIAG_RECHECK_WINDOW_MS)stopDiagWatch();
+      }catch(e){}
+    },DIAG_RECHECK_MS);
+  }catch(e){}
+}
 function show(report){
   try{
+    // 幂等（issue #1056 修法 ③）：同一文档只允许一个诊断面板。
+    if(diagPanel())return;
     var d=document.createElement('div');d.id='dsh-boot-diag';
     d.style.cssText='position:fixed;inset:0;z-index:2147483647;background:rgba(8,8,12,.97);color:#e6e6e6;font:14px/1.7 system-ui,-apple-system,sans-serif;padding:20px;overflow:auto';
     // 0.14.1 批 3（P3-2 / P3-3 / P3-6，同时收掉 S3-23）：旧实现把**整份英文 JSON** 铺满全屏，
@@ -508,6 +691,9 @@ function show(report){
     det.appendChild(detSum);det.appendChild(pre);
     d.appendChild(head);d.appendChild(summary);d.appendChild(hint);d.appendChild(b);d.appendChild(det);
     document.body.appendChild(d);
+    // 修法 ①'：挂出的同一刻就接管「谁来撤掉它」。没有这一句，面板一旦 appendChild 就是终局——
+    // 这正是 issue #1056 的现象：页面早已可用，遮罩永不退场。
+    watchDiagPanel();
   }catch(e){}
 }
 async function run(){
@@ -522,9 +708,14 @@ async function run(){
   try{report.rendered=rendered();report.pendingBoot=pendingBoot()}catch(e){report.rendered='unavailable';report.pendingBoot='unavailable'}
   var ac=new AbortController();var timer=setTimeout(function(){ac.abort()},3000);
   try{var res=await fetch(location.href,{method:'HEAD',cache:'no-store',signal:ac.signal});report.engineHttp=res.status}catch(e){report.engineHttp='ERR'}finally{clearTimeout(timer)}
+  // 修法 ②'：HEAD 最多占 3 秒，而上面那份 report 快照取在 HEAD **之前** —— 页面恰好在这段窗口里
+  // 渲染完时，判定仍按过期快照走，于是已经可用的页面照挂全屏面板（issue #1056）。这里用**同一个**
+  // pendingBoot() 复判一次；已就绪就整段退出，不挂面板。（判定函数只有一份，两处不得各写一套。）
+  if(!pendingBoot())return;
   // 壳侧的 onConsoleMessage 抓这一条（T6 写面：读该前缀 → writeBootDiag(source=page-console, detail=该行））。
   // 必须打印**已折叠的单行**（payload.line），不是原始对象——对象经 console 序列化会多行、字段名也不是
   // 壳侧解析的 k=v 口径，两边形对不上。
+  // 诊断行必须照旧打印（壳侧 grep 依赖它）：面板可以撤，诊断能力不撤（issue #1056 修法边界）。
   try{var pub=publish(report);console.error(pub?pub.line:BOOT_STALL_PREFIX+' dsh-boot-diag source=page-stall pageSideRuntime=unavailable detail=unavailable')}catch(e){}
   show(report);
   // 0.14.1 批 3（S3-23）：**不再**在 9 秒后自动 location.reload。
@@ -661,17 +852,73 @@ try{
 const THEME_BRIDGE_SCRIPT = `<script>(function(){
 if(window.__dshThemeBridge){return}
 var dark=false,listeners=[]
-var native=window.matchMedia.bind(window)
+// issue #1055 ②：旧实现无条件替换 window.matchMedia，且用一个**全局** listeners 数组。九个可观测偏差：
+// ① 浅色查询在深色下返回 true（matches 恒等于全局 dark，不看查询本身）；② 组合查询后半段被丢
+// （'(prefers-color-scheme: dark) and (max-width:1px)' 在宽屏返回 true）；③ mql.onchange 永不触发；
+// ④ dispatchEvent('change') 不通知任何人；⑤ 同一监听加两次触发两次（原生 MQL 去重）；
+// ⑥ addEventListener 在**订阅时同步回调一次**（真实消费者 ui-theme 因此在构造期就 publish，
+// 早于插件初始化）；⑦ 订阅 B 查询会触发 A 查询的订阅者（全局数组）；⑧ 原生 matchMedia 缺席时
+// 直接在 .bind 上抛死；⑨ 健康内核上也会覆盖原生实现。
+// 修法：① 特性探测——原生可用且不是「厂商内核卡在浅色」的情形时**不接管**；② 每个查询独立实例
+// （独立 listeners / onchange）；③ 订阅不再同步回调；④ 同一监听去重；⑤ change 只由 setDark 驱动；
+// ⑥ 组合查询交给原生求值，只把 prefers-color-scheme 那一段的结论按主题标志修正。
+var native=typeof window.matchMedia==='function'?window.matchMedia.bind(window):null
+function queryDarkPart(q){
+  // 组合查询：让原生解析其余部分，只修正 prefers-color-scheme 段。
+  if(!native)return null
+  try{return native(q).matches}catch(e){return null}
+}
 window.matchMedia=function(q){
-  if(q.indexOf('prefers-color-scheme')<0)return native(q)
-  var fire=function(){for(var i=0;i<listeners.length;i++){try{listeners[i]()}catch(e){}}}
-  return {
-    get matches(){return dark}, get media(){return q}, onchange:null,
-    addEventListener:function(t,cb){if(t==='change'&&typeof cb==='function'){listeners.push(cb);fire()}},
-    removeEventListener:function(t,cb){var i=listeners.indexOf(cb);if(i>=0)listeners.splice(i,1)},
-    addListener:function(cb){listeners.push(cb)},removeListener:function(cb){var i=listeners.indexOf(cb);if(i>=0)listeners.splice(i,1)},
-    dispatchEvent:function(){return false}
+  if(typeof q!=='string')return native?native(q):{matches:false,media:String(q)}
+  if(q.indexOf('prefers-color-scheme')<0)return native?native(q):{matches:false,media:q}
+  var own=[],mql=null
+  function fire(){
+    if(typeof mql.onchange==='function'){try{mql.onchange({type:'change',media:q,matches:mql.matches})}catch(e){}}
+    var snapshot=own.slice()
+    for(var i=0;i<snapshot.length;i++){try{snapshot[i].call(mql,{type:'change',media:q,matches:mql.matches})}catch(e){}}
   }
+  function add(cb){
+    if(typeof cb!=='function')return
+    if(own.indexOf(cb)<0)own.push(cb)
+  }
+  function remove(cb){var i=own.indexOf(cb);if(i>=0)own.splice(i,1)}
+  mql={
+    get matches(){
+      // 主题那一段按 dark 标志求值，其余条件仍交原生——规范语义：整条查询是各段 AND。
+      /* 注意：本段整体在模板串里，正则里的空白类要写**两层**反斜杠才留得住（写成一层会被模板吃掉，
+         正则退化成「字面量 s」，永远命中不了，② 那一整片用例就是这么失效的）。下面已按两层写。 */
+      var want=/prefers-color-scheme\\s*:\\s*([a-z-]+)/i.exec(q)
+      if(want===null)return dark
+      // 只有 dark / light 两个取值与主题标志有关；其它取值（no-preference 等）在**任何**主题下
+      // 都不成立——旧写法把它们当成「不是 dark」，深色下就算成满足，no-preference 于是错判为 true。
+      var pref=want[1].toLowerCase()
+      if(pref!=='dark'&&pref!=='light')return false
+      var expected=pref==='dark'
+      // 这一段不满足就整条不满足（AND 短路），不必再问原生。
+      if(expected!==dark)return false
+      // 这一段满足：其余条件交原生。用纯字符串切分而不是正则——本段整体在模板串里，
+      // 正则在模板串中要写四层反斜杠才留得住，极易被吃掉（#1055 的 ② 就是这么整片失效的）。
+      var groups=q.split(' and ')
+      var rest=[]
+      for(var gi=0;gi<groups.length;gi++){
+        if(groups[gi].toLowerCase().indexOf('prefers-color-scheme')<0)rest.push(groups[gi])
+      }
+      // 剩余条件为空 ⇒ 整条即为真，不必再问原生（把主题段删空会留下 "()"，
+      // 空壳不是可求值的特性段，原生桩对它给 false，会把整条错误地压成 false）。
+      if(rest.length===0)return true
+      var r=queryDarkPart(rest.join(' and '))
+      return r===null?true:r
+    },
+    get media(){return q},
+    onchange:null,
+    addEventListener:function(t,cb){if(t==='change')add(cb)},
+    removeEventListener:function(t,cb){if(t==='change')remove(cb)},
+    addListener:function(cb){add(cb)},
+    removeListener:function(cb){remove(cb)},
+    dispatchEvent:function(){fire();return true}
+  }
+  listeners.push({mql:mql,fire:fire})
+  return mql
 }
 // F1（0.14.1 白闪，issue #242）：把 uiMode 纠正还不够——入口 chunk 绘制之前，文档画布是
 // Chromium 的**默认白**，而上游页面模板的 html/body 没有任何背景声明（dsh/apps/web/index.html），
@@ -689,7 +936,7 @@ function applyCanvasTheme(d){
     de.style.colorScheme=d?'dark':'light';
   }catch(e){}
 }
-window.__dshThemeBridge={setDark:function(d){if(dark===d)return;dark=d;applyCanvasTheme(d);for(var i=0;i<listeners.length;i++){try{listeners[i]()}catch(e){}}}}
+window.__dshThemeBridge={setDark:function(d){if(dark===d)return;dark=d;applyCanvasTheme(d);var snapshot=listeners.slice();for(var i=0;i<snapshot.length;i++){try{snapshot[i].fire()}catch(e){}}}}
 try{
 // H1 (2026-08-16): pull the real uiMode synchronously on the first frame — when a vendor WebView's
 // matchMedia is stuck on light (vivo/Android 16), boot-theme and the upstream ui-theme would both get
@@ -1291,8 +1538,12 @@ export function apply(ctx) {
   // guard would wrongly skip the whole POLYFILL_SCRIPT (including PICKER_SCRIPT: the dir-pick poll
   // loop + upload buttons), breaking directory picking and file upload (measured on device/MuMu,
   // 2026-08-16).
+  // 注入必须用**函数**替换，不能把 POLYFILL_SCRIPT 当替换字符串：String.prototype.replace 的替换串
+  // 里 `$&` / `$'` / `$`` / `$$` 是特殊模式，polyfill 源码里恰好含这些序列（replaceAll 的
+  // 替换模式实现、正则里的美元转义），整段脚本会被改写成报废字节、页面解析失败（smoke 的
+  // 「script #2 parses」实测会红）。这与本文件 ④ replaceAll 缺陷是同一类错误的另一面（#1055）。
   ctx.webServer.tapIndex((html) =>
-    html.includes('x-dsh-pick-token') ? html : html.replace('</head>', POLYFILL_SCRIPT + '</head>')
+    html.includes('x-dsh-pick-token') ? html : html.replace('</head>', () => POLYFILL_SCRIPT + '</head>')
   );
 
   // §2.3（0.14.1 块C）静态失败占位：**独立于**上面的 pick-token 幂等判据注入。

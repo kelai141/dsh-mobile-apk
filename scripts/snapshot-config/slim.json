@@ -28,6 +28,16 @@
       "root": "usr/lib/node_modules/@deepseek-ai/dsh",
       "ext": ".d.ts",
       "reason": "引擎子树类型声明：Node 运行期执行的是 lib/*.js，.d.ts 不参与执行；全树扫「.js 用 require/import 拉 .ts 说明符」= 0 命中"
+    },
+    {
+      "root": "usr",
+      "ext": ".pfx",
+      "reason": "PKCS#12 密钥库容器：Android 运行期零消费者（无 Windows/Java 签名路径），且实测快照内 usr/share/cmake-*/Templates/Windows/Windows_TemporaryKey.pfx 是含私钥袋的真容器（openssl pkcs12 -info 显示 Shrouded Keybag，空口令可导出），违反「快照不含私钥」的承诺"
+    },
+    {
+      "root": "usr",
+      "ext": ".p12",
+      "reason": "同上：PKCS#12 密钥库的另一种扩展名，Android 无消费者；抛同一类私钥泄漏"
     }
   ],
   "engineStalePackages": [

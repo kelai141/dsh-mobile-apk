@@ -300,6 +300,35 @@ class W3ShellContractTest {
     )
   }
 
+  // ── profile 的 node_modules/.bin 必须真的进 PATH（子智能体插件的 codex 只能从这里找到） ──
+
+  @Test
+  fun shellEnvInjectsTheProfileBinDir() {
+    val code = codeOnly(source("EngineManager.kt"))
+    // 判据（注入这一半）：值那一半由 EnginePathTest 锁死；这里锁「真的接进了 shellEnv()」。
+    // 只写对 enginePath() 而 shellEnv() 仍自己拼字面量，引擎进程就永远拿不到这条 PATH——
+    // 这正是本缺陷的形态（插件装好、二进制在设备上，bash 里却 which 不到）。
+    assertTrue(
+      "PATH 必须由 enginePath(usrDir, activeProfileBinDir()) 产出，不得在 shellEnv() 里另拼字面量",
+      code.contains("\"PATH\" to enginePath(usrDir, activeProfileBinDir())"),
+    )
+    assertFalse(
+      "shellEnv() 不得残留旧的硬编码 PATH 字面量（会绕开 enginePath 的追加与顺序判据）",
+      code.contains("\"PATH\" to (usrDir.absolutePath + \"/bin:/system/bin\")"),
+    )
+    // profile 名必须从壳侧唯一真源推导，不得在这个解析器里写死 "web"。
+    assertTrue(
+      "profile bin 目录必须由 PluginMounts.PROFILE 推导（壳侧当前 profile 的唯一真源）",
+      code.contains("\"profiles/\" + PluginMounts.PROFILE"),
+    )
+    // 反证**只看解析器自己的函数体**：本文件别处（快照事务、Hard bundle 修复）本来就有
+    // ".dsh/profiles/web" 的历史字面量，对全文件断言会给出与该解析器无关的假红。
+    val resolver = memberBody(code, "private fun activeProfileBinDir()")
+    assertFalse("activeProfileBinDir 不得写死 profiles/web", resolver.contains("profiles/web"))
+    assertFalse("activeProfileBinDir 不得写死 .dsh/profiles/", resolver.contains(".dsh/profiles/"))
+    assertTrue("解析器必须落在 node_modules/.bin", resolver.contains("node_modules/.bin"))
+  }
+
   @Test
   fun bootSegmentsInstrumentationIsWiredOnBothEnds() {
     val collector = codeOnly(source("LogCollector.kt"))
@@ -372,7 +401,32 @@ class W3ShellContractTest {
     val pipeline = code.substringAfter("fun processIncomingIntent")
     val reservation = pipeline.indexOf("withIncomingDeliveryAfterSweep(pendingLock, activeDeliveries, { sweepExpired(context) })")
     val enqueue = pipeline.indexOf("enqueuePending(context, target.absolutePath)")
-    val retry = pipeline.indexOf("while (System.currentTimeMillis() < deadline)")
+    // ── 本条契约在 issue #1006 里被**改写**过，为什么这么改写在这里 ──────────────────
+    //
+    // 改的是哪条：本用例原来断言 `pipeline.indexOf("while (System.currentTimeMillis() < deadline)")`
+    // 的位置，即「20s 重试循环必须在投递预留包装内联地出现」。
+    //
+    // 为什么必须改：#1006 的真因正是「那段 20s 阻塞循环跑在 IO 单线程上」，修法就是把重试搬到
+    // 独立的 retryDelivery / deliveryRetryExecutor。于是「内联出现」这个**实现形态**必然消失——
+    // 断言形态等于断言「缺陷必须还在」，修好了反而红。形态断言测的是写法，不是需求。
+    //
+    // 守的是同一条需求：FX-211.2 要求「从拷贝到投递受理的整段里，投递预留计数（activeDeliveries）
+    // 必须一直被持有」。原文靠「内联 while 在包装体里」间接保证，现在改成直接断言两件语义：
+    //  ① 入口把重试委托给 retryDelivery（重试没有被删掉，否则冷启动补投能力就没了）；
+    //  ② retryDelivery 自己 incrementAndGet → 循环 → finally decrementAndGet（预留跨越整个重试期）。
+    //
+    // 负控（已实测，证明改写后仍守得住需求而不是换了个写法）：把 retryDelivery 的
+    // `finally { activeDeliveries.decrementAndGet() }` 去掉 ⇒ 本条用例红，失败原文：
+    //   java.lang.AssertionError: 投递预留必须在 finally 中归还
+    // 若没有这条负控，这个改写就只是「把断言换个位置」，不能证明它仍然有约束力。
+    val retry = pipeline.indexOf("retryDelivery(context, deliveryRetryBudgetMs)")
+    val retryBody = memberBody(code, "private fun retryDelivery(")
+    val retryInc = retryBody.indexOf("activeDeliveries.incrementAndGet()")
+    val retryLoop = retryBody.indexOf("while (System.currentTimeMillis() < deadline)")
+    val retryDec = retryBody.indexOf("activeDeliveries.decrementAndGet()")
+    assertTrue("重试必须仍存在（委托到 retryDelivery，不得靠删掉重试来消除阻塞）", retry > 0)
+    assertTrue("重试期必须先持有投递预留计数", retryInc >= 0 && retryLoop > retryInc)
+    assertTrue("投递预留必须在 finally 中归还", retryDec > retryLoop && retryBody.contains("finally"))
     val reservationBody = memberBody(code, "internal fun <T> withIncomingDeliveryAfterSweep(")
     val sweep = reservationBody.indexOf("sweep()")
     val inc = reservationBody.indexOf("deliveries.incrementAndGet()")
@@ -384,7 +438,8 @@ class W3ShellContractTest {
     assertTrue("守卫必须先预留再执行投递", inc in 0 until body)
     assertTrue("投递预留必须在 finally 中归还", release > body && dec > release)
     assertTrue("入待发清单必须经预留包装执行", reservation in 0 until enqueue)
-    assertTrue("20s 重试必须在同一投递包装内", retry > enqueue && !pipeline.substring(reservation, retry).contains("activeDeliveries.decrementAndGet()"))
+    assertTrue("入待发清单必须先于发起重试", retry > enqueue)
+    // 重试不再内联，故「同一包装内」由 retryDelivery 的 finally 保证（见上方三条断言）。
     val cleanup = code.substringAfter("fun cleanupTmp(context: Context)")
     assertTrue(
       "全清必须同时看「拷贝」与「投递/重试」两个计数",

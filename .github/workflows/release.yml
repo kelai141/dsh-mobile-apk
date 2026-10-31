@@ -313,7 +313,14 @@ jobs:
           apk_count=$(find "$OUT/apk" -name '*.apk' | wc -l)
           [ "$apk_count" -ge 2 ] || { echo "::error::APK 少于 2 件（双 ABI 缺件）"; exit 1; }
           node scripts/check-apk-signatures.mjs --self-test
-          node scripts/check-apk-signatures.mjs --dir "$OUT/apk" --keystore keystore/debug.keystore
+          # keystore 凭据必须显式声明（issue #1031）：门禁不再回落到 androiddebugkey/android。
+          node scripts/check-apk-signatures.mjs --dir "$OUT/apk" --keystore keystore/debug.keystore \
+            --keystore-alias androiddebugkey --keystore-pass android
+          # 产物形态门禁：签名全绿不区分 debug/release 变体（0.14.9 发布产物即 debug 变体，
+          # badging 含 application-debuggable 而 v1/v2/v3 全 true）。--require：runner 装有 SDK，
+          # aapt2 缺席即判红（不得以 SKIP 结案）。
+          node scripts/check-apk-form.mjs --self-test
+          node scripts/check-apk-form.mjs --dir "$OUT/apk" --require
           snap_count=$(find "$OUT/snapshot" -name 'snapshot-*.tar.xz' | wc -l)
           [ "$snap_count" -ge 2 ] || { echo "::error::注入后快照少于 2 件"; exit 1; }
       - name: MANIFEST.txt + notes.md

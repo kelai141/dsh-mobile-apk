@@ -261,13 +261,40 @@ export function installCapabilityGate(
       if (persisted.has(group)) continue
       try {
         const fiber = scoped.inject(['tools'], (scopedCtx: unknown) => {
-          const tools = (scopedCtx as { tools?: { restrict?: (filter: { deny: string[] }) => unknown } }).tools
+          const tools = (scopedCtx as {
+            tools?: {
+              restrict?: (filter: { deny: string[] }) => unknown
+              view?: () => { restrictableNames?: Set<string> } | undefined
+            }
+          }).tools
           if (typeof tools?.restrict !== 'function') return
-          tools.restrict({ deny: [...names] })
+          /**
+           * issue #1030：**先与本作用域可 restrict 的名字求交集**，再提交 deny。
+           *
+           * 缺陷形态：引擎侧 `tools.restrict()` 的判据是**逐个名字**——deny 列表里只要有一个
+           * 名字没注册，整次调用抛错（dsh-tools/lib/index.js：「names unknown global tool …」）。
+           * 而这里把异常当成「该组未注册」直接 fail-open 跳过，于是**组里有一个名字缺席**就取消
+           * 整组掩蔽。实测形态：`phone` 组的 17 个名字分布在两个插件里（dsh-android-manage 14 个 +
+           * dsh-android-bridge 3 个），用户禁用/加载失败 manage 时，桥自己那三个特权工具
+           * （android_shell_exec / android_termux_channel_exec / android_privilege_status）就在
+           * **从未解锁 phone 组**的情况下仍可调用。
+           *
+           * 交集是正确语义：本次要掩蔽的是「这一组里**当前真的存在**的成员」。缺席的成员本来
+           * 就没有工具可掩蔽，不该成为豁免其余成员的理由。
+           */
+          const view = typeof tools.view === 'function' ? tools.view() : undefined
+          const restrictable = view?.restrictableNames
+          const deny = restrictable instanceof Set ? names.filter((name) => restrictable.has(name)) : [...names]
+          // 交集为空 = 该组一个成员都没注册。此时 restrict 本来就是空操作，
+          // 跳过不构成 fail-open（没有任何工具需要被掩蔽）。
+          if (deny.length === 0) return
+          tools.restrict({ deny })
         })
         perAgent.set(group, fiber)
       } catch (error) {
-        // 未知工具名（该组未注册）等 → 该组不掩蔽，保持今天的可见性（fail-open，不静默吞工具）。
+        // 走到这里说明 inject/restrict 抛了**意料之外**的错（求交集之后不该再出现「未知工具名」）。
+        // 保留 fail-open 以免静默吞掉工具，但必须留下 error 级痕迹：这是一条安全面降级，
+        // 不能像以前那样只在 warn 里说一句「group lock skipped」。
         ctx.logger?.warn?.('capability gate: group lock skipped (' + group + '): ' + String((error as Error)?.message ?? error))
       }
     }

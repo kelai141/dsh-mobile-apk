@@ -73,7 +73,4 @@
   <string name="ds_share_log_working">Packaging diagnostic logs…</string>
   <string name="ds_share_log_done">Diagnostics %1$s ready; choose an app to send it to</string>
   <string name="ds_share_log_failed">Sharing failed: %1$s</string>
-  <string name="ds_clipboard_read_title">Read clipboard?</string>
-  <string name="ds_clipboard_read_detail">Read model configuration from the clipboard for preview and draft filling. Nothing is saved automatically.</string>
-  <string name="ds_clipboard_read_action">Read and preview</string>
 </resources>

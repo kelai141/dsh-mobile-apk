@@ -94,4 +94,39 @@ class SafeModePartialPhaseTest {
     assertEquals(SafeMode.PHASE_ACTIVE, done.optString("phase"))
     assertTrue(done.optBoolean("active", false))
   }
+
+  /**
+   * issue #982：`phase=writing` 重入**不得**把上一轮 ⑤ 写进去的过滤结果当「进入前原文」备份。
+   *
+   * 现场构造的是 #683 立项要治的那个崩溃窗口本身：⑤ 的 patch 已经写完（磁盘上是过滤后的
+   * 最小化清单），抬 `active` 之前进程死掉（用户强杀 / OOM / home 级或 package.json 段写失败），
+   * 状态停在 `phase=writing`。用户看到「进入失败」会再点一次按钮，而每次点击都传新的 id
+   * （`GuidePageRenderer.kt` 的 `SafeMode.newId()`），于是重入若另造备份，就会把过滤结果
+   * 当成原文记进状态；此后退出安全模式整份还原的是最小化清单 —— 第三方插件条目永久消失。
+   *
+   * 断言只落在用户口径的可观察事实上：退出后 live patch 必须逐字节回到**首次进入前**的原文。
+   * 反证：重入时另造备份（旧实现）→ 本条在最后的 `assertEquals` 判红。
+   */
+  @Test
+  fun `writing 阶段重入不得把已过滤的 patch 当原文备份`() {
+    val (patch, home, auto) = setup()
+    val before = patch.readText()
+    // 让 ⑤ 的 patch 写入成功、随后立刻失败：模拟「patch 已最小化、active 还没抬」的崩溃窗口。
+    val crashAfterPatchWrite: (File, ByteArray) -> Unit = { target, bytes ->
+      target.parentFile?.mkdirs()
+      target.writeBytes(bytes)
+      if (target.canonicalFile == patch.canonicalFile) throw java.io.IOException("simulated crash before active")
+    }
+    val first = SafeMode.enter(patch, home, auto, "id1", crashAfterPatchWrite, hardManifestAvailable = true, hardEntries = hardEntries)
+    assertFalse("抬 active 之前失败必须回 ok=false", first.ok)
+    assertEquals("失败后必须停在 writing", SafeMode.PHASE_WRITING, stateOf(auto).optString("phase"))
+    assertFalse("首轮 ⑤ 已把过滤结果写进 live patch", patch.readText().contains("third-party"))
+    // 用户再点一次「安全模式启动」：新 id、真实写盘。
+    val retry = SafeMode.enter(patch, home, auto, "id2", hardManifestAvailable = true, hardEntries = hardEntries)
+    assertTrue("重入必须收敛成功：" + retry.message, retry.ok)
+    assertEquals("重入后必须抬到 active", SafeMode.PHASE_ACTIVE, stateOf(auto).optString("phase"))
+    val exited = SafeMode.exit(patch, home, auto)
+    assertTrue("退出必须成功：" + exited.message, exited.ok)
+    assertEquals("退出后必须回到首次进入前的原文（第三方条目不得丢失）", before, patch.readText())
+  }
 }

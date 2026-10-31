@@ -100,7 +100,7 @@ jobs:
           # 自证（坑 203）：先用这把 keystore 签一个探针包、再把它读回来，验证「apksigner 能读出期望
           # 指纹」这条判据本身可用。放在构建**前**，是为了让工具/keystore 的问题在 2 分钟内暴露，
           # 而不是等 30 分钟的打包跑完才在末尾判红（前两轮各因此烧掉一小时，且产物被丢弃）。
-          expected_signing_certificate='1dde9d980f62b715f29c20b421063f1d3d796085adf7de7e9907dd16d845bcbd'
+          expected_signing_certificate=$(node scripts/check-apk-signatures.mjs --print-expected-cert)  # 期望指纹唯一真源：scripts/fixtures/apk-expected-cert.sha256（issue #1031）；此处原为硬编码 hex，与锚文件各持一份能独立漂移的真源。经检查器读取还断言「锚 == 不变量常量」，改锚洗白在本步即红
           mkdir -p .deploy-tmp/source-build/signing-self-test
           python3 - <<'PY'
           import zipfile
@@ -825,11 +825,23 @@ jobs:
           [ "${#apks[@]}" -gt 0 ] || { echo "::error::source build has no final APKs"; exit 1; }
           args=()
           for apk in "${apks[@]}"; do args+=(--apk "$apk"); done
-          node scripts/check-apk-signatures.mjs "${args[@]}" --apksigner "$(cat .deploy-tmp/source-build/apksigner-path.txt)" --keystore keystore/debug.keystore
+          # keystore 凭据必须显式声明（issue #1031）：门禁不再回落到 androiddebugkey/android。
+          node scripts/check-apk-signatures.mjs "${args[@]}" --apksigner "$(cat .deploy-tmp/source-build/apksigner-path.txt)" \
+            --keystore keystore/debug.keystore --keystore-alias androiddebugkey --keystore-pass android
+          # provenance 记录的是**锚**（已发布产物的签名身份），不是 keystore 现算值：
+          # keystore 只是交叉核对面，两者不一致时这条断言先判红，绝不能把 keystore 的指纹
+          # 当作发布身份写进 provenance（issue #1031）。
           node --input-type=module <<'NODE'
           import { writeFileSync } from 'node:fs'
-          import { readKeystoreCertificate } from './scripts/check-apk-signatures.mjs'
-          writeFileSync('.deploy-tmp/source-build/signing-certificate-sha256.txt', readKeystoreCertificate('keystore/debug.keystore') + '\n')
+          import { loadCertificateAnchor, crossCheckKeystore, readKeystoreCertificate } from './scripts/check-apk-signatures.mjs'
+          const anchor = loadCertificateAnchor()
+          if (!anchor.ok) {
+            for (const problem of anchor.problems) console.error(problem)
+            process.exit(1)
+          }
+          const cross = crossCheckKeystore({ anchorDigest: anchor.digest, keystoreDigest: readKeystoreCertificate('keystore/debug.keystore', { alias: 'androiddebugkey', pass: 'android' }) })
+          if (!cross.ok) { console.error(cross.detail); process.exit(1) }
+          writeFileSync('.deploy-tmp/source-build/signing-certificate-sha256.txt', anchor.digest + '\n')
           NODE
 
       - name: Upload APK and provenance

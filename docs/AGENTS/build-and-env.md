@@ -63,14 +63,16 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 + `--offline --rerun-tasks`，而开发链（`build-apk-013.ps1`）用项目 wrapper 且不带 `--offline` —— 系统 gradle 的依赖缓存里
 没有本工程的 AndroidX 产物，离线档下 arm64-v8a/x86_64 组装**必失败**（`No cached version of androidx.webkit:webkit:1.12.1
 available for offline mode`，22s 即 break），且该行把 gradle 输出重定向进 `$null`，日志里只剩一句 `APK build failed (…)`。
-现统一走项目 wrapper。`build-release.ps1 -Version 0.14.5` 的参数是最终版本名，因此传给 Gradle 的 `versionNameSuffix` 为空；测试构建可显式用 `-VersionSuffix "-preview"`（最终目录/包名为 `0.14.5-preview`），或传完整标签 `-Version "0.14.5-preview"`。脚本基于 Gradle 中的 `0.14.5` 派生后缀，拒绝不匹配的完整版本，避免把 `0.14.5` 再拼到自身后面；派生逻辑由 `scripts/resolve-version-suffix.mjs` 与 Node 回归用例覆盖。Gradle调用示例：`.\gradlew.bat :app:assembleDebug --no-daemon "-PversionNameSuffix=$VersionSuffix"`。**改任何一条链的调用前先问：另一条链是不是这条命令**（详档见坑 194）。
+现统一走项目 wrapper。`build-release.ps1 -Version 0.14.5` 的参数是最终版本名，因此传给 Gradle 的 `versionNameSuffix` 为空；测试构建可显式用 `-VersionSuffix "-preview"`（最终目录/包名为 `0.14.5-preview`），或传完整标签 `-Version "0.14.5-preview"`。脚本基于 Gradle 中的 `0.14.5` 派生后缀，拒绝不匹配的完整版本，避免把 `0.14.5` 再拼到自身后面；派生逻辑由 `scripts/resolve-version-suffix.mjs` 与 Node 回归用例覆盖。该链**不直接调 Gradle**：它把快照与后缀交给共享终端引擎 `build-apk-engine.mjs assemble`，由引擎按 `buildType`（缺省 `release`）派生出 `:app:assembleRelease --no-daemon -PversionNameSuffix=$VersionSuffix` 与产物路径 `app/build/outputs/apk/release/app-release.apk`。**改任何一条链的调用前先问：另一条链是不是这条命令**——但先确认两条链**本来就该同口径**：出包链与开发迭代链在构建变体上是**刻意不同**的（见下段），别把分工当漏改。
+
+**构建变体：出包走 release，开发迭代走 debug（0.14.11，issue #1118）**：三条正式链（本地 `build-apk-013.ps1`、云端 `build-apk.mjs`、发布 `build-release.ps1`）都经 `build-apk-engine.mjs` 的 `assembleApk()`，其 `buildType` **缺省 `release`**，因此 Gradle 任务是 `:app:assembleRelease`、产物是 `app/build/outputs/apk/release/app-release.apk`。**同一参数单点派生三样东西**——Gradle 任务、清理陈旧产物的目录、取产物的目录——所以三处不会各自漂移（此前是三个写死 `release` 的字面量，改变体要改三处，漏一处只表现为「清 A 目录却从 B 目录取」的假绿）。可选 `debug` 保留给受控负控与将来 `official` 之类的变体，命令行开关是 `--build-type`；未知值在 Gradle 之前就抛错。开发迭代脚本 `scripts/build-apk-dev-fast.mjs` **刻意**留在 `:app:assembleDebug`（它的产物就是 `application-debuggable`，会被 `check-apk-form.mjs` 判红，故禁作发布资产）——这是分工，不是漏改，脚本头注释已写明。为什么必须切：debug 与 release 在 `app/build.gradle.kts` 里**共用** `signingConfigs.repoDebug`，签名门禁对变体完全无感，0.14.9 的发布产物因此是「签名全绿但 debuggable」的 debug 变体；形态判据现由 `check-apk-form.mjs` 在最终产物关口把守（两条构建链都跑），而受控负控保证「构建类型被改回 debug」时它真的会红。
 
 **快照构建入口已收敛为单一链（0.14.5，删除已死的并行 workflow）**：apk 仓原有的 `.github/workflows/build-snapshot.yml`
 已删除，连同只服务它的 `docs/ci-snapshot-build.md` 与 `scripts/upload-snapshot-input.mjs`。四路证据：
 ① 它的输入是 draft release tag `snapshot-input` 的资产，由 `upload-snapshot-input.mjs` 上传，而**全仓没有任何 workflow 调用该上传脚本**（输入源在 CI 里无人维护）；
 ② 它的触发 `push: branches: ['release/*']` 指向 v0.12.4/v0.12.5 时代的分支——`release.yml` 只建 draft Release，**此后不再创建 `release/*` 分支**，该触发已死；
 ③ 功能被 `build-apk.yml` 覆盖且后者更完整——它只走 `inject-snapshot.py` 的**三包注入**，不做引擎 overlay / 引擎补丁 / 语法降级（EXECUTION-MAP 曾自记「仍带坑 63 语义」）；
-④ 它**绕过**共享终端组装引擎 `build-apk-engine.mjs`，直接调 Gradle `:app:assembleDebug`。
+④ 它**绕过**共享终端组装引擎 `build-apk-engine.mjs`，直接调 Gradle（当时的变体是 `:app:assembleDebug`；现出包链已由共用引擎统一为 `:app:assembleRelease`，见上段）。
 ⇒ 属 §14「测试和 Release 使用不同构建逻辑」「重复而没有新增信息的过度防御」。现在快照构建只有两条活链：
 `build-apk.yml`（自包含，源重建）与 `release.yml`（发布，Build Once → 同 artifact 提升）。
 **将来若需要快照专用产物，走这两条，不要再新建第三条。**
@@ -80,7 +82,7 @@ available for offline mode`，22s 即 break），且该行把 gradle 输出重�
 
 **CI 权限与正式发布**：构建/PR workflow 的 `GITHUB_TOKEN` 明确只读，checkout 禁止持久化凭据；`release.yml` 的快照构建、APK 构建、测试和签名核验均在只读 job 完成并上传 `release-v<version>` artifact。独立 `publish` job 只下载同一 artifact 并创建 draft Release / 上传资产，写权限仅授予该 job。发布阶段不重新构建或重签资产。PR 与来源构建 workflow 的源码 Node 测试使用 `node --test scripts/source-build/*.test.mjs`，新增测试自动进入该测试集。
 
-**APK 三方案签名核验**：最终 APK 必须通过 `scripts/check-apk-signatures.mjs`，并断言 JAR/v1、APK v2、APK v3 均为 true，且签名证书指纹匹配预期 keystore。实际 APK 验证必须传 `--keystore`；缺少预期证书身份时直接拒绝，不能只凭签名方案通过。共享 `build-apk-engine.mjs verify` 默认传仓库固定的 `keystore/debug.keystore`，本地、portable 与发布终端链因此共用同一身份判据；直接调用检查器的 workflow 显式传入该路径。核验命令显式传 `apksigner verify --min-sdk-version 18`：APK 的 `minSdk=26`，而默认核验会按 26 判断老系统兼容性，可能把只供旧系统使用的 v1 SHA-256 签名报告为 false；API 18 起支持此 v1 摘要算法。此参数只选择核验兼容性下限，不改 APK 内容或签名。仍要求 apksigner 返回码为 0，并保留原始输出、scheme 判定与退出码。
+**APK 三方案签名核验**：最终 APK 必须通过 `scripts/check-apk-signatures.mjs`，并断言 JAR/v1、APK v2、APK v3 均为 true，且签名证书指纹匹配**独立锚** `scripts/fixtures/apk-expected-cert.sha256`（期望证书的唯一真源，与 keystore 解耦；脚本内另存同一摘要作不变量常量，二者不一致即判红并点名「期望证书锚被改动」）。实际 APK 验证必须传 `--keystore`，但它只参与**交叉核对**（keystore 与锚不一致同样判红），不再产生期望值；锚缺失或格式非法一律判红，不得退化成「无期望值」而放行。**keystore 的 alias 与口令没有任何内置默认值**（issue #1031 后半）：检查器要求显式 `--keystore-alias`/`--keystore-pass` 或环境变量 `DSH_APK_KEYSTORE_ALIAS`/`DSH_APK_KEYSTORE_PASS`，两者都缺席即判红并点名缺哪一项、用哪个开关补。此前的 `|| 'androiddebugkey'`/`|| 'android'` 只对仓库自带 debug keystore 成立，换成任何一把真实发布钥都会让合法签名假红（实测 exit 1，补上环境变量才 exit 0）。仓库那份 debug keystore 的公开凭据（`androiddebugkey`/`android`，与 `app/build.gradle.kts` 的 `signingConfigs.repoDebug` 同源）集中在 `build-apk-engine.mjs` 的 `REPO_DEBUG_KEYSTORE_CREDENTIALS`，由它显式传给检查器——配对关系写在一处可读见，不是散落的猜测；换钥调用方用 CLI 参数或环境变量覆盖，不必改代码。`build-apk-source.yml` 的 `expected_signing_certificate` 经 `--print-expected-cert` 读同一份夹具，消除第二份真源。共享 `build-apk-engine.mjs verify` 默认传仓库固定的 `keystore/debug.keystore`，本地、portable 与发布终端链因此共用同一身份判据；直接调用检查器的 workflow 显式传入该路径。核验命令显式传 `apksigner verify --min-sdk-version 18`：APK 的 `minSdk=26`，而默认核验会按 26 判断老系统兼容性，可能把只供旧系统使用的 v1 SHA-256 签名报告为 false；API 18 起支持此 v1 摘要算法。此参数只选择核验兼容性下限，不改 APK 内容或签名。仍要求 apksigner 返回码为 0，并保留原始输出、scheme 判定与退出码。
 
 **APK 根目录传递约定**：云端 workflow 与本地来源链都显式传 `DSH_APK_DIR`；`check-runtime-assets.mjs` 必须优先使用该绝对根目录，不能仅凭 `ROOT/dsh-mobile-apk` 猜测协调仓布局。`--require` 仍严格要求该根下 `app/src/main/assets/patched`、快照和 registry 在场；缺件不得 SKIP 或自动生成。 `build-apk-013.ps1` 同样保留前置布局自检测得到的 `$apkDir`，不得在版本解析后重新硬编码 `Root\dsh-mobile-apk`。 发布链临时文件也不得假设 `$env:TEMP` 在所有 PowerShell runner 上存在；跨平台脚本使用 `[IO.Path]::GetTempPath()`。
 
@@ -174,6 +176,86 @@ Harness按固定0.2.0-rc.2源码完成全仓构建；prepare-harness-vendor-over
 | PowerShell 转义 | 双引号内 `$var` 本地展开（引号地狱）；二进制经 `adb exec-out`/push 传输 | 坑 8 |
 | ABI 匹配 | debug 包默认 x86_64 快照，装 arm64 真机必崩；构建/安装前核对（3.2 步 4） | 坑 18 |
 | 工作树行尾噪声 | `git status` 的 ` M` 与 `check-patch-mirror` 的「仅行尾差异」WARN 常来自 autocrlf（一侧检出为 CRLF），**不是**内容漂移。先逐字节复核（`cmp a b` / `git diff --ignore-cr-at-eol`）再决定要不要动文件，别按噪声改内容 | 铁律 5/6 |
+
+### 3.5 Windows + WSL 本地全链前置（2026-10-31 实测补齐）
+
+> **一句话**：`build-apk-013.ps1` 在净检出上**跑不到底**。下面是一次从零开始的独立 worktree 上实测到的**五轮阻塞点**，以及让链往前走的**五条前置**。照这份清单准备，可以少烧 5 轮 × 1-6 分钟。
+
+#### 五轮阻塞点（净检出 → 逐轮修复后）
+
+| 轮 | 耗时 | 阻塞点 | 属于 |
+|---|---|---|---|
+| 1 | 29s | `dsh-shell-termux` 的 `tsc` 报 15 个 `TS2307 Cannot find module` | 缺 10 个包的 `node_modules` |
+| 2 | 103s | `check-dead-tokens`：上游令牌定义面不在场 | 缺 `.deploy-tmp/deepseek-harness` |
+| 3 | 105s | 上游树 `package.json` 是 `0.2.1-rc.2`，契约要求 `0.2.1-rc.3` | 复制错了源树 |
+| 4 | 162s | 上游树 `describe` 读到 `v0.14.9-520-g5df44cdc`（套壳仓的 tag） | 复制时排除了 `.git` |
+| 5 | **386s** | `check-gate-skips` 3 项 FAIL | 见下方「已知门禁倒挂」，**不是环境没配好** |
+
+轮 5 已进入静态门禁尾段，未到注入/assemble，故**没有产物**。
+
+#### 五条前置（按顺序做，每条都可复用）
+
+**① 基座目录布局**
+`build-snapshot-013.mjs` 要求 `.deploy-tmp/{arm64,x64}-base/base-usr.tar.xz`，而仓里给的是 `base/base-usr-<abi>.tar.xz`：
+```powershell
+foreach ($p in @(@('x86_64','x64-base','base-usr-x86_64.tar.xz'), @('arm64','arm64-base','base-usr-arm64.tar.xz'))) {
+  $d = ".deploy-tmp\$($p[1])"; New-Item -ItemType Directory -Force -Path $d | Out-Null
+  Copy-Item "base\$($p[2])" "$d\base-usr.tar.xz" -Force
+  Copy-Item "base\base-dsh.tar.xz" "$d\base-dsh.tar.xz" -Force
+}
+```
+
+**② `typescript@5.9.3`（不是 7.x）+ `esbuild`**
+`check-browser-syntax-floor` 判据 1 要**真实 TS 解析器**，缺席即 `exit 2`（拒绝文本判据替代）。
+代码从 `<dir>/lib/typescript.js` 加载——**`typescript@7.x` 没有这个文件**，装了也解析不到。必须 5.x：
+```powershell
+npm install --no-save --no-package-lock typescript@5 esbuild
+node -e "console.log(typeof require('./node_modules/typescript/lib/typescript.js').createSourceFile)"
+```
+
+**③ 10 个包各自 `npm ci`**
+`scripts/plugin-dirs.json` 里的 `dirs` 逐个装（`dsh-host-web-compat` 无 lock，跳过）：
+```powershell
+$dirs = (Get-Content scripts\plugin-dirs.json -Raw | ConvertFrom-Json).dirs
+foreach ($d in $dirs) {
+  if (-not (Test-Path (Join-Path $d 'package-lock.json'))) { continue }
+  Push-Location $d; npm ci --no-audit --no-fund; Pop-Location
+}
+```
+注意：第 138-149 行（3.2 步 7）写的是 `npm install`；有 lock 的包用 `npm ci` 更稳（不会改写 lock）。
+
+**④ 上游树必须带 `.git`，且必须是 `dsh-v0.2.1-rc.3`**
+`check-contract` 比对的不是 `package.json` 版本，而是 `git describe` / `HEAD`。两条硬要求：
+- **用 `D:\coding\dsh-mobile\dsh`**（`describe=dsh-v0.2.1-rc.3`、`HEAD=1f81c047…`），**不要**用主工作区那份 `.deploy-tmp/deepseek-harness`（是 `rc.2`，必红）；
+- **robocopy 不要加 `/XD .git`**，否则 `describe` 会回退到套壳仓的 tag 而判红：
+```powershell
+robocopy "D:\coding\dsh-mobile\dsh" ".deploy-tmp\deepseek-harness" /E /NFL /NDL /NJH /NJS /NP
+git -C .deploy-tmp\deepseek-harness describe --tags   # 必须打印 dsh-v0.2.1-rc.3
+```
+
+**⑤ 官方快照要校大小**
+`gh release download` 会静默截断（实测首轮下到 4.4MB / 2.9MB）。必须核对字节数：
+```powershell
+gh release download v<ver> -R kelai141/dsh-mobile-apk -p "snapshot-*.tar.xz" -D .deploy-tmp\snapdl --clobber
+# v0.14.10: arm64=157948528  x86_64=153914720
+```
+放到位：`.deploy-tmp/snapshot-013/<abi>/snapshot.tar.xz`。**这样跑的是「打包链 + 门禁」，不是「快照构建链」**——快照来源是已发布资产，报告里要写清这个边界。
+
+#### 已知门禁倒挂（不是环境问题，别白折腾）
+
+装齐环境后 `check-gate-skips` 会报 3 项 FAIL，而净检出只报 1 项——**环境越完整越多红**：
+
+| FAIL | 真因 | 追踪 |
+|---|---|---|
+| `check-contract` 在 `--require` 下仍以 SKIP=1 结案 | 自包含树的合法缺席被门禁自己单方面豁免 | issue #1153 |
+| `check-runtime-assets` / `check-mcp-client-deps` 审计基线未复现 | 依赖装齐后缺口不再复现，销账规则要求删 `AUDIT_BASELINE` 登记 | issue #1154 |
+| `check-tool-output-schema` 有 SKIP 面却无判据行 | 净检出缺依赖走「校验器缺席」分支 | CI 有依赖即绿 |
+
+**在 #1153 / #1154 修复前，本地全链到 `check-gate-skips` 必然停住**；这不是配置能绕过的，别为此去改 `AUDIT_BASELINE`（那是让本地污染规范基线）。
+
+#### 跨平台完整性说明
+
+`build-snapshot-013.mjs` 的 `termux-elf-cleaner` 步骤在 WSL/Linux 上**必然失败**（它是 Android ELF，interpreter `/system/bin/linker64`，宿主无此文件 → status 127，且该调用无跳过开关）。详见 issue #1147。故 Windows 上**本地重建快照**目前不可达，只能用已发布快照（本节的路径 ⑤）。
 
 ## 更新记录表
 

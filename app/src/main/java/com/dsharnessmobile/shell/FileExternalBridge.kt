@@ -262,8 +262,17 @@ internal object FileExternalBridge {
    */
   internal fun toIntent(spec: IntentSpec): Intent {
     val intent = Intent(spec.action)
-    spec.dataUri?.let { intent.data = android.net.Uri.parse(it) }
-    spec.type?.let { intent.type = it }
+    // issue #978：**data 与 type 必须一次设好**。Intent.setType() 会把 data 清成 null
+    // （setData() 同样会把 type 清空）—— 这是 Android 的既定行为，不是实现 bug。
+    // 旧实现先 setData 再 setType，于是只要 spec 带 type，data 就丢了：目标应用收到一条
+    // 既没有 uri 也没有可推断类型的意图，「用别的应用打开」在带 MIME 的文件上直接失效
+    // （queryIntentActivities 也会因此给出错误的候选集）。
+    when {
+      spec.dataUri != null && spec.type != null ->
+        intent.setDataAndType(android.net.Uri.parse(spec.dataUri), spec.type)
+      spec.dataUri != null -> intent.data = android.net.Uri.parse(spec.dataUri)
+      spec.type != null -> intent.type = spec.type
+    }
     spec.streamUri?.let { intent.putExtra(Intent.EXTRA_STREAM, android.net.Uri.parse(it)) }
     // 每条意图各自授权：EXTRA_INITIAL_INTENTS 不继承 chooser 的授权。
     for (grant in spec.grants) {

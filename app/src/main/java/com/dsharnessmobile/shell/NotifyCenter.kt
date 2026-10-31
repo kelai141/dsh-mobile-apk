@@ -924,7 +924,7 @@ object NotifyCenter {
     // 探针与一行 flashStatus（面板收起时看不到），用户看到一条不响的提问通知却不知道原因。这里让
     // 「为什么静默 + 怎么恢复」**跟着通知本身走**：通知在哪儿，解释就在哪儿。
     val degradedNotice = if (channelId == null && face.interactive) {
-      "系统已把「" + face.label(app) + "」通知降级为静默——到系统设置里可恢复"
+      degradedNoticeText(face.label(app), UiText.isEnglish(app))
     } else null
     if (fallback == null) {
       // 连静默渠道都不可用（极端：用户逐个降级）——明确记录，绝不静默失败
@@ -1184,7 +1184,9 @@ object NotifyCenter {
   }
 
   private fun reportLine(entry: NotifyEntry, app: android.content.Context): String {
-    val head = entry.outcomeLabel.ifBlank { entry.outcomeLabel(app) }
+    // #986：与汇报栏同口径——`entry.outcomeLabel` 是**投递时**按当时语言落库的字符串，
+    // 语言切换不会重算，所以这里也必须按 outcome 用当前语言重算，不能让它优先。
+    val head = reportOutcomeHead(entry, UiText.isEnglish(app))
     val summary = if (entry.summary.isNotBlank()) entry.summary else entry.text
     return if (summary.isBlank()) head else head + " · " + summary
   }
@@ -1339,13 +1341,15 @@ object NotifyCenter {
   private fun addQuestionActions(app: Context, b: NotificationCompat.Builder, entry: NotifyEntry) {
     // 动作 1：直接回复（RemoteInput）。只有回复动作开 mutable——结果经 ClipData 注入，
     // FLAG_IMMUTABLE 会让回复静默失败（§6.3.1 / NT-16）。
+    // #1011 ②：通知栏按钮是系统画的，`RemoteInput` label 与 Action 标题各要一份，两处都跟语言走。
+    val replyLabel = replyActionLabel(UiText.isEnglish(app))
     val remote = RemoteInput.Builder(NotifyActionReceiver.REPLY_KEY)
-      .setLabel("回复")
+      .setLabel(replyLabel)
       .build()
     val firstQuestionId = entry.questions.firstOrNull()?.id
     val reply = NotificationCompat.Action.Builder(
       android.R.drawable.ic_menu_send,
-      "回复",
+      replyLabel,
       actionPending(app, entry, NotifyActionReceiver.ACTION_REPLY, mutable = true, questionId = firstQuestionId),
     )
       .addRemoteInput(remote)
@@ -1474,6 +1478,27 @@ object NotifyCenter {
   /** 失败通知的独立 ID 桶（S3-12：不得覆盖原提问/审批通知的 ID）。 */
   internal fun failureId(kind: String, eventId: String): Int =
     stableId("dsh-failure:" + kind.lowercase() + ":" + eventId)
+
+  /**
+   * 通知动作按钮「回复」的标题（#1011 ②）。
+   *
+   * 通知栏那枚按钮是系统画的，`RemoteInput` 的 label 与 `Action` 标题各要一份——
+   * 旧实现两处都写死中文，英文界面下仍是「回复」。
+   */
+  internal fun replyActionLabel(english: Boolean): String = UiText.t(english, "回复", "Reply")
+
+  /**
+   * 渠道被系统降级时随通知走的说明（S3-1 / #992）。
+   *
+   * 拆成纯函数是为了让「英文态」在 JVM 单测里可达——旧实现把整句写在 `notifyEvent` 里，
+   * 只有 `face.label(app)` 跟语言走，整句模板不跟（英文界面下露中文）。
+   */
+  internal fun degradedNoticeText(categoryLabel: String, english: Boolean): String =
+    if (english) {
+      "The system has silenced \"" + categoryLabel + "\" notifications; restore them in system settings"
+    } else {
+      "系统已把「" + categoryLabel + "」通知降级为静默——到系统设置里可恢复"
+    }
 
   /**
    * 发送**全部五类**测试通知（设置页「通知」分区的自证按钮；0.14.1 批 8 / S3-26）。
@@ -1635,14 +1660,17 @@ data class NotifyEntry(
     }
   }
 
-  fun outcomeLabel(app: android.content.Context? = null): String = when (outcome) {
-    "completed" -> UiText.t(app, "已完成", "Completed")
-    "error" -> UiText.t(app, "失败", "Failed")
-    "blocked" -> UiText.t(app, "被阻塞", "Blocked")
-    "aborted" -> UiText.t(app, "已中止", "Aborted")
-    "max-tokens" -> UiText.t(app, "输出超限", "Output limit reached")
-    "interrupted" -> UiText.t(app, "被中断", "Interrupted")
-    else -> if (outcome.isBlank()) "" else UiText.t(app, "结果未知", "Unknown result")
+  fun outcomeLabel(app: android.content.Context? = null): String = outcomeLabel(UiText.isEnglish(app))
+
+  /** 同一张表，语言已解析（#986：纯函数入口，JVM 单测能覆盖英文分支）。 */
+  fun outcomeLabel(english: Boolean): String = when (outcome) {
+    "completed" -> UiText.t(english, "已完成", "Completed")
+    "error" -> UiText.t(english, "失败", "Failed")
+    "blocked" -> UiText.t(english, "被阻塞", "Blocked")
+    "aborted" -> UiText.t(english, "已中止", "Aborted")
+    "max-tokens" -> UiText.t(english, "输出超限", "Output limit reached")
+    "interrupted" -> UiText.t(english, "被中断", "Interrupted")
+    else -> if (outcome.isBlank()) "" else UiText.t(english, "结果未知", "Unknown result")
   }
 
   /**

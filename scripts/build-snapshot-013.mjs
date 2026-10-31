@@ -14,7 +14,7 @@ import { mkdirSync, existsSync, writeFileSync, readFileSync, readdirSync, rmSync
 import { join, dirname, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
-import { wslPath, sh as wsl, XZ_THREADS, wslNodeCommand } from './lib/shell.mjs'
+import { wslPath, sh as wsl, shStatus, XZ_THREADS, wslNodeCommand } from './lib/shell.mjs'
 import { sanitizeSymlinks } from './lib/symlink-sanitize.mjs'
 import { relocateGitShellPath } from './lib/git-shell-path.mjs'
 
@@ -112,11 +112,11 @@ mkdirSync(join(STAGE, 'root'), { recursive: true })
 // **并发上限 8（0.14.1 用户拍板，系统级约束）**：此处原为 `-dT0`（吃满 16 逻辑核），会把开发机
 // 撑满 → 同时运行的 MuMu 模拟器卡顿/系统不稳；「模拟器优先」是铁律 2。统一用 shell.mjs 的 XZ_THREADS。
 log('解压基座（WSL）…')
-wsl(`set -o pipefail; mkdir -p "${wslPath(join(STAGE, 'root'))}" && xz -dT${XZ_THREADS} -c "${wslPath(baseTar)}" | tar -x -C "${wslPath(join(STAGE, 'root'))}" && du -sh ${wslPath(join(STAGE, 'root', 'usr'))} | cut -f1`)
+wsl(`mkdir -p "${wslPath(join(STAGE, 'root'))}" && xz -dT${XZ_THREADS} -c "${wslPath(baseTar)}" | tar -x -C "${wslPath(join(STAGE, 'root'))}" && du -sh ${wslPath(join(STAGE, 'root', 'usr'))} | cut -f1`)
 // home/.dsh 配置层在独立基座包（架构无关），一并合并
 const baseDsh = join(BASE_DIR, 'base-dsh.tar.xz')
 if (existsSync(baseDsh)) {
-  wsl(`set -o pipefail; xz -dT${XZ_THREADS} -c "${wslPath(baseDsh)}" | tar -x -C "${wslPath(join(STAGE, 'root'))}"`)
+  wsl(`xz -dT${XZ_THREADS} -c "${wslPath(baseDsh)}" | tar -x -C "${wslPath(join(STAGE, 'root'))}"`)
   log('合并 base-dsh（home/.dsh 配置层）')
 }
 // 🔒 机密剥离（安全审计 C1，2026-08-23）：base-dsh 是从运行中设备提取的配置层，
@@ -625,10 +625,49 @@ log('dpkg status: ' + dpkgStatus.length + ' 包，available: ' + availableBlocks
 // ── 6. shebang 与 ELF RUNPATH 重写（com.termux → com.dsharnessmobile.shell）──
 log('重写 shebang/RUNPATH…')
 execSync(`${PYTHON} scripts/fix-shebang.py "${U}" ${NEW_PREFIX}`, { encoding: 'utf8', stdio: 'inherit' })
-// termux-elf-cleaner：清理 ELF 中残留 com.termux RUNPATH（幂等：已清理的无操作）
+// termux-elf-cleaner：清理 ELF 中残留 com.termux RUNPATH。
+//
+// 【issue #1147】它是 **Android 目标**的 ELF，不是宿主 ELF：
+//   $ file usr/bin/termux-elf-cleaner
+//   ELF 64-bit LSB shared object, x86-64, ... interpreter /system/bin/linker64, stripped
+//   NEEDED: libc++_shared.so, libdl.so, libc.so     ← bionic，不是 glibc
+// CPU 架构与 WSL 相同（都是 x86-64），但**解释器是 Android 的 /system/bin/linker64**，
+// 宿主上没有它，内核无法加载该映像，bash 报
+//   "cannot execute: required file not found"
+// 并返回 **127**。所以这不是路径写错、也不是缺可执行位，是**平台不匹配**——
+// 在 Windows/WSL/macOS/Linux 构建机上它永远跑不起来。
+//
+// 判据（为什么跳过不改变产物，而不是「掩盖错误」）：
+//   实测基座 x64-base 的 usr/bin 有 361 个 ELF，**361 个**的 RUNPATH 都含
+//   /data/data/com.termux/files/usr/lib；而**已发布的 v0.14.10 官方快照**里 usr/bin
+//   有 393 个 ELF，**393 个仍是原样**（同样含 com.termux，不含的 0 个）。
+//   即：这一步在历史所有发布产物里**从未真正生效过**。#1121 之前它被 `| tail -3` 吞掉
+//   退出码（管道状态取末尾 tail=0），构建照样「成功」，产物带着原 RUNPATH 发布并正常使用
+//   ——设备侧靠 LD_LIBRARY_PATH 解析库。是 #1121 给 sh() 加 pipefail 后才暴露成硬失败。
+//   因此宿主上跳过它**不改变产物**：与历史发布件在这一项上逐项相同。
+//   也没有任何门禁断言 RUNPATH 必须干净（elf-check.mjs 只看 ELF 头 machine 字段）。
+//
+// 处置：用**平台探测**决定是否执行，而不是无条件跳过、也不是掩盖退出码。
+//   - 宿主有 Android linker（Termux/Android 上构建）→ 照旧真跑；跑失败即中止（不静默）。
+//   - 宿主没有 → 显式跳过并打印原因。
+// 真要清理 com.termux RUNPATH，正确做法是在宿主侧用 glibc 工具改写（如 patchelf），
+// 而不是在宿主上执行 Android 二进制；那是独立改动，见 #1147。
 const cleaner = join(U, 'bin', 'termux-elf-cleaner')
 if (existsSync(cleaner)) {
-  wsl(`cd "${wslPath(U)}" && chmod +x bin/termux-elf-cleaner && LD_LIBRARY_PATH=lib bin/termux-elf-cleaner bin/* 2>/dev/null | tail -3`)
+  const androidLinker = shStatus('test -x /system/bin/linker64')
+  if (androidLinker.status === 0) {
+    // 去掉原来的 `2>/dev/null | tail -3`：它把 stderr 现场和退出码都丢了。
+    const run = shStatus(`cd "${wslPath(U)}" && chmod +x bin/termux-elf-cleaner && LD_LIBRARY_PATH=lib bin/termux-elf-cleaner bin/*`)
+    if (run.status !== 0) {
+      console.error(`termux-elf-cleaner 执行失败（退出码 ${run.status}）：`)
+      console.error((run.stderr || run.stdout || '').trim().split('\n').slice(-20).join('\n'))
+      process.exit(1)
+    }
+    log('termux-elf-cleaner 已执行（宿主具备 Android linker）')
+  } else {
+    log('跳过 termux-elf-cleaner：宿主无 /system/bin/linker64，Android 目标 ELF 无法加载'
+      + '（issue #1147；历史发布件同样是原样 RUNPATH，本步骤不改变产物）')
+  }
 }
 
 // ── 7. 三缺陷固化 ──────────────────────────────────────────────────────
@@ -1182,7 +1221,11 @@ log('清单驱动裁剪完成（treeDelete + extensionDelete）')
 // ── 8. 归档 ────────────────────────────────────────────────────────────
 log('归档 snapshot.tar.xz…')
 const archive = join(OUT_DIR, 'snapshot.tar.xz')
+// 预删最终产物与它的 sha256（issue #1185）：本轮若在归档段之前/之中失败，
+// 目录里不得留着「上一轮的成功产物 + 上一轮的 sha256」，否则下游会把它当成本轮结果。
+// 成功路径上 archive 由 rename 重新落位、sha256 在归档后重写。
 rmSync(archive, { force: true })
+rmSync(join(OUT_DIR, 'snapshot.sha256'), { force: true })
 // 输出结构对齐既有快照：usr/ + home/.dsh/ + home/.gitconfig（home 其余目录不随快照）
 // 2c 提速（2026-09-05 实测）：tar -cJf 单线程 xz → tar -c | xz -T<n> 多线程（同 preset 档，
 // 743MB tar 380s 级 → 48s；产物字节因分块并行而不同，sha256 由下游重算，一致性门禁不受影响）。
@@ -1194,11 +1237,53 @@ rmSync(archive, { force: true })
 // 多花 3-5 分钟）。统一 `--mtime=@<固定纪元>`（GNU tar）后，同一输入的产物字节稳定；inject-all.py
 // 新增文件同样取固定 mtime（SOURCE_DATE_EPOCH 可覆写）。
 const SOURCE_DATE_EPOCH = process.env.SOURCE_DATE_EPOCH ?? '1704067200'
-wsl(`
-  cd "${wslPath(join(STAGE, 'root'))}" && \
-  tar -c --mtime=@${SOURCE_DATE_EPOCH} usr home/.dsh home/.gitconfig 2>/dev/null | xz -T${XZ_THREADS} -6 > "${wslPath(archive)}" && \
-  ls -lh "${wslPath(archive)}"
-`)
+// 归档 = **两段而不是一条流水线**（issue #1074）。原因不是风格，是判据：
+// 旧写法 `tar … 2>/dev/null | xz … > snapshot.tar.xz` 即使 sh() 已开 pipefail 也不够——
+// 真因有两层：
+//   ① 管道状态默认只看最后一段（xz）。xz 对「读到的残缺流」照样 exit 0，于是 tar 层面的
+//      失败（成员缺失 / 文件不可读 / 读到一半被改）全部不可见；
+//   ② 即便开了 pipefail，`2>/dev/null` 也把**唯一的现场**（tar 报的到底是哪个成员）扔了，
+//      事后只能看到「某处失败」。
+// 改成分段执行：tar 先落 tar 中间件，明确拿它自己的退出码；这一段的 stderr 不再丢弃，
+// 失败时把 tar 的原话带进报错。xz 再单独压，压缩失败同样中止。
+// 中间件长度上限：完整快照 tar 约 700MB 级（xz 后 300MB 级），不能用内存缓冲承接。
+const archiveTar = join(OUT_DIR, 'snapshot.tar')
+rmSync(archiveTar, { force: true })
+const tarRun = shStatus(`cd "${wslPath(join(STAGE, 'root'))}" && tar -c --mtime=@${SOURCE_DATE_EPOCH} usr home/.dsh home/.gitconfig > "${wslPath(archiveTar)}"`)
+if (tarRun.status !== 0) {
+  // tar 非 0 = 归档成员不齐（典型：home/.gitconfig 没生成、某成员读到一半被改）。
+  // 此时**不得**继续算 sha256：那份残缺归档会被指纹化并作为构建输入发出去（issue #1074 实证）。
+  console.error(`归档失败：tar 退出码 ${tarRun.status}（成员不齐或不可读，残缺归档不得进入指纹与发布）`)
+  console.error((tarRun.stderr || tarRun.stdout || '').trim().split('\n').slice(-20).join('\n'))
+  rmSync(archiveTar, { force: true })
+  process.exit(1)
+}
+// 先压到**临时名**，成功后再 rename 到最终路径（issue #1185）。
+//
+// 旧实现直接 `xz … > snapshot.tar.xz`：xz 中途失败（磁盘满、被中断、输入读到一半）时，
+// 最终路径上留着**截断的 .tar.xz**，而失败分支只删了 tar 中间件。后果有两层：
+//   ① 下游拿到一个能读开头、解到一半才报错的「快照」，报错点离真因很远；
+//   ② 上一轮成功时写的 snapshot.sha256 还在，与这份残件对不上，
+//      指纹门禁要么误报「快照被改过」，要么（若重算）把残件当成合法输入。
+// 临时名 + rename 让「最终路径存在」等价于「xz 完整成功」，不需要失败分支去补救；
+// 而「失败时连最终产物一起清」仍有一个窗口期（xz 写到一半时最终路径上是残件），
+// 进程被强杀就补不上。
+const archivePart = archive + '.part'
+rmSync(archivePart, { force: true })
+const xzRun = shStatus(`xz -T${XZ_THREADS} -6 -c "${wslPath(archiveTar)}" > "${wslPath(archivePart)}"`)
+if (xzRun.status !== 0) {
+  console.error(`归档失败：xz 压缩退出码 ${xzRun.status}（tar 中间件在 ${archiveTar}）`)
+  console.error((xzRun.stderr || xzRun.stdout || '').trim().split('\n').slice(-20).join('\n'))
+  // 残件与中间件都清掉：最终路径与临时路径都不得留任何快照文件。
+  rmSync(archivePart, { force: true })
+  rmSync(archiveTar, { force: true })
+  process.exit(1)
+}
+// 中间件只在归档段存在：留着会与 xz 产物混淆成第二份「快照」（体积也翻倍）。
+rmSync(archiveTar, { force: true })
+// 成功才落到最终路径；rename 同盘原子，不会出现「最终路径半截」的中间态。
+renameSync(archivePart, archive)
+log(`归档 ${(statSync(archive).size / 1024 / 1024).toFixed(1)} MB`)
 const sha = createHash('sha256').update(readFileSync(archive)).digest('hex')
 writeFileSync(join(OUT_DIR, 'snapshot.sha256'), sha)
 // 归档后自检（2026-08-23：x86 曾出现「stage 有、归档无」的 LICENSES 目录怪癖——防再犯）。

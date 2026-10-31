@@ -143,6 +143,7 @@ export const MOBILE_SETTINGS_CSS: string = `
     grid-template-areas: 'icon label chevron' 'icon desc chevron';
     /* 行间隙归零、说明自带 2px 上边距：两种行的行盒高度只由内容决定，
        图标跨两行时的中线才有确定值（真正解决下沉的是下面那条 other 行规则）。 */
+    /* 统一尺度（4px 基数）：图文间距 12、上下留白 12、两侧留白 16。 */
     gap: 0 12px;
     align-items: center;
     /* 行按内容高度整体居中，不被 min-height 拉伸。 */
@@ -151,7 +152,7 @@ export const MOBILE_SETTINGS_CSS: string = `
     width: 100%;
     height: auto;
     min-height: 56px;
-    padding: 12px;
+    padding: 12px 16px;
     border-radius: var(--dsw-radius-md);
   }
 
@@ -160,6 +161,10 @@ export const MOBILE_SETTINGS_CSS: string = `
   html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > nav button > svg {
     grid-area: icon;
     align-self: center;
+    /* 图标略小于文字行盒（文字 15/20 → 图标 20） */
+    width: 20px;
+    height: 20px;
+    flex: none;
   }
 
   /* 自有分区的图标：上游对我方 id 只给通用齿轮，故换成本分区自己的图标（见 settings-nav.ts）。
@@ -187,8 +192,8 @@ export const MOBILE_SETTINGS_CSS: string = `
   html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > nav button > span {
     grid-area: label;
     min-width: 0;
-    font-size: 16px;
-    line-height: 22px;
+    font-size: 15px;
+    line-height: 20px;
   }
 
   html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > nav button > span[data-dsh-settings-nav-desc] {
@@ -229,7 +234,7 @@ export const MOBILE_SETTINGS_CSS: string = `
   /* 内容列的表头（上游「打开配置文件」+ 关闭）收窄内边距，标题条已承担分区名。 */
   html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level='detail'] > div:last-child > div:first-child {
     height: auto;
-    padding: 4px 12px 8px;
+    padding: 4px 16px 8px;
   }
 
   /* 二级页只留返回，不要关闭（0.15.0 用户定例）：我们的标题条已经有「‹ 返回」，
@@ -240,8 +245,9 @@ export const MOBILE_SETTINGS_CSS: string = `
     display: none;
   }
 
+  /* 二级页内容列：两侧留白与一级行一致（16），底部留 24 作为组间间距。 */
   html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > div:last-child > div:nth-child(2) {
-    padding: 0 12px 24px;
+    padding: 0 16px 24px;
   }
 
   /* ── 无分层模块时的回退：保持旧行为（横向标签行）──────────────────

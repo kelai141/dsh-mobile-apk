@@ -36,7 +36,7 @@ const DOC_PATH = resolve(flagValue('--doc') ?? join(root, 'docs', 'UPSTREAM-CONT
 const SLOTS_SOURCE = flagValue('--slots-source')
 const issues = []
 const REQUIRE = argv.includes('--require')
-let skipped = 0
+let skipped = 0, hardSkip = 0
 /** 仓库相对路径（仅用于报错文案）。0.14.2 rc.2 追版实修：§9 的两处报错此前调用了**从未定义**的
  *  `rel()` —— rc.1 时文档含基线字样，该分支从未走到；换基线后第一次判红即 `ReferenceError` 崩溃，
  *  把「该判红」变成「门禁自己炸」，判据在追版路径上不可读。 */
@@ -44,7 +44,7 @@ const rel = (p) => { const r = resolve(p).slice(root.length + 1); return r.split
 const ok = (msg) => console.log('  OK  ' + msg)
 const fail = (msg) => { issues.push(msg); console.log('  FAIL ' + msg) }
 const skip = (msg) => {
-  skipped += 1
+  skipped += 1; hardSkip += 1
   if (REQUIRE) issues.push('SKIP: ' + msg)
   console.log('  SKIP(#' + skipped + ')  ' + msg + (REQUIRE ? ' —— --require 档不得 SKIP' : ''))
 }
@@ -332,9 +332,38 @@ if (contract.clientSlots.enabledRow !== undefined) {
 //   · 从上游该槽的声明文件里定位声明块（单行 `'x': { ... }` 或多行 `'x': {\n ... \n}` 两种形态）；
 //   · 断言 kind / scope 与 contract.json 记录的实测值一致（kind=keyed/list/single，scope=root/session）。
 // 判红理由分两类且文案分开：槽**消失**（升级删槽）与 kind/scope **漂移**（语义变更）是不同事故。
-if (Array.isArray(contract.clientSlots.declarations) && contract.clientSlots.declarations.length > 0) {
+//
+// issue #1021（判据失效模式：vacuous pass——判据整段被条件包住，空输入时静默消失）：
+//   旧实现把整段包在 §declarations.length > 0§ 里，于是把 §clientSlots.declarations§ 清空，
+//   这段守卫**根本不执行**：门禁仍打印 §CONTRACT PASS§、SKIP 计数还变小（§4b 段不再产生 SKIP 行），
+//   没有任何地方记录「这一段没跑」。整段判据对「登记表被清空」这种形态恒真 —— 属空集恒真家族。
+//   修法 = **声明面登记本身成为一条判据**：declarations 必须是非空数组，且必须与 §4 的槽位登记
+//   同规模（每个在 §clientSlots.slots 里登记、又在上游有声明文件的槽，都必须在 declarations 里出现）。
+//   于是「清空 declarations」直接从「静默通过」变成「判红」，且 §4b 段永远会被执行。
+const declarations = contract.clientSlots.declarations
+/** 声明面登记的非空下限（issue #1021）。纯函数形式便于自检直接喂合成输入。 */
+const declarationsProblem = (list, declaredSlots) => {
+  if (!Array.isArray(list)) return 'clientSlots.declarations 不是数组（声明面判据会整段消失）'
+  if (list.length === 0) {
+    return 'clientSlots.declarations 为空 —— §4b 声明面判据会整段静默消失（空声明集不等于「没有漂移」）'
+  }
+  // 非空下限之外再钉规模关系：§4 登记的槽位里凡有声明文件的，都该出现在 declarations 里。
+  // 只要求「declarations 里的项都在 slots 里」，不要求反向全等：有些槽的上游声明文件不在
+  // 当前 checkout（CI/自包含树），规模关系只在能核对的方向上成立。
+  const slotSet = new Set(Array.isArray(declaredSlots) ? declaredSlots : [])
+  const unknown = list.filter((d) => !slotSet.has(d.slot)).map((d) => d.slot)
+  if (unknown.length > 0) {
+    return 'clientSlots.declarations 里有未在 clientSlots.slots 登记的槽：' + unknown.join(', ')
+  }
+  return null
+}
+const declProblem = declarationsProblem(declarations, contract.clientSlots.slots)
+if (declProblem !== null) fail(declProblem)
+{
   console.log('== 4b. 槽位声明面（上游 kind/scope 与实测值一致；防升级静默失效） ==')
-  for (const d of contract.clientSlots.declarations) {
+  // declarations 非数组已由上面的判据判红（不再是「整段消失」），这里只做遍历；
+  // 数组为空时下面的 for 不执行，但判据已在上面报过红，不存在「静默通过」。
+  for (const d of Array.isArray(declarations) ? declarations : []) {
     const declFile = join(root, contract.upstreamRepo, d.file)
     if (!existsSync(declFile)) {
       skip('上游声明文件不在场: ' + d.file + '（只读 checkout；CI/自包含树不含）——槽 ' + d.slot + ' 未执行')
@@ -849,12 +878,46 @@ console.log('== 9. 人读契约文档与登记表同源（G-8：它会误导开�
   }
 }
 
+/**
+ * issue #1114：依赖树缺席时默认 exit 2（硬失败），只有显式传它才以 0 结案。
+ *
+ * 谁该传：`--self-test` 的对照组（它验的是**判据逻辑**，不是「上游树就绪」）、以及
+ * 任何确实处在「依赖尚未就绪」合法阶段的调用点。构建链与发版链**一律不传** ——
+ * 那两条链的前提就是上游树已在场，缺席必须当场暴露而不是静默结案。
+ */
+const ALLOW_MISSING = argv.includes('--allow-missing')
+
 if (skipped > 0) console.log('SKIP=' + skipped)
+
+/**
+ * issue #1114：依赖树缺席 ≠ 通过。
+ *
+ * 旧行为：上游声明文件不在场时只打一条 `SKIP(#n)` 就继续，最后照样 `CONTRACT PASS`。
+ * 于是「槽位声明面」这整段在干净 checkout 里**从未被执行过**，却一直报绿。
+ *
+ * 三态必须可区分（与 check-dead-tokens.mjs 同口径）：
+ *   0 = 判据跑了且通过；1 = 判据跑了且不通过；2 = 判据没跑（依赖缺席）。
+ *
+ * 例外：`softSkip` 记的是**自包含树里协调仓独有输入**的合法缺席（APK_SELF_CONTAINED），
+ * 那类不计入 hardSkip —— 它是「这一侧本来就不负责这条判据」，不是「该验却没验」。
+ */
 if (issues.length > 0) {
   console.error('')
   console.error('CONTRACT FAIL (' + issues.length + '):')
   for (const i of issues) console.error('  - ' + i)
   process.exit(1)
+}
+if (hardSkip > 0) {
+  if (!ALLOW_MISSING) {
+    console.error('')
+    console.error('CONTRACT DEPENDENCY-ABSENT (' + hardSkip + ' 处判据未执行):')
+    console.error('  上游树（' + contract.upstreamRepo + '）不在场，' + hardSkip + ' 个槽位声明面没被核对。')
+    console.error('  这不是通过，也不是被测对象有缺陷 —— 是「本次没验」。')
+    console.error('  请先拉取上游树，或在确实无法拉取的场合显式传 --allow-missing 声明接受。')
+    process.exit(2)
+  }
+  console.error('')
+  console.error('CONTRACT SKIPPED（--allow-missing：调用方已显式接受 ' + hardSkip + ' 处判据未执行）')
 }
 console.log('')
 console.log('CONTRACT PASS（SKIP=' + skipped + '）')
@@ -877,6 +940,12 @@ function runContractSelfTest() {
     { label: '对照组：现状登记表必须全绿', expect: null },
     { label: '§0 树身份判红：登记的 commit 不是树上的 commit', mutate: c => { c.upstream.commit = 'aa00000000000000000000000000000000000000' }, expect: /≠ 登记 commit/ },
     { label: '§4b 声明面判红：把某槽登记的 kind 改成单值', mutate: c => { c.clientSlots.declarations[0].kind = 'single' }, expect: /声明漂移/ },
+    /* ── issue #1021：空集恒真（判据整段被条件包住，空输入时静默消失）────────────────
+     * 旧实现在 declarations 为空时**整段不执行**，门禁照打 CONTRACT PASS 且 SKIP 计数变小。
+     * 这两条负控要证明的是「清空之后仍然判红」，且理由点的是 §4b 的声明面本身。 */
+    { label: '#1021 声明面清空 → 判红（不得整段静默消失）', mutate: c => { c.clientSlots.declarations = [] }, expect: /declarations 为空/ },
+    { label: '#1021 声明面不是数组 → 判红（不得静默降级成空集）', mutate: c => { c.clientSlots.declarations = null }, expect: /不是数组/ },
+    { label: '#1021 声明面登记了未在 slots 里的槽 → 判红（规模关系）', mutate: c => { c.clientSlots.declarations.push({ slot: 'zzz.selftest.unregistered', file: 'nowhere', kind: 'list', scope: 'root' }) }, expect: /未在 clientSlots\.slots 登记/ },
     { label: '§4c 反向判红：登记集漏一条（上游实有 = 未登记的槽）', mutate: dropSlot, expect: /上游长出未登记的槽/ },
     { label: '§4c 反向判红：登记集多一条（上游已无 = 静默落空）', mutate: fakeSlot, expect: /上游删除了已登记的槽/ },
     { label: '§4c 反向判红：登记的 kind 与上游声明不一致', mutate: c => { c.clientSlots.upstreamUniverse.entries.find(e => e.slot === 'settings.section').kind = 'chain' }, expect: /kind\/scope 漂移/ },
@@ -957,8 +1026,11 @@ function runContractSelfTest() {
     // 于是「消费了未登记」这类反例不需要动仓库源码。
     const sPath = kase.slotsSource === undefined ? null : join(scratch, 'slots-' + i + '.ts')
     if (sPath !== null) writeFileSync(sPath, kase.slotsSource(c))
+    /* --allow-missing：自证验的是**判据逻辑**，不是「上游树就绪」。
+     * issue #1114 之后，依赖缺席会让门禁 exit 2 —— 若不传它，缺上游 checkout 的布局里
+     * 全部用例都会因 exit 2 而"红"，自证就变成在测环境而不是测判据。 */
     const r = spawnSync(process.execPath,
-      [gateFile, '--contract', cPath, '--profile', pPath, ...(dPath === null ? [] : ['--doc', dPath]), ...(sPath === null ? [] : ['--slots-source', sPath]), ...(kase.extra ?? [])],
+      [gateFile, '--contract', cPath, '--profile', pPath, '--allow-missing', ...(dPath === null ? [] : ['--doc', dPath]), ...(sPath === null ? [] : ['--slots-source', sPath]), ...(kase.extra ?? [])],
       { encoding: 'utf8' })
     const out = (r.stdout ?? '') + (r.stderr ?? '')
     const firstFail = (out.split(/\r?\n/).find(l => /^\s+FAIL/.test(l)) ?? '').trim()

@@ -297,9 +297,17 @@ export async function removeSession(ctx, sessionId) {
 }
 
 /**
- * Map a failure onto an HTTP status.
+ * Map a failure onto an HTTP status and the fields the client is allowed to see.
+ *
+ * issue #983：`already-quarantined` 必须把隔离件路径带到回包里。客户端要靠它显示
+ * 「文件仍在、可恢复」的证据；不透传时客户端读不到 `reason.paths`，只能渲染
+ * 「已隔离到：（文件仍在，可恢复）」这种**空路径的成功横幅**。
+ *
+ * 只有这一个码外带字段：别的错误码把内部 details 漏给前端既无用处，又会让客户端
+ * 误以为「有路径 = 已隔离」。
+ *
  * @param {unknown} error - thrown value.
- * @returns {{ status: number, code: string, message: string }}
+ * @returns {{ status: number, code: string, message: string, paths?: string[] }}
  */
 function failureOf(error) {
   const code = error instanceof SessionDeleteError ? error.code : 'delete-failed'
@@ -308,7 +316,13 @@ function failureOf(error) {
     : code === 'not-found' ? 404
       : code === 'session-active' || code === 'activity-unknown' || code === 'unload-failed' || code === 'already-quarantined' || code === 'ambiguous' ? 409
         : 500
-  return { status, code, message: String(error?.message ?? error) }
+  const failure = { status, code, message: String(error?.message ?? error) }
+  if (code === 'already-quarantined') {
+    const paths = error instanceof SessionDeleteError ? error.details?.paths : undefined
+    // 一定是数组（可为空）：客户端据「有没有路径」决定用带路径文案还是降级文案。
+    failure.paths = Array.isArray(paths) ? paths.filter((entry) => typeof entry === 'string' && entry !== '') : []
+  }
+  return failure
 }
 
 /**
@@ -387,7 +401,10 @@ export function apply(ctx) {
           message: failure.message,
           ms: Date.now() - startedAt,
         })
-        sendJson(res, failure.status, { ok: false, error: failure.code, message: failure.message })
+        const payload = { ok: false, error: failure.code, message: failure.message }
+        // issue #983：只有 already-quarantined 带 paths（见 failureOf）。
+        if (failure.paths !== undefined) payload.paths = failure.paths
+        sendJson(res, failure.status, payload)
       }
     },
   })

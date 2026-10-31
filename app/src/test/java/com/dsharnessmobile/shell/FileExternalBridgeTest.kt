@@ -312,4 +312,40 @@ class FileExternalBridgeTest {
     assertEquals("页面给了就用页面的", "image/heic",
       FileExternalBridge.effectiveMime("image/heic", "a.weird"))
   }
+
+
+  // ── issue #978：data 与 type 必须一次设好 ────────────────────────────────────
+  //
+  // 判据形态说明（为什么是源码级而不是行为级）：**本仓 JVM 单测拿不到真实的 Intent**。
+  // unitTests.isReturnDefaultValues = true 把 android.* 打桩成默认值，实测
+  // setDataAndType(uri, "image/jpeg") 之后 getData() 与 getType() **都返回 null**
+  // （本文件实测输出：PROBE data=null type=null）。所以「构造 Intent 再断言 data/type」
+  // 这种写法会恒真或恒假，属于假绿温床。这里改用源码级判据，并显式标注它不是行为证据。
+
+  @Test
+  fun `data 与 type 必须用 setDataAndType 一次设好，不得先 data 后 type`() {
+    val code = codeOnly(source("FileExternalBridge.kt"))
+    val body = code.substringAfter("internal fun toIntent(").substringBefore("internal fun chooser(")
+    // Android 的既定行为：setType() 清 data、setData() 清 type。
+    assertTrue("带 data + type 时必须用 setDataAndType（一次设好），否则后者清掉前者",
+      body.contains("setDataAndType("))
+    // 反向：不得退化成「先 data 后 type」的两次调用形态（正是缺陷本体）。
+    val dataAt = body.indexOf("intent.data = ")
+    val typeAt = body.indexOf("intent.type = ")
+    val combined = body.contains("setDataAndType(")
+    assertFalse("不得同时保留「先 data 后 type」的两次赋值路径",
+      dataAt >= 0 && typeAt >= 0 && typeAt > dataAt && combined &&
+        Regex("spec\\.dataUri != null && spec\\.type != null").containsMatchIn(body).not())
+  }
+
+  @Test
+  fun `只有 data 或只有 type 时仍要各自设上`() {
+    // 反向判据：修复不得变成「只支持 data+type 同时在场」。只带其一的意图仍然必须设置。
+    val code = codeOnly(source("FileExternalBridge.kt"))
+    val body = code.substringAfter("internal fun toIntent(").substringBefore("internal fun chooser(")
+    assertTrue("只有 dataUri 时仍须设 data", body.contains("intent.data = android.net.Uri.parse(it)") ||
+      Regex("spec\\.dataUri != null -> intent\\.data =").containsMatchIn(body))
+    assertTrue("只有 type 时仍须设 type",
+      Regex("spec\\.type != null -> intent\\.type =").containsMatchIn(body))
+  }
 }

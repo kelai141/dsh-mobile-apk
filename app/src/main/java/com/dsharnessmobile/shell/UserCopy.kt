@@ -153,10 +153,14 @@ internal object UserCopy {
    * @param toolCount - 本轮工具调用次数。
    * @returns 元信息行；时长未知时只含工具数。
    */
-  fun reportMetaLine(durationLabel: String, toolCount: Int, app: android.content.Context? = null): String {
+  fun reportMetaLine(durationLabel: String, toolCount: Int, app: android.content.Context? = null): String =
+    reportMetaLine(durationLabel, toolCount, UiText.isEnglish(app))
+
+  /** 同一张表，语言已解析（#986：纯函数入口，JVM 单测能覆盖英文分支）。 */
+  fun reportMetaLine(durationLabel: String, toolCount: Int, english: Boolean): String {
     val parts = ArrayList<String>(2)
-    if (durationLabel.isNotBlank()) parts.add(UiText.t(app, "用时 $durationLabel", "Duration $durationLabel"))
-    parts.add(UiText.t(app, "工具 ×$toolCount", "Tools ×$toolCount"))
+    if (durationLabel.isNotBlank()) parts.add(UiText.t(english, "用时 $durationLabel", "Duration $durationLabel"))
+    parts.add(UiText.t(english, "工具 ×$toolCount", "Tools ×$toolCount"))
     return parts.joinToString(" · ")
   }
 

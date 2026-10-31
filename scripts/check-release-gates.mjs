@@ -26,6 +26,37 @@ const argOf = (name) => { const i = argv.indexOf('--' + name); return i >= 0 ? a
 const rel = (p) => relative(ROOT, p).replace(/\\/g, '/')
 
 /**
+ * 模式互斥（issue #1052 ④）。
+ *
+ * 旧实现里 --list 与 --self-test 都在 --run 分支**之前**短路并 process.exit(0)：
+ * `--run --list` 与 `--run --self-test` 于是**零执行 exit 0** —— 一次什么都没跑的成功。
+ * 现在这类组合直接判用法错误（exit 2），不再静默降级。
+ */
+const MODE_FLAGS = ['--list', '--self-test'].filter((f) => argv.includes(f))
+if (RUN && MODE_FLAGS.length > 0) {
+  console.error('CHECK-RELEASE-GATES 用法错误：--run 不能与 ' + MODE_FLAGS.join(' / ') + ' 同时使用'
+    + '（旧实现会零执行并 exit 0，等于一次什么都没跑的成功）')
+  process.exit(2)
+}
+/**
+ * --only <门禁名>[,…]（issue #1052 ③）。
+ *
+ * 旧实现**从未解析**它：grep --only 在脚本里出现 0 次，于是
+ * `--run --only check-dead-tokens.mjs` 会跑全部门禁且不报错，`--only <不存在的名字>` 同样静默。
+ * 现在：只在 --run 档生效；解析成集合；集合里出现未声明的名字 → 用法错误；
+ * 指定了 --only 但最终没有任何门禁被选中 → 判红（零执行不得当成功）。
+ */
+const ONLY_RAW = argOf('only')
+const ONLY_SET = ONLY_RAW === undefined
+  ? null
+  : new Set(String(ONLY_RAW).split(',').map((s) => s.trim()).filter(Boolean))
+if (ONLY_SET !== null && !RUN) {
+  // --only 只在 --run 档有意义；静态档给 --only 是调用方搞错了（旧实现两种档都静默忽略）。
+  console.error('CHECK-RELEASE-GATES 用法错误：--only 只在 --run 档有意义（静态档不执行任何门禁）')
+  process.exit(2)
+}
+
+/**
  * 2026-10-28 政策：构建脚本以 dsh-mobile-apk 为准，协调仓副本只作历史回退，字节差异属正常。
  * 本判据只守三件事：
  *   1. 协调仓布局下父入口真的委派 APK canonical（参数 / 退出码透传）；
@@ -227,6 +258,19 @@ const GATES = [
   // It also runs before packaging; needsSnapshot=false because it reads the tree and docs only.
   // The APK workflow invokes this gate after Kotlin compilation and before package checks.
   { script: 'check-code-map.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
+  // APK 产物形态门禁（0.14.11）：最终产物 badging 不得含独立行 `application-debuggable`。
+  // 缺的判据（0.14.9 实测）：整条链跑 `:app:assembleDebug`，而 app/build.gradle.kts 里 debug/release
+  // **共用** signingConfigs.repoDebug —— 发布产物本质是 debug 变体（badging 第 112 行即
+  // `application-debuggable`，应用可被任意调试器 attach），而签名门禁只看 v1/v2/v3 + 证书身份，
+  // 对此**完全无感**：一份签名完全正确的 debug 变体照样全绿。两条判据同属「交付字节的属性」，
+  // 故接线口径也一致：都在两条构建链的最终产物关口跑。
+  // 归属：输入是**最终 APK**（out/v<ver>/*.apk）。pr-gate 的 CI 不产出 APK，硬接只会得到一个
+  // 永久 SKIP 或以空集冒充通过，故 ciApk/ciCoord 皆 false（与 check-apk-signatures.mjs 同一归属：
+  // 产物面门禁只跑在拥有其输入的构建链上）。
+  // releaseSink:false —— 发布链的 2f 段（--run --require）跑在 APK 构建**之前**，那时 out/ 里还没有
+  // 本次产物；在那里跑它验的是上一次构建的残留甚至空集（与 check-snapshot-decode.mjs 同一时序陷阱）。
+  // 真实执行点是两条构建链的「最终产物」关口（build-apk-engine.mjs verify 的形态段），sink 断言会核验它。
+  { script: 'check-apk-form.mjs', ciApk: false, ciCoord: false, needsSnapshot: false, releaseSink: false, sink: 'local-chain' },
   // MCP client 运行期依赖闭包（0.14.2-fx-2 H-1）：真实用户诊断包 engine.log:138 六世代全崩在
   // `Cannot find package '@modelcontextprotocol/client'`——它**不在我们装配的行面上**（用户自己挂的
   // entry），故 check-engine-overlay 的正向闭包结构性看不见它。判据 = 宿主包运行期依赖的**闭包**
@@ -248,6 +292,27 @@ const ALL_GATES = GATES.map((g) => g.script)
 //     且下方断言会核验该接管方真的调用了它（否则就是「移出去就没人跑」= 静默降级防线）。
 // 声明集合本身不变（33 项）：check-gate-skips 仍逐项要求两条构建链调用，故「移出发布段」不等于「移出防线」。
 const RELEASE_GATES = GATES.filter((g) => g.releaseSink !== false).map((g) => g.script)
+/**
+ * 支持 --require 严格档、且在发布段（--run）会跑的门禁（issue #1052 ⑤）。
+ *
+ * 旧实现的白名单是内联的 6 项：其中 check-tool-output-schema 是 releaseSink:false（永不进发布段）
+ * ⇒ 死条目；而 5 个真的实现了 --require 的门禁从不收到它。这里把它提成常量，并加两条断言：
+ *   · 白名单里每一项都必须在声明集合里，且 releaseSink !== false（不许有死条目）；
+ *   · 凡源码里出现了 --require 解析的声明门禁，都必须在白名单里（不许漏项）。
+ * 断言由 check-gate-skips.mjs 一并守（它读本文件的 argvFor.push('--require') 机制）。
+ */
+const REQUIRE_CAPABLE_GATES = new Set([
+  'check-snapshot-fingerprint.mjs',
+  'check-perf-instrumentation.mjs',
+  'check-snapshot-secrets.mjs',
+  'check-contract.mjs',
+  'check-dead-tokens.mjs',
+  'check-api-route-auth.mjs',
+  'check-build-chain-abort.mjs',
+  'check-engine-heap-floor.mjs',
+  'check-i18n-parity.mjs',
+  'check-boot-budget.mjs',
+])
 const RELEASE_EXCLUDED = GATES.filter((g) => g.releaseSink === false)
 /**
  * sink 类型表（下沉门的接管方在哪、是否依赖 apk 树）。
@@ -280,13 +345,24 @@ if (argv.includes('--list')) {
     const note = g.script === 'check-boot-budget.mjs' ? '  [真检需 --require-real + 设备产物；见详档 §5.1]' : ''
     // G.3：下沉门在清单里显式标出「不进发布 --run 段」及其接管方，避免「看着在清单里其实没人跑」。
     const sink = g.releaseSink === false ? '  [下沉->' + g.sink + '；不进发布 --run]' : ''
-    console.log(g.script.padEnd(34) + (g.ci ? 'CI+构建' : '仅构建/发布') + (g.needsSnapshot ? ' 需要快照' : '') + note + sink)
+    // issue #1052 ⑥：此前读的是不存在的 g.ci（38/38 条目只有 ciApk/ciCoord），于是 38 行全部
+    // 打印「仅构建/发布」，而实际 29 个 ciApk:true —— AGENTS.md §5.2 说「门禁项数一律用 --list 现数」，
+    // 这一列此前不可用。现按真实字段分档，并标出协调仓侧覆盖。
+    const ciLabel = g.ciApk && g.ciCoord ? 'CI(apk+coord)' : g.ciApk ? 'CI(apk)' : g.ciCoord ? 'CI(coord)' : '仅构建/发布'
+    console.log(g.script.padEnd(34) + ciLabel.padEnd(15) + (g.needsSnapshot ? ' 需要快照' : '') + note + sink)
   }
   console.log('-- 发布链 --run 段实际执行: ' + RELEASE_GATES.length + ' / 声明 ' + GATES.length + ' 项；下沉 ' + RELEASE_EXCLUDED.length + ' 项')
   process.exit(0)
 }
 
 const failures = []
+/**
+ * issue #1052 ②：静态档必须核验声明集合里的脚本真的存在。
+ *
+ * 旧实现只在 --run 档才发现脚本缺席（MODULE_NOT_FOUND +「退出码 1，中止组装」），而 CI 跑的是
+ * 静态档 —— 删掉 scripts/check-dead-tokens.mjs 后静态档仍 PASSED exit 0。
+ * 注意 ALL_GATES 在下方（:238）才定义，故这里先算后判（判点放到 readOrFail 之后）。
+ */
 const check = (label, ok, detail) => {
   console.log((ok ? 'PASS  ' : 'FAIL  ') + label + (ok || detail === undefined ? '' : ' -> ' + detail))
   if (!ok) failures.push(label)
@@ -301,6 +377,46 @@ const readOrFail = (p) => {
   if (!hit) { check('接线面存在: ' + p, false, '文件缺席（协调仓根与 apk 仓根布局均未命中）'); return null }
   return readFileSync(join(ROOT, hit), 'utf8')
 }
+
+/**
+ * 「接管方真的会执行这条门禁」的判据（纯函数）。
+ *
+ * issue #1052 ①：旧判据是 text.includes(script) —— 注释里的名字同样满足，于是把
+ * pr-gate.yml 的步骤换成注释后仍然 PASSED。这里按文件类型只认真正的执行形态，并跳过注释行：
+ *   - .yml / .ps1：行内 `node ... scripts/<gate>`，且该行不是注释（# / // / <!--）
+ *   - .mjs      ：`gate('<gate>')`，或 spawn/execFile 一类调用里带 'scripts/<gate>'
+ *
+ * @param {string} text 接管方文件全文
+ * @param {string} script 门禁文件名（如 check-plugin-tests.mjs）
+ * @param {string} relPath 接管方相对路径（决定按哪种语法判）
+ * @returns {boolean}
+ */
+export function sinkCallsGate(text, script, relPath) {
+  const escaped = script.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const isNode = String(relPath).endsWith('.mjs')
+  for (const raw of String(text).split(/\r?\n/)) {
+    const line = raw.trim()
+    if (line === '' || line.startsWith('#') || line.startsWith('//') || line.startsWith('<!--')) continue
+    if (isNode) {
+      if (new RegExp("gate\\(\\s*['\"]" + escaped + "['\"]\\s*\\)").test(line)) return true
+      if (new RegExp("['\"][^'\"]*" + escaped + "['\"]").test(line) && /(spawn|execFile|execSync|run\()/.test(line)) return true
+    } else if (new RegExp('(^|[\\s=&-])node\\s+[^\\n]*' + escaped).test(line)) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * issue #1052 ②：静态档必须核验声明集合里的脚本**真的在场**。
+ *
+ * 旧实现只在 --run 档才会撞上脚本缺席（MODULE_NOT_FOUND +「退出码 1，中止组装」），
+ * 而 CI 跑的是静态档 —— 删掉 scripts/check-dead-tokens.mjs 后静态档仍 PASSED exit 0。
+ * 本 PR 实测：删文件 -> 新行为 FAILED 并点名缺哪一条。
+ */
+const missingDeclaredScripts = ALL_GATES.filter((g) => !existsSync(join(ROOT, 'scripts', g)))
+check('声明集合里的门禁脚本全部在场（' + ALL_GATES.length + ' 项）',
+  missingDeclaredScripts.length === 0, '缺: ' + missingDeclaredScripts.join(', '))
 
 // ── 1. 接线面（§8.3 C 的五位置 + apk 仓同版）────────────────────────────────
 const POSITIONS = [
@@ -559,9 +675,12 @@ const LIB_NO_CONSUMER_ALLOW = {
       continue
     }
     const text = readFileSync(sinkPath, 'utf8')
-    // 接管方必须真的点名这条门禁（CI 里是 `node scripts/check-x.mjs`；链里是 gate('check-x.mjs')）
-    check('下沉门被接管方调用: ' + g.script + ' @ ' + g.sink, text.includes(g.script),
-      '在 ' + rel(sinkPath) + ' 中找不到 ' + g.script + ' —— 移出发布链却无人接管 = 防线静默消失')
+    // issue #1052 ①：判据从「全文含这个文件名」改成「真的有一个执行点」。
+    // 旧实现用 text.includes(g.script)：把 workflow 里那一行换成注释
+    // （`# node scripts/check-plugin-tests.mjs (DISABLED)`）后仍然 PASSED —— 注释即满足。
+    check('下沉门被接管方调用: ' + g.script + ' @ ' + g.sink, sinkCallsGate(text, g.script, kind.rel),
+      '在 ' + rel(sinkPath) + ' 中找不到 ' + g.script + ' 的真实执行点（注释/文案里的名字不算）'
+      + ' —— 移出发布链却无人接管 = 防线静默消失')
   }
 }
 
@@ -591,12 +710,35 @@ if (!mjsGates) {
     '仅本地链: [' + onlyPs1.join(', ') + ']；仅云端链: [' + onlyMjs.join(', ') + ']')
 }
 
+// ── 3c. 严格档白名单一致性（issue #1052 ⑤）───────────────────────────────────
+// 死条目：白名单里有、但它根本不在发布段（releaseSink:false）或压根没声明。
+const deadRequireEntries = [...REQUIRE_CAPABLE_GATES].filter((g) => !RELEASE_GATES.includes(g))
+check('严格档白名单无死条目（' + REQUIRE_CAPABLE_GATES.size + ' 项）', deadRequireEntries.length === 0,
+  '不在发布段/未声明: ' + deadRequireEntries.join(', '))
+// 漏项：声明集合里凡源码解析了 --require 的门禁都必须在白名单里。
+const requireParsers = ALL_GATES.filter((g) => {
+  const abs = join(ROOT, 'scripts', g)
+  if (!existsSync(abs)) return false
+  return /argv\.includes\('--require'\)|argv\.includes\("--require"\)/.test(readFileSync(abs, 'utf8'))
+})
+const missedRequire = requireParsers.filter((g) => !REQUIRE_CAPABLE_GATES.has(g) && RELEASE_GATES.includes(g))
+check('严格档白名单无漏项（声明集合里解析 --require 的 ' + requireParsers.length + ' 项）', missedRequire.length === 0,
+  '实现了 --require 却没进白名单: ' + missedRequire.join(', '))
+
 if (!RUN) {
   if (failures.length > 0) {
     console.error('CHECK-RELEASE-GATES FAILED（' + failures.length + ' 项接线缺口）：' + failures.join('；'))
     process.exit(1)
   }
-  console.log('CHECK-RELEASE-GATES PASSED（静态接线断言；声明门禁集 ' + ALL_GATES.length + ' 项）')
+  // SKIP 纪律（issue #1026）：静态档也会打印 SKIP(#n)（布局降级），必须给出合计；
+  // 且严格档（--require）下这些 SKIP 必须判红 —— 否则「发布链 SKIP=0」对静态档完全失效
+  // （实测：`check-release-gates.mjs --require` 会打印 SKIP(#1) 并 exit 0）。
+  console.log('SKIP=' + staticSkipTotal + ' 合计（静态档：布局降级计数）')
+  if (argv.includes('--require') && staticSkipTotal > 0) {
+    console.error('CHECK-RELEASE-GATES FAILED：--require 档下不得以 SKIP 结案（静态档降级 ' + staticSkipTotal + ' 处）')
+    process.exit(1)
+  }
+  console.log('CHECK-RELEASE-GATES PASSED（静态接线断言；声明门禁集 ' + ALL_GATES.length + ' 项；SKIP=' + staticSkipTotal + '）')
   process.exit(0)
 }
 
@@ -611,7 +753,23 @@ const abis = ['arm64', 'x86_64'].filter((abi) => {
   if (snapshotDir) return existsSync(join(resolve(snapshotDir), 'snapshot-' + abi + '.tar.xz'))
   return existsSync(join(ROOT, '.deploy-tmp', 'snapshot-013', abi, 'snapshot.tar.xz'))
 })
-console.log('发布门禁集（--run 段 ' + RELEASE_GATES.length + ' 项；声明 ' + GATES.length + ' 项，下沉 ' + RELEASE_EXCLUDED.length + ' 项）：' + RELEASE_GATES.join(' → '))
+// issue #1052 ③：--only 选择集（未指定 = 全量）。未声明的名字是用法错误，不静默。
+let RUN_GATES = RELEASE_GATES
+if (ONLY_SET !== null) {
+  const unknown = [...ONLY_SET].filter((name) => !ALL_GATES.includes(name))
+  if (unknown.length > 0) {
+    console.error('CHECK-RELEASE-GATES 用法错误：--only 里出现未声明的门禁：' + unknown.join(', ')
+      + '  声明集合见 node scripts/check-release-gates.mjs --list')
+    process.exit(2)
+  }
+  RUN_GATES = RELEASE_GATES.filter((g) => ONLY_SET.has(g))
+  if (RUN_GATES.length === 0) {
+    console.error('CHECK-RELEASE-GATES FAILED：--only 没有选中任何门禁（本次零执行不得当成功）')
+    process.exit(1)
+  }
+  console.log('--only 生效：本次只跑 ' + RUN_GATES.length + ' 项（' + RUN_GATES.join(', ') + '）')
+}
+console.log('发布门禁集（--run 段 ' + RUN_GATES.length + ' 项；声明 ' + GATES.length + ' 项，下沉 ' + RELEASE_EXCLUDED.length + ' 项）：' + RUN_GATES.join(' → '))
 for (const g of RELEASE_EXCLUDED) {
   console.log('下沉(不进发布 --run)  ' + g.script + ' -> ' + g.sink + '（输入非发布产物；由接管方真检，见 3a-2 断言）')
 }
@@ -675,13 +833,18 @@ function writeGateTimings(outcome) {
   }
 }
 const snapshotTar = (abi) => join(resolve(snapshotDir), 'snapshot-' + abi + '.tar.xz')
-for (const gate of RELEASE_GATES) {
+for (const gate of RUN_GATES) {
   const argvFor = [join('scripts', gate)]
   // 严格档（发布链 --require）：凡支持 --require 的门禁一律传，SKIP 即失败（ST-31：发布链 SKIP=0）。
   // check-tool-output-schema 自 0.14.1 W1 起支持 --require：宿主缺 peer 依赖（净检出无 node_modules 的
   // 必然后果）在严格档下判红——此前该情形是**未捕获异常直接终止进程**，聚合链在第 6 条就死，
   // 后面 20 多条一条没跑，而没有任何一层把它报成失败。
-  if (STRICT && ['check-snapshot-fingerprint.mjs', 'check-perf-instrumentation.mjs', 'check-snapshot-secrets.mjs', 'check-contract.mjs', 'check-tool-output-schema.mjs', 'check-dead-tokens.mjs'].includes(gate)) argvFor.push('--require')
+  // issue #1052 ⑤：白名单此前 6 项，其中 check-tool-output-schema 是 releaseSink:false（永不进发布段）
+  // ⇒ 死条目；同时 5 个**真的实现了 --require 且在发布段跑**的门禁从不收到它
+  // （check-api-route-auth 只在快照分支收到、check-boot-budget 有专用分支、check-build-chain-abort /
+  // check-engine-heap-floor / check-i18n-parity 完全收不到）。白名单现在由常量 REQUIRE_CAPABLE_GATES
+  // 提供，并有一致性断言（声明集合里凡是实现了 --require 的都必须在内；白名单里不许有死条目）。
+  if (STRICT && REQUIRE_CAPABLE_GATES.has(gate)) argvFor.push('--require')
   // 冷启动预算（0.14.1 块F P0-2）：真检需要**设备原始产物**（boot-segments.log + 引擎探针输出），
   // 冷启动预算（0.14.1 块F P0-2）：**不再强制 --self-test**。默认档会先找设备真产物
   // （`--segments/--probe` > `DSH_BOOT_SEGMENTS`/`DSH_BOOT_PROBE` > `.deploy-tmp/boot-budget/`）：
@@ -694,7 +857,9 @@ for (const gate of RELEASE_GATES) {
   // build-apk-engine.mjs assemble 复制进去才有；本聚合入口若在那段跑，验的是**上一次**构建的残留。
   // 故：严格档显式要求内嵌资产在场（缺席即判红，不得以 SKIP 结案）；非严格档按其自身计数 SKIP。
   if (gate === 'check-boot-budget.mjs') {
-    runGate([join('scripts', gate)], gate + '(real-or-skip)')
+    // issue #1052 ⑤：本门禁解析 --require（严格档下 SKIP 即判红），专用分支此前**一个参数都不传**，
+    // 于是发布链的严格档对它完全失效。现在按 STRICT 透传。
+    runGate([join('scripts', gate), ...(STRICT ? ['--require'] : [])], gate + '(real-or-skip)')
     ran += 1
     console.log('PASS  ' + gate + '（真实数据来源：设备产物优先真检；无产物则 SKIP + self-test 自证，不算绿。'
       + '发布前设备门禁请显式跑 --require-real）')

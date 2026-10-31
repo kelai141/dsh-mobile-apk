@@ -11,6 +11,18 @@ import org.json.JSONObject
 
 /** One bounded model request. It never opens a browser, Node process, or engine dependency. */
 internal class RepairModelClient {
+  /** anthropic 分支的 token 常量（issue #1015；详见 [anthropicTokenPlan]）。 */
+  internal companion object {
+    /** 不留思考预算时（effort=off/null）的回复上限。与原硬写值一致，保持既有行为不变。 */
+    const val ANTHROPIC_MAX_TOKENS_DEFAULT = 8192
+
+    /** 思考预算之外留给正式回答的空间：只留 budget+1 会让回答被截断。 */
+    const val ANTHROPIC_OUTPUT_HEADROOM = 8192
+
+    /** 回复上限的天花板：防止高档位把 max_tokens 推到端点拒绝的数值。 */
+    const val ANTHROPIC_MAX_TOKENS_CEILING = 32768
+  }
+
   private val active = AtomicReference<HttpURLConnection?>(null)
   @Volatile internal var lastOutboundDigest: String = ""
     private set
@@ -169,11 +181,16 @@ internal class RepairModelClient {
       anthTools.put(JSONObject().put("name", t.getString("name")).put("description", t.optString("description"))
         .put("input_schema", t.optJSONObject("parameters")))
     }
-    val body = JSONObject().put("model", connection.model).put("max_tokens", 8192)
+    // issue #1015：max_tokens 与 budget_tokens 必须是**同一个约束下的两个值**，不能各写一张表。
+    // Anthropic 协议要求 budget_tokens **严格小于** max_tokens；旧实现把 max_tokens 硬写成 8192，
+    // 而 effortBudget 的 high=8192 / xhigh,max=16384 ⇒ 这三档必然违规，端点回 400。
+    // 现在由 anthropicTokenPlan() 一处决定二者，从结构上消除「两张表互相不知道」的可能。
+    val plan = anthropicTokenPlan(effort)
+    val body = JSONObject().put("model", connection.model).put("max_tokens", plan.maxTokens)
       .put("messages", converted).put("tools", anthTools)
     if (system.isNotBlank()) body.put("system", system.toString())
-    if (effort != null && effort != "off") {
-      body.put("thinking", JSONObject().put("type", "enabled").put("budget_tokens", effortBudget(effort)))
+    if (plan.budgetTokens != null) {
+      body.put("thinking", JSONObject().put("type", "enabled").put("budget_tokens", plan.budgetTokens))
     }
     return body.toString()
   }
@@ -205,6 +222,41 @@ internal class RepairModelClient {
     }
   }
 
+  /**
+   * anthropic 分支要发的两个 token 参数（issue #1015）。
+   *
+   * [maxTokens] 是回复上限，[budgetTokens] 是思考预算；**不变量：budgetTokens 恒小于 maxTokens**。
+   * null 表示本档不启用思考（effort 为 null / "off"）。
+   */
+  internal data class AnthropicTokenPlan(val maxTokens: Int, val budgetTokens: Int?)
+
+  /**
+   * 由推理档位算出「合法的」max_tokens + budget_tokens（issue #1015）。
+   *
+   * 缺陷现场：旧实现把 max_tokens 硬写成 8192，而思考预算另有一张 fixed 表
+   * （high=8192、xhigh/max=16384），两张表互不知道对方 ⇒ high 档 budget==max、
+   * xhigh/max 档 budget>max，二者都违反 Anthropic「budget_tokens 必须严格小于 max_tokens」，
+   * 端点直接回 400。而真实配置把 reasoningEffort 默认 pin 成 max，所以打开助手即中招。
+   *
+   * 修法不是「把 8192 调大」——那只是把冲突推给下一个更高的档位。这里改成**单一真源**：
+   * 先按档位定思考预算，再由「预算 + 预留输出」推出 max_tokens，二者永远满足约束。
+   * `ANTHROPIC_OUTPUT_HEADROOM` 是留给正式回答的空间：思考用完预算后还要输出结果，
+   * 只把 max_tokens 设成 budget+1 会让回复被截断。
+   *
+   * @return maxTokens 恒 > budgetTokens（有预算时）；无预算时 budgetTokens 为 null。
+   */
+  internal fun anthropicTokenPlan(effort: String?): AnthropicTokenPlan {
+    if (effort == null || effort == "off") {
+      return AnthropicTokenPlan(maxTokens = ANTHROPIC_MAX_TOKENS_DEFAULT, budgetTokens = null)
+    }
+    val budget = effortBudget(effort)
+    val max = (budget + ANTHROPIC_OUTPUT_HEADROOM).coerceAtMost(ANTHROPIC_MAX_TOKENS_CEILING)
+    // 上限夹紧后仍必须满足「严格小于」：极高档位撞到 ceiling 时把预算压回 max-1。
+    val safeBudget = if (budget < max) budget else (max - 1).coerceAtLeast(1)
+    return AnthropicTokenPlan(maxTokens = max, budgetTokens = safeBudget)
+  }
+
+  /** 档位 -> 思考预算。这是**唯一**的档位表；max_tokens 由它派生（见 anthropicTokenPlan）。 */
   private fun effortBudget(effort: String): Int = when (effort.lowercase()) {
     "low" -> 2048
     "medium" -> 4096

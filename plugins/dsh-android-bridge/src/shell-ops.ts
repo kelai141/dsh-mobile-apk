@@ -34,17 +34,57 @@ export type ShellLineTranslation =
   | { ok: true; steps: ShellStep[] }
   | { ok: false; error: string }
 
-/** 引号感知的行拆分（`&&` / `;` 分隔；引号内的分隔符不拆）。 */
+/**
+ * 引号与转义感知的行拆分（顶层分隔符 `;` 与 `&&`；引号内/转义后的分隔符不拆）。
+ *
+ * 词法按 POSIX shell：
+ * - 引号外 `\x` 是转义对 —— `\;` 不是分隔符、`\"` 不开启双引号、`\\` 是字面反斜杠；
+ * - 双引号内同样成对消费 —— `\"` 是字面双引号、`\\` 是字面反斜杠，都不结束引号段；
+ * - 单引号内一切字符都是字面量（POSIX：反斜杠在单引号内不转义），只有下一个 `'` 结束；
+ * - 由此奇偶性自然成立：偶数个反斜杠后的 `"` 是真的引号，奇数个反斜杠后的是字面字符。
+ *
+ * 取舍（issue #1066）：**看不懂就整行一段，绝不猜**。未闭合引号、行尾孤立反斜杠（续行）、
+ * `$'…'` / `$"…"` 这几种形态的边界语义无法静态定死，而猜错的方向恰好是「多切」——
+ * 多切等于伪造一条用户没写的设备命令（issue #1066 里 `rm -rf /sdcard/x` 就是这么冒出来的独立设备命令）。
+ * 所以一律把整行当成**一段**返回，交给下游 fail-closed 判据（screen-scope.ts 的 `deny-unparsed` 一族）去拒：
+ * 宁可少切，不可多切。切出的段是**原文子串**（这里不消引号、不消反斜杠），由下游按 shell 词法自己解释。
+ */
 function splitSegments(line: string): string[] {
   const out: string[] = []
   let cur = ''
   let quote: '"' | "'" | null = null
   for (let i = 0; i < line.length; i++) {
     const ch = line[i]
-    if (quote !== null) {
+    if (quote === "'") {
+      // 单引号内：只有下一个 `'` 结束引号，反斜杠是普通字符（POSIX）。
       cur += ch
-      if (ch === quote) quote = null
+      if (ch === "'") quote = null
       continue
+    }
+    if (quote === '"') {
+      // 双引号内：`\x` 成对消费，`\"` 不结束引号段。
+      if (ch === '\\') {
+        const next = line[i + 1]
+        if (next === undefined) return wholeLineAsSegment(line)
+        cur += ch + next
+        i += 1
+        continue
+      }
+      cur += ch
+      if (ch === '"') quote = null
+      continue
+    }
+    if (ch === '\\') {
+      const next = line[i + 1]
+      // 行尾孤立反斜杠 = 续行：换行被吃掉后整行的命令边界不可知。
+      if (next === undefined) return wholeLineAsSegment(line)
+      cur += ch + next
+      i += 1
+      continue
+    }
+    if (ch === '$' && (line[i + 1] === '"' || line[i + 1] === "'")) {
+      // ANSI-C 引号 $'…' / 本地化引号 $"…"：转义与展开语义随 shell 实现而变，不猜。
+      return wholeLineAsSegment(line)
     }
     if (ch === '"' || ch === "'") {
       quote = ch
@@ -64,8 +104,16 @@ function splitSegments(line: string): string[] {
     }
     cur += ch
   }
+  // 未闭合引号：引号边界是否跨行才有解，单行内无法判定。
+  if (quote !== null) return wholeLineAsSegment(line)
   out.push(cur)
   return out.map((s) => s.trim()).filter((s) => s.length > 0)
+}
+
+/** 词法不可判时的 fail-closed 兜底：整行作为**一段**（宁可少切，不可多切）。 */
+function wholeLineAsSegment(line: string): string[] {
+  const trimmed = line.trim()
+  return trimmed.length > 0 ? [trimmed] : []
 }
 
 /** 去掉一层成对引号（`"..."` / `'...'`）。 */

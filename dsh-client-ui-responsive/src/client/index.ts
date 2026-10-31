@@ -47,7 +47,7 @@ import { TrajectoryPanelsObserver } from './trajectory-panels-observer.ts'
 import { SnapshotPanelsObserver } from './snapshot-panels-observer.ts'
 import { SNAPSHOT_PANELS_CSS } from './snapshot-panels.css.ts'
 import { ComposerPopupGuard } from './composer-popup-guard.ts'
-import { SESSION_LOG_DIALOG_HIDE_CSS } from './session-log-dialog.css.ts'
+import { SESSION_LOG_DIALOG_HIDE_CSS, SHELL_OUTCOME_ATTR } from './session-log-dialog.css.ts'
 import { SessionLogDialogObserver } from './session-log-dialog-observer.ts'
 import { openSessionForNotify, type SessionOpenFace } from './mobile/notify-landing.ts'
 import { DevSection } from './dev-section/DevSection.tsx'
@@ -58,7 +58,6 @@ import { DEV_SECTION_CSS } from './dev-section/dev-section.css.ts'
 import { MARKETPLACE_CSS } from './marketplace/marketplace.css.ts'
 import { registerMarketplaceAction } from './marketplace/marketplace-entry.tsx'
 import { installAboutEntry } from './mobile/about-entry.ts'
-import { installClipboardModelDrafts } from './mobile/clipboard-model-drafts.ts'
 import { ABOUT_ENTRY_CSS } from './mobile/about-entry.css.ts'
 import { AboutSection } from './mobile/about-section.tsx'
 import { GeneralSettings } from './general-settings/GeneralSettings.tsx'
@@ -83,6 +82,8 @@ import { DrawerOverlayDismiss } from './mobile/drawer-overlay-dismiss.ts'
 import { registerConversationDock, ConversationDropZone, conversationAddress, existingConversation, retainDockIdentity, resolveDockSubagent, CONVERSATION_DOCK_CSS } from './mobile/conversation-dock.tsx'
 import { SidebarReorder } from './mobile/sidebar-reorder.ts'
 import { SIDEBAR_REORDER_CSS } from './mobile/sidebar-reorder.css.ts'
+import { LightboxZoom, ZOOM_SURFACE_ATTR, ZOOM_TARGET_ATTR } from './mobile/lightbox-zoom.ts'
+import { LIGHTBOX_ZOOM_CSS } from './mobile/lightbox-zoom.css.ts'
 import { EXTERNAL_OPEN_ID, externalOpenDefinition } from './mobile/external-open-paths.ts'
 import { ExternalOpenTab } from './mobile/external-open.tsx'
 import { SettingsDocumentAction } from './mobile/settings-document.ts'
@@ -94,6 +95,7 @@ import { SidebarBubbles, type BubbleReorderFace } from './mobile/sidebar-bubbles
 import { SIDEBAR_BUBBLES_CSS } from './mobile/sidebar-bubbles.css.ts'
 import { zh as bubblesZh, en as bubblesEn } from './mobile/sidebar-bubbles.locales.ts'
 import { MAIN_PANEL_BACK_CSS } from './mobile/main-panel-back.css.ts'
+import { HIDDEN_BUNDLES_CSS } from './mobile/hidden-bundles.css.ts'
 import { MainPanelBackMount } from './mobile/main-panel-back.ts'
 import { PanelNavDrawer } from './mobile/panel-nav-drawer.ts'
 import { MobileSidebarGestures } from './mobile/sidebar-gestures.ts'
@@ -255,14 +257,14 @@ export function apply(ctx: ClientContext): void {
     }, 'ui-responsive: composer + bottom sheet')
   })
 
-  // 交付文件卡片（换行汇总卡）上的两段胶囊：另一种打开方式 + 转发。
+  // 交付文件卡片（换行汇总卡）上的两段胶囊：用其他应用打开 + 转发。
   // 卡片是上游只读包 ui-deliverables 的 ChangedFiles，没有文件级操作插槽，故按 DOM 增强；
-  // 卡片自身的单击（侧栏预览）保持原样。左侧方向由 DEFAULT_OPEN_MODE 决定。
+  // 卡片单击（侧栏预览）保持原样；左段固定「用其他应用打开」（#991 无可反向的默认模式常量）。
   ctx.effect(() => injectStyle('file-card-capsule', FILE_CARD_CAPSULE_CSS), 'ui-responsive: delivery file card capsule styles')
   // 桥是壳侧在页面脚本之后注入的，所以每次动作时才读 window，不在装配期捕获一份快照。
   // 按方法名读取而不是走 AndroidShellBridge 的成员：那两个方法由壳侧另一个会话落地，
-  // 先声明会留下 tsOnly 悬空面（check-bridge-symmetry）。方法不在场即 undefined，
-  // FileCardCapsule 把它当「不可用」处理。
+  // 先声明会留下 tsOnly 悬空面（check-bridge-symmetry）。方法不在场即 undefined，不是终态
+  // （#990）：这一轮不渲染左段，桥注入后下次扫描补回；只有壳侧答 no-receiver 才永久收起。
   // 每次调用都重新查 window：壳侧注入晚于插件装配，缓存一份会在首批卡片上永远拿到 undefined。
   const bridgeFace = (): FileCardBridge => {
     const read = (name: 'openFileExternal' | 'shareFile') => {
@@ -306,13 +308,13 @@ export function apply(ctx: ClientContext): void {
     }
   }, 'ui-responsive: trajectory details full-viewport overlay + :has() fallback')
 
-  // 手机端终端卡片排版（社区截图）：上游命令行的 white-space 是 pre 且带
-  // text-overflow: ellipsis，而 banner 里的状态胶囊与复制按钮不可收缩，把命令挤进窄
-  // 列——长命令于是被省略号截断、右侧留下大片空白，输出区还会横滑。实测（emulator-5562
-  // 引擎 WebView）：命令内容 537px 落在 376px 盒子里（隐藏 161px；360px 视口下 401px），
-  // 输出区 scrollWidth 310 / clientWidth 249。TERMINAL_BLOCK_CSS 重绑两个 whitespace
-  // 变量为 pre-wrap、让 banner 换行且命令行独取整行、并解除 banner 的 150px 上限。
-  // 仅手机形态生效，横屏与桌面不改。
+  // 手机端终端卡片排版（社区截图）：banner 里的状态胶囊与复制按钮不可收缩，把命令挤进
+  // 窄列——长命令放不下、右侧留下大片空白，输出区还会横滑。折行走两个可重绑自定义属性：
+  // --dsl-terminal-line-whitespace 由 .line 直接消费；命令行的 --dsl-terminal-command-
+  // whitespace 要先经 .command 读进 --dsl-command-whitespace、再由 CommandText 的 .text 消费，
+  // 两跳跨两个哈希类名，上游改名即静默退回 pre。故 TERMINAL_BLOCK_CSS 在 command 结构选择器
+  // 上自己声明 white-space: pre-wrap，并重绑 line 变量、让 banner 换行且命令行独取整行、
+  // 解除 banner 的 150px 上限。仅手机形态生效，横屏与桌面不改（详据见该 css 文件头）。
   ctx.effect(() => injectStyle('terminal-block', TERMINAL_BLOCK_CSS), 'ui-responsive: mobile terminal card layout')
 
   // Mobile Enter guard: on the mobile form the soft-keyboard Enter key must
@@ -413,7 +415,6 @@ export function apply(ctx: ClientContext): void {
   // 「设置 → 通用」底部那行版本改成「关于」入口，点开看壳与引擎两个版本。
   ctx.effect(() => injectStyle('about-entry', ABOUT_ENTRY_CSS), 'ui-responsive: about entry styles')
   ctx.effect(() => installAboutEntry(), 'ui-responsive: about entry')
-  ctx.effect(() => installClipboardModelDrafts(), 'ui-responsive: clipboard model drafts')
 
   // 「关于」分区：入口在那行版本的位置（about-entry 点击时切到本分区）。
   ctx.slots.inject('settings.section', () => ctx.slots.register({
@@ -780,6 +781,42 @@ export function apply(ctx: ClientContext): void {
     return () => { gestures.detach() }
   }, 'ui-responsive: narrow-screen sidebar content swipes')
 
+  // 图片预览缩放：手势只放大图片本身。
+  //
+  // 真因（设备实测）：上游 `ImageLightbox` 没有任何手势代码，手机上的捏合只能落到
+  // Chromium 的**页面级缩放**——visualViewport.scale 1→5、width 450→90，顶栏/对话/输入区
+  // 跟着一起变大，这就是用户报的「放大图片会放大整个屏幕」。壳侧已在
+  // `WebViewShim.applyBaseline` 关掉页面缩放三连，于是这个手势必须由页面自己提供，
+  // 而且只能移动图片：backdrop/stage/mask/关闭键的几何一律不动。
+  //
+  // 样式表把 touch-action:none 只给 lightbox 的 <img>（手势归属图片，遮罩仍是既有的关闭
+  // 路径）；模块本身按 pointerId 跟踪触点在图片上的两指手势，并在每条关闭路径上复位，
+  // 不把缩放带到下一条消息。
+  ctx.effect(() => {
+    const disposeStyle = injectStyle('lightbox-zoom', LIGHTBOX_ZOOM_CSS)
+    const zoom = new LightboxZoom()
+    zoom.attach()
+    // 标记当前预览图片，让上面的样式表命中（属性由本模块维护，样式表只认属性）。
+    // 两种上游形态都要认：扁平（backdrop > mask + img + 关闭键）与带 stage
+    // （backdrop > stage > mask + img + 关闭键）——只按祖先链写选择器会漏掉另一种。
+    const mark = (): void => {
+      for (const dialog of document.querySelectorAll('[role="dialog"][aria-modal="true"]')) {
+        const image = dialog.querySelector<HTMLElement>(':scope > img') ?? dialog.querySelector<HTMLElement>('img')
+        if (image === null) continue
+        if (!dialog.hasAttribute(ZOOM_SURFACE_ATTR)) dialog.setAttribute(ZOOM_SURFACE_ATTR, '')
+        if (!image.hasAttribute(ZOOM_TARGET_ATTR)) image.setAttribute(ZOOM_TARGET_ATTR, '')
+      }
+    }
+    mark()
+    const observer = new MutationObserver(() => { mark() })
+    observer.observe(document.body, { childList: true, subtree: true })
+    return () => {
+      observer.disconnect()
+      zoom.detach()
+      disposeStyle()
+    }
+  }, 'ui-responsive: image lightbox zoom (picture only, never the page)')
+
   // apk #349：抽屉里点「新建会话」后抽屉不收、键盘残留（用户看到的「停在抽屉里，还得手动关」）。
   // 真因：上游 replaceMain 只在 panel==='reveal' 时调 selectPanel(null)（ui-workspace navigation.ts:403），
   // 停在会话时 activePanelId 本来就是 null → 不发通知；而本插件收起抽屉的唯一通路
@@ -870,6 +907,14 @@ export function apply(ctx: ClientContext): void {
     }
   }, 'ui-responsive: injected back control for upstream main panels')
 
+  // Two on-demand bundles ship no Android native payload (claude-agent-sdk-linux-* is a
+  // glibc dynamic binary; 0.153.4 of the Codex binary is not static-pie), so they install
+  // and never run. The user's call: hide their entries on the phone form instead of leaving
+  // a row that only leads to a broken install. Upstream is a read-only checkout here, so
+  // this is a stylesheet override keyed on the page's own data attributes, scoped to
+  // `html[data-dsh-mobile-form]` - the desktop and web forms keep both entries.
+  ctx.effect(() => injectStyle('hidden-bundles', HIDDEN_BUNDLES_CSS), 'ui-responsive: hide Android-unusable plugin bundles')
+
   // ── Bridges ─────────────────────────────────────────────────────────────
 
   ctx.effect(() => {
@@ -879,11 +924,30 @@ export function apply(ctx: ClientContext): void {
       if (typeof payload.ok !== 'boolean' || typeof payload.title !== 'string' || typeof payload.detail !== 'string') return
       exportChannel.show(payload)
     }
+    // Whether the shell owns the outcome right now (#919). Set on the same DOM
+    // event the dialog reads, cleared when that dialog folds — so the upstream
+    // error modal is suppressed exactly while the shell's dialog is up, never on
+    // a guessed time window.
+    const markOutcomeShown = (shown: boolean): void => {
+      if (shown) document.documentElement.setAttribute(SHELL_OUTCOME_ATTR, '')
+      else document.documentElement.removeAttribute(SHELL_OUTCOME_ATTR)
+    }
+    const onResultWithMark = (event: Event): void => {
+      onResult(event)
+      if (exportChannel.getSnapshot().open) markOutcomeShown(true)
+    }
     const bridge = (payload: ExportResultPayload): void => { reportUserFacingResult(payload) }
     window.__dshExportResult = bridge
-    window.addEventListener('dsh:export-result', onResult)
+    window.addEventListener('dsh:export-result', onResultWithMark)
+    // The dialog closes through this channel, so its snapshot is the single
+    // place the mark can be cleared — no second bookkeeping path.
+    const unsubscribe = exportChannel.subscribe(() => {
+      if (!exportChannel.getSnapshot().open) markOutcomeShown(false)
+    })
     return () => {
-      window.removeEventListener('dsh:export-result', onResult)
+      window.removeEventListener('dsh:export-result', onResultWithMark)
+      unsubscribe()
+      markOutcomeShown(false)
       delete window.__dshExportResult
     }
   }, 'ui-responsive: export result dialog bridge')
@@ -962,6 +1026,16 @@ export function apply(ctx: ClientContext): void {
     order: 90,
     locale: providerHintNS,
   } as never, CustomProviderHint as never))
+  // issue #979：座位上的 `locale: providerHintNS` 只有在同名命名空间**真的注册过**时才有文案；
+  // 未注册时引擎 translate 兜底返回 key，卡片里显示字面量 `hint.catalog`（#960 的文案等于没上屏）。
+  // 座位注册保持无条件执行（不挪进 locale 注入，避免改变座位的可用时机）；locale 注册单独一块，
+  // 照既有四处写法（scope.effect 托管 disposer）。
+  ctx.inject(['locale'], (scope) => {
+    scope.effect(
+      () => scope.locale.register(providerHintNS, { zh: providerHintZh, en: providerHintEn }),
+      'ui-responsive: custom provider hint copy',
+    )
+  })
 }
 
 

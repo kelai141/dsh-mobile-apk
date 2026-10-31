@@ -13,13 +13,19 @@
 //   4. 排版：mermaid 围栏成对、块内不得出现 style/classDef/linkStyle（渲染兼容），
 //      文档不得含 emoji（仓铁律）。
 //
-// 用法：
+// 用法（注意：--derive-anchors 与 --only 默认 **dry-run 不落盘**，必须显式加 --write）：
 //   node scripts/check-code-map.mjs                 # 校验（默认文档 docs/AGENTS/EXECUTION-MAP.md）
 //   node scripts/check-code-map.mjs --list          # 只打印账本盘点，不判红
 //   node scripts/check-code-map.mjs --doc <path>    # 换文档（调试用）
 //   node scripts/check-code-map.mjs --self-test     # 无仓库依赖的判别力自检（含故意失败样本）
 //   node scripts/check-code-map.mjs --refresh-anchor-baseline # Refresh reviewed legacy anchor snapshots
-// 退出码：0 = 通过；1 = 有失败项；2 = 前置不满足（文档缺失/文档缺账本块）。
+//   node scripts/check-code-map.mjs --only <path>[,<path>] [--write] # 只刷指定文件的锚点（默认 dry-run）
+//   node scripts/check-code-map.mjs --derive-anchors [--write]       # 全量推导迁移（默认 dry-run）
+// 退出码：0 = 通过；1 = 有失败项；2 = 前置不满足（文档缺失/文档缺账本块/参数越界）。
+//
+// **误跑保护**：--derive-anchors 会整体改写受版本控制的 EXECUTION-MAP.md（实测 1246 条锚点、
+// 上千行 diff）。它默认只报告「将改动多少条、前后 sha256」，**不碰磁盘**；确认后加 --write 才落盘。
+// 这条与「禁止直接 push main」同性质：会大范围改写文件的操作必须显式表达意图。
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { refreshCompletenessProblem, sourceLinesDropProblem } from './lib/refresh-guard.mjs'
 import { dirname, join, relative, resolve as resolvePath } from 'node:path'
@@ -63,8 +69,63 @@ const FORCE_ANCHOR_DRIFT = argv.includes('--force-drift')
 // issue #868 补齐面：sourceLines 段下降（陈旧键被清理）必须显式声明，否则拒绝写盘。
 // 合法清理与静默降级形状相同，不能靠猜，只能靠声明。
 const ALLOW_SOURCE_LINES_DROP = argv.includes('--allow-source-lines-drop')
+// issue #1023 补齐面：耦合边段的减少（整节被删 / 边被移除）必须显式声明，否则拒绝判绿。
+// 与 --allow-source-lines-drop 同形制：合法删除与静默丢失形状相同，只能靠显式声明区分。
+const ALLOW_COUPLING_DROP = argv.includes('--allow-coupling-drop')
+/**
+ * issue #1003：符号锚点段的下降守卫同样必须有显式逃生口。
+ *
+ * 为什么必须补：`refreshCompletenessProblem` 的 `allowDrop` 形参此前**没有任何调用方传值**，
+ * 于是一旦命中就再无出路——合法清理也只能手改基线 JSON（正是守卫消息自己建议的做法）。
+ * 判据有、出口没有 = 判据在教人绕过判据；形参存在但恒为默认值，等价于死代码。
+ */
+const ALLOW_SYMBOL_DROP = argv.includes('--allow-symbol-drop')
+/**
+ * 比例阈值覆盖（0..1）。解析不出数值时保持 undefined，交给 resolveSymbolDropRatio 回落默认——
+ * 让「参数写错」表现为「按默认值判并在日志里报当前阈值」，而不是「门禁崩溃」或「门禁被静默关掉」。
+ */
+const SYMBOL_DROP_MAX_RATIO = (() => {
+  const raw = argOf('symbol-drop-max-ratio', undefined)
+  if (raw === undefined) return undefined
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) ? parsed : undefined
+})()
 const DERIVE_ANCHORS = argv.includes('--derive-anchors')
 const DERIVE_DRY_RUN = argv.includes('--derive-dry-run')
+/**
+ * `--only <path>[,<path>...]`：**只**把列出的文件的锚点推导成符号形态，其余一概不动。
+ *
+ * 为什么需要它：`--derive-anchors` 会一次性改写整份执行地图的所有 legacy 锚点
+ * （实测 1392 条、696+/696-），把一个单点改动变成无法评审的巨型 diff。
+ * 实际最常见的场景是「我这次只动了三个文件，只想刷这三个文件」——此前只能手工算行号差
+ * 再逐条改坐标，非常脆（#1075 那批因此返工过一次）。
+ *
+ * 四条判据，每条都能判红：
+ *   1. 越界即错：路径不在执行地图里、或该文件在文档中没有任何锚点 -> 报错退出，不得静默跳过；
+ *   2. 只动 listed：未列出的文件在文档里一字不改；
+ *   3. 推不出锚点仍硬失败：绝不回退成行号锚（那正是要淘汰的形态）；
+ *   4. 与 --refresh-anchor-baseline 联用时，先改写文档、再重铺基线。
+ */
+const ONLY_RAW = (() => {
+  const i = argv.indexOf('--only')
+  if (i < 0) return null
+  const raw = argv[i + 1]
+  if (raw === undefined || raw.startsWith('--')) return { error: '--only 需要一个路径参数（逗号分隔）' }
+  return { paths: raw.split(',').map((s) => s.trim()).filter(Boolean) }
+})()
+/**
+ * `--derive-anchors` 的**落盘开关**：默认 dry-run，必须显式 `--write` 才改文件。
+ *
+ * 为什么：`--derive-anchors` 会一次性改写整份执行地图的所有 legacy 锚点（实测 1246 条、
+ * diff 规模上千行）。它本来是个「迁移工具」，却和校验路径共用同一个入口、且**默认就落盘**——
+ * 误跑一次（比如本想跑 `--derive-dry-run` 却打成了 `--derive-anchors`）就会把整份文档
+ * 改掉，且很难从 diff 里看出改了什么。这个坑我自己踩过：误跑后整份 EXECUTION-MAP.md
+ * 696+/696-，靠 `git checkout` 才恢复。
+ *
+ * 一个会整体改写受版本控制文档的工具，默认行为必须是**不改动**。
+ * 想落盘就明确说 `--write`——这条与仓里「禁止直接 push main」同一性质：危险动作必须显式。
+ */
+const DERIVE_WRITE = argv.includes('--write')
 /** CI 等价性检查：apk 仓在被独立检出时没有协调仓父目录，--no-parent 用来本地预演那种情形。 */
 const NO_PARENT = argv.includes('--no-parent')
 const ANCHOR_BASELINE_REL = 'scripts/check-code-map-anchor-baseline.json'
@@ -73,9 +134,33 @@ const ANCHOR_BASELINE = existsSync(ANCHOR_BASELINE_ABS)
   ? JSON.parse(readFileSync(ANCHOR_BASELINE_ABS, 'utf8'))
   : {}
 
-/** 覆盖全域：地图必须能定位到的文件集合（构建产物与第三方目录除外）。 */
+/**
+ * 覆盖全域：地图必须能定位到的文件集合（构建产物与第三方目录除外）。
+ *
+ * app/src 的口径（#1022）：**收「编译进产物的源/接口」，不收资源与资产**。
+ *
+ * 旧实现只认 main/AndroidManifest.xml + *.kt，于是同一个目录里 *.java / *.aidl
+ * 可以凭空出现而不被任何查点覆盖，门禁照样绿。这不是理论缺口：aidl/ 下的 4 个接口
+ * 是跨进程契约（ShizukuUserService / IBrowserRenderer 等），改它们等于改桥面，
+ * 却完全不在「新文件必须进地图」这条判据里。
+ *
+ * 收进来的：*.kt *.kts（Kotlin 源与构建脚本）、*.java（Java 源）、*.aidl（跨进程接口定义），
+ * 以及**产物源集**（main/debug/release）根的 AndroidManifest.xml（构建输入）。
+ * test/androidTest 的清单是测试运行器夹具、不参与产物，故不收。
+ * 刻意**不收**的：res/**（资源）、assets/**（随包资产，含快照与补丁 JS，它们由
+ * check-runtime-assets / check-snapshot-* 各自守）、*resources/**（测试夹具，由对应测试自己读）。
+ * 判据是「这个文件变了，产物行为会不会变」，不是「它在不在 app/src 下」。
+ */
+const APP_SRC_MANIFEST = /^(?:main|debug|release)\/AndroidManifest[.]xml$/
+const APP_SRC_CODE = /[.](?:kt|kts|java|aidl)$/
+const APP_SRC_NON_CODE = /^(?:[^/]+\/)?(?:res|assets)\//
+export function isAppSrcUniverseEntry(rel) {
+  if (APP_SRC_MANIFEST.test(rel)) return true
+  if (!APP_SRC_CODE.test(rel)) return false
+  return !APP_SRC_NON_CODE.test(rel) && !/(?:^|\/)resources\//.test(rel)
+}
 const UNIVERSE = [
-  { root: 'app/src', keep: (p) => p === 'main/AndroidManifest.xml' || p.endsWith('.kt') },
+  { root: 'app/src', keep: isAppSrcUniverseEntry },
   { root: 'plugins', keep: (p) => /^[^/]+\/(src|test)\/[^/]+/.test(p) && /\.(ts|tsx|mjs|js)$/.test(p) },
   { root: 'dsh-client-ui-responsive/src', keep: (p) => /\.(ts|tsx|css)$/.test(p) },
   { root: 'dsh-host-web-compat/lib', keep: (p) => /\.(js|ts|d\.ts)$/.test(p) },
@@ -143,6 +228,68 @@ function parseExpectation(raw) {
   } catch {
     return { expectError: 'expected fragment is not valid URI encoding' }
   }
+}
+
+/**
+ * 锚点行内容的**规范化**（#1020）：连续空白压成一个空格、去首尾空白。
+ *
+ * 去首尾空白 = 去缩进：本仓三种语言混排，缩进层级是排版噪音，不是被钉内容；
+ * 把缩进差异洗掉可以让「整体缩进变化」不误伤。压中间空白是为了让对齐抖动也不误伤 ——
+ * 但判据仍然是「同一行的开头」，所以「只差一个空格的假锚点」不会因此被放行。
+ */
+export function normalizeAnchorLine(text) {
+  return String(text).replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * 期望片段的**最小判别长度**（规范化后，字符数）。
+ *
+ * 为什么要有下限：`val` / `fun` / `return` / `if (` 这类词法片段是任何一段代码的常用开头，
+ * 把它们当判据等于把「前缀一致」退化成「这行看起来像代码」。实测今天仓里最短的合法片段是
+ * 17 字符（`private replaying`）；取 12 留出余量，同时把所有纯关键字片段挡在门外。
+ */
+export const MIN_EXPECT_LENGTH = 12
+
+/**
+ * `#expect=` 的判据（#1020）：**去缩进后的规范化前缀一致**，不是子串包含。
+ *
+ * 修的是什么：旧实现是 `text.includes(expectation)`。于是 `#expect=%20`（解码后就是一个空格）
+ * 几乎在任何一行上都成立 —— 一个空格就能把「指着错误的行」洗成绿的。更糟的是命中后直接
+ * `return`，把后面的 sourceLines 基线钉整段跳过（第二半见 checkReference 里的说明）。
+ * 实测的三个平凡片段 `%20`（空格）、`%7D`（}）、`val` 都能完成这次洗白。
+ *
+ * 收成的口径是四条同时成立，缺一即不匹配：
+ *   ① 片段规范化后**非空**且**含至少一个字母/数字/汉字** —— `%20`（空白）与 `%7D`（`}`）当场拒；
+ *   ② 片段长度 >= MIN_EXPECT_LENGTH —— `val`、`import` 这类词法片段挡在门外；
+ *   ③ 该行**去缩进**后以片段**开头**（前缀，不是任意位置）—— 指着别的行一律不中；
+ *   ④ 前缀之后必须是标识符断开处 —— `export function apply` 不会命中 `applySomething(`。
+ *
+ * 为什么是前缀而不是整行相等：整行相等会把文档变成源码逐行副本（长行要整段 URI 编码），
+ * 每次内容微调都得重新编码，可读性与维护成本都不可接受。前缀已经把「随便找个常见子串」
+ * 这条路堵死：要匹配，片段必须是**这行的开头**，而一行的开头是有限的。
+ * 判据的两侧都有反证（见 --self-test 的 EXP 系列与 PR 里的负控）。
+ *
+ * @returns { ok: true } 或 { ok: false, kind, detail } —— 纯函数，便于自检
+ */
+export function expectationMatch(actualText, expectation) {
+  const want = normalizeAnchorLine(expectation)
+  if (want === '') {
+    return { ok: false, kind: 'bad-anchor-expectation', detail: 'the fragment is empty after normalization (a bare %20 is not a pin)' }
+  }
+  if (!/[\p{L}\p{N}]/u.test(want)) {
+    return { ok: false, kind: 'bad-anchor-expectation', detail: 'the fragment has no letter or digit: ' + JSON.stringify(want) }
+  }
+  if ([...want].length < MIN_EXPECT_LENGTH) {
+    return { ok: false, kind: 'bad-anchor-expectation', detail: 'the fragment is shorter than ' + MIN_EXPECT_LENGTH
+      + ' characters (' + [...want].length + '): ' + JSON.stringify(want) }
+  }
+  const have = normalizeAnchorLine(actualText)
+  if (!have.startsWith(want)) return { ok: false, kind: 'bad-anchor-content', detail: have }
+  // 前缀之后必须是「标识符断开处」：不能是字母/数字/下划线/`$`。
+  // 否则 `apply` 会命中 `applySomething(...)` —— 那又回到了子串匹配的老路。
+  const next = have.charAt(want.length)
+  if (next !== '' && /[A-Za-z0-9_$]/.test(next)) return { ok: false, kind: 'bad-anchor-content', detail: have }
+  return { ok: true }
 }
 
 /**
@@ -502,6 +649,85 @@ function contentHashOf(text) {
   return createHash('sha256').update(t).digest('hex').slice(0, 8)
 }
 
+/**
+ * `@hash` 锚点的**唯一判据**（#988）—— 校验侧与 refresh 侧必须走同一份实现。
+ *
+ * 修的是什么：旧实现两侧各写一遍，校验侧要求「恰好 1 次」（>1 判 symbol-content-ambiguous），
+ * refresh 侧只要求「至少 1 次」。于是同一份文档可以：
+ *   ① `--refresh-anchor-baseline` 把 ambiguous 锚点写进基线并打印 refreshed（exit 0）；
+ *   ② 下一次 `check` 立刻判红 symbol-content-ambiguous；
+ *   ③ 再 refresh 仍然 refreshed —— **永远收敛不了**，而且 refresh 的绿灯是假绿灯。
+ * 判据分叉的根因不是「哪边写错了」，而是「有两份」。这里只留一份。
+ *
+ * 为什么判据是唯一性而不是成员性：符号体内出现两次相同（trim 后）的行时，
+ * 「至少一次」永远成立 —— 改了其中一处、另一处仍匹配，锚点再也钉不住任何一行，
+ * 等于永绿假锚点（#807 的原始动机）。故 occurrences > 1 一律 ambiguous。
+ *
+ * @param body 归一化后的符号体（normalizedSymbolBody 的输出，逐行 trim 过）
+ * @param symbolHash 8 位内容哈希
+ * @returns { verdict: 'exact' | 'ambiguous' | 'missing', occurrences, bodyLines }
+ */
+export function classifySymbolHashAnchor(body, symbolHash) {
+  const bodyLines = typeof body === 'string' ? body.split('\n') : []
+  const occurrences = bodyLines.filter((l) => contentHashOf(l) === symbolHash).length
+  const verdict = occurrences === 1 ? 'exact' : (occurrences === 0 ? 'missing' : 'ambiguous')
+  return { verdict, occurrences, bodyLines }
+}
+
+/**
+ * 耦合边的**稳定键**（#1023）。
+ *
+ * 为什么不是 `from -> to`：实测今天 152 条边只有 143 个 `from -> to` 组合 —— 同一个查点对
+ * 可以有多条语义不同的耦合（例如 K01 -> 「引擎进程与快照面」既有启动投递也有刷新闸门）。
+ * 用 from/to 当键会把它们折叠成一条，于是「删掉其中一条」在基线上根本看不出来。
+ * 故键 = `from -> to` + 关系列（表格第三列）。实测 152 条边的 from->to|note 组合全部唯一。
+ */
+export function couplingKey(c) {
+  return c.from + ' -> ' + c.to
+}
+
+/** 关系列（note）的规范化：连续空白压成一个，去首尾空白。 */
+export function couplingNote(c) {
+  return String(c.note ?? '').replace(/\s+/g, ' ').trim()
+}
+
+/** 一条耦合边的完整基线键：`A -> B | 关系`。证据列刻意不入键（见下面的 reason）。 */
+export function couplingBaselineEntry(c) {
+  return couplingKey(c) + ' | ' + couplingNote(c)
+}
+
+/**
+ * 归一化基线里的 `couplings` 段。
+ *
+ * 键包含**关系列但不含证据列**，理由是两者的失效模式完全不同：
+ *   · 关系列变了 = 语义变了（这条耦合在讲另一件事）⇒ 必须人工重登记，判红；
+ *   · 证据列只是「到哪一行去找」，行号会随任何一次编辑漂移 —— 把它放进键，
+ *     等于给本门禁重新装回「行号耦合」（#1022 之前的 legacy 锚点就是这么烂掉的）。
+ *     证据的有效性由 EVIDENCE_RE + 符号解析单独判，不需要在集合比较里再来一遍。
+ *
+ * 兼容三种形态（都是同一个集合的写法差异）：
+ *   ① 数组：['A -> B | 关系', ...]（refresh 写出的形态）
+ *   ② 对象：{ 'A -> B | 关系': true }
+ *   ③ 缺失/非集合：返回 null = 不比较（旧基线没有这一段，不能凭空判红）。
+ * 返回 null 时门禁退回「只判新增」的老行为，由 refresh 负责把这一段补齐。
+ */
+export function normalizeCouplingBaseline(raw) {
+  if (raw === undefined || raw === null) return null
+  if (Array.isArray(raw)) return new Set(raw.map((k) => String(k).replace(/\s+/g, ' ').trim()))
+  if (typeof raw === 'object') return new Set(Object.keys(raw).map((k) => String(k).replace(/\s+/g, ' ').trim()))
+  return null
+}
+
+/** 从文档解析结果算出「应写进基线的耦合边集合」（去重 + 排序，便于 diff 审阅）。 */
+export function couplingBaselineEntries(couplings) {
+  const out = new Set()
+  for (const c of couplings) {
+    if (!c.parsed) continue
+    out.add(couplingBaselineEntry(c).replace(/\s+/g, ' ').trim())
+  }
+  return [...out].sort()
+}
+
 function countLegacyReferences(anchors) {
   const counts = {}
   for (const anchor of anchors) {
@@ -725,18 +951,19 @@ export function checkDoc(text, universe, fsView, anchorBaseline = ANCHOR_BASELIN
     if (symbolHash !== undefined) {
       // #807：判据是**唯一性**，不是成员性 —— 旧实现用 Set 做 `has`，符号体内任意一行匹配就算过，
       // 内容重复出现时永不判红，锚点被废掉（永绿假锚点）。耦合边证据走 EVIDENCE_RE 纯正则、不经这里。
-      const bodyLines = hit.body.split('\n')
-      const occurrences = bodyLines.filter((l) => contentHashOf(l) === symbolHash).length
+      // #988：判据本体抽到 classifySymbolHashAnchor，refresh 侧调同一个函数 ——
+      // 两侧各写一遍时，refresh 只查「至少一次」，于是 ambiguous 锚点能刷进基线却永远判红。
+      const { verdict, occurrences } = classifySymbolHashAnchor(hit.body, symbolHash)
       const expected = (anchorBaseline.symbolHashes ?? {})[key + '@' + symbolHash]
       if (expected === undefined) {
         push('symbol-unbaselined', 'Symbol-hash anchor has no baseline entry (run --refresh-anchor-baseline): '
           + key + '@' + symbolHash)
         return
       }
-      if (occurrences === 0) {
+      if (verdict === 'missing') {
         push('symbol-content-drift', 'Anchored line content vanished from ' + key + '@' + symbolHash
           + '（定义行 ' + hit.line + '）; rerun --refresh-anchor-baseline after review')
-      } else if (occurrences > 1) {
+      } else if (verdict === 'ambiguous') {
         push('symbol-content-ambiguous', 'Anchored line content appears ' + occurrences
           + ' times in ' + key + '@' + symbolHash + '; the anchor cannot pin a single line —'
           + ' narrow the symbol or pick a unique line')
@@ -783,13 +1010,47 @@ export function checkDoc(text, universe, fsView, anchorBaseline = ANCHOR_BASELIN
       return
     }
     if (expectation !== undefined) {
-      const matches = contents.filter((candidate) => candidate.text.includes(expectation))
-      const matchingFiles = new Set(matches.map((candidate) => candidate.file))
+      // #1020：判据是**去缩进后的规范化前缀**（见 expectationMatch），不是子串包含。
+      // 旧的 `includes` 让 `#expect=%20`（一个空格）几乎必中，还能在命中后 return、
+      // 把下面的 sourceLines 基线钉整段跳过 —— 一条锚点因此可以既错又绿。
+      const verdicts = contents.map((candidate) => ({ file: candidate.file, text: candidate.text,
+        ...expectationMatch(candidate.text, expectation) }))
+      const matches = verdicts.filter((v) => v.ok)
+      const matchingFiles = new Set(matches.map((v) => v.file))
       if (matches.length === 0) {
         const actual = contents.map((candidate) => JSON.stringify(candidate.text)).join(', ') || '<unavailable>'
-        push('bad-anchor-content', 'Expected ' + JSON.stringify(expectation) + ' at ' + key + ', actual line: ' + actual)
-      } else if (matchingFiles.size !== 1) {
+        // 片段**本身**不合法（空 / 纯标点 / 短于最小判别长度）时，报的是片段的问题，
+        // 不是「这行内容不对」—— 否则读日志的人会去改源码，而真正要改的是文档里的片段。
+        const invalid = verdicts.find((v) => v.kind === 'bad-anchor-expectation')
+        if (invalid !== undefined) {
+          push('bad-anchor-expectation', 'Invalid expectation for ' + key + ': ' + invalid.detail
+            + '（#1020：片段必须是这一行的去缩进前缀，且至少 ' + MIN_EXPECT_LENGTH + ' 个字符）')
+          return
+        }
+        push('bad-anchor-content', 'Expected ' + JSON.stringify(expectation) + ' at ' + key + ', actual line: '
+          + actual + '（判据是去缩进后的规范化前缀，不是子串包含）')
+        return
+      }
+      if (matchingFiles.size !== 1) {
         push('ambiguous-anchor', 'Expectation ' + JSON.stringify(expectation) + ' matches ' + matchingFiles.size + ' files for ' + key + '; use a repository-relative path')
+        return
+      }
+      // #1020 第二半：**命中不得等于放行**。
+      //
+      // 旧实现在这里 `return`，于是「#expect 匹配成功」会跳过下面整段 sourceLines 基线钉：
+      // 对于一条**已在基线里被钉过的行**，只要写一个几乎必中的片段就能绕过「这一行后来被改过」的判据。
+      // 现在的口径：
+      //   · key **在** sourceLines 基线里 ⇒ 期望片段之外仍要过基线钉（内容必须还是基线记的那一行）；
+      //   · key **不在**基线里 ⇒ 这条锚点本来就是靠 #expect 引入的新/移动锚点，基线钉无对象可钉，
+      //     前缀片段本身就是它的判据（这也正是 refresh 从不把 #expect 锚点收进 sourceLines 的原因，
+      //     见下方 --refresh-anchor-baseline 的 references 过滤）。
+      const pinned = sourceLineBaseline[key]
+      if (!Array.isArray(pinned) || pinned.length === 0) return
+      if (!contents.some((candidate) => pinned.includes(candidate.text))) {
+        const actual = contents.map((candidate) => JSON.stringify(candidate.text)).join(', ') || '<unavailable>'
+        push('anchor-content-drift', 'Referenced content changed at ' + key + '; expected one of '
+          + JSON.stringify(pinned) + ', actual: ' + actual
+          + '（该坐标已在 sourceLines 基线里钉过：#expect 命中不会跳过基线钉）')
       }
       return
     }
@@ -815,6 +1076,28 @@ export function checkDoc(text, universe, fsView, anchorBaseline = ANCHOR_BASELIN
   }
 
   // 3. 耦合边（右端可以是「外部角色」文字，只有形如查点 ID 的才要求已登记）
+  //
+  // #1023：除格式校验外，还要与基线**双向**比较。旧实现只有「新增」方向（下面的
+  // coupling-unregistered 是 issue 文本里提到的那条），于是把 §4 耦合矩阵整段删掉时：
+  // 耦合边 152 -> 0、锚点 1090 -> 966，门禁照样 PASSED —— 删掉一整节反而更绿。
+  // 单向比较的失效形态是「消失」，靠格式校验永远看不见（没有边 = 没有格式问题）。
+  const couplingBaseline = normalizeCouplingBaseline(anchorBaseline.couplings)
+  if (couplingBaseline !== null) {
+    const current = new Set(couplingBaselineEntries(doc.couplings))
+    const added = [...current].filter((k) => !couplingBaseline.has(k))
+    const vanished = [...couplingBaseline].filter((k) => !current.has(k))
+    for (const k of added) {
+      push('coupling-unregistered', '耦合边未登记进基线（新增边必须同步刷新基线）：' + k)
+    }
+    if (vanished.length > 0 && !ALLOW_COUPLING_DROP) {
+      for (const k of vanished) {
+        push('coupling-vanished', '耦合边在文档里消失（基线有、当前文档没有）：' + k)
+      }
+    } else if (vanished.length > 0) {
+      console.warn('Explicit --allow-coupling-drop is accepting ' + vanished.length + ' vanished coupling edge(s):')
+      for (const k of vanished) console.warn('  - ' + k)
+    }
+  }
   for (const c of doc.couplings) {
     if (!c.parsed) { push('bad-coupling', '耦合边格式应为 `A -> B | 关系 | path:line`：' + c.raw); continue }
     if (!tableSet.has(c.from)) push('bad-coupling', '耦合边左端未登记：' + c.from + '（' + c.raw + '）')
@@ -1014,9 +1297,9 @@ function selfTest() {
       ? [{ file: p, text: map[p][line - 1].trim() }] : []),
     sourceLines: (p) => (Object.prototype.hasOwnProperty.call(map, p) ? map[p] : null),
   })
-  const fsFull = mk({ 'app/a.kt': ['header', 'fun ready()', 'fun other()', 'fun helper()'], 'app/b.kt': ['field', 'value'] })
+  const fsFull = mk({ 'app/a.kt': ['header', 'fun ready()', 'fun other(): Unit', 'fun helper()'], 'app/b.kt': ['field', 'value'] })
   const baseline = {
-    sourceLines: { 'app/a.kt:3': ['fun other()'], 'app/a.kt:4': ['fun helper()'] },
+    sourceLines: { 'app/a.kt:3': ['fun other(): Unit'], 'app/a.kt:4': ['fun helper()'] },
     legacyReferenceCounts: { 'app/a.kt:3': 1, 'app/a.kt:4': 1 },
   }
   const head = '<!-- COVERAGE\n'
@@ -1030,24 +1313,25 @@ function selfTest() {
     ['An out-of-range anchor is rejected', clean.replace('app/a.kt:3', 'app/a.kt:99'), fsFull, 1, baseline],
     ['A missing anchor file is rejected', clean.replace('app/a.kt:3', 'app/ghost.kt:3'), fsFull, 1, baseline],
     ['A mismatched expected fragment is rejected', clean.replace('app/a.kt:3', 'app/a.kt:3#expect=notPresent'), fsFull, 1, baseline],
-    ['A matching expected fragment passes', clean.replace('app/a.kt:3', 'app/a.kt:3#expect=other'), fsFull, 0, baseline],
+    // #1020：片段改成长度达标的行前缀（旧样本 `other` 只有 5 字符，新判据按最小判别长度拒绝它）。
+    ['A matching expected fragment passes', clean.replace('app/a.kt:3', 'app/a.kt:3#expect=fun%20other()%3A%20Unit'), fsFull, 0, baseline],
     ['Malformed URI-encoded expectation is rejected', clean.replace('app/a.kt:3', 'app/a.kt:3#expect=%zz'), fsFull, 1, baseline],
     ['A new anchor without an expected fragment is rejected', clean.replace('app/a.kt:3', 'app/a.kt:2'), fsFull, 1, baseline],
     ['Moving an anchor to another known line requires an expectation', clean.replace('app/a.kt:3', 'app/a.kt:4'), fsFull, 1, baseline],
     ['Legacy anchor content drift is rejected', clean, mk({ 'app/a.kt': ['header', 'fun ready()', 'changed body()', 'fun helper()'], 'app/b.kt': ['field', 'value'] }), 1, baseline],
     ['Mismatched coupling evidence is rejected', clean.replace('app/a.kt:4', 'app/a.kt:4#expect=missing'), fsFull, 1, baseline],
-    ['An expected fragment uniquely resolves a duplicate basename', clean.replace('app/a.kt:3', 'index.ts:3#expect=screenScope'), {
+    ['An expected fragment uniquely resolves a duplicate basename', clean.replace('app/a.kt:3', 'index.ts:3#expect=const%20screenScope'), {
       exists: (p) => p === 'app/a.kt' || p === 'app/b.kt',
       lineCount: (p) => p === 'index.ts' ? 3 : (p === 'app/a.kt' ? 4 : (p === 'app/b.kt' ? 2 : null)),
       lineContents: (p, line) => p === 'index.ts' && line === 3
         ? [{ file: 'plugins/bridge/index.ts', text: 'const screenScope = true' }, { file: 'plugins/manage/index.ts', text: 'const manage = true' }]
         : fsFull.lineContents(p, line),
     }, 0, { sourceLines: { 'app/a.kt:4': ['fun helper()'] } }],
-    ['An ambiguous expected fragment is rejected', clean.replace('app/a.kt:3', 'index.ts:3#expect=shared'), {
+    ['An ambiguous expected fragment is rejected', clean.replace('app/a.kt:3', 'index.ts:3#expect=shared%20screenScope'), {
       exists: (p) => p === 'app/a.kt' || p === 'app/b.kt',
       lineCount: (p) => p === 'index.ts' ? 3 : (p === 'app/a.kt' ? 4 : (p === 'app/b.kt' ? 2 : null)),
       lineContents: (p, line) => p === 'index.ts' && line === 3
-        ? [{ file: 'plugins/bridge/index.ts', text: 'shared screenScope' }, { file: 'plugins/manage/index.ts', text: 'shared manage' }]
+        ? [{ file: 'plugins/bridge/index.ts', text: 'shared screenScope' }, { file: 'plugins/manage/index.ts', text: 'shared screenScope' }]
         : fsFull.lineContents(p, line),
     }, 1, { sourceLines: { 'app/a.kt:4': ['fun helper()'] } }],
     ['Mismatched table and section IDs are rejected', clean.replace('### K01 甲', '### K02 甲'), fsFull, 2, baseline],
@@ -1330,6 +1614,166 @@ function selfTest() {
     driftCases.push(['AMB #807 内容唯一不得误红（含耦合边证据不受影响）',
       !rUno.issues.some((i) => i.kind === 'symbol-content-ambiguous')])
   }
+
+  // ── #1022 全域口径（app/src 收「产物源/接口」，不收资源与资产）────────────
+  //
+  // 为什么这条判据必须在自检里：`keep` 谓词写松（回到只认 .kt）时真实树照样 PASS，
+  // 门禁与自检都不会红 —— 缺口只能靠这条纯函数断言守住。
+  // 判据三向：① 产物源/接口必须收（否则新文件可绕过登记）；
+  // ② 资源/资产/测试夹具必须不收（否则地图被迫登记随包资产，噪音淹没真信号）；
+  // ③ 只有产物源集的清单收（test/androidTest 清单是测试夹具，不是构建输入）。
+  {
+    const mustKeep = [
+      'main/java/com/dsharnessmobile/shell/ShellOps.kt',
+      'main/java/com/dsharnessmobile/shell/Legacy.java',
+      'main/aidl/com/dsharnessmobile/shell/ShizukuUserService.aidl',
+      'debug/aidl/com/dsharnessmobile/shell/IBrowserSpike.aidl',
+      'main/AndroidManifest.xml',
+      'debug/AndroidManifest.xml',
+    ]
+    const mustDrop = [
+      'main/res/values/strings.xml',
+      'main/assets/console.html',
+      'main/assets/patched/fs-local-index.js',
+      'test/resources/protocol-v2/expected-v2.json',
+      'androidTest/AndroidManifest.xml',
+      'main/java/com/dsharnessmobile/shell/notes.md',
+    ]
+    const kept = mustKeep.filter((p) => isAppSrcUniverseEntry(p))
+    const leaked = mustDrop.filter((p) => isAppSrcUniverseEntry(p))
+    driftCases.push(['UNI #1022 产物源/接口（kt/kts/java/aidl/产物清单）必须入全域',
+      kept.length === mustKeep.length])
+    driftCases.push(['UNI #1022 资源/资产/测试夹具不得入全域', leaked.length === 0])
+  }
+
+  // ── #988 refresh / check 判据对称（同一份 classifySymbolHashAnchor）──────
+  //
+  // 判据只有一份实现，两侧都调它；这组断言钉的是**判决本身**三向齐全。
+  // 若有人把 refresh 改回 `some(...)`（至少一次），第三条会红。
+  {
+    const body = ['fun f() {', '  log()', '  log()', '}'].join(String.fromCharCode(10))
+    const hLog = contentHashOf('  log()')
+    const amb = classifySymbolHashAnchor(body, hLog)
+    const missing = classifySymbolHashAnchor(body, contentHashOf('  nowhere()'))
+    const exactBody = ['fun g() {', '  once()', '}'].join(String.fromCharCode(10))
+    const exact = classifySymbolHashAnchor(exactBody, contentHashOf('  once()'))
+    driftCases.push(['SYM #988 符号体内出现 2 次必须判 ambiguous（check 与 refresh 同判）',
+      amb.verdict === 'ambiguous' && amb.occurrences === 2])
+    driftCases.push(['SYM #988 符号体内不存在必须判 missing',
+      missing.verdict === 'missing' && missing.occurrences === 0])
+    driftCases.push(['SYM #988 符号体内恰好 1 次才判 exact（refresh 只能放行这一种）',
+      exact.verdict === 'exact' && exact.occurrences === 1])
+  }
+
+  // ── #1020 #expect 判据（去缩进规范化前缀 + 最小判别长度 + 命中不跳过基线钉）──
+  //
+  // 五条必须同时成立，缺一条就回到「一个空格洗白」的老路：
+  //   ① 纯空白片段（%20）拒；② 纯标点片段（%7D）拒；③ 短于最小长度的词法片段（val）拒；
+  //   ④ 命中位置必须是行首（去缩进后）而不是行内任意处；⑤ 命中之后基线钉仍然执行。
+  {
+    const line = "    return () => { marker.detach() }"
+    driftCases.push(['EXP #1020 纯空白片段（%20）必须拒', expectationMatch(line, ' ').kind === 'bad-anchor-expectation'])
+    driftCases.push(['EXP #1020 纯标点片段（%7D = }）必须拒', expectationMatch(line, '}').kind === 'bad-anchor-expectation'])
+    driftCases.push(['EXP #1020 短词法片段（val）必须拒', expectationMatch(line, 'val').kind === 'bad-anchor-expectation'])
+    driftCases.push(['EXP #1020 行内非行首位置必须拒（marker.detach 在行中间）',
+      expectationMatch(line, 'marker.detach').kind === 'bad-anchor-content'])
+    driftCases.push(['EXP #1020 合法行前缀必须放行（含缩进差异）',
+      expectationMatch(line, 'return () => { marker.detach() }').ok === true])
+    driftCases.push(['EXP #1020 前缀不得停在标识符中间（apply 不匹配 applySomething）',
+      expectationMatch('export function applySomething(ctx) {', 'export function apply').kind === 'bad-anchor-content'])
+  }
+  {
+    // ⑤ 命中即放行的第二半：key 在 sourceLines 基线里时，#expect 命中不得跳过基线钉。
+    const nl = String.fromCharCode(10)
+    const pinnedDoc = '<!-- TABLE-ROW' + nl + '| K01 | 甲 | 一句话 | 入口 | 稳态控制 | - | - | app/a.kt | 低 |' + nl + '-->' + nl
+      + '### K01 甲' + nl + nl + '- **一句话**：x' + nl + '- 关键坐标：`app/a.kt:3#expect=fun%20other()%3A%20Unit`' + nl
+      + '<!-- COUPLING' + nl + 'K01 -> K01 | 自环 | app/a.kt:2#expect=fun%20ready()%3A%20Unit' + nl + '-->' + nl
+      + '<!-- COVERAGE' + nl + 'app/a.kt' + nl + '-->' + nl
+    const drifted = mk({ 'app/a.kt': ['header', 'fun ready(): Unit', 'fun other(): Unit', 'fun helper()'] })
+    const withPin = {
+      sourceLines: { 'app/a.kt:3': ['fun other(): OLD'] },
+      legacyReferenceCounts: { 'app/a.kt:3': 1 },
+      symbols: {},
+      symbolHashes: {},
+    }
+    const noPin = { sourceLines: {}, legacyReferenceCounts: {}, symbols: {}, symbolHashes: {} }
+    const rPinned = checkDoc(pinnedDoc, ['app/a.kt'], drifted, withPin)
+    const rUnpinned = checkDoc(pinnedDoc, ['app/a.kt'], drifted, noPin)
+    driftCases.push(['EXP #1020 命中后仍执行基线钉（已钉坐标被改必须判红）',
+      rPinned.issues.some((i) => i.kind === 'anchor-content-drift')])
+    driftCases.push(['EXP #1020 未入基线的坐标命中即放行（基线钉无对象可钉）',
+      rUnpinned.issues.length === 0])
+  }
+
+  // ── #1023 耦合边基线双向比较 ────────────────────────────────────────────
+  //
+  // 单向比较的失效形态是「消失」，靠格式校验永远看不见（没有边 = 没有格式问题）。
+  // 三向：① 新增边判 coupling-unregistered；② 消失边判 coupling-vanished；
+  //       ③ 集合完全一致不误红。
+  {
+    const nlC = String.fromCharCode(10)
+    const mkCouplingDoc = (rows) => ['<!-- TABLE-ROW', '| K01 | 甲 | 一句话 | 入口 | 稳态控制 | - | - | app/a.kt | 低 |',
+      '| K02 | 乙 | 一句话 | 入口 | 稳态控制 | - | - | app/a.kt | 低 |', '-->',
+      '### K01 甲', '', '### K02 乙', '',
+      '<!-- COUPLING', ...rows, '-->',
+      '<!-- COVERAGE', 'app/a.kt', '-->', ''].join(nlC)
+    const baseRows = ['K01 -> K02 | 关系甲 | app/a.kt:4']
+    const base = { sourceLines: {}, legacyReferenceCounts: {}, symbols: {}, symbolHashes: {},
+      couplings: ['K01 -> K02 | 关系甲'] }
+    const fsC = mk({ 'app/a.kt': ['header', 'fun ready()', 'fun other(): Unit', 'fun helper()'] })
+    const uniC = ['app/a.kt']
+    const rAdded = checkDoc(mkCouplingDoc([...baseRows, 'K02 -> K01 | 关系乙 | app/a.kt:4']), uniC, fsC, base)
+    const rVanished = checkDoc(mkCouplingDoc([]), uniC, fsC, base)
+    const rSame = checkDoc(mkCouplingDoc(baseRows), uniC, fsC, base)
+    const rNoBaseline = checkDoc(mkCouplingDoc([]), uniC, fsC,
+      { sourceLines: {}, legacyReferenceCounts: {}, symbols: {}, symbolHashes: {} })
+    driftCases.push(['CPL #1023 新增耦合边判 coupling-unregistered',
+      rAdded.issues.some((i) => i.kind === 'coupling-unregistered')])
+    driftCases.push(['CPL #1023 消失的耦合边判 coupling-vanished（整节删掉必须红）',
+      rVanished.issues.some((i) => i.kind === 'coupling-vanished')])
+    driftCases.push(['CPL #1023 集合一致不得误红',
+      !rSame.issues.some((i) => i.kind === 'coupling-vanished' || i.kind === 'coupling-unregistered')])
+    driftCases.push(['CPL #1023 基线无 couplings 段时退回单向（不凭空判红）',
+      !rNoBaseline.issues.some((i) => i.kind === 'coupling-vanished')])
+    // 键必须区分同一对查点的不同关系：否则「删掉其中一条」在基线上看不出来。
+    const twoSame = [{ from: 'K01', to: 'K02', note: '甲', parsed: true },
+      { from: 'K01', to: 'K02', note: '乙', parsed: true }]
+    driftCases.push(['CPL #1023 同一对查点的两条不同关系必须算两条边',
+      couplingBaselineEntries(twoSame).length === 2])
+  }
+  /* ── issue #1111：符号段必须是「本次重写」而不是「并集继承」────────────────────
+   *
+   * 这两条钉的是**写盘形态**，不是某个具体键有没有被删 —— 因为具体键会随文档变。
+   * 判据：基线里的 symbolHashes 键，必须每一个都能在文档的 @hash 锚点里找到对应项。
+   * 旧实现（并集继承）下这条必红：任何一次行内容改动都会留下一条无锚点可解释的旧 @hash。
+   */
+  {
+    // 自足样本：不依赖仓库里的任何文件，只验「键集 ↔ 文档锚点集」这条对应关系。
+    const SAMPLE_DOC = [
+      '- 见 `a/b.kt#ghost@deadbeef`（有锚点，必须能解释这个键）',
+      '- 见 `a/b.kt#real@cafebabe`',
+    ].join('\n')
+    const sym = new Set()
+    const hashKeys = new Set()
+    for (const a of parseDoc(SAMPLE_DOC).anchors) {
+      if (!a.symbolForm) continue
+      sym.add(a.path + '#' + a.symbol)
+      if (a.symbolHash !== undefined) hashKeys.add(a.path + '#' + a.symbol + '@' + a.symbolHash)
+    }
+    // 用一份**故意含有孤儿键**的基线喂给一致性判据：旧形态会漏过，新形态必须识别出来。
+    // 这个键刻意不在上面的样本文档里 —— 它就是「文档没锚点、基线却留着」的那种陈旧键。
+    const withOrphan = { symbols: {}, symbolHashes: { 'a/b.kt#nowhere@0123abcd': true } }
+    const orphan = Object.keys(withOrphan.symbolHashes).filter((k) => !hashKeys.has(k))
+    driftCases.push(['#1111 孤儿 symbolHashes 键（无文档锚点可解释）必须能被识别',
+      orphan.length === 1])
+    // 反方向：文档里真实存在的 @hash 不得被判成孤儿（否则基线永远写不进东西）。
+    const realHash = [...hashKeys][0]
+    driftCases.push(['#1111 有锚点解释的 @hash 不得被误判成孤儿',
+      realHash !== undefined && !orphan.includes(realHash)])
+    // symbols 段的键同样必须与文档锚点集一致。
+    driftCases.push(['#1111 符号键集必须来自文档锚点（不是从旧基线继承）',
+      [...sym].every((k) => k.includes('#')) && sym.size > 0])
+  }
   for (const [name, okc] of driftCases) {
     if (okc) pass += 1
     lines.push((okc ? '  ok   ' : '  FAIL ') + name)
@@ -1350,13 +1794,187 @@ if (isMain) {
     console.error('CHECK-CODE-MAP FAILED：地图文档不存在：' + DOC_REL + '（先写文档，或 --doc 指定）')
     process.exit(2)
   }
-  const text = readFileSync(docAbs, 'utf8')
+  // let：--only 改写文档后需要重新读入，详见下方那段。其余路径只读一次。
+  let text = readFileSync(docAbs, 'utf8')
   const universe = collectUniverse(REPO)
   const fsView = makeFsView(REPO, NO_PARENT ? null : PARENT)
   // ── 推导迁移 / dry-run（用户决定 1）──────────────────────────────────────
   // 把 legacy 锚点（path:line + 该行内容）推导成可自愈的符号锚点：
   //   能唯一推导出符号 -> `path#Symbol@<内容哈希>`
   //   内容在全文不唯一 / 同名多符号且推不出宿主类 -> 保持 legacy 并列出，不猜
+  /* ── --only：只刷指定文件的锚点（说明见 ONLY_RAW 处）────────────────────────
+   *
+   * 推导逻辑与 --derive-anchors **完全复用**，不另写一套——两套推导必然漂移，
+   * 而漂移正是锚点要解决的问题。差别只在作用域：这里先按 listed 过滤 anchors。
+   */
+  if (ONLY_RAW !== null) {
+    if (ONLY_RAW.error) {
+      console.error('CHECK-CODE-MAP FAILED：' + ONLY_RAW.error)
+      process.exit(2)
+    }
+    const onlySet = new Set(ONLY_RAW.paths.map((s) => norm(s)))
+    const parsed = parseDoc(text)
+
+    /* 判据 1：越界即错。两种越界分开报，因为成因不同：
+     *   (a) 路径压根不在文档里 -> 拼错了，或该文件不属于地图；
+     *   (b) 文件在文档里但**没有任何锚点** -> 没有可刷的坐标。
+     * 都必须报错退出，不得静默跳过（静默跳过 = 「我以为刷了，其实没刷」）。 */
+    const mentioned = new Set()
+    for (const m of text.matchAll(/([A-Za-z0-9_./-]+\.(?:mjs|ps1|kt|ts|js|json|md|py|yml|yaml))/g)) {
+      mentioned.add(norm(m[1]))
+    }
+    const notInDoc = [...onlySet].filter((x) => !mentioned.has(x))
+    if (notInDoc.length > 0) {
+      console.error('CHECK-CODE-MAP FAILED：--only 给了执行地图里没有的路径（拼错，或该文件不属于地图）：')
+      for (const x of notInDoc) console.error('  - ' + x)
+      process.exit(2)
+    }
+    const anchoredPaths = new Set(parsed.anchors.map((a) => norm(a.path)))
+    const noAnchor = [...onlySet].filter((x) => !anchoredPaths.has(x))
+    if (noAnchor.length > 0) {
+      console.error('CHECK-CODE-MAP FAILED：--only 给了在执行地图里**没有任何锚点**的路径（没有可刷的坐标）：')
+      for (const x of noAnchor) console.error('  - ' + x)
+      process.exit(2)
+    }
+
+    const report = { symbol: [], disambiguated: [], content: [], failed: [] }
+    const rewrites = new Map()
+    for (const a of parsed.anchors) {
+      if (a.symbolForm) continue                      // 已是符号锚点，无需推导
+      if (!onlySet.has(norm(a.path))) continue        // 判据 2：只动 listed
+      const src = fsView.sourceLines(a.path)
+      if (src === null) { report.failed.push({ key: a.path + ':' + a.line, reason: '文件不存在' }); continue }
+      const lineText = src[a.line - 1]
+      if (lineText === undefined) { report.failed.push({ key: a.path + ':' + a.line, reason: '行号越界' }); continue }
+      const hash = contentHashOf(lineText)
+      const d = deriveSymbolAnchor(src, a.line, hash)
+      if (!d.ok) { report.failed.push({ key: a.path + ':' + a.line, reason: d.reason, text: lineText.trim().slice(0, 60) }); continue }
+      const target = d.symbol === null
+        ? a.path + '@' + d.hash
+        : a.path + '#' + d.symbol + '@' + d.hash
+      report[d.kind].push({ key: a.path + ':' + a.line, target, text: lineText.trim().slice(0, 60) })
+      rewrites.set(a.path + ':' + a.line, target)
+    }
+
+    // 判据 3：推不出锚点仍硬失败，绝不回退成行号锚。
+    if (report.failed.length > 0) {
+      console.error('CHECK-CODE-MAP FAILED：--only 的文件里有 ' + report.failed.length
+        + ' 条锚点推不出符号形态（不会回退成行号锚）：')
+      for (const f of report.failed) {
+        console.error('  - ' + f.key + '  ' + f.reason + (f.text ? '  | ' + f.text : ''))
+      }
+      console.error('  处置：给这些行补 #expect=<编码后的行前缀>，或把锚点移到有符号的行上。')
+      process.exit(1)
+    }
+
+    let out = text
+    let replaced = 0
+    for (const [key, target] of rewrites) {
+      const esc = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const re = new RegExp(esc + '(?!#expect=)', 'g')
+      out = out.replace(re, () => { replaced += 1; return target })
+    }
+    const shaOf = (s) => createHash('sha256').update(s, 'utf8').digest('hex')
+    const shaBefore = shaOf(text)
+    const shaAfter = shaOf(out)
+
+    /* issue #1179 缺陷 1：--only 必须与 --derive-anchors 同口径 —— 默认 dry-run，--write 才落盘。
+     *
+     * 旧实现直接 writeFileSync：另一个会话按「先跑一次看看」的心态跑了一次，7 处引用
+     * 已经落盘（第二次跑变 0 处）。一个改受版本控制文档的工具，默认行为必须是**不改动**。
+     */
+    if (!DERIVE_WRITE) {
+      console.log('--only 作用域：' + [...onlySet].join(', '))
+      console.log('')
+      console.log('DRY-RUN（未落盘）：')
+      console.log('  将改写 ' + replaced + ' 处引用 -> ' + DOC_REL + '（其余文件一字未动）')
+      console.log('  sha256 ' + DOC_REL + ': ' + shaBefore.slice(0, 16) + ' -> ' + shaAfter.slice(0, 16))
+      const willAdd = []
+      for (const [, target] of rewrites) {
+        const m = /#([A-Za-z_$][A-Za-z0-9_$.]*)@([0-9a-f]+)$/.exec(target)
+        if (m) willAdd.push(target)
+      }
+      console.log('  将新增 ' + willAdd.length + ' 条 symbolHashes 基线条目'
+        + (willAdd.length > 0 ? '（同批落盘，不需再跑 --refresh-anchor-baseline）' : ''))
+      console.log('  文件字节未改动。')
+      console.log('  确认无误后加上 --write 落盘：node scripts/check-code-map.mjs --only '
+        + [...onlySet].join(',') + ' --write')
+      process.exit(0)
+    }
+
+    /* issue #1179 缺陷 2：--only 改出的符号锚必须**同批**写进基线。
+     *
+     * 旧实现只改文档、不碰基线，于是跑完立刻 check-code-map 就报 symbol-unbaselined，
+     * 用户得再跑一次 --refresh-anchor-baseline 收尾 —— 而那条路正是我们要约束的
+     * （refresh 会做全集重写）。--only 自己知道它改了哪几条，就该自己把这几条的基线条目
+     * 写掉：**只动 listed 文件相关的键**，其余键一个不碰。
+     */
+    const nextSymbols = { ...(ANCHOR_BASELINE.symbols ?? {}) }
+    const nextSymbolHashes = { ...(ANCHOR_BASELINE.symbolHashes ?? {}) }
+    const nextSourceLines = { ...(ANCHOR_BASELINE.sourceLines ?? {}) }
+    const touchedHashes = []
+    const retiredSourceLines = []
+
+    for (const [key, target] of rewrites) {
+      // 这条 legacy 锚点退役：它的 sourceLines 键随之退休。
+      if (Object.hasOwn(nextSourceLines, key)) {
+        delete nextSourceLines[key]
+        retiredSourceLines.push(key)
+      }
+      const sym = /^(.+?)#([A-Za-z_$][A-Za-z0-9_$.]*)(?:@([0-9a-f]+))?$/.exec(target)
+      if (!sym) {
+        // 形如 `path@<hash>` 的纯内容锚点（无符号）：只退休 sourceLines，不进 symbols 段。
+        continue
+      }
+      const [, path, symbol, hash] = sym
+      const src = fsView.sourceLines(path)
+      const hit = src === null ? { found: false } : symbolAt(src, symbol)
+      if (!hit.found) {
+        console.error('CHECK-CODE-MAP FAILED：--only 推出来的符号在源码里找不到（不写基线）：'
+          + path + '#' + symbol)
+        process.exit(1)
+      }
+      nextSymbols[path + '#' + symbol] = hit.body
+      if (hash !== undefined) {
+        const { verdict, occurrences } = classifySymbolHashAnchor(hit.body, hash)
+        if (verdict === 'missing') {
+          console.error('CHECK-CODE-MAP FAILED：--only 推出的锚点内容不在符号体内（不写基线）：'
+            + path + '#' + symbol + '@' + hash)
+          process.exit(1)
+        }
+        if (verdict === 'ambiguous') {
+          console.error('CHECK-CODE-MAP FAILED：--only 推出的锚点内容在符号体内出现 '
+            + occurrences + ' 次，无法唯一定位（不写基线）：' + path + '#' + symbol + '@' + hash)
+          console.error('  处置：换一行在符号体内唯一的锚点，或收窄符号（#Class.member）。')
+          process.exit(1)
+        }
+        nextSymbolHashes[path + '#' + symbol + '@' + hash] = true
+        touchedHashes.push(path + '#' + symbol + '@' + hash)
+      }
+    }
+
+    writeFileSync(docAbs, out)
+    const nextBaseline = {
+      ...ANCHOR_BASELINE,
+      symbols: nextSymbols,
+      symbolHashes: nextSymbolHashes,
+      sourceLines: nextSourceLines,
+    }
+    writeFileSync(ANCHOR_BASELINE_ABS, JSON.stringify(nextBaseline, null, 2) + '\n')
+
+    console.log('--only 作用域：' + [...onlySet].join(', '))
+    console.log('')
+    console.log('已落盘（--write）：')
+    console.log('  改写 ' + replaced + ' 处引用 -> ' + DOC_REL + '（其余文件一字未动）')
+    console.log('  sha256 ' + DOC_REL + ': ' + shaBefore.slice(0, 16) + ' -> ' + shaAfter.slice(0, 16))
+    console.log('  基线同批更新：新增 ' + touchedHashes.length + ' 条 symbolHashes'
+      + (retiredSourceLines.length > 0 ? '，退休 ' + retiredSourceLines.length + ' 条 sourceLines' : ''))
+    for (const k of touchedHashes) console.log('    + symbolHashes: ' + k)
+    for (const k of retiredSourceLines) console.log('    - sourceLines: ' + k)
+    console.log('  下一步：node scripts/check-code-map.mjs（这一次就应该是 PASSED）')
+    process.exit(0)
+  }
+
   if (DERIVE_ANCHORS || DERIVE_DRY_RUN) {
     const parsed = parseDoc(text)
     const report = { symbol: [], disambiguated: [], content: [], failed: [] }
@@ -1394,7 +2012,8 @@ if (isMain) {
       }
       process.exit(0)
     }
-    // 真正改写文档：把 `path:line` 文本替换成推导出的符号锚点
+    /* 先把改写后的文本算出来（纯字符串操作，不碰磁盘）。
+     * 落盘与否由 DERIVE_WRITE 决定 —— 默认 dry-run，见 DERIVE_WRITE 处的说明。 */
     let out = text
     let replaced = 0
     for (const [key, target] of rewrites) {
@@ -1402,8 +2021,26 @@ if (isMain) {
       const re = new RegExp(esc + '(?!#expect=)', 'g')
       out = out.replace(re, () => { replaced += 1; return target })
     }
+    const shaOf = (s) => createHash('sha256').update(s, 'utf8').digest('hex')
+    const shaBefore = shaOf(text)
+    const shaAfter = shaOf(out)
+
+    if (!DERIVE_WRITE) {
+      // 默认 dry-run：只报告，不改文件。
+      console.log('')
+      console.log('DRY-RUN（未落盘）：')
+      console.log('  将改写 ' + replaced + ' 处引用 -> ' + DOC_REL)
+      console.log('  sha256 ' + DOC_REL + ': ' + shaBefore.slice(0, 16) + ' -> ' + shaAfter.slice(0, 16))
+      console.log('  文件字节未改动。')
+      console.log('  确认无误后加上 --write 落盘：node scripts/check-code-map.mjs --derive-anchors --write')
+      process.exit(0)
+    }
+
     writeFileSync(docAbs, out)
-    console.log('  已改写 ' + replaced + ' 处引用 -> ' + DOC_REL)
+    console.log('')
+    console.log('已落盘（--write）：')
+    console.log('  改写 ' + replaced + ' 处引用 -> ' + DOC_REL)
+    console.log('  sha256 ' + DOC_REL + ': ' + shaBefore.slice(0, 16) + ' -> ' + shaAfter.slice(0, 16))
     console.log('  下一步：node scripts/check-code-map.mjs --refresh-anchor-baseline')
     process.exit(0)
   }
@@ -1458,9 +2095,24 @@ if (isMain) {
           + ', actual ' + JSON.stringify(d.actual))
       }
     }
-    // 符号锚点：缓存「符号体归一化结果」。行号**不写入基线**——它只是缓存。
-    const symbols = { ...(anchorBaselineSymbols()) }
-    const symbolHashes = { ...(anchorBaselineSymbolHashes()) }
+    /* 符号锚点：缓存「符号体归一化结果」。行号**不写入基线**——它只是缓存。
+     *
+     * issue #1111：这两段改成**本次重写**，不再在旧基线上做并集。
+     *
+     * 为什么以前会单调累积（真因）：旧实现是 `{ ...(anchorBaselineSymbols()) }` 再逐条覆盖，
+     * 于是「本次没出现的键」永远留在文件里。而 symbolHashes 的键含 `@<内容哈希>`——同一个符号
+     * 改一次行内容就多一条新键，旧键却不会被删。结果是随**仓龄单调长大**：实测 94 条里 18 条是
+     * 同一符号的历史哈希。装比例阈值当兜底只是把「无限长」换成「长到某个数就永久拒绝刷新」，
+     * 那不是修复，是把病藏进倒计时。
+     *
+     * 现在的语义：**基线 == 本次解析出的锚点集**。这才是「基线是最新且合法的」该有的意思，
+     * 也才能让刷新幂等（同样的树刷两次，第二次零变更）。
+     *
+     * 丢弃旧键不是静默降级：下面 droppedSymbols / droppedSymbolHashes 会逐条打印，
+     * 且「推不出锚点」的符号在第 1839 行起就是硬失败（`process.exit(1)`），不是被悄悄丢掉。
+     */
+    const symbols = {}
+    const symbolHashes = {}
     const symbolKeys = parsed.anchors.filter((a) => a.symbolForm)
     for (const a of symbolKeys) {
       const src = fsView.sourceLines(a.path)
@@ -1474,50 +2126,152 @@ if (isMain) {
         process.exit(1)
       }
       symbols[a.path + '#' + a.symbol] = hit.body
-      // 带 @hash 的锚点：把「该行内容确实在这个符号体内」登记下来。
+      // 带 @hash 的锚点：把「该行内容在符号体内**恰好出现一次**」登记下来。
       // 判据锚在推导当时那一行的内容哈希上，同符号其它行改动不误伤。
+      //
+      // #988：判据与校验侧**同一份实现**（classifySymbolHashAnchor）。旧实现这里只查
+      // `some(...)`（至少一次），于是 ambiguous 锚点能被写进基线并打印 refreshed，
+      // 下一次 check 立刻判 symbol-content-ambiguous —— refresh 永远收敛不了。
+      // 现在 refresh 遇 ambiguous 直接拒写盘：写进去也是永远红的锚点，
+      // 让它进基线只会把「基线是最新且合法的」这个前提变成谎话。
       if (a.symbolHash !== undefined) {
-        const bodyLines = hit.body.split('\n')
-        const hasLine = bodyLines.some((l) => contentHashOf(l) === a.symbolHash)
-        if (!hasLine) {
-          console.error('Cannot refresh symbol-hash anchor (line content not inside symbol body): '
-            + a.path + '#' + a.symbol + '@' + a.symbolHash)
+        const key = a.path + '#' + a.symbol + '@' + a.symbolHash
+        const { verdict, occurrences } = classifySymbolHashAnchor(hit.body, a.symbolHash)
+        if (verdict === 'missing') {
+          console.error('Cannot refresh symbol-hash anchor (line content not inside symbol body): ' + key)
           process.exit(1)
         }
-        symbolHashes[a.path + '#' + a.symbol + '@' + a.symbolHash] = true
+        if (verdict === 'ambiguous') {
+          console.error('Refusing to refresh ambiguous symbol-hash anchor: ' + key)
+          console.error('  the anchored line content appears ' + occurrences + ' times in this symbol body,')
+          console.error('  so the anchor can never pin a single line. This is the same verdict the check')
+          console.error('  applies (symbol-content-ambiguous); writing it into the baseline would only')
+          console.error('  produce a permanently red anchor. Pick one of:')
+          console.error('    1. narrow the symbol (use #Class.member so the body is smaller), or')
+          console.error('    2. anchor a line that is unique inside the body, or')
+          console.error('    3. downgrade to a plain Markdown link (path#L<line>) when no gate is needed.')
+          process.exit(1)
+        }
+        symbolHashes[key] = true
       }
     }
-    // #868：写盘前断言，禁止「静默丢符号锚点基线」。判据与自检见 scripts/lib/refresh-guard.mjs。
-    // #868 补齐面：sourceLines 下降要么是合法陈旧键清理，要么是静默降级 —— 两者形状相同，
-    // 所以要求显式 --allow-source-lines-drop。拒绝时列出被丢弃的键，供人工判定属于哪一种。
+    /* issue #1148：sourceLines 段的陈旧键，规则与 symbols 段对齐。
+     *
+     * 以前这里只认「有没有传 --allow-source-lines-drop」：干净 main 上就有几条陈旧键
+     * （锚点已从文档删掉、基线还留着），于是**默认刷新直接 exit 1**，谁都得先想明白
+     * 该不该传那个旗标。那等于把「判断这是陈旧键还是解析退化」推给了人。
+     *
+     * 现在把那个判断交给机器，证据是现成的：**这条锚点还在文档里吗？**
+     *   - 不在 => 陈旧键，本次重写就该丢掉它（并逐条打印，不静默）；
+     *   - 在   => 却没能写进新基线 = 解析退化，仍然判红。
+     * 见 scripts/lib/refresh-guard.mjs 的 sourceLinesDropProblem。
+     */
+    const prevSourceLineKeys = Object.keys((ANCHOR_BASELINE && ANCHOR_BASELINE.sourceLines) || {})
     const slGuard = sourceLinesDropProblem(
-      Object.keys((ANCHOR_BASELINE && ANCHOR_BASELINE.sourceLines) || {}),
+      prevSourceLineKeys,
       Object.keys(sourceLines),
       ALLOW_SOURCE_LINES_DROP,
+      references,   // 本次文档里仍然存在的锚点 key 集合
     )
     if (slGuard !== null) {
       console.error('Refusing to refresh: ' + slGuard)
-      console.error('If this is a legitimate stale-key cleanup, re-run with --allow-source-lines-drop.')
+      console.error('If a human has reviewed exactly what would be dropped, re-run with --allow-source-lines-drop.')
       process.exit(1)
     }
+    // 陈旧键逐条打印（与 symbols/symbolHashes 段同一纪律：下降必须可见）。
+    const droppedSourceLines = prevSourceLineKeys.filter((k) => !Object.hasOwn(sourceLines, k))
+    if (droppedSourceLines.length > 0) {
+      console.log('Stale baseline keys dropped by this refresh:')
+      for (const k of droppedSourceLines) console.log('  - sourceLines: ' + k)
+      if (droppedSourceLines.length > 40) {
+        console.log('  ... total ' + droppedSourceLines.length + ' sourceLines keys')
+      }
+    }
+    /*
+     * issue #1111：丢弃键必须**逐条报出来**，不能静默。
+     *
+     * 与 sourceLines / couplings 两条同一条纪律：下降要么是「合法陈旧键清理」，要么是
+     * 「解析退化导致静默降级」——两者形状相同，所以先打印再让下面的一致性判据决定收不收。
+     * 差别在于这里的丢弃是**设计如此**：基线就是本次锚点集，陈旧键本就该消失。
+     */
+    const droppedSymbols = Object.keys(anchorBaselineSymbols()).filter((k) => !Object.hasOwn(symbols, k))
+    const droppedSymbolHashes = Object.keys(anchorBaselineSymbolHashes())
+      .filter((k) => !Object.hasOwn(symbolHashes, k))
+    if (droppedSymbols.length > 0 || droppedSymbolHashes.length > 0) {
+      console.log('Stale baseline keys dropped by this refresh:')
+      for (const k of droppedSymbols) console.log('  - symbols: ' + k)
+      for (const k of droppedSymbolHashes) console.log('  - symbolHashes: ' + k)
+      if (droppedSymbols.length + droppedSymbolHashes.length > 40) {
+        console.log('  ... total ' + (droppedSymbols.length + droppedSymbolHashes.length) + ' keys')
+      }
+    }
+    // issue #1003：把「允许下降」与「比例阈值」两个入口真正接上。
+    // 上一版形参存在却从未传值，等于守卫没有出口——合法清理只能手改基线 JSON。
     const refreshGuard = refreshCompletenessProblem(
       symbolKeys, symbols, symbolHashes,
       Object.keys(anchorBaselineSymbols()), Object.keys(anchorBaselineSymbolHashes()),
+      ALLOW_SYMBOL_DROP,
+      { maxRatio: SYMBOL_DROP_MAX_RATIO },
     )
     if (refreshGuard !== null) {
       console.error('Refusing to refresh: ' + refreshGuard)
-      console.error('This is how a silent baseline downgrade happens — check whether the anchors changed form.')
       process.exit(1)
     }
+    /*
+     * issue #1111：写盘前的**完整性断言** —— 基线键集必须与本次解析出的锚点集完全一致。
+     *
+     * 因为上面已把 symbols / symbolHashes 改成 `{}` 起手，这条断言在正常路径下恒真；
+     * 它存在的意义是**锁住那个不变量**，让将来任何人若把某一处改回「并集继承」，
+     * 这里立刻炸出来，而不是又悄悄开始累积。这类「守卫当前恒真」的断言是刻意保留的
+     * （与 refresh-guard.mjs 里 missSym/missHash 同一性质）：它防的是未来的退化，不是现在的 bug。
+     */
+    const documentSymbolKeys = new Set(symbolKeys.map((a) => a.path + '#' + a.symbol))
+    const documentSymbolHashKeys = new Set(symbolKeys
+      .filter((a) => a.symbolHash !== undefined)
+      .map((a) => a.path + '#' + a.symbol + '@' + a.symbolHash))
+    const extraSymbols = Object.keys(symbols).filter((k) => !documentSymbolKeys.has(k))
+    const extraHashes = Object.keys(symbolHashes).filter((k) => !documentSymbolHashKeys.has(k))
+    if (extraSymbols.length > 0 || extraHashes.length > 0) {
+      console.error('Refusing to refresh: the new baseline contains keys that no document anchor explains:')
+      for (const k of extraSymbols.slice(0, 20)) console.error('  - symbols: ' + k)
+      for (const k of extraHashes.slice(0, 20)) console.error('  - symbolHashes: ' + k)
+      console.error('The symbols/symbolHashes segments must be rebuilt from this run, never inherited.')
+      console.error('See the comment above their initialisation for why inheritance caused issue #1111.')
+      process.exit(1)
+    }
+    // #1023：耦合边基线。刷新侧与校验侧用**同一份** key 生成器（couplingBaselineEntries），
+    // 否则「刷新写进去的集合」与「校验比对的集合」会以各自的方式分叉 —— 那正是 #988 的形态。
+    // 这里也不做静默收缩：新集合比旧集合少时，与 sourceLines 同一条纪律，
+    // 要么是合法删除（显式 --allow-coupling-drop），要么是解析退化（拒绝写盘）。
+    const couplingsNext = couplingBaselineEntries(parsed.couplings)
+    const couplingsPrevRaw = ANCHOR_BASELINE && ANCHOR_BASELINE.couplings
+    const couplingsPrev = normalizeCouplingBaseline(couplingsPrevRaw)
+    if (couplingsPrev !== null) {
+      const nextSet = new Set(couplingsNext)
+      const dropped = [...couplingsPrev].filter((k) => !nextSet.has(k))
+      if (dropped.length > 0 && !ALLOW_COUPLING_DROP) {
+        console.error('Refusing to refresh: the couplings segment would drop ' + dropped.length
+          + ' edge(s) that the previous baseline had:')
+        for (const k of dropped.slice(0, 20)) console.error('  - ' + k)
+        if (dropped.length > 20) console.error('  ... 另有 ' + (dropped.length - 20) + ' 条')
+        console.error('If these edges were removed on purpose, re-run with --allow-coupling-drop.')
+        process.exit(1)
+      }
+      if (dropped.length > 0) {
+        console.warn('Explicit --allow-coupling-drop is removing ' + dropped.length + ' edge(s) from the baseline:')
+        for (const k of dropped.slice(0, 20)) console.warn('  - ' + k)
+      }
+    }
     writeFileSync(ANCHOR_BASELINE_ABS, JSON.stringify({
-      formatVersion: 2,
+      formatVersion: 3,
       legacyReferenceCounts: countLegacyReferences(parsed.anchors),
+      couplings: couplingsNext,
       sourceLines,
       symbols,
       symbolHashes,
     }, null, 2) + '\n')
     console.log('CHECK-CODE-MAP baseline refreshed: ' + references.size + ' legacy references, '
-      + symbolKeys.length + ' symbol anchors')
+      + symbolKeys.length + ' symbol anchors, ' + couplingsNext.length + ' coupling edges')
     process.exit(0)
   }
   const { issues, stats } = checkDoc(text, universe, fsView)

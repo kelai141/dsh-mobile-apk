@@ -126,9 +126,40 @@ export function wslPath(p) {
   return '/mnt/' + m[1].toLowerCase() + m[2].replace(/\\/g, '/')
 }
 
-/** 在 shell 执行一行命令并捕获 stdout（Windows 走 wsl.exe -e bash -lc；Linux 直接 /bin/bash -c）。 */
+/**
+ * 多行模板串 -> shell 可执行的单行（Windows CreateProcess 不允许裸换行，语法等价）。
+ *
+ * 分两步，因为两种换行**语义不同**：
+ *   ① 续行（`\` + 换行）= 作者显式的「下一行仍是同一条命令」→ 单行化后由空格承接，
+ *      反斜杠本身必须一起消失；
+ *   ② 其余换行 = 顺序执行的下一条命令 → 换成 ` ; ` 保序。
+ *
+ * 早先的实现只有一条 `\s*\n+\s*` -> ` ; `，把两类换行当同一件事，于是续行符被孤立成
+ * `… && \ ; ls …`：bash 把孤立 `\` 当空命令，**每次调用都往 stderr 吐一句**
+ * `bash: line 1:  : command not found`，那条命令的真状态被淹没在噪声里（实测于构建器归档段）。
+ * 归一化只该消掉换行，不该改写作者写的续行结构。
+ */
+export const toOneLine = (cmd) => String(cmd)
+  .trim()
+  // 续行：反斜杠 + 换行 + 下一行缩进 -> 一个空格（等价于「同一行继续写」）
+  .replace(/\\\r?\n\s*/g, ' ')
+  // 其余换行是命令分隔（多行模板 = 顺序执行的几条命令）
+  .replace(/\r?\n\s*/g, ' ; ')
+
+/**
+ * 在 shell 执行一行命令并捕获 stdout（Windows 走 wsl.exe -e bash -lc；Linux 直接 /bin/bash -c）。
+ *
+ * `opts.pipefail`（默认 true）给整行加 `set -o pipefail`：**这是默认值，不是可选项**。
+ * 真因（issue #1074 实锤）：构建器的归档段是 `tar … 2>/dev/null | xz … > snapshot.tar.xz`，
+ * 没有 pipefail 时管道状态 = **最后一段**（xz）的状态，而 xz 对「读到的残缺流」照样 exit 0。
+ * 于是 tar 层面的失败（成员缺失 / 文件不可读 / 读到一半被改）全部不可见：残缺归档被算
+ * sha256、写进 snapshot.sha256，再作为构建输入发布出去，全链零报错。
+ *   - 管道里每一段都是判据：任一非 0 就必须中止，而不是让最后一段替前面所有段背书。
+ *   - 少数调用点**确实**要「只看最后一段」（例：`grep` 没命中时按空结果处理）——那必须显式
+ *     `{ pipefail: false }`，让「我知情」留在调用点上，而不是让沉默的默认值替所有人做决定。
+ */
 export function sh(cmd, opts = {}) {
-  const oneLine = String(cmd).trim().replace(/\s*\n+\s*/g, ' ; ')
+  const oneLine = withPipefail(toOneLine(cmd), opts.pipefail ?? true)
   const maxBuffer = opts.maxBuffer ?? 96 * 1024 * 1024
   const encoding = opts.encoding ?? 'utf8'
   if (IS_WSL_HOST) {
@@ -137,9 +168,13 @@ export function sh(cmd, opts = {}) {
   return execSync(oneLine, { encoding, shell: '/bin/bash', maxBuffer })
 }
 
+/** 给一行 shell 命令加 `set -o pipefail` 前缀（幂等：已经带过就不重复加）。 */
+export const withPipefail = (oneLine, enabled = true) =>
+  enabled && !/\bset -o pipefail\b/.test(oneLine) ? 'set -o pipefail; ' + oneLine : oneLine
+
 /** 在 shell 执行命令，返回 { status, stdout, stderr }（不抛异常；用于需要判非零的场景）。 */
 export function shStatus(cmd, opts = {}) {
-  const oneLine = String(cmd).trim().replace(/\s*\n+\s*/g, ' ; ')
+  const oneLine = withPipefail(toOneLine(cmd), opts.pipefail ?? true)
   const maxBuffer = opts.maxBuffer ?? 96 * 1024 * 1024
   try {
     const o = IS_WSL_HOST

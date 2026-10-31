@@ -58,8 +58,6 @@ class OverlayPanel(private val svc: OverlayService) {
   /** 最近一次 session/list 的失败说明（"" = 成功）。S2-9：失败不得画成「共 0 个会话」。 */
   private var pickerLoadError = ""
 
-  /** 治理后的会话条目（官方可见性口径过滤后）。 */
-  internal class PickerSession(val id: String, val label: String, val running: Boolean, val relative: String)
 
   // 协议（0.1.2-rc.1 dsh-api-gateway/lib/{index,client}.js 核实，0.13.3 W3）：
   // WS /api/remote.mux 上 open `$events` 流；服务端 item value 帧形：
@@ -600,7 +598,7 @@ class OverlayPanel(private val svc: OverlayService) {
   private fun pendingChip(label: String, filled: Boolean, red: Boolean, dp: Float, onClick: () -> Unit): TextView = TextView(svc).apply {
     text = label
     textSize = 12f
-    maxLines = 2
+    maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END
     setTextColor(if (filled || red) Color.WHITE else themeColors().inputText)
     background = GradientDrawable().apply {
       cornerRadius = 14 * dp
@@ -831,7 +829,7 @@ class OverlayPanel(private val svc: OverlayService) {
           text = desc
           textSize = 11f
           setTextColor(subColor)
-          maxLines = 1
+          maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = (8 * dp).toInt() })
         box.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
           setMargins(0, 0, 0, (4 * dp).toInt())
@@ -1226,8 +1224,11 @@ class OverlayPanel(private val svc: OverlayService) {
               if (runningId.isEmpty() && running) runningId = sid
               if (recentId.isEmpty() && !blank) recentId = sid
               // 0.13.8 G2 (A-R2) label fallback chain: title -> workspace basename ->
-              // blank session + relative time (no more "(Nth session)" placeholders).
+              // placeholder + relative time (no more "(Nth session)" placeholders).
               // session/list already arrives sorted by updatedAt desc.
+              // #987：占位名与相对时间都是**随语言变**的文案，不能在取列表时算死（切语言后没有
+              // 任何路径能重算）。这里只留语言无关的部分（标题 / 目录名），整行文案交给
+              // [pickerSessionLabel] 在渲染时按当前语言求值。
               val titleObj = it.optJSONObject("projections")?.optJSONObject("values")?.opt("title")
               val title = if (titleObj == null || titleObj === JSONObject.NULL) "" else titleObj.toString()
               val cwd = it.optString("cwd", "")
@@ -1235,10 +1236,9 @@ class OverlayPanel(private val svc: OverlayService) {
               val label = when {
                 title.isNotBlank() -> title
                 cwd.isNotBlank() -> cwd.trimEnd('/').substringAfterLast('/')
-                blank -> "\u7a7a\u4f1a\u8bdd \u00b7 " + relativeTime(updated)
-                else -> "\u672a\u547d\u540d\u4f1a\u8bdd \u00b7 " + relativeTime(updated)
+                else -> ""
               }
-              pickerSessions.add(PickerSession(sid, label, running, relativeTime(updated)))
+              pickerSessions.add(PickerSession(sid, label, running, updated))
             }
           }
         } catch (_: Exception) {}
@@ -1274,14 +1274,18 @@ class OverlayPanel(private val svc: OverlayService) {
       contentDescription = t("查看工作汇报", "View work report")
     }
     // 目标行与输入提示也一并重算：面板开着时切语言，它们同样不会自己重建（内部会顺带刷新 hint）。
-    updatePickerRowText()
+    // #987：选择器窗口若正开着，行里的「相对时间」也要在这一刻按新语言重算——它此前是取列表时
+    // 算死的中文，只重算目标行不足以修掉列表里那一列。refreshPickerMarks 内含 updatePickerRowText。
+    refreshPickerMarks()
   }
 
   /** Target row text (new-session placeholder or "<label>(current)"). */
   internal fun updatePickerRowText() {
     val row = sessionPicker ?: return
     val current = pickerSessions.firstOrNull { it.id == svc.activeSessionId }
-    row.text = if (svc.activeSessionId.isEmpty()) "\uff0b \u65b0\u4f1a\u8bdd"
+    // #987：目标行会在 applyLanguage() 里被重算，这里**不得**再写死中文——同一句话的构造点
+    // （面板创建时的 t("＋ 新会话", "＋ New session")）本来就是双语的，重算路径必须同口径。
+    row.text = if (svc.activeSessionId.isEmpty()) t("\uff0b \u65b0\u4f1a\u8bdd", "\uff0b New session")
     else sessionRowText(current?.label, UiText.isEnglish(svc))
     refreshInputHint()
   }
@@ -1300,18 +1304,6 @@ class OverlayPanel(private val svc: OverlayService) {
   /** A-R5: only ids present in the visible session list may become activeSessionId. */
   internal fun isKnownSessionId(id: String): Boolean =
     id.isEmpty() || pickerSessions.any { it.id == id }
-
-  private fun relativeTime(ts: Long): String {
-    if (ts <= 0L) return "\u672a\u77e5\u65f6\u95f4"
-    val diff = System.currentTimeMillis() - ts
-    val m = diff / 60_000
-    return when {
-      m < 1 -> "\u521a\u521a"
-      m < 60 -> m.toString() + "\u5206\u949f\u524d"
-      m < 60 * 24 -> (m / 60).toString() + "\u5c0f\u65f6\u524d"
-      else -> (m / (60 * 24)).toString() + "\u5929\u524d"
-    }
-  }
 
   // -- picker window (0.13.8 G2: independent TYPE_APPLICATION_OVERLAY window, not a
   //    Spinner SUB_PANEL child of the panel whose frame geometry clipped the list). --
@@ -1348,8 +1340,9 @@ class OverlayPanel(private val svc: OverlayService) {
       val failed = pickerLoadError.isNotEmpty()
       text = when {
         failed -> pickerLoadError + t("（点此重试）", " (tap to retry)")
-        !pickerShowAll && pickerSessions.size > 8 -> "\u5168\u90e8\u4f1a\u8bdd\uff08" + pickerSessions.size + "\uff09"
-        else -> "\u5171 " + pickerSessions.size + " \u4e2a\u4f1a\u8bdd"
+        !pickerShowAll && pickerSessions.size > 8 ->
+          t("\u5168\u90e8\u4f1a\u8bdd\uff08" + pickerSessions.size + "\uff09", "All sessions (" + pickerSessions.size + ")")
+        else -> t("\u5171 " + pickerSessions.size + " \u4e2a\u4f1a\u8bdd", pickerSessions.size.toString() + " sessions")
       }
       textSize = 12f
       setTextColor(
@@ -1372,7 +1365,7 @@ class OverlayPanel(private val svc: OverlayService) {
         setOnClickListener {
           pickerShowAll = true
           fillPickerRows(list)
-          text = "\u5171 " + pickerSessions.size + " \u4e2a\u4f1a\u8bdd"
+          text = t("\u5171 " + pickerSessions.size + " \u4e2a\u4f1a\u8bdd", pickerSessions.size.toString() + " sessions")
         }
       }
     }
@@ -1444,16 +1437,22 @@ class OverlayPanel(private val svc: OverlayService) {
           closePicker()
           updatePickerRowText()
           // P3-4：会话名超长时附省略号（旧实现 `take(20)` 硬截，用户看到一个像完整名字的片段）。
-          svc.flashStatus(if (id.isEmpty()) "\u5df2\u5207\u6362\u5230 \u65b0\u4f1a\u8bdd" else "\u5df2\u5207\u6362\u5230 " + UserCopy.truncateWithEllipsis(text, 20))
+          val short = UserCopy.truncateWithEllipsis(text, 20)
+          svc.flashStatus(
+            if (id.isEmpty()) t("\u5df2\u5207\u6362\u5230 \u65b0\u4f1a\u8bdd", "Switched to a new session")
+            else t("\u5df2\u5207\u6362\u5230 " + short, "Switched to " + short),
+          )
           svc.renderPanelOnly()
         }
       }
       list.addView(tv, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
     }
-    addRow("\uff0b \u65b0\u4f1a\u8bdd", "", false, svc.activeSessionId.isEmpty())
+    // #987：行文案在**每次渲染**时按当前语言求值（会话名是数据，相对时间是界面文案）。
+    val english = UiText.isEnglish(svc)
+    addRow(t("\uff0b \u65b0\u4f1a\u8bdd", "\uff0b New session"), "", false, svc.activeSessionId.isEmpty())
     val cap = if (pickerShowAll) Int.MAX_VALUE else 8
     pickerSessions.take(cap).forEach { s ->
-      addRow(s.label, s.id, s.running, s.id == svc.activeSessionId)
+      addRow(pickerSessionLabelText(s, english), s.id, s.running, s.id == svc.activeSessionId)
     }
   }
 }
@@ -1497,6 +1496,54 @@ internal fun sessionRowText(label: String?, english: Boolean = false): String =
   (label?.takeIf { it.isNotBlank() }
     ?: if (english) SESSION_UNKNOWN_LABEL_EN else SESSION_UNKNOWN_LABEL) +
     if (english) " (current)" else "（当前）"
+
+/**
+ * 治理后的会话条目（官方可见性口径过滤后）。
+ *
+ * `updatedAt` 存**原始时间戳**而不是算好的「3 分钟前」：#987 的形态正是把中文相对时间
+ * 在取列表时算死，切语言后没有任何路径能重算。存时间戳后，列表行文案在每次渲染时按当前
+ * 语言求值（见 [pickerSessionLabelText] 与 [pickerRelativeTimeText]）。
+ */
+internal class PickerSession(val id: String, val label: String, val running: Boolean, val updatedAt: Long)
+
+/**
+ * 目标行文案（#987 的纯函数真源）：空目标 = 新建会话占位，否则 = 会话名（当前）。
+ *
+ * 缺陷现场：构造时这一行是 `t("＋ 新会话", "＋ New session")`（双语），而 `applyLanguage()` 的
+ * 重算路径 `updatePickerRowText()` 里又写死了中文——**切一次语言就回中文**，构造点的双语白写。
+ */
+internal fun pickerTargetRowText(label: String?, english: Boolean): String =
+  if (label == null) UiText.t(english, "\uff0b \u65b0\u4f1a\u8bdd", "\uff0b New session")
+  else sessionRowText(label, english)
+
+/**
+ * 会话列表里那一行「名字 · 相对时间」（#987）。
+ *
+ * 名字本身是**用户/引擎数据**（会话标题、目录名），原样保留；占位名与相对时间才是界面文案，
+ * 按当前语言求值。名字为空 = 取列表时既没有标题也没有目录名 → 用「未命名会话」占位。
+ */
+internal fun pickerSessionLabelText(session: PickerSession, english: Boolean, now: Long = System.currentTimeMillis()): String {
+  val name = session.label.takeIf { it.isNotBlank() }
+    ?: if (english) SESSION_UNKNOWN_LABEL_EN else SESSION_UNKNOWN_LABEL
+  return name + " \u00b7 " + pickerRelativeTimeText(session.updatedAt, english, now)
+}
+
+/**
+ * 相对时间（#987：必须跟着语言走）。
+ *
+ * 缺陷现场：旧实现全分支硬编码中文（`刚刚` / `N分钟前` / `未知时间`），且值在取会话列表时就
+ * 算死存进 [PickerSession]——切英文后目标行与列表里的时间仍回中文。现在纯函数 + 每次渲染求值。
+ */
+internal fun pickerRelativeTimeText(ts: Long, english: Boolean, now: Long = System.currentTimeMillis()): String {
+  if (ts <= 0L) return UiText.t(english, "\u672a\u77e5\u65f6\u95f4", "unknown time")
+  val m = (now - ts) / 60_000
+  return when {
+    m < 1 -> UiText.t(english, "\u521a\u521a", "just now")
+    m < 60 -> if (english) "$m min ago" else "${m}\u5206\u949f\u524d"
+    m < 60 * 24 -> if (english) "${m / 60} h ago" else "${m / 60}\u5c0f\u65f6\u524d"
+    else -> if (english) "${m / (60 * 24)} d ago" else "${m / (60 * 24)}\u5929\u524d"
+  }
+}
 
 /** 未命名会话的英文占位（与 [SESSION_UNKNOWN_LABEL] 同义）。 */
 internal const val SESSION_UNKNOWN_LABEL_EN = "Untitled session"

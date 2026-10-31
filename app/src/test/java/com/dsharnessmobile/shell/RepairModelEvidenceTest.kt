@@ -45,6 +45,8 @@ class RepairModelEvidenceTest {
     val produced = listOf(
       "parsed", "missing", "unsafe", "invalid",
       "skipped-legacy", "fallback-used", "no-credential",
+      // issue #1012：配置树的根整个不存在（运行时还没解出来）。
+      "root-missing",
     )
     // 文案表在 RepairModelNotice.statusLabels（生产代码用的那一份），不在 RepairActivity 里。
     val ui = codeOnly(source("RepairModelNotice.kt"))
@@ -85,6 +87,46 @@ class RepairModelEvidenceTest {
     val block = mirror.substringAfter("repair-model-source.json").substringBefore("logcat");
     assertFalse("不得往私有原件写内容", block.contains("evidence.writeText"));
     assertTrue("只从原件读", block.contains("evidence.readText"));
+  }
+
+  // ── 2.5 接线（issue #1012）：判定归 Notice，Activity 不得自己合成结论 ──────
+
+  @Test
+  fun `界面不得把零候选合成读取失败`() {
+    // 这是本 issue 最容易复发的形态：present() 里 failure 压过一切，若 Activity 仍把
+    // 「0 候选」塞进 failure，rootMissing 分支永远轮不到，用户看到的还是「未读到可用模型」。
+    // 修前 RepairActivity 正是这么写的（if (connections.isEmpty()) UiText.t(... "未读到可用模型" ...)）。
+    val repair = codeOnly(source("RepairActivity.kt"))
+    assertFalse("不得把「未读到可用模型」合成成 modelFailure/failure（那会压过根缺失判定）",
+      repair.contains("if (connections.isEmpty()) UiText.t"))
+    assertFalse("重新读取也不得自己合成「没模型」结论",
+      repair.contains("loaded.getOrDefault(emptyList()).isEmpty()"))
+  }
+
+  @Test
+  fun `发送键跟随 sendEnabled 而不是候选数`() {
+    // issue #1012 A3：三处写 send.isEnabled 的地方都不能再按候选数关。
+    val repair = codeOnly(source("RepairActivity.kt"))
+    assertTrue("applyModelState 必须用 sendEnabled", repair.contains("send.isEnabled = notice.sendEnabled"))
+    assertFalse("不得再按候选数关发送键", repair.contains("send.isEnabled = connections.isNotEmpty()"))
+    assertFalse("也不得再跟模型选择器共用同一个开关", repair.contains("send.isEnabled = notice.modelControlsEnabled"))
+  }
+
+  @Test
+  fun `根缺失文案由生产代码提供且中英双语`() {
+    // 上面那些用例自己传文案，钉的是 present() 的分支行为；若生产代码把文案改错，
+    // 它们照样绿。这里钉生产侧那一份：必须点名「运行时/重试引擎」，且英文同处一个调用。
+    val repair = source("RepairActivity.kt")
+    val zh = repair.substringAfter("rootMissingText = UiText.t(this,", "")
+    assertTrue("必须给 rootMissingText 传生产文案", zh.isNotEmpty())
+    val call = zh.substringBefore(")")
+    assertTrue("中文必须点明运行时（实际：" + call + "）", call.contains("运行时"))
+    assertTrue("中文必须指向重试引擎（实际：" + call + "）", call.contains("重试引擎"))
+    assertTrue("英文必须同处一个 UiText.t 调用", call.contains("retry the engine"))
+    // 必须显式否定「模型没配好」这个误诊，而不是把它当结论说出去。
+    assertTrue("必须显式排除「模型没配好」这个误诊（实际：" + call + "）",
+      call.contains("这不是模型没配好"))
+    assertFalse("不得把根缺失当结论说成没配模型", call.startsWith("模型没配好"))
   }
 
   // ── 3. 回落语义：marker 只决定优先级 ──────────────────────────────────────

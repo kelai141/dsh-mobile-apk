@@ -43,6 +43,9 @@ internal object SafeMode {
 
   const val STATE_FILE = "safe-mode.json"
 
+  /** 首轮 live patch 缺席（不是普通文件）时代入的合成空清单；它**不是**用户原文，不得当作备份复用。 */
+  private val EMPTY_PATCH_BYTES = "[]\n".toByteArray()
+
   /**
    * Ownership is established only by the exact `{id,name}` manifest packaged for this snapshot.
    *
@@ -92,7 +95,7 @@ internal object SafeMode {
       if (itemIndent == null) { out.add(line); out.addAll(body); i = end; continue }
       val kept = ArrayList<String>()
       for (item in insertChildChunks(body, itemIndent)) {
-        val name = itemName(item.lines)
+        val name = itemName(item.lines, itemIndent)
         val id = itemId(item.lines)
         if (name != null && !isProductOwned(name, hardEntries, id)) continue // 第三方条目：整条摘掉
         kept.addAll(item.lines)
@@ -227,9 +230,11 @@ internal object SafeMode {
     if (Files.exists(stateFile.toPath(), LinkOption.NOFOLLOW_LINKS) && !Files.isRegularFile(stateFile.toPath(), LinkOption.NOFOLLOW_LINKS)) {
       return Result(false, "安全模式状态不是普通文件，已拒绝读取或覆盖。")
     }
+    var existingState: org.json.JSONObject? = null
     if (stateFile.isFile) {
       try {
         val existing = org.json.JSONObject(stateFile.readText())
+        existingState = existing
         if (existing.has("profile") && existing.optString("profile") != "web") {
           return Result(false, "安全模式状态绑定到 profile ${existing.optString("profile")}，拒绝按 web 状态处理。")
         }
@@ -248,7 +253,30 @@ internal object SafeMode {
       }
     }
     if (!selectedAutoDir.exists() && !selectedAutoDir.mkdirs()) return Result(false, "无法创建安全模式目录：" + selectedAutoDir.absolutePath)
-    val backup = File(selectedAutoDir, "safe-mode-backup-$id.yml")
+    // issue #982：`phase=writing` 重入时，live patch 可能**已经是上一轮 ⑤ 写进去的过滤结果**。
+    // 现象：用户看到「进入失败」会再点一次按钮，而每次点击都传新 id（GuidePageRenderer 的 newId()）。
+    // 真因：旧实现照旧用新 id 另造备份，把这份过滤结果当「进入前原文」记进状态；此后 off 整份
+    // 还原的是最小化清单 —— 第三方插件条目再也回不来（首轮原字节还在 recovery/ 里，但状态不指向它）。
+    // 修法：重入且**原备份仍然有效**（文件在场 + 哈希与状态里的 backupSha256 匹配，复用既有
+    // loadBackup 的同一套校验口径）时，沿用原备份与原 sha：不覆盖备份文件、状态里的 backup 字段
+    // 回到原值。只有原备份缺失或哈希不匹配时才另造新备份 —— 保住今天「首轮没留下可用备份」的兜底。
+    val writingReentry = existingState != null &&
+      existingState!!.optString("phase", "") == PHASE_WRITING &&
+      existingState!!.optString("backup", "").isNotBlank()
+    // 读一次、核一次、用这一次读到的字节（与 loadBackup 的 read-once 纪律同款，避免核完再重开）。
+    val reusableBackup: Pair<File, ByteArray>? = if (writingReentry) {
+      val priorPath = existingState!!.optString("backup", "")
+      val priorSha = existingState!!.optString("backupSha256", "")
+      val priorId = existingState!!.optString("snapshotId", "")
+      val prior = backupFor(selectedAutoDir, priorPath, priorId, "safe-mode-backup-")
+      val priorBytes = prior?.let { runCatching { if (it.isFile && it.canRead()) it.readBytes() else null }.getOrNull() }
+      // 首轮 patch 缺席时会备份合成空清单（见 [EMPTY_PATCH_BYTES]）；那不是用户原文，复用它会让
+      // 退出后写回一份凭空的 `[]`。这种情形走兜底分支另造备份，与「原备份不可用」同口径。
+      val usable = prior != null && priorBytes != null && priorSha.isNotBlank() &&
+        !priorBytes.contentEquals(EMPTY_PATCH_BYTES) && sha256(priorBytes) == priorSha
+      if (usable) prior!! to priorBytes!! else null
+    } else null
+    val backup = reusableBackup?.first ?: File(selectedAutoDir, "safe-mode-backup-$id.yml")
     val homeBackup = File(selectedAutoDir, "safe-mode-home-backup-$id.yml")
     val packageFile = File(patch.parentFile, "package.json")
     val packageExists = Files.exists(packageFile.toPath(), LinkOption.NOFOLLOW_LINKS)
@@ -268,15 +296,22 @@ internal object SafeMode {
     val homeExisted = homePatch.isFile
     var homeSha = ""
     return try {
-      val original = if (patch.isFile) patch.readBytes() else "[]\n".toByteArray()
-      atomicWrite(backup, original)
+      // issue #982：重入复用原备份时，`original` 必须是**首次进入前**的字节，不能是 live patch
+      // 当前的内容（那已经是上一轮 ⑤ 写进去的过滤结果）。字节只从这里来，后面 ⑤ 的过滤与回执
+      // 都基于它，因此整条链路都回到真原文。
+      val original = reusableBackup?.second ?: if (patch.isFile) patch.readBytes() else EMPTY_PATCH_BYTES
+      // 复用分支不重写备份文件：覆盖它就等于把首轮原文替换成过滤结果，正是本条要修的事。
+      if (reusableBackup == null) atomicWrite(backup, original)
       // ③ 校验：备份必须真的落盘且与原文件逐字节相同（只信 readBytes 的结果，不信任 writeBytes 没抛）。
       if (!backup.isFile || !backup.readBytes().contentEquals(original)) {
         return Result(false, "安全模式备份校验失败（备份与原文不一致），已放弃进入——未改动任何文件")
       }
       val originalSha = sha256(original)
       ensureRecoveryCopy(selectedAutoDir, original, originalSha, atomicWrite)
-      if (homeExisted) {
+      // issue #982：复用分支同样不重做 home / package.json 备份。它们的 live 内容此刻可能也已是
+      // 上一轮 ⑤ 写进去的最小化结果，照抄一份只会把过滤结果再登记成一个「备份」；状态里的
+      // homeBackup / pkgBackup 指针保持首轮值，退出时还原的仍是真原文。
+      if (homeExisted && reusableBackup == null) {
         val homeBytes = homePatch.readBytes()
         atomicWrite(homeBackup, homeBytes)
         if (!homeBackup.readBytes().contentEquals(homeBytes)) {
@@ -285,7 +320,7 @@ internal object SafeMode {
         homeSha = sha256(homeBytes)
         ensureRecoveryCopy(selectedAutoDir, homeBytes, homeSha, atomicWrite)
       }
-      if (packageBytes != null) {
+      if (packageBytes != null && reusableBackup == null) {
         val packageBackup = File(selectedAutoDir, "safe-mode-pkg-$id.json")
         atomicWrite(packageBackup, packageBytes)
         if (!packageBackup.isFile || !packageBackup.readBytes().contentEquals(packageBytes)) {
@@ -294,13 +329,21 @@ internal object SafeMode {
         ensureRecoveryCopy(selectedAutoDir, packageBytes, sha256(packageBytes), atomicWrite)
       }
       // ④ 先落状态：此后无论何时崩溃，off 都能凭备份整份还原。
-      atomicWrite(stateFile, (
-        org.json.JSONObject()
-          // issue #683：先落 `phase=writing` 而不是 `active=true` —— 备份路径照旧早早记下，
-          // 便于中途崩溃时 off 仍能整份还原；但「已生效」这个结论要等 ⑤ 全部写完才给。
-          .put("active", false)
-          .put("phase", PHASE_WRITING)
-          .put("profile", "web")
+      //
+      // issue #982：重入复用原备份时，状态必须是**首轮状态在 phase 维度的延续**，而不是一份全新记录。
+      // 两个原因：① 备份指针（backup / homeBackup / pkgBackup / 各自 sha）指向的是首轮真正的
+      // 「进入前原文」，换成新值就等于把过滤结果登记成原文；② `snapshotId` 与备份**文件名**绑定
+      // （见 [backupFor] 的后缀校验），若状态换了新 id 而备份文件仍叫首轮 id，off 会直接判
+      // 「备份路径不符合状态文件约定」而拒绝退出 —— 用户从「插件丢了」变成「退出不了」。
+      val nextState = if (reusableBackup != null) org.json.JSONObject(existingState!!.toString()) else org.json.JSONObject()
+      nextState
+        // issue #683：先落 `phase=writing` 而不是 `active=true` —— 备份路径照旧早早记下，
+        // 便于中途崩溃时 off 仍能整份还原；但「已生效」这个结论要等 ⑤ 全部写完才给。
+        .put("active", false)
+        .put("phase", PHASE_WRITING)
+        .put("profile", "web")
+      if (reusableBackup == null) {
+        nextState
           .put("enteredAt", java.time.Instant.now().toString())
           .put("by", "shell-guide-button")
           .put("backup", backup.absolutePath)
@@ -311,8 +354,8 @@ internal object SafeMode {
           .put("pkgBackup", if (packageBytes != null) File(selectedAutoDir, "safe-mode-pkg-$id.json").absolutePath else "")
           .put("pkgBackupSha256", if (packageBytes != null) sha256(packageBytes) else "")
           .put("snapshotId", id)
-          .toString(2)
-      ).toByteArray(Charsets.UTF_8))
+      }
+      atomicWrite(stateFile, nextState.toString(2).toByteArray(Charsets.UTF_8))
       // ⑤ 最后改 patch。
       val filtered = filterThirdPartyInserts(String(original, Charsets.UTF_8), hardEntries.orEmpty())
       patch.parentFile?.mkdirs()
@@ -325,12 +368,15 @@ internal object SafeMode {
       done.put("active", true).put("phase", PHASE_ACTIVE)
       atomicWrite(stateFile, done.toString(2).toByteArray(Charsets.UTF_8))
       val removed = removedPluginNames(String(original, Charsets.UTF_8), hardEntries.orEmpty())
+      // 回执里的档 id 必须是**状态里实际记着的那个**：复用分支沿用首轮 id，报新 id 会让用户
+      // 拿它去 `undo-snapshots/auto` 找备份时找不到对应文件。
+      val effectiveId = if (reusableBackup != null) existingState!!.optString("snapshotId", id) else id
       Result(
         true,
         if (removed.isEmpty())
           "已进入安全模式（本次装配清单里没有第三方插件条目，故清单本身未变；改配置后重启应用生效）。"
         else "已进入安全模式：已摘除 " + removed.size + " 个第三方插件条目（" + removed.joinToString("、") + "），重启应用生效。",
-        id,
+        effectiveId,
       )
     } catch (t: Throwable) {
       // 失败回执不得吞掉真因（用户要拿它去修）。
@@ -666,8 +712,30 @@ internal object SafeMode {
   }
 
   /** 条目的包名：取条目片段里**第一个** `name:`（条目自身的 name 行总在 config 之前）。 */
-  private fun itemName(chunk: List<String>): String? =
-    chunk.firstNotNullOfOrNull { NAME_KEY.find(it)?.groupValues?.get(1)?.trim('\'', '"') }
+  /**
+   * 条目的包名：只认**条目键层**（与首键同列）的 `name:`。
+   *
+   * 为什么不能取「片段里第一个 name:」：`config:` 子树里出现 `name:` 很常见（插件配置字段），
+   * 那样「只有 `id:`、没有 `name:`」的条目会被判成「有 name 且名字不匹配」⇒ 整条被当第三方摘掉，
+   * 与本函数文档「子条目若没有 name 就保留（宁可不摘也不误伤；摘错一个能跑的比漏摘一个更糟）」
+   * 直接矛盾 —— 2026-10-28 自查实测到这条误摘（python 等价算法复现后落到 JVM 用例）。
+   *
+   * 判据：首键所在列（`    - id: x` 里 `id` 的列）＝键层列；只有与该列**同列**的行才算条目自己的键。
+   * 更深的一律是某个子块的内容（`config:` 里的 `name:` 缩进必然更大），一律不参与归属判定。
+   * 首键本身就是 name（`- name: x`）时直接取它。
+   */
+  private fun itemName(chunk: List<String>, itemIndent: Int): String? {
+    val header = chunk.firstOrNull { ITEM.containsMatchIn(it) } ?: return null
+    NAME_KEY.find(header)?.let { return it.groupValues[1].trim('\'', '"') }
+    val keyColumn = header.indexOfFirst { it.isLetter() }
+    if (keyColumn <= itemIndent) return null
+    for (line in chunk) {
+      if (line.isBlank() || line === header) continue
+      if (line.indexOfFirst { c -> !c.isWhitespace() } != keyColumn) continue
+      NAME_KEY.find(line)?.let { return it.groupValues[1].trim('\'', '"') }
+    }
+    return null
+  }
 
   private fun itemId(chunk: List<String>): String? = chunk.firstNotNullOfOrNull {
     Regex("""^\s*-\s+id:\s*['"]?([^'"\s]+)""").find(it)?.groupValues?.get(1)
@@ -683,7 +751,7 @@ internal object SafeMode {
       while (end < lines.size && !endsInsertGroup(lines[end])) end++
       val body = lines.subList(i + 1, end)
       val indent = body.firstOrNull { ITEM.containsMatchIn(it) }?.indexOfFirst { !it.isWhitespace() }
-      if (indent != null) for (chunk in insertChildChunks(body, indent)) out += InsertEntry(itemId(chunk.lines), itemName(chunk.lines))
+      if (indent != null) for (chunk in insertChildChunks(body, indent)) out += InsertEntry(itemId(chunk.lines), itemName(chunk.lines, indent))
       i = end
     }
     return out
@@ -702,7 +770,7 @@ internal object SafeMode {
       val itemIndent = body.firstOrNull { ITEM.containsMatchIn(it) }
         ?.let { it.indexOfFirst { c -> !c.isWhitespace() } }
       if (itemIndent != null) {
-        for (child in insertChildChunks(body, itemIndent)) itemName(child.lines)?.let { out.add(it) }
+        for (child in insertChildChunks(body, itemIndent)) itemName(child.lines, itemIndent)?.let { out.add(it) }
       }
       i = end
     }

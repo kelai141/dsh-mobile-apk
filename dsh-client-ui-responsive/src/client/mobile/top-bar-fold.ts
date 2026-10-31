@@ -23,7 +23,7 @@ import { HeaderPopups } from './header-popups.ts'
 
 /** 上游标题栏插件 UI 的座位（稳定属性，非 hashed 类名）。 */
 const ACTIONS_SELECTOR = 'div[data-slot="conversation.session.header.actions"]'
-/** 上游视图标签条（ConversationSession.tsx:143 的稳定锚点）。箭头挂在**它内部**末位。 */
+/** 上游视图标签条（ConversationSession.tsx:143 的稳定锚点）。箭头挂在它的**父行**末位。 */
 const TABS_SELECTOR = '[data-conversation-tabs]'
 /** 承载标题行 containment 的那一行（上游 .titleRow 带 container-type: inline-size）。 */
 const TITLE_ROW_FALLBACK = 'div[data-slot="conversation.session.header"] > div'
@@ -85,7 +85,8 @@ export class TopBarFold {
   private container: HTMLElement | null = null
   private titleRow: HTMLElement | null = null
   private arrow: HTMLButtonElement | null = null
-  private arrowHost: HTMLElement | null = null
+  /** 箭头当前的宿主：视图标签条所在的那一行（父行，不是标签条本身）。 */
+  private arrowRow: HTMLElement | null = null
   /** 容器上被我们覆盖掉的内联样式原值，解除时逐项写回。 */
   private readonly styleSnapshot = new Map<string, string>()
   private scheduled = false
@@ -230,29 +231,23 @@ export class TopBarFold {
   }
 
   /**
-   * 确保折叠箭头是**标签行**的最后一个元素（标签行不在场则不动）。
+   * 确保折叠箭头是**标签行**（视图标签条所在的父行）的最后一个孩子。
    *
-   * 挂到 `[data-conversation-tabs]` 的**父节点**而不是它自己：标签条是 React 拥有的列表
-   * （`visibleViewLimit` 变化时它会往自己末尾插标签）。箭头一旦进了标签条内部，React 下一次
-   * 追加标签就会插到箭头**之后**，箭头看起来就夹在两个视图标签中间了。父节点是那一行容器
-   * （`div.tabs`），React 不往那里插标签，箭头待得住。
+   * 宿主是 `tabs.parentElement`（真机实测 = 上游 `div.wSkVaW_tabs`），不是标签条本身：
+   * 需求是「整行最右、与『对话 / 轨迹』同一行」，而行内剩余空间只在父行里 —— 标签条自己是
+   * `flex: 0 1 auto`、宽度=内容宽，箭头留在它内部无论加不加 auto 都推不动（实测 x 恒为 144）。
    *
-   * 「末位」每次同步都要重新确认，不能只在首次挂载时确认一次：React 可能在我们插入之后
-   * 又往行尾追加节点（例如「…」菜单晚一步出现），箭头就不再是最右了。
+   * 「末位」每次同步都要重新确认，不能只在首次挂载时确认一次：父行里还有上游「…」菜单
+   * （`span.wSkVaW_viewsMoreAnchor + button[aria-haspopup=menu]`）等兄弟节点，它们可能
+   * 晚一步挂载或重挂，一旦排到箭头后面，箭头就不再是最右了。
    */
   private ensureArrow(): void {
-    // 挂进标签条**本身**，不是它的父行。
-    //
-    // 父行里还有「…」菜单等兄弟节点，把箭头 append 到父行只能保证它是**父行**的末位，
-    // 与「标签行最右侧」不是一回事（实机实测：父行末位时箭头 x=548，视口宽 600，
-    // 而最后一个标签的右边界只有 112，中间空出整段）。挂进标签条后箭头紧贴最后一个
-    // 标签，才是需求说的位置。
-    const host = document.querySelector<HTMLElement>(TABS_SELECTOR)
-    if (host === null) return
-    if (this.arrow !== null && this.arrowHost === host && host.lastElementChild === this.arrow) return
-    // 方向对但位置不是末位：原地重挂即可，不必重建按钮（保焦点/保已绑监听）。
-    if (this.arrow !== null && this.arrowHost === host) {
-      host.appendChild(this.arrow)
+    const row = this.resolveArrowRow()
+    if (row === null) return
+    if (this.arrow !== null && this.arrowRow === row && row.lastElementChild === this.arrow) return
+    // 行对但位置不是末位：原地重挂即可，不必重建按钮（保焦点/保已绑监听）。
+    if (this.arrow !== null && this.arrowRow === row) {
+      row.appendChild(this.arrow)
       return
     }
     this.removeArrow()
@@ -263,9 +258,26 @@ export class TopBarFold {
     arrow.setAttribute('aria-label', this.foldLabel())
     arrow.appendChild(chevron())
     arrow.addEventListener('click', this.onArrowClick)
-    host.appendChild(arrow)
+    row.appendChild(arrow)
     this.arrow = arrow
-    this.arrowHost = host
+    this.arrowRow = row
+  }
+
+  /**
+   * 箭头的宿主 = 视图标签条所在的那一行（`tabs.parentElement`，上游 `div.wSkVaW_tabs`）。
+   *
+   * 真机实测（emulator-5558 竖屏 600x1067，dsh 0.2.1-rc.2，真实非空会话）：
+   *   div.wSkVaW_tabs   display:flex; flex-wrap:wrap; align-items:flex-start;
+   *                     gap:16px 20px; padding-left:8px; rect x=20 right=572
+   *     ├ div.wSkVaW_viewTabs[data-conversation-tabs]  width=140.02; flex:0 1 auto
+   *     └ span.wSkVaW_viewsMoreAnchor + button[aria-haspopup=menu]
+   *
+   * 父节点就是行容器（不是 display:contents 的插槽）：标签条自己是 `flex: 0 1 auto`、
+   * 宽度=内容宽，行内剩余空间只存在于父行里，所以箭头必须挂父行才推得到最右。
+   */
+  private resolveArrowRow(): HTMLElement | null {
+    const tabs = document.querySelector<HTMLElement>(TABS_SELECTOR)
+    return tabs?.parentElement ?? null
   }
 
   private readonly onArrowClick = (event: MouseEvent): void => {
@@ -285,7 +297,7 @@ export class TopBarFold {
     if (this.arrow !== null) this.arrow.removeEventListener('click', this.onArrowClick)
     this.arrow?.remove()
     this.arrow = null
-    this.arrowHost = null
+    this.arrowRow = null
     // 箭头没了：缓存里的「已写状态」作废，下一次 syncState() 必须重写。
     this.written = null
   }

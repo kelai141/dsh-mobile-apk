@@ -1,5 +1,5 @@
 /**
- * 交付文件卡片（换行汇总卡）上的两段胶囊：另一种打开方式 + 转发。
+ * 交付文件卡片（换行汇总卡）上的两段胶囊：用其他应用打开 + 转发。
  *
  * 卡片本身是上游 ui-deliverables 的 ChangedFiles（只读包，不能改），它没有文件级操作插槽，
  * 所以这里按 DOM 增强：找到卡片、读出该文件的绝对设备路径、挂上胶囊。卡片自身的单击行为
@@ -10,17 +10,14 @@
  * 里面就是 resolveWorkspacePath 之后的绝对设备路径（ChangedFiles.tsx:52/75 单文件、
  * :85/94 多文件行）。照这个可访问性接线取值，比按样式类定位稳定得多。
  *
- * ## 为什么左侧可以反向
- * DEFAULT_OPEN_MODE 是这一处唯一的默认开口假设。胶囊左段永远是「另一种」打开方式：
- * 默认是侧栏 → 左段是外部应用（open-in-new）；默认改成外部应用 → 左段变成侧栏预览。
- * 以后加快捷设置行，只改这个常量，不用动组件。
+ * ## 左段为什么固定是「用其他应用打开」
+ * 曾经有一个 DEFAULT_OPEN_MODE 常量，设想是「默认单击是侧栏预览 → 左段是外部应用；把常量改成
+ * 外部应用 → 左段变成侧栏预览」。#991 判定这个设想不成立并删掉了它：卡片的单击行为属于上游
+ * ChangedFiles，本模块明确不改写、也无法改写（ChangedFiles 是只读包）。常量只能反向左段、
+ * 反向不了卡片本身——一旦把它改成 external，卡片单击仍是侧栏预览、左段也变成侧栏预览，外部
+ * 打开能力反而凭空消失。所以左段就写死为它实际做的事：用其他应用打开。要加真正的「默认打开
+ * 方式」设置行，前提是上游给出改写卡片单击的插槽，那时再引入模式概念。
  */
-
-/** 单击卡片的默认打开方式。加设置行时只改这里，胶囊左段自动反向。 */
-export const DEFAULT_OPEN_MODE: OpenMode = 'sidebar'
-
-/** 单击卡片时的目标：侧边栏预览，或交给外部应用。 */
-export type OpenMode = 'sidebar' | 'external'
 
 /** 在卡片上执行的两种动作。 */
 export type CardAction = 'external' | 'share'
@@ -30,6 +27,30 @@ const CAPSULE_ATTR = 'data-dsh-file-capsule'
 const EXTERNAL_ATTR = 'data-dsh-file-capsule-external'
 const SHARE_ATTR = 'data-dsh-file-capsule-share'
 const SEPARATOR_ATTR = 'data-dsh-file-capsule-separator'
+/** 只剩转发时的标记：左段不在场，样式据此不拉满整行。 */
+const SHARE_ONLY_ATTR = 'data-dsh-file-capsule-share-only'
+
+/** 胶囊自身的标记选择器（本模块自产节点的唯一判据，避免手拼方括号）。 */
+const CAPSULE_SELECTOR = '[' + CAPSULE_ATTR + ']'
+
+/**
+ * 这批新增节点是不是**全**为本模块自己挂的胶囊。
+ *
+ * 我们 append 胶囊会立刻产生一条 childList 记录，若不认出来就会「自己叫自己」：
+ * 每挂一条胶囊多换一次重扫。判定按「全为自有」而非「含自有」——含别的东西时仍要处理，
+ * 否则混在一条记录里的真实新增会被吞掉。
+ * @param nodes - 变更记录里的新增节点。
+ * @returns 新增节点非空且逐个都在胶囊内（或本身就是胶囊）。
+ */
+function onlyOwnCapsules(nodes: ArrayLike<Node>): boolean {
+  if (nodes.length === 0) return false
+  for (let index = 0; index < nodes.length; index += 1) {
+    const node = nodes[index]
+    const element = node instanceof Element ? node : node.parentElement
+    if (element === null || element.closest(CAPSULE_SELECTOR) === null) return false
+  }
+  return true
+}
 
 /** 扩展名 → MIME。未知一律空串，交给壳侧嗅探（见 android-bridge.ts 的 openFileExternal 注释）。 */
 const MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
@@ -189,6 +210,23 @@ export interface FileCardCopy {
  *
  * attach 挂 MutationObserver，detach 摘干净（HMR 安全）。卡片由 React 管理，我们只在卡片
  * 末尾追加自己的节点，且不监听 React 的渲染，所以不会和它抢 DOM。
+ *
+ * ## 观察策略（#985）：观察面全文档，扫描范围只到「脏卡片」
+ * 流式输出期间 DOM 每拍都在变，旧实现是「回调直接 scan()，每次对整份文档
+ * querySelectorAll(CARD_SELECTOR) 再逐卡片逐行 querySelector」——代价随
+ * 「历史消息数 × 变更次数」增长。现在分两步：
+ *
+ * 1. **回调只登记**：`onMutations` 在记录本身上做廉价判定（脱树 / 无新增元素 /
+ *    全是本模块自产的胶囊 → 直接跳过），只把「这一拍真正要重扫的卡片」放进待办集合，
+ *    然后 `schedule()` 用 pending 标志 + `queueMicrotask` 合批（写法对齐
+ *    `composer-sheet.ts` 的 `schedulePatch`）。
+ * 2. **扫描范围有界**：变更落在已知卡片内部（流式新增行、迟到补写的路径 span）→ 只重扫
+ *    那张卡片；否则只在这个新增子树里找卡片，绝不下探到整份文档。全文档扫描只剩
+ *    attach 的首次 `scanAll()` 一次。
+ *
+ * 「扫了几次 / 扫了多大范围」由 `cardsIn()` 与 `scanBatch()` 两个 protected 方法承担
+ * （用例覆写它们来计数），生产代码里没有为测试留的可变状态；待办集合每拍清空、detach
+ * 也清空，所以不会长期持有已移除卡片的引用。
  */
 export class FileCardCapsule {
   private observer: MutationObserver | null = null
@@ -196,8 +234,21 @@ export class FileCardCapsule {
   private bridge: () => FileCardBridge
   private copy: FileCardCopy
   private attached = false
-  /** 已被证明没有外部接收方：不再展示左段（避免留一个点了报错的按钮）。 */
-  private externalMissing = false
+  /**
+   * 壳侧是否**确证**过这台机器没有外部接收方（终态）。
+   *
+   * 只有壳侧回 `error === 'no-receiver'` 才算确证，见 {@link finish}。
+   * **桥方法不在场不是确证**（issue #990）：桥由壳侧在页面脚本之后注入，晚注入是本类明确
+   * 支持的场景（`bridge` 是每次动作取值的函数）；把「还没注入」当作「没人接」会让左段
+   * 永久消失，桥后来出现了也救不回来。旧实现正是在 act() 的 early return 里置位，故有此事。
+   */
+  private noReceiverConfirmed = false
+  /** 这一拍待重扫的卡片（Set 去重：同一张卡被多条记录点到只扫一次）。 */
+  private pending = new Set<HTMLElement>()
+  /** 合批标志：本拍是否已排过一次扫描。 */
+  private batchScheduled = false
+  /** 挂载代次：detach 自增，已排队但属于上一轮的合批任务据此作废（HMR 重装不读旧批次）。 */
+  private generation = 0
 
   /**
    * @param bridge - 桥面提供者；每次动作时调用，以便壳侧晚于插件注入也能生效。
@@ -219,23 +270,28 @@ export class FileCardCapsule {
   }
 
   /**
-   * 左侧那一段是否可用。
+   * 左侧那一段是否可用（是否可以渲染、以及是否可以保留在已渲染的胶囊里）。
    *
-   * 桥不存在（桌面/旧壳）→ 不可用。桥在但曾被答 no-handler → 也不可用。
-   * 真正的「先问有没有接收方」需要壳侧提供一个查询方法；当前协议只有两个执行方法，
-   * 所以这里用「桥在 + 尚未被证明没有」这条判据，宁可先显示、一旦确证就永久隐藏。
-   * @returns 是否渲染左段。
+   * 判据 = **桥方法在场** 且 **壳侧尚未确证没有接收方**。两种「不行」的区别是本类语义的核心：
+   * - 桥方法不在场（桌面 / 旧壳 / 壳侧还没注入）→ 只是**这一轮不确定**，不是无能力：
+   *   下一次 scan（桥出现后）会重新渲染左段，已经渲染成「只剩转发」的胶囊也会被补回左段。
+   * - 壳侧答 no-receiver → **确证**这台机器没人接，终态收起（见 {@link finish}）。
+   *
+   * 真正的「先问有没有接收方」需要壳侧提供查询方法；当前协议只有两个执行方法，所以这里用
+   * 「桥在 + 尚未被确证没有」这条判据，宁可先显示、一旦确证才收起。
+   * @returns 是否渲染/保留左段。
    */
   externalAvailable(): boolean {
-    return typeof this.bridge().openFileExternal === 'function' && !this.externalMissing
+    return typeof this.bridge().openFileExternal === 'function' && !this.noReceiverConfirmed
   }
 
   attach(): void {
     if (this.attached) return
     this.attached = true
     try {
-      this.scan()
-      this.observer = new MutationObserver(() => { this.scan() })
+      // 唯一一次全文档扫描：挂载时把存量卡片补齐。
+      this.scanAll()
+      this.observer = new MutationObserver((records) => { this.onMutations(records) })
       this.observer.observe(document.documentElement, { childList: true, subtree: true })
     } catch (error) {
       // 手机运行时守卫：卡片增强失败不能影响对话渲染。
@@ -248,42 +304,151 @@ export class FileCardCapsule {
     this.attached = false
     this.observer?.disconnect()
     this.observer = null
+    // 待办里的卡片引用一并放掉：HMR 重装后不能靠上一轮的脏集合继续扫（也不能长期持有已移除的节点）。
+    this.pending.clear()
+    this.batchScheduled = false
+    this.generation += 1
     for (const capsule of document.querySelectorAll('[' + CAPSULE_ATTR + ']')) capsule.remove()
   }
 
-  /** 给还没挂胶囊的文件行补齐。已经是幂等的：已存在就跳过。 */
-  private scan(): void {
-    for (const card of document.querySelectorAll<HTMLElement>(CARD_SELECTOR)) {
-      const single = card.hasAttribute('data-single')
-      if (single) {
-        // 单文件卡片：上游把 header 包在 FileOpenAnchor 里（div > span > button），
-        // 不是卡片的直接子元素，所以不能写 :scope > button（实机取证：那条恒 NULL）。
-        // 落点用卡片自身——按钮的 parentElement 是 FileOpenAnchor 的 span，挂进去会被
-        // 上游重渲染吞掉，而且胶囊会挤在按钮内部而不是卡片角落。
-        const header = card.querySelector<HTMLElement>('button[aria-describedby]')
-        if (header !== null) this.ensureCapsule(header, card)
-      } else {
-        // 多文件卡片：每行同样是 `li > span(FileOpenAnchor) > button`，按钮不是 li 的
-        // 直接子元素，所以 `li > button` 也匹配不到（实机取证）。按 li 逐个取行内按钮。
-        for (const row of card.querySelectorAll<HTMLElement>('li')) {
-          const anchor = row.querySelector<HTMLElement>('button[aria-describedby]')
-          if (anchor !== null) this.ensureCapsule(anchor, row)
-        }
+  /**
+   * 观察器回调：**只登记、不扫描**。
+   *
+   * 流式输出时这个回调每拍都会被叫到，所以这里只做 O(记录数) 的廉价判定，真正的 DOM 遍历
+   * 延到 `schedule()` 合批之后，且只碰待办里的卡片：
+   * - 记录目标已脱树（卡片被移除 / 整枝被替换）→ 跳过，不留失效引用；
+   * - 记录是本模块自己的回声（目标在胶囊里，或新增的正是我们刚挂的胶囊）→ 跳过；
+   * - 记录落在已知卡片内部（流式新增行、迟到的路径 span）→ 只重扫那一张卡片；
+   * - 其余（新卡片被插入别处）→ 只在**新增子树**里找卡片，绝不下探整份文档。
+   * @param records - 本拍投递的变更记录。
+   */
+  private onMutations(records: readonly MutationRecord[]): void {
+    for (const record of records) {
+      const target = record.target
+      // 目标脱树：卡片/容器已经不在文档里，扫它只会拿到失效引用。
+      if (!(target instanceof Element) || !target.isConnected) continue
+      // 本模块自己产出的节点（胶囊自身，或刚挂上去的那一条）：不重扫，避免自己叫自己。
+      if (target.closest(CAPSULE_SELECTOR) !== null) continue
+      if (onlyOwnCapsules(record.addedNodes)) continue
+      const card = target.closest<HTMLElement>(CARD_SELECTOR)
+      if (card !== null) {
+        this.pending.add(card)
+        continue
       }
+      for (const node of record.addedNodes) {
+        if (!(node instanceof Element)) continue
+        // 装不下卡片的叶子元素（流式输出的每个 token 节点）直接跳过，连子树查询都不做。
+        if (node.childElementCount === 0 && !node.matches(CARD_SELECTOR)) continue
+        // 新卡片可能自带整棵子树（多文件卡片一次插入），也可能只是外层容器。
+        for (const found of this.cardsIn(node)) this.pending.add(found)
+      }
+    }
+    if (this.pending.size > 0) this.schedule()
+  }
+
+  /** 合批：同一拍里的多条记录只换一次扫描（同 composer-sheet 的 schedulePatch 写法）。 */
+  private schedule(): void {
+    if (this.batchScheduled) return
+    this.batchScheduled = true
+    const generation = this.generation
+    queueMicrotask(() => {
+      // 已 detach（或 detach 后又 attach）：这一批属于上一轮，直接作废。
+      if (generation !== this.generation) return
+      this.batchScheduled = false
+      if (!this.attached) return
+      const cards = [...this.pending]
+      this.pending.clear()
+      this.scanBatch(cards)
+    })
+  }
+
+  /**
+   * 在给定根里找卡片。**唯一的卡片查询入口**：全文档扫描与子树扫描都走这里，
+   * 所以「扫了几次、扫了多大范围」是可以用例覆写它来数的量（生产代码里没有为测试留的状态）。
+   * @param root - 查询根：`document`（仅 attach 一次）或变更记录里的新增子树。
+   * @returns 该根里（含根本身）的卡片元素。
+   */
+  protected cardsIn(root: ParentNode): HTMLElement[] {
+    const found: HTMLElement[] = []
+    if (root instanceof Element && root.matches(CARD_SELECTOR)) found.push(root as HTMLElement)
+    for (const card of root.querySelectorAll<HTMLElement>(CARD_SELECTOR)) found.push(card)
+    return found
+  }
+
+  /**
+   * 扫描一批卡片。
+   * @param cards - 待扫卡片；合批期间被移出文档的在扫之前剔掉。
+   */
+  protected scanBatch(cards: readonly HTMLElement[]): void {
+    for (const card of cards) {
+      if (!card.isConnected) continue
+      this.scanCard(card)
+    }
+  }
+
+  /** 全文档扫一次。只在 attach 时发生，不要放回观察器回调里。 */
+  private scanAll(): void {
+    this.scanBatch(this.cardsIn(document))
+  }
+
+  /** 给一张卡片里还没挂胶囊的文件行补齐。已经是幂等的：已存在就跳过。 */
+  private scanCard(card: HTMLElement): void {
+    const single = card.hasAttribute('data-single')
+    if (single) {
+      // 单文件卡片：上游把 header 包在 FileOpenAnchor 里（div > span > button），
+      // 不是卡片的直接子元素，所以不能写 :scope > button（实机取证：那条恒 NULL）。
+      // 落点用卡片自身——按钮的 parentElement 是 FileOpenAnchor 的 span，挂进去会被
+      // 上游重渲染吞掉，而且胶囊会挤在按钮内部而不是卡片角落。
+      const header = card.querySelector<HTMLElement>('button[aria-describedby]')
+      if (header !== null) this.ensureCapsule(header, card)
+      return
+    }
+    // 多文件卡片：每行同样是 `li > span(FileOpenAnchor) > button`，按钮不是 li 的
+    // 直接子元素，所以 `li > button` 也匹配不到（实机取证）。按 li 逐个取行内按钮。
+    for (const row of card.querySelectorAll<HTMLElement>('li')) {
+      const anchor = row.querySelector<HTMLElement>('button[aria-describedby]')
+      if (anchor !== null) this.ensureCapsule(anchor, row)
     }
   }
 
   /**
    * 为一行文件挂胶囊。
+   *
+   * 已挂过的胶囊不是直接跳过：桥缺席时渲染出来的胶囊只有转发，壳侧晚注入桥之后必须能补回左段
+   * （#990 的用户可见后果）。补挂判据仍是 {@link externalAvailable}，所以被 no-receiver 确证
+   * 收起过的胶囊不会被补回来。
    * @param anchor - 该行的可点元素（上游写的 aria-describedby 指向绝对路径）。
    * @param host - 胶囊的落点（卡片自身或该行 li）。
    */
   private ensureCapsule(anchor: HTMLElement, host: HTMLElement | null): void {
     if (host === null) return
-    if (host.querySelector(':scope > [' + CAPSULE_ATTR + ']') !== null) return
+    const existing = host.querySelector<HTMLElement>(':scope > [' + CAPSULE_ATTR + ']')
+    if (existing !== null) {
+      this.restoreExternalSegment(existing, anchor)
+      return
+    }
     const path = this.pathOf(anchor)
     if (path === undefined) return
-    host.append(this.buildCapsule(anchor, path))
+    host.append(this.buildCapsule(path))
+  }
+
+  /**
+   * 给「只剩转发」的胶囊补回左段（桥晚注入后重新可用）。
+   *
+   * 幂等且可重入：左段已在场、桥仍不在场、上游没写路径、或已被壳侧确证没有接收方，都原地返回。
+   * @param capsule - 已渲染的胶囊。
+   * @param anchor - 该行的可点元素（用来重新取绝对路径）。
+   */
+  private restoreExternalSegment(capsule: HTMLElement, anchor: HTMLElement): void {
+    if (capsule.querySelector('[' + EXTERNAL_ATTR + ']') !== null) return
+    if (!this.externalAvailable()) return
+    const share = capsule.querySelector<HTMLElement>('[' + SHARE_ATTR + ']')
+    if (share === null) return
+    const path = this.pathOf(anchor)
+    if (path === undefined) return
+    capsule.insertBefore(this.buildExternalSegment(path), share)
+    capsule.insertBefore(this.buildSeparator(), share)
+    capsule.removeAttribute(SHARE_ONLY_ATTR)
   }
 
   /**
@@ -302,37 +467,60 @@ export class FileCardCapsule {
     return text === undefined || text === '' ? undefined : text
   }
 
-  private buildCapsule(anchor: HTMLElement, path: string): HTMLElement {
+  /**
+   * 造一条胶囊。
+   * @param path - 该文件的绝对设备路径。
+   * @returns 胶囊容器：左段在桥可用时才有，右段恒在。
+   */
+  private buildCapsule(path: string): HTMLElement {
     const capsule = document.createElement('div')
     capsule.setAttribute(CAPSULE_ATTR, '')
-    const name = nameOf(path)
-    const external = this.buildSegment(EXTERNAL_ATTR, ICON_FOLDER, this.copy.external(name), CHIP_ATTR)
+    if (this.externalAvailable()) {
+      capsule.append(this.buildExternalSegment(path), this.buildSeparator())
+    } else {
+      // 没有左段：整条胶囊只剩转发，不留空壳。桥晚注入后由 restoreExternalSegment 补回。
+      capsule.setAttribute(SHARE_ONLY_ATTR, '')
+    }
+    capsule.append(this.buildShareSegment(path))
+    return capsule
+  }
+
+  /**
+   * 左段：带描边小块的文件夹按钮，点击走 openFileExternal。
+   * @param path - 该文件的绝对设备路径。
+   * @returns 左段按钮。
+   */
+  private buildExternalSegment(path: string): HTMLButtonElement {
+    const external = this.buildSegment(EXTERNAL_ATTR, ICON_FOLDER, this.copy.external(nameOf(path)), CHIP_ATTR)
     external.addEventListener('click', (event) => {
       event.preventDefault()
       event.stopPropagation()
       this.act('external', path)
     })
-    capsule.append(external)
-    if (this.externalAvailable()) {
-      const separator = document.createElement('span')
-      separator.setAttribute(SEPARATOR_ATTR, '')
-      separator.setAttribute('aria-hidden', 'true')
-      capsule.append(separator)
-    } else {
-      // 没有左段：整条胶囊只剩转发，不留空壳。
-      capsule.setAttribute('data-dsh-file-capsule-share-only', '')
-      external.remove()
-    }
+    return external
+  }
+
+  /**
+   * 右段：纸飞机按钮，点击走 shareFile。
+   * @param path - 该文件的绝对设备路径。
+   * @returns 右段按钮。
+   */
+  private buildShareSegment(path: string): HTMLButtonElement {
     const share = this.buildSegment(SHARE_ATTR, ICON_SHARE, this.copy.share)
     share.addEventListener('click', (event) => {
       event.preventDefault()
       event.stopPropagation()
       this.act('share', path)
     })
-    capsule.append(share)
-    // 左段存在时它占大头；这里把 anchor 记在数据集上，供默认模式反向时使用。
-    capsule.setAttribute('data-dsh-file-capsule-target', anchor.getAttribute('typeof') ?? '')
-    return capsule
+    return share
+  }
+
+  /** 段间 1px 分隔线。 */
+  private buildSeparator(): HTMLElement {
+    const separator = document.createElement('span')
+    separator.setAttribute(SEPARATOR_ATTR, '')
+    separator.setAttribute('aria-hidden', 'true')
+    return separator
   }
 
   /**
@@ -364,21 +552,24 @@ export class FileCardCapsule {
 
   /**
    * 执行一种动作。两者都走桥、都不抛给 UI。
+   *
+   * ## 桥方法不在场 ≠ 「没有外部接收方」（issue #990）
+   * 这里**不置任何终态**：桥不在场只说明这一轮还不知道能不能开（桌面 / 旧壳 / 壳侧尚未注入），
+   * 置位会让左段永久消失、晚注入的桥也救不回来。确证只有一个来源——壳侧明确回
+   * `error === 'no-receiver'`，由 {@link finish} 写。
    * @param action - external 或 share。
    * @param path - 绝对设备路径。
    */
   act(action: CardAction, path: string): CardBridgeResult {
     const mime = mimeOf(path)
+    const bridge = this.bridge()
     if (action === 'share') {
-      const call = this.bridge().shareFile
+      const call = bridge.shareFile
       if (typeof call !== 'function') return { ok: false, reason: 'unavailable' }
       return this.finish(readAnswer(this.safely(() => call(path, mime))), action)
     }
-    const call = this.bridge().openFileExternal
-    if (typeof call !== 'function') {
-      this.externalMissing = true
-      return { ok: false, reason: 'unavailable' }
-    }
+    const call = bridge.openFileExternal
+    if (typeof call !== 'function') return { ok: false, reason: 'unavailable' }
     return this.finish(readAnswer(this.safely(() => call(path, mime))), action)
   }
 
@@ -397,7 +588,8 @@ export class FileCardCapsule {
    *
    * ## 只有 no-receiver 才算「确证」
    * 判据是壳侧的 `error === 'no-receiver'`——探活为空 / startActivity 抛 ActivityNotFound，
-   * 都是「这台机器上确实没人接」的确证。
+   * 都是「这台机器上确实没人接」的确证。这是本类**唯一**写终态的地方：桥缺席（unavailable）
+   * 走不到这里，所以晚注入的桥仍能恢复左段（issue #990）。
    *
    * 其余错误码（uri-denied / io / bad-request）**不收起左段**：它们是这一次调用的失败
    * （路径越界、读不到文件、调用方传错参数），不代表机器没有外部应用。把它们当永久无能力，
@@ -407,23 +599,14 @@ export class FileCardCapsule {
    * 不参与本判据；壳侧码一律走 `error`。
    */
   private finish(result: CardBridgeResult, action: CardAction): CardBridgeResult {
-    if (action === 'external' && !result.ok && result.error === SHELL_ERROR_NO_RECEIVER && !this.externalMissing) {
-      this.externalMissing = true
+    if (action === 'external' && !result.ok && result.error === SHELL_ERROR_NO_RECEIVER && !this.noReceiverConfirmed) {
+      this.noReceiverConfirmed = true
       for (const capsule of document.querySelectorAll('[' + CAPSULE_ATTR + ']')) {
         capsule.querySelector('[' + EXTERNAL_ATTR + ']')?.remove()
         capsule.querySelector('[' + SEPARATOR_ATTR + ']')?.remove()
-        capsule.setAttribute('data-dsh-file-capsule-share-only', '')
+        capsule.setAttribute(SHARE_ONLY_ATTR, '')
       }
     }
     return result
   }
-}
-
-/**
- * 左段对应的动作：永远是「另一种」打开方式。
- * @param mode - 当前默认打开方式。
- * @returns 左段该执行的动作。
- */
-export function otherModeOf(mode: OpenMode): OpenMode {
-  return mode === 'sidebar' ? 'external' : 'sidebar'
 }

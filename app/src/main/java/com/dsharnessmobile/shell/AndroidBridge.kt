@@ -38,8 +38,6 @@ class AndroidBridge(
    *  因此 MainActivity 无需传参即可返回真实值。 */
   private val onGetImmersiveMode: () -> Boolean = { ImmersiveMode.current() },
   private val onCopyTextRequest: (text: String) -> Boolean = { false },
-  private val onRequestClipboardText: (requestId: String) -> Unit = {},
-  private val onCancelClipboardText: (requestId: String) -> Unit = {},
   private val pickToken: String? = null,
   private val onRestartEngine: () -> Boolean = { false },
   private val onShutdownToGuide: () -> Unit = {},
@@ -326,14 +324,6 @@ class AndroidBridge(
   @JavascriptInterface
   fun copyText(text: String): Boolean = trusted { onCopyTextRequest(text) }
 
-  /** Request a foreground native consent prompt; text arrives through dsh:clipboard-text. */
-  @JavascriptInterface
-  fun requestClipboardText(requestId: String) = trusted { onRequestClipboardText(requestId) }
-
-  /** Revoke a disposed editor's outstanding native clipboard prompt. */
-  @JavascriptInterface
-  fun cancelClipboardText(requestId: String) = trusted { onCancelClipboardText(requestId) }
-
   /**
    * 0.13.1 W4：配置导出（私有 settings.yaml -> Documents/dshdata/exports/config/settings.yaml）。
    * 引擎 DSH_HOME 在私有域（外部改共享目录副本无效），本桥是安全的手改通道：
@@ -394,7 +384,15 @@ class AndroidBridge(
     onAllFilesAccessRequest()
   }
 
-  /** One-shot session token for the directory-picker bridge (validated by the engine-side pick endpoint; null = disabled). */
+  /**
+   * One-shot session token for the directory-picker bridge (validated by the engine-side pick
+   * endpoint; null = disabled).
+   *
+   * #686：本方法**不做**第二层凭据。整对象已在非放行帧被封死（见 BridgeOriginGuard），
+   * 再加一层持有式凭据是冗余代码——实测证明跨源子帧连 window.androidBridge 都摸不到，
+   * 到不了这里。保留正控断言（BridgeOriginGuardTest.pickTokenWorksOnAllowedFrame）
+   * 守住「放行帧照常拿得到真值」这条行为即可。
+   */
   @JavascriptInterface
   fun getPickToken(): String? = trusted { pickToken }
 

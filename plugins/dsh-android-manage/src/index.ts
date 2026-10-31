@@ -40,9 +40,10 @@ import {
   KB_ACTION_CLEAR,
   KB_ACTION_INPUT,
   KB_RESULT,
-  adbKeyboardAuth,
+  adbKeyboardAuthState,
   adbKeyboardBroadcast,
   isCommitAccepted,
+  hasAuthoritativeCommit,
   parseBroadcastResult,
 } from './ime-broadcast.js'
 
@@ -109,6 +110,33 @@ function pickText(v: Record<string, unknown>, ...keys: string[]): string {
     .join('\n')
 }
 
+/**
+ * `screenId` 归一化（纯函数，导出以便**真执行**单测，而不是源码 grep）。
+ *
+ * `real` 与"未指定"是同一块物理屏：`SCREEN_PARAM` 文案把 `real|virtual-N` 都列为合法取值。
+ * 不折叠时 `screenIdOf({screenId:'real'}) === 'real'` 而动作调用（不带 screenId）是 `''` ⇒
+ * `usableUiCache` 判成两块屏 ⇒ dump 明明 3ms 前刚成功，第二次调用却回「没有可用的控件清单
+ * （缓存已失效）」⇒ 模型以为真过期、每次动作前全量重 dump（正是 TTL 注释要消除的循环）。
+ * 只折叠大小写与首尾空白，其它取值原样（壳侧按字符串比对 `virtual-N`）。
+ */
+export function normalizeScreenId(raw: unknown): string {
+  if (typeof raw !== 'string') return ''
+  const normalized = raw.trim().toLowerCase()
+  return normalized === 'real' ? '' : normalized
+}
+
+/**
+ * 「界面未变」回包里那句续作提示的引用片段（纯函数，导出以便真执行单测）。
+ *
+ * 回包说「引用仍有效，直接继续」而判据要求 `screenId` 与清单一致 —— 不带 screenId 必然被拒，
+ * 同一条回包里两句话自相矛盾，形成 dump→照做→被拒→dump 循环。虚拟屏（DSH 自己的 UI 就在
+ * virtual-1）是主路径，所以提示必须把目标屏写出来。
+ */
+export function continueRefHintOf(screenId: string): string {
+  return screenId === ''
+    ? 'android_ui_click/id:nN 等引用'
+    : `android_ui_click/id:nN 等引用（要带上 screenId:"${screenId}"）`
+}
 
 function tools(ctx: Context, priv: PrivilegeFace) {
   // Every route that can observe or manipulate an Android display goes through this one scope gate
@@ -451,7 +479,7 @@ function tools(ctx: Context, priv: PrivilegeFace) {
     //
     // 实测：点击虚拟屏上的「深色主题」开关，返回「未观察到界面变化——可能未生效」，
     // 但紧接着的 `android_ui_dump` 明确显示 Switch 从 `[已选中]` 变为未选中——**点击其实成功了**。
-    // 真因：本函数比对的 `beforeGen` 传的是 `uiCacheOf()!.gen`（那是**配置代次**，如 fp0c052e71，恒定），
+    // 真因：本函数比对的 `beforeGen` 传的是 `uiCacheNow().gen`（那是**配置代次**，如 fp0c052e71，恒定），
     // 而壳侧 `state` 回的是**快照代次**（每次建树自增）。两个量根本不同源，比较必然判「未变」。
     //
     // 不确定时的措辞必须诚实（用户口径：不要用错误结论误导模型）：
@@ -726,24 +754,24 @@ function tools(ctx: Context, priv: PrivilegeFace) {
       const { ref, all, offset, limit } = args ?? {}
       const a = await guard('ui_detail', args as Record<string, unknown>, exec as { agent?: { session?: unknown } })
       if (!a.ok) return { ok: false, denied: true, text: a.guidance }
-      if (!uiCacheOf() || Date.now() - uiCacheOf()!.ts > UI_CACHE_TTL) {
+      if (!uiCacheNow()! || Date.now() - uiCacheNow()!.ts > UI_CACHE_TTL) {
         return { ok: false, denied: false, text: '没有最近的控件清单——请先取树（android_ui_dump 或 android_ui_tree），再按需取明细' }
       }
       const handle = detailHandle
       const path = detailPath
       if (ref !== undefined && ref.trim() !== '') {
-        const hit = resolveRef(uiCacheOf()!.byId, uiCacheOf()!.nodes, ref.trim(), scopePoolFor())
+        const hit = resolveRef(uiCacheNow()!.byId, uiCacheNow()!.nodes, ref.trim(), scopePoolFor())
         if (!hit.ok) return { ok: false, denied: false, handle, path, text: hit.error }
-        const idx = uiCacheOf()!.nodes.findIndex((n) => n.id === hit.node.id)
-        const rows = uiCacheOf()!.nodes
+        const idx = uiCacheNow()!.nodes.findIndex((n) => n.id === hit.node.id)
+        const rows = uiCacheNow()!.nodes
         const extra: Record<string, unknown> = {}
-        const v2 = uiCacheOf()!.v2
+        const v2 = uiCacheNow()!.v2
         if (v2 && idx >= 0) {
           const anc = v2.actionableAncestor[idx]
           extra.actionableAncestor = anc >= 0 ? 'n' + anc : null
           extra.subtree = { start: 'n' + idx, end: v2.subtreeEnd[idx] > idx ? 'n' + v2.subtreeEnd[idx] : null }
         }
-        const parent = uiCacheOf()!.nodes.find((n) => n.id === hit.node.parentId)
+        const parent = uiCacheNow()!.nodes.find((n) => n.id === hit.node.parentId)
         if (parent) extra.parentLabel = `${parent.type || 'View'}${parent.text ? ' text="' + parent.text.slice(0, 24) + '"' : ''}`
         return {
           ok: true, denied: false, handle, path, total: rows.length,
@@ -753,11 +781,11 @@ function tools(ctx: Context, priv: PrivilegeFace) {
       }
       if (all === true) {
         const lim = Math.min(Math.max(Number(limit ?? 60) || 60, 1), 200)
-        const { page, offset: off, omitted } = pageRows(uiCacheOf()!.nodes, Number(offset ?? 0) || 0, lim)
+        const { page, offset: off, omitted } = pageRows(uiCacheNow()!.nodes, Number(offset ?? 0) || 0, lim)
         return {
           ok: true, denied: false, handle, path, rows: page.map((n) => detailRecord(n)) as unknown as Array<Record<string, JsonValue>>,
-          total: uiCacheOf()!.nodes.length, offset: off, omitted,
-          text: `全量明细第 ${off}..${off + page.length - 1} 行 / 共 ${uiCacheOf()!.nodes.length} 行`
+          total: uiCacheNow()!.nodes.length, offset: off, omitted,
+          text: `全量明细第 ${off}..${off + page.length - 1} 行 / 共 ${uiCacheNow()!.nodes.length} 行`
             + (omitted > 0 ? `（本页外还有 ${omitted} 行，请带 offset 继续）` : '')
             + `；句柄 ${handle}${path ? '，离线可 read/grep：' + path : ''}`,
         }
@@ -769,11 +797,12 @@ function tools(ctx: Context, priv: PrivilegeFace) {
   /**
    * uiautomator 控件树管线（**单一来源**：`android_ui_dump` 的 ADB 回退与 `android_ui_tree` 共用）。
    *
-   * 从 uiautomator XML 一路走到「可被 ref 操作的节点清单」：解析 → 结构自检 → 剪枝 → 落明细 → 写 uiCache。
-   * `uiCache` 是关键：`android_ui_click/scroll/input` 的 ref 都从它解析；纯 Shizuku（无障碍关）下
+   * 从 uiautomator XML 一路走到「可被 ref 操作的节点清单」：解析 → 结构自检 → 剪枝 → 落明细 → 写 uiCacheNow()。
+   * `uiCacheNow()` 是关键：`android_ui_click/scroll/input` 的 ref 都从它解析；纯 Shizuku（无障碍关）下
    * 点击落到壳侧 `input tap cx cy`——**模型只报 ref，像素由引擎算**（用户原话：猜像素就是折磨）。
    */
-  const uiautomatorTree = async (exec: unknown, forceFresh = false): Promise<Record<string, unknown>> => {
+  /** uiautomator 通道取树。`args` 只用于给缓存打归属标记（会话 + 目标屏，issue #688）。 */
+  const uiautomatorTree = async (exec: unknown, forceFresh = false, args?: unknown): Promise<Record<string, unknown>> => {
     if (!priv.execAdbLine) return { ok: false, denied: false, screen: { w: 0, h: 0 }, rotation: 0, count: 0, rawCount: 0, nodes: [], text: 'ADB 执行通道未接通（dsh-android-bridge 未提供 execAdbLine）' }
     const n = Date.now()
     const remote = `/data/local/tmp/dsh-ui-${n}.xml`
@@ -805,9 +834,9 @@ function tools(ctx: Context, priv: PrivilegeFace) {
       const pruned = pruneNodes(parsed.raw)
       const fp = treeFingerprint(pruned.nodes)
       // 0.13.8 P0-4：同 a11y 分支——「界面未变」快路径
-      if (!forceFresh && uiCacheOf() !== null && uiCacheOf()!.fingerprint === fp && Date.now() - uiCacheOf()!.ts <= UI_CACHE_TTL) {
-        uiCacheOf()!.ts = Date.now()   // FX-206.3：同 a11y 分支，快路径必须推进时间戳（ADB 载荷不带代次）
-        return unchangedResponse(fp, uiCacheOf()!.gen)
+      if (!forceFresh && uiCacheNow()! && uiCacheNow()!.fingerprint === fp && Date.now() - uiCacheNow()!.ts <= UI_CACHE_TTL) {
+        uiCacheNow()!.ts = Date.now()   // FX-206.3：同 a11y 分支，快路径必须推进时间戳（ADB 载荷不带代次）
+        return unchangedResponse(fp, uiCacheNow()!.gen, args)
       }
       const size = /Physical size:\s*(\d+)x(\d+)/.exec(r.stdout)
       const screen = size ? { w: Number(size[1]), h: Number(size[2]) } : { w: 0, h: 0 }
@@ -821,7 +850,7 @@ function tools(ctx: Context, priv: PrivilegeFace) {
         rotation: parsed.rotation,
         rawCount: pruned.rawCount,
       })
-      const snap = {
+      const entry: UiCache = {
         nodes: pruned.nodes,
         byId: pruned.byId,
         byOrig: pruned.byOrig,
@@ -831,9 +860,13 @@ function tools(ctx: Context, priv: PrivilegeFace) {
         ts: Date.now(),
         fingerprint: fp,
         rawCount: pruned.rawCount,
+        session: sessionOf(exec),
+        screenId: screenIdOf(args),
       }
-      // #688 第一步：双写（读取侧仍用旧单槽，行为不变）。
-      uiCaches.set(cacheKey(), snap)
+      // issue #984：经唯一写入口落表（写入时就地回收过期/超额条目）；键 = 会话 + 目标屏（#688）。
+      uiCacheStore(cacheKeyOf(entry.session, entry.screenId), entry)
+      // 本次请求内立即可见（作用域是 per-request 的，并发会话互不覆盖）。
+      if (uiScope.getStore() !== undefined) uiScope.enterWith(entry)
       return {
         ok: true,
         denied: false,
@@ -914,7 +947,7 @@ properties: {
       if (!a.ok) return { ok: false, denied: true, screen: { w: 0, h: 0 }, rotation: 0, count: 0, rawCount: 0, nodes: [], text: a.guidance }
       const cap = adbChannelOnly('ui_tree', exec as { agent?: { session?: unknown } })
       if (!cap.ok) return { ok: false, denied: true, screen: { w: 0, h: 0 }, rotation: 0, count: 0, rawCount: 0, nodes: [], text: cap.text }
-      return await uiautomatorTree(exec, forceFresh)
+      return await uiautomatorTree(exec, forceFresh, args)
     }) as never,
   })
 
@@ -1137,21 +1170,8 @@ properties: {
   // 而墙钟无法区分「模型想得久」与「页面变了」，只会把前者误判成失效。
   // 故 TTL 只作为内存回收上限，放宽到 10 分钟。
   const UI_CACHE_TTL = 10 * 60_000
-  /**
-   * issue #688 第二步：UI 快照的**唯一读取入口**（按会话键）。
-   *
-   * 关键前提：`AsyncLocalStorage` 的上下文**跨 await 保留**，所以即使在这些 helper 深处、
-   * 或在 await 之后调用，`cacheKey()` 仍返回发起本次工具调用的会话 —— 不存在拿错会话的窗口。
-   */
-  /**
-   * issue #688：按会话键的 UI 快照表。
-   *
-   * **按 `tools()` 实例一份**（不是模块级）：旧实现的 `let uiCache` 就是每实例一份，
-   * 放模块级会让不同插件实例（含测试里的多次构造）共享缓存 —— 实测会让「首次 dump」
-   * 误走快路径，直接打红 6 条既有测试。
-   */
-  const uiCaches = new Map<string, UiCacheSnapshot>()
-  type UiCacheSnapshot = {
+  /** 一次 dump 的控件清单。`session` / `screenId` 是**归属标记**（issue #688）。 */
+  interface UiCache {
     nodes: UiNode[]
     byId: ReturnType<typeof pruneNodes>['byId']
     byOrig: ReturnType<typeof pruneNodes>['byOrig']
@@ -1163,9 +1183,126 @@ properties: {
     fingerprint?: string
     rawCount?: number
     v2?: V2Decoded
+    /** 产出这份清单的会话（`exec.agent.session`，取不到时 `__anonymous__`）。 */
+    session: string
+    /** 目标屏（`screenId` 参数归一化；空串 = 未指定，按真实屏口径）。 */
+    screenId: string
   }
-  const uiCacheOf = (): UiCacheSnapshot | null =>
-    (uiCaches.get(cacheKey()) as UiCacheSnapshot | null) ?? null
+
+  /**
+   * issue #688：UI 快照表（键 = 会话 + 目标屏）。
+   *
+   * **按 `tools()` 实例一份**（不是模块级）：旧实现的 `let uiCache` 就是每实例一份，
+   * 放模块级会让不同插件实例（含测试里的多次构造）共享缓存 —— 实测会让「首次 dump」
+   * 误走快路径，直接打红 6 条既有测试。
+   */
+  const uiCaches = new Map<string, UiCache>()
+
+  /**
+   * issue #984：UI 快照表的**容量上限**（键是会话 + 目标屏的 Map，必须有界）。
+   *
+   * 缺陷形态：#688 第二步把单槽改成按会话键的 Map 之后，这张表只增不减——没有 delete / clear /
+   * 容量上限 / 过期清扫，`UI_CACHE_TTL` 只参与**读侧**判定。于是每个做过 UI 工具的会话都会在
+   * 进程里永久留一整棵控件树（nodes + byId + byOrig + parentByOrig，大页面数千节点）；长跑引擎
+   * 一个进程开几十个会话，内存单调增长，旧条目永远不会因为 TTL 过期而释放。
+   *
+   * 上限取 8 的理由：这张表服务的只是「模型读完清单、想几下、再回来点」的短窗口（TTL 10 分钟）。
+   * 一个进程里真正同时在用控件树的会话是个位数；8 对正常用法零影响，对「只增不减」则是硬边界。
+   * 每棵树最多几十 KB，8 棵即上限数十 KB～几 MB，可接受。
+   */
+  const UI_CACHE_MAX_ENTRIES = 8
+
+  /**
+   * issue #984：**唯一写入入口**。写入前先清理：① 过期条目（TTL 已过的读侧本来就用不了）；
+   * ② 超出容量时淘汰最久未写入的条目（`ts` 最小者）。
+   *
+   * 为什么淘汰按 `ts` 而不是 Map 的插入顺序：`ts` 就是「这个条目最近一次 dump 的时刻」，
+   * 而快路径命中时会刷新 `ts`（见 dump 的两条快路径）——按它淘汰即 LRU，保留的正是还在用的条目。
+   *
+   * 为什么必须在**写入**时回收而不是定时器：定时器要随插件实例销毁，还要在测试里可复现；
+   * 而写入点是唯一的增长点，就地回收天然不会漏（也不依赖 GC 时机）。
+   */
+  const uiCacheStore = (key: string, entry: UiCache): void => {
+    const now = Date.now()
+    for (const [k, e] of uiCaches) {
+      if (now - e.ts > UI_CACHE_TTL) uiCaches.delete(k)
+    }
+    uiCaches.set(key, entry)
+    while (uiCaches.size > UI_CACHE_MAX_ENTRIES) {
+      let oldestKey: string | null = null
+      let oldestTs = Infinity
+      for (const [k, e] of uiCaches) {
+        if (e.ts < oldestTs) { oldestTs = e.ts; oldestKey = k }
+      }
+      if (oldestKey === null) break
+      uiCaches.delete(oldestKey)
+    }
+  }
+
+  /** 归属键：会话 + 目标屏（NUL 分隔，避免两个维度拼接出歧义）。 */
+  const cacheKeyOf = (session: string, screenId: string): string => session + '\u0000' + screenId
+
+  /**
+   * 本次请求的清单上下文。
+   *
+   * 为什么不能用一个模块级变量（issue #688）：工具调用可以并发，`await` 会让出执行权——
+   * 另一个会话的 dump 会把模块变量覆盖掉，于是「A 的 ref 配 B 的屏」这种跨会话复用就发生了。
+   * 壳侧只校验 ref 在集合内，回报 ok:true 却点在另一块屏上。
+   */
+  const uiScope = new AsyncLocalStorage<UiCache | null>()
+
+  /** 本次请求的清单；作用域外或无匹配时为 null。 */
+  const uiCacheNow = (): UiCache | null => uiScope.getStore() ?? null
+
+  /** 会话标识：`exec.agent.session` 的字符串或 `.id`，取不到归入匿名桶。 */
+  const sessionOf = (exec: unknown): string => {
+    const session = (exec as { agent?: { session?: unknown } } | undefined)?.agent?.session
+    if (typeof session === 'string' && session !== '') return session
+    if (session !== null && session !== undefined && typeof session === 'object') {
+      const id = (session as { id?: unknown }).id
+      if (typeof id === 'string' && id !== '') return id
+    }
+    return '__anonymous__'
+  }
+
+  /**
+   * `screenId` 参数归一化（缺省与显式 `real` **同义**）。
+   *
+   * `real` 是 `SCREEN_PARAM` 文案里明示的合法取值，和「未指定」指同一块物理屏；不折叠的话
+   * `screenIdOf({screenId:'real'}) === 'real'` 而动作调用（不带 screenId）是 `''` ⇒
+   * `usableUiCache` 判成两块屏 ⇒ dump 明明 3ms 前刚成功，第二次调用却回
+   * 「没有可用的控件清单（缓存已失效）」⇒ 模型以为真过期、每次动作前全量重 dump
+   * （正是 TTL 注释要消除的那个 dump/过期循环）。2026-10-28 自查，误拒方向。
+   * 只折叠大小写与空白：`REAL` / ` real ` 同样是「未指定」。
+   */
+  const screenIdOf = (args: unknown): string =>
+    normalizeScreenId((args as { screenId?: unknown } | undefined)?.screenId)
+
+  /**
+   * 本次调用能不能用这份清单：TTL 内 **且** 会话一致 **且** 目标屏一致。
+   *
+   * 判据为什么不只是 TTL：同名 ref（n3）在两块屏、两个会话里都可能存在，壳侧只校验 ref 在集合内，
+   * 所以「用旧清单」必须明确变成「没有清单」——宁可让模型重新 dump，也不能把点击送到另一块屏。
+   */
+  const usableUiCache = (args: unknown, exec: unknown): UiCache | null => {
+    const candidate = uiCaches.get(cacheKeyOf(sessionOf(exec), screenIdOf(args))) ?? null
+    if (candidate === null) return null
+    if (Date.now() - candidate.ts > UI_CACHE_TTL) return null
+    if (candidate.session !== sessionOf(exec)) return null
+    if (candidate.screenId !== screenIdOf(args)) return null
+    return candidate
+  }
+
+  /** 给工具执行套上清单作用域（issue #688）；没有 execute 的工具原样返回。 */
+  const withUiCacheScope = <T extends { execute?: unknown }>(tool: T): T => {
+    const execute = tool.execute as ((args: unknown, exec: unknown) => unknown) | undefined
+    if (typeof execute !== 'function') return tool
+    return {
+      ...tool,
+      execute: (args: unknown, exec: unknown) =>
+        uiScope.run(usableUiCache(args, exec), () => execute(args, exec)),
+    } as T
+  }
 
   /** 明细文件目录（与截图/XML 同一个 dsh-tmp；LRU 按前缀清理，保留最近 20 份）。 */
   const detailDir = (): string => pruneTmp('ui-detail-', 20)
@@ -1211,18 +1348,27 @@ properties: {
    * D3：`gen` 只有在**确实是 number** 时才发键——`{type:'number'}` 收 null/undefined 都会整值拒绝，
    * 而含 undefined 成员的对象更不是 lossless JSON（引擎直接抛错）。
    */
-  const unchangedResponse = (fp: string, gen?: number) => ({
+  /**
+   * 续作提示里的 `android_ui_click/id:nN` 片段：**必须带上目标屏**。
+   *
+   * 回包说「引用仍有效，直接继续」而判据要求 `screenId` 与清单一致 —— 模型照字面做（不带
+   * screenId）必然被拒，同一条回包里两句话自相矛盾，形成 dump→照做→被拒→dump 的循环。
+   * 虚拟屏（DSH 自己的 UI 就在 virtual-1）是主路径，所以这不是边角。
+   */
+  const continueRefHint = (args: unknown): string => continueRefHintOf(screenIdOf(args))
+
+  const unchangedResponse = (fp: string, gen?: number, args?: unknown) => ({
     ok: true,
     denied: false,
     unchanged: true,
-    screen: uiCacheOf()!.screen,
-    rotation: uiCacheOf()!.rotation,
-    count: uiCacheOf()!.nodes.length,
-    rawCount: uiCacheOf()!.rawCount ?? uiCacheOf()!.nodes.length,
+    screen: uiCacheNow()!.screen,
+    rotation: uiCacheNow()!.rotation,
+    count: uiCacheNow()!.nodes.length,
+    rawCount: uiCacheNow()!.rawCount ?? uiCacheNow()!.nodes.length,
     nodes: [] as JsonValue[],
     ...(typeof gen === 'number' ? { gen } : {}),
     note: '界面未变（结构指纹一致）：上次 dump 的引用（n0..nN）与坐标仍然有效，可直接复用；需完整清单请带 fresh:true 重新 dump',
-    text: `界面未变（gen=${gen ?? '未知'}，结构指纹 ${fp}）：上次 dump 的 ${uiCacheOf()!.nodes.length} 个节点引用仍有效——直接用 android_ui_click/id:nN 等引用继续，无需重新阅读清单（fresh:true 可强制完整重抓）`,
+    text: `界面未变（gen=${gen ?? '未知'}，结构指纹 ${fp}）：上次 dump 的 ${uiCacheNow()!.nodes.length} 个节点引用仍有效——直接用 ${continueRefHint(args)}继续，无需重新阅读清单（fresh:true 可强制完整重抓）`,
   })
 
   /** 0.13.5 W4：控制通道决策。策略面缺席（旧版 bridge）→ 按 ADB 通道处理，保持旧行为。 */
@@ -1302,11 +1448,11 @@ properties: {
   }
 
   /** 公开 id → 原始路径 id（无障碍动作按路径回指壳侧节点）。 */
-  const origPathOf = (publicId: string): string | undefined => uiCacheOf()?.byId.get(publicId)?.origPath
+  const origPathOf = (publicId: string): string | undefined => uiCacheNow()?.byId.get(publicId)?.origPath
 
   /** resolveRef 的 V2 子树池（预序区间切片）；V1 缓存返回 undefined（走 origPath 前缀匹配）。 */
   const scopePoolFor = (): ((id: string) => UiNode[] | null) | undefined => {
-    const v2 = uiCacheOf()?.v2
+    const v2 = uiCacheNow()?.v2
     return v2 ? (id: string) => scopePoolV2(v2, id) : undefined
   }
 
@@ -1315,7 +1461,7 @@ properties: {
   const putTargetRefById = (payload: Record<string, unknown>, publicId: string): boolean => {
     const handle = origPathOf(publicId)
     if (handle === undefined || handle === '') return false
-    if (uiCacheOf()?.v2) payload.row = Number(handle)
+    if (uiCacheNow()?.v2) payload.row = Number(handle)
     else payload.path = handle
     return true
   }
@@ -1323,10 +1469,10 @@ properties: {
 
   /** 祖先回退：V2 查表 O(1)（壳侧编码时已完成同一上溯，DD-8）；V1 走父链上溯（含跳过被剪层）。 */
   const actionableAncestorOf = (node: UiNode): UiNode | null => {
-    const v2 = uiCacheOf()?.v2
+    const v2 = uiCacheNow()?.v2
     if (v2) return actionableAncestorV2(v2, node)
-    if (uiCacheOf() === null) return null
-    return findActionableAncestor(uiCacheOf()!.byId, uiCacheOf()!.byOrig, uiCacheOf()!.parentByOrig, node)
+    if (!uiCacheNow()) return null
+    return findActionableAncestor(uiCacheNow()!.byId, uiCacheNow()!.byOrig, uiCacheNow()!.parentByOrig, node)
   }
 
   /**
@@ -1345,7 +1491,7 @@ properties: {
 
   /** F2 统一坐标系锚点：屏幕物理尺寸（wm size）。uiDump 缓存优先，否则现场查。 */
   async function screenSize(): Promise<{ w: number; h: number }> {
-    if (uiCacheOf() !== null && Date.now() - uiCacheOf()!.ts <= UI_CACHE_TTL && uiCacheOf()!.screen.w > 0) return uiCacheOf()!.screen
+    if (uiCacheNow()! && Date.now() - uiCacheNow()!.ts <= UI_CACHE_TTL && uiCacheNow()!.screen.w > 0) return uiCacheNow()!.screen
     if (!priv.execAdbLine) return { w: 0, h: 0 }
     const s = await priv.execAdbLine(`adb shell wm size | grep -m1 'Physical size'`)
     const m = /Physical size:\s*(\d+)x(\d+)/.exec(s.ok ? s.stdout : '')
@@ -1427,15 +1573,15 @@ properties: {
         }
         const fp = treeFingerprint(pruned.nodes)
         // 0.13.8 P0-4：「界面未变」快路径——结构指纹一致且缓存新鲜 → 纯追加一行摘要（L1）
-        if (!forceFresh && uiCacheOf() !== null && uiCacheOf()!.fingerprint === fp && Date.now() - uiCacheOf()!.ts <= UI_CACHE_TTL) {
-          const gen = v2?.gen ?? data.gen ?? uiCacheOf()!.gen
+        if (!forceFresh && uiCacheNow()! && uiCacheNow()!.fingerprint === fp && Date.now() - uiCacheNow()!.ts <= UI_CACHE_TTL) {
+          const gen = v2?.gen ?? data.gen ?? uiCacheNow()!.gen
           // FX-206.3：壳侧每次建树都递增代次（buildSnapshot(force=true)），快路径若不推进
-          // uiCacheOf()!.gen/ts，下一个动作就带着旧 gen 被 requireFresh 拒（文案还误报「界面已变化」）。
+          // uiCacheNow().gen/ts，下一个动作就带着旧 gen 被 requireFresh 拒（文案还误报「界面已变化」）。
           // 命中即续期：时间戳前移、代次对齐本次载荷。
-          uiCacheOf()!.ts = Date.now()
-          if (typeof gen === 'number') uiCacheOf()!.gen = gen
-          if (v2) uiCacheOf()!.v2 = v2
-          return unchangedResponse(fp, gen)
+          uiCacheNow()!.ts = Date.now()
+          if (typeof gen === 'number') uiCacheNow()!.gen = gen
+          if (v2) uiCacheNow()!.v2 = v2
+          return unchangedResponse(fp, gen, args)
         }
         // 0.14 D11：显式重建 screen——老壳 V1 载荷的 data.screen 可能多带键，按引用返回会让整条
         // dump 被 additionalProperties:false 拒绝（构造法可测；无老壳包可实测，见报告「需实测」）。
@@ -1445,7 +1591,7 @@ properties: {
         const screen = v2
           ? v2.screen
           : (Number.isFinite(rawW) && rawW > 0 ? { w: rawW, h: Number.isFinite(rawH) ? rawH : 0 } : { w: 0, h: 0 })
-        const snap = {
+        const entry: UiCache = {
           nodes: pruned.nodes,
           byId: pruned.byId,
           byOrig: pruned.byOrig,
@@ -1457,9 +1603,13 @@ properties: {
           fingerprint: fp,
           rawCount: pruned.rawCount,
           v2,
+          session: sessionOf(exec),
+          screenId: screenIdOf(args),
         }
-        // #688 第一步：双写（读取侧仍用旧单槽，行为不变）。
-        uiCaches.set(cacheKey(), snap)
+        // issue #984：经唯一写入口落表（写入时就地回收过期/超额条目）；键 = 会话 + 目标屏（#688）。
+        uiCacheStore(cacheKeyOf(entry.session, entry.screenId), entry)
+        // 本次请求内立即可见（作用域是 per-request 的，并发会话互不覆盖）。
+        if (uiScope.getStore() !== undefined) uiScope.enterWith(entry)
         const fg = await foregroundInfo()
         const dumpPkg = pruned.nodes.find((n) => String(n.pkg || '') !== '')?.pkg ?? ''
         const mismatch = fg !== null && dumpPkg !== '' && fg.pkg !== dumpPkg
@@ -1495,7 +1645,7 @@ properties: {
             + warn + webHint + detail.hint,
         }
       }
-      return await uiautomatorTree(exec, forceFresh) as never
+      return await uiautomatorTree(exec, forceFresh, args) as never
     }) as never,
   })
 
@@ -1621,7 +1771,7 @@ properties: {
           if (!wr.ok) return { ok: false, denied: false, text: 'WebView 点击失败：' + wr.error }
           const wd = (wr.data ?? {}) as { ok?: boolean; error?: string; via?: string; target?: { tag?: string; text?: string } }
           if (wd.ok === false) return { ok: false, denied: false, text: 'WebView 点击失败：' + (wd.error ?? '未知') }
-          // beforeGen 传 undefined：手里只有**配置代次**（uiCacheOf()!.gen，恒定如 fp0c052e71），
+          // beforeGen 传 undefined：手里只有**配置代次**（uiCacheNow().gen，恒定如 fp0c052e71），
           // 与壳侧快照代次不同源，拿它比对必然假报「未变化」（坑 138）。
           // 宁可如实报「未能确认」，也不给模型一个错误的「点击失败」结论。
           const verdict = await verifyClick(undefined, exec as ExecLike)
@@ -1643,12 +1793,12 @@ properties: {
         // 块G F3：payload 必须带 screenId——此分支此前是裸 `{}`，门按 virtual-N 放行、执行却落真实屏，
         // 模型看到「点了但画面没变」比直接拒绝更难排查（同 ui_dump 的双修口径）。
         const payload: Record<string, unknown> = { ...screenArgs(args) }
-        if (uiCacheOf()?.gen !== undefined) payload.gen = uiCacheOf()!.gen
+        if (uiCacheNow()!?.gen !== undefined) payload.gen = uiCacheNow()!.gen
         if (useRef) {
-          if (!uiCacheOf() || Date.now() - uiCacheOf()!.ts > UI_CACHE_TTL) {
+          if (!uiCacheNow()! || Date.now() - uiCacheNow()!.ts > UI_CACHE_TTL) {
             return { ok: false, denied: false, text: '没有可用的控件清单（缓存已失效）——请先执行 android_ui_dump 拿新 ref' }
           }
-          const hit = resolveRef(uiCacheOf()!.byId, uiCacheOf()!.nodes, ref!.trim(), scopePoolFor())
+          const hit = resolveRef(uiCacheNow()!.byId, uiCacheNow()!.nodes, ref!.trim(), scopePoolFor())
           if (!hit.ok) return { ok: false, denied: false, text: hit.error }
           let node = hit.node
           if (!node.clickable && !node.editable && !node.scrollable) {
@@ -1664,7 +1814,7 @@ properties: {
           const r = await a11yExec(clickOp, payload)
           if (!r.ok) return semanticFail(r, '无障碍点击失败：')
           const clicked = (r.data ?? {}) as { x?: number; y?: number; via?: string }
-          // beforeGen 传 undefined：手里只有**配置代次**（uiCacheOf()!.gen，恒定如 fp0c052e71），
+          // beforeGen 传 undefined：手里只有**配置代次**（uiCacheNow().gen，恒定如 fp0c052e71），
           // 与壳侧快照代次不同源，拿它比对必然假报「未变化」（坑 138）。
           // 宁可如实报「未能确认」，也不给模型一个错误的「点击失败」结论。
           const verdict = await verifyClick(undefined, exec as ExecLike)
@@ -1681,7 +1831,7 @@ properties: {
         const r = await a11yExec(clickOp, payload)
         if (!r.ok) return semanticFail(r, '无障碍点击失败：')
         const clicked = (r.data ?? {}) as { x?: number; y?: number; via?: string }
-        // beforeGen 传 undefined：我们手里只有**配置代次**（uiCacheOf()!.gen），与壳侧
+        // beforeGen 传 undefined：我们手里只有**配置代次**（uiCacheNow().gen），与壳侧
         // 快照代次不同源，拿它比对必然假报「未变」（坑 138）。宁可如实报「未能确认」。
         // targetVerified=false：坐标点击只有全局画面变化可观测，**未验证是否命中目标**
         // （issue #258 §5.1 误报成功）。
@@ -1711,10 +1861,10 @@ properties: {
       }
       let cx = 0; let cy = 0; let hitId = ''; let label = ''
       if (useRef) {
-        if (!uiCacheOf() || Date.now() - uiCacheOf()!.ts > UI_CACHE_TTL) {
+        if (!uiCacheNow()! || Date.now() - uiCacheNow()!.ts > UI_CACHE_TTL) {
           return { ok: false, denied: false, text: '没有可用的控件清单（缓存已失效）——请先执行 android_ui_dump 拿新 ref' }
         }
-        const hit = resolveRef(uiCacheOf()!.byId, uiCacheOf()!.nodes, ref!.trim(), scopePoolFor())
+        const hit = resolveRef(uiCacheNow()!.byId, uiCacheNow()!.nodes, ref!.trim(), scopePoolFor())
         if (!hit.ok) return { ok: false, denied: false, text: hit.error }
         let node = hit.node
         if (!node.clickable && !node.editable && !node.scrollable) {
@@ -1725,8 +1875,8 @@ properties: {
         cx = node.cx; cy = node.cy; hitId = node.id; label = (node.text || node.desc).slice(0, 24)
       } else {
         // 0-1 归一化坐标：无障碍通道从最近一次快照取屏幕尺寸（不依赖 ADB）
-        const size = uiCacheOf() !== null && Date.now() - uiCacheOf()!.ts <= UI_CACHE_TTL && uiCacheOf()!.screen.w > 0
-          ? uiCacheOf()!.screen
+        const size = uiCacheNow()! && Date.now() - uiCacheNow()!.ts <= UI_CACHE_TTL && uiCacheNow()!.screen.w > 0
+          ? uiCacheNow()!.screen
           : await screenSize()
         if (!size.w || !size.h) return { ok: false, denied: false, text: '屏幕尺寸未知（无障碍通道需先 android_ui_dump；ADB 通道需 wm size）——请先 dump 或改用 ref' }
         cx = Math.round(nx! * size.w); cy = Math.round(ny! * size.h)
@@ -1736,7 +1886,7 @@ properties: {
       // 0.13.5 W4：无障碍通道优先（语义 performAction；不经 input tap 坐标）
       if (controlDecision('click', exec as { agent?: { session?: unknown } }).backend === 'a11y') {
         const payload: Record<string, unknown> = { ...screenArgs(args) }
-        if (uiCacheOf()?.gen !== undefined) payload.gen = uiCacheOf()!.gen
+        if (uiCacheNow()!?.gen !== undefined) payload.gen = uiCacheNow()!.gen
         if (useRef) {
           if (!putTargetRefById(payload, hitId)) return { ok: false, denied: false, text: '无障碍通道需要节点行句柄/原始路径——请重新 android_ui_dump' }
         } else {
@@ -1818,10 +1968,10 @@ properties: {
       // 0.13.5 W4：无障碍通道优先（ACTION_SCROLL_* 语义滚动；无坐标 swipe）
       if (controlDecision('scroll', exec as { agent?: { session?: unknown } }).backend === 'a11y') {
         const payload: Record<string, unknown> = { direction: dir, fraction: frac, ...screenArgs(args) }
-        if (uiCacheOf()?.gen !== undefined) payload.gen = uiCacheOf()!.gen
+        if (uiCacheNow()!?.gen !== undefined) payload.gen = uiCacheNow()!.gen
         if (args.ref) {
-          if (!uiCacheOf() || Date.now() - uiCacheOf()!.ts > UI_CACHE_TTL) return { ok: false, denied: false, from: [], to: [], text: '没有可用的控件清单（缓存已失效）——请先执行 android_ui_dump 拿新 ref' }
-          const hit = resolveRef(uiCacheOf()!.byId, uiCacheOf()!.nodes, String(args.ref).trim(), scopePoolFor())
+          if (!uiCacheNow()! || Date.now() - uiCacheNow()!.ts > UI_CACHE_TTL) return { ok: false, denied: false, from: [], to: [], text: '没有可用的控件清单（缓存已失效）——请先执行 android_ui_dump 拿新 ref' }
+          const hit = resolveRef(uiCacheNow()!.byId, uiCacheNow()!.nodes, String(args.ref).trim(), scopePoolFor())
           if (!hit.ok) return { ok: false, denied: false, from: [], to: [], text: hit.error }
           if (!putTargetRef(payload, hit.node)) return { ok: false, denied: false, from: [], to: [], text: '无障碍通道需要节点行句柄/原始路径——请重新 android_ui_dump' }
         }
@@ -1833,7 +1983,7 @@ properties: {
       // 未配对 ADB 的部署下根本不需要 adb（此前挡在前面 → 语义滚动被误判成「ADB 执行通道未接通」）。
       if (!priv.execAdbLine || !priv.execAdbShell) return { ok: false, denied: false, text: 'ADB 执行通道未接通' }
       // 屏幕尺寸：缓存优先（dump 附带），无缓存现场查
-      let screen = uiCacheOf() !== null && Date.now() - uiCacheOf()!.ts <= UI_CACHE_TTL ? uiCacheOf()!.screen : null
+      let screen = uiCacheNow()! && Date.now() - uiCacheNow()!.ts <= UI_CACHE_TTL ? uiCacheNow()!.screen : null
       if (!screen || screen.w === 0) {
         const s = await priv.execAdbLine(`adb shell wm size | grep -m1 'Physical size'`)
         const m = /Physical size:\s*(\d+)x(\d+)/.exec(s.ok ? s.stdout : '')
@@ -1842,10 +1992,10 @@ properties: {
       // 滑动区域：有 ref 取节点 bounds；否则全屏
       let area = { x1: 0, y1: 0, x2: screen.w, y2: screen.h }
       if (args.ref) {
-        if (!uiCacheOf() || Date.now() - uiCacheOf()!.ts > UI_CACHE_TTL) {
+        if (!uiCacheNow()! || Date.now() - uiCacheNow()!.ts > UI_CACHE_TTL) {
           return { ok: false, denied: false, text: 'ref 滚动需要最近的 android_ui_dump 缓存' }
         }
-        const hit = resolveRef(uiCacheOf()!.byId, uiCacheOf()!.nodes, args.ref, scopePoolFor())
+        const hit = resolveRef(uiCacheNow()!.byId, uiCacheNow()!.nodes, args.ref, scopePoolFor())
         if (!hit.ok) return { ok: false, denied: false, text: hit.error }
         const n = hit.node
         area = { x1: n.cx - Math.floor(n.w / 2), y1: n.cy - Math.floor(n.h / 2), x2: n.cx + Math.floor(n.w / 2), y2: n.cy + Math.floor(n.h / 2) }
@@ -1940,10 +2090,10 @@ properties: {
       // 0.13.5 W4：无障碍通道优先（ACTION_SET_TEXT 原子写入——绕开 IME 切换与丢字问题 F5）
       if (controlDecision('setText', exec as { agent?: { session?: unknown } }).backend === 'a11y') {
         const payload: Record<string, unknown> = { text: raw, clear: clear === true, ...screenArgs(args) }
-        if (uiCacheOf()?.gen !== undefined) payload.gen = uiCacheOf()!.gen
+        if (uiCacheNow()!?.gen !== undefined) payload.gen = uiCacheNow()!.gen
         if (typeof ref === 'string' && ref.trim().length > 0) {
-          if (!uiCacheOf() || Date.now() - uiCacheOf()!.ts > UI_CACHE_TTL) return { ok: false, denied: false, channel: 'a11y', text: '没有可用的控件清单（缓存已失效）——请先执行 android_ui_dump 拿新 ref' }
-          const hit = resolveRef(uiCacheOf()!.byId, uiCacheOf()!.nodes, ref.trim(), scopePoolFor())
+          if (!uiCacheNow()! || Date.now() - uiCacheNow()!.ts > UI_CACHE_TTL) return { ok: false, denied: false, channel: 'a11y', text: '没有可用的控件清单（缓存已失效）——请先执行 android_ui_dump 拿新 ref' }
+          const hit = resolveRef(uiCacheNow()!.byId, uiCacheNow()!.nodes, ref.trim(), scopePoolFor())
           if (!hit.ok) return { ok: false, denied: false, channel: 'a11y', text: hit.error }
           if (!putTargetRef(payload, hit.node)) return { ok: false, denied: false, channel: 'a11y', text: '无障碍通道需要节点行句柄/原始路径——请重新 android_ui_dump' }
         }
@@ -1959,13 +2109,16 @@ properties: {
         // 本应用 0.13.2 起内嵌同协议 IME。F5 修复：ime enable 只入列不生效（广播被静默丢弃）——
         // 探测当前默认 IME → 临时 ime set 切到本通道 → 注入 → 还原原 IME（借道不劫持）。
         const execShell = priv.execAdbShell
+        // #679：nonce 是唯一凭据（壳侧已撤销 shell/root 白名单）。先确认可用再做 ime enable/ime set，
+        // 否则会先把用户输入法切走、最后却发不出去，且报错伪装成「来源被拒(3)」而非「凭据缺失」。
+        const authState = adbKeyboardAuthState(process.env.DSH_FILES_DIR)
+        if (!authState.ok) return { ok: false, denied: false, channel: 'adbkeyboard', text: kbAuthMissingText(authState.reason) }
+        const auth = authState.auth
         const cur = await execShell(`settings get secure default_input_method`).catch(() => ({ ok: false, stdout: '' }))
         const prev = (cur.ok ? cur.stdout : '').trim().replace(/^"|"$/g, '')
         await execShell(`ime enable ${IME_ID}`).catch(() => undefined)
         const needSwitch = prev.length > 0 && prev !== IME_ID
         if (needSwitch) await execShell(`ime set ${IME_ID}`).catch(() => undefined)
-        // 0.13.8 #183 / #413：来源校验 nonce（壳侧私有文件，引擎与壳同 uid 可读）+ 点名组件。
-        const auth = adbKeyboardAuth(process.env.DSH_FILES_DIR)
         type KbSend = { ok: boolean; stdout: string; guidance?: string; code: number | null }
         const sendKb = async (action: string, msg?: string): Promise<KbSend> => {
           const line = adbKeyboardBroadcast(action, msg, auth)
@@ -2037,9 +2190,15 @@ properties: {
             }
           }
           const act = [clear ? '已清空' : '', raw ? `已输入 ${raw.slice(0, 24)}${raw.length > 24 ? '…' : ''}` : ''].filter(Boolean).join(' + ')
-          const verifyNote = readBack === null
-            ? (resultCode === KB_RESULT.committed ? '，壳侧结果码确认已提交' : '')
-            : '，回读一致'
+          // issue #1067：无回读时，只有**权威结果码**才能宣称已提交。取不到结果码（截断 / ROM
+          // 不打印）与旧壳的 result=0 都只是「兼容性放行」，不是证据——此时必须明说未证实，
+          // 否则工具回 ok:true「已输入」而文本可能压根没进去（a11y 关闭时没有回读兜底，
+          // 这条是唯一判据）。isCommitAccepted 的放行口径不变（旧壳兼容），变的只是文案诚实度。
+          const verifyNote = readBack !== null
+            ? '，回读一致'
+            : (hasAuthoritativeCommit(resultCode)
+              ? '，壳侧结果码确认已提交'
+              : '，未证实例（取不到壳侧结果码，且本通道无回读：文本可能未落地，建议开无障碍后重试或改 channel:"input"）')
           return {
             ok: true,
             denied: false,
@@ -2421,7 +2580,9 @@ properties: {
   })
 
   // 0.14 D4：uiDetail 此前 defineTool 了但没进注册数组（死代码，而提示文案还在引导模型调用）。
+  // issue #688：每个工具的执行都跑在「本次请求的清单作用域」里（会话 + 目标屏，并发会话互不串味）。
   return [screenList, screenshot, uiTree, deviceInfo, actInput, uiDump, uiClick, uiScroll, uiInput, webDump, envPrepare, appLaunch, uiGlobal, uiDetail]
+    .map((tool) => withUiCacheScope(tool))
 }
 
 // ── 启动就绪审计（0.14.2-fx-2, 2026-09-28, task-80）───────────────────────────
@@ -2544,42 +2705,6 @@ function registerBootReadyAudit(ctx: Context): void {
   }, 'dsh-android-manage: boot readiness audit')
 }
 
-/**
- * issue #688：`uiCache` 原本是模块级单槽，没有 session 维 —— 先 dump 虚拟屏再 dump 真实屏，
- * 拿虚拟屏的 ref 去点真实屏就会点到错的控件。改成按会话键的 Map。
- *
- * 会话键来源与 dsh-android-browser 完全一致（那边早已这么做）：工具的 `execute` 被包一层，
- * 期间把归属会话放进 AsyncLocalStorage；键 = `sessionScope.getStore() ?? '__anonymous__'`。
- * 会话身份取自 `exec.agent.session`（字符串，或带 `.id` 的对象）。
- *
- * 拿不到会话时回落 `'__anonymous__'` —— 这是**显式降级**，不是编一个假 key 把缓存分开：
- * 所有无会话调用共享同一个桶，行为与旧单槽等价。
- */
-const sessionScope = new AsyncLocalStorage<string>()
-const sessionOf = (exec: unknown): string | undefined => {
-  const session = (exec as { agent?: { session?: unknown } } | undefined)?.agent?.session
-  if (typeof session === 'string' && session !== '') return session
-  if (session !== null && session !== undefined && typeof session === 'object') {
-    const id = (session as { id?: unknown }).id
-    if (typeof id === 'string' && id !== '') return id
-  }
-  return undefined
-}
-const cacheKey = (): string => sessionScope.getStore() ?? '__anonymous__'
-/** 把会话放进作用域：只包 `execute`，不改其它成员。 */
-const withSessionScope = <T,>(tool: T): T => {
-  const t = tool as unknown as { execute?: unknown }
-  const original = t.execute
-  if (typeof original !== 'function') return tool
-  const run = original as (args: unknown, exec: unknown) => unknown
-  return {
-    ...(tool as Record<string, unknown>),
-    execute: (args: unknown, exec: unknown) => {
-      const session = sessionOf(exec)
-      return session === undefined ? run(args, exec) : sessionScope.run(session, () => run(args, exec))
-    },
-  } as T
-}
 
 
 export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
@@ -2591,9 +2716,24 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
     gateFor: () => ({ ok: false, guidance: '授权桥（dsh-android-bridge）未装配' }),
     audit: () => {},
   }
-  // #688：注册前统一包一层会话作用域（与 dsh-android-browser 同做法）。
-  for (const t of tools(ctx, face).map(withSessionScope)) ctx.tools.register(t)
+  // #688：清单作用域已在 tools() 里逐个工具套好（会话 + 目标屏），这里直接注册。
+  for (const t of tools(ctx, face)) ctx.tools.register(t)
 
   // 启动就绪审计（异步、不阻塞 boot、异常不上抛）。
   registerBootReadyAudit(ctx)
+}
+
+/**
+ * #679：nonce 不可用时给模型的**可自助**报错（放在文件末尾以保持既有行号锚点零位移；
+ * `function` 声明会被提升，调用点在前面也没问题）。
+ *
+ * 为什么必须在这里返回而不是发一条注定被拒的广播：壳侧已撤销 shell/root 的 uid 白名单，
+ * 只认 nonce，空 auth 的广播 100% 回 result=3——那会把「凭据缺失」伪装成「来源被拒」。
+ */
+function kbAuthMissingText(reason: string): string {
+  return '未执行：键盘 nonce 不可用（' + reason + '）。'
+    + '壳侧已不再信任 uid 白名单（#679：Shizuku 的 shell 与 root 模式都能把身份借给第三方应用），'
+    + '没有 nonce 就发不出广播。最常见原因是壳与插件不同版——请安装同版本的 APK 与快照。'
+    + '诊断：adb shell run-as com.dsharnessmobile.shell cat files/boot-diag.log'
+    + '（查 adb-keyboard-nonce-unavailable / adb-keyboard-nonce-write-failed）'
 }

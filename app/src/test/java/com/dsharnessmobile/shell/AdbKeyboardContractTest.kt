@@ -125,32 +125,60 @@ class AdbKeyboardContractTest {
     assertTrue("android_ui_input 必须走命令构造器", tool.contains("adbKeyboardBroadcast("))
     assertTrue("android_ui_input 必须读结果码", tool.contains("parseBroadcastResult("))
     assertTrue("失败必须按结果码分类说明", tool.contains("KB_RESULT.rejected"))
+    // #679 fail loud：nonce 不可读时必须在**发广播之前**返回结构化错误——
+    // 壳侧已无 uid 白名单，空 auth 的广播注定被拒(result=3)，发出去只会把
+    // 「凭据缺失」伪装成「来源被拒」。
+    assertTrue("必须用结构化 authState（才能说清取不到的原因）", tool.contains("adbKeyboardAuthState("))
+    assertTrue("必须在发广播前拦下不可用状态", tool.contains("if (!authState.ok)"))
+    assertFalse("不得退回「空 auth 也照发」的旧形态",
+      tool.contains("const auth = adbKeyboardAuth(process.env.DSH_FILES_DIR)"))
+    // 壳侧：nonce 取不到时 fail loud（Log.e + boot-diag），不得静默。
+    val service = codeOnly(shellSource("AdbKeyboardService.kt"))
+    assertTrue("壳侧 nonce 不可用必须记 Log.e", service.contains("Log.e(\"dsh-adb-kb\""))
+    assertTrue("壳侧 nonce 不可用必须写 boot-diag", service.contains("writeBootDiag("))
+    assertFalse("不得保留 uid 白名单（uid 0/2000 都可被 Shizuku 代表）",
+      service.contains("isTrustedUid("))
+    val main = codeOnly(shellSource("MainActivity.kt"))
+    assertFalse("ensureNonce 失败不得静默吞掉",
+      main.contains("try { AdbKeyboardService.ensureNonce(this) } catch (_: Throwable) {"))
+    assertTrue("ensureNonce 失败必须可见",
+      main.contains("adb-keyboard-nonce-write-failed"))
   }
 
   // ── 纯逻辑判据 ──────────────────────────────────────────────────────────────
 
   @Test
-  fun onlyRootIsImplicitlyTrustedUid() {
-    assertTrue("root", AdbKeyboardService.isTrustedUid(0))
-    assertFalse("#679：adb shell(2000) 不再隐式可信——Shizuku 应用可持该身份", AdbKeyboardService.isTrustedUid(2000))
-    assertFalse("普通应用 uid 不在白名单", AdbKeyboardService.isTrustedUid(10123))
-    assertFalse("取不到发送方（INVALID_UID=-1）不得放行", AdbKeyboardService.isTrustedUid(-1))
+  fun noUidIsImplicitlyTrusted() {
+    // #679 收紧到极致：**没有任何 uid 被隐式信任**。
+    // 为什么连 root 也去掉：Shizuku 的 shell 与 root 两种模式都会把对应身份借给已授权的第三方
+    // 应用，所以 uid 2000 与 uid 0 都可以由「不是 adb、也不是本应用」的第三方代表；从 uid 上
+    // 无法区分，uid 白名单在这个威胁模型下没有安全增益。
+    // 反向：若有人把 root 免检加回来，本条立刻红（见下方 root 用例）。
+    for (uid in listOf(-1, 0, 2000, 10123, 1000)) {
+      assertFalse(
+        "uid " + uid + " 不得在没有 nonce 的情况下被放行",
+        AdbKeyboardService.isTrustedSenderFor(uid, null, "any"),
+      )
+    }
   }
 
   @Test
-  fun nonRootSenderWithoutNonceIsRejected() {
+  fun onlyAValidNonceGrantsAccessRegardlessOfUid() {
     // 纯判据面（[AdbKeyboardService.isTrustedSender] 负责从 nonce 文件收敛出 fileSecret；
     // JVM 单测没有可实例化的 Context，context→secret 的读文件路径不在此测）。
     assertFalse("uid 2000 无 nonce 必须拒（#679：Shizuku 冒用面）", AdbKeyboardService.isTrustedSenderFor(2000, null, "any"))
     assertFalse("uid 2000 带 nonce 但无有效 secret（文件缺失/不可读）同样拒（fail-closed）",
       AdbKeyboardService.isTrustedSenderFor(2000, "x", null))
     assertFalse("uid 2000 nonce 不匹配必须拒", AdbKeyboardService.isTrustedSenderFor(2000, "x", "y"))
-    assertTrue("uid 2000 nonce 匹配放行（经典 adb 路径的合法新形态：--es auth 携带 nonce）",
+    assertTrue("uid 2000 nonce 匹配放行（adb 路径：--es auth 携带 nonce）",
       AdbKeyboardService.isTrustedSenderFor(2000, "x", "x"))
     assertFalse("普通应用无 nonce 必须拒", AdbKeyboardService.isTrustedSenderFor(10123, null, "any"))
     assertTrue("普通应用带有效 nonce 放行（引擎路径，本就以应用 uid 运行）",
       AdbKeyboardService.isTrustedSenderFor(10123, "x", "x"))
-    assertTrue("root 不要求 nonce（本已拥有设备全部权限）", AdbKeyboardService.isTrustedSenderFor(0, null, null))
+    assertFalse("root 无 nonce 也必须拒（#679：Shizuku root 模式可把 root 身份借给第三方应用）",
+      AdbKeyboardService.isTrustedSenderFor(0, null, null))
+    assertFalse("root 带错 nonce 同样拒", AdbKeyboardService.isTrustedSenderFor(0, "x", "y"))
+    assertTrue("root 带对 nonce 放行——凭据是 nonce，不是身份", AdbKeyboardService.isTrustedSenderFor(0, "x", "x"))
   }
 
   @Test

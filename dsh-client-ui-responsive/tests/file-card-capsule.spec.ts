@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// 交付文件卡片的两段胶囊：另一种打开方式 + 转发。
+// 交付文件卡片的两段胶囊：用其他应用打开 + 转发。
 //
 // 夹具照上游 ui-deliverables/ChangedFiles.tsx 的真实可访问性接线搭：
 //   div[data-changed-files][data-single]
@@ -9,8 +9,9 @@
 // 上游没有文件级操作插槽，胶囊靠这段 DOM 接线取路径，不靠样式类。
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import {
-  FileCardCapsule, DEFAULT_OPEN_MODE, mimeOf, otherModeOf, type FileCardBridge,
+  FileCardCapsule, mimeOf, type FileCardBridge,
 } from '../src/client/mobile/file-card-actions.ts'
+import * as fileCardActions from '../src/client/mobile/file-card-actions.ts'
 import { FILE_CARD_CAPSULE_CSS } from '../src/client/mobile/file-card-capsule.css.ts'
 
 const CAPSULE = '[data-dsh-file-capsule]'
@@ -182,8 +183,6 @@ describe('卡片胶囊：行为', () => {
     capsule = new FileCardCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
     capsule.attach()
     await flush()
-    // 默认模式是侧栏
-    expect(DEFAULT_OPEN_MODE).toBe('sidebar')
     header.click()
     expect(onOpen).toHaveBeenCalledTimes(1)
   })
@@ -298,6 +297,73 @@ describe('卡片胶囊：行为', () => {
     expect(document.querySelector(EXTERNAL)).toBeNull()
   })
 
+  // ④f–④h 钉住 #990：**桥方法不在场不是「没有外部接收方」**。
+  // 桥由壳侧在页面脚本之后注入，晚注入是本类明确支持的场景（bridge 是每次取值的函数）。
+  // 历史缺陷：act() 在 openFileExternal 不在场时直接置 externalMissing = true，把「还没注入」
+  // 当成「没人接」——那是终态，桥后来出现了左段也永远回不来（用户可见：只剩转发，无法恢复）。
+
+  it('④f 桥缺席时点一次左段不置终态：桥晚注入后 externalAvailable() 重新为 true（#990 反证）', async () => {
+    buildSingleCard('/work/a.md')
+    let face: FileCardBridge = {}
+    capsule = new FileCardCapsule(() => face, COPY)
+    capsule.attach()
+    await flush()
+    // 装配期桥缺席：本轮渲染不出左段，但这只是「不确定」。
+    expect(document.querySelector(EXTERNAL)).toBeNull()
+    // 用户在桥缺席时点了左段（此时按钮不在场，直接走 act 模拟同一条代码路径）。
+    expect(capsule.act('external', '/work/a.md')).toEqual({ ok: false, reason: 'unavailable' })
+    // 桥仍然缺席：当然还不可用，但这只是当下的判断，不是终态。
+    expect(capsule.externalAvailable()).toBe(false)
+    // 壳侧此刻才注入桥。
+    face = makeBridge(() => '{"ok":true}')
+    expect(capsule.externalAvailable(), '桥出现后必须重新可用（旧实现是终态，这条必红）').toBe(true)
+  })
+
+  it('④g 桥晚注入后，已渲染的「只剩转发」胶囊补回左段与分隔线（#990 用户可见面）', async () => {
+    buildSingleCard('/work/a.md')
+    let face: FileCardBridge = {}
+    capsule = new FileCardCapsule(() => face, COPY)
+    capsule.attach()
+    await flush()
+    const box = document.querySelector<HTMLElement>(CAPSULE)!
+    expect(box.hasAttribute('data-dsh-file-capsule-share-only')).toBe(true)
+    capsule.act('external', '/work/a.md')
+    // 壳侧注入桥后，下一次扫描要把左段补回来——不能永远停在「只剩转发」。
+    face = makeBridge(() => '{"ok":true}')
+    // 用卡片内的变更触发一次重扫（卡片重渲染的形状）：只依赖「卡片子树变化会重扫」这条契约，
+    // 不依赖「整份文档任何变更都重扫」——后者正是 #985 要收掉的。
+    document.querySelector('[data-changed-files]')!.append(document.createElement('span'))
+    await flush()
+    const restored = document.querySelector<HTMLElement>(CAPSULE)!
+    expect(restored.querySelector(EXTERNAL), '已渲染的胶囊必须补回左段').not.toBeNull()
+    expect(restored.querySelector(SEPARATOR), '补回左段时分隔线一起回来').not.toBeNull()
+    expect(restored.hasAttribute('data-dsh-file-capsule-share-only'), '补回后不再是 share-only').toBe(false)
+    expect([...restored.children].map(node => node.hasAttribute('data-dsh-file-capsule-external') ? 'external' : node.hasAttribute('data-dsh-file-capsule-share') ? 'share' : 'sep'))
+      .toEqual(['external', 'sep', 'share'])
+    // 补回来的左段仍然是真按钮：点它确实走桥。
+    const bridge = makeBridge(() => '{"ok":true}')
+    face = bridge
+    restored.querySelector<HTMLElement>(EXTERNAL)!.click()
+    expect(bridge.calls.external).toEqual([['/work/a.md', 'text/markdown']])
+  })
+
+  it('④h 已确证 no-receiver 后桥重绑也不复活左段（终态只由壳侧确证触发）', async () => {
+    buildSingleCard('/work/a.md')
+    let face: FileCardBridge = makeBridge(() => '{"ok":false,"error":"no-receiver"}')
+    capsule = new FileCardCapsule(() => face, COPY)
+    capsule.attach()
+    await flush()
+    document.querySelector<HTMLElement>(EXTERNAL)!.click()
+    expect(capsule.externalAvailable()).toBe(false)
+    // 换一份可用的桥（例如壳侧重连）也不该把「这台机器没人接」的结论翻掉。
+    face = makeBridge(() => '{"ok":true}')
+    document.querySelector('[data-changed-files]')!.append(document.createElement('span'))
+    await flush()
+    expect(capsule.externalAvailable()).toBe(false)
+    expect(document.querySelector(EXTERNAL)).toBeNull()
+    expect(document.querySelector(SHARE)).not.toBeNull()
+  })
+
   it('桥抛异常时按失败返回，不向 DOM 事件里抛', async () => {
     buildSingleCard('/work/a.md')
     const bridge: FileCardBridge = {
@@ -357,14 +423,367 @@ describe('卡片胶囊：行为', () => {
   })
 })
 
-describe('卡片胶囊：默认模式反向', () => {
-  it('otherModeOf 把默认取反', () => {
-    expect(otherModeOf('sidebar')).toBe('external')
-    expect(otherModeOf('external')).toBe('sidebar')
+/**
+ * 扫描探针：覆写两个 protected 入口来数「扫了几次 / 扫了多大范围」。
+ *
+ * 生产代码里没有为测试留的可变状态——`cardsIn` 是唯一的卡片查询入口，`scanBatch` 是唯一的
+ * 批量扫描出口，观察点就长在真实的调用链上（不是旁路计数器）。
+ */
+class ProbeCapsule extends FileCardCapsule {
+  /** 每次卡片查询的根：'document' = 全文档扫描。 */
+  readonly roots: string[] = []
+  /** 每一批扫了几张卡片。 */
+  readonly batches: number[] = []
+
+  protected override cardsIn(root: ParentNode): HTMLElement[] {
+    this.roots.push(root === document ? 'document' : root === document.documentElement ? 'documentElement' : 'subtree')
+    return super.cardsIn(root)
+  }
+
+  protected override scanBatch(cards: readonly HTMLElement[]): void {
+    this.batches.push(cards.length)
+    super.scanBatch(cards)
+  }
+
+  /** 只看 attach 之后的区间。 */
+  reset(): void {
+    this.roots.length = 0
+    this.batches.length = 0
+  }
+
+  /** 全文档扫描次数。 */
+  get documentScans(): number {
+    return this.roots.filter(root => root === 'document').length
+  }
+}
+
+/** 连观察器回调与合批微任务一起跑完（比 flush 多等两拍，避免批次没落地就断言）。 */
+async function settle(): Promise<void> {
+  for (let round = 0; round < 4; round += 1) await Promise.resolve()
+}
+
+/** 一条卡片的查询次数：只数真正的卡片选择器，别的 querySelectorAll 不算。 */
+function cardScans(spy: { mock: { calls: unknown[][] } }): number {
+  return spy.mock.calls.filter(call => call[0] === '[data-changed-files]').length
+}
+
+let probe: ProbeCapsule
+
+describe('#985 观察面：合批 + 限定子树', () => {
+  afterEach(() => {
+    probe?.detach()
   })
 
-  it('默认值是单一常量（加设置行时只改它）', () => {
-    expect(DEFAULT_OPEN_MODE).toBe('sidebar')
+  it('流式 token 追加不回扫：整份文档零查询、已知卡片零重扫（反证：旧实现每次全文档扫）', async () => {
+    buildSingleCard('/work/a.md')
+    probe = new ProbeCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
+    probe.attach()
+    await settle()
+    // attach 的那一次全文档扫描是允许的；从这以后不该再出现。
+    expect(probe.documentScans).toBe(1)
+    probe.reset()
+
+    const spy = vi.spyOn(document, 'querySelectorAll')
+    const paragraph = document.createElement('p')
+    document.body.append(paragraph)
+    await settle()
+    probe.reset()
+    // 真实的流式形态：一堆叶子节点（token 文本、行内 span）追加进既有段落。
+    for (let index = 0; index < 30; index += 1) {
+      // 主流式形态：文本节点（markdown 增量）+ 行内元素交替追加。
+      paragraph.append('tok' + index)
+      if (index % 3 === 0) paragraph.append(document.createElement('span'))
+    }
+    await settle()
+
+    expect(cardScans(spy), '流式追加时对整份文档做了卡片查询').toBe(0)
+    expect(probe.documentScans, '无关变更重新扫了整份文档').toBe(0)
+    expect(probe.roots, '无关变更不该产生任何卡片查询').toEqual([])
+    expect(probe.batches, '无关变更不该产生扫描批次').toEqual([])
+    spy.mockRestore()
+  })
+
+  it('无关容器插入时只在那个子树里找卡片，绝不下探整份文档', async () => {
+    buildSingleCard('/work/a.md')
+    probe = new ProbeCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
+    probe.attach()
+    await settle()
+    probe.reset()
+
+    // 新消息外层容器带着一棵与卡片无关的子树一次性插进来（React 一次提交的形状）。
+    const message = document.createElement('div')
+    const body = document.createElement('div')
+    body.append(document.createElement('p'), document.createElement('pre'))
+    message.append(body)
+    document.body.append(message)
+    await settle()
+
+    expect(probe.roots, '查询范围被限制在新增子树里').toEqual(['subtree'])
+    expect(probe.documentScans, '无关容器插入不该升级成全文档扫描').toBe(0)
+    expect(probe.batches, '无关子树里没有卡片，不该产生扫描批次').toEqual([])
+  })
+
+  it('已有卡片内部的变更只重扫那一张卡片，不扫整份文档', async () => {
+    const card = buildMultiCard(['/work/a.md'])
+    probe = new ProbeCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
+    probe.attach()
+    await settle()
+    probe.reset()
+
+    // 流式追加一行：上游会往同一个 ul 里插新的 li。
+    const list = card.querySelector('ul')!
+    const li = document.createElement('li')
+    const anchor = document.createElement('span')
+    const row = document.createElement('button')
+    row.type = 'button'
+    row.setAttribute('aria-describedby', 'late-row')
+    anchor.append(row)
+    const hidden = document.createElement('span')
+    hidden.id = 'late-row'
+    hidden.hidden = true
+    hidden.textContent = '/work/late.md'
+    li.append(anchor, hidden)
+    list.append(li)
+    await settle()
+
+    expect(probe.documentScans, '卡片内部变更不该升级成全文档扫描').toBe(0)
+    // 已知卡片内部变更走「登记这张卡」，不做子树查询，也不碰别的卡。
+    expect(probe.roots, '已知卡片不该再做卡片查询').toEqual([])
+    expect(probe.batches, '只重扫那一张卡片').toEqual([1])
+    expect(document.querySelectorAll(CAPSULE)).toHaveLength(2)
+  })
+
+  it('同一拍的六次变更只换一次扫描（microtask 合批，不逐条放大）', async () => {
+    const card = buildMultiCard(['/work/a.md'])
+    probe = new ProbeCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
+    probe.attach()
+    await settle()
+    probe.reset()
+
+    const list = card.querySelector('ul')!
+    for (let index = 0; index < 6; index += 1) {
+      const li = document.createElement('li')
+      const anchor = document.createElement('span')
+      const row = document.createElement('button')
+      row.type = 'button'
+      row.setAttribute('aria-describedby', 'batch-row-' + index)
+      anchor.append(row)
+      const hidden = document.createElement('span')
+      hidden.id = 'batch-row-' + index
+      hidden.hidden = true
+      hidden.textContent = '/work/batch-' + index + '.md'
+      li.append(anchor, hidden)
+      list.append(li)
+    }
+    await settle()
+
+    // 六条记录、同一张卡：一批、一次扫描。逐条扫会得到六个批次。
+    expect(probe.batches, '六次变更被合成一批').toEqual([1])
+    expect(probe.roots, '已知卡片不再做任何卡片查询').toEqual([])
+    // 合批不得把卡片漏掉：六行全部挂上（原有 1 行 + 新增 6 行）。
+    expect(document.querySelectorAll(CAPSULE)).toHaveLength(7)
+  })
+
+  it('跨两个微任务到达的变更仍然各自成批，但都不做全文档扫描', async () => {
+    const card = buildMultiCard(['/work/a.md'])
+    probe = new ProbeCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
+    probe.attach()
+    await settle()
+    probe.reset()
+
+    const list = card.querySelector('ul')!
+    list.append(document.createElement('li'))
+    // 让观察器投递一次、合批微任务落地，再来一次（React 分两次提交的形态）。
+    await settle()
+    list.append(document.createElement('li'))
+    await settle()
+
+    expect(probe.documentScans).toBe(0)
+    expect(probe.batches.length).toBeGreaterThanOrEqual(1)
+    expect(probe.batches.length).toBeLessThanOrEqual(2)
+    expect(probe.batches.every(count => count === 1), '每次都只扫这张卡').toBe(true)
+  })
+
+  it('放行例：新卡片在两次微任务内挂上胶囊（观察器一拍 + 合批一拍，不多等）', async () => {
+    probe = new ProbeCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
+    probe.attach()
+    await settle()
+    probe.reset()
+
+    buildSingleCard('/work/late.md')
+    // 只给两拍：① 观察器回调投递；② 合批微任务落地。多一拍就说明合批把新卡片拖后了。
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(document.querySelectorAll(CAPSULE), '新卡片没有在一拍内被挂上胶囊').toHaveLength(1)
+  })
+
+  it('放行例：attach 之后插入的新卡片一个 microtask 批次内挂上胶囊', async () => {
+    probe = new ProbeCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
+    probe.attach()
+    await settle()
+    probe.reset()
+
+    buildSingleCard('/work/late.md')
+    await settle()
+    expect(document.querySelectorAll(CAPSULE)).toHaveLength(1)
+    expect(probe.documentScans, '发现新卡片不该靠重扫整份文档').toBe(0)
+  })
+
+  it('放行例：卡片插在深层容器里同样被发现', async () => {
+    probe = new ProbeCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
+    probe.attach()
+    await settle()
+    probe.reset()
+
+    const wrapper = document.createElement('div')
+    const inner = document.createElement('div')
+    const message = document.createElement('article')
+    inner.append(message)
+    wrapper.append(inner)
+    document.body.append(wrapper)
+    // buildSingleCard 自己 append 到 body，这里把它搬进深层容器。
+    const header = buildSingleCard('/work/deep.md')
+    const deepCard = header.closest('[data-changed-files]')!
+    message.append(deepCard)
+    await settle()
+
+    expect(document.querySelectorAll(CAPSULE)).toHaveLength(1)
+    expect(probe.documentScans).toBe(0)
+  })
+
+  it('放行例：迟到的路径 span 会在同一张卡片上补扫出胶囊', async () => {
+    // 上游先挂按钮、下一帧才写 aria-describedby 指向的 hidden span（React 分两次提交）。
+    const card = document.createElement('div')
+    card.setAttribute('data-changed-files', '')
+    card.setAttribute('data-single', '')
+    const header = document.createElement('button')
+    header.type = 'button'
+    card.append(header)
+    document.body.append(card)
+
+    probe = new ProbeCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
+    probe.attach()
+    await settle()
+    expect(document.querySelectorAll(CAPSULE)).toHaveLength(0)
+    probe.reset()
+
+    header.setAttribute('aria-describedby', 'late-path')
+    const hidden = document.createElement('span')
+    hidden.id = 'late-path'
+    hidden.hidden = true
+    hidden.textContent = '/work/late.md'
+    card.append(hidden)
+    await settle()
+
+    expect(document.querySelectorAll(CAPSULE)).toHaveLength(1)
+    expect(probe.documentScans).toBe(0)
+  })
+
+  it('卡片被移除后不留失效引用：后续变更既不扫它也不抛错', async () => {
+    const card = buildMultiCard(['/work/a.md', '/work/b.md'])
+    probe = new ProbeCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
+    probe.attach()
+    await settle()
+    expect(document.querySelectorAll(CAPSULE)).toHaveLength(2)
+
+    card.remove()
+    await settle()
+    probe.reset()
+
+    // 被摘掉的子树内部再变一次（React 卸载清理的常见形状）：目标脱树，必须直接跳过。
+    card.querySelector('ul')!.append(document.createElement('li'))
+    await settle()
+    expect(probe.roots, '脱树的目标仍被扫描（持有失效引用）').toEqual([])
+    expect(probe.batches).toEqual([])
+
+    // 新的卡片照常被发现，且不会把已移除的那张带回来。
+    buildSingleCard('/work/c.md')
+    await settle()
+    expect(probe.batches).toEqual([1])
+    expect(document.querySelectorAll(CAPSULE)).toHaveLength(1)
+  })
+
+  it('detach 之后已排队的合批不再执行（HMR 安全）', async () => {
+    probe = new ProbeCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
+    probe.attach()
+    await settle()
+    probe.reset()
+
+    const card = document.createElement('div')
+    card.setAttribute('data-changed-files', '')
+    card.setAttribute('data-single', '')
+    const header = document.createElement('button')
+    header.type = 'button'
+    header.setAttribute('aria-describedby', 'gone-path')
+    card.append(header)
+    document.body.append(card)
+    // 观察器回调已投递、合批微任务还没跑的时候 detach。
+    await Promise.resolve()
+    probe.detach()
+    await settle()
+
+    expect(probe.batches).toEqual([])
+    expect(document.querySelectorAll(CAPSULE)).toHaveLength(0)
+  })
+
+  it('detach 后立刻 re-attach（HMR）：上一轮排队的批次作废，不落到新一轮头上', async () => {
+    probe = new ProbeCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
+    probe.attach()
+    await settle()
+    probe.reset()
+
+    // 先制造一条变更：观察器回调投递、合批微任务已排队，但还没跑。
+    buildSingleCard('/work/a.md')
+    await Promise.resolve()
+
+    probe.detach()
+    probe.attach()
+    // 新一轮的首次扫描已经跑完，从这里只看旧批次会不会漏进来。
+    probe.reset()
+    await settle()
+
+    expect(probe.batches, '上一轮排队的批次落到了新一轮头上').toEqual([])
+    expect(document.querySelectorAll(CAPSULE), 're-attach 后存量卡片应重新挂上').toHaveLength(1)
+  })
+
+  it('自己挂的胶囊不触发回声重扫', async () => {
+    probe = new ProbeCapsule(() => makeBridge(() => '{"ok":true}'), COPY)
+    probe.attach()
+    await settle()
+    probe.reset()
+
+    buildMultiCard(['/work/a.md', '/work/b.md', '/work/c.md'])
+    await settle()
+
+    // 插入一条记录 → 一批扫描；这三次 append 胶囊自己的三条记录不得再换三次扫描。
+    expect(probe.batches).toEqual([1])
+    expect(document.querySelectorAll(CAPSULE)).toHaveLength(3)
+  })
+})
+
+describe('#991 左段固定为外部打开（无「默认模式」常量）', () => {
+  it('胶囊左段不导出任何「默认打开方式」常量或取反函数（删掉的死面不许回潮）', () => {
+    // #991：DEFAULT_OPEN_MODE / otherModeOf / OpenMode 在 src/ 内零读取点，只是钉常量本身，
+    // 改常量不改变任何行为。接上逻辑也不成立——卡片的单击属于上游只读包 ChangedFiles，
+    // 本模块改不动它；反向左段会让卡片单击（侧栏预览）与左段（也变成侧栏预览）撞车、
+    // 外部打开凭空消失。所以删掉，并在这里钉住它不会以上述任一形态回来。
+    expect(Object.keys(fileCardActions)).not.toContain('DEFAULT_OPEN_MODE')
+    expect(Object.keys(fileCardActions)).not.toContain('otherModeOf')
+  })
+
+  it('左段恒为「用其他应用打开」：aria-label 走 external 文案、点击走 openFileExternal', async () => {
+    // 这条替代原先钉常量的「默认值是单一常量」：断言真实行为，而不是断言一个无人读的值。
+    const bridge = makeBridge(() => '{"ok":true}')
+    buildSingleCard('/work/report.md')
+    capsule = new FileCardCapsule(() => bridge, COPY)
+    capsule.attach()
+    await flush()
+    const external = document.querySelector<HTMLElement>(EXTERNAL)!
+    expect(external.getAttribute('aria-label')).toBe('用其他应用打开：report.md')
+    external.click()
+    expect(bridge.calls.external).toEqual([['/work/report.md', 'text/markdown']])
+    // 卡片单击的默认动作仍由上游决定，本模块不参与（没有「模式」可改写它）。
+    expect(document.querySelector(CAPSULE)!.hasAttribute('data-dsh-file-capsule-share-only')).toBe(false)
   })
 })
 

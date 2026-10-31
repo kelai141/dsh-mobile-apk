@@ -38,11 +38,122 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
   /** 当前语言判定（每条回执都取一次，页面切语言后新回执立刻跟随）。 */
   private val english: Boolean get() = UiText.isEnglish(activity)
 
+
+  // ── 在途状态的落盘 / 恢复（issue #1007）──────────────────────────────────────
+
+  /** 进程死亡后重放的回执：页面未就绪时留到 onPageFinished 再送（与 deliverNotifyRoute 同款）。 */
+  private var deferredReceipt: String? = null
+
+  /**
+   * **构造里不得读 `activity.cacheDir`**（P0 冷启崩溃）。
+   *
+   * 缺陷现场：本控制器由 MainActivity 的**字段初始化**建出
+   * （`internal val photoCaptureController = PhotoCaptureController(this)`）。那一刻 Activity 还没跑完
+   * attachBaseContext，`Context.getCacheDir()` 直接 NPE：
+   * `FATAL: NullPointerException: 'android.content.Context.getCacheDir()' on a null object reference`
+   * —— 任何包在全新安装后冷启必崩。旧实现在这里调 restorePendingState()，而它第一行就走
+   * pendingStateFile() → activity.cacheDir。
+   *
+   * 时序约束与修法：
+   *  - 构造必须留在字段初始化（ActivityResult launcher 要在 STARTED 之前注册）；
+   *  - 但**恢复**改到 MainActivity.onCreate 里 super.onCreate 之后第一件事调 [restoreNow]。
+   *    这仍早于任何相机结果投递——结果只能经 onNewIntent / onActivityResult 进来，两者都在
+   *    onCreate 之后，所以「恢复早于结果」的保证不变。
+   */
+  init {
+    // 刻意留空：此处 Context 尚未 attach，任何碰 cacheDir/filesDir 的初始化都必须走 restoreNow()。
+  }
+
+  /**
+   * 在 MainActivity.onCreate（**super.onCreate 之后**）调用：此时 Context 已 attach，cacheDir 可用。
+   * 幂等：没有在途状态时 restorePendingState() 只做一次 `isFile` 判断。
+   */
+  fun restoreNow() {
+    restorePendingState()
+  }
+
+  private fun pendingStateFile(): File = PhotoCapture.pendingStateFile(activity.cacheDir)
+
+  /** 受理时落盘。写失败不影响本次拍照（只是丢了跨进程能力），所以只记日志不抛。 */
+  private fun persistPendingState(job: Pending) {
+    try {
+      AtomicFileReplace.writeText(
+        pendingStateFile(),
+        PhotoCapture.encodePending(job.raw, job.target, System.currentTimeMillis()),
+      )
+    } catch (t: Throwable) {
+      LogCollector.log("dsh-photo", "pending state persist failed: " + (t.message ?: t.javaClass.simpleName))
+    }
+  }
+
+  private fun clearPendingState() {
+    try {
+      pendingStateFile().delete()
+    } catch (t: Throwable) {
+      LogCollector.log("dsh-photo", "pending state clear failed: " + (t.message ?: t.javaClass.simpleName))
+    }
+  }
+
+  /**
+   * 把落盘的在途状态接回来。
+   *
+   * 三种结局：没有（正常启动）/ 可续上（等着相机结果）/ 已丢失（原图没了、超时或路径越界）。
+   * 第三种必须回一条结构化失败 —— 页面在等 onPhotoCaptured，静默就是原缺陷本身。
+   */
+  private fun restorePendingState() {
+    val file = pendingStateFile()
+    if (!file.isFile) return
+    val text = runCatching { file.readText() }.getOrNull()
+    val record = text?.let { PhotoCapture.decodePending(it) }
+    val recovery = PhotoCapture.classifyPending(
+      record,
+      PhotoCapture.rawDir(activity),
+      PhotoCapture.outputDir(activity),
+      System.currentTimeMillis(),
+    )
+    when (recovery) {
+      is PhotoCapture.PendingRecovery.None -> clearPendingState()
+      is PhotoCapture.PendingRecovery.Resume -> {
+        // 接着走既有的收尾路径：结果一到就压缩 + 投递 + 回执，与同进程内拍照完全同形。
+        pending = Pending(raw = recovery.raw, target = recovery.target, reply = { payload -> pushToPage(payload) })
+        LogCollector.log("dsh-photo", "pending capture restored: " + recovery.raw.name)
+      }
+      is PhotoCapture.PendingRecovery.Lost -> {
+        clearPendingState()
+        queueReceipt(
+          PhotoCapture.errorPayload(english, PhotoCapture.CODE_CAMERA_FAILED, "pending-lost:" + recovery.reason),
+        )
+      }
+    }
+  }
+
+  /** 排队一条回执；页面未就绪就等 onPageFinished（[flushDeferredReceipt]）。 */
+  private fun queueReceipt(payload: String) {
+    deferredReceipt = payload
+    flushDeferredReceipt()
+  }
+
+  /** 页面就绪时把排队中的回执送出去（MainActivity.onPageFinished 调用；不依赖页面先发起任何动作）。 */
+  internal fun flushDeferredReceipt() {
+    val payload = deferredReceipt ?: return
+    if (!activity.webViewReady) return
+    deferredReceipt = null
+    pushToPage(payload)
+  }
+
   /** 相机返回。非 RESULT_OK 或没有产物 = 用户取消（CODE_CANCELLED）。 */
   private val cameraLauncher: ActivityResultLauncher<android.content.Intent> =
     activity.registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-      val job = pending ?: return@registerForActivityResult
+      // issue #1007：这里曾经是裸空判（pending ?: return）—— 进程被回收后新实例的 pending 是 null，
+      // 而桥已经回过 {ok:true,accepted:true}，于是结果被静默丢弃、页面永远等不到 onPhotoCaptured。
+      // 现在 pending 由落盘状态恢复（见 restorePending）；真拿不到就如实回一条结构化失败。
+      val job = pending
+      if (job == null) {
+        queueReceipt(PhotoCapture.errorPayload(english, PhotoCapture.CODE_CAMERA_FAILED, "capture-result-without-pending"))
+        return@registerForActivityResult
+      }
       pending = null
+      clearPendingState()
       if (result.resultCode != Activity.RESULT_OK) {
         // 取消：原图（可能已建了 0 字节）直接删，不留垃圾。
         job.raw.delete()
@@ -59,6 +170,7 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
       if (job == null) return@registerForActivityResult
       if (!granted) {
         pending = null
+        clearPendingState()
         job.raw.delete()
         job.reply(PhotoCapture.errorPayload(english, PhotoCapture.CODE_PERMISSION_DENIED))
         return@registerForActivityResult
@@ -91,10 +203,14 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
     val names = PhotoCapture.namesFor(System.currentTimeMillis())
     val raw = File(PhotoCapture.rawDir(activity), names.first)
     val target = File(PhotoCapture.outputDir(activity), names.second)
-    // 清历史：成品留最近 N 张、历史原图全清（本次原图在压缩成功后也立刻删）。
+    // 清历史：成品留最近 N 张、普通原图全清、压缩失败的保留位按件数/时间窗有界回收
+    // （本次原图在压缩成功后立刻删；失败则改名进保留位，见 finish）。
     PhotoCapture.sweepOld(PhotoCapture.outputDir(activity), PhotoCapture.rawDir(activity))
     val job = Pending(raw = raw, target = target, reply = reply)
     pending = job
+    // issue #1007：受理即刻落盘（在拉起相机**之前**）。进程死亡后新实例靠它把在途状态接回来，
+    // 否则相机结果会被静默丢弃。
+    persistPendingState(job)
     if (ContextCompat.checkSelfPermission(activity, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
       launchCamera(job)
     } else {
@@ -108,6 +224,7 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
     val cameraPackage = PhotoCapture.resolveCameraPackage(activity)
     if (cameraPackage == null) {
       pending = null
+      clearPendingState()
       job.raw.delete()
       job.reply(PhotoCapture.errorPayload(english, PhotoCapture.CODE_CAMERA_UNAVAILABLE))
       return
@@ -116,6 +233,7 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
       PhotoCapture.captureIntent(activity, job.raw, cameraPackage)
     } catch (t: Throwable) {
       pending = null
+      clearPendingState()
       job.raw.delete()
       job.reply(PhotoCapture.errorPayload(english, PhotoCapture.CODE_CAMERA_UNAVAILABLE, t.message))
       return
@@ -124,6 +242,7 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
       cameraLauncher.launch(intent)
     } catch (t: Throwable) {
       pending = null
+      clearPendingState()
       job.raw.delete()
       job.reply(PhotoCapture.errorPayload(english, PhotoCapture.classifyLaunchFailure(t), t.message))
     }
@@ -137,6 +256,8 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
    * 那条通路没有这个能力。
    */
   private fun finish(job: Pending) {
+    // 结果已经回来了：无论成败，在途状态都不再需要（否则下次启动会把它当成"还在飞"）。
+    clearPendingState()
     if (!job.raw.isFile || job.raw.length() <= 0L) {
       job.raw.delete()
       job.reply(PhotoCapture.errorPayload(english, PhotoCapture.CODE_CAMERA_FAILED))
@@ -145,9 +266,12 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
     Thread({
       val bytes = PhotoCapture.compress(job.raw, job.target)
       if (bytes == null || bytes <= 0L) {
-        // 压缩失败：**保留原图**（用户刚拍的那张不能丢），把原图路径一并报出去。
+        // 压缩失败：**保留原图**（用户刚拍的那张是唯一副本，不能丢）。这里真的改名落进
+        // 保留位（issue #995）：只「不删」的话它和「拍完就删」的普通原图同名同形，下一次
+        // 拍照的 sweepOld 会把它当垃圾清掉——承诺必须落成磁盘上可判定的事实。
+        val kept = PhotoCapture.keepRaw(job.raw)
         val payload = PhotoCapture.errorPayload(
-          UiText.isEnglish(activity), PhotoCapture.CODE_COMPRESS_FAILED, job.raw.absolutePath,
+          UiText.isEnglish(activity), PhotoCapture.CODE_COMPRESS_FAILED, kept.absolutePath,
         )
         activity.runOnUiThread { job.reply(payload) }
         return@Thread

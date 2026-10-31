@@ -22,6 +22,15 @@ import android.widget.Toast
 import org.json.JSONObject
 import java.util.concurrent.Executors
 
+/**
+ * 插件页加载失败行（#1011 ④）。
+ *
+ * 缺陷现场：重试提示是硬拼的中文后缀（`"$message　点击重试"`），而 `message` 本身已经走
+ * `t(...)` —— 同一行里中英混排。后缀也必须跟着语言走，且不重试时不得凭空长出提示。
+ */
+internal fun pluginLoadErrorMessage(message: String, retry: Boolean, english: Boolean): String =
+  if (retry) message + UiText.t(english, "　点击重试", " - tap to retry") else message
+
 /** A stopped engine is an ordinary page state; HTTP liveness alone does not mean the plugin API is ready. */
 internal enum class PluginEngineAvailability { OFFLINE, STARTING, ONLINE, FAILED }
 
@@ -57,6 +66,9 @@ internal class PluginManagementPage(
   private val accent = activity.getColor(R.color.ds_accent)
   private val textOnAccent = activity.getColor(R.color.ds_text_on_accent)
   private fun t(zh: String, en: String) = UiText.t(activity, zh, en)
+
+  /** 行内双语（#1011）：插值里带变量的句子，中英两份就写在同一行。 */
+  private fun s(zh: String, en: String) = UiText.t(activity, zh, en)
 
   private val root = LinearLayout(activity).apply {
     orientation = LinearLayout.VERTICAL
@@ -423,18 +435,18 @@ internal class PluginManagementPage(
           val application = result.optString("application")
           if (application in setOf("applied", "restart-required", "overridden")) {
             when (application) {
-              "restart-required" -> showError("${row.moduleName} 已记录变更，重启引擎后生效。", false)
-              "overridden" -> showError("${row.moduleName} 的状态被策略覆盖，已重新读取实际状态。", false)
+              "restart-required" -> showError(s("${row.moduleName} 已记录变更，重启引擎后生效。", "Change to ${row.moduleName} recorded; restart the engine to apply it."), false)
+              "overridden" -> showError(s("${row.moduleName} 的状态被策略覆盖，已重新读取实际状态。", "A policy overrides the state of ${row.moduleName}; the actual state was read again."), false)
             }
             load()
           } else {
-            reloadAfterMutationError("${row.moduleName} 启停结果未确认，已回读实际状态。")
+            reloadAfterMutationError(s("${row.moduleName} 启停结果未确认，已回读实际状态。", "The enable/disable result for ${row.moduleName} is unconfirmed; the actual state was read again."))
           }
         }
       } catch (t: Throwable) {
         activity.runOnUiThread {
           if (disposed || activity.isFinishing || activity.isDestroyed) return@runOnUiThread
-          reloadAfterMutationError("${row.moduleName} 启停失败：${t.message ?: "正在回读实际状态"}")
+          reloadAfterMutationError(s("${row.moduleName} 启停失败：", "Could not enable/disable ${row.moduleName}: ") + (t.message ?: s("正在回读实际状态", "re-reading the actual state")))
         }
       }
     }
@@ -451,7 +463,7 @@ internal class PluginManagementPage(
           allRows = rows
           refreshRows()
         }
-        showError(if (rows == null) "$message 清单回读也失败。" else message, false)
+        showError(if (rows == null) message + s(" 清单回读也失败。", " Re-reading the list failed too.") else message, false)
       }
     }
   }
@@ -470,8 +482,8 @@ internal class PluginManagementPage(
     page.addView(label(t("运行阶段：", "Phase: ") + row.fiberPhase.ifBlank { t("未知", "unknown") }, 14, gray1))
     val description = rowDescription(row).ifBlank { t("暂无描述", "No description") }
     page.addView(label(t("描述：", "Description: ") + description, 14, gray1))
-    row.patchId?.takeIf { it.isNotBlank() }?.let { page.addView(label("补丁：$it", 13, gray3)) }
-    row.readOnlyReason?.takeIf { it.isNotBlank() }?.let { page.addView(label("只读原因：$it", 13, gray3)) }
+    row.patchId?.takeIf { it.isNotBlank() }?.let { page.addView(label(s("补丁：", "Patch: ") + it, 13, gray3)) }
+    row.readOnlyReason?.takeIf { it.isNotBlank() }?.let { page.addView(label(s("只读原因：", "Read-only reason: ") + it, 13, gray3)) }
     val configStatus = label(t("正在读取配置…", "Reading settings…"), 14, gray3)
     page.addView(configStatus)
     content.removeAllViews()
@@ -487,11 +499,11 @@ internal class PluginManagementPage(
           if (!showingDetail || page.parent == null) return@runOnUiThread
           page.removeView(configStatus)
           if (config == null) {
-            page.addView(label("暂无可编辑 schema。插件可能尚未激活，或未提供配置 schema。", 14, gray3))
+            page.addView(label(s("暂无可编辑 schema。插件可能尚未激活，或未提供配置 schema。", "No editable schema. The plugin may not be active, or it provides no configuration schema."), 14, gray3))
           } else {
             val writable = config.optBoolean("writable", false)
             val hasUserConfig = (config.optJSONObject("user")?.length() ?: 0) > 0
-            page.addView(label("配置：${if (hasUserConfig) "已配置" else "使用默认值"} · ${if (writable) "可写" else "只读"}", 14, gray1))
+            page.addView(label(s("配置：", "Settings: ") + (if (hasUserConfig) s("已配置", "configured") else s("使用默认值", "defaults")) + " · " + (if (writable) s("可写", "writable") else s("只读", "read-only")), 14, gray1))
             addNamespaceEditor(page, row, config, writable)
           }
         }
@@ -500,7 +512,7 @@ internal class PluginManagementPage(
           if (disposed || activity.isFinishing || activity.isDestroyed) return@runOnUiThread
           if (showingDetail && page.parent != null) {
             page.removeView(configStatus)
-            page.addView(label("读取配置失败：${t.message ?: "请重试"}", 14, activity.getColor(R.color.ds_danger)))
+            page.addView(label(s("读取配置失败：", "Could not read settings: ") + (t.message ?: s("请重试", "retry")), 14, activity.getColor(R.color.ds_danger)))
           }
         }
       }
@@ -514,14 +526,14 @@ internal class PluginManagementPage(
     val secretPaths = secretPaths(namespace)
     val initial = namespace.optJSONObject("user")?.let { JSONObject(it.toString()) } ?: JSONObject()
     secretPaths.forEach { path -> removePath(initial, path) }
-    page.addView(label(nsName.ifBlank { "插件配置" }, 15, white, true))
-    page.addView(label("高级配置：编辑 JSON 对象并合并保存，可保留未知字段。删除字段不会重置原值；版本冲突时请重新加载。", 13, gray3))
+    page.addView(label(nsName.ifBlank { s("插件配置", "Plugin settings") }, 15, white, true))
+    page.addView(label(s("高级配置：编辑 JSON 对象并合并保存，可保留未知字段。删除字段不会重置原值；版本冲突时请重新加载。", "Advanced: edit the JSON object and save to merge; unknown fields are kept. Deleting a field does not reset its value; reload after a version conflict."), 13, gray3))
     if (!globallyWritable || !namespace.optBoolean("writable", true) || revision < 0) {
-      page.addView(label("当前配置不可编辑：服务未提供可写描述或版本号。", 14, activity.getColor(R.color.ds_danger)))
+      page.addView(label(s("当前配置不可编辑：服务未提供可写描述或版本号。", "The current settings are not editable: the service provides no writable descriptor or version."), 14, activity.getColor(R.color.ds_danger)))
       return
     }
     val secretInputs = linkedMapOf<List<String>, EditText>()
-    if (secretPaths.isNotEmpty()) page.addView(label("已设置的敏感值不会回填。仅在密码框输入新值时才会更新。", 13, gray3))
+    if (secretPaths.isNotEmpty()) page.addView(label(s("已设置的敏感值不会回填。仅在密码框输入新值时才会更新。", "Stored secrets are never shown. They only change when you type a new value in the password field."), 13, gray3))
     val editor = EditText(activity).apply {
       setText(initial.toString(2))
       setTextColor(white)
@@ -543,7 +555,7 @@ internal class PluginManagementPage(
     addPrimitiveControls(page, schema, editor, namespace.optJSONObject("value") ?: JSONObject())
     secretPaths.forEach { path ->
       val secret = EditText(activity).apply {
-        hint = "${path.joinToString(".")}：已设置，留空保留原值"
+        hint = path.joinToString(".") + s("：已设置，留空保留原值", ": set; leave blank to keep the current value")
         setHintTextColor(gray3)
         setTextColor(white)
         textSize = 14f
@@ -751,7 +763,7 @@ internal class PluginManagementPage(
   }
 
   private fun showError(message: String, retry: Boolean) {
-    error.text = if (retry) "$message　点击重试" else message
+    error.text = pluginLoadErrorMessage(message, retry, UiText.isEnglish(activity))
     error.setOnClickListener(if (retry) View.OnClickListener { load() } else null)
     error.visibility = View.VISIBLE
     Toast.makeText(activity, message, Toast.LENGTH_SHORT).show()

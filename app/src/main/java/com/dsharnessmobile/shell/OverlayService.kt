@@ -758,14 +758,22 @@ class OverlayService : Service() {
     if (!engineRunning) { flashStatus(t("引擎离线", "Engine offline")); return }
     panel.inputBox?.setText("")
     val steer = sessionBusy   // 发送前的忙态决定模式与提示语（成功回调里已被乐观置忙覆盖）
-    // 0.1.2-rc.1 SessionPromptRequest：requestId 必填（幂等键）+ sessionId/mode/content
-    val payload = JSONObject()
-      .put("requestId", "overlay-" + System.currentTimeMillis() + "-" + (0..999).random())
-      .put("sessionId", activeSessionId)
-      .put("mode", if (steer) "steer" else "queue")
-      .put("content", org.json.JSONArray().put(
-        JSONObject().put("type", "text").put("text", text)))
+    // #1042：requestId 是**幂等键**，一次用户发送只生成一次，create 与随后的 prompt 复用同一个。
+    // 所以它必须留在这里、在 send 之外定好——挪进 send 里"顺便"再生成一次，就变成两次发送语义：
+    // create 成功后的 prompt 重试不再幂等（引擎可能记成两条请求）。判据见 requestIdIsFixedOncePerSend。
+    val requestId = "overlay-" + System.currentTimeMillis() + "-" + (0..999).random()
+    val content = org.json.JSONArray().put(JSONObject().put("type", "text").put("text", text))
     val send = Runnable {
+      // #1042：payload 在**真正发送的那一刻**才组装。sessionId 尤其必须此刻取——
+      // 「目标=新会话」时 activeSessionId 要等 session/create 成功后才被赋值（见下方 create 分支），
+      // 请求发起前就固化会把空串发出去（wire 上先是 create 成功、接着 prompt 却带 sessionId:""，
+      // 用户看到「发送失败」而列表里多出一个空会话）。
+      // 0.1.2-rc.1 SessionPromptRequest：requestId 必填（幂等键）+ sessionId/mode/content
+      val payload = JSONObject()
+        .put("requestId", requestId)
+        .put("sessionId", payloadSessionId(activeSessionId))
+        .put("mode", if (steer) "steer" else "queue")
+        .put("content", content)
       postRpc("session/prompt", JSONObject().put("request", payload)) { code, body ->
         if (code == 200) {
           // 发送成功：立即亮工作态（乐观忙态）——live 事件（turn_start/tool_call）到来前
@@ -773,13 +781,12 @@ class OverlayService : Service() {
           markBusyOptimistic()
           flashStatus(if (steer) t("已插话", "Interjected") else t("已发送", "Sent"))
         } else {
-          // 发送失败：回填已输入文本 + 提示（避免用户以为发出去了——#4）
-          panel.inputBox?.setText(text)
-          flashStatus(t("发送失败（HTTP $code）", "Send failed (HTTP $code)"))
+          // 发送失败：只在用户没动过输入框时回填（避免「以为发出去了」——#4；避免覆盖新输入——#1043）
+          restoreAfterFailure(text, t("发送失败（HTTP $code）", "Send failed (HTTP $code)"))
         }
       }
     }
-    if (activeSessionId.isEmpty()) {
+    if (payloadSessionId(activeSessionId).isEmpty()) {
       // 目标=「新会话」：先 create 再 prompt（用户拍板项：自动建会话为默认）。
       // 0.13.5：显式带 workspaceId=临时工作区（否则新会话落「未分组」，用户实测点名）。
       val createReq = JSONObject()
@@ -793,19 +800,54 @@ class OverlayService : Service() {
             // 块H-A1：新建会话 = 目标会话切换（详档 §3.2 复位时机）。
             onTargetSessionChanged(sid)
             panel.refreshSessionPicker()
+            // 此刻 activeSessionId 已是 sid，send 里的 sessionId 才取得到（#1042 的落点）。
             send.run()
           } else {
-            panel.inputBox?.setText(text)
-            flashStatus(t("建会话失败（解析）", "Failed to create session (parse error)"))
+            restoreAfterFailure(text, t("建会话失败（解析）", "Failed to create session (parse error)"))
           }
         } else {
-          panel.inputBox?.setText(text)
-          flashStatus(t("建会话失败（HTTP $code）", "Failed to create session (HTTP $code)"))
+          restoreAfterFailure(text, t("建会话失败（HTTP $code）", "Failed to create session (HTTP $code)"))
         }
       }
     } else {
       send.run()
     }
+  }
+
+  /**
+   * #1043：失败回填——**只在用户没动过输入框时**把原文放回去。
+   *
+   * 为什么必须判：`postRpc` 的 connectTimeout 3000 / readTimeout 8000，失败回包最晚 8 秒后才到；
+   * 这 8 秒里用户完全可能已经重新输入，旧实现的无条件 `setText(text)` 会把新内容整段覆盖。
+   * 判据落在纯函数 [failureBackfillPlan] 上（JVM 可测），本函数只负责执行与落地：
+   *  - 可回填：写回原文 + 状态行说明；
+   *  - 不可回填：**不碰输入框**，原文落剪贴板（可找回）+ 状态行说明（含原文与去向）。
+   */
+  private fun restoreAfterFailure(text: String, reason: String) {
+    val plan = failureBackfillPlan(
+      current = panel.inputBox?.text?.toString() ?: "",
+      sent = text,
+      reason = reason,
+    )
+    if (!plan.shouldRestore) {
+      // 只有「拒绝回填」这一支才动剪贴板：用户没动过输入框时改剪贴板属于谁也没让它做的副作用。
+      copyFailedSend(plan.original)
+    } else {
+      panel.inputBox?.setText(plan.restoreText)
+    }
+    flashStatus(plan.reason)
+  }
+
+  /** #1043：被拒绝回填时的原文兜底——剪贴板 + 日志各留一份，保证「不覆盖」不等于「弄丢了」。 */
+  private fun copyFailedSend(text: String) {
+    try {
+      val cm = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+      cm.setPrimaryClip(android.content.ClipData.newPlainText("dsh-overlay-failed-send", text))
+    } catch (e: Exception) {
+      LogCollector.log("dsh-overlay", "failed-send clipboard write failed: " + (e.message ?: e.javaClass.simpleName))
+    }
+    // 剪贴板可能被系统拒绝/被其它应用改写：日志里再留一份全文，用户仍能从日志页找回。
+    LogCollector.log("dsh-overlay", "send failed; original text kept in log: " + text)
   }
 
   /** 从 session.create 的 server-response 中取 sessionId（兼容 result.value / 嵌套 JSON 字符串两种形态）。 */
@@ -954,4 +996,67 @@ class OverlayService : Service() {
     @Volatile
     var frameConsumer: ((String) -> Unit)? = null
   }
+}
+
+// ── 发送链路的两个判定（internal 顶层纯函数；#1042 / #1043） ──────────────────
+//
+// 为什么是顶层纯函数而不是 OverlayService 的成员：本服务的两处判定要在 JVM 单测里跑，
+// 而 Service 实例化不了（Looper/WindowManager 都要真实运行环境）。抽成无副作用的纯函数后，
+// 判据直接可测，也不必为此新增 .kt 文件（避免动 EXECUTION-MAP 的覆盖账本）。
+
+/**
+ * #1042：这次 prompt 该带哪个 sessionId。
+ *
+ * 「目标=新会话」时 activeSessionId 在 session/create 成功之前是空串——payload 若在那之前构建，
+ * 发出去的就是 `sessionId: ""`。故取值必须是**发送时刻**的字段快照（本函数每次现读），
+ * 而不是请求发起前的固化值。
+ *
+ * 空白一律归一成 ""（走 create 分支）：把 "   " 当合法 id 会让 create 被跳过、prompt 带空白 id。
+ */
+internal fun payloadSessionId(activeSessionId: String): String = activeSessionId.trim()
+
+/**
+ * #1043：失败时要不要把原文回填进输入框。
+ *
+ * @property shouldRestore true = 写回 [restoreText]；false = **不碰输入框**（[restoreText] 恒为 ""）。
+ * @property restoreText 要写回的内容（仅在 shouldRestore 时有意义）。
+ * @property original 本次没能发出去的原文——被拒绝回填时由调用方落到剪贴板/日志。
+ * @property originalElsewhere 原文是否已另外保存（文案里要如实声明，否则用户不知道该去哪找）。
+ * @property reason 状态行文案：已经带上了原文与去向。
+ *
+ * 判据只有一条：**用户没动过**（当前为空、或仍等于本次原文）才回填。
+ * 反过来若一律不回填，原文就随失败一起消失——那比覆盖更糟，故本函数保留「照旧回填」这一支。
+ */
+internal data class BackfillPlan(
+  val shouldRestore: Boolean,
+  val restoreText: String,
+  val original: String,
+  val originalElsewhere: Boolean,
+  val reason: String,
+)
+
+/**
+ * 纯判据实现（见 [BackfillPlan]）。`current` 是**当前**输入框内容，`sent` 是本次发出的原文。
+ *
+ * 被拒绝回填时，[BackfillPlan.reason] 必须把原文与去向都写进去：面板收起时状态行看不见，
+ * 剪贴板是唯一能跨「面板收起/服务重启」存活的载体，文案里不写清楚就等于没保存。
+ */
+internal fun failureBackfillPlan(current: String, sent: String, reason: String): BackfillPlan {
+  val untouched = current.isBlank() || current.trim() == sent.trim()
+  if (untouched) {
+    return BackfillPlan(
+      shouldRestore = true,
+      restoreText = sent,
+      original = sent,
+      originalElsewhere = false,
+      reason = reason,
+    )
+  }
+  return BackfillPlan(
+    shouldRestore = false,
+    restoreText = "",
+    original = sent,
+    originalElsewhere = true,
+    reason = reason + "；" + sent + " 已复制到剪贴板 / copied to clipboard",
+  )
 }

@@ -352,6 +352,12 @@ class EngineManager(private val context: Context, private val pickToken: String?
         filesDir,
         SnapshotTransaction.Marker(SnapshotTransaction.Phase.STAGED, fingerprint, startedAt),
       )
+      // issue #963 第 3 步：**销毁点之前**再搬一次。
+      //
+      // 为什么 prelude 那次不够：冷启动顺序是 恢复 → 指纹判定 → refreshSnapshot（swap）→ startEngine
+      // （prelude 在这里面）。装上新 APK 的那一次，usr 在 prelude 跑之前就已经被整树换掉了——
+      // 只靠 prelude 会正好错过"升级即丢包"的那个现场。这里搬的是**还没有被换走**的 usr 用户包。
+      migratePythonPackages("before-swap")
       // 软件源是 usr 树里的用户选择，而下面这次 swap 会**整体替换 usr**：
       // 必须在换树前记下意图，换树后重放，否则用户换的源会在每次升级时被抹回出厂值。
       val rememberedSource = SourceSettings.captureSelection(usrDir)
@@ -367,6 +373,10 @@ class EngineManager(private val context: Context, private val pickToken: String?
         english = UiText.isEnglish(context),
         spaceCheck = { required -> insufficientSpaceReason(filesDir, required) },
       )
+      // issue #963 第 3 步：**救援通道**。swap 之后旧 usr 在 .snapshot-previous/usr 里，
+      // 但下面这轮 refresh 的 finish() 会把它删掉（且有寿命：下一次 swap 的 deletePathStrict
+      // 也会清）。所以"上次更新已经丢掉的包"只能在这里、在 finish 之前捞回来。
+      migratePythonPackages("after-swap-rescue")
       // #214：profiles 合并期间的工厂语义纠正逐条留档（升级现场可追溯，不只依赖 UI 文案）。
       for (note in swapNotes) LogCollector.log(TAG, "profile patch reconciled during swap: " + note)
       // 重放用户选的软件源（见 rememberedSource 处的说明）。失败不影响刷新结果。
@@ -443,7 +453,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
    * 现在：真因码一律解包保留（见 [findSnapshotFsException]）；确实没有码时 `lastRefreshFailureCode` 保持 null，
    * 由本标记表达「未归类」，渲染层据此给出**不同**的文案（见 [refreshFailureLabel]）。
    */
-  var lastRefreshFailureUnclassified: Boolean = false
+  @Volatile var lastRefreshFailureUnclassified: Boolean = false   // #1008：写点在刷新线程 catch，读点在 UI 线程
 
   /**
    * 上一次 [refreshSnapshot] 的 false 是不是**被让行**（另一条快照事务在飞）而不是失败（0.14.8 P1）。
@@ -571,6 +581,36 @@ class EngineManager(private val context: Context, private val pickToken: String?
   )
 
   /**
+   * issue #963 第 3 步：把用户 Python 包从"会被 usr 整树替换带走"的位置搬进
+   * `<files>/python-packages/lib/python3.X/site-packages`。
+   *
+   * **幂等**：搬完源就空了，重跑是三次 `listFiles`。**可中断**：逐个顶层条目 rename，
+   * 中断后要么在源、要么在目标，不会两处都没有。**不覆盖**：目标已有同名条目时记冲突、留在原地。
+   *
+   * **从不抛**：搬迁失败只是"这次没搬成"，下一次启动会重试；让它抛会把一次数据整理
+   * 放大成启动失败，那是比丢包更坏的结果（用户连引擎都起不来）。
+   *
+   * @param trigger 触发点标签（进日志，用来区分 prelude / 销毁点前 / 启动恢复）。
+   */
+  internal fun migratePythonPackages(trigger: String) {
+    val result = try {
+      PythonPackages.migrate(context.filesDir, usrDir, homeDir)
+    } catch (t: Throwable) {
+      Log.w(TAG, "python package migration failed (" + trigger + ")", t)
+      LogCollector.log(TAG, "python package migration failed (" + trigger + "): " + t.javaClass.simpleName)
+      return
+    }
+    if (!result.touched) return
+    val detail = "moved=" + result.moved.joinToString(",") +
+      " conflicts=" + result.conflicts.joinToString(",") +
+      " failures=" + result.failures.joinToString(",")
+    LogCollector.log(TAG, "python packages migrated (" + trigger + "): " + detail)
+    if (result.failures.isNotEmpty()) {
+      Log.w(TAG, "python package migration incomplete (" + trigger + "): " + detail)
+    }
+  }
+
+  /**
    * Resolves a transaction interrupted by a kill, an OEM cleaner or a low-memory restart.
    * Cheap when nothing is pending (one stat) and safe to call on every start.
    *
@@ -585,6 +625,12 @@ class EngineManager(private val context: Context, private val pickToken: String?
     try {
       val marker = SnapshotTransaction.readMarker(filesDir)
       if (onlineUpdateActive.get()) return
+      // issue #963 第 3 步：**救援要在回收之前**。
+      // 下面两条路都会删 `.snapshot-previous`（marker 缺席时的 reclaimResidue、marker 存在时的
+      // applyRecovery → finish），而上一轮"已经丢掉"的用户包就躺在 `.snapshot-previous/usr` 里。
+      // 放在这里是因为它排在「引擎已在跑」早退之前（startupRecoverThenProbe 的顺序契约）——
+      // prelude 那次会被那个早退整段跳过。
+      migratePythonPackages("startup-recovery")
       if (marker == null) {
         // No marker: only a stale stage directory can survive (a rollback that was
         // interrupted before it deleted the stage).
@@ -751,9 +797,8 @@ class EngineManager(private val context: Context, private val pickToken: String?
 
   private fun writeOnlineSnapshotIdentity(base: String, archive: String) {
     val target = File(context.filesDir, ONLINE_SNAPSHOT_NAME)
-    val tmp = File(context.filesDir, ONLINE_SNAPSHOT_NAME + ".tmp")
-    tmp.writeText("base=$base\narchive=$archive\n")
-    SnapshotFs.move(tmp, target)
+    // #1057：身份文件是快照来源的真源，旧实现是固定名 .tmp + 无 fsync 的 move。
+    AtomicFileReplace.writeText(target, "base=" + base + "\narchive=" + archive + "\n")
   }
 
   private fun commitOnlineUpdateIfPending(): Boolean {
@@ -1571,6 +1616,11 @@ class EngineManager(private val context: Context, private val pickToken: String?
       preludeProbe.step("provision-public-repo") {
         provisionPublicRepo(PublicRepoProvision.TRIGGER_ENGINE_START)
       }
+      // issue #963 第 3 步：用户 Python 包搬迁（幂等、可中断）。
+      // 位置：引擎读 profile 之前、spawn 之前 —— 与上面几步同一条纪律（"自愈必须在引擎读之前做一次"）。
+      // 它扫三个源：usr（下次刷新必丢）、旧默认 user site（设了 PYTHONUSERBASE 就看不见）、
+      // .snapshot-previous/usr（上一轮已丢的救援通道，有寿命）。
+      preludeProbe.step("migrate-python-packages") { migratePythonPackages("engine-start") }
       preludeProbe.step("apply-runtime-patches") { applyRuntimePatches() }
       preludeProbe.report(TAG, context)
       // --no-open: the engine must never try to open a desktop browser on Android
@@ -1586,13 +1636,12 @@ class EngineManager(private val context: Context, private val pickToken: String?
         nodeBin.absolutePath, "--expose-internals", dshBin.absolutePath, "web", "--port", bindPort.toString(), "--no-open",
       )
       EngineEndpoint.beginBinding()
-      // issue #963 第 2 步：用户 Python 包区前置进 PYTHONPATH。
-      // 只在 `<files>/python-packages/py3.X` **已存在**时设置（本步不创建它），
-      // 因此对现有设备是**零行为变化**；迁移与建目录是第 3 步。
-      val pythonPath = PythonPackages.pythonPath(context.filesDir, usrDir)
+      // issue #963 第 3 步：用户 Python 包**不再**靠 PYTHONPATH 前置（第 2 步那套已删除）。
+      // 落点重定向走 shellEnv() 的 PIP_USER / PYTHONUSERBASE（见 PythonPackages.environment），
+      // 全仓只有这一份路径口径，不存在"两套同时生效"。
       val started = startWithArgs(args, shellEnv() + mapOf(
         "DSH_MOBILE_MANAGED_ENGINE" to "1", "DSH_ENGINE_PORT" to bindPort.toString(),
-      ) + if (pythonPath == null) emptyMap() else mapOf("PYTHONPATH" to pythonPath))
+      ))
       engineProcess = started
       // A managed Node server retries EADDRINUSE only once, using the OS-assigned ephemeral port.
       // Nothing sends requests until its current-generation token URL publishes the bound port.
@@ -2097,21 +2146,15 @@ class EngineManager(private val context: Context, private val pickToken: String?
           failed = true
           continue
         }
-        val tmp = File(target.parentFile, target.name + ".normalize.tmp")
-        var publicationStarted = false
         // Protect the original first; classify and prune only after publication has returned.
         val backup = try {
           ProfileNormalizationPublication.publish(target, live) {
-            publicationStarted = true
-            tmp.writeText(result.text)
-            if (!tmp.renameTo(target)) {
-              target.writeText(result.text)
-              SnapshotFs.deletePath(tmp)
-            }
+            // #1057：旧实现是固定名 .normalize.tmp + renameTo 失败回退直写 target。
+            // 这里的目标是引擎加载的 cordis.patch.yml，半份 YAML 会让 profile 整段失效。
+            AtomicFileReplace.writeText(target, result.text)
           }
         } catch (t: Throwable) {
           failed = true
-          if (publicationStarted) SnapshotFs.deletePath(tmp)
           Log.w(TAG, "profile patch normalize attempt failed (original protected; retried next boot): " + target.absolutePath, t)
           continue
         }
@@ -2453,6 +2496,18 @@ class EngineManager(private val context: Context, private val pickToken: String?
   }
 
   /**
+   * 当前 profile 的 `node_modules/.bin`；目录不在（还没装过任何插件）时返回 null。
+   *
+   * profile 名取 [PluginMounts.PROFILE]——壳侧「当前 profile」的唯一真源（与
+   * `PATCH_REL` / `DSH_UNDO_PROFILE` 同源）。这里**不新写 profile 名字面量**：
+   * 引擎 argv 里的 `web` 与磁盘目录必须始终是同一条来源，否则某天换 profile 就会出现
+   * 「引擎跑 A、PATH 指向 B」这种没人能一眼看出来的错配。
+   */
+  private fun activeProfileBinDir(): File? =
+    File(File(File(homeDir, ".dsh"), "profiles/" + PluginMounts.PROFILE), "node_modules/.bin")
+      .takeIf { it.isDirectory }
+
+  /**
    * Snapshot environment shared by engine/console/log processes (PATH/LD_LIBRARY_PATH/HOME/DSH_HOME/
    * TERMUX_* injected explicitly — the snapshot is self-sufficient, no Termux app needed). Idempotent:
    * safe to call repeatedly (ensurePrivateDshData and the TMPDIR mkdirs are both idempotent).
@@ -2476,7 +2531,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
       )
     } else emptyMap()
     return mapOf(
-      "PATH" to (usrDir.absolutePath + "/bin:/system/bin"),
+      "PATH" to enginePath(usrDir, activeProfileBinDir()),
       "LD_LIBRARY_PATH" to (usrDir.absolutePath + "/lib"),
       "HOME" to homeDir.absolutePath,
       // 0.14.2 D13：侧边栏「新建终端」的默认 shell。上游 subprocess-local 的
@@ -2552,7 +2607,19 @@ class EngineManager(private val context: Context, private val pickToken: String?
       // 实测口径：--max-old-space-size=N ⇒ heap_size_limit = N + 96MB；引擎最小可用堆约 70MB。
       // 读不到设备内存时退回下限，保证「任何设备都够启动」而不是编造一个值。
       "NODE_OPTIONS" to heapOptionFrom(engineHeapMb(deviceTotalRamMb())),
-    ) + certEnv
+    ) + certEnv +
+      // issue #963 第 3 步：用户 Python 包的**落点重定向**。
+      // `usr` 是整目录 rename 替换的，`pip install` 默认写进去必丢；设 PIP_USER + PYTHONUSERBASE
+      // 让 pip 落到 `<files>/python-packages/lib/python3.X/site-packages`（在 usr 之外），
+      // 且 user site 本来就在 sys.path 上 ⇒ **不需要 PYTHONPATH**，pip list --user / uninstall 仍可用。
+      //
+      // 为什么放在 shellEnv() 而不是 startEngine 的局部 map：这条口径必须对**所有**经 shellEnv()
+      // 派生的子进程一致（控制台 / RepairTools / SourceSettings / UndoGate），否则用户在控制台里
+      // `pip install` 会继续写进 usr、下次刷新照丢——正是本 issue 的原始形态。
+      //
+      // 只在目录建成功时才设（PythonPackages.environment 的契约）：PYTHONUSERBASE 指向不存在的
+      // 目录时 user site **不进 sys.path**，设了等于没设，还会让旧默认 user site 一起失联。
+      PythonPackages.environment(context.filesDir, usrDir)
   }
 
   companion object {
@@ -3083,6 +3150,37 @@ internal fun heapOptionFrom(heapMb: Int): String =
  */
 internal fun pnpmStoreDir(homeDir: File): String =
   File(File(File(homeDir, ".local"), "share"), "pnpm/store").absolutePath
+
+/**
+ * 引擎/控制台/日志子进程的 PATH——**唯一真源**（[EngineManager.shellEnv] 只调它，不再自己拼）。
+ *
+ * 为什么要把 profile 的 `node_modules/.bin` 追加到末尾：
+ * 用户装的插件可以带自己的可执行文件（实测 `@deepseek-ai/dsh-subagent-codex@0.2.1-rc.3` 的
+ * dependencies 里就有 `@openai/codex`，pnpm 会在 profile 的 `node_modules/.bin` 落下 `codex` 软链），
+ * 而旧 PATH 只有 `<files>/usr/bin:/system/bin`——于是「插件装好了、二进制也在设备上」，bash 里
+ * 敲 `codex` 却是 `command not found`。设备实测（emulator-5566，Android 15 x86_64）：
+ * `.bin/codex` 存在且 `test -x` 为真，而 `which codex` 退出码 1。
+ *
+ * 三条口径，缺一条都会引入新问题：
+ *  1. **只追加到末尾**：工厂 `usr/bin` 必须始终优先。用户包里的同名可执行文件（例如某个插件
+ *     自带一份 `node` / `sh`）不得遮盖快照工具链——那是整台设备的运行底座。
+ *  2. **目录不存在就不加**：没装过任何插件时不产生一条指向空目录的 PATH 项（也避免把
+ *     「空目录」这种事实写进诊断日志里）。
+ *  3. **profile 名不得硬编码在这里**：调用方从壳侧唯一真源推导（见
+ *     `EngineManager.activeProfileBinDir`），本函数只负责拼接与顺序。
+ *
+ * 提到顶层是为了可断言——`shellEnv()` 需要 Context，JVM 单测拿不到；这里锁「拼接与顺序」，
+ * 「真的接进了 shellEnv()」那一半由 W3ShellContractTest 的源码扫描锁定（与 [pnpmStoreDir] 同款）。
+ *
+ * @param usrDir - 快照前缀（`<files>/usr`）。
+ * @param profileBinDir - 当前 profile 的 `node_modules/.bin`；不存在时传 null。
+ * @returns `<usr>/bin:/system/bin`，或在 profile bin 目录存在时追加 `:<profileBinDir>`。
+ */
+internal fun enginePath(usrDir: File, profileBinDir: File?): String {
+  val base = usrDir.absolutePath + "/bin:/system/bin"
+  if (profileBinDir == null || !profileBinDir.isDirectory) return base
+  return base + ":" + profileBinDir.absolutePath
+}
 
 /**
  * P-AC-04 修尺子（0.14.8）：监听观察窗口，与冷启动预算同量级；窗口本身**不改**。

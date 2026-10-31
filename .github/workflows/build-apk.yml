@@ -141,7 +141,10 @@ jobs:
           node scripts/check-apk-signatures.mjs --self-test
           mapfile -t apks < <(find out -type f -name '*.apk' | sort)
           [ "${#apks[@]}" -eq 1 ] || { echo "::error::当前 ABI 产物数不是 1: ${#apks[@]}"; exit 1; }
-          node scripts/check-apk-signatures.mjs --apk "${apks[0]}" --keystore keystore/debug.keystore
+          # keystore 凭据必须显式声明（issue #1031）：门禁不再回落到 androiddebugkey/android。
+          # 这里是仓库那份 keystore/debug.keystore 的公开凭据，与 app/build.gradle.kts 的 repoDebug 同源。
+          node scripts/check-apk-signatures.mjs --apk "${apks[0]}" --keystore keystore/debug.keystore \
+            --keystore-alias androiddebugkey --keystore-pass android
 
       - name: 上传 APK 产物（本地下载 debug；不出 Release）
         uses: actions/upload-artifact@v4

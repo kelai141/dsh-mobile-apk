@@ -686,15 +686,69 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         }
         return@Thread
       }
+      // issue #1240：**新鲜度判定必须提到「引擎已在跑」早退之前**。
+      //
+      // 缺陷形态（实测两台设备）：设备上已装过本 App 且引擎在跑，覆盖安装一个内嵌快照不同的 APK，
+      // 安装完成后系统拉起应用，此时探活命中 OUR_PROCESS/OUR_HTTP ⇒ 旧实现在下面直接早退，
+      // 紧随其后的那段 `if (!snapshotFresh())` 刷新**永远不会执行**。后果不是报错也不是降级，而是升级后继续跑上一版的
+      // runtime：用户视角是「这版没修那个问题」，排查视角是 boot-fail.log 里没有任何一条指向快照，
+      // 只能靠手动 force-stop / pm clear 才恢复。快照新鲜度的判据（snapshotFresh）本来就是对的，
+      // 缺陷只是它永远轮不到被执行。
+      //
+      // 修法取向（issue 建议方案 A）：探活结果**不再是早退的充分条件**，只是「是否需要先停旧引擎」的
+      // 一个输入。判据仍然是既有的 snapshotFresh()，不新造口径、不改它的语义。
       if (engineAlreadyRunning) {
-        // P-AC-04：这条早退路径不经过 spawn 观察线程，补一次 listen 标记（幂等；本进程没记过
+        // P-AC-04：这条路径不经过 spawn 观察线程，补一次 listen 标记（幂等；本进程没记过
         // t_boot_start 时按「未知」记 -1 落盘，而不是让三字段整行缺失）。
         LogCollector.markListen(activity)
         // C1：探活已经拿到 HTTP 应答（engineAlreadyRunning 覆盖 running 或 401=可认证，见 probeRunning）；
         // 所以首个响应时刻同样可判——否则「进程内接手已在跑的引擎」这一路径永远没有 C1 读数。
         LogCollector.markFirstHttp(activity)
-        activity.runOnUiThread { if (isCurrentEngineFlow(generation)) activity.showWeb() }
-        return@Thread
+        when (alreadyRunningSnapshotDecision(activity.engineManager.snapshotFresh())) {
+          // 快照与本安装包的指纹一致 ⇒ 在跑的就是这一版的运行时，早退照旧。
+          // 这是**反方向**的护栏：新鲜时不得为了「保险」多杀一次引擎（8-12 分钟重抽取 + 前台中断）。
+          AlreadyRunningSnapshotDecision.EARLY_EXIT_FRESH -> {
+            activity.runOnUiThread { if (isCurrentEngineFlow(generation)) activity.showWeb() }
+            return@Thread
+          }
+          AlreadyRunningSnapshotDecision.STOP_THEN_REFRESH -> Unit
+        }
+        // 快照陈旧 ⇒ 现在跑着的**不是这一版**的运行时，覆盖安装后必须换掉它。
+        // 刷新要 swap usr/ 树，带着活动引擎直接解压会把新树写进正被使用的路径，所以先停。
+        // 复用既有克制语义（stopOwnedEngine 只停本壳持有句柄的子进程，绝不按名字杀未归属监听器），
+        // 下面照旧落到同一条刷新 → 重启链，不新造任何流程。
+        requireCurrentEngineFlow(generation)
+        LogCollector.log("dsh-engine-start",
+          "engine already running but the runtime snapshot is stale: stopping the owned engine to refresh")
+        val stopped = try { activity.engineManager.stopOwnedEngine() } catch (t: Throwable) {
+          Log.w("dsh-engine-start", "stopping the stale owned engine failed: " + t.javaClass.simpleName)
+          false
+        }
+        requireCurrentEngineFlow(generation)
+        // 停干净是刷新的前置：失败时不进 refreshSnapshot（带活动引擎解压会破坏正在使用的 usr 树），
+        // 而是如实停在可读错误页。文案说明**本次刷新未执行**与出口，不宣称已安排刷新。
+        if (!stopped) {
+          LogCollector.writeBootFail(
+            activity, "snapshot-refresh-blocked-engine-running",
+            "快照与本安装包指纹不一致（覆盖安装后仍跑旧 runtime），但旧引擎未归属到本壳或停止失败："
+              + "本次**未执行**快照刷新（带活动引擎解压会破坏正在使用的 usr 树），运行时仍是旧版本。"
+              + "可点「重试」，或重启应用后再试。",
+          )
+          activity.runOnUiThread {
+            if (!isCurrentEngineFlow(generation)) return@runOnUiThread
+            activity.applyGuidePhase(
+              GuidePhase.Error,
+              UiText.t(activity, "运行时更新未完成", "The runtime update did not finish"),
+              UiText.t(activity,
+                "安装包的运行时与本机不一致，但旧引擎未能停止，本次未执行刷新；可点「重试」或重启应用。",
+                "The bundled runtime differs from this device, but the old engine could not be stopped; " +
+                  "the refresh was not attempted. Retry, or restart the app."),
+            )
+            activity.showGuide()
+          }
+          return@Thread
+        }
+        // 停成功：**不早退**，继续往下走既有的新鲜度判定（此刻必为 false）→ 刷新 → 重启链。
       }
       if (!isCurrentEngineFlow(generation)) return@Thread
       // 相位已由本函数入口切到 Starting（启动即有反馈），这里不再重复切换——
@@ -1622,6 +1676,46 @@ internal class StartupFlowOwnership {
     }
   }
 }
+
+/**
+ * issue #1240：**「引擎已在跑」不等于「运行时是这一版的」**——已跑引擎这条路径该怎么处置。
+ *
+ * ## 缺陷形态（本判据存在的理由）
+ * 设备上已装过本 App 且引擎在跑，覆盖安装一个内嵌快照不同的 APK；系统拉起应用后探活命中
+ * OUR_PROCESS/OUR_HTTP。旧实现在这里**无条件早退**，于是后面那段
+ * `if (!snapshotFresh()) refreshSnapshot(...)` 永远不会执行：升级后继续跑上一版的 runtime，
+ * 指纹不翻转、事务文件从不出现、boot-fail.log 里也没有任何一条指向快照。用户只能手动
+ * force-stop / pm clear 才恢复，而现场看是「这版没修那个问题」。快照新鲜度判据本身是对的，
+ * 缺陷只是它**轮不到被执行**。
+ *
+ * ## 为什么抽成纯函数
+ * 两条方向都必须能反证，而它们在同一个探活分支里背靠背——
+ * 「陈旧时必须刷新」与「新鲜时必须保持早退（不得无故杀引擎）」若写成内联 if，只能靠读代码
+ * 相信它。判据抽出来后可逐条喂输入（见 `Issue1240StaleSnapshotAfterUpgradeTest`），
+ * 而分支本身只剩一次 when 转发。
+ *
+ * @param snapshotFresh 当前 live 运行时是否就是本安装包内嵌的快照（= [EngineManager.snapshotFresh]）
+ */
+internal enum class AlreadyRunningSnapshotDecision {
+  /** 快照就绪：在跑的就是这一版的运行时，维持既有早退（绝不多杀一次引擎）。 */
+  EARLY_EXIT_FRESH,
+
+  /** 快照陈旧：先停本壳托管的旧引擎，再落到既有的刷新 → 重启链。 */
+  STOP_THEN_REFRESH,
+}
+
+/**
+ * 纯判据：探活到「引擎已在跑」之后该早退还是先停后刷。
+ *
+ * 只有快照就绪才允许早退——这是本 issue 的**唯一**语义变化；`snapshotFresh` 的口径一个字没改，
+ * 仍然由 [EngineManager.snapshotFresh] 回答。
+ */
+internal fun alreadyRunningSnapshotDecision(snapshotFresh: Boolean): AlreadyRunningSnapshotDecision =
+  if (snapshotFresh) {
+    AlreadyRunningSnapshotDecision.EARLY_EXIT_FRESH
+  } else {
+    AlreadyRunningSnapshotDecision.STOP_THEN_REFRESH
+  }
 
 /**
  * 启动前置（FX-210.1，JVM 单测的顺序契约）：先执行恢复入口，再做探活分流。

@@ -8,14 +8,51 @@
  *  - 能力探测：`CSS.supports('selector(:has(*))')` 为真 → 不启用（零重复开销）；
  *  - 为假 → MutationObserver 盯住上游导出弹窗，给其 `[role=presentation]`（无则由弹窗自身承担）
  *    打上 `dsh-mobile-hide-session-log-dialog` class，由伴随规则隐藏。
+ *
+ * #919：本文件与 CSS 必须用**同一套判据**，否则两条路径会在 error 弹窗上分叉 ——
+ * 主路径放行、降级路径隐藏（或反之），真机上就变成「新内核能看见报错、旧内核看不见」。
+ * 判据因此收敛到 `shouldHideSessionLogDialog()` 一处。
  */
-import { SESSION_LOG_DIALOG_HIDE_CLASS, SESSION_LOG_DIALOG_LABEL_PREFIXES } from './session-log-dialog.css.ts'
+import {
+  SESSION_LOG_DIALOG_ERROR_LABEL_PREFIXES,
+  SESSION_LOG_DIALOG_HIDE_CLASS,
+  SESSION_LOG_DIALOG_HIDE_LABEL_PREFIXES,
+  SHELL_OUTCOME_ATTR,
+} from './session-log-dialog.css.ts'
 
-/** 上游导出弹窗的判定：`[role=dialog]` 且 aria-label 命中导出文案前缀。 */
+/** 上游导出弹窗的判定：`[role=dialog]` 且 aria-label 命中任一导出文案前缀。 */
 export function isSessionLogDialog(element: Element): boolean {
   if (!element.matches('[role="dialog"]')) return false
   const label = element.getAttribute('aria-label') ?? ''
-  return SESSION_LOG_DIALOG_LABEL_PREFIXES.some((prefix) => label.startsWith(prefix))
+  return isErrorDialogLabel(label) || isPreparingOrSuccessLabel(label)
+}
+
+function isPreparingOrSuccessLabel(label: string): boolean {
+  return SESSION_LOG_DIALOG_HIDE_LABEL_PREFIXES.some((prefix) => label.startsWith(prefix))
+}
+
+function isErrorDialogLabel(label: string): boolean {
+  return SESSION_LOG_DIALOG_ERROR_LABEL_PREFIXES.some((prefix) => label.startsWith(prefix))
+}
+
+/** 壳侧自己的结果弹窗是否已接管结论（`<html>` 上的事实标记，事件驱动，不是时间窗）。 */
+export function shellOutcomeShown(doc: Document = document): boolean {
+  return doc.documentElement.hasAttribute(SHELL_OUTCOME_ATTR)
+}
+
+/**
+ * 该弹窗此刻是否应当被隐藏。与 `SESSION_LOG_DIALOG_HIDE_CSS` 的两条规则一一对应：
+ *  - preparing / success → 恒隐藏；
+ *  - error（#919）→ **只在壳侧已接管结论时**隐藏，否则必须放行。
+ * @param dialog - 候选的 `[role=dialog]` 元素。
+ * @param doc - 用于读取壳侧结论标记的文档（测试可注入）。
+ * @returns 是否应当隐藏。
+ */
+export function shouldHideSessionLogDialog(dialog: Element, doc: Document = document): boolean {
+  if (!isSessionLogDialog(dialog)) return false
+  const label = dialog.getAttribute('aria-label') ?? ''
+  if (isPreparingOrSuccessLabel(label)) return true
+  return shellOutcomeShown(doc)
 }
 
 export class SessionLogDialogObserver {
@@ -36,6 +73,11 @@ export class SessionLogDialogObserver {
       attributes: true,
       attributeFilter: ['aria-label'],
     })
+    // 壳侧结论标记落在 <html> 上，body 的子树观察看不到，单独盯它。
+    this.mutationObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: [SHELL_OUTCOME_ATTR],
+    })
     this.sync()
   }
 
@@ -47,11 +89,11 @@ export class SessionLogDialogObserver {
     this.attached = false
   }
 
-  /** 同步一次：命中导出弹窗 → 打 class；弹窗消失 → 收 class（绝不残留）。 */
+  /** 同步一次：命中且应当隐藏 → 打 class；其余（含被放行的 error）→ 收 class。 */
   sync(): void {
     const next = new Set<Element>()
     for (const dialog of document.querySelectorAll('[role="dialog"]')) {
-      if (!isSessionLogDialog(dialog)) continue
+      if (!shouldHideSessionLogDialog(dialog)) continue
       const target = dialog.closest('[role="presentation"]') ?? dialog
       target.classList.add(SESSION_LOG_DIALOG_HIDE_CLASS)
       next.add(target)
@@ -65,7 +107,11 @@ export class SessionLogDialogObserver {
   }
 
   private isRelevantMutation(record: MutationRecord): boolean {
-    if (record.type === 'attributes') return record.target instanceof Element && isSessionLogDialog(record.target)
+    if (record.type === 'attributes') {
+      // 壳侧结论标记翻转：必须重算，否则 error 弹窗会停在上一拍的状态。
+      if (record.attributeName === SHELL_OUTCOME_ATTR) return true
+      return record.target instanceof Element && isSessionLogDialog(record.target)
+    }
     const targets = [record.target, ...record.addedNodes, ...record.removedNodes]
     return targets.some((node) => {
       if (!(node instanceof Element)) return false

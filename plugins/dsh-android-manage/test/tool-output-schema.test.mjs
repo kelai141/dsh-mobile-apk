@@ -11,11 +11,56 @@ import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
+
+/* issue #1114 同族：净检出（CI 无 node_modules）里 @deepseek-ai/dsh-tools 是各插件的
+ * peerDependency，npm install 不会把它带进来。旧写法是在**顶层静态 import**，取不到就是
+ * 未捕获的 ERR_MODULE_NOT_FOUND —— 测试进程直接崩，报告成「1 项失败」，与「断言不成立」
+ * 在报告里长得一模一样。那是环境缺口冒充代码缺陷。
+ *
+ * 现在改成动态解析，三态分明：
+ *   · 拿到了校验器  -> 正常跑全部用例；
+ *   · 拿不到        -> 整文件 SKIP 并给出可操作提示（不是通过，也不冒充失败）。
+ * 环境缺口的**判定**由 scripts/check-tool-output-schema.mjs 的 exit 2 承担；本文件只保证
+ * 自己不会把缺口报成断言失败。
+ */
+let validateJsonSchemaValue = null
+try {
+  ;({ validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools'))
+} catch (error) {
+  if (error?.code !== 'ERR_MODULE_NOT_FOUND') throw error
+  console.log('SKIP(#1) 引擎校验器缺席（净检出无 node_modules）：@deepseek-ai/dsh-tools 未安装')
+  console.log('  SKIP=1')
+  console.log('  这是**环境缺口**，不是通过，也不是代码缺陷。')
+  console.log('  → 在 plugins/dsh-android-manage 下 npm install 后重跑。')
+}
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const mod = await import(pathToFileURL(join(HERE, '..', 'lib', 'index.js')).href)
+/* 同一个环境缺口的另一半：插件产物 lib/index.js 也要先 npm run build 才有。
+ * 缺它同样是 ERR_MODULE_NOT_FOUND，同样必须报成环境缺口而不是断言失败。 */
+let mod = null
+try {
+  mod = await import(pathToFileURL(join(HERE, '..', 'lib', 'index.js')).href)
+} catch (error) {
+  if (error?.code !== 'ERR_MODULE_NOT_FOUND') throw error
+  console.log('SKIP(#1) 插件产物缺席（净检出未 npm run build）：' + join('plugins', 'dsh-android-manage', 'lib', 'index.js'))
+  console.log('  SKIP=1')
+  console.log('  这是**环境缺口**，不是通过，也不是代码缺陷。')
+  console.log('  → 在 plugins/dsh-android-manage 下 npm install && npm run build 后重跑。')
+}
+
+/* 环境缺口时不要注册任何用例：注册了才失败，等于把缺口报成「断言不成立」。
+ * 三者俱在才算真跑，缺一即整文件 SKIP。 */
+const ENV_READY = validateJsonSchemaValue !== null && mod !== null
+if (!ENV_READY) {
+  console.log('SKIP(#2) 本文件整轮未执行：环境缺口（校验器与插件产物需同时在场）')
+  console.log('  SKIP=1')
+}
 const EXEC = { agent: { session: 's1' } }
+
+/* 环境缺口时把这些用例注册成 **skip**，而不是直接注册。
+ * 直接注册 = 用例执行时抛错 = 报告里是「1 fail」，与「断言不成立」无法区分。
+ * 注册成 skip 才如实表达「本轮没跑」，与门禁的 exit 2 是同一套三态语义。 */
+const t = (name, fn) => (ENV_READY ? test(name, fn) : test.skip(name + '（环境缺口，未执行）', fn))
 
 /** 递归收集 undefined 成员路径（lossless-JSON 前置检查）。 */
 function undefinedPaths(v, path = 'value', out = []) {
@@ -119,7 +164,7 @@ function makeFace(opts = {}) {
   return { face, calls }
 }
 
-test('FX-204.1/.2（B0）：30s 内连续两次 dump，两条返回路径都过引擎同款校验器（违规条数 = 0）', async () => {
+t('FX-204.1/.2（B0）：30s 内连续两次 dump，两条返回路径都过引擎同款校验器（违规条数 = 0）', async () => {
   const { face } = makeFace({ snapshotAt: (nth) => v2Payload({ gen: nth === 1 ? 7 : 9 }) })
   const { byName } = applyManage(face)
   const tool = byName('android_ui_dump')
@@ -142,7 +187,7 @@ test('FX-204.1/.2（B0）：30s 内连续两次 dump，两条返回路径都过�
   assert.ok(noUnchanged.length > 0 && noUnchanged[0].includes('unchanged'), '撤掉 unchanged 声明必须违规：' + JSON.stringify(noUnchanged))
 })
 
-test('D3：壳侧不报代次时 gen 整键不发（不是 gen: undefined，也不是 null）', async () => {
+t('D3：壳侧不报代次时 gen 整键不发（不是 gen: undefined，也不是 null）', async () => {
   const { face } = makeFace({ snapshot: v1Snapshot() })
   const { byName } = applyManage(face)
   const tool = byName('android_ui_dump')
@@ -155,7 +200,7 @@ test('D3：壳侧不报代次时 gen 整键不发（不是 gen: undefined，也�
   assert.equal(violations(tool, second).length, 0)
 })
 
-test('FX-206.1 + FX-206.2：无障碍点击的 row 句柄 = o 列映射回的原始行号（不是载荷下标）', async () => {
+t('FX-206.1 + FX-206.2：无障碍点击的 row 句柄 = o 列映射回的原始行号（不是载荷下标）', async () => {
   const { face, calls } = makeFace({ snapshot: v2Payload() })
   const { byName } = applyManage(face)
   const dump = await byName('android_ui_dump').execute({}, EXEC)
@@ -173,7 +218,7 @@ test('FX-206.1 + FX-206.2：无障碍点击的 row 句柄 = o 列映射回的原
   assert.equal(violations(byName('android_ui_click'), r).length, 0)
 })
 
-test('FX-206.3：未变快路径推进 gen/ts——其后动作带新代次，不被 requireFresh 拒', async () => {
+t('FX-206.3：未变快路径推进 gen/ts——其后动作带新代次，不被 requireFresh 拒', async () => {
   const { face, calls } = makeFace({ snapshotAt: (nth) => v2Payload({ gen: nth === 1 ? 7 : 9 }) })
   const { byName } = applyManage(face)
   await byName('android_ui_dump').execute({}, EXEC)
@@ -185,7 +230,7 @@ test('FX-206.3：未变快路径推进 gen/ts——其后动作带新代次，�
   assert.equal(call.args.gen, 9, '动作必须带第二次 dump 的代次（旧实现恒带 7 → 壳侧 requireFresh 拒）')
 })
 
-test('FX-206.4：截断状态按载荷真值渲染（不再写死「未截断」）', async () => {
+t('FX-206.4：截断状态按载荷真值渲染（不再写死「未截断」）', async () => {
   const on = await (async () => {
     const { face } = makeFace({ snapshot: v2Payload({ truncated: true }) })
     return applyManage(face).byName('android_ui_dump').execute({}, EXEC)
@@ -203,7 +248,7 @@ test('FX-206.4：截断状态按载荷真值渲染（不再写死「未截断」
   assert.match(v1.text, /截断状态未知/, 'V1 载荷不带该字段——如实标未知，不得声称未截断')
 })
 
-test('FX-212.5：V2 下 parentId 由预序+深度重建——render 的 ^nX 与 ui_detail 的 parentLabel 不再恒空', async () => {
+t('FX-212.5：V2 下 parentId 由预序+深度重建——render 的 ^nX 与 ui_detail 的 parentLabel 不再恒空', async () => {
   const { face } = makeFace({ snapshot: v2Payload() })
   const { byName } = applyManage(face)
   const tool = byName('android_ui_dump')
@@ -219,7 +264,7 @@ test('FX-212.5：V2 下 parentId 由预序+深度重建——render 的 ^nX 与 
   assert.equal(violations(byName('android_ui_detail'), r).length, 0)
 })
 
-test('D4：android_ui_detail 与 android_screen_list 已注册（源码级 defineTool 集合 − 注册集合 = 空集，注册数 = 14）', async () => {
+t('D4：android_ui_detail 与 android_screen_list 已注册（源码级 defineTool 集合 − 注册集合 = 空集，注册数 = 14）', async () => {
   const { face } = makeFace({ snapshot: v2Payload() })
   const { tools } = applyManage(face)
   const src = readFileSync(join(HERE, '..', 'src', 'index.ts'), 'utf8')
@@ -231,7 +276,7 @@ test('D4：android_ui_detail 与 android_screen_list 已注册（源码级 defin
   assert.equal(defined.size, 14)
 })
 
-test('D5：策略答「ADB 不可用」→ 四个 ADB 专属工具动手前拒绝，且不碰设备', async () => {
+t('D5：策略答「ADB 不可用」→ 四个 ADB 专属工具动手前拒绝，且不碰设备', async () => {
   const { face, calls } = makeFace({
     controlDecision: (op, session, forceBackend) => (forceBackend === 'adb'
       ? { backend: 'deny', reason: '测试桩：ADB 未配对' }
@@ -258,7 +303,7 @@ test('D5：策略答「ADB 不可用」→ 四个 ADB 专属工具动手前拒�
   assert.ok(!/环境准备完成/.test(texts.android_env_prepare), 'env_prepare 拒绝路径不得出现「环境准备完成」')
 })
 
-test('D5：旧 bridge（不认识 forceBackend）与策略面缺席都放行——不得误拒', async () => {
+t('D5：旧 bridge（不认识 forceBackend）与策略面缺席都放行——不得误拒', async () => {
   for (const controlDecision of [() => ({ backend: 'a11y', reason: 'legacy-bridge' }), 'absent']) {
     const { face, calls } = makeFace(controlDecision === 'absent' ? {} : { controlDecision })
     const { byName } = applyManage(face)
@@ -268,7 +313,7 @@ test('D5：旧 bridge（不认识 forceBackend）与策略面缺席都放行—�
   }
 })
 
-test('D5：env_prepare 不再以「环境准备完成」收尾假成功（子步骤未生效必须显式说明）', async () => {
+t('D5：env_prepare 不再以「环境准备完成」收尾假成功（子步骤未生效必须显式说明）', async () => {
   const { face } = makeFace({})
   const { byName } = applyManage(face)
   const r = await byName('android_env_prepare').execute({}, EXEC)
@@ -278,7 +323,7 @@ test('D5：env_prepare 不再以「环境准备完成」收尾假成功（子步
   assert.equal(violations(byName('android_env_prepare'), r).length, 0)
 })
 
-test('D8 + §5.3.3：13 个屏幕读写工具的未授权拒绝分支都带 denied=true 且过自己的 schema', async () => {
+t('D8 + §5.3.3：13 个屏幕读写工具的未授权拒绝分支都带 denied=true 且过自己的 schema', async () => {
   const { face } = makeFace({ gateFor: () => ({ ok: false, guidance: '未授权（测试桩）' }) })
   const { tools } = applyManage(face)
   const privilegedTools = tools.filter((tool) => tool.name !== 'android_screen_list')
@@ -301,7 +346,7 @@ test('D8 + §5.3.3：13 个屏幕读写工具的未授权拒绝分支都带 deni
   assert.equal(metadata.scope, 'virtual-only', '无内容的 capability metadata 不因会话权限门消失')
 })
 
-test('D10/D6：web_dump 未声明键被白名单剔除；url/title 缺席时整键不发', async () => {
+t('D10/D6：web_dump 未声明键被白名单剔除；url/title 缺席时整键不发', async () => {
   const { face } = makeFace({
     webSnapshot: {
       nodes: [{ ref: 'w0', tag: 'button', text: '发送', editable: false, inView: true, bounds: [1, 2, 3, 4], nodeId: '不是声明键', x: 9, y: 9 }],
@@ -323,7 +368,7 @@ test('D10/D6：web_dump 未声明键被白名单剔除；url/title 缺席时整�
   assert.equal(violations(byName('android_web_dump'), r2).length, 0)
 })
 
-test('D11：老壳 V1 载荷的 screen 多带未声明键不再连带拒绝（构造法；真老壳包需实测）', async () => {
+t('D11：老壳 V1 载荷的 screen 多带未声明键不再连带拒绝（构造法；真老壳包需实测）', async () => {
   const { face } = makeFace({ snapshot: v1Snapshot() })
   const { byName } = applyManage(face)
   const tool = byName('android_ui_dump')
@@ -333,7 +378,7 @@ test('D11：老壳 V1 载荷的 screen 多带未声明键不再连带拒绝（�
   assert.equal(violations(tool, r).length, 0)
 })
 
-test('D7：只开无障碍（ADB 执行面缺席）时 android_ui_scroll 仍走语义滚动，且不碰 adb', async () => {
+t('D7：只开无障碍（ADB 执行面缺席）时 android_ui_scroll 仍走语义滚动，且不碰 adb', async () => {
   const { face, calls } = makeFace({ snapshot: v2Payload() })
   delete face.execAdbLine      // 只开无障碍的部署：ADB 三道门未配对
   delete face.execAdbShell
@@ -348,7 +393,7 @@ test('D7：只开无障碍（ADB 执行面缺席）时 android_ui_scroll 仍走�
   assert.equal(violations(byName('android_ui_scroll'), r).length, 0)
 })
 
-test('D9：明细落盘失败时句柄不得停留在上一轮（detailHandle/detailPath 与本次返回一致）', async () => {
+t('D9：明细落盘失败时句柄不得停留在上一轮（detailHandle/detailPath 与本次返回一致）', async () => {
   const prevTmp = process.env.TMPDIR
   const okTmp = mkdtempSync(join(tmpdir(), 'dsh-mg-'))
   try {
@@ -378,7 +423,7 @@ test('D9：明细落盘失败时句柄不得停留在上一轮（detailHandle/de
   }
 })
 
-test('output.schema 自洽：14 个工具都是 object 且 additionalProperties=false（拼写错误防线）', async () => {
+t('output.schema 自洽：14 个工具都是 object 且 additionalProperties=false（拼写错误防线）', async () => {
   const { face } = makeFace({ snapshot: v2Payload() })
   const { tools } = applyManage(face)
   assert.equal(tools.length, 14)

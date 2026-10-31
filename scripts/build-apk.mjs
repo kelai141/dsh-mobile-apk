@@ -77,6 +77,11 @@ const GATE_SCRIPTS = [
   'check-snapshot-decode.mjs',
   // Delivery gate: every final APK must verify with v1, v2, and v3 before leaving out/.
   'check-apk-signatures.mjs',
+  // Delivery gate: the final APK must not be a debuggable variant (badging has no
+  // `application-debuggable`). Signature correctness says nothing about the variant:
+  // the whole chain runs :app:assembleDebug and debug/release share signingConfigs.repoDebug,
+  // so the 0.14.9 release artifacts were debuggable while passing the signature gate.
+  'check-apk-form.mjs',
   'check-manifest-hardening.mjs',
   // 0.14.8 堆下限：壳侧 shellEnv() 与快照内启动器必须给出同一 clamp 区间（单边漂移 = 部分路径仍 OOM）。
   'check-engine-heap-floor.mjs',
@@ -170,6 +175,29 @@ try {
   run(process.execPath, ['--test', gate('check-apk-signatures.test.mjs'), gate('resolve-version-suffix.test.mjs'), gate('build-apk-engine.test.mjs'), gate('build-hard-manifest.test.mjs'), gate('check-perf-instrumentation.test.mjs')])
   mkdirSync(OUT, { recursive: true })
   mkdirSync(work, { recursive: true })
+  // 清掉上一次留在交付目录里的 APK（issue #1077）。
+  //
+  // 真因：本脚本此前只 `mkdirSync(OUT)`，**从不清理**。配合「验签前就拷进交付目录」的老顺序，
+  // 一次签名回归会把未通过验签的包永久留在 out/v<ver>/；而收尾的 `check-apk-signatures --dir`
+  // 是**递归遍历目录**，对任何一个不合格的 *.apk 判红——于是这个版本从此每次构建恒红，
+  // 哪怕当前产物是好的。本地链 build-apk-013.ps1 / 发布链 build-release.ps1 早就在开头做同样
+  // 的清理，portable 链漏了这一步（三条链行为不对称本身就是缺陷）。
+  // 清理范围必须收窄到**本次要产出的 ABI**（issue #1183）。
+  //
+  // 旧实现无条件删掉 OUT 下所有 *.apk。本脚本每次只产一个 ABI（--abi，默认 arm64），
+  // 所以 portable 链跑 x86_64 时会把 arm64 已验签的产物一并删掉：两条 ABI 分别用本脚本
+  // 出包时，后跑的那次总是把前一次的产物清空，交付目录永远只剩一个 ABI。
+  // 而收尾的 ABI 齐全性检查看的是「本次 produced 与 rejected」，察觉不到「上一次的产物没了」。
+  //
+  // 口径与本地链 build-apk-013.ps1 的 $abisThisRun 一致（#1078）：只清本次产出的 ABI，
+  // 其它 ABI 的既有产物保留。
+  //
+  // 仍只删 *.apk：out/ 里还有 snapshot-*.tar.xz 等发布资产，按目录清空会误伤。
+  // 匹配用产物名尾部的 `-<ABI>.apk`，而不是子串包含 —— 避免 x86_64 被 arm64 之类的串味。
+  const staleSuffix = '-' + ABI + '.apk'
+  for (const name of readdirSync(OUT)) {
+    if (name.toLowerCase().endsWith(staleSuffix.toLowerCase())) rmSync(join(OUT, name), { force: true })
+  }
 
   // ---- 1. 前置：基座/插件/vendor 在场 ----
   requires('snapshot 源', snapSrc)
@@ -410,7 +438,11 @@ try {
   log('门禁：内嵌快照可解压（设备同源 streaming 解码器全量解压）…')
   run('node', [gate('check-snapshot-decode.mjs'), '--tar', join(apkDir, 'app', 'src', 'main', 'assets', 'snapshot.tar.xz'), '--require'])
   run(process.execPath, [gate('check-apk-signatures.mjs'), '--self-test'])
-  verifyApks({ signatureGate: gate('check-apk-signatures.mjs'), directories: [OUT], selfTest: false, log },
+  // 产物形态门禁（与签名同一「最终产物」关口）：签名全绿不区分 debug/release 变体——
+  // 0.14.9 发布产物就是 debug 变体（全链 :app:assembleDebug + debug/release 共用 signingConfigs.repoDebug），
+  // badging 带 application-debuggable，而签名门禁对此完全无感。--require：刚打出 APK 的机器必有 SDK。
+  run(process.execPath, [gate('check-apk-form.mjs'), '--self-test'])
+  verifyApks({ signatureGate: gate('check-apk-signatures.mjs'), formGate: gate('check-apk-form.mjs'), directories: [OUT], selfTest: false, log },
     (cmd, argv, opts) => spawnSync(cmd, argv, { cwd: ROOT, encoding: 'utf8', stdio: 'inherit', ...opts }))
   console.log(`=== 完成（${ABI} ${SUFFIX}）===\nAPK=${join(OUT, name)}`)
 } catch (e) {
