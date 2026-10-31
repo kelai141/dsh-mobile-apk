@@ -195,17 +195,16 @@ export const DOMAIN_CASES = [
     payload: domainPayload({ p: [0, 5] }),
     expect: 'reject',
   },
-  // ── 已登记缺口（shrink-only；销账 = 修 src/protocol-v2.ts 的输入侧校验后改成 'reject'）──
+  // ── issue #1208 已销账：n 的类型判据改落在 typeof 上，null / "" / false / [] / "0" 不再折算成 0。
+  //    本用例从 known-gap 改成 reject —— 谁把判据改回 Number(d.n)，这里立刻红（known-gap-stale 的反面）。
   {
-    id: 'P3b n:null（退化成 n=0 空树）',
+    id: 'P3b n:null（曾退化成 n=0 空树，issue #1208 已修）',
     payload: domainPayload({
       n: null, d: [], p: [], f: [], c: [], k: [], r: [], w: [], t: [], s: [], b: [], o: [],
     }),
-    expect: 'known-gap',
-    reason: '解码器输入侧把 n 交给 Number()，Number(null)=0 于是 n:null 通过「非负整数」检查，解出空树而不是失败关闭',
-    since: '2026-10',
-    issue: '#1025',
+    expect: 'reject',
   },
+  // ── 已登记缺口（shrink-only；销账 = 修 src/protocol-v2.ts 的输入侧校验后改成 'reject'）──
   {
     id: 'P2 t:999（符号索引越界，str 只有 2 项）',
     payload: domainPayload({ t: [999, 1] }),

@@ -161,7 +161,15 @@ export function parseUiTreeXml(xml: string): { raw: RawNode[]; rotation: number 
  * 绝不静默产出错树（错误树比没有树更危险）。
  * 检查：① 节点标签计数与解析产出一一对应；② 根节点必为 "0"；
  * ③ 栈未完全归位（未闭合的开标签）视为畸形——按容错放行但由调用方标记。
+ *
+ * issue #1210：原判据只要求 `bounds` 是**非空字符串**，不要求它能被解析，于是「闸报 OK」与
+ * 「100% 丢节点」可以同时成立（两个解析器要求精确的 `[d,d][d,d]`，偏差即返回 null，下游
+ * `parseBounds` 返回 null 就 continue）。这里补一条**形状**判据：只判形状，不判尺寸——
+ * `[0,0][0,0]` 是合法的零尺寸骨架节点，必须继续放行，所以不能复用 `parseBounds`
+ * （它对零尺寸也返回 null，会把合法节点判成坏）。
  */
+const BOUNDS_SHAPE = /^\[-?\d+,-?\d+\]\[-?\d+,-?\d+\]$/
+
 export function checkUiTreeParse(xml: string, raw: RawNode[]): { ok: true } | { ok: false; reason: string } {
   const tagCount = (xml.match(/<node[\s>]/g) ?? []).length
   if (raw.length !== tagCount) {
@@ -172,6 +180,10 @@ export function checkUiTreeParse(xml: string, raw: RawNode[]): { ok: true } | { 
   const noBounds = raw.findIndex((r) => typeof r.attrs.bounds !== 'string' || r.attrs.bounds === '')
   if (noBounds >= 0) {
     return { ok: false, reason: `第 ${noBounds} 个节点（id "${raw[noBounds].id}"）没有 bounds 属性——属性区解析失败（XML 含未转义的 > 或属性写法异常），解析结果不可信` }
+  }
+  const badShape = raw.findIndex((r) => !BOUNDS_SHAPE.test(r.attrs.bounds ?? ''))
+  if (badShape >= 0) {
+    return { ok: false, reason: `第 ${badShape} 个节点（id "${raw[badShape].id}"）的 bounds 形状非法：应形如 [x1,y1][x2,y2]，实得 ${JSON.stringify(String(raw[badShape].attrs.bounds ?? ''))}——解析结果不可信` }
   }
   if (raw.length > 0 && raw[0].id !== '0') {
     return { ok: false, reason: `根节点 id 应为 "0"，实得 "${raw[0].id}"（栈机归位错误）` }

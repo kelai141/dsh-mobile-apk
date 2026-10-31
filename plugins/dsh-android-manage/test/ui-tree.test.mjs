@@ -361,3 +361,23 @@ test('resolveRef：找不到节点时必须明确报错，不得静默返回', (
   assert.equal(byId.ok, false)
   assert.match(byId.error, /不在最近一次取树结果中/)
 })
+
+// ── issue #1210：完整性闸必须拒绝「不可解析的 bounds 形状」 ──────────────────────────
+test('checkUiTreeParse rejects malformed bounds shapes while keeping zero-size nodes', () => {
+  // 闸原来只校验「bounds 是非空字符串」，不校验它能被解析 ⇒ 闸报 OK 时可以 100% 丢节点。
+  // 修法只判**形状**，不复用 parseBounds（后者对合法的零尺寸 [0,0][0,0] 也返回 null）。
+  const raw = (list) => list.map((b, i) => ({ id: i === 0 ? '0' : '0.' + i, attrs: { bounds: b } }))
+  const xml = (k) => '<hierarchy>' + '<node >'.repeat(k) + '</hierarchy>'
+
+  for (const b of ['[0,0][100,100]', '[0,0][0,0]']) {
+    assert.equal(checkUiTreeParse(xml(2), raw([b, '[0,0][10,10]'])).ok, true,
+      'bounds=' + b + ' 必须放行（第二条是零尺寸骨架节点，判尺寸会误伤）')
+  }
+  for (const b of ['[0,0][100]', '[0, 0][100, 100]', '[0,0][100,100][200,200]']) {
+    const r = checkUiTreeParse(xml(2), raw([b, '[0,0][10,10]']))
+    assert.equal(r.ok, false, 'bounds=' + JSON.stringify(b) + ' 必须判红（旧实现只判非空字符串）')
+    assert.match(r.reason, /bounds 形状非法/, '形状类畸形必须点名形状：' + r.reason)
+  }
+  // 空串走的是更早的「没有 bounds 属性」判据（既有判据，不动它），这里只要求仍然判红
+  assert.equal(checkUiTreeParse(xml(2), raw(['', '[0,0][10,10]'])).ok, false)
+})

@@ -35,3 +35,22 @@ test('明细记录：字段齐全（第二级必须比默认渲染更全）', ()
     assert.ok(key in rec, '明细缺字段 ' + key)
   }
 })
+
+// ── issue #1209：offset 必须夹到行数内；Infinity 必须收敛 ────────────────────────────
+test('#1209 offset 夹到行数内：不产生倒挂区间、不抹掉「页外还有行」的事实', () => {
+  const rows = Array.from({ length: 100 }, (_, i) => i)
+  for (const off of [100, 101, 5000]) {
+    const r = pageRows(rows, off, 60)
+    assert.equal(r.page.length, 0)
+    // 旧实现原样返回 off，消费点因此印「第 5000..4999 行」且 omitted=0（页外还有 100 行却说没有）
+    assert.equal(r.offset, 100, 'offset=' + off + ' 必须夹到行数 100')
+    assert.equal(r.omitted, 0)
+  }
+  const inf = pageRows(rows, Number.POSITIVE_INFINITY, 60)
+  assert.ok(Number.isFinite(inf.offset), 'Infinity 必须收敛成有限数（它会序列化成 null，违反 type:number）')
+  assert.deepEqual(inf.page.slice(0, 3), [0, 1, 2])
+  // 正控：中段页仍然如实报告省略量
+  const mid = pageRows(rows, 40, 20)
+  assert.equal(mid.offset, 40)
+  assert.equal(mid.omitted, 40)
+})

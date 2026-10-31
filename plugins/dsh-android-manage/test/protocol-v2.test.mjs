@@ -495,3 +495,37 @@ test('输入契约：畸形载荷一律不得抛异常，被接受者必须数�
   // 防御：随机集必须真的既有拒绝也有接受，否则「全拒绝」会让上面的接受分支永远不跑（假绿）
   assert.ok(accepted > 0, '240 例里必须至少有一例被接受，否则断言只覆盖了拒绝路径')
 })
+
+// ── issue #1208：n 的类型判据 / n=0 的列形状 / 32 位句柄域 ──────────────────────────
+const V2_EMPTY = {
+  v: 2, gen: 1, rot: 0, scr: [1080, 2400], str: [], view: 'all', truncated: false,
+  d: [], p: [], f: [], c: [], k: [], r: [], w: [], t: [], s: [], b: [], o: [],
+}
+
+test('#1208 n 必须是数字：null/""/false/[]/"0"/true 一律失败关闭，不再折算成空树', () => {
+  // 旧实现 Number(d.n)：null/''/false/[] → 0，"0" → 0，于是「n 缺失或类型错」被当成空树放行，
+  // 且 n===0 的提前返回跳过整段列校验 —— 86 行的载荷能解成空树并报 ok。
+  for (const bad of [null, '', false, [], '0', true]) {
+    const r = decodeV2({ ...V2_EMPTY, n: bad })
+    assert.equal(r.ok, false, 'n=' + JSON.stringify(bad) + ' 必须失败关闭（旧实现会解成空树报 ok）')
+    assert.match(r.error, /n 必须是非负整数/)
+  }
+  // 正控：真正的 0 仍然接受（合法空树）
+  assert.equal(decodeV2({ ...V2_EMPTY, n: 0 }).ok, true)
+})
+
+test('#1208 句柄域：raw 越过 2^31 必须失败关闭（否则 Int32Array 截断成负数 / 两节点塌成一行）', () => {
+  const base = {
+    v: 2, gen: 1, rot: 0, scr: [10, 10], str: [], n: 1, view: 'all', truncated: false,
+    d: [0], p: [-1], f: [0], c: [0], k: [0], r: [0], w: [0], t: [0], s: [0], b: [0, 0, 1, 1],
+  }
+  const truncated = decodeV2({ ...base, raw: 4000000000, o: [3000000000] })
+  assert.equal(truncated.ok, false, 'raw=4e9 必须拒绝（旧实现解出 origRow[0]=-1294967296）')
+  assert.match(truncated.error, /32 位句柄域/)
+  assert.equal(decodeV2({ ...base, raw: 4294967296, o: [0] }).ok, false,
+    'raw=2^32 必须拒绝（旧实现里 0 与 4294967296 都被截成 0，严格递增判据随之失效）')
+  // 正控：合法句柄保真
+  const ok = decodeV2({ ...base, raw: 393, o: [42] })
+  assert.equal(ok.ok, true)
+  assert.equal(ok.value.origRow[0], 42)
+})

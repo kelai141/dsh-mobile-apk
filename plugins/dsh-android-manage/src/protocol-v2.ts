@@ -95,14 +95,32 @@ export function decodeV2(data: unknown): DecodeResult {
   if (!Array.isArray(str) || !str.every((s) => typeof s === 'string')) return { ok: false, error: 'str 必须是字符串数组' }
   const S = str as string[]
 
-  const n = Number(d.n)
-  if (!Number.isInteger(n) || n < 0) return { ok: false, error: 'n 必须是非负整数' }
+  // issue #1208 ①：`Number(d.n)` 把 null / 空串 / false / [] / "0" 一律折算成 0，于是「n 缺失或类型错」
+  // 被当成「空树」放行，再叠加下面 n===0 的提前返回，**整段列校验被跳过**：86 行的载荷能解成空树并报 ok。
+  // 判据必须落在类型上，不能落在折算后的数值上。
+  const nRaw = d.n
+  if (typeof nRaw !== 'number' || !Number.isInteger(nRaw) || nRaw < 0) {
+    return { ok: false, error: 'n 必须是非负整数（收到 ' + String(d.n) + '）' }
+  }
+  const n = nRaw
   const view: V2View = d.view === 'target' ? 'target' : 'all'
   const truncated = d.truncated === true
   const rawCount = Number(d.raw ?? n)
   if (!Number.isInteger(rawCount) || rawCount < n) {
     return { ok: false, error: `raw 必须是不小于 n=${n} 的整数（收到 ${String(d.raw)}）` }
   }
+  // issue #1208 ③：`origRow` 是 Int32Array，句柄域越过 2^31 会被**截断**：
+  //   raw=4e9, o=[3000000000]    → origRow=[-1294967296]（壳侧按负数索引不到任何行）；
+  //   raw=1e21, o=[0,4294967296] → 两项都截成 0，「严格递增」判据随之失效，两节点塌成同一行。
+  // 合法原始行号上限是 rawCount-1，必须 <= 2147483647。
+  if (rawCount > 2 ** 31) {
+    return { ok: false, error: 'raw=' + String(rawCount) + ' 超出 32 位句柄域（上限 2^31=2147483648），原始行号会被截断成负数' }
+  }
+  // issue #1208：这里保留「空树提前返回」，但**不采纳** issue 里建议 B 的「n=0 追加列形状校验」。
+  // B 只在「n 被折算成 0」时才需要：类型判据（上面的 typeof）已把 null / '' / false / [] 折算这条
+  // 入口关死；剩下的 n=0 只可能是调用方**真的**声明了空树，此时列内容与产物无关。
+  // 而 B 会把「老编码器带的非常规列形状」一并拒掉，等于用判据否认合法空载荷 —— 现有输入契约
+  // fuzz 用例（240 例里必须至少一例被接受）就是这条红线的守门人，实测 B 会把它打红。
   if (n === 0) {
     return {
       ok: true,
