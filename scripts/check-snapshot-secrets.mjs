@@ -39,6 +39,8 @@
 // 与 check-snapshot-decode 那条「必须用设备同一套解码器」的门禁不同，此处用哪套 tar 不影响判据强度。
 // 换 tar 实现不会放过任何一个敏感路径：两侧都是完整的 49,030 条成员表（见上方比对）。
 import { execFileSync } from 'node:child_process'
+import { mkdirSync, readFileSync, rmSync, lstatSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { TAR } from './lib/shell.mjs'
 
 // ── --self-test：判别力自证（2026-10-29 补；2026-10-30 按 issue #1033 扩到 12 项）──────
@@ -244,21 +246,90 @@ if (anon.length) failOut('anon-id', anon)
 //        .../rubygems/ssl_certs/GlobalSign.pem     → BEGIN CERTIFICATE 1   / PRIVATE KEY 0
 //      扩展名判据会把它们全判成 "私钥文件"，而它们恰恰是**公钥/证书**——公钥不是机密。
 //      所以这两类必须**看内容**：只有真出现 PEM 私钥头才判红。
+// ── 成员内容读取：一次解压、批量读（性能修复）────────────────────────────────
+//
+// 旧实现对每个成员跑一次 `tar -xOf <tar.xz> <member>`。tar.xz 是**流式压缩**：
+// 取任何一个成员都必须**从头解压整个归档**，于是 N 个成员 = N 次全量解压。
+// 实测本快照：52600 成员、内容级目标 2431 个、归档 158.2 MB
+//   → 约 2431 × 158 MB ≈ 384 GB 解压量，arm64 单份超 100 分钟仍未完成。
+//
+// 改为：把「需要读内容的成员」一次性 `tar -xf` 解到归档同目录下的临时目录
+// （同盘，避免跨盘拷贝），之后直接读文件。用完必删——包括 process.exit 路径
+// （挂 process.on('exit')）与异常路径。
+//
+// 等价性保持（逐条对齐旧行为，不是重新定义判据）：
+//   · **符号链接成员**：旧 `tar -xOf` 对链接成员输出空串 → 这里同样按空串处理，
+//     不跟随链接（否则会读到目标内容，结论可能不同）；
+//   · **超大成员**：旧 `maxBuffer` 32 MB 会抛错 → 这里超过 32 MB 同样记为「读不出」；
+//   · **缺席成员**：解压时缺席 → 这里读文件失败 → 同样计入「读不出」。
+const SCAN_LIMIT = 32 * 1024 * 1024
+const contentTargets = lines.filter((path) => CONTENT_SCAN_RE.test(path) && !path.endsWith('/'))
+const pemCandidates = pathHits(/(?:^|\/).*\.(?:pem|key)$/i)
+  .filter((l) => !/\/(?:node_modules|usr\/lib\/node_modules)\//.test(l))
+const SCAN_TMP = join(dirname(abs), '.secrets-scan-' + process.pid)
+const scanCache = new Map()
+let scanExtracted = false
+const cleanupScanTmp = () => {
+  if (!scanExtracted) return
+  try { rmSync(SCAN_TMP, { recursive: true, force: true }) } catch { /* 忽略清理失败 */ }
+  scanExtracted = false
+}
+process.on('exit', cleanupScanTmp)
+
+/**
+ * 读一个成员的内容（首次调用触发一次性解压）。
+ * @param member 归档内相对路径
+ * @returns {string|null} 内容；null = 读不出（缺席 / 超大 / 非普通文件以外的情况）
+ */
+function readMember(member) {
+  if (scanCache.has(member)) return scanCache.get(member)
+  if (!scanExtracted) {
+    scanExtracted = true
+    rmSync(SCAN_TMP, { recursive: true, force: true })
+    mkdirSync(SCAN_TMP, { recursive: true })
+    // 一次全量解压（不是 `-T <清单>` 选择性解压）：实测 `-T` 会漏掉符号链接成员
+    // （arm64 快照的 cacert.pem 是链接，没被解出，导致它被判成「读不出」而 failHard）。
+    // 全量解压只多花几十秒，换来与旧实现逐成员一致的可见性。
+    try {
+      execFileSync(TAR, ['-xf', abs, '-C', SCAN_TMP], { stdio: ['ignore', 'ignore', 'pipe'] })
+    } catch { /* 归档部分损坏时仍可能解出多数成员，缺失者由逐成员读取判定 */ }
+  }
+  const full = join(SCAN_TMP, member)
+  let text = null
+  let needFallback = false
+  try {
+    const st = lstatSync(full)
+    if (st.isSymbolicLink()) text = ''            // 旧 tar -xOf 对链接成员输出空串
+    else if (!st.isFile()) needFallback = true    // 目录等异常：交给回退路径判
+    else if (st.size > SCAN_LIMIT) text = null    // 对齐旧 maxBuffer
+    else text = readFileSync(full, 'utf8')
+  } catch { needFallback = true }
+
+  // 解不出来时回退到旧写法 tar -xOf（与旧实现逐字节等价）。
+  //
+  // 为什么需要这条：Windows 的 tar **建不出符号链接**（悬空链接直接失败且不报错），
+  // 于是像 arm64 快照的 .../certifi/cacert.pem（链接到 usr/etc/tls/cert.pem）
+  // 在解压树里根本不存在。旧实现用 -xOf 对它得空串；若这里直接判「读不出」，
+  // verdict 就从「绿」变成「红」——那就不是提速，是改判据。
+  // 触发面很小（只有解不出来的成员），代价是这几个成员各自一次全量解压。
+  if (needFallback) {
+    try {
+      text = execFileSync(TAR, ['-xOf', abs, member], { encoding: 'utf8', maxBuffer: SCAN_LIMIT })
+    } catch { text = null }
+  }
+  scanCache.set(member, text)
+  return text
+}
+
 const privKeyCarriers = pathHits(/(?:^|\/)(?:id_(?:rsa|dsa|ecdsa|ed25519)|\.ssh\/|.*\.(?:p12|pfx))$/i)
   .filter((l) => !/\/(?:node_modules|usr\/lib\/node_modules)\//.test(l))
 /** PEM 私钥头（与 credentialHit 里同一条，避免两处漂移）。 */
 const PEM_PRIVKEY_RE = /-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----/
 const privKeyFiles = [...privKeyCarriers]
 const pemKeyUnreadable = []
-for (const member of pathHits(/(?:^|\/).*\.(?:pem|key)$/i)
-  .filter((l) => !/\/(?:node_modules|usr\/lib\/node_modules)\//.test(l))) {
-  let content = ''
-  try {
-    content = execFileSync(TAR, ['-xOf', abs, member], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 })
-  } catch {
-    pemKeyUnreadable.push(member)
-    continue
-  }
+for (const member of pemCandidates) {
+  const content = readMember(member)
+  if (content === null) { pemKeyUnreadable.push(member); continue }
   if (PEM_PRIVKEY_RE.test(content)) privKeyFiles.push(member)
 }
 // 读不出来的 .pem/.key：不能当「干净」放行（否则损坏的归档或超 maxBuffer 就成了逃逸口）。
@@ -318,17 +389,12 @@ if (importedSettings.length) failOut('imported-user-settings', importedSettings)
 // 于是 usr/lib/app/config.json 里的 apiKey、usr/etc/npmrc 的 _authToken、拆两行的 JWT 全部 PASSED。
 // 现在：所有「能承载配置/凭据」的成员都读进来扫，且**整串拼起来再扫**（跨行也能命中）。
 // 读不出来的成员：--require 判红（SKIP 不得结案）；非严格档计数 SKIP 并打印。
-const contentTargets = lines.filter((path) => CONTENT_SCAN_RE.test(path) && !path.endsWith('/'))
+// contentTargets 已在上面（readMember 之前）定义，这里复用同一份清单。
 let contentScanned = 0
 const contentUnreadable = []
 for (const member of contentTargets) {
-  let content = ''
-  try {
-    content = execFileSync(TAR, ['-xOf', abs, member], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 })
-  } catch {
-    contentUnreadable.push(member)
-    continue
-  }
+  const content = readMember(member)
+  if (content === null) { contentUnreadable.push(member); continue }
   contentScanned += 1
   const hit = credentialHit(content)
   if (hit) {
@@ -343,6 +409,7 @@ if (contentUnreadable.length > 0) {
   skipped += 1
   console.log('SKIP(#' + skipped + ')  ' + msg)
 }
+cleanupScanTmp()   // 临时目录用完即删（process.exit 路径由 exit 钩子兜底）
 console.log('内容级扫描：' + contentScanned + '/' + contentTargets.length + ' 个成员（配置/凭据载体）')
 
 // 私有源映射：仅 @dsh-android 插件的 .js.map 才算泄露（npm 公共依赖带 map 属正常）
