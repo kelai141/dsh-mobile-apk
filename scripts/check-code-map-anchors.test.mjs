@@ -32,14 +32,36 @@ function gate() {
   return { code: p.status, passed: /CHECK-CODE-MAP PASSED/.test(out), crash, kinds }
 }
 
+// 变异态的复原：**三条路都要覆盖**，否则中断会把仓库留在变异态（实测：杀链/Ctrl-C 后
+// scripts/check-code-map.mjs 停在 `if (t === '') continue`，下一个 PR 可能把它当自己的改动提交）。
+//   ① 正常/异常：run() 里的 try/finally
+//   ② 信号：SIGINT / SIGTERM / SIGHUP（超时与 Ctrl-C 走这条）
+//   ③ 进程退出：process.on('exit')（含 process.exit 与未捕获异常）
+// SIGKILL 无法捕获，那一档只能靠人手 checkout —— 但它是唯一的残留窗口。
+let dirty = false
+function restore() {
+  if (!dirty) return
+  try { writeFileSync(TARGET, orig, 'utf8') } catch { /* 尽力复原 */ }
+  dirty = false
+}
+process.on('exit', restore)
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(sig, () => { restore(); process.exit(130) })
+}
+
 function run(label, content, want) {
   if (content === orig) {
     console.log('  VOID  ' + label + ' —— 变异未落地（替换零命中），该反证无效')
     return false
   }
-  writeFileSync(TARGET, content, 'utf8')
-  const r = gate()
-  writeFileSync(TARGET, orig, 'utf8')
+  let r
+  try {
+    dirty = true
+    writeFileSync(TARGET, content, 'utf8')
+    r = gate()
+  } finally {
+    restore()
+  }
   if (r.crash) { console.log('  VOID  ' + label + ' —— 门禁崩溃，非判定，该反证无效'); return false }
   const ok = want === 'green' ? (r.passed && r.code === 0) : (!r.passed && r.code === 1)
   console.log((ok ? '  ok    ' : '  FAIL  ') + label + ' -> exit=' + r.code
