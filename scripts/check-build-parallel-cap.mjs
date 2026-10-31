@@ -85,6 +85,26 @@ const codeOnly = (text) => text
     .replace(/^[ \t]*#.*$/, ''))                    // # 行注释（Python/Shell；[ \t] 而非 \s 防吃换行）
   .join('\n')
 
+/**
+ * 真跑一次求值拿到 XZ_THREADS 的实际取值（issue #1192）。
+ *
+ * 为什么必须真跑：文本判据只能证明「某个 return 语句写了 CPU_THREADS_CAP」，
+ * 证明不了「运行时拿到的就是这个值」—— 中间可以插条件分支、覆写、三元表达式。
+ * 本仓的门禁一律以「判据执行了且通过」为准（#1038），这里同理。
+ *
+ * 用独立子进程求值，避免本进程的模块缓存与 side effect 干扰。
+ * @returns {number|null} 实际取值；求值失败返回 null
+ */
+function liveThreadValue() {
+  const script = 'import(' + JSON.stringify('./' + CAP_MODULE) + ').then((m) => {'
+    + ' process.stdout.write(String(m.XZ_THREADS)) }).catch(() => process.stdout.write("NaN"))'
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    cwd: ROOT, encoding: 'utf8', env: { ...process.env, DSH_CPU_THREADS: '' },
+  })
+  const n = Number((r.stdout ?? '').trim())
+  return Number.isFinite(n) ? n : null
+}
+
 function runChecks() {
   // ── 1. 可执行代码行里不得有 -T0 / -dT0 ────────────────────────────────
   console.log('== 1. 吃满型线程参数（-T0 / -dT0）在可执行代码里必须为 0 ==')
@@ -119,6 +139,33 @@ function runChecks() {
     const capsToAllCores = /os\.cpus\(\)\.length|os\.cpu_count|nproc\b/.test(codeOnly(capText))
     check('默认不取「全部核心数」（禁回到吃满行为）', !capsToAllCores,
       '上限模块里出现「核心数」推导；用户口径是固定 8，不是「有多少用多少」')
+
+    // issue #1192：**取值必须真的被用上**，不能只验常量名在场。
+    //
+    // 旧判据只要求 `XZ_THREADS` 这个名字存在 + 另一个字面量 `CPU_THREADS_CAP = 8` 存在，
+    // 两者之间**没有任何绑定**。把 `return CPU_THREADS_CAP` 改成 `return 0`（于是每条
+    // `xz -T${XZ_THREADS}` 变成 `xz -T0` = 吃满所有核），16 条判据照样全 PASS。
+    //
+    // 这里补三条：
+    //   ① XZ_THREADS 的默认返回值必须真的是 CPU_THREADS_CAP（不是别的常量、不是字面量 0）；
+    //   ② 覆写分支必须做下界钳制（>= 1），否则 DSH_CPU_THREADS=0 会退化成 -T0；
+    //   ③ 实际运行取值必须落在 [1, CPU_THREADS_CAP] 内（真跑一次，不是读文本）。
+    const capCode = codeOnly(capText)
+    const returnsCap = /return\s+CPU_THREADS_CAP\b/.test(capCode)
+    check('XZ_THREADS 的默认分支**返回** CPU_THREADS_CAP（不是其它值）', returnsCap,
+      '没找到 `return CPU_THREADS_CAP` —— 常量在场但未被当作默认值，改写成 return 0 即可绕过全部判据')
+    const clampsLower = /Math\.max\(\s*1\s*,/.test(capCode)
+    check('XZ_THREADS 的覆写分支有下界钳制 Math.max(1, …)', clampsLower,
+      'DSH_CPU_THREADS=0 会退化成 -T0（吃满），必须有下界钳制')
+    // ③ 真跑一次取值（这是唯一能证明「常量与消费值相等」的判据）
+    const live = liveThreadValue()
+    if (live === null) {
+      check('实际运行取值落在 [1, ' + CAP_DEFAULT + ']', false, '无法载入 ' + CAP_MODULE + ' 求值')
+    } else {
+      check('实际运行取值落在 [1, ' + CAP_DEFAULT + ']',
+        Number.isInteger(live) && live >= 1 && live <= CAP_DEFAULT,
+        '实测 XZ_THREADS=' + String(live) + '（0 = 吃满全核；>' + CAP_DEFAULT + ' = 超过用户拍板上限）')
+    }
   }
 
   // ── 3. 消费面：构建链真的用了这个常量 ────────────────────────────────

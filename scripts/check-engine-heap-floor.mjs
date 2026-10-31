@@ -21,6 +21,7 @@
 // 退出码：0 = 通过；1 = 有失败项。
 import { readFileSync, existsSync } from "node:fs"
 import { dirname, join } from "node:path"
+import { stripComments } from './lib/strip-comments.mjs'
 import { fileURLToPath } from "node:url"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -40,10 +41,99 @@ const pass = (msg) => console.log("PASS  " + msg)
 const skip = (msg) => { skipped += 1; console.log("SKIP(#" + skipped + ")  " + msg) }
 
 /**
+ * 从生成器 JS 里抽出嵌入的 shell 脚本，并剥掉 shell 注释（issue #1191）。
+ *
+ * 为什么需要单独一层：启动器不是独立 .sh 文件，而是 `build-snapshot-013.mjs` 里的
+ * `+ '<shell 行>\n'` 字符串拼接。整份 JS 交给 JS 注释剥离器时，字符串字面量会被**原样保留**
+ * —— 于是「把 shell 行注释掉」这个动作在 JS 层面看不见，判据仍然命中。
+ *
+ * 抽取：匹配 `+ '...'\n'` 形态（本仓实测 16 处），拼成完整 shell 文本。
+ * 剥注释：按 shell 口径（`#` 行注释）走状态机，引号内的 `#` 不误判。
+ *
+ * 抽不到任何片段时退回「整份原文剥 JS 注释」：这样至少不会比旧实现更差，
+ * 且调用方（自检）会覆盖抽取路径。
+ *
+ * @param {string} jsSrc 生成器 JS 源码
+ * @returns {string} shell 代码面（注释已抹空）
+ */
+export function shellCodeOf(jsSrc) {
+  // 只扫 `writeFileSync(...)` 那段拼接区，避免把整个生成器里无关的单引号字符串都算进来。
+  // 形态有两种（实测都出现）：
+  //   + 'export NODE_OPTIONS="--max-old-space-size=$__dsh_heap"\n'        （纯字面量）
+  //   + 'export LD_LIBRARY_PATH="' + NEW_PREFIX + '/lib"\n'                 （中间插值）
+  // 后者必须把插值两侧的片段都算进来，否则 'export LD_LIBRARY_PATH="' 会被漏掉。
+  const start = jsSrc.indexOf('PTC_NODE_WRAPPER_REL')
+  const region = start >= 0 ? jsSrc.slice(start, start + 8000) : jsSrc
+  const parts = [...region.matchAll(/'((?:[^'\\]|\\.)*)'/g)].map((m) => m[1])
+  if (parts.length === 0) return stripComments(jsSrc, { mode: 'c' })
+  const shell = parts.join('\n')
+  return stripComments(shell, { mode: 'powershell' })
+}
+
+/**
+ * 从 `marker` 之后扫出**括号配平**的参数区（issue #1191 洞二）。
+ *
+ * 为什么不用正则惰性量词：`arrayOf\(([\s\S]{0,400}?)\)` 在第一个 `)` 就收尾，
+ * 而 `bindPort.toString()` 里就有个 `)` —— 窗口在目标内容之前结束，之后追加的东西全看不见。
+ *
+ * 字符串字面量里的括号必须跳过，否则 `"foo)"` 会提前收尾（同一个坑换一种形态）。
+ *
+ * @param {string} src 源码（调用方负责先剥注释）
+ * @param {string} marker 起始标记（如 'arrayOf('）
+ * @returns {string|null} 括号内的原文；找不到标记或括号不配平时返回 null
+ */
+export function balancedArgs(src, marker) {
+  const at = src.indexOf(marker)
+  if (at < 0) return null
+  const start = at + marker.length
+  const DQ = String.fromCharCode(34)
+  const SQ = String.fromCharCode(39)
+  const BT = String.fromCharCode(96)
+  let depth = 1
+  let i = start
+  while (i < src.length) {
+    const c = src[i]
+    if (c === DQ || c === SQ || c === BT) {
+      let j = i + 1
+      while (j < src.length && src[j] !== c) {
+        if (src[j] === '\\') j += 1
+        j += 1
+      }
+      i = j + 1
+      continue
+    }
+    if (c === '(') depth += 1
+    else if (c === ')') {
+      depth -= 1
+      if (depth === 0) return src.slice(start, i)
+    }
+    i += 1
+  }
+  return null
+}
+
+/**
  * 纯分析函数（可被自检直接喂合成样本）。返回 { findings: [...], values: {...} }。
  * findings 为空数组 = 全部判据通过。
  */
-export function analyze(kotlinSrc, wrapperSrc) {
+export function analyze(kotlinSrcRaw, wrapperSrcRaw) {
+  // issue #1191：**B/C/D 必须在剥过注释的代码面上判定**。
+  //
+  // 旧实现直接用文件原文做正则匹配，于是把启动器那 9 行逻辑整段注释掉（`# ` 前缀）后，
+  // 正则仍能从注释里读到 `export NODE_OPTIONS=...`、`LD_LIBRARY_PATH`、`linker64`，
+  // 三条判据全 PASS —— 设备上堆底线彻底缺失。
+  //
+  // **关键：wrapper 不是独立的 .sh 文件，而是嵌在 build-snapshot-013.mjs 里的 JS 字符串拼接。**
+  // 所以不能只对整个 JS 文件剥 JS 注释 —— shell 代码在字符串字面量内部，JS 剥离器会原样保留。
+  // 必须先把 shell 片段从 JS 字符串里**抽出来**，再按 shell 口径剥 `#` 注释。
+  //
+  // 抽取方式：`+ '<内容>\n'` 是这些片段的唯一拼接形态（本仓实测 16 处），
+  // 按它抽出来拼成一段完整 shell 文本；抽不到时退回整份原文（此时 shell 注释无法剥，
+  // 但至少 JS 注释能剥 —— 比完全不剥好，且下方的自检会覆盖抽取路径）。
+  //
+  // Kotlin 侧直接剥 C 系注释（`//` 与 `/* */`）。
+  const kotlinSrc = stripComments(kotlinSrcRaw, { mode: 'c' })
+  const wrapperSrc = shellCodeOf(wrapperSrcRaw)
   const findings = []
   const values = { floor: null, cap: null, clampLo: null, clampHi: null, divisor: null }
 
@@ -126,9 +216,17 @@ export function analyze(kotlinSrc, wrapperSrc) {
   }
 
   // ── E：argv 不得出现堆标志 ───────────────────────────────────────────────
-  const argvM = /val args = arrayOf\(([\s\S]{0,400}?)\)/.exec(kotlinSrc)
-  if (!argvM) findings.push("E: 找不到引擎 argv（锚点失效，判据无法生效）")
-  else if (/max-old-space-size|max_old_space_size/.test(argvM[1])) {
+  // issue #1191 洞二：**不能靠惰性量词截窗口**。
+  //
+  // 旧实现 `arrayOf\(([\s\S]{0,400}?)\)` 在第一个 `)` 就收尾 —— 而 `bindPort.toString()`
+  // 里就有个 `)`，扫描窗口在堆标志之前就结束了，之后追加的 `"--max-old-space-size=256",`
+  // 完全不可见。
+  //
+  // 改成**括号配平**扫描：从 `arrayOf(` 开始数括号，配平处才是真正的收尾。
+  // 字符串里的括号要跳过（否则 `"foo)"` 会提前收尾，同一个坑换一种形态）。
+  const argvArgs = balancedArgs(kotlinSrc, 'arrayOf(')
+  if (argvArgs === null) findings.push("E: 找不到引擎 argv（锚点失效，判据无法生效）")
+  else if (/max-old-space-size|max_old_space_size/.test(argvArgs)) {
     findings.push("E: 引擎 argv 出现堆标志（argv 覆盖 NODE_OPTIONS，堆来源必须唯一）")
   }
 
