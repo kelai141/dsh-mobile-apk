@@ -53,6 +53,34 @@ const argOf = (n, d) => { const i = argv.indexOf('--' + n); return i >= 0 ? (arg
 const DOC_REL = argOf('doc', 'docs/AGENTS/EXECUTION-MAP.md')
 const LIST_ONLY = argv.includes('--list')
 const SELF_TEST = argv.includes('--self-test')
+
+/**
+ * 结构性行：本身不承载语义，锚它们没有定位价值，也不该算进「需人工」的账（issue #1179）。
+ *
+ * 判据为什么用「形状」而不是「白名单」：实测那 82 条「内容在全文出现 N 次」的样本里，
+ * 形态高度集中在注释收尾（注释起始 23 条 / 星号续行 12 条 / 注释收尾 10 条 / 行注释 4 条）、
+ * 纯符号行（右括号 右圆括号 右方括号 分号 左花括号 合计 14 条）、Markdown 表格分隔行（3 条）
+ * 与裸注解（@Test 7 条、@JavascriptInterface 3 条）。逐条白名单会随源码漂移，按形状判不需要维护。
+ *
+ * 刻意**不**把「含标识符的行」纳入：业务行的重复（例如两处相同的调用语句）仍然必须算进
+ * 「需人工」，否则这条判据就从「统计口径改善」变成了「把真问题藏起来」。
+ * @param {string} trimmed 已 trim 的行内容。
+ * @returns {boolean} true = 结构性行，不计入需人工。
+ */
+export function isStructuralLine(trimmed) {
+  if (typeof trimmed !== 'string') return false
+  const t = trimmed.trim()
+  if (t === '') return true
+  // 注释起始、星号续行、注释收尾、行注释
+  if (/^(?:\/\/|\/\*\*?|\*(?:\/|$))/.test(t)) return true
+  // 纯符号行：整行只有标点与空白，没有任何标识符字符
+  if (/^[^A-Za-z0-9_$#@'"`]+$/.test(t)) return true
+  // Markdown 表格分隔行
+  if (/^\|[-:|\s]+\|$/.test(t)) return true
+  // 裸注解（无参数）
+  if (/^@[A-Za-z_][\w.]*$/.test(t)) return true
+  return false
+}
 const REFRESH_ANCHOR_BASELINE = argv.includes('--refresh-anchor-baseline')
 /**
  * 显式允许「基线内容漂移」被吸收进 `--refresh-anchor-baseline`。
@@ -1774,6 +1802,29 @@ function selfTest() {
     driftCases.push(['#1111 符号键集必须来自文档锚点（不是从旧基线继承）',
       [...sym].every((k) => k.includes('#')) && sym.size > 0])
   }
+  // ── #1179 结构性行分桶（统计口径，不改变锚点行为）──
+  {
+    const structuralSamples = ['/**', '*', '*/', '//', '}', ')', '];', '{', '| --- | --- |', '@Test', '@JavascriptInterface', '']
+    driftCases.push([
+      '#1179 结构性行必须全部命中（含注释收尾 / 纯符号 / 表格分隔 / 裸注解）',
+      structuralSamples.every((x) => isStructuralLine(x))])
+    // 负控一：业务行与**带参数**的注解不得被吞进结构性桶 —— 否则判据变成「把真问题藏起来」
+    const businessSamples = ['const x = 1', 'return null', 'log(1)', 'expect(a).toBe(b)', 'foo()', 'x']
+    driftCases.push([
+      '#1179 负控：业务行不得被当成结构性行',
+      businessSamples.every((x) => isStructuralLine(x) === false)])
+    // 负控二：分桶必须**完备且互斥**（条数之和 == 原集合，业务行只落在需人工一侧）
+    const failedSample = [
+      { key: 'a.kt:1', reason: 'dup', text: '/**' },
+      { key: 'a.kt:2', reason: 'dup', text: 'const dup = 1' },
+      { key: 'a.kt:3', reason: 'blank', text: '' },
+    ]
+    const st = failedSample.filter((f) => isStructuralLine(f.text))
+    const ac = failedSample.filter((f) => !isStructuralLine(f.text))
+    driftCases.push([
+      '#1179 分桶完备且互斥：条数之和等于原集合、业务行只落在需人工一侧',
+      st.length + ac.length === failedSample.length && ac.length === 1 && ac[0].text === 'const dup = 1'])
+  }
   for (const [name, okc] of driftCases) {
     if (okc) pass += 1
     lines.push((okc ? '  ok   ' : '  FAIL ') + name)
@@ -1998,17 +2049,39 @@ if (isMain) {
     console.log('锚点推导' + (DERIVE_DRY_RUN ? '（dry-run，不写盘）' : '') + '：')
     console.log('  可推导 ' + total + ' 条（唯一符号 ' + report.symbol.length
       + ' / 消歧后 ' + report.disambiguated.length + ' / 全文内容唯一 ' + report.content.length + '）')
-    console.log('  推导不出 ' + report.failed.length + ' 条（保持 legacy，需人工）')
+    /* issue #1179：把「结构性行」从「需人工」里分出来单列。
+     *
+     * 旧口径把两者串在同一个桶里（「内容在全文出现 N 次，不唯一」），于是标题行写
+     * 「推导不出 214 条（需人工）」——其中实测 82 条是注释收尾、纯符号行这类本身没有语义的行，
+     * 锚它们本就没有意义。数字因此不可读，真正的业务行淹没在里面。
+     *
+     * 这是**统计口径**改动，不改变任何锚点行为：结构性行同样保持 legacy、同样不被推导、
+     * 也照样写进 derive-report.json。只是不再计入「需人工」的分子。
+     */
+    const structural = report.failed.filter((f) => isStructuralLine(f.text))
+    const actionable = report.failed.filter((f) => !isStructuralLine(f.text))
+    console.log('  推导不出 ' + actionable.length + ' 条（保持 legacy，需人工）')
     const byReason = {}
-    for (const f of report.failed) byReason[f.reason] = (byReason[f.reason] ?? 0) + 1
+    for (const f of actionable) byReason[f.reason] = (byReason[f.reason] ?? 0) + 1
     for (const [k, v] of Object.entries(byReason).sort((x, y) => y[1] - x[1])) console.log('    ' + v + '  ' + k)
+    if (structural.length > 0) {
+      console.log('  另有 ' + structural.length + ' 条是结构性行（注释收尾 / 纯符号行 / 表格分隔行 / 裸注解），'
+        + '锚它们没有语义价值，保持 legacy 且不计入需人工（issue #1179）')
+      const byShape = {}
+      for (const f of structural) { const k = f.text ?? ''; byShape[k] = (byShape[k] ?? 0) + 1 }
+      for (const [k, v] of Object.entries(byShape).sort((x, y) => y[1] - x[1]).slice(0, 6)) console.log('    ' + v + '  ' + k)
+    }
     if (DERIVE_DRY_RUN) {
       const outPath = process.env.DERIVE_REPORT ?? 'derive-report.json'
       writeFileSync(outPath, JSON.stringify({ total, ...report }, null, 2) + '\n')
       console.log('  明细已写入 ' + outPath)
-      if (report.failed.length > 0) {
-        console.log('  --- 推导不出（前 20）---')
-        for (const f of report.failed.slice(0, 20)) console.log('    ' + f.key + '  ' + f.reason + (f.text ? '  | ' + f.text : ''))
+      if (actionable.length > 0) {
+        console.log('  --- 需人工（前 20）---')
+        for (const f of actionable.slice(0, 20)) console.log('    ' + f.key + '  ' + f.reason + (f.text ? '  | ' + f.text : ''))
+      }
+      if (structural.length > 0) {
+        console.log('  --- 结构性行（前 10，保持 legacy，不计入需人工）---')
+        for (const f of structural.slice(0, 10)) console.log('    ' + f.key + '  | ' + (f.text ?? ''))
       }
       process.exit(0)
     }
