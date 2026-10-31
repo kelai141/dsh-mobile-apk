@@ -100,6 +100,25 @@ export function sanitizeSymlinks(stageRoot, dirs, opts = {}) {
           stats.keptOtherAbsolute++
           continue
         }
+        // issue #1204 ②：`relInTree` 来自链接目标的**字面量**，这里必须先证明它没越界。
+        // 旧实现只把它拼进 candidate 就直接 lstat：目标里带 `..` 时会去 lstat stage 树之外的路径，
+        // 且一旦那个越界路径在构建机上恰好存在，链接就被改写成一条逃出 stage 树的相对链
+        // （实测 `.../usr/bin/evil -> ../../../../outside/passwd`，stats={rewrote:1,dropped:0}），
+        // 设备侧 SnapshotExtractor 随即拒收 → 正是本模块要消灭的「幽灵缺失」。
+        const relSegments = relInTree.split('/').filter((x) => x !== '' && x !== '.')
+        // 判据只看段：`..` 一旦出现就一定可能越界（是否真的越界取决于 stageRoot 的深度，
+        // 而这里没有理由在构建期做这种「恰好还在树内就放行」的推断——设备侧对相对链的判据是
+        // 「解析后必须在解压根内」，所以保守删除比精确放行更安全）。
+        const escapes = relSegments.includes('..')
+        if (escapes) {
+          if (stats.droppedSamples.length < 5) {
+            stats.droppedSamples.push(`${relative(stageRoot, full)} -> ${target}`)
+          }
+          rmSync(full, { force: true })
+          stats.dropped++
+          log(`    [drop-escape] ${relative(stageRoot, full)} -> ${target}`)
+          continue
+        }
         const candidate = join(stageRoot, relInTree)
         let candidateExists = false
         try {
@@ -109,6 +128,20 @@ export function sanitizeSymlinks(stageRoot, dirs, opts = {}) {
         }
         if (candidateExists) {
           const relLink = relative(dirname(full), /** @type {string} */ (candidate))
+          // issue #1204 ①：目标是链接**自己所在的目录**时 `relative()` 返回空串，
+          // 旧实现先 rmSync 再 symlinkSync('') ⇒ ENOENT 未捕获，链接被删且构建步骤中断
+          // （实测：`stage/usr/bin/self -> .../usr/bin`，抛 "ENOENT symlink dest=…"，之后该目录为空）。
+          // 这类链接在本步的处理面内没有语义（它指向自己所在目录，不是「指向树内某个实体」），
+          // 按模块 KDoc 第 3 条走 dropped，且**不先删再建**——先判断再动手。
+          if (relLink === '') {
+            if (stats.droppedSamples.length < 5) {
+              stats.droppedSamples.push(`${relative(stageRoot, full)} -> ${target}`)
+            }
+            rmSync(full, { force: true })
+            stats.dropped++
+            log(`    [drop-self] ${relative(stageRoot, full)} -> ${target}`)
+            continue
+          }
           rmSync(full, { force: true })
           symlinkSync(relLink, full)
           stats.rewrote++
