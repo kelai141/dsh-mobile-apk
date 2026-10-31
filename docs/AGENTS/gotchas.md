@@ -2764,3 +2764,34 @@ usage 首行写死了这条：`--derive-anchors 与 --only 默认 dry-run 不落
 - 表格里的裸锚点要加反引号，否则 ` |` 会被算进期望前缀。
 
 防呆：改动前先想一句——**我要动的文件，有没有被 `EXECUTION-MAP.md` 按行号引用？** 有就先准备好重钉；本地跑一次 `node scripts/check-code-map.mjs` 比等 CI 七分钟便宜。
+
+## 同一个概念（注入集）在两处实现，改一处只会在下一道门禁才报
+
+**现象**：`v0.15.x` 接入 `dsh-plugin-subscriptions`（vendored，`plugin-dirs.json.externals` 已登记、`profile-web.cordis.patch.yml` 已挂载、`vendor/` 里 `lib/` 已构建），全链却卡在：
+
+```
+== 挂载集校验（arm64）==
+权威 patch 挂载了注入面之外的包（反向差集）: dsh-plugin-subscriptions
+拒绝打包（arm64）：patch 挂载集校验失败
+```
+
+**真因**：「注入集」这一个概念在两条链里各有**两处**实现，且都硬编码了 `dshmarketplace-plugin`：
+
+| 用途 | 本地链 `build-apk-013.ps1` | 云端链 `build-apk.mjs` |
+|---|---|---|
+| ① 注入源 | `$market = $externByName['dshmarketplace-plugin']`（L297-323） | `const market = externalNamed('dshmarketplace-plugin')` |
+| ② 挂载门禁入参 | `... @pluginDirs $market`（L428） | `...pluginDirs, market`（L373） |
+
+只改 ① → 包确实进了快照，但 `check-patch-mounts.mjs` 的注入集是**命令行传进去的**（不读 `plugin-dirs.json`），仍只收到 marketplace 一个 → 依旧判红。必须两处一起改：注入源遍历 `externals` 全部，挂载门禁也传 `externals` 全部。
+
+**为什么容易只改一半**：两处相隔一百多行、函数形态不同（一处拼参数、一处拼 splat 数组），且 `check-patch-mounts` 的入参看起来像「调试用的额外目录」，看不出它是「注入集」这个概念的第二个定义点。
+
+**判据（下次怎么避免）**：
+- 见到 `<概念>` 被写进两个不同位置（尤其是「配置读取」与「门禁入参」各写一次），先问「这俩是不是同一个集合的两个副本」；
+- 修「往集合里加一项」这类问题后，**先跑下游门禁再跑全链**——本坑用一个 `node scripts/check-patch-mounts.mjs <patch> <dirs...>` 就能秒验，不必等 20 分钟全链；
+- 定理化表述：**局部正交 ≠ 全局成立**。改动在局部看是对的（包确实注入了），但全局语义（挂载集必须 ⊆ 注入集）要由另一处的同一概念共同满足。
+
+**同族（今晚三条都是这个形态）**：
+- 改被引用文件的行号 → 顶偏执行地图锚点（漂移检查只在行移动时报警，救不了「本来就指错」）；
+- 测试读了未声明的输入 + CI 允许 build cache → 任务 FROM-CACHE，断言失效被缓存掩盖（「测试通过」局部成立，「测的确实是当前代码」全局不成立）。
+

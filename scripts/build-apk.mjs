@@ -326,32 +326,40 @@ try {
     mkdirSync(degradeStaged, { recursive: true })
     // 默认指向**原源目录**（表示「不降级」）；只有真的降级成功才改指向暂存副本。
     // 无 lib/client.js 的源不复制、保持原路径。
-    const degraded = new Map([
-      ['market', market],
-    ])
-    for (const key of ['market']) {
-      const src = degraded.get(key)
-      const leaf = key + '-degraded'
+    // 根级注入源 = plugin-dirs.json.externals **全部**（不再只取 marketplace）。
+    // 历史：只硬编码 dshmarketplace-plugin → 新登记的 external 包不进快照，而权威 patch 已挂它，
+    // 于是 check-patch-mounts 判红「挂载了注入面之外的包」。dsh-plugin-subscriptions 即此。
+    const externName = (p) => p.replace(/\\/g, '/').split('/').pop()
+    const degraded = new Map()
+    for (const dir of externalDirs) degraded.set(externName(dir), dir)
+    const externMissing = [...degraded.keys()].filter((n) => !existsSync(join(degraded.get(n), 'package.json')))
+    if (externMissing.length > 0) throw new Error('缺根级注入源：' + externMissing.join(', '))
+    for (const [name, src] of degraded) {
       if (!existsSync(join(src, 'lib', 'client.js'))) {
         log(`  跳过降级（无 lib/client.js）：${src}`)
         continue
       }
-      const dst = join(degradeStaged, leaf)
+      const dst = join(degradeStaged, name + '-degraded')
       rmSync(dst, { recursive: true, force: true })
       // cpSync recursive 等价于本地链的 `robocopy /MIR`（整树复制；排除 .git 以免把版本库带进暂存树）
       cpSync(src, dst, { recursive: true, filter: (s) => !s.split(/[\\/]/).includes('.git') })
       run('node', [gate('check-browser-syntax-floor.mjs'), '--degrade', '--stage', dst])
-      degraded.set(key, dst)
+      degraded.set(name, dst)
       log(`  暂存降级就位：${src} -> ${dst}`)
     }
-    const marketDeg = degraded.get('market')
+    const externalArgs = []
+    for (const name of [...degraded.keys()].sort()) {
+      externalArgs.push('--external', degraded.get(name))
+      log(`  [inject] ${name} -> ${degraded.get(name)}`)
+    }
+    const marketDeg = degraded.get('dshmarketplace-plugin')
     log('单 pass 注入（@dsh-android + market + 权威 patch，全部装配 profile）…')
     // ST-05：--all-profiles = 权威 patch 写给全部真实装配 profile（web+headless，负控 profile 除外）
     run(PYTHON, [
       join(ROOT, 'scripts', 'inject-all.py'), snapSrc, join(work, 'snap-final2.tar.xz'),
       join(ROOT, 'scripts', 'profile-web.cordis.patch.yml'),
       '--dsh-android', ...pluginDirs,
-      '--external', marketDeg,
+      ...externalArgs,
       '--all-profiles',
     ])
     snapIn = join(work, 'snap-final2.tar.xz')
@@ -362,7 +370,7 @@ try {
 
   // ---- 4. 门禁（注入后；与 build-apk-013.ps1 同一份门禁集）----
   log('门禁：patch 挂载集校验（双向差集）…')
-  run('node', [gate('check-patch-mounts.mjs'), join(ROOT, 'scripts', 'profile-web.cordis.patch.yml'), ...pluginDirs, market])
+  run('node', [gate('check-patch-mounts.mjs'), join(ROOT, 'scripts', 'profile-web.cordis.patch.yml'), ...pluginDirs, ...externalDirs])
   // profile 层共享依赖解析（0.15.x）：判据作用于构建 stage 树（软链已就位、尚未归档）。
   // --require + 负控：移走农场链后子进程复检必须判红，证明判据真在守链而不是被残留洗绿。
   log('门禁：profile 共享依赖解析（undici -> 引擎树）…')

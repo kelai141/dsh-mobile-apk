@@ -321,6 +321,17 @@ foreach ($abi in @('arm64', 'x86_64')) {
         # pre-execute 守卫不调 next() 导致全工具崩溃，见其 PATCHES.md）。undo-savepoint 在 0.14.8
         # 已从装配面退役；vendor 目录与 retiredExternals 历史登记保留，供手动急救与升级迁移识别。
         $market = $externByName['dshmarketplace-plugin']
+        # 根级注入源 = plugin-dirs.json.externals **全部**（不再只取 marketplace）。
+        # 历史：只硬编码 dshmarketplace-plugin → 新登记的 external 包不进快照，而权威 patch 已挂它，
+        # 于是 check-patch-mounts 判红「挂载了注入面之外的包」。dsh-plugin-subscriptions 即此。
+        $externMissing = @()
+        foreach ($nm in $externByName.Keys) {
+            if (-not (Test-Path (Join-Path $externByName[$nm] 'package.json'))) { $externMissing += $nm }
+        }
+        if ($externMissing.Count -gt 0) { Deny-Abi $abi ('缺根级注入源：' + ($externMissing -join ', ')); continue }
+        # 注入时使用的路径（默认原源；降级成功则换成暂存副本）
+        $externStaged = @{}
+        foreach ($nm in $externByName.Keys) { $externStaged[$nm] = $externByName[$nm] }
         if (-not (Test-Path (Join-Path $market "package.json"))) { Deny-Abi $abi "缺 marketplace 注入源 $market（vendor 固化副本）"; continue }
         # 统一补丁门禁（Phase 2a）：marketplace A-D + undo E1-E7 幂等施加与校验，
         # 登记表 scripts/patches/registry.json。ensure 语义（缺席即施加，锚点失配拒打包）——
@@ -392,13 +403,21 @@ foreach ($abi in @('arm64', 'x86_64')) {
         # 注入后的权威判据是下方 `check-browser-syntax-floor.mjs --scan <注入后 tar>`——它扫全清单，
         # 一旦有包没降到位就判红；不需要在这里「顺手再降一遍」。
         if (-not [string]::IsNullOrEmpty($degradeFailDetail)) { Deny-Abi $abi $degradeFailDetail; continue }
+        # marketplace 若降级成功，注入用它；其余 external 用原源（无 lib/client.js 的不降级）
+        $externStaged['dshmarketplace-plugin'] = $marketDeg
+        # 逐包生成 --external，并逐包打印（可观测：下一个人一眼看出注入了什么）
+        $externArgs = @()
+        foreach ($nm in ($externByName.Keys | Sort-Object)) {
+            $externArgs += @('--external', $externStaged[$nm])
+            Write-Host ('  [inject] ' + $nm + ' -> ' + $externStaged[$nm])
+        }
         # 单 pass 注入（2c 提速 2026-09-05）：@dsh-android + 根级插件 + 权威 patch 覆盖合并
         # 为一次 tar 流处理——压缩/解压从 ×4 → ×1（原三步各自全量重压缩 ~743MB）。
         # 雷点 8：全量输出。
         Write-Host "== 单 pass 注入（@dsh-android + market + 权威 patch）（$abi）=="
         # ST-05：--all-profiles = 权威 patch 与注入包覆盖全部真实装配 profile（web + headless；
         # 负控 profile headless-bad 由 inject-all.py 显式跳过）。此前只写 web，headless 停在旧值。
-        python (Join-Path $Root "scripts\inject-all.py") $snap (Join-Path $work "snap-final2.tar.xz") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") --dsh-android @pluginDirs --external $marketDeg --all-profiles 2>&1
+        python (Join-Path $Root "scripts\inject-all.py") $snap (Join-Path $work "snap-final2.tar.xz") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") --dsh-android @pluginDirs @externArgs --all-profiles 2>&1
         if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "注入失败"; continue }
         # 防回归（审校 C4 2026-08-23）：patch 挂载集 ⊇ 注入集——缺条目（如 linux-env 漏挂）直接拒打包
         Write-Host "== 挂载集校验（$abi）=="
@@ -406,7 +425,7 @@ foreach ($abi in @('arm64', 'x86_64')) {
         # 写成 `node ... | Select-Object -First 4` 时，输出一旦超过 4 行，Select-Object 会提前终止上游、
         # 把 node 杀掉，$LASTEXITCODE 变成 $null —— 「门禁失败」与「输出被截断」在退出码上不可区分，
         # 于是 Deny-Abi 不触发、该 ABI 被计为已产出、链打印「=== 完成 ===」并 exit 0。
-        $mountsOut = node (Join-Path $Root "scripts\check-patch-mounts.mjs") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") @pluginDirs $market 2>&1
+        $mountsOut = node (Join-Path $Root "scripts\check-patch-mounts.mjs") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") @pluginDirs @externDirs 2>&1
         $mountsCode = $LASTEXITCODE
         $mountsOut | Select-Object -First 4
         if ($mountsCode -ne 0) { Deny-Abi $abi "patch 挂载集校验失败"; continue }
