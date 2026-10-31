@@ -65,17 +65,17 @@ html[data-dsh-mobile-form] div[data-dsh-topbar-fold-uncontained] {
 
 /* 视图菜单（上游的「…」）：用户定例移除，只保留折叠箭头（#862 的行为，保留）。
    它**不是**标签条的子节点，而是标签条（[data-conversation-tabs]）的兄弟节点。
-   按「兄弟 + 带 menu 语义」精确命中：+ * 是「谁排在我后面就藏谁」的开放规则，
-   折叠箭头同样会被挂到这一行，将来任何插到那里的兄弟节点都会被误伤。
+   按「兄弟 + 带 menu 语义」精确命中：+ * 是「谁排在我后面就藏谁」的开放规则。
+   + * 当前不会误伤箭头（菜单有 wrapper），但菜单不在场（上游去掉 / 按
+   visibleViewLimit 收起 / 加载时序）时，箭头会成为相邻兄弟被同一条规则隐藏，
+   用户失去展开入口——推荐 ~ * [aria-haspopup=menu]（见 #1228）。
 
-   已知未命中（真机实测 emulator-5558 / dsh 0.2.1-rc.2，不在本 PR 范围，单独处理）：
+   已知未命中（真机实测 emulator-5558 / dsh 0.2.1-rc.2，见 #1228）：
    这条规则在真机上 matches 为 false —— 菜单按钮外面包了一层
    span.wSkVaW_viewsMoreAnchor，结构是
      div.wSkVaW_tabs > div.viewTabs[data-conversation-tabs]
-                     > span.wSkVaW_viewsMoreAnchor
-                     > button[aria-haspopup=menu]
-   中间隔着那个 span，相邻兄弟选择器 + 不成立，所以「更多会话视图」目前并未被隐藏。
-   本 PR 只改箭头落位，不在这里扩宽选择器（+ * 会误伤箭头）；此处仅记录实测事实。 */
+                     > span.wSkVaW_viewsMoreAnchor > button[aria-haspopup=menu]
+   中间隔着那个 span，相邻选择器 + 不成立，所以「更多会话视图」目前并未被隐藏。 */
 html[data-dsh-mobile-form] [data-conversation-tabs] + [aria-haspopup='menu'] {
   display: none;
 }
