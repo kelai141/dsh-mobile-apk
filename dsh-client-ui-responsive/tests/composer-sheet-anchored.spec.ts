@@ -418,6 +418,53 @@ describe('内容与关闭行为契约', () => {
   })
 })
 
+/**
+ * 系统返回（Android 返回手势 / 返回键）必须**先关卡片**，而不是退出或返回上层。
+ *
+ * 实现方式：**复用**仓库既有的 BackStackSignal（`back-stack.ts`）—— 它是壳侧返回策略的
+ * 页面半边，按「已挂载的层」计数，`window.__dshBack()` 被壳侧 OnBackPressedCallback
+ * **同步**调用。它已经把 `[data-dsh-composer-sheet-backdrop]` 认成 `composer-sheet` 层。
+ *
+ * 为什么**不**用 history.pushState（用户最初建议的那条）：
+ * `back-stack.ts` 头注释记着实测结论 —— Chromium 110 的 `WebView.canGoBack()` 看不到
+ * same-document history 条目，所以 pushState 驱动不了壳侧的返回判定；本机 WebView 正是
+ * 110（`webview_version=110.0.5481.154`）。用 pushState 会得到「看起来压了历史、返回键照样退出」的假象。
+ */
+describe('系统返回先关卡片（复用 BackStackSignal）', () => {
+  it('卡片开着时是一层，__dshBack() 关掉它且返回 true', async () => {
+    const { BackStackSignal } = await import('../src/client/mobile/back-stack.ts')
+    const signal = new BackStackSignal({
+      toggleSidebar: () => {},
+      activePanelId: () => null,
+      leaveMainPanel: () => {},
+    })
+    const uplink = vi.fn()
+    vi.stubGlobal('dshBackBridge', { setAvailable: uplink })
+    signal.attach()
+    try {
+      buildComposer(NINE)
+      await open()
+      await new Promise((r) => { setTimeout(r, 0) })
+      await new Promise((r) => { setTimeout(r, 0) })
+      const win = window as unknown as { __dshBackKinds?: string[]; __dshBackDepth?: number; __dshBack?: () => boolean }
+      expect(win.__dshBackKinds).toContain('composer-sheet')
+      expect(win.__dshBackDepth).toBeGreaterThanOrEqual(1)
+      // 壳侧返回键：同步调用，返回 true = 消费掉这次返回（不退应用）
+      expect(win.__dshBack?.()).toBe(true)
+      // 卡片已被关掉
+      expect(document.querySelector(PANEL)).toBeNull()
+      // 且层栈回落（下一次返回才会走应用自身的返回，不是被空消费）
+      await new Promise((r) => { setTimeout(r, 0) })
+      await new Promise((r) => { setTimeout(r, 0) })
+      expect(win.__dshBackKinds ?? []).not.toContain('composer-sheet')
+      expect(uplink).toHaveBeenLastCalledWith(false)
+    } finally {
+      signal.detach()
+      vi.unstubAllGlobals()
+    }
+  })
+})
+
 describe('负控：新判据必须能抓住两种坏态', () => {
   /**
    * 负控 ①：去掉遮罩的点击处理器 → 「点遮罩关闭」必须变红。
