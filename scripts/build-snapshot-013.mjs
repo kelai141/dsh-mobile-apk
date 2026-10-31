@@ -1182,7 +1182,11 @@ log('清单驱动裁剪完成（treeDelete + extensionDelete）')
 // ── 8. 归档 ────────────────────────────────────────────────────────────
 log('归档 snapshot.tar.xz…')
 const archive = join(OUT_DIR, 'snapshot.tar.xz')
+// 预删最终产物与它的 sha256（issue #1185）：本轮若在归档段之前/之中失败，
+// 目录里不得留着「上一轮的成功产物 + 上一轮的 sha256」，否则下游会把它当成本轮结果。
+// 成功路径上 archive 由 rename 重新落位、sha256 在归档后重写。
 rmSync(archive, { force: true })
+rmSync(join(OUT_DIR, 'snapshot.sha256'), { force: true })
 // 输出结构对齐既有快照：usr/ + home/.dsh/ + home/.gitconfig（home 其余目录不随快照）
 // 2c 提速（2026-09-05 实测）：tar -cJf 单线程 xz → tar -c | xz -T<n> 多线程（同 preset 档，
 // 743MB tar 380s 级 → 48s；产物字节因分块并行而不同，sha256 由下游重算，一致性门禁不受影响）。
@@ -1215,15 +1219,31 @@ if (tarRun.status !== 0) {
   rmSync(archiveTar, { force: true })
   process.exit(1)
 }
-const xzRun = shStatus(`xz -T${XZ_THREADS} -6 -c "${wslPath(archiveTar)}" > "${wslPath(archive)}"`)
+// 先压到**临时名**，成功后再 rename 到最终路径（issue #1185）。
+//
+// 旧实现直接 `xz … > snapshot.tar.xz`：xz 中途失败（磁盘满、被中断、输入读到一半）时，
+// 最终路径上留着**截断的 .tar.xz**，而失败分支只删了 tar 中间件。后果有两层：
+//   ① 下游拿到一个能读开头、解到一半才报错的「快照」，报错点离真因很远；
+//   ② 上一轮成功时写的 snapshot.sha256 还在，与这份残件对不上，
+//      指纹门禁要么误报「快照被改过」，要么（若重算）把残件当成合法输入。
+// 临时名 + rename 让「最终路径存在」等价于「xz 完整成功」，不需要失败分支去补救；
+// 而「失败时连最终产物一起清」仍有一个窗口期（xz 写到一半时最终路径上是残件），
+// 进程被强杀就补不上。
+const archivePart = archive + '.part'
+rmSync(archivePart, { force: true })
+const xzRun = shStatus(`xz -T${XZ_THREADS} -6 -c "${wslPath(archiveTar)}" > "${wslPath(archivePart)}"`)
 if (xzRun.status !== 0) {
   console.error(`归档失败：xz 压缩退出码 ${xzRun.status}（tar 中间件在 ${archiveTar}）`)
   console.error((xzRun.stderr || xzRun.stdout || '').trim().split('\n').slice(-20).join('\n'))
+  // 残件与中间件都清掉：最终路径与临时路径都不得留任何快照文件。
+  rmSync(archivePart, { force: true })
   rmSync(archiveTar, { force: true })
   process.exit(1)
 }
 // 中间件只在归档段存在：留着会与 xz 产物混淆成第二份「快照」（体积也翻倍）。
 rmSync(archiveTar, { force: true })
+// 成功才落到最终路径；rename 同盘原子，不会出现「最终路径半截」的中间态。
+renameSync(archivePart, archive)
 log(`归档 ${(statSync(archive).size / 1024 / 1024).toFixed(1)} MB`)
 const sha = createHash('sha256').update(readFileSync(archive)).digest('hex')
 writeFileSync(join(OUT_DIR, 'snapshot.sha256'), sha)
