@@ -98,6 +98,9 @@ const GATE_SCRIPTS = [
   'check-gate-skips.mjs',
   'check-engine-overlay.mjs',
   'check-patch-mounts.mjs',
+  // profile 层共享依赖解析（0.15.x）：vendored 订阅插件把 undici 声明为 peer，靠 profile 共享农场的
+  // 相对链解析到引擎树。与本地链同一份实现，差集必须为 0。
+  'check-profile-undici-resolution.mjs',
   'check-inject-completeness.mjs',
   'check-combo-cache.mjs',
   'check-strip-noop.mjs',
@@ -357,6 +360,10 @@ try {
   // ---- 4. 门禁（注入后；与 build-apk-013.ps1 同一份门禁集）----
   log('门禁：patch 挂载集校验（双向差集）…')
   run('node', [gate('check-patch-mounts.mjs'), join(ROOT, 'scripts', 'profile-web.cordis.patch.yml'), ...pluginDirs, market])
+  // profile 层共享依赖解析（0.15.x）：判据作用于构建 stage 树（软链已就位、尚未归档）。
+  // --require + 负控：移走农场链后子进程复检必须判红，证明判据真在守链而不是被残留洗绿。
+  log('门禁：profile 共享依赖解析（undici -> 引擎树）…')
+  run('node', [gate('check-profile-undici-resolution.mjs'), '--require', '--negative-control'])
   // 注入面成员完整性（P0）：包内新增文件必须随注入进 tar，且相对导入不得悬空
   log('门禁：注入成员完整性（成员集合 + 相对导入可解析）…')
   run('node', [gate('check-inject-completeness.mjs'), snapIn])

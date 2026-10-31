@@ -143,6 +143,9 @@ if (targetArg === undefined) {
     process.exit(1)
   }
   console.log('SKIP(#1)  无 stage 树可对账（--snapshot/stageRoot 未给且 .deploy-tmp 下无 stage）—— 解析判据未执行')
+  console.log('SKIP=1（本门禁本次未作解析判定；两条构建链以 --require 调用，缺失即判红）')
+  // 判据行（机器可读）：与 SKIP 区分开——这条明确写 SKIPPED 而非 PASSED，不冒充通过。
+  console.log('CHECK-PROFILE-UNDICI-RESOLUTION SKIPPED（未作解析判定）')
   process.exit(0)
 }
 const root = resolve(targetArg)

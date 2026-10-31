@@ -410,6 +410,12 @@ foreach ($abi in @('arm64', 'x86_64')) {
         $mountsCode = $LASTEXITCODE
         $mountsOut | Select-Object -First 4
         if ($mountsCode -ne 0) { Deny-Abi $abi "patch 挂载集校验失败"; continue }
+        # profile 层共享依赖解析（0.15.x）：vendored 订阅插件把 undici 声明为 peer，靠 profile 共享农场的
+        # 相对链解析到引擎树。判据自动发现 build-snapshot 的 stage 树（软链已就位、尚未归档）。
+        # --require + 负控：移走农场链后子进程复检必须判红，证明判据真在守链而不是被残留洗绿。
+        Write-Host "== profile 共享依赖解析门禁（$abi）=="
+        node (Join-Path $Root "scripts\check-profile-undici-resolution.mjs") --require --negative-control 2>&1
+        if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "profile 层 undici 解析失败（农场链缺失/版本不符/来源不是引擎树）"; continue }
         # 注入面成员完整性（P0：包内新增文件曾被静默丢弃 → tar 里 import 悬空 → 设备侧引擎启动即死）
         Write-Host "== 注入成员完整性门禁（$abi）=="
         node (Join-Path $Root "scripts\check-inject-completeness.mjs") (Join-Path $work "snap-final2.tar.xz") 2>&1
