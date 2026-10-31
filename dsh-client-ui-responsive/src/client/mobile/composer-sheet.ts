@@ -60,6 +60,8 @@ const PANEL_ATTR = 'data-dsh-composer-sheet-panel'
 const TILES_ATTR = 'data-dsh-composer-sheet-tiles'
 const TILE_ATTR = 'data-dsh-composer-sheet-tile'
 const ROWS_ATTR = 'data-dsh-composer-sheet-rows'
+/** 关闭按钮（×）。三条关闭路径之一，必须与点外部 / 系统返回走同一个离场动画。 */
+const CLOSE_ATTR = 'data-dsh-composer-sheet-close'
 const ROW_ATTR = 'data-dsh-composer-sheet-row'
 /**
  * 收场动画标记：挂在 backdrop 上，CSS 据此播放「飞回视口底」的退场动画。
@@ -382,6 +384,7 @@ export class ComposerSheet {
 
     panel.append(this.buildTiles(t))
     panel.append(rows)
+    panel.append(this.buildClose(t))
 
     backdrop.append(panel)
     document.body.append(backdrop)
@@ -521,6 +524,42 @@ export class ComposerSheet {
       else element.style.overflow = previous
     }
     this.overflowSnapshot.clear()
+  }
+
+  /**
+   * 关闭按钮（×）。
+   *
+   * 存在的理由：居中卡片是模态形态，没有可见的关闭控件时用户只能靠「点外面」或
+   * 系统返回；而系统返回在平板 / 多窗口下不一定贴着用户的直觉。
+   *
+   * **它只是三条关闭路径之一**：点它 → this.close() → playExit()（160ms 向下沉出）。
+   * 点外部、系统返回（BackStackSignal 的 composer-sheet 层）走的是同一个 close()，
+   * 所以三者的离场动画天然一致，不存在某条路径瞬关。
+   */
+  private buildClose(t: (key: ComposerSheetKey) => string): HTMLElement {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.setAttribute(CLOSE_ATTR, '')
+    button.setAttribute('aria-label', t('close'))
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    svg.setAttribute('viewBox', '0 0 24 24')
+    svg.setAttribute('aria-hidden', 'true')
+    svg.setAttribute('fill', 'none')
+    svg.setAttribute('stroke', 'currentColor')
+    svg.setAttribute('stroke-width', '2')
+    svg.setAttribute('stroke-linecap', 'round')
+    for (const d of ['M6 6 L18 18', 'M18 6 L6 18']) {
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+      path.setAttribute('d', d)
+      svg.append(path)
+    }
+    button.append(svg)
+    button.addEventListener('click', (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      this.close()
+    })
+    return button
   }
 
   private buildTiles(t: (key: ComposerSheetKey) => string): HTMLElement {

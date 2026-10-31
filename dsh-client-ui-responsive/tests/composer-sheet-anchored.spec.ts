@@ -265,7 +265,9 @@ describe('动效：从视口底边之下飞入 / 飞回', () => {
     const kf = COMPOSER_SHEET_CSS.slice(COMPOSER_SHEET_CSS.indexOf('@keyframes dsh-composer-card-out'))
     expect(kf).toContain('translateY(0)')
     expect(kf).toContain('translateY(100vh)')
-    expect(COMPOSER_SHEET_CSS).toContain('animation: dsh-composer-card-out 160ms cubic-bezier(0.215, 0.61, 0.355, 1) forwards')
+    // 离场用**对称反向**曲线（入场 .215,.61,.355,1 的镜像），不是照抄入场曲线。
+    expect(COMPOSER_SHEET_CSS).toContain('animation: dsh-composer-card-out 160ms cubic-bezier(0.645, 0.045, 0.355, 1) forwards')
+    expect(COMPOSER_SHEET_CSS).toContain('animation: dsh-composer-backdrop-out 160ms cubic-bezier(0.645, 0.045, 0.355, 1) forwards')
   })
 
   it('遮罩淡入 200ms、淡出 160ms', () => {
@@ -458,6 +460,93 @@ describe('系统返回先关卡片（复用 BackStackSignal）', () => {
       await new Promise((r) => { setTimeout(r, 0) })
       expect(win.__dshBackKinds ?? []).not.toContain('composer-sheet')
       expect(uplink).toHaveBeenLastCalledWith(false)
+    } finally {
+      signal.detach()
+      vi.unstubAllGlobals()
+    }
+  })
+})
+
+describe('离场必须与入场镜像（向下沉出，不得缩小/淡出/向上退场）', () => {
+  it('引用名镜像：入场 card-in 向上，离场 card-out 向下，位移值相同', () => {
+    const kIn = COMPOSER_SHEET_CSS.slice(
+      COMPOSER_SHEET_CSS.indexOf('@keyframes dsh-composer-card-in'),
+      COMPOSER_SHEET_CSS.indexOf('@keyframes dsh-composer-card-out'),
+    )
+    const kOut = COMPOSER_SHEET_CSS.slice(COMPOSER_SHEET_CSS.indexOf('@keyframes dsh-composer-card-out'))
+    // 入场：视口底外 -> 0
+    expect(kIn).toContain('translateY(100vh)')
+    expect(kIn).toContain('translateY(0)')
+    // 离场：0 -> 视口底外（同一个值，方向相反）
+    expect(kOut).toContain('translateY(0)')
+    expect(kOut).toContain('translateY(100vh)')
+    // 离场不得用缩小 / 淡出 / 向上退场代替
+    expect(kOut).not.toContain('scale(')
+    expect(kOut).not.toContain('opacity')
+    expect(kOut).not.toContain('translateY(-')
+  })
+
+  it('时长与缓动镜像：进 200ms .215,.61,.355,1；出 160ms .645,.045,.355,1', () => {
+    expect(ruleBody('[data-dsh-composer-sheet-panel]')).toContain('animation: dsh-composer-card-in 200ms cubic-bezier(0.215, 0.61, 0.355, 1)')
+    expect(COMPOSER_SHEET_CSS).toContain('animation: dsh-composer-card-out 160ms cubic-bezier(0.645, 0.045, 0.355, 1) forwards')
+  })
+
+  /**
+   * 三条关闭路径必须走**同一个**离场动画，不得有的瞬关。
+   *
+   * jsdom 没有 WAAPI，直接 remove 会掩盖「有没有播动画」。所以这里给遮罩装一个假的
+   * getAnimations（返回一个永不 finish 的动画对象），然后断言：
+   *   ① backdrop 挂上 [data-dsh-composer-sheet-leaving]；
+   *   ② 面板此刻**仍在 DOM**（说明没有瞬关，在等动画结束）。
+   */
+  it('路径 1（×）：点关闭按钮走离场动画，不瞬关', async () => {
+    buildComposer(NINE)
+    await open()
+    const backdrop = document.querySelector<HTMLElement>(BACKDROP)!
+    let finish: (() => void) | null = null
+    Object.defineProperty(backdrop, 'getAnimations', {
+      configurable: true,
+      value: () => [{ addEventListener: (type: string, fn: () => void) => { if (type === 'finish') finish = fn } }],
+    })
+    const closeBtn = document.querySelector<HTMLElement>('[data-dsh-composer-sheet-close]')!
+    expect(closeBtn).not.toBeNull()
+    closeBtn.click()
+    // 离场标记已挂 + 面板仍在（等动画）
+    expect(document.querySelector(BACKDROP)!.hasAttribute('data-dsh-composer-sheet-leaving')).toBe(true)
+    expect(document.querySelector(PANEL)).not.toBeNull()
+    // 动画结束才移除
+    finish!()
+    expect(document.querySelector(PANEL)).toBeNull()
+  })
+
+  it('路径 2（点外部）与路径 3（系统返回）同样挂离场标记，不瞬关', async () => {
+    // 点外部
+    buildComposer(NINE)
+    await open()
+    let bd = document.querySelector<HTMLElement>(BACKDROP)!
+    Object.defineProperty(bd, 'getAnimations', { configurable: true, value: () => [{ addEventListener: () => {} }] })
+    bd.dispatchEvent(new Event('pointerdown', { bubbles: true, cancelable: true }))
+    expect(document.querySelector(BACKDROP)!.hasAttribute('data-dsh-composer-sheet-leaving')).toBe(true)
+    expect(document.querySelector(PANEL)).not.toBeNull()
+    sheet.detach()
+    sheet = new ComposerSheet()
+    document.body.innerHTML = ''
+
+    // 系统返回（走 BackStackSignal 的 composer-sheet 层，闭合仍是同一套 outside-pointerdown）
+    const { BackStackSignal } = await import('../src/client/mobile/back-stack.ts')
+    const signal = new BackStackSignal({ toggleSidebar: () => {}, activePanelId: () => null, leaveMainPanel: () => {} })
+    vi.stubGlobal('dshBackBridge', { setAvailable: () => {} })
+    signal.attach()
+    try {
+      buildComposer(NINE)
+      await open()
+      await new Promise((r) => { setTimeout(r, 0) })
+      await new Promise((r) => { setTimeout(r, 0) })
+      bd = document.querySelector<HTMLElement>(BACKDROP)!
+      Object.defineProperty(bd, 'getAnimations', { configurable: true, value: () => [{ addEventListener: () => {} }] })
+      const win = window as unknown as { __dshBack?: () => boolean }
+      expect(win.__dshBack?.()).toBe(true)
+      expect(document.querySelector(BACKDROP)?.hasAttribute('data-dsh-composer-sheet-leaving') ?? false).toBe(true)
     } finally {
       signal.detach()
       vi.unstubAllGlobals()

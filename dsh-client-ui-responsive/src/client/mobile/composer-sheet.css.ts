@@ -33,6 +33,8 @@ export const COMPOSER_SHEET_CSS = `
   min-height: 0;
   padding: 16px;
   overscroll-behavior-y: contain;
+  /* 关闭按钮绝对定位的锚点。 */
+  position: relative;
   /* 圆角 20px，走现有 token。 */
   border-radius: var(--dsw-radius-xl, 20px);
   border: 0.5px solid var(--dsw-alias-border-l3, rgba(128, 128, 128, 0.35));
@@ -44,6 +46,32 @@ export const COMPOSER_SHEET_CSS = `
      与「+」的坐标无关（旧的锚定形态已删除）。 */
   animation: dsh-composer-card-in 200ms cubic-bezier(0.215, 0.61, 0.355, 1);
 }
+/* 关闭按钮（×）：右上角，图标-only。
+   三条关闭路径之一（另两条：点外部、系统返回），三者都走同一个 close() -> playExit()。 */
+[data-dsh-composer-sheet-close] {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  /* 32x32 的按钮配 lg(16px) 恰好是正圆，不写 999px 裸值（圆角一律走 token）。 */
+  border-radius: var(--dsw-radius-lg, 16px);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, inherit);
+  cursor: pointer;
+}
+[data-dsh-composer-sheet-close]:active {
+  background: var(--dsw-alias-bg-layer-2, rgba(128, 128, 128, 0.16));
+}
+[data-dsh-composer-sheet-close] svg {
+  width: 18px;
+  height: 18px;
+}
+
 /* 第一排：三块并排瓦片。
    横向滚动限位 + snap 是两种形态共用的（规格：三张卡片那排横向滚动限位）。
 
@@ -223,12 +251,15 @@ export const COMPOSER_SHEET_CSS = `
   to { transform: translateY(100vh); }
 }
 /* 收场：由脚本挂 [data-dsh-composer-sheet-leaving]，动画结束后才真正 remove。
+   **同名镜像**：入场 translateY 向上抬起（100vh→0），离场必须**向下**沉出视口（0→100vh），
+   不得用缩小 / 淡出 / 向上退场代替 —— 从哪来到哪去。
+   缓动同样镜像：入场 .215,.61,.355,1（快出慢收），离场用对称反向 .645,.045,.355,1。 */
    收场期间遮罩必须继续接住事件（否则点击会穿透到背后页面），所以不改 pointer-events。 */
 [data-dsh-composer-sheet-backdrop][data-dsh-composer-sheet-leaving] {
-  animation: dsh-composer-backdrop-out 160ms cubic-bezier(0.215, 0.61, 0.355, 1) forwards;
+  animation: dsh-composer-backdrop-out 160ms cubic-bezier(0.645, 0.045, 0.355, 1) forwards;
 }
 [data-dsh-composer-sheet-backdrop][data-dsh-composer-sheet-leaving] > [data-dsh-composer-sheet-panel] {
-  animation: dsh-composer-card-out 160ms cubic-bezier(0.215, 0.61, 0.355, 1) forwards;
+  animation: dsh-composer-card-out 160ms cubic-bezier(0.645, 0.045, 0.355, 1) forwards;
 }
 /* 减少动态：横竖屏（同一形态）都直接切，不做位移也不做淡入淡出。
 
