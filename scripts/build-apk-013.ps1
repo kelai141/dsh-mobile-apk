@@ -369,15 +369,17 @@ foreach ($abi in @('arm64', 'x86_64')) {
         # **必须显式初始化**：无 lib/client.js 的源不会进下面的 if，若这两个变量保持未定义/为 $null，
         # 后续 `@($undoDeg, ...)` 会含 $null 元素，经 splatting 传给 node 时造成**参数错位**
         # （实测表现：--out 的值被当成未知参数）。
-        $marketDeg = $market
         # vendor 两源：**暂存副本**再降级（vendor/*/lib 是入库跟踪的，就地降级会写脏仓库并绊停
         # 发布链自己的 dirty 门禁）。无 lib/client.js 的源不复制、保持原路径。
         # 本段刻意**不写中间 continue**：构建链静态锁「每个 continue 都必须是经 Deny-Abi 记账的
         # 拒绝路径」（check-build-chain-abort.mjs），而「该源没有浏览器 bundle」是正常跳过不是拒绝；
         # 且嵌套 foreach 里的 continue 只会继续内层循环、不会跳过本 ABI。故失败只记明细，
         # 统一在段末用一条 `Deny-Abi $abi "..."; continue` 记账并跳过本 ABI。
-        foreach ($pair in ,@('market-degraded', $market)) {
-            $leaf = $pair[0]; $src = $pair[1]
+        # **逐 external 降级并把结果写回 $externStaged**（issue：名字→集合时映射没跟着扩）。
+        # 旧写法只降 marketplace 且只把它的降级副本写回，其它 external 即使造出了降级副本
+        # 仍以原始源注入 → 未降级的 ES2022 bundle 进产物（浏览器语法下限门禁判红）。
+        foreach ($nm in $externByName.Keys) {
+            $leaf = $nm + '-degraded'; $src = $externByName[$nm]
             if (Test-Path (Join-Path $src "lib\client.js")) {
                 $dst = Join-Path $degradeStaged $leaf
                 Remove-Item $dst -Recurse -Force -ErrorAction SilentlyContinue
@@ -391,7 +393,7 @@ foreach ($abi in @('arm64', 'x86_64')) {
                 }
                 node (Join-Path $Root "scripts\check-browser-syntax-floor.mjs") --degrade --stage $dst 2>&1
                 if ($LASTEXITCODE -ne 0) { $degradeFailDetail = "注入段浏览器语法降级失败（$leaf）" }
-                elseif ($leaf -eq 'market-degraded') { $marketDeg = $dst }
+                else { $externStaged[$nm] = $dst }   // 降级成功 -> 注入降级副本
             }
         }
         # **不降级我方 plugin**（原实现会 `--degrade --stage <plugin>` 就地改写）：
@@ -403,8 +405,7 @@ foreach ($abi in @('arm64', 'x86_64')) {
         # 注入后的权威判据是下方 `check-browser-syntax-floor.mjs --scan <注入后 tar>`——它扫全清单，
         # 一旦有包没降到位就判红；不需要在这里「顺手再降一遍」。
         if (-not [string]::IsNullOrEmpty($degradeFailDetail)) { Deny-Abi $abi $degradeFailDetail; continue }
-        # marketplace 若降级成功，注入用它；其余 external 用原源（无 lib/client.js 的不降级）
-        $externStaged['dshmarketplace-plugin'] = $marketDeg
+        # 注：不再有「只回写 marketplace」的覆盖——降级结果已在上面的循环里逐包写回 $externStaged。
         # 逐包生成 --external，并逐包打印（可观测：下一个人一眼看出注入了什么）
         $externArgs = @()
         foreach ($nm in ($externByName.Keys | Sort-Object)) {

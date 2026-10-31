@@ -2794,5 +2794,11 @@ usage 首行写死了这条：`--derive-anchors 与 --only 默认 dry-run 不落
 **同族（今晚三条都是这个形态）**：
 - 改被引用文件的行号 → 顶偏执行地图锚点（漂移检查只在行移动时报警，救不了「本来就指错」）；
 - 测试读了未声明的输入 + CI 允许 build cache → 任务 FROM-CACHE，断言失效被缓存掩盖（「测试通过」局部成立，「测的确实是当前代码」全局不成立）。
+- **名字→集合：每扩一处，都要搜一遍所有「按名字取」的地方**。同一形态今晚出现四次，每一次都是「把某个概念从单个名字扩成集合时，另一处按名字取的地方没跟着扩」：
+  1. **注入源**：`$externByName['dshmarketplace-plugin']` → 新登记 external 不进快照；
+  2. **挂载门禁入参**：`... @pluginDirs $market` → 门禁的「注入集」定义仍只有一个名字，包注入了却判「注入面之外」；
+  3. **降级写回**：降级循环只降 marketplace、只回写它的降级副本 → 其它 external 造出降级副本却仍以原始源注入（未降级 ES2022 进产物，浏览器语法下限门禁判红）；
+  4. **`$marketDeg` 覆盖**：扩完循环后残留的 `$externStaged['dshmarketplace-plugin'] = $marketDeg` 把结果改回原始源——**改了循环却漏了那行覆盖**。
+  判据（下次怎么避免）：扩集合时用一条命令把按名字取的地方全找出来，例如 `grep -n "\$externByName\['" scripts/build-apk-013.ps1` 与 `grep -n 'market\b' scripts/build-apk*.{ps1,mjs}`；改完先跑下游门禁（`check-inject-completeness`）再跑全链。
 - **幂等的观测点在建链逻辑，不在构建层**：`build-snapshot-013.mjs` 每次构建先 `rm -rf stage`（L106），所以「连跑两次构建看 `kept=1`」永远看不到——第二次跑时链已被删、必然重建。要验幂等必须把那段 farm 逻辑拎出来单项测（见 `scripts/farm-link-idempotency.test.mjs` 三断言：① `made=1/kept=0` 且 `readlink === want`；② 第二次 `made=0/kept=1`；③ 反证——建链写回宿主绝对路径则 `kept` 恒 0）。**判据的输入物变了，判据没跟着变——而且要先用数据定口径（字面目标 vs realpath），否则会把「换实现」写成「改判据」。**
 - 变异测试直接改仓内文件且**没有复原钩子** → 被 Ctrl-C / 超时杀死后仓库停在变异态（实测 `scripts/check-code-map.mjs` 停在 `if (t === '') continue`），下一个 PR 可能把变异当自己的改动提交。「测试跑完会复原」局部成立，「被中断时也会复原」全局不成立。
