@@ -946,9 +946,21 @@ describe('拖动中抽屉内容必须已挂载（0.14.7 task-7 真机真因）',
 })
 
 describe('触点按下前的原生平移策略', () => {
-  it('常驻 CSS 限制横向平移并保留纵向滚动和双指缩放', () => {
-    expect(MOBILE_FORM_CSS).toMatch(/\[data-dsh-frame\], \[data-dsh-frame\] \*\s*\{\s*touch-action: pan-y pinch-zoom/)
+  // 行为变更（图片预览「放大图片会放大整个屏幕」）：本用例原先锁的是
+  // `touch-action: pan-y pinch-zoom`，断言「双指缩放留给浏览器」。实测那条授权正是
+  // 整屏被放大的来源（pinch-zoom = 允许浏览器捏合缩放整页），所以它被**有意撤销**，
+  // 断言随契约一起改：frame 只保留 pan-y，捏合闸门移到根上（body 层 portal 不在 frame
+  // 子树里），横向滚动容器仍保留 auto。最后一条是反向守卫：谁再把 pinch-zoom 加回这张
+  // 样式表，就等于把这条 bug 加回来。
+  it('常驻 CSS 限制横向平移、保留纵向滚动，且不再放行整页双指缩放', () => {
+    expect(MOBILE_FORM_CSS).toMatch(/\[data-dsh-frame\], \[data-dsh-frame\] \*\s*\{\s*touch-action: pan-y;/)
+    expect(MOBILE_FORM_CSS).toMatch(/html\[data-dsh-mobile-form\]\s*\{\s*touch-action: pan-x pan-y;/)
     expect(MOBILE_FORM_CSS).toMatch(/\[data-dsh-frame\] \[data-dsh-horizontal-scroll\] \*\s*\{\s*touch-action: auto/)
+    // 守卫要贴着契约写：禁的是「把 pinch-zoom 写进某条 touch-action 声明」。
+    // 判据前先剥掉注释——这张样式表的注释正在解释 pinch-zoom 为什么被撤销，含该词属正常；
+    // 不剥会让断言被说明文字绊倒（首版就是踩了这个坑，红的是判据自己）。
+    const cssNoComments = MOBILE_FORM_CSS.replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(cssNoComments).not.toMatch(/touch-action:[^;{}]*pinch-zoom/)
   })
 
   it('touchstart 不临时改写元素样式，也不覆盖已有原生策略', () => {
