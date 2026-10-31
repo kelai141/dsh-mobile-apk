@@ -82,6 +82,13 @@ internal class DirectoryPickerController(private val activity: MainActivity) {
   private var pendingPickCallback: String? = null
   /** M3：上次 pick 因缺权限挂起（onResume 续启/结算的依据）。 */
   private var pendingPermissionRequest = false
+  /**
+   * 能力闸拦下的那个路径（非空 = 这次 pick 还没结算，授权/重选后要重判它）。
+   *
+   * 与 [pendingPickCallback] 同生共死：只保留 callback 而丢掉路径，授权回来就只能重开
+   * 选择器，用户得把目录再点一遍——那正是「授权了却什么也没发生」的观感。
+   */
+  private var pendingGatePath: String? = null
 
   private val directoryPicker =
     activity.registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -89,6 +96,8 @@ internal class DirectoryPickerController(private val activity: MainActivity) {
       val callback = pendingPickCallback
       pendingPickCallback = null
       pendingPermissionRequest = false
+      // 新的一次选择取代上一次被闸拦下的路径：旧路径不再参与任何重判。
+      pendingGatePath = null
       if (callback != null) {
         if (uri != null) {
           // SAF 持久化（docs/ANDROID10-SAF-ROUTING.md 方案 A）：系统 SAF 授权默认随
@@ -112,9 +121,11 @@ internal class DirectoryPickerController(private val activity: MainActivity) {
             activity.unlockLegacyStorageApi29()
           }
           val path = AndroidBridge.resolvePickedPath(uri)
-          activity.webView.evaluateJavascript(
-            "window.__dshBridge?.onDirectoryPicked?.(" + jsString(callback) + ", " + jsString(path) + ")", null,
-          )
+          // 能力闸：路径映射本身零判断（AndroidBridge.resolvePickedPath 只拼字符串），
+          // 于是「没权限」此前表现为把合法绝对路径交给引擎、由引擎 realpath 抛 EACCES，
+          // 再包成 workspace/invalid-path 的英文原串上屏。这里在**交给引擎之前**拦：
+          // 探不到可写就不结算这次选择，改由壳侧原生弹窗给出可操作的一步。
+          settlePickedPath(callback, path)
         } else {
           // 用户取消：回传 null，让引擎侧 pick() 以取消结算（否则页面轮询
           // 会继续拿到同一请求反复唤起选择器——设备实证的 picker 堆叠）。
@@ -125,6 +136,125 @@ internal class DirectoryPickerController(private val activity: MainActivity) {
       }
     }
 
+  /**
+   * 能力闸的结算面：可写才把路径交给引擎；否则**不建工作区**，弹壳侧原生提示。
+   *
+   * 三条不变量（对应真机缺陷的三段）：
+   *  1. **不把必然失败的路径交给引擎**——否则用户拿到的是引擎英文原串，且「重新选择」必然重演；
+   *  2. **不放行「探不到」**——授权位看着够也可能写不进去（scoped storage / 只读挂载 / 厂商目录锁）；
+   *  3. **不放过「探得到」**——探测成功优先于任何权限位判断（本仓在过度拦截上翻过车）。
+   *
+   * 探测是**真实写入**（建文件 + 写字节 + 长度回读 + 删除），在后台线程跑：
+   * 它要落到用户选的目录（可能是慢速 SD/共享存储），不得卡住 picker 回调所在的主线程。
+   */
+  private fun settlePickedPath(callback: String, path: String) {
+    val sdk = android.os.Build.VERSION.SDK_INT
+    Thread {
+      val verdict = try {
+        val shared = WorkspacePickGate.isSharedStoragePath(path)
+        WorkspacePickGate.evaluate(
+          sdkInt = sdk,
+          permissionGranted = WorkspacePickGate.storagePermissionGranted(
+            sdkInt = sdk,
+            hasAllFilesAccess = { sdk >= 30 && android.os.Environment.isExternalStorageManager() },
+            hasWritePermission = {
+              activity.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+            },
+          ),
+          sharedStoragePath = shared,
+          probeWritable = shared && WorkspacePickGate.probeWritable(File(path)),
+        )
+      } catch (t: Throwable) {
+        // 探测本身炸了按「不可写」处理（安全方向）：绝不让异常变成放行。
+        Log.w("dsh-shell", "workspace pick probe failed", t)
+        WorkspacePickVerdict.BLOCKED_UNWRITABLE
+      }
+      activity.runOnUiThread { applyPickVerdict(callback, path, verdict) }
+    }.start()
+  }
+
+  /**
+   * 把结论落到界面与槽位上。
+   *
+   * 槽位纪律：除「放行」外**一律保留 callback 与 TTL**——授权/重选之后要能用同一次请求
+   * 继续结算，否则引擎侧 pick() 只能等到 5 分钟 TTL 才以取消收场（用户看到的是「点了没反应」）。
+   * 只有用户明确按「取消」才结算为取消。
+   */
+  private fun applyPickVerdict(callback: String, path: String, verdict: WorkspacePickVerdict) {
+    val sdk = android.os.Build.VERSION.SDK_INT
+    val route = WorkspacePickGate.routeOf(verdict, sdk)
+    if (route == WorkspacePickRoute.PROCEED) {
+      activity.webView.evaluateJavascript(
+        "window.__dshBridge?.onDirectoryPicked?.(" + jsString(callback) + ", " + jsString(path) + ")", null,
+      )
+      return
+    }
+    // 保留槽位：授权回来由 settlePendingOnResume 用**同一个路径**重判（不重开选择器）。
+    pendingPickCallback = callback
+    pendingGatePath = path
+    pendingPermissionRequest = route != WorkspacePickRoute.CHOOSE_AGAIN
+    pickTtlHandler.removeCallbacks(pickTtlRunnable)
+    pickTtlHandler.postDelayed(pickTtlRunnable, 5 * 60_000L)
+    showPickGateDialog(verdict, path, route)
+  }
+
+  /**
+   * 壳侧原生弹窗：一句原因 + 一个真正可做的动作。
+   *
+   * 为什么不用页面弹窗（上游 folderError）：那条路的正文是引擎 RemoteError 的 message 原文，
+   * 我们在这侧拦下来就没有那句话可显示；而「去授权」必须跳系统页，只有壳侧能做。
+   * 主按钮由 [WorkspacePickGate.primaryActionLabel] 按路线给出——没有路线的结论拿到的是
+   * 「重新选择」，不会出现一个按了没反应的「去授权」。
+   */
+  private fun showPickGateDialog(verdict: WorkspacePickVerdict, path: String, route: WorkspacePickRoute) {
+    try {
+      val zh = !UiText.isEnglish(activity)
+      android.app.AlertDialog.Builder(activity)
+        .setTitle(WorkspacePickGate.dialogTitle(zh))
+        .setMessage(WorkspacePickGate.dialogMessage(verdict, path, zh))
+        .setPositiveButton(WorkspacePickGate.primaryActionLabel(route, zh)) { _, _ ->
+          when (route) {
+            WorkspacePickRoute.ALL_FILES_ACCESS_SCREEN -> openAllFilesAccessSettings()
+            WorkspacePickRoute.RUNTIME_PERMISSION_DIALOG -> storagePermLauncher.launch(
+              arrayOf(
+                android.Manifest.permission.READ_EXTERNAL_STORAGE,
+                android.Manifest.permission.WRITE_EXTERNAL_STORAGE,
+              ),
+            )
+            // 重选：槽位仍在这个 callback 上，结果回来照样走能力闸。
+            WorkspacePickRoute.CHOOSE_AGAIN -> directoryPicker.launch(null)
+            WorkspacePickRoute.PROCEED -> Unit
+          }
+        }
+        .setNegativeButton(WorkspacePickGate.secondaryActionLabel(zh)) { _, _ ->
+          // 取消：把这次 pick 结算成取消，引擎侧不必等到 TTL。
+          val callback = pendingPickCallback
+          pendingPickCallback = null
+          pendingGatePath = null
+          pendingPermissionRequest = false
+          pickTtlHandler.removeCallbacks(pickTtlRunnable)
+          if (callback != null) {
+            activity.webView.evaluateJavascript(
+              "window.__dshBridge?.onDirectoryPicked?.(" + jsString(callback) + ", null)", null,
+            )
+          }
+        }
+        .show()
+    } catch (t: Throwable) {
+      Log.w("dsh-shell", "pick gate dialog failed", t)
+      // 弹窗失败不能让这次 pick 永远悬着：按取消结算。
+      val callback = pendingPickCallback
+      pendingPickCallback = null
+      pendingGatePath = null
+      if (callback != null) {
+        activity.webView.evaluateJavascript(
+          "window.__dshBridge?.onDirectoryPicked?.(" + jsString(callback) + ", null)", null,
+        )
+      }
+    }
+  }
+
   /** H2：壳侧 pick 占槽 TTL（与引擎侧 5 分钟 TTL 对齐）——SAF 结果永远
    *  不回来（系统设置页停留/进程被杀恢复/缺权限路径）时自动清槽并按取消
    *  结算，避免后续目录选择被单槽永久拒绝。 */
@@ -133,6 +263,7 @@ internal class DirectoryPickerController(private val activity: MainActivity) {
     val callback = pendingPickCallback
     pendingPickCallback = null
     pendingPermissionRequest = false
+    pendingGatePath = null
     if (callback != null) {
       try {
         activity.webView.evaluateJavascript(
@@ -149,7 +280,9 @@ internal class DirectoryPickerController(private val activity: MainActivity) {
     activity.registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
       pickTtlHandler.removeCallbacks(pickTtlRunnable)
       val callback = pendingPickCallback
+      val gatedPath = pendingGatePath
       pendingPickCallback = null
+      pendingGatePath = null
       pendingPermissionRequest = false
       // P0-4：这行 `return` 是「点了没反应」的现场——「去授权存储」那条路径**从不开选择器**，
       // 因而不设 pendingPickCallback，回调进来第一件事就是 return，于是用户点「拒绝」后：
@@ -175,6 +308,13 @@ internal class DirectoryPickerController(private val activity: MainActivity) {
         return@registerForActivityResult
       }
       if (granted) {
+        if (gatedPath != null) {
+          // 这次授权是被能力闸拦下的那次选择换来的：**重判同一个路径**，
+          // 不再重开选择器（用户已经把目录选过了，再点一遍是多余的一步）。
+          pendingPickCallback = callback
+          settlePickedPath(callback, gatedPath)
+          return@registerForActivityResult
+        }
         // 授权成功：占槽 + 起 SAF 树选择器（外部工作区=真实路径）。
         pendingPickCallback = callback
         pickTtlHandler.removeCallbacks(pickTtlRunnable)
@@ -320,26 +460,30 @@ internal class DirectoryPickerController(private val activity: MainActivity) {
    *  SAF，仍拒绝则按取消结算（引擎请求不挂到 5 分钟 TTL）。
    *  （自 MainActivity.onResume 迁入。） */
   fun settlePendingOnResume() {
-    if (pendingPickCallback != null) {
-      val granted = android.os.Build.VERSION.SDK_INT >= 30 &&
-        android.os.Environment.isExternalStorageManager()
-      Log.i("dsh-shell", "M3 resume: pendingPick=" + pendingPickCallback + " granted=" + granted + " permFlag=" + pendingPermissionRequest)
-      if (granted) {
-        pendingPermissionRequest = false
-        directoryPicker.launch(null)
-      } else {
-        pickTtlHandler.removeCallbacks(pickTtlRunnable)
-        val callback = pendingPickCallback
-        pendingPickCallback = null
-        pendingPermissionRequest = false
-        if (callback != null) {
-          try {
-            activity.webView.evaluateJavascript(
-              "window.__dshBridge?.onDirectoryPicked?.(" + jsString(callback) + ", null)", null,
-            )
-          } catch (_: Exception) {
-          }
-        }
+    val callback = pendingPickCallback ?: return
+    val path = pendingGatePath
+    if (path != null) {
+      // 能力闸拦下的那次选择：**重判同一个路径**，不重开选择器。
+      // 授权回来后 probe 就是唯一的判据（探得到就放行，探不到就按结论再提示一次）。
+      Log.i("dsh-shell", "M3 resume: re-probe gated path=" + path + " permFlag=" + pendingPermissionRequest)
+      settlePickedPath(callback, path)
+      return
+    }
+    val granted = android.os.Build.VERSION.SDK_INT >= 30 &&
+      android.os.Environment.isExternalStorageManager()
+    Log.i("dsh-shell", "M3 resume: pendingPick=" + callback + " granted=" + granted + " permFlag=" + pendingPermissionRequest)
+    if (granted) {
+      pendingPermissionRequest = false
+      directoryPicker.launch(null)
+    } else {
+      pickTtlHandler.removeCallbacks(pickTtlRunnable)
+      pendingPickCallback = null
+      pendingPermissionRequest = false
+      try {
+        activity.webView.evaluateJavascript(
+          "window.__dshBridge?.onDirectoryPicked?.(" + jsString(callback) + ", null)", null,
+        )
+      } catch (_: Exception) {
       }
     }
   }
