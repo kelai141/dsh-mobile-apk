@@ -643,8 +643,22 @@ if ($LASTEXITCODE -ne 0) { throw "APK 签名门禁自测失败" }
 Write-Host "== 最终 APK 产物形态门禁（不得含 application-debuggable）=="
 node (Join-Path $Root "scripts\check-apk-form.mjs") --self-test
 if ($LASTEXITCODE -ne 0) { throw "APK 产物形态门禁自测失败" }
-node (Join-Path $Root "scripts\check-apk-form.mjs") --dir $Out --require
-if ($LASTEXITCODE -ne 0) { throw "最终 APK 是 debuggable 变体（badging 含 application-debuggable），拒绝交付" }
+# issue #1170：退出码与**原因**必须解耦。这条门禁的非 0 至少有四种来源：
+#   ① 产物含独立行 application-debuggable（真·debug 变体）；
+#   ② 目录里一个 APK 都没有（本次根本没产出，见上方「拒绝打包」）；
+#   ③ 找不到 aapt2；④ 用法错误。
+# 旧写法只看 $LASTEXITCODE 就断言「是 debuggable 变体」，于是「两个 ABI 都因缺快照被拒、交付目录是空的」
+# 被报成「产物是 debug 变体」——排查者去翻 buildTypes / signingConfig / assembleDebug 全是死路。
+# 现在：先收输出与退出码（不能管道直连 Select-Object，会吞 $LASTEXITCODE，见 check-build-chain-abort 判据 C），
+# 把门禁自己的末行结论回读进 throw，原因由门禁说，本行只负责追加处置动作。
+$apkFormOut = node (Join-Path $Root "scripts/check-apk-form.mjs") --dir $Out --require 2>&1
+$apkFormCode = $LASTEXITCODE
+$apkFormOut | Out-Host
+if ($apkFormCode -ne 0) {
+    $apkFormWhy = (@($apkFormOut) | Where-Object { $_ -match 'APK-FORM CHECK FAILED' } | Select-Object -Last 1)
+    if (-not $apkFormWhy) { $apkFormWhy = "门禁未通过（退出码 $apkFormCode）但未打印结论行——见上方门禁输出" }
+    throw "最终 APK 产物形态门禁未通过：$apkFormWhy（原因以上一行门禁输出为准，不要预设为 debuggable 变体）"
+}
 node (Join-Path $Root "scripts\build-apk-engine.mjs") verify --dir $Out --skip-self-test
 if ($LASTEXITCODE -ne 0) { throw "最终 APK 缺少 v1/v2/v3 全部签名，拒绝交付" }
 Write-Host "=== 汇总。已产出 ABI: [$producedList] / 被拒 ABI: [$rejectedList] ==="

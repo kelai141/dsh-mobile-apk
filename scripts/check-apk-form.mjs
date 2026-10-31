@@ -25,6 +25,12 @@
 //   · aapt2 **在场**时不存在「跳过」：非 0 退出 / 输出为空 / 输出不可解析都是**判红**
 //     ——拿不到判据不等于判据通过（这是本类门禁最容易长出来的假绿形态）。
 //
+// 汇总纪律（issue #1170）：判红必须说清**是哪一类**红。三类事实各自计数、各自措辞——
+// 产物形态判据未过（有 APK，且它不合格）/ 缺席未判定（一个 APK 都没有，或没有 aapt2）/ 用法错误。
+// 旧实现把它们都塞进同一个 failures 计数器，而汇总的分子取 failures、分母取真检个数：
+// 空交付目录于是打印「1/0 个 APK 未通过产物形态判据」，把「一个 APK 都没产出」说成了
+// 「有 1 个产物是 debuggable 变体」——现场按这句去翻 buildTypes / assembleDebug 全是死路。
+//
 // 用法：
 //   node scripts/check-apk-form.mjs --apk <file> [--apk <file> ...]
 //   node scripts/check-apk-form.mjs --dir <dir> [--dir <dir> ...]   # 递归收集 *.apk（跟随符号链接）
@@ -160,7 +166,10 @@ export function parseArgs(args) {
 const USAGE = 'Usage: node scripts/check-apk-form.mjs --apk <file> | --dir <dir> [--aapt2 <path>] [--require] [--self-test]'
 
 let skipTotal = 0
-let failures = 0
+/** 判定过、且确实不过判据的 APK 数（只数真检过的产物）。 */
+let formFailures = 0
+/** 用法错误（缺参数 / --dir 不是目录）——不是产物形态结论，单独计数。 */
+let usageFailures = 0
 
 /**
  * 缺席（不是判据结论）必须计数且可见：`SKIP(#n)` + 结尾 `SKIP=<n>`（scripts/check-gate-skips.mjs 的 SKIP 纪律）。
@@ -169,20 +178,42 @@ let failures = 0
 function skip(why) {
   skipTotal += 1
   console.log('SKIP(#' + skipTotal + ')  ' + why + (strict ? ' —— --require 档不得 SKIP' : ''))
-  if (strict) failures += 1
+}
+
+/**
+ * 汇总行（纯函数）：分母只数**真检过的产物**，加上 SKIP 与用法错误两种「没验成」的原因。
+ *
+ * issue #1170 的形态：旧实现把「--require 下缺席」记进同一个 failures 计数器，而汇总又拿它当分子、
+ * 拿真检个数当分母——空目录于是打印「1/0 个 APK 未通过产物形态判据」。分母 0 而分子 1 是自相矛盾的
+ * 一句结论，现场只能按「有 1 个 APK 是 debuggable 变体」去查，与真因（一个 APK 都没产出）完全反向。
+ * 现在三类事实分开报：判据未过 / 缺席未验 / 用法错误，各自带自己的计数。
+ *
+ * @param {{checked: number, failures: number, skips: number, usageErrors: number, strict: boolean}} input
+ * @returns {{failed: boolean, line: string}}
+ */
+export function summarizeVerdict({ checked, failures, skips, usageErrors, strict }) {
+  const parts = []
+  if (failures > 0) parts.push(failures + '/' + checked + ' 个 APK 未通过产物形态判据')
+  // 缺席不是「判据未过」，单独措辞：说清「没有可判的对象」，不要说成某个 APK 有问题。
+  if (skips > 0) parts.push('缺席未判定 ' + skips + ' 项（无 APK / 无 aapt2，不是产物形态结论）')
+  if (usageErrors > 0) parts.push('用法错误 ' + usageErrors + ' 项')
+  if (parts.length === 0) return { failed: false, line: '' }
+  const failed = strict || failures > 0 || usageErrors > 0
+  return { failed, line: 'APK-FORM CHECK FAILED：' + parts.join('；') + '（本次判定对象 ' + checked + ' 个 APK）' }
 }
 
 let strict = false
 
 function fail(message) {
   console.error('APK form gate: FAIL: ' + message)
-  failures += 1
+  usageFailures += 1
 }
 
 function finish(checked) {
   console.log('SKIP=' + skipTotal)
-  if (failures > 0) {
-    console.error('APK-FORM CHECK FAILED：' + failures + '/' + checked + ' 个 APK 未通过产物形态判据（SKIP=' + skipTotal + '）')
+  const verdict = summarizeVerdict({ checked, failures: formFailures, skips: skipTotal, usageErrors: usageFailures, strict })
+  if (verdict.failed) {
+    console.error(verdict.line)
     process.exit(1)
   }
   if (skipTotal > 0) {
@@ -231,6 +262,19 @@ function runSelfTest() {
     ['aapt2 空输出判红', evaluateBadging({ exitCode: 0, output: '   \n' }).ok, false],
     ['缺 package 行判红（截断输出）', evaluateBadging({ exitCode: 0, output: "minSdkVersion:'26'\n" }).ok, false],
     ['aapt2 无法启动判红', evaluateBadging({ spawnError: new Error('ENOENT') }).ok, false],
+    // 汇总措辞（issue #1170）：分母只数真检过的产物；缺席与用法错误不得混进「未通过判据」的分子。
+    ['汇总：空目录严格档 = 缺席红，不出现 x/0 的判据分子',
+      summarizeVerdict({ checked: 0, failures: 0, skips: 1, usageErrors: 0, strict: true }).line,
+      'APK-FORM CHECK FAILED：缺席未判定 1 项（无 APK / 无 aapt2，不是产物形态结论）（本次判定对象 0 个 APK）'],
+    ['汇总：空目录非严格档不判红（缺席自有 SKIP 汇总）',
+      summarizeVerdict({ checked: 0, failures: 0, skips: 1, usageErrors: 0, strict: false }).failed, false],
+    ['汇总：真有 1 个 APK 是 debuggable 才出现 1/1 判据分子',
+      summarizeVerdict({ checked: 1, failures: 1, skips: 0, usageErrors: 0, strict: true }).line,
+      'APK-FORM CHECK FAILED：1/1 个 APK 未通过产物形态判据（本次判定对象 1 个 APK）'],
+    ['汇总：用法错误单独成一句，不冒充产物形态结论',
+      summarizeVerdict({ checked: 0, failures: 0, skips: 0, usageErrors: 1, strict: false }).line,
+      'APK-FORM CHECK FAILED：用法错误 1 项（本次判定对象 0 个 APK）'],
+    ['汇总：全绿时没有结论文本', summarizeVerdict({ checked: 2, failures: 0, skips: 0, usageErrors: 0, strict: true }).line, ''],
   ]
   let bad = 0
   for (const [name, actual, expected] of cases) {
@@ -293,7 +337,7 @@ function main() {
   for (const apk of unique) {
     if (!fs.existsSync(apk) || !fs.statSync(apk).isFile()) {
       console.error('FAIL ' + apk + ': file does not exist')
-      failures += 1
+      formFailures += 1
       continue
     }
     console.log('\n$ ' + aapt2 + ' dump badging ' + apk)
@@ -309,7 +353,7 @@ function main() {
     console.log('aapt2 exit-code=' + String(result.status ?? 'null'))
     if (!status.ok) {
       console.error('FAIL ' + apk + ': ' + status.why)
-      failures += 1
+      formFailures += 1
     } else console.log('PASS ' + apk + '（无 application-debuggable）')
   }
   return finish(unique.length)

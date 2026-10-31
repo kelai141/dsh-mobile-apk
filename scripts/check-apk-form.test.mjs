@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { parseBadging, evaluateBadging } from './check-apk-form.mjs'
+import { parseBadging, evaluateBadging, summarizeVerdict } from './check-apk-form.mjs'
 
 // 真实 aapt2 dump badging 形态（0.14.9 产物实测样本节选）。
 const releaseBadging = [
@@ -206,3 +206,44 @@ test('--self-test reports every case and exits zero', () => {
   assert.match(result.stdout, /PASS \d+\/\d+ APK form gate self-tests/)
   assert.doesNotMatch(result.stdout, /^FAIL/m)
 })
+
+/**
+ * issue #1170：空交付目录必须报成「没有可判的对象」，不得报成「N/0 个 APK 未通过产物形态判据」。
+ *
+ * 真实现场：两个 ABI 都因缺快照被拒，out/v0.14.9 是空的。门禁确实打印了
+ * 「SKIP(#1) 未找到任何 APK」，但汇总行写成 1/0 个 APK 未通过产物形态判据 ——
+ * 分母 0 而分子 1，读起来就是「有 1 个产物是 debuggable 变体」，把人指向 buildTypes /
+ * signingConfig / assembleDebug 全是死路。这条断言钉住的是**措辞与计数的一致性**，不是退出码。
+ */
+test('an empty delivery directory is reported as "nothing to judge", never as an x/0 criteria failure', (t) => {
+  const emptyDir = mkdtempSync(join(tmpdir(), 'dsh-apk-form-1170-'))
+  t.after(() => rmSync(emptyDir, { recursive: true, force: true }))
+
+  // 严格档（发布链的真实形态）：仍然判红 —— 缺席在 --require 下不得以 SKIP 结案。
+  const strict = gate(['--dir', emptyDir, '--aapt2', GATE, '--require'])
+  assert.equal(strict.status, 1, strict.stdout + strict.stderr)
+  assert.match(strict.stderr, /APK-FORM CHECK FAILED/)
+  // 汇总里出现「缺席未判定」这一句，且不得出现「数字/0 个 APK 未通过产物形态判据」这种空分母的分子。
+  assert.match(strict.stderr, /缺席未判定 1 项/)
+  assert.doesNotMatch(strict.stderr, /\d+\/0 个 APK 未通过产物形态判据/)
+  assert.match(strict.stderr, /本次判定对象 0 个 APK/)
+})
+
+test('the summary counts only APKs that were actually judged (pure function)', () => {
+  // 空目录 + 严格档：缺席是缺席，不是判据结论。
+  const missing = summarizeVerdict({ checked: 0, failures: 0, skips: 1, usageErrors: 0, strict: true })
+  assert.equal(missing.failed, true)
+  assert.match(missing.line, /缺席未判定 1 项/)
+  assert.doesNotMatch(missing.line, /个 APK 未通过产物形态判据/)
+  // 非严格档下缺席自有 SKIP 汇总，不判红。
+  assert.equal(summarizeVerdict({ checked: 0, failures: 0, skips: 1, usageErrors: 0, strict: false }).failed, false)
+  // 真有一个不合格产物时才是 x/y 判据形态，且分母等于真检个数。
+  const real = summarizeVerdict({ checked: 1, failures: 1, skips: 0, usageErrors: 0, strict: true })
+  assert.equal(real.failed, true)
+  assert.match(real.line, /1\/1 个 APK 未通过产物形态判据/)
+  // 用法错误与产物形态是两件事，各自成句。
+  assert.match(summarizeVerdict({ checked: 0, failures: 0, skips: 0, usageErrors: 1, strict: false }).line, /用法错误 1 项/)
+  // 全绿时没有结论文本（PASS 由 finish() 打印）。
+  assert.equal(summarizeVerdict({ checked: 2, failures: 0, skips: 0, usageErrors: 0, strict: true }).line, '')
+})
+
