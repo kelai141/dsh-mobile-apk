@@ -148,6 +148,13 @@ if (process.argv.includes('--self-test')) {
     ['纯函数：私钥头命中', credentialHit('-----BEGIN OPENSSH PRIVATE KEY-----') !== null],
     ['纯函数：干净 npmrc 不命中', credentialHit('registry=https://registry.npmjs.org/') === null],
     ['纯函数：空占位不命中', credentialHit('apiKey: ""\ntoken: ""') === null],
+    // sk- 词边界（本次修）：MIME 名里被截出的 sk-response 不是密钥
+    ['纯函数：MIME 名 application/mbms-msk-response+xml 不命中（sk- 需词首）',
+      credentialHit('"application/mbms-msk-response+xml": { "source": "iana" }') === null],
+    ['纯函数：真密钥 sk-live-123456 仍命中（边界没放宽成一律不命中）',
+      credentialHit('apiKey: sk-live-123456') !== null],
+    ['纯函数：行首 sk-ant-xyz12345 仍命中',
+      credentialHit('sk-ant-xyz12345') !== null],
   ]
   for (const [label, ok] of pure) {
     console.log((ok ? 'PASS  ' : 'FAIL  ') + label)
@@ -155,7 +162,7 @@ if (process.argv.includes('--self-test')) {
   }
   for (const a of [clean, creds, sk, configJson, privKey, jwt, jwtSplit, authToken, authTokenHome, caBundle, pemWithKey, noEngine, noUsr]) rmSync(a, { force: true })
   console.log(bad === 0
-    ? 'SNAPSHOT_SECRET_SELF_TEST_PASSED（' + (checks.length + 7) + ' 项）'
+    ? 'SNAPSHOT_SECRET_SELF_TEST_PASSED（' + (checks.length + pure.length) + ' 项）'
     : 'SNAPSHOT_SECRET_SELF_TEST_FAILED（' + bad + ' 项）')
   process.exit(bad === 0 ? 0 : 1)
 }
@@ -278,7 +285,12 @@ if (privKeyFiles.length) failOut('private-key-file', privKeyFiles)
 export function credentialHit(content) {
   const text = String(content)
   const patterns = [
-    /sk-[A-Za-z0-9_-]{8,}/,
+    // sk- 必须落在「词首」：前面不能是字母/数字/下划线/连字符。
+    // 没有这个边界时 mime-db/db.json 的 MIME 类型
+    //   "application/mbms-msk-response+xml" 会被从中截出 sk-response 而判成 API key
+    // ——实测该文件 sk- 出现 1 次，全部来自这一条 MIME 名。真实密钥形态是
+    // sk-<词>（sk-proj-… / sk-ant-… / sk-live-…），前面不会紧跟标识符字符。
+    /(?:^|[^A-Za-z0-9_$-])sk-[A-Za-z0-9_-]{8,}/,
     /-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----/,
     /dsh web: \S*\/\?token=[A-Za-z0-9_-]{40,}/,
     // JWT：三段 base64url，header 段以 eyJ 开头（典型形态）；允许跨行（先拼串再扫）
