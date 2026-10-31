@@ -2802,3 +2802,21 @@ usage 首行写死了这条：`--derive-anchors 与 --only 默认 dry-run 不落
   判据（下次怎么避免）：扩集合时用一条命令把按名字取的地方全找出来，例如 `grep -n "\$externByName\['" scripts/build-apk-013.ps1` 与 `grep -n 'market\b' scripts/build-apk*.{ps1,mjs}`；改完先跑下游门禁（`check-inject-completeness`）再跑全链。
 - **幂等的观测点在建链逻辑，不在构建层**：`build-snapshot-013.mjs` 每次构建先 `rm -rf stage`（L106），所以「连跑两次构建看 `kept=1`」永远看不到——第二次跑时链已被删、必然重建。要验幂等必须把那段 farm 逻辑拎出来单项测（见 `scripts/farm-link-idempotency.test.mjs` 三断言：① `made=1/kept=0` 且 `readlink === want`；② 第二次 `made=0/kept=1`；③ 反证——建链写回宿主绝对路径则 `kept` 恒 0）。**判据的输入物变了，判据没跟着变——而且要先用数据定口径（字面目标 vs realpath），否则会把「换实现」写成「改判据」。**
 - 变异测试直接改仓内文件且**没有复原钩子** → 被 Ctrl-C / 超时杀死后仓库停在变异态（实测 `scripts/check-code-map.mjs` 停在 `if (t === '') continue`），下一个 PR 可能把变异当自己的改动提交。「测试跑完会复原」局部成立，「被中断时也会复原」全局不成立。
+
+## PS1 的 `//` 是合法裸词：语法检查全绿也会在运行时才炸
+
+**现象**：`build-apk-013.ps1` 里写了 `else { $externStaged[$nm] = $dst }   // 降级成功`，三条检查全绿，真跑链却炸：
+
+```
+//: build-apk-013.ps1:396
+The term '//' is not recognized as a name of a cmdlet, function, script file, or executable program.
+```
+
+**为什么三道都没拦住**：
+
+1. `[System.Management.Automation.Language.Parser]::ParseFile(...)` → `语法错误 = 0`。PowerShell 里 `//` 是**合法的裸词（bareword）**，语法层面完全通过，只在**求值**时要找一个叫 `//` 的命令。
+2. `check-code-map.mjs` 只看锚点行的**内容前缀**，不看这一行是否可执行。
+3. 只有真跑一次链才暴露。
+
+**判据**：**语法合法 ≠ 可运行**。改 `.ps1` 后不能只报「语法错误 = 0」当证据——必须真跑一次（哪怕是 `-Fast`/`-OnlyAbi` 的一小段），或至少执行到含该行的分支。同理适用于其它语言里「语法合法但求值才失败」的写法（如 shell 里未加引号的裸词）。
+

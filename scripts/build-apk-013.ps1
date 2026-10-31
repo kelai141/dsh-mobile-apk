@@ -393,7 +393,7 @@ foreach ($abi in @('arm64', 'x86_64')) {
                 }
                 node (Join-Path $Root "scripts\check-browser-syntax-floor.mjs") --degrade --stage $dst 2>&1
                 if ($LASTEXITCODE -ne 0) { $degradeFailDetail = "注入段浏览器语法降级失败（$leaf）" }
-                else { $externStaged[$nm] = $dst }   // 降级成功 -> 注入降级副本
+                else { $externStaged[$nm] = $dst }   # 降级成功 -> 注入降级副本
             }
         }
         # **不降级我方 plugin**（原实现会 `--degrade --stage <plugin>` 就地改写）：
