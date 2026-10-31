@@ -52,7 +52,7 @@ Paste the command and the key output. If a test was not run, say it was not run.
 
 ## Device acceptance
 
-A UI, shell-behavior or security-sensitive change must carry a device-acceptance section in the PR description. Use exactly one of the two states below; leave it empty or write both and the review is rejected.
+A UI, shell-behavior or security-sensitive change must carry a device-acceptance section **in the PR body**. Use exactly one of the two states below; leave it empty or write both and the review is rejected. The state block is a fact recorded in the body — writing it needs no special permission.
 
 ### State A: acceptance was run
 
@@ -61,7 +61,7 @@ State the evidence and the verdict:
 - Three evidence elements: **tree@sha** · **device serial** · **case name**; attach screenshots as a path or link;
 - Verdict: `PASS`, or `FAIL` with a reason.
 
-### State B: request acceptance (apply the `needs-device-verification` label)
+### State B: request acceptance
 
 If you cannot run a device yourself, do not stop at "no device verification". Write a card someone else can execute:
 
@@ -77,11 +77,21 @@ If you cannot run a device yourself, do not stop at "no device verification". Wr
 3. **The package version in the card must match what gets installed** (head sha or versionName): install a different build and the result proves nothing about this PR.
 4. **On FAIL, commit on the same branch and force-push; do not open a new PR**: this keeps review and acceptance history together instead of splitting one change into unrelated threads.
 
-### Requesting and scheduling
+### Who does what
 
-- Apply the `needs-device-verification` label (one per PR) and write the State B card;
-- A device-acceptance specialist or a maintainer schedules and runs it; keep the label until then and do not remove it yourself;
-- The specialist **changes no code and does not merge**; they only write back `PASS`/`FAIL` with the raw output (commands, key stdout, screenshot paths).
+| Role | Does | Permission needed |
+|---|---|---|
+| Contributor | Writes "State A (verified, with evidence)" or "State B (request acceptance, with forward steps / expectations / failure samples)" **in the PR body** | None |
+| Maintainer | Reads the card, then applies `needs-device-verification` as an **internal scheduling marker** | triage |
+| Acceptance specialist | Only handles labelled PRs; changes no code, does not merge, writes back `PASS`/`FAIL` and the raw output | None |
+
+**The state block is the fact in the body; the label is only the maintainer's index.** Therefore:
+
+- Contributors cannot apply labels and do not need to — putting your card in the body is enough;
+- The other way round, **without a card the maintainer cannot schedule anything**: a PR with a label but no State B card is sent back for one;
+- Maintainers add and remove the label; do not pester for it — writing a complete card is more useful than asking once more.
+
+The specialist changes no code and does not merge; they only write back `PASS`/`FAIL` with the raw output (commands, key stdout, screenshot paths).
 
 ### A new commit invalidates the card
 
