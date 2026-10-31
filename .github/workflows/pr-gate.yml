@@ -49,7 +49,15 @@ jobs:
       - name: 冲突标记检查
         if: always()
         run: |
-          if grep -rEn '^(<<<<<<< |>>>>>>> )' app/src --include='*.kt' --include='*.java' --include='*.xml' --include='*.html' --include='*.js' --include='*.yml' --include='*.yaml'; then
+          # 覆盖文档与脚本：docs/ 下曾遗留未解决的冲突标记（#1012 合并进 modules.md），
+          # 旧版只扫 app/src 的代码文件，因此漏检。这里扩到 docs/.github/scripts，
+          # 但**只匹配 <<<<<<< 与 >>>>>>>**——Markdown 的 setext 标题下划线（一整行 ====）不是冲突。
+          if grep -rEn '^(<<<<<<< |>>>>>>> )' \
+               app/src docs .github scripts \
+               --include='*.kt' --include='*.java' --include='*.xml' --include='*.html' \
+               --include='*.js' --include='*.mjs' --include='*.ts' --include='*.yml' \
+               --include='*.yaml' --include='*.md' --include='*.json' \
+               --exclude-dir=node_modules 2>/dev/null; then
             echo "::error::检测到未解决的 merge conflict 标记"
             exit 1
           fi
