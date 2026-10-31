@@ -3597,19 +3597,19 @@
       "function renderLoadState(v: Record<string, unknown>): string {"
     ],
     "plugins/dsh-android-browser/src/tools.ts:254": [
-      "const call = async (op: string, args: Payload, timeoutMs = 15_000): Promise<CallResult> => {"
+      "const runIt = () => originalExecute(args, exec)"
     ],
     "plugins/dsh-android-browser/src/tools.ts:262": [
-      "const reply = await control.controlExec(op, payload, timeoutMs)"
+      "throw e"
     ],
     "plugins/dsh-android-browser/src/tools.ts:281": [
-      "// 浏览器面**不做任何授权校验**（0.14.0 实锤缺陷修复）。"
+      "// 失败回执必须带上**已声明且值确实存在**的判别字段（G2a-4 / issue #232 同族）："
     ],
     "plugins/dsh-android-browser/src/tools.ts:33": [
       "const lastSnapshots = new Map<string, SnapshotMemory>()"
     ],
     "plugins/dsh-android-browser/src/tools.ts:407": [
-      "const state = opened.data"
+      "render: (_args, v: Record<string, unknown>) => [{"
     ],
     "plugins/dsh-android-file-open/src/index.ts:20": [
       "import { defineTool } from '@deepseek-ai/dsh-tools'"
@@ -4107,7 +4107,7 @@
       "if (android.getSystemDark()) globalObj.__dshThemeBridge.setDark(true)"
     ],
     "tools.ts:1075": [
-      "bytes: typeof result.data.bytes === 'number' ? result.data.bytes : 0,"
+      "}, 10_000)"
     ],
     "tools.ts:119": [
       "function loadStateOf(v: Record<string, unknown>): string {"
@@ -4119,28 +4119,28 @@
       "const sessionScope = new AsyncLocalStorage<string>()"
     ],
     "tools.ts:225": [
-      "render: (args: unknown, v: Record<string, unknown>) => {"
+      "* 「被 URL 准入拒绝」和「桥不可用」，审计面就仍然回答不了「这次为什么没做」。"
     ],
     "tools.ts:245": [
-      "execute: (args: unknown, exec: unknown) => {"
+      "audit(toolName, payload, !failed, failed ? failureReasonOf(v) : undefined)"
     ],
     "tools.ts:254": [
-      "const call = async (op: string, args: Payload, timeoutMs = 15_000): Promise<CallResult> => {"
+      "const runIt = () => originalExecute(args, exec)"
     ],
     "tools.ts:26": [
       "interface SnapshotMemory {"
     ],
     "tools.ts:262": [
-      "const reply = await control.controlExec(op, payload, timeoutMs)"
+      "throw e"
     ],
     "tools.ts:281": [
-      "// 浏览器面**不做任何授权校验**（0.14.0 实锤缺陷修复）。"
+      "// 失败回执必须带上**已声明且值确实存在**的判别字段（G2a-4 / issue #232 同族）："
     ],
     "tools.ts:33": [
       "const lastSnapshots = new Map<string, SnapshotMemory>()"
     ],
     "tools.ts:505": [
-      "reason: { type: 'string' },"
+      "// 于是 browser_click 无从下手，模型反复 snapshot/wait 直到放弃。"
     ],
     "tools.ts:73": [
       "/**"

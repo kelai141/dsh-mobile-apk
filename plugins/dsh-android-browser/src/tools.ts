@@ -206,49 +206,90 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
    * 工具面统一包裹（2026-09-15）：
    * - 失败渲染兜底：拒绝/失败对象（denied(...)）此前仍被 render 渲染，字段取不到就输出 undefined，
    *   snapshot 的 render 还会在 undefined 上抛错——真实 error/guidance 被吞掉；现 ok:false 一律渲染原文；
-   * - 会话注入：execute 期间把归属会话放进作用域，`call` 自动附加到控制 op 参数上（壳侧归属校验）。
+   * - 会话注入：execute 期间把归属会话放进作用域，`call` 自动附加到控制 op 参数上（壳侧归属校验）；
+   * - 审计（issue #1201）：在**结果出来之后**按真实 ok 记账。
    */
   const withFailureText = (tool: unknown): unknown => {
     const definition = tool as {
+      name?: unknown
       output?: { render?: unknown }
       execute?: (args: unknown, exec: unknown) => unknown
     }
+    const toolName = typeof definition.name === 'string' ? definition.name : ''
     const originalExecute = definition.execute
-    const wrapped = (() => {
-      const output = definition.output
-      if (output === undefined || typeof output.render !== 'function') return tool
-      const original = output.render as (args: unknown, v: Record<string, unknown>) => unknown
+
+    /**
+     * 从失败回执里取「为什么失败」，供审计落盘。
+     *
+     * issue #1201 要求「拒绝时日志里是 ok:false 且带原因」——只记 ok:false 无法区分
+     * 「被 URL 准入拒绝」和「桥不可用」，审计面就仍然回答不了「这次为什么没做」。
+     */
+    const failureReasonOf = (v: unknown): string | undefined => {
+      if (v === null || typeof v !== 'object') return undefined
+      const rec = v as Record<string, unknown>
+      const error = typeof rec.error === 'string' && rec.error !== '' ? rec.error : ''
+      const reason = typeof rec.reason === 'string' && rec.reason !== '' ? rec.reason : ''
+      const guidance = typeof rec.guidance === 'string' && rec.guidance !== '' ? rec.guidance : ''
+      const parts = [error, reason].filter((s) => s !== '')
+      const joined = parts.join('/')
+      if (joined !== '') return joined
+      // 无 error/reason 但确有 guidance（如 wait 的稳定超时）时，guidance 就是唯一真因。
+      return guidance === '' ? undefined : guidance
+    }
+
+    /** 审计入口：ok 由**真实返回值**决定，失败时附带原因。 */
+    const auditOf = (args: unknown, value: unknown): void => {
+      const v = value as Record<string, unknown> | null | undefined
+      const failed = v !== null && typeof v === 'object' && v.ok === false
+      const payload = (args !== null && typeof args === 'object' ? args : {}) as Payload
+      audit(toolName, payload, !failed, failed ? failureReasonOf(v) : undefined)
+    }
+
+    const withAudit = (t: unknown): unknown => {
+      if (typeof originalExecute !== 'function') return t
       return {
-        ...(tool as Record<string, unknown>),
-        output: {
-          ...(output as Record<string, unknown>),
-          render: (args: unknown, v: Record<string, unknown>) => {
-            if (v !== null && typeof v === 'object' && v.ok === false) {
-              const error = typeof v.error === 'string' && v.error !== '' ? v.error : 'tool-failed'
-              const guidance = typeof v.guidance === 'string' && v.guidance !== '' ? '（' + v.guidance + '）' : ''
-              // 失败回执必须带上**已声明且值确实存在**的判别字段（G2a-4 / issue #232 同族）：
-              // browser_wait 超时返回 `{ok:false, waited, reason:'stable-timeout'}` 却无 `error`，
-              // 通用兜底只印「失败：tool-failed」——把壳侧给的真实原因（超时类型）吞掉了，
-              // 而 `reason` 恰是 schema 声明、模型最需要的那个信号。此处如实透出，不再一律 tool-failed。
-              const reason = typeof v.reason === 'string' && v.reason !== '' ? '，reason=' + v.reason : ''
-              const waited = typeof v.waited === 'number' && Number.isFinite(v.waited) ? '，waited=' + v.waited + 'ms' : ''
-              return [{ type: 'text', text: '失败：' + error + reason + waited + guidance }]
-            }
-            return original(args, v)
-          },
+        ...(t as Record<string, unknown>),
+        execute: async (args: unknown, exec: unknown) => {
+          const session = sessionOf(exec)
+          const runIt = () => originalExecute(args, exec)
+          let value: unknown
+          try {
+            value = session === undefined ? await runIt() : await sessionScope.run(session, runIt)
+          } catch (e) {
+            // 抛异常也是一次「没做成」的操作，同样必须留痕（否则异常路径在审计里完全消失）。
+            audit(toolName, (args !== null && typeof args === 'object' ? args : {}) as Payload, false,
+              'exception: ' + String((e as Error).message))
+            throw e
+          }
+          auditOf(args, value)
+          return value
         },
       }
-    })()
-    if (typeof originalExecute !== 'function') return wrapped
-    return {
-      ...(wrapped as Record<string, unknown>),
-      execute: (args: unknown, exec: unknown) => {
-        const session = sessionOf(exec)
-        return session === undefined
-          ? originalExecute(args, exec)
-          : sessionScope.run(session, () => originalExecute(args, exec))
-      },
     }
+
+    const output = definition.output
+    if (output === undefined || typeof output.render !== 'function') return withAudit(tool)
+    const original = output.render as (args: unknown, v: Record<string, unknown>) => unknown
+    return withAudit({
+      ...(tool as Record<string, unknown>),
+      output: {
+        ...(output as Record<string, unknown>),
+        render: (args: unknown, v: Record<string, unknown>) => {
+          if (v !== null && typeof v === 'object' && v.ok === false) {
+            const error = typeof v.error === 'string' && v.error !== '' ? v.error : 'tool-failed'
+            const guidance = typeof v.guidance === 'string' && v.guidance !== '' ? '（' + v.guidance + '）' : ''
+            // 失败回执必须带上**已声明且值确实存在**的判别字段（G2a-4 / issue #232 同族）：
+            // browser_wait 超时返回 `{ok:false, waited, reason:'stable-timeout'}` 却无 `error`，
+            // 通用兜底只印「失败：tool-failed」——把壳侧给的真实原因（超时类型）吞掉了，
+            // 而 `reason` 恰是 schema 声明、模型最需要的那个信号。此处如实透出，不再一律 tool-failed。
+            const reason = typeof v.reason === 'string' && v.reason !== '' ? '，reason=' + v.reason : ''
+            const waited = typeof v.waited === 'number' && Number.isFinite(v.waited) ? '，waited=' + v.waited + 'ms' : ''
+            return [{ type: 'text', text: '失败：' + error + reason + waited + guidance }]
+          }
+          return original(args, v)
+        },
+      },
+    })
   }
 
   const call = async (op: string, args: Payload, timeoutMs = 15_000): Promise<CallResult> => {
@@ -293,8 +334,18 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
   // 因此本层直接透传，由原生执行点做它该做的校验（单一真源，避免两处各写一份漂移）。
   const gate = (_exec: unknown): { ok: true } | { ok: false; guidance: string } => ({ ok: true })
 
-  const audit = (tool: string, args: Payload, ok: boolean): void => {
-    try { face()?.audit?.(tool, { tool, args }, ok) } catch { /* 审计缺失不阻塞 */ }
+  /**
+   * 审计写入（issue #1201：ok 必须来自**真实结果**，且失败要带原因）。
+   *
+   * 旧实现由 8 个调用点在 `await call(...)` **之前**传字面量 `true`，失败分支从不补记；
+   * 另有 10 个工具完全没接审计。于是审计日志把每一次被拒绝的操作都记成成功，
+   * 安全审计面无法回答「某次被拒绝的操作是否真的被拒」。
+   * 现在唯一调用点是 withFailureText 的包裹层，它在 execute 返回之后按 v.ok 记账。
+   */
+  const audit = (tool: string, args: Payload, ok: boolean, reason?: string): void => {
+    try {
+      face()?.audit?.(tool, { tool, args, ...(reason === undefined ? {} : { reason }) }, ok)
+    } catch { /* 审计缺失不阻塞 */ }
   }
 
   const parseJsJson = (value: unknown): Payload | undefined => {
@@ -395,7 +446,6 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
         // tabId = 任务标识：给了就用它（存在则复用、不存在则新建），不给就**开一个新页**。
         // 这是「AI 可以同时控制多网页」的入口语义：每次 browser_open 默认得到独立一页。
         const route = typeof tabId === 'string' && tabId !== '' ? { tabId } : { newTab: true }
-        audit(BROWSER_TOOLS.open, { url, viewport, identity }, true)
         const opened = await call(BROWSER_OPS.open, {
           url, ...route,
           ...(viewportConfig === undefined ? {} : { viewportConfig }),
@@ -514,7 +564,6 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
         if (memory === undefined) {
           return { ok: false, error: 'snapshot-required', guidance: '先调用 browser_snapshot 拿到 ref，再点击；不猜测坐标。' } as never
         }
-        audit(BROWSER_TOOLS.click, { ref }, true)
         const result = await call(BROWSER_OPS.input, { kind: 'tap', ref, tabId: memory.tabId, pageGeneration: memory.pageGeneration }, 15_000)
         if (!result.ok) return denied(result) as never
         const state = await stateOf(memory.tabId)
@@ -560,7 +609,6 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
         if (memory === undefined) {
           return { ok: false, error: 'snapshot-required', guidance: '先调用 browser_snapshot 拿到 ref，再输入。' } as never
         }
-        audit(BROWSER_TOOLS.type, { ref, length: text.length }, true)
         const result = await call(BROWSER_OPS.input, {
           kind: 'text', ref, text, replace: replace !== false, tabId: memory.tabId, pageGeneration: memory.pageGeneration,
         }, 15_000)
@@ -596,7 +644,6 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
       execute: async ({ key }: { key: string }, exec) => {
         const session = gate(exec)
         if (!session.ok) return { ok: false, error: 'session-not-full-access', guidance: session.guidance } as never
-        audit(BROWSER_TOOLS.press, { key }, true)
         const memory = requireSnapshot()
         const result = await call(BROWSER_OPS.input, {
           kind: 'key', key,
@@ -756,7 +803,6 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
       execute: async ({ url }: { url: string }, exec) => {
         const session = gate(exec)
         if (!session.ok) return { ok: false, error: 'session-not-full-access', guidance: session.guidance } as never
-        audit(BROWSER_TOOLS.navigate, { url }, true)
         const result = await call(BROWSER_OPS.open, { url }, 20_000)
         if (!result.ok) return denied(result) as never
         resetSessionMemory()
@@ -987,7 +1033,6 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
         if (selected === undefined) {
           return { ok: false, error: 'unknown-identity', guidance: '可用身份：' + IDENTITY_PROFILES.map((p) => p.id).join(', ') } as never
         }
-        audit(BROWSER_TOOLS.setIdentity, { profile }, true)
         const result = await call(BROWSER_OPS.setUa, {
           profile: selected.id, ua: selected.ua, platform: selected.platform, mobile: selected.mobile,
         }, 10_000)
@@ -1025,7 +1070,6 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
         if (selected === undefined) {
           return { ok: false, error: 'unknown-viewport', guidance: '可用视口：' + VIEWPORT_PRESETS.map((p) => p.id).join(', ') } as never
         }
-        audit(BROWSER_TOOLS.setViewport, { preset, fit }, true)
         const result = await call(BROWSER_OPS.viewport, {
           preset: selected.id, route: 'S2', width: selected.width, height: selected.height,
         }, 10_000)
@@ -1066,7 +1110,6 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
       execute: async ({ inline }: { inline?: boolean }, exec: unknown) => {
         const session = gate(exec)
         if (!session.ok) return { ok: false, error: 'session-not-full-access', guidance: session.guidance } as never
-        audit(BROWSER_TOOLS.screenshot, { inline: inline === true }, true)
         const result = await call(BROWSER_OPS.shot, { inline: inline === true }, 15_000)
         if (!result.ok) return denied(result) as never
         return {
