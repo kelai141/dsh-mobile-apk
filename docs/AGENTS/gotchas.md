@@ -2750,3 +2750,17 @@ usage 首行写死了这条：`--derive-anchors 与 --only 默认 dry-run 不落
 ⇒ 同族判据：**凡「一处数据有两份表示」，改一份的工具必须同时改另一份，或者明确拒绝执行。** 把一致性推给用户的下一步操作，等于把红推给用户；而用户的下一个动作通常是「再跑一次别的工具」，那正是最容易做错的时刻。
 
 343. **同一判据在两个平台给出不同结论：`tar -tf` 在 Windows 上输出 CRLF，成员名带尾随 `\r`**：修 `check-combo-cache` 的单文件缓存漏检（#1195）时，构造了一份只含 `home/.dsh/profiles/web/.combo-cache`（无尾斜杠）的 tar 验证判据，Windows 工作树上却判绿、Linux 上判红。真因是判定用路径**分段**比较 `name.split('/').includes('.combo-cache')`，而 Windows 上 `tar -tf` 的输出行尾是 CRLF，分段拿到的是 `'.combo-cache\r'`，与 `'.combo-cache'` 不等——判据静默失效，不报错、不 SKIP、不崩，计数与输出全都「看起来正常」。这类缺陷最容易漏的原因是开发机 Windows / CI Linux：本地绿而 CI 红会被误读成环境问题，反之亦然。修法是**在读入处立即归一化**（`split('\n').map(l => l.replace(/\r/g, '').trim())`），不要指望每条判据各自处理。识别形态：凡是解析外部命令文本输出（`tar -tf`、`git status --porcelain`、`adb shell ls`）再按路径/字段比较的门禁，都该把成员名 `JSON.stringify` 打出来看有没有 `\r`——比读代码快。个人记录见 `docs/contrib/kelai141/2026-10-31-crlf-tar-members.md`。
+
+344. **改了被引用文件的行号，`check-code-map` 会红——而它看起来像"门禁自己坏了"**（2026-10-31 两次实锤）。
+
+现象：一个**纯文档** PR（只往 `gotchas.md` 插了 31 行）+ 一个**纯 CI 配置** PR（往 `pr-gate.yml` 插了 8 行），各自挂掉两条看起来毫不相关的门禁：
+`顶层脚本测试门禁`（报的是 `check-code-map-anchors.test.mjs` 的"对照组必须通过"失败）与 `制度性门禁`（报 `anchor-content-drift`）。
+
+真因：执行地图的锚点是 **`文件:行号` + 期望内容前缀**。被引用文件一插行，同一批锚点全部指向错误的行；对照组拿真实仓库跑 `check-code-map` 自然失败，所以最先喊疼的往往是**测试门禁**，不是地图门禁。
+
+修法（按工具设计，不放宽断言）：
+- 受影响锚点改到实测新行号，**并补 `#expect=<该行去缩进后的 URL 编码前缀>`**——只改行号不补 `#expect`，会继续报 `missing-anchor-expectation`；
+- 跨多行的**范围引用**（`:113-148`）不适合当锚点，改成按名称引用（"`pr-gate.yml` 的 `compile` 作业"），下次位移不再误报；
+- 表格里的裸锚点要加反引号，否则 ` |` 会被算进期望前缀。
+
+防呆：改动前先想一句——**我要动的文件，有没有被 `EXECUTION-MAP.md` 按行号引用？** 有就先准备好重钉；本地跑一次 `node scripts/check-code-map.mjs` 比等 CI 七分钟便宜。
