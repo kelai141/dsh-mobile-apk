@@ -1,6 +1,15 @@
 # build-apk-013.ps1 — 0.13.0 双 ABI APK 本地构建编排（插件注入 → 门禁 → gradle 双 ABI）
-# 前置：scripts/build-snapshot-013.mjs 已产出 .deploy-tmp/snapshot-013/<abi>/snapshot.tar.xz
-# 用法：pwsh build-apk-013.ps1 [-Suffix ""] [-SkipInject] [-OnlyAbi arm64]
+# 用法：pwsh build-apk-013.ps1 [-Suffix ""] [-SkipInject] [-OnlyAbi arm64] [-ExportSnapshots] [-ForceRejectAbi <abi>] [-Fast]
+#
+# 前置快照必须是**本代码集自建**（issue #1242）：
+#   node scripts/build-snapshot-013.mjs <arm64|x86_64>   =>  .deploy-tmp/snapshot-013/<abi>/snapshot.tar.xz
+# 不可跨版本复用官方 release 快照来验「当前 main 能否出包」。理由：engine 范围的补丁由
+# build-snapshot-013.mjs 在**构建快照时**施加（apply-patches --scope engine），而本链的
+# 引擎 overlay 抽验（check-engine-overlay.mjs）检查的是**注入前的源快照**——官方快照只含它发布
+# 那一刻的补丁集，此后 registry 新增任何 engine 补丁，旧快照的 [patch-marker] 断言就会缺席而拒打包。
+#   官方快照的正确用途只有两个：复现该 release 的产物，或作为 build-snapshot-013.mjs 的基座输入。
+#   确实拿官方快照跑链时，被拒的文案会指名缺哪个补丁标记（见 Get-EngineOverlayDenyReason）。
+# 退出码：0 = 全部 ABI 产出且过全部门禁；非 0 = 任一 ABI 被拒 / 门禁判红 / 产物形态或签名不合格。
 param(
     [string]$Suffix = "-SN-1-13",          # 快照测试后缀；正式版传 ""
     [string]$OnlyAbi = "",
@@ -32,6 +41,30 @@ if ($LASTEXITCODE -ne 0) { throw "APK scheme/version regression tests failed" }
 function Deny-Abi([string]$Abi, [string]$Reason) {
     Write-Host "拒绝打包（$Abi）：$Reason"
     $script:rejectedAbis += $Abi
+}
+
+# issue #1242：快照与补丁集不一致时，拒绝文案必须**当场说清是哪几个标记缺席**，而不是
+# 只留一句「引擎 overlay 抽验失败」再让读者去翻上面几十行输出。官方 release 快照会永远
+# 通不过当前代码集的检查（补丁由 build-snapshot-013.mjs 在构建快照时施加，而
+# check-engine-overlay 检的是**注入前**的源快照），这是最容易反复浪费一轮的形态。
+#
+# 判据只认门禁自己的机器标识 "[patch-marker] <补丁 id> 标记「<marker>」缺席"：
+# 它把「快照缺补丁标记」与「包版本漂移 / 依赖缺口」分开——后者该按 check-engine-overlay
+# 的正向/反向面去修，不是重建快照就能好。认不出任何 patch-marker 行时返回 $null，
+# 调用方沿用原文案（绝不猜原因）。
+function Get-EngineOverlayDenyReason([string[]]$Output) {
+    $markerLines = @($Output | Where-Object { $_ -match '\[patch-marker\]' })
+    if ($markerLines.Count -eq 0) { return $null }
+    # 每行形如：  - [patch-marker] zsh-fpath-A1 标记「_dsh_fn」缺席（补丁未施加或版本漂移）
+    $markers = @($markerLines | ForEach-Object {
+        if ($_ -match '\[patch-marker\]\s*(\S+)\s*标记「([^」]+)」') { $Matches[1] + '：「' + $Matches[2] + '」' }
+    } | Where-Object { $_ })
+    if ($markers.Count -eq 0) { return $null }
+    $shown = (($markers | Select-Object -First 3) -join '、')
+    $more = if ($markers.Count -gt 3) { ' 等 ' + $markers.Count + ' 项' } else { '' }
+    return "引擎 overlay 抽验失败：快照缺补丁标记 $shown$more —— 该快照早于本代码集的补丁集"
+        + "（补丁在构建快照时施加，官方 release 快照只含它发布那一刻的补丁集），"
+        + "请用 node scripts/build-snapshot-013.mjs <abi> 按当前代码集重建快照后再打包"
 }
 
 # 注入集产物重建（0.14.2 P1 实锤，task-54 F-1）：本地链此前**没有任何构建步**，直接让 inject-all.py
@@ -311,8 +344,18 @@ foreach ($abi in @('arm64', 'x86_64')) {
 
     # 1b. 引擎 overlay 抽验门禁（0.13.3 W1）：登记表在快照内全量落位（版本精确断言 + presets 在场）
     Write-Host "== 引擎 overlay 抽验（$abi）=="
-    node (Join-Path $Root "scripts\check-engine-overlay.mjs") $snap 2>&1
-    if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "引擎 overlay 抽验失败"; continue }
+    # issue #1242：先收输出与退出码（不得管道直连 Select-Object，会吞 $LASTEXITCODE，见
+    # check-build-chain-abort 判据 C），再把门禁自己指名的补丁标记写进拒绝文案。
+    # 只写「引擎 overlay 抽验失败」时，读者要自己往上翻几十行才知道是「快照缺哪个补丁标记」，
+    # 而这两种失败的处理方式完全不同：缺标记 = 用当前代码集重建快照；版本/依赖漂移 = 修 overlay。
+    $overlayOut = node (Join-Path $Root "scripts/check-engine-overlay.mjs") $snap 2>&1
+    $overlayCode = $LASTEXITCODE
+    $overlayOut | Out-Host
+    if ($overlayCode -ne 0) {
+        $overlayWhy = Get-EngineOverlayDenyReason $overlayOut
+        if (-not $overlayWhy) { $overlayWhy = "引擎 overlay 抽验失败" }
+        Deny-Abi $abi $overlayWhy; continue
+    }
 
     # 1. 插件注入（@dsh-android 专用 + 通用根级包）
     if (-not $SkipInject) {
