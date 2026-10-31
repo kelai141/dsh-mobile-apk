@@ -16,7 +16,7 @@
 // itself evidence that this one is wrong (or right).
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, copyFileSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -169,14 +169,17 @@ if (existsSync(fingerprint)) {
 }
 writeFileSync(fingerprint, digest, 'ascii')
 console.log('snapshot.sha256 = ' + digest)
-// Fail loudly if either gate asset is absent or inconsistent. Without this, a regression in the
-// two generation steps above would silently produce a package whose engine never starts.
-execFileSync(process.execPath, [join(root, 'scripts', 'check-snapshot-fingerprint.mjs'), '--require'],
-  { cwd: root, stdio: 'inherit' })
-
 mkdirSync(dirname(output), { recursive: true })
 // EngineManager refuses to launch when its product ownership manifest is absent.
 // Generate it from the exact embedded archive before Gradle packages assets.
+//
+// ORDER IS LOAD-BEARING (issue #1241): this must run BEFORE the fingerprint gate below. The gate
+// runs with --require and now also demands a *usable* manifest (non-empty entries/profileEntries),
+// so on a clean checkout — where plugin-hard-manifest.json is gitignored and therefore absent —
+// checking first turns every first run of this script into a hard red
+// ("SNAPSHOT-FINGERPRINT CHECK FAILED: Hard 插件清单缺席") even though the very next step was going
+// to create exactly that file. Generating first also makes the gate meaningful: it now validates the
+// manifest derived from THIS archive instead of whatever a previous build left behind.
 execFileSync(process.execPath, [join(root, 'scripts', 'build-hard-manifest.mjs'),
   '--snapshot', snapshot, '--out', join(apkDir, 'app/src/main/assets/plugin-hard-manifest.json')],
   { cwd: root, stdio: 'inherit' })
@@ -184,6 +187,18 @@ const hardManifest = join(apkDir, 'app/src/main/assets/plugin-hard-manifest.json
 if (!existsSync(hardManifest) || readFileSync(hardManifest).length === 0) {
   throw new Error('missing or empty ' + hardManifest + ': engine would refuse to start')
 }
+// Fail loudly if either gate asset is absent or inconsistent. Without this, a regression in the
+// two generation steps above would silently produce a package whose engine never starts.
+execFileSync(process.execPath, [join(root, 'scripts', 'check-snapshot-fingerprint.mjs'), '--require'],
+  { cwd: root, stdio: 'inherit' })
+// Wipe the variant output before Gradle runs (issue #1241, third defect). The debug APK path is
+// reused across runs, and incremental packaging rewrote the new snapshot into the OLD file without
+// truncating: the stale tail stayed on disk, the central directory referenced only the last segment,
+// and the artifact ballooned from 206,532,103 B to 407,510,549 B (3309 local file headers vs 241
+// central-directory entries; ~201 MB unreferenced hole). Installing that file doubles the transfer
+// and it cannot be used as verification evidence. Same rule as build-apk-engine.mjs:102 and the
+// local chain (build-apk-013.ps1 clears this run per ABI): the terminal APK is always freshly built.
+rmSync(join(apkDir, 'app', 'build', 'outputs', 'apk', 'debug'), { recursive: true, force: true })
 const gradle = process.platform === 'win32' ? 'gradlew.bat' : './gradlew'
 const args = [':app:assembleDebug', '--no-daemon', '--console=plain', '-PversionNameSuffix=-DEV-FAST']
 console.log('DEV-FAST: all release gates skipped; artifact is for local verification only')
