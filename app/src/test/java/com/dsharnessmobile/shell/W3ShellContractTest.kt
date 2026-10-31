@@ -300,6 +300,35 @@ class W3ShellContractTest {
     )
   }
 
+  // ── profile 的 node_modules/.bin 必须真的进 PATH（子智能体插件的 codex 只能从这里找到） ──
+
+  @Test
+  fun shellEnvInjectsTheProfileBinDir() {
+    val code = codeOnly(source("EngineManager.kt"))
+    // 判据（注入这一半）：值那一半由 EnginePathTest 锁死；这里锁「真的接进了 shellEnv()」。
+    // 只写对 enginePath() 而 shellEnv() 仍自己拼字面量，引擎进程就永远拿不到这条 PATH——
+    // 这正是本缺陷的形态（插件装好、二进制在设备上，bash 里却 which 不到）。
+    assertTrue(
+      "PATH 必须由 enginePath(usrDir, activeProfileBinDir()) 产出，不得在 shellEnv() 里另拼字面量",
+      code.contains("\"PATH\" to enginePath(usrDir, activeProfileBinDir())"),
+    )
+    assertFalse(
+      "shellEnv() 不得残留旧的硬编码 PATH 字面量（会绕开 enginePath 的追加与顺序判据）",
+      code.contains("\"PATH\" to (usrDir.absolutePath + \"/bin:/system/bin\")"),
+    )
+    // profile 名必须从壳侧唯一真源推导，不得在这个解析器里写死 "web"。
+    assertTrue(
+      "profile bin 目录必须由 PluginMounts.PROFILE 推导（壳侧当前 profile 的唯一真源）",
+      code.contains("\"profiles/\" + PluginMounts.PROFILE"),
+    )
+    // 反证**只看解析器自己的函数体**：本文件别处（快照事务、Hard bundle 修复）本来就有
+    // ".dsh/profiles/web" 的历史字面量，对全文件断言会给出与该解析器无关的假红。
+    val resolver = memberBody(code, "private fun activeProfileBinDir()")
+    assertFalse("activeProfileBinDir 不得写死 profiles/web", resolver.contains("profiles/web"))
+    assertFalse("activeProfileBinDir 不得写死 .dsh/profiles/", resolver.contains(".dsh/profiles/"))
+    assertTrue("解析器必须落在 node_modules/.bin", resolver.contains("node_modules/.bin"))
+  }
+
   @Test
   fun bootSegmentsInstrumentationIsWiredOnBothEnds() {
     val collector = codeOnly(source("LogCollector.kt"))

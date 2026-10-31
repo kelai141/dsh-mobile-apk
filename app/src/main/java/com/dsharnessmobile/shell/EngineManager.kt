@@ -2496,6 +2496,18 @@ class EngineManager(private val context: Context, private val pickToken: String?
   }
 
   /**
+   * 当前 profile 的 `node_modules/.bin`；目录不在（还没装过任何插件）时返回 null。
+   *
+   * profile 名取 [PluginMounts.PROFILE]——壳侧「当前 profile」的唯一真源（与
+   * `PATCH_REL` / `DSH_UNDO_PROFILE` 同源）。这里**不新写 profile 名字面量**：
+   * 引擎 argv 里的 `web` 与磁盘目录必须始终是同一条来源，否则某天换 profile 就会出现
+   * 「引擎跑 A、PATH 指向 B」这种没人能一眼看出来的错配。
+   */
+  private fun activeProfileBinDir(): File? =
+    File(File(File(homeDir, ".dsh"), "profiles/" + PluginMounts.PROFILE), "node_modules/.bin")
+      .takeIf { it.isDirectory }
+
+  /**
    * Snapshot environment shared by engine/console/log processes (PATH/LD_LIBRARY_PATH/HOME/DSH_HOME/
    * TERMUX_* injected explicitly — the snapshot is self-sufficient, no Termux app needed). Idempotent:
    * safe to call repeatedly (ensurePrivateDshData and the TMPDIR mkdirs are both idempotent).
@@ -2519,7 +2531,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
       )
     } else emptyMap()
     return mapOf(
-      "PATH" to (usrDir.absolutePath + "/bin:/system/bin"),
+      "PATH" to enginePath(usrDir, activeProfileBinDir()),
       "LD_LIBRARY_PATH" to (usrDir.absolutePath + "/lib"),
       "HOME" to homeDir.absolutePath,
       // 0.14.2 D13：侧边栏「新建终端」的默认 shell。上游 subprocess-local 的
@@ -3138,6 +3150,37 @@ internal fun heapOptionFrom(heapMb: Int): String =
  */
 internal fun pnpmStoreDir(homeDir: File): String =
   File(File(File(homeDir, ".local"), "share"), "pnpm/store").absolutePath
+
+/**
+ * 引擎/控制台/日志子进程的 PATH——**唯一真源**（[EngineManager.shellEnv] 只调它，不再自己拼）。
+ *
+ * 为什么要把 profile 的 `node_modules/.bin` 追加到末尾：
+ * 用户装的插件可以带自己的可执行文件（实测 `@deepseek-ai/dsh-subagent-codex@0.2.1-rc.3` 的
+ * dependencies 里就有 `@openai/codex`，pnpm 会在 profile 的 `node_modules/.bin` 落下 `codex` 软链），
+ * 而旧 PATH 只有 `<files>/usr/bin:/system/bin`——于是「插件装好了、二进制也在设备上」，bash 里
+ * 敲 `codex` 却是 `command not found`。设备实测（emulator-5566，Android 15 x86_64）：
+ * `.bin/codex` 存在且 `test -x` 为真，而 `which codex` 退出码 1。
+ *
+ * 三条口径，缺一条都会引入新问题：
+ *  1. **只追加到末尾**：工厂 `usr/bin` 必须始终优先。用户包里的同名可执行文件（例如某个插件
+ *     自带一份 `node` / `sh`）不得遮盖快照工具链——那是整台设备的运行底座。
+ *  2. **目录不存在就不加**：没装过任何插件时不产生一条指向空目录的 PATH 项（也避免把
+ *     「空目录」这种事实写进诊断日志里）。
+ *  3. **profile 名不得硬编码在这里**：调用方从壳侧唯一真源推导（见
+ *     `EngineManager.activeProfileBinDir`），本函数只负责拼接与顺序。
+ *
+ * 提到顶层是为了可断言——`shellEnv()` 需要 Context，JVM 单测拿不到；这里锁「拼接与顺序」，
+ * 「真的接进了 shellEnv()」那一半由 W3ShellContractTest 的源码扫描锁定（与 [pnpmStoreDir] 同款）。
+ *
+ * @param usrDir - 快照前缀（`<files>/usr`）。
+ * @param profileBinDir - 当前 profile 的 `node_modules/.bin`；不存在时传 null。
+ * @returns `<usr>/bin:/system/bin`，或在 profile bin 目录存在时追加 `:<profileBinDir>`。
+ */
+internal fun enginePath(usrDir: File, profileBinDir: File?): String {
+  val base = usrDir.absolutePath + "/bin:/system/bin"
+  if (profileBinDir == null || !profileBinDir.isDirectory) return base
+  return base + ":" + profileBinDir.absolutePath
+}
 
 /**
  * P-AC-04 修尺子（0.14.8）：监听观察窗口，与冷启动预算同量级；窗口本身**不改**。
