@@ -7,7 +7,7 @@ import { mkdtempSync, mkdirSync, rmSync, symlinkSync, lstatSync, readlinkSync, w
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { sanitizeSymlinks, OLD_DEVICE_PREFIX } from './symlink-sanitize.mjs'
+import { sanitizeSymlinks, OLD_DEVICE_PREFIX } from './lib/symlink-sanitize.mjs'
 
 /** 建一棵最小 stage 树：usr/bin + usr/lib，返回根路径。 */
 function makeStage() {

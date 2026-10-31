@@ -42,7 +42,7 @@ jobs:
       # 越界目标曾被改写成逃出 stage 树的相对链。两条都只能在真软链上复现，故单独跑这一份。
       - name: Symlink sanitize regressions
         if: always()
-        run: node --test scripts/lib/symlink-sanitize.test.mjs
+        run: node --test scripts/symlink-sanitize.test.mjs
       - name: APK 组装、版本与签名回归
         if: always()
         run: node --test scripts/check-apk-signatures.test.mjs scripts/resolve-version-suffix.test.mjs scripts/build-apk-engine.test.mjs scripts/check-third-party.test.mjs scripts/check-upstream-patch-bytes.test.mjs scripts/wsl-node-command.test.mjs scripts/check-bridge-symmetry.test.mjs scripts/check-snapshot-secrets.test.mjs
