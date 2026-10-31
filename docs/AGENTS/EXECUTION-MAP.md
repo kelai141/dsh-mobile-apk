@@ -1771,7 +1771,7 @@ FileProvider XML path regression coverage: `scripts/check-manifest-hardening.tes
   - `scripts/patches/data/registry-scan-c4.mjs:11`（同步 flush 的 Loader 临时索引与 manifest 复用；详细设备计时/预算见 RUNTIME-PATCHES §7.6，自动补给的异步 checkpoint 见 model-capability README）
   - `scripts/patches/data/client-index-loader-barrier.mjs:3`（G2：首页HTML在快照插件图前等待同一host Loader收敛；静态资源不参与等待）
   - `scripts/patches/data/undo-safe-transaction-snippet.mjs:1`（Safe Mode 事务代码模板；由 `apply-patches.mjs:540#expect=el%28%27p%27%2C%20%27%7BclassName%3A%22dshm-summary%22%7D%27%2C%20%27k%28o%2Ca%29%27%29%2C` 注入 vendor 快照代码）
-  - `scripts/build-apk-013.ps1:654#expect=if%20(%24rejectedAbis.Count%20-gt%200)%20%7B%20Write-Host%20%22%E6%9C%89%20ABI%20%E8%A2%AB%E9%97%A8%E7%A6%81%E6%8B%92%E7%BB%9D%E2%80%94%E2%80%94%E4%B8%8D%E5%8F%91%E7%89%88%EF%BC%88exit%201%EF%BC%89%22%3B%20exit%201%20%7D`（被拒非空即 exit 1 的收口）
+  - `scripts/build-apk-013.ps1:668#expect=if%20(%24rejectedAbis.Count%20-gt%200)%20%7B%20Write-Host%20%22%E6%9C%89%20ABI%20%E8%A2%AB%E9%97%A8%E7%A6%81%E6%8B%92%E7%BB%9D%E2%80%94%E2%80%94%E4%B8%8D%E5%8F%91%E7%89%88%EF%BC%88exit%201%EF%BC%89%22%3B%20exit%201%20%7D`（被拒非空即 exit 1 的收口）
   - `scripts/build-snapshot-013.mjs:31`（Windows 宿主重入 WSL 的判据）
   - `scripts/build-snapshot-013.mjs:291`（引擎树补丁 --apply --scope engine）
   - `scripts/build-snapshot-013.mjs:1400#expect=const%20xzRun%20%3D%20shStatus(`（归档 tar | xz，快照产物的唯一产出点）
