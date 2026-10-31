@@ -625,10 +625,49 @@ log('dpkg status: ' + dpkgStatus.length + ' 包，available: ' + availableBlocks
 // ── 6. shebang 与 ELF RUNPATH 重写（com.termux → com.dsharnessmobile.shell）──
 log('重写 shebang/RUNPATH…')
 execSync(`${PYTHON} scripts/fix-shebang.py "${U}" ${NEW_PREFIX}`, { encoding: 'utf8', stdio: 'inherit' })
-// termux-elf-cleaner：清理 ELF 中残留 com.termux RUNPATH（幂等：已清理的无操作）
+// termux-elf-cleaner：清理 ELF 中残留 com.termux RUNPATH。
+//
+// 【issue #1147】它是 **Android 目标**的 ELF，不是宿主 ELF：
+//   $ file usr/bin/termux-elf-cleaner
+//   ELF 64-bit LSB shared object, x86-64, ... interpreter /system/bin/linker64, stripped
+//   NEEDED: libc++_shared.so, libdl.so, libc.so     ← bionic，不是 glibc
+// CPU 架构与 WSL 相同（都是 x86-64），但**解释器是 Android 的 /system/bin/linker64**，
+// 宿主上没有它，内核无法加载该映像，bash 报
+//   "cannot execute: required file not found"
+// 并返回 **127**。所以这不是路径写错、也不是缺可执行位，是**平台不匹配**——
+// 在 Windows/WSL/macOS/Linux 构建机上它永远跑不起来。
+//
+// 判据（为什么跳过不改变产物，而不是「掩盖错误」）：
+//   实测基座 x64-base 的 usr/bin 有 361 个 ELF，**361 个**的 RUNPATH 都含
+//   /data/data/com.termux/files/usr/lib；而**已发布的 v0.14.10 官方快照**里 usr/bin
+//   有 393 个 ELF，**393 个仍是原样**（同样含 com.termux，不含的 0 个）。
+//   即：这一步在历史所有发布产物里**从未真正生效过**。#1121 之前它被 `| tail -3` 吞掉
+//   退出码（管道状态取末尾 tail=0），构建照样「成功」，产物带着原 RUNPATH 发布并正常使用
+//   ——设备侧靠 LD_LIBRARY_PATH 解析库。是 #1121 给 sh() 加 pipefail 后才暴露成硬失败。
+//   因此宿主上跳过它**不改变产物**：与历史发布件在这一项上逐项相同。
+//   也没有任何门禁断言 RUNPATH 必须干净（elf-check.mjs 只看 ELF 头 machine 字段）。
+//
+// 处置：用**平台探测**决定是否执行，而不是无条件跳过、也不是掩盖退出码。
+//   - 宿主有 Android linker（Termux/Android 上构建）→ 照旧真跑；跑失败即中止（不静默）。
+//   - 宿主没有 → 显式跳过并打印原因。
+// 真要清理 com.termux RUNPATH，正确做法是在宿主侧用 glibc 工具改写（如 patchelf），
+// 而不是在宿主上执行 Android 二进制；那是独立改动，见 #1147。
 const cleaner = join(U, 'bin', 'termux-elf-cleaner')
 if (existsSync(cleaner)) {
-  wsl(`cd "${wslPath(U)}" && chmod +x bin/termux-elf-cleaner && LD_LIBRARY_PATH=lib bin/termux-elf-cleaner bin/* 2>/dev/null | tail -3`)
+  const androidLinker = shStatus('test -x /system/bin/linker64')
+  if (androidLinker.status === 0) {
+    // 去掉原来的 `2>/dev/null | tail -3`：它把 stderr 现场和退出码都丢了。
+    const run = shStatus(`cd "${wslPath(U)}" && chmod +x bin/termux-elf-cleaner && LD_LIBRARY_PATH=lib bin/termux-elf-cleaner bin/*`)
+    if (run.status !== 0) {
+      console.error(`termux-elf-cleaner 执行失败（退出码 ${run.status}）：`)
+      console.error((run.stderr || run.stdout || '').trim().split('\n').slice(-20).join('\n'))
+      process.exit(1)
+    }
+    log('termux-elf-cleaner 已执行（宿主具备 Android linker）')
+  } else {
+    log('跳过 termux-elf-cleaner：宿主无 /system/bin/linker64，Android 目标 ELF 无法加载'
+      + '（issue #1147；历史发布件同样是原样 RUNPATH，本步骤不改变产物）')
+  }
 }
 
 // ── 7. 三缺陷固化 ──────────────────────────────────────────────────────
