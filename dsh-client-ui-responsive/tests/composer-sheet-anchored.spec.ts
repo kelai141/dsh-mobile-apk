@@ -378,12 +378,33 @@ describe('横屏：锚在「+」上的原生卡片', () => {
     expect(document.querySelector<HTMLElement>(PANEL)!.contains(document.activeElement)).toBe(true)
   })
 
-  it('动画原点在左下、120ms', () => {
-    const block = COMPOSER_SHEET_CSS.slice(COMPOSER_SHEET_CSS.indexOf('transform-origin: bottom left'))
-    expect(block.length).toBeGreaterThan(0)
-    expect(COMPOSER_SHEET_CSS).toContain('transform-origin: bottom left')
+  /**
+   * 卡片动效：从「+」长出来（规格）。
+   *
+   * 三件事各自可证伪：
+   *   1. 动画存在且时长落在 180-220ms 区间（规格），曲线是无回弹的单调缓出；
+   *   2. 关键帧是 scale(0.96) + translateY(4px) + opacity，不是纯淡入；
+   *   3. **transform-origin 不写在 CSS 里** —— 它必须由脚本按「+」的实测中心内联写入。
+   *      写死百分比（bottom left / 50% 50%）在真机上对不上：卡片宽度与「+」位置都随
+   *      视口变化。这条断言防的就是「图省事写死一个原点」。
+   */
+  it('卡片动效：scale(0.96)+位移+淡入，180-220ms，原点由脚本实测写入而非 CSS 写死', async () => {
+    buildComposer(NINE)
+    await open(true)
     expect(COMPOSER_SHEET_CSS).toContain('scale(0.96)')
-    expect(COMPOSER_SHEET_CSS).toContain('dsh-composer-card-in 120ms')
+    expect(COMPOSER_SHEET_CSS).toContain('translateY(4px)')
+    // 时长必须在规格区间内：120ms 太快（看不出「长出来」），300ms 以上拖沓。
+    const cardIn = COMPOSER_SHEET_CSS.match(/dsh-composer-card-in (\d+)ms/)
+    expect(cardIn).not.toBeNull()
+    const duration = Number(cardIn![1])
+    expect(duration).toBeGreaterThanOrEqual(180)
+    expect(duration).toBeLessThanOrEqual(220)
+    // 无回弹：曲线必须是无 overshoot 的 cubic-bezier，不能是 ease-out 之类带弹性的简写。
+    expect(COMPOSER_SHEET_CSS).toContain('cubic-bezier(0.215, 0.61, 0.355, 1)')
+    // 原点：CSS 里不得出现写死的 transform-origin，值必须来自内联样式（实测坐标）。
+    expect(COMPOSER_SHEET_CSS).not.toContain('transform-origin:')
+    const panel = document.querySelector<HTMLElement>(PANEL)!
+    expect(panel.style.getPropertyValue('transform-origin')).not.toBe('')
   })
 })
 
