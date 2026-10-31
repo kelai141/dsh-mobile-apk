@@ -9,8 +9,10 @@
 
 1. `<profile>/node_modules/.bin/codex` 确实存在且可执行，但引擎/控制台 PATH 只有 `<files>/usr/bin:/system/bin`，
    所以 bash 里 `which codex` 退出 1。（本 PR 修的就是这条）
-2. 更要紧的：`codex --version` **也是失败的**——`@openai/codex@0.153.4` 的平台二进制根本**没被装上**。
-   把 PATH 修好只能让 `which codex` 变成能过，`codex` 本身仍然起不来。
+2. 更要紧的：`codex --version` **也是失败的**——`@openai/codex@0.153.4` 的平台二进制根本**没被装上**
+   （pnpm 在 Android 上把六条平台可选包全跳过）。把 PATH 修好只能让 `which codex` 变成能过，
+   `codex` 本身仍然起不来；即使补上平台包，还有两条启动路径阻塞（见下文与
+   [issue #1238](https://github.com/kelai141/dsh-mobile-apk/issues/1238)）。
 
 ## 实装过程（复刻用户点「安装」的那条路）
 
@@ -68,23 +70,40 @@ skipped:
 `codex.js` 的 `findCodexExecutable()` 于是抓不到 `@openai/codex-linux-x64/package.json`，直接抛
 `Missing optional dependency`。
 
-**即使手工把包塞进去也不够**：把 `codex-0.153.4-linux-x64.tgz`（129MB）解开、按 `@openai/codex-linux-x64` 摆好后，
-vendor 下那个 258MB 的二进制直接 `Could not find a PHDR: broken executable?` 然后 `Aborted`（exit 134）。
+**手工把包塞进去也只是绕过第一层**：把 `codex-0.153.4-linux-x64.tgz`（129MB）解开、按 `@openai/codex-linux-x64` 摆好后，
+**经 `.bin/codex` 那条链**（软链 → `codex.js` → `child_process.spawn` vendor 二进制）调用会
+`Could not find a PHDR: broken executable?` 然后 `Aborted`（exit 134）。
+
+⚠️ **这个 PHDR 不是"二进制在 Android 上不兼容"**（早期误判，已更正）：同一份二进制**直接执行是正常的**——
 
 ```
-Elf file type is DYN (Shared object file)
-Program Headers: LOAD LOAD LOAD LOAD DYNAMIC TLS GNU_EH_FRAME GNU_STACK GNU_RELRO   # 没有 PHDR
+$ <profile>/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex --version
+codex-cli 0.153.4        # exit 0
 ```
 
-对照组：`@openai/codex@0.166.0` 的 linux-x64 二进制是 `static-pie linked`，在**同一台** emulator-5566 上
-`codex --version` 返回 `codex-cli 0.166.0`、exit 0。也就是说 **0.153.4 这一代的产物在 Android 上不可用，
-换成 0.166.0 才可用**——这与"pnpm 会把平台二进制一起装上"的假设正好相反。
+`readelf -l` 显示它是 static PIE（Type DYN、无 PT_INTERP；program headers 为
+`LOAD LOAD LOAD LOAD DYNAMIC TLS GNU_EH_FRAME GNU_STACK GNU_RELRO`）。**PHDR 报错的真因是 termux-exec 的
+`LD_PRELOAD` 把这次 `spawn` 重定向到 `/system/bin/linker64`** —— 静态 PIE 被当共享对象加载就 abort。
+另有第二条互相独立的阻塞：`.bin/codex` 的 shebang 是 `#!/usr/bin/env node`，而 Android 没有 `/usr/bin/env`
+（快照的 env 在 `<files>/usr/bin/env`）。
+
+0.153.4 与 0.166.0 在这一点上**行为一致**（两者直接执行都 exit 0）；换版本并不能解决启动路径问题。
+完整调查（`supportedArchitectures` / `overrides` / shim 方案 / 两条负控）见
+[issue #1238](https://github.com/kelai141/dsh-mobile-apk/issues/1238)。
 
 ## 本 PR 的边界
 
 本 PR 只做第 1 件事：把 `<profile>/node_modules/.bin` **追加到**引擎/控制台 PATH 的**末尾**
 （工厂 `usr/bin` 仍在前，用户包不得遮盖工具链；目录不存在就不追加；profile 名取 `PluginMounts.PROFILE`，不新写字面量）。
 
-第 2 件事（平台包 `os` 过滤 + 0.153.4 二进制在 Android 上 abort）需要单独决策——可选方向：
-把 `os` 限制在安装期绕开（`pnpm add --config.supportedArchitectures.os=linux` 类手段）、或在插件侧换 `@openai/codex` 版本。
+第 2 件事需要单独决策：装不装得上平台包（pnpm 的 `os` 过滤）与启动路径（`/usr/bin/env` 缺失 + termux-exec 的
+`LD_PRELOAD` 重定向到 linker64）是两个独立问题，**两个都不在本 PR 范围**。
+
+两条都已经过实测：
+- `supportedArchitectures: {os:[current,linux], cpu:[x64], libc:[glibc]}` 能让平台包真正落地；
+- sh wrapper（`#!/system/bin/sh` + `unset LD_PRELOAD` + 自推导前缀）能让 `codex --version` 返回
+  `codex-cli 0.166.0`、exit 0，且两条负控都能重现原失败形态。
+
+**产品决定：隐藏该子智能体，暂不修复**（用户 2026-10-31 定）。将来要修时从
+[issue #1238](https://github.com/kelai141/dsh-mobile-apk/issues/1238) 起。
 **在它被修好之前，只修 PATH 不会让 `codex` 真的能跑**，这一点必须在验收时如实说明。
