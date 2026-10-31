@@ -101,6 +101,17 @@ if (process.argv.includes('--self-test')) {
   const authToken = buildArchive('authtoken', [...base, { path: 'usr/etc/npmrc', content: '//registry.npmjs.org/:_authToken=npm_9Xk2abcdef\n' }])
   // 夹具 6：npmrc 里的 _authToken 在 home/.npmrc（内容级必须抓住，不能只靠路径名）
   const authTokenHome = buildArchive('authtokenhome', [...base, { path: 'home/.npmrc', content: '//registry.npmjs.org/:_authToken=npm_9Xk2abcdef\n' }])
+  // 夹具 7：CA 证书包（.pem 扩展名但只含 CERTIFICATE）——公钥不是机密，必须放行。
+  // 对应实测三份误报：usr/etc/tls/cert.pem、certifi/cacert.pem、GlobalSign.pem。
+  const caBundle = buildArchive('cabundle', [...base, {
+    path: 'usr/etc/tls/cert.pem',
+    content: '-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIU\n-----END CERTIFICATE-----\n',
+  }])
+  // 夹具 8：.pem 里真的放了私钥块 —— 必须判红（证明判据没被扩成「.pem 一律放行」）
+  const pemWithKey = buildArchive('pemwithkey', [...base, {
+    path: 'usr/etc/tls/leaked.pem',
+    content: '-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK\n-----END RSA PRIVATE KEY-----\n',
+  }])
   const noEngine = buildArchive('noengine', [{ path: 'usr/bin/true' }])
   const noUsr = buildArchive('nousr', [{ path: ENGINE }])
 
@@ -114,6 +125,10 @@ if (process.argv.includes('--self-test')) {
     ['夹具 4：JWT 拆两行 → FAILED（多行匹配）', jwtSplit, (r) => r.code === 1 && r.out.includes('FAIL[credential-content]')],
     ['夹具 5：_authToken 在 usr/etc/npmrc → FAILED', authToken, (r) => r.code === 1 && r.out.includes('FAIL[credential-content]')],
     ['夹具 6：_authToken 在 home/.npmrc → FAILED（内容级，不只看路径名）', authTokenHome, (r) => r.code === 1 && r.out.includes('FAIL[credential-content]')],
+    // 正控：CA 证书包（.pem 只含 CERTIFICATE）必须 PASSED —— 旧实现按扩展名判，这里会假红
+    ['夹具 7：.pem 只含 CA 证书 → PASSED（公钥/证书包不是机密）', caBundle, (r) => r.code === 0 && r.out.includes('SNAPSHOT_SECRET_CHECK_PASSED')],
+    // 负控：.pem 里真有私钥块必须判红 —— 证明「.pem 按内容判」没被扩成「.pem 一律放行」
+    ['夹具 8：.pem 内含 RSA 私钥块 → FAILED（内容判据仍在）', pemWithKey, (r) => r.code === 1 && r.out.includes('FAIL[private-key-file]')],
     ['缺 @deepseek-ai/dsh 引擎包 → 硬失败（不是发行快照）', noEngine, (r) => r.code === 1 && r.out.includes('不是发行快照')],
     ['缺 usr/ 前缀 → 硬失败', noUsr, (r) => r.code === 1 && r.out.includes('没有 usr/ 前缀')],
   ]
@@ -138,7 +153,7 @@ if (process.argv.includes('--self-test')) {
     console.log((ok ? 'PASS  ' : 'FAIL  ') + label)
     if (!ok) bad += 1
   }
-  for (const a of [clean, creds, sk, configJson, privKey, jwt, jwtSplit, authToken, authTokenHome, noEngine, noUsr]) rmSync(a, { force: true })
+  for (const a of [clean, creds, sk, configJson, privKey, jwt, jwtSplit, authToken, authTokenHome, caBundle, pemWithKey, noEngine, noUsr]) rmSync(a, { force: true })
   console.log(bad === 0
     ? 'SNAPSHOT_SECRET_SELF_TEST_PASSED（' + (checks.length + 7) + ' 项）'
     : 'SNAPSHOT_SECRET_SELF_TEST_FAILED（' + bad + ' 项）')
@@ -208,9 +223,46 @@ const stor = pathHits(/home\/\.dsh\/storages\//i)
 if (stor.length) failOut('storages', stor)
 const anon = pathHits(/\.anonymous-user-id/i)
 if (anon.length) failOut('anon-id', anon)
-// 私钥文件：路径即证据（issue #1033 夹具 2：home/.ssh/id_rsa 此前只在 settings.yaml 内容级判据里才看私钥头）。
-const privKeyFiles = pathHits(/(?:^|\/)(?:id_(?:rsa|dsa|ecdsa|ed25519)|\.ssh\/|.*\.(?:pem|key|p12|pfx))$/i)
+// 私钥文件（issue #1033 夹具 2 + 本次误报修正）。
+//
+// 分两类：
+//   ㈠ **本身就是私钥载体**——`.ssh/` 目录、`id_rsa/id_dsa/id_ecdsa/id_ed25519` 这类固定名，
+//      以及 `.p12/.pfx` 密钥库容器。路径即证据，内容无关（p12/pfx 是二进制容器，
+//      不便按文本判私钥头，保持路径判据）。
+//   ㈡ **`.pem` / `.key` 只是扩展名**——公钥、CA 证书包、TLS 信任根全都用它。
+//      实测本次误报的三份，私有钥块计数全为 0、只有 CERTIFICATE：
+//        usr/etc/tls/cert.pem                      → BEGIN CERTIFICATE 118 / PRIVATE KEY 0
+//        .../pip/_vendor/certifi/cacert.pem        → 符号链接，指向 ../../../../../../etc/tls/cert.pem
+//                                                    （即上面那份 CA 包；tar -xOf 读链接成员得空串）
+//        .../rubygems/ssl_certs/GlobalSign.pem     → BEGIN CERTIFICATE 1   / PRIVATE KEY 0
+//      扩展名判据会把它们全判成 "私钥文件"，而它们恰恰是**公钥/证书**——公钥不是机密。
+//      所以这两类必须**看内容**：只有真出现 PEM 私钥头才判红。
+const privKeyCarriers = pathHits(/(?:^|\/)(?:id_(?:rsa|dsa|ecdsa|ed25519)|\.ssh\/|.*\.(?:p12|pfx))$/i)
   .filter((l) => !/\/(?:node_modules|usr\/lib\/node_modules)\//.test(l))
+/** PEM 私钥头（与 credentialHit 里同一条，避免两处漂移）。 */
+const PEM_PRIVKEY_RE = /-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----/
+const privKeyFiles = [...privKeyCarriers]
+const pemKeyUnreadable = []
+for (const member of pathHits(/(?:^|\/).*\.(?:pem|key)$/i)
+  .filter((l) => !/\/(?:node_modules|usr\/lib\/node_modules)\//.test(l))) {
+  let content = ''
+  try {
+    content = execFileSync(TAR, ['-xOf', abs, member], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 })
+  } catch {
+    pemKeyUnreadable.push(member)
+    continue
+  }
+  if (PEM_PRIVKEY_RE.test(content)) privKeyFiles.push(member)
+}
+// 读不出来的 .pem/.key：不能当「干净」放行（否则损坏的归档或超 maxBuffer 就成了逃逸口）。
+// 处置与后面内容级扫描一致：--require 判红，非严格档计 SKIP 并打印。
+if (pemKeyUnreadable.length > 0) {
+  const msg = pemKeyUnreadable.length + ' 个 .pem/.key 成员的内容读取失败（归档部分损坏或超 maxBuffer？）：'
+    + pemKeyUnreadable.slice(0, 3).join(', ') + ' —— 私钥内容判据未执行'
+  if (REQUIRE) failHard(msg + '\n  --require 档不得以 SKIP 结案')
+  skipped += 1
+  console.log('SKIP(#' + skipped + ')  ' + msg)
+}
 if (privKeyFiles.length) failOut('private-key-file', privKeyFiles)
 
 /**
