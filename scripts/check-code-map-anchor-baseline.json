@@ -368,7 +368,6 @@
     "scripts/check-snapshot-builder-output.mjs:156": 2,
     "scripts/check-plugin-tests.mjs:35": 3,
     ".github/workflows/pr-gate.yml:41": 3,
-    "scripts/check-runtime-assets.mjs:96": 3,
     "VdisplayController.kt:753": 2,
     "MainActivity.kt:793": 2,
     "verify-state-sync.mjs:248": 2,
@@ -513,7 +512,6 @@
     "scripts/source-build/check-dsh-source-snapshot.mjs:25": 1,
     "scripts/check-release-gates.mjs:167": 1,
     "scripts/check-boot-budget.mjs:671": 1,
-    "scripts/check-runtime-assets.mjs:126": 1,
     "scripts/check-boot-budget.mjs:609": 1,
     "scripts/check-inject-completeness.mjs:100": 1,
     "scripts/check-browser-syntax-floor.mjs:536": 1,
@@ -3864,13 +3862,13 @@
       "${mapPart}"
     ],
     "scripts/check-boot-budget.mjs:609": [
-      "okOf(r, 'C1') === false, 'C1 ok=' + okOf(r, 'C1'))"
+      "const run = (segText, probeOut) => runChecks({"
     ],
     "scripts/check-boot-budget.mjs:671": [
-      "{"
+      "check('④b-⑥ 行数不一致的判红理由点名截断/漏读',"
     ],
     "scripts/check-boot-budget.mjs:681": [
-      "const c5skip = absent.results.find((x) => x.id === 'C5')"
+      "{"
     ],
     "scripts/check-bridge-symmetry.mjs:1": [
       "#!/usr/bin/env node"
@@ -3943,12 +3941,6 @@
     ],
     "scripts/check-release-gates.mjs:28": [
       "/**"
-    ],
-    "scripts/check-runtime-assets.mjs:126": [
-      "*/"
-    ],
-    "scripts/check-runtime-assets.mjs:96": [
-      ""
     ],
     "scripts/check-snapshot-builder-output.mjs:156": [
       "const writesTar = text.includes(\"join(OUT_DIR, 'snapshot.tar.xz')\")"
