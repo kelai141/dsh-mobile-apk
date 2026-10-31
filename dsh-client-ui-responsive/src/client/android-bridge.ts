@@ -15,10 +15,6 @@ export interface OpenPathResult {
 }
 
 export interface AndroidShellBridge {
-  /** Native consent precedes one foreground read; dsh:clipboard-text carries the requestId result. */
-  requestClipboardText?: (requestId: string) => void
-  /** Revoke only the matching pending read when its editor or preview is disposed. */
-  cancelClipboardText?: (requestId: string) => void
   /** H1: sync system-dark query (fallback for vendor WebViews whose matchMedia is stuck on light). */
   getSystemDark?: () => boolean
   /**

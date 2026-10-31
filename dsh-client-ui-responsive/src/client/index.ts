@@ -58,7 +58,6 @@ import { DEV_SECTION_CSS } from './dev-section/dev-section.css.ts'
 import { MARKETPLACE_CSS } from './marketplace/marketplace.css.ts'
 import { registerMarketplaceAction } from './marketplace/marketplace-entry.tsx'
 import { installAboutEntry } from './mobile/about-entry.ts'
-import { installClipboardModelDrafts } from './mobile/clipboard-model-drafts.ts'
 import { ABOUT_ENTRY_CSS } from './mobile/about-entry.css.ts'
 import { AboutSection } from './mobile/about-section.tsx'
 import { GeneralSettings } from './general-settings/GeneralSettings.tsx'
@@ -413,7 +412,6 @@ export function apply(ctx: ClientContext): void {
   // 「设置 → 通用」底部那行版本改成「关于」入口，点开看壳与引擎两个版本。
   ctx.effect(() => injectStyle('about-entry', ABOUT_ENTRY_CSS), 'ui-responsive: about entry styles')
   ctx.effect(() => installAboutEntry(), 'ui-responsive: about entry')
-  ctx.effect(() => installClipboardModelDrafts(), 'ui-responsive: clipboard model drafts')
 
   // 「关于」分区：入口在那行版本的位置（about-entry 点击时切到本分区）。
   ctx.slots.inject('settings.section', () => ctx.slots.register({

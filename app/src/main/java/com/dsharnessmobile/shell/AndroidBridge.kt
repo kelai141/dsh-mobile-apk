@@ -38,8 +38,6 @@ class AndroidBridge(
    *  因此 MainActivity 无需传参即可返回真实值。 */
   private val onGetImmersiveMode: () -> Boolean = { ImmersiveMode.current() },
   private val onCopyTextRequest: (text: String) -> Boolean = { false },
-  private val onRequestClipboardText: (requestId: String) -> Unit = {},
-  private val onCancelClipboardText: (requestId: String) -> Unit = {},
   private val pickToken: String? = null,
   private val onRestartEngine: () -> Boolean = { false },
   private val onShutdownToGuide: () -> Unit = {},
@@ -325,14 +323,6 @@ class AndroidBridge(
    */
   @JavascriptInterface
   fun copyText(text: String): Boolean = trusted { onCopyTextRequest(text) }
-
-  /** Request a foreground native consent prompt; text arrives through dsh:clipboard-text. */
-  @JavascriptInterface
-  fun requestClipboardText(requestId: String) = trusted { onRequestClipboardText(requestId) }
-
-  /** Revoke a disposed editor's outstanding native clipboard prompt. */
-  @JavascriptInterface
-  fun cancelClipboardText(requestId: String) = trusted { onCancelClipboardText(requestId) }
 
   /**
    * 0.13.1 W4：配置导出（私有 settings.yaml -> Documents/dshdata/exports/config/settings.yaml）。
