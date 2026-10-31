@@ -331,7 +331,7 @@ for (const [path, meta] of want) {
     if (ver !== meta.version) fails.push(`[${meta.kind}] 版本不符: ${meta.name} 期望 ${meta.version} 实得 ${ver}`)
     checked++
   } else if (meta.kind === 'patch-marker') {
-    if (!meta.verifier && !content.includes(meta.marker)) fails.push(`[patch-marker] ${meta.name} 标记「${meta.marker}」缺席（补丁未施加或版本漂移）`)
+    if (!meta.verifier && !content.includes(meta.marker)) fails.push(`[patch-marker] ${meta.name} 标记「${meta.marker}」缺席（快照早于本代码集的补丁集，或补丁未施加；engine 补丁在构建快照时施加，官方 release 快照只含它发布那一刻的补丁集 —— 请用 node scripts/build-snapshot-013.mjs <abi> 按当前代码集重建快照后再打包）`)
     for (const marker of meta.requiredMarkers ?? []) {
       if (!content.includes(marker)) fails.push(`[patch-marker] ${meta.name} 必需标记「${marker}」缺席（快照来自旧补丁集）`)
     }
