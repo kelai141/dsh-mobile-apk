@@ -463,6 +463,16 @@ foreach ($abi in @('arm64', 'x86_64')) {
             Deny-Abi $abi "快照权限模式校验失败"; continue
         }
     }
+    # 快照内 node 入口 shim（真机实证 2026-10-31，实例跑在 Android 多用户 user 10 上）：
+    #   缺陷 1：usr/bin/pnpm 的 shim 把构建期前缀 /data/user/0/<包名>/files/usr 烧死在 exec 行里，
+    #     而 user 10 的运行前缀是 /data/user/10/... ⇒ 设备上 pnpm exit 127（市场安装全废）；
+    #   缺陷 2：usr/bin/npm 是 symlink（-> ../lib/node_modules/npm/bin/npm-cli.js）⇒ pnpm 的
+    #     passThruToNpm spawnSync npm 经它落地 ENOENT，npm 通道整条断掉。
+    # 判据见 scripts/check-snapshot-node-shims.mjs（N1-N5：成员类型 / tar 模式 / 自定位 / exec 目标 /
+    # 前缀回流）。两类缺陷构建期全绿、只有真机才炸，故失败即拒打包 —— 不留到设备验收发现。
+    Write-Host "== 快照 node 入口 shim 门禁（$abi）=="
+    node (Join-Path $Root "scripts\check-snapshot-node-shims.mjs") $snapIn 2>&1
+    if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "快照 node 入口 shim 不自定位 / usr/bin/npm 不是普通文件（多用户设备 pnpm exit 127 / npm 通道 ENOENT）"; continue }
     # 第三方许可合规（GPL 义务 A1/A2 门禁 2026-08-23）：copyleft 包许可证全文须随快照分发，
     # 矩阵须覆盖 dpkg status 全部包；缺失直接拒绝打包（--- tar 视图：9p 权限不影响判定）。
     # issue #1075：GPL 许可合规门禁。与上面 :388 同一个坑——它失败时打印「THIRD-PARTY CHECK FAILED」

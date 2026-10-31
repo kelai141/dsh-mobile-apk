@@ -756,10 +756,77 @@ if (shellPath.hits > 0) {
   console.warn('警告: git SHELL_PATH 白名单为空（git.real / libexec/git-core 缺失，apk#247 未施加）')
 }
 
-// ── 7e. pnpm standalone（F4 市场安装的运行时依赖——`dsh plugin add` 走 pnpm，见 apps/cli plugin.ts）──
+// ── 7e. pnpm / npm standalone shim（F4 市场安装的运行时依赖——`dsh plugin add` 走 pnpm，见 apps/cli plugin.ts）──
 // 快照无 pnpm 时市场一键安装失败（实测 "pnpm not found on PATH"）：从 npm registry 拉 standalone 包
 // （自包含，bundledDependencies），解到 usr/lib/node_modules/pnpm + usr/bin/pnpm shim（node 执行）。
 // 镜像链（与 termux MIRRORS 同思路）：registry.npmjs.org → registry.npmmirror.com（下载失败回退）。
+//
+// 真机实证（小米12 / HyperOS2 / Android14，实例跑在 Android 多用户 user 10 上）：早先的 shim 把
+// 构建期 NEW_PREFIX（/data/user/0/<pkg>/files/usr）**烧死在 exec 行**里，而该设备的真实前缀是
+// /data/user/10/<pkg>/files/usr ⇒ exec 的 node 路径不存在 ⇒ exit 127，所有 pnpm 安装链
+// （插件市场 / 普通插件 / subagent）全废。同类风险还有第 6 步 fix-shebang.py 的 A/B 类重写——
+// 它会把 usr/bin、usr/lib 下的裸 env shebang 一并钉到同一个构建期前缀。
+// 结论：**shim 必须自定位**——前缀在设备上由 $0 反推（解析软链后取上一级目录 = usr），构建期一个字面量都不烧。
+//
+// 落点两个，共用同一份模板：
+//   usr/bin/pnpm -> lib/node_modules/pnpm/bin/pnpm.cjs（standalone 包，本段下载）
+//   usr/bin/npm  -> lib/node_modules/npm/bin/npm-cli.js（基座自带 npm payload）
+//
+// 写前必须先删旧条目：基座里的 usr/bin/npm 是**指向 ../lib/node_modules/npm/bin/npm-cli.js 的软链**，
+// 而 writeFileSync 默认 flag='w' 会**跟随软链**写——直接把 npm-cli.js 本体写坏（pnpm 落点同样防御）。
+const NPM_CLI_REL = 'lib/node_modules/npm/bin/npm-cli.js'
+
+/**
+ * 生成自定位 shim 文本（pnpm / npm 共用；逐字节模板只替换 <LABEL> / <PKG> / <CLI>）。
+ *
+ * 运行时算法：$0 可能是裸命令名（PATH 命中）也可能是路径 -> command -v 归一成路径；有 readlink
+ * 就解析软链（无 readlink 或解析失败均退化为原路径）；取上一级目录 = usr，此后 node 与包体相对它拼。
+ */
+const selfLocatingShim = (label, pkg, cli) => [
+  '#!/system/bin/sh',
+  '# dsh-mobile: ' + label + ' shim (self-locating; prefix is derived from $0 so a non-user-0 install prefix still finds node)',
+  'self=$0',
+  'case "$self" in /*) ;; *) self=$(command -v "$self") ;; esac',
+  'if command -v readlink >/dev/null 2>&1; then',
+  '  resolved=$(readlink -f "$self" 2>/dev/null) || resolved=',
+  '  [ -n "$resolved" ] && self=$resolved',
+  'fi',
+  'prefix=$(cd "$(dirname "$self")/.." && pwd)',
+  'export LD_LIBRARY_PATH="$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"',
+  'exec "$prefix/bin/node" "$prefix/lib/node_modules/' + pkg + '/bin/' + cli + '" "$@"',
+  '',
+].join('\n')
+
+/**
+ * 落一个 shim（usr 树内相对路径）：先 lstat 判定，已存在（含软链）就删，再以 0755 重建普通文件。
+ * 不删就写会跟随软链写到目标本体上（基座 usr/bin/npm 正是这种形态），把 npm-cli.js 写坏。
+ */
+const writeShim = (rel, text) => {
+  const dest = join(U, rel)
+  let st = null
+  try {
+    st = lstatSync(dest)
+  } catch (e) {
+    if (e?.code !== 'ENOENT') throw e
+  }
+  if (st) {
+    let kind = 'file'
+    if (st.isSymbolicLink()) {
+      let target = '?'
+      try { target = readlinkSync(dest) } catch { /* 悬空链：按软链处理即可 */ }
+      kind = 'symlink -> ' + target
+    }
+    rmSync(dest, { force: true })
+    log('  替换已存在的 usr/' + rel + '（' + kind + '）——不删旧条目会跟随软链写坏目标本体')
+  }
+  writeFileSync(dest, text, { mode: 0o755 })
+}
+
+// 写后自检判据（7e 尾部逐条断言）：
+//   ① shim 文本不得含构建期设备前缀字面量（/data/user/<n>/ 或旧 Termux 前缀）——多用户设备上必 127；
+//   ② 自定位行必须在场——只证明「没烧前缀」不够，还要证明「会自定位」。
+const SHIM_BUILTIN_PREFIX_RE = /\/data\/(user\/\d+|data\/com\.termux)\//
+const SHIM_SELF_LOCATE_LINE = 'prefix=$(cd "$(dirname "$self")/.." && pwd)'
 log('装配 pnpm（standalone，F4 安装链）…')
 const PNPM_VERSION = PREINSTALL.pnpm.version
 const NPM_MIRRORS = PREINSTALL.npmMirrors
@@ -792,12 +859,33 @@ try {
     log(`  pnpm ${PNPM_VERSION} downloaded from ${mirror} (${(buf.length / 1024 / 1024).toFixed(1)} MB)`)
   }
   wsl(`mkdir -p "${wslPath(join(U, 'lib/node_modules/pnpm'))}" && tar -xzf "${wslPath(pnpmTgz)}" -C "${wslPath(join(U, 'lib/node_modules/pnpm'))}" --strip-components=1 && chmod -R a+rX "${wslPath(join(U, 'lib/node_modules/pnpm'))}"`)
-  writeFileSync(
-    join(U, 'bin/pnpm'),
-    `#!/system/bin/sh\n# dsh-mobile: pnpm standalone shim（npm registry 打包，自包含；node 由快照提供）\nexec "${NEW_PREFIX}/bin/node" "${NEW_PREFIX}/lib/node_modules/pnpm/bin/pnpm.cjs" "$@"\n`,
-    { mode: 0o755 },
-  )
-  log('  pnpm shim 就位: usr/bin/pnpm -> lib/node_modules/pnpm/bin/pnpm.cjs')
+  const pnpmShimText = selfLocatingShim('pnpm standalone', 'pnpm', 'pnpm.cjs')
+  writeShim('bin/pnpm', pnpmShimText)
+  log('  pnpm shim 就位: usr/bin/pnpm -> lib/node_modules/pnpm/bin/pnpm.cjs（前缀运行时自定位）')
+
+  // npm 落点：payload 必须在场——缺失说明基座 npm 树没装配，shim 装了也是死链，必须可见失败。
+  if (!existsSync(join(U, NPM_CLI_REL))) {
+    console.error('  [npm shim 装配失败] 缺 usr/' + NPM_CLI_REL + '（基座 npm payload 未装配）——拒绝出快照')
+    process.exit(1)
+  }
+  const npmShimText = selfLocatingShim('npm CLI', 'npm', 'npm-cli.js')
+  writeShim('bin/npm', npmShimText)
+  log('  npm shim 就位: usr/bin/npm -> ' + NPM_CLI_REL + '（前缀运行时自定位）')
+
+  // 写后自检：两个 shim 都不得含构建期前缀字面量，自定位行必须在场（任一不满足即拒绝出快照）。
+  for (const [rel, text] of [['bin/pnpm', pnpmShimText], ['bin/npm', npmShimText]]) {
+    const hit = SHIM_BUILTIN_PREFIX_RE.exec(text)
+    if (hit) {
+      console.error('  [shim 自检失败] usr/' + rel + ' 含构建期设备前缀字面量 ' + hit[0]
+        + '——多用户设备（/data/user/<n>）上 exec 必失败（exit 127）')
+      process.exit(1)
+    }
+    if (!text.includes(SHIM_SELF_LOCATE_LINE)) {
+      console.error('  [shim 自检失败] usr/' + rel + ' 缺自定位行: ' + SHIM_SELF_LOCATE_LINE)
+      process.exit(1)
+    }
+    log('  shim 自检通过: usr/' + rel + '（无构建期前缀字面量 + 自定位行在场）')
+  }
 } catch (e) {
   // 不静默：市场安装是本里程碑验收项，装配失败必须可见（build-apk 门禁会因此拒绝打包）
   console.error(`  [pnpm 装配失败] ${e?.stack ?? String(e)}`)

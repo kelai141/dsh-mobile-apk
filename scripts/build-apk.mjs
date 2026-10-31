@@ -108,6 +108,9 @@ const GATE_SCRIPTS = [
   'check-i18n-parity.mjs',
   'check-build-chain-abort.mjs',
   'check-snapshot-file-modes.mjs',
+  // 快照内 node 入口 shim（真机实证 2026-10-31）：usr/bin/npm 必须是普通文件、两个 shim 必须自定位
+  // 且不含构建期前缀 /data/user/<n>/（多用户设备前缀随 user 变化 ⇒ pnpm exit 127）。
+  'check-snapshot-node-shims.mjs',
   'check-third-party.mjs',
   'check-snapshot-secrets.mjs',
   'elf-check.mjs',
@@ -404,6 +407,11 @@ try {
     if (SKIP_INJECT) log('警告：--skip-inject 档快照未做权限归一化（dev 专档，禁止发布）')
     else throw new Error('快照权限模式校验失败')
   }
+  // 快照内 node 入口 shim（真机实证 2026-10-31）：pnpm shim 烧死构建期前缀 /data/user/0/<包名>，
+  // 而多用户设备（user 10）的运行前缀是 /data/user/10/... ⇒ 设备上 pnpm exit 127；usr/bin/npm 是
+  // symlink ⇒ pnpm 的 passThruToNpm spawnSync('npm') 落地 ENOENT。与本地链同一份实现（差集必须为 0）。
+  log('门禁：快照 node 入口 shim（自定位 + npm 普通文件）…')
+  run('node', [gate('check-snapshot-node-shims.mjs'), snapIn])
   log('门禁：第三方许可…')
   run('node', [gate('check-third-party.mjs'), 'x', '--tar', snapIn, '--write-notices', join(ROOT, 'THIRD_PARTY_NOTICES.md')])
   log('门禁：机密（严格：归档不可读/成员为空即失败）…')

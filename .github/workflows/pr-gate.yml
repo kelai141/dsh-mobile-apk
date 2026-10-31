@@ -189,6 +189,14 @@ jobs:
       - name: 快照构建器产出面门禁
         if: always()
         run: node scripts/check-snapshot-builder-output.mjs
+      # 快照内 node 入口 shim 门禁（真机实证 2026-10-31）：usr/bin/npm 必须是普通文件（pnpm 的
+      # passThruToNpm spawnSync npm 经 symlink 落地 ENOENT）、两个 shim 必须自定位且不含构建期前缀
+      # /data/user/<n>/（多用户设备 user 10 的前缀是 /data/user/10/...，写死即 pnpm exit 127）。
+      # CI 净检出没有快照 tar（真检由两条构建链传注入后 tar 执行），故这里只跑 --self-test 证明判据
+      # 双向有判别力（正样本 1 + 受控负控 4，含 npm symlink 与无执行位两例）。
+      - name: 快照 node 入口 shim 门禁（自证）
+        if: always()
+        run: node scripts/check-snapshot-node-shims.mjs --self-test
       # 浏览器语法下限（0.14.1 块C G-1）：CI 无构建树 -> --self-test 四向自证（反向必红/正向必绿/
       # 载荷不触发/工具链在场且版本钉住）。
       - name: 浏览器语法下限门禁（自证）

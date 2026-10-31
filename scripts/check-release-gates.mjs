@@ -200,6 +200,15 @@ const GATES = [
   { script: 'check-build-chain-abort.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
   // 剥离清单后置断言（ST-16）：清单项在产物里必须不存在 + 反 no-op（基座命中的必须消失）。
   { script: 'check-strip-noop.mjs', ciApk: false, ciCoord: false, needsSnapshot: true },
+  // 快照内 node 入口 shim（真机实证 2026-10-31，实例跑在 Android 多用户 user 10 上）：
+  //   缺陷 1：usr/bin/pnpm 的 shim 把构建期前缀 /data/user/0/<包名>/files/usr 烧死在 exec 行里，
+  //     而 user 10 的运行前缀是 /data/user/10/... ⇒ 设备上 pnpm exit 127，市场安装全废；
+  //   缺陷 2：usr/bin/npm 是 symlink（-> ../lib/node_modules/npm/bin/npm-cli.js）⇒ pnpm 的
+  //     passThruToNpm spawnSync('npm') 经它落地 ENOENT，npm 通道整条断掉。
+  // 两类缺陷构建期全绿、只有产物面能看出来（成员类型 / tar 模式 / shim 内容），故 needsSnapshot=true：
+  // 两条构建链传注入后 tar 真检、发布链按快照面 --require 跑；CI 无 tar，只跑 --self-test 自证
+  // （见 pr-gate.yml 同名步骤）。
+  { script: 'check-snapshot-node-shims.mjs', ciApk: true, ciCoord: false, needsSnapshot: true },
   // combo 缓存覆盖（0.14.0 启动性能 P1-2 / 引擎树补丁 combo-cache-A3）：注入后快照的每条
   // client.js 必须有 sha256 命中的缓存条目，否则运行期回退现场生成会吞掉全部启动收益。
   { script: 'check-combo-cache.mjs', ciApk: false, ciCoord: false, needsSnapshot: true },
@@ -307,6 +316,7 @@ const RELEASE_GATES = GATES.filter((g) => g.releaseSink !== false).map((g) => g.
  */
 const REQUIRE_CAPABLE_GATES = new Set([
   'check-snapshot-fingerprint.mjs',
+  'check-snapshot-node-shims.mjs',
   'check-perf-instrumentation.mjs',
   'check-snapshot-secrets.mjs',
   'check-contract.mjs',
@@ -931,6 +941,29 @@ for (const gate of RUN_GATES) {
       ran += 1
       console.log('PASS  ' + gate + '（' + abis.join(', ') + '）')
       continue
+    }
+    skipTotal += 1
+    console.log('SKIP(#' + skipTotal + ')  ' + gate + '：发布链未提供快照面（--snapshot-dir 下无 tar）')
+    ran += 1
+    continue
+  }
+  // 快照内 node 入口 shim：判据全在**产物面**（成员类型 / tar 模式 / shim 内容），没有 tar 就没有判据。
+  // 发布链给了 --snapshot-dir 时逐 ABI 真检（严格档补 --require：stage 面缺 POSIX 模式判据，严格档不该以它结案）；
+  // 没给就计一条 SKIP —— 严格档按「未具名声明」判红（needsSnapshot=true 的门禁不得只验源码）。
+  if (gate === 'check-snapshot-node-shims.mjs') {
+    if (snapshotDir && abis.length > 0) {
+      for (const abi of abis) runGate([join('scripts', gate), snapshotTar(abi), ...(STRICT ? ['--require'] : [])], gate + '(' + abi + ')')
+      ran += 1
+      console.log('PASS  ' + gate + '（' + abis.join(', ') + '）')
+      continue
+    }
+    // 严格发布档：本门禁的判据 100% 在产物面上，没有 tar 就是零判据 —— 必须判红，
+    // 不得走「计一条 SKIP 然后 pop 掉」（聚合器的具名声明检查只看 runGate 记账，
+    // 只写 skipTotal 的跳过分支会让严格档静默变绿）。
+    if (STRICT) {
+      console.error('CHECK-RELEASE-GATES FAILED：' + gate + ' 需要 --snapshot-dir 的快照面，'
+        + '严格发布档不得跳过（shim 的成员类型/模式/内容判据全在产物 tar 上）')
+      process.exit(1)
     }
     skipTotal += 1
     console.log('SKIP(#' + skipTotal + ')  ' + gate + '：发布链未提供快照面（--snapshot-dir 下无 tar）')
