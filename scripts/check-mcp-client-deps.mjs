@@ -66,6 +66,34 @@ if (process.argv.includes('--self-test')) {
   }
 
   const HOST = '@deepseek-ai/dsh-mcp-client'
+  /**
+   * 构造「包挂在无关顶层包私有 node_modules 下」的快照（issue #1189 的反证夹具）。
+   * 形态：usr/lib/node_modules/other/node_modules/<name>/package.json ——
+   * 从宿主出发不可解析，但旧的全局包名集合会把它算进来。
+   */
+  const buildSnapshotNested = (tag, pkgs) => {
+    const dir = mkdtempSync(join(tmpdir(), 'mcpsnap-' + tag + '-'))
+    const hostDir = join(dir, ...NM.split('/'))
+    mkdirSync(hostDir, { recursive: true })
+    writeFileSync(join(hostDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '1.0.0' }))
+    // 宿主包本体必须在场（否则门禁以 SKIP(#2) 结案，反证就成了空转）。
+    // 它依赖 dep-a，而 dep-a 只存在于 other 的私有 node_modules 下。
+    const hostPkgDir = join(hostDir, '@deepseek-ai', 'dsh-mcp-client')
+    mkdirSync(hostPkgDir, { recursive: true })
+    writeFileSync(join(hostPkgDir, 'package.json'),
+      JSON.stringify({ name: '@deepseek-ai/dsh-mcp-client', version: '1.0.0', dependencies: { 'dep-a': '^1' } }))
+    const otherNm = join(dir, 'usr', 'lib', 'node_modules', 'other', 'node_modules')
+    for (const [name, meta] of Object.entries(pkgs)) {
+      const pkgDir = join(otherNm, ...name.split('/'))
+      mkdirSync(pkgDir, { recursive: true })
+      writeFileSync(join(pkgDir, 'package.json'),
+        JSON.stringify({ name, version: '1.0.0', dependencies: meta.dependencies ?? {} }))
+    }
+    const archive = join(tmpdir(), 'mcpsnap-' + tag + '-' + process.pid + '.tar.xz')
+    execFileSync(TAR, ['-cJf', archive, '-C', dir, 'usr'], { stdio: ['ignore', 'pipe', 'pipe'] })
+    rmSync(dir, { recursive: true, force: true })
+    return archive
+  }
   const ok = buildSnapshot('ok', {
     [HOST]: { dependencies: { 'dep-a': '^1' } },
     'dep-a': { dependencies: {} },
@@ -79,6 +107,9 @@ if (process.argv.includes('--self-test')) {
     'dep-a': { dependencies: { 'dep-deep-missing': '^2' } },
   })
   const noHost = buildSnapshot('nohost', { 'dep-a': {} })
+  // issue #1189：dep-a 只挂在无关顶层包 other 的私有 node_modules 下。
+  // Node 从宿主出发永远解析不到它，所以必须判红（旧实现用全局包名集合，会误判可解析）。
+  const nestedElsewhere = buildSnapshotNested('nested-elsewhere', { 'dep-a': { dependencies: { 'dep-deep-missing': '^1' } } })
   const absent = join(tmpdir(), 'mcpsnap-absent-' + process.pid + '.tar.xz')
 
   const checks = [
@@ -88,6 +119,10 @@ if (process.argv.includes('--self-test')) {
     ['快照缺席（非 --require）→ SKIP(#1) 且 exit 0', runGate(['--snapshot', absent]), (r) => r.code === 0 && r.out.includes('SKIP(#1)')],
     ['快照缺席 + --require → 硬失败 exit 1', runGate(['--snapshot', absent, '--require']), (r) => r.code === 1 && r.out.includes('CHECK-MCP-CLIENT-DEPS FAILED')],
     ['宿主包不在快照 → SKIP(#2)（上游裁包/改名，本门禁不适用）', runGate(['--snapshot', noHost]), (r) => r.code === 0 && r.out.includes('SKIP(#2)')],
+    // issue #1189 反证：包只挂在无关顶层包的私有 node_modules 下 → 必须判红。
+    // 旧实现用全局包名集合，会把它误判成「可解析」并 PASS，且因读不到它的 package.json
+    // 而不再展开它的依赖，传递缺口同时隐身。
+    ['包挂在无关顶层包下（Node 解析不到）→ FAILED（全局名集会误判可解析）', runGate(['--snapshot', nestedElsewhere]), (r) => r.code === 1 && r.out.includes('MISS  dep-a')],
   ]
   let bad = 0
   for (const [label, result, verify] of checks) {
@@ -95,7 +130,7 @@ if (process.argv.includes('--self-test')) {
     console.log((pass ? 'PASS  ' : 'FAIL  ') + label + (pass ? '' : '  -> exit=' + result.code + ' out=' + result.out.trim().slice(0, 240)))
     if (!pass) bad += 1
   }
-  for (const a of [ok, oneLevel, transitive, noHost]) rmSync(a, { force: true })
+  for (const a of [ok, oneLevel, transitive, noHost, nestedElsewhere]) rmSync(a, { force: true })
   console.log(bad === 0
     ? 'MCP_CLIENT_DEPS_SELF_TEST_PASSED（' + checks.length + ' 项）'
     : 'MCP_CLIENT_DEPS_SELF_TEST_FAILED（' + bad + ' 项）')
@@ -152,6 +187,16 @@ try {
  * 取第一个 `node_modules/` 会把包名解析成 `@deepseek-ai/dsh`（本轮实测的假红/假绿源）。
  * 嵌套 node_modules 也算（Node 解析会逐级向上），故按每段最后一个 node_modules 取其后的包名即可。
  */
+// issue #1189：**可解析性必须按宿主可见的解析路径判定，不能用一个全局包名集合**。
+//
+// 旧实现把**任何位置**的 `node_modules/` 都塞进同一个 pkgDirs 名集，于是：
+//   usr/lib/node_modules/other/node_modules/dep-a/...   （挂在无关顶层包下）
+// 会让 `dep-a` 被判「可解析」—— 而 Node 从宿主出发永远解析不到它（它在别的包的私有树里）。
+// 更糟的是 readPkgJson 只读宿主顶层，于是那个 dep-a 的**自己的依赖从不遍历**，
+// 传递缺口同样看不见：输出「闭包遍历 1 个包」却宣称「闭包全部可解析」，自己就自相矛盾。
+//
+// 修法：只把**宿主顶层 node_modules** 下的包算作可解析（这正是 Node 从宿主出发的解析面：
+// 沿 NM 目录逐级向上，第一站就是宿主顶层）。嵌套副本不参与判定。
 const pkgDirs = new Set()
 const ADD = (seg) => {
   const parts = seg.split('/')
@@ -159,9 +204,8 @@ const ADD = (seg) => {
   pkgDirs.add(parts[0].startsWith('@') ? parts[0] + '/' + parts[1] : parts[0])
 }
 for (const m of members) {
-  const i = m.lastIndexOf('node_modules/')
-  if (i < 0) continue
-  ADD(m.slice(i + 'node_modules/'.length))
+  if (!m.startsWith(NM + '/')) continue
+  ADD(m.slice(NM.length + 1))
 }
 
 /**

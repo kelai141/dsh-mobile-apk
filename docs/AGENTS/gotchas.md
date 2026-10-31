@@ -2717,3 +2717,5 @@ usage 首行写死了这条：`--derive-anchors 与 --only 默认 dry-run 不落
 3. **只写文档不写基线 -> 必须复现 `symbol-unbaselined` 并 exit 1**。这条是核心：它证明「同批写基线」不是冗余步骤，而是那条缺失的环。前两条单独存在时，一个只改文档的实现也能全绿（只要你事后手工补基线）。
 
 ⇒ 同族判据：**凡「一处数据有两份表示」，改一份的工具必须同时改另一份，或者明确拒绝执行。** 把一致性推给用户的下一步操作，等于把红推给用户；而用户的下一个动作通常是「再跑一次别的工具」，那正是最容易做错的时刻。
+
+343. **同一判据在两个平台给出不同结论：`tar -tf` 在 Windows 上输出 CRLF，成员名带尾随 `\r`**：修 `check-combo-cache` 的单文件缓存漏检（#1195）时，构造了一份只含 `home/.dsh/profiles/web/.combo-cache`（无尾斜杠）的 tar 验证判据，Windows 工作树上却判绿、Linux 上判红。真因是判定用路径**分段**比较 `name.split('/').includes('.combo-cache')`，而 Windows 上 `tar -tf` 的输出行尾是 CRLF，分段拿到的是 `'.combo-cache\r'`，与 `'.combo-cache'` 不等——判据静默失效，不报错、不 SKIP、不崩，计数与输出全都「看起来正常」。这类缺陷最容易漏的原因是开发机 Windows / CI Linux：本地绿而 CI 红会被误读成环境问题，反之亦然。修法是**在读入处立即归一化**（`split('\n').map(l => l.replace(/\r/g, '').trim())`），不要指望每条判据各自处理。识别形态：凡是解析外部命令文本输出（`tar -tf`、`git status --porcelain`、`adb shell ls`）再按路径/字段比较的门禁，都该把成员名 `JSON.stringify` 打出来看有没有 `\r`——比读代码快。个人记录见 `docs/contrib/kelai141/2026-10-31-crlf-tar-members.md`。
