@@ -155,6 +155,12 @@ if (process.argv.includes('--self-test')) {
       credentialHit('apiKey: sk-live-123456') !== null],
     ['纯函数：行首 sk-ant-xyz12345 仍命中',
       credentialHit('sk-ant-xyz12345') !== null],
+    // 布尔字面量误报（本次修）
+    ['纯函数：persist-credentials: false 不命中（布尔字面量不算凭据）',
+      credentialHit('        persist-credentials: false') === null],
+    ['纯函数：credentials: true 不命中', credentialHit('credentials: true') === null],
+    ['纯函数：password 有真值仍命中（没放宽成一律不命中）',
+      credentialHit('password: hunter2xyz') !== null],
   ]
   for (const [label, ok] of pure) {
     console.log((ok ? 'PASS  ' : 'FAIL  ') + label)
@@ -299,7 +305,11 @@ export function credentialHit(content) {
     /_authToken\s*=\s*\S+/i,
     /(?:_auth|_password)\s*=\s*\S+/i,
     /Bearer\s+[A-Za-z0-9._-]{20,}/,
-    /(?:apiKey|api[_-]?key|token|password|passwd|secret|credentials?)\s*[:=]\s*["']?[^\s"']{4,}/i,
+    // 键值族：值不得是布尔/空值字面量。没有这个排除时，GitHub Actions 的
+    //   persist-credentials: false
+    // 会被当成「credentials 有值」而判红——实测 fast-uri/.github/workflows/ci.yml
+    // 两处全是这种布尔字面量，不是凭据。
+    /(?:apiKey|api[_-]?key|token|password|passwd|secret|credentials?)\s*[:=]\s*["']?(?!(?:true|false|null|none|undefined)\b)[^\s"']{4,}/i,
   ]
   for (const re of patterns) {
     const m = re.exec(text)
