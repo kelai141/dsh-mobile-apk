@@ -128,3 +128,35 @@ dependencies {
   // 本地单测用真实 org.json（android.jar 桩在 JVM 里抛 Stub!）——快照 profiles 合并（#167）测试需要
   testImplementation("org.json:json:20240303")
 }
+
+// 这些单测在运行期**直接读仓内文件**（Kotlin 源、res、scripts 脚本、plugins 源码），而 Gradle 默认
+// 只把编译产物算作 Test 任务的输入 —— 被读的源文件不算。于是改了被读文件，Test 任务的 cache key
+// 不变，:app:testDebugUnitTest 会 FROM-CACHE 拿旧结果。
+//
+// 实锤：#1244 把 scripts/profile-web.cordis.patch.yml 的顶层条目从 21 加到 22，
+// FactoryProfilePatchTest 的断言（22 块）因此失效；但 CI 日志是
+//   > Task :app:testDebugUnitTest FROM-CACHE
+//   BUILD SUCCESSFUL in 19s
+// 任务根本没重跑 → 假绿。红的那条被缓存掩盖，直到本地全链才暴露。
+// 因此把「测试运行期真正读取的仓内目录」显式声明为输入（目录级，覆盖同类文件）。
+val repoRootDir: File = rootProject.projectDir
+tasks.withType<Test>().configureEach {
+    inputs.dir(File(repoRootDir, "scripts"))
+        .withPropertyName("repoScripts")
+        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+    inputs.dir(File(repoRootDir, "plugins"))
+        .withPropertyName("repoPlugins")
+        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+    inputs.dir(File(repoRootDir, "dsh-host-web-compat"))
+        .withPropertyName("repoHostWebCompat")
+        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+    inputs.dir(File(repoRootDir, ".github/workflows"))
+        .withPropertyName("repoWorkflows")
+        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+    inputs.dir(File(projectDir, "src/main"))
+        .withPropertyName("appMainSources")
+        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+    inputs.file(File(projectDir, "build.gradle.kts"))
+        .withPropertyName("appBuildScript")
+        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+}

@@ -266,7 +266,7 @@ jobs:
       - name: 编译与单元测试门禁（testDebugUnitTest 自动编译主代码和测试）
         run: |
           chmod +x gradlew
-          ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace
+          ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace --rerun-tasks
       # Kotlin 单测**数量**反回归门禁（0.14.2-fx-2 G.0 ⑤ 结构性脱节实修）。
       # 真因：CI 跑 testDebugUnitTest 只按退出码判——「测试类被删/改名/漏编译」时 exit 仍 0，
       # 而云端链又给本门禁传 --allow-missing（无结果=SKIP）⇒ 防线被删却一路绿。此处紧接上一
