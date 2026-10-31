@@ -275,7 +275,10 @@ test('a non-array activity probe result refuses instead of guessing idle', async
   }
 })
 
-test('a live session is unloaded before its files are removed', async () => {
+// issue #1203：**顺序已反转**。旧用例名与断言写的是「先卸载、后删文件」，那正是本条要修的
+// 缺陷形态——卸载在 rename 之前，一旦移动失败就是「内存没了、磁盘还在」。现在目录先离开
+// 扫描路径，卸载才跑；所以断言从「卸载时目录还在」改为「卸载时目录已不在原位（但未销毁）」。
+test('a live session is unloaded after its directory leaves the scan path', async () => {
   const home = await homeWith([ID])
   const previous = process.env.DSH_HOME
   process.env.DSH_HOME = home
@@ -285,8 +288,9 @@ test('a live session is unloaded before its files are removed', async () => {
     const ctx = fakeCtx({ live: true, activity: [], detach: () => { dirPresentAtDetach = existsSync(dir) } })
     const result = await removeSession(ctx, ID)
     assert.equal(result.ok, true)
-    // 卸载发生在删文件之前：目录此时必须还在。
-    assert.equal(dirPresentAtDetach, true)
+    // issue #1203：卸载发生在目录**离开扫描路径之后**，故此刻原位已不存在（内容仍在 graveyard，
+    // 随后才 rm）。旧断言要求此处为 true，等于钉死「先卸载后移动」这个缺陷顺序。
+    assert.equal(dirPresentAtDetach, false, '卸载必须在目录移出扫描路径之后才发生')
     assert.deepEqual(ctx.calls, ['detach:' + ID])
     // 卸载后不再 live（api-session/removed 因此会广播）。
     assert.equal(ctx.get('sessions').get(ID), undefined)
