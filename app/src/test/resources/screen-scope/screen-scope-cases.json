@@ -1884,6 +1884,166 @@
       ],
       "expect": "allow",
       "why": "正控：`curl -d` 是常见的「-d 后跟数据」写法，且不在屏幕命令族里 ⇒ 必须仍放行，否则 F1 的改动会把无关命令一起误拦。"
+    },
+    {
+      "name": "G1-a 空引号 -d 紧跟合法 -d（screencap -d7 -d \"\" 0）",
+      "command": "screencap -d7 -d \"\" 0",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "issue #1184：真实 argv [\"-d7\",\"-d\",\"\",\"0\"]。getopt 语义是最后一个 -d 生效，atoi(\"\")=0 ⇒ 实际打在 display 0。旧实现按 \\d+ 过滤，空值那次 -d 整个消失 ⇒ 更早的 -d7 为整条命令背书 ⇒ 回归成 allow。流式建模要求最后一次赋值可解释。"
+    },
+    {
+      "name": "G1-b 转义空白 -d（screencap -d 7 -d \\ 0）",
+      "command": "screencap -d 7 -d \\ 0",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "#1184：`\\ ` 是转义空白，取值为空白占位词而非数字 ⇒ 同理落到 display 0，且不得沿用前一个 -d 7。"
+    },
+    {
+      "name": "G1-c 空值 -d 后接粘连 -d0（screencap -d -d 7 -d0）",
+      "command": "screencap -d -d 7 -d0",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "#1184：getopt 把 `-d` 的下一个词当值；最终 -d0 ⇒ display 0（真实屏）。中间那个 -d 7 不能单独背书。"
+    },
+    {
+      "name": "G1-d 空引号 -d 在合法 -d 之前（screencap -d \"\" -d 7）",
+      "command": "screencap -d \"\" -d 7",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "#1184 正向：流式语义是**最后一次赋值生效**——空值不继承前值，但后续合法赋值可以覆盖它。真实 argv [\"-d\",\"\",\"-d\",\"7\"] ⇒ 最终 display 7（已注册）⇒ 放行。本条证明修法不是「凡出现空值 -d 就一律拒」，而是按最后一次赋值判定。"
+    },
+    {
+      "name": "G2-a 只有空引号 -d（screencap -d \"\" 7）",
+      "command": "screencap -d \"\" 7",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "#1060 F1 已修形态，本条守住不回归：取值为空串 ⇒ display 0，7 只是输出文件名。"
+    },
+    {
+      "name": "G2-b 只有转义空白 -d（screenrecord -d \\ 7 /sdcard/a.mp4）",
+      "command": "screenrecord -d \\ 7 /sdcard/a.mp4",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "#1184：转义空白取值不可解释 ⇒ display 0。"
+    },
+    {
+      "name": "G3-a 正常 -d 7（screencap -d 7 /sdcard/a.png）",
+      "command": "screencap -d 7 /sdcard/a.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "双向判据：流式建模不得把正常形态一起拒掉。getopt 在路径处停止，-d 7 是唯一且合法的目标屏。"
+    },
+    {
+      "name": "G3-b 正常粘连 -d7（screencap -d7 -p /sdcard/a.png）",
+      "command": "screencap -d7 -p /sdcard/a.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "双向判据：粘连形态 -d7 仍必须被正确解析为 display 7。"
+    },
+    {
+      "name": "G3-c 正常两次同一屏（screencap -d 7 -d 7 /sdcard/a.png）",
+      "command": "screencap -d 7 -d 7 /sdcard/a.png",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "双向判据：最后一次赋值仍是已注册屏 ⇒ 放行（证明流式建模只针对不可解释的取值，不是禁止多次出现）。"
+    },
+    {
+      "name": "G4-a 变量服务名（dumpsys $S）",
+      "command": "dumpsys $S",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "#1184 F3 残留：旧启发式只要求「下一个词不以 - 开头且不是敏感服务」⇒ `$S` 被当作已确认安全而放行；而 S=window 时展开后就是 dumpsys window（真实屏 View 层级）。判据改为：可确认安全的服务名不得含 $ 或反引号。"
+    },
+    {
+      "name": "G4-b 花括号变量（dumpsys ${S}）",
+      "command": "dumpsys ${S}",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "#1184：同上，${S} 同样是展开形式。"
+    },
+    {
+      "name": "G4-c 词内变量（dumpsys win$X）",
+      "command": "dumpsys win$X",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "#1184：词内拼接同样不可判（win$X 可为 window）。"
+    },
+    {
+      "name": "G4-d 赋值后使用（S=window; dumpsys $S）",
+      "command": "S=window; dumpsys $S",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "#1184：赋值与使用在同一命令里，展开后打真实屏；不得只看使用处的词形。"
+    },
+    {
+      "name": "G4-e 反引号服务名（dumpsys `echo window`）",
+      "command": "dumpsys `echo window`",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-uncertified-target",
+      "why": "#1184：命令替换不可判，与变量同等处理。"
+    },
+    {
+      "name": "G4-f 静态安全服务名（dumpsys meminfo）",
+      "command": "dumpsys meminfo",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "双向判据：与屏无关的服务名必须继续放行，否则紧化会退化成「dumpsys 一律拒」。"
+    },
+    {
+      "name": "G4-g 静态 SurfaceFlinger（dumpsys SurfaceFlinger）",
+      "command": "dumpsys SurfaceFlinger",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "双向判据：既有放行面不得回归。"
     }
   ]
 }

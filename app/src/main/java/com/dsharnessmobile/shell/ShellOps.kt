@@ -159,14 +159,20 @@ internal object ShellOps {
     // 输出含真实屏 View 层级。旧 pattern 要求服务名紧跟命令名 ⇒ 这一类全部 families=[] ⇒ allow。
     //
     // 修法（fail-closed，不新增放行分支）：命中判据改成「服务名**不能确认安全**就命中」——
-    //   ① `dumpsys` 之后紧跟一个**不以 `-` 开头**、且**不是**敏感服务的词 ⇒ 服务名可确认且安全 ⇒ 不命中；
-    //   ② 其余一律命中：紧跟敏感服务 / 紧跟旗标 / 干脆没有服务名。旗标之后是什么服务**静态不可判**
-    //      （`--abi arm64` 这类旗标自己带词形参数，任何「跳过旗标取下一个词」的推断都会被骗过去），
-    //      裸 `dumpsys` 更会 dump **全部**服务（含 window）。
+    //   ① `dumpsys` 之后紧跟一个**不以 `-` 开头**、**不是**敏感服务、且**不含 `$` / 反引号**的词
+    //      ⇒ 服务名可确认且安全 ⇒ 不命中；
+    //   ② 其余一律命中：紧跟敏感服务 / 紧跟旗标 / 干脆没有服务名 / 服务名是变量或命令替换。
+    //      旗标之后是什么服务**静态不可判**（`--abi arm64` 这类旗标自己带词形参数，任何
+    //      「跳过旗标取下一个词」的推断都会被骗过去），裸 `dumpsys` 更会 dump **全部**服务（含 window）。
+    //
+    // issue #1184（F3 残留）：服务名是**变量**时不得算「已确认安全」。旧启发式只要求
+    // 「下一个词不以 `-` 开头且不是敏感服务」，于是 `dumpsys $S` / `dumpsys ${S}` / `dumpsys win$X`
+    // 全被放行——而 `$S` 完全可能是 `window`（展开后就是 `dumpsys window`，打真实屏 View 层级）。
+    // 判据补一条：可确认安全的服务名不得含 `$` 与反引号（即不得含展开或命令替换）。
     ScreenFamily(
       "dumpsys",
       Regex(
-        """\bdumpsys\b(?![ \t]+(?!-)(?!(?:window|display|input|activity)\b)\S)""",
+        "\\bdumpsys\\b(?![ \\t]+(?!-)(?!(?:window|display|input|activity)\\b)(?!\\S*[$\u0060])\\S)",
         RegexOption.IGNORE_CASE,
       ),
       emptyList(),
@@ -748,12 +754,19 @@ internal object ShellOps {
         // 旧实现只给 `input` 算了边界、其余家族做全段扫描 ⇒ 尾随 `-d <owned>` 反而成了"已认证"的
         // 通行证（2026-10-28 自查的 `input` 那处；issue #1060 F2 把同源规则补齐到 getopt 家族）。
         val limit = familyOptionLimit(family, bareWords)
+        // issue #1184：目标屏参数按流式解释——最后一个赋值生效，空值不继承上一个值。
+        // 只按数字过滤（#1060 F1 的形态）会让「取值是空词」的 -d 整个消失，于是一个更早的
+        // 合法 -d 7 为整条命令背书，而真实作用屏是 display 0。这里要求最后一次赋值可解释。
+        val target = displayTargetIn(bareWords, limit)
+        if (target is DisplayTarget.Unresolved) return ScreenCommandVerdict.DENY_UNCERTIFIED_TARGET
         val owned = options
           .filter { it.flag in family.targetFlags && it.index < limit }
           .map { it.value }
         // 该家族必须在**本段内**自证：参数缺席、或任一值不属于已注册虚拟屏 → 拒（不得只认证其中一个）。
         if (owned.isEmpty()) return ScreenCommandVerdict.DENY_UNCERTIFIED_TARGET
         if (!owned.all { ownsTarget(it) }) return ScreenCommandVerdict.DENY_UNCERTIFIED_TARGET
+        // 流式结论也必须属于已注册虚拟屏（不得只看「出现过某个合法值」）。
+        if (target is DisplayTarget.Explicit && !ownsTarget(target.token)) return ScreenCommandVerdict.DENY_UNCERTIFIED_TARGET
       }
     }
     return ScreenCommandVerdict.ALLOW
@@ -1164,6 +1177,57 @@ internal object ShellOps {
       out.add(DisplayOption(m.groupValues[1], m.groupValues[2], m.range.first))
     }
     return out.sortedBy { it.index }
+  }
+
+  /**
+   * 目标屏参数的**流式**解析结果（issue #1184，与引擎侧 `displayTargetIn` 同一口径）。
+   *
+   * 为什么需要它（#1060 F1 的修法引入了新绕过）：[displayOptionsIn] 只记录**值为数字**的
+   * `-d`，于是「取值是空词 / 转义空白」的 `-d` 在结果里完全不出现——没有任何判据要求
+   * 「出现过的每个 `-d` 都必须能被解释」。而 screencap / screenrecord 是 getopt 工具，
+   * 语义是**最后一个 `-d` 生效**：
+   *   `screencap -d7 -d "" 0` ⇒ argv ["-d7","-d","","0"] ⇒ 先 7、再 atoi("")=0 ⇒ display 0，
+   * 前面那个合法的 `-d 7` 于是为一个实际打在真实屏上的命令背书。
+   *
+   * 所以按流式建模：每遇到一个目标屏参数就更新当前目标屏，**空值不继承上一个值**
+   * （它是独立的、无效的一次赋值），最终只看**最后一次**赋值的取值。
+   */
+  internal sealed interface DisplayTarget {
+    /** 窗口内没有出现任何目标屏参数。 */
+    data object None : DisplayTarget
+    /** 最后一次赋值的取值可解释为十进制串，由调用方再与注册表核对。 */
+    data class Explicit(val token: String) : DisplayTarget
+    /** 最后一次赋值的取值不可解释（空词 / 占位词 / 粘连非数字 / 缺值）⇒ 必须 fail-closed。 */
+    data class Unresolved(val token: String) : DisplayTarget
+  }
+
+  private val DECIMAL_ONLY = Regex("""^\d+$""")
+  private val GLUED_WITH_EQUALS = Regex("""^(?:--display-id|--display|-d)=(\S*)$""")
+  private val GLUED_SHORT_NUMERIC = Regex("""^-d(\d+)$""")
+
+  internal fun displayTargetIn(text: String, limit: Int = text.length): DisplayTarget {
+    val bounded = text.substring(0, limit.coerceIn(0, text.length))
+    val tokens = bounded.split(' ', '\t').filter { it.isNotEmpty() }
+    var result: DisplayTarget = DisplayTarget.None
+    var i = 0
+    while (i < tokens.size) {
+      val token = tokens[i]
+      if (token == "-d" || token == "--display" || token == "--display-id") {
+        val value = if (i + 1 < tokens.size) tokens[i + 1] else ""
+        result = if (DECIMAL_ONLY.matches(value)) DisplayTarget.Explicit(value) else DisplayTarget.Unresolved(value)
+        i += 2
+        continue
+      }
+      // 粘连形态：`-d7` / `-d=7` / `--display=7` / `--display-id=7`。
+      // 只认「旗标后紧跟数字或 =」，以免把 `-debug` 之类误当目标屏参数。
+      val glued = GLUED_WITH_EQUALS.find(token) ?: GLUED_SHORT_NUMERIC.find(token)
+      if (glued != null) {
+        val value = glued.groupValues[1]
+        result = if (DECIMAL_ONLY.matches(value)) DisplayTarget.Explicit(value) else DisplayTarget.Unresolved(value)
+      }
+      i += 1
+    }
+    return result
   }
 
   /**

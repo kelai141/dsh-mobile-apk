@@ -168,6 +168,57 @@ export function displayOptionsIn(text: string): DisplayOption[] {
 }
 
 /**
+ * 目标屏参数**流式解析**的结果（issue #1184）。
+ *
+ * 为什么需要它（#1060 F1 的修法引入了新绕过）：
+ * `displayOptionsIn` 只记录**值为 `\d+`** 的 `-d`，于是「取值是空词 / 转义空白」的 `-d`
+ * 在结果里**完全不出现**——没有任何判据要求「出现过的每个 `-d` 都必须能被解释」。
+ * 而 screencap / screenrecord 是 getopt 工具，语义是**最后一个 `-d` 生效**：
+ *   screencap -d7 -d "" 0   ⇒ argv ["-d7","-d","","0"] ⇒ 先 7、再 atoi("")=0 ⇒ **display 0**
+ * 前面那个合法的 `-d 7` 于是为一个实际打在真实屏上的命令背书。
+ *
+ * 所以这里按**流式**建模：每遇到一个目标屏参数就更新「当前目标屏」，
+ * **空值不继承上一个值**（它是独立的、无效的一次赋值），最终只看**最后一次**赋值的取值。
+ *
+ * - `none`：窗口内没有出现任何目标屏参数；
+ * - `explicit`：最后一次赋值的取值可解释为十进制数字串（由调用方再与注册表核对）；
+ * - `unresolved`：最后一次赋值的取值**不是**十进制数字串（空词 / 占位词 / 粘连非数字 / 缺值）
+ *   ⇒ 调用方必须 fail-closed（真实作用屏是 0 或不可判，不得沿用更早的那次）。
+ */
+export type DisplayTarget =
+  | { kind: 'none' }
+  | { kind: 'explicit'; token: string; index: number }
+  | { kind: 'unresolved'; token: string; index: number }
+
+export function displayTargetIn(text: string, limit: number = text.length): DisplayTarget {
+  const slice = text.slice(0, Math.max(0, limit))
+  const tokens = slice.split(/[ \t]+/).filter((t) => t.length > 0)
+  let result: DisplayTarget = { kind: 'none' }
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i]
+    const isSeparate = token === '-d' || token === '--display' || token === '--display-id'
+    if (isSeparate) {
+      const value = i + 1 < tokens.length ? tokens[i + 1] : ''
+      result = /^\d+$/.test(value)
+        ? { kind: 'explicit', token: value, index: i }
+        : { kind: 'unresolved', token: value, index: i }
+      i += 1
+      continue
+    }
+    // 粘连形态：`-d7` / `-d=7` / `--display=7` / `--display-id=7`。
+    // 只认「旗标后紧跟数字或 =」以免把 `-debug` 之类误当目标屏参数。
+    const glued = /^(?:--display-id|--display|-d)=(\S*)$/.exec(token) || /^-d(\d+)$/.exec(token)
+    if (glued) {
+      const value = glued[1]
+      result = /^\d+$/.test(value)
+        ? { kind: 'explicit', token: value, index: i }
+        : { kind: 'unresolved', token: value, index: i }
+    }
+  }
+  return result
+}
+
+/**
  * ADB shell 命令里显式指定的目标 display id（`-d <id>` / `--display <id>` / `--display-id <id>`）。
  *
  * 用途（块G F2）：raw shell 面的范围复查不能只做**命令词**匹配——`screencap -d 47` 读的是
@@ -850,7 +901,12 @@ const SCREEN_COMMAND_FAMILIES: readonly ScreenCommandFamily[] = [
   //      的推断都会被这种参数骗过去），裸 `dumpsys` 更会 dump **全部**服务（含 window）。
   {
     name: 'dumpsys',
-    pattern: /\bdumpsys\b(?![ \t]+(?!-)(?!(?:window|display|input|activity)\b)\S)/i,
+    // issue #1184 F3 残留：服务名是**变量**时不得算「已确认安全」。
+    // 旧启发式只要求「下一个词不以 `-` 开头且不是敏感服务」，于是 `dumpsys $S` / `dumpsys ${S}` /
+    // `dumpsys win$X` 全被当作「服务名已确认且安全」放行——而 `$S` 完全可能是 `window`
+    // （shell 展开后就是 `dumpsys window`，打真实屏 View 层级）。
+    // 判据：可确认安全的服务名必须**不含 `$` 与反引号**（即不含展开/命令替换）。
+    pattern: /\bdumpsys\b(?![ \t]+(?!-)(?!(?:window|display|input|activity)\b)(?!\S*[$`])\S)/i,
     targetFlags: [],
     optionWindow: 'full',
   },
@@ -957,12 +1013,19 @@ export function screenCommandVerdict(
       // 旧实现只给 `input` 算了边界、其余家族做全段扫描 ⇒ 尾随 `-d <owned>` 反而成了"已认证"的
       // 通行证（2026-10-28 自查的 `input` 那处；issue #1060 F2 把同源规则补齐到 getopt 家族）。
       const limit = familyOptionLimit(family, bareWords)
+      // issue #1184：目标屏参数按**流式**解释——最后一个赋值生效，空值**不继承**上一个值。
+      // 只按 `\d+` 过滤（#1060 F1 的形态）会让「取值是空词」的 `-d` 整个消失，于是一个更早的
+      // 合法 `-d 7` 为整条命令背书，而真实作用屏是 display 0。这里要求最后一次赋值可解释。
+      const target = displayTargetIn(bareWords, limit)
+      if (target.kind === 'unresolved') return 'deny-uncertified-target'
       const owned = options
         .filter((option) => family.targetFlags.includes(option.flag) && option.index < limit)
         .map((option) => option.value)
       // 该家族必须在**本段内**自证：参数缺席、或任一值不属于已注册虚拟屏 → 拒（不得只认证其中一个）。
       if (owned.length === 0) return 'deny-uncertified-target'
       if (!owned.every(isOwnedTarget)) return 'deny-uncertified-target'
+      // 流式结论也必须属于已注册虚拟屏（不得只看「出现过某个合法值」）。
+      if (target.kind === 'explicit' && !isOwnedTarget(target.token)) return 'deny-uncertified-target'
     }
   }
   return 'allow'
