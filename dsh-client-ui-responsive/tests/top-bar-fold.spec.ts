@@ -19,7 +19,9 @@
 //     |                                 padding-left:8px; rect x=20 right=572
 //     ├ div.wSkVaW_viewTabs[data-conversation-tabs]
 //     |                                 display:flex; flex-wrap:wrap; width=140.02; flex:0 1 auto
-//     └ span.wSkVaW_viewsMoreAnchor + button[aria-haspopup=menu]「更多会话视图」
+//     └ span.wSkVaW_viewsMoreAnchor > button[aria-haspopup=menu]「更多会话视图」
+//       ↑ 菜单**嵌在** wrapper span 里（不是行的直接子节点）。旧 fixture 把它挂成直接子节点，
+//         于是「相邻兄弟 +」在 jsdom 里成立、在真机上不成立：#1228 的门禁绿而设备坏。
 //
 // 箭头必须挂在**父行**（tabs.parentElement）末位：标签条自己是 flex:0 1 auto、宽度=内容宽，
 // 内部没有剩余空间，auto 外边距在那里推不动（实测 x 恒为 144.02）。
@@ -45,7 +47,7 @@ let fold: TopBarFold
    * 标签行按**真机实测**形状搭（emulator-5558 / dsh 0.2.1-rc.2）：
    *   div.tabs                                 ← 行容器（flex, flex-wrap:wrap, align-items:flex-start）
    *     > div.viewTabs[role=tablist][data-conversation-tabs]  ← React 拥有的标签列表（flex:0 1 auto）
-   *     > span.viewsMoreAnchor + button[aria-haspopup=menu]   ← 上游「…」菜单，行的兄弟节点
+   *     > span.viewsMoreAnchor > button[aria-haspopup=menu]   ← 上游「…」菜单，嵌在 wrapper 里
    * 箭头必须落在这个行容器里、并且是它的末位。
    * @param plugins - 座位下要挂载的节点数量。
    * @param withTabs - 是否渲染视图标签行。
@@ -109,6 +111,10 @@ function buildHeader(plugins: number, withTabs = true, withMoreMenu = true): voi
     }
     row.appendChild(tabs)
     if (withMoreMenu) {
+      // 真机形状：菜单按钮**嵌在** span.viewsMoreAnchor 里（上游 ConversationRoot 的
+      // Menu 用 anchor 包住按钮），而不是行的直接子节点。旧 fixture 少了这层嵌套，
+      // 于是「相邻兄弟」选择器在 jsdom 里 matches 为 true、在真机上恒为 false —— 门禁绿、
+      // 设备坏（#1228）。这里按真机形状搭，判据才守得住行为。
       const anchor = document.createElement('span')
       anchor.className = 'viewsMoreAnchor'
       row.appendChild(anchor)
@@ -116,7 +122,7 @@ function buildHeader(plugins: number, withTabs = true, withMoreMenu = true): voi
       menu.type = 'button'
       menu.setAttribute('aria-haspopup', 'menu')
       menu.textContent = '更多会话视图'
-      row.appendChild(menu)
+      anchor.appendChild(menu)
     }
     header.appendChild(row)
   }
@@ -204,12 +210,73 @@ afterEach(() => {
   document.body.innerHTML = ''
 })
 
+/**
+ * 取出样式表里「隐藏视图菜单」那条规则的选择器，交给真实 DOM 去 matches。
+ *
+ * 为什么不在断言里写死选择器字符串：本缺陷的形态正是「选择器文本看着对、在真机 DOM 上
+ * matches 为 false」（#1228）。只比对字符串会把 bug 当成契约钉住，所以这里把**样式表里的
+ * 那一条**抽出来，拿去和真实结构的选择器求值对照。
+ */
+function hideMenuSelector(css: string): string {
+  const match = /html\[data-dsh-mobile-form\]\s+(\[data-conversation-tabs\][^{]*\[aria-haspopup='menu'\])\s*\{/.exec(css)
+  if (match === null) throw new Error('样式表里找不到「隐藏视图菜单」的规则')
+  return match[1].trim()
+}
+
+/** 按选择器求值（jsdom 真的跑 selector engine，不是字符串比较）。 */
+function matchesAll(selector: string): Element[] {
+  return [...document.querySelectorAll(selector)]
+}
+
 describe('视图菜单与折叠箭头的位置', () => {
-  it('隐藏上游视图菜单「…」：按 aria-haspopup=menu 精确命中标签条的兄弟', () => {
-    // 不用 [data-conversation-tabs] + *：那是「谁排我后面就藏谁」的开放规则，
-    // 折叠箭头同样挂在这一行，将来插到这里的兄弟节点都会被误伤。
-    expect(TOP_BAR_FOLD_CSS).toMatch(/\[data-conversation-tabs\]\s*\+\s*\[aria-haspopup='menu'\]/)
+  it('隐藏上游视图菜单「…」：规则在真机形状（菜单嵌在 wrapper 里）上真的命中那个按钮', () => {
+    const row = document.querySelector<HTMLElement>('.tabs')!
+    const selector = hideMenuSelector(TOP_BAR_FOLD_CSS)
+    const menu = row.querySelector<HTMLElement>("button[aria-haspopup='menu']")!
+    const anchor = menu.parentElement!
+    // 前置：fixture 必须就是真机形状（菜单嵌在 span.viewsMoreAnchor 里，不是行的直接子节点）。
+    expect(anchor.tagName).toBe('SPAN')
+    expect(anchor.className).toBe('viewsMoreAnchor')
+    expect(anchor.parentElement).toBe(row)
+    // 核心判据：按钮命中样式表里那条规则（旧实现这条是 false —— 就是 #1228）。
+    expect(menu.matches(selector)).toBe(true)
+    // 命中集恰好是那一个按钮，不多不少。
+    expect(matchesAll('html[data-dsh-mobile-form] ' + selector)).toEqual([menu])
+  })
+
+  it('负控：旧规则（相邻兄弟 +）在真机形状上不命中 —— 这个 fixture 能抓住 #1228', () => {
+    const row = document.querySelector<HTMLElement>('.tabs')!
+    const menu = row.querySelector<HTMLElement>("button[aria-haspopup='menu']")!
+    // 把样式表换回旧形状，同一个 fixture 上必须求值为 false。若它变成 true，
+    // 说明 fixture 又退化成「菜单是行直接子节点」的假形状，本用例会先红。
+    expect(menu.matches("[data-conversation-tabs] + [aria-haspopup='menu']")).toBe(false)
+  })
+
+  it('负控：不用 [data-conversation-tabs] + *（谁排我后面就藏谁，会误伤折叠箭头）', () => {
+    // + * 是开放规则：菜单不在场的形态下，箭头就是标签条的相邻兄弟，会被一起藏掉。
+    // 本用例守住「不得退回那条写法」，与下一条 wrapper 缺席的反证互补。
     expect(TOP_BAR_FOLD_CSS).not.toMatch(/\[data-conversation-tabs\]\s*\+\s*\*(?!\S)/)
+    expect(hideMenuSelector(TOP_BAR_FOLD_CSS)).not.toMatch(/\+\s*\*/)
+  })
+
+  it('反证：菜单 wrapper 不在场（箭头成为相邻兄弟）时，箭头仍不被这条规则命中', async () => {
+    // 真机上的三种形态都会走到这里：上游去掉菜单 / 按 visibleViewLimit 收起 / 加载时序。
+    // 那时行里只剩标签条 + 箭头，箭头就是 [data-conversation-tabs] 的**相邻兄弟**。
+    fold.attach()
+    await flush()
+    const row = document.querySelector<HTMLElement>('.tabs')!
+    const arrow = state().arrow!
+    // 回到「菜单还没挂上来」的形状。
+    row.querySelector('[class~="viewsMoreAnchor"]')?.remove()
+    expect(arrow.parentElement).toBe(row)
+    expect(document.querySelector("button[aria-haspopup='menu']")).toBeNull()
+    // 前提成立：箭头此刻确实是标签条的相邻兄弟（也就是 + * 会误伤的那一形态）。
+    expect(row.querySelector('[data-conversation-tabs]')!.nextElementSibling).toBe(arrow)
+    // 判据：样式表里那条规则不得命中箭头。
+    expect(arrow.matches(hideMenuSelector(TOP_BAR_FOLD_CSS))).toBe(false)
+    expect(matchesAll('html[data-dsh-mobile-form] ' + hideMenuSelector(TOP_BAR_FOLD_CSS))).toEqual([])
+    // 摘掉 wrapper 会触发一轮 mutation 同步；跑完再退出本用例，别把待跑的帧留到下一个用例。
+    await flush()
   })
 
   it('折叠箭头推到整行最右并与标签同一行（推翻旧的不得 auto 约束）', async () => {
@@ -290,13 +357,13 @@ describe('视图菜单与折叠箭头的位置', () => {
     expect(() => { assertArrowRightAligned(noAlign, arrow) }).toThrow(/align-self/)
   })
 
-  it('箭头不会被「隐藏 … 菜单」的规则命中（自证不误伤）', async () => {
+  it('箭头不会被「隐藏 … 菜单」的规则命中（真机形状下自证不误伤）', async () => {
     fold.attach()
     await flush()
-    // 用 jsdom 的 matches 真跑一遍选择器，而不是只比对字符串形态。
-    // 本用例只守「箭头不被误伤」这一件事（箭头现在是行的末位孩子，永远不可能是那个相邻兄弟）。
+    // 用 jsdom 的 matches 真跑样式表里那条选择器，而不是只比对字符串形态。
+    // 箭头没有 aria-haspopup，所以无论 wrapper 在不在，都不该被它命中。
     const arrow = document.querySelector<HTMLElement>('[' + ARROW_ATTR + ']')!
-    expect(arrow.matches("[data-conversation-tabs] + [aria-haspopup='menu']")).toBe(false)
+    expect(arrow.matches(hideMenuSelector(TOP_BAR_FOLD_CSS))).toBe(false)
   })
 })
 
