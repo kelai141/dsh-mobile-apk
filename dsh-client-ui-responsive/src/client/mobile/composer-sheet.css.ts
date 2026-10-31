@@ -225,7 +225,10 @@ export const COMPOSER_SHEET_CSS = `
 [data-dsh-composer-sheet-backdrop][data-dsh-composer-sheet-leaving] > [data-dsh-composer-sheet-panel] {
   animation: dsh-composer-panel-out 160ms cubic-bezier(0.215, 0.61, 0.355, 1) forwards;
 }
-/* 减少动态：直接切换，不播放任何位移与淡入淡出。 */
+/* 减少动态（竖屏）：直接切换，不播放任何位移与淡入淡出。
+   **本块不覆盖横屏卡片** —— 横屏那条 animation 写在后面的媒体查询里，
+   选择器也更具体（多一个 [data-dsh-composer-sheet-anchored]），同优先级下
+   后者会盖掉这里的 animation: none。横屏的 reduced-motion 在文件末尾单独写。 */
 @media (prefers-reduced-motion: reduce) {
   [data-dsh-composer-sheet-backdrop],
   [data-dsh-composer-sheet-panel],
@@ -305,6 +308,19 @@ export const COMPOSER_SHEET_CSS = `
   @keyframes dsh-composer-card-out {
     from { transform: scale(1) translateY(0); opacity: 1; }
     to { transform: scale(0.96) translateY(4px); opacity: 0; }
+  }
+}
+/* 减少动态（横屏卡片）：直接切，不做缩放也不做位移。
+
+   **必须放在横屏媒体查询之后、且带 [data-dsh-composer-sheet-anchored]**：
+   - 放前面会被上面那条更具体的 animation 覆盖（同优先级下后者胜）；
+   - 选择器少一个属性选择器就不够具体，盖不住。
+   实测教训：一开始只在竖屏那段写了 reduced-motion，横屏卡片照旧播 200ms。 */
+@media (prefers-reduced-motion: reduce) {
+  [data-dsh-composer-sheet-backdrop][data-dsh-composer-sheet-anchored] > [data-dsh-composer-sheet-panel],
+  [data-dsh-composer-sheet-backdrop][data-dsh-composer-sheet-anchored][data-dsh-composer-sheet-leaving]
+    > [data-dsh-composer-sheet-panel] {
+    animation: none;
   }
 }
 `
