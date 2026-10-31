@@ -368,7 +368,6 @@
     "scripts/check-snapshot-builder-output.mjs:156": 2,
     "scripts/check-plugin-tests.mjs:35": 3,
     ".github/workflows/pr-gate.yml:41": 3,
-    "scripts/check-runtime-assets.mjs:96": 3,
     "VdisplayController.kt:753": 2,
     "MainActivity.kt:793": 2,
     "verify-state-sync.mjs:248": 2,
@@ -513,7 +512,6 @@
     "scripts/source-build/check-dsh-source-snapshot.mjs:25": 1,
     "scripts/check-release-gates.mjs:167": 1,
     "scripts/check-boot-budget.mjs:671": 1,
-    "scripts/check-runtime-assets.mjs:126": 1,
     "scripts/check-boot-budget.mjs:609": 1,
     "scripts/check-inject-completeness.mjs:100": 1,
     "scripts/check-browser-syntax-floor.mjs:536": 1,
@@ -3594,22 +3592,22 @@
       "export function resolveBrowserTier(facts: BrowserFacts): BrowserTierReport {"
     ],
     "plugins/dsh-android-browser/src/tools.ts:136": [
-      "function renderLoadState(v: Record<string, unknown>): string {"
+      "const name = oneLine(node.name)"
     ],
     "plugins/dsh-android-browser/src/tools.ts:254": [
-      "const runIt = () => originalExecute(args, exec)"
+      "output?: { render?: unknown }"
     ],
     "plugins/dsh-android-browser/src/tools.ts:262": [
-      "throw e"
+      "*"
     ],
     "plugins/dsh-android-browser/src/tools.ts:281": [
-      "// 失败回执必须带上**已声明且值确实存在**的判别字段（G2a-4 / issue #232 同族）："
+      "const v = value as Record<string, unknown> | null | undefined"
     ],
     "plugins/dsh-android-browser/src/tools.ts:33": [
       "const lastSnapshots = new Map<string, SnapshotMemory>()"
     ],
     "plugins/dsh-android-browser/src/tools.ts:407": [
-      "render: (_args, v: Record<string, unknown>) => [{"
+      "const stateOf = async (tabId?: string): Promise<Payload> => {"
     ],
     "plugins/dsh-android-file-open/src/index.ts:20": [
       "import { defineTool } from '@deepseek-ai/dsh-tools'"
@@ -3944,12 +3942,6 @@
     "scripts/check-release-gates.mjs:28": [
       "/**"
     ],
-    "scripts/check-runtime-assets.mjs:126": [
-      "*/"
-    ],
-    "scripts/check-runtime-assets.mjs:96": [
-      ""
-    ],
     "scripts/check-snapshot-builder-output.mjs:156": [
       "const writesTar = text.includes(\"join(OUT_DIR, 'snapshot.tar.xz')\")"
     ],
@@ -4107,40 +4099,40 @@
       "if (android.getSystemDark()) globalObj.__dshThemeBridge.setDark(true)"
     ],
     "tools.ts:1075": [
-      "}, 10_000)"
+      "const result = await call(BROWSER_OPS.setUa, {"
     ],
     "tools.ts:119": [
-      "function loadStateOf(v: Record<string, unknown>): string {"
+      "return oneLine(value, max).replace(/\"/g, \"'\")"
     ],
     "tools.ts:136": [
-      "function renderLoadState(v: Record<string, unknown>): string {"
+      "const name = oneLine(node.name)"
     ],
     "tools.ts:193": [
       "const sessionScope = new AsyncLocalStorage<string>()"
     ],
     "tools.ts:225": [
-      "* 「被 URL 准入拒绝」和「桥不可用」，审计面就仍然回答不了「这次为什么没做」。"
+      "if (tabs.length === 0) return '当前没有打开的网页。'"
     ],
     "tools.ts:245": [
-      "audit(toolName, payload, !failed, failed ? failureReasonOf(v) : undefined)"
+      "* 工具面统一包裹（2026-09-15）："
     ],
     "tools.ts:254": [
-      "const runIt = () => originalExecute(args, exec)"
+      "output?: { render?: unknown }"
     ],
     "tools.ts:26": [
       "interface SnapshotMemory {"
     ],
     "tools.ts:262": [
-      "throw e"
+      "*"
     ],
     "tools.ts:281": [
-      "// 失败回执必须带上**已声明且值确实存在**的判别字段（G2a-4 / issue #232 同族）："
+      "const v = value as Record<string, unknown> | null | undefined"
     ],
     "tools.ts:33": [
       "const lastSnapshots = new Map<string, SnapshotMemory>()"
     ],
     "tools.ts:505": [
-      "// 于是 browser_click 无从下手，模型反复 snapshot/wait 直到放弃。"
+      "// 此前被整条丢弃 —— 回执既不知道失败、也无法诊断。整键缺席而非空串（lossless JSON 纪律）。"
     ],
     "tools.ts:73": [
       "/**"
@@ -4215,6 +4207,12 @@
       "/**"
     ],
     "verify-webview-015.mjs:97": [
+      ""
+    ],
+    "scripts/check-runtime-assets.mjs:126": [
+      "*/"
+    ],
+    "scripts/check-runtime-assets.mjs:96": [
       ""
     ]
   },
