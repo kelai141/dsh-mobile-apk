@@ -50,6 +50,43 @@ Match evidence to risk:
 
 Paste the command and the key output. If a test was not run, say it was not run.
 
+## Device acceptance
+
+A UI, shell-behavior or security-sensitive change must carry a device-acceptance section in the PR description. Use exactly one of the two states below; leave it empty or write both and the review is rejected.
+
+### State A: acceptance was run
+
+State the evidence and the verdict:
+
+- Three evidence elements: **tree@sha** · **device serial** · **case name**; attach screenshots as a path or link;
+- Verdict: `PASS`, or `FAIL` with a reason.
+
+### State B: request acceptance (apply the `needs-device-verification` label)
+
+If you cannot run a device yourself, do not stop at "no device verification". Write a card someone else can execute:
+
+- Device prerequisites: Android version / package (versionName or head sha) / permission state;
+- Steps: 1. 2. 3. … — forward-looking and executable, down to the command or the tap target;
+- Expected observable: concrete values, copy, log lines, controls that must appear;
+- What failure looks like: counterexamples.
+
+### Four rules
+
+1. **All three evidence elements are mandatory** (tree@sha + device serial + case name): without the sha nobody knows which commit was verified.
+2. **Expectations must be values or copy**, never "works", "fine" or "ok": such words cannot go red, so the expectation does not exist.
+3. **The package version in the card must match what gets installed** (head sha or versionName): install a different build and the result proves nothing about this PR.
+4. **On FAIL, commit on the same branch and force-push; do not open a new PR**: this keeps review and acceptance history together instead of splitting one change into unrelated threads.
+
+### Requesting and scheduling
+
+- Apply the `needs-device-verification` label (one per PR) and write the State B card;
+- A device-acceptance specialist or a maintainer schedules and runs it; keep the label until then and do not remove it yourself;
+- The specialist **changes no code and does not merge**; they only write back `PASS`/`FAIL` with the raw output (commands, key stdout, screenshot paths).
+
+### A new commit invalidates the card
+
+The card is bound to a sha. After you add a commit the old evidence no longer points at the current HEAD, so write a fresh State B card instead of reusing the previous verdict.
+
 ## Self-review before pushing
 
 Read the full diff, stage only the files that belong to the change (do not run `git add .`), and make sure these commands report nothing:
