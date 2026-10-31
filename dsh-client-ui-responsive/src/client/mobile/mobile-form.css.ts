@@ -36,9 +36,26 @@ export const MOBILE_FORM_CSS: string = `
 @media (max-width: 767px) {
   /* touch-action 在触点按下时采样，touchstart 动态修改对当前手势无效。
      每个触点到最近滚动容器的祖先交集都必须保留 pan-y，而横向滚动容器及其内容
-     由手势模块预先标记放行。纵向滚动和双指缩放继续由浏览器处理。 */
+     由手势模块预先标记放行。
+
+     这里**不再放行 pinch-zoom**（2026-10-31 图片预览「放大图片会放大整个屏幕」）：
+     pinch-zoom 这个关键字本身就是「允许浏览器把整页捏合缩放」的授权，而这是应用 UI、
+     不是可阅读的文档。实测（MuMu Android 15 / WebView 110，设备 450x800）：带
+     pinch-zoom 时双指捏合让 visualViewport.scale 1→5、width 450→90，顶栏/输入区跟着
+     放大；去掉该关键字后同一手势 scale 恒为 1（对照：给 html 临时加 touch-action:none
+     得到同样结果，撤掉即复现）。壳侧 WebSettings 的 supportZoom/builtInZoomControls
+     在这一版 WebView 上关不掉页面捏合（两个方向都实测过），因此这一行才是真正的闸门。
+     图片自己的缩放在 lightbox 内实现（lightbox-zoom.ts），不依赖浏览器缩放。 */
+  /* 页面级捏合的闸门在根上，不在 frame 上：body 层的 portal（预览版说明、各类 aria-modal
+     浮层、大图预览）不在 [data-dsh-frame] 子树里，只关 frame 拦不住从浮层上开始的手势。
+     这里用 pans 而非 pinch-zoom：pan-x pan-y = 两个方向都允许平移、**不允许捏合缩放**，
+     于是纵向滚动、横向滚动容器（下方 auto 规则）、抽屉手势全都不受影响。 */
+  html[data-dsh-mobile-form] {
+    touch-action: pan-x pan-y;
+  }
+
   [data-dsh-frame], [data-dsh-frame] * {
-    touch-action: pan-y pinch-zoom;
+    touch-action: pan-y;
   }
   [data-dsh-frame][data-dsh-horizontal-scroll],
   [data-dsh-frame] [data-dsh-horizontal-scroll],

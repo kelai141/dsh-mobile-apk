@@ -103,6 +103,16 @@ internal object WebViewShim {
    *  - appOwnsTheme：引擎 UI 通过主题服务自行配色，禁止 WebView 再次算法改色。
    *  - textZoom 故意不设：0.13.3 起持久化退役（D6 收益省略），上游 ui-theme 的
    *    fontSize 原生管内容字号；新增调用点**不要**在本函数外自行加回。
+   *  - 页面级缩放三连关（图片放大带整屏）：这是**应用 UI**，不是可阅读的网页文档——
+   *    整页缩放会把顶栏/输入区一起放大，用户看到的是「整个屏幕被放大」。
+   *    真因不是有人打开了它，而是**从来没人关过**：setSupportZoom 的平台默认是 true，
+   *    setBuiltInZoomControls 默认 false 并不挡住视觉视口捏合（MuMu Android 15 /
+   *    WebView 110 实测：双指捏合 visualViewport.scale 1→5、width 450→90，而 html/body
+   *    的 zoom 与 transform 全不变、各元素 rect 不动）。三行必须一起写：supportZoom 关掉
+   *    「缩放能力」本身，builtInZoomControls 关掉捏合手势通路，displayZoomControls 关掉
+   *    +/- 浮层（前两者为 false 时它已无效，仍显式钉死，与 mediaPlaybackRequiresUserGesture
+   *    同一条「钉死默认值以免疫厂商 ROM 漂移」的理由）。图片自己的缩放在页面内实现
+   *    （dsh-client-ui-responsive 的 lightbox 手势），不依赖这个通道。
    */
   fun applyBaseline(s: WebSettings, appOwnsTheme: Boolean = false) {
     s.javaScriptEnabled = true
@@ -113,6 +123,10 @@ internal object WebViewShim {
     s.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
     s.cacheMode = WebSettings.LOAD_NO_CACHE
     s.mediaPlaybackRequiresUserGesture = true
+    // 页面级缩放全关（见上方函数注释）。三行同源，缺一条就可能被厂商 ROM 的默认值放回来。
+    s.setSupportZoom(false)
+    s.builtInZoomControls = false
+    s.displayZoomControls = false
     applyFollowSystemDark(s, appOwnsTheme)
     applyOffscreenPreraster(s)
   }

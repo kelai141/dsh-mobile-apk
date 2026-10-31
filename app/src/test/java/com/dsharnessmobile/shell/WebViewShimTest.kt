@@ -178,6 +178,32 @@ class WebViewShimTest {
   }
 
   @Test
+  fun pageLevelZoomIsPinnedOffOnEveryBaselineSurface() {
+    // 「放大图片会放大整个屏幕」的根因：页面级缩放**从来没人关过**，不是有人打开了它。
+    // setSupportZoom 的平台默认是 true，setBuiltInZoomControls 默认 false 并不挡住视觉视口
+    // 捏合（设备实测：visualViewport.scale 1→5、width 450→90，html/body 的 zoom 与 transform
+    // 全不变）。三行必须成组出现：少 builtInZoomControls 就留下捏合通路，少 supportZoom
+    // 就留下能力面，displayZoomControls 则钉死厂商 ROM 可能放回来的 +/- 浮层。
+    val shim = codeOnly(source("WebViewShim.kt"))
+    assertTrue("baseline 必须显式关掉缩放能力", shim.contains("setSupportZoom(false)"))
+    assertTrue("baseline 必须关掉捏合手势通路", shim.contains("builtInZoomControls = false"))
+    assertTrue("baseline 必须关掉缩放浮层控件", shim.contains("displayZoomControls = false"))
+    // 三条都必须落在 baseline 档内（在 applyIsolation 之前），否则引擎主页拿不到。
+    val isolation = shim.indexOf("fun applyIsolation")
+    for (token in listOf("setSupportZoom(false)", "builtInZoomControls = false", "displayZoomControls = false")) {
+      val at = shim.indexOf(token)
+      assertTrue("$token 必须在 applyBaseline 内（applyIsolation 之前）", at >= 0 && at < isolation)
+    }
+    // 页面级缩放一旦重开，lightbox 的手势就会重新落到整屏上——这是那条 bug 的复现条件，
+    // 所以「谁能打开它」必须同样只有这一处（与其它版本敏感面同一条铁律）。
+    assertEquals(
+      "页面级缩放只允许在 WebViewShim.kt 里出现（重复即漂移源）",
+      listOf("WebViewShim.kt"),
+      filesContaining("setSupportZoom"),
+    )
+  }
+
+  @Test
   fun localDocsStaysOffTheBaseline() {
     // 静态文档面刻意关 JS、最小能力：统一进 baseline 反而放大攻击面（shim KDoc 已声明此边界）。
     val docs = codeOnly(source("LocalDocs.kt"))

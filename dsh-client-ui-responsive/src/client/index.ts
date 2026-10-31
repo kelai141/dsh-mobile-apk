@@ -82,6 +82,8 @@ import { DrawerOverlayDismiss } from './mobile/drawer-overlay-dismiss.ts'
 import { registerConversationDock, ConversationDropZone, conversationAddress, existingConversation, retainDockIdentity, resolveDockSubagent, CONVERSATION_DOCK_CSS } from './mobile/conversation-dock.tsx'
 import { SidebarReorder } from './mobile/sidebar-reorder.ts'
 import { SIDEBAR_REORDER_CSS } from './mobile/sidebar-reorder.css.ts'
+import { LightboxZoom, ZOOM_SURFACE_ATTR, ZOOM_TARGET_ATTR } from './mobile/lightbox-zoom.ts'
+import { LIGHTBOX_ZOOM_CSS } from './mobile/lightbox-zoom.css.ts'
 import { EXTERNAL_OPEN_ID, externalOpenDefinition } from './mobile/external-open-paths.ts'
 import { ExternalOpenTab } from './mobile/external-open.tsx'
 import { SettingsDocumentAction } from './mobile/settings-document.ts'
@@ -778,6 +780,42 @@ export function apply(ctx: ClientContext): void {
     gestures.attach()
     return () => { gestures.detach() }
   }, 'ui-responsive: narrow-screen sidebar content swipes')
+
+  // 图片预览缩放：手势只放大图片本身。
+  //
+  // 真因（设备实测）：上游 `ImageLightbox` 没有任何手势代码，手机上的捏合只能落到
+  // Chromium 的**页面级缩放**——visualViewport.scale 1→5、width 450→90，顶栏/对话/输入区
+  // 跟着一起变大，这就是用户报的「放大图片会放大整个屏幕」。壳侧已在
+  // `WebViewShim.applyBaseline` 关掉页面缩放三连，于是这个手势必须由页面自己提供，
+  // 而且只能移动图片：backdrop/stage/mask/关闭键的几何一律不动。
+  //
+  // 样式表把 touch-action:none 只给 lightbox 的 <img>（手势归属图片，遮罩仍是既有的关闭
+  // 路径）；模块本身按 pointerId 跟踪触点在图片上的两指手势，并在每条关闭路径上复位，
+  // 不把缩放带到下一条消息。
+  ctx.effect(() => {
+    const disposeStyle = injectStyle('lightbox-zoom', LIGHTBOX_ZOOM_CSS)
+    const zoom = new LightboxZoom()
+    zoom.attach()
+    // 标记当前预览图片，让上面的样式表命中（属性由本模块维护，样式表只认属性）。
+    // 两种上游形态都要认：扁平（backdrop > mask + img + 关闭键）与带 stage
+    // （backdrop > stage > mask + img + 关闭键）——只按祖先链写选择器会漏掉另一种。
+    const mark = (): void => {
+      for (const dialog of document.querySelectorAll('[role="dialog"][aria-modal="true"]')) {
+        const image = dialog.querySelector<HTMLElement>(':scope > img') ?? dialog.querySelector<HTMLElement>('img')
+        if (image === null) continue
+        if (!dialog.hasAttribute(ZOOM_SURFACE_ATTR)) dialog.setAttribute(ZOOM_SURFACE_ATTR, '')
+        if (!image.hasAttribute(ZOOM_TARGET_ATTR)) image.setAttribute(ZOOM_TARGET_ATTR, '')
+      }
+    }
+    mark()
+    const observer = new MutationObserver(() => { mark() })
+    observer.observe(document.body, { childList: true, subtree: true })
+    return () => {
+      observer.disconnect()
+      zoom.detach()
+      disposeStyle()
+    }
+  }, 'ui-responsive: image lightbox zoom (picture only, never the page)')
 
   // apk #349：抽屉里点「新建会话」后抽屉不收、键盘残留（用户看到的「停在抽屉里，还得手动关」）。
   // 真因：上游 replaceMain 只在 panel==='reveal' 时调 selectPanel(null)（ui-workspace navigation.ts:403），
