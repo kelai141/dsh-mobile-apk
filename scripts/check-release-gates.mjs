@@ -189,6 +189,10 @@ const GATES = [
   // 注入面成员完整性（P0：包内新增文件曾被静默丢弃 → ERR_MODULE_NOT_FOUND/引擎启动即死）：
   // 需要「注入后」tar，故 CI 不跑，由两条构建链在注入步骤之后调用 + 发布链按快照面跑。
   { script: 'check-inject-completeness.mjs', ciApk: false, ciCoord: false, needsSnapshot: true },
+  // profile 层共享依赖解析（0.15.x）：vendored 订阅插件把 undici 声明为 peer，靠共享农场的相对链
+  // 解析到引擎树。判据作用于构建链的 **stage 树**（软链已就位、尚未归档），故 needsSnapshot:false——
+  // 本门禁自己按 .deploy-tmp/snapshot-013/<abi>/stage/root 发现根，找不到记计数 SKIP（--require 判红）。
+  { script: 'check-profile-undici-resolution.mjs', ciApk: false, ciCoord: false, needsSnapshot: false },
   // Kotlin 块注释嵌套静态检查（KDoc 里写 node_modules/** 会吞掉整个文件；dev-shell 实测）。
   { script: 'check-kotlin-comments.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
   { script: 'check-i18n-parity.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },

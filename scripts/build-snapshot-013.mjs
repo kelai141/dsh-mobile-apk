@@ -1154,6 +1154,45 @@ for (const entry of SLIM.platformDeadPackages ?? []) {
 //   ④ 其它越界绝对链：删除并计数（不删也必然被设备丢弃，留着只会让归档与设备不一致）。
 // 判据不是「链接看起来对不对」，而是**归档里不得存在任何设备必然丢弃的条目**（见本步之后的产物自检）。
 const STAGE_ROOT = join(STAGE, 'root')
+// ── 8a3b. profile 共享农场补齐（0.15.x，订阅 provider 引入）───────────────────
+//
+// 为什么要这一步：vendored 的 dsh-plugin-subscriptions 注入在 profiles/web|headless/node_modules/，
+// 它的 `import 'undici'` 由 Node 沿祖先目录向上解析 —— 能到达的只有 <profile>/node_modules 与
+// profiles/node_modules（共享农场），**到不了引擎树** usr/lib/node_modules/@deepseek-ai/dsh/node_modules/。
+// 基座 bootstrap 的农场只为「基座自己的依赖」建链，undici 不在其中，于是插件在设备上
+// ERR_MODULE_NOT_FOUND（实测：未补齐时 IMPORT FAIL）。不补齐就得把 undici 复制进 profile（+1.5MB）。
+//
+// 做法：为每个「引擎树有、农场没有」的共享依赖建一条**相对链**指向引擎树。幂等 + 可重建：
+// 目标路径每次按 ENGINE_NM_STAGE 现算，引擎目录换代自动跟着变；已存在且解析正确则跳过，指错则重指。
+// 清单为空时本步是 no-op。
+const PROFILE_SHARED_LINKS = [
+  // 插件把 undici 声明为 peer（见 vendor/dsh-plugin-subscriptions/PROVENANCE.md），由引擎提供。
+  'undici',
+]
+{
+  const farm = join(STAGE_ROOT, 'home', '.dsh', 'profiles', 'node_modules')
+  if (existsSync(farm)) {
+    let made = 0
+    let kept = 0
+    for (const name of PROFILE_SHARED_LINKS) {
+      const target = join(ENGINE_NM_STAGE, name)
+      if (!existsSync(join(target, 'package.json'))) {
+        console.warn('  警告: 共享农场依赖在引擎树缺席: ' + name + '（' + target + '）')
+        continue
+      }
+      const link = join(farm, name)
+      const want = relative(farm, target)
+      let ok = false
+      try { ok = readlinkSync(link) === want } catch { /* 缺席或非链接 */ }
+      if (ok) { kept++; continue }
+      wsl('rm -rf "' + wslPath(link) + '" && ln -sfn "' + wslPath(target) + '" "' + wslPath(link) + '"')
+      made++
+    }
+    log('profile 共享农场: 建链 ' + made + ' 条 / 已就位 ' + kept + ' 条（' + PROFILE_SHARED_LINKS.join(', ') + '）')
+  } else {
+    console.warn('  警告: profiles/node_modules 农场不在场，共享依赖链未建（' + farm + '）')
+  }
+}
 {
   const stats = sanitizeSymlinks(STAGE_ROOT, ['usr', 'home/.dsh'])
   log(`软链自净化: 共 ${stats.links} 条；相对化 ${stats.rewrote}；删除残留 ${stats.dropped}；保留 App 绝对链 ${stats.keptAppAbsolute}；其它绝对链 ${stats.keptOtherAbsolute}`)

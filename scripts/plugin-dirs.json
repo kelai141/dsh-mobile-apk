@@ -13,7 +13,8 @@
     "plugins/dsh-session-delete"
   ],
   "externals": [
-    "vendor/dshmarketplace-plugin"
+    "vendor/dshmarketplace-plugin",
+    "vendor/dsh-plugin-subscriptions"
   ],
   "retiredExternals": [
     "vendor/dsh-undo-savepoint"

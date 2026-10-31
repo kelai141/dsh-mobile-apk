@@ -130,6 +130,11 @@
       "id": "session-delete",
       "pkg": "@dsh-android/dsh-session-delete",
       "repo": "plugins/dsh-session-delete"
+    },
+    {
+      "id": "llm-subscriptions",
+      "pkg": "dsh-plugin-subscriptions",
+      "repo": "vendor/dsh-plugin-subscriptions"
     }
   ],
   "symbols": [

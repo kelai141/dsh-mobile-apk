@@ -49,6 +49,16 @@
     - id: dshmarketplace
       name: dshmarketplace-plugin
 
+# 订阅账号当 provider（0.15.x）：dsh-plugin-subscriptions（vendored，见 vendor/dsh-plugin-subscriptions/PATCHES.md）。
+# 把 ChatGPT(Codex)/Claude/Grok/Copilot/Antigravity 订阅当 LLM provider；OAuth 在 Settings → Subscriptions，
+# token 存 ~/.dsh/plugins/subscriptions/auth.json（0600，自动刷新）。
+# 依赖对齐：上游声明 undici@^7，本平台引擎自带 undici@8.11.2；实测插件用到的 fetch/ProxyAgent/close()
+# 在 8.x 语义等价（唯一 7->8 差异是 proxyTunnel 默认值，插件从不传该选项且目标全为 https，故不受影响），
+# 因此把 undici 改为 peer 由引擎提供，不再物化 7.x（省 1.5MB / 195 文件）。差异详见 PATCHES.md。
+- insert:
+    - id: llm-subscriptions
+      name: dsh-plugin-subscriptions
+
 # 在外部应用打开（0.1.5 新增，桌面编排）：上游 host/client 探查 Finder/Terminal/编辑器目录，
 # Android 上没有等价候选。两条 row 关闭，改由注入层的会话头部入口 + 壳侧系统选择器（PathOpen）承担。
 - id: open-in-app
