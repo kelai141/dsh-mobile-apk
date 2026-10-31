@@ -1273,7 +1273,11 @@ const PROFILE_SHARED_LINKS = [
       let ok = false
       try { ok = readlinkSync(link) === want } catch { /* 缺席或非链接 */ }
       if (ok) { kept++; continue }
-      wsl('rm -rf "' + wslPath(link) + '" && ln -sfn "' + wslPath(target) + '" "' + wslPath(link) + '"')
+      // 目标必须写**相对路径**（want），不是宿主 stage 绝对路径：
+      // 旧写法把 /root/.dsh-stage/<abi>/root/usr/... 烘进归档 → 设备上该路径不存在 →
+      // 插件 import 'undici' 得 ERR_MODULE_NOT_FOUND（subscriptions 整条不激活）；
+      // 且 ok 判据比的是 want（相对），与绝对目标永不相等 → 每次构建都重建、kept 恒 0。
+      wsl('rm -rf "' + wslPath(link) + '" && ln -sfn "' + want + '" "' + wslPath(link) + '"')
       made++
     }
     log('profile 共享农场: 建链 ' + made + ' 条 / 已就位 ' + kept + ' 条（' + PROFILE_SHARED_LINKS.join(', ') + '）')
