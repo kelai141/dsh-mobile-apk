@@ -62,18 +62,9 @@ const TILE_ATTR = 'data-dsh-composer-sheet-tile'
 const ROWS_ATTR = 'data-dsh-composer-sheet-rows'
 const ROW_ATTR = 'data-dsh-composer-sheet-row'
 /**
- * 横屏 / 桌面形态标记：挂在 backdrop 上，CSS 据此切成「锚在 + 上的卡片」，
- * 不再画全屏遮罩、不再贴底。
+ * 收场动画标记：挂在 backdrop 上，CSS 据此播放「飞回视口底」的退场动画。
  *
- * 判据与 CSS 里那段媒体查询逐字对应；改一处必须改两处。竖屏手机不命中，
- * 仍是原来的底部 sheet（用户定例保持）。
- */
-const ANCHORED_ATTR = 'data-dsh-composer-sheet-anchored'
-const ANCHORED_MEDIA = '(orientation: landscape) and (max-height: 500px), (min-width: 768px)'
-/**
- * 收场动画标记：挂在 backdrop 上，CSS 据此播放「缩回「+」」的退场动画。
- *
- * 为什么要一个属性而不是直接 remove：remove() 是瞬时的，用户看不到卡片收回去，
+ * 为什么要一个属性而不是直接 remove：remove() 是瞬时的，用户看不到卡片飞回去，
  * 观感上像「闪一下消失」。加了标记之后由 CSS 播 160ms，脚本等动画结束再 remove。
  * 真机 WebView 有 WAAPI（Element.getAnimations），jsdom 没有 —— 没有动画就不等，
  * 立刻 remove，测试与无动画环境的行为保持一致。
@@ -95,14 +86,7 @@ const EXIT_ANIMATION_MS = 160
  * visibility: hidden 保留布局与节点身份，只是不可见 —— 合成事件仍能直接派发到节点上。
  */
 const CONCEAL_ATTR = 'data-dsh-composer-sheet-concealed'
-/** 卡片与「+」之间的间隙（规格 8px）。 */
-const ANCHOR_GAP_PX = 8
-/** 卡片宽度上限（像手机，不像平板）；与 CSS 里的 max-width 兜底一致。 */
-const ANCHOR_MAX_WIDTH_PX = 360
-/** 视口边距：卡片离左右边缘至少留这么多，避免贴边。 */
-const ANCHOR_VIEWPORT_MARGIN_PX = 12
-/** 卡片高度上限（规格 min(70vh, 480px)）。 */
-const ANCHOR_MAX_HEIGHT_PX = 480
+
 /**
  * 附件入口在行列表里的标题（中英两套文案，精确匹配的闭集）。
  *
@@ -368,117 +352,6 @@ export class ComposerSheet {
     return this.backdrop?.querySelector<HTMLElement>('[' + PANEL_ATTR + ']') ?? null
   }
 
-  /** 当前是否卡片形态（横屏 / 桌面）。 */
-  private isAnchoredForm(): boolean {
-    if (typeof window.matchMedia !== 'function') return false
-    return window.matchMedia(ANCHORED_MEDIA).matches
-  }
-
-  /**
-   * 把面板锚到「+」按钮上。
-   *
-   * 几何全部由内联样式写入（带 !important），CSS 只管外观：这样竖屏贴底与横屏
-   * 锚定能共用同一个 panel 元素，切形态时把内联值撤掉即可回到 CSS。
-   * @param button - 「+」按钮（几何锚点）。
-   */
-  private placeAnchored(button: HTMLElement): void {
-    const panel = this.panel()
-    if (panel === null) return
-    const plus = button.getBoundingClientRect()
-    const viewportW = window.innerWidth
-    const viewportH = window.innerHeight
-    // 左边缘对齐「+」，但不越过左侧安全边距（「+」贴左边时留一点呼吸）。
-    const left = Math.max(ANCHOR_VIEWPORT_MARGIN_PX, plus.left)
-    // 宽度三重夹取：
-    //   1. 上限 360；
-    //   2. 视口减两侧边距（窄视口不被拉出屏幕）；
-    //   3. 视口减「卡片左边缘到右边的可用宽度」—— 加号靠右时卡片只能向左收，
-    //      否则左对齐加号会把右半截顶出屏幕。这是 max-width:
-    //      calc(100vw - 2 * plusLeft) 的等价实现，但按实际 left 算更准
-    //      （left 可能已被上一条夹过）。
-    const width = Math.min(
-      ANCHOR_MAX_WIDTH_PX,
-      viewportW - ANCHOR_VIEWPORT_MARGIN_PX * 2,
-      viewportW - left - ANCHOR_VIEWPORT_MARGIN_PX,
-    )
-    // 上方可用高度 = 「+」顶边 - 间隙 - 顶部安全边距。
-    const spaceAbove = plus.top - ANCHOR_GAP_PX - ANCHOR_VIEWPORT_MARGIN_PX
-    // 最小可用高度：三瓦片 96 + 内边距 24。低于它就没有展示价值，翻到下方。
-    const minUseful = 96 + 24
-    const openUpward = spaceAbove >= minUseful
-    // 高度上限再按实际可用空间收紧，避免卡片顶出屏幕。
-    const spaceBelow = viewportH - plus.bottom - ANCHOR_GAP_PX - ANCHOR_VIEWPORT_MARGIN_PX
-    const maxHeight = Math.min(
-      ANCHOR_MAX_HEIGHT_PX,
-      viewportH * 0.7,
-      Math.max(minUseful, openUpward ? spaceAbove : spaceBelow),
-    )
-    panel.style.setProperty('position', 'fixed', 'important')
-    panel.style.setProperty('left', left + 'px', 'important')
-    panel.style.setProperty('width', width + 'px', 'important')
-    panel.style.setProperty('max-height', maxHeight + 'px', 'important')
-    // 动画原点必须落在「+」的中心，卡片才像「从加号长出来」。
-    //
-    // X 用实测：加号中心 - 卡片左边缘（两者都是 px，随视口变化）。
-    // Y 用 calc 相对卡片自身高度：向上展开时卡片底边在 plus.top - gap，加号中心
-    // 在它下方 (gap + plus.height / 2)，所以原点是 100% + 该值；向下展开则在上方，
-    // 取 0% - 该值。这样既不需要等一次布局就能写对，也不会在卡片高度变化后失准。
-    // 写死百分比（如 50% 50%）在真机上对不上：卡片宽度与「+」位置都随视口变。
-    const plusCenterX = plus.left + plus.width / 2
-    const plusOffsetY = ANCHOR_GAP_PX + plus.height / 2
-    panel.style.setProperty('transform-origin',
-      (plusCenterX - left) + 'px ' + (openUpward ? 'calc(100% + ' + plusOffsetY + 'px)' : 'calc(0% - ' + plusOffsetY + 'px)'),
-      'important')
-    if (openUpward) {
-      // 自下展开：底边贴「+」上沿再留 8px。
-      panel.style.setProperty('bottom', (viewportH - plus.top + ANCHOR_GAP_PX) + 'px', 'important')
-      panel.style.removeProperty('top')
-      panel.setAttribute('data-dsh-composer-sheet-dir', 'up')
-    } else {
-      // 下方展开：顶边贴「+」下沿再留 8px。
-      panel.style.setProperty('top', (plus.bottom + ANCHOR_GAP_PX) + 'px', 'important')
-      panel.style.removeProperty('bottom')
-      panel.setAttribute('data-dsh-composer-sheet-dir', 'down')
-    }
-  }
-
-  /**
-   * 形态切换 / 尺寸变化时重算锚点。
-   *
-   * 竖屏形态下把内联几何全部撤掉，交回 CSS 贴底 —— 少撤一条，切回竖屏就会
-   * 带着横屏的 left/width 贴底，右下角露出空白。
-   */
-  private readonly relayout = (): void => {
-    const backdrop = this.backdrop
-    const panel = this.panel()
-    if (backdrop === null || panel === null) return
-    const button = this.addButton
-    if (this.isAnchoredForm() && button !== null) {
-      backdrop.setAttribute(ANCHORED_ATTR, '')
-      panel.setAttribute('aria-modal', 'false')
-      this.placeAnchored(button)
-      return
-    }
-    backdrop.removeAttribute(ANCHORED_ATTR)
-    panel.setAttribute('aria-modal', 'true')
-    panel.style.removeProperty('position')
-    panel.style.removeProperty('left')
-    panel.style.removeProperty('width')
-    panel.style.removeProperty('max-height')
-    panel.style.removeProperty('bottom')
-    panel.style.removeProperty('top')
-    // 动画原点是横屏卡片专有的内联值：不撤掉，切回竖屏后会带着横屏的原点播
-    // 「从底部抬起」，位移方向就错了。
-    panel.style.removeProperty('transform-origin')
-    panel.removeAttribute('data-dsh-composer-sheet-dir')
-  }
-
-  /** 视口变化（转屏 / 改窗口大小）时重算；卡片没开时什么都不做。 */
-  private readonly onViewportChange = (): void => {
-    if (this.backdrop === null) return
-    this.relayout()
-  }
-
   private open(button: HTMLElement): void {
     this.close()
     const t = this.text()
@@ -514,11 +387,8 @@ export class ComposerSheet {
     document.body.append(backdrop)
     this.backdrop = backdrop
     button.setAttribute('aria-expanded', 'true')
-    // 形态判定与锚定几何：backdrop 挂上之后立刻算一次（横屏卡片要贴「+」）。
-    this.relayout()
-    // 转屏 / 改窗口大小时重算锚点；close() 里解绑。
-    window.addEventListener('resize', this.onViewportChange)
-    window.addEventListener('orientationchange', this.onViewportChange)
+    // 几何全部交给 CSS（居中卡片），脚本不写内联定位，因此不需要 relayout /
+    // 视口变化监听：转屏后 grid + place-items: center 自动重新居中。
     this.lockBodyScroll()
     // 到这里 backdrop 已经挂到 body 上（this.backdrop 也已赋值），读菜单拿到的
     // 行才有地方写。顺序不能提前：见 fillRows 的注释。
@@ -988,8 +858,7 @@ export class ComposerSheet {
     // 关掉 sheet 时借用一定结束：万一借用段还没走到自己的 finally，这里的复位
     // 保证 Escape 立刻可用（#1001）。
     this.borrowing = false
-    window.removeEventListener('resize', this.onViewportChange)
-    window.removeEventListener('orientationchange', this.onViewportChange)
+
     if (this.backdrop !== null) {
       // 先摘掉引用，再播退场动画：close() 是同步语义（调用方回来时面板状态已归零），
       // 动画只是视觉上的余韵，不能让它决定「关没关」。

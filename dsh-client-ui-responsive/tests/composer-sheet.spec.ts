@@ -623,11 +623,10 @@ describe('附件入口去重：隐藏上游「文件 / file」行', () => {
   })
 })
 
-describe('竖屏：限高滚动与进出动画', () => {
-  it('限高命中 min(72vh, 100dvh - 96px)，且滚动拓扑是「面板不滚、列表滚」', () => {
-    expect(COMPOSER_SHEET_CSS).toContain('max-height: min(72vh, calc(100dvh - 96px))')
-    // 回退档：不支持 dvh 的 WebView 必须还有一条可用的 vh 上限。
-    expect(COMPOSER_SHEET_CSS).toContain('max-height: 82vh')
+describe('居中卡片：限高与进出动画', () => {
+  it('限高命中 min(70vh, 560px)，且滚动拓扑是「面板不滚、列表滚」', () => {
+    // 新规格：卡片视口居中、固定落点，高度上限 min(70vh, 560px)。
+    expect(COMPOSER_SHEET_CSS).toContain('max-height: min(70vh, 560px)')
     // 面板**不**承担滚动（旧写法是面板 overflow-y:auto，实测会让整个面板滚、
     // 列表反而 overflow:visible 不滚，与规格相反）。
     expect(COMPOSER_SHEET_CSS).toMatch(/\[data-dsh-composer-sheet-panel\]\s*\{[^}]*overflow:\s*hidden/)
@@ -637,16 +636,19 @@ describe('竖屏：限高滚动与进出动画', () => {
     expect(COMPOSER_SHEET_CSS).toMatch(/\[data-dsh-composer-sheet-rows\]\s*\{[^}]*min-height:\s*0/)
   })
 
-  it('底部留 safe-area、行内左 padding >= 16px', () => {
-    expect(COMPOSER_SHEET_CSS).toContain('env(safe-area-inset-bottom')
+  it('行内左 padding >= 16px', () => {
+    // 卡片居中后不再贴底，safe-area 由「卡片永远不贴视口底」天然规避
+    // （max-height 70vh，上下各留 15vh）。这里只钉行内边距。
     expect(COMPOSER_SHEET_CSS).toMatch(/\[data-dsh-composer-sheet-row\]\s*\{[^}]*padding:\s*6px 16px/)
   })
 
-  it('进 220ms / 出 160ms，且 prefers-reduced-motion 直接切', () => {
-    expect(COMPOSER_SHEET_CSS).toMatch(/dsh-composer-panel-in 220ms/)
-    expect(COMPOSER_SHEET_CSS).toMatch(/dsh-composer-panel-out 160ms/)
-    const reduced = COMPOSER_SHEET_CSS.slice(COMPOSER_SHEET_CSS.indexOf('prefers-reduced-motion'))
+  it('进 200ms / 出 160ms，且 prefers-reduced-motion 直接切', () => {
+    expect(COMPOSER_SHEET_CSS).toMatch(/dsh-composer-card-in 200ms/)
+    expect(COMPOSER_SHEET_CSS).toMatch(/dsh-composer-card-out 160ms/)
+    const at = COMPOSER_SHEET_CSS.lastIndexOf('prefers-reduced-motion')
+    const reduced = COMPOSER_SHEET_CSS.slice(at)
     expect(reduced).toContain('animation: none')
+    expect(reduced).toContain('transition: none')
   })
 
   it('标题自动换行而不是截断（窄屏不丢字）', () => {
@@ -935,54 +937,6 @@ describe('退场动画：标记必须先于取动画', () => {
     // 顺序反了时，取动画那一刻标记还没挂 ⇒ sawLeaving=false。
     const sawLeavingIfReversed = backdrop.hasAttribute('data-dsh-composer-sheet-leaving')
     expect(sawLeavingIfReversed).toBe(false)
-  })
-})
-
-describe('横屏卡片的 reduced-motion 必须盖住横屏动画', () => {
-  /**
-   * 真缺陷（2026-10-31 自查发现）：reduced-motion 块只写在竖屏那段（文件中部），
-   * 而横屏卡片的 animation 写在后面的横屏媒体查询里、选择器还多一个
-   * [data-dsh-composer-sheet-anchored]。同优先级下后者胜，
-   * 于是「prefers-reduced-motion: reduce」对横屏卡片完全不生效 —— 照旧播 200ms 缩放。
-   *
-   * 判据不能只看「文件里有 prefers-reduced-motion」就完事（那样旧写法也绿），
-   * 必须断「在横屏动画之后还有一条带 anchored 的 reduced-motion 规则」。
-   */
-  it('文件末尾有带 anchored 的 reduced-motion 块，且在横屏 animation 之后', () => {
-    const cardAnimAt = COMPOSER_SHEET_CSS.indexOf('animation: dsh-composer-card-in')
-    expect(cardAnimAt).toBeGreaterThan(-1)
-    // 找最后一条 reduced-motion 块的位置（横屏那条必须在横屏动画之后）。
-    const rmAt = COMPOSER_SHEET_CSS.lastIndexOf('@media (prefers-reduced-motion: reduce)')
-    expect(rmAt).toBeGreaterThan(cardAnimAt)
-    const rmBlock = COMPOSER_SHEET_CSS.slice(rmAt)
-    // 选择器必须带 anchored（否则不够具体，盖不住横屏那条 animation）。
-    expect(rmBlock).toContain('[data-dsh-composer-sheet-anchored]')
-    expect(rmBlock).toContain('animation: none')
-    // 且必须同时覆盖入场与收场两条（收场是 [leaving] 变体）。
-    expect(rmBlock).toContain('[data-dsh-composer-sheet-leaving]')
-  })
-
-  it('横屏动画时长落在 180-220ms，缓动为规格值，且不做回弹', () => {
-    expect(COMPOSER_SHEET_CSS).toMatch(/animation: dsh-composer-card-in 200ms cubic-bezier\(0\.215, 0\.61, 0\.355, 1\)/)
-    // 出场 140-160ms。
-    expect(COMPOSER_SHEET_CSS).toMatch(/animation: dsh-composer-card-out 160ms cubic-bezier\(0\.215, 0\.61, 0\.355, 1\)/)
-    // 无回弹：keyframes 里不许出现 scale > 1 或反向 translate（回弹的典型写法）。
-    const kf = COMPOSER_SHEET_CSS.slice(
-      COMPOSER_SHEET_CSS.indexOf('@keyframes dsh-composer-card-in'),
-      COMPOSER_SHEET_CSS.indexOf('@keyframes dsh-composer-card-out'),
-    )
-    expect(kf).not.toMatch(/scale\(1\.[0-9]+\)/)
-    expect(kf).toContain('scale(0.96)')
-    expect(kf).toContain('translateY(4px)')
-  })
-
-  it('transform-origin 不在 CSS 里写死（必须由脚本按实测坐标内联写入）', () => {
-    // 写死百分比在真机上对不上：卡片宽度与「+」位置都随视口变。
-    //
-    // 断言用「行首声明」形式而不是 not.toContain('transform-origin')：
-    // CSS 里的注释会合法地提到这个属性名（说明为什么由脚本写），
-    // 用子串否定会把它当成「CSS 里写了 transform-origin」而假红。
-    expect(COMPOSER_SHEET_CSS).not.toMatch(/^\s*transform-origin\s*:/m)
   })
 })
 

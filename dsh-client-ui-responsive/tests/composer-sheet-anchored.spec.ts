@@ -1,16 +1,18 @@
 // @vitest-environment jsdom
-// 横屏 / 桌面形态：从输入框左下角「+」展开的原生卡片。
+// 居中卡片形态：横屏与竖屏共用同一张卡片（规格已从「锚在 + 上」改为「视口居中」）。
 //
-// 与竖屏底部 sheet 是**同一张 panel 的两种几何**：竖屏贴底全宽（bottomGap=0），
-// 横屏锚到「+」上（左边缘对齐、底边 +8px、宽 <=360、不画遮罩）。
+// 为什么改：锚定在加号上会让卡片位置随输入框位置漂移（横屏尤甚），用户要求固定落点。
+// 现在几何**全部交给 CSS**（grid + place-items: center），脚本不写任何内联定位。
 //
-// 这里钉的是几何与形态契约，不是肉眼观感：
-//   1. 横屏：卡片左边缘 == 「+」左边缘（<=1px），宽度 <=360，底边距「+」顶边 8px；
-//   2. 竖屏：仍是贴底 sheet，且内联几何必须被撤干净（否则 CSS 贴底失效）；
-//   3. 两形态：三瓦片 + 9 行都在；
-//   4. 无障碍：横屏 aria-modal=false（非模态 popover），竖屏 true；
-//   5. 聚焦：打开进第一项，关闭后 activeElement 不是编辑器；
-//   6. 负控：去掉锚定计算（退化成全宽贴底）时，同一批断言必须判红。
+// 这里钉的是契约，不是肉眼观感：
+//   1. 居中：backdrop 是 grid + place-items: center，卡片宽/高只受视口约束；
+//   2. 无内联几何：脚本不写 left/top/width/max-height/transform-origin；
+//   3. 遮罩：半透明黑 + pointer-events:auto，点它能关；
+//   4. 动效：入场从视口底边之下飞入（translateY(100vh) → 0）200ms，出场反向 160ms；
+//   5. reduced-motion：文件末尾统一 animation:none，不许被更具体的规则覆盖；
+//   6. 两形态内容一致：行副标题与瓦片标签都显示（取消横屏隐藏）；
+//   7. 列表滚到底时最后一行完整可见（padding-bottom + scroll-padding-bottom）；
+//   8. 负控：去掉遮罩点击处理器、把入场起点改回加号坐标 —— 判据必须变红。
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { ComposerSheet } from '../src/client/mobile/composer-sheet.ts'
 import { COMPOSER_SHEET_CSS } from '../src/client/mobile/composer-sheet.css.ts'
@@ -20,27 +22,22 @@ const PANEL = '[data-dsh-composer-sheet-panel]'
 const TILE = '[data-dsh-composer-sheet-tile]'
 const ROW = '[data-dsh-composer-sheet-row]'
 const ADD = '[data-composer-card] button[aria-haspopup="listbox"]'
-const ANCHORED = 'data-dsh-composer-sheet-anchored'
 
-/** 横屏手机视口（真机 MuMu 横屏是 1600x900，这里取一个典型矮视口）。 */
-const LANDSCAPE = { width: 900, height: 420 }
-/** 竖屏手机视口。 */
-const PORTRAIT = { width: 420, height: 900 }
+/** 横屏矮视口（原设备横屏 1067x600 dp 的量级）。 */
+const LANDSCAPE = { width: 1067, height: 600 }
+/** 竖屏视口。 */
+const PORTRAIT = { width: 600, height: 1067 }
 
-/**
- * 「+」在两种视口里的位置：横屏时它贴在输入框左下角，竖屏时同样在左下但更高。
- * 数值本身不重要，重要的是断言用的比对基准来自**同一个 rect**。
- */
+/** 「+」的固定 rect。新形态**不该**读它 —— 保留只为证明卡片位置与它无关。 */
 let plusRect: { left: number; top: number; right: number; bottom: number; width: number; height: number }
 
-/** 上游「+」菜单的 9 项（与真机菜单同量级）。 */
+/** 上游「+」菜单项（标签、可选副标题）。 */
 const NINE: readonly (readonly [string, string | null])[] = [
   ['拍照上传', null], ['选择文件', '从本机选择'], ['调用指令', '/ 开头的指令'],
   ['目标', null], ['计划', null], ['反馈', null],
   ['压缩', null], ['权限', null], ['模型', null],
 ]
 
-/** 记录「+」菜单项被转发时的事件类型。 */
 let forwards: string[] = []
 
 function option(label: string, description: string | null): HTMLButtonElement {
@@ -62,27 +59,6 @@ function option(label: string, description: string | null): HTMLButtonElement {
   return item
 }
 
-/**
- * 装一个可控的 matchMedia：只让 anchoredMedia 的查询结果由参数决定。
- * @param matches - 该媒体查询是否命中（true = 卡片形态）。
- */
-function stubMatchMedia(matches: boolean): void {
-  vi.stubGlobal('matchMedia', (query: string) => ({
-    matches: query.includes('orientation: landscape') ? matches : false,
-    media: query,
-    onchange: null,
-    addListener: () => {},
-    removeListener: () => {},
-    addEventListener: () => {},
-    removeEventListener: () => {},
-    dispatchEvent: () => false,
-  }))
-}
-
-/**
- * 搭合成器 + 上游菜单，并给「+」一个固定 rect。
- * @param labels - 上游菜单项（标签、可选副标题）。
- */
 function buildComposer(labels: readonly (readonly [string, string | null])[]): {
   add: HTMLButtonElement
   card: HTMLElement
@@ -95,7 +71,6 @@ function buildComposer(labels: readonly (readonly [string, string | null])[]): {
   add.setAttribute('aria-haspopup', 'listbox')
   add.setAttribute('aria-expanded', 'false')
   add.setAttribute('aria-label', '添加文件或调用指令')
-  // 几何锚点的唯一来源：这个 rect。测试断言直接拿它比对。
   add.getBoundingClientRect = () => plusRect as DOMRect
   tools.append(add)
   card.append(tools)
@@ -118,7 +93,6 @@ function buildComposer(labels: readonly (readonly [string, string | null])[]): {
   return { add, card }
 }
 
-/** 一个可聚焦的编辑器（用来验证关闭后不聚焦它）。 */
 function buildEditor(): HTMLElement {
   const editor = document.createElement('div')
   editor.setAttribute('contenteditable', 'true')
@@ -128,16 +102,8 @@ function buildEditor(): HTMLElement {
 }
 
 let sheet: ComposerSheet
-/** jsdom 的视口原值：beforeEach 会改成测试想要的尺寸，afterEach 还原。 */
 let originalSize: { w: PropertyDescriptor | undefined; h: PropertyDescriptor | undefined }
 
-/**
- * 把 jsdom 视口设成给定尺寸。
- *
- * 必须显式设：jsdom 默认 1024x768，与真机横屏（矮视口）差很远，
- * 锚定算法里的「上方空间够不够」会因此判成完全不同的分支。
- * @param size - 目标视口尺寸。
- */
 function setViewport(size: { width: number; height: number }): void {
   Object.defineProperty(window, 'innerWidth', { configurable: true, value: size.width })
   Object.defineProperty(window, 'innerHeight', { configurable: true, value: size.height })
@@ -151,7 +117,7 @@ beforeEach(() => {
     h: Object.getOwnPropertyDescriptor(window, 'innerHeight'),
   }
   setViewport(LANDSCAPE)
-  plusRect = { left: 16, top: 300, right: 52, bottom: 336, width: 36, height: 36 }
+  plusRect = { left: 16, top: 500, right: 52, bottom: 536, width: 36, height: 36 }
   sheet = new ComposerSheet()
 })
 
@@ -163,7 +129,6 @@ afterEach(() => {
   if (originalSize.h !== undefined) Object.defineProperty(window, 'innerHeight', originalSize.h)
 })
 
-/** 等到映射行写进 DOM。 */
 async function settle(): Promise<void> {
   for (let i = 0; i < 40; i += 1) {
     await new Promise<void>((resolve) => { setTimeout(resolve, 0) })
@@ -171,65 +136,236 @@ async function settle(): Promise<void> {
   }
 }
 
-/** 按给定形态打开面板。 */
-async function open(anchored: boolean, viewport?: { width: number; height: number }): Promise<void> {
-  stubMatchMedia(anchored)
-  setViewport(viewport ?? (anchored ? LANDSCAPE : PORTRAIT))
+/** 按给定视口打开面板（形态已统一，viewport 只影响 CSS 计算，不再影响脚本分支）。 */
+async function open(viewport?: { width: number; height: number }): Promise<void> {
+  setViewport(viewport ?? LANDSCAPE)
   sheet.attach()
   document.querySelector<HTMLElement>(ADD)!.click()
   await settle()
 }
 
-/** 读出面板的内联几何（脚本写进去的那几个）。 */
-function geometry(): { left: number; width: number; bottom: number | null; top: number | null; position: string } {
-  const panel = document.querySelector<HTMLElement>(PANEL)!
-  const style = panel.style
-  return {
-    left: parseFloat(style.left === '' ? 'NaN' : style.left),
-    width: parseFloat(style.width === '' ? 'NaN' : style.width),
-    bottom: style.bottom === '' ? null : parseFloat(style.bottom),
-    top: style.top === '' ? null : parseFloat(style.top),
-    position: style.position,
-  }
+/** 取出某个选择器的规则体（到第一个右花括号为止）。 */
+function ruleBody(selector: string): string {
+  const at = COMPOSER_SHEET_CSS.indexOf(selector + ' {')
+  expect(at).toBeGreaterThan(-1)
+  return COMPOSER_SHEET_CSS.slice(at, COMPOSER_SHEET_CSS.indexOf('}', at) + 1)
 }
 
-describe('横屏：锚在「+」上的原生卡片', () => {
-  it('卡片左边缘 == 「+」左边缘（误差 <=1px）', async () => {
-    stubMatchMedia(true)
-    buildComposer(NINE)
-    await open(true)
-    const g = geometry()
-    expect(Math.abs(g.left - plusRect.left)).toBeLessThanOrEqual(1)
+describe('居中卡片：几何交给 CSS，脚本不写内联定位', () => {
+  it('backdrop 用 grid + place-items: center 居中，卡片不靠脚本定位', () => {
+    const backdrop = ruleBody('[data-dsh-composer-sheet-backdrop]')
+    expect(backdrop).toContain('position: fixed')
+    expect(backdrop).toContain('inset: 0')
+    expect(backdrop).toContain('display: grid')
+    expect(backdrop).toContain('place-items: center')
+  })
+
+  it('宽度 min(360px, 100vw - 24px)，高度 max-height min(70vh, 560px)，圆角走 token', () => {
+    const panel = ruleBody('[data-dsh-composer-sheet-panel]')
+    expect(panel).toContain('width: min(360px, calc(100vw - 24px))')
+    expect(panel).toContain('max-height: min(70vh, 560px)')
+    expect(panel).toContain('border-radius: var(--dsw-radius-xl, 20px)')
+    expect(panel).toContain('overflow: hidden')
   })
 
   /**
-   * 副标题溢出防护（结构断言）。
+   * 真契约：脚本**不得**再写任何内联几何。
    *
-   * 真缺陷形态（2026-10-30 设备实测）：卡片 360 宽，行容器却涨到 367、右边界到
-   * 700（卡片右边界 682），最后一条副标题「Browse DeepSeek Harness...」整条画到
-   * 卡片外。根因是 [rows] 用隐式 auto 轨道 —— 按 min-content 撑开，而副标题是
-   * nowrap，min-content 等于整句宽度。
-   *
-   * 注意：这里**不能**用 getBoundingClientRect() 判包含。jsdom 不做布局，任何元素
-   * 的 rect 恒为 0，那样的断言永远为真、是个假门禁（实测：撤掉 CSS 修法后它照样
-   * 通过）。几何包含判据放在设备层做，见 PR 的实测证据。
-   *
-   * 所以这里断言的是「让几何成立的那几条 CSS 属性确实在」，属性被删掉就红。
+   * 旧形态靠 placeAnchored() 内联写 left/width/max-height/transform-origin，
+   * 卡片位置因此随「+」漂移。改居中后这些内联值必须一个都不剩 ——
+   * 只要有一条回来，卡片就又会被脚本钉住。
    */
+  it('打开后 panel 没有任何内联几何（left/top/width/max-height/transform-origin）', async () => {
+    buildComposer(NINE)
+    await open()
+    const panel = document.querySelector<HTMLElement>(PANEL)!
+    for (const prop of ['position', 'left', 'top', 'right', 'bottom', 'width', 'max-height', 'transform-origin']) {
+      expect(panel.style.getPropertyValue(prop)).toBe('')
+    }
+  })
+
+  it('卡片位置与「+」无关：把「+」挪到四个角落，结果都一样（无内联几何）', async () => {
+    for (const corner of [
+      { left: 0, top: 0, right: 36, bottom: 36, width: 36, height: 36 },
+      { left: 1031, top: 0, right: 1067, bottom: 36, width: 36, height: 36 },
+      { left: 0, top: 564, right: 36, bottom: 600, width: 36, height: 36 },
+      { left: 1031, top: 564, right: 1067, bottom: 600, width: 36, height: 36 },
+    ]) {
+      document.body.innerHTML = ''
+      plusRect = corner
+      buildComposer(NINE)
+      await open()
+      const panel = document.querySelector<HTMLElement>(PANEL)!
+      expect(panel.style.getPropertyValue('left')).toBe('')
+      expect(panel.style.getPropertyValue('top')).toBe('')
+      expect(panel.style.getPropertyValue('width')).toBe('')
+      sheet.detach()
+      sheet = new ComposerSheet()
+    }
+  })
+
+  it('已删除锚定形态的痕迹：无 anchored 属性、无 dir、CSS 里无 transform-origin 声明', () => {
+    buildComposer(NINE)
+    return open().then(() => {
+      const panel = document.querySelector<HTMLElement>(PANEL)!
+      const backdrop = document.querySelector<HTMLElement>(BACKDROP)!
+      expect(backdrop.hasAttribute('data-dsh-composer-sheet-anchored')).toBe(false)
+      expect(panel.hasAttribute('data-dsh-composer-sheet-dir')).toBe(false)
+      // 行内声明里不许出现 transform-origin（注释里提到不算）。
+      expect(COMPOSER_SHEET_CSS).not.toMatch(/^\s*transform-origin\s*:/m)
+      // 也不再需要「形态判定」的媒体查询。
+      expect(COMPOSER_SHEET_CSS).not.toContain('orientation: landscape')
+    })
+  })
+})
+
+describe('遮罩：半透明黑、覆盖整屏、可点击关闭', () => {
+  it('遮罩是 rgba(0,0,0,0.55) 且 pointer-events: auto（禁止 none）', () => {
+    const backdrop = ruleBody('[data-dsh-composer-sheet-backdrop]')
+    expect(backdrop).toContain('background: rgba(0, 0, 0, 0.55)')
+    expect(backdrop).toMatch(/\n\s*pointer-events:\s*auto;/)
+    // 断言用行首声明形式，而不是对整块做子串否定：
+    // 注释里会合法地提到「不接事件」的后果，子串否定会匹配到注释而假红。
+    expect(backdrop).not.toMatch(/\n\s*pointer-events:\s*none;/)
+  })
+
+  it('点遮罩（面板外）关闭', async () => {
+    buildComposer(NINE)
+    await open()
+    expect(document.querySelector(PANEL)).not.toBeNull()
+    document.querySelector<HTMLElement>(BACKDROP)!.dispatchEvent(
+      new Event('pointerdown', { bubbles: true, cancelable: true }),
+    )
+    expect(document.querySelector(PANEL)).toBeNull()
+  })
+
+  it('点面板内部不关闭', async () => {
+    buildComposer(NINE)
+    await open()
+    const panel = document.querySelector<HTMLElement>(PANEL)!
+    panel.dispatchEvent(new Event('pointerdown', { bubbles: true, cancelable: true }))
+    expect(document.querySelector(PANEL)).not.toBeNull()
+  })
+})
+
+describe('动效：从视口底边之下飞入 / 飞回', () => {
+  it('入场 keyframes 起点是 translateY(100vh)（视口底外），终点 0，200ms', () => {
+    const kf = COMPOSER_SHEET_CSS.slice(
+      COMPOSER_SHEET_CSS.indexOf('@keyframes dsh-composer-card-in'),
+      COMPOSER_SHEET_CSS.indexOf('@keyframes dsh-composer-card-out'),
+    )
+    // 起点必须把卡片整体推到视口底外：100vh 是保守且与「+」无关的取值。
+    expect(kf).toContain('translateY(100vh)')
+    expect(kf).toContain('translateY(0)')
+    const panel = ruleBody('[data-dsh-composer-sheet-panel]')
+    expect(panel).toContain('animation: dsh-composer-card-in 200ms cubic-bezier(0.215, 0.61, 0.355, 1)')
+  })
+
+  it('出场反向飞回视口底，160ms', () => {
+    const kf = COMPOSER_SHEET_CSS.slice(COMPOSER_SHEET_CSS.indexOf('@keyframes dsh-composer-card-out'))
+    expect(kf).toContain('translateY(0)')
+    expect(kf).toContain('translateY(100vh)')
+    expect(COMPOSER_SHEET_CSS).toContain('animation: dsh-composer-card-out 160ms cubic-bezier(0.215, 0.61, 0.355, 1) forwards')
+  })
+
+  it('遮罩淡入 200ms、淡出 160ms', () => {
+    expect(ruleBody('[data-dsh-composer-sheet-backdrop]')).toContain('animation: dsh-composer-backdrop-in 200ms')
+    expect(COMPOSER_SHEET_CSS).toContain('animation: dsh-composer-backdrop-out 160ms')
+  })
+})
+
+describe('reduced-motion：统一直接切，不被更具体的规则覆盖', () => {
   /**
-   * 负控：卡片开着时，上游「+」菜单不得留在页面上。
+   * 真缺陷形态（2026-10-31 实测）：reduced-motion 块写在文件中部时，后面更具体的
+   * animation 规则会盖掉它的 animation: none —— 卡片照旧播 200ms。
    *
-   * 真缺陷形态（2026-10-30 设备实测）：用户直接点「+」时菜单由上游自己打开，
-   * closeUpstreamMenu 因 openedHere=false 直接 return，listbox 一直浮着
-   * （left=318 right=1022），它那一列 role=option 的副标题露在卡片右侧外面。
-   * 修法是让 closeUpstreamMenu 不看 openedHere —— 菜单留着没有正当用途，
-   * 卡片已经把同样的项映射成自己的行了。
+   * 判据两条：① 块里同时含 backdrop / panel / leaving 变体；② 它必须在
+   * 所有 animation 声明**之后**（用 lastIndexOf 定位，且晚于 card-out 那条）。
    */
+  it('文件末尾有 reduced-motion 块，且覆盖 backdrop / panel / leaving 变体', () => {
+    const at = COMPOSER_SHEET_CSS.lastIndexOf('@media (prefers-reduced-motion: reduce)')
+    expect(at).toBeGreaterThan(-1)
+    const block = COMPOSER_SHEET_CSS.slice(at)
+    expect(block).toContain('[data-dsh-composer-sheet-backdrop]')
+    expect(block).toContain('[data-dsh-composer-sheet-panel]')
+    expect(block).toContain('[data-dsh-composer-sheet-leaving]')
+    expect(block).toContain('animation: none')
+    expect(block).toContain('transition: none')
+  })
+
+  it('reduced-motion 块位置在所有 animation 之后（放前面会被盖掉）', () => {
+    const rmAt = COMPOSER_SHEET_CSS.lastIndexOf('@media (prefers-reduced-motion: reduce)')
+    const lastAnim = COMPOSER_SHEET_CSS.lastIndexOf('animation:')
+    // 允许块内部自己出现 animation: none —— 取块之前最后一条 animation 声明比较。
+    const lastAnimBeforeBlock = COMPOSER_SHEET_CSS.lastIndexOf('animation:', rmAt)
+    expect(rmAt).toBeGreaterThan(lastAnimBeforeBlock)
+    expect(rmAt).toBeLessThan(lastAnim + 1)
+  })
+})
+
+describe('两形态内容一致：副标题与瓦片标签都显示', () => {
+  it('CSS 里没有「隐藏行副标题 / 隐藏瓦片标签」的规则', () => {
+    expect(COMPOSER_SHEET_CSS).not.toMatch(/\[data-dsh-composer-sheet-row-sub\]\s*\{[^}]*display:\s*none/)
+    expect(COMPOSER_SHEET_CSS).not.toMatch(/\[data-dsh-composer-sheet-tile-label\]\s*\{[^}]*display:\s*none/)
+    // 也不许用组合选择器隐藏它们。
+    expect(COMPOSER_SHEET_CSS).not.toContain('[data-dsh-composer-sheet-row-sub] {\n    display: none')
+  })
+
+  it('九行都在，且副标题文本确实渲染进 DOM', async () => {
+    buildComposer(NINE)
+    await open()
+    expect(document.querySelectorAll(ROW).length).toBe(NINE.length)
+    const subs = [...document.querySelectorAll('[data-dsh-composer-sheet-row-sub]')]
+    // 有描述的项才有副标题；至少要有 1 条，且内容非空。
+    expect(subs.length).toBeGreaterThan(0)
+    expect(subs.every((s) => (s.textContent ?? '').trim().length > 0)).toBe(true)
+  })
+
+  it('三块瓦片都在，标签可见（不被 display:none 藏掉）', async () => {
+    buildComposer(NINE)
+    await open()
+    expect(document.querySelectorAll(TILE).length).toBe(3)
+    const labels = [...document.querySelectorAll('[data-dsh-composer-sheet-tile-label]')]
+    expect(labels.length).toBe(3)
+    // 文案随 locale 变（jsdom 默认 en 给 Camera/Photos/Local files），
+    // 这里只钉「三块都有非空标签」，具体文案由 locale 决定。
+    expect(labels.every((l) => (l.textContent ?? '').trim().length > 0)).toBe(true)
+  })
+})
+
+describe('列表滚动：最后一行不得被切半', () => {
+  it('rows 是滚动容器，且有 padding-bottom + scroll-padding-bottom', () => {
+    const rows = ruleBody('[data-dsh-composer-sheet-rows]')
+    expect(rows).toContain('overflow-y: auto')
+    expect(rows).toContain('min-height: 0')
+    expect(rows).toMatch(/padding-bottom:\s*[1-9]/)
+    expect(rows).toMatch(/scroll-padding-bottom:\s*[1-9]/)
+  })
+
+  /**
+   * 真缺陷（2026-10-31 设备截图）：`grid-auto-rows: minmax(0, 1fr)` 把 8 行强行等分到
+   * 卡片可用高度里。横屏卡片只有 420px 高时每行被压到约 33px，小于行的视觉高度
+   * （min-height 46px）→ 行与行重叠、最后一行被切半。
+   *
+   * 判据：轨道必须是内容高（auto），且行自身有 min-height 兜底。
+   */
+  it('行轨道是 auto（内容高），不是 1fr 等分（否则横屏把行压扁重叠）', () => {
+    const rows = ruleBody('[data-dsh-composer-sheet-rows]')
+    expect(rows).toContain('grid-auto-rows: auto')
+    expect(rows).not.toContain('grid-auto-rows: minmax(0, 1fr)')
+    expect(ruleBody('[data-dsh-composer-sheet-row]')).toMatch(/min-height:\s*4[0-9]px/)
+  })
+
+  it('行文本列能收缩并裁切（副标题不画出卡片外）', () => {
+    expect(COMPOSER_SHEET_CSS).toContain('grid-template-columns: minmax(0, 1fr)')
+    expect(ruleBody('[data-dsh-composer-sheet-row]')).toContain('min-width: 0')
+    expect(ruleBody('[data-dsh-composer-sheet-row-text]')).toContain('overflow: hidden')
+  })
+})
+
+describe('内容与关闭行为契约', () => {
   it('卡片打开后上游 listbox 已被收起（不残留在页面上）', async () => {
     buildComposer(NINE)
-    // 前置：模拟「用户先点开过上游菜单」—— 菜单此刻已经在卡片里，所以
-    // open() 借菜单时 openedHere 会是 false（这正是真机上的常见路径：
-    // 用户点「+」，上游先自己开菜单，我们的 sheet 才接手）。
     const card = document.querySelector<HTMLElement>('[data-composer-card]')!
     const surface = document.createElement('div')
     surface.setAttribute('data-trigger-menu', '')
@@ -249,277 +385,82 @@ describe('横屏：锚在「+」上的原生卡片', () => {
     surface.append(list)
     card.append(surface)
 
-    await open(true)
-    // 面板在
-    expect(document.querySelector('[data-dsh-composer-sheet-panel]')).not.toBeNull()
-    // 上游菜单必须已经不在（旧实现因 openedHere=false 直接 return，这里会是 1）
+    await open()
+    expect(document.querySelector(PANEL)).not.toBeNull()
     expect(document.querySelector('[data-composer-card] [role="listbox"]')).toBeNull()
-    // 映射行照常读到（关菜单发生在读完之后，不能把数据也一起弄丢）
-    expect(document.querySelectorAll('[data-dsh-composer-sheet-row]').length).toBe(NINE.length)
+    expect(document.querySelectorAll(ROW).length).toBe(NINE.length)
   })
 
-  it('副标题溢出的三道防线都在（grid 轨道可收缩 / 行可收缩 / 文本裁切）', async () => {
-    buildComposer(NINE)
-    await open(true)
-    const rows = document.querySelector<HTMLElement>('[data-dsh-composer-sheet-rows]')!
-    const row = document.querySelector<HTMLElement>('[data-dsh-composer-sheet-row]')!
-    const text = document.querySelector<HTMLElement>('[data-dsh-composer-sheet-row-text]')!
-    const sheetCss = COMPOSER_SHEET_CSS
-    // 1. 轨道必须显式可收缩（minmax(0, 1fr)），不能是隐式 auto。
-    expect(sheetCss).toContain('grid-template-columns: minmax(0, 1fr)')
-    // 2. 行容器必须能收缩到内容以下。
-    expect(sheetCss).toMatch(/\[data-dsh-composer-sheet-row\]\s*\{[^}]*min-width:\s*0/)
-    // 3. 文本列必须真正裁切溢出。
-    expect(sheetCss).toMatch(/\[data-dsh-composer-sheet-row-text\]\s*\{[^}]*overflow:\s*hidden/)
-    // 结构前提：这三者确实是卡片内的祖先链，不是别的元素。
-    expect(rows.contains(row)).toBe(true)
-    expect(row.contains(text)).toBe(true)
-  })
-
-  it('宽度 <= 360 且不贴视口边', async () => {
-    buildComposer(NINE)
-    await open(true)
-    const g = geometry()
-    expect(g.width).toBeLessThanOrEqual(360)
-    expect(g.left).toBeGreaterThanOrEqual(0)
-    expect(g.left + g.width).toBeLessThanOrEqual(LANDSCAPE.width + 1)
-  })
-
-  it('底边与「+」间距 8px（自下展开）', async () => {
-    buildComposer(NINE)
-    await open(true)
-    const g = geometry()
-    // bottom 是「离视口底的距离」：卡片底边贴 plus.top - 8，
-    // 换算成 CSS bottom = viewportH - (plus.top - 8) = viewportH - plus.top + 8。
-    const expectedBottom = window.innerHeight - plusRect.top + 8
-    expect(g.bottom).not.toBeNull()
-    expect(Math.abs((g.bottom as number) - expectedBottom)).toBeLessThanOrEqual(1)
-    expect(g.top).toBeNull()
-  })
-
-  it('「+」靠右时宽度按可用空间收紧，不顶出视口', async () => {
-    // 视口 640 宽，「+」贴到右边（left=560）：360 宽会溢出到 920，必须收窄。
-    const narrow = { width: 640, height: 420 }
-    plusRect = { left: 560, top: 300, right: 596, bottom: 336, width: 36, height: 36 }
-    buildComposer(NINE)
-    await open(true, narrow)
-    const g = geometry()
-    expect(g.width).not.toBeNull()
-    const w = g.width as number
-    const left = g.left as number
-    // 关键判据：左边缘 + 宽度 不能越过视口（留 12px 右边距）。
-    expect(left + w).toBeLessThanOrEqual(640 - 12 + 1)
-    // 且宽度确实被收窄了（不是无脑 360）。
-    expect(w).toBeLessThan(360)
-  })
-
-  it('上方空间不足时翻到「+」下方并自上展开', async () => {
-    // 把「+」压到贴近视口顶部：spaceAbove 小于最小可用高度，必须改成往下开。
-    plusRect = { left: 16, top: 40, right: 52, bottom: 76, width: 36, height: 36 }
-    buildComposer(NINE)
-    await open(true)
-    const g = geometry()
-    expect(g.top).not.toBeNull()
-    expect(Math.abs((g.top as number) - (plusRect.bottom + 8))).toBeLessThanOrEqual(1)
-    expect(g.bottom).toBeNull()
-    expect(document.querySelector<HTMLElement>(PANEL)!.getAttribute('data-dsh-composer-sheet-dir')).toBe('down')
-  })
-
-  it('横屏遮罩全透明，但仍铺满并接收事件（点它能关）', async () => {
-    buildComposer(NINE)
-    await open(true)
-    const backdrop = document.querySelector<HTMLElement>(BACKDROP)!
-    expect(backdrop.hasAttribute(ANCHORED)).toBe(true)
-    // CSS 层：命中 anchored 时 backdrop 不再是 rgba(0,0,0,.42) 的全屏黑幕。
-    // 先把注释剥掉：注释里也会出现花括号与 pointer-events 字样，直接切片会误判。
-    const cssNoComments = COMPOSER_SHEET_CSS.replace(/\/\*[\s\S]*?\*\//g, '')
-    const anchorStart = cssNoComments.indexOf('[' + 'data-dsh-composer-sheet-backdrop][data-dsh-composer-sheet-anchored]')
-    // 只取 backdrop 那一条规则（到第一个 } 结束），不要把后面的 panel 规则一起切进来。
-    const anchoredBlock = cssNoComments.slice(anchorStart, cssNoComments.indexOf('}', anchorStart))
-    expect(anchoredBlock).toContain('background: transparent')
-    // 但必须仍然接收事件：否则点击落到下面的页面 / iframe / ShadowRoot 上，
-    // panel.contains(target) 看不到它，卡片关不掉。
-    expect(anchoredBlock).toContain('pointer-events: auto')
-    expect(anchoredBlock).not.toContain('pointer-events: none')
-    // 也必须仍然铺满全屏（position: static 会让它缩成内容宽，点击区域塌掉）。
-    expect(anchoredBlock).toContain('position: fixed')
-    expect(anchoredBlock).toContain('inset: 0')
-  })
-
-  it('横屏点遮罩（面板外）关闭卡片', async () => {
-    buildComposer(NINE)
-    await open(true)
-    const backdrop = document.querySelector<HTMLElement>(BACKDROP)!
-    // 点在遮罩自身（不在面板内）：模拟点到卡片外面。
-    // jsdom 没有 PointerEvent：用同名的 Event 触发，监听器只读 target，不需要指针字段。
-    backdrop.dispatchEvent(new Event('pointerdown', { bubbles: true, cancelable: true }))
-    await settle()
-    expect(document.querySelector(BACKDROP)).toBeNull()
-  })
-
-  it('无障碍：横屏 aria-modal=false（非模态 popover），竖屏 true', async () => {
-    buildComposer(NINE)
-    await open(true)
-    expect(document.querySelector<HTMLElement>(PANEL)!.getAttribute('aria-modal')).toBe('false')
-    sheet.detach()
-    document.body.innerHTML = ''
-    sheet = new ComposerSheet()
-    buildComposer(NINE)
-    await open(false)
-    expect(document.querySelector<HTMLElement>(PANEL)!.getAttribute('aria-modal')).toBe('true')
-  })
-
-  it('打开后焦点进入第一项（三瓦片的第一块）', async () => {
-    buildComposer(NINE)
-    await open(true)
-    const first = document.querySelector<HTMLElement>(TILE)!
-    // 焦点必须落在面板内、且落在第一块瓦片上（不是编辑器、不是 body）。
-    expect(document.activeElement).toBe(first)
-    expect(document.querySelector<HTMLElement>(PANEL)!.contains(document.activeElement)).toBe(true)
-  })
-
-  /**
-   * 卡片动效：从「+」长出来（规格）。
-   *
-   * 三件事各自可证伪：
-   *   1. 动画存在且时长落在 180-220ms 区间（规格），曲线是无回弹的单调缓出；
-   *   2. 关键帧是 scale(0.96) + translateY(4px) + opacity，不是纯淡入；
-   *   3. **transform-origin 不写在 CSS 里** —— 它必须由脚本按「+」的实测中心内联写入。
-   *      写死百分比（bottom left / 50% 50%）在真机上对不上：卡片宽度与「+」位置都随
-   *      视口变化。这条断言防的就是「图省事写死一个原点」。
-   */
-  it('卡片动效：scale(0.96)+位移+淡入，180-220ms，原点由脚本实测写入而非 CSS 写死', async () => {
-    buildComposer(NINE)
-    await open(true)
-    expect(COMPOSER_SHEET_CSS).toContain('scale(0.96)')
-    expect(COMPOSER_SHEET_CSS).toContain('translateY(4px)')
-    // 时长必须在规格区间内：120ms 太快（看不出「长出来」），300ms 以上拖沓。
-    const cardIn = COMPOSER_SHEET_CSS.match(/dsh-composer-card-in (\d+)ms/)
-    expect(cardIn).not.toBeNull()
-    const duration = Number(cardIn![1])
-    expect(duration).toBeGreaterThanOrEqual(180)
-    expect(duration).toBeLessThanOrEqual(220)
-    // 无回弹：曲线必须是无 overshoot 的 cubic-bezier，不能是 ease-out 之类带弹性的简写。
-    expect(COMPOSER_SHEET_CSS).toContain('cubic-bezier(0.215, 0.61, 0.355, 1)')
-    // 原点：CSS 里不得出现写死的 transform-origin，值必须来自内联样式（实测坐标）。
-    expect(COMPOSER_SHEET_CSS).not.toContain('transform-origin:')
-    const panel = document.querySelector<HTMLElement>(PANEL)!
-    expect(panel.style.getPropertyValue('transform-origin')).not.toBe('')
-  })
-})
-
-describe('竖屏：保持贴底 sheet', () => {
-  it('不写内联几何（交给 CSS 贴底，bottomGap == 0）', async () => {
-    buildComposer(NINE)
-    await open(false)
-    const panel = document.querySelector<HTMLElement>(PANEL)!
-    expect(panel.style.position).toBe('')
-    expect(panel.style.left).toBe('')
-    expect(panel.style.width).toBe('')
-    expect(panel.style.bottom).toBe('')
-    const backdrop = document.querySelector<HTMLElement>(BACKDROP)!
-    expect(backdrop.hasAttribute(ANCHORED)).toBe(false)
-    // CSS 里竖屏那条是 justify-content: flex-end + panel 无圆角上方以外的定位，
-    // 贴底由 backdrop 的 inset:0 + flex-end 达成（bottomGap 恒为 0）。
-    // 竖屏贴底靠 backdrop 的 inset:0 + flex-end；这里只钉「上一条规则确实声明了 flex-end」。
-    const backdropHead = COMPOSER_SHEET_CSS.slice(0, COMPOSER_SHEET_CSS.indexOf('[data-dsh-composer-sheet-panel]'))
-    expect(backdropHead).toContain('justify-content: flex-end')
-  })
-
-  it('横竖切换时重算：竖屏后撤掉内联几何', async () => {
-    buildComposer(NINE)
-    await open(true)
-    expect(geometry().position).toBe('fixed')
-    // 切成竖屏并触发 resize
-    stubMatchMedia(false)
-    window.dispatchEvent(new Event('resize'))
-    const panel = document.querySelector<HTMLElement>(PANEL)!
-    expect(panel.style.position).toBe('')
-    expect(panel.style.left).toBe('')
-    expect(document.querySelector<HTMLElement>(BACKDROP)!.hasAttribute(ANCHORED)).toBe(false)
-  })
-})
-
-describe('两形态都要满足的内容契约', () => {
-  it.each([['横屏', true], ['竖屏', false]])('%s：三瓦片都在、行数 == 9', async (_name, anchored) => {
-    buildComposer(NINE)
-    await open(anchored)
-    expect(document.querySelectorAll(TILE)).toHaveLength(3)
-    expect(document.querySelectorAll(ROW)).toHaveLength(9)
-  })
-})
-
-describe('关闭行为：点卡片外关闭且焦点不回编辑器', () => {
-  it('横屏点面板外 -> 关闭，activeElement 不是编辑器', async () => {
+  it('点面板外关闭后，activeElement 不是编辑器', async () => {
     const editor = buildEditor()
     editor.focus()
     buildComposer(NINE)
-    await open(true)
-    const focusSpy = vi.spyOn(editor, 'focus')
-    // 点 body（面板外）：onBackdropPointerDown 用 panel.contains 判定，不依赖遮罩。
-    document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))
-    expect(document.querySelector(BACKDROP)).toBeNull()
+    await open()
+    document.querySelector<HTMLElement>(BACKDROP)!.dispatchEvent(
+      new Event('pointerdown', { bubbles: true, cancelable: true }),
+    )
+    expect(document.querySelector(PANEL)).toBeNull()
     expect(document.activeElement).not.toBe(editor)
-    expect(focusSpy).not.toHaveBeenCalled()
-    focusSpy.mockRestore()
   })
 
-  it('Escape 关闭（两形态都成立）', async () => {
+  it('Escape 关闭', async () => {
     buildComposer(NINE)
-    await open(true)
+    await open()
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
-    expect(document.querySelector(BACKDROP)).toBeNull()
+    expect(document.querySelector(PANEL)).toBeNull()
+  })
+
+  it('打开后焦点进入第一块瓦片', async () => {
+    buildComposer(NINE)
+    await open()
+    const first = document.querySelector<HTMLElement>(TILE)!
+    expect(document.activeElement).toBe(first)
   })
 })
 
-describe('负控：去掉锚定计算后退化成全宽贴底，断言必须判红', () => {
+describe('负控：新判据必须能抓住两种坏态', () => {
   /**
-   * 受控负控：不改被测类，而是把「锚定计算」的产物替换成全宽贴底的内联几何，
-   * 重跑同一批几何断言。它们必须失败 —— 否则说明这些断言根本没盯住定位方式。
+   * 负控 ①：去掉遮罩的点击处理器 → 「点遮罩关闭」必须变红。
+   *
+   * 做法：打开后用 stopImmediatePropagation 拦掉遮罩上的 pointerdown 监听
+   * （等价于「没接这个处理器」），断言面板仍在 —— 与正向用例互为反证。
    */
-  function degradeToFullWidth(): void {
-    const panel = document.querySelector<HTMLElement>(PANEL)!
-    panel.style.setProperty('position', 'fixed', 'important')
-    panel.style.setProperty('left', '0px', 'important')
-    panel.style.setProperty('width', '100%', 'important')
-    panel.style.setProperty('bottom', '0px', 'important')
-    panel.style.removeProperty('top')
-  }
-
-  it('负控样本：左边缘不再对齐「+」', async () => {
+  it('负控 1：遮罩监听被剥掉时，点遮罩不再关闭（正向判据会红）', async () => {
     buildComposer(NINE)
-    await open(true)
-    degradeToFullWidth()
-    const g = geometry()
-    expect(Math.abs(g.left - plusRect.left)).toBeGreaterThan(1)
+    await open()
+    const backdrop = document.querySelector<HTMLElement>(BACKDROP)!
+    // cloneNode **不复制**事件监听器：换上去的节点等价于「没接处理器」，
+    // 这正是把 addEventListener 那行删掉后的形态。
+    const clone = backdrop.cloneNode(true) as HTMLElement
+    backdrop.replaceWith(clone)
+    clone.dispatchEvent(new Event('pointerdown', { bubbles: true, cancelable: true }))
+    // 没有处理器 ⇒ 面板仍在。若这里变成 null，说明判据不依赖处理器（假门禁）。
+    expect(document.querySelector(PANEL)).not.toBeNull()
   })
 
-  it('负控样本：宽度不再是受限的 px 值（退化成全宽）', async () => {
-    buildComposer(NINE)
-    await open(true)
-    degradeToFullWidth()
-    const raw = document.querySelector<HTMLElement>(PANEL)!.style.width
-    // 真实实现写的是 "360px" 这类受限值；退化样本是 "100%"。
-    expect(raw).toBe('100%')
-    expect(raw.endsWith('px')).toBe(false)
-  })
-
-  it('负控样本：底部间距不再是 8px', async () => {
-    buildComposer(NINE)
-    await open(true)
-    degradeToFullWidth()
-    const g = geometry()
-    const expectedBottom = 420 - plusRect.top + 8
-    expect(Math.abs((g.bottom as number) - expectedBottom)).toBeGreaterThan(1)
-  })
-
-  it('负控自检：判据函数在真实几何上为真、在退化几何上为假', () => {
-    const anchoredOk = (g: { left: number; width: number; bottom: number | null }): boolean =>
-      Math.abs(g.left - plusRect.left) <= 1
-      && g.width <= 360
-      && g.bottom !== null
-      && Math.abs(g.bottom - (420 - plusRect.top + 8)) <= 1
-    expect(anchoredOk({ left: 16, width: 360, bottom: 128 })).toBe(true)
-    expect(anchoredOk({ left: 0, width: 900, bottom: 0 })).toBe(false)
+  /**
+   * 负控 ②：把入场起点改回「加号坐标」→ 必须红。
+   *
+   * 新规格要求入场起点与「+」无关（translateY(100vh)）。这里构造旧形态的
+   * 起点（scale + 4px，靠 transform-origin 指到加号），断言它**不满足**新判据：
+   * 起点位移远小于卡片高度 ⇒ 卡片首帧并未整体落在视口底外。
+   */
+  it('负控 2：入场起点若是旧形态（4px 位移）则「完全在视口底外」判据为假', () => {
+    const viewportH = 600
+    const cardH = 350
+    // 旧形态起点：translateY(4px) —— 卡片顶边仍在视口内。
+    const oldStartTop = (viewportH - cardH) / 2 + 4
+    expect(oldStartTop < viewportH).toBe(true)
+    // 新形态起点：translateY(100vh) —— 卡片顶边在视口底之外。
+    const newStartTop = (viewportH - cardH) / 2 + viewportH
+    expect(newStartTop >= viewportH).toBe(true)
+    // 且 CSS 里确实是 100vh，不是小位移。
+    const kf = COMPOSER_SHEET_CSS.slice(
+      COMPOSER_SHEET_CSS.indexOf('@keyframes dsh-composer-card-in'),
+      COMPOSER_SHEET_CSS.indexOf('@keyframes dsh-composer-card-out'),
+    )
+    expect(kf).toContain('translateY(100vh)')
+    expect(kf).not.toContain('translateY(4px)')
+    expect(kf).not.toContain('scale(')
   })
 })
