@@ -119,7 +119,17 @@ test('portable chain clears stale APKs from its delivery directory before buildi
   // 三条链行为必须一致：ps1 与 release 都在开头清理，portable 此前漏了这一步。
   const portable = readFileSync(new URL('./build-apk.mjs', import.meta.url), 'utf8')
   assert.match(portable, /readdirSync\(OUT\)/, 'portable 链必须在构建开始时枚举交付目录');
-  assert.match(portable, /endsWith\('\.apk'\)/, '清理面是 *.apk（不得按目录清空，会误伤 snapshot-*.tar.xz）');
+  /* issue #1183：清理面从「所有 *.apk」收窄到「本次 ABI 的 *.apk」。
+   * 旧断言写死字面量 /endsWith\('\.apk'\)/，只证明「源码里有这个字符串」——
+   * 把清理改成无条件删（缺陷回归）它照样绿，因为它不看**删除条件是什么**。
+   * 改为断「后缀由 ABI 构成」，即 staleSuffix = '-' + ABI + '.apk'，删除判据必须用它。 */
+  assert.match(portable, /const staleSuffix = '-' \+ ABI \+ '\.apk'/,
+    '清理后缀必须由本次 ABI 构成（尾部 -<ABI>.apk），不能是无条件的 *.apk');
+  assert.match(portable, /endsWith\(staleSuffix\.toLowerCase\(\)\)/,
+    '删除判据必须用 staleSuffix（点对点放行），不能退回 endsWith(\'.apk\') 的无条件删除');
+  assert.doesNotMatch(portable, /endsWith\('\.apk'\)/,
+    '不得再有「无条件删所有 *.apk」的判据（会删掉另一个 ABI 的已验签产物）');
+  assert.match(portable, /readdirSync\(OUT\)/, '清理仍只枚举交付目录（不得按目录整棵清空）');
   const local = readFileSync(new URL('./build-apk-013.ps1', import.meta.url), 'utf8')
   const release = readFileSync(new URL('./build-release.ps1', import.meta.url), 'utf8')
   /* issue #1078：本地链的预清理改成「只清本次产出 ABI」，不再无条件递归删 $Out。
