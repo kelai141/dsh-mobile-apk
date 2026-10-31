@@ -27,6 +27,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writ
 import { createRequire } from 'node:module'
 import { dirname, join, resolve, sep } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { TAR } from './lib/shell.mjs'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -126,6 +127,65 @@ if (flag('self-test')) {
   process.exit(fails === 0 ? 0 : 1)
 }
 
+/* ── 归档判据（0.15.x 补）────────────────────────────────────────────────────
+ *
+ * 为什么默认对象从 stage 树改成归档：快照构建收尾后 .deploy-tmp/snapshot-013/<abi>/stage
+ * 已被清掉，只剩 snapshot.tar.xz。于是本门禁在链里**永远找不到 stage 树** → --require 判红，
+ * 与「判据不成立」混在一起。（同族：判据的输入物变了，判据没跟着变。）
+ *
+ * 口径（先看真实数据再定，不先选）：
+ *   实测归档里 home/.dsh/profiles/node_modules/undici 是 **l 型、一跳、绝对目标**
+ *   -> /root/.dsh-stage/<abi>/root/usr/lib/node_modules/@deepseek-ai/dsh/node_modules/undici
+ *   即**宿主 stage 路径**（构建设备上不存在）。对照 undici-types 指向设备前缀
+ *   /data/data/com.dsharnessmobile.shell/files/usr/... —— 那条是基座建的，正确。
+ * 所以判据不能只「比字面前缀」，必须区分三种目标：
+ *   · 相对目标：posix.normalize(linkDir + '/' + target) 必须等于 ENGINE_UNDICI；
+ *   · 绝对目标：只接受设备前缀（/data/data/<pkg>/files/usr 或 /data/user/0/<pkg>/files/usr），
+ *     剥掉前缀后必须等于 ENGINE_UNDICI；
+ *   · 其它绝对路径（典型 /root/.dsh-stage/*）= **宿主路径泄漏** → 判红并点名。
+ * 多跳：跟到底，上限 MAX_HOPS=8，报跳数；超限判红。
+ */
+const MAX_HOPS = 8
+const DEVICE_PREFIXES = [
+  '/data/data/com.dsharnessmobile.shell/files/usr',
+  '/data/user/0/com.dsharnessmobile.shell/files/usr',
+]
+
+/** posix 风格规范化拼接（不碰真实文件系统）。 */
+export function posixJoin(base, rel) {
+  const parts = (base + '/' + rel).split('/')
+  const out = []
+  for (const seg of parts) {
+    if (seg === '' || seg === '.') continue
+    if (seg === '..') { out.pop(); continue }
+    out.push(seg)
+  }
+  return '/' + out.join('/')
+}
+
+/**
+ * 把链接目标规范成「快照内相对路径」（usr/... 形式）；无法归属则返回 original + kind。
+ * @param linkDir - 链接所在目录（快照内相对，如 home/.dsh/profiles/node_modules）
+ * @param target - 链接目标字面值
+ * @returns {{ form: 'relative'|'device'|'host-leak'|'other', path: string, raw: string }}
+ */
+export function classifyTarget(linkDir, target) {
+  const raw = String(target)
+  if (raw.startsWith('/')) {
+    for (const pre of DEVICE_PREFIXES) {
+      if (raw === pre || raw.startsWith(pre + '/')) {
+        return { form: 'device', path: raw.slice(pre.length).replace(/^\//, ''), raw }
+      }
+    }
+    if (raw.includes('/.dsh-stage/') || raw.includes('.dsh-stage')) {
+      return { form: 'host-leak', path: raw, raw }
+    }
+    return { form: 'other', path: raw, raw }
+  }
+  const abs = posixJoin('/' + linkDir, raw)
+  return { form: 'relative', path: abs.replace(/^\//, ''), raw }
+}
+
 /* 默认根：构建链的 stage 树（两条链都在 `.deploy-tmp/snapshot-013/<abi>/stage/root`）。
  * 没有显式参数时按此自动发现——与 check-third-party / check-perf-instrumentation 的 autoTar 同口径：
  * 找不到就记一条计数 SKIP（--require 时改判红），不假绿（假绿的判据比判红更危险）。 */
@@ -136,7 +196,102 @@ function autoStageRoot() {
   }
   return undefined
 }
+
+/**
+ * 归档判据：一次 `tar -tvf` 拿成员表，之后不在归档上做逐成员 `-xOf` 全量扫描
+ * （除引擎 undici 的 package.json 单独取一次——那是唯一需要读内容的成员，见 #1256 教训）。
+ * @param tarPath - snapshot.tar.xz
+ * @returns {{ pass: boolean, reasons: string[], detail: object }}
+ */
+export function checkArchive(tarPath) {
+  const reasons = []
+  const detail = { tar: tarPath, link: null, hops: [], form: null, resolved: null, version: null }
+  const ls = spawnSync(TAR, ['-tvf', tarPath], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 })
+  if (ls.error || ls.status !== 0) {
+    return { pass: false, reasons: ['归档不可读（tar -tvf 失败）：' + String(ls.error ?? ls.status)], detail }
+  }
+  const linkMap = new Map()
+  const lines = String(ls.stdout).split('\n').filter(Boolean)
+  for (const line of lines) {
+    const arrow = line.indexOf(' -> ')
+    if (arrow < 0) continue
+    const head = line.slice(0, arrow)
+    const name = head.split(/\s+/).slice(-1)[0]
+    linkMap.set(name.replace(/^(\.\/)+/, ''), line.slice(arrow + 4).trim())
+  }
+  const FARM_UNDICI = FARM + '/' + PKG
+  if (!linkMap.has(FARM_UNDICI)) reasons.push('共享农场缺 ' + PKG + ' 链：归档内无 ' + FARM_UNDICI)
+  else {
+    // 多跳跟随（上限 MAX_HOPS）
+    let cur = FARM_UNDICI
+    let hops = 0
+    let lastForm = null
+    while (linkMap.has(cur)) {
+      if (hops >= MAX_HOPS) { reasons.push('链接跳数超过上限 ' + MAX_HOPS + '（疑似环）'); break }
+      const target = linkMap.get(cur)
+      const dir = cur.includes('/') ? cur.slice(0, cur.lastIndexOf('/')) : ''
+      const c = classifyTarget(dir, target)
+      detail.hops.push({ from: cur, target, form: c.form })
+      lastForm = c.form
+      hops++
+      if (c.form === 'host-leak') { reasons.push('宿主路径泄漏: ' + target + '（设备上不存在，插件 import 必失败）'); break }
+      if (c.form === 'other') { reasons.push('链接目标不是快照内路径也不是设备前缀: ' + target); break }
+      const next = c.path
+      if (linkMap.has(next)) { cur = next; continue }
+      detail.form = c.form
+      detail.resolved = next
+      cur = next
+      break
+    }
+    detail.link = FARM_UNDICI
+    if (!reasons.length) {
+      if (detail.resolved !== ENGINE_UNDICI) reasons.push('解析结果不在引擎树：' + String(detail.resolved))
+      if (hops !== 1) detail.hopCount = hops
+    }
+  }
+  if (!lines.some((l) => l.endsWith(' ' + ENGINE_UNDICI + '/package.json') || l.includes(ENGINE_UNDICI + '/package.json'))) {
+    reasons.push('引擎树缺 ' + PKG + '/package.json')
+  } else if (!reasons.length) {
+    const one = spawnSync(TAR, ['-xOf', tarPath, ENGINE_UNDICI + '/package.json'], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 })
+    try { detail.version = JSON.parse(String(one.stdout)).version } catch { reasons.push('引擎 ' + PKG + ' 的 package.json 不可解析') }
+    if (detail.version && compareVersion(detail.version, MIN_VERSION) < 0) {
+      reasons.push('引擎 ' + PKG + ' 版本 ' + detail.version + ' < 下界 ' + MIN_VERSION)
+    }
+  }
+  // 反证：不得解析到本仓 node_modules（devDependency 那份）
+  if (lines.some((l) => /(^|\s)node_modules\/undici\/package\.json$/.test(l) && !l.includes(ENGINE_UNDICI))) {
+    reasons.push('归档里出现非引擎树的 undici/package.json（疑似 devDependency 那份）')
+  }
+  return { pass: reasons.length === 0, reasons, detail }
+}
+
+/** 默认归档：.deploy-tmp/snapshot-013/<abi>/snapshot.tar.xz */
+function autoSnapshot() {
+  for (const abi of ['x86_64', 'arm64']) {
+    const cand = join(ROOT, '.deploy-tmp', 'snapshot-013', abi, 'snapshot.tar.xz')
+    if (existsSync(cand)) return cand
+  }
+  return undefined
+}
+
 const targetArg = target ?? autoStageRoot()
+// 归档模式：显式给 .tar.xz，或没给 stage 树时回落到默认归档
+const tarArg = targetArg && /\.tar\.xz$/.test(targetArg) ? targetArg : (targetArg === undefined ? autoSnapshot() : undefined)
+if (tarArg !== undefined) {
+  if (!existsSync(tarArg)) {
+    console.error('归档不存在: ' + tarArg + '（环境缺口，不是判据不成立）')
+    process.exit(2)
+  }
+  const ar = checkArchive(tarArg)
+  console.log('归档       : ' + tarArg)
+  console.log('农场链     : ' + (ar.detail.link ?? '(none)') + (ar.detail.hopCount ? '（跳数 ' + ar.detail.hopCount + '）' : ''))
+  console.log('目标形态   : ' + (ar.detail.form ?? '(none)'))
+  console.log('解析结果   : ' + (ar.detail.resolved ?? '(none)'))
+  console.log('引擎版本   : ' + (ar.detail.version ?? '(none)') + '（下界 ' + MIN_VERSION + '）')
+  for (const r of ar.reasons) console.error('FAIL  ' + r)
+  console.log(ar.pass ? 'PASS  profile 层 ' + PKG + ' 解析到引擎自带 ' + ar.detail.version : 'UNDICI-RESOLUTION FAILED')
+  process.exit(ar.pass ? 0 : 1)
+}
 if (targetArg === undefined) {
   if (flag('require')) {
     console.error('FAIL  --require：找不到 stage 树（.deploy-tmp/snapshot-013/<abi>/stage/root）—— 解析判据未执行')
