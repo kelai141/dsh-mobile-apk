@@ -241,6 +241,82 @@ class FarmSymlinkMergeTest {
   }
 
   /**
+   * 用例 ④（真机实锤回归）：live 里**完全没有**该项时，判定「不存在」不得抛异常。
+   *
+   * ## 缺陷（设备实证 127.0.0.1:16448，v0.14.9 覆盖安装后强制刷新）
+   *
+   * ```
+   * boot failed: stage=snapshot-refresh-unclassified
+   *   cause=java.nio.file.NoSuchFileException:
+   *     .../files/home/.dsh/profiles/web/node_modules/dsh-find-plugin
+   *   at SnapshotTransaction$PRODUCTION_LINKS$1.isLink(SnapshotTransaction.kt:919)
+   *   at SnapshotTransaction.mergeTree(SnapshotTransaction.kt:1156)
+   *   at SnapshotTransaction.mergeProfiles(SnapshotTransaction.kt:815)
+   *   at SnapshotTransaction.swap(SnapshotTransaction.kt:620)
+   * ```
+   *
+   * 用户看到的是「运行时更新失败」，**整次刷新作废**。
+   *
+   * 真因：第一版判据写成 `if (SnapshotFs.exists(live) || links.isLink(live))`。
+   * `SnapshotFs.exists` 对缺项返回 false（短路救不了），于是对**不存在的路径**调用
+   * `isLink`；生产实现是 `readAttributes(NOFOLLOW)`——**路径不存在直接抛**，不返回 false。
+   * 而「live 没有这一项」正是该分支要处理的主要情形。
+   *
+   * 本用例用一个**对不存在的路径会抛**的替身（与生产语义一致）锁住这个契约：
+   * 缺项必须被正常判定为「不存在」并建链，全程不抛。
+   */
+  @Test
+  fun missingLiveEntryIsDetectedWithoutThrowing() {
+    val filesDir = tempDir()
+    try {
+      val live = File(filesDir, "live").apply { mkdirs() }
+      val stage = SnapshotTransaction.stageRoot(filesDir)
+      writeRuntime(live, "old-node", "old-profile")
+      writeRuntime(stage, "new-node", "new-profile")
+
+      // 与生产语义一致的替身：路径不存在时抛 NoSuchFileException（而不是返回 false）
+      val real = RecordingLinks()
+      val strict = object : SnapshotTransaction.LinkPrimitives {
+        override fun isLink(file: File): Boolean {
+          if (!real.isLink(file) && !file.exists()) {
+            throw java.nio.file.NoSuchFileException(file.absolutePath)
+          }
+          return real.isLink(file)
+        }
+        override fun linkTargetOf(file: File): Path = real.linkTargetOf(file)
+        override fun createLink(dest: File, target: Path) = real.createLink(dest, target)
+      }
+      val stagedLink = File(stage, "home/.dsh/profiles/node_modules/undici")
+      stagedLink.parentFile.mkdirs()
+      stagedLink.writeText("placeholder")
+      real.seed(stagedLink, "../../../../usr/lib/node_modules/@deepseek-ai/dsh/node_modules/undici")
+      File(live, "home/.dsh/profiles/node_modules").mkdirs()
+      val liveLink = File(live, "home/.dsh/profiles/node_modules/undici")
+
+      // 不得抛：缺项是正常情形
+      SnapshotTransaction.swap(
+        filesDir = filesDir,
+        stagedRoot = stage,
+        usrDir = File(live, "usr"),
+        homeDir = File(live, "home"),
+        preservedNames = preserved,
+        fingerprint = "fp-farm-4",
+        startedAt = 1L,
+        links = strict,
+      )
+
+      assertEquals(
+        "缺项必须被补齐（而不是因为判存在性抛错把整次刷新炸掉）",
+        "../../../../usr/lib/node_modules/@deepseek-ai/dsh/node_modules/undici",
+        real.targetOf(liveLink),
+      )
+      SnapshotTransaction.finish(filesDir)
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
+  /**
    * 用例 ③（判别力）：把修复退回「裸 return」后，用例 ① 必须判红。
    *
    * 为什么需要它：本仓有过「接缝在、但判据没接上」的假绿（0.14.7 实锤）。
