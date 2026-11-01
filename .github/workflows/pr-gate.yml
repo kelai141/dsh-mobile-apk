@@ -43,6 +43,11 @@ jobs:
       - name: Symlink sanitize regressions
         if: always()
         run: node --test scripts/symlink-sanitize.test.mjs
+      # 订阅 provider 的代理面（issue #1282）：发给浏览器的视图曾把 URL 内嵌 userinfo 的密码原样回传，
+      # passwordSet 还报 false，出错文案也回显整条 URL。用例对序列化结果做全舰搜索（密码用随机串做夹具）。
+      - name: Subscriptions proxy secret regressions
+        if: always()
+        run: node --test scripts/subs-proxy-secrets.test.mjs
       - name: APK 组装、版本与签名回归
         if: always()
         run: node --test scripts/check-apk-signatures.test.mjs scripts/resolve-version-suffix.test.mjs scripts/build-apk-engine.test.mjs scripts/check-third-party.test.mjs scripts/check-upstream-patch-bytes.test.mjs scripts/wsl-node-command.test.mjs scripts/check-bridge-symmetry.test.mjs scripts/check-snapshot-secrets.test.mjs
