@@ -88,6 +88,9 @@ const GATE_SCRIPTS = [
   // 登记进 GATE_SCRIPTS 是硬要求：check-release-gates 断言两份编排器门禁集差集 = 0。
   'check-degrade-source-of-truth.mjs',
   'check-manifest-hardening.mjs',
+  // vendored 字节绑定（issue #1285）：vendor/dsh-plugin-subscriptions 的逐文件 sha256 必须与
+  // scripts/vendor-provenance.json 相符。此前没有任何门禁消费 PROVENANCE 的哈希，手改 lib/*.js 也能出厂。
+  'check-vendor-provenance.mjs',
   // 0.14.8 堆下限：壳侧 shellEnv() 与快照内启动器必须给出同一 clamp 区间（单边漂移 = 部分路径仍 OOM）。
   'check-engine-heap-floor.mjs',
   'check-bounded-io.mjs',

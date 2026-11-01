@@ -692,3 +692,11 @@ Write-Host "=== 产物目录：$Out ==="
 # 由 scripts/check-build-chain-abort.mjs 静态锁住（0.13.8-b：arm64 被拒后整链仍 exit 0 的实锤）。
 if ($rejectedAbis.Count -gt 0) { Write-Host "有 ABI 被门禁拒绝——不发版（exit 1）"; exit 1 }
 if ($producedAbis.Count -eq 0) { Write-Host "没有任何 ABI 产出——不发版（exit 1）"; exit 1 }
+
+# vendored 字节绑定（issue #1285）：vendor/dsh-plugin-subscriptions 的逐文件 sha256 必须与
+# scripts/vendor-provenance.json 相符。此前没有任何门禁消费 PROVENANCE 记的哈希，手改一个
+# lib/*.js 照样出厂——供应链面只剩「版本字符串对」这一层。放在链尾：它只读仓库文件，与 ABI 无关，
+# 跑一次即可；但必须在「发版」之前，否则改过的 vendor 会被打进包。
+Write-Host "== vendored 字节绑定门禁 =="
+node (Join-Path $Root "scripts\check-vendor-provenance.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { throw "vendored 目录与 scripts/vendor-provenance.json 不符，拒绝交付" }

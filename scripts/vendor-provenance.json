@@ -1,0 +1,278 @@
+{
+  "vendorDir": "vendor/dsh-plugin-subscriptions",
+  "byteBound": "PROVENANCE.md 除外（本仓自有文档，只有其自述数字受判据 ④ 约束）",
+  "files": {
+    "LICENSE": {
+      "sha256": "1fcf4016009aa6dd0bd490f6fdaf0552424a1052ca8d2c59a09da3eb7e2cd722",
+      "bytes": 1061
+    },
+    "README.md": {
+      "sha256": "9a59a018626066bc3ec4cb34a4110ac796bff599d84ff6dc2aaa5b375c7f75ff",
+      "bytes": 38184
+    },
+    "cordis.patch.yml": {
+      "sha256": "df616106e59021c90a96ba61037e904ceb8dc62b20ea9b27062f9abb6a21ec8f",
+      "bytes": 632
+    },
+    "lib/auth/claude-code-creds.js": {
+      "sha256": "5c9c35aff60610ff02b2723edf3451fba8dc7174f93d8c7071a3588ec75cd429",
+      "bytes": 6454
+    },
+    "lib/auth/device-flow.js": {
+      "sha256": "a6c4fb4a423cda73f02ad5afcbe4f0ab85b1da60908e292a14f0d860a0372a09",
+      "bytes": 7998
+    },
+    "lib/auth/jwt.js": {
+      "sha256": "a1dc38514941d55d13cb0878460fcf271300e1b90b8ee25a4c6313214e63fefe",
+      "bytes": 990
+    },
+    "lib/auth/oauth-flow.js": {
+      "sha256": "686223ef835d18d35480bf59b122f23cf9867c68d9fa47149e6794b18863f93a",
+      "bytes": 9622
+    },
+    "lib/auth/pkce.js": {
+      "sha256": "263c8f10cbd91d9b7388c92551c37fb1095c32ab8d129e80cc8b907613df6aeb",
+      "bytes": 1154
+    },
+    "lib/auth/rpc.js": {
+      "sha256": "240781d95d1112ffd224481f55a457575911ee13b9ba6020ed8441bdbc00cb20",
+      "bytes": 19984
+    },
+    "lib/auth/store.js": {
+      "sha256": "44f27af71c2b73e1d88ca4a41279bd51a45cdc00a7d40fd828b4cf3b4390be75",
+      "bytes": 20139
+    },
+    "lib/client.js": {
+      "sha256": "59d41e8bc8294aa60f71757981fa3d3611a6d361a546a3bf14cf30e4f9e3140f",
+      "bytes": 175345
+    },
+    "lib/client/ImageGallery.js": {
+      "sha256": "61b786d0c823a6472b261ffc0a850c6ad65cbf55b1ae41e1e8343f3712651dcb",
+      "bytes": 6663
+    },
+    "lib/client/ImageGenerateToolview.js": {
+      "sha256": "d868a6f7afd0804f4a9a6d1025212efdbb1944c94cdb7593784c7ab128ec6314",
+      "bytes": 6136
+    },
+    "lib/client/ProviderAccountManager.js": {
+      "sha256": "85086567e07f14dc097bea110b6da07f2c9b354f0ff479956b0f3aeba815da0a",
+      "bytes": 14429
+    },
+    "lib/client/ProviderModelEditor.js": {
+      "sha256": "905cbe8cc028435f0777f1d634d53028791a54dbf2f8b037be48be1677e1b842",
+      "bytes": 12505
+    },
+    "lib/client/SpeedSelect.js": {
+      "sha256": "babfe1573b5e82a06b7ef8c4a843f58db5e424c14e3a9b793cf764b8accc675a",
+      "bytes": 9012
+    },
+    "lib/client/SubscriptionUsageBadge.js": {
+      "sha256": "8aaa6d202f16f9264fee88bd2d63e98ad2a8d818f13287701e0844f2c161d694",
+      "bytes": 26554
+    },
+    "lib/client/SubscriptionsSection.js": {
+      "sha256": "528f507584a04d7c4b4de57a23a60fb980eaf0f54092b945eaeae4e17304c2c6",
+      "bytes": 48648
+    },
+    "lib/client/UsageBadgeDisplaySetting.js": {
+      "sha256": "749954ea7ff007b362103ad1caaf80f8bf733f00f1f9cfd2b785d34c15065ba5",
+      "bytes": 2372
+    },
+    "lib/client/VideoGenerateToolview.js": {
+      "sha256": "5cf4591e8365307664b30b9e040ecfbc371bf54f099e6cfb21dc72d58f9908aa",
+      "bytes": 8506
+    },
+    "lib/client/account-preferences.js": {
+      "sha256": "1d62f40fec8e0db9ad97ca653da67240b80785f8be7ee4a479b6739d071d401a",
+      "bytes": 1139
+    },
+    "lib/client/display-name-events.js": {
+      "sha256": "abc5bf4e0ac5fa685752a4cb702491e75f3eab8ef10182d25e6cc042017cc2e7",
+      "bytes": 402
+    },
+    "lib/client/fast-command.js": {
+      "sha256": "3632a112038917197da0df205e7a9a0b468a388233abd26b805b5697043a160a",
+      "bytes": 141
+    },
+    "lib/client/host-icons.js": {
+      "sha256": "f6e9b514225d22b0f87eade4a18f2197302e1205f6924402cf756f1f0bbd2125",
+      "bytes": 523
+    },
+    "lib/client/index.js": {
+      "sha256": "902f5f34992850b5fa9aa1005e46e79b8a1e8d54cc5406d3184ce6df4a15dcd4",
+      "bytes": 7578
+    },
+    "lib/client/locales.js": {
+      "sha256": "56f6f1c92ebdbc41b6dad143a49bd89dcf265c1a50828c5da6cccb207c23c6bd",
+      "bytes": 23942
+    },
+    "lib/client/model-filter.js": {
+      "sha256": "533a880852c978c0e1a10ce38ac04c9f3c3fddda20e7b94dc3235c094dc8fa57",
+      "bytes": 2568
+    },
+    "lib/client/provider-settings-styles.js": {
+      "sha256": "f212faa09ddd7202b8a2b44d979bdb7b5f93ef36297f6a12323994172d6d30d2",
+      "bytes": 6215
+    },
+    "lib/client/reset-action.js": {
+      "sha256": "6d399ad072a605c6008938a185e04395cb60d1ed7c1efb4c47cc6105439522c5",
+      "bytes": 757
+    },
+    "lib/client/subscriptions-rpc.js": {
+      "sha256": "4bff829112aacf1ca2107b0ed7e2b7c9e612000244c72b8a4e1d3320fc46832e",
+      "bytes": 1566
+    },
+    "lib/client/usage-badge-preferences.js": {
+      "sha256": "e9c0b1df2963d5e9e5a4808d436df01981d6f4e7c3cabcabc187cad5201de326",
+      "bytes": 1653
+    },
+    "lib/client/usage-window-filter.js": {
+      "sha256": "68e298f07dd73ae43cafe0888c8d90305e8a2b6c563c7098460e6ffe30fe834a",
+      "bytes": 390
+    },
+    "lib/compat.js": {
+      "sha256": "67ed1d15101612f88729fdad6848285fdbdde9ba8d07b16ce191fef7078d2e75",
+      "bytes": 1004
+    },
+    "lib/http.js": {
+      "sha256": "13519fe40a087da417be7c5d770971b3ce262227089e1e1aa15dc46ad5b2f6f9",
+      "bytes": 20831
+    },
+    "lib/index.js": {
+      "sha256": "0453c3f4abe171b39c52707ad02d42b04eecd8cd043d1caea0fd1cc152412b3b",
+      "bytes": 446169
+    },
+    "lib/model-defaults.js": {
+      "sha256": "3f7b108cf74e9b558e5e8231286c3b0432c3b7915a53c48cf06ce2bf84e61cff",
+      "bytes": 9546
+    },
+    "lib/provider-settings.js": {
+      "sha256": "5464faa50adc2eaa9312e56dd498b4b777fd1303ae7424b34253bed5dc259ee6",
+      "bytes": 10307
+    },
+    "lib/providers/account-preferences.js": {
+      "sha256": "3755a247bf1a1864ac128d69a1f09a99642d4f9be51535b6f68947d687af6bf1",
+      "bytes": 10326
+    },
+    "lib/providers/accounts.js": {
+      "sha256": "7a832c96b1ace0ffb68d34510036af9c3f53a331a81301ece4c8f1a932d7771f",
+      "bytes": 6512
+    },
+    "lib/providers/catalog-refresh.js": {
+      "sha256": "97397067149233af449a96a4e1433d3fe80a064b27643d9dddc6058ccc823526",
+      "bytes": 974
+    },
+    "lib/providers/catalog-store.js": {
+      "sha256": "5252b3a41fc8bf029a830cc059b99e15f6d9a29bf190d417c5a5e47d12185388",
+      "bytes": 12313
+    },
+    "lib/providers/claude-cli-version.js": {
+      "sha256": "46aaebd1c885e1a316ba65f2a204faf52164913c47dcb2495a809846487b3b39",
+      "bytes": 1000
+    },
+    "lib/providers/claude.js": {
+      "sha256": "53999a3cee8d16addd0a73b1f96635e1e4fc43348c61dcbb68db0eef32c84f74",
+      "bytes": 33599
+    },
+    "lib/providers/codex-client-version.js": {
+      "sha256": "8bbda52ba3fc26fa3469a53c1c6c8a5cc86aa0c218f2c1c5a9d890b381df9696",
+      "bytes": 813
+    },
+    "lib/providers/codex-search.js": {
+      "sha256": "f6025a2641967a5ed515d08026a52a043523ecad71e15fe44e805d31a9ed42a1",
+      "bytes": 7935
+    },
+    "lib/providers/codex.js": {
+      "sha256": "2a96af3185fc5babe18632fd2e7272df0934755d6f0f02da882e237cc42e8449",
+      "bytes": 45038
+    },
+    "lib/providers/common.js": {
+      "sha256": "f256979a111794d72205a46a293118c09917f325cea58f8ecd84916a6804495a",
+      "bytes": 35773
+    },
+    "lib/providers/copilot.js": {
+      "sha256": "dc7eaa891d8b8a8f358e574e48e1dfccda56b4f5a97d5fc9824c9e39626647d9",
+      "bytes": 44540
+    },
+    "lib/providers/grok.js": {
+      "sha256": "411885de42c54a9d7f2bb7db499e0ab6542ae99962934b0d9be10f957c1daba1",
+      "bytes": 33881
+    },
+    "lib/providers/image-pool.js": {
+      "sha256": "d102f95daa7eb4cabab253b2ac5218ab2b58adea67a32beb4a188d928983bdab",
+      "bytes": 4739
+    },
+    "lib/providers/npm-cli-version.js": {
+      "sha256": "c5c556411f1250634c721b30079509fd3265fb6f24dadc96a865032215fbe739",
+      "bytes": 4016
+    },
+    "lib/providers/pool-family.js": {
+      "sha256": "e3b2534c73db04ff7b5b37024d9f092aea6f9d8a318807d1eb2ab052ca93b844",
+      "bytes": 2001
+    },
+    "lib/providers/pool-health.js": {
+      "sha256": "0c504fccd2d29ea55293badba790137cc1d1f49d52e7ae6b1d6ef5b3e63a0cbc",
+      "bytes": 7444
+    },
+    "lib/providers/pool-usage.js": {
+      "sha256": "de59a1f621e1b830fc89ab37ec925a372f2ed3976a8c50da5d248ba57b6db194",
+      "bytes": 10249
+    },
+    "lib/providers/pool.js": {
+      "sha256": "df8d5a99e38d6b27f49d44f6ca151fdf49a7cb504d5f4e6d8c4ae4edaf84beb0",
+      "bytes": 22001
+    },
+    "lib/providers/rate-limit.js": {
+      "sha256": "0f092ad158bafa4505a3b72d819806cf581f925220d65a59eca8d31ebab82e9d",
+      "bytes": 14947
+    },
+    "lib/providers/replay.js": {
+      "sha256": "da9a8e04b56c478b0b0536b71382156e2105b841e992d1830cba4e7f6504fd93",
+      "bytes": 2235
+    },
+    "lib/providers/reset-redemption.js": {
+      "sha256": "f82bd6ae11f32ffd2a679bd3be9dd6bec641e6cc704cd2f4f9e7db9459a321ce",
+      "bytes": 3468
+    },
+    "lib/tools/image-generate.js": {
+      "sha256": "9b92ac4ffa9f98d1a0c1143f25371a3cf5ea86b93e49903d1e793ec44f6a9fbd",
+      "bytes": 22777
+    },
+    "lib/tools/registration.js": {
+      "sha256": "897e5791c5679afd54302c69b4ec1fc93604b9365701feb970cc138a22965020",
+      "bytes": 1091
+    },
+    "lib/tools/video-generate.js": {
+      "sha256": "c8e6b275df24f4b2bd9a11d7b2ee134f767dd9d26782a4d047b6d938c116c66e",
+      "bytes": 11738
+    },
+    "lib/tools/x-search.js": {
+      "sha256": "c433752d42d86252c3e50c331d9d7efdb97bee3e4dfdbc45dcda73a1da672adc",
+      "bytes": 8683
+    },
+    "lib/translate/anthropic.js": {
+      "sha256": "8f46d2a680feafa541f8025ae99cc2e6537fa92db68bafde5bf5bf83a8a043e5",
+      "bytes": 23893
+    },
+    "lib/translate/chat-completions.js": {
+      "sha256": "af5e497ce6a9f92de0584e0b238c7bd7064b9627313ba6d0aa27e774d2c8179f",
+      "bytes": 16326
+    },
+    "lib/translate/resolved.js": {
+      "sha256": "3cf4872062ba28aafebd38b52923ed33e9a726b7623e96edbf34a956caeb1783",
+      "bytes": 8465
+    },
+    "lib/translate/responses.js": {
+      "sha256": "2e0235aee4d643b45a20cad888ecbe6da4e97c3c3f3e49b4a3aa12fd833ea33e",
+      "bytes": 18999
+    },
+    "lib/translate/sse.js": {
+      "sha256": "a3aca50bd63b2b95d2bc3f1e06e16ca515045afd7060f6cd72dbe7146aa32879",
+      "bytes": 6615
+    },
+    "package.json": {
+      "sha256": "6e332a5c93eb2cae88eac48f01d5eeb5b605d5746d7f567478468beddeca57ef",
+      "bytes": 1553
+    }
+  }
+}
