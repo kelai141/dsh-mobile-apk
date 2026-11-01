@@ -53,6 +53,22 @@ const NAV_TITLE_SELECTOR = ':scope > nav > div:first-child'
 const ACTIVE_ROW_SELECTOR = 'nav button[aria-current="true"]'
 
 /**
+ * 「订阅」与「账号与余额」的分区名（issue #1288 第 3、7 条）。
+ *
+ * 身份通道同本模块其余表：DOM 里能看见的只有 label 文本。两个分区都由**第三方插件**
+ * 注册——「账号与余额」来自上游只读的 settings-account 插件（且**只在已登录
+ * `status === "credential-stored"` 时**才注册），「订阅」来自 vendored 的
+ * dsh-plugin-subscriptions。所以这里做的是**装配**（把 A 的分区入口放进 B 的二级页），
+ * 不是上游能力；上游改版时这两张表就是失效判据（见 syncSubscriptionsEntry 的降级分支）。
+ */
+const ACCOUNT_LABELS: readonly string[] = ['账号与余额', 'Account & balance']
+const SUBSCRIPTIONS_LABELS: readonly string[] = ['订阅', 'Subscriptions']
+/** 注入到「账号与余额」二级页里的那一行（本模块自己的节点，收回时删掉即可）。 */
+const ACCOUNT_EXTRA_ATTR = 'data-dsh-settings-account-extra'
+/** 首页被本模块隐藏的「订阅」行（只加一个属性，收回时去掉即复原）。 */
+const HOME_HIDDEN_ATTR = 'data-dsh-settings-nav-hidden'
+
+/**
  * 我方自有分区的「一行短说明」（D4），键 = `index.ts` 里注册的 label 字面量。
  *
  * 只登记我方自有一级分区；上游「通用设置 / 模型 / 内置插件 / 快照…」与第三方插件行一律不加说明、
@@ -459,6 +475,7 @@ export class MobileSettingsNav {
       else panel.removeAttribute(FRESH_ATTR)
       const bar = this.ensureBar(panel)
       this.syncRows(panel)
+      this.syncSubscriptionsEntry(panel)
       this.syncTitle(panel, bar)
       this.applyFocus(panel)
     } catch (error) {
@@ -488,6 +505,8 @@ export class MobileSettingsNav {
     // 上游图标只是被标记隐藏，收回时去掉标记即原样恢复。
     for (const node of panel.querySelectorAll('[' + ICON_ATTR + '-hidden]')) node.removeAttribute(ICON_ATTR + '-hidden')
     for (const node of panel.querySelectorAll('[' + ROW_ATTR + ']')) node.removeAttribute(ROW_ATTR)
+    for (const node of panel.querySelectorAll('[' + ACCOUNT_EXTRA_ATTR + ']')) node.remove()
+    for (const node of panel.querySelectorAll('[' + HOME_HIDDEN_ATTR + ']')) node.removeAttribute(HOME_HIDDEN_ATTR)
   }
 
   /** 顶部条：返回控件 + 分区标题 + 右侧等高占位（标题因此真正居中）。 */
@@ -558,6 +577,72 @@ export class MobileSettingsNav {
         existing.textContent = description
       }
     }
+  }
+
+  /**
+   * 把「订阅」归到「账号与余额」二级页里（issue #1288 第 3、7 条）。
+   *
+   * 做法（两步，都可逆，都不改上游注册项本身）：
+   *   1. 首页：把「订阅」这一行**隐藏**（只加 `data-dsh-settings-nav-hidden`，不删节点）——
+   *      删了它这个分区就再也点不动了，而它仍是唯一的真实分区；
+   *   2. 「账号与余额」的二级页里：往内容列顶部**注入一个可点的入口行**，点它就去点
+   *      第 1 步隐藏的那个真实行 —— 所以进到订阅页之后的一切都是上游原样行为，
+   *      本模块没有重实现任何订阅界面。
+   *
+   * 降级判据（上游改版/未登录时的失效面，必须**安静降级**、不许乱塞也不许报错）：
+   *   · 找不到「订阅」行 → 什么都不做（既没隐藏也没注入）；
+   *   · 找不到「账号与余额」行 → 什么都不做，**尤其不能隐藏订阅行**：
+   *     该分区由上游 settings-account 插件**只在已登录时**注册，未登录时若隐藏了订阅行，
+   *     订阅就彻底点不到了（这是本条最危险的失败模式）；
+   *   · 当前不在账号与余额的二级页 → 移除注入行（切到别的分区不留孤儿）。
+   */
+  private syncSubscriptionsEntry(panel: HTMLElement): void {
+    const list = panel.querySelector<HTMLElement>(NAV_LIST_SELECTOR)
+    if (list === null) return
+    const rows = [...list.querySelectorAll<HTMLButtonElement>(':scope > button')]
+    const find = (labels: readonly string[]): HTMLButtonElement | undefined =>
+      rows.find(row => labels.includes(rowLabel(row)))
+    const accountRow = find(ACCOUNT_LABELS)
+    const subsRow = find(SUBSCRIPTIONS_LABELS)
+
+    // 内容列（二级页）：注入行的宿主。取不到就什么都不做。
+    const content = panel.querySelector<HTMLElement>(':scope > div:last-child > div:nth-child(2)')
+    const existing = content?.querySelector<HTMLElement>(':scope > [' + ACCOUNT_EXTRA_ATTR + ']') ?? null
+    const onAccountDetail = this.level === LEVEL_DETAIL
+      && this.currentLabel !== null
+      && ACCOUNT_LABELS.includes(this.currentLabel)
+
+    // 只有两个分区都在场、且确实在账号二级页时才装配；其余情形一律复原。
+    const shouldPlace = accountRow !== undefined && subsRow !== undefined && content !== null && onAccountDetail
+    if (!shouldPlace) {
+      existing?.remove()
+      // 复原：首页行重新可见（未登录时账号分区缺席，绝不能把订阅藏起来）。
+      subsRow?.removeAttribute(HOME_HIDDEN_ATTR)
+      return
+    }
+
+    subsRow.setAttribute(HOME_HIDDEN_ATTR, '')
+    if (existing !== null) return
+
+    const entry = document.createElement('button')
+    entry.type = 'button'
+    entry.setAttribute(ACCOUNT_EXTRA_ATTR, '')
+    // 复用一级行的观感：图标位留白 + 标签 + 箭头，让它在二级页里像「一个分区入口」
+    // 而不是一条普通按钮。样式全部来自本包的语义属性（无内联字面量）。
+    entry.style.cssText = 'display:flex;align-items:center;gap:12px;width:100%;box-sizing:border-box;'
+      + 'min-height:52px;padding:12px 4px;background:transparent;border:none;cursor:pointer;'
+      + 'color:var(--dsw-alias-label-primary);font-size:15px;line-height:20px;text-align:left'
+    const label = document.createElement('span')
+    label.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
+    label.textContent = rowLabel(subsRow)
+    const chevron = document.createElement('span')
+    chevron.setAttribute('aria-hidden', 'true')
+    chevron.style.cssText = 'flex:none;display:inline-flex;color:var(--dsw-alias-label-tertiary)'
+    chevron.appendChild(strokeArrow('M7 4l5 5-5 5'))
+    entry.append(label, chevron)
+    // 点注入行 = 点上游那个真实的订阅行（section 切换仍由上游 onSelect 完成）。
+    entry.addEventListener('click', () => { subsRow.click() })
+    content.insertBefore(entry, content.firstChild)
   }
 
   /**

@@ -28,13 +28,20 @@ export function apply(ctx) {
     // sits flush against the panel's top edge; push it down a little to leave
     // breathing room. Scoped by the settings panel's own dialog role + nav child
     // so other aria-modal dialogs (e.g. the attachment lightbox) are untouched.
+    //
+    // issue #1288 第 2/5/8 条：**必须再限定到非手机形态**（html:not([data-dsh-mobile-form])）。
+    // 原选择器特异性 (0,2,2) 会压过宿主 dsh-client-ui-responsive 的手机形态规则 (0,2,1)，
+    // 把设置面板的 padding-top 从真实顶部 inset（实测 24px）压成 14px。宿主手机形态下这块
+    // 留白由 --dsh-mobile-top-inset 负责（mobile-form.css.ts），插件不该再插一手；否则二级页
+    // 顶部条会顶到状态栏下面（一级页顶部条是 absolute，不吃面板 padding，所以只有二级页坏）。
+    // 桌面形态维持原样。
     ctx.effect(() => {
         const style = document.createElement('style');
         style.setAttribute('data-plugin', 'dsh-plugin-subscriptions');
-        style.textContent = 'div[role="dialog"][aria-modal="true"]:has(> nav) { padding-top: 14px; }';
+        style.textContent = 'html:not([data-dsh-mobile-form]) div[role="dialog"][aria-modal="true"]:has(> nav) { padding-top: 14px; }';
         document.head.appendChild(style);
         return () => style.remove();
-    }, 'dsh-plugin-subscriptions: settings panel breathing room');
+    }, 'dsh-plugin-subscriptions: settings panel breathing room (desktop form only)');
     // The shell's Context merge types `connection` as the host handle; in the
     // browser shell the same key holds the full client ConnectionHandle.
     const connection = ctx.get('connection');

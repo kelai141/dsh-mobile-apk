@@ -43,8 +43,8 @@
       "bytes": 20139
     },
     "lib/client.js": {
-      "sha256": "59d41e8bc8294aa60f71757981fa3d3611a6d361a546a3bf14cf30e4f9e3140f",
-      "bytes": 175345
+      "sha256": "01839af22d9974bc74e16aab5bbe999cf5e018c99263ccce75c222c176b8aedb",
+      "bytes": 179438
     },
     "lib/client/ImageGallery.js": {
       "sha256": "61b786d0c823a6472b261ffc0a850c6ad65cbf55b1ae41e1e8343f3712651dcb",
@@ -99,8 +99,8 @@
       "bytes": 523
     },
     "lib/client/index.js": {
-      "sha256": "902f5f34992850b5fa9aa1005e46e79b8a1e8d54cc5406d3184ce6df4a15dcd4",
-      "bytes": 7578
+      "sha256": "c577b60ddd861584fc1e3aac9641cdc6436a4c7352aa064e201c42d161a3d3d6",
+      "bytes": 8262
     },
     "lib/client/locales.js": {
       "sha256": "56f6f1c92ebdbc41b6dad143a49bd89dcf265c1a50828c5da6cccb207c23c6bd",

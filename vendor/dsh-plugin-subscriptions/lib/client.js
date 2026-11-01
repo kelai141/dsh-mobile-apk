@@ -107,6 +107,9 @@ const en = {
 	login: "Log in",
 	cancel: "Cancel",
 	logout: "Log out",
+	providerDotBusy: "Busy: an operation is running",
+	providerDotLinked: "Signed in",
+	providerDotUnlinked: "Not signed in",
 	logoutAccountConfirm: "Log out {account} of {provider}?",
 	manualSummary: "Browser flow not working? Paste the callback URL or code",
 	manualPlaceholder: "Paste the callback URL or code",
@@ -198,6 +201,7 @@ const en = {
 	proxyDialogTitle: "Proxy settings",
 	proxyDialogClose: "Close",
 	proxyEnabled: "Route subscription requests through a proxy",
+	proxyDisabledHint: "Proxy off: requests go out directly",
 	proxyUrl: "Proxy URL",
 	proxyUrlPlaceholder: "http://localhost:7890",
 	proxyUrlHint: "HTTP or HTTPS proxy only (Clash/mihomo, v2rayN…); socks is not supported.",
@@ -296,6 +300,9 @@ const zh = {
 	login: "登录",
 	cancel: "取消",
 	logout: "退出登录",
+	providerDotBusy: "正在处理",
+	providerDotLinked: "已登录",
+	providerDotUnlinked: "未登录",
 	logoutAccountConfirm: "确定退出 {provider} 的账号 {account} 吗？",
 	manualSummary: "浏览器流程无法完成？粘贴回调 URL 或授权码",
 	manualPlaceholder: "粘贴回调 URL 或授权码",
@@ -387,6 +394,7 @@ const zh = {
 	proxyDialogTitle: "代理设置",
 	proxyDialogClose: "关闭",
 	proxyEnabled: "让订阅相关请求走代理",
+	proxyDisabledHint: "代理未启用：请求直连",
 	proxyUrl: "代理地址",
 	proxyUrlPlaceholder: "http://localhost:7890",
 	proxyUrlHint: "仅支持 HTTP/HTTPS 代理（Clash/mihomo、v2rayN 等）；不支持 socks。",
@@ -1956,10 +1964,27 @@ const styles$5 = {
 		lineHeight: "18px",
 		color: "var(--dsw-alias-label-tertiary)"
 	},
+	// issue #1288 第 11 条（横向溢出）：这一行在 600dp 竖屏上会把整页撞宽。
+	//
+	// 真因不是「文字太长」，是 flex 的默认收缩规则：
+	//   · .accountHeader 是 display:flex，而 flex 子项的 min-width 默认是 auto ——
+	//     子项**不能收缩到小于其内容宽度**，所以长邮箱（wlx…@gmail.com）+ plan +
+	//     「过期时间 2026/11/11 21:39:24」三段并列时，整行按内容总宽被撑开；
+	//   · 「退出登录」按钮是 marginLeft:auto + flexShrink:0 —— 它自己不收缩，
+	//     于是被前面的内容挤出卡片右边界（用户截图里只能看到一半）。
+	// 结果：卡片 → 页面容器 → document 一路被推宽，整页可以左右滑。
+	//
+	// 修法就是补上 flex 收缩链上缺的两处（不是 overflow-x:hidden 遮住）：
+	//   · accountHeader 允许收缩（minWidth:0）—— 容器本身也可能被父级撑；
+	//   · 三个文本 span 各给 minWidth:0 + 省略号，让「超出」表现为省略而不是外溢；
+	//   · 邮箱是最长的那个，允许换行以求完整可读（省略号会藏掉后半截，
+	//     而账号名是用户要核对的东西）。
 	accountRow: {
 		display: "flex",
 		flexDirection: "column",
 		gap: 6,
+		// 卡片在 column flex 里也要能收缩，否则内层 min-width:auto 继续向上传染。
+		minWidth: 0,
 		border: "0.5px solid var(--dsw-alias-border-l2)",
 		borderRadius: "var(--dsw-radius-lg, 16px)",
 		padding: "8px 10px",
@@ -1968,13 +1993,21 @@ const styles$5 = {
 	accountHeader: {
 		display: "flex",
 		alignItems: "center",
-		gap: 8
+		gap: 8,
+		// 关键：允许这一行收缩到容器宽度，而不是按内容宽度铺开。
+		minWidth: 0,
+		// 窄屏上让长邮箱与过期时间换行，而不是硬挤一行把按钮顶出去。
+		flexWrap: "wrap",
+		rowGap: 2
 	},
 	accountName: {
 		fontSize: 13,
 		lineHeight: "20px",
 		color: "var(--dsw-alias-label-primary)",
-		userSelect: "all"
+		userSelect: "all",
+		// 可收缩 + 长串断行（邮箱没有空格，需要 anywhere 才会断）。
+		minWidth: 0,
+		overflowWrap: "anywhere"
 	},
 	starButton: {
 		border: "none",
@@ -2113,6 +2146,27 @@ function dotColor(status) {
 	if ((status?.accounts.length ?? 0) > 0) return "var(--dsw-alias-state-success-primary)";
 	return "var(--dsw-alias-label-dimmed)";
 }
+/**
+ * 供应商卡标题前那个状态点的**语义**（issue #1288 第 10 条）。
+ *
+ * 用户报「看不懂这个灰点」——查下来颜色逻辑本身是好的（见 dotColor：busy=黄、
+ * 已登录=绿、未登录=灰），缺的只是**把它说出来**：那个 span 没有 aria-label，
+ * 也不在任何可读文本里，所以三种状态在无障碍树和肉眼上都只能靠颜色猜。
+ * 这里补一个纯语义映射（不改颜色、不改尺寸、不加图例——用户明确说设计不动）。
+ * @param status - 该 provider 的账户状态快照。
+ * @returns 三态键之一：busy / linked / unlinked。
+ */
+function dotState(status) {
+	if (status?.busy === true) return "busy";
+	if ((status?.accounts.length ?? 0) > 0) return "linked";
+	return "unlinked";
+}
+/** 把 dotState 的三态键翻成当前语言的 aria-label 文案键。 */
+const DOT_STATE_LABEL = {
+	busy: "providerDotBusy",
+	linked: "providerDotLinked",
+	unlinked: "providerDotUnlinked"
+};
 /** The CLI version a route presents, beside the provider name; nothing for routes without one. */
 function ClientVersionTag({ clientVersion, t }) {
 	if (clientVersion === void 0) return null;
@@ -2622,10 +2676,14 @@ function SubscriptionsSection(props) {
 				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					style: styles$5.cardHeader,
 					children: [
-						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { style: {
-							...styles$5.dot,
-							background: proxy?.enabled === true ? "var(--dsw-alias-state-success-primary)" : "var(--dsw-alias-label-dimmed)"
-						} }),
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+							style: {
+								...styles$5.dot,
+								background: proxy?.enabled === true ? "var(--dsw-alias-state-success-primary)" : "var(--dsw-alias-label-dimmed)"
+							},
+							role: "img",
+							"aria-label": proxy?.enabled === true ? t("proxyEnabled") : t("proxyDisabledHint")
+						}),
 						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 							style: styles$5.name,
 							children: t("proxyTitle")
@@ -2657,10 +2715,14 @@ function SubscriptionsSection(props) {
 						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 							style: styles$5.cardHeader,
 							children: [
-								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { style: {
-									...styles$5.dot,
-									background: dotColor(status)
-								} }),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									style: {
+										...styles$5.dot,
+										background: dotColor(status)
+									},
+									role: "img",
+									"aria-label": t(DOT_STATE_LABEL[dotState(status)])
+								}),
 								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 									style: styles$5.name,
 									children: status?.displayName || name
@@ -4814,10 +4876,18 @@ function apply(ctx) {
 	ctx.effect(() => {
 		const style = document.createElement("style");
 		style.setAttribute("data-plugin", "dsh-plugin-subscriptions");
-		style.textContent = "div[role=\"dialog\"][aria-modal=\"true\"]:has(> nav) { padding-top: 14px; }";
+		// issue #1288 第 2/5/8 条：**必须限定在非手机形态**。
+		//
+		// 原选择器是裸的 div[role=dialog][aria-modal=true]:has(> nav)，特异性 (0,2,2) —— 它会命中
+		// **宿主的**设置面板（那是唯一「dialog 且直接子节点是 nav」的面板），并把它的 padding-top
+		// 压成 14px。宿主手机形态的顶部 inset 由 dsh-client-ui-responsive 的 mobile-form.css.ts
+		// 提供（--dsh-mobile-top-inset，实测 24px），被压成 14px 之后二级页标题栏就顶到状态栏下面
+		// （用户实测：一级页正常、二级页标题只剩半截 —— 一级的顶部条是 absolute 不吃面板 padding）。
+		// 在手机形态下这块留白本来就由宿主按真实 inset 负责，插件不该再插一手；桌面形态维持原样。
+		style.textContent = 'html:not([data-dsh-mobile-form]) div[role="dialog"][aria-modal="true"]:has(> nav) { padding-top: 14px; }';
 		document.head.appendChild(style);
 		return () => style.remove();
-	}, "dsh-plugin-subscriptions: settings panel breathing room");
+	}, "dsh-plugin-subscriptions: settings panel breathing room (desktop form only)");
 	const connection = ctx.get("connection");
 	const t = ctx.locale.bind(NS);
 	const injected = () => ({

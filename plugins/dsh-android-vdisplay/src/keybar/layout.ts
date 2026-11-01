@@ -203,3 +203,93 @@ export const KEYBAR_CSS: string = [
   'font:var(--dsw-font-markdown-small);color:var(--dsw-alias-label-secondary);',
   'background:var(--dsw-alias-bg-layer-2);border-top:1px solid var(--dsw-alias-border-l4)}',
 ].join('')
+
+/**
+ * xterm 的宿主元素：上游把它交给 FitAddon 的那个 node。
+ *
+ * 上游事实（引擎树 dsh-client-ui-sidebar-terminal/lib/client.terminal.js）：
+ *   `const observer = new ResizeObserver(measure); observer.observe(node)`
+ *   `measure = () => { ...; fitScreen(xterm, addon, state, model) }`
+ * 也就是**重排是以 node 的尺寸变化为唯一触发源**，没有对外暴露的 fit()/resize() 入口
+ * （terminal / fit addon 都只活在 React 闭包里，`xterm.open(node)` 之后无从外部取得）。
+ * 因此本插件要通知终端重排，唯一可行的最小手段是**让 node 的尺寸可观测地变一次**。
+ *
+ * 为什么取 .xterm 本身而不是 [data-sidebar-terminal]：ResizeObserver 观察的正是
+ * `.xterm` 那个 node（上游 `.screen` 里 `.xterm{height:100%}`），观察 root 会漏掉
+ * 「root 尺寸没变、但内容盒变矮」的情形（root 的 padding-bottom 就是这种）。
+ *
+ * @param root - 终端根节点。
+ * @returns 宿主 node；结构不符时返回 null（调用方必须容忍）。
+ */
+export function terminalResizeTarget(root: HTMLElement): HTMLElement | null {
+  const direct = root.querySelector<HTMLElement>('.xterm')
+  if (direct !== null) return direct
+  // 退一步：上游把 xterm 挂在 .screen 里（.screen > .xterm）；结构变化时按「第一个子元素」兜底。
+  // 刻意不用 `instanceof HTMLElement`：本模块会被 jsdom 等宿主加载，那里的构造器来自各自 window，
+  // 与 Node 全局不是同一个（实测 `ReferenceError: HTMLElement is not defined`）。
+  const first = root.firstElementChild
+  return first === null || first === undefined ? null : (first as HTMLElement)
+}
+
+/**
+ * 通知终端重排一次（幂等、无副作用残留）。
+ *
+ * ## 为什么用「尺寸抖动」而不是派发事件
+ *
+ * 上游没有任何自定义重排事件；它只听 ResizeObserver。派发 `resize` 到 window 是骗自己：
+ * ResizeObserver 不理会构造事件。另一种写法是读一次然后写回同一个值 —— 浏览器不会为
+ * 「值没变」的赋值产生尺寸变化，观察者同样不触发。所以必须真的改一次尺寸再改回去。
+ *
+ * ## 两次写入顺序（缺一不可）
+ *
+ * 1. 先写成**当前同一尺寸**是无效的（见上），因此用 +1px/-1px 的整数抖动；
+ * 2. 必须**同步**在同一个任务里写两次还是**分帧**写？—— 必须分帧：ResizeObserver 的回调
+ *    在布局之后、绘制之前批量投递，同一任务内两次写入会被合并成一次「没有净变化」的观察。
+ *    这里用 rAF 安排回写，并在回写前校验节点仍在文档里、且没有被别人改过高度。
+ *
+ * ## 失效条件（如实登记）
+ *
+ * - 宿主 node 的高度不是由自身 style 决定（例如被 flex 撑满且 inline height 会被忽略）：
+ *   此时写 inline 高度会短暂生效但仍会触发一次观察，通常仍能工作；若上游改用
+ *   `contain: size` 或把 node 换成 canvas-only 布局，抖动不再改变尺寸 → 本通知失效。
+ * - 页面处于 `display:none` / 尺寸为 0（终端 tab 在后台）：不做抖动（见下），
+ *   因为 0 尺寸本来就不会产生有意义的重排；切回前台时上游自己的观察者会重新触发。
+ * - 上游若将来暴露真正的 `fit()` 入口，应改为直接调用它，届时本函数退化为兜底。
+ *
+ * @param root - 终端根节点。
+ * @param schedule - 帧调度器（默认 rAF；测试可注入）。
+ * @returns 是否真的安排了抖动。
+ */
+export function nudgeTerminalRefit(
+  root: HTMLElement,
+  schedule: (run: () => void) => void = defaultSchedule,
+): boolean {
+  const node = terminalResizeTarget(root)
+  if (node === null) return false
+  const view = node.ownerDocument?.defaultView ?? null
+  const rect = typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : null
+  // 尺寸为 0（后台 tab / 未布局）：抖动没有意义，也会把 0 写进 inline 高度污染下次布局。
+  if (rect !== null && (rect.width === 0 || rect.height === 0)) return false
+  const previous = node.style.height
+  const base = rect !== null && rect.height > 0 ? rect.height : 0
+  if (base <= 0) return false
+  // 抖动 1px：足够产生两次不同的观察记录，又不会让用户看见。取整避免子像素被浏览器合并。
+  const nudged = Math.max(1, Math.round(base) - 1)
+  node.style.height = nudged + 'px'
+  schedule(() => {
+    // 回写前确认：节点还在文档里、且高度仍是我们写的那一个（别人没接管）。
+    if (!node.isConnected) return
+    if (node.style.height !== nudged + 'px') return
+    if (previous === '') node.style.removeProperty('height')
+    else node.style.height = previous
+    // 让浏览器在回写后再走一次布局；某些内核要读一次几何才 flush。
+    void (view === null ? undefined : node.getBoundingClientRect())
+  })
+  return true
+}
+
+/** 默认帧调度：优先 rAF，没有 rAF 的宿主（旧内核 / jsdom 精简档）退化为宏任务。 */
+function defaultSchedule(run: () => void): void {
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => { run() })
+  else setTimeout(run, 0)
+}
