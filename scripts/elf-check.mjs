@@ -73,6 +73,13 @@ try {
   sh(`tar -xOf "${wslArc}" usr/bin/node 2>/dev/null > "${fullWsl}"`, { maxBuffer: 96 * 1024 * 1024 })
   sh(`head -c 20 "${fullWsl}" > "${tmpWsl}"`)
 } catch (e) {
+  // issue #1287 ④：清理必须**在 exit 之前**。
+  //
+  // 原实现把 rmSync 放在 finally 里，而 catch 里先调 process.exit(1) —— process.exit
+  // 立即终止进程，finally 不会执行，于是失败路径留下完整 dump（实测
+  // ".elfnode-full-arm64-20830"，约 100 MB）。build 失败时磁盘已经很紧张，
+  // 再留一份大文件只会让下一次失败更难排查。
+  try { rmSync(fullWin, { force: true }) } catch { /* 忽略清理失败 */ }
   console.error('  usr/bin/node 提取失败: ' + e.message)
   process.exit(1)
 } finally {
