@@ -82,6 +82,11 @@ const GATE_SCRIPTS = [
   // the whole chain runs :app:assembleDebug and debug/release share signingConfigs.repoDebug,
   // so the 0.14.9 release artifacts were debuggable while passing the signature gate.
   'check-apk-form.mjs',
+  // 注入源真源（2026-11-01）：降级副本被造出来、注入时却用原始源——历史形态（PR #1272）。
+  // --scan 判的是产物内容是否合规；原始源恰好也合规时两份字节都能过，选错看不出来。
+  // 这条判「注入的是哪一份字节」：tar 内成员 sha256 == 降级副本 且 != 原始源（只读字节，不解析日志）。
+  // 登记进 GATE_SCRIPTS 是硬要求：check-release-gates 断言两份编排器门禁集差集 = 0。
+  'check-degrade-source-of-truth.mjs',
   'check-manifest-hardening.mjs',
   // 0.14.8 堆下限：壳侧 shellEnv() 与快照内启动器必须给出同一 clamp 区间（单边漂移 = 部分路径仍 OOM）。
   'check-engine-heap-floor.mjs',
@@ -297,6 +302,8 @@ try {
 
   // ---- 3. 插件注入链（python，跨平台）----
   let snapIn
+  // 注入段产出、下游门禁段消费：原始注入源 -> 降级副本 的配对（跨块可见）。
+  let degradePairsForGate = []
   if (!SKIP_INJECT) {
     // 统一补丁门禁（Phase 2a）：engine + vendor 补丁幂等施加与校验（registry.json）
     run('node', [join(ROOT, 'scripts', 'patches', 'apply-patches.mjs'), join(ROOT, 'vendor')])
@@ -363,6 +370,14 @@ try {
       '--all-profiles',
     ])
     snapIn = join(work, 'snap-final2.tar.xz')
+    // 注入源真源门禁的配对（含降级失败的源——那时 degraded.get(name) 仍指向原始源，
+    // 配对左右相等，判据会如实走「没被改写」的 SKIP 分支，而不是假装通过）。
+    for (const name of [...degraded.keys()].sort()) {
+      const origSrc = externalDirs.find((d) => externName(d) === name)
+      if (origSrc === undefined) continue
+      if (!existsSync(join(origSrc, 'lib', 'client.js'))) continue
+      degradePairsForGate.push('--pair', origSrc + '=' + degraded.get(name))
+    }
   } else {
     snapIn = snapSrc
     log('--skip-inject：直接用输入快照（dev 档；权限归一化只在注入链发生，禁止用于发布资产）')
@@ -403,6 +418,19 @@ try {
   run(PYTHON, [gate('ci-verify-snapshot.py'), snapIn, ABI, ...pluginDirs])
   // 模型面工具 wire 预算（0.14.0 §4.1）：注册集（解锁后上限）+ 初始可见集（模型第一眼）双口径。
   // 前置于本步的插件 npm build 已产出 plugins/*/lib，门禁真跑各插件 apply() 采集工具定义。
+  // 注入源真源（2026-11-01）：降级副本被造出来了、注入时却用原始源——历史形态（PR #1272）。
+  // --scan 判的是「产物内容是否合规」；原始源恰好也合规时两份字节都能过，选错看不出来。
+  // 这里判「注入的是哪一份字节」：tar 内成员 sha256 必须等于降级副本且不等于原始源。
+  // 输入只用字节（tar + 两份源目录），不解析日志。--skip-inject 档没有降级段，不判。
+  // 上面注入段的降级表只在 if (!SKIP_INJECT) 块内存在，跨块引用会 ReferenceError——
+  // 故这里由注入段把「原始源 -> 降级副本」的配对留在外层可见的变量里。
+  if (degradePairsForGate.length === 0) {
+    // 与本地链同口径：一个可判对象都没有时显式说出来，不静默略过。
+    log('SKIP(#1)  注入源真源门禁：本轮没有任何带 lib/client.js 的 external，无可判对象')
+  } else {
+    log('门禁：注入源真源（tar 字节 == 降级副本，!= 原始源）…')
+    run('node', [gate('check-degrade-source-of-truth.mjs'), '--snapshot', snapIn, ...degradePairsForGate, '--require'])
+  }
   log('门禁：模型面工具 wire 预算（注册集 + 初始可见集）…')
   run('node', [gate('check-tool-surface-budget.mjs')])
   log('门禁：注入后 /api 路由鉴权 marker…')
