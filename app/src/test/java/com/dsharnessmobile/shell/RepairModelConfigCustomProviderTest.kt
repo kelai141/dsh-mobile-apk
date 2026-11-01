@@ -261,4 +261,82 @@ class RepairModelConfigCustomProviderTest {
     File(home, ".dsh/.credentials.yaml").writeText("refs:\n  ZMYF_API_KEY: k1\n  FARO_API_KEY: k2\n")
     assertEquals("bundle 声明的 .yaml 必须被读到", 2, RepairModelConfig.load(home).size)
   }
+
+  // ── 引用名 join（用户 2026-11-01 明确的事实）────────────────────────────────
+  //
+  // cordis patch 里**没有真实 key**：provider 的 apiKey 只是一个引用名，真值在
+  // .credentials.yaml 的 refs 里，两边按引用名 join。join 不上时该路由必须仍然「被看见」，
+  // 只是标成「凭据引用未命中」——不能 crash，也不能静默丢掉。
+
+  private val refPatch = """
+    - id: llm-pi-ai
+      config:
+        providers:
+          deepseek:
+            displayName: DeepSeek 自建
+            apiKey: deepseek
+            api: openai-completions
+            baseURL: http://10.0.0.9:8000/v1
+            models:
+              - id: ds-v4
+                name: DS v4
+  """.trimIndent() + "\n"
+
+  @Test
+  fun apiKeyInPatchIsAReferenceNameJoinedAgainstCredentialsRefs() {
+    File(home, ".dsh/profiles/web/cordis.patch.yml").writeText(refPatch)
+    File(home, ".dsh/.credentials.yaml").writeText("refs:\n  deepseek: sk-fixture-not-a-real-key\n")
+    val result = RepairModelConfig.loadDetailed(home)
+    assertEquals(1, result.connections.size)
+    val route = result.connections.single()
+    assertEquals("deepseek", route.provider)
+    assertEquals("ds-v4", route.model)
+    assertEquals("http://10.0.0.9:8000/v1", route.baseUrl)
+    assertEquals("sk-fixture-not-a-real-key", route.apiKey)
+    assertTrue("引用命中时不该有不可用条目", result.unavailable.isEmpty())
+  }
+
+  @Test
+  fun missingCredentialRefKeepsTheRouteVisibleAndSaysWhy() {
+    // 负例①：credentials 里删掉该 ref。候选数 0，但必须报「凭据引用未命中」，不是「没有模型」。
+    File(home, ".dsh/profiles/web/cordis.patch.yml").writeText(refPatch)
+    File(home, ".dsh/.credentials.yaml").writeText("refs:\n  someone-else: sk-other\n")
+    val result = RepairModelConfig.loadDetailed(home)
+    assertTrue("缺凭据不产出可用候选", result.connections.isEmpty())
+    assertEquals("但路由必须被看见", 1, result.unavailable.size)
+    val missing = result.unavailable.single()
+    assertEquals("deepseek", missing.provider)
+    assertEquals("ds-v4", missing.model)
+    assertEquals("引用名必须回传，供用户对照", "deepseek", missing.credentialRef)
+    assertEquals("no-credential", missing.reason)
+  }
+
+  @Test
+  fun typoInCredentialRefIsReportedWithTheWrongName() {
+    // 负例②：patch 里的引用名写错一个字符。
+    File(home, ".dsh/profiles/web/cordis.patch.yml").writeText(refPatch.replace("apiKey: deepseek", "apiKey: deepseak"))
+    File(home, ".dsh/.credentials.yaml").writeText("refs:\n  deepseek: sk-fixture-not-a-real-key\n")
+    val result = RepairModelConfig.loadDetailed(home)
+    assertTrue(result.connections.isEmpty())
+    assertEquals(1, result.unavailable.size)
+    assertEquals("拼错的引用名必须原样回传", "deepseak", result.unavailable.single().credentialRef)
+  }
+
+  @Test
+  fun keyMaterialNeverLeaksIntoTheUnavailableReport() {
+    // 用户铁律：任何日志/落盘/异常文案都不得出现 key 值（含前 4 位）。
+    File(home, ".dsh/profiles/web/cordis.patch.yml").writeText(
+      refPatch.replace("apiKey: deepseek", "apiKey: sk-live-abcdef0123456789abcdef"),
+    )
+    File(home, ".dsh/.credentials.yaml").writeText("refs:\n  deepseek: sk-fixture-not-a-real-key\n")
+    val result = RepairModelConfig.loadDetailed(home)
+    val rendered = result.unavailable.joinToString { it.toString() } +
+      result.sources.joinToString { it.toString() }
+    for (leak in listOf("sk-live", "abcdef0123456789", "sk-fixture", "sk-")) {
+      assertTrue("凭据/引用名不得出现在不可用报告里（泄漏片段：" + leak + "，实际：" + rendered + "）",
+        !rendered.contains(leak))
+    }
+    // 形似密钥的值不当引用名，于是这条路由连「引用名」都不报（宁缺勿泄）。
+    assertEquals(null, result.unavailable.singleOrNull()?.credentialRef)
+  }
 }
