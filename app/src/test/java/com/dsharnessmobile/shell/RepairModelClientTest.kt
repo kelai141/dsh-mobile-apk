@@ -92,12 +92,19 @@ class RepairModelClientTest {
 
   @Test
   fun plainHttpAndLocalEndpointsAreAccepted() {
-    assertEquals("https://api.deepseek.com/anthropic", base("https://api.deepseek.com/anthropic"))
-    assertEquals("http://192.168.1.20:8000/v1", base("http://192.168.1.20:8000/v1"))
-    assertEquals("http://my-nas.local:1234/v1", base("http://my-nas.local:1234/v1"))
-    assertEquals("http://127.0.0.1:4145", base("http://127.0.0.1:4145"))
-    assertEquals("http://[::1]:8000/v1", base("http://[::1]:8000/v1"))
-    assertEquals("http://10.0.0.5:8000/v1", base("http://10.0.0.5:8000/v1/"))
+    // 用户 2026-11-01 明确列出的 6 条接受例（自部署/局域网模型）。
+    //
+    // 全部走 admit()（= endpointFor 真实准入 + 拼路径），而不是只测 normalizeModelBase：
+    // 只测规范化函数时，把准入改回旧白名单这条负控**不会红**（测试绕过了被改的那一层）。
+    assertEquals("https://api.x.com/chat/completions", admit("https://api.x.com"))
+    assertEquals("http://192.168.1.10:8000/v1/chat/completions", admit("http://192.168.1.10:8000/v1"))
+    assertEquals("http://10.0.0.5/chat/completions", admit("http://10.0.0.5"))
+    assertEquals("http://[::1]:1234/chat/completions", admit("http://[::1]:1234"))
+    assertEquals("http://localhost:8080/chat/completions", admit("http://localhost:8080"))
+    assertEquals("http://myserver.lan:3000/v1/chat/completions", admit("http://myserver.lan:3000/v1"))
+    // 172.16-31 段同样放行（自部署常见网段），规范化结果单独钉一遍。
+    assertEquals("http://172.20.3.4:9000/v1/chat/completions", admit("http://172.20.3.4:9000/v1"))
+    assertEquals("http://192.168.1.10:8000/v1", base("http://192.168.1.10:8000/v1"))
   }
 
   @Test
@@ -111,14 +118,52 @@ class RepairModelClientTest {
 
   @Test
   fun nonHttpSchemesAndCredentialBearingUrlsAreRejected() {
-    assertNull("file:// 不是模型端点", base("file:///etc/passwd"))
-    assertNull("javascript: 不是模型端点", base("javascript:alert(1)"))
-    assertNull("data: 不是模型端点", base("data:text/plain,x"))
-    assertNull("空 host 不接受", base("http:///v1"))
+    // 用户 2026-11-01 明确列出的 4 条拒绝例（同样走真实准入路径）。
+    assertNull("空 host 不接受", admit("http://"))
+    assertNull("空 host（带斜杠）不接受", admit("http:///v1"))
+    assertNull("ftp:// 不是模型端点", admit("ftp://host/v1"))
+    assertNull("file:/// 不是模型端点", admit("file:///x"))
+    assertNull("http://user:pw@h/v1 必须拒绝（userinfo 会进对端日志与重定向链）", admit("http://user:pw@h/v1"))
+    // 规范化函数层面的同一批拒绝（两道都要守住）。
+    assertNull("空 host 不接受（规范化层）", base("http://"))
+    assertNull("ftp:// 不接受（规范化层）", base("ftp://host/v1"))
+    // 放宽的边界：仍然是「只放行 http(s)」，content:// 与 javascript: 不在其中。
+    assertNull("content:// 不放行", base("content://media/external/images/1"))
+    assertNull("javascript: 不放行", base("javascript:alert(1)"))
+    assertNull("data: 不放行", base("data:text/plain,x"))
     assertNull("空串不接受", base(""))
-    // user:pass@ 会把凭据写进对端日志与重定向链。
-    assertNull("URL 内嵌账号密码必须拒绝", base("http://user:pass@host:8000/v1"))
     assertNull("https 内嵌账号密码同样拒绝", base("https://user:pass@api.example/v1"))
+  }
+
+  @Test
+  fun queryStringSurvivesPathAppendInsteadOfSwallowingIt() {
+    // 自部署网关常见 http://host:8000/v1?token=…：路径必须插在查询串之前。
+    assertEquals(
+      "http://host:8000/v1/chat/completions?token=abc",
+      RepairModelClient().appendEndpointPath("http://host:8000/v1?token=abc", "/chat/completions"),
+    )
+    assertEquals(
+      "http://host:8000/v1/messages?token=abc",
+      RepairModelClient().appendEndpointPath("http://host:8000/v1?token=abc", "/messages"),
+    )
+    assertEquals(
+      "http://host:8000/v1/chat/completions",
+      RepairModelClient().appendEndpointPath("http://host:8000/v1", "/chat/completions"),
+    )
+  }
+
+  @Test
+  fun urlQueryStringsNeverReachFailureText() {
+    // 放宽明文后端点可能带 token；异常消息会把整条 URL 带出来，进聊天记录与诊断包。
+    val redacted = RepairModelClient().redactUrlQuery(
+      "模型连接失败：failed to connect to http://192.168.1.10:8000/v1?token=sk-live-abcdef (port 8000)",
+    )
+    assertFalse("查询串内容不得出现", redacted.contains("sk-live-abcdef"))
+    assertTrue("路径仍要保留，否则用户没法定位端点", redacted.contains("http://192.168.1.10:8000/v1"))
+    assertTrue("必须显式标出被抹掉", redacted.contains("<redacted>"))
+    // 无查询串的文本原样保留（不误伤普通路径）。
+    val plain = "模型连接失败：Connection refused"
+    assertEquals(plain, RepairModelClient().redactUrlQuery(plain))
   }
 
   @Test
