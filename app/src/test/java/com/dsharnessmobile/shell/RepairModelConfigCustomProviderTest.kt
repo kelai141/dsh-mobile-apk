@@ -4,6 +4,7 @@ import java.io.File
 import java.nio.file.Files
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -235,9 +236,22 @@ class RepairModelConfigCustomProviderTest {
     val result = RepairModelConfig.loadDetailed(home)
     assertEquals("只取 .yaml 一份，不得双用", 1, result.connections.size)
     assertEquals("other-model", result.connections.single().model)
+    val conflict = result.sources.singleOrNull { it.status == "conflict-skipped" }
+    assertNotNull("冲突必须留痕（实际：" + result.sources.joinToString { it.path + "=" + it.status } + "）", conflict)
+    // 用户 2026-11-01 要求：source 里要写明「同时存在 .yml，已忽略」，不能只给一个状态码。
+    assertTrue("被忽略的必须是 .yml", conflict!!.path.endsWith("cordis.patch.yml"))
     assertTrue(
-      "冲突必须留痕（实际：" + result.sources.joinToString { it.path + "=" + it.status } + "）",
-      result.sources.any { it.status == "conflict-skipped" },
+      "source 说明里必须点出同目录还有 .yaml（实际：" + conflict.detail + "）",
+      conflict.detail.orEmpty().contains("cordis.patch.yaml"),
+    )
+    // 候选侧同样要有据可查：实际采用的是 .yaml。
+    assertTrue(
+      "采用来源必须可查（实际：" + result.appliedPatches + "）",
+      result.appliedPatches.any { it.endsWith("cordis.patch.yaml") },
+    )
+    assertTrue(
+      "被忽略的 .yml 不得出现在采用清单里",
+      result.appliedPatches.none { it.endsWith("cordis.patch.yml") },
     )
   }
 

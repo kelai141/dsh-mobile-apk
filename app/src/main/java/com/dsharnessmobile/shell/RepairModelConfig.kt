@@ -44,7 +44,19 @@ internal data class RepairReasoningEffort(
   val wireValue: String? = null,
 )
 
-internal data class RepairModelSource(val path: String, val status: String)
+internal data class RepairModelSource(
+  val path: String,
+  val status: String,
+  /**
+   * 人类可读的补充说明（可选）。
+   *
+   * 为什么需要它：`conflict-skipped` 只说「有一份被忽略」，但用户拿着诊断包看不出**被忽略的是哪一份、
+   * 为什么忽略它**——而「同目录同时存在 .yml 与 .yaml」恰恰是最容易被误改回去的现场。
+   *
+   * 纪律：这里只放文件名与取舍理由，**不得**放配置内容、密钥、URL 查询串。
+   */
+  val detail: String? = null,
+)
 
 /**
  * 配置里确实存在、但**用不了**的一条路由。
@@ -84,6 +96,14 @@ internal data class RepairModelLoad(
    * 与「根本没配」在界面上又变成同一句话。
    */
   val unavailable: List<RepairModelUnavailable> = emptyList(),
+  /**
+   * 本轮实际采用的 patch 文档（按叠层顺序）。
+   *
+   * 单独列出来的理由：同目录 `.yaml` 与 `.yml` 同时存在时只取一份，用户需要在「候选从哪来」这件事上
+   * 有据可查；`sources` 里那条 `conflict-skipped` 说明**忽略**了谁，这里说明**采用**了谁。
+   * 只记相对路径，不含配置内容。
+   */
+  val appliedPatches: List<String> = emptyList(),
 )
 
 /** Reads bundle → profile → HOME layers without starting Node or asking a live engine. */
@@ -102,7 +122,10 @@ internal object RepairModelConfig {
       val json = org.json.JSONObject().put("candidates", result.connections.size)
         .put("defaultAvailable", result.defaultAvailable)
         .put("sources", org.json.JSONArray(result.sources.map {
-          org.json.JSONObject().put("path", it.path).put("status", it.status)
+          // detail 只带文件名与取舍理由（见 RepairModelSource 的纪律说明），不含配置内容与密钥。
+          org.json.JSONObject().put("path", it.path).put("status", it.status).apply {
+            it.detail?.let { detail -> put("detail", detail) }
+          }
         }))
       SnapshotTransaction.writeTextAtomic(File(context.filesDir, "repair-model-source.json"),
         json.toString(), "修复模型来源") { org.json.JSONObject(it) }
@@ -229,7 +252,13 @@ internal object RepairModelConfig {
       val ymlExists = yml.isFile
       return when {
         yamlExists && ymlExists -> {
-          sink += RepairModelSource(rel(yml), "conflict-skipped")
+          // 两份都在：取 .yaml（用户手写/自建现场的常见扩展名），并把「忽略的是 .yml」写进来源。
+          // 只记一个状态码不够——诊断包里看不出被忽略的是哪一份，用户也就没法判断该删哪个。
+          sink += RepairModelSource(
+            rel(yml),
+            "conflict-skipped",
+            detail = "ignored because " + yaml.name + " also exists in the same directory",
+          )
           listOf(yaml)
         }
         yamlExists -> listOf(yaml)
@@ -242,13 +271,22 @@ internal object RepairModelConfig {
       }
     }
 
-    fun buildLayer(sink: MutableList<RepairModelSource>): Layer {
+    fun buildLayer(sink: MutableList<RepairModelSource>, applied: MutableList<String>): Layer {
       val layer = Layer()
       (readInto(sink, File(dsh, "settings.yaml")) as? RepairYamlValue.Mapping)?.let(layer::legacy)
       val profileDir = File(dsh, "profiles/web")
-      for (document in selectedBundlePatches(home, profileDir)) layer.apply(readInto(sink, document))
-      for (document in firstPatch(sink, profileDir)) layer.apply(readInto(sink, document))
-      for (document in firstPatch(sink, dsh)) layer.apply(readInto(sink, document))
+      for (document in selectedBundlePatches(home, profileDir)) {
+        applied += rel(document)
+        layer.apply(readInto(sink, document))
+      }
+      for (document in firstPatch(sink, profileDir)) {
+        applied += rel(document)
+        layer.apply(readInto(sink, document))
+      }
+      for (document in firstPatch(sink, dsh)) {
+        applied += rel(document)
+        layer.apply(readInto(sink, document))
+      }
       return layer
     }
     val allCredentials = credentials + environment.filterValues { it.isNotBlank() }.filterKeys { it !in credentials }
@@ -283,7 +321,8 @@ internal object RepairModelConfig {
     }
     // 只有一层：settings.yaml 打底，patch 覆盖。回落机制随之取消——它存在的唯一理由是
     // 「旧文件要不要读」取决于别的层有没有候选，而这正是误判本身（见 buildLayer 注释）。
-    val resolved = resolve(buildLayer(sources))
+    val appliedPatches = ArrayList<String>()
+    val resolved = resolve(buildLayer(sources, appliedPatches))
     // 有配置却一条候选都没产出来：把原因写进来源表，UI 才有话可说。
     if (resolved.connections.isEmpty()) resolved.blocked?.let { reason ->
       sources += RepairModelSource(rel(File(dsh, "settings.yaml")), reason)
@@ -301,7 +340,8 @@ internal object RepairModelConfig {
     }
     // 缺凭据的路由如实上报（引用名不带 key 值），但绝不混进可用候选。
     val unavailable = resolved.unavailable.distinctBy { it.provider + "|" + it.model }
-    return RepairModelLoad(ordered, sources, defaultAvailable, unavailable = unavailable)
+    return RepairModelLoad(ordered, sources, defaultAvailable, unavailable = unavailable,
+      appliedPatches = appliedPatches)
   }
 
   /**
