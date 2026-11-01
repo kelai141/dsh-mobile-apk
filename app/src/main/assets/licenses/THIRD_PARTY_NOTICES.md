@@ -63,7 +63,7 @@
 | python-pip | 26.2.2-2 | MIT | [termux-packages/python-pip](https://github.com/termux/termux-packages/tree/master/packages/python-pip) |
 | readline | 8.3.6 | GPL-3.0+ | [termux-packages/readline](https://github.com/termux/termux-packages/tree/master/packages/readline) |
 | ripgrep | 15.2.0 | MIT | [termux-packages/ripgrep](https://github.com/termux/termux-packages/tree/master/packages/ripgrep) |
-| ruby | 4.0.7 | GPL-2.0+ / Ruby-1.8 | [termux-packages/ruby](https://github.com/termux/termux-packages/tree/master/packages/ruby) |
+| ruby | 4.0.9 | GPL-2.0+ / Ruby-1.8 | [termux-packages/ruby](https://github.com/termux/termux-packages/tree/master/packages/ruby) |
 | sed | 4.10 | GPL-3.0+ | [termux-packages/sed](https://github.com/termux/termux-packages/tree/master/packages/sed) |
 | socat | 1.8.1.3 | GPL-2.0+ | [termux-packages/socat](https://github.com/termux/termux-packages/tree/master/packages/socat) |
 | tar | 1.35-3 | GPL-3.0+ | [termux-packages/tar](https://github.com/termux/termux-packages/tree/master/packages/tar) |
@@ -75,7 +75,7 @@
 | termux-keyring | 3.14 | MIT | [termux-packages/termux-keyring](https://github.com/termux/termux-packages/tree/master/packages/termux-keyring) |
 | termux-tools | 1.46.0+really1.45.0-1 | GPL-3.0+ | [termux-packages/termux-tools](https://github.com/termux/termux-packages/tree/master/packages/termux-tools) |
 | util-linux | 2.42.4 | GPL-2.0+ | [termux-packages/util-linux](https://github.com/termux/termux-packages/tree/master/packages/util-linux) |
-| vim | 9.2.1200 | Vim (GPL-compatible, charityware) | [termux-packages/vim](https://github.com/termux/termux-packages/tree/master/packages/vim) |
+| vim | 9.2.1250 | Vim (GPL-compatible, charityware) | [termux-packages/vim](https://github.com/termux/termux-packages/tree/master/packages/vim) |
 | xz-utils | 5.8.4 | PD + LGPL-2.1+ + GPL-2.0+ | [termux-packages/xz-utils](https://github.com/termux/termux-packages/tree/master/packages/xz-utils) |
 | zip | 3.0-7 | Info-ZIP License | [termux-packages/zip](https://github.com/termux/termux-packages/tree/master/packages/zip) |
 | zlib | 1.3.2 | Zlib | [termux-packages/zlib](https://github.com/termux/termux-packages/tree/master/packages/zlib) |
