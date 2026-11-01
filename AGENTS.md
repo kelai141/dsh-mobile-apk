@@ -13,7 +13,7 @@ DeepSeek Harness 的**安卓壳应用**（包名 `com.dsharnessmobile.shell`）�
 
 **关键约束：AI 可见的能力全部来自插件**，壳侧不直接注册工具。
 
-**运行时**：内嵌 Termux 快照（`assets/snapshot.tar.xz` → `files/usr` + `files/home`）；构建目标 `@deepseek-ai/dsh` 为 **0.2.1-rc.3**（以快照内 `package.json` 与 `scripts/snapshot-config/engine-overlay.json` 为准），监听 `127.0.0.1:3080`；WebView 加载引擎 Web UI。
+**运行时**：内嵌 Termux 快照（`assets/snapshot.tar.xz` → `files/usr` + `files/home`）；构建目标 `@deepseek-ai/dsh` 为 **0.2.1-rc.3**（以快照内 `package.json` 与 `scripts/snapshot-config/engine-overlay.json` 为准），监听回环**动态端点**（默认 `127.0.0.1:4145`，被占用时 Node 侧原子回退，实际端口以 `files/.engine-endpoint.json` 为准）；WebView 加载引擎 Web UI。
 
 **构建链**：minSdk 26 / targetSdk 34 / compileSdk 36；Kotlin 2.0.21；AGP 8.8.2；Java 17。
 
