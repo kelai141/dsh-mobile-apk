@@ -1,9 +1,4 @@
 #!/usr/bin/env node
-
-
-
-
-
 // check-code-map.mjs — 执行地图（EXECUTION-MAP.md）覆盖与锚点门禁。
 //
 // 目的：把「代码执行地图」变成**不会静默过期**的资产。地图文档是人写的说明面，
@@ -876,7 +871,7 @@ export function parseDoc(text) {
   for (const b of block('COVERAGE')) {
     for (const line of b.body.split('\n')) {
       const t = line.trim()
-      if (t === '') continue
+      if (t === '' || t.startsWith('#')) continue
       if (t.startsWith('glob:')) coverage.push({ glob: norm(t.slice(5).trim()) })
       else coverage.push({ path: norm(t) })
     }
