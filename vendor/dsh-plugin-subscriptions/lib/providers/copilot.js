@@ -860,16 +860,17 @@ export class CopilotAdapter extends LlmAdapter {
             if (response.body === null) {
                 throw new LlmError('copilot API returned no response body', EMPTY_RESPONSE_CODE);
             }
-            const pulse = () => { watchdog.pulse(); };
+            const pulse = () => { watchdog.progress(); };
+            const frame = () => { watchdog.event(); };
             if (wire === 'responses') {
                 // The normalizer doubles as the capture point for completed reasoning.
                 const normalizer = new CopilotResponsesItemNormalizer((callIds, items) => {
                     this.captureReasoning(scope, callIds, items);
                 });
-                yield* streamResponses(response.body, pulse, event => normalizer.push(event));
+                yield* streamResponses(response.body, pulse, event => normalizer.push(event), frame);
             }
             else {
-                yield* streamChatCompletions(response.body, pulse);
+                yield* streamChatCompletions(response.body, pulse, frame);
             }
         }
         catch (error) {

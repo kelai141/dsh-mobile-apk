@@ -355,11 +355,14 @@ export class ChatCompletionsStreamTranslator {
  * Consume a chat completions SSE byte stream and yield harness StreamChunks.
  * @param stream - raw response body.
  * @param onActivity - transport-activity callback for the idle watchdog.
+ * @param onEvent - called per completed SSE frame; feeds the watchdog's
+ *   framing-stall accounting (optional).
  * @returns the chunk stream; throws when the stream ends before any finish chunk.
  */
-export async function* streamChatCompletions(stream, onActivity) {
+export async function* streamChatCompletions(stream, onActivity, onEvent) {
     const translator = new ChatCompletionsStreamTranslator();
     for await (const sseEvent of parseSse(stream, onActivity)) {
+        onEvent?.();
         if (sseEvent.data === '[DONE]') {
             yield* translator.flush();
             return;

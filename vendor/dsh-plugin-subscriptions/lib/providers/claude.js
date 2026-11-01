@@ -652,7 +652,7 @@ export class ClaudeAdapter extends LlmAdapter {
             if (response.body === null) {
                 throw new LlmError('claude API returned no response body', EMPTY_RESPONSE_CODE);
             }
-            yield* streamAnthropic(response.body, () => { watchdog.pulse(); });
+            yield* streamAnthropic(response.body, () => { watchdog.progress(); }, () => { watchdog.event(); });
         }
         catch (error) {
             throw mapFetchFailure('claude API', error, watchdog, options.signal);

@@ -514,11 +514,14 @@ export class AnthropicStreamTranslator {
  * Consume an Anthropic SSE byte stream and yield harness StreamChunks.
  * @param stream - raw response body.
  * @param onActivity - transport-activity callback for the idle watchdog.
+ * @param onEvent - called per completed SSE frame; feeds the watchdog's
+ *   framing-stall accounting (optional).
  * @returns the chunk stream; throws when the stream ends before `message_stop`.
  */
-export async function* streamAnthropic(stream, onActivity) {
+export async function* streamAnthropic(stream, onActivity, onEvent) {
     const translator = new AnthropicStreamTranslator();
     for await (const sseEvent of parseSse(stream, onActivity)) {
+        onEvent?.();
         let event;
         try {
             event = JSON.parse(sseEvent.data);

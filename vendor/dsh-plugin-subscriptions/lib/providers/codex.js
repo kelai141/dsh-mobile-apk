@@ -892,7 +892,7 @@ export class CodexAdapter extends LlmAdapter {
             if (response.body === null) {
                 throw new LlmError('codex API returned no response body', EMPTY_RESPONSE_CODE);
             }
-            yield* streamResponses(response.body, () => { watchdog.pulse(); });
+            yield* streamResponses(response.body, () => { watchdog.progress(); }, undefined, () => { watchdog.event(); });
         }
         catch (error) {
             throw mapFetchFailure('codex API', error, watchdog, options.signal);

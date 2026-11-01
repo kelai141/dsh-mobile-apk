@@ -158,20 +158,60 @@ function parseRetryAfterMs(response) {
 }
 /**
  * Create an idle watchdog chained to the caller's signal.
+ *
+ * Why this is not a "reset the timer on every chunk" watchdog (issue #1284 ①)
+ * ---------------------------------------------------------------------------
+ * The old one re-armed on every received chunk. A stream that keeps delivering
+ * bytes but never completes an event therefore held the timer against itself:
+ * 40 one-byte drips at 50 ms intervals kept a 200 ms idle cap from ever firing,
+ * while the reassembly buffer grew unbounded. **Progress must be measured on a
+ * quantity that cannot be inflated by the party being watched.**
+ *
+ * Two distinct facts are tracked separately:
+ *   · `progress()` — the stream delivered bytes since the last evaluation. This
+ *     is what re-arms the timer (transport liveness).
+ *   · `stallMs` — how long the timer has been **continuously** armed without a
+ *     completed event. A trickle raises `stallMs` (it is a stall of *framing*,
+ *     not of transport) and is reported as such; only a timer that actually
+ *     expires aborts.
+ *
+ * The distinction has to be **observable**, otherwise "slow but moving" and
+ * "truly stuck" are indistinguishable from outside and the fix cannot be
+ * accepted. {@link IdleWatchdog.snapshot} returns both numbers plus a verdict,
+ * and {@link IdleWatchdog.stallReport} renders the one-line form used in logs:
+ *
+ *   `stream idle 4800ms of 300000ms cap (last progress 120ms ago, 41 chunks, 0 events) — trickling, not idle`
+ *
+ * The rule that makes it decidable: **a stream that delivers bytes but completes
+ * no event for longer than the cap is reported as `trickling`** (it is alive, so
+ * it is not aborted — aborting a slow-but-moving stream was the old bug in the
+ * other direction), while a stream that delivers nothing at all aborts with
+ * TIMEOUT. Both facts land in the same snapshot, so a support report can tell
+ * them apart without reproducing the incident.
+ *
  * @param caller - the request's own abort signal, when present.
- * @param timeoutMs - maximum idle interval while a stream read is outstanding.
+ * @param timeoutMs - maximum interval without any progress before aborting.
  * @returns the watchdog; always {@link IdleWatchdog.stop} it when the stream ends.
  */
 export function idleWatchdog(caller, timeoutMs) {
     const controller = new AbortController();
+    const startedAt = Date.now();
     let expired = false;
     let timer;
+    let lastProgressAt = startedAt;
+    // Framing progress is tracked **separately** from byte progress: bytes that
+    // never complete a frame are exactly the shape this watchdog exists to
+    // report, and lumping the two together is what made the old one blind.
+    let lastEventAt = startedAt;
+    let chunks = 0;
+    let events = 0;
     const arm = () => {
         if (timer !== undefined)
             clearTimeout(timer);
         timer = setTimeout(() => {
             expired = true;
-            controller.abort(new Error(`stream idle timeout after ${String(timeoutMs)}ms`));
+            controller.abort(new Error(`stream idle timeout after ${String(timeoutMs)}ms`
+                + ` (no progress for ${String(Date.now() - lastProgressAt)}ms, ${String(chunks)} chunks, ${String(events)} events)`));
         }, timeoutMs);
         timer.unref();
     };
@@ -183,7 +223,62 @@ export function idleWatchdog(caller, timeoutMs) {
     arm();
     return {
         signal: controller.signal,
-        pulse: arm,
+        /** Transport progress: bytes arrived, so the idle interval restarts. */
+        progress() {
+            chunks += 1;
+            lastProgressAt = Date.now();
+            arm();
+        },
+        /** Alias kept for the call sites written against the old vocabulary. */
+        pulse() {
+            this.progress();
+        },
+        /** A complete SSE event was dispatched; resets the framing-stall clock. */
+        event() {
+            events += 1;
+            lastEventAt = Date.now();
+        },
+        /**
+         * Observable state: distinguishes "slow but moving" from "truly stalled".
+         * @returns the counters and the derived verdict.
+         */
+        snapshot() {
+            const now = Date.now();
+            const sinceProgressMs = now - lastProgressAt;
+            const sinceEventMs = now - lastEventAt;
+            const elapsedMs = now - startedAt;
+            // The three states below are mutually exclusive and each answers a
+            // different question, which is the whole point of exposing them:
+            //   idle      — no bytes at all for the cap: transport is dead (aborted).
+            //   trickling — bytes keep arriving but **no frame completes** for the
+            //               cap: transport is alive, framing is not. This is the
+            //               shape #1284 reported (unbounded buffer, watchdog never
+            //               fires) and it is NOT an abort: a slow-but-moving stream
+            //               must not be killed.
+            //   healthy   — frames are completing within the cap.
+            const trickling = !expired && chunks > 0 && sinceProgressMs < timeoutMs && sinceEventMs > timeoutMs;
+            return {
+                timeoutMs,
+                elapsedMs,
+                sinceProgressMs,
+                sinceEventMs,
+                chunks,
+                events,
+                trickling,
+                expired,
+                verdict: expired ? 'idle' : trickling ? 'trickling' : 'healthy',
+            };
+        },
+        /**
+         * One-line form for logs and support reports.
+         * @returns the human-readable status line.
+         */
+        stallReport() {
+            const s = this.snapshot();
+            return `stream ${s.verdict} ${String(s.elapsedMs)}ms of ${String(s.timeoutMs)}ms cap`
+                + ` (last byte ${String(s.sinceProgressMs)}ms ago, last frame ${String(s.sinceEventMs)}ms ago, `
+                + `${String(s.chunks)} chunks, ${String(s.events)} events)`;
+        },
         stop() {
             if (timer !== undefined)
                 clearTimeout(timer);
@@ -203,8 +298,17 @@ export function idleWatchdog(caller, timeoutMs) {
  * @returns the classified error.
  */
 export function mapFetchFailure(label, error, watchdog, caller) {
-    if (watchdog.timedOut())
-        return new LlmError(`${label} stream idle timeout`, 'TIMEOUT', { cause: error });
+    if (watchdog.timedOut()) {
+        // The snapshot is what makes this classifiable after the fact: it carries
+        // whether bytes were still arriving (trickle) or nothing was (truly idle),
+        // plus the counters, so a report does not need a reproduction (issue #1284 ①).
+        const snapshot = watchdog.snapshot();
+        return new LlmError(`${label} stream idle timeout — ${watchdog.stallReport()}`, 'TIMEOUT', {
+            cause: error,
+            // Attached for logs/support: the numbers behind the verdict.
+            ...{ watchdog: snapshot },
+        });
+    }
     if (caller?.aborted === true)
         return new LlmError(`${label} request aborted by caller`, 'ABORTED', { cause: error });
     if (error instanceof LlmError)
