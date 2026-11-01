@@ -812,7 +812,7 @@ internal object SnapshotTransaction {
       // exports 等字段，live 树因此变成「旧清单 + 新文件」的混合体，插件跨包 import
       // "./route-auth" 直接 ERR_PACKAGE_PATH_NOT_EXPORTED（引擎 exit=1）。
       val userFacingFiles = profileUserFacingFiles(stagedProfiles)
-      mergeTree(stagedProfiles, liveProfiles, notes, userFacingFiles, preserveCopy)
+      mergeTree(stagedProfiles, liveProfiles, notes, userFacingFiles, preserveCopy, links)
       reconcileRemovedProfilePlugins(liveProfiles, notes)
       val suffix = if (notes.isEmpty()) "" else "；工厂语义纠正 " + notes.size + " 处"
       onEntry("home/.dsh/profiles (merged" + suffix + ")")
@@ -1125,16 +1125,48 @@ internal object SnapshotTransaction {
     notes: MutableList<String>,
     userFacingFiles: Set<String>,
     preserveCopy: (File, File) -> Unit = { from, to -> Files.copy(from.toPath(), to.toPath(), REPLACE_EXISTING) },
+    links: LinkPrimitives = PRODUCTION_LINKS,
   ) {
     val attrs = Files.readAttributes(
       staged.toPath(), BasicFileAttributes::class.java, NOFOLLOW_LINKS,
     )
     when {
-      attrs.isSymbolicLink -> return
+      // 【0.14.10 P0：共享农场链接永不落地】旧实现是裸 `return`——staged 里的符号链接
+      // **整个跳过**，既不建新链接、也不覆盖既有条目。后果按「live 里有没有这一项」分两种：
+      //   · live 已有 → 悄悄保留旧链接，看起来没事（掩盖了缺陷）；
+      //   · live 没有 → 这一项**永远不会被创建**，而 profiles 树的其余部分（profiles/web）
+      //     每次刷新都在合并，于是农场变成「部分新、部分缺」的混合体。
+      // 设备实证（v0.14.9 双 ABI 产物，127.0.0.1:16448）：
+      //   归档 farm 顶层 165 项 vs 设备 187 项，差集恰为 1 项 = `undici`；
+      //   同批 4 个相对目标链接里，其余 3 个设备 mtime 仍是上一代解压时间（从未被本路径写过），
+      //   只有 `undici` 缺失 ⇒ 不是「被删」，是**从未创建**。
+      //   而 `dsh-plugin-subscriptions/lib/index.js` 里 `import { ProxyAgent } from "undici"`
+      //   ⇒ 缺它这个插件在解析期就起不来。
+      //
+      // 修法（**补齐，不覆盖**）：只补 live 侧不存在的链接；live 已有条目（含用户后加的
+      // 同农场包、以及上一代遗留的链接）一律不动——本函数其余分支的既有语义是
+      // 「staged 权威 + live-only 不动」，此处刻意保持一致，不做整目录替换（那会抹掉用户数据）。
+      // 建链失败**向上抛**（与 [copyRecursivelyStrict] 同口径）：静默跳过正是本缺陷的成因。
+      links.isLink(staged) -> {
+        // live 已有该项（真实条目或链接本体）⇒ 不动。注意判据必须**同时**问
+        // [SnapshotFs.exists] 与 [LinkPrimitives.isLink]：
+        //   · 对**悬空链接**，File.exists() 会跟随链接返回 false（真机实测 v0.10.7 重解压滑过）；
+        //   · 而 isLink 走 NOFOLLOW 语义，能看见链接本体。
+        // 只问前者 ⇒ 悬空链接会被当成「不存在」而被覆盖；只问后者 ⇒ 普通目录/文件被判丢。
+        if (SnapshotFs.exists(live) || links.isLink(live)) return@mergeTree
+        val linkTarget = links.linkTargetOf(staged)
+        live.parentFile?.let { SnapshotFs.createDirectories(it) }
+        links.createLink(live, linkTarget)
+        notes.add("农场链接补齐 " + staged.name)
+      }
       attrs.isDirectory -> {
         SnapshotFs.createDirectories(live)
         for (child in staged.listFiles() ?: emptyArray()) {
-          mergeTree(child, File(live, child.name), notes, userFacingFiles, preserveCopy)
+          // 【接缝必须全程透传】递归漏传 `links` 会让下游退回默认的 PRODUCTION_LINKS：
+          // 判据看着还在（代码里写着 links.isLink），实际深一层的条目全问的是生产实现，
+          // 测试替身永远收不到问题 ⇒ 用例「通过」而缺陷照旧。本轮实测就是这么暴露的
+          // （farm 顶层目录被问到 7 次，undici 那层一次都没问）。
+          mergeTree(child, File(live, child.name), notes, userFacingFiles, preserveCopy, links)
         }
       }
       attrs.isRegularFile -> when {
