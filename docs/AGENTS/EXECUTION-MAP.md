@@ -471,7 +471,7 @@ sequenceDiagram
 | K01 | 软件源切换 | 管理中心「软件源」行经 SourceSettings 双写 sources.list 与 chosen_mirrors，再跑 apt-get update 验证；失败按备份回滚（退出码不足以判成败） | app/src/main/java/com/dsharnessmobile/shell/SourceSettings.kt:88 |
 | K01 | 系统外部角色 | BootReceiver 接 ACTION_BOOT_COMPLETED 决定是否自启前台服务，分享面板经 VIEW/SEND 进本 Activity | app/src/main/java/com/dsharnessmobile/shell/BootReceiver.kt:24 |
 | K02 | K01 | 启动全程用引导页阶段承载文案，成功才切 WebUI | EngineStartFlow.kt:445-479、MainActivity.kt:145-155 |
-| K02 | K03 | 刷新期禁启动、事务恢复、update-pending 健康 3 拍才删 usr-old 三处握手；刷新窗口内的启动请求**不得静默丢弃**（0.14.8 P1）：`start()`/`restart()` 拿不到世代所有权时按 destroyed/running 分开处置，running 走 boot-fail 留痕 + 有界等待后自动续跑；安全模式重启在停旧引擎前先判事务 journal | `EngineManager.kt:1466#expect=if%20(EngineManager.snapshotRefreshing.get())%20%7B`、`EngineManager.kt:1390-1415#expect=LogCollector.writeBootDiag(context%2C%20%22perf-asset-patch%22%2C%20perfLine)`；`EngineStartFlow.kt:754#expect=%2F%2F%20%E7%9B%B8%E4%BD%8D%E5%B7%B2%E7%94%B1%E6%9C%AC%E5%87%BD%E6%95%B0%E5%85%A5%E5%8F%A3%E5%88%87%E5%88%B0%20Starting%EF%BC%88%E5%90%AF%E5%8A%A8%E5%8D%B3%E6%9C%89%E5%8F%8D%E9%A6%88%EF%BC%89`、`EngineStartFlow.kt:1756#expect=internal%20fun%20startupRecoverThenProbe(recover%3A%20()%20-%3E%20Unit%2C%20probeRunning%3A%20()%20-%3E%20Boolean)%3A%20Boolean%20%7B` |
+| K02 | K03 | 刷新期禁启动、事务恢复、update-pending 健康 3 拍才删 usr-old 三处握手；刷新窗口内的启动请求**不得静默丢弃**（0.14.8 P1）：`start()`/`restart()` 拿不到世代所有权时按 destroyed/running 分开处置，running 走 boot-fail 留痕 + 有界等待后自动续跑；安全模式重启在停旧引擎前先判事务 journal | `EngineManager.kt:1466#expect=if%20(EngineManager.snapshotRefreshing.get())%20%7B`、`EngineManager.kt:1390-1415#expect=LogCollector.writeBootDiag(context%2C%20%22perf-asset-patch%22%2C%20perfLine)`；`EngineStartFlow.kt:754#expect=%2F%2F%20%E7%9B%B8%E4%BD%8D%E5%B7%B2%E7%94%B1%E6%9C%AC%E5%87%BD%E6%95%B0%E5%85%A5%E5%8F%A3%E5%88%87%E5%88%B0%20Starting%EF%BC%88%E5%90%AF%E5%8A%A8%E5%8D%B3%E6%9C%89%E5%8F%8D%E9%A6%88%EF%BC%89`、`EngineStartFlow.kt:1852#expect=internal%20fun%20startupRecoverThenProbe(recover%3A%20()%20-%3E%20Unit%2C%20probeRunning%3A%20()%20-%3E%20Boolean)%3A%20Boolean%20%7B` |
 | K02 | UpdateManager | .update-pending/.update-pending-at 与 usr-old 的生产者 | UpdateManager.kt:84-85 |
 | K02 | UndoGate | 看门狗 UNDO、启动超时与客户端插件树失败共用闸门：可点名时外科拔除非 Hard 插件；整份回撤只用当前 snapshot fingerprint 下的壳侧 HEALTHY known-good ID；被拒后复位锁存以继续引擎重试 | EngineService.kt:207-293、EngineStartFlow.kt:345-390、UndoGate.kt:278-434 |
 | K02 | 通知链 NotifyStore/NotifyCenter | 每拍按字节偏移消费 .task-done.ndjson，双读不双发 | WatchdogV2.kt:258-309、NotifyCenter.kt:188 |
@@ -781,9 +781,9 @@ Terminal output delivery (#591): `ConsoleSession` sends stripped PTY text throug
   - **不变量 2c（拒绝必须按真实原因分档，不得笼统报忙）**：`start()`（`:394`）三档 —— 无待装新版回 `no-pending`（`:396`）、
     真有在途动作回 `busy`（`:398`）、其余（failed/up-to-date 等）回 `not-available`（`:399`）。
     旧实现只要 `currentResult` 非空就回 `busy`，这正是上述死循环的用户可见形态。
-    **例外（显式化，勿误以为全线都有兜底）**：快照联调路径 `runUpdate`（`EngineStartFlow.kt:1217#expect=*%20%E7%BB%AD%E8%B7%91%E4%B8%80%E6%AC%A1%EF%BC%8C%E5%8F%88%E6%92%9E%E5%9B%9E%20L700`）**无超时兜底**；
+    **例外（显式化，勿误以为全线都有兜底）**：快照联调路径 `runUpdate`（`EngineStartFlow.kt:1229#expect=*%20%E7%BB%AD%E8%B7%91%E4%B8%80%E6%AC%A1%EF%BC%8C%E5%8F%88%E6%92%9E%E5%9B%9E%20L700`）**无超时兜底**；
     它的 adb 显式 intent 触发入口**已随 #682 移除**（`ACTION_UPDATE` 的处理分支直接删除：导出的 launcher Activity 无法区分「adb 联调」与「任意第三方应用」，两者走的是同一条显式组件 intent，故收口；`runUpdate` 定义保留在 `EngineStartFlow.kt`，但当前无任何外部 intent 入口）；
-    回执守卫在 `EngineStartFlow.kt:1224#expect=override%20fun%20run()%20%7B`，代次作废即静默丢弃回执、不落终态。见 `docs/AGENTS/known-gaps.md`。
+    回执守卫在 `EngineStartFlow.kt:1236#expect=override%20fun%20run()%20%7B`，代次作废即静默丢弃回执、不落终态。见 `docs/AGENTS/known-gaps.md`。
     
     > **补记（#1028）：为什么不能把 `#773` 分支的文档整份合进 main**
     > 本轮恢复这句时试过三条路，都被门禁当场挡下，记录以免后来者重走：

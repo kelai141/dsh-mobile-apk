@@ -19,7 +19,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
   /** Minimum spacing between retries of a failed engine page (see the monitor below). */
   private val ENGINE_PAGE_RELOAD_INTERVAL_MS = 30_000L
 
-  private val flowOwnership = StartupFlowOwnership()
+  private val flowOwnership = StartupFlowOwnership(::flowOwnershipProbeSink) // 探针接线（tag=dsh-owner）
   private val ownershipRetry = StartupOwnershipRetryBudget()
   /** 重启引擎 in-flight 守卫（防连点双杀双启）。 */
   private val engineRestarting = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -1151,6 +1151,18 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     if (!canRunEngineWork()) return
     engineMonitorHandler.removeCallbacks(deferredStartRunnable)
     val marker = SnapshotTransaction.readMarker(activity.filesDir)
+    // 取证探针（只读）：把「谁在占所有权」如实留一行。
+    //
+    // 为什么必须有这一行：设备实测（127.0.0.1:16448）冷启时这句 boot-fail 成对复现，
+    // 但旧日志只有「另一次启动流仍在占用」这种无名氏的措辞——排障者无从判断
+    // 到底是 onCreate 的自动入口、onResume 的探活，还是看门狗的重启在占。
+    // 这里给出 generation + 线程名 + journal 是否在场，三者足以定位入口类型。
+    LogCollector.log(
+      "dsh-owner",
+      "flow.defer reason=" + (if (marker == null) "no-transaction" else "transaction-" + marker.phase.name) +
+        " " + flowOwnership.deferredOwnerSnapshot() +
+        " snapshotMarker=" + (if (marker == null) "absent" else "present"),
+    )
     LogCollector.log("dsh-shell", "engine start deferred: another start flow or a snapshot refresh owns the generation")
     if (marker == null) {
       // 所有权被占、但没有任何快照事务在场（典型是同一实例里上一次启动流的收尾还没跑完）。
@@ -1653,8 +1665,29 @@ internal fun diagnosticsLocationHint(dir: java.io.File?): String =
 internal fun startupOwnershipPending(reason: String): Boolean =
   reason == "root-maintenance-busy" || reason == "repair-result-unknown"
 
-/** Pure generation/owner gate; cancellation targets only caller threads, never shared root workers. */
-internal class StartupFlowOwnership {
+/**
+ * Pure generation/owner gate; cancellation targets only caller threads, never shared root workers.
+ *
+ * ## 取证探针（只加日志，不改行为）
+ *
+ * 2026-11-01 设备实测（`127.0.0.1:16448`）：冷启时 `engine-start-deferred-no-transaction`
+ * 与它的 `-timeout` 成对复现，日志宣称「未拉起引擎」，而 `node` 进程其实早 2 秒就在跑了
+ * （被丢弃的只是**这次**启动请求；真把引擎拉起来的是另一次已在跑的流）。
+ *
+ * 排障者拿不到的关键信息是：**当时到底是谁持有所有权**。旧实现里 `begin()`/`finish()`
+ * 一行日志都没有，于是只能从「候选清单」（start / restart / 共享入口）里猜。
+ *
+ * 这里补三处**只读**留痕（begin / finish / defer），字段只有 generation、
+ * caller 标识（线程名）与「谁抢不到」，**不含任何用户数据**。
+ *
+ * 为什么走注入式 [sink] 而不是直接调 LogCollector：本类是纯门禁，JVM 单测要能直接驱动它
+ * （Android 的 LogCollector 在单测里没有 appContext，静默 no-op —— 那样探针在测试里等于不存在）。
+ * 生产侧由 [flowOwnershipProbeSink] 接到 LogCollector。
+ */
+internal class StartupFlowOwnership(
+  /** 探针出口。默认空实现：单测不接线时不影响任何行为。 */
+  private val sink: (String) -> Unit = {},
+) {
   internal class Token(val generation: Long) {
     private val cancelled = java.util.concurrent.atomic.AtomicBoolean(false)
     private val callers = java.util.concurrent.ConcurrentHashMap.newKeySet<Thread>()
@@ -1676,10 +1709,19 @@ internal class StartupFlowOwnership {
   fun begin(): Token? {
     while (true) {
       val before = state.get()
-      if (before.destroyed || before.running) return null
+      if (before.destroyed || before.running) {
+        // 抢不到：把「谁在占」如实报出来（token?.generation 为 null 表示状态已损坏/被销毁）。
+        probe(
+          "flow.begin denied caller=" + callerLabel() +
+            " ownerGeneration=" + (before.token?.generation?.toString() ?: "none") +
+            " destroyed=" + before.destroyed,
+        )
+        return null
+      }
       val token = Token(before.generation + 1)
       if (state.compareAndSet(before, State(token.generation, token, running = true))) {
         before.token?.cancel()
+        probe("flow.begin granted generation=" + token.generation + " caller=" + callerLabel())
         return token
       }
     }
@@ -1688,8 +1730,18 @@ internal class StartupFlowOwnership {
   fun finish(token: Token) {
     while (true) {
       val before = state.get()
-      if (before.token !== token || !before.running) return
-      if (state.compareAndSet(before, before.copy(running = false))) return
+      if (before.token !== token || !before.running) {
+        probe(
+          "flow.finish ignored generation=" + token.generation +
+            " current=" + (before.token?.generation?.toString() ?: "none") +
+            " caller=" + callerLabel(),
+        )
+        return
+      }
+      if (state.compareAndSet(before, before.copy(running = false))) {
+        probe("flow.finish released generation=" + token.generation + " caller=" + callerLabel())
+        return
+      }
     }
   }
 
@@ -1700,9 +1752,53 @@ internal class StartupFlowOwnership {
     while (true) {
       val before = state.get()
       val after = State(before.generation + 1, destroyed = before.destroyed || destroy)
-      if (state.compareAndSet(before, after)) { before.token?.cancel(); return }
+      if (state.compareAndSet(before, after)) {
+        probe("flow.invalidate nextGeneration=" + after.generation + " destroy=" + destroy + " caller=" + callerLabel())
+        before.token?.cancel()
+        return
+      }
     }
   }
+
+  /**
+   * 如实记录「谁在占所有权」，供 defer 分支引用。
+   *
+   * 只暴露 generation 与线程名——**不含任何用户数据**（不放路径、不放会话、不放 prompt）。
+   * 线程名足以区分入口：`main` = 生命周期/UI 回调（onCreate/onResume/引导按钮），
+   * `Thread-N` = 启动流自己的 worker，`Watchdog*` = 看门狗。
+   */
+  internal fun deferredOwnerSnapshot(): String =
+    "ownerGeneration=" + (state.get().token?.generation?.toString() ?: "none") +
+      " running=" + state.get().running +
+      " destroyed=" + state.get().destroyed +
+      " caller=" + callerLabel()
+
+  private fun probe(message: String) {
+    // 探针自身绝不抛：取证代码把启动流带崩是本末倒置。
+    try {
+      sink(message)
+    } catch (_: Throwable) {
+    }
+  }
+
+  private fun callerLabel(): String {
+    val name = try {
+      Thread.currentThread().name
+    } catch (_: Throwable) {
+      null
+    }
+    return (name ?: "unknown").replace(' ', '_')
+  }
+}
+
+/**
+ * 生产侧探针出口：把 [StartupFlowOwnership] 的留痕接到 `LogCollector`（tag=`dsh-owner`）。
+ *
+ * 单独抽成顶层函数而不是在类里直接调 LogCollector：后者依赖 appContext，JVM 单测里是静默 no-op，
+ * 会让「defer 必写一行」这条判据在测试里永远看不到输出（假绿）。
+ */
+internal fun flowOwnershipProbeSink(message: String) {
+  LogCollector.log("dsh-owner", message)
 }
 
 /**
