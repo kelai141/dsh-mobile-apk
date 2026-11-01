@@ -2,6 +2,34 @@
   "$comment": "vendor 固化插件补丁登记表（apply-patches.mjs 消费；id 必须与 IMPLS 一一对应，启动时交叉校验）。marker 语义见 README。",
   "patches": [
     {
+      "id": "image-expiry-E1",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js",
+      "additionalTargets": [
+        "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js",
+        "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/index.js"
+      ],
+      "scope": "engine",
+      "summary": "设置中手动回收120分钟未主动读取的图片后，请求链路将已清理图片投影为占位文字；被动历史重发不刷新图片时间",
+      "provenance": "2026-11-01 用户指定120分钟仅为手动可清理门槛；未清理时图片继续可读，不自动失效",
+      "marker": "dsh-mobile image expiry placeholder (E1)"
+    },
+    {
+      "id": "image-request-preview-P1",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js",
+      "additionalTargets": [
+        "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js",
+        "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/index.js",
+        "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment/lib/index.js"
+      ],
+      "scope": "engine",
+      "summary": "模型请求使用最长边1600的等比预览和压缩编码；禁止原字节透传，原附件留在本地，派生版本按固定策略缓存",
+      "provenance": "2026-11-01 用户要求高分辨率截图必须压缩后再发送服务商；源码确认旧请求编码器存在原字节透传路径；dsh-attachment为未修改的几何配套，以真实函数签名核验，不要求注入P1标记",
+      "marker": "dsh-mobile compressed request preview (P1)",
+      "targetMarkers": {
+        "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment/lib/index.js": "function requestImageDimensions("
+      }
+    },
+    {
       "id": "image-history-batch-offload-I1",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm/lib/index.js",
       "scope": "engine",

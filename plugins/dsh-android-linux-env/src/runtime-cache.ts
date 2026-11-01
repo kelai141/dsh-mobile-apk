@@ -2,12 +2,13 @@
  * 运行时缓存清理（0.14.1 块 E，设计 = `docs/0.14.1-preview-LEGACY-AND-PERF.md` §4.3）。
  *
  * 语义边界：清的是**引擎运行时残留**（可再生、与用户数据无关的中间产物），不是 Android 的
- * 「应用缓存」目录，也不是任何用户资产。
+ * 「应用缓存」目录。2026-11-01 用户授权的例外：图片闲置120分钟后可在设置中手动清理，
+ * 清理后的模型上下文使用占位文字；不清理则继续可读。文件附件与会话文字仍保留。
  *
  * 四条硬约束（逐条对应 §4.3 的判据，实现只依赖这些不变量）：
  *
  * ① **白名单制**：唯一可删的东西是本文件 `scanTargets()` 枚举出来的**具体项**；任何不在该枚举
- *    里的路径一律不删。`DSH_HOME` 下与用户资产同树（`sessions/`、`storages/`、`attachments/`、
+ *    里的路径一律不删。`DSH_HOME` 下与用户资产同树（`sessions/`、`storages/`、`attachments/v1/files/`、
  *    `.credentials.yaml`、`settings.yaml`、`profiles/**`、`workspaces/` 等）因此天然免疫——
  *    它们不是「黑名单被挡住」，而是从未进入删除通道。
  * ② **保留当前代**：`engine.log.1..N` 可删，但当前代 `engine.log` 绝不删——壳侧鉴权链
@@ -25,13 +26,14 @@
  *  - 快照解压残留（`.snapshot-transaction` / `.snapshot-transaction.tmp`）：它是在途标志，删掉会让
  *    「刷新是否完成」失去唯一判据；
  *  - 整目录删除：`DSH_HOME/cache/**` 一律**按子目录分别裁定**（见 `CACHE_SUBDIR_ALLOW`；本版该表
- *    为空集 = `cache/**` 全部显式跳过，理由见其注释）；
+ *    为空集；图片仅按 image-cache.ts 的哈希叶文件另行裁定）；
  *  - 无据可查的目录名（如 `pip` / `dsh-vision-toolkit`）：名字像缓存不构成「可安全再生」的依据，
  *    不得照名字猜着删——只清理本版有据可查的项。
  */
 import { existsSync, lstatSync, readdirSync, rmdirSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { imageCacheEligible, scanImageCache, type ImageCachePolicy } from './image-cache.js'
 
 /** 日志世代探测上限：与壳侧 `ENGINE_LOG_GENERATIONS` 同量级，多留不误删（不存在即跳过）。 */
 const MAX_LOG_GENERATIONS = 32
@@ -51,9 +53,11 @@ const ROTATED_LOG = /^engine\.log\.(\d+)$/
  * `docs/UPSTREAM-0.1.6-ALPHA2-DELTA-2026-09-17.md:257`）。整目录删会把它一起带走，而它是否
  * 可再生属上游语义——所以**未列入本表的子目录一律跳过并上报**（覆盖面随上游变化是有意为之）。
  *
- * **本版为空集，这是判定的结果而不是漏写**：本仓没有对任何 `cache/` 子目录给出「可安全再生」的
+ * 本表仍为空集。2026-11-01 起 request-images 的已知哈希叶文件由 image-cache.ts 单独裁定，
+ * 依据是固定版本 readRequestImageFile 的可重建缓存语义；绝不放开 cache/attachments 整目录。
+ * 历史上没有对任何 `cache/` 子目录给出「可安全再生」的
  * 依据（§4.3 的判据要求逐条成立才删；`pip` 之类看起来像工具缓存的目录名，在本仓无证据证明它就是
- * 那个缓存，照名字猜着删正是 §4.3⑤ 禁止的「猜测性删除」）。因此本版 `cache/**` **全部显式跳过**，
+ * 那个缓存，照名字猜着删正是 §4.3⑤ 禁止的「猜测性删除」）。其余 `cache/**` **仍显式跳过**，
  * 并在结果里逐项上报 `not-allowlisted`；将来拿到上游/设备证据时只需往本表加名字。
  */
 const CACHE_SUBDIR_ALLOW = new Set<string>([])
@@ -96,7 +100,7 @@ export interface CleanupTarget {
   /** 稳定 id（审计与 UI 展示用）。 */
   id: string
   /** 类别：引擎日志历史代 / `cache/**` 子目录 / `DSH_HOME` 下有名有据的缓存目录。 */
-  kind: 'engine-log-generation' | 'cache-subdirectory' | 'home-cache-directory'
+  kind: 'engine-log-generation' | 'cache-subdirectory' | 'home-cache-directory' | 'image-object' | 'image-preview' | 'image-temporary'
   /** 绝对路径。 */
   path: string
   /** 实测可回收字节（目录递归求和）。 */
@@ -127,6 +131,9 @@ export interface CleanupPlan {
   skipped: CleanupSkip[]
   /** `targets` 的字节合计——执行前的可回收体积。 */
   reclaimableBytes: number
+  /** Image expiry is enabled only with matching model-request placeholder support. */
+  imagePolicy?: ImageCachePolicy
+  imageTmpDir?: string
 }
 
 /** 单项执行结果（审计单位 = 一项）。 */
@@ -248,7 +255,7 @@ function removeTree(path: string): void {
  * @param logRoot - 已解析的日志根目录（`''` = 不可用）。
  * @returns 命中项与跳过项。
  */
-export function scanTargets(dshHome: string, logRoot: string): { targets: CleanupTarget[]; skipped: CleanupSkip[] } {
+export function scanTargets(dshHome: string, logRoot: string, imagePolicy: ImageCachePolicy = {}, env: Record<string, string | undefined> = process.env): { targets: CleanupTarget[]; skipped: CleanupSkip[] } {
   const targets: CleanupTarget[] = []
   const skipped: CleanupSkip[] = []
 
@@ -336,6 +343,9 @@ export function scanTargets(dshHome: string, logRoot: string): { targets: Cleanu
       skipped.push({ id: 'home-cache-' + name, path: candidate, reason: 'unreadable' })
     }
   }
+  const images = scanImageCache(dshHome, logRoot, imagePolicy, env)
+  targets.push(...images.targets)
+  skipped.push(...images.skipped)
   return { targets, skipped }
 }
 
@@ -344,11 +354,11 @@ export function scanTargets(dshHome: string, logRoot: string): { targets: Cleanu
  * @param env - 环境映射（默认 `process.env`；`DSH_HOME`/`DSH_FILES_DIR` 的真源）。
  * @returns 计划：可回收项、跳过项、可回收字节。
  */
-export function planCleanup(env: Record<string, string | undefined> = process.env): CleanupPlan {
+export function planCleanup(env: Record<string, string | undefined> = process.env, imagePolicy: ImageCachePolicy = {}): CleanupPlan {
   const dshHome = resolveHarnessHome(undefined, env)
   const logRoot = engineLogRoot(env)
-  const { targets, skipped } = scanTargets(dshHome, logRoot)
-  const allowed = targets.filter((target) => insideAllowedScope(target.path, dshHome, logRoot))
+  const { targets, skipped } = scanTargets(dshHome, logRoot, imagePolicy, env)
+  const allowed = targets.filter((target) => insideAllowedScope(target.path, dshHome, logRoot, imagePolicy, env))
   for (const target of targets) {
     if (!allowed.includes(target)) skipped.push({ id: target.id, path: target.path, reason: 'scope-rejected' })
   }
@@ -358,6 +368,8 @@ export function planCleanup(env: Record<string, string | undefined> = process.en
     targets: allowed,
     skipped,
     reclaimableBytes: allowed.reduce((sum, target) => sum + target.bytes, 0),
+    imagePolicy,
+    imageTmpDir: env.TMPDIR,
   }
 }
 
@@ -390,13 +402,16 @@ export function executeCleanup(
     let result: CleanupItemResult
     try {
       // 执行前对每一项再复核作用域：扫描与执行之间若有任何状态漂移，拒绝而非误删。
-      if (!insideAllowedScope(target.path, plan.dshHome, plan.logRoot)) {
+      if (!insideAllowedScope(target.path, plan.dshHome, plan.logRoot, plan.imagePolicy, { TMPDIR: plan.imageTmpDir })) {
         result = { id: target.id, path: target.path, status: 'skipped', bytes: 0, reason: 'scope-rejected' }
       } else if (!existsSync(target.path)) {
         result = { id: target.id, path: target.path, status: 'skipped', bytes: 0, reason: 'vanished' }
       } else {
-        remove(target.path)
-        result = { id: target.id, path: target.path, status: 'removed', bytes: target.bytes }
+        const image = target.kind.startsWith('image-')
+        const bytes = image ? lstatSync(target.path).size : target.bytes
+        if (image && options.remove === undefined) unlinkSync(target.path)
+        else remove(target.path)
+        result = { id: target.id, path: target.path, status: 'removed', bytes }
       }
     } catch (error) {
       // 失败一律捕获如实上报：不为「清干净」强删/降权/改权限。
@@ -478,7 +493,8 @@ function relativeUnder(path: string, root: string): string | undefined {
  * @param logRoot - 已解析的日志根（`''` = 不可用）。
  * @returns `true` = 在白名单作用域内。
  */
-export function insideAllowedScope(path: string, dshHome: string, logRoot: string): boolean {
+export function insideAllowedScope(path: string, dshHome: string, logRoot: string, imagePolicy: ImageCachePolicy = {}, env: Record<string, string | undefined> = process.env): boolean {
+  if (imageCacheEligible(path, dshHome, logRoot, imagePolicy, env)) return true
   const underCache = relativeUnder(path, join(dshHome, 'cache'))
   if (underCache !== undefined && underCache !== '') {
     const segment = underCache.split('/')[0] ?? ''
