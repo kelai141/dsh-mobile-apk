@@ -33,6 +33,7 @@ import {
   KEYBAR_STYLE_ID,
   TERMINAL_ROOT_SELECTOR,
   computeBottomInset,
+  nudgeTerminalRefit,
 } from './layout.ts'
 
 /** xterm 的隐藏输入面（合成 keydown 的目标）。 */
@@ -298,6 +299,8 @@ export function mountKeybar(host: KeybarHost): KeybarHandle {
 
   /** 当前承载留白变量的终端根节点（换根/卸载时要清掉旧的那份）。 */
   let insetHost: HTMLElement | null = null
+  /** 上一次真正写进 KS 变量 / root 的留白值（null = 还没写过）。用来只在变化时通知重排。 */
+  let lastInset: number | null = null
 
   /**
    * 底边留白：见 layout.ts 的 computeBottomInset 判据（自足量 + 系统条/安全区）。
@@ -329,9 +332,20 @@ export function mountKeybar(host: KeybarHost): KeybarHandle {
       visualViewportOffsetTop: view.visualViewport?.offsetTop ?? 0,
       layoutViewportHeight: view.innerHeight,
     })
-    if (insetHost !== null && insetHost !== host) insetHost.style.removeProperty(KEYBAR_INSET_VAR)
+    if (insetHost !== null && insetHost !== host) {
+      insetHost.style.removeProperty(KEYBAR_INSET_VAR)
+      lastInset = null
+    }
     insetHost = host
+    // 只在「之前写过、且值真的变了」时通知。
+    //
+    // 首次写入（lastInset === null）**不**在这里通知：那一次由 reconcile 的 inserted 分支负责。
+    // 两条路径各管一件事（挂载 / 留白变化），否则同一次挂载会抖两次；更要紧的是，
+    // 任一分支被单独移除时另一条会顶上来，负控就永远变不红 —— 判据必须能分别证伪。
+    const changed = lastInset !== null && lastInset !== inset
+    lastInset = inset
     host.style.setProperty(KEYBAR_INSET_VAR, inset + 'px')
+    if (changed) nudgeTerminalRefit(host)
   }
 
   /**
@@ -359,10 +373,14 @@ export function mountKeybar(host: KeybarHost): KeybarHandle {
       return
     }
     // 挂在最后：终端 .screen 是 flex:1，键条 flex:none 在流内 -> 不遮挡。
-    if (bar.parentElement !== current || current.lastElementChild !== noticeEl) {
+    // 插入本身会改变 .screen 的可用高度（键条是 flex:none 的兄弟），而 xterm 的重排只由
+    // 「宿主 node 尺寸变化」触发 —— 插入动作必须自己把这次变化说出去（见 layout.ts）。
+    const inserted = bar.parentElement !== current
+    if (inserted || current.lastElementChild !== noticeEl) {
       current.append(bar)
       current.append(noticeEl)
     }
+    if (inserted) nudgeTerminalRefit(current)
     syncInset(current)
   }
 
@@ -396,6 +414,8 @@ export function mountKeybar(host: KeybarHost): KeybarHandle {
       noticeEl.remove()
       // 留白变量挂在根节点上：卸载必须清掉，否则下一个键条会继承一个陈旧的非零留白。
       if (insetHost !== null) { insetHost.style.removeProperty(KEYBAR_INSET_VAR); insetHost = null }
+      // 重置「上次写入值」：同一根上重建的键条必须重新通知一次重排（否则首帧留白变化被吞）。
+      lastInset = null
       disposeStyle()
     },
     latch: () => state,
