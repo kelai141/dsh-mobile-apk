@@ -3,7 +3,7 @@
 // 不可点击目标的「可点击祖先」回退静默失效。本测试锁死该边界。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseUiTreeXml, pruneNodes, treeFingerprint, resolveRef, findActionableAncestor, checkUiTreeParse, decodeEntities } from '../lib/ui-tree.js'
+import { parseUiTreeXml, pruneNodes, treeFingerprint, resolveRef, findActionableAncestor, checkUiTreeParse, decodeEntities, parseBoundsToBox } from '../lib/ui-tree.js'
 
 const ATTRS = 'checkable="false" checked="false" enabled="true" focusable="false" focused="false" ' +
   'long-clickable="false" password="false" selected="false" package="com.android.settings"'
@@ -362,22 +362,65 @@ test('resolveRef：找不到节点时必须明确报错，不得静默返回', (
   assert.match(byId.error, /不在最近一次取树结果中/)
 })
 
-// ── issue #1210：完整性闸必须拒绝「不可解析的 bounds 形状」 ──────────────────────────
-test('checkUiTreeParse rejects malformed bounds shapes while keeping zero-size nodes', () => {
-  // 闸原来只校验「bounds 是非空字符串」，不校验它能被解析 ⇒ 闸报 OK 时可以 100% 丢节点。
-  // 修法只判**形状**，不复用 parseBounds（后者对合法的零尺寸 [0,0][0,0] 也返回 null）。
+// ── issue #1210 + #1286：完整性闸的 bounds 判据必须与解析器接受同一个集合 ────────────
+test('checkUiTreeParse rejects unparseable bounds while keeping zero-size nodes', () => {
+  // #1210：闸原来只校验「bounds 是非空字符串」，不校验它能被解析 ⇒ 闸报 OK 时可以 100% 丢节点。
+  // #1286：闸最初写成**锚定**的 ^…$，而两个解析器不锚定，于是尾随空格这类「旧解析器能吃」的
+  //        形状让整棵树判红。收敛到「与解析器共用同一个正则」（不锚定），失败模式从
+  //        「整树拒绝」退回「该节点按既有行为处理」。
+  // 判据只判**形状**、不判尺寸：零尺寸 [0,0][0,0] 是合法骨架节点。
   const raw = (list) => list.map((b, i) => ({ id: i === 0 ? '0' : '0.' + i, attrs: { bounds: b } }))
   const xml = (k) => '<hierarchy>' + '<node >'.repeat(k) + '</hierarchy>'
 
-  for (const b of ['[0,0][100,100]', '[0,0][0,0]']) {
+  // ① 能解析的形状一律放行 —— 包含 #1286 点名的 5 例（尾随/前导空白、尾随字符、前缀、尾随换行）
+  const accepted = [
+    '[0,0][100,100]',
+    '[0,0][0,0]',
+    '[0,0][1080,2400] ',
+    ' [0,0][1080,2400]',
+    '[0,0][1080,2400]x',
+    'bounds=[0,0][1080,2400]',
+    '[0,0][1080,2400]\n',
+  ]
+  for (const b of accepted) {
     assert.equal(checkUiTreeParse(xml(2), raw([b, '[0,0][10,10]'])).ok, true,
-      'bounds=' + b + ' 必须放行（第二条是零尺寸骨架节点，判尺寸会误伤）')
+      'bounds=' + JSON.stringify(b) + ' 必须放行：解析器能取到坐标，闸不得比它更严（#1286）')
   }
-  for (const b of ['[0,0][100]', '[0, 0][100, 100]', '[0,0][100,100][200,200]']) {
+
+  // ② 取不到坐标的形状仍然判红（与 #1210 之前一致）
+  for (const b of ['[0,0][100]', '[0, 0][100, 100]', '[x1,y1][x2,y2]']) {
     const r = checkUiTreeParse(xml(2), raw([b, '[0,0][10,10]']))
     assert.equal(r.ok, false, 'bounds=' + JSON.stringify(b) + ' 必须判红（旧实现只判非空字符串）')
     assert.match(r.reason, /bounds 形状非法/, '形状类畸形必须点名形状：' + r.reason)
   }
   // 空串走的是更早的「没有 bounds 属性」判据（既有判据，不动它），这里只要求仍然判红
   assert.equal(checkUiTreeParse(xml(2), raw(['', '[0,0][10,10]'])).ok, false)
+})
+
+test('#1286 闸与解析器必须是同一个集合：凡闸放行的 bounds，parseBoundsToBox 都能取到坐标', () => {
+  // 这条是 #1286 的**结构**判据，不是举例判据：它直接比对两侧对同一批输入的反应。
+  // 一旦有人把闸再写回锚定（或给解析器加锚定而不同步），这条立刻红。
+  const raw = (b) => [{ id: '0', attrs: { bounds: b } }]
+  const xml = '<hierarchy><node ></hierarchy>'
+  const samples = [
+    '[0,0][100,100]', '[0,0][0,0]', '[0,0][1080,2400] ', ' [0,0][1080,2400]',
+    '[0,0][1080,2400]x', 'bounds=[0,0][1080,2400]', '[0,0][1080,2400]\n', '[0,0][1080,2400]\r\n',
+    '[1,2][3,4]', '  [0,0][10,10]  ',
+  ]
+  for (const b of samples) {
+    const gateOk = checkUiTreeParse(xml, raw(b)).ok
+    // 解析器「取到了坐标」= 四个数字里至少有一个非零，或原串本就全是零。
+    // 分成这两种是因为全零也是合法取数（零尺寸骨架节点），不能用「非零」当唯一标志。
+    const box = parseBoundsToBox(b)
+    const digits = /\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]/.exec(b)
+    const parserGotNumbers = digits !== null
+    assert.equal(gateOk, parserGotNumbers,
+      'bounds=' + JSON.stringify(b) + '：闸与解析器对同一输入给出了不同结论'
+        + '（闸=' + gateOk + '，解析器取到数字=' + parserGotNumbers + '，盒子=' + JSON.stringify(box) + '）')
+  }
+
+  // 反向：取不到坐标的必然判红（这一侧不能松）
+  for (const b of ['[0,0][100]', '[0, 0][100, 100]', '[x1,y1][x2,y2]', '[0,0]']) {
+    assert.equal(checkUiTreeParse(xml, raw(b)).ok, false, 'bounds=' + JSON.stringify(b) + ' 必须判红')
+  }
 })

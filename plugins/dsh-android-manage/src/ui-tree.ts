@@ -84,10 +84,40 @@ export function decodeEntities(s: string): string {
     .replace(/&amp;/g, '&')
 }
 
+/**
+ * bounds 的**唯一一份**取数正则（issue #1286）。
+ *
+ * 为什么是**不锚定**（`exec` 首个匹配），而不是锚定到整串：
+ * ------------------------------------------------------------------
+ * 这里原先有三份各自为政的口径 —— 两个解析器用不锚定的 `exec`，而完整性闸
+ * （{@link checkUiTreeParse}）用锚定的 `^…$`。三份里两份宽、一份严，于是出现
+ * 「旧解析器能吃、新闸不吃」的形状：尾随空格 `"[0,0][10,10] "` 会被解析成合法盒子，
+ * 却让**整棵树**判红、`android_ui_tree` 零节点返回。
+ *
+ * 收敛到哪一侧是**失败模式**的取舍，不是口味问题：
+ *   · 收敛到严（都锚定）⇒ 一个尾空格从「丢这一个节点」升级成「整棵树拒绝」，把局部
+ *     降级放大成全局失败。真机厂商输出带尾随空白的概率远高于零，这是把可用的树换成不可用。
+ *   · 收敛到宽（都不锚定）⇒ 尾随/前导空白、多余后缀仍按既有行为解析出盒子；拿不到数字
+ *     的形状（`[x1,y1][x2,y2]` 这类占位符）依旧解析失败、该节点丢弃，**与 #1210 之前一致**。
+ *
+ * 因此取「宽」，且让三处共用这一份正则：**判据与它所守的解析器必须接受同一个集合**，
+ * 否则闸的失败就不是解析失败的证据。闸侧的配套变化见 {@link BOUNDS_SHAPE}。
+ */
+const BOUNDS_RE = /\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]/
+
+/**
+ * bounds 的取数结果：命中返回四个坐标，未命中返回 null。
+ * @param b - 属性原值。
+ * @returns 坐标，或 null（形状不可解析）。
+ */
+function matchBounds(b: string | undefined): RegExpExecArray | null {
+  if (!b) return null
+  return BOUNDS_RE.exec(b)
+}
+
 /** bounds="[x1,y1][x2,y2]" → {x,y,w,h}；畸形/缺省按零尺寸（0,0,0,0）——V2 编码保留零尺寸节点做骨架。 */
 export function parseBoundsToBox(b: string | undefined): { x: number; y: number; w: number; h: number } {
-  if (!b) return { x: 0, y: 0, w: 0, h: 0 }
-  const m = /\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]/.exec(b)
+  const m = matchBounds(b)
   if (!m) return { x: 0, y: 0, w: 0, h: 0 }
   const x1 = Number(m[1]); const y1 = Number(m[2]); const x2 = Number(m[3]); const y2 = Number(m[4])
   return { x: x1, y: y1, w: Math.max(0, x2 - x1), h: Math.max(0, y2 - y1) }
@@ -95,8 +125,7 @@ export function parseBoundsToBox(b: string | undefined): { x: number; y: number;
 
 /** 解析 bounds="[x1,y1][x2,y2]"；畸形/零尺寸返回 null（该节点丢弃）。 */
 function parseBounds(b: string | undefined): { cx: number; cy: number; w: number; h: number } | null {
-  if (!b) return null
-  const m = /\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]/.exec(b)
+  const m = matchBounds(b)
   if (!m) return null
   const x1 = Number(m[1]); const y1 = Number(m[2]); const x2 = Number(m[3]); const y2 = Number(m[4])
   const w = x2 - x1; const h = y2 - y1
@@ -167,8 +196,14 @@ export function parseUiTreeXml(xml: string): { raw: RawNode[]; rotation: number 
  * `parseBounds` 返回 null 就 continue）。这里补一条**形状**判据：只判形状，不判尺寸——
  * `[0,0][0,0]` 是合法的零尺寸骨架节点，必须继续放行，所以不能复用 `parseBounds`
  * （它对零尺寸也返回 null，会把合法节点判成坏）。
+ *
+ * issue #1286：形状判据**必须与解析器共用同一个正则**（{@link BOUNDS_RE}），不得另立一份。
+ * 原先这里是锚定的 `^…$`，而两个解析器不锚定，于是尾随空格的 bounds 被解析成合法盒子、
+ * 却让整棵树判红。判据比它所守的解析器更严时，闸的失败就不再是解析失败的证据 ——
+ * 它变成了一条自己的新规矩，而这条新规矩的代价是「局部降级放大成全局拒绝」。
+ * 现在两边接受**同一个集合**：栅绿 ⇔ 每个节点都能取到坐标（或会按既有行为被丢弃）。
  */
-const BOUNDS_SHAPE = /^\[-?\d+,-?\d+\]\[-?\d+,-?\d+\]$/
+const BOUNDS_SHAPE = BOUNDS_RE
 
 export function checkUiTreeParse(xml: string, raw: RawNode[]): { ok: true } | { ok: false; reason: string } {
   const tagCount = (xml.match(/<node[\s>]/g) ?? []).length
