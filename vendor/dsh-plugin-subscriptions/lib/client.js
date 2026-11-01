@@ -4876,10 +4876,18 @@ function apply(ctx) {
 	ctx.effect(() => {
 		const style = document.createElement("style");
 		style.setAttribute("data-plugin", "dsh-plugin-subscriptions");
-		style.textContent = "div[role=\"dialog\"][aria-modal=\"true\"]:has(> nav) { padding-top: 14px; }";
+		// issue #1288 第 2/5/8 条：**必须限定在非手机形态**。
+		//
+		// 原选择器是裸的 div[role=dialog][aria-modal=true]:has(> nav)，特异性 (0,2,2) —— 它会命中
+		// **宿主的**设置面板（那是唯一「dialog 且直接子节点是 nav」的面板），并把它的 padding-top
+		// 压成 14px。宿主手机形态的顶部 inset 由 dsh-client-ui-responsive 的 mobile-form.css.ts
+		// 提供（--dsh-mobile-top-inset，实测 24px），被压成 14px 之后二级页标题栏就顶到状态栏下面
+		// （用户实测：一级页正常、二级页标题只剩半截 —— 一级的顶部条是 absolute 不吃面板 padding）。
+		// 在手机形态下这块留白本来就由宿主按真实 inset 负责，插件不该再插一手；桌面形态维持原样。
+		style.textContent = 'html:not([data-dsh-mobile-form]) div[role="dialog"][aria-modal="true"]:has(> nav) { padding-top: 14px; }';
 		document.head.appendChild(style);
 		return () => style.remove();
-	}, "dsh-plugin-subscriptions: settings panel breathing room");
+	}, "dsh-plugin-subscriptions: settings panel breathing room (desktop form only)");
 	const connection = ctx.get("connection");
 	const t = ctx.locale.bind(NS);
 	const injected = () => ({

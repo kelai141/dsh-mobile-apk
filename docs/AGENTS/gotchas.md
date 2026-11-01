@@ -2848,3 +2848,29 @@ The term '//' is not recognized as a name of a cmdlet, function, script file, or
     识别信号（最有用的一条）：**当闸的失败代价大于它所守护的操作时，先去核对两侧判据是不是同一集合。** 具体表现：闸判红导致整体不可用、而它守护的解析器只会丢一条；或者「改前能用、改后整块不可用」而输入只差空白/前缀这类无关字符。核对方法是把两侧对同一批输入的结论逐条比对——实例二的测试就是这么写的（不举例，直接断言「闸的结论 == 解析器能否取到数字」），任一侧被改回去都会立刻红。
 
     同型提醒：判据里凡出现 `includes` / `startsWith` / 锚定正则 / 白名单字面量，先问一句——**我判的是它的拼写，还是它求值后的效果？** 拼写判据天然比效果判据更严，而"更严"落在守护位置上，等于"更容易把可用状态判成不可用"。
+
+
+367. **vendored 插件用裸 tag + `:has()` 注入全局 CSS，靠特异性抢赢宿主；宿主样式改动必须验计算值**（2026-11-01，issue #1288 第 2/5/8 条实锤）
+
+    现象：手机竖屏设置页**一级列表正常、二级页标题只剩半截**（顶部条被 Android 状态栏遮住）。这个「一级好二级坏」的对照非常容易被误判成「全局头部容器有问题」或「壳侧没推 insets」。
+
+    真因：vendored 的 `dsh-plugin-subscriptions` 在 `apply()` 里往 `document.head` 注入了一条**裸 tag 选择器**的全局规则（`lib/client.js:4879`，注释自称 "settings panel breathing room"）：
+    `div[role="dialog"][aria-modal="true"]:has(> nav) { padding-top: 14px; }`
+    它本意是给**宿主**设置面板加一点顶部留白，实际效果是：特异性 `div`+`[role]`+`[aria-modal]`+`:has(>nav)` = **(0,2,2)**，压过宿主 `dsh-client-ui-responsive` 手机形态的面板规则 `html[data-dsh-mobile-form] [data-dsh-settings-dialog]` = **(0,2,1)**，把面板 `padding-top` 从真实顶部 inset（实测 **24px**）压成 **14px**。宿主的地方**根本没有内联样式**、也没有 `!important`，所以从「我自己写的 CSS」这一侧怎么读都读不出问题。
+
+    为什么只有二级页坏：一级页顶部条是 `position:absolute; top:var(--dsh-mobile-top-inset)` —— 绝对定位**不吃面板 padding**；二级页顶部条在正常流里，就站在那 14px 上。状态栏 24px 一盖，标题上半截没了。
+
+    识别法（不靠猜）：
+    1. `getComputedStyle(el).paddingTop` 与**期望值**不符（本例 14px vs 24px）——**先怀疑有外来规则，而不是自己写错**；
+    2. 遍历 `document.styleSheets`，对每个 `rules[i].selectorText` 做 `el.matches(sel)`，把命中且含该属性的规则按顺序列出来：本例列出两条，一条是插件的 `(0,2,2)`、一条是自己的 `(0,2,1)`，胜负立刻可见；
+    3. 看 `el.getAttribute('style')`：本例是空，可**直接排除内联样式**，把范围锁定在样式表；
+    4. 查注入来源：`document.querySelector('style[data-plugin]')` 一眼看出是哪个插件干的（该插件给自己打了 `data-plugin="dsh-plugin-subscriptions"`）。
+
+    正确做法（两层，缺一不可）：
+    - **根因侧**：在 vendor 里把规则收窄到它该管的形态 —— `html:not([data-dsh-mobile-form]) div[role=dialog][aria-modal=true]:has(> nav)`。手机形态的顶部留白本来就该由宿主按真实 inset 负责，插件不该插一手；桌面行为不变。两份打包副本（`lib/client.js` + `lib/client/index.js`）必须同步改，并登记 `PROVENANCE` 差异表。
+    - **防守侧**：宿主把选择器特异性提到 (0,4,1)（加 `[role='dialog'][aria-modal='true']`），插件若再回归也压不回去。注释里写明「这条是在和 vendored 插件抢优先级」并指向对方行号，否则会被当成冗余选择器删掉。
+    - **不用 `!important`、不用 `:has()` 在自己的包里**（本包要在老内核上生效）。
+
+    判据：**宿主样式改动后必须验 `getComputedStyle` 的计算值，不能只看自己写的 CSS**。本例实测 `panelPaddingTop 24px / bar.top 24 / 标题 top 38` 才算过；负控把面板 padding 打回 14px 并按用户机型把状态栏模拟成 38dp，标题被遮 **10px** 才算红。
+
+    同型提醒：`document.head` 里的全局规则是**跨插件共享面**。凡是「按 tag + 属性 + `:has()` 猜宿主结构」的注入，都在赌宿主结构不变、且赌自己不是最后一个写入者。判据要落在**计算值**上，别落在「我写了什么」上。
