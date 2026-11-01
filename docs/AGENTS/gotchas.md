@@ -2854,11 +2854,11 @@ The term '//' is not recognized as a name of a cmdlet, function, script file, or
 
     现象：手机竖屏设置页**一级列表正常、二级页标题只剩半截**（顶部条被 Android 状态栏遮住）。这个「一级好二级坏」的对照非常容易被误判成「全局头部容器有问题」或「壳侧没推 insets」。
 
-    真因：vendored 的 `dsh-plugin-subscriptions` 在 `apply()` 里往 `document.head` 注入了一条**裸 tag 选择器**的全局规则（`lib/client.js:4879`，注释自称 "settings panel breathing room"）：
+    真因：vendored 的 `dsh-plugin-subscriptions` 在 `apply()` 里往 `document.head` 注入了一条**裸 tag 选择器**的全局规则（注释自称 "settings panel breathing room"；**定位不要写行号**——每加一句注释就漂，用 `document.querySelector('style[data-plugin="dsh-plugin-subscriptions"]')`）：
     `div[role="dialog"][aria-modal="true"]:has(> nav) { padding-top: 14px; }`
     它本意是给**宿主**设置面板加一点顶部留白，实际效果是：特异性 `div`+`[role]`+`[aria-modal]`+`:has(>nav)` = **(0,2,2)**，压过宿主 `dsh-client-ui-responsive` 手机形态的面板规则 `html[data-dsh-mobile-form] [data-dsh-settings-dialog]` = **(0,2,1)**，把面板 `padding-top` 从真实顶部 inset（实测 **24px**）压成 **14px**。宿主的地方**根本没有内联样式**、也没有 `!important`，所以从「我自己写的 CSS」这一侧怎么读都读不出问题。
 
-    为什么只有二级页坏：一级页顶部条是 `position:absolute; top:var(--dsh-mobile-top-inset)` —— 绝对定位**不吃面板 padding**；二级页顶部条在正常流里，就站在那 14px 上。状态栏 24px 一盖，标题上半截没了。
+    为什么用户报的是「一级好、二级坏」：**那是 0972fc24 及更早版本的形状**——当时一级页顶部条是 `position:absolute; top:var(--dsh-mobile-top-inset)`，绝对定位**不吃面板 padding**；二级页顶部条在正常流里，就站在那 14px 上，状态栏一盖标题上半截没了。`issue #1288` 里已把两级统一成正常流（`position:relative`），所以**从那一版起两级都吃面板 padding**：这条优先级对两级同时成立，不再只影响二级页。写这条时别把旧版本的现象当现行事实。
 
     识别法（不靠猜）：
     1. `getComputedStyle(el).paddingTop` 与**期望值**不符（本例 14px vs 24px）——**先怀疑有外来规则，而不是自己写错**；
