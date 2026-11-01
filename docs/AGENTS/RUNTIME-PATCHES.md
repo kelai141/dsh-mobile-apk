@@ -186,6 +186,8 @@
 | `mimo-thinking-toggle-056` | `dsh-llm-pi-ai/lib/index.js` + `@earendil-works/pi-ai/dist/api/openai-completions.js` | Issue #56：开放显式 `thinkingFormat=mimo`；仅精确官方 MiMo profile 或用户显式 compat 生成 off/low 二态映射，选择器显示“关闭思考/开启思考”，默认开启。Completions serializer 将状态编码为 `thinking.type=disabled|enabled`，不发送 `reasoning_effort`；保留 assistant 多轮 `reasoning_content`。固定 DSH 0.2.1-rc.2 / pi-ai 1.1.0 锚点（版本守卫：`dsh-llm-pi-ai@0.2.1-rc.2` + `pi-ai@1.1.0`，不符即抛）；行为回归 `scripts/patches/tests/mimo-thinking-toggle-056.test.mjs`。 |
 
 
+`image-history-batch-offload-I1` 将 `dsh-llm@0.2.1-rc.3` 的图片预算选择器改为90%预警、最旧40%批量淘汰，释放不足时继续释放旧图，至少保留最新一张。沿用 image/offload 事件与重试；最新单图超硬上限仍明确报错。策略、夹具与验证边界见 `docs/contrib/kelai141/2026-10-30-history-image-prefix-cache.md`。
+
 ### 7.1a 0.14.3 新增/变更补丁与构建钩子（源码在场，未执行）
 
 | 补丁/文件 | 真实目标与职责 | 登记 / 回归状态 |

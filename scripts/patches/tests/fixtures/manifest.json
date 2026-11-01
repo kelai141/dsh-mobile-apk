@@ -1980,6 +1980,56 @@
       "patchIds": [
         "terminal-shell-candidates-T1"
       ]
+    },
+    "dsh-llm-0.2.1-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.1-rc.3",
+      "package": "@deepseek-ai/dsh-llm@0.2.1-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-llm-0.2.1-rc.3.tgz",
+        "tarballSha256": "244964904379b32998d573d6426f582da843666430e5bf0463711f55defc521d",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "d18d8ae4c8d961e628708c1e4698e09716a0ebb80e55a672e0bde1029bec1155",
+        "package.json": "381b8948adee1ae66db2a301a22df879aa780604143e494daf1b07ada57d668f"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm/package.json"
+      },
+      "patchIds": [
+        "image-history-batch-offload-I1"
+      ]
+    },
+    "dsh-compaction-image-offload-0.2.1-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.1-rc.3",
+      "package": "@deepseek-ai/dsh-compaction-image-offload@0.2.1-rc.3",
+      "provenance": {
+        "inputKind": "published-tarball",
+        "tarballFile": "deepseek-ai-dsh-compaction-image-offload-0.2.1-rc.3.tgz",
+        "tarballSha256": "820cfd3f179f433928f80c88e4ea40d852e4d3d15868cff97d3cba2b1c4eb79d"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "6352066e8028a74374f0d6de42ebfeec5125100bb1a32ea98ff7a9fc9f58b940",
+        "package.json": "0ac7af4398782ec974139a8301a0c662beb2a8e5ea3b9d044bf19a7cc244d1d8"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-compaction-image-offload/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-compaction-image-offload/package.json"
+      },
+      "patchIds": [
+        "image-history-batch-offload-I1"
+      ]
     }
   },
   "capture": {
@@ -1991,6 +2041,6 @@
       ]
     },
     "overlaySha256": "0e5a7f49f0145857a4b6c3f0f8b8594c401a50c526505a112c3740bcf86c8993",
-    "registrySha256": "84499a77d12b0c28918b47cd5d4090c5116b153a08b8bd581af00a1f2b5526b9"
+    "registrySha256": "9c7d3f601bd3c008aca022db3daf8b366e6f104f35f3495ddf88a89e21b39693"
   }
 }
