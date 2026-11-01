@@ -113,6 +113,57 @@ function withError(error) {
     configError = errorMessage(error);
 }
 /**
+ * Credentials embedded in a proxy URL's userinfo, or undefined when the URL
+ * does not parse. Needed because a user may legitimately paste
+ * `http://user:pass@host:port` into the URL field instead of filling the
+ * separate username/password inputs; the secret then lives in `url`, not in
+ * {@link ProxyConfig.password}.
+ * @param raw - the stored URL.
+ * @returns the percent-decoded userinfo, or undefined when unparsable.
+ */
+function urlCredentials(raw) {
+    let url;
+    try {
+        url = new URL(raw);
+    }
+    catch {
+        return undefined;
+    }
+    if (url.username === '' && url.password === '')
+        return undefined;
+    const decode = (value) => {
+        try {
+            return decodeURIComponent(value);
+        }
+        catch {
+            return value;
+        }
+    };
+    return { username: decode(url.username), password: decode(url.password) };
+}
+/**
+ * Strip the userinfo from a proxy URL so it can be logged or returned to the
+ * browser. Unparsable input still gets the authority prefix removed: a
+ * half-typed `http://user:pass@` is exactly the shape that used to be echoed
+ * back in a validation error.
+ * @param raw - the URL to sanitize.
+ * @returns the URL without credentials.
+ */
+export function redactProxyUrl(raw) {
+    try {
+        const url = new URL(raw);
+        url.username = '';
+        url.password = '';
+        return url.toString();
+    }
+    catch {
+        const match = /^([a-z][a-z0-9+.-]*:\/\/)?([^/?#]*)(.*)$/i.exec(raw);
+        if (match !== null && match[2].includes('@'))
+            return (match[1] ?? '') + match[2].slice(match[2].lastIndexOf('@') + 1) + match[3];
+        return raw;
+    }
+}
+/**
  * Parse and validate a proxy URL. Only HTTP(S) proxies are supported because
  * the undici dispatcher speaks CONNECT over HTTP; socks5 is not supported.
  * @param raw - the URL the user configured.
@@ -124,10 +175,13 @@ export function parseProxyUrl(raw) {
         url = new URL(raw);
     }
     catch {
-        throw new Error(`proxy URL "${raw}" is not a valid URL`);
+        // The message quotes the URL, so it must quote the **redacted** form:
+        // a rejected `http://user:pass@` used to put the password into the
+        // error text, which the browser then rendered and any log kept.
+        throw new Error(`proxy URL "${redactProxyUrl(raw)}" is not a valid URL`);
     }
     if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-        throw new Error(`proxy URL must use the http:// or https:// scheme (got "${raw}")`);
+        throw new Error(`proxy URL must use the http:// or https:// scheme (got "${redactProxyUrl(raw)}")`);
     }
     if (url.hostname === '')
         throw new Error('proxy URL must include a host');
@@ -172,8 +226,31 @@ function normalizeConfig(input) {
     if (input.enabled && url === '') {
         throw new Error('a proxy URL is required when the proxy is enabled');
     }
-    if (url !== '')
+    if (url !== '') {
+        // issue #1282: promote userinfo into the dedicated fields. Keeping the
+        // password inside `url` is what made `proxyGetConfig` hand it to the
+        // browser, and it also made `passwordSet` report `false` for a config
+        // that does have a password. Promotion happens on every normalize, so a
+        // config already on disk is cleaned the next time it is loaded.
+        const embedded = urlCredentials(url);
+        if (embedded !== undefined) {
+            const promoted = parseProxyUrl(url);
+            promoted.username = '';
+            promoted.password = '';
+            return normalizeConfig({
+                enabled: input.enabled,
+                url: promoted.toString(),
+                username: input.username !== undefined && input.username !== ''
+                    ? input.username
+                    : embedded.username === '' ? undefined : embedded.username,
+                password: input.password !== undefined && input.password !== '' && input.password !== null
+                    ? input.password
+                    : embedded.password === '' ? undefined : embedded.password,
+                bypass: input.bypass,
+            });
+        }
         parseProxyUrl(url);
+    }
     const bypass = Array.from(new Set((input.bypass ?? [])
         .map(entry => entry.trim())
         .filter(entry => entry !== '')));
@@ -299,11 +376,18 @@ export async function resetProxyForTests() {
  */
 export async function proxyGetConfig() {
     await ensureReady();
+    // issue #1282: this view is served to the browser, so it must never carry a
+    // secret. Two places can hold one: the separate `password` field and the
+    // userinfo of a URL the user pasted in whole. The first is only reported as
+    // `passwordSet`; the second is **stripped from `url`** (not masked, not
+    // replaced with a placeholder — a masked value still ships the secret's shape
+    // and length, and every consumer here only needs the routed destination).
+    const embedded = urlCredentials(current.url);
     return {
         enabled: current.enabled,
-        url: current.url,
+        url: redactProxyUrl(current.url),
         ...current.username === undefined ? {} : { username: current.username },
-        passwordSet: current.password !== undefined && current.password !== '',
+        passwordSet: (current.password !== undefined && current.password !== '') || (embedded !== undefined && embedded.password !== ''),
         bypass: [...current.bypass],
         ...configError === undefined ? {} : { error: configError },
     };

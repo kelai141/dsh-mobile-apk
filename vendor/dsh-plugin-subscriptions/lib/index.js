@@ -347,6 +347,55 @@ function withError(error) {
 	configError = errorMessage(error);
 }
 /**
+* Credentials embedded in a proxy URL's userinfo, or undefined when the URL
+* does not parse. Needed because a user may legitimately paste
+* `http://user:pass@host:port` into the URL field instead of filling the
+* separate username/password inputs; the secret then lives in `url`, not in
+* {@link ProxyConfig.password}.
+* @param raw - the stored URL.
+* @returns the percent-decoded userinfo, or undefined when unparsable.
+*/
+function urlCredentials(raw) {
+	let url;
+	try {
+		url = new URL(raw);
+	} catch {
+		return void 0;
+	}
+	if (url.username === "" && url.password === "") return void 0;
+	const decode = (value) => {
+		try {
+			return decodeURIComponent(value);
+		} catch {
+			return value;
+		}
+	};
+	return {
+		username: decode(url.username),
+		password: decode(url.password)
+	};
+}
+/**
+* Strip the userinfo from a proxy URL so it can be logged or returned to the
+* browser. Unparsable input still gets the authority prefix removed: a
+* half-typed `http://user:pass@` is exactly the shape that used to be echoed
+* back in a validation error.
+* @param raw - the URL to sanitize.
+* @returns the URL without credentials.
+*/
+function redactProxyUrl(raw) {
+	try {
+		const url = new URL(raw);
+		url.username = "";
+		url.password = "";
+		return url.toString();
+	} catch {
+		const match = /^([a-z][a-z0-9+.-]*:\/\/)?([^/?#]*)(.*)$/i.exec(raw);
+		if (match !== null && match[2].includes("@")) return (match[1] ?? "") + match[2].slice(match[2].lastIndexOf("@") + 1) + match[3];
+		return raw;
+	}
+}
+/**
 * Parse and validate a proxy URL. Only HTTP(S) proxies are supported because
 * the undici dispatcher speaks CONNECT over HTTP; socks5 is not supported.
 * @param raw - the URL the user configured.
@@ -357,9 +406,9 @@ function parseProxyUrl(raw) {
 	try {
 		url = new URL(raw);
 	} catch {
-		throw new Error(`proxy URL "${raw}" is not a valid URL`);
+		throw new Error(`proxy URL "${redactProxyUrl(raw)}" is not a valid URL`);
 	}
-	if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error(`proxy URL must use the http:// or https:// scheme (got "${raw}")`);
+	if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error(`proxy URL must use the http:// or https:// scheme (got "${redactProxyUrl(raw)}")`);
 	if (url.hostname === "") throw new Error("proxy URL must include a host");
 	return url;
 }
@@ -391,7 +440,25 @@ function matchesBypass(hostname, entries) {
 function normalizeConfig(input) {
 	const url = input.url.trim();
 	if (input.enabled && url === "") throw new Error("a proxy URL is required when the proxy is enabled");
-	if (url !== "") parseProxyUrl(url);
+	if (url !== "") {
+		// issue #1282：把 userinfo 提成独立字段。密码留在 `url` 里既让 `proxyGetConfig`
+		// 把它交给浏览器，也让 `passwordSet` 对「确实有密码」的配置报 false。每次 normalize
+		// 都做提取，所以磁盘上已有的配置下次加载时同样被清洗。
+		const embedded = urlCredentials(url);
+		if (embedded !== void 0) {
+			const promoted = parseProxyUrl(url);
+			promoted.username = "";
+			promoted.password = "";
+			return normalizeConfig({
+				enabled: input.enabled,
+				url: promoted.toString(),
+				username: input.username !== void 0 && input.username !== "" ? input.username : embedded.username === "" ? void 0 : embedded.username,
+				password: input.password !== void 0 && input.password !== "" && input.password !== null ? input.password : embedded.password === "" ? void 0 : embedded.password,
+				bypass: input.bypass
+			});
+		}
+		parseProxyUrl(url);
+	}
 	const bypass = Array.from(new Set((input.bypass ?? []).map((entry) => entry.trim()).filter((entry) => entry !== "")));
 	return {
 		enabled: input.enabled,
@@ -491,11 +558,16 @@ async function persistConfig(cfg, path) {
 */
 async function proxyGetConfig() {
 	await ensureReady$1();
+	// issue #1282：这个视图是发给浏览器的，绝不能带密码。密码可能在两处：独立的
+	// `password` 字段，以及用户整条粘进 URL 框的 userinfo。前者只以 `passwordSet` 报告；
+	// 后者从 `url` 里**剥掉**（不打码、不占位——打码仍会带出秘密的形状与长度，而本模块的
+	// 消费者只需要「这条代理指向哪」）。
+	const embedded = urlCredentials(current$1.url);
 	return {
 		enabled: current$1.enabled,
-		url: current$1.url,
+		url: redactProxyUrl(current$1.url),
 		...current$1.username === void 0 ? {} : { username: current$1.username },
-		passwordSet: current$1.password !== void 0 && current$1.password !== "",
+		passwordSet: current$1.password !== void 0 && current$1.password !== "" || embedded !== void 0 && embedded.password !== "",
 		bypass: [...current$1.bypass],
 		...configError === void 0 ? {} : { error: configError }
 	};
