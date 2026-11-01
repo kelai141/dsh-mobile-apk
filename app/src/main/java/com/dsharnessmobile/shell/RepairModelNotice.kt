@@ -185,6 +185,8 @@ internal object RepairModelNotice {
     "missing",
     "unsafe",
     "invalid",
+    // 同目录下 .yaml 与 .yml 两份 patch 都在：只取一份，另一份留痕（不静默双用）。
+    "conflict-skipped",
     "skipped-legacy",
     "fallback-used",
     "no-credential",
@@ -206,6 +208,8 @@ internal object RepairModelNotice {
     "missing" to if (english) "Missing" else "不存在",
     "unsafe" to if (english) "Unsupported path or size" else "路径或大小不受支持",
     "invalid" to if (english) "Could not parse" else "格式无法解析",
+    // 同目录两份 patch 同时存在：取一份，另一份不参与。
+    "conflict-skipped" to if (english) "Duplicate patch, ignored" else "同目录重复 patch，已忽略这一份",
     // 迁移后按优先级没读它。文件可能完好，只是这轮不是活动配置。
     "skipped-legacy" to if (english) "Migrated; not read this run" else "已迁移，本轮未读取",
     // 活动配置读不出候选，已回落读它。

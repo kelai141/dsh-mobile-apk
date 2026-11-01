@@ -169,4 +169,96 @@ class RepairModelConfigCustomProviderTest {
     assertEquals("fixture-secret-b", result.connections.single().apiKey)
     assertTrue("默认模型必须判为可用", result.defaultAvailable)
   }
+
+  // ── 真实 cordis.patch 片段（脱敏自 ~/.dsh/profiles/desktop/cordis.patch.yml）──
+  //
+  // 形状取自真机实物：providers 下每条路由自带 apiKeyEnv/api/baseURL/models，
+  // 密钥在 .credentials.yaml 的 refs 里。含明文 http + 显式端口的自建网关（zmyf 那条）。
+
+  private val realPatchFragment = """
+    - id: llm-pi-ai
+      config:
+        providers:
+          zmyf:
+            apiKeyEnv: ZMYF_API_KEY
+            api: openai-completions
+            baseURL: http://124.220.238.163:40810/v1
+            models:
+              - id: global:deepseek-v4.1-flash
+                name: Deepseek-V4.1-Flash
+          faro:
+            displayName: faro
+            apiKeyEnv: FARO_API_KEY
+            api: openai-completions
+            baseURL: https://faroapi.com/v1
+            models:
+              - id: gpt-5.6-terra
+                name: GPT-5.6 Terra
+  """.trimIndent() + "\n"
+
+  @Test
+  fun realPatchFragmentYieldsProvidersModelsAndKeyReferences() {
+    File(home, ".dsh/profiles/web/cordis.patch.yml").writeText(realPatchFragment)
+    File(home, ".dsh/.credentials.yaml").writeText(
+      "refs:\n  ZMYF_API_KEY: secret-zmyf\n  FARO_API_KEY: secret-faro\n",
+    )
+    val routes = RepairModelConfig.load(home)
+    assertEquals(2, routes.size)
+    val zmyf = routes.single { it.provider == "zmyf" }
+    assertEquals("global:deepseek-v4.1-flash", zmyf.model)
+    assertEquals("http://124.220.238.163:40810/v1", zmyf.baseUrl)
+    assertEquals("secret-zmyf", zmyf.apiKey)
+    val faro = routes.single { it.provider == "faro" }
+    assertEquals("gpt-5.6-terra", faro.model)
+    assertEquals("secret-faro", faro.apiKey)
+  }
+
+  @Test
+  fun dotYamlPatchIsReadTheSameAsDotYml() {
+    // 真机 16448 实测只有 .yml，但用户自建/手工编辑的现场会出现 .yaml。
+    File(home, ".dsh/profiles/web/cordis.patch.yaml").writeText(realPatchFragment)
+    File(home, ".dsh/.credentials.yaml").writeText("refs:\n  ZMYF_API_KEY: k1\n  FARO_API_KEY: k2\n")
+    val routes = RepairModelConfig.load(home)
+    assertEquals("cordis.patch.yaml 必须被读到", 2, routes.size)
+    assertTrue(routes.any { it.provider == "zmyf" })
+  }
+
+  @Test
+  fun bothExtensionsPresentRecordsConflictAndTakesOnlyOne() {
+    // 两份都在时只取一份并留痕：叠起来会产出用户没写过的合并结果。
+    File(home, ".dsh/profiles/web/cordis.patch.yml").writeText(realPatchFragment)
+    File(home, ".dsh/profiles/web/cordis.patch.yaml").writeText(
+      "- id: llm-pi-ai\n  config:\n    providers:\n      other:\n        apiKeyEnv: ZMYF_API_KEY\n" +
+        "        baseURL: https://other.example/v1\n        models:\n          - id: other-model\n",
+    )
+    File(home, ".dsh/.credentials.yaml").writeText("refs:\n  ZMYF_API_KEY: k1\n  FARO_API_KEY: k2\n")
+    val result = RepairModelConfig.loadDetailed(home)
+    assertEquals("只取 .yaml 一份，不得双用", 1, result.connections.size)
+    assertEquals("other-model", result.connections.single().model)
+    assertTrue(
+      "冲突必须留痕（实际：" + result.sources.joinToString { it.path + "=" + it.status } + "）",
+      result.sources.any { it.status == "conflict-skipped" },
+    )
+  }
+
+  @Test
+  fun homeLevelDotYamlPatchIsAlsoRead() {
+    File(home, ".dsh/cordis.patch.yaml").writeText(realPatchFragment)
+    File(home, ".dsh/.credentials.yaml").writeText("refs:\n  ZMYF_API_KEY: k1\n  FARO_API_KEY: k2\n")
+    assertEquals(2, RepairModelConfig.load(home).size)
+  }
+
+  @Test
+  fun bundleDeclaredPatchFallsBackToTheOtherExtension() {
+    // bundle 作者把扩展名写成 .yml 而实物是 .yaml：不该让整条 bundle 的 provider 消失。
+    val profile = File(home, ".dsh/profiles/web")
+    File(profile, "package.json").writeText("""{"dsh":{"profile":{"bundles":["@user/model-config"]}}}""")
+    val bundle = File(profile, "node_modules/@user/model-config").apply { mkdirs() }
+    File(bundle, "package.json").writeText(
+      """{"name":"@user/model-config","dsh":{"bundle":{"patch":"cordis.patch.yaml"}}}""",
+    )
+    File(bundle, "cordis.patch.yaml").writeText(realPatchFragment)
+    File(home, ".dsh/.credentials.yaml").writeText("refs:\n  ZMYF_API_KEY: k1\n  FARO_API_KEY: k2\n")
+    assertEquals("bundle 声明的 .yaml 必须被读到", 2, RepairModelConfig.load(home).size)
+  }
 }

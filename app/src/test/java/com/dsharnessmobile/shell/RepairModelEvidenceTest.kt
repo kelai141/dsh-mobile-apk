@@ -44,6 +44,8 @@ class RepairModelEvidenceTest {
     // 用户看到「格式无法解析」但文件其实只是「配置可用、缺凭据」。
     val produced = listOf(
       "parsed", "missing", "unsafe", "invalid",
+      // 同目录下 .yaml 与 .yml 两份 patch 都在：只取一份，另一份记这个状态。
+      "conflict-skipped",
       // 下面两个是**历史状态**：marker 开关与「按候选数回落」都已删除，RepairModelConfig 不再产出。
       // 但旧版 APK 写下的 evidence 文件仍可能带着它们被共享出来，所以文案表必须继续认。
       "skipped-legacy", "fallback-used", "no-credential",
@@ -145,9 +147,9 @@ class RepairModelEvidenceTest {
     // 判据落到调用本身：第一个实参是 sink、文件表达式是 File(dsh, "settings.yaml")，且不带条件。
     assertTrue("buildLayer 必须无条件读 settings.yaml（实际：" + build.trim() + "）",
       build.contains("readInto(sink, File(dsh, \"settings.yaml\"))"))
-    // 最低优先级 = 先读它、再让 patch 覆盖它。
+    // 最低优先级 = 先读它、再让 patch 覆盖它。patch 层现在经 firstPatch 取（.yaml 与 .yml 都认）。
     val settingsAt = build.indexOf("settings.yaml")
-    val patchAt = build.indexOf("cordis.patch.yml")
+    val patchAt = build.indexOf("selectedBundlePatches(home, profileDir)")
     assertTrue("buildLayer 必须仍读 patch 层（实际：" + build + "）", patchAt >= 0)
     assertTrue("settings.yaml 必须排在所有 patch 之前（最低优先级）",
       settingsAt in 0 until patchAt)

@@ -179,13 +179,47 @@ internal object RepairModelConfig {
     // 碰巧产出了任何一条候选（哪怕是一条用户根本没在用的路由），真正被选中的那条就彻底不见了——
     // 助手于是报「没有可用模型」，而引擎明明能用。
     // 所以这层底改成无条件铺：优先级最低（同 id 的 patch 配置覆盖它），但没有任何标记能关掉它。
+    /**
+     * 取同一个目录下的 cordis.patch 文档：**两种扩展名都认**（.yaml 优先，其次 .yml）。
+     *
+     * 真机 16448 实测（2026-11-01）：web profile 下只有 `cordis.patch.yml`，`.dsh` 根下两份都没有；
+     * 但用户自建/手工编辑的现场会出现 `.yaml`（YAML 的常见扩展名），旧实现只拼 `.yml`，
+     * 于是那份配置整个读不到——这正是「助手说没模型、引擎却能用」的又一来源。
+     *
+     * 同目录下两份都在时**只取 `.yaml` 并显式记一条冲突来源**，不静默双用：两份配置叠起来会产生
+     * 用户没写过的合并结果（例如两边各写一半 provider），比缺一份更难排查。
+     *
+     * @param sink 来源表收集器，冲突时在这里留痕。
+     * @param directory 文档所在目录。
+     * @returns 存在的候选文件（0 或 1 个）；都不存在时返回空列表，并由这里记一条 missing。
+     */
+    fun firstPatch(sink: MutableList<RepairModelSource>, directory: File): List<File> {
+      val yaml = File(directory, "cordis.patch.yaml")
+      val yml = File(directory, "cordis.patch.yml")
+      val yamlExists = yaml.isFile
+      val ymlExists = yml.isFile
+      return when {
+        yamlExists && ymlExists -> {
+          sink += RepairModelSource(rel(yml), "conflict-skipped")
+          listOf(yaml)
+        }
+        yamlExists -> listOf(yaml)
+        ymlExists -> listOf(yml)
+        else -> {
+          // 两份都不在：如实记一条 missing（沿用 .yml 的展示路径，避免来源表里出现两条 missing）。
+          sink += RepairModelSource(rel(yml), "missing")
+          emptyList()
+        }
+      }
+    }
+
     fun buildLayer(sink: MutableList<RepairModelSource>): Layer {
       val layer = Layer()
       (readInto(sink, File(dsh, "settings.yaml")) as? RepairYamlValue.Mapping)?.let(layer::legacy)
       val profileDir = File(dsh, "profiles/web")
       for (document in selectedBundlePatches(home, profileDir)) layer.apply(readInto(sink, document))
-      layer.apply(readInto(sink, File(profileDir, "cordis.patch.yml")))
-      layer.apply(readInto(sink, File(dsh, "cordis.patch.yml")))
+      for (document in firstPatch(sink, profileDir)) layer.apply(readInto(sink, document))
+      for (document in firstPatch(sink, dsh)) layer.apply(readInto(sink, document))
       return layer
     }
     val allCredentials = credentials + environment.filterValues { it.isNotBlank() }.filterKeys { it !in credentials }
@@ -280,7 +314,17 @@ internal object RepairModelConfig {
       }
       for (relative in paths.take(32)) {
         val file = File(directory, relative)
-        if (!File(relative).isAbsolute && file.canonicalFile.toPath().startsWith(directory.canonicalFile.toPath())) out += file
+        if (File(relative).isAbsolute || !file.canonicalFile.toPath().startsWith(directory.canonicalFile.toPath())) continue
+        // 声明里写 .yml 但实物是 .yaml（或反过来）时按另一个扩展名兜一次：bundle 作者换扩展名
+        // 不该让整条 bundle 的 provider 消失。两边都在时仍只用声明里的那一个。
+        if (file.isFile) { out += file; continue }
+        val alternate = when {
+          relative.endsWith(".yml") -> File(directory, relative.dropLast(4) + ".yaml")
+          relative.endsWith(".yaml") -> File(directory, relative.dropLast(5) + ".yml")
+          else -> null
+        }
+        if (alternate != null && alternate.isFile &&
+          alternate.canonicalFile.toPath().startsWith(directory.canonicalFile.toPath())) out += alternate
       }
     }
     out
