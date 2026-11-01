@@ -228,7 +228,7 @@ jobs:
       # 接线面聚合断言（0.13.8-b FX-208.2/E2）：本仓布局下解析到同名相对路径
       - name: 门禁接线面聚合断言
         if: always()
-        run: node scripts/check-release-gates.mjs
+        run: node scripts/check-release-gates.mjs && node scripts/check-vendor-provenance.mjs && node scripts/check-vendor-provenance.mjs --self-test
       # 制度性门禁（0.13.8-b 批 B2 ST-25/26/31）：状态登记制 / 桥面对称性 / 门禁覆盖与 SKIP 纪律。
       # 三者离线可跑（不依赖快照），故在 CI 与两条构建链同源；性能度量入口在无快照时计数 SKIP。
       - name: 制度性门禁（登记制 / 桥面对称 / SKIP 纪律）

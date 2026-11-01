@@ -289,6 +289,11 @@ const GATES = [
   // entry），故 check-engine-overlay 的正向闭包结构性看不见它。判据 = 宿主包运行期依赖的**闭包**
   // 在快照内全部可解析；上游再换包名/加依赖即判红。输入在快照面 ⇒ needsSnapshot=true。
   { script: 'check-mcp-client-deps.mjs', ciApk: false, ciCoord: false, needsSnapshot: true },
+  // vendored 目录的字节绑定（issue #1285）：vendor/dsh-plugin-subscriptions 此前只按版本字符串
+  // 钉住，PROVENANCE 记的 tarball shasum/sha512 无任何门禁消费 ⇒ 手改一个 lib/*.js 也能出厂。
+  // 判据 = 逐文件 sha256 + 字节数与 scripts/vendor-provenance.json 相符（另含目录自述数字）。
+  // 输入全在仓库内（不读网络、不需要快照），故 ciApk/ciCoord 皆 true。
+  { script: 'check-vendor-provenance.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
 ]
 const CI_COORD_GATES = GATES.filter((g) => g.ciCoord).map((g) => g.script)
 const CI_APK_GATES = GATES.filter((g) => g.ciApk).map((g) => g.script)

@@ -88,6 +88,9 @@ const GATE_SCRIPTS = [
   // 登记进 GATE_SCRIPTS 是硬要求：check-release-gates 断言两份编排器门禁集差集 = 0。
   'check-degrade-source-of-truth.mjs',
   'check-manifest-hardening.mjs',
+  // vendored 字节绑定（issue #1285）：vendor/dsh-plugin-subscriptions 的逐文件 sha256 必须与
+  // scripts/vendor-provenance.json 相符。此前没有任何门禁消费 PROVENANCE 的哈希，手改 lib/*.js 也能出厂。
+  'check-vendor-provenance.mjs',
   // 0.14.8 堆下限：壳侧 shellEnv() 与快照内启动器必须给出同一 clamp 区间（单边漂移 = 部分路径仍 OOM）。
   'check-engine-heap-floor.mjs',
   'check-bounded-io.mjs',
@@ -234,6 +237,10 @@ try {
   run('node', [gate('check-snapshot-fingerprint.mjs')])
   log('门禁：manifest 加固语义…')
   run('node', [gate('check-manifest-hardening.mjs')])
+  // vendored 字节绑定（issue #1285）：只读仓库里的 vendor/ 与 scripts/vendor-provenance.json，
+  // 与 ABI、快照都无关，所以放在 ABI 循环外跑一次。缺它的话改一个 lib/*.js 也能照常出厂。
+  log('门禁：vendored 目录字节绑定…')
+  run('node', [gate('check-vendor-provenance.mjs')])
   // 0.14.8 堆下限：壳侧 shellEnv() 与快照内启动器必须给出同一 clamp 区间（单边漂移 = 部分路径仍 OOM）。
   log('门禁：引擎堆下限双源一致性…')
   run('node', [gate('check-engine-heap-floor.mjs')])
