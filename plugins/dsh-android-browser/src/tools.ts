@@ -205,7 +205,7 @@ function renderTabLine(raw: unknown, activeTabId: string): string {
   const tab = (raw !== null && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
   const tabId = typeof tab.tabId === 'string' && tab.tabId !== '' ? tab.tabId : '(未知页)'
   // issue #1200：url 由页面地址决定（history.pushState 可任意改写），同样必须单行化。
-  const urlRaw = oneLine(tab.url, 200)
+  const urlRaw = renderUrl(tab.url)
   const url = urlRaw === '' ? '(无地址)' : urlRaw
   const tabTitle = oneLineQuoted(tab.title)
   const title = tabTitle === '' ? '' : ' "' + tabTitle + '"'
@@ -445,7 +445,7 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
         // 现在动词、状态与原因都随 loadState 走（loadState=error 时给出可执行指引），模型才有可判别信号。
         render: (_args, v: Record<string, unknown>) => [{
           type: 'text',
-          text: (loadStateOf(v) === 'error' ? '打开失败 ' : '已打开 ') + oneLine(v.url, 200)
+          text: (loadStateOf(v) === 'error' ? '打开失败 ' : '已打开 ') + renderUrl(v.url)
             + '（页 ' + String(v.tabId) + '，代次 ' + String(v.pageGeneration) + '）'
             + renderTitle(v) + renderLoadState(v),
         }],
@@ -534,7 +534,7 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
           // 必须把 ref 行显式渲染出来（用户实报：只报计数时 click/type 完全不可用）。
           const blocks: Array<{ type: 'text'; text: string }> = [
             // title 此前 schema 已声明却从不渲染（G2a-4 实测命中）：模型看不到当前是哪一页。
-            { type: 'text', text: '快照 ' + String(nodes.length) + ' 个可交互节点（' + oneLine(v.url, 200) + '，代次 ' + String(v.pageGeneration)
+            { type: 'text', text: '快照 ' + String(nodes.length) + ' 个可交互节点（' + renderUrl(v.url) + '，代次 ' + String(v.pageGeneration)
               + '）' + renderTitle(v) },
             { type: 'text', text: renderSnapshotNodes(nodes) },
           ]
@@ -593,7 +593,7 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
           title: { type: 'string' },
           reason: { type: 'string' },
         }),
-        render: (_args, v: Record<string, unknown>) => [{ type: 'text', text: (loadStateOf(v) === 'error' ? '点击后页面失败 ' : '已点击 ') + oneLine(v.url, 200)
+        render: (_args, v: Record<string, unknown>) => [{ type: 'text', text: (loadStateOf(v) === 'error' ? '点击后页面失败 ' : '已点击 ') + renderUrl(v.url)
           + renderTitle(v) + renderLoadState(v) }],
       },
       execute: async ({ ref }: { ref: string }, exec) => {
@@ -638,7 +638,7 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
         // url 此前 schema 已声明却从不渲染（G2a-4 实测命中）：输入后模型看不到页面是否被跳转
         // （表单提交类输入会引发导航），也就无法判断该不该重新 snapshot。
         render: (_args, v: Record<string, unknown>) => [{ type: 'text', text: (loadStateOf(v) === 'error' ? '输入后页面失败 ' : '已输入文本 ') + '（当前值 ' + oneLine(v.value, 40)
-          + (oneLine(v.url, 200) !== '' ? '，当前页 ' + oneLine(v.url, 200) : '') + '）'
+          + (renderUrl(v.url) !== '' ? '，当前页 ' + renderUrl(v.url) : '') + '）'
           + renderTitle(v) + renderLoadState(v) }],
       },
       execute: async ({ ref, text, replace }: { ref: string; text: string; replace?: boolean }, exec) => {
@@ -677,7 +677,7 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
           title: { type: 'string' },
           reason: { type: 'string' },
         }),
-        render: (_args, v: Record<string, unknown>) => [{ type: 'text', text: (loadStateOf(v) === 'error' ? '按键后页面失败 ' : '已发送按键 ') + oneLine(v.url, 200)
+        render: (_args, v: Record<string, unknown>) => [{ type: 'text', text: (loadStateOf(v) === 'error' ? '按键后页面失败 ' : '已发送按键 ') + renderUrl(v.url)
           + renderTitle(v) + renderLoadState(v) }],
       },
       execute: async ({ key }: { key: string }, exec) => {
@@ -835,7 +835,7 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
         }),
         render: (_args, v: Record<string, unknown>) => [{
           type: 'text',
-          text: (loadStateOf(v) === 'error' ? '导航失败 ' : '已导航 ') + oneLine(v.url, 200)
+          text: (loadStateOf(v) === 'error' ? '导航失败 ' : '已导航 ') + renderUrl(v.url)
             + renderTitle(v) + renderLoadState(v),
         }],
       },
@@ -871,7 +871,7 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
           reason: { type: 'string' },
         }),
         // 回执按**真实 loadState** 判定（不再恒报「已后退」）：error 时给失败动词 + reason + 指引。
-        render: (_args, v: Record<string, unknown>) => [{ type: 'text', text: (loadStateOf(v) === 'error' ? '后退失败 ' : '已后退 ') + oneLine(v.url, 200)
+        render: (_args, v: Record<string, unknown>) => [{ type: 'text', text: (loadStateOf(v) === 'error' ? '后退失败 ' : '已后退 ') + renderUrl(v.url)
           + renderTitle(v) + renderLoadState(v) }],
       },
       execute: async (_args, exec) => {
@@ -905,7 +905,7 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
           title: { type: 'string' },
           reason: { type: 'string' },
         }),
-        render: (_args, v: Record<string, unknown>) => [{ type: 'text', text: (loadStateOf(v) === 'error' ? '前进失败 ' : '已前进 ') + oneLine(v.url, 200)
+        render: (_args, v: Record<string, unknown>) => [{ type: 'text', text: (loadStateOf(v) === 'error' ? '前进失败 ' : '已前进 ') + renderUrl(v.url)
           + renderTitle(v) + renderLoadState(v) }],
       },
       execute: async (_args, exec) => {
@@ -939,7 +939,7 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
           reason: { type: 'string' },
         }),
         // 措辞刻意区分「已请求」与「已加载完成」：重载是异步的，回执只能反映**此刻**的 loadState。
-        render: (_args, v: Record<string, unknown>) => [{ type: 'text', text: (loadStateOf(v) === 'error' ? '重载失败 ' : '已请求重载 ') + oneLine(v.url, 200)
+        render: (_args, v: Record<string, unknown>) => [{ type: 'text', text: (loadStateOf(v) === 'error' ? '重载失败 ' : '已请求重载 ') + renderUrl(v.url)
           + renderTitle(v) + renderLoadState(v) }],
       },
       execute: async (_args, exec) => {
@@ -1167,4 +1167,36 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
 
   // 档位工具（android_browser_tier）由 index.ts 注册（依赖 index 的 tier 报告）；这里只补动作工具面。
   return tools.map(withFailureText)
+}
+
+/**
+ * 单行化 + **显式**截断标记（issue #1287 ①）。
+ *
+ * 原实现 `oneLine(url, 200)` 把超长 URL 直接切掉且不加任何提示：带查询串的 URL 很容易
+ * 超过 200 字符，模型据此判断「当前在哪一页」就会错，而回执里看不到任何「这已经被截断」的
+ * 迹象。**静默截断比报错更坏**：它给出一个看起来完整、实际错误的答案。
+ *
+ * 所以超长时在尾部补 `…(共 N 字符，已截断)`：既要能放进行（行边界必须由我们产生），
+ * 又要让截断这件事在回执里**可读出来**。标记本身也算进 max，因此先算标记再截内容，
+ * 避免「标记被自己截掉」。
+ * @param value - 页面可控字符串。
+ * @param max - 该字段允许的最大显示长度（含标记）。
+ * @returns 单行串；超长时带可见的截断说明。
+ */
+function oneLineVisible(value: unknown, max = 200): string {
+  const full = oneLine(value, Number.MAX_SAFE_INTEGER)
+  if (full.length <= max) return full
+  const note = `…(共 ${String(full.length)} 字符，已截断)`
+  // 标记比 max 还长（极端 max）时退化为「只放标记」，绝不产出被截掉一半的标记。
+  if (note.length >= max) return note
+  return full.slice(0, max - note.length) + note
+}
+
+/**
+ * URL 的回执口径：**永远不静默截断**（issue #1287 ①）。
+ * @param value - 页面报告的 URL。
+ * @returns 单行 URL，超长时带截断说明。
+ */
+function renderUrl(value: unknown): string {
+  return oneLineVisible(value, 200)
 }

@@ -17,6 +17,7 @@
  * - the directory is renamed first so a concurrent scan cannot observe a
  *   half-deleted session, then removed recursively.
  */
+import { lstatSync } from 'node:fs'
 import { mkdir, readdir, rename, rm, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
@@ -99,10 +100,13 @@ export async function findSessionDir(root, sessionId) {
  * @param {(info: { sessionId: string, dir: string }) => Promise<void>} [options.beforeRemove] - bookkeeping hook (unarchive/unpin).
  * @param {(info: { sessionId: string, dir: string }) => Promise<void>} [options.afterResolve] - runs once the directory is confirmed (unload the live session).
  * @param {(level: 'info'|'warn'|'error', message: string, extra?: object) => void} [options.logger] - step logger.
+ * @param {(target: string, options: object) => Promise<void>} [options.removeDir] - directory remover.
+ *   Injectable so a test can prove the **failure** path without needing a real unwritable directory
+ *   (issue #1287 ②): the interesting behaviour is what we report, not how we provoke the errno.
  * @returns {Promise<{ ok: true, sessionId: string, dir: string }>} outcome.
  * @throws {SessionDeleteError} on every refused state.
  */
-export async function deleteStoredSession({ home, sessionId, isActive, beforeRemove, afterResolve, logger }) {
+export async function deleteStoredSession({ home, sessionId, isActive, beforeRemove, afterResolve, logger, removeDir }) {
   const log = typeof logger === 'function' ? logger : () => {}
   assertSessionId(sessionId)
   log('info', 'delete requested', { sessionId, isActive: isActive === true })
@@ -163,12 +167,36 @@ export async function deleteStoredSession({ home, sessionId, isActive, beforeRem
   }
   try {
     log('info', 'removing session directory', { sessionId, dir: graveyard })
-    await rm(graveyard, { recursive: true, force: true })
+    const remove = typeof removeDir === 'function' ? removeDir : rm
+    await remove(graveyard, { recursive: true, force: true })
     log('info', 'session deleted', { sessionId })
   } catch (error) {
-    // 目录已离开扫描路径、内存也已卸载：对用户来说会话已经没了。残留的 graveyard 由
-    // sweepGraveyard 清（本函数已把它移出扫描路径，不构成「界面没了磁盘还在」）。
-    log('warn', 'session directory removed from the scan path but the final rm failed', { sessionId, graveyard, error: String(error?.message ?? error) })
+    // issue #1287 ②：这里**不能**再报 ok。
+    //
+    // 旧实现在最终 rm 失败时只 warn 一句、然后 return { ok: true }：会话已离开扫描路径、
+    // 内存也已卸载，界面上「看起来删掉了」，而磁盘上 100% 的会话数据停在
+    // `<dir>.deleting-*` 里，要等下次启动 sweepGraveyards 才清（实测 graveyard left=1、
+    // 回执 ok:true）。用户拿到的「成功」与磁盘事实相反，且**没有任何可行动的信息**。
+    //
+    // 现在：如实报失败，并把「修它需要什么」一起给出来 —— 路径（哪个目录）、errno
+    // （为什么失败）、是否残留（还能不能救）。只报一个 failed 而不给这三样，用户拿到失败也修不了。
+    const code = typeof error?.code === 'string' ? error.code : undefined
+    let leftover = false
+    try {
+      leftover = lstatSync(graveyard) !== null
+    } catch {
+      leftover = false
+    }
+    log('error', 'session directory removed from the scan path but the final rm failed', {
+      sessionId, dir, graveyard, code, leftover, error: String(error?.message ?? error),
+    })
+    throw new SessionDeleteError(
+      'delete-failed',
+      `the session was unloaded and moved out of the scan path, but its files could not be removed`
+        + ` (path=${graveyard}, errno=${code ?? 'unknown'}, leftover=${leftover ? 'yes' : 'no'})`
+        + ` — the leftover directory is cleaned on the next start, or you can remove it manually`,
+      { sessionId, dir, graveyard, errno: code, leftover },
+    )
   }
   return { ok: true, sessionId, dir }
 }
