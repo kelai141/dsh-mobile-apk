@@ -33,6 +33,7 @@ import { hasProfileLinkSkip, patchProfileLinkSkip } from './data/profile-link-sk
 import { hasTerminalShellCandidates, patchTerminalShellCandidates } from './data/terminal-shell-candidates-T1.mjs'
 import { hasZshFpath, patchZshFpath } from './data/subprocess-zsh-fpath-A1.mjs'
 import { hasManagedPortBind, patchManagedPortBind } from './data/managed-port-bind-EP1.mjs'
+import { IMAGE_HISTORY_CORE, planImageHistory } from './image-history-batch-offload-I1.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const registry = JSON.parse(readFileSync(join(HERE, 'registry.json'), 'utf8'))
@@ -226,6 +227,19 @@ const IMPLS = {
         ? s : loadImpl(runtime + '/' + file, CURRENT_STAGE_ROOT))
       for (const file of plan) if (file.file !== 'dist/api/openai-completions.js') IMPL_state[runtime + '/' + file.file] = file.after
       return plan.find(file => file.file === 'dist/api/openai-completions.js').after
+    },
+  },
+
+  'image-history-batch-offload-I1': {
+    file: IMAGE_HISTORY_CORE,
+    scope: 'engine',
+    check: (s) => planImageHistory(file => file === IMAGE_HISTORY_CORE
+      ? s : loadImpl(file, CURRENT_STAGE_ROOT)).every(file => file.before === file.after),
+    apply: (s) => {
+      const plan = planImageHistory(file => file === IMAGE_HISTORY_CORE
+        ? s : loadImpl(file, CURRENT_STAGE_ROOT))
+      for (const file of plan) if (file.file !== IMAGE_HISTORY_CORE) IMPL_state[file.file] = file.after
+      return plan.find(file => file.file === IMAGE_HISTORY_CORE).after
     },
   },
 
