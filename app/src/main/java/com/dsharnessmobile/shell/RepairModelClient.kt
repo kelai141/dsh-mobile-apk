@@ -73,11 +73,49 @@ internal class RepairModelClient {
   internal fun endpointFor(connection: RepairModelConnection): String {
     val base = normalizeModelBase(connection.baseUrl)
     require(base != null) { "模型端点必须是 http(s) 地址，且不得内嵌账号密码" }
-    return when (connection.api) {
-      "anthropic-messages" -> if (base.endsWith("/v1")) "$base/messages" else "$base/v1/messages"
-      "openai-responses" -> "$base/responses"
-      else -> "$base/chat/completions"
+    val suffix = when (connection.api) {
+      "anthropic-messages" -> if (base.substringBefore('?').endsWith("/v1")) "/messages" else "/v1/messages"
+      "openai-responses" -> "/responses"
+      else -> "/chat/completions"
     }
+    return appendEndpointPath(base, suffix)
+  }
+
+  /**
+   * 把请求路径拼到 base 上，且**把 base 自带的查询串留在最末**。
+   *
+   * 自部署网关常用 `http://host:8000/v1?token=…` 这种形态；直接 `base + "/chat/completions"`
+   * 会拼出 `…?token=…/chat/completions`（查询串把路径吃进去），请求必然打错地方。
+   * 这里先切出 path 再拼，最后接回原查询串与片段。
+   *
+   * @param base 已规范化的基址（可含查询串与片段）。
+   * @param suffix 要追加的路径，必须以 `/` 开头。
+   * @returns 可直接请求的完整端点。
+   */
+  internal fun appendEndpointPath(base: String, suffix: String): String {
+    val hash = base.indexOf('#')
+    val head = if (hash >= 0) base.substring(0, hash) else base
+    val tail = if (hash >= 0) base.substring(hash) else ""
+    val query = head.indexOf('?')
+    return if (query < 0) head + suffix + tail
+    else head.substring(0, query) + suffix + head.substring(query) + tail
+  }
+
+  /**
+   * 抹掉文本里任何 URL 的查询串。
+   *
+   * 放宽到明文 HTTP 之后，端点可能长成 `http://host:8000/v1?token=…`：底层异常消息会把整条 URL
+   * 带出来，而修复助手的失败文案会进聊天记录、`repair-model-source.json` 与共享诊断包。
+   * 查询串里恰恰是自部署网关最常见的放 key 位置，所以**一律不保留查询串内容**，只留路径。
+   *
+   * 凭据（userinfo）在准入层已被拒绝，不会出现在 URL 里；这里只处理查询串与片段。
+   *
+   * @param text 可能含 URL 的任意文本（通常是异常消息）。
+   * @returns 查询串被替换为 `?<redacted>` 的文本。
+   */
+  internal fun redactUrlQuery(text: String): String {
+    val withoutQuery = Regex("(https?://[^\\s?#]+)\\?[^\\s#]*").replace(text) { it.groupValues[1] + "?<redacted>" }
+    return Regex("(https?://[^\\s#]+)#[^\\s]*").replace(withoutQuery) { it.groupValues[1] + "#<redacted>" }
   }
 
   /**
@@ -369,7 +407,8 @@ internal class RepairModelClient {
       if (text.isBlank()) throw RepairModelFailure("模型返回空响应")
       return text
     } catch (e: RepairModelFailure) { throw e }
-    catch (e: Exception) { throw RepairModelFailure("模型连接失败：" + (e.message ?: e.javaClass.simpleName)) }
+    // 异常消息常带完整 URL：查询串必须抹掉再进文案（见 redactUrlQuery）。
+    catch (e: Exception) { throw RepairModelFailure("模型连接失败：" + redactUrlQuery(e.message ?: e.javaClass.simpleName)) }
     finally {
       active.compareAndSet(conn, null)
       conn.disconnect()
