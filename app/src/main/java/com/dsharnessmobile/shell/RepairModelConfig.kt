@@ -124,7 +124,14 @@ internal object RepairModelConfig {
     // 一层配置读出来的东西：既可能是候选，也可能「找到了条目但一条都不可用」（缺凭据等）。
     // 后者必须能被上层判读，否则「没配置」与「配了但缺凭据」在 UI 上是同一句话。
     class Layer {
+      /** 三条内置路径（pi-ai 路由 / 官方 DeepSeek / 默认模型选择）的配置。 */
       val configs = LinkedHashMap<String, RepairYamlValue.Mapping>()
+      /**
+       * 内置名单之外的条目：自定义 OpenAI 兼容 provider、订阅型 provider、用户自装的 llm 插件。
+       * 它们没有预设 schema，只能按「能拼出 route + model + baseURL + 凭据」泛化识别——
+       * 旧实现按 id 白名单整条丢弃，于是「设置 -> 模型」里自己加的 provider 一条都看不见。
+       */
+      val custom = LinkedHashMap<String, RepairYamlValue.Mapping>()
       val disabled = HashMap<String, Boolean>()
       fun apply(root: RepairYamlValue?, depth: Int = 0) {
         if (depth > 32) return
@@ -133,12 +140,28 @@ internal object RepairModelConfig {
           val entry = value as? RepairYamlValue.Mapping ?: continue
           apply(entry.sequence("insert"), depth + 1)
           val id = entry.string("id") ?: continue
-          if (id !in names || (entry.string("name") != null && entry.string("name") != names[id])) continue
-          if (entry.string("disabled") in setOf("true", "false")) disabled[id] = entry.string("disabled") == "true"
           val config = entry.mapping("config")
-          // An inserted provider with no explicit config still has its schema defaults.
-          if (config != null) configs[id] = merge(configs[id], config)
-          else if (entry.string("name") == names[id]) configs.putIfAbsent(id, RepairYamlValue.Mapping(LinkedHashMap()))
+          val declared = entry.string("name")
+          // name 只用来确认「这个 id 还是官方那个插件」。改名/自建的 fork 占着同一个 id 时，
+          // 它已经不是内置路径能读懂的东西了——但也不能整条丢，交给泛化扫描。
+          if (id in names && (declared == null || declared == names[id])) {
+            if (entry.string("disabled") in setOf("true", "false")) disabled[id] = entry.string("disabled") == "true"
+            // An inserted provider with no explicit config still has its schema defaults.
+            if (config != null) configs[id] = merge(configs[id], config)
+            else configs.putIfAbsent(id, RepairYamlValue.Mapping(LinkedHashMap()))
+          } else if (config != null) {
+            // 名单外的条目不再整条丢弃：它是不是 provider 由泛化扫描判，不看 id。
+            if (entry.string("disabled") in setOf("true", "false")) disabled[id] = entry.string("disabled") == "true"
+            custom[id] = merge(custom[id], config)
+          }
+        }
+      }
+
+      /** settings.yaml 是按 id 分节的旧式配置，不是 patch 序列，所以单独给一个入口。 */
+      fun legacy(root: RepairYamlValue.Mapping) {
+        for ((id, value) in root.values) {
+          val config = value as? RepairYamlValue.Mapping ?: continue
+          if (id in names) configs[id] = merge(configs[id], config) else custom[id] = merge(custom[id], config)
         }
       }
     }
@@ -148,26 +171,55 @@ internal object RepairModelConfig {
       var selectedEffort: String? = null
       var blocked: String? = null
     }
-    // 叠层语义不变：settings.yaml 是**底**，patch 覆盖它。旧实现只在「没迁移过」时铺这层底，
-    // 迁移过就整层跳过——marker 于是从「历史标记」变成了「以后别读旧文件」的开关。
-    // 但 marker 只证明曾经迁过，不证明迁移目标现在还在：patch 丢了/坏了/只含 persona 时，
-    // 两边都不读，候选数为 0（社群 2026-10-30 的现场）。所以这层底改成**按需铺**。
-    fun buildLayer(includeLegacy: Boolean, sink: MutableList<RepairModelSource>): Layer {
-      val layer = Layer()
-      val legacy = File(dsh, "settings.yaml")
-      if (includeLegacy) {
-        val root = readInto(sink, legacy) as? RepairYamlValue.Mapping
-        for (id in names.keys) root?.mapping(id)?.let { layer.configs[id] = it }
-      } else {
-        // 这轮按优先级没铺这层底，但仍要如实交代它的状态：文件在就记「跳过」，不在就记「不存在」。
-        // 旧实现连「有个文件被跳过了」都不记，用户拿到的唯一结论是「未读到可用模型」，
-        // 无从判断是没配置、没读到、还是读到了但不可用。
-        sink += RepairModelSource(rel(legacy), if (legacy.isFile) "skipped-legacy" else "missing")
+    // 叠层语义：settings.yaml 永远是底，patch 依次覆盖它。
+    //
+    // 这条底曾经被 settings.yaml.imported 这个 marker 整个关掉（if (!marker.isFile) { 读 }），
+    // 后来放宽成「patch 层没有候选时才回落读它」。两种写法是同一个误判的两种强度：marker 只证明
+    // 曾经迁过，既不证明迁移目标现在还在，也不证明用户的 provider 都搬到了 patch 里。只要 patch 层
+    // 碰巧产出了任何一条候选（哪怕是一条用户根本没在用的路由），真正被选中的那条就彻底不见了——
+    // 助手于是报「没有可用模型」，而引擎明明能用。
+    // 所以这层底改成无条件铺：优先级最低（同 id 的 patch 配置覆盖它），但没有任何标记能关掉它。
+    /**
+     * 取同一个目录下的 cordis.patch 文档：**两种扩展名都认**（.yaml 优先，其次 .yml）。
+     *
+     * 真机 16448 实测（2026-11-01）：web profile 下只有 `cordis.patch.yml`，`.dsh` 根下两份都没有；
+     * 但用户自建/手工编辑的现场会出现 `.yaml`（YAML 的常见扩展名），旧实现只拼 `.yml`，
+     * 于是那份配置整个读不到——这正是「助手说没模型、引擎却能用」的又一来源。
+     *
+     * 同目录下两份都在时**只取 `.yaml` 并显式记一条冲突来源**，不静默双用：两份配置叠起来会产生
+     * 用户没写过的合并结果（例如两边各写一半 provider），比缺一份更难排查。
+     *
+     * @param sink 来源表收集器，冲突时在这里留痕。
+     * @param directory 文档所在目录。
+     * @returns 存在的候选文件（0 或 1 个）；都不存在时返回空列表，并由这里记一条 missing。
+     */
+    fun firstPatch(sink: MutableList<RepairModelSource>, directory: File): List<File> {
+      val yaml = File(directory, "cordis.patch.yaml")
+      val yml = File(directory, "cordis.patch.yml")
+      val yamlExists = yaml.isFile
+      val ymlExists = yml.isFile
+      return when {
+        yamlExists && ymlExists -> {
+          sink += RepairModelSource(rel(yml), "conflict-skipped")
+          listOf(yaml)
+        }
+        yamlExists -> listOf(yaml)
+        ymlExists -> listOf(yml)
+        else -> {
+          // 两份都不在：如实记一条 missing（沿用 .yml 的展示路径，避免来源表里出现两条 missing）。
+          sink += RepairModelSource(rel(yml), "missing")
+          emptyList()
+        }
       }
+    }
+
+    fun buildLayer(sink: MutableList<RepairModelSource>): Layer {
+      val layer = Layer()
+      (readInto(sink, File(dsh, "settings.yaml")) as? RepairYamlValue.Mapping)?.let(layer::legacy)
       val profileDir = File(dsh, "profiles/web")
       for (document in selectedBundlePatches(home, profileDir)) layer.apply(readInto(sink, document))
-      layer.apply(readInto(sink, File(profileDir, "cordis.patch.yml")))
-      layer.apply(readInto(sink, File(dsh, "cordis.patch.yml")))
+      for (document in firstPatch(sink, profileDir)) layer.apply(readInto(sink, document))
+      for (document in firstPatch(sink, dsh)) layer.apply(readInto(sink, document))
       return layer
     }
     val allCredentials = credentials + environment.filterValues { it.isNotBlank() }.filterKeys { it !in credentials }
@@ -192,31 +244,19 @@ internal object RepairModelConfig {
         if (official != null) addOfficial(official, credentials, environment, out.connections,
           out.selected?.takeIf { it.first == "deepseek-official" }?.second, ::note)
       }
+      // 泛化面：不在三条内置路径里的条目，只要能拼出 provider + model + baseURL + 凭据就算候选。
+      // 内置路径先跑（保持既有优先级），泛化候选只做补充；去重由 order() 的 identity 负责。
+      for ((id, config) in layer.custom) {
+        if (layer.disabled[id] == true) continue
+        addGeneric(id, config, allCredentials, out.connections, ::note)
+      }
       return out
     }
-    val migrated = File(dsh, "settings.yaml.imported").isFile
-    val primarySources = ArrayList<RepairModelSource>()
-    var resolved = resolve(buildLayer(includeLegacy = !migrated, primarySources))
-    var finalSources: MutableList<RepairModelSource> = primarySources
-    var blockedReason = resolved.blocked
-    // 回落只在「一条候选都没有」时发生。不按「文件在不在」判——用户可能把配置写在旧文件里，
-    // 而新文件存在却只含 persona；那种情况同样需要回落。
-    if (resolved.connections.isEmpty() && migrated) {
-      val fallbackSources = ArrayList<RepairModelSource>()
-      val fallback = resolve(buildLayer(includeLegacy = true, fallbackSources))
-      if (fallback.connections.isNotEmpty()) {
-        resolved = fallback
-        blockedReason = null
-        fallbackSources += RepairModelSource(rel(File(dsh, "settings.yaml")), "fallback-used")
-        finalSources = fallbackSources
-      } else if (blockedReason == null) {
-        // 两层都没候选：优先保留「配了但缺凭据」这种可执行的说明，而不是笼统的「没配置」。
-        blockedReason = fallback.blocked
-      }
-    }
-    sources += finalSources
+    // 只有一层：settings.yaml 打底，patch 覆盖。回落机制随之取消——它存在的唯一理由是
+    // 「旧文件要不要读」取决于别的层有没有候选，而这正是误判本身（见 buildLayer 注释）。
+    val resolved = resolve(buildLayer(sources))
     // 有配置却一条候选都没产出来：把原因写进来源表，UI 才有话可说。
-    if (resolved.connections.isEmpty()) blockedReason?.let { reason ->
+    if (resolved.connections.isEmpty()) resolved.blocked?.let { reason ->
       sources += RepairModelSource(rel(File(dsh, "settings.yaml")), reason)
     }
     val attempts = resolved.connections.map { connection ->
@@ -274,7 +314,17 @@ internal object RepairModelConfig {
       }
       for (relative in paths.take(32)) {
         val file = File(directory, relative)
-        if (!File(relative).isAbsolute && file.canonicalFile.toPath().startsWith(directory.canonicalFile.toPath())) out += file
+        if (File(relative).isAbsolute || !file.canonicalFile.toPath().startsWith(directory.canonicalFile.toPath())) continue
+        // 声明里写 .yml 但实物是 .yaml（或反过来）时按另一个扩展名兜一次：bundle 作者换扩展名
+        // 不该让整条 bundle 的 provider 消失。两边都在时仍只用声明里的那一个。
+        if (file.isFile) { out += file; continue }
+        val alternate = when {
+          relative.endsWith(".yml") -> File(directory, relative.dropLast(4) + ".yaml")
+          relative.endsWith(".yaml") -> File(directory, relative.dropLast(5) + ".yml")
+          else -> null
+        }
+        if (alternate != null && alternate.isFile &&
+          alternate.canonicalFile.toPath().startsWith(directory.canonicalFile.toPath())) out += alternate
       }
     }
     out
@@ -318,30 +368,14 @@ internal object RepairModelConfig {
       val base = profile.string("baseURL") ?: continue
       val api = profile.string("api") ?: "openai-completions"
       val display = profile.string("displayName") ?: route
-      val headers = headers(profile)
+      val routeHeaders = headers(profile)
       val models = profile.sequence("models")?.values?.mapNotNull { item ->
         val entry = item as? RepairYamlValue.Mapping ?: return@mapNotNull null
         val id = entry.string("id") ?: return@mapNotNull null
         Triple(entry.string("name") ?: id, id, entry)
       } ?: continue
       for ((modelName, id, entry) in models) {
-        val compat = entry.mapping("compat")
-        out += RepairModelConnection(
-          provider = route, providerLabel = display, modelLabel = modelName,
-          model = id, baseUrl = base, api = api, key = key, headers = headers,
-          reasoningEfforts = repairReasoningEfforts(entry.mapping("reasoningEfforts")),
-          supportsReasoningEffort = compat?.boolean("supportsReasoningEffort"),
-          thinkingFormat = compat?.string("thinkingFormat"),
-          requiresReasoningContentOnAssistantMessages =
-            compat?.boolean("requiresReasoningContentOnAssistantMessages") == true,
-          maxTokensField = compat?.string("maxTokensField"),
-          // OpenAI-compatible gateways use the native assistant(tool_calls) +
-          // tool(result) protocol. A provider may opt into an explicit
-          // user-observation projection in its own compat block, but route
-          // names are not a safe proxy: rewriting every completed tool turn
-          // both mutates provider history and prevents stable prefix caching.
-          toolHistoryMode = compat?.string("toolHistoryMode")?.takeIf { it.isNotBlank() },
-        )
+        out += connection(route, display, base, api, key, routeHeaders, modelName, id, entry)
       }
     }
   }
@@ -370,21 +404,135 @@ internal object RepairModelConfig {
       ),
     )
     val route = "deepseek-official"
-    val headers = headers(config)
+    val routeHeaders = headers(config)
     for ((modelName, id, entry) in models) {
-      val compat = entry.mapping("compat")
-      out += RepairModelConnection(
-        provider = route, providerLabel = "DeepSeek", modelLabel = modelName,
-        model = id, baseUrl = base, api = "anthropic-messages", key = key, headers = headers,
-        reasoningEfforts = repairReasoningEfforts(entry.mapping("reasoningEfforts")),
-        supportsReasoningEffort = compat?.boolean("supportsReasoningEffort"),
-        thinkingFormat = compat?.string("thinkingFormat"),
-        requiresReasoningContentOnAssistantMessages =
-          compat?.boolean("requiresReasoningContentOnAssistantMessages") == true,
-        maxTokensField = compat?.string("maxTokensField"),
-        toolHistoryMode = compat?.string("toolHistoryMode"),
-      )
+      out += connection(route, "DeepSeek", base, "anthropic-messages", key, routeHeaders, modelName, id, entry)
     }
+  }
+
+  /**
+   * 泛化 provider 发现。
+   *
+   * 旧实现只认三条内置 id（llm-pi-ai / llm-deepseek / agent-default-model），名单外的条目
+   * 整条丢弃。可「设置 -> 模型」里加的自定义 OpenAI 兼容 provider 是独立插件 id，订阅型
+   * provider 同理——用户明明能用，助手却报「没有可用模型」，属于假阴性。
+   *
+   * 判据只有一条：这份配置能不能拼出 路由 + 至少一个模型 + baseURL + 可解析的凭据。
+   * 拼不出来就不是 provider（persona、locale 之类），拼得出来就是候选，不看 id 叫什么。
+   *
+   * @param id 条目的插件 id；扁平形态下同时充当路由名。
+   * @param config 条目的 config 映射。
+   * @param credentials 已解析的凭据（.credentials.yaml 的 refs + 进程环境）。
+   * @param out 候选收集器。
+   * @param noteBlocked 「像 provider 但缺凭据」时留痕，供 UI 说清原因。
+   */
+  private fun addGeneric(
+    id: String,
+    config: RepairYamlValue.Mapping,
+    credentials: Map<String, String>,
+    out: MutableList<RepairModelConnection>,
+    noteBlocked: (String) -> Unit = {},
+  ) {
+    val providers = config.mapping("providers")
+    if (providers != null) {
+      // providers 映射形态：每个子项自己是一条路由，路由名就是它的键。
+      for ((route, value) in providers.values) {
+        val profile = value as? RepairYamlValue.Mapping ?: continue
+        addGenericRoute(route, route, profile, credentials, out, noteBlocked)
+      }
+      return
+    }
+    // 扁平形态：整份 config 就是一条路由，插件 id 兼作路由名。
+    addGenericRoute(id, id, config, credentials, out, noteBlocked)
+  }
+
+  private fun addGenericRoute(
+    route: String,
+    fallbackLabel: String,
+    profile: RepairYamlValue.Mapping,
+    credentials: Map<String, String>,
+    out: MutableList<RepairModelConnection>,
+    noteBlocked: (String) -> Unit,
+  ) {
+    // 没有 baseURL 就不猜端点：猜错等于给用户一条注定失败的候选，比不给更糟。
+    val base = profile.string("baseURL") ?: profile.string("baseUrl") ?: return
+    val key = genericCredential(profile, credentials)
+    if (key == null) {
+      // 只对「确实声明了凭据引用」的条目留痕，免得把无关配置记成缺凭据。
+      if (profile.string("apiKeyEnv") != null || profile.string("tokenEnv") != null) {
+        noteBlocked("no-credential")
+      }
+      return
+    }
+    val models = profile.sequence("models")?.values?.mapNotNull { item ->
+      val entry = item as? RepairYamlValue.Mapping ?: return@mapNotNull null
+      val modelId = entry.string("id") ?: entry.string("model") ?: return@mapNotNull null
+      Triple(entry.string("name") ?: modelId, modelId, entry)
+    }.orEmpty().ifEmpty {
+      val single = profile.string("model") ?: profile.string("modelId") ?: profile.string("defaultModel")
+      listOfNotNull(single?.takeIf { it.isNotBlank() }
+        ?.let { Triple(it, it, RepairYamlValue.Mapping(LinkedHashMap())) })
+    }
+    if (models.isEmpty()) return
+    val api = profile.string("api") ?: "openai-completions"
+    val display = profile.string("displayName") ?: profile.string("label") ?: fallbackLabel
+    val routeHeaders = headers(profile)
+    for ((modelName, modelId, entry) in models) {
+      out += connection(route, display, base, api, key, routeHeaders, modelName, modelId, entry)
+    }
+  }
+
+  /**
+   * 凭据解析：先认引用，再认字面量。
+   *
+   * 引用（apiKeyEnv / apiKeyRef / tokenEnv / tokenRef）指向 .credentials.yaml 的 refs 或进程环境；
+   * 字面量（apiKey / token / accessToken）是用户直接写在配置里的值，也可能只是写了个 ref 名。
+   * 无论哪条路径，值都只进内存里的候选，不落盘、不打印、不进来源表。
+   */
+  private fun genericCredential(profile: RepairYamlValue.Mapping, credentials: Map<String, String>): String? {
+    for (field in listOf("apiKeyEnv", "apiKeyRef", "tokenEnv", "tokenRef")) {
+      val ref = profile.string(field) ?: continue
+      credentials[ref]?.takeIf { it.isNotBlank() }?.let { return it }
+    }
+    for (field in listOf("apiKey", "token", "accessToken")) {
+      val literal = profile.string(field)?.takeIf { it.isNotBlank() } ?: continue
+      return credentials[literal] ?: literal
+    }
+    return null
+  }
+
+  /**
+   * 一条候选连接的唯一构造点。
+   *
+   * 三条路径（pi-ai 路由 / 官方 DeepSeek / 泛化扫描）的自适应字段完全一致；各写一份时
+   * 「新增一个 compat 字段只改了两处」这种漂移没法被任何测试发现。
+   */
+  private fun connection(
+    route: String,
+    display: String,
+    baseUrl: String,
+    api: String,
+    key: String,
+    headers: Map<String, String>,
+    modelName: String,
+    modelId: String,
+    entry: RepairYamlValue.Mapping,
+  ): RepairModelConnection {
+    val compat = entry.mapping("compat")
+    return RepairModelConnection(
+      provider = route, providerLabel = display, modelLabel = modelName,
+      model = modelId, baseUrl = baseUrl, api = api, key = key, headers = headers,
+      reasoningEfforts = repairReasoningEfforts(entry.mapping("reasoningEfforts")),
+      supportsReasoningEffort = compat?.boolean("supportsReasoningEffort"),
+      thinkingFormat = compat?.string("thinkingFormat"),
+      requiresReasoningContentOnAssistantMessages =
+        compat?.boolean("requiresReasoningContentOnAssistantMessages") == true,
+      maxTokensField = compat?.string("maxTokensField"),
+      // OpenAI 兼容网关走原生 assistant(tool_calls) + tool(result) 协议。provider 可以在自己的
+      // compat 块里显式选用别的投影，但路由名不是安全的代理判据：重写每一轮完成的工具回合既改
+      // 写 provider 历史，也会毁掉稳定前缀缓存。
+      toolHistoryMode = compat?.string("toolHistoryMode")?.takeIf { it.isNotBlank() },
+    )
   }
 
   private fun repairReasoningEfforts(mapping: RepairYamlValue.Mapping?): List<RepairReasoningEffort> {

@@ -70,16 +70,57 @@ internal class RepairModelClient {
     return RepairToolCallParser.normalize(result)
   }
 
-  private fun endpointFor(connection: RepairModelConnection): String {
-    val base = connection.baseUrl.trimEnd('/')
-    require(base.startsWith("https://") || base.startsWith("http://127.0.0.1") || base.startsWith("http://localhost")) {
-      "模型端点必须使用 HTTPS（本机回环除外）"
-    }
+  internal fun endpointFor(connection: RepairModelConnection): String {
+    val base = normalizeModelBase(connection.baseUrl)
+    require(base != null) { "模型端点必须是 http(s) 地址，且不得内嵌账号密码" }
     return when (connection.api) {
       "anthropic-messages" -> if (base.endsWith("/v1")) "$base/messages" else "$base/v1/messages"
       "openai-responses" -> "$base/responses"
       else -> "$base/chat/completions"
     }
+  }
+
+  /**
+   * 模型端点准入与规范化。
+   *
+   * 用户 2026-11-01 明确要求：**允许本地地址与明文 HTTP**（自部署模型很常见）。旧实现只放行
+   * `https://` 与两个回环字面量，于是自建网关（`http://192.168.x.x:8000/v1`、内网域名、
+   * `http://host:8000/v1`）在修复助手里一律被判「端点不合法」——引擎那边能用的配置，助手用不了。
+   *
+   * 取舍是显式的：明文 HTTP 的代价（同网段可被动嗅探/篡改凭据与内容）由用户自担，平台侧
+   * `network_security_config` 的 base-config 早已 `cleartextTrafficPermitted="true"`（见该文件
+   * 0.14.1 注释），所以这里是「准入面与平台面重新对齐」，不是新开一个口子。
+   *
+   * 仍然拒绝三类：非 http(s) scheme（file/javascript/data 等）、空 host、URL 里内嵌
+   * `user:pass@`（凭据会随请求发到第三方日志里）。
+   *
+   * @param raw 配置里的 baseURL 原文。
+   * @returns 去掉末尾斜杠、保留显式端口与路径前缀（含 IPv6 方括号）的基址；不合法返回 null。
+   */
+  internal fun normalizeModelBase(raw: String): String? {
+    val text = raw.trim()
+    if (text.isEmpty()) return null
+    val lower = text.lowercase()
+    val scheme = when {
+      lower.startsWith("https://") -> "https://"
+      lower.startsWith("http://") -> "http://"
+      else -> return null
+    }
+    val rest = text.substring(scheme.length)
+    // user:pass@host 形态：凭据会被写进 Authorization 之外的 URL，可能落到对端日志与重定向里。
+    val authority = rest.substringBefore('/').substringBefore('?').substringBefore('#')
+    if (authority.contains('@')) return null
+    val host = when {
+      authority.startsWith("[") -> {
+        val close = authority.indexOf(']')
+        if (close <= 1) return null
+        authority.substring(0, close + 1)
+      }
+      else -> authority.substringBefore(':')
+    }
+    if (host.isEmpty() || host == "[]") return null
+    // 保留显式端口、路径前缀与 IPv6 方括号，只收敛末尾斜杠。
+    return (scheme + rest).trimEnd('/')
   }
 
 

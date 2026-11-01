@@ -16,8 +16,11 @@ import org.junit.runner.RunWith
  * 设备层回归：修复助手在「引擎已死」现场能不能读到模型配置。
  *
  * 为什么是 instrumentation 而不是 JVM 单测：JVM 单测跑在宿主机临时目录，
- * 碰不到真实设备上的目录形态——尤其 `settings.yaml.imported` 这个 marker 是引擎迁移时写下的，
+ * 碰不到真实设备上的目录形态——尤其 `settings.yaml.imported` 由引擎迁移写下，
  * 而 `selectedBundlePatches()` 会去 `home.parentFile/usr/lib/node_modules/...` 找运行时清单。
+ *
+ * 当前契约：settings.yaml 无条件铺底、patch 按同一插件 id 深合并覆盖；marker 不参与读取，
+ * 也没有任何「按候选数回落」的分支。所以这里既断言候选读到了，也断言那两个旧状态再不会出现。
  *
  * ## 为什么不直接读写 filesDir/home
  *
@@ -56,7 +59,7 @@ class RepairModelFallbackDeviceTest {
     assertTrue("真实 home 必须原样存在", File(filesDir, "home").isDirectory)
   }
 
-  /** 社群现场：marker 在、settings.yaml 有 provider、凭据有 key、patch 不含模型键。 */
+  /** 社群现场：marker 在（现已不影响读取）、settings.yaml 有 provider、凭据有 key、patch 不含模型键。 */
   private fun communityScenario() {
     File(dsh, "settings.yaml.imported").writeText(COMMUNITY_SETTINGS)
     File(dsh, "settings.yaml").writeText(COMMUNITY_SETTINGS)
@@ -66,25 +69,28 @@ class RepairModelFallbackDeviceTest {
     File(dsh, "cordis.patch.yml").delete()
   }
 
-  // ── 1. 回落生效（社群现场）────────────────────────────────────────────────
+  // ── 1. 铺底生效（社群现场）────────────────────────────────────────────────
 
   @Test
-  fun 社群现场下修复助手能回落到settings读到模型() {
+  fun 社群现场下修复助手照样从settings读到模型() {
     communityScenario()
     val result = RepairModelConfig.loadDetailed(home)
     val statuses = result.sources.joinToString { it.path + "=" + it.status }
-    assertTrue("回落必须生效，实际来源：" + statuses, result.connections.isNotEmpty())
+    assertTrue("settings.yaml 必须无条件铺底，实际来源：" + statuses,
+      result.connections.isNotEmpty())
     assertEquals("demo-model", result.connections.single().model)
     assertEquals("community-demo", result.connections.single().provider)
     assertEquals("device-secret", result.connections.single().apiKey)
-    assertTrue("来源表必须标出回落生效：" + statuses,
-      result.sources.any { it.status == "fallback-used" })
+    assertTrue("来源表必须把 settings.yaml 记为已读取：" + statuses,
+      result.sources.any { it.path.endsWith("settings.yaml") && it.status == "parsed" })
+    assertFalse("回落/跳过状态已不再产出：" + statuses,
+      result.sources.any { it.status == "fallback-used" || it.status == "skipped-legacy" })
   }
 
-  // ── 2. skipped-legacy：活动配置有候选时，旧文件被跳过且留痕 ────────────────
+  // ── 2. 叠层：patch 只覆盖同名键，settings.yaml 里其余的仍参与 ──────────────
 
   @Test
-  fun 活动配置有候选时旧文件记为已跳过而不是静默消失() {
+  fun 活动配置与旧文件同时参与而不是互相顶掉() {
     File(dsh, "settings.yaml.imported").writeText(COMMUNITY_SETTINGS)
     File(dsh, "settings.yaml").writeText(COMMUNITY_SETTINGS)
     File(dsh, ".credentials.yaml").writeText(COMMUNITY_CREDENTIALS)
@@ -101,11 +107,16 @@ class RepairModelFallbackDeviceTest {
         "          - id: active-model\n",
     )
     val result = RepairModelConfig.loadDetailed(home)
-    assertEquals("活动配置优先", "active-model", result.connections.single().model)
     val statuses = result.sources.joinToString { it.path + "=" + it.status }
-    assertTrue("旧文件必须记为 skipped-legacy：" + statuses,
-      result.sources.any { it.path.endsWith("settings.yaml") && it.status == "skipped-legacy" })
-    assertFalse("不该回落：" + statuses, result.sources.any { it.status == "fallback-used" })
+    // 深合并只合并同名键：patch 新增了 active-demo，settings.yaml 里的 community-demo 不会被顶掉。
+    assertEquals("两条路由必须都在（实际：" + statuses + "）",
+      listOf("community-demo", "active-demo"), result.connections.map { it.provider })
+    assertEquals("patch 的模型值照旧生效", "active-model",
+      result.connections.single { it.provider == "active-demo" }.model)
+    assertTrue("settings.yaml 必须记为已读取：" + statuses,
+      result.sources.any { it.path.endsWith("settings.yaml") && it.status == "parsed" })
+    assertFalse("回落/跳过状态已不再产出：" + statuses,
+      result.sources.any { it.status == "fallback-used" || it.status == "skipped-legacy" })
   }
 
   // ── 3. 缺凭据：配了但用不了，必须与「没配置」分开 ─────────────────────────
@@ -138,8 +149,8 @@ class RepairModelFallbackDeviceTest {
     assertTrue("没有 settings.yaml 就没有候选：" + statuses, result.connections.isEmpty())
     assertTrue("来源必须如实记 missing：" + statuses,
       result.sources.any { it.path.endsWith("settings.yaml") && it.status == "missing" })
-    assertFalse("此时不该有 fallback-used：" + statuses,
-      result.sources.any { it.status == "fallback-used" })
+    assertFalse("回落/跳过状态已不再产出：" + statuses,
+      result.sources.any { it.status == "fallback-used" || it.status == "skipped-legacy" })
   }
 
   // ── 5. 隔离性自证：本类全程不碰真实 home ─────────────────────────────────

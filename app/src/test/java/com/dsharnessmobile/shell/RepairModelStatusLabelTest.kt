@@ -83,7 +83,7 @@ class RepairModelStatusLabelTest {
       val previous = seen.put(text, status)
       assertTrue("状态 $status 与 $previous 文案重复：$text", previous == null)
     }
-    assertEquals("已知状态数应与实现一致", 8, RepairModelNotice.KNOWN_STATUSES.size)
+    assertEquals("已知状态数应与实现一致", 9, RepairModelNotice.KNOWN_STATUSES.size)
   }
 
   // ── 5.5 根缺失（issue #1012）：必须与「文件不存在」可区分 ─────────────────

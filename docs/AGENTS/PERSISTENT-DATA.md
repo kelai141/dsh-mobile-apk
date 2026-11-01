@@ -77,7 +77,7 @@ If Safe Mode cannot restore startup, no uniquely attributable Soft plugin can be
 
 `files/.engine-endpoint.json` 保存 `{schema:1,port}`，仅供下次启动偏好。默认端口为 4145；占用时使用操作系统原子分配的端口。它不是监听器归属证明。绑定期间有效内存端口为 0，只有当前 spawn 世代、非轮转日志中的回环 token URL 可以发布实际端点。普通请求只读取内存，不做文件读或端口扫描。
 
-`native-repair` 偏好保存 `required` 与 `retries`。自动重试耗尽后暂停自动启动，但故障页始终可显式重试。用户点重试同时清除二者；普通返回或回前台不清预算。成功健康收敛也会清账。`repair-model-source.json` 仅为助手离线读取配置的诊断证据，保存路径、解析状态和候选数，不保存凭据或原文，不作为配置真源。它同时被只读复制进共享诊断包（`Documents/dshdata/diagnostics/<时间戳>-<原因>/`），因为引擎已死、助手打不开时，应用私有目录没有任何用户可达路径。状态取值见 `RepairModelConfig`：`parsed` / `missing` / `unsafe` / `invalid` / `skipped-legacy`（迁移后按优先级未读）/ `fallback-used`（活动配置无候选，回落读到）/ `no-credential`（配置可用但缺 API key）。
+`native-repair` 偏好保存 `required` 与 `retries`。自动重试耗尽后暂停自动启动，但故障页始终可显式重试。用户点重试同时清除二者；普通返回或回前台不清预算。成功健康收敛也会清账。`repair-model-source.json` 仅为助手离线读取配置的诊断证据，保存路径、解析状态和候选数，不保存凭据或原文，不作为配置真源。它同时被只读复制进共享诊断包（`Documents/dshdata/diagnostics/<时间戳>-<原因>/`），因为引擎已死、助手打不开时，应用私有目录没有任何用户可达路径。状态取值见 `RepairModelConfig`：`parsed` / `missing` / `unsafe` / `invalid` / `conflict-skipped`（同目录下 `.yaml` 与 `.yml` 两份 patch 都在，只取一份并留痕）/ `no-credential`（配置可用但缺 API key）/ `root-missing`（配置树根不存在，运行时还没解出来）。`skipped-legacy` 与 `fallback-used` 是**历史状态**（0.14.10 之前的「按 marker 跳过」与「无候选才回落」两套机制产出），现在不再产出，UI 仍保留文案只为容错旧诊断包。同一版起 `settings.yaml` 是**无条件铺的底层候选源**（patch 按 id 深合并覆盖它，`settings.yaml.imported` 不再参与「读不读」的判断），模型发现也不再受三条内置插件 id 限制。
 
 All listed preferences use app-private SharedPreferences storage. They survive APK upgrade and are outside snapshot restore. Keys below are current source constants or direct literals; dynamic key families are shown as patterns. The owner column names the source class responsible for reading/writing the keys.
 
