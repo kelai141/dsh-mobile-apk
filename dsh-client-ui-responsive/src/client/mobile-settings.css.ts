@@ -20,7 +20,19 @@
  */
 
 export const MOBILE_SETTINGS_CSS: string = `
-  html[data-dsh-mobile-form] [data-dsh-settings-dialog] {
+  /* 选择器必须带 [role="dialog"][aria-modal="true"] —— 这不是审美，是**优先级必需**。
+   *
+   * vendored 订阅插件（vendor/dsh-plugin-subscriptions/lib/client.js:4879）注入了一条全局规则：
+   *   div[role="dialog"][aria-modal="true"]:has(> nav) { padding-top: 14px }
+   * 它给**任何带 nav 的 dialog** 加 14px，我们的设置面板也命中。优先级对比：
+   *   它   div + [role] + [aria-modal] + :has(>nav)            = (0,2,2)
+   *   原来 html + [data-dsh-mobile-form] + [data-dsh-settings-dialog] = (0,2,1)  → 输给它
+   * 于是面板 padding-top 被压成 14px 而不是真实的 inset（实测 24px），
+   * 二级页顶部条又在正常流里，就站在那 14px 上 → 被状态栏遮住半截。
+   * 一级页顶部条原本是 absolute + top:inset，不吃面板 padding，所以**只有二级页坏** ——
+   * 这正是用户报的「一级正常、二级异常」。
+   * 提优先级到 (0,4,1) 即可稳压；不用 !important，也不用 :has()（本包要在老内核上生效）。 */
+  html[data-dsh-mobile-form] [data-dsh-settings-dialog][role='dialog'][aria-modal='true'] {
     position: relative;
     box-sizing: border-box;
     width: 100vw;
