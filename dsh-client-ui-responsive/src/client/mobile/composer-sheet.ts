@@ -44,7 +44,12 @@ const UPSTREAM_OPTION_SELECTOR = '[role="option"]'
 /** 等上游菜单出现的轮询间隔与超时（超时后按「没读到」处理，只留三块瓦片）。 */
 const MENU_POLL_INTERVAL_MS = 25
 const MENU_WAIT_TIMEOUT_MS = 3000
-/** 上游隐藏的 multiple file input：拍照/照片/本地文件都走它。 */
+/**
+ * 上游隐藏的 multiple file input：**照片 / 本地文件**两块瓦片走它。
+ *
+ * 拍照**不**走它（issue #1288 第 4 条）：WebView 里 `capture` 属性不被实现，
+ * 叠上去只会静默拉起图库 —— 这正是「点拍照却看到相册」的成因。拍照走壳侧原生相机。
+ */
 const FILE_INPUT_SELECTOR = 'input[type="file"][multiple]'
 /**
  * 上游编辑器根元素（ComposerContentEditable 渲染的 contenteditable div）。
@@ -63,6 +68,10 @@ const ROWS_ATTR = 'data-dsh-composer-sheet-rows'
 /** 关闭按钮（×）。三条关闭路径之一，必须与点外部 / 系统返回走同一个离场动画。 */
 const CLOSE_ATTR = 'data-dsh-composer-sheet-close'
 const ROW_ATTR = 'data-dsh-composer-sheet-row'
+/**
+ * 回执位（role=status）。原生拍照的结果是**异步一次性事件**，没有这处就只剩「点了没反应」。
+ */
+const STATUS_ATTR = 'data-dsh-composer-sheet-status'
 /**
  * 收场动画标记：挂在 backdrop 上，CSS 据此播放「飞回视口底」的退场动画。
  *
@@ -105,6 +114,73 @@ const ATTACHMENT_ROW_TITLES: ReadonlySet<string> = new Set([
 ])
 
 type TileKind = 'camera' | 'photo' | 'file'
+
+/**
+ * 壳侧原生拍照桥（issue #1288 第 4 条）。
+ *
+ * **对象名是小写 a 的 `androidBridge`**（MainActivity.addJavascriptInterface 注入的那个），
+ * 不是 `AndroidBridge`（Kotlin 类名，页面上不存在）。`capturePhoto(action)` 是
+ * `AndroidBridge.capturePhoto` 的 @JavascriptInterface 入口，动作名是闭集（目前只有 capture）。
+ *
+ * 类型按方法名现读而不是走 AndroidShellBridge 成员，与 file-card 的 bridgeFace 同款：
+ * 桥由壳侧在页面脚本之后注入，装配期捕获快照会拿到 undefined。
+ */
+function photoBridge(): ((action: string) => unknown) | null {
+  const bridge = (window as unknown as { androidBridge?: Record<string, unknown> }).androidBridge
+  const method = bridge?.['capturePhoto']
+  if (typeof method !== 'function') return null
+  return (action: string) => (method as (this: unknown, action: string) => unknown).call(bridge, action)
+}
+
+/** 壳侧回执的回调名（PhotoCaptureController.pushToPage 写死的那个）。 */
+const PHOTO_RECEIPT = 'onPhotoCaptured' as const
+
+/**
+ * 注入层 `window.__dshBridge` 的宿主对象（**只读地**取，绝不创建）。
+ *
+ * 见 installPhotoReceipt 的注释：那个对象由 host-web-compat 的 PICKER_SCRIPT 整体赋值，
+ * 我们先造一个空壳会让它的幂等守卫整段跳过。
+ */
+function pickerBridgeHost(): Record<string, unknown> | null {
+  const host = (window as unknown as { __dshBridge?: Record<string, unknown> }).__dshBridge
+  return host !== undefined && host !== null && typeof host === 'object' ? host : null
+}
+
+/** 桥返回/回执的 JSON 字符串（@JavascriptInterface 只能同步回字符串）解析成对象。 */
+function parseBridgeReply(raw: unknown): Record<string, unknown> | null {
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    // 回执走 evaluateJavascript 传参，理想是字符串；对象直接给了也认。
+    if (raw !== null && typeof raw === 'object') return raw as Record<string, unknown>
+    return null
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return parsed !== null && typeof parsed === 'object' ? parsed as Record<string, unknown> : null
+  } catch {
+    return null
+  }
+}
+
+/** 从解析后的载荷里取一个字符串字段（缺席/非字符串一律空串，不猜）。 */
+function stringField(payload: Record<string, unknown>, key: string): string {
+  const value = payload[key]
+  return typeof value === 'string' ? value : ''
+}
+
+/** 壳侧错误码 → 本模块文案 key。码值见 PhotoCapture.CODE_*，未知码不猜原因。 */
+function messageKeyForCode(code: string): ComposerSheetKey {
+  switch (code) {
+    case 'cancelled': return 'photoCancelled'
+    case 'permission-denied': return 'photoPermissionDenied'
+    case 'camera-unavailable': return 'photoUnavailable'
+    case 'camera-busy': return 'photoBusy'
+    case 'camera-failed': return 'photoFailed'
+    case 'compress-failed': return 'photoCompressFailed'
+    case 'busy': return 'photoInFlight'
+    case 'not-wired': return 'photoNotWired'
+    default: return 'photoUnknown'
+  }
+}
 
 /** 一条从上游菜单复制出来的行（index 是它在上游菜单里的位置，转发时按位取回）。 */
 interface MappedRow {
@@ -203,6 +279,8 @@ export class ComposerSheet {
   }
 
   private backdrop: HTMLElement | null = null
+  /** 面板里的回执位（每次 open 重建，close 时置空）。 */
+  private status: HTMLElement | null = null
   private addButton: HTMLElement | null = null
   private observer: MutationObserver | null = null
   private attached = false
@@ -384,6 +462,7 @@ export class ComposerSheet {
 
     panel.append(this.buildTiles(t))
     panel.append(rows)
+    panel.append(this.buildStatus())
     panel.append(this.buildClose(t))
 
     backdrop.append(panel)
@@ -562,6 +641,31 @@ export class ComposerSheet {
     return button
   }
 
+  /**
+   * 回执位：原生拍照那次调用的结果落在这里（role=status + aria-live，读屏与视觉同源）。
+   *
+   * 空文案时不占位（CSS `:empty`），有回执才出现 —— 否则面板会凭空空出一条。
+   */
+  private buildStatus(): HTMLElement {
+    const status = document.createElement('div')
+    status.setAttribute(STATUS_ATTR, '')
+    status.setAttribute('role', 'status')
+    status.setAttribute('aria-live', 'polite')
+    // 样式就地写在这几行上，**刻意不动 composer-sheet.css.ts**：本轮改动面限定在
+    // composer-sheet.ts + locales（同一插件里还有别的面板改动在并行进行）。
+    // 三条要点与 CSS 里的行列表同款：不参与弹性收缩（否则被行列表挤成 0 高）、
+    // 长文案换行而不是溢出、次要色（回执不是主内容）。
+    status.style.flex = 'none'
+    status.style.marginTop = '10px'
+    status.style.fontSize = '12px'
+    status.style.lineHeight = '16px'
+    status.style.color = 'var(--dsw-alias-label-secondary, inherit)'
+    status.style.whiteSpace = 'normal'
+    status.style.overflowWrap = 'anywhere'
+    this.status = status
+    return status
+  }
+
   private buildTiles(t: (key: ComposerSheetKey) => string): HTMLElement {
     const tiles = document.createElement('div')
     tiles.setAttribute(TILES_ATTR, '')
@@ -583,6 +687,16 @@ export class ComposerSheet {
       tile.addEventListener('click', (event) => {
         event.preventDefault()
         event.stopPropagation()
+        // 拍照走壳侧原生相机（issue #1288 第 4 条）；照片/本地文件仍走上游 file input。
+        // 三条路**互不回退**：拍照失败只报码，绝不偷偷拉起图库。
+        //
+        // 拍照这条**不关面板**：相机是另一个 Activity，回执在它返回之后才到；
+        // 面板正是这轮回执唯一的落点（role=status）。照片/文件仍先关再拉选择器 ——
+        // 那是同步交接，关闭面板不会丢掉任何回执。
+        if (kind === 'camera') {
+          this.capturePhoto()
+          return
+        }
         this.pickFile(kind)
       })
       tiles.append(tile)
@@ -840,8 +954,17 @@ export class ComposerSheet {
     if (editor !== null && !editor.contains(document.activeElement)) editor.focus()
   }
 
-  /** 拍照 / 照片 / 本地文件：都交给上游那个 hidden multiple file input。 */
-  private pickFile(kind: TileKind): void {
+  /**
+   * 照片 / 本地文件：交给上游那个 hidden multiple file input（行为不变）。
+   *
+   * 「拍照」**不在这里**：issue #1288 第 4 条实测，给 file input 叠 `capture="environment"`
+   * 并不能让系统拉起相机 —— Android WebView 的 `<input type=file>` 只认
+   * `accept`（它在 ACTION_GET_CONTENT / ACTION_OPEN_DOCUMENT 里表现为 MIME 过滤），
+   * `capture` 属性是 Chrome-for-Android 的**页面直采**扩展，WebView 里没有这条实现，
+   * 属性被整个忽略 → 用户点「拍照」看到的是图库/文件选择器。所以拍照走壳侧原生通道，
+   * 见 [capturePhoto]。
+   */
+  private pickFile(kind: Exclude<TileKind, 'camera'>): void {
     const card = this.addButton?.closest(CARD_SELECTOR) ?? document.querySelector(CARD_SELECTOR)
     const input = card?.querySelector<HTMLInputElement>(FILE_INPUT_SELECTOR) ?? null
     this.close()
@@ -849,23 +972,119 @@ export class ComposerSheet {
     if (kind === 'file') {
       // 本地文件保持上游默认（不限 accept），直接开。
       input.removeAttribute('accept')
-      input.removeAttribute('capture')
     } else {
-      // 拍照与照片共用 image/*：Android 的系统选择器把相机作为同一 picker 的一个来源；
-      // 拍照再叠 capture 让系统优先给相机。
+      // 照片走 image/*：系统选择器按 MIME 过滤出图片。**不设 capture**：见上面的实测结论，
+      // 它在 WebView 里不起作用，设了只会让「照片」和「拍照」看起来走了同一条路。
       input.setAttribute('accept', 'image/*')
-      if (kind === 'camera') input.setAttribute('capture', 'environment')
-      else input.removeAttribute('capture')
     }
+    // 历史属性的清场：旧实现给 input 叠过 capture，用户升级后那颗 input 上可能还留着值
+    // （同一颗 DOM 不重建就不刷新）。清掉它，避免「照片」意外命中残留的直采语义。
+    input.removeAttribute('capture')
     try {
       input.click()
     } finally {
-      // accept/capture 只影响这一次选择请求，选择器返回后清掉，避免污染后续「本地文件」。
+      // accept 只影响这一次选择请求，选择器返回后清掉，避免污染后续「本地文件」。
       window.setTimeout(() => {
         input.removeAttribute('accept')
-        input.removeAttribute('capture')
       }, 0)
     }
+  }
+
+  /**
+   * 「拍照」：调壳侧原生相机（issue #1288 第 4 条）。
+   *
+   * 契约（`AndroidBridge.capturePhoto(action)` / `PhotoCaptureController.handleBridgeAction`）：
+   *  - 入参：action 字符串，目前只有 `'capture'`；
+   *  - 同步返回：**只表示受理**，`{"ok":true,"accepted":true}`；没接线是
+   *    `{"ok":false,"code":"not-wired"}`。**不表示拍到了** —— 相机等待时间不可预知。
+   *  - 最终结果：壳侧经进程内回调 `window.__dshBridge.onPhotoCaptured(payload)` 推回，
+   *    成功 `{ok:true,path,mime,bytes,longEdge}`，失败 `{ok:false,code,message,detail}`，
+   *    code 取 PhotoCapture.CODE_*（cancelled / permission-denied / camera-unavailable /
+   *    camera-busy / camera-failed / compress-failed / busy / not-wired）。
+   *
+   * 照片本身由壳侧经**既有**来件通路（FileIncoming，与外部分享文件同一条）投进会话，
+   * 页面只负责发起与如实反馈，不自己搬运文件。
+   *
+   * **绝不回退 file input**：静默回退正是本 issue 的缺陷形态 —— 用户点「拍照」，
+   * 系统拉起图库，拍不到照却看不出哪里不对。没有桥时如实说「未接线」。
+   */
+  private capturePhoto(): void {
+    const t = this.text()
+    const bridge = photoBridge()
+    if (bridge === null) {
+      this.setStatus(t('photoNotWired'))
+      return
+    }
+    // 回调必须**先**挂上再发起：受理与回执之间的窗口里挂晚了就会丢第一条结果。
+    this.installPhotoReceipt()
+    let reply: unknown
+    try {
+      reply = bridge('capture')
+    } catch (error) {
+      // 桥调用抛错（ROM 拦截 / WebView 正在销毁）：如实报错，不吞。
+      this.setStatus(t('photoUnknown'), String(error))
+      return
+    }
+    const parsed = parseBridgeReply(reply)
+    if (parsed === null) {
+      // 返回值不是可解析的 JSON：无法判断受理与否。**不能当成功**。
+      this.setStatus(t('photoUnknown'), typeof reply === 'string' ? reply : '')
+      return
+    }
+    if (parsed.ok === true) {
+      this.setStatus(t('photoStarting'))
+      return
+    }
+    // 同步失败（通常是 not-wired / failed）：按码给文案。
+    this.setStatus(t(messageKeyForCode(stringField(parsed, 'code'))))
+  }
+
+  /**
+   * 把 `window.__dshBridge.onPhotoCaptured` 挂上（幂等）。
+   *
+   * **只增属性，绝不创建 `window.__dshBridge` 本身**：注入层的 PICKER_SCRIPT 是
+   * `if(window.__dshBridge){return}; window.__dshBridge={...}` 的**整体赋值 + 幂等守卫**，
+   * 我们先建一个空壳会让它整段跳过 —— 目录选择轮询与 pick-token 一起失效
+   * （host-web-compat lib/index.js:957-966）。那个脚本在 <head> 里随文档一起执行，
+   * 早于任何插件装配，所以本函数正常路径下总能挂到既有对象上。
+   */
+  private installPhotoReceipt(): void {
+    const host = pickerBridgeHost()
+    if (host === null) return
+    host[PHOTO_RECEIPT] = (payload: unknown): void => { this.onPhotoReceipt(payload) }
+  }
+
+  /** 壳侧回执：成功只说「正在加入会话」（投递本身在壳侧），失败按码提示。 */
+  private onPhotoReceipt(payload: unknown): void {
+    const t = this.text()
+    const parsed = parseBridgeReply(payload)
+    if (parsed === null) {
+      this.setStatus(t('photoUnknown'))
+      return
+    }
+    if (parsed.ok === true) {
+      this.setStatus(t('photoAccepted'))
+      return
+    }
+    const code = stringField(parsed, 'code')
+    // 取消不算错误：如实说「已取消」，不带红。
+    this.setStatus(t(messageKeyForCode(code)), stringField(parsed, 'detail'))
+  }
+
+  /**
+   * 面板里的回执位（role=status + aria-live，读屏与视觉同一处）。
+   *
+   * 为什么要有它：拍照是**一次性事件**且结果异步到达，没有这处就只剩「点了没反应」。
+   * 打开时为空（不占视觉），有回执才显示文字。
+   */
+  private setStatus(text: string, detail = ''): void {
+    const status = this.status
+    if (status === null) return
+    status.textContent = text
+    // detail 只做排查线索，挂 title 而不是正文：正文要短到一眼读完。
+    if (detail === '') status.removeAttribute('title')
+    else status.setAttribute('title', detail)
+    status.toggleAttribute('data-dsh-composer-sheet-status-set', true)
   }
 
   /** 临时把 inputmode 压成 none（关闭时逐个还原）。 */
@@ -903,6 +1122,8 @@ export class ComposerSheet {
       // 动画只是视觉上的余韵，不能让它决定「关没关」。
       const leaving = this.backdrop
       this.backdrop = null
+      // 回执位随面板一起失效：再往里写就是往即将离场的节点里写。
+      this.status = null
       this.playExit(leaving)
       if (this.addButton !== null) {
         if (this.previousExpanded === null) this.addButton.removeAttribute('aria-expanded')
