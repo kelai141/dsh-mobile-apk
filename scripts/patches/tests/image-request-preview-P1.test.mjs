@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, mkdirSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { readFileSync, mkdirSync, writeFileSync, mkdtempSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
@@ -9,6 +9,8 @@ import { versionedFixture } from './lib/fixture.mjs'
 import { patchRequestPreview, planRequestPreview, PREVIEW_LOCAL, PREVIEW_PI, PREVIEW_DEEPSEEK } from '../image-request-preview-P1.mjs'
 
 const targets = [[PREVIEW_LOCAL, 'local'], [PREVIEW_PI, 'pi'], [PREVIEW_DEEPSEEK, 'deepseek']]
+const repository = join(dirname(fileURLToPath(import.meta.url)), '../../..')
+const assetPath = [join(repository, 'app/src/main/assets/patched/attachment-local-index.js'), join(repository, 'dsh-mobile-apk/app/src/main/assets/patched/attachment-local-index.js')].find(existsSync)
 const files = {}
 for (const [file] of targets) {
   const name = file.split('/').at(-3)
@@ -110,4 +112,20 @@ test('真实补丁CLI完整预检、写回、重复应用与负控，不只验�
   assert.match(again.stdout, /changed=0/)
   writeFileSync(join(stage, PREVIEW_PI), readFileSync(join(stage, PREVIEW_PI), 'utf8').replace('1600 / Math.max(ref.width, ref.height)', '3200 / Math.max(ref.width, ref.height)'))
   assert.notEqual(run('--check').status, 0)
+})
+
+test('启动覆盖资产也必须压缩小图并声明清理兼容，旧资产负控必须失败', { skip: assetPath === undefined ? 'APK startup asset is absent in this source-only checkout' : false }, async () => {
+  async function probe(source) {
+    const encoded = { data: new Uint8Array([7]), mediaType: 'image/jpeg', width: 400, height: 800 }
+    const create = extract(source, 'createRequestImage', { pipeline: () => ({}), encodingLadder: () => [], encodeFirstWithinLimit: async () => encoded, isExhaustedEncoding: () => false })
+    const original = new Uint8Array([1, 2])
+    const result = await create({ ref: { width: 400, height: 800, mediaType: 'image/png' }, data: original }, { width: 400, height: 800, maxBytes: 1048576 }, false)
+    assert.equal(result, encoded)
+    const getter = source.match(/get imageExpirySupported\(\) \{ return true; \}/)?.[0]
+    assert.ok(getter, 'startup override must not silently disable manual image reclamation')
+    const Ready = Function('return class {' + getter + '}')()
+    assert.equal(new Ready().imageExpirySupported, true)
+  }
+  await assert.rejects(probe(files[PREVIEW_LOCAL]))
+  await probe(readFileSync(assetPath, 'utf8'))
 })
