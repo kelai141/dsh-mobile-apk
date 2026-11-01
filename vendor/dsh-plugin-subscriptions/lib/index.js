@@ -2459,19 +2459,30 @@ function parseRetryAfterMs(response) {
 }
 /**
 * Create an idle watchdog chained to the caller's signal.
+*
+* issue #1284 ①：旧实现每个收到的 chunk 都重置计时，于是「一直在送字节但完不成帧」的流
+* 把超时永远顶住（40 × 1 字节 @50ms 实测让 200ms 上限从未触发），同时把重组缓冲撑到 OOM。
+* 修法把两种进展拆开记账：`progress()` 记字节（传输仍活），`event()` 记帧（解析仍在推进）。
+* 只有**完全没进展**才中止；「有字节无帧」不中止但必须可观测（trickling），否则「慢但在走」
+* 与「真卡住」在外部无法区分，改计时器也就无法验收。
 * @param caller - the request's own abort signal, when present.
-* @param timeoutMs - maximum idle interval while a stream read is outstanding.
+* @param timeoutMs - maximum interval without any progress before aborting.
 * @returns the watchdog; always {@link IdleWatchdog.stop} it when the stream ends.
 */
 function idleWatchdog(caller, timeoutMs) {
 	const controller = new AbortController();
+	const startedAt = Date.now();
 	let expired = false;
 	let timer;
+	let lastProgressAt = startedAt;
+	let lastEventAt = startedAt;
+	let chunks = 0;
+	let events = 0;
 	const arm = () => {
 		if (timer !== void 0) clearTimeout(timer);
 		timer = setTimeout(() => {
 			expired = true;
-			controller.abort(/* @__PURE__ */ new Error(`stream idle timeout after ${String(timeoutMs)}ms`));
+			controller.abort(/* @__PURE__ */ new Error(`stream idle timeout after ${String(timeoutMs)}ms (no progress for ${String(Date.now() - lastProgressAt)}ms, ${String(chunks)} chunks, ${String(events)} events)`));
 		}, timeoutMs);
 		timer.unref();
 	};
@@ -2481,7 +2492,51 @@ function idleWatchdog(caller, timeoutMs) {
 	arm();
 	return {
 		signal: controller.signal,
-		pulse: arm,
+		/** 字节进展：重新开始计空闲区间。 */
+		progress() {
+			chunks += 1;
+			lastProgressAt = Date.now();
+			arm();
+		},
+		/** 旧调用点的别名。 */
+		pulse() {
+			this.progress();
+		},
+		/** 帧进展：重置「帧停滞」时钟（与字节进展分开记）。 */
+		event() {
+			events += 1;
+			lastEventAt = Date.now();
+		},
+		/**
+		* 可观测状态：区分「慢但在走」与「真卡住」。
+		* @returns 计数与判定（idle / trickling / healthy）。
+		*/
+		snapshot() {
+			const now = Date.now();
+			const sinceProgressMs = now - lastProgressAt;
+			const sinceEventMs = now - lastEventAt;
+			const elapsedMs = now - startedAt;
+			const trickling = !expired && chunks > 0 && sinceProgressMs < timeoutMs && sinceEventMs > timeoutMs;
+			return {
+				timeoutMs,
+				elapsedMs,
+				sinceProgressMs,
+				sinceEventMs,
+				chunks,
+				events,
+				trickling,
+				expired,
+				verdict: expired ? "idle" : trickling ? "trickling" : "healthy"
+			};
+		},
+		/**
+		* 贴进日志/支持报告的单行事实。
+		* @returns 人类可读状态行。
+		*/
+		stallReport() {
+			const s = this.snapshot();
+			return `stream ${s.verdict} ${String(s.elapsedMs)}ms of ${String(s.timeoutMs)}ms cap (last byte ${String(s.sinceProgressMs)}ms ago, last frame ${String(s.sinceEventMs)}ms ago, ${String(s.chunks)} chunks, ${String(s.events)} events)`;
+		},
 		stop() {
 			if (timer !== void 0) clearTimeout(timer);
 			caller?.removeEventListener("abort", onCallerAbort);
@@ -3059,10 +3114,26 @@ const ToolCallId = (() => {
 //#endregion
 //#region src/translate/sse.ts
 /**
+* Reassembly-buffer ceiling, in UTF-16 code units (what `String.length` counts).
+*
+* issue #1284 ① 的数值推导（不是拍脑袋的常数，改它之前请先重做这段推导）：
+* 缓冲只在**单帧未完成**时增长，所以要问的是「单个合法帧能有多大」，不是「响应能有多大」。
+*   · chat-completions / responses 的增量是 token 级；最大的单个增量是内联图片块，而本仓对
+*     单个提交附件的编码上限是 5 MiB（dsh-attachment-local："Default maximum encoded bytes
+*     for one submitted image"）；base64 后约 6.99 M 字符，加 JSON 外壳；
+*   · Anthropic 的 thinking 块与工具入参同样是一帧一个 JSON 对象；
+*   · 其余帧都在千字节量级（4k token 约 16 KiB）。
+* 因此合法上界由**附件上限**决定，而不是由响应总长度决定 —— 长对话是很多小帧，不是一个大帧。
+* 8 MiB = 8_388_608 字符 = 那 5 MiB 附件的 base64（约 6.99 M）+ 外壳与格式化余量，取到 2 的幂，
+* 便于与附件上限对照。超过它的不可能是合法单帧，只可能是恶意或损坏的流。
+*/
+const MAX_PENDING_CHARS = 8 * 1024 * 1024;
+/**
 * Decode an SSE byte stream into events.
 * @param stream - raw response bytes; reads may split anywhere, including mid-UTF-8 sequence.
-* @param onActivity - called on every received chunk and comment line; drives the idle watchdog.
+* @param onActivity - called when a read delivered bytes; drives the idle watchdog's byte progress.
 * @returns events in arrival order.
+* @throws when one frame exceeds {@link MAX_PENDING_CHARS} without a newline.
 */
 async function* parseSse(stream, onActivity) {
 	const reader = stream.getReader();
@@ -3070,12 +3141,33 @@ async function* parseSse(stream, onActivity) {
 	let pending = "";
 	let dataLines = [];
 	let eventName;
+	const dispatch = () => {
+		if (dataLines.length === 0 && eventName === void 0) return void 0;
+		const event = dataLines.length === 0 ? {
+			data: "",
+			...eventName === void 0 ? {} : { event: eventName }
+		} : {
+			data: dataLines.join("\n"),
+			...eventName === void 0 ? {} : { event: eventName }
+		};
+		dataLines = [];
+		eventName = void 0;
+		return event;
+	};
 	try {
 		while (true) {
 			const { done, value } = await reader.read();
-			if (done) return;
+			if (done) {
+				// issue #1284 ③：SSE 规范允许末帧不补空行。EOF 时把未派发的那一帧交出去，
+				// 否则三条 wire 会把合法的收尾当成 STREAM_CLOSED。
+				const tail = dispatch();
+				if (tail !== void 0) yield tail;
+				return;
+			}
 			onActivity?.();
 			pending += decoder.decode(value, { stream: true });
+			// 先判上限再扫描：不带换行的 chunk 不得无限制撑大缓冲。
+			if (pending.length > MAX_PENDING_CHARS) throw new Error(`SSE frame exceeded ${String(MAX_PENDING_CHARS)} chars without a newline (buffer reached ${String(pending.length)}); refusing to grow further`);
 			let newline = pending.indexOf("\n");
 			while (newline >= 0) {
 				let line = pending.slice(0, newline);
@@ -3083,12 +3175,8 @@ async function* parseSse(stream, onActivity) {
 				newline = pending.indexOf("\n");
 				if (line.endsWith("\r")) line = line.slice(0, -1);
 				if (line.length === 0) {
-					if (dataLines.length > 0) yield {
-						data: dataLines.join("\n"),
-						...eventName === void 0 ? {} : { event: eventName }
-					};
-					dataLines = [];
-					eventName = void 0;
+					const event = dispatch();
+					if (event !== void 0) yield event;
 				} else if (line.startsWith(":")) onActivity?.();
 				else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
 				else if (line.startsWith("event:")) eventName = line.slice(6).replace(/^ /, "");
@@ -4705,7 +4793,9 @@ var ClaudeAdapter = class extends LlmAdapter {
 			});
 			if (response.body === null) throw new LlmError("claude API returned no response body", EMPTY_RESPONSE_CODE);
 			yield* streamAnthropic(response.body, () => {
-				watchdog.pulse();
+				watchdog.progress();
+			}, () => {
+				watchdog.event();
 			});
 		} catch (error) {
 			throw mapFetchFailure("claude API", error, watchdog, options.signal);
@@ -5943,7 +6033,9 @@ var CodexAdapter = class extends LlmAdapter {
 			});
 			if (response.body === null) throw new LlmError("codex API returned no response body", EMPTY_RESPONSE_CODE);
 			yield* streamResponses(response.body, () => {
-				watchdog.pulse();
+				watchdog.progress();
+			}, void 0, () => {
+				watchdog.event();
 			});
 		} catch (error) {
 			throw mapFetchFailure("codex API", error, watchdog, options.signal);
@@ -7907,7 +7999,9 @@ var GrokAdapter = class extends LlmAdapter {
 			});
 			if (response.body === null) throw new LlmError("grok API returned no response body", EMPTY_RESPONSE_CODE);
 			yield* streamResponses(response.body, () => {
-				watchdog.pulse();
+				watchdog.progress();
+			}, void 0, () => {
+				watchdog.event();
 			});
 		} catch (error) {
 			throw mapFetchFailure("grok API", error, watchdog, options.signal);
@@ -9033,14 +9127,17 @@ var CopilotAdapter = class CopilotAdapter extends LlmAdapter {
 			if (!response.ok) throw await httpLlmError(response, "copilot API", { ...this.options.onWarn === void 0 ? {} : { onWarn: this.options.onWarn } });
 			if (response.body === null) throw new LlmError("copilot API returned no response body", EMPTY_RESPONSE_CODE);
 			const pulse = () => {
-				watchdog.pulse();
+				watchdog.progress();
+			};
+			const frame = () => {
+				watchdog.event();
 			};
 			if (wire === "responses") {
 				const normalizer = new CopilotResponsesItemNormalizer((callIds, items) => {
 					this.captureReasoning(scope, callIds, items);
 				});
-				yield* streamResponses(response.body, pulse, (event) => normalizer.push(event));
-			} else yield* streamChatCompletions(response.body, pulse);
+				yield* streamResponses(response.body, pulse, (event) => normalizer.push(event), frame);
+			} else yield* streamChatCompletions(response.body, pulse, frame);
 		} catch (error) {
 			throw mapFetchFailure("copilot API", error, watchdog, options.signal);
 		} finally {

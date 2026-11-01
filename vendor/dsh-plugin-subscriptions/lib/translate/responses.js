@@ -386,11 +386,17 @@ export class ResponsesStreamTranslator {
  * @param transform - optional per-event rewrite applied before translation
  *   (Copilot's gateway mints a fresh item id per event; the adapter rewrites
  *   them into stable per-item keys).
+ * @param onEvent - called per completed SSE frame; feeds the watchdog's
+ *   framing-stall accounting (optional).
  * @returns the chunk stream; throws when the stream ends before `response.completed`.
  */
-export async function* streamResponses(stream, onActivity, transform) {
+export async function* streamResponses(stream, onActivity, transform, onEvent) {
     const translator = new ResponsesStreamTranslator();
     for await (const sseEvent of parseSse(stream, onActivity)) {
+        // Report the completed frame separately from byte progress: the watchdog
+        // reports "bytes arriving, no event completed" as a trickle rather than
+        // as health (issue #1284 ①).
+        onEvent?.();
         let event;
         try {
             event = JSON.parse(sseEvent.data);

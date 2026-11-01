@@ -48,6 +48,11 @@ jobs:
       - name: Subscriptions proxy secret regressions
         if: always()
         run: node --test scripts/subs-proxy-secrets.test.mjs
+      # 订阅 provider 的 SSE 面（issue #1284）：pending 无上限 + 每 chunk 重置看门狗（既 OOM 又永不超时）、
+      # 以及末帧无空行即丢弃。三条都只能靠构造字节流复现，故单独跑这一份。
+      - name: Subscriptions SSE limit regressions
+        if: always()
+        run: node --test scripts/subs-sse-limits.test.mjs
       - name: APK 组装、版本与签名回归
         if: always()
         run: node --test scripts/check-apk-signatures.test.mjs scripts/resolve-version-suffix.test.mjs scripts/build-apk-engine.test.mjs scripts/check-third-party.test.mjs scripts/check-upstream-patch-bytes.test.mjs scripts/wsl-node-command.test.mjs scripts/check-bridge-symmetry.test.mjs scripts/check-snapshot-secrets.test.mjs
