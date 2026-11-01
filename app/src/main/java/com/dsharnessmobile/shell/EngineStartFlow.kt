@@ -1169,11 +1169,31 @@ internal class EngineStartFlow(private val activity: MainActivity) {
       //  - 无事务：等的是**本实例上一次启动流的收尾**，判据是 flowOwnership，预算数秒。
       // 把它们并成一个（例如复用 deferredStartRunnable 的 16 分钟预算）会让「上一次流收尾慢了」
       // 这种秒级情形也挂上 16 分钟等待者，用户点到按钮后毫无反馈。
+      // 【文案必须能区分两种状态】旧文案一律写「且无快照事务在场」，但**刷新正在进行**时
+      // 这句话是错的、而且误导排障方向：真正占用所有权的是正在跑的那次启动流（它内部正在
+      // 解压/合并），而不是「什么都没发生」。
+      //
+      // 为什么 journal 判据在刷新期会是 absent（这不是 bug，是时序）：STAGED marker 由
+      // EngineManager.refreshSnapshot 在**解压完成、swap 之前**才写（EngineManager.kt:351），
+      // 而解压本身要 8-12 分钟。设备实测（127.0.0.1:16448，覆盖安装 v0.14.9）正好落在这一段：
+      // boot-fail.log 里 transaction=absent + engineLog=empty + t_boot_start 有值。
+      //
+      // 判据用 RepairState.startupInProgress（= 本进程主启动流在跑）：它在 start() 抢到所有权后
+      // 立刻置 true（:595）、在 finally 里置 false（:1125），与「谁在占所有权」同一事实源。
+      val refreshing = RepairState.startupInProgress
       LogCollector.writeBootFail(
         activity, "engine-start-deferred-no-transaction",
-        "启动请求未获世代所有权（另一次启动流仍在占用），且无快照事务在场：本次请求未被受理，未拉起引擎；"
-          + "已安排按 " + NO_TRANSACTION_RETRY_STEP_MS + "ms 步进、上限 " + NO_TRANSACTION_RETRY_BUDGET_MS
-          + "ms 的自动重试，取得所有权后自动续跑。",
+        if (refreshing) {
+          ("启动请求撞上正在进行的运行时刷新（主启动流持有世代所有权，快照解压/合并尚未走到写事务 journal 的"
+            + "那一步，故此时 journal 判据为 absent——这不代表没有事务在跑）：本次请求未被受理，未拉起引擎；"
+            + "已安排按 " + NO_TRANSACTION_RETRY_STEP_MS + "ms 步进、上限 " + NO_TRANSACTION_RETRY_BUDGET_MS
+            + "ms 的自动重试，刷新收口后会重新尝试。")
+        } else {
+          ("启动请求未获世代所有权（另一次启动流仍在占用），且**确实**无快照事务在场"
+            + "（主启动流未在运行、journal 也为 absent）：本次请求未被受理，未拉起引擎；"
+            + "已安排按 " + NO_TRANSACTION_RETRY_STEP_MS + "ms 步进、上限 " + NO_TRANSACTION_RETRY_BUDGET_MS
+            + "ms 的自动重试，取得所有权后自动续跑。")
+        },
       )
       noTransactionRetry.attempts = 0
       engineMonitorHandler.postDelayed(noTransactionRetry, NO_TRANSACTION_RETRY_STEP_MS)
@@ -1267,11 +1287,19 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         }
         DeferredStartRetryDecision.TIMEOUT -> {
           attempts = 0
+          val stillRefreshing = RepairState.startupInProgress
           LogCollector.writeBootFail(
             activity, "engine-start-deferred-no-transaction-timeout",
-            "启动请求在 " + NO_TRANSACTION_RETRY_BUDGET_MS + "ms 重试预算内仍未取得世代所有权"
-              + "（另一次启动流仍在占用，且始终无快照事务在场）：本次启动请求未执行，也未拉起引擎；"
-              + "下一次入口（点按钮 / 回前台探活）会再次尝试。",
+            if (stillRefreshing) {
+              ("启动请求在 " + NO_TRANSACTION_RETRY_BUDGET_MS + "ms 重试预算内仍未取得世代所有权"
+                + "（运行时刷新仍在进行：主启动流持有所有权，且尚未走到写事务 journal 那一步）："
+                + "本次启动请求未执行，也未拉起引擎；刷新收口后由下一次入口（点按钮 / 回前台探活）续跑。"
+                + "解压典型耗时 8-12 分钟，此时**不要**关闭应用或强杀进程。")
+            } else {
+              ("启动请求在 " + NO_TRANSACTION_RETRY_BUDGET_MS + "ms 重试预算内仍未取得世代所有权"
+                + "（另一次启动流仍在占用，且**确实**无快照事务在场）：本次启动请求未执行，也未拉起引擎；"
+                + "下一次入口（点按钮 / 回前台探活）会再次尝试。")
+            },
           )
           return
         }

@@ -231,4 +231,59 @@ class NoTransactionStartRetryTest {
     assertTrue("长等待者仍用 16 分钟预算", long.contains("SNAPSHOT_TRANSACTION_WAIT_BUDGET_MS"))
     assertFalse("长等待者不得改用秒级预算", long.contains("NO_TRANSACTION_RETRY_BUDGET_MS"))
   }
+
+  /**
+   * 文案必须**区分**「刷新正在进行」与「确实无事务」两种状态。
+   *
+   * ## 缺陷（设备实证 127.0.0.1:16448，覆盖安装 v0.14.9）
+   *
+   * boot-fail.log 原文写的是「且无快照事务在场」，而当时真实情况是**快照正在解压**
+   * （引导页显示「正在解压运行时，需数分钟，请勿关闭」，解压完成后引擎自行起来了）。
+   * 那句话把排障者指向「什么都没发生」，与事实相反。
+   *
+   * 真因是时序：STAGED marker 由 `EngineManager.refreshSnapshot` 在
+   * **解压完成、swap 之前**才写，而解压要 8-12 分钟，故这段时间 journal 判据必然 absent。
+   *
+   * 判据改用 `RepairState.startupInProgress`（= 本进程主启动流在跑）：
+   * 它在 start() 抢到所有权后立刻置 true、finally 里置 false，与「谁在占所有权」同一事实源。
+   */
+  @Test
+  fun theDeferredWordingDistinguishesRefreshFromGenuinelyNoTransaction() {
+    val flow = codeOnly(source("EngineStartFlow.kt"))
+    val defer = flow.substringAfter("private fun deferEngineStartWhileSnapshotTransactionBusy()")
+      .substringBefore("private val deferredStartRunnable")
+
+    assertTrue(
+      "刷新中那一条必须点明「journal 为 absent 不等于没有事务在跑」",
+      defer.contains("这不代表没有事务在跑"),
+    )
+    assertTrue(
+      "刷新中那一条必须报出真实原因（主启动流持有所有权 + 尚未走到写 journal 那一步）",
+      defer.contains("主启动流持有世代所有权"),
+    )
+    assertTrue(
+      "确实无事务那一条必须能读出「主启动流未在运行」这个判据",
+      defer.contains("主启动流未在运行"),
+    )
+    assertTrue(
+      "两条必须由 RepairState.startupInProgress 分流，不得只看 journal",
+      defer.contains("RepairState.startupInProgress"),
+    )
+
+    val retry = flow.substringAfter("private val noTransactionRetry")
+      .substringBefore("private fun canRunEngineWork")
+    assertTrue(
+      "timeout 那条同样必须区分（它是最常被读到的一条）",
+      retry.contains("运行时刷新仍在进行"),
+    )
+    assertTrue(
+      "timeout 的刷新档必须给出可照做的处置",
+      retry.contains("不要"),
+    )
+    assertFalse(
+      "timeout 的刷新档不得再用「且始终无快照事务在场」这种误导句式",
+      retry.contains("且始终无快照事务在场"),
+    )
+  }
 }
+
