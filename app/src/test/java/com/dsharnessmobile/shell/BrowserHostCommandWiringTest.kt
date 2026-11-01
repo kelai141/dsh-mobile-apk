@@ -65,11 +65,26 @@ class BrowserHostCommandWiringTest {
     assertTrue(command.contains("finally {") && command.contains("currentWorkspace = previous"))
     assertBefore(command, "currentWorkspace = previous", "applyStageBounds()")
     assertBefore(command, "currentWorkspace = previous", "applyVisibility()")
+    val status = body("BrowserHost.kt", "private fun browserStatus(")
+    assertTrue("profile attach 事实必须从捕获工作台派生", status.contains("workspace?.profile?.isAssigned == true"))
     val reply = body("BrowserHost.kt", "private fun nativeReply(")
-    assertTrue(reply.contains("workspace.profile.isAssigned"))
+    assertTrue("UI 回执必须走同一份 browserStatus 派生", reply.contains("browserStatus(workspace)"))
     for (field in listOf("session", "ownerSessionId", "profileAvailable", "profileReason", "tabs", "activeTabId")) {
       assertTrue("UI 回执必须带已捕获工作台的 $field", reply.contains(".put(\"$field\","))
     }
+  }
+
+  @Test
+  fun statusAndRepliesExposeBrowserAndIsolationAsSeparateFacts() {
+    val status = body("BrowserHost.kt", "private fun status(")
+    assertTrue(status.contains("""put("browserAvailable", status.browserAvailable)"""))
+    assertTrue(status.contains("""put("isolationAvailable", status.isolationAvailable)"""))
+    assertTrue(status.contains("""put("profileReason", status.profileReason)"""))
+    assertFalse("ok 不得再等同于隔离可用", status.contains("""put("ok", isolationAvailable)"""))
+    val reply = body("BrowserHost.kt", "private fun nativeReply(")
+    assertTrue(reply.contains("""put("available", status.browserAvailable)"""))
+    assertTrue(reply.contains("""put("isolationAvailable", status.isolationAvailable)"""))
+    assertTrue(reply.contains("""put("profileAvailable", status.profileEstablished)"""))
   }
 
   @Test
