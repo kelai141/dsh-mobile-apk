@@ -204,8 +204,8 @@ export function RuntimeCacheRow() {
           「本版未纳入任何子目录」这类与上方跳过清单逐条重复的实现口径。 */}
       <p className="dsh-dev-hint">
         {tr(
-          '白名单制：只清理本版已知安全的引擎运行时残留（引擎日志历史代 + 有据可查的缓存目录）。当前引擎日志、会话与附件、凭据、用户设置、已装插件一律不触碰；白名单外的路径逐项跳过并如实列出。',
-          'Only known-safe runtime leftovers are cleared. Current logs, sessions, attachments, credentials, user settings, and installed plugins are never touched; everything else is skipped and listed.',
+          '只按清单清理。图片距上次主动读取满120分钟可手动回收；不清理仍可用，清理后显示占位。会话文字、文件附件、凭据、设置、插件和当前日志保留。',
+          'Only listed items are cleared. Images idle for 120 minutes can be cleared manually. They remain usable until you clear them, then become placeholders. Text history, file attachments, credentials, settings, plugins and the current log are kept.',
         )}
       </p>
 
@@ -260,7 +260,7 @@ export function RuntimeCacheRow() {
             {/* 不可逆操作的后果说明必须保留：删哪几项、哪些不受影响、失败项如何处理。 */}
             <p className="dsh-dev-modal-desc">
               {tr('删除以下 ', 'Delete these ')}{targets.length}{tr(' 项，共 ', ' items, ')}{fmtBytes(reclaimable)}
-              {tr('，无法恢复。会话、附件、凭据、设置、已装插件与当前引擎日志不受影响；失败项会如实列出。', ', with no undo. Sessions, attachments, credentials, settings, plugins, and the current log are untouched; failures are listed.')}
+              {tr('，无法恢复。清理的图片会替换为占位文字；会话文字、文件附件、凭据、设置、插件与当前日志保留。失败项会列出。', ', with no undo. Cleared images become text placeholders. Text history, file attachments, credentials, settings, plugins and the current log are kept. Failures are listed.')}
             </p>
             <ul className="dsh-dev-cache-list">
               {targets.map((item) => (

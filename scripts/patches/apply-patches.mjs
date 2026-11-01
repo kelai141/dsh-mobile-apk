@@ -34,6 +34,8 @@ import { hasTerminalShellCandidates, patchTerminalShellCandidates } from './data
 import { hasZshFpath, patchZshFpath } from './data/subprocess-zsh-fpath-A1.mjs'
 import { hasManagedPortBind, patchManagedPortBind } from './data/managed-port-bind-EP1.mjs'
 import { IMAGE_HISTORY_CORE, planImageHistory } from './image-history-batch-offload-I1.mjs'
+import { PREVIEW_LOCAL, PREVIEW_PI, PREVIEW_DEEPSEEK, planRequestPreview } from './image-request-preview-P1.mjs'
+import { planImageExpiry } from './image-expiry-E1.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const registry = JSON.parse(readFileSync(join(HERE, 'registry.json'), 'utf8'))
@@ -227,6 +229,34 @@ const IMPLS = {
         ? s : loadImpl(runtime + '/' + file, CURRENT_STAGE_ROOT))
       for (const file of plan) if (file.file !== 'dist/api/openai-completions.js') IMPL_state[runtime + '/' + file.file] = file.after
       return plan.find(file => file.file === 'dist/api/openai-completions.js').after
+    },
+  },
+
+  'image-request-preview-P1': {
+    file: PREVIEW_LOCAL,
+    additionalFiles: [PREVIEW_PI, PREVIEW_DEEPSEEK],
+    scope: 'engine',
+    check: (s) => planRequestPreview(file => file === PREVIEW_LOCAL
+      ? s : loadImpl(file, CURRENT_STAGE_ROOT)).every(file => file.before === file.after),
+    apply: (s) => {
+      const plan = planRequestPreview(file => file === PREVIEW_LOCAL
+        ? s : loadImpl(file, CURRENT_STAGE_ROOT))
+      for (const file of plan) if (file.file !== PREVIEW_LOCAL) IMPL_state[file.file] = file.after
+      return plan.find(file => file.file === PREVIEW_LOCAL).after
+    },
+  },
+
+  'image-expiry-E1': {
+    file: PREVIEW_LOCAL,
+    additionalFiles: [PREVIEW_PI, PREVIEW_DEEPSEEK],
+    scope: 'engine',
+    check: (s) => planImageExpiry(file => file === PREVIEW_LOCAL
+      ? s : loadImpl(file, CURRENT_STAGE_ROOT)).every(file => file.before === file.after),
+    apply: (s) => {
+      const plan = planImageExpiry(file => file === PREVIEW_LOCAL
+        ? s : loadImpl(file, CURRENT_STAGE_ROOT))
+      for (const file of plan) if (file.file !== PREVIEW_LOCAL) IMPL_state[file.file] = file.after
+      return plan.find(file => file.file === PREVIEW_LOCAL).after
     },
   },
 

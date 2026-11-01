@@ -342,6 +342,8 @@ function cacheExecutePayload(plan: CleanupPlan): Record<string, unknown> {
 }
 
 export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
+  const imagePolicy = () => ({ imageExpirySupported: serviceOf<{ imageExpirySupported?: boolean }>(ctx, 'attachments')?.imageExpirySupported === true })
+  const cleanupPlan = () => planCleanup(process.env, imagePolicy())
   // 授权档位权威 = bridge 服务（androidPrivilege，patch 顺序 bridge 先于本插件）
   const svc = (ctx as unknown as { androidPrivilege?: { status(): { tier: string } } }).androidPrivilege
   // 实验性内部 Linux 插件（bootstrap + runtime）：包随机放在内置（hard）插件目录，但**默认不启用**
@@ -428,7 +430,7 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
           res.end(JSON.stringify({ ok: false, error: 'GET only' }))
           return
         }
-        sendJson(res, 200, cacheScanPayload(planCleanup()))
+        sendJson(res, 200, cacheScanPayload(cleanupPlan()))
       },
     }))
     ctx.effect(() => wsvc.register({
@@ -443,7 +445,7 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
           return
         }
         // 执行前重新扫描（体积以执行瞬间的实测为准），再逐项删。
-        sendJson(res, 200, cacheExecutePayload(planCleanup()))
+        sendJson(res, 200, cacheExecutePayload(cleanupPlan()))
       },
     }))
   }
