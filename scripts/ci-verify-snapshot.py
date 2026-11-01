@@ -2,7 +2,9 @@
 """ci-verify-snapshot.py — CI snapshot gate: ELF arch + secrets scan + plugin consistency + profile patch consistency.
 Usage:
   python3 ci-verify-snapshot.py <snapshot.tar.xz> <expect-arch> <plugins-dir>...
-  expect-arch: aarch64 | x86_64
+  expect-arch: aarch64 | arm64 | x86_64 | x86-64
+    (aliases are normalized to one ELF machine name; the criteria are unchanged -- see
+     normalize_expect_arch)
 Checks:
   1. usr/bin/node ELF machine matches expect-arch (streamed from tar).
   2. Sensitive paths absent: .credentials / sessions/ / storages/ / anon-id / settings.yaml / .npmrc / private sourcemaps.
@@ -22,6 +24,20 @@ import sys
 import tarfile
 
 MACHINES = {0x3E: 'x86_64', 0xB7: 'aarch64', 0x28: 'arm', 0x03: 'i386'}
+# ABI 别名（2026-11-01 实锤，确定性缺陷）：两条构建链传的是 Android 打包口径的 ABI 名
+# （build-apk-013.ps1:529 传 $abi、build-apk.mjs:403 传 ABI，取值域都是 arm64 / x86_64），
+# 而本门禁比的是 ELF 机器名 aarch64 / x86_64。x86_64 恰好两边同名所以一直没暴露，
+# arm64 则**每一次**都被拒：SNAPSHOT_GATE_ERROR -> Deny-Abi SNAPSHOT_PKG_NAME_MISMATCH，
+# 双 ABI 链在 arm64 上恒断。受控反证：同一快照传 aarch64 exit 0，传 arm64 exit 2。
+#
+# 这里只做**命名对齐**：别名映射到同一个 ELF 机器名后，走的仍是原来那条
+# arch != expect 比对，判据强度不变。未知值仍按原样报错 exit 2。
+EXPECT_ALIASES = {
+    'aarch64': 'aarch64',
+    'arm64': 'aarch64',
+    'x86_64': 'x86_64',
+    'x86-64': 'x86_64',
+}
 SENSITIVE = (
     'home/.dsh/.credentials',
     'home/.dsh/sessions/',
@@ -134,6 +150,16 @@ def elf_machine(data: bytes) -> str:
     return MACHINES.get(machine, '0x%x' % machine)
 
 
+def normalize_expect_arch(expect: str):
+    """Map an ABI alias onto the ELF machine name this gate compares against.
+
+    Returns None for anything not in EXPECT_ALIASES -- the caller keeps the historical
+    'unknown ABI' exit 2 so a typo (riscv64, arm, aarch64-) can never be silently accepted.
+    This is a naming alignment only: it does not weaken the arch check below.
+    """
+    return EXPECT_ALIASES.get(str(expect).strip().lower())
+
+
 def scan(snapshot: str, expect: str, plugin_dirs, gradle_reader=app_id_from_gradle):
     """Gate a snapshot archive.
 
@@ -146,8 +172,10 @@ def scan(snapshot: str, expect: str, plugin_dirs, gradle_reader=app_id_from_grad
     # 输入缺失时必须给出「一眼能分清是环境问题还是真判红」的信息，不能抛 Python traceback
     # ——构建者看到 FileNotFoundError 栈看不出「我忘了先跑 build-snapshot-013.mjs」。
     # 约定：exit 2 = 环境/用法错误（区别于 exit 1 = 判据不通过）。两仓逐字节同源。
-    if expect not in ('aarch64', 'x86_64'):
-        print('SNAPSHOT_GATE_ERROR: 未知 ABI "' + str(expect) + '"（只接受 aarch64 | x86_64）')
+    raw_expect = expect
+    expect = normalize_expect_arch(expect)
+    if expect is None:
+        print('SNAPSHOT_GATE_ERROR: 未知 ABI "' + str(raw_expect) + '"（只接受 aarch64 | arm64 | x86_64 | x86-64）')
         sys.exit(2)
     if not os.path.isfile(snapshot):
         print('SNAPSHOT_GATE_ERROR: 快照文件不存在: ' + str(snapshot))
