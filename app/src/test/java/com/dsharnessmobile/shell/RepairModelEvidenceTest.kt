@@ -168,7 +168,7 @@ class RepairModelEvidenceTest {
       .substringBefore("val resolved = resolve(")
     assertTrue("resolve 必须遍历泛化条目 layer.custom（实际长度 " + resolve.length + "）",
       resolve.contains("for ((id, config) in layer.custom)"))
-    assertTrue("泛化条目必须交给 addGeneric 判定",
-      resolve.contains("addGeneric(id, config, allCredentials, out.connections, ::note)"))
+    assertTrue("泛化条目必须交给 addGeneric 判定（不可用条目也要一并上报）",
+      resolve.contains("addGeneric(id, config, allCredentials, out.connections, ::note, out.unavailable)"))
   }
 }
