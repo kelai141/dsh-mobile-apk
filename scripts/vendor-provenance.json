@@ -43,8 +43,8 @@
       "bytes": 20139
     },
     "lib/client.js": {
-      "sha256": "59d41e8bc8294aa60f71757981fa3d3611a6d361a546a3bf14cf30e4f9e3140f",
-      "bytes": 175345
+      "sha256": "61f24584c051aaf4810512b994d61294aee6361487bfa403af9c421d59cb619a",
+      "bytes": 178586
     },
     "lib/client/ImageGallery.js": {
       "sha256": "61b786d0c823a6472b261ffc0a850c6ad65cbf55b1ae41e1e8343f3712651dcb",

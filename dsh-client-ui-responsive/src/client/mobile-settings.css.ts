@@ -28,6 +28,33 @@ export const MOBILE_SETTINGS_CSS: string = `
     /* The panel is centred by its fixed overlay, so shrinking the height would
        move its header back under the status bar. Keep the full height and inset
        the content instead: border-box keeps the total box at 100vh. */
+    /* ── 状态栏遮挡标题栏的根因（issue #1288 第 2 条）─────────────────────────
+     * 实测排除的三条错误假说（都验证过不是它）：
+     *   · 「WebView 没吃 insets」——insets 是好的。壳侧把 max(bars.top, cutout.top) 折算成
+     *     CSS px 写到 --dsh-android-system-top（MainActivity.pushWebInsets），
+     *     --dsh-mobile-top-inset 取它（mobile-form.css.ts）。设备实测（关闭沉浸式、
+     *     状态栏 36px / density 1.5）：--dsh-android-system-top = 24px ✓。
+     *   · 「行高/padding 不够」——把 inset 加到 24px 之后 bar.top 仍是 12，不是 24。
+     *   · 「position:absolute 少算了一份 inset」——把顶部条还原成 absolute 后 bar.top
+     *     依然是 24，判据不变红；负控当场否掉了这个假说。
+     *
+     * 真因：**面板被 overlay 的 align-items:center 居中**。
+     * 上游 SettingsRoot 的蒙层是 position:fixed; display:flex; align-items:center;
+     * justify-content:center 的居中容器。本面板在手机形态下是 height:100vh +
+     * padding-top:inset；box-sizing 一旦不是 border-box（或视口高度与 100vh 有偏差，
+     * 例如键盘/浏览器 UI 让可视高度略小），面板就比视口**高一点点**，居中于是把
+     * 上溢量的一半顶出视口顶：实测面板 top=-12、bar.top=12、标题 top=26 —— 正好
+     * 是用户截图里「标题与返回箭头只看得见下半截」。
+     * 这也解释了为什么不是每一页都同样严重：溢出量随页面内容与视口高度变化。
+     *
+     * 修法（一条根因，改在公共容器上，不逐页打补丁）：
+     *   ① 整屏面板不参与居中：align-self:flex-start + margin:0。它本来就该占满视口，
+     *      「居中」对它没有任何语义，只会把溢出量分到两端。
+     *   ② 面板用 box-sizing:border-box（下方已声明），100vh 含 padding，不再溢出。
+     *   ③ 顶部条回到 flex 正常流（见下方 bar 规则），inset 只由面板的 padding-top 消费一次。
+     * 判据：标题与返回箭头的 rect.top ≥ 状态栏底部（--dsh-mobile-top-inset 的实测值）。 */
+    align-self: flex-start;
+    margin: 0;
     height: 100vh;
     max-height: none;
     padding-top: var(--dsh-mobile-top-inset, 0px);
@@ -35,14 +62,19 @@ export const MOBILE_SETTINGS_CSS: string = `
     flex-direction: column;
   }
 
-  /* ── 分层导航：顶部条（返回 + 标题）─────────────────────────────────
-   * 首页时绝对定位成返回浮标（标题即设置外壳自己的标题），二级页时是内容列之上
-   * 一行真正的标题栏。文案一律取自 DOM 既有的上游文本，本表不含任何字面量。 */
+  /* 顶部条：**两级共用这一套规则**（issue #1288 第 2 条）。
+   *
+   * 这两条（首页 absolute、二级页 relative）原来不一致，看着像「有的页切、有的页不切」，
+   * 但把首页还原成 absolute 后 bar.top 仍是 24——所以它**不是**切字的成因（见面板规则里
+   * 的实测记录，真因是 overlay 居中）。这里统一成正常流仍然值得：
+   *   · 顶部条作为面板的第一个 flex 项、flex:none —— 永远不参与滚动，也不会被顶出视口；
+   *   · inset 只由面板的 padding-top 消费一次，避免两处各算一份的隐患。
+   * 判据：标题/返回箭头的 rect.top ≥ 状态栏底部（= --dsh-mobile-top-inset 的实测值）。 */
   html[data-dsh-mobile-form] [data-dsh-settings-dialog] > [data-dsh-settings-bar] {
-    position: absolute;
-    top: var(--dsh-mobile-top-inset, 0px);
-    left: 0;
-    right: 0;
+    position: relative;
+    top: auto;
+    left: auto;
+    right: auto;
     z-index: 2;
     display: flex;
     align-items: center;
@@ -56,8 +88,6 @@ export const MOBILE_SETTINGS_CSS: string = `
   }
 
   html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level='detail'] > [data-dsh-settings-bar] {
-    position: relative;
-    top: auto;
     border-bottom: 1px solid var(--dsw-alias-border-l1);
   }
 
@@ -114,9 +144,18 @@ export const MOBILE_SETTINGS_CSS: string = `
     width: 100%;
     height: auto;
     gap: 0;
-    /* 顶部让出标题条的高度（标题条是绝对定位，两者的原点都是面板的 padding box）。 */
-    padding: 56px 12px 16px;
+    /* 标题条已回到正常流（见 bar 规则），列表不再需要为绝对定位预留 56px。 */
+    padding: 8px 12px 16px;
+    /* ── 一级列表独立可滚（issue #1288 第 1 条）─────────────────────────────
+     * 三件事缺一不可，缺任何一件都会「看起来能滚、实际不动」：
+     *   · flex: 1 + min-height: 0 —— flex 子项默认 min-height: auto 会被内容撑开，
+     *     那样 overflow-y:auto 永远不产生滚动（scrollHeight === clientHeight）；
+     *   · overflow-y: auto —— 滚动发生在这个列表里，而不是被面板裁掉；
+     *   · overscroll-behavior: contain —— 滚到底不要传染给外层（否则整页跟着弹）。
+     * 注意列表内容仍是上游注册顺序渲染的子节点，这一层只负责滚动。 */
     overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
     border: none;
   }
 
