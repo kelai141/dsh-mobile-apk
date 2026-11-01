@@ -41,9 +41,11 @@ class RepairModelEvidenceTest {
   @Test
   fun `来源状态表覆盖读取层产出的每一种状态`() {
     // RepairModelConfig 可能写出的状态集合。新增状态而 UI 没跟上，就会掉进兜底句，
-    // 用户看到「格式无法解析」但文件其实只是「已迁移、本轮未读」。
+    // 用户看到「格式无法解析」但文件其实只是「配置可用、缺凭据」。
     val produced = listOf(
       "parsed", "missing", "unsafe", "invalid",
+      // 下面两个是**历史状态**：marker 开关与「按候选数回落」都已删除，RepairModelConfig 不再产出。
+      // 但旧版 APK 写下的 evidence 文件仍可能带着它们被共享出来，所以文案表必须继续认。
       "skipped-legacy", "fallback-used", "no-credential",
       // issue #1012：配置树的根整个不存在（运行时还没解出来）。
       "root-missing",
@@ -129,25 +131,42 @@ class RepairModelEvidenceTest {
     assertFalse("不得把根缺失当结论说成没配模型", call.startsWith("模型没配好"))
   }
 
-  // ── 3. 回落语义：marker 只决定优先级 ──────────────────────────────────────
+  // ── 3. 读取语义：settings.yaml 无条件铺底，marker 与候选数都不参与 ──────────
 
   @Test
-  fun `marker 不再整体跳过 settings yaml`() {
-    // 旧实现是 `if (!marker.isFile) { 读 settings }`——marker 一在就整层跳过。
-    // 新实现按「有没有候选」决定是否回落，marker 只参与选择先读哪层。
+  fun `marker 不再决定是否读 settings yaml`() {
+    // 两代旧实现都把 settings.yaml 的「读不读」交给了别的证据：先是 `if (!marker.isFile) { 读 }`，
+    // 后来是「patch 层没有候选才回落」。新契约没有开关——settings.yaml 永远是优先级最低的一层。
+    // 回归一旦把 marker 重新接回读取路径，这条必须转红。
     val config = codeOnly(source("RepairModelConfig.kt"))
-    assertFalse("不得再用 marker 作为「是否读取」的开关",
-      config.contains("if (!File(dsh, \"settings.yaml.imported\").isFile)"))
-    assertTrue("必须有回落分支", config.contains("includeLegacy = true"))
-    assertTrue("回落判据必须是「没有候选」",
-      config.contains("resolved.connections.isEmpty()"))
+    assertFalse("读取路径不得再出现 marker", config.contains("settings.yaml.imported"))
+    assertTrue("buildLayer 必须还在", config.contains("fun buildLayer("))
+    val build = config.substringAfter("fun buildLayer(").substringBefore("return layer")
+    // 判据落到调用本身：第一个实参是 sink、文件表达式是 File(dsh, "settings.yaml")，且不带条件。
+    assertTrue("buildLayer 必须无条件读 settings.yaml（实际：" + build.trim() + "）",
+      build.contains("readInto(sink, File(dsh, \"settings.yaml\"))"))
+    // 最低优先级 = 先读它、再让 patch 覆盖它。
+    val settingsAt = build.indexOf("settings.yaml")
+    val patchAt = build.indexOf("cordis.patch.yml")
+    assertTrue("buildLayer 必须仍读 patch 层（实际：" + build + "）", patchAt >= 0)
+    assertTrue("settings.yaml 必须排在所有 patch 之前（最低优先级）",
+      settingsAt in 0 until patchAt)
   }
 
   @Test
-  fun `回落只在无候选时发生不会顶掉活动配置`() {
+  fun `settings yaml 无条件铺底且不再按候选数回落`() {
+    // 「有没有候选」不再参与「读不读旧文件」：条件回落的机械必须整块消失。
     val config = codeOnly(source("RepairModelConfig.kt"))
-    val fallback = config.substringAfter("if (resolved.connections.isEmpty() && migrated)");
-    val body = fallback.substringBefore("sources += finalSources");
-    assertTrue("回落读到的候选必须非空才采用", body.contains("fallback.connections.isNotEmpty()"))
+    assertFalse("条件回落机制必须已删除（不得再有 includeLegacy）", config.contains("includeLegacy"))
+    assertFalse("不得再产出 fallback-used / skipped-legacy",
+      config.contains("fallback-used") || config.contains("skipped-legacy"))
+    // 反过来，泛化发现面必须还在：回落删掉不能顺手把名单外 provider 一起删掉。
+    assertTrue("addGeneric 必须还在", config.contains("private fun addGeneric("))
+    val resolve = config.substringAfter("fun resolve(layer: Layer): Resolved {")
+      .substringBefore("val resolved = resolve(")
+    assertTrue("resolve 必须遍历泛化条目 layer.custom（实际长度 " + resolve.length + "）",
+      resolve.contains("for ((id, config) in layer.custom)"))
+    assertTrue("泛化条目必须交给 addGeneric 判定",
+      resolve.contains("addGeneric(id, config, allCredentials, out.connections, ::note)"))
   }
 }

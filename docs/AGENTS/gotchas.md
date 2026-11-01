@@ -232,14 +232,19 @@ tag=load  imeOcclusion=0px  insetBottom=0px  innerHeight=800  visualViewportHeig
 「以后别读 settings.yaml」的开关，于是上述形态下**两边都不读**、候选数为 0，修复助手报「未读到可用模型」——
 而它本来最该救这个场景。#924 之后 marker 只决定优先级，候选为 0 时回落读 `settings.yaml`（标 `fallback-used`）。
 
+**再修（0.14.10）**：「只在候选为 0 时才回落」是同一个误判的弱化版 —— patch 层只要碰巧产出一条
+用户根本没在用的路由，`settings.yaml` 里真正被选中的那条就又消失了（进修复助手看到的是别人的模型，
+或者干脆没有）。所以现在 `settings.yaml` 是**无条件铺的底层候选源**：patch 按 id 深合并覆盖它，
+marker 不参与「读不读」的判断，条件回落整段删除；`skipped-legacy` / `fallback-used` 随之不再产出。
+
 ### 对后续改动的约束
 
-1. **修复助手不能假设 `settings.yaml` 长期存在。** 引擎跑过一轮它就没了；只能靠回落读到「引擎没跑完」的现场。
+1. **修复助手不能假设 `settings.yaml` 长期存在。** 引擎跑过一轮它就没了；它作为底层候选源被无条件读到，但「引擎没跑完」的现场仍要靠它，不能把它当可忽略的历史文件。
 2. **任何在引擎启动后读配置的逻辑，都要按「活动配置是 profile patch」来写。**
    `SnapshotUserData.configurationDocument()` 已把判据收敛到一处（有 marker 或 patch 存在 ⇒ patch 是活动配置），
    **新增读取方应复用它，不要各自判 marker**。
-3. **诊断证据要能区分「文件不存在」与「文件被迁移」。** #924 引入的 `skipped-legacy` / `fallback-used` /
-   `no-credential` 就是为此；新增状态时 UI 必须同步给出可判读的说明。
+3. **诊断证据要能区分「文件不存在」与「文件被迁移」。** #924 引入的 `no-credential`（以及后来补的
+   `root-missing`）就是为此；`skipped-legacy` / `fallback-used` 已随无条件铺底退役。新增状态时 UI 必须同步给出可判读的说明。
 
 ### 实测记录（MuMu `127.0.0.1:16544`，`0.14.9-DEV-FAST` / vcode 53，两次独立复现）
 

@@ -18,6 +18,9 @@ import org.junit.runner.RunWith
  * 与 [RepairModelFallbackDeviceTest] 的分工：那个钉数据层（读到了什么），
  * 这个钉**界面会拿到什么**——0 候选时按钮必须禁用，有候选时可用。
  *
+ * 数据层的当前契约是「settings.yaml 无条件铺底、marker 不参与读取」，本类只消费那份结果：
+ * 社群现场必须拿到候选，删掉 settings.yaml 的对照组必须零候选。
+ *
  * ## 隔离
  *
  * 同样注入 `filesDir/test-home-<uuid>`，不碰真实 `filesDir/home`。
@@ -60,8 +63,10 @@ class RepairUiFallbackDeviceTest {
     val result = RepairModelConfig.loadDetailed(home)
     val statuses = result.sources.joinToString { it.path + "=" + it.status }
     assertTrue("界面必须拿到候选，实际来源：" + statuses, result.connections.isNotEmpty())
-    assertTrue("必须留下回落标记：" + statuses,
-      result.sources.any { it.status == "fallback-used" })
+    assertTrue("来源表必须把 settings.yaml 记为已读取：" + statuses,
+      result.sources.any { it.path.endsWith("settings.yaml") && it.status == "parsed" })
+    assertFalse("回落/跳过状态已不再产出：" + statuses,
+      result.sources.any { it.status == "fallback-used" || it.status == "skipped-legacy" })
     // UI 的判据是 connections.isNotEmpty()（见 RepairActivity.applyModelState）。
     // 这里断言的是同一份数据，等价于「模型按钮与发送按钮可用」。
     assertTrue("默认模型可用", result.defaultAvailable)
