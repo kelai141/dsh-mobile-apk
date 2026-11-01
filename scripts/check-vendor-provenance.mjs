@@ -200,7 +200,8 @@ function runVerify() {
   const manifest = JSON.parse(readFileSync(absManifest, 'utf8'))
   const problems = [...verifyManifest(ROOT, manifest), ...verifySelfDescription(ROOT)]
   if (problems.length > 0) {
-    console.error('VENDOR-PROVENANCE FAILED（' + String(problems.length) + ' 项）：')
+    console.error('FAIL  vendored 目录与清单不符（' + String(problems.length) + ' 项）')
+    console.error('CHECK-VENDOR-PROVENANCE FAILED（' + String(problems.length) + ' 项）：')
     for (const p of problems) console.error('  - ' + p)
     console.error('  修法：确认改动是有意的之后跑 `node scripts/check-vendor-provenance.mjs --write`，')
     console.error('        并在 PROVENANCE.md「与上游的差异」表登记这次改动。')
@@ -208,7 +209,10 @@ function runVerify() {
   }
   const count = Object.keys(manifest.files ?? {}).length
   const bytes = Object.values(manifest.files ?? {}).reduce((a, f) => a + f.bytes, 0)
-  console.log('VENDOR-PROVENANCE PASSED（' + String(count) + ' 文件 / ' + String(bytes) + ' B 逐文件 sha256 与自述均相符）')
+  // 判据行形态按 check-gate-skips 的 VERDICT_RE：行首 PASS/FAIL，或 CHECK-<NAME> PASSED/FAILED。
+  // 只写一个自由文案（如 "VENDOR-PROVENANCE PASSED…"）不被认作机器判据行，会被判「零判据结案」。
+  console.log('PASS  vendored 目录 ' + String(count) + ' 文件 / ' + String(bytes) + ' B 逐文件 sha256 与自述均相符')
+  console.log('CHECK-VENDOR-PROVENANCE PASSED')
   return 0
 }
 
