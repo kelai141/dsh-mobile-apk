@@ -23,8 +23,11 @@
       ],
       "scope": "engine",
       "summary": "模型请求使用最长边1600的等比预览和压缩编码；禁止原字节透传，原附件留在本地，派生版本按固定策略缓存",
-      "provenance": "2026-11-01 用户要求高分辨率截图必须压缩后再发送服务商；源码确认旧请求编码器存在原字节透传路径",
-      "marker": "dsh-mobile compressed request preview (P1)"
+      "provenance": "2026-11-01 用户要求高分辨率截图必须压缩后再发送服务商；源码确认旧请求编码器存在原字节透传路径；dsh-attachment为未修改的几何配套，以真实函数签名核验，不要求注入P1标记",
+      "marker": "dsh-mobile compressed request preview (P1)",
+      "targetMarkers": {
+        "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment/lib/index.js": "function requestImageDimensions("
+      }
     },
     {
       "id": "image-history-batch-offload-I1",

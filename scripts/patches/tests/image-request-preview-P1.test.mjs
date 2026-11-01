@@ -17,6 +17,16 @@ for (const [file] of targets) {
   files[file] = readFileSync(versionedFixture(name, 'lib/index.js'), 'utf8')
   files[file.replace(/lib\/index\.js$/, 'package.json')] = readFileSync(versionedFixture(name, 'package.json'), 'utf8')
 }
+test('未修改的几何配套按实际函数签名登记，不要求不存在的P1注入标记', () => {
+  const registry = JSON.parse(readFileSync(join(repository, 'scripts/patches/registry.json'), 'utf8'))
+  const patch = registry.patches.find(item => item.id === 'image-request-preview-P1')
+  const geometry = PREVIEW_LOCAL.replace('dsh-attachment-local', 'dsh-attachment')
+  assert.ok(patch.additionalTargets.includes(geometry))
+  const published = readFileSync(versionedFixture('dsh-attachment', 'lib/index.js'), 'utf8')
+  assert.ok(!published.includes(patch.marker), 'geometry is an unchanged upstream companion')
+  assert.equal(patch.targetMarkers[geometry], 'function requestImageDimensions(')
+  assert.ok(published.includes(patch.targetMarkers[geometry]))
+})
 function extract(source, name, injected = {}) {
   const start = source.indexOf(`function ${name}(`)
   assert.ok(start >= 0, name)
