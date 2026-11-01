@@ -290,3 +290,7 @@ base bundle 已有唯一 `typert-gateway`，web-app 继承它，不能再 insert
 `gateway-client-source-g1.test.mjs` 使用本代真实 Registry 产物，构造 gateway 及其两个 inject 依赖 host 均未就绪、controller 已就绪的图，
 取回并执行 combo 注册/factory：旧图同步 require 缺件，新图排序供给优先且四个 controller 成功；另验证 disabled、运行期恢复、其它 pending 包不被放宽。
 这是已知缺模块机制的反证修复；具体真机偶发哪条 host 激活分支缺席仍未获逐帧证明，最终 APK 冷启动/升级验收另记。
+
+## 2026-10-31 历史图片批量淘汰
+
+`image-history-batch-offload-I1` 只适配 `dsh-llm@0.2.1-rc.3`：达到现有累计图片字节或次数上限的90%时，按最旧出现次数一次淘汰40%并向上取整。若释放的字节仍不足，继续释放较旧图片，至少保留最新一张；唯一图片仍在硬上限内时正常发送。沿用持久 image/offload 与原重试机制，不新增会话压缩。策略、例外、真实产物夹具与验证边界见 APK 侧 `docs/contrib/kelai141/2026-10-30-history-image-prefix-cache.md`。本地手机测试包尚未更新。
