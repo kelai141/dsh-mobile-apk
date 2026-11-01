@@ -452,6 +452,30 @@ foreach ($abi in @('arm64', 'x86_64')) {
         Write-Host "== 浏览器语法下限门禁（$abi）=="
         node (Join-Path $Root "scripts\check-browser-syntax-floor.mjs") --scan (Join-Path $work "snap-final2.tar.xz") 2>&1
         if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "发往浏览器的 bundle 携带未降级的 ES2022 语法（老内核白屏）"; continue }
+        # 注入源真源（2026-11-01）：降级副本被造出来了，但注入时用的是原始源——历史形态（PR #1272）。
+        # 上面那道 --scan 判的是**产物内容是否合规**；当原始源恰好也合规时，两份字节都能过扫描，
+        # 「注入源选错」在内容级看不出来。这里判的是**注入的是哪一份字节**：tar 内成员 sha256 必须
+        # 等于降级副本、且不等于原始源。判据输入只用字节（tar + 两份源目录），不解析本链日志。
+        # 每个 external 一对：左=原始注入源，右=暂存降级副本（$externStaged 已在上面的循环里逐包写回）。
+        Write-Host "== 注入源真源门禁（$abi）=="
+        # 用前置过滤而不是 continue：本段不是 per-ABI 拒绝路径，而 check-build-chain-abort 按词法把
+        # 任何裸 continue 视为「未记账的拒绝」（与上方 buildable 过滤段同一处理方式）。
+        $degradeSrcs = @($externByName.Keys | Sort-Object | Where-Object {
+            Test-Path (Join-Path $externByName[$_] "lib\client.js")
+        })
+        $degradePairs = @()
+        foreach ($nm in $degradeSrcs) {
+            $degradePairs += @('--pair', ($externByName[$nm] + '=' + $externStaged[$nm]))
+        }
+        if ($degradePairs.Count -eq 0) {
+            # 一个带浏览器 bundle 的 external 都没有 = 这一轮没有可判对象。不是通过，也不是拒绝：
+            # 与其它门禁的 SKIP 口径一致，必须显式说出来而不是静默略过。
+            Write-Host "SKIP(#1)  注入源真源门禁（$abi）：本轮没有任何带 lib/client.js 的 external，无可判对象"
+        } else {
+            node (Join-Path $Root "scripts\check-degrade-source-of-truth.mjs") --snapshot (Join-Path $work "snap-final2.tar.xz") @degradePairs --require 2>&1
+            if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "注入源不是降级副本（降级被造出来却没用：产物带未降级的 ES2022 bundle）"; continue }
+        }
+
         # 模型面工具 wire 预算（0.14.0 §4.1）：注册集 + 初始可见集双口径。真跑各插件 apply()，
         # 需 plugins/*/lib 构建产物（本链前置已构建）。防「工具面无声膨胀」吃掉每会话固定预算。
         Write-Host "== 工具面预算门禁（$abi）=="
