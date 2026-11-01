@@ -21,9 +21,10 @@ const LEGACY = 'android-browser-legacy'
 /** 原生桥回复：给定会话的原生 Tab 清单。 */
 function reply(session: string, tabs: { tabId: string, uiTabId?: string }[] = []): string {
   return JSON.stringify({
-    ok: true, available: true, session, profileAvailable: true, profileReason: '',
+    ok: true, available: true, session, profileAvailable: true, isolationAvailable: true, profileReason: '',
     tabs: tabs.map(tab => ({ ...tab, url: 'https://example.com/', title: 'Example', pageGeneration: 1,
-      loadState: 'complete', canGoBack: false, canGoForward: false, profileAvailable: true, profileReason: '',
+      loadState: 'complete', canGoBack: false, canGoForward: false, profileAvailable: true,
+      isolationAvailable: true, profileReason: '',
       identityId: 'android-real', viewportWidth: 390, viewportHeight: 844 })),
   })
 }

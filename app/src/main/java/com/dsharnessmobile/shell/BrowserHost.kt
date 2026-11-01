@@ -97,11 +97,27 @@ internal class BrowserHost(
     private val ORPHAN_REFS = HashSet<String>()
   }
 
+  /**
+   * Derive the two independent facts once: a browser can work without identity isolation.
+   * Shared by status(), nativeReply(), caps() and tabSummaries() so the wire cannot drift.
+   */
+  private fun browserStatus(workspace: Workspace? = currentWorkspace): BrowserStatus {
+    val surfacePresent = workspace?.tabs?.values?.any { it.view != null || it.remoteCreated } == true
+    val surfaceCreatable = BrowserHostProfile.supported() || remote != null
+    val profileAttached = remote != null || workspace?.profile?.isAssigned == true
+    return BrowserStatusSemantics.derive(
+      tier = isolation.tier(),
+      profileError = workspace?.profileError.orEmpty(),
+      surfacePresent = surfacePresent,
+      surfaceCreatable = surfaceCreatable,
+      profileAttached = profileAttached,
+    )
+  }
+
   /** Complete per-session native authority; polling never changes selected workspace or visibility. */
   private fun tabSummaries(workspace: Workspace = requireWorkspace()): JSONArray {
     val density = dshWebView.resources.displayMetrics.density.coerceAtLeast(0.5f)
-    val profileAvailable = (remote != null || workspace.profile.isAssigned) && workspace.profileError.isEmpty()
-    val profileReason = workspace.profileError.ifEmpty { if (profileAvailable) "" else "browser-profile-not-ready" }
+    val status = browserStatus(workspace)
     val out = JSONArray()
     for (tab in workspace.tabs.values) {
       out.put(JSONObject()
@@ -114,7 +130,9 @@ internal class BrowserHost(
         .put("identityId", tab.identityId)
         .put("viewportWidth", tab.requestedViewport?.width ?: (dshWebView.width / density).toInt())
         .put("viewportHeight", tab.requestedViewport?.height ?: (dshWebView.height / density).toInt())
-        .put("profileAvailable", profileAvailable).put("profileReason", profileReason)
+        .put("profileAvailable", status.profileEstablished)
+        .put("isolationAvailable", status.isolationAvailable)
+        .put("profileReason", status.profileReason)
         .put("reason", tab.reason).put("active", tab.id == workspace.activeTabId))
     }
     return out
@@ -598,20 +616,19 @@ internal class BrowserHost(
     value.isNotBlank() && value.length <= limit && value.none { it.code < 32 || it.code == 127 }
 
   private fun commandUnavailable(session: String, reason: String): String = JSONObject()
-    .put("ok", false).put("available", false).put("session", session)
+    .put("ok", false).put("available", false).put("browserAvailable", false).put("isolationAvailable", false)
+    .put("statusLevel", BrowserStatusLevel.ERROR.wire).put("session", session)
     .put("profileAvailable", false).put("profileReason", reason).put("reason", reason).toString()
 
   private fun nativeReply(workspace: Workspace, tab: Tab? = null, reason: String = ""): JSONObject {
-    val tierOk = isolation.tier() != BrowserIsolationTier.UNAVAILABLE
-    val available = tierOk && workspace.profileError.isEmpty()
-    val isolated = available && (remote != null || workspace.profile.isAssigned)
-    val profileReason = workspace.profileError.ifEmpty {
-      if (!tierOk) "browser-profile-unsupported" else if (!isolated) "browser-profile-not-ready" else ""
-    }
-    return JSONObject().put("ok", available && reason.isEmpty()).put("available", available)
+    val status = browserStatus(workspace)
+    return JSONObject().put("ok", status.browserAvailable && reason.isEmpty()).put("available", status.browserAvailable)
+      .put("browserAvailable", status.browserAvailable)
+      .put("isolationAvailable", status.isolationAvailable)
+      .put("statusLevel", status.level.wire)
       .put("session", workspace.sessionKey).put("ownerSessionId", workspace.sessionKey)
-      .put("profileAvailable", isolated).put("profileReason", profileReason)
-      .put("reason", reason.ifEmpty { if (!available) profileReason else tab?.reason.orEmpty() })
+      .put("profileAvailable", status.profileEstablished).put("profileReason", status.profileReason)
+      .put("reason", reason.ifEmpty { if (!status.browserAvailable) status.reason else tab?.reason.orEmpty() })
       .put("tabs", tabSummaries(workspace)).put("activeTabId", workspace.activeTabId ?: "")
       .apply { tab?.let { put("tabId", it.id) } }
   }
@@ -1443,19 +1460,23 @@ internal class BrowserHost(
 
   private fun status(): JSONObject {
     val density = dshWebView.resources.displayMetrics.density.coerceAtLeast(0.5f)
+    val workspace = currentWorkspace
     val isolationTier = isolation.tier()
-    val isolationAvailable = isolationTier != BrowserIsolationTier.UNAVAILABLE && currentWorkspace?.profileError.isNullOrEmpty()
-    val profileEstablished = isolationAvailable && (remote != null || currentWorkspace?.profile?.isAssigned == true)
+    val status = browserStatus(workspace)
     return JSONObject()
-      .put("ok", isolationAvailable)
-      .put("available", isolationAvailable)
+      // ok/available 只回答「浏览器能不能用」；隔离是另一个事实（isolationAvailable）。
+      .put("ok", status.browserAvailable)
+      .put("available", status.browserAvailable)
+      .put("browserAvailable", status.browserAvailable)
+      .put("isolationAvailable", status.isolationAvailable)
+      .put("statusLevel", status.level.wire)
       .put("isolationTier", isolationTier.wire)
-      .put("profileAvailable", profileEstablished)
-      .put("profileReason", currentWorkspace?.profileError.orEmpty().ifEmpty { if (profileEstablished) "" else if (isolationAvailable) "browser-profile-not-ready" else "browser-profile-unsupported" })
-      .put("session", currentWorkspace?.sessionKey ?: "")
+      .put("profileAvailable", status.profileEstablished)
+      .put("profileReason", status.profileReason)
+      .put("session", workspace?.sessionKey ?: "")
       .put("multiProfileSupported", BrowserHostProfile.supported())
-      .put("profileIsolation", if (profileEstablished) "isolated" else if (isolationAvailable) "not-created" else "unavailable")
-      .put("profileName", currentWorkspace?.profile?.takeIf { it.isAssigned }?.name ?: if (remote != null) BrowserProcessService.SUFFIX else "")
+      .put("profileIsolation", if (status.profileEstablished) "isolated" else if (status.isolationAvailable) "not-created" else "unavailable")
+      .put("profileName", workspace?.profile?.takeIf { it.isAssigned }?.name ?: if (remote != null) BrowserProcessService.SUFFIX else "")
       .put("created", view != null || activeTab()?.remoteCreated == true)
       .put("visible", view?.visibility == View.VISIBLE || (view == null && remote?.hostSurface?.visibility == View.VISIBLE))
       .put("url", url)
@@ -1466,7 +1487,7 @@ internal class BrowserHost(
       .put("canGoForward", activeTab()?.let { if (it.view != null) it.view!!.canGoForward() else it.remoteCanGoForward } == true)
       .put("identityId", identityId)
       // 会话标识改为「当前工作台的会话」：每个会话各有自己的页面与代次，不再是全局归属。
-      .put("ownerSessionId", currentWorkspace?.sessionKey ?: "")
+      .put("ownerSessionId", workspace?.sessionKey ?: "")
       .put("scrollY", scrollY)
       .put("scrollDirection", scrollDirection)
       .put("atTop", scrollY <= 0)
@@ -1481,8 +1502,9 @@ internal class BrowserHost(
       .put("tabCount", tabs.size)
       // 请求级过滤计数（审查 S-4）：非 0 表示本页有子资源被拒（模型/面板据此知道「页面少了东西」）。
       .put("blockedRequests", activeTab()?.blockedRequests?.get() ?: 0)
-      .put("serviceWorkerBlockedRequests", currentWorkspace?.profile?.serviceWorkerBlockedRequests?.get() ?: 0)
-      .put("reason", activeTab()?.reason?.takeIf { it.isNotEmpty() } ?: lastError.ifEmpty { if (!isolationAvailable) currentWorkspace?.profileError?.takeIf { it.isNotEmpty() } ?: "browser-profile-unsupported" else "" })
+      .put("serviceWorkerBlockedRequests", workspace?.profile?.serviceWorkerBlockedRequests?.get() ?: 0)
+      // 隔离原因只留在 profileReason；只有浏览器本体故障才进 reason（不被降级提示污染）。
+      .put("reason", activeTab()?.reason?.takeIf { it.isNotEmpty() } ?: status.reason)
   }
 
   private fun rejected(reason: String): String = status().put("ok", false).put("reason", reason).toString()
@@ -1490,6 +1512,9 @@ internal class BrowserHost(
   private fun unavailable(reason: String): String = JSONObject()
     .put("ok", false)
     .put("available", false)
+    .put("browserAvailable", false)
+    .put("isolationAvailable", false)
+    .put("statusLevel", BrowserStatusLevel.ERROR.wire)
     .put("created", false)
     .put("visible", false)
     .put("url", "about:blank")
@@ -1518,16 +1543,21 @@ internal class BrowserHost(
     val uaCh = WebViewShim.supports(WebViewFeature.USER_AGENT_METADATA)
     val multiProfile = BrowserHostProfile.supported()
     val isolationTier = isolation.tier()
-    val isolationAvailable = isolationTier != BrowserIsolationTier.UNAVAILABLE && currentWorkspace?.profileError.isNullOrEmpty()
+    val status = browserStatus()
     return JSONObject()
-      .put("ok", isolationAvailable)
-      .put("available", isolationAvailable)
+      .put("ok", status.browserAvailable)
+      .put("available", status.browserAvailable)
+      .put("browserAvailable", status.browserAvailable)
+      .put("isolationAvailable", status.isolationAvailable)
+      .put("statusLevel", status.level.wire)
       .put("isolationTier", isolationTier.wire)
       .put("multiProfileSupported", multiProfile)
+      .put("profileAvailable", status.profileEstablished)
+      .put("profileReason", status.profileReason)
       .put("profileIsolationRequired", true)
       .put("defaultProfileFallback", false)
       .put("completeBrowsingDataClearAvailable", false)
-      .put("reason", if (isolationAvailable) "" else currentWorkspace?.profileError?.takeIf { it.isNotEmpty() } ?: "browser-profile-unsupported")
+      .put("reason", status.reason)
       .put("webviewMajor", major)
       .put("webviewVersion", versionText)
       .put("uaChAvailable", uaCh)
@@ -1539,7 +1569,7 @@ internal class BrowserHost(
       .put("screenHeight", metrics.heightPixels)
       .put("densityDpi", metrics.densityDpi)
       .put("rendererProcesses", if (remote?.ready == true) 1 else 0)
-      .put("browserWebViewAvailable", isolationAvailable)
+      .put("browserWebViewAvailable", status.browserAvailable)
       .put("cdpEnabled", false)
       .put("viewportId", requestedViewport?.id ?: "device")
       .put("surface", "browser")
