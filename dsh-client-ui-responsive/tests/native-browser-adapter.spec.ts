@@ -9,7 +9,8 @@ const SESSION = 'session-a'
 const UI = 'ui-a' as TabId
 const native = { tabId: 'native-a', uiTabId: UI, url: 'https://example.com/', title: 'Example',
   pageGeneration: 3, loadState: 'complete', canGoBack: true, canGoForward: false,
-  profileAvailable: true, profileReason: '', identityId: 'android-real', viewportWidth: 390, viewportHeight: 844 }
+  profileAvailable: true, isolationAvailable: true, profileReason: '', identityId: 'android-real',
+  viewportWidth: 390, viewportHeight: 844 }
 function reply(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({ ok: true, available: true, session: SESSION, profileAvailable: true, profileReason: '',
     tabId: native.tabId, tabs: [native], ...overrides })
@@ -29,7 +30,21 @@ describe('narrow native wire parser', () => {
       tabs: [{ tabId: 'native-a', url: 'https://example.com/', title: 'Example' }] }), SESSION)
     expect(result.available).toBe(true)
     expect(result.profileAvailable).toBe(false)
+    expect(result.isolationAvailable).toBe(false)
     expect(result.tabs[0]?.profileReason).toBe('browser-profile-state-missing')
+  })
+  it('keeps browser availability separate from isolation availability', () => {
+    const result = parseNativeBrowserSnapshot(JSON.stringify({ ok: true, available: true, browserAvailable: true,
+      isolationAvailable: false, session: SESSION, profileAvailable: false, profileReason: 'browser-profile-not-ready',
+      tabId: 'native-a', tabs: [{ ...native, profileAvailable: false, isolationAvailable: false,
+        profileReason: 'browser-profile-not-ready' }] }), SESSION)
+    expect(result.ok).toBe(true)
+    expect(result.available).toBe(true)
+    expect(result.isolationAvailable).toBe(false)
+    expect(result.profileAvailable).toBe(false)
+    expect(result.profileReason).toBe('browser-profile-not-ready')
+    expect(result.reason).toBe('')
+    expect(result.tabs[0]?.isolationAvailable).toBe(false)
   })
 })
 

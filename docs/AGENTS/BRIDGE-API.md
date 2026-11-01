@@ -34,7 +34,7 @@ Shizuku v4以追加configuration()回读完整app UID/anchor，AIDL旧transactio
 
 ### 2.2 窄browserHostCommand与Session/tab归属
 
-browserHostCommand(payloadJson)由MainActivity转交Activity拥有的BrowserHost.command；payload须受长度/词汇/session/uiTabId/tabId约束，action仅status/tabs/open/select/close/back/forward/reload。它不是任意JS、shell或controlExec通道。status/tabs不创建renderer、不抢UI舞台，返回available/profileAvailable/profileReason/session/ownerSessionId/tabs/activeTabId/tabId及每页真实导航状态。
+browserHostCommand(payloadJson)由MainActivity转交Activity拥有的BrowserHost.command；payload须受长度/词汇/session/uiTabId/tabId约束，action仅status/tabs/open/select/close/back/forward/reload。它不是任意JS、shell或controlExec通道。status/tabs不创建renderer、不抢UI舞台，返回available/browserAvailable/isolationAvailable/profileAvailable/profileReason/session/ownerSessionId/tabs/activeTabId/tabId及每页真实导航状态。available/browserAvailable只表示浏览器本体可用；isolationAvailable=false、profileAvailable=false（如browser-profile-not-ready）只是隔离降级提示，原因码留在profileReason，不得把浏览器报成不可用；只有browser-profile-unsupported且无任何可建表面，或provider/renderer故障才进reason错误面。
 
 模型controlOp捕获自己的Session/tab（包括modelTabId）供后续main-thread片段/异步回调，校验同一workspace/tab/view/generation，不依赖当时UI焦点。UI bounds/viewport/identity必须指定自己的Session/nativeTab/GUI occurrence，暂切上下文后恢复前台；陈旧hide/HMR detach不能盖掉邻页。identity、viewport、error、refs均per-tab。主状态旧入口为兼容面，不是0.14.3多Session查询真源。
 

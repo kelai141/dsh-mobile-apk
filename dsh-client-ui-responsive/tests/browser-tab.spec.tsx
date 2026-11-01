@@ -13,7 +13,7 @@ import type { NativeBrowserControlState } from '../src/client/mobile/native-brow
 import type { BrowserControllerState } from '../src/client/mobile/upstream-browser/browser/BrowserController.ts'
 import { emptyBrowserFrame } from '../src/client/mobile/upstream-browser/browser/BrowserFrame.ts'
 import { createBrowserStore } from '../src/client/mobile/upstream-browser/browser/store.ts'
-import { zh } from '../src/client/mobile/upstream-browser/locales.ts'
+import { en, zh } from '../src/client/mobile/upstream-browser/locales.ts'
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -74,7 +74,7 @@ async function mount(nativeOverrides: Partial<NativeBrowserControlState> = {}, v
       actions: { bindCommands: vi.fn(() => vi.fn()), openResource: vi.fn(), openTab: vi.fn(), close: vi.fn() } },
   }
   const native: NativeBrowserControlState = { nativeTabId: 'native-1', available: true, reason: '',
-    profileAvailable: true, profileReason: '', identityId: 'android-real', viewportWidth: 390, viewportHeight: 844,
+    profileAvailable: true, isolationAvailable: true, profileReason: '', identityId: 'android-real', viewportWidth: 390, viewportHeight: 844,
     ...nativeOverrides }
   const state: BrowserControllerState = { frame: emptyBrowserFrame(), restoreTarget: undefined, addressFailure: undefined, addressRevision: 0 }
   const callbacks = {
@@ -135,10 +135,29 @@ describe('official browser chrome over the Android adapter', () => {
     expect(view.callbacks.closeBrowserTab).not.toHaveBeenCalled()
   })
 
-  it('surfaces a native unsupported-profile reason rather than rendering a ready page', async () => {
-    const view = await mount({ profileAvailable: false, profileReason: 'android-profile-isolation-unsupported' })
-    expect(view.host.textContent).toContain('android-profile-isolation-unsupported')
-    expect(view.host.textContent).toContain('浏览器身份档不可用')
+  it('treats unavailable identity isolation as a notice while the browser keeps working', async () => {
+    const view = await mount({ available: true, isolationAvailable: false, profileAvailable: false,
+      profileReason: 'browser-profile-not-ready' })
+    expect(view.host.textContent).toContain(zh['native.isolation.unavailable'])
+    expect(view.host.textContent).not.toContain(zh['native.unavailable'])
+    expect(view.host.textContent).not.toContain('浏览器身份档不可用')
+  })
+
+  it('shows no isolation notice while isolation is available, even before a profile is created', async () => {
+    const view = await mount({ available: true, isolationAvailable: true, profileAvailable: false,
+      profileReason: 'browser-profile-not-ready' })
+    expect(view.host.textContent).not.toContain(zh['native.isolation.unavailable'])
+  })
+
+  it('keeps error semantics only when the browser itself is unavailable', async () => {
+    const view = await mount({ available: false, isolationAvailable: false, reason: 'browser-profile-unsupported' })
+    expect(view.host.textContent).toContain(zh['native.unavailable'].replace('{reason}', 'browser-profile-unsupported'))
+  })
+
+  it('keeps the isolation notice copy bilingual and code-free', () => {
+    expect(zh['native.isolation.unavailable']).toBe('浏览器可用；身份隔离不可用（已降级为单一身份档）')
+    expect(en['native.isolation.unavailable']).toBe('Browser works; identity isolation unavailable (single profile fallback)')
+    expect(zh['native.isolation.unavailable']).not.toContain('browser-profile')
   })
 
   it('routes PC profile and viewport actions to the owning UI occurrence', async () => {

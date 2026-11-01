@@ -18,6 +18,8 @@ export interface NativeBrowserTab {
   readonly viewportWidth: number
   readonly viewportHeight: number
   readonly profileAvailable: boolean
+  /** 隔离手段是否可用；与「浏览器能不能用」是两个独立事实。 */
+  readonly isolationAvailable: boolean
   readonly profileReason: string
   readonly reason: string
 }
@@ -29,6 +31,8 @@ export interface NativeBrowserSnapshot {
   readonly session: string
   readonly reason: string
   readonly profileAvailable: boolean
+  /** 隔离手段是否可用；缺省时从 profileAvailable 兼容推导。 */
+  readonly isolationAvailable: boolean
   readonly profileReason: string
   readonly tabs: readonly NativeBrowserTab[]
   readonly authoritativeTabs: boolean
@@ -51,8 +55,8 @@ function nonnegative(value: unknown): number {
 
 /** @param session - requesting Session. @param reason - wire refusal. @returns explicit unavailable state. */
 export function unavailableNativeBrowser(session: string, reason: string): NativeBrowserSnapshot {
-  return { ok: false, available: false, session, reason, profileAvailable: false, profileReason: reason,
-    tabs: [], authoritativeTabs: false, tabId: undefined }
+  return { ok: false, available: false, session, reason, profileAvailable: false, isolationAvailable: false,
+    profileReason: reason, tabs: [], authoritativeTabs: false, tabId: undefined }
 }
 
 /**
@@ -74,6 +78,8 @@ export function parseNativeBrowserSnapshot(raw: string | undefined, session: str
   const explicitProfile = typeof value.profileAvailable === 'boolean' ? value.profileAvailable
     : typeof profile?.available === 'boolean' ? profile.available : undefined
   const profileAvailable = explicitProfile === true
+  // 新壳显式上报；旧壳没有该字段时退回 profileAvailable（保持旧行为，不虚报隔离可用）。
+  const isolationAvailable = typeof value.isolationAvailable === 'boolean' ? value.isolationAvailable : profileAvailable
   const profileReason = text(value.profileReason) ?? text(profile?.reason)
     ?? (profileAvailable ? '' : explicitProfile === false ? 'browser-profile-unavailable' : 'browser-profile-state-missing')
   const reason = text(value.reason) || (value.ok === true && value.available === true ? '' : 'browser-unavailable')
@@ -98,16 +104,18 @@ export function parseNativeBrowserSnapshot(raw: string | undefined, session: str
     const tabProfile = record(tab.profile)
     const explicitProfile = typeof tab.profileAvailable === 'boolean' ? tab.profileAvailable
       : typeof tabProfile?.available === 'boolean' ? tabProfile.available : profileAvailable
+    const tabIsolation = typeof tab.isolationAvailable === 'boolean' ? tab.isolationAvailable : isolationAvailable
     tabs.push({ tabId: id, uiTabId, url, title, pageGeneration: nonnegative(tab.pageGeneration),
       loadState: text(tab.loadState, 128) ?? 'unknown', canGoBack: tab.canGoBack === true, canGoForward: tab.canGoForward === true,
       identityId: text(tab.identityId, 256) ?? '', viewportWidth: nonnegative(tab.viewportWidth),
       viewportHeight: nonnegative(tab.viewportHeight), profileAvailable: explicitProfile,
+      isolationAvailable: tabIsolation,
       profileReason: text(tab.profileReason) ?? text(tabProfile?.reason) ?? profileReason, reason: text(tab.reason) ?? '' })
     ids.add(id)
     if (uiTabId !== undefined) uiIds.add(uiTabId)
   }
   return { ok: value.ok === true, available: value.available === true, session, reason,
-    profileAvailable, profileReason, tabs, authoritativeTabs: Array.isArray(value.tabs), tabId }
+    profileAvailable, isolationAvailable, profileReason, tabs, authoritativeTabs: Array.isArray(value.tabs), tabId }
 }
 
 /**
