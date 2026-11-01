@@ -33,6 +33,13 @@ internal object RepairModelNotice {
      * 用户只能退出去。默认跟随后者，只有明确要放开的分支才单独置 true。
      */
     val sendEnabled: Boolean = modelControlsEnabled,
+    /**
+     * 配置里存在但缺凭据的路由数（0 表示没有这种情况）。
+     *
+     * 与 candidateCount 分开报的理由：0 候选时「未读到可用模型」把两种修法完全不同的现场
+     * 归成一句话——没配置（去写配置）与凭据引用没命中（去补 key 或改引用名）。
+     */
+    val unavailableCount: Int = 0,
   )
 
   /**
@@ -72,6 +79,15 @@ internal object RepairModelNotice {
     // 必填、不给默认值：留一个「没传就回落成 noModelText」的口子，等于给这条误报留了
     // 一条静默复发的路——调用方漏传时用户看到的正是那句「未读到可用模型」（issue #1012）。
     rootMissingText: String,
+    /**
+     * 配置里存在但缺凭据的路由数。
+     *
+     * 用户 2026-11-01 明确要求：patch 里只有引用名、真 key 在独立凭据文件，join 不上时必须
+     * 报「凭据引用未命中」，不能报「没有模型」，也不能 crash 或静默丢掉。
+     */
+    unavailableCount: Int = 0,
+    /** 缺凭据时的正文；调用方必须给出，否则退化成 noModelText（同上，不留静默口子）。 */
+    unavailableText: String = "",
   ): Presentation {
     // 有候选才谈得上「用哪一枚」。0 候选时模型选择必须禁用，否则用户点下去只会拿到空选择器；
     // 但发送键不跟着关（issue #1012 A3）——见下面对 sendEnabled 的说明。
@@ -96,6 +112,16 @@ internal object RepairModelNotice {
         modelControlsEnabled = false,
         sendEnabled = true,
       )
+      // 0 候选但配置里有路由：真因是凭据引用没 join 上，不是「没配置」。
+      // 排在笼统的 0 候选之前——否则用户按「去配模型」的提示修，永远修不好。
+      candidateCount == 0 && unavailableCount > 0 && unavailableText.isNotEmpty() -> Presentation(
+        visible = true,
+        text = unavailableText,
+        appendSources = true,
+        modelControlsEnabled = false,
+        sendEnabled = true,
+        unavailableCount = unavailableCount,
+      )
       candidateCount == 0 -> Presentation(
         visible = true,
         // 诊断未就绪时把它拼进正文（issue #1012 A2）：运行时死掉时两者同时成立，
@@ -110,6 +136,7 @@ internal object RepairModelNotice {
         text = defaultUnavailableText,
         appendSources = false,
         modelControlsEnabled = true,
+        unavailableCount = unavailableCount,
       )
       !diagnosticsReady -> Presentation(
         visible = true,

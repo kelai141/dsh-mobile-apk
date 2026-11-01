@@ -237,7 +237,9 @@ tag=load  imeOcclusion=0px  insetBottom=0px  innerHeight=800  visualViewportHeig
 或者干脆没有）。所以现在 `settings.yaml` 是**无条件铺的底层候选源**：patch 按 id 深合并覆盖它，
 marker 不参与「读不读」的判断，条件回落整段删除；`skipped-legacy` / `fallback-used` 随之不再产出。
 
-**同轮补两条（用户 2026-11-01 明确要求）**：① 端点是**主源**读取的一部分，`RepairModelClient.endpointFor` 的准入从「https + 两个回环字面量」放开成「任意 http(s) 主机」——自部署模型（`http://192.168.x.x:8000/v1`、内网域名、显式端口）在引擎侧一直能用，只有修复助手拦着；仍拒绝非 http(s)、空 host、`user:pass@`。平台侧 `network_security_config` 的 base-config 早已 `cleartextTrafficPermitted="true"`，这是准入面与平台面对齐，不是新开口子。② patch 文档**两种扩展名都读**（`cordis.patch.yaml` 优先、其次 `.yml`；`.dsh` 根与 `profiles/web` 各一套），同目录两份都在时**只取一份并记 `conflict-skipped`**——静默双用会叠出用户没写过的合并结果。
+**同轮补两条（用户 2026-11-01 明确要求）**：① 端点是**主源**读取的一部分，`RepairModelClient.endpointFor` 的准入从「https + 两个回环字面量」放开成「任意 http(s) 主机」——自部署模型（`http://192.168.x.x:8000/v1`、内网域名、显式端口）在引擎侧一直能用，只有修复助手拦着；仍拒绝非 http(s)、空 host、`user:pass@`。平台侧 `network_security_config` 的 base-config 早已 `cleartextTrafficPermitted="true"`，这是准入面与平台面对齐，不是新开口子。③ cordis patch 里**没有真实 key**：provider 的 `apiKey`（或 `apiKeyEnv`/`tokenEnv` 等同义字段）只是引用名，真值在 `.credentials.yaml` 的 `refs:` 里，按引用名 join。join 不上时该路由**必须仍被看见**并报「凭据引用未命中」（带引用名），不能 crash、不能静默丢掉——否则「配了但缺 key」与「没配」在界面上又是同一句话。形似密钥的值（`sk-`、≥40 字符）一律不当作引用名，密钥值与任何前缀不得进界面/日志/诊断包。
+
+② patch 文档**两种扩展名都读**（`cordis.patch.yaml` 优先、其次 `.yml`；`.dsh` 根与 `profiles/web` 各一套），同目录两份都在时**只取一份并记 `conflict-skipped`**——静默双用会叠出用户没写过的合并结果。
 
 ### 对后续改动的约束
 

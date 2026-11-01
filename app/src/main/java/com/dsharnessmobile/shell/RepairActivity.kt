@@ -151,6 +151,13 @@ class RepairActivity : Activity() {
   private var diagnosticsReady = false
   private var defaultModelAvailable = false
   private var modelSources = ""
+  /**
+   * 配置里存在但凭据引用没 join 上的路由。
+   *
+   * 只存「provider / model / 引用名」，**绝不存 key 值**（引用名本身已在 RepairModelConfig
+   * 侧做过形似密钥的剔除）。用途只有一个：把「配了但缺 key」与「没配」在提示区区分开。
+   */
+  private var unavailableRoutes: List<RepairModelUnavailable> = emptyList()
   /** 配置树的根（`home/.dsh`）整个不存在：运行时还没解出来，不是没配模型（issue #1012）。 */
   private var modelRootMissing = false
 
@@ -158,6 +165,7 @@ class RepairActivity : Activity() {
     val result = RepairModelConfig.loadDetailed(applicationContext)
     defaultModelAvailable = result.defaultAvailable
     modelRootMissing = result.rootMissing
+    unavailableRoutes = result.unavailable
     // 状态必须说清「为什么没候选」，而不是只报一个「未读到可用模型」。
     // 用户拿着这句话无法区分：没配置 / 配置读不到 / 读到了但缺凭据——三种修法完全不同。
     // 文案表本身也放在 RepairModelNotice（statusLabels），单测钉的是**生产代码用的那份表**；
@@ -165,9 +173,15 @@ class RepairActivity : Activity() {
     val english = UiText.isEnglish(this)
     val labels = RepairModelNotice.statusLabels(english)
     val fallback = RepairModelNotice.statusFallback(english)
-    modelSources = result.sources.joinToString("\n") { source ->
-      source.path + ": " + RepairModelNotice.statusLabel(source.status, labels, fallback)
+    // 缺凭据的路由逐条进来源表：只说引用名，不带 key 值（前几位也不行）。
+    val missingCredentials = unavailableRoutes.joinToString("\n") { route ->
+      route.provider + " / " + route.model + ": " +
+        RepairModelNotice.statusLabel(route.reason, labels, fallback) +
+        (route.credentialRef?.let { " (" + it + ")" } ?: "")
     }
+    modelSources = (result.sources.joinToString("\n") { source ->
+      source.path + ": " + RepairModelNotice.statusLabel(source.status, labels, fallback)
+    } + (if (missingCredentials.isEmpty()) "" else "\n" + missingCredentials)).trim()
     return result.connections
   }
 
@@ -390,6 +404,10 @@ class RepairActivity : Activity() {
         "当前默认模型不可用。请点右上角选择模型，再发送修复需求。",
         "The configured default model is unavailable. Choose a model at the top right before sending a repair request."),
       rootMissing = modelRootMissing,
+      unavailableCount = unavailableRoutes.size,
+      unavailableText = UiText.t(this,
+        "配置里读到了模型路由，但凭据引用没有命中：patch 里只有引用名，真正的 key 在 .credentials.yaml 的 refs 里。请补上对应 key 或改对引用名后点「重新读取模型配置」。",
+        "Model routes were found, but their credential references did not resolve. The patch only carries a reference name; the real key lives in .credentials.yaml under refs. Add the key or fix the reference name, then reload the model configuration."),
       rootMissingText = UiText.t(this,
         "运行时还没解出来（配置目录尚不存在）。这不是模型没配好——请返回启动页重试引擎，等快照解压完成后再回来看。也可打开控制台查看启动日志。",
         "The runtime has not been extracted yet; the configuration directory does not exist. This is not a missing model: go back and retry the engine, then return once the snapshot finishes extracting. The console shows the startup log."),

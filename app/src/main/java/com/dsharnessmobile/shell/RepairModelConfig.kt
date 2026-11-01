@@ -45,6 +45,25 @@ internal data class RepairReasoningEffort(
 )
 
 internal data class RepairModelSource(val path: String, val status: String)
+
+/**
+ * 配置里确实存在、但**用不了**的一条路由。
+ *
+ * 与「没有配置」必须分开报：patch 里写了 provider 与 model，凭据却按引用名 join 不上
+ * （`.credentials.yaml` 的 `refs` 里没有那个名字，或名字拼错），用户该去补 key / 改引用名，
+ * 而不是去重新配一遍 provider。旧实现把这种条目静默丢掉，UI 只能说「未读到可用模型」。
+ *
+ * @property provider 路由名（patch 里 `providers` 下的键，或扁平形态的插件 id）。
+ * @property model 该路由下第一个模型 id；只声明了 `model` 时就是它。
+ * @property credentialRef 未命中的引用名；**绝不携带 key 值**（可疑值会被打掉，见 credentialRefName）。
+ * @property reason 固定的原因码，当前只有 `no-credential`。
+ */
+internal data class RepairModelUnavailable(
+  val provider: String,
+  val model: String,
+  val credentialRef: String?,
+  val reason: String = "no-credential",
+)
 internal data class RepairModelLoad(
   val connections: List<RepairModelConnection>,
   val sources: List<RepairModelSource>,
@@ -57,6 +76,14 @@ internal data class RepairModelLoad(
    * 一个去写配置，一个回启动页重试引擎——所以必须能被上层判读（issue #1012）。
    */
   val rootMissing: Boolean = false,
+  /**
+   * 配置里存在但缺凭据的路由。
+   *
+   * 与 [connections] 分开的理由：客户端要求 apiKey 非空才能发请求（`RepairModelClient` 直接
+   * require），所以缺凭据的路由不能混进可用候选；但它也**不能消失**，否则「配了但缺 key」
+   * 与「根本没配」在界面上又变成同一句话。
+   */
+  val unavailable: List<RepairModelUnavailable> = emptyList(),
 )
 
 /** Reads bundle → profile → HOME layers without starting Node or asking a live engine. */
@@ -167,6 +194,8 @@ internal object RepairModelConfig {
     }
     class Resolved {
       val connections = ArrayList<RepairModelConnection>()
+      /** 配置在、凭据 join 不上的路由；与 connections 互斥，单独上报。 */
+      val unavailable = ArrayList<RepairModelUnavailable>()
       var selected: Pair<String, String>? = null
       var selectedEffort: String? = null
       var blocked: String? = null
@@ -234,7 +263,7 @@ internal object RepairModelConfig {
       // 缺凭据必须留痕：用户配了 provider 却没候选，和用户根本没配，是两种完全不同的修法。
       fun note(reason: String) { if (out.blocked == null) out.blocked = reason }
       if (layer.disabled["llm-pi-ai"] != true) layer.configs["llm-pi-ai"]?.let {
-        addPiAi(it, allCredentials, out.connections, ::note)
+        addPiAi(it, allCredentials, out.connections, ::note, out.unavailable)
       }
       if (layer.disabled["llm-deepseek"] != true) {
         val explicit = layer.configs["llm-deepseek"]
@@ -242,13 +271,13 @@ internal object RepairModelConfig {
         val official = explicit ?: out.selected?.takeIf { it.first == "deepseek-official" }
           ?.let { RepairYamlValue.Mapping(LinkedHashMap()) }
         if (official != null) addOfficial(official, credentials, environment, out.connections,
-          out.selected?.takeIf { it.first == "deepseek-official" }?.second, ::note)
+          out.selected?.takeIf { it.first == "deepseek-official" }?.second, ::note, out.unavailable)
       }
       // 泛化面：不在三条内置路径里的条目，只要能拼出 provider + model + baseURL + 凭据就算候选。
       // 内置路径先跑（保持既有优先级），泛化候选只做补充；去重由 order() 的 identity 负责。
       for ((id, config) in layer.custom) {
         if (layer.disabled[id] == true) continue
-        addGeneric(id, config, allCredentials, out.connections, ::note)
+        addGeneric(id, config, allCredentials, out.connections, ::note, out.unavailable)
       }
       return out
     }
@@ -270,7 +299,9 @@ internal object RepairModelConfig {
     val defaultAvailable = if (resolved.selected == null) ordered.size == 1 else ordered.any {
       it.provider == resolved.selected!!.first && it.model == resolved.selected!!.second
     }
-    return RepairModelLoad(ordered, sources, defaultAvailable)
+    // 缺凭据的路由如实上报（引用名不带 key 值），但绝不混进可用候选。
+    val unavailable = resolved.unavailable.distinctBy { it.provider + "|" + it.model }
+    return RepairModelLoad(ordered, sources, defaultAvailable, unavailable = unavailable)
   }
 
   /**
@@ -355,16 +386,11 @@ internal object RepairModelConfig {
     credentials: Map<String, String>,
     out: MutableList<RepairModelConnection>,
     noteBlocked: (String) -> Unit = {},
+    unavailable: MutableList<RepairModelUnavailable> = ArrayList(),
   ) {
     val providers = config.mapping("providers") ?: return
     for ((route, value) in providers.values) {
       val profile = value as? RepairYamlValue.Mapping ?: continue
-      // 缺 apiKeyEnv / 缺凭据都是「配了但用不了」，不是「没配」。旧实现一律静默 continue，
-      // UI 只能说「未读到可用模型」，用户无从判断该去补什么。
-      val ref = profile.string("apiKeyEnv")
-      if (ref == null) { noteBlocked("no-credential"); continue }
-      val key = credentials[ref]
-      if (key == null) { noteBlocked("no-credential"); continue }
       val base = profile.string("baseURL") ?: continue
       val api = profile.string("api") ?: "openai-completions"
       val display = profile.string("displayName") ?: route
@@ -374,6 +400,16 @@ internal object RepairModelConfig {
         val id = entry.string("id") ?: return@mapNotNull null
         Triple(entry.string("name") ?: id, id, entry)
       } ?: continue
+      // 引用名 join：patch 里只写引用名，真 key 在 .credentials.yaml 的 refs 里。
+      // 缺 apiKeyEnv / 引用名没命中都是「配了但用不了」，不是「没配」——旧实现静默 continue，
+      // UI 只能说「未读到可用模型」，用户无从判断该去补什么。
+      val ref = credentialRefOf(profile)
+      val key = ref?.let { credentials[it] }
+      if (key == null) {
+        noteBlocked("no-credential")
+        unavailable += RepairModelUnavailable(route, models.firstOrNull()?.second ?: "", ref)
+        continue
+      }
       for ((modelName, id, entry) in models) {
         out += connection(route, display, base, api, key, routeHeaders, modelName, id, entry)
       }
@@ -387,11 +423,9 @@ internal object RepairModelConfig {
     out: MutableList<RepairModelConnection>,
     selectedModel: String? = null,
     noteBlocked: (String) -> Unit = {},
+    unavailable: MutableList<RepairModelUnavailable> = ArrayList(),
   ) {
-    val ref = config.string("apiKeyEnv") ?: "DEEPSEEK_API_KEY"
-    val key = credentials[ref] ?: environment[ref]?.takeIf { it.isNotBlank() }
-      ?: run { noteBlocked("no-credential"); return }
-    val base = config.string("baseURL") ?: "https://api.deepseek.com/anthropic"
+    val ref = credentialRefOf(config) ?: "DEEPSEEK_API_KEY"
     val models = config.sequence("models")?.values?.mapNotNull { item ->
       val model = item as? RepairYamlValue.Mapping ?: return@mapNotNull null
       val id = model.string("id") ?: return@mapNotNull null
@@ -405,6 +439,13 @@ internal object RepairModelConfig {
     )
     val route = "deepseek-official"
     val routeHeaders = headers(config)
+    val key = credentials[ref] ?: environment[ref]?.takeIf { it.isNotBlank() }
+    if (key == null) {
+      noteBlocked("no-credential")
+      unavailable += RepairModelUnavailable(route, models.firstOrNull()?.second ?: "", ref)
+      return
+    }
+    val base = config.string("baseURL") ?: "https://api.deepseek.com/anthropic"
     for ((modelName, id, entry) in models) {
       out += connection(route, "DeepSeek", base, "anthropic-messages", key, routeHeaders, modelName, id, entry)
     }
@@ -432,18 +473,19 @@ internal object RepairModelConfig {
     credentials: Map<String, String>,
     out: MutableList<RepairModelConnection>,
     noteBlocked: (String) -> Unit = {},
+    unavailable: MutableList<RepairModelUnavailable> = ArrayList(),
   ) {
     val providers = config.mapping("providers")
     if (providers != null) {
       // providers 映射形态：每个子项自己是一条路由，路由名就是它的键。
       for ((route, value) in providers.values) {
         val profile = value as? RepairYamlValue.Mapping ?: continue
-        addGenericRoute(route, route, profile, credentials, out, noteBlocked)
+        addGenericRoute(route, route, profile, credentials, out, noteBlocked, unavailable)
       }
       return
     }
     // 扁平形态：整份 config 就是一条路由，插件 id 兼作路由名。
-    addGenericRoute(id, id, config, credentials, out, noteBlocked)
+    addGenericRoute(id, id, config, credentials, out, noteBlocked, unavailable)
   }
 
   private fun addGenericRoute(
@@ -453,17 +495,10 @@ internal object RepairModelConfig {
     credentials: Map<String, String>,
     out: MutableList<RepairModelConnection>,
     noteBlocked: (String) -> Unit,
+    unavailable: MutableList<RepairModelUnavailable> = ArrayList(),
   ) {
     // 没有 baseURL 就不猜端点：猜错等于给用户一条注定失败的候选，比不给更糟。
     val base = profile.string("baseURL") ?: profile.string("baseUrl") ?: return
-    val key = genericCredential(profile, credentials)
-    if (key == null) {
-      // 只对「确实声明了凭据引用」的条目留痕，免得把无关配置记成缺凭据。
-      if (profile.string("apiKeyEnv") != null || profile.string("tokenEnv") != null) {
-        noteBlocked("no-credential")
-      }
-      return
-    }
     val models = profile.sequence("models")?.values?.mapNotNull { item ->
       val entry = item as? RepairYamlValue.Mapping ?: return@mapNotNull null
       val modelId = entry.string("id") ?: entry.string("model") ?: return@mapNotNull null
@@ -474,6 +509,17 @@ internal object RepairModelConfig {
         ?.let { Triple(it, it, RepairYamlValue.Mapping(LinkedHashMap())) })
     }
     if (models.isEmpty()) return
+    // 引用名 join：命中即可用；未命中是「配了但缺凭据」，必须作为不可用条目上报（带引用名、不带值）。
+    val ref = credentialRefOf(profile)
+    val key = ref?.let { credentials[it] }
+    if (key == null) {
+      // 只对「确实声明了凭据引用」的条目留痕，免得把无关配置记成缺凭据。
+      if (ref != null) {
+        noteBlocked("no-credential")
+        unavailable += RepairModelUnavailable(route, models.first().second, ref)
+      }
+      return
+    }
     val api = profile.string("api") ?: "openai-completions"
     val display = profile.string("displayName") ?: profile.string("label") ?: fallbackLabel
     val routeHeaders = headers(profile)
@@ -483,23 +529,43 @@ internal object RepairModelConfig {
   }
 
   /**
-   * 凭据解析：先认引用，再认字面量。
+   * 取一条路由声明的**凭据引用名**（不是 key 值）。
    *
-   * 引用（apiKeyEnv / apiKeyRef / tokenEnv / tokenRef）指向 .credentials.yaml 的 refs 或进程环境；
-   * 字面量（apiKey / token / accessToken）是用户直接写在配置里的值，也可能只是写了个 ref 名。
-   * 无论哪条路径，值都只进内存里的候选，不落盘、不打印、不进来源表。
+   * 用户 2026-11-01 明确的事实：cordis patch 里没有真实 key，provider 的 `apiKey`（或同义字段）
+   * 只是一个引用名，真值在 `.credentials.yaml` 的 `refs:` 里，两边按引用名 join。
+   *
+   * 因此这里只回答「这条路由引用了哪个名字」，由调用方拿它去 credentials 里查；查不到就是
+   * 「凭据引用未命中」，而不是「这条路由不存在」。
+   *
+   * 返回值必须能安全进 UI 与诊断包：形如 `sk-xxxx` 的疑似真实密钥**一律不当作引用名**
+   * （宁可报「没有引用」也不能把密钥前几位写进界面），其余按原样返回。
+   *
+   * @param profile 一条 provider 路由的配置映射。
+   * @returns 引用名；没有声明或形似密钥时返回 null。
    */
-  private fun genericCredential(profile: RepairYamlValue.Mapping, credentials: Map<String, String>): String? {
-    for (field in listOf("apiKeyEnv", "apiKeyRef", "tokenEnv", "tokenRef")) {
-      val ref = profile.string(field) ?: continue
-      credentials[ref]?.takeIf { it.isNotBlank() }?.let { return it }
-    }
-    for (field in listOf("apiKey", "token", "accessToken")) {
-      val literal = profile.string(field)?.takeIf { it.isNotBlank() } ?: continue
-      return credentials[literal] ?: literal
+  internal fun credentialRefOf(profile: RepairYamlValue.Mapping): String? {
+    for (field in listOf("apiKeyEnv", "apiKeyRef", "tokenEnv", "tokenRef", "apiKey", "token", "accessToken")) {
+      val value = profile.string(field)?.trim()?.takeIf { it.isNotEmpty() } ?: continue
+      if (looksLikeSecret(value)) continue
+      return value
     }
     return null
   }
+
+  /**
+   * 形似真实密钥的判定：只用于**拒绝把它当引用名**，不用于识别或展示密钥。
+   *
+   * @param value 配置里的原始字符串。
+   * @returns true 表示看起来是密钥本体，不能出现在 UI/日志/诊断包里。
+   */
+  internal fun looksLikeSecret(value: String): Boolean {
+    val text = value.trim()
+    if (text.length >= 40) return true
+    if (text.startsWith("sk-") || text.startsWith("Bearer ")) return true
+    // 长串且不含分隔符 = 更像密钥而不是引用名（引用名是 POSIX 标识符或 kebab 名）。
+    return text.length >= 20 && !text.contains('-') && !text.contains('_')
+  }
+
 
   /**
    * 一条候选连接的唯一构造点。
