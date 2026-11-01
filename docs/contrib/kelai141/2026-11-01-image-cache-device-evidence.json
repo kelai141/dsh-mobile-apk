@@ -1,0 +1,129 @@
+{
+  "taskDate": "2026-11-01",
+  "recordedAt": "2026-11-01T15:57:53.968Z",
+  "code": {
+    "coordinationCommit": "7c998d36c2c2799f12dac758c45da2cbaa2a501b",
+    "apkCommit": "3d1e8838810f4a48f70cf2561e8c07c16070df74",
+    "engine": "0.2.1-rc.3"
+  },
+  "device": {
+    "environment": "独立MuMu模拟器",
+    "android": "15",
+    "api": 35,
+    "primaryAbi": "x86_64",
+    "node": "24.18.0",
+    "densityDpi": 240,
+    "viewports": [
+      {
+        "language": "en",
+        "nativeWidth": 1600,
+        "nativeHeight": 900
+      },
+      {
+        "language": "zh-CN",
+        "nativeWidth": 900,
+        "nativeHeight": 1600
+      }
+    ],
+    "arm64Measured": false
+  },
+  "artifacts": [
+    {
+      "variant": "Fast",
+      "fileName": "dsh-mobile-apk-v0.14.9-IMAGE-PREVIEW-LOCAL-x86_64.apk",
+      "bytes": 206063944,
+      "sha256": "1ea3c09bcb7fd7cb4cddee57c154f857fcceddd52058024e8366e195e53d5928",
+      "snapshotSha256": "e76e5acee514d03b54b49226888aafcdd5a7f304562f8cd168d853577ce121ad",
+      "attachmentSha256": "c1a4818d1693798958f21b1b56ef109f9a38dc231a27e348bf5553eaca8f6157"
+    },
+    {
+      "variant": "debug-QA",
+      "fileName": "dsh-mobile-apk-dev-fast.apk",
+      "bytes": 207370414,
+      "sha256": "3c5e4f7420c947cee67e68a86a30b912180f63247502c74f5cb3021e0440eb32",
+      "snapshotSha256": "e76e5acee514d03b54b49226888aafcdd5a7f304562f8cd168d853577ce121ad",
+      "attachmentSha256": "c1a4818d1693798958f21b1b56ef109f9a38dc231a27e348bf5553eaca8f6157"
+    }
+  ],
+  "runtime": {
+    "snapshotFingerprint": "e76e5acee514d03b54b49226888aafcdd5a7f304562f8cd168d853577ce121ad",
+    "attachmentSha256": "c1a4818d1693798958f21b1b56ef109f9a38dc231a27e348bf5553eaca8f6157",
+    "matchedAfterInstallAndColdRestart": true,
+    "installedVariant": "debug-QA",
+    "fastVariantInstalled": false
+  },
+  "ageMethod": {
+    "fixtureAgeMinutes": 121,
+    "thresholdMinutes": 120,
+    "method": "仅修改自建样本mtime；不改系统时钟，不称为实际等待两小时",
+    "explicitReadUsedRealAttachmentService": true
+  },
+  "cases": {
+    "englishLandscape": {
+      "plannedReclaimableBytes": 7486418,
+      "eligibleImageFiles": 2,
+      "scanAndCancelPreserve": true,
+      "oldPairRemoved": true,
+      "recentAndRenewedPreserved": true,
+      "existingFileAndConfigHashesUnchanged": true,
+      "currentLogPrefixUnchanged": true,
+      "uiReportedFreed": "7.1 MB"
+    },
+    "chinesePortrait": {
+      "plannedReclaimableBytes": 213097,
+      "eligibleImageFiles": 2,
+      "oldPairRemoved": true,
+      "recentAndRenewedPreserved": true,
+      "existingFileAndConfigHashesUnchanged": true,
+      "currentLogPrefixUnchanged": true,
+      "uiReportedFreed": "208.1 KB"
+    },
+    "temporaryFiles": {
+      "plannedReclaimableBytes": 7935904,
+      "oldTypes": [
+        "原图",
+        "标注图",
+        "浏览器截图",
+        "残留原帧"
+      ],
+      "oldTemporaryFilesRemoved": 4,
+      "recentAndUnknownPreserved": true,
+      "attachmentAndConfigHashesUnchanged": true,
+      "currentLogPrefixUnchanged": true
+    },
+    "history": {
+      "method": "真实SDK构造历史，真实已安装函数的隔离导出副本；生产入口哈希保持不变",
+      "runs": [
+        "english",
+        "chinese",
+        "restart"
+      ],
+      "oldImagePlaceholderBothRoutes": true,
+      "currentImageRetained": true,
+      "originalEventsUnchanged": true,
+      "availableBytesUnchanged": true,
+      "preview": {
+        "width": 1600,
+        "height": 721,
+        "bytes": 30888
+      },
+      "providerRequests": 0
+    }
+  },
+  "boundaries": [
+    "未测ARM64",
+    "未发起真实模型请求或测量usage/token",
+    "未验收完整phone-vision标尺、小字或游戏点击准确性",
+    "仅同源debug包完成CDP与ADB；Fast包不是发布候选",
+    "设备未配置模型密钥；凭据保留由受控单测覆盖"
+  ],
+  "evidenceDirectory": ".deploy-tmp/image-live-qa/",
+  "buildLog": ".deploy-tmp/image-build/fast-chain-fully-prepared.log",
+  "teardown": {
+    "ownedFixturePayloadFilesRemoved": 5,
+    "ownedFixtureDirectoryRemoved": true,
+    "userSettingsAndCredentialsUntouched": true,
+    "completedAt": "2026-11-01T16:04:22.762Z",
+    "preservedTemporaryControlsCleanedAfterAssertions": 4
+  }
+}
