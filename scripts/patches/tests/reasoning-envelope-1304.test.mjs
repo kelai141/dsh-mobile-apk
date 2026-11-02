@@ -112,6 +112,8 @@ test('account/model/endpoint isolation after auth refresh, safe diagnostics, no 
   const jwt = (sub, expiry) => 'x.' + Buffer.from(JSON.stringify({ iss: 'issuer', sub, exp: expiry })).toString('base64url') + '.x'
   const scope = reasoningScope(model, { apiKey: jwt('one', 1) }, hash)
   assert.equal(reasoningScope(model, { apiKey: jwt('one', 2) }, hash), scope)
+  assert.equal(reasoningScope(model, { apiKey: jwt('one', 2), headers: { 'User-Agent': 'dsh-future', 'X-Request-Id': 'new-request' } }, hash), scope)
+  assert.notEqual(reasoningScope(model, { apiKey: jwt('one', 2), headers: { 'ChatGPT-Account-Id': 'different' } }, hash), scope)
   const message = { role: 'assistant', provider: model.provider, model: model.id, api: model.api, dshReasoningScope: scope,
     content: [{ type: 'thinking', thinking: 'display', thinkingSignature: CIPHER }, { type: 'toolCall', id: 'x', name: 'inspect', thoughtSignature: SIG }] }
   assert.equal(scopeReasoningHistory({ messages: [message] }, scope, model, assert.fail).messages[0], message)

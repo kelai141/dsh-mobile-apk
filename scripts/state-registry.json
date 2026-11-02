@@ -155,10 +155,10 @@
     },
     {
       "id": "provider-reasoning-replay",
-      "holder": "llm-pi-ai 的 source.replayState；摘要由既有 reasoning 内容持有",
+      "holder": "llm-pi-ai 的 source.replayState 与 credentials grant 私有登录世代；摘要由既有 reasoning 内容持有",
       "writePath": "scripts/patches/data/reasoning-envelope-1304.mjs:patchReasoningAdapter / patchReasoningModels",
-      "sourceOfTruth": "提供商原生 reasoning/thinking 块及实际鉴权后的账号、模型、API、端点",
-      "syncPath": "原生输出 → replayState 持久化 → 同身份原生输入；ui-chat 只读取摘要，空摘要保留思考行",
+      "sourceOfTruth": "提供商原生 reasoning/thinking 块、成功登录世代及实际鉴权后的账号、模型、API、端点",
+      "syncPath": "登录建立世代、刷新保留；原生输出 → replayState 持久化 → 同身份原生输入；ui-chat 只读取摘要，空摘要保留思考行",
       "evidence": {
         "kind": "grep",
         "file": "scripts/patches/data/reasoning-envelope-1304.mjs",

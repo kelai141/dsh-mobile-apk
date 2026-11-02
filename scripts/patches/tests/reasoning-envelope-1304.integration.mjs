@@ -31,6 +31,7 @@ writeFileSync(resolve(root, '../../@deepseek-ai/dsh-llm-pi-ai/lib/index.js'), pl
 }
 const load = relative => import(pathToFileURL(resolve(root, relative)).href)
 const { createModels } = await load('dist/models.js')
+const { InMemoryCredentialStore } = await load('dist/auth/credential-store.js')
 const responses = await load('dist/api/openai-responses.js')
 const codex = await load('dist/api/openai-codex-responses.js')
 const claude = await load('dist/api/anthropic-messages.js')
@@ -165,6 +166,61 @@ test('strict HTTP negative controls: missing replay is rejected with 400 invalid
       assert.equal((await response.json()).error.type, 'invalid_request_error')
     } finally { await server.close() }
   }
+})
+
+test('opaque OAuth refresh and collection restart preserve replay; a new login isolates the previous account', async () => {
+  const server = await reasoningMock(assert, { wire: 'responses' })
+  try {
+    const initial = modelsFor('xai', 'openai-responses', server)
+    const store = new InMemoryCredentialStore()
+    const grant = (account, expires = Date.now() + 3600_000) => ({ type: 'oauth', access: 'opaque-access-' + account, refresh: 'refresh-' + account, expires })
+    await store.modify('xai', async () => grant('one'))
+    let refreshes = 0
+    let heldAuth
+    const provider = { ...initial.models.getProvider('xai'), auth: { oauth: {
+      name: 'Test OAuth', login: async () => grant('two'),
+      refresh: async () => { refreshes++; return grant('one-refreshed') },
+      toAuth: async credential => {
+        const held = heldAuth
+        if (held) { held.entered.resolve(); await held.release.promise }
+        return { apiKey: credential.access }
+      },
+    } } }
+    const models = createModels({ credentials: store }); models.setProvider(provider)
+    const { apiKey: ignored, ...options } = initial.options
+    const context = { messages: [{ role: 'user', content: 'Inspect workspace.', timestamp: 1 }], tools: [tool] }
+    const first = await models.completeSimple(initial.model, context, options)
+    assert.equal(first.stopReason, 'toolUse', first.errorMessage)
+    const identity = (await store.read('xai')).dshReasoningIdentity
+    assert.ok(identity)
+    const recovered = restore(persist(first), assert.fail)
+    const call = first.content.find(block => block.type === 'toolCall')
+    const nextContext = { ...context, messages: [...context.messages, recovered,
+      { role: 'toolResult', toolCallId: call.id, toolName: call.name, content: [{ type: 'text', text: 'ok' }], timestamp: 2 }] }
+    await store.modify('xai', async current => ({ ...current, expires: 0 }))
+    const second = await models.completeSimple(initial.model, nextContext, options)
+    assert.equal(second.stopReason, 'stop', second.errorMessage)
+    assert.equal(refreshes, 1)
+    assert.equal((await store.read('xai')).dshReasoningIdentity, identity)
+    assert.equal(second.dshReasoningScope, first.dshReasoningScope)
+    const restarted = createModels({ credentials: store }); restarted.setProvider(provider)
+    assert.equal((await restarted.completeSimple(initial.model, nextContext, options)).stopReason, 'stop')
+    heldAuth = { entered: Promise.withResolvers(), release: Promise.withResolvers() }
+    const held = heldAuth
+    const pending = restarted.completeSimple(initial.model, context, options)
+    await held.entered.promise
+    await restarted.login('xai', 'oauth', { prompt: async () => '', notify: () => {} })
+    heldAuth = undefined
+    held.release.resolve()
+    assert.equal((await pending).dshReasoningScope, first.dshReasoningScope,
+      'an in-flight old-account request must not acquire the new account identity')
+    assert.notEqual((await store.read('xai')).dshReasoningIdentity, identity)
+    const diagnostics = []
+    const switched = await restarted.completeSimple(initial.model, nextContext, { ...options, onReasoningDegrade: code => diagnostics.push(code) })
+    assert.equal(switched.stopReason, 'error')
+    assert.deepEqual(diagnostics, ['REASONING_SCOPE_MISMATCH'])
+    assert.ok(!JSON.stringify(server.requests.at(-1).input).includes('encrypted_content'))
+  } finally { await server.close() }
 })
 
 test('Responses summary is display-only; Copilot unsupported opaque chat fields fail explicitly', async () => {

@@ -17,7 +17,11 @@
 
 Copilot 的公开字段依据是微软官方客户端的 [ThinkingDataInMessage](https://github.com/microsoft/vscode-copilot-chat/blob/main/src/platform/thinking/common/thinking.ts) 与 [CopilotChatEndpoint](https://github.com/microsoft/vscode-copilot-chat/blob/main/src/platform/endpoint/node/copilotChatEndpoint.ts)。`reasoning_opaque` 是完整不透明值，不能把不同段的值拼接。CAPI 每条消息一个值，因此分段序列化，并把各段工具结果放回对应调用之后；重复或缺失结果明确报错。字段清单探针只输出路径/类型，本轮没有把模拟结果写成真实账号观测。
 
-Responses 每个工具步骤先排 reasoning，再排该步骤的其他内容，不把凭证移到另一工具批次。Claude 块保持原顺序。外来推理不转成 assistant 正文；切换账号、模型、API 或端点时剥离旧凭证并报告 `REASONING_SCOPE_MISMATCH`。旧历史无法确认归属时同样处理。JWT 使用 issuer/subject/tenant 保持刷新后的身份稳定；不透明 token 轮换会保守拒绝旧凭证并告警。
+Responses 每个工具步骤先排 reasoning，再排该步骤的其他内容，不把凭证移到另一工具批次。Claude 块保持原顺序。外来推理不转成 assistant 正文；切换账号、模型、API 或端点时剥离旧凭证并报告 `REASONING_SCOPE_MISMATCH`。旧历史无法确认归属时同样处理。
+
+OAuth grant 私有元数据 `dshReasoningIdentity` 记录随机登录世代。首次请求在原凭据事务中补齐；普通 token 刷新保留它，显式登录生成新世代，注销删除。每次鉴权单独捕获实际使用的世代，不在鉴权后重读可能已切换的账号。显式 API key/鉴权头覆盖不使用该世代，JWT 使用 issuer/subject/tenant，其余不透明 key 轮换保守拒绝旧凭证。回归覆盖刷新、Models 重建、重新登录和鉴权途中换号。
+
+身份指纹仅包含鉴权与账号/组织/租户/项目选择头；User-Agent、客户端版本、请求追踪 ID 不参与，避免正常升级或新请求误切断推理历史。
 
 Chat Completions 收到未适配的 encrypted_content/signature 会明确报错。仅在 compat 明确要求 reasoning_content 时补缺省空格。诊断只导出字段路径和类型，不改写存储信封；损坏的信封报固定错误码，不回显原值。
 

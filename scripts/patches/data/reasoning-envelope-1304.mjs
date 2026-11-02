@@ -129,6 +129,7 @@ export function reasoningScope(model, options, hash) {
   const headers = Object.fromEntries(Object.entries(options.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v]))
   // JWT account identity survives token refresh; opaque keys fail closed on rotation.
   const identity = token => {
+    if (options.dshReasoningIdentity) return ['oauth', options.dshReasoningIdentity]
     try {
       const claims = JSON.parse(Buffer.from(String(token).replace(/^Bearer /i, '').split('.')[1], 'base64url').toString())
       const tenant = claims['https://api.openai.com/auth']?.chatgpt_account_id ?? claims.account_id ?? claims.tid
@@ -137,7 +138,44 @@ export function reasoningScope(model, options, hash) {
     return token ?? ''
   }
   return hash(JSON.stringify([model.provider, model.api, model.id, model.baseUrl, identity(options.apiKey),
-    Object.keys(headers).sort().map(key => [key, /authorization|api-key/.test(key) ? identity(headers[key]) : headers[key]])]))
+    Object.keys(headers).filter(key => /authorization|api-key|account|organization|tenant|project|cookie|user-id/.test(key))
+      .sort().map(key => [key, /authorization|api-key|cookie/.test(key) ? identity(headers[key]) : headers[key]])]))
+}
+
+/** Preserve a login generation across token refreshes. Explicit login always supplies a fresh generation. */
+export function reasoningCredentialStore(store, newIdentity) {
+  return {
+    read: (id, options) => store.read(id, options),
+    list: options => store.list(options),
+    delete: (id, options) => store.delete(id, options),
+    modify: (id, update, options) => store.modify(id, async current => {
+      const next = await update(current)
+      if (next?.type !== 'oauth') return next
+      const supplied = typeof next.dshReasoningIdentity === 'string' ? next.dshReasoningIdentity : undefined
+      const previous = current?.type === 'oauth' && typeof current.dshReasoningIdentity === 'string' ? current.dshReasoningIdentity : undefined
+      return { ...next, dshReasoningIdentity: supplied || previous || newIdentity() }
+    }, options),
+  }
+}
+
+/** Capture the credential actually used by this auth resolution, rather than rereading a possibly switched account. */
+export function reasoningAuthStore(store) {
+  const captured = { identity: undefined }
+  const remember = credential => {
+    captured.identity = credential?.type === 'oauth' ? credential.dshReasoningIdentity : undefined
+    return credential
+  }
+  captured.store = {
+    ...store,
+    async read(id, options) {
+      let credential = await store.read(id, options)
+      if (credential?.type === 'oauth' && (typeof credential.dshReasoningIdentity !== 'string' || !credential.dshReasoningIdentity))
+        credential = await store.modify(id, async current => current, options)
+      return remember(credential)
+    },
+    async modify(id, update, options) { return remember(await store.modify(id, update, options)) },
+  }
+  return captured
 }
 
 /** Drop foreign seals with a safe diagnostic. Never turn foreign thinking into assistant prose. */
@@ -203,9 +241,25 @@ export function patchReasoningAdapter(source) {
 }
 
 export function patchReasoningModels(source) {
-  let out = 'import { createHash as dshReasoningHash } from "node:crypto";\n'
+  let out = 'import { createHash as dshReasoningHash, randomUUID as dshReasoningUUID } from "node:crypto";\n'
     + 'import { createAssistantMessageEventStream as dshReasoningStream } from "./utils/event-stream.js";\n'
-    + [reasoningScope, scopeReasoningHistory, scopedReasoningStream].map(fn => fn.toString()).join('\n') + '\n' + source
+    + [reasoningScope, reasoningCredentialStore, reasoningAuthStore, scopeReasoningHistory, scopedReasoningStream]
+      .map(fn => fn.toString()).join('\n') + '\n' + source
+  out = replace(out, 'this.credentials = options?.credentials ?? new InMemoryCredentialStore();',
+    'this.credentials = reasoningCredentialStore(options?.credentials ?? new InMemoryCredentialStore(), dshReasoningUUID);')
+  out = replace(out, 'const result = await resolveProviderAuth(provider, this.credentials, this.authContext, { ...overrides, signal });',
+    `const captured = reasoningAuthStore(this.credentials);
+        const resolved = await resolveProviderAuth(provider, captured.store, this.authContext, { ...overrides, signal });
+        const result = resolved?.source === "OAuth" && captured.identity
+            ? { ...resolved, dshReasoningIdentity: captured.identity } : resolved;`)
+  out = replace(out, 'const credential = await raceWithAbortSignal(loginOperation, signal);',
+    `const granted = await raceWithAbortSignal(loginOperation, signal);
+        const credential = granted.type === "oauth" ? { ...granted, dshReasoningIdentity: dshReasoningUUID() } : granted;`)
+  out = replace(out, 'const requestOptions = { ...providerOptions, apiKey, headers, env };',
+    `const explicitAuth = options?.apiKey !== undefined || Object.keys({ ...model.headers, ...options?.headers })
+            .some(name => /authorization|api-key|cookie/i.test(name));
+        const requestOptions = { ...providerOptions, apiKey, headers, env,
+            dshReasoningIdentity: explicitAuth ? undefined : resolution.dshReasoningIdentity };`)
   for (const method of ['stream', 'streamSimple']) {
     out = replace(out, `return provider.${method}(requestModel, transcript, requestOptions);`,
       `const scope = reasoningScope(requestModel, requestOptions, value => dshReasoningHash("sha256").update(value).digest("hex"));
@@ -354,7 +408,8 @@ const CONTRACTS = [
   ['{ dshReasoningScope: message.dshReasoningScope }', '{ dshSealed: block.dshSealed }',
     '{ dshSealed: replay.dshSealed }', 'onReasoningDegrade: onReplayDegrade'],
   ['scopeReasoningHistory(transcript, scope, requestModel, report)',
-    'scopedReasoningStream(provider.streamSimple', 'scopedReasoningStream(provider.stream('],
+    'scopedReasoningStream(provider.streamSimple', 'scopedReasoningStream(provider.stream(',
+    'reasoningCredentialStore(options?.credentials', 'reasoningAuthStore(this.credentials)', 'dshReasoningUUID()'],
   ['readReasoningSignature(block.thinkingSignature)', 'terminal reasoning slot mismatch',
     'JSON.stringify(replayReasoningItem(item))', 'messages.push(...reasonFirst(output));'],
   ['dshSealed: JSON.stringify(event.content_block)', 'blocks.push(sealed)', 'JSON.parse(block.dshSealed)'],
