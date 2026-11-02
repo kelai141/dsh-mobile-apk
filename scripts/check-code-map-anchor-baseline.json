@@ -1323,22 +1323,22 @@
       "internal fun describeEngineLogState(filesDir: File): String {"
     ],
     "MainActivity.kt:1035": [
-      "// 冻结态兜底供能（0.14.10）：页面轮询不在前台/未挂载时，reaper 兼任限频重试触发；"
+      "* 由 [VdisplayController.reclaimIdle] 判定（阈值 10 分钟未使用）。"
     ],
     "MainActivity.kt:1059": [
-      "outState.putBoolean(\"dsh.engine-user-closed\", userClosedEngine)"
+      "override fun onStop() {"
     ],
     "MainActivity.kt:1062": [
-      "}"
+      "vdisplayReaper = null"
     ],
     "MainActivity.kt:1081": [
-      "try {"
+      "splashOverlay = null"
     ],
     "MainActivity.kt:1169": [
-      "try {"
+      "isEnabled = false"
     ],
     "MainActivity.kt:1172": [
-      "if (!pageRecovery.accepts(generation) || view !== webView) return@evaluateJavascript"
+      "}"
     ],
     "MainActivity.kt:145": [
       "private var splashTimeout: Runnable? = null"
@@ -1374,52 +1374,52 @@
       "if (userClosedEngine) EngineService.userShutdown = true"
     ],
     "MainActivity.kt:610": [
-      "uiChrome.applyImmersive(uiChrome.immersivePrefs())"
+      "LogCollector.start(this)"
     ],
     "MainActivity.kt:647": [
-      "finishSplash(\"failure-\" + code, animate = false)"
+      "// §2.3（0.14.1 块C）：未设背景色时默认白，白屏在视觉上与「正常空页」不可区分——渲染失败"
     ],
     "MainActivity.kt:774": [
-      "}"
+      "pendingNotifySession = session"
     ],
     "MainActivity.kt:777": [
-      "internal fun deliverNotifyRoute() {"
+      "}"
     ],
     "MainActivity.kt:78": [
       "private var webSystemBottomInset = 0"
     ],
     "MainActivity.kt:787": [
-      "if (raw?.trim() != \"true\") {"
+      "consumeNotifyRoute(intent)"
     ],
     "MainActivity.kt:789": [
-      "// 有界重试（最多 12 次 / 约 10s）后再判失败——只有真删除/真不可开才弹失败提示。"
+      ""
     ],
     "MainActivity.kt:793": [
-      "webView.postDelayed({ deliverNotifyRoute() }, NOTIFY_ROUTE_RETRY_MS)"
+      "if (!pageUiActive || !webViewReady || webView.visibility != android.view.View.VISIBLE) return"
     ],
     "MainActivity.kt:798": [
-      "}"
+      "val generation = pageRecovery.generation"
     ],
     "MainActivity.kt:808": [
-      "try {"
+      "return@evaluateJavascript"
     ],
     "MainActivity.kt:817": [
       "}"
     ],
     "MainActivity.kt:820": [
-      ""
+      "runOnUiThread {"
     ],
     "MainActivity.kt:827": [
-      "if (!RepairState.active && RepairState.required(this)) {"
+      ").show()"
     ],
     "MainActivity.kt:855": [
-      "}"
+      "if (pendingWebPresentation) showWeb()"
     ],
     "MainActivity.kt:885": [
-      "if (!userClosedEngine && autoStart) {"
+      "NotifyCenter.syncChannelNames(this)"
     ],
     "MainActivity.kt:928": [
-      "// M3：从系统授权页返回——上次 pick 因缺权限挂起时按授权结果续启/结算（迁至 DirectoryPickerController）。"
+      "if (!userClosedEngine && autoStart && webView.visibility != View.VISIBLE) {"
     ],
     "MobileChrome.tsx:35": [
       "?? null"
@@ -2112,10 +2112,10 @@
       ""
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1035": [
-      "// 冻结态兜底供能（0.14.10）：页面轮询不在前台/未挂载时，reaper 兼任限频重试触发；"
+      "* 由 [VdisplayController.reclaimIdle] 判定（阈值 10 分钟未使用）。"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1118": [
-      "* （即便 JS 侧没找到关闭控件也不退出：「观测不到/关不掉的层不得变成误退应用」）；"
+      ""
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:137": [
       "internal val splashImportController = SplashImportController(this)"
@@ -2145,28 +2145,28 @@
       "}"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:610": [
-      "uiChrome.applyImmersive(uiChrome.immersivePrefs())"
+      "LogCollector.start(this)"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:672": [
-      "// #182-2：左右同样取系统栏与挖孔的较大者（横屏且侧边挖孔时 cutout.left/right > 0）。"
+      "// Activity-owned isolated WebView only through the process-wide holder."
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:724": [
-      "// 自带 GONE，什么都不做的话用户会看到一片空白（没有可点的「启动引擎」）。"
+      "if (consumePendingSelfRetry()) {"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:776": [
-      "/** 把待投递的通知落点交给页面；页面未就绪则留到 onPageFinished 再送一次。 */"
+      "deliverNotifyRoute()"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:817": [
       "}"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:820": [
-      ""
+      "runOnUiThread {"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:89": [
       ""
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:928": [
-      "// M3：从系统授权页返回——上次 pick 因缺权限挂起时按授权结果续启/结算（迁至 DirectoryPickerController）。"
+      "if (!userClosedEngine && autoStart && webView.visibility != View.VISIBLE) {"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MuxClient.kt:172": [
       "sendFrame(out, 0x1, streamOpen.toByteArray(Charsets.UTF_8))"

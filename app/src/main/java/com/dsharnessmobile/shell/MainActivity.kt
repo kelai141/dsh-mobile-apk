@@ -579,7 +579,21 @@ class MainActivity : ComponentActivity() {
     // 提示），随后交回默认 handler——只记录，不吞异常、不阻止崩溃。
     installCrashMarker()
     // 启动即 TTL 清扫临时工作区（issue #60 F5.1：7 天过期文件自动回收）
-    try { FileIncoming.sweepExpired(this) } catch (_: Throwable) {}
+    //
+    // 性能审计 2026-11-02 #5：**移出主线程**。
+    //
+    // 原实现直接在 onCreate 同步跑：sweepWorkspace 会 listFiles() 整个来件临时工作区，
+    // 再对 `.sessions` 下**每个 json 各做一次 readText + JSONObject 解析**，最后逐条 stat。
+    // 这是本 Activity 唯一一处「随用户来件量增长」的主线程冷启成本，且上界无硬限
+    // （TTL 是 7 天，重度用户可以让 .sessions 累积数百条）。
+    //
+    // 为什么挪走是**零行为变化**：它的语义只是「删掉 7 天前的过期临时文件」，早两秒晚两秒
+    // 对用户没有任何可观测差异。与 processIncomingIntent 的顺序也不构成正确性问题——
+    // 新来件 age=0，永远不在 TTL 删除集里（sweepWorkspace 只删 lastModified < now - TTL 的项）。
+    // 异常仍按原样吞掉（清扫失败不得影响启动）。
+    Thread({
+      try { FileIncoming.sweepExpired(this) } catch (_: Throwable) {}
+    }, "dsh-incoming-ttl-sweep").apply { isDaemon = true }.start()
     // S1-11：**冷启动不再弹通知权限**。旧实现在 onCreate 里直接 launch：应用刚打开、用户还
   // 不知道这是干什么的，系统弹窗先来了——没有前置说明，拒绝了也没有任何后果提示，而
   // 后果其实很重（引擎提问/授权请求没有超时，通知被丢 = 任务永久挂起）。
