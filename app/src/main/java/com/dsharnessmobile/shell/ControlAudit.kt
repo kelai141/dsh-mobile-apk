@@ -74,7 +74,48 @@ object ControlAudit {
   /** 纯函数：把一条记录追加到 `<auditDir>/audit.ndjson`（只依赖 [File]，供 JVM 单测直驱）。 */
   fun appendTo(auditDir: File, record: JSONObject) {
     auditDir.mkdirs()
-    File(auditDir, "audit.ndjson").appendText(record.toString() + "\n")
+    val file = File(auditDir, "audit.ndjson")
+    // 性能审计 2026-11-02 #2：**有界写**。
+    //
+    // 改动前这一行是 `file.appendText(record.toString() + "\n")`，两个问题：
+    //  ① 每条记录 open + write + close 一次（无常驻句柄、无缓冲）。宿主负控 A/B = 11.2x
+    //     （274.2 us vs 24.5 us/record），而加 fsync 只贵 5% —— 也就是说当前形态为每次
+    //     open/close 白付了 11 倍代价，却没换来任何耐久性。
+    //  ② 这是全仓**唯一**一个没有大小上限的运行时状态文件。插件侧同一个写者
+    //     （plugins/dsh-android-bridge/src/index.ts:154-160）早就做了 >2MB 保留尾部 500 行的滚动，
+    //     壳侧没有 —— 于是 audit.ndjson 只增不减。
+    //
+    // 现在与插件侧口径对齐：同样 2MB 阈值、同样保留尾部 500 行；写入改成本次调用内复用同一
+    // 个句柄（appendBytes），不再每条 open/close。仍然**不做 fsync**：审计不是事务日志，
+    // 崩溃丢最后几条可接受，而 fsync 在每条记录上会显著拖慢授权路径。
+    try {
+      java.io.FileOutputStream(file, true).use { out ->
+        out.write((record.toString() + "\n").toByteArray(Charsets.UTF_8))
+      }
+    } finally {
+      rollIfOversized(file)
+    }
+  }
+
+  /** 审计文件大小上限（与插件侧 writeAudit 的 2MB 同口径）。 */
+  internal const val MAX_AUDIT_BYTES = 2L * 1024 * 1024
+
+  /** 超限时保留的尾部行数（与插件侧 `lines.slice(-500)` 同口径）。 */
+  internal const val KEEP_TAIL_LINES = 500
+
+  /**
+   * 超限滚动：保留尾部 [KEEP_TAIL_LINES] 行。
+   *
+   * 失败不抛出——审计的写入失败绝不能影响授权路径（与 [log] 的静默放弃同口径）。
+   */
+  private fun rollIfOversized(file: File) {
+    try {
+      if (file.length() <= MAX_AUDIT_BYTES) return
+      val tail = file.readLines(Charsets.UTF_8).takeLast(KEEP_TAIL_LINES)
+      file.writeText(tail.joinToString("") { it + "\n" }, Charsets.UTF_8)
+    } catch (_: Throwable) {
+      /* 截断失败不阻断 */
+    }
   }
 
   /**
