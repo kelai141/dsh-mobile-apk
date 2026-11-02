@@ -160,6 +160,9 @@ export const COMPOSER_SHEET_CSS = `
      每行被压到 ~33px（小于行视觉高度 46px）→ 行与行重叠、末行被切半。
      实测截图：横屏行列表挤成一团。内容超高时由本容器的 overflow-y 滚动承担。 */
   grid-auto-rows: auto;
+  /* align-content: stretch（默认值）会把多余高度按比例塞进每条 auto 行：卡片一展开，
+     行高就从 46 涨到 86，peek 的「2.5 行」跟着算错（实测 249 → 350）。行必须按内容高。 */
+  align-content: start;
   min-width: 0;
   gap: 2px;
   margin-top: 10px;
@@ -189,6 +192,12 @@ export const COMPOSER_SHEET_CSS = `
   font: inherit;
   text-align: start;
   cursor: pointer;
+}
+/* 空回执不占位（buildStatus 用内联样式给了 margin-top 10px，空节点在 flex 里照样占行）。
+   这条是 peek 计算的一部分：多出的 10px 会让「刚好 2.5 行」变成 2.26 行。 */
+[data-dsh-composer-sheet-status]:empty {
+  display: none;
+  margin-top: 0;
 }
 [data-dsh-composer-sheet-row]:active {
   background: var(--dsw-alias-bg-layer-2, rgba(128, 128, 128, 0.16));
@@ -232,6 +241,121 @@ export const COMPOSER_SHEET_CSS = `
   text-wrap: pretty;
 }
 
+/* ─────────────────────────────────────────────────────────────────────────────
+   竖屏（html[data-dsh-mobile-form]）：底部锚定 sheet + 两段滚动。
+
+   横屏（无该属性）一条都不命中：上面的居中卡片原样生效，像素不变。
+   「横屏不受影响」是**结构保证**而不是约定 —— 竖屏规则一律以
+   html[data-dsh-mobile-form] 开头，缺了那个 property 选择器就落不到横屏卡片上。
+
+   peek 高度按内容算（瓦片行 + 刚露出的 2.5 行 + 底部安全区），脚本写内联 height；
+   这里只负责形态，不写死任何 vh。
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/* 遮罩改成普通块层：居中网格只属于横屏卡片。遮罩继续接收点击（点遮罩关闭）。 */
+html[data-dsh-mobile-form] [data-dsh-composer-sheet-backdrop][data-dsh-composer-sheet-form='sheet'] {
+  display: block;
+  background: rgba(0, 0, 0, 0.55);
+  overscroll-behavior: contain;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+/* 面板贴底，只有上方两角是圆角。高度/位移由脚本逐帧写内联值。 */
+html[data-dsh-mobile-form] [data-dsh-composer-sheet-form='sheet'] > [data-dsh-composer-sheet-panel] {
+  position: fixed;
+  left: 0;
+  right: 0;
+  /* 软键盘（visualViewport）抬起的距离：脚本写 --dsh-sheet-bottom。 */
+  bottom: var(--dsh-sheet-bottom, 0px);
+  width: auto;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 4px 16px 12px;
+  border-radius: var(--dsw-radius-xl, 20px) var(--dsw-radius-xl, 20px) 0 0;
+  border-bottom: 0;
+  box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.36);
+  /* 拖拽期间不能有过渡，否则跟手被缓动吃掉；settling 时才打开。 */
+  transition: none;
+  will-change: height, transform;
+  touch-action: auto;
+  /* 安全区高度供脚本计算 peek：内容 = 瓦片 + 2.5 行 + 安全区。
+     与仓库既有写法一致（mobile-form.css.ts / marketplace.css.ts）：env() 在部分内核/模拟器上
+     恒为 0，壳侧 MainActivity 推的 --dsh-android-system-bottom 才是真值，两者取大。 */
+  --dsh-sheet-safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--dsh-android-system-bottom, 0px));
+  animation: dsh-composer-sheet-in 200ms cubic-bezier(0.215, 0.61, 0.355, 1);
+}
+
+/* 吸附：脚本只在松手后挂 settling，曲线/时长由手感档写进自定义属性。 */
+html[data-dsh-mobile-form] [data-dsh-composer-sheet-form='sheet'][data-dsh-composer-sheet-settling] > [data-dsh-composer-sheet-panel] {
+  transition:
+    height var(--dsh-sheet-snap-ms, 200ms) var(--dsh-sheet-snap-timing, cubic-bezier(0.215, 0.61, 0.355, 1)),
+    transform var(--dsh-sheet-snap-ms, 200ms) var(--dsh-sheet-snap-timing, cubic-bezier(0.215, 0.61, 0.355, 1));
+}
+
+/* 拖拽把手：一条小横杠。只是视觉提示，手势区仍是整张面板。 */
+html[data-dsh-mobile-form] [data-dsh-composer-sheet-handle] {
+  display: block;
+  flex: none;
+  width: 36px;
+  height: 4px;
+  margin: 4px auto 6px;
+  /* 4px 高的横杠配 lg(16px)：浏览器按短边裁成胶囊，与 999px 同观感，但圆角一律走 token。 */
+  border-radius: var(--dsw-radius-lg, 16px);
+  background: var(--dsw-alias-border-l3, rgba(128, 128, 128, 0.5));
+  pointer-events: none;
+}
+
+/* 竖屏没有关闭 ×：离场只走三条路径（下拉超阈值 / 点遮罩 / 系统返回）。 */
+html[data-dsh-mobile-form] [data-dsh-composer-sheet-form='sheet'] [data-dsh-composer-sheet-close] {
+  display: none;
+}
+
+/* 瓦片排恒在顶部，不参与高度分配。 */
+html[data-dsh-mobile-form] [data-dsh-composer-sheet-form='sheet'] [data-dsh-composer-sheet-tiles] {
+  flex: none;
+}
+
+/* 行列表：面板里**唯一**的滚动容器。touch-action: pan-y 让「归属列表」时走原生滚动。 */
+html[data-dsh-mobile-form] [data-dsh-composer-sheet-form='sheet'] [data-dsh-composer-sheet-rows] {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: 8px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+  /* 最后一行整行可见：滚到底时不让行体越出面板底边。 */
+  padding-bottom: 2px;
+  scroll-padding-bottom: 2px;
+}
+html[data-dsh-mobile-form] [data-dsh-composer-sheet-form='sheet'] [data-dsh-composer-sheet-rows]:empty {
+  margin-top: 0;
+}
+
+/* 瓦片焦点：点按之后不留系统蓝框（只有键盘态 :focus-visible 才画环）。 */
+[data-dsh-composer-sheet-tile]:focus {
+  outline: none;
+}
+[data-dsh-composer-sheet-tile]:focus-visible {
+  outline: 2px solid var(--dsw-alias-border-l3, rgba(128, 128, 128, 0.5));
+  outline-offset: 2px;
+}
+
+/* 竖屏入场/离场：translateY(100%) → 0，以及反向；100% 是面板自身高度，不是 vh。 */
+@keyframes dsh-composer-sheet-in {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+@keyframes dsh-composer-sheet-out {
+  from { transform: translateY(0); }
+  to { transform: translateY(100%); }
+}
+html[data-dsh-mobile-form] [data-dsh-composer-sheet-backdrop][data-dsh-composer-sheet-leaving][data-dsh-composer-sheet-form='sheet'] > [data-dsh-composer-sheet-panel] {
+  animation: dsh-composer-sheet-out 160ms cubic-bezier(0.645, 0.045, 0.355, 1) forwards;
+}
+
 /* 入场：遮罩淡入 + 卡片从视口底边之下飞入（200ms，无回弹）。 */
 @keyframes dsh-composer-backdrop-in {
   from { opacity: 0; }
@@ -253,7 +377,7 @@ export const COMPOSER_SHEET_CSS = `
 /* 收场：由脚本挂 [data-dsh-composer-sheet-leaving]，动画结束后才真正 remove。
    **同名镜像**：入场 translateY 向上抬起（100vh→0），离场必须**向下**沉出视口（0→100vh），
    不得用缩小 / 淡出 / 向上退场代替 —— 从哪来到哪去。
-   缓动同样镜像：入场 .215,.61,.355,1（快出慢收），离场用对称反向 .645,.045,.355,1。 */
+   缓动同样镜像：入场 .215,.61,.355,1（快出慢收），离场用对称反向 .645,.045,.355,1。
    收场期间遮罩必须继续接住事件（否则点击会穿透到背后页面），所以不改 pointer-events。 */
 [data-dsh-composer-sheet-backdrop][data-dsh-composer-sheet-leaving] {
   animation: dsh-composer-backdrop-out 160ms cubic-bezier(0.645, 0.045, 0.355, 1) forwards;
@@ -271,6 +395,15 @@ export const COMPOSER_SHEET_CSS = `
   [data-dsh-composer-sheet-panel],
   [data-dsh-composer-sheet-backdrop][data-dsh-composer-sheet-leaving],
   [data-dsh-composer-sheet-backdrop][data-dsh-composer-sheet-leaving] > [data-dsh-composer-sheet-panel] {
+    animation: none;
+    transition: none;
+  }
+}
+/* 竖屏 sheet 的同一档：直接切换，不做位移与淡入淡出，也不做吸附动画。 */
+@media (prefers-reduced-motion: reduce) {
+  html[data-dsh-mobile-form] [data-dsh-composer-sheet-form='sheet'] > [data-dsh-composer-sheet-panel],
+  html[data-dsh-mobile-form] [data-dsh-composer-sheet-backdrop][data-dsh-composer-sheet-leaving][data-dsh-composer-sheet-form='sheet'] > [data-dsh-composer-sheet-panel],
+  html[data-dsh-mobile-form] [data-dsh-composer-sheet-form='sheet'][data-dsh-composer-sheet-settling] > [data-dsh-composer-sheet-panel] {
     animation: none;
     transition: none;
   }
