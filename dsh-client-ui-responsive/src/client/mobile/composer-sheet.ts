@@ -98,6 +98,85 @@ const EXIT_ANIMATION_MS = 160
  */
 const CONCEAL_ATTR = 'data-dsh-composer-sheet-concealed'
 
+/** 竖屏标记（form-marker.ts 维护）。竖屏 sheet 的所有规则与手势都以它为前提。 */
+const MOBILE_FORM_ATTR = 'data-dsh-mobile-form'
+/** 形态：竖屏底部 sheet / 横屏居中卡片。横屏永远 card，新规则一条都不命中。 */
+const FORM_ATTR = 'data-dsh-composer-sheet-form'
+const FORM_SHEET = 'sheet'
+const FORM_CARD = 'card'
+/** 拖拽把手（只有竖屏有；横屏卡片靠 × 关闭）。 */
+const HANDLE_ATTR = 'data-dsh-composer-sheet-handle'
+/** peek / expanded 两段状态，写在面板上供 CSS 与断言读取。 */
+const PHASE_ATTR = 'data-dsh-composer-sheet-phase'
+/** 拖拽中标记：CSS 据此关掉过渡（跟手必须 1:1，不能被缓动吃掉）。 */
+const DRAGGING_ATTR = 'data-dsh-composer-sheet-dragging'
+/** 吸附中标记：CSS 据此打开 height/transform 过渡。 */
+const SETTLING_ATTR = 'data-dsh-composer-sheet-settling'
+/** 脚本算出来的两个高度，挂在面板上供设备验收逐条取值。 */
+const PEEK_ATTR = 'data-dsh-composer-sheet-peek'
+const MAX_ATTR = 'data-dsh-composer-sheet-max'
+/** 手感档：写在 <html> 上（A 为契约档，B 为可选手感档）。 */
+const FEEL_ATTR = 'data-dsh-composer-sheet-feel'
+
+/** 方向锁：起手这么多像素内不判定归属（避免「想滚列表却把卡片拉高」）。 */
+const DRAG_LOCK_PX = 8
+/** peek 露出的行数（2.5 行：两行整 + 半行提示还有内容）。 */
+const PEEK_ROWS = 2.5
+/** 展开上限占视口比例。 */
+const MAX_HEIGHT_RATIO = 0.88
+/** 关闭阈值：超过卡片高度的这个比例才算「拉下去要关」。 */
+const CLOSE_RATIO = 0.3
+/** 读不到真实行高时的兜底（与 CSS min-height 同值）。 */
+const ROW_FALLBACK_HEIGHT = 46
+/** 松手速度判据（px/ms）：向下超这个速度直接关，向上超这个速度直接展开。 */
+const SNAP_VELOCITY_CLOSE = 0.6
+const SNAP_VELOCITY_EXPAND = 0.3
+/**
+ * 抬手前停顿多久就抹掉速度（ms）。
+ *
+ * 速度只在 touchmove 上更新：手指停住不动时，drag.velocity 会一直停在最后一次位移上。
+ * 拿着「几百毫秒前的速度」判 fling，会把「慢慢拉、停一下再松手」判成快速甩动 —— 实测：
+ * 最后一次 move 到抬手 600/1200ms 时本该回 peek，却被速度分支弹成 expanded。
+ */
+const VELOCITY_IDLE_MS = 120
+
+/**
+ * 手感档：只改阻尼与吸附曲线，不改语义（阈值、方向锁、关闭比例都在上面）。
+ *
+ * A 是**契约档**：拖拽严格 1:1（阻尼 1），吸附 200ms 快出慢收 —— 验收判据都按 A 取数。
+ * B 是可选手感档：阻尼 0.85/0.9（同样的手势位移抬得更少），吸附 280ms 更柔。
+ * 两档的同一手势位移序列由设备脚本分别采集，供人工挑。
+ */
+interface SheetFeel {
+  readonly id: string
+  readonly upDamping: number
+  readonly downDamping: number
+  readonly snapMs: number
+  readonly snapTiming: string
+}
+const FEELS: Readonly<Record<string, SheetFeel>> = {
+  A: { id: 'A', upDamping: 1, downDamping: 1, snapMs: 200, snapTiming: 'cubic-bezier(0.215, 0.61, 0.355, 1)' },
+  B: { id: 'B', upDamping: 0.85, downDamping: 0.9, snapMs: 280, snapTiming: 'cubic-bezier(0.22, 1, 0.36, 1)' },
+}
+
+/** 一次拖拽的临时状态（不跨手势保留）。 */
+interface SheetDrag {
+  startX: number
+  startY: number
+  /** 上一次已经算进几何的 clientY（增量算法的基准）。 */
+  appliedY: number
+  lastY: number
+  lastTime: number
+  velocity: number
+  startHeight: number
+  height: number
+  /** 已经回收到 peek 之后继续下拉的距离（translateY）。 */
+  overscroll: number
+  owner: 'none' | 'sheet' | 'list'
+  /** 高度已到上限、手势交回列表（此后上滑滚列表）。 */
+  handedBack: boolean
+}
+
 /**
  * 附件入口在行列表里的标题（中英两套文案，精确匹配的闭集）。
  *
@@ -323,6 +402,21 @@ export class ComposerSheet {
    */
   private borrowing = false
 
+  /** 当前拖拽（竖屏才可能非空）。 */
+  private drag: SheetDrag | null = null
+  /** 吸附计时器：到点摘掉 settling 标记，避免过渡一直挂着。 */
+  private settleTimer: number | undefined
+  /** 竖屏 sheet 上挂过监听的面板（卸载时按它逐条摘掉）。 */
+  private sheetPanel: HTMLElement | null = null
+  /**
+   * 行高缓存（px）。
+   *
+   * 吸附/展开动画期间容器高度在动，行高会量到 46.4 / 46.8 这种亚像素值，
+   * 直接用它算 peek 会让 peek 每次吸附后都不一样（实测 249 → 252 → 350）。
+   * 所以只在**量到真实行**时写一次，此后复用。
+   */
+  private rowHeightPx: number | null = null
+
   /**
    * 捕获阶段拦「+」。
    *
@@ -450,8 +544,12 @@ export class ComposerSheet {
     this.suppressInputMode()
     this.previousExpanded = button.getAttribute('aria-expanded')
 
+    // 形态在打开时判定一次：竖屏（html[data-dsh-mobile-form]）走底部 sheet，横屏走原来的
+    // 居中卡片。横屏那条分支的 DOM 与几何一个像素都不改。
+    const sheetForm = this.sheetFormRequested()
     const backdrop = document.createElement('div')
     backdrop.setAttribute(BACKDROP_ATTR, '')
+    backdrop.setAttribute(FORM_ATTR, sheetForm ? FORM_SHEET : FORM_CARD)
     backdrop.setAttribute('role', 'presentation')
 
     const panel = document.createElement('div')
@@ -460,17 +558,21 @@ export class ComposerSheet {
     panel.setAttribute('aria-modal', 'true')
     panel.setAttribute('aria-label', t('sheetLabel'))
 
+    // 竖屏：顶部一条拖拽把手，且**没有关闭 ×**（三条离场路径都不需要它）。
+    // 横屏：居中卡片保持原样 —— 有 ×、没有把手、不写任何内联高度。
+    if (sheetForm) panel.append(this.buildHandle())
     panel.append(this.buildTiles(t))
     panel.append(rows)
     panel.append(this.buildStatus())
-    panel.append(this.buildClose(t))
+    if (!sheetForm) panel.append(this.buildClose(t))
 
     backdrop.append(panel)
     document.body.append(backdrop)
     this.backdrop = backdrop
     button.setAttribute('aria-expanded', 'true')
-    // 几何全部交给 CSS（居中卡片），脚本不写内联定位，因此不需要 relayout /
-    // 视口变化监听：转屏后 grid + place-items: center 自动重新居中。
+    // 竖屏：peek 高度按内容现算（瓦片 + 2.5 行 + 安全区），并挂手势/视口监听。
+    // 横屏：几何仍然全部交给 CSS（居中卡片），不写内联定位。
+    if (sheetForm) this.activateSheet(panel)
     this.lockBodyScroll()
     // 到这里 backdrop 已经挂到 body 上（this.backdrop 也已赋值），读菜单拿到的
     // 行才有地方写。顺序不能提前：见 fillRows 的注释。
@@ -487,6 +589,8 @@ export class ComposerSheet {
       // 映射过程会开一次上游菜单、那一步会调 focusDraftEditor：再压一次焦点，
       // 保证 sheet 停留期间不会有键盘。
       this.blurActiveEditor()
+      // 行到齐之后重算 peek：行高只有真实行才量得到（打开瞬间还没有行）。
+      this.relayoutSheet()
       // 焦点进入第一项：必须放在**压焦点之后**。
       // 写在打开时同步段会被这里的 blurActiveEditor 清掉（实测 activeElement 退回 body）。
       // 瓦片是 <button>，focus 不会唤起软键盘（编辑器才是会被唤起的那个）。
@@ -1105,6 +1209,386 @@ export class ComposerSheet {
     this.inputModeSnapshot.clear()
   }
 
+  // ── 竖屏底部 sheet：几何（peek / 展开上限）与两段滚动手势 ───────────────────
+
+  /** 拖拽把手：一条小横杠（只有竖屏有；横屏靠 × 关闭）。 */
+  private buildHandle(): HTMLElement {
+    const handle = document.createElement('div')
+    handle.setAttribute(HANDLE_ATTR, '')
+    handle.setAttribute('aria-hidden', 'true')
+    return handle
+  }
+
+  /** 竖屏形态判据：form-marker 维护的 html[data-dsh-mobile-form]（<768px 才有）。 */
+  private sheetFormRequested(): boolean {
+    return document.documentElement.hasAttribute(MOBILE_FORM_ATTR)
+  }
+
+  private mountedForm(): string | null {
+    return this.backdrop?.getAttribute(FORM_ATTR) ?? null
+  }
+
+  private isSheetForm(): boolean {
+    return this.mountedForm() === FORM_SHEET
+  }
+
+  /** 当前手感档（<html data-dsh-composer-sheet-feel>；缺省 A = 契约档）。 */
+  private feel(): SheetFeel {
+    const id = (document.documentElement.getAttribute(FEEL_ATTR) ?? 'A').trim().toUpperCase()
+    return FEELS[id] ?? (FEELS['A'] as SheetFeel)
+  }
+
+  /** 可见视口高度：优先 visualViewport（软键盘抬起时它才是真实可见区）。 */
+  private viewportHeight(): number {
+    const vv = typeof window.visualViewport === 'object' ? window.visualViewport : null
+    return vv !== null && vv.height > 0 ? vv.height : window.innerHeight
+  }
+
+  /** 软键盘抬起的距离：innerHeight 与可见区（height + offsetTop）之差。 */
+  private keyboardInset(): number {
+    const vv = typeof window.visualViewport === 'object' ? window.visualViewport : null
+    if (vv === null) return 0
+    return Math.max(0, Math.round(window.innerHeight - (vv.height + vv.offsetTop)))
+  }
+
+  /** 把键盘抬起量写进 --dsh-sheet-bottom，让面板贴住可见区底边。 */
+  private applyViewportVars(): void {
+    const panel = this.panel()
+    if (panel === null) return
+    panel.style.setProperty('--dsh-sheet-bottom', this.keyboardInset() + 'px')
+  }
+
+  /** 展开上限：0.88 × 可见视口高，且不小于 peek。 */
+  private maxHeight(): number {
+    const cap = Math.round(this.viewportHeight() * MAX_HEIGHT_RATIO)
+    return Math.max(this.peekHeight(), cap)
+  }
+
+  /**
+   * 底部安全区（px）：读 CSS 变量 --dsh-sheet-safe-bottom（env() 与壳侧推送取大）。
+   *
+   * 不折进 padding-bottom：那样 jsdom 与老内核里 env() 恒 0 时 peek 会少一段，
+   * 而把两处都算上又会重复计一次。安全区只在这一处参与计算。
+   */
+  private safeBottom(): number {
+    const panel = this.panel()
+    if (panel === null) return 0
+    const raw = getComputedStyle(panel).getPropertyValue('--dsh-sheet-safe-bottom').trim()
+    const px = Number.parseFloat(raw)
+    return Number.isFinite(px) && px > 0 ? px : 0
+  }
+
+  /**
+   * peek 高度 = 顶部内边距 + 把手 + 瓦片行 + 行间距 + 2.5 行 + 底部内边距 + 安全区。
+   *
+   * 行高取**真实第一行**：打开瞬间还没有映射行，用 ROW_FALLBACK_HEIGHT 兜底，
+   * 行到齐后 relayoutSheet() 重算。任何一项都不写死 vh —— 内容变高，peek 跟着变。
+   */
+  private peekHeight(): number {
+    const panel = this.panel()
+    if (panel === null) return 0
+    const style = getComputedStyle(panel)
+    const padTop = Number.parseFloat(style.paddingTop) || 0
+    const padBottom = Number.parseFloat(style.paddingBottom) || 0
+    const handle = panel.querySelector<HTMLElement>('[' + HANDLE_ATTR + ']')
+    let handleHeight = 0
+    if (handle !== null) {
+      const handleStyle = getComputedStyle(handle)
+      handleHeight = handle.getBoundingClientRect().height
+        + (Number.parseFloat(handleStyle.marginTop) || 0)
+        + (Number.parseFloat(handleStyle.marginBottom) || 0)
+    }
+    const tiles = panel.querySelector<HTMLElement>('[' + TILES_ATTR + ']')
+    const tilesHeight = tiles === null ? 0 : tiles.getBoundingClientRect().height
+    const rows = panel.querySelector<HTMLElement>('[' + ROWS_ATTR + ']')
+    const row = rows?.querySelector<HTMLElement>('[' + ROW_ATTR + ']') ?? null
+    const measured = row === null ? 0 : row.getBoundingClientRect().height
+    if (measured > 0 && this.rowHeightPx === null) this.rowHeightPx = Math.round(measured)
+    const rowHeight = this.rowHeightPx ?? ROW_FALLBACK_HEIGHT
+    const gap = rows === null ? 0 : (Number.parseFloat(getComputedStyle(rows).marginTop) || 0)
+    return Math.round(padTop + handleHeight + tilesHeight + gap + PEEK_ROWS * rowHeight + padBottom + this.safeBottom())
+  }
+
+  /** 面板当前高度（优先实测；jsdom 里没有布局，退回内联值）。 */
+  private currentHeight(): number {
+    const panel = this.panel()
+    if (panel === null) return 0
+    const measured = panel.getBoundingClientRect().height
+    if (measured > 0) return measured
+    const inline = Number.parseFloat(panel.style.height)
+    return Number.isFinite(inline) ? inline : 0
+  }
+
+  private setHeight(px: number): void {
+    const panel = this.panel()
+    if (panel === null) return
+    panel.style.height = Math.round(px) + 'px'
+  }
+
+  /** 拖拽位移：直接写 transform（无过渡），松手吸附时才交给 CSS。 */
+  private setOverscroll(px: number): void {
+    const panel = this.panel()
+    if (panel === null) return
+    panel.style.transform = px === 0 ? '' : 'translateY(' + Math.round(px) + 'px)'
+  }
+
+  /** 把 peek / max 两个数值写到面板上，供 CSS 与设备验收逐条取值。 */
+  private writeHeights(phase: string): void {
+    const panel = this.panel()
+    if (panel === null) return
+    const peek = this.peekHeight()
+    panel.setAttribute(PHASE_ATTR, phase)
+    panel.setAttribute(PEEK_ATTR, String(peek))
+    panel.setAttribute(MAX_ATTR, String(this.maxHeight()))
+  }
+
+  /** 把当前几何挂到 window.__dshComposerSheet（设备验收的取数口，只读）。 */
+  private publishGeometry(): void {
+    const panel = this.panel()
+    if (panel === null) return
+    // 高度用**内联值**：吸附过渡期间实测 rect 还在动，读它会拿到上一步的旧高度。
+    const inline = Number.parseFloat(panel.style.height)
+    const geometry = {
+      form: this.mountedForm(),
+      phase: panel.getAttribute(PHASE_ATTR),
+      height: Number.isFinite(inline) ? Math.round(inline) : Math.round(this.currentHeight()),
+      peek: this.peekHeight(),
+      max: this.maxHeight(),
+      viewport: { height: Math.round(this.viewportHeight()), innerHeight: window.innerHeight, keyboard: this.keyboardInset() },
+      feel: this.feel().id,
+    }
+    ;(window as unknown as { __dshComposerSheet?: unknown }).__dshComposerSheet = geometry
+  }
+
+  /** 竖屏：写初始 peek 高度、挂手势与视口监听。 */
+  private activateSheet(panel: HTMLElement): void {
+    this.sheetPanel = panel
+    this.applyViewportVars()
+    this.setHeight(this.peekHeight())
+    this.writeHeights('peek')
+    panel.addEventListener('touchstart', this.onSheetTouchStart, { passive: true })
+    // 必须非 passive：归属卡片时要 preventDefault 才能压住原生滚动。
+    panel.addEventListener('touchmove', this.onSheetTouchMove, { passive: false })
+    panel.addEventListener('touchend', this.onSheetTouchEnd)
+    panel.addEventListener('touchcancel', this.onSheetTouchEnd)
+    window.addEventListener('resize', this.onSheetViewport)
+    if (typeof window.visualViewport === 'object' && window.visualViewport !== null) {
+      window.visualViewport.addEventListener('resize', this.onSheetViewport)
+      window.visualViewport.addEventListener('scroll', this.onSheetViewport)
+    }
+    this.publishGeometry()
+  }
+
+  private deactivateSheet(): void {
+    const panel = this.sheetPanel
+    this.sheetPanel = null
+    this.drag = null
+    if (this.settleTimer !== undefined) {
+      window.clearTimeout(this.settleTimer)
+      this.settleTimer = undefined
+    }
+    window.removeEventListener('resize', this.onSheetViewport)
+    if (typeof window.visualViewport === 'object' && window.visualViewport !== null) {
+      window.visualViewport.removeEventListener('resize', this.onSheetViewport)
+      window.visualViewport.removeEventListener('scroll', this.onSheetViewport)
+    }
+    // 调试取数口随面板一起失效：留着会把竖屏的 peek/max 带进横屏读到的旧值。
+    delete (window as unknown as { __dshComposerSheet?: unknown }).__dshComposerSheet
+    if (panel === null) return
+    panel.removeEventListener('touchstart', this.onSheetTouchStart)
+    panel.removeEventListener('touchmove', this.onSheetTouchMove)
+    panel.removeEventListener('touchend', this.onSheetTouchEnd)
+    panel.removeEventListener('touchcancel', this.onSheetTouchEnd)
+  }
+
+  /**
+   * 重算 peek / 上限并重写高度：行到齐、视口变化（软键盘、转屏）都走这里。
+   *
+   * 打开期间被转屏换成横屏形态时直接收场：两种形态的 DOM 不同（把手 / ×），
+   * 半路换 DOM 会让用户正在点的节点消失。
+   */
+  private relayoutSheet(): void {
+    if (!this.isSheetForm()) return
+    if (this.sheetFormRequested() !== true) {
+      this.close()
+      return
+    }
+    const panel = this.panel()
+    if (panel === null) return
+    this.applyViewportVars()
+    const peek = this.peekHeight()
+    const max = this.maxHeight()
+    const phase = panel.getAttribute(PHASE_ATTR) === 'expanded' ? 'expanded' : 'peek'
+    this.setHeight(phase === 'expanded' ? max : Math.min(peek, max))
+    this.writeHeights(phase)
+    this.publishGeometry()
+  }
+
+  /** 松手吸附到 peek / expanded（带手感档的过渡）。 */
+  private settleTo(target: number): void {
+    const panel = this.panel()
+    const backdrop = this.backdrop
+    if (panel === null || backdrop === null) return
+    const feel = this.feel()
+    this.setOverscroll(0)
+    // prefers-reduced-motion：直接切，不挂 settling（CSS 那条 reduce 规则是双保险）。
+    const reduced = typeof window.matchMedia === 'function'
+      && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    if (!reduced) {
+      backdrop.style.setProperty('--dsh-sheet-snap-ms', feel.snapMs + 'ms')
+      backdrop.style.setProperty('--dsh-sheet-snap-timing', feel.snapTiming)
+      backdrop.setAttribute(SETTLING_ATTR, '')
+    }
+    const phase = target > this.peekHeight() + 1 ? 'expanded' : 'peek'
+    this.setHeight(target)
+    this.writeHeights(phase)
+    this.publishGeometry()
+    if (this.settleTimer !== undefined) window.clearTimeout(this.settleTimer)
+    this.settleTimer = window.setTimeout(() => {
+      this.settleTimer = undefined
+      this.backdrop?.removeAttribute(SETTLING_ATTR)
+    }, feel.snapMs + 40)
+  }
+
+  private readonly onSheetViewport = (): void => {
+    this.relayoutSheet()
+  }
+
+  /** 起手只记录，不判定归属（8px 方向锁在 move 里）。 */
+  private readonly onSheetTouchStart = (event: TouchEvent): void => {
+    if (!this.isSheetForm() || this.drag !== null) return
+    const panel = this.panel()
+    const touch = event.touches[0]
+    if (panel === null || touch === undefined) return
+    const height = this.currentHeight()
+    this.drag = {
+      startX: touch.clientX,
+      startY: touch.clientY,
+      appliedY: touch.clientY,
+      lastY: touch.clientY,
+      lastTime: performance.now(),
+      velocity: 0,
+      startHeight: height,
+      height,
+      overscroll: 0,
+      owner: 'none',
+      handedBack: false,
+    }
+  }
+
+  /**
+   * 两段滚动：内层到顶后上滑抬卡片（1:1），到上限把剩余位移交回列表；
+   * 下滑先把列表滚回顶部，再回收卡片高度，最后才是「超出 peek 的下拉」。
+   */
+  private readonly onSheetTouchMove = (event: TouchEvent): void => {
+    const drag = this.drag
+    const panel = this.panel()
+    const touch = event.touches[0]
+    if (drag === null || panel === null || touch === undefined) return
+    const rows = panel.querySelector<HTMLElement>('[' + ROWS_ATTR + ']')
+    const dy = touch.clientY - drag.startY
+    const dx = touch.clientX - drag.startX
+    const now = performance.now()
+    const elapsed = now - drag.lastTime
+    if (elapsed > 0) {
+      const step = (touch.clientY - drag.lastY) / elapsed
+      drag.velocity = drag.velocity * 0.5 + step * 0.5
+      drag.lastY = touch.clientY
+      drag.lastTime = now
+    }
+    // 方向锁：起手 8px 内不判定归属；横向手势直接让给浏览器。
+    if (drag.owner === 'none') {
+      if (Math.abs(dy) < DRAG_LOCK_PX) return
+      if (Math.abs(dy) <= Math.abs(dx)) { drag.owner = 'list'; return }
+      drag.owner = (rows === null ? 0 : rows.scrollTop) > 0 ? 'list' : 'sheet'
+    }
+    if (drag.owner !== 'sheet') return
+    event.preventDefault()
+    panel.setAttribute(DRAGGING_ATTR, '')
+    const feel = this.feel()
+    const peek = this.peekHeight()
+    const max = this.maxHeight()
+    const delta = touch.clientY - drag.appliedY
+    drag.appliedY = touch.clientY
+    if (delta === 0) return
+    if (delta < 0) {
+      // 上滑：卡片先 1:1 抬起；到上限后剩余位移交回列表（此后继续上滑滚列表）。
+      if (drag.handedBack) {
+        if (rows !== null) rows.scrollTop = rows.scrollTop - delta
+        return
+      }
+      const grown = drag.height + (-delta) * feel.upDamping
+      if (grown <= max) {
+        drag.height = Math.max(peek, grown)
+      } else {
+        const rest = grown - max
+        drag.height = max
+        drag.handedBack = true
+        if (rows !== null) rows.scrollTop = rows.scrollTop + rest
+      }
+      this.setHeight(drag.height)
+      this.publishGeometry()
+      return
+    }
+    // 下滑：列表还有得滚就先滚列表，滚到顶之后才开始回收卡片高度。
+    if (drag.handedBack) {
+      if (rows !== null && rows.scrollTop > 0) {
+        const next = rows.scrollTop - delta
+        if (next >= 0) {
+          rows.scrollTop = next
+          return
+        }
+        rows.scrollTop = 0
+      }
+      drag.handedBack = false
+    }
+    if (drag.height > peek) {
+      const next = drag.height - delta * feel.downDamping
+      if (next > peek) {
+        drag.height = next
+        this.setHeight(next)
+        this.publishGeometry()
+        return
+      }
+      drag.height = peek
+      this.setHeight(peek)
+      drag.overscroll = Math.max(0, drag.overscroll + (peek - next))
+      this.setOverscroll(drag.overscroll)
+      this.publishGeometry()
+      return
+    }
+    drag.height = peek
+    drag.overscroll = Math.max(0, drag.overscroll + delta)
+    this.setOverscroll(drag.overscroll)
+    this.publishGeometry()
+  }
+
+  /**
+   * 松手：下拉超过卡片高度 30% 才关闭（或明显快速下甩），否则吸附回 peek / expanded。
+   *
+   * 阈值是**卡片高度的比例**而不是固定像素：peek 随内容变高，阈值必须跟着变。
+   */
+  private readonly onSheetTouchEnd = (): void => {
+    const drag = this.drag
+    this.drag = null
+    if (drag === null || drag.owner !== 'sheet') return
+    this.panel()?.removeAttribute(DRAGGING_ATTR)
+    const peek = this.peekHeight()
+    const max = this.maxHeight()
+    // 停手再抬：速度按「距最后一次位移的时间」清零，避免陈旧速度把慢放判成甩动。
+    const velocity = performance.now() - drag.lastTime > VELOCITY_IDLE_MS ? 0 : drag.velocity
+    const closing = drag.overscroll > 0
+      && (drag.overscroll > CLOSE_RATIO * peek || velocity > SNAP_VELOCITY_CLOSE)
+    if (closing) {
+      this.close()
+      return
+    }
+    const expanded = drag.overscroll === 0
+      && (drag.height > (peek + max) / 2
+        || (velocity < -SNAP_VELOCITY_EXPAND && drag.height > peek + DRAG_LOCK_PX))
+    this.settleTo(expanded ? max : peek)
+  }
+
   /**
    * 收起 sheet。
    *
@@ -1122,6 +1606,15 @@ export class ComposerSheet {
       // 动画只是视觉上的余韵，不能让它决定「关没关」。
       const leaving = this.backdrop
       this.backdrop = null
+      // 竖屏：先摘手势/视口监听，并把拖拽残留的位移清掉 —— 退场动画必须从 0 起，
+      // 否则会从半路（用户拖到一半的位置）跳一下再沉下去。
+      this.deactivateSheet()
+      leaving.removeAttribute(SETTLING_ATTR)
+      const leavingPanel = leaving.querySelector<HTMLElement>('[' + PANEL_ATTR + ']')
+      if (leavingPanel !== null) {
+        leavingPanel.style.transform = ''
+        leavingPanel.removeAttribute(DRAGGING_ATTR)
+      }
       // 回执位随面板一起失效：再往里写就是往即将离场的节点里写。
       this.status = null
       this.playExit(leaving)

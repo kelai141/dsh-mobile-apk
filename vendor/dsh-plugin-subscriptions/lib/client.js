@@ -192,6 +192,7 @@ const en = {
 	speedFast: "Fast",
 	speedFastDescription: "1.5x speed, more usage",
 	commandFast: "Switch the Codex speed tier (Standard/Fast)",
+	commandFastTitle: "Fast tier",
 	commandFastUnavailable: "The current model has no fast tier; /fast only works on Codex models whose catalog advertises one",
 	proxyTitle: "Proxy",
 	proxyStatusNone: "Plugin proxy disabled — using DSH network settings.",
@@ -385,6 +386,7 @@ const zh = {
 	speedFast: "快速",
 	speedFastDescription: "约 1.5 倍速度，消耗更多用量",
 	commandFast: "切换 Codex 速度档（标准/快速）",
+	commandFastTitle: "快速档",
 	commandFastUnavailable: "当前模型不支持快速档；/fast 仅对目录声明了 fast tier 的 Codex 模型可用",
 	proxyTitle: "代理",
 	proxyStatusNone: "插件代理未启用 —— 使用 DSH 网络设置。",
@@ -4940,6 +4942,8 @@ function apply(ctx) {
 		const command = scope.get("commandUi");
 		scope.effect(() => command.register({
 			name: "fast",
+			// 行标题走 locale（缺 label 时上游直接显示命令 id "fast"；副标题仍是 commandFast）。
+			label: () => t("commandFastTitle"),
 			description: fastCommandDescription(() => t("commandFast")),
 			available: () => true,
 			ui: {

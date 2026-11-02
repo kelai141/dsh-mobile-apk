@@ -120,3 +120,8 @@ slot-guard 注释与本日审计报告。
 |---|---|---|
 | 测试通知的标题/正文只有中文 | `NotifyCenter.sendTestAll` 的五条测试通知用了写死的中文字面量（「测试提问」「测试会话」「已完成 · 这是一条工作汇报测试」等）。把 UI 语言切成英文后，系统通知栏里这五条仍显示中文（真机截图已确认），而开关点击后的落点提示已正确显示英文。 | 面只出现在「发送测试通知」自证按钮，不影响真实事件通知（真实通知的标题/正文由引擎帧提供）。修法：把 `sendTest` 里的字面量改成 `UiText.t(app, zh, en)`，并在 `AppLanguageTest` 补一条形态断言。 |
 | 原生离线插件面板无双语 helper | `PluginOfflinePanel.kt` 全文没有 `UiText.t`/`t(zh,en)`，其「已启用/已停用，重启引擎后生效」「修改失败」等提示只有中文。 | 与本次修的两处同一类问题，但该面板整体缺英文（不是漏一处），单独收口更合适。 |
+## 命令菜单标题的本地化能力缺口（2026-11-02）
+
+| 项 | 当前事实 | 结论 / 后续 |
+|---|---|---|
+| `store` 在「+」菜单里的标题是命令 id，无法在插件侧改成中文 | 上游 `ui-input-trigger` 的行标题是 `item.label ?? item.name`（`MenuView.tsx:186`），而 `label` 只有**客户端命令贡献**能给（`ui-commands` 的 `CommandContribution.label?()`，`contract.ts:105`）；宿主命令目录的 `CommandDescriptor` 只有 `name` + `description`（`packages/interaction/commands/src/types.ts:57-66`），且贡献名与宿主命令重名会在候选合成时抛错（`ui-commands/src/client/service.ts:238-240`）。`store` 是市场插件在**服务端**注册的宿主命令（`vendor/dshmarketplace-plugin/lib/index.js` 的 `name:"store"`），因此客户端没有改标题的合法钩子。 | 真正的修法在上游：给宿主命令加可选本地化标题（目录或渲染侧）。插件侧的等价改法是把 `store` 从宿主命令改成客户端贡献，但会丢掉打字触发的 `/store`，代价大于收益，不在本轮做。同一形态的 `fast` 已修（它是客户端贡献，补了 `label`）。 |
