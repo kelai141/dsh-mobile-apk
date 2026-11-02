@@ -972,9 +972,18 @@ class EngineManager(private val context: Context, private val pickToken: String?
       0L
     }
     return try {
+      // 性能审计 #6：快照解压分段。只在「快照不新鲜」时执行（首装/覆盖安装），
+      // 因此这条记录出现即代表本次启动走了全量解压路径，不与日常冷启动混淆。
+      val extractStartMs = android.os.SystemClock.elapsedRealtime()
       context.assets.open(BUNDLED_SNAPSHOT_ASSET).use { input ->
         SnapshotExtractor.extract(input, assetLength, stage, onProgress, runtimeRoot = context.filesDir)
       }
+      BootPhaseTrace.mark(
+        context,
+        BootPhaseTrace.SNAPSHOT_EXTRACT,
+        "ms=" + (android.os.SystemClock.elapsedRealtime() - extractStartMs) +
+          " compressedBytes=" + assetLength,
+      )
       true
     } catch (t: Throwable) {
       Log.e(TAG, "snapshot extract failed", t)

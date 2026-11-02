@@ -209,6 +209,42 @@ object LogCollector {
     else -> SOURCE_NONE
   }
 
+
+  /**
+   * 从引擎输出中解析 loader-settle 耗时（性能审计 #6）。
+   *
+   * ── 为什么是「解析」而不是「测量」────────────────────────────────────────────
+   * loader-settle 是**引擎进程内部**的量（上游激活全部 Loader entry 的模块编译/求值链）。
+   * 壳侧只能观测到「引擎 stdout 出现了哪一行」，造不出这个数值。既有 check-boot-budget.mjs
+   * 的头注已记录：该窗口是冷启动窗口的**支配项**（设备 n=24 实测 1532.5-7288.1 ms）。
+   *
+   * ── 为什么必须能返回 null ───────────────────────────────────────────────────
+   * 出厂引擎 argv 不装 phase 探针 ⇒ 绝大多数设备上这一行**不存在**。此时必须返回 null，
+   * 由调用方写 absent=probe-not-installed，**绝不写 0 冒充**（0 会让门禁误以为「瞬间完成」）。
+   * 这与既有 t_compose_total 的 -1 口径同源，理由相同。
+   *
+   * 期望行形态（phase 探针，见 scripts/check-perf-instrumentation.mjs 的 PHASE_PROBE_MARKERS）:
+   *   [perf] phase name=loader-settle ms=1234
+   * 兼容 name=loader-settle-ms / settleMs= 两种历史写法；取**最后一次**出现（汇总行 last-wins）。
+   */
+  internal fun loaderSettleMs(text: String): Long? {
+    if (text.isEmpty()) return null
+    var last: Long? = null
+    for (regex in LOADER_SETTLE_RES) {
+      for (m in regex.findAll(text)) {
+        val value = m.groupValues[1].toLongOrNull() ?: continue
+        if (value >= 0L) last = value
+      }
+    }
+    return last
+  }
+
+  private val LOADER_SETTLE_RES = listOf(
+    Regex("name=loader-settle[^\\n]*?ms=(-?\\d+)"),
+    Regex("name=loader-settle-ms[^\\n]*?ms=(-?\\d+)"),
+    Regex("settleMs=(-?\\d+)"),
+  )
+
   /**
    * 单行判据格式（纯函数）。**字段恒在场、未知一律 -1、绝不省字段**（T2 定稿口径）：
    *
@@ -300,8 +336,12 @@ object LogCollector {
         val deadline = System.currentTimeMillis() + PROBE_WINDOW_MS
         var sawProbe = false
         var graceAfterProbe = 0
+        // 性能审计 #6：累积本窗口读到的引擎输出（有界），供 loader-settle 解析。
+        // 上限与单次读上限同量级，避免长时间窗口把整份 engine.log 攒进内存。
+        val seen = StringBuilder()
         while (System.currentTimeMillis() < deadline) {
           val text = readEngineLogFrom(ctx, probeThreshold = probeOffset, advanced = { probeOffset = it })
+          if (seen.length < MAX_ENGINE_CHUNK) seen.append(text)
           if (text.isNotEmpty()) {
             val source = composeProbeSource(text)
             if (source != SOURCE_NONE) segComposeSource = source
@@ -331,6 +371,18 @@ object LogCollector {
         if (!sawProbe) {
           val note = if (segComposeSource == SOURCE_NONE) "probe-absent" else "probe-no-total"
           emitBootSegments(ctx, note + " source=" + segComposeSource)
+        }
+        // 性能审计 #6：loader-settle 分段。该量只能由引擎侧 phase 探针给出（壳侧造不出来），
+        // 因此**必须显式区分「拿到了」与「探针未装」**——后者如实写 absent，绝不写 0 冒充。
+        try {
+          val settle = loaderSettleMs(seen.toString())
+          BootPhaseTrace.mark(
+            ctx,
+            BootPhaseTrace.LOADER_SETTLE,
+            if (settle != null) "ms=" + settle else "absent=probe-not-installed",
+          )
+        } catch (_: Throwable) {
+          // 埋点失败不影响启动。
         }
       } catch (t: Throwable) {
         Log.w(TAG, "probe tail failed: " + (t.message ?: t.javaClass.simpleName))
