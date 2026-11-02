@@ -85,6 +85,8 @@ export function copilotAssistantParts(blocks, assistant) {
     } else if (block.type === 'toolCall') {
       part ??= { role: 'assistant', content: '' }
       const call = assistant.tool_calls?.find(call => call.id === block.id)
+      // The existing G2 history guard deliberately drops unnamed calls and their results.
+      if (!call && (typeof block.name !== 'string' || block.name.trim() === '')) continue
       if (!call) throw new Error('reasoning-1304: missing Copilot tool mapping')
       ;(part.tool_calls ??= []).push(call)
     }

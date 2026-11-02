@@ -52,6 +52,8 @@ test('Copilot keeps every sealed segment and rejects orphaned or duplicated tool
   const block = { type: 'thinking', thinking: '', dshSealed: JSON.stringify({ sealedBy: 'github-copilot', reasoning_opaque: CIPHER }) }
   assert.deepEqual(copilotAssistantParts([block], { role: 'assistant', content: null }),
     [{ role: 'assistant', content: '', reasoning_opaque: CIPHER, reasoning_text: '' }])
+  assert.deepEqual(copilotAssistantParts([block, { type: 'toolCall', id: 'bad', name: '' }], { role: 'assistant' }),
+    [{ role: 'assistant', content: '', reasoning_opaque: CIPHER, reasoning_text: '' }])
   const assistant = { role: 'assistant', content: '', reasoning_opaque: CIPHER, tool_calls: [{ id: 'one' }] }
   const output = { role: 'tool', tool_call_id: 'one', content: 'ok' }
   assert.throws(() => copilotToolRuns([assistant]), /incomplete/)
