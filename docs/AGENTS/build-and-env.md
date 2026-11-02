@@ -281,3 +281,7 @@ gh release download v<ver> -R kelai141/dsh-mobile-apk -p "snapshot-*.tar.xz" -D 
 本轮隔离开发链发现：WSL 派生的 PowerShell 可能继承只有 `.CPL` 的 PATHEXT，导致 node.exe 已在 PATH、`Get-Command node` 仍失败。先读取环境并保留日志；仅在该构建子进程中补上 `.COM;.EXE;.BAT;.CMD`，同时加入 Windows System32、Node 与 JDK 路径。不要修改用户全局环境或把此问题当成缺少 Node 依赖。
 
 Telemetry import failures caused by inherited dependency versions: see docs/contrib/MCMR-JIM/2026-10-27-telemetry-runtime-closure.md for the consumer-local closure contract and archive-gate evidence. A package being present is insufficient when the consumer declares a different exact version.
+
+## 多文件运行时资产校验
+
+`check-runtime-assets.mjs` 从同一快照一次提取主文件、registry声明的配套文件和所属包清单。正文检查仍以候选asset为主文件，不允许用快照副本覆盖候选。多文件补丁缺配套、身份不符或任一正文漂移均拒绝；`--self-test` 包含真实CLI正控和负控。启动旧资产覆盖现象及本轮证据见 `docs/contrib/kelai141/2026-11-01-image-preview-and-manual-reclaim.md`。

@@ -241,7 +241,25 @@ function patchImplIds() {
  * 让补丁链自己判定「该 target 上的补丁本体是否在场」。
  * @returns {{ok: true, checked: number}|{ok: false, detail: string}|{skipped: string}}
  */
-function patchBodyVerdict(targetPatches, target, assetBuf) {
+function bodyContextMembers(targetPatches) {
+  const members = new Set()
+  for (const patch of targetPatches) {
+    for (const file of [patch.target, ...(patch.additionalTargets ?? [])]) {
+      if (typeof file !== 'string' || file.startsWith('/') || file.split('/').some(part => part === '..' || part === '' || part === '.')) {
+        throw new Error('Invalid patch context member: ' + String(file))
+      }
+      members.add(file)
+      const parts = file.split('/'), index = parts.lastIndexOf('node_modules')
+      if (index >= 0) {
+        const end = index + (parts[index + 1]?.startsWith('@') ? 3 : 2)
+        members.add(parts.slice(0, end).join('/') + '/package.json')
+      }
+    }
+  }
+  return [...members]
+}
+
+function patchBodyVerdict(targetPatches, target, assetBuf, contextBytes) {
   const usable = targetPatches.filter((p) => p.targetDiscovery === undefined && typeof p.id === 'string')
   if (usable.length === 0) return { skipped: '该 target 的 registry 条目没有可复核的 id' }
   const ids = patchImplIds()
@@ -254,6 +272,20 @@ function patchBodyVerdict(targetPatches, target, assetBuf) {
     const staged = join(dir, target.split('/').join(sep))
     mkdirSync(dirname(staged), { recursive: true })
     writeFileSync(staged, assetBuf)
+    // Verify the candidate asset, with companions and package identities from the
+    // exact same snapshot. Never overwrite that candidate with snapshot bytes.
+    const required = new Set(runnable.flatMap(patch => patch.additionalTargets ?? []))
+    for (const file of bodyContextMembers(runnable)) {
+      if (file === target) continue
+      const data = contextBytes.get(file)
+      if (data === undefined) {
+        if (required.has(file)) return { ok: false, detail: 'Snapshot companion is missing: ' + file }
+        continue // Legacy checks may not consume an owner manifest; pinned checks still require it.
+      }
+      const destination = join(dir, file.split('/').join(sep))
+      mkdirSync(dirname(destination), { recursive: true })
+      writeFileSync(destination, data)
+    }
     const result = spawnSync(process.execPath,
       [join(TEST_ROOT ?? ROOT, 'scripts', 'patches', 'apply-patches.mjs'), dir, '--check', '--scope', 'engine', '--only', runnable.map((p) => p.id).join(',')],
       { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
@@ -306,6 +338,9 @@ function selfTest() {
     const missing = wanted.filter((id) => !ids.has(id))
     probe('在册资产同源补丁均在 IMPLS 里（否则本体判据会 SKIP）：缺 ' + (missing.join(', ') || '无'), missing.length === 0)
   }
+  const companionTest = spawnSync(process.execPath, ['--test', join(HERE, 'check-runtime-assets-companions.test.mjs')], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 })
+  if (companionTest.status !== 0) console.error((companionTest.stdout ?? '') + (companionTest.stderr ?? ''))
+  probe('多文件资产验证：同快照配套正控与缺失/漂移负控', companionTest.status === 0)
   const bad = cases.filter(([, ok]) => !ok)
   console.log(bad.length === 0
     ? '\nCHECK-RUNTIME-ASSETS SELF-TEST PASSED（' + cases.length + ' 项：marker 位置 / 同源方向 / 本体判据可执行）'
@@ -370,11 +405,12 @@ for (const asset of assets) {
   if (src.length === 0) continue
   const targets = [...new Set(src.map((p) => p.target))]
   if (targets.length !== 1) continue
-  singleTargets.push({ asset, target: targets[0] })
+  singleTargets.push({ asset, target: targets[0], patches: src })
 }
-const snapBytes = readManyFromSnapshot([...new Set(singleTargets.map((x) => x.target))])
+const wantedMembers = [...new Set(singleTargets.flatMap(x => bodyContextMembers(x.patches)))]
+const snapBytes = readManyFromSnapshot(wantedMembers)
 if (singleTargets.length > 0) {
-  console.log('PASS  快照字节一次性取回（一次 tar -xf，' + snapBytes.size + '/' + new Set(singleTargets.map((x) => x.target)).size + ' 个目标成员；'
+  console.log('PASS  快照字节一次性取回（一次 tar -xf，' + snapBytes.size + '/' + wantedMembers.length + ' 个目标及配套成员；'
     + '旧实现为每资产一次 tar -xO = 全量解码 N 次）')
 }
 for (const asset of assets) {
@@ -432,7 +468,7 @@ for (const asset of assets) {
 
   // 判据 0b（issue #1072）：逐字节同源只证「两条路一致」，不证「补丁本体在里面」——
   // 两侧同等陈旧（都缺补丁）时它恒真。让补丁链自己的结构断言复核这份字节。
-  const body = patchBodyVerdict(src, target, assetBuf)
+  const body = patchBodyVerdict(src, target, assetBuf, snapBytes)
   if (body.skipped !== undefined) {
     // 生产树（不传 --root）不得以「判据不可执行」结案：那会把「marker 在场即绿」的洞重新打开。
     if (TEST_ROOT !== null) skipAsset('资产 ' + asset + ' 的补丁本体判据未执行（--root 测试档）：' + body.skipped)
