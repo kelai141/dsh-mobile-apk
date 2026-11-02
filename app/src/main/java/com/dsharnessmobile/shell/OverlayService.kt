@@ -193,6 +193,10 @@ class OverlayService : Service() {
     probeEngine()
     scheduleProbe()
     panel.startMux()
+    // 常驻 INFINITE 动画（光环呼吸 / 待答呼吸 / 状态行扫光）订阅动效开关：
+    // 用户可能在动画跑起来之后才去系统设置关动画，订阅后能立刻停。
+    halo.startMotionWatch()
+    panel.startMotionWatch()
   }
 
   /**
@@ -223,6 +227,9 @@ class OverlayService : Service() {
 
   override fun onDestroy() {
     if (instance === this) instance = null
+    // 动效开关订阅必须在窗口拆除前注销，否则 ContentObserver 会持有已销毁的 View。
+    halo.stopMotionWatch()
+    panel.stopMotionWatch()
     live.stopWatcher()
     panel.destroy()
     // 块H-A2：报告栏是独立顶层窗口，必须在此收口（纪律同 panel.closePicker/unitView）。

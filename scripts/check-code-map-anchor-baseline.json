@@ -1302,7 +1302,7 @@
       "// 旧实现的更新状态是本类的私有字段，视图一被 showWeb() 藏起来状态就不可达，这正是"
     ],
     "GuidePageRenderer.kt:781": [
-      ")"
+      "when (presentation) {"
     ],
     "LogCollector.kt:395": [
       "/**"
@@ -1323,103 +1323,103 @@
       "internal fun describeEngineLogState(filesDir: File): String {"
     ],
     "MainActivity.kt:1035": [
-      "val task = object : Runnable {"
+      "// 冻结态兜底供能（0.14.10）：页面轮询不在前台/未挂载时，reaper 兼任限频重试触发；"
     ],
     "MainActivity.kt:1059": [
-      "vdisplayFloat.show()"
+      "outState.putBoolean(\"dsh.engine-user-closed\", userClosedEngine)"
     ],
     "MainActivity.kt:1062": [
       "}"
     ],
     "MainActivity.kt:1081": [
-      "// #128 L1：控制面不再持有已销毁 Activity 的 WebView。"
+      "try {"
     ],
     "MainActivity.kt:1169": [
-      "}"
+      "try {"
     ],
     "MainActivity.kt:1172": [
-      "* onPageFinished 后拉平层栈缓存：注入插件可能晚于首帧挂载，桥上推的初始信号会漏。"
+      "if (!pageRecovery.accepts(generation) || view !== webView) return@evaluateJavascript"
     ],
     "MainActivity.kt:145": [
-      ""
+      "private var splashTimeout: Runnable? = null"
     ],
     "MainActivity.kt:191": [
-      ""
+      "finishSplash(\"timeout\", animate = false)"
     ],
     "MainActivity.kt:296": [
-      "/** #242：是否有一次「露出 WebView」正在等首帧（决定淡入还是已显形）。 */"
+      "internal var observedChromiumVersion: String = \"\""
     ],
     "MainActivity.kt:306": [
-      "// 冷启自动尝试（0.14.10）：门若是上一进程落的残留，允许本进程一次自动越过；本进程内仍有界。"
+      "//    的调用面保持不变：onCreate/onResume/监控/WebViewClient/引导按钮共用入口）。 ——"
     ],
     "MainActivity.kt:354": [
-      "private fun consumePendingSelfRetry(): Boolean {"
+      ""
     ],
     "MainActivity.kt:422": [
-      "// 用户显式动作（重试/安全模式）会先 clear latch，出口仍然存在。"
+      "// 插件装配失败 latch（CONTRACT §4）：latch 期内**不得**把坏页面推回前台。"
     ],
     "MainActivity.kt:507": [
-      "webView.post { startInitialEngineAuthRecovery() }"
+      "webView.loadUrl(EngineProbe.ENGINE_URL)"
     ],
     "MainActivity.kt:519": [
-      "ForegroundPageRecoveryPolicy.Recovery.RELOAD -> {"
+      ""
     ],
     "MainActivity.kt:549": [
-      "override fun onCreate(savedInstanceState: Bundle?) {"
+      "true"
     ],
     "MainActivity.kt:570": [
-      "EngineService.userShutdown || EngineService.isUserShutdownPersisted(this)"
+      "} else {"
     ],
     "MainActivity.kt:574": [
-      "// 0.13.3 W2：引擎鉴权模块绑定应用上下文（EngineProbe 等 object 调用方的 cookie 来源）。"
+      "if (userClosedEngine) EngineService.userShutdown = true"
     ],
     "MainActivity.kt:610": [
-      "// provider 缺失或升级窗口期内 WebView 构造本身会抛（无 GMS 精简 ROM / WebView 被停用 /"
+      "uiChrome.applyImmersive(uiChrome.immersivePrefs())"
     ],
     "MainActivity.kt:647": [
-      "setContentView(root)"
+      "finishSplash(\"failure-\" + code, animate = false)"
     ],
     "MainActivity.kt:774": [
-      "// SINGLE_TOP：应用已在前台时点击通知走这里（此前**没有这个覆写**，intent 直接丢掉）。"
+      "}"
     ],
     "MainActivity.kt:777": [
-      "retryEngineExplicitly()"
+      "internal fun deliverNotifyRoute() {"
     ],
     "MainActivity.kt:78": [
       "private var webSystemBottomInset = 0"
     ],
     "MainActivity.kt:787": [
-      "pendingNotifySession = null"
+      "if (raw?.trim() != \"true\") {"
     ],
     "MainActivity.kt:789": [
-      "jsString(session) + \") === true } catch (e) { return false } })()\""
+      "// 有界重试（最多 12 次 / 约 10s）后再判失败——只有真删除/真不可开才弹失败提示。"
     ],
     "MainActivity.kt:793": [
-      "if (!pageRecovery.accepts(generation)) { pendingNotifySession = session; return@evaluateJavascript }"
+      "webView.postDelayed({ deliverNotifyRoute() }, NOTIFY_ROUTE_RETRY_MS)"
     ],
     "MainActivity.kt:798": [
-      "notifyRouteAttempts += 1"
+      "}"
     ],
     "MainActivity.kt:808": [
-      "notifyRouteFailed()"
+      "try {"
     ],
     "MainActivity.kt:817": [
-      "this,"
+      "}"
     ],
     "MainActivity.kt:820": [
-      ").show()"
-    ],
-    "MainActivity.kt:827": [
       ""
     ],
+    "MainActivity.kt:827": [
+      "if (!RepairState.active && RepairState.required(this)) {"
+    ],
     "MainActivity.kt:855": [
-      "showGuide()"
+      "}"
     ],
     "MainActivity.kt:885": [
-      "if (!userClosedEngine) {"
+      "if (!userClosedEngine && autoStart) {"
     ],
     "MainActivity.kt:928": [
-      "pushSystemDark(webView)"
+      "// M3：从系统授权页返回——上次 pick 因缺权限挂起时按授权结果续启/结算（迁至 DirectoryPickerController）。"
     ],
     "MobileChrome.tsx:35": [
       "?? null"
@@ -1575,16 +1575,16 @@
       "fun startWatcher() {"
     ],
     "OverlayPanel.kt:1058": [
-      "if (entry != null) {"
+      "if (cur != null && cur.submittedAt > 0L) {"
     ],
     "OverlayPanel.kt:110": [
       "private fun handleMuxFrame(text: String) {"
     ],
     "OverlayPanel.kt:1172": [
-      "if (svc.toolCount > 0) { it.text = t(\"工具 ×${svc.toolCount}\", \"Tools ×${svc.toolCount}\"); it.visibility = View.VISIBLE }"
+      "} else if (svc.sessionBusy) {"
     ],
     "OverlayPanel.kt:1175": [
-      "updateClock()"
+      "// 模板化（用户拍板）：调工具 → 工具类型 + 概览；思考 → Deep diving 扫光。"
     ],
     "OverlayPanel.kt:175": [
       "pendingGen.remove(id)"
@@ -1623,22 +1623,22 @@
       "//   提问跳过 outcome={kind:\"rejected\",error:{name,message}}；审批无取消通道。"
     ],
     "OverlayPanel.kt:816": [
-      "textSize = 11f"
+      "setMargins(0, (2 * dp).toInt(), 0, (4 * dp).toInt())"
     ],
     "OverlayPanel.kt:822": [
-      "text = label"
+      "// 选项时用户看不到剩余候选，只能被迫手打。现在默认列 6 项（卡面高度有限）+ 一行明示入口。"
     ],
     "OverlayPanel.kt:833": [
-      "}, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = (8 * dp).toInt() })"
+      "gravity = Gravity.CENTER_VERTICAL"
     ],
     "OverlayPanel.kt:85": [
       "private val qOptsExpanded = HashSet<String>()"
     ],
     "OverlayPanel.kt:902": [
-      "orientation = LinearLayout.HORIZONTAL"
+      "}, LinearLayout.LayoutParams((18 * dp).toInt(), (18 * dp).toInt()).apply { marginEnd = (8 * dp).toInt() })"
     ],
     "OverlayPanel.kt:945": [
-      "foot.addView(pendingChip(t(\"跳过本题\", \"Skip this question\"), filled = false, red = false, dp) {"
+      "foot.addView(TextView(svc).apply {"
     ],
     "OverlayReport.kt:164": [
       "* 为什么不直接量栏体：ScrollView 在栏内是 `weight=1`（要随拖拽伸缩），而 weight 子项在"
@@ -1674,73 +1674,73 @@
       "// 隐藏态：球/光环不在 WindowManager 里，updateViewLayout/syncHalo 对它们只会抛异常"
     ],
     "OverlayService.kt:216": [
-      "* 划掉任务 = 主动关闭：自停，由 onDestroy 统一撤窗（三条路径都走同一个收口）。"
+      "return START_NOT_STICKY"
     ],
     "OverlayService.kt:232": [
-      "recall.hide()"
+      "panel.stopMotionWatch()"
     ],
     "OverlayService.kt:252": [
-      "setImageDrawable(icon)"
+      "val dp = resources.displayMetrics.density"
     ],
     "OverlayService.kt:299": [
-      "val halo = View(this).apply { background = this@OverlayService.halo.newHaloDrawable(Halo.IDLE) }"
+      "// 球贴边时球心距屏边 25dp > 24dp，光晕圆完整在屏内（治「吸附后光圈与球错位」）。"
     ],
     "OverlayService.kt:382": [
-      "}"
+      "try { wm.addView(unit, pp) } catch (_: Exception) {}"
     ],
     "OverlayService.kt:415": [
-      "// 块H-A1：结束本次完成态展示（完成位已在 showPanel 消费时清空，故下次打开回常态）。"
+      "// 点会话行 → 不选任何条 → 收起后选择器窗口留在屏上（dumpsys window 可见该 type=2038 窗口）。"
     ],
     "OverlayService.kt:427": [
-      "/**"
+      "panelParams = null"
     ],
     "OverlayService.kt:436": [
       "*"
     ],
     "OverlayService.kt:449": [
-      "emitFrame()"
+      "if (hidden) return"
     ],
     "OverlayService.kt:470": [
-      "rp.y = spot[1]"
+      "if (!hidden) return"
     ],
     "OverlayService.kt:473": [
-      "haloView?.let { h -> haloParams?.let { hp -> try { wm.addView(h, hp) } catch (_: Exception) {} } }"
+      "recall.hide()"
     ],
     "OverlayService.kt:499": [
-      "MotionEvent.ACTION_MOVE -> {"
+      "when (ev.actionMasked) {"
     ],
     "OverlayService.kt:502": [
-      "if (moved) {"
+      "startX = p.x; startY = p.y"
     ],
     "OverlayService.kt:504": [
-      "p.y = (startY + dy).toInt()"
+      "true"
     ],
     "OverlayService.kt:509": [
-      "}"
+      "if (moved) {"
     ],
     "OverlayService.kt:512": [
-      "MotionEvent.ACTION_UP -> {"
+      "clampBallPos(p)"
     ],
     "OverlayService.kt:547": [
-      ""
+      "val winW = if (p.width > 0) p.width else ballSizeDp"
     ],
     "OverlayService.kt:574": [
-      "* 临时工作区 workspaceId（0.13.5）：读 `home/.dsh/storages/workspace.json`，取 title=临时工作区 的条目"
+      "sessionBusy = false"
     ],
     "OverlayService.kt:580": [
-      "val file = java.io.File(filesDir, \"home/.dsh/storages/workspace.json\")"
+      "/**"
     ],
     "OverlayService.kt:621": [
-      "onTurnStart()"
+      "panel.dropPendingFor(agentId)"
     ],
     "OverlayService.kt:669": [
-      "setHalo(deriveHalo())"
+      "// `!running` 分支里直接改文案，恢复在线时**没有任何人**把它改回来 —— 面板开着、引擎已经起来，"
     ],
     "OverlayService.kt:683": [
-      "}.start()"
+      "// 这句最要紧的话就被 tick 覆写成「引擎离线」——用户正要作答的提示被抹掉。"
     ],
     "OverlayService.kt:737": [
-      "}.start()"
+      "conn.disconnect()"
     ],
     "OverlayService.kt:85": [
       "// ── 引擎维/会话维状态（协作类经 internal 共享） ──────────────────"
@@ -2112,61 +2112,61 @@
       ""
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1035": [
-      "val task = object : Runnable {"
+      "// 冻结态兜底供能（0.14.10）：页面轮询不在前台/未挂载时，reaper 兼任限频重试触发；"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1118": [
-      "/**"
+      "* （即便 JS 侧没找到关闭控件也不退出：「观测不到/关不掉的层不得变成误退应用」）；"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:137": [
-      "private var splashOverlay: SplashOverlay? = null"
+      "internal val splashImportController = SplashImportController(this)"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:160": [
-      "scheduleSplashTimeout()"
+      "val path = SplashStore.filePath(this) ?: return"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:193": [
-      "internal var crashInfo: String? = null"
+      "splashTimeout = task"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:205": [
-      "Toast.LENGTH_LONG,"
+      "// S1-11：结果如实回执——用户拒绝后下一次「该提醒而没提醒」的原因就是这一下。"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:206": [
-      ").show()"
+      "if (!granted) {"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:255": [
-      "/**"
+      "private const val WEB_REVEAL_FADE_MS = 140L"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:266": [
-      "private const val VDISPLAY_REAP_INTERVAL_MS = 2 * 60 * 1000L"
+      "* `syntax_floor_ok:` 字段必须与本处同源（同一个数字），故跨类引用；`private` 会编译不过。"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:296": [
-      "/** #242：是否有一次「露出 WebView」正在等首帧（决定淡入还是已显形）。 */"
+      "internal var observedChromiumVersion: String = \"\""
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:391": [
       "}"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:610": [
-      "// provider 缺失或升级窗口期内 WebView 构造本身会抛（无 GMS 精简 ROM / WebView 被停用 /"
+      "uiChrome.applyImmersive(uiChrome.immersivePrefs())"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:672": [
-      "val density = resources.displayMetrics.density"
+      "// #182-2：左右同样取系统栏与挖孔的较大者（横屏且侧边挖孔时 cutout.left/right > 0）。"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:724": [
-      "// 「打开应用后自动启动」关闭时停在启动页；手动点「启动引擎」仍会拉起引擎。"
+      "// 自带 GONE，什么都不做的话用户会看到一片空白（没有可点的「启动引擎」）。"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:776": [
-      "if (consumePendingSelfRetry()) {"
+      "/** 把待投递的通知落点交给页面；页面未就绪则留到 onPageFinished 再送一次。 */"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:817": [
-      "this,"
+      "}"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:820": [
-      ").show()"
+      ""
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:89": [
       ""
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:928": [
-      "pushSystemDark(webView)"
+      "// M3：从系统授权页返回——上次 pick 因缺权限挂起时按授权结果续启/结算（迁至 DirectoryPickerController）。"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MuxClient.kt:172": [
       "sendFrame(out, 0x1, streamOpen.toByteArray(Charsets.UTF_8))"
@@ -2235,16 +2235,16 @@
       "super.onConfigurationChanged(newConfig)"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:274": [
-      "val root = FrameLayout(this).apply { addView(ball, FrameLayout.LayoutParams(ballSize, ballSize)) }"
+      "val scale = minOf(sx, sy)"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:299": [
-      "val halo = View(this).apply { background = this@OverlayService.halo.newHaloDrawable(Halo.IDLE) }"
+      "// 球贴边时球心距屏边 25dp > 24dp，光晕圆完整在屏内（治「吸附后光圈与球错位」）。"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:574": [
-      "* 临时工作区 workspaceId（0.13.5）：读 `home/.dsh/storages/workspace.json`，取 title=临时工作区 的条目"
+      "sessionBusy = false"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:706": [
-      "val envelope = JSONObject()"
+      "Thread {"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/PluginMounts.kt:41": [
       ""
@@ -3152,15 +3152,16 @@
     "index.ts:368": [
       "/\\bchmod\\s+-R\\s+\\d{3,4}\\s+\\//,",
       "ctx.slots.inject('settings.section', () => ctx.slots.register({",
+      "if (next !== undefined) setSnap(next)",
       "if (typeof a.screenId === 'string' && a.screenId !== '') payload.target = a.screenId",
       "}",
       "})"
     ],
     "index.ts:380": [
       "'shutdown', 'reboot', 'poweroff', 'halt',",
+      "* 「切换序号」与「关掉它」是同一个心理动作的两半，理应并排放。",
       "* 而 `width`/`height` 谎报 `0`。模型的坐标换算锚点（schema 描述原文）拿到 0 只会算出错的值，",
       "const next = ensureChain.then(run, run)",
-      "const presenting = snap.viewers.some((viewer) => viewer.presenting &&",
       "if (!Number.isInteger(d) || d < 0 || d > 20_000) return rejectInput('swipe 的 duration 需为 0-20000 毫秒') as never",
       "order: 97,",
       "webServer: wsvc,"
@@ -3172,16 +3173,16 @@
       "const rejection = authorizeMobileRoute(req, authOptions())",
       "const workspaceId = await incomingWorkspaceId()",
       "if (raw.length === 0 || raw.length > 500) return rejectInput('text 长度需为 1-500 字符') as never",
-      "tr('由会话 ', 'In use by session ') + String(snap.ownerSessionId ?? '').slice(-6)"
+      "}"
     ],
     "index.ts:394": [
       "*/",
-      "+ tr(' 使用中', '')))",
       "/**",
       "// linux-environment、label 同为「Linux环境」）。dsh-client-ui-slots 对 list 槽的重复 id 是",
       "const controller = sessionControllerOf()",
       "if (rejection !== undefined) {",
-      "payload.text = raw"
+      "payload.text = raw",
+      "} catch { /* 壳不可用 */ }"
     ],
     "index.ts:42": [
       "* documented default; a present but non-decimal or out-of-range value is invalid. This is read per",
@@ -3196,15 +3197,15 @@
     ],
     "index.ts:428": [
       "// 市场插件据此打开它的浮层；该浮层由 market-J-fullpage 补丁做成整页（满屏 + 返回页头）。",
-      "? createElement('p', { className: 'dsh-vdisplay-stage-hint' }, stageHint)",
       "if (req.method !== 'GET') {",
       "parts.push(seg)",
+      "screens.map((screen) => createElement('button', {",
       "wsvc.register({",
       "}",
       "} catch {"
     ],
     "index.ts:432": [
-      "",
+      "'data-alias': screen.alias,",
       "/** apply 注入的宿主面（命令面/工作区面按调用实时经 ctx.get 读取）。 */",
       "const data = readFileSync(filePath)",
       "ctx.slots.inject('settings.general.item', () => ctx.slots.register({",
@@ -3215,23 +3216,23 @@
     "index.ts:444": [
       "// Mobile chrome: the drawer mask only (0.14.2 P4 moved the toggle out of this",
       "// 必须**严格位于**某个允许根之下（等于根本身也不放行：那是清空整个临时面）。",
-      "ctx.effect(() => {",
       "function safeResolveInside(ws: string, path: string): string | null {",
       "image: {",
+      "onClick: shutdownAll,",
       "res.end(JSON.stringify({ ok: false, error: 'POST only' }))",
       "sendJson(res, 200, await readVdToolSnapshot(faceOf()))"
     ],
     "index.ts:453": [
       "",
+      "'data-presenting': presenting ? 'true' : 'false',",
       "+ '图像就在本结果里，无需再调用 read_image；像素坐标换算用归一化 nx/ny。',",
       "/\\bsettings\\s+(put|delete)\\b/,",
-      "const sidebar = ctx.get('sidebarRight') as SidebarRightController | undefined",
       "wsReal = wsLex"
     ],
     "index.ts:472": [
       "// issue #258 §5.1：坐标点击的校验只比较**全局画面**变化，并不验证是否命中目标——",
       "// ——说明「危险命令一律拒绝」是工具壳的属性，不是通道的属性。",
-      "// 同浏览器侧：权威收起信号 = 上游展开控件是否在场（`data-rightbar-collapsed` 是常量，不可用）。",
+      "const style = document.createElement('style')",
       "ctx.effect(() => injectStyle('vendor-chrome-hide', VENDOR_CHROME_HIDE_CSS), 'ui-responsive: hide vendor header chrome')",
       "output: {"
     ],
@@ -3239,18 +3240,19 @@
       "",
       "//   ① 调用点直接传 `{ session }`（首选）；",
       "// ok/error 是本工具的**错误出口**：队列目录不可读/不可建时（EACCES 等）必须返回",
-      "if (document.querySelector('[data-testid=vdisplay-stage]') !== null) return",
-      "}"
+      "}",
+      "}, 'dsh-android-vdisplay: styles')"
     ],
     "index.ts:517": [
       "/** 动画三开关（manage 的 android_env_prepare 读写面）。 */",
-      "description: () => tr('在独立屏幕上运行第三方 App（Shizuku 特权通道），不挤占用户前台。',",
       "return () => { observer.detach() }",
       "try { purgeStaleUnclaimed('boot') } catch { /* 清理失败不阻断装配 */ }",
-      "}"
+      "}",
+      "} catch {"
     ],
     "index.ts:584": [
       "* 热补丁（2026-08-27 真机实锤）：通道结果 → 模型文本。",
+      "// 同 key 再注册会顶掉终端 body。因此对 [data-sidebar-terminal] 做**受管 DOM 注入**，",
       "bytes,",
       "const image = v.image as { attachmentId: string; mediaType: string; bytes: number; width: number; height: number; name?: string } | undefined",
       "tabs: session => sidebar.tabsIn(session),"

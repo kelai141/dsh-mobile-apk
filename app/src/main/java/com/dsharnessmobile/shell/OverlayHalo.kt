@@ -168,6 +168,26 @@ class OverlayHalo(private val svc: OverlayService) {
     }
   }
 
+  /** 动效开关订阅的注销句柄（服务存活期只注册一次）。 */
+  private var motionUnsubscribe: (() -> Unit)? = null
+
+  /**
+   * 订阅动效开关：用户**在光环脉动跑起来之后**去系统设置关动画时，立刻停下。
+   *
+   * 为什么必须单独订阅：上面的 [setHalo] 只在状态变化时被调用，动画一旦启动就没人
+   * 再问开关。而 WORKING/PENDING 期间光环是常驻 INFINITE —— 144Hz 设备上等于永不空闲。
+   */
+  fun startMotionWatch() {
+    if (motionUnsubscribe != null) return
+    motionUnsubscribe = DsUi.registerMotionListener(svc) { setHalo(lastHalo) }
+  }
+
+  /** 服务销毁时注销，避免 ContentObserver 泄漏。 */
+  fun stopMotionWatch() {
+    motionUnsubscribe?.invoke()
+    motionUnsubscribe = null
+  }
+
   /**
    * 换肤（uiMode 变化）：按当前状态重刷一次取色。
    * 为什么必须显式调：haloView 的 background 是**手工构造**的 drawable，不是主题资源，

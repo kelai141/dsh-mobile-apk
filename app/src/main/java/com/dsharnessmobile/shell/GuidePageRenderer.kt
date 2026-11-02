@@ -711,8 +711,21 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
       "Unpacking the runtime; this takes a few minutes. Keep the app open.",
     )
 
+  /** 动效开关订阅的注销句柄；当前是否应脉冲由 [statusPulseWanted] 记住。 */
+  private var motionUnsubscribe: (() -> Unit)? = null
+  private var statusPulseWanted = false
+
+  /**
+   * 状态点脉冲。
+   *
+   * 本处是全仓**唯一**原先未受 [DsUi.animationsEnabled] 约束的 INFINITE 动画：系统关动画时
+   * 它照旧每帧重绘一个 alpha。现在两件事都补上：
+   *  1. 启动前判开关（animationsEnabled == false 直接设终态）；
+   *  2. 订阅开关翻转 —— 脉冲跑起来之后用户去系统设置关动画，也立刻停。
+   */
   private fun setStatusPulse(on: Boolean) {
-    if (on) {
+    statusPulseWanted = on
+    if (on && DsUi.animationsEnabled(activity)) {
       val anim = statusPulse ?: ObjectAnimator.ofFloat(chrome.statusDot, View.ALPHA, 1f, 0.28f).apply {
         duration = 900
         repeatMode = ValueAnimator.REVERSE
@@ -723,14 +736,28 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
       if (!anim.isStarted) anim.start()
     } else {
       statusPulse?.cancel()
+      statusPulse = null
       chrome.statusDot.alpha = 1f
     }
   }
 
+  /** 引导页就绪后调用一次，订阅动效开关翻转；重复调用安全。 */
+  fun startMotionWatch() {
+    if (motionUnsubscribe != null) return
+    motionUnsubscribe = DsUi.registerMotionListener(activity) { setStatusPulse(statusPulseWanted) }
+  }
+
+  fun stopMotionWatch() {
+    motionUnsubscribe?.invoke()
+    motionUnsubscribe = null
+  }
+
   /** 取消状态点脉冲动画（onDestroy 兜底，自 MainActivity.onDestroy 迁入）。 */
   fun cancelPulse() {
+    stopMotionWatch()
     statusPulse?.cancel()
     statusPulse = null
+    statusPulseWanted = false
     management.destroy()
   }
 
