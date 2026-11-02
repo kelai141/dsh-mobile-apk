@@ -808,7 +808,7 @@ Terminal output delivery (#591): `ConsoleSession` sends stripped PTY text throug
 
 - **一句话**：页面里的 `window.androidBridge` / `window.dshBackBridge` 方法面，加壳侧两条对引擎的 HTTP/WS 通道（浏览器 cookie 鉴权、控制队列长轮询）与崩溃自动回撤闸门，共同构成「模型动作怎么落到这台手机上、结果怎么回填、出事怎么自救」的底座。
 - **入口/触发**：
-  - 页面 JS 同步调 `window.androidBridge.*`（现状：81 个 `@JavascriptInterface` 注解，唯一安装点 `MainActivity.kt:1532#expect=webView.addJavascriptInterface(`；#773 的帧来源守卫合入后每个入口都过 `trusted{}`/`checkTrustedFrame()`，由 `check-bridge-symmetry` 的静态判据守住）与 `window.dshBackBridge.*`（`BackGate.kt:132-148`，仅 2 个方法）；另有 `consoleBridge`（`ConsoleActivity.kt:112#expect=webView.getLocationOnScreen(location)`）挂在控制台 WebView。
+  - 页面 JS 同步调 `window.androidBridge.*`（现状：81 个 `@JavascriptInterface` 注解，唯一安装点 `MainActivity.kt:1546#expect=webView.addJavascriptInterface(`；#773 的帧来源守卫合入后每个入口都过 `trusted{}`/`checkTrustedFrame()`，由 `check-bridge-symmetry` 的静态判据守住）与 `window.dshBackBridge.*`（`BackGate.kt:132-148`，仅 2 个方法）；另有 `consoleBridge`（`ConsoleActivity.kt:112#expect=webView.getLocationOnScreen(location)`）挂在控制台 WebView。
   - `EngineService.onCreate` → `ControlCarrier.ensureStarted`（`EngineService.kt:43`）；无障碍服务连接时同入口（`DeviceControlService.kt:452-453`）。轮询/心跳由此起步。
   - 任一出厂 HTTP 调用方（`EngineProbe.kt:51`、`DownloadSaver.kt:101`、`NotifyBridge.kt:328`、`OverlayPanel.kt:822`、`OverlayService.kt:580`、`MuxClient.kt:91`）在发请求前向 `EngineAuth` 取值。
   - 看门狗 tick 的 `undoReady`（`EngineService.kt:134`）与启动流（`EngineStartFlow.kt:349`）触发 `UndoGate`。
