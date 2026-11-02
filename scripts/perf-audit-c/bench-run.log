@@ -1,0 +1,29 @@
+# bench-extract 2026-11-02T21:27:44.5746071+08:00
+# host: BABEL  java: openjdk version "17.0.2" 2022-01-18
+# archive: D:\coding\dsh-mobile\dsh-mobile-apk\app\src\main\assets\snapshot.tar.xz  bytes: 200877488
+# note: 宿主并发负载下测得（同机另有 3 个审计 agent 在跑），绝对值可能偏高；相对比较有效。
+# free on C:: 52.6 GB
+
+## NEGATIVE-CONTROL: native liblzma (xz.exe -t) vs pure-java tukaani xz
+ctrl-native-xz-t run=1 ms=12461 exit=0
+ctrl-native-xz-t run=2 ms=10947 exit=0
+ctrl-native-xz-t run=3 ms=11661 exit=0
+ctrl-native-xz-t run=4 ms=11280 exit=0
+ctrl-native-xz-t run=5 ms=11410 exit=0
+
+## variant=digest runs=5
+variant=digest entries=0 regular=0 symlink=0 dir=0 bytes=200877488 ms=1345 mbps=142.4 sha256=3dc9f3090822ea056bc5e53ad5455dd73a51d0f9cef465f9fb93061e8401002d
+variant=digest entries=0 regular=0 symlink=0 dir=0 bytes=200877488 ms=988 mbps=193.9 sha256=3dc9f3090822ea056bc5e53ad5455dd73a51d0f9cef465f9fb93061e8401002d
+variant=digest entries=0 regular=0 symlink=0 dir=0 bytes=200877488 ms=1073 mbps=178.5 sha256=3dc9f3090822ea056bc5e53ad5455dd73a51d0f9cef465f9fb93061e8401002d
+variant=digest entries=0 regular=0 symlink=0 dir=0 bytes=200877488 ms=1159 mbps=165.3 sha256=3dc9f3090822ea056bc5e53ad5455dd73a51d0f9cef465f9fb93061e8401002d
+variant=digest entries=0 regular=0 symlink=0 dir=0 bytes=200877488 ms=1112 mbps=172.3 sha256=3dc9f3090822ea056bc5e53ad5455dd73a51d0f9cef465f9fb93061e8401002d
+
+## variant=nullsink runs=5
+variant=nullsink entries=53178 regular=44568 symlink=1017 dir=7593 bytes=750434969 ms=24032 mbps=29.8
+variant=nullsink entries=53178 regular=44568 symlink=1017 dir=7593 bytes=750434969 ms=24553 mbps=29.1
+variant=nullsink entries=53178 regular=44568 symlink=1017 dir=7593 bytes=750434969 ms=23136 mbps=30.9
+variant=nullsink entries=53178 regular=44568 symlink=1017 dir=7593 bytes=750434969 ms=24341 mbps=29.4
+variant=nullsink entries=53178 regular=44568 symlink=1017 dir=7593 bytes=750434969 ms=24225 mbps=29.5
+
+# done 2026-11-02T21:30:51.0666584+08:00
+LOG=D:\coding\dsh-mobile\dsh-mobile-apk\_dsh-wt\perf-audit\scripts\perf-audit-c\out\bench-20261102-212744.txt
