@@ -422,8 +422,31 @@ window.__ModuleLoader__.load({
 			}, []);
 			(0, react.useEffect)(() => {
 				refreshStat();
-				const id = setInterval(refreshStat, 30000);
-				return () => clearInterval(id);
+				// Performance audit 2026-11-02 #4: self-renewing setTimeout instead of a bare
+				// setInterval, so no further tick is scheduled while the page is hidden. The 30s
+				// period is unchanged; a hidden WebView has no observer for this badge, and the
+				// poll still crosses the native bridge every tick.
+				// Same shape as dsh-client-ui-responsive/src/client/mobile/native-browser-auto-place.ts:87-101.
+				let id = null;
+				const schedule = () => {
+					if (id !== null) return;
+					id = window.setTimeout(() => {
+						id = null;
+						refreshStat();
+						if (!document.hidden) schedule();
+					}, 30000);
+				};
+				const onVisibility = () => {
+					if (document.hidden) return;
+					refreshStat();
+					schedule();
+				};
+				document.addEventListener('visibilitychange', onVisibility);
+				schedule();
+				return () => {
+					document.removeEventListener('visibilitychange', onVisibility);
+					if (id !== null) clearTimeout(id);
+				};
 			}, [refreshStat]);
 			return (0, react_jsx_runtime.jsx)("div", {
 				className: styles.actions,

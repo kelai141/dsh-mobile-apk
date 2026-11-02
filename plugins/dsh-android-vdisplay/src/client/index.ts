@@ -330,8 +330,35 @@ function VdPanel(props: { sessionId?: unknown }): ReactElement {
     pull()
     // 1s 轮询保留为**兜底对齐**（原生层重建、事件通道漏网时用）；即时性由上面的
     // watchStageVisibility 事件通道负责，不再依赖这一拍。
-    const timer = setInterval(pull, 1000)
-    return () => { alive = false; clearInterval(timer) }
+    //
+    // 性能审计 2026-11-02 #4：改成「自续 setTimeout + 页面不可见时不排下一拍」。
+    // 原先的裸 setInterval 在 WebView 被切到后台时仍然每秒跨桥一次（pullPanelState + publishBounds
+    // 各一次原生调用），而页面不可见时这两个动作都没有任何可观测效果——纯白烧。
+    // 周期语义不变（仍是 1s），变的只是「后台不排下一拍」；回前台由 visibilitychange 立刻补一拍。
+    // 与仓库既有正确实现同口径：dsh-client-ui-responsive/src/client/mobile/native-browser-auto-place.ts:87-101。
+    let timer: number | undefined
+    const schedule = () => {
+      if (!alive || timer !== undefined) return
+      timer = window.setTimeout(() => {
+        timer = undefined
+        if (!alive) return
+        pull()
+        if (!document.hidden) schedule()
+      }, 1000)
+    }
+    const onVisibility = () => {
+      if (document.hidden) return
+      if (!alive) return
+      pull()
+      schedule()
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    schedule()
+    return () => {
+      alive = false
+      document.removeEventListener('visibilitychange', onVisibility)
+      if (timer !== undefined) { window.clearTimeout(timer); timer = undefined }
+    }
   }, [tick, publishBounds])
 
   const selectTarget = (alias: string) => {
@@ -493,8 +520,29 @@ export function apply(ctx: ClientContext): void {
       }
     }
     reveal()
-    const timer = window.setInterval(reveal, 800)
-    return () => { window.clearInterval(timer) }
+    // 性能审计 2026-11-02 #4：同 1s 兜底轮询的口径——页面不可见时不排下一拍。
+    // 「自动展开查看器」在后台没有任何意义（用户看不到），却在后台仍每 800ms 读一次
+    // collapsedNow()/sidebar 状态并可能触发 openTab。
+    let timer: number | undefined
+    const schedule = () => {
+      if (timer !== undefined) return
+      timer = window.setTimeout(() => {
+        timer = undefined
+        reveal()
+        if (!document.hidden) schedule()
+      }, 800)
+    }
+    const onVisibility = () => {
+      if (document.hidden) return
+      reveal()
+      schedule()
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    schedule()
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      if (timer !== undefined) { window.clearTimeout(timer); timer = undefined }
+    }
   }, 'dsh-android-vdisplay: automatically reveal active viewer')
 
   ctx.effect(() => {
