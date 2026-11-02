@@ -2,6 +2,14 @@
   "$comment": "vendor 固化插件补丁登记表（apply-patches.mjs 消费；id 必须与 IMPLS 一一对应，启动时交叉校验）。marker 语义见 README。",
   "patches": [
     {
+      "id": "image-history-batch-offload-I1",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm/lib/index.js",
+      "scope": "engine",
+      "summary": "图片请求接近累计预算时一次淘汰最旧40%，释放不足时继续释放旧图，保留最新观察",
+      "provenance": "2026-10-30 用户选择批量淘汰以减少缓存前缀改写，维持长会话连续操作",
+      "marker": "dsh-mobile image history batch offload (I1)"
+    },
+    {
       "id": "managed-port-bind-EP1",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-webserver/lib/index.js",
       "scope": "engine",

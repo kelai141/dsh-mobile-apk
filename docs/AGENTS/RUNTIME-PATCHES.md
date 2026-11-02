@@ -67,6 +67,7 @@
 <!-- generated:active-registry:start -->
 | 活动补丁 ID | scope | 目标 |
 |---|---|---|
+| `image-history-batch-offload-I1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm/lib/index.js` |
 | `managed-port-bind-EP1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-webserver/lib/index.js` |
 | `profile-link-skip-PL1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js` |
 | `sidebar-bubble-reorder-B1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar-right/lib/client.js` |
@@ -185,6 +186,8 @@
 | `file-upload-restart-R1` | `dsh-client-file-upload/lib/index.js` | Agent resolver 单槽注册改为**同槽覆盖**（2026-09-28 模拟器 5556 实锤）：cordis `Fiber._reload` 的顺序是「先执行新实例 body、再 `_unload()` 释放旧 effect」，故 session-controller 因 `agent-default-model` 条目被改写而重启时，新 `SessionController` 构造里的 `ctx.effect(() => ctx.fileUploads.registerAgentResolver(...))` 撞上上游的 already-registered 守卫 → 新 fiber 判 FAILED、服务永久缺席（切一次默认模型即触发，客户端恒报 `session/control: active Service "sessionController" is unavailable`）。修法只去掉守卫、保留身份判据的 disposer（旧 fiber 的 disposer 不会清掉新注册）；仍只有一个槽。真源见 `scripts/patches/registry.json` 的 `file-upload-restart-R1` |
 | `mimo-thinking-toggle-056` | `dsh-llm-pi-ai/lib/index.js` + `@earendil-works/pi-ai/dist/api/openai-completions.js` | Issue #56：开放显式 `thinkingFormat=mimo`；仅精确官方 MiMo profile 或用户显式 compat 生成 off/low 二态映射，选择器显示“关闭思考/开启思考”，默认开启。Completions serializer 将状态编码为 `thinking.type=disabled|enabled`，不发送 `reasoning_effort`；保留 assistant 多轮 `reasoning_content`。固定 DSH 0.2.1-rc.2 / pi-ai 1.1.0 锚点（版本守卫：`dsh-llm-pi-ai@0.2.1-rc.2` + `pi-ai@1.1.0`，不符即抛）；行为回归 `scripts/patches/tests/mimo-thinking-toggle-056.test.mjs`。 |
 
+
+`image-history-batch-offload-I1` 将 `dsh-llm@0.2.1-rc.3` 的图片预算选择器改为90%预警、最旧40%批量淘汰，释放不足时继续释放旧图，至少保留最新一张。沿用 image/offload 事件与重试；最新单图超硬上限仍明确报错。策略、夹具与验证边界见 `docs/contrib/kelai141/2026-10-30-history-image-prefix-cache.md`。
 
 ### 7.1a 0.14.3 新增/变更补丁与构建钩子（源码在场，未执行）
 
