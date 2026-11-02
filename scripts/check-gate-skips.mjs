@@ -673,7 +673,37 @@ const collectGateFiles = (dir, prefix = '') => readdirSync(dir, { withFileTypes:
   if (entry.isDirectory()) return collectGateFiles(join(dir, entry.name), rel)
   return entry.name.startsWith('check-') && entry.name.endsWith('.mjs') ? [rel] : []
 })
-const allGateFiles = collectGateFiles(SCRIPTS).sort().filter((f) => f !== 'check-gate-skips.mjs')
+const discoveredGateFiles = collectGateFiles(SCRIPTS).sort().filter((f) => f !== 'check-gate-skips.mjs')
+
+// ── 探针面分类（性能审计 2026-11-02 #3）──────────────────────────────────────
+// 全树发现 80 个 check-*.mjs，其中三类**不该被当成「门禁」逐个子进程 spawn**：
+//   unitTest   23 个 *.test.mjs —— 它们是 node --test 用例，CI 的 node --test 已经跑过；
+//              再 spawn 一次等于把整套单测跑第三遍（check-script-tests.mjs 单条 222.6 s）。
+//   aggregator  2 个 —— check-release-gates.mjs 是聚合入口，自身 --run 会再 spawn 一遍全部门禁，
+//              套娃两次；check-gate-skips.mjs 是自指，原本就被排除。
+//
+// **这不是把判据改小来借绿**：分类是**三选一的显式分派**，discovered 必须等于三类的并集，
+// 任一新文件落不进任何一类就判红（见下方 classify 的 exhaustive 断言）。
+// 被排除的两类仍然逐条出现在 --list 输出与 [gate-surface] 清单里，
+// 且「静态层」断言（声明集合 / 接线 / 计数口径）对它们**照旧全跑**，只是不再做运行期探针。
+const UNIT_TEST_RE = /\.test\.mjs$/
+const AGGREGATORS = new Set(['check-gate-skips.mjs', 'check-release-gates.mjs'])
+const classifyGateFile = (f) => {
+  const base = f.split('/').pop()
+  if (base === 'check-gate-skips.mjs') return 'self'
+  if (AGGREGATORS.has(base)) return 'aggregator'
+  if (UNIT_TEST_RE.test(base)) return 'unitTest'
+  return 'probe'
+}
+const gateSurface = discoveredGateFiles.map((file) => ({ file, kind: classifyGateFile(file) }))
+const unclassified = gateSurface.filter((g) => !['self', 'aggregator', 'unitTest', 'probe'].includes(g.kind))
+check('探针面分类全覆盖（无可归类的 check-*.mjs）', unclassified.length === 0,
+  '未归类: ' + unclassified.map((g) => g.file).join(', '))
+// 反向对照：三类被排除者合计必须 > 0，否则说明分类器失效（全落进 probe 也会「全绿」）。
+const excludedCount = gateSurface.filter((g) => g.kind !== 'probe').length
+check('探针面分类器确实排除了聚合器与单测（反向对照，>0 条）', excludedCount > 0,
+  '排除 0 条 = 分类器没生效')
+const allGateFiles = gateSurface.filter((g) => g.kind === 'probe').map((g) => g.file)
 if (ONLY_FILE !== null && !allGateFiles.includes(ONLY_FILE) && ONLY_FILE !== 'check-gate-skips.mjs') {
   console.error('CHECK-GATE-SKIPS 用法错误：--only 指定的门禁不在审计面内：' + ONLY_FILE)
   process.exit(2)
@@ -814,6 +844,14 @@ const strictPropagated = /argvFor\.push\('--require'\)/.test(aggText)
 check('聚合入口对支持 --require 的门禁传严格档（存在 argvFor.push(--require) 机制）', strictPropagated)
 
 if (argv.includes('--list')) {
+  // 探针面全貌（性能审计 2026-11-02 #3）：被排除的两类**必须可见**，
+  // 否则「缩小探针面」就等于把覆盖面悄悄藏起来。
+  console.log('== 探针面分类（发现 ' + discoveredGateFiles.length + ' 个 check-*.mjs）')
+  for (const kind of ['probe', 'unitTest', 'aggregator']) {
+    const list = gateSurface.filter((g) => g.kind === kind).map((g) => g.file)
+    console.log('   [' + kind + '] ' + list.length + ' 项' + (kind === 'probe' ? '（做运行期探针）' : '（不做运行期探针，静态层照跑）'))
+    if (kind !== 'probe') for (const f of list) console.log('      ' + f)
+  }
   console.log('== 门禁清单（声明 ' + declared.length + ' 项）')
   for (const g of declared) console.log('   ' + g.padEnd(34) + (invokedIn(CHAINS[0]).includes(g) ? 'local' : '     ') + ' ' + (invokedIn(CHAINS[1]).includes(g) ? 'cloud' : ''))
   console.log('== SKIP 审计（运行期实证；static = 源码里的 SKIP 相关写入点）')
@@ -832,4 +870,6 @@ if (failures.length > 0) {
 const emitterCount = skipAudit.filter((a) => !a.self && a.runtime > 0).length
 console.log('CHECK-GATE-SKIPS PASSED（声明 ' + declared.length + ' 项门禁；'
   + (NO_RUNTIME ? 'SKIP 审计 ' + gateFiles.length + ' 个脚本（仅静态层，运行期未执行）' : 'SKIP 运行期审计 ' + gateFiles.length + ' 个脚本、真的发射 SKIP 的 ' + emitterCount + ' 个')
+  + '；探针面 ' + gateFiles.length + '/' + discoveredGateFiles.length
+  + '（排除 ' + (discoveredGateFiles.length - gateFiles.length) + ' 个单测/聚合器，见 --list）'
   + '；发布链 --require 在场）')
