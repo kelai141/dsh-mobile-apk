@@ -666,6 +666,40 @@ class OverlayPanel(private val svc: OverlayService) {
    *  动画实例挂在面板字段上（工程无 res id，故不用 View tag 键）。 */
   private var statusBreathing: android.animation.ObjectAnimator? = null
 
+  /**
+   * 动效开关订阅的注销句柄。
+   *
+   * 呼吸动画一旦启动就没人再问开关——用户在「待答」呼吸跑起来之后去系统设置关动画，
+   * 它会一直跑到待答状态结束。订阅后立刻按当前开关落实。
+   */
+  private var motionUnsubscribe: (() -> Unit)? = null
+
+  /** 由 [OverlayService] 在面板就绪后调用一次；重复调用安全。 */
+  fun startMotionWatch() {
+    if (motionUnsubscribe != null) return
+    motionUnsubscribe = DsUi.registerMotionListener(svc) { onMotionChanged() }
+  }
+
+  fun stopMotionWatch() {
+    motionUnsubscribe?.invoke()
+    motionUnsubscribe = null
+  }
+
+  /** 开关翻转：把当前该跑/不该跑的常驻动画按新值重落实。 */
+  private fun onMotionChanged() {
+    if (!animationsOn()) {
+      statusBreathing?.cancel()
+      statusBreathing = null
+      statusText?.animate()?.cancel()
+      statusText?.alpha = 1f
+      statusText?.let { ShimmerTextView::class.java.cast(it).setShimmering(false) }
+    } else {
+      // 开关重新打开：把「应该正在呼吸」的状态补回来。applyAgentStatus 是幂等的
+      // 状态派生入口（与 setHalo 同一口径），走它而不是另写判定。
+      if (currentPending() != null) statusText?.let { setAmberBreathing(it, true) }
+    }
+  }
+
   private fun setAmberBreathing(tv: TextView, on: Boolean) {
     if (on && animationsOn()) {
       if (statusBreathing?.isRunning == true) return

@@ -808,7 +808,7 @@ Terminal output delivery (#591): `ConsoleSession` sends stripped PTY text throug
 
 - **一句话**：页面里的 `window.androidBridge` / `window.dshBackBridge` 方法面，加壳侧两条对引擎的 HTTP/WS 通道（浏览器 cookie 鉴权、控制队列长轮询）与崩溃自动回撤闸门，共同构成「模型动作怎么落到这台手机上、结果怎么回填、出事怎么自救」的底座。
 - **入口/触发**：
-  - 页面 JS 同步调 `window.androidBridge.*`（现状：81 个 `@JavascriptInterface` 注解，唯一安装点 `MainActivity.kt:1539#expect=webView.addJavascriptInterface(`；#773 的帧来源守卫合入后每个入口都过 `trusted{}`/`checkTrustedFrame()`，由 `check-bridge-symmetry` 的静态判据守住）与 `window.dshBackBridge.*`（`BackGate.kt:132-148`，仅 2 个方法）；另有 `consoleBridge`（`ConsoleActivity.kt:112#expect=webView.getLocationOnScreen(location)`）挂在控制台 WebView。
+  - 页面 JS 同步调 `window.androidBridge.*`（现状：81 个 `@JavascriptInterface` 注解，唯一安装点 `MainActivity.kt:1532#expect=webView.addJavascriptInterface(`；#773 的帧来源守卫合入后每个入口都过 `trusted{}`/`checkTrustedFrame()`，由 `check-bridge-symmetry` 的静态判据守住）与 `window.dshBackBridge.*`（`BackGate.kt:132-148`，仅 2 个方法）；另有 `consoleBridge`（`ConsoleActivity.kt:112#expect=webView.getLocationOnScreen(location)`）挂在控制台 WebView。
   - `EngineService.onCreate` → `ControlCarrier.ensureStarted`（`EngineService.kt:43`）；无障碍服务连接时同入口（`DeviceControlService.kt:452-453`）。轮询/心跳由此起步。
   - 任一出厂 HTTP 调用方（`EngineProbe.kt:51`、`DownloadSaver.kt:101`、`NotifyBridge.kt:328`、`OverlayPanel.kt:822`、`OverlayService.kt:580`、`MuxClient.kt:91`）在发请求前向 `EngineAuth` 取值。
   - 看门狗 tick 的 `undoReady`（`EngineService.kt:134`）与启动流（`EngineStartFlow.kt:349`）触发 `UndoGate`。
@@ -1120,7 +1120,7 @@ flowchart TD
   - 工作线程：`postRpc`、`postEventResult`、`probeEngine` 的 `HttpURLConnection` 调用 → `main.post` 回调。
 - **耦合**（具体符号）：
   - 偏好键：`overlay_display` 的 `auto_collapse_on_done`（`OverlayService.kt:427`）与 `template_thinking`/`template_tool`/`template_completion`（`OverlayPanel.kt:387/390/396`）；`dsh-overlay` 的 `enabled`（`OverlayController.kt:22-23`）。
-  - 跨块符号：`OverlayService.instance`（`OverlayService.kt:989#expect=var%20instance%3A%20OverlayService%3F`）被 `OverlayController.isEnabled`、`NotifyCenter.kt:161`、`MainActivity.kt:647` 读；`OverlayService.frameConsumer`（`OverlayService.kt:997#expect=var%20frameConsumer%3A`）被 `MainActivity.kt:296` 写、`:424` 清。
+  - 跨块符号：`OverlayService.instance`（`OverlayService.kt:996#expect=var%20instance%3A%20OverlayService%3F`）被 `OverlayController.isEnabled`、`NotifyCenter.kt:161`、`MainActivity.kt:647` 读；`OverlayService.frameConsumer`（`OverlayService.kt:1004#expect=var%20frameConsumer%3A`）被 `MainActivity.kt:296` 写、`:424` 清。
   - 服务级共享字段：`activeSessionId`/`userPinnedSession`/`engineRunning`/`sessionBusy`/`toolCount`/`optimisticBusyAt`/`currentToolName`/`pendingKind`/`panelOccupied`/`completion`/`report`/`recall`/`hidden`（`OverlayService.kt:85-120`）由 OverlayPanel/OverlayLiveFeed/OverlayHalo/OverlayRecall 直接读写（`hidden` 由 OverlayService 持有、`OverlayRecall` 只经 `svc.recallBall()` 回调，见 ARCHITECTURE.md 的单向纪律）。
   - 网络与鉴权：`http://127.0.0.1:3080/api/<method>`（`OverlayService.kt:574`）与 `POST /api/$events/result`（`OverlayPanel.kt:816`），均 `EngineAuth.attach`（`:580`、`OverlayPanel.kt:822`）+ 401 重试一次（`:586`）。
   - 引擎事件流：streamId `dsh-overlay-events`（`MuxClient.kt:46`）与 K10 的 `dsh-notify-responder`（`NotifyBridge.kt:28`）并行，两条流首答者结算、另一方收 `cancel`。
@@ -1130,7 +1130,7 @@ flowchart TD
 - **关键坐标**：`OverlayService.kt:216`（球窗 TYPE_APPLICATION_OVERLAY + NOT_FOCUSABLE/NOT_TOUCH_MODAL/ADJUST_NOTHING）、`OverlayService.kt:252`（光环窗先 add 定 z 序）、`OverlayService.kt:382`（点球与拖动分叉）、`OverlayService.kt:504`（权威完成位置位）、`OverlayService.kt:509`（有草稿不收的自动收起门）、`OverlayPanel.kt:175`（currentPending 审批优先）、`OverlayPanel.kt:816`（应答回流 URL）、`OverlayHalo.kt:143`（deriveHalo 唯一权威）。
 - **不变量**：
   1. 光环窗必须先于球窗 `addView`，且三窗口生命周期内禁止 remove/re-add 重排；状态切换只走 `setHalo`/`syncHalo`。违反 → 辉光整窗盖住球面，表现为「球不是一圈氛围光而是整球变色」（`OverlayService.kt:232-235`）。
-  2. `rootParams.width/height` 运行期恒为球尺寸（面板自 0.13.3 起是独立窗口），`edgeMarginPx` 与 `haloSizeDp` 同源恒等式 `haloSizeDp/2 == ballSizeDp/2 + edgeMarginPx`（`BALL_EDGE_MARGIN_DP = 8`，`OverlayService.kt:979#expect=internal%20const%20val%20BALL_EDGE_MARGIN_DP`）。违反 → 贴边时光环窗请求坐标为负、被 WMS 整窗平移回屏，表现为球与光环偏心。
+  2. `rootParams.width/height` 运行期恒为球尺寸（面板自 0.13.3 起是独立窗口），`edgeMarginPx` 与 `haloSizeDp` 同源恒等式 `haloSizeDp/2 == ballSizeDp/2 + edgeMarginPx`（`BALL_EDGE_MARGIN_DP = 8`，`OverlayService.kt:986#expect=internal%20const%20val%20BALL_EDGE_MARGIN_DP`）。违反 → 贴边时光环窗请求坐标为负、被 WMS 整窗平移回屏，表现为球与光环偏心。
   3. 完成位必须挂在服务级字段且只能被 `showPanel` 消费一次（`OverlayReport.kt:348`）。放进视图状态 → 默认的自动收起 `removeView` 后丢失，用户点球重开永远看不到完成文案（坑 155）。
   4. 应答必须带 ready 帧分配的 `eventsClientId`（`OverlayPanel.kt:833` 空则判失败）；HTTP 200 只代表受理、不等于结清，权威收敛点是引擎 `cancel` 帧、`turn_end`/`running=false` 的 `dropPendingFor`、以及重连换代的 3s 宽限（`OverlayPanel.kt:110-129`）。违反 → 卡片提前消失或永挂。
   5. `OverlayService` **不是前台服务**：manifest 未声明 `foregroundServiceType`，全仓 `startForeground` 只在 `EngineService.kt:37`。它作为后台服务的存活依赖 EngineService 的前台服务抬升进程优先级。
