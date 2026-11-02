@@ -4,6 +4,8 @@
 
 ## 组成
 
+`data/reasoning-envelope-1304.mjs`：四家订阅的推理信封与空摘要显示。统一 runner 登记为 `sealed-reasoning-1304`，依赖官方 streaming 补丁。HTTP/SSE 模拟只在 tests 内；两仓 PR Gate 按当前夹具版本运行协议与升级回归。详见 APK 仓 `docs/REASONING-1304.md`。
+
 | 文件 | 职责 |
 |---|---|
 | `apply-patches.mjs` | 唯一 runner：`--check`（门禁验证）/ `--apply`（幂等施加+自验）/ `--list` / `--only` |

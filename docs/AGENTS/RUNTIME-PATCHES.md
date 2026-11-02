@@ -110,6 +110,7 @@
 | `reference-drill-F6` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-reference/lib/client.js` |
 | `terminal-inspector-android-D1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/lib/runner-launch-B2zsQ1Dz.js` |
 | `pi-upstream-streaming-020` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js`<br>`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/anthropic-messages.js`<br>`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/bedrock-converse-stream.js`<br>`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/mistral-conversations.js`<br>`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/openai-responses-shared.js`<br>`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/pi-messages.js` |
+| `sealed-reasoning-1304` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js`<br>`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/models.js`<br>`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/openai-responses-shared.js`<br>`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/anthropic-messages.js`<br>`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js`<br>`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/transform-messages.js`<br>`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-chat/lib/client.js` |
 | `mimo-thinking-toggle-056` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js`<br>`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js` |
 | `pi-toolcall-G2` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js` |
 | `fs-local-digest-guard-B` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-fs-local/lib/index.js` |
@@ -150,6 +151,8 @@
 （fixture = 0.1.5-rc.1 产物；`.deploy-tmp/` 下的临时预检脚本不入库，勿再引用）。
 
 ### 7.1 构建期引擎补丁历史与实现说明（活动状态见 §6.1）
+
+2026-11-02：`sealed-reasoning-1304` 补齐四家订阅的推理信封、账号/模型/端点隔离、空摘要思考行与传输进度保活。目标包括 llm-pi-ai、pi-ai Models 与原生协议适配器、ui-chat；回归及升级防线见 [REASONING-1304.md](../REASONING-1304.md)。不修改上游 checkout，不注入测试服务。
 
 2026-10-24 追版 `0.2.1-rc.3`：PTC A1 与 MiMo 056 的精确版本守卫同步为 rc.3，未知版本继续拒绝；28 条引擎补丁在 rc.3 原始发布包上全部命中。历史 rc.2 夹具保留为 superseded，新夹具记录官方提交 `1f81c047` 与真实字节哈希。完整验证见协调仓 `docs/UPSTREAM-0.2.1-RC3-2026-10-24.md`。
 

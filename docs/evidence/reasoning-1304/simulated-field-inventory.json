@@ -1,0 +1,66 @@
+{
+  "date": "2026-11-02",
+  "source": "本地协议模拟服务；不是实际订阅账号探针",
+  "records": [
+    {
+      "provider": "openai-codex",
+      "api": "openai-codex-responses",
+      "simulated": true,
+      "fields": [
+        "item.encrypted_content:string",
+        "response.output[].encrypted_content:string"
+      ]
+    },
+    {
+      "provider": "xai",
+      "api": "openai-responses",
+      "simulated": true,
+      "fields": [
+        "item.encrypted_content:string",
+        "response.output[].encrypted_content:string"
+      ]
+    },
+    {
+      "provider": "anthropic",
+      "api": "anthropic-messages",
+      "simulated": true,
+      "fields": [
+        "content_block.data:string",
+        "content_block.signature:string",
+        "content_block.thinking:string",
+        "delta.signature:string",
+        "delta.thinking:string"
+      ]
+    },
+    {
+      "provider": "github-copilot",
+      "api": "openai-completions",
+      "simulated": true,
+      "fields": [
+        "choices[].delta.reasoning_opaque:string",
+        "choices[].delta.reasoning_text:string"
+      ]
+    },
+    {
+      "provider": "github-copilot",
+      "api": "anthropic-messages",
+      "simulated": true,
+      "fields": [
+        "content_block.data:string",
+        "content_block.signature:string",
+        "content_block.thinking:string",
+        "delta.signature:string",
+        "delta.thinking:string"
+      ]
+    },
+    {
+      "provider": "github-copilot",
+      "api": "openai-responses",
+      "simulated": true,
+      "fields": [
+        "item.encrypted_content:string",
+        "response.output[].encrypted_content:string"
+      ]
+    }
+  ]
+}

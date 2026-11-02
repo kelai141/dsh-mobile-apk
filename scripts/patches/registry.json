@@ -364,6 +364,25 @@
       "verifier": "pi-upstream-streaming-020"
     },
     {
+      "id": "sealed-reasoning-1304",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js",
+      "additionalTargets": [
+        "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/models.js",
+        "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/openai-responses-shared.js",
+        "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/anthropic-messages.js",
+        "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js",
+        "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/transform-messages.js",
+        "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-chat/lib/client.js"
+      ],
+      "scope": "engine",
+      "summary": "四家订阅推理信封：账号/模型/端点隔离、凭证回传、空摘要保留思考行与传输进度保活",
+      "provenance": "APK issue #1304 正文与三条评论；pi-ai 原生协议适配，精确锚点失配即拒注入",
+      "marker": "dsh-mobile sealed reasoning (1304)",
+      "requires": [
+        "pi-upstream-streaming-020"
+      ]
+    },
+    {
       "id": "mimo-thinking-toggle-056",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js",
       "additionalTargets": [
