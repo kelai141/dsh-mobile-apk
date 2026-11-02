@@ -97,7 +97,7 @@ class ForegroundPageRecoveryWiringTest {
     // 判据只加不减：既要求 userClosedEngine 短路，也要求读偏好，还要求偏好开时才拉起。
     assertTrue(creation.contains("if (!userClosedEngine) {"))
     assertTrue(creation.contains("if (SplashStore.autoStart(this)) {"))
-    assertTrue(creation.contains("startEngineFlow()"))
+    assertTrue(Regex("""startEngineFlow\([^)]*\)""").containsMatchIn(creation))
     val destruction = between(activity, "override fun onDestroy()", "override fun onConfigurationChanged(")
     assertTrue(ordered(destruction, "engineFlow.destroy()", "pageRecovery.pause()"))
     assertTrue(destruction.contains("webViewRef === webView"))
@@ -138,8 +138,8 @@ class ForegroundPageRecoveryWiringTest {
 
   @Test fun activityGenerationAndPendingPreludeRejectObsoleteEffects() {
     val flow = source("EngineStartFlow.kt")
-    val startup = between(flow, "fun start()", "private fun canRunEngineWork()")
-    assertTrue(ordered(startup, "canRunEngineWork()", "flowOwnership.begin()"))
+    val startup = between(flow, "fun start(", "private fun canRunEngineWork()")
+    assertTrue(ordered(startup, "canRunEngineWork()", "flowOwnership.begin("))
     assertTrue(ordered(startup, "startupOwnershipPending(", "startupRecoverThenProbe("))
     assertTrue(startup.contains("flowOwnership.finish(token)"))
     assertFalse(startup.contains("flowRunning.set(false)"))
@@ -198,7 +198,7 @@ class ForegroundPageRecoveryWiringTest {
   }
 
   @Test fun rootPrebootRepairStillPrecedesAnySnapshotRecovery() {
-    val startup = between(source("EngineStartFlow.kt"), "fun start()", "private fun isCurrentEngineFlow(")
+    val startup = between(source("EngineStartFlow.kt"), "fun start(", "private fun isCurrentEngineFlow(")
     assertTrue(ordered(startup, "ShizukuTransport.prepareStartupOwnership(", "startupRecoverThenProbe("))
     assertTrue(ordered(startup, "startupRecoverThenProbe(", "if (engineAlreadyRunning)"))
     assertFalse(source("MainActivity.kt").contains("autoHealOwnership("))

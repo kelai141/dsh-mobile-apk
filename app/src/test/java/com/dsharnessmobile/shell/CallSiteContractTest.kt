@@ -164,7 +164,7 @@ class CallSiteContractTest {
    */
   @Test
   fun startSwitchesToStartingBeforeTheWorkerThread() {
-    val body = memberBody(codeOnly(source("EngineStartFlow.kt")), "fun start() {")
+    val body = memberBody(codeOnly(source("EngineStartFlow.kt")), "fun start(")
     val phaseAt = body.indexOf("applyGuidePhase(GuidePhase.Starting")
     val workerAt = body.indexOf("val caller = Thread {")
     assertTrue("相位切换必须存在（启动即有反馈）", phaseAt >= 0)

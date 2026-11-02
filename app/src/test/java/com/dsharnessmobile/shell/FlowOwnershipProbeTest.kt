@@ -172,4 +172,56 @@ class FlowOwnershipProbeTest {
     assertEquals("授予留痕必须恰好一条", 1, grantedLines)
     tokens.toList().forEach { gate.finish(it) }
   }
+
+  /**
+   * 入口枚举必须真的进到 begin 那行日志里。
+   *
+   * 为什么需要它：探针第一版只记线程名，设备实测两次 flow.begin 的 caller **都是 main**
+   * （onCreate 与 onResume 同在 UI 线程），于是「哪个入口占的锁」仍然钉不死。
+   * 入口只能由调用方显式声明——本用例锁住「声明了就一定出现在日志里」。
+   */
+  @Test
+  fun beginLogsTheDeclaredEntryPoint() {
+    val rec = Recorder()
+    val gate = StartupFlowOwnership(rec.sink())
+    for (entry in StartEntryPoint.entries) {
+      rec.lines.clear()
+      val token = gate.begin(entry)
+      assertNotNull("begin 必须成功（entry=" + entry.name + "）", token)
+      val text = rec.joined()
+      assertTrue(
+        "授予行必须带 entry=" + entry.label() + "，实得：" + text,
+        text.contains("entry=" + entry.label()),
+      )
+      gate.finish(token!!)
+    }
+  }
+
+  /** 抢不到的那条 denied 也要带入口——否则「谁想进、谁在占」只剩一半信息。 */
+  @Test
+  fun deniedLogsTheDeclaredEntryPointToo() {
+    val rec = Recorder()
+    val gate = StartupFlowOwnership(rec.sink())
+    val owner = gate.begin(StartEntryPoint.ON_CREATE)!!
+    rec.lines.clear()
+    assertNull(gate.begin(StartEntryPoint.ON_RESUME))
+    val text = rec.joined()
+    assertTrue("denied 行必须带请求方入口 entry=on_resume，实得：" + text, text.contains("entry=on_resume"))
+    assertTrue(
+      "denied 行必须同时报出占用者 generation，实得：" + text,
+      text.contains("ownerGeneration=" + owner.generation),
+    )
+    gate.finish(owner)
+  }
+
+  /** 缺省参数保持既有调用点零改动（不带 entry 时记 unspecified，而不是崩）。 */
+  @Test
+  fun beginWithoutEntryStillWorksAndLogsUnspecified() {
+    val rec = Recorder()
+    val gate = StartupFlowOwnership(rec.sink())
+    val token = gate.begin()
+    assertNotNull(token)
+    assertTrue("缺省入口记为 unspecified，实得：" + rec.joined(), rec.joined().contains("entry=unspecified"))
+    gate.finish(token!!)
+  }
 }

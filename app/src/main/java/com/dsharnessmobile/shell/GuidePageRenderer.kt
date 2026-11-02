@@ -341,7 +341,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
             activity.engineManager.clearRefreshLedger()
             // Explicit start: replay the launch video even if the automatic path already
             // played it once in this Activity.
-            activity.startEngineFlow(splash = true)
+            activity.startEngineFlow(splash = true, entry = StartEntryPoint.GUIDE_BUTTON)
           } else {
             pushHint(
               result.optString("guidance").ifBlank {

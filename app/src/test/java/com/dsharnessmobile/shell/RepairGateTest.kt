@@ -71,7 +71,7 @@ class RepairGateTest {
 
   @Test
   fun `only the explicit retry clears required and the retry budget`() {
-    val start = source("EngineStartFlow.kt").substringAfter("fun start()").substringBefore("resetBootStall()")
+    val start = source("EngineStartFlow.kt").substringAfter("fun start(").substringBefore("resetBootStall()")
     assertTrue("自动 start 过闸门只能查询每进程一次的冷启自动尝试（不消耗）",
       start.contains("explicitUserRetry = RepairState.coldStartAutoAttemptAvailable(activity)"))
     assertTrue("放行后必须显式花掉这一次尝试", start.contains("RepairState.spendColdStartAutoAttempt()"))
@@ -81,7 +81,7 @@ class RepairGateTest {
     val explicit = main.substringAfter("internal fun retryEngineExplicitly()").substringBefore("private fun applyRepairRequiredGuide")
     assertTrue(explicit.contains("if (!RepairState.beginUserRetry(this))"))
     assertTrue(explicit.contains("engineFlow.engineRetryCount = 0"))
-    assertTrue(explicit.contains("startEngineFlow(splash = true)"))
+    assertTrue(Regex("""startEngineFlow\(splash = true[^)]*\)""").containsMatchIn(explicit))
 
     val state = source("RepairState.kt")
     val clear = state.substringAfter("private fun clearGate")

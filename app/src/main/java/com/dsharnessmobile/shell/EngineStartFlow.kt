@@ -564,7 +564,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
    * embedded), else extract the embedded snapshot and start the embedded
    * engine, then poll until the web service answers.
    */
-  fun start() {
+  fun start(entry: StartEntryPoint = StartEntryPoint.UNSPECIFIED) {
     if (!canRunEngineWork()) return
     // 冷启自动尝试（0.14.10）：与 MainActivity.startEngineFlow 同一出口语义；RepairState 内部保证每进程一次。
     if (startupEntryDecision(RepairState.required(activity), explicitUserRetry = RepairState.coldStartAutoAttemptAvailable(activity)) ==
@@ -583,11 +583,11 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     clientPluginTreeFailed = false
     // The owner and generation change in one CAS; an obsolete finally cannot
     // clear a replacement, and duplicate lifecycle callbacks change neither.
-    val token = flowOwnership.begin()
+    val token = flowOwnership.begin(entry)
     if (token == null) {
       // 抢不到所有权有两种原因，**必须分开**（定位报告 §2.3）：destroyed 是生命周期终结，
       // 保持「不启动」；running 是「另一次启动/快照刷新正在跑」，丢弃它才是缺陷。
-      deferEngineStartWhileSnapshotTransactionBusy()
+      deferEngineStartWhileSnapshotTransactionBusy(entry)
       return
     }
     val generation = token.generation
@@ -1146,7 +1146,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
    * 判据用**跨进程真源** journal 文件而不是 `flowOwnership.running`：后者只是本 Activity 实例的
    * 内存态（MainActivity 未声明 launchMode，新实例会绕过它），journal 才是「刷新真的在跑」的事实。
    */
-  private fun deferEngineStartWhileSnapshotTransactionBusy() {
+  private fun deferEngineStartWhileSnapshotTransactionBusy(entry: StartEntryPoint = StartEntryPoint.UNSPECIFIED) {
     if (flowOwnership.destroyed) return // 生命周期终结：保持不启动，不等待、不留痕。
     if (!canRunEngineWork()) return
     engineMonitorHandler.removeCallbacks(deferredStartRunnable)
@@ -1159,8 +1159,9 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     // 这里给出 generation + 线程名 + journal 是否在场，三者足以定位入口类型。
     LogCollector.log(
       "dsh-owner",
-      "flow.defer reason=" + (if (marker == null) "no-transaction" else "transaction-" + marker.phase.name) +
-        " " + flowOwnership.deferredOwnerSnapshot() +
+      "flow.defer cause=" + classifyDeferCause(marker != null, flowOwnership.running).name +
+        " reason=" + (if (marker == null) "no-transaction" else "transaction-" + marker.phase.name) +
+        " " + flowOwnership.deferredOwnerSnapshot(entry) +
         " snapshotMarker=" + (if (marker == null) "absent" else "present"),
     )
     LogCollector.log("dsh-shell", "engine start deferred: another start flow or a snapshot refresh owns the generation")
@@ -1190,21 +1191,40 @@ internal class EngineStartFlow(private val activity: MainActivity) {
       // 而解压本身要 8-12 分钟。设备实测（127.0.0.1:16448，覆盖安装 v0.14.9）正好落在这一段：
       // boot-fail.log 里 transaction=absent + engineLog=empty + t_boot_start 有值。
       //
-      // 判据用 RepairState.startupInProgress（= 本进程主启动流在跑）：它在 start() 抢到所有权后
-      // 立刻置 true（:595）、在 finally 里置 false（:1125），与「谁在占所有权」同一事实源。
-      val refreshing = RepairState.startupInProgress
+      // 【判据：只看快照事务是否真的存在，不看 startupInProgress】
+      //
+      // 2026-11-02 设备实测（127.0.0.1:16448，v0.14.11 候选包）拿到反例：一次冷启报出
+      // 「撞上**正在进行的运行时刷新**」，而同期三条独立事实都表明根本没有刷新：
+      //   · .snapshot-settings-backup/ 无新条目（只有装机触发的那次）
+      //   · .snapshot-fingerprint mtime 停在上一次刷新完成时刻，未变
+      //   · boot-diag.log 里 refresh 命中数 = 0
+      // 探针给出的实情是 reason=no-transaction / snapshotMarker=absent，占用者是**另一次启动流**。
+      //
+      // 真因：RepairState.startupInProgress 在**任何**启动流期间都为真（start 抢到所有权即置 true），
+      // 它只说明「本进程有个启动流在跑」，**不等于「有快照事务」**。用它分档会把「同刻多入口争锁」
+      // 误报成「正在刷新」，把排障方向引到 8-12 分钟的解压上。
+      //
+      // 现在改走纯判据 classifyDeferCause（事务文件 + 所有权持有者两条互相独立的事实）。
+      // 走到本分支说明 marker 为 null，故 transactionPresent 恒为 false；SNAPSHOT_TRANSACTION
+      // 分支保留只为穷尽三档（真刷新走下面 engine-start-deferred 那条 stage）。
+      val cause = classifyDeferCause(transactionPresent = false, ownerRunning = flowOwnership.running)
       LogCollector.writeBootFail(
         activity, "engine-start-deferred-no-transaction",
-        if (refreshing) {
-          ("启动请求撞上正在进行的运行时刷新（主启动流持有世代所有权，快照解压/合并尚未走到写事务 journal 的"
-            + "那一步，故此时 journal 判据为 absent——这不代表没有事务在跑）：本次请求未被受理，未拉起引擎；"
-            + "已安排按 " + NO_TRANSACTION_RETRY_STEP_MS + "ms 步进、上限 " + NO_TRANSACTION_RETRY_BUDGET_MS
-            + "ms 的自动重试，刷新收口后会重新尝试。")
-        } else {
-          ("启动请求未获世代所有权（另一次启动流仍在占用），且**确实**无快照事务在场"
-            + "（主启动流未在运行、journal 也为 absent）：本次请求未被受理，未拉起引擎；"
-            + "已安排按 " + NO_TRANSACTION_RETRY_STEP_MS + "ms 步进、上限 " + NO_TRANSACTION_RETRY_BUDGET_MS
-            + "ms 的自动重试，取得所有权后自动续跑。")
+        when (cause) {
+          DeferCause.SNAPSHOT_TRANSACTION ->
+            ("启动请求撞上正在进行的快照刷新（journal 可读）：本次请求未被受理，未拉起引擎；"
+              + "已安排按 " + NO_TRANSACTION_RETRY_STEP_MS + "ms 步进、上限 " + NO_TRANSACTION_RETRY_BUDGET_MS
+              + "ms 的自动重试，刷新收口后会重新尝试。")
+          DeferCause.OWNERSHIP_CONTENTION ->
+            ("启动请求未获世代所有权：**另有启动流正持有所有权**，而**快照事务并不存在**"
+              + "（journal absent，当前没有刷新在进行）——这是同一时刻的多个启动入口在争锁，不是刷新等待；"
+              + "本次请求未被受理，未拉起引擎；已安排按 " + NO_TRANSACTION_RETRY_STEP_MS + "ms 步进、上限 "
+              + NO_TRANSACTION_RETRY_BUDGET_MS + "ms 的自动重试，取得所有权后自动续跑。")
+          DeferCause.NO_TRANSACTION_IDLE ->
+            ("启动请求未获世代所有权，且此刻**既无快照事务、也无持有者**"
+              + "（journal absent、所有权已释放——begin 拒绝与本次处置之间的竞态）：本次请求未被受理，"
+              + "未拉起引擎；已安排按 " + NO_TRANSACTION_RETRY_STEP_MS + "ms 步进、上限 "
+              + NO_TRANSACTION_RETRY_BUDGET_MS + "ms 的自动重试，下一次即应成功。")
         },
       )
       noTransactionRetry.attempts = 0
@@ -1288,7 +1308,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         DeferredStartRetryDecision.HAND_OVER_TO_TRANSACTION_WAIT -> {
           attempts = 0
           LogCollector.log("dsh-shell", "no-transaction retry handing over to the transaction waiter")
-          deferEngineStartWhileSnapshotTransactionBusy()
+          deferEngineStartWhileSnapshotTransactionBusy(StartEntryPoint.INTERNAL_RETRY)
           return
         }
         DeferredStartRetryDecision.RESUME -> {
@@ -1299,18 +1319,29 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         }
         DeferredStartRetryDecision.TIMEOUT -> {
           attempts = 0
-          val stillRefreshing = RepairState.startupInProgress
+          // 超时点**重新读一次**两条独立事实（事务文件 + 所有权），不用 startupInProgress：
+          // 那个标志在任何启动流期间都为真，会让「无刷新的争锁」误报成「刷新仍在进行」。
+          val timeoutCause = classifyDeferCause(
+            transactionPresent = SnapshotTransaction.readMarker(activity.filesDir) != null,
+            ownerRunning = flowOwnership.running,
+          )
+          LogCollector.log("dsh-owner", "flow.defer.timeout cause=" + timeoutCause.name + " " + flowOwnership.deferredOwnerSnapshot(StartEntryPoint.INTERNAL_RETRY))
           LogCollector.writeBootFail(
             activity, "engine-start-deferred-no-transaction-timeout",
-            if (stillRefreshing) {
-              ("启动请求在 " + NO_TRANSACTION_RETRY_BUDGET_MS + "ms 重试预算内仍未取得世代所有权"
-                + "（运行时刷新仍在进行：主启动流持有所有权，且尚未走到写事务 journal 那一步）："
-                + "本次启动请求未执行，也未拉起引擎；刷新收口后由下一次入口（点按钮 / 回前台探活）续跑。"
-                + "解压典型耗时 8-12 分钟，此时**不要**关闭应用或强杀进程。")
-            } else {
-              ("启动请求在 " + NO_TRANSACTION_RETRY_BUDGET_MS + "ms 重试预算内仍未取得世代所有权"
-                + "（另一次启动流仍在占用，且**确实**无快照事务在场）：本次启动请求未执行，也未拉起引擎；"
-                + "下一次入口（点按钮 / 回前台探活）会再次尝试。")
+            when (timeoutCause) {
+              DeferCause.SNAPSHOT_TRANSACTION ->
+                ("启动请求在 " + NO_TRANSACTION_RETRY_BUDGET_MS + "ms 重试预算内仍未取得世代所有权"
+                  + "（journal 可读，快照刷新确实在场）：本次启动请求未执行，也未拉起引擎；"
+                  + "刷新收口后由下一次入口（点按钮 / 回前台探活）续跑。"
+                  + "解压典型耗时 8-12 分钟，此时**不要**关闭应用或强杀进程。")
+              DeferCause.OWNERSHIP_CONTENTION ->
+                ("启动请求在 " + NO_TRANSACTION_RETRY_BUDGET_MS + "ms 重试预算内仍未取得世代所有权"
+                  + "（**另有启动流持续持有所有权，且快照事务并不存在**——不是刷新等待）："
+                  + "本次启动请求未执行，也未拉起引擎；下一次入口（点按钮 / 回前台探活）会再次尝试。")
+              DeferCause.NO_TRANSACTION_IDLE ->
+                ("启动请求在 " + NO_TRANSACTION_RETRY_BUDGET_MS + "ms 重试预算内仍未取得世代所有权"
+                  + "（既无快照事务、也无持有者：begin 拒绝与超时判定之间的竞态）："
+                  + "本次启动请求未执行，也未拉起引擎；下一次入口（点按钮 / 回前台探活）会再次尝试。")
             },
           )
           return
@@ -1515,7 +1546,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
       "安全模式重启进入启动流（decision=" + preDecision + "）：本壳托管的旧引擎已停，正以安全模式清单重建运行时",
     )
     LogCollector.log("dsh-shell", "safe mode restart: owned engine stopped, starting with the safe profile (decision=" + preDecision + ")")
-    activity.startEngineFlow()
+    activity.startEngineFlow(entry = StartEntryPoint.SAFE_MODE_RESTART)
   }
 
   /**
@@ -1666,6 +1697,74 @@ internal fun startupOwnershipPending(reason: String): Boolean =
   reason == "root-maintenance-busy" || reason == "repair-result-unknown"
 
 /**
+ * 启动请求被延后时的**真实原因**——判据只看「快照事务是否真的存在」与「所有权是否有持有者」。
+ *
+ * ## 为什么不能用 RepairState.startupInProgress
+ *
+ * 2026-11-02 设备实测（`127.0.0.1:16448`，v0.14.11 候选包）拿到反例：一次冷启报出
+ * 「启动请求撞上**正在进行的运行时刷新**」，可同期的三条独立事实都表明**根本没有刷新**：
+ *
+ *   · `.snapshot-settings-backup/` 无新条目（只有装机那次 18:58:17）
+ *   · `.snapshot-fingerprint` mtime 停在 18:58:32
+ *   · `boot-diag.log` 里 `refresh` 命中数 = 0
+ *
+ * 而探针给出的实情是 `flow.defer reason=no-transaction snapshotMarker=absent`，
+ * 持有者是**另一次启动流**（generation=1），不是快照事务。
+ *
+ * 真因：`RepairState.startupInProgress` 在**任何**启动流期间都为真（start 抢到所有权即置 true），
+ * 它只说明「本进程有个启动流在跑」，**不等于「有快照事务」**。用它在 defer 分支分档，
+ * 就会把「同一时刻两次启动入口争锁」误报成「正在刷新」，把排障方向引到解压上。
+ *
+ * 正确的判据是两条**互相独立**的事实：journal（[SnapshotTransaction.readMarker]）与所有权持有者。
+ */
+internal enum class DeferCause {
+  /** journal 可读 ⇒ 真的有一次快照刷新在跑。 */
+  SNAPSHOT_TRANSACTION,
+
+  /** 无事务，但另有启动流持有世代所有权 ⇒ 同刻多入口争锁。 */
+  OWNERSHIP_CONTENTION,
+
+  /** 无事务、且此刻也无持有者（begin 拒绝与处置之间所有权已释放）⇒ 真的什么都没在跑。 */
+  NO_TRANSACTION_IDLE,
+}
+
+/**
+ * 纯判据：由「事务文件是否在场」与「所有权是否有持有者」推出 [DeferCause]。
+ *
+ * 刻意不接收 `startupInProgress`：那个标志与快照事务无关，接进来就会重演上面的误报。
+ */
+internal fun classifyDeferCause(transactionPresent: Boolean, ownerRunning: Boolean): DeferCause =
+  when {
+    transactionPresent -> DeferCause.SNAPSHOT_TRANSACTION
+    ownerRunning -> DeferCause.OWNERSHIP_CONTENTION
+    else -> DeferCause.NO_TRANSACTION_IDLE
+  }
+
+/**
+ * 启动入口（**仅供探针**，不参与任何判据、不改变任何分支）。
+ *
+ * ## 为什么必须显式枚举
+ *
+ * 探针第一版只记线程名，设备实测显示两次 `flow.begin` 的 `caller` **都是 `main`**
+ * （onCreate 与 onResume 同在 UI 线程），于是「到底是哪个入口占的锁」仍然钉不死。
+ * 入口只能由调用方**显式声明**，线程名推不出来。
+ */
+internal enum class StartEntryPoint {
+  ON_CREATE,
+  ON_RESUME,
+  MONITOR,
+  GUIDE_BUTTON,
+  SAFE_MODE_RESTART,
+  /** 启动流自身的重试/续跑（不是新的外部入口）。 */
+  INTERNAL_RETRY,
+  UNSPECIFIED,
+  ;
+
+  /** 日志用的稳定小写标识（只进日志，不做判据）。 */
+  internal fun label(): String = name.lowercase()
+}
+
+/**
  * Pure generation/owner gate; cancellation targets only caller threads, never shared root workers.
  *
  * ## 取证探针（只加日志，不改行为）
@@ -1706,13 +1805,17 @@ internal class StartupFlowOwnership(
   val destroyed: Boolean get() = state.get().destroyed
   val running: Boolean get() = state.get().running
 
-  fun begin(): Token? {
+  /**
+   * @param entry 调用方**显式声明**的启动入口。只进日志，不参与判据、不影响返回值。
+   *   默认 [StartEntryPoint.UNSPECIFIED] 让既有调用点与单测零改动即可编译。
+   */
+  fun begin(entry: StartEntryPoint = StartEntryPoint.UNSPECIFIED): Token? {
     while (true) {
       val before = state.get()
       if (before.destroyed || before.running) {
         // 抢不到：把「谁在占」如实报出来（token?.generation 为 null 表示状态已损坏/被销毁）。
         probe(
-          "flow.begin denied caller=" + callerLabel() +
+          "flow.begin denied caller=" + callerLabel() + " entry=" + entry.label() +
             " ownerGeneration=" + (before.token?.generation?.toString() ?: "none") +
             " destroyed=" + before.destroyed,
         )
@@ -1721,7 +1824,7 @@ internal class StartupFlowOwnership(
       val token = Token(before.generation + 1)
       if (state.compareAndSet(before, State(token.generation, token, running = true))) {
         before.token?.cancel()
-        probe("flow.begin granted generation=" + token.generation + " caller=" + callerLabel())
+        probe("flow.begin granted generation=" + token.generation + " caller=" + callerLabel() + " entry=" + entry.label())
         return token
       }
     }
@@ -1767,11 +1870,12 @@ internal class StartupFlowOwnership(
    * 线程名足以区分入口：`main` = 生命周期/UI 回调（onCreate/onResume/引导按钮），
    * `Thread-N` = 启动流自己的 worker，`Watchdog*` = 看门狗。
    */
-  internal fun deferredOwnerSnapshot(): String =
+  internal fun deferredOwnerSnapshot(entry: StartEntryPoint = StartEntryPoint.UNSPECIFIED): String =
     "ownerGeneration=" + (state.get().token?.generation?.toString() ?: "none") +
       " running=" + state.get().running +
       " destroyed=" + state.get().destroyed +
-      " caller=" + callerLabel()
+      " caller=" + callerLabel() +
+      " entry=" + entry.label()
 
   private fun probe(message: String) {
     // 探针自身绝不抛：取证代码把启动流带崩是本末倒置。
