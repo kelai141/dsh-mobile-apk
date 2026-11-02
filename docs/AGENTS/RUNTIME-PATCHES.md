@@ -151,6 +151,8 @@
 
 ### 7.1 构建期引擎补丁历史与实现说明（活动状态见 §6.1）
 
+2026-11-02：`sealed-reasoning-1304` 补齐四家订阅的推理信封、账号/模型/端点隔离、空摘要思考行与传输进度保活。目标包括 llm-pi-ai、pi-ai Models 与原生协议适配器、ui-chat；回归及升级防线见 [REASONING-1304.md](../REASONING-1304.md)。不修改上游 checkout，不注入测试服务。
+
 2026-10-24 追版 `0.2.1-rc.3`：PTC A1 与 MiMo 056 的精确版本守卫同步为 rc.3，未知版本继续拒绝；28 条引擎补丁在 rc.3 原始发布包上全部命中。历史 rc.2 夹具保留为 superseded，新夹具记录官方提交 `1f81c047` 与真实字节哈希。完整验证见协调仓 `docs/UPSTREAM-0.2.1-RC3-2026-10-24.md`。
 
 2026-10-23 新增：`profile-link-skip-PL1` 仅在 profile 链接扫描中跳过权限/缺失/非目录错误，不写用户文件；`managed-port-bind-EP1` 仅在本壳 IPv4 回环监听发生 `EADDRINUSE` 时回退一次到 OS 分配端口，监听完成后发布真实端口。实现位于 `scripts/patches/data/`，真实发布夹具与负控位于同名测试文件。壳侧消费与信任边界见 `EXECUTION-MAP.md` 的 K02 端点补充。

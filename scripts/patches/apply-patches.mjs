@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url'
 import { ENV_MARKER as PTC_ENV_MARKER, LAUNCH_MARKER as PTC_LAUNCH_MARKER, assertChildClearing, patchEnvironment, patchRuntimeIndex, planPatch } from './ptc-android-native-A1.mjs'
 import { PI_STREAMING_FILES, planPiStreaming } from './pi-upstream-streaming-020.mjs'
 import { MIMO_PI_FILE, planMimoThinking } from './mimo-thinking-toggle-056.mjs'
+import { REASONING_FILES, planReasoning } from './data/reasoning-envelope-1304.mjs'
 import { CLIENT_SCAN_MARKER, GATEWAY_CLIENT_MARKER, TYPERT_SCAN_MARKER, planClientRegistryScan, planTypertRegistryScan } from './data/registry-scan-c4.mjs'
 import { CLIENT_INDEX_LOADER_BARRIER_MARKER, planClientIndexLoaderBarrier } from './data/client-index-loader-barrier.mjs'
 import { resolveEnginePatchFile } from './resolve-engine-patch-target.mjs'
@@ -270,6 +271,19 @@ const IMPLS = {
         ? s : loadImpl(file, CURRENT_STAGE_ROOT))
       for (const file of plan) if (file.file !== IMAGE_HISTORY_CORE) IMPL_state[file.file] = file.after
       return plan.find(file => file.file === IMAGE_HISTORY_CORE).after
+    },
+  },
+
+  'sealed-reasoning-1304': {
+    file: REASONING_FILES[0],
+    additionalFiles: REASONING_FILES.slice(1),
+    scope: 'engine',
+    check: (s) => planReasoning(file => file === REASONING_FILES[0] ? s : loadImpl(file, CURRENT_STAGE_ROOT))
+      .every(file => file.before === file.after),
+    apply: (s) => {
+      const plan = planReasoning(file => file === REASONING_FILES[0] ? s : loadImpl(file, CURRENT_STAGE_ROOT))
+      for (const file of plan) if (file.file !== REASONING_FILES[0]) IMPL_state[file.file] = file.after
+      return plan[0].after
     },
   },
 

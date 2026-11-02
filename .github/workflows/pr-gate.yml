@@ -335,3 +335,25 @@ jobs:
         run: |
           node --test scripts/tests/maintenance-docs.test.mjs
           node scripts/check-maintenance-docs.mjs
+
+  reasoning:
+    name: 四家推理协议与升级回归
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - name: 从当前夹具读取协议客户端版本
+        shell: bash
+        run: |
+          baseline=$(node -p 'require("./scripts/contract.json").baseline')
+          version=$(node -p "require('./scripts/patches/tests/fixtures/pi-ai-$baseline/package.json').version")
+          npm install --prefix "$RUNNER_TEMP/reasoning-1304" --ignore-scripts --no-audit --no-fund "@earendil-works/pi-ai@$version" "@deepseek-ai/dsh-timeout@$baseline" "@deepseek-ai/dsh-llm@$baseline" "@deepseek-ai/dsh-llm-pi-ai@$baseline"
+          echo "DSH_REASONING_RUNTIME=$RUNNER_TEMP/reasoning-1304/node_modules/@earendil-works/pi-ai" >> "$GITHUB_ENV"
+      - name: 空摘要、隔离、负控与两轮工具回传
+        run: |
+          node --test scripts/patches/tests/reasoning-envelope-1304.test.mjs
+          node --test scripts/patches/tests/reasoning-envelope-1304.integration.mjs

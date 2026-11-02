@@ -1753,6 +1753,8 @@
         "dist/api/openai-completions.js",
         "dist/api/openai-responses-shared.js",
         "dist/api/pi-messages.js",
+        "dist/api/transform-messages.js",
+        "dist/models.js",
         "package.json"
       ],
       "fileSha256": {
@@ -1762,7 +1764,9 @@
         "dist/api/bedrock-converse-stream.js": "4a4bd19cb795ff4838b8235be4fb6293dabefe027121edd9fd14fdbfd0d47cf8",
         "dist/api/mistral-conversations.js": "f7d39a7c22994049099aad55a1d622542cb19f283c87dc45aeedaa5d37583161",
         "dist/api/openai-responses-shared.js": "8744ad2ce9ce2512993360600760f5bcdbeb520d0a641c655b2a0b7cbe9db10a",
-        "dist/api/pi-messages.js": "33cd3a7adc48775c88474d3c68b51f33791dc6e5b315ab9f3a8fc67eee4d8696"
+        "dist/api/pi-messages.js": "33cd3a7adc48775c88474d3c68b51f33791dc6e5b315ab9f3a8fc67eee4d8696",
+        "dist/models.js": "0911bab242726dc56517fe62ca422d0602d6eab8aa63841a560f61e1c35a0cd7",
+        "dist/api/transform-messages.js": "9d747a3d64c533f7bfaf2a66e8446dc006086559d364a09d4c51d1c8c9c332e5"
       },
       "targets": {
         "dist/api/openai-completions.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js",
@@ -1771,10 +1775,13 @@
         "dist/api/bedrock-converse-stream.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/bedrock-converse-stream.js",
         "dist/api/mistral-conversations.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/mistral-conversations.js",
         "dist/api/openai-responses-shared.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/openai-responses-shared.js",
-        "dist/api/pi-messages.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/pi-messages.js"
+        "dist/api/pi-messages.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/pi-messages.js",
+        "dist/models.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/models.js",
+        "dist/api/transform-messages.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/transform-messages.js"
       },
       "patchIds": [
         "pi-upstream-streaming-020",
+        "sealed-reasoning-1304",
         "mimo-thinking-toggle-056",
         "pi-toolcall-G2"
       ]
@@ -1803,6 +1810,7 @@
       "patchIds": [
         "image-expiry-E1",
         "image-request-preview-P1",
+        "sealed-reasoning-1304",
         "mimo-thinking-toggle-056"
       ]
     },
@@ -2085,6 +2093,31 @@
       "patchIds": [
         "image-request-preview-P1"
       ]
+    },
+    "dsh-client-ui-chat-0.2.1-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.1-rc.3",
+      "package": "@deepseek-ai/dsh-client-ui-chat@0.2.1-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-client-ui-chat-0.2.1-rc.3.tgz",
+        "tarballSha256": "b541c10b3de59340cc97e11ce24b65e65d63f4f8a45208a1282c169039a803b4",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/client.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/client.js": "a00e5176d1257d51604cefbe9a15d326d4283439df31f76ba20ff690c76e10a1",
+        "package.json": "036312e0da98c257a7d03bc5d9c1e7a50347e84639a5fb558b098e55b71dc832"
+      },
+      "targets": {
+        "lib/client.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-chat/lib/client.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-chat/package.json"
+      },
+      "patchIds": [
+        "sealed-reasoning-1304"
+      ]
     }
   },
   "capture": {
@@ -2096,6 +2129,6 @@
       ]
     },
     "overlaySha256": "0e5a7f49f0145857a4b6c3f0f8b8594c401a50c526505a112c3740bcf86c8993",
-    "registrySha256": "ff0ffe228434d442a6a4268ffda7675675aa14571dec7e44d6063061e0ac426f"
+    "registrySha256": "bfe058c555a9d6e575a3f59dab897a8872f3cef523b5e5d4ac81c70aeb662311"
   }
 }
