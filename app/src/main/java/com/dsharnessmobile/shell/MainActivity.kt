@@ -548,6 +548,9 @@ class MainActivity : ComponentActivity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    // 性能审计 #6：冷启动细分段基准。开发者调试开关关闭时本行只读一次已缓存的布尔值，
+    // 不取时刻、不碰磁盘（见 BootPhaseTrace 头注「有界性」）。
+    BootPhaseTrace.markBootBase(this)
     // 本实例的原生视图树是按创建时的界面语言构建的；桥在运行期改语言后靠
     // refreshUiLanguageIfChanged() 在启动页再次出现前重建。
     photoCaptureController.restoreNow(); appliedUiLanguage = AppLanguage.mode(this) // P0：恢复必须在这里（super.onCreate 之后），不能放控制器 init——那时未 attachBaseContext，cacheDir 为 null ⇒ getCacheDir() NPE。相机结果只经 onNewIntent/onActivityResult 投递，都在 onCreate 之后，时序不变。
@@ -609,8 +612,15 @@ class MainActivity : ComponentActivity() {
     // 系统层面表现为「点开即崩」。改为如实落 boot-diag + 一句话告知 + finish 干净退出；
     // 早退后各 lateinit 面由 ::isInitialized 闸门挡住，onDestroy 不碰未建对象。
     // （赋值保持 `webView = WebView(this)` 字面形态——ForegroundPageRecoveryWiringTest 线序钉。）
+    val webViewConstructStartMs = android.os.SystemClock.elapsedRealtime()
     try {
       webView = WebView(this)
+      // 性能审计 #6：WebView 构造耗时（Chromium provider 首次加载 native 库的成本）。
+      BootPhaseTrace.mark(
+        this,
+        BootPhaseTrace.WEBVIEW_CONSTRUCT,
+        "ms=" + (android.os.SystemClock.elapsedRealtime() - webViewConstructStartMs),
+      )
     } catch (t: Throwable) {
       LogCollector.writeBootDiag(
         this,
@@ -635,6 +645,8 @@ class MainActivity : ComponentActivity() {
     guideRenderer.management.restore(savedInstanceState?.getString("dsh.guide-page"))
     root.addView(guideView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     setContentView(root)
+    // 性能审计 #6：onCreate 主线程段到此结束（setContentView 返回即首帧内容已提交视图树）。
+    BootPhaseTrace.mark(this, BootPhaseTrace.ON_CREATE)
     // 开屏视频是最上层视图：加在 guideView 之后、任何宿主视图之前。
     splashRoot = root
     splashOverlay = SplashOverlay(root) { code ->
