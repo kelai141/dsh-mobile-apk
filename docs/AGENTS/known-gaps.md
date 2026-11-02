@@ -125,3 +125,19 @@ slot-guard 注释与本日审计报告。
 | 项 | 当前事实 | 结论 / 后续 |
 |---|---|---|
 | `store` 在「+」菜单里的标题是命令 id，无法在插件侧改成中文 | 上游 `ui-input-trigger` 的行标题是 `item.label ?? item.name`（`MenuView.tsx:186`），而 `label` 只有**客户端命令贡献**能给（`ui-commands` 的 `CommandContribution.label?()`，`contract.ts:105`）；宿主命令目录的 `CommandDescriptor` 只有 `name` + `description`（`packages/interaction/commands/src/types.ts:57-66`），且贡献名与宿主命令重名会在候选合成时抛错（`ui-commands/src/client/service.ts:238-240`）。`store` 是市场插件在**服务端**注册的宿主命令（`vendor/dshmarketplace-plugin/lib/index.js` 的 `name:"store"`），因此客户端没有改标题的合法钩子。 | 真正的修法在上游：给宿主命令加可选本地化标题（目录或渲染侧）。插件侧的等价改法是把 `store` 从宿主命令改成客户端贡献，但会丢掉打字触发的 `/store`，代价大于收益，不在本轮做。同一形态的 `fast` 已修（它是客户端贡献，补了 `label`）。 |
+
+## 引擎该不该开 gzip（2026-11-03，待评估，不在本轮）
+
+| 项 | 当前事实 | 结论 / 后续 |
+|---|---|---|
+| `dsh-host-webserver` 的 `compression` 默认 `none`，全快照无人开启 | `lib/index.js` 里 `DEFAULT_COMPRESSION = "none"`，`this.gzip = resolved.compression === "gzip" ? createGzipMiddleware(resolved) : void 0`，为 `void 0` 时直接 `next()`。全树搜 `compression` 只命中这处定义与 schema；`scripts/snapshot-config/engine-overlay.json` 里的 `compression: "1.8.1"` 是 **npm 依赖版本号**，不是配置项。壳侧 `*.kt` 与 `plugins/dsh-android-bridge/src/index.ts` 搜 `Content-Encoding|gzip` 只命中 `bitmap.compress(PNG)`（无关）。 | 由 #1 内联位图调查顺带发现。**待评估，不在本轮做**：见下方三条权衡。 |
+
+**三条权衡（评估时按此展开）**：
+
+1. **回环带宽不是瓶颈**。引擎与 WebView 同机（`127.0.0.1` 动态端口），传输不经网络栈的真实链路。压缩换来的字节节省，在时间上大概率换不到对等收益。
+2. **开 gzip 是拿 CPU 换字节**。实测该包 level 1 压缩成本 **87.9 ms（`gzipSync`）/ 95.3 ms（streaming）**，而剥掉 2.29 MiB 载荷后只要 **2.1 ms**。也就是说这份 CPU 成本几乎全部由内联位图造成。若开 gzip，需要同时决定是否先剥内联图，否则等于给每次响应加一笔可观的同步 CPU。
+3. **影响面是所有 bundle，不只这一个**。`createGzipMiddleware` 挂在全局路由上（`this.gzip(req, res, next)`），一旦开启，所有 `platform === "web"` 的 bundle 响应都会走压缩。收益与风险都要按全集评估，不能只看单个包。
+
+**已有的缓存事实（评估前提）**：bundle 响应带 `IMMUTABLE_CACHE = "public, max-age=31536000, immutable"`，浏览器侧一年内不重复取。因此即使开 gzip，压缩成本也只在**首次请求**发生，不是每次冷启动。这一条会显著削弱「开 gzip 省时间」的论据，评估时必须计入。
+
+**复现**：`node scripts/perf-audit-lead/b1-gzip-method.mjs <client.js>`；引擎侧判据 `grep -n 'DEFAULT_COMPRESSION\|compression ===' <webserver>/lib/index.js`。
