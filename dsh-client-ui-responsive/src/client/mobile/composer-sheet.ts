@@ -418,6 +418,42 @@ export class ComposerSheet {
   private rowHeightPx: number | null = null
 
   /**
+   * **一次拖拽内**的 peek / max 缓存（per-drag，绝不跨拖）。
+   *
+   * 为什么需要：peekHeight() 内含 4 次 getComputedStyle + 3 次 getBoundingClientRect，
+   * maxHeight() 内部又调一次 peekHeight()。拖拽时每个 touchmove 都要这两个值，而它们在
+   * 一次拖拽内**恒定**（内容没变、视口没变、行高已缓存在 rowHeightPx）。120Hz 下一帧
+   * 可能有两个 touchmove，原本要付 32 次强制同步布局 —— 而 Blink 每次读几何前都得先
+   * flush 掉上一句 panel.style.height 的写，每一次都是真 layout。
+   *
+   * 生命周期：onSheetTouchStart 建立 → 整个拖拽复用 → onSheetTouchEnd/取消时丢弃。
+   * **不跨拖**是刻意选择：跨拖缓存会把「用户拖到一半时行到齐 / 键盘弹起」的旧值带进下一次，
+   * 而这两个场景正是 peek 会变的场合。拖拽期间真正会变的那两条（视口变化、行到齐）
+   * 由 onSheetViewport / relayoutSheet 显式失效。
+   */
+  private dragGeometry: { peek: number; max: number } | null = null
+
+  /** 丢弃 per-drag 几何缓存（任何可能让 peek/max 变的事实都要调它）。 */
+  private invalidateDragGeometry(): void {
+    this.dragGeometry = null
+  }
+
+  /**
+   * 取本次拖拽的 peek/max：有缓存就用，没有就现算并缓存。
+   *
+   * 只在拖拽路径上用（onSheetTouchMove / settleTo）。非拖拽路径（relayoutSheet、
+   * writeHeights、publishGeometry）一律走实时计算 —— 那些是低频路径，缓存只会引入
+   * 失效面而没有收益。
+   */
+  private dragPeekMax(): { peek: number; max: number } {
+    const cached = this.dragGeometry
+    if (cached !== null) return cached
+    const fresh = { peek: this.peekHeight(), max: this.maxHeight() }
+    this.dragGeometry = fresh
+    return fresh
+  }
+
+  /**
    * 捕获阶段拦「+」。
    *
    * 用捕获 + stopImmediatePropagation 而不是只 preventDefault：上游 onClick 会调
@@ -1342,18 +1378,25 @@ export class ComposerSheet {
     panel.setAttribute(MAX_ATTR, String(this.maxHeight()))
   }
 
-  /** 把当前几何挂到 window.__dshComposerSheet（设备验收的取数口，只读）。 */
+  /**
+   * 把当前几何挂到 window.__dshComposerSheet（设备验收的取数口，只读）。
+   *
+   * **拖拽期间必须走 per-drag 缓存**：本函数在 onSheetTouchMove 里每帧被调一次，
+   * 若在这里直接 peekHeight()/maxHeight()，刚才在 touchmove 里省下的几何读会原样付回来
+   * （实测：缓存做了但仍每帧 12 次读）。拖拽外的调用照旧实时计算。
+   */
   private publishGeometry(): void {
     const panel = this.panel()
     if (panel === null) return
     // 高度用**内联值**：吸附过渡期间实测 rect 还在动，读它会拿到上一步的旧高度。
     const inline = Number.parseFloat(panel.style.height)
+    const dragGeometry = this.drag !== null ? this.dragPeekMax() : null
     const geometry = {
       form: this.mountedForm(),
       phase: panel.getAttribute(PHASE_ATTR),
       height: Number.isFinite(inline) ? Math.round(inline) : Math.round(this.currentHeight()),
-      peek: this.peekHeight(),
-      max: this.maxHeight(),
+      peek: dragGeometry?.peek ?? this.peekHeight(),
+      max: dragGeometry?.max ?? this.maxHeight(),
       viewport: { height: Math.round(this.viewportHeight()), innerHeight: window.innerHeight, keyboard: this.keyboardInset() },
       feel: this.feel().id,
     }
@@ -1363,6 +1406,7 @@ export class ComposerSheet {
   /** 竖屏：写初始 peek 高度、挂手势与视口监听。 */
   private activateSheet(panel: HTMLElement): void {
     this.sheetPanel = panel
+    this.invalidateDragGeometry()
     this.applyViewportVars()
     this.setHeight(this.peekHeight())
     this.writeHeights('peek')
@@ -1376,6 +1420,18 @@ export class ComposerSheet {
       window.visualViewport.addEventListener('resize', this.onSheetViewport)
       window.visualViewport.addEventListener('scroll', this.onSheetViewport)
     }
+    // 字体加载完成会改行高 ⇒ peek 跟着变。rowHeightPx 只在首次量到真行时写入，
+    // 而那次量到的可能是回退字体；这里在字体就绪后重新采样一次并重算。
+    // （jsdom / 老内核没有 document.fonts：存在性判断后跳过，不改变原有行为。）
+    const fonts = (document as unknown as { fonts?: { ready?: Promise<unknown> } }).fonts
+    if (fonts?.ready !== undefined) {
+      void fonts.ready.then(() => {
+        if (this.sheetPanel !== panel) return
+        this.rowHeightPx = null
+        this.invalidateDragGeometry()
+        this.relayoutSheet()
+      }).catch(() => {})
+    }
     this.publishGeometry()
   }
 
@@ -1383,6 +1439,7 @@ export class ComposerSheet {
     const panel = this.sheetPanel
     this.sheetPanel = null
     this.drag = null
+    this.invalidateDragGeometry()
     if (this.settleTimer !== undefined) {
       window.clearTimeout(this.settleTimer)
       this.settleTimer = undefined
@@ -1415,6 +1472,8 @@ export class ComposerSheet {
     }
     const panel = this.panel()
     if (panel === null) return
+    // 行到齐（fillRows 收尾）/ 视口变化都会走到这里：几何缓存必须随之失效。
+    this.invalidateDragGeometry()
     this.applyViewportVars()
     const peek = this.peekHeight()
     const max = this.maxHeight()
@@ -1439,7 +1498,9 @@ export class ComposerSheet {
       backdrop.style.setProperty('--dsh-sheet-snap-timing', feel.snapTiming)
       backdrop.setAttribute(SETTLING_ATTR, '')
     }
-    const phase = target > this.peekHeight() + 1 ? 'expanded' : 'peek'
+    // 松手吸附仍在拖拽生命周期内（drag 尚未清空）：复用本次拖拽的几何，避免再付一轮读。
+    // 缓存缺失（例如非手势路径调用）时 dragPeekMax 会现算，行为与原先一致。
+    const phase = target > this.dragPeekMax().peek + 1 ? 'expanded' : 'peek'
     this.setHeight(target)
     this.writeHeights(phase)
     this.publishGeometry()
@@ -1451,6 +1512,8 @@ export class ComposerSheet {
   }
 
   private readonly onSheetViewport = (): void => {
+    // 视口变化（软键盘弹收 / visualViewport resize / 转屏）会让 max 变 —— 拖拽中也要失效。
+    this.invalidateDragGeometry()
     this.relayoutSheet()
   }
 
@@ -1460,6 +1523,8 @@ export class ComposerSheet {
     const panel = this.panel()
     const touch = event.touches[0]
     if (panel === null || touch === undefined) return
+    // 新一次拖拽：先丢弃上一轮的几何缓存，再让本次拖拽自己付第一次读。
+    this.invalidateDragGeometry()
     const height = this.currentHeight()
     this.drag = {
       startX: touch.clientX,
@@ -1506,8 +1571,8 @@ export class ComposerSheet {
     event.preventDefault()
     panel.setAttribute(DRAGGING_ATTR, '')
     const feel = this.feel()
-    const peek = this.peekHeight()
-    const max = this.maxHeight()
+    // per-drag 缓存：整个拖拽只在这里付一次几何读（见 dragPeekMax 的注释）。
+    const { peek, max } = this.dragPeekMax()
     const delta = touch.clientY - drag.appliedY
     drag.appliedY = touch.clientY
     if (delta === 0) return
@@ -1587,6 +1652,8 @@ export class ComposerSheet {
       && (drag.height > (peek + max) / 2
         || (velocity < -SNAP_VELOCITY_EXPAND && drag.height > peek + DRAG_LOCK_PX))
     this.settleTo(expanded ? max : peek)
+    // 拖拽结束：per-drag 几何缓存到此为止（绝不跨拖，见 dragGeometry 的注释）。
+    this.invalidateDragGeometry()
   }
 
   /**
@@ -1600,6 +1667,8 @@ export class ComposerSheet {
     // 关掉 sheet 时借用一定结束：万一借用段还没走到自己的 finally，这里的复位
     // 保证 Escape 立刻可用（#1001）。
     this.borrowing = false
+    // 面板要离场了：拖拽几何缓存没有跨开关的意义，随手丢掉。
+    this.invalidateDragGeometry()
 
     if (this.backdrop !== null) {
       // 先摘掉引用，再播退场动画：close() 是同步语义（调用方回来时面板状态已归零），
