@@ -260,7 +260,10 @@ function VdPanel(props: { sessionId?: unknown }): ReactElement {
       // 可见，**盖在聊天界面上**。权威收起信号 = 上游展开控件在场（ExpandButton 只在收起时渲染；
       // data-rightbar-collapsed 是恒为 true 的常量，不可用——见坑 119/120）。
       const collapsed = document.querySelector('[data-sidebar-right-expand]') !== null
-      const hidden = getComputedStyle(stage).display === 'none' || getComputedStyle(stage).visibility === 'hidden'
+      // 同一元素只解析一次样式表：getComputedStyle 是**强制样式重算**入口，
+      // 一次 publish 调两次就是两次重算（性能审计 2026-11-02 Top 4 的附带项）。
+      const stageStyle = getComputedStyle(stage)
+      const hidden = stageStyle.display === 'none' || stageStyle.visibility === 'hidden'
       // 覆盖层让位（0.14.8 用户实报）：三个点弹层展开时必须把原生画面藏起来。
       // 原生 SurfaceView 在 WebView 之上，不藏它的话弹层会被虚拟屏画面整块盖住，
       // 用户看到的是「点开三个点，结果被一块黑色虚拟屏挡住」。收起后 next publish 自动恢复。
@@ -336,20 +339,29 @@ function VdPanel(props: { sessionId?: unknown }): ReactElement {
     // 各一次原生调用），而页面不可见时这两个动作都没有任何可观测效果——纯白烧。
     // 周期语义不变（仍是 1s），变的只是「后台不排下一拍」；回前台由 visibilitychange 立刻补一拍。
     // 与仓库既有正确实现同口径：dsh-client-ui-responsive/src/client/mobile/native-browser-auto-place.ts:87-101。
+    //
+    // 性能审计 2026-11-02 Top 4（剩余面）：`#1325` 只做了「页面在后台」那一半。
+    // 侧栏收起时页面仍在前台，`document.hidden` 为 false，这一拍照跑——而面板不在屏上，
+    // `pullPanelState` + `publishBounds` 两次跨桥没有任何可观测效果。
+    // 现在改成：**在屏才打桥**；不在屏仍然每秒醒来，但只做一次零成本的 DOM 复查，
+    // 一旦回到屏上立刻恢复正常节奏（不需要等 visibilitychange）。
+    // 复查周期刻意不降：降周期会让「用户展开侧栏」后的首帧状态更慢。
     let timer: number | undefined
     const schedule = () => {
       if (!alive || timer !== undefined) return
       timer = window.setTimeout(() => {
         timer = undefined
         if (!alive) return
-        pull()
+        // 不在屏：跳过跨桥，但继续排下一拍（只花一次 DOM 读取）。
+        // 不在屏：跳过跨桥，但继续排下一拍（只花一次 DOM 读取）。
+        if (panelOnScreen()) pull()
         if (!document.hidden) schedule()
       }, 1000)
     }
     const onVisibility = () => {
       if (document.hidden) return
       if (!alive) return
-      pull()
+      if (panelOnScreen()) pull()
       schedule()
     }
     document.addEventListener('visibilitychange', onVisibility)
@@ -523,12 +535,18 @@ export function apply(ctx: ClientContext): void {
     // 性能审计 2026-11-02 #4：同 1s 兜底轮询的口径——页面不可见时不排下一拍。
     // 「自动展开查看器」在后台没有任何意义（用户看不到），却在后台仍每 800ms 读一次
     // collapsedNow()/sidebar 状态并可能触发 openTab。
+    //
+    // 性能审计 2026-11-02 Top 4（剩余面）：与 1s 轮询同口径。`#1325` 已挡掉后台，
+    // 但「页面在前台 + 侧栏收起」时这一拍仍在每 800ms 读一次 collapsedNow()/sidebar 状态。
+    // 自动露出的**目的**就是把面板露出来，所以「侧栏已收起且用户没在展开」时它无事可做——
+    // 唯一例外是 pending 补落位（收起期间攒下的那次），那条路径必须继续跑，
+    // 否则用户展开侧栏后不会自动落位。判据因此是「页面在屏 且 (侧栏已展开 或 有待落位)」。
     let timer: number | undefined
     const schedule = () => {
       if (timer !== undefined) return
       timer = window.setTimeout(() => {
         timer = undefined
-        reveal()
+        if (!document.hidden && (!collapsedNow() || pending)) reveal()
         if (!document.hidden) schedule()
       }, 800)
     }
@@ -602,4 +620,43 @@ export function apply(ctx: ClientContext): void {
     }
     return () => { watch?.dispose() }
   }, 'dsh-android-vdisplay: terminal keybar')
+}
+
+/**
+ * 面板此刻是否**真的在屏幕上**（只读 DOM，零桥调用）。
+ *
+ * 为什么需要它（性能审计 2026-11-02 Top 4 的剩余面）：
+ * `#1325` 已把「页面切到后台」这一半做掉了（`document.hidden` 时不排下一拍）。但还有另一半：
+ * **侧栏收起时页面仍在前台**——此时 `document.hidden` 是 false，1s 轮询照跑，每秒仍然
+ * 跨桥两次（`vdisplayStatus` + `vdisplayBounds`），而面板根本不在屏幕上，这两个动作
+ * 没有任何可观测效果。用户收起侧栏看聊天界面的整段时间都在白烧。
+ *
+ * 判据与 `publishBounds` 里的可见性口径**同源**（宁可多判一次不可漏判）：
+ *   1. 页面在前台（`visibilityState`）；
+ *   2. 侧栏没有收起（权威信号 = 上游展开控件不在场，见坑 119/120）；
+ *   3. 舞台还在文档里；
+ *   4. 舞台没有 display:none / visibility:hidden；
+ *   5. 舞台矩形大于 1px。
+ *
+ * 任何一条不成立就返回 false —— 保守侧是「不轮询」，代价只是回到「下一拍对齐」，
+ * 而这正是事件通道（watchStageVisibility）已经覆盖的部分。
+ *
+ * **本函数刻意放在文件末尾**：EXECUTION-MAP 有两条锚点钉在 watchStageVisibility 的
+ * 注释与属性过滤行上（`:171` / `:194`），把新函数插在它们之前会把行号推漂。
+ */
+function panelOnScreen(): boolean {
+  if (typeof document === 'undefined') return false
+  if (document.visibilityState === 'hidden') return false
+  if (document.querySelector('[data-sidebar-right-expand]') !== null) return false
+  const stage = document.querySelector('[data-testid=vdisplay-stage]')
+  if (stage === null || !stage.isConnected) return false
+  try {
+    const style = getComputedStyle(stage)
+    if (style.display === 'none' || style.visibility === 'hidden') return false
+    const rect = stage.getBoundingClientRect()
+    return rect.width > 1 && rect.height > 1
+  } catch {
+    // 取不到样式（老内核 / 分离节点）：按「在屏」处理，宁可多轮询也不让状态停更。
+    return true
+  }
 }
