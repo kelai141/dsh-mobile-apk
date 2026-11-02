@@ -1770,7 +1770,7 @@ FileProvider XML path regression coverage: `scripts/check-manifest-hardening.tes
   - `scripts/build-apk-engine.mjs:54#expect=export%20function%20assembleApk(options%2C%20runner%20%3D%20spawnSync)%20%7B` / `:144#expect=export%20function%20verifyApks(%7B%20directories%20%3D%20%5B%5D%2C%20files%20%3D%20%5B%5D%2C%20signatureGate`（共用 assemble 与签名验证入口；`assembleApk` 的 `buildType` 缺省 release、可选 debug，单点派生 Gradle 任务与产物目录）；调用测试锁住本地、云端、发布三路汇合：`scripts/build-apk-engine.test.mjs:51#expect=assert.deepEqual(args%2C%20%5B'%3Aapp%3AassembleRelease'`
   - `scripts/patches/data/registry-scan-c4.mjs:11`（同步 flush 的 Loader 临时索引与 manifest 复用；详细设备计时/预算见 RUNTIME-PATCHES §7.6，自动补给的异步 checkpoint 见 model-capability README）
   - `scripts/patches/data/client-index-loader-barrier.mjs:3`（G2：首页HTML在快照插件图前等待同一host Loader收敛；静态资源不参与等待）
-  - `scripts/patches/data/undo-safe-transaction-snippet.mjs:1`（Safe Mode 事务代码模板；由 `apply-patches.mjs:554#expect=el%28%27p%27%2C%20%27%7BclassName%3A%22dshm-summary%22%7D%27%2C%20%27k%28o%2Ca%29%27%29%2C` 注入 vendor 快照代码）
+  - `scripts/patches/data/undo-safe-transaction-snippet.mjs:1`（Safe Mode 事务代码模板；由 `apply-patches.mjs:584#expect=el%28%27p%27%2C%20%27%7BclassName%3A%22dshm-summary%22%7D%27%2C%20%27k%28o%2Ca%29%27%29%2C` 注入 vendor 快照代码）
   - `scripts/build-apk-013.ps1:693#expect=if%20(%24rejectedAbis.Count%20-gt%200)%20%7B%20Write-Host%20%22%E6%9C%89%20ABI%20%E8%A2%AB%E9%97%A8%E7%A6%81%E6%8B%92%E7%BB%9D%E2%80%94%E2%80%94%E4%B8%8D%E5%8F%91%E7%89%88%EF%BC%88exit%201%EF%BC%89%22%3B%20exit%201%20%7D`（被拒非空即 exit 1 的收口）
   - `scripts/build-snapshot-013.mjs:31`（Windows 宿主重入 WSL 的判据）
   - `scripts/build-snapshot-013.mjs:291`（引擎树补丁 --apply --scope engine）
