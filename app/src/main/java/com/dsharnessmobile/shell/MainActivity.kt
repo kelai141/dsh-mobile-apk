@@ -300,8 +300,8 @@ class MainActivity : ComponentActivity() {
   // —— 引擎流 / 引导页委托（原位一行委托到协作类；引擎启动与引导页状态渲染
   //    的调用面保持不变：onCreate/onResume/监控/WebViewClient/引导按钮共用入口）。 ——
 
-  /** 引擎启动流（委托 EngineStartFlow.start）。 */
-  internal fun startEngineFlow(splash: Boolean = false) {
+  /** 引擎启动流（委托 EngineStartFlow.start）；entry 只进探针日志、不参与判据（两次 caller 都是 main，须显式声明入口）。 */
+  internal fun startEngineFlow(splash: Boolean = false, entry: StartEntryPoint = StartEntryPoint.UNSPECIFIED) {
     if (isFinishing || isDestroyed) return
     // 冷启自动尝试（0.14.10）：门若是上一进程落的残留，允许本进程一次自动越过；本进程内仍有界。
     if (startupEntryDecision(RepairState.required(this), explicitUserRetry = RepairState.coldStartAutoAttemptAvailable(this)) ==
@@ -326,7 +326,7 @@ class MainActivity : ComponentActivity() {
       pageRecovery.userReloadRequested()
       recoverPageIfPending()
     } else {
-      engineFlow.start()
+      engineFlow.start(entry)
     }
   }
 
@@ -344,7 +344,7 @@ class MainActivity : ComponentActivity() {
     }
     engineFlow.engineRetryCount = 0
     engineManager.clearRefreshLedger()
-    startEngineFlow(splash = true)
+    startEngineFlow(splash = true, entry = StartEntryPoint.GUIDE_BUTTON)
   }
 
   /**
@@ -713,7 +713,7 @@ class MainActivity : ComponentActivity() {
       if (!userClosedEngine) {
         if (SplashStore.autoStart(this)) {
           maybePlaySplash(force = false)
-          startEngineFlow()
+          startEngineFlow(entry = StartEntryPoint.ON_CREATE)
         } else {
           // 关闭自动启动后必须显式停在启动页：webView 初始为 GONE，而 guideView
           // 自带 GONE，什么都不做的话用户会看到一片空白（没有可点的「启动引擎」）。
@@ -908,7 +908,7 @@ class MainActivity : ComponentActivity() {
     // 单次同步 HTTP 为秒级）。后台探活 + 主线程分流，失败原因结构化落盘。
     if (!userClosedEngine && autoStart && webView.visibility != View.VISIBLE) {
       probeEngineOffMainThread { running ->
-        if (!running && !userClosedEngine && SplashStore.autoStart(this) && webView.visibility != View.VISIBLE) startEngineFlow()
+        if (!running && !userClosedEngine && SplashStore.autoStart(this) && webView.visibility != View.VISIBLE) startEngineFlow(entry = StartEntryPoint.ON_RESUME)
       }
     }
     // 主题补推：从系统设置/SAF 返回时系统主题可能已变（兜底桥时序覆盖）。

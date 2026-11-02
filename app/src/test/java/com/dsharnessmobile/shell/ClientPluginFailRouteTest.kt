@@ -308,7 +308,7 @@ class ClientPluginFailRouteTest {
   @Test
   fun explicitOutletsClearTheLatch() {
     val flow = codeOnly(src("EngineStartFlow.kt"))
-    val start = flow.substringAfter("fun start() {").substringBefore("val token = flowOwnership.begin()")
+    val start = flow.substringAfter("fun start(").substringBefore("val token = flowOwnership.begin(")
     assertTrue("start() 入口必须清 latch（用户显式重试/安全模式路径）", start.contains("clearClientPluginTreeFailureLatch()"))
     val activity = codeOnly(src("MainActivity.kt"))
     val outlet = activity.substringAfter("internal fun startEngineFlow()").substringBefore("internal fun applyGuidePhase(")

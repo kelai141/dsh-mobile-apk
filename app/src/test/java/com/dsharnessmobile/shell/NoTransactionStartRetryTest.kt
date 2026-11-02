@@ -194,7 +194,7 @@ class NoTransactionStartRetryTest {
   @Test
   fun theNoTransactionBranchSchedulesAnAutomaticRetry() {
     val flow = codeOnly(source("EngineStartFlow.kt"))
-    val defer = flow.substringAfter("private fun deferEngineStartWhileSnapshotTransactionBusy()")
+    val defer = flow.substringAfter("private fun deferEngineStartWhileSnapshotTransactionBusy(")
       .substringBefore("private val deferredStartRunnable")
 
     assertTrue("必须仍留痕（不得因为加了重试就不记账）", defer.contains("\"engine-start-deferred-no-transaction\""))
@@ -244,45 +244,120 @@ class NoTransactionStartRetryTest {
    * 真因是时序：STAGED marker 由 `EngineManager.refreshSnapshot` 在
    * **解压完成、swap 之前**才写，而解压要 8-12 分钟，故这段时间 journal 判据必然 absent。
    *
-   * 判据改用 `RepairState.startupInProgress`（= 本进程主启动流在跑）：
-   * 它在 start() 抢到所有权后立刻置 true、finally 里置 false，与「谁在占所有权」同一事实源。
+   * ## 第二版修复（2026-11-02，本文件现在锁的是这一版）
+   *
+   * 第一版用 `RepairState.startupInProgress` 分流，随后在设备上被证伪：它只说明
+   * 「本进程有个启动流在跑」，**不等于「有快照事务」**，于是在「同刻多入口争锁」时
+   * 仍会误报成「正在刷新」。现场三条独立事实（settings-backup 无新条目、
+   * fingerprint mtime 未变、boot-diag 里 refresh 命中 0）与探针（snapshotMarker=absent）
+   * 一起证伪了它。
+   *
+   * 现在改走 `classifyDeferCause(transactionPresent, ownerRunning)`：只看事务文件与
+   * 所有权持有者这两条互相独立的事实，三档 = 真刷新 / 争锁 / 真无事务无人持有。
    */
   @Test
   fun theDeferredWordingDistinguishesRefreshFromGenuinelyNoTransaction() {
     val flow = codeOnly(source("EngineStartFlow.kt"))
-    val defer = flow.substringAfter("private fun deferEngineStartWhileSnapshotTransactionBusy()")
+    val defer = flow.substringAfter("private fun deferEngineStartWhileSnapshotTransactionBusy(")
       .substringBefore("private val deferredStartRunnable")
 
     assertTrue(
-      "刷新中那一条必须点明「journal 为 absent 不等于没有事务在跑」",
-      defer.contains("这不代表没有事务在跑"),
+      "三档必须由纯判据 classifyDeferCause 分流",
+      defer.contains("classifyDeferCause"),
     )
-    assertTrue(
-      "刷新中那一条必须报出真实原因（主启动流持有所有权 + 尚未走到写 journal 那一步）",
-      defer.contains("主启动流持有世代所有权"),
-    )
-    assertTrue(
-      "确实无事务那一条必须能读出「主启动流未在运行」这个判据",
-      defer.contains("主启动流未在运行"),
-    )
-    assertTrue(
-      "两条必须由 RepairState.startupInProgress 分流，不得只看 journal",
+    assertFalse(
+      "分档不得再用 RepairState.startupInProgress（它不等于有快照事务，会误报刷新）",
       defer.contains("RepairState.startupInProgress"),
     )
+    assertTrue(
+      "争锁档必须点明「另有启动流持有所有权」，而不是含糊的「另一次启动流仍在占用」",
+      defer.contains("另有启动流正持有所有权"),
+    )
+    assertTrue(
+      "争锁档必须明确否掉刷新：快照事务并不存在",
+      defer.contains("快照事务并不存在"),
+    )
+    assertTrue(
+      "第三档（无事务无人持有）必须存在且可辨识",
+      defer.contains("既无快照事务、也无持有者"),
+    )
+    assertTrue("三档都必须在 when 里出现", defer.contains("DeferCause.NO_TRANSACTION_IDLE"))
+    assertTrue("三档都必须在 when 里出现", defer.contains("DeferCause.SNAPSHOT_TRANSACTION"))
 
     val retry = flow.substringAfter("private val noTransactionRetry")
       .substringBefore("private fun canRunEngineWork")
     assertTrue(
-      "timeout 那条同样必须区分（它是最常被读到的一条）",
-      retry.contains("运行时刷新仍在进行"),
-    )
-    assertTrue(
-      "timeout 的刷新档必须给出可照做的处置",
-      retry.contains("不要"),
+      "timeout 那条必须重新读一次事务文件（而不是复用启动时的判断）",
+      retry.contains("SnapshotTransaction.readMarker(activity.filesDir) != null"),
     )
     assertFalse(
-      "timeout 的刷新档不得再用「且始终无快照事务在场」这种误导句式",
-      retry.contains("且始终无快照事务在场"),
+      "timeout 分档不得再用 RepairState.startupInProgress",
+      retry.contains("RepairState.startupInProgress"),
+    )
+    assertTrue("timeout 也必须三档齐全", retry.contains("DeferCause.OWNERSHIP_CONTENTION"))
+    assertTrue("timeout 也必须三档齐全", retry.contains("DeferCause.NO_TRANSACTION_IDLE"))
+    assertTrue(
+      "真刷新档才允许说「刷新仍在进行」",
+      retry.contains("journal 可读，快照刷新确实在场"),
+    )
+    assertTrue(
+      "真刷新档必须给出可照做的处置",
+      retry.contains("不要"),
+    )
+  }
+
+  // ── ⑦ 三档纯判据 + 负控（2026-11-02：证伪 startupInProgress 之后新增） ─────────────
+
+  /** 三档一一对应，不得串档。 */
+  @Test
+  fun classifyDeferCauseMapsAllThreeTiers() {
+    assertEquals(
+      "journal 可读 ⇒ 真刷新",
+      DeferCause.SNAPSHOT_TRANSACTION,
+      classifyDeferCause(transactionPresent = true, ownerRunning = true),
+    )
+    assertEquals(
+      "无事务 + 有持有者 ⇒ 争锁",
+      DeferCause.OWNERSHIP_CONTENTION,
+      classifyDeferCause(transactionPresent = false, ownerRunning = true),
+    )
+    assertEquals(
+      "无事务 + 无持有者 ⇒ 真无事务无人持有",
+      DeferCause.NO_TRANSACTION_IDLE,
+      classifyDeferCause(transactionPresent = false, ownerRunning = false),
+    )
+  }
+
+  /**
+   * **负控（本 PR 的核心）**：「无刷新的争锁」必须落到第二档，**不得**落到第一档。
+   *
+   * 这正是设备上被证伪的那条：旧实现用 `RepairState.startupInProgress` 分档，
+   * 在无刷新的争锁场景下报出「正在进行的运行时刷新」，把排障方向引到 8-12 分钟的解压上。
+   * 若有人把判据改回 startupInProgress 语义（等价于 ownerRunning 单独决定第一档），
+   * 本用例立刻红。
+   */
+  @Test
+  fun lockContentionWithoutRefreshNeverLandsOnTheRefreshTier() {
+    val cause = classifyDeferCause(transactionPresent = false, ownerRunning = true)
+    assertNotEquals(
+      "无刷新的争锁不得被判成真刷新",
+      DeferCause.SNAPSHOT_TRANSACTION,
+      cause,
+    )
+    assertEquals(
+      "无刷新的争锁必须落到「有启动流但无事务」这一档",
+      DeferCause.OWNERSHIP_CONTENTION,
+      cause,
+    )
+  }
+
+  /** 反过来：真有事务时必须是第一档（否则真刷新会被误降成争锁）。 */
+  @Test
+  fun realTransactionAlwaysWinsFirstTier() {
+    assertEquals(
+      "有事务时无论有无持有者都是真刷新",
+      DeferCause.SNAPSHOT_TRANSACTION,
+      classifyDeferCause(transactionPresent = true, ownerRunning = false),
     )
   }
 }
