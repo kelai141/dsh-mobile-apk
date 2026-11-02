@@ -1,8 +1,8 @@
 # RUNTIME-PATCHES.md — assets/patched/ 运行时补丁登记
 
-> 职责：设备端完整覆盖资产与构建期补丁登记。活动构建期清单由 `scripts/patches/registry.json` 生成；运行 `node scripts/check-maintenance-docs.mjs --write` 更新，省略 `--write` 检查。§2 的尺寸/hash 已按 2026-10-17 实测更新（夹具复算 + 现产物对账）；历史重出章节里的数字是当时批次记录；当前产物同源性与验收状态见对应版本阶段交接和最终产物证据。
+> 职责：设备端完整覆盖资产与构建期补丁登记。活动构建期清单由 `scripts/patches/registry.json` 生成；运行 `node scripts/check-maintenance-docs.mjs --write` 更新，省略 `--write` 检查。§2 的尺寸/hash 按各行实测日期登记（夹具复算 + 现产物对账）；历史重出章节里的数字是当时批次记录；当前产物同源性与验收状态见对应版本阶段交接和最终产物证据。
 >
-> 当前适配目标：官方 `dsh-v0.2.1-rc.2` / commit `687f282e8625c6b8d11ff58211a90524be2e4317`（预发布，不称 stable）。引擎换代批次的补丁面变更、夹具换代与运行时资产实测见 §7.7。
+> 当前适配目标：官方 `dsh-v0.2.1-rc.3` / commit `1f81c047fc48fa190a683e469daa699857e9afe8`（预发布，不称 stable）。引擎换代批次的补丁面变更、夹具换代与运行时资产实测见 §7.7。
 
 ## 1. 机制（EngineManager.kt）
 
@@ -20,7 +20,7 @@
 
 | asset 文件（字节） | 目标快照路径（注册行） | 状态 | 作用 / 来源线索 |
 |---|---|---|---|
-| attachment-local-index.js（**47,937**；sha256 `7ffe07dc8bed38a858f85c7f6df1fa41214cc16c634afbd989e07bf60cb31dbd`；2026-09-24 按 0.1.7-rc.1 快照重建；2026-10-17 实测 0.2.1-rc.2 夹具经 `attach-durable-F2` 复算与该资产逐字节一致） | dsh-attachment-local/lib/index.js（applyRuntimePatches） | 生效 | 0.13.7 重出（引擎 0.1.5-rc.1）+ 0.14.2 随引擎 0.1.7-rc.1 换代重建（§7.4）+ 0.14.0 review C1：**与构建期 `attach-durable-F2` 逐字节同源**（F2 已扩为三件套：祖先 fsync 守卫 + 两处 link(2)→rename 回退 + unlink ENOENT 容忍）；内含图片归一化 2048 降采样上限（`DEFAULT_NORMALIZED_IMAGE_MAX_DIMENSION = 2048`）。补丁判定走内容指纹而非内嵌标记 |
+| attachment-local-index.js（**48,531**；sha256 `c1a4818d1693798958f21b1b56ef109f9a38dc231a27e348bf5553eaca8f6157`；2026-11-01 从0.2.1-rc.3独立快照完整补丁链提取） | dsh-attachment-local/lib/index.js（applyRuntimePatches） | 生效 | F2持久化保护继续保留；P1取消请求原字节透传，E1增加主动访问时间及手动清理兼容声明。与构建期快照逐字节同源，避免启动时回退旧实现。本地归一化默认像素预算2048²、最长边8192，与请求预览长边1600是两层不同策略。验证记录见 `docs/contrib/kelai141/2026-11-01-image-preview-and-manual-reclaim.md` |
 | session-persistence-jsonl-index.js（**149,673**；sha256 `b9ac5744c96a35c881ccc0d1b70850b012245dc54f07f2e543ad3632784a0981`；2026-10-24 与 `0.2.1-rc.3` 快照逐字节同源，F5/F7 行为回归通过） | dsh-session-persistence-jsonl/lib/index.js（applyRuntimePatches） | 生效 | 0.13.7 重出 + 0.13.8-b 追加 F5/F7（与构建期同源）+ 0.14.2 随引擎 0.1.7-rc.1 换代重建（§7.4）：两处 link(2) 站点带 EACCES/EPERM/ENOTSUP → rename 回退，发布独占语义由模块级 `dshMobileClaimExclusive/ReleaseClaim` 恢复（O_EXCL 占位 + 失败回收）。**0.14.0 review C1 实锤**：v0.14.0-preview 资产曾是「内联占位 + helper 占位」双占位坏版本（恒 EEXIST 恒 false，旧会话迁移永久失败并留 0 字节毒文件）——修复 = F7 补丁增加 v1→v2 收敛分支 + 本资产从快照重出 + 门禁升级为逐字节比对。行为回归 `scripts/patches/tests/{spj-migration-link-f5,publish-exclusive-reclaim}.test.mjs`（后者支持 `--asset` 直测资产本体） |
 | fs-local-index.js（**47,826**；sha256 `4b1daab4763d47c0936886e23767f485a5aee54cc66ecbcf0588f047de6f5408`；2026-09-26 由出厂态 fixture 经补丁链重建：F8 + B。0.14.2 批记录为 47,793 B，当前补丁实现（F8 的 ENOSYS 分支 + B）产出 47,826 B；2026-10-17 实测 0.2.1-rc.2 夹具复算与该资产逐字节一致） | dsh-fs-local/lib/index.js（applyRuntimePatches） | 生效 | **0.14.1 重新入册**（apk issue #246）：`writeFileAtomic` 的 `createIfAbsent` 发布站点是全包唯一的 `link(2)` 调用，且该分支失败即抛、无任何回退 → Android 应用域恒拒 hardlink ⇒ 真机上 `write` 工具建不了任何新文件（覆盖已存在文件走 `rename`，正常）。与构建期 `fs-local-link-F8` 逐字节同源。**本资产是 0.13.3 退役资产的重新入册**——当年退役理由「上游 0.1.2-rc.1 已原生覆盖 rename 回退」对 `createIfAbsent` 站点不成立（0.1.5-rc.1 实测：全文仅此一处 `link` 调用，`EACCES`/`EPERM`/`ENOTSUP` 无任何处理）。补丁判定走内容指纹而非内嵌标记。行为回归 `scripts/patches/tests/fs-local-link-f8.test.mjs`（支持 `--asset` 直测资产本体） | **0.14.2 追加 `fs-local-digest-guard-B`**（版本守卫摘要 CAS 兜底）：资产必须同时含 F8+B 两个 marker，否则引擎启动时会把 B 覆盖回「只有 F8」的旧字节 ⇒ 真机上 B 等于没修（实测踩到：旧资产 43,405 B 与当时快照逐字节一致，门禁因快照陈旧而不响）。重建方式 = 取出厂态 fixture 按 registry 顺序施加该文件全部 engine 补丁（0.14.2 批产物 47,793 B；当前实现产出 47,826 B），**禁止手改**；门禁见 §7.5 |
 
@@ -29,7 +29,7 @@
 ## 3. 维护约定（硬约束）
 
 1. **全量替换非 delta**：asset 必须是目标文件的完整拷贝（在原文件基础上改后整体入库）；不允许只存 diff 片段或手写残缺文件——applyAssetPatch 直接 writeBytes 整写，半截文件 = 引擎启动即崩。
-2. **更新需随上游引擎对齐**：引擎换代必须从对应原始产物重出三条资产，并施加该文件全部当前补丁，再与最终双ABI快照逐字节/全部marker或exact verifier对账；不能叠加旧asset。**0.14.8（引擎 0.2.1-rc.2）实测状态**：`attachment-local-index.js`（47,937 B）与 `fs-local-index.js`（47,826 B）已能由 0.2.1-rc.2 夹具经对应补丁链逐字节复现；`session-persistence-jsonl-index.js` 现资产仍为上一代产物（145,247 B），0.2.1-rc.2 夹具复算为 149,673 B ⇒ 新快照出炉后必须重出。§7.4/7.5/7.7 是批次证据，不能代替「本轮已完成」的实测。
+2. **更新需随上游引擎对齐**：引擎换代必须从对应原始产物重出三条资产，并施加该文件全部当前补丁，再与最终双ABI快照逐字节/全部marker或exact verifier对账；不能叠加旧asset。**当前实测状态**见§2各行及本轮验证记录：三份资产与本轮0.2.1-rc.3的x86_64最终快照逐字节同源，正文与F7/F8行为检查通过；ARM64尚未复验。旧0.14.8批次数字只作历史记录。§7.4/7.5/7.7 是批次证据，不能代替「本轮已完成」的实测。
 3. **禁止随手重生成**：内容指纹机制意味着 asset 与目标「看起来差不多但字节不同」就会触发重写——不得用本地构建产物/不同 minify 形态随手替换 asset；改动须走完整链路验证（引擎起得来、市场/会话/附件功能实测）。
 4. **新增补丁**：applyAssetPatch 注册新条目 + 本表登记；优先评估上游新版本是否已修复（能不补则不补）。
 
@@ -41,7 +41,7 @@
   - runtime patch asset missing表示打包遗漏，不是功能通过。
   - `index hash adaptation failed; keeping bundled patch`（hashAdaptive 已于 0.13.7fx-1 随 web-frontend-index.html 退役，见 §8；该日志行不再产生）。
 - **产物抽验**：从 APK 内 assets/patched/ 取出与快照解压树目标文件做字节比对（contentEquals 同一判定）；发布链可用 `tar -xO` 抽验快照内目标文件（AGENTS.md 惯例）。
-- **行为抽验**：剪贴板复制（primitives）、附件上传图片（attachment 2048 上限）、WebView 沉浸式与老内核插件列表（web-frontend）、会话持久化/文件工具（fs-local、session-persistence-jsonl）。
+- **行为抽验**：剪贴板复制（primitives）、附件上传图片（本地归一化与请求预览两层限制）、WebView 沉浸式与老内核插件列表（web-frontend）、会话持久化/文件工具（fs-local、session-persistence-jsonl）。
 
 ## 5. 机制演进史（改动前先读，防止重蹈）
 
@@ -67,6 +67,8 @@
 <!-- generated:active-registry:start -->
 | 活动补丁 ID | scope | 目标 |
 |---|---|---|
+| `image-expiry-E1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js`<br>`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js`<br>`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/index.js` |
+| `image-request-preview-P1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js`<br>`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js`<br>`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/index.js`<br>`usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment/lib/index.js` |
 | `image-history-batch-offload-I1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm/lib/index.js` |
 | `managed-port-bind-EP1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-webserver/lib/index.js` |
 | `profile-link-skip-PL1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js` |
