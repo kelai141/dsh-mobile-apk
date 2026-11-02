@@ -8,7 +8,7 @@
 | 发行版 | npm `dsh-plugin-subscriptions@0.9.12`（tarball shasum `a3aff899f615cec19f56b4bf11026a6cbf696382`，integrity `sha512-OHW6LsNjmfQ7gFZ734Lbz9iVtrPeWAaQz2sAzSezNDgyNGpEBzvLufGhzwffh1VgWz2TW8AMJ/JpgBec5Lscrg==`） |
 | 上游 gitHead | `b8023110864494acefc6f5963c2a197d85dda20c`（package.json 的 `gitHead` 字段；无对应 tag 时以此为准） |
 | 许可 | MIT（原文见本目录 `LICENSE`，随快照分发，见下「MIT 许可原文保留位置」） |
-| 解包体积 | 上游 npm 包 2,063,168 B / 143 文件；本目录裁掉源映射与类型声明后 **1,379,840 B / 68 文件**（见差异 #4） |
+| 解包体积 | 上游 npm 包 2,063,168 B / 143 文件；本目录裁掉源映射与类型声明后 **1,380,125 B / 68 文件**（见差异 #4） |
 | 定位 | 把 ChatGPT(Codex)/Claude/Grok/Copilot 订阅当 LLM provider；OAuth 在 Settings → Subscriptions |
 
 ## 为什么 vendor（而不是直接依赖 npm 版本）
@@ -32,8 +32,9 @@
 | 6 | `lib/translate/sse.js`、`lib/translate/{chat-completions,responses,anthropic}.js`、`lib/providers/common.js`、`lib/providers/{claude,codex,copilot,grok}.js` | **SSE 面加固（issue #1284）**：① `parseSse` 增加 `MAX_PENDING_CHARS`（8 MiB，推导见该常量注释：上限由「单个合法帧」决定，而单个合法帧的上界是仓库的 5 MiB 附件上限的 base64 形态，不是响应总长度），超限即失败关闭并报出实收长度；② `idleWatchdog` 把「字节进展」与「帧进展」拆成两个时钟，新增 `progress()`/`event()`/`snapshot()`/`stallReport()`，`TIMEOUT` 错误带上现场快照并可区分 `idle`（零字节，中止）/`trickling`（有字节无帧，不中止但可观测）/`healthy`；③ EOF 时派发未以空行收尾的最后一帧（SSE 规范允许这种收尾） | ① 一条不换行的响应流能把宿主内存吃光，而「空闲超时」这道防线正好被同一股流量关掉（每 chunk 重置）；② 没有可观测事实时「慢但在走」与「真卡住」无法区分，改计时器也无法验收；③ 服务端以「末帧不补空行」收尾是规范允许的，原实现让整轮对话报 `STREAM_CLOSED` 且文案指向网络。三项都只在构造字节流上复现，判据见 `scripts/subs-sse-limits.test.mjs` |
 | 7 | `lib/client.js` | **竖屏可读性修（issue #1288 第 10、11 条）**：① 供应商卡标题前的状态点补 `aria-label`（新增 `dotState()` 三态映射 busy/linked/unlinked + 6 个文案键），颜色与尺寸**未改**；② 账号行溢出修：`accountHeader` 补 `minWidth:0` + `flexWrap:wrap`，`accountName` 补 `minWidth:0` + `overflowWrap:anywhere`，`accountRow` 补 `minWidth:0`。原本这三处都缺 flex 收缩，长邮箱与过期时间会把整页撞宽、`退出登录` 按钮被挤出卡片右边界 | ① 状态点本身有真实三态（黄=busy/绿=已登录/灰=未登录，见 `dotColor`），但它在无障碍树与肉眼上都只能靠颜色猜，用户报「看不懂这个点」；只是补语义，不改设计、不加图例。② 真因不是「文字太长」，是 flex 子项默认 `min-width:auto` 不可收缩 + 按钮 `flexShrink:0`，于是窄屏上整行按内容宽度铺开并撑宽容器（`scrollWidth > clientWidth`，整页可左右滑）。判据见 PR 正文 |
 | 8 | `lib/client.js`、`lib/client/index.js` | **宿主样式污染收窄（issue #1288 第 2/5/8 条）**：设置面板留白规则的裸选择器 `div[role="dialog"][aria-modal="true"]:has(> nav) { padding-top: 14px }` 收窄为 `html:not([data-dsh-mobile-form]) div[…]:has(> nav)`。两份打包副本同步改 | 原选择器特异性 (0,2,2)，会压过宿主 `dsh-client-ui-responsive` 手机形态的面板规则 (0,2,1)，把面板 `padding-top` 从真实顶部 inset（实测 24px）压成 **14px**。宿主手机形态的留白由 `--dsh-mobile-top-inset` 负责（`mobile-form.css.ts`），插件不该再插一手；后果是**二级页**顶部条（在正常流里）顶到状态栏下面只剩半截，而一级页顶部条是 `absolute` 不吃面板 padding 所以正常——正是用户报的「一级正常、二级异常」。收窄后桌面形态行为不变；另在宿主侧同时把该规则的特异性提到 (0,4,1) 作为第二道防线（插件若再回归也压不回去） |
+| 9 | `lib/client.js`、`lib/client/locales.js` | **命令标题本地化（本轮）**：给 `/fast` 的命令贡献补 `label: () => t("commandFastTitle")`，并在 zh/en 两份 locale 里各加一条 `commandFastTitle`（快速档 / Fast tier） | 上游只传了 `description`、没传 `label`，而 `ui-input-trigger` 的行标题是 `item.label ?? item.name`，于是「+」菜单里这一行显示的是命令 id `fast`（同屏其余行都是中文）。宿主命令目录的 `CommandDescriptor` 只有 `name` + `description`，没有标题钩子；贡献名与宿主命令重名又会在候选合成时抛错，所以只能在这一层补 |
 
-**未改动**：`lib/` 下运行时代码**除上表第 5、6、8 条所列代理面、SSE 面与宿主样式面外**逐字节保持上游（仅另删上表第 4 条的 `.map` / `.d.ts`）（含 provider 实现、OAuth 流程、token 存储路径 `~/.dsh/plugins/subscriptions/auth.json` 与其 0600 权限）、`cordis.patch.yml`、`README.md`、`LICENSE`。
+**未改动**：`lib/` 下运行时代码**除上表第 5、6、8、9 条所列代理面、SSE 面、宿主样式面与命令标题 locale 外**逐字节保持上游（仅另删上表第 4 条的 `.map` / `.d.ts`）（含 provider 实现、OAuth 流程、token 存储路径 `~/.dsh/plugins/subscriptions/auth.json` 与其 0600 权限）、`cordis.patch.yml`、`README.md`、`LICENSE`。
 
 ## 我们删了什么、为什么
 
