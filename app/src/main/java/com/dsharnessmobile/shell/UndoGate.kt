@@ -136,7 +136,9 @@ object UndoGate {
       GateDecision.ARM -> {
         suppressNoted = false
         val armed = try {
-          armFile(context).writeText(now.toString())
+          // issue #1369：arm 文件必须原子写——`writeText` 先截断再写，进程在窗口内被硬杀
+          // （或磁盘满）会留下 0 字节文件，而读取侧把「存在」当「值有效」。
+          writeAtomicText(armFile(context), now.toString())
           true
         } catch (t: Throwable) {
           Log.e(TAG, "auto-undo arm failed", t)
@@ -295,9 +297,59 @@ object UndoGate {
     }
   }
 
-  /** 观察窗起始时刻（无则 null）。 */
-  private fun armedAt(context: Context): Long? =
-    armFile(context).takeIf { it.exists() }?.readText()?.trim()?.toLongOrNull()
+  /**
+   * 观察窗起始时刻（无则 null）。
+   *
+   * issue #1369：存在但**解析不出**（0 字节 / 半截内容）以前会被当成「没有值」，于是每拍都判 ARM
+   * 并重写——观察窗永不结束，自动回滚静默失效。现在把它判成损坏：删掉、记一行，下一拍重新起窗。
+   */
+  private fun armedAt(context: Context): Long? {
+    val file = armFile(context)
+    val exists = file.exists()
+    val raw = if (exists) (try { file.readText() } catch (_: Throwable) { null }) else null
+    return when (armState(exists, raw)) {
+      ArmState.VALID -> raw?.trim()?.toLongOrNull()
+      ArmState.MISSING -> null
+      ArmState.CORRUPT -> {
+        runCatching { file.delete() }
+        record(context, "arm file corrupt (unparseable) — removed; observation window restarts")
+        null
+      }
+    }
+  }
+
+  /** 解析结果分类（纯函数，JVM 单测直接钉）：缺失 / 有效 / 损坏。 */
+  internal fun armState(exists: Boolean, raw: String?): ArmState = when {
+    !exists -> ArmState.MISSING
+    raw?.trim()?.toLongOrNull() != null -> ArmState.VALID
+    else -> ArmState.CORRUPT
+  }
+
+  internal enum class ArmState { MISSING, VALID, CORRUPT }
+
+  /**
+   * 原子写文本（issue #1369）：同目录临时文件 → fsync → ATOMIC_MOVE。
+   * 目标路径上要么是上一版的完整内容、要么不存在，不会出现 0 字节残档。
+   */
+  private fun writeAtomicText(target: File, text: String) {
+    val parent = target.absoluteFile.parentFile ?: throw java.io.IOException("arm file has no parent")
+    parent.mkdirs()
+    val temp = File.createTempFile("." + target.name + "-", ".tmp", parent)
+    try {
+      java.io.FileOutputStream(temp).use { out ->
+        out.write(text.toByteArray(Charsets.UTF_8))
+        out.flush()
+        out.fd.sync()
+      }
+      java.nio.file.Files.move(
+        temp.toPath(), target.toPath(),
+        java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+        java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+      )
+    } finally {
+      if (temp.exists()) temp.delete()
+    }
+  }
 
   /**
    * 记录「已知良好快照 id」——**只由壳侧自己的健康观测写入**（引擎探活 HEALTHY 的那一拍）。
