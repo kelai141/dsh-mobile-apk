@@ -440,4 +440,39 @@ class PhotoCaptureTest {
     assertTrue("受理拍照时必须先跑 sweepOld（保留位的有界回收就在这里）",
       controller.contains("PhotoCapture.sweepOld("))
   }
+  // ── issue #1387：连拍不得删掉仍在压缩的原图 ─────────────────────────────
+
+  @Test
+  fun `连拍时仍在压缩的原图不被清理删掉`() {
+    // 第二张拍照受理时先跑一遍清理，keep=0 会把第一张**仍在压缩**的 raw-*.jpg 删掉；
+    // 压缩线程读到缺失文件返回 null，而回执还写着「原图已保留」。
+    val photoDir = tempDir("photo-inflight-out")
+    val rawDir = tempDir("photo-inflight-raw")
+    try {
+      val inFlight = File(rawDir, PhotoCapture.RAW_PREFIX + "20260101-000001-000.jpg").apply { writeText("compressing") }
+      val stale = File(rawDir, PhotoCapture.RAW_PREFIX + "20260101-000000-000.jpg").apply { writeText("stale") }
+      val removed = PhotoCapture.sweepOld(photoDir, rawDir, keep = 10, exclude = setOf(inFlight.name))
+      assertTrue("在途原图必须活下来（否则压缩读到缺失文件）", inFlight.isFile)
+      assertFalse("不在途的原图照旧清掉", stale.exists())
+      assertEquals("只删掉那张不在途的", 1, removed)
+    } finally {
+      photoDir.deleteRecursively()
+      rawDir.deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `控制器把在途原图交给清理侧排除`() {
+    val controller = codeOnly(source("src/main/java/com/dsharnessmobile/shell/PhotoCaptureController.kt"))
+    assertTrue("受理拍照时必须把在途集合交给 sweepOld", controller.contains("exclude = inFlightRawNames.toSet()"))
+    assertTrue("必须用同步集合（压缩线程与主线程并发读写）",
+      controller.contains("Collections.synchronizedSet(mutableSetOf<String>())"))
+    // 登记必须在起线程之前：起线程之后再登记会有窗口期让并发的 sweepOld 抢在前面。
+    val register = controller.indexOf("inFlightRawNames.add(job.raw.name)")
+    val start = controller.indexOf("Thread({")
+    assertTrue("登记与起线程都必须存在", register >= 0 && start >= 0)
+    assertTrue("登记必须在起线程之前", register < start)
+    assertTrue("线程结束必须注销（否则同名原图永远清不掉）",
+      controller.contains("inFlightRawNames.remove(job.raw.name)"))
+  }
 }
