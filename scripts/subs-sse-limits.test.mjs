@@ -271,25 +271,124 @@ test('#1309 ② 改成按帧判之后，内存上限不得退化成「读完才�
     '判据拖到「读完再拒」了：读了 ' + reads + ' 个 4 MiB chunk，而上限只允许 ' + limitChunks + ' 个左右')
 })
 
+// ── issue #1340：#1309 ② 把上限挪到扫描之后，但只量了「未闭合的帧」 ──────────────
+//
+// 判据在扫描**之后**跑，而扫描会把已闭合的帧就地派发掉。于是「一次 read 送来
+// 完整帧（含终止空行）」走的是派发路径，长度判据根本没机会看到它：9.4 MiB 单帧
+// 直接进 `JSON.parse`；同样的字节按 64 KiB 分块则被拒。同一份字节、同一个帧，
+// 两种结论——上限仍是「网络分片形状」的属性，只是方向反了过来。
+
+test('#1340 同一超限帧：一次 read 与 64 KiB 分块必须给同一结论（都拒绝）', async () => {
+  const { parseSse } = await loadWithStubs('translate/sse.js')
+  const payload = 'x'.repeat(9 * 1024 * 1024)
+  const frame = new TextEncoder().encode('data: ' + payload + '\n\n')
+  const verdict = async (chunks) => {
+    try {
+      for await (const _ of parseSse(streamOf(chunks))) { /* consume */ }
+      return 'accepted'
+    }
+    catch (e) { return 'rejected: ' + String(e.message).slice(0, 60) }
+  }
+  const whole = await verdict([frame])
+  const parts = []
+  for (let i = 0; i < frame.length; i += 65536) parts.push(frame.slice(i, i + 65536))
+  const split = await verdict(parts)
+  assert.equal(whole.split(':')[0], 'rejected',
+    '一次 read 送来的超限帧被放行了——上限只对分块生效：' + whole)
+  assert.equal(split.split(':')[0], 'rejected', '64 KiB 分块送来的超限帧也应被拒：' + split)
+})
+
+test('#1340 超限帧不得进入下游：拒绝必须发生在派发之前', async () => {
+  const { parseSse } = await loadWithStubs('translate/sse.js')
+  // 关键不是「最后抛了错」，而是「有没有先吐出一个事件」。先 yield 再抛，
+  // 调用方已经拿到 9 MiB 的 data 并 JSON.parse 过了，之后再抛也来不及。
+  const payload = 'y'.repeat(9 * 1024 * 1024)
+  const frame = new TextEncoder().encode('data: ' + payload + '\n\n')
+  let events = 0
+  let error
+  try {
+    for await (const _ of parseSse(streamOf([frame]))) events += 1
+  }
+  catch (e) { error = e }
+  assert.ok(error !== undefined, '超限帧必须失败关闭')
+  assert.equal(events, 0, '超限帧被派发了 ' + events + ' 次才抛错——调用方已经拿到它的正文了')
+})
+
+test('#1340 上限以下的大帧仍必须逐字节送达（反向用例：判据不得误伤合法帧）', async () => {
+  const { parseSse, MAX_PENDING_CHARS } = await loadWithStubs('translate/sse.js')
+  // 贴着上限的合法帧，两种投递方式都要原样通过——修法不能把「接近上限」一并否掉。
+  const payload = 'z'.repeat(MAX_PENDING_CHARS - 64)
+  const frame = new TextEncoder().encode('data: ' + payload + '\n\n')
+  assert.ok(frame.length <= MAX_PENDING_CHARS, '夹具必须不超过上限（实得 ' + frame.length + '）')
+  const collect = async (chunks) => {
+    const out = []
+    for await (const ev of parseSse(streamOf(chunks))) out.push(ev)
+    return out
+  }
+  const whole = await collect([frame])
+  const parts = []
+  for (let i = 0; i < frame.length; i += 65536) parts.push(frame.slice(i, i + 65536))
+  const split = await collect(parts)
+  assert.equal(whole.length, 1, '一次 read 的合法大帧必须派发一次，实得 ' + whole.length)
+  assert.equal(split.length, 1, '分块的合法大帧必须派发一次，实得 ' + split.length)
+  assert.equal(whole[0].data.length, payload.length, '一次 read：正文被截断了')
+  assert.equal(split[0].data.length, payload.length, '分块：正文被截断了')
+})
+
+test('#1340 负控：把判据从 dispatch() 挪回「只量未闭合帧」，一次 read 用例必须变红', async () => {
+  const fs = await import('node:fs')
+  const { mkdtempSync, writeFileSync } = fs
+  const { tmpdir } = await import('node:os')
+  const source = fs.readFileSync(join(VENDOR, 'translate/sse.js'), 'utf8')
+  const guard = `        const consumed = frameChars();
+        if (consumed > MAX_PENDING_CHARS)
+            throw oversizedFrame(consumed, consumed + pending.length);
+`
+  assert.equal(source.split(guard).length - 1, 1, '负控锚点应恰好命中一次——sse.js 漂移了就要同步这里')
+  const mutant = source.replace(guard, '')
+  assert.notEqual(mutant, source, '负控没有产生任何变异')
+  const dir = mkdtempSync(join(tmpdir(), 'sse-mutant3-'))
+  const file = join(dir, 'sse.js')
+  writeFileSync(file, mutant)
+  const { parseSse } = await import(pathToFileURL(file).href + '?t=' + Math.random())
+  const payload = 'w'.repeat(9 * 1024 * 1024)
+  const frame = new TextEncoder().encode('data: ' + payload + '\n\n')
+  let events = 0
+  let error
+  try { for await (const _ of parseSse(streamOf([frame]))) events += 1 }
+  catch (e) { error = e }
+  assert.equal(error, undefined,
+    '负控失效：抽掉 dispatch() 的判据后一次 read 的超限帧仍被拒，说明正控没守住这条')
+  assert.equal(events, 1, '负控失效：抽掉判据后应放行（这正是修复前的缺陷形态）')
+})
+
 test('#1309 负控：把 dispatch 改回「空 data 也派发」，event-only 用例必须变红', async () => {
   const fs = await import('node:fs')
   const { mkdtempSync, writeFileSync } = fs
   const { tmpdir } = await import('node:os')
   const source = fs.readFileSync(join(VENDOR, 'translate/sse.js'), 'utf8')
+  // 锚点按内容钉：只认「无 data 行就不派发」这条判据本身，不认它前后的注释与
+  // issue #1340 新加的上限检查（那些会随本轮改动变化，锚死它们等于给自己埋漂移）。
   const before = `        if (dataLines.length === 0) {
             eventName = undefined;
             return undefined;
-        }
-        const event = { data: dataLines.join('\\n'), ...eventName === undefined ? {} : { event: eventName } };`
+        }`
   const after = `        if (dataLines.length === 0 && eventName === undefined)
-            return undefined;
-        const event = dataLines.length === 0
+            return undefined;`
+  assert.equal(source.split(before).length - 1, 1, '负控锚点应恰好命中一次——sse.js 漂移了就要同步这里')
+  // 「没有 data 行」时仍然构造出带 data 的事件，才是修复前的形态
+  const oldShape = `        const event = dataLines.length === 0
             ? { data: '', ...eventName === undefined ? {} : { event: eventName } }
             : { data: dataLines.join('\\n'), ...eventName === undefined ? {} : { event: eventName } };`
-  assert.equal(source.split(before).length - 1, 1, '负控锚点应恰好命中一次——sse.js 漂移了就要同步这里')
+  const curShape = `        const event = { data: dataLines.join('\\n'), ...eventName === undefined ? {} : { event: eventName } };`
+  assert.equal(source.split(curShape).length - 1, 1, '当前形态锚点应恰好命中一次')
+  // 两处一起回退才是完整的「修复前形态」：既要有 event-only 就派发的分支，
+  // 也要有它构造出的 `data: ''` 事件。
+  const mutant = source.replace(before, after).replace(curShape, oldShape)
+  assert.notEqual(mutant, source, '负控没有产生任何变异')
   const dir = mkdtempSync(join(tmpdir(), 'sse-mutant-'))
   const file = join(dir, 'sse.js')
-  writeFileSync(file, source.replace(before, after))
+  writeFileSync(file, mutant)
   const { parseSse } = await import(pathToFileURL(file).href + '?t=' + Math.random())
   const events = []
   for await (const e of parseSse(streamOf(['event: ping\n\n']))) events.push(e)
@@ -316,6 +415,21 @@ test('#1309 负控：把上限改回「扫描前按 read 量 pending」，9.4 Mi
   try { for await (const _ of parseSse(streamOf([bytes]))) { /* consume */ } }
   catch (e) { error = e }
   assert.ok(error !== undefined, '负控失效：改回「按 read 量」后 9.4 MiB 完整小帧仍然通过，说明用例没守住这条')
+})
+
+test('#1340 两份打包副本都带上了同一处修复（改一份漏一份 = 缺陷照旧出厂）', async () => {
+  const { readFileSync } = await import('node:fs')
+  const sseSource = readFileSync(join(VENDOR, 'translate/sse.js'), 'utf8')
+  const bundle = readFileSync(join(VENDOR, 'index.js'), 'utf8')
+  for (const [name, source] of [['translate/sse.js', sseSource], ['index.js', bundle]]) {
+    assert.ok(source.includes('issue #1340'), name + ' 缺 #1340 标记（另一份改了、这份没改？）')
+    // 判据必须落在 dispatch() 内部：这是帧变成事件的唯一出口。
+    assert.match(source, /const frameChars = \(\) =>/, name + ' 缺少 frameChars 辅助')
+    assert.match(source, /const consumed = frameChars\(\);/, name + ' 的 dispatch 未在派发前量帧长')
+    assert.match(source, /if \(consumed > MAX_PENDING_CHARS\)/, name + ' 的 dispatch 缺超限失败关闭')
+    // 未闭合帧那条判据必须仍在（否则不换行的流会无限增长到 EOF）
+    assert.match(source, /openFrameChars/, name + ' 丢了未闭合帧的判据（不换行的流会无界增长）')
+  }
 })
 
 test('#1284 两份打包副本都带上了同一处修复（改一份漏一份是这里的既定坑）', async () => {
