@@ -477,7 +477,7 @@ class PhotoCaptureTest {
 
   @Test
   fun `压缩先写临时文件再转正_不得直写成品`() {
-    val code = codeOnly(source("src/main/java/com/dsharnessmobile/shell/PhotoCapture.kt"))
+    val code = codeOnly(source("PhotoCapture.kt"))
     val body = code.substringAfter("internal fun compress(").substringBefore("internal fun publishCompressed(")
     assertTrue("必须先写带 TMP_SUFFIX 的临时文件", body.contains("dst.name + TMP_SUFFIX"))
     assertTrue("必须经 publishCompressed 转正", body.contains("publishCompressed(tmp, dst)"))
