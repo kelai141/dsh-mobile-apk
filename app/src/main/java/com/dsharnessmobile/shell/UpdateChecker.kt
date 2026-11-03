@@ -860,6 +860,43 @@ object UpdateChecker {
       val x = a.getOrElse(i) { 0L }; val y = b.getOrElse(i) { 0L }
       if (x != y) return x > y
     }
+    // issue #1365：核心数字相同**不等于**同版本——预发布段必须单独比。
+    // 旧实现在这里直接 return false：`v0.14.2-rc.2` 与 `0.14.2-rc.1` 都归约成 [0,14,2]，
+    // 于是 rc 用户被永久钉在当前 rc；正式版对 rc 用户同样判「已是最新」。
+    val preA = prereleaseOf(tag); val preB = prereleaseOf(current)
+    return when {
+      preA == null && preB == null -> false   // 同核心、都无预发布段 = 同版本
+      preA == null -> true                    // 正式版 > 同核心的预发布
+      preB == null -> false                   // 预发布 < 同核心的正式版
+      else -> comparePrerelease(preA, preB)
+    }
+  }
+
+  /**
+   * 预发布段：`-rc.2` → ("rc", [2])；`-SN-1-13` → ("sn", [1,13])；无白名单后缀 → null（issue #1365）。
+   *
+   * 只认 [PRERELEASE_SUFFIX] 白名单，`fx-N` 这类修订链**不在**其中——它们参与核心数字比较
+   * （`0.14.5-fx-3 > 0.14.5-fx-2`），语义与「预发布」不同。
+   */
+  internal fun prereleaseOf(v: String): Pair<String, List<Long>>? {
+    val bare = v.substringBefore('+')
+    val hit = PRERELEASE_SUFFIX.find(bare) ?: return null
+    val text = hit.value.removePrefix("-").lowercase()
+    val family = text.takeWhile { it.isLetter() }
+    val numbers = Regex("\\d+").findAll(text).map { it.value.toLongOrNull() ?: 0L }.toList()
+    return family to numbers
+  }
+
+  /** 两个预发布段的先后（SemVer：先比族名，再逐位比数字；缺省位补 0）。 */
+  private fun comparePrerelease(
+    a: Pair<String, List<Long>>,
+    b: Pair<String, List<Long>>,
+  ): Boolean {
+    if (a.first != b.first) return a.first > b.first
+    for (i in 0 until maxOf(a.second.size, b.second.size)) {
+      val x = a.second.getOrElse(i) { 0L }; val y = b.second.getOrElse(i) { 0L }
+      if (x != y) return x > y
+    }
     return false
   }
 
