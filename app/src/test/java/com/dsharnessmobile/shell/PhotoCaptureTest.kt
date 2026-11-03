@@ -440,7 +440,6 @@ class PhotoCaptureTest {
     assertTrue("受理拍照时必须先跑 sweepOld（保留位的有界回收就在这里）",
       controller.contains("PhotoCapture.sweepOld("))
   }
-  // ── issue #1387：连拍不得删掉仍在压缩的原图 ─────────────────────────────
 
   @Test
   fun `连拍时仍在压缩的原图不被清理删掉`() {
@@ -458,8 +457,24 @@ class PhotoCaptureTest {
     } finally {
       photoDir.deleteRecursively()
       rawDir.deleteRecursively()
+    }
+  }
 
-  // ── issue #1388：压缩失败不得在 attachments/ 里留半截成品 ─────────────────
+
+  @Test
+  fun `控制器把在途原图交给清理侧排除`() {
+    val controller = codeOnly(source("PhotoCaptureController.kt"))
+    assertTrue("受理拍照时必须把在途集合交给 sweepOld", controller.contains("exclude = inFlightRawNames.toSet()"))
+    assertTrue("必须用同步集合（压缩线程与主线程并发读写）",
+      controller.contains("Collections.synchronizedSet(mutableSetOf<String>())"))
+    // 登记必须在起线程之前：起线程之后再登记会有窗口期让并发的 sweepOld 抢在前面。
+    val register = controller.indexOf("inFlightRawNames.add(job.raw.name)")
+    val start = controller.indexOf("Thread({")
+    assertTrue("登记与起线程都必须存在", register >= 0 && start >= 0)
+    assertTrue("登记必须在起线程之前", register < start)
+    assertTrue("线程结束必须注销（否则同名原图永远清不掉）",
+      controller.contains("inFlightRawNames.remove(job.raw.name)"))
+  }
 
   @Test
   fun `成品转正失败时临时文件与目标都不留`() {
@@ -479,20 +494,8 @@ class PhotoCaptureTest {
     }
   }
 
-  @Test
-  fun `控制器把在途原图交给清理侧排除`() {
-    val controller = codeOnly(source("src/main/java/com/dsharnessmobile/shell/PhotoCaptureController.kt"))
-    assertTrue("受理拍照时必须把在途集合交给 sweepOld", controller.contains("exclude = inFlightRawNames.toSet()"))
-    assertTrue("必须用同步集合（压缩线程与主线程并发读写）",
-      controller.contains("Collections.synchronizedSet(mutableSetOf<String>())"))
-    // 登记必须在起线程之前：起线程之后再登记会有窗口期让并发的 sweepOld 抢在前面。
-    val register = controller.indexOf("inFlightRawNames.add(job.raw.name)")
-    val start = controller.indexOf("Thread({")
-    assertTrue("登记与起线程都必须存在", register >= 0 && start >= 0)
-    assertTrue("登记必须在起线程之前", register < start)
-    assertTrue("线程结束必须注销（否则同名原图永远清不掉）",
-      controller.contains("inFlightRawNames.remove(job.raw.name)"))
 
+  @Test
   fun `成品转正成功时落到最终路径`() {
     val dir = tempDir("photo-publish-ok")
     try {
@@ -507,30 +510,29 @@ class PhotoCaptureTest {
     }
   }
 
+
   @Test
   fun `压缩先写临时文件再转正_不得直写成品`() {
-    val code = codeOnly(source("src/main/java/com/dsharnessmobile/shell/PhotoCapture.kt"))
+    val code = codeOnly(source("PhotoCapture.kt"))
     val body = code.substringAfter("internal fun compress(").substringBefore("internal fun publishCompressed(")
     assertTrue("必须先写带 TMP_SUFFIX 的临时文件", body.contains("dst.name + TMP_SUFFIX"))
     assertTrue("必须经 publishCompressed 转正", body.contains("publishCompressed(tmp, dst)"))
     assertFalse("不得再直写成品路径", body.contains("FileOutputStream(dst)"))
     assertTrue("失败分支必须删临时文件", body.contains("tmp.delete()"))
-
-  // ── issue #1390：恢复路径的回执必须等页面就绪 ────────────────────────────
+  }
 
   @Test
   fun `恢复的在途拍照回执走延迟队列而不是裸投`() {
     // 冷启后相机很快返回时，页面可能还没注入 window.__dshBridge：裸 pushToPage 的回执会消失，
     // 页面永远等 onPhotoCaptured。Lost 分支一直走 queueReceipt，Resume 分支必须对齐。
-    val controller = codeOnly(source("src/main/java/com/dsharnessmobile/shell/PhotoCaptureController.kt"))
+    val controller = codeOnly(source("PhotoCaptureController.kt"))
     val resume = controller.substringAfter("is PhotoCapture.PendingRecovery.Resume ->")
       .substringBefore("is PhotoCapture.PendingRecovery.Lost ->")
     assertTrue("Resume 的回执必须走 queueReceipt", resume.contains("reply = { payload -> queueReceipt(payload) }"))
     assertFalse("Resume 不得再用裸 pushToPage", resume.contains("pushToPage(payload)"))
     assertTrue("Lost 分支仍走 queueReceipt（对照）",
       controller.substringAfter("is PhotoCapture.PendingRecovery.Lost ->").contains("queueReceipt("))
-
-  // ── issue #1389：恢复的在途记录必须会过期 ───────────────────────────────
+  }
 
   @Test
   fun `在途记录超过窗口即判过期`() {
@@ -546,10 +548,11 @@ class PhotoCaptureTest {
     assertFalse("刚开始不算过期", PhotoCapture.isPendingStale(startedAt, startedAt + 1_000))
   }
 
+
   @Test
   fun `恢复的条目必须带出落盘时刻`() {
     // 不带 startedAt 的话，恢复后的记录永远「刚受理」，过期判据拿不到真实年龄。
-    val code = codeOnly(source("src/main/java/com/dsharnessmobile/shell/PhotoCapture.kt"))
+    val code = codeOnly(source("PhotoCapture.kt"))
     assertTrue(
       "Resume 必须携带 startedAt",
       code.contains("data class Resume(val raw: File, val target: File, val startedAt: Long)"),
@@ -560,9 +563,10 @@ class PhotoCaptureTest {
     )
   }
 
+
   @Test
   fun `拍照入口把过期的在途记录清掉并如实回失败`() {
-    val controller = codeOnly(source("src/main/java/com/dsharnessmobile/shell/PhotoCaptureController.kt"))
+    val controller = codeOnly(source("PhotoCaptureController.kt"))
     assertTrue(
       "入口必须每次重算过期（不是只在恢复时算一次）",
       controller.contains("PhotoCapture.isPendingStale(inFlight.startedAt, System.currentTimeMillis())"),
