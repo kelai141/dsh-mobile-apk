@@ -338,9 +338,19 @@ internal object PhotoCapture {
     rawDir: File,
     keep: Int = KEEP_PHOTOS,
     now: Long = System.currentTimeMillis(),
+    /**
+     * 正在被压缩线程读取的原图文件名（issue #1387）。
+     *
+     * 连拍时第二张的 `capture()` 会先跑一遍本函数；keep=0 会把第一张**仍在压缩**的
+     * `raw-*.jpg` 当普通原图清掉，压缩线程读到缺失文件返回 null，而回执还写着「原图已保留」。
+     * 调用方把在途集合传进来即可，不需要把压缩串行化。
+     */
+    exclude: Set<String> = emptySet(),
   ): Int {
     return sweepDir(photoDir, keep) { it.isFile && it.name.startsWith(PHOTO_PREFIX) } +
-      sweepDir(rawDir, 0) { it.isFile && it.name.startsWith(RAW_PREFIX) && !isKeptRawName(it.name) } +
+      sweepDir(rawDir, 0) {
+        it.isFile && it.name.startsWith(RAW_PREFIX) && !isKeptRawName(it.name) && it.name !in exclude
+      } +
       sweepKeptRaw(rawDir, now)
   }
 
