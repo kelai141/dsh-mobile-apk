@@ -16,7 +16,7 @@
   ],
   "scripts": {
     "build": "node build.mjs",
-    "test": "node --test test/"
+    "test": "npm run build && node --test test/*.test.mjs"
   },
   "peerDependencies": {
     "react": ">=18"
