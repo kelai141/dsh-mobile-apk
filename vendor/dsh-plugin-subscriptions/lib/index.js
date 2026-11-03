@@ -449,11 +449,19 @@ function normalizeConfig(input) {
 			const promoted = parseProxyUrl(url);
 			promoted.username = "";
 			promoted.password = "";
+			// issue #1308：提升必须**回填**，不只是兜底。优先级 = 显式输入 > URL userinfo > 无；
+			// 从上一份配置播种来的值不在这条链上——此处它与显式输入已无法区分，而它曾经胜出，
+			// 于是粘贴的 http://user:new@host/ 静默沿用旧密码、同时 userinfo 又被剥出 url，两侧皆失。
+			const username = input.username !== void 0 && input.username !== "" ? input.username : embedded.username === "" ? void 0 : embedded.username;
+			// passwordCleared 是「显式清空」与「没给」的分水岭：清空是决定，缺席不是。
+			// 没有它，清空密码会被回填从 URL 复活，用户永远删不掉这个凭据。
+			const password = input.password !== void 0 && input.password !== "" && input.password !== null ? input.password : input.passwordCleared === true ? void 0 : embedded.password === "" ? void 0 : embedded.password;
 			return normalizeConfig({
 				enabled: input.enabled,
 				url: promoted.toString(),
-				username: input.username !== void 0 && input.username !== "" ? input.username : embedded.username === "" ? void 0 : embedded.username,
-				password: input.password !== void 0 && input.password !== "" && input.password !== null ? input.password : embedded.password === "" ? void 0 : embedded.password,
+				...username === void 0 ? {} : { username },
+				...password === void 0 ? {} : { password },
+				...input.passwordCleared === true ? { passwordCleared: true } : {},
 				bypass: input.bypass
 			});
 		}
@@ -580,12 +588,17 @@ async function proxyGetConfig() {
 */
 async function proxySetConfig(input) {
 	await ensureReady$1();
-	const password = input.password === void 0 ? current$1.password : input.password === null || input.password === "" ? void 0 : input.password;
+	// issue #1308：URL 里带 userinfo 时不得播种旧密码。播种会让「没给密码」与「显式给了密码」
+	// 在 normalizeConfig 里不可区分，而提升逻辑当时优先用播种值 → 粘进 URL 的新凭据两侧都丢。
+	const cleared = input.password === null || input.password === "";
+	const seeded = input.password === void 0 && urlCredentials(String(input.url).trim()) === void 0;
+	const password = seeded ? current$1.password : cleared ? void 0 : input.password;
 	const next = normalizeConfig({
 		enabled: input.enabled,
 		url: input.url,
 		...input.username === void 0 ? {} : { username: input.username },
 		...password === void 0 ? {} : { password },
+		...cleared ? { passwordCleared: true } : {},
 		bypass: input.bypass ?? current$1.bypass
 	});
 	await persistConfig(next, proxyFilePath());

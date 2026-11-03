@@ -29,16 +29,20 @@ function makeHome() {
 }
 
 /**
- * 载入 vendored `lib/http.js`。
+ * 载入一份 vendored `lib/http.js`（默认是仓库里那份；`file` 只在负控里换成变异副本）。
  *
  * 它 import 两个此处不可解析的包：`undici`（宿主提供，净检出没有 node_modules）与
  * `@deepseek-ai/dsh-home-paths`（引擎树提供）。用 `module.registerHooks` 就地打桩，
  * 从而**跑的是仓库里那份真实字节**，不是复制品；桩只提供构造函数与路径函数，
  * 断言的都是我们不依赖网络/磁盘布局的纯逻辑。
+ *
+ * `ProxyAgent` 桩把每次构造收到的 URL 记进 `globalThis.__subsAgentUrls`：只看配置视图
+ * 无法区分「密码生效了」与「密码存着但没交给代理」，而 #1308 的缺陷形态正是后者。
  */
-async function loadHttpModule(home) {
+async function loadHttpModule(home, file = HTTP_JS) {
   const stubs = {
-    undici: 'export class ProxyAgent { constructor(url) { this.url = String(url) } async close() {} }\n'
+    undici: 'globalThis.__subsAgentUrls ??= []\n'
+      + 'export class ProxyAgent { constructor(url) { this.url = String(url); globalThis.__subsAgentUrls.push(this.url) } async close() {} }\n'
       + 'export async function fetch() { throw new Error("no network in this test") }',
     '@deepseek-ai/dsh-home-paths': 'import { join } from "node:path"\n'
       + 'export function dshHomePath(...segs) { return join(' + JSON.stringify(home) + ', ...segs) }',
@@ -55,7 +59,22 @@ async function loadHttpModule(home) {
       return next(url, context)
     },
   })
-  return import(pathToFileURL(HTTP_JS).href + '?home=' + encodeURIComponent(home))
+  return import(pathToFileURL(file).href + '?home=' + encodeURIComponent(home) + '&t=' + Math.random())
+}
+
+/**
+ * 代理**实际收到**的凭据（user:pass），来自最后一次 `new ProxyAgent(url)`。
+ *
+ * 这是 #1308 唯一有判别力的观测点：`proxyGetConfig` 的视图按设计不含密码，
+ * 只看视图的话「新密码生效」与「旧密码被沿用」长得一模一样。
+ */
+function agentCredential() {
+  const urls = globalThis.__subsAgentUrls ?? []
+  const last = urls[urls.length - 1]
+  if (last === undefined) return undefined
+  const url = new URL(last)
+  const decode = (v) => { try { return decodeURIComponent(v) } catch { return v } }
+  return { username: decode(url.username), password: decode(url.password), basic: 'Basic ' + Buffer.from(decode(url.username) + ':' + decode(url.password)).toString('base64') }
 }
 
 /** 一枚不可猜的密码夹具：命中率 0 才有意义。 */
@@ -141,6 +160,198 @@ test('#1282 磁盘上已有的旧配置（密码在 url 里）在加载时被清
   assert.equal(readFileSync(file, 'utf8').includes(pass), false || true, '')
 })
 
+// ── issue #1308：粘贴的代理密码不得被播种的旧密码顶替 ────────────────────────────────
+//
+// #1282 的修法把 userinfo 从 `url` 里剥掉、提升为独立字段，这一步是对的；但它同时让
+// 「调用方没给 password」等同于「沿用上一份配置的 password」。于是**粘贴**一条
+// `http://bob:new@host/` 时：新密码被剥出 url（唯一记录点），随后又被播种值顶替
+// ——两侧都丢，而 `passwordSet` 还报 true（那是旧密码）。判据必须落在**代理实际收到的
+// 凭据**上，因为视图按设计不含密码，只看视图区分不出「新密码生效」与「旧密码沿用」。
+
+test('#1308 粘贴带 userinfo 的 URL：新密码必须覆盖播种的旧密码，并真的交给代理', async () => {
+  const home = makeHome()
+  const http = await loadHttpModule(home)
+  const oldPass = secret('old')
+  const newPass = secret('new')
+
+  await http.proxySetConfig({ enabled: true, url: 'http://127.0.0.1:7890/', username: 'bob', password: oldPass, bypass: [] })
+  assert.equal(agentCredential().password, oldPass, '前置：旧密码应先真的生效')
+
+  // 用户把整条带凭据的 URL 粘进 URL 框，密码框留空 —— 这正是 UI 的调用形态
+  // （lib/client.js 在密码框为空时**不带** password 字段）。
+  const saved = await http.proxySetConfig({
+    enabled: true,
+    url: 'http://bob:' + newPass + '@127.0.0.1:7890/',
+    username: 'bob',
+    bypass: [],
+  })
+
+  const seen = agentCredential()
+  assert.equal(seen.password, newPass, '代理用的仍是旧密码——粘贴的新密码被播种值顶替了（#1308 本体）')
+  assert.equal(seen.username, 'bob', '用户名应来自 userinfo')
+  assert.equal(saved.url.includes('@'), false, 'url 里不得留下 userinfo：' + saved.url)
+  assert.equal(JSON.stringify(saved).includes(newPass), false, '新密码不得出现在视图里：' + JSON.stringify(saved))
+  assert.equal(saved.passwordSet, true, '有密码时 passwordSet 必须为 true')
+
+  // 磁盘上也必须是新密码：只改内存 agent 而落盘仍旧值，重启即回退。
+  // 路径取自被测模块自己的 `proxyFilePath()`，不在这里重算一遍布局（重算就把
+  // 「模块把配置写到哪」这件事复制成了第二份真源）。
+  const onDisk = JSON.parse(readFileSync(http.proxyFilePath(), 'utf8'))
+  assert.equal(onDisk.password, newPass, '落盘的仍是旧密码：' + JSON.stringify(onDisk))
+  assert.equal(onDisk.url, 'http://127.0.0.1:7890/', '落盘 url 应只剩路由目标')
+})
+
+test('#1308 不带 userinfo 的常规保存：空密码框仍应沿用已存密码（不得连带改坏）', async () => {
+  const home = makeHome()
+  const http = await loadHttpModule(home)
+  const pass = secret('keep')
+
+  await http.proxySetConfig({ enabled: true, url: 'http://127.0.0.1:7890/', username: 'bob', password: pass, bypass: [] })
+  // 改端口、密码框留空：这是「只改路由目标」的常见操作，密码必须原样保留。
+  const saved = await http.proxySetConfig({ enabled: true, url: 'http://127.0.0.1:7891/', username: 'bob', bypass: [] })
+
+  assert.equal(agentCredential().password, pass, '不带 userinfo 时空密码框不应丢掉已存密码')
+  assert.equal(saved.passwordSet, true, 'passwordSet 应保持 true')
+})
+
+test('#1308 清空密码：得到 user:（无密码），不得被回填复活成旧密码', async () => {
+  const home = makeHome()
+  const http = await loadHttpModule(home)
+  const pass = secret('clear')
+
+  await http.proxySetConfig({ enabled: true, url: 'http://127.0.0.1:7890/', username: 'bob', password: pass, bypass: [] })
+  const saved = await http.proxySetConfig({ enabled: true, url: 'http://127.0.0.1:7890/', username: 'bob', password: null, bypass: [] })
+
+  const seen = agentCredential()
+  assert.equal(seen.username, 'bob', '清空密码不应把用户名一起丢掉')
+  assert.equal(seen.password, '', '清空后代理不得再带旧密码，实得 ' + JSON.stringify(seen.password))
+  // `user:` 的 base64 —— 空密码要真的以空值发出，而不是整个 userinfo 消失（那是另一种行为）
+  assert.equal(seen.basic, 'Basic ' + Buffer.from('bob:').toString('base64'), '清空后的凭据应为 user:（空密码），实得 ' + seen.basic)
+  assert.equal(saved.passwordSet, false, '清空后 passwordSet 必须为 false')
+})
+
+/**
+ * 把真实 `http.js` 复制到临时树并**只**回退一处判据，其余字节不动。
+ *
+ * 为什么不用 `node --test` 的用例级 mock：判据本身是「代理实际收到哪个密码」，
+ * 而它的输入端有**两道**闸（`proxySetConfig` 的播种、`normalizeConfig` 的提升优先级）。
+ * 只抽掉其中一道，另一道仍可能兜住结果——那样负控会假绿。所以这里分别对两道闸
+ * 各做一次变异，两次都必须让同一条正控变红，才证明这道判据是必要的。
+ */
+function writeMutant(mutate) {
+  const source = readFileSync(HTTP_JS, 'utf8')
+  const mutated = mutate(source)
+  assert.notEqual(mutated, source, '负控变异点没有命中——源码漂移了，需同步本用例的锚点')
+  const dir = mkdtempSync(join(tmpdir(), 'subs-mutant-'))
+  const file = join(dir, 'http.js')
+  writeFileSync(file, mutated)
+  return file
+}
+
+/** 走一遍「先有旧密码，再粘贴带新密码的 URL」，返回代理最终收到的密码。 */
+async function pasteNewPasswordOverOld(http, newPass, oldPass = secret('mutant-old')) {
+  await http.proxySetConfig({ enabled: true, url: 'http://127.0.0.1:7890/', username: 'bob', password: oldPass, bypass: [] })
+  await http.proxySetConfig({ enabled: true, url: 'http://bob:' + newPass + '@127.0.0.1:7890/', username: 'bob', bypass: [] })
+  return agentCredential().password
+}
+
+// 上面三条正控只覆盖了「调用方没给 password」。提升优先级自身还有两种可区分的输入，
+// 它们的答案与 userinfo 相反——正是这两条让那道闸成为**必要条件**，而不是等价写法。
+
+test('#1308 显式密码字段与 URL userinfo 同时存在：字段胜出（意图更精确的那个赢）', async () => {
+  const home = makeHome()
+  const http = await loadHttpModule(home)
+  const fromField = secret('field-wins')
+  const fromUrl = secret('url-loses')
+
+  await http.proxySetConfig({
+    enabled: true,
+    url: 'http://bob:' + fromUrl + '@127.0.0.1:7890/',
+    username: 'bob',
+    password: fromField,
+    bypass: [],
+  })
+  const seen = agentCredential()
+  assert.equal(seen.password, fromField, '两个来源同时给密码时应以显式字段为准，实得 ' + JSON.stringify(seen.password))
+  assert.equal(seen.password === fromUrl, false, 'URL 里的那份不得胜出')
+})
+
+test('#1308 清空密码 + URL 仍带 userinfo：必须清空，不得被 userinfo 回填复活', async () => {
+  const home = makeHome()
+  const http = await loadHttpModule(home)
+  const fromUrl = secret('url-revive')
+
+  await http.proxySetConfig({
+    enabled: true,
+    url: 'http://bob:' + fromUrl + '@127.0.0.1:7890/',
+    username: 'bob',
+    password: null,
+    bypass: [],
+  })
+  const seen = agentCredential()
+  assert.equal(seen.username, 'bob', '清空密码不应丢用户名')
+  assert.equal(seen.password, '', '显式清空是决定，不能被 userinfo 回填覆盖，实得 ' + JSON.stringify(seen.password))
+})
+
+test('#1308 负控 A：抽掉 normalizeConfig 的两处优先级判据，对应正控必须变红', async () => {
+  const fromField = secret('mutant-a-field')
+  const fromUrl = secret('mutant-a-url')
+
+  // A1：显式字段优先于 userinfo
+  const httpA1 = await loadHttpModule(makeHome(), writeMutant((source) => source.replace(
+    `            const password = input.password !== undefined && input.password !== '' && input.password !== null
+                ? input.password
+                : input.passwordCleared === true
+                    ? undefined
+                    : embedded.password === '' ? undefined : embedded.password;`,
+    // 回退成「userinfo 恒定胜出」的旧形态：显式输入压不住它。
+    `            const password = embedded.password === '' ? undefined : embedded.password;`,
+  )))
+  await httpA1.proxySetConfig({ enabled: true, url: 'http://bob:' + fromUrl + '@127.0.0.1:7890/', username: 'bob', password: fromField, bypass: [] })
+  assert.notEqual(agentCredential().password, fromField,
+    '负控 A1 失效：抽掉提升优先级后显式字段仍然胜出，说明那条正控没有守住这道闸')
+
+  // A2：显式清空优先于 userinfo 回填
+  const httpA2 = await loadHttpModule(makeHome(), writeMutant((source) => source.replace(
+    `                : input.passwordCleared === true
+                    ? undefined
+                    : embedded.password === '' ? undefined : embedded.password;`,
+    `                : embedded.password === '' ? undefined : embedded.password;`,
+  )))
+  await httpA2.proxySetConfig({ enabled: true, url: 'http://bob:' + fromUrl + '@127.0.0.1:7890/', username: 'bob', password: null, bypass: [] })
+  assert.notEqual(agentCredential().password, '',
+    '负控 A2 失效：抽掉 passwordCleared 后清空仍生效，说明该判据不是必要条件')
+})
+
+test('#1308 内部标记不得落盘：passwordCleared 只是进程内的传递位，不是配置字段', async () => {
+  const home = makeHome()
+  const http = await loadHttpModule(home)
+  const pass = secret('noleak')
+
+  await http.proxySetConfig({ enabled: true, url: 'http://bob:' + pass + '@127.0.0.1:7890/', username: 'bob', bypass: [] })
+  const afterPaste = JSON.parse(readFileSync(http.proxyFilePath(), 'utf8'))
+  assert.equal(Object.hasOwn(afterPaste, 'passwordCleared'), false,
+    'passwordCleared 落盘了：它是内部传递位，写进配置会让下次加载的语义变得不可预测')
+
+  await http.proxySetConfig({ enabled: true, url: 'http://127.0.0.1:7890/', username: 'bob', password: null, bypass: [] })
+  const afterClear = JSON.parse(readFileSync(http.proxyFilePath(), 'utf8'))
+  assert.equal(Object.hasOwn(afterClear, 'passwordCleared'), false, '清空路径同样不得落盘该标记')
+  assert.deepEqual(Object.keys(afterClear).sort(), ['bypass', 'enabled', 'url', 'username'],
+    '清空后的磁盘配置键集合应回到最简形态，实得 ' + JSON.stringify(afterClear))
+})
+
+test('#1308 负控 B：抽掉 proxySetConfig 的「有 userinfo 就不播种」，粘贴的新密码必须被顶替', async () => {
+  const newPass = secret('mutant-b')
+  const http = await loadHttpModule(makeHome(), writeMutant((source) => source.replace(
+    `    const seeded = input.password === undefined
+        && urlCredentials(String(input.url).trim()) === undefined`,
+    // 回退成「没给密码就一律播种旧值」：这正是 #1308 修复前的第一道闸。
+    `    const seeded = input.password === undefined`,
+  )))
+  assert.notEqual(await pasteNewPasswordOverOld(http, newPass), newPass,
+    '负控 B 失效：抽掉「有 userinfo 就不播种」后新密码仍然生效，说明正控没有守住这道闸')
+})
+
 test('#1282 两份打包副本都带上了同一处修复（避免改一份漏一份）', () => {
   // lib/http.js 是源码形态的直接副本，lib/index.js 是 rollup 打包副本：两者都含一份
   // proxyGetConfig/normalizeConfig。历史坑：只改一份，另一份仍出厂。
@@ -154,5 +365,22 @@ test('#1282 两份打包副本都带上了同一处修复（避免改一份漏�
     // 出错文案必须走 redact，而不是直接插值原始 URL
     assert.equal(/proxy URL "\$\{raw\}" is not a valid URL/.test(source), false,
       name + ' 的解析失败文案仍直接插值 raw（会把密码写进错误信息）')
+  }
+})
+
+test('#1308 两份打包副本都带上了同一处修复（改一份漏一份 = 缺陷照旧出厂）', () => {
+  for (const file of [HTTP_JS, INDEX_JS]) {
+    const source = readFileSync(file, 'utf8')
+    const name = file.split(/[\\/]/).pop()
+    assert.ok(source.includes('issue #1308'), name + ' 缺少 #1308 标记注释（另一份改了、这份没改？）')
+    // 判据 ①：带 userinfo 时不得播种旧密码。
+    // 两份副本的写法不同（http.js 用 `undefined`，打包副本用 `void 0`），断言只认语义。
+    assert.match(source, /urlCredentials\(String\(input\.url\)\.trim\(\)\)\s*===\s*(?:undefined|void 0)/,
+      name + ' 的 proxySetConfig 未按「URL 带 userinfo 就不播种」分流')
+    // 判据 ②：显式清空必须能与「没给」区分（否则清空会被 userinfo 回填复活）
+    assert.match(source, /passwordCleared === true/, name + ' 缺少 passwordCleared 分支')
+    // 判据 ③：提升时回填，而不是让 userinfo 恒定胜出
+    assert.equal(/password: input\.password !== [\s\S]{0,120}?embedded\.password === '' \? undefined : embedded\.password/.test(source), false,
+      name + ' 的提升分支仍是旧形态（userinfo 压过显式输入）')
   }
 })
