@@ -88,4 +88,20 @@ class UpdateArtifactRecheckTest {
       action.contains("verifiedArtifact = VerifiedArtifact(dest, r.sizeBytes, r.sha256)"),
     )
   }
+  // ── issue #1410：单槽字段的写入必须有换代守卫 ────────────────────────────
+
+  @Test
+  fun `下载收尾写 verifiedArtifact 必须带换代守卫`() {
+    // 同函数上面两处早退都有 `isCurrentEpoch(e)`，唯独收尾那次赋值没有：下载线程换代后
+    // 仍会把旧产物写进单槽，下一次 install() 就可能以它为据（校验结论与实际包不一致）。
+    val action = src("ApkUpdateAction.kt")
+    val at = action.indexOf("verifiedArtifact = VerifiedArtifact(")
+    assertTrue("找不到收尾赋值", at > 0)
+    val window = action.substring(maxOf(0, at - 320), at + 160)
+    assertTrue("赋值必须在 synchronized(publicationLock) 内", window.contains("synchronized(publicationLock)"))
+    assertTrue("赋值必须受 isCurrentEpoch 守卫", window.contains("isCurrentEpoch(e)"))
+    // 反证：不得回到裸赋值（守卫在上一行、赋值在锁外的形态同样不合格）
+    val line = action.substring(0, at).split("\n").last()
+    assertTrue("赋值行不得是裸赋值：$line", !line.trim().startsWith("verifiedArtifact ="))
+  }
 }

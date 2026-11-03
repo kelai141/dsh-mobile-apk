@@ -667,7 +667,11 @@ internal class ApkUpdateController(private val activity: Activity) {
       return
     }
     // issue #676：把这次的校验依据绑在产物上（下面 install() 拉起安装器前会用它重验字节）。
-    verifiedArtifact = VerifiedArtifact(dest, r.sizeBytes, r.sha256)
+    // issue #1410：单槽字段的**写入**同样要换代守卫——同函数上面两处早退都有 `isCurrentEpoch(e)`，
+    // 唯独这里没有；下载线程在换代后仍会把旧产物写进来，下一次 install() 就可能以它为据。
+    synchronized(publicationLock) {
+      if (isCurrentEpoch(e)) verifiedArtifact = VerifiedArtifact(dest, r.sizeBytes, r.sha256)
+    }
     val reusedFlag = reused
     // 注意：此处**不**清载荷——install() 在 UI 线程跑且可能落到「需授权」相位，而那一刻才离开
     // downloading。载荷的清零与相位切换成对发生（见 install/failDownload），不变量因此始终成立。
