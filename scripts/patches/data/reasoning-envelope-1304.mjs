@@ -22,10 +22,16 @@ export function replayReasoningItem(value) {
       && typeof value.encrypted_content !== 'string') throw new Error('reasoning-1304: invalid encrypted reasoning')
   if (value.summary != null && !Array.isArray(value.summary)) throw new Error('reasoning-1304: invalid reasoning summary')
   // No content:null, status, or provider-only output properties in input items.
+  //
+  // issue #1336：但**非 null 的 content 必须保留**。它是 xAI/grok 形态下「非加密的
+  // 思考正文」（`[{type:'reasoning_text', text:'…'}]`）。原先无条件丢弃，于是
+  // response.completed 写回的 signature 里没有它，重放该 item 无法还原思考正文。
+  // 只丢 null/undefined —— 上游「不把 content:null 送回去」的口径仍然成立。
   return {
     type: 'reasoning',
     ...(typeof value.id === 'string' ? { id: value.id } : {}),
     summary: value.summary ?? [],
+    ...(Array.isArray(value.content) ? { content: value.content } : {}),
     ...(typeof value.encrypted_content === 'string' ? { encrypted_content: value.encrypted_content } : {}),
   }
 }
@@ -200,20 +206,32 @@ export function scopedReasoningStream(stream, scope, createStream) {
   const result = createStream()
   ;(async () => {
     try {
-      let terminal = false
       for await (const event of stream) {
-        terminal ||= event.type === 'done' || event.type === 'error'
         for (const message of [event.partial, event.message, event.error]) {
           if (message) message.dshReasoningScope = scope
         }
         result.push(event)
       }
-      if (!terminal) throw new Error('missing terminal event')
+      // issue #1335 ②：迭代器正常结束但**没有**终止事件（连接被掐）时，不要在这里
+      // 伪造一个终止错误事件。原先的 `if (!terminal) throw new Error('missing terminal
+      // event')` 会被下面的 catch 转成一个带内错误事件，于是上游「缺终止事件」的判据
+      // 永远不触发 —— STREAM_CLOSED 对包装流不可达，「流被掐断」与「provider 报错」
+      // 在观测上无法区分。这里直接 end()，把判断交还给上游。
       result.end()
     } catch (error) {
       // Native streams normally report errors in-band. A thrown stream remains loud.
+      //
+      // issue #1335 ①：必须保留**原始** error 文本与 code。上游 dsh-llm-pi-ai 的
+      // classifyPiAiError 是按原文匹配来分类的（上下文超限 / 鉴权 / 限流 / 超时），
+      // 原先一律改写成固定文案 'reasoning-1304: provider stream failed'，等于把分类
+      // 全部抹平：用户拿到的是一句不可解释的通用错误，排障者也失去可行动信息。
+      const message = error instanceof Error ? error.message : String(error)
+      const code = error !== null && typeof error === 'object' && typeof error.code === 'string'
+        ? error.code
+        : undefined
       result.push({ type: 'error', reason: 'error', error: {
-        role: 'assistant', content: [], stopReason: 'error', errorMessage: 'reasoning-1304: provider stream failed',
+        role: 'assistant', content: [], stopReason: 'error', errorMessage: message,
+        ...code === undefined ? {} : { errorCode: code },
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
       } })
@@ -288,7 +306,14 @@ export function patchReasoningResponses(source) {
                 const stored = JSON.parse(previous.thinkingSignature);
                 previous.thinkingSignature = JSON.stringify(replayReasoningItem({ ...stored, ...item,
                     encrypted_content: item.encrypted_content ?? stored.encrypted_content }));
-                const text = Array.isArray(item.summary) ? item.summary.map(part => part.text ?? "").join("\\n\\n") : previous.thinking;
+                // issue #1336：终止推理块必须按 summary || content || 既有正文 取文本。
+                // 原先只看 summary，对「只有 content、summary 为空」的推理项（xAI/grok
+                // Responses 形态）会算出空串，把已经显示出来的思考内容清空，并多推一个
+                // 内容为空的 thinking_end。上游 openai-responses-shared.js 用的是
+                // summaryText || contentText || slot.block.thinking —— 这里对齐同一口径。
+                const summaryText = Array.isArray(item.summary) ? item.summary.map(part => part.text ?? "").join("\\n\\n") : "";
+                const contentText = Array.isArray(item.content) ? item.content.map(part => part.text ?? "").join("\\n\\n") : "";
+                const text = summaryText || contentText || previous.thinking;
                 if (text !== previous.thinking) {
                     previous.thinking = text;
                     stream.push({ type: "thinking_end", contentIndex: output.content.indexOf(previous), content: text, partial: output });
