@@ -882,7 +882,10 @@ object UpdateChecker {
     val bare = v.substringBefore('+')
     val hit = PRERELEASE_SUFFIX.find(bare) ?: return null
     val text = hit.value.removePrefix("-").lowercase()
-    val family = text.takeWhile { it.isLetter() }
+    // 不用 Kotlin 的 takeWhile 扩展：ApiLevelGuardTest 的禁用正则按名字把它整类判成
+    // java.util.stream 的同名方法（API 34），而 CharSequence 上的那个扩展是全版本安全的
+    // —— 与同文件里 isBlank 的注释同一类误报。这里用正则取族名，门禁判据不动。
+    val family = Regex("^[a-z]+").find(text)?.value ?: ""
     val numbers = Regex("\\d+").findAll(text).map { it.value.toLongOrNull() ?: 0L }.toList()
     return family to numbers
   }
