@@ -64,14 +64,41 @@ test('旧小图释放40%仍不够时继续淘汰，保留最新图片', () => {
   assert.equal(batch([50, 50], { maxBytes: 100 }), 1)
 })
 
-test('不淘汰唯一可用观察；最新单图自身超硬上限时明确报错且不篡改历史', () => {
+test('不淘汰唯一可用观察；最新单图自身超硬上限时返回计数而不是抛错（issue #1334）', () => {
   assert.equal(batch([], budget), 0)
   assert.equal(batch([95], budget), 0)
   const lengths = Object.freeze([10, 101])
-  assert.throws(() => batch(lengths, budget), error => error.code === 'INVALID_REQUEST')
-  assert.deepEqual(lengths, [10, 101])
+  // issue #1334：这里原先断言抛 INVALID_REQUEST —— 那是缺陷本身的形态，不是契约。
+  // 唯一消费方 dsh-compaction-image-offload 只认 IMAGE_OFFLOAD_REQUIRED_CODE，其它 code
+  // 一律 return next() 放过，于是没有任何环节去卸载，该会话每轮都失败、删附件前无法恢复。
+  // 正确契约是返回计数（全部 occurrence），让适配器抛 IMAGE_OFFLOAD_REQUIRED(n)：
+  // 卸载换的是表示形态（内联 base64 → 引用），字节数大幅下降，重试即可通过。
+  assert.equal(batch(lengths, budget), 2, '最新单图自身超上限时必须返回全部 occurrence 计数')
+  assert.deepEqual(lengths, [10, 101], '不得篡改入参历史')
 })
 
+test('issue #1334：最新一张图自身超预算时，requiredImageOffload 必须返回计数而不是抛错', () => {
+  // 这是 issue 的原始复现：一张 3 B 的小图 + 一张 21 MiB（base64 后）的大图，
+  // 预算 20 MiB。旧策略返回 2 -> 适配器抛 IMAGE_OFFLOAD_REQUIRED(2) -> 卸载 -> 重试成功；
+  // 抛出 INVALID_REQUEST 的版本会让唯一消费方 return next() 放过，之后每一轮都失败，
+  // 该会话在删掉附件之前彻底卡死。
+  const base64Length = fn(core, 'base64Length')
+  const visitImageBlocks = fn(core, 'visitImageBlocks')
+  const required = fn(patched, 'requiredImageOffload', { base64Length, visitImageBlocks, offloadedImagePrefixCount: batch })
+  const big = 21 * 1024 * 1024
+  const history = [{
+    role: 'user',
+    content: [
+      { type: 'image', attachment: { bytes: 3 } },
+      { type: 'image', attachment: { bytes: big } },
+    ],
+  }]
+  let count
+  assert.doesNotThrow(() => {
+    count = required(history, { representation: 'base64', maxBytes: 20 * 1024 * 1024 }, block => block.attachment.bytes)
+  }, '最新图自身超预算时不得抛错——抛了就没有任何环节会去卸载')
+  assert.equal(count, 2, '必须返回全部 occurrence 计数（两张都卸载），实得 ' + count)
+})
 test('实际 requiredImageOffload 按每次出现计数及 Base64 后字节触发', () => {
   const base64Length = fn(core, 'base64Length')
   const visitImageBlocks = fn(core, 'visitImageBlocks')
