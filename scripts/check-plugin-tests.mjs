@@ -87,6 +87,35 @@ function runSubrepoNpm(dir, repo, run = runCommand, spawn = spawnSync, platform 
 }
 
 /**
+ * 为子仓安装依赖（issue #1466）：有 lockfile 用 `npm ci`，否则 `npm install`。
+ *
+ * 为什么门禁自己要装：`dsh-client-ui-responsive` 的 vitest 套件此前**没有任何 CI 步骤执行**
+ * （它的 `node_modules` 不在库里、也没有别的作业装它），于是那条 SKIP 一直静默成立。
+ *
+ * @param {string} dir 子仓绝对路径。
+ * @param {string} repo 子仓名（仅用于日志）。
+ * @returns {{ ok: boolean, note: string }} ok=false 时 note 是**给人看的原因**（进 SKIP 统计）。
+ */
+function installSubrepoDeps(dir, repo) {
+  const cwd = realpathSync(dir)
+  const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+  const hasLock = existsSync(join(cwd, 'package-lock.json'))
+  const args = hasLock ? ['ci', '--no-audit', '--no-fund'] : ['install', '--no-audit', '--no-fund']
+  console.log('NOTE  ' + repo + '：依赖缺失，先跑 ' + npmBin + ' ' + args.join(' '))
+  const r = runCommand(npmBin, args, {
+    cwd, encoding: 'utf8', shell: process.platform === 'win32', timeout: TEST_TIMEOUT_MS,
+  })
+  if (r.error !== undefined && r.error !== null) {
+    return { ok: false, note: String(r.error.code ?? r.error.message) }
+  }
+  if (r.status !== 0) {
+    const tail = stripAnsi(((r.stdout ?? '') + (r.stderr ?? '')).trim()).split('\n').slice(-2).join(' / ')
+    return { ok: false, note: 'exit ' + String(r.status) + (tail ? '：' + tail : '') }
+  }
+  return { ok: true, note: '' }
+}
+
+/**
  * 去掉 ANSI 颜色转义。为什么必须去（本轮实测）：vitest 的输出是
  * `[2m Tests [22m [1m[32m262 passed[39m[22m`，按裸文本匹配 `Tests\s+(\d+) passed` 永远不中，
  * 于是「测试全绿」被判成「未产生有效通过数（全 skip = 假绿）」——**假红**。
@@ -96,6 +125,25 @@ function runSubrepoNpm(dir, repo, run = runCommand, spawn = spawnSync, platform 
  */
 function stripAnsi(text) {
   return text.replace(/\[[0-9;]*[A-Za-z]/g, '')
+}
+
+/** issue #1466：UI 子仓里**必须真跑**的判据（点名）。缺一个就判红，防止判据被删还整体绿。 */
+const REQUIRED_UI_SPECS = ['root 授权终态（issue #1377）']
+
+/**
+ * 抽出 vitest 的**具体用例名**（`✓` / `✔` 行）。
+ * 为什么点名：只判 `Tests N passed` 时，把某条判据删了照样绿——那是假绿。
+ * @param {string} text 已剥 ANSI 的输出。
+ * @returns {string[]}
+ */
+function parseSpecNames(text) {
+  const out = []
+  for (const line of text.split('\n')) {
+    if (/\(\d+ tests?\)/.test(line)) continue // 文件级行（`✓ tests/x.spec.tsx (12 tests)`）
+    const m = line.match(/^\s*[✓✔]\s+(.+?)(?:\s+\(\d+(?:\.\d+)?m?s\))?\s*$/)
+    if (m) out.push(m[1].trim())
+  }
+  return out
 }
 
 /**
@@ -578,7 +626,7 @@ for (const repo of SUBREPO_TESTS) {
     continue
   }
   const pkg = JSON.parse(fsmod.readFileSync(pkgPath, 'utf8'))
-  const hasDeps = existsSync(join(dir, 'node_modules'))
+  let hasDeps = existsSync(join(dir, 'node_modules'))
   const bare = []
   for (const sub of ['test', 'scripts']) {
     const d = join(dir, sub)
@@ -586,8 +634,16 @@ for (const repo of SUBREPO_TESTS) {
     for (const f of fsmod.readdirSync(d)) if (f.endsWith('.test.mjs')) bare.push(join(sub, f))
   }
   if (!hasDeps && bare.length === 0) {
-    skipLine(repo + ' 的子仓测试（无依赖且无自带 *.test.mjs）')
-    continue
+    // issue #1466：这里此前**直接 SKIP**，于是 UI 子仓的判据写多少条都等于「编译通过就算过」——
+    // CI 全绿只证明别的东西没坏。现在先尝试装依赖：装上就真跑判据；装不上才 SKIP，
+    // 并把原因写进 SKIP 统计（不静默通过）。
+    const installed = installSubrepoDeps(dir, repo)
+    if (installed.ok) {
+      hasDeps = true
+    } else {
+      skipLine(repo + ' 的子仓测试（依赖安装失败：' + installed.note + '）')
+      continue
+    }
   }
   if (!hasDeps && typeof pkg.scripts?.test !== 'string') {
     skipLine(repo + ' 的子仓测试（无依赖且未声明 test 脚本）')
@@ -619,6 +675,22 @@ for (const repo of SUBREPO_TESTS) {
   } else if (passN3 <= 0) {
     failed += 1
     console.error('FAIL  ' + repo + ' 的子仓测试未产生有效通过数（全 skip = 假绿）')
+  } else if (repo === 'dsh-client-ui-responsive') {
+    // issue #1466：UI 子仓必须有**点名的判据**真的跑过。只认 'Tests N passed' 时，删掉某条判据仍然绿——
+    // CI 证据里看不出少了什么。
+    const names = parseSpecNames(plain3)
+    const missing = REQUIRED_UI_SPECS.filter((frag) => !names.some((n) => n.includes(frag)))
+    if (missing.length > 0) {
+      failed += 1
+      console.error('FAIL  ' + repo + ' 缺少必需的判据用例（点名缺失即判红）：' + missing.join(', '))
+      console.error('  已点名 ' + names.length + ' 项；请确认 reporter 是 verbose（否则嵌套用例名不会打印）')
+    } else {
+      console.log('PASS  ' + repo + '（' + how + ' / ' + passN3 + ' 项通过；点名 ' + names.length + ' 项）')
+      for (const req of REQUIRED_UI_SPECS) {
+        const hit = names.find((n) => n.includes(req))
+        if (hit) console.log('  ✓ ' + hit)
+      }
+    }
   } else {
     console.log('PASS  ' + repo + '（' + how + ' / ' + passN3 + ' 项通过）')
   }
