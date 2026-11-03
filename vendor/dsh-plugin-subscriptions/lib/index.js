@@ -590,13 +590,23 @@ async function proxySetConfig(input) {
 	await ensureReady$1();
 	// issue #1308：URL 里带 userinfo 时不得播种旧密码。播种会让「没给密码」与「显式给了密码」
 	// 在 normalizeConfig 里不可区分，而提升逻辑当时优先用播种值 → 粘进 URL 的新凭据两侧都丢。
+	const embedded = urlCredentials(String(input.url).trim());
 	const cleared = input.password === null || input.password === "";
-	const seeded = input.password === void 0 && urlCredentials(String(input.url).trim()) === void 0;
+	const seeded = input.password === void 0 && embedded === void 0;
 	const password = seeded ? current$1.password : cleared ? void 0 : input.password;
+	// issue #1341：用户名那半区需要同一条规则，但它不能用「字段缺席」当信号——设置对话框
+	// **总是**发送预填的 username（lib/client.js 从已存配置预填并无条件提交）。于是「字段存在」
+	// 不等于「用户填了」，无条件让它胜出会把一条粘贴进来的凭据拆到两个账号上：
+	// http://alice:NEWPASS@host/ 得到 bob:NEWPASS——旧账号配新密码，视图仍显示 bob、
+	// passwordSet 仍为 true，且没有任何诊断。
+	// 真正能区分的信号是**值变没变**：预填值等于已存用户名，用户改过则不等。所以只有字段
+	// 未被改动时 URL userinfo 才压过它；显式改名仍然胜出（用户要 carol 而不是 URL 里的 alice，
+	// 那是更精确的意图）。
+	const username = embedded !== void 0 && (input.username === void 0 || input.username === current$1.username) ? embedded.username : input.username;
 	const next = normalizeConfig({
 		enabled: input.enabled,
 		url: input.url,
-		...input.username === void 0 ? {} : { username: input.username },
+		...username === void 0 ? {} : { username },
 		...password === void 0 ? {} : { password },
 		...cleared ? { passwordCleared: true } : {},
 		bypass: input.bypass ?? current$1.bypass
