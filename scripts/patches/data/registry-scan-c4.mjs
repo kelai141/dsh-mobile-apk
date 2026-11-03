@@ -3,10 +3,9 @@
 export const CLIENT_SCAN_MARKER = 'dsh-mobile registry scan C4'
 export const TYPERT_SCAN_MARKER = 'dsh-mobile typert scan C4'
 
-function replaceOnce(source, before, after, label) {
-  if (source.split(before).length !== 2) throw new Error(`registry-scan C4 anchor mismatch: ${label}`)
-  return source.replace(before, after)
-}
+// 判据与实现统一到 scripts/patches/lib/replace-once.mjs（issue #1384：同一判据只写一处）。
+// 行为不变：出现次数必须恰好是 1，否则抛（原来是 split().length !== 2）。
+import { replaceOnce } from '../lib/replace-once.mjs' 
 
 export function planClientRegistryScan(source) {
   if (source.includes(CLIENT_SCAN_MARKER)) return planGatewayClientSource(source)
