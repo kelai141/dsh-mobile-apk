@@ -3154,6 +3154,8 @@ async function* parseSse(stream, onActivity) {
 	let pending = "";
 	let dataLines = [];
 	let eventName;
+	/** 当前正在拼装的那一帧已累计的字符数。 */
+	const frameChars = () => dataLines.reduce((n, line) => n + line.length + 1, 0);
 	const dispatch = () => {
 		// issue #1309 ①：没有 data: 字段的帧**不派发**（WHATWG「dispatch the event」原话）。
 		// 要保护的是保活帧 event: ping\n\n —— 它只带类型不带负载，做成 { data: "" }
@@ -3163,6 +3165,12 @@ async function* parseSse(stream, onActivity) {
 			eventName = void 0;
 			return void 0;
 		}
+		// issue #1340：上限必须在**这里**判——帧变成事件的唯一出口。只量「未闭合的帧」
+		// 会漏掉所有已闭合的帧：一次 read 送来的 data: <9 MiB>\n\n 会被扫描后就地派发，
+		// 长度判据根本看不到它，9 MiB 直接进 JSON.parse；而同样的字节按 64 KiB 分块则被拒。
+		// 同一份字节、同一个帧、两种结论 —— 上限仍然是「网络分片形状」的属性，只是方向反了。
+		const consumed = frameChars();
+		if (consumed > MAX_PENDING_CHARS) throw new Error(`SSE frame exceeded ${String(MAX_PENDING_CHARS)} chars before its terminating blank line (frame ${String(consumed)}, reassembly buffer ${String(consumed + pending.length)}); refusing to grow further`);
 		const event = {
 			data: dataLines.join("\n"),
 			...eventName === void 0 ? {} : { event: eventName }
@@ -3202,7 +3210,10 @@ async function* parseSse(stream, onActivity) {
 			}
 			// 扫描之后仍在缓冲里的，全部属于**那一帧**：pending 是它尚未终结的行，
 			// dataLines 是已消费的 data: 行。二者之和才是上限推导所依据的量。
-			const openFrameChars = pending.length + dataLines.reduce((n, line) => n + line.length + 1, 0);
+			// issue #1340：这条判据只覆盖**尚未闭合**的帧（对端一直在滴一行而不终结，
+			// 永远不会走到 dispatch()）；刚闭合的帧由 dispatch() 判。两条都必须有：
+			// 只在这里判，就是「一次 read 的完整帧被放行」的缺陷形态。
+			const openFrameChars = pending.length + frameChars();
 			if (openFrameChars > MAX_PENDING_CHARS) throw new Error(`SSE frame exceeded ${String(MAX_PENDING_CHARS)} chars before its terminating blank line (frame ${String(openFrameChars)}, reassembly buffer ${String(openFrameChars)}); refusing to grow further`);
 		}
 	} finally {

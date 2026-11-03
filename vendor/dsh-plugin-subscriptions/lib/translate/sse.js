@@ -87,6 +87,8 @@ export async function* parseSse(stream, onActivity) {
     let pending = '';
     let dataLines = [];
     let eventName;
+    /** Characters accumulated in the frame currently being assembled. */
+    const frameChars = () => dataLines.reduce((n, line) => n + line.length + 1, 0);
     const dispatch = () => {
         // issue #1309 ①: a frame with no `data:` field is **not** dispatched.
         // WHATWG's "dispatch the event" step says so outright, and the shape it
@@ -99,6 +101,17 @@ export async function* parseSse(stream, onActivity) {
             eventName = undefined;
             return undefined;
         }
+        // issue #1340: the ceiling has to be enforced **here**, at the single
+        // point where a frame becomes an event. Checking only the still-open
+        // frame (below) missed every frame that arrived already terminated:
+        // a read carrying `data: <9 MiB>\n\n` was scanned, dispatched and
+        // handed to `JSON.parse` without the limit ever seeing it, while the
+        // byte-identical frame split into 64 KiB reads was rejected. Same bytes,
+        // same frame, opposite verdicts — so the limit was still a property of
+        // how the network happened to split the stream.
+        const consumed = frameChars();
+        if (consumed > MAX_PENDING_CHARS)
+            throw oversizedFrame(consumed, consumed + pending.length);
         const event = { data: dataLines.join('\n'), ...eventName === undefined ? {} : { event: eventName } };
         dataLines = [];
         eventName = undefined;
@@ -149,15 +162,19 @@ export async function* parseSse(stream, onActivity) {
                     eventName = line.slice(6).replace(/^ /, '');
                 }
             }
-            // ① (continued) After the scan, everything still buffered belongs to
-            //    the **one** frame that has not terminated yet: `pending` is its
-            //    last unterminated line, `dataLines` are the `data:` lines already
-            //    consumed from it. That sum is the quantity the ceiling is derived
-            //    from ("how big can one legitimate event get"), so it is what gets
-            //    measured. A read that delivered many complete frames leaves both
-            //    at zero — which is the whole point of checking after the scan
-            //    rather than before it.
-            const openFrameChars = pending.length + dataLines.reduce((n, line) => n + line.length + 1, 0);
+            // ① (continued) The scan leaves behind only what belongs to the frame
+            //    still being assembled: `pending` is its unterminated tail and
+            //    `dataLines` are the `data:` lines already consumed from it. A
+            //    read that delivered many complete frames leaves both at zero —
+            //    they were dispatched, and `dispatch()` capped each of them.
+            //
+            //    issue #1340: this check covers the frame that has NOT terminated
+            //    yet (a peer dribbling an endless line, where no `dispatch()` will
+            //    ever run); `dispatch()` covers the frame that just closed. Both
+            //    are needed — capping only here is what let a single-read
+            //    terminated frame through, capping only in `dispatch()` would let
+            //    an unterminated line grow without bound until EOF.
+            const openFrameChars = pending.length + frameChars();
             if (openFrameChars > MAX_PENDING_CHARS)
                 throw oversizedFrame(openFrameChars, openFrameChars);
         }
