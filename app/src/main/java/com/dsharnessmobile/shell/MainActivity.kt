@@ -88,7 +88,7 @@ class MainActivity : ComponentActivity() {
   private val pickToken: String = EngineManager.ensurePickToken()
 
   /** 跨类 ::isInitialized 形式（EngineStartFlow 监控/冻结看门狗用；语义等价原 lambda 内检查）。 */
-  private val pageRecovery = ForegroundPageRecoveryPolicy()
+  internal val pageRecovery = ForegroundPageRecoveryPolicy()
   private var pendingWebPresentation = false
   /**
    * 非前台期间收到插件装配失败契约行时挂起的前台呈现（CONTRACT §4），由 [onResume] 消费。
@@ -513,8 +513,8 @@ class MainActivity : ComponentActivity() {
     }
   }
 
-  internal fun retryFailedEnginePage() {
-    if (enginePageFailed && pageRecovery.claimLoadErrorRetry()) reloadEnginePage()
+  internal fun retryFailedEnginePage(epoch: Long = 0L) {
+    if (enginePageFailed && pageRecovery.claimLoadErrorRetry(epoch)) reloadEnginePage()
   }
 
   private fun recoverPageIfPending(): Boolean {
