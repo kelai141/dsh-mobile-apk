@@ -458,6 +458,24 @@ class PhotoCaptureTest {
     } finally {
       photoDir.deleteRecursively()
       rawDir.deleteRecursively()
+
+  // ── issue #1388：压缩失败不得在 attachments/ 里留半截成品 ─────────────────
+
+  @Test
+  fun `成品转正失败时临时文件与目标都不留`() {
+    // rename 失败（例如目标位置已被占用/权限异常）时，宁可这次压缩失败，也不留半截成品：
+    // 它会计入 KEEP_PHOTOS 配额挤掉好图，还落在 FileProvider 映射面内被当成品分享。
+    val dir = tempDir("photo-publish")
+    try {
+      val tmp = File(dir, PhotoCapture.PHOTO_PREFIX + "20260101-000000-000.jpg" + PhotoCapture.TMP_SUFFIX)
+        .apply { writeText("half-written jpeg") }
+      // 目标位置是个空目录 ⇒ renameTo 必然失败
+      val dst = File(dir, PhotoCapture.PHOTO_PREFIX + "20260101-000000-000.jpg").apply { mkdirs() }
+      assertFalse("rename 失败必须如实返回 false", PhotoCapture.publishCompressed(tmp, dst))
+      assertFalse("临时文件不得残留", tmp.exists())
+      assertFalse("目标位置的空壳也不得残留", dst.exists())
+    } finally {
+      dir.deleteRecursively()
     }
   }
 
@@ -474,5 +492,28 @@ class PhotoCaptureTest {
     assertTrue("登记必须在起线程之前", register < start)
     assertTrue("线程结束必须注销（否则同名原图永远清不掉）",
       controller.contains("inFlightRawNames.remove(job.raw.name)"))
+
+  fun `成品转正成功时落到最终路径`() {
+    val dir = tempDir("photo-publish-ok")
+    try {
+      val tmp = File(dir, PhotoCapture.PHOTO_PREFIX + "20260101-000001-000.jpg" + PhotoCapture.TMP_SUFFIX)
+        .apply { writeText("jpeg") }
+      val dst = File(dir, PhotoCapture.PHOTO_PREFIX + "20260101-000001-000.jpg")
+      assertTrue("正常路径必须成功", PhotoCapture.publishCompressed(tmp, dst))
+      assertTrue("成品必须在最终路径上", dst.isFile)
+      assertFalse("临时文件必须消失", tmp.exists())
+    } finally {
+      dir.deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `压缩先写临时文件再转正_不得直写成品`() {
+    val code = codeOnly(source("src/main/java/com/dsharnessmobile/shell/PhotoCapture.kt"))
+    val body = code.substringAfter("internal fun compress(").substringBefore("internal fun publishCompressed(")
+    assertTrue("必须先写带 TMP_SUFFIX 的临时文件", body.contains("dst.name + TMP_SUFFIX"))
+    assertTrue("必须经 publishCompressed 转正", body.contains("publishCompressed(tmp, dst)"))
+    assertFalse("不得再直写成品路径", body.contains("FileOutputStream(dst)"))
+    assertTrue("失败分支必须删临时文件", body.contains("tmp.delete()"))
   }
 }
