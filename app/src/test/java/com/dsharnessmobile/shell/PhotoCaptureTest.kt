@@ -440,4 +440,18 @@ class PhotoCaptureTest {
     assertTrue("受理拍照时必须先跑 sweepOld（保留位的有界回收就在这里）",
       controller.contains("PhotoCapture.sweepOld("))
   }
+  // ── issue #1390：恢复路径的回执必须等页面就绪 ────────────────────────────
+
+  @Test
+  fun `恢复的在途拍照回执走延迟队列而不是裸投`() {
+    // 冷启后相机很快返回时，页面可能还没注入 window.__dshBridge：裸 pushToPage 的回执会消失，
+    // 页面永远等 onPhotoCaptured。Lost 分支一直走 queueReceipt，Resume 分支必须对齐。
+    val controller = codeOnly(source("src/main/java/com/dsharnessmobile/shell/PhotoCaptureController.kt"))
+    val resume = controller.substringAfter("is PhotoCapture.PendingRecovery.Resume ->")
+      .substringBefore("is PhotoCapture.PendingRecovery.Lost ->")
+    assertTrue("Resume 的回执必须走 queueReceipt", resume.contains("reply = { payload -> queueReceipt(payload) }"))
+    assertFalse("Resume 不得再用裸 pushToPage", resume.contains("pushToPage(payload)"))
+    assertTrue("Lost 分支仍走 queueReceipt（对照）",
+      controller.substringAfter("is PhotoCapture.PendingRecovery.Lost ->").contains("queueReceipt("))
+  }
 }
