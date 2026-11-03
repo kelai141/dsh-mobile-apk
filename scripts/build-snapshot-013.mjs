@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import { wslPath, sh as wsl, shStatus, XZ_THREADS, wslNodeCommand } from './lib/shell.mjs'
 import { sanitizeSymlinks } from './lib/symlink-sanitize.mjs'
+import { assertOverlayDigest } from './lib/overlay-integrity.mjs'
 import { relocateGitShellPath } from './lib/git-shell-path.mjs'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -224,9 +225,9 @@ const overlayTgz = async (name, version) => {
   const dist = meta?.versions?.[version]?.dist
   if (!dist) throw new Error(`overlay 元数据不可得: ${name}@${version}`)
   const buf = Buffer.from(await (await fetch(dist.tarball, { signal: AbortSignal.timeout(300000) })).arrayBuffer())
-  if (dist.sha512 && createHash('sha512').update(buf).digest('base64') !== dist.sha512) {
-    throw new Error(`overlay sha512 不匹配: ${name}@${version}`)
-  }
+  // issue #1415：旧写法 `if (dist.sha512 && …)` 在镜像不返回 sha512 时静默放行远端字节。
+  // 判据收口在 lib/overlay-integrity.mjs（缺摘要即拒，integrity=sha512-… 也能比）。
+  assertOverlayDigest(dist, buf, `${name}@${version}`)
   writeFileSync(dest, buf)
   return dest
 }
