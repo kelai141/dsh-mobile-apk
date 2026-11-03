@@ -1,12 +1,20 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { Context } from '@deepseek-ai/cordis'
+import ts from 'typescript'
 import { createLinuxPluginHost, registerLinuxEnvironmentRoutes, checkLinuxEnvironmentAfterMobileChange, normalizeLinuxStatus, cordisScope } from '../lib/linux-environment.js'
+
+// Cordis 4.0.5 erases its exported const enum from JS; compile that declaration for these fixtures.
+const fiberSource = await readFile(new URL(import.meta.resolve('@deepseek-ai/cordis/src/fiber.ts')), 'utf8')
+const { outputText } = ts.transpileModule(fiberSource.match(/export const enum FiberState \{[^}]+\}/)[0], {
+  compilerOptions: { module: ts.ModuleKind.ESNext },
+})
+const { FiberState } = await import(`data:text/javascript,${encodeURIComponent(outputText)}`)
 
 const TOKEN = 'a'.repeat(32)
 function makeBootstrap(overrides = {}) {
@@ -166,6 +174,116 @@ test('pluginHost rejects pending or failed Cordis activation and cleans partial 
     await assert.rejects(host.install({ directory }), /did not become active/)
     await host.uninstall()
   } finally { await ctx.fiber.dispose(); await rm(dir, { recursive: true, force: true }) }
+})
+
+test('pluginHost reports external Cordis disposal and replaces the cached manager', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'linux-host-disposed-'))
+  const ctx = new Context()
+  try {
+    const directory = join(dir, 'runtime')
+    await mkdir(join(directory, 'lib'), { recursive: true })
+    await writeFile(join(directory, 'lib', 'index.js'), 'export function apply(ctx) { ctx.provide("linuxRuntimeManager", { install: async () => {}, uninstall: async () => {} }) }')
+    let fiber
+    let activations = 0
+    const host = createLinuxPluginHost({ root: dir, activate: (plugin, config) => {
+      activations += 1
+      fiber = ctx.plugin(plugin, config)
+      return cordisScope(fiber)
+    } })
+    const first = await host.install({ directory })
+    assert.equal((await host.install({ directory })).manager, first.manager)
+    assert.equal(activations, 1)
+    await fiber.dispose()
+    assert.equal(fiber.state, FiberState.DISPOSED)
+    for (const query of [{ directory }, {}]) {
+      assert.deepEqual(await host.isInjected(query), { injected: true, active: false, directory })
+    }
+    assert.notEqual((await host.install({ directory })).manager, first.manager)
+    assert.equal(activations, 2)
+    await host.uninstall()
+  } finally { await ctx.fiber.dispose(); await rm(dir, { recursive: true, force: true }) }
+})
+
+test('pluginHost only reuses scopes with ACTIVE or absent state', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'linux-host-state-'))
+  try {
+    const directory = join(dir, 'runtime')
+    await mkdir(join(directory, 'lib'), { recursive: true })
+    await writeFile(join(directory, 'lib', 'index.js'), '')
+    for (const state of [undefined, ...Object.values(FiberState).filter(value => typeof value === 'number')]) {
+      let scope
+      let activations = 0
+      const host = createLinuxPluginHost({
+        root: dir, importModule: async () => ({ apply() {} }),
+        activate: () => {
+          activations += 1
+          return scope = { state: FiberState.ACTIVE, dispose() {}, manager: makeManager() }
+        },
+      })
+      const first = await host.install({ directory })
+      scope.state = state
+      const active = state === undefined || state === FiberState.ACTIVE
+      for (const query of [{ directory }, {}]) {
+        assert.deepEqual(await host.isInjected(query), { injected: true, active, directory })
+      }
+      const next = await host.install({ directory })
+      assert.equal(next.manager === first.manager, active)
+      assert.equal(activations, active ? 1 : 2)
+      await host.uninstall()
+      if (!active) {
+        const inactive = createLinuxPluginHost({
+          root: dir, importModule: async () => ({ apply() {} }),
+          activate: () => ({ state, dispose() {}, manager: makeManager() }),
+        })
+        await assert.rejects(inactive.install({ directory }), /did not become active/)
+      }
+    }
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
+test('pluginHost forgets failed disposals and recovers after uninstall or rollback rejection', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'linux-host-dispose-error-'))
+  try {
+    const directory = join(dir, 'runtime')
+    await mkdir(join(directory, 'lib'), { recursive: true })
+    await writeFile(join(directory, 'lib', 'index.js'), '')
+    for (const rollback of [false, true]) {
+      for (const asyncDispose of [false, true]) {
+        const error = Object.assign(new Error('busy runtime'), { code: 'EBUSY' })
+        let activations = 0
+        let disposals = 0
+        const host = createLinuxPluginHost({
+          root: dir, importModule: async () => ({ apply() {} }),
+          activate: () => {
+            activations += 1
+            return {
+              state: FiberState.ACTIVE, manager: makeManager(),
+              dispose() {
+                disposals += 1
+                this.state = FiberState.DISPOSED
+                if (disposals > 1) return
+                if (asyncDispose) return Promise.reject(error)
+                throw error
+              },
+            }
+          },
+        })
+        const first = await host.install({ directory })
+        await assert.rejects(rollback ? first.rollback() : host.uninstall(), caught => caught === error)
+        assert.deepEqual(await host.isInjected({ directory }), { injected: true, active: false, directory })
+        assert.deepEqual(await host.isInjected({}), { injected: false, active: false })
+        await host.uninstall()
+        assert.equal(disposals, 1)
+        const next = await host.install({ directory })
+        assert.notEqual(next.manager, first.manager)
+        assert.equal(activations, 2)
+        await next.rollback()
+        await next.rollback()
+        await host.uninstall()
+        assert.equal(disposals, 2)
+      }
+    }
+  } finally { await rm(dir, { recursive: true, force: true }) }
 })
 
 test('isInjected reads injection membership without creating or repairing anything', async () => {
