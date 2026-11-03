@@ -232,20 +232,37 @@ function normalizeConfig(input) {
         // browser, and it also made `passwordSet` report `false` for a config
         // that does have a password. Promotion happens on every normalize, so a
         // config already on disk is cleaned the next time it is loaded.
+        //
+        // issue #1308: promotion must **backfill**, not merely fall back. The
+        // precedence is explicit input > URL userinfo > nothing; a value seeded
+        // from the previous config is *not* in that list, because at this point
+        // the two are indistinguishable — and seeding used to win, so a pasted
+        // `http://user:new@host/` silently kept the old password while the
+        // userinfo was being stripped out of `url`. Both halves of the new
+        // credential were then gone: not used, not stored.
         const embedded = urlCredentials(url);
         if (embedded !== undefined) {
             const promoted = parseProxyUrl(url);
             promoted.username = '';
             promoted.password = '';
+            const username = input.username !== undefined && input.username !== ''
+                ? input.username
+                : embedded.username === '' ? undefined : embedded.username;
+            // `passwordCleared` is what keeps an explicit "clear the password"
+            // from being undone by the backfill below: clearing is a decision,
+            // absence is not. Without it, wiping the field would resurrect the
+            // credential from the URL and the user could never get rid of it.
+            const password = input.password !== undefined && input.password !== '' && input.password !== null
+                ? input.password
+                : input.passwordCleared === true
+                    ? undefined
+                    : embedded.password === '' ? undefined : embedded.password;
             return normalizeConfig({
                 enabled: input.enabled,
                 url: promoted.toString(),
-                username: input.username !== undefined && input.username !== ''
-                    ? input.username
-                    : embedded.username === '' ? undefined : embedded.username,
-                password: input.password !== undefined && input.password !== '' && input.password !== null
-                    ? input.password
-                    : embedded.password === '' ? undefined : embedded.password,
+                ...username === undefined ? {} : { username },
+                ...password === undefined ? {} : { password },
+                ...input.passwordCleared === true ? { passwordCleared: true } : {},
                 bypass: input.bypass,
             });
         }
@@ -400,9 +417,19 @@ export async function proxyGetConfig() {
  */
 export async function proxySetConfig(input) {
     await ensureReady();
-    const password = input.password === undefined
+    // issue #1308: the "omitted password keeps the stored one" rule must not
+    // run when the caller just pasted a credential inside the URL. Seeding
+    // `current.password` there made an absent field indistinguishable from an
+    // explicit one, and `normalizeConfig` then preferred the seed over the
+    // userinfo it was promoting — so the pasted password was dropped without a
+    // trace. The two cases are told apart by where the credential lives:
+    // a URL userinfo is a *fresh* credential and outranks the stored one.
+    const cleared = input.password === null || input.password === ''
+    const seeded = input.password === undefined
+        && urlCredentials(String(input.url).trim()) === undefined
+    const password = seeded
         ? current.password
-        : input.password === null || input.password === ''
+        : cleared
             ? undefined
             : input.password;
     const next = normalizeConfig({
@@ -410,6 +437,7 @@ export async function proxySetConfig(input) {
         url: input.url,
         ...input.username === undefined ? {} : { username: input.username },
         ...password === undefined ? {} : { password },
+        ...cleared ? { passwordCleared: true } : {},
         bypass: input.bypass ?? current.bypass,
     });
     await persistConfig(next, proxyFilePath());
