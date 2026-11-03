@@ -61,8 +61,67 @@ function claimOf(value: unknown): ClaimReply | undefined {
     : undefined
 }
 
-function waitTurn(): Promise<void> {
-  return new Promise(resolve => { window.setTimeout(resolve, 100) })
+/**
+ * 一组任务按**有界并发**跑（issue #1413）。
+ *
+ * 旧实现是串行 `for (const item of items) await this.hydrate(item)`：一条条目卡住，队列里
+ * 其余文件全部等着。改成有界并发后，单条慢/失败都不阻塞其它条目；单条异常在这里被吞掉，
+ * 不影响同批其它条目（它们各自有自己的重试与终止标记）。
+ *
+ * @param items - 待处理条目。
+ * @param limit - 并发上限（至少 1）。
+ * @param task - 单条处理函数。
+ */
+export async function runBounded<T>(
+  items: readonly T[],
+  limit: number,
+  task: (item: T) => Promise<void>,
+): Promise<void> {
+  if (items.length === 0) return
+  const width = Math.max(1, Math.min(Math.floor(limit) || 1, items.length))
+  let next = 0
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const index = next
+      next += 1
+      if (index >= items.length) return
+      try { await task(items[index]) } catch { /* 单条失败不阻塞同批其它条目 */ }
+    }
+  }
+  await Promise.all(Array.from({ length: width }, () => worker()))
+}
+
+/** 从一个 HTTP 错误对象上取状态码（不同层用 status / statusCode 两种写法）。 */
+function statusOf(error: unknown): number | undefined {
+  const e = error as { status?: unknown, statusCode?: unknown } | null | undefined
+  if (typeof e?.status === "number") return e.status
+  if (typeof e?.statusCode === "number") return e.statusCode
+  return undefined
+}
+
+/**
+ * 这个状态码是不是**终态**（服务端明确拒绝，重试也不会变好）。
+ *
+ * 4xx 里 408（请求超时）与 429（限流）是显式可重试的，不算终态；5xx 一律可重试。
+ */
+export function isTerminalStatus(status: number | undefined): boolean {
+  if (status === undefined) return false
+  if (status === 408 || status === 429) return false
+  return status >= 400 && status < 500
+}
+
+/**
+ * 刷新会话目录失败时，这次失败是否**终态**（issue #1412）。
+ *
+ * 旧实现把「刷新失败」一律当终态：`catch { sessionId = undefined }` 丢掉条目自带的
+ * sessionId，落进「新建会话」分支 —— claim 用新 id 与服务端记录不符 → 非 ok → 静默
+ * return → 下一轮重试（上限 5 次）⇒ 一次分享最多产生 5 个空会话。
+ *
+ * 判据：只有服务端明确拒绝（4xx，除 408/429）才算这个 id 已死；网络失败 / 超时 / 5xx
+ * 一律保留原 id 重试。
+ */
+export function isTerminalRefreshFailure(error: unknown): boolean {
+  return isTerminalStatus(statusOf(error))
 }
 
 /** Drives one process-local external attachment flow. */
@@ -76,6 +135,8 @@ export class IncomingDraftConsumer {
   /** 已经提示过「临时工作区不可用」的条目（S3-21：同一 entryId 只提示一次）。 */
   private readonly workspaceWarned = new Set<string>()
   private static readonly MAX_HYDRATE_ATTEMPTS = 5
+  /** issue #1413：一批条目的并发上限。一条慢/失败不得阻塞同批其它条目。 */
+  private static readonly POLL_CONCURRENCY = 4
 
   /** @param fetchImpl authenticated same-origin fetch. @param runtime session/conversation bridge. */
   constructor(
@@ -94,10 +155,9 @@ export class IncomingDraftConsumer {
       const payload = await response.json().catch(() => null) as { items?: unknown[] } | null
       if (!Array.isArray(payload?.items)) return
       document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'items:' + String(payload.items.length))
-      for (const raw of payload.items) {
-        const item = itemOf(raw)
-        if (item !== undefined) await this.hydrate(item)
-      }
+      // issue #1413：有界并发，别让一条慢条目把整个队列串住。
+      const items = payload.items.map(itemOf).filter((i): i is IncomingDraftItem => i !== undefined)
+      await runBounded(items, IncomingDraftConsumer.POLL_CONCURRENCY, (item) => this.hydrate(item))
     } catch (error) {
       console.warn('[dsh-mobile] incoming draft queue retry deferred:', String(error))
     } finally {
@@ -163,8 +223,20 @@ export class IncomingDraftConsumer {
           // standard client creator is already local; refreshing it can stall behind an unrelated
           // list request before its attachment handoff.
           if (item.sessionId !== undefined) await this.runtime.refreshSessions()
-        } catch {
-          sessionId = undefined
+        } catch (error) {
+          // issue #1412：刷新失败**不得**丢掉条目自带的 sessionId。
+          //
+          // 丢了就落进下面的「新建会话」分支：claim 用新 id 与服务端记录不符 → 非 ok →
+          // 静默 return → 下一轮重试（上限 5 次）⇒ 一次分享最多产生 5 个空会话。
+          //
+          // 只有服务端明确拒绝（4xx，除 408/429）才判这个 id 已死；网络失败 / 超时 / 5xx
+          // 保留原 id，交给下一轮 poll 重试——期间**不建新会话**。
+          if (isTerminalRefreshFailure(error)) {
+            sessionId = undefined
+          } else {
+            document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'session-refresh-deferred')
+            return
+          }
         }
         if (sessionId !== undefined) {
           try { this.runtime.openSession(sessionId) } catch { /* navigation may lag an addressable Session */ }
@@ -194,12 +266,14 @@ export class IncomingDraftConsumer {
       // J1 admits through the same InputHub shell that owns the rendered composer. The Session
       // controller resolves before that UI scope can be bound on cold WebView startup, so retain
       // the queue record and wait through the bounded binding window rather than losing the draft.
-      let scope = this.runtime.sessionScope(sessionId)
-      for (let attempt = 0; scope === undefined && attempt < 100; attempt += 1) {
-        await waitTurn()
-        scope = this.runtime.sessionScope(sessionId)
+      // issue #1413：**不原地自旋**。旧实现最多 100 × 100ms = 10s 卡在这一条上，而 poll 当时
+      // 是串行的 ⇒ 队列里其余文件在这 10s 内一个都不处理。会话作用域在冷启动后很快绑定，
+      // 条目留在队列里，下一轮 poll 再来即可。
+      const scope = this.runtime.sessionScope(sessionId)
+      if (scope === undefined) {
+        document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'scope-deferred')
+        return
       }
-      if (scope === undefined) return
       let ticket = ''
       try {
         document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'claim')
@@ -209,6 +283,10 @@ export class IncomingDraftConsumer {
         })
         const claim = claimResponse.ok ? claimOf(await claimResponse.json().catch(() => null)) : undefined
         document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'claim:' + String(claimResponse.status))
+        // issue #1412：claim 失败这里**保持**既有的有界重试 + 提示一次（C10）。
+        // 不能改成「立即终态」：finish() 需要 ticket，而 claim 失败时还没有 ticket，没有可终态的
+        // 对象；而「反复重试」的**真实危害**是每次新建一个空会话 —— 那一条已由上面的
+        // isTerminalRefreshFailure 分支堵掉（重试复用同一个 sessionId）。
         if (claim === undefined) return
         ticket = claim.ticket as string
         const content = await this.fetchImpl('/api/android/file-incoming/content?ticket=' + encodeURIComponent(ticket), {

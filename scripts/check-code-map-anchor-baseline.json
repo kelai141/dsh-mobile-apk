@@ -447,7 +447,7 @@
     "scripts/check-tool-output-schema.mjs:153": 2,
     "plugins/dsh-android-file-open/src/route-auth.ts:47": 2,
     "app/src/main/java/com/dsharnessmobile/shell/FileIncoming.kt:32": 1,
-    "dsh-client-ui-responsive/src/client/mobile/incoming-draft.ts:175": 1,
+    "dsh-client-ui-responsive/src/client/mobile/incoming-draft.ts:247": 1,
     "dsh-shell-termux/src/index.ts:42": 2,
     "plugins/dsh-android-file-open/src/index.ts:302": 1,
     "dsh-client-ui-responsive/src/client/android-bridge.ts:17": 1,
@@ -759,8 +759,8 @@
     "session-marker.ts:67": 1,
     "browser-auto-place.ts:85": 1,
     "index.ts:444": 1,
-    "incoming-draft.ts:86": 1,
-    "dsh-client-ui-responsive/tests/incoming-draft.spec.ts:166": 1,
+    "incoming-draft.ts:147": 1,
+    "dsh-client-ui-responsive/tests/incoming-draft.spec.ts:174": 1,
     "trajectory-panels-observer.ts:43": 1,
     "trajectory-details.css.ts:44": 1,
     "index.ts:142": 1,
@@ -792,7 +792,7 @@
     "phone-control.tsx:363": 1,
     "notify-settings.tsx:66": 1,
     "phone-control.tsx:220": 1,
-    "incoming-draft.ts:150": 1,
+    "incoming-draft.ts:210": 1,
     "browser-auto-place.ts:45": 1,
     "index.ts:380": 1,
     "native-browser-presentation.ts:61": 1,
@@ -2924,7 +2924,7 @@
     "dsh-client-ui-responsive/src/client/mobile/form-marker.ts:88": [
       ".filter(dialog => dialog.closest('[data-shell-overlay]') === null)"
     ],
-    "dsh-client-ui-responsive/src/client/mobile/incoming-draft.ts:175": [
+    "dsh-client-ui-responsive/src/client/mobile/incoming-draft.ts:247": [
       "const cwd = window.androidBridge?.incomingWorkspacePath?.() ?? ''"
     ],
     "dsh-client-ui-responsive/src/client/mobile/native-browser-presentation.ts:20": [
@@ -2936,7 +2936,7 @@
     "dsh-client-ui-responsive/src/client/mobile/native-browser-presentation.ts:61": [
       "readonly clipsX: boolean"
     ],
-    "dsh-client-ui-responsive/tests/incoming-draft.spec.ts:166": [
+    "dsh-client-ui-responsive/tests/incoming-draft.spec.ts:174": [
       "expect(document.documentElement.getAttribute('data-dsh-incoming-draft-poll')).toBe('exhausted')"
     ],
     "dsh-host-web-compat/scripts/boot-watchdog.test.mjs:231": [
@@ -2969,10 +2969,10 @@
     "form-marker.ts:96": [
       "document.documentElement.toggleAttribute(SETTINGS_OPEN_TAG, settings !== null)"
     ],
-    "incoming-draft.ts:150": [
+    "incoming-draft.ts:210": [
       ""
     ],
-    "incoming-draft.ts:86": [
+    "incoming-draft.ts:147": [
       "/** Fetch eligible queue metadata and hydrate each blank-session attachment once. */"
     ],
     "index.js:2198": [
