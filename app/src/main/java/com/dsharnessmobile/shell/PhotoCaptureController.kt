@@ -32,6 +32,8 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
   private data class Pending(
     val raw: File,
     val target: File,
+    /** 受理时刻（毫秒）。恢复回来的记录带的是落盘时的值——过期判据要用它（issue #1389）。 */
+    val startedAt: Long = System.currentTimeMillis(),
     val reply: (String) -> Unit,
   )
 
@@ -115,7 +117,16 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
       is PhotoCapture.PendingRecovery.None -> clearPendingState()
       is PhotoCapture.PendingRecovery.Resume -> {
         // 接着走既有的收尾路径：结果一到就压缩 + 投递 + 回执，与同进程内拍照完全同形。
-        pending = Pending(raw = recovery.raw, target = recovery.target, reply = { payload -> pushToPage(payload) })
+        // issue #1390：回执必须走 queueReceipt（等页面注入桥），不能裸 pushToPage——
+        // 冷启后相机很快返回时 evaluateJavascript 会打到尚未注入的 window.__dshBridge，
+        // 回执消失、页面永远停在等待态。Lost 分支一直是这么做的，这里与之对齐。
+        pending = Pending(raw = recovery.raw, target = recovery.target, reply = { payload -> queueReceipt(payload) })
+        pending = Pending(
+          raw = recovery.raw,
+          target = recovery.target,
+          startedAt = recovery.startedAt,
+          reply = { payload -> queueReceipt(payload) },
+        )
         LogCollector.log("dsh-photo", "pending capture restored: " + recovery.raw.name)
       }
       is PhotoCapture.PendingRecovery.Lost -> {
@@ -126,6 +137,16 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
       }
     }
   }
+
+  /**
+   * 正在被压缩线程读取的原图文件名（issue #1387）。
+   *
+   * 连拍的时序：第一张相机返回 → `pending` 立刻放开（用户马上能拍第二张）→ 后台线程还在压缩；
+   * 第二张的 `capture()` 会先跑 `sweepOld`，keep=0 会把第一张的原图当垃圾清掉。这里把在途名字
+   * 交给清理侧排除，既保住第一张，也不把压缩串行化（第二张照样能马上拍）。
+   */
+  private val inFlightRawNames: MutableSet<String> =
+    java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
   /** 排队一条回执；页面未就绪就等 onPageFinished（[flushDeferredReceipt]）。 */
   private fun queueReceipt(payload: String) {
@@ -196,16 +217,34 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
 
   /** 发起一次拍照。最终结果走 [reply]（主线程回调）。 */
   private fun capture(reply: (String) -> Unit) {
-    if (pending != null) {
-      reply(PhotoCapture.errorPayload(english, PhotoCapture.CODE_BUSY))
-      return
+    val inFlight = pending
+    if (inFlight != null) {
+      // issue #1389：恢复回来的在途记录可能永远等不到相机结果（相机进程同死 / ROM 丢结果）。
+      // 15 分钟窗口原来只在 classifyPending 里算一次、没有定时器 ⇒ pending 永不为 null，
+      // 此后每次拍照都回 BUSY，只能重启应用。这里每次入口重算：过期就清掉并如实回一条失败，
+      // 然后照常发起这一次拍照（用户不必再点一次）。
+      if (!PhotoCapture.isPendingStale(inFlight.startedAt, System.currentTimeMillis())) {
+        reply(PhotoCapture.errorPayload(english, PhotoCapture.CODE_BUSY))
+        return
+      }
+      pending = null
+      clearPendingState()
+      inFlight.raw.delete()
+      inFlight.reply(
+        PhotoCapture.errorPayload(english, PhotoCapture.CODE_CAMERA_FAILED, "pending-stale"),
+      )
     }
     val names = PhotoCapture.namesFor(System.currentTimeMillis())
     val raw = File(PhotoCapture.rawDir(activity), names.first)
     val target = File(PhotoCapture.outputDir(activity), names.second)
     // 清历史：成品留最近 N 张、普通原图全清、压缩失败的保留位按件数/时间窗有界回收
     // （本次原图在压缩成功后立刻删；失败则改名进保留位，见 finish）。
-    PhotoCapture.sweepOld(PhotoCapture.outputDir(activity), PhotoCapture.rawDir(activity))
+    // issue #1387：把仍在压缩的原图排除掉——连拍的第二张不能删掉第一张还在读的文件。
+    PhotoCapture.sweepOld(
+      PhotoCapture.outputDir(activity),
+      PhotoCapture.rawDir(activity),
+      exclude = inFlightRawNames.toSet(),
+    )
     val job = Pending(raw = raw, target = target, reply = reply)
     pending = job
     // issue #1007：受理即刻落盘（在拉起相机**之前**）。进程死亡后新实例靠它把在途状态接回来，
@@ -263,22 +302,29 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
       job.reply(PhotoCapture.errorPayload(english, PhotoCapture.CODE_CAMERA_FAILED))
       return
     }
+    // issue #1387：先登记再起线程（起线程之后再登记会有窗口期让并发的 sweepOld 抢在前面）。
+    inFlightRawNames.add(job.raw.name)
     Thread({
-      val bytes = PhotoCapture.compress(job.raw, job.target)
-      if (bytes == null || bytes <= 0L) {
-        // 压缩失败：**保留原图**（用户刚拍的那张是唯一副本，不能丢）。这里真的改名落进
-        // 保留位（issue #995）：只「不删」的话它和「拍完就删」的普通原图同名同形，下一次
-        // 拍照的 sweepOld 会把它当垃圾清掉——承诺必须落成磁盘上可判定的事实。
-        val kept = PhotoCapture.keepRaw(job.raw)
-        val payload = PhotoCapture.errorPayload(
-          UiText.isEnglish(activity), PhotoCapture.CODE_COMPRESS_FAILED, kept.absolutePath,
-        )
-        activity.runOnUiThread { job.reply(payload) }
-        return@Thread
+      try {
+        val bytes = PhotoCapture.compress(job.raw, job.target)
+        if (bytes == null || bytes <= 0L) {
+          // 压缩失败：**保留原图**（用户刚拍的那张是唯一副本，不能丢）。这里真的改名落进
+          // 保留位（issue #995）：只「不删」的话它和「拍完就删」的普通原图同名同形，下一次
+          // 拍照的 sweepOld 会把它当垃圾清掉——承诺必须落成磁盘上可判定的事实。
+          val kept = PhotoCapture.keepRaw(job.raw)
+          val payload = PhotoCapture.errorPayload(
+            UiText.isEnglish(activity), PhotoCapture.CODE_COMPRESS_FAILED, kept.absolutePath,
+          )
+          activity.runOnUiThread { job.reply(payload) }
+          return@Thread
+        }
+        // 压缩成功 → 原图使命完成（用户要求「原图可删」）。
+        job.raw.delete()
+        deliver(job, bytes)
+      } finally {
+        // 无论成败都要注销：留在集合里会让同名原图永远清不掉（名字带时间戳，实际是泄漏）。
+        inFlightRawNames.remove(job.raw.name)
       }
-      // 压缩成功 → 原图使命完成（用户要求「原图可删」）。
-      job.raw.delete()
-      deliver(job, bytes)
     }, "dsh-photo-capture").apply { isDaemon = true }.start()
   }
 

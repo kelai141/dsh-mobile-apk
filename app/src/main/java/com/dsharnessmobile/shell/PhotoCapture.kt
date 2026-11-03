@@ -83,6 +83,9 @@ internal object PhotoCapture {
   /** 原图文件名前缀。 */
   internal const val RAW_PREFIX = "raw-"
 
+  /** 压缩中间文件的后缀（issue #1388）：成品先写它，成功后才 rename 到最终名字。 */
+  internal const val TMP_SUFFIX = ".tmp"
+
   /**
    * 保留位后缀：压缩失败的原图**不改前缀、只加这个后缀**留在原目录。
    *
@@ -266,12 +269,31 @@ internal object PhotoCapture {
       oriented = applyExifRotation(src, decoded)
       scaled = scaleTo(oriented, maxLongEdge)
       dst.parentFile?.mkdirs()
-      val ok = FileOutputStream(dst).use { out ->
-        if (!scaled.compress(Bitmap.CompressFormat.JPEG, quality, out)) return null
-        out.flush()
-        true
+      // issue #1388：先写同目录临时文件、成功后 rename。旧实现直接写 dst，压缩中途失败
+      // （磁盘满 / OOM / compress 返回 false）会在 attachments/ 里留下 0 字节或半截 JPEG：
+      // 它计入 KEEP_PHOTOS 配额、挤掉好图，还落在 FileProvider 映射面内，可能被当成品分享。
+      val tmp = File(dst.parentFile, dst.name + TMP_SUFFIX)
+      val written = try {
+        FileOutputStream(tmp).use { out ->
+          if (!scaled.compress(Bitmap.CompressFormat.JPEG, quality, out)) {
+            false
+          } else {
+            out.flush()
+            true
+          }
+        }
+      } catch (t: Throwable) {
+        tmp.delete()
+        throw t
       }
-      if (!ok) null else dst.length()
+      if (!written) {
+        tmp.delete()
+        null
+      } else if (!publishCompressed(tmp, dst)) {
+        null
+      } else {
+        dst.length()
+      }
     } catch (_: Throwable) {
       // 解不出来 / 磁盘满 / OOM：一律 null（调用方保留原图）。
       null
@@ -281,6 +303,19 @@ internal object PhotoCapture {
       if (oriented !== null && oriented !== decoded) oriented.recycle()
       decoded?.recycle()
     }
+  }
+
+  /**
+   * 把临时成品转正（issue #1388）。rename 失败时**两边都删**：宁可这次压缩失败（调用方会保留
+   * 原图并如实报错），也不在 attachments/ 里留半截成品占配额、被 FileProvider 当成品分享。
+   *
+   * @returns true = 已落到最终路径。
+   */
+  internal fun publishCompressed(tmp: File, dst: File): Boolean {
+    if (tmp.renameTo(dst)) return true
+    tmp.delete()
+    dst.delete()
+    return false
   }
 
   /** 按 EXIF Orientation 把位图转正；无方向信息或已是正向时原样返回。 */
@@ -338,9 +373,19 @@ internal object PhotoCapture {
     rawDir: File,
     keep: Int = KEEP_PHOTOS,
     now: Long = System.currentTimeMillis(),
+    /**
+     * 正在被压缩线程读取的原图文件名（issue #1387）。
+     *
+     * 连拍时第二张的 `capture()` 会先跑一遍本函数；keep=0 会把第一张**仍在压缩**的
+     * `raw-*.jpg` 当普通原图清掉，压缩线程读到缺失文件返回 null，而回执还写着「原图已保留」。
+     * 调用方把在途集合传进来即可，不需要把压缩串行化。
+     */
+    exclude: Set<String> = emptySet(),
   ): Int {
     return sweepDir(photoDir, keep) { it.isFile && it.name.startsWith(PHOTO_PREFIX) } +
-      sweepDir(rawDir, 0) { it.isFile && it.name.startsWith(RAW_PREFIX) && !isKeptRawName(it.name) } +
+      sweepDir(rawDir, 0) {
+        it.isFile && it.name.startsWith(RAW_PREFIX) && !isKeptRawName(it.name) && it.name !in exclude
+      } +
       sweepKeptRaw(rawDir, now)
   }
 
@@ -482,7 +527,8 @@ internal object PhotoCapture {
   /** 恢复判定结果：没有 / 可以续上 / 已丢失（必须给一条回执，不能静默）。 */
   internal sealed class PendingRecovery {
     object None : PendingRecovery()
-    data class Resume(val raw: File, val target: File) : PendingRecovery()
+    /** [startedAt] 必须带出来：恢复后的在途记录要靠它判过期（issue #1389）。 */
+    data class Resume(val raw: File, val target: File, val startedAt: Long) : PendingRecovery()
     data class Lost(val reason: String) : PendingRecovery()
   }
 
@@ -527,8 +573,18 @@ internal object PhotoCapture {
     if (now - record.startedAt > staleAfterMs) return PendingRecovery.Lost("stale")
     if (!raw.isFile) return PendingRecovery.Lost("raw-missing")
     if (raw.length() <= 0L) return PendingRecovery.Lost("raw-empty")
-    return PendingRecovery.Resume(raw, target)
+    return PendingRecovery.Resume(raw, target, record.startedAt)
   }
+
+  /**
+   * 在途记录是否已过期（issue #1389）。
+   *
+   * [classifyPending] 只在**恢复那一刻**算一次窗口；之后若相机结果始终不回（相机进程同死、
+   * ROM 丢结果），`pending` 就永不为 null，此后每次拍照都回 `CODE_BUSY`，只能重启应用。
+   * 把判据抽成纯函数，让 `capture()` 入口每次都能重算，并让单测钉住边界。
+   */
+  internal fun isPendingStale(startedAt: Long, now: Long, staleAfterMs: Long = PENDING_STALE_MS): Boolean =
+    now - startedAt > staleAfterMs
 
   /** file 是否在 dir 之内（规范化后按路径前缀比较；不解析符号链接之外的东西）。 */
   private fun inside(dir: File, file: File): Boolean {
