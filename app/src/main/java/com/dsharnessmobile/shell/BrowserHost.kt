@@ -2521,6 +2521,35 @@ internal class BrowserHost(
    *
    * @param session 被删除的会话 id。
    */
+  /**
+   * 按**可信会话列表**对账回收（issue #1364 的便宜路）。
+   *
+   * 数据源已经存在：`OverlayPanel.refreshSessionPicker()` 就在调 `session/list` RPC，拿到的
+   * `items[].sessionId` 就是当前真实存在的会话集。所以**不需要新路由、不需要跨仓**。
+   *
+   * 刻意不做的两件事：
+   * - **不动** `ANONYMOUS_SESSION`（非会话调用）；
+   * - **空列表不动手**：空列表几乎一定是「读取失败 / 会话引擎还没起来」，此时大清理会把用户
+   *   正在看的页面全删掉。宁可这轮不回收，也不误删。
+   *
+   * @param liveSessionIds 本次列表里出现的 sessionId 集合（空集合 = 不做回收）。
+   */
+  internal fun reconcileWorkspaces(liveSessionIds: Set<String>) {
+    val plan = WorkspaceReclaim.reconcilePlan(workspaces.keys.toList(), liveSessionIds, ANONYMOUS_SESSION)
+    if (plan.isEmpty()) return
+    val now = System.currentTimeMillis()
+    for (key in plan) {
+      val workspace = workspaces[key] ?: continue
+      val lastUsed = workspaceLastUsedAt.remove(key) ?: now
+      workspaces.remove(key) // 先删引用
+      android.util.Log.w(
+        "dsh-browser",
+        "workspace dropped: reason=session-list-reconcile key=" + key + " age=" + (now - lastUsed) + "ms",
+      )
+      dropWorkspace(workspace) // 再销毁
+    }
+  }
+
   internal fun dropWorkspaceForSession(session: String?) {
     val key = session?.takeIf { it.isNotBlank() } ?: return
     val workspace = workspaces[key] ?: return
@@ -2557,6 +2586,15 @@ internal object BrowserHostHolder {
    */
   fun dropSessionWorkspace(session: String?) {
     host?.dropWorkspaceForSession(session)
+  }
+
+  /**
+   * 按可信会话列表对账回收（issue #1364 便宜路：复用 `session/list` RPC，无新路由）。
+   *
+   * @param liveSessionIds 当前真实存在的 sessionId 集合；空集合时不做任何回收。
+   */
+  fun reconcileSessionWorkspaces(liveSessionIds: Set<String>) {
+    host?.reconcileWorkspaces(liveSessionIds)
   }
 
   fun control(op: String, args: JSONObject): JSONObject {
