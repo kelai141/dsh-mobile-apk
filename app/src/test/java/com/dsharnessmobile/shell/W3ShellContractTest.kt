@@ -462,6 +462,27 @@ class W3ShellContractTest {
     assertFalse("不得对整个 content URI 做 URLDecoder（会把 document id 的 %2F 变路径分隔符）", code.contains("Uri.parse(URLDecoder.decode(uriString"))
   }
 
+  // ── #1353：外部来件白名单不得含本应用私有目录 ───────────────────────────
+  //
+  // 缺陷形态：MainActivity 是 exported 的 VIEW/SEND 入口，file:// 方案下壳侧拿不到调用方身份，
+  // 于是「白名单里出现 /data/data/<pkg>/」= 任意应用都能让 DSH 把私有凭据拷进来件工作区。
+  // 这条断言守的是外部入口的白名单面，不是某段写法：把私有前缀加回来即红。
+  @Test
+  fun incomingExternalWhitelistExcludesPrivateDirs() {
+    val code = codeOnly(source("FileIncoming.kt"))
+    val whitelist = code
+      .substringAfter("private val SAFE_PREFIXES = listOf(")
+      .substringBefore(")")
+    assertTrue("系统分享的主路径 content:// 必须保留", whitelist.contains("\"content://\""))
+    assertTrue("共享存储 file:// 必须保留（外部真实路径）", whitelist.contains("\"file:///storage/emulated/0/\""))
+    assertFalse("私有目录不得进外部来件白名单（issue #1353）", whitelist.contains("/data/data/"))
+    assertFalse("私有目录不得进外部来件白名单（issue #1353）", whitelist.contains("/data/user/0/"))
+    assertTrue(
+      "壳侧自产来件必须走 File 入口（不经过 URI 白名单）",
+      code.contains("fun processIncomingPath(context: Context, copied: File, notify:"),
+    )
+  }
+
   @Test
   fun configTransferNoLongerWritesTheDeadSafList() {
     val code = codeOnly(source("ConfigTransfer.kt"))
