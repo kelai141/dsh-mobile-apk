@@ -84,7 +84,7 @@
     "EngineStartFlow.kt:497": 1,
     "app/src/main/java/com/dsharnessmobile/shell/SnapshotExtractor.kt:81": 1,
     "AndroidBridge.kt:431": 2,
-    "app/build.gradle.kts:126": 2,
+    "app/build.gradle.kts:175": 2,
     "BrowserHostNavigationPolicyTest.kt:129": 2,
     "ControlAudit.kt:34": 2,
     "ControlProtocolV2.kt:196": 2,
@@ -181,7 +181,7 @@
     "NotifyCenter.kt:829": 3,
     "NotifyStore.kt:18": 3,
     "NotifyCenter.kt:631": 3,
-    "app/build.gradle.kts:88": 1,
+    "app/build.gradle.kts:93": 1,
     "app/src/test/java/com/dsharnessmobile/shell/CallSiteContractTest.kt:294": 2,
     "app/src/test/java/com/dsharnessmobile/shell/OverlayHaloInvariantTest.kt:92": 2,
     "app/src/test/java/com/dsharnessmobile/shell/NotifyCenterChannelTest.kt:33": 2,
@@ -404,7 +404,7 @@
     "app/src/main/java/com/dsharnessmobile/shell/UndoGate.kt:278": 1,
     "app/src/main/java/com/dsharnessmobile/shell/UndoGate.kt:136": 1,
     "scripts/check-bridge-symmetry.mjs:1": 1,
-    "app/build.gradle.kts:127": 1,
+    "app/build.gradle.kts:176": 1,
     "app/src/main/java/com/dsharnessmobile/shell/ControlPoller.kt:158": 2,
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:652": 2,
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:770": 1,
@@ -447,7 +447,7 @@
     "scripts/check-tool-output-schema.mjs:153": 2,
     "plugins/dsh-android-file-open/src/route-auth.ts:47": 2,
     "app/src/main/java/com/dsharnessmobile/shell/FileIncoming.kt:32": 1,
-    "dsh-client-ui-responsive/src/client/mobile/incoming-draft.ts:175": 1,
+    "dsh-client-ui-responsive/src/client/mobile/incoming-draft.ts:247": 1,
     "dsh-shell-termux/src/index.ts:42": 2,
     "plugins/dsh-android-file-open/src/index.ts:302": 1,
     "dsh-client-ui-responsive/src/client/android-bridge.ts:17": 1,
@@ -457,7 +457,7 @@
     "plugins/dsh-android-file-open/src/index.ts:527": 4,
     "dsh-client-ui-responsive/src/client/dev-section/runtime-cache.tsx:91": 1,
     "dsh-shell-termux/src/index.ts:39": 1,
-    "dsh-host-web-compat/scripts/boot-watchdog.test.mjs:231": 2,
+    "dsh-host-web-compat/scripts/boot-watchdog.test.mjs:236": 2,
     "scripts/profile-web.cordis.patch.yml:7": 1,
     "scripts/plugin-dirs.json:1": 1,
     "scripts/check-patch-mirror.mjs:109": 1,
@@ -759,8 +759,8 @@
     "session-marker.ts:67": 1,
     "browser-auto-place.ts:85": 1,
     "index.ts:444": 1,
-    "incoming-draft.ts:86": 1,
-    "dsh-client-ui-responsive/tests/incoming-draft.spec.ts:166": 1,
+    "incoming-draft.ts:147": 1,
+    "dsh-client-ui-responsive/tests/incoming-draft.spec.ts:174": 1,
     "trajectory-panels-observer.ts:43": 1,
     "trajectory-details.css.ts:44": 1,
     "index.ts:142": 1,
@@ -792,7 +792,7 @@
     "phone-control.tsx:363": 1,
     "notify-settings.tsx:66": 1,
     "phone-control.tsx:220": 1,
-    "incoming-draft.ts:150": 1,
+    "incoming-draft.ts:210": 1,
     "browser-auto-place.ts:45": 1,
     "index.ts:380": 1,
     "native-browser-presentation.ts:61": 1,
@@ -1544,9 +1544,6 @@
     "NotifyStore.kt:36": [
       "const val FILE_NAME = \".notify.ndjson\""
     ],
-    "NotifyStore.kt:398": [
-      "heartbeat(app, trigger, offset, len)"
-    ],
     "NotifyStore.kt:66": [
       "private const val KEY_OFFSET = \"notify.offset\""
     ],
@@ -1919,13 +1916,13 @@
     "WebUiChrome.kt:37": [
       "* 定案靠设备层 A/B。本仓实测（Medium_Phone 1080x2400 / 420dpi / 手势条）：改前导航条 inset"
     ],
-    "app/build.gradle.kts:126": [
+    "app/build.gradle.kts:175": [
       "androidTestImplementation(\"androidx.test.ext:junit:1.2.1\")"
     ],
-    "app/build.gradle.kts:127": [
+    "app/build.gradle.kts:176": [
       "androidTestImplementation(\"androidx.test:runner:1.6.2\")"
     ],
-    "app/build.gradle.kts:88": [
+    "app/build.gradle.kts:93": [
       "jvmTarget = \"17\""
     ],
     "app/src/main/AndroidManifest.xml:158": [
@@ -2206,12 +2203,6 @@
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyDecisionQueue.kt:266": [
       "@Volatile"
-    ],
-    "app/src/main/java/com/dsharnessmobile/shell/NotifyStore.kt:321": [
-      "dedupeKey = j.optString(\"dedupeKey\", \"\"),"
-    ],
-    "app/src/main/java/com/dsharnessmobile/shell/NotifyStore.kt:360": [
-      "id = q.optString(\"id\", \"q\" + i),"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/NotifyStore.kt:68": [
       "@Volatile"
@@ -2924,7 +2915,7 @@
     "dsh-client-ui-responsive/src/client/mobile/form-marker.ts:88": [
       ".filter(dialog => dialog.closest('[data-shell-overlay]') === null)"
     ],
-    "dsh-client-ui-responsive/src/client/mobile/incoming-draft.ts:175": [
+    "dsh-client-ui-responsive/src/client/mobile/incoming-draft.ts:247": [
       "const cwd = window.androidBridge?.incomingWorkspacePath?.() ?? ''"
     ],
     "dsh-client-ui-responsive/src/client/mobile/native-browser-presentation.ts:20": [
@@ -2936,10 +2927,10 @@
     "dsh-client-ui-responsive/src/client/mobile/native-browser-presentation.ts:61": [
       "readonly clipsX: boolean"
     ],
-    "dsh-client-ui-responsive/tests/incoming-draft.spec.ts:166": [
+    "dsh-client-ui-responsive/tests/incoming-draft.spec.ts:174": [
       "expect(document.documentElement.getAttribute('data-dsh-incoming-draft-poll')).toBe('exhausted')"
     ],
-    "dsh-host-web-compat/scripts/boot-watchdog.test.mjs:231": [
+    "dsh-host-web-compat/scripts/boot-watchdog.test.mjs:236": [
       "// 判据取**求值后**的脚本体（源码切片测不出模板串语义），并在 VM 里跑出真实行为："
     ],
     "dsh-host-web-compat/scripts/smoke-injections.mjs:50": [
@@ -2969,10 +2960,10 @@
     "form-marker.ts:96": [
       "document.documentElement.toggleAttribute(SETTINGS_OPEN_TAG, settings !== null)"
     ],
-    "incoming-draft.ts:150": [
+    "incoming-draft.ts:210": [
       ""
     ],
-    "incoming-draft.ts:86": [
+    "incoming-draft.ts:147": [
       "/** Fetch eligible queue metadata and hydrate each blank-session attachment once. */"
     ],
     "index.js:2198": [
@@ -3895,6 +3886,15 @@
     ],
     "verify-webview-015.mjs:97": [
       ""
+    ],
+    "app/src/main/java/com/dsharnessmobile/shell/NotifyStore.kt:344": [
+      "dedupeKey = j.optString(\"dedupeKey\", \"\"),"
+    ],
+    "app/src/main/java/com/dsharnessmobile/shell/NotifyStore.kt:383": [
+      "id = q.optString(\"id\", \"q\" + i),"
+    ],
+    "NotifyStore.kt:421": [
+      "heartbeat(app, trigger, offset, len)"
     ]
   },
   "symbols": {

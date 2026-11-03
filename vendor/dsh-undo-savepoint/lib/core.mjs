@@ -1470,12 +1470,30 @@ function canResolveAny(cfg, name) {
 async function createSnapshot(cfg, kind, reason, opts = {}) {
   const base = kind === 'manual' ? cfg.manualDir : cfg.autoDir;
   await fs.mkdir(base, { recursive: true });
-  let id;
-  do {
-    id = makeId();
-  } while (await pathExists(join(base, id)));
-  const dir = join(base, id);
-  await fs.mkdir(dir, { recursive: true });
+  // issue #1399：id 冲突检测必须是「原子占用」，不能「先看后建」。
+  //
+  // 旧实现是 do { id = makeId() } while (await pathExists(...)) 预检 + mkdir(recursive: true)：
+  // 预检与创建之间是 TOCTOU 窗口，且 recursive 会把 EEXIST 吞掉 —— 同一秒内并发两次
+  // createSnapshot（并发撤销各自建 pre-restore 就会这样）可能落进同一个目录互相覆盖。
+  //
+  // 现在把 mkdir(dir)（**不带 recursive**）当作占位：EEXIST 就代表这个 id 已被别人占了。
+  // 关键：占位失败后**绝不**退回使用该目录（那等于把竞态换成覆盖），必须换 id 重试；
+  // 只有 mkdir 成功的那一方才拿到这个目录并往里写。
+  let id = null;
+  let dir = null;
+  for (let attempt = 0; attempt < 8 && dir === null; attempt += 1) {
+    const candidateId = makeId();
+    const candidate = join(base, candidateId);
+    try {
+      await fs.mkdir(candidate);
+      id = candidateId;
+      dir = candidate;
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      // 被别人抢了：换一个 id 重试（不碰这个目录）。
+    }
+  }
+  if (dir === null) throw new Error('snapshot id collision: could not claim a unique directory after 8 attempts');
   const files = [];
   const envVaultRefs = {};
   const redacted = [];
@@ -2664,6 +2682,24 @@ async function undoCompact(cfg) {
   return { ok: true, removed, freed };
 }
 async function restore(cfg, mode, id, options = {}) {
+  // issue #1398：并发撤销必须互斥。
+  //
+  // 旧实现的唯一前置是 if (hasOpenTurn()) return busyError() —— 只读不置位。两次并发请求
+  // 都能通过，随后各自建 pre-restore 并交错执行 applySnapshot：两边的文件集合互相覆盖成
+  // 混合态，还多出两个 pre-restore 快照。
+  //
+  // 用 cfg 上的单飞标志（cfg 是插件加载时建好的**同一个对象**，进程内共享）。
+  // 检查与置位之间没有 await，因此不会有第二个请求插进来。
+  if (cfg.undoBusy) return busyError();
+  cfg.undoBusy = true;
+  try {
+    return await restoreOnce(cfg, mode, id, options);
+  } finally {
+    cfg.undoBusy = false;
+  }
+}
+
+async function restoreOnce(cfg, mode, id, options = {}) {
   if (hasOpenTurn()) return busyError();
   const syncDeps = options.syncDeps === true;
   const list = await listSnapshots(cfg);

@@ -156,7 +156,7 @@ internal class BrowserHost(
 
   // ── 兼容档（process-suffix，WebView<114）执行位 ──────────────────────────
   /** evaluateJs 序号 → 回调（tier-2；回调统一回主线程再派发）。 */
-  private val pendingJs = HashMap<Int, (String?) -> Unit>()
+  private val pendingJs = HashMap<Int, PendingJsEntry>()
 
   private val rendererListener = object : RemoteRendererHost.Listener {
     override fun onRendererEvent(tabId: String, event: JSONObject) {
@@ -164,7 +164,7 @@ internal class BrowserHost(
     }
 
     override fun onRendererJsResult(tabId: String, seq: Int, result: JSONObject) {
-      main.post { pendingJs.remove(seq)?.invoke(result.optString("value")) }
+      main.post { deliverJsResult(tabId, seq, result) }
     }
   }
 
@@ -369,7 +369,7 @@ internal class BrowserHost(
   /** Foreground selection is owned exclusively by trusted UI work on the main thread. */
   private fun switchTo(workspace: Workspace) {
     check(Looper.myLooper() == Looper.getMainLooper())
-    currentWorkspace = workspace
+    currentWorkspace = workspace; evictOverCap(workspace)
     applyStageBounds()
     applyVisibility()
   }
@@ -957,7 +957,7 @@ internal class BrowserHost(
         rh.disconnect()
         rh.detachHostSurface()
       }
-      workspaces.clear()
+      workspaces.clear(); drainPendingJs("destroy")
       currentWorkspace = null
       Unit
     }
@@ -2260,7 +2260,7 @@ internal class BrowserHost(
     }
     val rh = remote ?: run { callback(null); return }
     val seq = rh.nextSeq()
-    pendingJs[seq] = callback
+    enqueuePendingJs(seq, tab, callback)
     if (!rh.evaluateJs(remoteTabId(tab.owner, tab), script, seq)) {
       pendingJs.remove(seq)
       callback(null)
@@ -2414,6 +2414,154 @@ internal class BrowserHost(
     "end" to KeyEvent.KEYCODE_MOVE_END,
     "space" to KeyEvent.KEYCODE_SPACE,
   )
+
+  /**
+   * tier-2 JS 回执派发（issue #1363）：**先比对 tab 存活与世代，不同代直接丢弃**。
+   *
+   * 旧实现只按 `seq` 取回调：`closeTabOp` 已经 `generation.incrementAndGet()` + 销毁 view +
+   * `tabs.remove`，在途回执照旧把 url / title / scrollY 写回，模型侧读到「幽灵页」并据此继续操作。
+   *
+   * 为什么要分三态（见 [PendingJsDispatch] 的注释）：`tab 已关` 是正常关闭竞态，
+   * `换过代` 说明有人在旧页面上继续操作——两者排障含义不同，日志要能分开。
+   *
+   * @param tabId 回执上报的 tabId。
+   * @param seq 求值序号。
+   * @param result 渲染侧回执。
+   */
+  private fun deliverJsResult(tabId: String, seq: Int, result: JSONObject) {
+    val entry = pendingJs.remove(seq) ?: return
+    val live = tabs[entry.tabId]?.generation?.get()
+    when (PendingJsDispatch.decide(entry, tabId, live)) {
+      PendingJsDispatch.Decision.DELIVER -> entry.callback(result.optString("value"))
+      PendingJsDispatch.Decision.DISCARD_TAB_GONE ->
+        android.util.Log.w("dsh-browser", "js result discarded (tab gone): tab=" + entry.tabId + " seq=" + seq)
+      PendingJsDispatch.Decision.DISCARD_STALE_GENERATION ->
+        android.util.Log.w("dsh-browser", "js result discarded (stale generation): tab=" + entry.tabId + " seq=" + seq)
+    }
+  }
+
+  /**
+   * 入队一条在途回执，并在**超过上限**时先回收（issue #1362：页面还在但永不回执的那一类）。
+   *
+   * 为什么要上限：`destroy()`/断连的 drain 只能收拾「页面已死」；若渲染进程活着却卡死，
+   * 回执永远不来、调用方各自 2s 闩超时后继续发新请求 —— 同一个页面会持续堆积。
+   * 上限取值依据见 [PendingJsDrain] 的类注释（典型 1–2 条、最坏 ≈1 条/2s，64 ≈ 2 分钟挂死）。
+   *
+   * @param seq 求值序号。
+   * @param tab 发起求值的 tab（记下它的世代，供回执派发时比对）。
+   * @param callback 回执回调。
+   */
+  private fun enqueuePendingJs(seq: Int, tab: Tab, callback: (String?) -> Unit) {
+    if (PendingJsDrain.shouldReclaim(pendingJs.size)) drainPendingJs("cap")
+    pendingJs[seq] = PendingJsEntry(tab.id, tab.generation.get(), callback)
+  }
+
+  /**
+   * 清空在途回执表（issue #1362）：逐条移除并以 `null` 回调，让调用方的 2s 闩**立刻**结束，
+   * 而不是各自等到超时。
+   *
+   * **必须留痕**：每次回收写一行日志（条数 + 原因）。静默回收会让以后分不清
+   * 「没堆」与「堆了但被静默回收」——那正是本 issue 想避免的不可观测。
+   *
+   * @param reason 回收原因（`destroy` / `cap`），进日志。
+   */
+  private fun drainPendingJs(reason: String) {
+    if (pendingJs.isEmpty()) return
+    val drained = ArrayList<PendingJsEntry>(pendingJs.size)
+    for (entry in pendingJs.values) drained.add(entry)
+    pendingJs.clear()
+    android.util.Log.w("dsh-browser", "pending js drained: reason=" + reason + " count=" + drained.size)
+    for (entry in drained) entry.callback(null)
+  }
+
+  /** 会话键 → 最近使用时刻（毫秒）。issue #1364：切换淘汰的依据。 */
+  private val workspaceLastUsedAt = HashMap<String, Long>()
+
+  /**
+   * 切换时**只淘汰超上限**的工作台（issue #1364，按维护者裁定重定时机）。
+   *
+   * 为什么不在切换时清空非当前工作台：那是用户可感知的退化——切走再切回来页面就重建，
+   * 后台浏览状态（滚动位置、表单、正在播放的媒体）全丢。现在保留 current + 最近使用的
+   * [WorkspaceReclaim.RECENT_KEEP] 个，只有当第 [WorkspaceReclaim.MAX_LIVE] 个存活工作区出现时
+   * 才淘汰最久未用的那个。上限依据见 [WorkspaceReclaim] 的类注释。
+   *
+   * **顺序：先删引用，再销毁**（维护者要求）——先从 `workspaces` 摘键，此后新调用会新建，
+   * 不会被半销毁的工作台接住；再 `dropWorkspace`（内部 remove 幂等；profile dispose 失败只 warn）。
+   *
+   * @param keep 当前工作台（永不淘汰）。
+   */
+  private fun evictOverCap(keep: Workspace?) {
+    val now = System.currentTimeMillis()
+    keep?.let { workspaceLastUsedAt[it.sessionKey] = now }
+    val victims = WorkspaceReclaim.evictPlan(
+      workspaces.keys.toList(), keep?.sessionKey, ANONYMOUS_SESSION, workspaceLastUsedAt,
+    )
+    for (key in victims) {
+      val workspace = workspaces[key] ?: continue
+      val lastUsed = workspaceLastUsedAt.remove(key) ?: now
+      workspaces.remove(key)
+      android.util.Log.w(
+        "dsh-browser",
+        "workspace evicted: reason=cap key=" + key + " age=" + (now - lastUsed) + "ms",
+      )
+      dropWorkspace(workspace)
+    }
+  }
+
+  /**
+   * 会话被删除时**立即**回收它的工作台（issue #1364 的主回收点）。
+   *
+   * 删除是唯一能确定「这个页面再也不会被用到」的时刻，所以这里不做任何延迟或额度判断。
+   * 其余工作台**不受影响**（判据里有这条）。
+   *
+   * 注：壳侧目前**没有**会话删除的信号源——session 生命周期归引擎/页面侧，现有的
+   * `/api/android/` 路由里也没有会话事件。本方法是那个信号出现时要调的入口
+   * （`BrowserHostHolder.dropSessionWorkspace`），
+   * 在信号接上之前，驻留由 [evictOverCap] 的上限兜住（最坏 4 个）。
+   *
+   * @param session 被删除的会话 id。
+   */
+  /**
+   * 按**可信会话列表**对账回收（issue #1364 的便宜路）。
+   *
+   * 数据源已经存在：`OverlayPanel.refreshSessionPicker()` 就在调 `session/list` RPC，拿到的
+   * `items[].sessionId` 就是当前真实存在的会话集。所以**不需要新路由、不需要跨仓**。
+   *
+   * 刻意不做的两件事：
+   * - **不动** `ANONYMOUS_SESSION`（非会话调用）；
+   * - **空列表不动手**：空列表几乎一定是「读取失败 / 会话引擎还没起来」，此时大清理会把用户
+   *   正在看的页面全删掉。宁可这轮不回收，也不误删。
+   *
+   * @param liveSessionIds 本次列表里出现的 sessionId 集合（空集合 = 不做回收）。
+   */
+  internal fun reconcileWorkspaces(liveSessionIds: Set<String>) {
+    val plan = WorkspaceReclaim.reconcilePlan(workspaces.keys.toList(), liveSessionIds, ANONYMOUS_SESSION)
+    if (plan.isEmpty()) return
+    val now = System.currentTimeMillis()
+    for (key in plan) {
+      val workspace = workspaces[key] ?: continue
+      val lastUsed = workspaceLastUsedAt.remove(key) ?: now
+      workspaces.remove(key) // 先删引用
+      android.util.Log.w(
+        "dsh-browser",
+        "workspace dropped: reason=session-list-reconcile key=" + key + " age=" + (now - lastUsed) + "ms",
+      )
+      dropWorkspace(workspace) // 再销毁
+    }
+  }
+
+  internal fun dropWorkspaceForSession(session: String?) {
+    val key = session?.takeIf { it.isNotBlank() } ?: return
+    val workspace = workspaces[key] ?: return
+    val now = System.currentTimeMillis()
+    val lastUsed = workspaceLastUsedAt.remove(key) ?: now
+    workspaces.remove(key) // 先删引用
+    android.util.Log.w(
+      "dsh-browser",
+      "workspace dropped: reason=session-delete key=" + key + " age=" + (now - lastUsed) + "ms",
+    )
+    dropWorkspace(workspace) // 再销毁
+  }
 }
 
 /**
@@ -2428,6 +2576,27 @@ internal object BrowserHostHolder {
   var host: BrowserHost? = null
 
   /** Route one control op to the live BrowserHost; absent host is a structured fail-closed answer. */
+  /**
+   * 会话被删除时回收它的隔离工作台（issue #1364 的主回收点）。
+   *
+   * 现在**没有调用方**：壳侧收不到会话删除信号（session 生命周期在引擎/页面侧）。
+   * 已具备可信信号时应在这里接上——在那之前，驻留由切换淘汰的上限兜住（最坏 4 个）。
+   *
+   * @param session 被删除的会话 id。
+   */
+  fun dropSessionWorkspace(session: String?) {
+    host?.dropWorkspaceForSession(session)
+  }
+
+  /**
+   * 按可信会话列表对账回收（issue #1364 便宜路：复用 `session/list` RPC，无新路由）。
+   *
+   * @param liveSessionIds 当前真实存在的 sessionId 集合；空集合时不做任何回收。
+   */
+  fun reconcileSessionWorkspaces(liveSessionIds: Set<String>) {
+    host?.reconcileWorkspaces(liveSessionIds)
+  }
+
   fun control(op: String, args: JSONObject): JSONObject {
     val current = host ?: return JSONObject()
       .put("__error", "浏览器工作台尚未创建：请先在右侧栏「AI 浏览器」中打开页面。")

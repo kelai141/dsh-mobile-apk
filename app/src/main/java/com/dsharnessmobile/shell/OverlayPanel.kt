@@ -95,9 +95,9 @@ class OverlayPanel(private val svc: OverlayService) {
   private var pendingKey = ""                                    // 当前卡指纹（kind:eventId），变化即清作答态
   private var renderedCardKey = ""                               // 卡片已渲染指纹（防 live 流重绘打断输入）
 
-  /** 服务 onDestroy 联动：关闭 mux 长连接（原 mux?.close(); mux = null）。 */
+  /** 服务 onDestroy 联动：先收 picker 顶层窗口（issue #1359），再关 mux 长连接。 */
   internal fun destroy() {
-    mux?.close(); mux = null
+    closePicker(); mux?.close(); mux = null
   }
 
   internal fun startMux() {
@@ -1291,6 +1291,11 @@ class OverlayPanel(private val svc: OverlayService) {
             }
           }
         } catch (_: Exception) {}
+      }
+      // issue #1364 便宜路：这份列表就是「当前真实存在的会话集」，顺手对账回收已消失会话的工作台。
+      // 只有 HTTP 200 才动手（失败时 pickerSessions 是空的，回收会把正在看的页面全删掉）。
+      if (code == 200 && pickerSessions.isNotEmpty()) {
+        BrowserHostHolder.reconcileSessionWorkspaces(pickerSessions.map { it.id }.toSet())
       }
       // Re-validate the target; auto-follow only when unpinned.
       // (A-R5: agent ids from api-session/status must never be stored as session ids.)

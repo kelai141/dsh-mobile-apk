@@ -61,8 +61,10 @@ export const SITE_URL = 'https://kelai141.github.io/dsh-mobile-apk/';
  * 资产一旦改名或某版本发布不完整，测速就整体失效，用户被钉死在默认线路上。
  * 用 releases/latest/download/MANIFEST.txt 则永远指向最新版（几十字节）。
  *
- * 为什么必须是小文件：浏览器端判活用的是 <script> 标签（见 app.js 的 probeMirror），
- * 它会**真正加载整个响应体**。MANIFEST.txt 只有约 1.4 KB，代价可忽略；换成 APK 就是 150 MB。
+ * 为什么必须是小文件：浏览器端判活走 fetch（见 app.js 的 probeAlive），能读正文时会**真正下载
+ * 整个响应体**并校验它确实是 MANIFEST。MANIFEST.txt 只有约 1.4 KB，代价可忽略；换成 APK 就是 150 MB。
+ *
+ * issue #1393：这里原先是 <script src> 判活——那会**执行**响应体，等于把页面 origin 交给镜像。
  */
 export const PROBE_FILE = 'MANIFEST.txt';
 

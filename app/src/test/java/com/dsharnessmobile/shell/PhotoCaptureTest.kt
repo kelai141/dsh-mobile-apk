@@ -440,4 +440,138 @@ class PhotoCaptureTest {
     assertTrue("受理拍照时必须先跑 sweepOld（保留位的有界回收就在这里）",
       controller.contains("PhotoCapture.sweepOld("))
   }
+
+  @Test
+  fun `连拍时仍在压缩的原图不被清理删掉`() {
+    // 第二张拍照受理时先跑一遍清理，keep=0 会把第一张**仍在压缩**的 raw-*.jpg 删掉；
+    // 压缩线程读到缺失文件返回 null，而回执还写着「原图已保留」。
+    val photoDir = tempDir("photo-inflight-out")
+    val rawDir = tempDir("photo-inflight-raw")
+    try {
+      val inFlight = File(rawDir, PhotoCapture.RAW_PREFIX + "20260101-000001-000.jpg").apply { writeText("compressing") }
+      val stale = File(rawDir, PhotoCapture.RAW_PREFIX + "20260101-000000-000.jpg").apply { writeText("stale") }
+      val removed = PhotoCapture.sweepOld(photoDir, rawDir, keep = 10, exclude = setOf(inFlight.name))
+      assertTrue("在途原图必须活下来（否则压缩读到缺失文件）", inFlight.isFile)
+      assertFalse("不在途的原图照旧清掉", stale.exists())
+      assertEquals("只删掉那张不在途的", 1, removed)
+    } finally {
+      photoDir.deleteRecursively()
+      rawDir.deleteRecursively()
+    }
+  }
+
+
+  @Test
+  fun `控制器把在途原图交给清理侧排除`() {
+    val controller = codeOnly(source("PhotoCaptureController.kt"))
+    assertTrue("受理拍照时必须把在途集合交给 sweepOld", controller.contains("exclude = inFlightRawNames.toSet()"))
+    assertTrue("必须用同步集合（压缩线程与主线程并发读写）",
+      controller.contains("Collections.synchronizedSet(mutableSetOf<String>())"))
+    // 登记必须在起线程之前：起线程之后再登记会有窗口期让并发的 sweepOld 抢在前面。
+    val register = controller.indexOf("inFlightRawNames.add(job.raw.name)")
+    val start = controller.indexOf("Thread({")
+    assertTrue("登记与起线程都必须存在", register >= 0 && start >= 0)
+    assertTrue("登记必须在起线程之前", register < start)
+    assertTrue("线程结束必须注销（否则同名原图永远清不掉）",
+      controller.contains("inFlightRawNames.remove(job.raw.name)"))
+  }
+
+  @Test
+  fun `成品转正失败时临时文件与目标都不留`() {
+    // rename 失败（例如目标位置已被占用/权限异常）时，宁可这次压缩失败，也不留半截成品：
+    // 它会计入 KEEP_PHOTOS 配额挤掉好图，还落在 FileProvider 映射面内被当成品分享。
+    val dir = tempDir("photo-publish")
+    try {
+      val tmp = File(dir, PhotoCapture.PHOTO_PREFIX + "20260101-000000-000.jpg" + PhotoCapture.TMP_SUFFIX)
+        .apply { writeText("half-written jpeg") }
+      // 目标位置是个空目录 ⇒ renameTo 必然失败
+      val dst = File(dir, PhotoCapture.PHOTO_PREFIX + "20260101-000000-000.jpg").apply { mkdirs() }
+      assertFalse("rename 失败必须如实返回 false", PhotoCapture.publishCompressed(tmp, dst))
+      assertFalse("临时文件不得残留", tmp.exists())
+      assertFalse("目标位置的空壳也不得残留", dst.exists())
+    } finally {
+      dir.deleteRecursively()
+    }
+  }
+
+
+  @Test
+  fun `成品转正成功时落到最终路径`() {
+    val dir = tempDir("photo-publish-ok")
+    try {
+      val tmp = File(dir, PhotoCapture.PHOTO_PREFIX + "20260101-000001-000.jpg" + PhotoCapture.TMP_SUFFIX)
+        .apply { writeText("jpeg") }
+      val dst = File(dir, PhotoCapture.PHOTO_PREFIX + "20260101-000001-000.jpg")
+      assertTrue("正常路径必须成功", PhotoCapture.publishCompressed(tmp, dst))
+      assertTrue("成品必须在最终路径上", dst.isFile)
+      assertFalse("临时文件必须消失", tmp.exists())
+    } finally {
+      dir.deleteRecursively()
+    }
+  }
+
+
+  @Test
+  fun `压缩先写临时文件再转正_不得直写成品`() {
+    val code = codeOnly(source("PhotoCapture.kt"))
+    val body = code.substringAfter("internal fun compress(").substringBefore("internal fun publishCompressed(")
+    assertTrue("必须先写带 TMP_SUFFIX 的临时文件", body.contains("dst.name + TMP_SUFFIX"))
+    assertTrue("必须经 publishCompressed 转正", body.contains("publishCompressed(tmp, dst)"))
+    assertFalse("不得再直写成品路径", body.contains("FileOutputStream(dst)"))
+    assertTrue("失败分支必须删临时文件", body.contains("tmp.delete()"))
+  }
+
+  @Test
+  fun `恢复的在途拍照回执走延迟队列而不是裸投`() {
+    // 冷启后相机很快返回时，页面可能还没注入 window.__dshBridge：裸 pushToPage 的回执会消失，
+    // 页面永远等 onPhotoCaptured。Lost 分支一直走 queueReceipt，Resume 分支必须对齐。
+    val controller = codeOnly(source("PhotoCaptureController.kt"))
+    val resume = controller.substringAfter("is PhotoCapture.PendingRecovery.Resume ->")
+      .substringBefore("is PhotoCapture.PendingRecovery.Lost ->")
+    assertTrue("Resume 的回执必须走 queueReceipt", resume.contains("reply = { payload -> queueReceipt(payload) }"))
+    assertFalse("Resume 不得再用裸 pushToPage", resume.contains("pushToPage(payload)"))
+    assertTrue("Lost 分支仍走 queueReceipt（对照）",
+      controller.substringAfter("is PhotoCapture.PendingRecovery.Lost ->").contains("queueReceipt("))
+  }
+
+  @Test
+  fun `在途记录超过窗口即判过期`() {
+    val startedAt = 1_700_000_000_000L
+    assertFalse(
+      "刚好在窗口边界上不算过期",
+      PhotoCapture.isPendingStale(startedAt, startedAt + PhotoCapture.PENDING_STALE_MS),
+    )
+    assertTrue(
+      "超过窗口一毫秒即过期",
+      PhotoCapture.isPendingStale(startedAt, startedAt + PhotoCapture.PENDING_STALE_MS + 1),
+    )
+    assertFalse("刚开始不算过期", PhotoCapture.isPendingStale(startedAt, startedAt + 1_000))
+  }
+
+
+  @Test
+  fun `恢复的条目必须带出落盘时刻`() {
+    // 不带 startedAt 的话，恢复后的记录永远「刚受理」，过期判据拿不到真实年龄。
+    val code = codeOnly(source("PhotoCapture.kt"))
+    assertTrue(
+      "Resume 必须携带 startedAt",
+      code.contains("data class Resume(val raw: File, val target: File, val startedAt: Long)"),
+    )
+    assertTrue(
+      "classifyPending 必须透传 record.startedAt",
+      code.contains("PendingRecovery.Resume(raw, target, record.startedAt)"),
+    )
+  }
+
+
+  @Test
+  fun `拍照入口把过期的在途记录清掉并如实回失败`() {
+    val controller = codeOnly(source("PhotoCaptureController.kt"))
+    assertTrue(
+      "入口必须每次重算过期（不是只在恢复时算一次）",
+      controller.contains("PhotoCapture.isPendingStale(inFlight.startedAt, System.currentTimeMillis())"),
+    )
+    assertTrue("过期后必须删掉原图并清在途状态", controller.contains("inFlight.raw.delete()"))
+    assertTrue("过期后必须回结构化失败而不是静默", controller.contains("\"pending-stale\""))
+  }
 }

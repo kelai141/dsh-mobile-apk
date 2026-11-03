@@ -465,4 +465,75 @@ class LogShareTest {
     assertTrue("新包覆盖旧包", names.contains("two.log"))
     assertFalse("旧条目不得残留（否则是追加而不是原子替换）", names.contains("one.log"))
   }
+
+  // ── issue #1403：整包上限按**诊断价值**扣减，且 skipped 计入回执 ──────────────────
+
+  @Test
+  fun `诊断价值序_device 与 logcat 必须排在所有 engine log 之前`() {
+    val device = LogShare.diagnosticPriority(LogShare.DEVICE_NAME)
+    val logcat = LogShare.diagnosticPriority("logcat.txt")
+    val bootFail = LogShare.diagnosticPriority("boot-fail.log")
+    val bootDiag = LogShare.diagnosticPriority("boot-diag.log")
+    val engine = LogShare.diagnosticPriority("engine.log")
+    val engineOld = LogShare.diagnosticPriority("engine.log.5")
+    val day = LogShare.diagnosticPriority("dsh-day.log")
+    val other = LogShare.diagnosticPriority("something-else.txt")
+
+    assertEquals("device.txt 必须永远第一", 0, device)
+    assertTrue("logcat 必须排在 engine.log 之前（它是唯一记录系统侧事件的来源）", logcat < engine)
+    assertTrue("boot-fail 要比 engine.log 靠前", bootFail < engine)
+    assertTrue("boot-diag 要比 engine.log 靠前", bootDiag < engine)
+    assertTrue("最新一代 engine.log 要比旧代靠前", engine < engineOld)
+    assertTrue("dsh-day.log 排在 engine.log 之后（可由 engine.log 部分还原）", day > engineOld)
+    assertTrue("未知条目落兜底（最容易因 cap 被丢）", other >= day)
+  }
+
+  @Test
+  fun `整包上限按价值扣减_logcat 不得被多代 engine log 挤掉`() {
+    val big = "x".repeat(1000)
+    val entries = ArrayList<LogShare.InputEntry>()
+    // 故意按**旧**顺序给：device → 6 代 engine.log → dsh-day → logcat。
+    // 旧实现按这个顺序扣减，logcat 会拿到 skipped-total-cap。
+    entries.add(LogShare.InputEntry(LogShare.DEVICE_NAME) { "device" })
+    for (n in 0..5) {
+      entries.add(LogShare.InputEntry(if (n == 0) "engine.log" else "engine.log." + n) { big })
+    }
+    entries.add(LogShare.InputEntry("dsh-day.log") { big })
+    // logcat 也必须**有体积**：6 字节的 logcat 在坏顺序下照样能塞进剩余空间，判据就不判别了
+    // （第一版实测踩到：变异「取消排序」后用例仍绿）。真实 logcat 上限是 512KB。
+    entries.add(LogShare.InputEntry("logcat.txt") { "L".repeat(1000) })
+
+    val ok = zipTarget()
+    // cap 只够 device + logcat + 一份 engine.log 左右
+    val result = LogShare.packTo(ok, entries, totalCap = 2500L)
+    assertTrue("打包必须成功：" + result.reason, result.ok)
+    ZipFile(ok).use { zip ->
+      assertNotNull("device.txt 必须在包里", zip.getEntry(LogShare.DEVICE_NAME))
+      assertNotNull("logcat.txt 不得被 engine.log 挤掉（本 issue 的缺陷本体）", zip.getEntry("logcat.txt"))
+    }
+    assertTrue("必须有条目因整包上限被丢，否则夹具没触到 cap：" + result.report,
+      result.report.any { it.endsWith("=skipped-total-cap") })
+    // 被丢的第一条必须是低价值条目，而不是 logcat/dsh-day 这类高价值项
+    val firstSkipped = result.report.first { it.endsWith("=skipped-total-cap") }
+    assertTrue("被丢的第一条应是 engine.log 旧代而不是 logcat：" + firstSkipped,
+      firstSkipped.startsWith("engine.log."))
+  }
+
+  @Test
+  fun `回执必须把 skipped-total-cap 计入未收录数`() {
+    assertEquals("", LogShare.missingNote(listOf("device.txt=present(6B)", "engine.log=present(10B)")))
+    // 只有 absent：沿用原文案
+    assertTrue(LogShare.missingNote(listOf("a=absent")).contains("1 项日志缺失"))
+    // 只有 skipped：必须单独说明，且说清是"整包上限"而不是"缺失"
+    val cappedOnly = LogShare.missingNote(listOf("logcat.txt=skipped-total-cap"))
+    assertTrue("skipped 必须计入回执：" + cappedOnly, cappedOnly.contains("1 项"))
+    assertTrue("必须说明是整包上限：" + cappedOnly, cappedOnly.contains("整包上限"))
+    assertFalse("不得把它说成缺失：" + cappedOnly, cappedOnly.contains("缺失"))
+    // 两者都有：分别给出数字
+    val mixed = LogShare.missingNote(listOf("a=absent", "b=skipped-total-cap", "c=skipped-total-cap"))
+    assertTrue("混合时必须给总数：" + mixed, mixed.contains("3 项"))
+    assertTrue(mixed.contains("1 项缺失"))
+    assertTrue(mixed.contains("2 项超上限"))
+  }
+
 }

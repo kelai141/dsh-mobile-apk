@@ -98,10 +98,25 @@ class JsConfirmHostContractTest {
     assertTrue("找不到仓库根（vendor/dsh-undo-savepoint 不在任何祖先目录下）", root != null)
     val client = File(root, "vendor/dsh-undo-savepoint/lib/client.js").readText()
     val guards = Regex("if \\(!window\\.confirm\\(").findAll(client).count()
+    // issue #1392：撤销也补上了确认守卫，从 3 处变 4 处。
     assertTrue(
       "vendor/dsh-undo-savepoint/lib/client.js 里的 window.confirm 守卫数量变了（实得 " + guards + "）——" +
         "页面若已改用应用内确认组件，宿主 onJsConfirm 的判据需要同步重写",
-      guards == 3,
+      guards == 4,
     )
+    // 只数个数不够：把其中一个删掉、另一个复制一遍也能凑够 4。逐条点名四个**破坏性**动作，
+    // 任何一处守卫被挪走都会在这里点名失败。
+    val sites = listOf(
+      "恢复" to "window.confirm(t(\"panel.confirm.restore\")",
+      "删除" to "window.confirm(t(\"panel.confirm.delete\")",
+      "安全模式" to "window.confirm(on ? t(\"safe.off.confirm\")",
+      "撤销" to "window.confirm(t(\"panel.confirm.undo\")",
+    )
+    for ((label, needle) in sites) {
+      assertTrue(
+        label + " 的 confirm 守卫不见了（找 " + needle + "）——破坏性动作不得在没有确认的情况下执行",
+        client.contains(needle),
+      )
+    }
   }
 }
