@@ -61,6 +61,9 @@ export async function installVerifiedPluginBundle({
   if (typeof downloadAsset !== 'function' || typeof extractArchive !== 'function') throw new TypeError('downloadAsset and safe extractArchive adapters are required')
   const root = path.resolve(destinationRoot)
   await mkdir(root, { recursive: true })
+  // issue #1375：回收上次中断留下的 .backup-*（原先**无人清理**，磁盘只增不减）。
+  // 保守：只清 10 分钟前的条目，避免删掉正在进行的发布所用的回滚源。清扫失败不影响安装。
+  try { await sweepStaleBundleDirs(root) } catch { /* 清扫是尽力而为 */ }
   const finalDirectory = path.join(root, asset.sha256)
   const markerPath = path.join(finalDirectory, '.dsh-asset-integrity.json')
   try {
@@ -142,8 +145,8 @@ async function pickPackageDirectory(rootDirectory) {
  * Publish a verified package directory as `<root>/<sha256>`, replacing any
  * previous copy atomically and rolling back if the swap fails.
  */
-async function publishBundle({ root, finalDirectory, packageDirectory, asset, unpackedSize, token }) {
-  await writeFile(path.join(packageDirectory, '.dsh-asset-integrity.json'), `${JSON.stringify({ sha256: asset.sha256, size: asset.size, unpackedSize })}\n`)
+export async function publishBundle({ root, finalDirectory, packageDirectory, asset, unpackedSize, token }) {
+  await writeFile(path.join(packageDirectory, '.dsh-asset-integrity.json'), `${JSON.stringify({ sha256: asset.sha256, size: asset.size, unpackedSize })}`)
   const backupDirectory = path.join(root, `.backup-${token}`)
   let hadPrevious = false
   try {
@@ -154,10 +157,32 @@ async function publishBundle({ root, finalDirectory, packageDirectory, asset, un
   }
   try {
     await rename(packageDirectory, finalDirectory)
-    if (hadPrevious) await rm(backupDirectory, { recursive: true, force: true })
   } catch (error) {
-    if (hadPrevious) await rename(backupDirectory, finalDirectory).catch(() => {})
+    // issue #1375：回滚失败**不得**被吞掉。旧实现是 rename(...).catch(() => {}) ——
+    // 恢复失败既没有日志也没有上报，旧包永久留在 .backup-<uuid>，用户只看到「安装失败」
+    // 而现场无从查起。这里把两个错误一起抛出，并在消息里点明旧包还在哪。
+    if (hadPrevious) {
+      try {
+        await rename(backupDirectory, finalDirectory)
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          `Bundle publish failed and rollback failed; previous copy remains at ${backupDirectory}`,
+        )
+      }
+    }
     throw error
+  }
+  // issue #1375（反向）：清理备份必须在**发布成功之后、且在 try 之外**。
+  // 旧实现把它放在 try 里：rm 一抛（备份目录被占用等）就落进 catch，去把**刚刚发布成功**的
+  // 目录再 rename 回备份（必然失败并被吞），然后 throw —— 安装其实成功却报失败。
+  // 清理失败只告警：新包已就位，不影响可用性，但必须留痕。
+  if (hadPrevious) {
+    try {
+      await rm(backupDirectory, { recursive: true, force: true })
+    } catch (error) {
+      console.warn('[dsh-linux-bootstrap] backup cleanup deferred: ' + backupDirectory + ' (' + String(error && error.message ? error.message : error) + ')')
+    }
   }
 }
 
@@ -210,6 +235,38 @@ async function publishHostStagedBundle({ hostStagingRoot, asset, root, finalDire
     await rm(staging, { recursive: true, force: true }).catch(() => {})
   }
   return { path: finalDirectory, sha256: asset.sha256, size: asset.size, unpackedSize, reused: false, hostStaged: true }
+}
+
+/**
+ * 清扫上次中断留下的 `.backup-*` / `.stage-*`（issue #1375：`.backup-*` 原先**无人回收**）。
+ *
+ * 保守点：只删 mtime 超过 minAgeMs 的条目。发布过程中备份目录会短暂存在，
+ * 直接全删会把正在进行的回滚源删掉。
+ *
+ * @param {string} root 插件包根目录。
+ * @param {{ minAgeMs?: number, now?: number }} [options]
+ * @returns {Promise<string[]>} 被删掉的目录名（便于调用方记日志与测试断言）。
+ */
+export async function sweepStaleBundleDirs(root, options = {}) {
+  const minAgeMs = Number.isFinite(options.minAgeMs) ? options.minAgeMs : 10 * 60 * 1000
+  const now = Number.isFinite(options.now) ? options.now : Date.now()
+  const removed = []
+  let entries
+  try { entries = await readdir(root, { withFileTypes: true }) } catch { return removed }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    if (!entry.name.startsWith('.backup-') && !entry.name.startsWith('.stage-')) continue
+    const target = path.join(root, entry.name)
+    try {
+      const info = await stat(target)
+      if (now - info.mtimeMs < minAgeMs) continue
+      await rm(target, { recursive: true, force: true })
+      removed.push(entry.name)
+    } catch (error) {
+      console.warn('[dsh-linux-bootstrap] stale bundle dir cleanup skipped: ' + target + ' (' + String(error && error.message ? error.message : error) + ')')
+    }
+  }
+  return removed
 }
 
 async function validatePackage(directory, packageName, entry) {
