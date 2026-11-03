@@ -1292,6 +1292,11 @@ class OverlayPanel(private val svc: OverlayService) {
           }
         } catch (_: Exception) {}
       }
+      // issue #1364 便宜路：这份列表就是「当前真实存在的会话集」，顺手对账回收已消失会话的工作台。
+      // 只有 HTTP 200 才动手（失败时 pickerSessions 是空的，回收会把正在看的页面全删掉）。
+      if (code == 200 && pickerSessions.isNotEmpty()) {
+        BrowserHostHolder.reconcileSessionWorkspaces(pickerSessions.map { it.id }.toSet())
+      }
       // Re-validate the target; auto-follow only when unpinned.
       // (A-R5: agent ids from api-session/status must never be stored as session ids.)
       if (svc.activeSessionId.isNotEmpty() && pickerSessions.none { it.id == svc.activeSessionId }) {
