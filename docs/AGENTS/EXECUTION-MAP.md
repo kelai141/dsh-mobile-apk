@@ -142,6 +142,7 @@ sequenceDiagram
 ### 阶段 3：交互面（用户随时触发）
 
 - 悬浮球/光环/面板/报告栏：`app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:155`（`onCreate` 建三窗口）；
+- WebView 的 JS 确认框：`app/src/main/java/com/dsharnessmobile/shell/JsConfirmChromeClient.kt:35#expect=override%20fun%20onJsConfirm(view%3A%20WebView%2C%20url%3A%20String%2C%20message%3A%20String%2C%20result%3A%20JsResult)%3A%20Boolean%20%7B`（`onJsConfirm`，两个宿主的 WebChromeClient 共同基类；issue #1383）；
 - 通知中心与通知内应答：`NotifyCenter` → `NotifyStore`（偏移消费）→ `NotifyDecisionQueue`（耐久队列）→ `MuxClient`（`/api/remote.mux`）；
 - BrowserHost捕获Session/tab，UI舞台focus与modelTab分开；新WebView先验证nonDefault profile且无bridge，当前锚点见§6 K08。
 - 虚拟屏：`VdisplayController` + `VdisplayHost`（viewer Surface）+ `VdisplayFloat`（浮窗），特权走 `ShizukuTransport`。
@@ -162,7 +163,7 @@ sequenceDiagram
 
 | ID | 名称 | 一句话职责 | 入口/触发 | 阶段 | 依赖 | 被谁拉起 | 关键文件 | 耦合 |
 |---|---|---|---|---|---|---|---|---|
-| K01 | 启动与引导面 | 点开 App 到引擎页面可见的进程入口、引导页与 WebView 宿主 | LAUNCHER 图标、VIEW/SEND 来件（`ACTION_UPDATE` 的 adb 触发入口已随 #682 移除） | 引导与启动 | 引擎进程与快照面、鉴权探活、诊断落盘 | 系统启动器与分享面板、BootReceiver、悬浮球跳转 | MainActivity.kt,EngineStartFlow.kt,GuidePageRenderer.kt,ForegroundPageRecoveryPolicy.kt | 高 |
+| K01 | 启动与引导面 | 点开 App 到引擎页面可见的进程入口、引导页与 WebView 宿主 | LAUNCHER 图标、VIEW/SEND 来件（`ACTION_UPDATE` 的 adb 触发入口已随 #682 移除） | 引导与启动 | 引擎进程与快照面、鉴权探活、诊断落盘 | 系统启动器与分享面板、BootReceiver、悬浮球跳转 | MainActivity.kt,EngineStartFlow.kt,GuidePageRenderer.kt,ForegroundPageRecoveryPolicy.kt,JsConfirmChromeClient.kt | 高 |
 | K02 | 引擎生命周期与保活 | 起 node 引擎、Activity独立观察启动准备窗、5s 探活、看门狗重启熔断与日志落盘 | EngineStartFlow.start及生命周期结束后排队启动前台服务、EngineService先前台提升后初始化及5s tick | 引导与启动 | K01,K03 | MainActivity、BootReceiver、EngineStartFlow | EngineManager.kt,EngineService.kt,WatchdogV2.kt,LogCollector.kt | 高 |
 | K03 | 快照事务与更新链 | 内嵌快照暂存交换事务与回滚（插件故障走**清单式外科拔除**，不整份回滚），兼在线更新与清单合并 | 启动流判指纹不新鲜 / 引导页检查更新 / WebView 下载 | 快照与更新 | 引导启动流、引擎探活、构建快照资产 | EngineStartFlow.runFlow、EngineService 看门狗、引导页按钮、MainActivity 的 WebView 回调 | SnapshotTransaction.kt,SnapshotFs.kt,SnapshotRefreshPolicy.kt,PublicRepoProvision.kt,UpdateManager.kt,PluginMounts.kt,SnapshotUserData.kt,SnapshotFingerprintPolicy.kt,ProfilePackageManifest.kt | 高 |
 | K04 | 桥与控制协议面 | 页面 JS 桥面、引擎鉴权与控制队列承载 | 页面调 androidBridge；EngineService 起控制承载 | 稳态控制 | 引导与启动（EngineService/MainActivity）、无障碍与虚拟屏宿主、快照与更新（UndoGate） | MainActivity 装桥；EngineService.onCreate 起 ControlCarrier；看门狗 tick 调 UndoGate | app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt,app/src/main/java/com/dsharnessmobile/shell/ClipboardReadController.kt,app/src/main/java/com/dsharnessmobile/shell/ControlPoller.kt,app/src/main/java/com/dsharnessmobile/shell/EngineAuth.kt,app/src/main/java/com/dsharnessmobile/shell/ControlProtocolV2.kt | 高 |
@@ -2171,6 +2172,7 @@ app/src/main/java/com/dsharnessmobile/shell/ConsoleSessionStartGuard.kt
 app/src/test/java/com/dsharnessmobile/shell/ConsoleSessionSingleStartGuardTest.kt
 app/src/main/java/com/dsharnessmobile/shell/FileExternalBridge.kt
 app/src/main/java/com/dsharnessmobile/shell/PhotoCapture.kt
+app/src/main/java/com/dsharnessmobile/shell/JsConfirmChromeClient.kt
 app/src/main/java/com/dsharnessmobile/shell/PhotoCaptureController.kt
 app/src/test/java/com/dsharnessmobile/shell/PhotoCaptureTest.kt
 app/src/main/java/com/dsharnessmobile/shell/UpdateCardLayout.kt

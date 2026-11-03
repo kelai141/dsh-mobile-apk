@@ -1476,7 +1476,7 @@ class MainActivity : ComponentActivity() {
     webView.setDownloadListener { url, _userAgent, contentDisposition, _mimeType, _contentLength ->
       downloadSaver.downloadToDownloads(url, contentDisposition)
     }
-    webView.webChromeClient = object : WebChromeClient() {
+    webView.webChromeClient = object : JsConfirmChromeClient(this@MainActivity) {
       /**
        * 块L L-2：页面控制台消费者（跨层契约的壳侧一半）。
        *

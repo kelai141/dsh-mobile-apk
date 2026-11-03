@@ -1175,7 +1175,7 @@ internal class BrowserHost(
           return true
         }
       }
-      webChromeClient = object : WebChromeClient() {
+      webChromeClient = object : JsConfirmChromeClient(activity) {
         override fun onReceivedTitle(view: WebView, pageTitle: String?) {
           if (tab.view !== view) return
           tab.title = pageTitle ?: ""
