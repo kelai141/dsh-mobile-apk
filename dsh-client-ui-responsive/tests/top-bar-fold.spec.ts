@@ -612,6 +612,8 @@ describe('D 项：样式表守则', () => {
     // 不碰 vendor 源码：只做样式覆盖（反证：样式表里不得出现 vendor 的 hashed 类名形态）
     expect(TOP_BAR_FOLD_CSS).not.toMatch(/\.[A-Za-z0-9_-]{6,}_.*\{/)
   })
+})
+
 describe('issue #1411：detach 必须取消已排队的 rAF', () => {
   it('排队中的那一帧被 cancel，且回调即便执行也不再写 DOM', () => {
     // 旧实现只存布尔、不存 id：同一帧内 detach 之后，已排队的回调仍会跑 sync()，
