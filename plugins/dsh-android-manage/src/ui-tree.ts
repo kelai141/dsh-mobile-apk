@@ -432,15 +432,25 @@ export function resolveRef(
       if (pool.length === 0) pool = [scope.n]
     }
   }
-  const cands = pool.filter((n) => (kind === 'text' ? n.text === t : kind === 'desc' ? n.desc === t : n.rid === t))
-  if (cands.length === 0) {
+  // issue #1406：编号口径必须与渲染侧**完全一致**——都是「按**单一字段**在**整份取树结果**里的顺序」。
+  // 旧实现按 pool（可能已被 scope 缩小）过滤，而清单用整份 nodes 编号 ⇒ 模型照清单写
+  // `text:X#2` 会点到另一个节点，且回 ok=true。
+  const fieldOf = (n: UiNode): string => (kind === 'text' ? n.text : kind === 'desc' ? n.desc : n.rid)
+  const all = nodes.filter((n) => fieldOf(n) === t)
+  const cands = pool === nodes ? all : all.filter((n) => pool.includes(n))
+  if (all.length === 0) {
     return { ok: false, error: `没有 ${kind} 为 "${t.slice(0, 30)}" 的节点${scopeId ? `（作用域 ${scopeId}）` : ''}——请重新取树（android_ui_dump 或 android_ui_tree）确认当前页面` }
   }
   if (occurrence !== null) {
-    if (occurrence > cands.length) {
-      return { ok: false, error: `${kind} "${t.slice(0, 30)}" 只有 ${cands.length} 个匹配，请求的是第 ${occurrence} 个`, matches: cands.slice(0, 8) }
+    // 校验与取值都按**全局**序（与清单一致），作用域只用来拒绝越界引用。
+    if (occurrence > all.length) {
+      return { ok: false, error: `${kind} "${t.slice(0, 30)}" 只有 ${all.length} 个匹配，请求的是第 ${occurrence} 个`, matches: all.slice(0, 8) }
     }
-    return { ok: true, node: cands[occurrence - 1], matches: cands.length > 1 ? cands : undefined }
+    const target = all[occurrence - 1]
+    if (!cands.includes(target)) {
+      return { ok: false, error: `${kind} "${t.slice(0, 30)}#${occurrence}" 落在作用域 ${scopeId} 之外——请去掉 scopeid 或改用在该作用域内的序号`, matches: cands.slice(0, 8) }
+    }
+    return { ok: true, node: target, matches: all.length > 1 ? all : undefined }
   }
   if (cands.length === 1) return { ok: true, node: cands[0] }
   // 多个候选：不猜。列出候选（含类型/坐标），让模型用 id 或 #N / @nX 消歧。
