@@ -1313,11 +1313,6 @@ object NotifyCenter {
   }
 
   /**
-   * 纯判据：这条提问是否**无法**在通知栏作答（选项多于两个 ⇒ 通知里没有对应按钮）。
-   * @param entry - 通知条目。
-   * @returns true = 需要在通知里显式给出「打开应用作答」的入口。
-   */
-  /**
    * 通知点击的落点目标（0.14.11，N1）：交互类通知只带 agent 键，旧实现只读 session 键。
    *
    * 为什么 agent 键等价于会话 id：交互类通知来自 user-questions/request 与 approval/request
@@ -1335,8 +1330,26 @@ object NotifyCenter {
     return if (agent.isNotEmpty()) agent else null
   }
 
-  internal fun questionNeedsAppEntry(entry: NotifyEntry): Boolean =
-    entry.questions.any { it.options.size > 2 }
+  /**
+   * 通知栏折叠态能画的动作数上限（系统行为：超出的动作只在展开态出现，用户不一定看得到）。
+   * 计数口径 = 1 个「回复」+ 每个可选项提问的选项按钮。
+   */
+  internal const val MAX_COLLAPSED_ACTIONS = 3
+
+  /**
+   * 纯判据：这条提问是否**无法**在通知栏作答，需要显式给「打开应用作答」入口。
+   *
+   * issue #1409：旧判据只看**单个问题**的选项数（`any { options.size > 2 }`）。多问叠加时
+   * 「1 个回复 + Σ选项」会超过折叠态能画的动作数，而单看每个问题都没超标 ⇒ 判据返回 false，
+   * 第 2 个问题起既点不到也没有引导入口。改为按**总动作数**判。
+   *
+   * @param entry - 通知条目。
+   * @returns true = 需要在通知里显式给出「打开应用作答」的入口。
+   */
+  internal fun questionNeedsAppEntry(entry: NotifyEntry): Boolean {
+    val optionActions = entry.questions.filter { it.options.size in 1..2 }.sumOf { it.options.size }
+    return 1 + optionActions > MAX_COLLAPSED_ACTIONS || entry.questions.any { it.options.size > 2 }
+  }
 
   private fun addQuestionActions(app: Context, b: NotificationCompat.Builder, entry: NotifyEntry) {
     // 动作 1：直接回复（RemoteInput）。只有回复动作开 mutable——结果经 ClipData 注入，
