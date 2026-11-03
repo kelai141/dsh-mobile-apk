@@ -10,11 +10,11 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
 import test from 'node:test'
 
-const CORE = pathToFileURL(new URL('../vendor/dsh-undo-savepoint/lib/core.mjs', import.meta.url).pathname.replace(/^\//, ''))
-const core = await import(CORE.href)
+// 直接用 URL.href 导入：把 URL 转成 pathname 再转回 file URL 会在 POSIX 上拼错路径
+// （Windows 上因为盘符形态侥幸可用，CI 立刻暴露）。
+const core = await import(new URL('../vendor/dsh-undo-savepoint/lib/core.mjs', import.meta.url).href)
 
 /** 造一份「会删掉 victim」的批次内容。 */
 function batchFor(victim) {
