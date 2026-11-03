@@ -115,7 +115,10 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
       is PhotoCapture.PendingRecovery.None -> clearPendingState()
       is PhotoCapture.PendingRecovery.Resume -> {
         // 接着走既有的收尾路径：结果一到就压缩 + 投递 + 回执，与同进程内拍照完全同形。
-        pending = Pending(raw = recovery.raw, target = recovery.target, reply = { payload -> pushToPage(payload) })
+        // issue #1390：回执必须走 queueReceipt（等页面注入桥），不能裸 pushToPage——
+        // 冷启后相机很快返回时 evaluateJavascript 会打到尚未注入的 window.__dshBridge，
+        // 回执消失、页面永远停在等待态。Lost 分支一直是这么做的，这里与之对齐。
+        pending = Pending(raw = recovery.raw, target = recovery.target, reply = { payload -> queueReceipt(payload) })
         LogCollector.log("dsh-photo", "pending capture restored: " + recovery.raw.name)
       }
       is PhotoCapture.PendingRecovery.Lost -> {
