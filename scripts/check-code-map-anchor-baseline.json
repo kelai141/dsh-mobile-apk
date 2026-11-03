@@ -457,7 +457,7 @@
     "plugins/dsh-android-file-open/src/index.ts:527": 4,
     "dsh-client-ui-responsive/src/client/dev-section/runtime-cache.tsx:91": 1,
     "dsh-shell-termux/src/index.ts:39": 1,
-    "dsh-host-web-compat/scripts/boot-watchdog.test.mjs:231": 2,
+    "dsh-host-web-compat/scripts/boot-watchdog.test.mjs:236": 2,
     "scripts/profile-web.cordis.patch.yml:7": 1,
     "scripts/plugin-dirs.json:1": 1,
     "scripts/check-patch-mirror.mjs:109": 1,
@@ -2939,7 +2939,7 @@
     "dsh-client-ui-responsive/tests/incoming-draft.spec.ts:174": [
       "expect(document.documentElement.getAttribute('data-dsh-incoming-draft-poll')).toBe('exhausted')"
     ],
-    "dsh-host-web-compat/scripts/boot-watchdog.test.mjs:231": [
+    "dsh-host-web-compat/scripts/boot-watchdog.test.mjs:236": [
       "// 判据取**求值后**的脚本体（源码切片测不出模板串语义），并在 VM 里跑出真实行为："
     ],
     "dsh-host-web-compat/scripts/smoke-injections.mjs:50": [
