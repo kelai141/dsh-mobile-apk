@@ -1,3 +1,8 @@
+// issue #1131：内嵌资产一致性检查要在脚本里算 sha256。必须走顶层 import ——
+// 在 Kotlin DSL 里写全限定名 `java.security.MessageDigest` 会先解析到 Gradle 的 `java` 扩展，
+// 报 "Unresolved reference: security"（实测踩到）。
+import java.security.MessageDigest
+
 plugins {
   id("com.android.application")
   id("org.jetbrains.kotlin.android")
@@ -99,6 +104,50 @@ tasks.whenTaskAdded {
           "缺少运行时快照 assets/snapshot.tar.xz —— " +
             "从 GitHub Releases 下载 snapshot-x86_64.tar.xz 后放到 app/src/main/assets/snapshot.tar.xz（见 README.md）",
         )
+      }
+      // issue #1131：只判「存在」不够 —— 三份内嵌资产必须**同代**。
+      // 它们都被 .gitignore（git status 看不见、没有 review 会审到），走完整构建链会被自愈，
+      // 直接用 gradle 则不会：会**成功出包**，装到设备上才发现「界面正常、引擎拒启」
+      // （运行期 EngineManager 以 hard-bundle-selection-unverified 拒绝启动）。
+      // 失败形态与操作者直觉相反，所以在这里当场判死，不把坏包交给装机环节。
+      val actualHex = MessageDigest.getInstance("SHA-256").let { md ->
+        snap.inputStream().use { input ->
+          val buf = ByteArray(1 shl 16)
+          while (true) {
+            val n = input.read(buf)
+            if (n < 0) break
+            md.update(buf, 0, n)
+          }
+        }
+        md.digest().joinToString("") { b: Byte -> String.format("%02x", b) }
+      }
+      val howToFix =
+        "修复：先跑 scripts/build-apk-013.ps1 重建（拷贝 tar 后会一并重写 snapshot.sha256 与 " +
+          "plugin-hard-manifest.json），或删掉 app/src/main/assets/ 下这三份陈旧产物后重跑构建链。"
+      val shaFile = file("src/main/assets/snapshot.sha256")
+      if (shaFile.exists()) {
+        val declaredHex = shaFile.readText().trim().lowercase()
+        if (declaredHex != actualHex) {
+          throw GradleException(
+            "内嵌快照资产不同代：assets/snapshot.sha256 声明 " + declaredHex +
+              "，但 snapshot.tar.xz 实际是 " + actualHex + "。\n" +
+              "这三份（snapshot.tar.xz / snapshot.sha256 / plugin-hard-manifest.json）都被 .gitignore，" +
+              "直接跑 gradle 会打出一个「界面正常、引擎拒启」的包。\n" + howToFix,
+          )
+        }
+      }
+      val hardFile = file("src/main/assets/plugin-hard-manifest.json")
+      if (hardFile.exists()) {
+        // fingerprint 的绑定关系已坐实：build-hard-manifest.mjs 把 sha256(tar 字节) 直接写进该字段。
+        val fingerprint = Regex("\"fingerprint\"\\s*:\\s*\"([0-9a-fA-F]{64})\"")
+          .find(hardFile.readText())?.groupValues?.get(1)?.lowercase()
+        if (fingerprint != null && fingerprint != actualHex) {
+          throw GradleException(
+            "内嵌 Hard 插件清单与快照不同代：plugin-hard-manifest.json 的 fingerprint=" + fingerprint +
+              "，但 snapshot.tar.xz 实际是 " + actualHex + "。\n" +
+              "这是「陈旧残留」的典型形态：清单是上一次构建的，tar 是新的。\n" + howToFix,
+          )
+        }
       }
     }
   }
