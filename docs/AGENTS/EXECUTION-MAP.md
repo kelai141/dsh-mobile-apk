@@ -811,7 +811,7 @@ Terminal output delivery (#591): `ConsoleSession` sends stripped PTY text throug
 - **入口/触发**：
   - 页面 JS 同步调 `window.androidBridge.*`（现状：81 个 `@JavascriptInterface` 注解，唯一安装点 `MainActivity.kt:1564#expect=webView.addJavascriptInterface(`；#773 的帧来源守卫合入后每个入口都过 `trusted{}`/`checkTrustedFrame()`，由 `check-bridge-symmetry` 的静态判据守住）与 `window.dshBackBridge.*`（`BackGate.kt:132-148`，仅 2 个方法）；另有 `consoleBridge`（`ConsoleActivity.kt:112#expect=webView.getLocationOnScreen(location)`）挂在控制台 WebView。
   - `EngineService.onCreate` → `ControlCarrier.ensureStarted`（`EngineService.kt:43`）；无障碍服务连接时同入口（`DeviceControlService.kt:452-453`）。轮询/心跳由此起步。
-  - 任一出厂 HTTP 调用方（`EngineProbe.kt:51`、`DownloadSaver.kt:101`、`NotifyBridge.kt:328`、`OverlayPanel.kt:837`、`OverlayService.kt:580`、`MuxClient.kt:91`）在发请求前向 `EngineAuth` 取值。
+  - 任一出厂 HTTP 调用方（`EngineProbe.kt:51`、`DownloadSaver.kt:101`、`NotifyBridge.kt:328`、`OverlayPanel.kt:837`、`OverlayService.kt:580`、`MuxClient.kt:106#expect=var%20failures%20%3D%200`）在发请求前向 `EngineAuth` 取值。
   - 看门狗 tick 的 `undoReady`（`EngineService.kt:134`）与启动流（`EngineStartFlow.kt:349`）触发 `UndoGate`。
 - **运行顺序**：
   1. 引导期（MainActivity.onCreate）：`:160` 先 `EngineAuth.initContext`（顺带 `ShellAppContext.bind`）→ `:204` 建 WebView → `:719`/`:803` 装两条桥 → `:812` 取本地缓存 cookie 注入 CookieManager → 载引擎页；此后页面任何时刻都能同步调桥（JavaBridge 线程）。
@@ -837,7 +837,7 @@ Terminal output delivery (#591): `ConsoleSession` sends stripped PTY text throug
   - `app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:431`（`jsString` 注入转义实现）
   - `app/src/main/java/com/dsharnessmobile/shell/BackGate.kt:52`（`decide` 三输入判定）
   - `app/src/main/java/com/dsharnessmobile/shell/EngineAuth.kt:172`（`refresh` 主体：对象锁 + 同步 HTTP）
-  - `app/src/main/java/com/dsharnessmobile/shell/MuxClient.kt:172`（文本帧重组缓冲，唯一跨帧累积点）
+  - `app/src/main/java/com/dsharnessmobile/shell/MuxClient.kt:189#expect=sendFrame(out%2C%200x1%2C%20streamOpen.toByteArray(Charsets.UTF_8))`（文本帧重组缓冲，唯一跨帧累积点）
   - `app/src/main/java/com/dsharnessmobile/shell/ControlPoller.kt:125`（reqId 去重 + L1 降级重跑）
   - `app/src/main/java/com/dsharnessmobile/shell/ControlCarrier.kt:86`（三族 neverA11y 直连 + a11y 兜底）
   - `app/src/main/java/com/dsharnessmobile/shell/ControlProtocolV2.kt:215`（`o` 列发原始行号）
