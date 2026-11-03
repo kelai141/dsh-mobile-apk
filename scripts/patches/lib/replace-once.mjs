@@ -28,3 +28,26 @@ export function replaceOnce(source, before, after, label) {
   }
   return source.replace(before, after)
 }
+
+/**
+ * 「最多一处」变体（issue #1384 复审）：给**升级型**锚点用——0 次是合法状态（文件已经是新形态），
+ * 1 次正常替换，**≥2 次仍然抛**（那才是半补丁）。
+ *
+ * 为什么不能一律用 [replaceOnce]：S2 的遗留升级路径要在「旧形态」与「已升级形态」之间辨认，
+ * 它的 import 锚点在新形态文件里根本不存在。旧写法 `String.replace` 对 0 次静默不动，于是这条
+ * 路径以前是「碰巧能用」；`replaceOnce` 会把这种合法的「不需要替换」判成锚点漂移。
+ *
+ * 判据边界写死在这里：**只有 0 次被容忍**。1 次以上一律按半补丁处理，不给自己留「多改一处也没事」的口子。
+ */
+export function replaceAtMostOnce(source, before, after, label) {
+  if (typeof before !== 'string' || before === '') {
+    throw new Error('replaceAtMostOnce: anchor must be a non-empty string')
+  }
+  const hits = source.split(before).length - 1
+  if (hits === 0) return source
+  if (hits > 1) {
+    const what = label ?? before.slice(0, 60).replace(/\s+/g, ' ')
+    throw new Error(`anchor mismatch (expected at most one occurrence, found ${hits}): ${what}`)
+  }
+  return source.replace(before, after)
+}

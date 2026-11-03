@@ -37,7 +37,7 @@ import { hasManagedPortBind, patchManagedPortBind } from './data/managed-port-bi
 import { IMAGE_HISTORY_CORE, planImageHistory } from './image-history-batch-offload-I1.mjs'
 import { PREVIEW_LOCAL, PREVIEW_PI, PREVIEW_DEEPSEEK, planRequestPreview } from './image-request-preview-P1.mjs'
 import { planImageExpiry } from './image-expiry-E1.mjs'
-import { replaceOnce } from './lib/replace-once.mjs'
+import { replaceAtMostOnce, replaceOnce } from './lib/replace-once.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const registry = JSON.parse(readFileSync(join(HERE, 'registry.json'), 'utf8'))
@@ -481,7 +481,10 @@ const IMPLS = {
         : 't.webServer.register({kind:"exact",path:V,handler:async(n,e)=>{if(!dshMobileMarketplaceRouteAuthorized(n,e))return;return b({install:s=>p(s,T()),onInstalled:f})(n,e)}})'
       if (!s.includes(SEARCH_OLD)) throw new Error('market-route-auth 锚点未命中：search route 起点已变')
       if (!s.includes(INSTALL_OLD)) throw new Error('market-route-auth 锚点未命中：install route 已变')
-      s = replaceOnce(s, SEARCH_OLD, SEARCH_NEW).replace(INSTALL_OLD, INSTALL_NEW)
+      s = replaceOnce(
+        replaceOnce(s, SEARCH_OLD, SEARCH_NEW, 'market-route-auth search'),
+        INSTALL_OLD, INSTALL_NEW, 'market-route-auth install',
+      )
       if (!s.includes('dsh-mobile marketplace route auth (U2)')) throw new Error('market-route-auth 复核失败——不写回')
       return s
     },
@@ -651,7 +654,13 @@ const IMPLS = {
       for (const [old, name] of [[GROUP_OLD, '归并'], [STATE_OLD, '状态'], [LIST_OLD, '列表']]) {
         if (!s.includes(old)) throw new Error('market-E ' + name + '锚点未命中——上游客户端包已变，请人工核对')
       }
-      s = replaceOnce(s, GROUP_OLD, GROUP_NEW).replace(STATE_OLD, STATE_NEW).replace(LIST_OLD, LIST_NEW)
+      s = replaceOnce(
+        replaceOnce(
+          replaceOnce(s, GROUP_OLD, GROUP_NEW, 'market-F 归并'),
+          STATE_OLD, STATE_NEW, 'market-F 状态声明',
+        ),
+        LIST_OLD, LIST_NEW, 'market-F 列表',
+      )
       if (!s.includes('kidOpen') || !s.includes('dshm-repo')) throw new Error('market-E 复核失败——不写回')
       return s
     },
@@ -717,7 +726,10 @@ const IMPLS = {
       const LIST_NEW = '{className:"dshm-list"},(l!=="ready"||z.length===0)?s.default.createElement("li",{className:"dshm-state"},e(l==="error"?"error":l==="ready"?(mo?"mobileEmpty":"empty"):"loading")):z.map(o=>'
       if (!s.includes(STATES_OLD)) throw new Error('market-G 状态段锚点未命中——三态渲染已变')
       if (!s.includes(LIST_OLD)) throw new Error('market-G 列表锚点未命中——列表起点已变（需先应用 market-E-collapse）')
-      s = replaceOnce(s, STATES_OLD, '').replace(LIST_OLD, LIST_NEW)
+      s = replaceOnce(
+        replaceOnce(s, STATES_OLD, '', 'market-G 状态段'),
+        LIST_OLD, LIST_NEW, 'market-G 列表',
+      )
       if (s.includes('l==="loading"?s.default.createElement("p"')) throw new Error('market-G 复核失败——顶部状态仍在')
       return s
     },
@@ -804,7 +816,10 @@ const IMPLS = {
         + '\t\t\tif (desktop) {'
       if (!s.includes(ITEM)) throw new Error('settings-account 菜单项锚点未命中——上游客户端包已变，请人工核对')
       if (!s.includes(ANCHOR)) throw new Error('settings-account operations 尾部锚点未命中')
-      s = replaceOnce(s, ITEM, '', 1).replace(ANCHOR, EXPOSE, 1)
+      s = replaceOnce(
+        replaceOnce(s, ITEM, '', 'inspector-worker item'),
+        ANCHOR, EXPOSE, 'inspector-worker anchor',
+      )
       if (!s.includes('__dshContactUs') || s.includes('id: "contact"')) throw new Error('settings-account 复核失败——不写回')
       return s
     },
@@ -1069,7 +1084,8 @@ const IMPLS = {
       const safeModeDefaultLine = `    safeModeDefaultWebStore: profileName === 'web' && overrides.autoDir === undefined && !hasConfiguredAutoDir(),\n`
       if (!next.includes('safeModeDefaultWebStore: profileName === \'web\'')) next = next.replace(/(    profileName,\r?\n)/, `$1${safeModeDefaultLine}`)
       else next = next.replace(/    safeModeDefaultWebStore: profileName === 'web' && overrides.autoDir === undefined && !hasConfiguredAutoDir\(\),\r?\n/, safeModeDefaultLine)
-      next = replaceOnce(next, "import { promises as fs, existsSync, readFileSync } from 'node:fs';",
+      // 升级型锚点（复审意见）：新形态文件里这行 import 已经不存在，0 次是合法状态。
+      next = replaceAtMostOnce(next, "import { promises as fs, existsSync, readFileSync } from 'node:fs';",
         "import { promises as fs, existsSync, readFileSync, constants as fsConstants } from 'node:fs';")
       next = next.replace(/import \{ join, dirname, basename, resolve, isAbsolute \} from 'node:path';\r?\n/,
         "import { join, dirname, basename, resolve, relative, sep, isAbsolute } from 'node:path';\n")
@@ -1255,7 +1271,10 @@ const IMPLS = {
       if (!s.includes(OLD_FNS)) {
         throw new Error('narb-android 锚点未命中：三个导出函数体——引擎升级后请人工核对 node-addon-require-builtin/lib/index.js')
       }
-      s = replaceOnce(s, OLD, NEW).replace(OLD_FNS, NEW_FNS)
+      s = replaceOnce(
+        replaceOnce(s, OLD, NEW, 'pi-toolcall 主体'),
+        OLD_FNS, NEW_FNS, 'pi-toolcall 辅助函数',
+      )
       if (!s.includes('dsh-mobile native-binding fallback (N1)')) throw new Error('narb-android 复核失败——不写回')
       return s
     },
@@ -1416,7 +1435,13 @@ const IMPLS = {
           throw new Error('ptc-argv 锚点未命中：' + pair[1] + '——引擎升级后请人工核对 dsh-ptc-runtime-node/lib/index.js')
         }
       }
-      s = replaceOnce(s, OLD_EXEC, NEW_EXEC).replace(OLD_ARGV, NEW_ARGV).replace(OLD_ENV, NEW_ENV)
+      s = replaceOnce(
+        replaceOnce(
+          replaceOnce(s, OLD_EXEC, NEW_EXEC, 'ptc exec'),
+          OLD_ARGV, NEW_ARGV, 'ptc argv',
+        ),
+        OLD_ENV, NEW_ENV, 'ptc env',
+      )
       if (!s.includes('dsh-mobile ptc argv heap via NODE_OPTIONS (L1)')) throw new Error('ptc-argv 复核失败——不写回')
       return s
     },
