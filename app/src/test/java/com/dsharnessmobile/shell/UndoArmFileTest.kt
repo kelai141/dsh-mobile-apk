@@ -42,7 +42,9 @@ class UndoArmFileTest {
     // 0 字节（写盘被硬杀）、空串、非数字、只有空白——都必须算损坏，不能当成「没有值」
     assertEquals(UndoGate.ArmState.CORRUPT, UndoGate.armState(true, ""))
     assertEquals(UndoGate.ArmState.CORRUPT, UndoGate.armState(true, "   "))
-    assertEquals(UndoGate.ArmState.CORRUPT, UndoGate.armState(true, "17000"))
+    // 注意边界：`"17000"` 是**可解析**的 Long，按「解析不出才算损坏」的判据它应当是 VALID
+    // ——把它判成损坏需要引入「时间戳必须落在合理区间」这类额外语义，本 issue 不做。
+    assertEquals(UndoGate.ArmState.VALID, UndoGate.armState(true, "17000"))
     assertEquals(UndoGate.ArmState.CORRUPT, UndoGate.armState(true, "not-a-number"))
     assertEquals(UndoGate.ArmState.CORRUPT, UndoGate.armState(true, null))
   }
