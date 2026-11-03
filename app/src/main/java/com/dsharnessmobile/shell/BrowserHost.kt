@@ -12,6 +12,7 @@ import android.os.SystemClock
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
+import android.webkit.JsResult
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.SslErrorHandler
 import android.webkit.ValueCallback
@@ -1179,6 +1180,36 @@ internal class BrowserHost(
         override fun onReceivedTitle(view: WebView, pageTitle: String?) {
           if (tab.view !== view) return
           tab.title = pageTitle ?: ""
+        }
+
+        /**
+         * issue #1383：隔离浏览器与主 WebView 是同一缺口——没有 onJsConfirm 时 Android 的默认
+         * 实现直接 `result.cancel()`，页面里的 `window.confirm()` 恒为 false，确认类动作全部失效。
+         * 与 MainActivity 同一口径：原生对话框 + 恰好回一次（按钮/返回键/被系统关掉都算终态）。
+         */
+        override fun onJsConfirm(view: WebView, url: String, message: String, result: JsResult): Boolean {
+          if (tab.view !== view) {
+            result.cancel()
+            return true
+          }
+          if (activity.isFinishing || activity.isDestroyed) {
+            result.cancel()
+            return true
+          }
+          var settled = false
+          fun settle(ok: Boolean) {
+            if (settled) return
+            settled = true
+            if (ok) result.confirm() else result.cancel()
+          }
+          android.app.AlertDialog.Builder(activity)
+            .setMessage(message)
+            .setPositiveButton(android.R.string.ok) { _, _ -> settle(true) }
+            .setNegativeButton(android.R.string.cancel) { _, _ -> settle(false) }
+            .setOnCancelListener { settle(false) }
+            .setOnDismissListener { settle(false) }
+            .show()
+          return true
         }
       }
     }

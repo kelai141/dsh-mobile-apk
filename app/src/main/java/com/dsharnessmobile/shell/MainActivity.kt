@@ -1560,6 +1560,35 @@ class MainActivity : ComponentActivity() {
         result.confirm()
         return true
       }
+
+      /**
+       * issue #1383：Android 的默认实现直接 `result.cancel()`，于是页面里的 `window.confirm()`
+       * 恒为 false——快照面板的「恢复该版本 / 删除快照 / 切换安全模式」三个破坏性动作点了没反应
+       * （同页的 `alert()` 走上面的 onJsAlert，看起来一切正常，所以这个缺口长期没被发现）。
+       *
+       * 这里补原生对话框，并且**恰好回一次**：按钮、返回键、对话框被系统关掉都算终态，
+       * 漏回会让页面的 JS 永久挂在该 confirm 上。文案用系统资源（跟随系统语言），不引入新字符串。
+       */
+      override fun onJsConfirm(view: WebView, url: String, message: String, result: JsResult): Boolean {
+        if (isFinishing || isDestroyed) {
+          result.cancel()
+          return true
+        }
+        var settled = false
+        fun settle(ok: Boolean) {
+          if (settled) return
+          settled = true
+          if (ok) result.confirm() else result.cancel()
+        }
+        android.app.AlertDialog.Builder(this)
+          .setMessage(message)
+          .setPositiveButton(android.R.string.ok) { _, _ -> settle(true) }
+          .setNegativeButton(android.R.string.cancel) { _, _ -> settle(false) }
+          .setOnCancelListener { settle(false) }
+          .setOnDismissListener { settle(false) }
+          .show()
+        return true
+      }
     }
     webView.addJavascriptInterface(
       AndroidBridge(

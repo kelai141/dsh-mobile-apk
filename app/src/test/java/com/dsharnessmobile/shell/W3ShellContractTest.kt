@@ -468,4 +468,23 @@ class W3ShellContractTest {
     assertFalse("ST-24：无消费方的 SAF 目录留档表必须删除", code.contains("dsh-saf-dirs"))
     assertTrue("系统持久化授权本身必须保留（真源）", code.contains("takePersistableUriPermission"))
   }
+
+  // ── #1383：window.confirm 必须有原生对话框（Android 默认实现恒 cancel）────────
+  //
+  // 缺陷形态：只实现 onJsAlert、不实现 onJsConfirm ⇒ 页面 confirm() 恒 false，
+  // 快照面板三个破坏性动作点了没反应，而同页 alert() 正常（所以长期没被发现）。
+  // 判据落在「两处宿主各自回了 confirm()/cancel()」上，撤掉任一宿主的实现即红。
+  @Test
+  fun jsConfirmAnsweredInBothHosts() {
+    val main = codeOnly(source("MainActivity.kt"))
+    assertTrue("主 WebView 必须实现 onJsConfirm", main.contains("override fun onJsConfirm("))
+    val mainBody = main.substringAfter("override fun onJsConfirm(").substringBefore("\n      }")
+    assertTrue("主 WebView 的确认分支必须回 confirm()", mainBody.contains("result.confirm()"))
+    assertTrue("主 WebView 的取消分支必须回 cancel()", mainBody.contains("result.cancel()"))
+    val host = codeOnly(source("BrowserHost.kt"))
+    assertTrue("隔离浏览器同一缺口必须补", host.contains("override fun onJsConfirm("))
+    val hostBody = host.substringAfter("override fun onJsConfirm(").substringBefore("\n        }")
+    assertTrue("隔离浏览器的确认分支必须回 confirm()", hostBody.contains("result.confirm()"))
+    assertTrue("隔离浏览器的取消分支必须回 cancel()", hostBody.contains("result.cancel()"))
+  }
 }
