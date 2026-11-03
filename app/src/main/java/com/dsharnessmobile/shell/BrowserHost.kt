@@ -369,7 +369,7 @@ internal class BrowserHost(
   /** Foreground selection is owned exclusively by trusted UI work on the main thread. */
   private fun switchTo(workspace: Workspace) {
     check(Looper.myLooper() == Looper.getMainLooper())
-    currentWorkspace = workspace; reclaimInactiveWorkspaces(workspace)
+    currentWorkspace = workspace; evictOverCap(workspace)
     applyStageBounds()
     applyVisibility()
   }
@@ -2474,27 +2474,64 @@ internal class BrowserHost(
     for (entry in drained) entry.callback(null)
   }
 
+  /** 会话键 → 最近使用时刻（毫秒）。issue #1364：切换淘汰的依据。 */
+  private val workspaceLastUsedAt = HashMap<String, Long>()
+
   /**
-   * 回收**非当前、非匿名**的会话工作台（issue #1364）。
+   * 切换时**只淘汰超上限**的工作台（issue #1364，按维护者裁定重定时机）。
    *
-   * 旧实现只有三个调用点（关工作区 / 关目标会话的标签 / `destroy()` 全清），会话切走或删除时
-   * 什么都不做 ⇒ 常驻 WebView 数 = 开过浏览器的会话数，渲染进程随使用历史线性增长。
+   * 为什么不在切换时清空非当前工作台：那是用户可感知的退化——切走再切回来页面就重建，
+   * 后台浏览状态（滚动位置、表单、正在播放的媒体）全丢。现在保留 current + 最近使用的
+   * [WorkspaceReclaim.RECENT_KEEP] 个，只有当第 [WorkspaceReclaim.MAX_LIVE] 个存活工作区出现时
+   * 才淘汰最久未用的那个。上限依据见 [WorkspaceReclaim] 的类注释。
    *
-   * **顺序：先删引用，再销毁**（维护者要求）：
-   * 1. 先从 `workspaces` 摘键——此后任何新调用都会新建，不会被半销毁的工作台接住；
-   * 2. 再 `dropWorkspace`（销毁 WebView / 释放 profile）。它内部的 `workspaces.remove` 此时是
-   *    幂等 no-op；profile dispose 失败只记录 `profileError`（**warn，不抛**），
-   *    绝不因为「删不掉」而阻断会话删除这类调用方流程。
+   * **顺序：先删引用，再销毁**（维护者要求）——先从 `workspaces` 摘键，此后新调用会新建，
+   * 不会被半销毁的工作台接住；再 `dropWorkspace`（内部 remove 幂等；profile dispose 失败只 warn）。
    *
-   * @param keep 当前工作台（必须保留）。
+   * @param keep 当前工作台（永不淘汰）。
    */
-  private fun reclaimInactiveWorkspaces(keep: Workspace?) {
-    val plan = WorkspaceReclaim.plan(workspaces.keys.toList(), keep?.sessionKey, ANONYMOUS_SESSION)
-    for (key in plan) {
+  private fun evictOverCap(keep: Workspace?) {
+    val now = System.currentTimeMillis()
+    keep?.let { workspaceLastUsedAt[it.sessionKey] = now }
+    val victims = WorkspaceReclaim.evictPlan(
+      workspaces.keys.toList(), keep?.sessionKey, ANONYMOUS_SESSION, workspaceLastUsedAt,
+    )
+    for (key in victims) {
       val workspace = workspaces[key] ?: continue
-      workspaces.remove(key) // 先删引用
-      dropWorkspace(workspace) // 再销毁（内部 remove 幂等；profile 失败只 warn）
+      val lastUsed = workspaceLastUsedAt.remove(key) ?: now
+      workspaces.remove(key)
+      android.util.Log.w(
+        "dsh-browser",
+        "workspace evicted: reason=cap key=" + key + " age=" + (now - lastUsed) + "ms",
+      )
+      dropWorkspace(workspace)
     }
+  }
+
+  /**
+   * 会话被删除时**立即**回收它的工作台（issue #1364 的主回收点）。
+   *
+   * 删除是唯一能确定「这个页面再也不会被用到」的时刻，所以这里不做任何延迟或额度判断。
+   * 其余工作台**不受影响**（判据里有这条）。
+   *
+   * 注：壳侧目前**没有**会话删除的信号源——session 生命周期归引擎/页面侧，现有的
+   * `/api/android/` 路由里也没有会话事件。本方法是那个信号出现时要调的入口
+   * （`BrowserHostHolder.dropSessionWorkspace`），
+   * 在信号接上之前，驻留由 [evictOverCap] 的上限兜住（最坏 4 个）。
+   *
+   * @param session 被删除的会话 id。
+   */
+  internal fun dropWorkspaceForSession(session: String?) {
+    val key = session?.takeIf { it.isNotBlank() } ?: return
+    val workspace = workspaces[key] ?: return
+    val now = System.currentTimeMillis()
+    val lastUsed = workspaceLastUsedAt.remove(key) ?: now
+    workspaces.remove(key) // 先删引用
+    android.util.Log.w(
+      "dsh-browser",
+      "workspace dropped: reason=session-delete key=" + key + " age=" + (now - lastUsed) + "ms",
+    )
+    dropWorkspace(workspace) // 再销毁
   }
 }
 
@@ -2510,6 +2547,18 @@ internal object BrowserHostHolder {
   var host: BrowserHost? = null
 
   /** Route one control op to the live BrowserHost; absent host is a structured fail-closed answer. */
+  /**
+   * 会话被删除时回收它的隔离工作台（issue #1364 的主回收点）。
+   *
+   * 现在**没有调用方**：壳侧收不到会话删除信号（session 生命周期在引擎/页面侧）。
+   * 已具备可信信号时应在这里接上——在那之前，驻留由切换淘汰的上限兜住（最坏 4 个）。
+   *
+   * @param session 被删除的会话 id。
+   */
+  fun dropSessionWorkspace(session: String?) {
+    host?.dropWorkspaceForSession(session)
+  }
+
   fun control(op: String, args: JSONObject): JSONObject {
     val current = host ?: return JSONObject()
       .put("__error", "浏览器工作台尚未创建：请先在右侧栏「AI 浏览器」中打开页面。")
