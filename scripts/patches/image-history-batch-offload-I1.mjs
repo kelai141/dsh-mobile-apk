@@ -9,9 +9,18 @@ export const IMAGE_BATCH_FUNCTION = `function offloadedImagePrefixCount(lengths,
 \tif (count === 0) return 0;
 \tconst hardBytes = budget.maxBytes ?? Infinity;
 \tconst hardCount = budget.maxImages ?? Infinity;
-\t// A single observation cannot be made smaller by removing older history.
+\t// issue #1334：最新一张图**自身**超预算时不得抛 INVALID_REQUEST。
+\t//
+\t// 唯一消费方 dsh-compaction-image-offload 只认 IMAGE_OFFLOAD_REQUIRED_CODE，
+\t// 其它 code 一律 return next() 放过 —— 于是没有任何环节会去卸载，之后每一轮都抛
+\t// 同一条错误，该会话在删掉附件之前彻底卡死。
+\t//
+\t// 与引擎原实现一致：返回计数（这里是全部 occurrence），让适配器抛
+\t// IMAGE_OFFLOAD_REQUIRED(n)，由卸载插件把内联字节换成引用后重试。
+\t// 「单张自身超预算」并不等于无解：卸载换的是表示形态（内联 base64 → 引用），
+\t// 字节数会大幅下降，重试即可通过。
 \tif (lengths[count - 1] > hardBytes || hardCount < 1) {
-\t\tthrow new LlmError("The latest image alone exceeds the request image limit; history was not changed.", "INVALID_REQUEST");
+\t\treturn count;
 \t}
 \tif (count === 1) return 0;
 \tconst softBytes = Number.isFinite(hardBytes) ? Math.max(1, Math.floor(hardBytes * 0.9)) : Infinity;
