@@ -2682,4 +2682,4 @@ Telemetry snapshot closure: check-engine-overlay retains each dependency's decla
 **PendingJsDrain**：`app/src/main/java/com/dsharnessmobile/shell/PendingJsDrain.kt:47#expect=fun%20shouldReclaim(inflight%3A%20Int)%3A%20Boolean%20%3D%20inflight%20%3E%3D%20MAX_INFLIGHT`（issue #1362）
 
 
-**WorkspaceReclaim**：`app/src/main/java/com/dsharnessmobile/shell/WorkspaceReclaim.kt:34#expect=fun%20plan(keys%3A%20List%3CString%3E%2C%20currentKey%3A%20String%3F%2C%20anonymousKey%3A%20String)%3A%20List%3CString%3E%20%3D`（issue #1364）
+**WorkspaceReclaim**：`app/src/main/java/com/dsharnessmobile/shell/WorkspaceReclaim.kt:39#expect=const%20val%20MAX_LIVE%20%3D%20RECENT_KEEP%20%2B%201`（issue #1364；上限 4 = current + 3 个最近使用，依据见该类注释）

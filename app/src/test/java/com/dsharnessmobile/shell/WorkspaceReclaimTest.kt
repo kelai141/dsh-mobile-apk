@@ -5,45 +5,63 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * issue #1364：会话切走时必须回收**非当前、非匿名**的工作台。
+ * issue #1364（2026-11-04 按维护者裁定重定时机）：**删除为主、切换只做上限淘汰**。
  *
- * 这条判据要能**双向**区分两件事（维护者要求）：
- *  - 「跳过 current」——current 与匿名必须留在终态里；
- *  - 「根本没有调用」——所以必须有一个**非 current 的可删工作区**真的出现在回收计划里。
- * 只断言「目录还在」在两种实现下都绿，区分不了这两件事。
+ * 判据要挡住的退化是「切走再切回就重建」——所以第一条就是「上一个会话的工作区必须还在」。
+ * 淘汰只在**超上限**时发生，且只淘汰最久未用的那一个。
  */
 class WorkspaceReclaimTest {
   private val anon = "__anonymous__"
+  private fun used(vararg pairs: Pair<String, Long>): Map<String, Long> = pairs.toMap()
 
-  @Test fun nonCurrentWorkspaceIsActuallyReclaimed() {
+  @Test fun previousSessionWorkspaceSurvivesSwitch() {
+    // 上一个是 s1（用过），现在切到 s2：s1 **不得**被淘汰。
     val keys = listOf("s1", "s2", anon)
-    // s2 是当前会话：s1 必须出现在计划里 —— 这证明「真的会删」，而不是「压根没调用」。
-    assertEquals(listOf("s1"), WorkspaceReclaim.plan(keys, currentKey = "s2", anonymousKey = anon))
-  }
-
-  @Test fun currentAndAnonymousSurvive() {
-    val keys = listOf("s1", "s2", anon)
-    assertEquals(
-      listOf("s2", anon),
-      WorkspaceReclaim.remainingKeys(keys, currentKey = "s2", anonymousKey = anon),
+    val plan = WorkspaceReclaim.evictPlan(
+      keys, currentKey = "s2", anonymousKey = anon,
+      lastUsedAt = used("s1" to 100L, "s2" to 200L),
     )
+    assertTrue("切走就回收是用户可感知的退化（切回来页面重建），计划必须为空：" + plan, plan.isEmpty())
   }
 
-  @Test fun noCurrentMeansEverySessionWorkspaceGoes() {
-    val keys = listOf("s1", "s2", anon)
-    assertEquals(listOf("s1", "s2"), WorkspaceReclaim.plan(keys, currentKey = null, anonymousKey = anon))
-    assertEquals(listOf(anon), WorkspaceReclaim.remainingKeys(keys, currentKey = null, anonymousKey = anon))
+  @Test fun fiveSessionsEvictOnlyTheOldestAndKeepCurrentPlusThree() {
+    // 5 个会话工作区，current = s5；s1 最久未用 → 只淘汰 s1。
+    val keys = listOf("s1", "s2", "s3", "s4", "s5", anon)
+    val lastUsed = used("s1" to 10L, "s2" to 20L, "s3" to 30L, "s4" to 40L, "s5" to 50L)
+    val plan = WorkspaceReclaim.evictPlan(keys, currentKey = "s5", anonymousKey = anon, lastUsedAt = lastUsed)
+    assertEquals(listOf("s1"), plan)
+    val remaining = keys.filter { it !in plan }
+    assertEquals(listOf("s2", "s3", "s4", "s5", anon), remaining)
   }
 
-  @Test fun currentNotInMapReclaimsEverythingElse() {
-    // 当前键已不在表里（例如刚被别处摘掉）：其余仍应全部回收，不得因为「找不到 current」而放弃。
-    val keys = listOf("s1", "s2")
-    assertEquals(listOf("s1", "s2"), WorkspaceReclaim.plan(keys, currentKey = "gone", anonymousKey = anon))
+  @Test fun currentIsNeverEvictedEvenIfItLooksOld() {
+    // current 的时间戳故意给最小值 —— 仍不得被淘汰。
+    val keys = listOf("s1", "s2", "s3", "s4", "s5")
+    val lastUsed = used("s1" to 50L, "s2" to 40L, "s3" to 30L, "s4" to 20L, "s5" to 1L)
+    val plan = WorkspaceReclaim.evictPlan(keys, currentKey = "s5", anonymousKey = anon, lastUsedAt = lastUsed)
+    assertEquals(listOf("s4"), plan) // 非 current 里最久未用的是 s4
+    assertTrue("current 不得出现在淘汰计划里", "s5" !in plan)
   }
 
-  @Test fun anonymousIsNeverReclaimedEvenWhenNotCurrent() {
-    val keys = listOf(anon, "s1")
-    assertTrue(WorkspaceReclaim.plan(keys, currentKey = "s1", anonymousKey = anon).isEmpty())
-    assertEquals(listOf(anon, "s1"), WorkspaceReclaim.remainingKeys(keys, currentKey = "s1", anonymousKey = anon))
+  @Test fun anonymousIsNeverEvicted() {
+    val keys = listOf(anon, "s1", "s2", "s3", "s4", "s5")
+    val lastUsed = used(anon to 1L, "s1" to 10L, "s2" to 20L, "s3" to 30L, "s4" to 40L, "s5" to 50L)
+    val plan = WorkspaceReclaim.evictPlan(keys, currentKey = "s5", anonymousKey = anon, lastUsedAt = lastUsed)
+    assertEquals(listOf("s1"), plan)
+    assertTrue("匿名工作台永不淘汰", anon !in plan)
+  }
+
+  @Test fun sessionDeleteReleasesOnlyThatSession() {
+    val keys = listOf("s1", "s2", "s3", anon)
+    assertEquals(listOf("s1", "s3", anon), WorkspaceReclaim.afterSessionDelete(keys, "s2", anon))
+    assertEquals(keys, WorkspaceReclaim.afterSessionDelete(keys, "nope", anon))
+    assertEquals(keys, WorkspaceReclaim.afterSessionDelete(keys, anon, anon))
+  }
+
+  @Test fun capStaysAtTheDocumentedValue() {
+    // 上限是被论证过的数字（4 个渲染进程 ≈ 240–600 MB，已接近低端机上限；用户实际并行 1–2，
+    // 3 个非当前额度覆盖「同一话题开两三条支线」）。改它必须同时改 WorkspaceReclaim 类注释。
+    assertEquals(3, WorkspaceReclaim.RECENT_KEEP)
+    assertEquals(4, WorkspaceReclaim.MAX_LIVE)
   }
 }
