@@ -1160,8 +1160,10 @@ object NotifyCenter {
         addApprovalActions(app, b, entry)
       }
     }
-    // S3-1：降级告示只在传了它时出现，且不覆盖更具体的 subText（如提问的「仅本次生效」）。
-    if (degradedNotice != null) b.setSubText(degradedNotice)
+    // S3-1：降级告示只在传了它时出现，且**不覆盖**更具体的 subText（如审批的「仅本次生效」）。
+    // issue #1407：旧实现无条件 setSubText，把这句具体说明顶掉——用户会把「一次性授权」当成
+    // 长期授权。哪些分支自带 subText 由 hasSpecificSubText 一张表说清（纯函数，单测钉住）。
+    if (degradedNotice != null && !hasSpecificSubText(face, entry.count)) b.setSubText(degradedNotice)
     b.setContentIntent(contentIntent(app, entry))
     // DEF-NOTIFY-01：降级为静默条目时补静默标志（渠道已是 dsh-silent，这是第二道保险）
     if (silentOverride) {
@@ -1333,6 +1335,19 @@ object NotifyCenter {
     if (session.isNotEmpty()) return session
     val agent = agentExtra?.trim().orEmpty()
     return if (agent.isNotEmpty()) agent else null
+  }
+
+  /**
+   * 本拍是否已有**更具体**的 subText（issue #1407）——降级告示不得覆盖它。
+   *
+   * 表来自 [build] 各分支的实际写法：SILENT 只在多条时写条数、TODO 写步骤、REPORT 写元信息、
+   * APPROVAL 写「仅本次生效」、QUESTION 不写（它的信息在 contentText 与 BigText 里）。
+   * 纯函数：JVM 单测直接钉住这张表，新增分支时忘同步会红。
+   */
+  internal fun hasSpecificSubText(face: Face, count: Int): Boolean = when (face) {
+    Face.SILENT -> count > 1
+    Face.TODO, Face.REPORT, Face.APPROVAL -> true
+    Face.QUESTION -> false
   }
 
   internal fun questionNeedsAppEntry(entry: NotifyEntry): Boolean =
