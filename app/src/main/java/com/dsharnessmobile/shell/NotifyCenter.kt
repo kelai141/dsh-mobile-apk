@@ -1376,7 +1376,7 @@ object NotifyCenter {
       b.addAction(
         NotificationCompat.Action.Builder(
           android.R.drawable.ic_menu_view,
-          "打开应用作答",
+          UiText.t(app, "打开应用作答", "Open app to answer"),
           contentIntent(app, entry),
         ).build(),
       )
@@ -1387,12 +1387,12 @@ object NotifyCenter {
     // 审批动作恒为两个（NT-21）：批准一次 / 拒绝。不提供任何常驻授权承诺。
     val approve = NotificationCompat.Action.Builder(
       android.R.drawable.ic_menu_edit,
-      "批准一次",
+      UiText.t(app, "批准一次", "Allow once"),
       actionPending(app, entry, NotifyActionReceiver.ACTION_APPROVE, mutable = false),
     )
     val reject = NotificationCompat.Action.Builder(
       android.R.drawable.ic_menu_close_clear_cancel,
-      "拒绝",
+      UiText.t(app, "拒绝", "Reject"),
       actionPending(app, entry, NotifyActionReceiver.ACTION_REJECT, mutable = false),
     )
     if (APPROVAL_REQUIRE_UNLOCK) {
@@ -1465,7 +1465,7 @@ object NotifyCenter {
         retry,
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
       )
-      b.addAction(NotificationCompat.Action.Builder(android.R.drawable.ic_menu_rotate, "重试", pending).build())
+      b.addAction(NotificationCompat.Action.Builder(android.R.drawable.ic_menu_rotate, UiText.t(app, "重试", "Retry"), pending).build())
     }
     (app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
       .notify(failureId(kind, eventId), b.build())
