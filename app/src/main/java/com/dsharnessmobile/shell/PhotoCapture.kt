@@ -83,6 +83,9 @@ internal object PhotoCapture {
   /** 原图文件名前缀。 */
   internal const val RAW_PREFIX = "raw-"
 
+  /** 压缩中间文件的后缀（issue #1388）：成品先写它，成功后才 rename 到最终名字。 */
+  internal const val TMP_SUFFIX = ".tmp"
+
   /**
    * 保留位后缀：压缩失败的原图**不改前缀、只加这个后缀**留在原目录。
    *
@@ -266,12 +269,31 @@ internal object PhotoCapture {
       oriented = applyExifRotation(src, decoded)
       scaled = scaleTo(oriented, maxLongEdge)
       dst.parentFile?.mkdirs()
-      val ok = FileOutputStream(dst).use { out ->
-        if (!scaled.compress(Bitmap.CompressFormat.JPEG, quality, out)) return null
-        out.flush()
-        true
+      // issue #1388：先写同目录临时文件、成功后 rename。旧实现直接写 dst，压缩中途失败
+      // （磁盘满 / OOM / compress 返回 false）会在 attachments/ 里留下 0 字节或半截 JPEG：
+      // 它计入 KEEP_PHOTOS 配额、挤掉好图，还落在 FileProvider 映射面内，可能被当成品分享。
+      val tmp = File(dst.parentFile, dst.name + TMP_SUFFIX)
+      val written = try {
+        FileOutputStream(tmp).use { out ->
+          if (!scaled.compress(Bitmap.CompressFormat.JPEG, quality, out)) {
+            false
+          } else {
+            out.flush()
+            true
+          }
+        }
+      } catch (t: Throwable) {
+        tmp.delete()
+        throw t
       }
-      if (!ok) null else dst.length()
+      if (!written) {
+        tmp.delete()
+        null
+      } else if (!publishCompressed(tmp, dst)) {
+        null
+      } else {
+        dst.length()
+      }
     } catch (_: Throwable) {
       // 解不出来 / 磁盘满 / OOM：一律 null（调用方保留原图）。
       null
@@ -281,6 +303,19 @@ internal object PhotoCapture {
       if (oriented !== null && oriented !== decoded) oriented.recycle()
       decoded?.recycle()
     }
+  }
+
+  /**
+   * 把临时成品转正（issue #1388）。rename 失败时**两边都删**：宁可这次压缩失败（调用方会保留
+   * 原图并如实报错），也不在 attachments/ 里留半截成品占配额、被 FileProvider 当成品分享。
+   *
+   * @returns true = 已落到最终路径。
+   */
+  internal fun publishCompressed(tmp: File, dst: File): Boolean {
+    if (tmp.renameTo(dst)) return true
+    tmp.delete()
+    dst.delete()
+    return false
   }
 
   /** 按 EXIF Orientation 把位图转正；无方向信息或已是正向时原样返回。 */
