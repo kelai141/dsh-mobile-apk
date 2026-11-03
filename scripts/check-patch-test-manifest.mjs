@@ -17,7 +17,7 @@
 //
 // 用法：node scripts/check-patch-test-manifest.mjs
 //       node scripts/check-patch-test-manifest.mjs --self-test
-import { readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
