@@ -89,7 +89,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
                 if (activity.guideView.visibility == View.VISIBLE) {
                   activity.showWeb()
                 } else if (activity.enginePageFailed &&
-                  System.currentTimeMillis() - lastEnginePageReloadAt > ENGINE_PAGE_RELOAD_INTERVAL_MS
+                  System.currentTimeMillis() - lastEnginePageReloadAt > ENGINE_PAGE_RELOAD_INTERVAL_MS && EnginePageRetryPolicy.decide(activity.enginePageFailed, true, activity.pageRecovery.foreground, activity.pageRecovery.rendererGone, activity.userClosedEngine, activity.pageRecovery.retryBudgetSpent(currentStartGeneration), 0L, 0L) == EnginePageRetryPolicy.Decision.RETRY
                 ) {
                   // The engine answered only after the WebView had already shown its
                   // error page (long snapshot refresh): retry that navigation instead
@@ -99,7 +99,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
                   // ERR_CONNECTION_REFUSED 上，而现场没有任何一行说明「我们试过重载但没成功」。
                   // 吞掉无害清理可以，吞掉用户正在等的那个恢复动作不行。
                   try {
-                    activity.retryFailedEnginePage()
+                    activity.retryFailedEnginePage(currentStartGeneration)
                   } catch (e: Exception) {
                     Log.w("dsh-shell", "engine page reload failed", e)
                   }

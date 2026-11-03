@@ -185,7 +185,7 @@ function arbitrateStaleness() {
  * 核心判据。`results` / `classes` / `baseline` 允许注入，便于 --self-test 构造反向对照。
  * @returns {{ failures: string[], notes: string[] }}
  */
-export function evaluate({ results, classes, baseline, srcMtimeMs = 0 }) {
+export function evaluate({ results, classes, baseline, srcMtimeMs = 0, sourceCounts = null }) {
   const failures = []
   const notes = []
 
@@ -228,6 +228,21 @@ export function evaluate({ results, classes, baseline, srcMtimeMs = 0 }) {
     for (const cls of classes) {
       if (results[cls] !== undefined && baseline.testsByClass?.[cls] === undefined) {
         notes.push('新增测试类（可升基线）: ' + cls + ' tests=' + results[cls].tests)
+      }
+    }
+  }
+
+  // C. 源码声明的 @Test 不得多于**实际运行**的用例数（issue #1345 / gotcha 369）。
+  //    失效形态：@Test 写在类的闭合花括号之后 —— Kotlin 能编译、JUnit 不收集，报告里 tests 少几条，
+  //    而 A/B 两条判据**全绿**（基线只升不降，少几条刚好也能过，如果同时删了别的用例甚至更宽松）。
+  if (Array.isArray(sourceCounts)) {
+    for (const entry of sourceCounts) {
+      const present = entry.classes.filter((c) => results[c] !== undefined)
+      if (present.length === 0) continue // A 已判红，不重复报
+      const ran = present.reduce((s, c) => s + results[c].tests, 0)
+      if (entry.annotations > ran) {
+        failures.push('源码 @Test 多于实际运行（用例未被收集，常见于 @Test 写在类的闭合花括号之后）: '
+          + entry.file + ' 源码 ' + entry.annotations + ' 条，实际运行 ' + ran + ' 条')
       }
     }
   }
@@ -336,7 +351,27 @@ function selfTest() {
     console.error('KOTLIN-TEST-COUNT SELF-TEST FAILED: ' + failures.join(' / '))
     process.exit(1)
   }
-  console.log('KOTLIN-TEST-COUNT SELF-TEST PASSED（10 条：1 正向 + 5 反向 + 4 条仲裁判据）')
+  // ④ issue #1345：源码 @Test 多于实际运行 → 判红（类外 @Test 被静默丢弃的形态）
+  {
+    const r = evaluate({
+      results: mk({ AlphaTest: { tests: 2, skipped: 0, failures: 0, errors: 0 }, BetaTest: { tests: 2, skipped: 0, failures: 0, errors: 0 } }),
+      classes, baseline: null,
+      sourceCounts: [{ file: 'AlphaTest.kt', classes: ['AlphaTest'], annotations: 3 }],
+    })
+    check('反向：源码 3 条 @Test 只跑了 2 条 → 判红并点名文件（类外 @Test 会被静默丢弃）',
+      r.failures.some((f) => f.includes('多于实际运行') && f.includes('AlphaTest.kt')), r.failures.join('; '))
+  }
+  // ⑤ 同一条判据不得恒红：源码数与运行数相等 → 绿
+  {
+    const r = evaluate({
+      results: mk({ AlphaTest: { tests: 3, skipped: 0, failures: 0, errors: 0 }, BetaTest: { tests: 2, skipped: 0, failures: 0, errors: 0 } }),
+      classes, baseline: null,
+      sourceCounts: [{ file: 'AlphaTest.kt', classes: ['AlphaTest'], annotations: 3 }],
+    })
+    check('正向：源码 3 条 @Test 跑了 3 条 → 不判红（判据不得恒红）',
+      r.failures.length === 0, r.failures.join('; '))
+  }
+  console.log('KOTLIN-TEST-COUNT SELF-TEST PASSED（12 条：2 正向 + 7 反向 + 4 条仲裁判据）')
 }
 
 // ── main ──────────────────────────────────────────────────────────────────────
@@ -415,7 +450,11 @@ if (argv.includes('--self-test')) {
     ? adjudicated.refreshed
     : results
 
-  const { failures, notes } = evaluate({ results: effectiveResults, classes, baseline, srcMtimeMs: effectiveSrcMtime })
+  const { failures, notes } = evaluate({
+    results: effectiveResults, classes, baseline, srcMtimeMs: effectiveSrcMtime,
+    // issue #1345 / gotcha 369：源码声明的 @Test 必须真的都跑了（写在类外的会被静默丢弃）。
+    sourceCounts: sourceAnnotationCounts(),
+  })
   if (adjudicated !== null) {
     if (adjudicated.arbitrated) console.log('NOTE  ' + adjudicated.note)
     else failures.push('结果陈旧且无法仲裁：' + adjudicated.note)
@@ -431,4 +470,38 @@ if (argv.includes('--self-test')) {
     process.exit(1)
   }
   console.log('CHECK-KOTLIN-TEST-COUNT PASSED（SKIP=0；逐类不低于基线 + 无缺席 + 结果新鲜 + 无失败用例）')
+}
+
+/**
+ * 每个测试源文件里**声明了多少条 `@Test`**（issue #1345 / gotcha 369）。
+ *
+ * 为什么要这条判据：把 `@Test` 追加到类的闭合花括号之后，Kotlin **能编译通过**、JUnit 却
+ * 不收集，于是「加了 3 条用例」没有任何编译期或运行期反馈——报告里的 `tests=` 少几条，
+ * 而其余判据（基线只升不降）**全绿**。对齐「源码声明数 vs 实际运行数」是唯一的外部信号。
+ *
+ * 为什么不用「扫 `@Test` 的大括号深度」：Kotlin 字符串字面量里到处是 `{}`（本仓测试里有大量
+ * `"{0}"` 与 JSON 片段），不处理字符串就会大面积假红；而完整处理原始字符串/转义/模板的成本
+ * 超过它对这条低频陷阱的收益（试过一版，8 个文件误报，见 gotcha 369）。
+ *
+ * 这里只做「数注解」——注释先被剥掉，且比较方向是 `>=`（参数化/多跑几轮都不误判）。
+ *
+ * @returns {Array<{ file: string, classes: string[], annotations: number }>|null}
+ */
+function sourceAnnotationCounts() {
+  if (!existsSync(TEST_SRC_DIR)) return null
+  const out = []
+  for (const f of readdirSync(TEST_SRC_DIR)) {
+    if (!f.endsWith('.kt')) continue
+    const text = readFileSync(join(TEST_SRC_DIR, f), 'utf8')
+    // 与 testSourceClasses 同一套剥离：先块注释、再行注释，避免注释里的 `@Test` 被计入。
+    const code = text.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map((l) => l.split('//')[0]).join('\n')
+    const annotations = (code.match(/(?:^|\n)\s*@Test\b/g) ?? []).length
+    const re = /(?:^|\n)\s*(?:internal\s+|private\s+)?class\s+([A-Za-z0-9_]*Test)\b/g
+    const classes = []
+    let m
+    while ((m = re.exec(code)) !== null) classes.push(m[1])
+    if (classes.length === 0) classes.push(basename(f, '.kt'))
+    out.push({ file: f, classes, annotations })
+  }
+  return out
 }

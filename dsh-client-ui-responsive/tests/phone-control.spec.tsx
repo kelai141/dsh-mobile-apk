@@ -16,6 +16,8 @@ import {
   rootGrantChannelHint,
   rootAccessStateLabel,
   canRequestRoot,
+  rootGrantTerminal,
+  ROOT_GRANT_PENDING_TIMEOUT_MS,
   ROOT_GRANT_NOT_ROOT_TEXT,
   describeOwnershipRepair,
   parseRootReply,
@@ -1119,5 +1121,50 @@ describe('文件属主维护异步结算（rootGrant.ownership）', () => {
     const malformed = describeOwnershipRepair(ownershipStatus({ result: { ok: false, checked: -1, healed: Number.NaN, failures: '0' } }))!
     expect(malformed.ok).toBe(false)
     expect(malformed.text).toContain('检查 未知 项 / 修复 未知 项 / 失败 未知 项')
+  })
+})
+
+/**
+ * issue #1377：root 授权等待的**终态收敛**。
+ *
+ * 判据要钉住「三种终态可辨」，而不是只验「pending 被关掉」——后者在三种状态下表现完全一样，
+ * 那正是缺陷（文案一直停在「正在检测 root 授权」）。
+ */
+describe('root 授权终态（issue #1377）', () => {
+  it('已拒绝：可重试，且文案指明去 Root 管理器改', () => {
+    const terminal = rootGrantTerminal('denied')
+    expect(terminal?.code).toBe('root-denied')
+    expect(terminal?.retryable).toBe(true)
+    expect(terminal?.text).toContain('拒绝')
+    expect(terminal?.text).toContain('Root 管理器')
+  })
+
+  it('超时：可重试，文案明写「再点一次」', () => {
+    const terminal = rootGrantTerminal('timeout')
+    expect(terminal?.code).toBe('root-grant-timeout')
+    expect(terminal?.retryable).toBe(true)
+    expect(terminal?.text).toContain('超时')
+    expect(terminal?.text).toContain('重试')
+  })
+
+  it('本机没有 su：不可重试，且必须说明原因（不是只写「不可用」）', () => {
+    const terminal = rootGrantTerminal('no-su')
+    expect(terminal?.code).toBe('root-no-su')
+    // 这一态重试永远不会成功——与 denied 必须分开，否则用户会反复点。
+    expect(terminal?.retryable).toBe(false)
+    expect(terminal?.text).toContain('没有 su')
+    expect(terminal?.text).toContain('不是权限问题')
+  })
+
+  it('非终态不产生文案（不得把 granted/requesting 画成失败）', () => {
+    expect(rootGrantTerminal('granted')).toBeNull()
+    expect(rootGrantTerminal('requesting')).toBeNull()
+    expect(rootGrantTerminal('unknown')).toBeNull()
+    expect(rootGrantTerminal('')).toBeNull()
+  })
+
+  it('等待有上界：pending 超时常量存在且有限', () => {
+    expect(Number.isFinite(ROOT_GRANT_PENDING_TIMEOUT_MS)).toBe(true)
+    expect(ROOT_GRANT_PENDING_TIMEOUT_MS).toBeGreaterThan(0)
   })
 })

@@ -266,6 +266,8 @@ export function apply(ctx, config = {}) {
     /** >0 while a restore is writing files: the watcher must NOT auto-snapshot
      * the restore's own writes, or the new auto snapshot would block redo. */
     suppressAuto: 0,
+    /** issue #1398：撤销/恢复的单飞标志（并发请求必须互斥，见 core.mjs 的 restore）。 */
+    undoBusy: false,
     /** destName -> sha1 of what the last restore wrote (echo detection). */
     restoredHashes: new Map(),
   };
@@ -1094,6 +1096,16 @@ export function apply(ctx, config = {}) {
           if (method === 'GET' && path === '/api/undo/diff') {
             const id = url.searchParams.get('id') ?? '';
             const list = await listSnapshots(cfg);
+            // issue #1392：id=undo = 「预览一次撤销会改什么」。目标必须由**服务端**按
+            // undoCandidates + sameState 算（与 restore(cfg,'undo') 同一份判据），
+            // 否则确认框展示的和实际撤销的不是同一个快照。
+            if (id === 'undo') {
+              const cur = await currentState(cfg);
+              const candidates = await undoCandidates(cfg, list);
+              const target = candidates.find((c) => !sameState(cur, c.st)) ?? null;
+              if (!target) return send(res, 200, { ok: true, id: null, noTarget: true, diff: [] });
+              return send(res, 200, { ok: true, id: target.s.id, diff: await diffSnapshotStructured(cfg, target.s) });
+            }
             const snap = id === 'latest' ? list[0] ?? null : findSnapshot(list, id);
             if (!snap) return send(res, 404, { ok: false, error: { code: 'not-found', message: `snapshot not found: ${id}` } });
             return send(res, 200, { ok: true, id: snap.id, diff: await diffSnapshotStructured(cfg, snap) });

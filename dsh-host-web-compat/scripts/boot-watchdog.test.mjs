@@ -54,7 +54,7 @@ assert.ok(FLOOR, 'BOOT_WATCHDOG_SCRIPT 必须声明 RENDER_TEXT_FLOOR')
 const PREFIX_DECL = /var BOOT_STALL_PREFIX='[^']+';/.exec(BODY)?.[0]
 assert.ok(PREFIX_DECL, 'BOOT_WATCHDOG_SCRIPT 必须声明 BOOT_STALL_PREFIX（块L 契约：壳侧按该前缀抓行）')
 // 新实现：结果性判据 + 次要文本信号
-const NEW_PENDING = [FLOOR, grabFunction(BODY, 'textLen'), grabFunction(BODY, 'rendered'), grabFunction(BODY, 'pendingBoot')].join('\n')
+const NEW_PENDING = [FLOOR, grabFunction(BODY, 'textLen'), grabFunction(BODY, 'diagPanelTextLen'), grabFunction(BODY, 'rendered'), grabFunction(BODY, 'pendingBoot')].join('\n')
 // 块L 发布点（页面侧唯一赋值语句，壳侧只读）。
 // 必须带上 lastProgressAt 声明——waitingForMs 由它计算；缺了它 collectRuntime 会走
 // fail-closed 分支返回 unavailable，测到的就不是「能取到时的值」（首版实测踩到）。
@@ -67,10 +67,15 @@ const OLD_PENDING = "function pendingBoot(){ try{return /Loading plugins/i.test(
 /** 依场景描述搭出最小 document/window，然后求 pendingBoot()。 */
 function pending(code, scene) {
   const root = scene.rootChildren === undefined ? null : { children: new Array(scene.rootChildren).fill({}) }
+  // issue #1386：诊断浮层自己的文案同样计入 body.textContent，必须能被单独认出来。
+  const diagPanel = scene.diagText === undefined
+    ? null
+    : { textContent: scene.diagText, id: 'dsh-boot-diag' }
   const bodyText = 'x'.repeat(scene.bodyText ?? 0) + (scene.bootText ? scene.bootText : '')
+    + (scene.diagText === undefined ? '' : scene.diagText)
   const document = {
     body: { textContent: bodyText, children: root ? [root] : [] },
-    getElementById: (id) => (id === 'root' ? root : null),
+    getElementById: (id) => (id === 'root' ? root : (id === 'dsh-boot-diag' ? diagPanel : null)),
     querySelector: () => null,
   }
   const ctx = createContext({ document, window: scene.bootMarker ? { __DSH_BOOT__: { rev: 'r', entries: [] } } : {}, sessionStorage: { getItem: () => null }, RegExp })
@@ -1053,4 +1058,24 @@ test('issue #1056 / C：连续 show() 两次只留一个面板节点（幂等）
   r.tickWatch()
   assert.deepEqual(r.state.removed, ['dsh-boot-diag'], '幂等路径下依然必须移除面板')
   assert.equal(r.body.children.length, 0)
+})
+
+test('#1386 诊断浮层自身的文本不得算「页面已渲染」', () => {
+  // 浮层里的标题+摘要+提示+按钮+折叠的 <pre>=JSON.stringify(report) 远超 RENDER_TEXT_FLOOR，
+  // 而它就挂在 body 下 —— 旧 rendered() 只看 body 文本长度，于是浮层一挂出就把自己判成「已渲染」。
+  const panelProse = '诊断信息'.repeat(120)   // 远超 120 字阈值
+  const scene = { rootChildren: 0, bodyText: 0, diagText: panelProse }
+  assert.equal(pending(NEW_PENDING, scene), true, '浮层在场但页面没渲染，必须仍判 pending（否则浮层被自己移除、并在静态白屏下发假 dsh-boot-ready）')
+})
+
+test('#1386 浮层之外真的有内容时仍判已渲染（不把判据改瞎）', () => {
+  const panelProse = '诊断信息'.repeat(120)
+  const scene = { rootChildren: 0, bodyText: 300, diagText: panelProse }
+  assert.equal(pending(NEW_PENDING, scene), false, '扣掉浮层后仍有 300 字正文 => 已渲染，不得误判 pending')
+})
+
+test('#1386 源码契约：rendered() 与 pendingBoot 都必须扣除浮层文本', () => {
+  assert.ok(BODY.includes('function diagPanelTextLen()'), '缺少浮层文本度量函数')
+  assert.ok(BODY.includes('textLen(document.body)-diagPanelTextLen()>=RENDER_TEXT_FLOOR'), 'rendered() 的 body 判据未扣除浮层')
+  assert.ok(BODY.includes('textLen(document.body)-diagPanelTextLen()>0'), 'pendingBoot 的 __DSH_BOOT__ 判据未扣除浮层')
 })

@@ -122,4 +122,42 @@ class ForegroundPageRecoveryPolicyTest {
     policy.resume()
     assertEquals(ForegroundPageRecoveryPolicy.Recovery.RECREATE, policy.takeRecovery())
   }
+  // ── issue #1345：预算按**引擎启动世代**计，不再跨世代黏住 ────────────────────
+
+  @Test fun loadErrorBudgetIsSpentPerEpochNotPerActivityLifetime() {
+    val policy = ForegroundPageRecoveryPolicy()
+    policy.resume()
+    // 第 1 世代：一次
+    assertTrue(policy.claimLoadErrorRetry(1L))
+    assertFalse(policy.claimLoadErrorRetry(1L))
+    // 同世代反复调仍然是 false —— 「一次」这条约束没有被放松
+    repeat(10) { assertFalse(policy.claimLoadErrorRetry(1L)) }
+    // 换代（引擎重启）后重开一次。这正是旧实现缺的复位点：冷启动第一次重试很可能
+    // 又撞 refused，那之后预算永久耗尽，用户停在错误页上再也回不来。
+    assertTrue(policy.claimLoadErrorRetry(2L))
+    assertFalse(policy.claimLoadErrorRetry(2L))
+    assertTrue(policy.claimLoadErrorRetry(3L))
+  }
+
+  @Test fun budgetSpentReportsPerEpochWithoutConsuming() {
+    val policy = ForegroundPageRecoveryPolicy()
+    policy.resume()
+    assertFalse(policy.retryBudgetSpent(1L))
+    assertTrue(policy.claimLoadErrorRetry(1L))
+    assertTrue(policy.retryBudgetSpent(1L))
+    // 换代后本世代不欠账
+    assertFalse(policy.retryBudgetSpent(2L))
+    // 查询本身不得消耗预算
+    assertFalse(policy.retryBudgetSpent(2L))
+    assertTrue(policy.claimLoadErrorRetry(2L))
+  }
+
+  @Test fun pausedPolicyStillRefusesEvenWithAFreshEpoch() {
+    val policy = ForegroundPageRecoveryPolicy()
+    policy.resume()
+    assertTrue(policy.claimLoadErrorRetry(1L))
+    policy.pause()
+    assertFalse(policy.claimLoadErrorRetry(2L))
+  }
+
 }

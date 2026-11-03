@@ -20,10 +20,12 @@
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
   MIRROR_TEMPLATES, SITE_URL, REPO_URL, apkNameCandidates, assetUrl, sha256FromManifest,
 } from '../src/assets/release.js';
+import { seedConsistency } from '../src/assets/digest.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const p = (...s) => path.join(root, ...s);
@@ -88,7 +90,12 @@ async function fetchText(url, timeoutMs) {
   }
 }
 
-/** Only the official manifest may provide integrity data. A failed sync must not deploy stale data. */
+/**
+ * Only the official manifest may provide integrity data. A failed sync must not deploy stale data.
+ *
+ * issue #1394：返回 manifest 正文——调用方要把它自己的 sha256 写进 seed（`manifestSha256`），
+ * 页面端才能用「重新拉一次 MANIFEST 并比对」来证明摘要没被手改。
+ */
 async function attachSha256(data) {
   const text = await fetchText(assetUrl(MIRROR_TEMPLATES[0], data.tag, 'MANIFEST.txt'), 15000);
   for (const abi of ['arm64', 'x86_64']) {
@@ -102,7 +109,11 @@ async function attachSha256(data) {
     }
     data.sha256[abi] = digest;
   }
+  // issue #1394：把 manifest 正文交回调用方——它自己的 sha256 会写进 seed 的 manifestSha256。
+  return text;
 }
+
+const sha256Hex = (text) => createHash('sha256').update(text, 'utf8').digest('hex')
 
 const escapeHtml = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const jsonForHtml = value => JSON.stringify(value).replace(/</g, '\\u003c');
@@ -189,7 +200,18 @@ async function main() {
   const data = refresh
     ? normalize(await fetchJson(API_LATEST_URL, 15000), 'release')
     : normalize(JSON.parse(read(SEED_FILE)), 'seed');
-  if (refresh) await attachSha256(data);
+  if (refresh) {
+    const manifestText = await attachSha256(data);
+    // issue #1394：把「摘要所依据的那份 MANIFEST」的 sha256 记进 seed。页面端凭它判断自己
+    // 重新拉到的 manifest 是否就是当初那份（对不上 = mismatch，不得展示为已校验）。
+    data.manifestSha256 = sha256Hex(manifestText);
+  }
+
+  // issue #1394 辅修：廉价自洽检查（不引入新字段、不改变旧数据可用性）。
+  // 这里只做构建期告警；页面端会用**同一个纯函数**再算一次，把摘要状态压到「未验证」。
+  const consistency = seedConsistency(data, (tag, abi, assets) =>
+    apkNameCandidates(tag, abi).find((name) => assets.some((asset) => asset.name === name)) ?? null);
+  if (consistency.length > 0) console.warn('[build] seed 自洽检查未通过：' + consistency.join(', '));
 
   const indexHtml = read('src/index.html');
   const styles = read('src/assets/styles.css');
@@ -210,7 +232,7 @@ async function main() {
   fs.writeFileSync(p(DIST, 'index.html'), html);
   fs.writeFileSync(p(DIST, '.nojekyll'), '');
   fs.writeFileSync(p(DIST, 'assets', 'release.js'), read('src/assets/release.js'));
-  for (const module of ['app.js', 'locales.js', 'routing.js']) fs.writeFileSync(p(DIST, 'assets', module), read('src/assets/' + module));
+  for (const module of ['app.js', 'locales.js', 'routing.js', 'probe.js', 'digest.js']) fs.writeFileSync(p(DIST, 'assets', module), read('src/assets/' + module));
   fs.writeFileSync(p(DIST, 'assets', 'icon.png'), fs.readFileSync(p('src/assets/icon.png')));
 
   // 运行期兜底数据源（与内联数据同源，供内联解析失败时使用）
@@ -248,7 +270,7 @@ async function main() {
     log('已刷新种子 ' + SEED_FILE);
   }
 
-  const total = ['index.html', 'assets/release.js', 'assets/app.js', 'assets/locales.js', 'assets/routing.js', 'assets/icon.png', 'data/releases.json']
+  const total = ['index.html', 'assets/release.js', 'assets/app.js', 'assets/locales.js', 'assets/routing.js', 'assets/probe.js', 'assets/digest.js', 'assets/icon.png', 'data/releases.json']
     .map((f) => fs.statSync(p(DIST, f)).size)
     .reduce((a, b) => a + b, 0);
 

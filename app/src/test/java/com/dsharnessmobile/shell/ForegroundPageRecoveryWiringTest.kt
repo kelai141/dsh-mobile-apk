@@ -116,7 +116,17 @@ class ForegroundPageRecoveryWiringTest {
     assertTrue(callbacks.contains("if (!pageUiActive || view !== webView) return"))
     assertTrue(callbacks.contains("pageRecovery.accepts(generation)"))
     val flow = source("EngineStartFlow.kt")
-    assertTrue(flow.substringBefore("fun startMonitor()").contains("activity.retryFailedEnginePage()"))
+    val flowBeforeMonitor = flow.substringBefore("fun startMonitor()")
+    // issue #1345：自愈入口改为走三态决策并携带启动世代。断言的**意图不变**——
+    // 「页面级失败确实接进了监控循环」；并且额外钉住它必须经过纯决策函数，而不是退回
+    // 内联布尔串（那正是本 issue 的成因：三个条件串在一起、且「预算用完」与「还没到时候」
+    // 在布尔面上长得一样）。
+    // 判据走纯决策函数（不是退回内联布尔串——那正是本 issue 的成因），且带上启动世代。
+    assertTrue(flowBeforeMonitor.contains("EnginePageRetryPolicy.decide(activity.enginePageFailed"))
+    assertTrue(flowBeforeMonitor.contains("EnginePageRetryPolicy.Decision.RETRY"))
+    assertTrue(flowBeforeMonitor.contains("activity.retryFailedEnginePage(currentStartGeneration)"))
+    // 预算必须按世代查（而不是无参的旧调用）。
+    assertTrue(flowBeforeMonitor.contains("activity.pageRecovery.retryBudgetSpent(currentStartGeneration)"))
     val gone = between(activity, "override fun onRenderProcessGone(", "override fun onPageStarted(")
     assertTrue(ordered(gone, "if (pageRecovery.rendererGone) return true", "pageRecovery.rendererLost()"))
     assertTrue(gone.contains("if (webViewRef === view) webViewRef = null"))

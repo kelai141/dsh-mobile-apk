@@ -141,3 +141,9 @@ slot-guard 注释与本日审计报告。
 **已有的缓存事实（评估前提）**：bundle 响应带 `IMMUTABLE_CACHE = "public, max-age=31536000, immutable"`，浏览器侧一年内不重复取。因此即使开 gzip，压缩成本也只在**首次请求**发生，不是每次冷启动。这一条会显著削弱「开 gzip 省时间」的论据，评估时必须计入。
 
 **复现**：`node scripts/perf-audit-lead/b1-gzip-method.mjs <client.js>`；引擎侧判据 `grep -n 'DEFAULT_COMPRESSION\|compression ===' <webserver>/lib/index.js`。
+
+## 下载页摘要展示改为三态（2026-11-04，issue #1394）
+
+| 项 | 当前事实 | 结论 / 后续 |
+|---|---|---|
+| 摘要展示从「有值即显示」改为「证明不了就说未验证」 | `webpages/src/assets/digest.js` 判据把 SHA-256 展示分三态：`verified` / `unverified`（旧 seed 无 `manifestSha256`、拉不到 MANIFEST、或 seed 自洽检查不过）/ `mismatch`（manifest 摘要对不上，或某条 APK 摘要与 manifest 条目不同）。**旧 seed 显示「未验证」是预期行为，不是回归**。 | 跑一次 `node webpages/tools/build.mjs --refresh` 会把 `manifestSha256` 写进 `data/releases.json`，下一次构建自动转 `verified`。**不要把「未验证」当缺陷去改成「已验证」**——那正是 #1394 修掉的东西。 |

@@ -340,6 +340,15 @@ var lastProgressKey='';
 function textLen(el){
   try{return ((el&&el.textContent)||'').replace(/\\s+/g,'').length}catch(e){return 0}
 }
+/**
+ * 诊断浮层自身的文本长度（issue #1386）。
+ *
+ * 浮层挂在 document.body 下，里面的标题 + 摘要 + 提示 + 按钮 + 折叠的 <pre>=JSON.stringify(report)
+ * 远超 RENDER_TEXT_FLOOR。它的文案是**页面自己写的**，不能算「页面已渲染」的证据。
+ */
+function diagPanelTextLen(){
+  try{var p=document.getElementById('dsh-boot-diag');return p?textLen(p):0}catch(e){return 0}
+}
 function rendered(){
   try{
     var root=document.getElementById('root');
@@ -348,7 +357,13 @@ function rendered(){
     if(frame&&frame.children&&frame.children.length>0)return true;
     var main=document.querySelector('main,[role="main"]');
     if(main&&textLen(main)>=RENDER_TEXT_FLOOR)return true;
-    return textLen(document.body)>=RENDER_TEXT_FLOOR;
+    // issue #1386：必须扣掉诊断浮层自己的文本 —— 否则浮层一挂出就满足本判据：
+    // ① watchDiagPanel 用同一个 rendered() 复看，面板会在 500ms 内把自己判成「已渲染」并移除，
+    //    用户只看到闪一下，40 秒卡死的诊断永远读不到；
+    // ② publishReady 的判据是 rendered() && !bootPagePresent()，「启动页已消失但主界面未渲染」
+    //    正是这套兜底存在的场景 —— 浮层文本会让页面发出 [dsh-boot-ready]，壳侧据此停掉 stall
+    //    计时并标该 epoch 就绪，恢复链被假就绪提前切断。
+    return textLen(document.body)-diagPanelTextLen()>=RENDER_TEXT_FLOOR;
   }catch(e){return false}
 }
 function pendingBoot(){
@@ -357,7 +372,8 @@ function pendingBoot(){
   // 次要信号：上游 boot 文案在场 => 确实还停在 boot。
   var t='';try{t=(document.body&&document.body.textContent)||''}catch(e){}
   if(/Loading plugins/i.test(t))return true;
-  if(window.__DSH_BOOT__&&textLen(document.body)>0)return false;
+  // issue #1386：同一处假阳性——浮层文本不是「页面有内容」的证据。
+  if(window.__DSH_BOOT__&&textLen(document.body)-diagPanelTextLen()>0)return false;
   // 既无渲染结果也无 boot 文案 => 入口模块可能整体未执行（原判据看不见的白屏死角）=> 按 pending 处理。
   return true;
 }
