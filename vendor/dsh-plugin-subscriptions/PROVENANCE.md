@@ -8,7 +8,7 @@
 | 发行版 | npm `dsh-plugin-subscriptions@0.9.12`（tarball shasum `a3aff899f615cec19f56b4bf11026a6cbf696382`，integrity `sha512-OHW6LsNjmfQ7gFZ734Lbz9iVtrPeWAaQz2sAzSezNDgyNGpEBzvLufGhzwffh1VgWz2TW8AMJ/JpgBec5Lscrg==`） |
 | 上游 gitHead | `b8023110864494acefc6f5963c2a197d85dda20c`（package.json 的 `gitHead` 字段；无对应 tag 时以此为准） |
 | 许可 | MIT（原文见本目录 `LICENSE`，随快照分发，见下「MIT 许可原文保留位置」） |
-| 解包体积 | 上游 npm 包 2,063,168 B / 143 文件；本目录裁掉源映射与类型声明后 **1,388,735 B / 68 文件**（见差异 #4） |
+| 解包体积 | 上游 npm 包 2,063,168 B / 143 文件；本目录裁掉源映射与类型声明后 **1,390,871 B / 68 文件**（见差异 #4） |
 | 定位 | 把 ChatGPT(Codex)/Claude/Grok/Copilot 订阅当 LLM provider；OAuth 在 Settings → Subscriptions |
 
 ## 为什么 vendor（而不是直接依赖 npm 版本）
@@ -36,8 +36,9 @@
 | 10 | `lib/http.js`、`lib/index.js` | **代理凭据优先级修（issue #1308）**：① `proxySetConfig` 增加分流——`input.url` 带 userinfo 时**不播种** `current.password`（粘贴进来的凭据是新事实，旧值没有资格顶替它）；② `normalizeConfig` 的 userinfo 提升分支改为**回填**而非恒定胜出，优先级 = 显式输入 > URL userinfo > 无；③ 新增内部标记 `passwordCleared`，让「显式清空」与「没给密码」可区分，否则清空会被 userinfo 回填复活、用户永远删不掉凭据。两份打包副本同步改 | #1282 把 userinfo 剥出 `url` 并提升为独立字段是对的，但它同时让「调用方没给 password」等同于「沿用上一份配置」，于是**粘贴** `http://bob:new@host/` 时新密码先被剥出 url（唯一记录点）、再被播种值顶替——两侧都丢，而 `passwordSet` 还报 true（那是旧密码）；用户以为换了密码，实际仍用旧的，清空后更退化成 407 且无诊断。判据见 `scripts/subs-proxy-secrets.test.mjs`（观测点是 `new ProxyAgent(url)` 实际收到的凭据，3 条正控 + 2 组负控） |
 | 11 | `lib/translate/sse.js`、`lib/index.js` | **SSE 边界回归修（issue #1309）**：① `dispatch()` 对「无 `data:` 行的帧」改为**不派发**（只清 event 名缓冲），符合 WHATWG「dispatch the event」；② `MAX_PENDING_CHARS` 的判据从「扫描换行前量本次 read」改为「扫描后量**尚未闭合的那一帧**」（`pending` + 已消费的 `dataLines` 之和），错误文案同步改为指名帧长度。两份打包副本同步改 | ① #1284 的修法让 `event: ping\n\n` 这类保活帧变成 `{ data: '' }`，三条 wire 的 `JSON.parse('')` 直接抛 `MALFORMED_RESPONSE` —— 一条心跳打掉整条 chat 流；② 该常量的推导（见 sse.js 头注）依据的是「**一个**合法帧能有多大」，而判据量的是「这次 read 带来多少字节」：一次 read 送 9.4 MiB 的 943,719 个完整小帧会被拒（错误文案还说是「没有换行」，与输入不符），同样的字节按 64 KiB 分片则全过。判据见 `scripts/subs-sse-limits.test.mjs`（4 条正控 + 分片一致性 + 2 条负控） |
 | 12 | `lib/translate/sse.js`、`lib/index.js` | **SSE 上限判据补到派发口（issue #1340）**：`dispatch()` 内新增「本帧已累计字符数」判据——帧变成事件的唯一出口就在此处，超限即失败关闭、不产出事件；扫描后的「未闭合帧」判据保留，两条分工明确（闭合帧由 `dispatch()` 判，未闭合帧由扫描后判据判）。两份打包副本同步改 | #1309 ② 把上限挪到扫描之后，但只量了「未闭合的帧」。扫描会把已闭合的帧就地派发，于是「一次 read 送来完整帧」走派发路径，长度判据根本没机会看到它：9.4 MiB 单帧直接进 `JSON.parse`（9,437,184 字符），而同样的字节按 64 KiB 分块则被拒。同一份字节、同一个帧、两种结论——上限仍是「网络分片形状」的属性，只是方向反了。判据见 `scripts/subs-sse-limits.test.mjs`（3 条正控 + 1 条负控） |
+| 13 | `lib/http.js`、`lib/index.js` | **代理用户名优先级修（issue #1341）**：`proxySetConfig` 把 userinfo 的账号提到与密码同一条规则——URL 带 userinfo 且传入的 username **未被改动**（等于已存值，即设置对话框的预填）时，userinfo 胜出；用户显式改过则仍以显式输入为准。两份打包副本同步改 | #1308 只修了密码半区，用户名半区仍让位给显式输入。而设置对话框**总是**发送预填的 username（`lib/client.js` 从已存配置预填、无条件提交），于是粘贴 `http://alice:NEWPASS@host/` 实际生效 `bob:NEWPASS`——旧账号配新密码，凭据被拆到两个账号上，视图仍显示 `bob`、`passwordSet` 仍 true、无任何诊断；认证失败时用户只看到 407，无从判断是账号还是密码错。判据见 `scripts/subs-proxy-secrets.test.mjs`（3 条正控 + 1 条负控） |
 
-**未改动**：`lib/` 下运行时代码**除上表第 5、6、8、9、10、11、12 条所列代理面、SSE 面、宿主样式面与命令标题 locale 外**逐字节保持上游（仅另删上表第 4 条的 `.map` / `.d.ts`）（含 provider 实现、OAuth 流程、token 存储路径 `~/.dsh/plugins/subscriptions/auth.json` 与其 0600 权限）、`cordis.patch.yml`、`README.md`、`LICENSE`。
+**未改动**：`lib/` 下运行时代码**除上表第 5、6、8、9、10、11、12、13 条所列代理面、SSE 面、宿主样式面与命令标题 locale 外**逐字节保持上游（仅另删上表第 4 条的 `.map` / `.d.ts`）（含 provider 实现、OAuth 流程、token 存储路径 `~/.dsh/plugins/subscriptions/auth.json` 与其 0600 权限）、`cordis.patch.yml`、`README.md`、`LICENSE`。
 
 ## 我们删了什么、为什么
 

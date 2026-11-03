@@ -424,18 +424,36 @@ export async function proxySetConfig(input) {
     // userinfo it was promoting — so the pasted password was dropped without a
     // trace. The two cases are told apart by where the credential lives:
     // a URL userinfo is a *fresh* credential and outranks the stored one.
+    const embedded = urlCredentials(String(input.url).trim());
     const cleared = input.password === null || input.password === ''
-    const seeded = input.password === undefined
-        && urlCredentials(String(input.url).trim()) === undefined
+    const seeded = input.password === undefined && embedded === undefined
     const password = seeded
         ? current.password
         : cleared
             ? undefined
             : input.password;
+    // issue #1341: the username half needs the same rule, but it cannot use
+    // "field absent" as the signal — the settings dialog **always** sends the
+    // pre-filled username (lib/client.js pre-fills from the stored config and
+    // submits it unconditionally). So "the field is present" does not mean "the
+    // user typed it", and letting it win unconditionally split a pasted
+    // credential across two accounts: `http://alice:NEWPASS@host/` produced
+    // `bob:NEWPASS` — the old account carrying the new password, with the view
+    // still showing `bob`, `passwordSet: true`, and no diagnostic anywhere.
+    //
+    // The signal that actually distinguishes the two is whether the value
+    // *changed*: a pre-fill equals the stored username, an edit does not. So a
+    // URL userinfo outranks the field only while the field is untouched, and an
+    // explicit edit still wins (the user asking for `carol` over the URL's
+    // `alice` is a deliberate, more specific intent).
+    const username = embedded !== undefined
+        && (input.username === undefined || input.username === current.username)
+        ? embedded.username
+        : input.username;
     const next = normalizeConfig({
         enabled: input.enabled,
         url: input.url,
-        ...input.username === undefined ? {} : { username: input.username },
+        ...username === undefined ? {} : { username },
         ...password === undefined ? {} : { password },
         ...cleared ? { passwordCleared: true } : {},
         bypass: input.bypass ?? current.bypass,

@@ -370,16 +370,104 @@ test('#1308 清空密码的意图不跨重启存续：重启后与「从未设�
     + JSON.stringify(clearedDisk) + ' vs ' + JSON.stringify(neverDisk))
 })
 
+// ── issue #1341：#1308 只修了密码半区，用户名半区仍让位给显式输入 ──────────────
+//
+// 设置对话框**总是**发送预填的 username（lib/client.js 从已存配置预填、无条件提交），
+// 所以「字段存在」不等于「用户填了」。让 input.username 无条件胜出，会把一条粘贴进来的
+// 完整凭据拆到两个账号上：http://alice:NEWPASS@host/ 实际生效 bob:NEWPASS——旧账号配
+// 新密码，而视图仍显示 bob、passwordSet 仍 true、没有任何诊断。认证失败时用户只会看到
+// 407，无从判断是账号还是密码错。
+
+test('#1341 粘贴带 userinfo 的 URL：用户名也必须来自 userinfo，不得只换密码', async () => {
+  const home = makeHome()
+  const http = await loadHttpModule(home)
+  const oldPass = secret('u-old')
+  const newPass = secret('u-new')
+
+  await http.proxySetConfig({ enabled: true, url: 'http://127.0.0.1:7890/', username: 'bob', password: oldPass, bypass: [] })
+  assert.equal(agentCredential().username, 'bob', '前置：旧用户名应先真的生效')
+
+  // 对话框形态：username 由已存配置预填并发送，密码框留空
+  const saved = await http.proxySetConfig({
+    enabled: true,
+    url: 'http://alice:' + newPass + '@127.0.0.1:7890/',
+    username: 'bob',
+    bypass: [],
+  })
+
+  const seen = agentCredential()
+  assert.equal(seen.username, 'alice', '用户名仍是被预填的旧值——凭据被拆到两个账号上了（#1341 本体）')
+  assert.equal(seen.password, newPass, '密码应为 URL 里的新值')
+  assert.equal(seen.username === 'bob', false, '不得出现「旧账号 + 新密码」这种跨账号组合')
+  assert.equal(saved.username, 'alice', '视图必须反映真正生效的用户名，实得 ' + JSON.stringify(saved.username))
+
+  const onDisk = JSON.parse(readFileSync(http.proxyFilePath(), 'utf8'))
+  assert.equal(onDisk.username, 'alice', '落盘用户名与代理实际使用的不一致：' + JSON.stringify(onDisk))
+  assert.equal(onDisk.url.includes('@'), false, 'url 里不得留下 userinfo：' + onDisk.url)
+})
+
+test('#1341 用户真的改了用户名时，显式输入仍必须胜出（不得把修法做成另一头一刀切）', async () => {
+  const home = makeHome()
+  const http = await loadHttpModule(home)
+  const newPass = secret('u-edit')
+
+  await http.proxySetConfig({ enabled: true, url: 'http://127.0.0.1:7890/', username: 'bob', password: secret('u-prev'), bypass: [] })
+  // 用户名被改成 carol（与已存值不同 = 用户真的动了这个字段），URL 里是 alice
+  await http.proxySetConfig({ enabled: true, url: 'http://alice:' + newPass + '@127.0.0.1:7890/', username: 'carol', bypass: [] })
+
+  const seen = agentCredential()
+  assert.equal(seen.username, 'carol', '显式改的用户名被 URL userinfo 顶掉了——用户更精确的意图必须胜出')
+  assert.equal(seen.password, newPass, '密码仍应取 URL 里的新值')
+})
+
+test('#1341 不带 userinfo 的常规保存：用户名仍按传入值走（不得连带改坏）', async () => {
+  const home = makeHome()
+  const http = await loadHttpModule(home)
+  await http.proxySetConfig({ enabled: true, url: 'http://127.0.0.1:7890/', username: 'dave', password: secret('u-plain'), bypass: [] })
+  assert.equal(agentCredential().username, 'dave', '没有 userinfo 时用户名必须原样生效')
+})
+
+test('#1341 负控：把用户名改回「显式输入恒定胜出」，粘贴用例必须变红', async () => {
+  const http = await loadHttpModule(makeHome(), writeMutant((source) => source.replace(
+    `    const username = embedded !== undefined
+        && (input.username === undefined || input.username === current.username)
+        ? embedded.username
+        : input.username;`,
+    // 回退成「任何显式输入都压过 userinfo」：#1341 修复前的形态。
+    `    const username = input.username;`,
+  )))
+  const newPass = secret('mutant-1341')
+  await http.proxySetConfig({ enabled: true, url: 'http://127.0.0.1:7890/', username: 'bob', password: secret('mutant-1341-old'), bypass: [] })
+  await http.proxySetConfig({ enabled: true, url: 'http://alice:' + newPass + '@127.0.0.1:7890/', username: 'bob', bypass: [] })
+  assert.notEqual(agentCredential().username, 'alice',
+    '负控失效：抽掉「预填值让位给 userinfo」后用户名仍是 alice，说明正控没守住这条')
+})
+
 test('#1308 负控 B：抽掉 proxySetConfig 的「有 userinfo 就不播种」，粘贴的新密码必须被顶替', async () => {
   const newPass = secret('mutant-b')
   const http = await loadHttpModule(makeHome(), writeMutant((source) => source.replace(
-    `    const seeded = input.password === undefined
-        && urlCredentials(String(input.url).trim()) === undefined`,
+    // 锚点按内容钉：只认「播种必须要求 URL 里没有 userinfo」这条判据本身，
+    // 不认它用哪个局部变量表达（#1341 把它复用成了 embedded）。
+    `    const seeded = input.password === undefined && embedded === undefined`,
     // 回退成「没给密码就一律播种旧值」：这正是 #1308 修复前的第一道闸。
     `    const seeded = input.password === undefined`,
   )))
   assert.notEqual(await pasteNewPasswordOverOld(http, newPass), newPass,
     '负控 B 失效：抽掉「有 userinfo 就不播种」后新密码仍然生效，说明正控没有守住这道闸')
+})
+
+test('#1341 两份打包副本都带上了同一处修复（改一份漏一份 = 缺陷照旧出厂）', () => {
+  for (const file of [HTTP_JS, INDEX_JS]) {
+    const source = readFileSync(file, 'utf8')
+    const name = file.split(/[\\/]/).pop()
+    assert.ok(source.includes('issue #1341'), name + ' 缺少 #1341 标记（另一份改了、这份没改？）')
+    // 判据：userinfo 与「预填值」比较后才决定用户名，而不是无条件让显式输入胜出。
+    // 两份副本写法不同（http.js 用 undefined，打包副本用 void 0），断言只认语义。
+    assert.match(source, /embedded !== (?:undefined|void 0)\s*&&\s*\(input\.username === (?:undefined|void 0) \|\| input\.username === current(?:\$1)?\.username\)/,
+      name + ' 的用户名优先级仍是「显式输入恒定胜出」')
+    assert.equal(/\\.\.\.input\.username === (?:undefined|void 0) \? \{\} : \{ username: input\.username \}/.test(source), false,
+      name + ' 的 proxySetConfig 仍直接透传 input.username（未按「预填 vs 改动」分流）')
+  }
 })
 
 test('#1282 两份打包副本都带上了同一处修复（避免改一份漏一份）', () => {
@@ -405,7 +493,9 @@ test('#1308 两份打包副本都带上了同一处修复（改一份漏一份 =
     assert.ok(source.includes('issue #1308'), name + ' 缺少 #1308 标记注释（另一份改了、这份没改？）')
     // 判据 ①：带 userinfo 时不得播种旧密码。
     // 两份副本的写法不同（http.js 用 `undefined`，打包副本用 `void 0`），断言只认语义。
-    assert.match(source, /urlCredentials\(String\(input\.url\)\.trim\(\)\)\s*===\s*(?:undefined|void 0)/,
+    // 判据只认语义：播种必须同时要求「没给密码」与「URL 里没有 userinfo」。
+    // 变量名会随重构变化（#1341 起复用 embedded），锚死它等于给自己埋漂移。
+    assert.match(source, /const seeded = input\.password === (?:undefined|void 0)\s*&&\s*embedded === (?:undefined|void 0)/,
       name + ' 的 proxySetConfig 未按「URL 带 userinfo 就不播种」分流')
     // 判据 ②：显式清空必须能与「没给」区分（否则清空会被 userinfo 回填复活）
     assert.match(source, /passwordCleared === true/, name + ' 缺少 passwordCleared 分支')

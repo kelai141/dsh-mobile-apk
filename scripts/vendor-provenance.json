@@ -135,12 +135,12 @@
       "bytes": 1004
     },
     "lib/http.js": {
-      "sha256": "4ef1e5ccf2ba4fcc4cea327c5b19445884f42372e2c1bf4b235793ad30ab309d",
-      "bytes": 22694
+      "sha256": "2e4596347ab3dd2ea6f8fbc8ee82da6062f5543d93c5c0d4f7f31fca0936cd8d",
+      "bytes": 23875
     },
     "lib/index.js": {
-      "sha256": "fa6ddb5b9ec489d2c08e8d55f4188aff92262acb05156959273363816374aef7",
-      "bytes": 449506
+      "sha256": "d710861a693d3b0c2c12833435f8dc24083f5b9ec66b30b45e4c8f0ae0b1c249",
+      "bytes": 450461
     },
     "lib/model-defaults.js": {
       "sha256": "3f7b108cf74e9b558e5e8231286c3b0432c3b7915a53c48cf06ce2bf84e61cff",
