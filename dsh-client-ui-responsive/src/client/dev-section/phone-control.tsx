@@ -463,6 +463,49 @@ export function rootAccessStateLabel(status: RootAccessStatus): string {
   }
 }
 
+/** issue #1377：等待授权**必须有上界**；超时即写终态，而不是无限停在「正在检测」。 */
+export const ROOT_GRANT_PENDING_TIMEOUT_MS = 30_000
+
+/**
+ * issue #1377：root 授权等待的**终态收敛**（纯函数，便于逐态钉住）。
+ *
+ * 旧实现只 `setPendingEnable(false)` 就 return，文案停在「正在检测 root 授权」——用户分不清
+ * 「还在等」与「已被拒」，于是反复点开关。三种终态必须**可辨**，因为下一步动作不同：
+ *
+ * | 状态 | 可重试 | 原因 |
+ * | --- | --- | --- |
+ * | `denied` | 是 | 用户在管理器里点了拒绝，改过来就能过 |
+ * | `timeout` | 是 | 等太久，重来一次即可 |
+ * | `no-su` | **否** | 本机没有 su：这不是权限问题，重试永远不会成功 |
+ *
+ * @param state 壳侧 `RootAccess.state`。
+ * @returns 终态信息；非终态（granted / requesting / unknown）返回 null。
+ */
+export function rootGrantTerminal(state: string): { code: string; text: string; retryable: boolean } | null {
+  if (state === 'denied') {
+    return {
+      code: 'root-denied',
+      retryable: true,
+      text: tr('已拒绝 root 授权：可在系统的 Root 管理器里改成「允许」，然后重新点开关。', 'Root access was denied. Allow it in your root manager, then toggle again.'),
+    }
+  }
+  if (state === 'timeout') {
+    return {
+      code: 'root-grant-timeout',
+      retryable: true,
+      text: tr('等待授权超时：可以再点一次开关重试。', 'Timed out waiting for the grant; toggle again to retry.'),
+    }
+  }
+  if (state === 'no-su') {
+    return {
+      code: 'root-no-su',
+      retryable: false,
+      text: tr('本机没有 su：这不是权限问题，重试也不会成功。需要换一台已 root 的设备，或先刷入 root。', 'No su on this device: this is not a permission problem, so retrying will not help. Use a rooted device or flash root first.'),
+    }
+  }
+  return null
+}
+
 /** 请求按钮可否点：有 su 且没有请求在飞。 */
 export function canRequestRoot(status: RootAccessStatus): boolean {
   return status.readable && status.suExists && !status.requesting
@@ -777,8 +820,17 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
    */
   useEffect(() => {
     if (!pendingEnable) return
-    if (!rootGrant.consentValid || ['denied', 'timeout', 'no-su'].includes(rootAccess.state)) {
+    if (!rootGrant.consentValid) {
       setPendingEnable(false)
+      return
+    }
+    // issue #1377：三态收敛时**必须把终态写回文案**。旧实现只关掉 pending 就 return，
+    // 界面仍停在「正在检测 root 授权」——分不清「还在等」与「已被拒」，用户会反复点开关。
+    const terminal = rootGrantTerminal(rootAccess.state)
+    if (terminal !== null) {
+      setPendingEnable(false)
+      setRootOk(false)
+      setRootMsg(terminal.text)
       return
     }
     if (rootGrant.granted) {
@@ -790,6 +842,23 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
       toggleRootGrant(true)
     }
   }, [pendingEnable, rootGrant.granted, rootGrant.consentValid, rootAccess.granted, rootAccess.state, toggleRootGrant])
+
+  /**
+   * issue #1377：等待授权**必须有上界**。旧实现只等壳侧状态收敛；壳侧不收敛（管理器无响应、
+   * 弹窗被系统吞掉）时界面会永久停在「正在检测」。
+   *
+   * 超时写的是**终态**（`timeout` 语义的文案），不是回到「未授权」——回到未授权等于什么都没发生，
+   * 用户又得猜。文案里明写「可以再点一次重试」，所以它是可重试终态而不是死路。
+   */
+  useEffect(() => {
+    if (!pendingEnable) return undefined
+    const timer = window.setTimeout(() => {
+      setPendingEnable(false)
+      setRootOk(false)
+      setRootMsg(rootGrantTerminal('timeout')?.text ?? null)
+    }, ROOT_GRANT_PENDING_TIMEOUT_MS)
+    return () => window.clearTimeout(timer)
+  }, [pendingEnable])
 
   const toggleRootConsent = useCallback((next: boolean) => {
     runRootAction(
@@ -992,7 +1061,9 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
             <div className="dsh-gs-control">
               <Switch
                 checked={rootGrant.granted}
-                disabled={!rootGrant.readable || (!rootGrant.granted && (!canToggleRootGrant(rootGrant) || !rootGrant.consentValid))}
+                // issue #1377：no-su 时开关必须置灰——重试永远不会成功。置灰的原因由下方
+                // data-code="root-no-su" 那条明文解释（灰开关不解释 = 用户以为坏了）。
+                disabled={!rootGrant.readable || rootAccess.state === 'no-su' || (!rootGrant.granted && (!canToggleRootGrant(rootGrant) || !rootGrant.consentValid))}
                 onChange={(next) => toggleRootGrant(next)}
                 label={tr('授权 AI 使用 root', 'Allow model root access')}
               />
@@ -1000,6 +1071,16 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
           </div>
           {rootGrant.readable && canToggleRootGrant(rootGrant) && !rootGrant.consentValid ? (
             <p className="dsh-dev-hint">{tr('请先阅读并确认免责声明，才能开启 AI root 权限。', 'Read and accept the disclaimer before turning on model root access.')}</p>
+          ) : null}
+          {/*
+            issue #1377：开关因「本机没有 su」而不可用时，**必须解释为什么**。
+            用户看到灰开关的第一反应是「是不是坏了」，只写「不可用」等于把原因藏起来。
+            这条与上面的终态文案分开：后者是「一次操作的结果」，这条是「一直以来的前提」。
+          */}
+          {rootAccess.state === 'no-su' ? (
+            <p className="dsh-dev-hint" data-code="root-no-su">
+              {rootGrantTerminal('no-su')?.text}
+            </p>
           ) : null}
           {rootMsg === null ? null : (
             <p role="status" aria-live="polite" className={rootOk === true ? 'dsh-dev-hint' : 'dsh-dev-error'}>{rootMsg}</p>
