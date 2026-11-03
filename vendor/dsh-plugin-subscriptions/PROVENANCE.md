@@ -8,7 +8,7 @@
 | 发行版 | npm `dsh-plugin-subscriptions@0.9.12`（tarball shasum `a3aff899f615cec19f56b4bf11026a6cbf696382`，integrity `sha512-OHW6LsNjmfQ7gFZ734Lbz9iVtrPeWAaQz2sAzSezNDgyNGpEBzvLufGhzwffh1VgWz2TW8AMJ/JpgBec5Lscrg==`） |
 | 上游 gitHead | `b8023110864494acefc6f5963c2a197d85dda20c`（package.json 的 `gitHead` 字段；无对应 tag 时以此为准） |
 | 许可 | MIT（原文见本目录 `LICENSE`，随快照分发，见下「MIT 许可原文保留位置」） |
-| 解包体积 | 上游 npm 包 2,063,168 B / 143 文件；本目录裁掉源映射与类型声明后 **1,383,171 B / 68 文件**（见差异 #4） |
+| 解包体积 | 上游 npm 包 2,063,168 B / 143 文件；本目录裁掉源映射与类型声明后 **1,386,431 B / 68 文件**（见差异 #4） |
 | 定位 | 把 ChatGPT(Codex)/Claude/Grok/Copilot 订阅当 LLM provider；OAuth 在 Settings → Subscriptions |
 
 ## 为什么 vendor（而不是直接依赖 npm 版本）
@@ -34,8 +34,9 @@
 | 8 | `lib/client.js`、`lib/client/index.js` | **宿主样式污染收窄（issue #1288 第 2/5/8 条）**：设置面板留白规则的裸选择器 `div[role="dialog"][aria-modal="true"]:has(> nav) { padding-top: 14px }` 收窄为 `html:not([data-dsh-mobile-form]) div[…]:has(> nav)`。两份打包副本同步改 | 原选择器特异性 (0,2,2)，会压过宿主 `dsh-client-ui-responsive` 手机形态的面板规则 (0,2,1)，把面板 `padding-top` 从真实顶部 inset（实测 24px）压成 **14px**。宿主手机形态的留白由 `--dsh-mobile-top-inset` 负责（`mobile-form.css.ts`），插件不该再插一手；后果是**二级页**顶部条（在正常流里）顶到状态栏下面只剩半截，而一级页顶部条是 `absolute` 不吃面板 padding 所以正常——正是用户报的「一级正常、二级异常」。收窄后桌面形态行为不变；另在宿主侧同时把该规则的特异性提到 (0,4,1) 作为第二道防线（插件若再回归也压不回去） |
 | 9 | `lib/client.js`、`lib/client/locales.js` | **命令标题本地化（本轮）**：给 `/fast` 的命令贡献补 `label: () => t("commandFastTitle")`，并在 zh/en 两份 locale 里各加一条 `commandFastTitle`（快速档 / Fast tier） | 上游只传了 `description`、没传 `label`，而 `ui-input-trigger` 的行标题是 `item.label ?? item.name`，于是「+」菜单里这一行显示的是命令 id `fast`（同屏其余行都是中文）。宿主命令目录的 `CommandDescriptor` 只有 `name` + `description`，没有标题钩子；贡献名与宿主命令重名又会在候选合成时抛错，所以只能在这一层补 |
 | 10 | `lib/http.js`、`lib/index.js` | **代理凭据优先级修（issue #1308）**：① `proxySetConfig` 增加分流——`input.url` 带 userinfo 时**不播种** `current.password`（粘贴进来的凭据是新事实，旧值没有资格顶替它）；② `normalizeConfig` 的 userinfo 提升分支改为**回填**而非恒定胜出，优先级 = 显式输入 > URL userinfo > 无；③ 新增内部标记 `passwordCleared`，让「显式清空」与「没给密码」可区分，否则清空会被 userinfo 回填复活、用户永远删不掉凭据。两份打包副本同步改 | #1282 把 userinfo 剥出 `url` 并提升为独立字段是对的，但它同时让「调用方没给 password」等同于「沿用上一份配置」，于是**粘贴** `http://bob:new@host/` 时新密码先被剥出 url（唯一记录点）、再被播种值顶替——两侧都丢，而 `passwordSet` 还报 true（那是旧密码）；用户以为换了密码，实际仍用旧的，清空后更退化成 407 且无诊断。判据见 `scripts/subs-proxy-secrets.test.mjs`（观测点是 `new ProxyAgent(url)` 实际收到的凭据，3 条正控 + 2 组负控） |
+| 11 | `lib/translate/sse.js`、`lib/index.js` | **SSE 边界回归修（issue #1309）**：① `dispatch()` 对「无 `data:` 行的帧」改为**不派发**（只清 event 名缓冲），符合 WHATWG「dispatch the event」；② `MAX_PENDING_CHARS` 的判据从「扫描换行前量本次 read」改为「扫描后量**尚未闭合的那一帧**」（`pending` + 已消费的 `dataLines` 之和），错误文案同步改为指名帧长度。两份打包副本同步改 | ① #1284 的修法让 `event: ping\n\n` 这类保活帧变成 `{ data: '' }`，三条 wire 的 `JSON.parse('')` 直接抛 `MALFORMED_RESPONSE` —— 一条心跳打掉整条 chat 流；② 该常量的推导（见 sse.js 头注）依据的是「**一个**合法帧能有多大」，而判据量的是「这次 read 带来多少字节」：一次 read 送 9.4 MiB 的 943,719 个完整小帧会被拒（错误文案还说是「没有换行」，与输入不符），同样的字节按 64 KiB 分片则全过。判据见 `scripts/subs-sse-limits.test.mjs`（4 条正控 + 分片一致性 + 2 条负控） |
 
-**未改动**：`lib/` 下运行时代码**除上表第 5、6、8、9、10 条所列代理面、SSE 面、宿主样式面与命令标题 locale 外**逐字节保持上游（仅另删上表第 4 条的 `.map` / `.d.ts`）（含 provider 实现、OAuth 流程、token 存储路径 `~/.dsh/plugins/subscriptions/auth.json` 与其 0600 权限）、`cordis.patch.yml`、`README.md`、`LICENSE`。
+**未改动**：`lib/` 下运行时代码**除上表第 5、6、8、9、10、11 条所列代理面、SSE 面、宿主样式面与命令标题 locale 外**逐字节保持上游（仅另删上表第 4 条的 `.map` / `.d.ts`）（含 provider 实现、OAuth 流程、token 存储路径 `~/.dsh/plugins/subscriptions/auth.json` 与其 0600 权限）、`cordis.patch.yml`、`README.md`、`LICENSE`。
 
 ## 我们删了什么、为什么
 

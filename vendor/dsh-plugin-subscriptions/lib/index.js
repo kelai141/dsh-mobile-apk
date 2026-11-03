@@ -3155,11 +3155,15 @@ async function* parseSse(stream, onActivity) {
 	let dataLines = [];
 	let eventName;
 	const dispatch = () => {
-		if (dataLines.length === 0 && eventName === void 0) return void 0;
-		const event = dataLines.length === 0 ? {
-			data: "",
-			...eventName === void 0 ? {} : { event: eventName }
-		} : {
+		// issue #1309 ①：没有 data: 字段的帧**不派发**（WHATWG「dispatch the event」原话）。
+		// 要保护的是保活帧 event: ping\n\n —— 它只带类型不带负载，做成 { data: "" }
+		// 就等于把空串交给每个消费者的 JSON.parse，一条心跳打掉整条 chat 流。
+		// 类型缓冲仍要清，否则下一帧会继承上一帧的 event 名。
+		if (dataLines.length === 0) {
+			eventName = void 0;
+			return void 0;
+		}
+		const event = {
 			data: dataLines.join("\n"),
 			...eventName === void 0 ? {} : { event: eventName }
 		};
@@ -3179,8 +3183,10 @@ async function* parseSse(stream, onActivity) {
 			}
 			onActivity?.();
 			pending += decoder.decode(value, { stream: true });
-			// 先判上限再扫描：不带换行的 chunk 不得无限制撑大缓冲。
-			if (pending.length > MAX_PENDING_CHARS) throw new Error(`SSE frame exceeded ${String(MAX_PENDING_CHARS)} chars without a newline (buffer reached ${String(pending.length)}); refusing to grow further`);
+			// issue #1309 ②：上限约束的是**一个帧**，不是一次 read。原先在扫描前量 pending，
+			// 等于把这个上限变成了「网络分片形状」的属性：一次 read 送来 9 MiB 的完整小帧
+			// （943,719 个，每个都以换行结尾）会撞「帧超限」，而同样的字节按 64 KiB 分片就全过。
+			// 现在先扫描，pending 只剩尚未消费的字节，按「未闭合的那一帧」判。
 			let newline = pending.indexOf("\n");
 			while (newline >= 0) {
 				let line = pending.slice(0, newline);
@@ -3194,6 +3200,10 @@ async function* parseSse(stream, onActivity) {
 				else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
 				else if (line.startsWith("event:")) eventName = line.slice(6).replace(/^ /, "");
 			}
+			// 扫描之后仍在缓冲里的，全部属于**那一帧**：pending 是它尚未终结的行，
+			// dataLines 是已消费的 data: 行。二者之和才是上限推导所依据的量。
+			const openFrameChars = pending.length + dataLines.reduce((n, line) => n + line.length + 1, 0);
+			if (openFrameChars > MAX_PENDING_CHARS) throw new Error(`SSE frame exceeded ${String(MAX_PENDING_CHARS)} chars before its terminating blank line (frame ${String(openFrameChars)}, reassembly buffer ${String(openFrameChars)}); refusing to grow further`);
 		}
 	} finally {
 		try {

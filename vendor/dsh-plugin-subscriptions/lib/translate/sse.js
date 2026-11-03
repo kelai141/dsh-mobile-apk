@@ -58,13 +58,19 @@ export const MAX_PENDING_CHARS = 8 * 1024 * 1024;
 const EOF_FRAME_GRACE = true;
 /**
  * Raise a typed error for an oversized frame. Kept as a factory so the message
- * carries the observed size (the caller logs it; a bare "too big" is not
- * actionable).
- * @param observed - reassembly buffer length when the ceiling was crossed.
+ * carries the observed size and the buffer that was actually measured (the
+ * caller logs it; a bare "too big" is not actionable).
+ *
+ * issue #1309 ②: the message names the **frame** buffer, not "no newline".
+ * The old wording described a different check (a chunk that never terminated a
+ * line) and was flatly false when the ceiling tripped on a buffer full of
+ * newline-terminated frames — which is exactly the bug it was misreporting.
+ * @param frameChars - characters accumulated in the current, still-open frame.
+ * @param bufferChars - total reassembly buffer at the moment of the throw.
  * @returns the error to throw.
  */
-function oversizedFrame(observed) {
-    return new Error(`SSE frame exceeded ${String(MAX_PENDING_CHARS)} chars without a newline (buffer reached ${String(observed)}); refusing to grow further`);
+function oversizedFrame(frameChars, bufferChars) {
+    return new Error(`SSE frame exceeded ${String(MAX_PENDING_CHARS)} chars before its terminating blank line (frame ${String(frameChars)}, reassembly buffer ${String(bufferChars)}); refusing to grow further`);
 }
 /**
  * Decode an SSE byte stream into events.
@@ -82,11 +88,18 @@ export async function* parseSse(stream, onActivity) {
     let dataLines = [];
     let eventName;
     const dispatch = () => {
-        if (dataLines.length === 0 && eventName === undefined)
+        // issue #1309 ①: a frame with no `data:` field is **not** dispatched.
+        // WHATWG's "dispatch the event" step says so outright, and the shape it
+        // protects here is the keep-alive: `event: ping\n\n` carries a type and
+        // nothing else, so turning it into `{ data: '' }` handed every consumer
+        // an empty string to `JSON.parse` — one heartbeat killed the whole chat
+        // stream with MALFORMED_RESPONSE. The type buffer is still cleared, or
+        // the next frame would inherit a stale event name.
+        if (dataLines.length === 0) {
+            eventName = undefined;
             return undefined;
-        const event = dataLines.length === 0
-            ? { data: '', ...eventName === undefined ? {} : { event: eventName } }
-            : { data: dataLines.join('\n'), ...eventName === undefined ? {} : { event: eventName } };
+        }
+        const event = { data: dataLines.join('\n'), ...eventName === undefined ? {} : { event: eventName } };
         dataLines = [];
         eventName = undefined;
         return event;
@@ -105,10 +118,15 @@ export async function* parseSse(stream, onActivity) {
             }
             onActivity?.();
             pending += decoder.decode(value, { stream: true });
-            // ① Bound the buffer BEFORE scanning: a chunk that brings no newline
-            //    must not be able to grow it past the ceiling unchecked.
-            if (pending.length > MAX_PENDING_CHARS)
-                throw oversizedFrame(pending.length);
+            // ① issue #1309 ②: the ceiling bounds **one frame**, so it is checked
+            //    against the frame buffer, not against a raw read. Measuring
+            //    `pending` before scanning made the limit a property of network
+            //    chunking: one read carrying 9 MiB of perfectly well-formed small
+            //    frames (943,719 of them, every one newline-terminated) tripped a
+            //    "frame too large" error, while the identical bytes split into
+            //    64 KiB reads sailed through. The buffer is scanned first now, so
+            //    `pending` only holds what has not yet been consumed, and
+            //    `frameChars` is what the ceiling actually governs.
             let newline = pending.indexOf('\n');
             while (newline >= 0) {
                 let line = pending.slice(0, newline);
@@ -131,6 +149,17 @@ export async function* parseSse(stream, onActivity) {
                     eventName = line.slice(6).replace(/^ /, '');
                 }
             }
+            // ① (continued) After the scan, everything still buffered belongs to
+            //    the **one** frame that has not terminated yet: `pending` is its
+            //    last unterminated line, `dataLines` are the `data:` lines already
+            //    consumed from it. That sum is the quantity the ceiling is derived
+            //    from ("how big can one legitimate event get"), so it is what gets
+            //    measured. A read that delivered many complete frames leaves both
+            //    at zero — which is the whole point of checking after the scan
+            //    rather than before it.
+            const openFrameChars = pending.length + dataLines.reduce((n, line) => n + line.length + 1, 0);
+            if (openFrameChars > MAX_PENDING_CHARS)
+                throw oversizedFrame(openFrameChars, openFrameChars);
         }
     }
     finally {
