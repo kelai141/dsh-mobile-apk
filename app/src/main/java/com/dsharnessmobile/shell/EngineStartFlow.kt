@@ -160,6 +160,14 @@ internal class EngineStartFlow(private val activity: MainActivity) {
             if (generation != monitorGeneration || !activity.pageUiActive) return@evaluateJavascript
             jsAckAt = System.currentTimeMillis()
             pingOutstanding = false
+            // issue #1355：**页面真的活过来**才给下一次冻结自愈发新预算。
+            // 旧实现 freezeReloaded 一旦置位就没有复位点：同一进程内第二次渲染进程冻结只落一行
+            // 日志、不 reload，界面永久停在 Loading，除杀进程没有出口。
+            //
+            // 为什么复位点选这里而不是 startFreezeWatchdog（onPageFinished）：后者在文档加载完就
+            // 触发，此时 JS 可能仍然死着——reload → onPageFinished → 复位 → 再判冻结 → 再 reload，
+            // 就是一个 65 秒一圈的 reload 循环。应答回来才是「页面确实在跑」的证据。
+            freezeReloaded = false
           }
         } catch (_: Exception) {
           pingOutstanding = false

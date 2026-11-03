@@ -90,4 +90,38 @@ class UpdateCheckerSuffixTest {
     assertTrue("fx 修订号仍参与", UpdateChecker.isNewer("v0.13.7fx-2", "0.13.7fx-1"))
     assertFalse("rc 段仍不参与", UpdateChecker.isNewer("v0.13.7-rc.1", "0.13.7"))
   }
+  // ── issue #1365：预发布段必须参与比较 ──────────────────────────────────
+
+  @Test
+  fun 同核心的预发布段按序号比较() {
+    assertTrue("rc.2 比 rc.1 新（旧实现两者都归约成 [0,14,2] ⇒ 恒 false）",
+      UpdateChecker.isNewer("v0.14.2-rc.2", "0.14.2-rc.1"))
+    assertFalse("反向不得成立", UpdateChecker.isNewer("v0.14.2-rc.1", "0.14.2-rc.2"))
+    assertFalse("同一 rc 不算更新", UpdateChecker.isNewer("v0.14.2-rc.2", "0.14.2-rc.2"))
+    assertTrue("按数字比而不是按字典序（rc.10 > rc.9）",
+      UpdateChecker.isNewer("v0.14.2-rc.10", "0.14.2-rc.9"))
+  }
+
+  @Test
+  fun 正式版高于同核心的预发布() {
+    assertTrue("rc 用户必须能升到正式版", UpdateChecker.isNewer("v0.14.2", "0.14.2-rc.1"))
+    assertFalse("正式版用户不得被同核心的 rc 提示更新",
+      UpdateChecker.isNewer("v0.14.2-rc.1", "0.14.2"))
+  }
+
+  @Test
+  fun 预发布段的解析只认白名单() {
+    assertEquals("rc" to listOf(2L), UpdateChecker.prereleaseOf("v0.14.2-rc.2"))
+    assertEquals("sn" to listOf(1L, 13L), UpdateChecker.prereleaseOf("v0.14.6-SN-1-13"))
+    assertEquals(null, UpdateChecker.prereleaseOf("v0.14.5-fx-3"))
+    assertEquals(null, UpdateChecker.prereleaseOf("v0.14.5"))
+  }
+
+  @Test
+  fun 修订链语义不受影响() {
+    assertTrue(UpdateChecker.isNewer("v0.14.5-fx-3", "0.14.5-fx-2"))
+    assertFalse(UpdateChecker.isNewer("v0.14.5-fx-2", "0.14.5-fx-2"))
+    assertFalse("fx 不是预发布段，正式版与它的关系保持原口径",
+      UpdateChecker.isNewer("v0.14.5-fx-2", "0.14.5-fx-2"))
+  }
 }
