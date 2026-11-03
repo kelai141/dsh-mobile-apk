@@ -35,7 +35,10 @@
 //
 // 用法：
 //   node scripts/check-vendor-provenance.mjs             # 校验（默认；CI/发布链用）
-//   node scripts/check-vendor-provenance.mjs --write     # 从真实文件重建清单（唯一更新途径）
+//   node scripts/check-vendor-provenance.mjs --write     # 从真实文件重建机器清单（不动 PROVENANCE 自述）
+//   node scripts/check-vendor-provenance.mjs --write --update-provenance
+//                                                        # 同时改写 PROVENANCE 自述数字（issue #1311：
+//                                                        # 人可核对判据必须显式、单独地被改，不能顺手洗白）
 //   node scripts/check-vendor-provenance.mjs --self-test # 判别力自证（1 正控 + 5 负控）
 import { readFileSync, readdirSync, writeFileSync, existsSync, statSync, mkdtempSync, rmSync, mkdirSync, symlinkSync } from 'node:fs'
 import { createHash } from 'node:crypto'
@@ -178,15 +181,25 @@ export function verifySelfDescription(root) {
  * @param {string} root 仓库根。
  * @returns {{count: number, bytes: number}} 统计
  */
-export function writeManifest(root) {
+export function writeManifest(root, opts = {}) {
   const manifest = buildManifest(root)
   writeFileSync(join(root, MANIFEST), JSON.stringify(manifest, null, 2) + '\n')
   const count = Object.keys(manifest.files).length
   const bytes = Object.values(manifest.files).reduce((a, f) => a + f.bytes, 0)
-  const absProv = join(root, PROVENANCE)
-  const text = readFileSync(absProv, 'utf8')
-  const next = text.replace(/\*\*([\d,]+) B \/ (\d+) 文件\*\*/, '**' + bytes.toLocaleString('en-US') + ' B / ' + String(count) + ' 文件**')
-  if (next !== text) writeFileSync(absProv, next)
+  // issue #1311：**不得**在裸 --write 里改写 PROVENANCE 的自述数字。
+  //
+  // 那个数字是这份清单里唯一「人能一眼核对」的判据（字节数 / 文件数）。原先 --write 顺手把它
+  // 重写掉，等于「一条命令就能洗白」：任何人改了 vendor 字节、跑一次 --write，门禁绿、自述也
+  // 跟着变成新值，评审在 diff 里只会看到「数字变了」，而看不出「是改动导致的还是被洗白的」。
+  //
+  // 现在分成两步：--write 只重建机器清单；改写人可核对的自述需要再显式加 --update-provenance。
+  // 于是「自述数字变了」这件事在命令层面就是一次独立的、有意的动作。
+  if (opts.updateProvenance === true) {
+    const absProv = join(root, PROVENANCE)
+    const text = readFileSync(absProv, 'utf8')
+    const next = text.replace(/\*\*([\d,]+) B \/ (\d+) 文件\*\*/, '**' + bytes.toLocaleString('en-US') + ' B / ' + String(count) + ' 文件**')
+    if (next !== text) writeFileSync(absProv, next)
+  }
   return { count, bytes }
 }
 
@@ -245,6 +258,26 @@ function runSelfTest() {
   cases.push({ name: '负控②：只改 PROVENANCE 散文、不动数字 → 不得红', got: check((r) => [...verifyManifest(r, m), ...verifySelfDescription(r)], d), want: 'pass' })
   rmSync(d, { recursive: true, force: true })
 
+  // issue #1311：裸 --write 不得改写 PROVENANCE 自述（那是唯一人可核对的判据）。
+  d = mk()
+  mkdirSync(join(d, 'scripts'), { recursive: true })
+  writeFileSync(join(d, PROVENANCE), '# t\n\n| 体积 | **999 B / 9 文件** |\n')
+  writeManifest(d)
+  const bare = readFileSync(join(d, PROVENANCE), 'utf8')
+  cases.push({
+    name: '负控⑦：裸 --write 不改写 PROVENANCE 自述（不得洗白）',
+    got: { problems: bare.includes('**999 B / 9 文件**') ? [] : ['裸 --write 把自述数字改写了'] },
+    want: 'pass',
+  })
+  writeManifest(d, { updateProvenance: true })
+  const updated = readFileSync(join(d, PROVENANCE), 'utf8')
+  cases.push({
+    name: '正控：--update-provenance 才改写自述',
+    got: { problems: updated.includes('**999 B / 9 文件**') ? ['--update-provenance 未生效'] : [] },
+    want: 'pass',
+  })
+  rmSync(d, { recursive: true, force: true })
+
   d = mk(); m = buildManifest(d)
   writeFileSync(join(d, VENDOR, 'new.js'), 'z')
   cases.push({ name: '负控③：新增文件未登记 → 必须红', got: check((r) => verifyManifest(r, m), d), want: 'fail' })
@@ -286,7 +319,12 @@ function runSelfTest() {
 const argv = process.argv.slice(2)
 if (argv.includes('--self-test')) process.exit(runSelfTest())
 else if (argv.includes('--write')) {
-  const r = writeManifest(ROOT)
-  console.log('VENDOR-PROVENANCE 清单已重建：' + MANIFEST + '（' + String(r.count) + ' 文件 / ' + String(r.bytes) + ' B），PROVENANCE 自述已同步')
+  // issue #1311：自述数字必须显式加 --update-provenance 才改写（裸 --write 不得洗白）。
+  const updateProvenance = argv.includes('--update-provenance')
+  const r = writeManifest(ROOT, { updateProvenance })
+  console.log('VENDOR-PROVENANCE 清单已重建：' + MANIFEST + '（' + String(r.count) + ' 文件 / ' + String(r.bytes) + ' B）')
+  console.log(updateProvenance
+    ? 'PROVENANCE 自述已同步（--update-provenance 显式指定）'
+    : 'PROVENANCE 自述**未**改动（人可核对判据不得被裸 --write 洗白）；要同步请显式加 --update-provenance')
   process.exit(0)
 } else process.exit(runVerify())

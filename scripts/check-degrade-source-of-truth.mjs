@@ -242,12 +242,36 @@ if (entries.size === 0) die('归档成员列表为空（不是 tar.xz / 解压�
  * 共享农场是唯一一个**按设计**不属于 profile、又确实叫得出名字的目录，故只把它排除。
  */
 const SHARED_FARM_DIR = 'node_modules'
-const profiles = [...new Set([...entries]
+/**
+ * 注入器的装配 profile **真源**（scripts/inject-all.py 的 PROFILES 元组）。
+ *
+ * issue #1310：期望 profile 集合**不能**从被测 tar 推导。从 tar 推导意味着「少注入了哪个
+ * profile」这件事在判据里不可见 —— tar 里没有 headless，profile 集合就只剩 web，
+ * 于是「headless 完全没被注入」被判绿。判据必须与注入器读同一份真源。
+ *
+ * 为什么不在这里再抄一份常量：抄一份就是第二套答案，注入器改 PROFILES 时本门禁会静默
+ * 停在旧集合（正是 issue 说的「两套答案」形态）。读不到真源即无法判定（exit 2）。
+ */
+const declaredProfiles = (() => {
+  let py
+  try { py = readFileSync(join(HERE, 'inject-all.py'), 'utf8') } catch { return null }
+  const m = /^PROFILES\s*=\s*\(([^)]*)\)/m.exec(py)
+  if (m === null) return null
+  const names = [...m[1].matchAll(/["']([^"']+)["']/g)].map((x) => x[1])
+  return names.length === 0 ? null : names
+})()
+if (declaredProfiles === null) {
+  die('读不到 scripts/inject-all.py 的 PROFILES —— 期望 profile 集合无真源，判据无法执行')
+}
+const tarProfiles = [...new Set([...entries]
   .map((e) => /^home\/\.dsh\/profiles\/([^/]+)\//.exec(e)?.[1])
   .filter((p) => typeof p === 'string' && p !== '' && p !== SHARED_FARM_DIR))].sort()
-if (profiles.length === 0) {
+if (tarProfiles.length === 0) {
   die('归档里没有任何 home/.dsh/profiles/<profile>/ 成员——这不是注入后的快照（拒绝空集假绿）')
 }
+// 判据覆盖的 profile = 真源 ∪ tar 实有：真源里缺的那个也要被判（否则「没注入」= 判据看不见）。
+const profiles = [...new Set([...declaredProfiles, ...tarProfiles])].sort()
+const missingProfiles = declaredProfiles.filter((p) => !tarProfiles.includes(p))
 
 /**
  * 负控夹具 profile（与 scripts/ci-verify-snapshot.py 的 NEGATIVE_CONTROL_PROFILES、
@@ -302,7 +326,36 @@ const skip = (label, detail) => {
 
 console.log(TAG + ' 判据：tar 内注入字节 == 降级副本字节，且 != 原始源字节（只看字节，不解析构建日志）')
 console.log('  归档: ' + snapshot)
-console.log('  成员 ' + entries.size + ' 条；装配 profile: ' + profiles.join(', '))
+console.log('  成员 ' + entries.size + ' 条；装配 profile: ' + profiles.join(', ')
+  + '（真源 ' + declaredProfiles.join(', ') + '；tar 实有 ' + tarProfiles.join(', ') + '）')
+
+// issue #1310 ①：真源声明、tar 里却整个缺席的 profile 直接判红。
+//
+// 「该 profile 完全没被注入」不是「无法判定」，而是注入器少做了一件事——属事实性缺陷。
+// 旧实现从 tar 推导 profile 集合，于是少注入一个 profile 只会让集合变小，判据看不见。
+for (const p of missingProfiles) {
+  fail('profile ' + p, '注入器 PROFILES 声明了该 profile，但归档里没有任何 home/.dsh/profiles/'
+    + p + '/ 成员——该 profile 完全没被注入')
+}
+
+// issue #1310 ②：口径边界必须**显式说出来**，不能静默判绿。
+//
+// R（改写面）只含「原始源与降级副本字节不同」的文件。package.json 这类文件在两边通常逐字节
+// 相同 ⇒ 永远不进 R ⇒ 「注入的是原始源的那一份」在字节上不可区分。这是本门禁的口径边界，
+// 不是可以悄悄放过的地方：下面把「本次有多少注入面文件因字节相同而无法判定来源」计数说出来。
+//
+// 为什么**不**在这里改判「必须等于降级副本」：orig==deg 时该断言恒真，加它只是把不可判定
+// 伪装成已判定（比不判更糟，正是 issue 批评的形态）。真正的补法是让降级步骤改写更多文件面，
+// 那是 check-browser-syntax-floor 的职责，不在本门禁。
+let undecidableByBytes = 0
+for (const { pair, rewritten } of plan) {
+  const surface = injectSurface(pair.origDir)
+  for (const rel of surface) if (!rewritten.includes(rel)) undecidableByBytes += 1
+}
+if (undecidableByBytes > 0) {
+  console.log('NOTE  ' + undecidableByBytes + ' 个注入面文件在原始源与降级副本里逐字节相同，'
+    + '其来源不可由字节判定（口径边界；本门禁只判改写面 R）')
+}
 
 for (const { pair, rewritten } of plan) {
   if (pair.degradedName !== pair.name) {
