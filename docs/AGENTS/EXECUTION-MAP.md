@@ -2264,6 +2264,8 @@ app/src/main/java/com/dsharnessmobile/shell/RootMaintenanceLease.kt
 app/src/main/java/com/dsharnessmobile/shell/BrowserHostProfile.kt
 app/src/main/java/com/dsharnessmobile/shell/EnginePageRetryPolicy.kt
 app/src/main/java/com/dsharnessmobile/shell/PendingJsEntry.kt
+app/src/main/java/com/dsharnessmobile/shell/WorkspaceReclaim.kt
+app/src/main/java/com/dsharnessmobile/shell/PendingJsDrain.kt
 app/src/main/java/com/dsharnessmobile/shell/ForegroundPageRecoveryPolicy.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotFingerprintPolicy.kt
 app/src/main/java/com/dsharnessmobile/shell/ProfilePackageManifest.kt
@@ -2675,3 +2677,9 @@ Telemetry snapshot closure: check-engine-overlay retains each dependency's decla
 
 
 **#1363 tier-2 JS 回执世代校验**：入队记 `(tabId, generation)`，派发前比对；不同代**丢弃**，日志区分「tab 已关」与「换过代」（`app/src/main/java/com/dsharnessmobile/shell/PendingJsEntry.kt:52#expect=fun%20decide(entry%3A%20PendingJsEntry%2C%20replyTabId%3A%20String%2C%20liveGeneration%3A%20Long%3F)%3A%20Decision%20%7B`）。旧实现只按 seq 取回调，关页后回执照旧写回 url/title/scrollY，模型侧读到幽灵页。
+
+
+**PendingJsDrain**：`app/src/main/java/com/dsharnessmobile/shell/PendingJsDrain.kt:47#expect=fun%20shouldReclaim(inflight%3A%20Int)%3A%20Boolean%20%3D%20inflight%20%3E%3D%20MAX_INFLIGHT`（issue #1362）
+
+
+**WorkspaceReclaim**：`app/src/main/java/com/dsharnessmobile/shell/WorkspaceReclaim.kt:34#expect=fun%20plan(keys%3A%20List%3CString%3E%2C%20currentKey%3A%20String%3F%2C%20anonymousKey%3A%20String)%3A%20List%3CString%3E%20%3D`（issue #1364）

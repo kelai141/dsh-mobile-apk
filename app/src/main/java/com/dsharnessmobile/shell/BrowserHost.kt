@@ -369,7 +369,7 @@ internal class BrowserHost(
   /** Foreground selection is owned exclusively by trusted UI work on the main thread. */
   private fun switchTo(workspace: Workspace) {
     check(Looper.myLooper() == Looper.getMainLooper())
-    currentWorkspace = workspace
+    currentWorkspace = workspace; reclaimInactiveWorkspaces(workspace)
     applyStageBounds()
     applyVisibility()
   }
@@ -957,7 +957,7 @@ internal class BrowserHost(
         rh.disconnect()
         rh.detachHostSurface()
       }
-      workspaces.clear()
+      workspaces.clear(); drainPendingJs("destroy")
       currentWorkspace = null
       Unit
     }
@@ -2260,7 +2260,7 @@ internal class BrowserHost(
     }
     val rh = remote ?: run { callback(null); return }
     val seq = rh.nextSeq()
-    pendingJs[seq] = PendingJsEntry(tab.id, tab.generation.get(), callback)
+    enqueuePendingJs(seq, tab, callback)
     if (!rh.evaluateJs(remoteTabId(tab.owner, tab), script, seq)) {
       pendingJs.remove(seq)
       callback(null)
@@ -2437,6 +2437,63 @@ internal class BrowserHost(
         android.util.Log.w("dsh-browser", "js result discarded (tab gone): tab=" + entry.tabId + " seq=" + seq)
       PendingJsDispatch.Decision.DISCARD_STALE_GENERATION ->
         android.util.Log.w("dsh-browser", "js result discarded (stale generation): tab=" + entry.tabId + " seq=" + seq)
+    }
+  }
+
+  /**
+   * 入队一条在途回执，并在**超过上限**时先回收（issue #1362：页面还在但永不回执的那一类）。
+   *
+   * 为什么要上限：`destroy()`/断连的 drain 只能收拾「页面已死」；若渲染进程活着却卡死，
+   * 回执永远不来、调用方各自 2s 闩超时后继续发新请求 —— 同一个页面会持续堆积。
+   * 上限取值依据见 [PendingJsDrain] 的类注释（典型 1–2 条、最坏 ≈1 条/2s，64 ≈ 2 分钟挂死）。
+   *
+   * @param seq 求值序号。
+   * @param tab 发起求值的 tab（记下它的世代，供回执派发时比对）。
+   * @param callback 回执回调。
+   */
+  private fun enqueuePendingJs(seq: Int, tab: Tab, callback: (String?) -> Unit) {
+    if (PendingJsDrain.shouldReclaim(pendingJs.size)) drainPendingJs("cap")
+    pendingJs[seq] = PendingJsEntry(tab.id, tab.generation.get(), callback)
+  }
+
+  /**
+   * 清空在途回执表（issue #1362）：逐条移除并以 `null` 回调，让调用方的 2s 闩**立刻**结束，
+   * 而不是各自等到超时。
+   *
+   * **必须留痕**：每次回收写一行日志（条数 + 原因）。静默回收会让以后分不清
+   * 「没堆」与「堆了但被静默回收」——那正是本 issue 想避免的不可观测。
+   *
+   * @param reason 回收原因（`destroy` / `cap`），进日志。
+   */
+  private fun drainPendingJs(reason: String) {
+    if (pendingJs.isEmpty()) return
+    val drained = ArrayList<PendingJsEntry>(pendingJs.size)
+    for (entry in pendingJs.values) drained.add(entry)
+    pendingJs.clear()
+    android.util.Log.w("dsh-browser", "pending js drained: reason=" + reason + " count=" + drained.size)
+    for (entry in drained) entry.callback(null)
+  }
+
+  /**
+   * 回收**非当前、非匿名**的会话工作台（issue #1364）。
+   *
+   * 旧实现只有三个调用点（关工作区 / 关目标会话的标签 / `destroy()` 全清），会话切走或删除时
+   * 什么都不做 ⇒ 常驻 WebView 数 = 开过浏览器的会话数，渲染进程随使用历史线性增长。
+   *
+   * **顺序：先删引用，再销毁**（维护者要求）：
+   * 1. 先从 `workspaces` 摘键——此后任何新调用都会新建，不会被半销毁的工作台接住；
+   * 2. 再 `dropWorkspace`（销毁 WebView / 释放 profile）。它内部的 `workspaces.remove` 此时是
+   *    幂等 no-op；profile dispose 失败只记录 `profileError`（**warn，不抛**），
+   *    绝不因为「删不掉」而阻断会话删除这类调用方流程。
+   *
+   * @param keep 当前工作台（必须保留）。
+   */
+  private fun reclaimInactiveWorkspaces(keep: Workspace?) {
+    val plan = WorkspaceReclaim.plan(workspaces.keys.toList(), keep?.sessionKey, ANONYMOUS_SESSION)
+    for (key in plan) {
+      val workspace = workspaces[key] ?: continue
+      workspaces.remove(key) // 先删引用
+      dropWorkspace(workspace) // 再销毁（内部 remove 幂等；profile 失败只 warn）
     }
   }
 }
