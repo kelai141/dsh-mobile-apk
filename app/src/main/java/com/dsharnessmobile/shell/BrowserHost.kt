@@ -156,7 +156,7 @@ internal class BrowserHost(
 
   // ── 兼容档（process-suffix，WebView<114）执行位 ──────────────────────────
   /** evaluateJs 序号 → 回调（tier-2；回调统一回主线程再派发）。 */
-  private val pendingJs = HashMap<Int, (String?) -> Unit>()
+  private val pendingJs = HashMap<Int, PendingJsEntry>()
 
   private val rendererListener = object : RemoteRendererHost.Listener {
     override fun onRendererEvent(tabId: String, event: JSONObject) {
@@ -164,7 +164,7 @@ internal class BrowserHost(
     }
 
     override fun onRendererJsResult(tabId: String, seq: Int, result: JSONObject) {
-      main.post { pendingJs.remove(seq)?.invoke(result.optString("value")) }
+      main.post { deliverJsResult(tabId, seq, result) }
     }
   }
 
@@ -2260,7 +2260,7 @@ internal class BrowserHost(
     }
     val rh = remote ?: run { callback(null); return }
     val seq = rh.nextSeq()
-    pendingJs[seq] = callback
+    pendingJs[seq] = PendingJsEntry(tab.id, tab.generation.get(), callback)
     if (!rh.evaluateJs(remoteTabId(tab.owner, tab), script, seq)) {
       pendingJs.remove(seq)
       callback(null)
@@ -2414,6 +2414,31 @@ internal class BrowserHost(
     "end" to KeyEvent.KEYCODE_MOVE_END,
     "space" to KeyEvent.KEYCODE_SPACE,
   )
+
+  /**
+   * tier-2 JS 回执派发（issue #1363）：**先比对 tab 存活与世代，不同代直接丢弃**。
+   *
+   * 旧实现只按 `seq` 取回调：`closeTabOp` 已经 `generation.incrementAndGet()` + 销毁 view +
+   * `tabs.remove`，在途回执照旧把 url / title / scrollY 写回，模型侧读到「幽灵页」并据此继续操作。
+   *
+   * 为什么要分三态（见 [PendingJsDispatch] 的注释）：`tab 已关` 是正常关闭竞态，
+   * `换过代` 说明有人在旧页面上继续操作——两者排障含义不同，日志要能分开。
+   *
+   * @param tabId 回执上报的 tabId。
+   * @param seq 求值序号。
+   * @param result 渲染侧回执。
+   */
+  private fun deliverJsResult(tabId: String, seq: Int, result: JSONObject) {
+    val entry = pendingJs.remove(seq) ?: return
+    val live = tabs[entry.tabId]?.generation?.get()
+    when (PendingJsDispatch.decide(entry, tabId, live)) {
+      PendingJsDispatch.Decision.DELIVER -> entry.callback(result.optString("value"))
+      PendingJsDispatch.Decision.DISCARD_TAB_GONE ->
+        android.util.Log.w("dsh-browser", "js result discarded (tab gone): tab=" + entry.tabId + " seq=" + seq)
+      PendingJsDispatch.Decision.DISCARD_STALE_GENERATION ->
+        android.util.Log.w("dsh-browser", "js result discarded (stale generation): tab=" + entry.tabId + " seq=" + seq)
+    }
+  }
 }
 
 /**

@@ -2263,6 +2263,7 @@ glob:scripts/patches/tests/fixtures/dsh-client-ui-sidebar-right-mobile-0.2.0-rc.
 app/src/main/java/com/dsharnessmobile/shell/RootMaintenanceLease.kt
 app/src/main/java/com/dsharnessmobile/shell/BrowserHostProfile.kt
 app/src/main/java/com/dsharnessmobile/shell/EnginePageRetryPolicy.kt
+app/src/main/java/com/dsharnessmobile/shell/PendingJsEntry.kt
 app/src/main/java/com/dsharnessmobile/shell/ForegroundPageRecoveryPolicy.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotFingerprintPolicy.kt
 app/src/main/java/com/dsharnessmobile/shell/ProfilePackageManifest.kt
@@ -2670,3 +2671,7 @@ app/src/androidTest/java/com/dsharnessmobile/shell/RepairUiFallbackDeviceTest.kt
 Telemetry snapshot closure: check-engine-overlay retains each dependency's declared requirement and resolves the actual nested package from the mounted telemetry consumer. Exact-version mismatches and missing transitive runtime packages reject the archive. The isolated overlay pins prevent upgrading unrelated consumers' root packages. Validation and the unresolved startup-budget distinction are recorded in docs/contrib/MCMR-JIM/2026-10-27-telemetry-runtime-closure.md.
 
 **#1345 引擎页重试三态**：页面级失败的自愈判据收在纯函数里（`app/src/main/java/com/dsharnessmobile/shell/EnginePageRetryPolicy.kt:22#expect=*%20-%20%5BDecision.RETRY%5D%EF%BC%9A%E6%9D%A1%E4%BB%B6%E9%BD%90%E5%A4%87%E4%B8%94%E6%9C%AC%E4%B8%96%E4%BB%A3%E9%A2%84%E7%AE%97%E6%9C%AA%E7%94%A8%E5%AE%8C%20%E2%80%94%E2%80%94%20%E7%8E%B0%E5%9C%A8%E5%B0%B1%E9%87%8D%E8%BD%BD%EF%BC%9B`），三态 = RETRY / WAIT_ENGINE_NOT_READY / GIVE_UP_BUDGET_SPENT；预算按**引擎启动世代**计（`app/src/main/java/com/dsharnessmobile/shell/ForegroundPageRecoveryPolicy.kt`），换代才重开，避免「第一次自动重试也失败」后永久静默。
+
+
+
+**#1363 tier-2 JS 回执世代校验**：入队记 `(tabId, generation)`，派发前比对；不同代**丢弃**，日志区分「tab 已关」与「换过代」（`app/src/main/java/com/dsharnessmobile/shell/PendingJsEntry.kt:52#expect=fun%20decide(entry%3A%20PendingJsEntry%2C%20replyTabId%3A%20String%2C%20liveGeneration%3A%20Long%3F)%3A%20Decision%20%7B`）。旧实现只按 seq 取回调，关页后回执照旧写回 url/title/scrollY，模型侧读到幽灵页。
