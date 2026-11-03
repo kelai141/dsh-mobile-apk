@@ -36,6 +36,7 @@
 | E8 | `lib/client.js` | 重锚（原位命中） | 快照徽章折叠成小绿点，数量挪进 title/aria-label | 2026-09-10 用户定例：360dp 竖屏头部被模式徽章/打开方式/…/右栏键占满 |
 | S1 | `lib/core.mjs` | **新增（本版分叉）** | safe 生成对齐壳侧 `SafeMode.kt`：只摘第三方 insert 子条目，保留 `@deepseek-ai/*`、`@dsh-android/*` 与两个具名插件，且保留全部顶层 `disabled: true` | 用户口径「undo 要确保保留我们自己的插件」。上游 `safeModeSet` 原把 `cordis.patch.yml` **整份覆写**成只含一条 insert 的最小文件，实测会摘掉 12 个 `@dsh-android/*` 引用与 7 条 disabled（含**安全关键的 `client-hmr`** ⇒ 会重开无鉴权的 `/plugins/events` SSE） |
 | U1 | `lib/index.js` | 重锚 | `/api/undo` prefix 在 handler 首行执行 Host/Origin、浏览器会话或壳侧实时 controlToken 鉴权；403 不可由 token 绕过，拒绝与成功 JSON 均 `no-store`，且拒绝先于 body 读取、快照枚举和任何写操作 | apk #222：更长 prefix 绕过 `/api` 信任栅栏；所有读写必须 fail-closed。**上游 0.4.9 新增的 M2（跨站 CSRF：Origin/Host 不符即拒）不替代本条**——M2 不做壳侧 controlToken、不做 `connection.requestRejection` 会话栅栏、也不保证「读 body 前失败关闭」 |
+| M1 | `lib/core.mjs` | **新增（本版分叉，issue #1400）** | `readMessageOps` / `appendMessageOp` / `pruneMessageOps` 一律先过批次 id 白名单 `/^[A-Za-z0-9_-]{1,64}$/`；非法 id 在读取侧按「没有这个批次」fail-closed（不回显落盘路径），写入侧抛错，prune 侧跳过 | 缺陷形态：id 被直接拼进 `join(messageOpsDir(cfg), `<id>.json`)`，既不过滤 `..` 也不过滤分隔符。`POST /api/undo/message` 的 `body.id` 与工具参数 `message_id` 都直达该拼接点，传 `../../<相对路径>` 即可**读取并应用快照目录之外的任意 `.json`**，再按其中记录的路径执行还原/删除——越界读写且无需任何凭据。prune 侧另有一条：`b.id` 来自**文件内容**，一个被构造过的批次文件同样能把删除带出目录 |
 
 保留：头部徽章（`u_badge`，点击打开快照管理面板）、`SnapshotPanel`（快照列表/回滚/删除/手动存档）、
 设置页「快照」分区（自动兜底开关、watch 防抖、保留数、自动清理、脱敏模式、目录）。
