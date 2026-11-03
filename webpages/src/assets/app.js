@@ -6,9 +6,10 @@ import {
 import { t, translatePage, toggleLocale } from './locales.js';
 import { selectRoute } from './routing.js';
 import { classifyProbe } from './probe.js';
+import { apkDigestFromManifest, classifySeedDigest, digestStateKey, seedConsistency } from './digest.js';
 
 const PROBE_TIMEOUT_MS = 2500;
-const state = { data: null, classification: null, mode: 'auto', current: MIRROR_TEMPLATES[0], results: [], checked: false };
+const state = { digestState: undefined, data: null, classification: null, mode: 'auto', current: MIRROR_TEMPLATES[0], results: [], checked: false };
 const body = document.getElementById('dl-body');
 const esc = value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
@@ -134,6 +135,47 @@ function updateRoute() {
   }
 }
 
+/** 计算一段文本的 sha256（hex）。环境没有 subtle 时返回空串 => 状态落到「未验证」。 */
+async function sha256HexOf(text) {
+  try {
+    if (!globalThis.crypto || !globalThis.crypto.subtle) return '';
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+  } catch { return ''; }
+}
+
+/**
+ * 校验 seed 摘要（issue #1394）：重新拉当前线路的 MANIFEST，比对 seed 登记的 manifestSha256，
+ * 并逐条核对 APK 摘要。三态见 digest.js；拉不到/旧 seed 缺字段一律「未验证」，绝不当已校验。
+ */
+async function verifySeedDigest() {
+  const { data, classification: c } = state;
+  if (!data || !data.tag || !c || !c.abi) return;
+  const asset = pickAsset(data.tag, c.abi, data.assets);
+  if (!asset) return;
+  const consistency = seedConsistency(data, (tag, abi) => {
+    const hit = pickAsset(tag, abi, data.assets);
+    return hit ? hit.name : null;
+  });
+  let computed = '';
+  let manifestDigest = null;
+  try {
+    const res = await fetch(probeUrl(state.current) + '?dsh=' + Date.now(), { cache: 'no-store' });
+    if (res.ok) {
+      const text = await res.text();
+      computed = await sha256HexOf(text);
+      manifestDigest = apkDigestFromManifest(text, asset.name);
+    }
+  } catch { /* 拉不到 => unverified */ }
+  state.digestState = classifySeedDigest({
+    manifestSha256: data.manifestSha256,
+    computedManifestSha256: computed,
+    seedDigest: data.sha256 ? data.sha256[c.abi] : '',
+    manifestDigest,
+    consistency,
+  });
+  render();
+}
 function render() {
   const { data, classification: c } = state;
   if (!data?.tag) { body.innerHTML = '<p>' + t('error') + '</p><a class="btn2" href="' + LATEST_RELEASE_URL + '">' + t('history') + '</a>'; return; }
@@ -158,7 +200,7 @@ function render() {
       '<button type="button" id="switch-abi">' + t('changeAbi') + '</button></div>' +
       '<details class="verify"><summary>' + t('verification') + '</summary><p>' + t('installHelp') + '</p>' +
       '<p class="small">' + t('file') + '</p><code class="filename">' + esc(asset.name) + '</code>' +
-      (hasDigest ? '<p class="small">SHA-256</p><code class="hash">' + esc(digest) + '</code><button class="text-button" id="copy-hash" type="button">' + t('copy') + '</button>' : '<p class="small muted">' + t('missingHash') + '</p>') + '</details>';
+      (hasDigest ? '<p class="small">SHA-256 · ' + t(digestStateKey(state.digestState)) + '</p><code class="hash">' + esc(digest) + '</code><button class="text-button" id="copy-hash" type="button">' + t('copy') + '</button>' : '<p class="small muted">' + t('missingHash') + '</p>') + '</details>';
     document.getElementById('copy-hash')?.addEventListener('click', async event => {
       try { await navigator.clipboard.writeText(digest); event.target.textContent = t('copied'); }
       catch { event.target.textContent = t('copyFailed'); }
@@ -195,6 +237,7 @@ async function main() {
   }
   state.classification = classifyAbi(await deviceSignals());
   render();
+verifySeedDigest();
   if (!state.data?.tag) return;
   // Start in parallel; downloading never waits for probes. No persisted stale route.
   await Promise.all(MIRROR_TEMPLATES.map(async template => {
