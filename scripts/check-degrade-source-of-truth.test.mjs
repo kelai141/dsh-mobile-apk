@@ -199,7 +199,9 @@ test('多对混装：降级对判 PASS，未改写对 SKIP，两条判据互不�
   const degB = makeSource(root, 'src/b-deg', 'dsh-plugin-subscriptions', UNCHANGED_CLIENT)
   const snap = makeSnapshot(root, {
     tag: 'multi',
-    profiles: ['web'],
+    // issue #1310：期望 profile 集合取自注入器真源（web + headless），夹具必须两个都在场，
+    // 否则「profile 整个缺席」判据会（正确地）先红，掩盖本用例要测的东西。
+    profiles: ['web', 'headless'],
     packages: [
       { name: 'dshmarketplace-plugin', members: {
         'package.json': readFileSync(join(degA, 'package.json'), 'utf8'),
@@ -218,7 +220,8 @@ test('多对混装：降级对判 PASS，未改写对 SKIP，两条判据互不�
   assert.match(r.out, /PASS  dshmarketplace-plugin@web lib\/client\.js/)
   assert.match(r.out, /SKIP\(#1\)  dsh-plugin-subscriptions/)
   assert.match(r.out, /SKIP=1/)
-  assert.match(r.out, /判定 1 个落点/)
+  // issue #1310：夹具补齐两个真源 profile 后，落点数从 1 变 2（web + headless 各一条）。
+  assert.match(r.out, /判定 2 个落点/)
 }))
 
 // ── 第二对被换成原始源：多包里任何一个用错源都必须判红（PR #1272 的原始形态）────
@@ -229,7 +232,7 @@ test('负控 A 扩展：多对里只有第二个包用了原始源 -> 仍必须�
   const degB = makeSource(root, 'src/b-deg', 'dsh-plugin-subscriptions', DEGRADED_CLIENT + '// subscriptions\n')
   const snap = makeSnapshot(root, {
     tag: 'second-wrong',
-    profiles: ['web'],
+    profiles: ['web', 'headless'],
     packages: [
       { name: 'dshmarketplace-plugin', members: {
         'package.json': readFileSync(join(degA, 'package.json'), 'utf8'),
@@ -256,7 +259,8 @@ test('落点定位不到：非严格档 SKIP=1 + exit 0；--require 档 exit 1',
   // tar 里只有别的包，没有 dshmarketplace-plugin 的落点
   const snap = makeSnapshot(root, {
     tag: 'missing',
-    profiles: ['web'],
+    // 同上：两个真源 profile 都要在场，本用例测的是「包落点缺席」而不是「profile 缺席」。
+    profiles: ['web', 'headless'],
     packages: [{ name: 'other-plugin', members: {
       'package.json': JSON.stringify({ name: 'other-plugin' }),
       'lib/client.js': DEGRADED_CLIENT,
@@ -269,6 +273,29 @@ test('落点定位不到：非严格档 SKIP=1 + exit 0；--require 档 exit 1',
 
   const strict = runGate(['--snapshot', snap, '--pair', orig + '=' + deg, '--require'])
   assert.equal(strict.code, 1, strict.out + strict.err)
+}))
+
+// ── issue #1310：期望 profile 集合取自注入器真源，不取自被测 tar ────────────────
+test('issue #1310：真源声明的 profile 整个缺席 -> 必须判红（旧实现从 tar 推导，对这一形态判绿）', () => withFixture((root) => {
+  const orig = makeSource(root, 'src/orig', 'dshmarketplace-plugin', ORIGINAL_CLIENT)
+  const deg = makeSource(root, 'src/deg', 'dshmarketplace-plugin', DEGRADED_CLIENT)
+  // 缺陷形态：只注入了 web，headless 完全没注入。
+  // 旧实现从 tar 的成员推导 profile 集合 => 集合只剩 web => 判绿。
+  const snap = makeSnapshot(root, {
+    tag: 'no-headless',
+    profiles: ['web'],
+    packages: [{ name: 'dshmarketplace-plugin', members: {
+      'package.json': readFileSync(join(deg, 'package.json'), 'utf8'),
+      'lib/client.js': DEGRADED_CLIENT,
+      'lib/index.js': 'export const value = 1\n',
+    } }],
+  })
+  const loose = runGate(['--snapshot', snap, '--pair', orig + '=' + deg])
+  assert.equal(loose.code, 1, '非严格档也必须红：「没注入」是事实性缺陷，不是观察缺口\n' + loose.out + loose.err)
+  assert.match(loose.out, /FAIL  profile headless/)
+  assert.match(loose.out, /该 profile 完全没被注入/)
+  // 真源集合必须被打印出来，便于对账
+  assert.match(loose.out, /真源 web, headless/)
 }))
 
 // ── 用法/环境错误：exit 2（不静默、不当作通过）──────────────────────────────────
