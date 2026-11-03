@@ -37,6 +37,16 @@ object UndoGate {
   const val RETRY_WINDOW_MS = 30 * 60 * 1000L
 
   /**
+   * 尝试退避（issue #1368）：距上次**尝试**（无论成败）不足该间隔时不再放行 EXECUTE。
+   *
+   * 旧实现只在**成功**后写 `.undo-auto-done`，失败路径没有任何记忆 ⇒ 引擎死透且急救 CLI 起不来时，
+   * 闸门每 5 秒一拍继续放行，每拍拉起一次回滚尝试，无上限、无退避（后台唤醒与日志一起膨胀）。
+   * 取 5 分钟：相对 5 秒拍是 60 拍一次，既不会把「第一次失败后引擎刚好自愈」的窗口堵死，
+   * 也不会让不可恢复的现场把 IO 打满。
+   */
+  const val ATTEMPT_BACKOFF_MS = 5 * 60 * 1000L
+
+  /**
    * Records the first confirmed-dead observation, then grants exactly one caller
    * the right to execute after [WATCH_MS]. A healthy probe disarms the wait.
    */
@@ -123,7 +133,7 @@ object UndoGate {
       suppressNoted = true
       record(context, "legacy undo marker conservatively suppresses until retry window expires")
     }
-    return when (decide(consecutiveFailures, now, retry.atMs, armedAt(context))) {
+    return when (decide(consecutiveFailures, now, retry.atMs, armedAt(context), attemptAt(context))) {
       GateDecision.IDLE -> false
       GateDecision.SUPPRESS -> {
         // 只记一次：重试窗口内每 5s 一拍，逐拍落盘会刷爆观测文件（真实原因由 .undo-auto-done 承载）。
@@ -152,6 +162,12 @@ object UndoGate {
       GateDecision.WAIT -> false
       GateDecision.EXECUTE -> {
         suppressNoted = false
+        // issue #1368：**无论成败**都记一次尝试——decide 据此退避，不可恢复的现场不再每拍拉起。
+        try {
+          attemptFile(context).writeText(now.toString())
+        } catch (t: Throwable) {
+          record(context, "attempt marker write failed: " + (t.message ?: t.javaClass.simpleName))
+        }
         record(context, "trigger failures=" + consecutiveFailures)
         true
       }
@@ -178,7 +194,7 @@ object UndoGate {
     val now = System.currentTimeMillis()
     val retry = retrySuppression(markerFile(context), currentRetryIdentity(context, engine), now)
     if (retry.resetWatch) runCatching { armFile(context).delete() }
-    val decision = decide(TRIGGER_CONSEC_FAILURES, now, retry.atMs, armedAt(context))
+    val decision = decide(TRIGGER_CONSEC_FAILURES, now, retry.atMs, armedAt(context), attemptAt(context))
     record(context, "client-plugin-tree-failed decision=" + decision + " detail=" + detail.take(160).replace('\n', ' '))
     return clientPluginFailureDecision(decision)
   }
@@ -220,9 +236,13 @@ object UndoGate {
     nowMs: Long,
     lastUndoAtMs: Long?,
     armedAtMs: Long?,
+    /** 上次**尝试**执行回撤的时刻（无论成败，issue #1368）；无则 null。 */
+    lastAttemptAtMs: Long? = null,
   ): GateDecision = when {
     consecutiveFailures < TRIGGER_CONSEC_FAILURES -> GateDecision.IDLE
     lastUndoAtMs != null && nowMs - lastUndoAtMs < RETRY_WINDOW_MS -> GateDecision.SUPPRESS
+    // issue #1368：失败也记账。旧实现只在成功后写 marker，失败路径每拍都重新放行。
+    lastAttemptAtMs != null && nowMs - lastAttemptAtMs < ATTEMPT_BACKOFF_MS -> GateDecision.SUPPRESS
     armedAtMs == null -> GateDecision.ARM
     nowMs - armedAtMs < WATCH_MS -> GateDecision.WAIT
     else -> GateDecision.EXECUTE
@@ -568,6 +588,14 @@ object UndoGate {
 
   private fun markerFile(context: Context) = File(context.filesDir, ".undo-auto-done")
   private fun armFile(context: Context) = File(context.filesDir, ".undo-auto-armed")
+
+  /** 上次尝试执行的时刻（issue #1368）：成败都写，供 decide 退避。 */
+  private fun attemptFile(context: Context) = File(context.filesDir, ".undo-auto-attempt")
+
+  private fun attemptAt(context: Context): Long? =
+    attemptFile(context).takeIf { it.exists() }?.let { f ->
+      runCatching { f.readText().trim().toLongOrNull() }.getOrNull()
+    }
 
   private fun currentRetryIdentity(context: Context, engine: EngineManager?): RetryIdentity {
     val install = runCatching { installFingerprint(context)?.lowercase(java.util.Locale.ROOT) }.getOrNull() ?: "unavailable"
