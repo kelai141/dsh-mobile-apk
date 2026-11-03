@@ -266,6 +266,8 @@ export function apply(ctx, config = {}) {
     /** >0 while a restore is writing files: the watcher must NOT auto-snapshot
      * the restore's own writes, or the new auto snapshot would block redo. */
     suppressAuto: 0,
+    /** issue #1398：撤销/恢复的单飞标志（并发请求必须互斥，见 core.mjs 的 restore）。 */
+    undoBusy: false,
     /** destName -> sha1 of what the last restore wrote (echo detection). */
     restoredHashes: new Map(),
   };
