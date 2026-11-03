@@ -90,6 +90,13 @@ export class TopBarFold {
   /** 容器上被我们覆盖掉的内联样式原值，解除时逐项写回。 */
   private readonly styleSnapshot = new Map<string, string>()
   private scheduled = false
+  /**
+   * 已排队的 rAF id（issue #1411）。旧实现只存布尔、不存 id：同一帧内 detach 之后，已排队的
+   * 回调仍会执行 sync()，而观察者与监听器都已断开，没人再 restore()——箭头与折叠属性永久留在节点上。
+   */
+  private frameId: number | null = null
+  /** attach/detach 状态：detach 之后 sync() 不得再动 DOM（双保险，见 schedule 的取消）。 */
+  private attached = false
   /** 上一次真正写进 DOM 的呈现状态（折叠开关 + 容器 + 标题行 + 箭头），见 syncState()。 */
   private written: readonly [boolean, HTMLElement | null, HTMLElement | null, HTMLButtonElement | null] | null = null
 
@@ -110,6 +117,7 @@ export class TopBarFold {
 
   /** 开始观察标题栏；非手机竖屏时什么都不做。 */
   attach(): void {
+    this.attached = true
     this.headerPopups.attach()
     this.media = typeof window.matchMedia === 'function' ? window.matchMedia(MOBILE_QUERY) : null
     this.observer = new MutationObserver(() => { this.schedule() })
@@ -130,6 +138,13 @@ export class TopBarFold {
 
   /** 解除折叠并清理监听（HMR 安全：不留 document 监听，不改动 React 节点）。 */
   detach(): void {
+    // issue #1411：先取消已排队的那一帧并复位，再拆监听——否则回调会在拆卸之后跑 sync()。
+    this.attached = false
+    if (this.frameId !== null) {
+      cancelAnimationFrame(this.frameId)
+      this.frameId = null
+    }
+    this.scheduled = false
     this.headerPopups.detach()
     this.observer?.disconnect()
     this.observer = null
@@ -149,7 +164,8 @@ export class TopBarFold {
   private schedule(): void {
     if (this.scheduled) return
     this.scheduled = true
-    requestAnimationFrame(() => {
+    this.frameId = requestAnimationFrame(() => {
+      this.frameId = null
       this.scheduled = false
       this.sync()
     })
@@ -157,6 +173,7 @@ export class TopBarFold {
 
   /** 形态门 + 单次同步。 */
   private sync(): void {
+    if (!this.attached) return
     if (!this.isMobileForm()) {
       this.restore()
       return
