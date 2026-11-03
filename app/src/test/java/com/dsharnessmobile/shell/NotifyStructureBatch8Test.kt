@@ -46,7 +46,18 @@ class NotifyStructureBatch8Test {
     assertTrue("降级必须产生随通知走的说明", code.contains("degradedNotice"))
     assertTrue("说明必须点名是哪个类别被降级", code.contains("系统已把「"))
     assertTrue("说明必须给出恢复路径", code.contains("到系统设置里可恢复"))
-    assertTrue("说明必须落到通知上（subText）", code.contains("if (degradedNotice != null) b.setSubText(degradedNotice)"))
+    // ── 这条断言在 issue #1407 里被**改写**过，为什么改写在这里 ──────────────────────
+    //
+    // 原文钉的是 `if (degradedNotice != null) b.setSubText(degradedNotice)`——即「降级说明
+    // 无条件覆盖 subText」这个**实现形态**。而 #1407 的真因正是这一句：它把审批通知的
+    // 「仅本次生效」顶掉了。于是原文等于断言「缺陷必须还在」，修好了反而红。
+    //
+    // 守的是同一条需求（S3-1：降级必须有一份随通知走的说明），只是不再允许它盖掉更具体的
+    // subText。判据改成直接断言两件事同时成立：降级说明仍落到 subText，且受占用判据保护。
+    assertTrue(
+      "说明必须落到通知上（subText），且不得覆盖更具体的 subText（#1407）",
+      code.contains("if (degradedNotice != null && !hasSpecificSubText(face, entry.count)) b.setSubText(degradedNotice)"),
+    )
     assertTrue("只在交互类且渠道不可用时才说", code.contains("channelId == null && face.interactive"))
   }
 
