@@ -44,6 +44,21 @@ class MuxClient(
     private const val TAG = "dsh-overlay-mux"
     private const val GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
     private const val MAX_FRAME = 8 * 1024 * 1024
+
+    /**
+     * 握手阶段的 socket 读超时（issue #1401）。
+     *
+     * 旧实现从不设置 `soTimeout`：网关 accept 后不回 upgrade 时，`readLine(ins)` 永久阻塞——
+     * 读线程卡死，重连循环里的退避与自愈都不进入，审批卡与提问卡静默不弹，直到重启应用。
+     */
+    private const val HANDSHAKE_TIMEOUT_MS = 5_000
+
+    /**
+     * 帧循环的读超时（issue #1401）：网关每 30 秒发一次 ping，两拍没有帧即认定连接半开
+     * （引擎被杀而 TCP 未 RST 是最常见的形态）。超时抛 [java.net.SocketTimeoutException]，
+     * 由 [loop] 的 catch 计入失败并走退避——与「连接被拒」同一条自愈路径。
+     */
+    private const val READ_TIMEOUT_MS = 60_000
     /** $events 流的默认 streamId（悬浮球）。 */
     const val STREAM_ID = "dsh-overlay-events"
   }
@@ -129,6 +144,8 @@ class MuxClient(
     if (activePort <= 0) throw java.io.IOException("engine endpoint is not bound")
     val s = Socket()
     s.connect(InetSocketAddress(host, activePort), 3000)
+    // issue #1401：connect 只超时「建连」，不回包的服务端仍能让后面的 read 永久阻塞。
+    s.soTimeout = HANDSHAKE_TIMEOUT_MS
     socket = s
     val key = Base64.encodeToString(ByteArray(16).also { SecureRandom().nextBytes(it) }, Base64.NO_WRAP)
     // W3：upgrade 同过 connection 鉴权栅栏——握手带浏览器 Cookie（现取，重连吃到刷新后的值）。
@@ -171,7 +188,14 @@ class MuxClient(
     // 连上即 open $events 流（服务端无 open 不会转发任何事件）
     sendFrame(out, 0x1, streamOpen.toByteArray(Charsets.UTF_8))
     Log.i(TAG, "mux connected ($path, \$events open, streamId=" + streamOpen.length + "b)")
-    frameLoop(ins, out)
+    // issue #1401：握手已完成，换成帧读超时——半开连接不再把读线程永久挂住。
+    s.soTimeout = READ_TIMEOUT_MS
+    try {
+      frameLoop(ins, out)
+    } catch (timeout: java.net.SocketTimeoutException) {
+      // 超时按失败走退避；message 固定成可读原因，日志里能直接看出是「半开」而不是 EOF。
+      throw java.io.IOException("frame read timeout (" + READ_TIMEOUT_MS + "ms)", timeout)
+    }
   }
 
   private fun expectedAccept(key: String): String {
