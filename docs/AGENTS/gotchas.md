@@ -2974,3 +2974,38 @@ The term '//' is not recognized as a name of a cmdlet, function, script file, or
     - `#1374`：把 `#1375` 刚堵的静默 catch 写回去。
 
     一句话：**静默 catch 是肌肉记忆，契约测试是免疫系统；肌肉记忆每次都在，免疫系统只有你记得去跑时才在。**
+
+371. **构建顺序错位会长得像真缺陷：先怀疑环境，再怀疑代码**（2026-11-04，issue #1374 实锤）
+
+    现象（一模一样的两次）：本地跑 `check-plugin-tests`，`dsh-android-linux-env` 报 4 个测试文件全红，
+    `ℹ pass 46 · fail 4`，失败信息是 `test failed`、看不出原因。第一反应是「我改的门禁把别人的东西搞坏了」。
+
+    真因：**它的构建先失败**，测试根本没跑起来。构建日志里只有两行：
+
+    ```
+    src/index.ts(30,78): error TS2307: Cannot find module '@dsh-android/dsh-shell-termux'
+    src/index.ts(127,34): error TS7006: Parameter 'pkg' implicitly has an 'any' type
+    ```
+
+    第一条是真因（缺依赖包的类型），第二条是它的**连带**（类型解析失败让 `pkg` 退化成 `any`）。
+    而依赖包 `dsh-shell-termux` 就在仓库根目录、源码也在——**它只是没构建**，没有 `lib/*.d.ts`，
+    于是 `tsc` 找不到声明。
+
+    为什么难认：测试门禁只报「测试失败」，不报「测试压根没跑起来」。而 node:test 对
+    「import 失败」的表现就是每个文件一条 `test failed`，与真的断言失败长得一样。
+
+    识别法（顺序很重要）：
+    1. 看到**整个文件**都红、且失败信息只有 `test failed`（没有断言/期望值）⇒ 先怀疑**加载失败**，
+       不是断言失败；
+    2. 直接单独跑该插件的 `npm run build`，看它是 exit 0 还是非 0——这一步能立刻分开两类；
+    3. 构建失败里如果出现 `TS2307 Cannot find module '<兄弟包>'`，去看那个兄弟包有没有 `lib/`；
+       没有就先构建它（本仓的依赖图是有序的：`dsh-shell-termux` → `dsh-android-linux-env`）；
+    4. 修完兄弟包再回头跑，`TS7006` 之类的连带错误通常自己就消失了——**不要逐条去改那些连带错误**，
+       它们的根因是第一条。
+
+    一句话：**「整个文件红 + 无断言细节」= 环境/加载问题；有具体期望值与实际值才是代码问题。**
+    先分清这两类，能省掉一整轮改代码的时间。
+
+    同轮的相关教训：这也是 `check-plugin-tests` 后来加「缺产物 → 按需构建，三态可 grep」的动机之一
+    （`built-on-demand` / `build-failed` / `lib-absent-after-build`）——把「环境没就绪」与
+    「代码有缺陷」在输出上分开，别让人再去猜。
