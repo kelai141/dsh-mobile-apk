@@ -541,7 +541,7 @@ sequenceDiagram
 | K10 | MainActivity | contentIntent 只拉起 Activity 并携带 dsh.notify.kind / dsh.notify.target，全仓无消费点且 MainActivity 无 onNewIntent，点击不会跳到对应会话 | app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:828 |
 | K10 | 设置页桥面 AndroidBridge | getNotifySetting / setNotifySetting 是 suppressForeground 与 cat.* 的唯一 UI 出入口，写后读回判定 applied | app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:375 |
 | K10 | OverlayService | ShellListener 复用 flashStatus 做抑制/未授权/渠道降级的可见反馈，受 expanded 守卫限制 | app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:145 |
-| K10 | WatchdogV2 | 旧信道 .task-done.ndjson 只做回退，且与通知共用 dsh-notify 偏好文件的两个偏移键 | app/src/main/java/com/dsharnessmobile/shell/NotifyStore.kt:321 |
+| K10 | WatchdogV2 | 旧信道 .task-done.ndjson 只做回退，且与通知共用 dsh-notify 偏好文件的两个偏移键 | `app/src/main/java/com/dsharnessmobile/shell/NotifyStore.kt:66#expect=private%20const%20val%20KEY_OFFSET%20%3D%20%22notify.offset%22` |
 | K10 | OverlayReport | latestReportLine 窄接口供长按查看最近一次汇报，登记在投递判定之前 | app/src/main/java/com/dsharnessmobile/shell/NotifyStore.kt:68 |
 | P01 | K04 | 队列服务端与壳侧轮询客户端的协议面：两条 exact 路由 + pv/caps 协商，「壳侧单线程」语义由此保证 | plugins/dsh-android-bridge/src/control-queue.ts:347 |
 | P01 | K05 | a11y op 经同一队列投给无障碍服务，A11Y_OPS 名单必须与壳侧 handle 分支一一对应（check-control-ops.mjs 判六面） | plugins/dsh-android-bridge/src/control-policy.ts:79 |
@@ -1193,7 +1193,7 @@ flowchart TD
   - `app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:49` 抑制默认值常量（`DEFAULT_SUPPRESS_FOREGROUND = false`）
   - `app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:345` 渠道三态纯函数 `selectChannel`；`:357` / `:374` 映射读取与落 prefs
   - `app/src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt:589` 唯一投递入口 `notifyEvent`（异常边界）；`:624` 唯一抑制判定
-  - `app/src/main/java/com/dsharnessmobile/shell/NotifyStore.kt:360` `drain`（带触发源 + 加锁）；`:398` 先投递再推进偏移（至少一次）
+  - `app/src/main/java/com/dsharnessmobile/shell/NotifyStore.kt:406#expect=fun%20drain(context%3A%20Context%2C%20trigger%3A%20String)%20%7B` `drain`（带触发源 + 加锁）；`:398` 先投递再推进偏移（至少一次）
   - `app/src/main/java/com/dsharnessmobile/shell/NotifyBridge.kt:200` 帧分发 `handleValue`；`:307` `postResult`（`:339-346` 404/410→STALE）
   - `app/src/main/java/com/dsharnessmobile/shell/NotifyActionReceiver.kt:51` outcome 闭集 `outcomeFor`；`:82` `onReceive`（只落盘 + 一次快速 flush）
   - `app/src/main/java/com/dsharnessmobile/shell/NotifyDecisionQueue.kt:266` NOT_READY 处置；`:292` `flush`
@@ -1217,7 +1217,7 @@ flowchart TD
   5. 「渠道显示已降级、在系统设置里调回高优仍静默」：`run-as cat shared_prefs/dsh-notify.xml | grep "channel\."`，值为空串即降级态被固化（见可疑点 5）；端到端连通性另用 `grep -E "responder started|ready gen=|waterfall event=|notify: kind=" files/notify-responder.log` 四段判定，心跳行 `alive ready= frames= waterfalls= pending=` 判流是否活着。
 - **可疑点**：
   1. 决策链与动作链的记账**只走 `LogCollector`**（`NotifyDecisionQueue.kt:194/200/229/271/281/299/316/334/338/367/382/388`、`NotifyActionReceiver.kt:89/101/110/119/127`），而 `LogCollector.log` 在采集器未开时直接 return（`LogCollector.kt:795`，闸门 `MainActivity.kt:1190` 缺键即 false）⇒ 默认设备上「点了动作 → 是否落盘 → 是否投递成功」全链路零可观测面，`files/notify-responder.log` 里没有任何 decision 行（只有 `NotifyBridge` 的 waterfall/ready/cancel 行）。这与已修的 J-2（`NotificationContractTest.kt:206` 要求投递结果改走 `NotifyProbe`）是同一族缺陷，只是当时只修了 `NotifyStore`。影响：用户报「批准没生效」时无法从设备取证。
-  2. `NotifySuppressQueue` 是**纯进程内** `@Volatile List`（`NotifySuppressQueue.kt:83`），而 `drain` 早已推进字节偏移（`NotifyStore.kt:398`）⇒ 命中抑制后进程被回收（后台被杀的常见场景）即永久丢该条，与 FIX-1「抑制＝延后而非丢弃」的承诺只对存活进程成立。已登记：评审 `N-8`（`coord:docs/COMPAT-REVIEW-0.14.0-2026-09-19.md:1238`，锚点正是 `NotifySuppressQueue.kt:83` 与 `:153-167`）与 `H-17`（`coord:docs/0.14.1-REVIEW-CHECKLIST-PROGRESS.md:94`），修法为落盘 sidecar + 启动恢复。
+  2. `NotifySuppressQueue` 是**纯进程内** `@Volatile List`（`NotifySuppressQueue.kt:83`），而 `drain` 早已推进字节偏移（`NotifyStore.kt:421#expect=heartbeat(app%2C%20trigger%2C%20offset%2C%20len)`）⇒ 命中抑制后进程被回收（后台被杀的常见场景）即永久丢该条，与 FIX-1「抑制＝延后而非丢弃」的承诺只对存活进程成立。已登记：评审 `N-8`（`coord:docs/COMPAT-REVIEW-0.14.0-2026-09-19.md:1238`，锚点正是 `NotifySuppressQueue.kt:83` 与 `:153-167`）与 `H-17`（`coord:docs/0.14.1-REVIEW-CHECKLIST-PROGRESS.md:94`），修法为落盘 sidecar + 启动恢复。
   3. `PostStatus.STALE` 分支（`NotifyDecisionQueue.kt:323-327`，404/410 才触发）在本版本**不可达**：设备实测网关对未知 eventId 返回 200 no-op（`coord:docs/0.14.0-preview-ACCEPTANCE-LEDGER.md:177` 的 NT-17 注、`coord:docs/NEXT-ITERATION-PLAN-2026-09-12.md:1440` NT-17B）⇒ 旧事件会被判 `OK`、标记 `submitted` 并本地撤通知（`NotifyDecisionQueue.kt:310-316`），用户以为答复已提交而引擎从未收到，「该请求已失效」文案永不出现。已登记为未决项，未证实有壳侧可行替代信号（评审建议查 cancel 帧）。
   4. FIX-2 的可见反馈面是 `OverlayService.flashStatus`，而它要求面板展开且只闪现 2.5s（`OverlayService.kt:683-692` 的 `if (expanded)` 守卫，坑 148 已记该可见性条件）⇒ 「通知已延后」「通知未授权」这类提示在面板收起（最需要提示的前台场景）时依然不可见，`ShellListener`（`NotifyCenter.kt:145-167`）只解决了「零实现」，没解决「不可见」。影响：开启抑制后用户仍可能观察到「什么都没发生」。
   5. 渠道降级结果被**空串固化**：`resolveChannel` 把 `chosen = null` 写成 `channel.<category> = ""`（`NotifyCenter.kt:401-404`），`channelFor` 命中已初始化标记后直接 `stored.ifEmpty { null }` 返回、不再复查 `getNotificationChannel`（`:361-371`）；`selectedCache` 同进程内同样固化。用户按自检页文案去系统设置把 importance 调回高优后，应用仍永久判「已降级为静默」并只发静默条目（`:443-463` 文案继续报降级）——除非清数据或换新候选 ID。源码级可判，本轮无设备复现。
@@ -2264,6 +2264,7 @@ app/src/main/java/com/dsharnessmobile/shell/RootMaintenanceLease.kt
 app/src/main/java/com/dsharnessmobile/shell/BrowserHostProfile.kt
 app/src/main/java/com/dsharnessmobile/shell/EnginePageRetryPolicy.kt
 app/src/main/java/com/dsharnessmobile/shell/PendingJsEntry.kt
+app/src/main/java/com/dsharnessmobile/shell/NotifyTailSplit.kt
 app/src/main/java/com/dsharnessmobile/shell/WorkspaceReclaim.kt
 app/src/main/java/com/dsharnessmobile/shell/PendingJsDrain.kt
 app/src/main/java/com/dsharnessmobile/shell/ForegroundPageRecoveryPolicy.kt
@@ -2683,3 +2684,6 @@ Telemetry snapshot closure: check-engine-overlay retains each dependency's decla
 
 
 **WorkspaceReclaim**：`app/src/main/java/com/dsharnessmobile/shell/WorkspaceReclaim.kt:39#expect=const%20val%20MAX_LIVE%20%3D%20RECENT_KEEP%20%2B%201`（issue #1364；上限 4 = current + 3 个最近使用，依据见该类注释）
+
+
+**NotifyTailSplit**：通知尾行按 JSON 边界切分（issue #1358）——两条连续无换行帧都能出；`app/src/main/java/com/dsharnessmobile/shell/NotifyTailSplit.kt:36#expect=fun%20split(buf%3A%20ByteArray%2C%20from%3A%20Int%2C%20to%3A%20Int)%3A%20Pair%3CList%3CString%3E%2C%20Int%3E%20%7B`
