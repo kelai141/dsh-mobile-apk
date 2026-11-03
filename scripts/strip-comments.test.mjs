@@ -37,6 +37,28 @@ ok('PS 块注释后的代码保留', sp2.includes('Write-Output x'));
 // 反证：不剥注释时 marker 仍在（证明上面的剥离确实起作用，不是文本本来就没有）
 ok('反证：未剥离时 marker 仍在', p2.includes('-DryRun'));
 
+// issue #1281：正则字面量（内部引号个数为奇数时会带偏状态机）
+const r1 = 'const a = /abc/' + NL + '// MARK-A' + NL + 'const b = 1';
+const sr1 = stripComments(r1);
+ok('正则字面量之后的注释被剥', !sr1.includes('MARK-A'));
+ok('正则字面量本身保留', sr1.includes('/abc/'));
+
+// 真实触发形态：build-apk.mjs 第 52 行那个正则带引号与字符类，奇数错位
+const r2 = 'const re = /versionName\\s*=\\s*' + DQ + '([^' + DQ + ']+)' + DQ + '/' + NL + '// MARK-B' + NL + 'const c = 2';
+const sr2 = stripComments(r2);
+ok('带引号的正则之后的注释被剥（奇数引号不再带偏）', !sr2.includes('MARK-B'));
+ok('带引号的正则本身保留', sr2.includes('/versionName'));
+
+// 反向：除号不得被误当成正则起点（否则会吞掉后续代码）
+const r3 = 'const half = total / 2' + NL + 'const d = 3';
+const sr3 = stripComments(r3);
+ok('除号不被误判为正则', sr3.includes('total / 2') && sr3.includes('const d = 3'));
+
+// 反向：未闭合的斜杠不得吞掉整份文件
+const r4 = 'const bad = a / b' + NL + 'const e = 4';
+const sr4 = stripComments(r4);
+ok('未闭合的斜杠不吞后续代码', sr4.includes('const e = 4'));
+
 // codeOnly 与 stripComments 等价（不给调用方两套语义）
 ok('codeOnly 与 stripComments 同口径', codeOnly(p1, { mode: 'powershell' }) === sp1);
 

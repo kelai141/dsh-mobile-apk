@@ -94,6 +94,11 @@ if (argv.includes('--self-test')) {
     audit([], '', ['combo-cache-A3']).length === 1)
   push('反证：注释里提文件名不误判（撤销说明本身就是合法文案）',
     audit([], '// 链路面不得再调 combo-precompute.mjs\n  run(\'node\', [gate(\'check-something.mjs\')])', ids).length === 0)
+  // issue #1281：注释剥离的状态机原先不认正则字面量，正则里的引号（奇数个）会把扫描器
+  // 带进「字符串」状态，于是**之后整段**注释都不再被剥。判据本身没错，错的是它读到的
+  // 「代码」里混进了注释 —— 这条自证钉住「剥离仍然可靠」，否则本门禁可被注释骗成假红。
+  push('反证：正则字面量之后的注释也不误判（issue #1281）',
+    audit([], 'const r = /versionName\\s*=\\s*"([^"]+)"/\n// 链路面不得再调 combo-precompute.mjs\nrun(\'node\', [gate(\'check-something.mjs\')])', ids).length === 0)
   push('对照组：干净输入不判红', audit(['home/.dsh/profiles/web/package.json'], '', ids).length === 0)
   if (fails.length) { console.error(`COMBO-CACHE SELF-TEST FAILED（${fails.length} 项）`); process.exit(1) }
   console.log('COMBO-CACHE SELF-TEST PASSED')
