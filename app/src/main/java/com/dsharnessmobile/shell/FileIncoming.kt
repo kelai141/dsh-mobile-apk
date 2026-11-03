@@ -32,9 +32,19 @@ object FileIncoming {
   fun tmpWorkspace(context: Context): File =
     File(context.filesDir, "home/.dsh/workspaces/incoming").apply { mkdirs() }
 
+  /**
+   * 外部来件（VIEW/SEND）白名单——**只放行外部世界的真实路径**（issue #1353）。
+   *
+   * 为什么私有目录不在其中：这条入口的调用方是任意已安装应用（MainActivity exported），
+   * 而 `file://` 方案下壳侧拿不到调用方身份（Activity 侧才有 getCallingPackage，且 file://
+   * 不携带任何读授权）。前缀匹配一旦放行 `/data/data/<pkg>/`，等于「谁都能让 DSH 把私有目录
+   * 里的 .credentials.yaml 拷进来件工作区，再随强制新会话交给引擎」——FileProvider 那条出口
+   * 特意没映射 home/.dsh，这条入口曾经绕过了它。
+   *
+   * 壳侧自产来件（拍照等）不走本白名单：它们已经有 `File`，直接进 [processIncomingPath]。
+   */
   private val SAFE_PREFIXES = listOf(
-    "content://", "file:///data/user/0/com.dsharnessmobile.shell/", "file:///data/data/com.dsharnessmobile.shell/",
-    "file:///storage/emulated/0/", "file:///sdcard/",
+    "content://", "file:///storage/emulated/0/", "file:///sdcard/",
   )
 
   /** 路径校验：仅接受白名单前缀的真实路径，拒绝上级跳转。返回可拷资源 Uri 描述或 null。 */
