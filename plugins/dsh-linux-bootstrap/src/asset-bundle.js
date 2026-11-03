@@ -55,6 +55,9 @@ export async function installVerifiedPluginBundle({
   kind = 'plugin',
   packageName,
   entry = 'lib/index.js',
+  // issue #1374：透传给 publishBundle。为 true 时返回结果里带 `assetHandle`（commit/rollback），
+  // 让调用方能在「资产已发布、但 host 安装/激活失败」时把旧包换回来。
+  deferCommit = false,
 }) {
   const url = assertAsset(asset)
   if (typeof destinationRoot !== 'string' || !destinationRoot) throw new TypeError('destinationRoot is required')
@@ -90,7 +93,7 @@ export async function installVerifiedPluginBundle({
   // silently falling back to a download would hide tampering or corruption.
   if (hostStagingRoot) {
     const staged = await publishHostStagedBundle({
-      hostStagingRoot, asset, root, finalDirectory, packageName, entry,
+      hostStagingRoot, asset, root, finalDirectory, packageName, entry, deferCommit,
     })
     if (staged) return staged
     if (requireStagedBundle) {
@@ -119,8 +122,8 @@ export async function installVerifiedPluginBundle({
     const unpackedSize = await unpackedBytes(packageDirectory)
     if (unpackedSize !== asset.unpackedSize) throw new Error(`Unpacked size mismatch: expected ${asset.unpackedSize}, got ${unpackedSize}`)
     if (packageName) await validatePackage(packageDirectory, packageName, entry)
-    await publishBundle({ root, finalDirectory, packageDirectory, asset, unpackedSize, token })
-    return { path: finalDirectory, sha256: asset.sha256, size: asset.size, unpackedSize, reused: false }
+    const assetHandle = await publishBundle({ root, finalDirectory, packageDirectory, asset, unpackedSize, token, deferCommit })
+    return { path: finalDirectory, sha256: asset.sha256, size: asset.size, unpackedSize, reused: false, assetHandle }
   } catch (error) {
     throw error
   } finally {
@@ -145,7 +148,7 @@ async function pickPackageDirectory(rootDirectory) {
  * Publish a verified package directory as `<root>/<sha256>`, replacing any
  * previous copy atomically and rolling back if the swap fails.
  */
-export async function publishBundle({ root, finalDirectory, packageDirectory, asset, unpackedSize, token }) {
+export async function publishBundle({ root, finalDirectory, packageDirectory, asset, unpackedSize, token, deferCommit = false }) {
   await writeFile(path.join(packageDirectory, '.dsh-asset-integrity.json'), `${JSON.stringify({ sha256: asset.sha256, size: asset.size, unpackedSize })}`)
   const backupDirectory = path.join(root, `.backup-${token}`)
   let hadPrevious = false
@@ -177,12 +180,30 @@ export async function publishBundle({ root, finalDirectory, packageDirectory, as
   // 旧实现把它放在 try 里：rm 一抛（备份目录被占用等）就落进 catch，去把**刚刚发布成功**的
   // 目录再 rename 回备份（必然失败并被吞），然后 throw —— 安装其实成功却报失败。
   // 清理失败只告警：新包已就位，不影响可用性，但必须留痕。
-  if (hadPrevious) {
+  if (hadPrevious && !deferCommit) {
     try {
       await rm(backupDirectory, { recursive: true, force: true })
     } catch (error) {
       console.warn('[dsh-linux-bootstrap] backup cleanup deferred: ' + backupDirectory + ' (' + String(error && error.message ? error.message : error) + ')')
     }
+  }
+  // issue #1374: the caller still has to install the host plugin and activate it, and either step
+  // can fail *after* publish. Default keeps the old semantics; a caller that needs a cross-stage
+  // transaction passes deferCommit=true and gets { commit, rollback }, so a failed activation can
+  // restore the previous copy instead of leaving disk=new / state=old / old-directory-gone.
+  if (!deferCommit) return null
+  return {
+    // Commit drops the backup and never throws: the new bundle is already in place, so a failed
+    // cleanup is a cleanup failure, not an install failure (see #1375).
+    commit: async () => {
+      if (hadPrevious) await rm(backupDirectory, { recursive: true, force: true }).catch(() => {})
+    },
+    // Rollback moves the new copy out and the previous one back; it throws on failure so the
+    // caller can record error.assetRollbackError instead of pretending the rollback worked.
+    rollback: async () => {
+      await rm(finalDirectory, { recursive: true, force: true })
+      if (hadPrevious) await rename(backupDirectory, finalDirectory)
+    },
   }
 }
 
@@ -195,7 +216,7 @@ export async function publishBundle({ root, finalDirectory, packageDirectory, as
  * own marker is never a usability credential, and a mismatch is a corruption or
  * tampering signal that must not be papered over by a silent re-download.
  */
-async function publishHostStagedBundle({ hostStagingRoot, asset, root, finalDirectory, packageName, entry }) {
+async function publishHostStagedBundle({ hostStagingRoot, asset, root, finalDirectory, packageName, entry, deferCommit = false }) {
   const stagedRoot = path.join(path.resolve(hostStagingRoot), asset.sha256)
   const archivePath = path.join(stagedRoot, 'asset.tar.xz')
   let archiveInfo
@@ -230,11 +251,11 @@ async function publishHostStagedBundle({ hostStagingRoot, asset, root, finalDire
     // Copy rather than move: the host's staging area stays intact and
     // re-verifiable, and our own copy is what gets published and re-used.
     await cp(packageDirectory, copied, { recursive: true })
-    await publishBundle({ root, finalDirectory, packageDirectory: copied, asset, unpackedSize, token })
+    const assetHandle = await publishBundle({ root, finalDirectory, packageDirectory: copied, asset, unpackedSize, token, deferCommit })
+    return { path: finalDirectory, sha256: asset.sha256, size: asset.size, unpackedSize, reused: false, hostStaged: true, assetHandle }
   } finally {
     await rm(staging, { recursive: true, force: true }).catch(() => {})
   }
-  return { path: finalDirectory, sha256: asset.sha256, size: asset.size, unpackedSize, reused: false, hostStaged: true }
 }
 
 /**
