@@ -527,7 +527,8 @@ internal object PhotoCapture {
   /** 恢复判定结果：没有 / 可以续上 / 已丢失（必须给一条回执，不能静默）。 */
   internal sealed class PendingRecovery {
     object None : PendingRecovery()
-    data class Resume(val raw: File, val target: File) : PendingRecovery()
+    /** [startedAt] 必须带出来：恢复后的在途记录要靠它判过期（issue #1389）。 */
+    data class Resume(val raw: File, val target: File, val startedAt: Long) : PendingRecovery()
     data class Lost(val reason: String) : PendingRecovery()
   }
 
@@ -572,8 +573,18 @@ internal object PhotoCapture {
     if (now - record.startedAt > staleAfterMs) return PendingRecovery.Lost("stale")
     if (!raw.isFile) return PendingRecovery.Lost("raw-missing")
     if (raw.length() <= 0L) return PendingRecovery.Lost("raw-empty")
-    return PendingRecovery.Resume(raw, target)
+    return PendingRecovery.Resume(raw, target, record.startedAt)
   }
+
+  /**
+   * 在途记录是否已过期（issue #1389）。
+   *
+   * [classifyPending] 只在**恢复那一刻**算一次窗口；之后若相机结果始终不回（相机进程同死、
+   * ROM 丢结果），`pending` 就永不为 null，此后每次拍照都回 `CODE_BUSY`，只能重启应用。
+   * 把判据抽成纯函数，让 `capture()` 入口每次都能重算，并让单测钉住边界。
+   */
+  internal fun isPendingStale(startedAt: Long, now: Long, staleAfterMs: Long = PENDING_STALE_MS): Boolean =
+    now - startedAt > staleAfterMs
 
   /** file 是否在 dir 之内（规范化后按路径前缀比较；不解析符号链接之外的东西）。 */
   private fun inside(dir: File, file: File): Boolean {
