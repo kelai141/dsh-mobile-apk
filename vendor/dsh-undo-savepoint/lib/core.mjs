@@ -2494,13 +2494,26 @@ async function appendRollbackLog(cfg, entry) {
 
 // ── 消息级撤销（V0.4.0，P6：每条 AI 消息 → 文件变更清单 → 逆序回滚）────────
 function messageOpsDir(cfg) { return join(cfg.autoDir, 'message-ops'); }
+// issue #1400：消息批次 id 的白名单。id 会被直接拼进 join(messageOpsDir(cfg), <id>.json)，
+// 既不过滤 .. 也不过滤分隔符。POST /api/undo/message 的 body.id 与工具参数 message_id
+// 都直达这里，于是传 ../../<相对路径> 就能读取并应用快照目录之外的任意 .json，再按其中
+// 记录的路径执行还原/删除。白名单取生成器实际产出的字符集（批次 id 由内部生成），
+// 长度 1..64。不做「只挡 ..」那种黑名单——..、/、反斜杠、盘符、URL 编码变体都要分别
+// 想到，白名单只需想对一次。
+const MESSAGE_BATCH_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+function isSafeMessageBatchId(id) { return typeof id === 'string' && MESSAGE_BATCH_ID_RE.test(id); }
 async function readMessageOps(cfg, id) {
+  // 非法 id 一律当「没有这个批次」：fail-closed，且不把调用方给的路径回显到错误里。
+  if (!isSafeMessageBatchId(id)) return null;
   try { return JSON.parse(await fs.readFile(join(messageOpsDir(cfg), `${id}.json`), 'utf8')); }
   catch { return null; }
 }
 /** 追加一条工具变更 op 到指定批次；批次不存在则创建。返回更新后的批次。 */
 async function appendMessageOp(cfg, batch) {
   const dir = messageOpsDir(cfg);
+  // issue #1400（纵深）：写入侧也过同一白名单。batchId 目前由内部生成，但一旦某个调用方
+  // 透传了外部值，写入就会在快照目录外建文件——比读更难发现。
+  if (!isSafeMessageBatchId(batch?.batchId)) throw new Error('invalid message batch id');
   await fs.mkdir(dir, { recursive: true });
   const file = join(dir, `${batch.batchId}.json`);
   let b = await readMessageOps(cfg, batch.batchId);
@@ -2534,6 +2547,9 @@ async function pruneMessageOps(cfg) {
   const batches = await listMessageOps(cfg, 100000);
   let removed = 0;
   for (const b of batches.slice(keep)) {
+    // issue #1400（纵深）：b.id 来自文件内容（batch.batchId），一个被构造过的批次文件
+    // 就能让 prune 删到快照目录之外。同样过白名单。
+    if (!isSafeMessageBatchId(b.id)) continue;
     const p = join(dir, `${b.id}.json`);
     await fs.rm(p, { force: true }); removed++;
   }
