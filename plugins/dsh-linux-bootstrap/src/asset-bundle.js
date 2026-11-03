@@ -196,7 +196,15 @@ export async function publishBundle({ root, finalDirectory, packageDirectory, as
     // Commit drops the backup and never throws: the new bundle is already in place, so a failed
     // cleanup is a cleanup failure, not an install failure (see #1375).
     commit: async () => {
-      if (hadPrevious) await rm(backupDirectory, { recursive: true, force: true }).catch(() => {})
+      if (!hadPrevious) return
+      // issue #1375 口径：清理失败**必须留痕**，不得 `.catch(() => {})` 静默吞掉
+      // （这条曾被 #1375 修过一次，加 deferCommit 时又被写回来——见 gotcha）。
+      // 但仍不抛：新包已就位，清理失败只是磁盘占用，不该把一次成功的安装改判为失败。
+      try {
+        await rm(backupDirectory, { recursive: true, force: true })
+      } catch (error) {
+        console.warn('[dsh-linux-bootstrap] deferred backup cleanup failed: ' + backupDirectory + ' (' + String(error && error.message ? error.message : error) + ')')
+      }
     },
     // Rollback moves the new copy out and the previous one back; it throws on failure so the
     // caller can record error.assetRollbackError instead of pretending the rollback worked.

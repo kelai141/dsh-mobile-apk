@@ -64,6 +64,29 @@ test('the caller rolls the assets back BEFORE rolling the host scope back (issue
   assert.ok(src.includes('assetHandle?.commit'), 'a successful install must commit (drop the backup)')
 })
 
+test('publishBundle never swallows cleanup/rollback errors (issue #1374 regression of #1375)', async () => {
+  // 回归判据：加 deferCommit 时我把 `#1375` 刚堵掉的 `.catch(() => {})` 又写了回来，
+  // 当时只有 `#1375` 那条源码契约守着。这里再钉一次，让 `#1374` 这套用例也能独立打红。
+  const src = await readFile(new URL('../src/asset-bundle.js', import.meta.url), 'utf8')
+  const start = src.indexOf('export async function publishBundle(')
+  assert.ok(start >= 0, 'publishBundle must exist')
+  const end = src.indexOf('\n}\n', start)
+  assert.ok(end > start, 'publishBundle body must be delimited')
+  // 剥注释：注释里会**引用**旧写法来解释缺陷，不剥会把「解释」误判成「仍有缺陷」。
+  const code = src.slice(start, end)
+    .split('\n')
+    .filter((line) => {
+      const s = line.trimStart()
+      return !(s.startsWith('//') || s.startsWith('*') || s.startsWith('/*'))
+    })
+    .join('\n')
+  assert.equal(/\.catch\(\(\) => \{\}\)/.test(code), false,
+    'publishBundle 内又出现静默 catch：清理/回滚失败会被吞掉（#1375 的洞）')
+  // deferred cleanup 必须留痕
+  assert.ok(code.includes('deferred backup cleanup failed'),
+    'deferred 清理失败必须 console.warn 留痕')
+})
+
 test('default behaviour is unchanged: no deferred backup, no handle', async (t) => {
   const f = await fixture()
   t.after(() => rm(f.root, { recursive: true, force: true }))
