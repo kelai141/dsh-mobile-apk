@@ -84,7 +84,7 @@
     "EngineStartFlow.kt:497": 1,
     "app/src/main/java/com/dsharnessmobile/shell/SnapshotExtractor.kt:81": 1,
     "AndroidBridge.kt:431": 2,
-    "app/build.gradle.kts:126": 2,
+    "app/build.gradle.kts:175": 2,
     "BrowserHostNavigationPolicyTest.kt:129": 2,
     "ControlAudit.kt:34": 2,
     "ControlProtocolV2.kt:196": 2,
@@ -181,7 +181,7 @@
     "NotifyCenter.kt:829": 3,
     "NotifyStore.kt:18": 3,
     "NotifyCenter.kt:631": 3,
-    "app/build.gradle.kts:88": 1,
+    "app/build.gradle.kts:93": 1,
     "app/src/test/java/com/dsharnessmobile/shell/CallSiteContractTest.kt:294": 2,
     "app/src/test/java/com/dsharnessmobile/shell/OverlayHaloInvariantTest.kt:92": 2,
     "app/src/test/java/com/dsharnessmobile/shell/NotifyCenterChannelTest.kt:33": 2,
@@ -404,7 +404,7 @@
     "app/src/main/java/com/dsharnessmobile/shell/UndoGate.kt:278": 1,
     "app/src/main/java/com/dsharnessmobile/shell/UndoGate.kt:136": 1,
     "scripts/check-bridge-symmetry.mjs:1": 1,
-    "app/build.gradle.kts:127": 1,
+    "app/build.gradle.kts:176": 1,
     "app/src/main/java/com/dsharnessmobile/shell/ControlPoller.kt:158": 2,
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:652": 2,
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:770": 1,
@@ -1919,13 +1919,13 @@
     "WebUiChrome.kt:37": [
       "* 定案靠设备层 A/B。本仓实测（Medium_Phone 1080x2400 / 420dpi / 手势条）：改前导航条 inset"
     ],
-    "app/build.gradle.kts:126": [
+    "app/build.gradle.kts:175": [
       "androidTestImplementation(\"androidx.test.ext:junit:1.2.1\")"
     ],
-    "app/build.gradle.kts:127": [
+    "app/build.gradle.kts:176": [
       "androidTestImplementation(\"androidx.test:runner:1.6.2\")"
     ],
-    "app/build.gradle.kts:88": [
+    "app/build.gradle.kts:93": [
       "jvmTarget = \"17\""
     ],
     "app/src/main/AndroidManifest.xml:158": [

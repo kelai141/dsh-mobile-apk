@@ -39,13 +39,39 @@ const ROOT = dirname(HERE)
  *   - `entries.length > 0` ⇒ 红（空数组 = 「没有可挂载的插件」= 引擎必拒启动）；
  *   - 每项 `id`/`name` 必须是非空字符串 ⇒ 红（壳侧 `cacheHard` 逐项校验同一组字段）；
  *   - `profileEntries` 非空且 ⊆ `entries` ⇒ 红（壳侧 `cacheHard` 的同款前置）。
- * `fingerprint` 只做「存在且形如 sha256」的弱校验：它与 `snapshot.sha256` 的强对账由上面的
- * 主判据负责，清单里那份是构建期冗余记录（两份可能来自不同 ABI 的同一 tar，不在这里比字节）。
+ * issue #1131 更正：此前这里写着「fingerprint 只做弱校验，它与 snapshot.sha256 的强对账由主判据
+ * 负责」——**那条理由是错的**。`build-hard-manifest.mjs:121` 是
+ * `createHash('sha256').update(readFileSync(snapshot)).digest('hex')`，即 `fingerprint` **就是**
+ * tar 字节的 sha256，与 `snapshot.sha256` 是同一个数；「两份可能来自不同 ABI 的同一 tar」恰恰
+ * 说明它们**必须**相等（同一 tar 同一哈希，与 ABI 无关）。
+ * 漏掉这条的后果是实测过的：陈旧清单能通过结构判据，运行期却以
+ * `hard-bundle-selection-unverified` 拒绝启动引擎（界面正常、引擎不干活）。
  *
  * @param {string} text 清单文件原文。
  * @returns {{problems: string[], counts?: {entries: number, profileEntries: number}}}
  *          problems 为空 = 清单可用；counts 只在能解析出数组时给出。
  */
+/**
+ * 清单 `fingerprint` 与 tar 实际哈希的强对账（issue #1131）。
+ *
+ * 绑定关系已坐实（不是推断）：`build-hard-manifest.mjs:121` 把 `sha256(tar 字节)` 直接写进
+ * `fingerprint`。所以三者必须相等：
+ *
+ *     sha256(assets/snapshot.tar.xz) == assets/snapshot.sha256 == plugin-hard-manifest.json.fingerprint
+ *
+ * @param {unknown} manifestFingerprint 清单里的 fingerprint 字段。
+ * @param {string} actualSha tar 的实际 sha256（小写十六进制）。
+ * @returns {string|null} 问题描述；null = 一致。
+ */
+export const fingerprintProblem = (manifestFingerprint, actualSha) => {
+  const got = typeof manifestFingerprint === 'string' ? manifestFingerprint.trim().toLowerCase() : ''
+  if (got === '') return 'Hard 插件清单缺 fingerprint 字段（结构判据能过，但无法与快照对账）'
+  if (!/^[0-9a-f]{64}$/.test(got)) return 'Hard 插件清单的 fingerprint 不是 64 位十六进制：' + JSON.stringify(manifestFingerprint)
+  const want = String(actualSha).toLowerCase()
+  if (got !== want) return 'Hard 插件清单与快照**不同代**：fingerprint=' + got + '，tar 实际=' + want
+  return null
+}
+
 export const hardManifestProblem = (text) => {
   const problems = []
   let json = null
@@ -117,10 +143,13 @@ if (process.argv.includes('--self-test')) {
    * #920 / #993：清单的默认夹具必须是**可用**形态（非空 entries + 子集 profileEntries），
    * 否则「缺清单」以外的用例会被清单判据连带判红，反证结论就不可信了。
    */
-  const GOOD_MANIFEST = JSON.stringify({
+  // issue #1131：默认夹具的 fingerprint 必须**是这份 tar 的哈希**，否则「一致 → PASSED」这条
+  // 会被新的第三条腿判红（第一版就是这样自己把自己打红的）。
+  // 陈旧清单场景由 opts.fingerprint 显式覆盖。
+  const goodManifest = (fingerprint) => JSON.stringify({
     schema: 2,
     complete: true,
-    fingerprint: 'a'.repeat(64),
+    fingerprint,
     entries: [{ id: 'a@1.0.0', name: '@dsh-android/a' }],
     profileEntries: [{ id: 'a@1.0.0', name: '@dsh-android/a' }],
     factoryBundles: [],
@@ -140,12 +169,17 @@ if (process.argv.includes('--self-test')) {
     // 缺席场景由 noManifest 树覆盖，#993 的空壳场景由各自专门的树覆盖。
     if (opts.manifest !== false) {
       writeFileSync(join(dir, 'app', 'src', 'main', 'assets', 'plugin-hard-manifest.json'),
-        opts.manifest === undefined ? GOOD_MANIFEST : opts.manifest)
+        opts.manifest === undefined
+          ? goodManifest(opts.fingerprint ?? hashOf('sha256').update(bytes).digest('hex'))
+          : opts.manifest)
     }
     return dir
   }
 
   const match = buildTree('match', { sha: 'auto' })
+  // issue #1131 负控夹具：tar 与 .sha256 都自洽，只有清单的 fingerprint 是**别的代**。
+  // 这正是「走完整链时被自愈、直接 gradle 时被漏掉」的那种残留。
+  const staleManifest = buildTree('stalemanifest', { sha: 'auto', fingerprint: 'b'.repeat(64) })
   const mismatch = buildTree('mismatch', { sha: 'f'.repeat(64) })
   const noSha = buildTree('nosha', {})
   const badSha = buildTree('badsha', { sha: 'NOT-A-SHA' })
@@ -189,6 +223,10 @@ if (process.argv.includes('--self-test')) {
     ['#993 截断 JSON → FAILED', runGate(['--root', badJson]), (r) => r.code === 1 && r.out.includes('不是合法 JSON')],
     ['#993 profileEntries 为空 → FAILED', runGate(['--root', emptyProfile]), (r) => r.code === 1 && r.out.includes('profileEntries 为空数组')],
     ['#993 profileEntry 不在 entries 里 → FAILED', runGate(['--root', profileOutside]), (r) => r.code === 1 && r.out.includes('不在 entries 里')],
+    // ── issue #1131：清单 fingerprint 必须与 tar 同代（第三条腿）──────────────
+    // 负控形态：tar 与 .sha256 都自洽，只有清单是别的代 —— 走完整链会被自愈，直接 gradle 则不会。
+    ['#1131 清单 fingerprint 与 tar 不同代 → FAILED 且点名「不同代」', runGate(['--root', staleManifest]), (r) => r.code === 1 && r.out.includes('不同代')],
+    ['#1131 清单 fingerprint 与 tar 同代 → PASSED（判据不得恒红）', runGate(['--root', match]), (r) => r.code === 0 && r.out.includes('fingerprint == tar sha256')],
   ]
   let bad = 0
   for (const [label, result, verify] of checks) {
@@ -236,7 +274,10 @@ const rel = (p) => relative(ROOT, p).replace(/\\/g, '/')
 
 console.log('APK 树: ' + (relative(ROOT, APK_ROOT) || APK_ROOT))
 if (!existsSync(TAR)) {
-  const msg = '快照 tar 不在场（' + rel(TAR) + '）——净检出/CI 下 tar 被 .gitignore 忽略'
+  // issue #1131：SKIP 必须**留痕**且可 grep。静默跳过会让以后分不清「没资产」与「判据失效」
+  // ——后者正是这条门禁最该避免的失效形态。
+  const msg = 'SKIP assets-absent 快照 tar 不在场（' + rel(TAR) + '）——净检出/CI 下 tar 被 .gitignore 忽略；' +
+    '此时无从被判，属明确跳过而非通过'
   if (REQUIRE) fail(msg + '\n  构建链要求在场：先跑 scripts/build-snapshot-013.mjs <abi>（或注入链），再跑本门禁')
   skip(msg)
 }
@@ -275,4 +316,17 @@ if (hard.problems.length > 0) {
 }
 console.log('PASS  ' + rel(HARD) + ' 可用（Hard 插件清单，' + statSync(HARD).size + ' B；entries='
   + hard.counts.entries + ' profileEntries=' + hard.counts.profileEntries + '）')
+// issue #1131：第三条腿。清单的 fingerprint 必须与同一份 tar 的哈希相等。
+// 少了这条，陈旧清单能过上面的结构判据，运行期才以 hard-bundle-selection-unverified 拒启引擎
+// ——失败形态是「界面正常、引擎不干活」，最容易被当成别的问题。
+let manifestFingerprint
+try { manifestFingerprint = JSON.parse(hardText).fingerprint } catch { manifestFingerprint = undefined }
+const staleFingerprint = fingerprintProblem(manifestFingerprint, actual)
+if (staleFingerprint !== null) {
+  fail(staleFingerprint + '\n'
+    + '  ' + rel(HARD) + ' 是**陈旧残留**（这三份都被 .gitignore，git status 看不见，没有 review 会审到）。\n'
+    + '  修复：重跑 scripts/build-apk-013.ps1（拷贝 tar 后会一并重生成该清单）；\n'
+    + '        或删掉 assets 下三份陈旧产物（snapshot.tar.xz / snapshot.sha256 / plugin-hard-manifest.json）后重跑构建链。')
+}
+console.log('PASS  ' + rel(HARD) + ' fingerprint == tar sha256（' + String(actual).slice(0, 12) + '…）')
 console.log('SNAPSHOT-FINGERPRINT CHECK PASSED')
