@@ -165,6 +165,68 @@ internal object LogShare {
   }
 
   /**
+   * 诊断**价值**排序表（issue #1403）。
+   *
+   * 为什么需要它：整包上限原先按**条目顺序**扣减，而顺序是 device.txt → 6 份 engine.log* →
+   * dsh-day.log → logcat.txt。轮转满 6 代时前面 6 × 2MB 就把 12MB 用光，于是 dsh-day.log 与
+   * logcat.txt 一律 `skipped-total-cap` —— 恰好缺的是唯一能定位真因的那份，而回执只数 `=absent`，
+   * 用户看到「打包成功、0 项缺失」。
+   *
+   * 排序**凭据**（每条都写清为什么排在那个位置，否则以后没人敢改）：
+   *  0. device.txt —— 设备/版本/ABI/快照指纹。极便宜（<2KB）且没有它整包无法归因，永远第一。
+   *  1. logcat.txt —— 唯一记录**系统侧**事件的来源（ANR / crash / 系统杀进程 / 权限拒绝）。
+   *     引擎自己的日志看不见「壳被系统杀掉」这类真因，所以它必须排在引擎日志之前。
+   *  2. boot-fail.log(*) —— 启动链失败的直接证据，只有启动异常时才有内容，信息密度最高。
+   *  3. boot-diag.log(*) —— 启动诊断分段快照，与 boot-fail 互补。
+   *  4. boot-segments.log(*) —— 分段明细，可由上面两份部分还原，再次一级。
+   *  5. engine.log —— 引擎最新一代日志。
+   *  6. engine.log.N —— 同质旧代（N 越大越旧）；多代之间是上下文关系，最新一代信息密度最高。
+   *  7. dsh-day.log —— 当日采集器汇总，可由 engine.log 部分还原，价值最低。
+   *  8. 其它（未知条目）—— 兜底放最后。
+   *
+   * 注意：这是**价值序**，不是「重要文件白名单」。新增条目必须在这里给出它的序号和理由；
+   * 不写就会落到兜底（8），也就是「最容易因为 cap 被丢」——那本身也是一个显式决定，只是隐式的。
+   *
+   * @param name 包内条目名。
+   * @return 越小越先被收录（越不容易因整包上限被丢）。
+   */
+  /**
+   * 回执里的「缺失/未收录」说明（issue #1403）。
+   *
+   * 为什么单独抽成纯函数：[=skipped-total-cap] 也是「没进包」，必须计入回执。旧实现只数
+   * `=absent`，于是「日志确实存在、只因整包上限没收录」对用户完全不可见——而这恰好是最需要
+   * 解释的一种缺失（文件在设备上、包里有标注、回执却说 0 项缺失）。
+   *
+   * 两种缺失给**不同的措辞**：用户能对它们做的事不一样（absent = 去开一下采集器；
+   * 超上限 = 换更小的日志或直接反馈给我们），混成一句会让下一步无从下手。
+   *
+   * @param report manifest 的逐条状态行。
+   * @return 括号包裹的说明；无缺失时为空串。
+   */
+  internal fun missingNote(report: List<String>): String {
+    val absent = report.count { it.endsWith("=absent") }
+    val capped = report.count { it.endsWith("=skipped-total-cap") }
+    return when {
+      absent + capped == 0 -> ""
+      capped == 0 -> "（" + absent + " 项日志缺失，包内已如实标注）"
+      absent == 0 -> "（" + capped + " 项因整包上限未收录，包内已如实标注）"
+      else -> "（" + (absent + capped) + " 项未收录：" + absent + " 项缺失、" + capped + " 项超上限，包内已如实标注）"
+    }
+  }
+
+  internal fun diagnosticPriority(name: String): Int = when {
+    name == DEVICE_NAME -> 0
+    name == "logcat.txt" -> 1
+    name.startsWith("boot-fail.log") -> 2
+    name.startsWith("boot-diag.log") -> 3
+    name.startsWith("boot-segments.log") -> 4
+    name == "engine.log" -> 5
+    name.startsWith("engine.log.") -> 6
+    name == "dsh-day.log" -> 7
+    else -> 8
+  }
+
+  /**
    * 打包核心（纯 IO，JVM 单测可直接打真实文件）。
    *
    * 原子落盘：先写同目录下带 .tmp 后缀的临时文件，全部条目成功后 rename 覆盖目标；任一步失败
@@ -191,7 +253,9 @@ internal object LogShare {
       if (tmp.exists()) tmp.delete()
       var total = 0L
       ZipOutputStream(tmp.outputStream().buffered()).use { zip ->
-        for (entry in inputs) {
+        // issue #1403：按**诊断价值**遍历，而不是调用方给的条目顺序。
+        // 排序表与凭据见 diagnosticPriority 的注释——顺序本身是被论证过的决定，不是文件名优先级。
+        for (entry in inputs.sortedWith(compareBy { diagnosticPriority(it.name) })) {
           val raw = try {
             entry.read()
           } catch (t: Throwable) {
@@ -332,8 +396,7 @@ internal object LogShare {
           activity.startActivity(chooser)
           // 回执只给**细节**（文件名 + 缺失项数），完整句子由调用方用字符串资源拼——
           // 否则「已生成诊断包」会在资源串里再出现一次，读成「已生成诊断包 已生成诊断包 x.zip」。
-          val absent = result.report.count { it.endsWith("=absent") }
-          val note = if (absent > 0) "（" + absent + " 项日志缺失，包内已如实标注）" else ""
+          val note = missingNote(result.report)
           onResult(true, result.zipFile.name + note)
         } catch (_: ActivityNotFoundException) {
           // 连**系统分享宿主**都拉不起来（极简 ROM / resolver 被裁剪）——如实说，不假装已分享。
