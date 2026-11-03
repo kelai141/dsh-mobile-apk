@@ -207,6 +207,28 @@ class WatchdogCadenceTest {
     assertTrue("冷启动窗口判据必须存在（booting）", tick.contains("isBootingWindow()"))
   }
 
+  // ── issue #1354：修复态分支不得把 tick 链断死 ──────────────────────────
+
+  @Test
+  fun 修复态分支必须把下一拍挂回去() {
+    val code = codeOnly(source("EngineService.kt"))
+    val tick = code.substringAfter("private fun watchdogTick(").substringBefore("private fun buildNotification(")
+    // 边界用**分支自己的收尾花括号**，不用注释行：codeOnly 已把注释整行删掉，
+    // 拿注释当分隔符会 substringBefore 不到（Kotlin 回落成整段），断言就退化成整条 tick 上找。
+    val repair = tick
+      .substringAfter("if (RepairState.required(this)")
+      .substringBefore("\n      }")
+    assertTrue("修复态分支必须存在", repair.isNotEmpty())
+    assertTrue("修复态保持非健康节奏（5 秒）复看", repair.contains("nextDelayMs = WatchdogV2.ACTIVE_TICK_MS"))
+    // 判据落在「重排的位置」上：scheduleWatchdogTick 全仓只有首拍与尾部两个调用点，
+    // 只要重排留在 try 之后，修复态那句 return 就会跳过它，链子永久断死。
+    assertTrue("重排必须在 finally 里（任何早退都要挂回下一拍）", tick.contains("} finally {"))
+    assertTrue(
+      "finally 里必须按 nextDelayMs 重排",
+      tick.substringAfter("} finally {").contains("scheduleWatchdogTick(epoch, exec, nextDelayMs)"),
+    )
+  }
+
   @Test
   fun 阶梯阈值必须同时给出时间口径() {
     val code = codeOnly(source("WatchdogV2.kt"))
