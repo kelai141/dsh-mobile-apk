@@ -62,6 +62,25 @@ internal object WorkspaceReclaim {
   }
 
   /**
+   * 按**可信会话列表**对账：哪些工作区该回收（issue #1364 便宜路）。
+   *
+   * 三条必须成立：
+   * - **空列表不回收任何东西**：空列表几乎一定是「读取失败 / 会话引擎还没起来」，
+   *   照它清理会把用户正在看的页面全删掉 —— 宁可这轮不动；
+   * - 匿名工作台永不回收；
+   * - 只有在列表里**确实消失**的会话才回收。
+   *
+   * @param keys 现有工作区键。
+   * @param liveSessionIds 列表里出现的会话 id（空集合 = 不回收）。
+   * @param anonymousKey 匿名键。
+   * @returns 要回收的键。
+   */
+  fun reconcilePlan(keys: List<String>, liveSessionIds: Set<String>, anonymousKey: String): List<String> {
+    if (liveSessionIds.isEmpty()) return emptyList()
+    return keys.filter { it != anonymousKey && it !in liveSessionIds }
+  }
+
+  /**
    * 会话被删除后仍应存在的键（**只有被删的那个消失，其余不受影响**）。
    *
    * @param keys 删除前的全部键。
