@@ -95,9 +95,9 @@ class OverlayPanel(private val svc: OverlayService) {
   private var pendingKey = ""                                    // 当前卡指纹（kind:eventId），变化即清作答态
   private var renderedCardKey = ""                               // 卡片已渲染指纹（防 live 流重绘打断输入）
 
-  /** 服务 onDestroy 联动：关闭 mux 长连接（原 mux?.close(); mux = null）。 */
+  /** 服务 onDestroy 联动：先收 picker 顶层窗口（issue #1359），再关 mux 长连接。 */
   internal fun destroy() {
-    mux?.close(); mux = null
+    closePicker(); mux?.close(); mux = null
   }
 
   internal fun startMux() {
