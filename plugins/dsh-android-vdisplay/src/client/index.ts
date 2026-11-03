@@ -504,31 +504,56 @@ export function apply(ctx: ClientContext): void {
     // 同浏览器侧：**边沿触发 + 收起时延迟落位**，不是每秒无条件抢焦点。
     // 旧实现每 800ms 无条件 openTab，用户收起侧栏后会被下一拍拽开、点 × 收起也会被切回来
     // （设备实测：浏览器侧与虚拟屏侧是同一个结构缺陷，两侧一起改）。
-    /** 上一次已处理过的舞台标记（'' = 还没出现过）。 */
-    let seenActive = false
-    /** 收起期间出现过、等待用户展开后补落位。 */
-    let pending = false
+    // issue #1339：原先用单个布尔 `seenActive` 记「这次激活已经落位过」，它有两个
+    // 死锁面，合起来让自动展示**永远**不再发生：
+    //   ① `pending` 只在 `reveal()` 内部写（折叠分支），而闸门恰在 `pending === false`
+    //      且侧栏收起时**不调用** `reveal()` —— 唯一能把它置真的路径被自己挡住；
+    //   ② `seenActive` 在折叠期间从不重置，屏销毁重建后仍是 true，于是 `reveal()`
+    //      在「已落位」早退分支直接返回，新屏再也拿不到页签。
+    // 改法：把「已落位」锚定到**具体的那块屏**（displayId），而不是一个布尔。
+    // 屏重建 = 新 displayId = 未落位 = 门重新武装；用户手动关掉页签时 displayId 不变，
+    // 仍然不会每拍把页签拽回来（这是 seenActive 原本要保护的用户意图）。
+    /** 已落位过的 displayId（undefined = 尚未落位）。 */
+    let placedFor: number | undefined
+    /** 收起期间攒下、等待用户展开后补落位的 displayId（undefined = 没有待落位）。 */
+    let pendingFor: number | undefined
     // 同浏览器侧：权威收起信号 = 上游展开控件是否在场（`data-rightbar-collapsed` 是常量，不可用）。
     const collapsedNow = (): boolean => document.querySelector('[data-sidebar-right-expand]') !== null
     const reveal = () => {
-      const active = decodeNative('vdisplayStatus')?.state === 'active'
-      if (!active) { seenActive = false; return }
-      if (document.querySelector('[data-testid=vdisplay-stage]') !== null) return
+      const status = decodeNative('vdisplayStatus')
+      // 显式判空而不是用可选链比较：后者在窄化上依赖 TS 对可选链的推断，
+      // 写成两段条件后 status 在这里确定是 VdPanelState，status.displayId 无需断言。
+      if (status === undefined || status.state !== 'active') {
+        // 屏没了：两个标记一起清，下一次激活就是一次全新的落位机会。
+        placedFor = undefined
+        pendingFor = undefined
+        return
+      }
+      const displayId = status.displayId
+      if (document.querySelector('[data-testid=vdisplay-stage]') !== null) {
+        // 舞台已在屏上：记下这块屏已落位，并清掉待落位（没有需要补的了）。
+        placedFor = displayId
+        pendingFor = undefined
+        return
+      }
+      if (placedFor === displayId) {
+        // 这块屏已落位过、页签却被用户关掉了：尊重用户意图，不再每拍拽回来。
+        pendingFor = undefined
+        return
+      }
+      if (collapsedNow()) {
+        // 收起：攒着，展开后由下一拍补落位。注意这里**不**置 placedFor——
+        // 置了就等于「已落位」，展开后反而不会再落（正是 ① 的形态）。
+        pendingFor = displayId
+        return
+      }
       try {
-        if (seenActive) {
-          // 无新事件：仅当「收起期间攒下待落位」且用户已展开时，补一次。
-          if (pending && !collapsedNow()) {
-            pending = false
-            sidebar.openTab(VD_TAB_KIND, { revealIfOpened: true })
-          }
-          return
-        }
-        seenActive = true
-        if (collapsedNow()) { pending = true; return }
         sidebar.openTab(VD_TAB_KIND, { revealIfOpened: true })
+        placedFor = displayId
+        pendingFor = undefined
       } catch {
-        /* 侧栏未挂载：下一拍重试（seenActive 未置位，保持可重试） */
-        seenActive = false
+        /* 侧栏未挂载：下一拍重试（placedFor 未置位，保持可重试） */
+        placedFor = undefined
       }
     }
     reveal()
@@ -539,14 +564,17 @@ export function apply(ctx: ClientContext): void {
     // 性能审计 2026-11-02 Top 4（剩余面）：与 1s 轮询同口径。`#1325` 已挡掉后台，
     // 但「页面在前台 + 侧栏收起」时这一拍仍在每 800ms 读一次 collapsedNow()/sidebar 状态。
     // 自动露出的**目的**就是把面板露出来，所以「侧栏已收起且用户没在展开」时它无事可做——
-    // 唯一例外是 pending 补落位（收起期间攒下的那次），那条路径必须继续跑，
+    // 唯一例外是待落位（收起期间攒下的那次），那条路径必须继续跑，
     // 否则用户展开侧栏后不会自动落位。判据因此是「页面在屏 且 (侧栏已展开 或 有待落位)」。
+    //
+    // issue #1339：待落位现在读 `pendingFor`（可被 reveal() 之外的逻辑看见、也可被
+    // 重置），不再是一个只在 reveal() 内部翻转的布尔——那样闸门会把自己锁死。
     let timer: number | undefined
     const schedule = () => {
       if (timer !== undefined) return
       timer = window.setTimeout(() => {
         timer = undefined
-        if (!document.hidden && (!collapsedNow() || pending)) reveal()
+        if (!document.hidden && (!collapsedNow() || pendingFor !== undefined)) reveal()
         if (!document.hidden) schedule()
       }, 800)
     }
