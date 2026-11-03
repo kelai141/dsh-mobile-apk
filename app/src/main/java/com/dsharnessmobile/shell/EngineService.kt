@@ -329,6 +329,11 @@ class EngineService : Service() {
         noteWakeActivityForTick(epoch)
         WatchdogV2.refreshWakeLock(this, epoch.wakeOwner)
         // 修复态不打探活 ⇒ 保持非健康节奏（5 秒）复看，不拖到 20 秒。
+        nextDelayMs = WatchdogV2.ACTIVE_TICK_MS
+        // 本拍到此为止（后台不得重启、回撤或改写正在被修复的运行时），但**下一拍必须挂回去**：
+        // 重排在 finally 里，这里 return 也会走到。旧实现是直接 return 跳过尾部重排，而
+        // scheduleWatchdogTick 全仓只有首拍与尾部两个调用点 ⇒ 修复态一出现 tick 链就永久断死
+        // （issue #1354：探活、自动重启、通知 drain 一起停摆，直到 Service 重建）。
         return
       }
       // P1（0.14.1 通知停摆修复）：通知信道消费的**兜底驱动**（`NotifyStore` 的 drainTick）。
@@ -433,11 +438,14 @@ class EngineService : Service() {
       if (isEpochCurrent(epoch)) WatchdogV2.refreshWakeLock(this, epoch.wakeOwner)
       // 异常拍按「非健康」收口：下一拍回到 5 秒节奏复看。
       nextDelayMs = WatchdogV2.ACTIVE_TICK_MS
-    }
-    // §6.3：单次延迟重排——旧 scheduleWithFixedDelay 的固定 5 秒节奏换成按状态自适应。
-    // 判定全部收口在 nextDelayMs，本处只负责「什么时候再看一眼」。
-    if (isEpochCurrent(epoch) && epoch.watchdog.get() === exec) {
-      scheduleWatchdogTick(epoch, exec, nextDelayMs)
+    } finally {
+      // §6.3：单次延迟重排——旧 scheduleWithFixedDelay 的固定 5 秒节奏换成按状态自适应。
+      // 判定全部收口在 nextDelayMs，本处只负责「什么时候再看一眼」。
+      // 为什么在 finally 而不是 try 之后：本拍**任何**早退（修复态、换代、异常）都必须把下一拍
+      // 挂回去，否则 tick 链断死（issue #1354）。停机与换代由这两个判据兜住，不会多出一条链。
+      if (isEpochCurrent(epoch) && epoch.watchdog.get() === exec) {
+        scheduleWatchdogTick(epoch, exec, nextDelayMs)
+      }
     }
   }
 
