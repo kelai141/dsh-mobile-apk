@@ -5,6 +5,7 @@ import {
 } from './release.js';
 import { t, translatePage, toggleLocale } from './locales.js';
 import { selectRoute } from './routing.js';
+import { classifyProbe } from './probe.js';
 
 const PROBE_TIMEOUT_MS = 2500;
 const state = { data: null, classification: null, mode: 'auto', current: MIRROR_TEMPLATES[0], results: [], checked: false };
@@ -48,32 +49,55 @@ function canProbe() {
     && typeof document.createElement === 'function';
 }
 
+/**
+ * 判活（issue #1393）：**不得**再往页面里插 `<script src>`。
+ *
+ * 旧实现把镜像的 MANIFEST.txt 当脚本加载。任一镜像返回可执行 JS（被投毒 / 反代把错误页换成
+ * JS / 302 到第三方）就会在**本页 origin 内执行**，而本页是 APK 分发口——执行后可改写所有
+ * 下载链接指向任意 APK。
+ *
+ * 现在只用 fetch（无执行面），并按证据强度分三态（判据在 ./probe.js，纯函数可离线测）：
+ *   ok          → 读到正文且确实是 MANIFEST（可参与排序）
+ *   unknown     → opaque / 4xx-5xx / 超时：连得上但证不了（不参与排序）
+ *   unreachable → 网络层失败（DNS/拒连）
+ */
+async function probeAlive(url) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
+  try {
+    // 先试 cors：能读正文才可能「确认可达」。
+    const res = await fetch(url, { mode: 'cors', cache: 'no-store', signal: ctrl.signal });
+    let text = null;
+    if (res.ok) {
+      try { text = await res.text(); } catch { text = null; }
+    }
+    return classifyProbe({ ok: res.ok, status: res.status, text });
+  } catch (e) {
+    if (ctrl.signal.aborted) return classifyProbe({ aborted: true });
+    // cors 被拒（镜像没发 ACAO）是常态：退回 no-cors 再试一次，能连上就记「无法判定」。
+    try {
+      const res2 = await fetch(url, { mode: 'no-cors', cache: 'no-store', signal: ctrl.signal });
+      return classifyProbe({ ok: false, status: res2.type === 'opaque' ? 0 : res2.status, text: null });
+    } catch (e2) {
+      return classifyProbe({ error: String(e2 && e2.message ? e2.message : e2) });
+    }
+  } finally {
+    clearTimeout(timer);
+    ctrl.abort();
+  }
+}
+
 async function probeMirror(template, speedUrlFor) {
-  // 环境不支持脚本加载：返回 unprobed，表示"未探测"而非"探测失败"，
+  // 环境不支持 fetch：返回 unprobed，表示"未探测"而非"探测失败"，
   // 调用方据此不标死线（否则会把全部线路误标为不可用）。
   if (!canProbe()) return { id: template.id, ms: 0, unprobed: true };
 
-  const alive = await new Promise((resolve) => {
-    const script = document.createElement('script');
-    let settled = false;
-    const finish = (ok) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      script.remove();
-      resolve(ok);
-    };
-    const timer = setTimeout(() => finish(null), PROBE_TIMEOUT_MS);
-    script.onload = () => finish(true);
-    script.onerror = () => finish(false);
-    // 加时间戳绕过缓存：命中的缓存会掩盖"这条线路现在坏了"的事实
-    script.src = probeUrl(template) + '?dsh=' + Date.now();
-    document.head.appendChild(script);
-  });
+  // 加时间戳绕过缓存：命中的缓存会掩盖"这条线路现在坏了"的事实
+  const alive = await probeAlive(probeUrl(template) + '?dsh=' + Date.now());
 
   // 健康检查不过就是死线，不测速——死线的 403 反而回得最快，测了只会误导排序
-  if (alive === null) return { id: template.id, ms: 0, unprobed: true };
-  if (!alive) return null;
+  if (alive === 'unknown') return { id: template.id, ms: 0, unprobed: true };
+  if (alive !== 'ok') return null;
 
   const speedUrl = typeof speedUrlFor === 'function' ? speedUrlFor(template) : null;
   if (!speedUrl) return { id: template.id, ms: 0 };

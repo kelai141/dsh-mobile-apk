@@ -210,7 +210,7 @@ async function main() {
   fs.writeFileSync(p(DIST, 'index.html'), html);
   fs.writeFileSync(p(DIST, '.nojekyll'), '');
   fs.writeFileSync(p(DIST, 'assets', 'release.js'), read('src/assets/release.js'));
-  for (const module of ['app.js', 'locales.js', 'routing.js']) fs.writeFileSync(p(DIST, 'assets', module), read('src/assets/' + module));
+  for (const module of ['app.js', 'locales.js', 'routing.js', 'probe.js']) fs.writeFileSync(p(DIST, 'assets', module), read('src/assets/' + module));
   fs.writeFileSync(p(DIST, 'assets', 'icon.png'), fs.readFileSync(p('src/assets/icon.png')));
 
   // 运行期兜底数据源（与内联数据同源，供内联解析失败时使用）
@@ -248,7 +248,7 @@ async function main() {
     log('已刷新种子 ' + SEED_FILE);
   }
 
-  const total = ['index.html', 'assets/release.js', 'assets/app.js', 'assets/locales.js', 'assets/routing.js', 'assets/icon.png', 'data/releases.json']
+  const total = ['index.html', 'assets/release.js', 'assets/app.js', 'assets/locales.js', 'assets/routing.js', 'assets/probe.js', 'assets/icon.png', 'data/releases.json']
     .map((f) => fs.statSync(p(DIST, f)).size)
     .reduce((a, b) => a + b, 0);
 
