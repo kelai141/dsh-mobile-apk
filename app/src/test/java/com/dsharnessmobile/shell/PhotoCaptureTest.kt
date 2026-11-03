@@ -459,7 +459,7 @@ class PhotoCaptureTest {
   @Test
   fun `恢复的条目必须带出落盘时刻`() {
     // 不带 startedAt 的话，恢复后的记录永远「刚受理」，过期判据拿不到真实年龄。
-    val code = codeOnly(source("src/main/java/com/dsharnessmobile/shell/PhotoCapture.kt"))
+    val code = codeOnly(source("PhotoCapture.kt"))
     assertTrue(
       "Resume 必须携带 startedAt",
       code.contains("data class Resume(val raw: File, val target: File, val startedAt: Long)"),
@@ -472,7 +472,7 @@ class PhotoCaptureTest {
 
   @Test
   fun `拍照入口把过期的在途记录清掉并如实回失败`() {
-    val controller = codeOnly(source("src/main/java/com/dsharnessmobile/shell/PhotoCaptureController.kt"))
+    val controller = codeOnly(source("PhotoCaptureController.kt"))
     assertTrue(
       "入口必须每次重算过期（不是只在恢复时算一次）",
       controller.contains("PhotoCapture.isPendingStale(inFlight.startedAt, System.currentTimeMillis())"),
