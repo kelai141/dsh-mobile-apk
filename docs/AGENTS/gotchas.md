@@ -2874,3 +2874,39 @@ The term '//' is not recognized as a name of a cmdlet, function, script file, or
     判据：**宿主样式改动后必须验 `getComputedStyle` 的计算值，不能只看自己写的 CSS**。本例实测 `panelPaddingTop 24px / bar.top 24 / 标题 top 38` 才算过；负控把面板 padding 打回 14px 并按用户机型把状态栏模拟成 38dp，标题被遮 **10px** 才算红。
 
     同型提醒：`document.head` 里的全局规则是**跨插件共享面**。凡是「按 tag + 属性 + `:has()` 猜宿主结构」的注入，都在赌宿主结构不变、且赌自己不是最后一个写入者。判据要落在**计算值**上，别落在「我写了什么」上。
+
+368. **门禁里“这里不测”的注释比漏测判据更危险：它把缺口写成了决定**（2026-11-04，issue #1131 实锤）
+
+    现象：`check-snapshot-fingerprint.mjs` 已经断言 `sha256(assets/snapshot.tar.xz) == assets/snapshot.sha256`，
+    也校验 `plugin-hard-manifest.json` 的**结构**，但**不比对**它的 `fingerprint` 字段。而这个字段是
+    `build-hard-manifest.mjs:121` 用 `createHash('sha256').update(readFileSync(snapshot))` 写进去的
+    ——**就是 tar 字节的 sha256**。于是「陈旧清单 + 新 tar」能一路绿灯通过门禁，装到设备上才以
+    `hard-bundle-selection-unverified` 拒绝启动引擎（界面正常、引擎不干活）。
+
+    真因不是「忘了写判据」，而是门禁里有一段注释**主动论证不该写**：
+
+    > `fingerprint` 只做「存在且形如 sha256」的弱校验：它与 `snapshot.sha256` 的强对账由上面的主判据负责，
+    > 清单里那份是构建期冗余记录（两份可能来自不同 ABI 的同一 tar，不在这里比字节）。
+
+    这条理由是**错的**：同一 tar 同一哈希，与 ABI 无关；「可能来自不同 ABI」恰恰说明它们必须相等。
+    但它的**形态**很有说服力——引用了真实字段、给了听起来合理的技术理由、还暗示「上面已经测了」。
+    后来人读到会当成已决策事项跳过，而不是当成缺口。**漏测判据会被 review 抓到；写成理由的豁免不会。**
+
+    识别法（可机械执行）：
+    1. 在门禁/校验器源码里搜这组措辞：`不必`、`无需`、`不用`、`不在这里`、`只做`、`弱校验`、`由上面负责`、`冗余记录`；
+    2. 每条逐字问三问：**这个理由今天还成立吗**（当时的限制是否已被上游改掉）？**它说的「上面已经测了」是真测了还是也豁免了**？**如果不豁免，代价落在谁身上**（构建期红 vs 用户装完才发现）；
+    3. 对答案里出现「可能」「大概」「通常」的，一律当成**待验证假设**，用一次临时探针算一遍再决定。
+
+    本例的机械验证只花一分钟：读 `build-hard-manifest.mjs` 那一行，确认 `fingerprint` 的字面来源。
+
+    正确做法：把豁免改写成**判据 + 保留原文**。即删掉错误理由、写下更正与为什么错（本例保留了
+    「此前写着…那条理由是错的」），再补上判据：三者必须相等
+    `sha256(tar) == snapshot.sha256 == plugin-hard-manifest.json.fingerprint`，并在 Gradle 的
+    `merge*Assets` 前置检查里也判一次（让「直接 gradle」当场红，而不是交出坏包）。
+
+    判据与负控：门禁 `--self-test` 增两条——清单 fingerprint 换成别的代必须红、同代必须绿；
+    Gradle 侧用临时夹具跑真任务（tar 换掉不改声明 → FAILED；三者改对 → BUILD SUCCESSFUL）。
+    资产缺席时必须打印 `SKIP assets-absent` 并计入 SKIP，**静默跳过**会让以后分不清「没资产」与「判据失效」。
+
+    同型提醒：**判据的注释也是判据的一部分**。凡在门禁里写「这里不测 X」，必须同时写清「那 X 由谁守」并
+    附上可点的行号；写不出「由谁守」，写的就是缺口本身。
