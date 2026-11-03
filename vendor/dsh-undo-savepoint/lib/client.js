@@ -102,6 +102,7 @@ window.__ModuleLoader__.load({
 			"settings.cleanupNote": "自动档保留 {keepAuto} 份;后悔档保留 {keepPre} 份;手动存档永不清除;关闭自动清理则全部保留",
 			"panel.empty": "暂无快照。配置变化会自动存档;也可点「手动保存」立即存档。",
 			"panel.confirm.restore": "确认回退到该快照?当前状态会先保存为后悔档,可再恢复。",
+			"panel.confirm.undo": "确认撤销?当前状态会先保存为后悔档，下方是本次会改动的文件。不想撤销就点取消。",
 			"panel.confirm.delete": "确认删除该快照?此操作不可恢复。",
 			"panel.updated": "已刷新 {n} 条",
 			"type.manual": "手动",
@@ -212,6 +213,7 @@ window.__ModuleLoader__.load({
 			"settings.cleanupNote": "Auto keeps {keepAuto}, pre-restore keeps {keepPre}; manual snapshots are never deleted; disabling auto-cleanup keeps everything",
 			"panel.empty": "No snapshots yet. Config changes auto-archive; or click Save now.",
 			"panel.confirm.restore": "Restore to this snapshot? Current state is kept as a redo point.",
+			"panel.confirm.undo": "Undo now? Current state is kept as a redo point; the files listed below will change. Cancel to leave everything untouched.",
 			"panel.confirm.delete": "Delete this snapshot? This cannot be undone.",
 			"panel.updated": "Refreshed {n} items",
 			"type.manual": "Manual",
@@ -303,7 +305,12 @@ window.__ModuleLoader__.load({
 		 * reloads so the UI re-reads them (settings UI does not hot-follow files). */
 		function maybeReload(r, label) {
 			if (r && r.ok && !r.unchanged && (label === "undo" || label === "redo" || label === "restore")) {
-				setTimeout(() => { try { location.reload(); } catch (e) { /* noop */ } }, 350);
+				// issue #1392：**不再整页 reload**。350ms 的 reload 会把页面整页重建，正在流式回复的一轮
+				// 会被直接掐断。reload 存在的唯一理由是「让页面重新读配置文件」——改派发事件，宿主可以
+				// 监听它做**局部**刷新；没有监听方时最多是配置展示滞后，用户可手动刷新，比静默打断会话安全。
+				try {
+					window.dispatchEvent(new CustomEvent("dsh-undo-config-changed", { detail: { label: label, targetId: r.targetId || "" } }));
+				} catch (e) { /* noop */ }
 			}
 		}
 		function publishResult(r, label) {
@@ -581,6 +588,24 @@ window.__ModuleLoader__.load({
 				if (!window.confirm(t("panel.confirm.restore") + "\n\n" + summary)) return;
 				act("restore", "/api/undo/restore", { id: s.id });
 			};
+			// issue #1392：撤销是**破坏性**动作，此前却是唯一没有确认的一个（恢复/删除/安全模式都有）。
+			// 先向服务端取「这次撤销会改什么」——目标由服务端按与真正撤销**同一份判据**算
+			// （/api/undo/diff?id=undo），所以确认框里列的文件就是会被改的那些。
+			const undoNow = async () => {
+				if (busy) return;
+				let items = [];
+				let noTarget = false;
+				try {
+					const p = await api("/api/undo/diff?id=undo");
+					if (p && p.ok) { items = p.diff || []; noTarget = p.noTarget === true; }
+				} catch (e) { /* 预览失败不阻断确认；下面显示「无差异」 */ }
+				const detail = items.length === 0 ? t("panel.diff.none")
+					: items.map((f) => "  " + f.name + "  +" + f.added + " -" + f.removed).join("\n");
+				// 取消 = 一个破坏性请求都不发（本 issue 的判据：取消后页面状态必须没变）。
+				if (!window.confirm(t("panel.confirm.undo") + "\n\n" + detail)) return;
+				if (noTarget) return;
+				act("undo", "/api/undo/undo");
+			};
 			const showDiff = async (s) => {
 				const items = await fetchDiff(s.id);
 				setDiff({ id: s.id, items });
@@ -646,7 +671,7 @@ window.__ModuleLoader__.load({
 							className: styles.toolbar,
 							children: [
 								(0, react_jsx_runtime.jsx)("button", { type: "button", className: styles.save, disabled: busy, onClick: saveNow, children: t("panel.save") }),
-								(0, react_jsx_runtime.jsx)("button", { type: "button", className: styles.btn + " " + styles.undo, disabled: busy, onClick: () => act("undo", "/api/undo/undo"), children: t("undo") }),
+								(0, react_jsx_runtime.jsx)("button", { type: "button", className: styles.btn + " " + styles.undo, disabled: busy, onClick: undoNow, children: t("undo") }),
 								(0, react_jsx_runtime.jsx)("button", { type: "button", className: styles.btn + " " + styles.redo, disabled: busy, onClick: () => act("redo", "/api/undo/redo"), children: t("redo") }),
 								(0, react_jsx_runtime.jsx)("button", { type: "button", className: styles.btn, disabled: busy, onClick: load, children: t("panel.refresh") }),
 								(0, react_jsx_runtime.jsx)("button", { type: "button", className: styles.btn, disabled: busy, onClick: cleanupNow, children: t("panel.cleanup") }),
