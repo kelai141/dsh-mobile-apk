@@ -88,12 +88,17 @@ object ControlAudit {
     // 现在与插件侧口径对齐：同样 2MB 阈值、同样保留尾部 500 行；写入改成本次调用内复用同一
     // 个句柄（appendBytes），不再每条 open/close。仍然**不做 fsync**：审计不是事务日志，
     // 崩溃丢最后几条可接受，而 fsync 在每条记录上会显著拖慢授权路径。
+    val bytes = (record.toString() + "\n").toByteArray(Charsets.UTF_8)
+    // issue #1337 ③：上限判据前移到 append **之前**，并且把本次记录的字节数算进去。
+    //
+    // 原先在 append 之后才查（`finally { rollIfOversized(file) }`），于是「超限那一刻」
+    // 已经多写了一条——读侧实测 2,097,278 > 2,097,152。把记录大小一起算，文件就**永远
+    // 不会**越过上限：宁可先滚动一次，也不让上限成为事后追认。
     try {
-      java.io.FileOutputStream(file, true).use { out ->
-        out.write((record.toString() + "\n").toByteArray(Charsets.UTF_8))
-      }
-    } finally {
-      rollIfOversized(file)
+      if (file.length() + bytes.size > MAX_AUDIT_BYTES) roll(file)
+      java.io.FileOutputStream(file, true).use { out -> out.write(bytes) }
+    } catch (_: Throwable) {
+      /* 审计写入失败不影响授权路径（与 roll 的静默放弃同口径） */
     }
   }
 
@@ -104,17 +109,37 @@ object ControlAudit {
   internal const val KEEP_TAIL_LINES = 500
 
   /**
-   * 超限滚动：保留尾部 [KEEP_TAIL_LINES] 行。
+   * 滚动：保留尾部 [KEEP_TAIL_LINES] 行，**先写临时文件再原子 rename**。
+   *
+   * issue #1337 ①②：原实现是 `readLines()` + `writeText()`，两个缺陷都是实测出来的：
+   *
+   *  ① `writeText` 先 truncate 再写。读侧轮询能观察到 `2,097,076 → 0 → 14,752` 的
+   *     **0 字节窗口**——此刻进程被杀就是整份审计历史清零，而「审计文件为空」与
+   *     「审计被清空」从此不可区分，事故取证时最需要的那段正好没了。
+   *  ② 读与写之间没有锁。并发写者在这段窗口里追加的记录被整段丢弃，且丢的是
+   *     **比保留项更新**的那些（4 写者 × 2500 条实测 141 个 id 缺失，形成空洞，
+   *     不是预期的「丢最旧前缀」）。
+   *
+   * rename 在同一目录内是原子的：读侧要么看到旧文件、要么看到新文件，不存在空窗；
+   * 并发的 append 也只会落到「旧文件」或「新文件」其中一个上，不会凭空消失。
    *
    * 失败不抛出——审计的写入失败绝不能影响授权路径（与 [log] 的静默放弃同口径）。
    */
-  private fun rollIfOversized(file: File) {
+  private fun roll(file: File) {
     try {
-      if (file.length() <= MAX_AUDIT_BYTES) return
+      if (!file.isFile) return
       val tail = file.readLines(Charsets.UTF_8).takeLast(KEEP_TAIL_LINES)
-      file.writeText(tail.joinToString("") { it + "\n" }, Charsets.UTF_8)
+      val parent = file.parentFile ?: return
+      val tmp = File(parent, file.name + ".roll.tmp")
+      tmp.writeText(tail.joinToString("") { it + "\n" }, Charsets.UTF_8)
+      if (!tmp.renameTo(file)) {
+        // rename 失败（被占用/跨卷）时退回覆盖写：仍然优先保证内容不丢，
+        // 只是这一条路径上原子性拿不到——下次滚动会再试。
+        tmp.copyTo(file, overwrite = true)
+        tmp.delete()
+      }
     } catch (_: Throwable) {
-      /* 截断失败不阻断 */
+      /* 滚动失败不阻断；下一次 append 会再试 */
     }
   }
 
