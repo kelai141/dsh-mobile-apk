@@ -463,7 +463,7 @@ class PhotoCaptureTest {
 
   @Test
   fun `控制器把在途原图交给清理侧排除`() {
-    val controller = codeOnly(source("src/main/java/com/dsharnessmobile/shell/PhotoCaptureController.kt"))
+    val controller = codeOnly(source("PhotoCaptureController.kt"))
     assertTrue("受理拍照时必须把在途集合交给 sweepOld", controller.contains("exclude = inFlightRawNames.toSet()"))
     assertTrue("必须用同步集合（压缩线程与主线程并发读写）",
       controller.contains("Collections.synchronizedSet(mutableSetOf<String>())"))
