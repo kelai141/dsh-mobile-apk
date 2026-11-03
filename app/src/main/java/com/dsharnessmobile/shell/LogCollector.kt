@@ -229,14 +229,24 @@ object LogCollector {
    */
   internal fun loaderSettleMs(text: String): Long? {
     if (text.isEmpty()) return null
-    var last: Long? = null
+    // issue #1342 ②：取**文本位置最靠后**的那次出现，而不是「最后跑完的那个正则」。
+    // 三个正则依次跑，旧的 `last` 会被后跑的正则无条件覆盖 —— 于是日志里同时出现历史
+    // 写法与 phase 探针时，**较早**的那个值胜出（settleMs=999 在前、
+    // name=loader-settle ms=1234 在后 → 得到 999），与上面注释声明的「最后一次出现」
+    // 恰好相反。按 m.range.first 比位置，才与文档一致。
+    var bestIndex = -1
+    var best: Long? = null
     for (regex in LOADER_SETTLE_RES) {
       for (m in regex.findAll(text)) {
         val value = m.groupValues[1].toLongOrNull() ?: continue
-        if (value >= 0L) last = value
+        if (value < 0L) continue
+        if (m.range.first > bestIndex) {
+          bestIndex = m.range.first
+          best = value
+        }
       }
     }
-    return last
+    return best
   }
 
   private val LOADER_SETTLE_RES = listOf(
