@@ -78,10 +78,13 @@ test('可见时的节奏保持不变（1000ms，没有被顺手降速）', () =>
 })
 
 test('自动露出：收起且无待落位时不跑，有待落位时仍要跑', () => {
+  // 锚点按内容钉：判据是「门控 + 待落位路径不能被一起挡掉」，不认承载它的变量名。
+  // issue #1339 把待落位从布尔 pending 换成 pendingFor（锚定到具体 displayId），
+  // 这条断言此前锚死了变量名，于是判据没失效、断言先红了。
   assert.match(
     source,
-    /if \(!document\.hidden && \(!collapsedNow\(\) \|\| pending\)\) reveal\(\)/,
-    '自动露出必须门控，且 pending 补落位路径不能一起被挡掉',
+    /if \(!document\.hidden && \(!collapsedNow\(\) \|\| pendingFor !== undefined\)\) reveal\(\)/,
+    '自动露出必须门控，且待落位（收起期间攒下的那次）路径不能一起被挡掉',
   )
 })
 
