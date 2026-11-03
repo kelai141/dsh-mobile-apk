@@ -1160,8 +1160,10 @@ object NotifyCenter {
         addApprovalActions(app, b, entry)
       }
     }
-    // S3-1：降级告示只在传了它时出现，且不覆盖更具体的 subText（如提问的「仅本次生效」）。
-    if (degradedNotice != null) b.setSubText(degradedNotice)
+    // S3-1：降级告示只在传了它时出现，且**不覆盖**更具体的 subText（如审批的「仅本次生效」）。
+    // issue #1407：旧实现无条件 setSubText，把这句具体说明顶掉——用户会把「一次性授权」当成
+    // 长期授权。哪些分支自带 subText 由 hasSpecificSubText 一张表说清（纯函数，单测钉住）。
+    if (degradedNotice != null && !hasSpecificSubText(face, entry.count)) b.setSubText(degradedNotice)
     b.setContentIntent(contentIntent(app, entry))
     // DEF-NOTIFY-01：降级为静默条目时补静默标志（渠道已是 dsh-silent，这是第二道保险）
     if (silentOverride) {
@@ -1335,6 +1337,19 @@ object NotifyCenter {
     return if (agent.isNotEmpty()) agent else null
   }
 
+  /**
+   * 本拍是否已有**更具体**的 subText（issue #1407）——降级告示不得覆盖它。
+   *
+   * 表来自 [build] 各分支的实际写法：SILENT 只在多条时写条数、TODO 写步骤、REPORT 写元信息、
+   * APPROVAL 写「仅本次生效」、QUESTION 不写（它的信息在 contentText 与 BigText 里）。
+   * 纯函数：JVM 单测直接钉住这张表，新增分支时忘同步会红。
+   */
+  internal fun hasSpecificSubText(face: Face, count: Int): Boolean = when (face) {
+    Face.SILENT -> count > 1
+    Face.TODO, Face.REPORT, Face.APPROVAL -> true
+    Face.QUESTION -> false
+  }
+
   internal fun questionNeedsAppEntry(entry: NotifyEntry): Boolean =
     entry.questions.any { it.options.size > 2 }
 
@@ -1376,7 +1391,7 @@ object NotifyCenter {
       b.addAction(
         NotificationCompat.Action.Builder(
           android.R.drawable.ic_menu_view,
-          "打开应用作答",
+          UiText.t(app, "打开应用作答", "Open app to answer"),
           contentIntent(app, entry),
         ).build(),
       )
@@ -1387,12 +1402,12 @@ object NotifyCenter {
     // 审批动作恒为两个（NT-21）：批准一次 / 拒绝。不提供任何常驻授权承诺。
     val approve = NotificationCompat.Action.Builder(
       android.R.drawable.ic_menu_edit,
-      "批准一次",
+      UiText.t(app, "批准一次", "Allow once"),
       actionPending(app, entry, NotifyActionReceiver.ACTION_APPROVE, mutable = false),
     )
     val reject = NotificationCompat.Action.Builder(
       android.R.drawable.ic_menu_close_clear_cancel,
-      "拒绝",
+      UiText.t(app, "拒绝", "Reject"),
       actionPending(app, entry, NotifyActionReceiver.ACTION_REJECT, mutable = false),
     )
     if (APPROVAL_REQUIRE_UNLOCK) {
@@ -1465,7 +1480,7 @@ object NotifyCenter {
         retry,
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
       )
-      b.addAction(NotificationCompat.Action.Builder(android.R.drawable.ic_menu_rotate, "重试", pending).build())
+      b.addAction(NotificationCompat.Action.Builder(android.R.drawable.ic_menu_rotate, UiText.t(app, "重试", "Retry"), pending).build())
     }
     (app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
       .notify(failureId(kind, eventId), b.build())

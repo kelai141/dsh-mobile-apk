@@ -17,7 +17,7 @@
  * 退出码：0 成功 / 1 补丁失败或锚点失配 / 2 用法错误。
  * 雷点 8 约定：本脚本全量输出，构建链禁止 Select-First 截断（截断会杀 node 致误判失败）。
  */
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ENV_MARKER as PTC_ENV_MARKER, LAUNCH_MARKER as PTC_LAUNCH_MARKER, assertChildClearing, patchEnvironment, patchRuntimeIndex, planPatch } from './ptc-android-native-A1.mjs'
@@ -80,8 +80,49 @@ function loadImpl(target, vendorRoot) {
   if (!(key in IMPL_state)) IMPL_state[key] = readFileSync(join(vendorRoot, target), 'utf8')
   return IMPL_state[key]
 }
+/** 施加前的原件字节（issue #1385）：第 N 个补丁失败时 1..N-1 已经落盘，目录停在混合态。 */
+const ORIGINALS = new Map()
+
+/** 同目录临时文件 + rename：写到一半被杀时目标文件仍是上一版完整字节，不会截断（issue #1385）。 */
+function writeAtomic(dest, bytes) {
+  const temp = dest + '.tmp-' + process.pid
+  try {
+    writeFileSync(temp, bytes)
+    renameSync(temp, dest)
+  } catch (e) {
+    try { rmSync(temp, { force: true }) } catch { /* 清临时文件失败不掩盖真错 */ }
+    throw e
+  }
+}
+
+function rememberOriginal(target, vendorRoot) {
+  if (ORIGINALS.has(target)) return
+  try {
+    ORIGINALS.set(target, readFileSync(join(vendorRoot, target)))
+  } catch {
+    ORIGINALS.set(target, null) // 施加前不存在 ⇒ 回滚时删掉本次新建的文件
+  }
+}
+
 function saveImpl(target, vendorRoot) {
-  writeFileSync(join(vendorRoot, target), IMPL_state[target])
+  rememberOriginal(target, vendorRoot)
+  writeAtomic(join(vendorRoot, target), IMPL_state[target])
+}
+
+/** 失败收口：倒序把本次动过的文件写回施加前字节，避免构建机停在半补丁态（issue #1385）。 */
+function rollbackAll(vendorRoot) {
+  let restored = 0
+  for (const [target, bytes] of [...ORIGINALS.entries()].reverse()) {
+    try {
+      const dest = join(vendorRoot, target)
+      if (bytes === null) rmSync(dest, { force: true })
+      else writeAtomic(dest, bytes)
+      restored++
+    } catch (e) {
+      console.error(`[rollback] ${target} 还原失败：${e.message}`)
+    }
+  }
+  return restored
 }
 
 function safeModeTransactionStart(source) {
@@ -2958,7 +2999,13 @@ for (const id of order) {
 
 if (mode === 'apply') {
   console.log(`applied ${applied}/${order.length}${failed ? `，失败 ${failed}` : ''}`)
-  if (failed) process.exit(1)
+  if (failed) {
+    // issue #1385：失败即回滚。此前只 exit(1)，目录停在前 N-1 个补丁已落盘的混合态，
+    // 下一次构建从混合态继续，且日志里看不出哪几个文件被改了。
+    const restored = rollbackAll(vendorRoot)
+    console.error(`[rollback] 已还原 ${restored} 个文件的施加前字节（失败 ${failed} 个补丁）`)
+    process.exit(1)
+  }
 } else if (failed) {
   process.exit(1)
 }
