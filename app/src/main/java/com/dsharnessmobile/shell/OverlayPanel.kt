@@ -697,8 +697,23 @@ class OverlayPanel(private val svc: OverlayService) {
       // 开关重新打开：把「应该正在呼吸」的状态补回来。applyAgentStatus 是幂等的
       // 状态派生入口（与 setHalo 同一口径），走它而不是另写判定。
       if (currentPending() != null) statusText?.let { setAmberBreathing(it, true) }
+      // issue #1342 ①：光泽也必须补回来。关闭动效时走的是
+      // ShimmerTextView.setShimmering(false) —— 那是**状态设置器**（running=false、
+      // animator=null），不是「暂停」。重新启用若不显式恢复，正在跑的扫光会永久停住，
+      // 直到下一次实时流事件（updateBallOnly）或面板重新展开才自愈，看起来像「卡住了」。
+      // 兄弟两处都恢复了：halo 走 setHalo(deriveHalo())、guide 走 setStatusPulse。
+      if (shimmerWanted()) statusText?.let { ShimmerTextView::class.java.cast(it).setShimmering(true) }
     }
   }
+
+  /**
+   * 光泽（Deep diving 扫光）当前该不该跑。
+   *
+   * 与 applyAgentStatus 的 sessionBusy 分支同一判据：忙且没在调工具时才扫光
+   * （调工具时改显工具模板，不扫）。抽成派生入口，是为了让「重新启用动效」与
+   * 「实时流更新」走同一份判定，而不是各写一遍条件。
+   */
+  private fun shimmerWanted(): Boolean = svc.sessionBusy && svc.currentToolName.isBlank()
 
   private fun setAmberBreathing(tv: TextView, on: Boolean) {
     if (on && animationsOn()) {

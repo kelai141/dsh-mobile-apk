@@ -130,6 +130,33 @@ class MotionGateContractTest {
   }
 
   @Test
+  fun reEnablingMotionRestoresEveryRunningIndicator() {
+    // issue #1342 ①：开关翻转的「重新启用」分支必须把**所有**被停掉的常驻动画补回来。
+    // 关闭时用的是状态设置器（setShimmering(false) 会把 running 置 false、animator 置 null），
+    // 那不是暂停；漏恢复就会永久停住，直到下一次实时流事件或面板重新展开才自愈，
+    // 用户看到的是「卡住了」。兄弟两处都恢复了：halo 走 setHalo(deriveHalo())、
+    // guide 走 setStatusPulse(...)，只有面板状态行的扫光被漏掉。
+    val panel = codeOnly(source("OverlayPanel.kt"))
+    // 必须把范围**夹在函数体内**：整份文件里别处也有 setShimmering(true)（实时流更新路径），
+    // 不夹范围的话「恢复」与「正常更新」无法区分，判据会假绿。
+    val handler = panel
+      .substringAfter("private fun onMotionChanged(", "")
+      .substringBefore("\n  private fun ")
+    assertTrue("onMotionChanged 必须存在", handler.isNotEmpty())
+    val reEnable = handler.substringAfter("} else {", "")
+    assertTrue("onMotionChanged 必须有 else（重新启用）分支", reEnable.isNotEmpty())
+    assertTrue(
+      "重新启用动效时必须恢复状态行扫光：else 分支里缺 setShimmering(true)，" +
+        "正在跑的扫光会永久停住（issue #1342 ①）",
+      reEnable.contains("setShimmering(true)"),
+    )
+    assertTrue(
+      "重新启用动效时必须恢复待答琥珀呼吸（不得为了修扫光把它弄丢）",
+      reEnable.contains("setAmberBreathing(it, true)"),
+    )
+  }
+
+  @Test
   fun shimmerReusesSingleMatrixInstance() {
     // 每帧 new Matrix() 在 1800ms 内约 60-120 次分配；144Hz 下是纯 GC 压力。
     val src = codeOnly(source("ShimmerTextView.kt"))

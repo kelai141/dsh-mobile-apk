@@ -33,6 +33,27 @@ class BootPhaseTraceTest {
   }
 
   @Test
+  fun loaderSettlePicksLastByTextPositionNotByRegexOrder() {
+    // issue #1342 ②：三个正则依次跑，旧实现让后跑的正则无条件覆盖 `last` —— 于是日志里
+    // 同时出现历史写法与 phase 探针时，**较早**的那个值胜出，与注释声明的「最后一次出现」
+    // 恰好相反。修法按 m.range.first 比文本位置。
+    val historicalFirst = "loader settleMs=999\n[perf] phase name=loader-settle ms=1234\n"
+    assertEquals(
+      "应取文本位置靠后的 phase 探针值（1234），而不是先跑完的那个正则的 999",
+      1234L,
+      LogCollector.loaderSettleMs(historicalFirst),
+    )
+    val probeFirst = "[perf] phase name=loader-settle ms=1234\nloader settleMs=999\n"
+    assertEquals(
+      "应取文本位置靠后的历史写法值（999）",
+      999L,
+      LogCollector.loaderSettleMs(probeFirst),
+    )
+    val twoProbes = "[perf] phase name=loader-settle ms=1234\n[perf] phase name=loader-settle ms=5678\n"
+    assertEquals("同一正则的多次命中仍取最后一次", 5678L, LogCollector.loaderSettleMs(twoProbes))
+  }
+
+  @Test
   fun loaderSettleIsNullWhenLineHasNoNumber() {
     // 具备探针行形态但不含数值：同样必须 null，而不是 0。
     assertNull(LogCollector.loaderSettleMs("[perf] phase name=loader-settle ms=-1"))

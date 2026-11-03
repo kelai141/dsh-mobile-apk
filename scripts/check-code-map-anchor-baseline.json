@@ -21,14 +21,14 @@
     "EngineManager.kt:238": 1,
     "app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:431": 2,
     "app/src/test/java/com/dsharnessmobile/shell/BrowserHostNavigationPolicyTest.kt:129": 1,
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:820": 2,
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:838": 2,
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:84": 2,
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:60": 1,
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:322": 2,
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:495": 1,
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayHost.kt:207": 3,
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:678": 2,
-    "app/src/main/java/com/dsharnessmobile/shell/LogCollector.kt:458": 1,
+    "app/src/main/java/com/dsharnessmobile/shell/LogCollector.kt:468": 1,
     "app/src/main/java/com/dsharnessmobile/shell/UndoGate.kt:240": 1,
     "vendor/dsh-undo-savepoint/lib/core.mjs:1180": 1,
     "index.js:2198": 1,
@@ -43,7 +43,7 @@
     "scripts/verify-vdisplay-float.mjs:95": 4,
     "scripts/verify-browser-panel.mjs:123": 3,
     "plugins/dsh-android-file-open/src/index.ts:43": 1,
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:610": 1,
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:619": 1,
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:193": 1,
     "app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:299": 1,
     "app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:274": 1,
@@ -52,7 +52,7 @@
     "scripts/build-apk-013.ps1:166": 3,
     "plugins/dsh-android-vdisplay/test/tools-callable.test.mjs:122": 3,
     "scripts/build-apk-013.ps1:141": 3,
-    "MainActivity.kt:610": 1,
+    "MainActivity.kt:619": 1,
     "GuidePageRenderer.kt:363": 1,
     "EngineStartFlow.kt:96": 1,
     "MainActivity.kt:422": 1,
@@ -60,16 +60,16 @@
     "MainActivity.kt:78": 1,
     "EngineStartFlow.kt:427": 1,
     "MainActivity.kt:191": 1,
-    "MainActivity.kt:855": 3,
+    "MainActivity.kt:873": 3,
     "ARCHITECTURE.md:15": 1,
-    "MainActivity.kt:817": 1,
+    "MainActivity.kt:835": 1,
     "MainActivity.kt:549": 1,
     "docs/AGENTS/ARCHITECTURE.md:12": 2,
     "docs/AGENTS/ARCHITECTURE.md:15": 2,
     "WebUiChrome.kt:37": 2,
-    "LogCollector.kt:458": 1,
-    "MainActivity.kt:574": 1,
-    "MainActivity.kt:827": 1,
+    "LogCollector.kt:468": 1,
+    "MainActivity.kt:583": 1,
+    "MainActivity.kt:845": 1,
     "EngineService.kt:129": 1,
     "WatchdogV2.kt:146": 1,
     "WatchdogV2.kt:96": 1,
@@ -114,8 +114,8 @@
     "index.ts:368": 1,
     "index.ts:949": 3,
     "ShizukuUserService.kt:207": 1,
-    "MainActivity.kt:1059": 1,
-    "MainActivity.kt:1081": 1,
+    "MainActivity.kt:1077": 1,
+    "MainActivity.kt:1099": 1,
     "ShizukuUserService.kt:30": 2,
     "ShizukuTransport.kt:821": 2,
     "DeviceControlService.kt:703": 2,
@@ -124,22 +124,22 @@
     "app/src/main/AndroidManifest.xml:158": 1,
     "VdisplayController.kt:84": 2,
     "browser-tab.tsx:54": 1,
-    "MainActivity.kt:570": 1,
-    "MainActivity.kt:820": 1,
+    "MainActivity.kt:579": 1,
+    "MainActivity.kt:838": 1,
     "BrowserHostNavigationPolicy.kt:87": 1,
     "docs/AGENTS/ARCHITECTURE.md:18": 2,
     "dsh-client-ui-responsive/src/client/mobile/native-browser-presentation.ts:20": 2,
     "OverlayService.kt:473": 2,
-    "OverlayPanel.kt:1058": 2,
+    "OverlayPanel.kt:1073": 2,
     "OverlayService.kt:621": 2,
     "OverlayPanel.kt:177": 2,
     "OverlayReport.kt:373": 2,
     "OverlayService.kt:502": 2,
     "OverlayService.kt:299": 4,
-    "OverlayPanel.kt:1175": 2,
+    "OverlayPanel.kt:1190": 2,
     "OverlayReport.kt:164": 2,
     "OverlayService.kt:509": 3,
-    "OverlayPanel.kt:945": 2,
+    "OverlayPanel.kt:960": 2,
     "OverlayPanel.kt:71": 2,
     "OverlayService.kt:499": 2,
     "OverlayLiveFeed.kt:160": 2,
@@ -149,9 +149,9 @@
     "docs/AGENTS/ARCHITECTURE.md:27": 3,
     "docs/AGENTS/ARCHITECTURE.md:29": 3,
     "docs/AGENTS/modules.md:39": 3,
-    "OverlayPanel.kt:816": 5,
+    "OverlayPanel.kt:831": 5,
     "OverlayPanel.kt:614": 3,
-    "OverlayPanel.kt:902": 3,
+    "OverlayPanel.kt:917": 3,
     "OverlayPanel.kt:24": 3,
     "OverlayPanel.kt:487": 3,
     "OverlayLiveFeed.kt:166": 3,
@@ -162,8 +162,8 @@
     "OverlayService.kt:683": 9,
     "NotifyDecisionQueue.kt:194": 2,
     "NotifyActionReceiver.kt:89": 2,
-    "LogCollector.kt:785": 2,
-    "MainActivity.kt:1172": 2,
+    "LogCollector.kt:795": 2,
+    "MainActivity.kt:1190": 2,
     "NotificationContractTest.kt:206": 2,
     "NotifyDecisionQueue.kt:323": 2,
     "NotifyDecisionQueue.kt:310": 2,
@@ -315,7 +315,7 @@
     "tools.ts:73": 2,
     "plugins/dsh-android-vdisplay/src/client/index.ts:83": 2,
     "AndroidBridge.kt:325": 2,
-    "MainActivity.kt:789": 2,
+    "MainActivity.kt:807": 2,
     "dsh-client-ui-responsive/src/client/android-bridge.ts:82": 2,
     "app/src/main/java/com/dsharnessmobile/shell/FileIncoming.kt:35": 2,
     "plugins/dsh-android-file-open/src/index.ts:238": 3,
@@ -345,7 +345,7 @@
     "scripts/check-snapshot-builder-output.mjs:156": 2,
     "scripts/check-plugin-tests.mjs:35": 3,
     "VdisplayController.kt:753": 2,
-    "MainActivity.kt:793": 2,
+    "MainActivity.kt:811": 2,
     "verify-state-sync.mjs:248": 2,
     "verify-webview-015.mjs:3": 2,
     "scripts/verify-vdisplay-viewer.mjs:2": 2,
@@ -361,15 +361,15 @@
     "docs/AGENTS/emulator-test-protocol.md:4": 2,
     "app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:408": 1,
     "app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:207": 1,
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:817": 1,
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:835": 1,
     "app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:670": 1,
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1118": 1,
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1136": 1,
     "app/src/main/java/com/dsharnessmobile/shell/WebUiChrome.kt:19": 1,
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:205": 1,
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:391": 1,
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:296": 2,
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:137": 1,
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:672": 1,
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:690": 1,
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:266": 1,
     "app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:294": 1,
     "app/src/main/java/com/dsharnessmobile/shell/ApkUpdateAction.kt:245": 1,
@@ -386,7 +386,7 @@
     "NotifyCenter.kt:188": 1,
     "EngineService.kt:43": 2,
     "ConsoleSession.kt:32": 1,
-    "LogCollector.kt:395": 1,
+    "LogCollector.kt:405": 1,
     "app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:427": 1,
     "app/src/main/java/com/dsharnessmobile/shell/EngineService.kt:348": 1,
     "app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:99": 1,
@@ -398,7 +398,7 @@
     "app/src/main/java/com/dsharnessmobile/shell/PublicRepoProvision.kt:1": 1,
     "MainActivity.kt:354": 1,
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:160": 1,
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:724": 1,
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:742": 1,
     "app/src/main/java/com/dsharnessmobile/shell/ControlCarrier.kt:110": 1,
     "plugins/dsh-android-bridge/src/control-queue.ts:347": 2,
     "app/src/main/java/com/dsharnessmobile/shell/UndoGate.kt:278": 1,
@@ -411,7 +411,7 @@
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:852": 1,
     "app/src/main/java/com/dsharnessmobile/shell/ControlCarrier.kt:107": 1,
     "app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:661": 1,
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:776": 1,
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:794": 1,
     "app/src/main/java/com/dsharnessmobile/shell/FileIncoming.kt:332": 1,
     "app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:550": 1,
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:324": 1,
@@ -451,9 +451,9 @@
     "dsh-shell-termux/src/index.ts:42": 2,
     "plugins/dsh-android-file-open/src/index.ts:302": 1,
     "dsh-client-ui-responsive/src/client/android-bridge.ts:17": 1,
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:928": 1,
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:946": 1,
     "app/src/main/java/com/dsharnessmobile/shell/BackGate.kt:38": 1,
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1035": 1,
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1053": 1,
     "plugins/dsh-android-file-open/src/index.ts:527": 4,
     "dsh-client-ui-responsive/src/client/dev-section/runtime-cache.tsx:91": 1,
     "dsh-shell-termux/src/index.ts:39": 1,
@@ -505,7 +505,7 @@
     "EngineProbe.kt:51": 1,
     "DownloadSaver.kt:101": 1,
     "NotifyBridge.kt:328": 1,
-    "OverlayPanel.kt:822": 2,
+    "OverlayPanel.kt:837": 2,
     "OverlayService.kt:580": 1,
     "MuxClient.kt:91": 1,
     "EngineService.kt:134": 1,
@@ -525,7 +525,7 @@
     "AdbKeyboardReceiver.kt:45": 1,
     "AdbKeyboardService.kt:114": 1,
     "AdbKeyboardReceiver.kt:76": 1,
-    "MainActivity.kt:798": 1,
+    "MainActivity.kt:816": 1,
     "ControlCarrier.kt:110": 1,
     "VdisplayController.kt:133": 1,
     "ControlProtocolV2.kt:96": 1,
@@ -537,7 +537,7 @@
     "ControlProtocolV2.kt:46": 1,
     "ControlCarrier.kt:47": 1,
     "ScreenScope.kt:49": 1,
-    "MainActivity.kt:777": 1,
+    "MainActivity.kt:795": 1,
     "AdbKeyboardService.kt:122": 1,
     "index.ts:42": 1,
     "GlobalActionCatalog.kt:23": 1,
@@ -552,7 +552,7 @@
     "VdisplayOps.kt:20": 1,
     "ScreenScope.kt:31": 1,
     "AndroidBridge.kt:319": 2,
-    "MainActivity.kt:787": 1,
+    "MainActivity.kt:805": 1,
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:306": 1,
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:372": 1,
     "app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:474": 1,
@@ -568,7 +568,7 @@
     "VdisplayController.kt:372": 2,
     "VdisplayController.kt:124": 2,
     "VdisplayOps.kt:21": 2,
-    "MainActivity.kt:774": 1,
+    "MainActivity.kt:792": 1,
     "MainActivity.kt:306": 1,
     "EngineService.kt:70": 1,
     "OverlayService.kt:382": 2,
@@ -589,7 +589,7 @@
     "OverlayPanel.kt:387": 1,
     "OverlayController.kt:22": 2,
     "NotifyCenter.kt:161": 1,
-    "MainActivity.kt:647": 1,
+    "MainActivity.kt:663": 1,
     "OverlayService.kt:85": 1,
     "OverlayService.kt:574": 1,
     "MuxClient.kt:46": 1,
@@ -597,7 +597,7 @@
     "OverlayLiveFeed.kt:26": 1,
     "OverlayService.kt:449": 1,
     "OverlayReport.kt:180": 1,
-    "OverlayPanel.kt:1172": 1,
+    "OverlayPanel.kt:1187": 1,
     "OverlayPanel.kt:202": 1,
     "OverlayService.kt:216": 1,
     "OverlayService.kt:252": 1,
@@ -606,7 +606,7 @@
     "OverlayHalo.kt:143": 1,
     "OverlayService.kt:232": 1,
     "OverlayReport.kt:348": 1,
-    "OverlayPanel.kt:833": 1,
+    "OverlayPanel.kt:848": 1,
     "OverlayPanel.kt:110": 1,
     "EngineService.kt:37": 1,
     "NotifyStore.kt:197": 1,
@@ -766,7 +766,7 @@
     "index.ts:142": 1,
     "snapshot-panels-observer.ts:47": 1,
     "snapshot-panels.css.ts:15": 1,
-    "MainActivity.kt:928": 1,
+    "MainActivity.kt:946": 1,
     "mobile-form.css.ts:21": 1,
     "composer-insets.css.ts:13": 1,
     "keyboard-boundary.ts:94": 1,
@@ -797,19 +797,19 @@
     "index.ts:380": 1,
     "native-browser-presentation.ts:61": 1,
     "back-stack.ts:551": 1,
-    "MainActivity.kt:808": 1,
+    "MainActivity.kt:826": 1,
     "BackGate.kt:126": 1,
     "BackGate.kt:38": 1,
     "index.ts:432": 1,
-    "MainActivity.kt:1035": 1,
+    "MainActivity.kt:1053": 1,
     "DownloadSaver.kt:61": 1,
     "theme-bridge.ts:68": 1,
-    "MainActivity.kt:885": 1,
-    "LogCollector.kt:740": 1,
+    "MainActivity.kt:903": 1,
+    "LogCollector.kt:750": 1,
     "EngineStartFlow.kt:206": 1,
-    "LogCollector.kt:755": 1,
-    "LogCollector.kt:780": 1,
-    "MainActivity.kt:1062": 1,
+    "LogCollector.kt:765": 1,
+    "LogCollector.kt:790": 1,
+    "MainActivity.kt:1080": 1,
     "EngineStartFlow.kt:317": 1,
     "EngineStartFlow.kt:350": 1,
     "UndoGate.kt:165": 1,
@@ -876,7 +876,7 @@
     "verify-webview-015.mjs:11": 1,
     "verify-vdisplay-viewer.mjs:106": 1,
     "verify-webview-015.mjs:60": 1,
-    "MainActivity.kt:1169": 1,
+    "MainActivity.kt:1187": 1,
     "verify-state-sync.mjs:106": 1,
     "verify-engine-log-copy.mjs:28": 1,
     "device-smoke.ps1:24": 1,
@@ -1304,40 +1304,40 @@
     "GuidePageRenderer.kt:781": [
       "when (presentation) {"
     ],
-    "LogCollector.kt:395": [
+    "LogCollector.kt:405": [
       "/**"
     ],
-    "LogCollector.kt:458": [
+    "LogCollector.kt:468": [
       ""
     ],
-    "LogCollector.kt:740": [
+    "LogCollector.kt:750": [
       "}"
     ],
-    "LogCollector.kt:755": [
+    "LogCollector.kt:765": [
       ""
     ],
-    "LogCollector.kt:780": [
+    "LogCollector.kt:790": [
       "* (dsh-live2d-pets): The requested module '@deepseek-ai/dsh-settings' does not provide an export"
     ],
-    "LogCollector.kt:785": [
+    "LogCollector.kt:795": [
       "internal fun describeEngineLogState(filesDir: File): String {"
     ],
-    "MainActivity.kt:1035": [
+    "MainActivity.kt:1053": [
       "* 由 [VdisplayController.reclaimIdle] 判定（阈值 10 分钟未使用）。"
     ],
-    "MainActivity.kt:1059": [
+    "MainActivity.kt:1077": [
       "override fun onStop() {"
     ],
-    "MainActivity.kt:1062": [
+    "MainActivity.kt:1080": [
       "vdisplayReaper = null"
     ],
-    "MainActivity.kt:1081": [
+    "MainActivity.kt:1099": [
       "splashOverlay = null"
     ],
-    "MainActivity.kt:1169": [
+    "MainActivity.kt:1187": [
       "isEnabled = false"
     ],
-    "MainActivity.kt:1172": [
+    "MainActivity.kt:1190": [
       "}"
     ],
     "MainActivity.kt:145": [
@@ -1367,58 +1367,58 @@
     "MainActivity.kt:549": [
       "true"
     ],
-    "MainActivity.kt:570": [
+    "MainActivity.kt:579": [
       "} else {"
     ],
-    "MainActivity.kt:574": [
+    "MainActivity.kt:583": [
       "if (userClosedEngine) EngineService.userShutdown = true"
     ],
-    "MainActivity.kt:610": [
+    "MainActivity.kt:619": [
       "LogCollector.start(this)"
     ],
-    "MainActivity.kt:647": [
+    "MainActivity.kt:663": [
       "// §2.3（0.14.1 块C）：未设背景色时默认白，白屏在视觉上与「正常空页」不可区分——渲染失败"
     ],
-    "MainActivity.kt:774": [
+    "MainActivity.kt:792": [
       "pendingNotifySession = session"
     ],
-    "MainActivity.kt:777": [
+    "MainActivity.kt:795": [
       "}"
     ],
     "MainActivity.kt:78": [
       "private var webSystemBottomInset = 0"
     ],
-    "MainActivity.kt:787": [
+    "MainActivity.kt:805": [
       "consumeNotifyRoute(intent)"
     ],
-    "MainActivity.kt:789": [
+    "MainActivity.kt:807": [
       ""
     ],
-    "MainActivity.kt:793": [
+    "MainActivity.kt:811": [
       "if (!pageUiActive || !webViewReady || webView.visibility != android.view.View.VISIBLE) return"
     ],
-    "MainActivity.kt:798": [
+    "MainActivity.kt:816": [
       "val generation = pageRecovery.generation"
     ],
-    "MainActivity.kt:808": [
+    "MainActivity.kt:826": [
       "return@evaluateJavascript"
     ],
-    "MainActivity.kt:817": [
+    "MainActivity.kt:835": [
       "}"
     ],
-    "MainActivity.kt:820": [
+    "MainActivity.kt:838": [
       "runOnUiThread {"
     ],
-    "MainActivity.kt:827": [
+    "MainActivity.kt:845": [
       ").show()"
     ],
-    "MainActivity.kt:855": [
+    "MainActivity.kt:873": [
       "if (pendingWebPresentation) showWeb()"
     ],
-    "MainActivity.kt:885": [
+    "MainActivity.kt:903": [
       "NotifyCenter.syncChannelNames(this)"
     ],
-    "MainActivity.kt:928": [
+    "MainActivity.kt:946": [
       "if (!userClosedEngine && autoStart && webView.visibility != View.VISIBLE) {"
     ],
     "MobileChrome.tsx:35": [
@@ -1574,16 +1574,16 @@
     "OverlayLiveFeed.kt:28": [
       "fun startWatcher() {"
     ],
-    "OverlayPanel.kt:1058": [
+    "OverlayPanel.kt:1073": [
       "if (cur != null && cur.submittedAt > 0L) {"
     ],
     "OverlayPanel.kt:110": [
       "private fun handleMuxFrame(text: String) {"
     ],
-    "OverlayPanel.kt:1172": [
+    "OverlayPanel.kt:1187": [
       "} else if (svc.sessionBusy) {"
     ],
-    "OverlayPanel.kt:1175": [
+    "OverlayPanel.kt:1190": [
       "// 模板化（用户拍板）：调工具 → 工具类型 + 概览；思考 → Deep diving 扫光。"
     ],
     "OverlayPanel.kt:175": [
@@ -1622,22 +1622,22 @@
     "OverlayPanel.kt:71": [
       "//   提问跳过 outcome={kind:\"rejected\",error:{name,message}}；审批无取消通道。"
     ],
-    "OverlayPanel.kt:816": [
+    "OverlayPanel.kt:831": [
       "setMargins(0, (2 * dp).toInt(), 0, (4 * dp).toInt())"
     ],
-    "OverlayPanel.kt:822": [
+    "OverlayPanel.kt:837": [
       "// 选项时用户看不到剩余候选，只能被迫手打。现在默认列 6 项（卡面高度有限）+ 一行明示入口。"
     ],
-    "OverlayPanel.kt:833": [
+    "OverlayPanel.kt:848": [
       "gravity = Gravity.CENTER_VERTICAL"
     ],
     "OverlayPanel.kt:85": [
       "private val qOptsExpanded = HashSet<String>()"
     ],
-    "OverlayPanel.kt:902": [
+    "OverlayPanel.kt:917": [
       "}, LinearLayout.LayoutParams((18 * dp).toInt(), (18 * dp).toInt()).apply { marginEnd = (8 * dp).toInt() })"
     ],
-    "OverlayPanel.kt:945": [
+    "OverlayPanel.kt:960": [
       "foot.addView(TextView(svc).apply {"
     ],
     "OverlayReport.kt:164": [
@@ -2108,13 +2108,13 @@
     "app/src/main/java/com/dsharnessmobile/shell/GlobalActionCatalog.kt:47": [
       "* ③ 其余：系统列表为空（部分 ROM 不报）时按 API 下限放行，非空时以系统列表为准。"
     ],
-    "app/src/main/java/com/dsharnessmobile/shell/LogCollector.kt:458": [
+    "app/src/main/java/com/dsharnessmobile/shell/LogCollector.kt:468": [
       ""
     ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1035": [
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1053": [
       "* 由 [VdisplayController.reclaimIdle] 判定（阈值 10 分钟未使用）。"
     ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1118": [
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1136": [
       ""
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:137": [
@@ -2144,28 +2144,28 @@
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:391": [
       "}"
     ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:610": [
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:619": [
       "LogCollector.start(this)"
     ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:672": [
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:690": [
       "// Activity-owned isolated WebView only through the process-wide holder."
     ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:724": [
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:742": [
       "if (consumePendingSelfRetry()) {"
     ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:776": [
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:794": [
       "deliverNotifyRoute()"
     ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:817": [
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:835": [
       "}"
     ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:820": [
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:838": [
       "runOnUiThread {"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:89": [
       ""
     ],
-    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:928": [
+    "app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:946": [
       "if (!userClosedEngine && autoStart && webView.visibility != View.VISIBLE) {"
     ],
     "app/src/main/java/com/dsharnessmobile/shell/MuxClient.kt:172": [
