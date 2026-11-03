@@ -44,6 +44,15 @@ class MuxClient(
     private const val TAG = "dsh-overlay-mux"
     private const val GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
     private const val MAX_FRAME = 8 * 1024 * 1024
+
+    /**
+     * 一条**消息**（可能由多个分片组成）的累计上限（issue #1402）。
+     *
+     * [MAX_FRAME] 只管单帧：上游把一条消息拆成 N 个 `fin=0` 分片时，旧实现让 [textBuf]
+     * 一直长到 MAX_FRAME×N——异常或恶意上游能把壳侧直接撑到 OOM。与单帧同量级即可：
+     * 正常的 `$events` 帧远小于这个数，超限说明对端不按协议说话。
+     */
+    internal const val MAX_MESSAGE = 8 * 1024 * 1024
     /** $events 流的默认 streamId（悬浮球）。 */
     const val STREAM_ID = "dsh-overlay-events"
   }
@@ -214,8 +223,8 @@ class MuxClient(
       val payload = ByteArray(len.toInt()).also { readN(ins, it) }
       if (mask != null) for (i in payload.indices) payload[i] = (payload[i].toInt() xor mask[i % 4].toInt()).toByte()
       when (opcode) {
-        0x1 -> { textBuf.reset(); textBuf.write(payload); if (fin) emitText() }
-        0x0 -> { textBuf.write(payload); if (fin) emitText() }
+        0x1 -> { textBuf.reset(); appendText(payload); if (fin) emitText() }
+        0x0 -> { appendText(payload); if (fin) emitText() }
         // 服务端**正常**收流（close 帧）：这不是「连不上」，必须与失败分开处理——
         // 见 [MuxServerClosedException] 与重连循环里的快速重连分支。
         0x8 -> { sendFrame(out, 0x8, payload); throw MuxServerClosedException("server close") }
@@ -224,6 +233,18 @@ class MuxClient(
         else -> {}
       }
     }
+  }
+
+  /**
+   * 写入文本分片并守住**跨分片累计**上限（issue #1402）：超限即重置缓冲并断开，
+   * 不把半条消息交给下游（走 `loop()` 的失败路径重连，与其它协议错误同一处置）。
+   */
+  internal fun appendText(payload: ByteArray) {
+    if (textBuf.size().toLong() + payload.size > MAX_MESSAGE) {
+      textBuf.reset()
+      throw Exception("message too big (> " + MAX_MESSAGE + " bytes across fragments)")
+    }
+    textBuf.write(payload)
   }
 
   private fun emitText() {
