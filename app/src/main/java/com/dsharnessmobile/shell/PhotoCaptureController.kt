@@ -32,6 +32,8 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
   private data class Pending(
     val raw: File,
     val target: File,
+    /** 受理时刻（毫秒）。恢复回来的记录带的是落盘时的值——过期判据要用它（issue #1389）。 */
+    val startedAt: Long = System.currentTimeMillis(),
     val reply: (String) -> Unit,
   )
 
@@ -115,7 +117,12 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
       is PhotoCapture.PendingRecovery.None -> clearPendingState()
       is PhotoCapture.PendingRecovery.Resume -> {
         // 接着走既有的收尾路径：结果一到就压缩 + 投递 + 回执，与同进程内拍照完全同形。
-        pending = Pending(raw = recovery.raw, target = recovery.target, reply = { payload -> pushToPage(payload) })
+        pending = Pending(
+          raw = recovery.raw,
+          target = recovery.target,
+          startedAt = recovery.startedAt,
+          reply = { payload -> pushToPage(payload) },
+        )
         LogCollector.log("dsh-photo", "pending capture restored: " + recovery.raw.name)
       }
       is PhotoCapture.PendingRecovery.Lost -> {
@@ -196,9 +203,22 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
 
   /** 发起一次拍照。最终结果走 [reply]（主线程回调）。 */
   private fun capture(reply: (String) -> Unit) {
-    if (pending != null) {
-      reply(PhotoCapture.errorPayload(english, PhotoCapture.CODE_BUSY))
-      return
+    val inFlight = pending
+    if (inFlight != null) {
+      // issue #1389：恢复回来的在途记录可能永远等不到相机结果（相机进程同死 / ROM 丢结果）。
+      // 15 分钟窗口原来只在 classifyPending 里算一次、没有定时器 ⇒ pending 永不为 null，
+      // 此后每次拍照都回 BUSY，只能重启应用。这里每次入口重算：过期就清掉并如实回一条失败，
+      // 然后照常发起这一次拍照（用户不必再点一次）。
+      if (!PhotoCapture.isPendingStale(inFlight.startedAt, System.currentTimeMillis())) {
+        reply(PhotoCapture.errorPayload(english, PhotoCapture.CODE_BUSY))
+        return
+      }
+      pending = null
+      clearPendingState()
+      inFlight.raw.delete()
+      inFlight.reply(
+        PhotoCapture.errorPayload(english, PhotoCapture.CODE_CAMERA_FAILED, "pending-stale"),
+      )
     }
     val names = PhotoCapture.namesFor(System.currentTimeMillis())
     val raw = File(PhotoCapture.rawDir(activity), names.first)
