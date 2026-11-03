@@ -340,6 +340,36 @@ test('#1308 内部标记不得落盘：passwordCleared 只是进程内的传递�
     '清空后的磁盘配置键集合应回到最简形态，实得 ' + JSON.stringify(afterClear))
 })
 
+test('#1308 清空密码的意图不跨重启存续：重启后与「从未设置过」收敛到同一状态', async () => {
+  // passwordCleared 是**进程内**传递位：它只用来在一次 proxySetConfig 调用里区分
+  // 「显式清空」与「没给」，不写盘、也不产生任何持久化的「已清空」状态。
+  //
+  // 这是刻意的：清空之后的磁盘事实就是「没有这个凭据」，重启后既不该复活旧密码，
+  // 也不该凭空冒出一个「曾清空过」的标记——对用户而言两者是同一个结果（无密码），
+  // 语叉上也不该分叉（没有凭据就是没有凭据）。
+  const clearedHome = makeHome()
+  const cleared = await loadHttpModule(clearedHome)
+  await cleared.proxySetConfig({ enabled: true, url: 'http://127.0.0.1:7890/', username: 'bob', password: secret('was-set'), bypass: [] })
+  await cleared.proxySetConfig({ enabled: true, url: 'http://127.0.0.1:7890/', username: 'bob', password: null, bypass: [] })
+  const clearedDisk = JSON.parse(readFileSync(cleared.proxyFilePath(), 'utf8'))
+
+  // 「重启」= 同一份磁盘、全新模块实例；不用上一轮的进程状态。
+  const rebooted = await loadHttpModule(clearedHome)
+  const rebootedView = await rebooted.proxyGetConfig()
+  assert.equal(Object.hasOwn(clearedDisk, 'passwordCleared'), false, '内部标记不得落盘（清空路径）')
+  assert.equal(rebootedView.passwordSet, false, '重启后密码必须仍是「没有」，不得复活')
+  assert.equal(agentCredential().password, '', '重启后代理不得再带旧密码，实得 ' + JSON.stringify(agentCredential().password))
+
+  // 对照组：从未设置过密码的配置，重启后必须落在完全相同的形状上。
+  const neverHome = makeHome()
+  const never = await loadHttpModule(neverHome)
+  await never.proxySetConfig({ enabled: true, url: 'http://127.0.0.1:7890/', username: 'bob', bypass: [] })
+  const neverDisk = JSON.parse(readFileSync(never.proxyFilePath(), 'utf8'))
+  assert.deepEqual(clearedDisk, neverDisk,
+    '「清空过」与「从未设置过」的磁盘形态不一致——那会让重启后的语义分叉：'
+    + JSON.stringify(clearedDisk) + ' vs ' + JSON.stringify(neverDisk))
+})
+
 test('#1308 负控 B：抽掉 proxySetConfig 的「有 userinfo 就不播种」，粘贴的新密码必须被顶替', async () => {
   const newPass = secret('mutant-b')
   const http = await loadHttpModule(makeHome(), writeMutant((source) => source.replace(
