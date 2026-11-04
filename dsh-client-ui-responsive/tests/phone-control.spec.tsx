@@ -1050,23 +1050,28 @@ describe('文件属主维护异步结算（rootGrant.ownership）', () => {
     expect(el.textContent).not.toContain('启动文件属主维护失败')
   })
 
-  it('失败红字在轮询看到推进后自愈（issue #1376）', async () => {
+  it('有历史成功记录时，本次失败的红字仍必须出现（issue #1376）', async () => {
     vi.useFakeTimers()
     vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
-    let ownership: Record<string, unknown> = { running: false, startedAt: 0, completedAt: 0 }
+    // 设备上以前成功修过一次：轮询里**永远**有一条旧的 completed 记录。
+    // 只按「现在是不是 completed」判自愈，会把刚出现的红字在下一个 tick 立刻抹掉。
+    let ownership: Record<string, unknown> = { running: false, startedAt: 10, completedAt: 20, result: completedRepair }
     const rootGrantState = vi.fn(() => rootGrantJson({ ownership }))
     // 第一次点击被壳侧拒绝（例如 root 未授权）→ 红字
     const repairRootOwnership = vi.fn(() => JSON.stringify({ ok: false, code: 'denied', reason: 'root-missing' }))
     const el = await render({ rootGrantState, repairRootOwnership, setRootGranted: vi.fn(), setRootConsent: vi.fn() })
     await act(async () => { buttonByText(el, '修复文件属主').click() })
     expect(el.textContent).toContain('启动文件属主维护失败')
-    // 2s 轮询把 ownership 刷成 running：红字必须让位，改由 describeOwnershipRepair 接管
-    ownership = { running: true, startedAt: 10, completedAt: 0, overdue: false }
+    // 旧记录原样再来一次（没有推进）：红字必须留着。
+    await act(async () => { vi.advanceTimersByTime(2_000) })
+    expect(el.textContent).toContain('启动文件属主维护失败')
+    // 真正推进：新的 startedAt 且 running —— 这时才允许清除。
+    ownership = { running: true, startedAt: 30, completedAt: 0, overdue: false }
     await act(async () => { vi.advanceTimersByTime(2_000) })
     expect(el.textContent).not.toContain('启动文件属主维护失败')
     expect(buttonByText(el, '属主维护进行中').disabled).toBe(true)
     // 再刷成 completed：仍不得回退到失败文案
-    ownership = { running: false, startedAt: 10, completedAt: 20, result: completedRepair }
+    ownership = { running: false, startedAt: 30, completedAt: 40, result: completedRepair }
     await act(async () => { vi.advanceTimersByTime(2_000) })
     expect(el.textContent).not.toContain('启动文件属主维护失败')
     expect(el.textContent).toContain('文件属主维护完成')

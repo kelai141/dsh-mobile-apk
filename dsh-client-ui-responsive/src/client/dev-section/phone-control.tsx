@@ -19,7 +19,7 @@
  *  - **授权只能由用户在 Shizuku 内完成**（被提权方不得自改授权），壳侧只负责把人送到界面；
  *    回到本页每 2 秒轮询一次状态，授权完成会自动收敛，不需要用户手动点刷新。
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useShellState } from '../mobile/use-shell-state.ts'
 import { describeCallReason } from '../user-copy.ts'
 import { Button, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -791,6 +791,8 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
 
   const [repairReply, setRepairReply] = useState<RootOwnershipStatus | undefined>()
   const [repairFailure, setRepairFailure] = useState<string | undefined>()
+  /** 发起修复时的属主维护基线（issue #1376）：只有轮询**越过**它才算「有推进」。 */
+  const repairBaselineRef = useRef<{ startedAt: number; completedAt: number } | null>(null)
   const polledRepair = rootGrant.ownership ?? OWNERSHIP_UNREADABLE
   const repairState = polledRepair.readable && polledRepair.startedAt >= (repairReply?.startedAt ?? 0)
     ? polledRepair : repairReply ?? polledRepair
@@ -798,6 +800,9 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
 
   /** Native request is asynchronous and single-flight; only later native result counts as completed. */
   const repairOwnership = useCallback(() => {
+    // 点击即记基线：此后只认「越过基线」。没有比较对象时，只看「现在是不是 running/completed」
+    // 会把**上一次**的成功记录当成这次的自愈证据。
+    repairBaselineRef.current = { startedAt: polledRepair.startedAt, completedAt: polledRepair.completedAt }
     let raw: string | undefined
     try { raw = window.androidBridge?.repairRootOwnership?.() } catch { raw = undefined }
     const parsed = parseRootReply(raw)
@@ -811,7 +816,7 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
       setRepairFailure('启动文件属主维护失败：' + describeCallReason(typeof parsed?.reason === 'string' ? parsed.reason : undefined))
     }
     refreshRootGrant()
-  }, [refreshRootGrant])
+  }, [refreshRootGrant, polledRepair.startedAt, polledRepair.completedAt])
 
   // issue #1376：红字不可自愈——点「修复文件属主」失败后，后续 2s 轮询即使把 ownership 刷成
   // running / completed，界面仍停在「启动文件属主维护失败」。这里在轮询看到推进时清掉失败态，
@@ -819,9 +824,14 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
   useEffect(() => {
     if (repairFailure === undefined) return
     if (!polledRepair.readable) return
-    if (polledRepair.running || (polledRepair.completedAt > 0 && polledRepair.result !== undefined)) {
-      setRepairFailure(undefined)
-    }
+    // 判据是「**越过基线**」，不是「现在看起来在跑/已完成」：设备上以前成功修过一次时，
+    // 轮询里永远有一条旧的 completed 记录；只按形态判断会把刚出现的红字在下一个 tick 立刻
+    // 抹掉——失败**根本不会显示**（同 startedAt 更不该清）。
+    const base = repairBaselineRef.current
+    if (base === null) return
+    const advanced = polledRepair.startedAt > base.startedAt
+      || (polledRepair.completedAt > base.completedAt && polledRepair.result !== undefined)
+    if (advanced) setRepairFailure(undefined)
   }, [polledRepair, repairFailure])
 
   /**
