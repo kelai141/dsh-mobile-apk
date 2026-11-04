@@ -293,6 +293,75 @@ function applySub(pattern,matched,whole,position,original){
     if(typeof AP.findLast==='undefined'){defNonEnum('findLast',function(predicate,thisArg){var o=Object(this);checked(predicate);return scan(o,predicate,thisArg,false)})}
     if(typeof AP.findLastIndex==='undefined'){defNonEnum('findLastIndex',function(predicate,thisArg){var o=Object(this);checked(predicate);return scan(o,predicate,thisArg,true)})}
   })();`,
+  // Web Speech API（issue #1307）：Android WebView **不实现** speechSynthesis / SpeechSynthesisUtterance
+  // （Chromium 任何版本都不接系统 TTS 引擎），依赖朗读的插件在手机上永远无声，而且不报错——调用点拿不到
+  // 对象，只能降级或失效。这里用壳面 window.androidBridge.tts* 补最小可用面：
+  // getVoices / speak / cancel + start·end·error 事件。
+  //
+  // 判据（scripts/web-speech-polyfill.test.mjs）只认**行为**，其中最关键的一条是**失败必须可见**：
+  // 桥方法缺席或返回 ok:false 时一律派发 error 事件并把原因留在 speechSynthesis.__dshLastError 上，
+  // 不许静默当成「说过话」（v1 也不编造 end：只有桥面明确回 done/finished 才派发）。
+  // v1 不做 pause/resume（Android TTS 与 Web 语义不一致，见 issue #1307 的「第一版不做」）：
+  // 调用它们会派发 error 并写明不支持，而不是假装暂停成功。
+  // 只在 speechSynthesis 缺失时安装（幂等）：桌面 Chrome/新版内核上永远跳过补丁。
+  `if(typeof speechSynthesis==='undefined'){(function(g){
+function bridge(){var b=g.androidBridge;return b&&typeof b==='object'?b:null}
+function str(v){return typeof v==='string'?v:''}
+function num(v,d){var n=Number(v);return isFinite(n)?n:d}
+function parse(raw){if(typeof raw!=='string'||raw==='')return null;try{return JSON.parse(raw)}catch(e){return null}}
+function reasonOf(bad,fallback){return bad&&typeof bad.reason==='string'&&bad.reason!==''?bad.reason:fallback}
+function fire(u,type,detail){var h=u?u['on'+type]:null;if(typeof h==='function'){try{h.call(u,detail||{type:type,utterance:u})}catch(e){}}}
+function Utterance(text){this.text=text===undefined?'':String(text);this.lang='';this.voice=null;this.volume=1;this.rate=1;this.pitch=1;this.onstart=null;this.onend=null;this.onerror=null;this.onpause=null;this.onresume=null;this.onmark=null;this.onboundary=null}
+Utterance.prototype.addEventListener=function(type,handler){if(typeof handler==='function')this['on'+type]=handler}
+Utterance.prototype.removeEventListener=function(type,handler){if(this['on'+type]===handler)this['on'+type]=null}
+function assertUtterance(u){if(u===null||typeof u!=='object'||typeof u.text!=='string')throw new TypeError('speechSynthesis.speak: argument must be a SpeechSynthesisUtterance')}
+var voices=[],pending=null,speaking=false,lastError=''
+function fail(u,reason){lastError=reason;synth.__dshLastError=reason;if(g.console&&typeof g.console.error==='function')g.console.error('speechSynthesis: '+reason);fire(u,'error',{type:'error',error:'synthesis-failed',reason:reason,utterance:u||null})}
+function succeed(){lastError='';synth.__dshLastError=''}
+var synth={
+  speaking:false,
+  pending:false,
+  paused:false,
+  onvoiceschanged:null,
+  __dshLastError:'',
+  __dshPolyfill:'web-speech-v1',
+  getVoices:function(){
+    var b=bridge()
+    if(!b||typeof b.ttsVoices!=='function'){fail(null,'bridge unavailable: window.androidBridge.ttsVoices');return voices.slice()}
+    var out=parse(b.ttsVoices())
+    if(!out||out.ok===false){fail(null,reasonOf(out,'ttsVoices failed'));return voices.slice()}
+    var list=Array.isArray(out.voices)?out.voices:[]
+    voices=list.map(function(v,i){return {name:str(v&&v.name)||('voice-'+i),lang:str(v&&v.lang),local:!!(v&&v.local),default:!!(v&&v.default)||i===0,voiceURI:'dsh-tts:'+(str(v&&v.name)||i)}})
+    succeed()
+    if(typeof synth.onvoiceschanged==='function'){try{synth.onvoiceschanged({type:'voiceschanged'})}catch(e){}}
+    return voices.slice()
+  },
+  speak:function(u){
+    assertUtterance(u)
+    var b=bridge()
+    if(!b||typeof b.ttsSpeak!=='function'){fail(u,'bridge unavailable: window.androidBridge.ttsSpeak');return}
+    var out=parse(b.ttsSpeak(u.text,u.lang,num(u.rate,1),num(u.pitch,1)))
+    if(!out||out.ok===false){fail(u,reasonOf(out,'ttsSpeak failed'));return}
+    succeed()
+    pending=u;speaking=true;synth.speaking=true;synth.pending=true
+    fire(u,'start',{type:'start',utterance:u})
+    /* v1 不编造 end：只有桥面**明确**报完成（done/finished）才派发。 */
+    if(out.done===true||out.finished===true){pending=null;speaking=false;synth.speaking=false;synth.pending=false;fire(u,'end',{type:'end',utterance:u})}
+  },
+  cancel:function(){
+    var b=bridge(),u=pending
+    if(b&&typeof b.ttsStop==='function'){var out=parse(b.ttsStop());if(out&&out.ok===false)fail(u,reasonOf(out,'ttsStop failed'))}
+    else fail(u,'bridge unavailable: window.androidBridge.ttsStop')
+    pending=null;speaking=false;synth.speaking=false;synth.pending=false
+    if(u){fire(u,'end',{type:'end',utterance:u})}
+  },
+  pause:function(){fail(pending,'pause is not supported by the DSH Web Speech polyfill (v1)')},
+  resume:function(){fail(pending,'resume is not supported by the DSH Web Speech polyfill (v1)')}
+}
+g.SpeechSynthesisUtterance=Utterance
+g.speechSynthesis=synth
+})(typeof globalThis!=='undefined'?globalThis:this)}`,
+
 ];
 
 // Boot watchdog (2026-08-17, issue #36): when the page stays on "Loading plugins…" for over 40s,
