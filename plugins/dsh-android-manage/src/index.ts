@@ -45,6 +45,8 @@ import {
   isCommitAccepted,
   hasAuthoritativeCommit,
   parseBroadcastResult,
+  shellQuote,
+  resolveImeRestoreTarget,
 } from './ime-broadcast.js'
 
 /**
@@ -2115,9 +2117,20 @@ properties: {
         if (!authState.ok) return { ok: false, denied: false, channel: 'adbkeyboard', text: kbAuthMissingText(authState.reason) }
         const auth = authState.auth
         const cur = await execShell(`settings get secure default_input_method`).catch(() => ({ ok: false, stdout: '' }))
-        const prev = (cur.ok ? cur.stdout : '').trim().replace(/^"|"$/g, '')
+        const rawPrev = (cur.ok ? cur.stdout : '').trim().replace(/^"|"$/g, '')
+        // issue #1371 第三条路：读回值不可还原时**不能直接放弃**——不切换会让本通道键盘不被激活，
+        // 广播拿 imeNotReady，文本注入整条失效，而那批设备正是本 issue 的现场。也不能「切换了不管还原」
+        // （那就是原来的伤害）。先试读回值，再退到 `ime list -s` 里一个非本通道的已启用输入法。
+        let restore = resolveImeRestoreTarget(rawPrev, '', IME_ID)
+        if (restore.source === 'none') {
+          const listed = await execShell(`ime list -s`).catch(() => ({ ok: false, stdout: '' }))
+          if (listed.ok) restore = resolveImeRestoreTarget(rawPrev, listed.stdout, IME_ID)
+        }
+        const prev = restore.id
         await execShell(`ime enable ${IME_ID}`).catch(() => undefined)
-        const needSwitch = prev.length > 0 && prev !== IME_ID
+        // prev === IME_ID：用户本来就用本通道键盘，无需切换；其余（含 prev 为空）都要切，否则广播不会被提交。
+        const needSwitch = prev !== IME_ID
+        const canRestore = prev.length > 0
         if (needSwitch) await execShell(`ime set ${IME_ID}`).catch(() => undefined)
         type KbSend = { ok: boolean; stdout: string; guidance?: string; code: number | null }
         const sendKb = async (action: string, msg?: string): Promise<KbSend> => {
@@ -2134,7 +2147,7 @@ properties: {
         }
         const kbFailText = (action: string, code: number | null): string => {
           const what = action === KB_ACTION_CLEAR ? '清空' : '输入'
-          if (code === KB_RESULT.imeNotReady) return `${what}未落地：内嵌输入法尚未被系统绑定（ime set 后未就绪）——请确认「DSH 设备键盘」已在系统里启用，稍后重试`
+          if (code === KB_RESULT.imeNotReady) return `${what}未落地：内嵌输入法尚未被系统绑定（ime set 后未就绪）——若本次未能切换（原输入法不可读且 \`ime list -s\` 为空），请手动切到「DSH 设备键盘」后重试；否则只是绑定竞态，稍后重试即可`
           if (code === KB_RESULT.noConnection) return `${what}未落地：目标输入框没有输入连接（可能未聚焦或已被回收）——请先点聚焦目标输入框后重试`
           if (code === KB_RESULT.rejected) return `${what}未落地：广播来源校验被拒（只有 adb shell/root 直发或携带有效 auth nonce 才能通过，见 AdbKeyboardReceiver 注释）`
           if (code === KB_RESULT.badRequest) return `${what}未落地：广播请求不合法（文本为空或动作不识别）`
@@ -2203,11 +2216,15 @@ properties: {
             ok: true,
             denied: false,
             channel: 'adbkeyboard',
-            text: `${act}（ADBKeyboard${needSwitch ? '，IME 已临时切换并还原' : ''}${verifyNote}）`,
+            text: `${act}（ADBKeyboard${needSwitch
+              ? (canRestore
+                ? (restore.source === 'fallback' ? '，IME 已临时切换并按已启用列表还原' : '，IME 已临时切换并还原')
+                : '，IME 已临时切换；原输入法不可读，未能还原')
+              : ''}${verifyNote}）`,
           }
         } finally {
           // 还原用户原 IME（广播已被接收器入队提交，留 0.4s 提交窗口防切换竞态）。
-          if (needSwitch) await execShell(`sleep 0.4; ime set ${prev}`).catch(() => undefined)
+          if (needSwitch && canRestore) await execShell(`sleep 0.4; ime set ${shellQuote(prev)}`).catch(() => undefined)
         }
       }
       // input text 兜底（channel: "input" 强制；仅可见 ASCII——部分 ROM 丢字/丢空格，F5 不推荐）
