@@ -952,7 +952,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
         setDownloadButton(null, enabled = false)
       }
       ApkUpdateState.STATE_UP_TO_DATE -> {
-        val v = activity.apkUpdate.version() ?: ("v" + UpdateChecker.currentVersion())
+        val v = activity.apkUpdate.version() ?: ("v" + UpdateChecker.displayVersion())
         // 0.14.6：**不再链式调用引擎快照更新**（那条链已下线：UpdateManager.DEFAULT_MANIFEST_URL 为空、
         // 零生产覆盖点 ⇒ 必然只回「本版不提供在线更新」）。留着只会让用户以为在更新应用。
         setApkStatus(activity.getString(R.string.ds_apk_latest, v))
@@ -980,7 +980,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
         // 读屏用户拿不到「版本号在上、按钮在下」的版面关系：把这句「下的是什么版本」挂到下载按钮上，
         // 否则它只会被念成「下载」，用户无从判断点下去会装哪一版。
         chrome.apkDownload.contentDescription = activity.getString(
-          R.string.ds_apk_available, tag ?: "", "v" + UpdateChecker.currentVersion(), size,
+          R.string.ds_apk_available, tag ?: "", "v" + UpdateChecker.displayVersion(), size,
         )
       }
       ApkUpdateState.STATE_DOWNLOADING -> {

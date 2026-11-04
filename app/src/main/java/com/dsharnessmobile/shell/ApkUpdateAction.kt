@@ -594,7 +594,8 @@ internal class ApkUpdateController(private val activity: Activity) {
         return
       }
       if (r is UpdateChecker.CheckResult.Available) currentResult = r else currentResult = null
-      state.onCheckResult(r, UpdateChecker.currentVersion())
+      // 上屏/回执用**短形态**（去掉 -SN-*）；比较层用的是 UpdateChecker.currentVersion() 原值。
+      state.onCheckResult(r, UpdateChecker.displayVersion())
       settle()
     }
   }

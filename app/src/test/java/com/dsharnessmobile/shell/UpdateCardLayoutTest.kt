@@ -208,6 +208,7 @@ class UpdateCardLayoutTest {
       .substringBefore("ApkUpdateState.STATE_DOWNLOADING ->")
     assertTrue("下载按钮的 contentDescription 必须仍含当前版本",
       available.contains("R.string.ds_apk_available") &&
-        available.contains("UpdateChecker.currentVersion()"))
+        // #1511：上屏/读屏用的是**展示形态**（剥掉 -SN-* 的快照后缀）；比较层才用原值。
+        available.contains("UpdateChecker.displayVersion()"))
   }
 }

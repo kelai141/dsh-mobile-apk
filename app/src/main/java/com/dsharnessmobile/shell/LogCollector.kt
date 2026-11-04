@@ -1096,13 +1096,44 @@ object LogCollector {
    *  咽喉，写前过 EngineAuth.redact——engine.log 本体不动（鉴权链依赖），脱敏只作用于这份副本。 */
   private fun appendToDayFile(ctx: Context, text: String) {
     val day = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
-    val dir = currentDir(ctx)
-    val safe = EngineAuth.redact(text)
-    val file = File(dir, "dsh-$day.log")
-    if (file.exists() && file.length() > MAX_FILE_BYTES) {
+    appendDayFile(currentDir(ctx), day, EngineAuth.redact(text))
+  }
+
+  /**
+   * 按天日志的写锁（issue #1509）。
+   *
+   * 为什么必须加锁：这份文件有**多个写者**——[log] 的调用线程、[tick] 的调度线程、以及
+   * [emitBootSegments] 的调用线程与 probe 尾线程。它们都会进「查长度 → 可能轮转 → 追加」
+   * 这串**非原子**操作：两线程交错时，轮转窗口内的写入会落到刚被 rename 走的文件句柄上
+   * （内容写进 .1.log），长度判据也会读到别人半完成的状态。与 #1366 给分段日志加的
+   * [segmentsLock] 是同一类缺陷、同一口径。
+   */
+  private val dayFileLock = Any()
+
+  /**
+   * 「查长度 → 轮转 → 追加」整段串行（issue #1509）。
+   *
+   * 判据与动作做成参数，是为了让 JVM 单测能直接判**互斥**（注入一个会等待的 rotate，
+   * 两线程同时进来时观察是否重叠），而不是靠读源码文本——判据必须能真打红。
+   *
+   * @param dir 日志目录。
+   * @param day `yyyy-MM-dd` 日期段。
+   * @param text 已脱敏的待写文本。
+   * @param shouldRotate 轮转判据（默认：文件超过 [MAX_FILE_BYTES]）。
+   * @param rotate 轮转动作（默认：三代滚动到 .1/.2）。
+   */
+  internal fun appendDayFile(
+    dir: File,
+    day: String,
+    text: String,
+    shouldRotate: (File) -> Boolean = { it.exists() && it.length() > MAX_FILE_BYTES },
+    rotate: (File) -> Unit = { file ->
       rotateDayFile(file, File(dir, "dsh-$day.1.log"), File(dir, "dsh-$day.2.log"))
-    }
-    file.appendText(safe)
+    },
+  ) = synchronized(dayFileLock) {
+    val file = File(dir, "dsh-$day.log")
+    if (shouldRotate(file)) rotate(file)
+    file.appendText(text)
   }
 
   /**
