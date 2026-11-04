@@ -281,6 +281,9 @@ export class MobileWorkspaces implements WorkspaceNavigation {
     const panel = window.innerWidth <= WORKSPACE_MAX_WIDTH && session ? [...document.querySelectorAll<HTMLElement>('[data-sidebar-right-panel][data-sidebar-right-open]')]
       .find(node => node.getAttribute('data-sidebar-right-session') === session && !node.closest('[hidden]')) : undefined
     if (panel !== this.panel || session !== this.session) {
+      // issue #1382：上游重建右栏会走 unmount → onCancel，把进行中的分隔条拖动直接丢掉。
+      // 先把比例落盘，再重建（此时 store/panel 仍是旧的，取到的正是拖动中的那份）。
+      this.commitDivider()
       this.unmount(); this.panel = panel; this.session = session
       if (panel) {
         this.status = document.createElement('div'); this.status.className = 'dsh-workspace-status'; this.status.setAttribute('role', 'status')
@@ -598,8 +601,7 @@ export class MobileWorkspaces implements WorkspaceNavigation {
     const layout = this.layout(), store = this.store(), session = this.session
     if (layout && store && session && drag.moved) {
       if (drag.kind === 'divider') {
-        const grid = this.panel?.querySelector<HTMLElement>('[data-dockkit-split]'), raw = Number(grid?.style.getPropertyValue('--dsh-workspace-preview-ratio'))
-        if (Number.isFinite(raw) && raw > 0 && raw < 1) { const ratio = this.swapped.has(session) ? 1 - raw : raw; store.actions.resizeSplit(session, layout.rootId as SplitId, [ratio, 1 - ratio]) }
+        this.commitDivider()
       } else {
         const target = this.paneAt(event.clientX, event.clientY)
         if (target !== undefined && target !== drag.pane) this.swap()
@@ -607,6 +609,24 @@ export class MobileWorkspaces implements WorkspaceNavigation {
     }
     this.onCancel(); this.refresh()
   }
+  /**
+   * 把进行中的分隔条比例落盘（issue #1382）。
+   *
+   * 抽出来是为了让「松手」与「上游重建右栏」两个出口共用同一段落盘逻辑——旧实现只有松手会落盘，
+   * 重建走 `unmount()` 的 `onCancel()`，比例直接丢弃且没有任何提示。
+   */
+  private commitDivider(): void {
+    const drag = this.gesture
+    if (!drag || drag.kind !== 'divider' || !drag.moved) return
+    const layout = this.layout(), store = this.store(), session = this.session
+    if (!layout || !store || !session) return
+    const grid = this.panel?.querySelector<HTMLElement>('[data-dockkit-split]')
+    const raw = Number(grid?.style.getPropertyValue('--dsh-workspace-preview-ratio'))
+    if (!Number.isFinite(raw) || raw <= 0 || raw >= 1) return
+    const ratio = this.swapped.has(session) ? 1 - raw : raw
+    store.actions.resizeSplit(session, layout.rootId as SplitId, [ratio, 1 - ratio])
+  }
+
   private swap(): void {
     if (!this.session || this.panes().length !== 2) return
     // FLIP：先量旧位置，刷新到新排布后再从旧位置的偏移量动画回零，两个窗格对向滑动完成换位。
