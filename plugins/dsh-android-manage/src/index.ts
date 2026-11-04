@@ -45,7 +45,20 @@ import {
   isCommitAccepted,
   hasAuthoritativeCommit,
   parseBroadcastResult,
+  shellQuote,
 } from './ime-broadcast.js'
+
+/**
+ * 可还原的 IME id（issue #1371）：必须是 `pkg/.Component` 形态。
+ *
+ * `settings get secure default_input_method` 在未显式赋值时打印字面 `null`；旧实现把它当成 id
+ * 拼进 `ime set null`，失败被 catch 吞掉 ⇒ 用户输入法永久停在 DSH 键盘。空串与非组件形态同理。
+ */
+function restorableImeId(raw: string): boolean {
+  const v = raw.trim().replace(/^"|"$/g, '')
+  if (v === '' || v.toLowerCase() === 'null') return false
+  return /^[A-Za-z0-9_.]+\/[A-Za-z0-9_.$]+$/.test(v)
+}
 
 /**
  * 0.13.8 #183 / #413：键盘广播的 nonce 与命令构造已抽到 ./ime-broadcast.js
@@ -2115,7 +2128,10 @@ properties: {
         if (!authState.ok) return { ok: false, denied: false, channel: 'adbkeyboard', text: kbAuthMissingText(authState.reason) }
         const auth = authState.auth
         const cur = await execShell(`settings get secure default_input_method`).catch(() => ({ ok: false, stdout: '' }))
-        const prev = (cur.ok ? cur.stdout : '').trim().replace(/^"|"$/g, '')
+        const rawPrev = (cur.ok ? cur.stdout : '').trim().replace(/^"|"$/g, '')
+        // issue #1371：不可还原的形态（`null` / 空 / 非 `pkg/.Component`）一律当作「没有可还原的输入法」，
+        // 既不切换也不还原——否则会把用户输入法切走后再也切不回来。
+        const prev = restorableImeId(rawPrev) ? rawPrev : ''
         await execShell(`ime enable ${IME_ID}`).catch(() => undefined)
         const needSwitch = prev.length > 0 && prev !== IME_ID
         if (needSwitch) await execShell(`ime set ${IME_ID}`).catch(() => undefined)
@@ -2207,7 +2223,7 @@ properties: {
           }
         } finally {
           // 还原用户原 IME（广播已被接收器入队提交，留 0.4s 提交窗口防切换竞态）。
-          if (needSwitch) await execShell(`sleep 0.4; ime set ${prev}`).catch(() => undefined)
+          if (needSwitch) await execShell(`sleep 0.4; ime set ${shellQuote(prev)}`).catch(() => undefined)
         }
       }
       // input text 兜底（channel: "input" 强制；仅可见 ASCII——部分 ROM 丢字/丢空格，F5 不推荐）
