@@ -3671,9 +3671,6 @@
     "scripts/patches/data/client-index-loader-barrier.mjs:3": [
       "export function planClientIndexLoaderBarrier(source) {"
     ],
-    "scripts/patches/data/registry-scan-c4.mjs:11": [
-      "export function planClientRegistryScan(source) {"
-    ],
     "scripts/patches/data/undo-safe-transaction-snippet.mjs:1": [
       "// dsh-mobile safe mode transaction (S2) with CAS recovery failover, web-store resolver and factory-bundle filter (S5)."
     ],
@@ -3895,6 +3892,9 @@
     ],
     "NotifyStore.kt:421": [
       "heartbeat(app, trigger, offset, len)"
+    ],
+    "scripts/patches/data/registry-scan-c4.mjs:10": [
+      "export function planClientRegistryScan(source) {"
     ]
   },
   "symbols": {
