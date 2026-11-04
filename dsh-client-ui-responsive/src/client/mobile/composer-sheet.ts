@@ -1414,7 +1414,7 @@ export class ComposerSheet {
     // 必须非 passive：归属卡片时要 preventDefault 才能压住原生滚动。
     panel.addEventListener('touchmove', this.onSheetTouchMove, { passive: false })
     panel.addEventListener('touchend', this.onSheetTouchEnd)
-    panel.addEventListener('touchcancel', this.onSheetTouchEnd)
+    panel.addEventListener('touchcancel', this.onSheetTouchCancel)
     window.addEventListener('resize', this.onSheetViewport)
     if (typeof window.visualViewport === 'object' && window.visualViewport !== null) {
       window.visualViewport.addEventListener('resize', this.onSheetViewport)
@@ -1455,7 +1455,7 @@ export class ComposerSheet {
     panel.removeEventListener('touchstart', this.onSheetTouchStart)
     panel.removeEventListener('touchmove', this.onSheetTouchMove)
     panel.removeEventListener('touchend', this.onSheetTouchEnd)
-    panel.removeEventListener('touchcancel', this.onSheetTouchEnd)
+    panel.removeEventListener('touchcancel', this.onSheetTouchCancel)
   }
 
   /**
@@ -1653,6 +1653,24 @@ export class ComposerSheet {
         || (velocity < -SNAP_VELOCITY_EXPAND && drag.height > peek + DRAG_LOCK_PX))
     this.settleTo(expanded ? max : peek)
     // 拖拽结束：per-drag 几何缓存到此为止（绝不跨拖，见 dragGeometry 的注释）。
+    this.invalidateDragGeometry()
+  }
+
+  /**
+   * 手势被**系统取消**（来电、通知下拉、浏览器接管滚动）：不是用户松手，不能按提交处理。
+   *
+   * issue #1378：旧实现把 `touchcancel` 绑到 `onSheetTouchEnd`，回弹量超过阈值就直接 `close()`——
+   * 用户什么都没做，面板却被关掉。这里只吸附回原位（与松手同样的落点判定，但**没有关闭分支**）。
+   */
+  private readonly onSheetTouchCancel = (): void => {
+    const drag = this.drag
+    this.drag = null
+    if (drag === null || drag.owner !== 'sheet') return
+    this.panel()?.removeAttribute(DRAGGING_ATTR)
+    const peek = this.peekHeight()
+    const max = this.maxHeight()
+    const expanded = drag.overscroll === 0 && drag.height > (peek + max) / 2
+    this.settleTo(expanded ? max : peek)
     this.invalidateDragGeometry()
   }
 
