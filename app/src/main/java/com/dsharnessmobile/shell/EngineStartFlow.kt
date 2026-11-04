@@ -159,7 +159,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
           activity.webView.evaluateJavascript("1") { _ ->
             if (generation != monitorGeneration || !activity.pageUiActive) return@evaluateJavascript
             jsAckAt = System.currentTimeMillis()
-            pingOutstanding = false
+            pingOutstanding = false; freezeReloaded = false // #1355 应答=页面真活，重开冻结自愈预算（不能放 onPageFinished，会成 reload 循环）
           }
         } catch (_: Exception) {
           pingOutstanding = false
