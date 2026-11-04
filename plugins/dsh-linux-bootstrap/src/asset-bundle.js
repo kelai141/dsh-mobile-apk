@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { cp, mkdir, lstat, readFile, readdir, rename, rm, stat, writeFile, copyFile } from 'node:fs/promises'
+import { appendFile, cp, mkdir, lstat, readFile, readdir, rename, rm, stat, writeFile, copyFile } from 'node:fs/promises'
 import path from 'node:path'
 import { parseGithubUrl } from './manifest.js'
 
@@ -17,6 +17,71 @@ async function digestFile(filePath) {
 }
 
 const INTEGRITY_MARKER = '.dsh-asset-integrity.json'
+
+/** 回滚失败留痕文件的文件名（放在 assets root 下，与 `.backup-*` 同级）。 */
+export const ROLLBACK_FAILURE_LOG = '.rollback-failures.log'
+
+/** `.backup-<token>` 目录的默认陈旧阈值：1 小时。 */
+export const STALE_BACKUP_MS = 60 * 60 * 1000
+
+/**
+ * 回滚失败落盘（issue #1528）。
+ *
+ * 为什么必须落盘：`index.js` 只把错误塞进 `error.assetRollbackError`，既不 warn 也不写日志，
+ * 于是「半态现场」（新包已 rm、旧包 rename 不回来）事后无迹可查。这里 best-effort 追加一行，
+ * **绝不因为写日志失败而改变控制流**——调用方仍要拿到原始 rollback 错误。
+ *
+ * @param {string} root assets root（`.backup-*` 所在目录）
+ * @param {string} token 本次发布的备份 token
+ * @param {unknown} error 回滚抛出的错误
+ * @param {number} [now] 注入时钟（判据用）
+ */
+export async function recordRollbackFailure(root, token, error, now = Date.now()) {
+  const message = String((error && error.message) || error)
+  const line = JSON.stringify({ at: new Date(now).toISOString(), token, backup: `.backup-${token}`, error: message })
+  console.warn('[dsh-linux-bootstrap] rollback failed; previous copy may remain at ' + path.join(root, `.backup-${token}`) + ' (' + message + ')')
+  try {
+    await appendFile(path.join(root, ROLLBACK_FAILURE_LOG), line + '\n')
+  } catch {
+    /* 落盘失败不掩盖真错：控制流只由调用方决定 */
+  }
+}
+
+/**
+ * 清理陈旧的 `.backup-<token>` 目录（issue #1528）。
+ *
+ * 为什么需要：`deferCommit: true` 后进程若在 publish 与 commit 之间被杀，`.backup-*` 没有任何
+ * 清理路径，会长期堆积。只在发布链路入口调用，只删本类目录、只删超过阈值的。
+ *
+ * @param {string} root assets root
+ * @param {object} [options]
+ * @param {number} [options.olderThanMs] 陈旧阈值（默认 [STALE_BACKUP_MS]）
+ * @param {number} [options.now] 注入时钟（判据用）
+ * @returns {Promise<string[]>} 被删除的目录名
+ */
+export async function pruneStaleBackups(root, { olderThanMs = STALE_BACKUP_MS, now = Date.now() } = {}) {
+  const removed = []
+  let entries
+  try {
+    entries = await readdir(root, { withFileTypes: true })
+  } catch {
+    return removed
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith('.backup-')) continue
+    const full = path.join(root, entry.name)
+    try {
+      const info = await stat(full)
+      if (now - info.mtimeMs < olderThanMs) continue
+      await rm(full, { recursive: true, force: true })
+      removed.push(entry.name)
+      console.warn('[dsh-linux-bootstrap] pruned stale backup: ' + entry.name)
+    } catch {
+      /* 单个删不掉不影响其它 */
+    }
+  }
+  return removed
+}
 
 async function unpackedBytes(directory) {
   let total = 0
@@ -150,6 +215,8 @@ async function pickPackageDirectory(rootDirectory) {
  */
 export async function publishBundle({ root, finalDirectory, packageDirectory, asset, unpackedSize, token, deferCommit = false }) {
   await writeFile(path.join(packageDirectory, '.dsh-asset-integrity.json'), `${JSON.stringify({ sha256: asset.sha256, size: asset.size, unpackedSize })}`)
+  // issue #1528：进入发布链路先清陈旧 `.backup-*`——`deferCommit` 后进程被杀会留下永不清理的备份。
+  await pruneStaleBackups(root)
   const backupDirectory = path.join(root, `.backup-${token}`)
   let hadPrevious = false
   try {
@@ -209,8 +276,14 @@ export async function publishBundle({ root, finalDirectory, packageDirectory, as
     // Rollback moves the new copy out and the previous one back; it throws on failure so the
     // caller can record error.assetRollbackError instead of pretending the rollback worked.
     rollback: async () => {
-      await rm(finalDirectory, { recursive: true, force: true })
-      if (hadPrevious) await rename(backupDirectory, finalDirectory)
+      try {
+        await rm(finalDirectory, { recursive: true, force: true })
+        if (hadPrevious) await rename(backupDirectory, finalDirectory)
+      } catch (rollbackError) {
+        // issue #1528：回滚失败**必须留痕**（warn + 落盘），再原样抛出。
+        await recordRollbackFailure(root, token, rollbackError)
+        throw rollbackError
+      }
     },
   }
 }
