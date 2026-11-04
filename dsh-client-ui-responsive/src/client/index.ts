@@ -76,6 +76,7 @@ import { VENDOR_CHROME_HIDE_CSS } from './mobile/vendor-chrome-hide.css.ts'
 import { TAP_HIGHLIGHT_CSS } from './mobile/tap-highlight.css.ts'
 import { TopBarFold } from './mobile/top-bar-fold.ts'
 import { TOP_BAR_FOLD_CSS } from './mobile/top-bar-fold.css.ts'
+import { ActivationGuard } from './mobile/activation-guard.ts'
 import { NewSessionDrawer } from './mobile/new-session-drawer.ts'
 import { SidebarSessionDismiss } from './mobile/sidebar-session-dismiss.ts'
 import { DrawerOverlayDismiss } from './mobile/drawer-overlay-dismiss.ts'
@@ -849,6 +850,22 @@ export function apply(ctx: ClientContext): void {
     dismiss.attach()
     return () => { dismiss.detach() }
   }, 'ui-responsive: sidebar conversation selection dismisses drawer')
+
+  // issue #1317 / #1316：控件激活纪律（两条同源：激活落在不能表达意图的控件上）。
+  //
+  // #1317 红米 K Pad 实测：会话卡片上的「更多/归档/置顶」在**不显示**的状态下点得到——
+  // 上游用透明隐藏，透明盒仍然参与命中测试，于是「点在空白处」归档/置顶了会话。
+  // 修法不是再调一次 opacity：激活被吞掉，同时把控件移出命中面（pointer-events:none）
+  // 与聚焦树（tabindex=-1、aria-hidden）——三处一致；重新可见时原样还原。
+  //
+  // #1316 同一台机器上点「暂停对话」会弹软键盘：焦点被上游塞回输入框。这里只开一个
+  // **短窗**（250ms）并在用户下一次按下时立刻撤销，不做全局 blur：非输入控件的激活不该
+  // 抢键盘，而用户自己点输入框永远优先。
+  ctx.effect(() => {
+    const guard = new ActivationGuard()
+    guard.attach()
+    return () => { guard.detach() }
+  }, 'ui-responsive: control activation discipline (hidden inert, no IME pull)')
 
   // issue #489：抽屉收起时，侧栏里打开的 portal 行菜单（工作区「…」等）仍浮在页面上。
   // 收起入口不止本插件注入的几条（上游抽屉自己的折叠按钮直通布局服务，包装不到），所以
