@@ -2384,6 +2384,7 @@ app/src/main/java/com/dsharnessmobile/shell/ShellState.kt
 app/src/main/java/com/dsharnessmobile/shell/AppLanguage.kt
 app/src/main/java/com/dsharnessmobile/shell/UiText.kt
 app/src/main/AndroidManifest.xml
+app/src/main/java/com/dsharnessmobile/shell/SnapshotNodeRecycler.kt
 app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt
 app/src/main/java/com/dsharnessmobile/shell/CoordBasisPolicy.kt
 app/src/main/java/com/dsharnessmobile/shell/GlobalActionCatalog.kt
@@ -2696,3 +2697,5 @@ Telemetry snapshot closure: check-engine-overlay retains each dependency's decla
 **imeBorrowLock**：ADBKeyboard 借道 IME 的整段互斥（issue #1373），锁覆盖 README 阶段的两次 execShell——`plugins/dsh-android-manage/src/ime-borrow.ts:21#expect=export%20function%20createImeBorrowLock()%3A%20ImeBorrowLock%20%7B`
 
 **replaceOnce**：补丁锚点「恰好一处」替换（issue #1384）——`scripts/patches/lib/replace-once.mjs:20#expect=export%20function%20replaceOnce(source%2C%20before%2C%20after%2C%20label)%20%7B`
+
+**GenerationalNodeRecycler**：快照节点句柄延迟回收，只保留一代（issue #1361）——`app/src/main/java/com/dsharnessmobile/shell/SnapshotNodeRecycler.kt:21#expect=internal%20class%20GenerationalNodeRecycler%3CT%20%3A%20Any%3E(`
