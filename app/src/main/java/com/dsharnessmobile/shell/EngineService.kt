@@ -311,18 +311,18 @@ class EngineService : Service() {
       if (!isEpochCurrent(epoch) || epoch.watchdog.get() !== exec) return
       val now = System.currentTimeMillis()
       // §6.3（0.14.10）：本拍实际经过多久 → 折算成多少个「标准拍（5 秒）」记账。
-      // 阶梯阈值（30s/60s/90s）都按 5 秒拍标定：健康态退到 20 秒一拍后，若仍按
-      // 「一拍 = 一个阶梯单位」计数，30 秒的阶梯会变成 120 秒——审计点名的陷阱。
-      // 折算后无论调度拍长多少，恢复与熔断都落在同一时间点（见 WatchdogV2.tickUnits）。
-      // 首拍（lastWatchdogTickAt = 0）按一个标准拍处理：不能把它当成「隔了很久」，
-      // 否则服务刚起的第一拍就折算成整条阶梯（6 个标准拍），等于跳过整个观察窗。
-      // issue #1357：拍长记账必须用**单调时钟**。旧实现用墙钟（now - lastWatchdogTickAt），
-      // 系统时间前跳时 tickMs 会变得极大，而 tickUnits 封顶 6 个标准拍——两次观测就能把
-      // DEGRADED_HTTP 推满 12 拍熔断；而唤醒锁本来就用 elapsedRealtime，两处必须同域。
+      // 阶梯阈值（30s/60s/90s）都按 5 秒拍标定：健康态退到 20 秒一拍后，若仍按「一拍 = 一个
+      // 阶梯单位」计数，30 秒的阶梯会变成 120 秒。issue #1357：时钟必须单调（与唤醒锁同域）。
+      // issue #1505：单调时钟**含深睡**，而 doze 期间 postDelayed 不执行 ⇒ 唤醒后必然出现一个
+      // 巨大 tickMs。它不能算「连续失败」的观测：tickAccounting 把缺口拍按**一个**标准拍记账
+      // 并给 gap（旧实现封顶 6 拍 ⇒ 两拍就把 DEGRADED_HTTP 推满 12 拍熔断）。
+      // 首拍（lastWatchdogTickAt = 0）仍按一个标准拍处理：不能把它当成「隔了很久」。
       val mono = android.os.SystemClock.elapsedRealtime()
       val tickMs = if (epoch.lastWatchdogTickAt <= 0L) 0L else mono - epoch.lastWatchdogTickAt
       epoch.lastWatchdogTickAt = mono
-      val units = WatchdogV2.tickUnits(tickMs)
+      val accounting = WatchdogV2.tickAccounting(tickMs)
+      val units = accounting.units
+      if (accounting.gap) LogCollector.log("dsh-watchdog", accounting.log)
       // 本拍探活状态（用于定下一拍节奏；异常拍保持非健康节奏）。
       var tickState: WatchdogV2.ProbeState? = null
       // 启动流正在排队重试或修复助手持有闸门时，后台不得同时重启、回撤或改写

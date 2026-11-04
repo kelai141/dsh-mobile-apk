@@ -858,6 +858,44 @@ object WatchdogV2 {
 
   /** 终态释放（onDestroy / retireEpoch）：关闭 owner，此后一律拒绝重新 install。 */
   internal fun releaseWakeLock(owner: WakeLockOwner) { owner.acquisition.close() }
+
+  /**
+   * 「缺口拍」阈值（issue #1505）：超出最长合法调度拍（健康态 [HEALTHY_TICK_MS]）一个标准拍以上，
+   * 就不是调度抖动而是**深睡 / 进程挂起**——`Handler.postDelayed` 在 doze 期间不执行，
+   * 唤醒后的第一拍必然出现一个巨大的单调间隔。
+   *
+   * 取 [HEALTHY_TICK_MS] + [STANDARD_TICK_MS]（25s）而不是「2 个标准拍」：健康态 20 秒拍本身
+   * 就是合法的 4 个标准拍，按 10s 设阈值会把它误判成缺口（DEAD 引擎从健康拍降下来那一拍也要
+   * 折算 4 拍，压成 1 拍会让 60 秒熔断变成 240 秒）。
+   */
+  const val GAP_TICK_MS = HEALTHY_TICK_MS + STANDARD_TICK_MS
+
+  /** 一拍记账结果（issue #1505）：[units] 交给 [recordProbe] 的加权标准拍数；[gap] = 深睡/挂起后的缺口拍；[log] 缺口时的结构化日志行（非缺口为空串）。 */
+  internal data class TickAccounting(val units: Int, val gap: Boolean, val log: String = "")
+
+  /**
+   * 纯函数（issue #1505）：本拍实际经过的毫秒 -> 记账。判据见 WatchdogCadenceTest。
+   *
+   * 缺陷形态：#1357 把拍长记账从墙钟换成 `elapsedRealtime()`（这一步是对的，否则系统时间前跳
+   * 会误触熔断），但那个时钟**包含深睡**：doze 或进程挂起后第一拍的 `tickMs` 就是睡眠时长，
+   * 而 [tickUnits] 对任意大间隔都封顶 [MAX_TICK_UNITS]（6），[recordProbe] 又是
+   * `consecutiveFailures += units` ⇒ **两拍**就是 12 = 熔断。深睡唤醒因此被当成「引擎连续失败
+   * 60 秒」，自动恢复反而被抑制。
+   *
+   * 处置：缺口拍只记**一个**标准拍（等价于「醒来后看了一次、失败一次」），并给 [gap]/[log]
+   * 让调用方落 `watchdog-gap` 日志——不静默丢信息，也不让一次睡眠冒充一串失败。
+   * 合法节奏不受影响：健康态 20 秒拍（4 个标准拍）与降级态 5 秒拍（1 个）都 <= [GAP_TICK_MS]。
+   */
+  internal fun tickAccounting(elapsedMs: Long): TickAccounting {
+    if (elapsedMs > GAP_TICK_MS) {
+      return TickAccounting(
+        1,
+        true,
+        "watchdog-gap: 深睡/挂起 " + elapsedMs + "ms 后本拍按 1 个标准拍记账（缺口拍不折算，避免两拍打满熔断）",
+      )
+    }
+    return TickAccounting(tickUnits(elapsedMs), false)
+  }
 }
 
 /** CAS publication/terminal teardown. Acquisition and release may block, but never hold a lock. */
