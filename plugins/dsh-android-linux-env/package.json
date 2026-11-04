@@ -23,13 +23,18 @@
     "@dsh-android/linux-bootstrap": "file:../dsh-linux-bootstrap"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-tools": "0.2.1-rc.3",
-    "@deepseek-ai/cordis": "4.0.5"
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
+    "@deepseek-ai/cordis": "4.1.0"
   },
   "devDependencies": {
+<<<<<<< HEAD
     "@deepseek-ai/dsh-system-prompt": "0.2.1-rc.3",
     "@deepseek-ai/dsh-tools": "0.2.1-rc.3",
     "@deepseek-ai/cordis": "4.0.5",
+=======
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
+    "@deepseek-ai/cordis": "4.1.0",
+>>>>>>> d43f915a (chore(pin): contract 行面/槽位重捕 + 11 个插入行 peer 抬到 0.2.2-rc.1（本 PR 不可发布）)
     "@types/node": "^24.0.0",
     "typescript": "^5.5.0"
   },
