@@ -3452,9 +3452,6 @@
     "plugins/dsh-android-linux-env/src/index.ts:30": [
       "import { PROBE_BINARIES, REQUIRED_TOOLCHAIN, TOOLCHAIN_REPRESENTATIVE } from '@dsh-android/dsh-shell-termux'"
     ],
-    "plugins/dsh-android-linux-env/src/index.ts:337": [
-      "// 只供页面放进 `data-detail` 与审计，两端都不上正文。"
-    ],
     "plugins/dsh-android-linux-env/src/index.ts:72": [
       "const policy = serviceOf<SandboxPolicyFace>(ctx, 'sandboxPolicy')"
     ],

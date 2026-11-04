@@ -88,14 +88,24 @@ export function liveFacts(ctx: Context, session?: unknown) {
     writeMode = e.DSH_WRITE_MODE
     writeModeSource = 'env-fallback'
   }
-  const workspace = typeof e.DSH_WORKSPACE === 'string' && e.DSH_WORKSPACE !== '' ? e.DSH_WORKSPACE : process.cwd()
+  // issue #1207：`process.cwd()` 会在工作区被删/SAF 卸载后抛 ENOENT——这里不能裸调，
+  // 否则读事实的函数本身抛错，路由 handler 与所有调用方跟着炸。
+  let engineCwd = ''
+  try {
+    engineCwd = process.cwd()
+  } catch {
+    engineCwd = ''
+  }
+  const workspace = typeof e.DSH_WORKSPACE === 'string' && e.DSH_WORKSPACE !== '' ? e.DSH_WORKSPACE : engineCwd
   return {
     prefix: e.TERMUX__PREFIX ?? e.PREFIX ?? '',
     home: e.HOME ?? '',
     writeMode: writeMode ?? 'workspace-write',
     writeModeSource,
     workspace,
-    workspaceSource: typeof e.DSH_WORKSPACE === 'string' && e.DSH_WORKSPACE !== '' ? 'env-override' : 'engine-cwd',
+    workspaceSource: typeof e.DSH_WORKSPACE === 'string' && e.DSH_WORKSPACE !== ''
+      ? 'env-override'
+      : (engineCwd === '' ? 'engine-cwd-unavailable' : 'engine-cwd'),
     sharedDirs: (e.DSH_SHARED_DIRS ?? '').split(':').filter(Boolean),
     sharedDirsSource: 'env',
     termuxVersion: e.TERMUX_VERSION ?? '',
@@ -386,7 +396,9 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
       ['/api/android/env/status', () => toolchainStatus(svc?.status().tier, ctx)],
       ['/api/android/env/recipe', () => recipeExport(ctx)],
     ] as const) {
-      wsvc.register({
+      // issue #1207：注册必须走 ctx.effect——`register()` 运行期返回 disposer，裸调用会把
+      // disposer 丢掉，插件卸载/热重载后路由仍存活并从已销毁的 ctx 提供服务。
+      ctx.effect(() => wsvc.register({
         kind: 'exact',
         path,
         handler: async (req: MobileRouteRequest, res: MobileRouteResponse) => {
@@ -404,11 +416,22 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
             res.end(JSON.stringify({ ok: false, error: 'GET only' }))
             return
           }
-          const body = JSON.stringify(builder())
-          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-          res.end(body)
+          // issue #1207：处理器必须自带 try/catch——builder 抛错（例如工作区被删后 cwd ENOENT）
+          // 会让整个 handler reject，res 永不 end，客户端挂住。
+          try {
+            const body = JSON.stringify(builder())
+            res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+            res.end(body)
+          } catch (failure) {
+            res.writeHead(500, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+            res.end(JSON.stringify({
+              ok: false,
+              error: 'env-route-failed',
+              detail: failure instanceof Error ? failure.message : String(failure),
+            }))
+          }
         },
-      })
+      }))
     }
 
     // 块 E（§4.3③ 先给可回收体积再执行）：GET = 只读扫描；POST = 执行。
