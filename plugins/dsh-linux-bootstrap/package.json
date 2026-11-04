@@ -15,7 +15,8 @@
     "README.md"
   ],
   "scripts": {
-    "build": "node build.mjs"
+    "build": "node build.mjs",
+    "test": "npm run build && node --test test/*.test.mjs"
   },
   "peerDependencies": {
     "react": ">=18"

@@ -212,6 +212,42 @@ export function missingBuildArtifacts(pluginDir, testFiles) {
   }
   return { missing }
 }
+
+/**
+ * 缺产物时**按需构建**（issue #1466 后续 / 维护者裁定 A）。
+ *
+ * 为什么不让门禁去改 `plugin-dirs.json`：那是**发布面**，决定随包注入什么；
+ * 为了跑测试去改它，等于让判据改变被测对象。
+ *
+ * 只在缺产物时调用（调用点已保证），已有产物绝不重建。
+ *
+ * @param {string} pluginDir 插件目录绝对路径。
+ * @param {string} plugin 插件名（日志用）。
+ * @returns {'built-on-demand'|'build-failed'|'no-build-script'}
+ */
+function buildOnDemand(pluginDir, plugin) {
+  const pkg = (() => {
+    try { return JSON.parse(readFileSync(join(pluginDir, 'package.json'), 'utf8')) } catch { return null }
+  })()
+  const hasBuild = typeof pkg?.scripts?.build === 'string' && pkg.scripts.build.trim() !== ''
+  if (!hasBuild) return 'no-build-script'
+  const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+  console.log('NOTE  ' + plugin + '：缺构建产物，先跑 npm run build（built-on-demand）')
+  const r = runCommand(npmBin, ['run', 'build'], {
+    cwd: realpathSync(pluginDir), encoding: 'utf8', shell: process.platform === 'win32', timeout: TEST_TIMEOUT_MS,
+  })
+  const tail = stripAnsi(((r.stdout ?? '') + (r.stderr ?? '')).trim()).split('\n').slice(-3).join(' / ')
+  if (r.error !== undefined && r.error !== null) {
+    console.error('  ' + plugin + '：build-failed（' + String(r.error.code ?? r.error.message) + '）')
+    return 'build-failed'
+  }
+  if (r.status !== 0) {
+    console.error('  ' + plugin + '：build-failed（exit ' + String(r.status) + (tail ? '：' + tail : '') + '）')
+    return 'build-failed'
+  }
+  console.log('  ' + plugin + '：built-on-demand')
+  return 'built-on-demand'
+}
 /**
  * 从 `package.json` 的 test 脚本里抽出**测试路径模式集合**。
  *
@@ -531,11 +567,36 @@ for (const plugin of plugins.sort()) {
   // issue #1143：**先区分「缺构建产物」与「测试失败」**。
   // 缺产物是环境未就绪（exit 2），不是判据结论；报成「单测未通过」会误导人去改正确的代码。
   // 「全 skip = 假绿」那条判据原样保留在下方，继续抓真正的假绿。
-  const artifacts = missingBuildArtifacts(join(PLUGIN_DIR, plugin), files)
+  const pluginDir = join(PLUGIN_DIR, plugin)
+  const artifacts = missingBuildArtifacts(pluginDir, files)
   if (artifacts.missing.length > 0) {
     // 详情统一在收口处打印（一遍、聚在一起），避免与其它插件的 RUN/PASS 行交错。
-    missingArtifactPlugins.push({ plugin, missing: artifacts.missing })
-    continue
+    //
+    // issue #1466 后续（维护者裁定 A）：**只在缺产物时按需构建**，不改 `plugin-dirs.json`——
+    // 那是**发布面**（决定随包注入什么），为跑测试去改它等于让判据改变被测对象。
+    // 已有产物不重建（不浪费每次门禁的时间）。三态必须可 grep：
+    //   built-on-demand          构建跑了 → 继续跑测试（并在输出里点名该插件）
+    //   build-failed             构建失败 → 判红
+    //   lib-absent-after-build   构建声称成功但产物仍不在 → 判红
+    const built = buildOnDemand(pluginDir, plugin)
+    if (built === 'build-failed') {
+      failed += 1
+      console.error('FAIL  ' + plugin + '：build-failed（按需构建失败，测试无法运行）')
+      continue
+    }
+    if (built === 'built-on-demand') {
+      const recheck = missingBuildArtifacts(pluginDir, files)
+      if (recheck.missing.length > 0) {
+        failed += 1
+        console.error('FAIL  ' + plugin + '：lib-absent-after-build（构建声称成功但产物仍缺：'
+          + recheck.missing.map((m) => m.rel).join(', ') + '）')
+        continue
+      }
+      // 构建成功且产物齐备：落到下面的正常跑测试路径。
+    } else {
+      missingArtifactPlugins.push({ plugin, missing: artifacts.missing })
+      continue
+    }
   }
   ran += 1
   // 运行器按文件内容自动判定：本仓 6 个插件用 node:test，client/UI 侧用 vitest。
