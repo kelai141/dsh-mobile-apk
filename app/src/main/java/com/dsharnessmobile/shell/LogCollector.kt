@@ -88,7 +88,7 @@ object LogCollector {
   private const val SEGMENTS_FILE = "boot-segments.log"
 
   /** 判据文件上限：每次启动最多 3 行、单行 <200 B；超限轮转一代（.1）。 */
-  private const val SEGMENTS_MAX_BYTES = 64L * 1024
+  private const val SEGMENTS_MAX_BYTES = 64L * 1024; private val segmentsLock = Any()
 
   /**
    * 探针口径：`[perf] TOTAL calls=… totalMs=… instances=… firstAt=…ms singles=… loopP99Ms=… loopSamples=…`
@@ -480,19 +480,8 @@ object LogCollector {
   }
 
   /**
-   * 分段日志的写入锁（issue #1366）。
-   *
-   * `markFirstHttp()` 走**调用线程**直接写，而 probe 尾线程经 `maybeEmitComposeTotal → emitBootSegments`
-   * 写同一个文件；`#174` 只把 `log()` 挪进单线程执行器，没覆盖 segments 这条。于是「查长度 → 可能轮转 →
-   * 追加」这串非原子操作会被两个线程交错：轮转瞬间的 rename 与 append 可能落到两个不同代的文件上，
-   * 表现为分段行丢失或半行。
-   */
-  private val segmentsLock = Any()
-
-  /**
    * 追加一行到壳侧判据文件（files/boot-segments.log，O_APPEND；超限轮转一代 .1）。
-   * 唯一**进程**写者就是壳自己 → 不存在「被别的进程从它自己的偏移覆盖」的窗口（engine.log 的教训）；
-   * 但进程内有两个线程（调用线程 / probe 尾线程）会同时进来，故整段加锁（issue #1366）。
+   * 唯一**进程**写者是壳自己；但进程内两个线程（调用线程 / probe 尾线程）会同时进来，整段加锁（issue #1366）。
    */
   private fun appendToSegmentsFile(ctx: Context, line: String) = synchronized(segmentsLock) {
     try {
