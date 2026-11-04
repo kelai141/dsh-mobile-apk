@@ -826,9 +826,28 @@ object UpdateChecker {
     classifyTransportFailure(e)
   }
 
-  /** 当前版本（只去快照后缀 -SN-*；0.13.7fx-1-SN-1-13 → 0.13.7fx-1）。
-   *  注意：修订号 -1/-2（0.13.7fx-N 命名）**不能**当后缀剥掉，否则 fx-2 会被判成与 fx-1 同版。 */
-  fun currentVersion(): String = BuildConfig.VERSION_NAME.replace(Regex("-SN-.*$"), "")
+  /**
+   * 当前版本，**带完整后缀原值**（`0.13.7fx-1-SN-1-13` 原样返回）。
+   *
+   * issue #1511：这里曾把 `-SN-*` 剥掉再用，于是 `isNewer` 的 `prereleaseOf(current)` 恒为 null，
+   * 走 `preB == null -> false` —— **SN 快照构建恒判「已是最新」**，装快照的测试者收不到后续快照。
+   * 剥后缀的职责归比较层（[stripPrereleaseSuffix] 白名单，两侧同口径），展示层要短形态时自己剥
+   * （[displayVersion]）。把剥离放在取值处 = 让「同一事实两种读数」，且必然有一侧读错。
+   *
+   * 注意：修订号 -1/-2（`0.13.7fx-N` 命名）**不能**当后缀剥掉，否则 fx-2 会被判成与 fx-1 同版。
+   */
+  fun currentVersion(raw: String = BuildConfig.VERSION_NAME): String = raw
+
+  /**
+   * 展示用当前版本（去掉快照后缀 `-SN-*`）：`0.13.7fx-1-SN-1-13` → `0.13.7fx-1`。
+   *
+   * 只给**上屏文本**用（状态行 / 读屏描述 / 引导页）。比较一律用 [currentVersion] 原值——
+   * 用短形态去比正是 #1511 的缺陷本形。
+   *
+   * @param raw 原始版本串（默认 [BuildConfig.VERSION_NAME]；参数化是为了让单测能喂 SN 形态，
+   *   否则 JVM 单测里 VERSION_NAME 恒无后缀，剥离逻辑的回归判据会退化成恒真）。
+   */
+  fun displayVersion(raw: String = BuildConfig.VERSION_NAME): String = raw.replace(Regex("-SN-.*$"), "")
 
   /**
    * 预发布/快照后缀**白名单**（FX-209.2，E-5/E-11）：只剥 rc / preview / SN 这一类
