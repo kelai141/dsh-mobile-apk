@@ -79,7 +79,13 @@ test('#1516 排队预算：前一路永不释放时后一路按时被拒（不�
   )
   assert.ok(outcome instanceof ImeBorrowTimeout,
     '超过预算必须抛 ImeBorrowTimeout（旧实现在无超时的 await 上永久等待）：' + String(outcome))
-  assert.ok(outcome.waitedMs >= 60, '超时对象必须带等待量（回执要用）：' + outcome.waitedMs)
+  // 判据不用「>= 预算」这种固定值：60ms 的预算在慢机器上会落在 59ms（实测红过），
+  // 而真正要证的语义是「带等待量 + 带预算 + 与预算同量级（不是秒级假等待）」。
+  assert.equal(typeof outcome.waitedMs, 'number', '超时对象必须带等待量（回执要用）')
+  assert.ok(outcome.waitedMs >= 0, '等待量不得为负：' + outcome.waitedMs)
+  assert.ok(outcome.waitedMs <= 5_000, '等待量必须与预算同量级（不得是秒级假等待）：' + outcome.waitedMs)
+  assert.equal(outcome.budgetMs, 60, '回执必须带预算，否则用户看不出被拒的原因：' + outcome.budgetMs)
+  assert.match(String(outcome.message), /60ms/, '文案要带预算：' + outcome.message)
 })
 
 test('#1516 超时让位：永不释放的队头不得把后面每一路都锁死', async () => {

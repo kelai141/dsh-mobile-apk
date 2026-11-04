@@ -39,11 +39,14 @@ export interface ImeBorrowRelease {
 /** 排队超时：等待量在 `waitedMs` 里，回执直接引用它。 */
 export class ImeBorrowTimeout extends Error {
   readonly waitedMs: number
+  /** 本次排队用的预算（与 waitedMs 一起进回执：用户要看出「等了多久、允许多久」）。 */
+  readonly budgetMs: number
 
-  constructor(waitedMs: number) {
-    super(`IME 借道排队 ${waitedMs}ms 超时（前一路的切换/还原未结束）`)
+  constructor(waitedMs: number, budgetMs: number) {
+    super(`IME 借道排队 ${waitedMs}ms 超时（预算 ${budgetMs}ms；前一路的切换/还原未结束）`)
     this.name = 'ImeBorrowTimeout'
     this.waitedMs = waitedMs
+    this.budgetMs = budgetMs
   }
 }
 
@@ -82,7 +85,7 @@ export function createImeBorrowLock(): ImeBorrowLock {
       try {
         if (typeof budget === 'number' && budget > 0 && Number.isFinite(budget)) {
           const deadline = new Promise<never>((_resolve, reject) => {
-            timer = setTimeout(() => reject(new ImeBorrowTimeout(Date.now() - startedAt)), budget)
+            timer = setTimeout(() => reject(new ImeBorrowTimeout(Date.now() - startedAt, budget)), budget)
           })
           await Promise.race([previous, deadline])
         } else {

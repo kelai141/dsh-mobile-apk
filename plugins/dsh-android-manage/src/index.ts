@@ -2168,7 +2168,7 @@ properties: {
                 // 排队超时 = **没有**取得锁：一律不切换、不广播（把输入法留在原处比劫持一半安全）。
                 return {
                   sends: [],
-                  stop: `输入未执行：IME 借道排队 ${acquired.waitedMs}ms 仍未轮到自己（前一路的切换/还原还没结束，`
+                  stop: `输入未执行：IME 借道排队 ${acquired.waitedMs}ms 超过预算 ${acquired.budgetMs}ms 仍未轮到自己（前一路的切换/还原还没结束，`
                     + '可能卡在设备回填）——本次未切换输入法、未发送广播；稍后重试，或改用 channel:"input"（仅 ASCII）',
                 }
               }
