@@ -48,6 +48,29 @@ import {
 } from './ime-broadcast.js'
 
 /**
+ * ADBKeyboard 借道 IME 的整段互斥（issue #1373）。
+ *
+ * 「读 prev → `ime set` 本通道 → 广播 → 还原」这一整段不能被两路并发穿插：两路各自读 prev、
+ * 各自切换，先结束者在 `finally` 里把输入法还原，另一路的广播就落到错误 IME 上（result=2/5，
+ * 220ms 重试仍失败）。这里用一条 promise 链把整段串起来（Node 单线程，链即可作互斥）。
+ */
+let imeBorrowTail: Promise<void> = Promise.resolve()
+
+/** 取得借道锁；返回值必须在 `finally` 里调用以放行下一路。 */
+export async function acquireImeBorrow(): Promise<() => void> {
+  const previous = imeBorrowTail
+  let release!: () => void
+  imeBorrowTail = new Promise<void>((resolve) => { release = resolve })
+  await previous
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    release()
+  }
+}
+
+/**
  * 0.13.8 #183 / #413：键盘广播的 nonce 与命令构造已抽到 ./ime-broadcast.js
  * （纯函数，单测守住「点名组件」「结果码解析」两条真判据）。
  */
@@ -2114,6 +2137,8 @@ properties: {
         const authState = adbKeyboardAuthState(process.env.DSH_FILES_DIR)
         if (!authState.ok) return { ok: false, denied: false, channel: 'adbkeyboard', text: kbAuthMissingText(authState.reason) }
         const auth = authState.auth
+        // issue #1373：整段借道（读 prev → ime set → 广播 → 还原）互斥；在 finally 里放行。
+        const releaseImeBorrow = await acquireImeBorrow()
         const cur = await execShell(`settings get secure default_input_method`).catch(() => ({ ok: false, stdout: '' }))
         const prev = (cur.ok ? cur.stdout : '').trim().replace(/^"|"$/g, '')
         await execShell(`ime enable ${IME_ID}`).catch(() => undefined)
@@ -2207,7 +2232,11 @@ properties: {
           }
         } finally {
           // 还原用户原 IME（广播已被接收器入队提交，留 0.4s 提交窗口防切换竞态）。
-          if (needSwitch) await execShell(`sleep 0.4; ime set ${prev}`).catch(() => undefined)
+          try {
+            if (needSwitch) await execShell(`sleep 0.4; ime set ${prev}`).catch(() => undefined)
+          } finally {
+            releaseImeBorrow()
+          }
         }
       }
       // input text 兜底（channel: "input" 强制；仅可见 ASCII——部分 ROM 丢字/丢空格，F5 不推荐）
