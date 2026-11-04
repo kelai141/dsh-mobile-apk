@@ -151,7 +151,14 @@ internal class DirectoryPickerController(private val activity: MainActivity) {
     val sdk = android.os.Build.VERSION.SDK_INT
     Thread {
       val verdict = try {
-        val shared = WorkspacePickGate.isSharedStoragePath(path)
+        // issue #1234：共享存储根按**当前用户**取（多用户设备上 user 10 的根是 /storage/emulated/10），
+        // 不能再写死 user 0 —— 否则 user 10 下合法的自选目录会被判「不在共享存储」。
+        val sharedRoot = try {
+          android.os.Environment.getExternalStorageDirectory()?.absolutePath.orEmpty()
+        } catch (_: Throwable) {
+          ""
+        }
+        val shared = WorkspacePickGate.isSharedStoragePath(path, sharedRoot)
         WorkspacePickGate.evaluate(
           sdkInt = sdk,
           permissionGranted = WorkspacePickGate.storagePermissionGranted(

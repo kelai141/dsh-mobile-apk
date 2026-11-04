@@ -616,6 +616,14 @@ log('dpkg status: ' + dpkgStatus.length + ' 包，available: ' + availableBlocks
 
 // ── 6. shebang 与 ELF RUNPATH 重写（com.termux → com.dsharnessmobile.shell）──
 log('重写 shebang/RUNPATH…')
+// issue #1234：这里写进 shebang 的前缀**仍然是构建期的**，而且**无法**改成自定位——
+// shebang 是内核 execve 直接解析的绝对路径，没有 $0 可言，也没有任何 sh 语法可用。
+// 处置分两半（都不放宽判据）：
+//   ① 可执行 shim（tar / git / pnpm / npm / PTC dsh-node）**一律自定位**（见 7a/7d/7e/7c1），
+//      它们是多用户设备上真正会被 exec 的那批；
+//   ② 由本步改写 shebang 的**文本脚本**（node 包 bin 脚本等）保留构建期前缀，由壳侧
+//      **首次解压后的一次性重写**（app/src/main/java/.../SnapshotPrefixRewrite.kt）换成实机 usrDir。
+// 换句话说：构建期写死不是"修好了"，而是"有运行期补丁兜住"，且只在首次解压跑一次。
 execSync(`${PYTHON} scripts/fix-shebang.py "${U}" ${NEW_PREFIX}`, { encoding: 'utf8', stdio: 'inherit' })
 // termux-elf-cleaner：清理 ELF 中残留 com.termux RUNPATH。
 //
@@ -664,15 +672,77 @@ if (existsSync(cleaner)) {
 
 // ── 7. 三缺陷固化 ──────────────────────────────────────────────────────
 log('固化三缺陷（tar/git/ripgrep）…')
+
+/**
+ * 快照内可执行 shim 的**自定位前导**（issue #1234；tar / git / PTC node wrapper 共用）。
+ *
+ * 为什么不能烧 `NEW_PREFIX`：那是**构建期**的事实，不是运行期事实。Android 应用数据目录随用户变化
+ * （user 0 = /data/user/0/<pkg>，user 10 = /data/user/10/<pkg>），而 FUSE 跨用户隔离让 user 10 的
+ * 进程读不到 user 0 的那份安装 ⇒ shim 里的 `exec /data/user/0/...` 直接 `inaccessible or not found`
+ * （真机实测：pnpm 装插件全 exit 127）。故前缀一律在设备上由 `$0` 反推。
+ *
+ * 算法：`$0` 可能是裸命令名（PATH 命中）→ `command -v` 归一成路径；有 readlink 就解析软链
+ * （没有或解析失败都退化为原路径）；取上一级目录 = `usr`。此后 `$prefix` 就是本机的 usr 根。
+ *
+ * @param {string} label 写进注释行的用途说明（便于设备上 head -3 认出来）。
+ * @returns {string[]} 前导行（调用方追加自己的 exec 行）。
+ */
+const SELF_LOCATE_PREAMBLE = (label) => [
+  '#!/system/bin/sh',
+  '# dsh-mobile: ' + label + '（自定位：前缀由 $0 推导，不烧构建期设备路径 —— issue #1234）',
+  'self=$0',
+  'case "$self" in /*) ;; *) self=$(command -v "$self") ;; esac',
+  'if command -v readlink >/dev/null 2>&1; then',
+  '  resolved=$(readlink -f "$self" 2>/dev/null) || resolved=',
+  '  [ -n "$resolved" ] && self=$resolved',
+  'fi',
+  'prefix=$(cd "$(dirname "$self")/.." && pwd)',
+]
+// 自定位要素：门禁与写后自检都按这两条判「真的会自定位」，不是只看「没烧前缀」。
+const SELF_LOCATE_LINE = 'prefix=$(cd "$(dirname "$self")/.." && pwd)'
+// 写后自检判据（7a/7d/7c1/7e 尾部逐条断言）：
+//   ① shim 文本不得含构建期设备前缀字面量（/data/user/<n>/ 或旧 Termux 前缀）——多用户设备上必 127；
+//   ② 自定位行必须在场——只证明「没烧前缀」不够，还要证明「会自定位」。
+const SHIM_BUILTIN_PREFIX_RE = /\/data\/(user\/\d+|data\/com\.termux)\//
+
+/**
+ * 写完一个 shim 后立刻自检；不满足即拒绝出快照（不静默）。
+ *
+ * 为什么把这段抽出来：7e 里原本只对 pnpm/npm 做了这两条断言，tar/git/PTC 三个 shim 一个都没有——
+ * 这正是「同类缺陷只修了报障的那两个」的形态（issue #1234）。判据一份，四个 shim 都过它。
+ *
+ * @param {string} rel usr 树内相对路径（报告用）。
+ * @param {string} text shim 全文。
+ */
+const assertSelfLocatingShim = (rel, text) => {
+  const hit = SHIM_BUILTIN_PREFIX_RE.exec(text)
+  if (hit) {
+    console.error('  [shim 自检失败] usr/' + rel + ' 含构建期设备前缀字面量 ' + hit[0]
+      + '——多用户设备（/data/user/<n>）上 exec 必失败（exit 127）')
+    process.exit(1)
+  }
+  if (!text.includes(SELF_LOCATE_LINE)) {
+    console.error('  [shim 自检失败] usr/' + rel + ' 缺自定位行: ' + SELF_LOCATE_LINE)
+    process.exit(1)
+  }
+  log('  shim 自检通过: usr/' + rel + '（无构建期前缀字面量 + 自定位行在场）')
+}
+
 // 7a. tar 压缩冲突：调用侧局部剔除遗留变量（PRD：严禁全局剔除；包装脚本内部 unset）
-// 注意：包装脚本必须使用设备端路径（NEW_PREFIX），构建期本地 stage 路径不可烧入（实测泄漏）。
+// issue #1234：exec 目标原先烧 NEW_PREFIX（构建期设备路径），多用户设备上同样 exit 127；改自定位。
 const tarReal = join(U, 'bin', 'tar.real')
 if (existsSync(join(U, 'bin', 'tar'))) {
   rmSync(tarReal, { force: true })
   renameSync(join(U, 'bin', 'tar'), tarReal)
-  const wrapPath = `${NEW_PREFIX}/bin/tar.real`
-  writeFileSync(join(U, 'bin', 'tar'), `#!/system/bin/sh\n# dsh-mobile 0.13.0: GNU tar 压缩与执行拦截冲突修复（调用侧局部剔除，见 PRD F1.1）\nunset -v TERMUX_APP__LEGACY_DATA_DIR\nexec "${wrapPath}" "$@"\n`, { mode: 0o755 })
-  log('tar 包装就位（tar.real + 包装脚本，设备路径 ' + wrapPath + '）')
+  const tarShimText = [
+    ...SELF_LOCATE_PREAMBLE('GNU tar 压缩与执行拦截冲突修复（调用侧局部剔除，见 PRD F1.1）'),
+    'unset -v TERMUX_APP__LEGACY_DATA_DIR',
+    'exec "$prefix/bin/tar.real" "$@"',
+    '',
+  ].join('\n')
+  writeFileSync(join(U, 'bin', 'tar'), tarShimText, { mode: 0o755 })
+  assertSelfLocatingShim('bin/tar', tarShimText)
+  log('tar 包装就位（tar.real + 包装脚本，exec 目标运行期自定位）')
 }
 // 7b. git 属主与模板：home/.gitconfig + 模板目录（快照内 home/，基座已有模板 usr/share/git-core/templates）
 const homeDir = join(STAGE, 'root', 'home')
@@ -716,12 +786,18 @@ const gitReal = join(U, 'bin', 'git.real')
 if (existsSync(join(U, 'bin', 'git')) && existsSync(join(U, 'libexec', 'git-core'))) {
   rmSync(gitReal, { force: true })
   renameSync(join(U, 'bin', 'git'), gitReal)
-  const gitExecPath = `${NEW_PREFIX}/libexec/git-core`
-  // 设备路径烧写（同 tar wrapper）：exec 目标必须是设备端 ${NEW_PREFIX}/bin/git.real，
-  // 绝不可用本地 stage 路径（gitReal 是构建期本地路径，烧入后真机 exec 失败——v2 抽验实锤）。
-  const gitRealDevice = `${NEW_PREFIX}/bin/git.real`
-  writeFileSync(join(U, 'bin', 'git'), `#!/system/bin/sh\n# dsh-mobile 0.13.0: git exec-path 重定位（issue apk#87；编译期 --exec-path 写死 com.termux）\nexport GIT_EXEC_PATH="${gitExecPath}"\nexec "${gitRealDevice}" "$@"\n`, { mode: 0o755 })
-  log('git 包装就位（git.real + GIT_EXEC_PATH=' + gitExecPath + '）')
+  // issue #1234：这里原先烧 ${NEW_PREFIX}/bin/git.real 与 GIT_EXEC_PATH。前缀**随 Android 用户变化**
+  // （user 10 = /data/user/10/<pkg>/files/usr），构建期烧死 ⇒ 多用户设备上 exec 直接 exit 127。
+  // 与 pnpm/npm 同一套自定位模板：前缀在设备上由 $0 反推，构建期零字面量。
+  const gitShimText = [
+    ...SELF_LOCATE_PREAMBLE('git exec-path 重定位（issue apk#87；编译期 --exec-path 写死 com.termux）'),
+    'export GIT_EXEC_PATH="$prefix/libexec/git-core"',
+    'exec "$prefix/bin/git.real" "$@"',
+    '',
+  ].join('\n')
+  writeFileSync(join(U, 'bin', 'git'), gitShimText, { mode: 0o755 })
+  assertSelfLocatingShim('bin/git', gitShimText)
+  log('git 包装就位（git.real + GIT_EXEC_PATH 运行期自定位）')
 } else {
   console.warn('警告: git 或 git-core 缺失（#87 包装未装配）')
 }
@@ -775,15 +851,9 @@ const NPM_CLI_REL = 'lib/node_modules/npm/bin/npm-cli.js'
  * 就解析软链（无 readlink 或解析失败均退化为原路径）；取上一级目录 = usr，此后 node 与包体相对它拼。
  */
 const selfLocatingShim = (label, pkg, cli) => [
-  '#!/system/bin/sh',
-  '# dsh-mobile: ' + label + ' shim (self-locating; prefix is derived from $0 so a non-user-0 install prefix still finds node)',
-  'self=$0',
-  'case "$self" in /*) ;; *) self=$(command -v "$self") ;; esac',
-  'if command -v readlink >/dev/null 2>&1; then',
-  '  resolved=$(readlink -f "$self" 2>/dev/null) || resolved=',
-  '  [ -n "$resolved" ] && self=$resolved',
-  'fi',
-  'prefix=$(cd "$(dirname "$self")/.." && pwd)',
+  // issue #1234：前导抽到 SELF_LOCATE_PREAMBLE，与 tar / git / PTC wrapper 共用**同一份**算法。
+  // 三处各写一遍是本缺陷的成因之一（pnpm/npm 在 #1243 里修了，tar/git/PTC 漏了）。
+  ...SELF_LOCATE_PREAMBLE(label + ' shim (self-locating; prefix is derived from $0 so a non-user-0 install prefix still finds node)'),
   'export LD_LIBRARY_PATH="$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"',
   'exec "$prefix/bin/node" "$prefix/lib/node_modules/' + pkg + '/bin/' + cli + '" "$@"',
   '',
@@ -814,11 +884,6 @@ const writeShim = (rel, text) => {
   writeFileSync(dest, text, { mode: 0o755 })
 }
 
-// 写后自检判据（7e 尾部逐条断言）：
-//   ① shim 文本不得含构建期设备前缀字面量（/data/user/<n>/ 或旧 Termux 前缀）——多用户设备上必 127；
-//   ② 自定位行必须在场——只证明「没烧前缀」不够，还要证明「会自定位」。
-const SHIM_BUILTIN_PREFIX_RE = /\/data\/(user\/\d+|data\/com\.termux)\//
-const SHIM_SELF_LOCATE_LINE = 'prefix=$(cd "$(dirname "$self")/.." && pwd)'
 log('装配 pnpm（standalone，F4 安装链）…')
 const PNPM_VERSION = PREINSTALL.pnpm.version
 const NPM_MIRRORS = PREINSTALL.npmMirrors
@@ -864,19 +929,9 @@ try {
   writeShim('bin/npm', npmShimText)
   log('  npm shim 就位: usr/bin/npm -> ' + NPM_CLI_REL + '（前缀运行时自定位）')
 
-  // 写后自检：两个 shim 都不得含构建期前缀字面量，自定位行必须在场（任一不满足即拒绝出快照）。
+  // 写后自检：判据已抽成 assertSelfLocatingShim（tar/git/PTC 三个 shim 也过同一条）。
   for (const [rel, text] of [['bin/pnpm', pnpmShimText], ['bin/npm', npmShimText]]) {
-    const hit = SHIM_BUILTIN_PREFIX_RE.exec(text)
-    if (hit) {
-      console.error('  [shim 自检失败] usr/' + rel + ' 含构建期设备前缀字面量 ' + hit[0]
-        + '——多用户设备（/data/user/<n>）上 exec 必失败（exit 127）')
-      process.exit(1)
-    }
-    if (!text.includes(SHIM_SELF_LOCATE_LINE)) {
-      console.error('  [shim 自检失败] usr/' + rel + ' 缺自定位行: ' + SHIM_SELF_LOCATE_LINE)
-      process.exit(1)
-    }
-    log('  shim 自检通过: usr/' + rel + '（无构建期前缀字面量 + 自定位行在场）')
+    assertSelfLocatingShim(rel, text)
   }
 } catch (e) {
   // 不静默：市场安装是本里程碑验收项，装配失败必须可见（build-apk 门禁会因此拒绝打包）
@@ -908,13 +963,14 @@ const PTC_NODE_WRAPPER_REL = 'libexec/dsh-node'
 try {
   const wrapperDir = join(U, 'libexec')
   mkdirSync(wrapperDir, { recursive: true })
-  // 设备路径烧写（同 git wrapper / pnpm shim）：执行目标必须是设备端路径，绝不可用本地 stage 路径。
+  // issue #1234：exec 目标与 LD_LIBRARY_PATH 原先烧 NEW_PREFIX（构建期设备路径）——多用户设备上
+  // wrapper 自己就先 127。改为与 pnpm/git 同一套自定位前导：`$prefix` 由 $0 反推，构建期零字面量。
   writeFileSync(
     join(U, PTC_NODE_WRAPPER_REL),
-    '#!/system/bin/sh\n'
-      + '# dsh-mobile: PTC node launcher (C1) - app-data ELF cannot be exec\'d under untrusted_app,\n'
+    SELF_LOCATE_PREAMBLE('PTC node launcher (C1) - app-data ELF cannot be exec\'d under untrusted_app').join('\n')
+      + '\n'
       + '# so hand it to the system linker with the snapshot library path exported here.\n'
-      + 'export LD_LIBRARY_PATH="' + NEW_PREFIX + '/lib"\n'
+      + 'export LD_LIBRARY_PATH="$prefix/lib"\n'
       // ── 引擎/子进程 V8 堆下限（0.14.8）────────────────────────────────────────
       // 为什么放在**启动器**而不是只靠壳侧 env：本 wrapper 是快照内 node 的唯一启动器，
       // 而有些调用方给子进程的是**过滤后的 env**（PTC 只放 6 个名字，见上方真因），
@@ -938,9 +994,11 @@ try {
       + '  [ "$__dsh_heap" -gt 4096 ] && __dsh_heap=4096\n'
       + '  export NODE_OPTIONS="--max-old-space-size=$__dsh_heap"\n'
       + 'fi\n'
-      + 'exec /system/bin/linker64 "' + NEW_PREFIX + '/bin/node" "$@"\n',
+      + 'exec /system/bin/linker64 "$prefix/bin/node" "$@"\n',
     { mode: 0o755 },
   )
+  // 写后自检：PTC wrapper 与 tar/git/pnpm/npm 过同一条判据（无构建期前缀 + 自定位行在场）。
+  assertSelfLocatingShim(PTC_NODE_WRAPPER_REL, readFileSync(join(U, PTC_NODE_WRAPPER_REL), 'utf8'))
   log('PTC node wrapper 就位: usr/' + PTC_NODE_WRAPPER_REL + ' -> linker64 + bin/node（LD_LIBRARY_PATH + 堆下限在 wrapper 内）')
 } catch (e) {
   // 不静默：PTC 是本里程碑验收项（`code run` 是模型的主要执行手段），装配失败必须可见。

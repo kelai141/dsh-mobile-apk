@@ -317,6 +317,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
           val missing = RuntimeTree.missingEntries(
             root = File(stage, "usr"),
             profileDir = File(stage, "home/.dsh/profiles/web"),
+            currentUser = currentAndroidUser(),
           )
           lastRefreshFailure = SnapshotFsException(
             SnapshotBundledAsset.CODE_STAGE_INCOMPLETE, emptyList(),
@@ -817,10 +818,24 @@ class EngineManager(private val context: Context, private val pickToken: String?
    * 每次都在链接期 CANNOT LINK 而死。现把动态库面并入判据（只加合取项），并**逐项打印缺失名**
    * （旧日志只报 3 个布尔，排障者看不出缺的是哪个库，这本身是排障缺口）。
    */
+  /**
+   * 当前进程所在的 Android 用户号（issue #1234）。
+   *
+   * 为什么必须显式取而不是让判据从路径反推：真机上这棵树的路径可能正写成 `/data/data/<pkg>`
+   * （user 0 的软链拼写），而进程其实跑在 user 10——从路径反推会得到 0，跨用户守卫就永远不触发。
+   * 取不到时退回 0（= 历史单用户口径，不放大失败面）。
+   */
+  private fun currentAndroidUser(): Int = try {
+    PrefixRelocation.currentUserFromUid(android.os.Process.myUid())
+  } catch (_: Throwable) {
+    0
+  }
+
   private fun stagedRuntimeComplete(stage: File): Boolean {
     val missing = RuntimeTree.missingEntries(
       root = File(stage, "usr"),
       profileDir = File(stage, "home/.dsh/profiles/web"),
+      currentUser = currentAndroidUser(),
     )
     if (missing.isNotEmpty()) Log.e(TAG, "staged runtime incomplete: missing=" + missing.joinToString(", "))
     return missing.isEmpty()
@@ -836,6 +851,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
     val missing = RuntimeTree.missingEntries(
       root = usrDir,
       profileDir = File(homeDir, ".dsh/profiles/web"),
+      currentUser = currentAndroidUser(),
     )
     // 逐项打印：真机现场只有「3 个布尔」时，排障者无从知道缺的是 libz.so.1 还是别的。
     if (missing.isNotEmpty()) Log.e(TAG, "live runtime incomplete: missing=" + missing.joinToString(", "))
@@ -1513,6 +1529,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
       val missing = RuntimeTree.missingEntries(
         root = usrDir,
         profileDir = File(homeDir, ".dsh/profiles/web"),
+        currentUser = currentAndroidUser(),
       )
       val confirmed = RuntimeTree.confirmedDamage(missing)
       lastStartRefusalConfirmed = confirmed
@@ -1624,6 +1641,31 @@ class EngineManager(private val context: Context, private val pickToken: String?
       // 触发，那里才是「授权之后能自愈」的入口（0.14.1 用户反馈）。
       preludeProbe.step("provision-public-repo") {
         provisionPublicRepo(PublicRepoProvision.TRIGGER_ENGINE_START)
+      }
+      // issue #1234：解压后的一次性前缀重写（shebang 无法自定位，见 SnapshotPrefixRewrite 头注释）。
+      // 位置：引擎 spawn 之前、且在所有会 exec 快照内脚本的步骤之前——pip/pnpm 这些一旦先跑，
+      // 就会先撞上 user 0 的死前缀。标记命中即整步返回，日常冷启动代价 = 一次 stat。
+      preludeProbe.step("relocate-baked-prefix") {
+        // 标记内容带**快照指纹**：同版本内换快照（在线更新/覆盖安装）也要重跑，否则新烧进来的
+        // 构建期前缀会被「本版本已修过」的标记永久盖住——那是「半修好且不可见」的形态。
+        val result = SnapshotPrefixRewrite.runOnce(context, BuildConfig.VERSION_NAME, liveFingerprint())
+        if (!result.skipped) {
+          LogCollector.log(
+            TAG,
+            "prefix rewrite: rewritten=" + result.rewritten + " scanned=" + result.scanned +
+              " failed=" + result.failed + " truncated=" + result.truncated +
+              " usr=" + usrDir.absolutePath,
+          )
+          if (result.truncated) {
+            // 有界遍历没扫完：本轮不算完成（没写标记），下次启动续跑。必须可见，不能静默。
+            LogCollector.writeBootDiag(
+              context,
+              "prefix-rewrite-truncated",
+              "首次解压后的前缀重写未扫完（上限 " + SnapshotPrefixRewrite.MAX_VISITS +
+                " 个条目），下次启动继续；已改写 " + result.rewritten + " 个文本 shim。",
+            )
+          }
+        }
       }
       // issue #963 第 3 步：用户 Python 包搬迁（幂等、可中断）。
       // 位置：引擎读 profile 之前、spawn 之前 —— 与上面几步同一条纪律（"自愈必须在引擎读之前做一次"）。

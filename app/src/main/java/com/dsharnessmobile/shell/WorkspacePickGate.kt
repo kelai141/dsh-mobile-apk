@@ -69,8 +69,25 @@ internal enum class WorkspacePickRoute {
 
 internal object WorkspacePickGate {
 
-  /** 共享存储根：与引擎侧 dir-pick 端点的接受面同源。 */
+  /**
+   * 共享存储根：与引擎侧 dir-pick 端点的接受面同源。
+   *
+   * issue #1234：**不能写死 user 0**。SAF 的 `primary:` 在 Android 上指「**当前用户**的 primary
+   * 共享存储」，多用户设备上 DSH 跑在 user 10 时真实根是 `/storage/emulated/10`
+   * （`Environment.getExternalStorageDirectory()` 返回的就是它），而 `/storage/emulated/0` 是 user 0 的——
+   * 当前实例既不该访问、也访问不到。故接受面改为**按用户推导**（[sharedStorageRootFor]）。
+   * 本常量保留为 user 0 的拼写（兼容既有引用与文案）。
+   */
   const val SHARED_STORAGE_ROOT = "/storage/emulated/0"
+
+  /**
+   * 按 Android 用户号推导 primary 共享存储根：user 0 → `/storage/emulated/0`，user 10 → `/storage/emulated/10`。
+   *
+   * 为什么不在本对象里直接读 `Environment`：本对象是**纯判据**（JVM 可测，不碰 Context/Environment）。
+   * 运行期调用方传 `Environment.getExternalStorageDirectory()` 的值；单测与纯逻辑走这里的推导。
+   * 两者同一套拼写口径，不产生第二份真源。
+   */
+  fun sharedStorageRootFor(user: Int): String = "/storage/emulated/" + user
 
   /** 探测文件前缀（隐藏文件，与用户内容区分开）。 */
   const val PROBE_PREFIX = ".dsh-write-probe-"
@@ -99,11 +116,19 @@ internal object WorkspacePickGate {
     hasWritePermission: () -> Boolean,
   ): Boolean = if (sdkInt >= 30) hasAllFilesAccess() else hasWritePermission()
 
-  /** 路径是否落在引擎能接受的共享存储面内（前缀 + 无上跳段）。 */
-  fun isSharedStoragePath(path: String?): Boolean {
+  /**
+   * 路径是否落在引擎能接受的共享存储面内（前缀 + 无上跳段）。
+   *
+   * @param path 待判路径。
+   * @param sharedRoot 当前用户的 primary 共享存储根（运行期传 `Environment.getExternalStorageDirectory()`；
+   *   缺省用 user 0 的拼写，保持既有单测与纯逻辑调用不变）。issue #1234：多用户设备上必须传当前用户那个根，
+   *   否则 user 10 的合法路径会被判成「不在共享存储」。
+   */
+  fun isSharedStoragePath(path: String?, sharedRoot: String = SHARED_STORAGE_ROOT): Boolean {
     if (path == null) return false
+    val root = sharedRoot.trimEnd('/').ifEmpty { SHARED_STORAGE_ROOT }
     val trimmed = path.trim()
-    if (trimmed != SHARED_STORAGE_ROOT && !trimmed.startsWith(SHARED_STORAGE_ROOT + "/")) return false
+    if (trimmed != root && !trimmed.startsWith(root + "/")) return false
     return !trimmed.split("/").any { it == ".." } && !trimmed.contains('\u0000')
   }
 

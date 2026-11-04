@@ -2177,14 +2177,29 @@ class MainActivity : ComponentActivity() {
     if (android.os.Build.VERSION.SDK_INT != 29) return
     Thread {
       try {
+        // issue #1234：`--user 0` 同样是「写死 user 0」——多用户设备上要操作的是**当前用户**的那个
+        // 实例（uid / 100000 = Android 用户号，user 10 的 app uid 形如 10xxxxx）。
+        val currentUser = android.os.Process.myUid() / 100000
         val out = ShizukuTransport.runShell(
           this,
-          "appops set --user 0 $packageName LEGACY_STORAGE allow && appops get $packageName LEGACY_STORAGE",
+          "appops set --user $currentUser $packageName LEGACY_STORAGE allow" +
+            " && appops get --user $currentUser $packageName LEGACY_STORAGE",
         )
         LogCollector.log("dsh-saf", "appop LEGACY_STORAGE: " + out.toString().take(300))
+        // issue #1234：探测根必须是**当前用户**的共享存储（user 10 → /storage/emulated/10）。
+        // Environment 拿不到时退回 user 0 拼写（保持旧行为，不放大失败面）。
+        val sharedStorageRoot = try {
+          android.os.Environment.getExternalStorageDirectory()?.absolutePath
+        } catch (_: Throwable) {
+          null
+        } ?: WorkspacePickGate.SHARED_STORAGE_ROOT
         val probe = ShizukuTransport.runShell(
           this,
-          "touch /storage/emulated/0/.dsh-write-probe && rm -f /storage/emulated/0/.dsh-write-probe && echo PROBE_OK",
+          // issue #1234：探测根必须是**当前用户**的共享存储（user 10 → /storage/emulated/10）。
+          // 原先写死 /storage/emulated/0，多用户设备上探的是 user 0 的那份 ⇒ 必然失败 ⇒ 上层
+          // 据此判「存储不可用」。这里用运行期真源拼同一句探测。
+          "touch " + sharedStorageRoot + "/.dsh-write-probe && rm -f " + sharedStorageRoot
+            + "/.dsh-write-probe && echo PROBE_OK",
         )
         LogCollector.log("dsh-saf", "raw 写探测: " + probe.toString().take(200))
       } catch (t: Throwable) {

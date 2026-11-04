@@ -96,21 +96,20 @@ internal object RuntimeTree {
    *
    * @param target 链接目标原文（调用方已确认以 `/` 开头）。
    * @param libDirPath 本树 lib 目录的绝对路径。
+   * @param currentUser **当前进程所在的 Android 用户号**（issue #1234）。
+   *   **必须由调用方注入**，不能从 [libDirPath] 反推：真机上这棵树的路径可能正写成 `/data/data/<pkg>`
+   *   （user 0 的软链拼写），而进程其实跑在 user 10——从路径反推会得到 0，同用户守卫就永远不触发。
+   *   这正是「判据看着有、实际不生效」的形态；单测因此能把「去掉守卫」判红。
    */
-  internal fun absoluteTargetInsideTree(target: String, libDirPath: String): Boolean {
-    // 先统一分隔符：Android 上永远是 '/'，但 JVM 单测（Windows）里 File.absolutePath 用 '\'。
-    // 不统一的话，同一个判据在两种平台上结论不同——那正是「判据不可移植」的形态。
-    fun norm(s: String): String = s.replace(java.io.File.separatorChar, '/')
-    val t = norm(target)
-    val prefix = norm(libDirPath).trimEnd('/') + "/"
-    if (t.startsWith(prefix)) return true
-    // /data/user/0/<pkg> ←→ /data/data/<pkg> 两种拼写等价（互为软链）。
-    val altPrefix = when {
-      prefix.startsWith("/data/user/0/") -> "/data/data/" + prefix.removePrefix("/data/user/0/")
-      prefix.startsWith("/data/data/") -> "/data/user/0/" + prefix.removePrefix("/data/data/")
-      else -> null
-    }
-    return altPrefix != null && t.startsWith(altPrefix)
+  internal fun absoluteTargetInsideTree(target: String, libDirPath: String, currentUser: Int): Boolean {
+    // 分隔符统一在 [PrefixRelocation.sameUserEquivalent] 里做（JVM 单测跑在 Windows 上，File.absolutePath
+    // 用 '\'；不统一会让同一判据在两种平台得出不同结论——「判据不可移植」的形态）。
+    // issue #1234 根因二：「当前用户」= **这棵树自己所在的用户**（不额外要 Context：判据保持纯函数，JVM 可测）。
+    // `/data/data/<pkg>` 就是 `/data/user/0/<pkg>` 的软链，这条等价**只在 user 0 成立**。user 10 的应用
+    // 数据在 `/data/user/10/<pkg>`，把它当 `/data/data` 等价就是把路径指回 user 0 的那份安装
+    // （跨用户 FUSE 隔离 ⇒ 读不到，正是 issue 里「自愈把路径指回 user 0」的形态）。
+    // 判据本体复用 [PrefixRelocation.sameUserEquivalent]：同一份口径只写一处。
+    return PrefixRelocation.sameUserEquivalent(target, libDirPath, currentUser)
   }
 
   /**
@@ -122,12 +121,15 @@ internal object RuntimeTree {
    *   **调用方必须传**——它不在 `usr` 之下，无法从 [root] 推出（旧判据把它与 usr 下的两项并列，
    *   这里保持同一判据口径，只是路径由调用方给出）。传 null 表示该层不适用（会记入日志的调用方自行区分）。
    * @param probe 探测原语。
+   * @param currentUser 当前进程的 Android 用户号（issue #1234；缺省 0 = 单用户设备的历史口径）。
+   *   缺省值让既有调用点零位移；**多用户路径必须显式传**，否则跨用户守卫退化成 user 0 口径。
    * @returns 可读的缺失条目名（含基础 3 项与动态库），供日志逐项打印。
    */
   internal fun missingEntries(
     root: File,
     profileDir: File?,
     probe: Probe = FsProbe,
+    currentUser: Int = 0,
   ): List<String> {
     val missing = ArrayList<String>()
     for (rel in BASE_ENTRIES) if (!probe.exists(File(root, rel))) missing.add(rel)
@@ -143,7 +145,7 @@ internal object RuntimeTree {
       // 必然找不到 ⇒ 误报 dangling（本仓单测在 Windows 上跑，这条被实测抓出）。
       // `File(...).isAbsolute` 同时覆盖两种平台，且语义正是「这是不是绝对路径」。
       if (java.io.File(target).isAbsolute) {
-        if (!absoluteTargetInsideTree(target, libDir.absolutePath)) {
+        if (!absoluteTargetInsideTree(target, libDir.absolutePath, currentUser)) {
           missing.add("lib/" + lib + " (absolute link outside tree: " + target + ")")
         }
       } else if (!probe.exists(File(libDir, target))) {

@@ -172,6 +172,33 @@ class WorkspacePickGateTest {
     assertFalse(WorkspacePickGate.isSharedStoragePath(""))
   }
 
+  /**
+   * issue #1234 第 4 条：共享存储根必须**按当前用户**取，不能写死 user 0。
+   *
+   * 真机形态：DSH 装在 user 10，Environment.getExternalStorageDirectory() 给的是
+   * /storage/emulated/10。旧判据只认 /storage/emulated/0 ⇒ 用户选的合法目录被判
+   * 「不在共享存储」⇒ 建工作区必然失败（而界面显示得像是路径问题）。
+   */
+  @Test
+  fun sharedStorageRootFollowsCurrentUser() {
+    assertEquals("user 0 的根", "/storage/emulated/0", WorkspacePickGate.sharedStorageRootFor(0))
+    assertEquals("user 10 的根", "/storage/emulated/10", WorkspacePickGate.sharedStorageRootFor(10))
+    // 运行期把当前用户的根传进来：user 10 的路径必须判「在共享存储」。
+    assertTrue(
+      "user 10 下 /storage/emulated/10 的目录必须是合法工作区",
+      WorkspacePickGate.isSharedStoragePath("/storage/emulated/10/work", WorkspacePickGate.sharedStorageRootFor(10)),
+    )
+    // 反向：user 10 的实例**不得**把 user 0 的目录当自己的共享存储（跨用户不可达）。
+    assertFalse(
+      "user 10 下不得把 /storage/emulated/0 当自己的共享存储",
+      WorkspacePickGate.isSharedStoragePath("/storage/emulated/0/work", WorkspacePickGate.sharedStorageRootFor(10)),
+    )
+    // 缺省参数保持既有口径（user 0），既有调用与文案不变。
+    assertTrue(WorkspacePickGate.isSharedStoragePath("/storage/emulated/0/x"))
+    // 传空串时退回缺省根（Environment 拿不到时调用方会传空），不得因此全判 false。
+    assertTrue(WorkspacePickGate.isSharedStoragePath("/storage/emulated/0/x", ""))
+  }
+
   @Test
   fun unsupportedPathIsBlockedRegardlessOfPermission() {
     for (granted in listOf(true, false)) {
