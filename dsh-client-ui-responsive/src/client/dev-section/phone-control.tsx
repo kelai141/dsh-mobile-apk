@@ -791,7 +791,7 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
 
   const [repairReply, setRepairReply] = useState<RootOwnershipStatus | undefined>()
   const [repairFailure, setRepairFailure] = useState<string | undefined>()
-  /** 发起修复时的属主维护基线（issue #1376）：只有轮询**越过**它才算「有推进」。 */
+  /** 发起修复时的属主维护基线（issue #1376/#1518）：只在状态**可读**时记，不可读记 null（没有可比对象）。 */
   const repairBaselineRef = useRef<{ startedAt: number; completedAt: number } | null>(null)
   const polledRepair = rootGrant.ownership ?? OWNERSHIP_UNREADABLE
   const repairState = polledRepair.readable && polledRepair.startedAt >= (repairReply?.startedAt ?? 0)
@@ -802,7 +802,10 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
   const repairOwnership = useCallback(() => {
     // 点击即记基线：此后只认「越过基线」。没有比较对象时，只看「现在是不是 running/completed」
     // 会把**上一次**的成功记录当成这次的自愈证据。
-    repairBaselineRef.current = { startedAt: polledRepair.startedAt, completedAt: polledRepair.completedAt }
+    // 基线取**已渲染状态**（repairState，含上一次点击回执）而不是 polledRepair：界面渲染的是
+    // repairState，判据与渲染必须同源，否则「轮询不可读、回执已推进」时两边各说各话（#1519）。
+    // 不可读时记 null：记成 {0,0} 会让任意一条历史成功记录都算越过基线（#1518）。
+    repairBaselineRef.current = repairState.readable ? { startedAt: repairState.startedAt, completedAt: repairState.completedAt } : null
     let raw: string | undefined
     try { raw = window.androidBridge?.repairRootOwnership?.() } catch { raw = undefined }
     const parsed = parseRootReply(raw)
@@ -816,23 +819,30 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
       setRepairFailure('启动文件属主维护失败：' + describeCallReason(typeof parsed?.reason === 'string' ? parsed.reason : undefined))
     }
     refreshRootGrant()
-  }, [refreshRootGrant, polledRepair.startedAt, polledRepair.completedAt])
+  }, [refreshRootGrant, repairState])
 
   // issue #1376：红字不可自愈——点「修复文件属主」失败后，后续 2s 轮询即使把 ownership 刷成
   // running / completed，界面仍停在「启动文件属主维护失败」。这里在轮询看到推进时清掉失败态，
   // 让 describeOwnershipRepair 重新接管文案（成功/进行中/结果不可读各自有话说）。
   useEffect(() => {
     if (repairFailure === undefined) return
-    if (!polledRepair.readable) return
     // 判据是「**越过基线**」，不是「现在看起来在跑/已完成」：设备上以前成功修过一次时，
     // 轮询里永远有一条旧的 completed 记录；只按形态判断会把刚出现的红字在下一个 tick 立刻
     // 抹掉——失败**根本不会显示**（同 startedAt 更不该清）。
+    // 比较对象是 repairState（与渲染同源），不是 polledRepair：轮询不可读时 polledRepair 恒为
+    // OWNERSHIP_UNREADABLE，这里会直接放弃，而界面早已由点击回执推进到「进行中/完成」——
+    // 红字与正文自相矛盾（#1519）。
     const base = repairBaselineRef.current
-    if (base === null) return
-    const advanced = polledRepair.startedAt > base.startedAt
-      || (polledRepair.completedAt > base.completedAt && polledRepair.result !== undefined)
+    if (base === null) {
+      // 点击时状态不可读 ⇒ 没有可比基线。此时只认**活证据**（running）：历史 completed 记录的
+      // startedAt 恒大于 0，用它判自愈等于让任意一次旧成功清掉本次失败（#1518）。
+      if (repairState.readable && repairState.running) setRepairFailure(undefined)
+      return
+    }
+    const advanced = repairState.startedAt > base.startedAt
+      || (repairState.completedAt > base.completedAt && repairState.result !== undefined)
     if (advanced) setRepairFailure(undefined)
-  }, [polledRepair, repairFailure])
+  }, [repairState, repairFailure])
 
   /**
    * 自动续开（2026-09-30 主人定例的体验闭环）：用户开开关 → 壳侧因「root 未授权」拦下并

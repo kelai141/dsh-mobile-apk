@@ -1077,6 +1077,43 @@ describe('文件属主维护异步结算（rootGrant.ownership）', () => {
     expect(el.textContent).toContain('文件属主维护完成')
   })
 
+  it('ownership 不可读时点失败，历史成功记录不得清掉红字（issue #1518）', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
+    // 壳侧回包形态不符 ⇒ ownership 不可读（readable=false）。此时基线无从谈起。
+    let ownership: Record<string, unknown> = { startedAt: 10 }
+    const rootGrantState = vi.fn(() => rootGrantJson({ ownership }))
+    const repairRootOwnership = vi.fn(() => JSON.stringify({ ok: false, code: 'denied', reason: 'root-missing' }))
+    const el = await render({ rootGrantState, repairRootOwnership, setRootGranted: vi.fn(), setRootConsent: vi.fn() })
+    expect(readRootGrant().ownership?.readable).toBe(false)
+    await act(async () => { buttonByText(el, '修复文件属主').click() })
+    expect(el.textContent).toContain('启动文件属主维护失败')
+    // 轮询读到一条**历史**成功记录（startedAt=10 / completedAt=20）。本次没有新 run：
+    // 旧判据 base={0,0} ⇒ 10 > 0 成立 ⇒ 红字被清，失败被历史成功掩盖。
+    ownership = { running: false, startedAt: 10, completedAt: 20, result: completedRepair }
+    await act(async () => { vi.advanceTimersByTime(2_000) })
+    expect(el.textContent).toContain('启动文件属主维护失败')
+  })
+
+  it('不可读基线下仍要能自愈：轮询读到活的 running 必须清红字（#1376 不得被 #1518 修法关掉）', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
+    // 与上一条同一个起点（点击时不可读 ⇒ 没有可比基线），区别在于轮询随后读到**真的在跑**。
+    // 「不可读就不记基线」如果实现成「没有基线就永不清除」，等于用关掉自愈来修 #1518——
+    // 那会把 #1376 打回原形（红字永不消失）。这条判据守的就是这个反方向。
+    let ownership: Record<string, unknown> = { startedAt: 10 }
+    const rootGrantState = vi.fn(() => rootGrantJson({ ownership }))
+    const repairRootOwnership = vi.fn(() => JSON.stringify({ ok: false, code: 'denied', reason: 'root-missing' }))
+    const el = await render({ rootGrantState, repairRootOwnership, setRootGranted: vi.fn(), setRootConsent: vi.fn() })
+    await act(async () => { buttonByText(el, '修复文件属主').click() })
+    expect(el.textContent).toContain('启动文件属主维护失败')
+    // 轮询读到活的 running（不是历史 completed）：这是「真的有一次新 run」的活证据。
+    ownership = { running: true, startedAt: 30, completedAt: 0, overdue: false }
+    await act(async () => { vi.advanceTimersByTime(2_000) })
+    expect(el.textContent).not.toContain('启动文件属主维护失败')
+    expect(buttonByText(el, '属主维护进行中').disabled).toBe(true)
+  })
+
   it('repair-running 回执沿用同一个单飞作业，不宣称已修复', async () => {
     const pending = { running: true, startedAt: 10, completedAt: 0, overdue: false }
     const repairRootOwnership = vi.fn(() => JSON.stringify({ ok: true, code: 'repair-running', ...pending }))
