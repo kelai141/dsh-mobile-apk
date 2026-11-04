@@ -96,4 +96,23 @@ class A11yNodeRecycleTest {
     assertTrue("兜底路径的中间跳必须用后即回收", code.contains(".also { runCatching { node.recycle() } }"))
     assertTrue("不得再有立即回收整棵树的入口", !code.contains("recycleSnapshot("))
   }
+
+  /**
+   * issue #1510：teardown 不得**就地**回收——动作可能正持着节点在锁外 performAction，
+   * 立即回收就是 use-after-recycle（API<33 抛 IllegalStateException，动作层又报「行 N 已不存在」）。
+   */
+  @Test
+  fun teardownDefersRecycleInsteadOfRecyclingInPlace() {
+    val lines = serviceCode().split("\n")
+    val start = lines.indexOfFirst { it.contains("private fun teardown()") }
+    assertTrue("找不到 teardown", start >= 0)
+    val body = lines.drop(start + 1).takeWhile { it.isNotBlank() }.joinToString("\n")
+    assertTrue("teardown 体内必须换代（本代进 retired）", body.contains("nodeRecycler.retire("))
+    assertTrue("teardown 必须安排宽限后的回收", body.contains("postDelayed("))
+    assertTrue("teardown 不得同步 drain（会与锁外 performAction 竞争）", !body.contains("drain() } } }"))
+    assertTrue(
+      "drain 只能出现在 postDelayed 的回调里（延迟回收），不得裸调",
+      !body.replace("postDelayed({ runCatching { nodeRecycler.drain() } }", "").contains("nodeRecycler.drain()"),
+    )
+  }
 }
