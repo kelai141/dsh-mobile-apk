@@ -1480,6 +1480,14 @@ export class ComposerSheet {
     const phase = panel.getAttribute(PHASE_ATTR) === 'expanded' ? 'expanded' : 'peek'
     this.setHeight(phase === 'expanded' ? max : Math.min(peek, max))
     this.writeHeights(phase)
+    // issue #1380：拖拽中视口/软键盘变化会按新 peek/max 重写 style.height，拖拽基准必须跟着对齐，
+    // 否则下一次 move 的 delta 会叠加到旧基准上——卡片高度瞬跳。
+    if (this.drag !== null) {
+      // 高度取**内联值**（刚写下去的那个），不读 getBoundingClientRect——过渡期间它还在动。
+      const inline = Number.parseFloat(panel.style.height)
+      this.drag.height = Number.isFinite(inline) ? inline : this.currentHeight()
+      this.drag.appliedY = this.drag.lastY
+    }
     this.publishGeometry()
   }
 
