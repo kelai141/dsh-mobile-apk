@@ -20,7 +20,9 @@ describe('sheet 手势取消不得按提交处理（issue #1378）', () => {
   })
 
   it('取消处理器只吸附、不关闭', () => {
-    const body = src.slice(src.indexOf('private readonly onSheetTouchCancel'), src.indexOf('private readonly onSheetTouchEnd'))
+    // 取一段窗口即可：cancel 处理器排在 end 处理器**之后**，用 end 作右边界会切出空串。
+    const start = src.indexOf('private readonly onSheetTouchCancel')
+    const body = src.slice(start, start + 800)
     expect(body.length).toBeGreaterThan(0)
     expect(body).toContain('settleTo(')
     expect(body).not.toContain('this.close()')
