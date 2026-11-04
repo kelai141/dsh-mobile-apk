@@ -37,6 +37,16 @@ object UndoGate {
   const val RETRY_WINDOW_MS = 30 * 60 * 1000L
 
   /**
+   * 尝试退避（issue #1368）：距上次**尝试**（无论成败）不足该间隔时不再放行 EXECUTE。
+   *
+   * 旧实现只在**成功**后写 `.undo-auto-done`，失败路径没有任何记忆 ⇒ 引擎死透且急救 CLI 起不来时，
+   * 闸门每 5 秒一拍继续放行，每拍拉起一次回滚尝试，无上限、无退避（后台唤醒与日志一起膨胀）。
+   * 取 5 分钟：相对 5 秒拍是 60 拍一次，既不会把「第一次失败后引擎刚好自愈」的窗口堵死，
+   * 也不会让不可恢复的现场把 IO 打满。
+   */
+  const val ATTEMPT_BACKOFF_MS = 5 * 60 * 1000L
+
+  /**
    * Records the first confirmed-dead observation, then grants exactly one caller
    * the right to execute after [WATCH_MS]. A healthy probe disarms the wait.
    */
@@ -123,7 +133,7 @@ object UndoGate {
       suppressNoted = true
       record(context, "legacy undo marker conservatively suppresses until retry window expires")
     }
-    return when (decide(consecutiveFailures, now, retry.atMs, armedAt(context))) {
+    return when (decide(consecutiveFailures, now, retry.atMs, armedAt(context), attemptAt(context))) {
       GateDecision.IDLE -> false
       GateDecision.SUPPRESS -> {
         // 只记一次：重试窗口内每 5s 一拍，逐拍落盘会刷爆观测文件（真实原因由 .undo-auto-done 承载）。
@@ -154,6 +164,14 @@ object UndoGate {
       GateDecision.WAIT -> false
       GateDecision.EXECUTE -> {
         suppressNoted = false
+        // issue #1368：**无论成败**都记一次尝试——decide 据此退避，不可恢复的现场不再每拍拉起。
+        try {
+          // issue #1369 同源：标记文件必须原子写，否则进程被硬杀会留下 0 字节文件，
+          // 而读取侧把「存在但解析不出」当成没有记录 ⇒ 退避静默失效、又回到每 5 秒一拍。
+          writeAtomicText(attemptFile(context), now.toString())
+        } catch (t: Throwable) {
+          record(context, "attempt marker write failed: " + (t.message ?: t.javaClass.simpleName))
+        }
         record(context, "trigger failures=" + consecutiveFailures)
         true
       }
@@ -180,7 +198,7 @@ object UndoGate {
     val now = System.currentTimeMillis()
     val retry = retrySuppression(markerFile(context), currentRetryIdentity(context, engine), now)
     if (retry.resetWatch) runCatching { armFile(context).delete() }
-    val decision = decide(TRIGGER_CONSEC_FAILURES, now, retry.atMs, armedAt(context))
+    val decision = decide(TRIGGER_CONSEC_FAILURES, now, retry.atMs, armedAt(context), attemptAt(context))
     record(context, "client-plugin-tree-failed decision=" + decision + " detail=" + detail.take(160).replace('\n', ' '))
     return clientPluginFailureDecision(decision)
   }
@@ -222,9 +240,13 @@ object UndoGate {
     nowMs: Long,
     lastUndoAtMs: Long?,
     armedAtMs: Long?,
+    /** 上次**尝试**执行回撤的时刻（无论成败，issue #1368）；无则 null。 */
+    lastAttemptAtMs: Long? = null,
   ): GateDecision = when {
     consecutiveFailures < TRIGGER_CONSEC_FAILURES -> GateDecision.IDLE
     lastUndoAtMs != null && nowMs - lastUndoAtMs < RETRY_WINDOW_MS -> GateDecision.SUPPRESS
+    // issue #1368：失败也记账。旧实现只在成功后写 marker，失败路径每拍都重新放行。
+    lastAttemptAtMs != null && nowMs - lastAttemptAtMs < ATTEMPT_BACKOFF_MS -> GateDecision.SUPPRESS
     armedAtMs == null -> GateDecision.ARM
     nowMs - armedAtMs < WATCH_MS -> GateDecision.WAIT
     else -> GateDecision.EXECUTE
@@ -620,6 +642,49 @@ object UndoGate {
 
   private fun markerFile(context: Context) = File(context.filesDir, ".undo-auto-done")
   private fun armFile(context: Context) = File(context.filesDir, ".undo-auto-armed")
+
+  /** 上次尝试执行的时刻（issue #1368）：成败都写，供 decide 退避。 */
+  private fun attemptFile(context: Context) = File(context.filesDir, ".undo-auto-attempt")
+
+  private fun attemptAt(context: Context): Long? {
+    val file = attemptFile(context)
+    val exists = file.exists()
+    val raw = if (exists) runCatching { file.readText() }.getOrNull() else null
+    val now = System.currentTimeMillis()
+    return when (val marker = attemptMarker(exists, raw)) {
+      is AttemptMarker.Missing -> null
+      is AttemptMarker.Recorded -> marker.atMs
+      is AttemptMarker.Corrupt -> {
+        // 损坏（0 字节 / 半截）**不能静默退化成「没有记录」**：那样退避就失效了。
+        // 保守做法 = 当成「刚刚尝试过」，于是本窗口仍然退避；同时删掉坏文件，
+        // 让下一个窗口能正常写入新标记（不会永久卡死）。
+        runCatching { file.delete() }
+        record(context, "attempt marker corrupt (unparseable) — treated as a just-now attempt and removed")
+        now
+      }
+    }
+  }
+
+  /** 尝试标记的解析结果（纯函数，JVM 单测直接钉）。 */
+  internal sealed interface AttemptMarker {
+    data object Missing : AttemptMarker
+    data class Recorded(val atMs: Long) : AttemptMarker
+    data object Corrupt : AttemptMarker
+  }
+
+  /**
+   * 解析尝试标记。
+   *
+   * 0 字节 / 半截内容的语义是「尝试过但时间不可知」，不是「没尝试过」——
+   * 前者必须继续退避，后者才放行。
+   *
+   * @param exists 文件是否存在。
+   * @param raw 文件内容（读失败时为 null）。
+   */
+  internal fun attemptMarker(exists: Boolean, raw: String?): AttemptMarker = when {
+    !exists -> AttemptMarker.Missing
+    else -> raw?.trim()?.toLongOrNull()?.let { AttemptMarker.Recorded(it) } ?: AttemptMarker.Corrupt
+  }
 
   private fun currentRetryIdentity(context: Context, engine: EngineManager?): RetryIdentity {
     val install = runCatching { installFingerprint(context)?.lowercase(java.util.Locale.ROOT) }.getOrNull() ?: "unavailable"
