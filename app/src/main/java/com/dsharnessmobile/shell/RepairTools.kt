@@ -26,6 +26,21 @@ import org.json.JSONObject
  * before the target is replaced. Every model-visible result passes through
  * [LogSanitizer].
  */
+/**
+ * 备份目录的访问面（issue #1367）：**读放行、写拒绝**。
+ *
+ * `write` 会为被覆盖的文件留备份并回传 backup id，系统提示词也承诺「write 会备份」；而旧实现
+ * 对所有 `/repair-backups/` 路径一律拒绝，`read` / `list` 既不能枚举也不能读取——bash 不可用时
+ * （正是修复助手存在的场景）模型没有任何回滚路径。
+ *
+ * 写仍然拒绝：备份是「最后一份好内容」，不该被模型改写；这也让 backup id 保持不可伪造的语义。
+ */
+internal fun backupWriteDenied(path: String, write: Boolean): Boolean {
+  if (!write) return false
+  val dir = "/" + RepairTools.BACKUP_DIR
+  return path.contains(dir + "/") || path.endsWith(dir)
+}
+
 internal class RepairTools(
   private val context: Context,
   private val engine: EngineManager,
@@ -578,8 +593,8 @@ internal class RepairToolsFs(
       throw RepairFailure("protected-file", "凭据文件不通过修复工具读写")
     }
     val path = file.absolutePath
-    if (path.contains("/repair-backups/") || path.endsWith("/repair-backups")) {
-      throw RepairFailure("backup-reserved", "修复备份目录不通过工具访问")
+    if (backupWriteDenied(path, write)) {
+      throw RepairFailure("backup-reserved", "修复备份目录只允许读取（备份是最后一份好内容，不允许模型改写）")
     }
     if (path.endsWith(".apk") || path.contains("/data/app/") || path.contains("/system/") ||
       path.contains("/product/") || path.contains("/vendor/") || path.contains("/apex/")) {
