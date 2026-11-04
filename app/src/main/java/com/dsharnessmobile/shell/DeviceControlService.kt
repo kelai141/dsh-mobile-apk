@@ -320,6 +320,28 @@ class DeviceControlService : AccessibilityService() {
   }
 
   /** 最近一次快照：路径 → 节点/边界。节点对象不跨快照使用（页面变化即失效）。 */
+  /**
+   * 回收快照持有的节点句柄（issue #1361）。
+   *
+   * minSdk 26：API < 33 上 `AccessibilityNodeInfo` **必须**显式 `recycle()`。不回收时每次重建
+   * 快照都会泄漏最多 MAX_NODES 个节点，长会话后节点池耗尽，`getChild` 开始返回 null——动作层
+   * 于是报「行 N 已不存在（页面已变化）」的**假失败**，而界面其实没变。
+   *
+   * `nodes` 与 `rowNodes` 共享同一批实例，按 identity 去重，避免同一节点被 recycle 两次。
+   * API 33+ 起 `recycle()` 是 no-op（已废弃），调用它不会有害。
+   */
+  private fun recycleSnapshot(target: Snapshot?) {
+    if (target === null) return
+    val seen = java.util.Collections.newSetFromMap(
+      java.util.IdentityHashMap<AccessibilityNodeInfo, Boolean>(),
+    )
+    for (node in target.rowNodes) {
+      if (node === null) continue
+      if (!seen.add(node)) continue
+      runCatching { node.recycle() }
+    }
+  }
+
   private class Snapshot(
     // 0.13.8 E4：gen 用秒级时间戳播种（Long）——服务重连后计数从 0 回绕曾让旧缓存
     // 「假新鲜」（同一 gen 判定通过 → 按失效快照点击）。时间戳单调，杜绝回绕。
@@ -546,7 +568,7 @@ class DeviceControlService : AccessibilityService() {
   private fun teardown() {
     if (ControlCarrier.a11y === this) ControlCarrier.a11y = null
     instance = null
-    synchronized(lock) { snapshot = null }
+    synchronized(lock) { recycleSnapshot(snapshot); snapshot = null }
     observedScreenScope = null
     setEnabledFlag(this, false)
     LogCollector.log(TAG, "accessibility service disconnected; a11y handler unregistered")
@@ -620,6 +642,8 @@ class DeviceControlService : AccessibilityService() {
         generation.incrementAndGet(), rotation(), metrics.first, metrics.second,
         nodes, bounds, rows, rowNodes, truncated,
       )
+      // issue #1361：换树之前先回收旧树（`nodes`/`rowNodes` 共享实例，按 identity 去重）。
+      recycleSnapshot(snapshot)
       snapshot = fresh
       invalidated = false
       return fresh
@@ -775,7 +799,7 @@ class DeviceControlService : AccessibilityService() {
   private fun observeScreenScope(scope: ScreenScope) {
     if (observedScreenScope == scope) return
     observedScreenScope = scope
-    synchronized(lock) { snapshot = null }
+    synchronized(lock) { recycleSnapshot(snapshot); snapshot = null }
     invalidated = true
   }
 
