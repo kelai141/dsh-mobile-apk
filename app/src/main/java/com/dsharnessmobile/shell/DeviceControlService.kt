@@ -348,7 +348,7 @@ class DeviceControlService : AccessibilityService() {
     val truncated: Boolean = false,
   )
 
-  private val lock = Any()
+  private val lock = Any(); private val nodeRecycler = GenerationalNodeRecycler<AccessibilityNodeInfo> { node -> node.recycle() }; private val TEARDOWN_GRACE_MS = 2_000L
   private var snapshot: Snapshot? = null
   // 0.13.8 E4：秒级时间戳播种（Long，单调不回绕）
   private val generation = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis() / 1000)
@@ -546,7 +546,7 @@ class DeviceControlService : AccessibilityService() {
   private fun teardown() {
     if (ControlCarrier.a11y === this) ControlCarrier.a11y = null
     instance = null
-    synchronized(lock) { snapshot = null }
+    synchronized(lock) { snapshot?.let { nodeRecycler.retire(it.nodes.values, it.rowNodes) }; snapshot = null }.also { runCatching { android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ runCatching { nodeRecycler.drain() } }, TEARDOWN_GRACE_MS) } } // #1510：teardown 不就地回收（动作可能在锁外 performAction 持着节点），宽限后 drain
     observedScreenScope = null
     setEnabledFlag(this, false)
     LogCollector.log(TAG, "accessibility service disconnected; a11y handler unregistered")
@@ -620,7 +620,7 @@ class DeviceControlService : AccessibilityService() {
         generation.incrementAndGet(), rotation(), metrics.first, metrics.second,
         nodes, bounds, rows, rowNodes, truncated,
       )
-      snapshot = fresh
+      nodeRecycler.retire(nodes.values, rowNodes); snapshot = fresh
       invalidated = false
       return fresh
     }
@@ -775,7 +775,7 @@ class DeviceControlService : AccessibilityService() {
   private fun observeScreenScope(scope: ScreenScope) {
     if (observedScreenScope == scope) return
     observedScreenScope = scope
-    synchronized(lock) { snapshot = null }
+    synchronized(lock) { snapshot?.let { nodeRecycler.retire(it.nodes.values, it.rowNodes) }; snapshot = null }
     invalidated = true
   }
 
@@ -1096,7 +1096,7 @@ class DeviceControlService : AccessibilityService() {
     var node: AccessibilityNodeInfo = rootFor(activeDisplayId) ?: return null
     for (level in childPath.indices) {
       val index = childPath[level]
-      val direct = if (index >= 0 && index < node.childCount) node.getChild(index) else null
+      val direct = (if (index >= 0 && index < node.childCount) node.getChild(index) else null).also { runCatching { node.recycle() } }
       node = direct ?: return null
       if (level == childPath.size - 1) return node
     }
