@@ -64,6 +64,15 @@ object ShizukuTransport {
    */
   private val bindState = ShizukuBindState(BIND_WATCHDOG_MS)
 
+  // ── issue #1476：就绪的**功能性证据**与失败留痕 ──────────────────────────────
+  /** 功能探测（`protocolVersion()`）的 TTL 缓存；2s 轮询不能每次都打 binder。 */
+  private val functionalProbe = FunctionalProbeCache(clock = { SystemClock.elapsedRealtime() })
+  private val probeLock = Any()
+  private var probeInFlight = false
+  /** 最近一次 shell 失败（进程内环形一项）：让「面板 ready / 工具 timeout」能在同屏对上。 */
+  private var lastShellFailure: JSONObject? = null
+  private val shellFailureLock = Any()
+
   @Volatile private var connectedAt = 0L
   private var activeAttempt: BindAttempt? = null
   // SDK 13.1.5 在主线程遍历未同步的连接集合；注册、注销也必须走同一线程。
@@ -209,7 +218,7 @@ object ShizukuTransport {
     diagnosingStartFailure = true
     Thread({
       try {
-        startFailureLogs = collectStartFailureLogs()
+        startFailureLogs = startFailureDiagnostic(bindState.attempts, bindState.attemptAgeMs(SystemClock.elapsedRealtime()), collectStartFailureLogs())
       } catch (failure: Throwable) {
         startFailureLogs = "读取启动失败日志时出错：" + ProcIo.errorText(failure)
       } finally {
@@ -265,6 +274,8 @@ object ShizukuTransport {
     out.put("startFailed", bindState.startFailed)
     out.put("retryAfterMs", bindState.autoRetryAfterMs(now))
     if (startFailureLogs.isNotEmpty()) out.put("diagnostics", startFailureLogs)
+    lastShellFailure?.let { out.put("lastShellFailure", it) }
+    out.put("functionalProbe", probeJson())
     maybeCollectStartFailureLogs()
 
     if (!running) {
@@ -329,6 +340,17 @@ object ShizukuTransport {
       val answer = out.put("ok", false).put("code", code).put("guidance", guidance)
       if (binding) answer.put("retryAfterMs", BIND_TIMEOUT_MS)
       return answer
+    }
+    // issue #1476：binder 活 + 已绑定**还不够**——必须有功能探测成功的证据。
+    val probeNow = SystemClock.elapsedRealtime()
+    if (functionalProbe.shouldProbe(probeNow)) kickFunctionalProbe()
+    val verdict = readinessVerdict(
+      ReadyFacts(binderAlive = true, granted = true, version = version, bound = true, probe = functionalProbe.current()),
+      probeNow,
+    )
+    if (!verdict.ok) {
+      return out.put("ok", false).put("code", verdict.code)
+        .put("guidance", probeGuidance(context, verdict))
     }
     return out.put("ok", true).put("code", "shizuku-ready")
       .put("guidance", UiText.t(context, "Shizuku shell UserService 已就绪（uid=$uid）。", "The Shizuku shell UserService is ready (uid=$uid)."))
@@ -1082,10 +1104,13 @@ object ShizukuTransport {
     return canon.takeIf { it.path == rootPath || it.path.startsWith(rootPath + java.io.File.separator) }
   }
 
-  private fun shellFailure(t: Throwable): JSONObject = JSONObject()
+  private fun shellFailure(t: Throwable): JSONObject = run {
+    recordShellFailure("shell-transport-failed", t.javaClass.simpleName + ": " + (t.message ?: ""))
+    JSONObject()
     .put("ok", false)
     .put("code", "shell-transport-failed")
     .put("guidance", "Shizuku shell 通道失败：" + t.javaClass.simpleName + ": " + (t.message ?: ""))
+  }
 
   /**
    * issue #262 方案 A：root 通道授权门（策略门 + 知情同意，**不是技术沙箱**）。
@@ -1195,9 +1220,12 @@ object ShizukuTransport {
     .put("noReplay", true)
 
 
-  private fun unavailableShell(): JSONObject = JSONObject()
+  private fun unavailableShell(): JSONObject = run {
+    recordShellFailure("shizuku-user-service-not-bound", "shell 通道未就绪（ensureBound 未拿到可用 UserService）")
+    JSONObject()
     .put("ok", false).put("code", "shizuku-user-service-not-bound")
     .put("guidance", "Shizuku shell 通道未就绪；请在设置页「手机控制」查看状态与引导。")
+  }
 
   /**
    * 「Shizuku 兼容服务在场」的事实判定（0.14.8）。
@@ -1220,5 +1248,71 @@ object ShizukuTransport {
 
   /** Shizuku API binder 是否已收到且存活（官方与兼容实现同一条判据，不猜实现方是谁）。 */
   private fun binderAlive(): Boolean = runCatching { Shizuku.pingBinder() }.getOrDefault(false)
+
+  /** 功能探测的对外快照（进 status()，供面板与诊断区分「缓存命中」与「刚探测」）。 */
+  private fun probeJson(): JSONObject {
+    val p = functionalProbe.current()
+    val now = SystemClock.elapsedRealtime()
+    val stale = p.probed && now - p.atMs !in 0..FunctionalProbeCache.DEFAULT_TTL_MS
+    return JSONObject()
+      .put("probed", p.probed)
+      .put("ok", p.ok)
+      .put("protocolVersion", p.protocolVersion)
+      .put("error", p.error)
+      .put("atMs", p.atMs)
+      .put("stale", stale)
+      .put("fromCache", p.probed && !stale)
+      .put("ttlMs", FunctionalProbeCache.DEFAULT_TTL_MS)
+  }
+
+  /** 异步补一次功能探测（单飞）：TTL 过期时沿用上次结果，不把面板闪成 not-ready。 */
+  private fun kickFunctionalProbe() {
+    synchronized(probeLock) {
+      if (probeInFlight) return
+      probeInFlight = true
+    }
+    Thread({
+      try {
+        val remote = service ?: return@Thread
+        functionalProbe.probeIfNeeded({ remote.protocolVersion() })
+      } catch (t: Throwable) {
+        Log.w(TAG, "functional probe failed: " + t.javaClass.simpleName)
+      } finally {
+        synchronized(probeLock) { probeInFlight = false }
+      }
+    }, "dsh-shizuku-probe").apply { isDaemon = true }.start()
+  }
+
+  /** 功能探测未通过时的引导（与「未绑定」「版本过低」分开说）。 */
+  private fun probeGuidance(context: Context, verdict: ReadyVerdict): String {
+    val p = functionalProbe.current()
+    return when (verdict.code) {
+      READY_PROBE_FAILED -> UiText.t(
+        context,
+        "Shizuku 已授权，但 UserService 在 binder 上不可用（功能探测失败：" + p.error + "）。请在本页「重置连接」后重试；仍失败请提供 logcat。",
+        "Shizuku is granted, but the UserService is not usable over binder (probe failed: " + p.error + "). Reset the connection on this page and retry; if it persists, provide logcat.",
+      )
+      READY_PROBE_PENDING -> UiText.t(
+        context,
+        "binder 已连上，正在做首次功能探测（尚不能证明 UserService 可用）。",
+        "The binder is connected; the first functional probe is still running (availability is not proven yet).",
+      )
+      else -> UiText.t(context, "Shizuku shell 通道未就绪。", "The Shizuku shell channel is not ready.")
+    }
+  }
+
+  /** 记一笔最近一次 shell 失败（进程内环形一项）。 */
+  internal fun recordShellFailure(code: String, message: String) {
+    synchronized(shellFailureLock) {
+      lastShellFailure = JSONObject()
+        .put("code", code)
+        .put("at", System.currentTimeMillis())
+        .put("elapsedMs", SystemClock.elapsedRealtime())
+        .put("message", message)
+    }
+  }
+
+  /** 最近一次 shell 失败的快照（判据与诊断面用）。 */
+  internal fun lastShellFailureSnapshot(): JSONObject? = synchronized(shellFailureLock) { lastShellFailure }
 }
 

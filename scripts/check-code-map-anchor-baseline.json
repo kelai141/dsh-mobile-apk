@@ -1763,15 +1763,6 @@
     "ShizukuProbe.kt:77": [
       "return out.put(\"ok\", false).put(\"code\", \"shizuku-not-running\")"
     ],
-    "ShizukuTransport.kt:806": [
-      ""
-    ],
-    "ShizukuTransport.kt:821": [
-      "}.getOrDefault(false)"
-    ],
-    "ShizukuTransport.kt:98": [
-      "val valid = runCatching { binder.pingBinder() }.getOrDefault(false)"
-    ],
     "ShizukuUserService.kt:207": [
       "putBoolean(\"ok\", result.complete && result.exitCode == 0)"
     ],
@@ -3895,6 +3886,15 @@
     ],
     "scripts/patches/data/registry-scan-c4.mjs:10": [
       "export function planClientRegistryScan(source) {"
+    ],
+    "ShizukuTransport.kt:828": [
+      ""
+    ],
+    "ShizukuTransport.kt:843": [
+      "}.getOrDefault(false)"
+    ],
+    "ShizukuTransport.kt:107": [
+      "val valid = runCatching { binder.pingBinder() }.getOrDefault(false)"
     ]
   },
   "symbols": {
