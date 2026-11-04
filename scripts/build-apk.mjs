@@ -7,7 +7,8 @@
 // 0.13.8-b ST-06 / F-ENV-04 真源化（此前是本链的三处陈旧字面量）：
 //   ① 版本 = app/build.gradle.kts 的 versionName（此前写死 0.13.0 → 产物名与输出目录恒错）；
 //   ② 注入集 = scripts/plugin-dirs.json（与本地链同一常量；此前 pluginDirs 少一个权威 patch
-//      已挂载的插件 dsh-model-capability，且门禁集比本地链少一批）；
+//      已挂载的插件——该插件 dsh-model-capability 已于 0.14.8 退役，现由 check-retired-plugins.mjs
+//      守「退役插件不得再被构建/发布入口引用」，且门禁集与本地链一致）；
 //   ③ 门禁集与 build-apk-013.ps1 逐项对齐（补 engine-overlay / snapshot-file-modes，机密门禁统一
 //      check-snapshot-secrets.mjs 单实现），check-release-gates.mjs 断言两份编排器差集 = 0；
 //   ④ `--dry-run` 只解析真源并打印产物名/注入集/门禁集，不写任何文件（验收 ① 的机器可读入口）。
@@ -91,6 +92,9 @@ const GATE_SCRIPTS = [
   // vendored 字节绑定（issue #1285）：vendor/dsh-plugin-subscriptions 的逐文件 sha256 必须与
   // scripts/vendor-provenance.json 相符。此前没有任何门禁消费 PROVENANCE 的哈希，手改 lib/*.js 也能出厂。
   'check-vendor-provenance.mjs',
+  // 退役插件残留引用（0.14.8 起 dsh-model-capability 退役）：构建/发布入口里不得再有可执行引用。
+  // 缺它的话「注入集多一条指向不存在目录的项」一路静默到设备上才暴露。
+  'check-retired-plugins.mjs',
   // 0.14.8 堆下限：壳侧 shellEnv() 与快照内启动器必须给出同一 clamp 区间（单边漂移 = 部分路径仍 OOM）。
   'check-engine-heap-floor.mjs',
   'check-bounded-io.mjs',
@@ -241,6 +245,9 @@ try {
   // 与 ABI、快照都无关，所以放在 ABI 循环外跑一次。缺它的话改一个 lib/*.js 也能照常出厂。
   log('门禁：vendored 目录字节绑定…')
   run('node', [gate('check-vendor-provenance.mjs')])
+  // 退役插件残留引用：同样只读仓库文件，放 ABI 循环外跑一次；必须在打包前，避免静默到设备。
+  log('门禁：退役插件残留引用…')
+  run('node', [gate('check-retired-plugins.mjs')])
   // 0.14.8 堆下限：壳侧 shellEnv() 与快照内启动器必须给出同一 clamp 区间（单边漂移 = 部分路径仍 OOM）。
   log('门禁：引擎堆下限双源一致性…')
   run('node', [gate('check-engine-heap-floor.mjs')])
