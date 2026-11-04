@@ -37,7 +37,7 @@ import { hasManagedPortBind, patchManagedPortBind } from './data/managed-port-bi
 import { IMAGE_HISTORY_CORE, planImageHistory } from './image-history-batch-offload-I1.mjs'
 import { PREVIEW_LOCAL, PREVIEW_PI, PREVIEW_DEEPSEEK, planRequestPreview } from './image-request-preview-P1.mjs'
 import { planImageExpiry } from './image-expiry-E1.mjs'
-import { replaceAtMostOnce, replaceOnce } from './lib/replace-once.mjs'
+import { replaceAtMostOnce, replaceAtMostOnceRe, replaceOnce, replaceOnceRe } from './lib/replace-once.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const registry = JSON.parse(readFileSync(join(HERE, 'registry.json'), 'utf8'))
@@ -417,7 +417,7 @@ const IMPLS = {
       // 幂等 + map 强制同步（别名增补等数据更新直接反映到已修补文件）
       const mapRe = /let _=\{.*?\},e=String\(t\.fullName/
       if (!mapRe.test(s)) throw new Error('D map 锚点未命中——请人工核对')
-      s = s.replace(mapRe, `let _=${MAP},e=String(t.fullName`)
+      s = replaceOnceRe(s, mapRe, `let _=${MAP},e=String(t.fullName`, 'market-D map 锚点')
       // 搜索 handler：上游原形、旧 D 形态（mobile: 前缀）、新形态三者都收敛到同一段实现。
       // 0.1.7 的服务端 handler 上游新增了 installCheck:"passed"，锚点按该字节写。
       const HANDLER_TAIL = ',category:s.searchParams.get("category")??void 0,limit:s.searchParams.get("limit")??60,installCheck:"passed"});'
@@ -993,7 +993,7 @@ const IMPLS = {
       // 注入片段从独立文件读入（LF），避免在补丁源码里嵌套转义：
       // 直接内联会让 \n/\s 被外层字符串先吃掉（实测踩到两处：字面换行与 \s 变 s）。
       const MINIMAL_NEW = readFileSync(join(HERE, 'data', 'undo-safe-align-snippet.mjs'), 'utf8').replace(/\n$/, '')
-      s = s.replace(MINIMAL_RE, MINIMAL_NEW)
+      s = replaceOnceRe(s, MINIMAL_RE, MINIMAL_NEW, 'undo-safe-align minimal 覆写段')
       if (!s.includes('dsh-mobile safe ownership identity v2')) throw new Error('undo-safe-align 复核失败——不写回')
       return s
     },
@@ -1079,18 +1079,18 @@ const IMPLS = {
         const autoHelperEnd = next.indexOf('\n}', autoHelperStart)
         if (autoHelperEnd > autoHelperStart) next = next.slice(0, autoHelperStart) + defaultDirHelper.trimEnd() + next.slice(autoHelperEnd + 2)
       } else {
-        next = next.replace(/function buildConfig\(overrides = \{\}\) \{/, defaultDirHelper + 'function buildConfig(overrides = {}) {')
+        next = replaceAtMostOnceRe(next, /function buildConfig\(overrides = \{\}\) \{/, defaultDirHelper + 'function buildConfig(overrides = {}) {', 'undo-safe-transaction buildConfig 锚点')
       }
       const safeModeDefaultLine = `    safeModeDefaultWebStore: profileName === 'web' && overrides.autoDir === undefined && !hasConfiguredAutoDir(),\n`
-      if (!next.includes('safeModeDefaultWebStore: profileName === \'web\'')) next = next.replace(/(    profileName,\r?\n)/, `$1${safeModeDefaultLine}`)
-      else next = next.replace(/    safeModeDefaultWebStore: profileName === 'web' && overrides.autoDir === undefined && !hasConfiguredAutoDir\(\),\r?\n/, safeModeDefaultLine)
+      if (!next.includes('safeModeDefaultWebStore: profileName === \'web\'')) next = replaceAtMostOnceRe(next, /(    profileName,\r?\n)/, `$1${safeModeDefaultLine}`, 'undo-safe-transaction profileName 锚点')
+      else next = replaceAtMostOnceRe(next, /    safeModeDefaultWebStore: profileName === 'web' && overrides.autoDir === undefined && !hasConfiguredAutoDir\(\),\r?\n/, safeModeDefaultLine, 'undo-safe-transaction webStore 默认值行')
       // 升级型锚点（复审意见）：新形态文件里这行 import 已经不存在，0 次是合法状态。
       next = replaceAtMostOnce(next, "import { promises as fs, existsSync, readFileSync } from 'node:fs';",
         "import { promises as fs, existsSync, readFileSync, constants as fsConstants } from 'node:fs';")
-      next = next.replace(/import \{ join, dirname, basename, resolve, isAbsolute \} from 'node:path';\r?\n/,
-        "import { join, dirname, basename, resolve, relative, sep, isAbsolute } from 'node:path';\n")
-      next = next.replace(/import \{ join, dirname, basename, resolve, relative, sep, isAbsolute \} from 'node:path';\r?\n/,
-        "import { join, dirname, basename, resolve, relative, sep, isAbsolute } from 'node:path';\n")
+      next = replaceAtMostOnceRe(next, /import \{ join, dirname, basename, resolve, isAbsolute \} from 'node:path';\r?\n/,
+        "import { join, dirname, basename, resolve, relative, sep, isAbsolute } from 'node:path';\n", 'undo-safe-transaction node:path import（短形态升级）')
+      next = replaceAtMostOnceRe(next, /import \{ join, dirname, basename, resolve, relative, sep, isAbsolute \} from 'node:path';\r?\n/,
+        "import { join, dirname, basename, resolve, relative, sep, isAbsolute } from 'node:path';\n", 'undo-safe-transaction node:path import')
       if (!next.includes('dsh-mobile safe mode transaction (S2)')) {
         throw new Error('undo-safe-transaction 复核失败——不写回')
       }
@@ -1893,13 +1893,13 @@ const IMPLS = {
       if (s.includes('dsh-mobile ArkWeb resource authority fallback (H1)')) return s
       const ORIGINAL = /(if \(parsed\.protocol !== `dsh-resource:`\) return void 0;)(\r?\n)([ \t]*)return parsed\.hostname === "" \? void 0 : parsed\.hostname\.toLowerCase\(\);/
       if (!ORIGINAL.test(s)) throw new Error('arkweb-resource-protocol 锚点未命中：protocolOf hostname 返回语句已变')
-      s = s.replace(ORIGINAL, (_whole, protocolCheck, eol, indent) => [
+      s = replaceOnceRe(s, ORIGINAL, (_whole, protocolCheck, eol, indent) => [
         protocolCheck,
         indent + 'if (parsed.hostname !== "") return parsed.hostname.toLowerCase();',
         indent + '// dsh-mobile ArkWeb resource authority fallback (H1): ArkWeb loses the non-special-scheme hostname.',
         indent + 'const authority = /^dsh-resource:\\/\\/([A-Za-z][A-Za-z0-9-]*)(?:[/?#]|$)/i.exec(address);',
         indent + 'return authority === null ? void 0 : authority[1].toLowerCase();',
-      ].join(eol))
+      ].join(eol), 'arkweb-resource-protocol protocolOf hostname 返回语句')
       if (!s.includes('dsh-mobile ArkWeb resource authority fallback (H1)')) throw new Error('arkweb-resource-protocol 复核失败——不写回')
       return s
     },
