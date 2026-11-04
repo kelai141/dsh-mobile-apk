@@ -3500,12 +3500,6 @@
     "plugins/dsh-android-vdisplay/src/status.ts:14": [
       "export const VD_OPS = ['vdCreate', 'vdDestroy', 'vdLaunch', 'vdMoveTask', 'vdInfo', 'vdLaunchApp', 'vdInput'] as const"
     ],
-    "plugins/dsh-android-vdisplay/src/status.ts:186": [
-      "if (typeof raw.selected === 'string') out.selected = raw.selected"
-    ],
-    "plugins/dsh-android-vdisplay/src/status.ts:190": [
-      "/**"
-    ],
     "plugins/dsh-android-vdisplay/test/tools-callable.test.mjs:122": [
       "const expected = schema.properties[key].type"
     ],
@@ -3895,6 +3889,12 @@
     ],
     "ShizukuTransport.kt:107": [
       "val valid = runCatching { binder.pingBinder() }.getOrDefault(false)"
+    ],
+    "plugins/dsh-android-vdisplay/src/status.ts:204": [
+      "if (typeof raw.selected === 'string') out.selected = raw.selected"
+    ],
+    "plugins/dsh-android-vdisplay/src/status.ts:208": [
+      "/**"
     ]
   },
   "symbols": {

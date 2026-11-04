@@ -177,6 +177,24 @@ export function snapshotFromRaw(
     return { ok: false, ...base, screens, enabled, state, code: raw.code ?? 'vdisplay-blocked',
       guidance: raw.guidance ?? '能力探测缺项，虚拟屏无法打开（缺什么/为什么/能否补救见设置页错误码）。' }
   }
+  // issue #1211：自报 `active`/`ready` **不等于**有对应屏幕。旧实现直接把 state 当 ok:true，
+  // 于是「displayId 不在 screens 里」甚至「screens 为空」都报「虚拟屏已激活」——模型据此下发
+  // vdInput/vdLaunch，拿到的却是壳侧失败回执：先假成功再失败，比直接 blocked 更难排查。
+  // 判据与 #1476 同型：**ok 必须有功能证据**（这里的功能证据 = 已注册屏幕里有它）。
+  if (screens.length === 0) {
+    return { ok: false, ...base, screens, enabled, state, code: 'vdisplay-no-screens',
+      guidance: '虚拟屏自报「' + state + '」，但没有任何已注册屏幕（screens 为空）——先 android_vdisplay_create 再操作。' }
+  }
+  const reportedDisplay = typeof raw.displayId === 'number' ? raw.displayId : undefined
+  if (reportedDisplay !== undefined && !screens.some((s) => s.displayId === reportedDisplay)) {
+    return { ok: false, ...base, screens, enabled, state, code: 'vdisplay-display-missing',
+      guidance: '虚拟屏自报 displayId=' + reportedDisplay + '，但它不在已注册屏幕里（现有：'
+        + screens.map((s) => s.alias + '#' + s.displayId).join('、') + '）——以 android_vdisplay_status 的 screens 为准，请重建屏。' }
+  }
+  if (state === 'active' && reportedDisplay === undefined) {
+    return { ok: false, ...base, screens, enabled, state, code: 'vdisplay-display-missing',
+      guidance: '虚拟屏自报已激活，但没有给出 displayId——无法证明对应屏幕存在，按未就绪处理。' }
+  }
   const out: VdSnapshot = { ok: true, ...base, screens, enabled, state, code: raw.code ?? 'vdisplay-ok',
     guidance: raw.guidance ?? (state === 'active' ? '虚拟屏已激活（AI 操作面在虚拟屏，用户前台不受影响）。' : '能力就绪，尚未建屏。'),
     transports: raw.transports ?? [] }
