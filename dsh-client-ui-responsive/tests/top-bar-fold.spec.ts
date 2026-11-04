@@ -613,3 +613,33 @@ describe('D 项：样式表守则', () => {
     expect(TOP_BAR_FOLD_CSS).not.toMatch(/\.[A-Za-z0-9_-]{6,}_.*\{/)
   })
 })
+
+describe('issue #1411：detach 必须取消已排队的 rAF', () => {
+  it('排队中的那一帧被 cancel，且回调即便执行也不再写 DOM', () => {
+    // 旧实现只存布尔、不存 id：同一帧内 detach 之后，已排队的回调仍会跑 sync()，
+    // 而观察者与监听器都已断开，没人再 restore()——箭头与折叠属性永久留在节点上。
+    const queued: FrameRequestCallback[] = []
+    const originalRaf = window.requestAnimationFrame
+    const originalCancel = window.cancelAnimationFrame
+    const cancelled: number[] = []
+    window.requestAnimationFrame = ((cb: FrameRequestCallback): number => {
+      queued.push(cb)
+      return queued.length
+    }) as typeof window.requestAnimationFrame
+    window.cancelAnimationFrame = ((id: number): void => { cancelled.push(id) }) as typeof window.cancelAnimationFrame
+    try {
+      fold.attach() // 用 beforeEach 造好的实例；attach 自己会排一帧
+      expect(queued.length).toBeGreaterThan(0)
+      const pendingId = queued.length
+      fold.detach()
+      expect(cancelled).toContain(pendingId)
+      // 双保险：即便回调仍被调用（浏览器已派发），也不得再动 DOM
+      for (const cb of queued) cb(0)
+      expect(document.querySelector('[' + ARROW_ATTR + ']')).toBeNull()
+      expect(document.querySelector('[' + FOLD_ATTR + ']')).toBeNull()
+    } finally {
+      window.requestAnimationFrame = originalRaf
+      window.cancelAnimationFrame = originalCancel
+    }
+  })
+})
