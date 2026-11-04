@@ -518,8 +518,11 @@ internal class EngineStartFlow(private val activity: MainActivity) {
       activity.showGuide()
     }
     engineMonitorHandler.postDelayed({
+      // issue #1356：**先判世代再清闩**。陈旧的重试 runnable 跨世代执行时，原来会把新一代的
+      // retryPending 清掉——新一代正在等自己的重试窗口，闩被误清后看门狗会在这段窗口里重启引擎。
+      if (!isCurrentEngineFlow(generation)) return@postDelayed
       RepairState.retryPending = false
-      if (isCurrentEngineFlow(generation) && !RepairState.required(activity)) {
+      if (!RepairState.required(activity)) {
         Thread {
           if (!isCurrentEngineFlow(generation)) return@Thread
           // stopOwnedEngine() also returns false when the tracked child is
