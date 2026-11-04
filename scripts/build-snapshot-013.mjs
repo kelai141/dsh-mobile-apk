@@ -17,6 +17,7 @@ import { createHash } from 'node:crypto'
 import { wslPath, sh as wsl, shStatus, XZ_THREADS, wslNodeCommand } from './lib/shell.mjs'
 import { sanitizeSymlinks } from './lib/symlink-sanitize.mjs'
 import { assertOverlayDigest } from './lib/overlay-integrity.mjs'
+import { overlayCacheHit, overlayCacheStore } from './lib/overlay-cache.mjs'
 import { relocateGitShellPath } from './lib/git-shell-path.mjs'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -211,7 +212,9 @@ const OVERLAY_MIRRORS = PREINSTALL.npmMirrors
 let overlayOk = 0
 const overlayTgz = async (name, version) => {
   const dest = join(OVERLAY_CACHE, `${name.replace('@', '').replace('/', '-')}-${version}.tgz`)
-  if (existsSync(dest)) return dest
+  // issue #1414：命中也要校验（sidecar 摘要）；残档/无摘要的旧缓存会被清掉并重下。
+  const cached = overlayCacheHit(dest)
+  if (cached !== null) return cached
   mkdirSync(OVERLAY_CACHE, { recursive: true })
   let meta = null
   for (const m of OVERLAY_MIRRORS) {
@@ -228,8 +231,8 @@ const overlayTgz = async (name, version) => {
   // issue #1415：旧写法 `if (dist.sha512 && …)` 在镜像不返回 sha512 时静默放行远端字节。
   // 判据收口在 lib/overlay-integrity.mjs（缺摘要即拒，integrity=sha512-… 也能比）。
   assertOverlayDigest(dist, buf, `${name}@${version}`)
-  writeFileSync(dest, buf)
-  return dest
+  // issue #1414：临时文件 + rename 原子落盘，并写 sidecar 供下次命中校验。
+  return overlayCacheStore(dest, buf)
 }
 // 树内路径：scoped 包落在 node_modules/<scope>/<name>（基座实证 @deepseek-ai 域有嵌套 scope 目录）
 const overlayPkgDir = (name, base = ENGINE_NM_STAGE) => {
