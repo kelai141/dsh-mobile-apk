@@ -813,6 +813,17 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
     refreshRootGrant()
   }, [refreshRootGrant])
 
+  // issue #1376：红字不可自愈——点「修复文件属主」失败后，后续 2s 轮询即使把 ownership 刷成
+  // running / completed，界面仍停在「启动文件属主维护失败」。这里在轮询看到推进时清掉失败态，
+  // 让 describeOwnershipRepair 重新接管文案（成功/进行中/结果不可读各自有话说）。
+  useEffect(() => {
+    if (repairFailure === undefined) return
+    if (!polledRepair.readable) return
+    if (polledRepair.running || (polledRepair.completedAt > 0 && polledRepair.result !== undefined)) {
+      setRepairFailure(undefined)
+    }
+  }, [polledRepair, repairFailure])
+
   /**
    * 自动续开（2026-09-30 主人定例的体验闭环）：用户开开关 → 壳侧因「root 未授权」拦下并
    * **弹出授权框** → 用户点「允许」→ 本页 2s 轮询看到 `rootAccess.granted` → 自动把开关续开。

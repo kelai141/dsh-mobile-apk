@@ -1050,6 +1050,28 @@ describe('文件属主维护异步结算（rootGrant.ownership）', () => {
     expect(el.textContent).not.toContain('启动文件属主维护失败')
   })
 
+  it('失败红字在轮询看到推进后自愈（issue #1376）', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
+    let ownership: Record<string, unknown> = { running: false, startedAt: 0, completedAt: 0 }
+    const rootGrantState = vi.fn(() => rootGrantJson({ ownership }))
+    // 第一次点击被壳侧拒绝（例如 root 未授权）→ 红字
+    const repairRootOwnership = vi.fn(() => JSON.stringify({ ok: false, code: 'denied', reason: 'root-missing' }))
+    const el = await render({ rootGrantState, repairRootOwnership, setRootGranted: vi.fn(), setRootConsent: vi.fn() })
+    await act(async () => { buttonByText(el, '修复文件属主').click() })
+    expect(el.textContent).toContain('启动文件属主维护失败')
+    // 2s 轮询把 ownership 刷成 running：红字必须让位，改由 describeOwnershipRepair 接管
+    ownership = { running: true, startedAt: 10, completedAt: 0, overdue: false }
+    await act(async () => { vi.advanceTimersByTime(2_000) })
+    expect(el.textContent).not.toContain('启动文件属主维护失败')
+    expect(buttonByText(el, '属主维护进行中').disabled).toBe(true)
+    // 再刷成 completed：仍不得回退到失败文案
+    ownership = { running: false, startedAt: 10, completedAt: 20, result: completedRepair }
+    await act(async () => { vi.advanceTimersByTime(2_000) })
+    expect(el.textContent).not.toContain('启动文件属主维护失败')
+    expect(el.textContent).toContain('文件属主维护完成')
+  })
+
   it('repair-running 回执沿用同一个单飞作业，不宣称已修复', async () => {
     const pending = { running: true, startedAt: 10, completedAt: 0, overdue: false }
     const repairRootOwnership = vi.fn(() => JSON.stringify({ ok: true, code: 'repair-running', ...pending }))
