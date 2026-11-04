@@ -99,7 +99,7 @@ const GATE_SCRIPTS = [
   'check-engine-heap-floor.mjs',
   'check-bounded-io.mjs',
   'check-api-route-auth.mjs',
-  'check-protocol-v2.mjs',
+  'check-protocol-v2.mjs', 'check-snapshot-node-floor.mjs',
   'check-tool-output-schema.mjs',
   'check-control-ops.mjs',
   'check-op-registry-parity.mjs',
@@ -315,6 +315,11 @@ try {
   run('node', [gate('check-workflow-input-injection.mjs')])
   log('门禁：引擎 overlay 抽验…')
   run('node', [gate('check-engine-overlay.mjs'), snapSrc])
+  // 快照 node 下限（0.2.2-rc.1 适配）：引擎首次声明 engines.node>=24.9.0，而快照 node 由 Termux
+  // nodejs-lts 决定、仓内不钉版本 ⇒ 必须把「声明下限 vs 快照实测」绑成判据，否则回退到 24.8 以下
+  // 在上设备前不会红。只读仓库文件（contract + 取证 JSON + base 归档字节数），与 ABI/快照产物无关。
+  log('门禁：快照 node 版本下限（声明 engines vs 快照实测）…')
+  run('node', [gate('check-snapshot-node-floor.mjs')])
 
   // ---- 3. 插件注入链（python，跨平台）----
   let snapIn
