@@ -27,8 +27,17 @@ import java.nio.file.StandardCopyOption
  */
 internal object AtomicFileReplace {
 
-  /** 仅当目标已指向完整的临时文件时返回 true。 */
-  fun publish(tmp: File, target: File): Boolean {
+  /**
+   * 仅当目标已指向完整的临时文件时返回 true。
+   *
+   * issue #1515：ATOMIC_MOVE 在 FUSE / emulated 挂载上会抛 AtomicMoveNotSupportedException。
+   * 旧实现的全捕获降级是**静默**的，调用方无从判断「这条路径此刻跑在不支持原子 move 的文件系统上」
+   * ——UndoGate 的退避与观察窗因此可以整体失效而日志里一个字都没有。[onDegrade] 只为了把这件事
+   * 留痕，判据本身不变。
+   *
+   * @param onDegrade 原子 move 不可用时回调一次（异常类名 + 原文）；默认丢弃，既有调用点不受影响。
+   */
+  fun publish(tmp: File, target: File, onDegrade: (String) -> Unit = {}): Boolean {
     return try {
       Files.move(
         tmp.toPath(),
@@ -36,14 +45,34 @@ internal object AtomicFileReplace {
         StandardCopyOption.ATOMIC_MOVE,
         StandardCopyOption.REPLACE_EXISTING,
       )
+      syncParentDir(target)
       true
-    } catch (_: Exception) {
+    } catch (e: Exception) {
       // 部分 Android 存储 provider 不支持 ATOMIC_MOVE；回退仍只做一次 move，绝不先删目标。
+      onDegrade(e.javaClass.simpleName + (e.message?.let { ": " + it } ?: ""))
       try {
         Files.move(tmp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        syncParentDir(target)
         true
       } catch (_: Exception) {
         false
+      }
+    }
+  }
+
+  /**
+   * 父目录 fsync（issue #1515）：rename 落盘之后目录项本身也要落盘，否则掉电后可能出现
+   * 「内容在、名字还是旧的」。拿不到目录 fd（部分 provider 不允许 open 目录）时**不抛**——
+   * 这是加固，不是判据；它绝不允许把一次成功的写入变成失败。
+   */
+  fun syncParentDir(target: File) {
+    val parent = target.absoluteFile.parentFile ?: return
+    runCatching {
+      val fd = android.system.Os.open(parent.path, android.system.OsConstants.O_RDONLY, 0)
+      try {
+        android.system.Os.fsync(fd)
+      } finally {
+        android.system.Os.close(fd)
       }
     }
   }
