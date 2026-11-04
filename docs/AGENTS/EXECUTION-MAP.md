@@ -2701,4 +2701,4 @@ Telemetry snapshot closure: check-engine-overlay retains each dependency's decla
 
 **Shizuku 就绪证据**：功能探测 TTL 缓存 + 失败留痕（issue #1476）——`app/src/main/java/com/dsharnessmobile/shell/ShizukuReadyEvidence.kt:120#expect=internal%20fun%20readinessVerdict(facts%3A%20ReadyFacts%2C%20now%3A%20Long%2C%20ttlMs%3A%20Long%20%3D%20FunctionalProbeCache.DEFAULT_TTL_MS)%3A%20ReadyVerdict%20%7B`
 
-**GenerationalNodeRecycler**：快照节点句柄延迟回收，只保留一代（issue #1361）——`app/src/main/java/com/dsharnessmobile/shell/SnapshotNodeRecycler.kt:21#expect=internal%20class%20GenerationalNodeRecycler%3CT%20%3A%20Any%3E(`
+**GenerationalNodeRecycler**：快照节点句柄延迟回收，只保留一代；兜底重定位节点收编 + API<33 回收守卫（issue #1361 / #1521 / #1522）——`app/src/main/java/com/dsharnessmobile/shell/SnapshotNodeRecycler.kt:28#expect=internal%20class%20GenerationalNodeRecycler%3CT%20%3A%20Any%3E(`

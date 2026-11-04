@@ -1072,9 +1072,14 @@ class DeviceControlService : AccessibilityService() {
       //   用 refresh() 判死活会把「能用」误判成「已失效」，退回重走又必然失败（见上）。
       //   正确做法：直接把它交给动作，由动作的真实结果决定成败；失败了再走兜底重定位。
       val stored = synchronized(lock) { snapshot?.rowNodes?.getOrNull(handle) }
-      val node = stored ?: nodeAtChildPath(row.childPath) ?: nodeByFingerprint(row)
+      // 兜底重定位拿到的节点**没有持有者**（不进 rowNodes），旧实现于是既不回收也不受换代覆盖——
+      // #1361 只治了主路径（issue #1521）。这里把它们收编进回收器的当前一代：既不会就地回收
+      // （动作还带着它出锁 performAction，就地回收就是 #1510 的 use-after-recycle），
+      // 又能随下一次换代/drain 真正回收。
+      val relocated = stored ?: nodeAtChildPath(row.childPath)?.also { nodeRecycler.adopt(it) }
+        ?: nodeByFingerprint(row)?.also { nodeRecycler.adopt(it) }
         ?: return Target.Miss(error("行 $handle 已不存在（页面已变化）——请重新 android_ui_dump"))
-      return Target.Hit(node, "row:$handle")
+      return Target.Hit(relocated, "row:$handle")
     }
     val path = args.optString("path", "")
     if (path.isEmpty()) return Target.None
