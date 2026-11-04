@@ -754,16 +754,32 @@ function parseCordisRows(text, label) {
   return rows
 }
 
-/** 上游 bundle（base + web-app）出现的全部行 id；任一 bundle 不在场即返回 null（由调用方 SKIP）。 */
+/**
+ * 上游出现的全部 loader 行 id；必需 bundle 中任一不在场即返回 null（由调用方 SKIP）。
+ *
+ * issue #1344：可选 bundle（experimental-terminal-bundle）也会往 loader 里插行，而 profile 层会定向
+ * 禁用它的 `optional-terminal-pwsh`。判据必须覆盖**我们引用的行所在的层**——只扫 base + web-app 时，
+ * 这条禁用会被判成「禁用了上游不存在的行」（假红），于是正确修法反而过不了门。
+ * 可选 bundle 不在场时跳过它（它不是必需层，缺失不代表判据失效）。
+ */
+const UPSTREAM_BUNDLES = [
+  { id: 'base', file: ['packages', 'bundle', 'base', 'cordis.patch.yml'], required: true },
+  { id: 'web-app', file: ['packages', 'bundle', 'web-app', 'cordis.patch.yml'], required: true },
+  { id: 'experimental-terminal', file: ['packages', 'experimental', 'terminal-bundle', 'cordis.patch.yml'], required: false },
+]
+
 function scanUpstreamRows() {
   const out = new Map()
-  for (const bundle of ['base', 'web-app']) {
-    const p = join(root, contract.upstreamRepo, 'packages', 'bundle', bundle, 'cordis.patch.yml')
-    if (!existsSync(p)) return null
+  for (const bundle of UPSTREAM_BUNDLES) {
+    const p = join(root, contract.upstreamRepo, ...bundle.file)
+    if (!existsSync(p)) {
+      if (bundle.required) return null
+      continue
+    }
     let rows
-    try { rows = parseCordisRows(readFileSync(p, 'utf8'), '上游 ' + bundle + ' bundle') }
+    try { rows = parseCordisRows(readFileSync(p, 'utf8'), '上游 ' + bundle.id + ' bundle') }
     catch (e) { fail(String(e.message ?? e)); continue }
-    for (const r of rows) if (!out.has(r.id)) out.set(r.id, { key: r.id, name: r.name ?? '', upstreamDisabled: r.disabled, bundle })
+    for (const r of rows) if (!out.has(r.id)) out.set(r.id, { key: r.id, name: r.name ?? '', upstreamDisabled: r.disabled, bundle: bundle.id })
   }
   return out
 }
