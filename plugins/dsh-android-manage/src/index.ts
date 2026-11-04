@@ -2380,7 +2380,14 @@ properties: {
       if (animations) {
         if (restore) {
           await restoreAnimScales({})
-          lines.push('动画：已恢复默认（1）')
+          // issue #1372：恢复分支原来没有回读——写失败被 restoreAnimScales 内部 catch 吞掉，
+          // 回执却照旧说「已恢复默认（1）」。与关闭分支同口径：只有读回才算数。
+          const now = await readAnimScales()
+          if (ANIM_KEYS.every((k) => now[k] === '1')) {
+            lines.push('动画：已恢复默认（1）')
+          } else {
+            notDone.push('动画未恢复默认（读回 ' + ANIM_KEYS.map((k) => `${k}=${now[k] ?? '?'}`).join(', ') + '）')
+          }
         } else {
           await setAnimScales('0')
           // 回读验证：写失败被 setAnimScales 吞掉，只有读回才能证明「已关闭」。
