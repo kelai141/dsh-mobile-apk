@@ -125,10 +125,11 @@ internal class EngineStartFlow(private val activity: MainActivity) {
   // 主线程不受影响：主线程周期发 JS 心跳，回调不再返回即判渲染进程失活 →
   // 前台静默 reload 一次 + 记日志；后台时间不参与冻结判定。 ——
   private val freezeHandler = android.os.Handler(android.os.Looper.getMainLooper())
-  private var jsAckAt = System.currentTimeMillis()
-  private var pageLoadedAt = System.currentTimeMillis()
-  private var pingOutstanding = false
-  private var freezeReloaded = false
+  // #1513：冻结自愈的**状态机**（置位 / 复位 / 重武装）收在 FreezeRecoveryGate 里，判据用
+  // 可注入时钟直接跑「冻结 -> reload -> 不重复 reload -> 应答后重武装」这些转换。旧判据切的是
+  // startFreezeWatchdog 到 startUpdateCheck 那一段，而置位点与唯一复位点都在 freezeRunnable 里，
+  // 于是把 freezeReloaded=false 挪进冻结分支（每拍复位 = 每 10 秒 reload 的循环）也判不出来。
+  private val freezeGate = FreezeRecoveryGate()
   private val freezeRunnable = object : Runnable {
     override fun run() {
       if (!canRunEngineWork()) return
@@ -138,33 +139,32 @@ internal class EngineStartFlow(private val activity: MainActivity) {
       // （与 showWeb 的 reload 环同族）。清 latch 之后本看门狗自然恢复。
       if (clientPluginTreeFailed) return
       val now = System.currentTimeMillis()
-      if (now - pageLoadedAt > 45_000 && now - jsAckAt > 20_000) {
-        if (!freezeReloaded) {
-          freezeReloaded = true
-          LogCollector.log("dsh-shell", "webview JS 无响应，渲染进程冻结（frozenMs=" + (now - jsAckAt) + "）")
-          // 0.14.1 D3：与上面的引擎页重载同族——冻结自愈的唯一动作失败时必须留下痕迹，
-          // 否则日志里只有「检测到冻结」，看不出「自愈没生效」。
-          try {
-            activity.reloadEnginePage()
-          } catch (e: Exception) {
-            Log.w("dsh-shell", "freeze recovery reload failed", e)
-          }
+      // 状态机只回答「本拍做什么」；动作（reload / evaluateJavascript）留在 Activity 侧，
+      // 这样判据能在 JVM 里离线跑转换，不必构造 WebView。
+      val action = freezeGate.tick(now)
+      if (action == FreezeRecoveryGate.Action.RELOAD) {
+        LogCollector.log("dsh-shell", "webview JS 无响应，渲染进程冻结（frozenMs=" + freezeGate.frozenMs(now) + "）")
+        // 0.14.1 D3：与上面的引擎页重载同族——冻结自愈的唯一动作失败时必须留下痕迹，
+        // 否则日志里只有「检测到冻结」，看不出「自愈没生效」。
+        try {
+          activity.reloadEnginePage()
+        } catch (e: Exception) {
+          Log.w("dsh-shell", "freeze recovery reload failed", e)
         }
-        jsAckAt = now
-        pingOutstanding = false
-      } else if (!pingOutstanding) {
-        pingOutstanding = true
+      } else if (action == FreezeRecoveryGate.Action.PING) {
+        // 心跳只发一次：在飞标记由状态机记（pingOutstanding），回执回来前不重发。
         try {
           val generation = monitorGeneration
           activity.webView.evaluateJavascript("1") { _ ->
             if (generation != monitorGeneration || !activity.pageUiActive) return@evaluateJavascript
-            jsAckAt = System.currentTimeMillis()
-            pingOutstanding = false; freezeReloaded = false // #1355 应答=页面真活，重开冻结自愈预算（不能放 onPageFinished，会成 reload 循环）
+            // #1355：应答=页面真活，重开冻结自愈预算（不能放 onPageFinished，会成 reload 循环）。
+            freezeGate.onAck(System.currentTimeMillis())
           }
         } catch (_: Exception) {
-          pingOutstanding = false
+          freezeGate.onPingFailed()
         }
       }
+      // 拍长 10 秒（与旧实现一致，勿单独改）：状态机的 45s/20s 两个窗口按这个节奏标定。
       freezeHandler.postDelayed(this, 10_000)
     }
   }
@@ -415,7 +415,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
   fun stopMonitoring() {
     monitorGeneration++ // Reject HTTP/JS callbacks already in flight at pause or renderer loss.
     engineMonitorFailures = 0
-    pingOutstanding = false
+    freezeGate.onStopped()
     engineMonitorHandler.removeCallbacks(engineMonitorRunnable)
     freezeHandler.removeCallbacks(freezeRunnable)
     bootStallHandler.removeCallbacks(bootStallRunnable)
@@ -425,9 +425,9 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     if (!canRunEngineWork()) return
     if (!activity.pageUiActive || activity.userClosedEngine || !activity.webViewReady || activity.webView.visibility != View.VISIBLE) return
     val now = System.currentTimeMillis()
-    pageLoadedAt = now
-    jsAckAt = now
-    pingOutstanding = false
+    // #1513：计时交给状态机（复位只发生在应答回调，onPageFinished 不等于页面真活）。
+    freezeGate.onPageLoaded(now)
+    // 冻结自愈闸门（freezeReloaded）在这里**不复位**：文档加载完时 JS 可能仍然死着。
     // **不要**在这里 resetBootStall()：本函数由 onPageFinished 调用，而 onPageFinished 只代表
     // **文档加载完**，不代表页面渲染完/插件装配完。此前在这里复位 → 页面加载完重新计时 →
     // 再过 40s 又报一次，同一 epoch 落两行（L-1 的重复报根因）。

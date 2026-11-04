@@ -49,7 +49,8 @@ class ForegroundPageRecoveryWiringTest {
     assertTrue(monitors.contains("if (!activity.pageUiActive || !activity.webViewReady"))
     assertTrue(monitors.contains("freezeHandler.removeCallbacks(freezeRunnable)"))
     assertTrue(monitors.contains("bootStallHandler.removeCallbacks(bootStallRunnable)"))
-    assertTrue(monitors.contains("jsAckAt = now"))
+    // #1513：页面加载计时改由 FreezeRecoveryGate 的状态机记（复位只发生在应答回调）。
+    assertTrue(monitors.contains("freezeGate.onPageLoaded(now)"))
     assertFalse(monitors.contains("Toast.makeText"))
     assertFalse(monitors.contains("activity.webView.reload()"))
   }
