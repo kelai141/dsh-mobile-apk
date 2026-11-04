@@ -12,6 +12,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 const src = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+const broadcast = readFileSync(new URL('../src/ime-broadcast.ts', import.meta.url), 'utf8')
 
 test('还原命令必须对回读值做 shell 转义', () => {
   assert.ok(src.includes('ime set ${shellQuote(prev)}'), '还原必须用 shellQuote 包裹 prev')
@@ -19,24 +20,10 @@ test('还原命令必须对回读值做 shell 转义', () => {
 })
 
 test('回读值必须过「可还原形态」判据', () => {
-  assert.ok(src.includes('function restorableImeId(raw: string): boolean'), '判据函数必须存在')
-  assert.ok(src.includes('const prev = restorableImeId(rawPrev) ? rawPrev : \'\''), '读取处必须经判据过滤')
-  assert.ok(src.includes("v.toLowerCase() === 'null'"), '必须显式拦掉字面 null')
+  assert.ok(broadcast.includes('export function restorableImeId(raw: string): boolean'), '判据函数必须存在（已下沉到 ime-broadcast 以便单测）')
+  assert.ok(src.includes('resolveImeRestoreTarget(rawPrev'), '读取处必须经判据过滤')
+  assert.ok(broadcast.includes("v.toLowerCase() === 'null'"), '必须显式拦掉字面 null')
 })
 
-// 判据模型：与 restorableImeId 同构（Kotlin/TS 侧的运行时由插件构建后的单测覆盖）。
-function restorable(raw) {
-  const v = raw.trim().replace(/^"|"$/g, '')
-  if (v === '' || v.toLowerCase() === 'null') return false
-  return /^[A-Za-z0-9_.]+\/[A-Za-z0-9_.$]+$/.test(v)
-}
-
-test('判据模型：null / 空 / 非组件形态都不可还原', () => {
-  assert.equal(restorable('null'), false)
-  assert.equal(restorable('  '), false)
-  assert.equal(restorable(''), false)
-  assert.equal(restorable('com.example'), false)
-  assert.equal(restorable('com.example/.MyIme'), true)
-  assert.equal(restorable('"com.android.adbkeyboard/.AdbKeyboardService"'), true)
-  assert.equal(restorable('com.example/com.example.MyIme$Inner'), true)
-})
+// 判据模型那段原来是一份**手抄的同构实现**（测的是抄件，不是真函数）。现已改为
+// `ime-restore-fallback.test.mjs` 直接 import 构建产物 `../lib/ime-broadcast.js` 的真函数。
