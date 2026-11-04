@@ -206,6 +206,8 @@ export class ReferenceMenuEnhancer {
     if (target.closest('[' + ADD_ATTR + ']') === null) return
     event.preventDefault()
     event.stopPropagation()
+    // issue #1404：在途期间第二次点按直接忽略（按钮同时被置 disabled/aria-busy）。
+    if (this.busy) return
     void this.addSelected()
   }
 
@@ -387,12 +389,39 @@ export class ReferenceMenuEnhancer {
   /** 上一次插入的残留提示（#169-3：失败要如实说，不能无声清空选择）。 */
   private lastReport = ''
 
+  /**
+   * 「添加 N 项」在途标志（issue #1404）：整段插入是异步的（每项最长 1500+600ms），而按钮期间
+   * 一直可点——双击会起两个循环对同一批 key 重复 pickByKey，同一引用被插两次。
+   */
+  private busy = false
+
   private statusText(base: string): string {
     return this.lastReport === '' ? base : base + ' · ' + this.lastReport
   }
 
   /** Insert every checked candidate through upstream's settle-pick, one reference at a time. */
   private async addSelected(): Promise<void> {
+    if (this.busy) return
+    this.busy = true
+    this.syncBusy()
+    try {
+      await this.insertChecked()
+    } finally {
+      this.busy = false
+      this.syncBusy()
+    }
+  }
+
+  /** 在途态同步到按钮（issue #1404）：disabled + aria-busy，避免用户以为没响应而反复点。 */
+  private syncBusy(): void {
+    const add = document.querySelector<HTMLButtonElement>('[' + ADD_ATTR + ']')
+    if (add === null) return
+    add.disabled = this.busy
+    if (this.busy) add.setAttribute('aria-busy', 'true')
+    else add.removeAttribute('aria-busy')
+  }
+
+  private async insertChecked(): Promise<void> {
     const keys = [...this.checked]
     let inserted = 0
     this.lastReport = ''
