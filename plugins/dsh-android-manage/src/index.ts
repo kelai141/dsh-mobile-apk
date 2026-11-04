@@ -41,14 +41,14 @@ import {
   KB_ACTION_INPUT,
   KB_RESULT,
   adbKeyboardAuthState,
-  adbKeyboardBroadcast,
+  adbKeyboardBroadcast, normalizeImeId, userImeHistory,
   isCommitAccepted,
   hasAuthoritativeCommit,
   parseBroadcastResult,
   shellQuote,
   resolveImeRestoreTarget,
 } from './ime-broadcast.js'
-import { imeBorrowLock } from './ime-borrow.js'
+import { imeBorrowLock, ImeBorrowTimeout } from './ime-borrow.js'
 
 /**
  * 0.13.8 #183 / #413：键盘广播的 nonce 与命令构造已抽到 ./ime-broadcast.js
@@ -2117,32 +2117,18 @@ properties: {
         const authState = adbKeyboardAuthState(process.env.DSH_FILES_DIR)
         if (!authState.ok) return { ok: false, denied: false, channel: 'adbkeyboard', text: kbAuthMissingText(authState.reason) }
         const auth = authState.auth
-        // 这三个必须在 try **外面**声明：finally 里的还原要用到它们。
+        // 借道窗口的产出（窗口内写、窗口外读）：prev/needSwitch/canRestore/restore 决定「还回谁」，
+        // borrowWaitedMs/borrowQueued 只是排队回执（issue #1516：排在后面的那一路不许静默等待）。
         let prev = ''
         let needSwitch = false
         let canRestore = false
         let restore: { id: string; source: 'readback' | 'fallback' | 'none' } = { id: '', source: 'none' }
-        let releaseImeBorrow: (() => void) | undefined
-        try {
-          // issue #1373：整段互斥——**从读 prev 开始**，包括 resolveImeRestoreTarget 的两次 execShell
-          // （settings get / ime list -s）。只锁中间那一段等于没锁：prep 阶段仍可被另一路穿插。
-          releaseImeBorrow = await imeBorrowLock.acquire()
-          const cur = await execShell(`settings get secure default_input_method`).catch(() => ({ ok: false, stdout: '' }))
-          const rawPrev = (cur.ok ? cur.stdout : '').trim().replace(/^"|"$/g, '')
-          // issue #1371 第三条路：读回值不可还原时**不能直接放弃**——不切换会让本通道键盘不被激活，
-          // 广播拿 imeNotReady，文本注入整条失效，而那批设备正是本 issue 的现场。也不能「切换了不管还原」
-          // （那就是原来的伤害）。先试读回值，再退到 `ime list -s` 里一个非本通道的已启用输入法。
-          restore = resolveImeRestoreTarget(rawPrev, '', IME_ID)
-          if (restore.source === 'none') {
-            const listed = await execShell(`ime list -s`).catch(() => ({ ok: false, stdout: '' }))
-            if (listed.ok) restore = resolveImeRestoreTarget(rawPrev, listed.stdout, IME_ID)
-          }
-          prev = restore.id
-          await execShell(`ime enable ${IME_ID}`).catch(() => undefined)
-          // prev === IME_ID：用户本来就用本通道键盘，无需切换；其余（含 prev 为空）都要切，否则广播不会被提交。
-          needSwitch = prev !== IME_ID
-          canRestore = prev.length > 0
-          if (needSwitch) await execShell(`ime set ${IME_ID}`).catch(() => undefined)
+        let borrowWaitedMs = 0
+        let borrowQueued = 0
+        // 排队预算（毫秒）：一段窗口正常几百毫秒就结束；超过这个数基本只能是前一路卡在设备回填
+        // （单条 execShell 最长 20s）。此时宁可如实失败（未切换、未广播）也不要静默等待。
+        // 测试钩子：DSH_IME_BORROW_BUDGET_MS（与 DSH_SCREEN_SCOPE_TEST 同口径，只影响排队预算）。
+        const IME_BORROW_BUDGET_MS = Number.parseInt(process.env.DSH_IME_BORROW_BUDGET_MS ?? '', 10) || 8000
           type KbSend = { ok: boolean; stdout: string; guidance?: string; code: number | null }
           const sendKb = async (action: string, msg?: string): Promise<KbSend> => {
             const line = adbKeyboardBroadcast(action, msg, auth)
@@ -2164,26 +2150,84 @@ properties: {
             if (code === KB_RESULT.badRequest) return `${what}未落地：广播请求不合法（文本为空或动作不识别）`
             return `${what}未落地：未知结果码 ${code}`
           }
-            if (clear) {
-              const res = await sendKb(KB_ACTION_CLEAR)
-              if (!res.ok) return { ok: false, denied: false, channel: 'adbkeyboard', text: res.guidance ?? (res.stdout || 'ADBKeyboard 清空执行失败') }
-              if (!isCommitAccepted(res.code)) {
-                return { ok: false, denied: false, channel: 'adbkeyboard', text: kbFailText(KB_ACTION_CLEAR, res.code) }
+            /**
+             * 一次借道窗口（**锁内**，issue #1373）：读 prev → ime enable/set → 按 actions 广播 → 还原。
+             *
+             * issue #1516：窗口里只留 IME 相关动作。回读断言（nodeText，4s 超时 ×2）与重试前的
+             * 260/320ms 等待全部移到锁外——它们不碰输入法；而「还原」必须留在窗口内：下一路在锁内
+             * 读 prev，本路若还没还回去，它会把 DSH 键盘当用户输入法（#1520 同族，还原到 DSH = 原伤）。
+             */
+            const withImeBorrow = async (
+              actions: Array<{ action: string; msg?: string }>,
+            ): Promise<{ sends: KbSend[]; stop: string | null }> => {
+              const acquired = await imeBorrowLock.acquire({ timeoutMs: IME_BORROW_BUDGET_MS }).catch((error: unknown) => {
+                if (error instanceof ImeBorrowTimeout) return error
+                throw error
+              })
+              if (acquired instanceof ImeBorrowTimeout) {
+                // 排队超时 = **没有**取得锁：一律不切换、不广播（把输入法留在原处比劫持一半安全）。
+                return {
+                  sends: [],
+                  stop: `输入未执行：IME 借道排队 ${acquired.waitedMs}ms 超过预算 ${acquired.budgetMs}ms 仍未轮到自己（前一路的切换/还原还没结束，`
+                    + '可能卡在设备回填）——本次未切换输入法、未发送广播；稍后重试，或改用 channel:"input"（仅 ASCII）',
+                }
+              }
+              const release = acquired
+              borrowWaitedMs = release.waitedMs
+              borrowQueued = release.queued
+              const sends: KbSend[] = []
+              try {
+                // issue #1373：读 prev 必须在锁内——它是「本路要还回哪一个」的唯一真源。
+                const cur = await execShell(`settings get secure default_input_method`).catch(() => ({ ok: false, stdout: '' }))
+                const rawPrev = (cur.ok ? cur.stdout : '').trim().replace(/^"|"$/g, '')
+                // issue #1371 第三条路：读回值不可还原时不能直接放弃（不切换 ⇒ 广播拿 imeNotReady，
+                // 注入整条失效），也不能「切换了不管还原」。先试读回值，再退到 `ime list -s`。
+                restore = resolveImeRestoreTarget(rawPrev, '', IME_ID, userImeHistory.list())
+                if (restore.source === 'none') {
+                  const listed = await execShell(`ime list -s`).catch(() => ({ ok: false, stdout: '' }))
+                  if (listed.ok) restore = resolveImeRestoreTarget(rawPrev, listed.stdout, IME_ID, userImeHistory.list())
+                }
+                prev = restore.id
+                // issue #1517：读到了就记进偏好表——下一路读不到时按「用户实际在用的」兜底，不取列表第一行。
+                if (restore.source === 'readback') userImeHistory.remember(prev)
+                await execShell(`ime enable ${IME_ID}`).catch(() => undefined)
+                // issue #1520：等值比较归一化（`pkg/pkg.Class` 与 `pkg/.Class` 等价）。
+                // prev 是本通道时无需切换；其余（含 prev 为空）都要切，否则广播不会被提交。
+                needSwitch = normalizeImeId(prev) !== normalizeImeId(IME_ID)
+                canRestore = prev.length > 0
+                if (needSwitch) await execShell(`ime set ${IME_ID}`).catch(() => undefined)
+                for (const step of actions) {
+                  const res = await sendKb(step.action, step.msg)
+                  sends.push(res)
+                  if (!res.ok) {
+                    const what = step.action === KB_ACTION_CLEAR ? '清空' : '输入'
+                    return { sends, stop: res.guidance ?? (res.stdout || `ADBKeyboard ${what}执行失败`) }
+                  }
+                  if (!isCommitAccepted(res.code)) return { sends, stop: kbFailText(step.action, res.code) }
+                }
+                return { sends, stop: null }
+              } finally {
+                // 还原用户原 IME（广播已被接收器入队提交，留 0.4s 提交窗口防切换竞态）。
+                if (needSwitch && canRestore) await execShell(`sleep 0.4; ime set ${shellQuote(prev)}`).catch(() => undefined)
+                release?.()
               }
             }
+            // ① 注入（锁内，短）：clear / text 各一次广播。
+            const injectSteps: Array<{ action: string; msg?: string }> = []
+            if (clear) injectSteps.push({ action: KB_ACTION_CLEAR })
+            if (raw) injectSteps.push({ action: KB_ACTION_INPUT, msg: raw })
             let resultCode: number | null = null
-            if (raw) {
-              const res = await sendKb(KB_ACTION_INPUT, raw)
-              if (!res.ok) return { ok: false, denied: false, channel: 'adbkeyboard', text: res.guidance ?? (res.stdout || 'ADBKeyboard 输入执行失败') }
-              resultCode = res.code
-              if (!isCommitAccepted(res.code)) {
-                return { ok: false, denied: false, channel: 'adbkeyboard', text: kbFailText(KB_ACTION_INPUT, res.code) }
-              }
+            if (injectSteps.length > 0) {
+              const first = await withImeBorrow(injectSteps)
+              if (first.stop !== null) return { ok: false, denied: false, channel: 'adbkeyboard', text: first.stop }
+              resultCode = first.sends[first.sends.length - 1]?.code ?? null
             }
-            // 现场实测（2026-09-10）：`input text` 偶发丢尾字符、中文 IME 可能把字母汉字化——
-            // 注入后**回读断言**（壳侧 nodeText 读聚焦框，便宜），不一致自动重试一次。
-            // 块G F3：回读必须带目标屏——否则壳侧按真实屏读聚焦框，校验与注入不在同一块屏上，
-            // 会假报「输入未落地」（模型据此重试或改道，实际输入早已成功）。
+            // ② 回读断言（**锁外**，issue #1516）：nodeText 单次 4s、最长两次，读的是聚焦框文本、
+            //    与当前 IME 无关——还原之后再读同样成立，不该让排在后面的那一路陪着等这 8s。
+            //    现场实测（2026-09-10）：`input text` 偶发丢尾字符、中文 IME 可能把字母汉字化——
+            //    注入后**回读断言**（壳侧 nodeText 读聚焦框，便宜），不一致自动重试一次。
+            //    块G F3：回读必须带目标屏——否则壳侧按真实屏读聚焦框，校验与注入不在同一块屏上，
+            //    会假报「输入未落地」（模型据此重试或改道，实际输入早已成功）。
             const nodeTextArgs = { ...screenArgs(args) }
             let readBack: string | null = null
             if (raw.length > 0) {
@@ -2196,8 +2240,10 @@ properties: {
               await new Promise((resolve) => setTimeout(resolve, 260))
               readBack = await read()
               if (readBack !== null && readBack !== raw) {
-                await sendKb(KB_ACTION_CLEAR)
-                await sendKb(KB_ACTION_INPUT, raw)
+                // ③ 不一致：重来一次**完整窗口**（清空 + 输入 + 还原）——重试同样不许占着锁等回读。
+                const retry = await withImeBorrow([{ action: KB_ACTION_CLEAR }, { action: KB_ACTION_INPUT, msg: raw }])
+                if (retry.stop !== null) return { ok: false, denied: false, channel: 'adbkeyboard', text: retry.stop }
+                resultCode = retry.sends[retry.sends.length - 1]?.code ?? resultCode
                 await new Promise((resolve) => setTimeout(resolve, 320))
                 readBack = await read()
               }
@@ -2215,28 +2261,29 @@ properties: {
             const act = [clear ? '已清空' : '', raw ? `已输入 ${raw.slice(0, 24)}${raw.length > 24 ? '…' : ''}` : ''].filter(Boolean).join(' + ')
             // issue #1067：无回读时，只有**权威结果码**才能宣称已提交。取不到结果码（截断 / ROM
             // 不打印）与旧壳的 result=0 都只是「兼容性放行」，不是证据——此时必须明说未证实，
-            // 否则工具回 ok:true「已输入」而文本可能压根没进去（a11y 关闭时没有回读兜底，
-            // 这条是唯一判据）。isCommitAccepted 的放行口径不变（旧壳兼容），变的只是文案诚实度。
+            // 否则工具回 ok:true「已输入」而文本可能压根没进去（a11y 关闭时没有回读兜底）。
             const verifyNote = readBack !== null
               ? '，回读一致'
               : (hasAuthoritativeCommit(resultCode)
                 ? '，壳侧结果码确认已提交'
                 : '，未证实例（取不到壳侧结果码，且本通道无回读：文本可能未落地，建议开无障碍后重试或改 channel:"input"）')
+            // issue #1517：回执必须报出还原目标的 id 与来源——用户要能核对「还原到了谁」，
+            // 而不是只信一句「已还原」（兜底路径此前连 id 都不写，选错也无从发现）。
+            const imeNote = !needSwitch
+              ? ''
+              : !canRestore
+                ? '，IME 已临时切换；原输入法不可读，未能还原'
+                : restore.source === 'fallback'
+                  ? `，IME 已临时切换，读回值不可用，按已启用列表还原到 ${prev}`
+                  : `，IME 已临时切换，已还原到 ${prev}`
+            // issue #1516：排队量也写进回执（等过锁才有的说；队列空时省略）。
+            const queueNote = borrowQueued > 0 ? `，借道排队 ${borrowWaitedMs}ms（前面 ${borrowQueued} 路）` : ''
             return {
               ok: true,
               denied: false,
               channel: 'adbkeyboard',
-              text: `${act}（ADBKeyboard${needSwitch
-                ? (canRestore
-                  ? (restore.source === 'fallback' ? '，IME 已临时切换并按已启用列表还原' : '，IME 已临时切换并还原')
-                  : '，IME 已临时切换；原输入法不可读，未能还原')
-                : ''}${verifyNote}）`,
+              text: `${act}（ADBKeyboard${imeNote}${verifyNote}${queueNote}）`,
             }
-        } finally {
-            // 还原用户原 IME（广播已被接收器入队提交，留 0.4s 提交窗口防切换竞态）。
-            if (needSwitch && canRestore) await execShell(`sleep 0.4; ime set ${shellQuote(prev)}`).catch(() => undefined)
-          releaseImeBorrow?.()
-        }
       }
       // input text 兜底（channel: "input" 强制；仅可见 ASCII——部分 ROM 丢字/丢空格，F5 不推荐）
       const asciiOnly = /^[\x20-\x7E]+$/.test(raw)

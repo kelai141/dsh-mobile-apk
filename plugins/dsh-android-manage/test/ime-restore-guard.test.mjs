@@ -1,29 +1,38 @@
-// 输入法还原的守卫与转义（issue #1371）。
+// 输入法 id 的形态与等值判据（issue #1371 / #1520）。
 //
-// 现场：ADBKeyboard 通道借道 IME 注入文本，结束后要 `ime set <用户原输入法>` 还回去。旧实现
-//   ① 把设备回读值直接拼进 shell 命令（同模块已导出 shellQuote 却没用）；
-//   ② 不校验形态：`settings get secure default_input_method` 在未显式赋值时打印字面 `null`，
-//      于是还原命令变成 `ime set null`，失败又被 catch 吞掉 ⇒ 用户输入法永久停在 DSH 键盘。
+// 现场（#1371）：ADBKeyboard 通道借道 IME 注入文本，结束后要 `ime set <用户原输入法>` 还回去。
+//  ① 旧实现把设备回读值直接拼进 shell 命令（转义问题）；
+//  ② 不校验形态：`settings get secure default_input_method` 在未显式赋值时打印字面 `null`，
+//     于是还原命令变成 `ime set null`，失败又被 catch 吞掉 ⇒ 用户输入法永久停在 DSH 键盘。
+// 现场（#1520）：自身排除用严格字符串等值，ROM 打印 `pkg/pkg.Class` 全形态时 DSH 自己成了
+// 还原目标——回执写「已还原」，实际把用户留在 DSH 键盘上。
 //
-// 判据落在「源码里那两行」上：还原必须转义、读取必须过形态判据。本文件读 src/index.ts 文本，
-// 不依赖构建产物（lib/ 在 CI 才生成）。
+// 本文件只放**纯函数**判据；`ime set` 的 shell 转义与整段接线由行为判据守
+// （ime-borrow-window.test.mjs：还原命令必须是 sleep 0.4; ime set '<prev>'）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { normalizeImeId, restorableImeId, resolveImeRestoreTarget } from '../lib/ime-broadcast.js'
 
-const src = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
-const broadcast = readFileSync(new URL('../src/ime-broadcast.ts', import.meta.url), 'utf8')
+const SELF = 'com.dsharnessmobile.shell/.AdbKeyboardService'
+const SELF_FULL = 'com.dsharnessmobile.shell/com.dsharnessmobile.shell.AdbKeyboardService'
 
-test('还原命令必须对回读值做 shell 转义', () => {
-  assert.ok(src.includes('ime set ${shellQuote(prev)}'), '还原必须用 shellQuote 包裹 prev')
-  assert.ok(!src.includes('ime set ${prev}`'), '不得再出现裸拼接的 ime set ${prev}')
+test('回读值必须过「可还原形态」判据：null / 空 / 非组件一律拒', () => {
+  assert.equal(restorableImeId('null'), false, '必须显式拦掉字面 null')
+  assert.equal(restorableImeId('NULL'), false, '大小写不敏感')
+  assert.equal(restorableImeId('"null"'), false, '带引号的 null 同样要拦')
+  assert.equal(restorableImeId(''), false)
+  assert.equal(restorableImeId('com.example'), false, '没有 / 不是组件名')
 })
 
-test('回读值必须过「可还原形态」判据', () => {
-  assert.ok(broadcast.includes('export function restorableImeId(raw: string): boolean'), '判据函数必须存在（已下沉到 ime-broadcast 以便单测）')
-  assert.ok(src.includes('resolveImeRestoreTarget(rawPrev'), '读取处必须经判据过滤')
-  assert.ok(broadcast.includes("v.toLowerCase() === 'null'"), '必须显式拦掉字面 null')
+test('#1520 等值比较必须归一化：全形态与短形态是同一个输入法', () => {
+  assert.equal(normalizeImeId(SELF_FULL), normalizeImeId(SELF))
+  assert.notEqual(normalizeImeId('com.other/com.other.AdbKeyboardService'), normalizeImeId(SELF))
 })
 
-// 判据模型那段原来是一份**手抄的同构实现**（测的是抄件，不是真函数）。现已改为
-// `ime-restore-fallback.test.mjs` 直接 import 构建产物 `../lib/ime-broadcast.js` 的真函数。
+test('#1520 读回值＝本通道（任一种形态）时不得把自己当还原目标', () => {
+  for (const raw of [SELF, SELF_FULL]) {
+    const r = resolveImeRestoreTarget(raw, 'com.user/.Mine\n', SELF)
+    assert.deepEqual(r, { id: 'com.user/.Mine', source: 'fallback' },
+      '读回值是本通道时必须退到列表里的另一个输入法（而不是把自己当目标）：' + raw)
+  }
+})

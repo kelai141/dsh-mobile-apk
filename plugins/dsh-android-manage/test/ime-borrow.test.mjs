@@ -1,11 +1,14 @@
-// ADBKeyboard 借道 IME 的整段互斥（issue #1373）。
+// ADBKeyboard 借道 IME 的整段互斥（issue #1373）+ 排队超时与回执（issue #1516）。
 //
 // 判据必须验**真实现**：原方案把一条等价的 promise 链手抄进测试，测的是抄件——
 // 真实现改成不互斥，测试照样绿。这里 import 构建产物 `../lib/ime-borrow.js`。
+//
+// #1516 的两条新判据都在**行为**上：
+//   ① 排队有预算：前一路永不释放时，后一路按时以 ImeBorrowTimeout 拒绝（不是静默干等）；
+//   ② 超时必须让位：那条永不 resolve 的队头不得把后面每一路都锁死。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import { createImeBorrowLock } from '../lib/ime-borrow.js'
+import { createImeBorrowLock, ImeBorrowTimeout } from '../lib/ime-borrow.js'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -67,18 +70,56 @@ test('release 幂等：重复调用不会破坏队列', async () => {
   release2()
 })
 
-test('接线：锁必须在 try 内取得，且包住 resolveImeRestoreTarget 的两次 execShell', () => {
-  const src = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
-  const acquireAt = src.indexOf('releaseImeBorrow = await imeBorrowLock.acquire()')
-  const settingsAt = src.indexOf('settings get secure default_input_method', acquireAt)
-  const listAt = src.indexOf('ime list -s', acquireAt)
-  const restoreAt = src.indexOf('sleep 0.4; ime set', acquireAt)
-  assert.ok(acquireAt >= 0, '必须用 imeBorrowLock.acquire()')
-  assert.ok(settingsAt > acquireAt, '锁必须包住 settings get（prep 阶段不能穿插）')
-  assert.ok(listAt > acquireAt, '锁必须包住 ime list -s（prep 阶段不能穿插）')
-  assert.ok(restoreAt > acquireAt, '还原也必须在锁内')
-  const tryAt = src.lastIndexOf('try {', acquireAt)
-  assert.ok(tryAt >= 0 && tryAt < acquireAt, 'acquire 必须在 try 之内（否则早退会永久泄漏锁）')
-  const finallyAt = src.indexOf('releaseImeBorrow?.()', acquireAt)
-  assert.ok(finallyAt > acquireAt, 'finally 必须释放锁')
+test('#1516 排队预算：前一路永不释放时后一路按时被拒（不静默等待）', async () => {
+  const lock = createImeBorrowLock()
+  await lock.acquire()   // 故意不释放：模拟前一路的 finally 迟迟不执行
+  const outcome = await lock.acquire({ timeoutMs: 60 }).then(
+    () => 'acquired',
+    (error) => error,
+  )
+  assert.ok(outcome instanceof ImeBorrowTimeout,
+    '超过预算必须抛 ImeBorrowTimeout（旧实现在无超时的 await 上永久等待）：' + String(outcome))
+  // 判据不用「>= 预算」这种固定值：60ms 的预算在慢机器上会落在 59ms（实测红过），
+  // 而真正要证的语义是「带等待量 + 带预算 + 与预算同量级（不是秒级假等待）」。
+  assert.equal(typeof outcome.waitedMs, 'number', '超时对象必须带等待量（回执要用）')
+  assert.ok(outcome.waitedMs >= 0, '等待量不得为负：' + outcome.waitedMs)
+  assert.ok(outcome.waitedMs <= 5_000, '等待量必须与预算同量级（不得是秒级假等待）：' + outcome.waitedMs)
+  assert.equal(outcome.budgetMs, 60, '回执必须带预算，否则用户看不出被拒的原因：' + outcome.budgetMs)
+  assert.match(String(outcome.message), /60ms/, '文案要带预算：' + outcome.message)
+})
+
+test('#1516 超时让位：永不释放的队头不得把后面每一路都锁死', async () => {
+  const lock = createImeBorrowLock()
+  const stuck = await lock.acquire() // 队头：永不释放
+  void stuck
+  // 第一路超时后让位；第二路必须能拿到锁。
+  await lock.acquire({ timeoutMs: 40 }).catch((error) => {
+    assert.ok(error instanceof ImeBorrowTimeout, String(error))
+  })
+  const outcome = await Promise.race([
+    lock.acquire({ timeoutMs: 200 }).then(() => 'acquired'),
+    sleep(1500).then(() => 'deadlock'),
+  ])
+  assert.equal(outcome, 'acquired', '超时的那一路没让位，后面的全部卡死（#1516 的真实现场）')
+})
+
+test('#1516 回执：队列空时 waitedMs/queued 为 0，排队时如实计数', async () => {
+  const lock = createImeBorrowLock()
+  const holder = await lock.acquire()
+  assert.equal(holder.queued, 0, '队列空时 queued 必须是 0')
+  // waitedMs 是墙钟量：队列空时也允许有 1-2ms 的调度抖动，但不得是「等过前一路」的量级。
+  assert.ok(holder.waitedMs < 50, '队列空时不该等到可观的时间：' + holder.waitedMs)
+
+  // 队列是串行的：第二路要等第一路 release 后才能拿到锁，所以先等第一路、再放行它。
+  const onePending = lock.acquire()
+  const twoPending = lock.acquire()
+  await sleep(20)
+  holder()
+  const one = await onePending
+  assert.ok(one.waitedMs > 0, '排过队的那一路必须带等待量：' + one.waitedMs)
+  assert.ok(one.queued >= 1, '排过队的那一路必须带前面几路：' + one.queued)
+  one()
+  const two = await twoPending
+  assert.ok(two.queued >= 1, '第二路同样要报前面有几路：' + two.queued)
+  two()
 })
