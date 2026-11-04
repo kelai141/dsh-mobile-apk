@@ -700,3 +700,10 @@ if ($producedAbis.Count -eq 0) { Write-Host "没有任何 ABI 产出——不发
 Write-Host "== vendored 字节绑定门禁 =="
 node (Join-Path $Root "scripts\check-vendor-provenance.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { throw "vendored 目录与 scripts/vendor-provenance.json 不符，拒绝交付" }
+
+# 快照 node 下限（0.2.2-rc.1 适配）：引擎首次声明 engines.node ">=24.9.0"，而快照 node 由 Termux
+# nodejs-lts 决定、仓内不钉版本号 ⇒ 必须把「声明下限 vs 快照实测」绑成判据。放在链尾与 vendored 那条
+# 同因：只读仓库文件（contract + 取证 JSON + base 归档字节），与 ABI 无关，跑一次即可；但必须在发版之前。
+Write-Host "== 快照 node 版本下限门禁 =="
+node (Join-Path $Root "scripts\check-snapshot-node-floor.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { throw "快照 node 低于引擎声明下限，拒绝交付（取证见 docs/adapt/022rc1-node-floor.md）" }

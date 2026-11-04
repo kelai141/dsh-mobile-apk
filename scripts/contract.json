@@ -1,16 +1,16 @@
 {
-  "baseline": "0.2.1-rc.3",
-  "cordis": "4.0.5",
-  "schemastery": "3.18.5",
+  "baseline": "0.2.2-rc.1",
+  "cordis": "4.1.0",
+  "schemastery": "3.19.0",
   "upstreamRepo": ".deploy-tmp/deepseek-harness",
   "upstream": {
-    "$comment": "上游 rc.3 精确提交；适配、构建和运行验收以本轮实际证据为准。",
-    "tag": "dsh-v0.2.1-rc.3",
-    "describe": "dsh-v0.2.1-rc.3",
-    "commit": "1f81c047fc48fa190a683e469daa699857e9afe8",
-    "rootVersion": "0.2.1-rc.3",
+    "$comment": "上游 0.2.2-rc.1 精确提交；enginesNode 是该引擎首次声明的下限（0.2.1-rc.3 无该字段），本仓快照 node 24.18.0 达标，取证见 docs/adapt/022rc1-node-floor.md。",
+    "tag": "dsh-v0.2.2-rc.1",
+    "describe": "dsh-v0.2.2-rc.1",
+    "commit": "66491b05e3f05ad35bcdd4f6cd7ed26041d9e3db",
+    "rootVersion": "0.2.2-rc.1",
     "packageManager": "pnpm@11.28.5",
-    "enginesNode": "^22.19.0 || >=24.0.0",
+    "enginesNode": ">=24.9.0",
     "adaptationSourceRepo": ".deploy-tmp/deepseek-harness"
   },
   "runtimeCompat": {
