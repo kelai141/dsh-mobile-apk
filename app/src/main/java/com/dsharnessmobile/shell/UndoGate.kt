@@ -166,7 +166,9 @@ object UndoGate {
         suppressNoted = false
         // issue #1368：**无论成败**都记一次尝试——decide 据此退避，不可恢复的现场不再每拍拉起。
         try {
-          attemptFile(context).writeText(now.toString())
+          // issue #1369 同源：标记文件必须原子写，否则进程被硬杀会留下 0 字节文件，
+          // 而读取侧把「存在但解析不出」当成没有记录 ⇒ 退避静默失效、又回到每 5 秒一拍。
+          writeAtomicText(attemptFile(context), now.toString())
         } catch (t: Throwable) {
           record(context, "attempt marker write failed: " + (t.message ?: t.javaClass.simpleName))
         }
@@ -644,10 +646,45 @@ object UndoGate {
   /** 上次尝试执行的时刻（issue #1368）：成败都写，供 decide 退避。 */
   private fun attemptFile(context: Context) = File(context.filesDir, ".undo-auto-attempt")
 
-  private fun attemptAt(context: Context): Long? =
-    attemptFile(context).takeIf { it.exists() }?.let { f ->
-      runCatching { f.readText().trim().toLongOrNull() }.getOrNull()
+  private fun attemptAt(context: Context): Long? {
+    val file = attemptFile(context)
+    val exists = file.exists()
+    val raw = if (exists) runCatching { file.readText() }.getOrNull() else null
+    val now = System.currentTimeMillis()
+    return when (val marker = attemptMarker(exists, raw)) {
+      is AttemptMarker.Missing -> null
+      is AttemptMarker.Recorded -> marker.atMs
+      is AttemptMarker.Corrupt -> {
+        // 损坏（0 字节 / 半截）**不能静默退化成「没有记录」**：那样退避就失效了。
+        // 保守做法 = 当成「刚刚尝试过」，于是本窗口仍然退避；同时删掉坏文件，
+        // 让下一个窗口能正常写入新标记（不会永久卡死）。
+        runCatching { file.delete() }
+        record(context, "attempt marker corrupt (unparseable) — treated as a just-now attempt and removed")
+        now
+      }
     }
+  }
+
+  /** 尝试标记的解析结果（纯函数，JVM 单测直接钉）。 */
+  internal sealed interface AttemptMarker {
+    data object Missing : AttemptMarker
+    data class Recorded(val atMs: Long) : AttemptMarker
+    data object Corrupt : AttemptMarker
+  }
+
+  /**
+   * 解析尝试标记。
+   *
+   * 0 字节 / 半截内容的语义是「尝试过但时间不可知」，不是「没尝试过」——
+   * 前者必须继续退避，后者才放行。
+   *
+   * @param exists 文件是否存在。
+   * @param raw 文件内容（读失败时为 null）。
+   */
+  internal fun attemptMarker(exists: Boolean, raw: String?): AttemptMarker = when {
+    !exists -> AttemptMarker.Missing
+    else -> raw?.trim()?.toLongOrNull()?.let { AttemptMarker.Recorded(it) } ?: AttemptMarker.Corrupt
+  }
 
   private fun currentRetryIdentity(context: Context, engine: EngineManager?): RetryIdentity {
     val install = runCatching { installFingerprint(context)?.lowercase(java.util.Locale.ROOT) }.getOrNull() ?: "unavailable"

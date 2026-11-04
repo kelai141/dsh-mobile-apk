@@ -66,12 +66,25 @@ class UndoGateAttemptBackoffTest {
       .filterNot { it.trimStart().startsWith("//") || it.trimStart().startsWith("*") }
       .joinToString("\n")
     val execute = code.substringAfter("GateDecision.EXECUTE ->").substringBefore("GateDecision.")
-    assertTrue("EXECUTE 分支必须写 attempt marker", execute.contains("attemptFile(context).writeText(now.toString())"))
+    // issue #1369 同源：marker 必须**原子写**（writeText 先截断再写，硬杀留 0 字节 ⇒ 退避失效）。
+    assertTrue("EXECUTE 分支必须原子写 attempt marker", execute.contains("writeAtomicText(attemptFile(context), now.toString())"))
+    assertTrue("不得再用非原子 writeText 写 marker", !execute.contains("attemptFile(context).writeText("))
     assertTrue(
       "两个 decide 调用点都必须把 attemptAt 传进去",
       code.contains("decide(consecutiveFailures, now, retry.atMs, armedAt(context), attemptAt(context))") &&
         code.contains("decide(TRIGGER_CONSEC_FAILURES, now, retry.atMs, armedAt(context), attemptAt(context))"),
     )
     assertTrue("退避判据必须在 decide 里", code.contains("nowMs - lastAttemptAtMs < ATTEMPT_BACKOFF_MS"))
+  }
+
+  @Test fun `0 字节 attempt 标记必须继续退避而不是当成没有记录`() {
+    // 语义分界：Missing = 没尝试过（放行）；Corrupt = 尝试过但时间不可知（必须继续退避）。
+    assertEquals(UndoGate.AttemptMarker.Missing, UndoGate.attemptMarker(false, null))
+    assertEquals(UndoGate.AttemptMarker.Recorded(123L), UndoGate.attemptMarker(true, "123"))
+    assertEquals(UndoGate.AttemptMarker.Corrupt, UndoGate.attemptMarker(true, ""))
+    assertEquals(UndoGate.AttemptMarker.Corrupt, UndoGate.attemptMarker(true, "   "))
+    assertEquals(UndoGate.AttemptMarker.Corrupt, UndoGate.attemptMarker(true, null))
+    // 损坏 ⇒ attemptAt 视作「刚刚尝试过」⇒ decide 在退避窗口内必须抑制（不是每 5 秒一拍）。
+    assertEquals(UndoGate.GateDecision.SUPPRESS, decide(lastAttemptAtMs = now - 1_000))
   }
 }
