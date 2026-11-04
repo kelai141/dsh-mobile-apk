@@ -132,6 +132,55 @@ export function isCommitAccepted(code: number | null): boolean {
  * 「已输入 xxx（ADBKeyboard）」——正是本文件 `-n` 那次修复要消灭的「链路全绿、文本不动」形态
  * （a11y 关闭时没有回读兜底，这条是唯一判据）。
  */
+/**
+ * 可还原的 IME id 形态（issue #1371）：必须是 `pkg/.Component`。
+ *
+ * `settings get secure default_input_method` 在未显式赋值时打印字面 `null`；把它拼进
+ * `ime set null` 必然失败，而失败又被吞掉 ⇒ 用户输入法永久停在 DSH 键盘。
+ */
+export function restorableImeId(raw: string): boolean {
+  const v = String(raw ?? '').trim().replace(/^"|"$/g, '')
+  if (v === '' || v.toLowerCase() === 'null') return false
+  return /^[A-Za-z0-9_.]+\/[A-Za-z0-9_.$]+$/.test(v)
+}
+
+/** 还原目标的来源：读回值 / 已启用列表兜底 / 都没有。 */
+export type ImeRestoreSource = 'readback' | 'fallback' | 'none'
+
+/** 还原目标。`id` 为空串表示「没有可还原目标」（仍会切换，但无法还原）。 */
+export interface ImeRestoreTarget {
+  id: string
+  source: ImeRestoreSource
+}
+
+/**
+ * 解析还原目标（issue #1371 第三条路，2026-11-04 维护者裁定）。
+ *
+ * 为什么不能「不可还原就不切换」：不切换 ⇒ 本通道键盘没被激活 ⇒ 广播拿 `imeNotReady`，
+ * 文本注入整条失效；而那批设备（读回值 `null`/非组件形态）正是本 issue 的现场。
+ * 也不能「照样切换但不管还原」：那正是原来的伤害（用户输入法被劫持）。
+ *
+ * 所以：读回值可用就用它；否则从 `ime list -s` 里挑一个**非本通道**的已启用输入法；
+ * 两者都没有才承认「无法还原」（仍切换，回执明写）。
+ *
+ * @param rawPrev `settings get secure default_input_method` 的原样输出。
+ * @param imeList `ime list -s` 的原样输出（每行一个 id）；空串表示没有可用行。
+ * @param selfId 本通道自己的 IME id（永不作为还原目标）。
+ */
+export function resolveImeRestoreTarget(rawPrev: string, imeList: string, selfId: string): ImeRestoreTarget {
+  if (restorableImeId(rawPrev)) {
+    const v = String(rawPrev).trim().replace(/^"|"$/g, '')
+    if (v !== selfId) return { id: v, source: 'readback' }
+  }
+  const lines = String(imeList ?? '').split(/\r?\n/).map((s) => s.trim()).filter((s) => s !== '')
+  for (const line of lines) {
+    if (!restorableImeId(line)) continue
+    if (line === selfId) continue
+    return { id: line, source: 'fallback' }
+  }
+  return { id: '', source: 'none' }
+}
+
 export function hasAuthoritativeCommit(code: number | null): boolean {
   return code === KB_RESULT.committed
 }
