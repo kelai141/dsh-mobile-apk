@@ -379,6 +379,9 @@ export function createMobileBootstrap(options = {}) {
         try {
           await assetHandle.rollback()
         } catch (assetRollbackError) {
+          // issue #1528：这里只记字段等于「没人知道回滚失败过」。warn 一行，落盘由
+          // asset-bundle 的 rollback 内部完成（那里才拿得到 assets root）。
+          console.warn('[dsh-linux-bootstrap] asset rollback failed: ' + String((assetRollbackError && assetRollbackError.message) || assetRollbackError))
           error.assetRollbackError = safeError(assetRollbackError)
         }
       }

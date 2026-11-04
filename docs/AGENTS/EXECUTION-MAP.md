@@ -2273,6 +2273,7 @@ app/src/main/java/com/dsharnessmobile/shell/BrowserHostProfile.kt
 app/src/main/java/com/dsharnessmobile/shell/EnginePageRetryPolicy.kt
 app/src/main/java/com/dsharnessmobile/shell/PendingJsEntry.kt
 app/src/main/java/com/dsharnessmobile/shell/NotifyTailSplit.kt
+plugins/dsh-linux-bootstrap/test/rollback-trace-1528.test.mjs
 plugins/dsh-linux-bootstrap/test/asset-bundle-rollback.test.mjs
 app/src/main/java/com/dsharnessmobile/shell/WorkspaceReclaim.kt
 app/src/main/java/com/dsharnessmobile/shell/PendingJsDrain.kt
@@ -2702,7 +2703,7 @@ Telemetry snapshot closure: check-engine-overlay retains each dependency's decla
 
 **NotifyTailSplit**：通知尾行按 JSON 边界切分（issue #1358）——两条连续无换行帧都能出；`app/src/main/java/com/dsharnessmobile/shell/NotifyTailSplit.kt:36#expect=fun%20split(buf%3A%20ByteArray%2C%20from%3A%20Int%2C%20to%3A%20Int)%3A%20Pair%3CList%3CString%3E%2C%20Int%3E%20%7B`
 
-**publishBundle deferCommit**：资产发布返回 commit/rollback 句柄，安装失败可换回旧包（issue #1374；与 #1375 的发布内原子性互补）——`plugins/dsh-linux-bootstrap/src/asset-bundle.js:151#expect=export%20async%20function%20publishBundle(%7B%20root%2C%20finalDirectory%2C%20packageDirectory%2C%20asset%2C%20unpackedSize%2C%20token%2C%20deferCommit%20%3D%20false%20%7D)%20%7B`
+**publishBundle deferCommit**：资产发布返回 commit/rollback 句柄，安装失败可换回旧包（issue #1374；与 #1375 的发布内原子性互补）——`plugins/dsh-linux-bootstrap/src/asset-bundle.js:216#expect=export%20async%20function%20publishBundle(%7B%20root%2C%20finalDirectory%2C%20packageDirectory%2C%20asset%2C%20unpackedSize%2C%20token%2C%20deferCommit%20%3D%20false%20%7D)%20%7B`
 
 **imeBorrowLock**：ADBKeyboard 借道 IME 的整段互斥（issue #1373）＋排队预算（issue #1516）——锁只覆盖「读 prev → 切换 → 广播 → 还原」这一窗：`nodeText` 回读（4s 超时 ×2）与重试等待在锁外，`acquire({ timeoutMs })` 到点抛 `ImeBorrowTimeout` 并**让位**（不让位 = 队头永不释放，后面每路都卡死）。`plugins/dsh-android-manage/src/ime-borrow.ts:63#expect=export%20function%20createImeBorrowLock()%3A%20ImeBorrowLock%20%7B`
 
