@@ -88,7 +88,7 @@ object LogCollector {
   private const val SEGMENTS_FILE = "boot-segments.log"
 
   /** 判据文件上限：每次启动最多 3 行、单行 <200 B；超限轮转一代（.1）。 */
-  private const val SEGMENTS_MAX_BYTES = 64L * 1024
+  private const val SEGMENTS_MAX_BYTES = 64L * 1024; private val segmentsLock = Any()
 
   /**
    * 探针口径：`[perf] TOTAL calls=… totalMs=… instances=… firstAt=…ms singles=… loopP99Ms=… loopSamples=…`
@@ -481,9 +481,9 @@ object LogCollector {
 
   /**
    * 追加一行到壳侧判据文件（files/boot-segments.log，O_APPEND；超限轮转一代 .1）。
-   * 唯一写者就是壳自己 → 不存在「被别的进程从它自己的偏移覆盖」的窗口（engine.log 的教训）。
+   * 唯一**进程**写者是壳自己；但进程内两个线程（调用线程 / probe 尾线程）会同时进来，整段加锁（issue #1366）。
    */
-  private fun appendToSegmentsFile(ctx: Context, line: String) {
+  private fun appendToSegmentsFile(ctx: Context, line: String) = synchronized(segmentsLock) {
     try {
       val f = File(ctx.filesDir, SEGMENTS_FILE)
       if (f.length() > SEGMENTS_MAX_BYTES) {
