@@ -316,8 +316,12 @@ class EngineService : Service() {
       // 折算后无论调度拍长多少，恢复与熔断都落在同一时间点（见 WatchdogV2.tickUnits）。
       // 首拍（lastWatchdogTickAt = 0）按一个标准拍处理：不能把它当成「隔了很久」，
       // 否则服务刚起的第一拍就折算成整条阶梯（6 个标准拍），等于跳过整个观察窗。
-      val tickMs = if (epoch.lastWatchdogTickAt <= 0L) 0L else now - epoch.lastWatchdogTickAt
-      epoch.lastWatchdogTickAt = now
+      // issue #1357：拍长记账必须用**单调时钟**。旧实现用墙钟（now - lastWatchdogTickAt），
+      // 系统时间前跳时 tickMs 会变得极大，而 tickUnits 封顶 6 个标准拍——两次观测就能把
+      // DEGRADED_HTTP 推满 12 拍熔断；而唤醒锁本来就用 elapsedRealtime，两处必须同域。
+      val mono = android.os.SystemClock.elapsedRealtime()
+      val tickMs = if (epoch.lastWatchdogTickAt <= 0L) 0L else mono - epoch.lastWatchdogTickAt
+      epoch.lastWatchdogTickAt = mono
       val units = WatchdogV2.tickUnits(tickMs)
       // 本拍探活状态（用于定下一拍节奏；异常拍保持非健康节奏）。
       var tickState: WatchdogV2.ProbeState? = null
