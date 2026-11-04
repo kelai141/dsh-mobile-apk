@@ -241,6 +241,26 @@
 - id: product-analytics
   disabled: true
 
+# 持久 Shell 后端（issue #1344）：@deepseek-ai/dsh-terminal-bash 的**两个入口**
+# （optional-terminal-bash / optional-terminal-pwsh）都按包内 Config.backendType 的默认值 "shell"
+# 注册 PTY 后端（lib/index.js:38 z.string().default("shell")，两个入口都没有覆盖它）⇒ 后者撞名即抛
+#   TerminalError: a PTY backend named "shell" is already registered
+# 插件页出现红色「组件启用失败」，且每次都重放。
+# 上游把「pwsh 只在 Windows 开」写成可选 bundle 补丁里的 !!js 表达式
+# （@deepseek-ai/dsh-experimental-terminal-bundle/cordis.patch.yml，rc.2/rc.3 同为 646 字节：
+#   optional-terminal-pwsh: disabled: !!js process.platform !== 'win32'），
+# 而该表达式由 cordis loader 以 `with (ctx) { return eval(expr) }` 求值（cordis-plugin-loader
+# lib/index.js:233-237）——现场（红米 K Pad / Android 16）里两个入口同时激活，说明这道 !!js 判据
+# 在该环境没兜住。本仓不复用那道表达式：profile 层的 id 定向禁用是**字面量**，在所有 bundle 层之后应用，
+# 不依赖任何求值成功与否。
+# 为什么是禁用而不是「改个后端名共存」：Android 快照里没有 pwsh 可执行文件
+# （copy dsh-pwsh-local 的 resolvePwshPath 在非 win32 直接返回 "pwsh"，不校验存在），
+# 共存只会把「启动失败」换成「显示运行中、真用时报 spawn ENOENT」——语义错误比红点更贵。
+# bash 入口保持 "shell"，工具与终端 UI 一行不变（消费者按 "shell" 取名，不受影响）。
+# 逆转条件：上游按 shell 类型区分两个入口的后端名（issue #1344 建议修法 1）后删掉本行与这段注释。
+- id: optional-terminal-pwsh
+  disabled: true
+
 # 删除对话（issue #493）：会话行菜单「删除对话」+ 受鉴权 host 路由 /api/session-delete。
 # 引擎没有 session/delete RPC，插件负责先卸载内存会话，再删磁盘目录；运行中的会话拒绝删除。
 - insert:

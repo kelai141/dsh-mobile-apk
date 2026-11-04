@@ -839,10 +839,10 @@
     ]
   },
   "upstreamRows": {
-    "$comment": "G-4 判据的登记集：上游 base + web-app 两个 bundle 的全部行 id（含我们未挂载的）。新增行必须逐条判「挂载 / 明确不挂」后重新登记——0.14.2 追版时 `mcp-resources` 这类新行走的就是这里。",
+    "$comment": "G-4 判据的登记集：上游 base + web-app 与可选 experimental-terminal bundle 的全部行 id（含我们未挂载的）。新增行必须逐条判「挂载 / 明确不挂」后重新登记——0.14.2 追版时 `mcp-resources` 这类新行走的就是这里。",
     "capturedFrom": "dsh-v0.2.1-rc.3",
     "capturedReason": "rc.3 新增 entry-customization 行；沿用上游 web-app 默认装配",
-    "total": 187,
+    "total": 192,
     "entries": [
       {
         "key": "account-controller",
@@ -1143,6 +1143,36 @@
         "name": "@deepseek-ai/dsh-host-open-in-app",
         "upstreamDisabled": false,
         "bundle": "web-app"
+      },
+      {
+        "key": "optional-persistent-terminals",
+        "name": "cordis:group",
+        "upstreamDisabled": false,
+        "bundle": "experimental-terminal"
+      },
+      {
+        "key": "optional-terminal-bash",
+        "name": "@deepseek-ai/dsh-terminal-bash",
+        "upstreamDisabled": false,
+        "bundle": "experimental-terminal"
+      },
+      {
+        "key": "optional-terminal-pwsh",
+        "name": "@deepseek-ai/dsh-terminal-bash",
+        "upstreamDisabled": false,
+        "bundle": "experimental-terminal"
+      },
+      {
+        "key": "optional-terminal-registry",
+        "name": "@deepseek-ai/dsh-terminal",
+        "upstreamDisabled": false,
+        "bundle": "experimental-terminal"
+      },
+      {
+        "key": "optional-tool-terminal",
+        "name": "@deepseek-ai/dsh-tool-terminal",
+        "upstreamDisabled": false,
+        "bundle": "experimental-terminal"
       },
       {
         "key": "otel",

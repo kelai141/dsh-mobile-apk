@@ -622,6 +622,15 @@ class FactoryProfilePatchTest {
    * `desktop-product-telemetry` 与 `product-analytics` 两行（桌面产品遥测/分析，不是 Android 服务），
    * 我方按 Android 面显式 disable 这两行——不禁则设备上会去连桌面遥测端点。两条都经
    * `check-contract.mjs` §8 核对「上游确实存在该 id」后才允许写入，不存在空指向。
+   * 22 增为 23 条条目（块数 23 → 24）是 issue #1344 的产品改动：`@deepseek-ai/dsh-terminal-bash` 的
+   * 两个 loader 入口（`optional-terminal-bash` / `optional-terminal-pwsh`，来自可选 bundle
+   * `@deepseek-ai/dsh-experimental-terminal-bundle/cordis.patch.yml`）都按包内
+   * `Config.backendType = z.string().default("shell")` 注册 PTY 后端，后者恒撞名
+   * （`TerminalError: a PTY backend named "shell" is already registered`）⇒ 插件页红色「组件启用失败」。
+   * 上游只靠那道 `!!js process.platform !== 'win32'` 兜底，现场（红米 K Pad / Android 16）两个入口同时
+   * 激活；本仓在 profile 层用**字面量** `disabled: true` 默认关掉 pwsh 入口（Android 快照里没有 pwsh
+   * 可执行文件）。该行经 `check-contract.mjs` §8 核对（上游行集已把可选 terminal bundle 纳入）后写入，
+   * 字面判据见 `scripts/check-terminal-entries.test.mjs`。
    */
   @Test
   fun realFactoryFileSelfMergeIsByteIdentical() {
@@ -636,9 +645,10 @@ class FactoryProfilePatchTest {
     assertTrue("零改动时不得有改动说明", result.changes.isEmpty())
 
     val blocks = FactoryProfilePatch.topLevelBlocks(text)
-    // 22 = 21 个 `- ` 顶层条目 + 1 个「首个条目之前的注释头」块（parseBlocks 会把它们冲成独立块）。
-    // 历史锚点：0.14.2 时代 20 个条目 ⇒ 21 块；0.14.8 退役 undo 装配项后仍为 20 个条目。
-    assertEquals("顶层条目数（工厂件结构改变时同步本断言）", 23, blocks.size)
+    // 24 = 23 个 `- ` 顶层条目 + 1 个「首个条目之前的注释头」块（parseBlocks 会把它们冲成独立块）。
+    // 历史锚点：0.14.2 时代 20 个条目 ⇒ 21 块；0.14.8 退役 undo 装配项后仍为 20 个条目；
+    // 0.14.3 起 22 个条目（+2 遥测/分析禁用行）；issue #1344 起 23 个条目（+1 pwsh 入口禁用行）。
+    assertEquals("顶层条目数（工厂件结构改变时同步本断言）", 24, blocks.size)
     val groups = blocks.map { FactoryProfilePatch.blockIds(it) }.filter { it.size > 1 }
     assertEquals("唯一多子条目组 = shell-termux + host-web-compat", 1, groups.size)
     assertEquals(listOf("shell-termux", "host-web-compat"), groups.single())
@@ -669,7 +679,7 @@ class FactoryProfilePatchTest {
 
     assertTrue("D10：缺失的组内兄弟必须被补回", result.text.contains("id: host-web-compat"))
     assertTrue("补回的是同一个组（shell-termux 仍是组首）", result.text.contains("id: shell-termux"))
-    assertEquals("顶层条目数不变（补进组内，不是追加成新块）", 23, FactoryProfilePatch.topLevelBlocks(result.text).size)
+    assertEquals("顶层条目数不变（补进组内，不是追加成新块）", 24, FactoryProfilePatch.topLevelBlocks(result.text).size)
     val group = FactoryProfilePatch.topLevelBlocks(result.text)
       .first { FactoryProfilePatch.blockIds(it).contains("shell-termux") }
     assertEquals(listOf("shell-termux", "host-web-compat"), FactoryProfilePatch.blockIds(group))
