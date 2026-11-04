@@ -1355,6 +1355,20 @@ export class ComposerSheet {
     return Number.isFinite(inline) ? inline : 0
   }
 
+  /**
+   * 起手基准高度（issue #1381）：**优先内联值**。
+   *
+   * 吸附过渡期间 `getBoundingClientRect()` 还在动，读它会拿到动画中间值并被当作本次拖拽的起点
+   * ⇒ 连点时 peek / expanded 判定可能反掉。这里与 [publishGeometry] 的取数口径保持一致。
+   */
+  private settledHeight(): number {
+    const panel = this.panel()
+    if (panel === null) return 0
+    const inline = Number.parseFloat(panel.style.height)
+    if (Number.isFinite(inline)) return inline
+    return this.currentHeight()
+  }
+
   private setHeight(px: number): void {
     const panel = this.panel()
     if (panel === null) return
@@ -1525,7 +1539,8 @@ export class ComposerSheet {
     if (panel === null || touch === undefined) return
     // 新一次拖拽：先丢弃上一轮的几何缓存，再让本次拖拽自己付第一次读。
     this.invalidateDragGeometry()
-    const height = this.currentHeight()
+    // issue #1381：起手基准必须用「我们写下去的高度」，不是动画中间值。
+    const height = this.settledHeight()
     this.drag = {
       startX: touch.clientX,
       startY: touch.clientY,
