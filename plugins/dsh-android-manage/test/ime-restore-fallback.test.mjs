@@ -41,8 +41,9 @@ test('形态判据：null / 空 / 非组件都不可还原', () => {
 
 test('接线：prev 为空也必须切换（否则广播拿 imeNotReady，注入整条失效）', () => {
   const src = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
-  assert.ok(src.includes('const needSwitch = prev !== IME_ID'), 'prev 为空时也必须是 needSwitch=true')
-  assert.ok(src.includes('const canRestore = prev.length > 0'), '还原资格与切换资格必须分开')
+  // issue #1373 之后这两个改成了 try 外声明的 let（finally 的还原要用），语义不变。
+  assert.ok(src.includes('needSwitch = prev !== IME_ID'), 'prev 为空时也必须是 needSwitch=true')
+  assert.ok(src.includes('canRestore = prev.length > 0'), '还原资格与切换资格必须分开')
   assert.ok(src.includes('ime list -s'), '读回不可用时必须查已启用列表兜底')
   assert.ok(src.includes('if (needSwitch && canRestore)'), '还原只在有目标时才做')
   assert.ok(src.includes('未能还原'), '两边都空时回执必须明写未能还原')
