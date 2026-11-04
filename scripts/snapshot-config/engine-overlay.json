@@ -5,7 +5,7 @@
     "上游 Harness 0.2.2-rc.1，精确提交 66491b05e3f05ad35bcdd4f6cd7ed26041d9e3db；overlay 由协调仓 gen-engine-overlay.mjs 派生（见 docs/adapt/022rc1-overlay.md 的生成器 provenance）。",
     "Package identities and versions are read from the pinned target manifests; Cordis packages are not rewound to older sources.",
     "Android assembles ui-settings-session-log and otel; desktop product telemetry and analytics payloads are inventoried but their rows are explicitly disabled.",
-    "The complete Lexical family follows the official 0.49.0 source lock, not the previous Android-only 0.50.0 pin.",
+    "The Lexical family lock (0.49.0) is retired with 0.2.2-rc.1: no package in the pinned tree declares lexical, and the npm install closure carries none; the client editor now ships inside the host bundles.",
     "pi-ai raw npm extraction does not carry upstream pnpm patches: requiredUpstreamPatches records the mandatory post-extraction parent hook.",
     "Android Koffi 3.2.1 and the Sharp WASM runtime override remain intentional source-deploy policy.",
     "keepUnpublished records unmounted legacy base residue; clean source builds omit it."
@@ -24,11 +24,11 @@
   },
   "packages": {
     "@deepseek-ai/cordis": "4.1.0",
-    "@deepseek-ai/cordis-plugin-group": "1.0.5",
+    "@deepseek-ai/cordis-plugin-group": "1.1.0",
     "@deepseek-ai/cordis-plugin-hmr": "1.0.20",
-    "@deepseek-ai/cordis-plugin-include": "1.0.10",
-    "@deepseek-ai/cordis-plugin-loader": "1.0.6",
-    "@deepseek-ai/cordis-plugin-timer": "1.1.7",
+    "@deepseek-ai/cordis-plugin-include": "1.1.0",
+    "@deepseek-ai/cordis-plugin-loader": "1.1.0",
+    "@deepseek-ai/cordis-plugin-timer": "1.2.0",
     "@deepseek-ai/dsh-acp": "0.2.2-rc.1",
     "@deepseek-ai/dsh-acp-app": "0.2.2-rc.1",
     "@deepseek-ai/dsh-action-cards": "0.2.2-rc.1",
@@ -560,7 +560,7 @@
     }
   ],
   "assemblyInventory": {
-    "sourceCommit": "1f81c047fc48fa190a683e469daa699857e9afe8",
+    "sourceCommit": "66491b05e3f05ad35bcdd4f6cd7ed26041d9e3db",
     "rows": {
       "otel": "enabled base service",
       "ui-settings-session-log": "enabled official general-settings control",

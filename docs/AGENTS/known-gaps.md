@@ -147,3 +147,11 @@ slot-guard 注释与本日审计报告。
 | 项 | 当前事实 | 结论 / 后续 |
 |---|---|---|
 | 摘要展示从「有值即显示」改为「证明不了就说未验证」 | `webpages/src/assets/digest.js` 判据把 SHA-256 展示分三态：`verified` / `unverified`（旧 seed 无 `manifestSha256`、拉不到 MANIFEST、或 seed 自洽检查不过）/ `mismatch`（manifest 摘要对不上，或某条 APK 摘要与 manifest 条目不同）。**旧 seed 显示「未验证」是预期行为，不是回归**。 | 跑一次 `node webpages/tools/build.mjs --refresh` 会把 `manifestSha256` 写进 `data/releases.json`，下一次构建自动转 `verified`。**不要把「未验证」当缺陷去改成「已验证」**——那正是 #1394 修掉的东西。 |
+
+
+## 0.2.2-rc.1 适配期的「不可发布」窗口（2026-11-04，PR-2）
+
+| 项 | 当前事实 | 结论 / 后续 |
+|---|---|---|
+| peer 声明已指向 0.2.2-rc.1，但插件 API 面迁移未完成 | PR-2（`adapt/022-pin`）把 11 个插入行（3 个子仓 + 8 个插件 + 2 个 vendor）的 `@deepseek-ai/*` peer/dev 依赖从 `0.2.1-rc.3` 抬到 `0.2.2-rc.1`、`cordis 4.1.0`、`schemastery 3.19.0`——这一步是**为了不被上游 boot 期 peer 判定静默 disable**（症状：设备上功能面消失而进程照常起）。API 面迁移（`tools.resolve/executable`、session projection 注册改异步、PTC 控制通道改 birpc、`run_code` 取消 ABORTED、市场改名「自定义插件索引」）在 `adapt/022-plugins`。 | **门禁绿 ≠ 可发布**：`#1544` 同步登记。在 `adapt/022-plugins` 的实跑（起 0.2.2-rc.1 引擎 → 建会话 → 发一次工具调用）通过前，**不得发版**。这句话是给下一个人看的闸，不是免责声明。 |
+| 拒绝了 `contract.runtimeCompat.exemptions` 那条路 | 该字段能把「暂未验证」写成「广而告之的例外」，半年后没人敢删。本轮明确不登记豁免，宁可让 `check-contract` 保持「peer 必须抬」的硬判据。 | 后续若真需要豁免，必须在同一条里写清「哪天、凭什么证据可以删」，否则不接受。 |
