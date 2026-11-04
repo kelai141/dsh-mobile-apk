@@ -150,7 +150,7 @@ sequenceDiagram
 ### 阶段 4：后台维护（低频）
 
 - 看门狗持续探活/退避/熔断（`WatchdogV2.kt:109`）；日志采集与轮转（`LogCollector`）；
-- APK 更新：设置页一级分区「应用更新」（与原生管理中心）经 `AndroidBridge.apkUpdate(action)` 驱动 `ApkUpdateController`（唯一状态机与推进者）→ `UpdateChecker` 六档确认链 + 下载校验 → 系统安装器；快照更新链已下线，`startUpdateCheck` 在本版**已无任何调用点**（定义保留于 `EngineStartFlow.kt:549`；`UpdateManagerPolicyTest.kt:58` 与 `ForegroundPageRecoveryWiringTest.kt:47` 按该签名切片，**不得当死代码删除**）。manifest 未配置仍 fail-closed；当前职责见§6 K03。
+- APK 更新：设置页一级分区「应用更新」（与原生管理中心）经 `AndroidBridge.apkUpdate(action)` 驱动 `ApkUpdateController`（唯一状态机与推进者）→ `UpdateChecker` 六档确认链 + 下载校验 → 系统安装器；快照更新链已下线，`startUpdateCheck` 在本版**已无任何调用点**（定义保留于 `EngineStartFlow.kt:552#expect=Thread%20%7B%20activity.engineManager.mirrorDiagnosticsToShared(%22startup-retries-exhausted%22)%20%7D`；`UpdateManagerPolicyTest.kt:58` 与 `ForegroundPageRecoveryWiringTest.kt:47` 按该签名切片，**不得当死代码删除**）。manifest 未配置仍 fail-closed；当前职责见§6 K03。
 - 残渣回收与标记恢复（`SnapshotTransaction.kt:190` / `EngineManager.kt:238`）。
 
 ### 横向：构建与验收链
@@ -458,9 +458,9 @@ sequenceDiagram
 | 从 | 到 | 关系 | 证据 |
 |---|---|---|---|
 | K01 | 引擎进程与快照面 | EngineStartFlow 在工作线程调 refreshSnapshot/startEngine/engineProcessAlive，Activity 侧只传 Activity 与 pickToken | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:408 |
-| K01 | 快照事务（跨进程真源） | 0.14.8 P1：启动请求与安全模式重启都不得在刷新窗口内被静默丢弃。判据 = 事务 journal（`SnapshotTransaction.readMarker(filesDir)`，跨进程）而不是本 Activity 实例的内存态所有权；`start()`/`restart()` 的 destroyed 与 running 必须分开处置，安全模式重启在**停旧引擎之前**先判事务 | `app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:754#expect=%2F%2F%20%E7%9B%B8%E4%BD%8D%E5%B7%B2%E7%94%B1%E6%9C%AC%E5%87%BD%E6%95%B0%E5%85%A5%E5%8F%A3%E5%88%87%E5%88%B0%20Starting%EF%BC%88%E5%90%AF%E5%8A%A8%E5%8D%B3%E6%9C%89%E5%8F%8D%E9%A6%88%EF%BC%89`；`app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:207` |
+| K01 | 快照事务（跨进程真源） | 0.14.8 P1：启动请求与安全模式重启都不得在刷新窗口内被静默丢弃。判据 = 事务 journal（`SnapshotTransaction.readMarker(filesDir)`，跨进程）而不是本 Activity 实例的内存态所有权；`start()`/`restart()` 的 destroyed 与 running 必须分开处置，安全模式重启在**停旧引擎之前**先判事务 | `app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:757#expect=%2F%2F%20%E7%9B%B8%E4%BD%8D%E5%B7%B2%E7%94%B1%E6%9C%AC%E5%87%BD%E6%95%B0%E5%85%A5%E5%8F%A3%E5%88%87%E5%88%B0%20Starting%EF%BC%88%E5%90%AF%E5%8A%A8%E5%8D%B3%E6%9C%89%E5%8F%8D%E9%A6%88%EF%BC%89`；`app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:207` |
 | K01 | 引擎鉴权与探活 | 首屏 cookie 注入进程级 CookieManager，探活结果决定 showWeb/showGuide 分流 | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:835 |
-| K01 | 前台服务与看门狗 | startEngineService 挂载前台服务，回撤阈值取 WatchdogV2.effectiveFailureCount | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:670 |
+| K01 | 前台服务与看门狗 | startEngineService 挂载前台服务，回撤阈值取 WatchdogV2.effectiveFailureCount | `app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:673#expect=probeRunning%20%3D%20%7B` |
 | K01 | 诊断落盘 | 启动分段、引导页 stall、HTTP/TLS/渲染进程错误全部经 LogCollector 写壳侧自有文件 | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1136 |
 | K01 | 沉浸式与开发者日志真源 | onCreate/onWindowFocusChanged 读 ImmersiveMode，onResume 读 DevLogControl（单一真源，壳侧不再持第二份） | app/src/main/java/com/dsharnessmobile/shell/WebUiChrome.kt:19 |
 | K01 | 隔离浏览器舞台 | onCreate 建 BrowserHost 并挂 BrowserHostHolder，onPause/onDestroy 暂停与销毁 | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:205 |
@@ -475,7 +475,7 @@ sequenceDiagram
 | K01 | 软件源切换 | 管理中心「软件源」行经 SourceSettings 双写 sources.list 与 chosen_mirrors，再跑 apt-get update 验证；失败按备份回滚（退出码不足以判成败） | app/src/main/java/com/dsharnessmobile/shell/SourceSettings.kt:88 |
 | K01 | 系统外部角色 | BootReceiver 接 ACTION_BOOT_COMPLETED 决定是否自启前台服务，分享面板经 VIEW/SEND 进本 Activity | app/src/main/java/com/dsharnessmobile/shell/BootReceiver.kt:24 |
 | K02 | K01 | 启动全程用引导页阶段承载文案，成功才切 WebUI | EngineStartFlow.kt:445-479、MainActivity.kt:145-155 |
-| K02 | K03 | 刷新期禁启动、事务恢复、update-pending 健康 3 拍才删 usr-old 三处握手；刷新窗口内的启动请求**不得静默丢弃**（0.14.8 P1）：`start()`/`restart()` 拿不到世代所有权时按 destroyed/running 分开处置，running 走 boot-fail 留痕 + 有界等待后自动续跑；安全模式重启在停旧引擎前先判事务 journal | `EngineManager.kt:1475#expect=if%20(EngineManager.snapshotRefreshing.get())%20%7B`、`EngineManager.kt:1399-1415#expect=LogCollector.writeBootDiag(context%2C%20%22perf-asset-patch%22%2C%20perfLine)`；`EngineStartFlow.kt:754#expect=%2F%2F%20%E7%9B%B8%E4%BD%8D%E5%B7%B2%E7%94%B1%E6%9C%AC%E5%87%BD%E6%95%B0%E5%85%A5%E5%8F%A3%E5%88%87%E5%88%B0%20Starting%EF%BC%88%E5%90%AF%E5%8A%A8%E5%8D%B3%E6%9C%89%E5%8F%8D%E9%A6%88%EF%BC%89`、`EngineStartFlow.kt:1956#expect=internal%20fun%20startupRecoverThenProbe(recover%3A%20()%20-%3E%20Unit%2C%20probeRunning%3A%20()%20-%3E%20Boolean)%3A%20Boolean%20%7B` |
+| K02 | K03 | 刷新期禁启动、事务恢复、update-pending 健康 3 拍才删 usr-old 三处握手；刷新窗口内的启动请求**不得静默丢弃**（0.14.8 P1）：`start()`/`restart()` 拿不到世代所有权时按 destroyed/running 分开处置，running 走 boot-fail 留痕 + 有界等待后自动续跑；安全模式重启在停旧引擎前先判事务 journal | `EngineManager.kt:1475#expect=if%20(EngineManager.snapshotRefreshing.get())%20%7B`、`EngineManager.kt:1399-1415#expect=LogCollector.writeBootDiag(context%2C%20%22perf-asset-patch%22%2C%20perfLine)`；`EngineStartFlow.kt:757#expect=%2F%2F%20%E7%9B%B8%E4%BD%8D%E5%B7%B2%E7%94%B1%E6%9C%AC%E5%87%BD%E6%95%B0%E5%85%A5%E5%8F%A3%E5%88%87%E5%88%B0%20Starting%EF%BC%88%E5%90%AF%E5%8A%A8%E5%8D%B3%E6%9C%89%E5%8F%8D%E9%A6%88%EF%BC%89`、`EngineStartFlow.kt:1959#expect=internal%20fun%20startupRecoverThenProbe(recover%3A%20()%20-%3E%20Unit%2C%20probeRunning%3A%20()%20-%3E%20Boolean)%3A%20Boolean%20%7B` |
 | K02 | UpdateManager | .update-pending/.update-pending-at 与 usr-old 的生产者 | UpdateManager.kt:84-85 |
 | K02 | UndoGate | 看门狗 UNDO、启动超时与客户端插件树失败共用闸门：可点名时外科拔除非 Hard 插件；整份回撤只用当前 snapshot fingerprint 下的壳侧 HEALTHY known-good ID；被拒后复位锁存以继续引擎重试 | EngineService.kt:207-293、EngineStartFlow.kt:345-390、`UndoGate.kt:280-472#expect=*%20%E8%90%BD%E4%B8%80%E6%9D%A1%E9%97%B8%E9%97%A8%E8%A7%82%E6%B5%8B%EF%BC%88best-effort%EF%BC%8C%E7%BB%9D%E4%B8%8D%E6%8A%9B%EF%BC%89%E3%80%82**%E4%B8%8D%E7%BB%8F%20DevLogPrefs%20%E9%97%B8%E9%97%A8**%E2%80%94%E2%80%94%E5%AE%83%E5%BF%85%E9%A1%BB%E5%9C%A8%E9%BB%98%E8%AE%A4%E9%85%8D%E7%BD%AE%E4%B8%8B%E5%8F%AF%E8%A7%81%E3%80%82` |
 | K02 | 通知链 NotifyStore/NotifyCenter | 每拍按字节偏移消费 .task-done.ndjson，双读不双发 | WatchdogV2.kt:258-309、NotifyCenter.kt:188 |
@@ -513,7 +513,7 @@ sequenceDiagram
 | K06 | 引擎 file-open 插件 | 来件经 POST /api/android/file-incoming 建立强制新会话草稿 | `app/src/main/java/com/dsharnessmobile/shell/FileIncoming.kt:446#expect=val%20conn%20%3D%20java.net.URL(EngineEndpoint.url` |
 | K06 | 审计块 ControlAudit | 每条 sh* 写一条 audit.ndjson（result 字段硬编码 ok） | app/src/main/java/com/dsharnessmobile/shell/ShellOps.kt#flush@2eda6fab |
 | K06 | 构建门禁块 | check-bounded-io / check-control-ops / gen-screen-scope-fixture 三条门禁约束本块形态 | scripts/check-bounded-io.mjs#scanSource@0bc35a00 |
-| K06 | 引擎启动流 EngineStartFlow | 引擎就绪时补投待发来件，闭合冷启动竞态 | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:550 |
+| K06 | 引擎启动流 EngineStartFlow | 引擎就绪时补投待发来件，闭合冷启动竞态 | `app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:553#expect=.apply%20%7B%20isDaemon%20%3D%20true%3B%20name%20%3D%20%22dsh-repair-diagnostics%22%3B%20start()%20%7D` |
 | K07 | ShizukuTransport | 建屏前必须 ensureBound，输入/拉起/SF token 反查全走 runController 的固定 argv | app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:324 |
 | K07 | K06 ScreenScope | `vdInput` 在 bridge 服务面校验目标范围，`VdisplayController.input` 在固定 argv 执行前再次校验；显式 target 直接解析，不得被 selected 覆盖 | plugins/dsh-android-bridge/src/index.ts#resolved@e33053de, app/src/main/java/com/dsharnessmobile/shell/VdisplayController.kt:608 |
 | K07 | K05 | realScreenScopeError 用 displayIdForAlias 把 virtual-N 解析成动态 displayId 并钉给 a11y 取树/截屏 | app/src/main/java/com/dsharnessmobile/shell/DeviceControlService.kt:718 |
@@ -625,7 +625,7 @@ sequenceDiagram
 | 2. 引擎反复被重启或长时间不重启 | K02 | `cat files/boot-segments.log` 看 t_boot_start / t_listen 世代与失败密度；`grep dsh-watchdog`（logcat 或 `Documents/dshdata/log/dsh-日期.log`，需开发者日志开）；熔断态 grep `watchdog circuit open`，半死态 grep `DEGRADED_HTTP` 与 `DEGRADED_HTTP 连续`。 |
 | 3. 端口被占 / 双引擎 | K02 | grep `killExistingEngine: port 3080 still occupied`；设备侧 `adb shell "ps -A | grep -E 'linker|node'"`（进程名是 linker64 不是 node，坑 31）。 |
 | 4. 页面白屏但端口在 | K02 | `adb forward tcp:23080 tcp:3080` 后 `curl -i http://127.0.0.1:23080/`（200/401 都算活）；grep `DEGRADED_LOG` 与 `plugin tree failed to load`（后者只判不重启）。 |
-| 5. 诊断包找不到 | K02 | `mirrorDiagnosticsToShared` 无 All Files Access 时回落私有目录，界面按实际路径回填（`EngineStartFlow.kt:778#expect=activity.guideRenderer.progressText.visibility%20%3D%20View.GONE`）；`adb shell run-as com.dsharnessmobile.shell ls files/diagnostics`。 |
+| 5. 诊断包找不到 | K02 | `mirrorDiagnosticsToShared` 无 All Files Access 时回落私有目录，界面按实际路径回填（`EngineStartFlow.kt:781#expect=activity.guideRenderer.progressText.visibility%20%3D%20View.GONE`）；`adb shell run-as com.dsharnessmobile.shell ls files/diagnostics`。 |
 | 1. 启动长期停在「正在更新运行时」或每次开机都重解压：`adb -s <serial> shell run-as com.dsharnessmobile.shell ls -la files/ | grep -E "snapshot|usr-old|update"`；`... cat files/.snapshot-transaction`（看 `phase=` 与 `moved=` 条目）；logcat grep `dsh-engine|dsh-snap`，失败真因在 `files/boot-fail.log` 的 `dsh-boot-fail stage=snapshot-refresh-failed` 行（`error=` / `cause=`），镜像副本在 `Documents/dshdata/diagnostics/snapshot-refresh-failed-*`。 | K03 | （待补） |
 | 2. 报「运行时更新失败（诊断已保存）」但看不到原因：`grep -E "存储空间不足|Directory not empty|InsufficientSpace" files/boot-fail.log`；空间类真因只落在 cause 里（UI 文案是通用的），`df /data` 对账；`Directory not empty` 类看 `~/.failed-<ts>` 残渣是否在场。 | K03 | （待补） |
 | 3. 插件列表在、点开不可用（0.14.0 实报形态）：`grep -n "disabled: true" files/home/.dsh/profiles/web/cordis.patch.yml`；查 `files/.profile-patch-repair-<版本名>` 标记是否已写（没写=上次启动修复失败，下轮重试）；对照 `files/home/.dsh/profiles/web/?` 的 node_modules 是否半合并（1/10 形态）。 | K03 | （待补） |
@@ -785,9 +785,9 @@ Terminal output delivery (#591): `ConsoleSession` sends stripped PTY text throug
   - **不变量 2c（拒绝必须按真实原因分档，不得笼统报忙）**：`start()`（`:394`）三档 —— 无待装新版回 `no-pending`（`:396`）、
     真有在途动作回 `busy`（`:398`）、其余（failed/up-to-date 等）回 `not-available`（`:399`）。
     旧实现只要 `currentResult` 非空就回 `busy`，这正是上述死循环的用户可见形态。
-    **例外（显式化，勿误以为全线都有兜底）**：快照联调路径 `runUpdate`（`EngineStartFlow.kt:1249#expect=*%20%E7%BB%AD%E8%B7%91%E4%B8%80%E6%AC%A1%EF%BC%8C%E5%8F%88%E6%92%9E%E5%9B%9E%20L700`）**无超时兜底**；
+    **例外（显式化，勿误以为全线都有兜底）**：快照联调路径 `runUpdate`（`EngineStartFlow.kt:1252#expect=*%20%E7%BB%AD%E8%B7%91%E4%B8%80%E6%AC%A1%EF%BC%8C%E5%8F%88%E6%92%9E%E5%9B%9E%20L700`）**无超时兜底**；
     它的 adb 显式 intent 触发入口**已随 #682 移除**（`ACTION_UPDATE` 的处理分支直接删除：导出的 launcher Activity 无法区分「adb 联调」与「任意第三方应用」，两者走的是同一条显式组件 intent，故收口；`runUpdate` 定义保留在 `EngineStartFlow.kt`，但当前无任何外部 intent 入口）；
-    回执守卫在 `EngineStartFlow.kt:1256#expect=override%20fun%20run()%20%7B`，代次作废即静默丢弃回执、不落终态。见 `docs/AGENTS/known-gaps.md`。
+    回执守卫在 `EngineStartFlow.kt:1259#expect=override%20fun%20run()%20%7B`，代次作废即静默丢弃回执、不落终态。见 `docs/AGENTS/known-gaps.md`。
     
     > **补记（#1028）：为什么不能把 `#773` 分支的文档整份合进 main**
     > 本轮恢复这句时试过三条路，都被门禁当场挡下，记录以免后来者重走：
@@ -799,7 +799,7 @@ Terminal output delivery (#591): `ConsoleSession` sends stripped PTY text throug
     > 锚点全部沿用 main 现有形态（新增引用必须带 `#expect=<行内容前缀>`）。
   - **不变量 3（不碰共享页面桥对象）**：壳侧对 `window.__dshBridge` 写入面 = 0。
     反例锚点 `UpdateCheckerTest.kt:426`（`updatePathNeverTouchesTheSharedPageBridgeObject`）。
-  - **快照链已下线**：`startUpdateCheck` 无任何调用点（定义保留于 `EngineStartFlow.kt:549`，两个测试按该签名切片，不得当死代码删除）。
+  - **快照链已下线**：`startUpdateCheck` 无任何调用点（定义保留于 `EngineStartFlow.kt:552#expect=Thread%20%7B%20activity.engineManager.mirrorDiagnosticsToShared(%22startup-retries-exhausted%22)%20%7D`，两个测试按该签名切片，不得当死代码删除）。
 
 #### K04 桥与控制协议面
 
