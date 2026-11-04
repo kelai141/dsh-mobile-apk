@@ -1518,11 +1518,27 @@ export class ComposerSheet {
   }
 
   /** 起手只记录，不判定归属（8px 方向锁在 move 里）。 */
+  /** 本次拖拽所属的手指（issue #1379）；`null` = 尚未起手。 */
+  private dragTouchId: number | null = null
+
+  /** 取起手那根手指；没有记录时退回 `touches[0]`（单指场景与旧行为一致）。 */
+  private trackedTouch(event: TouchEvent): Touch | undefined {
+    const list = event.touches
+    if (this.dragTouchId === null) return list[0]
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].identifier === this.dragTouchId) return list[i]
+    }
+    return undefined
+  }
+
   private readonly onSheetTouchStart = (event: TouchEvent): void => {
     if (!this.isSheetForm() || this.drag !== null) return
     const panel = this.panel()
     const touch = event.touches[0]
     if (panel === null || touch === undefined) return
+    // issue #1379：记住这次拖拽属于哪根手指——多指时 `touches[0]` 会换指，
+    // clientY 随之跳变；抬起别的手指也不该触发结算。
+    this.dragTouchId = touch.identifier
     // 新一次拖拽：先丢弃上一轮的几何缓存，再让本次拖拽自己付第一次读。
     this.invalidateDragGeometry()
     const height = this.currentHeight()
@@ -1548,7 +1564,8 @@ export class ComposerSheet {
   private readonly onSheetTouchMove = (event: TouchEvent): void => {
     const drag = this.drag
     const panel = this.panel()
-    const touch = event.touches[0]
+    // issue #1379：只跟起手那根手指；它已抬起（或被换出列表）时不再用别的手指续拖。
+    const touch = this.trackedTouch(event)
     if (drag === null || panel === null || touch === undefined) return
     const rows = panel.querySelector<HTMLElement>('[' + ROWS_ATTR + ']')
     const dy = touch.clientY - drag.startY
@@ -1633,9 +1650,12 @@ export class ComposerSheet {
    *
    * 阈值是**卡片高度的比例**而不是固定像素：peek 随内容变高，阈值必须跟着变。
    */
-  private readonly onSheetTouchEnd = (): void => {
+  private readonly onSheetTouchEnd = (event: TouchEvent): void => {
+    // issue #1379：抬起的是**别的手指**时不能结算——起手那根还在 event.touches 里。
+    if (this.trackedTouch(event) !== undefined) return
     const drag = this.drag
     this.drag = null
+    this.dragTouchId = null
     if (drag === null || drag.owner !== 'sheet') return
     this.panel()?.removeAttribute(DRAGGING_ATTR)
     const peek = this.peekHeight()
