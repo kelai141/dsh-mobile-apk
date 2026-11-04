@@ -44,13 +44,28 @@ internal class FunctionalProbeCache(
   private val ttlMs: Long = FunctionalProbeCache.DEFAULT_TTL_MS,
   private val clock: () -> Long,
 ) {
-  /** 真正发起过多少次探测（判据用它做**计数断言**，而不是看源码）。 */
-  var probeCalls: Int = 0
-    private set
+  /**
+   * 真正发起过多少次探测（判据用它做**计数断言**，而不是看源码）。
+   *
+   * issue #1512：原来是裸 `var`，`probeCalls += 1` 在多线程下会丢计数；改原子量。
+   */
+  private val calls = java.util.concurrent.atomic.AtomicInteger(0)
+  val probeCalls: Int get() = calls.get()
 
+  /**
+   * 最近一次快照。
+   *
+   * issue #1512：由探测线程写、`status()` 的调用线程读，**必须 `@Volatile`**——
+   * 否则弱内存下读侧可能长期看到 `probed=false`（表现为面板永久 `shizuku-probe-pending`
+   * 且每轮都重新 kick，把 binder 反复打）。
+   */
+  @Volatile
   private var snapshot = FunctionalProbeSnapshot(
     probed = false, ok = false, protocolVersion = -1, error = "", atMs = 0L,
   )
+
+  /** 单飞锁：`shouldProbe` 判断与写回必须是同一个原子区，否则两路都看到过期就都会打 binder。 */
+  private val probeLock = Any()
 
   /** 最近一次快照（不触发探测）。 */
   fun current(): FunctionalProbeSnapshot = snapshot
@@ -68,9 +83,10 @@ internal class FunctionalProbeCache(
    * @param run 真正打 binder 的探测（返回协议版本；抛异常表示失败）。
    * @returns 探测后的快照。
    */
-  fun probeIfNeeded(run: () -> Int, now: Long = clock()): FunctionalProbeSnapshot {
+  fun probeIfNeeded(run: () -> Int, now: Long = clock()): FunctionalProbeSnapshot = synchronized(probeLock) {
+    // 读侧（current/isFresh）**不加锁**、只读 @Volatile 快照；锁只保护「判断 + 写回」这段。
     if (!shouldProbe(now)) return snapshot
-    probeCalls += 1
+    calls.incrementAndGet()
     snapshot = try {
       val pv = run()
       FunctionalProbeSnapshot(probed = true, ok = true, protocolVersion = pv, error = "", atMs = now)
@@ -80,7 +96,7 @@ internal class FunctionalProbeCache(
         error = t.javaClass.simpleName + ": " + (t.message ?: ""), atMs = now,
       )
     }
-    return snapshot
+    snapshot
   }
 
   companion object {
