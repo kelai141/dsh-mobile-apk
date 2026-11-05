@@ -361,7 +361,11 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
     name: 'linux_environment_status',
     description: '查看 Linux 运行时是否正在启动、已就绪、未安装或失败。DSH 可先提供对话，Debian 在后台恢复；Linux 工具未出现时先查看此状态，不猜路径、不回退宿主 shell。',
     parameters: {},
-    output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
+    output: { schema: { type: 'object', additionalProperties: false,
+      properties: {
+        phase: { type: 'string', required: true, enum: ['starting', 'ready', 'not-installed', 'disabled', 'failed', 'stopping', 'stopped'] },
+        ready: { type: 'boolean', required: true }, engine: { type: 'string', required: true, enum: ['dsh'] }, message: { type: 'string', required: true },
+      } }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
     execute: async () => lifecycle.snapshot(),
   }))
   if (typeof ctx.inject === 'function') ctx.inject(['systemPrompt'], scope => {

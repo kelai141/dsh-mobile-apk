@@ -26,7 +26,7 @@ export function createLinuxLifecycle() {
     }
   }
   return {
-    snapshot: () => ({ phase, ready: phase === 'ready', engine: 'dsh', message: detail }),
+    snapshot: () => ({ phase, ready: phase === 'ready', engine: 'dsh' as const, message: detail }),
     async attach(bootstrap: LinuxBootstrap) {
       if (terminal()) return
       // status() can wait for restore; never await it from the parent apply or a tool call.
