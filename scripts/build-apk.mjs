@@ -108,6 +108,7 @@ const GATE_SCRIPTS = [
   'check-state-registry.mjs',
   'check-bridge-symmetry.mjs',
   'check-gate-skips.mjs',
+  'check-workflow-input-injection.mjs',
   'check-engine-overlay.mjs',
   'check-patch-mounts.mjs',
   // profile 层共享依赖解析（0.15.x）：vendored 订阅插件把 undici 声明为 peer，靠 profile 共享农场的
@@ -311,6 +312,7 @@ try {
   run('node', [gate('check-bridge-symmetry.mjs')])
   log('门禁：门禁覆盖清单与 SKIP 纪律…')
   run('node', [gate('check-gate-skips.mjs')])
+  run('node', [gate('check-workflow-input-injection.mjs')])
   log('门禁：引擎 overlay 抽验…')
   run('node', [gate('check-engine-overlay.mjs'), snapSrc])
 

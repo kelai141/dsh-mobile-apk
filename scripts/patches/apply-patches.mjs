@@ -41,6 +41,8 @@ import { replaceAtMostOnce, replaceAtMostOnceRe, replaceOnce, replaceOnceRe } fr
 import { hasCustomEndpointDiscovery, patchCustomEndpointDiscovery } from './data/custom-endpoint-discovery-960.mjs'
 import { hasCustomFirstModelRow, patchCustomFirstModelRow } from './data/custom-first-model-row-960.mjs'
 import { hasModelCatalogSectionLabels, patchModelCatalogSectionLabels } from './data/model-catalog-section-labels-960.mjs'
+/* issue #1582：移除类补丁的**肯定式**判据（marker 在场 = 真的删过），见该模块头注释。 */
+import { REMOVAL_MARKERS, removalApplied } from './lib/removal-seam.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const registry = JSON.parse(readFileSync(join(HERE, 'registry.json'), 'utf8'))
@@ -883,8 +885,9 @@ const IMPLS = {
 
   // ── dsh-undo-savepoint E1-E7（0.3.8 移动端裁剪，字节级锚点）──
   'undo-E1': {    file: 'dsh-undo-savepoint/lib/client.js',
-    // 移除类：标记不存在 = 已应用
-    check: (s) => !s.includes('size: 14 }), t("snapshots")]'),
+    // 移除类：**肯定式**判据——marker 在场 = 真的删过（issue #1582）。
+    // 旧写法是 !s.includes(被删原文)：上游改了那段形态就恒真，补丁一次都不跑却报「已应用」。
+    check: (s) => removalApplied(s, 'undo-E1'),
     apply: (s) => {
       const iAnchor = s.indexOf('className: styles.btn + " " + styles.undo,')
       const iStart = s.lastIndexOf('(0, react_jsx_runtime.jsx)("button", {', iAnchor)
@@ -894,63 +897,68 @@ const IMPLS = {
       const iStat = s.indexOf('\t\t\t\t\tstat !== null', iSnap)
       const iEnd = s.lastIndexOf('}),', iStat) + 3
       if (iAnchor < 0 || iStart < 0 || iSnap < 0 || iStat < 0 || iEnd < 3) throw new Error('E1 锚点缺失')
-      return s.slice(0, iStart) + s.slice(iEnd)
+      return s.slice(0, iStart) + REMOVAL_MARKERS['undo-E1'] + s.slice(iEnd)
     },
   },
   'undo-E2': {
     file: 'dsh-undo-savepoint/lib/client.js',
-    check: (s) => !s.includes('//#region KeyBindRow (settings.general.item)'),
+    // 移除类：肯定式（marker 在场 = 真的删过），见 lib/removal-seam.mjs 头注释。
+    check: (s) => removalApplied(s, 'undo-E2'),
     apply: (s) => {
       const iStart = s.indexOf('//#region KeyBindRow (settings.general.item)')
       if (iStart < 0) throw new Error('E2 起点缺失')
       const iEnd = s.indexOf('//#endregion', iStart)
       if (iEnd < 0) throw new Error('E2 终点缺失')
       const after = s.indexOf('\n', iEnd)
-      return s.slice(0, iStart) + s.slice(after + 1)
+      return s.slice(0, iStart) + REMOVAL_MARKERS['undo-E2'] + s.slice(after + 1)
     },
   },
   'undo-E3': {
     file: 'dsh-undo-savepoint/lib/client.js',
-    check: (s) => !s.includes('}, KeyBindRow)));'),
+    // 移除类：肯定式（marker 在场 = 真的删过），见 lib/removal-seam.mjs 头注释。
+    check: (s) => removalApplied(s, 'undo-E3'),
     apply: (s) => {
       const iStart = s.indexOf('// Custom shortcut settings row (General settings)')
       const iEnd = s.indexOf('}, KeyBindRow)));', iStart)
       if (iStart < 0 || iEnd < 0) throw new Error('E3 锚点缺失')
       const after = s.indexOf('\n', iEnd)
-      return s.slice(0, iStart) + s.slice(after + 1)
+      return s.slice(0, iStart) + REMOVAL_MARKERS['undo-E3'] + s.slice(after + 1)
     },
   },
   'undo-E4': {
     file: 'dsh-undo-savepoint/lib/client.js',
-    check: (s) => !s.includes('"dsh-undo-savepoint: keyboard"'),
+    // 移除类：肯定式（marker 在场 = 真的删过），见 lib/removal-seam.mjs 头注释。
+    check: (s) => removalApplied(s, 'undo-E4'),
     apply: (s) => {
       const iStart = s.indexOf('// Global keyboard shortcuts')
       const iEnd = s.indexOf('"dsh-undo-savepoint: keyboard"', iStart)
       if (iStart < 0 || iEnd < 0) throw new Error('E4 锚点缺失')
       const after = s.indexOf('\n', iEnd)
-      return s.slice(0, iStart) + s.slice(after + 1)
+      return s.slice(0, iStart) + REMOVAL_MARKERS['undo-E4'] + s.slice(after + 1)
     },
   },
   'undo-E5': {
     file: 'dsh-undo-savepoint/lib/client.js',
-    check: (s) => !s.includes('exports.KeyBindRow'),
+    // 移除类：肯定式（marker 在场 = 真的删过），见 lib/removal-seam.mjs 头注释。
+    check: (s) => removalApplied(s, 'undo-E5'),
     apply: (s) => {
       const iStart = s.indexOf('exports.KeyBindRow')
       if (iStart < 0) throw new Error('E5 锚点缺失')
       const after = s.indexOf('\n', iStart)
-      return s.slice(0, iStart) + s.slice(after + 1)
+      return s.slice(0, iStart) + REMOVAL_MARKERS['undo-E5'] + s.slice(after + 1)
     },
   },
   'undo-E6': {
     file: 'dsh-undo-savepoint/lib/client.js',
-    check: (s) => !s.includes('relativeTime(stat.latest, t) || ""'),
+    // 移除类：肯定式（marker 在场 = 真的删过），见 lib/removal-seam.mjs 头注释。
+    check: (s) => removalApplied(s, 'undo-E6'),
     apply: (s) => {
       const anchor = '\t\t\t\t\t\t\tstat.latest ? " · " + (relativeTime(stat.latest, t) || "") : ""'
       const a = s.indexOf(anchor)
       if (a < 0) throw new Error('E6 锚点缺失')
       const lineStart = s.lastIndexOf('\n', a)
       const lineEnd = s.indexOf('\n', a)
-      return s.slice(0, lineStart) + s.slice(lineEnd)
+      return s.slice(0, lineStart) + REMOVAL_MARKERS['undo-E6'] + s.slice(lineEnd)
     },
   },
   'undo-E7': {
