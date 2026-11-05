@@ -64,7 +64,14 @@ const argv = process.argv.slice(2)
 const has = (f) => argv.includes('--' + f)
 const argOf = (f, d = null) => { const i = argv.indexOf('--' + f); return i >= 0 ? (argv[i + 1] ?? d) : d }
 
-const TARGET_LOW = 'chrome87'   // 语法下限（纸面基线：Android 10 / Chromium 87，且唯一在案老内核 = 87.0.4280.101）
+// 语法下限。**不是 chrome87**：实测 esbuild 在 chrome87 目标下**不降类字段**（`x = new Map()` 原样保留），
+// 而类实例字段是 ES2022 语法，真机 Chromium 87 解析期就抛 SyntaxError —— 正是本门要防的形态。
+// 本文件第 24-27 行早已如实标注该边界（「不降 nullish-coalescing / logical-assignment / 类字段 /
+// 私有成员 / 对象展开」），但当时的结论只是「标注边界」，没有换目标，于是门禁自身在类字段上漏判。
+// 改用 es2021：这是 Chromium 87 对应的 ECMAScript 档位（ES2021），且 esbuild 在该档位**确实降**类字段
+// 与私有成员（实测 __publicField / __privateAdd）。口径因此从「不低于 esbuild 的 chrome87 表」
+// 收紧到「不低于 ES2021」——比 MDN 意义的逐特性 Chromium 87 仍然保守（不会放过真机解析不了的东西）。
+const TARGET_LOW = 'es2021'
 const TARGET_HIGH = 'esnext'    // 对照臂（当前出厂口径）
 const ESBUILD_PIN = '0.25.12'   // 判据 2 的口径锁：兼容表随版本变，故显式钉住
 /**
@@ -661,7 +668,10 @@ if (has('self-test')) {
   for (const rel of [FE, CB, HOME_CB]) mkdirSync(join(root, rel.split('/').join(sep)), { recursive: true })
 
   // 用例 1：真代码（类静态块 + 可选链）—— 两条判据都必须报
-  const realCode = 'export class A {\n  static { this.x = 1 }\n  static is(v) { return v?.y }\n}\nexport const z = A.is?.length\n'
+  // 夹具必须含**在 TARGET_LOW 下真的会被降级**的语法，否则判据 2 空转（改成 es2021 后 `?.`
+  // 属于 ES2020、不再降级，原来的夹具因此失效——这正是「换目标必须同步换夹具」的地方）。
+  // 现在同时含：类静态块（ES2022）、类实例字段（ES2022）、类静态字段（ES2022）、私有字段（ES2022）。
+  const realCode = 'export class A {\n  static { this.x = 1 }\n  rows = new Map()\n  static EMPTY = 0\n  #secret = 1\n  static is(v) { return v?.y }\n}\nexport const z = A.is?.length\n'
   writeFileSync(absOf(root, FE + '/index-fixture.js'), realCode)
   // 用例 2/3/4：字符串 / 模板串 / 注释内的同类文本，且**不含任何现代语法**——两条判据都不得触发（载荷对照）。
   // 关键：文档里 grep 会把这三种载荷全部误报成语法；本门禁必须一个都不报。
@@ -669,8 +679,10 @@ if (has('self-test')) {
     + 'export const b = `class B { static { this.y = 2 } }`\n'
     + '// class C { static { this.z = 3 } }\nexport const c = a.length\n'
   writeFileSync(absOf(root, CB + '/client.js'), payload)
-  // 对照件：只有真 `?.`（无类静态块）—— 判据 1 必须静默、判据 2 必须命中（证明判据 2 不是靠静态块才有输出）
-  writeFileSync(absOf(root, HOME_CB + '/client.js'), 'export const opt = (o) => o?.x?.y\nexport const n = opt.length\n')
+  // 对照件：只有类实例字段（无类静态块）—— 判据 1 必须静默、判据 2 必须命中。
+  // 这证明判据 2 不是「只有含 static{} 才有输出」；换成 es2021 后 `?.` 不再触发差分，
+  // 故用类字段作为承重语法（它在 TARGET_LOW 下确实降级，在 TARGET_HIGH 下保留）。
+  writeFileSync(absOf(root, HOME_CB + '/client.js'), 'export class Opt {\n  rows = new Map()\n}\nexport const n = Opt.length\n')
 
   const t0 = Date.now()
   const reverse = spawnSelf(['--scan', root])                 // 反向对照：未降级必须判红
@@ -925,11 +937,45 @@ if (has('self-test')) {
       console.log('  真实产物读数: ' + x.rel + ' → AST 违规文件 ' + x.astBad + '（staticBlocks ' + x.staticTotal
         + '）/ 差分命中 ' + x.diffHits + '/' + x.total)
     }
-    check('⑦ 真实出厂产物反向对照（默认启用，未降级产物必须判红）', redDemonstrated !== null,
+    // ── 产物全绿时的补充反向对照（0.2.2-rc.1 适配补）──────────────────────
+    // 背景：降级步骤一旦真的生效，本机所有产物都会判绿，于是「未降级产物必须判红」这条
+    // 就再也演示不出来了——但**判据本身仍然有效**，缺的只是「一份未降级输入」。
+    // 早先的处置是让自检判红并要求外部提供 release/** 产物，结果是：本地永远红、
+    // CI 因裸 clone 没有产物而 SKIP —— 两头都拿不到证据，这条判据实际处于失效状态。
+    // 改法：从在场产物里取一个真实浏览器面文件，**注入一段真 static{}**（模拟降级前形态），
+    // 再跑同一套判据，必须判红。这比依赖外部历史产物更可靠：它不依赖任何人记得留档，
+    // 而且注入点是真实产物字节，不是合成 fixture（合成 fixture 已在 ② 里覆盖）。
+    let injectedDemonstrated = null
+    if (redDemonstrated === null && present.length > 0) {
+      const source = present[0]
+      const mat = materialize(source)
+      try {
+        const target = mat.rels.find((rel) => /lib\/client\.js$/.test(rel)) ?? mat.rels[0]
+        if (target !== undefined) {
+          const abs = join(mat.root, target.split('/').join(sep))
+          const original = readFileSync(abs, 'utf8')
+          // 注入点选在文件末尾之前，保证语法完整：一个带 static 块的类声明。
+          writeFileSync(abs, original + '\nclass __SyntaxFloorReverseProbe { static { this.x = 1 } }\n')
+          const r = await runScan(mat.root, mat.rels)
+          const rel = (source.startsWith(ROOT) ? source.slice(ROOT.length + 1).replace(/\\/g, '/') : source)
+          console.log('  注入式反向对照: ' + rel + ' 的 ' + target + ' 注入真 static{} → AST 违规文件 '
+            + r.astBad + '（staticBlocks ' + r.staticTotal + '）/ 差分命中 ' + r.diffHits + '/' + r.total)
+          if (r.astBad > 0 && r.diffHits > 0) {
+            injectedDemonstrated = { rel, target, astBad: r.astBad, diffHits: r.diffHits }
+          }
+        }
+      } finally {
+        mat.cleanup()
+      }
+    }
+    check('⑦ 真实出厂产物反向对照（默认启用，未降级产物必须判红）',
+      redDemonstrated !== null || injectedDemonstrated !== null,
       redDemonstrated
         ? '未降级产物=' + redDemonstrated.rel + '（astBad=' + redDemonstrated.astBad + ' diffHits=' + redDemonstrated.diffHits + '）'
-        : '在场的 ' + readings.length + ' 个产物**全部判绿**（都已降级）——无法演示反向对照；'
-          + '请提供一份降级前产物（release/** 已发布快照），否则本条形同虚设')
+        : injectedDemonstrated
+          ? '注入式=' + injectedDemonstrated.rel + ' / ' + injectedDemonstrated.target
+            + '（astBad=' + injectedDemonstrated.astBad + ' diffHits=' + injectedDemonstrated.diffHits + '）'
+          : '在场的 ' + readings.length + ' 个产物全部判绿（都已降级），且注入式对照也没能判红——本判据失效')
   }
 
   rmSync(tmp, { recursive: true, force: true })

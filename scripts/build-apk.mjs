@@ -143,6 +143,7 @@ const GATE_SCRIPTS = [
   'check-snapshot-builder-output.mjs',
   // 浏览器语法下限（0.14.1 块C G-1）：与本地链同一份实现（差集必须为 0）。
   'check-browser-syntax-floor.mjs',
+  'check-browser-parse-floor.mjs',
   // 构建并发上限（0.14.1 系统级约束）：不得吃满全部逻辑核（MuMu 模拟器/系统稳定）。
   'check-build-parallel-cap.mjs',
   // Kotlin 单测数量反回归（0.14.1 P0）：CI 不跑 Kotlin 单测 + 只按退出码判 = 防线删失仍绿。
@@ -422,6 +423,11 @@ try {
   // → 纯白无字。判据 = 真实解析器 AST + esbuild 双 arm 逐字节差分（禁 grep），扫全清单。
   log('门禁：浏览器语法下限（AST + 双 arm 差分）…')
   run('node', [gate('check-browser-syntax-floor.mjs'), '--scan', snapIn])
+  // 同一条产物的第二个方向的证据（0.2.2-rc.1 适配补）：上面那门的判据 2 只证明「不低于 esbuild 的
+  // 口径」，而 esbuild 在 chrome87 下不降类字段（门自己标注过这个边界）。这里用真解析器按 ES2021
+  // 档位逐文件 parse——解析失败即老内核解析期抛 SyntaxError、整模块一行不执行。
+  log('门禁：浏览器 ES2021 可解析…')
+  run('node', [gate('check-browser-parse-floor.mjs'), '--scan', snapIn])
   // 快照包名一致性（2026-10-27，issue #154 / apk #480 第 1 条）：注入进各装配 profile 的
   // cordis.patch.yml 里，shell 路径（bashPath/prefix/home/cwd）必须与 app/build.gradle.kts 的
   // applicationId 同源。改包名时漏改 patch，APK 装得上但引擎起不来（路径指向不存在的
