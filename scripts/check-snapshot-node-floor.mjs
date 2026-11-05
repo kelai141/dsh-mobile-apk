@@ -34,7 +34,7 @@
 //       node scripts/check-snapshot-node-floor.mjs --self-test
 // 退出码：0 通过；1 判定失败；2 布局/形态不可解析
 import { createHash } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -116,6 +116,18 @@ export function evaluate(input) {
       if (!Number.isInteger(rec.bytes) || rec.bytes <= 0) { problems.push(abi + ': bytes 必须是正整数'); continue }
       const st = input.statOf(rec.file)
       if (!st.exists) { problems.push(abi + ': 基座归档不存在 ' + rec.file); continue }
+      // Git LFS 指针不是基座归档：裸 clone / CI 没拉 LFS 时，base/*.tar.xz 只有一百多字节的
+      // 文本指针。此时「字节数与记录不一致」是**无法判定**，不是「换了基座却没更新取证」——
+      // 把两者混成 exit 1 会让 CI 永远红，而人看不出该改什么（真因是归档没拉到，不是数字过期）。
+      // 判据取向：读得出来就按 pointer 判 exit 2；读不出来（二进制）就走正常字节比对。
+      if (st.bytes > 0 && st.bytes < 1024) {
+        const head = input.peekOf ? input.peekOf(rec.file, 200) : ''
+        if (/^version https:\/\/git-lfs\.github\.com\/spec\/v1/m.test(head)) {
+          problems.push(abi + ': ' + rec.file + ' 是 Git LFS 指针（' + st.bytes + ' B），不是基座归档'
+            + '——先 `git lfs pull --include=base/` 或改走带 LFS 的检出；本门本轮未做任何版本判定')
+          continue
+        }
+      }
       if (st.bytes !== rec.bytes) {
         failures.push(abi + ': ' + rec.file + ' 字节数 ' + st.bytes + ' 与记录 ' + rec.bytes + ' 不一致（换了基座却没更新取证？）')
         continue
@@ -155,6 +167,14 @@ function report(root, full) {
       return existsSync(p) ? { exists: true, bytes: statSync(p).size } : { exists: false, bytes: 0 }
     },
     hashOf: (rel) => sha256File(join(root, rel)),
+    // 只读前 n 字节：够判 LFS 指针头，不必把可能的几十 MB 归档整个读进来。
+    peekOf: (rel, n) => {
+      const p = join(root, rel)
+      if (!existsSync(p)) return ''
+      const fd = openSync(p, 'r')
+      try { const buf = Buffer.alloc(n); const read = readSync(fd, buf, 0, n, 0); return buf.subarray(0, read).toString('utf8') }
+      finally { closeSync(fd) }
+    },
   })
   for (const i of result.infos) console.log('INFO  ' + i)
   for (const f of result.failures) console.error('FAIL  ' + f)
@@ -188,6 +208,7 @@ function selfTest() {
     enginesNode, evidence, full: !!(opts && opts.full),
     statOf: (rel) => (opts && opts.statOf ? opts.statOf(rel) : fixed[rel] || { exists: false, bytes: 0 }),
     hashOf: () => 'f'.repeat(64),
+    peekOf: (opts && opts.peekOf) ? opts.peekOf : () => '',
   })
   try {
     t('正控：24.18.0 >= 24.9.0 -> exit 0', exitCodeOf(run('>=24.9.0', ev('24.18.0'))) === 0)
@@ -201,6 +222,18 @@ function selfTest() {
     t('布局：baseTarballs 缺失 -> exit 2', exitCodeOf(run('>=24.9.0', { nodeVersion: '24.18.0' })) === 2)
     t('布局：基座归档缺失 -> exit 2', exitCodeOf(run('>=24.9.0', ev('24.18.0'), { statOf: () => ({ exists: false, bytes: 0 }) })) === 2)
     t('负控：基座字节数变化 -> exit 1', exitCodeOf(run('>=24.9.0', ev('24.18.0'), { statOf: () => ({ exists: true, bytes: 999 }) })) === 1)
+    // LFS 指针不是「字节漂移」：裸 clone / 未拉 LFS 时 base/*.tar.xz 只有指针，此时门禁没有
+    // 任何可判的版本信息，必须 exit 2（无法判定），而不是 exit 1（判据不成立）——两者修法完全不同。
+    t('形态：基座是 Git LFS 指针 -> exit 2（无法判定，不冒充字节漂移）',
+      exitCodeOf(run('>=24.9.0', ev('24.18.0'), {
+        statOf: () => ({ exists: true, bytes: 133 }),
+        peekOf: () => 'version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 80933336\n',
+      })) === 2)
+    t('正控：小文件但不是 LFS 指针 -> 仍按字节漂移判 exit 1',
+      exitCodeOf(run('>=24.9.0', ev('24.18.0'), {
+        statOf: () => ({ exists: true, bytes: 133 }),
+        peekOf: () => 'not an lfs pointer, just a small file',
+      })) === 1)
     t('--full：sha256 不一致 -> exit 1', exitCodeOf(run('>=24.9.0', ev('24.18.0', { baseTarballs: { x86_64: { file: 'a.tar.xz', bytes: 3, sha256: 'e'.repeat(64) } } }), { full: true })) === 1)
     t('--full：sha256 一致 -> exit 0', exitCodeOf(run('>=24.9.0', ev('24.18.0', { baseTarballs: { x86_64: { file: 'a.tar.xz', bytes: 3, sha256: 'f'.repeat(64) } } }), { full: true })) === 0)
   } finally {
