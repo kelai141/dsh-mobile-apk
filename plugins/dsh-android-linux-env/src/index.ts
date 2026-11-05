@@ -37,6 +37,7 @@ import {
 import { createLinuxBootstrapConfig } from './linux-host-asset-io.js'
 import { mountLinuxBootstrap, readLinuxManifest } from './linux-bootstrap-loader.js'
 import { createLinuxLifecycle, onEngineShutdown } from './linux-lifecycle.js'
+import { LINUX_TOOL_GUIDANCE, registerLinuxToolContract } from './linux-tool-contract.js'
 
 export const name = 'dsh-android-linux-env'
 export const inject = ['tools', 'webServer', 'androidPrivilege'] as const
@@ -354,9 +355,10 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
     execute: async () => lifecycle.snapshot(),
   }))
   if (typeof ctx.inject === 'function') ctx.inject(['systemPrompt'], scope => {
+    registerLinuxToolContract(scope)
     const prompt = serviceOf<{ context(input: unknown): () => void }>(scope, 'systemPrompt')
     scope.effect(() => prompt!.context({ name: 'android-linux-lifecycle', order: 90, required: true, interpolate: false,
-      text: () => lifecycle.snapshot().message }))
+      text: () => lifecycle.snapshot().message + '\n' + LINUX_TOOL_GUIDANCE }))
   })
   // 授权档位权威 = bridge 服务（androidPrivilege，patch 顺序 bridge 先于本插件）
   const svc = (ctx as unknown as { androidPrivilege?: { status(): { tier: string } } }).androidPrivilege

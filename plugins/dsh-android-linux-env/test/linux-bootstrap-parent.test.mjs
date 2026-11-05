@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { Context } from '@deepseek-ai/cordis'
 import * as host from '../lib/index.js'
-import ToolRuntime from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 
 test('the actual host publishes bootstrap after its parent fiber activates', async t => {
@@ -16,6 +16,9 @@ test('the actual host publishes bootstrap after its parent fiber activates', asy
   const ctx = new Context()
   const prompt = new SystemPrompt(ctx, {})
   const tools = new ToolRuntime(ctx)
+  const hostBash = defineTool({ name: 'bash', description: 'Run shell command.', parameters: {},
+    output: { schema: { type: 'object', additionalProperties: true } }, execute: async () => ({ host: true }) })
+  tools.register(hostBash)
   const fibers = []
   ctx.on('internal/plugin', fiber => { fibers.push(fiber) })
   ctx.provide('webServer', { register: () => () => {} })
@@ -33,6 +36,15 @@ test('the actual host publishes bootstrap after its parent fiber activates', asy
     assert.ok(statusTool, 'status remains visible even when Debian is not installed')
     await new Promise(resolve => setTimeout(resolve, 20))
     const assembly = await prompt.assemble({})
+    const bash = assembly.tools.find(tool => tool.name === 'bash')
+    assert.match(bash.description, /Android\/Termux host, Bionic/)
+    assert.match(bash.description, /JDK\/Android SDK\/Gradle/)
+    assert.equal(tools.get('bash').execute, hostBash.execute, 'the host executor and policy are preserved')
+    const guidance = assembly.contexts.find(part => part.name === 'android-linux-lifecycle').text
+    assert.match(guidance, /cd\/export 不跨调用保留/)
+    assert.match(guidance, /共享 Android 内核/)
+    const repeated = await prompt.assemble({})
+    assert.equal(repeated.tools.find(tool => tool.name === 'bash').description, bash.description, 'assembly does not accumulate prefixes')
     assert.ok(assembly.contexts.some(part => part.name === 'android-linux-lifecycle' && /尚未安装/.test(part.text)), 'the model receives actual runtime state before a request')
   } finally {
     await ctx.fiber.dispose()

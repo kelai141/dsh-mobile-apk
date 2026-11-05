@@ -2515,4 +2515,7 @@ DSH 的父插件先激活，Linux bootstrap 在后台恢复。linux-lifecycle.ts
 <!-- COVERAGE
 app/src/main/java/com/dsharnessmobile/shell/OwnedEngineStop.kt
 plugins/dsh-android-linux-env/src/linux-lifecycle.ts
+plugins/dsh-android-linux-env/src/linux-tool-contract.ts
 -->
+
+`linux-tool-contract.ts` 在每轮 system-prompt/assemble 中补齐宿主 bash 的 Android/Termux 定义，不替换执行器或权限策略；required context 提供 Debian/宿主边界、共享工作区、内核/proc 语义与持续会话规则。Linux 工具本体的定义和输出环境标记由 Bionilux 仓的 linux-runtime 包维护。
