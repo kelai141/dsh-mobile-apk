@@ -453,6 +453,12 @@ foreach ($abi in @('arm64', 'x86_64')) {
         Write-Host "== 浏览器语法下限门禁（$abi）=="
         node (Join-Path $Root "scripts\check-browser-syntax-floor.mjs") --scan (Join-Path $work "snap-final2.tar.xz") 2>&1
         if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "发往浏览器的 bundle 携带未降级的 ES2022 语法（老内核白屏）"; continue }
+        # 同一条产物的**第二个方向**的证据（0.2.2-rc.1 适配补）：上面那门的判据 2 只证明「不低于
+        # esbuild 的口径」，而 esbuild 在 chrome87 下不降类字段（门自己标注过这个边界）。这里用真解析器
+        # 按 ES2021 档位逐文件 parse——解析失败即老内核解析期抛 SyntaxError、整模块一行不执行。
+        Write-Host "== 浏览器 ES2021 可解析判据（$abi）=="
+        node (Join-Path $Root "scripts\check-browser-parse-floor.mjs") --scan (Join-Path $work "snap-final2.tar.xz") 2>&1
+        if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "发往浏览器的 bundle 在 ES2021 档位下解析失败（老内核 SyntaxError）"; continue }
         # 注入源真源（2026-11-01）：降级副本被造出来了，但注入时用的是原始源——历史形态（PR #1272）。
         # 上面那道 --scan 判的是**产物内容是否合规**；当原始源恰好也合规时，两份字节都能过扫描，
         # 「注入源选错」在内容级看不出来。这里判的是**注入的是哪一份字节**：tar 内成员 sha256 必须

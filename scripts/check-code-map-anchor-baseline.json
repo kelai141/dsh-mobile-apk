@@ -2974,15 +2974,6 @@
     "scripts/check-bridge-symmetry.mjs:1": [
       "#!/usr/bin/env node"
     ],
-    "scripts/check-browser-syntax-floor.mjs:535": [
-      "problems.push(tag + ' 无法从降级调用行解析出 --stage 实参（判据失效，拒绝假绿）：' + degradeLine.l.trim())"
-    ],
-    "scripts/check-browser-syntax-floor.mjs:536": [
-      "} else {"
-    ],
-    "scripts/check-browser-syntax-floor.mjs:658": [
-      "'createSourceFile=' + (typeof ts.createSourceFile === 'function')"
-    ],
     "scripts/check-gate-skips.mjs:197": [
       "const resolveRepoPath = (rel) => {"
     ],
@@ -3261,6 +3252,15 @@
     ],
     "verify-webview-015.mjs:97": [
       ""
+    ],
+    "scripts/check-browser-syntax-floor.mjs:542": [
+      "problems.push(tag + ' 无法从降级调用行解析出 --stage 实参（判据失效，拒绝假绿）：' + degradeLine.l.trim())"
+    ],
+    "scripts/check-browser-syntax-floor.mjs:543": [
+      "} else {"
+    ],
+    "scripts/check-browser-syntax-floor.mjs:670": [
+      "'createSourceFile=' + (typeof ts.createSourceFile === 'function')"
     ]
   },
   "symbols": {
@@ -3404,9 +3404,9 @@
     "scripts/check-code-map.mjs#UNIVERSE@60d8a536": true,
     "scripts/check-contract.mjs#collectConsumedSlots@2c28ea38": true,
     "BrowserHost.kt#showPayload@bfaa29a3": true,
-    "app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#navigateOp@176d6443": true,
     "app/src/main/java/com/dsharnessmobile/shell/BrowserJsReplyGuard.kt#BrowserJsReplyGuard@41413f35": true,
     "app/src/main/java/com/dsharnessmobile/shell/ChooserAllowlist.kt#ChooserAllowlist@5f360fc5": true,
-    "app/src/main/java/com/dsharnessmobile/shell/RemoteProjectionPolicy.kt#RemoteProjectionPolicy@e85ab632": true
+    "app/src/main/java/com/dsharnessmobile/shell/RemoteProjectionPolicy.kt#RemoteProjectionPolicy@e85ab632": true,
+    "scripts/check-browser-syntax-floor.mjs#checkChainWiring@a979d3e8": true
   }
 }

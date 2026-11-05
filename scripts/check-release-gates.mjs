@@ -335,6 +335,9 @@ const REQUIRE_CAPABLE_GATES = new Set([
   'check-engine-heap-floor.mjs',
   'check-i18n-parity.mjs',
   'check-boot-budget.mjs',
+  // 0.2.2-rc.1 适配新增：工程侧 LFS 指针在普通档记 SKIP 计数，--require 档必须判红
+  // （发布链不得 SKIP：要么基座归档在场并逐字节核过，要么不发版）。
+  'check-snapshot-node-floor.mjs',
 ])
 const RELEASE_EXCLUDED = GATES.filter((g) => g.releaseSink === false)
 /**
