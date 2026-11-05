@@ -1608,8 +1608,25 @@ internal class BrowserHost(
     var navigationTarget: ControlTarget? = null
     val started = controlOnMain(captured) {
       val workspace = captured.workspace
-      val newTab = (wantsNewTab && requestedTabId == null) ||
-        (requestedTabId != null && !tabs.containsKey(requestedTabId))
+      // issue #1318：同 URL 的新开请求先按 workspace 口径规范化再查存活标签，命中就复用。
+      // 判定逻辑在 BrowserTabReuse（纯函数，JVM 单测钉住两个方向）；这里只负责接线。
+      // 注意：**不得**在 ensureSurface 之前调用 normalizeForWorkspace 做别的事——
+      // 该函数是「导航前解析目标 URL」的语义锚点，接线测试按 assertBefore 钉着它的位置。
+      val reusable = BrowserTabReuse.reusableTabId(
+        wantsNewTab = wantsNewTab,
+        requestedTabId = requestedTabId,
+        targetUrl = raw.takeIf { it.isNotBlank() }?.let { BrowserHostNavigationPolicy.normalize(
+          it, isolatedProfile = true, allowAnonymousEngineAccess = allowAnonymousEngineAccess,
+        ) },
+        existingTabs = tabs.values.map { it.id to it.url },
+      )
+      if (reusable != null) {
+        activeTabId = reusable
+        workspace.modelTabId = reusable
+        navigationTarget = ControlTarget(workspace, ensureTab(reusable))
+      }
+      val newTab = reusable == null && ((wantsNewTab && requestedTabId == null) ||
+        (requestedTabId != null && !tabs.containsKey(requestedTabId)))
       if (newTab && tabs.size >= MAX_TABS) {
         return@controlOnMain targetFailure(captured, "tab-limit")
           .put("guidance", "同时打开的页面已达上限（$MAX_TABS）；先 browser_close_tab 关掉不再需要的页。")

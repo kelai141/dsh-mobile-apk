@@ -592,7 +592,10 @@ export function splitCommandSegments(command: string): CommandSegments {
       if (ch === "'") {
         const end = text.indexOf("'", i + 1)
         if (end < 0) { unparsed = true; buf += text.slice(i); i = text.length; continue }
-        buf += text.slice(i, end + 1); i = end + 1; continue
+        // issue #1572：引号/替换结束后**词已经开始**（`echo ''#…` 里 `#` 是词内字面量，不是注释起点）。
+        // 这四处 continue 原先都不清 atWordStart，于是 `echo ''#; screencap …` 把后半行当注释吃掉、
+        // 真实屏命令整段不进 segments —— 判据看不见它。
+        buf += text.slice(i, end + 1); i = end + 1; atWordStart = false; continue
       }
       if (ch === '"') {
         let j = i + 1
@@ -619,7 +622,7 @@ export function splitCommandSegments(command: string): CommandSegments {
           j += 1
         }
         if (j >= text.length) { unparsed = true; buf += text.slice(i); i = text.length; continue }
-        buf += text.slice(i, j + 1); i = j + 1; continue
+        buf += text.slice(i, j + 1); i = j + 1; atWordStart = false; continue
       }
       if (ch === '`') {
         const end = backtickEnd(text, i + 1)
@@ -629,7 +632,8 @@ export function splitCommandSegments(command: string): CommandSegments {
         // 但**载荷位置**上的替换（`` sh -c \`cat f\` ``）等于整段脚本来自运行时，同样 fail-closed。
         if (buf.trim().length === 0 || PAYLOAD_SLOT_TAIL.test(buf)) unparsed = true
         scan(text.slice(i + 1, end), depth + 1)
-        buf += ' '; i = end + 1; continue
+        // issue #1572：替换结果占据当前词的位置，词已开始（见上方单引号分支注释）。
+        buf += ' '; i = end + 1; atWordStart = false; continue
       }
       if (ch === '$' && text[i + 1] === '(') {
         const end = parenEnd(text, i + 2)
@@ -638,7 +642,7 @@ export function splitCommandSegments(command: string): CommandSegments {
         // 「命令名来自运行时」⇒ 与 `sh /x.sh`（脚本文件）同档，fail-closed。
         if (buf.trim().length === 0 || PAYLOAD_SLOT_TAIL.test(buf)) unparsed = true
         scan(text.slice(i + 2, end), depth + 1)
-        buf += ' '; i = end + 1; continue
+        buf += ' '; i = end + 1; atWordStart = false; continue
       }
       // shell 注释：`#` 只有在**词首**才开注释。词首＝未转义、未引用的 ASCII 空白 / `;` / `&` / `|`
       // 之后（由 atWordStart 显式跟踪）——不能用「buf 末尾是 \s」判定：`echo\ #; screencap …` 里

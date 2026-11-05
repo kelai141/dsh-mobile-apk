@@ -9,7 +9,11 @@
  * 但引擎自带的 pi-ai 厂商目录**已声明**这些能力（thinkingLevelMap/input/compat），
  * 按精确模型 id 查表是「读厂商声明」而不是「按名字猜」。
  *
- * 输出：plugins/dsh-model-capability/lib/catalog-snapshot.json（随插件注入快照）。
+ * 输出：必须显式传 --out；不再有默认落点。
+ *   （历史默认落点是 plugins/dsh-model-capability/lib/catalog-snapshot.json，消费它的插件已于 0.14.8
+ *    整体退役，release.yml 的生成步骤与 build-snapshot-013.mjs 的生成块均已删除。本脚本保留只为追溯
+ *    生成逻辑；**故意不给默认 --out**，避免有人一跑就把已退役插件的目录树重新造出来。重新启用能力目录
+ *    产物前，先过 scripts/check-retired-plugins.mjs 并在 issue 里登记 provenance。）
  * 可复现：generatedAt 取 SOURCE_DATE_EPOCH（默认 1704067200），内容相同的两次生成字节一致。
  *
  * 用法：node scripts/gen-model-catalog.mjs [--engine-root <snapshotRoot>] [--out <file>]
@@ -29,7 +33,13 @@ const argOf = (name, fallback) => {
   return i >= 0 && argv[i + 1] ? argv[i + 1] : fallback
 }
 
-const OUT = resolve(argOf('--out', join(ROOT, 'plugins', 'dsh-model-capability', 'lib', 'catalog-snapshot.json')))
+const OUT_ARG = argOf('--out', '')
+if (!OUT_ARG) {
+  console.error('gen-model-catalog: 必须显式传 --out <file>（其历史默认落点属于已退役插件，不再提供默认值）。')
+  console.error('  例：node scripts/gen-model-catalog.mjs --out .deploy-tmp/catalog-snapshot.json --engine-root <snapshotRoot>')
+  process.exit(2)
+}
+const OUT = resolve(OUT_ARG)
 const PI_SUBPATH = 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai'
 
 const candidates = [

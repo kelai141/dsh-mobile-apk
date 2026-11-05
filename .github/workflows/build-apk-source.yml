@@ -770,7 +770,7 @@ jobs:
           find .deploy-tmp/snapshot-013/arm64/.debs -maxdepth 1 -type f -name '*.tgz' -print0 \
             | sort -z | xargs -0 -r sha256sum \
             > .deploy-tmp/source-build/runtime-tarballs-sha256.txt
-          for d in plugins/dsh-android-bridge plugins/dsh-android-manage plugins/dsh-android-linux-env plugins/dsh-android-file-open plugins/dsh-model-capability plugins/dsh-android-browser plugins/dsh-android-vdisplay dsh-shell-termux dsh-client-ui-responsive vendor/dshmarketplace-plugin; do
+          for d in plugins/dsh-android-bridge plugins/dsh-android-manage plugins/dsh-android-linux-env plugins/dsh-android-file-open plugins/dsh-android-browser plugins/dsh-android-vdisplay dsh-shell-termux dsh-client-ui-responsive vendor/dshmarketplace-plugin; do
             sha256sum "$d/package.json" "$d/package-lock.json" 2>/dev/null || true
           done > .deploy-tmp/source-build/plugin-lock-sha256.txt
           printf '%s\n' "$GITHUB_SHA" > .deploy-tmp/source-build/project-source-commit.txt
