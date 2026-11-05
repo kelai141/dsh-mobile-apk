@@ -234,32 +234,28 @@ if (up === undefined) {
   }
 }
 
-/**
- * 登记集非空下限（issue #1580；与 #1021 的 declarationsProblem 同形制）。
- *
- * 真因：§1 / §5 都是「遍历登记表逐条断言」，而**遍历本身**没有任何下限——
- *   · §1 的 `rows: []` → 循环零次、零条 FAIL、照打 CONTRACT PASS；
- *   · §5 的 `envContract.keys: []` → 同上。
- * 于是「删掉登记项」比「改错登记项」更容易通过，而这个方向此前没有任何一层在守
- * （`--require` 只拦 skip()，拦不住「判据正常执行但对象是空集」）。
- * 判据 = 登记表必须是非空数组；空/非数组即判红，理由直指该段判据已消失。
- * 纯函数形式便于 --self-test 直接喂合成输入（不动仓库文件）。
- */
-const registryNonEmptyProblem = (list, label) => {
-  if (!Array.isArray(list)) return label + ' 不是数组（该段判据会整段消失）'
+/* issue #1580：§1 / §5 的**空集恒真**（与已修的 #1021 §4b 同族）。
+ * 两处都是「遍历登记表逐条断言」，登记表为空时循环零次、零条 FAIL，仍打印
+ * CONTRACT PASS（SKIP=0）；--require 也拦不住（它只拦 skip()）。
+ * 触发：一次 JSON 合并/手改把 rows 或 envContract.keys 清空（undefined 会抛，[] 不会）⇒
+ * 「bundle 行引用」「环境键注入」两整段判据静默消失。删掉登记项比改错登记项更容易通过，
+ * 而这个方向此前没有任何一层在守。
+ * 修法照 declarationsProblem 的形状：登记本身成为一条判据（非数组 / 空集都判红），
+ * 判据抽成纯函数，--self-test 直接喂合成输入钉住双向判别力。 */
+const entriesProblem = (list, label, consumer) => {
+  if (!Array.isArray(list)) return label + ' 不是数组（' + consumer + ' 会整段消失）'
   if (list.length === 0) {
-    return label + ' 为空 —— 该段判据对「登记表被清空」恒真（空集不等于「没有违约」，'
-      + '删掉登记项比改错登记项更容易通过）'
+    return label + ' 为空 —— ' + consumer + ' 判据会整段静默消失（空登记集不等于「没有要判的」）'
   }
   return null
 }
-/** §1 / §5 的登记表各判一次（两条判据必须在遍历之前跑，空集时下面的 for 不执行也照样判红）。 */
-const rowsProblem = registryNonEmptyProblem(contract.rows, 'contract.rows')
-const envKeysProblem = registryNonEmptyProblem(contract.envContract.keys, 'contract.envContract.keys')
+const rowsProblem = entriesProblem(contract.rows, 'contract.rows', '§1 bundle 行引用')
+const envKeysProblem = entriesProblem(contract.envContract?.keys, 'contract.envContract.keys', '§5 环境契约键')
 
 console.log('== 1. bundle 行引用 ==')
 if (rowsProblem !== null) fail(rowsProblem)
 const upstreamPackages = join(root, contract.upstreamRepo, 'packages')
+if (rowsProblem !== null) fail(rowsProblem)
 if (!existsSync(upstreamPackages)) {
   skip('上游树 ' + contract.upstreamRepo + '/packages 不在场（只读 checkout；CI/自包含树不含）——bundle 行引用未执行')
 } else {

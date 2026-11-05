@@ -5,8 +5,7 @@ import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { checkPackageLockRoot } from './check-package-lock-roots.mjs'
+import { checkPackageLockRoot, lockDiffSummary, lockRewriteProblem } from './check-package-lock-roots.mjs'
 
 /**
  * 两个 lock 之间的**图差异**（issue #1615）。
@@ -46,26 +45,6 @@ export const lockGraphDiff = (beforeText, afterText) => {
     + line('changed', changed, (k) => k + ' ' + before.get(k) + ' -> ' + after.get(k))
   return out.length > 0 ? out : '  (package graph unchanged; only metadata bytes differ)\n'
 }
-
-/**
- * 判据本体（issue #1615）：重写后的 lock 必须与提交进仓的**逐字节相同**。
- *
- * 为什么不能只看图差异：lock 缺 resolved/integrity 时图可能一模一样（包名与版本都没变），
- * 只有字节不同 —— 那正是「提交的 lock 不完整、CI 从 registry 补齐」的可判形态。
- * 反过来，字节相同就必然没被重写，不必再看图。
- *
- * @returns null = 通过；否则是给维护者看的完整错误文案（含图差异面）。
- */
-export const lockRewriteProblem = ({ inputSha256, resolvedSha256, inputText, resolvedText, directoryArg }) => {
-  if (inputSha256 === resolvedSha256) return null
-  return 'npm install --package-lock-only rewrote the committed package-lock.json ('
-    + String(inputSha256).slice(0, 16) + ' -> ' + String(resolvedSha256).slice(0, 16) + ').\n'
-    + 'The committed lock is incomplete (missing resolved/integrity, or stale), and CI must not silently '
-    + 'resolve it from the registry and install that graph.\n'
-    + 'Lock graph diff (committed -> resolved):\n' + lockGraphDiff(inputText, resolvedText)
-    + 'Fix: update and commit the lock in a PR — (cd ' + directoryArg + ' && npm install --package-lock-only --ignore-scripts).'
-}
-
 /* issue #1615：CLI 段必须有 main 守卫。
  *
  * 旧写法把「读 argv / 跑 npm / 写报告」全部放在模块顶层，于是 `import` 本模块（为了单测

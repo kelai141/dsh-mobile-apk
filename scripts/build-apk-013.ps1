@@ -633,16 +633,14 @@ foreach ($abi in @('arm64', 'x86_64')) {
 if ($ExportSnapshots) {
     foreach ($abi in @('arm64', 'x86_64')) {
         if ($OnlyAbi -and $OnlyAbi -ne $abi) { continue }
-        # issue #1616：导出对象必须是**本轮真正产出且通过全部门禁**的 ABI。
-        #
-        # 旧判据只看 Test-Path $apkOut：而 assemble 在 622/623 的「内嵌快照可解压」门禁**之前**，
-        # arm64 在 assemble 之后被拒时 APK 已经落在 out/v<ver>/ 里，于是这一段照样把
-        # snapshot-arm64.tar.xz + .sha256 写进发布目录，然后整链在 :693 的 rejectedAbis 守卫 exit 1。
-        # CI 侧 publish 不会跑，但文件确实留在了发布目录里——「目录里有 snapshot-<abi>」
-        # 就不再等价于「它通过了门禁」。
-        # 判据用 $producedAbis（该变量只在 624 行、全部 per-ABI 门禁通过之后自增）：
-        # 不在里面 = 本轮没通过 = 不导出，并记账（拒绝路径必须走 Deny-Abi，见 check-build-chain-abort）。
-        if ($producedAbis -notcontains $abi) { Deny-Abi $abi "本轮未产出该 ABI（assemble 后被门禁拒绝或未构建）——拒绝导出未经门禁的快照资产（#1616）"; continue }
+        # issue #1616：导出段必须判「**本轮产出**」，不是「目录里有东西」。
+        # 旧实现的 §644 注释把「发布目录里存在 snapshot-<abi>」定义成「已校验」，而它只等价于
+        # 「APK 文件在场 + check-snapshot-asset 通过」——与「该 ABI 通过了全部门禁」不是同一件事。
+        # 触发路径：arm64 在 assemble **之后**的门禁被拒（内嵌快照可解压 / build-apk-engine 验签）⇒
+        # APK 已落在 out/v<ver>/，导出段照样把 snapshot-arm64.tar.xz + .sha256 写进发布目录，
+        # 而 $rejectedAbis.Count -gt 0 → exit 1 发生在导出段**之后**（末尾守卫）。
+        # CI 侧 publish 不会跑，但文件确实留在了发布目录里 —— 下一次组装/人工拷贝就会带走它。
+        if ($producedAbis -notcontains $abi) { Deny-Abi $abi "本轮未产出该 ABI（未通过全部门禁）——拒绝导出快照资产（#1616）"; continue }
         $snapIn = Join-Path $Root ".deploy-tmp\build-\13-$abi\snap-final2.tar.xz"
         if (-not (Test-Path $snapIn)) { Deny-Abi $abi "缺注入后快照 $snapIn（导出失败：发布资产不完整）"; continue }
         # issue #1080：**先校验，再拷进发布目录**；缺 APK 是硬失败，不是警告。
