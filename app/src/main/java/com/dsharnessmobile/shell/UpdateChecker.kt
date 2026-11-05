@@ -909,12 +909,38 @@ object UpdateChecker {
     return family to numbers
   }
 
-  /** 两个预发布段的先后（SemVer：先比族名，再逐位比数字；缺省位补 0）。 */
+  /**
+   * 预发布族名的**显式先后**（issue #1524）：数值越大越新，即 preview < rc < sn。
+   *
+   * 旧实现直接比字符串（`a.first > b.first`），先后由字典序**偶然**决定：sn > rc > preview。
+   * 当前发布线碰巧对得上，但这个顺序没有语义依据——将来新增后缀（beta / alpha / dev）
+   * 会按字母位置插进任意位置，跨族比较结果不可预期，且「改个名字」就等于「悄悄改了语义」。
+   * 这里把先后写成表：**先预览、再候选、最后快照**，与发布流程的实际先后一致。
+   */
+  private val PRERELEASE_FAMILY_RANK = mapOf("preview" to 0, "rc" to 1, "sn" to 2)
+
+  /**
+   * 跨族比较（issue #1524）：两边都在 [PRERELEASE_FAMILY_RANK] 里时按显式次序；
+   * 只要有一边**未登记**就退回字典序。
+   *
+   * 为什么保留字典序兜底而不是判等或抛错：未登记族**今天取不到**（[prereleaseOf] 只认
+   * [PRERELEASE_SUFFIX] 白名单），所以这条分支现在不可达；它的作用是把「白名单加了新族名、
+   * 族序表忘了加」这一天的行为钉成**旧口径**——静默改变现网比较结果比维持历史行为更危险。
+   * 直接单测这个函数，是因为经 [isNewer] 走不到它（白名单先把它挡掉了）。
+   */
+  internal fun prereleaseFamilyIsNewer(a: String, b: String): Boolean {
+    val rankA = PRERELEASE_FAMILY_RANK[a]
+    val rankB = PRERELEASE_FAMILY_RANK[b]
+    if (rankA != null && rankB != null) return rankA > rankB
+    return a > b
+  }
+
+  /** 两个预发布段的先后（先比族名，再逐位比数字；缺省位补 0）。 */
   private fun comparePrerelease(
     a: Pair<String, List<Long>>,
     b: Pair<String, List<Long>>,
   ): Boolean {
-    if (a.first != b.first) return a.first > b.first
+    if (a.first != b.first) return prereleaseFamilyIsNewer(a.first, b.first)
     for (i in 0 until maxOf(a.second.size, b.second.size)) {
       val x = a.second.getOrElse(i) { 0L }; val y = b.second.getOrElse(i) { 0L }
       if (x != y) return x > y

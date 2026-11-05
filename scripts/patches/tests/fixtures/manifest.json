@@ -1811,7 +1811,8 @@
         "image-expiry-E1",
         "image-request-preview-P1",
         "sealed-reasoning-1304",
-        "mimo-thinking-toggle-056"
+        "mimo-thinking-toggle-056",
+        "custom-endpoint-discovery-960"
       ]
     },
     "dsh-ptc-runtime-node-0.2.1-rc.3": {
@@ -2118,6 +2119,32 @@
       "patchIds": [
         "sealed-reasoning-1304"
       ]
+    },
+    "dsh-client-ui-settings-models-0.2.1-rc.3": {
+      "source": "engine-tgz",
+      "engine": "0.2.1-rc.3",
+      "package": "@deepseek-ai/dsh-client-ui-settings-models@0.2.1-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-client-ui-settings-models-0.2.1-rc.3.tgz",
+        "tarballSha256": "2fa15781b4b03acca4508f52b108008d1c4d31835f271730e9b8a10f26f0248f",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/client.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/client.js": "190498e15358bcd3fe6810fe6368023a20b0403e3ea493bc979eca9bdb593b28",
+        "package.json": "3f073169bea233b479963ec5f6eb8d046ff6336d86121e17a3292b7baecb3992"
+      },
+      "targets": {
+        "lib/client.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-models/package.json"
+      },
+      "patchIds": [
+        "custom-first-model-row-960",
+        "model-catalog-section-labels-960"
+      ]
     }
   },
   "capture": {
@@ -2129,6 +2156,6 @@
       ]
     },
     "overlaySha256": "0e5a7f49f0145857a4b6c3f0f8b8594c401a50c526505a112c3740bcf86c8993",
-    "registrySha256": "435e2309e0ecbda97998bbe3f621623d348a33f532331a61ddf04e5aad3e9347"
+    "registrySha256": "c8edcf0869e598a2ffd73aa0894e0953a86dc2416d026ce463c4566fac748288"
   }
 }
