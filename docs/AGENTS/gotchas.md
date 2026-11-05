@@ -495,7 +495,6 @@ gh pr reopen 883            -> Could not open the pull request
 
 **第二轮定位（原「43 续」）：白屏静默挂起的真因与修复**：
 
-
 首轮定位到「create 循环静默挂起」后，用 **Runtime.enable + dist 插桩**（设备侧 python 给 index-Df-65__b.js 的 boot await 链插 console.log）拿到完整时序：**50 个 entries 全部 created、r5-pluginboot-done、mount-effect、r6-mounted 全部触达——boot 管线本身是通的**。真因在 mount 后的 **React 渲染错误**：`Error: strict session slot 'details' rendered without a scope binding`（console error，0.13.2 时代无此强制）。
 
 **根因**：rc.1 对 session-scope 槽（details 等）加了**严格 scope binding 强制**——session-scope 槽必须包在框架注入的 `<SessionProvider>` 里渲染（官方 ui-layout AppFrame 的写法：`jsx(SessionProvider, { children: renderSlot("details", {}) })`，SessionProvider 从 AppFrameProps 解构）。我们 rc.2 时代的 AppFrame 直接裸渲染 `renderSlot('details')` → 渲染期 throw → React 卸载整树 → root 空、且 React 渲染错误不进 Runtime.consoleAPICalled（error boundary 前抛出）→ **零 console 静默白屏**。
@@ -508,7 +507,6 @@ gh pr reopen 883            -> Could not open the pull request
 3. 服务器内存 serve：combo bundle 从 flush 时内存 responses 出（非磁盘直读），**改 dist 文件后必须重启引擎**才生效。
 
 **验证**：SessionProvider 修复 + 第 6 次装机解压后——rootLen=411682、零 error、composer（contenteditable）在场、截图实证完整 UI（Hy3 选择器/会话历史/悬浮球全部在场）、session/create+list+prompt 新 wire 全 PASS。
-
 
 44. **WSL 9p 挂载 chmod 无效 → 归档权限归一化只能在重打包层做（2026-09-08 实测）**：`/mnt/d` 是 9p 挂载且未启用 metadata，`chmod 600` 后 `stat` 仍 777、`tar -tvf` 记录 777（实测探针目录）。因此「归档前 chmod 整棵树」在 Windows 侧是**无效步骤**（白走 6 万文件），快照 tar 的权限只能靠**流式重打包**修正——唯一权威落点 = `scripts/inject-all.py`（重写每个成员：ELF/shebang=0700、数据文件=0600、目录=0700），门禁 `scripts/check-snapshot-file-modes.mjs` 校验注入后快照（= APK 内嵌 + 发布资产同源）。`build-snapshot-013.mjs` 8a3 步已删除并注明原因；`build-apk-013.ps1` 的 `-SkipInject` dev 档跳过该门禁（警告不拒打包）。grep `check-snapshot-file-modes`。
 
@@ -541,16 +539,13 @@ gh pr reopen 883            -> Could not open the pull request
 
 60. **原生「打开方式」两条出口与白名单（0.13.7）**：`PathOpen.openChooser` 与 `FileIncoming.openWithExternalReader` 共用 `FileIncoming.isReaderAllowed`（file_paths.xml 同一映射面）；目录主候选固定 `ACTION_OPEN_DOCUMENT_TREE`（FileProvider 目录 URI 多数文件管理器不可枚举），MT 管理器等按包名进「初始意图」——装了才出现，未装不臆造。返回 `{"ok",reason?}`，页面按 reason 分流文案，绝不静默（`no-handler` 弹提示）。
 
-
 61. **polyfill 片段共用一个 `<script>`：一个片段语法错误 = 整块 polyfill 静默全灭（0.13.7 模拟器实锤，排查花掉一整轮）**：`dsh-host-web-compat` 的 `POLYFILLS` 数组原来用 `join('')` 拼进同一个 script 元素——Set 集合方法片段以表达式 `})()` 结尾（**没有分号**），紧接着的下一段以 `if (` 开头，两段贴成 `})()if(` → 解析器拒绝**整个 script 元素**（`Unexpected token 'if'`）→ 页面上 `typeof Iterator === 'undefined'`、`Promise.withResolvers` 也没了，上游 0.1.5 客户端包 import 期直接 `Iterator is not defined`（表现为 "Failed to load plugins"，截图见 `.deploy-tmp/0137/now-01.png`）；而**服务出去的 HTML 里片段文本一个不少**，所以 `grep` 类检查全绿，检查脚本用的「`ES2024/2025 builtins`」标记还只是插件源码里的 JS 注释（根本不会出现在页面），假绿 + 假红线同时误导。**防线（三层）**：① 装配规则 `POLYFILL_SCRIPT_BODY` 对每段补 `;` 并用换行分隔；② `apply()` 装载期对装配结果逐段 `new Function` 解析断言，失败直接抛（`host-web-compat: polyfill injection does not parse: …`）；③ 门禁 `node dsh-host-web-compat/scripts/smoke-injections.mjs`（桩 cordis 真装配 + 逐段解析 + 页面标记）+ 设备侧 `scripts/verify-webview-015.mjs` 的「全部内联脚本可解析 / polyfill 活性」断言。**教训：注入类缺陷只能按「装配后能不能解析/能不能用」判，不能按文本在场判。** grep `POLYFILL_SCRIPT_BODY`。
 
 62. **孤儿写锁会让引擎永久起不来（Android 没有 operator）→ F4 引擎树补丁（0.13.7）**：`dsh-atomic-write.withFileLock` 用 `wx` 建 `<file>.lock`（内容 = 持有者 pid），只在 `finally` 里 `rm`。进程被硬杀（用户划掉应用 / 系统 OOM / `am force-stop` / 看门狗重启）时 finally 不执行 → 锁永久残留 → 之后每次写该文件都等到 deadline 抛 `atomic-write: timed out waiting for the writer lock at …/.credentials.yaml.lock`，**引擎 boot 直接失败**（实测现场：重复引擎进程被清掉后仍起不来，只因这一颗残留锁）。上游注释明写「contender never removes an existing lock … orphan recovery is an operator action」——桌面/服务器有位运维能删锁，Android 应用私有目录（`/data/data/<pkg>/…`）用户无任何可达手段。补丁 `atomic-stale-lock-F4`（scope=engine）在超时点做**一次**受控回收：锁记录的 pid 已消失（`process.kill(pid,0)` 得 ESRCH；EPERM 视为存活）且锁内容二次核验一致才删；读数失败/非 pid/不一致/任何异常一律不动锁（退回上游等待-超时语义）。行为回归 `node scripts/patches/tests/atomic-stale-lock.test.mjs`。排障配套：**同一时刻只许一个引擎进程**（重复进程既制造锁争用也污染 `dsh web:` banner 判读），现场先 `ps -A | grep -E 'linker|node'` 清干净再起。grep `recoverStaleLock`。
 
 63. **`inject-snapshot.py` 只替换快照内已存在的成员——给已有插件包「加新文件」不会进快照（幽灵缺陷温床）**：注入器按 tar 成员逐个判定（`member.isfile() and is_injectable(...)` → 用本地内容替换），只有**整包都不在快照里**时才走 `need_add` 全量新增（`scripts/inject-snapshot.py` 第 90-121 行）。因此「在 `dsh-host-web-compat/lib/` 里新加一个模块文件」这类改动，release 快照里**不会出现该文件**（本地跑得通、设备上 `Cannot find module`；0.13.7 处理 polyfill 缺陷时刻意把修复留在 `lib/index.js` 内就是为了避开这条）。需要新增文件时：要么确认该包整包走 add 路径，要么改注入器补「本地有、tar 内无 → 追加成员」的分支，并**在设备上 `ls` 该文件复核**。grep `need_add`。
 
-
 61 续（同日第二层，同一入口）：**Iterator 垫片必须长成构造器形状，否则 pdfjs 把整树打挂**。清掉「Iterator is not defined」之后，`ui-sidebar-documentpreview` 的 combo 包仍在 import 期抛 `Cannot read properties of undefined (reading 'join')`。定位方式（可复用）：CDP `Debugger.setPauseOnExceptions: all` 暂停在抛点 + `Debugger.getScriptSource` 取源码行——出错行是 pdfjs 的 `if (typeof Iterator.prototype.join !== "function") Iterator.prototype.join = ...`：真 `Iterator` 是构造器且 `.prototype === %IteratorPrototype%`，而第一版垫片是裸对象 `{from}`（`Iterator.prototype` 为 undefined）→ 守卫行即抛，loader 记 `failed to import loader entry ...` → 整树 Failed to load plugins。修复：垫片改成 `function Iterator(){throw new TypeError(...)}` + `from` + `Object.defineProperty(ctor,'prototype',{value:proto})`（proto 仍是打过助手的 %IteratorPrototype%）；同时 `box()` 包装器必须 `Object.create(proto)` 而不是裸对象，否则链式助手 `iter.map(f).toArray()` 全断（真机断言当时报 `toArray is not a function`）。两道回归都进了 `dsh-host-web-compat/scripts/smoke-injections.mjs`：在 `node:vm` 里先删掉 Iterator 全局**和**原生助手方法（如实模拟 Chromium 110）再跑垫片，然后执行 pdfjs 的守卫行与 `Iterator.from([1,2]).map(...).toArray()`。**教训：垫片要按「真实现的结构」补（构造器 + prototype + 继承链），只补名字不够。**
-
 
 64. **运行时补丁不得引用引擎构建产物（bundle hash）**：`adaptIndexHashes` 用 `-([A-Za-z0-9]{8})\.(js|css)` 抓引擎
     `dist/index.html` 的 bundle 名，而 npm 现包的 hash 已经是 `index-Df-65__b.js` 这种（带 `-`、9 字符）——正则匹配不上就
@@ -1659,8 +1654,6 @@ gh pr reopen 883            -> Could not open the pull request
 
 219. **跨平台发布链不能假设 PowerShell 的 `$env:TEMP` 存在（2026-09-29，release run 36599977147）**：**现象**：两处 self-contained APK 根目录修复后，arm64 与 x86_64 均完成 runtime asset 门禁、快照指纹门禁和 `assembleDebug`；导出注入后快照时，`check-snapshot-asset.ps1` 在 `build-apk-013.ps1:485` 报 `Cannot bind argument to parameter 'Path' because it is null`，双 ABI 资产未归集，因而没有创建 draft Release。**真因**：Linux GitHub Actions 的 PowerShell 运行环境未提供 `$env:TEMP`，`Join-Path $env:TEMP ...` 生成 null 临时路径；Windows 本地环境有 TEMP，因此问题此前未暴露。**修法**：用 `[IO.Path]::GetTempPath()` 获取平台运行时临时目录；不降低 APK 内嵌快照与发布快照的一致性门禁。**复验证据**：失败日志显示两 ABI 的 `SNAPSHOT-FINGERPRINT CHECK PASSED` 与 `BUILD SUCCESSFUL`，仅 snapshot asset checker 在临时路径绑定处失败；修复后必须重新触发 workflow 并核验双 ABI 资产、MANIFEST 和 draft Release。
 
-
-
 220. **来源链的两处 `git clone` 没有「已存在则复用」守卫，本地复跑必撞（2026-09-29，本地链实测）**：
     **现象**：同一工作区第二次跑 `scripts/source-build/run-local-source-chain.mjs` 时，第 3 步直接报 `fatal: destination path '.deploy-tmp/deepseek-harness' already exists and is not an empty directory`，链在开头就停。
     **真因**：CI 每轮全新检出，`.deploy-tmp/` 恒为空，故 `git clone` 从不失败；而本地复跑时目录还在。**同一类不可重入**此前已修过两处（`bootstrap-extracted` 解包目录、NDK 的 `unzip` 无 `-o`），但 clone 这两处漏了——它们与那两处的区别只是「失败得早且直白」。
@@ -1830,8 +1823,6 @@ gh pr reopen 883            -> Could not open the pull request
     **修法**：改用 `gh workflow run … -F notes=@release/v<版本>/notes.md`（`-F` 才展开 @file）；并在发布后**下载 notes.md 资产核对首行**是否为 `# v<版本> 发布说明`。**建议（只登记，未开 issue）**：① 把「下载 notes.md 资产并核对首行」列入**发布后动作清单**——发布链自身不校验 notes 内容，这是当前唯一防线；② 可另立 issue 提出「发布链加一条 notes 非空/首行断言」的门禁改进（开不开由 Lead/用户决定）。
     **复验证据**：已**删除坏 draft**，改用 `-F` 重派（run **37281961398**），核对 notes 资产为 **7767 字节正文**（Lead 已执行）；本条待核结论以该次 run 的资产首行为准。
 
-
-
 247. **WebView provider 包版本不等于 Chromium 版本，语法门诊断会假报不兼容（2026-10-05 源码核实，#312 关联）**：
     **现象**：华为 `com.huawei.webview` 的 provider `versionName` 可为 `14.0.0.370`，旧诊断直接解析首段 `14` 并与 Chromium 94 比较，于是 `syntax_floor_ok=false`；这个字段没有测到实际 JS 引擎版本，升级后「重新连接中」消失也不能证明厂商版本 15 就等于 Chromium 115。
     **修法**：provider 包名/版本单独记录；Chromium 版本从实际 WebView User-Agent 的 `Chrome/<四段版本>` 读取。读不到时 `syntax_floor_ok=unknown`，不要把 provider 版本当 Chromium 版本。UA-CH 元数据也不得用 vendor package version 伪造。
@@ -1862,20 +1853,17 @@ gh pr reopen 883            -> Could not open the pull request
     **修法**：先 realpath 备份的父目录，与 autoDir 的 realpath 比较；要求叶文件是普通文件且不是 symlink，再返回根目录下规范化后的文件路径。父目录别名可用，备份本身的 symlink 与越界目录仍拒绝。
     **复验证据**：`node --test vendor/dsh-undo-savepoint/test/safe-mode-transaction.test.mjs` 与 `node --test scripts/patches/tests/safe-mode-transaction.test.mjs` 各覆盖 symlink on→off 恢复和伪造越界备份拒绝；两份源码、测试和补丁模板需保持 APK 子仓逐字节镜像。
 
-
 253. **复用旧 snapshot 会让 APK 缺少当前 engine 探针，源码门禁通过仍不能证明产物新鲜（2026-10-06 独立产物核验）**：
     **现象**：0.14.5 菜单修复 APK 与设备指纹一致，但解包和设备中的 `dsh-client-modules/lib/index.js` 均没有新 phase 探针；C4 仍为 308.3ms/22 samples，FAIL。
     **真因**：`build-apk.mjs --snapshot` 复用原始快照，只执行后续 vendor 补丁与插件注入，不重新应用 engine 补丁；旧门禁检查当前源码和 profile，漏检归档中的实际模块。
     **修法**：engine 补丁变更后重新执行 `build-snapshot-013.mjs`。度量门禁读取快照实际模块并检查 phase allowlist、Map、固定窗口、记录函数和输出字段；旧 P1、缺目标、坏 tar 与缺输出均拒绝。
     **复验证据**：双仓微型 tar CLI 回归通过；旧原始快照严格检查 exit 1，当前源重建快照严格检查 exit 0。最终 APK 和设备的新探针验收仍须独立完成，mtime、版本号与快照指纹一致不能替代探针内容检查。
 
-
 254. **Android 模型菜单未登记返回层，系统 Back 会结束 Activity（2026-10-06 模拟器复现）**：
     **现象**：模型选择菜单已不透明，但竖屏 MuMu 16416 用真实 `KEYCODE_BACK` 后直接回到 Launcher；WebView target 同时销毁。
     **真因**：上游 ModelSelect 的菜单通过 React portal 挂在 body，既无 slash/@ 菜单的 `data-trigger-menu`，也不是附件菜单。原 BackStackSignal 漏掉这一层，壳侧在无其他返回层时结束 Activity。复用普通菜单的 pointerdown 关闭路径也不成立：ModelSelect 使用 mousedown 外部关闭及自己的 Escape 分层逻辑。
     **修法**：只识别 ComposerPopupGuard 为展开且 aria-controls 关联的 Android ModelSelect 加的 `data-dsh-android-model-menu`，登记 `model-menu`。返回时向真实 portal 发送可取消并冒泡的 Escape，让上游先退模型子列表、再关根菜单并恢复焦点。上游 preventDefault 会让 dispatchEvent 返回 false，这表示事件已处理，不能解释为返回未消费。
     **复验证据**：新增单测覆盖标记晚到、preventDefault 仍消费、子列表逐级返回、宽屏不依赖窄屏标记、其他菜单不误认领。responsive 全量 463/463、tsc/build 通过；src/tests/lib 已 robocopy 镜像，双仓镜像门禁 SKIP=0。MuMu 16416 热推后真实 ADB tap/Back 验证根菜单关闭、子列表先退一级再关闭、MainActivity 保持前台、模型未变；CDP 确认层信号与不透明背景及关闭后的标记清理，整页 39/39 通过。证据 `.deploy-tmp/refactor/0.14.5-phase-device/portrait-back-menu-*.json/.png` 和 `verify-webview-menu-back-portrait.log`。横屏返回测试及最终入包验收仍待完成；热推不代表修复已进入当前 APK。
-
 
 255. **把 compose 时长当作 C4 根因会漏掉 Loader 扫描和自动补给投影（2026-10-06 MuMu 实测）**：
     **现象**：compose仅数毫秒，C3已收敛为2，但真实C4仍反复超过100ms。
@@ -1974,7 +1962,6 @@ gh pr reopen 883            -> Could not open the pull request
     ② `ConvertFrom-Json` 的日期字段**默认就是 DateTime**，要字符串比较就显式 `.ToString('yyyy-MM-dd')`；
     ③ **执行输出与计划不一致时必须当场停手查**——我这次看到了 `62 ≠ 49` 却继续，这正是本仓反复出现的
        「输出看起来正常，但它证明的事情是假的」同一形态，只不过这次是我自己造的。
-
 
 264. **#341：bounds 去重必须与覆盖层 TTL 租约配对（0.14.5-fx-1）**：旧客户端静止时不发相同bounds，原生4000ms后主动INVISIBLE，DOM/加载仍正常。可见挂载每1000ms续租，隐藏/卸载即停止；普通Mutation去重不能重置续租截止时间。不能删TTL，否则幽灵覆盖层回归；也不能把Surface日志当单一根因。回归新增客户端9例与原生TTL/前台契约，真实绘制留第三阶段。
 
@@ -2124,9 +2111,6 @@ gh pr reopen 883            -> Could not open the pull request
 结果用户学会无脑点同意，安全意图反被稀释；② 持久化键的语义变更必须同时处理**老数据的迁移方向**，
 而迁移的职责是「保住既有的合法状态」，不是「用新规则重判历史」；③ 注释里写「无需迁移」往往是缺陷的自我确认。
 
-
-
-
 288. **#0.14.7-浏览器 controller 同步 require gateway 缺模块：host 激活条件不能代替 browser 依赖供给条件**：
 现场在同指纹且无快照事务的冷启动中记录 `require("@deepseek-ai/dsh-api-gateway/client") missed the module table`，
 两个 controller 未激活。交接中「web-app 没有 gateway 行，所以补 insert」的推断不成立：web-app 继承 base，base 已有唯一 typert-gateway。
@@ -2150,7 +2134,6 @@ Registry 只读取 fiber 存在的行；构造供给方 fiber 未构造而消费
 修法：手机frame预先生效pan-y pinch-zoom，实际横向溢出容器标记为auto例外，保留代码块/横表原生横滚；纵向达到8px后本序列退出，快甩结算不能绕过方向门控。
 手势之外更新横向溢出标记，预览style更新不触发全树尺寸扫描。单测与变异反证见版本收口记录；真实触摸跟手、斜向、原生纵横滚动仍需最终APK三层验收。
 依据：W3C Pointer Events 2 touch-action规范（https://www.w3.org/TR/pointerevents2/#the-touch-action-css-property）。
-
 
 291. **0.14.7追加交互：横滚扫描与菜单边界透传**：SN15语义开合/菜单几何通过不能证明时序与边界。真机22触摸发现列表到边界后背景/IME变化；MuMu独立CPU采样约9秒中全frame refreshSurfaces约2.8秒。只收集变化子树，触点活动期间不量尺寸，释放后增量更新，并先过滤overflow再读宽度；对实际模型.scrollable设置overscroll-behavior-y:none。后台任务绝对定位ul会被折叠顶栏overflow裁切，需按真实aria-label提升fixed并保留React树。会话切换需在capture阶段识别data-row-key/aria-selected，先拦自动focus再等待真正选中后收起；只在bubble阶段处理会漏掉React同步提交。候选707单测通过，设备及新APK结果见协调仓followup证据，未验不写PASS。
 
@@ -2194,7 +2177,6 @@ EngineBootContinuationTest用latch驱动真实观察函数：winner持CAS但无�
 
 300. **Touch reorder cancellation must settle the upstream owner (#357/#358).** A second finger or touchcancel previously cleared only local flags; an unmatched touchend could still drop on the previous target. Because upstream dragend commits its last hover, cancellation now flushes a source-row drop through upstream's no-op path before dragend. Synthetic phases use ReactDOM flushSync, DataTransfer types satisfy the global file-drop handler, and competing trusted Android HTML drag/context-menu defaults are suppressed while this adapter owns the row. Real AVD testing exposed both global transfer metadata and native drag competition after the initial React tests passed. Regression: 713 UI tests, successful build, real catalog cancellation with unchanged order, a subsequent successful reorder, persisted order after reload, and native ADB reorder. The browser-stage lease handle is typed as a numeric window timer so Node ambient timer declarations do not break compilation. Evidence applies to the hot-pushed runtime, not a final release APK.
 
-
 301. **线路探针把 403 当成"最快线路"：no-cors 拿到的是不透明响应，读不到状态码（0.14.7 发布页线上故障，本轮实修）**
     **现象**：发布页自动选中 `gh-proxy.com` 作为默认线路并显示最快，但用户点"下载"拿到的是错误页而非 APK。该镜像对 MANIFEST 与 APK **均返回 403**（连测三次稳定复现），其余三条线路 302/200 正常。
     **真因**：探针用 `fetch(url, {mode:'no-cors'})`，而 **no-cors 返回的是不透明响应（`type:'opaque'`、`status:0`），读不到状态码**——403 与 200 在探针眼里完全等价。雪上加霜的是 **403 比 200 回得更快**（实测 284ms vs 605ms），于是死线不仅没被判死，还每次都被排成第一名。探针只测了"有没有响应"，没测"响应是不是可用"。
@@ -2232,7 +2214,6 @@ EngineBootContinuationTest用latch驱动真实观察函数：winner持CAS但无�
     **真因**：`read` 对长文件**分页返回**（默认上限），把当页内容当作全文写回 = 用部分覆盖整体。
     **修法**：长文件一律用**定向编辑**追加（以文末唯一片段作锚点），不要 `read` 全文再 `write`；发现截断立即 `git checkout -- <file>` 复原再重做。
     **判据**：写后必须核对 `git diff --stat` 的删除行数与文件字节数，删除数异常大即已截断。
-
 
 307. **子仓镜像用 robocopy /MIR 打到有未提交改动的主工作树 = 真实丢数据风险（本次无损失，但属侥幸）**：
 
@@ -2410,7 +2391,6 @@ Stellar 在跑、兼容层正常，本应用却在设置页与工具面一律报
 触摸还须在长按前对会话与子代理行禁止原生文字选择及 HTML drag，否则 WebView 先发 touchcancel，JS 的 dragstart 拦截会来不及。只在 coarse pointer 下禁用这些原生行为，桌面鼠标原有排序不受影响。
 
 复验证据：`dsh-client-ui-responsive/tests/conversation-dock.spec.ts` 覆盖同名条目、目录漂移、父子路由与引用隔离；设备证据与运行树哈希见本轮 PR。
-
 
 320. **原生管理页不可把配置脱敏结果当完整替换文档**：`settings/describe` 会省略敏感值；把这份 user 对象交给 `settings/replace` 会重建可编辑配置并丢失未回填字段。原生页面改用 `settings/mutate` 按字段合并保存，携带 `expectedRevision`；密码框留空不提交。插件启停的 `ChangeResult.application=failed` 也不保证磁盘未变，必须重新读取状态。停用前后比较完整运行清单，发现其他 active 插件失活则补偿目标状态并核验恢复。测试见 `PluginManagementRepositoryTest.kt`，设备范围见本轮开发报告。
 
@@ -2829,7 +2809,6 @@ The term '//' is not recognized as a name of a cmdlet, function, script file, or
 
 **判据**：**语法合法 ≠ 可运行**。改 `.ps1` 后不能只报「语法错误 = 0」当证据——必须真跑一次（哪怕是 `-Fast`/`-OnlyAbi` 的一小段），或至少执行到含该行的分支。同理适用于其它语言里「语法合法但求值才失败」的写法（如 shell 里未加引号的裸词）。
 
-
 366. **判据看拼写，危害看效果：闸/净化器的判据必须建立在解析求值后的结果上，不是输入的字面形状**（2026-11-01，同一晚两处独立实例）
 
     形态：判据拿**输入的字面形状**做判断，而真正的危害取决于**解析/求值后的结果**。两者一旦不是同一个集合，判据就会在错误的一侧放行、在正确的一侧拒绝——守护变成改规矩。
@@ -2848,7 +2827,6 @@ The term '//' is not recognized as a name of a cmdlet, function, script file, or
     识别信号（最有用的一条）：**当闸的失败代价大于它所守护的操作时，先去核对两侧判据是不是同一集合。** 具体表现：闸判红导致整体不可用、而它守护的解析器只会丢一条；或者「改前能用、改后整块不可用」而输入只差空白/前缀这类无关字符。核对方法是把两侧对同一批输入的结论逐条比对——实例二的测试就是这么写的（不举例，直接断言「闸的结论 == 解析器能否取到数字」），任一侧被改回去都会立刻红。
 
     同型提醒：判据里凡出现 `includes` / `startsWith` / 锚定正则 / 白名单字面量，先问一句——**我判的是它的拼写，还是它求值后的效果？** 拼写判据天然比效果判据更严，而"更严"落在守护位置上，等于"更容易把可用状态判成不可用"。
-
 
 367. **vendored 插件用裸 tag + `:has()` 注入全局 CSS，靠特异性抢赢宿主；宿主样式改动必须验计算值**（2026-11-01，issue #1288 第 2/5/8 条实锤）
 
@@ -3140,6 +3118,34 @@ The term '//' is not recognized as a name of a cmdlet, function, script file, or
     删配置的改动必须同时扫一遍依赖该配置文本的夹具（`grep` 被删的字面量）。
 
     复验：`node --test scripts/check-manifest-hardening.test.mjs` 8 例全绿，且把 `</paths>` 注入点改坏后能红。
+
+385. **手势热区不是遮挡物——把它当遮挡高度，屏幕上一条系统栏都没有时也会凭空留出一条纯背景带**（2026-11-05，`#783` 复查实锤）
+
+    现象：荣耀 CRT-AN00（Android 14 / 手势导航 / density 3.0）上，左侧抽屉底部与输入卡下方各有一条 46 CSS px 的纯黑带，
+    可视区域变小、重心偏上；`env(safe-area-inset-bottom)` 实测恒为 0px，所以不是安全区算错。
+    真因：壳侧只发布一条底部通道 `--dsh-android-system-bottom = max(navigationBars.bottom, mandatorySystemGestures.bottom)`。
+    后者是**手势热区**（AOSP 手势导航可触摸的那条 48dp 带子），不是遮挡物——导航条窗口是 `FLAG_NOT_TOUCHABLE | FLAG_NOT_FOCUSABLE`
+    且合成在 `Z=-1`，永不遮挡页面。于是手势模式下 navigationBars.bottom = 0、mandatorySystemGestures.bottom = 138 物理 px，
+    页面被要求让出 46 CSS px，而屏幕上根本没有东西盖住它。
+    修法：拆两条通道——`--dsh-android-system-bottom` 保留保守值（贴底但不与系统栏争抢的表面：底部 sheet 的 peek、气泡弹层上限、
+    市场滚动内边距），新增 `--dsh-android-navbar-bottom` 只算 navigationBars，给「不得被系统盖住」的交互面（输入卡、抽屉）。
+    判据在 `BottomInsetPolicy`（JVM 单测，纯函数）：手势导航下 navBar = 0 而 system = 46；三键导航下两条相等。
+    纪律：区分「热区（hot-zone）」与「遮挡（occluder）」——前者只用于手势排除，后者才进 padding。
+
+    复验：把手势热区重新并进 navBar 通道，`BottomInsetPolicyTest` 的「手势导航下交互面通道必须归零」立刻变红（实测 1 条红，恢复即绿）。
+
+386. **Android WebView 114 的 ResizeObserver 只改被观察元素自身的 padding 时不投递——「预留写在谁身上」决定变量会不会停在旧值**（2026-11-05，`#783` 缺陷 B 实锤）
+
+    现象：向上滑动查看历史时，「回到底部」浮层压住最后一行正文，且按钮比预期低一个 inset 的高度（实测净空 -30px，设计值 +16px）。
+    真因两层：① 上游把 `--dsh-composer-height` 设为 `seat.offsetHeight` 并在 seat 上挂 ResizeObserver（默认 content-box）；
+    ② 本插件把底部预留写在 `[data-composer-seat]` 自己身上——**只改被观察元素自身的 padding-bottom 时该 RO 不投递**
+    （隔离实验：seat 128px→174px 而回调 0 次；改 height 或改子元素高度则正常投递），于是变量停在旧值 128px 而 seat 已是 174px。
+    依赖该变量的浮层 `bottom: calc(var(--dsh-composer-height) + 16px)` 因此比真实 seat 顶低 46px。
+    修法：把预留移到 seat **内部**的真实盒子（`[class*='composerStack']`），seat 的高度变化于是由子元素引起，RO 正常投递。
+    判据要打在几何上而不是源码上：真机 CDP 逐次重载的 A/B/A/B——缺陷态 `clearance = -30`、修复态 `+16`，且 `varMatchesSeat` 由 false 变 true。
+    纪律：任何「给元素加 padding 改变它的高度」的适配，先问这个元素上有没有别人的 ResizeObserver；有就加在内层。
+
+    复验：把选择器改回 `[data-composer-seat]`，`composer-insets-seat-height.spec.ts` 的反证用例变红；恢复即绿。
 
 387. **并集合并后「同一条判据的两份等价实现」会互相拆台：取 A 的实现 + B 的夹具，锚字符串与注入缝同时失效**（2026-11-05，`#1643` 实锤）
 
