@@ -26,15 +26,14 @@
   },
   "dshVendor": {
     "source": "kelai141/dsh-bionilux",
-    "commit": "3f86a853e346b4f2c268fbf6a76216294b5c4382",
+    "commit": "becd3af8e70d451ad1470a5ab90b0046c5e53550",
     "package": "packages/linux-bootstrap",
     "upstreamVersion": "0.5.0",
-    "excludedFromVendor": "test/ (upstream test/client.test.mjs + react-resolver/react-stub hooks depend on a host-provided react peer and POSIX-only cases)",
+    "excludedFromVendor": "Upstream browser/react test harness excluded; the two filesystem/rollback test files are retained and digest checked.",
     "deviations": [
-      "exports/main point at ./lib: the snapshot injector carries lib/** plus package.json; this tree is built by build.mjs, not published as-is",
-      "build script added (copies src/ to lib/); no build artifact is committed",
-      "test script dropped: upstream test/ is intentionally not vendored (see excludedFromVendor)",
-      "private: true so the vendored copy can never be published"
+      "exports/main point at ./lib; build.mjs materializes sources without committing generated code",
+      "private package; package-lock.json pins local regression dependencies",
+      "Only the two digest-checked filesystem rollback regression tests are vendored; browser/react test harness is excluded"
     ]
   }
 }

@@ -16,9 +16,10 @@ import java.net.URL
  * 本仓 node_modules 里也没有任何 xz/tar 包），宿主已有的解码与解包能力才是可复用的那一份。
  * 因此字节获取这一半交给宿主，bootstrap 仍**拥有**版本/状态/校验/激活的权威。
  *
- * 复用了本仓两处**已在生产路径**的实现，而不是另写一套安全判据：
- *   * [SnapshotExtractor.extract]：xz tar 解包，含绝对路径/`..` 越界/符号链接逃逸（含 Termux 残留）
- *     与解压炸弹上限；本对象只负责把归档文件接上它，不再重复实现这些判据。
+ * 复用了本仓已在生产路径的实现，而不是另写一套安全判据：
+ *   * [LinuxAssetExtractor]：xz tar 解包，按资产 kind 判定符号链接；共同拒绝绝对条目名/`..`/
+ *     hardlink/特殊文件/父路径符号链接，并带解压炸弹上限。rootfs 的绝对 guest 链接只做词法判定，
+ *     不会被宿主 canonicalPath 解引用。
  *   * [SnapshotBundledAsset.digest]：流式 SHA-256 **并返回实读字节数**，一次读同时给出摘要与体量，
  *     正好对应「摘要 + 字节数都要验」。
  *
@@ -51,6 +52,34 @@ internal object LinuxAssetIO {
   const val CODE_DIGEST_MISMATCH = "linux-asset-digest-mismatch"
   const val CODE_SIZE_MISMATCH = "linux-asset-size-mismatch"
   const val CODE_DOWNLOAD_FAILED = "linux-asset-download-failed"
+  const val CODE_KIND_INVALID = "linux-asset-kind-invalid"
+
+  /**
+   * 资产类型：决定符号链接的合法目标面。
+   *
+   * `rootfs` 里的绝对链接是 **guest** 语义（`/bin -> usr/bin`），必须保留且不能按宿主路径解引用；
+   * `backend` / `node` / `plugin` 的链接只允许落在解包根内的相对目标。
+   */
+  enum class Kind(val wire: String) {
+    PLUGIN("plugin"),
+    BACKEND("backend"),
+    ROOTFS("rootfs"),
+    NODE("node");
+
+    companion object {
+      /** 缺省 `plugin`；`runtime-plugin` 是旧 UI 的兼容别名。 */
+      fun parse(raw: String?): Kind? {
+        val value = raw?.trim()?.lowercase()
+        if (value == null) return PLUGIN
+        if (value.isEmpty()) return null
+        if (value == "runtime-plugin") return PLUGIN
+        return entries.firstOrNull { it.wire == value }
+      }
+    }
+  }
+
+  /** Debug-only 本地回放配置：私有目录下的单行 loopback origin。 */
+  const val DEBUG_ORIGIN_FILE = "debug-download-origin"
 
   /**
    * 清单里的字面量不合规（摘要是路径段的来源，必须先于**任何**文件系统使用判定）。
@@ -79,7 +108,12 @@ internal object LinuxAssetIO {
   const val MAX_DOWNLOAD_BYTES = 512L * 1024L * 1024L
 
   /** 资产清单条目：与 bootstrap 的 `{url, sha256, size}` 同形。 */
-  data class Spec(val url: String, val sha256: String, val size: Long)
+  data class Spec(
+    val url: String,
+    val sha256: String,
+    val size: Long,
+    val kind: Kind = Kind.PLUGIN,
+  )
 
   /** 失败原因：稳定 code + 可落盘的一行 detail。 */
   data class Failure(val code: String, val detail: String)
@@ -154,6 +188,44 @@ internal object LinuxAssetIO {
     return null
   }
 
+  /**
+   * 正式来源校验之后的 debug 回放地址。生产（debugBuild=false）永不读取该文件。
+   *
+   * 映射只替换 origin，保留官方 pathname（`/kelai141/.../releases/download/<tag>/<asset>`），
+   * 因而本地服务器能按与正式 Releases 相同的路径提供字节。任何不满足显式 IPv4 loopback
+   * HTTP origin 的配置都失败关闭；这里不放宽 [urlVerdict] 的正式白名单。
+   */
+  fun debugMappedUrl(root: File, officialUrl: String, debugBuild: Boolean): String? {
+    // 映射之前先独立复核正式来源；release 构建不读取配置，但也不接受非官方 URL。
+    urlVerdict(officialUrl)?.let { return null }
+    if (!debugBuild) return officialUrl
+    val file = File(root, DEBUG_ORIGIN_FILE)
+    // 未配置 = 正常走官方地址；已配置但不合规 = 失败关闭，绝不回落到网络。
+    if (!java.nio.file.Files.exists(file.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS)) return officialUrl
+    val origin = try {
+      if (!file.isFile || java.nio.file.Files.isSymbolicLink(file.toPath())) return null
+      file.readText().trim()
+    } catch (_: Exception) {
+      return null
+    }
+    val originVerdict = debugOriginVerdict(origin) ?: return null
+    val official = try { URL(officialUrl) } catch (_: Exception) { return null }
+    // 只替换 origin，保留官方 pathname（含 `/releases/download/<tag>/<asset>` 形态）。
+    return try { URL(URL("$originVerdict/"), official.path).toString() } catch (_: Exception) { null }
+  }
+
+  /** 纯判据：只接受 `http://127.0.0.1:<port>/`，无凭据、query、fragment 与额外路径。 */
+  fun debugOriginVerdict(raw: String): String? {
+    val url = try { URL(raw) } catch (_: Exception) { return null }
+    if (!url.protocol.equals("http", ignoreCase = true)) return null
+    if (url.host != "127.0.0.1") return null
+    if (url.port !in 1..65535) return null
+    if (url.userInfo != null) return null
+    if (url.path != "/" && url.path.isNotEmpty()) return null
+    if (url.query != null || url.ref != null) return null
+    return "http://127.0.0.1:${url.port}"
+  }
+
   /** 摘要与体量的合规判据（纯函数）：两者都必须与清单一致。 */
   fun verifyVerdict(digest: SnapshotBundledAsset.Digest, spec: Spec): String? {
     if (digest.bytes != spec.size) {
@@ -175,7 +247,7 @@ internal object LinuxAssetIO {
   }
 
   /**
-   * 解包到 [destination]：复用 [SnapshotExtractor.extract]（穿越/符号链接逃逸/炸弹上限都在那里）。
+   * 解包到 [destination]：走 [LinuxAssetExtractor]（按 kind 的链接判据 + 炸弹上限）。
    *
    * [root] 是唯一允许的落点根；[destination] 必须先通过 [resolveInside] 的等价判定。
    */
@@ -183,6 +255,7 @@ internal object LinuxAssetIO {
     archive: File,
     destination: File,
     root: File,
+    kind: Kind = Kind.PLUGIN,
     limits: SnapshotExtractor.Limits = PLUGIN_LIMITS,
   ): Failure? {
     val rootCanon = root.canonicalPath
@@ -193,10 +266,10 @@ internal object LinuxAssetIO {
     if (!archive.isFile) return Failure(CODE_DOWNLOAD_FAILED, "归档不存在：${archive.name}")
     return try {
       archive.inputStream().use { input ->
-        SnapshotExtractor.extract(input, archive.length(), destination, { _, _ -> }, destination, limits)
+        LinuxAssetExtractor.extract(input, archive.length(), destination, kind, limits)
       }
       null
-    } catch (e: IOException) {
+    } catch (e: Exception) {
       // 穿越/符号链接逃逸/上限超限都由 SnapshotExtractor 以 IOException 中止；统一归为「不安全归档」
       // （与「落点越界」分开，故障归因才不会把炸弹报成路径问题）。
       Failure(CODE_UNSAFE_ARCHIVE, "解包被拒绝（路径穿越/符号链接逃逸/超出解压上限）：${e.message}")
@@ -213,6 +286,25 @@ internal object LinuxAssetIO {
     maxSingleFileBytes = 128L * 1024L * 1024L,
   )
 
+  /** rootfs 含完整 Debian 树；Node 含 npm 全量文件。 */
+  val ROOTFS_LIMITS = SnapshotExtractor.Limits(
+    maxEntries = 240_000,
+    maxTotalBytes = 4L * 1024L * 1024L * 1024L,
+    maxSingleFileBytes = 1L * 1024L * 1024L * 1024L,
+  )
+
+  val NODE_LIMITS = SnapshotExtractor.Limits(
+    maxEntries = 60_000,
+    maxTotalBytes = 1L * 1024L * 1024L * 1024L,
+    maxSingleFileBytes = 256L * 1024L * 1024L,
+  )
+
+  fun limitsFor(kind: Kind): SnapshotExtractor.Limits = when (kind) {
+    Kind.ROOTFS -> ROOTFS_LIMITS
+    Kind.NODE -> NODE_LIMITS
+    Kind.PLUGIN, Kind.BACKEND -> PLUGIN_LIMITS
+  }
+
   /**
    * 逐跳校验地下载到 [destination]（暂存文件 + [AtomicFileReplace] 唯一原子写入口发布），
    * 随后**回验**摘要与字节数。
@@ -220,10 +312,18 @@ internal object LinuxAssetIO {
    * 校验发生在发布之前：任何失败都不留下半个「看似可用」的资产；发布本身也不再先删目标
    * （#1057），所以「校验失败」与「发布失败」都不会拿掉已有的可用资产。
    */
-  fun download(spec: Spec, destination: File, root: File, opener: Opener = HttpOpener): Failure? {
+  fun download(
+    spec: Spec,
+    destination: File,
+    root: File,
+    opener: Opener = HttpOpener,
+    debugBuild: Boolean = BuildConfig.DEBUG,
+  ): Failure? {
     // 清单字面量先判：摘要是路径段的来源，校验必须早于任何文件系统动作（含下面的 mkdirs/delete）。
     specVerdict(spec)?.let { return Failure(CODE_SPEC_INVALID, it) }
     urlVerdict(spec.url)?.let { return Failure(CODE_URL_REJECTED, it) }
+    val fetchUrl = debugMappedUrl(root, spec.url, debugBuild)
+      ?: return Failure(CODE_URL_REJECTED, "debug 回放配置不可用或不是 loopback origin")
     val rootCanon = root.canonicalPath
     val destCanon = destination.parentFile?.canonicalPath ?: rootCanon
     if (destCanon != rootCanon && !destCanon.startsWith(rootCanon + File.separator)) {
@@ -233,7 +333,7 @@ internal object LinuxAssetIO {
     try {
       destination.parentFile?.mkdirs()
       tmp.delete()
-      val read = opener.fetch(spec.url, tmp, MAX_DOWNLOAD_BYTES)
+      val read = opener.fetch(fetchUrl, tmp, MAX_DOWNLOAD_BYTES)
       if (read < 0) return Failure(CODE_DOWNLOAD_FAILED, "下载失败或逐跳校验未通过")
       // 兜底上限在**本函数**里再判一次：注入的下载器可能不自己设限，判据不能只存在于生产实现里。
       if (read > MAX_DOWNLOAD_BYTES) {

@@ -53,6 +53,7 @@
       "expression": "path",
       "resolvesTo": [
         "/api/android/linux-environment/status",
+        "/api/android/linux-environment/manifest",
         "/api/android/linux-environment/check",
         "/api/android/linux-environment/install",
         "/api/android/linux-environment/reinstall",
@@ -61,7 +62,7 @@
         "/api/android/linux-environment/auto-update-off"
       ],
       "literalEvidence": "for (const [action, path] of ROUTES)",
-      "reason": "Linux 环境路由由 ROUTES 的动作/路径成对常量注册；七条鉴权与方法判据共用同一 handler，不能另起无鉴权入口。"
+      "reason": "Linux 环境路由由 ROUTES 的动作/路径成对常量注册；八条鉴权与方法判据共用同一 handler，不能另起无鉴权入口。"
     },
     {
       "source": "plugins/dsh-android-browser/src/index.ts",
@@ -114,6 +115,17 @@
     {
       "id": "linux-environment-status",
       "path": "/api/android/linux-environment/status",
+      "kind": "exact",
+      "registrationSource": "plugins/dsh-android-linux-env/src/linux-environment.ts",
+      "registration": "path,",
+      "endpointSource": "plugins/dsh-android-linux-env/src/linux-environment.ts",
+      "access": "protected",
+      "authMarker": "authorizeMobileRoute(req, options.auth())",
+      "authCallMarker": "authorizeMobileRoute(req, options.auth())"
+    },
+    {
+      "id": "linux-environment-manifest",
+      "path": "/api/android/linux-environment/manifest",
       "kind": "exact",
       "registrationSource": "plugins/dsh-android-linux-env/src/linux-environment.ts",
       "registration": "path,",

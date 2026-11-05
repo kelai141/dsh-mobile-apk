@@ -135,6 +135,13 @@
       "id": "llm-subscriptions",
       "pkg": "dsh-plugin-subscriptions",
       "repo": "vendor/dsh-plugin-subscriptions"
+    },
+    {
+      "id": "linux-bootstrap",
+      "pkg": "@dsh-android/linux-bootstrap",
+      "repo": "plugins/dsh-linux-bootstrap",
+      "dynamicOnly": true,
+      "why": "随快照注入（loader 需要能 import '@dsh-android/linux-bootstrap'）但不进 profile patch：apply() 需要函数型 config（linuxAssetIO），YAML 装配表达不了，只由宿主在用户显式启用时动态加载。登记进 inserted 是版本钉覆盖面要求；check-patch-mounts / check-contract 按 scripts/plugin-dirs.json 的 dynamicOnly 同一登记豁免挂载判定，其余包照旧判红。"
     }
   ],
   "symbols": [

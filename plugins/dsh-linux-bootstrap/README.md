@@ -7,8 +7,12 @@ is independent of the DSH Mobile app version.
 
 Both plugins in this system are **our own experimental internal plugins**:
 
-* They ship in the built-in (hard) plugin directory, but they are **not enabled
-  by default** — presence is not activation.
+* The bootstrap is distributed with the app in the built-in (hard) plugin
+  directory, but it is **not enabled by default** — presence is not activation.
+  It is not mounted in the Cordis profile either: the host loads it only once the
+  user explicitly enables the Linux environment (see `docs/DECISIONS.md` D-014).
+* The runtime plugin, Bionilux, the rootfs and the shared glibc Node are **not**
+  distributed with the app: they are fetched on demand from a versioned Release.
 * Installing a new DSH Mobile APK or publishing a new Linux release never enables
   a plugin, and never re-enables one the user turned off.
 * The Linux environment only becomes usable after the user explicitly enables the
@@ -27,11 +31,35 @@ ctx.plugin(linuxBootstrap, {
   extractArchive,          // required: safe extractor (no shell tar)
   appVersionProvider,      // DSH Mobile version (function, getVersion(), or string)
   managerProvider,         // optional: build the manager after the runtime plugin loads
+  arch,                    // optional: 'arm64' or 'x64'; defaults to process.arch
 })
 ```
 
 `apply(ctx, config)` publishes the service as `ctx.provide('linuxBootstrap', service)`
 and returns it.
+
+### Architecture and runtime defaults
+
+The host architecture comes from the explicit arch option, or from process.arch
+when it is omitted. Only arm64 and x64 are accepted; any other host architecture
+raises an explicit error rather than guessing.
+
+The canonical runtime IDs are:
+
+| Host | Default runtime ID |
+|---|---|
+| arm64 | debian-minimal |
+| x64 | debian-minimal-x64 |
+
+status() reports architecture, defaultRuntimeId, runtimeId and only the runtimes
+available for this host. An install, reinstall or automatic update without an
+explicit ID selects that architecture's canonical ID. An explicit ID that
+belongs to another architecture is rejected before host activation, and a
+manifest without a runtime for this architecture fails closed instead of
+falling back to another architecture. A manifest must use unique IDs. Custom IDs
+remain valid when explicitly selected; an omitted ID requires the host's default
+to be present. The historical `DEFAULT_RUNTIME_ID` export remains an ARM64-only
+compatibility constant; new callers should use `defaultRuntimeIdForArch()`.
 
 ### Required IO
 
@@ -43,6 +71,12 @@ and returns it.
   reject absolute paths, `..` traversal and symlinks escaping `destination`.
   The runtime package is rejected if it does not contain
   `package.json` named `@dsh-android/linux-runtime` with a safe `lib/index.js`.
+* When the host has already fetched and extracted the bundle itself — the shipped
+  arrangement, where the settings client triggers the host and `.tar.xz` is
+  decoded host-side (see `docs/DECISIONS.md` D-015) — both hooks may be
+  pass-through. Nothing is trusted on that basis: the bootstrap re-verifies the
+  staged content against the manifest before it activates, so a reuse result is a
+  verification outcome and never an assumption.
 
 ### Host adapter (`linuxPluginHost`)
 
@@ -76,6 +110,9 @@ re-adding it, and only an explicit install can bring it back.
 `installedSystemMobileVersion`, `autoUpdate`, `availableVersion`,
 `updateAvailable`, `updateBlocked`, `busy`, `operation`, `runtime`,
 `injectionActivated`, `enabled`, `pluginReleaseUrls`, `lastCheckAt` and `error`.
+
+The status object also includes architecture, defaultRuntimeId, runtimeId and
+the host-architecture runtimes list.
 
 ## Update policy
 

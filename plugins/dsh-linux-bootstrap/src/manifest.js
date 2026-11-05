@@ -5,6 +5,27 @@ export const BOOTSTRAP_ASSET_NAME = 'linux-bootstrap-plugin.tar.xz'
 export const RUNTIME_ASSET_NAME = 'linux-runtime-plugin.tar.xz'
 export const RUNTIME_PACKAGE_NAME = '@dsh-android/linux-runtime'
 export const RUNTIME_ENTRY = 'lib/index.js'
+export const SUPPORTED_ARCHITECTURES = Object.freeze(['arm64', 'x64'])
+export const DEFAULT_RUNTIME_IDS = Object.freeze({
+  arm64: 'debian-minimal',
+  x64: 'debian-minimal-x64',
+})
+
+/** Resolve the host architecture explicitly, or from the Node process when omitted. */
+export function resolveHostArchitecture(value) {
+  if (value !== undefined) {
+    if (!SUPPORTED_ARCHITECTURES.includes(value)) throw new TypeError('arch must be arm64 or x64')
+    return value
+  }
+  if (SUPPORTED_ARCHITECTURES.includes(process.arch)) return process.arch
+  throw new Error(`Unsupported host architecture ${process.arch}; pass arch: 'arm64' or 'x64' explicitly`)
+}
+
+export function defaultRuntimeIdForArch(arch) {
+  const id = DEFAULT_RUNTIME_IDS[arch]
+  if (!id) throw new TypeError('arch must be arm64 or x64')
+  return id
+}
 
 const RELEASE_DOWNLOAD = /^\/([^/]+)\/([^/]+)\/releases\/download\/([^/]+)\/([^/]+)$/
 const RELEASE_PAGE = /^\/([^/]+)\/([^/]+)\/releases\/tag\/([^/]+)$/
@@ -77,17 +98,51 @@ export function validateManifestShape(manifest, latestTag) {
     if (!runtime || typeof runtime !== 'object' || !/^[a-z0-9][a-z0-9-]*$/.test(runtime.id ?? '') || typeof runtime.label !== 'string' || typeof runtime.architecture !== 'string' || typeof runtime.backend !== 'string') {
       throw new TypeError('Each runtime requires id, label, architecture, and backend')
     }
+    if (!SUPPORTED_ARCHITECTURES.includes(runtime.architecture)) {
+      throw new TypeError('Each runtime architecture must be arm64 or x64')
+    }
     const copy = { ...runtime }
     for (const field of ['backendAsset', 'rootfsAsset', 'nodeAsset']) {
       if (copy[field] != null) copy[field] = releaseAssetUrl(copy[field], `runtimes.${runtime.id}.${field}`, release)
     }
     return copy
   })
-  if (!runtimes.some(({ id }) => id === 'debian-minimal')) throw new TypeError('Manifest must include the debian-minimal runtime')
+  const ids = new Set()
+  for (const runtime of runtimes) {
+    if (ids.has(runtime.id)) throw new TypeError(`Manifest contains duplicate runtime id ${runtime.id}`)
+    ids.add(runtime.id)
+  }
   const pluginReleaseUrl = manifest.pluginReleaseUrl === undefined ? undefined : validateReleasePage(manifest.pluginReleaseUrl, release)
   return { ...manifest, version, releaseVersion: version, plugins, runtimes, ...(pluginReleaseUrl ? { pluginReleaseUrl } : {}), _release: release }
 }
 
 export function findRuntime(manifest, runtimeId) {
   return manifest.runtimes.find((runtime) => runtime.id === runtimeId) ?? null
+}
+
+/**
+ * Resolve the runtime to install for this host.
+ *
+ * An omitted id selects the canonical runtime for the host architecture. An
+ * explicit id is never retargeted: a runtime that belongs to another
+ * architecture is rejected instead of falling back to a different id.
+ */
+export function selectRuntimeForArch(manifest, runtimeId, arch) {
+  const id = runtimeId ?? defaultRuntimeIdForArch(arch)
+  const runtime = findRuntime(manifest, id)
+  if (!runtime) {
+    const available = manifest.runtimes
+      .filter((candidate) => candidate.architecture === arch)
+      .map((candidate) => candidate.id)
+    throw new Error(
+      `Runtime ${id} for ${arch} is not present in the release manifest` +
+        (available.length > 0 ? ` (available: ${available.join(', ')})` : ''),
+    )
+  }
+  if (runtime.architecture !== arch) {
+    throw new Error(
+      `Runtime ${id} targets ${runtime.architecture}, but this host is ${arch}; refusing to install a different architecture`,
+    )
+  }
+  return runtime
 }

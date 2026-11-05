@@ -21,8 +21,8 @@
  */
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { cp, lstat, mkdir, readdir } from 'node:fs/promises'
-import { isAbsolute, join, resolve, sep } from 'node:path'
+import { cp, lstat, mkdir, readdir, readFile, readlink, symlink } from 'node:fs/promises'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 /** 与 Kotlin `LinuxAssetIO.ENV_DIR` 同口径（`check-linux-host-staging-invariant` 守）。 */
 export const LINUX_ENV_DIR = 'linux-environment'
@@ -112,22 +112,36 @@ async function assertPlainDirectory(directory: string, code: string, what: strin
 }
 
 /**
- * 复制目录树，拒绝符号链接。
+ * 复制目录树。插件拒绝链接；rootfs/Node 仅复制指向各自树内的链接本身。
  *
  * 宿主侧的树来自 Kotlin 的硬化解包（`SnapshotExtractor` 已拒穿越/符号链接逃逸），这里是
  * **第二道**：跨语言边界时不信上游结论，踏到的每个条目的实时类型才是判据。
  */
-async function copyTreeNoSymlinks(source: string, destination: string): Promise<void> {
+async function copyStagedTree(source: string, destination: string, kind = 'plugin', sourceRoot = source): Promise<void> {
   for (const entry of await readdir(source, { withFileTypes: true })) {
     const from = join(source, entry.name)
     const to = join(destination, entry.name)
     const info = await lstat(from)
     if (info.isSymbolicLink()) {
-      throw new LinuxHostAssetError(CODE_HOST_TREE_UNSAFE, `宿主解包树含符号链接：${entry.name}`)
+      if (kind !== 'rootfs' && kind !== 'node') {
+        throw new LinuxHostAssetError(CODE_HOST_TREE_UNSAFE, `宿主解包树含符号链接：${entry.name}`)
+      }
+      const link = await readlink(from)
+      if (link.includes('\u0000') || (isAbsolute(link) && kind !== 'rootfs')) {
+        throw new LinuxHostAssetError(CODE_HOST_TREE_UNSAFE, `不安全的资产符号链接：${entry.name}`)
+      }
+      const target = isAbsolute(link) ? resolve(sourceRoot, `.${link}`) : resolve(dirname(from), link)
+      const inside = relative(sourceRoot, target)
+      if (inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
+        throw new LinuxHostAssetError(CODE_HOST_TREE_UNSAFE, `资产符号链接越界：${entry.name}`)
+      }
+      // Copy the link itself. Never dereference a guest path on the host.
+      await symlink(isAbsolute(link) ? relative(dirname(from), target) || '.' : link, to)
+      continue
     }
     if (info.isDirectory()) {
       await mkdir(to, { recursive: true })
-      await copyTreeNoSymlinks(from, to)
+      await copyStagedTree(from, to, kind, sourceRoot)
     } else if (info.isFile()) {
       await cp(from, to)
     } else {
@@ -139,9 +153,9 @@ async function copyTreeNoSymlinks(source: string, destination: string): Promise<
 /** bootstrap 需要的适配器面：只有这两个，且都是透传。 */
 export interface HostAssetIO {
   /** 交回宿主已暂存的归档路径；宿主没准备好就抛错（**不下载**）。 */
-  downloadAsset(asset: { sha256?: unknown }, options?: { destination?: string }): Promise<string>
+  downloadAsset(asset: { sha256?: unknown }, options?: { destination?: string } | string): Promise<string>
   /** 把宿主已解包的树复制进 `destination`；宿主没准备好就抛错（**不解压**）。 */
-  extractArchive(archivePath: string, destination: string): Promise<void>
+  extractArchive(archivePath: string, destination: string, options?: { kind?: string }): Promise<void>
 }
 
 /**
@@ -154,7 +168,7 @@ export function createHostAssetIO(options: { filesDir: string }): HostAssetIO {
   if (typeof filesDir !== 'string' || filesDir === '') throw new TypeError('filesDir is required')
 
   return {
-    async downloadAsset(asset: { sha256?: unknown }): Promise<string> {
+    async downloadAsset(asset: { sha256?: unknown }, options?: { destination?: string } | string): Promise<string> {
       const archive = retainedArchiveFor(filesDir, asset?.sha256)
       if (archive === null) {
         throw new LinuxHostAssetError(CODE_ASSET_SPEC_INVALID, `清单摘要不合规，拒绝推导落点：${String(asset?.sha256)}`)
@@ -172,10 +186,17 @@ export function createHostAssetIO(options: { filesDir: string }): HostAssetIO {
         throw new LinuxHostAssetError(CODE_HOST_TREE_UNSAFE, `保留的归档必须是普通文件：${archive}`)
       }
       // 只交路径：bootstrap 会自行复制并**重算摘要与体量**后才解包。
+      // Runtime IO writes into the manager's requested cache file; bootstrap IO
+      // consumes a returned path. Both reuse the same native verified archive.
+      const destination = typeof options === 'string' ? options : options?.destination
+      if (destination && resolve(destination) !== resolve(archive)) {
+        await cp(archive, destination)
+        return destination
+      }
       return archive
     },
 
-    async extractArchive(archivePath: string, destination: string): Promise<void> {
+    async extractArchive(archivePath: string, destination: string, options?: { kind?: string }): Promise<void> {
       // 按**归档自身的摘要**定位宿主已解包的树：这样解包结果与 bootstrap 刚验过的字节绑定，
       // 而不是靠调用顺序或调用方给的任何路径。
       const digest = await sha256OfFile(archivePath)
@@ -192,7 +213,7 @@ export function createHostAssetIO(options: { filesDir: string }): HostAssetIO {
         }
       }
       await mkdir(destination, { recursive: true })
-      await copyTreeNoSymlinks(tree, destination)
+      await copyStagedTree(tree, destination, options?.kind)
     },
   }
 }
@@ -207,7 +228,7 @@ export const LINUX_RELEASE_URL = 'https://github.com/kelai141/dsh-bionilux/relea
  * `<stagingDirectory>/<sha256>/` 当成**它自己的包槽位**（先 `rename` 到 `.backup-*`，成功后再
  * 递归删除），若指向宿主暂存的 `<root>/staging/<sha256>/`，它会**删掉宿主保留的归档与解包树**，
  * 而那两样正是引擎侧复验的依据。所以两者必须分开：宿主暂存 `<root>/staging/<sha256>/`，
- * bootstrap 包槽 `<root>/staging/runtime-plugin/<sha256>/`。
+ * bootstrap 包槽 `<root>/plugins/runtime/<sha256>/`，同时属于宿主允许的插件根。
  *
  * 注意这里**不含**启用决策：本函数只造配置，启用与否仍由用户显式动作决定（默认不启用）。
  */
@@ -218,11 +239,46 @@ export function createLinuxBootstrapConfig(options: {
 }): Record<string, unknown> {
   const { filesDir, appVersion, releaseUrl = LINUX_RELEASE_URL } = options
   const dataDir = linuxEnvironmentRoot(filesDir)
+  const linuxAssetIO = createHostAssetIO({ filesDir })
   return {
     dataDir,
     releaseUrl,
-    linuxAssetIO: createHostAssetIO({ filesDir }),
+    linuxAssetIO,
+    fetchImpl: createLinuxReleaseFetch({ filesDir }),
+    runtimePluginConfig: linuxAssetIO,
     appVersionProvider: () => appVersion,
-    stagingDirectory: join(dataDir, STAGING_DIR, 'runtime-plugin'),
+    stagingDirectory: join(dataDir, 'plugins', 'runtime'),
+  }
+}
+
+/** Debug APKs can replay official release requests against an ADB-reversed local fixture. */
+export function createLinuxReleaseFetch(options: {
+  filesDir: string
+  debug?: boolean
+  fetchImpl?: typeof fetch
+}): typeof fetch {
+  const upstream = options.fetchImpl ?? globalThis.fetch
+  return async (input, init) => {
+    if (!(options.debug ?? process.env.DSH_DEBUG_BUILD === '1')) return upstream(input, init)
+    let origin: string
+    try { origin = (await readFile(join(linuxEnvironmentRoot(options.filesDir), 'debug-download-origin'), 'utf8')).trim() }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return upstream(input, init); throw error }
+    const base = new URL(origin)
+    if (base.protocol !== 'http:' || base.hostname !== '127.0.0.1' || !base.port || base.pathname !== '/' || base.username || base.password || base.search || base.hash) {
+      throw new Error('Debug Linux download origin must be an explicit IPv4 loopback HTTP origin')
+    }
+    const official = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url)
+    const allowed = official.protocol === 'https:' && !official.username && !official.password && !official.search && !official.hash && (
+      (official.hostname === 'api.github.com' && official.pathname === '/repos/kelai141/dsh-bionilux/releases/latest') ||
+      (official.hostname === 'github.com' && /^\/kelai141\/dsh-bionilux\/releases\/download\/[^/]+\/[^/]+$/.test(official.pathname))
+    )
+    if (!allowed) throw new Error('Debug Linux download requested an unsupported official release URL')
+    const response = await upstream(new URL(official.pathname, base), { ...init, redirect: 'error' })
+    // Preserve the official identity for the production manifest origin check.
+    return new Proxy(response, { get(target, key) {
+      if (key === 'url') return official.href
+      const value = Reflect.get(target, key, target)
+      return typeof value === 'function' ? value.bind(target) : value
+    } })
   }
 }
