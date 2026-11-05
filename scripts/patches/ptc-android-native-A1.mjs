@@ -89,8 +89,13 @@ export function assertPolicyGate(text) {
   const spawnPaths = [...text.matchAll(/this\.ctx\.sandbox\.confine\(argv,/g)]
   if (gates.length === 0 || spawnPaths.length === 0) fail('resolved-policy confinement gate: expected reviewed anchors, got gates=' + gates.length + ', spawn paths=' + spawnPaths.length)
   if (gates.length !== spawnPaths.length) fail('resolved-policy confinement gate: every sandbox spawn path must share the reviewed gate (gates=' + gates.length + ', spawn paths=' + spawnPaths.length + ')')
-  if (!/error instanceof SandboxUnavailableError \? (['"])sandbox-unavailable\1/.test(text)) fail('sandbox-unavailable classification absent')
-  if (!/argv:\s*confined\?\.argv \?\? argv/.test(text)) fail('spawn no longer consumes enforcing argv')
+  // 0.2.2-rc.1：失败分类从「只认 SandboxUnavailableError」扩成四路（见产物 1035/1202/1205 行）：
+  //   SandboxUnavailableError || (confined && isRunnerSpawnFailure(...)) ? "sandbox-unavailable" : ...
+  // 判据改成「分类产物必须仍在，且 sandbox-unavailable 字面量必须出现」——上游再加/改分支不会被误判成通过，
+  // 单纯把三重判断重排也不会假红。
+  if (!/isRunnerSpawnFailure\(/.test(text) || !/classifyRunnerFailure\(/.test(text)) fail('reviewed sandbox failure classifiers absent')
+  if (!/(["'])sandbox-unavailable\1/.test(text)) fail('sandbox-unavailable classification absent')
+  if (!/argv:\s*this\.confined\?\.argv \?\? argv/.test(text)) fail('spawn no longer consumes enforcing argv')
 }
 /** The OS allowlist must not expose host environment values to model-authored JS. */
 export function assertChildClearing(text, source = false) {
@@ -107,21 +112,34 @@ export function assertChildClearing(text, source = false) {
 function helper(source) {
   return source ? LAUNCH_HELPER_JS.replace('function dshMobilePtcLaunchPrefix(executable)', 'function dshMobilePtcLaunchPrefix(executable: string): string[]') : LAUNCH_HELPER_JS
 }
-function launchBlock(indent, source) {
+/**
+ * 0.2.2-rc.1 起上游 start() 换了三处形态：signal 变成 this.controller.signal、
+ * settled 守卫换成 if (this.closed) return;、bootstrapArgs 多带一个 this.retainsState。
+ * 这三样都不是本补丁要改的东西，所以从被替换块里原样捕获再原样带出，
+ * 而不是写死一份——否则会把上游新加的守卫与新参数顺手丢掉。
+ */
+function launchShape(block) {
+  const signal = /(?:undefined|void 0), ([^)]+)\);/.exec(block)
+  const guard = /if \(this\.closed\) return;|if \(settled\) return await result\.promise;?/.exec(block)
+  const bootstrap = /(\.\.\.bootstrapArgs\([^\n]*?\))/.exec(block)
+  if (!signal || !guard || !bootstrap) fail('launch block shape not recognized')
+  return { signal: signal[1], guard: guard[0], bootstrap: bootstrap[1] }
+}
+function launchBlock(indent, source, shape) {
   const absent = source ? 'undefined' : 'void 0'
   const tick = String.fromCharCode(96)
   return [
-    'const executable = await this.ctx.subprocess.resolveExecutable(this.config.launch.executable, ' + absent + ', signal);',
-    'if (settled) return await result.promise;',
+    'const executable = await this.ctx.subprocess.resolveExecutable(this.config.launch.executable, ' + absent + ', ' + shape.signal + ');',
+    shape.guard,
     'const launchPrefix = dshMobilePtcLaunchPrefix(executable);',
     'if (launchPrefix.length === 2) {',
-    '  launchPrefix[1] = await this.ctx.subprocess.resolveExecutable(launchPrefix[1], ' + absent + ', signal);',
-    '  if (settled) return await result.promise;',
+    '  launchPrefix[1] = await this.ctx.subprocess.resolveExecutable(launchPrefix[1], ' + absent + ', ' + shape.signal + ');',
+    '  ' + shape.guard,
     '}',
     "const packaged = this.config.launch.kind === " + (source ? "'embedded'" : '"embedded"') + ';',
     'const heapFlag = ' + tick + '--max-old-space-size=$' + '{this.config.maxOldGenerationSizeMb}' + tick + ';',
     '// Heap options belong to Node, never between linker64 and its absolute program path.',
-    'const argv = [...launchPrefix, ...bootstrapArgs(this.ctx.fs, this.config.launch, this.config.maxMessageBytes)];',
+    'const argv = [...launchPrefix, ' + shape.bootstrap + '];',
   ].map(line => indent + line).join('\n')
 }
 /** Replace the reviewed launch block, including the old L1 guard if it was applied first. */
@@ -130,21 +148,23 @@ export function patchRuntimeIndex(text, source = false) {
   if (text.includes(LAUNCH_MARKER)) {
     if (!text.includes(helper(source)) || text.split(LAUNCH_MARKER).length !== 2) fail('incomplete or modified launch helper')
     const launch = oneMatch(text, /^([\t ]*)const executable = await this\.ctx\.subprocess\.resolveExecutable\(this\.config\.launch\.executable,[\s\S]*?\n\1const argv = \[\.\.\.launchPrefix,[^\n]*\];/m, 'patched launch block')
-    if (launch[0] !== launchBlock(launch[1], source)) fail('modified native launch block')
+    if (launch[0] !== launchBlock(launch[1], source, launchShape(launch[0]))) fail('modified native launch block')
     oneMatch(text, /env\.NODE_OPTIONS = heapFlag;/, 'owned heap flag')
     if (/if \(packaged\) \{[^}]*env\.NODE_OPTIONS = heapFlag/.test(text)) fail('heap flag is still packaged-only')
     return text
   }
-  const launch = oneMatch(text, /^([\t ]*)const executable = await this\.ctx\.subprocess\.resolveExecutable\(this\.config\.launch\.executable, (?:undefined|void 0), signal\);?[\s\S]*?\n\1const argv = \[[\s\S]*?\];?\n/m, 'upstream Node launch block')
-  if (!/if \(settled\) return await result\.promise/.test(launch[0])
+  // 0.2.2-rc.1：第一行第三个实参从 signal 变成 this.controller.signal，守卫从 settled 变成 this.closed，
+  // bootstrapArgs 增一人 this.retainsState；锚点按新形态放宽（捕获而非写死），其余审阅条件不放宽。
+  const launch = oneMatch(text, /^([\t ]*)const executable = await this\.ctx\.subprocess\.resolveExecutable\(this\.config\.launch\.executable, (?:undefined|void 0), [^)]+\);?[\s\S]*?\n\1const argv = \[[\s\S]*?\];?\n/m, 'upstream Node launch block')
+  if (!/if \((?:this\.closed\) return|settled\) return await result\.promise)/.test(launch[0])
     || !/const packaged = this\.config\.launch\.kind === (['"])embedded\1/.test(launch[0])
     || !/const heapFlag = \u0060--max-old-space-size=\$\{this\.config\.maxOldGenerationSizeMb\}\u0060/.test(launch[0])
-    || !/bootstrapArgs\(this\.ctx\.fs, this\.config\.launch, this\.config\.maxMessageBytes\)/.test(launch[0])) fail('launch block differs from reviewed upstream')
+    || !/bootstrapArgs\(this\.ctx\.fs, this\.config\.launch, this\.config\.maxMessageBytes(?:, this\.retainsState)?\)/.test(launch[0])) fail('launch block differs from reviewed upstream')
   const noComments = launch[0].replace(/^[\t ]*\/\/[^\n]*\n/gm, '')
   if (/\b(?:spawn|confine|catch|policy|env)\b/.test(noComments)) fail('unexpected statements in launch block')
   const oldLinkerGuard = launch[0].includes('resolved node executable is the system dynamic linker')
   if (launch[0].includes('__dshMobileExecBase') !== oldLinkerGuard) fail('unrecognized legacy executable guard')
-  text = replaceMatch(text, launch, launchBlock(launch[1], source) + '\n')
+  text = replaceMatch(text, launch, launchBlock(launch[1], source, launchShape(launch[0])) + '\n')
   const nested = /^([\t ]*)if \(packaged\) \{\n\1[\t ]+env\.DSH_PTC_RUNTIME_NODE = (['"])1\2;?\n\1[\t ]+env\.NODE_OPTIONS = heapFlag;?\n\1\};?/m.exec(text)
   if (nested) text = replaceMatch(text, nested, nested[1] + 'env.NODE_OPTIONS = heapFlag;\n' + nested[1] + 'if (packaged) {\n' + nested[1] + '  env.DSH_PTC_RUNTIME_NODE = "1";\n' + nested[1] + '}')
   else if (!/env\.NODE_OPTIONS = heapFlag;/.test(text)) fail('owned heap flag anchor absent')
