@@ -101,6 +101,10 @@ const INJECT = [
   '        info = tarfile.TarInfo("home/.dsh/profiles/web/node_modules/@dsh-android/x/lib/index.js")',
   '        info.size = len(extra)',
   '        t.addfile(info, io.BytesIO(extra))',
+  // 完成标记：真实 inject-snapshot.py 在产物写完后向 stdout 打 `written: <path> <bytes>`，
+  // build-release.ps1 的分层判据（#1636 侧）以此作为「产物确实写完了」的第三层证据。
+  // 桩必须复现这个契约，否则正控会被判红——那不是判据太严，是夹具没模拟真实输出。
+  'print("written: %s %d" % (out, os.path.getsize(out)))',
   'sys.exit(exit_code)',
   '',
 ].join('\n')
@@ -130,7 +134,13 @@ test('注入段：python 退出码非 0 时不得用半写快照覆盖输入（i
       '$root = ' + JSON.stringify(work),
       '$pluginSrcs = @()',
       '$abi = @{ n = "arm64"; f = ' + JSON.stringify(snap) + '; expect = "aarch64" }',
-      body.replace(/\$injectPy = Join-Path \$root "[^"]*"/, '$injectPy = ' + JSON.stringify(injectPy)),
+      // 两处重定向必须**串联**：body.replace 是纯函数，写成数组里的两个独立元素时第二处结果会被丢弃，
+      // 于是 $root 仍指向临时目录、第三层去跑一个不存在的路径（MODULE_NOT_FOUND），正控假红。
+      //   ① $injectPy 指到夹具的合成 python；
+      //   ② 第三层 `(Join-Path $root "scripts\check-injection-output.mjs")` 指到真实仓库里的那份门禁。
+      body
+        .replace(/\$injectPy = Join-Path \$root "[^"]*"/, '$injectPy = ' + JSON.stringify(injectPy))
+        .replace(/\(Join-Path \$root "scripts\\check-injection-output\.mjs"\)/, JSON.stringify(join(repoRoot, 'scripts', 'check-injection-output.mjs'))),
       '',
     ].join('\n')
     const p = join(work, 'run-' + tag + '.ps1')
@@ -146,7 +156,11 @@ test('注入段：python 退出码非 0 时不得用半写快照覆盖输入（i
   const failed = runBlock('truncated', 2, 1, 'fail')
   const failedOut = (failed.stdout ?? '') + (failed.stderr ?? '')
   assert.notEqual(failed.status, 0, 'python 非 0 时必须中止（旧实现只看文件存在，会放行）：' + failedOut.slice(-400))
-  assert.match(failedOut, /快照注入失败（inject-snapshot\.py exit 1）/, '判红理由必须点名退出码：' + failedOut.slice(-400))
+  // 文案口径以 build-release.ps1 的分层实现为准（#1636 侧）：必须同时点名「哪个 ABI」与「退出码」，
+  // 只报其中一个都不够——前者缺了不知道修哪条腿，后者缺了分不清是失败还是产物不完整。
+  assert.match(failedOut, /快照注入失败/, '判红理由必须点名失败面：' + failedOut.slice(-400))
+  assert.match(failedOut, /python exit 1/, '判红理由必须点名退出码：' + failedOut.slice(-400))
+  assert.match(failedOut, /arm64/, '判红理由必须点名哪个 ABI：' + failedOut.slice(-400))
   assert.deepEqual(readFileSync(snap), original, '输入快照必须逐字节不变（不得被半写件覆盖）')
   assert.equal(existsSync(snap + '.new'), false, '半写产物必须被删除，不能留在原地等下一次重跑覆盖输入')
 
@@ -155,7 +169,16 @@ test('注入段：python 退出码非 0 时不得用半写快照覆盖输入（i
   const truncated = runBlock('truncated', 2, 0, 'truncated')
   const truncatedOut = (truncated.stdout ?? '') + (truncated.stderr ?? '')
   assert.notEqual(truncated.status, 0, '成员数少于输入时必须中止：' + truncatedOut.slice(-400))
-  assert.match(truncatedOut, /成员数少于输入/, '判红理由必须点名成员数对账：' + truncatedOut.slice(-400))
+  // 截断驱动在分层实现（#1636 侧）里被「完成标记 written:」这一层先拦下——两条判据都指向同一事实
+  // （产物不完整），实现取更靠前的那层。断言点名「产物不完整」这一族文案，不锁死具体是哪一层，
+  // 否则判据会随实现层次调整而假红（但必须仍然是**判红**，且点名不完整面）。
+  // 分层实现的第三层（check-injection-output.mjs）会给出「条目数 N < 输入 M」的判红文案；
+  // 第一层（退出码）与第二层（完成标记）也可能先命中。断言只要求**点名产物不完整这一族**，
+  // 不锁死具体哪一层 —— 否则判据会随实现层次调整而假红，而它本来要守的是「半写件不得覆盖输入」。
+  assert.match(
+    truncatedOut,
+    /没有完成标记 written:|成员数少于输入|条目数 \d+ < 输入 \d+/, '判红理由必须点名产物不完整：' + truncatedOut.slice(-400),
+  )
   assert.deepEqual(readFileSync(snap), original, '输入快照必须逐字节不变')
 
   // ③ 正常驱动：退出码 0 且成员数只增不减 -> 必须放行并 Move-Item（判据不得恒红）。
@@ -174,7 +197,11 @@ test('注入段：python 退出码非 0 时不得用半写快照覆盖输入（i
   writeFileSync(snap, original)
   const completeButFailed = runBlock('copy', 0, 1, 'fail-complete')
   assert.notEqual(completeButFailed.status, 0, '退出码非 0 时即使产物完整也必须中止（a 判据）')
-  assert.match((completeButFailed.stdout ?? '') + (completeButFailed.stderr ?? ''), /inject-snapshot\.py exit 1/)
+  // 文案口径以分层实现为准：必须点名「退出码 1」与「哪个 ABI」，不锁死具体措辞（实现层不同、
+  // 但「退出码非 0 即中止」这一事实必须被说清，否则排查者分不清是失败还是产物不完整）。
+  const cbfOut = (completeButFailed.stdout ?? '') + (completeButFailed.stderr ?? '')
+  assert.match(cbfOut, /exit 1/, 'a 判据的判红文案必须点名退出码：' + cbfOut.slice(-400))
+  assert.match(cbfOut, /arm64/, 'a 判据的判红文案必须点名哪个 ABI：' + cbfOut.slice(-400))
   assert.deepEqual(readFileSync(snap), original, 'a 判据下输入必须不变')
 
   writeFileSync(snap, original)
@@ -185,11 +212,26 @@ test('注入段：python 退出码非 0 时不得用半写快照覆盖输入（i
     + ((withoutCodeGuard.stdout ?? '') + (withoutCodeGuard.stderr ?? '')).slice(-400))
 
   writeFileSync(snap, original)
+  /* 合并后「成员数对账」有**两层**：
+   *   ② build-release.ps1 的内联对账（$outCount -lt $inCount，来自 #1637 侧）
+   *   ③ check-injection-output.mjs 的独立门禁（来自 #1636 侧）
+   * 只去掉 ② 时 ③ 仍然拦住 —— 这是并集的价值（冗余判据），不是判据失效。
+   * 因此反证分两步：先证明 ② 单独承重（去掉 ② 后 ③ 给出**它自己的**判红文案），
+   * 再证明 ③ 也承重（两层都去掉才放行，且输入确实被截断件覆盖 = 旧缺陷形态复现）。 */
   const withoutCountGuard = runBlock('truncated', 2, 0, 'noguard-count',
     (text) => text.replace(/if \(\$outCount -lt \$inCount\) \{[\s\S]*?\n    \}/, ''))
-  assert.equal(withoutCountGuard.status, 0,
-    '去掉成员数对账后必须恢复放行（否则本判据不承重）：'
-    + ((withoutCountGuard.stdout ?? '') + (withoutCountGuard.stderr ?? '')).slice(-400))
+  const noCountOut = (withoutCountGuard.stdout ?? '') + (withoutCountGuard.stderr ?? '')
+  assert.notEqual(withoutCountGuard.status, 0,
+    '去掉内联对账后独立门禁必须接手（两层冗余不得同时失效）：' + noCountOut.slice(-400))
+  assert.match(noCountOut, /条目数 \d+ < 输入 \d+/, '接手的必须是独立门禁自己的判红文案：' + noCountOut.slice(-400))
+  writeFileSync(snap, original)
+  const withoutBothGuards = runBlock('truncated', 2, 0, 'noguard-both', (text) => text
+    .replace(/if \(\$outCount -lt \$inCount\) \{[\s\S]*?\n    \}/, '')
+    .replace(/\(Join-Path \$root "scripts\\check-injection-output\.mjs"\)/, 'node -e 0')
+    .replace(/if \(\$injectVerifyCode -ne 0\) \{[\s\S]*?\n    \}/, ''))
+  assert.equal(withoutBothGuards.status, 0,
+    '两层对账都去掉后必须恢复放行（否则本判据不承重）：'
+    + ((withoutBothGuards.stdout ?? '') + (withoutBothGuards.stderr ?? '')).slice(-400))
   const afterNoGuard = spawnSync('tar', ['-tf', snap], { encoding: 'utf8' })
   assert.doesNotMatch(afterNoGuard.stdout ?? '', /usr\/lib\/m3\.bin/, '反证下输入应被截断件覆盖（旧缺陷形态）')
   writeFileSync(snap, original)

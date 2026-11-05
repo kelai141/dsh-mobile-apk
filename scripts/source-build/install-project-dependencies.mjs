@@ -5,7 +5,12 @@ import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { checkPackageLockRoot, lockDiffSummary, lockRewriteProblem } from './check-package-lock-roots.mjs'
+
+// 判据本体在 check-package-lock-roots.mjs（issue #1615 / #1637 侧）；此处 re-export 供单测与调用方使用，
+// 保持本模块原有的导出面不变（合并三支时两边各定义了一份，只保留独立模块那份）。
+export { lockRewriteProblem }
 
 /**
  * 两个 lock 之间的**图差异**（issue #1615）。

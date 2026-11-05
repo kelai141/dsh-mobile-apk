@@ -81,7 +81,10 @@ const shPath = (p) => {
 const bash = (script, env = {}) => {
   if (process.platform === 'win32') {
     const exports = Object.entries(env).map(([k, v]) => 'export ' + k + "='" + String(v).replace(/'/g, "'\\''") + "'").join('; ')
-    return spawnSync('wsl.exe', ['-e', 'bash', '-lc', (exports ? exports + '; ' : '') + script], { encoding: 'utf8', timeout: 180000 })
+    // 用 `-c` 而不是 `-lc`：登录 shell 会先跑 /etc/profile 与 ~/.bash_profile，其中的 PATH 赋值会**覆盖**
+    // 调用方传入的 export PATH=<stub bin>，于是 node 桩不被命中、payload 也不落盘 —— 反证在 Windows 上
+    // 假失败（实测：同一脚本用 `-c` 时 payload=true，用 `-lc` 时 false）。判据不该依赖登录 shell 的初始化。
+    return spawnSync('wsl.exe', ['-e', 'bash', '-c', (exports ? exports + '; ' : '') + script], { encoding: 'utf8', timeout: 180000 })
   }
   return spawnSync('/bin/bash', ['-lc', script], { encoding: 'utf8', timeout: 180000, env: { ...process.env, ...env } })
 }
@@ -140,6 +143,11 @@ test('反证：改回内插写法后，同一敌意输入必须被执行（判�
     .replace(/\$\{\{\s*matrix\.abi\s*\}\}/g, 'arm64')
     .replace(/"\$SUFFIX"/, '"' + hostile + '"')
   assert.notEqual(legacy, step.run, '反证前提不成立：脚本里找不到 "$SUFFIX" 形态')
-  bash('export PATH="' + pathPrefix + ':$PATH"; cd ' + shPath(work) + '; ' + legacy)
+  // 反证要证明的是「内插形态下敌意输入会被 shell 执行」。真实步骤以 `set -euo pipefail` 开头，
+  // 若不给 $ABI 赋值，`set -u` 会在展开 $SUFFIX **之前**就中止脚本 —— payload 自然不落盘，
+  // 反证就变成「永远红」（Linux CI 实测：bash: line 2: ABI: unbound variable）。
+  // 这不是判据变强，是判据失去判别力：必须补齐步骤运行时会有的 env，让脚本真的走到那条命令。
+  const abi = step.env.ABI?.replace(/\$\{\{\s*matrix\.abi\s*\}\}/g, 'arm64') ?? 'arm64'
+  bash('export PATH="' + pathPrefix + ':$PATH"; cd ' + shPath(work) + '; export ABI=' + JSON.stringify(abi) + '; ' + legacy)
   assert.equal(existsSync(payload), true, '内插写法下敌意输入必须被执行（否则反证没有判别力）')
 })

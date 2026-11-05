@@ -42,15 +42,59 @@ export function checkPackageLockRoot(directory) {
  * @param {{inputLockSha256: string, resolvedLockSha256: string}} digests 重写前后的锁文件摘要。
  * @returns {string|null} 判红文案；相等（无位移）时返回 null。
  */
-export function lockRewriteProblem({ inputLockSha256, resolvedLockSha256 } = {}) {
-  if (typeof inputLockSha256 !== 'string' || typeof resolvedLockSha256 !== 'string'
-    || inputLockSha256.length === 0 || resolvedLockSha256.length === 0) {
+export function lockRewriteProblem({
+  inputLockSha256, resolvedLockSha256,
+  // 参数别名：合并三支时两边的调用点用了不同名字（#1636 的 inputSha256 / #1637 的 inputLockSha256），
+  // 判据本体只有一个，别名在此收口，避免为了名字再造一份实现。
+  inputSha256, resolvedSha256,
+  inputLockText, resolvedLockText, inputText, resolvedText, directoryArg,
+} = {}) {
+  const a = inputLockSha256 ?? inputSha256
+  const b = resolvedLockSha256 ?? resolvedSha256
+  const inText = inputLockText ?? inputText
+  const resText = resolvedLockText ?? resolvedText
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length === 0 || b.length === 0) {
     return '锁文件摘要缺席（input/resolved）——无法判断依赖解析是否就地重写了 lock'
   }
-  if (inputLockSha256 === resolvedLockSha256) return null
-  return '依赖解析就地重写了 package-lock.json（input ' + inputLockSha256.slice(0, 12)
-    + ' != resolved ' + resolvedLockSha256.slice(0, 12) + '）：锁文件必须先在 PR 里更新并提交，'
-    + '不得由 CI 从 registry 补齐 resolved/integrity 后照单安装（issue #1615）'
+  if (a === b) return null
+  // 判红文案必须**点名「就地重写」**并给出差异面：只报一个哈希差，排查者看不出影响范围。
+  // 差异面走 lockDiffSummary（结构化），并在图完全相同时如实说明「只有字节不同」——
+  // 那一类正是「提交的 lock 缺 resolved/integrity、CI 从 registry 补齐」的可判形态。
+  // 差异面：lockDiffSummary 返回结构化对象，这里格式化成可读文本。
+  // 「图完全相同、只有字节不同」必须如实说明——那一类正是「提交的 lock 缺 resolved/integrity、
+  // CI 从 registry 补齐」的可判形态，只说「哈希变了」会让排查者以为有版本变更。
+  let diff = '  (no lock text supplied)\n'
+  let graphIdentical = false
+  if (typeof inText === 'string' && typeof resText === 'string') {
+    try {
+      const d = lockDiffSummary(JSON.parse(inText), JSON.parse(resText))
+      const parts = []
+      if (d.counts.added > 0) parts.push('  added by CI (' + d.counts.added + '): ' + d.added.slice(0, 12).join(', '))
+      if (d.counts.removed > 0) parts.push('  removed (' + d.counts.removed + '): ' + d.removed.slice(0, 12).join(', '))
+      if (d.counts.changed > 0) parts.push('  changed (' + d.counts.changed + '): ' + d.changed.slice(0, 12).join(', '))
+      graphIdentical = parts.length === 0
+      // 「提交的 lock 缺 resolved/integrity、CI 从 registry 补齐」这一类必须**显式点名**：
+      // 只说「某个包 changed」维护者不知道该补什么字段；这一类的正确修法是重跑 --package-lock-only 并提交。
+      const before = JSON.parse(inText)?.packages ?? {}
+      const noResolved = Object.keys(before)
+        .filter((k) => k !== '' && before[k] && typeof before[k] === 'object' && !('resolved' in before[k]))
+      const noResolvedNote = noResolved.length > 0
+        ? '  no resolved in committed lock (' + noResolved.length + '): ' + noResolved.slice(0, 12).join(', ') + '\n'
+        : ''
+      diff = (parts.length === 0
+        ? '  (package graph unchanged; only metadata bytes differ)\n'
+        : parts.join('\n') + '\n') + noResolvedNote
+    } catch {
+      diff = '  (lock unparseable)\n'
+    }
+  }
+  return 'npm install --package-lock-only rewrote the committed package-lock.json ('
+    + String(a).slice(0, 16) + ' -> ' + String(b).slice(0, 16) + ').\n'
+    + 'The committed lock is incomplete (missing resolved/integrity, or stale), and CI must not silently '
+    + 'resolve it from the registry and install that graph.\n'
+    + 'Lock graph diff (committed -> resolved):\n' + diff
+    + (graphIdentical ? '  (no resolved/integrity delta in the package graph; only metadata bytes differ)\n' : '')
+    + 'Fix: update and commit the lock in a PR — (cd ' + String(directoryArg ?? '<dir>') + ' && npm install --package-lock-only --ignore-scripts).'
 }
 
 /** 锁文件结构性差异（用于把「重写了什么」打到日志里，不让差异只活在一个哈希里）。 */
