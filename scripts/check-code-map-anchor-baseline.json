@@ -1036,7 +1036,10 @@
     "S01 -> 引擎侧 linux-env 插件 | shell-termux 导出的 PROBE_BINARIES / REQUIRED_TOOLCHAIN / TOOLCHAIN_REPRESENTATIVE 被工具链状态的面板复用",
     "S01 -> 引擎侧 linux-env 插件 | 开发者选项的运行时缓存面板读写 /api/android/runtime-cache/scan 与 execute",
     "S01 -> 构建链 | 三个子仓由 profile-web.cordis.patch.yml 的 insert 行装载，快照构建只 pack 不 build",
-    "S01 -> 门禁脚本 | 注入类缺陷三条防线之二由 smoke-injections.mjs 与 boot-watchdog.test.mjs 常驻，脚本与源码脱同步即整条红"
+    "S01 -> 门禁脚本 | 注入类缺陷三条防线之二由 smoke-injections.mjs 与 boot-watchdog.test.mjs 常驻，脚本与源码脱同步即整条红",
+    "K06 -> 浏览器 JS 回执守卫 BrowserJsReplyGuard | 隔离 BrowserHost 的 evaluateJavascript 回执必须过这道守卫才回给引擎，避免把非本轮的迟到回执当成当轮结果",
+    "K06 -> 选择器白名单 ChooserAllowlist | 文件选择器回调只放行白名单内的来源，其余一律拒绝，防止任意页面借 chooser 读本地文件",
+    "K06 -> 远端投影策略 RemoteProjectionPolicy | 决定哪些页面元素可被投影到远端视图，是「远端能看到什么」的唯一判据"
   ],
   "sourceLines": {
     ".github/workflows/build-apk-source.yml:134": [
@@ -1592,7 +1595,7 @@
       "}"
     ],
     "OverlayPanel.kt:421": [
-      "val unit = LinearLayout(svc).apply {"
+      "val unit = BackKeyPanelLayout(svc, { svc.hidePanel() }).apply {"
     ],
     "OverlayPanel.kt:487": [
       "/** 块H-A1：完成态常驻文案（并入 overlay_display prefs，与上述两个模板同族，可覆写）。"
@@ -2731,9 +2734,6 @@
     "check-snapshot-builder-output.mjs:139": [
       "try { slim = JSON.parse(readFileSync(SLIM, 'utf8')) } catch (e) {"
     ],
-    "composer-insets.css.ts:13": [
-      "padding-bottom: max("
-    ],
     "composer-menu.css.ts:25": [
       "html[data-dsh-mobile-form] [data-composer-card] [data-dsh-popup] {"
     ],
@@ -3864,6 +3864,9 @@
     ],
     "plugins/dsh-android-vdisplay/src/status.ts:208": [
       "/**"
+    ],
+    "composer-insets.css.ts:21": [
+      "padding-bottom: max("
     ]
   },
   "symbols": {
@@ -4006,6 +4009,9 @@
     "scripts/check-code-map.mjs#UNIVERSE@60d8a536": true,
     "scripts/check-contract.mjs#collectConsumedSlots@2c28ea38": true,
     "BrowserHost.kt#showPayload@bfaa29a3": true,
-    "app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#navigateOp@176d6443": true
+    "app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#navigateOp@176d6443": true,
+    "app/src/main/java/com/dsharnessmobile/shell/BrowserJsReplyGuard.kt#BrowserJsReplyGuard@41413f35": true,
+    "app/src/main/java/com/dsharnessmobile/shell/ChooserAllowlist.kt#ChooserAllowlist@5f360fc5": true,
+    "app/src/main/java/com/dsharnessmobile/shell/RemoteProjectionPolicy.kt#RemoteProjectionPolicy@e85ab632": true
   }
 }

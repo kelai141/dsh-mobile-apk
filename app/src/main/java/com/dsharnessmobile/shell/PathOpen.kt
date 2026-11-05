@@ -82,14 +82,20 @@ object PathOpen {
   }
 
   /**
-   * 选择器允许面 = FileIncoming 的 canonical 白名单（工作区 / tmp / usr/bin / 导出仓库）
-   * 加上**外部存储根**：上游右栏 Files 标签可以浏览整个设备，用户在那里点开的文件/目录
-   * 必须能交给 MT 管理器 / 系统文件管理（0.13.7 用户要求：文件管理按钮一律唤起系统选择器）。
+   * 选择器允许面 = FileIncoming 的 canonical 白名单（工作区 / tmp / usr/bin / 导出仓库）。
    *
-   * 与 FileIncoming.isReaderAllowed 的分工：本方法只服务**页面主动打开**这一条出口
+   * issue #1571：这里**不再**并上整个存储根（要浏览全盘请走用户当场授权的
+   * `ACTION_OPEN_DOCUMENT` 通路，而不是放宽这张表）。旧允许面是「四条窄根 ∪
+   * /storage/emulated/0」，而三个 `@JavascriptInterface`（openFileExternal / shareFile /
+   * openPathChooser）的门禁只要求顶层帧是引擎 origin，`BridgeOriginGuard` 又明确为「同源 HTML
+   * artifact 预览帧」放行桥——模型生成的一段 artifact HTML 调
+   * `shareFile("/storage/emulated/0/Android/data/<别的应用>/files/token.db")` 就能把别的应用
+   * 私有区里的文件交给系统分享面板（第一项通常是聊天工具），`openFileExternal` 更直接把文件
+   * 交给外部阅读器并授予读权限。
+   *
+   * 与 FileIncoming.isReaderAllowed 的分工：本方法服务**页面主动打开**这一条出口
    * （PathOpen.openChooser → 系统选择器，用户当场选应用）；引擎/插件驱动的
-   * 「文件提及 → 外部阅读器」（FileIncoming.openWithExternalReader）继续走严格白名单，
-   * 不因这条放宽（2026-08-23 安全审计 CRITICAL 的结论只针对那条引擎驱动出口）。
+   * 「文件提及 → 外部阅读器」（FileIncoming.openWithExternalReader）走同一份白名单。
    * 应用私有区仍严格：`.dsh` 其余部分（.credentials.yaml 等）永不进选择器。
    */
   fun isChooserAllowed(activity: MainActivity, file: File): Boolean = isChooserAllowedFor(activity, file)
@@ -100,16 +106,35 @@ object PathOpen {
    * 为什么让两个出口共用同一份判据：openFileExternal / shareFile 与 openPathChooser
    * 做的是同一件事（把设备路径变成可交给别的应用的 Uri），允许面若各写一份，必然漂移成
    * 「某个按钮能分享、另一个不能」这种无法解释的差异。
+   *
+   * 允许面 = 严格白名单，**不**并外部存储根（issue #1571，理由见 [isChooserAllowed] 的 KDoc）。
    */
   internal fun isChooserAllowedFor(activity: MainActivity, file: File): Boolean {
     if (FileIncoming.isReaderAllowed(activity, file)) return true
     return try {
-      val canon = file.canonicalPath
-      val external = android.os.Environment.getExternalStorageDirectory().canonicalPath
-      canon == external || canon.startsWith(external + File.separator)
+      // issue #1571：外部存储**不再是**无条件的允许面；只有用户经系统目录选择器亲手授予过的
+      // 目录（persistedUriPermissions，外部工作区走的就是这条）才继续放行。
+      ChooserAllowlist.permitted(file.canonicalPath, grantedRoots(activity))
     } catch (_: Exception) {
       false
     }
+  }
+
+  /**
+   * 用户持久化授予过的 SAF 目录（真实路径形态）。
+   *
+   * 为什么要读系统真源而不是自己记一份清单：`ConfigTransfer` 里那张私有 prefs 目录清单
+   * 已在 ST-24 因「有写无读 + 与系统双口径」被删；这里直接读 `persistedUriPermissions`，
+   * 授权被系统回收（用户清除、卸载重装）后判据自动跟着收紧。
+   */
+  private fun grantedRoots(activity: MainActivity): List<String> = try {
+    ChooserAllowlist.grantedRoots(
+      activity.contentResolver.persistedUriPermissions
+        .filter { it.isReadPermission }
+        .map { AndroidBridge.resolvePickedPath(it.uri) },
+    )
+  } catch (_: Exception) {
+    emptyList()
   }
 
   /** 文件/目录通吃：ACTION_VIEW + 读授权；`type` 为空时由系统按 Uri 推断。 */

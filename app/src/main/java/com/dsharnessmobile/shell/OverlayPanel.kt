@@ -418,7 +418,7 @@ class OverlayPanel(private val svc: OverlayService) {
       addView(stop, LinearLayout.LayoutParams((MIN_TOUCH_TARGET_DP * dp).toInt(), (MIN_TOUCH_TARGET_DP * dp).toInt()).apply { marginStart = (4 * dp).toInt() })
     }
 
-    val unit = LinearLayout(svc).apply {
+    val unit = BackKeyPanelLayout(svc, { svc.hidePanel() }).apply {
       orientation = LinearLayout.VERTICAL
       background = GradientDrawable().apply {
         setColor(c.unitBg)

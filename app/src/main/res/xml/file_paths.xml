@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- FileProvider 路径映射（issue #52 + 2026-08-23 安全审计 CRITICAL 修复）：
      外部阅读器打开文件需要 content://。安全边界（与 MainActivity.OPEN_READER_ROOTS 同步）：
-     - 外部存储仅 Documents/dshdata（用户导出仓库）；不授外部存储根（防任意 sdcard 文件外泄）
+     - 外部存储仅 Documents/dshdata（用户导出仓库）；不授外部存储根（防任意 sdcard 文件外泄）。
+       issue #1571：0.13.7 加过的 external_shared（<external-path path="." />，整个外部存储根）
+       已删除——运行时允许面同时收窄，见 PathOpen.isChooserAllowedFor 与 ChooserAllowlist。
      - 私有目录仅 filesDir/home/.dsh/workspaces 与 filesDir/home/tmp（引擎工作区/导出暂存）与
        filesDir/usr/bin；绝不映射 filesDir/home/.dsh 其余部分（含 .credentials.yaml /
        deepseek-key.txt 等机密）——引擎返回的路径若在私密区内，运行时白名单将拒绝，
@@ -9,10 +11,6 @@
      映射文件不存在时 FileProvider 抛 IllegalArgumentException，调用方已兜底。 -->
 <paths>
   <external-path name="dshdata_exports" path="Documents/dshdata/" />
-  <!-- 0.13.7：用户从上游右栏 Files 标签主动打开任意外部存储文件/目录时的映射面
-       （PathOpen.openChooser 专用；FileIncoming.isReaderAllowed 仍只放行上面四条，
-       引擎/插件驱动的「文件提及 → 外部阅读器」不因这条映射而放宽）。 -->
-  <external-path name="external_shared" path="." />
   <files-path name="internal_workspaces" path="home/.dsh/workspaces/" />
   <files-path name="internal_tmp" path="home/tmp/" />
   <files-path name="internal_usr_bin" path="usr/bin/" />

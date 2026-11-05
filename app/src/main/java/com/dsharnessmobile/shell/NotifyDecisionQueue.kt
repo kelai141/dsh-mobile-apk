@@ -491,6 +491,42 @@ object NotifyDecisionQueue {
     t.start()
   }
 
+  /**
+   * issue #1621：用户点「重试」时，把这条决策**重新入队**（重置墙钟起点、计数归零、状态回 PENDING）。
+   *
+   * 缺陷现场：重试按钮只做一次 flush()，既不改 ts 也不把状态改回 PENDING。对已经超出
+   * NOT_READY_BUDGET_MS 的 FAILED 决策，handleNotReady 立刻再判一次 FAIL —— 一次投递尝试都
+   * 没做，却又发一条同样的「提交失败」。用户点了「重试」，看到的是又一条失败：死路。
+   *
+   * 为什么重置要**全部**做：只改 ts 会让 HTTP 失败计数继续累积（再点一次就撞 MAX_ATTEMPTS）；
+   * 只改状态会立刻再超预算。三者一起重置，语义才是「用户重新授权了一次投递」。
+   *
+   * @param d - 被重试的决策（通常是 FAILED 那条）。
+   * @param now - 当前时刻（作为新的墙钟起点）。
+   * @returns 重排后的决策（状态 pending、attempts/waitAttempts 归零、ts = now）。
+   */
+  fun rearm(d: Decision, now: Long): Decision =
+    d.copy(state = State.PENDING.wire, ts = now, attempts = 0, waitAttempts = 0)
+
+  /**
+   * issue #1621：通知栏「重试」的唯一入口 —— 重新入队（rearm）后再走一次正常投递。
+   *
+   * 与 flush 的分工：flush 是「队列自己的节奏」，重试是「用户明确要求再试一次」，两者的墙钟
+   * 起点不同（后者从点击时刻重新计时）。重试 = 「先 rearm 落盘、再 flush」，预算、退避、可见
+   * 失败态全部沿用同一套实现，不产生第二条投递路径。
+   *
+   * @param eventId - 通知动作携带的事件 id。
+   * @returns true = 找到并重排了该决策（false ⇒ 调用方不得假装重试发生过）。
+   */
+  fun retryFailed(context: Context, eventId: String, now: Long = System.currentTimeMillis()): Boolean {
+    val target = load(context).firstOrNull {
+      it.eventId == eventId && (it.state == State.FAILED.wire || it.state == State.PENDING.wire)
+    } ?: return false
+    mark(context, rearm(target, now), State.PENDING)
+    LogCollector.log(TAG, "decision rearmed by user retry: " + target.requestId)
+    return true
+  }
+
   /** 重置（测试 / 停机清理用）。 */
   @Synchronized
   fun reset() {

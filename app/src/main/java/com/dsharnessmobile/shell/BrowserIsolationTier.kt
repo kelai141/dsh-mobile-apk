@@ -123,4 +123,31 @@ internal object BrowserStatusSemantics {
       level = level,
     )
   }
+
+  /**
+   * `browser_state` / `browser_caps` 的 `profileIsolation` 取值（issue #1575）。
+   *
+   * 缺陷形态：tier-2 下 `profileEstablished` 恒成立，旧实现据此输出 `isolated`。而
+   * [BrowserIsolationTier.PROCESS_SUFFIX] 的 KDoc 明写它是「独立 :browser 进程 +
+   * setDataDirectorySuffix，**全 app 共享一个浏览器档案**」——隔离的是「浏览器 vs 引擎」，
+   * 不是「会话 vs 会话」。会话 A 在某站登录后，会话 B 的 `browser_open` 直接带着 A 的
+   * cookie/登录态，而 `browser_state` 对 B 回 `isolated`：模型与用户都被这句假话误导。
+   *
+   * 修法边界：**不动 `profileEstablished`**（它进 `browserAvailable` 派生链，改它会连带把
+   * 「浏览器可用」判歪）。只把声明按档位语义分开：tier-2 报 `process-shared`，tier-1 才报
+   * `isolated`。
+   *
+   * @param tier 已解析的隔离档位。
+   * @param status 同一次派生出的只读状态。
+   * @returns `process-shared` / `isolated` / `not-created` / `unavailable`。
+   */
+  fun isolationWire(tier: BrowserIsolationTier, status: BrowserStatus): String = when {
+    tier == BrowserIsolationTier.PROCESS_SUFFIX && status.profileEstablished -> PROCESS_SHARED
+    status.profileEstablished -> "isolated"
+    status.isolationAvailable -> "not-created"
+    else -> "unavailable"
+  }
+
+  /** tier-2 的 `profileIsolation` 取值：档案全 app 共享（会话之间没有隔离）。 */
+  const val PROCESS_SHARED = "process-shared"
 }
