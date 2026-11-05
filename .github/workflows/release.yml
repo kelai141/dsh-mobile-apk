@@ -374,11 +374,13 @@ jobs:
             echo "发布字节核对通过: $rel sha256=$actual"
           done < <(find "$DIR/apk" -maxdepth 1 -type f -name '*.apk' | sort)
       - name: 建 draft Release 并上传已验证资产
+        # 两个 env 必须合并在**同一个** `env:` 下：YAML 重复键会让整份 workflow 解析失败
+        # （GitHub 报 "This run likely failed because of a workflow file issue"），
+        # 而不是某个 job 报错。issue #1614 的 env 传参与既有的 GH_TOKEN 就在这里撞过。
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        env:
           INPUT_VERSION: ${{ inputs.version }}
+        shell: bash
         run: |
           set -euo pipefail
           VER="$INPUT_VERSION"
