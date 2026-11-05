@@ -67,6 +67,52 @@ const argOf = (f, d = null) => { const i = argv.indexOf('--' + f); return i >= 0
 const TARGET_LOW = 'chrome87'   // 语法下限（纸面基线：Android 10 / Chromium 87，且唯一在案老内核 = 87.0.4280.101）
 const TARGET_HIGH = 'esnext'    // 对照臂（当前出厂口径）
 const ESBUILD_PIN = '0.25.12'   // 判据 2 的口径锁：兼容表随版本变，故显式钉住
+/**
+ * 供应器（provisionEsbuild）**只认这里钉住的字节**（issue #1581）。
+ *
+ * 真因：旧实现拿 npm registry 响应里的 `dist.sha512`（或 `dist.integrity`）去校验**同一次响应**
+ * 指过来的 tgz——哈希与产物同源，投毒/被劫持的镜像可以同时伪造两者，这条校验等于自证。
+ * 更糟的是 `if (sha && …)`：两个字段都缺席时连这条自证都跳过，直接解包并**执行**
+ * （esbuildUsable 里 spawnSync 一个 require(下载来的包) 的子进程），而 ESBUILD_PIN 只钉版本字符串。
+ * 本门禁的产物决定「浏览器语法下限」的判据口径 ⇒ 投毒者既能让坏 bundle 过门禁，也能让好 bundle 判红。
+ *
+ * 修法：sha512（base64，与 npm `dist.integrity` 的 `sha512-` 后缀同格式）作为常量进仓，
+ * 只认这里的值；表里没有的包名或摘要不匹配一律 die，registry 说什么都不作数。
+ * 追版 esbuild 时必须**同批**改 ESBUILD_PIN 与本表（改法：`npm view <pkg>@<ver> dist.integrity`）。
+ */
+const ESBUILD_TARBALL_SHA512 = {
+  esbuild: 'bbPBYYrtZbkt6Os6FiTLCTFxvq4tt3JKall1vRwshA3fdVztsLAatFaZobhkBC8/BrPetoa0oksYoKXoG4ryJg==',
+  '@esbuild/darwin-arm64': 'N3zl+lxHCifgIlcMUP5016ESkeQjLj/959RxxNYIthIg+CQHInujFuXeWbWMgnTo4cp5XVHqFPmpyu9J65C1Yg==',
+  '@esbuild/darwin-x64': 'HQ9ka4Kx21qHXwtlTUVbKJOAnmG1ipXhdWTmNXiPzPfWKpXqASVcWdnf2bnL73wgjNrFXAa3yYvBSd9pzfEIpA==',
+  '@esbuild/linux-arm': 'lPDGyC1JPDou8kGcywY0YILzWlhhnRjdof3UlcoqYmS9El818LLfJJc3PXXgZHrHCAKs/Z2SeZtDJr5MrkxtOw==',
+  '@esbuild/linux-arm64': '8bwX7a8FghIgrupcxb4aUmYDLp8pX06rGh5HqDT7bB+8Rdells6mHvrFHHW2JAOPZUbnjUpKTLg6ECyzvas2AQ==',
+  '@esbuild/linux-ia32': '0y9KrdVnbMM2/vG8KfU0byhUN+EFCny9+8g202gYqSSVMonbsCfLjUO+rCci7pM0WBEtz+oK/PIwHkzxkyharA==',
+  '@esbuild/linux-x64': 'uqZMTLr/zR/ed4jIGnwSLkaHmPjOjJvnm6TVVitAa08SLS9Z0VM8wIRx7gWbJB5/J54YuIMInDquWyYvQLZkgw==',
+  '@esbuild/win32-arm64': 'rMmLrur64A7+DKlnSuwqUdRKyd3UE7oPJZmnljqEptesKM8wx9J8gx5u0+9Pq0fQQW8vqeKebwNXdfOyP+8Bsg==',
+  '@esbuild/win32-ia32': 'HkqnmmBoCbCwxUKKNPBixiWDGCpQGVsrQfJoVGYLPT41XWF8lHuE5N6WhVia2n4o5QK5M4tYr21827fNhi4byQ==',
+  '@esbuild/win32-x64': 'alJC0uCZpTFrSL0CCDjcgleBXPnCrEAhTBILpeAp7M/OFgoqtAetfBzX0xM00MUsVVPpVjlPuMbREqnZCXaTnA==',
+}
+/**
+ * 供应器字节绑定的判据本体（纯函数，便于 --self-test 直接喂合成输入）。
+ *
+ * @param name npm 包名。
+ * @param buf  下载到的 tgz 字节。
+ * @param pins 钉住的摘要表（自检可传合成表，正式链恒为 ESBUILD_TARBALL_SHA512）。
+ * @returns null = 与钉住的字节一致；否则为判红理由（缺钉 / 摘要不符）。
+ */
+const tarballPinProblem = (name, buf, pins = ESBUILD_TARBALL_SHA512) => {
+  const pinned = pins[name]
+  if (typeof pinned !== 'string' || pinned.length === 0) {
+    return 'esbuild 供应器：' + name + '@' + ESBUILD_PIN + ' 没有钉住的 sha512 —— 拒绝解包未锚定的第三方字节'
+      + '（registry 给的 dist.sha512/integrity 与 tarball 同源，不能自证）'
+  }
+  const actual = createHash('sha512').update(buf).digest('base64')
+  if (actual !== pinned) {
+    return 'esbuild 供应器：' + name + '@' + ESBUILD_PIN + ' 的 sha512 与钉住值不符（实际 ' + actual
+      + '，钉住 ' + pinned + '）——镜像被投毒或版本漂移，拒绝解包与执行'
+  }
+  return null
+}
 
 // 显式、固定顺序的依赖候选（不依赖偶然在场；缺席时给出可诊断错误）
 const TS_CANDIDATES = [
@@ -192,8 +238,11 @@ const extractNpmTgz = async (registry, name, version, targetDir) => {
   const dist = meta?.versions?.[version]?.dist
   if (!dist?.tarball) throw new Error('版本 ' + version + ' 的 dist 不可得')
   const buf = Buffer.from(await (await fetch(dist.tarball, { signal: AbortSignal.timeout(300000) })).arrayBuffer())
-  const sha = dist.sha512 ?? (String(dist.integrity ?? '').startsWith('sha512-') ? String(dist.integrity).slice(7) : null)
-  if (sha && createHash('sha512').update(buf).digest('base64') !== sha) throw new Error('sha512 不匹配')
+  /* issue #1581：校验锚点**不取自 registry 响应**。旧实现用 dist.sha512 / dist.integrity 校验同一次响应
+   * 指过来的 tarball（哈希与产物同源 = 自证），且两个字段都缺席时连这条自证都跳过、直接解包并执行。
+   * 现在只认仓内钉住的 sha512：缺钉或摘要不符一律抛出（调用方按镜像不可用处理，最终 die）。 */
+  const pinProblem = tarballPinProblem(name, buf)
+  if (pinProblem !== null) throw new Error(pinProblem)
   const tgzDir = dirname(targetDir)
   mkdirSync(tgzDir, { recursive: true })
   const tgz = join(tgzDir, '.__' + name.replace(/[@/]/g, '_') + '.tgz')
@@ -674,6 +723,39 @@ if (has('self-test')) {
   check('⑥ 接线反回归：两条构建链都必须在注入消费（inject-all.py）之前调用 --degrade（暂存副本，不原地）',
     wiring.ok, wiring.detail)
   console.log('  接线取证: ' + wiring.evidence)
+
+  /* ⑧ 供应器字节绑定（issue #1581）：provisionEsbuild 拉下来的 tgz 只认**仓内钉住**的 sha512。
+   *    旧判据用 registry 响应自带的 dist.sha512 校验同一次响应指过来的 tarball（同源自证），
+   *    且两个字段都缺席时整条校验跳过 —— 于是「镜像投毒」与「哈希缺席」两个方向都判绿。
+   *    这里的负控刻意分成三条，分别钉住三个失效方向（改坏字节 / 缺钉 / 默认表被换成空表）。 */
+  // 平台包全集 = esbuild 实际发布的组合（darwin 无 arm/ia32，linux 与 win32 各有四个）。
+  // 用显式清单而不是「平台 × 架构」的笛卡尔积：后者会要求 esbuild 根本不存在的包，
+  // 把「钉住表不完整」这条判据变成永远红的假红。
+  const pinPlatforms = ['win32', 'linux', 'darwin']
+  const pinArches = { win32: ['x64', 'arm64', 'ia32'], linux: ['x64', 'arm64', 'arm', 'ia32'], darwin: ['x64', 'arm64'] }
+  const pinRequired = ['esbuild', ...pinPlatforms.flatMap((p) => pinArches[p].map((a) => '@esbuild/' + p + '-' + a))]
+  const pinMissing = pinRequired.filter((n) => typeof ESBUILD_TARBALL_SHA512[n] !== 'string' || ESBUILD_TARBALL_SHA512[n].length === 0)
+  const pinBuf = Buffer.from('syntax-floor-pin-fixture-bytes', 'utf8')
+  const pinBufHash = createHash('sha512').update(pinBuf).digest('base64')
+  const pinTable = { esbuild: pinBufHash }
+  const pinCases = [
+    ['正控：与钉住值一致的字节放行', tarballPinProblem('esbuild', pinBuf, pinTable) === null],
+    ['负控：字节被改坏必须判红（旧实现只在 registry 自己给的哈希上比）',
+      /不符/.test(String(tarballPinProblem('esbuild', Buffer.from('tampered', 'utf8'), pinTable)))],
+    ['负控：钉住表里没有该包必须判红（旧实现在哈希缺席时直接解包执行）',
+      /没有钉住/.test(String(tarballPinProblem('@esbuild/nowhere', pinBuf, pinTable)))],
+    /* 默认实参必须是**真表**：若有人把默认值改成空表（或忘了传），下面两条会同时错向 ——
+     * 真包名会报「没有钉住」而不是「不符」，未登记包名也会报「没有钉住」但第一条就红了。 */
+    ['默认表生效：真包名 + 改坏字节报「不符」而非「没有钉住」',
+      /不符/.test(String(tarballPinProblem('esbuild', Buffer.from('tampered', 'utf8'))))],
+    ['默认表生效：真包名 + 任意字节都不会被放行',
+      tarballPinProblem('esbuild', Buffer.from('tampered', 'utf8')) !== null],
+  ]
+  const pinJudgeOk = pinCases.every(([, ok]) => ok)
+  check('⑧ 供应器字节绑定：esbuild tgz 只认仓内钉住的 sha512（缺钉/不符一律拒绝解包与执行）',
+    pinJudgeOk && pinMissing.length === 0,
+    '判定用例 ' + pinCases.filter(([, ok]) => !ok).map(([l]) => l).join(' / ')
+    + (pinMissing.length > 0 ? '；钉住表缺 ' + pinMissing.join(',') + '（' + pinRequired.length + ' 个平台包必须全覆盖）' : ''))
 
   // ── 真实产物反向对照（C-2）：默认**自动启用**，不再是 opt-in ──
   // 真因：`--as-shipped <path>` 是 opt-in 且**没有任何调用方传它**（两条构建链调的是 `--scan`），

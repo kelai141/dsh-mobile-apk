@@ -383,9 +383,21 @@ jobs:
           set -euo pipefail
           VER="$INPUT_VERSION"
           TAG="v${VER}"
-          # 幂等：已存在则复用，避免重跑 422
-          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "release $TAG 已存在，复用"
+          # 幂等：**仅对 draft** 复用，避免重跑 422（issue #1579）。
+          #
+          # 旧实现用 `gh release view "$TAG"` 判存在性，而它对**已转正**的 Release 同样返回 0，
+          # 随后逐个 `gh release upload --clobber` ⇒ 第二次派发同一 version（哪怕只是补跑 notes）
+          # 会**原地覆盖**线上字节，而 Release 正文与 tag 指向的 commit 都不变——事后无法从 Release
+          # 分辨哪个文件来自哪次构建。concurrency 只挡并发，挡不住串行重跑。
+          # 现在：已存在且**不是 draft** ⇒ 立即失败并要求人工删/改版本号；--clobber 只对 draft 保留
+          # （draft 是同一轮未发布产物，重跑覆盖它是预期行为）。
+          if gh release view "$TAG" --repo "${{ github.repository }}" --json isDraft,tagName >/dev/null 2>&1; then
+            IS_DRAFT=$(gh release view "$TAG" --repo "${{ github.repository }}" --json isDraft --jq '.isDraft')
+            if [ "$IS_DRAFT" != "true" ]; then
+              echo "::error::release $TAG 已存在且**已转正**（isDraft=$IS_DRAFT）——拒绝覆盖线上资产。先人工删除该 Release 或换一个 version 再派发。"
+              exit 1
+            fi
+            echo "release $TAG 已存在且为 draft，复用（同一轮未发布产物，重跑覆盖是预期行为）"
           else
             gh release create "$TAG" --repo "${{ github.repository }}" --draft \
               --title "dsh-mobile $TAG" --notes-file "release/v${VER}/notes.md"
