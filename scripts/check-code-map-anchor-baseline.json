@@ -2747,9 +2747,6 @@
     "check-snapshot-builder-output.mjs:139": [
       "try { slim = JSON.parse(readFileSync(SLIM, 'utf8')) } catch (e) {"
     ],
-    "composer-insets.css.ts:13": [
-      "padding-bottom: max("
-    ],
     "composer-menu.css.ts:25": [
       "html[data-dsh-mobile-form] [data-composer-card] [data-dsh-popup] {"
     ],
@@ -3892,6 +3889,9 @@
     ],
     "plugins/dsh-android-vdisplay/src/status.ts:208": [
       "/**"
+    ],
+    "composer-insets.css.ts:21": [
+      "padding-bottom: max("
     ]
   },
   "symbols": {
