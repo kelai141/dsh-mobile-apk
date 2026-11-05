@@ -95,10 +95,12 @@ object LocalDocs {
           /* encoding = */ "utf-8",
           /* historyUrl = */ null,
         )
+        // #1011 ③：对话框标题与关闭键此前写死中文，英文界面下整块弹窗仍是中文。
+        val copy = localDocDialogCopy(UiText.isEnglish(activity))
         val dialog = AlertDialog.Builder(activity)
-          .setTitle("免责声明")
+          .setTitle(copy.title)
           .setView(view)
-          .setPositiveButton("关闭", null)
+          .setPositiveButton(copy.close, null)
           .create()
         // 关闭即销毁 WebView：弹窗持有的 WebView 不销毁会泄漏（每个 WebView 都是重量级对象）。
         dialog.setOnDismissListener { runCatching { view.destroy() } }
@@ -128,6 +130,18 @@ object LocalDocs {
     return out.toString()
   }
 }
+
+/** 免责声明对话框的两处文案（#1011 ③）。纯数据，可脱离 Android 单测。 */
+internal data class LocalDocDialogCopy(val title: String, val close: String)
+
+/**
+ * 对话框文案（#1011 ③）：标题与关闭键此前都写死中文，英文界面下整块弹窗仍是中文。
+ * 纯函数入口，JVM 单测能同时断言中英两档。
+ */
+internal fun localDocDialogCopy(english: Boolean): LocalDocDialogCopy = LocalDocDialogCopy(
+  title = UiText.t(english, "免责声明", "Disclaimer"),
+  close = UiText.t(english, "关闭", "Close"),
+)
 
 /** [LocalDocs.classify] 的判据结果。纯数据，可脱离 Android 单测。 */
 internal sealed class LocalDocVerdict {

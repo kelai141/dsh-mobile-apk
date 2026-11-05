@@ -101,3 +101,7 @@ internal fun startupEntryDecision(required: Boolean, explicitUserRetry: Boolean)
 /** Automatic retries stay bounded and stay behind the durable gate. */
 internal fun shouldScheduleAutomaticRetry(required: Boolean, retries: Int, retryPending: Boolean): Boolean =
   !required && !retryPending && retries < 2
+
+/** Observation can finish an authorized attempt; it grants no new spawn or retry authority. */
+internal fun mayObserveColdStart(required: Boolean, attemptInFlight: Boolean): Boolean =
+  !required || attemptInFlight

@@ -5,6 +5,446 @@
 > grep 用法：`grep -n "<坑号>\." docs/AGENTS/gotchas.md` 或按关键词（如 `borrowSession`、`MANAGE_EXTERNAL_STORAGE`、`store-rehome`）定位。
 > 维护约定：新坑追加到文末并递增编号；修复后保留条目（教训与历史归档）。
 
+## 提交前必须 `git status --porcelain` 核一遍待提交清单（2026-10-30 实锤）
+
+一次多文件 PR 里，我用 `git add -A` 收尾，把**三个本该分开的改动**连同三个 `_p*.md` 草稿
+一起塞进了同一个提交 —— PR 描述只讲了一件事，diff 里却有 9 个文件：
+
+```
+_p1031.md                        <- 写 PR 描述用的草稿
+_p1049.md
+_p1051.md
+scripts/check-apk-signatures-dir.test.mjs
+scripts/check-apk-signatures.mjs
+scripts/check-manifest-hardening.mjs
+scripts/check-tool-surface-budget.mjs
+scripts/check-tool-surface-budget.test.mjs
+scripts/lib/tool-surface-plugins.mjs
+```
+
+后果不是「多几个文件」这么轻：拆分时要重建分支、从提交里逐文件取出，中间**丢过一次改动**（apksig 那处）
+并重放了一遍才推上去。自己给自己制造噪音，代价是几轮 git 手术。
+
+### 规矩
+
+```powershell
+git status --porcelain      # 提交前必看：待提交清单是不是我打算提交的那几个
+git add <path1> <path2>     # 按 PR 分组逐个 add，不要 `-A`
+git status --porcelain      # add 后再看一遍，确认没有 _p*.md / _tmp / 产物混入
+```
+
+**多文件 PR 尤其要看**：`-A` 会连草稿、临时脚本、构建产物一起收。
+草稿文件写 PR 描述后就该删，不要留在工作区里等 `-A` 把它捡走。
+
+## 量 `innerHeight` 必须同时记朝向，否则会被读成「CSS px != dp」（#864 实锤）
+
+两个实例、同一份代码，数值看起来互相矛盾：
+
+| 实例 | `wm size` | `wm density` | `dpr` | `innerHeight` | `innerHeight*dpr` | 朝向 |
+|---|---|---|---|---|---|---|
+| 5 | 900x1600 | 320 | 2 | **800** | 1600 = 高度 | 竖屏（`SurfaceOrientation: 0`） |
+| 6 | 900x1600 | 240 | 1.5 | **600** | 900 = **宽度** | **横屏（`SurfaceOrientation: 1`）** |
+
+实例 6 单看 `600*1.5=900` 会得出「对不上屏幕高 1600 ⇒ CSS px 不是 dp」的**错误结论**。
+实际上它横过来了：物理变成 **1600x900**，`900/1.5 = 600` 正是 dp 高度。
+
+**正确表述**：`innerHeight * dpr` = **当前朝向下**视口高度方向的物理像素数；`wm size` 报的是**未旋转**的尺寸，
+所以它永远只对上其中一个方向。
+
+判据：
+
+```
+adb shell dumpsys input | grep -i SurfaceOrientation    # 0=竖 1=90deg 2=180 3=270
+```
+
+**结论仍然成立**：`CSS px == dp`（`width=device-width` 下），Kotlin 侧 `px / density` 换到 CSS px 是对的 ——
+但**只报 `innerHeight` 不报朝向**会让人（包括未来的自己）算错。
+
+## 「看得见却留不下」：页面在打日志、诊断里一条没有（#864 实锤）
+
+这类盲区比普通 bug 难查，因为**症状是「静默」而不是「报错」**：页面的 `console.log` 你
+在 logcat 里看得见、用 `adb logcat | grep` 也能抓到，于是很容易认定「日志通了」——
+但**诊断包里一条都没有**，事后复盘时那段现场等于不存在。
+
+### 本次实例：`ConsoleActivity` 原本没有 `webChromeClient`
+
+控制台页面（`assets/console.html`）跑在 `ConsoleActivity` 的 WebView 里，
+而那个 Activity **没有装 `webChromeClient`**：
+
+```
+Select-String -Path app/src/main/java/com/dsharnessmobile/shell/ConsoleActivity.kt -Pattern 'webChromeClient|onConsoleMessage'
+  （空）
+```
+
+于是：页面的 `console.log` → logcat（有）→ `boot-diag.log`（**没有**），中间缺的就是消费端。
+
+对照：应用主 WebView 在 `MainActivity.onConsoleMessage` 里有完整的三前缀消费，
+所以 `[dsh-boot-ready]` / `[dsh-boot-stall]` / `[dsh-boot-failed]` 能落盘 —— **只有控制台这条线是断的**。
+
+### 怎么避免同类盲区
+
+**判据不是「日志出现」，而是「日志能被导出」**。加任何页面侧上报前先确认三件事都在：
+
+| 面 | 查法 |
+|---|---|
+| 生产者：页面真的发了吗 | `adb logcat -d | grep <前缀>` |
+| 消费者：那个 WebView 有 `webChromeClient.onConsoleMessage` 吗 | 在**对应 Activity** 里 grep |
+| 落局面：写出后文件真有这一行 | `adb shell run-as <pkg> cat files/boot-diag.log \| grep <source>` |
+
+**三缺一就是「看得见却留不下」。** 只验第一条会得到假的「已接通」。
+
+### 连带教训：`run-as ls assets/` 证明不了 APK 里有某个 asset
+
+`assets/` 在 APK **内部**，`run-as` 看的是应用数据目录：
+
+```
+adb shell run-as com.dsharnessmobile.shell ls -l assets/console-metrics.js
+  -> No such file or directory        （这不代表 APK 里没有）
+```
+
+同理 Windows 的 `tar` 是 GNU 版，**读不了 APK（zip）**，报 `does not look like a tar archive` 后
+过滤得到的 0 条会被误读成「APK 里没这个条目」。要查 APK 内容只能用解压库（`[IO.Compression.ZipFile]`）。
+
+## 真机/模拟器上「键盘弹起态」量不出来时的排查顺序（#864）
+
+MuMu 常有**硬键盘连接**导致软键盘不弹，`mInputShown` 恒 `false`。按序试：
+
+```
+adb shell settings put secure show_ime_with_hard_keyboard 1
+adb shell ime list -s                                        # 确认有可用 IME
+adb shell dumpsys input_method | grep -E 'mInputShown|mCurMethodId'
+```
+
+仍为 `false` 就换实例或真机；都不行则把「键盘弹起态不可观测」记为**已知缺口**，
+**不要拿弹起前的值去推双扣方向** —— 那等于用 A 面的数编 B 面的结论。
+
+## WebView 远程调试（CDP）的两个坑：`force-stop` 后调试面为 0、以及**两个** devtools socket（#864）
+
+### 坑 1：`am force-stop` 之后只起 `ConsoleDebugAlias`，`webview_devtools_remote_*` 根本不存在
+
+`setWebContentsDebuggingEnabled(true)` 只在两处调用：
+
+```
+app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:1180   if (debuggable) android.webkit.WebView.setWebContentsDebuggingEnabled(true)
+app/src/main/java/com/dsharnessmobile/shell/BrowserProcessService.kt:116
+```
+
+所以「force-stop 清半开连接 → 直接起控制台别名」这条路**不会**有调试面：
+
+```
+adb shell cat /proc/net/unix | grep -c webview_devtools   ->  0
+```
+
+必须先起 `MainActivity` 再起别名，同一条命令才有值（实测 2）。
+
+**判据**：`forward` 建好了但 `curl /json` 报 socket hang up / 空结果时，先查这一条，别急着怀疑 hostname 或 Origin。
+
+### 坑 2：有两个 devtools socket，`/json` 会聚合、`adb forward` 只指向一个
+
+```
+webview_devtools_remote_2161   -> /json pages=0            （干扰项：0 个页面）
+webview_devtools_remote_2046   -> /json pages=2，含 console.html   <- 应用主进程 pid
+```
+
+`localabstract:webview_devtools_remote_<pid>` 里的 `<pid>` 要用 `pidof` 取的应用主进程 pid；
+`/proc/net/unix` 里出现的**另一个** socket 不要用。
+
+**症状**：`/json` 返回 `[]` 或没有目标页 —— 不是页面没加载，是连错了 socket。
+
+### 附带两条「查证方法本身错」的教训
+
+- **`tar -tf` 在 Windows 上是 GNU tar，读不了 APK（zip）**：会报 `does not look like a tar archive`，
+  但输出里仍可能有几行，`Where-Object` 过滤后得到 0 条 —— 看起来像「APK 里没有这个条目」，其实是**工具不认这个格式**。
+  要查 APK 条目用 `[System.IO.Compression.ZipFile]::OpenRead()`。
+- **`run-as <pkg> ls assets/...` 证明不了 APK 里有/没有某个 asset**：`assets/` 在 APK 内部，
+  `run-as` 看的是应用数据目录。要查 APK 资产只能解 APK。
+
+### 本机 CDP 的当前状态（供后续判断）
+
+| 面 | 结果 |
+|---|---|
+| `curl http://localhost:9223/json/version` | HTTP 200，`Chrome/110.0.5481.154`、`Protocol-Version: 1.3` |
+| `ws://localhost:9223/devtools/page/<id>` | **连 101 都收不到**（`upgrade` 事件从不触发，8s `handshakeTimeout` 也不报错） |
+
+结论：本机属「HTTP 通 / WS 不通」，量测改走**页面 console → boot-diag** 通道（见下条）。
+
+## 控制台布局量测：走页面 console + `boot-diag`，不走 CDP（#864）
+
+`dsh-console-metrics.js` 只存在于 **`app/src/debug/assets/`**（debug 变体），
+`ConsoleActivity.onPageFinished` 里在 `debuggable` 为真时把它 `evaluateJavascript` 注入；
+页面每发一行 `[dsh-console-metrics] {json}`，`ConsoleActivity` 的 `webChromeClient.onConsoleMessage`
+就把它写进 `boot-diag.log`（`source=console-metrics`）——复用既有诊断通道，不新开日志。
+
+读法（无需 WebSocket）：
+
+```
+adb shell run-as com.dsharnessmobile.shell cat files/boot-diag.log | grep console-metrics
+```
+
+**两个坑（都踩过）**：
+
+1. **`ConsoleActivity` 原先没有 `webChromeClient`** —— 控制台页面的 `console.log` 只进 logcat、进不了诊断。
+   补消费端时别忘了这一半，否则「页面在打日志、诊断里一条没有」。
+2. **前缀字符串不能写在 `src/main`** —— 否则 release 产物里也 grep 得到。
+   放在 `src/debug/assets/` 的 JS 里，Kotlin 侧只按通用字段名（`imeOcclusion`）识别。
+    注意：`src/debug` 与 `src/main` 放**同名同包 Kotlin 类**会 `Redeclaration` 编译失败（Java 资源可以覆盖，Kotlin 类不行）。
+
+### 实测值（MuMu 实例 5，900x1600 @ density 320，WebView Chrome 110，debug 包）
+
+```
+tag=load  imeOcclusion=0px  insetBottom=0px  innerHeight=800  visualViewportHeight=800  compact=false  dpr=2
+```
+
+`innerHeight(800) * dpr(2) = 1600` = 屏幕物理高 ⇒ **CSS px == dp**（`width=device-width` 下），
+所以 Kotlin 侧 `px / density` 换算到 CSS px 是对的，不存在单位错配。
+
+（键盘弹起态在本实例量不出来：`dumpsys input_method` 的 `mInputShown` 恒 `false`，点击输入区也不弹键盘。）
+
+## 引擎启动会把 `settings.yaml` 迁进 profile patch 并删掉原文件（#934）
+
+**这不是缺陷，是既有迁移设计** —— 但它决定了一类故障现场的形态，所以必须知道。
+
+引擎每次启动会把 `$DSH_HOME/settings.yaml` 并入 `profiles/web/cordis.patch.yml`，然后**删除** `settings.yaml`。
+
+### 归属：不是壳侧删的
+
+壳侧 `SnapshotUserData.prepareStagedSnapshot()` 只对**解压临时目录**（`stagedDsh`）做 discard：
+
+```kotlin
+// 调用点是 discard(File(stagedDsh, "settings.yaml"), ...) —— staged，不是 live
+```
+
+`app/src/main/java` 里搜不到任何删除 live `settings.yaml` 的代码。删除发生在引擎（node）侧的迁移逻辑。
+
+### 为什么重要：两件事互斥
+
+> **「有 `settings.yaml`」** 与 **「引擎跑过一次」** 是互斥的。
+
+于是「配置搞坏、进不了安全模式」这类现场**只有一种可能形态**：
+
+```
+引擎没完成迁移就死了
+  ⇒ settings.yaml 还在
+  ⇒ profiles/web/cordis.patch.yml 缺失，或只含非模型键
+```
+
+这正是 #924 修的那个 bug 的场景：`RepairModelConfig` 曾用 `settings.yaml.imported` 这个 marker 当
+「以后别读 settings.yaml」的开关，于是上述形态下**两边都不读**、候选数为 0，修复助手报「未读到可用模型」——
+而它本来最该救这个场景。#924 之后 marker 只决定优先级，候选为 0 时回落读 `settings.yaml`（标 `fallback-used`）。
+
+**再修（0.14.10）**：「只在候选为 0 时才回落」是同一个误判的弱化版 —— patch 层只要碰巧产出一条
+用户根本没在用的路由，`settings.yaml` 里真正被选中的那条就又消失了（进修复助手看到的是别人的模型，
+或者干脆没有）。所以现在 `settings.yaml` 是**无条件铺的底层候选源**：patch 按 id 深合并覆盖它，
+marker 不参与「读不读」的判断，条件回落整段删除；`skipped-legacy` / `fallback-used` 随之不再产出。
+
+**同轮补两条（用户 2026-11-01 明确要求）**：① 端点是**主源**读取的一部分，`RepairModelClient.endpointFor` 的准入从「https + 两个回环字面量」放开成「任意 http(s) 主机」——自部署模型（`http://192.168.x.x:8000/v1`、内网域名、显式端口）在引擎侧一直能用，只有修复助手拦着；仍拒绝非 http(s)、空 host、`user:pass@`。平台侧 `network_security_config` 的 base-config 早已 `cleartextTrafficPermitted="true"`，这是准入面与平台面对齐，不是新开口子。③ cordis patch 里**没有真实 key**：provider 的 `apiKey`（或 `apiKeyEnv`/`tokenEnv` 等同义字段）只是引用名，真值在 `.credentials.yaml` 的 `refs:` 里，按引用名 join。join 不上时该路由**必须仍被看见**并报「凭据引用未命中」（带引用名），不能 crash、不能静默丢掉——否则「配了但缺 key」与「没配」在界面上又是同一句话。形似密钥的值（`sk-`、≥40 字符）一律不当作引用名，密钥值与任何前缀不得进界面/日志/诊断包。
+
+② patch 文档**两种扩展名都读**（`cordis.patch.yaml` 优先、其次 `.yml`；`.dsh` 根与 `profiles/web` 各一套），同目录两份都在时**只取一份并记 `conflict-skipped`**——静默双用会叠出用户没写过的合并结果。
+
+### 对后续改动的约束
+
+1. **修复助手不能假设 `settings.yaml` 长期存在。** 引擎跑过一轮它就没了；它作为底层候选源被无条件读到，但「引擎没跑完」的现场仍要靠它，不能把它当可忽略的历史文件。
+2. **任何在引擎启动后读配置的逻辑，都要按「活动配置是 profile patch」来写。**
+   `SnapshotUserData.configurationDocument()` 已把判据收敛到一处（有 marker 或 patch 存在 ⇒ patch 是活动配置），
+   **新增读取方应复用它，不要各自判 marker**。
+3. **诊断证据要能区分「文件不存在」与「文件被迁移」。** #924 引入的 `no-credential`（以及后来补的
+   `root-missing`）就是为此；`skipped-legacy` / `fallback-used` 已随无条件铺底退役。新增状态时 UI 必须同步给出可判读的说明。
+
+### 实测记录（MuMu `127.0.0.1:16544`，`0.14.9-DEV-FAST` / vcode 53，两次独立复现）
+
+```
+# 启动前
+  files/home/.dsh/settings.yaml                      253 B
+  files/home/.dsh/profiles/web/cordis.patch.yml       41 B   # 只有 persona
+# 启动后
+  files/home/.dsh/settings.yaml                      不存在
+  files/home/.dsh/profiles/web/cordis.patch.yml    17173 B   # 引擎重建，含 provider
+```
+## 工具输出的「通道与类型」也会骗人（PowerShell 实锤）
+
+**实锤（2026-10-30）：** 跑 `node scripts/check-code-map.mjs --refresh-anchor-baseline --force-drift` 想读拒绝原因，写成：
+
+```powershell
+node scripts/check-code-map.mjs ... 2>&1 | Select-Object -Last 8 | ForEach-Object { $_.Substring(0, 150) }
+```
+
+结果满屏 `InvalidOperation: ... does not contain a method named 'Substring'` —— 因为 node 的 stderr 被 `2>&1` 合流后是 **`ErrorRecord` 对象**，不是字符串。`Select-Object -Last` 也只对**行**有效，对对象流无效。
+
+更坑的是：**过滤后一条目标行都没打出来**，看起来像「守卫没触发」，实际是我的读取方式把输出吞了。为此多花了两轮。
+
+### 正确写法
+
+```powershell
+$o = (node script.mjs ... 2>&1 | Out-String)   # 先 Out-String 拍平成文本
+$o -split [char]10 | Where-Object { $_ -match 'Refusing|allow' }
+```
+
+### 判据（三条）
+
+1. 外部程序输出**先 `Out-String`**，再切分/正则；不要直接对管道结果调字符串方法。
+2. `2>&1` 之后拿到的是 `ErrorRecord` 还是 `string`，**取决于有没有 `Out-String`** —— 别假设。
+3. **「一条都没匹配到」永远先怀疑读取方式**，再怀疑程序没输出。这和「失败文案被兜底值吞掉」是同一族：真因被工具层的表示形式掩盖了。
+## 禁止裸 `splice` 改代码（同一个错犯了三次，升级为硬规则）
+
+### 实锤
+
+| 次 | 场景 | 后果 |
+|---|---|---|
+| 1 | `NotifyStructureBatch8Test.kt` 冲突按行拼接 | KDoc 与函数体拼断，`SyntaxError` |
+| 2 | `EngineManager.kt` 的 `if (hard == null) {` 块 splice 计数错**多留一行** | 花括号不平衡 → 报错出现在 `UpdateManager.kt` / `WatchdogV2.kt`（`Unresolved reference onlineUpdateActive`），极易误判成 main 坏了 |
+| 3 | `console.html` 的 `__dshConsoleSetLang` 块实际 **5 行**只 splice 了 **3 行** | 留重复 `applyLang(); };` → 第二个 script 块 `SyntaxError` |
+
+### 四条硬规则
+
+1. **禁止裸 `splice` 改代码** —— 首选锚定**字符串**替换（`old` 含足够前后文保证唯一）；必须按行时，splice 前后**断言首尾行原文**（打印出来对一眼），`n` 从实际读出结果来，**不能凭印象**。
+2. **splice 后必跑该语言的语法检查再谈功能验证** —— `node --check`（JS/MJS/内联 script）/ `tsc --noEmit`（TS）/ `:app:compileDebugKotlin`（Kotlin）/ `JSON.parse`。**顺序不能反**：语法都不通过，功能验证的结论没有任何意义。
+3. **报错出现在「别的文件」时先怀疑自己刚改的那一块** —— 块界错位的典型形态是「真正出问题的文件一条错都不报，错误全落在下游受害者上」。排查顺序：`git diff` 看自己改的文件有无重复语句头 / 缺失右花括号 → 数括号配平 → **最后**才看别的文件。
+4. **临时文件的「写→用→删」必须在同一次成功执行内闭合** —— 删除步骤不能跑在可能失败的使用步骤之后。这叫生命周期问题，不只是脚本问题：任何「生成产物 → 消费产物 → 清理产物」的流程都算（构建、测试夹具、迁移脚本）。
+
+**规则 4 的实锤（同一次会话连栽三次）：**
+
+- 上游那次调用自己先失败（JS 语法错），`_blk.txt` **根本没写出来**；
+- 下一条命令是 `node _ins.mjs` 然后 `Remove-Item _blk.txt` —— 脚本因 ENOENT 失败，**但删除照样把原料抹了**；
+- 于是下一轮又没有输入，重复失败三次。
+
+做法：小内容直接**内嵌进执行脚本**（不落中间文件）；必须落文件时，`Remove-Item` 放在同一条命令的**最后**且仅在成功分支执行（先判退出码再删）。
+## 改 Kotlin 控制流后：先看**本文件**括号平衡，再看别的文件报错
+
+**实锤（2026-10-29，一次误判差点以为 main 坏了）。**
+
+用脚本按行 `splice()` 改 `EngineManager.kt` 的 `if (hard == null) {` 块时，**边界算错多留了一行**，文件里出现两个连续的 `if (hard == null) {` → 花括号不平衡 → 类体提前闭合。
+
+**报错却出现在完全无关的文件里**：
+
+```
+e: UpdateManager.kt:160  Unresolved reference 'onlineUpdateActive'
+e: WatchdogV2.kt:334     Unresolved reference 'START_COOLDOWN_MS'
+```
+
+这些符号本是 `EngineManager` 的成员 —— 类体提前关闭后它们不存在了。**第一反应很容易是「main 编译坏了」，实际是我改的文件少了一个 `}`。**
+
+### 判据（顺序不要反）
+
+1. 先 `git diff origin/main -- <你改的那个文件>`，看有没有**重复的语句头**或**缺失的 `}`**；
+2. 再数该文件 `{` / `}` 是否配平；
+3. 最后才看别的文件的报错 —— 它们多半是**受害者**，不是病因。
+
+### 顺带：Kotlin 不接受行首 `+`
+
+多行字符串拼接的 `+` 必须写在**上一行行尾**。写成行首会报 `Syntax error: Expecting '->'`。
+
+## 改「门禁自身判据」的 PR：合前必须报批（#826）
+
+**硬规则。** 触及以下任一项即属此列：
+
+- `scripts/check-*.mjs` 的**判据逻辑**（新增 / 放宽 / 收紧断言）；
+- 门禁的**白名单 / allowlist**（放行一个原本会被拒的项 —— 白名单正是门禁被削弱的典型入口）；
+- `scripts/*-baseline.json` 的**语义内容**。（纯行号重铺的 `*-anchor-baseline.json` 属构建产物，**不算**判据。）
+
+### 合前必须满足两条
+
+1. **负控能变红**：构造一个应被拒的输入，门禁必须 `FAIL`。只证明「加上去就绿了」不算。`--self-test` 要同时有**拒绝例**与**放行例** —— 只测拒绝无法排除「一律拒绝」这种空防线。
+2. **描述写清**：修的是哪条假绿 / 修前怎么绿 / 修后怎么红。
+
+### 为什么
+
+门禁是唯一能拦住「看起来绿其实没验」的那层。放宽它而无人复核，等于把后面所有结论的可信度一起降级。
+
+### 实例
+
+- `#844`（`--force-drift`）：两条 DRIFT 自检（重复判红 / 未变不误报）+ 修前 exit 0 / 修后 exit 1 实测；
+- `#898`（`#808`/`#810` 负控）：两条各自 revert 验红，且**只红自己那条**；
+- `#899`：`FILE_PROVIDER_CALLER_ALLOWLIST` 放行一个调用点 → 所有者具名批准 + 三条条件（精确到 path 前缀 / 负控证明仍会拒 / PR 与发版 notes 写清权限面）。
+## debug 包起不来引擎：assets 里三个 gitignored 构建产物必须同版本配对
+
+**实锤（2026-10-29，查了十几轮）。** debug 包装到设备后引擎起不来，UI 只报泛化文案；真因分两层，都藏在 `.gitignore` 里。
+
+### 坑 1：`snapshot.sha256` 与 `snapshot.tar.xz` 必须自洽
+
+`EngineManager.kt:102-140` 的**启动前预检**比的是两个内嵌资产互相自洽（`assets/snapshot.sha256` 的声明值 vs `assets/snapshot.tar.xz` 的实际 sha256），**与 app 版本、引擎版本都无关**。失配时报 `[runtime-unavailable]`。
+
+两者都是构建产物：`.gitignore:6`（tar.xz）与 `.gitignore:12`（sha256）。**不能只链接其中一个**，也不能链接不同版本的一对。
+
+### 坑 2：`plugin-hard-manifest.json` 也必须一起带，且同版本
+
+`.gitignore:14` 忽略它，但 `EngineManager.kt:1461` 的 `PluginMounts.ensureHard(context, PluginMounts.currentFingerprint(context))` **按运行时快照指纹**查这份清单。缺了或版本不符，报 `stage=hard-bundle-selection-unverified`：
+
+```
+detail=EngineManager.startEngine() 拒启（未拉起引擎进程）：当前版本 Hard 插件清单缺失或与运行时快照不匹配
+```
+
+实测三种配对**全部同一个错**：0.14.10 快照 + 缺清单 / v0.14.9 快照 + 0.14.10 清单 / 0.14.10 快照 + 0.14.10 清单。
+
+### 结论
+
+`installDebug` 出来的包在这套环境里很难过这两道校验。**要跑引擎相关 / UI 级验收，应该用发布链产出的包**（`build-apk-013.ps1 -Fast` 会同时生成快照与 Hard 清单，天然配对），而不是 debug 包。
+
+### worktree 里手动起引擎的最小前提
+
+```powershell
+foreach ($f in @('snapshot.tar.xz','snapshot.sha256','plugin-hard-manifest.json')) {
+  New-Item -ItemType HardLink -Path "app/src/main/assets/$f" -Target "<用户工作区>/app/src/main/assets/$f"
+}
+```
+
+三者版本必须一致；混搭比缺失更难查（报错文案完全相同）。
+
+## 合堆叠 PR：下层禁带 --delete-branch
+
+**实锤（2026-10-29）：`#883` 就是这样丢的。**
+
+`#883` 的 base 是 `#882` 的分支（堆叠 PR）。合 `#882` 时带了 `--delete-branch`，GitHub 立刻删掉该分支，**基于它的 `#883` 被连带自动关闭**。之后：
+
+```
+gh pr edit 883 --base main   -> Cannot change the base branch of a closed pull request
+gh pr reopen 883            -> Could not open the pull request
+```
+
+**PR 不可恢复**：内容还在分支上，但该 PR 已成死链。
+
+### 正确顺序
+
+```
+1. 合下层 PR（不带 --delete-branch）
+2. 把上层 PR 的 base 改成 main（gh pr edit <N> --base main）
+3. 等上层 CI 绿后合上层
+4. 最后再删各分支
+```
+
+### 已经丢了怎么办
+
+用**旧分支**开新 PR（base=main），描述里链回被关闭的原 PR，写清原因与「内容相同」。不要试图 reopen —— GitHub 对 base 分支已删除的 PR 拒绝 reopen。
+
+### 判断能否带 --delete-branch
+
+先查有没有别的开放 PR 以本 PR 的分支为 base（`gh pr list --json baseRefName` 过滤）；有就不能带。
+
+## 解冲突：「保留双方」只对并列追加安全，同结构内部必须内联合并
+
+**实锤两次（2026-10-29，同一个错犯了两遍）：**
+
+| 场景 | 后果 |
+|---|---|
+| `NotifyStructureBatch8Test.kt`：两侧各加 `@Test`，但冲突块切在**函数体中间** | 「保留双方」把 KDoc 与函数体拼断，`SyntaxError: Expecting an element` |
+| `scripts/patches/apply-patches.mjs`：两侧各往**同一个 `IMPLS` 对象**加一条实现 | 「保留双方」并列拼两段，缺收尾 `},`，`SyntaxError: Unexpected token 'const'`（报错落在文件很后面的 `const regIds`，与真正的错点无关） |
+
+### 规则
+
+1. **先判断冲突块在什么结构里**：同一 `{}` / 同一函数体 / 同一数组 / 同一表格 / 独立顶层声明。
+2. **并列追加**（数组元素、列表项、表格行、彼此独立的 `@Test` 函数）→ 才能「保留双方」。
+3. **同一对象字面量 / 同一语句列表 / 同一函数体内部** → **内联合并**：把两侧成员合进同一个结构的内部，收尾符号只留一份。
+4. **解完必须跑结构级检查，不能只看门禁绿**：
+   - `node --check` **全部** `.js`/`.mjs`（不是只查改动的那个）；
+   - `JSON.parse` 每个改过的 JSON；
+   - `tsc --noEmit`（TS 侧）；
+   - Kotlin 编译（`:app:compileDebugUnitTestKotlin` 或 `:app:testDebugUnitTest`）；
+   - 再跑 `check-code-map`。
+
+**为什么门禁绿不够**：`check-code-map` 只查文档锚点与覆盖，不解析 JS 语法。上面两次都是 `check-code-map` 绿、`node --check` 才红——而且红的位置离真正的错点很远，靠读报错行号找不到根因。
+
+### 附带教训：夹具哈希不要手改
+
+`scripts/check-patch-fixtures.mjs:41` 拿 `manifest.capture.registrySha256` 与 `sha256(registry.json)` 比对。改 registry 后它必然失配——**手改哈希能让它绿，但那只是仪式**：`overlaySha256` / `discoveredTargets` 来自真实构建，新补丁没有对真实字节验证过。正确动作是重新捕获（需真实构建），否则就是假绿。
 ## 6. 关键实现细节与坑（每次踩坑必须登记）
 
 1. **realpath 前缀混用（B7 运行时表现，已修）**：Android 上 `/data/user/0` 可能是 `/data/data` 的软链——只把「文件侧」realpath 后再与未 realpath 的 ws 比较必拒。修复：`safeResolveInside` **两侧都 realpath**（ws 侧失败按原样参与），symlink 目标按 `dirname(rel)` 解析（`../../LICENSES` 从 `doc/<pkg>/` 出发 = `share/LICENSES`）。**新路径校验代码一律双侧规范化。**
@@ -144,7 +584,7 @@
 
 68. **部署默认写面档位不是能力门（#172 实锤，0.13.8 修复）**：`dsh-android-bridge` 的
     `gateFor/gateFacts/controlDecision` 三处曾叠 `&& st.tier !== 'T0'`——出厂装配
-    `writeMode: workspace-write`（profile-web.cordis.patch.yml:23）使 `tier` 恒 T0，
+    `writeMode: workspace-write`（`scripts/profile-web.cordis.patch.yml` 的 `shell-termux.config` 段）使 `tier` 恒 T0，
     ADB 通道**恒判未就绪**（`android_adb_shell_exec` 永不返回 via:'adb'），且设置页显示
     「未授权（T0）」——坑 29「勿把部署默认当死锁」的活体复刻。修复 = 三处删 tier 条件，
     能力门 = 引擎级三道门 + 会话档位实时 resolve；`tier` 降级为部署视图字段
@@ -2075,3 +2515,598 @@ JVM 边界测试在 `EngineBootInstrumentationTest`（取值与 clamp 边界、�
 341. **把 APK 更新入口从"开发者选项"提级时必须同时补导航短说明与图标**：`settings-nav.ts` 有两张按 `index.ts` 里注册的 **label 字面量**为键的表——`OWN_SECTION_DESCRIPTIONS`（一级行短说明，zh/en 各一份）与 `OWN_SECTION_ICONS`（内联 SVG 几何，取自上游 artwork）。新增一个 `settings.section` 注册项若只改 `index.ts`：`settings-nav.spec` 中"我方自有分区必须拿到短说明"的用例当场变红；图标则**不会红**（它的"图标互不相同"用例只构造三行，新分区不在其中），表现为新分区悄悄退回上游通用齿轮。修法：三处同改（注册 + 两张表），且图标几何必须逐字取自上游（`ui-primitives/src/icons/index.tsx` 的 `*OutlineArtwork`，viewBox 与 stroke 宽度同一档），不许自造。另注意该模块的 `sectionIcon()` 只支持"**首段**填充、其余描边"，目标图标的填充段不在首位时要么换图标、要么在注释里写明为什么表达不了。
 
 342. **多 agent 并行改同一个 Gradle 工程时，单测必须串行**：多个构建同时写 `app/build` 时，`bundleDebugClassesToRuntimeJar` 会在 `intermediates/runtime_app_classes_jar/.../classes.jar` 上撞文件锁，报 `FileSystemException: 另一个程序正在使用此文件`。这个形态**看起来像构建失败**（编译阶段是绿的），极易被误判成自己的代码有问题，从而去改本来没坏的源码。同样地，上一轮测试留下的 Kotlin/Java 守护进程会占着 `build/test-results/.../binary/output.bin`，让 **下一轮**在任何代码改动前就以 `Unable to delete directory` 失败。纪律：① 并行开发时由一人统一串行跑单测，其他人只做静态自查并如实写"未跑 Gradle"；② 复跑前先清 `build/test-results/testDebugUnitTest`，并确认没有上一轮的守护进程在跑；③ 归因前先看结果 XML 的 mtime 是不是本轮——拿旧 XML 当新结果会得出完全错误的结论。
+
+343. **每帧触摸路径上的同步 Binder：一次滑动 20 余次往返，把主进程主线程挂到 ANR 边缘（issue #540，2026-10-25）**
+
+现象：tier-2（`process-suffix`）浏览器档里滑一次网页，主进程主线程整段停顿，偶发 `ANR in com.dsharnessmobile.shell`；渲染进程主线程被占满时必卡（issue 复现者在 MuMu 上实测单事件约 180ms，一次滑动约 4s）。
+
+真因：`IBrowserRenderer.forwardMotion` 声明成同步 `boolean`，主进程宿主 SurfaceView 的 `onTouchListener` 在 UI 线程同步调用它；渲染侧实现走 `onMain{}`（`FutureTask.get(10s)` 排队等渲染进程主线程）。一次滑动约 22 条事件 = 22 次同步 Binder 往返，把「渲染进程忙」原样传导成「调用方主线程阻塞」。返回值本身没人真正需要：触摸回调只关心「要不要继续收后续 MOVE」——回 false 会被系统当成手势结束。
+
+修法（维护者在 issue 评论里拍板的最小改法）：
+1. `forwardMotion` 改 `oneway void`，投递即返回；主进程触摸回调恒按「已消费」返回。`dispatchTap`/`dispatchKey` 保持同步 `boolean`：一次性工具调用、返回值要如实报给模型，不在每帧路径上。
+2. 渲染侧新增纯 Kotlin `MotionCoalescer` 与按 tab 的 `TabMotionQueues`：DOWN/UP/CANCEL 保序保留、连续 MOVE 只留最后一条、上限 64 且溢出优先丢最老的 MOVE；binder 线程只入队，主线程 drain 时逐条 `obtain`/`dispatchTouchEvent`/`recycle`，取不到 live tab 整批丢弃；destroyTab / destroyAll / onRenderProcessGone 即 `forget`。
+
+复验证据：
+- 代码层：`MotionCoalescerTest` 8 例全绿；**负控**把合帧判据改成「新 MOVE 追加」后 3 例立刻变红（`consecutiveMovesCollapseToTheSingleLastOne` / `downMoveMoveUpKeepsOrderAndCoalescesTheMoves` / `tabsAreIsolatedFromEachOther`）；`check-bridge-symmetry` / `check-code-map` / `check-kotlin-test-count` 均 PASS。
+- 设备层（MuMu `127.0.0.1:16416`，SDK 35，WebView 110.0.5481.154）：tier-2 确已激活（`isolationTier=process-suffix`、`multiProfileSupported=false`、`:browser` 进程在场）。真实 `adb shell input swipe` 经 oneway 路径把中文维基百科页滚到底（`scrollY` 0 → 2118，6 次滑动），宿主进程主线程 `delayacct_blkio_ticks` 增量 **0**，5 次滑动期间 utime 仅 0.19s；页面 JS 忙等 9s 期间连发 3 次滑动，主线程仍 0 阻塞、`logcat` 无任何 ANR / `Input dispatching timed out` 行。
+- 同机代价对照：单次同步 AIDL 往返实测 **24.4ms/次**（`tabState` 20 次均摊）；与旧实现同一条 `onMain{FutureTask.get(10s)}` 通道的 `dispatchTap` 在「页面 JS 忙等」窗口内阻塞 81.9ms 才返回（该通道确实排在渲染进程主线程后面）。按一次滑动 22 条事件算，旧实现的同步代价下界约 0.54s，忙时按 issue 的 180ms/次约 4s。
+- 未量到（如实登记）：没能在本机把 `:browser` 主线程占满到 9s 级复现「必 ANR」档——JS 忙等占住的是 sandboxed renderer 进程，不是 `:browser` 主线程；「改动前」同机对照包未单独构建，改动前的量化取自本机同步往返实测与 issue 复现者数据。
+- 既存限制（不在本 PR 范围）：生产布局里 `BrowserHost` 把宿主 SurfaceView 加到 root 的 index 0，引擎 WebView 全屏压在上面；`browserHostShow` + 手动 stage 下投影既不可见、也收不到 `input swipe`（本轮实测远端 `scrollY` 不动）。设备层触摸测量因此在 debug 源集的 `BrowserRendererHostActivity`（SurfaceView 在最上层、同一条 forwardMotion 路径）上完成，临时取证钩子未提交。
+
+345. **XML source spelling is not the Android attribute value (#590).** The FileProvider gate classified raw attribute text, so `path="&#46;"` appeared narrow although Android resolves it to the broad `.` mapping. A complete fixture with an unregistered URI caller rejected the literal form but accepted its encoded equivalent. Attributes are now decoded exactly once before classification. Eight full-gate regression cases cover decimal and hexadecimal roots, parent traversal, registered callers, narrow directories and escaped literal ampersands; restoring the old raw-attribute assignment makes five cases fail. The gate self-test and the real source-tree check also pass.
+
+346. **A time comparison on the next input frame is not a flush deadline (#591).** The PTY reader checked elapsed time only when another frame arrived, so a short tail or prompt could remain buffered while the process waited for input. ConsoleOutputBatcher now schedules a one-shot deadline for the first pending text, serializes timer and size-triggered emission, and drains on close. Four behavioral regressions cover idle delivery, threshold ordering, one-time final drain and deadline cancellation; disabling scheduling makes the two deadline-sensitive cases fail. The session keeps its generation guard when forwarding emitted text.
+
+347. **A directory target does not reliably make rename fail (#593).** The journal write-failure regression assumed File.renameTo could never replace an empty directory; that assumption depends on the file system. A full regression run accepted that unexpected target instead of rejecting it. SnapshotTransaction.writeMarker now checks existing target types without following links and rejects non-regular files through its structured snapshot-marker-write failure path. The existing empty-directory negative and a populated-directory preservation test cover this contract, while normal marker publication retains its existing replacement behavior.
+
+348. **A generation check after download does not isolate its file writes (#592).** An invalidated worker still wrote the shared `<apk>.tmp` until download returned, racing a retry's writes, publication and cleanup. Downloads now use unique per-attempt staging, check cancellation during transfer and publish only through an owner-supplied generation gate serialized with invalidation. Cleanup owns only the attempt's temporary file and closes its connection. Five behavioral cases cover overlap, stale publication, failed reads, successful bytes and cancellation before connection. Restoring the fixed temporary filename makes the concurrent isolation case fail.
+
+351. **A volatile ready flag does not serialize input admission (#599).** The old writer checked readiness before taking the queue lock. A ready handler could drain the queue before that writer appended, stranding its input; publishing readiness before replay also allowed later input to overtake the queue. Admission, replay, readiness and protocol writes now share one critical section, and stale relay handshakes are rejected. Five production-method regressions cover the concurrent boundary, ordering, fallback bytes and failed/stale handshakes. The original race was reproduced on Android 15 with a blocked producer and a completed ready drain. Restoring the old admission method makes two of the five new regressions fail; the final focused set of 16 tests passes.
+
+352. **Keyboard padding can consume the entire console output area (#602).** In landscape, fixed headers and controls plus a full IME-sized dock padding exceeded the available height. The input fell below the keyboard edge and the output collapsed to zero. Native code now measures only the IME overlap remaining inside the WebView; the page reserves navigation and keyboard space once and uses a compact control row when height is short. Six native geometry tests and eight layout-state tests pass. Raw-inset and old-layout controls fail four and five cases respectively. Five Chromium viewport scenarios retain visible editing and nonzero output; the original asset reproduces the occlusion.
+
+353. **A generation guard must include the mutation it authorizes (#605).** A callback could pass its epoch check, block at the state lock, and overwrite a newer result after invalidation. Check-result publication, failure and progress now share the epoch publication lock with admission, invalidation and installer handoff. Rejected-artifact deletion rechecks ownership under that lock; network transfer and digest calculation remain outside it. Production-method interleaving tests stop at the actual state-lock boundary, avoiding transient reflection initialization as a false synchronization signal. The original failure callback changed a newer available result back to failed.
+
+354. **EOF is not proof that an exit event was delivered (#606).** The PTY reader unconditionally marked exit as delivered after a normal read loop, suppressing fallback notification when the relay died without an exit frame. Only an actual exit frame now suppresses the fallback; every current reader completion clears PTY readiness, and initial startup status is sent before the reader can report a terminal result. Production-reader tests cover abrupt EOF, buffered tail ordering, explicit exit deduplication, read failure, stale generations and non-PTY fallback. Android fault injection reproduced the original stale-ready UI after terminating only the console relay.
+
+355. **老内核缺 ES2023 内建 `toSorted` 时，客户端插件是「render 里抛错 → slot 错误边界吞成空渲染」，症状是入口凭空消失而不是报错（2026-10-26 用户报障「模型选择不可用」）**：Android 应用内 WebView（内核 < Chrome 110）上，输入框控件行的模型胶囊不显示，点开 /model 只有「搜索模型…」+ 红字 `groups.toSorted is not a function`，没有任何模型行。真因：`toSorted` / `toReversed` / `toSpliced` / `Array.prototype.with` 随 V8 11.0（Chrome/WebView 110）才发布，而上游客户端包**在 render 里直接调**它们（ui-model-selection 的模型分组排序、ui-settings-models 的设置→模型行排序、ui-schedule 的定时任务排序）；旧内核上这四个是 `undefined`，render 抛错被 slot 错误边界接住，于是渲染成空——「入口被下掉」只是表象。**为什么语法门禁抓不到**：`check-browser-syntax-floor.mjs` 判的是**语法**（esbuild 的降级面），内建缺失属**运行时**，两者正交；唯一挡得住的是能力存在性判断，所以补在注入层（`dsh-host-web-compat` 的 POLYFILLS，`</head>` 前注入），补一次覆盖全部调用点与后续同名新增（逐个补上游 minified 产物要按版本重锚，漏一处就再崩一次，也挡不住第三方 bundle）。判据与反证：`dsh-host-web-compat/scripts/array-copy-polyfills.test.mjs` 在**删掉四个原生方法的 realm**里跑页面实际收到的脚本字节，逐例与原生实现对照（稀疏洞物化 / 原数组不被改写 / 比较器非法抛 TypeError / `with` 越界 RangeError），并保留「补丁装上之前该 realm 真的没有这些方法」这条反证。**复现老内核的坑**：模拟器 WebView 恰是 110，原生在场，`typeof [].toSorted === 'function'` 恒真——要看真实症状必须用 CDP `Page.addScriptToEvaluateOnNewDocument` 在页面任何脚本之前 `delete Array.prototype.toSorted/toReversed/toSpliced/with` 再 reload，否则验的是原生不是补丁。**同批审计的额外发现（别混成本次归因）**：`Array.prototype.findLast/findLastIndex`（Chrome 97）也在旧内核缺位，且在售快照的 `client.js` 里实测命中 ui-chat 6 / ui-conversation 3 / ui-trajectory 1 / inspector 1 处 `findLast` 与 ui-chat、ui-trajectory 各 1 处 `findLastIndex`，全在 render 路径（设备负控臂另拍到 client-store 的 `LegacySliceBuilder.rebuildPartial` 报 `findLast is not a function`，表现为 subscriber failed），故同批补上。附带的口径修正：产物里的 `??=`/`||=` 把实际可解析下限抬到 **Chromium 85**（`check-browser-syntax-floor` 的 chrome87 是语法降级目标，不是内建下限），`at`/`hasOwn`/`structuredClone` 这些更低的项只在 >=85 的设备上起保险作用。
+
+356. **注入层补原型内建若用赋值安装，属性就是可枚举的——`for...in` 会把方法名当成数组元素（#621）**：0.14.9 的六个 ES2022/ES2023 数组方法（`toSorted/toReversed/toSpliced/with/findLast/findLastIndex`）以 `Array.prototype.x = function ...` 补进 POLYFILLS，于是**装过补丁的旧内核**上普通数组的 `for...in` 额外返回六个方法名（`0,1,toSorted,toReversed,toSpliced,with,findLast,findLastIndex`），`Object.keys(Array.prototype)` 也不再为空；原生内建全部不可枚举，所以桌面 Chrome 永远复现不了，只在旧内核上把函数当数据读。同一条缺口还伏在更早的 `Array.prototype.at` 与 `String.prototype.replaceAll` 上（同一个写法）。修法：原型内建一律 `Object.defineProperty(proto,'name',{value,writable:true,configurable:true,enumerable:false})`，判缺守卫与语义实现不动，原生在场时仍一个字节都不改。判据落在 `dsh-host-web-compat/scripts/polyfill-property-descriptors.test.mjs`：在删掉原生方法的 realm 里跑页面实际收到的脚本字节，读描述符并与**原生读数**对齐、断言 `for...in` 只见到 `0,1`、`Object.keys(Array.prototype)` 为空，外加一条「POLYFILLS 内不得再出现赋值式安装」的源码契约。负控：把 `lib/index.js` 换回修前版本，同一份回归 2 例判红、`smoke-injections` 7 条送达标记判红。**别只测「是函数」**——可枚举性只有描述符与遍历读数抓得住。
+357. **APK 三方案全真仍不能证明签名者身份 (#678)**：原签名门禁在 `expectedCertificateSha256` 缺省时把证书判据当作恒真；共享组装器又没有把固定 keystore 传给本地和 portable 验证入口，所以替换密钥后的 APK 仍可能只凭 v1/v2/v3 都为真而被接受。修法：APK 验证必须提供 keystore，证书指纹无效、缺失或任一签名者不匹配均判红；共享组装器默认传入仓库固定的 `keystore/debug.keystore`，直接调用的 workflow 继续显式传入。`check-apk-signatures.test.mjs` 覆盖缺预期身份、缺证书、错误证书与多签名者，并以真实 CLI 负控证明不带 `--keystore` 在运行 `apksigner` 前失败；`build-apk-engine.test.mjs` 锁定共享终端默认值与显式覆盖参数。复验：`node --test scripts/check-apk-signatures.test.mjs scripts/build-apk-engine.test.mjs`、签名门禁 `--self-test` 与 `check-patch-mirror.mjs --self-test`。
+
+358. **判定了「引号内的命令替换」还不够——`eval` 与 shell 注释是同一张网上的两个洞（2026-10-28 自查，issue #674 同类）。** `eval "screencap -p /sdcard/real.png"` 会被执行，但 `stripQuotedText` 把引号内容抹成空白 ⇒ 命令词面里没有 `screencap` ⇒ 只认 `sh/su -c` 时它**一路放行**（安全侧漏拦）；反过来 `echo hi # screencap -p /sdcard/x.png` 里的注释文本会被当命令词面 ⇒ **误拦合法命令**（可用性侧过度拦截）。修法：把 `eval` 当作与 `sh -c` 并列的「载荷会被再解释一遍」入口（`EVAL_PAYLOAD`，分界符要含 `;`/`&&`/`||`/`|`/`(`），并在切段时按 shell 规则剥掉**词首** `#` 到行尾。两侧（TS/Kotlin）必须同改，fixture `S-5a..c` 与 `S-6a` 锁死。**教训：判定语义的新增分支要双向测——既测「原来漏的现在拦住」，也测「原来误拦的现在放行」，只测一侧就会把 fail-closed 写成 fail-broken。**
+
+359. **门禁报「目标文件缺失」时，先查 registry 与实现的 scope 是否不同步，不要先怀疑目录没生成（2026-10-30 实锤，issue #888 / PR #939）。** Fast 与 release 链在「vendor 补丁校验/施加失败」处拒打包，报错是 `[fail] terminal-shell-candidates-T1: 目标文件缺失 usr/lib/node_modules/...`，路径里带着 **`vendor/`** 前缀。直觉反应是「`vendor/usr` 没生成」，于是去补目录——**方向完全错了**：那个路径本就不该存在。
+
+    真因是 `registry.json` 里 `zsh-fpath-A1` 与 `terminal-shell-candidates-T1` 两条**漏了 `scope` 字段**。`apply-patches.mjs` 用 registry 做 scope 过滤，空值落到默认 `vendor`，于是拿仓库根的 `vendor/` 当根去拼 `usr/lib/...`，必然 ENOENT。而实现侧（`apply-patches.mjs` 的 `IMPLS`）这两条**本来就写着 `scope: 'engine'`**——是 registry 与实现不同步。
+
+    **判别方法**：报错路径含 `vendor/usr/` 这类不该存在的组合时，直接 `grep` 该补丁 id 在 `registry.json` 与 `IMPLS` 里的 `scope`，两边比对；不要先动文件系统。
+
+    **为什么能潜伏这么久**：两道门禁之间漏了一格——① registry ↔ IMPLS 的 id 集合校验只比 **id**，不比 `scope`；② `check-patch-fixtures.mjs` 的 B 段按 `patch.scope ?? 'vendor'` 过滤，缺 scope 的 engine 补丁被**静默当成 vendor 跳过**，于是「每个 engine 补丁目标必须恰有一份当前代真夹具」这条判据对它们根本不执行（实测这两条夹具数都是 0 而 CI 全绿）。已补 D 段（PR #943）：registry 缺 scope 而实现声明 engine → 直接判红。
+
+    **附带教训**：修完后 `RUNTIME-PATCHES.md` 的生成块会判红，diff 里 scope 列原为 `undefined`——**那个 `undefined` 就是缺 scope 的可见症状**，跑 `node scripts/check-maintenance-docs.mjs --write` 重新生成即可；夹具台账也要 `probe-engine-anchors.mjs --fixtures` 重捕（`capture.registrySha256` 必然失配）。
+
+360. **夹具与真实 DOM 同错时，再多测试也只能证明「内部自洽」（2026-10-30 实锤，#941 / #949 / #950 三次同源）。** 一天内撞了三次同一形态的错：**选择器按猜的结构写，夹具又照着猜的结构造，于是测试全绿而真机全废。**
+
+    **① 「+」映射行恒 0（#941）。** 上游整条链是自洽的：按钮 `aria-haspopup="listbox"` → 弹层 `role="listbox"`（`MenuView.tsx:132`）→ 每项 `role="option"`。插件却写 `[role="menu"]`——上游根本没有这个角色。夹具更配合：假菜单先造一层 `role="menu"` 再套 `role="listbox"`，于是 24 条测试全绿。实机同一次点击：`[role="menu"]` 为 null，`[role="option"]` 有 **9 项**。
+
+    **②③ 文件卡片胶囊不挂（#949 单文件 / #950 多文件）。** 上游把按钮包在 `FileOpenAnchor` 里，真实 DOM 是 `div[data-single] > span > button` 和 `ul > li > span > button`；插件写 `:scope > button` 与 `li > button`（都假设按钮是直接子级），两条分支都匹配不到。夹具同样少了那一层 span（`card.append(header, hidden)`），30 条测试全绿。
+
+    **共同点不是「选择器写错」这个表面现象，而是判断依据的来源**：结构是**猜的**，夹具又按猜的结论造，于是两边同错、互相印证。
+
+    **判别方法**：凡按 DOM 结构做增强，先取一次真实结构再写选择器——
+    - 用 CDP 在真机上打印 `el.outerHTML` 或逐层 `tagName + role + className`；
+    - **优先用语义属性**（`aria-haspopup`、`role`、`aria-describedby`、`data-*`），别用「几层父子」这种脆结构；
+    - 夹具必须照抄真实 DOM 层级，**多一层少一层都不行**——夹具的作用是复现真机，不是复现想象。
+
+    **最省的证伪手段**：写完选择器先在真机跑一次 `document.querySelector(选择器)`，返回 null 就是结构猜错了。这一步 10 秒，能省掉一轮完整构建（本轮每次构建 + 装机约 20 分钟）。
+
+    **附带的判定原则**：测试通过只证明「代码与夹具一致」，不证明「代码与产品一致」。夹具是**真机的代理**，代理失真时测试越绿越危险。
+
+361. **一轮只读复核的「判定干净」清单（2026-10-28，附判据；省得后人把这些当新发现重挖）**：以下八处各自被怀疑过、逐条验完认为当前实现正确，**不要**因为"看起来像那类经典缺陷"就动它——
+    ① `CoordBasisPolicy.resolve`（#258 整屏/窗口基准）：优先级 `maximumWindowMetrics`(API 30+) → `Display.getRealMetrics()` → currentWindow 兜底；全取不到返回 `(0,0)` + `WIRE_WINDOW_CURRENT`（fail-closed，绝不虚报整屏）；click/longClick/snapshot 的 screen 字段/scroll 兜底四条路径共用同一个 `resolve`，不存在"漏改一条就换个入口复发"。
+    ② `parseSfDisplayTokens`(Kotlin) 与 `screenTokensFromSfDump`(TS) **实质等价**：`lines()` vs `split(/\r?\n/)`、`matchEntire(trim())` 自带锚点 vs 显式 `^…$`、`trimEnd()` vs split 已吃掉 `\r` ⇒ 不是漂移，勿按"双份实现必漂移"的直觉去改。
+    ③ `ConsoleKeyCodec.decode` 的**未知转义丢弃引导反斜杠**（`\q` → `q`、`\xZZ` → `xZZ`）是**有意契约**，两条用例钉住（`unknownEscapeDropsTheBackslashAndKeepsTheCharacter`、`badHexFallsBackToTheEscapedCharacter`）；文件头那句"不吞字符"才是笔误（已在 `cb5edc1d` 改注释对齐）。**改了实现那两条会红**，且真实输入走不到那一支（页面侧把 `\` 编码成 `\\`）。
+    ④ `ConsoleOutputBatcher`：`@Synchronized` 可重入不死锁；`deadline.cancel(false)` 之后**已排队**的任务进去会因 `pending.isEmpty()` 直接返回（无害）；`close()` 先置 `closed` 再 flush、`finally` shutdown ⇒ 关停后 `append` 早退不撞 `RejectedExecutionException`。
+    ⑤ `GuidePageRenderer`（1083 行）**没有 HTML 字符串拼接**，全部走 `TextView`/`LinearLayout` ⇒ 不存在"未转义值进模板"那一面。
+    ⑥ `EngineAuth.redact` 与 `LogSanitizer` 是**分工**不是重复：前者只管引擎 URL 的 `[?&]token=`（`{40,}` 长度下限的 `TOKEN_RE` 只用于**提取**，不得拿去脱敏），JSON `"token":`/键值对形态由后者的 `SENSITIVE_KV` 兜 ⇒ 叠加后覆盖完整。
+    ⑦ 路径包含判据**四处都对**：`RepairActivity:1112`、`ShizukuTransport:1056`、`ShizukuUserService:110` 都补了 `File.separator` / `"/"`；`PluginMounts:921/1033/1046` 用 `java.nio.file.Path.startsWith`（**按路径段**比较，`/a/b-evil` 不命中 `/a/b`）。**看到 `X.startsWith(Y)` 先回类型声明确认 receiver**——`String.startsWith` 才是字符前缀那个洞。
+    ⑧ `BrowserHost` 的 `remoteId` 解析（`val slash = remoteId.indexOf('/'); if (slash <= 0) return`）用 `<= 0` 同时挡住 `-1` 与首字符命中 ⇒ 后面两处 `substring` 不会越界；同文件里 `tab.view!!`/`remote!!` 都有前置非空分支或在 `runCatching` 内。
+
+    ⑨ **`plugins/dsh-android-manage/src/protocol-v2.ts` 里两处 `subtreeEnd` 不是重复实现**（2026-10-28 复核）：`:160` 那份在 `decodeV2` 里（顺手重建 `parentId`，因为 V2 不传父 id），`:293` 那份在 `encodeV2` 里（判叶子用）。两处循环**算法一致**（单调栈 + 同深或更浅即出栈），编码侧不需要 parentId 所以少一行赋值。看到"同一个文件里两份同名算法"先确认是不是**解码/编码两个方向**，别急着合并。
+    ⑩ **TS 侧叶子去重 key 与 Kotlin 侧实质等价**：TS `[text, desc, cls, x + Math.floor(w/2), y + Math.floor(h/2)].join('\u0000')` vs Kotlin `text + "\u0000" + desc + … + (x + w/2) + …` —— `Math.floor(w/2)` 与 Kotlin 的 `Int` 除法对正数逐位相同，join 与字符串拼接都得同一串。**唯一理论差异**：`join` 的分隔符与文本里出现 `\u0000` 时会歧义，Kotlin 侧同样有此问题 ⇒ 两侧同病，不构成漂移。
+    ⑪ **`plugins/dsh-android-bridge/src/route-auth.ts` 的端口判据正确**：`enginePortFromEnv` 对 `undefined` 给文档默认 4145、对非 `^[0-9]+$`（含空白/符号/十六进制）给 `null`、对 `Number.isSafeInteger` 之外与 `1024..65535` 之外给 `null`（`0` 自然被区间挡掉）；`loopbackAuthorities` 在端口不可用时返回**空数组** ⇒ 所有调用方 fail-closed。注释里那条「绝不能在模块作用域缓存」是真实约束（engine 模块在 `server.listen()` 之前就被 import，缓存会把 pre-bind 默认值冻住）。
+    ⑫ 以上 TS 面**都有测试覆盖**（`route-auth.test.mjs` / `engine-port-auth.test.mjs` / `screen-scope.test.mjs` 47 例 / `protocol-negotiation.test.mjs`），不存在"判干净但没人测"的情况。
+
+    ⑬ **`plugins/dsh-android-file-open` 的 `purgeStaleUnclaimed` 里 `join(queueDir(), item.file)` 不构成路径逃逸**（2026-10-28 复核，我差点报它）：`item.file` 看着像"清单 JSON 里的字段"，实际是 `readItems()` 里 `readdirSync(dir)` 的目录项名（`file: f`）—— readdir 只返回 basename，**不含 `../`**。判据：**先看那个字段的唯一赋值处，再判它是不是外部可控**。同文件的 `enqueueSession` 有 "ws+sep 边界 + realpath 规范化"（H3 修复），两处删除操作的安全模型不同是因为**入参来源不同**（一个是外部路径、一个是目录项名），不是口径不一致。
+    ⑭ **`canonicalPath` 对不存在路径回落词法 `resolve` 在 `ownedInsideWorkspace` 里无害**：回落会让"指向不存在目标的符号链接"通过 `real === wsReal` 与 `startsWith(wsReal + sep)` 两道判据，但调用方是 `rmSync(target, { recursive: true, force: true })` —— `rm` 遇符号链接**删链接本身、不跟进目标**（`rm -r` 同理）。⇒ 结论安全。**别**照搬"canonical 回落 = 悬空链接漏洞"这条直觉（它在"写入"场景成立、在"删除链接"场景不成立）：判据取决于**下一步动作是否会跟随链接**。
+
+    ⑮ **`MALFORMED_DISPLAY_OPTION` 这条判据当前没有「独家覆盖」——删掉它测试仍然全绿**（2026-10-28 变异验证实测，别当成缺陷去删或者去补）：
+    `MALFORMED_DISPLAY_OPTION = /(?:^|[ \t])-d(?:[ \t]*=[ \t]*\S|(?![0-9\s])\S)/` 拦「形似 display 选项但取值不是纯数字」（`-d=7`、`-dx`）。把它变异成 `false` 后 `screen-scope.test.mjs` **47/47 全绿** —— 原因不是没覆盖，而是**判据重叠**：`-d=7` 已有一条 fixture（`S-9b`），它走的是另一条路——`displayOptionsIn` 认不出 `-d=7` ⇒ 该段无 option ⇒ `family.targetFlags.length === 0` ⇒ 同样 `deny-uncertified-target`。
+    **因为每个需要目标屏的命令家族都要求 `targetFlags` 非空**，所以「认不出 option」与「option 畸形」在当前命令集下**必然同样落进 deny**，MALFORMED 成了双重保险。
+    ⇒ 处置：**保留**（fail-closed 的方向、成本为零），但别误以为它有独立用例守着。**真要动它之前**，先确认「有没有哪个家族的 `targetFlags` 可以为空却仍然 allow」——有的话 MALFORMED 就是那条路的唯一门槛，删了会开洞。
+    ⇒ 顺带记同一轮的有效覆盖（同一 63 条 fixture 上变异实测）：`family.targetFlags.length===0` **红 4**、`owned.length===0` **红 5**、`!owned.every(isOwnedTarget)` **红 15**、首个 `deny-unparsed` **红 1**、`interpreterPayloadUnparsed(bare)` **红 1**、`TRAP_PAYLOAD` 正则（`trap`→`trapZ`）**红 1**。
+
+    ⑯ **`PublicRepoProvision` 的 `status|trigger|nowMs|detail` 落盘格式：`trigger` 不转义 `|` 当前安全，但别给它传带 `|` 的值**（2026-10-28 复核）：
+    `encode()` 用 `|` 拼四段，`fold()` **只折叠换行**（CRLF→空格、CR/LF→空格、trim），**不转义 `|`**。
+    `parseStatus` 只取 `parts[0]` 且要求 `parts.size >= 4`（半截文件判 UNKNOWN，方向正确）；`parseDetail` 用 `parts.drop(3).joinToString("|")` **能正确还原含 `|` 的 detail**。
+    唯一脆弱点在第 2 段：若 `trigger` 含 `|`，`parseTrigger` 会截断、`parseDetail` 会把 `nowMs` 也当成 detail 的一部分。
+    **当前所有实参都是 `PublicRepoProvision.TRIGGER_*` 常量**（`EngineManager` 五处全是 `TRIGGER_ENGINE_START`），所以不构成缺陷 ⇒ **不要改 `fold()` 去转义 `|`**（会改变落盘格式、老文件读不对，收益为零）。真要加带 `|` 的 trigger 时，先给 trigger 单独做一层折叠。
+
+    ⑰ **用不变量跑 fuzz 量 `screen-scope` 的覆盖面：`eval`/`trap` 这两族一度只在 batch3 分支被堵住**（2026-10-28 实测；**该差异已于同日随 #717 合并进 main 而消失**——`3e676a5c` 把 `EVAL_PAYLOAD`/`TRAP_PAYLOAD`/`interpreterPayloadUnparsed` 全部带进 main，本条保留作判据来源与变异覆盖记录）：
+    方法＝不变量 fuzz（不读代码、主动找洞）：固定 8 条真实屏命令词（`screencap -p` / `screenrecord` / `input tap` / `input keyevent` / `wm size` / `uiautomator dump` / `dumpsys window` / `am start`）× 20 种包装（裸写、`sh -c "…"`、`sh -c '…'`、`eval "…"`、`eval '…'`、`trap '…' EXIT`、`trap "…" INT`、`;`/`&&`/`|` 拼接、`(…)`、`{ …; }`、反引号、`$(…)`、`echo 'x' # …`、尾随换行、前后空格、`X=1 …`、`if…fi`、`while…done`），`isOwnedTarget` 恒 `false`（空注册表＝最严），**凡是 allow 就是洞**。
+    **结果**：
+    - `fix/self-audit-…`（基于 main）与 `main`：**160 例里 32 例放行** —— 全部是 `eval` / `trap` 两族（`eval "screencap -p …"`、`eval '…'`、`trap '…' EXIT`、`trap "…" INT` × 8 条命令）。
+    - `fix/issue-batch3-…`：**降到 8 例**，且这 8 例全是 `echo 'x' # screencap …` —— **`#` 后面 shell 本来就不执行，放行是对的**（batch3 加了词首注释剥离）。⇒ **batch3 这 160 例实际 0 真洞**。
+    ⇒ **纪律**：①`eval` / `trap` 的展开修复**只在 #717（batch3）里**；`#719`（batch4）与 `#733`（self-audit）都基于 main，**这两个合并了也不会带上它** —— 如果作者先合 #719/#733 再合 #717，中间窗口里 `eval "screencap …"` 是放行的。真要拆成两个不重叠的批次，得把 `EVAL_PAYLOAD`/`TRAP_PAYLOAD` 那两段单独摘出来。
+    ②写这类 fuzz 时**注释形态要单独分类**（我的不变量一开始把 `echo 'x' # cmd` 也算泄漏，属假阳）——判断"该不该拦"要看**shell 会不会执行**，而不是"命令词有没有出现"。
+
+    ⑱ **`screen-scope.ts` 的引擎侧判据：`#717`（batch3）比 main 多 4 个，其中 3 个在 main/batch4/#733 上仍缺**（2026-10-28 用 diff + 探针逐条坐实）：
+    batch3 相对 main 新增的四条判据（`git diff origin/main fix/issue-batch3 -- plugins/dsh-android-bridge/src/screen-scope.ts`）：
+    ① `MALFORMED_DISPLAY_OPTION`（`-d=7` / `-dx` 形态）—— **其根因已由 #733 的 `2bbb5049` 修掉**（`displayOptionsIn` 短选项不再吃 `=`），所以 main 上这条路已经堵住，batch3 那条成了第二层保险。
+    ② `EVAL_PAYLOAD`（`eval "<cmd>"` 载荷展开）
+    ③ `TRAP_PAYLOAD`（`trap '<cmd>' EXIT` 载荷展开）
+    ④ `interpreterPayloadUnparsed`（含 `SHELL_C_PAYLOAD` 与**裸解释器段** `BARE_SHELL_SEGMENT`）
+    ⇒ **②③④ 当时在 main / batch4 / #733 上仍然缺；现随 #717 合入 main（`3e676a5c`）而补齐**。以下探针结果是**合并前**的对照数据，保留用于复验判据：（`isOwnedTarget` 恒 false，即空注册表最严）：
+    ```
+    "echo 'screencap -p /x.png' | sh"   → main: allow   batch3: deny-unparsed
+    "eval "screencap -p /x.png""       → main: allow   batch3: deny-unparsed
+    "trap 'screencap -p /x.png' EXIT"   → main: allow   batch3: deny-unparsed
+    "sh" / "/system/bin/sh" / "busybox sh" → main: allow   batch3: deny-unparsed
+    ```
+    **为什么 `| sh` 那类特别危险**：`echo '<真实屏命令>' | sh` 里，喂入段被 `stripQuotedText` 抹成空、接收段是裸 `sh`（同样无命令词）⇒ 引擎侧两条都不进屏幕命令词面 ⇒ **allow**，而执行时 `sh` 从 stdin 读到命令照跑。**壳侧 `ShellOps.decideScreenCommand` 的 `BARE_SHELL_SEGMENT` 会 DENY_UNPARSED 兜住**（所以执行点安全），但引擎侧先告诉模型"可以做" ⇒ **误导性错误**（模型收到允许、到壳侧才被拒）。
+    ⇒ **纪律**：①这 3 条判据的修复归属是 `#717`，**不要**在 #733/#719 里重复写（会与 batch3 冲突且重复）；②若作者按 #719 → #733 → #717 的顺序合，中间窗口里这三个形态在引擎侧是放行的（执行点仍安全）；③`ShellOps.kt` 里 `BARE_SHELL_SEGMENT` 的注释声称「与引擎侧 `screen-scope.ts` 的同构判据同批演进」—— **这句话在 main/batch4/#733 上不成立**，只在 batch3 成立；④查这类漂移最快的办法是**同一批探针在两侧各跑一次**（跨语言 fixture 只覆盖已登记的用例，覆盖不到就看不出来）。
+
+    ⑲ **`parseUiTreeXml` + `pruneNodes` 已用「结构不变量 fuzz」验证过（400 例零违反）—— 别再怀疑栈机/裁剪的结构自洽性**（2026-10-28）：
+    方法：随机拼 1~6 个片段（合法开标签 / 自闭合 / 含 `|` 的文本 / 多余 `</node>` / 裸 `<node>`）成 400 条 XML，逐条检查四条不变量：
+    ①`pruneNodes` 输出的 `id` **唯一**（`n0/n1/…` 不重号）；
+    ②`byId.size === nodes.length`（索引与节点一一对应）；
+    ③每个 `parentId` 要么为空、**要么指向存在的 public id**（不悬空）；
+    ④`checkUiTreeParse` 拒收时给出的理由必须属于已知的三类（节点数不一致 / 缺 bounds / 根 id 非 0），不得出现意料外的理由。
+    结果：**400 例 0 违反**，`parse` / `prune` 均未抛异常。
+    ⇒ 这三处此前各修过一个真缺陷（`>` 截断属性区、`|` 分隔符碰撞、自检漏属性丢光），修完之后结构面已经结实；**再往这个方向找只能找到边角**，优先换靶。
+    ⇒ **顺带记一次我自己的误判**：看到 `const { pkg, waitMs = 2500, screenId } = args`（`app_launch`）与 `const { action } = args`（`ui_global`）**没有 `?? {}` 兜底**，就怀疑「模型无参调用会 TypeError」。查签名才发现这两处的字段是**必填**（`pkg: string` / `action: string`），框架会校验并传对象；而另外四处写了 `?? {}` 的，字段是**全可选**（`ref?` / `root?`）。⇒ **「有没有兜底」不能只看写法，要看签名字段是否可选** —— 这是"按形式下结论"的又一次（同 `0mvrty8b` 家族）。
+
+    ⑳ **`splitCommandSegments` / `stripQuotedText` 会把「嵌套体」与「引号内容」替换成**一个空格**——别拿「段必须是原文子串」当不变量**（2026-10-28 我因此误报 44 例）：
+    `screen-scope.ts:257` / `:263` 里反引号与 `$()` 的嵌套体被 `buf += ' '` 占位，`:319` 的 `stripQuotedText` 同理，顶层分隔符（`;` / `\n` / `\r`）由 `flush()` 直接切掉。所以：
+    ```
+    "`\n`$"    → 段 " $"      // 原文里没有 " $" —— 换行被占位成空格，属预期
+    "&;||(`(`"  → 段 " ( "     // 同上
+    ```
+    ⇒ **写不变量/断言时正确的做法**：比「段长度 ≤ 原文长度 + 常数」（用来抓死循环/膨胀）、比「`unparsed` 的段不得被判 ALLOW」，**不要**比「段是原文子串」——占位符会稳定制造假阳。
+    ⇒ 这条与「注释形态假阳」（⑰）同族：**fuzz 的不变量必须建立在实现契约上，而不是建立在对"应该长什么样"的直觉上**。写不变量前先问一句「实现会不会为了可判定性而改写输入？」——会，就别用「等于原文」类断言。
+    ⇒ 顺带记：`splitCommandSegments` 的四条不变量（分隔符只在引号外切段、嵌套执行体再切一层、引号不闭合判拒、`MAX_NESTING = 4`）在 TS 与 Kotlin 两侧**逐条一致**（`MAX_NESTING` 都是 4、`\` 处理都是取两字符、单引号都是找下一个 `'`）；3000 例 fuzz 无死循环、无段长度膨胀。
+
+362. **锚点要锚「符号 + 目标行内容」，不要锚绝对行号；行号锚只在确实无符号可指时用，且必须写明理由（2026-10-30 实锤，#791 计划 B 的模板）。**
+
+现象：`EXECUTION-MAP.md` 里 `scripts/check-bounded-io.mjs:239` 这种行号锚，**只要在它上面插一行代码就判红**——不管插的那行跟被锚定的内容有没有关系。我自己就踩过一次：加三行声明 -> `check-code-map` 报 `anchor-content-drift`，最后是靠把新增代码挪到锚点**之后**绕过去的。那是治标：下一个在这个文件里加代码的人会再踩一次。
+
+真因：`path:line` 里的 line 是**绝对行号**，漂移判据比的是「这个行号上的内容变没变」。任何上方插入/删除都会让同一条锚点指向别处，于是它报的不是「你改坏了什么」，而是「你动了这个文件」——**判据表达的东西错了一位**。
+
+修法：改成 `path#Symbol@<hash>`，hash 是**目标行内容**的哈希（不是符号定义行的）。判据变成「该符号体内是否还含这一行内容」，于是：插行不红（内容还在），改内容才红（内容消失）。本仓模板见 `EXECUTION-MAP.md` K06 行 -> `scripts/check-bounded-io.mjs#scanSource@0bc35a00`；早先同形的例子是 `check-contract.mjs#collectConsumedSlots@2c28ea38`（原先也是 `:165` 行号锚，同样害过一次）。
+
+推导方式：用门禁自己的推导器，**不要手工猜**——
+
+```
+node -e "import('file:///'+process.cwd()+'/scripts/check-code-map.mjs').then(m=>{const fs=require('fs');const src=fs.readFileSync('scripts/x.mjs','utf8').split('\n');console.log(JSON.stringify(m.deriveAnchorFor(src,123)))})"
+```
+
+返回 `kind:'symbol'` 就直接用；返回 `kind:'content'`（`symbol:null`）说明该行不在任何具名符号体内（常见于顶层 `if` 自检块、匿名箭头函数里的行），此时才允许保留行号锚，**并在同一条目里写一行理由**，说明为什么指不到符号。
+
+纪律：**不要为了省事跑全量 `--derive-anchors`**。它会一次性把整份 `EXECUTION-MAP.md` 的锚点全改形（实测 1392 条、696+/696-），把一个单点改动变成无法评审的巨型 diff，还容易连带改错语义。只改你**确实需要改**的那几条。迁移 917 条是独立计划，不是顺手做的事。
+
+⇒ 同族判据：任何「按位置定位内容」的校验，位置一变判据就失真。锚点要绑**内容**或**符号**，不能绑**坐标**。
+
+363. **改锚点别手工算行号差，用 `--only <path>`：它只刷你列出的文件，其余一字不动（2026-10-30，`--only` 落地时补记）。**
+
+现象：`--derive-anchors` 会一次性改写整份执行地图的**所有** legacy 锚点（实测 1392 条、696+/696-）。而实际最常见的场景是「这次只动了三个文件，只想刷这三个文件」。此前只能手工算行号差再逐条改坐标——非常脆，`#1075` 那批就因此返工过一次（还顺手把两处语义早已错位的锚点改错了）。
+
+修法：`node scripts/check-code-map.mjs --only <path>[,<path>...] [--refresh-anchor-baseline]`。四条判据，每条都能判红：
+
+- **越界即错**：路径不在执行地图里、或该文件在文档中没有任何锚点 -> exit 2，不静默跳过。静默跳过 = 「我以为刷了，其实没刷」。
+- **只动 listed**：未列出的文件在文档里一字不改（有负控守着，见下）。
+- **推不出锚点仍硬失败**：exit 1，绝不回退成行号锚（那正是要淘汰的形态）。
+- **与 `--refresh-anchor-baseline` 联用**：先改写文档锚点、再用**改后的新内容**重新解析并重铺基线。顺序反了会把刚生成的符号锚当成「新引用」而判红。
+
+三条负控（都要能判红，缺一即这道门禁没在盯）：
+
+1. listed 文件坐标陈旧 -> 被修正（旧行号锚剩余 0/N，且产生 `#Symbol@hash` 形态）；
+2. **未 listed 的文件同时陈旧 -> 必须保持原样**（这条才是「真的只动 listed」的证明，前一条单独存在时，即使实现改成了全量刷也会绿）；
+3. 传不存在的路径 -> exit 非 0。
+
+幂等：同一 `--only` 连跑两次，第二次 `改写 0 处引用`，基线与文档 SHA-256 都不变。
+
+⇒ 注意 `--only` 只解决**作用域**，不解决**推导**：它复用 `deriveAnchorFor` / `deriveSymbolAnchor`，与 `--derive-anchors` 同一套逻辑（两套推导必然漂移，而漂移正是锚点要解决的问题）。所以内容在符号体内不唯一时它照样硬失败——那时该做的是换一行锚、或给 `#expect`，不是绕过门禁。
+364. **会整体改写受版本控制文件的工具，默认行为必须是「不改动」——`--derive-anchors` 曾默认落盘（2026-10-30 实修）。**
+
+现象：`node scripts/check-code-map.mjs --derive-anchors` 一条命令就把整份 `EXECUTION-MAP.md` 改写掉：实测 1169 处引用、693+/693-。它本来是个「锚点形态迁移工具」，却和**校验路径共用同一个入口**，而且**默认就 writeFileSync**。
+
+真因：把「危险动作」写成了默认值。这个脚本日常被这样调用——
+
+```
+node scripts/check-code-map.mjs            # 校验，天天跑
+node scripts/check-code-map.mjs --self-test
+```
+
+手指记住的是 `--derive-` 前缀，`--derive-anchors` 与 `--derive-dry-run` 只差一个词。误跑前者 = 整份文档被改写，而且从 diff 里根本看不出「你只想试一下」。我自己就这么踩过一次，靠 `git checkout` 才恢复。
+
+修法：**默认 dry-run**，只打印将改动的条数与前后 sha256；必须显式 `--write` 才落盘。
+
+```
+$ node scripts/check-code-map.mjs --derive-anchors
+DRY-RUN（未落盘）：
+  将改写 1169 处引用 -> docs/AGENTS/EXECUTION-MAP.md
+  sha256 docs/AGENTS/EXECUTION-MAP.md: 5a11e5ebc8257613 -> 2908c39a5d139d13
+  文件字节未改动。
+  确认无误后加上 --write 落盘
+EXIT=0
+
+$ node scripts/check-code-map.mjs --derive-anchors --write
+已落盘（--write）：
+  改写 1169 处引用 -> ...
+```
+
+两条负控（缺一即这个保护没在盯）：①**不加 `--write` -> 文件字节 SHA-256 不变且 exit 0**，并打印「dry-run / 未落盘」字样；②加 `--write` -> 文件真的被写入。只测②会漏掉「默认仍然是写」这种回归。
+
+usage 首行写死了这条：`--derive-anchors 与 --only 默认 dry-run 不落盘，必须显式加 --write`。
+
+⇒ 同族判据：凡「一条命令能大范围改写受版本控制文件」的工具，问一句「默认值是哪边」。默认可写 + 与常用入口共用一个前缀，是误操作的标准配方。反过来，默认不可写 + 显式开关，误跑最多得到一段报告。
+
+365. **「刷新锚点」是两步，不是一步：改文档坐标（doc）与登记基线条目（baseline）必须同批，否则中间态一定是红的（2026-10-31，`--only` 首次实战撞出）。**
+
+现象：另一个会话按「先跑一次看看」跑了 `--only`，两件事同时出问题：
+
+1. **它以为在 dry-run，实际已经写盘**——`改写 7 处引用` 是真的落到了文件上，第二次跑变 `改写 0 处`；
+2. **改完立刻红**：`check-code-map` 报 2 项 `symbol-unbaselined`，只能再跑一次 `--refresh-anchor-baseline` 收尾，而那条路正是被限制的（它做全集重写）。
+
+真因（两条都不是笔误，是设计缺口）：
+
+- 第 1 条：`--only` 与 `--derive-anchors` 是同一类「改写受版本控制文件」的动作，却只有后者有 dry-run 保护。**同类工具必须同口径**，否则用户按上一个工具的习惯用下一个，就会误写。
+- 第 2 条：锚点数据实际存在**两处**——文档里的 `path#Symbol@hash` 与基线里的 `symbolHashes[path#Symbol@hash]`。改一处不改另一处，`check` 必然判 `symbol-unbaselined`。工具只改了自己「看得见」的那一半，把收尾推给用户，而收尾工具恰好是受限的那个。
+
+修法：
+
+- 默认 dry-run，`--write` 才落盘，并打印「将改写 N 处」+「将新增 M 条 symbolHashes 基线条目」+ 前后 sha256；
+- `--write` 时**同批**写两处：文档坐标 + 该批锚点对应的 `symbolHashes` 条目，同时**退休**被替换掉的 `sourceLines` 键（只动 listed 文件相关的键，其余一个不碰）；
+- 落盘后就地打印「下一步：node scripts/check-code-map.mjs —— 这一次就应该是 PASSED」。
+
+三条负控（缺任一条都证明不了「同批」）：
+
+1. 不带 `--write` -> 文档与基线**字节都不变**，且打印将改数；
+2. 带 `--write` -> 文档真写**且基线同批更新**，随后**一次** `check-code-map` 就 `PASSED`（不需要任何额外命令）；
+3. **只写文档不写基线 -> 必须复现 `symbol-unbaselined` 并 exit 1**。这条是核心：它证明「同批写基线」不是冗余步骤，而是那条缺失的环。前两条单独存在时，一个只改文档的实现也能全绿（只要你事后手工补基线）。
+
+⇒ 同族判据：**凡「一处数据有两份表示」，改一份的工具必须同时改另一份，或者明确拒绝执行。** 把一致性推给用户的下一步操作，等于把红推给用户；而用户的下一个动作通常是「再跑一次别的工具」，那正是最容易做错的时刻。
+
+343. **同一判据在两个平台给出不同结论：`tar -tf` 在 Windows 上输出 CRLF，成员名带尾随 `\r`**：修 `check-combo-cache` 的单文件缓存漏检（#1195）时，构造了一份只含 `home/.dsh/profiles/web/.combo-cache`（无尾斜杠）的 tar 验证判据，Windows 工作树上却判绿、Linux 上判红。真因是判定用路径**分段**比较 `name.split('/').includes('.combo-cache')`，而 Windows 上 `tar -tf` 的输出行尾是 CRLF，分段拿到的是 `'.combo-cache\r'`，与 `'.combo-cache'` 不等——判据静默失效，不报错、不 SKIP、不崩，计数与输出全都「看起来正常」。这类缺陷最容易漏的原因是开发机 Windows / CI Linux：本地绿而 CI 红会被误读成环境问题，反之亦然。修法是**在读入处立即归一化**（`split('\n').map(l => l.replace(/\r/g, '').trim())`），不要指望每条判据各自处理。识别形态：凡是解析外部命令文本输出（`tar -tf`、`git status --porcelain`、`adb shell ls`）再按路径/字段比较的门禁，都该把成员名 `JSON.stringify` 打出来看有没有 `\r`——比读代码快。个人记录见 `docs/contrib/kelai141/2026-10-31-crlf-tar-members.md`。
+
+344. **改了被引用文件的行号，`check-code-map` 会红——而它看起来像"门禁自己坏了"**（2026-10-31 两次实锤）。
+
+现象：一个**纯文档** PR（只往 `gotchas.md` 插了 31 行）+ 一个**纯 CI 配置** PR（往 `pr-gate.yml` 插了 8 行），各自挂掉两条看起来毫不相关的门禁：
+`顶层脚本测试门禁`（报的是 `check-code-map-anchors.test.mjs` 的"对照组必须通过"失败）与 `制度性门禁`（报 `anchor-content-drift`）。
+
+真因：执行地图的锚点是 **`文件:行号` + 期望内容前缀**。被引用文件一插行，同一批锚点全部指向错误的行；对照组拿真实仓库跑 `check-code-map` 自然失败，所以最先喊疼的往往是**测试门禁**，不是地图门禁。
+
+修法（按工具设计，不放宽断言）：
+- 受影响锚点改到实测新行号，**并补 `#expect=<该行去缩进后的 URL 编码前缀>`**——只改行号不补 `#expect`，会继续报 `missing-anchor-expectation`；
+- 跨多行的**范围引用**（`:113-148`）不适合当锚点，改成按名称引用（"`pr-gate.yml` 的 `compile` 作业"），下次位移不再误报；
+- 表格里的裸锚点要加反引号，否则 ` |` 会被算进期望前缀。
+
+防呆：改动前先想一句——**我要动的文件，有没有被 `EXECUTION-MAP.md` 按行号引用？** 有就先准备好重钉；本地跑一次 `node scripts/check-code-map.mjs` 比等 CI 七分钟便宜。
+
+## 同一个概念（注入集）在两处实现，改一处只会在下一道门禁才报
+
+**现象**：`v0.15.x` 接入 `dsh-plugin-subscriptions`（vendored，`plugin-dirs.json.externals` 已登记、`profile-web.cordis.patch.yml` 已挂载、`vendor/` 里 `lib/` 已构建），全链却卡在：
+
+```
+== 挂载集校验（arm64）==
+权威 patch 挂载了注入面之外的包（反向差集）: dsh-plugin-subscriptions
+拒绝打包（arm64）：patch 挂载集校验失败
+```
+
+**真因**：「注入集」这一个概念在两条链里各有**两处**实现，且都硬编码了 `dshmarketplace-plugin`：
+
+| 用途 | 本地链 `build-apk-013.ps1` | 云端链 `build-apk.mjs` |
+|---|---|---|
+| ① 注入源 | `$market = $externByName['dshmarketplace-plugin']`（L297-323） | `const market = externalNamed('dshmarketplace-plugin')` |
+| ② 挂载门禁入参 | `... @pluginDirs $market`（L428） | `...pluginDirs, market`（L373） |
+
+只改 ① → 包确实进了快照，但 `check-patch-mounts.mjs` 的注入集是**命令行传进去的**（不读 `plugin-dirs.json`），仍只收到 marketplace 一个 → 依旧判红。必须两处一起改：注入源遍历 `externals` 全部，挂载门禁也传 `externals` 全部。
+
+**为什么容易只改一半**：两处相隔一百多行、函数形态不同（一处拼参数、一处拼 splat 数组），且 `check-patch-mounts` 的入参看起来像「调试用的额外目录」，看不出它是「注入集」这个概念的第二个定义点。
+
+**判据（下次怎么避免）**：
+- 见到 `<概念>` 被写进两个不同位置（尤其是「配置读取」与「门禁入参」各写一次），先问「这俩是不是同一个集合的两个副本」；
+- 修「往集合里加一项」这类问题后，**先跑下游门禁再跑全链**——本坑用一个 `node scripts/check-patch-mounts.mjs <patch> <dirs...>` 就能秒验，不必等 20 分钟全链；
+- 定理化表述：**局部正交 ≠ 全局成立**。改动在局部看是对的（包确实注入了），但全局语义（挂载集必须 ⊆ 注入集）要由另一处的同一概念共同满足。
+
+**同族（今晚三条都是这个形态）**：
+- 改被引用文件的行号 → 顶偏执行地图锚点（漂移检查只在行移动时报警，救不了「本来就指错」）；
+- 测试读了未声明的输入 + CI 允许 build cache → 任务 FROM-CACHE，断言失效被缓存掩盖（「测试通过」局部成立，「测的确实是当前代码」全局不成立）。
+- **名字→集合：每扩一处，都要搜一遍所有「按名字取」的地方**。同一形态今晚出现四次，每一次都是「把某个概念从单个名字扩成集合时，另一处按名字取的地方没跟着扩」：
+  1. **注入源**：`$externByName['dshmarketplace-plugin']` → 新登记 external 不进快照；
+  2. **挂载门禁入参**：`... @pluginDirs $market` → 门禁的「注入集」定义仍只有一个名字，包注入了却判「注入面之外」；
+  3. **降级写回**：降级循环只降 marketplace、只回写它的降级副本 → 其它 external 造出降级副本却仍以原始源注入（未降级 ES2022 进产物，浏览器语法下限门禁判红）；
+  4. **`$marketDeg` 覆盖**：扩完循环后残留的 `$externStaged['dshmarketplace-plugin'] = $marketDeg` 把结果改回原始源——**改了循环却漏了那行覆盖**。
+  判据（下次怎么避免）：扩集合时用一条命令把按名字取的地方全找出来，例如 `grep -n "\$externByName\['" scripts/build-apk-013.ps1` 与 `grep -n 'market\b' scripts/build-apk*.{ps1,mjs}`；改完先跑下游门禁（`check-inject-completeness`）再跑全链。
+- **幂等的观测点在建链逻辑，不在构建层**：`build-snapshot-013.mjs` 每次构建先 `rm -rf stage`（L106），所以「连跑两次构建看 `kept=1`」永远看不到——第二次跑时链已被删、必然重建。要验幂等必须把那段 farm 逻辑拎出来单项测（见 `scripts/farm-link-idempotency.test.mjs` 三断言：① `made=1/kept=0` 且 `readlink === want`；② 第二次 `made=0/kept=1`；③ 反证——建链写回宿主绝对路径则 `kept` 恒 0）。**判据的输入物变了，判据没跟着变——而且要先用数据定口径（字面目标 vs realpath），否则会把「换实现」写成「改判据」。**
+- 变异测试直接改仓内文件且**没有复原钩子** → 被 Ctrl-C / 超时杀死后仓库停在变异态（实测 `scripts/check-code-map.mjs` 停在 `if (t === '') continue`），下一个 PR 可能把变异当自己的改动提交。「测试跑完会复原」局部成立，「被中断时也会复原」全局不成立。
+
+## PS1 的 `//` 是合法裸词：语法检查全绿也会在运行时才炸
+
+**现象**：`build-apk-013.ps1` 里写了 `else { $externStaged[$nm] = $dst }   // 降级成功`，三条检查全绿，真跑链却炸：
+
+```
+//: build-apk-013.ps1:396
+The term '//' is not recognized as a name of a cmdlet, function, script file, or executable program.
+```
+
+**为什么三道都没拦住**：
+
+1. `[System.Management.Automation.Language.Parser]::ParseFile(...)` → `语法错误 = 0`。PowerShell 里 `//` 是**合法的裸词（bareword）**，语法层面完全通过，只在**求值**时要找一个叫 `//` 的命令。
+2. `check-code-map.mjs` 只看锚点行的**内容前缀**，不看这一行是否可执行。
+3. 只有真跑一次链才暴露。
+
+**判据**：**语法合法 ≠ 可运行**。改 `.ps1` 后不能只报「语法错误 = 0」当证据——必须真跑一次（哪怕是 `-Fast`/`-OnlyAbi` 的一小段），或至少执行到含该行的分支。同理适用于其它语言里「语法合法但求值才失败」的写法（如 shell 里未加引号的裸词）。
+
+
+366. **判据看拼写，危害看效果：闸/净化器的判据必须建立在解析求值后的结果上，不是输入的字面形状**（2026-11-01，同一晚两处独立实例）
+
+    形态：判据拿**输入的字面形状**做判断，而真正的危害取决于**解析/求值后的结果**。两者一旦不是同一个集合，判据就会在错误的一侧放行、在正确的一侧拒绝——守护变成改规矩。
+
+    实例一（#1204② → #1287③，`scripts/lib/symlink-sanitize.mjs`）：净化器判 `relSegments.includes('..')`，只看链接目标**字面量里有没有 `..`**，从不看**解析后是否仍在 stage 树内**。于是 `usr/bin/../bin/bzdiff`（拼写含 `..`、解析后 = `stage/usr/bin/bzdiff`、完全在树内、旧实现能算成 `relLink="bzdiff"`）被当成越界链**删掉**；而危害本来只发生在解析结果跑出树外时（如 `../../../../outside/passwd`）。修法：按字面量 `resolve()`，再判结果是否仍在 `stageRoot` 内——越界判据还在，且更准（该修在 PR #1298，合入后代码侧即与本条一致；在此之前 main 上仍是"看段"的那一版）。
+
+    实例二（#1210 → #1286，`plugins/dsh-android-manage/src/ui-tree.ts`）：bounds 形状闸写成**锚定**的 `^\[-?\d+,…\]\[…\]$`，而同文件两个解析器用**不锚定**的 `exec`。三份口径两份宽、一份严，严格的那份恰好是失败代价最大的那份——闸判红是**整树级**（`android_ui_tree` 直接返回错误、零节点），解析器判负只丢一个节点。于是尾随一个空格的 `"[0,0][1080,2400] "` 从「丢一个节点」升级成「整棵树不可用」。修法：抽出单一 `BOUNDS_RE`，闸与解析器共用，两侧接受同一集合（已由 #1297 落地）。
+
+    为什么这两个是同一形态：`..` 与锚定 `^…$` 都是**在文本上判断"看起来危不危险"**，而 `resolve()` 后的路径、`exec()` 能不能取到数字，才是**实际会怎样**。同一份语义存在两份判据时（净化器 vs 解析器、闸 vs 解析器），只要它们接受不同集合，"守护"就变成了"另一条规矩"。
+
+    正确做法：
+    ① 判据建立在**解析/求值后的结果**上（`resolve()` 后的路径在不在树内、`exec()` 取不取得到坐标），不是输入的字面形状；
+    ② 同一语义**只留一份**判据（抽出共用常量/函数），让闸与它守护的解析器**接受同一个集合**——「闸绿 ⇔ 每个节点都能被该解析器处理」，否则闸的失败不再是被守护操作失败的证据；
+    ③ 收敛方向由**失败模式**决定，不由口味决定：两侧都要动时，选让"局部降级"而不是"全局拒绝"的那一侧（实例二因此收敛到宽的那一版，并在注释里写明为什么）。
+
+    识别信号（最有用的一条）：**当闸的失败代价大于它所守护的操作时，先去核对两侧判据是不是同一集合。** 具体表现：闸判红导致整体不可用、而它守护的解析器只会丢一条；或者「改前能用、改后整块不可用」而输入只差空白/前缀这类无关字符。核对方法是把两侧对同一批输入的结论逐条比对——实例二的测试就是这么写的（不举例，直接断言「闸的结论 == 解析器能否取到数字」），任一侧被改回去都会立刻红。
+
+    同型提醒：判据里凡出现 `includes` / `startsWith` / 锚定正则 / 白名单字面量，先问一句——**我判的是它的拼写，还是它求值后的效果？** 拼写判据天然比效果判据更严，而"更严"落在守护位置上，等于"更容易把可用状态判成不可用"。
+
+
+367. **vendored 插件用裸 tag + `:has()` 注入全局 CSS，靠特异性抢赢宿主；宿主样式改动必须验计算值**（2026-11-01，issue #1288 第 2/5/8 条实锤）
+
+    现象：手机竖屏设置页**一级列表正常、二级页标题只剩半截**（顶部条被 Android 状态栏遮住）。这个「一级好二级坏」的对照非常容易被误判成「全局头部容器有问题」或「壳侧没推 insets」。
+
+    真因：vendored 的 `dsh-plugin-subscriptions` 在 `apply()` 里往 `document.head` 注入了一条**裸 tag 选择器**的全局规则（注释自称 "settings panel breathing room"；**定位不要写行号**——每加一句注释就漂，用 `document.querySelector('style[data-plugin="dsh-plugin-subscriptions"]')`）：
+    `div[role="dialog"][aria-modal="true"]:has(> nav) { padding-top: 14px; }`
+    它本意是给**宿主**设置面板加一点顶部留白，实际效果是：特异性 `div`+`[role]`+`[aria-modal]`+`:has(>nav)` = **(0,2,2)**，压过宿主 `dsh-client-ui-responsive` 手机形态的面板规则 `html[data-dsh-mobile-form] [data-dsh-settings-dialog]` = **(0,2,1)**，把面板 `padding-top` 从真实顶部 inset（实测 **24px**）压成 **14px**。宿主的地方**根本没有内联样式**、也没有 `!important`，所以从「我自己写的 CSS」这一侧怎么读都读不出问题。
+
+    为什么用户报的是「一级好、二级坏」：**那是 0972fc24 及更早版本的形状**——当时一级页顶部条是 `position:absolute; top:var(--dsh-mobile-top-inset)`，绝对定位**不吃面板 padding**；二级页顶部条在正常流里，就站在那 14px 上，状态栏一盖标题上半截没了。`issue #1288` 里已把两级统一成正常流（`position:relative`），所以**从那一版起两级都吃面板 padding**：这条优先级对两级同时成立，不再只影响二级页。写这条时别把旧版本的现象当现行事实。
+
+    识别法（不靠猜）：
+    1. `getComputedStyle(el).paddingTop` 与**期望值**不符（本例 14px vs 24px）——**先怀疑有外来规则，而不是自己写错**；
+    2. 遍历 `document.styleSheets`，对每个 `rules[i].selectorText` 做 `el.matches(sel)`，把命中且含该属性的规则按顺序列出来：本例列出两条，一条是插件的 `(0,2,2)`、一条是自己的 `(0,2,1)`，胜负立刻可见；
+    3. 看 `el.getAttribute('style')`：本例是空，可**直接排除内联样式**，把范围锁定在样式表；
+    4. 查注入来源：`document.querySelector('style[data-plugin]')` 一眼看出是哪个插件干的（该插件给自己打了 `data-plugin="dsh-plugin-subscriptions"`）。
+
+    正确做法（两层，缺一不可）：
+    - **根因侧**：在 vendor 里把规则收窄到它该管的形态 —— `html:not([data-dsh-mobile-form]) div[role=dialog][aria-modal=true]:has(> nav)`。手机形态的顶部留白本来就该由宿主按真实 inset 负责，插件不该插一手；桌面行为不变。两份打包副本（`lib/client.js` + `lib/client/index.js`）必须同步改，并登记 `PROVENANCE` 差异表。
+    - **防守侧**：宿主把选择器特异性提到 (0,4,1)（加 `[role='dialog'][aria-modal='true']`），插件若再回归也压不回去。注释里写明「这条是在和 vendored 插件抢优先级」并指向对方行号，否则会被当成冗余选择器删掉。
+    - **不用 `!important`、不用 `:has()` 在自己的包里**（本包要在老内核上生效）。
+
+    判据：**宿主样式改动后必须验 `getComputedStyle` 的计算值，不能只看自己写的 CSS**。本例实测 `panelPaddingTop 24px / bar.top 24 / 标题 top 38` 才算过；负控把面板 padding 打回 14px 并按用户机型把状态栏模拟成 38dp，标题被遮 **10px** 才算红。
+
+    同型提醒：`document.head` 里的全局规则是**跨插件共享面**。凡是「按 tag + 属性 + `:has()` 猜宿主结构」的注入，都在赌宿主结构不变、且赌自己不是最后一个写入者。判据要落在**计算值**上，别落在「我写了什么」上。
+
+368. **门禁里“这里不测”的注释比漏测判据更危险：它把缺口写成了决定**（2026-11-04，issue #1131 实锤）
+
+    现象：`check-snapshot-fingerprint.mjs` 已经断言 `sha256(assets/snapshot.tar.xz) == assets/snapshot.sha256`，
+    也校验 `plugin-hard-manifest.json` 的**结构**，但**不比对**它的 `fingerprint` 字段。而这个字段是
+    `build-hard-manifest.mjs:121` 用 `createHash('sha256').update(readFileSync(snapshot))` 写进去的
+    ——**就是 tar 字节的 sha256**。于是「陈旧清单 + 新 tar」能一路绿灯通过门禁，装到设备上才以
+    `hard-bundle-selection-unverified` 拒绝启动引擎（界面正常、引擎不干活）。
+
+    真因不是「忘了写判据」，而是门禁里有一段注释**主动论证不该写**：
+
+    > `fingerprint` 只做「存在且形如 sha256」的弱校验：它与 `snapshot.sha256` 的强对账由上面的主判据负责，
+    > 清单里那份是构建期冗余记录（两份可能来自不同 ABI 的同一 tar，不在这里比字节）。
+
+    这条理由是**错的**：同一 tar 同一哈希，与 ABI 无关；「可能来自不同 ABI」恰恰说明它们必须相等。
+    但它的**形态**很有说服力——引用了真实字段、给了听起来合理的技术理由、还暗示「上面已经测了」。
+    后来人读到会当成已决策事项跳过，而不是当成缺口。**漏测判据会被 review 抓到；写成理由的豁免不会。**
+
+    识别法（可机械执行）：
+    1. 在门禁/校验器源码里搜这组措辞：`不必`、`无需`、`不用`、`不在这里`、`只做`、`弱校验`、`由上面负责`、`冗余记录`；
+    2. 每条逐字问三问：**这个理由今天还成立吗**（当时的限制是否已被上游改掉）？**它说的「上面已经测了」是真测了还是也豁免了**？**如果不豁免，代价落在谁身上**（构建期红 vs 用户装完才发现）；
+    3. 对答案里出现「可能」「大概」「通常」的，一律当成**待验证假设**，用一次临时探针算一遍再决定。
+
+    本例的机械验证只花一分钟：读 `build-hard-manifest.mjs` 那一行，确认 `fingerprint` 的字面来源。
+
+    正确做法：把豁免改写成**判据 + 保留原文**。即删掉错误理由、写下更正与为什么错（本例保留了
+    「此前写着…那条理由是错的」），再补上判据：三者必须相等
+    `sha256(tar) == snapshot.sha256 == plugin-hard-manifest.json.fingerprint`，并在 Gradle 的
+    `merge*Assets` 前置检查里也判一次（让「直接 gradle」当场红，而不是交出坏包）。
+
+    判据与负控：门禁 `--self-test` 增两条——清单 fingerprint 换成别的代必须红、同代必须绿；
+    Gradle 侧用临时夹具跑真任务（tar 换掉不改声明 → FAILED；三者改对 → BUILD SUCCESSFUL）。
+    资产缺席时必须打印 `SKIP assets-absent` 并计入 SKIP，**静默跳过**会让以后分不清「没资产」与「判据失效」。
+
+    同型提醒：**判据的注释也是判据的一部分**。凡在门禁里写「这里不测 X」，必须同时写清「那 X 由谁守」并
+    附上可点的行号；写不出「由谁守」，写的就是缺口本身。
+
+369. **顶层 `@Test fun` 在 Kotlin 里能编译通过但**永不运行**——唯一的信号是测试数对不上**（2026-11-04，issue #1345 实锤）
+
+    现象：给 `ForegroundPageRecoveryPolicyTest` 追加了 3 条用例，`gradlew testDebugUnitTest` **BUILD SUCCESSFUL**，
+    但测试报告里 `tests=9`，而源码里明明有 12 个 `@Test`。
+
+    真因：文件末尾的**类闭合花括号之后**追加了 `@Test fun`。Kotlin 允许顶层函数，所以语法完全合法、
+    编译通过；但 JUnit4 只收集**类内**方法，顶层函数不是测试。于是「加了测试」这件事没有任何编译期
+    或运行期反馈——**测试数才是唯一的外部信号**。
+
+    为什么这条比锚点更坑人：
+    - 锚点漂移会**红**（门禁拦住）；这条**全绿**；
+    - 它正好会让你误判「判据不灵」：写负控（故意改坏源码看用例红不红）时，用例压根没跑，
+      于是变异之后仍然 green —— 看起来像「这条判据守不住东西」，实际是**判据根本没执行**。
+      本次第一轮负控「没红」就是这个原因，差点把一条有效的判据当成无效。
+
+    识别法（三秒）：
+    1. 看 `app/build/test-results/**/TEST-*.xml` 里 `tests=` 计数；
+    2. 与源码里 `grep -c '@Test'` 的条数对比，**不相等就是有东西没进收集器**；
+    3. 若不等，看文件末尾的类闭合花括号之后还有没有 `@Test`（最常见就是追加在文件尾）。
+
+    守卫建议（**未落地**）：在 `check-kotlin-test-count.mjs` 里加一条「每个测试类：XML `tests=`
+    必须 >= 源码里该类块内的 `@Test` 条数」，不等即红。这个方向比源码解析稳——它天然对齐
+    「实际跑了多少条」这个事实。
+
+    我试过另一条更早的守卫（逐文件扫 `@Test` 所在位置的大括号深度，深度 0 即判红），**没有采纳**：
+    Kotlin 的字符串字面量里到处是 `{}`（本仓测试里有大量 `"{0}"`、JSON 片段），不处理字符串就
+    会大面积假红；而完整处理原始字符串 `"""`、转义与模板 `${...}` 的成本，已经超过它对一条
+    低频陷阱的收益。**宁可留一个诚实的建议，不发布一条吵人的门禁。**
+
+    同型提醒：任何「测试没跑」的形态都比「测试跑了但失败」危险一个量级——失败会吵，没跑不会。
+    所以搬运/追加测试后，**先对齐测试数再谈判据灵不灵**。
+
+370. **同一条代码线第二次修改时，最容易把上一次刚堵的静默兜回去**（2026-11-04，issue #1374 实锤，第三次同类）
+
+    形态：`#1375` 刚把 `publishBundle` 里的 `rename(...).catch(() => {})` 改成显式 `AggregateError`，
+    并加了源码契约测试守着。几个提交之后做 `#1374`（同一函数的 deferred commit 分支），
+    我在新增的 `commit()` 里写了 `await rm(...).catch(() => {})` —— **同一个洞，同一段代码，原地挖回去**。
+    CI 红在 `#1375` 留下的那条契约测试上，我自己新写的用例全绿，所以本地一点问题都看不出来。
+
+    为什么总会这样：
+    - 修改者（我）心里想的是「这次是新分支/新语义」，下意识把新代码当**绿地**写，而 `.catch(() => {})`
+      又是清理类代码的肌肉记忆；
+    - 自己新写的判据只会覆盖**新语义**，天然不会去守旧约束；
+    - 旧契约测试在同一个文件里，但**不在我要跑的那条命令里**。
+
+    识别法（一条，成本极低）：**改完之后，先跑「被改文件已有的契约测试」，再跑自己新写的用例。**
+    命令通常短得可以直接抄：
+    ```
+    node --test scripts/asset-bundle-publish.test.mjs      # 该文件的历史契约
+    node --test plugins/<plugin>/test/<自己新写的>.test.mjs
+    ```
+    顺序很关键：先跑老的能立刻暴露「我把旧约束改坏了」，先把老的跑绿，再谈新的。
+
+    加固法（防复发）：新用例里**主动抄一条老约束**。本例在 `#1374` 的套件里也断言了
+    「`publishBundle` 内不得出现 `.catch(() => {})`」，于是这条洞被**两套**判据同时守着——
+    老的那套万一被谁改松，新的这套仍然会红。
+
+    同型清单（本仓已有三次）：
+    - `#1300`：把「未触发」误判成「已通过」；
+    - `#1439`：括号/转义改坏了自己刚加的分支；
+    - `#1374`：把 `#1375` 刚堵的静默 catch 写回去。
+
+    一句话：**静默 catch 是肌肉记忆，契约测试是免疫系统；肌肉记忆每次都在，免疫系统只有你记得去跑时才在。**
+
+371. **构建顺序错位会长得像真缺陷：先怀疑环境，再怀疑代码**（2026-11-04，issue #1374 实锤）
+
+    现象（一模一样的两次）：本地跑 `check-plugin-tests`，`dsh-android-linux-env` 报 4 个测试文件全红，
+    `ℹ pass 46 · fail 4`，失败信息是 `test failed`、看不出原因。第一反应是「我改的门禁把别人的东西搞坏了」。
+
+    真因：**它的构建先失败**，测试根本没跑起来。构建日志里只有两行：
+
+    ```
+    src/index.ts(30,78): error TS2307: Cannot find module '@dsh-android/dsh-shell-termux'
+    src/index.ts(127,34): error TS7006: Parameter 'pkg' implicitly has an 'any' type
+    ```
+
+    第一条是真因（缺依赖包的类型），第二条是它的**连带**（类型解析失败让 `pkg` 退化成 `any`）。
+    而依赖包 `dsh-shell-termux` 就在仓库根目录、源码也在——**它只是没构建**，没有 `lib/*.d.ts`，
+    于是 `tsc` 找不到声明。
+
+    为什么难认：测试门禁只报「测试失败」，不报「测试压根没跑起来」。而 node:test 对
+    「import 失败」的表现就是每个文件一条 `test failed`，与真的断言失败长得一样。
+
+    识别法（顺序很重要）：
+    1. 看到**整个文件**都红、且失败信息只有 `test failed`（没有断言/期望值）⇒ 先怀疑**加载失败**，
+       不是断言失败；
+    2. 直接单独跑该插件的 `npm run build`，看它是 exit 0 还是非 0——这一步能立刻分开两类；
+    3. 构建失败里如果出现 `TS2307 Cannot find module '<兄弟包>'`，去看那个兄弟包有没有 `lib/`；
+       没有就先构建它（本仓的依赖图是有序的：`dsh-shell-termux` → `dsh-android-linux-env`）；
+    4. 修完兄弟包再回头跑，`TS7006` 之类的连带错误通常自己就消失了——**不要逐条去改那些连带错误**，
+       它们的根因是第一条。
+
+    一句话：**「整个文件红 + 无断言细节」= 环境/加载问题；有具体期望值与实际值才是代码问题。**
+    先分清这两类，能省掉一整轮改代码的时间。
+
+    同轮的相关教训：这也是 `check-plugin-tests` 后来加「缺产物 → 按需构建，三态可 grep」的动机之一
+    （`built-on-demand` / `build-failed` / `lib-absent-after-build`）——把「环境没就绪」与
+    「代码有缺陷」在输出上分开，别让人再去猜。
+
+372. **`check-runs` 为 0 不是「还没起跑」，而是「从未入队」；PR 记录还会永久卡死**（2026-11-04，`#1494`/`#1503` 实锤）
+
+    现象：`gh pr checks` 报 `no checks reported on the ... branch`，反复重推也起不来，而同一时刻别的分支正常起跑。
+    真因两条：① 平台停摆窗口内发出的 `pull_request` 事件被丢弃；② 该 PR 记录已坏——**后续 `synchronize` 也不被接收**。
+    判据：只看 `gh api repos/<o>/<r>/commits/<sha>/check-runs --jq .total_count`（0 = 没入队），不要用 `gh pr checks` 的措辞去猜。
+    修法：**从同一个提交新开分支 + 新 PR**（`#1494→#1497`、`#1503→#1532→#1534`），旧 PR 留一句「被 X 取代」。
+    反例（都吃过亏）：推空提交想触发 `synchronize`——新 sha 的 `workflow_runs` 仍是 0；关掉再开——会撞「branch was force-pushed」而无法重开。
+
+373. **执行地图的锚点重钉不产生任何用户价值，能零位移就不要重钉**（2026-11-04，`#1495`/`#1485`/`#1534` 实锤）
+
+    现象：一次改动吃掉整轮时间在锚点上，交付物却毫无变化；重钉还会连环撞上基线键与 prose。
+    优先顺序：① 新文件（不制造位移）；② **同行替换**；③ 才轮到重钉。
+    判据：`git diff --numstat` 左右相等（如 `5 5`）= 零位移，地图一行都不用动。
+    实例：`#1495` 原先 8 行插入位移 20+ 锚点、改一次没驯服，改写成一行的 `pingOutstanding = false; freezeReloaded = false` 后 `1 1`；
+    `#1485` 把锁声明并进既有常量行、签名改 `= synchronized(lock) {`，`3 3`；`#1534` 五处全同行替换，`5 5`。
+
+374. **「文件存在但读不出来」不等于「文件不存在」：退避状态必须区分 Corrupt 与 Missing**（2026-11-04，`#1496`/`#1508`/`#1530` 同族）
+
+    两种反向错误都实锤过：把截断/空文件当「没有记录」⇒ 退避被静默重置；把一次 IO 抖动的读失败当「损坏」并删文件 ⇒ 观察窗被重置。
+    正确形态是三态：`Missing` / `Recorded(atMs)` / `Corrupt`，且 **Corrupt 按「刚刚发生过」处理并保留文件**；删除只发生在内容缺陷可自愈的那一支，且要留时间戳给退避用。
+    判据要打在「0 字节的标记仍然退避」上，不是「多了一个解析函数」。
+
+375. **执行地图的两类锚点错误修法相反，脚本只修一类就会把另一类顶回来**（2026-11-04，一夜之间踩三次）
+
+    `[moved-anchor]`（信息形如 `baseline count 0, current count 1`）= **同一坐标被引用次数增加** → 修法是补 `#expect`；
+    `[anchor-content-drift]` = **基线钉住的坐标内容变了** → 修法是改锚点号**并同步 `check-code-map-anchor-baseline.json` 的键**；
+    `[bad-anchor-content]` = 行号不对 → 必须按内容重钉，不会自己好。
+    只做补 `#expect` 的脚本会让 drift 一直在；只做改号+改基线键的又会让 moved 冒出来——看起来像「修好又坏」，实际是三条独立判据在互相顶。
+    **先读错误类别再动手，不要一个脚本打天下。**
+
+376. **位移脚本按「基名」认文件会跨目录一次改掉上百个锚点；prose 里的锚点不许脚本碰**（2026-11-04，`#1207` 实锤移动 135 个）
+
+    `index.ts:NNN` 这类锚点在仓里有几十个同名文件，按基名匹配就把一个插件的行号增量套到了**所有插件**的 `index.ts` 上。
+    硬闸：**只处理含 `/` 的完整路径锚点**；基名锚点一律拒绝自动位移并打印清单，逐个确认归属。
+    同一族的第二个陷阱：prose 里写成 `` `path:NNN` `` 的锚点后面紧跟正文，脚本直接插 `#expect=` 会把正文**吞进值里**（门禁报 `bad-anchor-content`，内容看起来被拼歪）。只改反引号内的锚点。
+    附带发现：有些锚点原本就指向**空行**——它从来没有守过任何东西。按内容重钉到真正的守卫行不是「掩饰」，是修好了一个假锚点。
+
+377. **静默失败的诊断不能只去 logcat 抓已知特征，否则「什么都没抓到」就什么都不报**（2026-11-04，`#1476` 实锤）
+
+    现象：`shizukuBind` 的启动失败诊断只捞 logcat 里的崩溃特征（联发科 `makeApplicationInner` NPE 那类），而「`bindUserService` 根本没有回调」在 logcat 里没有任何特征行 ⇒ 诊断为空，用户只看到「未就绪」。
+    修法：**兜底也要自证**——抓不到特征时写结构化诊断（`无回调超时（attempts=N, age=Xms, 无 logcat 特征）`），并让状态面同时暴露「最近一次失败」（`lastShellFailure{code,at,elapsedMs,message}`）。
+    判据：断言「空摘录 → 诊断非空且含 `attempts=`」，否则这条永远修不掉。
+
+378. **判据不区分守卫时，负控不会红——「负控没打红」等于「这条判据是假的」**（2026-11-04，`#1234` 实锤）
+
+    现象：给 `/data/user/<N>` 与 `/data/data` 的等价改写加「同用户」守卫后写了一条例据，把守卫删掉负控**仍然绿**——因为那条分支只处理 `user 0`，删了守卫结论也一样。
+    补一条真正区分它的用例（base 写成 `user/0`、而当前进程在 `user 10`）之后，删守卫立刻红。
+    纪律：**负控不红不是「实现已经正确」，而是「这条判据没有判别力」**——当场补用例，不能放过。
+
+379. **插件退役了，构建/发布入口的引用不会自己消失——而"少一个包"没有任何判据会红**（2026-11-04，0.2.2-rc.1 适配勘测）
+
+    现象：`plugins/dsh-model-capability` 在 0.14.8 就整体退役（本仓连目录都没有），但 8 个月后仍有
+    5 处构建/发布入口在引用它：`build-apk-source.yml` 的插件 `sha256sum` 循环、`release.yml` 里
+    "从本次快照恢复模型能力目录"整步（`gen-model-catalog.mjs --out plugins/dsh-model-capability/lib/catalog-snapshot.json`）、
+    `build-snapshot-013.mjs` 的 0g 生成块、`plugin-dirs.json` 的说明文字、以及 `build-apk-013.ps1` 里
+    "少一个包且无任何门禁能发现"那句自陈注释——**注释本身就在描述这个缺陷，却没人把它变成判据**。
+
+    真因：这些入口对"插件是否存在"全是**静默容错**。
+    ① `for d in <列表>` 里缺失的目录只会让 `sha256sum` 报个错再 `|| true` 吞掉；
+    ② `build-snapshot-013.mjs` 的生成块整个包在 `if (existsSync(join(pluginDir,'package.json')))` 里，
+       目录不在就静默跳过；
+    ③ `release.yml` 那步会自己 `mkdir` 出目标目录再写文件，**把已退役插件的路径重新造出来**；
+    ④ `plugin-dirs.json` 只在 `$comment` 里提到它，没人读注释做判据。
+    于是"退役"只发生在源码树里，入口清单仍是旧世界的副本，谁也不会红。
+
+    修法：
+    - 清引用：两份 workflow（删整步 / 从循环移除）、`build-snapshot-013.mjs`（删 0g 块）、
+      `plugin-dirs.json` 说明、两处自陈注释；`gen-model-catalog.mjs` **撤掉默认 `--out`**，
+      不显式指定就 `exit 2`，杜绝"一跑就把退役插件目录树造回来"。
+    - 加门禁：`scripts/check-retired-plugins.mjs` 扫 7 个构建/发布入口，
+      可执行引用命中即红、**注释里的历史说明放行**（否则逼人删掉理由），并单独断言
+      `plugin-dirs.json` 的 dirs/externals/retiredExternals 与 `profile-web.cordis.patch.yml` 的装配行里没有它；
+      自检用临时样本做正/负控，**不依赖仓库当前是否干净**（依赖现状的自检会在清理完成后变假绿）。
+    - 判据边界：`docs/`、`release/`、`AGENTS.md` 属历史记录，**刻意不扫**——把历史也判红，等于逼人删证据。
+
+    复验：`node scripts/check-retired-plugins.mjs`（0）与 `--self-test`（正/负控都符合预期）；
+    反证做法 = 往 `plugin-dirs.json` 的 dirs 里塞回该包，门禁必须红。
+380. **`git rebase` 会静默丢掉执行地图的改动——地图必须在重基后按内容重做，delta 重铺不可重放**（2026-11-04，`#1548` 实锤）
+
+    现象：本地 `check-code-map` 绿；rebase 到新 main 之后同一个分支突然 30 项 `bad-anchor-content`，而且不是差一行——**指到了另一行**。
+    真因两层：① rebase 重放提交时，`docs/AGENTS/EXECUTION-MAP.md` 的冲突块取了 upstream（main）侧，我原先算好的锚点位移被**静默丢弃**，
+    工作区只剩「部分更新」的地图；② 我随后的修复又是按 delta 推的，而 delta 是相对**旧基**算的，基一变全错。
+    纪律：任何 rebase 之后，**地图一律按内容重钉**（找出该内容当前所在行），不要复用重基前算出的位移量；
+    判据是 `check-code-map` + `check-code-map-anchors.test.mjs` 双绿，不是只看前者。
+
+381. **CI 验的是 PR 的 merge commit，不是分支 head——「本地全绿、CI 全红」的必然来源**（2026-11-04，`#1548`/`#1537` 实锤）
+
+    现象：分支 head 上 `check-code-map` PASSED，CI 却红；`check-code-map-anchors.test.mjs` 的四条变异反证全部以 `-> exit=1` 失败。
+    读法：那个自测把仓库（含地图与基线）拷进临时副本再跑门禁；`-> exit=1` 表示**副本里门禁本来就已经红**，不是「变异没被抓到」。
+    真因：GitHub 在 `refs/pull/<n>/merge` 上跑 CI，即 **main 与分支的合并结果**。分支落后 main 时，合并会把 main 的地图与我的地图拼在一起，
+    产生 head 上没有、合并后才有的一堆 `bad-anchor-content` / `uncovered`。
+    纪律：推之前本地必须 `git merge origin/main`（或等价地用合并结果）再跑门禁；只验 head 等于没验。
+    复现方式：`git worktree add /tmp/m --detach origin/main && cd /tmp/m && git merge <branch> && node scripts/check-code-map.mjs`。
+
+382. **脚本往 `#expect` 里写值时，正则必须一直吃到反引号为止，不能停在空格**（2026-11-04，`#1548` 实锤，与 376 同族）
+
+    现象：重钉后门禁报 ``Expected "…9#expect=+ warn + webHint + detail.hint," ``——期望值尾部粘着别的 token。
+    真因：`#expect` 值是百分号编码的（本不含空格），但历史上有手工写成裸文本的条目；脚本用 `[^` ]*`（排除空格）匹配，
+    遇到裸文本就只吃掉第一段，剩下的被当成内容的一部分。
+    修法：匹配用 `#expect=[^`]*`（到反引号为止），替换时整段重建；写回的值一律 `encodeURIComponent`。

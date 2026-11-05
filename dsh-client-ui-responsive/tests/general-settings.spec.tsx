@@ -174,14 +174,25 @@ describe('GeneralSettings 行骨架与上游通用设置一致（2026-10-23）',
     expect(host!.querySelectorAll('[role="switch"]')).toHaveLength(3)
   })
 
-  it('每个设置项是一行：标题 + 说明 + 右侧开关', async () => {
+  it('每个设置项是一行：标题 + 说明 + 右侧控件', async () => {
     await render()
     const rows = [...host!.querySelectorAll('[data-plugin="android-general"] > .dsh-gs-row')]
-    expect(rows).toHaveLength(3)
+    // 三行开关（沉浸式、左侧栏滑动、右侧栏滑动）+ 一行动作（意见反馈，右侧是按钮不是开关）。
+    expect(rows).toHaveLength(4)
     for (const row of rows) {
       expect(row.querySelector('.dsh-gs-title')?.textContent).toBeTruthy()
-      expect(row.querySelector('[role="switch"]')).not.toBeNull()
+      const control = row.querySelector('[role="switch"], .dsh-gs-control button')
+      expect(control, '每行都要有右侧控件（开关或按钮）').not.toBeNull()
     }
+  })
+
+  it('意见反馈行：说明与按钮都在，且点击走统一的打开函数', async () => {
+    await render()
+    const row = host!.querySelector('[data-dsh-feedback]')
+    expect(row, '通用设置最下方应有意见反馈行').not.toBeNull()
+    expect(row!.querySelector('.dsh-gs-title')?.textContent).toContain('意见反馈')
+    expect(row!.querySelector('.dsh-gs-desc')?.textContent).toContain('系统浏览器')
+    expect(row!.querySelector('.dsh-gs-control button'), '右侧应是可点的按钮').not.toBeNull()
   })
 
   it('不再渲染语言行（语言只保留上游 locale 行；壳侧启动时按系统语言写好具体值）', async () => {

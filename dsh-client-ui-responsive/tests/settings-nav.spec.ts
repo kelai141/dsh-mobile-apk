@@ -163,6 +163,124 @@ describe('设置首页：分类列表', () => {
   })
 })
 
+describe('重新打开设置后不沿用旧历史', () => {
+  it('上次在 A 页、这次从列表进 B 页后，返回直接回列表（不跳到 A）', async () => {
+    const first = buildPanel(['通用设置', '开发者选项'], '通用设置')
+    nav = new MobileSettingsNav()
+    nav.attach()
+    first.rows.get('通用设置')!.click()
+    await settle()
+    first.rows.get('开发者选项')!.click()
+    await settle()
+    nav.detach()
+
+    // 关闭后重新打开：新面板、新实例（与真实关闭/重开一致）
+    const second = buildPanel(['通用设置', '开发者选项'])
+    nav = new MobileSettingsNav()
+    nav.attach()
+    second.rows.get('开发者选项')!.click()
+    await settle()
+    back(second.panel).click()
+    await settle()
+    expect(second.panel.getAttribute('data-dsh-settings-level'), '应直接回列表').toBe('home')
+  })
+})
+
+describe('从列表进入任意分区后返回，应回到列表（不得跳去通用设置）', () => {
+  it('进入「开发者选项」后返回 -> home，而不是停在通用设置', async () => {
+    // 上游默认把第一行（通用设置）标成 aria-current，进详情页后它才挪到目标行。
+    // 过渡期若照常记账，会把通用设置误记成「上一页」——真机表现为从任何二级页返回都跳通用设置。
+    const handle = buildPanel(['通用设置', '开发者选项'], '通用设置')
+    nav = new MobileSettingsNav()
+    nav.attach()
+    await settle()
+    handle.rows.get('开发者选项')!.click()
+    await settle()
+    back(handle.panel).click()
+    await settle()
+    expect(handle.panel.getAttribute('data-dsh-settings-level'), '应回到列表').toBe('home')
+  })
+})
+
+describe('系统返回（蒙层 / Escape）也按上一页回退', () => {
+  it('A → B 后点蒙层，回到 A 而不是列表', async () => {
+    const handle = buildPanel(['通用设置', '关于'], '通用设置')
+    nav = new MobileSettingsNav()
+    nav.attach()
+    handle.rows.get('通用设置')!.click()
+    await settle()
+    handle.rows.get('关于')!.click()
+    await settle()
+    handle.mask.click()
+    await settle()
+    expect(handle.panel.getAttribute('data-dsh-settings-level')).toBe('detail')
+    expect(handle.panel.querySelector('[data-dsh-settings-bar-title]')!.textContent).toBe('通用设置')
+  })
+
+  it('A → B 后按 Escape，回到 A 而不是列表', async () => {
+    const handle = buildPanel(['通用设置', '关于'], '通用设置')
+    nav = new MobileSettingsNav()
+    nav.attach()
+    handle.rows.get('通用设置')!.click()
+    await settle()
+    handle.rows.get('关于')!.click()
+    await settle()
+    handle.panel.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await settle()
+    expect(handle.panel.getAttribute('data-dsh-settings-level')).toBe('detail')
+    expect(handle.panel.querySelector('[data-dsh-settings-bar-title]')!.textContent).toBe('通用设置')
+  })
+})
+
+describe('二级页之间跳转与逐页返回', () => {
+  it('详情页里换到另一个分区后，返回回到上一页而不是列表', async () => {
+    const handle = buildPanel(['通用设置', '关于'], '通用设置')
+    nav = new MobileSettingsNav()
+    nav.attach()
+    handle.rows.get('通用设置')!.click()
+    await settle()
+    // 详情页里切到「关于」（入口就是这么做的：点一下导航行）
+    handle.rows.get('关于')!.click()
+    await settle()
+    expect(handle.panel.getAttribute('data-dsh-settings-level')).toBe('detail')
+    expect(handle.panel.querySelector('[data-dsh-settings-bar-title]')!.textContent).toBe('关于')
+
+    back(handle.panel).click()
+    await settle()
+    // 回到「通用设置」这一页，而不是一级列表
+    expect(handle.panel.getAttribute('data-dsh-settings-level')).toBe('detail')
+    expect(handle.panel.querySelector('[data-dsh-settings-bar-title]')!.textContent).toBe('通用设置')
+
+    // 再返一次才回列表
+    back(handle.panel).click()
+    await settle()
+    expect(handle.panel.getAttribute('data-dsh-settings-level')).toBe('home')
+  })
+})
+
+describe('打开设置时不把默认选中画成高亮', () => {
+  it('刚打开时面板带 fresh 标记，aria-current 原样保留', async () => {
+    const handle = buildPanel(['通用设置', '开发者选项'], '通用设置')
+    nav = new MobileSettingsNav()
+    nav.attach()
+    await settle()
+    expect(handle.panel.hasAttribute('data-dsh-settings-fresh')).toBe(true)
+    // 语义不动：上游的默认选中仍在（返回焦点与标题跟随依赖它）
+    expect(handle.rows.get('通用设置')!.getAttribute('aria-current')).toBe('true')
+  })
+
+  it('用户点过一次后撤掉 fresh，点击高亮恢复', async () => {
+    const handle = buildPanel(['通用设置', '开发者选项'], '通用设置')
+    nav = new MobileSettingsNav()
+    nav.attach()
+    await settle()
+    handle.rows.get('开发者选项')!.click()
+    await settle()
+    expect(handle.panel.hasAttribute('data-dsh-settings-fresh')).toBe(false)
+    expect(handle.rows.get('开发者选项')!.getAttribute('aria-current')).toBe('true')
+  })
+})
+
 describe('二级页：点一级分类进入', () => {
   it('点任意一级行进入二级页，标题取该行的注册名，焦点落到返回控件', () => {
     const handle = buildPanel(['通用设置', '开发者选项'])
@@ -217,6 +335,19 @@ describe('二级页：点一级分类进入', () => {
 })
 
 describe('逐级返回', () => {
+  it('returns focus to a visible row when the active About row is hidden', () => {
+    const handle = buildPanel(['通用设置', '关于'])
+    nav = new MobileSettingsNav()
+    nav.attach()
+    const about = handle.rows.get('关于')!
+    about.style.display = 'none'
+    about.click()
+    back(handle.panel).click()
+    expect(handle.panel.getAttribute('data-dsh-settings-level')).toBe('home')
+    expect(document.activeElement).toBe(handle.rows.get('通用设置'))
+    expect(about.getAttribute('aria-current')).toBe('true')
+  })
+
   it('二级页返回 -> 首页，焦点回到当前一级行，内容列节点原样（未保存编辑不丢）', () => {
     const handle = buildPanel(['开发者选项'])
     nav = new MobileSettingsNav()
@@ -275,6 +406,40 @@ describe('逐级返回', () => {
     }
     expect(handle.panel.lastElementChild).toBe(content)
     expect(handle.panel.querySelectorAll('[data-dsh-settings-back]')).toHaveLength(1)
+  })
+
+  // 真机 bug（0.14.9）：反复往返时的「串页」。上面的用例每轮进的是**同一个**分区，
+  // 所以看不出来；换成两个不同分区就能暴露 —— 第二遍返回会先弹回上一次打开过的二级页。
+  it('进 A 返回、再进 B 返回：两次都必须直接回首页，不得跳回上一次的分区', async () => {
+    const handle = buildPanel(['通用设置', '关于'], '通用设置')
+    nav = new MobileSettingsNav()
+    nav.attach()
+    handle.rows.get('通用设置')!.click()
+    await settle()
+    back(handle.panel).click()
+    await settle()
+    expect(handle.panel.getAttribute('data-dsh-settings-level')).toBe('home')
+
+    handle.rows.get('关于')!.click()
+    await settle()
+    expect(handle.panel.querySelector('[data-dsh-settings-bar-title]')!.textContent).toBe('关于')
+    back(handle.panel).click()
+    await settle()
+    expect(handle.panel.getAttribute('data-dsh-settings-level'), '不得弹回上一次的「通用设置」').toBe('home')
+    expect(handle.panel.querySelector('[data-dsh-settings-bar-title]')!.textContent).toBe('设置')
+  })
+
+  it('同一分区连进两轮，第二轮返回也必须直接回首页', async () => {
+    const handle = buildPanel(['通用设置', '关于'], '通用设置')
+    nav = new MobileSettingsNav()
+    nav.attach()
+    for (let round = 0; round < 2; round += 1) {
+      handle.rows.get('通用设置')!.click()
+      await settle()
+      back(handle.panel).click()
+      await settle()
+      expect(handle.panel.getAttribute('data-dsh-settings-level'), '第 ' + (round + 1) + ' 轮').toBe('home')
+    }
   })
 })
 

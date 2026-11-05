@@ -63,6 +63,31 @@ function settingsPathForChooser(): { path: string; isCopy: boolean } {
   return { path: settingsPath(), isCopy: false }
 }
 
+/**
+ * 打开活动配置文件（壳侧先导出副本，再交给系统选择器）。
+ *
+ * 供两处调用：上游设置头部那个「打开配置文件」动作（本文件的事件接管），
+ * 以及 Developer options 的「配置文件」行（0.15.0 起把入口收敛到那一行）。
+ */
+export function openSettingsDocument(): boolean {
+  if (!chooserAvailable()) return false
+  const target = settingsPathForChooser()
+  if (target.path === '') return false
+  if (!openPathChooser(target.path, 'view').ok) return false
+  if (target.isCopy) {
+    // 打开的是**副本**，改它不会生效。文件名取自实际路径，不写死——活动文档可能是
+    // settings.yaml 也可能是 profiles/web/cordis.patch.yml（有 settings.yaml.imported 时）。
+    const name = target.path.slice(target.path.lastIndexOf('/') + 1)
+    reportUserFacingResult({
+      ok: true,
+      title: '已打开配置文件的副本',
+      detail: `这是导出副本（Documents/dshdata/exports/config/${name}），在它上面修改不会直接生效；`
+        + '改完请回到「设置 → 开发者选项 → 导入配置」。',
+    })
+  }
+  return true
+}
+
 /** Whether the clicked element is the upstream open-configuration-file action. */
 function isSettingsDocumentAction(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false
@@ -77,31 +102,78 @@ function isSettingsDocumentAction(target: EventTarget | null): boolean {
 /** Claims the upstream action and opens the settings document through the shell chooser. */
 export class SettingsDocumentAction {
   private readonly onClick = (event: MouseEvent): void => {
-    if (!chooserAvailable()) return
     if (!isSettingsDocumentAction(event.target)) return
-    const target = settingsPathForChooser()
-    if (target.path === '') return
-    // Claim only when the shell really took the path: a refusal keeps upstream's own error path.
-    if (!openPathChooser(target.path, 'view').ok) return
+    // 只在壳侧真把路径交给选择器之后才接管；否则交还上游（保留它自己的错误提示）。
+    // 只调用一次 openSettingsDocument：它内部已完成导出与打开，重复调用会二次拉起选择器。
+    if (!openSettingsDocument()) return
     event.preventDefault()
     event.stopPropagation()
-    if (target.isCopy) {
-      // S3-20：打开的是**副本**，改它不会生效。用与导出结果同一条对话框通道如实说明
-      // （这条动作由上游按钮触发，我们无法在它旁边内联渲染文字）。
-      reportUserFacingResult({
-        ok: true,
-        title: '已打开配置文件的副本',
-        detail: '这是导出副本（Documents/dshdata/exports/config/settings.yaml），在它上面修改不会直接生效；'
-          + '改完请回到「设置 → 开发者选项 → 导入配置」。',
-      })
-    }
   }
 
   attach(): void {
     document.addEventListener('click', this.onClick, true)
+    this.observer?.disconnect()
+    // 观察器必须挂在 body 上（要能看见对话框出现），但**只有这波变更碰到对话框才扫按钮**。
+    // 设置对话框开着时聊天仍在流式输出，body 下每秒几十次变更——旧实现每次都把对话框里的
+    // 按钮全扫一遍，而这些变更根本没碰对话框（判据见 touchedSettingsDialog）。
+    this.observer = new MutationObserver((records) => {
+      if (this.touchedSettingsDialog(records)) this.hideUpstreamAction()
+    })
+    this.observer.observe(document.body, { childList: true, subtree: true })
+    this.hideUpstreamAction()
   }
 
   detach(): void {
     document.removeEventListener('click', this.onClick, true)
+    this.observer?.disconnect()
+    this.observer = undefined
+  }
+
+  private observer?: MutationObserver
+
+  /**
+   * 这波 DOM 变更是否碰到了设置对话框（判据只看 mutation records，不做子树遍历）。
+   *
+   * 为什么不能沿用「每次都扫」：对话框开着时聊天流式输出会持续改写 body 下的节点，
+   * 旧实现每次都把 `dialog.querySelectorAll('button')` 跑一遍并按 textContent 逐个 trim。
+   * 这些变更绝大多数与对话框无关，扫了等于白跑。
+   *
+   * 反过来也必须覆盖真实需要的两种变更：
+   *  1. 变更发生在对话框内部（切换分区时表头按钮被重建）；
+   *  2. 对话框本身刚被挂上来（新增节点是对话框、或其祖先、或其后代）。
+   *
+   * 判据只用 records 里的 target/addedNodes 做 contains 比较，不额外查 DOM。
+   */
+  private touchedSettingsDialog(records: MutationRecord[]): boolean {
+    const dialog = document.querySelector('[data-dsh-settings-dialog]')
+    if (dialog === null) return false
+    for (const record of records) {
+      const target = record.target
+      if (target === dialog || dialog.contains(target)) return true
+      for (const node of record.addedNodes) {
+        if (node === dialog || dialog.contains(node)) return true
+        if (node instanceof Element && node.contains(dialog)) return true
+      }
+    }
+    return false
+  }
+
+  /**
+   * 0.15.0 用户定例：入口收敛到「设置 → 开发者选项 → 配置文件」那一行。
+   *
+   * 上游把「打开配置文件」渲染在设置内容列的表头（每个分区都有），这里把它隐藏掉，
+   * 只保留关闭按钮；真正的入口是我们那一行里的「打开」。按文本匹配而不是按位置，
+   * 因为表头的元素顺序不属于我们的契约。命中一次后打标记，不重复扫。
+   */
+  private hideUpstreamAction(): void {
+    const dialog = document.querySelector('[data-dsh-settings-dialog]')
+    if (dialog === null) return
+    for (const button of dialog.querySelectorAll('button')) {
+      if (button.dataset.dshSettingsDocHidden === '1') continue
+      const label = (button.textContent ?? '').trim()
+      if (!ACTION_LABELS.includes(label)) continue
+      button.dataset.dshSettingsDocHidden = '1'
+      button.style.display = 'none'
+    }
   }
 }

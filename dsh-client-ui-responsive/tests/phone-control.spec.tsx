@@ -4,6 +4,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
+import { toggleOf } from './toggle.ts'
 import {
   PhoneControlSection,
   settleLinkCall,
@@ -15,6 +16,8 @@ import {
   rootGrantChannelHint,
   rootAccessStateLabel,
   canRequestRoot,
+  rootGrantTerminal,
+  ROOT_GRANT_PENDING_TIMEOUT_MS,
   ROOT_GRANT_NOT_ROOT_TEXT,
   describeOwnershipRepair,
   parseRootReply,
@@ -144,11 +147,11 @@ describe('PhoneControlSection（手机控制设置页）', () => {
     const getVdisplayFloatEnabled = vi.fn(() => enabled)
     const setVdisplayFloatEnabled = vi.fn((next: boolean) => { enabled = next })
     const el = await render({ getVdisplayFloatEnabled, setVdisplayFloatEnabled })
-    const toggle = el.querySelector('input[aria-label="虚拟屏浮窗（退后台自动显示）"]') as HTMLInputElement
+    const toggle = toggleOf(el, '虚拟屏浮窗（退后台自动显示）')
     expect(toggle.checked).toBe(true)
     await act(async () => { toggle.click() })
     expect(setVdisplayFloatEnabled).toHaveBeenCalledWith(false)
-    expect((el.querySelector('input[aria-label="虚拟屏浮窗（退后台自动显示）"]') as HTMLInputElement).checked).toBe(false)
+    expect(toggleOf(el, '虚拟屏浮窗（退后台自动显示）').checked).toBe(false)
   })
 
   // P5-6：与开发者选项里的「悬浮球」去混淆——两处都叫「浮」，必须各说各是什么，
@@ -569,10 +572,8 @@ function rootAccessJson(over: Record<string, unknown> = {}): string {
 }
 
 describe('AI root 权限开关（issue #262 方案 A）', () => {
-  const grantedInput = (el: HTMLElement) =>
-    el.querySelector('input[aria-label="授权 AI 使用 root"]') as HTMLInputElement
-  const consentInput = (el: HTMLElement) =>
-    el.querySelector('input[aria-label="已阅读免责声明"]') as HTMLInputElement
+  const grantedInput = (el: HTMLElement) => toggleOf(el, '授权 AI 使用 root')
+  const consentInput = (el: HTMLElement) => toggleOf(el, '已阅读免责声明')
 
   it('两条 root 路径均不可用：AI 开关置灰，但同意和免责声明仍可读可撤销', async () => {
     const el = await render({
@@ -875,7 +876,7 @@ describe('应用级 Root 授权面（2026-09-30 主人定例）', () => {
     expect(groups[0]!.textContent).toContain('1. 应用 root 授权')
     expect(groups[0]!.querySelector('input')).toBeNull()
     expect(groups[1]!.textContent).toContain('2. AI root 权限')
-    expect(groups[1]!.querySelectorAll('input')).toHaveLength(2)
+    expect(groups[1]!.querySelectorAll('button[role="switch"]')).toHaveLength(2)
     const maintenance = groups[2] as HTMLDetailsElement
     expect(maintenance.open).toBe(false)
     expect(maintenance.querySelector('summary')!.textContent).toBe('文件属主维护')
@@ -931,8 +932,8 @@ describe('Root 桥回执形状与失败呈现', () => {
   it('坏 root 状态在页面上不可读，两开关均不可点，文档入口仍保留', async () => {
     const el = await render({ rootGrantState: () => '[{"granted":true}]', rootAccessState: () => 'null' })
     expect(detailLine(el, '2. AI root 权限')).toContain('状态不可读')
-    expect((el.querySelector('input[aria-label="授权 AI 使用 root"]') as HTMLInputElement).disabled).toBe(true)
-    expect((el.querySelector('input[aria-label="已阅读免责声明"]') as HTMLInputElement).disabled).toBe(true)
+    expect(toggleOf(el, '授权 AI 使用 root').disabled).toBe(true)
+    expect(toggleOf(el, '已阅读免责声明').disabled).toBe(true)
     expect(buttonByText(el, '阅读《AI root 权限免责声明》').disabled).toBe(false)
   })
 
@@ -944,13 +945,13 @@ describe('Root 桥回执形状与失败呈现', () => {
     { label: '拒收', raw: '{"ok":false,"reason":"consent-required"}' },
   ])('同意写入 $label 不谎报成功也不泄漏机器码', async ({ raw }) => {
     const el = await render({ rootGrantState: () => rootGrantJson(), setRootConsent: () => raw })
-    await act(async () => { (el.querySelector('input[aria-label="已阅读免责声明"]') as HTMLInputElement).click() })
+    await act(async () => { toggleOf(el, '已阅读免责声明').click() })
     const receipt = el.querySelector('.dsh-root-step [role="status"]')!
     expect(receipt.className).toContain('dsh-dev-error')
     expect(receipt.textContent).toContain('记录「已阅读」失败')
     expect(receipt.textContent).not.toContain('future-native-private-code')
     expect(receipt.textContent).not.toContain('已记录「已阅读」')
-    expect((el.querySelector('input[aria-label="已阅读免责声明"]') as HTMLInputElement).checked).toBe(false)
+    expect(toggleOf(el, '已阅读免责声明').checked).toBe(false)
   })
 
   it('request-started 是等待而非已开启；当前同意失效后不得自动续开', async () => {
@@ -964,7 +965,7 @@ describe('Root 桥回执形状与失败呈现', () => {
       rootAccessState: () => rootAccessJson({ state: rootGranted ? 'granted' : 'requesting', granted: rootGranted, requesting: !rootGranted }),
       setRootGranted,
     })
-    await act(async () => { (el.querySelector('input[aria-label="授权 AI 使用 root"]') as HTMLInputElement).click() })
+    await act(async () => { toggleOf(el, '授权 AI 使用 root').click() })
     expect(el.textContent).toContain('正在检测 root 授权')
     expect(el.textContent).not.toContain('开启 AI root 权限失败')
     expect(el.textContent).not.toContain('已开启 AI root 权限：')
@@ -973,7 +974,7 @@ describe('Root 桥回执形状与失败呈现', () => {
     rootGranted = true
     await act(async () => { vi.advanceTimersByTime(2_000) })
     expect(setRootGranted).toHaveBeenCalledTimes(1)
-    expect((el.querySelector('input[aria-label="授权 AI 使用 root"]') as HTMLInputElement).checked).toBe(false)
+    expect(toggleOf(el, '授权 AI 使用 root').checked).toBe(false)
   })
 
   it('检测应用 root 成功只更新事实面，不自动开启 AI 策略门', async () => {
@@ -993,7 +994,7 @@ describe('Root 桥回执形状与失败呈现', () => {
     await act(async () => { vi.advanceTimersByTime(2_000) })
     expect(detailLine(el, '1. 应用 root 授权')).toContain('已授权（uid 0）')
     expect(setRootGranted).not.toHaveBeenCalled()
-    expect((el.querySelector('input[aria-label="授权 AI 使用 root"]') as HTMLInputElement).checked).toBe(false)
+    expect(toggleOf(el, '授权 AI 使用 root').checked).toBe(false)
   })
 })
 
@@ -1047,6 +1048,70 @@ describe('文件属主维护异步结算（rootGrant.ownership）', () => {
     await act(async () => { buttonByText(el, '修复文件属主').click() })
     expect(el.textContent).toContain('文件属主维护完成（检查 42 项 / 修复 3 项 / 失败 0 项）')
     expect(el.textContent).not.toContain('启动文件属主维护失败')
+  })
+
+  it('有历史成功记录时，本次失败的红字仍必须出现（issue #1376）', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
+    // 设备上以前成功修过一次：轮询里**永远**有一条旧的 completed 记录。
+    // 只按「现在是不是 completed」判自愈，会把刚出现的红字在下一个 tick 立刻抹掉。
+    let ownership: Record<string, unknown> = { running: false, startedAt: 10, completedAt: 20, result: completedRepair }
+    const rootGrantState = vi.fn(() => rootGrantJson({ ownership }))
+    // 第一次点击被壳侧拒绝（例如 root 未授权）→ 红字
+    const repairRootOwnership = vi.fn(() => JSON.stringify({ ok: false, code: 'denied', reason: 'root-missing' }))
+    const el = await render({ rootGrantState, repairRootOwnership, setRootGranted: vi.fn(), setRootConsent: vi.fn() })
+    await act(async () => { buttonByText(el, '修复文件属主').click() })
+    expect(el.textContent).toContain('启动文件属主维护失败')
+    // 旧记录原样再来一次（没有推进）：红字必须留着。
+    await act(async () => { vi.advanceTimersByTime(2_000) })
+    expect(el.textContent).toContain('启动文件属主维护失败')
+    // 真正推进：新的 startedAt 且 running —— 这时才允许清除。
+    ownership = { running: true, startedAt: 30, completedAt: 0, overdue: false }
+    await act(async () => { vi.advanceTimersByTime(2_000) })
+    expect(el.textContent).not.toContain('启动文件属主维护失败')
+    expect(buttonByText(el, '属主维护进行中').disabled).toBe(true)
+    // 再刷成 completed：仍不得回退到失败文案
+    ownership = { running: false, startedAt: 30, completedAt: 40, result: completedRepair }
+    await act(async () => { vi.advanceTimersByTime(2_000) })
+    expect(el.textContent).not.toContain('启动文件属主维护失败')
+    expect(el.textContent).toContain('文件属主维护完成')
+  })
+
+  it('ownership 不可读时点失败，历史成功记录不得清掉红字（issue #1518）', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
+    // 壳侧回包形态不符 ⇒ ownership 不可读（readable=false）。此时基线无从谈起。
+    let ownership: Record<string, unknown> = { startedAt: 10 }
+    const rootGrantState = vi.fn(() => rootGrantJson({ ownership }))
+    const repairRootOwnership = vi.fn(() => JSON.stringify({ ok: false, code: 'denied', reason: 'root-missing' }))
+    const el = await render({ rootGrantState, repairRootOwnership, setRootGranted: vi.fn(), setRootConsent: vi.fn() })
+    expect(readRootGrant().ownership?.readable).toBe(false)
+    await act(async () => { buttonByText(el, '修复文件属主').click() })
+    expect(el.textContent).toContain('启动文件属主维护失败')
+    // 轮询读到一条**历史**成功记录（startedAt=10 / completedAt=20）。本次没有新 run：
+    // 旧判据 base={0,0} ⇒ 10 > 0 成立 ⇒ 红字被清，失败被历史成功掩盖。
+    ownership = { running: false, startedAt: 10, completedAt: 20, result: completedRepair }
+    await act(async () => { vi.advanceTimersByTime(2_000) })
+    expect(el.textContent).toContain('启动文件属主维护失败')
+  })
+
+  it('不可读基线下仍要能自愈：轮询读到活的 running 必须清红字（#1376 不得被 #1518 修法关掉）', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
+    // 与上一条同一个起点（点击时不可读 ⇒ 没有可比基线），区别在于轮询随后读到**真的在跑**。
+    // 「不可读就不记基线」如果实现成「没有基线就永不清除」，等于用关掉自愈来修 #1518——
+    // 那会把 #1376 打回原形（红字永不消失）。这条判据守的就是这个反方向。
+    let ownership: Record<string, unknown> = { startedAt: 10 }
+    const rootGrantState = vi.fn(() => rootGrantJson({ ownership }))
+    const repairRootOwnership = vi.fn(() => JSON.stringify({ ok: false, code: 'denied', reason: 'root-missing' }))
+    const el = await render({ rootGrantState, repairRootOwnership, setRootGranted: vi.fn(), setRootConsent: vi.fn() })
+    await act(async () => { buttonByText(el, '修复文件属主').click() })
+    expect(el.textContent).toContain('启动文件属主维护失败')
+    // 轮询读到活的 running（不是历史 completed）：这是「真的有一次新 run」的活证据。
+    ownership = { running: true, startedAt: 30, completedAt: 0, overdue: false }
+    await act(async () => { vi.advanceTimersByTime(2_000) })
+    expect(el.textContent).not.toContain('启动文件属主维护失败')
+    expect(buttonByText(el, '属主维护进行中').disabled).toBe(true)
   })
 
   it('repair-running 回执沿用同一个单飞作业，不宣称已修复', async () => {
@@ -1120,5 +1185,50 @@ describe('文件属主维护异步结算（rootGrant.ownership）', () => {
     const malformed = describeOwnershipRepair(ownershipStatus({ result: { ok: false, checked: -1, healed: Number.NaN, failures: '0' } }))!
     expect(malformed.ok).toBe(false)
     expect(malformed.text).toContain('检查 未知 项 / 修复 未知 项 / 失败 未知 项')
+  })
+})
+
+/**
+ * issue #1377：root 授权等待的**终态收敛**。
+ *
+ * 判据要钉住「三种终态可辨」，而不是只验「pending 被关掉」——后者在三种状态下表现完全一样，
+ * 那正是缺陷（文案一直停在「正在检测 root 授权」）。
+ */
+describe('root 授权终态（issue #1377）', () => {
+  it('已拒绝：可重试，且文案指明去 Root 管理器改', () => {
+    const terminal = rootGrantTerminal('denied')
+    expect(terminal?.code).toBe('root-denied')
+    expect(terminal?.retryable).toBe(true)
+    expect(terminal?.text).toContain('拒绝')
+    expect(terminal?.text).toContain('Root 管理器')
+  })
+
+  it('超时：可重试，文案明写「再点一次」', () => {
+    const terminal = rootGrantTerminal('timeout')
+    expect(terminal?.code).toBe('root-grant-timeout')
+    expect(terminal?.retryable).toBe(true)
+    expect(terminal?.text).toContain('超时')
+    expect(terminal?.text).toContain('重试')
+  })
+
+  it('本机没有 su：不可重试，且必须说明原因（不是只写「不可用」）', () => {
+    const terminal = rootGrantTerminal('no-su')
+    expect(terminal?.code).toBe('root-no-su')
+    // 这一态重试永远不会成功——与 denied 必须分开，否则用户会反复点。
+    expect(terminal?.retryable).toBe(false)
+    expect(terminal?.text).toContain('没有 su')
+    expect(terminal?.text).toContain('不是权限问题')
+  })
+
+  it('非终态不产生文案（不得把 granted/requesting 画成失败）', () => {
+    expect(rootGrantTerminal('granted')).toBeNull()
+    expect(rootGrantTerminal('requesting')).toBeNull()
+    expect(rootGrantTerminal('unknown')).toBeNull()
+    expect(rootGrantTerminal('')).toBeNull()
+  })
+
+  it('等待有上界：pending 超时常量存在且有限', () => {
+    expect(Number.isFinite(ROOT_GRANT_PENDING_TIMEOUT_MS)).toBe(true)
+    expect(ROOT_GRANT_PENDING_TIMEOUT_MS).toBeGreaterThan(0)
   })
 })

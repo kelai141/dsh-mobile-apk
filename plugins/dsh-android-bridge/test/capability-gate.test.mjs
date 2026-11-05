@@ -151,3 +151,47 @@ test('A1：channels 允许异步（引擎补探），门禁必须 await 得到�
   assert.deepEqual(one.channels, { a11y: true, shizuku: true })
   assert.match(one.text, /Shizuku 特权通道：就绪/)
 })
+
+test('a11y probe failures remain unknown instead of becoming confirmed disabled', async () => {
+  const h = harness()
+  installCapabilityGate(h.ctx, async () => { throw new Error('probe unavailable') }, isolatedStore())
+  const one = await h.registered[0].execute({ group: 'all' }, { agent: h.state.agent })
+  assert.deepEqual(one.channels, {})
+  assert.doesNotMatch(JSON.stringify(one), /undefined/)
+  const line = one.text.split('\n').find((l) => l.startsWith('- 无障碍通道'))
+  assert.match(line, /状态未确认/)
+  assert.match(line, /直接尝试目标操作/)
+  assert.doesNotMatch(line, /未开启/)
+})
+
+test('stale a11y heartbeat is reported as uncertain with its age', async () => {
+  const h = harness()
+  installCapabilityGate(h.ctx, () => ({ a11ySource: 'stale', a11yHeartbeatAgeMs: 45_000 }), isolatedStore())
+  const one = await h.registered[0].execute({ group: 'all' }, { agent: h.state.agent })
+  assert.deepEqual(one.channels, { a11ySource: 'stale', a11yHeartbeatAgeMs: 45_000 })
+  const line = one.text.split('\n').find((l) => l.startsWith('- 无障碍通道'))
+  assert.match(line, /心跳已过期 45 秒/)
+  assert.match(line, /服务状态未确认/)
+  assert.match(line, /直接尝试目标操作/)
+  assert.doesNotMatch(line, /未开启/)
+})
+
+test('missing stale heartbeat age remains a stale state instead of becoming unknown', async () => {
+  const h = harness()
+  installCapabilityGate(h.ctx, () => ({ a11ySource: 'stale' }), isolatedStore())
+  const one = await h.registered[0].execute({ group: 'all' }, { agent: h.state.agent })
+  assert.deepEqual(one.channels, { a11ySource: 'stale' })
+  const line = one.text.split('\n').find((l) => l.startsWith('- 无障碍通道'))
+  assert.match(line, /心跳缺失/)
+  assert.match(line, /服务状态未确认/)
+  assert.doesNotMatch(line, /状态未知|未开启/)
+})
+
+test('explicit a11y disablement remains a distinct confirmed state', async () => {
+  const h = harness()
+  installCapabilityGate(h.ctx, () => ({ a11y: false }), isolatedStore())
+  const one = await h.registered[0].execute({ group: 'all' }, { agent: h.state.agent })
+  assert.deepEqual(one.channels, { a11y: false })
+  const line = one.text.split('\n').find((l) => l.startsWith('- 无障碍通道'))
+  assert.match(line, /已确认关闭/)
+})

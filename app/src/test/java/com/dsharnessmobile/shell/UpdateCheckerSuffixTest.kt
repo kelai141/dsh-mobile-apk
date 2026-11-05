@@ -57,4 +57,71 @@ class UpdateCheckerSuffixTest {
     assertTrue("fx 后缀不得被剥（否则修订链断裂）", stripped.contains("fx-2"))
     assertTrue(UpdateChecker.isNewer(stripped, "0.13.7fx-1"))
   }
+
+
+  /** #513：重定向链白名单——镜像域内跟随合法，越域（劫持 302）整链放弃。 */
+  @Test
+  fun redirectChainAllowedAcceptsOnlyKnownHosts() {
+    assertEquals(true, UpdateChecker.redirectChainAllowed(listOf(
+      "https://gh-proxy.com/https://github.com/a/b/releases/download/v1/x.apk")))
+    assertEquals(true, UpdateChecker.redirectChainAllowed(listOf(
+      "https://github.com/...",
+      "https://objects.githubusercontent.com/...",
+      "https://release-assets.githubusercontent.com/...")))
+    assertEquals("劫持到任意域必须整链拒绝", false,
+      UpdateChecker.redirectChainAllowed(listOf(
+        "https://ghfast.top/https://github.com/a",
+        "https://evil.example.com/x.apk")))
+    assertEquals("空链拒绝", false, UpdateChecker.redirectChainAllowed(emptyList()))
+  }
+
+  // ---- 2026-10-28 自查：SemVer build metadata（+xxx）不参与优先级 ----
+
+  @Test
+  fun `build metadata 不得让同一个版本被判成更新`() {
+    // 不切掉 `+…` 时 parts 会多出一个数字组 [.., 7] > [.., 0] ⇒ 每轮报"发现新版"，
+    // 然后去要一个不存在的 asset 名，最终把"版本号写法"错报成"没有适配架构的包"。
+    assertFalse("v0.14.5+build.7 不高于 0.14.5", UpdateChecker.isNewer("v0.14.5+build.7", "0.14.5"))
+    assertFalse("0.14.5+build.7 与 0.14.5+build.9 同级", UpdateChecker.isNewer("v0.14.5+build.7", "0.14.5+build.9"))
+    // 反向：真正更高的版本仍要判出来（切 +build 不能把比较弄坏）
+    assertTrue("0.14.6 高于 0.14.5", UpdateChecker.isNewer("v0.14.6+build.1", "0.14.5+build.9"))
+    assertTrue("0.14.5 高于 0.14.4", UpdateChecker.isNewer("v0.14.5", "0.14.4"))
+    // 既有两种命名不受影响
+    assertTrue("fx 修订号仍参与", UpdateChecker.isNewer("v0.13.7fx-2", "0.13.7fx-1"))
+    assertFalse("rc 段仍不参与", UpdateChecker.isNewer("v0.13.7-rc.1", "0.13.7"))
+  }
+  // ── issue #1365：预发布段必须参与比较 ──────────────────────────────────
+
+  @Test
+  fun 同核心的预发布段按序号比较() {
+    assertTrue("rc.2 比 rc.1 新（旧实现两者都归约成 [0,14,2] ⇒ 恒 false）",
+      UpdateChecker.isNewer("v0.14.2-rc.2", "0.14.2-rc.1"))
+    assertFalse("反向不得成立", UpdateChecker.isNewer("v0.14.2-rc.1", "0.14.2-rc.2"))
+    assertFalse("同一 rc 不算更新", UpdateChecker.isNewer("v0.14.2-rc.2", "0.14.2-rc.2"))
+    assertTrue("按数字比而不是按字典序（rc.10 > rc.9）",
+      UpdateChecker.isNewer("v0.14.2-rc.10", "0.14.2-rc.9"))
+  }
+
+  @Test
+  fun 正式版高于同核心的预发布() {
+    assertTrue("rc 用户必须能升到正式版", UpdateChecker.isNewer("v0.14.2", "0.14.2-rc.1"))
+    assertFalse("正式版用户不得被同核心的 rc 提示更新",
+      UpdateChecker.isNewer("v0.14.2-rc.1", "0.14.2"))
+  }
+
+  @Test
+  fun 预发布段的解析只认白名单() {
+    assertEquals("rc" to listOf(2L), UpdateChecker.prereleaseOf("v0.14.2-rc.2"))
+    assertEquals("sn" to listOf(1L, 13L), UpdateChecker.prereleaseOf("v0.14.6-SN-1-13"))
+    assertEquals(null, UpdateChecker.prereleaseOf("v0.14.5-fx-3"))
+    assertEquals(null, UpdateChecker.prereleaseOf("v0.14.5"))
+  }
+
+  @Test
+  fun 修订链语义不受影响() {
+    assertTrue(UpdateChecker.isNewer("v0.14.5-fx-3", "0.14.5-fx-2"))
+    assertFalse(UpdateChecker.isNewer("v0.14.5-fx-2", "0.14.5-fx-2"))
+    assertFalse("fx 不是预发布段，正式版与它的关系保持原口径",
+      UpdateChecker.isNewer("v0.14.5-fx-2", "0.14.5-fx-2"))
+  }
 }

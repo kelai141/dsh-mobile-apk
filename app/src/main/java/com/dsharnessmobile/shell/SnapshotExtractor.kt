@@ -250,7 +250,8 @@ object SnapshotExtractor {
           target.setExecutable(SnapshotFileMode.isDirectlyExecutable(prefix, prefixLength), true)
         }
       }
-      done += entry.size
+      // done 已在循环头部（上限检查处）累加过 entry.size——这里不再重复累加（#680）：
+      // 双倍计数让 8 GiB 总量上限在 4 GiB 就触发，正常快照被误判成解压炸弹。
       if (done % (1024 * 1024) < entry.size) onProgress(done, totalBytes)
       entry = tar.nextEntry
     }

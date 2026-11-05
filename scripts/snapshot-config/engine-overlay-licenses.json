@@ -79,6 +79,14 @@
     "undici": "MIT",
     "unicorn-magic": "MIT",
     "which-command": "MIT",
-    "yoctocolors": "MIT"
+    "yoctocolors": "MIT",
+    "@opentelemetry/api-logs": "Apache-2.0",
+    "@opentelemetry/core": "Apache-2.0",
+    "@opentelemetry/otlp-exporter-base": "Apache-2.0",
+    "@opentelemetry/otlp-transformer": "Apache-2.0",
+    "@opentelemetry/resources": "Apache-2.0",
+    "@opentelemetry/sdk-logs": "Apache-2.0",
+    "@opentelemetry/sdk-metrics": "Apache-2.0",
+    "@opentelemetry/sdk-trace": "Apache-2.0"
   }
 }

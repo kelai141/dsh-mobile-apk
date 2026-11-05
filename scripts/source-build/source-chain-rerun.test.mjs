@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto'
 import { spawnSync, execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 const ROOT = resolve(import.meta.dirname, '../..')
 const yaml = readFileSync(join(ROOT, '.github/workflows/build-apk-source.yml'), 'utf8').replaceAll('\r\n', '\n')
 function step(name, workflow = yaml) {
@@ -25,7 +25,7 @@ function fixture(fn) {
 function bash(script, root, extra = {}) {
   const r = spawnSync('/bin/bash', ['--noprofile', '--norc', '-c', 'set -euo pipefail\n' + script], {
     cwd: root, encoding: 'utf8', timeout: 10000, maxBuffer: 262144,
-    env: { PATH: join(root, 'bin') + ':/usr/bin:/bin', HOME: root, TMPDIR: root, LC_ALL: 'C', GITHUB_WORKSPACE: root, ...extra },
+    env: { PATH: join(root, 'bin') + ':' + dirname(process.execPath) + ':/usr/bin:/bin', HOME: root, TMPDIR: root, LC_ALL: 'C', GITHUB_WORKSPACE: root, ...extra },
   })
   if (r.error) throw r.error
   return r
@@ -34,6 +34,53 @@ const linux = { skip: process.platform !== 'linux' }
 const buildYaml = readFileSync(join(ROOT, '.github/workflows/build-apk.yml'), 'utf8').replaceAll('\r\n', '\n')
 const pluginDirs = JSON.parse(readFileSync(join(ROOT, 'scripts/plugin-dirs.json'), 'utf8')).dirs
 const buildableDirs = pluginDirs.filter(d => JSON.parse(readFileSync(join(ROOT, d, 'package.json'), 'utf8')).scripts?.build)
+function workflowConcurrencyGroup(source) {
+  const lines = source.replaceAll('\r\n', '\n').split('\n')
+  const start = lines.findIndex(line => line === 'concurrency:')
+  if (start < 0) return null
+  for (const line of lines.slice(start + 1)) {
+    if (line.trim() === '') continue
+    if (!/^\s/.test(line)) break
+    const match = line.match(/^  group:\s*(.*?)\s*$/)
+    if (match) return match[1].replace(/^(?:"(.*)"|'(.*)')$/, (_, doubleQuoted, singleQuoted) => doubleQuoted ?? singleQuoted)
+  }
+  return null
+}
+function resolveConcurrencyGroup(template, workflow, ref) {
+  return template
+    .replaceAll('${{ github.workflow }}', workflow)
+    .replaceAll('${{ github.ref }}', ref)
+}
+function assertDistinctConcurrencyGroups(caller, called, context) {
+  const callerGroup = resolveConcurrencyGroup(caller, context.workflow, context.ref)
+  const calledGroup = resolveConcurrencyGroup(called, context.workflow, context.ref)
+  if (callerGroup === calledGroup) throw new Error('caller and called workflow share concurrency group ' + callerGroup)
+  return { callerGroup, calledGroup }
+}
+test('source-audit caller and reusable workflow use separate concurrency namespaces', () => {
+  assert.match(buildYaml, /source-audit:[\s\S]*?uses: \.\/\.github\/workflows\/build-apk-source\.yml/)
+  assert.match(yaml, /^  workflow_call:\s*$/m)
+  const callerGroup = workflowConcurrencyGroup(buildYaml)
+  const sourceGroup = workflowConcurrencyGroup(yaml)
+  assert.ok(callerGroup)
+  assert.ok(sourceGroup)
+  const context = { workflow: 'build-apk', ref: 'refs/heads/concurrency-test' }
+  const resolved = assertDistinctConcurrencyGroups(callerGroup, sourceGroup, context)
+  assert.equal(resolved.callerGroup, 'build-apk-entry-refs/heads/concurrency-test')
+  assert.equal(resolved.calledGroup, 'build-apk-source-refs/heads/concurrency-test')
+  assert.equal(
+    resolveConcurrencyGroup(sourceGroup, 'build-apk', context.ref),
+    resolveConcurrencyGroup(sourceGroup, 'build-apk-source', context.ref),
+    'direct dispatch and nested source calls must serialize together',
+  )
+
+  const oldGroup = '${{ github.workflow }}-${{ github.ref }}'
+  assert.throws(
+    () => assertDistinctConcurrencyGroups(oldGroup, oldGroup, context),
+    /share concurrency group/,
+    'negative control must reject the former shared caller/callee group',
+  )
+})
 function preparePluginBuild(root) {
   mkdirSync(join(root, 'scripts'), { recursive: true })
   mkdirSync(join(root, 'bin'))
@@ -166,4 +213,73 @@ test('deploy cleanup is scoped and rejects empty workspace and linked parent', l
   rmSync(join(root, '.deploy-tmp'), { recursive: true }); symlinkSync(other, join(root, '.deploy-tmp'))
   assert.notEqual(bash(cleanup, root).status, 0)
   assert.equal(readFileSync(join(other, 'sentinel'), 'utf8'), 'keep')
+}))
+
+// P1 回归（真实 rc3 演练发现）：合同读取曾在 `cd .deploy-tmp/deepseek-harness` 之后执行，
+// 于是从 upstream 的 cwd 解析 ./scripts/contract.json —— 上游没有这个文件，frozen install
+// 之后必然 MODULE_NOT_FOUND。这里直接跑工作流原文的初始化片段，确保合同在根目录读取。
+test('source build reads the contract before entering the upstream checkout', linux, () => fixture(root => {
+  const harnessStep = step('Build and pack DeepSeek Harness from source')
+  const harness = join(root, '.deploy-tmp/deepseek-harness')
+  mkdirSync(harness, { recursive: true })
+  // 片段里的 git checkout/clean 需要真实仓库；用一个已提交的 upstream 夹具即可。
+  const git = (...args) => execFileSync('git', ['-C', harness, ...args], {
+    env: { PATH: join(root, 'bin') + ':/usr/bin:/bin', HOME: root, GIT_CONFIG_NOSYSTEM: '1' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  git('init', '-q')
+  git('config', 'user.name', 'Fixture')
+  git('config', 'user.email', 'fixture@example.invalid')
+  writeFileSync(join(harness, 'package.json'), '{}\n')
+  git('add', '.')
+  git('commit', '-qm', 'upstream fixture')
+  mkdirSync(join(root, 'scripts/snapshot-config'), { recursive: true })
+  writeFileSync(join(root, 'scripts/snapshot-config/engine-overlay.json'), '{}\n')
+  // 片段开头用 git show "$GITHUB_SHA:<overlay>" 恢复文件，夹具根也必须是已提交仓库。
+  const projectGit = (...args) => execFileSync('git', ['-C', root, ...args], {
+    env: { PATH: join(root, 'bin') + ':/usr/bin:/bin', HOME: root, GIT_CONFIG_NOSYSTEM: '1' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  projectGit('init', '-q')
+  projectGit('config', 'user.name', 'Fixture')
+  projectGit('config', 'user.email', 'fixture@example.invalid')
+  projectGit('add', 'scripts/snapshot-config/engine-overlay.json')
+  projectGit('commit', '-qm', 'project fixture')
+  const projectCommit = projectGit('rev-parse', 'HEAD').toString().trim()
+  const contractPath = join(root, 'scripts/contract.json')
+  writeFileSync(contractPath, JSON.stringify({
+    baseline: '9.9.9-rc.9',
+    upstream: { commit: '0123456789abcdef0123456789abcdef01234567', packageManager: 'pnpm@9.9.9' },
+  }))
+  mkdirSync(join(root, 'bin'))
+  // corepack 替身：报告一次成功安装，并且只在 expected_pnpm 已捕获时返回合同版本。
+  writeFileSync(join(root, 'bin/corepack'), [
+    '#!/bin/bash', 'set -eu',
+    'if [ "$1" = enable ]; then exit 0; fi',
+    'if [ "$1" = pnpm ]; then',
+    '  if [ "$2" = install ]; then exit 0; fi',
+    '  if [ "$2" = --version ]; then printf "%s\\n" "${FAKE_PNPM_VERSION:?}"; exit 0; fi',
+    'fi',
+    'echo "unexpected corepack invocation: $*" >&2; exit 64', '',
+  ].join('\n'))
+  chmodSync(join(root, 'bin/corepack'), 0o755)
+  // 只跑合同捕获与 frozen install 校验；部署 pnpm@12.2.0 预热属于后续步骤。
+  const script = harnessStep.slice(0, harnessStep.indexOf('\n# corepack\'s fetcher'))
+  assert.ok(script.includes('corepack pnpm install --frozen-lockfile'))
+  const run = extra => bash(script, root, { GITHUB_SHA: projectCommit, FAKE_PNPM_VERSION: '9.9.9', ...extra })
+
+  const positive = run({})
+  assert.equal(positive.status, 0, positive.stderr + positive.stdout)
+
+  // upstream 自己的 scripts/ 不该被读成合同来源；真实上游此处没有 contract.json。
+  mkdirSync(join(harness, 'scripts'), { recursive: true })
+  writeFileSync(join(harness, 'scripts/contract.json'), JSON.stringify({
+    baseline: '9.9.9-rc.9',
+    upstream: { commit: '0123456789abcdef0123456789abcdef01234567', packageManager: 'pnpm@8.8.8' },
+  }))
+  const stillGood = run({})
+  assert.equal(stillGood.status, 0, stillGood.stderr + stillGood.stdout)
+
+  const wrongVersion = run({ FAKE_PNPM_VERSION: '9.9.8' })
+  assert.notEqual(wrongVersion.status, 0, 'installed pnpm must match the captured contract version')
 }))

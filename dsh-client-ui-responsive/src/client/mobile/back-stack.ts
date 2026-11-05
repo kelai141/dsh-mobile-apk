@@ -26,8 +26,8 @@
  *   collapse toggle;
  * - `@`/slash menu: the menu's own outside-pointerdown dismissal;
  * - menu drill-down: the last enabled breadcrumb (one level per press).
- * - attachment source menu (this plugin's own paperclip popup): its own
- *   outside-pointerdown dismissal, which the enhancer implements.
+ * - composer "+" bottom sheet (this plugin's own): its own outside-pointerdown
+ *   dismissal, which the sheet implements.
  * - global main panel (upstream's plugin manager and its kin): one detail level
  *   per press through the page's own crumb control, then the page's own back
  *   control (this plugin's, at the list root — see mobile/main-panel-back.ts).
@@ -51,9 +51,10 @@ export type BackLayerKind =
   | 'sidebar-bubbles'
   | 'menu'
   | 'menu-drill'
-  | 'attachment-menu'
+  | 'composer-sheet'
   | 'model-menu'
   | 'main-panel'
+  | 'marketplace'
 
 /** One observed layer plus the closure that pops it. */
 interface BackLayerDetection {
@@ -97,14 +98,24 @@ const MENU_SELECTOR = '[data-trigger-menu]'
 // ComposerPopupGuard marks only the open, aria-controlled Android ModelSelect portal.
 const MODEL_MENU_SELECTOR = '[data-dsh-android-model-menu]'
 /**
- * This plugin's own attachment-source popup (attachment-picker-menu.ts).
+ * This plugin's own composer "+" bottom sheet (composer-sheet.ts).
  *
- * D8: the menu is mounted on document.body and removed on close, so its presence is exactly
- * "open". It was not a layer, and the shell's back callback treats "no layer" as FINISH_ACTIVITY
- * (BackGate.kt:56-60), so pressing system back with the menu open exited the app instead of
- * closing it.
+ * Same D8 rule the attachment-source popup used: the sheet is mounted on document.body and removed
+ * on close, so its presence is exactly "open". The shell's back callback treats "no layer" as
+ * FINISH_ACTIVITY (BackGate.kt:56-60), so without this entry pressing system back with the sheet
+ * open would exit the app instead of closing it.
  */
-const ATTACHMENT_MENU_SELECTOR = '[data-dsh-attachment-picker-menu]'
+const COMPOSER_SHEET_SELECTOR = '[data-dsh-composer-sheet-backdrop]'
+/**
+ * 第三方市场插件（dshmarketplace-plugin）的整页浮层。
+ *
+ * 它由那个插件自己渲染在 React 树之外，不是 `role=dialog`，本栈原先完全看不见它：
+ * 系统返回被当成「没有可弹的层」=> BackGate 走 FINISH_ACTIVITY，直接回手机桌面。
+ * 三个类名都取自该插件自己的产物（`.dshm-overlay` 是遮罩兼关闭面、`.dshm-back` 是
+ * market-J-fullpage 补丁加进页头的「‹ 返回」按钮）。
+ */
+const MARKETPLACE_OVERLAY_SELECTOR = '.dshm-overlay'
+const MARKETPLACE_BACK_SELECTOR = '.dshm-back'
 /** The drilled-listing breadcrumb header (a `nav`; the candidate list is a `div[role=listbox]`). */
 const MENU_DRILL_SELECTOR = '[data-trigger-menu] nav'
 /** Hashed CSS-module close controls still carry the class token (`[class*=ledger]` precedent). */
@@ -130,7 +141,7 @@ const OBSERVED_ATTRIBUTES = [
   'data-sidebar-right-panel',
   'data-sidebar-right-open',
   'data-trigger-menu',
-  'data-dsh-attachment-picker-menu',
+  'data-dsh-composer-sheet-backdrop',
   'data-dsh-android-model-menu',
   'data-plugin-panel',
   'data-dsh-main-panel-back',
@@ -478,8 +489,10 @@ export class BackStackSignal {
     if (drill !== null) found.push(drill)
     const modelMenu = this.detectModelMenu()
     if (modelMenu !== null) found.push(modelMenu)
-    const attachmentMenu = this.detectAttachmentMenu()
-    if (attachmentMenu !== null) found.push(attachmentMenu)
+    const composerSheet = this.detectComposerSheet()
+    if (composerSheet !== null) found.push(composerSheet)
+    const marketplace = this.detectMarketplace()
+    if (marketplace !== null) found.push(marketplace)
     return found
   }
 
@@ -574,16 +587,38 @@ export class BackStackSignal {
   }
 
   /**
-   * This plugin's own attachment-source menu.
+   * This plugin's own composer "+" bottom sheet.
    *
    * Distinct from the upstream trigger menus: it is our node, mounted on document.body, and the
-   * enhancer already closes it on the same outside-pointerdown gesture upstream menus use - so the
-   * shared dismissal path below is the right control.
+   * sheet already closes on the same outside-pointerdown gesture upstream menus use - so the shared
+   * dismissal path below is the right control.
    */
-  private detectAttachmentMenu(): BackLayerDetection | null {
-    const menu = document.querySelector<HTMLElement>(ATTACHMENT_MENU_SELECTOR)
-    if (menu === null) return null
-    return { id: 'attachment-menu', kind: 'attachment-menu', close: () => closeMenu(menu) }
+  private detectComposerSheet(): BackLayerDetection | null {
+    const sheet = document.querySelector<HTMLElement>(COMPOSER_SHEET_SELECTOR)
+    if (sheet === null) return null
+    return { id: 'composer-sheet', kind: 'composer-sheet', close: () => closeMenu(sheet) }
+  }
+
+  /**
+   * 第三方市场插件的整页浮层（见 MARKETPLACE_OVERLAY_SELECTOR 的说明）。
+   *
+   * 用浮层自带的「‹ 返回」当关闭控件；拿不到按钮时退回点蒙层（overlay 的 onClick 就是 close）。
+   * 找不到控件就不入栈——与「入栈后必须能关掉」相反的方向在这里不适用：它本就不是本插件
+   * 的节点，强行入栈会让返回键一直消费却毫无效果。
+   */
+  private detectMarketplace(): BackLayerDetection | null {
+    const overlay = document.querySelector<HTMLElement>(MARKETPLACE_OVERLAY_SELECTOR)
+    if (overlay === null) return null
+    return {
+      id: 'marketplace',
+      kind: 'marketplace',
+      close: () => {
+        const button = overlay.querySelector<HTMLElement>(MARKETPLACE_BACK_SELECTOR)
+        if (button !== null) { button.click(); return true }
+        overlay.click()
+        return true
+      },
+    }
   }
 
   /** A menu listing descended into a directory (its breadcrumb header is up). */

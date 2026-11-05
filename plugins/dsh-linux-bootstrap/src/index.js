@@ -411,6 +411,10 @@ export function createMobileBootstrap(options = {}) {
     let result
     let hostResult
     let hostInstalled = false
+    // issue #1374：资产一旦发布就占住了 `<root>/<sha256>` 并把旧槽位改名成 `.backup-*`。
+    // host 安装与激活都发生在发布**之后**，任一步失败都必须能把旧包换回来，
+    // 否则就是「磁盘是新包、state 还是旧版本、旧目录已不存在」的半态。
+    let assetHandle = null
     let resolvedManager = manager
     let managerBeforeActivation = manager
     let stateBeforeActivation = null
@@ -427,7 +431,9 @@ export function createMobileBootstrap(options = {}) {
         kind: 'plugin',
         packageName: RUNTIME_PACKAGE_NAME,
         entry: RUNTIME_ENTRY,
+        deferCommit: true,
       })
+      assetHandle = result.assetHandle ?? null
       const enable = automatic ? state.enabled && state.injectionActivated : activate === true
       if (automatic) {
         // An automatic update may only replace the assets of a plugin the user
@@ -469,8 +475,22 @@ export function createMobileBootstrap(options = {}) {
       state.lastError = null
       state.runtime = typeof resolvedManager.status === 'function' ? await resolvedManager.status() : { id: runtime.id, label: runtime.label, architecture: runtime.architecture, backend: runtime.backend }
       await save()
+      // issue #1374：全部成功才丢弃旧包备份——提交点必须在激活/manifest 落库之后。
+      if (typeof assetHandle?.commit === 'function') await assetHandle.commit()
       return emit()
     } catch (error) {
+      // 顺序：**先回滚资产、再回滚 host scope**（issue #1374）。
+      // 反过来会出现「host 已回滚、磁盘仍是新包」——正是本 issue 的半态。
+      if (typeof assetHandle?.rollback === 'function') {
+        try {
+          await assetHandle.rollback()
+        } catch (assetRollbackError) {
+          // issue #1528：这里只记字段等于「没人知道回滚失败过」。warn 一行，落盘由
+          // asset-bundle 的 rollback 内部完成（那里才拿得到 assets root）。
+          console.warn('[dsh-linux-bootstrap] asset rollback failed: ' + String((assetRollbackError && assetRollbackError.message) || assetRollbackError))
+          error.assetRollbackError = safeError(assetRollbackError)
+        }
+      }
       if (hostInstalled) {
         try {
           if (typeof hostResult?.rollback === 'function') await hostResult.rollback()

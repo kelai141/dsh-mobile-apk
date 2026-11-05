@@ -44,6 +44,9 @@ object NotifyCenter {
   const val EXTRA_TARGET_SESSION = "dsh.notify.session"
   /** 目标**agent** id（辅助键：会话尚未建立时的兜底匹配，与 sessionId 不是同一个东西）。 */
   const val EXTRA_TARGET_AGENT = "dsh.notify.agent"
+  /** detail 渲染上限（字符）：保留足够判断的首段，超出截断并显示省略号。 */
+  internal const val DETAIL_LIMIT = 800
+
   private const val KEY_CHANNELS_INITIALIZED = "channelsInitialized"
   private const val KEY_SELECTED_PREFIX = "channel."
   private const val KEY_SUPPRESS_FOREGROUND = "suppressForeground"
@@ -96,6 +99,7 @@ object NotifyCenter {
   enum class Face(
     val category: String,
     val description: String,
+    val descriptionEn: String,
     val candidates: List<String>,
     val importance: Int,
     val popup: Boolean,
@@ -109,23 +113,23 @@ object NotifyCenter {
     val interactive: Boolean,
   ) {
     SILENT(
-      "silent", "看门狗与引擎状态；静默更新，不弹出",
+      "silent", "看门狗与引擎状态；静默更新，不弹出", "Watchdog and engine status; silent updates, no popup",
       listOf("dsh-silent"), NotificationManager.IMPORTANCE_LOW, false, false,
     ),
     TODO(
-      "todo", "任务步骤进度；静默更新，不弹出",
+      "todo", "任务步骤进度；静默更新，不弹出", "Task step progress; silent updates, no popup",
       listOf("dsh-todo-progress"), NotificationManager.IMPORTANCE_LOW, false, false,
     ),
     REPORT(
-      "report", "每轮任务结束的汇报；需要出现在锁屏之上",
+      "report", "每轮任务结束的汇报；需要出现在锁屏之上", "End-of-run report; must appear above the lock screen",
       listOf("dsh-report", "dsh-report-h2"), NotificationManager.IMPORTANCE_HIGH, true, false,
     ),
     QUESTION(
-      "question", "引擎向你提问；可直接在通知栏回复",
+      "question", "引擎向你提问；可直接在通知栏回复", "The engine asks you something; you can reply from the shade",
       listOf("dsh-question", "dsh-question-h2"), NotificationManager.IMPORTANCE_HIGH, true, true,
     ),
     APPROVAL(
-      "approval", "工具执行前的授权请求；请确认不是他人代答",
+      "approval", "工具执行前的授权请求；请确认不是他人代答", "Approval request before a tool runs; make sure nobody else answers",
       listOf("dsh-auth", "dsh-auth-h2", "dsh-auth-h3"), NotificationManager.IMPORTANCE_HIGH, true, true,
     );
 
@@ -136,7 +140,10 @@ object NotifyCenter {
      * 把「提问」写在设置页，同一个东西两个名字（审查档 §4.3）；本批把用词收到一处，
      * 这里派生取值，设置页标签同源于同一张表。
      */
-    val label: String get() = UserCopy.notifyCategory(category)
+    fun label(app: Context? = null): String = UserCopy.notifyCategory(category, app)
+
+    /** 渠道说明（跟随语言）。 */
+    fun descriptionText(app: Context? = null): String = UiText.t(app, description, descriptionEn)
 
     companion object {
       fun of(category: String): Face? = values().firstOrNull { it.category == category }
@@ -342,9 +349,14 @@ object NotifyCenter {
   /** 设置项 key（与 prefs 键同名字面量集中一处，避免设置页/迁移两处漂移）。 */
   const val KEY_SETTING_SUPPRESS = "suppressForeground"
 
-  /** 设置页/长按入口的开关生效即时反馈：关掉抑制时立刻补投被延后的条目。 */
+  /**
+   * 设置页/长按入口的开关生效即时反馈：关掉抑制时立刻补投被延后的条目。
+   *
+   * 走 [NotifySuppressQueue.flushAsync]（2026-10-26 评审）：本函数由设置页主线程调用，
+   * 同步 flush 的 journal commit 与通知 binder 投递会卡住这次点击。
+   */
   fun onSuppressForegroundChanged(context: Context) {
-    if (!suppressForeground(context)) NotifySuppressQueue.flush(context)
+    if (!suppressForeground(context)) NotifySuppressQueue.flushAsync(context)
   }
 
   // ── 渠道选择：纯逻辑（JVM 可测）+ Android 胶水 ─────────────────────────
@@ -406,11 +418,18 @@ object NotifyCenter {
   @Synchronized
   fun channelFor(context: Context, face: Face): String? {
     val app = context.applicationContext
-    selectedCache[face.category]?.let { return it.ifEmpty { null } }
+    // 2026-10-25 审计 M-N4：用户在系统设置删除渠道后（删除即撤销，同 ID 重建即恢复默认），
+    // manager.notify 会静默丢弃（No channel found）。因此缓存与 prefs 命中**都必须验存在性**——
+    // 只验一侧的话，同进程存活期间缓存会把已删渠道继续喂给 notify。已删/判定失败一律回落
+    // resolveChannel（同 ID 重建合法），否则该类目通知永久静默且无自愈。
+    selectedCache[face.category]?.let { cached ->
+      if (cached.isNotEmpty() && channelExists(app, cached)) return cached
+      selectedCache.remove(face.category)
+    }
     val p = prefs(app)
     if (p.getBoolean(KEY_CHANNELS_INITIALIZED, false)) {
       val stored = p.getString(KEY_SELECTED_PREFIX + face.category, null)
-      if (stored != null) {
+      if (stored != null && channelExists(app, stored)) {
         selectedCache[face.category] = stored
         return stored.ifEmpty { null }
       }
@@ -418,6 +437,14 @@ object NotifyCenter {
     val id = resolveChannel(app, face)
     selectedCache[face.category] = id ?: ""
     return id
+  }
+
+  private fun channelExists(app: Context, channelId: String): Boolean = try {
+    val manager = app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    manager.getNotificationChannel(channelId) != null
+  } catch (_: Throwable) {
+    // 判定失败按「渠道不在」处理：回落 resolveChannel（它自己会重建同 ID 渠道）。
+    false
   }
 
   /** 解析（必要时创建）一个信道的渠道 ID；结果落 prefs（投递路径一律读映射，不硬编码）。 */
@@ -445,7 +472,7 @@ object NotifyCenter {
       }
     }
     if (chosen != null && selection.create) {
-      manager.createNotificationChannel(buildChannel(chosen, face))
+      manager.createNotificationChannel(buildChannel(chosen, face, app))
       val created = manager.getNotificationChannel(chosen)
       // 少数 ROM 会把新建渠道的 importance 打回默认值：这里以设备实际值为准再判一次。
       if (created != null && created.importance < face.importance) {
@@ -460,7 +487,7 @@ object NotifyCenter {
       // （S3-13 要的正是两侧同名，光改字面量不够）。
       // 这里按 id 校正展示名与说明：**用渠道当前 importance 重建**，不尝试提升/降低 importance,
       // 因此不会干扰「用户改过的重要性」判定（那是降级检测的输入）。
-      renameChannelIfNeeded(manager, chosen, face)
+      renameChannelIfNeeded(manager, chosen, face, app)
     }
     prefs(app).edit()
       .putBoolean(KEY_CHANNELS_INITIALIZED, true)
@@ -500,16 +527,35 @@ object NotifyCenter {
     for (face in Face.values()) {
       val id = channelFor(app, face) ?: continue
       val existing = manager.getNotificationChannel(id) ?: continue
-      if (!channelRenameNeeded(existing.name?.toString().orEmpty(), existing.description, face.label, face.description)) continue
-      renameChannelIfNeeded(manager, id, face)
+      if (!channelRenameNeeded(
+          existing.name?.toString().orEmpty(),
+          existing.description,
+          face.label(app),
+          face.descriptionText(app),
+        )
+      ) {
+        continue
+      }
+      renameChannelIfNeeded(manager, id, face, app)
       renamed += 1
+    }
+    // 引擎前台服务渠道（EngineService 建，名字含中文「引擎」）也要跟着语言走，
+    // 否则切英文后通知设置里仍能看到「DeepCode 引擎」。
+    val engineCh = manager.getNotificationChannel("engine")
+    if (engineCh != null) {
+      val want = UserCopy.APP_NAME + UiText.t(app, " 引擎", " engine")
+      if (engineCh.name?.toString().orEmpty() != want) {
+        engineCh.name = want
+        manager.createNotificationChannel(engineCh)
+        renamed += 1
+      }
     }
     return renamed
   }
 
-  private fun buildChannel(id: String, face: Face): NotificationChannel {
-    val ch = NotificationChannel(id, face.label, face.importance)
-    ch.description = face.description
+  private fun buildChannel(id: String, face: Face, app: Context): NotificationChannel {
+    val ch = NotificationChannel(id, face.label(app), face.importance)
+    ch.description = face.descriptionText(app)
     ch.setShowBadge(true)
     if (face.popup) {
       ch.enableVibration(true)
@@ -531,18 +577,30 @@ object NotifyCenter {
    * @param id - 已选中的渠道 id。
    * @param face - 该渠道对应的语义。
    */
-  private fun renameChannelIfNeeded(manager: NotificationManager, id: String, face: Face) {
+  private fun renameChannelIfNeeded(manager: NotificationManager, id: String, face: Face, app: Context) {
     val existing = manager.getNotificationChannel(id) ?: return
-    if (!channelRenameNeeded(existing.name?.toString().orEmpty(), existing.description, face.label, face.description)) return
-    manager.createNotificationChannel(buildChannelKeepingImportance(existing, face))
-    LogCollector.log("dsh-notify", "channel " + face.category + " renamed to '" + face.label + "' (id=" + id +
+    if (!channelRenameNeeded(
+        existing.name?.toString().orEmpty(),
+        existing.description,
+        face.label(app),
+        face.descriptionText(app),
+      )
+    ) {
+      return
+    }
+    manager.createNotificationChannel(buildChannelKeepingImportance(existing, face, app))
+    LogCollector.log("dsh-notify", "channel " + face.category + " renamed to '" + face.label(app) + "' (id=" + id +
       ", importance kept=" + existing.importance + ")")
   }
 
   /** 按既有渠道的**当前** importance 重建，只改展示名与说明（其余保持系统现状）。 */
-  private fun buildChannelKeepingImportance(existing: NotificationChannel, face: Face): NotificationChannel {
-    val ch = NotificationChannel(existing.id, face.label, existing.importance)
-    ch.description = face.description
+  private fun buildChannelKeepingImportance(
+    existing: NotificationChannel,
+    face: Face,
+    app: Context,
+  ): NotificationChannel {
+    val ch = NotificationChannel(existing.id, face.label(app), existing.importance)
+    ch.description = face.descriptionText(app)
     ch.setShowBadge(true)
     ch.enableVibration(existing.shouldVibrate())
     ch.setSound(existing.sound, existing.audioAttributes)
@@ -569,7 +627,7 @@ object NotifyCenter {
     for (face in Face.values()) {
       val row = JSONObject()
       row.put("category", face.category)
-      row.put("label", face.label)
+      row.put("label", face.label(app))
       val selected = channelFor(app, face)
       row.put("selected", selected ?: "")
       row.put("popup", face.popup)
@@ -866,7 +924,7 @@ object NotifyCenter {
     // 探针与一行 flashStatus（面板收起时看不到），用户看到一条不响的提问通知却不知道原因。这里让
     // 「为什么静默 + 怎么恢复」**跟着通知本身走**：通知在哪儿，解释就在哪儿。
     val degradedNotice = if (channelId == null && face.interactive) {
-      "系统已把「" + face.label + "」通知降级为静默——到系统设置里可恢复"
+      degradedNoticeText(face.label(app), UiText.isEnglish(app))
     } else null
     if (fallback == null) {
       // 连静默渠道都不可用（极端：用户逐个降级）——明确记录，绝不静默失败
@@ -1037,30 +1095,39 @@ object NotifyCenter {
   ): Notification {
     val b = NotificationCompat.Builder(app, channelId)
       .setSmallIcon(android.R.drawable.stat_notify_chat)
-      .setAutoCancel(true)
+      // 交互类（提问 / 审批）**不得**点开即撤（0.14.11）：这类通知是用户作答的唯一入口，而引擎侧的
+      // 提问与审批都没有超时；点开看一眼就把入口撤掉，等于让请求永久挂起（与 P0-5「关掉提醒 = 任务
+      // 永久挂起」同一形态的静默失败）。其余类别保持点开即撤——它们是公告，看完就没用了。
+      .setAutoCancel(face != Face.QUESTION && face != Face.APPROVAL)
       .setOnlyAlertOnce(!face.popup || silentOverride)
       .setWhen(System.currentTimeMillis())
     when (face) {
       Face.SILENT -> {
-        b.setContentTitle(entry.displayTitle())
-        b.setContentText(entry.text.ifBlank { "引擎状态更新" })
+        b.setContentTitle(entry.displayTitle(app))
+        b.setContentText(entry.text.ifBlank { UiText.t(app, "引擎状态更新", "Engine status update") })
         b.setSilent(true) // 第二道保险（javadoc 明写它同时阻止 peek）
-        if (entry.count > 1) b.setSubText("共 " + entry.count + " 条")
+        if (entry.count > 1) b.setSubText(UiText.t(app, "共 " + entry.count + " 条", entry.count.toString() + " updates"))
       }
       Face.TODO -> {
-        b.setContentTitle(entry.displayTitle())
-        b.setContentText(if (entry.current.isBlank()) "步骤 " + entry.done + "/" + entry.total else "当前：" + entry.current)
-        b.setSubText("步骤 " + entry.done + "/" + entry.total)
+        b.setContentTitle(entry.displayTitle(app))
+        b.setContentText(
+          if (entry.current.isBlank()) {
+            UiText.t(app, "步骤 " + entry.done + "/" + entry.total, "Step " + entry.done + "/" + entry.total)
+          } else {
+            UiText.t(app, "当前：" + entry.current, "Current: " + entry.current)
+          },
+        )
+        b.setSubText(UiText.t(app, "步骤 " + entry.done + "/" + entry.total, "Step " + entry.done + "/" + entry.total))
         b.setProgress(entry.total.coerceAtLeast(0), entry.done.coerceAtLeast(0), false)
         b.setSilent(true)
         b.setCategory(NotificationCompat.CATEGORY_PROGRESS)
         b.setOnlyAlertOnce(true)
       }
       Face.REPORT -> {
-        b.setContentTitle(entry.displayTitle())
-        b.setContentText(reportLine(entry))
-        b.setStyle(NotificationCompat.BigTextStyle().bigText(reportBigText(entry)))
-        b.setSubText(UserCopy.reportMetaLine(entry.durationLabel(), entry.toolCount))
+        b.setContentTitle(entry.displayTitle(app))
+        b.setContentText(reportLine(entry, app))
+        b.setStyle(NotificationCompat.BigTextStyle().bigText(reportBigText(entry, app)))
+        b.setSubText(UserCopy.reportMetaLine(entry.durationLabel(), entry.toolCount, app))
         if (!silentOverride) b.setPriority(NotificationCompat.PRIORITY_HIGH)
       }
       Face.QUESTION -> {
@@ -1069,7 +1136,7 @@ object NotifyCenter {
         b.setContentTitle(first?.header?.ifBlank { null } ?: UserCopy.notifyCategory(Face.QUESTION.category))
         // S3-4：旧写法是 `first?.question ?: entry.text.ifBlank {...}`——`first.question` 是**空串**
         // （非 null）时 elvis 不触发，通知正文于是空白。`ifBlank { null }` 才能让空串也落到兜底。
-        b.setContentText(first?.question?.ifBlank { null } ?: entry.text.ifBlank { "引擎正在等待你的回答" })
+        b.setContentText(first?.question?.ifBlank { null } ?: entry.text.ifBlank { UiText.t(app, "引擎正在等待你的回答", "The engine is waiting for your answer") })
         b.setStyle(NotificationCompat.BigTextStyle().bigText(questionBigText(entry)))
         b.setPriority(NotificationCompat.PRIORITY_HIGH)
         // S3-6：**不再** setTimeoutAfter(30 分钟)。引擎侧的提问没有超时，而通知栏是唯一的作答入口
@@ -1081,18 +1148,22 @@ object NotifyCenter {
         // S3-8：旧标题恒为类别词「需要授权」，把引擎给的**具体对象**（工具名）丢在正文里——用户
         // 一眼看到「需要授权」四个字，不知道要放行什么。标题带上具体对象，类别词只作兜底。
         b.setContentTitle(
-          entry.toolName.ifBlank { null }?.let { "「" + it + "」需要授权" }
-            ?: entry.displayTitle().ifBlank { UserCopy.notifyCategory(Face.APPROVAL.category) },
+          entry.toolName.ifBlank { null }?.let {
+            UiText.t(app, "「" + it + "」需要授权", "「" + it + "」needs approval")
+          }
+            ?: entry.displayTitle(app).ifBlank { UserCopy.notifyCategory(Face.APPROVAL.category, app) },
         )
-        b.setContentText(approvalLine(entry))
-        b.setStyle(NotificationCompat.BigTextStyle().bigText(approvalLine(entry) + "\n仅本次生效"))
-        b.setSubText("仅本次生效")
+        b.setContentText(approvalLine(app, entry))
+        b.setStyle(NotificationCompat.BigTextStyle().bigText(approvalLine(app, entry) + "\n" + UiText.t(app, "仅本次生效", "Applies once")))
+        b.setSubText(UiText.t(app, "仅本次生效", "Applies once"))
         b.setPriority(NotificationCompat.PRIORITY_HIGH)
         addApprovalActions(app, b, entry)
       }
     }
-    // S3-1：降级告示只在传了它时出现，且不覆盖更具体的 subText（如提问的「仅本次生效」）。
-    if (degradedNotice != null) b.setSubText(degradedNotice)
+    // S3-1：降级告示只在传了它时出现，且**不覆盖**更具体的 subText（如审批的「仅本次生效」）。
+    // issue #1407：旧实现无条件 setSubText，把这句具体说明顶掉——用户会把「一次性授权」当成
+    // 长期授权。哪些分支自带 subText 由 hasSpecificSubText 一张表说清（纯函数，单测钉住）。
+    if (degradedNotice != null && !hasSpecificSubText(face, entry.count)) b.setSubText(degradedNotice)
     b.setContentIntent(contentIntent(app, entry))
     // DEF-NOTIFY-01：降级为静默条目时补静默标志（渠道已是 dsh-silent，这是第二道保险）
     if (silentOverride) {
@@ -1106,24 +1177,28 @@ object NotifyCenter {
         NotificationCompat.Builder(app, channelId)
           .setSmallIcon(android.R.drawable.stat_notify_chat)
           .setContentTitle(UserCopy.APP_NAME)
-          .setContentText("有一项需要你的决定")
+          // 锁屏公版文案同样要跟语言走（2026-10-29 真机：EN 下这条仍是中文）。
+          .setContentText(UiText.t(app, "有一项需要你的决定", "There is a decision waiting for you"))
           .build(),
       )
     }
     return b.build()
   }
 
-  private fun reportLine(entry: NotifyEntry): String {
-    val head = entry.outcomeLabel.ifBlank { entry.outcomeLabel() }
+  private fun reportLine(entry: NotifyEntry, app: android.content.Context): String {
+    // #986：与汇报栏同口径——`entry.outcomeLabel` 是**投递时**按当时语言落库的字符串，
+    // 语言切换不会重算，所以这里也必须按 outcome 用当前语言重算，不能让它优先。
+    val head = reportOutcomeHead(entry, UiText.isEnglish(app))
     val summary = if (entry.summary.isNotBlank()) entry.summary else entry.text
     return if (summary.isBlank()) head else head + " · " + summary
   }
 
-  private fun reportBigText(entry: NotifyEntry): String {
-    val sb = StringBuilder(reportLine(entry))
-    sb.append("\n").append(UserCopy.reportMetaLine(entry.durationLabel(), entry.toolCount))
+  private fun reportBigText(entry: NotifyEntry, app: android.content.Context): String {
+    val sb = StringBuilder(reportLine(entry, app))
+    sb.append("\n").append(UserCopy.reportMetaLine(entry.durationLabel(), entry.toolCount, app))
     if (entry.presentedFiles.isNotEmpty()) {
-      sb.append("\n产出：").append(entry.presentedFiles.joinToString("、"))
+      sb.append("\n").append(UiText.t(app, "产出：", "Output: "))
+        .append(entry.presentedFiles.joinToString(UiText.t(app, "、", ", ")))
     }
     return sb.toString()
   }
@@ -1132,17 +1207,27 @@ object NotifyCenter {
    * 审批正文（S3-7）：保留被操作目标的可辨识末段，而不是把整条路径抹成 `[路径]`。
    * 用户要确认的**正是那个目标**；抹掉它等于让用户在不知道放行什么的情况下点「批准一次」。
    */
-  private fun approvalLine(entry: NotifyEntry): String {
-    val tool = entry.toolName.ifBlank { "未知工具" }
+  private fun approvalLine(app: Context, entry: NotifyEntry): String {
+    val tool = entry.toolName.ifBlank { UiText.t(app, "未知工具", "unknown tool") }
     val reason = entry.reason.trim()
-    return if (reason.isBlank()) "工具 " + tool + " 请求执行" else "工具 " + tool + "：" + redactPathsKeepingTail(reason)
+    return if (reason.isBlank()) {
+      UiText.t(app, "工具 " + tool + " 请求执行", "Tool " + tool + " wants to run")
+    } else {
+      UiText.t(app, "工具 " + tool + "：" + redactPathsKeepingTail(reason), "Tool " + tool + ": " + redactPathsKeepingTail(reason))
+    }
   }
 
   /** 正文脱敏：绝对路径截断 + token 形态遮挡（§5.6；不改写 engine.log 本体）。 */
   fun sanitize(text: String): String {
+    val s = redact(text)
+    return if (s.length > 180) s.take(179) + "…" else s
+  }
+
+  /** 正文脱敏（不带截断）：sanitize 与 detail 渲染共用，避免两套正则漂移。 */
+  internal fun redact(text: String): String {
     var s = text.replace(Regex("""(/data/[^\s:，。；]+)"""), "[路径]")
     s = s.replace(Regex("""(?i)\b(token|secret|password|apikey|api_key)=([^\s&]+)"""), "\$1=***")
-    return if (s.length > 180) s.take(179) + "…" else s
+    return s
   }
 
   /** 通知点击只能拉起 Activity（Android 12+ trampoline 禁令：动作一律广播）。 */
@@ -1181,7 +1266,14 @@ object NotifyCenter {
       questionId?.let { putExtra(NotifyActionReceiver.EXTRA_QUESTION_ID, it) }
     }
 
-  /** 动作 PendingIntent requestCode 必须按 (eventId, action) 唯一：Intent 过滤等价不含 extras。 */
+  /**
+   * 动作 PendingIntent requestCode 必须按 (eventId, action, option, **questionId**) 唯一：
+   * Intent 过滤等价不含 extras。2026-10-25 审计实锤旧键漏了 questionId——同一 question 事件
+   * 携带 ≥2 个问题时，两问若有同名选项（如都是「是」），两次 getBroadcast 命中同一
+   * requestCode + FLAG_UPDATE_CURRENT，后者覆盖前者的 extras ⇒ 点第一问的「是」实际提交
+   * 第二问的 questionId，第一问永久无解（引擎侧提问无超时）。RemoteInput 回复仍绑定
+   * 第一问（系统通知只允许一个回复动作，平台约束，如实注明）。
+   */
   private fun actionPending(
     app: Context,
     entry: NotifyEntry,
@@ -1191,7 +1283,8 @@ object NotifyCenter {
     questionId: String? = null,
   ): PendingIntent {
     val flags = (if (mutable) PendingIntent.FLAG_MUTABLE else PendingIntent.FLAG_IMMUTABLE) or PendingIntent.FLAG_UPDATE_CURRENT
-    val key = "dsh.action:" + entry.eventId + ":" + action + (option?.let { ":" + it } ?: "")
+    val key = "dsh.action:" + entry.eventId + ":" + action +
+      (option?.let { ":" + it } ?: "") + (questionId?.let { ":" + it } ?: "")
     return PendingIntent.getBroadcast(app, stableId(key), actionIntent(app, entry, action, option, questionId), flags)
   }
 
@@ -1201,30 +1294,90 @@ object NotifyCenter {
    * 旧行为：正文只 join 各问的 `question`，而选项多于两个的问句在通知里没有任何动作——用户看到
    * 三四个选项的问句，却发现通知栏里点不出东西，也没人告诉他去应用里答。
    */
-  private fun questionBigText(entry: NotifyEntry): String {
+  internal fun questionBigText(entry: NotifyEntry): String {
     val lines = entry.questions.map { it.question }.filter { it.isNotBlank() }
     val body = if (lines.isEmpty()) "引擎正在等待你的回答" else lines.joinToString("\n")
-    return if (questionNeedsAppEntry(entry)) body + "\n（本题选项多于两个，请打开应用作答）" else body
+    // N2（0.14.11）：plan-review 这类交互把正文（计划全文）放在 detail，旧实现只拼 question，
+    // 于是通知栏里只有问题加两个按钮，用户看不到计划就要批。
+    val details = entry.questions.map { it.detail.trim() }.filter { it.isNotBlank() }
+    val withDetail = if (details.isEmpty()) body else
+      body + "\n\n" + clipDetail(details.joinToString("\n\n"))
+    return if (questionNeedsAppEntry(entry)) withDetail + "\n（本题选项多于两个，请打开应用作答）" else withDetail
   }
 
   /**
-   * 纯判据：这条提问是否**无法**在通知栏作答（选项多于两个 ⇒ 通知里没有对应按钮）。
+   * detail 的长度上限与脱敏：通知正文有系统上限，且计划里可能带绝对路径 / 令牌形态（§5.6 同一纪律）。
+   * 截断必须可见（结尾省略号），不让用户以为自己看到的是全文。
+   */
+  private fun clipDetail(text: String): String {
+    val redacted = redact(text)
+    return if (redacted.length <= DETAIL_LIMIT) redacted else redacted.take(DETAIL_LIMIT).trimEnd() + "…"
+  }
+
+  /**
+   * 通知点击的落点目标（0.14.11，N1）：交互类通知只带 agent 键，旧实现只读 session 键。
+   *
+   * 为什么 agent 键等价于会话 id：交互类通知来自 user-questions/request 与 approval/request
+   * 两条 waterfall 帧，帧里只有 agentId（dsh-api-remotes 写入 agent.id），而 dsh-agent 注册时
+   * 强断言 agent.id === agent.session.id，不等直接抛错；所以 agentId 就是会话 id。
+   *
+   * @param sessionExtra dsh.notify.session 的值。
+   * @param agentExtra dsh.notify.agent 的值。
+   * @returns 非空目标；两者都空返回 null（调用方据此不动作，也不贴一个错会话）。
+   */
+  internal fun resolveNotifyTarget(sessionExtra: String?, agentExtra: String?): String? {
+    val session = sessionExtra?.trim().orEmpty()
+    if (session.isNotEmpty()) return session
+    val agent = agentExtra?.trim().orEmpty()
+    return if (agent.isNotEmpty()) agent else null
+  }
+
+  /**
+   * 本拍是否已有**更具体**的 subText（issue #1407）——降级告示不得覆盖它。
+   *
+   * 表来自 [build] 各分支的实际写法：SILENT 只在多条时写条数、TODO 写步骤、REPORT 写元信息、
+   * APPROVAL 写「仅本次生效」、QUESTION 不写（它的信息在 contentText 与 BigText 里）。
+   * 纯函数：JVM 单测直接钉住这张表，新增分支时忘同步会红。
+   */
+  internal fun hasSpecificSubText(face: Face, count: Int): Boolean = when (face) {
+    Face.SILENT -> count > 1
+    Face.TODO, Face.REPORT, Face.APPROVAL -> true
+    Face.QUESTION -> false
+  }
+
+  /**
+   * 通知栏折叠态能画的动作数上限（系统行为：超出的动作只在展开态出现，用户不一定看得到）。
+   * 计数口径 = 1 个「回复」+ 每个可选项提问的选项按钮。
+   */
+  internal const val MAX_COLLAPSED_ACTIONS = 3
+
+  /**
+   * 纯判据：这条提问是否**无法**在通知栏作答，需要显式给「打开应用作答」入口。
+   *
+   * issue #1409：旧判据只看**单个问题**的选项数（`any { options.size > 2 }`）。多问叠加时
+   * 「1 个回复 + Σ选项」会超过折叠态能画的动作数，而单看每个问题都没超标 ⇒ 判据返回 false，
+   * 第 2 个问题起既点不到也没有引导入口。改为按**总动作数**判。
+   *
    * @param entry - 通知条目。
    * @returns true = 需要在通知里显式给出「打开应用作答」的入口。
    */
-  internal fun questionNeedsAppEntry(entry: NotifyEntry): Boolean =
-    entry.questions.any { it.options.size > 2 }
+  internal fun questionNeedsAppEntry(entry: NotifyEntry): Boolean {
+    val optionActions = entry.questions.filter { it.options.size in 1..2 }.sumOf { it.options.size }
+    return 1 + optionActions > MAX_COLLAPSED_ACTIONS || entry.questions.any { it.options.size > 2 }
+  }
 
   private fun addQuestionActions(app: Context, b: NotificationCompat.Builder, entry: NotifyEntry) {
     // 动作 1：直接回复（RemoteInput）。只有回复动作开 mutable——结果经 ClipData 注入，
     // FLAG_IMMUTABLE 会让回复静默失败（§6.3.1 / NT-16）。
+    // #1011 ②：通知栏按钮是系统画的，`RemoteInput` label 与 Action 标题各要一份，两处都跟语言走。
+    val replyLabel = replyActionLabel(UiText.isEnglish(app))
     val remote = RemoteInput.Builder(NotifyActionReceiver.REPLY_KEY)
-      .setLabel("回复")
+      .setLabel(replyLabel)
       .build()
     val firstQuestionId = entry.questions.firstOrNull()?.id
     val reply = NotificationCompat.Action.Builder(
       android.R.drawable.ic_menu_send,
-      "回复",
+      replyLabel,
       actionPending(app, entry, NotifyActionReceiver.ACTION_REPLY, mutable = true, questionId = firstQuestionId),
     )
       .addRemoteInput(remote)
@@ -1251,7 +1404,7 @@ object NotifyCenter {
       b.addAction(
         NotificationCompat.Action.Builder(
           android.R.drawable.ic_menu_view,
-          "打开应用作答",
+          UiText.t(app, "打开应用作答", "Open app to answer"),
           contentIntent(app, entry),
         ).build(),
       )
@@ -1262,12 +1415,12 @@ object NotifyCenter {
     // 审批动作恒为两个（NT-21）：批准一次 / 拒绝。不提供任何常驻授权承诺。
     val approve = NotificationCompat.Action.Builder(
       android.R.drawable.ic_menu_edit,
-      "批准一次",
+      UiText.t(app, "批准一次", "Allow once"),
       actionPending(app, entry, NotifyActionReceiver.ACTION_APPROVE, mutable = false),
     )
     val reject = NotificationCompat.Action.Builder(
       android.R.drawable.ic_menu_close_clear_cancel,
-      "拒绝",
+      UiText.t(app, "拒绝", "Reject"),
       actionPending(app, entry, NotifyActionReceiver.ACTION_REJECT, mutable = false),
     )
     if (APPROVAL_REQUIRE_UNLOCK) {
@@ -1340,7 +1493,7 @@ object NotifyCenter {
         retry,
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
       )
-      b.addAction(NotificationCompat.Action.Builder(android.R.drawable.ic_menu_rotate, "重试", pending).build())
+      b.addAction(NotificationCompat.Action.Builder(android.R.drawable.ic_menu_rotate, UiText.t(app, "重试", "Retry"), pending).build())
     }
     (app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
       .notify(failureId(kind, eventId), b.build())
@@ -1353,6 +1506,27 @@ object NotifyCenter {
   /** 失败通知的独立 ID 桶（S3-12：不得覆盖原提问/审批通知的 ID）。 */
   internal fun failureId(kind: String, eventId: String): Int =
     stableId("dsh-failure:" + kind.lowercase() + ":" + eventId)
+
+  /**
+   * 通知动作按钮「回复」的标题（#1011 ②）。
+   *
+   * 通知栏那枚按钮是系统画的，`RemoteInput` 的 label 与 `Action` 标题各要一份——
+   * 旧实现两处都写死中文，英文界面下仍是「回复」。
+   */
+  internal fun replyActionLabel(english: Boolean): String = UiText.t(english, "回复", "Reply")
+
+  /**
+   * 渠道被系统降级时随通知走的说明（S3-1 / #992）。
+   *
+   * 拆成纯函数是为了让「英文态」在 JVM 单测里可达——旧实现把整句写在 `notifyEvent` 里，
+   * 只有 `face.label(app)` 跟语言走，整句模板不跟（英文界面下露中文）。
+   */
+  internal fun degradedNoticeText(categoryLabel: String, english: Boolean): String =
+    if (english) {
+      "The system has silenced \"" + categoryLabel + "\" notifications; restore them in system settings"
+    } else {
+      "系统已把「" + categoryLabel + "」通知降级为静默——到系统设置里可恢复"
+    }
 
   /**
    * 发送**全部五类**测试通知（设置页「通知」分区的自证按钮；0.14.1 批 8 / S3-26）。
@@ -1382,19 +1556,43 @@ object NotifyCenter {
   }
 
   /** 发送测试通知（设置页自证按钮；按类各一条；权限缺失时二次请求由界面负责）。 */
+  /** 发送测试通知（设置页自证按钮；按类各一条；权限缺失时二次请求由界面负责）。 */
   fun sendTest(context: Context, category: String): Result {
+    val app = context.applicationContext
+    // 文案面（0.14.11）：这五条是用户点「发送测试通知」后看得见的通知，切到英文后仍是中文。
+    // 标题/正文与其它原生文案走同一条 UiText.t。
     val entry = when (category) {
-      "todo" -> NotifyEntry(kind = "todo", sessionId = "test", total = 5, done = 2, current = "测试进度")
+      "todo" -> NotifyEntry(
+        kind = "todo", sessionId = "test", total = 5, done = 2,
+        current = UiText.t(app, "测试进度", "Test progress"),
+      )
       "report" -> NotifyEntry(
-        kind = "report", sessionId = "test", title = "测试会话", outcome = "completed",
-        outcomeLabel = "已完成", summary = "这是一条工作汇报测试", durationMs = 12_000, toolCount = 3,
+        kind = "report", sessionId = "test", outcome = "completed",
+        title = UiText.t(app, "测试会话", "Test session"),
+        outcomeLabel = UiText.t(app, "已完成", "Completed"),
+        summary = UiText.t(app, "这是一条工作汇报测试", "This is a work-report notification test"),
+        durationMs = 12_000, toolCount = 3,
       )
       "question" -> NotifyEntry(
         kind = "question", eventId = "test-q",
-        questions = listOf(NotifyQuestion("q1", "测试提问", "现在方便吗？", emptyList())),
+        questions = listOf(
+          NotifyQuestion(
+            "q1",
+            UiText.t(app, "测试提问", "Test question"),
+            UiText.t(app, "现在方便吗？", "Is now a good time?"),
+            emptyList(),
+          ),
+        ),
       )
-      "approval" -> NotifyEntry(kind = "approval", eventId = "test-a", toolName = "bash", reason = "测试授权请求")
-      else -> NotifyEntry(kind = "silent", event = "test", title = "后台动态测试", text = "引擎状态正常")
+      "approval" -> NotifyEntry(
+        kind = "approval", eventId = "test-a", toolName = "bash",
+        reason = UiText.t(app, "测试授权请求", "Test approval request"),
+      )
+      else -> NotifyEntry(
+        kind = "silent", event = "test",
+        title = UiText.t(app, "后台动态测试", "Background activity test"),
+        text = UiText.t(app, "引擎状态正常", "Engine status is healthy"),
+      )
     }
     return notifyEvent(context, entry)
   }
@@ -1443,6 +1641,8 @@ internal fun channelRenameNeeded(
   val header: String = "",
   val question: String = "",
   val options: List<String> = emptyList(),
+  /** 正文（plan-review 的计划全文走这里）；旧实现不读，导致通知里只有问题没有内容。 */
+  val detail: String = "",
 )
 
 /**
@@ -1480,22 +1680,25 @@ data class NotifyEntry(
   val questions: List<NotifyQuestion> = emptyList(),
   val target: String? = null,
 ) {
-  fun displayTitle(): String = title.ifBlank {
+  fun displayTitle(app: android.content.Context? = null): String = title.ifBlank {
     if (kind == "report") {
-      UserCopy.notifyCategory(NotifyCenter.Face.REPORT.category)
+      UserCopy.notifyCategory(NotifyCenter.Face.REPORT.category, app)
     } else {
       UserCopy.APP_NAME
     }
   }
 
-  fun outcomeLabel(): String = when (outcome) {
-    "completed" -> "已完成"
-    "error" -> "失败"
-    "blocked" -> "被阻塞"
-    "aborted" -> "已中止"
-    "max-tokens" -> "输出超限"
-    "interrupted" -> "被中断"
-    else -> if (outcome.isBlank()) "" else "结果未知"
+  fun outcomeLabel(app: android.content.Context? = null): String = outcomeLabel(UiText.isEnglish(app))
+
+  /** 同一张表，语言已解析（#986：纯函数入口，JVM 单测能覆盖英文分支）。 */
+  fun outcomeLabel(english: Boolean): String = when (outcome) {
+    "completed" -> UiText.t(english, "已完成", "Completed")
+    "error" -> UiText.t(english, "失败", "Failed")
+    "blocked" -> UiText.t(english, "被阻塞", "Blocked")
+    "aborted" -> UiText.t(english, "已中止", "Aborted")
+    "max-tokens" -> UiText.t(english, "输出超限", "Output limit reached")
+    "interrupted" -> UiText.t(english, "被中断", "Interrupted")
+    else -> if (outcome.isBlank()) "" else UiText.t(english, "结果未知", "Unknown result")
   }
 
   /**

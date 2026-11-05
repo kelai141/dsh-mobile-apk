@@ -37,6 +37,55 @@ object UndoGate {
   const val RETRY_WINDOW_MS = 30 * 60 * 1000L
 
   /**
+   * 尝试退避（issue #1368）：距上次**尝试**（无论成败）不足该间隔时不再放行 EXECUTE。
+   *
+   * 旧实现只在**成功**后写 `.undo-auto-done`，失败路径没有任何记忆 ⇒ 引擎死透且急救 CLI 起不来时，
+   * 闸门每 5 秒一拍继续放行，每拍拉起一次回滚尝试，无上限、无退避（后台唤醒与日志一起膨胀）。
+   * 取 5 分钟：相对 5 秒拍是 60 拍一次，既不会把「第一次失败后引擎刚好自愈」的窗口堵死，
+   * 也不会让不可恢复的现场把 IO 打满。
+   */
+  const val ATTEMPT_BACKOFF_MS = 5 * 60 * 1000L
+
+  /**
+   * 标记文件（arm / attempt）的**唯一写读契约**（issues #1508 #1514 #1530）。
+   *
+   * 写侧：`v2:<13 位毫秒时间戳>`（[encodeMarker]）。读侧把「长度不是 13 位 / 含非数字 / 落在
+   * 合理区间之外」一律判**损坏**——旧判据只要求 `toLongOrNull()` 非空，于是被截断的
+   * `1700000000000 -> 1700000000` 依然合法：arm 侧观察窗被静默跳过（#1508），attempt 侧退避
+   * 被静默绕过（#1368 原症状复发）。两侧共用同一个编解码器就是「arm/attempt 语义一次定死」的
+   * 落点：任何一侧放宽都会立刻被另一侧的用例打红。
+   */
+  private const val MARKER_VERSION = "v2:"
+
+  /** 毫秒时间戳的固定宽度（13 位覆盖到 2286 年）。宽度不符 = 截断或拼接 = 损坏。 */
+  private const val MARKER_DIGITS = 13
+
+  /** 读侧对「未来时刻」的容忍度：超过一个观察窗就只能是时钟回拨造成的坏值。 */
+  private const val MARKER_FUTURE_TOLERANCE_MS = WATCH_MS
+
+  /**
+   * 闸门的**一次性叙述状态**。收进一个实例而不是散落的 `@Volatile` 字段，是为了让 JVM 用例
+   * 各自持有一份——全局可变状态既会让用例互相串扰，也把「只记一次」「退避起点」这类语义
+   * 变成不可测。
+   */
+  internal class GateNotes {
+    /** 本进程是否已记过「被重试窗口抑制」。 */
+    @Volatile var suppressNoted = false
+    /** 证据否决的叙述只落一次（避免每 5s 一拍刷爆观测文件）。 */
+    @Volatile var evidenceNoted = false
+    /** arm 文件读失败只记一次（issue #1530）。 */
+    @Volatile var armUnreadableNoted = false
+    /** attempt 标记损坏只记一次（issue #1514）。 */
+    @Volatile var attemptCorruptNoted = false
+    /** attempt 标记损坏时记住的退避起点（写入时刻拿不到时用它兜住，避免永久抑制）。 */
+    var attemptCorruptSeenAt: Long? = null
+    /** 硬杀残留的临时文件只清一次（issue #1515）。 */
+    @Volatile var staleTempsPurged = false
+  }
+
+  private val notes = GateNotes()
+
+  /**
    * Records the first confirmed-dead observation, then grants exactly one caller
    * the right to execute after [WATCH_MS]. A healthy probe disarms the wait.
    */
@@ -100,59 +149,102 @@ object UndoGate {
     consecutiveFailures: Int,
     evidence: RollbackEvidence = RollbackEvidence.NONE,
     engine: EngineManager? = null,
+  ): Boolean = onProbeFailureIn(
+    dir = context.filesDir,
+    consecutiveFailures = consecutiveFailures,
+    evidence = evidence,
+    identity = currentRetryIdentity(context, engine),
+    nowMs = System.currentTimeMillis(),
+    notes = notes,
+    note = { record(context, it) },
+  )
+
+  /**
+   * [onProbeFailure] 的**文件系统无关**实现（JVM 可整链真跑：临时目录 + 推进时钟）。
+   *
+   * 为什么把 Context 换成目录：这条闸门的全部语义都落在 arm / attempt 两个标记文件上，而
+   * 「0 字节 / 半截 / 读失败 / 写入时刻」这些形态只有在真文件上才造得出来。旧实现只能靠源码
+   * 文本切片断言「两个调用点都传了 attemptAt」——传参不等于记账，于是 #1507（第二入口从不记账）
+   * 与 #1514（损坏标记只退避一拍）在测试全绿的情况下同时存在。
+   *
+   * @param dir 应用私有目录（生产 = `context.filesDir`）
+   * @param identity 重试纪元身份（生产 = 安装指纹 + 当前 patch digest）
+   * @param nowMs 本拍墙钟（生产 = `System.currentTimeMillis()`；用例直接推进）
+   * @param notes 一次性叙述状态（生产传对象级实例；用例各持一份以隔离）
+   * @param note 观测行落点（生产 = [record]；用例收集进列表以断言「留了哪一行」）
+   */
+  internal fun onProbeFailureIn(
+    dir: File,
+    consecutiveFailures: Int,
+    evidence: RollbackEvidence,
+    identity: RetryIdentity,
+    nowMs: Long,
+    notes: GateNotes = GateNotes(),
+    note: (String) -> Unit = {},
   ): Boolean {
-    val now = System.currentTimeMillis()
+    purgeStaleTempsOnce(dir, nowMs, notes, note)
     val refusal = rollbackEvidenceRefusal(evidence)
     if (refusal != null) {
       // 只在到过触发阈值时落叙述，避免每 5s 一拍刷爆观测文件。
-      if (consecutiveFailures >= TRIGGER_CONSEC_FAILURES && !evidenceNoted) {
-        evidenceNoted = true
-        record(context, "evidence-veto failures=" + consecutiveFailures + " reason=" + refusal)
+      if (consecutiveFailures >= TRIGGER_CONSEC_FAILURES && !notes.evidenceNoted) {
+        notes.evidenceNoted = true
+        note("evidence-veto failures=" + consecutiveFailures + " reason=" + refusal)
         Log.i(TAG, refusal)
       }
       return false
     }
-    evidenceNoted = false
-    val retryIdentity = currentRetryIdentity(context, engine)
-    val retry = retrySuppression(markerFile(context), retryIdentity, now)
+    notes.evidenceNoted = false
+    val retry = retrySuppression(markerFileIn(dir), identity, nowMs)
     if (retry.resetWatch) {
-      runCatching { armFile(context).delete() }
-      record(context, "retry epoch changed; observation window restarted")
+      runCatching { armFileIn(dir).delete() }
+      note("retry epoch changed; observation window restarted")
     }
-    if (retry.legacyMarker && consecutiveFailures >= TRIGGER_CONSEC_FAILURES && !suppressNoted) {
-      suppressNoted = true
-      record(context, "legacy undo marker conservatively suppresses until retry window expires")
+    if (retry.legacyMarker && consecutiveFailures >= TRIGGER_CONSEC_FAILURES && !notes.suppressNoted) {
+      notes.suppressNoted = true
+      note("legacy undo marker conservatively suppresses until retry window expires")
     }
-    return when (decide(consecutiveFailures, now, retry.atMs, armedAt(context))) {
+    val decision = decide(
+      consecutiveFailures,
+      nowMs,
+      retry.atMs,
+      armedAt(dir, nowMs, notes, note),
+      attemptAt(dir, nowMs, notes, note),
+    )
+    return when (decision) {
       GateDecision.IDLE -> false
       GateDecision.SUPPRESS -> {
         // 只记一次：重试窗口内每 5s 一拍，逐拍落盘会刷爆观测文件（真实原因由 .undo-auto-done 承载）。
-        if (!suppressNoted) {
-          suppressNoted = true
-          record(context, "suppressed retry-window failures=" + consecutiveFailures + " lastUndoAt=" + retry.atMs)
+        if (!notes.suppressNoted) {
+          notes.suppressNoted = true
+          note("suppressed retry-window failures=" + consecutiveFailures + " lastUndoAt=" + retry.atMs)
         }
         false
       }
       GateDecision.ARM -> {
-        suppressNoted = false
+        notes.suppressNoted = false
         val armed = try {
-          armFile(context).writeText(now.toString())
+          // issue #1369 / #1508：arm 文件必须原子写且带版本前缀——裸 writeText 先截断再写，
+          // 进程在窗口内被硬杀（或磁盘满）会留下 0 字节/半截文件，而读侧把「存在」当「值有效」。
+          writeAtomicText(armFileIn(dir), encodeMarker(nowMs), note)
           true
         } catch (t: Throwable) {
           Log.e(TAG, "auto-undo arm failed", t)
-          record(context, "arm-failed " + (t.message ?: t.javaClass.simpleName))
+          note("arm-failed " + (t.message ?: t.javaClass.simpleName))
           false
         }
         if (armed) {
-          Log.i(TAG, "auto-undo armed at $now; waiting $WATCH_MS ms")
-          record(context, "armed failures=" + consecutiveFailures + " watchMs=" + WATCH_MS)
+          Log.i(TAG, "auto-undo armed at $nowMs; waiting $WATCH_MS ms")
+          note("armed failures=" + consecutiveFailures + " watchMs=" + WATCH_MS)
         }
         false
       }
       GateDecision.WAIT -> false
       GateDecision.EXECUTE -> {
-        suppressNoted = false
-        record(context, "trigger failures=" + consecutiveFailures)
+        notes.suppressNoted = false
+        // issue #1368 / #1507：**无论成败**都记一次尝试，且与 client-plugin 入口共用同一个
+        // 记录函数——旧实现只有这一处记账，那条路径因此仍每 5 秒拉起一次回滚。
+        recordAttempt(dir, nowMs, note)
+        note("trigger failures=" + consecutiveFailures)
         true
       }
     }
@@ -174,13 +266,46 @@ object UndoGate {
    * @param detail 失败原文/原因短句（进观测面，供设备侧归因；不参与判定）
    * @return true = 现在就执行回滚；false = 距上次成功回滚不足 [RETRY_WINDOW_MS]，防循环抑制
    */
-  fun onClientPluginTreeFailure(context: Context, detail: String, engine: EngineManager? = null): Boolean {
-    val now = System.currentTimeMillis()
-    val retry = retrySuppression(markerFile(context), currentRetryIdentity(context, engine), now)
-    if (retry.resetWatch) runCatching { armFile(context).delete() }
-    val decision = decide(TRIGGER_CONSEC_FAILURES, now, retry.atMs, armedAt(context))
-    record(context, "client-plugin-tree-failed decision=" + decision + " detail=" + detail.take(160).replace('\n', ' '))
-    return clientPluginFailureDecision(decision)
+  fun onClientPluginTreeFailure(context: Context, detail: String, engine: EngineManager? = null): Boolean =
+    onClientPluginTreeFailureIn(
+      dir = context.filesDir,
+      detail = detail,
+      identity = currentRetryIdentity(context, engine),
+      nowMs = System.currentTimeMillis(),
+      notes = notes,
+      note = { record(context, it) },
+    )
+
+  /**
+   * [onClientPluginTreeFailure] 的目录版实现（理由同 [onProbeFailureIn]）。
+   *
+   * issue #1507：**放行必须记账**。旧实现在这里只做 [decide] 然后把 EXECUTE 映射成 true，attempt
+   * 文件从不更新 ⇒ 「每 5 秒一拍拉起一次回滚」在这条路径上原样保留，#1368 的退避只覆盖了一个
+   * 入口。现在两个放行出口共用 [recordAttempt]，语义不可能再分叉。
+   */
+  internal fun onClientPluginTreeFailureIn(
+    dir: File,
+    detail: String,
+    identity: RetryIdentity,
+    nowMs: Long,
+    notes: GateNotes = GateNotes(),
+    note: (String) -> Unit = {},
+  ): Boolean {
+    purgeStaleTempsOnce(dir, nowMs, notes, note)
+    val retry = retrySuppression(markerFileIn(dir), identity, nowMs)
+    if (retry.resetWatch) runCatching { armFileIn(dir).delete() }
+    val decision = decide(
+      TRIGGER_CONSEC_FAILURES,
+      nowMs,
+      retry.atMs,
+      armedAt(dir, nowMs, notes, note),
+      attemptAt(dir, nowMs, notes, note),
+    )
+    note("client-plugin-tree-failed decision=" + decision + " detail=" + detail.take(160).replace('\n', ' '))
+    val allowed = clientPluginFailureDecision(decision)
+    // issue #1507：放行即一次真实尝试（调用方拿到 true 就会去执行），必须当场记账。
+    if (allowed) recordAttempt(dir, nowMs, note)
+    return allowed
   }
 
   /**
@@ -220,9 +345,13 @@ object UndoGate {
     nowMs: Long,
     lastUndoAtMs: Long?,
     armedAtMs: Long?,
+    /** 上次**尝试**执行回撤的时刻（无论成败，issue #1368）；无则 null。 */
+    lastAttemptAtMs: Long? = null,
   ): GateDecision = when {
     consecutiveFailures < TRIGGER_CONSEC_FAILURES -> GateDecision.IDLE
     lastUndoAtMs != null && nowMs - lastUndoAtMs < RETRY_WINDOW_MS -> GateDecision.SUPPRESS
+    // issue #1368：失败也记账。旧实现只在成功后写 marker，失败路径每拍都重新放行。
+    lastAttemptAtMs != null && nowMs - lastAttemptAtMs < ATTEMPT_BACKOFF_MS -> GateDecision.SUPPRESS
     armedAtMs == null -> GateDecision.ARM
     nowMs - armedAtMs < WATCH_MS -> GateDecision.WAIT
     else -> GateDecision.EXECUTE
@@ -268,11 +397,7 @@ object UndoGate {
   /** 观测行前缀（设备侧单条 grep；与 boot-segments 同类，机器可判）。 */
   const val ATTEMPT_MARK = "dsh-undo-gate"
 
-  /** 本进程是否已记过「被重试窗口抑制」（每纪元只记一次）。 */
-  @Volatile private var suppressNoted = false
-
-  /** 证据否决的叙述只落一次（与 [suppressNoted] 同款：避免每 5s 一拍刷爆观测文件）。 */
-  @Volatile private var evidenceNoted = false
+  // 「只记一次」与「退避起点」这类一次性叙述状态收在 [GateNotes] 里（见类顶部的实例）。
 
   /**
    * 落一条闸门观测（best-effort，绝不抛）。**不经 DevLogPrefs 闸门**——它必须在默认配置下可见。
@@ -295,9 +420,153 @@ object UndoGate {
     }
   }
 
-  /** 观察窗起始时刻（无则 null）。 */
-  private fun armedAt(context: Context): Long? =
-    armFile(context).takeIf { it.exists() }?.readText()?.trim()?.toLongOrNull()
+  /**
+   * 观察窗起始时刻（无则 null）。
+   *
+   * issue #1369：存在但**解析不出**（0 字节 / 半截内容）以前会被当成「没有值」，于是每拍都判 ARM
+   * 并重写——观察窗永不结束，自动回滚静默失效。现在把它判成损坏：删掉、记一行，下一拍重新起窗。
+   * issue #1508：**可解析不等于有效**——被截断成 1700000000 的时间戳同样能 `toLongOrNull()`，
+   * 于是 armedAt 远在过去 ⇒ 观察窗被静默跳过（比「永不结束」更危险：引擎还没确认健康就回滚）。
+   * 判据换成 [decodeMarker] 的形状 + 区间校验，见 [ArmMarker]。
+   * issue #1530：**读失败与内容为空必须分开**——读失败时保留文件（下一拍还能读回真实起点），
+   * 起点取文件写入时刻，绝不因为一次瞬时 IO 抖动就删掉有效记录、把观察窗从头重计。
+   */
+  private fun armedAt(dir: File, nowMs: Long, notes: GateNotes, note: (String) -> Unit): Long? {
+    val file = armFileIn(dir)
+    val exists = file.exists()
+    val raw = readMarker(file)
+    val mtime = if (exists) file.lastModified() else 0L
+    return when (val marker = armMarker(exists, raw, nowMs, mtime)) {
+      ArmMarker.Missing -> null
+      is ArmMarker.Armed -> marker.atMs
+      is ArmMarker.Unreadable -> {
+        if (!notes.armUnreadableNoted) {
+          notes.armUnreadableNoted = true
+          note("arm file unreadable (kept) — window kept from write time at=" + marker.atMs)
+        }
+        marker.atMs
+      }
+      ArmMarker.Corrupt -> {
+        runCatching { file.delete() }
+        note("arm file corrupt (unparseable) — removed; observation window restarts")
+        null
+      }
+    }
+  }
+
+  /**
+   * arm 标记的解析结果（纯函数，JVM 单测直接钉）。
+   *
+   *  - [Missing]   文件不在 ⇒ 本拍起窗；
+   *  - [Armed]     形状与区间都合法 ⇒ 用文件里的起点（长度不是 13 位一律不认，截断值走 [Corrupt]）；
+   *  - [Unreadable] 文件在、这次读失败（#1530）⇒ **不删**，起点取文件写入时刻（拿不到退回本拍），
+   *    于是观察窗既不被重置、也不会被永久冻结；
+   *  - [Corrupt]   内容坏 ⇒ 删文件重起窗（#1369 的既有语义，半截值不能当有效起点）。
+   */
+  internal sealed interface ArmMarker {
+    data object Missing : ArmMarker
+    data class Armed(val atMs: Long) : ArmMarker
+    data class Unreadable(val atMs: Long) : ArmMarker
+    data object Corrupt : ArmMarker
+  }
+
+  internal fun armMarker(exists: Boolean, raw: String?, nowMs: Long, mtimeMs: Long = 0L): ArmMarker = when {
+    !exists -> ArmMarker.Missing
+    raw == null -> ArmMarker.Unreadable(writeTimeOrNow(mtimeMs, nowMs))
+    else -> decodeMarker(raw, nowMs)?.let { ArmMarker.Armed(it) } ?: ArmMarker.Corrupt
+  }
+
+  /** 编码标记值：`v2:<13 位毫秒>`。[decodeMarker] 的逆函数（用例做往返断言）。 */
+  internal fun encodeMarker(atMs: Long): String = MARKER_VERSION + atMs
+
+  /**
+   * 解码标记值（纯函数，JVM 单测直接钉）：返回 null = **损坏**。
+   *
+   * 判据是**形状 + 区间**，不是「能不能 parse」：
+   *  - 去掉 [MARKER_VERSION] 前缀后必须**恰好 13 位且全为数字**（截断 17000 / 拼接 abc 全判损坏）；
+   *  - 必须落在 `(0, now + MARKER_FUTURE_TOLERANCE_MS]`（时钟回拨造出的未来值不许把闸门冻住）。
+   * 无前缀但形状合法的裸值照收：那是上一个版本写的标记文件，升级当拍不该被当成损坏。
+   */
+  internal fun decodeMarker(raw: String?, nowMs: Long): Long? {
+    val body = raw?.trim()?.removePrefix(MARKER_VERSION) ?: return null
+    if (body.length != MARKER_DIGITS) return null
+    if (body.any { it < '0' || it > '9' }) return null
+    val at = body.toLongOrNull() ?: return null
+    if (at <= 0L || at > nowMs + MARKER_FUTURE_TOLERANCE_MS) return null
+    return at
+  }
+
+  /** 文件写入时刻的可信取值；拿不到（0 / 未来）时退回本拍。 */
+  private fun writeTimeOrNow(mtimeMs: Long, nowMs: Long): Long =
+    if (mtimeMs > 0L && mtimeMs <= nowMs + MARKER_FUTURE_TOLERANCE_MS) mtimeMs else nowMs
+
+  /** 读标记文件：正常返回内容；读失败返回 null（与「内容为空」严格区分，issue #1530）。 */
+  private fun readMarker(file: File): String? = if (file.exists()) runCatching { file.readText() }.getOrNull() else null
+
+  /**
+   * 原子写文本（issue #1369 / #1515）：同目录临时文件 → fsync → 发布。
+   * 目标路径上要么是上一版的完整内容、要么不存在，不会出现 0 字节残档。
+   *
+   * issue #1515：ATOMIC_MOVE 在 FUSE / emulated 挂载上会抛 AtomicMoveNotSupportedException。
+   * 旧实现让异常直接冒泡，于是 ARM 分支退化成 armed=false、EXECUTE 分支只留一行日志 ⇒ 退避
+   * 静默失效。现在统一走 [AtomicFileReplace]（仓内唯一的「临时文件 + fsync + 发布」实现，
+   * 自带普通 move 降级），降级经 [AtomicFileReplace.publish] 的 onDegrade 留痕；父目录 fsync
+   * 也在那一层补，硬杀残留的临时文件由 [purgeStaleTemps] 在进闸门第一拍清掉。
+   */
+  internal fun writeAtomicText(
+    target: File,
+    text: String,
+    note: (String) -> Unit,
+    publish: (File, File, (String) -> Unit) -> Boolean = AtomicFileReplace::publish,
+  ) {
+    val parent = target.absoluteFile.parentFile ?: throw java.io.IOException("marker file has no parent")
+    parent.mkdirs()
+    AtomicFileReplace.writeText(target, text) { tmp, dst ->
+      publish(tmp, dst) { reason ->
+        note("atomic move unsupported (" + reason + ") — degraded to plain move")
+      }
+    }
+  }
+
+  /**
+   * 记一次**尝试**（issue #1368 / #1507）：两个放行出口（[onProbeFailureIn] 的 EXECUTE、
+   * [onClientPluginTreeFailureIn] 的放行）共用本函数，语义不可能再分叉。
+   * 写失败只留痕、不放行失败——退避是加固，不是执行的前置条件。
+   */
+  internal fun recordAttempt(dir: File, nowMs: Long, note: (String) -> Unit) {
+    try {
+      writeAtomicText(attemptFileIn(dir), encodeMarker(nowMs), note)
+    } catch (t: Throwable) {
+      note("attempt marker write failed: " + (t.message ?: t.javaClass.simpleName))
+    }
+  }
+
+  /** 硬杀残留的原子写临时文件（issue #1515）：本类写入器产生的 `..undo-auto-*.<rand>.tmp`。 */
+  internal fun staleTempNames(names: List<String>): List<String> =
+    names.filter { it.startsWith("..undo-auto-") && it.endsWith(".tmp") }
+
+  /** 残留临时文件的最小年龄：正常写盘是毫秒级，仍在写的临时文件不能被误清。 */
+  internal const val STALE_TEMP_MS = 10 * 60 * 1000L
+
+  /** 清掉 [STALE_TEMP_MS] 之前的残留临时文件；返回清掉的条数。 */
+  internal fun purgeStaleTemps(dir: File, nowMs: Long, note: (String) -> Unit): Int {
+    val names = runCatching { dir.list()?.toList() ?: emptyList<String>() }.getOrNull() ?: return 0
+    var removed = 0
+    for (name in staleTempNames(names)) {
+      val stale = File(dir, name)
+      if (nowMs - stale.lastModified() < STALE_TEMP_MS) continue
+      if (runCatching { stale.delete() }.getOrDefault(false)) removed++
+    }
+    if (removed > 0) note("purged " + removed + " stale atomic-write temp file(s)")
+    return removed
+  }
+
+  /** 每个进程只清一次（进闸门的第一拍；本类没有独立的启动钩子）。 */
+  private fun purgeStaleTempsOnce(dir: File, nowMs: Long, notes: GateNotes, note: (String) -> Unit) {
+    if (notes.staleTempsPurged) return
+    notes.staleTempsPurged = true
+    purgeStaleTemps(dir, nowMs, note)
+  }
 
   /**
    * 记录「已知良好快照 id」——**只由壳侧自己的健康观测写入**（引擎探活 HEALTHY 的那一拍）。
@@ -360,8 +629,11 @@ object UndoGate {
     storedId?.takeIf { it.isNotEmpty() && !storedFp.isNullOrEmpty() && storedFp == currentFp }
 
   /** 当前安装的快照指纹（`files/.snapshot-fingerprint`，EngineManager 写入；缺失返回 null）。 */
-  private fun installFingerprint(context: Context): String? =
-    File(context.filesDir, ".snapshot-fingerprint")
+  private fun installFingerprint(context: Context): String? = installFingerprintIn(context.filesDir)
+
+  /** [installFingerprint] 的目录版（[onProbeFailureIn] / [onClientPluginTreeFailureIn] 用得到）。 */
+  private fun installFingerprintIn(dir: File): String? =
+    File(dir, ".snapshot-fingerprint")
       .takeIf { it.exists() }?.readText()?.trim()?.takeIf { it.isNotEmpty() }
 
   /** 快照目录里的 id 列表（排除 `boot-state.json` / `env-vault` 等非快照条目）。 */
@@ -566,8 +838,84 @@ object UndoGate {
   /** 快照 id 形状：`yyyyMMdd-HHmmss-rrrr`（本地时间 + 4 位随机；字典序 = 时间序）。 */
   private val SNAPSHOT_ID = Regex("^20[0-9]{6}-[0-9]{6}-[0-9a-f]{4}$")
 
-  private fun markerFile(context: Context) = File(context.filesDir, ".undo-auto-done")
-  private fun armFile(context: Context) = File(context.filesDir, ".undo-auto-armed")
+  private fun markerFile(context: Context) = markerFileIn(context.filesDir)
+  private fun armFile(context: Context) = armFileIn(context.filesDir)
+  private fun markerFileIn(dir: File) = File(dir, ".undo-auto-done")
+  private fun armFileIn(dir: File) = File(dir, ".undo-auto-armed")
+
+  /** 上次尝试执行的时刻（issue #1368）：成败都写，供 decide 退避。 */
+  private fun attemptFileIn(dir: File) = File(dir, ".undo-auto-attempt")
+
+  /**
+   * 上次尝试执行的时刻（无则 null）。
+   *
+   * issue #1514：损坏时**不再删文件**——原子写本身是 REPLACE_EXISTING，预删毫无必要；旧实现
+   * 「删掉 + 返回 now」让 tick1 判 SUPPRESS、tick2 已是 Missing ⇒ 退避只维持一拍，坏标记反而
+   * 让回滚提前。现在把损坏解成「尝试过，时间取文件写入时刻」，于是退避按真实时间走完整个窗口，
+   * 文件本身留着（下一次成功写入会原地覆盖，不留下「被清空」的中间态）。
+   */
+  private fun attemptAt(dir: File, nowMs: Long, notes: GateNotes, note: (String) -> Unit): Long? {
+    val file = attemptFileIn(dir)
+    val exists = file.exists()
+    val mtime = if (exists) file.lastModified() else 0L
+    val marker = attemptMarker(exists, readMarker(file), nowMs, mtime, notes.attemptCorruptSeenAt)
+    return when (marker) {
+      AttemptMarker.Missing -> null
+      is AttemptMarker.Recorded -> {
+        notes.attemptCorruptNoted = false
+        marker.atMs
+      }
+      is AttemptMarker.Corrupt -> {
+        if (!notes.attemptCorruptNoted) {
+          notes.attemptCorruptNoted = true
+          note("attempt marker corrupt (unparseable) — kept; backoff continues from at=" + marker.atMs)
+        }
+        notes.attemptCorruptSeenAt = marker.atMs
+        marker.atMs
+      }
+    }
+  }
+
+  /** 尝试标记的解析结果（纯函数，JVM 单测直接钉）。 */
+  internal sealed interface AttemptMarker {
+    data object Missing : AttemptMarker
+    data class Recorded(val atMs: Long) : AttemptMarker
+    /**
+     * 内容不可解析：**尝试确实发生过**，只是时间不可知（issue #1514）。
+     * [atMs] 是本次可用的最佳线性估计——文件写入时刻；取不到时退回上一次观测到的时刻、再退回本拍。
+     * 调用方把它当退避起点即可，**不得删文件**：下一拍仍要据此继续退避。
+     */
+    data class Corrupt(val atMs: Long) : AttemptMarker
+  }
+
+  /**
+   * 解析尝试标记。
+   *
+   * 0 字节 / 半截内容的语义是「尝试过但时间不可知」，不是「没尝试过」——
+   * 前者必须继续退避，后者才放行。半截值（例如 1700000000000 被截成 1700000000）也不能当成
+   * 有效时间：那会让退避显示「早已过期」而立刻放行（#1508 的同款失效面）。
+   *
+   * @param exists 文件是否存在。
+   * @param raw 文件内容（读失败时为 null）。
+   * @param nowMs 本拍墙钟（区间校验与兜底起点）。
+   * @param mtimeMs 文件写入时刻（0 = 拿不到）。
+   * @param seenAtMs 上一次观测到的损坏起点（避免写入时刻拿不到时永久抑制）。
+   */
+  internal fun attemptMarker(
+    exists: Boolean,
+    raw: String?,
+    nowMs: Long,
+    mtimeMs: Long = 0L,
+    seenAtMs: Long? = null,
+  ): AttemptMarker = when {
+    !exists -> AttemptMarker.Missing
+    else -> decodeMarker(raw, nowMs)?.let { AttemptMarker.Recorded(it) }
+      ?: AttemptMarker.Corrupt(corruptAttemptAt(mtimeMs, nowMs, seenAtMs))
+  }
+
+  /** 损坏标记的退避起点：写入时刻 → 上次观测 → 本拍（三级兜底，任何一级都不退化成「没有记录」）。 */
+  private fun corruptAttemptAt(mtimeMs: Long, nowMs: Long, seenAtMs: Long?): Long =
+    if (mtimeMs > 0L) writeTimeOrNow(mtimeMs, nowMs) else (seenAtMs ?: nowMs)
 
   private fun currentRetryIdentity(context: Context, engine: EngineManager?): RetryIdentity {
     val install = runCatching { installFingerprint(context)?.lowercase(java.util.Locale.ROOT) }.getOrNull() ?: "unavailable"
@@ -578,25 +926,27 @@ object UndoGate {
   }
 
   private fun writeRetryMarker(context: Context, identity: RetryIdentity, atMs: Long) {
+    // issue #1515 同源：重试标记也是「临时文件 + 发布」，同样必须走唯一写入器（含降级与留痕），
+    // 否则它在不支持 ATOMIC_MOVE 的文件系统上会静默写不进去，防循环窗口随之消失。
     val target = markerFile(context)
-    val parent = target.absoluteFile.parentFile ?: return
-    val temp = File.createTempFile(".undo-auto-done-", ".tmp", parent)
+    val text = JSONObject().put("schema", 2).put("at", atMs)
+      .put("installFingerprint", identity.installFingerprint)
+      .put("patchDigest", identity.patchDigest).toString()
     try {
-      temp.writeText(JSONObject().put("schema", 2).put("at", atMs)
-        .put("installFingerprint", identity.installFingerprint)
-        .put("patchDigest", identity.patchDigest).toString())
-      java.nio.file.Files.move(temp.toPath(), target.toPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE,
-        java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+      writeAtomicText(target, text, note = { record(context, it) })
     } catch (t: Throwable) {
       record(context, "retry-marker write failed: " + (t.message ?: t.javaClass.simpleName))
-    } finally { if (temp.exists()) temp.delete() }
+    }
   }
 
   /** Called only by an explicit user-requested engine restart; automatic retries keep the guard. */
   fun clearRetryEpochForUserRestart(context: Context) {
     runCatching { markerFile(context).delete() }
     runCatching { armFile(context).delete() }
-    suppressNoted = false
+    notes.suppressNoted = false
+    // 用户显式重启同时重开一个干净的退避纪元（损坏标记的观测记录不得跨纪元延续）。
+    notes.attemptCorruptSeenAt = null
+    notes.attemptCorruptNoted = false
   }
 
   /** 壳侧确认过健康的那份快照 id（[noteHealthy] 写、[execute] 读）。 */

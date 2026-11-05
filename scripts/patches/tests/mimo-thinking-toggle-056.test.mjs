@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
-import { MIMO_PATCH_MARKER, patchDshThinkingProfile, patchPiAiMimoThinking } from '../mimo-thinking-toggle-056.mjs'
+import { MIMO_PATCH_MARKER, patchDshThinkingProfile, patchPiAiMimoThinking, planMimoThinking } from '../mimo-thinking-toggle-056.mjs'
 import { versionedFixture } from './lib/fixture.mjs'
 
 const dshFixture = readFileSync(versionedFixture('dsh-llm-pi-ai', 'lib', 'index.js'), 'utf8')
@@ -22,6 +22,40 @@ test('patch marker and selector expose only closed plus one canonical enabled va
   assert.equal(resolve(legacyModel, 'high'), 'low')
   assert.equal(resolve(legacyModel, 'off'), 'off')
   assert.equal(patchDshThinkingProfile(patched), patched)
+})
+
+test('version preflight accepts only the pinned pair and rejects the previous or an unknown engine', () => {
+  const dsh = readFileSync(versionedFixture('dsh-llm-pi-ai', 'lib', 'index.js'), 'utf8')
+  const pi = readFileSync(versionedFixture('pi-ai', 'dist', 'api', 'openai-completions.js'), 'utf8')
+  const dshManifest = readFileSync(versionedFixture('dsh-llm-pi-ai', 'package.json'), 'utf8')
+  const piManifest = readFileSync(versionedFixture('pi-ai', 'package.json'), 'utf8')
+  const files = {
+    'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js': dsh,
+    'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js': pi,
+    'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai/package.json': dshManifest,
+    'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/package.json': piManifest,
+  }
+  const read = file => {
+    if (!(file in files)) throw new Error('unexpected read: ' + file)
+    return files[file]
+  }
+  // 当前这一代必须通过：证明判据没有把 rc3 当成未知版本。
+  assert.equal(planMimoThinking(read).length, 2)
+  // 上一代与任何未知版本都必须判红，不能悄悄施加到别的产物上。
+  for (const [name, version] of [['dsh-llm-pi-ai', '0.2.1-rc.2'], ['dsh-llm-pi-ai', '0.2.2-rc.1'], ['dsh-llm-pi-ai', '0.2.1'], ['dsh-llm-pi-ai', '0.3.0-rc.3']]) {
+    const mutated = { ...files }
+    const file = 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/' + name + '/package.json'
+    const manifest = JSON.parse(files[file])
+    mutated[file] = JSON.stringify({ ...manifest, version })
+    assert.throws(() => planMimoThinking(target => mutated[target] ?? (() => { throw new Error('unexpected read: ' + target) })()),
+      /requires dsh-llm-pi-ai@0\.2\.1-rc\.3 and pi-ai@1\.1\.0/, name + '@' + version)
+  }
+  // pi-ai 侧的钉住值同样不可漂移。
+  const piFile = 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/package.json'
+  const piMutated = { ...files }
+  piMutated[piFile] = JSON.stringify({ ...JSON.parse(piManifest), version: '1.2.0' })
+  assert.throws(() => planMimoThinking(target => piMutated[target] ?? (() => { throw new Error('unexpected read: ' + target) })()),
+    /requires dsh-llm-pi-ai@0\.2\.1-rc\.3 and pi-ai@1\.1\.0/)
 })
 
 test('Completions serializer sends only the boolean thinking.type for MiMo', () => {

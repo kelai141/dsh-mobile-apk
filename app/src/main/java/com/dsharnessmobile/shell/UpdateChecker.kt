@@ -18,7 +18,10 @@ import java.net.URL
  * - **同按钮二次确认**：发现新版后同一按钮变为「下载并安装 vX.Y.Z」，再点才开始下载；
  * - 下载落 Documents/dshdata/updates/（FileProvider 既有映射内），.tmp→rename 原子；
  * - 安装：REQUEST_INSTALL_PACKAGES 未持有 → 先拉「安装未知应用」授权页（launcher 返回后续继）；
- *   签名不匹配由系统安装器天然拒绝；发布数据带摘要时下载后校验（缺失则如实说明"本次未提供"）。
+ *   发布数据带摘要时下载后校验（缺失则如实说明"本次未提供"）。签名侧兜底（#675）：唤起安装器
+ *   前做发布者连续性校验（[signerContinuityHolds]）——「签名不匹配由系统安装器天然拒绝」在发布
+ *   私钥随公开仓分发的前提下不成立（同私钥可签出同证书的包，安装器只会放行），摘要又由投递方
+ *   自带、挡不住同源替换；唯一可信锚是设备上已安装本应用的证书。
  * 与引擎快照更新（EngineStartFlow.startUpdateCheck / UpdateManager）完全分离。
  *
  * **版本号确认链（多源，顺序即优先级）**：见 [checkLatest]。
@@ -65,6 +68,29 @@ object UpdateChecker {
   fun updatesDir(context: Context): File =
     File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOCUMENTS), "dshdata/updates")
 
+  /**
+   * 清扫更新目录（issue #676）：只保留本次要装的那一个包，删掉更早的 APK 与中断留下的 `.tmp`。
+   *
+   * 为什么需要：`updatesDir` 落在公共外部存储（`Documents/dshdata/updates`），全仓只有"写"没有"删"。
+   * 每换一版就多一个 169MB 的包；下载被进程中断时 `.tmp` 还会留在原地（`finally` 只在正常退出时跑）。
+   *
+   * 判据刻意保守：只删 `*.apk`（且不是 [keepName]）与 `*.tmp`，只删普通文件——不碰目录、不跟符号链接。
+   * 返回实际删除个数（0 = 没有可删的，也算正常结果）。
+   */
+  internal fun pruneUpdatesDir(dir: File, keepName: String?): Int {
+    val entries = dir.listFiles() ?: return 0
+    var removed = 0
+    for (file in entries) {
+      if (!file.isFile) continue
+      val name = file.name
+      val staleApk = name.endsWith(".apk", ignoreCase = true) && name != keepName
+      val staleTmp = name.endsWith(".tmp", ignoreCase = true)
+      if (!staleApk && !staleTmp) continue
+      if (runCatching { file.delete() }.getOrDefault(false)) removed++
+    }
+    return removed
+  }
+
   sealed class CheckResult {
     /** 已是最新（latest.tag == 当前版本）。 */
     data object UpToDate : CheckResult()
@@ -72,13 +98,14 @@ object UpdateChecker {
      * 发现新版：tag + 双 ABI 资产 URL（按设备 ABI 已选好）。
      *
      * [sha256] 是**摘要本身**（64 位十六进制小写），不是摘要文件的 URL；null = 本次发布的数据源里
-     * 没有提供摘要，调用方下载后只能靠系统安装器的签名校验兜底，界面必须如实说明而不是沉默跳过。
+     * 没有提供摘要，完整性只剩安装前的发布者连续性校验（#675 [signerContinuityHolds]）这一层，
+     * 界面必须如实说明而不是沉默跳过。
      */
     data class Available(
       val tag: String,
       val name: String,
       val apkUrl: String,
-      val sha256: String?,
+      val sha256: String,
       val sizeBytes: Long,
     ) : CheckResult()
 
@@ -149,6 +176,38 @@ object UpdateChecker {
    * `.github/workflows/release.yml`（唯一线上发布入口）与 `scripts/build-apk-013.ps1` 的
    * `--artifact-name` 形态并逐字比对——**发布链改名即判红**，不靠人记得同步。
    */
+  /**
+   * 产物文件名的形态白名单（**安全边界**，2026-10-28 自查）。
+   *
+   * 名字最上游来自发布元数据（Pages `releases.json` 的 tag/asset 名、API 的 tag_name/asset），
+   * `assetNameCandidates` 只是把 tag 原样插值进 `dsh-mobile-apk-v<tag>-<abi>.apk`。带分隔符的
+   * tag（`v9../../../Documents/x`）会让 `File(updatesDir, name)` 落到**任意可写目录**，
+   * 而 batch4 起 `pruneUpdatesDir(dest.parentFile)` 的作用域也跟着被元数据决定 ⇒ 能删/写别的目录里
+   * 的 `*.apk`/`*.tmp`。修法两层：名字形态白名单 + canonical 父目录必须等于 updatesDir。
+   */
+  internal val ARTIFACT_NAME = Regex("""^[A-Za-z0-9][A-Za-z0-9._+\-]{0,127}\.apk$""")
+
+  internal fun isSafeArtifactName(name: String): Boolean =
+    ARTIFACT_NAME.matches(name) && File(name).name == name && File(name).parentFile == null
+
+  /**
+   * 把元数据给的文件名解析成 updatesDir 里的安全路径；不安全返回 null（调用方按"产物不可用"拒绝）。
+   * 两道判据都要：形态白名单挡住 `../`、绝对路径、尾随空格与大小写变体；canonical 比对挡住
+   * 符号链接/`..` 归一化之后仍然逃出目录的情形（形态合法但落点在外面的构造）。
+   */
+  internal fun resolveUpdateTarget(dir: File, name: String): File? {
+    if (!isSafeArtifactName(name)) return null
+    val raw = File(dir, name)
+    // 名字本身是符号链接就直接拒：`canonicalFile` 对**指向不存在目标**的链接不解引用，
+    // 此时 parent 仍等于 dir、判据会放行，而写入会跟着链接落到目录外。
+    if (runCatching { java.nio.file.Files.isSymbolicLink(raw.toPath()) }.getOrDefault(true)) return null
+    return runCatching {
+      val dirReal = dir.canonicalFile
+      val fileReal = raw.canonicalFile
+      if (fileReal.parentFile == dirReal) fileReal else null
+    }.getOrNull()
+  }
+
   fun assetNameCandidates(tag: String, abi: String): List<String> {
     val v = tag.removePrefix("v")
     val releaseAbis = if (abi == "arm64") listOf("arm64", "arm64-v8a") else listOf(abi)
@@ -165,7 +224,7 @@ object UpdateChecker {
   fun assetName(tag: String, abi: String): String = assetNameCandidates(tag, abi).first()
 
   /** 一件发布资产（只取判定所需字段；不引入 JSON 对象到判定层，便于 JVM 单测）。 */
-  internal data class ReleaseAssetRef(val name: String, val url: String, val sizeBytes: Long)
+  internal data class ReleaseAssetRef(val name: String, val url: String, val sizeBytes: Long, val sha256: String?)
 
   /** 解析后的 latest release：tag + 资产清单。 */
   internal data class LatestRelease(val tag: String, val assets: List<ReleaseAssetRef>)
@@ -186,7 +245,8 @@ object UpdateChecker {
       val a = arr.optJSONObject(i) ?: continue
       val name = a.optString("name", "").trim()
       if (name.isEmpty()) continue
-      assets += ReleaseAssetRef(name, a.optString("browser_download_url", "").trim(), a.optLong("size", 0L))
+      val sha256 = if (APK_NAME_TAG.matches(name)) parseReleaseAssetSha256(a.opt("digest")) else null
+      assets += ReleaseAssetRef(name, a.optString("browser_download_url", "").trim(), a.optLong("size", 0L), sha256)
     }
     return LatestRelease(tag, assets)
   }
@@ -304,6 +364,12 @@ object UpdateChecker {
     val sha256: Map<String, String>,
   )
 
+  private fun factsFromRelease(release: LatestRelease): LatestFacts = LatestFacts(
+    release.tag,
+    release.assets.associate { it.name to it.sizeBytes },
+    release.assets.mapNotNull { asset -> asset.sha256?.let { asset.name to it } }.toMap(),
+  )
+
   /** 发布链产物名里的版本号与架构。为什么从文件名取：MANIFEST.txt 实测 12 行只有三列，没有 tag 字段。 */
   private val APK_NAME_TAG = Regex("^dsh-mobile-apk-v(.+)-(arm64-v8a|arm64|x86_64)\\.apk$")
 
@@ -311,6 +377,15 @@ object UpdateChecker {
   private val MANIFEST_LINE = Regex("^(\\S+)\\s+(\\S+)\\s+(\\S+)$")
 
   private val SHA256_HEX = Regex("^[0-9a-fA-F]{64}$")
+  private val RELEASE_ASSET_SHA256 = Regex("^sha256:([0-9a-fA-F]{64})$", RegexOption.IGNORE_CASE)
+
+  private fun parseReleaseAssetSha256(value: Any?): String? {
+    if (value == null || value == JSONObject.NULL) return null
+    require(value is String) { "latest release APK digest 不是字符串" }
+    val match = RELEASE_ASSET_SHA256.matchEntire(value.trim())
+      ?: throw IllegalArgumentException("latest release APK digest 不是有效的 SHA-256")
+    return match.groupValues[1].lowercase()
+  }
 
   /**
    * 解析 MANIFEST.txt（三列：sha256 相对路径 字节数）。失败**抛异常**，由调用方归类 PARSE。
@@ -392,8 +467,8 @@ object UpdateChecker {
    * **顺序是契约的一部分**：先确认"有本机可用的包"，再比版本——反过来会让"发布侧漏了本机架构的包"
    * 被"已是最新"掩盖，用户永远等不到适配版本，也不会看到任何异常。
    *
-   * 摘要只从 [LatestFacts.sha256] 里按**选中资产名**取：取不到就是 null（本次发布未提供校验值），
-   * 绝不用邻家资产或空串顶替——那会把"没提供"变成"提供了但校验失败"。
+   * 摘要只从 [LatestFacts.sha256] 里按**选中资产名**取。缺失或无效时拒绝提供可安装更新，
+   * 不用邻家资产或文件大小替代摘要校验。
    */
   internal fun classifyFacts(
     facts: LatestFacts,
@@ -415,11 +490,16 @@ object UpdateChecker {
     val hit = assetNameCandidates(tag, family).firstOrNull { facts.sizes.containsKey(it) }
       ?: return classifyAssetFailure(tag, family, deviceAbis, facts.sizes.keys.toList())
     if (!isNewer(tag, currentVersion)) return CheckResult.UpToDate
+    val sha256 = facts.sha256[hit]?.takeIf { SHA256_HEX.matches(it) }?.lowercase()
+      ?: return CheckResult.Failed(
+        "检查失败：发布数据异常——APK 资产缺少有效 SHA-256，已拒绝提供更新包",
+        CheckResult.FailureKind.RELEASE_DATA_BROKEN,
+      )
     return CheckResult.Available(
       tag,
       hit,
       assetDownloadUrl(tag, hit),
-      facts.sha256[hit],
+      sha256,
       facts.sizes[hit] ?: 0L,
     )
   }
@@ -454,9 +534,9 @@ object UpdateChecker {
         CheckResult.FailureKind.RELEASE_DATA_BROKEN,
       )
     }
-    // API 资产清单里没有摘要字段（发布链不产 .sha256 资产），故这里摘要恒为 null——如实说明，不编造。
+    // 保留 API 的真实下载地址，同时把 APK assets[].digest 纳入统一摘要判据。
     val verdict = classifyFacts(
-      LatestFacts(latest.tag, latest.assets.associate { it.name to it.sizeBytes }, emptyMap()),
+      factsFromRelease(latest),
       deviceAbis,
       family,
       currentVersion(),
@@ -566,37 +646,116 @@ object UpdateChecker {
     else -> 15_000
   }
 
-  private fun probeSources(): CheckResult {
+  private fun probeSources(deadline: UpdateCheckDeadline): CheckResult {
     val abis = deviceAbis()
     val latestPath = REPO + "/releases/latest/download/MANIFEST.txt"
     val attempts: List<Pair<String, () -> SourceProbe>> = listOf(
-      "gh-proxy" to { probeManifest(MIRROR_PREFIXES[1] + latestPath, timeoutFor("gh-proxy")) },
-      "ghfast" to { probeManifest(MIRROR_PREFIXES[2] + latestPath, timeoutFor("ghfast")) },
-      "github" to { probeManifest(MIRROR_PREFIXES[0] + latestPath, timeoutFor("github")) },
-      "pages" to { probePages(SITE_URL + "data/releases.json", timeoutFor("pages")) },
-      "ghproxy.net" to { probeManifest(MIRROR_PREFIXES[3] + latestPath, timeoutFor("ghproxy.net")) },
-      "api" to { probeApi(timeoutFor("api")) },
+      "gh-proxy" to { probeManifest(MIRROR_PREFIXES[1] + latestPath, timeoutFor("gh-proxy"), deadline) },
+      "ghfast" to { probeManifest(MIRROR_PREFIXES[2] + latestPath, timeoutFor("ghfast"), deadline) },
+      "github" to { probeManifest(MIRROR_PREFIXES[0] + latestPath, timeoutFor("github"), deadline) },
+      "pages" to { probePages(SITE_URL + "data/releases.json", timeoutFor("pages"), deadline) },
+      "ghproxy.net" to { probeManifest(MIRROR_PREFIXES[3] + latestPath, timeoutFor("ghproxy.net"), deadline) },
+      "api" to { probeApi(timeoutFor("api"), deadline) },
     )
     return runChain(attempts, abis, abiFrom(abis), currentVersion())
   }
 
-  /** 取一档文本（不做镜像回退：每档就是一个明确 URL，回退由 [runChain] 的顺序负责）。 */
-  private fun fetchText(url: String, timeoutMs: Int, accept: String?): String {
-    val conn = URL(url).openConnection(Proxy.NO_PROXY) as HttpURLConnection
-    try {
-      conn.connectTimeout = timeoutMs
-      conn.readTimeout = timeoutMs
-      conn.instanceFollowRedirects = true
-      accept?.let { conn.setRequestProperty("Accept", it) }
-      val code = conn.responseCode
-      if (code != 200) {
-        // 把限流响应头一起带出去：旧实现靠它们区分"配额耗尽（等一会儿再来）"与"普通 403（换网络也没用）"，
-        // 丢掉这两个头等于把两种完全不同的处置方式压成同一条建议。
-        throw HttpStatusException(code, url, conn.getHeaderField("x-ratelimit-remaining"), conn.getHeaderField("retry-after"))
+  /** 元数据读取上限（#10）：MANIFEST/releases.json 都是 KB 级；超过它的一定不是元数据（防无上限读 OOM/拖死）。 */
+  internal const val METADATA_MAX_BYTES = 1 shl 20
+
+  /** 元数据重定向跳数上限（#10）：合法链路 1-2 跳；再多就是环或被劫持。 */
+  internal const val METADATA_MAX_REDIRECTS = 3
+
+  /**
+   * 元数据 302 的合法落点域（#10）。摘要权威源（MANIFEST/releases.json 里的 sha256）决定 169MB
+   * 载荷的可信度，不能被镜像方 302 到**任意**主机——那等于把校验值的签发权交出去。
+   * 同域跳转（镜像自身的路径调整）恒允许；跨域只放行 GitHub 官方资产域（release 下载的
+   * 既有落点）。白名单外的目标按数据错误拒绝（isDataError → PARSE 分档）。
+   */
+  internal val METADATA_REDIRECT_HOSTS = setOf(
+    "github.com", "api.github.com", "codeload.github.com",
+    "objects.githubusercontent.com", "release-assets.githubusercontent.com",
+    "raw.githubusercontent.com",
+  )
+
+  internal fun metadataRedirectAllowed(fromHost: String, toHost: String): Boolean =
+    toHost == fromHost || METADATA_REDIRECT_HOSTS.contains(toHost)
+
+  /**
+   * 取一档文本（不做镜像回退：每档就是一个明确 URL，回退由 [runChain] 的顺序负责）。
+   *
+   * #10（2026-10-25 审计）：重定向改为**手工限域跟随**（同域或 GitHub 官方域、仅 https、
+   * ≤[METADATA_MAX_REDIRECTS] 跳），读取加上限——旧实现 `instanceFollowRedirects = true`
+   * 盲跟任意 302 + `readBytes()` 无上限，镜像方一条 302 就能把摘要权威源劫到任意主机并
+   * 无限流式输出。
+   */
+  private val metadataTimers = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { task ->
+    Thread(task, "dsh-update-metadata-deadline").apply { isDaemon = true }
+  }
+
+  internal fun fetchText(
+    url: String,
+    timeoutMs: Int,
+    accept: String?,
+    checkDeadline: UpdateCheckDeadline,
+    openConnection: (URL) -> HttpURLConnection = { it.openConnection(Proxy.NO_PROXY) as HttpURLConnection },
+  ): String {
+    val deadline = checkDeadline.source(timeoutMs)
+    var current = url
+    var hops = 0
+    while (true) {
+      deadline.remainingMs()
+      val conn = openConnection(URL(current))
+      val cancellation = metadataTimers.schedule(
+        { runCatching { conn.disconnect() } }, deadline.remainingMs(), java.util.concurrent.TimeUnit.MILLISECONDS,
+      )
+      try {
+        conn.connectTimeout = deadline.timeoutMs(timeoutMs)
+        conn.readTimeout = deadline.timeoutMs(timeoutMs)
+        conn.instanceFollowRedirects = false
+        accept?.let { conn.setRequestProperty("Accept", it) }
+        val code = conn.responseCode
+        deadline.remainingMs()
+        if (code in 300..399 && code != 304) {
+          val location = conn.getHeaderField("Location")
+            ?: throw HttpStatusException(code, url, conn.getHeaderField("x-ratelimit-remaining"), conn.getHeaderField("retry-after"))
+          val next = URL(URL(current), location)
+          if (next.protocol != "https") {
+            throw IllegalStateException("元数据重定向降级到非 https：" + next.protocol)
+          }
+          if (++hops > METADATA_MAX_REDIRECTS) {
+            throw IllegalStateException("元数据重定向超过 " + METADATA_MAX_REDIRECTS + " 跳")
+          }
+          if (!metadataRedirectAllowed(URL(current).host, next.host)) {
+            throw IllegalStateException("元数据重定向目标不在发布链白名单：" + next.host)
+          }
+          current = next.toString()
+          continue
+        }
+        if (code != 200) {
+          // 把限流响应头一起带出去：旧实现靠它们区分"配额耗尽（等一会儿再来）"与"普通 403（换网络也没用）"，
+          // 丢掉这两个头等于把两种完全不同的处置方式压成同一条建议。
+          throw HttpStatusException(code, url, conn.getHeaderField("x-ratelimit-remaining"), conn.getHeaderField("retry-after"))
+        }
+        return conn.inputStream.use { input ->
+          val buf = java.io.ByteArrayOutputStream()
+          val chunk = ByteArray(8 * 1024)
+          while (true) {
+            conn.readTimeout = deadline.timeoutMs(timeoutMs)
+            val n = input.read(chunk)
+            deadline.remainingMs()
+            if (n < 0) break
+            if (buf.size() + n > METADATA_MAX_BYTES) {
+              throw IllegalStateException("元数据超过 " + METADATA_MAX_BYTES + " 字节上限（不是合法的 MANIFEST/releases.json）")
+            }
+            buf.write(chunk, 0, n)
+          }
+          buf.toString(Charsets.UTF_8)
+        }
+      } finally {
+        cancellation.cancel(false)
+        runCatching { conn.disconnect() }
       }
-      return conn.inputStream.use { it.readBytes().toString(Charsets.UTF_8) }
-    } finally {
-      runCatching { conn.disconnect() }
     }
   }
 
@@ -630,21 +789,21 @@ object UpdateChecker {
     else -> SourceProbe.Unreachable(e)
   }
 
-  private fun probeManifest(url: String, timeoutMs: Int): SourceProbe = try {
-    SourceProbe.Parsed(parseManifest(fetchText(url, timeoutMs, null)))
+  private fun probeManifest(url: String, timeoutMs: Int, deadline: UpdateCheckDeadline): SourceProbe = try {
+    SourceProbe.Parsed(parseManifest(fetchText(url, timeoutMs, null, deadline)))
   } catch (e: Exception) {
     probeFailure(e)
   }
 
-  private fun probePages(url: String, timeoutMs: Int): SourceProbe = try {
-    SourceProbe.Parsed(parsePagesReleaseJson(fetchText(url, timeoutMs, null)))
+  private fun probePages(url: String, timeoutMs: Int, deadline: UpdateCheckDeadline): SourceProbe = try {
+    SourceProbe.Parsed(parsePagesReleaseJson(fetchText(url, timeoutMs, null, deadline)))
   } catch (e: Exception) {
     probeFailure(e)
   }
 
-  private fun probeApi(timeoutMs: Int): SourceProbe = try {
-    val latest = parseLatestRelease(fetchText("$API/repos/$REPO/releases/latest", timeoutMs, "application/vnd.github+json"))
-    SourceProbe.Parsed(LatestFacts(latest.tag, latest.assets.associate { it.name to it.sizeBytes }, emptyMap()))
+  private fun probeApi(timeoutMs: Int, deadline: UpdateCheckDeadline): SourceProbe = try {
+    val latest = parseLatestRelease(fetchText("$API/repos/$REPO/releases/latest", timeoutMs, "application/vnd.github+json", deadline))
+    SourceProbe.Parsed(factsFromRelease(latest))
   } catch (e: Exception) {
     probeFailure(e)
   }
@@ -658,16 +817,37 @@ object UpdateChecker {
    *
    * 元数据只取小文件（MANIFEST 约 1.4KB / releases.json 约 1.3KB），169MB 的 APK 才走镜像下载链（[download]）。
    */
-  fun checkLatest(): CheckResult = try {
-    probeSources()
+  fun checkLatest(): CheckResult = checkLatest(UpdateCheckDeadline.start())
+
+  internal fun checkLatest(deadline: UpdateCheckDeadline): CheckResult = try {
+    probeSources(deadline)
   } catch (e: Exception) {
     android.util.Log.w(TAG, "check chain failed: " + (e.message ?: e.javaClass.simpleName))
     classifyTransportFailure(e)
   }
 
-  /** 当前版本（只去快照后缀 -SN-*；0.13.7fx-1-SN-1-13 → 0.13.7fx-1）。
-   *  注意：修订号 -1/-2（0.13.7fx-N 命名）**不能**当后缀剥掉，否则 fx-2 会被判成与 fx-1 同版。 */
-  fun currentVersion(): String = BuildConfig.VERSION_NAME.replace(Regex("-SN-.*$"), "")
+  /**
+   * 当前版本，**带完整后缀原值**（`0.13.7fx-1-SN-1-13` 原样返回）。
+   *
+   * issue #1511：这里曾把 `-SN-*` 剥掉再用，于是 `isNewer` 的 `prereleaseOf(current)` 恒为 null，
+   * 走 `preB == null -> false` —— **SN 快照构建恒判「已是最新」**，装快照的测试者收不到后续快照。
+   * 剥后缀的职责归比较层（[stripPrereleaseSuffix] 白名单，两侧同口径），展示层要短形态时自己剥
+   * （[displayVersion]）。把剥离放在取值处 = 让「同一事实两种读数」，且必然有一侧读错。
+   *
+   * 注意：修订号 -1/-2（`0.13.7fx-N` 命名）**不能**当后缀剥掉，否则 fx-2 会被判成与 fx-1 同版。
+   */
+  fun currentVersion(raw: String = BuildConfig.VERSION_NAME): String = raw
+
+  /**
+   * 展示用当前版本（去掉快照后缀 `-SN-*`）：`0.13.7fx-1-SN-1-13` → `0.13.7fx-1`。
+   *
+   * 只给**上屏文本**用（状态行 / 读屏描述 / 引导页）。比较一律用 [currentVersion] 原值——
+   * 用短形态去比正是 #1511 的缺陷本形。
+   *
+   * @param raw 原始版本串（默认 [BuildConfig.VERSION_NAME]；参数化是为了让单测能喂 SN 形态，
+   *   否则 JVM 单测里 VERSION_NAME 恒无后缀，剥离逻辑的回归判据会退化成恒真）。
+   */
+  fun displayVersion(raw: String = BuildConfig.VERSION_NAME): String = raw.replace(Regex("-SN-.*$"), "")
 
   /**
    * 预发布/快照后缀**白名单**（FX-209.2，E-5/E-11）：只剥 rc / preview / SN 这一类
@@ -688,42 +868,124 @@ object UpdateChecker {
    *  tag 形如 v0.13.8 / 0.13.8 / v0.13.7fx-2 / v0.13.7-rc.1（rc 段不参与比较）。
    *  FX-209.2：两侧同口径剥后缀（BuildConfig.VERSION_NAME 亦可能是 0.14.0-preview）。 */
   fun isNewer(tag: String, current: String): Boolean {
-    fun parts(v: String) = Regex("\\d+").findAll(stripPrereleaseSuffix(v)).map { it.value.toLongOrNull() ?: 0L }.toList()
+    // SemVer 的 build metadata（`+build.7`）**不参与优先级**：不切掉的话 `v0.14.5+build.7`
+    // 会比 `0.14.5` 多出一个数字组 [.., 7] > [.., 0] ⇒ 每轮检查都报"发现新版"，
+    // 随后去要 `…-v0.14.5+build.7-arm64.apk` 必然不存在，最终把"版本号写法"错报成
+    // "没有适配本机架构的包"（与 0.14.6 修掉的那类错误归类同源）。
+    fun parts(v: String) =
+      Regex("\\d+").findAll(stripPrereleaseSuffix(v.substringBefore('+'))).map { it.value.toLongOrNull() ?: 0L }.toList()
     val a = parts(tag); val b = parts(current)
     for (i in 0 until maxOf(a.size, b.size)) {
       val x = a.getOrElse(i) { 0L }; val y = b.getOrElse(i) { 0L }
+      if (x != y) return x > y
+    }
+    // issue #1365：核心数字相同**不等于**同版本——预发布段必须单独比。
+    // 旧实现在这里直接 return false：`v0.14.2-rc.2` 与 `0.14.2-rc.1` 都归约成 [0,14,2]，
+    // 于是 rc 用户被永久钉在当前 rc；正式版对 rc 用户同样判「已是最新」。
+    val preA = prereleaseOf(tag); val preB = prereleaseOf(current)
+    return when {
+      preA == null && preB == null -> false   // 同核心、都无预发布段 = 同版本
+      preA == null -> true                    // 正式版 > 同核心的预发布
+      preB == null -> false                   // 预发布 < 同核心的正式版
+      else -> comparePrerelease(preA, preB)
+    }
+  }
+
+  /**
+   * 预发布段：`-rc.2` → ("rc", [2])；`-SN-1-13` → ("sn", [1,13])；无白名单后缀 → null（issue #1365）。
+   *
+   * 只认 [PRERELEASE_SUFFIX] 白名单，`fx-N` 这类修订链**不在**其中——它们参与核心数字比较
+   * （`0.14.5-fx-3 > 0.14.5-fx-2`），语义与「预发布」不同。
+   */
+  internal fun prereleaseOf(v: String): Pair<String, List<Long>>? {
+    val bare = v.substringBefore('+')
+    val hit = PRERELEASE_SUFFIX.find(bare) ?: return null
+    val text = hit.value.removePrefix("-").lowercase()
+    // 不用 Kotlin 的 takeWhile 扩展：ApiLevelGuardTest 的禁用正则按名字把它整类判成
+    // java.util.stream 的同名方法（API 34），而 CharSequence 上的那个扩展是全版本安全的
+    // —— 与同文件里 isBlank 的注释同一类误报。这里用正则取族名，门禁判据不动。
+    val family = Regex("^[a-z]+").find(text)?.value ?: ""
+    val numbers = Regex("\\d+").findAll(text).map { it.value.toLongOrNull() ?: 0L }.toList()
+    return family to numbers
+  }
+
+  /** 两个预发布段的先后（SemVer：先比族名，再逐位比数字；缺省位补 0）。 */
+  private fun comparePrerelease(
+    a: Pair<String, List<Long>>,
+    b: Pair<String, List<Long>>,
+  ): Boolean {
+    if (a.first != b.first) return a.first > b.first
+    for (i in 0 until maxOf(a.second.size, b.second.size)) {
+      val x = a.second.getOrElse(i) { 0L }; val y = b.second.getOrElse(i) { 0L }
       if (x != y) return x > y
     }
     return false
   }
 
   /**
+   * 下载重定向的最终域白名单（#513）：直连与镜像域名之外的一律放弃该线路走下一条。
+   * 旧实现 `instanceFollowRedirects = true` 无白名单——镜像被劫持 302 到任意域会直接跟随
+   * （对照 linux-bootstrap 的 github.js assertResponse，同为下载链标准应对齐）。
+   */
+  internal val ALLOWED_DOWNLOAD_HOSTS = setOf(
+    "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com",
+    "gh-proxy.com", "ghfast.top", "ghproxy.net",
+  )
+
+  /** 纯判据（JVM 单测）：跟随至多 maxHops 跳后，每个中间/最终 URL 的 host 是否都在白名单内。 */
+  internal fun redirectChainAllowed(hops: List<String>, allowed: Set<String> = ALLOWED_DOWNLOAD_HOSTS): Boolean =
+    hops.isNotEmpty() && hops.all { raw ->
+      val host = try { URL(raw).host.lowercase() } catch (_: Exception) { return@all false }
+      host in allowed
+    }
+
+  /**
    * 通过镜像链把 GitHub 资产 URL 逐级尝试下载到目标文件（.tmp → rename 原子落盘）。
    *
    * 前缀表与确认链**同一份**（[MIRROR_PREFIXES]）：查版本与下 APK 若走不同线路集合，
    * 就会出现"能查到新版却下不下来"这种介于两者之间的状态，而没有任何一层为它负责。
+   *
+   * @param allowMirrors false = 只允许官方直连（#513：元数据缺 sha256 时，第三方镜像产物
+   *   无摘要可校验、直通安装器——fail-closed，宁可下载失败也不裸奔）。
+   * @param isActive stops an invalidated attempt before further reads or publication.
+   * @param publishIfActive serializes the final move with the owner's generation change.
+   * @param connectionFactory transport test seam; production uses verified redirects.
    */
-  fun download(url: String, dest: File, onProgress: (percent: Int) -> Unit): String? {
+  fun download(
+    url: String,
+    dest: File,
+    onProgress: (percent: Int) -> Unit,
+    allowMirrors: Boolean = true,
+    isActive: () -> Boolean = { true },
+    publishIfActive: (() -> Unit) -> Boolean = { publish -> publish(); true },
+    connectionFactory: (String) -> HttpURLConnection? = ::openRedirectVerified,
+  ): String? {
     val path = url.removePrefix("https://github.com/")
-    for (mirror in MIRROR_PREFIXES) {
+    val prefixes = if (allowMirrors) MIRROR_PREFIXES else listOf(MIRROR_PREFIXES[0])
+    for (mirror in prefixes) {
+      if (!isActive()) return null
       val candidate = if (mirror == MIRROR_PREFIXES[0]) url else mirror + path
+      var conn: HttpURLConnection? = null
+      var ownedTemporary: File? = null
       try {
-        val conn = URL(candidate).openConnection(Proxy.NO_PROXY) as HttpURLConnection
-        conn.connectTimeout = 10_000
-        conn.readTimeout = 30_000
-        conn.instanceFollowRedirects = true
-        if (conn.responseCode != 200) { conn.disconnect(); continue }
+        conn = connectionFactory(candidate) ?: continue
+        if (conn.responseCode != 200) continue
         val total = conn.contentLengthLong
-        dest.parentFile?.mkdirs()
-        val tmp = File(dest.parentFile, dest.name + ".tmp")
+        val parent = dest.absoluteFile.parentFile
+        parent.mkdirs()
+        // A failed or cancelled attempt owns only this unique staging file.
+        val tmp = File.createTempFile("dsh-apk-" + dest.name + ".", ".tmp", parent)
+        ownedTemporary = tmp
         tmp.outputStream().use { out ->
           conn.inputStream.use { input ->
             val buf = ByteArray(128 * 1024)
             var read = 0L
             var lastPct = -1
             while (true) {
+              if (!isActive()) return null
               val n = input.read(buf)
               if (n < 0) break
+              if (!isActive()) return null
               out.write(buf, 0, n)
               read += n
               if (total > 0) {
@@ -733,15 +995,45 @@ object UpdateChecker {
             }
           }
         }
-        if (dest.exists()) dest.delete()
-        if (!tmp.renameTo(dest)) { tmp.copyTo(dest, overwrite = true); tmp.delete() }
-        conn.disconnect()
+        if (!isActive()) return null
+        // The owner serializes this publication with invalidation of its generation.
+        if (!publishIfActive {
+          if (!AtomicFileReplace.publish(tmp, dest)) throw java.io.IOException("APK publication failed")
+        }) return null
         return candidate
       } catch (e: Exception) {
         android.util.Log.w(TAG, "download via $mirror failed: " + (e.message ?: e.javaClass.simpleName))
-        File(dest.parentFile, dest.name + ".tmp").delete()
+      } finally {
+        runCatching { conn?.disconnect() }
+        ownedTemporary?.delete()
       }
     }
+    return null
+  }
+
+  /**
+   * 打开连接并手动跟随重定向（≤3 跳），每一跳的最终域都必须在 [ALLOWED_DOWNLOAD_HOSTS] 内；
+   * 越域或超跳数返回 null（调用方按"该线路失败"走下一条镜像，绝不盲跟）。
+   */
+  private fun openRedirectVerified(startUrl: String): HttpURLConnection? {
+    var current = startUrl
+    var conn: HttpURLConnection? = null
+    for (hop in 0..3) {
+      if (!redirectChainAllowed(listOf(current))) return null
+      conn = try { URL(current).openConnection(Proxy.NO_PROXY) as HttpURLConnection } catch (_: Exception) { return null }
+      conn.connectTimeout = 10_000
+      conn.readTimeout = 30_000
+      conn.instanceFollowRedirects = false
+      val code = try { conn.responseCode } catch (_: Exception) { conn.disconnect(); return null }
+      if (code in 300..399) {
+        val location = conn.getHeaderField("Location") ?: run { conn.disconnect(); return null }
+        conn.disconnect()
+        current = if (location.startsWith("http")) location else URL(URL(current), location).toString()
+        continue
+      }
+      return conn
+    }
+    conn?.disconnect()
     return null
   }
 
@@ -763,6 +1055,62 @@ object UpdateChecker {
   /** 安装未知应用来源权限是否已持有（manifest 已声明 REQUEST_INSTALL_PACKAGES）。 */
   fun canInstall(context: Context): Boolean =
     if (android.os.Build.VERSION.SDK_INT >= 26) context.packageManager.canRequestPackageInstalls() else true
+
+  /**
+   * #675：发布者连续性校验——待装 APK 的签名证书必须与**当前安装**的本应用一致。
+   *
+   * 为什么锚在「已安装证书」而不是硬编码指纹：本项目的签名密钥随仓公开是**既定选择**
+   * （开源项目、不上 Google Play，keystore 不修改/不轮换），所以硬编码那把密钥的指纹等于
+   * 没有校验（任何拿到仓的人都能签出同证书的包）。已安装应用的证书是发行链可信的最小事实，
+   * 且**不要求存在第二把密钥**。读不出（解析失败/无签名块）一律 false——fail-closed。
+   *
+   * 覆盖的真实形态：更新包被换成**异证书**的包（第三方重签、投毒镜像）。它挡不住
+   * 「有人拿公开密钥重签同证书包 + 同时改摘要」——那个形态只能靠官方发布面收敛，
+   * 如实登记在 `docs/AGENTS/known-gaps.md`，不在本函数射程内。
+   *
+   * 纯判据部分 [signerDigestsMatch] JVM 单测直接覆盖；archive/installed 证书读取走
+   * PackageManager，属设备面（本批未做设备验证，PR 显式标注，发版候选前补验）。
+   */
+  fun signerContinuityHolds(context: Context, apk: File): Boolean = try {
+    val pm = context.packageManager
+    signerDigestsMatch(
+      archiveSignerCertificates(pm, apk.absolutePath),
+      installedSignerCertificates(pm, context.packageName),
+    )
+  } catch (_: Throwable) {
+    false
+  }
+
+  /** 纯判据（JVM 单测）：两组证书 SHA-256 摘要集合一致（顺序无关；任一侧为空即不一致）。 */
+  internal fun signerDigestsMatch(incoming: List<ByteArray>, installed: List<ByteArray>): Boolean {
+    if (incoming.isEmpty() || installed.isEmpty()) return false
+    return incoming.map { sha256Hex(it) }.sorted() == installed.map { sha256Hex(it) }.sorted()
+  }
+
+  private fun signerFlags(): Int =
+    if (android.os.Build.VERSION.SDK_INT >= 28) android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES
+    else @Suppress("DEPRECATION") android.content.pm.PackageManager.GET_SIGNATURES
+
+  private fun archiveSignerCertificates(pm: android.content.pm.PackageManager, path: String): List<ByteArray> {
+    val pi = pm.getPackageArchiveInfo(path, signerFlags()) ?: return emptyList()
+    return signerCertificatesOf(pi)
+  }
+
+  private fun installedSignerCertificates(pm: android.content.pm.PackageManager, pkg: String): List<ByteArray> {
+    val pi = pm.getPackageInfo(pkg, signerFlags()) ?: return emptyList()
+    return signerCertificatesOf(pi)
+  }
+
+  private fun signerCertificatesOf(pi: android.content.pm.PackageInfo): List<ByteArray> =
+    if (android.os.Build.VERSION.SDK_INT >= 28) {
+      pi.signingInfo?.apkContentsSigners?.map { it.toByteArray() } ?: emptyList()
+    } else {
+      @Suppress("DEPRECATION")
+      pi.signatures?.map { it.toByteArray() } ?: emptyList()
+    }
+
+  private fun sha256Hex(bytes: ByteArray): String =
+    java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
   /**
    * 拉起「安装未知应用」授权页（普通 startActivity；返回时 onResume 结算，与目录授权同一惯例）。
@@ -789,17 +1137,28 @@ object UpdateChecker {
     }
   }
 
-  /** FileProvider URI + ACTION_VIEW 唤起系统安装器（签名不匹配由系统拒绝）。 */
-  fun invokeInstaller(activity: android.app.Activity, apk: File): Boolean = try {
-    val uri = FileProvider.getUriForFile(activity, activity.packageName + ".fileprovider", apk)
-    val intent = Intent(Intent.ACTION_VIEW).apply {
-      setDataAndType(uri, "application/vnd.android.package-archive")
-      addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+  /**
+   * FileProvider URI + ACTION_VIEW 唤起系统安装器。
+   * #675：唤起前**强制**做发布者连续性校验（[signerContinuityHolds]）——这是安装链的最后
+   * 一道闸，任何调用方都绕不过。正常路径由 ApkUpdateAction 先做过并给出更具体的用户文案；
+   * 这里再拦一次是防未来新增调用方直接打穿。
+   */
+  fun invokeInstaller(activity: android.app.Activity, apk: File): Boolean {
+    if (!signerContinuityHolds(activity, apk)) {
+      LogCollector.log(TAG, "install aborted: signer continuity check failed (#675)")
+      return false
     }
-    activity.startActivity(intent)
-    true
-  } catch (e: Exception) {
-    LogCollector.log(TAG, "installer invoke failed: " + (e.message ?: e.javaClass.simpleName))
-    false
+    return try {
+      val uri = FileProvider.getUriForFile(activity, activity.packageName + ".fileprovider", apk)
+      val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(uri, "application/vnd.android.package-archive")
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+      }
+      activity.startActivity(intent)
+      true
+    } catch (e: Exception) {
+      LogCollector.log(TAG, "installer invoke failed: " + (e.message ?: e.javaClass.simpleName))
+      false
+    }
   }
 }

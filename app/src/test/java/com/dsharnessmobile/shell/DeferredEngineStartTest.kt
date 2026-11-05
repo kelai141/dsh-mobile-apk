@@ -213,11 +213,15 @@ class DeferredEngineStartTest {
       "start() 不得再静默丢弃启动请求（val token = flowOwnership.begin() ?: return）",
       flow.contains("val token = flowOwnership.begin() ?: return"),
     )
-    val start = flow.substringAfter("fun start() {").substringBefore("private fun canRunEngineWork")
-    assertTrue("start() 必须显式分支处理 begin() 返回 null", start.contains("val token = flowOwnership.begin()"))
+    val start = flow.substringAfter("fun start(").substringBefore("private fun canRunEngineWork")
+    // begin() 现在带一个入口参数（探针用）；断言允许任意实参，但必须仍是「先取 token 再判 null」。
+    assertTrue(
+      "start() 必须显式分支处理 begin() 返回 null",
+      Regex("""val token = flowOwnership\.begin\([^)]*\)""").containsMatchIn(start),
+    )
     assertTrue(
       "begin() 拿不到所有权时必须走如实处置（留痕 + 有界等待）",
-      start.contains("deferEngineStartWhileSnapshotTransactionBusy()"),
+      start.contains("deferEngineStartWhileSnapshotTransactionBusy("),
     )
     assertTrue(
       "destroyed 与非 destroyed 必须分开处置（前者不启动，后者等待）",
@@ -243,7 +247,7 @@ class DeferredEngineStartTest {
       assertTrue("必须落 boot-fail stage=" + stage, flow.contains("\"" + stage + "\""))
     }
     // 反证：不得只留一句 LogCollector.log 就算完（那正是「零回执」的形态）。
-    val defer = flow.substringAfter("private fun deferEngineStartWhileSnapshotTransactionBusy()")
+    val defer = flow.substringAfter("private fun deferEngineStartWhileSnapshotTransactionBusy(")
       .substringBefore("private val deferredStartRunnable")
     assertTrue("处置路径必须写 boot-fail", defer.contains("LogCollector.writeBootFail("))
   }
@@ -252,7 +256,7 @@ class DeferredEngineStartTest {
   @Test
   fun theHostSideWaitReadsTheCrossProcessJournal() {
     val flow = codeOnly(source("EngineStartFlow.kt"))
-    val defer = flow.substringAfter("private fun deferEngineStartWhileSnapshotTransactionBusy()")
+    val defer = flow.substringAfter("private fun deferEngineStartWhileSnapshotTransactionBusy(")
       .substringBefore("private val deferredStartRunnable")
     assertTrue("必须读事务 journal（跨进程真源）", defer.contains("SnapshotTransaction.readMarker(activity.filesDir)"))
     val safe = flow.substringAfter("private fun performSafeModeRestart()")

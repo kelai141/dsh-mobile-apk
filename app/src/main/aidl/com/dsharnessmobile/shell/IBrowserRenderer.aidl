@@ -32,7 +32,15 @@ interface IBrowserRenderer {
   boolean dispatchKey(String tabId, int keyCode);
   // MotionEvent 不在 SDK framework.aidl 清单里，无法直接过 AIDL——传标量字段、远端重建。
   // 单指手势（点按/拖动/滚动）足够；多指批量留待接线 PR 按需扩展。
-  boolean forwardMotion(String tabId, int action, long downTime, long eventTime,
+  //
+  // 本方法是每帧触摸路径（一次滑动 20 余条事件），故为 oneway：
+  //  - 返回值语义丢失：调用方拿不到「远端是否消费」，触摸回调恒按已消费处理
+  //    （否则丢一次 MOVE 就会被系统当成手势结束）；投递结果不计入任何 UI 线程。
+  //  - 主进程主线程只做一次非阻塞 Binder 投递，不再等待渲染进程主线程。
+  //  - 渲染侧负责合帧（MotionCoalescer）：DOWN/UP/CANCEL 保序、连续 MOVE 只留最后一条。
+  // dispatchTap / dispatchKey 刻意保持同步 boolean：它们是一次性工具调用，返回值要如实
+  // 报给模型，且不在每帧触摸路径上。
+  oneway void forwardMotion(String tabId, int action, long downTime, long eventTime,
       float x, float y, float pressure, float size, int metaState);
   // 截图：PNG 写入给定 fd（主进程建管道读）。
   boolean capture(String tabId, in ParcelFileDescriptor fd, int maxWidthPx, int maxHeightPx);

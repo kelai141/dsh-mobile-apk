@@ -10,6 +10,8 @@ import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
+import { gunzipSync } from 'node:zlib'
 import test from 'node:test'
 
 import {
@@ -200,6 +202,37 @@ test('B：重打包是幂等的（再跑一次字节不变）', () => {
     assert.equal(readFileSync(one.tgz).toString('binary'), once, '重打包不幂等 ⇒ 每跑一次就换一份字节')
   } finally {
     one.cleanup()
+  }
+})
+
+test('B：跨秒真实重打包仍逐字节相同，gzip 头不携带时间戳或文件名', async (t) => {
+  const files = {
+    'package/package.json': '{"name":"x","version":"1.0.0","dependencies":{"b":"1","a":"2"}}\n',
+    'package/lib/index.js': 'exports.x = 1\n',
+  }
+  const one = makeTarball(files)
+  const two = makeTarball(files)
+  try {
+    canonicalizePackedManifest(one.tgz, 'first-second')
+    const first = readFileSync(one.tgz)
+    const firstSecond = Math.floor(Date.now() / 1000)
+    // 不改系统时间、不伪造头字节：真实等待跨秒，再走同一条完整重打包路径。
+    await delay(1100)
+    assert.ok(Math.floor(Date.now() / 1000) > firstSecond, '第二次重打包必须发生在下一秒以后')
+    canonicalizePackedManifest(two.tgz, 'later-second')
+    const second = readFileSync(two.tgz)
+    const firstMtime = first.readUInt32LE(4)
+    const secondMtime = second.readUInt32LE(4)
+    const samePayload = gunzipSync(first).equals(gunzipSync(second))
+    t.diagnostic(JSON.stringify({ firstMtime, secondMtime, samePayload }))
+    assert.equal(samePayload, true, '解压后的 tar 字节必须相同，排除内容变化')
+    assert.deepEqual(second, first, '跨秒重打包必须逐字节相同；不能只比较归一化后的摘要')
+    assert.equal(firstMtime, 0, 'gzip mtime 必须固定为 0')
+    assert.equal(secondMtime, 0, '跨秒后 gzip mtime 仍必须为 0')
+    assert.equal(first[3] & 8, 0, 'gzip 不得携带第一个临时文件名')
+    assert.equal(second[3] & 8, 0, 'gzip 不得携带第二个临时文件名')
+  } finally {
+    one.cleanup(); two.cleanup()
   }
 })
 

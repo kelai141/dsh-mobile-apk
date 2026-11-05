@@ -1,6 +1,7 @@
 package com.dsharnessmobile.shell
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -164,4 +165,65 @@ class AppLanguageTest {
     assertTrue("非三档值必须丢弃", script.contains("if(next!=='zh'&&next!=='en')return"))
   }
 
+  /**
+   * 文案面（0.14.11）：用户可见的原生提示必须中英双语。
+   *
+   * 现象：把语言切成英文后，无障碍设置失败的提示与插件页的「配置已保存」仍然只有中文。
+   * 判据钉在源码形态上：这两处必须走双语 helper，旧的单语写法不得回来。
+   */
+  @Test
+  fun userFacingToastsCarryBothLanguages() {
+    val main = source("src/main/java/com/dsharnessmobile/shell/MainActivity.kt")
+    assertTrue("无障碍设置失败提示必须有英文", main.contains("Could not open system settings"))
+    assertFalse(
+      "不得回到只有中文的无障碍提示",
+      main.contains("Toast.makeText(this, \"无法打开系统设置"),
+    )
+
+    val plugins = source("src/main/java/com/dsharnessmobile/shell/PluginManagementPage.kt")
+    assertTrue("插件配置保存提示必须有英文", plugins.contains("Configuration saved: "))
+    assertTrue("应用结果的缺省值也要双语", plugins.contains("t(\"已应用\", \"applied\")"))
+  }
+
+  private fun source(relative: String): String {
+    val candidates = listOf(java.io.File(relative), java.io.File("app/" + relative))
+    val file = candidates.firstOrNull { it.isFile }
+      ?: throw AssertionError("找不到源码 " + relative + "（工作目录 = " + java.io.File(".").absolutePath + "）")
+    return file.readText()
+  }
+
+  /**
+   * 测试通知也是用户看得见的（「发送测试通知」按钮），标题/正文必须随语言走。
+   * 现象：切英文后系统通知栏里那五条仍是中文（真机截图确认过）。判据钉在源码形态上。
+   */
+  @Test
+  fun testNotificationsCarryBothLanguages() {
+    val center = source("src/main/java/com/dsharnessmobile/shell/NotifyCenter.kt")
+    assertTrue("测试提问必须双语", center.contains("\"测试提问\""))
+    assertTrue("测试会话必须双语", center.contains("\"Test session\""))
+    assertTrue("后台动态必须双语", center.contains("\"Background activity test\""))
+    assertTrue("审批标题必须双语", center.contains("needs approval"))
+    assertTrue("审批副标题必须双语", center.contains("Applies once"))
+    assertFalse(
+      "不得回到只有中文的测试通知",
+      center.contains("NotifyQuestion(\"q1\", \"测试提问\", \"现在方便吗？\""),
+    )
+  }
+
+  /**
+   * 浮层面板是用户天天开的原生面（停止/发送/批准一次…），此前整页只有中文。
+   * 判据钉在源码形态上：面板必须走双语入口，且关键动作都有英文。
+   */
+  @Test
+  fun overlayPanelCopyCarriesBothLanguages() {
+    val panel = source("src/main/java/com/dsharnessmobile/shell/OverlayPanel.kt")
+    assertTrue("面板必须有双语入口", panel.contains("private fun t(zh: String, en: String): String = UiText.t(svc, zh, en)"))
+    assertTrue("停止必须双语", panel.contains("\"Stop current task\""))
+    assertTrue("批准一次必须双语", panel.contains("\"Allow once\""))
+    assertTrue("等待审批必须双语", panel.contains("\"Waiting for approval…\""))
+    assertFalse(
+      "不得回到只有中文的面板动作",
+      panel.contains("pendingChip(\"批准一次\""),
+    )
+  }
 }

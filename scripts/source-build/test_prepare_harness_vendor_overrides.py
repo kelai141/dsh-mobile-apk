@@ -5,12 +5,14 @@ from __future__ import annotations
 import importlib.util
 import os
 import pathlib
+import sys
 import tempfile
 import unittest
 from unittest import mock
 
 
 SCRIPT = pathlib.Path(__file__).with_name("prepare-harness-vendor-overrides.py")
+sys.path.insert(0, str(SCRIPT.parent))
 SPEC = importlib.util.spec_from_file_location("prepare_harness_vendor_overrides", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)

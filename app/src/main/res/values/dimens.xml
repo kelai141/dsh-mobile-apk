@@ -12,6 +12,10 @@
   <dimen name="ds_radius_sm">8dp</dimen>
   <dimen name="ds_radius_md">16dp</dimen>
   <dimen name="ds_radius_card">18dp</dimen>
+  <!-- 设置卡片外壳圆角：与 WebView 侧设置页卡片 .dsh-screen-control-card 的 12px 同值
+       （上游 dsw-radius-md = 12px）。原生侧原有 ds_radius_sm=8dp 对应 dsw-radius-sm，
+       ds_radius_md=16dp 对应的是 dsw-radius-lg，中间这一档此前缺位。 -->
+  <dimen name="ds_radius_settings_card">12dp</dimen>
   <dimen name="ds_radius_pill">999dp</dimen>
   <dimen name="ds_radius_icon">18dp</dimen>
   <dimen name="ds_progress_height">5dp</dimen>

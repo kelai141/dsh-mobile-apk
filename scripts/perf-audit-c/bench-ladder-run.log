@@ -1,0 +1,9 @@
+# ladder 2026-11-02T21:40:01.6128639+08:00 archive=D:\coding\dsh-mobile\dsh-mobile-apk\app\src\main\assets\snapshot.tar.xz
+Exception in thread "main" java.io.FileNotFoundException: C:\Users\17765\AppData\Local\Temp\dsh-perf-c-ladder\nopath-1\usr\lib\libgcrypt.so (系统找不到指定的路径�?) 	at java.base/java.io.FileOutputStream.open0(Native Method) 	at java.base/java.io.FileOutputStream.open(FileOutputStream.java:293) 	at java.base/java.io.FileOutputStream.<init>(FileOutputStream.java:235) 	at java.base/java.io.FileOutputStream.<init>(FileOutputStream.java:184) 	at ExtractBench.main(ExtractBench.java:80)
+  wall-ms=1023 ondisk-files=0 ondisk-bytes=
+Exception in thread "main" java.io.FileNotFoundException: C:\Users\17765\AppData\Local\Temp\dsh-perf-c-ladder\nopath-2\usr\lib\libgcrypt.so (系统找不到指定的路径�?) 	at java.base/java.io.FileOutputStream.open0(Native Method) 	at java.base/java.io.FileOutputStream.open(FileOutputStream.java:293) 	at java.base/java.io.FileOutputStream.<init>(FileOutputStream.java:235) 	at java.base/java.io.FileOutputStream.<init>(FileOutputStream.java:184) 	at ExtractBench.main(ExtractBench.java:80)
+  wall-ms=953 ondisk-files=0 ondisk-bytes=
+Exception in thread "main" java.io.FileNotFoundException: C:\Users\17765\AppData\Local\Temp\dsh-perf-c-ladder\nopath-3\usr\lib\libgcrypt.so (系统找不到指定的路径�?) 	at java.base/java.io.FileOutputStream.open0(Native Method) 	at java.base/java.io.FileOutputStream.open(FileOutputStream.java:293) 	at java.base/java.io.FileOutputStream.<init>(FileOutputStream.java:235) 	at java.base/java.io.FileOutputStream.<init>(FileOutputStream.java:184) 	at ExtractBench.main(ExtractBench.java:80)
+  wall-ms=1273 ondisk-files=0 ondisk-bytes=
+variant=noperms entries=53178 regular=44568 symlink=1017 dir=7593 bytes=750434969 ms=180783 mbps=4.0
+  wall-ms=182038 ondisk-files=44568 ondisk-bytes=750434969

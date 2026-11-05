@@ -69,7 +69,7 @@ MainActivity 33 / OverlayService 20 / **BrowserHost 18** / OverlayPanel 15 / Con
 ## 6. 相关构建配置（与 android API 面配套，build.gradle.kts 实测）
 
 - `androidResources.noCompress += "xz"`（build.gradle.kts 注释：snapshot.tar.xz 已 xz 压缩，AAPT 二次压缩会破坏 openFd/流式读取）——SnapshotExtractor 依赖拿到原始 xz 字节流。
-- `usesCleartextTraffic="true"`（AndroidManifest.xml application 节点）：引擎是 http://127.0.0.1:3080 明文回环，WebView 与直连 RPC 均依赖。
+- `usesCleartextTraffic="true"`（AndroidManifest.xml application 节点）：引擎是 `http://127.0.0.1:<port>` 明文回环（默认 4145，实际端口见 `files/.engine-endpoint.json`），WebView 与直连 RPC 均依赖。
 - targetSdk 34 下前台服务启动须声明 foregroundServiceType（dataSync，EngineService/开机自启路径）。
 
 ## 7. 无障碍 API（0.13.5 W4 新增，全量参考见 ACCESSIBILITY-API.md）

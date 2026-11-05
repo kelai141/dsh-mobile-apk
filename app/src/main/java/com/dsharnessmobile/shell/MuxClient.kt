@@ -44,6 +44,29 @@ class MuxClient(
     private const val TAG = "dsh-overlay-mux"
     private const val GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
     private const val MAX_FRAME = 8 * 1024 * 1024
+
+    /**
+     * 握手阶段的 socket 读超时（issue #1401）。
+     *
+     * 旧实现从不设置 `soTimeout`：网关 accept 后不回 upgrade 时，`readLine(ins)` 永久阻塞——
+     * 读线程卡死，重连循环里的退避与自愈都不进入，审批卡与提问卡静默不弹，直到重启应用。
+     */
+    private const val HANDSHAKE_TIMEOUT_MS = 5_000
+
+    /**
+     * 帧循环的读超时（issue #1401）：网关每 30 秒发一次 ping，两拍没有帧即认定连接半开
+     * （引擎被杀而 TCP 未 RST 是最常见的形态）。超时抛 [java.net.SocketTimeoutException]，
+     * 由 [loop] 的 catch 计入失败并走退避——与「连接被拒」同一条自愈路径。
+     */
+    private const val READ_TIMEOUT_MS = 60_000
+    /**
+     * 一条**消息**（可能由多个分片组成）的累计上限（issue #1402）。
+     *
+     * [MAX_FRAME] 只管单帧：上游把一条消息拆成 N 个 `fin=0` 分片时，旧实现让 [textBuf]
+     * 一直长到 MAX_FRAME×N——异常或恶意上游能把壳侧直接撑到 OOM。与单帧同量级即可：
+     * 正常的 `$events` 帧远小于这个数，超限说明对端不按协议说话。
+     */
+    internal const val MAX_MESSAGE = 8 * 1024 * 1024
     /** $events 流的默认 streamId（悬浮球）。 */
     const val STREAM_ID = "dsh-overlay-events"
   }
@@ -129,6 +152,8 @@ class MuxClient(
     if (activePort <= 0) throw java.io.IOException("engine endpoint is not bound")
     val s = Socket()
     s.connect(InetSocketAddress(host, activePort), 3000)
+    // issue #1401：connect 只超时「建连」，不回包的服务端仍能让后面的 read 永久阻塞。
+    s.soTimeout = HANDSHAKE_TIMEOUT_MS
     socket = s
     val key = Base64.encodeToString(ByteArray(16).also { SecureRandom().nextBytes(it) }, Base64.NO_WRAP)
     // W3：upgrade 同过 connection 鉴权栅栏——握手带浏览器 Cookie（现取，重连吃到刷新后的值）。
@@ -171,7 +196,14 @@ class MuxClient(
     // 连上即 open $events 流（服务端无 open 不会转发任何事件）
     sendFrame(out, 0x1, streamOpen.toByteArray(Charsets.UTF_8))
     Log.i(TAG, "mux connected ($path, \$events open, streamId=" + streamOpen.length + "b)")
-    frameLoop(ins, out)
+    // issue #1401：握手已完成，换成帧读超时——半开连接不再把读线程永久挂住。
+    s.soTimeout = READ_TIMEOUT_MS
+    try {
+      frameLoop(ins, out)
+    } catch (timeout: java.net.SocketTimeoutException) {
+      // 超时按失败走退避；message 固定成可读原因，日志里能直接看出是「半开」而不是 EOF。
+      throw java.io.IOException("frame read timeout (" + READ_TIMEOUT_MS + "ms)", timeout)
+    }
   }
 
   private fun expectedAccept(key: String): String {
@@ -214,8 +246,8 @@ class MuxClient(
       val payload = ByteArray(len.toInt()).also { readN(ins, it) }
       if (mask != null) for (i in payload.indices) payload[i] = (payload[i].toInt() xor mask[i % 4].toInt()).toByte()
       when (opcode) {
-        0x1 -> { textBuf.reset(); textBuf.write(payload); if (fin) emitText() }
-        0x0 -> { textBuf.write(payload); if (fin) emitText() }
+        0x1 -> { textBuf.reset(); appendText(payload); if (fin) emitText() }
+        0x0 -> { appendText(payload); if (fin) emitText() }
         // 服务端**正常**收流（close 帧）：这不是「连不上」，必须与失败分开处理——
         // 见 [MuxServerClosedException] 与重连循环里的快速重连分支。
         0x8 -> { sendFrame(out, 0x8, payload); throw MuxServerClosedException("server close") }
@@ -224,6 +256,18 @@ class MuxClient(
         else -> {}
       }
     }
+  }
+
+  /**
+   * 写入文本分片并守住**跨分片累计**上限（issue #1402）：超限即重置缓冲并断开，
+   * 不把半条消息交给下游（走 `loop()` 的失败路径重连，与其它协议错误同一处置）。
+   */
+  internal fun appendText(payload: ByteArray) {
+    if (textBuf.size().toLong() + payload.size > MAX_MESSAGE) {
+      textBuf.reset()
+      throw Exception("message too big (> " + MAX_MESSAGE + " bytes across fragments)")
+    }
+    textBuf.write(payload)
   }
 
   private fun emitText() {

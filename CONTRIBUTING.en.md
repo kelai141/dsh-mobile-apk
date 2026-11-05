@@ -50,6 +50,53 @@ Match evidence to risk:
 
 Paste the command and the key output. If a test was not run, say it was not run.
 
+## Device acceptance
+
+A UI, shell-behavior or security-sensitive change must carry a device-acceptance section **in the PR body**. Use exactly one of the two states below; leave it empty or write both and the review is rejected. The state block is a fact recorded in the body — writing it needs no special permission.
+
+### State A: acceptance was run
+
+State the evidence and the verdict:
+
+- Three evidence elements: **tree@sha** · **device serial** · **case name**; attach screenshots as a path or link;
+- Verdict: `PASS`, or `FAIL` with a reason.
+
+### State B: request acceptance
+
+If you cannot run a device yourself, do not stop at "no device verification". Write a card someone else can execute:
+
+- Device prerequisites: Android version / package (versionName or head sha) / permission state;
+- Steps: 1. 2. 3. … — forward-looking and executable, down to the command or the tap target;
+- Expected observable: concrete values, copy, log lines, controls that must appear;
+- What failure looks like: counterexamples.
+
+### Four rules
+
+1. **All three evidence elements are mandatory** (tree@sha + device serial + case name): without the sha nobody knows which commit was verified.
+2. **Expectations must be values or copy**, never "works", "fine" or "ok": such words cannot go red, so the expectation does not exist.
+3. **The package version in the card must match what gets installed** (head sha or versionName): install a different build and the result proves nothing about this PR.
+4. **On FAIL, commit on the same branch and force-push; do not open a new PR**: this keeps review and acceptance history together instead of splitting one change into unrelated threads.
+
+### Who does what
+
+| Role | Does | Permission needed |
+|---|---|---|
+| Contributor | Writes "State A (verified, with evidence)" or "State B (request acceptance, with forward steps / expectations / failure samples)" **in the PR body** | None |
+| Maintainer | Reads the card, then applies `needs-device-verification` as an **internal scheduling marker** | triage |
+| Acceptance specialist | Only handles labelled PRs; changes no code, does not merge, writes back `PASS`/`FAIL` and the raw output | None |
+
+**The state block is the fact in the body; the label is only the maintainer's index.** Therefore:
+
+- Contributors cannot apply labels and do not need to — putting your card in the body is enough;
+- The other way round, **without a card the maintainer cannot schedule anything**: a PR with a label but no State B card is sent back for one;
+- Maintainers add and remove the label; do not pester for it — writing a complete card is more useful than asking once more.
+
+The specialist changes no code and does not merge; they only write back `PASS`/`FAIL` with the raw output (commands, key stdout, screenshot paths).
+
+### A new commit invalidates the card
+
+The card is bound to a sha. After you add a commit the old evidence no longer points at the current HEAD, so write a fresh State B card instead of reusing the previous verdict.
+
 ## Self-review before pushing
 
 Read the full diff, stage only the files that belong to the change (do not run `git add .`), and make sure these commands report nothing:

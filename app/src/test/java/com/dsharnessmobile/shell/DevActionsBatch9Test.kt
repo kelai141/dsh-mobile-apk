@@ -35,7 +35,7 @@ class DevActionsBatch9Test {
     assertTrue("真的发起了才回 true", flow.contains("return true"))
 
     val bridge = codeOnly(source("src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt"))
-    assertTrue("桥面签名必须是 Boolean", bridge.contains("fun restartEngine(): Boolean = onRestartEngine()"))
+    assertTrue("桥面签名必须是 Boolean（#686 起入口先过顶层帧门禁，委托链不变）", bridge.contains("fun restartEngine(): Boolean = trusted { onRestartEngine() }"))
     assertTrue("回调类型必须是 Boolean（不得退回 Unit/未接线桩）", bridge.contains("private val onRestartEngine: () -> Boolean"))
     // 默认实现刻意是 fail-closed 的空桩（未接线时回 false ⇒ 页面如实说「没发起」，而不是假忙碌）。
     // 真正的接线判据在下一条：MainActivity 必须把真源传进去（否则上面的桩就会一直是答案）。

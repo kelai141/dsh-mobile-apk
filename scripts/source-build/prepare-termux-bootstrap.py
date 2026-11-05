@@ -12,8 +12,11 @@ import subprocess
 import sys
 import zipfile
 
-HARNESS_COMMIT = "639ed015397290b3745d163aafe02ffee4aa3f84"
-HARNESS_VERSION = "0.2.0-rc.2"
+from harness_pin import read_harness_identity
+
+_IDENTITY = read_harness_identity()
+HARNESS_COMMIT = _IDENTITY.commit
+HARNESS_VERSION = _IDENTITY.version
 
 BOOTSTRAP_VERSION = "bootstrap-2026.09.20-r1+apt.android-7"
 BOOTSTRAP_SHA256 = "65ba578133ea2f4e5cc07234568815397cf9e1236b5da8c06ce6753cf036cc69"
@@ -134,13 +137,13 @@ def main() -> None:
     source_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source_root, text=True).strip()
     source_manifest = json.loads((source_root / "package.json").read_text(encoding="utf-8"))
     if source_commit != HARNESS_COMMIT or source_manifest.get("version") != HARNESS_VERSION:
-        raise ValueError("bootstrap assembly requires the official 0.2.0-rc.2 source")
+        raise ValueError(f"bootstrap assembly requires the official {HARNESS_VERSION} source")
     actual = hashlib.sha256(zip_path.read_bytes()).hexdigest()
     if actual != BOOTSTRAP_SHA256:
         raise ValueError(f"official Termux bootstrap SHA-256 mismatch: {actual}")
     dsh_manifest = json.loads((dsh_deploy / "package.json").read_text(encoding="utf-8"))
-    if dsh_manifest.get("name") != "@deepseek-ai/dsh" or dsh_manifest.get("version") != "0.2.0-rc.2":
-        raise ValueError("deployed DSH runtime must be @deepseek-ai/dsh@0.2.0-rc.2")
+    if dsh_manifest.get("name") != "@deepseek-ai/dsh" or dsh_manifest.get("version") != HARNESS_VERSION:
+        raise ValueError(f"deployed DSH runtime must be @deepseek-ai/dsh@{HARNESS_VERSION}")
     if not (dsh_deploy / "lib" / "bin.js").is_file() or not (dsh_deploy / "node_modules").is_dir():
         raise ValueError("deployed DSH runtime is missing its built CLI or isolated dependency tree")
     dsh_files = tree_manifest(dsh_deploy)
@@ -190,7 +193,7 @@ def main() -> None:
             "profiles": ["web", "headless"],
         },
         "deepSeekHarnessRuntime": {
-            "package": "@deepseek-ai/dsh@0.2.0-rc.2",
+            "package": f"@deepseek-ai/dsh@{HARNESS_VERSION}",
             "sourceCommit": subprocess.check_output(
                 ["git", "rev-parse", "HEAD"], cwd=source_root, text=True
             ).strip(),

@@ -325,4 +325,76 @@ class RepairToolCallParserTest {
     assertEquals("", RepairToolCallParser.displayableText("."))
     assertEquals("读取完成。", RepairToolCallParser.displayableText("读取完成。"))
   }
+
+  // issue #1014（负控）：**设备上**网关返回 "reasoning_content": null 时，Android 的 org.json
+  // 在 optString 里把 JSONObject.NULL 渲染成**字符串 "null"**（AOSP JSON.toString 走 String.valueOf，
+  // 而 NULL 的 toString 就是 "null"），isNotBlank() 对它为真 —— 空 assistant 壳因此被保留。
+  //
+  // 注意：本仓单测用的是 Maven 的 org.json:json:20240303（app/build.gradle.kts:129），它的
+  // optString(key, fallback) 对 NULL 返回 **fallback**，所以用 JSONObject.NULL 构造在 JVM 上
+  // 复现不出这条缺陷（实测：那样写修前就是绿的）。设备上真正进入生产代码的值就是字符串 "null"，
+  // 因此这里直接喂该值 —— 这才是与设备同形的输入，不是把缺陷"造"出来。
+  @Test
+  fun androidNullRenderingDoesNotKeepAnEmptyAssistantShell() {
+    val history = JSONArray()
+      .put(JSONObject().put("role", "system").put("content", "system"))
+      .put(JSONObject().put("role", "user").put("content", "fix it"))
+      .put(JSONObject().put("role", "assistant")
+        .put("content", "null")
+        .put("reasoning_content", "null")
+        .put("tool_calls", JSONArray().put(JSONObject().put("id", "call-1")
+          .put("type", "function")
+          .put("function", JSONObject().put("name", "read").put("arguments", "{}")))))
+      .put(JSONObject().put("role", "tool").put("tool_call_id", "call-1").put("content", "diag"))
+
+    val projected = RepairToolCallParser.toolResultsAsUserObservations(history)
+
+    // 期望：assistant 空壳被丢弃，只剩 system / user / 该批次的 user 观察。
+    val roles = (0 until projected.length()).map { projected.getJSONObject(it).getString("role") }
+    assertEquals(listOf("system", "user", "user"), roles)
+    for (i in 0 until projected.length()) {
+      assertFalse("不得保留内容为字面量 null 的 assistant 壳",
+        projected.getJSONObject(i).optString("content") == "null")
+      assertFalse(projected.getJSONObject(i).optString("reasoning_content") == "null")
+    }
+  }
+
+  // 守卫用例（修法落地后加）：界面的取值口径必须与历史投影侧共用同一个判定，否则第三处复发。
+  @Test
+  fun androidNullReasoningIsNotRenderedAsAThinkingCard() {
+    val answer = JSONObject().put("role", "assistant")
+      .put("content", "null")
+      .put("reasoning_content", "null")
+    assertEquals("", RepairToolCallParser.reasoningText(answer))
+    assertFalse(RepairToolCallParser.hasProviderContent(answer))
+  }
+
+  @Test
+  fun reasoningTextKeepsRealTextAndDropsOnlyTheNullRendering() {
+    assertEquals("先核对当前事实。",
+      RepairToolCallParser.reasoningText(JSONObject().put("reasoning_content", "先核对当前事实。")))
+    assertEquals("", RepairToolCallParser.reasoningText(JSONObject()))
+    assertEquals("", RepairToolCallParser.reasoningText(JSONObject().put("reasoning_content", "   ")))
+    assertTrue(RepairToolCallParser.hasProviderContent(JSONObject().put("content", "真文本")))
+    assertTrue(RepairToolCallParser.hasProviderContent(JSONObject().put("reasoning_content", "真推理")))
+  }
+
+  @Test
+  fun realReasoningContentIsStillPreserved() {
+    val history = JSONArray()
+      .put(JSONObject().put("role", "user").put("content", "fix it"))
+      .put(JSONObject().put("role", "assistant")
+        .put("content", JSONObject.NULL)
+        .put("reasoning_content", "真实推理文本")
+        .put("tool_calls", JSONArray().put(JSONObject().put("id", "call-1")
+          .put("type", "function")
+          .put("function", JSONObject().put("name", "read").put("arguments", "{}")))))
+      .put(JSONObject().put("role", "tool").put("tool_call_id", "call-1").put("content", "diag"))
+
+    val projected = RepairToolCallParser.toolResultsAsUserObservations(history)
+
+    assertEquals("assistant", projected.getJSONObject(1).getString("role"))
+    assertEquals("真实推理文本", projected.getJSONObject(1).getString("reasoning_content"))
+  }
 }
+

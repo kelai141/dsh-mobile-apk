@@ -88,7 +88,7 @@ object LogCollector {
   private const val SEGMENTS_FILE = "boot-segments.log"
 
   /** 判据文件上限：每次启动最多 3 行、单行 <200 B；超限轮转一代（.1）。 */
-  private const val SEGMENTS_MAX_BYTES = 64L * 1024
+  private const val SEGMENTS_MAX_BYTES = 64L * 1024; private val segmentsLock = Any()
 
   /**
    * 探针口径：`[perf] TOTAL calls=… totalMs=… instances=… firstAt=…ms singles=… loopP99Ms=… loopSamples=…`
@@ -209,6 +209,52 @@ object LogCollector {
     else -> SOURCE_NONE
   }
 
+
+  /**
+   * 从引擎输出中解析 loader-settle 耗时（性能审计 #6）。
+   *
+   * ── 为什么是「解析」而不是「测量」────────────────────────────────────────────
+   * loader-settle 是**引擎进程内部**的量（上游激活全部 Loader entry 的模块编译/求值链）。
+   * 壳侧只能观测到「引擎 stdout 出现了哪一行」，造不出这个数值。既有 check-boot-budget.mjs
+   * 的头注已记录：该窗口是冷启动窗口的**支配项**（设备 n=24 实测 1532.5-7288.1 ms）。
+   *
+   * ── 为什么必须能返回 null ───────────────────────────────────────────────────
+   * 出厂引擎 argv 不装 phase 探针 ⇒ 绝大多数设备上这一行**不存在**。此时必须返回 null，
+   * 由调用方写 absent=probe-not-installed，**绝不写 0 冒充**（0 会让门禁误以为「瞬间完成」）。
+   * 这与既有 t_compose_total 的 -1 口径同源，理由相同。
+   *
+   * 期望行形态（phase 探针，见 scripts/check-perf-instrumentation.mjs 的 PHASE_PROBE_MARKERS）:
+   *   [perf] phase name=loader-settle ms=1234
+   * 兼容 name=loader-settle-ms / settleMs= 两种历史写法；取**最后一次**出现（汇总行 last-wins）。
+   */
+  internal fun loaderSettleMs(text: String): Long? {
+    if (text.isEmpty()) return null
+    // issue #1342 ②：取**文本位置最靠后**的那次出现，而不是「最后跑完的那个正则」。
+    // 三个正则依次跑，旧的 `last` 会被后跑的正则无条件覆盖 —— 于是日志里同时出现历史
+    // 写法与 phase 探针时，**较早**的那个值胜出（settleMs=999 在前、
+    // name=loader-settle ms=1234 在后 → 得到 999），与上面注释声明的「最后一次出现」
+    // 恰好相反。按 m.range.first 比位置，才与文档一致。
+    var bestIndex = -1
+    var best: Long? = null
+    for (regex in LOADER_SETTLE_RES) {
+      for (m in regex.findAll(text)) {
+        val value = m.groupValues[1].toLongOrNull() ?: continue
+        if (value < 0L) continue
+        if (m.range.first > bestIndex) {
+          bestIndex = m.range.first
+          best = value
+        }
+      }
+    }
+    return best
+  }
+
+  private val LOADER_SETTLE_RES = listOf(
+    Regex("name=loader-settle[^\\n]*?ms=(-?\\d+)"),
+    Regex("name=loader-settle-ms[^\\n]*?ms=(-?\\d+)"),
+    Regex("settleMs=(-?\\d+)"),
+  )
+
   /**
    * 单行判据格式（纯函数）。**字段恒在场、未知一律 -1、绝不省字段**（T2 定稿口径）：
    *
@@ -300,8 +346,12 @@ object LogCollector {
         val deadline = System.currentTimeMillis() + PROBE_WINDOW_MS
         var sawProbe = false
         var graceAfterProbe = 0
+        // 性能审计 #6：累积本窗口读到的引擎输出（有界），供 loader-settle 解析。
+        // 上限与单次读上限同量级，避免长时间窗口把整份 engine.log 攒进内存。
+        val seen = StringBuilder()
         while (System.currentTimeMillis() < deadline) {
           val text = readEngineLogFrom(ctx, probeThreshold = probeOffset, advanced = { probeOffset = it })
+          if (seen.length < MAX_ENGINE_CHUNK) seen.append(text)
           if (text.isNotEmpty()) {
             val source = composeProbeSource(text)
             if (source != SOURCE_NONE) segComposeSource = source
@@ -331,6 +381,18 @@ object LogCollector {
         if (!sawProbe) {
           val note = if (segComposeSource == SOURCE_NONE) "probe-absent" else "probe-no-total"
           emitBootSegments(ctx, note + " source=" + segComposeSource)
+        }
+        // 性能审计 #6：loader-settle 分段。该量只能由引擎侧 phase 探针给出（壳侧造不出来），
+        // 因此**必须显式区分「拿到了」与「探针未装」**——后者如实写 absent，绝不写 0 冒充。
+        try {
+          val settle = loaderSettleMs(seen.toString())
+          BootPhaseTrace.mark(
+            ctx,
+            BootPhaseTrace.LOADER_SETTLE,
+            if (settle != null) "ms=" + settle else "absent=probe-not-installed",
+          )
+        } catch (_: Throwable) {
+          // 埋点失败不影响启动。
         }
       } catch (t: Throwable) {
         Log.w(TAG, "probe tail failed: " + (t.message ?: t.javaClass.simpleName))
@@ -419,9 +481,9 @@ object LogCollector {
 
   /**
    * 追加一行到壳侧判据文件（files/boot-segments.log，O_APPEND；超限轮转一代 .1）。
-   * 唯一写者就是壳自己 → 不存在「被别的进程从它自己的偏移覆盖」的窗口（engine.log 的教训）。
+   * 唯一**进程**写者是壳自己；但进程内两个线程（调用线程 / probe 尾线程）会同时进来，整段加锁（issue #1366）。
    */
-  private fun appendToSegmentsFile(ctx: Context, line: String) {
+  private fun appendToSegmentsFile(ctx: Context, line: String) = synchronized(segmentsLock) {
     try {
       val f = File(ctx.filesDir, SEGMENTS_FILE)
       if (f.length() > SEGMENTS_MAX_BYTES) {
@@ -474,11 +536,7 @@ object LogCollector {
     pageSideRuntime: String = PAGE_RUNTIME_UNAVAILABLE,
   ) {
     val ctx = context.applicationContext
-    val runtime = pageSideRuntime.replace('\n', ' ').replace('\r', ' ')
-    val line = BOOT_DIAG_MARK + " source=" + source +
-      " " + bootSegmentsSnapshot() +
-      " pageSideRuntime=" + runtime +
-      " detail=" + detail.replace('\n', ' ').replace('\r', ' ')
+    val line = bootDiagLine(source, detail, pageSideRuntime, bootSegmentsSnapshot())
     try {
       val f = File(ctx.filesDir, BOOT_DIAG_FILE)
       if (f.length() > BOOT_DIAG_MAX_BYTES) {
@@ -490,6 +548,17 @@ object LogCollector {
     } catch (t: Throwable) {
       Log.w(TAG, "boot diag write failed: " + (t.message ?: t.javaClass.simpleName))
     }
+  }
+
+  internal fun bootDiagLine(source: String, detail: String, pageSideRuntime: String, segments: String): String {
+    val runtime = pageSideRuntime.replace('\n', ' ').replace('\r', ' ')
+    val safeDetail = detail.replace('\n', ' ').replace('\r', ' ')
+    return EngineAuth.redact(
+      BOOT_DIAG_MARK + " source=" + source +
+        " " + segments +
+        " pageSideRuntime=" + runtime +
+        " detail=" + safeDetail,
+    )
   }
 
   /** 页面侧运行时装配状态**从壳侧不可得**时的显式标注（不得留空数组）。 */
@@ -527,8 +596,8 @@ object LogCollector {
    *
    * @param stage 失败阶段（可判别的短标识，如 `engine-start-false` / `process-died-during-boot` /
    *   `boot-budget-exceeded` / `start-flow-exception` / `snapshot-refresh-failed`）
-   * @param detail 人类可读的一句话补充（不含凭据）
-   * @param error 导致失败的异常（可为 null —— 多数失败分支是布尔判定而非异常）
+   * @param detail 人类可读的一句话补充（组装行时强制过 [EngineAuth.redact]，#673）
+   * @param error 导致失败的异常（可为 null —— 多数失败分支是布尔判定而非异常；栈同样过 redact）
    */
   fun writeBootFail(context: Context, stage: String, detail: String, error: Throwable? = null) {
     writeBootFailTo(
@@ -605,12 +674,17 @@ object LogCollector {
         error.printStackTrace(java.io.PrintWriter(sw))
         sw.toString()
       } catch (_: Throwable) { "" }
-      sb.append(" stack=").append(stack.replace('\n', '|').replace('\r', '|').take(BOOT_FAIL_STACK_MAX_CHARS))
+      sb.append(" stack=").append(
+        EngineAuth.redact(stack).replace('\n', '|').replace('\r', '|').take(BOOT_FAIL_STACK_MAX_CHARS),
+      )
     } else {
       // 显式标注「本次失败无可读异常」——绝不留空（空字段会让读的人以为漏采）。
       sb.append(" error=none(boolean-failure-path) stack=none")
     }
-    sb.append(" detail=").append(detail.replace('\n', ' ').replace('\r', ' '))
+    // #673：detail 与 stack 都在组装行内强制过 EngineAuth.redact——拒启收口（#657）把 spawn
+    // 异常的 message 原样当 detail 传入，异常消息可能携带带 token 的引擎 URL；注释里那句
+    // 「detail 不含凭据」此前只是约定没有强制。诊断包会离开进程，token 绝不能跟着走。
+    sb.append(" detail=").append(EngineAuth.redact(detail).replace('\n', ' ').replace('\r', ' '))
     return sb.toString()
   }
 
@@ -1022,13 +1096,44 @@ object LogCollector {
    *  咽喉，写前过 EngineAuth.redact——engine.log 本体不动（鉴权链依赖），脱敏只作用于这份副本。 */
   private fun appendToDayFile(ctx: Context, text: String) {
     val day = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
-    val dir = currentDir(ctx)
-    val safe = EngineAuth.redact(text)
-    val file = File(dir, "dsh-$day.log")
-    if (file.exists() && file.length() > MAX_FILE_BYTES) {
+    appendDayFile(currentDir(ctx), day, EngineAuth.redact(text))
+  }
+
+  /**
+   * 按天日志的写锁（issue #1509）。
+   *
+   * 为什么必须加锁：这份文件有**多个写者**——[log] 的调用线程、[tick] 的调度线程、以及
+   * [emitBootSegments] 的调用线程与 probe 尾线程。它们都会进「查长度 → 可能轮转 → 追加」
+   * 这串**非原子**操作：两线程交错时，轮转窗口内的写入会落到刚被 rename 走的文件句柄上
+   * （内容写进 .1.log），长度判据也会读到别人半完成的状态。与 #1366 给分段日志加的
+   * [segmentsLock] 是同一类缺陷、同一口径。
+   */
+  private val dayFileLock = Any()
+
+  /**
+   * 「查长度 → 轮转 → 追加」整段串行（issue #1509）。
+   *
+   * 判据与动作做成参数，是为了让 JVM 单测能直接判**互斥**（注入一个会等待的 rotate，
+   * 两线程同时进来时观察是否重叠），而不是靠读源码文本——判据必须能真打红。
+   *
+   * @param dir 日志目录。
+   * @param day `yyyy-MM-dd` 日期段。
+   * @param text 已脱敏的待写文本。
+   * @param shouldRotate 轮转判据（默认：文件超过 [MAX_FILE_BYTES]）。
+   * @param rotate 轮转动作（默认：三代滚动到 .1/.2）。
+   */
+  internal fun appendDayFile(
+    dir: File,
+    day: String,
+    text: String,
+    shouldRotate: (File) -> Boolean = { it.exists() && it.length() > MAX_FILE_BYTES },
+    rotate: (File) -> Unit = { file ->
       rotateDayFile(file, File(dir, "dsh-$day.1.log"), File(dir, "dsh-$day.2.log"))
-    }
-    file.appendText(safe)
+    },
+  ) = synchronized(dayFileLock) {
+    val file = File(dir, "dsh-$day.log")
+    if (shouldRotate(file)) rotate(file)
+    file.appendText(text)
   }
 
   /**

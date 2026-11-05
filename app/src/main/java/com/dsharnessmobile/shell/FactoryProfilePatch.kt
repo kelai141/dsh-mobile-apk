@@ -71,6 +71,18 @@ internal object FactoryProfilePatch {
    * 工厂安装项的启动迁移由 `EngineManager.repairProfilePatch()` 负责。
    */
   internal val RETIRED_FACTORY_ENTRIES = mapOf("dsh-undo-savepoint" to "dsh-undo-savepoint")
+  /**
+   * issue #903：退役条目的**可读报告**（进可导出诊断，不是只进开发日志）。
+   *
+   * 文案刻意用「已退役」而不是「删除你的配置」—— 前者解释了为什么，后者会让用户继续手工加回去。
+   * 并附备份文件名，用户可据此回看差异。
+   */
+  internal fun retiredRemovalReport(before: Set<String>, after: Set<String>, backupName: String): String? {
+    val removed = before - after
+    if (removed.isEmpty()) return null
+    return "已退役条目被移除（设计行为，非用户配置损坏）：" + removed.sorted().joinToString(",") +
+      "（备份 " + backupName + "）"
+  }
 
   /**
    * 旧「单点」写法的两个 id（0.14.2-fx-2 归一迁移，见 [normalizeLegacyAgentDefaultModel]）。
@@ -97,14 +109,28 @@ internal object FactoryProfilePatch {
   /** 列 0 的列表项起始：`- `、裸 `-`（行尾）都算；tab 缩进**不算**（缩进的 `-` 是子条目）。 */
   private val TOP_ITEM = Regex("""^-(?:\s|$)""")
 
+  /**
+   * 条目 id 的取值形态：**引号包裹**（`'x'` / `"x"`，允许内含空格）或裸 `\S+`。
+   *
+   * 为什么要认引号：YAML 里 `- id: 'shell-termux'` 与 `- id: shell-termux` 是**同一个值**。
+   * 旧实现三处 id 正则都用 `(\S+)` 原样取串 ⇒ 带引号的 id 与工厂件里的裸 id 不相等 ⇒
+   * merge 判它"缺失" ⇒ **每次都把同一个插件再追加一份**（实测：一次 merge 就出现两个
+   * `- insert:` 组各带一份 shell-termux；用户只要手改过 patch 文件加了引号就会撞上，且每次
+   * 升级都多一份）。同一仓库的 `PluginMounts.removeEntry` 早已做引号归一，两侧口径必须一致。
+   */
+  private val ID_VALUE = """('[^']*'|"[^"]*"|\S+)"""
+
+  /** 去掉包裹 id 的引号（`'x'` → `x`）；裸值原样。 */
+  private fun unquoteId(raw: String): String = raw.trim().trim('\'', '"')
+
   /** 顶层条目 id 行。 */
-  private val TOP_ID = Regex("""^- id:\s*(\S+)""")
+  private val TOP_ID = Regex("""^- id:\s*$ID_VALUE""")
 
   /** 顶层 insert 组行。 */
   private val TOP_INSERT = Regex("""^- insert:\s*$""")
 
   /** 组内条目 id 行（至少一个前导空白，故不会命中列 0 的顶层行）。 */
-  private val CHILD_ID = Regex("""^(\s+)- id:\s*(\S+)""")
+  private val CHILD_ID = Regex("""^(\s+)- id:\s*""" + ID_VALUE)
 
   /** 形如 `disabled: true|false` 的键行（含缩进捕获）。 */
   private val ENTRY_DISABLED = Regex("""^(\s*)disabled:\s*(true|false)\s*(#.*)?$""")
@@ -113,7 +139,7 @@ internal object FactoryProfilePatch {
   private val DISABLED_LINE = Regex("""^(\s*)disabled:\s*(true|false)\s*(#.*)?$""", RegexOption.MULTILINE)
 
   /** 块内任意缩进的 `id:` 键行（用于裸 `-` 顶层项；捕获缩进与 id）。 */
-  private val KEY_ID = Regex("""^(\s*)id:\s*(\S+)""")
+  private val KEY_ID = Regex("""^(\s*)id:\s*""" + ID_VALUE)
 
   /** 形如「只剩 id」的行（纯 id 行不是动作）。 */
   private val PURE_ID_LINE = Regex("""^(?:-\s+)?id:\s*\S+$""")
@@ -589,11 +615,11 @@ internal object FactoryProfilePatch {
         childIndent = layer[0].second.groupValues[1]
         for ((position, pair) in layer.withIndex()) {
           val end = if (position + 1 < layer.size) layer[position + 1].first else lines.size
-          entries += Entry(pair.second.groupValues[2], childIndent, pair.first, end)
+          entries += Entry(unquoteId(pair.second.groupValues[2]), childIndent, pair.first, end)
         }
       }
     } else {
-      TOP_ID.find(lines[head])?.let { entries += Entry(it.groupValues[1], "", head, lines.size) }
+      TOP_ID.find(lines[head])?.let { entries += Entry(unquoteId(it.groupValues[1]), "", head, lines.size) }
       if (entries.isEmpty() && lines[head].trimEnd('\r').trim() == "-") {
         // 裸 `-` 顶层项（键在同一项的后续缩进行上）：取块内最浅缩进的 `id:` 行。
         var keyIndent: String? = null
@@ -604,7 +630,7 @@ internal object FactoryProfilePatch {
           if (width == 0) continue
           if (keyIndent == null || width < keyIndent.length) {
             keyIndent = m.groupValues[1]
-            keyId = m.groupValues[2]
+            keyId = unquoteId(m.groupValues[2])
           }
         }
         if (keyIndent != null && keyId != null) entries += Entry(keyId, "", head, lines.size)

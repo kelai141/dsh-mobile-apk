@@ -132,12 +132,17 @@ class OwnershipLeaseSettlementFixtureTest {
     // 自动清算＝通道被证实不存在 + 租约从未派发 + **租约状态可信** + 无在飞维护（复审第 2 点 + 第四轮）
     assertTrue(entry.contains("val dispatched = lease?.optBoolean(\"dispatched\") == true"))
     assertTrue(entry.contains("val leaseUnknown = lease?.optBoolean(\"unknown\") == true || RootMaintenanceLease.unknown(app)"))
-    assertTrue(entry.contains("autoClearAllowed(probe.state, dispatched, leaseUnknown, RootExecutionFence.maintenanceActive)"))
+    assertTrue(entry.contains("autoClearAllowed(probe.state, dispatched, leaseUnknown, RootExecutionFence.maintenanceActive, leaseStale)"))
+    // issue #658：陈旧路径仍必须把三个否决项 AND 在最前，不能退化成「陈旧就无条件清」
+    assertTrue(body("ShizukuTransport", "internal fun autoClearAllowed(")
+      .contains("if (dispatched || leaseUnknown || maintenanceActive) return false"))
     assertTrue(entry.contains("if (!allowed) return false"))
     assertTrue(entry.contains("LeaseClearProbe.record(app, probe, decisive = true, dispatched = dispatched, allowed = allowed,"))
     // 锁内复核四条件（判断—清除之间：通道可能复活 / 维护可能开始 / 租约可能刚被派发 / 租约状态可能变得不可信）
-    assertTrue(entry.contains("!RootExecutionFence.maintenanceActive && !RootAccess.isGranted(app) &&"))
-    assertTrue(entry.contains("!RootMaintenanceLease.dispatched(app) && !RootMaintenanceLease.unknown(app)"))
+    assertTrue(entry.contains("!RootExecutionFence.maintenanceActive &&"))
+    // issue #658：陈旧路径不再要求「通道已消失」，但非陈旧路径仍必须复核 isGranted —— 两者是 OR 关系
+    assertTrue(entry.contains("(!RootAccess.isGranted(app) || RootMaintenanceLease.stale(app))"))
+    assertTrue(entry.contains("!RootMaintenanceLease.dispatched(app) && !RootMaintenanceLease.unknown(app) &&"))
     assertTrue(entry.contains("RootMaintenanceLease.clearWhenNoRootChannel(app)"))
   }
 

@@ -18,11 +18,13 @@
 //   4. exclude 语义：backup_rules 与 data_extraction_rules（cloud-backup + device-transfer）
 //      必须逐条覆盖 REQUIRED_EXCLUDES（删任意一条即拒，空 exclude 即拒）。
 //
-// 用法：node scripts/check-manifest-hardening.mjs [--root <apk 仓根或协调仓根>]
-//   --root 仅用于反向验证（合成夹具树）；缺省自动探测。也可用环境变量 DSH_APK_ROOT。
+// 用法：node scripts/check-manifest-hardening.mjs [--root <apk 仓根或协调仓根>] [--self-test]
+//   --root 仅用于反向验证（合成夹具树）；--self-test 自测宽映射判据；缺省自动探测。
+//   也可用环境变量 DSH_APK_ROOT。
 // 退出码：0 = 通过；1 = 失败（拒打包/拒合）或树定位失败。
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { join, dirname, relative, resolve } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -52,6 +54,19 @@ const check = (label, ok, detail) => {
 }
 
 // ── 轻量 XML 解析（结构感知，非字面量 grep）──────────────────────────────────
+/** Decode each XML attribute once, matching the value Android receives. */
+function decodeXmlAttribute(value) {
+  const named = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }
+  return value.replace(/&(amp|lt|gt|quot|apos|#x[0-9a-fA-F]+|#[0-9]+);/g, (reference, entity) => {
+    if (!entity.startsWith('#')) return named[entity]
+    const code = entity.startsWith('#x') ? Number.parseInt(entity.slice(2), 16) : Number(entity.slice(1))
+    if (code < 1 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) {
+      throw new Error('Invalid XML character reference: ' + reference)
+    }
+    return String.fromCodePoint(code)
+  })
+}
+
 /** 解析为 { name, attrs, children, parent, selfClosing } 节点树；注释/CDATA/声明按类型跳过。 */
 function parseXml(text) {
   const doc = { name: '#document', attrs: {}, children: [], parent: null, text: '' }
@@ -79,7 +94,7 @@ function parseXml(text) {
     const attrs = {}
     const attrRe = /([\w.:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g
     let a
-    while ((a = attrRe.exec(rawAttrs)) !== null) attrs[a[1]] = a[2] ?? a[3]
+    while ((a = attrRe.exec(rawAttrs)) !== null) attrs[a[1]] = decodeXmlAttribute(a[2] ?? a[3])
     const node = { name, attrs, children: [], parent: stack[stack.length - 1], selfClosing: slash === '/' }
     node.parent.children.push(node)
     if (slash !== '/') stack.push(node)
@@ -104,6 +119,201 @@ const read = (p) => {
   try { return readFileSync(p, 'utf8') } catch { return null }
 }
 
+// ── FileProvider 宽映射的 URI 调用点封口 ─────────────────────────────────────
+// path="."、空路径或越界回根路径会把整个 provider 基目录映射出去。Android 会优先
+// 选择最具体的匹配 root，但新增调用点仍可能落到宽 root；宽映射在场时，所有源码 URI
+// 创建点必须与逐文件、逐引用次数登记的清单一致。
+const FILE_PROVIDER_PATH_TAGS = new Set([
+  'root-path', 'files-path', 'cache-path', 'external-path',
+  'external-files-path', 'external-cache-path', 'external-media-path',
+])
+const FILE_PROVIDER_CALLER_ALLOWLIST = new Map([
+  ['java/com/dsharnessmobile/shell/FileIncoming.kt', {
+    references: 1,
+    reason: '外部阅读器出口；调用前由 isReaderAllowed 做运行时窄白名单校验',
+  }],
+  ['java/com/dsharnessmobile/shell/LogShare.kt', {
+    references: 1,
+    reason: '诊断包分享；ZIP 落在 cacheDir/log-share 并由内容白名单与脱敏器把关',
+  }],
+  ['java/com/dsharnessmobile/shell/PathOpen.kt', {
+    references: 1,
+    reason: '用户主动选择文件后的 chooser；这是 external-path 根映射的预期调用点',
+  }],
+  ['java/com/dsharnessmobile/shell/UpdateChecker.kt', {
+    references: 1,
+    reason: '安装器出口；APK 落在 Documents/dshdata 的更窄映射内',
+  }],
+  ['java/com/dsharnessmobile/shell/FileExternalBridge.kt', {
+    references: 2,
+    reason: '外部打开/转发出口；允许面与 PathOpen 共用（FileIncoming.isReaderAllowed + 外部存储根），'
+      + '参数只有设备路径 + MIME，不接受页面传 Uri，且父目录不可授权时干脆不提供目录项',
+  }],
+  ['java/com/dsharnessmobile/shell/PhotoCapture.kt', {
+    references: 1,
+    reason: '原生拍照出口；落点是 cacheDir/attachments 的更窄映射（cache-path name=photo_attachments），'
+      + '且 Uri 由本仓 PhotoCapture.outputDir/rawDir 派生，不接受页面传路径',
+  }],
+])
+
+function fileProviderPathsResources(manifest) {
+  return descendants(manifest, 'provider').flatMap((provider) =>
+    childrenNamed(provider, 'meta-data')
+      .filter((meta) => meta.attrs['android:name'] === 'android.support.FILE_PROVIDER_PATHS')
+      .map((meta) => meta.attrs['android:resource'] ?? ''))
+}
+
+function fileProviderPathNodes(pathsXml) {
+  const doc = parseXml(pathsXml)
+  const roots = doc.children.filter((node) => node.name === 'paths')
+  if (roots.length !== 1) return { nodes: [], error: '必须恰好有一个 <paths> 根节点；count=' + roots.length }
+  return { nodes: roots[0].children.filter((node) => FILE_PROVIDER_PATH_TAGS.has(node.name)), error: null }
+}
+
+function isWideFileProviderPath(node) {
+  // root-path 的基目录就是文件系统根。其他 provider 类型只把归一化后回到基目录，
+  // 或用 .. 逃出基目录的路径视作宽映射。
+  if (node.name === 'root-path') return true
+  const segments = String(node.attrs.path ?? '').replace(/\\/g, '/').split('/')
+  let depth = 0
+  for (const segment of segments) {
+    if (!segment || segment === '.') continue
+    if (segment === '..') {
+      if (depth === 0) return true
+      depth -= 1
+    } else {
+      depth += 1
+    }
+  }
+  return depth === 0
+}
+
+function countFileProviderReferences(source) {
+  // 保守按源码标识符计数，注释/字符串里的示例也需同步计入，避免解析器漏掉新调用形式。
+  return [...source.matchAll(/\bgetUriForFile\b/g)].length
+}
+
+function scanFileProviderCallers(main) {
+  const roots = ['java', 'kotlin'].map((name) => join(main, name)).filter(existsSync)
+  const callers = new Map()
+  const errors = []
+  if (roots.length === 0) return { callers, errors: ['app/src/main/java 与 app/src/main/kotlin 均不存在'] }
+  const walk = (dir) => {
+    let entries
+    try { entries = readdirSync(dir, { withFileTypes: true }) } catch (error) {
+      errors.push('读取目录失败 ' + dir + '：' + error.message)
+      return
+    }
+    for (const entry of entries) {
+      const file = join(dir, entry.name)
+      if (entry.isDirectory()) { walk(file); continue }
+      if (!entry.isFile() || !/\.(?:kt|java)$/.test(entry.name)) continue
+      const source = read(file)
+      if (source === null) { errors.push('读取源码失败 ' + file); continue }
+      const references = countFileProviderReferences(source)
+      if (references > 0) callers.set(relative(main, file).replace(/\\/g, '/'), references)
+    }
+  }
+  for (const root of roots) walk(root)
+  return { callers, errors }
+}
+
+function fileProviderCallerProblems(callers) {
+  const problems = []
+  for (const [file, references] of callers) {
+    const expected = FILE_PROVIDER_CALLER_ALLOWLIST.get(file)
+    if (!expected) problems.push('未登记调用文件 ' + file + '（引用数=' + references + '）')
+    else if (references !== expected.references) {
+      problems.push(file + ' 引用数=' + references + '，登记值=' + expected.references)
+    }
+  }
+  for (const [file, expected] of FILE_PROVIDER_CALLER_ALLOWLIST) {
+    if (!callers.has(file)) problems.push('登记调用点缺席 ' + file + '（预期引用数=' + expected.references + '）')
+  }
+  return problems
+}
+
+if (argv.includes('--self-test')) {
+  const parsed = fileProviderPathNodes('<paths>'
+    + '<external-path name="wide" path="." />'
+    + '<files-path name="narrow" path="home/.dsh/workspaces/" />'
+    + '<files-path name="normalized-wide" path="tmp/.." />'
+    + '<root-path name="root" path="private/" />'
+    + '</paths>')
+  const wide = parsed.nodes.filter(isWideFileProviderPath)
+  check('--self-test：识别根映射和归一化回根映射',
+    parsed.error === null && wide.map((node) => node.attrs.name).join(',') === 'wide,normalized-wide,root',
+    parsed.error ?? wide.map((node) => node.attrs.name).join(','))
+  check('--self-test：窄目录映射不误判为宽映射',
+    parsed.nodes.filter((node) => node.attrs.name === 'narrow').every((node) => !isWideFileProviderPath(node)))
+  for (const path of ['&#46;', '&#x2e;', 'tmp/&#46;&#46;', '&#x2e;&#x2e;/outside']) {
+    const fixture = fileProviderPathNodes('<paths><external-path name="encoded" path="' + path + '" /></paths>')
+    check('--self-test: encoded wide path is recognized: ' + path,
+      fixture.error === null && fixture.nodes.length === 1 && isWideFileProviderPath(fixture.nodes[0]))
+  }
+  for (const path of ['Documents/&#46;hidden', '&amp;#46;', 'home/tmp']) {
+    const fixture = fileProviderPathNodes('<paths><files-path name="narrow" path="' + path + '" /></paths>')
+    check('--self-test: narrow XML path remains narrow: ' + path,
+      fixture.error === null && fixture.nodes.length === 1 && !isWideFileProviderPath(fixture.nodes[0]))
+  }
+  const expected = new Map([...FILE_PROVIDER_CALLER_ALLOWLIST].map(([file, value]) => [file, value.references]))
+  const selfTestRoot = mkdtempSync(join(tmpdir(), 'manifest-hardening-fileprovider-'))
+  try {
+    const syntheticMain = join(selfTestRoot, 'app', 'src', 'main')
+    const sourceFor = (references) => [
+      'package com.dsharnessmobile.shell',
+      ...Array.from({ length: references }, (_, index) =>
+        'fun emit' + index + '() = FileProvider.getUriForFile(context, authority, file)'),
+    ].join('\n')
+    const writeCaller = (relativePath, references) => {
+      const target = join(syntheticMain, relativePath)
+      mkdirSync(dirname(target), { recursive: true })
+      writeFileSync(target, sourceFor(references))
+      return target
+    }
+    for (const [file, references] of expected) writeCaller(file, references)
+    const baselineScan = scanFileProviderCallers(syntheticMain)
+    check('--self-test：源码扫描器递归识别已登记调用点',
+      baselineScan.errors.length === 0 && baselineScan.callers.size === expected.size
+        && fileProviderCallerProblems(baselineScan.callers).length === 0,
+      baselineScan.errors.join('；') || fileProviderCallerProblems(baselineScan.callers).join('；'))
+    const roguePath = writeCaller('java/com/dsharnessmobile/shell/Unexpected.kt', 1)
+    const rogueScan = scanFileProviderCallers(syntheticMain)
+    check('--self-test 受控负控：递归扫描器拒绝新增调用文件',
+      rogueScan.errors.length === 0
+        && fileProviderCallerProblems(rogueScan.callers).some((problem) => problem.includes('未登记调用文件')))
+    rmSync(roguePath)
+    writeCaller('java/com/dsharnessmobile/shell/PathOpen.kt', 2)
+    const duplicateScan = scanFileProviderCallers(syntheticMain)
+    check('--self-test 受控负控：递归扫描器拒绝已登记文件中的新增调用',
+      duplicateScan.errors.length === 0
+        && fileProviderCallerProblems(duplicateScan.callers).some((problem) => problem.includes('引用数=2')))
+    rmSync(join(syntheticMain, 'java/com/dsharnessmobile/shell/LogShare.kt'))
+    const missingScan = scanFileProviderCallers(syntheticMain)
+    check('--self-test 受控负控：递归扫描器拒绝已登记调用点缺席',
+      missingScan.errors.length === 0
+        && fileProviderCallerProblems(missingScan.callers).some((problem) => problem.includes('登记调用点缺席')))
+  } finally {
+    rmSync(selfTestRoot, { recursive: true, force: true })
+  }
+  check('--self-test：Kotlin 普通与原始字符串插值中的 URI API 引用均计入',
+    countFileProviderReferences([
+      'val uri = "$' + '{FileProvider.getUriForFile(ctx, authority, file)}"',
+      'val raw = """$' + '{FileProvider.getUriForFile(ctx, authority, file)}"""',
+    ].join('\n')) === 2)
+  const manifestFixture = parseXml('<manifest><application><provider>'
+    + '<meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />'
+    + '</provider></application></manifest>')
+  check('--self-test：从 provider metadata 读取 paths 资源',
+    fileProviderPathsResources(manifestFixture).join(',') === '@xml/file_paths')
+  if (failures.length > 0) {
+    console.error('MANIFEST-HARDENING SELF-TEST FAILED: ' + failures.join('；'))
+    process.exit(1)
+  }
+  console.log('MANIFEST-HARDENING SELF-TEST PASSED')
+  process.exit(0)
+}
+
 // ── 1/2. manifest ────────────────────────────────────────────────────────────
 const manifestPath = join(MAIN, 'AndroidManifest.xml')
 const manifestText = read(manifestPath)
@@ -120,6 +330,7 @@ const EXPORTED_ALLOW = new Map([
   ['.BootReceiver', { reason: 'BOOT_COMPLETED（受保护系统广播）', guard: 'permission' }],
   ['rikka.shizuku.ShizukuProvider', { reason: 'Shizuku 官方 Binder bootstrap；INTERACT_ACROSS_USERS_FULL 保护 provider', guard: 'permission' }],
 ])
+
 const PROTECTED_SYSTEM_ACTIONS = new Set([
   'android.intent.action.BOOT_COMPLETED',
   'android.intent.action.LOCKED_BOOT_COMPLETED',
@@ -128,6 +339,73 @@ const PROTECTED_SYSTEM_ACTIONS = new Set([
   'android.intent.action.TIMEZONE_CHANGED',
 ])
 const COMPONENTS = ['activity', 'service', 'receiver', 'provider', 'activity-alias']
+
+// #864：debug-only 的导出组件白名单（仅 app/src/debug/AndroidManifest.xml 生效）。
+// 这些名字**不得**出现在 main（release）清单里 —— 出现即视为 debug 面泄漏到发布产物。
+// name -> { reason, guard }
+const DEBUG_EXPORTED_ALLOW = new Map([
+  ['.ConsoleDebugAlias', { reason: '控制台 CDP 量测通路（ConsoleActivity 未导出，adb 起不来）；仅 debug 构建', guard: 'debug-only' }],
+])
+
+// #864 断言 ①：debug 清单里 exported="true" 的组件必须逐条登记。
+// （新增未登记的 debug 公开口即拒，与 main 清单的 EXPORTED_ALLOW 同口径。）
+{
+  const debugManifestPath = join(APK_ROOT, 'app', 'src', 'debug', 'AndroidManifest.xml')
+  const debugText = read(debugManifestPath)
+  if (debugText !== null) {
+    const debugRoot = parseXml(debugText)
+    const exportedDebug = debugRoot === null ? [] : descendants(debugRoot, 'application').flatMap((a) =>
+      COMPONENTS.flatMap((tag) => descendants(a, tag)))
+      .filter((c) => c.attrs['android:exported'] === 'true')
+      .map((c) => c.attrs['android:name'])
+    for (const name of exportedDebug) {
+      check('debug 导出组件已登记：' + name, DEBUG_EXPORTED_ALLOW.has(name),
+        '在 scripts/check-manifest-hardening.mjs 的 DEBUG_EXPORTED_ALLOW 里登记理由')
+    }
+    for (const [name, meta] of DEBUG_EXPORTED_ALLOW) {
+      check('登记的 debug 导出组件仍在场：' + name, exportedDebug.includes(name), 'meta=' + meta.guard)
+    }
+  }
+}
+
+// issue #1051：`app/src/release/AndroidManifest.xml` 此前**从不被读**。
+//
+// 它同样会与 main 合并进发布产物，所以它的 `exported` 组件与 allowBackup/cleartext
+// 属于**发布面**；不读等于整面不受检查（新增一个 release-only 导出组件不会被拦）。
+const RELEASE_EXPORTED_ALLOW = new Map()
+{
+  const releaseManifestPath = join(APK_ROOT, 'app', 'src', 'release', 'AndroidManifest.xml')
+  const releaseText = read(releaseManifestPath)
+  if (releaseText === null) {
+    console.log('NOTE  app/src/release/AndroidManifest.xml 不在场（release 变体判据跳过）')
+  } else {
+    const releaseRoot = parseXml(releaseText)
+    const apps = releaseRoot === null ? [] : descendants(releaseRoot, 'application')
+    const exportedRelease = apps.flatMap((a) => COMPONENTS.flatMap((tag) => descendants(a, tag)))
+      .filter((c) => c.attrs['android:exported'] === 'true')
+      .map((c) => c.attrs['android:name'])
+    for (const name of exportedRelease) {
+      check('release 变体导出组件已登记：' + name, RELEASE_EXPORTED_ALLOW.has(name),
+        '在 scripts/check-manifest-hardening.mjs 的 RELEASE_EXPORTED_ALLOW 里登记理由')
+    }
+    for (const name of RELEASE_EXPORTED_ALLOW.keys()) {
+      check('登记的 release 导出组件仍在场：' + name, exportedRelease.includes(name))
+    }
+    for (const app of apps) {
+      check('release 变体不得 allowBackup="true"', app.attrs['android:allowBackup'] !== 'true', releaseManifestPath)
+      check('release 变体不得 usesCleartextTraffic="true"', app.attrs['android:usesCleartextTraffic'] !== 'true', releaseManifestPath)
+    }
+  }
+}
+
+// #864 断言 ②（release 泄漏）：main 清单里不得出现任何 debug-only 组件名。
+if (manifestText !== null) {
+  for (const name of DEBUG_EXPORTED_ALLOW.keys()) {
+    const bare = name.replace(/^\./, '')
+    check('release 清单不得含 debug-only 组件：' + name,
+      !manifestText.includes(bare), 'grep 命中即为 debug 面泄漏到发布产物')
+  }
+}
 
 /** 源码级来源校验（review §2.3）：去注释后要求**调用形态** isTrustedSender( —— 旧实现只查子串，
  * 注释里提一句就能假绿。字符串字面量近似不计（该标识符不出现在 UI 文案）。 */
@@ -294,6 +572,44 @@ const checkExcludes = (label, file, groups) => {
 }
 checkExcludes('backup_rules.xml', join(MAIN, 'res', 'xml', 'backup_rules.xml'), [null])
 checkExcludes('data_extraction_rules.xml', join(MAIN, 'res', 'xml', 'data_extraction_rules.xml'), ['cloud-backup', 'device-transfer'])
+
+// 守 FileProvider 实际引用的路径 XML，避免 manifest 改指向另一份配置后绕过扫描。
+const providerPathRefs = manifest ? fileProviderPathsResources(manifest) : []
+const providerPathRef = providerPathRefs.length === 1 ? /^@xml\/([A-Za-z_][A-Za-z0-9_]*)$/.exec(providerPathRefs[0]) : null
+check('FileProvider paths resource 唯一且为 @xml/<name>',
+  providerPathRef !== null,
+  '引用=' + providerPathRefs.join(',') + '；count=' + providerPathRefs.length)
+if (providerPathRef !== null) {
+  const pathsFile = join(MAIN, 'res', 'xml', providerPathRef[1] + '.xml')
+  const pathsText = read(pathsFile)
+  check('FileProvider paths XML 在场', pathsText !== null, pathsFile)
+  if (pathsText !== null) {
+    const parsedPaths = fileProviderPathNodes(pathsText)
+    check('FileProvider paths XML 结构有效', parsedPaths.error === null, parsedPaths.error)
+    if (parsedPaths.error === null) {
+      const wideMappings = parsedPaths.nodes.filter(isWideFileProviderPath)
+      if (wideMappings.length === 0) {
+        check('无宽范围 FileProvider 映射；调用点 allowlist 不启用', true)
+      } else {
+        check('宽范围 FileProvider 映射：' + wideMappings.map((node) =>
+          '<' + node.name + ' name="' + (node.attrs.name ?? '') + '" path="' + (node.attrs.path ?? '') + '">').join(', '), true)
+        const scan = scanFileProviderCallers(MAIN)
+        check('FileProvider 调用点源码扫描完整', scan.errors.length === 0, scan.errors.join('；'))
+        if (scan.errors.length === 0) {
+          const problems = fileProviderCallerProblems(scan.callers)
+          check('宽映射下的 FileProvider 调用点与逐文件/逐引用登记一致（'
+            + FILE_PROVIDER_CALLER_ALLOWLIST.size + ' 个）',
+          problems.length === 0, problems.join('；'))
+          if (problems.length === 0) {
+            for (const [file, policy] of FILE_PROVIDER_CALLER_ALLOWLIST) {
+              console.log('      ' + file + ' × ' + policy.references + '：' + policy.reason)
+            }
+          }
+        }
+      }
+    }
+  }
+}
 
 if (failures.length > 0) {
   console.error('MANIFEST-HARDENING FAILED: ' + failures.join('；'))

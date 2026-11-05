@@ -116,12 +116,9 @@ internal object AppLanguage {
       val updated = withDshLocalePreference(original, locale)
       if (updated != original) {
         file.parentFile?.mkdirs()
-        val temporary = File(file.parentFile, ".cordis.patch.yml.lang-tmp")
-        temporary.writeText(updated)
-        if (!temporary.renameTo(file)) {
-          file.writeText(updated)
-          temporary.delete()
-        }
+        // #1057：固定名 tmp + 失败回退直写都去掉，改走唯一原子写入口（唯一临时名 + fsync）。
+        // 这个文件是引擎真正加载的 patch：直写回退在崩溃窗口内会留下半份 YAML。
+        AtomicFileReplace.writeText(file, updated)
       }
       true
     } catch (_: Exception) {

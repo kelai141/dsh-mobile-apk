@@ -24,6 +24,7 @@
 // 退出码：0 = 通过（或显式 SKIP）；1 = 有死 token / --require 下有 SKIP；2 = 用法错误。
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -31,6 +32,56 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = dirname(HERE)
 const argv = process.argv.slice(2)
 const REQUIRE = argv.includes('--require')
+/**
+ * 默认档零判据不得 exit 0（issue #1038 ①）。
+ *
+ * 实测：上游定义面在净检出里不存在（.deploy-tmp 被 .gitignore 忽略），本门禁打一条 SKIP=1 就 exit 0，
+ * 而两个构建链调用点都不传 --require —— 于是「一道门禁在默认入口恒绿且零判据」。
+ * 修法：缺输入时**默认判红**，只有显式声明「我知道这次没有判据面」才允许以计数的 SKIP 结案：
+ *   --allow-missing   调用方显式接受「本次未执行判据」（构建链/发布链一律不传，它们走 --require）。
+ * 这与 check-kotlin-test-count.mjs 的 --allow-missing 同口径，也与本仓「SKIP 未兑现不是通过」一致。
+ */
+const ALLOW_MISSING = argv.includes('--allow-missing')
+
+/**
+ * 「本次零判据」的结案方式（issue #1038 ①）。
+ *
+ * 事实：默认档在上游定义面缺席时**零判据**，旧实现静默 exit 0 —— 一道在默认入口恒绿、
+ * 却什么都没校验的门禁。两个构建链调用点（build-apk.mjs / build-apk-013.ps1）都不传 --require，
+ * 所以「严格档才判红」等于默认入口永远不判。
+ *
+ * 处置（issue #1114 收口）：**依赖缺席 = exit 2 硬失败**。
+ *
+ * 为什么从 exit 0 改成 exit 2（而不是 exit 1）：三态必须可区分，否则调用方与人都读不懂。
+ *   - 0 = 判据跑了且通过；
+ *   - 1 = 判据跑了且**不通过**（真缺陷，比如引用了已删除的令牌）；
+ *   - 2 = **判据根本没跑**（依赖树缺席）—— 这不是"通过"，也不是"被测对象有问题"，
+ *         而是"这次没验"。把它报成 0 就是 issue #1114 的静默恒绿；报成 1 又会让人以为
+ *         代码有缺陷、去改根本不相关的地方。
+ *
+ * 事实依据（issue #1114 实测）：`.deploy-tmp` 被 .gitignore 忽略，只在第一次跑构建链
+ * 或云端 `build-apk-source.yml` 里才落盘。所以**任何人在第一次构建之前，这个门禁都是绿的**。
+ * 更糟的是它不在 PR 门禁集合里（GATES 登记 ciApk:false / ciCoord:true），唯一会真判的场合
+ * 是构建链与发版链 —— 而那两条链自己也**不负责**填充上游树（见 build-apk-source.yml:134-150），
+ * 于是缺陷一路绿到有人真的去构建。
+ *
+ * 逃生口：`--allow-missing` 显式声明「本次接受零判据」，仍以 0 结案但打印明确原因。
+ * 调用点若确实处在「依赖尚未就绪」的合法阶段，应当显式传它 —— 静默才是要消灭的东西。
+ */
+function noCriteriaExit(why) {
+  if (ALLOW_MISSING) {
+    console.log('NO-CRITERIA  本次没有执行任何判据（' + why + '）')
+    console.log('CHECK-DEAD-TOKENS SKIPPED（--allow-missing：调用方已显式接受本次零判据）')
+    process.exit(0)
+  }
+  // 机器可识别的零判据标记：check-gate-skips.mjs 会把它当成「该门禁本次没有执行任何判据」。
+  console.log('NO-CRITERIA  本次没有执行任何判据（' + why + '）')
+  console.error('CHECK-DEAD-TOKENS DEPENDENCY-ABSENT：判据未执行（' + why + '）')
+  console.error('  这不是通过，也不是被测对象有缺陷 —— 是「本次没验」。')
+  console.error('  请先跑构建链拉取上游树（.deploy-tmp/deepseek-harness），或显式传 --allow-missing')
+  console.error('  声明本次接受零判据。干净 checkout 里 .deploy-tmp 被 .gitignore 忽略，故默认不通过。')
+  process.exit(2)
+}
 
 let skipped = 0
 const skip = (msg) => { skipped += 1; console.log('SKIP(#' + skipped + ')  ' + msg) }
@@ -41,7 +92,16 @@ const SCAN_DIRS = [
   'plugins',
   'vendor/dsh-undo-savepoint',
   'vendor/dshmarketplace-plugin',
+  // issue #1038 ③：壳侧 Android 资源同样可能承载样式字符串（注入的 style、xml 里的说明）
+  'app/src/main/res',
 ]
+/**
+ * 扫描面后缀。
+ *
+ * issue #1038 ③：此前只有 .css/.ts/.tsx —— .js/.mjs/.jsx 与 res/** 下的 XML 完全不在面内，
+ * 在它们里引用死令牌不会产生任何判据（实测插入 zz-probe.js 后引用数不变、exit 0）。
+ */
+const SCAN_SUFFIXES = ['.css', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.xml']
 /**
  * 上游令牌定义面（目录；只读）。
  *
@@ -134,17 +194,67 @@ function walk(dir, out, suffixes) {
 
 /**
  * 抽取上游现存令牌集合（所有 `*.css` 里 `--dsw-x:` 形式的定义）。
+ *
+ * issue #1038 ②：条件定义（@media / @supports / 主题选择器内）**不是全局定义**。
+ * 实测：上游 values-night.css 里 `@media (prefers-color-scheme: dark) { :root { --dsw-dark-only: #fff } }`
+ * 被当成全局令牌，我方在无条件作用域引用它时判绿——而实际只有暗色媒体查询下才有值。
+ * 修法：扫描时按花括号深度追踪「当前是否处在 @media/@supports 块内」，块内的定义记为条件定义；
+ * 只把**顶层/普通选择器内**的定义当作全局定义（条件定义另存一份，供将来的条件引用判据使用）。
+ *
  * @param dir - 上游样式目录绝对路径。
- * @returns 令牌名集合。
+ * @returns 令牌名集合（仅全局定义）。
  */
 export function definedTokens(dir) {
   const out = new Set()
   for (const file of walk(dir, [], ['.css'])) {
     const text = readFileSync(file, 'utf8')
-    for (const m of text.matchAll(/^\s*(--dsw-[a-z0-9-]+)\s*:/gm)) out.add(m[1])
+    for (const m of text.matchAll(DEFINITION_RE)) {
+      if (isConditionalDefinition(text, m.index)) continue
+      out.add(m[1])
+    }
   }
   return out
 }
+
+/**
+ * 某个定义位置是否落在条件块（@media / @supports / @container）内。
+ *
+ * 做法：把该位置之前的文本按花括号数出深度，并记住每一层是不是条件块；
+ * 只要有一层是条件块，这个定义就是**条件定义**（不构成「全局已定义」）。
+ * 纯函数，供 --self-test 直接喂字符串。
+ */
+export function isConditionalDefinition(text, index) {
+  const before = text.slice(0, index)
+  const stack = []
+  let i = 0
+  let lastAt = -1
+  while (i < before.length) {
+    const c = before[i]
+    if (c === '@') lastAt = i
+    if (c === '{') {
+      // 本层如果是 at-rule 块（@media/@supports/@container/@layer 之外的条件块），标记为条件层
+      const head = lastAt >= 0 ? before.slice(lastAt, i) : ''
+      stack.push(/^@(media|supports|container)\b/.test(head))
+      lastAt = -1
+    } else if (c === '}') {
+      stack.pop()
+      lastAt = -1
+    }
+    i++
+  }
+  return stack.some(Boolean)
+}
+
+/**
+ * 上游令牌**定义**的识别式。
+ *
+ * issue #1038 ⑤：原式 `^\s*(--dsw-…)\s*:` 只认「行首定义」，于是单行块
+ * `:root { --dsw-dark-only: #fff; }`（定义写在花括号后面）识别不到 —— 上游存活的令牌被当成不存在，
+ * 我们自己引用它就判红（假红）。
+ * 修法：定义允许出现在任意位置，但要求左侧不是标识符/连字符（避免吃到 `var(--dsw-x)` 里的引用），
+ * 且后面紧跟冒号。
+ */
+const DEFINITION_RE = /(?:^|[^A-Za-z0-9_-])(--dsw-[a-z0-9-]+)\s*:/g
 
 /**
  * 抽取一份文本里的全部 `--dsw-*` **引用**：`var(--dsw-x)` / 字符串字面量里的 `--dsw-x`。
@@ -153,17 +263,54 @@ export function definedTokens(dir) {
  * @returns `{ token, line }` 列表（1-based 行号）。
  */
 export function referencedTokens(text) {
+  // issue #1038 ④：抽取前先抹掉注释里的令牌名。旧实现取原始行文本，于是
+  //   /* 旧写法：var(--dsw-alias-bg-elevated) */
+  // 被当成真实引用判红（假红），而该行根本不会生效。掩码保留换行与长度 ⇒ 行号不变。
+  const masked = maskComments(text)
   const out = []
-  const lines = text.split('\n')
+  const lines = masked.split('\n')
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
     for (const m of line.matchAll(/--dsw-[a-z0-9-]+/g)) {
       const after = line.slice(m.index + m[0].length)
       if (/^\s*:/.test(after)) continue // 定义处，不是引用
+      const before = line.slice(0, m.index)
+      if (/[A-Za-z0-9_-]$/.test(before)) continue // 更长标识符的一部分（--dsw-a 不是 --dsw-ab 的前缀）
       out.push({ token: m[0], line: i + 1 })
     }
   }
   return out
+}
+
+/**
+ * 抹掉 CSS / TS 注释，保留换行与字符偏移（行号不变）。
+ *
+ * 覆盖面只需两种：块注释与行注释。把 URL 里的 // 也当行注释会抹掉后面几个字符，但**引用抽取**
+ * 只需要知道「令牌名是不是写在注释里」，多抹只会漏掉伪引用、不会凭空造出引用——方向是安全的。
+ */
+export function maskComments(text) {
+  const out = text.split('')
+  const n = text.length
+  const blank = (j) => { if (j < n && text[j] !== '\n' && text[j] !== '\r') out[j] = ' ' }
+  let i = 0
+  while (i < n) {
+    if (text[i] === '/' && text[i + 1] === '*') {
+      let j = i
+      blank(j); blank(j + 1); j += 2
+      while (j < n && !(text[j] === '*' && text[j + 1] === '/')) { blank(j); j++ }
+      if (j < n) { blank(j); blank(j + 1); j += 2 }
+      i = j
+      continue
+    }
+    if (text[i] === '/' && text[i + 1] === '/') {
+      let j = i
+      while (j < n && text[j] !== '\n') { blank(j); j++ }
+      i = j
+      continue
+    }
+    i++
+  }
+  return out.join('')
 }
 
 /**
@@ -220,13 +367,39 @@ if (argv.includes('--self-test')) {
   const emptyDefs = audit([{ token: '--dsw-alias-bg-elevated', file: 'y.css', line: 7 }], new Set(), new Map())
   const okNoDefinitionFace = emptyDefs.dead.size === 1
 
+  /* ⑤ issue #1114：**依赖缺席必须非 0 退出**（这是本门禁此前最大的假绿面）。
+   *
+   * 上面 ①-④ 验的都是「判据写得对不对」，但它们的共同前提是「判据真的跑到了」。
+   * #1114 的缺陷恰恰在那个前提上：上游树缺席时门禁 exit 0，于是再正确的判据也从未执行。
+   *
+   * 这条自证必须**真的起子进程**去跑自己 —— 因为在同一进程里调 noCriteriaExit() 会直接
+   * process.exit，拿不到退出码。用 --root 指向一个不存在的目录来制造「依赖缺席」，
+   * 与真实场景（.deploy-tmp 被 gitignore 忽略）同一条代码路径。
+   */
+  const { spawnSync } = await import('node:child_process')
+  const missingRoot = join(tmpdir(), 'dead-tokens-selftest-missing-' + process.pid)
+  const runAbsent = (extra) => spawnSync(process.execPath,
+    [fileURLToPath(import.meta.url), '--root', missingRoot, ...extra], { encoding: 'utf8' })
+  const absentDefault = runAbsent([])
+  const absentAllowed = runAbsent(['--allow-missing'])
+  // 默认档：必须 exit 2（不是 0=假绿，也不是 1=让人误以为代码有缺陷）
+  const okAbsentHardFails = absentDefault.status === 2
+    && /DEPENDENCY-ABSENT/.test(String(absentDefault.stderr))
+    && /请先跑构建链拉取上游树/.test(String(absentDefault.stderr))
+  // 逃生口：显式 --allow-missing 必须仍能结案（否则没人能在依赖未就绪时跑其它判据）
+  const okAbsentEscape = absentAllowed.status === 0
+    && /SKIPPED（--allow-missing/.test(String(absentAllowed.stdout))
+
   const allPass = okRefs && okDefsSkipped && okGreen && okRed && okAllow && okNoDefinitionFace
+    && okAbsentHardFails && okAbsentEscape
   console.log((allPass ? 'DEAD-TOKENS SELF-TEST PASSED' : 'DEAD-TOKENS SELF-TEST FAILED')
     + '（引用抽取 ' + got.length + '/3；定义处不计入 ' + (okDefsSkipped ? '是' : '否')
     + '；全命中判绿 ' + (okGreen ? '是' : '否')
     + '；混入死 token 判红且点名 ' + (okRed ? '是' : '否')
     + '；允许清单豁免 ' + (okAllow ? '是' : '否')
-    + '；定义面为空仍判红 ' + (okNoDefinitionFace ? '是' : '否') + '）')
+    + '；定义面为空仍判红 ' + (okNoDefinitionFace ? '是' : '否')
+    + '；#1114 依赖缺席 exit 2 ' + (okAbsentHardFails ? '是' : '否')
+    + '；#1114 --allow-missing 仍可结案 ' + (okAbsentEscape ? '是' : '否') + '）')
   process.exit(allPass ? 0 : 1)
 }
 
@@ -239,7 +412,7 @@ if (upstreamRel === null || !existsSync(upstreamRel)) {
   skip('上游令牌定义面不在场（' + UPSTREAM_TOKEN_DIR + '）：无判据，跳过死 token 对账（不计入绿）')
   console.log('SKIP=' + skipped)
   if (REQUIRE) { console.error('CHECK-DEAD-TOKENS FAILED：--require 下不得以 SKIP 结案'); process.exit(1) }
-  process.exit(0)
+  noCriteriaExit('上游令牌定义面缺席')
 }
 
 const defined = definedTokens(upstreamRel)
@@ -252,13 +425,15 @@ const scanned = []
 for (const rel of SCAN_DIRS) {
   const abs = resolveRepoPath(rel)
   if (abs === null) continue
-  walk(abs, scanned, ['.css', '.ts', '.tsx'])
+  // issue #1038 ③：扫描面此前只有 .css/.ts/.tsx，于是 .js 里引用死令牌完全不可见
+  // （plugins/dsh-android-manage/src/zz-probe.js 实测引用数不变），app/src/main/res 的 XML 同理。
+  walk(abs, scanned, SCAN_SUFFIXES)
 }
 if (scanned.length === 0) {
   skip('扫描面为空（' + SCAN_DIRS.join(', ') + ' 都不在场）：无判据，跳过')
   console.log('SKIP=' + skipped)
   if (REQUIRE) { console.error('CHECK-DEAD-TOKENS FAILED：--require 下不得以 SKIP 结案'); process.exit(1) }
-  process.exit(0)
+  noCriteriaExit('上游令牌定义面缺席')
 }
 
 const references = []

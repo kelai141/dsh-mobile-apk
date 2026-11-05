@@ -12,6 +12,13 @@ import org.junit.Test
  * These tests pin both sides so a future "helpful" reset cannot turn retries into a loop.
  */
 class RepairGateTest {
+  @Test fun `passive observation finishes only the authorized cold attempt behind a stale gate`() {
+    assertTrue(mayObserveColdStart(required = false, attemptInFlight = false))
+    assertTrue(mayObserveColdStart(required = false, attemptInFlight = true))
+    assertTrue(mayObserveColdStart(required = true, attemptInFlight = true))
+    assertFalse(mayObserveColdStart(required = true, attemptInFlight = false))
+    assertFalse("Observing must not grant a retry", shouldScheduleAutomaticRetry(true, 2, false))
+  }
   private fun source(name: String): String = listOf(
     File("src/main/java/com/dsharnessmobile/shell", name),
     File("app/src/main/java/com/dsharnessmobile/shell", name),
@@ -48,8 +55,23 @@ class RepairGateTest {
   }
 
   @Test
+  fun `page-reported boot-ready clears the durable gate regardless of cold-start budget`() {
+    // 小米 14 实锤（2026-10-25）：五轮启动页面每一轮都活着并上报 [dsh-boot-ready]（上游
+    // ErrorBoundary 兜住了 slot entry 的 React #130），但旧守卫「required 且冷启尝试已花掉
+    // 即整条丢弃」让门永不清、用户每轮看到「引擎仍无法启动」，直到手清 native-repair。
+    val fn = source("EngineStartFlow.kt")
+      .substringAfter("fun onPageReadyReported").substringBefore("fun onPageStallReported")
+    assertFalse("ready 到达不得因持久门被丢弃（冷启额度归零也不行）",
+      fn.contains("RepairState.coldStartAttemptInFlight()"))
+    assertTrue("门在场时 ready 必须清门并留痕",
+      fn.contains("RepairState.reset(activity)") && fn.contains("repair gate cleared by page-reported boot-ready"))
+    assertTrue("插件树失败在场时仍丢弃 ready（失败终态优先，语义保留）",
+      fn.contains("if (clientPluginTreeFailed) return"))
+  }
+
+  @Test
   fun `only the explicit retry clears required and the retry budget`() {
-    val start = source("EngineStartFlow.kt").substringAfter("fun start()").substringBefore("resetBootStall()")
+    val start = source("EngineStartFlow.kt").substringAfter("fun start(").substringBefore("resetBootStall()")
     assertTrue("自动 start 过闸门只能查询每进程一次的冷启自动尝试（不消耗）",
       start.contains("explicitUserRetry = RepairState.coldStartAutoAttemptAvailable(activity)"))
     assertTrue("放行后必须显式花掉这一次尝试", start.contains("RepairState.spendColdStartAutoAttempt()"))
@@ -59,7 +81,7 @@ class RepairGateTest {
     val explicit = main.substringAfter("internal fun retryEngineExplicitly()").substringBefore("private fun applyRepairRequiredGuide")
     assertTrue(explicit.contains("if (!RepairState.beginUserRetry(this))"))
     assertTrue(explicit.contains("engineFlow.engineRetryCount = 0"))
-    assertTrue(explicit.contains("startEngineFlow(splash = true)"))
+    assertTrue(Regex("""startEngineFlow\(splash = true[^)]*\)""").containsMatchIn(explicit))
 
     val state = source("RepairState.kt")
     val clear = state.substringAfter("private fun clearGate")
@@ -82,7 +104,7 @@ class RepairGateTest {
     assertTrue("诊断读取失败单独处理", repair.contains("val diagnosticsFailure = try"))
     assertFalse("模型缺失不得再整页 require() 失败", repair.contains("require(connections.isNotEmpty())"))
     assertTrue("重新读取模型配置必须直接读本地来源", repair.contains("RepairModelConfig.loadDetailed(applicationContext)"))
-    assertTrue("返回启动页并重试使用一次性动作", repair.contains("MainActivity.ACTION_RETRY_ENGINE"))
+    assertTrue("返回启动页并重试使用进程内一次性标志（#682：intent action 可被外部应用冒充）", repair.contains("MainActivity.pendingSelfRetry = true"))
     val ordinaryBack = repair.substringAfter("private fun returnToLauncher()").substringBefore("private fun cancelWork")
     assertFalse("普通返回不能消耗一次显式重试", ordinaryBack.contains("RepairState.reset") || ordinaryBack.contains("beginUserRetry"))
     assertTrue("必须有打开控制台入口", repair.contains("ConsoleActivity::class.java"))

@@ -23,21 +23,55 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { TAR } from './lib/shell.mjs'
+import { stripComments } from './lib/strip-comments.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = dirname(HERE)
 const argv = process.argv.slice(2)
 const DEAD_PATCH_IDS = ['combo-cache-A3', 'combo-single-lazy-A5', 'combo-parallel-C3']
 
-/** 只留可执行行：撤销说明里提一句文件名是合法的，判全文会把自己变成假红（0.14.2 已踩过两次）。 */
-const codeOnly = (text) => text.split('\n')
-  .filter((l) => !l.trim().startsWith('//') && !l.trim().startsWith('#') && !l.trim().startsWith('<#'))
-  .join('\n')
+// issue #1195 洞二：**行尾注释不能被当成调用**（假红），且不能按行首符号整行丢弃（假绿）。
+//
+// 旧实现按「行首是 // / # / <#」整行过滤，两种错误同时存在：
+//   假红：代码行尾写一句「已撤销：本文件不再调用 combo-precompute.mjs」被判成仍在调用；
+//   假绿：以 // 开头的行里若真有代码，会被整行删掉（本仓踩过的坑）。
+//
+// 改用共享状态机（scripts/lib/strip-comments.mjs）：只抹掉注释内容、保留代码，
+// 且按引号状态走一遍，字符串里的 // 不会被误判。
+const codeOnly = (text) => stripComments(text)
+
+/**
+ * 死缓存条目判定（issue #1195，两处判据共用这一份）。
+ *
+ * 旧条件要求路径里出现 `/.combo-cache/`（**带尾斜杠**），而缓存的自然形态可能就是一个 JSON 文件：
+ * `home/.dsh/profiles/web/.combo-cache`（无尾斜杠）→ 扫不到 → 假绿。
+ *
+ * 改成按「路径段等于 .combo-cache」判定：既覆盖目录形态（`.../.combo-cache/x.json`），
+ * 也覆盖单文件形态（`.../.combo-cache`）。用分段比较而不是裸 includes，
+ * 避免 `my.combo-cache.bak` 这类名字被误判。
+ *
+ * @param {string} name tar 成员路径或文件路径（POSIX 分隔符）
+ * @returns {boolean} 是否为死缓存条目
+ */
+export function isDeadCacheEntry(name) {
+  // Windows 上 tar -tf 的输出带 CRLF：成员名会带尾随 \r。
+  // 不先归一化，分段比较会得到 '.combo-cache\r' ≠ '.combo-cache' —— 实测到的假绿
+  // （同一份 tar 在 Linux 上能判红、Windows 上不能）。
+  const norm = String(name).replace(/\r/g, '').trim()
+  return norm.split('/').includes('.combo-cache')
+}
 
 /** 纯判据：喂成员清单 + 构建脚本源码 + 登记表 id，返回失败列表（--self-test 直接驱动它）。 */
 function audit(memberNames, buildScriptsText, registryIds) {
   const out = []
-  const dead = memberNames.filter((n) => n.includes('/.combo-cache/'))
+  // issue #1195 洞一：**单文件缓存也要能扫到**。
+  //
+  // 旧条件要求路径里出现 `/.combo-cache/`（**带尾斜杠**），而缓存的自然形态可能就是一个 JSON 文件：
+  // `home/.dsh/profiles/web/.combo-cache`（无尾斜杠）→ 扫不到 → 假绿。
+  // 改成按「路径段等于 .combo-cache」判定：既覆盖目录形态（`.../.combo-cache/x.json`），
+  // 也覆盖单文件形态（`.../.combo-cache`）。用分段比较而不是裸 includes，
+  // 避免 `my.combo-cache.bak` 这类名字被误判。
+  const dead = memberNames.filter(isDeadCacheEntry)
   if (dead.length > 0) out.push(`快照内含 combo 死缓存条目 ${String(dead.length)} 个: [${dead.slice(0, 3).join(', ')}]——A3 已撤销（上游 rc.1 懒构造后预计算净亏）`)
   const code = codeOnly(buildScriptsText)
   if (/combo-precompute\.mjs/.test(code)) out.push('构建链仍在调用 combo-precompute.mjs')
@@ -60,6 +94,11 @@ if (argv.includes('--self-test')) {
     audit([], '', ['combo-cache-A3']).length === 1)
   push('反证：注释里提文件名不误判（撤销说明本身就是合法文案）',
     audit([], '// 链路面不得再调 combo-precompute.mjs\n  run(\'node\', [gate(\'check-something.mjs\')])', ids).length === 0)
+  // issue #1281：注释剥离的状态机原先不认正则字面量，正则里的引号（奇数个）会把扫描器
+  // 带进「字符串」状态，于是**之后整段**注释都不再被剥。判据本身没错，错的是它读到的
+  // 「代码」里混进了注释 —— 这条自证钉住「剥离仍然可靠」，否则本门禁可被注释骗成假红。
+  push('反证：正则字面量之后的注释也不误判（issue #1281）',
+    audit([], 'const r = /versionName\\s*=\\s*"([^"]+)"/\n// 链路面不得再调 combo-precompute.mjs\nrun(\'node\', [gate(\'check-something.mjs\')])', ids).length === 0)
   push('对照组：干净输入不判红', audit(['home/.dsh/profiles/web/package.json'], '', ids).length === 0)
   if (fails.length) { console.error(`COMBO-CACHE SELF-TEST FAILED（${fails.length} 项）`); process.exit(1) }
   console.log('COMBO-CACHE SELF-TEST PASSED')
@@ -82,10 +121,16 @@ if (!tarArg && !existsSync(autoTar)) {
   console.log('SKIP(#' + String(skipped) + ')  产物面未核对（无快照可扫）——构建/发布链以显式 <snapshot.tar.xz> 参数强制')
 } else {
   const listing = execFileSync(TAR, ['-tf', tarPath], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
-  members = listing.split('\n').filter((l) => l.length > 0)
+  // 同上：Windows tar 输出带 \r，先归一化再做任何路径判定。
+  members = listing.split('\n').map((l) => l.replace(/\r/g, '').trim()).filter((l) => l.length > 0)
+  // issue #1195：这条与 audit() 里的产物面判据必须用**同一份**匹配逻辑。
+  // 旧实现两处各写一遍 `includes('/.combo-cache/')`，改了一处另一处仍是假绿 ——
+  // 修洞一时实测到：单文件 `.../.combo-cache` 在 audit() 已能扫到，这条却仍漏。
+  // 抽成 isDeadCacheEntry 后两处共用，避免再次分叉。
+  const deadHere = members.filter(isDeadCacheEntry)
   check('产物面无 combo 死缓存条目（' + String(members.length) + ' 个成员已扫）',
-    !members.some((m) => m.includes('/.combo-cache/')),
-    'A3 已撤销：预计算清单在 rc.1 上是净亏，见本文件头注')
+    deadHere.length === 0,
+    deadHere.slice(0, 3).join(', ') + ' —— A3 已撤销：预计算清单在 rc.1 上是净亏，见本文件头注')
 }
 
 const buildScripts = ['scripts/build-snapshot-013.mjs', 'scripts/build-apk.mjs', 'scripts/build-apk-013.ps1',

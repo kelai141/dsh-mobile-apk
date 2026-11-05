@@ -57,7 +57,7 @@ describe('审计 §7.3：childList 是必需的（层是靠插入进场的）', 
     expect(window.__dshBackDepth, '触发器菜单靠 childList 进场').toBe(1)
     document.body.innerHTML = ''
 
-    commitLayer(document.body, 'div', { 'data-dsh-attachment-picker-menu': '' })
+    commitLayer(document.body, 'div', { 'data-dsh-composer-sheet-backdrop': '' })
     await flush()
     expect(window.__dshBackDepth, '附件来源菜单靠 childList 进场').toBe(1)
   })
@@ -69,20 +69,20 @@ describe('审计 §7.3：childList 是必需的（层是靠插入进场的）', 
     // 直接构造「只观察属性」的等价夹具：以 attributes-only 观察 documentElement。
     attributesOnly.observe(document.documentElement, {
       subtree: true, attributes: true,
-      attributeFilter: ['role', 'aria-modal', 'data-trigger-menu', 'data-dsh-attachment-picker-menu'],
+      attributeFilter: ['role', 'aria-modal', 'data-trigger-menu', 'data-dsh-composer-sheet-backdrop'],
     })
     let attributeOnlyHits = 0
     const attributeOnlyObserver = new MutationObserver((records) => { attributeOnlyHits += records.length })
     attributeOnlyObserver.observe(document.documentElement, {
       subtree: true, attributes: true,
-      attributeFilter: ['role', 'aria-modal', 'data-trigger-menu', 'data-dsh-attachment-picker-menu'],
+      attributeFilter: ['role', 'aria-modal', 'data-trigger-menu', 'data-dsh-composer-sheet-backdrop'],
     })
 
     withChildList.attach()
     await flush()
     commitLayer(document.body, 'div', { role: 'dialog', 'aria-modal': 'true' })
     commitLayer(document.body, 'div', { 'data-trigger-menu': '' })
-    commitLayer(document.body, 'div', { 'data-dsh-attachment-picker-menu': '' })
+    commitLayer(document.body, 'div', { 'data-dsh-composer-sheet-backdrop': '' })
     await flush()
 
     expect(window.__dshBackDepth, '带 childList：三层都看得见').toBe(3)

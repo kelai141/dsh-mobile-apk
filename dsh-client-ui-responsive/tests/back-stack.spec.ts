@@ -221,6 +221,42 @@ describe('other layers', () => {
     expect(seen).toEqual(['click'])
   })
 
+  it('closes the third-party marketplace full page through its own back button', async () => {
+    signal.attach()
+    // 真机 bug：插件市场被挪到左抽屉后，浮层由 dshmarketplace-plugin 自己渲染在 React 树外，
+    // 本栈看不见它 -> 系统返回被当成「没有可弹的层」-> BackGate 直接 FINISH_ACTIVITY 回桌面。
+    const overlay = document.createElement('div')
+    overlay.className = 'dshm-overlay'
+    const panel = document.createElement('div')
+    panel.className = 'dshm-panel'
+    const pagebar = document.createElement('div')
+    pagebar.className = 'dshm-pagebar'
+    const backButton = document.createElement('button')
+    backButton.className = 'dshm-back'
+    pagebar.appendChild(backButton)
+    panel.appendChild(pagebar)
+    overlay.appendChild(panel)
+    document.body.appendChild(overlay)
+    const seen = record(backButton)
+    await flush()
+    expect(window.__dshBackKinds, '市场浮层必须被认成一层').toEqual(['marketplace'])
+    expect(window.__dshBack?.()).toBe(true)
+    expect(seen).toEqual(['click'])
+  })
+
+  it('falls back to the overlay itself when the marketplace has no back button', async () => {
+    signal.attach()
+    const overlay = document.createElement('div')
+    overlay.className = 'dshm-overlay'
+    overlay.appendChild(document.createElement('div'))
+    document.body.appendChild(overlay)
+    const seen = record(overlay)
+    await flush()
+    expect(window.__dshBackKinds).toEqual(['marketplace'])
+    expect(window.__dshBack?.()).toBe(true)
+    expect(seen).toEqual(['click'])
+  })
+
   it('leaves right-column fullscreen through the mode toggle, else the collapse toggle', async () => {
     signal.attach()
     const panel = document.createElement('div')
@@ -272,19 +308,18 @@ describe('other layers', () => {
     expect(seenMode).toEqual(['click'])
   })
 
-  // D8 (2026-09-25): the plugin's own attachment-source popup is mounted on document.body, so its
-  // presence is exactly "open". It used to be invisible to this stack; the shell's back callback
-  // treats "no layer" as FINISH_ACTIVITY (BackGate.kt:56-60), so back with the menu open exited the
-  // app instead of closing the menu.
-  it('counts the attachment source menu as a layer and closes it, not the activity', async () => {
+  // D8: the plugin's own composer "+" bottom sheet is mounted on document.body, so its
+  // presence is exactly "open". The shell's back callback treats "no layer" as FINISH_ACTIVITY
+  // (BackGate.kt:56-60), so back with the sheet open must close it, not exit the app.
+  it('counts the composer sheet as a layer and closes it, not the activity', async () => {
     signal.attach()
     const popup = document.createElement('div')
-    popup.setAttribute('data-dsh-attachment-picker-menu', '')
+    popup.setAttribute('data-dsh-composer-sheet-backdrop', '')
     document.body.appendChild(popup)
     const seen: string[] = []
     document.addEventListener('pointerdown', event => { seen.push((event.target as Element)?.tagName ?? '') }, true)
     await flush()
-    expect(window.__dshBackKinds).toEqual(['attachment-menu'])
+    expect(window.__dshBackKinds).toEqual(['composer-sheet'])
     expect(window.__dshBackDepth).toBe(1)
     expect(uplink).toHaveBeenLastCalledWith(true)
     expect(window.__dshBack?.()).toBe(true)
@@ -297,16 +332,16 @@ describe('other layers', () => {
     expect(uplink).toHaveBeenLastCalledWith(false)
   })
 
-  it('stacks the attachment menu above an open upstream menu', async () => {
+  it('stacks the composer sheet above an open upstream menu', async () => {
     signal.attach()
     const upstream = document.createElement('div')
     upstream.setAttribute('data-trigger-menu', '')
     document.body.appendChild(upstream)
     const popup = document.createElement('div')
-    popup.setAttribute('data-dsh-attachment-picker-menu', '')
+    popup.setAttribute('data-dsh-composer-sheet-backdrop', '')
     document.body.appendChild(popup)
     await flush()
-    expect(window.__dshBackKinds).toEqual(['menu', 'attachment-menu'])
+    expect(window.__dshBackKinds).toEqual(['menu', 'composer-sheet'])
     expect(window.__dshBack?.()).toBe(true)
   })
 

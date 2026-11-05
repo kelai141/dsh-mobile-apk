@@ -43,6 +43,15 @@ internal class GuideChrome(
    */
   val apkStatus: TextView,
   val apkDownload: Button,
+  /**
+   * 0.15.0：更新卡的**次入口**（文字链接），与主按钮二选一承担动作。
+   *
+   * 为什么不复用 apkDownload：用户口径是「主按钮只有一个，另一个降为卡内右侧的轻量
+   * 文字链接」。同一枚控件既要当等宽主按钮又要当文字链接，只能靠运行时改 LayoutParams ——
+   * 那会在每次状态切换时重排整张卡，滚动位置也会跳。两枚各自静态，由 [UpdateCardLayout]
+   * 决定谁出现。
+   */
+  val apkSecondaryLink: TextView,
   /** Secondary startup action: retry the engine, or open the repair assistant. */
   val repairButton: Button,
   val runtimeChip: TextView,
@@ -449,10 +458,13 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
   // （管理中心 build 里先摘下来再挂进去）是同一判据的既有实现，这里只是不再走一遍"先挂在
   // 死布局里、再被摘走"的弯路。
   val apkStatus = TextView(activity).apply {
-    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-    // 次要色：状态行是次级信息，与管理中心的分区标题（ds_text_primary）同级会抢读者的注意力。
+    // 12sp + 1.5 倍行距（即 18sp 行高）= WebView 设置卡片里 .dsh-gs-desc 的那一档
+    // （font-size: 12px; line-height: 18px）。此前是 13sp/1.3 倍，两侧并排时字号与行距都不是一套。
+    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+    setLineSpacing(0f, 1.5f)
+    // 次要色：状态行是次级信息，与卡片标题（ds_text_primary）同级会抢读者的注意力。
+    // 这一档也正好是 .dsh-gs-desc 的 --dsw-alias-label-secondary。
     setTextColor(color(R.color.ds_text_secondary))
-    setLineSpacing(0f, 1.3f)
     // 失败原因与版本行都可能偏长：允许折两行，超出交给省略号（不撑高更新块、不截断到别的控件）。
     maxLines = 2
     ellipsize = TextUtils.TruncateAt.END
@@ -461,6 +473,28 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
   val apkDownload = makeSecondary(activity.getString(R.string.ds_apk_download)) {
     callbacks.onDownloadUpdate()
   }.apply { visibility = View.GONE }
+
+  /**
+   * 次入口：轻量文字链接（无底色、无描边，14sp 次要色）。
+   *
+   * 为什么不给底色：用户口径是「另一个降为卡内右侧的轻量文字链接」——它要让位给主按钮，
+   * 一旦与主按钮同款等宽灰块，克制就没了。触控面仍按 48dp（[minimumHeight]）保证好点，
+   * 只是**画**得像文本。
+   */
+  val apkSecondaryLink = TextView(activity).apply {
+    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+    setTextColor(color(R.color.ds_text_secondary))
+    gravity = Gravity.CENTER
+    includeFontPadding = false
+    minimumHeight = dpix(R.dimen.ds_btn_secondary_height)
+    isClickable = true
+    isFocusable = true
+    background = DsUi.ripple(
+      DsUi.roundRect(android.graphics.Color.TRANSPARENT, 0f),
+      color(R.color.ds_accent_soft),
+    )
+    visibility = View.GONE
+  }
 
   val secondaryRow = LinearLayout(activity).apply {
     orientation = LinearLayout.HORIZONTAL
@@ -576,6 +610,7 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
     updateButton = updateButton,
     apkStatus = apkStatus,
     apkDownload = apkDownload,
+    apkSecondaryLink = apkSecondaryLink,
     repairButton = repairButton,
     runtimeChip = runtimeChip,
     storageChip = storageChip,

@@ -17,6 +17,8 @@ export interface NativeBrowserControlState {
   readonly available: boolean
   readonly reason: string
   readonly profileAvailable: boolean
+  /** 隔离手段是否可用；false 只触发提示，不把浏览器标成不可用。 */
+  readonly isolationAvailable: boolean
   readonly profileReason: string
   readonly identityId: string
   readonly viewportWidth: number
@@ -236,6 +238,7 @@ export class NativeBrowserSession {
     return { nativeTabId: this.nativeTabId(uiTabId), available: this.snapshot.available,
       reason: this.snapshot.reason || tab?.reason || '',
       profileAvailable: this.snapshot.ok ? tab?.profileAvailable ?? this.snapshot.profileAvailable : this.snapshot.profileAvailable,
+      isolationAvailable: this.snapshot.ok ? tab?.isolationAvailable ?? this.snapshot.isolationAvailable : this.snapshot.isolationAvailable,
       profileReason: this.snapshot.ok ? tab?.profileReason ?? this.snapshot.profileReason : this.snapshot.profileReason, identityId: tab?.identityId ?? '',
       viewportWidth: tab?.viewportWidth ?? 0, viewportHeight: tab?.viewportHeight ?? 0 }
   }
@@ -263,7 +266,8 @@ class NativeBrowserFrame implements BrowserFrame {
       ready: () => {
         const snapshot = owner.getSnapshot()
         const tab = owner.nativeTab(options.tabId)
-        return snapshot.ok && snapshot.available && tab?.profileAvailable === true && this.source.getSnapshot().target !== undefined
+        // 隔离缺失不等于浏览器不可用：只要求浏览器在且有目标页；隔离单独提示。
+        return snapshot.ok && snapshot.available && tab !== undefined && this.source.getSnapshot().target !== undefined
       } })
     this.unsubscribe = owner.subscribe(() => { this.synchronize() })
   }
@@ -283,8 +287,8 @@ class NativeBrowserFrame implements BrowserFrame {
     const parsed = native === undefined || native.url === '' || native.url === 'about:blank' ? undefined
       : parseBrowserAddress(native.url, window.location.origin)
     const target = parsed?.ok === true ? { ...parsed.target, title: native?.title || parsed.target.title } : undefined
+    // 只有浏览器本体不可用或页面加载失败才进 error；隔离缺失是提示，不是页面错误。
     const reason = !snapshot.ok || !snapshot.available ? snapshot.reason
-      : native?.profileAvailable === false ? native.profileReason || 'browser-profile-unavailable'
       : native?.loadState === 'error' || native?.loadState === 'failed' ? native.reason || 'browser-load-failed' : undefined
     const next: BrowserFrameState = { target, address: target === undefined ? 'empty' : 'observed',
       loading: native?.loadState === 'loading' || native?.loadState === 'navigating',

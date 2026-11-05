@@ -130,19 +130,32 @@ class ClientRollbackGateTest {
   }
 
   @Test
-  fun 一次性入口源码_不得起观察窗也不得等WATCH_MS() {
-    val code = memberBody(codeOnly(shellSource("UndoGate.kt")), "fun onClientPluginTreeFailure(context: Context, detail: String, engine: EngineManager? = null): Boolean")
-    assertTrue("必须用 decide 复用 SUPPRESS/EXECUTE 语义", code.contains("decide(TRIGGER_CONSEC_FAILURES"))
-    assertTrue("必须按安装 + 当前失败patch身份读取重试marker", code.contains("retrySuppression(markerFile(context), currentRetryIdentity(context, engine), now)"))
-    // 契约是「不得**新开**观察窗」，不是「不得碰 arm 文件」：清退一个陈旧起点是安全方向，
-    // 写入时间戳才会造出一个在这条路上永远走不到 EXECUTE 的窗口（历史缺陷形状即 armFile().writeText(now)）。
-    assertFalse(
-      "不得写 arm 文件（那会引入永不打开的观察窗）",
-      Regex("""armFile\s*\([^)]*\)\s*\.\s*(writeText|writeBytes|appendText|createNewFile)""").containsMatchIn(code),
-    )
-    assertTrue("观察窗起点只能来自读盘，不得在本入口重新计时", code.contains("armedAt("))
-    assertFalse("不得等待 WATCH_MS", code.contains("WATCH_MS"))
-    assertTrue("判定必须走纯函数两态映射", code.contains("clientPluginFailureDecision("))
+  fun 一次性入口_放行即记账且不得起观察窗() {
+    // 行为判据替代源码切片（issue #1507）：这条入口放行时**必须当场记账**——旧实现只做 decide
+    // 就返回 true，attempt 文件从不更新，于是下一次进来又读到「没有尝试记录」⇒ 每 5 秒一拍
+    // 拉起一次回滚。同时它不得写 arm 文件：观察窗在这条路上永远走不完（见上一条反证）。
+    val dir = File(System.getProperty("java.io.tmpdir"), "undo-client-gate-" + System.nanoTime())
+    dir.mkdirs()
+    try {
+      val identity = UndoGate.RetryIdentity("install-a", "patch-a")
+      val notes = UndoGate.GateNotes()
+      assertTrue(
+        "首次进入必须立刻放行（不得等 WATCH_MS）",
+        UndoGate.onClientPluginTreeFailureIn(dir, "detail", identity, now, notes),
+      )
+      assertFalse("arm 文件不得出现（那会引入永不打开的观察窗）", File(dir, ".undo-auto-armed").exists())
+      assertEquals(
+        "放行必须落尝试记录",
+        now,
+        UndoGate.decodeMarker(File(dir, ".undo-auto-attempt").readText(), now),
+      )
+      assertFalse(
+        "5 秒后的下一拍必须被尝试退避压住（旧实现这里又放行）",
+        UndoGate.onClientPluginTreeFailureIn(dir, "detail", identity, now + 5_000L, notes),
+      )
+    } finally {
+      dir.deleteRecursively()
+    }
   }
 
   // ── 客户端点名判定：唯一命中 ─────────────────────────────────────────────────

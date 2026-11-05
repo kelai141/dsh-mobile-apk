@@ -56,7 +56,7 @@ class OverlayRecall(private val svc: OverlayService) {
     )
     val strip = View(svc).apply {
       // uiautomator / 无障碍认这条（隐藏态里它是**唯一**可操作面，必须有名字）。
-      contentDescription = "唤回悬浮球"
+      contentDescription = UiText.t(svc, "唤回悬浮球", "Bring back floating ball")
       background = stripBackground()
       isClickable = true
       setOnClickListener { svc.recallBall() }

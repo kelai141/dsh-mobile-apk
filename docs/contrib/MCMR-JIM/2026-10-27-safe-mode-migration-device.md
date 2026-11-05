@@ -1,0 +1,11 @@
+# Android qualification of Safe Mode migration
+
+Safe Mode marker migration deletes a legacy state file and decides which state governs restoration. Pure filesystem JVM tests are useful but do not establish Android filesystem qualification for this user-data path.
+
+The new instrumented suite exercises the actual `SafeMode.status`, `enter` and `exit` implementation in an isolated cache profile with the production web path layout. It covers identical duplicate state convergence, conflicting state preservation, either marker being a symbolic link or directory, column-zero comments after filtered insert groups, and exit through verified backups after an interrupted active-state migration.
+
+All 60 existing focused Safe Mode JVM tests pass. Against the verified older development APK (574ba8ea, source 01d63929), the identical six-case test APK fails three expected assertions: duplicate status convergence, active-state exit and comment preservation. The current development package passes all six. Its SafeMode runtime source is identical to main 64098a20; unrelated startup and backup fixes in that package are not part of this qualification.
+
+Portrait and landscape WebView suites each pass all 46 assertions. Actual console tasks navigate through Settings and Developer options, then issue native `dsh safe` status/on/status/off/status commands. Each orientation preserves a unique column-zero comment while active and restores patch, home and package bytes exactly on exit. Native state and only newly owned backup files are removed after verification. A second portrait pass supplies per-step screenshots; both orientations have screenshot sets for every command. The live profile contains no third-party insert entries, so actual removal is established by the isolated native fixture rather than claimed from the live task.
+
+The fixture refuses to replace existing Safe Mode state and stores complete originals privately before adding its test comment. The original live patch SHA-256 is restored in both directions; rotation preferences return to their initial portrait/automatic setting. Configuration transactions were tested without restarting the engine with the filtered configuration. Neither development APK is a release candidate. No production behavior is changed by this test-only PR.

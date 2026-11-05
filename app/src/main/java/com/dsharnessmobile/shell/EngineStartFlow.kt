@@ -19,7 +19,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
   /** Minimum spacing between retries of a failed engine page (see the monitor below). */
   private val ENGINE_PAGE_RELOAD_INTERVAL_MS = 30_000L
 
-  private val flowOwnership = StartupFlowOwnership()
+  private val flowOwnership = StartupFlowOwnership(::flowOwnershipProbeSink) // 探针接线（tag=dsh-owner）
   private val ownershipRetry = StartupOwnershipRetryBudget()
   /** 重启引擎 in-flight 守卫（防连点双杀双启）。 */
   private val engineRestarting = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -48,7 +48,8 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     override fun run() {
       if (!canRunEngineWork()) return
       if (!activity.pageUiActive || activity.userClosedEngine) return
-      if (RepairState.required(activity) || RepairState.active || RepairState.retryPending) return
+      if (RepairState.active || RepairState.retryPending) return
+      if (!mayObserveColdStart(RepairState.required(activity), RepairState.coldStartAttemptInFlight())) return
       // CONTRACT §4 闸门：插件装配失败 latch 期内整条前台监控都不再动作。
       // 为什么是整条而不是只挡住 showWeb 那一支：latch 的语义是「页面已定性失败，等用户决策」；
       // 放行其余分支就会继续做「引擎未运行 → 自动恢复」的相位切换，把 Error 页顶掉——那是
@@ -70,6 +71,9 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         val portAlive = EngineProbe.portReachable(500)
         activity.runOnUiThread {
           if (generation != monitorGeneration || !activity.pageUiActive || !canRunEngineWork()) return@runOnUiThread
+          // A repair decision made during the HTTP request revokes this observation too.
+          if (RepairState.retryPending ||
+            !mayObserveColdStart(RepairState.required(activity), RepairState.coldStartAttemptInFlight())) return@runOnUiThread
           if (flowOwnership.running) {
             engineMonitorHandler.postDelayed(monitor, 3_000)
             return@runOnUiThread
@@ -85,7 +89,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
                 if (activity.guideView.visibility == View.VISIBLE) {
                   activity.showWeb()
                 } else if (activity.enginePageFailed &&
-                  System.currentTimeMillis() - lastEnginePageReloadAt > ENGINE_PAGE_RELOAD_INTERVAL_MS
+                  System.currentTimeMillis() - lastEnginePageReloadAt > ENGINE_PAGE_RELOAD_INTERVAL_MS && EnginePageRetryPolicy.decide(activity.enginePageFailed, true, activity.pageRecovery.foreground, activity.pageRecovery.rendererGone, activity.userClosedEngine, activity.pageRecovery.retryBudgetSpent(currentStartGeneration), 0L, 0L) == EnginePageRetryPolicy.Decision.RETRY
                 ) {
                   // The engine answered only after the WebView had already shown its
                   // error page (long snapshot refresh): retry that navigation instead
@@ -95,7 +99,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
                   // ERR_CONNECTION_REFUSED 上，而现场没有任何一行说明「我们试过重载但没成功」。
                   // 吞掉无害清理可以，吞掉用户正在等的那个恢复动作不行。
                   try {
-                    activity.retryFailedEnginePage()
+                    activity.retryFailedEnginePage(currentStartGeneration)
                   } catch (e: Exception) {
                     Log.w("dsh-shell", "engine page reload failed", e)
                   }
@@ -121,10 +125,11 @@ internal class EngineStartFlow(private val activity: MainActivity) {
   // 主线程不受影响：主线程周期发 JS 心跳，回调不再返回即判渲染进程失活 →
   // 前台静默 reload 一次 + 记日志；后台时间不参与冻结判定。 ——
   private val freezeHandler = android.os.Handler(android.os.Looper.getMainLooper())
-  private var jsAckAt = System.currentTimeMillis()
-  private var pageLoadedAt = System.currentTimeMillis()
-  private var pingOutstanding = false
-  private var freezeReloaded = false
+  // #1513：冻结自愈的**状态机**（置位 / 复位 / 重武装）收在 FreezeRecoveryGate 里，判据用
+  // 可注入时钟直接跑「冻结 -> reload -> 不重复 reload -> 应答后重武装」这些转换。旧判据切的是
+  // startFreezeWatchdog 到 startUpdateCheck 那一段，而置位点与唯一复位点都在 freezeRunnable 里，
+  // 于是把 freezeReloaded=false 挪进冻结分支（每拍复位 = 每 10 秒 reload 的循环）也判不出来。
+  private val freezeGate = FreezeRecoveryGate()
   private val freezeRunnable = object : Runnable {
     override fun run() {
       if (!canRunEngineWork()) return
@@ -134,33 +139,32 @@ internal class EngineStartFlow(private val activity: MainActivity) {
       // （与 showWeb 的 reload 环同族）。清 latch 之后本看门狗自然恢复。
       if (clientPluginTreeFailed) return
       val now = System.currentTimeMillis()
-      if (now - pageLoadedAt > 45_000 && now - jsAckAt > 20_000) {
-        if (!freezeReloaded) {
-          freezeReloaded = true
-          LogCollector.log("dsh-shell", "webview JS 无响应，渲染进程冻结（frozenMs=" + (now - jsAckAt) + "）")
-          // 0.14.1 D3：与上面的引擎页重载同族——冻结自愈的唯一动作失败时必须留下痕迹，
-          // 否则日志里只有「检测到冻结」，看不出「自愈没生效」。
-          try {
-            activity.reloadEnginePage()
-          } catch (e: Exception) {
-            Log.w("dsh-shell", "freeze recovery reload failed", e)
-          }
+      // 状态机只回答「本拍做什么」；动作（reload / evaluateJavascript）留在 Activity 侧，
+      // 这样判据能在 JVM 里离线跑转换，不必构造 WebView。
+      val action = freezeGate.tick(now)
+      if (action == FreezeRecoveryGate.Action.RELOAD) {
+        LogCollector.log("dsh-shell", "webview JS 无响应，渲染进程冻结（frozenMs=" + freezeGate.frozenMs(now) + "）")
+        // 0.14.1 D3：与上面的引擎页重载同族——冻结自愈的唯一动作失败时必须留下痕迹，
+        // 否则日志里只有「检测到冻结」，看不出「自愈没生效」。
+        try {
+          activity.reloadEnginePage()
+        } catch (e: Exception) {
+          Log.w("dsh-shell", "freeze recovery reload failed", e)
         }
-        jsAckAt = now
-        pingOutstanding = false
-      } else if (!pingOutstanding) {
-        pingOutstanding = true
+      } else if (action == FreezeRecoveryGate.Action.PING) {
+        // 心跳只发一次：在飞标记由状态机记（pingOutstanding），回执回来前不重发。
         try {
           val generation = monitorGeneration
           activity.webView.evaluateJavascript("1") { _ ->
             if (generation != monitorGeneration || !activity.pageUiActive) return@evaluateJavascript
-            jsAckAt = System.currentTimeMillis()
-            pingOutstanding = false
+            // #1355：应答=页面真活，重开冻结自愈预算（不能放 onPageFinished，会成 reload 循环）。
+            freezeGate.onAck(System.currentTimeMillis())
           }
         } catch (_: Exception) {
-          pingOutstanding = false
+          freezeGate.onPingFailed()
         }
       }
+      // 拍长 10 秒（与旧实现一致，勿单独改）：状态机的 45s/20s 两个窗口按这个节奏标定。
       freezeHandler.postDelayed(this, 10_000)
     }
   }
@@ -266,10 +270,20 @@ internal class EngineStartFlow(private val activity: MainActivity) {
    */
   fun onPageReadyReported(rawLine: String) {
     if (!canRunEngineWork()) return
-    // 冷启自动尝试在途时允许健康收敛清门（否则自动尝试拉起引擎后门永远清不掉，
-    // 页面就绪报文被这道守卫原样丢弃）；本进程内再落门则恢复原语义。
-    if (clientPluginTreeFailed || (RepairState.required(activity) && !RepairState.coldStartAttemptInFlight())) return
-    RepairState.reset(activity)
+    // 页面 ready 是**最硬的健康证据**（结果性判据：真实 DOM 已渲染）：它到达时必须清修复门。
+    // 此前（0.14.10 审计 §B-1，小米 14 实锤 2026-10-25）：门在场且冷启自动尝试已花掉时，
+    // 本守卫把 ready 报文整条丢弃——实测五轮启动页面**每一轮都活着并上报 ready**（上游
+    // ErrorBoundary 兜住了 slot entry 的 React #130），但壳因持久门无视它，用户每轮看到
+    // 「引擎仍无法启动」引导页，直到手清 native-repair 才亮。coldStartAttemptInFlight 的
+    // 例外只覆盖「自动尝试刚花掉、门还没来得及被本轮失败重置」的窗口，覆盖不了
+    // 「门是历史残留、本进程已无自动尝试额度」的常态——那正是环境性死亡后的真实形态。
+    // 保留的语义边界：clientPluginTreeFailed 在场仍丢弃（插件树失败是页面自身的终态，
+    // ready 行与失败行同源竞争时以失败为准——那是另一条契约，不在本修复动）。
+    if (clientPluginTreeFailed) return
+    if (RepairState.required(activity)) {
+      RepairState.reset(activity)
+      LogCollector.log("dsh-shell", "repair gate cleared by page-reported boot-ready")
+    }
     pageReadyReported = true
     if (pageReadyLogged) return
     pageReadyLogged = true
@@ -401,7 +415,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
   fun stopMonitoring() {
     monitorGeneration++ // Reject HTTP/JS callbacks already in flight at pause or renderer loss.
     engineMonitorFailures = 0
-    pingOutstanding = false
+    freezeGate.onStopped()
     engineMonitorHandler.removeCallbacks(engineMonitorRunnable)
     freezeHandler.removeCallbacks(freezeRunnable)
     bootStallHandler.removeCallbacks(bootStallRunnable)
@@ -411,9 +425,9 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     if (!canRunEngineWork()) return
     if (!activity.pageUiActive || activity.userClosedEngine || !activity.webViewReady || activity.webView.visibility != View.VISIBLE) return
     val now = System.currentTimeMillis()
-    pageLoadedAt = now
-    jsAckAt = now
-    pingOutstanding = false
+    // #1513：计时交给状态机（复位只发生在应答回调，onPageFinished 不等于页面真活）。
+    freezeGate.onPageLoaded(now)
+    // 冻结自愈闸门（freezeReloaded）在这里**不复位**：文档加载完时 JS 可能仍然死着。
     // **不要**在这里 resetBootStall()：本函数由 onPageFinished 调用，而 onPageFinished 只代表
     // **文档加载完**，不代表页面渲染完/插件装配完。此前在这里复位 → 页面加载完重新计时 →
     // 再过 40s 又报一次，同一 epoch 落两行（L-1 的重复报根因）。
@@ -541,8 +555,11 @@ internal class EngineStartFlow(private val activity: MainActivity) {
       activity.showGuide()
     }
     engineMonitorHandler.postDelayed({
+      // issue #1356：**先判世代再清闩**。陈旧的重试 runnable 跨世代执行时，原来会把新一代的
+      // retryPending 清掉——新一代正在等自己的重试窗口，闩被误清后看门狗会在这段窗口里重启引擎。
+      if (!isCurrentEngineFlow(generation)) return@postDelayed
       RepairState.retryPending = false
-      if (isCurrentEngineFlow(generation) && !RepairState.required(activity)) {
+      if (!RepairState.required(activity)) {
         Thread {
           if (!isCurrentEngineFlow(generation)) return@Thread
           // stopOwnedEngine() also returns false when the tracked child is
@@ -587,7 +604,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
    * embedded), else extract the embedded snapshot and start the embedded
    * engine, then poll until the web service answers.
    */
-  fun start() {
+  fun start(entry: StartEntryPoint = StartEntryPoint.UNSPECIFIED) {
     if (!canRunEngineWork()) return
     // 冷启自动尝试（0.14.10）：与 MainActivity.startEngineFlow 同一出口语义；RepairState 内部保证每进程一次。
     if (startupEntryDecision(RepairState.required(activity), explicitUserRetry = RepairState.coldStartAutoAttemptAvailable(activity)) ==
@@ -606,11 +623,11 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     clientPluginTreeFailed = false
     // The owner and generation change in one CAS; an obsolete finally cannot
     // clear a replacement, and duplicate lifecycle callbacks change neither.
-    val token = flowOwnership.begin()
+    val token = flowOwnership.begin(entry)
     if (token == null) {
       // 抢不到所有权有两种原因，**必须分开**（定位报告 §2.3）：destroyed 是生命周期终结，
       // 保持「不启动」；running 是「另一次启动/快照刷新正在跑」，丢弃它才是缺陷。
-      deferEngineStartWhileSnapshotTransactionBusy()
+      deferEngineStartWhileSnapshotTransactionBusy(entry)
       return
     }
     val generation = token.generation
@@ -709,15 +726,69 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         }
         return@Thread
       }
+      // issue #1240：**新鲜度判定必须提到「引擎已在跑」早退之前**。
+      //
+      // 缺陷形态（实测两台设备）：设备上已装过本 App 且引擎在跑，覆盖安装一个内嵌快照不同的 APK，
+      // 安装完成后系统拉起应用，此时探活命中 OUR_PROCESS/OUR_HTTP ⇒ 旧实现在下面直接早退，
+      // 紧随其后的那段 `if (!snapshotFresh())` 刷新**永远不会执行**。后果不是报错也不是降级，而是升级后继续跑上一版的
+      // runtime：用户视角是「这版没修那个问题」，排查视角是 boot-fail.log 里没有任何一条指向快照，
+      // 只能靠手动 force-stop / pm clear 才恢复。快照新鲜度的判据（snapshotFresh）本来就是对的，
+      // 缺陷只是它永远轮不到被执行。
+      //
+      // 修法取向（issue 建议方案 A）：探活结果**不再是早退的充分条件**，只是「是否需要先停旧引擎」的
+      // 一个输入。判据仍然是既有的 snapshotFresh()，不新造口径、不改它的语义。
       if (engineAlreadyRunning) {
-        // P-AC-04：这条早退路径不经过 spawn 观察线程，补一次 listen 标记（幂等；本进程没记过
+        // P-AC-04：这条路径不经过 spawn 观察线程，补一次 listen 标记（幂等；本进程没记过
         // t_boot_start 时按「未知」记 -1 落盘，而不是让三字段整行缺失）。
         LogCollector.markListen(activity)
         // C1：探活已经拿到 HTTP 应答（engineAlreadyRunning 覆盖 running 或 401=可认证，见 probeRunning）；
         // 所以首个响应时刻同样可判——否则「进程内接手已在跑的引擎」这一路径永远没有 C1 读数。
         LogCollector.markFirstHttp(activity)
-        activity.runOnUiThread { if (isCurrentEngineFlow(generation)) activity.showWeb() }
-        return@Thread
+        when (alreadyRunningSnapshotDecision(activity.engineManager.snapshotFresh())) {
+          // 快照与本安装包的指纹一致 ⇒ 在跑的就是这一版的运行时，早退照旧。
+          // 这是**反方向**的护栏：新鲜时不得为了「保险」多杀一次引擎（8-12 分钟重抽取 + 前台中断）。
+          AlreadyRunningSnapshotDecision.EARLY_EXIT_FRESH -> {
+            activity.runOnUiThread { if (isCurrentEngineFlow(generation)) activity.showWeb() }
+            return@Thread
+          }
+          AlreadyRunningSnapshotDecision.STOP_THEN_REFRESH -> Unit
+        }
+        // 快照陈旧 ⇒ 现在跑着的**不是这一版**的运行时，覆盖安装后必须换掉它。
+        // 刷新要 swap usr/ 树，带着活动引擎直接解压会把新树写进正被使用的路径，所以先停。
+        // 复用既有克制语义（stopOwnedEngine 只停本壳持有句柄的子进程，绝不按名字杀未归属监听器），
+        // 下面照旧落到同一条刷新 → 重启链，不新造任何流程。
+        requireCurrentEngineFlow(generation)
+        LogCollector.log("dsh-engine-start",
+          "engine already running but the runtime snapshot is stale: stopping the owned engine to refresh")
+        val stopped = try { activity.engineManager.stopOwnedEngine() } catch (t: Throwable) {
+          Log.w("dsh-engine-start", "stopping the stale owned engine failed: " + t.javaClass.simpleName)
+          false
+        }
+        requireCurrentEngineFlow(generation)
+        // 停干净是刷新的前置：失败时不进 refreshSnapshot（带活动引擎解压会破坏正在使用的 usr 树），
+        // 而是如实停在可读错误页。文案说明**本次刷新未执行**与出口，不宣称已安排刷新。
+        if (!stopped) {
+          LogCollector.writeBootFail(
+            activity, "snapshot-refresh-blocked-engine-running",
+            "快照与本安装包指纹不一致（覆盖安装后仍跑旧 runtime），但旧引擎未归属到本壳或停止失败："
+              + "本次**未执行**快照刷新（带活动引擎解压会破坏正在使用的 usr 树），运行时仍是旧版本。"
+              + "可点「重试」，或重启应用后再试。",
+          )
+          activity.runOnUiThread {
+            if (!isCurrentEngineFlow(generation)) return@runOnUiThread
+            activity.applyGuidePhase(
+              GuidePhase.Error,
+              UiText.t(activity, "运行时更新未完成", "The runtime update did not finish"),
+              UiText.t(activity,
+                "安装包的运行时与本机不一致，但旧引擎未能停止，本次未执行刷新；可点「重试」或重启应用。",
+                "The bundled runtime differs from this device, but the old engine could not be stopped; " +
+                  "the refresh was not attempted. Retry, or restart the app."),
+            )
+            activity.showGuide()
+          }
+          return@Thread
+        }
+        // 停成功：**不早退**，继续往下走既有的新鲜度判定（此刻必为 false）→ 刷新 → 重启链。
       }
       if (!isCurrentEngineFlow(generation)) return@Thread
       // 相位已由本函数入口切到 Starting（启动即有反馈），这里不再重复切换——
@@ -810,7 +881,11 @@ internal class EngineStartFlow(private val activity: MainActivity) {
             // snapshot-delete-residue / snapshot-move-blocked / snapshot-foreign-owner）。
             // 有了码，boot-fail.log 的一行就说清「是哪一类失败」，不必翻栈。
             val refreshCause = activity.engineManager.lastRefreshFailure
-            val refreshCode = activity.engineManager.lastRefreshFailureCode ?: "snapshot-refresh-failed"
+            // issue #921：真因码与「未归类」必须渲染成不同字符串（不再共用一个兜底值）。
+        val refreshCode = EngineManager.refreshFailureLabel(
+            activity.engineManager.lastRefreshFailureCode,
+            activity.engineManager.lastRefreshFailureUnclassified,
+        )
             activity.engineManager.lastStartRefusalCode = refreshCause?.let {
               activity.engineManager.startupExceptionCode(it)
             } ?: EngineManager.REFUSAL_RUNTIME_UNAVAILABLE
@@ -852,12 +927,30 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         }
       }
       if (!isCurrentEngineFlow(generation)) return@Thread
-      if (!activity.engineManager.startEngine()) {
+      // issue #684：让行与失败必须分开 ——「刷新中让行」没有进程，不能进存活判据、不能计重试预算。
+      // 旧实现把它当 true（已发起），于是存活判据当拍为假，一次正常的 8-12 分钟刷新被误判成
+      // 「进程在预算内死亡」，两次重试后落持久修复门。
+      val startOutcome = activity.engineManager.startEngine()
+      if (startOutcome == EngineStartOutcome.DEFERRED_REFRESHING) {
+        LogCollector.writeBootFail(
+          activity, "engine-start-deferred-refresh",
+          "本次启动请求撞上正在进行的快照刷新，已让行（非失败）：未 spawn、未置 STARTING、未计重试预算；"
+            + "由持有刷新的启动流在完成后拉起引擎。",
+        )
+        return@Thread
+      }
+      if (startOutcome == EngineStartOutcome.REFUSED) {
         requireCurrentEngineFlow(generation)
       // A Hard ownership mismatch is itself an install/runtime integrity failure.
       // There is no separate UI retry state that can resolve it: the assistant
       // reads the actual archive and profile through native tools.
       if (activity.engineManager.lastStartRefusalCode == EngineManager.REFUSAL_HARD_BUNDLE_SELECTION) {
+        // issue #657：这条 early return 此前跳过了下面的失败落盘，于是「Hard 清单缺失」
+        // 这种用户无法自行诊断的拒启，成了唯一不在 boot-fail.log 留痕的启动失败。
+        //
+        // 落盘已**下沉**到 EngineManager.startEngine() 的统一收口 refuse()（7 条出口全走它），
+        // 所以这里不再重复写——设备实测过重复版本会一次拒启写两条同 stage 记录，
+        // 反而让 boot-fail.log 的条数失真。此处只保留「转交原生修复」这层语义。
         requireNativeRepair()
         return@Thread
       }
@@ -870,7 +963,8 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         val refusalCode = activity.engineManager.lastStartRefusalCode
         LogCollector.writeBootFail(
           activity, if (refusal != null) "engine-start-refused" else "engine-start-false",
-          "EngineManager.startEngine() 返回 false（未能拉起引擎进程）"
+          // issue #720：布尔时代的口径（"返回 false"）已随三态契约作废，落盘文案必须说清是哪一态。
+          "EngineManager.startEngine() 判为 REFUSED（引擎未 spawn，原因见 refusalCode）"
             + (refusalCode?.let { "；refusalCode=" + it } ?: "")
             // issue #309：把**判别性事实**（确诊项有几个）也写进 boot-fail，而不是只写进
             // LogCollector.log——后者只有采集器在跑时才落盘（独立评审 C6 指出的可诊断性缺口）。
@@ -1092,11 +1186,24 @@ internal class EngineStartFlow(private val activity: MainActivity) {
    * 判据用**跨进程真源** journal 文件而不是 `flowOwnership.running`：后者只是本 Activity 实例的
    * 内存态（MainActivity 未声明 launchMode，新实例会绕过它），journal 才是「刷新真的在跑」的事实。
    */
-  private fun deferEngineStartWhileSnapshotTransactionBusy() {
+  private fun deferEngineStartWhileSnapshotTransactionBusy(entry: StartEntryPoint = StartEntryPoint.UNSPECIFIED) {
     if (flowOwnership.destroyed) return // 生命周期终结：保持不启动，不等待、不留痕。
     if (!canRunEngineWork()) return
     engineMonitorHandler.removeCallbacks(deferredStartRunnable)
     val marker = SnapshotTransaction.readMarker(activity.filesDir)
+    // 取证探针（只读）：把「谁在占所有权」如实留一行。
+    //
+    // 为什么必须有这一行：设备实测（127.0.0.1:16448）冷启时这句 boot-fail 成对复现，
+    // 但旧日志只有「另一次启动流仍在占用」这种无名氏的措辞——排障者无从判断
+    // 到底是 onCreate 的自动入口、onResume 的探活，还是看门狗的重启在占。
+    // 这里给出 generation + 线程名 + journal 是否在场，三者足以定位入口类型。
+    LogCollector.log(
+      "dsh-owner",
+      "flow.defer cause=" + classifyDeferCause(marker != null, flowOwnership.running).name +
+        " reason=" + (if (marker == null) "no-transaction" else "transaction-" + marker.phase.name) +
+        " " + flowOwnership.deferredOwnerSnapshot(entry) +
+        " snapshotMarker=" + (if (marker == null) "absent" else "present"),
+    )
     LogCollector.log("dsh-shell", "engine start deferred: another start flow or a snapshot refresh owns the generation")
     if (marker == null) {
       // 所有权被占、但没有任何快照事务在场（典型是同一实例里上一次启动流的收尾还没跑完）。
@@ -1115,11 +1222,50 @@ internal class EngineStartFlow(private val activity: MainActivity) {
       //  - 无事务：等的是**本实例上一次启动流的收尾**，判据是 flowOwnership，预算数秒。
       // 把它们并成一个（例如复用 deferredStartRunnable 的 16 分钟预算）会让「上一次流收尾慢了」
       // 这种秒级情形也挂上 16 分钟等待者，用户点到按钮后毫无反馈。
+      // 【文案必须能区分两种状态】旧文案一律写「且无快照事务在场」，但**刷新正在进行**时
+      // 这句话是错的、而且误导排障方向：真正占用所有权的是正在跑的那次启动流（它内部正在
+      // 解压/合并），而不是「什么都没发生」。
+      //
+      // 为什么 journal 判据在刷新期会是 absent（这不是 bug，是时序）：STAGED marker 由
+      // EngineManager.refreshSnapshot 在**解压完成、swap 之前**才写（EngineManager.kt:351），
+      // 而解压本身要 8-12 分钟。设备实测（127.0.0.1:16448，覆盖安装 v0.14.9）正好落在这一段：
+      // boot-fail.log 里 transaction=absent + engineLog=empty + t_boot_start 有值。
+      //
+      // 【判据：只看快照事务是否真的存在，不看 startupInProgress】
+      //
+      // 2026-11-02 设备实测（127.0.0.1:16448，v0.14.11 候选包）拿到反例：一次冷启报出
+      // 「撞上**正在进行的运行时刷新**」，而同期三条独立事实都表明根本没有刷新：
+      //   · .snapshot-settings-backup/ 无新条目（只有装机触发的那次）
+      //   · .snapshot-fingerprint mtime 停在上一次刷新完成时刻，未变
+      //   · boot-diag.log 里 refresh 命中数 = 0
+      // 探针给出的实情是 reason=no-transaction / snapshotMarker=absent，占用者是**另一次启动流**。
+      //
+      // 真因：RepairState.startupInProgress 在**任何**启动流期间都为真（start 抢到所有权即置 true），
+      // 它只说明「本进程有个启动流在跑」，**不等于「有快照事务」**。用它分档会把「同刻多入口争锁」
+      // 误报成「正在刷新」，把排障方向引到 8-12 分钟的解压上。
+      //
+      // 现在改走纯判据 classifyDeferCause（事务文件 + 所有权持有者两条互相独立的事实）。
+      // 走到本分支说明 marker 为 null，故 transactionPresent 恒为 false；SNAPSHOT_TRANSACTION
+      // 分支保留只为穷尽三档（真刷新走下面 engine-start-deferred 那条 stage）。
+      val cause = classifyDeferCause(transactionPresent = false, ownerRunning = flowOwnership.running)
       LogCollector.writeBootFail(
         activity, "engine-start-deferred-no-transaction",
-        "启动请求未获世代所有权（另一次启动流仍在占用），且无快照事务在场：本次请求未被受理，未拉起引擎；"
-          + "已安排按 " + NO_TRANSACTION_RETRY_STEP_MS + "ms 步进、上限 " + NO_TRANSACTION_RETRY_BUDGET_MS
-          + "ms 的自动重试，取得所有权后自动续跑。",
+        when (cause) {
+          DeferCause.SNAPSHOT_TRANSACTION ->
+            ("启动请求撞上正在进行的快照刷新（journal 可读）：本次请求未被受理，未拉起引擎；"
+              + "已安排按 " + NO_TRANSACTION_RETRY_STEP_MS + "ms 步进、上限 " + NO_TRANSACTION_RETRY_BUDGET_MS
+              + "ms 的自动重试，刷新收口后会重新尝试。")
+          DeferCause.OWNERSHIP_CONTENTION ->
+            ("启动请求未获世代所有权：**另有启动流正持有所有权**，而**快照事务并不存在**"
+              + "（journal absent，当前没有刷新在进行）——这是同一时刻的多个启动入口在争锁，不是刷新等待；"
+              + "本次请求未被受理，未拉起引擎；已安排按 " + NO_TRANSACTION_RETRY_STEP_MS + "ms 步进、上限 "
+              + NO_TRANSACTION_RETRY_BUDGET_MS + "ms 的自动重试，取得所有权后自动续跑。")
+          DeferCause.NO_TRANSACTION_IDLE ->
+            ("启动请求未获世代所有权，且此刻**既无快照事务、也无持有者**"
+              + "（journal absent、所有权已释放——begin 拒绝与本次处置之间的竞态）：本次请求未被受理，"
+              + "未拉起引擎；已安排按 " + NO_TRANSACTION_RETRY_STEP_MS + "ms 步进、上限 "
+              + NO_TRANSACTION_RETRY_BUDGET_MS + "ms 的自动重试，下一次即应成功。")
+        },
       )
       noTransactionRetry.attempts = 0
       engineMonitorHandler.postDelayed(noTransactionRetry, NO_TRANSACTION_RETRY_STEP_MS)
@@ -1202,7 +1348,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         DeferredStartRetryDecision.HAND_OVER_TO_TRANSACTION_WAIT -> {
           attempts = 0
           LogCollector.log("dsh-shell", "no-transaction retry handing over to the transaction waiter")
-          deferEngineStartWhileSnapshotTransactionBusy()
+          deferEngineStartWhileSnapshotTransactionBusy(StartEntryPoint.INTERNAL_RETRY)
           return
         }
         DeferredStartRetryDecision.RESUME -> {
@@ -1213,11 +1359,30 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         }
         DeferredStartRetryDecision.TIMEOUT -> {
           attempts = 0
+          // 超时点**重新读一次**两条独立事实（事务文件 + 所有权），不用 startupInProgress：
+          // 那个标志在任何启动流期间都为真，会让「无刷新的争锁」误报成「刷新仍在进行」。
+          val timeoutCause = classifyDeferCause(
+            transactionPresent = SnapshotTransaction.readMarker(activity.filesDir) != null,
+            ownerRunning = flowOwnership.running,
+          )
+          LogCollector.log("dsh-owner", "flow.defer.timeout cause=" + timeoutCause.name + " " + flowOwnership.deferredOwnerSnapshot(StartEntryPoint.INTERNAL_RETRY))
           LogCollector.writeBootFail(
             activity, "engine-start-deferred-no-transaction-timeout",
-            "启动请求在 " + NO_TRANSACTION_RETRY_BUDGET_MS + "ms 重试预算内仍未取得世代所有权"
-              + "（另一次启动流仍在占用，且始终无快照事务在场）：本次启动请求未执行，也未拉起引擎；"
-              + "下一次入口（点按钮 / 回前台探活）会再次尝试。",
+            when (timeoutCause) {
+              DeferCause.SNAPSHOT_TRANSACTION ->
+                ("启动请求在 " + NO_TRANSACTION_RETRY_BUDGET_MS + "ms 重试预算内仍未取得世代所有权"
+                  + "（journal 可读，快照刷新确实在场）：本次启动请求未执行，也未拉起引擎；"
+                  + "刷新收口后由下一次入口（点按钮 / 回前台探活）续跑。"
+                  + "解压典型耗时 8-12 分钟，此时**不要**关闭应用或强杀进程。")
+              DeferCause.OWNERSHIP_CONTENTION ->
+                ("启动请求在 " + NO_TRANSACTION_RETRY_BUDGET_MS + "ms 重试预算内仍未取得世代所有权"
+                  + "（**另有启动流持续持有所有权，且快照事务并不存在**——不是刷新等待）："
+                  + "本次启动请求未执行，也未拉起引擎；下一次入口（点按钮 / 回前台探活）会再次尝试。")
+              DeferCause.NO_TRANSACTION_IDLE ->
+                ("启动请求在 " + NO_TRANSACTION_RETRY_BUDGET_MS + "ms 重试预算内仍未取得世代所有权"
+                  + "（既无快照事务、也无持有者：begin 拒绝与超时判定之间的竞态）："
+                  + "本次启动请求未执行，也未拉起引擎；下一次入口（点按钮 / 回前台探活）会再次尝试。")
+            },
           )
           return
         }
@@ -1421,7 +1586,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
       "安全模式重启进入启动流（decision=" + preDecision + "）：本壳托管的旧引擎已停，正以安全模式清单重建运行时",
     )
     LogCollector.log("dsh-shell", "safe mode restart: owned engine stopped, starting with the safe profile (decision=" + preDecision + ")")
-    activity.startEngineFlow()
+    activity.startEngineFlow(entry = StartEntryPoint.SAFE_MODE_RESTART)
   }
 
   /**
@@ -1571,8 +1736,97 @@ internal fun diagnosticsLocationHint(dir: java.io.File?): String =
 internal fun startupOwnershipPending(reason: String): Boolean =
   reason == "root-maintenance-busy" || reason == "repair-result-unknown"
 
-/** Pure generation/owner gate; cancellation targets only caller threads, never shared root workers. */
-internal class StartupFlowOwnership {
+/**
+ * 启动请求被延后时的**真实原因**——判据只看「快照事务是否真的存在」与「所有权是否有持有者」。
+ *
+ * ## 为什么不能用 RepairState.startupInProgress
+ *
+ * 2026-11-02 设备实测（`127.0.0.1:16448`，v0.14.11 候选包）拿到反例：一次冷启报出
+ * 「启动请求撞上**正在进行的运行时刷新**」，可同期的三条独立事实都表明**根本没有刷新**：
+ *
+ *   · `.snapshot-settings-backup/` 无新条目（只有装机那次 18:58:17）
+ *   · `.snapshot-fingerprint` mtime 停在 18:58:32
+ *   · `boot-diag.log` 里 `refresh` 命中数 = 0
+ *
+ * 而探针给出的实情是 `flow.defer reason=no-transaction snapshotMarker=absent`，
+ * 持有者是**另一次启动流**（generation=1），不是快照事务。
+ *
+ * 真因：`RepairState.startupInProgress` 在**任何**启动流期间都为真（start 抢到所有权即置 true），
+ * 它只说明「本进程有个启动流在跑」，**不等于「有快照事务」**。用它在 defer 分支分档，
+ * 就会把「同一时刻两次启动入口争锁」误报成「正在刷新」，把排障方向引到解压上。
+ *
+ * 正确的判据是两条**互相独立**的事实：journal（[SnapshotTransaction.readMarker]）与所有权持有者。
+ */
+internal enum class DeferCause {
+  /** journal 可读 ⇒ 真的有一次快照刷新在跑。 */
+  SNAPSHOT_TRANSACTION,
+
+  /** 无事务，但另有启动流持有世代所有权 ⇒ 同刻多入口争锁。 */
+  OWNERSHIP_CONTENTION,
+
+  /** 无事务、且此刻也无持有者（begin 拒绝与处置之间所有权已释放）⇒ 真的什么都没在跑。 */
+  NO_TRANSACTION_IDLE,
+}
+
+/**
+ * 纯判据：由「事务文件是否在场」与「所有权是否有持有者」推出 [DeferCause]。
+ *
+ * 刻意不接收 `startupInProgress`：那个标志与快照事务无关，接进来就会重演上面的误报。
+ */
+internal fun classifyDeferCause(transactionPresent: Boolean, ownerRunning: Boolean): DeferCause =
+  when {
+    transactionPresent -> DeferCause.SNAPSHOT_TRANSACTION
+    ownerRunning -> DeferCause.OWNERSHIP_CONTENTION
+    else -> DeferCause.NO_TRANSACTION_IDLE
+  }
+
+/**
+ * 启动入口（**仅供探针**，不参与任何判据、不改变任何分支）。
+ *
+ * ## 为什么必须显式枚举
+ *
+ * 探针第一版只记线程名，设备实测显示两次 `flow.begin` 的 `caller` **都是 `main`**
+ * （onCreate 与 onResume 同在 UI 线程），于是「到底是哪个入口占的锁」仍然钉不死。
+ * 入口只能由调用方**显式声明**，线程名推不出来。
+ */
+internal enum class StartEntryPoint {
+  ON_CREATE,
+  ON_RESUME,
+  MONITOR,
+  GUIDE_BUTTON,
+  SAFE_MODE_RESTART,
+  /** 启动流自身的重试/续跑（不是新的外部入口）。 */
+  INTERNAL_RETRY,
+  UNSPECIFIED,
+  ;
+
+  /** 日志用的稳定小写标识（只进日志，不做判据）。 */
+  internal fun label(): String = name.lowercase()
+}
+
+/**
+ * Pure generation/owner gate; cancellation targets only caller threads, never shared root workers.
+ *
+ * ## 取证探针（只加日志，不改行为）
+ *
+ * 2026-11-01 设备实测（`127.0.0.1:16448`）：冷启时 `engine-start-deferred-no-transaction`
+ * 与它的 `-timeout` 成对复现，日志宣称「未拉起引擎」，而 `node` 进程其实早 2 秒就在跑了
+ * （被丢弃的只是**这次**启动请求；真把引擎拉起来的是另一次已在跑的流）。
+ *
+ * 排障者拿不到的关键信息是：**当时到底是谁持有所有权**。旧实现里 `begin()`/`finish()`
+ * 一行日志都没有，于是只能从「候选清单」（start / restart / 共享入口）里猜。
+ *
+ * 这里补三处**只读**留痕（begin / finish / defer），字段只有 generation、
+ * caller 标识（线程名）与「谁抢不到」，**不含任何用户数据**。
+ *
+ * 为什么走注入式 [sink] 而不是直接调 LogCollector：本类是纯门禁，JVM 单测要能直接驱动它
+ * （Android 的 LogCollector 在单测里没有 appContext，静默 no-op —— 那样探针在测试里等于不存在）。
+ * 生产侧由 [flowOwnershipProbeSink] 接到 LogCollector。
+ */
+internal class StartupFlowOwnership(
+  /** 探针出口。默认空实现：单测不接线时不影响任何行为。 */
+  private val sink: (String) -> Unit = {},
+) {
   internal class Token(val generation: Long) {
     private val cancelled = java.util.concurrent.atomic.AtomicBoolean(false)
     private val callers = java.util.concurrent.ConcurrentHashMap.newKeySet<Thread>()
@@ -1591,13 +1845,26 @@ internal class StartupFlowOwnership {
   val destroyed: Boolean get() = state.get().destroyed
   val running: Boolean get() = state.get().running
 
-  fun begin(): Token? {
+  /**
+   * @param entry 调用方**显式声明**的启动入口。只进日志，不参与判据、不影响返回值。
+   *   默认 [StartEntryPoint.UNSPECIFIED] 让既有调用点与单测零改动即可编译。
+   */
+  fun begin(entry: StartEntryPoint = StartEntryPoint.UNSPECIFIED): Token? {
     while (true) {
       val before = state.get()
-      if (before.destroyed || before.running) return null
+      if (before.destroyed || before.running) {
+        // 抢不到：把「谁在占」如实报出来（token?.generation 为 null 表示状态已损坏/被销毁）。
+        probe(
+          "flow.begin denied caller=" + callerLabel() + " entry=" + entry.label() +
+            " ownerGeneration=" + (before.token?.generation?.toString() ?: "none") +
+            " destroyed=" + before.destroyed,
+        )
+        return null
+      }
       val token = Token(before.generation + 1)
       if (state.compareAndSet(before, State(token.generation, token, running = true))) {
         before.token?.cancel()
+        probe("flow.begin granted generation=" + token.generation + " caller=" + callerLabel() + " entry=" + entry.label())
         return token
       }
     }
@@ -1606,8 +1873,18 @@ internal class StartupFlowOwnership {
   fun finish(token: Token) {
     while (true) {
       val before = state.get()
-      if (before.token !== token || !before.running) return
-      if (state.compareAndSet(before, before.copy(running = false))) return
+      if (before.token !== token || !before.running) {
+        probe(
+          "flow.finish ignored generation=" + token.generation +
+            " current=" + (before.token?.generation?.toString() ?: "none") +
+            " caller=" + callerLabel(),
+        )
+        return
+      }
+      if (state.compareAndSet(before, before.copy(running = false))) {
+        probe("flow.finish released generation=" + token.generation + " caller=" + callerLabel())
+        return
+      }
     }
   }
 
@@ -1618,10 +1895,95 @@ internal class StartupFlowOwnership {
     while (true) {
       val before = state.get()
       val after = State(before.generation + 1, destroyed = before.destroyed || destroy)
-      if (state.compareAndSet(before, after)) { before.token?.cancel(); return }
+      if (state.compareAndSet(before, after)) {
+        probe("flow.invalidate nextGeneration=" + after.generation + " destroy=" + destroy + " caller=" + callerLabel())
+        before.token?.cancel()
+        return
+      }
     }
   }
+
+  /**
+   * 如实记录「谁在占所有权」，供 defer 分支引用。
+   *
+   * 只暴露 generation 与线程名——**不含任何用户数据**（不放路径、不放会话、不放 prompt）。
+   * 线程名足以区分入口：`main` = 生命周期/UI 回调（onCreate/onResume/引导按钮），
+   * `Thread-N` = 启动流自己的 worker，`Watchdog*` = 看门狗。
+   */
+  internal fun deferredOwnerSnapshot(entry: StartEntryPoint = StartEntryPoint.UNSPECIFIED): String =
+    "ownerGeneration=" + (state.get().token?.generation?.toString() ?: "none") +
+      " running=" + state.get().running +
+      " destroyed=" + state.get().destroyed +
+      " caller=" + callerLabel() +
+      " entry=" + entry.label()
+
+  private fun probe(message: String) {
+    // 探针自身绝不抛：取证代码把启动流带崩是本末倒置。
+    try {
+      sink(message)
+    } catch (_: Throwable) {
+    }
+  }
+
+  private fun callerLabel(): String {
+    val name = try {
+      Thread.currentThread().name
+    } catch (_: Throwable) {
+      null
+    }
+    return (name ?: "unknown").replace(' ', '_')
+  }
 }
+
+/**
+ * 生产侧探针出口：把 [StartupFlowOwnership] 的留痕接到 `LogCollector`（tag=`dsh-owner`）。
+ *
+ * 单独抽成顶层函数而不是在类里直接调 LogCollector：后者依赖 appContext，JVM 单测里是静默 no-op，
+ * 会让「defer 必写一行」这条判据在测试里永远看不到输出（假绿）。
+ */
+internal fun flowOwnershipProbeSink(message: String) {
+  LogCollector.log("dsh-owner", message)
+}
+
+/**
+ * issue #1240：**「引擎已在跑」不等于「运行时是这一版的」**——已跑引擎这条路径该怎么处置。
+ *
+ * ## 缺陷形态（本判据存在的理由）
+ * 设备上已装过本 App 且引擎在跑，覆盖安装一个内嵌快照不同的 APK；系统拉起应用后探活命中
+ * OUR_PROCESS/OUR_HTTP。旧实现在这里**无条件早退**，于是后面那段
+ * `if (!snapshotFresh()) refreshSnapshot(...)` 永远不会执行：升级后继续跑上一版的 runtime，
+ * 指纹不翻转、事务文件从不出现、boot-fail.log 里也没有任何一条指向快照。用户只能手动
+ * force-stop / pm clear 才恢复，而现场看是「这版没修那个问题」。快照新鲜度判据本身是对的，
+ * 缺陷只是它**轮不到被执行**。
+ *
+ * ## 为什么抽成纯函数
+ * 两条方向都必须能反证，而它们在同一个探活分支里背靠背——
+ * 「陈旧时必须刷新」与「新鲜时必须保持早退（不得无故杀引擎）」若写成内联 if，只能靠读代码
+ * 相信它。判据抽出来后可逐条喂输入（见 `Issue1240StaleSnapshotAfterUpgradeTest`），
+ * 而分支本身只剩一次 when 转发。
+ *
+ * @param snapshotFresh 当前 live 运行时是否就是本安装包内嵌的快照（= [EngineManager.snapshotFresh]）
+ */
+internal enum class AlreadyRunningSnapshotDecision {
+  /** 快照就绪：在跑的就是这一版的运行时，维持既有早退（绝不多杀一次引擎）。 */
+  EARLY_EXIT_FRESH,
+
+  /** 快照陈旧：先停本壳托管的旧引擎，再落到既有的刷新 → 重启链。 */
+  STOP_THEN_REFRESH,
+}
+
+/**
+ * 纯判据：探活到「引擎已在跑」之后该早退还是先停后刷。
+ *
+ * 只有快照就绪才允许早退——这是本 issue 的**唯一**语义变化；`snapshotFresh` 的口径一个字没改，
+ * 仍然由 [EngineManager.snapshotFresh] 回答。
+ */
+internal fun alreadyRunningSnapshotDecision(snapshotFresh: Boolean): AlreadyRunningSnapshotDecision =
+  if (snapshotFresh) {
+    AlreadyRunningSnapshotDecision.EARLY_EXIT_FRESH
+  } else {
+    AlreadyRunningSnapshotDecision.STOP_THEN_REFRESH
+  }
 
 /**
  * 启动前置（FX-210.1，JVM 单测的顺序契约）：先执行恢复入口，再做探活分流。

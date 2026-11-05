@@ -1,0 +1,21 @@
+# 期望签名证书的 SHA-256 摘要 —— 已发布 APK 签名身份的独立锚（issue #1031）。
+#
+# 为什么要有这个文件：此前「期望证书」就是从 --keystore 现算出来的那把钥匙本身，
+# 于是换个 --keystore 就能把错签名判绿 —— 锚与被检对象同源，等于没有锚。这里放一份
+# 与 keystore 解耦的只读期望值，scripts/check-apk-signatures.mjs 以它为准。
+#
+# 来源（三者是同一把固定发布密钥）：
+#   1. .github/workflows/build-apk-source.yml 的 expected_signing_certificate（产出侧自证，
+#      现在也改读本文件，第二份真源已去除）；
+#   2. keystore/debug.keystore 导出的证书指纹（仅作交叉核对，不是真源）；
+#   3. v0.14.5 / v0.14.5-fx-2 发布资产实测指纹 —— 见 docs/AGENTS/gotchas.md 坑 202 / 坑 203
+#      与 release/v0.14.5-fx-2/notes.md。
+#
+# 不变量：这个值是已发布产物的签名身份，不得因构建改动而更新。
+#   - 改这里的值换不来新的信任根：脚本另存了同一 pin 作为不变量常量，
+#     两者不一致即判红，报错会点名「期望证书锚被改动」。
+#   - 真要换发布密钥，必须同时改脚本里的 PINNED_EXPECTED_CERT_SHA256 并附已发布资产的
+#     迁移证据 —— 那是一次单独的、需要评审的发布决策，不属于任何构建修复。
+#
+# 格式：恰好一行，小写十六进制 64 位（# 开头的行是注释，空行忽略）。
+1dde9d980f62b715f29c20b421063f1d3d796085adf7de7e9907dd16d845bcbd

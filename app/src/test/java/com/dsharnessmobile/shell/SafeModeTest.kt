@@ -732,7 +732,7 @@ class SafeModeTest {
   /** prompt 必须含报错**原文**（不得截断成摘要）+ 两条关键约束 + 不承诺修复。 */
   @Test
   fun `prompt 含报错原文与两条关键约束`() {
-    val detail = "EngineManager.startEngine() 返回 false（未能拉起引擎进程）"
+    val detail = "EngineManager.startEngine() 判为 REFUSED（引擎未 spawn）"
     val tail = "dsh-boot-fail stage=engine-start-false at=1 fingerprint=abc\\njava.lang.IllegalStateException: boom"
     val p = buildSafeModePrompt("engine-start-false", detail, tail, safeModeActive = true)
     assertTrue("必须含 stage", p.contains("engine-start-false"))

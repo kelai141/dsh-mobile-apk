@@ -59,7 +59,16 @@ class DeviceControlService : AccessibilityService() {
     private const val WEB_SNAPSHOT_JS = """
 (function(){
   var rootSel = __ROOT__;
-  var root = rootSel ? document.querySelector(rootSel) : document.body;
+  var root;
+  try {
+    root = rootSel ? document.querySelector(rootSel) : document.body;
+  } catch (e) {
+    // 非法 CSS 选择器（如 '[[['）在 querySelector 里抛 DOMException（W3C：SyntaxError）。不接住
+    // 的话整个 IIFE 抛错，evaluateJavascript 回 "null"，壳侧只能报「结果解析失败（页面可能正在
+    // 跳转）」——把「选择器语法错」误报成「页面在跳」会把模型引向反复重试而不是改选择器
+    // （与 #777 的「id 形态用错误报成页面已变化」同一类死循环引导）。
+    return JSON.stringify({ok:false,error:'根选择器语法错误：' + rootSel + '（' + (e && e.message ? e.message : 'invalid selector') + '）'});
+  }
   if (!root) return JSON.stringify({ok:false,error:'根选择器无匹配：' + rootSel});
   var reg = window.__dshWebRefs || (window.__dshWebRefs = {n:0,map:{}});
   reg.map = {}; reg.n = 0;
@@ -147,7 +156,11 @@ class DeviceControlService : AccessibilityService() {
   var el = null;
   var key = String(a.ref || '').replace(/^w/, '');
   if (key && reg && reg.map[key]) { el = reg.map[key]; if (el && !el.isConnected) el = null; }
-  if (!el && a.sel) { try { el = document.querySelector(a.sel); } catch (e) { el = null; } }
+  var selErr = null;
+  if (!el && a.sel) {
+    try { el = document.querySelector(a.sel); }
+    catch (e) { selErr = (e && e.message) ? String(e.message) : 'invalid selector'; el = null; }
+  }
   if (!el && a.text){
     var want = String(a.text).replace(/\s+/g,' ').trim().toLowerCase();
     var list = candidates(), exact = null, partial = null;
@@ -171,7 +184,14 @@ class DeviceControlService : AccessibilityService() {
       if (tag){ for (var m = 0; m < list2.length; m++){ if (list2[m].tagName.toLowerCase() === tag){ el = list2[m]; break; } } }
     }
   }
-  if (!el) return JSON.stringify({ok:false,error:'未找到目标元素（ref/sel/text/role 均无匹配）'});
+  if (!el) {
+    // 选择器语法错与「选择器语法对但没匹配到」是两件事：前者模型该改选择器，后者该换 text/role
+    // 或者等页面渲染。原来两种情况共用一句「未找到目标元素」，前者会被引向反复重试同一条错误
+    // 选择器（与 #777 / WEB_SNAPSHOT_JS 那次同类）。
+    return JSON.stringify({ok:false,error: selErr
+      ? '选择器语法错误（' + String(a.sel) + '：' + selErr + '）；ref/text/role 也无匹配'
+      : '未找到目标元素（ref/sel/text/role 均无匹配）'});
+  }
   try { el.scrollIntoView({block:'center', inline:'center'}); } catch (e) {}
   var info = {tag: el.tagName.toLowerCase(), text: textOf(el).slice(0,60)};
   var via = key ? 'ref' : (a.sel ? 'selector' : (a.text ? 'text' : 'role'));
@@ -249,6 +269,35 @@ class DeviceControlService : AccessibilityService() {
       return fresh
     }
 
+    /**
+     * #648 自愈：把 prefs 的 a11yEnabled 显式回写成 false（并删掉心跳键）。
+     *
+     * 调用方只有一个：`ControlCarrier.handle` 在**无障碍处理器引用为 null**（服务未绑定）
+     * 时触发。那里的判据是「服务不在场」这个确定事实，不是某次 op 的成败——所以本方法
+     * 不做任何推断，只是把已经确定的状态落盘。
+     *
+     * 为什么需要它：prefs 的 a11yEnabled 在进程被 force-stop 后可能残留 true（onDestroy
+     * 不保证执行）。引擎侧 a11ySource() 只认新鲜心跳、会正确判离线，但 prefs 的陈旧 true
+     * 会让两侧长期不一致，也让下一个人 grep prefs 时读到假状态。
+     *
+     * 闭环保障：服务重新连上时 onServiceConnected() 会 setEnabledFlag(true) 改回来，
+     * 所以这次回写不会把状态永久钉死。与 setEnabledFlag 走同一条落盘路径，不碰 token。
+     *
+     * **幂等**：状态已经是 false 时直接返回（不写盘、不记日志）。这一条是必需的——
+     * a11y 死掉后每条 a11y op 都会进这个分支，不判当前值就是每次调用一次落盘加一条日志，
+     * 与 heartbeat() 注释里批过的「可收敛的无谓 I/O」同型。
+     */
+    fun markUnavailable(context: Context) {
+      // 幂等保护：a11y 死掉后**每一条** a11y op 都会走到回写路径，而状态只需纠正一次。
+      // 不判当前值就是「每次调用一次 prefs 落盘 + 一条日志」——与 heartbeat() 注释里
+      // 「每 2 秒写一次属于可收敛的无谓 I/O」同型的浪费，还会把 logcat 刷满。
+      // 已经是 false 就直接返回：不写盘、不记日志。
+      val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+      if (!prefs.getBoolean(KEY_A11Y, false)) return
+      setEnabledFlag(context, false)
+      LogCollector.log(TAG, "a11y prefs reconciled to disabled (handler absent; #648)")
+    }
+
     private fun setEnabledFlag(context: Context, enabled: Boolean) {
       val editor = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         .edit().putBoolean(KEY_A11Y, enabled)
@@ -299,7 +348,7 @@ class DeviceControlService : AccessibilityService() {
     val truncated: Boolean = false,
   )
 
-  private val lock = Any()
+  private val lock = Any(); private val nodeRecycler = GenerationalNodeRecycler<AccessibilityNodeInfo> { node -> node.recycle() }; private val TEARDOWN_GRACE_MS = 2_000L
   private var snapshot: Snapshot? = null
   // 0.13.8 E4：秒级时间戳播种（Long，单调不回绕）
   private val generation = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis() / 1000)
@@ -497,7 +546,7 @@ class DeviceControlService : AccessibilityService() {
   private fun teardown() {
     if (ControlCarrier.a11y === this) ControlCarrier.a11y = null
     instance = null
-    synchronized(lock) { snapshot = null }
+    synchronized(lock) { snapshot?.let { nodeRecycler.retire(it.nodes.values, it.rowNodes) }; snapshot = null }.also { runCatching { android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ runCatching { nodeRecycler.drain() } }, TEARDOWN_GRACE_MS) } } // #1510：teardown 不就地回收（动作可能在锁外 performAction 持着节点），宽限后 drain
     observedScreenScope = null
     setEnabledFlag(this, false)
     LogCollector.log(TAG, "accessibility service disconnected; a11y handler unregistered")
@@ -571,7 +620,7 @@ class DeviceControlService : AccessibilityService() {
         generation.incrementAndGet(), rotation(), metrics.first, metrics.second,
         nodes, bounds, rows, rowNodes, truncated,
       )
-      snapshot = fresh
+      nodeRecycler.retire(nodes.values, rowNodes); snapshot = fresh
       invalidated = false
       return fresh
     }
@@ -726,7 +775,7 @@ class DeviceControlService : AccessibilityService() {
   private fun observeScreenScope(scope: ScreenScope) {
     if (observedScreenScope == scope) return
     observedScreenScope = scope
-    synchronized(lock) { snapshot = null }
+    synchronized(lock) { snapshot?.let { nodeRecycler.retire(it.nodes.values, it.rowNodes) }; snapshot = null }
     invalidated = true
   }
 
@@ -1023,9 +1072,14 @@ class DeviceControlService : AccessibilityService() {
       //   用 refresh() 判死活会把「能用」误判成「已失效」，退回重走又必然失败（见上）。
       //   正确做法：直接把它交给动作，由动作的真实结果决定成败；失败了再走兜底重定位。
       val stored = synchronized(lock) { snapshot?.rowNodes?.getOrNull(handle) }
-      val node = stored ?: nodeAtChildPath(row.childPath) ?: nodeByFingerprint(row)
+      // 兜底重定位拿到的节点**没有持有者**（不进 rowNodes），旧实现于是既不回收也不受换代覆盖——
+      // #1361 只治了主路径（issue #1521）。这里把它们收编进回收器的当前一代：既不会就地回收
+      // （动作还带着它出锁 performAction，就地回收就是 #1510 的 use-after-recycle），
+      // 又能随下一次换代/drain 真正回收。
+      val relocated = stored ?: nodeAtChildPath(row.childPath)?.also { nodeRecycler.adopt(it) }
+        ?: nodeByFingerprint(row)?.also { nodeRecycler.adopt(it) }
         ?: return Target.Miss(error("行 $handle 已不存在（页面已变化）——请重新 android_ui_dump"))
-      return Target.Hit(node, "row:$handle")
+      return Target.Hit(relocated, "row:$handle")
     }
     val path = args.optString("path", "")
     if (path.isEmpty()) return Target.None
@@ -1047,7 +1101,7 @@ class DeviceControlService : AccessibilityService() {
     var node: AccessibilityNodeInfo = rootFor(activeDisplayId) ?: return null
     for (level in childPath.indices) {
       val index = childPath[level]
-      val direct = if (index >= 0 && index < node.childCount) node.getChild(index) else null
+      val direct = (if (index >= 0 && index < node.childCount) node.getChild(index) else null).also { runCatching { node.recycle() } }
       node = direct ?: return null
       if (level == childPath.size - 1) return node
     }

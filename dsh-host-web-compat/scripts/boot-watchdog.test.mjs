@@ -54,7 +54,7 @@ assert.ok(FLOOR, 'BOOT_WATCHDOG_SCRIPT 必须声明 RENDER_TEXT_FLOOR')
 const PREFIX_DECL = /var BOOT_STALL_PREFIX='[^']+';/.exec(BODY)?.[0]
 assert.ok(PREFIX_DECL, 'BOOT_WATCHDOG_SCRIPT 必须声明 BOOT_STALL_PREFIX（块L 契约：壳侧按该前缀抓行）')
 // 新实现：结果性判据 + 次要文本信号
-const NEW_PENDING = [FLOOR, grabFunction(BODY, 'textLen'), grabFunction(BODY, 'rendered'), grabFunction(BODY, 'pendingBoot')].join('\n')
+const NEW_PENDING = [FLOOR, grabFunction(BODY, 'textLen'), grabFunction(BODY, 'diagPanelTextLen'), grabFunction(BODY, 'rendered'), grabFunction(BODY, 'pendingBoot')].join('\n')
 // 块L 发布点（页面侧唯一赋值语句，壳侧只读）。
 // 必须带上 lastProgressAt 声明——waitingForMs 由它计算；缺了它 collectRuntime 会走
 // fail-closed 分支返回 unavailable，测到的就不是「能取到时的值」（首版实测踩到）。
@@ -67,10 +67,15 @@ const OLD_PENDING = "function pendingBoot(){ try{return /Loading plugins/i.test(
 /** 依场景描述搭出最小 document/window，然后求 pendingBoot()。 */
 function pending(code, scene) {
   const root = scene.rootChildren === undefined ? null : { children: new Array(scene.rootChildren).fill({}) }
+  // issue #1386：诊断浮层自己的文案同样计入 body.textContent，必须能被单独认出来。
+  const diagPanel = scene.diagText === undefined
+    ? null
+    : { textContent: scene.diagText, id: 'dsh-boot-diag' }
   const bodyText = 'x'.repeat(scene.bodyText ?? 0) + (scene.bootText ? scene.bootText : '')
+    + (scene.diagText === undefined ? '' : scene.diagText)
   const document = {
     body: { textContent: bodyText, children: root ? [root] : [] },
-    getElementById: (id) => (id === 'root' ? root : null),
+    getElementById: (id) => (id === 'root' ? root : (id === 'dsh-boot-diag' ? diagPanel : null)),
     querySelector: () => null,
   }
   const ctx = createContext({ document, window: scene.bootMarker ? { __DSH_BOOT__: { rev: 'r', entries: [] } } : {}, sessionStorage: { getItem: () => null }, RegExp })
@@ -898,4 +903,179 @@ test('防回归 B（行为）：failedIds 必须从真实 DOM 读出 id 形状�
   assert.equal(runtime.failedEntries[0].id, ID, 'pageSideRuntime.failedEntries 与 failedIds 必须指向同一条')
   // 反向：终局原文含空格，不得被当成 entry id 混进来
   assert.equal(line.includes('failedIds=' + ID + ','), false, '含空格的终局原文不得被当作 id 追加')
+})
+
+// ── issue #1056：诊断面板的移除路径（慢启动被全屏遮罩永久盖住）──────────────────────────
+//
+// 缺陷现场：41 秒才就绪的启动，40 秒处挂出全屏、最高层级的 #dsh-boot-diag「启动没有完成」面板；
+// 页面随后渲染完成、UI 明明可用，面板却**没有任何移除路径**（全篇 removeChild 只有静态占位那一处），
+// 用户只能点「重新加载」把它清掉 —— 一次「正常但慢」的启动被呈现成「永久失败」。
+// 第二个口子：挂出前的判定早于那次最长 3 秒的 HEAD 请求（report 快照取在 HEAD 之前），页面恰好在这段
+// 窗口里渲染完时，判定按过期快照走，已经可用的页面照挂。
+//
+// 判据必须取**求值后**的脚本体、并在 vm 里跑出真实行为（appendChild / removeChild 逐次记账）：
+// 源码切片只能证明「写了 removeChild 这一行」，证不了「页面就绪时它真的会被调用」。
+//
+// 截取策略：show() 依赖 rendered()（复用 readyWatch 同一判据）与一组 DOM 桩，故用 grabFunction
+// 取 rendered 与新增的四个面板函数 + show 本体，显式构造依赖，**不复制任何实现**。
+
+/** 取一个函数定义并补上语句分隔，便于多个函数并列拼进同一个 function 体。 */
+function grabFnStmt(body, name) {
+  return grabFunction(body, name) + ';'
+}
+
+/** 面板运行面：脚本体全部截取自真实源码，DOM 与定时器用记账桩。 */
+function panelRuntime(scene) {
+  const state = { appended: [], removed: [], timers: [], cleared: [] }
+  const makeEl = (tag) => {
+    const el = { tagName: tag, style: {}, children: [], textContent: '', id: '' }
+    el.appendChild = (child) => { el.children.push(child); return child }
+    return el
+  }
+  const root = { children: scene.rendered ? [{}] : [] }
+  const body = {
+    textContent: '',
+    children: [],
+    appendChild: (child) => { body.children.push(child); state.appended.push(child.id); child.parentNode = body; return child },
+    removeChild: (child) => {
+      const i = body.children.indexOf(child)
+      if (i >= 0) body.children.splice(i, 1)
+      state.removed.push(child.id)
+      child.parentNode = null
+      return child
+    },
+  }
+  const document = {
+    body,
+    createElement: makeEl,
+    getElementById: (id) => {
+      if (id === 'root') return root
+      // 关键：真实页面上 getElementById 查的是**当前 DOM**，桩必须同样查 body.children；
+      // 否则面板被摘掉之后按 id 仍「看得见」它，幂等与停表两条用例会假绿。
+      return body.children.find((c) => c.id === id) ?? null
+    },
+    querySelector: () => null,
+  }
+  const sandbox = {
+    document,
+    window: {},
+    setTimeout: (fn, ms) => { state.timers.push({ fn, ms, kind: 'timeout' }); return state.timers.length },
+    setInterval: (fn, ms) => { state.timers.push({ fn, ms, kind: 'interval' }); return state.timers.length },
+    clearInterval: (id) => {
+      state.cleared.push(id)
+      const timer = state.timers[id - 1]
+      if (timer) timer.dead = true
+    },
+    Date: { now: () => scene.now ?? 1000 },
+    RegExp,
+  }
+  const ctx = createContext(sandbox)
+  const consts = [
+    FLOOR,
+    /var DIAG_PANEL_ID='[^']+';/.exec(BODY)?.[0],
+    /var DIAG_RECHECK_MS=\d+;/.exec(BODY)?.[0],
+    /var DIAG_RECHECK_WINDOW_MS=\d+;/.exec(BODY)?.[0],
+  ]
+  for (const c of consts) assert.ok(c, '面板相关常量必须能从真实源码里截取到：' + c)
+  const code = [
+    ...consts,
+    grabFnStmt(BODY, 'textLen'),
+    grabFnStmt(BODY, 'rendered'),
+    grabFnStmt(BODY, 'diagPanel'),
+    grabFnStmt(BODY, 'stopDiagWatch'),
+    grabFnStmt(BODY, 'dropDiagPanel'),
+    grabFnStmt(BODY, 'watchDiagPanel'),
+    grabFnStmt(BODY, 'show'),
+    'return {show:show,panel:diagPanel,rendered:rendered}',
+  ].join('\n')
+  const api = runInContext('(function(){' + code + '})()', ctx)
+  const report = { tookMs: 41000, ua: 'ua', manifest: null, bundleCount: 0, pendingBundles: [], badBundles: [], engineHttp: 200, rendered: false, pendingBoot: true }
+  /** 跑一拍复看（interval 语义：只跑当前活着的那一个）。 */
+  const tickWatch = () => {
+    const timer = state.timers.find((x) => x.kind === 'interval' && !x.dead)
+    if (timer) timer.fn()
+  }
+  return { api, state, body, root, report, tickWatch }
+}
+
+test('issue #1056 / A：面板挂出后页面就绪，复看必须把它从 DOM 里移除（缺陷本体）', () => {
+  const r = panelRuntime({ rendered: false })
+  r.api.show(r.report)
+  assert.deepEqual(r.state.appended, ['dsh-boot-diag'], '前置：show() 必须真的把面板挂上（否则本用例无意义）')
+  assert.notEqual(r.api.panel(), null)
+  assert.equal(r.state.timers.filter((x) => x.kind === 'interval').length, 1,
+    '挂出的同时必须启动复看：没有复看就没有移除路径——这正是 issue #1056 的机制')
+  // 还没渲染的那一拍：不得误删（否则真卡住的页面反而失去唯一反馈）
+  r.tickWatch()
+  assert.deepEqual(r.state.removed, [], '页面仍未渲染时不得移除面板')
+  // 页面渲染出来了：同一拍必须摘掉面板并停表
+  r.root.children = [{}]
+  r.tickWatch()
+  assert.deepEqual(r.state.removed, ['dsh-boot-diag'], '页面就绪后面板必须被 removeChild 掉（修前此断言恒为空：没有移除代码）')
+  assert.equal(r.api.panel(), null, '移除后按 id 必须查不到（是离开 DOM，不是隐藏）')
+  assert.equal(r.body.children.length, 0)
+  assert.equal(r.state.cleared.length, 1, '移除后必须停掉复看定时器（不得在健康页面上继续打点）')
+  r.tickWatch()
+  assert.deepEqual(r.state.removed, ['dsh-boot-diag'], '停表后不得重复移除')
+})
+
+test('issue #1056 / B：挂出前已就绪则不挂（HEAD 之后必须用同一判据重判）', () => {
+  // 源码级：HEAD 请求之后必须还有一次 pendingBoot() 复判，且它发生在 show() 之前。
+  const headAt = BODY.indexOf("method:'HEAD'")
+  assert.ok(headAt > 0, '必须能定位 HEAD 请求')
+  const afterHead = BODY.slice(headAt, headAt + 1200)
+  const recheckAt = afterHead.indexOf('if(!pendingBoot())return;')
+  assert.ok(recheckAt >= 0, 'HEAD 返回后必须重判 pendingBoot()（快照取在 HEAD 之前，过期判定会挂错面板）')
+  assert.ok(afterHead.indexOf('show(report)') > recheckAt, '重判必须发生在 show() 之前，否则等于没判')
+  // 行为级：页面已渲染（#root 有子节点）时判据为假，与 run() 同样的串联不得调用 show()。
+  const r = panelRuntime({ rendered: true })
+  const pending = runInContext(
+    '(function(){' + [FLOOR, grabFnStmt(BODY, 'textLen'), grabFnStmt(BODY, 'rendered'), grabFnStmt(BODY, 'pendingBoot')].join('\n')
+      + ';return pendingBoot})()',
+    createContext({
+      document: {
+        body: { textContent: '', children: [] },
+        getElementById: (id) => (id === 'root' ? r.root : null),
+        querySelector: () => null,
+      },
+      window: {},
+      RegExp,
+    }),
+  )
+  assert.equal(pending(), false, '页面已渲染 ⇒ pendingBoot() 必须为假（两处判据同一份实现）')
+  if (!pending()) { /* 复判命中：整段退出，不挂面板 */ } else { r.api.show(r.report) }
+  assert.deepEqual(r.state.appended, [], '已就绪时不得挂面板（修前：判定取在 HEAD 之前，过期快照照样挂）')
+})
+
+test('issue #1056 / C：连续 show() 两次只留一个面板节点（幂等）', () => {
+  const r = panelRuntime({ rendered: false })
+  r.api.show(r.report)
+  r.api.show(r.report)
+  assert.deepEqual(r.state.appended, ['dsh-boot-diag'], '重复 show() 不得堆叠第二个面板（叠两层互相遮挡，且移除只摘得掉一层）')
+  assert.equal(r.body.children.length, 1)
+  assert.equal(r.state.timers.filter((x) => x.kind === 'interval').length, 1, '重复 show() 不得堆叠复看定时器')
+  r.root.children = [{}]
+  r.tickWatch()
+  assert.deepEqual(r.state.removed, ['dsh-boot-diag'], '幂等路径下依然必须移除面板')
+  assert.equal(r.body.children.length, 0)
+})
+
+test('#1386 诊断浮层自身的文本不得算「页面已渲染」', () => {
+  // 浮层里的标题+摘要+提示+按钮+折叠的 <pre>=JSON.stringify(report) 远超 RENDER_TEXT_FLOOR，
+  // 而它就挂在 body 下 —— 旧 rendered() 只看 body 文本长度，于是浮层一挂出就把自己判成「已渲染」。
+  const panelProse = '诊断信息'.repeat(120)   // 远超 120 字阈值
+  const scene = { rootChildren: 0, bodyText: 0, diagText: panelProse }
+  assert.equal(pending(NEW_PENDING, scene), true, '浮层在场但页面没渲染，必须仍判 pending（否则浮层被自己移除、并在静态白屏下发假 dsh-boot-ready）')
+})
+
+test('#1386 浮层之外真的有内容时仍判已渲染（不把判据改瞎）', () => {
+  const panelProse = '诊断信息'.repeat(120)
+  const scene = { rootChildren: 0, bodyText: 300, diagText: panelProse }
+  assert.equal(pending(NEW_PENDING, scene), false, '扣掉浮层后仍有 300 字正文 => 已渲染，不得误判 pending')
+})
+
+test('#1386 源码契约：rendered() 与 pendingBoot 都必须扣除浮层文本', () => {
+  assert.ok(BODY.includes('function diagPanelTextLen()'), '缺少浮层文本度量函数')
+  assert.ok(BODY.includes('textLen(document.body)-diagPanelTextLen()>=RENDER_TEXT_FLOOR'), 'rendered() 的 body 判据未扣除浮层')
+  assert.ok(BODY.includes('textLen(document.body)-diagPanelTextLen()>0'), 'pendingBoot 的 __DSH_BOOT__ 判据未扣除浮层')
 })

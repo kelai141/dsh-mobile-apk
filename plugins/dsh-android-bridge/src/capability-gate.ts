@@ -167,14 +167,44 @@ const CAPABILITY_SKILLS: ReadonlyArray<{ name: string; description: string; sour
 /**
  * 通道就绪度（facade 如实汇报，避免模型误判「没解锁」或盲目建屏）。
  *
- * `shizuku` 是**三态**（0.14.1 设备实测缺陷 A1）：`true` 就绪 / `false` 已实测未就绪 /
- * 缺席 = **尚未探测到**。壳侧 caps 只随控制 op 的回执抵达，冷启动首次询问必然缺席；
- * 旧实现把它折成 `false` 并渲染「未就绪（虚拟屏建屏需要它）」，模型据此放弃了一个**当时可用**的能力。
- * 纪律：**「未知」不得渲染成「未就绪」**，也不得阻止模型尝试（见 {@link shizukuLine}）。
+ * A11y distinguishes fresh, disabled, stale, and unobserved states. Missing evidence remains
+ * fail-closed for routing, but must not be rendered as confirmed off.
  */
 export interface ChannelFacts {
-  a11y: boolean
+  a11y?: boolean
+  a11ySource?: 'heartbeat' | 'disabled' | 'stale' | 'unknown'
+  a11yHeartbeatAgeMs?: number
   shizuku?: boolean
+}
+
+function normalizeChannelFacts(facts: ChannelFacts): ChannelFacts {
+  return {
+    ...(typeof facts.a11y === 'boolean' ? { a11y: facts.a11y } : {}),
+    ...(facts.a11ySource === 'heartbeat' || facts.a11ySource === 'disabled'
+      || facts.a11ySource === 'stale' || facts.a11ySource === 'unknown'
+      ? { a11ySource: facts.a11ySource }
+      : {}),
+    ...(typeof facts.a11yHeartbeatAgeMs === 'number' && Number.isFinite(facts.a11yHeartbeatAgeMs)
+      ? { a11yHeartbeatAgeMs: Math.max(0, facts.a11yHeartbeatAgeMs) }
+      : {}),
+    ...(typeof facts.shizuku === 'boolean' ? { shizuku: facts.shizuku } : {}),
+  }
+}
+
+function a11yLine(facts: ChannelFacts): string {
+  if (facts.a11ySource === 'heartbeat' || (!facts.a11ySource && facts.a11y === true)) {
+    return '已开启（语义树 / ref 动作 / 虚拟屏语义树可用）'
+  }
+  if (facts.a11ySource === 'disabled' || (!facts.a11ySource && facts.a11y === false)) {
+    return '未开启（壳侧已确认关闭）'
+  }
+  if (facts.a11ySource === 'stale' || typeof facts.a11yHeartbeatAgeMs === 'number') {
+    if (typeof facts.a11yHeartbeatAgeMs !== 'number') {
+      return '心跳缺失，服务状态未确认（按不可用处理；可直接尝试目标操作）'
+    }
+    return `心跳已过期 ${Math.round(facts.a11yHeartbeatAgeMs / 1000)} 秒，服务状态未确认（按不可用处理；可直接尝试目标操作）`
+  }
+  return '状态未确认（按不可用处理；可直接尝试目标操作并依据返回结果选择备用通道）'
 }
 
 /**
@@ -197,7 +227,7 @@ export function shizukuLine(ready: boolean | undefined): string {
 /** 把 Android 设备能力组做成渐进披露：常驻 facade + agent 作用域掩蔽 + skill 目录条目。 */
 export function installCapabilityGate(
   ctx: CapabilityGateCtx,
-  channels: () => ChannelFacts | Promise<ChannelFacts> = () => ({ a11y: false }),
+  channels: () => ChannelFacts | Promise<ChannelFacts> = () => ({}),
   store: UnlockStore = createFileUnlockStore(),
 ): void {
   const locks = new WeakMap<object, Map<string, ScopedFiber>>()
@@ -231,13 +261,40 @@ export function installCapabilityGate(
       if (persisted.has(group)) continue
       try {
         const fiber = scoped.inject(['tools'], (scopedCtx: unknown) => {
-          const tools = (scopedCtx as { tools?: { restrict?: (filter: { deny: string[] }) => unknown } }).tools
+          const tools = (scopedCtx as {
+            tools?: {
+              restrict?: (filter: { deny: string[] }) => unknown
+              view?: () => { restrictableNames?: Set<string> } | undefined
+            }
+          }).tools
           if (typeof tools?.restrict !== 'function') return
-          tools.restrict({ deny: [...names] })
+          /**
+           * issue #1030：**先与本作用域可 restrict 的名字求交集**，再提交 deny。
+           *
+           * 缺陷形态：引擎侧 `tools.restrict()` 的判据是**逐个名字**——deny 列表里只要有一个
+           * 名字没注册，整次调用抛错（dsh-tools/lib/index.js：「names unknown global tool …」）。
+           * 而这里把异常当成「该组未注册」直接 fail-open 跳过，于是**组里有一个名字缺席**就取消
+           * 整组掩蔽。实测形态：`phone` 组的 17 个名字分布在两个插件里（dsh-android-manage 14 个 +
+           * dsh-android-bridge 3 个），用户禁用/加载失败 manage 时，桥自己那三个特权工具
+           * （android_shell_exec / android_termux_channel_exec / android_privilege_status）就在
+           * **从未解锁 phone 组**的情况下仍可调用。
+           *
+           * 交集是正确语义：本次要掩蔽的是「这一组里**当前真的存在**的成员」。缺席的成员本来
+           * 就没有工具可掩蔽，不该成为豁免其余成员的理由。
+           */
+          const view = typeof tools.view === 'function' ? tools.view() : undefined
+          const restrictable = view?.restrictableNames
+          const deny = restrictable instanceof Set ? names.filter((name) => restrictable.has(name)) : [...names]
+          // 交集为空 = 该组一个成员都没注册。此时 restrict 本来就是空操作，
+          // 跳过不构成 fail-open（没有任何工具需要被掩蔽）。
+          if (deny.length === 0) return
+          tools.restrict({ deny })
         })
         perAgent.set(group, fiber)
       } catch (error) {
-        // 未知工具名（该组未注册）等 → 该组不掩蔽，保持今天的可见性（fail-open，不静默吞工具）。
+        // 走到这里说明 inject/restrict 抛了**意料之外**的错（求交集之后不该再出现「未知工具名」）。
+        // 保留 fail-open 以免静默吞掉工具，但必须留下 error 级痕迹：这是一条安全面降级，
+        // 不能像以前那样只在 warn 里说一句「group lock skipped」。
         ctx.logger?.warn?.('capability gate: group lock skipped (' + group + '): ' + String((error as Error)?.message ?? error))
       }
     }
@@ -366,8 +423,16 @@ export function capabilityTool(
           unlocked: { type: 'array', required: true },
           locked: { type: 'array', required: true },
           groups: { type: 'array', required: true },
-          channels: { type: 'object', required: true, additionalProperties: false, properties: { a11y: { type: 'boolean' }, shizuku: { type: 'boolean' } } },
-          // 注：`channels.shizuku` 缺席即「尚未探测到」（三态，见 ChannelFacts）——不是 false。
+          channels: {
+            type: 'object', required: true, additionalProperties: false,
+            properties: {
+              a11y: { type: 'boolean' },
+              a11ySource: { type: 'string', enum: ['heartbeat', 'disabled', 'stale', 'unknown'] },
+              a11yHeartbeatAgeMs: { type: 'number' },
+              shizuku: { type: 'boolean' },
+            },
+          },
+          // Missing a11y or Shizuku keys mean "unknown", not false.
           text: { type: 'string', required: true },
         },
       },
@@ -384,12 +449,12 @@ export function capabilityTool(
       const attempted = revoked === undefined ? unlock(target, agent) : undefined
       const unlocked = attempted?.unlocked ?? []
       const locked = revoked === undefined ? (attempted?.locked ?? []) : revoked.locked
-      let facts: ChannelFacts = { a11y: false }
+      let facts: ChannelFacts = {}
       try {
         // 通道事实可能来自一次**补探**（A1：caps 缺席时引擎主动发一次 vdInfo），故此处可 await。
-        facts = await channels()
+        facts = normalizeChannelFacts(await channels())
       } catch {
-        facts = { a11y: false }
+        facts = {}
       }
       const groups = Object.entries(DEVICE_TOOL_GROUPS).map(([name, tools]) => ({
         group: name,
@@ -407,13 +472,13 @@ export function capabilityTool(
             : '请求的组此前已解锁（无需重复解锁）。'
       const stateLines = groups.map((g) => `- ${g.group}：${g.state === 'locked' ? '未解锁' : '可用'}（${g.tools} 个工具）${g.persisted ? '［已记住解锁，重启后仍有效］' : ''}`)
       const channelLines = [
-        `- 无障碍通道：${facts.a11y ? '已开启（语义树 / ref 动作 / 虚拟屏语义树可用）' : '未开启（只能走 Shizuku 或坐标面）'}`,
+        `- 无障碍通道：${a11yLine(facts)}`,
         `- Shizuku 特权通道：${shizukuLine(facts.shizuku)}`,
       ]
       // 权限事实与解锁态是两件事（task-58 边界 2）：解锁只让工具**出现**，能不能用由实测决定。
       // 这里必须把这句话说出来，否则模型会把「已解锁」误读成「一定可用」。
       const honesty = '注意：解锁只代表这些工具**出现在列表里**，不代表权限当前可用——'
-        + '无障碍未开启 / Shizuku 未运行时，调用会如实返回结构化失败（本行以上即为当前实测通道状态）。'
+        + '无障碍 / Shizuku 已确认不可用时，调用会如实返回结构化失败；状态未确认时以实际调用结果为准，再选择备用路径。'
       return {
         ok: true,
         unlocked,

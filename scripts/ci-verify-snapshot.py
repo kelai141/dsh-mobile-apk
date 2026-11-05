@@ -2,7 +2,9 @@
 """ci-verify-snapshot.py — CI snapshot gate: ELF arch + secrets scan + plugin consistency + profile patch consistency.
 Usage:
   python3 ci-verify-snapshot.py <snapshot.tar.xz> <expect-arch> <plugins-dir>...
-  expect-arch: aarch64 | x86_64
+  expect-arch: aarch64 | arm64 | x86_64 | x86-64
+    (aliases are normalized to one ELF machine name; the criteria are unchanged -- see
+     normalize_expect_arch)
 Checks:
   1. usr/bin/node ELF machine matches expect-arch (streamed from tar).
   2. Sensitive paths absent: .credentials / sessions/ / storages/ / anon-id / settings.yaml / .npmrc / private sourcemaps.
@@ -22,6 +24,20 @@ import sys
 import tarfile
 
 MACHINES = {0x3E: 'x86_64', 0xB7: 'aarch64', 0x28: 'arm', 0x03: 'i386'}
+# ABI 别名（2026-11-01 实锤，确定性缺陷）：两条构建链传的是 Android 打包口径的 ABI 名
+# （build-apk-013.ps1:529 传 $abi、build-apk.mjs:403 传 ABI，取值域都是 arm64 / x86_64），
+# 而本门禁比的是 ELF 机器名 aarch64 / x86_64。x86_64 恰好两边同名所以一直没暴露，
+# arm64 则**每一次**都被拒：SNAPSHOT_GATE_ERROR -> Deny-Abi SNAPSHOT_PKG_NAME_MISMATCH，
+# 双 ABI 链在 arm64 上恒断。受控反证：同一快照传 aarch64 exit 0，传 arm64 exit 2。
+#
+# 这里只做**命名对齐**：别名映射到同一个 ELF 机器名后，走的仍是原来那条
+# arch != expect 比对，判据强度不变。未知值仍按原样报错 exit 2。
+EXPECT_ALIASES = {
+    'aarch64': 'aarch64',
+    'arm64': 'aarch64',
+    'x86_64': 'x86_64',
+    'x86-64': 'x86_64',
+}
 SENSITIVE = (
     'home/.dsh/.credentials',
     'home/.dsh/sessions/',
@@ -49,15 +65,31 @@ AUTHORITATIVE_PATCH_NAME = 'profile-web.cordis.patch.yml'
 
 
 def app_id_from_gradle() -> str:
-    """Read applicationId from the APK repo's build.gradle.kts. Works both in
-    CI (workflow root is the dsh-mobile-apk checkout, this script lives under
-    <root>/dsh-mobile/scripts/) and locally (<root>/dsh-mobile-apk/)."""
+    """Read applicationId from the APK repo's build.gradle.kts.
+
+    Covers every layout this script is actually launched from (2026-10-26: the
+    first two candidates below were the only ones and they both missed the
+    self-contained APK-repo layout, so the cloud chain read None and would have
+    rejected every build the moment this gate was wired in):
+
+      A. coordinator root with a nested APK checkout — local build-apk-013.ps1
+         <root>/scripts/ci-verify-snapshot.py + <root>/dsh-mobile-apk/app/...
+      B. self-contained APK repo root — cloud build-apk.mjs
+         <apk>/scripts/ci-verify-snapshot.py + <apk>/app/...
+      C. CI workflow root that is the APK checkout
+         <work>/dsh-mobile/scripts/ci-verify-snapshot.py + <work>/app/...
+
+    A missing applicationId is a FAILURE at the call site (no silent default):
+    the whole point of the gate is that package name and baked-in paths agree.
+    """
     script = os.path.abspath(__file__)
-    root2 = os.path.dirname(os.path.dirname(script))
+    script_dir = os.path.dirname(script)
+    root2 = os.path.dirname(script_dir)
     root3 = os.path.dirname(root2)
     candidates = (
-        os.path.join(root3, 'app', 'build.gradle.kts'),            # CI layout: <work>/app/...
-        os.path.join(root2, 'dsh-mobile-apk', 'app', 'build.gradle.kts'),  # local layout: <root>/dsh-mobile-apk/app/...
+        os.path.join(root2, 'app', 'build.gradle.kts'),            # B: self-contained APK repo root
+        os.path.join(root3, 'app', 'build.gradle.kts'),            # C: CI layout <work>/app/...
+        os.path.join(root2, 'dsh-mobile-apk', 'app', 'build.gradle.kts'),  # A: <root>/dsh-mobile-apk/app/...
     )
     for gradle in candidates:
         try:
@@ -79,11 +111,12 @@ def authoritative_patch_path() -> str:
     root2 = os.path.dirname(script_dir)
     root3 = os.path.dirname(root2)
     candidates = (
-        os.path.join(script_dir, AUTHORITATIVE_PATCH_NAME),                                # CI: <work>/dsh-mobile/scripts/
-        os.path.normpath(os.path.join(root2, '..', 'scripts', AUTHORITATIVE_PATCH_NAME)),  # local: <root>/scripts/
-        os.path.join(root3, 'scripts', AUTHORITATIVE_PATCH_NAME),
-        os.path.join(root2, 'scripts', AUTHORITATIVE_PATCH_NAME),
+        os.path.join(script_dir, AUTHORITATIVE_PATCH_NAME),                                # same dir as the gate (every layout)
+        os.path.join(root2, 'scripts', AUTHORITATIVE_PATCH_NAME),                          # B: self-contained APK repo root
+        os.path.normpath(os.path.join(root2, '..', 'scripts', AUTHORITATIVE_PATCH_NAME)),  # A: coordinator root
+        os.path.join(root3, 'scripts', AUTHORITATIVE_PATCH_NAME),                          # C: CI layout
         os.path.join(root3, 'dsh-mobile', 'scripts', AUTHORITATIVE_PATCH_NAME),
+        os.path.join(root2, 'dsh-mobile-apk', 'scripts', AUTHORITATIVE_PATCH_NAME),
     )
     seen = []
     for cand in candidates:
@@ -117,14 +150,53 @@ def elf_machine(data: bytes) -> str:
     return MACHINES.get(machine, '0x%x' % machine)
 
 
-def scan(snapshot: str, expect: str, plugin_dirs):
+def normalize_expect_arch(expect: str):
+    """Map an ABI alias onto the ELF machine name this gate compares against.
+
+    Returns None for anything not in EXPECT_ALIASES -- the caller keeps the historical
+    'unknown ABI' exit 2 so a typo (riscv64, arm, aarch64-) can never be silently accepted.
+    This is a naming alignment only: it does not weaken the arch check below.
+    """
+    return EXPECT_ALIASES.get(str(expect).strip().lower())
+
+
+def scan(snapshot: str, expect: str, plugin_dirs, gradle_reader=app_id_from_gradle):
+    """Gate a snapshot archive.
+
+    `gradle_reader` is injectable on purpose (issue #736): the default reads the real
+    repository's app/build.gradle.kts, which does not exist in every host that runs this
+    file -- the coordinator repo carries only a mirror copy of this script, so the self-test
+    turned red there. Tests pass a stub; production call sites keep the default.
+    """
+    # 输入前置校验（2026-10-27，issue #154 C2）。本门禁被接进两条构建链后是**硬阻断点**，
+    # 输入缺失时必须给出「一眼能分清是环境问题还是真判红」的信息，不能抛 Python traceback
+    # ——构建者看到 FileNotFoundError 栈看不出「我忘了先跑 build-snapshot-013.mjs」。
+    # 约定：exit 2 = 环境/用法错误（区别于 exit 1 = 判据不通过）。两仓逐字节同源。
+    raw_expect = expect
+    expect = normalize_expect_arch(expect)
+    if expect is None:
+        print('SNAPSHOT_GATE_ERROR: 未知 ABI "' + str(raw_expect) + '"（只接受 aarch64 | arm64 | x86_64 | x86-64）')
+        sys.exit(2)
+    if not os.path.isfile(snapshot):
+        print('SNAPSHOT_GATE_ERROR: 快照文件不存在: ' + str(snapshot))
+        print('  → 先跑 node scripts/build-snapshot-013.mjs <abi> 产出快照，或检查 --snapshot 路径')
+        sys.exit(2)
+    if not plugin_dirs:
+        print('SNAPSHOT_GATE_ERROR: 未提供任何插件目录（至少要给一个 plugins/<name>）')
+        sys.exit(2)
+    missing_dirs = [d for d in plugin_dirs if not os.path.isdir(d)]
+    if missing_dirs:
+        print('SNAPSHOT_GATE_ERROR: 插件目录不存在: ' + ', '.join(missing_dirs))
+        print('  → 插件 lib/ 需先 npm run build；目录名拼写也要核对')
+        sys.exit(2)
+
     fail = []
     checked_elf = False
     # profile -> set(注入包名)：插件必须在**每个**装配 profile 里在场
     found_pkgs = {}
     # profile -> cordis.patch.yml 原始字节
     profile_patches = {}
-    app_id = app_id_from_gradle()
+    app_id = gradle_reader()
     if app_id is None:
         fail.append('applicationId not found in app/build.gradle.kts')
 
@@ -181,6 +253,8 @@ def scan(snapshot: str, expect: str, plugin_dirs):
                 if pkg in expected and (rel == 'package.json' or rel.startswith('lib/')):
                     if rel.endswith('.map'):
                         fail.append(f'private sourcemap ({profile}): {n}')
+                        continue
+                    if profile not in ASSEMBLY_PROFILES:
                         continue
                     h = hashlib.sha256(tf.extractfile(m).read()).hexdigest()
                     want = expected[pkg].get(rel)
@@ -241,7 +315,20 @@ def scan(snapshot: str, expect: str, plugin_dirs):
           f'profiles checked={sorted(profile_patches)}, ELF={expect})')
 
 
+def run_self_test() -> int:
+    import unittest
+
+    suite = unittest.defaultTestLoader.discover(
+        os.path.dirname(os.path.abspath(__file__)),
+        pattern='test_ci_verify_snapshot.py',
+    )
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    return 0 if result.wasSuccessful() else 1
+
+
 if __name__ == '__main__':
+    if sys.argv[1:] == ['--self-test']:
+        sys.exit(run_self_test())
     if len(sys.argv) < 4:
         print(__doc__)
         sys.exit(2)

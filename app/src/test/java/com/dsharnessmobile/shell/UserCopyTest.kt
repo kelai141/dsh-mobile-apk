@@ -11,7 +11,7 @@ import org.junit.Test
  *
  * 这一组断言的目标不是「函数能跑」，而是把四条规则钉死——把任何一条改坏都会在这里判红：
  *  1. **码不上屏**：表内每个码、以及表外的未知码，正文都不得包含该码；
- *  2. **术语唯一**：`Face.label` 与 `UserCopy.notifyCategory` 同源（同一个东西不许有两个名字）；
+ *  2. **术语唯一**：`Face.label()` 与 `UserCopy.notifyCategory` 同源（同一个东西不许有两个名字）；
  *  3. **时长唯一**：只有一种「分秒」口径，未知给空串而不是 `-`；
  *  4. **截断自证**：超长文本必带省略号，用户不会把截断片段当成完整内容。
  */
@@ -41,21 +41,21 @@ class UserCopyTest {
       assertEquals(
         "Face(${face.category}) 的用词必须来自唯一真源",
         UserCopy.notifyCategory(face.category),
-        face.label,
+        face.label(),
       )
     }
     // 五个类别都不许退化成兜底名（退化了说明码写错）。
     assertEquals(
       "五类通知的用词都要在表里（未登记会退化成兜底名）",
       0,
-      NotifyCenter.Face.values().count { it.label == UserCopy.NOTIFY_CATEGORY_UNKNOWN },
+      NotifyCenter.Face.values().count { it.label() == UserCopy.NOTIFY_CATEGORY_UNKNOWN },
     )
   }
 
   @Test
   fun notifyCategoryNeverEchoesTheCode() {
     for (face in NotifyCenter.Face.values()) {
-      assertFalse("类别码不得上屏", face.label.contains(face.category))
+      assertFalse("类别码不得上屏", face.label().contains(face.category))
     }
     assertEquals(UserCopy.NOTIFY_CATEGORY_UNKNOWN, UserCopy.notifyCategory("brand-new-category"))
   }
@@ -222,7 +222,7 @@ class UserCopyTest {
 
   @Test
   fun channelRenameIsDetectedSoOldInstallsGetTheNewWord() {
-    // 缺陷现场（设备实测 2026-09-23）：改代码里的 `Face.label` 到不了老装机——既有渠道
+    // 缺陷现场（设备实测 2026-09-23）：改代码里的 `Face.label()` 到不了老装机——既有渠道
     // （importance 已达标）不再走 createNotificationChannel 分支，系统设置里仍是旧词。
     // 判据：现状与期望不一致时必须判「需要校正」。
     assertTrue(
@@ -242,7 +242,7 @@ class UserCopyTest {
     for (face in NotifyCenter.Face.values()) {
       assertFalse(
         "期望名必须取自唯一真源，否则这里会误判需要反复重建（${face.category}）",
-        channelRenameNeeded(face.label, face.description, UserCopy.notifyCategory(face.category), face.description),
+        channelRenameNeeded(face.label(), face.description, UserCopy.notifyCategory(face.category), face.description),
       )
     }
   }

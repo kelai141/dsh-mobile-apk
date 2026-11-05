@@ -98,3 +98,44 @@ describe('打开配置文件时说明「这是副本」（S3-20）', () => {
     expect(String(events[0].detail.detail)).toContain('导入配置')
   })
 })
+
+// ── 2026-10-25：观察器只在「变更碰到设置对话框」时扫按钮 ──
+// 背景：此前的加固（PR #559）用 textContent 早退 + queueMicrotask 合帧，实测两条都不成立
+// （按钮隐藏后文案仍在 DOM，判据恒真；MutationObserver 本就按任务合并）。这里换成作用域判据，
+// 并给每条判据配一条能在旧实现下变红的用例。
+describe('隐藏上游按钮的扫描范围', () => {
+  /** 等观察器回调（微任务）落地。 */
+  const settle = (): Promise<void> => new Promise<void>((resolve) => { setTimeout(resolve, 0) })
+
+  it('挂上即隐藏表头按钮，并打上已处理标记', async () => {
+    action.attach()
+    await settle()
+    expect(button.style.display).toBe('none')
+    expect(button.dataset.dshSettingsDocHidden).toBe('1')
+  })
+
+  it('对话框外的变更不触发按钮扫描（聊天流式输出那条路径）', async () => {
+    action.attach()
+    await settle()
+    const spy = vi.spyOn(dialog, 'querySelectorAll')
+    // 模拟聊天流式输出：对话框外部持续追加节点
+    for (let i = 0; i < 20; i += 1) {
+      const chunk = document.createElement('div')
+      chunk.textContent = 'stream ' + i
+      document.body.appendChild(chunk)
+    }
+    await settle()
+    expect(spy, '对话框外的变更不得扫描按钮').not.toHaveBeenCalled()
+    spy.mockRestore()
+  })
+
+  it('对话框内重建表头按钮时仍然隐藏（切换分区）', async () => {
+    action.attach()
+    await settle()
+    const rebuilt = document.createElement('button')
+    rebuilt.textContent = '打开配置文件'
+    dialog.appendChild(rebuilt)
+    await settle()
+    expect(rebuilt.style.display, '分区切换后新表头按钮必须继续被隐藏').toBe('none')
+  })
+})

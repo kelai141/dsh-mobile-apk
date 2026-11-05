@@ -13,12 +13,12 @@ DeepSeek Harness 的**安卓壳应用**（包名 `com.dsharnessmobile.shell`）�
 
 **关键约束：AI 可见的能力全部来自插件**，壳侧不直接注册工具。
 
-**运行时**：内嵌 Termux 快照（`assets/snapshot.tar.xz` → `files/usr` + `files/home`）；快照、`scripts/contract.json` 与 `scripts/snapshot-config/engine-overlay.json` 对齐 **0.2.1-rc.3**。引擎监听本机回环地址，端口由 `EngineEndpoint` 管理；WebView 加载引擎 Web UI。
+**运行时**：内嵌 Termux 快照（`assets/snapshot.tar.xz` → `files/usr` + `files/home`）；构建目标 `@deepseek-ai/dsh` 为 **0.2.1-rc.3**（以快照内 `package.json` 与 `scripts/snapshot-config/engine-overlay.json` 为准），监听回环**动态端点**（默认 `127.0.0.1:4145`，被占用时 Node 侧原子回退，实际端口以 `files/.engine-endpoint.json` 为准）；WebView 加载引擎 Web UI。
 
 **构建链**：minSdk 26 / targetSdk 34 / compileSdk 36；Kotlin 2.0.21；AGP 8.8.2；Java 17。
 
 **兄弟子仓**（本仓内含自包含副本，见 §4 同步铁律）：
-`dsh-shell-termux` 0.2.0 · `dsh-client-ui-responsive` 0.3.3 · `dsh-host-web-compat` 0.1.14 · `plugins/`（bridge 0.2.4 / manage 0.3.0 / model-capability 0.2.1 / file-open 0.1.0 / browser 0.1.0 / linux-env 0.1.2 / vdisplay 0.1.0）· `vendor/`（marketplace / undo-savepoint）
+`dsh-shell-termux` 0.2.0 · `dsh-client-ui-responsive` 0.3.3 · `dsh-host-web-compat` 0.1.16 · `plugins/`（bridge 0.2.4 / manage 0.3.0 / file-open 0.1.0 / browser 0.1.0 / linux-env 0.1.2 / vdisplay 0.1.0；模型能力插件已退役）· `vendor/`（marketplace / undo-savepoint）
 
 **上游** `deepseek-ai/deepseek-harness`（协调仓 `dsh/` 只读 checkout）：**零改动**，一切适配走补丁/插件/壳侧。
 
@@ -135,7 +135,7 @@ adb -s <serial> install -r -t out\v<版本>\dsh-mobile-apk-v<版本>-arm64.apk
 4. **一切改动走 PR**：建分支 → 提交（`<type>: <描述>`）→ 推分支 → 开 PR（1-3 标签）→ CI 绿 → 合并 → 删分支。**禁止直接 push `main`**。例外仅限不改仓库内容的外部动作（Release 资产、issue 评论与开关、标签）。
 5. **子仓镜像（幽灵缺陷防线）**：`dsh-client-ui-responsive` / `dsh-host-web-compat` / `dsh-shell-termux` 与协调仓根级目录同源（协调仓那边是符号链接指向本仓），直接在本仓修改即可，没有镜像动作。协调仓独有的源码只有 `plugins/dsh-android-*`：那边改动或 bump 版本后，**必须 robocopy 镜像到本仓 `plugins/<同名目录>`**（src + package.json + **`lib/` 产物**）。漏了 → 云端自包含构建注入旧副本，**编译通过但功能缺失**。
    - 只同步**镜像清单内的文件**，切勿对 `scripts/` 等目录整体 `/MIR`——会删掉本仓独有的设备脚本（真实事故）。
-6. **补丁镜像面**：`scripts/patches/**`、`scripts/check-patch-mirror.mjs`、`scripts/build-apk-013.ps1` 等是协调仓的**逐字节镜像**，单边演进即拒。补丁改动**先合本仓镜像 PR，再合协调仓权威源 PR**。
+6. **补丁镜像面**：`scripts/patches/**` 仍逐字节镜像，补丁改动**先合本仓镜像 PR，再合协调仓权威源 PR**。构建、门禁与校验脚本以本仓为准，协调仓同名历史副本不再要求字节一致；协调仓构建入口委派本仓执行。插件镜像仍按铁律 5，共享 JSON/YAML 配置仍检查一致。
 7. **禁 emoji**：提交信息、PR 标题/描述、文档、标签一律不用。
 8. **issue/PR 评论只在结论定下后才发**：每条评论都会通知全部协作者。中间态、未验证的假设、排查过程、自己纠正自己，一律只写进当轮汇报，**不进 issue/PR**。允许发评论的三种情形：结论已定 / 关单或回答 issue / 有阻塞必须问维护者。写错的处置：已发出的那条**改掉，或补一条更正，然后就停**——不发第三条，不解释为什么发错，不在公开场合复盘自己的过程。
    理由：评论是广播，不是草稿纸。发得多会吵到所有人；说错还要公开改口，成本比当初多等一会高得多。

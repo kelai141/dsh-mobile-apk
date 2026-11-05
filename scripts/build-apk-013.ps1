@@ -126,6 +126,12 @@ Write-Host "== Kotlin 注释嵌套门禁 =="
 node (Join-Path $Root "scripts\check-kotlin-comments.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "Kotlin 块注释嵌套，拒绝打包"; exit 1 }
 
+# 中英文案一致性（0.15.0）：资源键集合成对 + tr() 必须带两个非空参数。
+# 漏一条英文时 Android 会静默回退中文，构建/单测/CI 全绿——只有这道门禁能拦。
+Write-Host "== 中英文案一致性门禁 =="
+node (Join-Path $Root "scripts\check-i18n-parity.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { Write-Host "中英文案不一致，拒绝打包"; exit 1 }
+
 # 引擎 V8 堆下限双源一致性（0.14.8）：壳侧 shellEnv() 与快照内启动器必须给出同一 clamp 区间
 # （单边漂移 ⇒「引擎起来了、code run 仍 OOM」这类最难查的形态）
 Write-Host "== 引擎堆下限一致性门禁 =="
@@ -211,15 +217,30 @@ if ($LASTEXITCODE -ne 0) { Write-Host "构建并发吃满全部核心（模拟�
 # Kotlin 单测数量反回归（0.14.1 P0）：CI 从不跑 Kotlin 单测（pr-gate 只 compileDebugKotlin），
 # 417 例契约断言此前只在本地手动跑过；且「只按退出码判」分不清「全绿」与「一个用例都没跑」
 # （测试类被删/改名/漏编译时 exit 仍 0）。本门禁逐类比对基线（只许升）+ 断言无缺席 + 结果新鲜。
-# 注意时序：本步在 gradle 构建**之前**，故用的是**上一次**的测试结果——若尚无结果则显式
-# SKIP(#1) 计数（不计入绿）。真正的「本次构建前必须重跑单测」由发布链步骤保证（见 build-release.ps1）。
+#
+# 判据必须**由本次构建自己产出**（issue #677）：此前这里带 --allow-missing，而全链从不执行
+# :app:testDebugUnitTest —— 干净检出上结果目录缺席就 SKIP(#1) 然后 exit 0，那条 P0 反回归
+# 判据在本地链上一次都不生效，产物仍打印「门禁通过」。注释里「由发布链保证」也不成立：
+# build-release.ps1 全程没有 testDebugUnitTest 调用点。现改为先跑单测再判，缺结果直接红。
+Write-Host "== Kotlin 单测（:app:testDebugUnitTest 全量；门禁前置，issue #677）=="
+Push-Location $apkDir
+try {
+    if (Test-Path (Join-Path $apkDir "gradlew.bat")) { $gradlew = Join-Path $apkDir "gradlew.bat" }
+    elseif (Test-Path (Join-Path $apkDir "gradlew")) { $gradlew = Join-Path $apkDir "gradlew" }
+    else { Write-Host "找不到 gradlew，无法产出 Kotlin 单测结果，拒绝打包"; exit 1 }
+    & $gradlew ":app:testDebugUnitTest" --no-daemon --console=plain
+    if ($LASTEXITCODE -ne 0) { Write-Host "Kotlin 单测未通过，拒绝打包"; exit 1 }
+} finally {
+    Pop-Location
+}
+
 Write-Host "== Kotlin 单测数量反回归门禁 =="
-node (Join-Path $Root "scripts\check-kotlin-test-count.mjs") --allow-missing 2>&1
+node (Join-Path $Root "scripts\check-kotlin-test-count.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "Kotlin 单测防线数量/新鲜度不达标（可能有用例被删或结果陈旧），拒绝打包"; exit 1 }
 
-# 执行地图覆盖与锚点门禁（0.14.2 D7）：此前只被 apk 仓 CI 调用，本地链与发布链的声明集里
-# 零命中 —— 于是「改了代码必须跑 check-code-map」这条约定在两条真正出包/发版的路径上没有执行者。
-# 它守的是漂移：新加源文件没人挂到查点、锚点指向已删函数、主表与章节对不上。
+# Execution-map coverage and anchor gate (0.14.2 D7). APK CI and both APK build chains run it.
+# It checks source-map coverage, source-line expectations, and section IDs before packaging.
+# Keep this check in the local build path even though it needs no snapshot input.
 Write-Host "== 执行地图覆盖与锚点门禁 =="
 node (Join-Path $Root "scripts\check-code-map.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "执行地图失真（覆盖缺口/锚点失效/编号不一致），拒绝打包"; exit 1 }
@@ -247,11 +268,29 @@ $Out = Join-Path $Root ("out\v" + $GradleVer)
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 # This directory contains generated deliverables. Remove old APKs before the dual-ABI run so a
 # stale or extra package cannot pass the final directory-wide signature scan as this build's output.
-Get-ChildItem $Out -Filter '*.apk' -File -Recurse | Remove-Item -Force
+#
+# issue #1078：清理必须**只针对本次会产出的 ABI**。
+# 此前这里是无条件 `Get-ChildItem $Out -Filter '*.apk' -Recurse | Remove-Item`，于是跑过一次
+# 完整构建后再用 -OnlyAbi（或 -Fast，它在参数解析里强制 OnlyAbi=x86_64）跑单 ABI：
+# 预清理把**另一个 ABI 已验签的产物也删了** -> 本次只产 1 个 ABI -> $producedAbis=[该 ABI]、
+# $rejectedAbis=[] -> 尾部两条守卫都过 -> exit 0，而发布目录只剩 1/2 ABI。
+# 与 0.13.8-b 那次「单 ABI 产物发布 = 缺 ABI 的 release」同类，只是触发方式从
+# 「只跑了一个 ABI」变成「跑了第二个 ABI」。check-build-chain-abort 看不见：它只统计本次调用的数组。
+#
+# 判定「本次会产出哪些 ABI」必须与下面循环的实际过滤条件一致（:287 的 continue），
+# 否则清理面与产出面又会分叉 —— 那正是本 issue 的形态。
+$abisThisRun = @(@('arm64', 'x86_64') | Where-Object { -not $OnlyAbi -or $OnlyAbi -eq $_ })
+foreach ($staleName in @(Get-ChildItem $Out -Filter '*.apk' -File -Recurse)) {
+    $isThisRun = $false
+    foreach ($a in $abisThisRun) { if ($staleName.Name -like "*$a*") { $isThisRun = $true; break } }
+    if ($isThisRun) { Remove-Item $staleName.FullName -Force }
+}
+Write-Host ("== 预清理：本次产出 ABI = " + ($abisThisRun -join ', ') + "（其它 ABI 的既有产物保留）==")
 
 # 注入集单一常量（0.13.8-b ST-06 / F-ENV-04）：dirs/externals 都在 scripts/plugin-dirs.json，
 # 与云端链 dsh-mobile-apk/scripts/build-apk.mjs 共用同一份——此前两条链各写一份，云端
-# pluginDirs 少一个「权威 patch 已挂载」的包（dsh-model-capability）且无任何门禁能发现。
+# pluginDirs 曾少一个「权威 patch 已挂载」的包且无门禁能发现；那个包 dsh-model-capability 已于 0.14.8 退役，
+# 其残留引用改由 scripts/check-retired-plugins.mjs 守（重新引入必须先过那道门）。
 # 注入四件套的历史背景（2026-08-23 修复 C3）：此前快照仅有 3 个 @dsh-android 包，而权威 patch
 # 挂载了 bridge/manage/linux-env/file-open → 装配失败/功能缺席。
 $pluginManifest = Get-Content (Join-Path $Root "scripts\plugin-dirs.json") -Raw | ConvertFrom-Json
@@ -283,12 +322,30 @@ foreach ($abi in @('arm64', 'x86_64')) {
         # pre-execute 守卫不调 next() 导致全工具崩溃，见其 PATCHES.md）。undo-savepoint 在 0.14.8
         # 已从装配面退役；vendor 目录与 retiredExternals 历史登记保留，供手动急救与升级迁移识别。
         $market = $externByName['dshmarketplace-plugin']
+        # 根级注入源 = plugin-dirs.json.externals **全部**（不再只取 marketplace）。
+        # 历史：只硬编码 dshmarketplace-plugin → 新登记的 external 包不进快照，而权威 patch 已挂它，
+        # 于是 check-patch-mounts 判红「挂载了注入面之外的包」。dsh-plugin-subscriptions 即此。
+        $externMissing = @()
+        foreach ($nm in $externByName.Keys) {
+            if (-not (Test-Path (Join-Path $externByName[$nm] 'package.json'))) { $externMissing += $nm }
+        }
+        if ($externMissing.Count -gt 0) { Deny-Abi $abi ('缺根级注入源：' + ($externMissing -join ', ')); continue }
+        # 注入时使用的路径（默认原源；降级成功则换成暂存副本）
+        $externStaged = @{}
+        foreach ($nm in $externByName.Keys) { $externStaged[$nm] = $externByName[$nm] }
         if (-not (Test-Path (Join-Path $market "package.json"))) { Deny-Abi $abi "缺 marketplace 注入源 $market（vendor 固化副本）"; continue }
         # 统一补丁门禁（Phase 2a）：marketplace A-D + undo E1-E7 幂等施加与校验，
-        # 登记表 scripts/patches/registry.json。默认 ensure 语义（缺席即施加，锚点失配拒打包）。
+        # 登记表 scripts/patches/registry.json。ensure 语义（缺席即施加，锚点失配拒打包）——
+        # 必须显式带 --apply：apply-patches 的默认模式是 --check（只验在场、不写文件），
+        # 而 vendor/*/lib 是入库跟踪的产物，从不施加就永远缺席，本门禁必然判红。
+        # 注意 scope：默认 scope=vendor，engine 范围的补丁（target 在 usr/ 下）不会被选中，
+        # 也不会被这条命令误判——两段各管各的范围，互不越界。
         # 雷点 8：全量输出——Select-First 截断管道会杀 node 致误判失败
-        node (Join-Path $Root "scripts\patches\apply-patches.mjs") (Join-Path $Root "vendor") 2>&1
+        node (Join-Path $Root "scripts\patches\apply-patches.mjs") (Join-Path $Root "vendor") --apply 2>&1
         if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "vendor 补丁校验/施加失败"; continue }
+        # 施加后复查（防 exit 0 但补丁缺席的半成品，与引擎树两段式同款）
+        node (Join-Path $Root "scripts\patches\apply-patches.mjs") (Join-Path $Root "vendor") --check 2>&1
+        if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "vendor 补丁施加后复查失败"; continue }
         # 浏览器语法下限：注入段的 lib/client.js 降级（0.14.1 块C G-1 的第二段）。
         # 为什么注入段也要降：快照段的降级（build-snapshot-013.mjs 的 0f-1b）只覆盖快照内已有产物，
         # 而注入包里**新进来**的 lib/client.js 不在其中。我方 3 个带 client bundle 的包已改自身构建
@@ -313,15 +370,17 @@ foreach ($abi in @('arm64', 'x86_64')) {
         # **必须显式初始化**：无 lib/client.js 的源不会进下面的 if，若这两个变量保持未定义/为 $null，
         # 后续 `@($undoDeg, ...)` 会含 $null 元素，经 splatting 传给 node 时造成**参数错位**
         # （实测表现：--out 的值被当成未知参数）。
-        $marketDeg = $market
         # vendor 两源：**暂存副本**再降级（vendor/*/lib 是入库跟踪的，就地降级会写脏仓库并绊停
         # 发布链自己的 dirty 门禁）。无 lib/client.js 的源不复制、保持原路径。
         # 本段刻意**不写中间 continue**：构建链静态锁「每个 continue 都必须是经 Deny-Abi 记账的
         # 拒绝路径」（check-build-chain-abort.mjs），而「该源没有浏览器 bundle」是正常跳过不是拒绝；
         # 且嵌套 foreach 里的 continue 只会继续内层循环、不会跳过本 ABI。故失败只记明细，
         # 统一在段末用一条 `Deny-Abi $abi "..."; continue` 记账并跳过本 ABI。
-        foreach ($pair in ,@('market-degraded', $market)) {
-            $leaf = $pair[0]; $src = $pair[1]
+        # **逐 external 降级并把结果写回 $externStaged**（issue：名字→集合时映射没跟着扩）。
+        # 旧写法只降 marketplace 且只把它的降级副本写回，其它 external 即使造出了降级副本
+        # 仍以原始源注入 → 未降级的 ES2022 bundle 进产物（浏览器语法下限门禁判红）。
+        foreach ($nm in $externByName.Keys) {
+            $leaf = $nm + '-degraded'; $src = $externByName[$nm]
             if (Test-Path (Join-Path $src "lib\client.js")) {
                 $dst = Join-Path $degradeStaged $leaf
                 Remove-Item $dst -Recurse -Force -ErrorAction SilentlyContinue
@@ -335,7 +394,7 @@ foreach ($abi in @('arm64', 'x86_64')) {
                 }
                 node (Join-Path $Root "scripts\check-browser-syntax-floor.mjs") --degrade --stage $dst 2>&1
                 if ($LASTEXITCODE -ne 0) { $degradeFailDetail = "注入段浏览器语法降级失败（$leaf）" }
-                elseif ($leaf -eq 'market-degraded') { $marketDeg = $dst }
+                else { $externStaged[$nm] = $dst }   # 降级成功 -> 注入降级副本
             }
         }
         # **不降级我方 plugin**（原实现会 `--degrade --stage <plugin>` 就地改写）：
@@ -347,18 +406,37 @@ foreach ($abi in @('arm64', 'x86_64')) {
         # 注入后的权威判据是下方 `check-browser-syntax-floor.mjs --scan <注入后 tar>`——它扫全清单，
         # 一旦有包没降到位就判红；不需要在这里「顺手再降一遍」。
         if (-not [string]::IsNullOrEmpty($degradeFailDetail)) { Deny-Abi $abi $degradeFailDetail; continue }
+        # 注：不再有「只回写 marketplace」的覆盖——降级结果已在上面的循环里逐包写回 $externStaged。
+        # 逐包生成 --external，并逐包打印（可观测：下一个人一眼看出注入了什么）
+        $externArgs = @()
+        foreach ($nm in ($externByName.Keys | Sort-Object)) {
+            $externArgs += @('--external', $externStaged[$nm])
+            Write-Host ('  [inject] ' + $nm + ' -> ' + $externStaged[$nm])
+        }
         # 单 pass 注入（2c 提速 2026-09-05）：@dsh-android + 根级插件 + 权威 patch 覆盖合并
         # 为一次 tar 流处理——压缩/解压从 ×4 → ×1（原三步各自全量重压缩 ~743MB）。
         # 雷点 8：全量输出。
         Write-Host "== 单 pass 注入（@dsh-android + market + 权威 patch）（$abi）=="
         # ST-05：--all-profiles = 权威 patch 与注入包覆盖全部真实装配 profile（web + headless；
         # 负控 profile headless-bad 由 inject-all.py 显式跳过）。此前只写 web，headless 停在旧值。
-        python (Join-Path $Root "scripts\inject-all.py") $snap (Join-Path $work "snap-final2.tar.xz") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") --dsh-android @pluginDirs --external $marketDeg --all-profiles 2>&1
+        python (Join-Path $Root "scripts\inject-all.py") $snap (Join-Path $work "snap-final2.tar.xz") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") --dsh-android @pluginDirs @externArgs --all-profiles 2>&1
         if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "注入失败"; continue }
         # 防回归（审校 C4 2026-08-23）：patch 挂载集 ⊇ 注入集——缺条目（如 linux-env 漏挂）直接拒打包
         Write-Host "== 挂载集校验（$abi）=="
-        node (Join-Path $Root "scripts\check-patch-mounts.mjs") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") @pluginDirs $market 2>&1 | Select-Object -First 4
-        if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "patch 挂载集校验失败"; continue }
+        # issue #1075：**先收进变量拿退出码，再截断显示**（与下面 elf-check 同一写法）。
+        # 写成 `node ... | Select-Object -First 4` 时，输出一旦超过 4 行，Select-Object 会提前终止上游、
+        # 把 node 杀掉，$LASTEXITCODE 变成 $null —— 「门禁失败」与「输出被截断」在退出码上不可区分，
+        # 于是 Deny-Abi 不触发、该 ABI 被计为已产出、链打印「=== 完成 ===」并 exit 0。
+        $mountsOut = node (Join-Path $Root "scripts\check-patch-mounts.mjs") (Join-Path $Root "scripts\profile-web.cordis.patch.yml") @pluginDirs @externDirs 2>&1
+        $mountsCode = $LASTEXITCODE
+        $mountsOut | Select-Object -First 4
+        if ($mountsCode -ne 0) { Deny-Abi $abi "patch 挂载集校验失败"; continue }
+        # profile 层共享依赖解析（0.15.x）：vendored 订阅插件把 undici 声明为 peer，靠 profile 共享农场的
+        # 相对链解析到引擎树。判据自动发现 build-snapshot 的 stage 树（软链已就位、尚未归档）。
+        # --require + 负控：移走农场链后子进程复检必须判红，证明判据真在守链而不是被残留洗绿。
+        Write-Host "== profile 共享依赖解析门禁（$abi）=="
+        node (Join-Path $Root "scripts\check-profile-undici-resolution.mjs") --require --negative-control 2>&1
+        if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "profile 层 undici 解析失败（农场链缺失/版本不符/来源不是引擎树）"; continue }
         # 注入面成员完整性（P0：包内新增文件曾被静默丢弃 → tar 里 import 悬空 → 设备侧引擎启动即死）
         Write-Host "== 注入成员完整性门禁（$abi）=="
         node (Join-Path $Root "scripts\check-inject-completeness.mjs") (Join-Path $work "snap-final2.tar.xz") 2>&1
@@ -375,6 +453,30 @@ foreach ($abi in @('arm64', 'x86_64')) {
         Write-Host "== 浏览器语法下限门禁（$abi）=="
         node (Join-Path $Root "scripts\check-browser-syntax-floor.mjs") --scan (Join-Path $work "snap-final2.tar.xz") 2>&1
         if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "发往浏览器的 bundle 携带未降级的 ES2022 语法（老内核白屏）"; continue }
+        # 注入源真源（2026-11-01）：降级副本被造出来了，但注入时用的是原始源——历史形态（PR #1272）。
+        # 上面那道 --scan 判的是**产物内容是否合规**；当原始源恰好也合规时，两份字节都能过扫描，
+        # 「注入源选错」在内容级看不出来。这里判的是**注入的是哪一份字节**：tar 内成员 sha256 必须
+        # 等于降级副本、且不等于原始源。判据输入只用字节（tar + 两份源目录），不解析本链日志。
+        # 每个 external 一对：左=原始注入源，右=暂存降级副本（$externStaged 已在上面的循环里逐包写回）。
+        Write-Host "== 注入源真源门禁（$abi）=="
+        # 用前置过滤而不是 continue：本段不是 per-ABI 拒绝路径，而 check-build-chain-abort 按词法把
+        # 任何裸 continue 视为「未记账的拒绝」（与上方 buildable 过滤段同一处理方式）。
+        $degradeSrcs = @($externByName.Keys | Sort-Object | Where-Object {
+            Test-Path (Join-Path $externByName[$_] "lib\client.js")
+        })
+        $degradePairs = @()
+        foreach ($nm in $degradeSrcs) {
+            $degradePairs += @('--pair', ($externByName[$nm] + '=' + $externStaged[$nm]))
+        }
+        if ($degradePairs.Count -eq 0) {
+            # 一个带浏览器 bundle 的 external 都没有 = 这一轮没有可判对象。不是通过，也不是拒绝：
+            # 与其它门禁的 SKIP 口径一致，必须显式说出来而不是静默略过。
+            Write-Host "SKIP(#1)  注入源真源门禁（$abi）：本轮没有任何带 lib/client.js 的 external，无可判对象"
+        } else {
+            node (Join-Path $Root "scripts\check-degrade-source-of-truth.mjs") --snapshot (Join-Path $work "snap-final2.tar.xz") @degradePairs --require 2>&1
+            if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "注入源不是降级副本（降级被造出来却没用：产物带未降级的 ES2022 bundle）"; continue }
+        }
+
         # 模型面工具 wire 预算（0.14.0 §4.1）：注册集 + 初始可见集双口径。真跑各插件 apply()，
         # 需 plugins/*/lib 构建产物（本链前置已构建）。防「工具面无声膨胀」吃掉每会话固定预算。
         Write-Host "== 工具面预算门禁（$abi）=="
@@ -406,10 +508,25 @@ foreach ($abi in @('arm64', 'x86_64')) {
             Deny-Abi $abi "快照权限模式校验失败"; continue
         }
     }
+    # 快照内 node 入口 shim（真机实证 2026-10-31，实例跑在 Android 多用户 user 10 上）：
+    #   缺陷 1：usr/bin/pnpm 的 shim 把构建期前缀 /data/user/0/<包名>/files/usr 烧死在 exec 行里，
+    #     而 user 10 的运行前缀是 /data/user/10/... ⇒ 设备上 pnpm exit 127（市场安装全废）；
+    #   缺陷 2：usr/bin/npm 是 symlink（-> ../lib/node_modules/npm/bin/npm-cli.js）⇒ pnpm 的
+    #     passThruToNpm spawnSync npm 经它落地 ENOENT，npm 通道整条断掉。
+    # 判据见 scripts/check-snapshot-node-shims.mjs（N1-N5：成员类型 / tar 模式 / 自定位 / exec 目标 /
+    # 前缀回流）。两类缺陷构建期全绿、只有真机才炸，故失败即拒打包 —— 不留到设备验收发现。
+    Write-Host "== 快照 node 入口 shim 门禁（$abi）=="
+    node (Join-Path $Root "scripts\check-snapshot-node-shims.mjs") $snapIn 2>&1
+    if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "快照 node 入口 shim 不自定位 / usr/bin/npm 不是普通文件（多用户设备 pnpm exit 127 / npm 通道 ENOENT）"; continue }
     # 第三方许可合规（GPL 义务 A1/A2 门禁 2026-08-23）：copyleft 包许可证全文须随快照分发，
     # 矩阵须覆盖 dpkg status 全部包；缺失直接拒绝打包（--- tar 视图：9p 权限不影响判定）。
-    node (Join-Path $Root "scripts\check-third-party.mjs") (Join-Path $work "x") --tar $snapIn --write-notices (Join-Path $Root "THIRD_PARTY_NOTICES.md") 2>&1 | Select-Object -First 4
-    if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "THIRD-PARTY CHECK FAILED（许可合规）"; continue }
+    # issue #1075：GPL 许可合规门禁。与上面 :388 同一个坑——它失败时打印「THIRD-PARTY CHECK FAILED」
+    # 加 N 行明细，N >= 4 就超过 First-4 的对象数，Select-Object 提前终止上游把 node 杀掉，
+    # $LASTEXITCODE 变成 $null，Deny-Abi 不触发，快照不合规却一路 exit 0。先收变量，再截断显示。
+    $thirdPartyOut = node (Join-Path $Root "scripts\check-third-party.mjs") (Join-Path $Root $work "x") --tar $snapIn --write-notices (Join-Path $Root "THIRD_PARTY_NOTICES.md") 2>&1
+    $thirdPartyCode = $LASTEXITCODE
+    $thirdPartyOut | Select-Object -First 4
+    if ($thirdPartyCode -ne 0) { Deny-Abi $abi "THIRD-PARTY CHECK FAILED（许可合规）"; continue }
     # 许可资产（LICENSES 标准文本 + notices）打入 APK assets（A2：随包分发）
     $licAssets = Join-Path $apkDir "app\src\main\assets\licenses"
     New-Item -ItemType Directory -Force -Path $licAssets | Out-Null
@@ -422,6 +539,20 @@ foreach ($abi in @('arm64', 'x86_64')) {
     Write-Host "== 快照机密门禁（$abi，严格）=="
     node (Join-Path $Root "scripts\check-snapshot-secrets.mjs") $snapIn --require 2>&1
     if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "SNAPSHOT_SECRET_CHECK_FAILED：快照含机密或归档不可读"; continue }
+    # 快照包名一致性（2026-10-27，issue #154 / apk #480 第 1 条）：注入进各装配 profile 的
+    # cordis.patch.yml 里，shell 路径（bashPath/prefix/home/cwd）必须与 app/build.gradle.kts 的
+    # applicationId 同源。改包名时漏改 patch，APK 装得上但引擎起不来。历史缺口：该门禁自存在起
+    # **从未被任何链调用**（apk #480 实测）。云端链 build-apk.mjs 调用同一份实现，差集必须为 0。
+    #
+    # 雷点（不要「统一风格」改成管道）：下面这行末尾的 2>&1 是**把 stderr 并进 stdout 供日志
+    # 收集**，不是管道。一旦写成 python ... 2>&1 | Select-Object -First N，$LASTEXITCODE 会变成
+    # 管道末端 cmdlet 的退出码，门禁判红会被静默吞成 0——「接了但等于没接」。
+    # check-build-chain-abort.mjs 的判据 C（:13）对此有明文规定：不得管道直连 Select-Object 吞掉
+    # $LASTEXITCODE。实测坑（2026-10-27）：python ... 2>&1 | Select-Object -First 20 显示 exit 0，
+    # 实际门禁返回 1。
+    Write-Host "== 快照包名一致性门禁（$abi）=="
+    python (Join-Path $Root "scripts\ci-verify-snapshot.py") $snapIn $abi @pluginDirs 2>&1
+    if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "SNAPSHOT_PKG_NAME_MISMATCH：快照内 profile patch 的包名与 applicationId 不一致（或被检查项不通过）"; continue }
     # 本段只是**可观测性打印**（数一遍关键可执行与常规文件条数），不参与任何判据；
     # 真正的判据是下面的 check-snapshot-secrets / elf-check / 运行时补丁资产门禁。
     # 非 Windows runner 无 wsl（GitHub ubuntu-latest 实测：The term 'wsl' is not recognized）⇒
@@ -503,17 +634,24 @@ if ($ExportSnapshots) {
         if ($OnlyAbi -and $OnlyAbi -ne $abi) { continue }
         $snapIn = Join-Path $Root ".deploy-tmp\build-\13-$abi\snap-final2.tar.xz"
         if (-not (Test-Path $snapIn)) { Deny-Abi $abi "缺注入后快照 $snapIn（导出失败：发布资产不完整）"; continue }
+        # issue #1080：**先校验，再拷进发布目录**；缺 APK 是硬失败，不是警告。
+        #
+        # 旧顺序是先 Copy-Item 再 check-snapshot-asset，而 APK 不在场那一步只打一行警告。
+        # 于是「上一次运行留下的 snap-final2.tar.xz」可以带着 .sha256 躺进 out/v<ver>/，
+        # 而一致性校验被跳过 —— 正是本段注释要防的「发布快照 != APK 内嵌快照」。
+        # 而且 $snapIn 是从 .deploy-tmp 重新推导的，与本次是否真的产出过该 ABI 无关。
+        #
+        # 现在：没有 APK 就没有可校验的对象，直接判红；只有校验通过才写发布目录。
+        # 这样「发布目录里存在 snapshot-<abi>.tar.xz」就等价于「它已被校验与 APK 内嵌一致」。
+        $apkOut = Join-Path $Out ("dsh-mobile-apk-v" + $GradleVer + $Suffix + "-" + $abi + ".apk")
+        if (-not (Test-Path $apkOut)) { Deny-Abi $abi "缺 APK $apkOut —— 无校验对象，拒绝导出未校验的快照资产（#1080）"; continue }
+        & (Join-Path $PSScriptRoot "check-snapshot-asset.ps1") -ApkPath $apkOut -SnapshotPath $snapIn
+        if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "快照资产与 APK 内嵌不一致（拒绝发布组装）"; continue }
+        # 校验通过后才落盘：拷贝 + 写 sha256。
         $outSnap = Join-Path $Out "snapshot-$abi.tar.xz"
         Copy-Item $snapIn $outSnap -Force
         Set-Content -Path (Join-Path $Out "snapshot-$abi.tar.xz.sha256") -Value ((Get-FileHash $outSnap -Algorithm SHA256).Hash.ToLower()) -NoNewline -Encoding ascii
-        Write-Host "快照资产导出: $outSnap"
-        $apkOut = Join-Path $Out ("dsh-mobile-apk-v" + $GradleVer + $Suffix + "-" + $abi + ".apk")
-        if (Test-Path $apkOut) {
-            & (Join-Path $PSScriptRoot "check-snapshot-asset.ps1") -ApkPath $apkOut -SnapshotPath $outSnap
-            if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "快照资产与 APK 内嵌不一致（拒绝发布组装）"; continue }
-        } else {
-            Write-Host "警告: 缺 APK $apkOut，跳过一致性校验（$abi）"
-        }
+        Write-Host "快照资产导出（已校验）: $outSnap"
     }
 }
 $producedList = (($producedAbis | Select-Object -Unique) -join ", ")
@@ -522,6 +660,31 @@ $rejectedList = (($rejectedAbis | Select-Object -Unique) -join ", ")
 Write-Host "== 最终 APK 签名门禁（v1 + v2 + v3；apksigner 原始输出与退出码留在日志）=="
 node (Join-Path $Root "scripts\check-apk-signatures.mjs") --self-test
 if ($LASTEXITCODE -ne 0) { throw "APK 签名门禁自测失败" }
+# 产物形态门禁（与签名同一「最终产物」关口）：签名全绿不区分 debug/release 变体。
+# 出包由 build-apk-engine.mjs 走 release 变体（issue #1118 起缺省 release，本脚本不自己拼
+# assembleDebug），故本段现在是**回归哨兵**而非恒红断言：一旦变体被改回 debug 即判红。
+# 历史：0.14.9 的发布产物曾是 debug 变体（badging 含 application-debuggable）而签名门禁全绿——
+# 因为当时全链跑 :app:assembleDebug，且 app/build.gradle.kts 里 debug/release 共用 signingConfigs.repoDebug。
+# --require：刚打出 APK 的机器必有 SDK；aapt2 缺席即判红，不以 SKIP 结案。
+Write-Host "== 最终 APK 产物形态门禁（不得含 application-debuggable）=="
+node (Join-Path $Root "scripts\check-apk-form.mjs") --self-test
+if ($LASTEXITCODE -ne 0) { throw "APK 产物形态门禁自测失败" }
+# issue #1170：退出码与**原因**必须解耦。这条门禁的非 0 至少有四种来源：
+#   ① 产物含独立行 application-debuggable（真·debug 变体）；
+#   ② 目录里一个 APK 都没有（本次根本没产出，见上方「拒绝打包」）；
+#   ③ 找不到 aapt2；④ 用法错误。
+# 旧写法只看 $LASTEXITCODE 就断言「是 debuggable 变体」，于是「两个 ABI 都因缺快照被拒、交付目录是空的」
+# 被报成「产物是 debug 变体」——排查者去翻 buildTypes / signingConfig / assembleDebug 全是死路。
+# 现在：先收输出与退出码（不能管道直连 Select-Object，会吞 $LASTEXITCODE，见 check-build-chain-abort 判据 C），
+# 把门禁自己的末行结论回读进 throw，原因由门禁说，本行只负责追加处置动作。
+$apkFormOut = node (Join-Path $Root "scripts/check-apk-form.mjs") --dir $Out --require 2>&1
+$apkFormCode = $LASTEXITCODE
+$apkFormOut | Out-Host
+if ($apkFormCode -ne 0) {
+    $apkFormWhy = (@($apkFormOut) | Where-Object { $_ -match 'APK-FORM CHECK FAILED' } | Select-Object -Last 1)
+    if (-not $apkFormWhy) { $apkFormWhy = "门禁未通过（退出码 $apkFormCode）但未打印结论行——见上方门禁输出" }
+    throw "最终 APK 产物形态门禁未通过：$apkFormWhy（原因以上一行门禁输出为准，不要预设为 debuggable 变体）"
+}
 node (Join-Path $Root "scripts\build-apk-engine.mjs") verify --dir $Out --skip-self-test
 if ($LASTEXITCODE -ne 0) { throw "最终 APK 缺少 v1/v2/v3 全部签名，拒绝交付" }
 Write-Host "=== 汇总。已产出 ABI: [$producedList] / 被拒 ABI: [$rejectedList] ==="
@@ -530,3 +693,18 @@ Write-Host "=== 产物目录：$Out ==="
 # 由 scripts/check-build-chain-abort.mjs 静态锁住（0.13.8-b：arm64 被拒后整链仍 exit 0 的实锤）。
 if ($rejectedAbis.Count -gt 0) { Write-Host "有 ABI 被门禁拒绝——不发版（exit 1）"; exit 1 }
 if ($producedAbis.Count -eq 0) { Write-Host "没有任何 ABI 产出——不发版（exit 1）"; exit 1 }
+
+# vendored 字节绑定（issue #1285）：vendor/dsh-plugin-subscriptions 的逐文件 sha256 必须与
+# scripts/vendor-provenance.json 相符。此前没有任何门禁消费 PROVENANCE 记的哈希，手改一个
+# lib/*.js 照样出厂——供应链面只剩「版本字符串对」这一层。放在链尾：它只读仓库文件，与 ABI 无关，
+# 跑一次即可；但必须在「发版」之前，否则改过的 vendor 会被打进包。
+Write-Host "== vendored 字节绑定门禁 =="
+node (Join-Path $Root "scripts\check-vendor-provenance.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { throw "vendored 目录与 scripts/vendor-provenance.json 不符，拒绝交付" }
+
+# 退役插件残留引用（0.14.8 dsh-model-capability 退役）：构建/发布入口里不得再出现它的可执行引用。
+# 放在链尾与 vendored 那条同因：只读仓库文件、与 ABI 无关，跑一次即可；但它必须在打包之前，
+# 否则「注入集里多一条指向不存在目录的项」会一路静默到设备上才暴露。
+Write-Host "== 退役插件残留引用门禁 =="
+node (Join-Path $Root "scripts\check-retired-plugins.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { throw "构建/发布入口仍引用已退役插件，拒绝交付" }

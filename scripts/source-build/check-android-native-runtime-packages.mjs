@@ -19,8 +19,8 @@ const within = (root, path) => {
   return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
 }
 const acknowledgedFamilies = [
-  /^@img\+sharp-linux-(?:x64|arm64)@0\.35\.3\//,
-  /^@img\+sharp-wasm32@0\.35\.3\//,
+  /^@img\+sharp-linux-(?:x64|arm64)@0\.35\.5\//,
+  /^@img\+sharp-wasm32@0\.35\.5\//,
   /^@koromix\+koffi-(?:android|linux)-(?:arm64|x64)@3\.2\.1\//,
   /^node-pty@1\.2\.0-beta\.15_.*\//,
   /^node-addon-require-builtin-linux-(arm64|x64)-gnu@0\.1\.(?:4|6)\/node_modules\/node-addon-require-builtin-linux-\1-gnu\/prebuilt\/linux-\1-gnu-napi-v9\.node$/,
@@ -123,11 +123,11 @@ for (const [consumer, consumerRoot] of koffiConsumers) {
 }
 
 const sharpRoot = packageAt(engineRoot, attachmentRoot, 'sharp')
-const sharpPackage = readPackage(sharpRoot, 'sharp', '0.35.3')
+const sharpPackage = readPackage(sharpRoot, 'sharp', '0.35.5')
 const sharpRequire = createRequire(join(sharpRoot, 'dist', 'sharp.mjs'))
 const sharpWasmEntry = sharpRequire.resolve('@img/sharp-wasm32/sharp.node')
 const sharpWasmRoot = realpathSync(dirname(sharpWasmEntry))
-const sharpWasm = readPackage(sharpWasmRoot, '@img/sharp-wasm32', '0.35.3')
+const sharpWasm = readPackage(sharpWasmRoot, '@img/sharp-wasm32', '0.35.5')
 const emnapiRoot = packageAt(engineRoot, sharpWasmRoot, '@emnapi/runtime')
 const emnapiPackage = JSON.parse(readFileSync(join(emnapiRoot, 'package.json'), 'utf8'))
 const sharpLoader = readFileSync(join(sharpRoot, 'dist', 'sharp.mjs'), 'utf8')

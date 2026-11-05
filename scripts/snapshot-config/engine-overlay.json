@@ -2,7 +2,7 @@
   "$schema": "dsh-mobile engine overlay manifest (W1, 0.13.3)",
   "engineVersion": "0.2.1-rc.3",
   "comment": [
-    "Linux integration source alignment: official Harness 1f81c047fc48fa190a683e469daa699857e9afe8, 0.2.1-rc.3.",
+    "上游 Harness 0.2.1-rc.3，精确提交 1f81c047fc48fa190a683e469daa699857e9afe8；构建和运行验收见本轮追版记录。",
     "Package identities and versions are read from the pinned target manifests; Cordis packages are not rewound to older sources.",
     "Android assembles ui-settings-session-log and otel; desktop product telemetry and analytics payloads are inventoried but their rows are explicitly disabled.",
     "The complete Lexical family follows the official 0.49.0 source lock, not the previous Android-only 0.50.0 pin.",
@@ -82,6 +82,7 @@
     "@deepseek-ai/dsh-client-ui-directory-picker-browse": "0.2.1-rc.3",
     "@deepseek-ai/dsh-client-ui-directory-picker-native": "0.2.1-rc.3",
     "@deepseek-ai/dsh-client-ui-dockkit": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-client-ui-entry-customization": "0.2.1-rc.3",
     "@deepseek-ai/dsh-client-ui-goal": "0.2.1-rc.3",
     "@deepseek-ai/dsh-client-ui-input-trigger": "0.2.1-rc.3",
     "@deepseek-ai/dsh-client-ui-jobs": "0.2.1-rc.3",
@@ -474,6 +475,19 @@
       "debug": "2.6.9",
       "negotiator": "0.6.4",
       "ms": "2.0.0"
+    },
+    "@deepseek-ai/dsh-otel": {
+      "@opentelemetry/api-logs": "0.222.0",
+      "@opentelemetry/core": "2.11.0",
+      "@opentelemetry/otlp-exporter-base": "0.222.0",
+      "@opentelemetry/otlp-transformer": "0.222.0",
+      "@opentelemetry/resources": "2.11.0",
+      "@opentelemetry/sdk-logs": "0.222.0",
+      "@opentelemetry/sdk-metrics": "2.11.0",
+      "@opentelemetry/sdk-trace": "2.11.0"
+    },
+    "@deepseek-ai/dsh-session-telemetry-otel": {
+      "@opentelemetry/api-logs": "0.222.0"
     }
   },
   "keepUnpublished": [
@@ -498,12 +512,12 @@
   "uninstalledRootDeps": [],
   "uninstalledRootDepsNote": "dsh 根 package.json 声明、但安装闭包**刻意不产出**的直接依赖。每条必须写明上游依据与启用条件；门禁（check-engine-overlay.mjs）会反证：本表中任一条目若在快照里真的存在，立即判红（说明install 面变了、这条豁免已过期）。",
   "extraPresentNote": "随 overlay 落地但不在 packages 版本钉面上的包（平台可选依赖 / 客户端面传递依赖；依赖闭包不可达）。反向面门禁（check-engine-overlay.mjs，ST-17）要求：快照内每个包必须「已登记」或「由已登记包经 dependencies/optionalDependencies/peerDependencies 闭包可达」——不在两者内的包必须在此显式登记，否则判红。",
-  "generatedBy": "scripts/gen-engine-overlay.mjs --engine 0.2.1-rc.2",
+  "generatedBy": "scripts/gen-engine-overlay.mjs --engine 0.2.1-rc.3",
   "requiredUpstreamPatches": [
     {
       "package": "@earendil-works/pi-ai",
       "version": "1.1.0",
-      "sourceCommit": "687f282e8625c6b8d11ff58211a90524be2e4317",
+      "sourceCommit": "1f81c047fc48fa190a683e469daa699857e9afe8",
       "sourcePath": "patches/@earendil-works__pi-ai@1.1.0.patch",
       "patchSha256": "66eaf960054f10441b93ac3857114e96c1901f6d183713e2f21437b007111644",
       "integrationHook": "scripts/build-snapshot-013.mjs: immediately after the OVERLAY.pins extraction loop, before subsequent engine patches; retain the patched pnpm package payload or reapply this exact official patch to every physical runtime copy.",
@@ -512,7 +526,7 @@
     }
   ],
   "assemblyInventory": {
-    "sourceCommit": "687f282e8625c6b8d11ff58211a90524be2e4317",
+    "sourceCommit": "1f81c047fc48fa190a683e469daa699857e9afe8",
     "rows": {
       "otel": "enabled base service",
       "ui-settings-session-log": "enabled official general-settings control",
@@ -521,7 +535,8 @@
       "schedule": "enabled upstream web-app default (0.2.1 restored scheduling rows; Android follows upstream)",
       "ui-schedule": "enabled upstream web-app default (client half of the restored scheduling rows)",
       "time-context": "enabled upstream preset row (context only; no Android-specific override)",
-      "tool-schedule": "enabled upstream preset tool row (schedule tools surface; follow upstream default)"
+      "tool-schedule": "enabled upstream preset tool row (schedule tools surface; follow upstream default)",
+      "entry-customization": "enabled upstream web-app default (region-local plugin menus)"
     },
     "excludedFromBaseWeb": [],
     "excludedReason": "0.2.1-rc.2 restored schedule / ui-schedule / time-context / tool-schedule to the official base+web-app and preset rows. Android follows the upstream default instead of re-disabling them; the retired experimental schedule bundle is gone upstream, so there is no excluded row to recreate."

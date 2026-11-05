@@ -5,8 +5,17 @@ import assert from 'node:assert/strict'
 import { pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
+
+// #679 硬切后壳侧只认 nonce；android_ui_input 会在发广播前检查它。本套件验的是 a11y/adb 路由与
+// 回读口径，必须能走到发广播那一步，所以提供一份可读 nonce（否则会拿到「nonce 不可用」文案）。
+const NONCE_DIR = mkdtempSync(join(tmpdir(), 'kb-a11y-'))
+writeFileSync(join(NONCE_DIR, 'adb-keyboard-nonce'), 'test-nonce\n')
+process.env.DSH_FILES_DIR = NONCE_DIR
+
 const mod = await import(pathToFileURL(join(HERE, '..', 'lib', 'index.js')).href)
 
 function makeFace({ backend = 'a11y' } = {}) {
@@ -237,7 +246,7 @@ test('android_screenshot 的 ADB 回落对虚拟屏必须传 SF token（不是 d
     return { ok: true, stdout: '/tmp/dsh-shot-1.png\n-rw-rw-rw- 1 shell shell 1234 dsh-shot-1.png' }
   }
   const { byName } = applyManage(face)
-  const r = await byName('android_screenshot').execute({ screenId: 'virtual-1', textRedact: true }, exec)
+  const r = await byName('android_screenshot').execute({ screenId: 'virtual-1' }, exec)
   const line = calls.adbLine.find((l) => /screencap/.test(l))
   assert.ok(line, 'ADB 回落路径必须真的发起 screencap')
   assert.match(line, /screencap -p -d 11529215046816944610/, '必须把 SF token 落到 screencap 上')
@@ -256,7 +265,7 @@ test('android_screenshot 虚拟屏反查不到 SF token 时必须 fail-closed（
   face.execAdbShell = async (cmd) => { calls.adbShell.push(cmd); return { ok: true, stdout: '    name="mumuscreen000"\n' } }
   face.execAdbLine = async (line) => { calls.adbLine.push(line); return { ok: true, stdout: '' } }
   const { byName } = applyManage(face)
-  const r = await byName('android_screenshot').execute({ screenId: 'virtual-1', textRedact: true }, exec)
+  const r = await byName('android_screenshot').execute({ screenId: 'virtual-1' }, exec)
   assert.ok(!calls.adbLine.some((l) => /screencap/.test(l)), '反查失败时不得发起任何 screencap')
   assert.match(String(r.text ?? ''), /SurfaceFlinger display token 解析不到/, '必须如实说明反查失败')
   assert.match(String(r.text ?? ''), /不会/, '必须显式声明不回落 displayId 或真实屏')
@@ -265,7 +274,7 @@ test('android_screenshot 虚拟屏反查不到 SF token 时必须 fail-closed（
 test('android_screenshot 不带 screenId 时抓默认屏（语义不变）', async () => {
   const { face, calls } = makeFace({ backend: 'adb' })
   const { byName } = applyManage(face)
-  await byName('android_screenshot').execute({ textRedact: true }, exec)
+  await byName('android_screenshot').execute({}, exec)
   const line = calls.adbLine.find((l) => /screencap/.test(l))
   assert.ok(line, '应发起 screencap')
   assert.ok(!/-d \d+/.test(line), '未指定屏时不得注入 -d（保持真实屏默认语义）')
@@ -559,4 +568,97 @@ test('act_input 虚拟屏路径：壳侧拒绝时如实转述，不得谎报成�
   const r = await byName('android_act_input').execute({ action: 'keyevent', keycode: 4, screenId: 'virtual-1' }, exec)
   assert.equal(r.ok, false, '壳侧说没成，工具面不得说成功')
   assert.match(r.text, /虚拟屏幕尚未创建/)
+})
+
+// ── 未知值不得编造成 0（2026-10-28 自查；"绝不编造默认值"契约的违反面） ──────────────
+//
+// 修前实测（探针）：
+//   A. 壳侧不回 `clicked.x/y` 时，返回体硬给 `x:0, y:0`、文案写「实际坐标 0,0」——
+//      而**同一句文案**里 `basisFields` 会如实说「基准未回显：壳侧版本较旧」⇒ 一个返回体两套口径。
+//   B. `web_dump` 同一句里 `vw`/`vh` 未知报 `?`，`scrollY` 未知却报 `0` ⇒ 模型会把
+//      「壳侧没回显」误读成「页面没滚动」。
+// 反向必须一起守：壳侧真回显时，坐标与滚动量要如实带出（不许为了拒未知把合法值也丢掉）。
+test('未知值不得编造成 0：归一化点击的坐标如实缺席（不谎报 0,0）', async () => {
+  const { face } = makeFace({ backend: 'a11y' })
+  const { byName } = applyManage(face)
+  // makeFace 的 controlExec 对 click 返回 {done:true}——不回 x/y，等价于老壳侧
+  const r = await byName('android_ui_click').execute({ nx: 0.5, ny: 0.5 }, exec)
+  assert.equal(r.ok, true, JSON.stringify(r).slice(0, 160))
+  assert.equal(r.x, undefined, '壳侧未回显时 x 必须缺席（不是 0）')
+  assert.equal(r.y, undefined, '壳侧未回显时 y 必须缺席（不是 0）')
+  assert.match(String(r.text), /实际坐标 未回显/, '文案必须如实说未回显')
+  assert.ok(!/实际坐标 0,0/.test(String(r.text)), '不得谎报 0,0')
+})
+
+test('未知值不得编造成 0：web_dump 的 scrollY 与 vw/vh 口径一致', async () => {
+  const { face } = makeFace({ backend: 'a11y' })
+  face.controlExec = async (op) => (op === 'webSnapshot'
+    ? { ok: true, data: { ok: true, nodes: [] } }   // 不回 vw/vh/scrollY
+    : { ok: true, data: { done: true } })
+  const { byName } = applyManage(face)
+  const r = await byName('android_web_dump').execute({}, exec)
+  const line = String(r.text).split('\n')[0]
+  assert.match(line, /视口 \?x\?/, 'vw/vh 未知报 ?')
+  assert.match(line, /滚动 \?/, 'scrollY 未知也必须报 ?（修前报 0）')
+})
+
+test('反向：壳侧真回显时坐标与滚动量必须如实带出（不得为了拒未知而一起丢掉）', async () => {
+  const { face } = makeFace({ backend: 'a11y' })
+  face.controlExec = async (op) => {
+    if (op === 'click') return { ok: true, data: { done: true, x: 540, y: 1200 } }
+    if (op === 'webSnapshot') return { ok: true, data: { ok: true, vw: 412, vh: 915, scrollY: 204, nodes: [] } }
+    return { ok: true, data: { done: true } }
+  }
+  const { byName } = applyManage(face)
+  const c = await byName('android_ui_click').execute({ nx: 0.5, ny: 0.5 }, exec)
+  assert.equal(c.x, 540, '壳侧真回显时 x 必须带出')
+  assert.equal(c.y, 1200, '壳侧真回显时 y 必须带出')
+  assert.match(String(c.text), /实际坐标 540,1200/)
+  const w = await byName('android_web_dump').execute({}, exec)
+  assert.match(String(w.text).split('\n')[0], /视口 412x915，滚动 204/)
+})
+
+// ── #258 同族：屏身份字段与点击坐标不得互相顶替、非有限 displayId 不得透传（2026-10-28 自查） ──
+//
+// 两处真缺陷（探针实测，修前输出见下）：
+//   A. `android_ui_click` 虚拟屏坐标模式的成功分支写成
+//      `x: typeof data.displayId === 'number' ? data.displayId : 0, y: 0`——
+//      x 里装的是 **displayId**，真实点击坐标 180/524 凭空消失；壳侧回 `displayId: NaN` 时
+//      `typeof NaN === 'number'` 恒真 ⇒ NaN 进返回体（JSON 成 `{"x":null,"y":0}`）。
+//   B/C. `android_app_launch` 跨屏两条分支先展开 `...screenOut(data)`（已带 Number.isFinite 守卫），
+//        紧接着又手写一行 `...(typeof data.displayId === 'number' ? {...} : {})` ——
+//        展开顺序在后 ⇒ **把守卫值覆盖掉** ⇒ NaN/Infinity 照样透出。而 schema 声明
+//        `displayId: {type:'integer'}` ⇒ 非整数让引擎**整值拒绝**，模型拿不到任何数据。
+// 反证方向：把任一处改回旧形态，下列用例立即红。
+test('#258 同族：虚拟屏坐标点击回显的是点击坐标而不是 displayId，且非有限 displayId 不落盘', async () => {
+  const { face } = makeFace({ backend: 'a11y' })
+  face.screenAccessResolved = async (sid) => ({ ok: true, screenId: sid ?? 'real', displayId: 38, scope: 'all' })
+  face.controlExec = async () => ({ ok: true, data: { ok: true, guidance: 'ok', displayId: NaN, screenId: 'virtual-1' } })
+  const { byName } = applyManage(face)
+  const r = await byName('android_ui_click').execute({ x: 180, y: 524, screenId: 'virtual-1' }, exec)
+  assert.equal(r.ok, true, JSON.stringify(r).slice(0, 200))
+  assert.equal(r.x, 180, '必须回显本次点击的 x（修前是 NaN：被 displayId 顶掉）')
+  assert.equal(r.y, 524, '必须回显本次点击的 y（修前恒 0）')
+  assert.ok(Number.isInteger(r.x) && Number.isInteger(r.y), '坐标必须是整数')
+  assert.equal(r.displayId, undefined, 'NaN displayId 必须缺席（不是 0、不是 NaN）')
+  assert.equal(JSON.stringify(r.x), '180', '序列化后不得是 null')
+})
+
+test('#258 同族：跨屏拉起两条分支都不得让非有限 displayId 覆盖 screenOut 的守卫', async () => {
+  const cases = [
+    ['成功分支 + NaN', { ok: true, displayId: NaN, guidance: '已拉起' }, undefined],
+    ['失败分支 + Infinity', { ok: false, displayId: Infinity, guidance: '未确认', code: 'not-landed' }, undefined],
+    ['成功分支 + 合法 displayId', { ok: true, displayId: 25, guidance: '已拉起' }, 25],
+    ['失败分支 + 合法 displayId', { ok: false, displayId: 25, guidance: '未确认' }, 25],
+  ]
+  for (const [label, data, want] of cases) {
+    const { face } = makeFace({ backend: 'adb' })
+    face.screenAccess = () => ({ ok: true, screenId: 'virtual-1', displayId: 25, scope: 'all' })
+    face.controlExec = async () => ({ ok: true, data })
+    const { byName } = applyManage(face)
+    const r = await byName('android_app_launch').execute({ pkg: 'com.example.app', screenId: 'virtual-1' }, exec)
+    assert.equal(r.displayId, want, label + '：displayId 必须与壳侧一致（非有限值缺席、合法值保留）')
+    assert.equal(JSON.stringify({ d: r.displayId }), JSON.stringify({ d: want }),
+      label + '：序列化不得把非有限值悄悄变成 null')
+  }
 })

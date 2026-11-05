@@ -20,7 +20,7 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { SessionDeleteError, assertSessionId, deleteStoredSession } from './session-delete.js'
+import { SessionDeleteError, assertSessionId, deleteStoredSession, quarantineStoredSession, sweepGraveyards } from './session-delete.js'
 
 /** Log tag shared with the client half so device logs can be grepped by one string. */
 const TAG = '[dsh-session-delete]'
@@ -203,6 +203,49 @@ function unloadLiveSession(ctx, sessionId) {
   return { wasLive: true }
 }
 
+/**
+ * issue #912：隔离一个**读不出历史**的会话（移动而不是删除）。
+ *
+ * 与 [removeSession] 的区别只有最后一步：那边 rename 后**递归删除**，这边 rename 到
+ * `<工作区>/.corrupt/<id>.<时间戳>` 就停手 —— 数据原样保留、可逆。
+ *
+ * 前置校验与删除一致（非法 id / 不存在 / 多义 / 仍在运行都拒绝），
+ * 因为「活会话被搬走」和「活会话被删」一样会造成用户看到它在跑却找不到目录。
+ *
+ * @param {object} ctx - cordis context。
+ * @param {string} sessionId - 要隔离的会话 id。
+ * @returns {Promise<{ ok: true, sessionId: string, dir: string, quarantinedTo: string, restorable: true }>} 隔离结果。
+ */
+export async function quarantineSession(ctx, sessionId) {
+  assertSessionId(sessionId)
+  const live = ctx.get('sessions')?.get?.(sessionId) !== undefined
+  const activity = await sessionActivity(ctx, sessionId)
+  if (activity === null) {
+    throw new SessionDeleteError('activity-unknown', 'cannot verify whether the conversation is idle; refusing to quarantine', { sessionId })
+  }
+  if (activity.length > 0) {
+    throw new SessionDeleteError('session-active', 'the conversation is running; stop it before quarantining', { sessionId })
+  }
+  const registry = ctx.get('workspaceRegistry')
+  const result = await quarantineStoredSession({
+    home: process.env.DSH_HOME ?? join(homedir(), '.dsh'),
+    sessionId,
+    isActive: false,
+    logger: (level, message, extra) => log(ctx, level, message, extra),
+    // 目录真正离开扫描路径之后才卸载：先卸载再搬，会让「搬失败」变成「会话消失了但文件还在原地」。
+    beforeResolve: async () => {
+      const unloaded = unloadLiveSession(ctx, sessionId)
+      if (unloaded.wasLive || live) log(ctx, 'info', 'session kept on disk (quarantined)', { sessionId })
+    },
+  })
+  try { await registry?.unarchiveSession?.(sessionId) } catch (error) {
+    log(ctx, 'warn', 'unarchive failed (ignored)', { sessionId, error: String(error?.message ?? error) })
+  }
+  try { await registry?.unpinSession?.(sessionId) } catch (error) {
+    log(ctx, 'warn', 'unpin failed (ignored)', { sessionId, error: String(error?.message ?? error) })
+  }
+  return result
+}
 export async function removeSession(ctx, sessionId) {
   // 先做纯校验：非法 id 必须在探测活动之前就返回 invalid-id（400），
   // 否则会被报成 activity-unknown（409），错误归因完全错位。
@@ -254,18 +297,32 @@ export async function removeSession(ctx, sessionId) {
 }
 
 /**
- * Map a failure onto an HTTP status.
+ * Map a failure onto an HTTP status and the fields the client is allowed to see.
+ *
+ * issue #983：`already-quarantined` 必须把隔离件路径带到回包里。客户端要靠它显示
+ * 「文件仍在、可恢复」的证据；不透传时客户端读不到 `reason.paths`，只能渲染
+ * 「已隔离到：（文件仍在，可恢复）」这种**空路径的成功横幅**。
+ *
+ * 只有这一个码外带字段：别的错误码把内部 details 漏给前端既无用处，又会让客户端
+ * 误以为「有路径 = 已隔离」。
+ *
  * @param {unknown} error - thrown value.
- * @returns {{ status: number, code: string, message: string }}
+ * @returns {{ status: number, code: string, message: string, paths?: string[] }}
  */
 function failureOf(error) {
   const code = error instanceof SessionDeleteError ? error.code : 'delete-failed'
-  const status = code === 'invalid-id' || code === 'invalid-body'
+  const status = code === 'invalid-id' || code === 'invalid-body' || code === 'invalid-action'
     ? 400
     : code === 'not-found' ? 404
-      : code === 'session-active' || code === 'activity-unknown' || code === 'unload-failed' || code === 'ambiguous' ? 409
+      : code === 'session-active' || code === 'activity-unknown' || code === 'unload-failed' || code === 'already-quarantined' || code === 'ambiguous' ? 409
         : 500
-  return { status, code, message: String(error?.message ?? error) }
+  const failure = { status, code, message: String(error?.message ?? error) }
+  if (code === 'already-quarantined') {
+    const paths = error instanceof SessionDeleteError ? error.details?.paths : undefined
+    // 一定是数组（可为空）：客户端据「有没有路径」决定用带路径文案还是降级文案。
+    failure.paths = Array.isArray(paths) ? paths.filter((entry) => typeof entry === 'string' && entry !== '') : []
+  }
+  return failure
 }
 
 /**
@@ -274,6 +331,11 @@ function failureOf(error) {
  */
 export function apply(ctx) {
   log(ctx, 'info', 'registering route', { path: ROUTE })
+  // 启动清扫上次失败删除留下的 *.deleting-* 墓地目录（best-effort；见 sweepGraveyards 注释）。
+  sweepGraveyards(process.env.DSH_HOME ?? join(homedir(), '.dsh')).then(
+    (removed) => { if (removed.length > 0) log(ctx, 'info', 'swept leftover graveyard directories', { count: removed.length }) },
+    () => {},
+  )
   // 客户端决策回传：删除后界面为什么没切换，只有浏览器侧知道；把它的选择写进
   // engine.log（[dsh-session-delete] client trace …），现场问题不必再靠猜。
   ctx.webServer.register({
@@ -319,8 +381,16 @@ export function apply(ctx) {
       }
       try {
         const body = await readJsonBody(req)
-        log(ctx, 'info', 'request parsed', { sessionId: body?.sessionId })
-        const result = await removeSession(ctx, body?.sessionId)
+        log(ctx, 'info', 'request parsed', { sessionId: body?.sessionId, action: body?.action })
+        // issue #912：隔离动作（移动而非删除）。错误码与 delete 完全分开 ——
+        // 调用方据 `already-quarantined` 才能告诉用户「文件还在，可恢复」。
+        const action = body?.action ?? 'delete'
+        if (action !== 'delete' && action !== 'quarantine') {
+          throw new SessionDeleteError('invalid-action', 'unknown action: ' + String(action), { action })
+        }
+        const result = action === 'quarantine'
+          ? await quarantineSession(ctx, body?.sessionId)
+          : await removeSession(ctx, body?.sessionId)
         log(ctx, 'info', 'route completed', { sessionId: result.sessionId, ms: Date.now() - startedAt })
         sendJson(res, 200, result)
       } catch (error) {
@@ -331,7 +401,10 @@ export function apply(ctx) {
           message: failure.message,
           ms: Date.now() - startedAt,
         })
-        sendJson(res, failure.status, { ok: false, error: failure.code, message: failure.message })
+        const payload = { ok: false, error: failure.code, message: failure.message }
+        // issue #983：只有 already-quarantined 带 paths（见 failureOf）。
+        if (failure.paths !== undefined) payload.paths = failure.paths
+        sendJson(res, failure.status, payload)
       }
     },
   })

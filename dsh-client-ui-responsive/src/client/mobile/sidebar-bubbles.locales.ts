@@ -10,6 +10,10 @@ export const zh = {
   terminal: '终端',
   vdisplay: '虚拟屏',
   tool: '工具面板',
+  split: '分栏',
+  splitLabel: '创建双工作区',
+  float: '小窗',
+  floatLabel: '将当前标签小窗化',
 }
 export const en: typeof zh = {
   tabs: 'Open work panels',
@@ -22,6 +26,10 @@ export const en: typeof zh = {
   terminal: 'Terminal',
   vdisplay: 'Virtual display',
   tool: 'Tool panel',
+  split: 'Split',
+  splitLabel: 'Create a second workspace',
+  float: 'Float',
+  floatLabel: 'Float the current tab',
 }
 export type BubbleKey = keyof typeof zh
 declare module '@deepseek-ai/dsh-client-ui-slots' {

@@ -37,7 +37,7 @@
   <string name="ds_apk_not_checked">尚未检查</string>
   <string name="ds_apk_download">下载</string>
   <!-- 版本号进独立状态行后，按钮文案只剩短词——长版本号不会再被固定高按钮截断 -->
-  <string name="ds_apk_version_available">新版本 %1$s（当前 %2$s，%3$s）</string>
+  <string name="ds_apk_version_available">%1$s 可用 · %2$s</string>
   <!-- ds_apk_confirm（下载并安装 %s）随单按钮三态一起下线：版本号进状态行后，没有哪个控件再需要它 -->
   <string name="ds_apk_available">发现新版 APK %1$s（当前 %2$s，%3$s）——点「下载」开始下载并安装</string>
   <string name="ds_apk_downloading">下载中 %1$d%%</string>

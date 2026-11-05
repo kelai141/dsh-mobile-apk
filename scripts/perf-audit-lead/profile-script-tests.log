@@ -1,0 +1,44 @@
+discovered=43 candidates=38 nodeTest=35 plain=3
+
+=== per-file wall (serial, sum=83.2s) ===
+  14628ms  pass=  - fail= - exit= 0  check-code-map-anchors.test.mjs  [plain]
+  12637ms  pass=  8 fail= 0 exit= 0  check-upstream-patch-bytes.test.mjs
+   8216ms  pass=  6 fail= 0 exit= 0  check-snapshot-archive-exit-code.test.mjs
+   7363ms  pass= 39 fail= 0 exit= 0  check-apk-signatures.test.mjs
+   6231ms  pass= 10 fail= 0 exit= 0  check-patch-mirror.test.mjs
+   3944ms  pass= 12 fail= 0 exit= 0  check-degrade-source-of-truth.test.mjs
+   3524ms  pass=  3 fail= 0 exit= 0  check-runtime-assets-companions.test.mjs
+   2720ms  pass=  6 fail= 0 exit= 0  check-snapshot-secrets.test.mjs
+   2234ms  pass=  8 fail= 0 exit= 0  check-runtime-assets.test.mjs
+   2231ms  pass= 15 fail= 0 exit= 0  check-apk-form.test.mjs
+   2218ms  pass=  1 fail= 0 exit= 0  build-apk-stale-delivery.test.mjs
+   1954ms  pass=  - fail= - exit= 0  check-perf-instrumentation.test.mjs  [plain]
+   1763ms  pass=  8 fail= 0 exit= 0  check-manifest-hardening.test.mjs
+   1364ms  pass=  8 fail= 0 exit= 0  check-third-party.test.mjs
+   1360ms  pass=  8 fail= 0 exit= 0  check-control-ops.test.mjs
+   1355ms  pass=  8 fail= 0 exit= 0  subs-sse-limits.test.mjs
+   1336ms  pass=  4 fail= 0 exit= 0  migrate-anchors-guards.test.mjs
+   1248ms  pass=  1 fail= 0 exit= 0  wsl-node-command.test.mjs
+   1171ms  pass=  0 fail=10 exit= 1  check-tool-output-schema.test.mjs
+    601ms  pass=  1 fail= 0 exit= 0  probe-engine-anchors.test.mjs
+    419ms  pass= 16 fail= 0 exit= 0  build-apk-engine.test.mjs
+    407ms  pass=  1 fail= 0 exit= 0  farm-link-idempotency.test.mjs
+    402ms  pass=  3 fail= 0 exit= 0  check-tool-surface-budget.test.mjs
+    389ms  pass=  1 fail= 0 exit= 0  strip-comments.test.mjs
+    341ms  pass=  5 fail= 0 exit= 0  side-effects-1287.test.mjs
+    337ms  pass=  5 fail= 0 exit= 0  subs-proxy-secrets.test.mjs
+    335ms  pass=  5 fail= 0 exit= 0  build-apk-engine-delivery.test.mjs
+    277ms  pass=  8 fail= 0 exit= 0  check-bridge-symmetry.test.mjs
+    247ms  pass= 14 fail= 0 exit= 0  verify-screen-scope-matrix.test.mjs
+    232ms  pass=  7 fail= 0 exit= 0  console-ime-units.test.mjs
+    231ms  pass=  3 fail= 0 exit= 0  check-apk-signatures-dir.test.mjs
+    231ms  pass=  5 fail= 0 exit= 0  hot-push-status.test.mjs
+    224ms  pass= 11 fail= 0 exit= 0  check-engine-overlay.test.mjs
+    217ms  pass=  7 fail= 0 exit= 0  resolve-version-suffix.test.mjs
+    213ms  pass=  3 fail= 0 exit= 0  vdisplay-float-contract.test.mjs
+    212ms  pass=  8 fail= 0 exit= 0  console-keyboard-layout.test.mjs
+    206ms  pass=  0 fail= 0 exit= 0  symlink-sanitize.test.mjs
+    168ms  pass=  - fail= - exit= 0  verify-state-sync-modep.test.mjs  [plain]
+
+top-8 share: 71.2%
+SUM pass (node:test files) = 248  SUM fail = 10

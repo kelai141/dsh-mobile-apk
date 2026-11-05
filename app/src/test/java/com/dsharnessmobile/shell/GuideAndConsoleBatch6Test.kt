@@ -405,7 +405,12 @@ class GuideAndConsoleBatch6Test {
     assertFalse("下载按钮不得挂在任何布局里", chrome.contains("addView(apkDownload"))
     val management = codeOnly(source("GuideManagementController.kt"))
     assertTrue("管理中心必须认领状态行", management.contains("block.addView(chrome.apkStatus"))
-    assertTrue("管理中心必须认领下载按钮", management.contains("buttons.addView(chrome.apkDownload"))
+    // 0.15.0 排版改版：承载两枚按钮的行变量名从 buttons 改为 actions（主按钮 + 文字链接）。
+    // 断言随之改成「下载那枚被摆进那一行」——判据是**仍然独立 addView**，不是变量名叫什么。
+    assertTrue(
+      "管理中心必须认领下载按钮",
+      Regex("actions\\.addView\\(\\s*chrome\\.apkDownload").containsMatchIn(management),
+    )
     assertTrue("检查按钮仍走「先摘再挂」的既有路径", management.contains("(chrome.updateButton.parent as? ViewGroup)?.removeView(chrome.updateButton)"))
   }
 

@@ -6,7 +6,7 @@
 // 运行期「拒绝真的发生了」必须在这里断言。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { apply } from '../lib/index.js'
@@ -73,10 +73,10 @@ function fixture() {
 }
 
 /** 在给定 fixture 上装插件（env 是唯一路径真源，符合「不得硬编码路径」）。 */
-function applyOn(fixtureEnv) {
+function applyOn(fixtureEnv, services = {}) {
   const previous = { DSH_HOME: process.env.DSH_HOME, DSH_FILES_DIR: process.env.DSH_FILES_DIR, DSH_CONTROL_TOKEN_TEST: process.env.DSH_CONTROL_TOKEN_TEST, DSH_CONTROL_TOKEN: process.env.DSH_CONTROL_TOKEN }
   Object.assign(process.env, { DSH_HOME: fixtureEnv.home, DSH_FILES_DIR: fixtureEnv.files, DSH_CONTROL_TOKEN_TEST: '1', DSH_CONTROL_TOKEN: TOKEN })
-  const harness = makeCtx()
+  const harness = makeCtx(services)
   apply(harness.ctx)
   return {
     harness,
@@ -218,6 +218,27 @@ test('execute 面在无白名单命中时只返回空计划（不误删、不报
     assert.equal(report.removedBytes, 0)
     assert.equal(existsSync(join(home, 'sessions', 's1.jsonl')), true)
     assert.equal(existsSync(join(files, 'engine.log')), true)
+  } finally { restore() }
+})
+
+test('图片原件接入原手动路由：GET只扫描，未授权POST不能删，确认清理后保留新图', async () => {
+  const f = fixture(), hash = 'd'.repeat(64), freshHash = 'e'.repeat(64)
+  const object = join(f.home, 'attachments/v1/objects/dd', hash)
+  const fresh = join(f.home, 'attachments/v1/objects/ee', freshHash)
+  for (const path of [object, fresh]) { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, 'image') }
+  const old = new Date(Date.now() - 121 * 60 * 1000); utimesSync(object, old, old)
+  const { harness, restore } = applyOn(f, { attachments: { imageExpirySupported: true } })
+  try {
+    const scan = JSON.parse((await call(harness, '/api/android/runtime-cache/scan')).body)
+    assert.equal(scan.targets.filter(t => t.kind === 'image-object').length, 1)
+    assert.equal(existsSync(object), true)
+    assert.equal((await call(harness, '/api/android/runtime-cache/execute', { method: 'POST', token: '' })).code, 401)
+    assert.equal(existsSync(object), true)
+    const response = await call(harness, '/api/android/runtime-cache/execute', { method: 'POST' })
+    assert.equal(response.code, 200)
+    assert.equal(JSON.parse(response.body).failed, 0)
+    assert.equal(existsSync(object), false)
+    assert.equal(readFileSync(fresh, 'utf8'), 'image')
   } finally { restore() }
 })
 

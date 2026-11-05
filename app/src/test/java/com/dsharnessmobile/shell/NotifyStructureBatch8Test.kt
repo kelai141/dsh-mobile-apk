@@ -46,7 +46,18 @@ class NotifyStructureBatch8Test {
     assertTrue("降级必须产生随通知走的说明", code.contains("degradedNotice"))
     assertTrue("说明必须点名是哪个类别被降级", code.contains("系统已把「"))
     assertTrue("说明必须给出恢复路径", code.contains("到系统设置里可恢复"))
-    assertTrue("说明必须落到通知上（subText）", code.contains("if (degradedNotice != null) b.setSubText(degradedNotice)"))
+    // ── 这条断言在 issue #1407 里被**改写**过，为什么改写在这里 ──────────────────────
+    //
+    // 原文钉的是 `if (degradedNotice != null) b.setSubText(degradedNotice)`——即「降级说明
+    // 无条件覆盖 subText」这个**实现形态**。而 #1407 的真因正是这一句：它把审批通知的
+    // 「仅本次生效」顶掉了。于是原文等于断言「缺陷必须还在」，修好了反而红。
+    //
+    // 守的是同一条需求（S3-1：降级必须有一份随通知走的说明），只是不再允许它盖掉更具体的
+    // subText。判据改成直接断言两件事同时成立：降级说明仍落到 subText，且受占用判据保护。
+    assertTrue(
+      "说明必须落到通知上（subText），且不得覆盖更具体的 subText（#1407）",
+      code.contains("if (degradedNotice != null && !hasSpecificSubText(face, entry.count)) b.setSubText(degradedNotice)"),
+    )
     assertTrue("只在交互类且渠道不可用时才说", code.contains("channelId == null && face.interactive"))
   }
 
@@ -169,7 +180,7 @@ class NotifyStructureBatch8Test {
   fun approvalTitleNamesTheConcreteSubject() {
     val code = centerCode()
     assertTrue("标题必须用工具名（具体对象）", code.contains("「\" + it + \"」需要授权"))
-    assertTrue("没有工具名时才回落类别词", code.contains("entry.displayTitle().ifBlank { UserCopy.notifyCategory(Face.APPROVAL.category) }"))
+    assertTrue("没有工具名时才回落类别词（i18n 后回落词也要跟随语言，故带 app）", code.contains("entry.displayTitle(app).ifBlank { UserCopy.notifyCategory(Face.APPROVAL.category, app) }"))
   }
 
   // ── S3-9 本机提交 vs 别处已答/引擎撤销 ─────────────────────────────────
@@ -262,5 +273,83 @@ class NotifyStructureBatch8Test {
     assertEquals("审批决定", "allowed-once", summary("{\"outcome\":\"allowed-once\"}"))
     assertEquals("取不到就给空串（不编造）", "", summary("{}"))
     assertEquals("非法 JSON 不抛异常", "", summary("not json"))
+  }
+
+  /**
+   * N5（0.14.11）：失败通知里的「你所提交的内容」曾经是**原始 JSON**。
+   *
+   * 现场形状来自 NotifyActionReceiver.outcomeFor（线上唯一构造点），不是想象出来的：
+   *   审批 -> {"kind":"result","value":"allowed-once"}
+   *   选答 -> {"kind":"result","value":{"answers":[{"id":"q1","selected":["方案A"]}]}}
+   *   回复 -> {"kind":"result","value":{"answers":[{"id":"q1","selected":[],"custom":"我选第二个方案"}]}}
+   * 旧实现只取 optString("value")，对象形态会拿到它的 JSON 文本 ⇒ 用户看到一串花括号。
+   */
+  @Test
+  fun answerSummaryRendersTheRealOutcomeShapes() {
+    fun summary(json: String) = NotifyDecisionQueue.answerSummary(
+      NotifyDecisionQueue.Decision("r1", "e1", "question", json, 0L),
+    )
+
+    assertEquals("审批通过", "allowed-once", summary("{\"kind\":\"result\",\"value\":\"allowed-once\"}"))
+    assertEquals("审批拒绝", "rejected", summary("{\"kind\":\"result\",\"value\":\"rejected\"}"))
+    assertEquals(
+      "单选选项",
+      "方案A",
+      summary("{\"kind\":\"result\",\"value\":{\"answers\":[{\"id\":\"q1\",\"selected\":[\"方案A\"]}]}}"),
+    )
+    assertEquals(
+      "自由文本回复",
+      "我选第二个方案",
+      summary("{\"kind\":\"result\",\"value\":{\"answers\":[{\"id\":\"q1\",\"selected\":[],\"custom\":\"我选第二个方案\"}]}}"),
+    )
+    assertEquals(
+      "多问合成一行",
+      "甲；乙",
+      summary(
+        "{\"kind\":\"result\",\"value\":{\"answers\":[" +
+          "{\"id\":\"q1\",\"selected\":[],\"custom\":\"甲\"}," +
+          "{\"id\":\"q2\",\"selected\":[],\"custom\":\"乙\"}]}}",
+      ),
+    )
+    val rendered = summary("{\"kind\":\"result\",\"value\":{\"answers\":[{\"id\":\"q1\",\"selected\":[\"方案A\"]}]}}")
+    assertFalse("不得把原始 JSON 甩到用户脸上", rendered.contains("{") || rendered.contains("answers"))
+    assertEquals("空对象不编造", "", summary("{}"))
+  }
+
+  /**
+   * N2（0.14.11）：plan-review 的计划正文放在 `detail`，旧实现只拼 question，
+   * 于是通知栏里只有「Approve this plan and leave plan mode?」+ 按钮 —— 用户盲批。
+   */
+  @Test
+  fun questionBodyCarriesThePlanDetail() {
+    val review = NotifyQuestion("plan-review", "Plan review", "Approve this plan and leave plan mode?", listOf("Approve", "Keep planning"))
+    val plan = "# 迁移到新队列\n- 先落盘再投递\n- 退避封顶 60s"
+    val withDetail = review.copy(detail = plan)
+    val entry = NotifyEntry(kind = "question", eventId = "e1", questions = listOf(withDetail))
+    val body = NotifyCenter.questionBigText(entry)
+    assertTrue("必须带上正文（否则用户看不到计划就要批）", body.contains("迁移到新队列"))
+    assertTrue("问题本身仍在", body.contains("Approve this plan"))
+
+    val noDetail = NotifyCenter.questionBigText(NotifyEntry(kind = "question", eventId = "e2", questions = listOf(review)))
+    assertFalse("没有正文时不得凭空造", noDetail.contains("迁移到新队列"))
+
+    val long = "# 长计划\n" + "x".repeat(NotifyCenter.DETAIL_LIMIT + 200)
+    val clipped = NotifyCenter.questionBigText(
+      NotifyEntry(kind = "question", eventId = "e3", questions = listOf(review.copy(detail = long))),
+    )
+    assertTrue("超长必须截断且截断可见", clipped.endsWith("…"))
+    assertTrue("截断后长度受控", clipped.length < NotifyCenter.DETAIL_LIMIT + 200)
+
+    val withPath = NotifyCenter.questionBigText(
+      NotifyEntry(
+        kind = "question", eventId = "e4",
+        questions = listOf(review.copy(detail = "计划：读取 /data/data/com.dsharnessmobile.shell/files/x 后继续")),
+      ),
+    )
+    assertTrue("正文同样要脱敏（绝对路径）", withPath.contains("[路径]"))
+    assertFalse("不得原样带出绝对路径", withPath.contains("/data/data/"))
+
+    val bridge = codeOnly(source("src/main/java/com/dsharnessmobile/shell/NotifyBridge.kt"))
+    assertTrue("解析侧必须读 detail 字段", bridge.contains("q.optString(\"detail\""))
   }
 }

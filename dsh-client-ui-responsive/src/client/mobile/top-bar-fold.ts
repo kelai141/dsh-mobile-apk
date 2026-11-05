@@ -23,7 +23,7 @@ import { HeaderPopups } from './header-popups.ts'
 
 /** 上游标题栏插件 UI 的座位（稳定属性，非 hashed 类名）。 */
 const ACTIONS_SELECTOR = 'div[data-slot="conversation.session.header.actions"]'
-/** 上游视图标签条：折叠箭头挂在这里（ConversationSession.tsx:143 的稳定锚点）。 */
+/** 上游视图标签条（ConversationSession.tsx:143 的稳定锚点）。箭头挂在它的**父行**末位。 */
 const TABS_SELECTOR = '[data-conversation-tabs]'
 /** 承载标题行 containment 的那一行（上游 .titleRow 带 container-type: inline-size）。 */
 const TITLE_ROW_FALLBACK = 'div[data-slot="conversation.session.header"] > div'
@@ -85,10 +85,18 @@ export class TopBarFold {
   private container: HTMLElement | null = null
   private titleRow: HTMLElement | null = null
   private arrow: HTMLButtonElement | null = null
-  private arrowHost: HTMLElement | null = null
+  /** 箭头当前的宿主：视图标签条所在的那一行（父行，不是标签条本身）。 */
+  private arrowRow: HTMLElement | null = null
   /** 容器上被我们覆盖掉的内联样式原值，解除时逐项写回。 */
   private readonly styleSnapshot = new Map<string, string>()
   private scheduled = false
+  /**
+   * 已排队的 rAF id（issue #1411）。旧实现只存布尔、不存 id：同一帧内 detach 之后，已排队的
+   * 回调仍会执行 sync()，而观察者与监听器都已断开，没人再 restore()——箭头与折叠属性永久留在节点上。
+   */
+  private frameId: number | null = null
+  /** attach/detach 状态：detach 之后 sync() 不得再动 DOM（双保险，见 schedule 的取消）。 */
+  private attached = false
   /** 上一次真正写进 DOM 的呈现状态（折叠开关 + 容器 + 标题行 + 箭头），见 syncState()。 */
   private written: readonly [boolean, HTMLElement | null, HTMLElement | null, HTMLButtonElement | null] | null = null
 
@@ -109,6 +117,7 @@ export class TopBarFold {
 
   /** 开始观察标题栏；非手机竖屏时什么都不做。 */
   attach(): void {
+    this.attached = true
     this.headerPopups.attach()
     this.media = typeof window.matchMedia === 'function' ? window.matchMedia(MOBILE_QUERY) : null
     this.observer = new MutationObserver(() => { this.schedule() })
@@ -129,6 +138,13 @@ export class TopBarFold {
 
   /** 解除折叠并清理监听（HMR 安全：不留 document 监听，不改动 React 节点）。 */
   detach(): void {
+    // issue #1411：先取消已排队的那一帧并复位，再拆监听——否则回调会在拆卸之后跑 sync()。
+    this.attached = false
+    if (this.frameId !== null) {
+      cancelAnimationFrame(this.frameId)
+      this.frameId = null
+    }
+    this.scheduled = false
     this.headerPopups.detach()
     this.observer?.disconnect()
     this.observer = null
@@ -148,7 +164,8 @@ export class TopBarFold {
   private schedule(): void {
     if (this.scheduled) return
     this.scheduled = true
-    requestAnimationFrame(() => {
+    this.frameId = requestAnimationFrame(() => {
+      this.frameId = null
       this.scheduled = false
       this.sync()
     })
@@ -156,6 +173,7 @@ export class TopBarFold {
 
   /** 形态门 + 单次同步。 */
   private sync(): void {
+    if (!this.attached) return
     if (!this.isMobileForm()) {
       this.restore()
       return
@@ -229,11 +247,26 @@ export class TopBarFold {
     this.styleSnapshot.set('--dsh-topbar-fold-max-height', element.style.getPropertyValue('--dsh-topbar-fold-max-height'))
   }
 
-  /** 确保折叠箭头挂在视图标签条最右（标签条不在场则不动）。 */
+  /**
+   * 确保折叠箭头是**标签行**（视图标签条所在的父行）的最后一个孩子。
+   *
+   * 宿主是 `tabs.parentElement`（真机实测 = 上游 `div.wSkVaW_tabs`），不是标签条本身：
+   * 需求是「整行最右、与『对话 / 轨迹』同一行」，而行内剩余空间只在父行里 —— 标签条自己是
+   * `flex: 0 1 auto`、宽度=内容宽，箭头留在它内部无论加不加 auto 都推不动（实测 x 恒为 144）。
+   *
+   * 「末位」每次同步都要重新确认，不能只在首次挂载时确认一次：父行里还有上游「…」菜单
+   * （`span.wSkVaW_viewsMoreAnchor + button[aria-haspopup=menu]`）等兄弟节点，它们可能
+   * 晚一步挂载或重挂，一旦排到箭头后面，箭头就不再是最右了。
+   */
   private ensureArrow(): void {
-    const host = document.querySelector<HTMLElement>(TABS_SELECTOR)
-    if (host === null) return
-    if (this.arrow !== null && this.arrowHost === host && host.contains(this.arrow)) return
+    const row = this.resolveArrowRow()
+    if (row === null) return
+    if (this.arrow !== null && this.arrowRow === row && row.lastElementChild === this.arrow) return
+    // 行对但位置不是末位：原地重挂即可，不必重建按钮（保焦点/保已绑监听）。
+    if (this.arrow !== null && this.arrowRow === row) {
+      row.appendChild(this.arrow)
+      return
+    }
     this.removeArrow()
     const arrow = document.createElement('button')
     arrow.type = 'button'
@@ -242,9 +275,26 @@ export class TopBarFold {
     arrow.setAttribute('aria-label', this.foldLabel())
     arrow.appendChild(chevron())
     arrow.addEventListener('click', this.onArrowClick)
-    host.appendChild(arrow)
+    row.appendChild(arrow)
     this.arrow = arrow
-    this.arrowHost = host
+    this.arrowRow = row
+  }
+
+  /**
+   * 箭头的宿主 = 视图标签条所在的那一行（`tabs.parentElement`，上游 `div.wSkVaW_tabs`）。
+   *
+   * 真机实测（emulator-5558 竖屏 600x1067，dsh 0.2.1-rc.2，真实非空会话）：
+   *   div.wSkVaW_tabs   display:flex; flex-wrap:wrap; align-items:flex-start;
+   *                     gap:16px 20px; padding-left:8px; rect x=20 right=572
+   *     ├ div.wSkVaW_viewTabs[data-conversation-tabs]  width=140.02; flex:0 1 auto
+   *     └ span.wSkVaW_viewsMoreAnchor + button[aria-haspopup=menu]
+   *
+   * 父节点就是行容器（不是 display:contents 的插槽）：标签条自己是 `flex: 0 1 auto`、
+   * 宽度=内容宽，行内剩余空间只存在于父行里，所以箭头必须挂父行才推得到最右。
+   */
+  private resolveArrowRow(): HTMLElement | null {
+    const tabs = document.querySelector<HTMLElement>(TABS_SELECTOR)
+    return tabs?.parentElement ?? null
   }
 
   private readonly onArrowClick = (event: MouseEvent): void => {
@@ -264,7 +314,7 @@ export class TopBarFold {
     if (this.arrow !== null) this.arrow.removeEventListener('click', this.onArrowClick)
     this.arrow?.remove()
     this.arrow = null
-    this.arrowHost = null
+    this.arrowRow = null
     // 箭头没了：缓存里的「已写状态」作废，下一次 syncState() 必须重写。
     this.written = null
   }

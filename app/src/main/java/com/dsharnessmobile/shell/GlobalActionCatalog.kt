@@ -30,8 +30,10 @@ object GlobalActionCatalog {
     Entry("toggleSplitScreen", AccessibilityService.GLOBAL_ACTION_TOGGLE_SPLIT_SCREEN, 24),
     Entry("lockScreen", AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN, 28),
     Entry("takeScreenshot", AccessibilityService.GLOBAL_ACTION_TAKE_SCREENSHOT, 28),
-    Entry("menu", AccessibilityService.GLOBAL_ACTION_MENU, 31),
-    Entry("mediaPlayPause", AccessibilityService.GLOBAL_ACTION_MEDIA_PLAY_PAUSE, 31),
+    // #681：menu 与 mediaPlayPause 是 API 36（Android 16）新增常量，此前误标 31——
+    // API 31-35 的设备会宣传并尝试 performGlobalAction，平台恒返回 false（点了没反应）。
+    Entry("menu", AccessibilityService.GLOBAL_ACTION_MENU, 36),
+    Entry("mediaPlayPause", AccessibilityService.GLOBAL_ACTION_MEDIA_PLAY_PAUSE, 36),
     Entry("dismissNotificationShade", AccessibilityService.GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE, 31),
     Entry("accessibilityShortcut", AccessibilityService.GLOBAL_ACTION_ACCESSIBILITY_SHORTCUT, 31),
   )

@@ -75,12 +75,50 @@ if (!ps1Rel) { check('本地链脚本在场: scripts/build-apk-013.ps1', false) 
   const denyCalls = lines.filter((l) => /Deny-Abi \$abi/.test(l))
   check('per-ABI 拒绝路径存在（断言有对象）', denyCalls.length > 0, '找到 ' + denyCalls.length + ' 处')
 
-  // ── C. elf-check 退出码 ────────────────────────────────────────────────────
-  const elfPiped = lines.filter((l) => /elf-check\.mjs/.test(l) && /\|\s*Select-Object/.test(l))
-  check('elf-check 不得管道直连 Select-Object（会吞退出码语义）', elfPiped.length === 0,
-    elfPiped.map((l) => l.trim()).join(' | '))
+  // ── C. 门禁脚本不得管道直连 Select-Object ──────────────────────────────────
+  //
+  // issue #1075：判据 C 此前**按脚本名**写死成 /elf-check\.mjs/，于是同文件里另外两处
+  // 同形状的写法（check-patch-mounts @ :388、check-third-party @ :439）溜了过去。
+  // 其中 check-third-party 正是 GPL 许可合规门禁：失败时打印「THIRD-PARTY CHECK FAILED」
+  // 加 N 行明细，N >= 4 就超过 Select-Object -First 4 的对象数 =>
+  //   上游 node 被提前终止 => $LASTEXITCODE 变成 $null => `-ne 0` 为 True 但那是空值比较，
+  //   实测语义上 Deny-Abi 不会按预期触发，该 ABI 被计为「已产出」，链打印「=== 完成 ===」并 exit 0。
+  //
+  // 改成**任何** check-*.mjs 直连 Select-Object 都判红：这个坑与具体是哪道门禁无关，
+  // 只与「用管道截断输出」这个动作有关。要截断就先把退出码捕获到变量再截（见 elf-check 的写法）。
+  const gatePiped = lines.filter((l) => /check-[a-z0-9-]+\.mjs/.test(l) && /\|\s*Select-Object/.test(l))
+  check('check-*.mjs 门禁不得管道直连 Select-Object（会吞退出码语义）', gatePiped.length === 0,
+    gatePiped.map((l) => l.trim()).join(' | '))
   check('elf-check 退出码被捕获并判定（$elfCode + Deny-Abi）',
     /\$elfCode\s*=\s*\$LASTEXITCODE/.test(ps1Text) && /\$elfCode -ne 0[^\n]*Deny-Abi/.test(ps1Text))
+
+  // ── C2. 预清理只针对本次产出的 ABI（issue #1078）─────────────────────────────
+  //
+  // 旧写法 `Get-ChildItem $Out -Filter '*.apk' -Recurse | Remove-Item` 在 ABI 循环之前无条件跑，
+  // 于是跑过一次完整构建后再用 -OnlyAbi / -Fast 跑单 ABI 会把另一个 ABI 已验签的产物也删掉，
+  // 本次只产 1 个 ABI、两条尾部守卫都过、exit 0，而发布目录只剩 1/2 ABI。
+  // 判据：预清理必须按「本次产出 ABI」过滤，不得对 $Out 无条件递归删。
+  const unconditionalWipe = lines.filter((l) => /Get-ChildItem\s+\$Out/.test(l)
+    && /Remove-Item/.test(l) && !/\$abisThisRun/.test(l) && !/^\s*#/.test(l))
+  check('预清理不得无条件删除 $Out 下所有 APK（#1078：会删掉另一个 ABI 的产物）',
+    unconditionalWipe.length === 0, unconditionalWipe.map((l) => l.trim()).join(' | '))
+  check('预清理按本次产出 ABI 过滤（$abisThisRun）',
+    /\$abisThisRun\s*=/.test(ps1Text) && /\$abisThisRun/.test(ps1Text))
+
+  // ── C3. 发布快照资产先校验后落盘（issue #1080）───────────────────────────────
+  //
+  // 旧顺序：Copy-Item 拷进 out/ -> 再 check-snapshot-asset；缺 APK 只打警告并跳过校验。
+  // 于是上一次运行的旧 tar 可以带着 .sha256 躺进发布目录，而一致性校验从未发生。
+  // 判据：`Copy-Item $snapIn $outSnap` 必须出现在 check-snapshot-asset 调用**之后**；
+  //       且「缺 APK」分支必须是 Deny-Abi，不得是「警告 + 跳过」。
+  const copyIdx = lines.findIndex((l) => /Copy-Item\s+\$snapIn\s+\$outSnap/.test(l))
+  const verifyIdx = lines.findIndex((l) => /check-snapshot-asset\.ps1/.test(l))
+  check('发布快照资产必须先校验再拷入（#1080：Copy-Item 必须在 check-snapshot-asset 之后）',
+    copyIdx === -1 || verifyIdx === -1 || verifyIdx < copyIdx,
+    copyIdx === -1 ? '未找到 Copy-Item $snapIn $outSnap' : ('verify L' + (verifyIdx + 1) + ' vs copy L' + (copyIdx + 1)))
+  const warnSkip = lines.filter((l) => !/^\s*#/.test(l) && /缺 APK/.test(l) && /警告|跳过/.test(l))
+  check('缺 APK 时不得只警告并跳过一致性校验（#1080：必须 Deny-Abi）',
+    warnSkip.length === 0, warnSkip.map((l) => l.trim()).join(' | '))
 
   // ── 尾部守卫 ──────────────────────────────────────────────────────────────
   check('含「已产出 / 被拒 ABI」汇总行', /汇总。已产出 ABI/.test(ps1Text))
@@ -96,6 +134,55 @@ if (!mjsRel) { check('云端链脚本在场: dsh-mobile-apk/scripts/build-apk.mj
   const silent = text.split('\n').filter((l) => /拒绝打包|拒绝发布/.test(l) && /continue/.test(l) && !/throw|process\.exit/.test(l))
   check('云端链无「打印后 continue」式静默跳过', silent.length === 0, '可疑行: ' + silent.length)
   check('云端链失败路径抛错/非 0 退出', /throw new Error|process\.exit\(1\)/.test(text))
+}
+
+// ── D2. 快照包名一致性门禁（ci-verify-snapshot.py）必须真接线 ────────────────
+// 背景（2026-10-27，issue #154 / apk #480 第 1 条）：该门禁自存在起从未被任何链调用，只能在 CI
+// 工作流里手动跑——与 :56 记的 check-dead-tokens「只登记未接线」是同型缺陷。接线之后必须有人守，
+// 否则下一个人删掉那行调用不会有任何东西报警，直接退回原始状态。
+//
+// 判据取「调用点 + 快照变量」两个要素，且只认**真实调用形态**（不认注释、不认声明数组字符串）：
+//   - 调用点：没出现 = 线被拆了；
+//   - 快照变量：调用必须把「本次构建的快照路径」作为实参传进去（ps1 的 $snapIn / mjs 的 snapIn）。
+//     否则有人传常量或空串也能「通过」，门禁等于没验本次产物。
+// 两个仓同一份脚本，故 ps1 侧判据在协调仓（本仓）与 apk 仓都适用；mjs 侧按 resolveRepoPath 解析。
+{
+  // 注意：不要用跨行块注释正则去「净���」整个文件——本仓 build-apk.mjs 第 25 行有 /** ... */,
+  // 贪婪跨行匹配会把中间整段（含真实调用行）一起吞掉，断言会假红。改成只剔除以 // 开头的整行注释。
+  const dropLineComments = (text) => text.split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n')
+  // ps1：python (Join-Path $Root "scripts\ci-verify-snapshot.py") $snapIn $abi @pluginDirs
+  // 反引号/引号内是脚本名，实参紧随其后；要求同一行里既有脚本名又有 $snapIn。
+  const ps1Call = ps1Text
+    .split('\n')
+    .filter((l) => !/^\s*#/.test(l))
+    .filter((l) => /ci-verify-snapshot\.py/.test(l))
+  const ps1Wired = ps1Call.filter((l) => /\$snapIn\b/.test(l))
+  check('本地链真调用快照包名门禁（ci-verify-snapshot.py + $snapIn 实参）',
+    ps1Wired.length === 1,
+    ps1Call.length === 0 ? '未找到调用行（门禁未接线或调用被删）'
+      : (ps1Wired.length === 0 ? '调用行未传 $snapIn（验的不是本次快照）: ' + ps1Call[0].trim()
+        : '调用点应恰好 1 处，实得 ' + ps1Wired.length + ' 处'))
+  // 云端链文件在三类布局下的位置不同：apk 仓根（云端）/ 协调仓根 + 嵌套 dsh-mobile-apk / 只有本仓。
+  // resolveRepoPath 已按这两条候选解析；解析不到就说明两侧都没这个文件（不是「未接线」，要分开报）。
+  const mjsRelCands = ['dsh-mobile-apk/scripts/build-apk.mjs', 'scripts/build-apk.mjs']
+  const mjsRelResolved = mjsRelCands.find((c) => existsSync(join(ROOT, c))) ?? null
+  if (!mjsRelResolved) {
+    check('云端链脚本在场（dsh-mobile-apk/scripts/build-apk.mjs 或 scripts/build-apk.mjs）', false)
+  } else {
+    const mjsText = dropLineComments(readFileSync(join(ROOT, mjsRelResolved), 'utf8'))
+    const mjsCall = mjsText
+      .split('\n')
+      .filter((l) => !/^\s*\/\//.test(l))
+      .filter((l) => /ci-verify-snapshot\.py/.test(l))
+      // 真实执行形态：run(PYTHON, [gate('ci-verify-snapshot.py'), snapIn, ABI, ...pluginDirs])
+      .filter((l) => /\brun\s*\(/.test(l))
+    const mjsWired = mjsCall.filter((l) => /\bsnapIn\b/.test(l) && /\bABI\b/.test(l))
+    check('云端链真调用快照包名门禁（run(ci-verify-snapshot.py, snapIn, ABI, ...)）',
+      mjsWired.length === 1,
+      mjsCall.length === 0 ? '未找到 run(...) 调用行（门禁未接线或调用被删）'
+        : (mjsWired.length === 0 ? '调用行未同时传 snapIn 与 ABI: ' + mjsCall[0].trim()
+          : '调用点应恰好 1 处，实得 ' + mjsWired.length + ' 处'))
+  }
 }
 
 // ── E. 动态自检 ──────────────────────────────────────────────────────────────

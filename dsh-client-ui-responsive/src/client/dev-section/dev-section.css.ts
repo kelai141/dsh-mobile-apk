@@ -12,6 +12,118 @@ export const DEV_SECTION_CSS: string = `
   padding: 4px 0 12px;
 }
 
+/* 上游行骨架（2026-10-24）：通知 / 手机控制 / 开发者选项三个分区与「通用设置」同规——
+   左标题 14/20 + 说明 12/18 + 右侧控件，上下 16px、行间 0.5px 分隔线，控件一律取上游
+   ui-primitives（Switch / Button）。此前这三页是自绘的 36px 描边按钮 + 16px 原生勾选框，
+   与同页上游行并排就是用户反馈的「有些 UI 很突兀」。 */
+[data-plugin='dev-section'],
+[data-plugin='dev-notify-settings'],
+[data-plugin='dev-phone-control'],
+[data-plugin='dev-apk-update'] {
+  display: flex;
+  flex-direction: column;
+}
+
+[data-plugin='dev-section'] .dsh-gs-row,
+[data-plugin='dev-notify-settings'] .dsh-gs-row,
+[data-plugin='dev-phone-control'] .dsh-gs-row,
+[data-plugin='dev-apk-update'] .dsh-gs-row {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  /* 与通用设置同一行规：padding 16 0 / gap 24 / 0.5px 分隔线。
+     此前这里是 8px，同一套 .dsh-gs-row 在两处密度不同（通用设置更松、这三页更挤），
+     与「对齐上游」的目标相反；tests/row-skeleton-parity.spec.ts 盯着这条不再漂。 */
+  padding: 16px 0;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
+}
+
+/* 动作按钮多的行（运行时 / 配置文件）：文字整行在上、按钮组在下。
+   横排时右侧四个按钮会把左侧说明挤成一条窄柱（真机 360dp 实测），
+   与上游 AppearanceRow「标题在上、控件在下」同规。 */
+.dsh-gs-row.dsh-gs-stacked {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+}
+.dsh-gs-stacked > .dsh-gs-control {
+  justify-content: flex-start;
+}
+
+/* 行内文字列与控件的样式自带一份，不依赖「通用设置」那张表。
+   为什么必须自带：这三页的行用的是通用设置的 .dsh-gs-* 类，而那张表属于
+   general-settings.css.ts——在只有本包、没有该表的构建里（例如 0.14.9 基线），
+   .dsh-gs-title / .dsh-gs-desc 会完全没有样式，标题与灰色说明会长得一模一样。
+   作用域限死在本页三个根下，不会污染其它分区。 */
+/* 卡片内的行：最后一行不画分隔线（框已经收边，多一条线只是噪音）。 */
+[data-plugin='dev-apk-update'] .dsh-gs-row:last-child {
+  border-bottom: 0;
+}
+
+[data-plugin='dev-section'] .dsh-gs-text,
+[data-plugin='dev-notify-settings'] .dsh-gs-text,
+[data-plugin='dev-phone-control'] .dsh-gs-text,
+[data-plugin='dev-apk-update'] .dsh-gs-text {
+  min-width: 0;
+}
+
+[data-plugin='dev-section'] .dsh-gs-title,
+[data-plugin='dev-notify-settings'] .dsh-gs-title,
+[data-plugin='dev-phone-control'] .dsh-gs-title,
+[data-plugin='dev-apk-update'] .dsh-gs-title {
+  color: var(--dsw-alias-label-primary);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+[data-plugin='dev-section'] .dsh-gs-desc,
+[data-plugin='dev-notify-settings'] .dsh-gs-desc,
+[data-plugin='dev-phone-control'] .dsh-gs-desc,
+[data-plugin='dev-apk-update'] .dsh-gs-desc {
+  margin-top: 4px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  /* 长路径（Documents/dshdata/...）没有空格，不设断行点会顶穿文字列、压到按钮上。 */
+  overflow-wrap: anywhere;
+}
+
+[data-plugin='dev-section'] .dsh-gs-control,
+[data-plugin='dev-notify-settings'] .dsh-gs-control,
+[data-plugin='dev-phone-control'] .dsh-gs-control,
+[data-plugin='dev-apk-update'] .dsh-gs-control {
+  display: flex;
+  flex: none;
+  align-items: center;
+}
+
+/* 一行放多个动作按钮（通知页的三个按钮）：按内容取宽、禁止换行。
+   之前写成三等分 + 允许换行，中文标签被挤成「系统通知设 / 置」两行，
+   还会顶到上一行的开关上。 */
+.dsh-dev-actions {
+  flex-wrap: nowrap;
+  gap: 8px;
+}
+.dsh-dev-actions > button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* 破坏性动作：沿用上游 Button 的形状，只把文字/描边染成错误语义色。 */
+.dsh-gs-control .dsh-danger,
+.dsh-dev-modal-actions .dsh-danger {
+  color: var(--dsw-alias-state-error-primary);
+  border-color: var(--dsw-alias-state-error-primary);
+}
+
+/* 行内按钮组：多个动作同排时留 8px 间距，不换行。 */
+.dsh-gs-control.dsh-gs-actions {
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+
 .dsh-dev-note {
   margin: 0;
   font-size: 13px;
@@ -57,21 +169,32 @@ export const DEV_SECTION_CSS: string = `
   cursor: pointer;
 }
 
+/* 原生按钮对齐上游 Button(.sm/.outline)：28px 高、12/18 字号、0.5px 描边、透明底。
+   没有逐个换成 <Button> 的，是手机控制页里带 data-* / 三连点确认的那些按钮——
+   行为不变，只把外观拉到与上游同一条线上。 */
 .dsh-dev-btn {
-  min-height: 36px;
-  padding: 6px 14px;
-  border: 1px solid var(--dsw-alias-border-l3);
-  border-radius: 8px;
-  background: var(--dsw-alias-button-elevated-fill);
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  padding: 0 10px;
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
   color: var(--dsw-alias-label-primary);
-  font-size: 13px;
-  line-height: 20px;
+  font-size: 12px;
+  line-height: 18px;
   cursor: pointer;
 }
 
+.dsh-dev-btn:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
 .dsh-dev-btn:disabled {
-  opacity: 0.6;
-  cursor: default;
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .dsh-dev-danger {
@@ -120,6 +243,10 @@ export const DEV_SECTION_CSS: string = `
   justify-content: flex-end;
 }
 
+/* 原生勾选行（标签 + 16px checkbox）。
+ * 本包自己的三页已全部换成上游 Switch，但**旧版通用设置**（0.14.9 的 GeneralSettings，
+ * 沉浸式状态栏那一行）仍用 dsh-dev-row + dsh-dev-switch 两个类；那条路径的样式就来自本表。
+ * 在它被下一个 APK 换代之前，这两条规则不能删——删了那一行的勾选框会失去尺寸与间距。 */
 .dsh-dev-switch {
   font-size: 14px;
   color: var(--dsw-alias-label-primary);
@@ -135,9 +262,13 @@ export const DEV_SECTION_CSS: string = `
 }
 
 .dsh-screen-scope-row {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
   justify-content: space-between;
-  padding: 10px 0;
-  border-top: 1px solid var(--dsw-alias-border-l2);
+  gap: 24px;
+  padding: 16px 0;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
 }
 .dsh-screen-scope-row > span {
   display: grid;
@@ -145,6 +276,10 @@ export const DEV_SECTION_CSS: string = `
   min-width: 0;
   color: var(--dsw-alias-label-primary);
   font-size: 14px;
+  line-height: 20px;
+}
+.dsh-screen-scope-row > span strong {
+  font-weight: 400;
 }
 .dsh-screen-scope-row small {
   color: var(--dsw-alias-label-secondary);
@@ -152,14 +287,15 @@ export const DEV_SECTION_CSS: string = `
   line-height: 18px;
 }
 .dsh-screen-scope-row select {
-  min-height: 34px;
+  min-height: 32px;
   max-width: min(100%, 190px);
-  padding: 0 28px 0 10px;
-  border: 1px solid var(--dsw-alias-border-l4);
-  border-radius: 8px;
-  background: var(--dsw-alias-bg-layer-2);
+  padding: 0 26px 0 10px;
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-md);
+  background: transparent;
   color: var(--dsw-alias-label-primary);
   font: inherit;
+  font-size: 13px;
 }
 
 .dsh-screen-control-card {
@@ -227,9 +363,6 @@ export const DEV_SECTION_CSS: string = `
 .dsh-root-step + .dsh-root-step { padding-top: 12px; border-top: 1px solid var(--dsw-alias-border-l2); }
 .dsh-root-access-card .dsh-dev-btn { min-height: 44px; width: 100%; }
 .dsh-root-access-card .dsh-dev-link { min-height: 44px; justify-self: start; text-align: left; }
-.dsh-root-toggle-row { display: flex; align-items: center; gap: 14px; min-height: 44px; }
-.dsh-root-toggle-row > span { flex: 1 1 auto; }
-.dsh-root-toggle-row > input { flex: 0 0 auto; width: 24px; height: 24px; margin: 0; accent-color: #4d6bfe; }
 .dsh-root-maintenance { padding-top: 8px; border-top: 1px solid var(--dsw-alias-border-l2); }
 .dsh-root-maintenance summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; color: var(--dsw-alias-label-primary); }
 .dsh-root-maintenance[open] { display: grid; gap: 8px; }
@@ -341,22 +474,6 @@ export const DEV_SECTION_CSS: string = `
   border: 1px solid var(--dsw-alias-border-l3);
   border-radius: 12px;
   background: var(--dsw-alias-bg-layer-2);
-}
-
-.dsh-dev-notify-cats {
-  display: grid;
-  gap: 4px;
-}
-
-/* 每个分类开关 + 它的「关掉会怎样」说明（批 4 / P0-5：纯标签开关会让用户按旧语义做决定）。 */
-.dsh-dev-notify-cat {
-  display: grid;
-  gap: 2px;
-  padding: 4px 0;
-}
-
-.dsh-dev-notify-cat .dsh-dev-hint {
-  margin: 0 0 0 2px;
 }
 
 /* #43 深色兜底（2026-08-18 首修 / 2026-09-25 二次修）。

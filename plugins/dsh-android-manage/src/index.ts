@@ -21,12 +21,17 @@
  * 执行通道说明：本版经 ctx.androidPrivilege 状态机与审计面落地（桥执行实现随壳侧 adbShell 原语
  * 就绪后接通）；未授权时全部工具返回引导——与 PRD "未授权时全部失败关闭" 语义一致。
  */
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { type JsonValue } from '@deepseek-ai/dsh-util-values'
 import { join } from 'node:path'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
-import { parseUiTreeXml, pruneNodes, resolveRef, findActionableAncestor, checkUiTreeParse, type UiNode, actionableAncestorV2, scopePoolV2 } from './ui-tree.js'
+import { coordBasisNote, basisFields, COMPAT_NOTE } from './coord-basis.js'
+import { screenArgs, screenOut, coordinateMode } from './screen-fields.js'
+import { nodeListLines } from './node-list.js'
+import { semanticFail } from './semantic-fail.js'
+import { parseUiTreeXml, pruneNodes, resolveRef, findActionableAncestor, checkUiTreeParse, type UiNode, actionableAncestorV2, scopePoolV2, treeFingerprint } from './ui-tree.js'
 import { cacheFromV2, decodeV2, isV2Payload, type V2Decoded } from './protocol-v2.js'
 import { detailRecord, pageRows, writeDetailStore } from './detail-store.js'
 import { resolveVirtualDisplayToken, vdTokenMissingText } from './vd-shot.js'
@@ -35,11 +40,15 @@ import {
   KB_ACTION_CLEAR,
   KB_ACTION_INPUT,
   KB_RESULT,
-  adbKeyboardAuth,
-  adbKeyboardBroadcast,
+  adbKeyboardAuthState,
+  adbKeyboardBroadcast, normalizeImeId, userImeHistory,
   isCommitAccepted,
+  hasAuthoritativeCommit,
   parseBroadcastResult,
+  shellQuote,
+  resolveImeRestoreTarget,
 } from './ime-broadcast.js'
+import { imeBorrowLock, ImeBorrowTimeout } from './ime-borrow.js'
 
 /**
  * 0.13.8 #183 / #413：键盘广播的 nonce 与命令构造已抽到 ./ime-broadcast.js
@@ -102,6 +111,34 @@ function pickText(v: Record<string, unknown>, ...keys: string[]): string {
     })
     .filter((s) => s.length > 0)
     .join('\n')
+}
+
+/**
+ * `screenId` 归一化（纯函数，导出以便**真执行**单测，而不是源码 grep）。
+ *
+ * `real` 与"未指定"是同一块物理屏：`SCREEN_PARAM` 文案把 `real|virtual-N` 都列为合法取值。
+ * 不折叠时 `screenIdOf({screenId:'real'}) === 'real'` 而动作调用（不带 screenId）是 `''` ⇒
+ * `usableUiCache` 判成两块屏 ⇒ dump 明明 3ms 前刚成功，第二次调用却回「没有可用的控件清单
+ * （缓存已失效）」⇒ 模型以为真过期、每次动作前全量重 dump（正是 TTL 注释要消除的循环）。
+ * 只折叠大小写与首尾空白，其它取值原样（壳侧按字符串比对 `virtual-N`）。
+ */
+export function normalizeScreenId(raw: unknown): string {
+  if (typeof raw !== 'string') return ''
+  const normalized = raw.trim().toLowerCase()
+  return normalized === 'real' ? '' : normalized
+}
+
+/**
+ * 「界面未变」回包里那句续作提示的引用片段（纯函数，导出以便真执行单测）。
+ *
+ * 回包说「引用仍有效，直接继续」而判据要求 `screenId` 与清单一致 —— 不带 screenId 必然被拒，
+ * 同一条回包里两句话自相矛盾，形成 dump→照做→被拒→dump 循环。虚拟屏（DSH 自己的 UI 就在
+ * virtual-1）是主路径，所以提示必须把目标屏写出来。
+ */
+export function continueRefHintOf(screenId: string): string {
+  return screenId === ''
+    ? 'android_ui_click/id:nN 等引用'
+    : `android_ui_click/id:nN 等引用（要带上 screenId:"${screenId}"）`
 }
 
 function tools(ctx: Context, priv: PrivilegeFace) {
@@ -198,10 +235,6 @@ function tools(ctx: Context, priv: PrivilegeFace) {
    * **投递到壳侧执行**。只做前者的后果（0.14.0 真机实锤）：门按 virtual-N 放行了，
    * 执行却仍落在真实屏——模型看到「参数生效了但画面没变」，比直接拒绝更难排查。
    */
-  const screenArgs = (args: unknown): Record<string, unknown> => {
-    const screenId = (args as { screenId?: unknown } | undefined)?.screenId
-    return typeof screenId === 'string' && screenId !== '' ? { screenId } : {}
-  }
 
   /**
    * 动作模式（SPEC §4.2）：壳侧对每个真实屏 op 回填 `actionMode`。
@@ -228,7 +261,6 @@ function tools(ctx: Context, priv: PrivilegeFace) {
   const SCOPE_PROP = { type: 'string' } as const
 
   /** 壳侧版本兼容标记：老壳侧不回显基准时文案里的这句即为唯一线索（wire 上有测试钉住）。 */
-  const COMPAT_NOTE = '（基准未回显：壳侧版本较旧）'
 
   /**
    * issue #258：**回显归一化基准**。
@@ -241,17 +273,6 @@ function tools(ctx: Context, priv: PrivilegeFace) {
    * 老壳侧（未修版本）不回显基准时，这里**如实标注**而不是假装知道：回显的全部意义就是自证，
    * 猜一个基准等于又制造一个看不见的错。
    */
-  const coordBasisNote = (data: unknown): string => {
-    const d = (data ?? {}) as { basis?: unknown; basisWidth?: unknown; basisHeight?: unknown }
-    if (typeof d.basis !== 'string' || d.basis === '') return COMPAT_NOTE
-    const w = typeof d.basisWidth === 'number' ? d.basisWidth : 0
-    const h = typeof d.basisHeight === 'number' ? d.basisHeight : 0
-    // window-current = 壳侧未拿到整屏尺寸（issue #258 的缺陷基准），必须显式告警。
-    const warn = d.basis === 'window-current'
-      ? '——本机未给出整屏尺寸，本次按**当前窗口**换算，多窗口下可能偏左'
-      : ''
-    return `（基准 ${d.basis} = ${w}x${h}${warn}）`
-  }
 
   /**
    * issue #258：把壳侧回显的基准字段并进工具返回值（schema 已声明 basis/basisWidth/basisHeight）。
@@ -259,15 +280,6 @@ function tools(ctx: Context, priv: PrivilegeFace) {
    * 只在壳侧真的回显时才带键——老壳侧不回显时**不编造** 0 值（那会让「没回显」看起来像
    * 「基准是 0x0」）；文案侧由 [coordBasisNote] 如实标注。
    */
-  const basisFields = (data: unknown): Record<string, unknown> => {
-    const d = (data ?? {}) as { basis?: unknown; basisWidth?: unknown; basisHeight?: unknown }
-    if (typeof d.basis !== 'string' || d.basis === '') return {}
-    return {
-      basis: d.basis,
-      ...(typeof d.basisWidth === 'number' ? { basisWidth: d.basisWidth } : {}),
-      ...(typeof d.basisHeight === 'number' ? { basisHeight: d.basisHeight } : {}),
-    }
-  }
 
   /** 归一化基准回显字段（issue #258；仅 android_ui_click 用，故就地声明不走共享常量）。 */
   const BASIS_PROP = { type: 'string' } as const
@@ -363,8 +375,16 @@ function tools(ctx: Context, priv: PrivilegeFace) {
   /** 截图工具的规范返回值（与 output.schema 一致；image 在场即内联回图）。 */
   type ShotValue = {
     imagePath: string
-    width: number
-    height: number
+    /**
+     * 设备物理分辨率（截图像素坐标换算锚点）。
+     *
+     * 壳侧**没回显**时**不带这两个键**——不编造 0（2026-10-28 自查，与 #745 同族）：
+     * 旧实现写 `data.width ?? 0`，于是同一个返回体里两套口径——文案如实说「设备物理分辨率 ?x?」，
+     * 而 `width`/`height` 谎报 `0`。模型的坐标换算锚点（schema 描述原文）拿到 0 只会算出错的值，
+     * 且无法区分「真的 0」与「壳侧没回显」。schema 里这两个字段本来就不是 required，缺席合法。
+     */
+    width?: number
+    height?: number
     denied: boolean
     text: string
     image?: { attachmentId: string; mediaType: string; bytes: number; width: number; height: number; name?: string }
@@ -376,13 +396,19 @@ function tools(ctx: Context, priv: PrivilegeFace) {
    * 图像输入时启用；否则回退到「返回路径」的旧行为（文件已落引擎可读目录，read_image 可用）。
    */
   async function inlineShot(
-    filePath: string, width: number, height: number, exec: ExecLike, channelNote: string,
+    filePath: string, width: number | undefined, height: number | undefined, exec: ExecLike, channelNote: string,
   ): Promise<ShotValue> {
+    // 只有两个都拿到有限数值时才带尺寸键；否则整对省略（见 ShotValue 注释）。
+    const sizeFields: { width?: number; height?: number } =
+      typeof width === 'number' && Number.isFinite(width) && typeof height === 'number' && Number.isFinite(height)
+        ? { width, height }
+        : {}
+    const sizeNote = sizeFields.width === undefined ? '?' : String(sizeFields.width)
+    const sizeNoteH = sizeFields.height === undefined ? '?' : String(sizeFields.height)
     const fallback = (why: string): ShotValue => ({
       imagePath: filePath,
       denied: false,
-      width,
-      height,
+      ...sizeFields,
       text: `截图已保存：${filePath}（${channelNote}${why}）`,
     })
     const attachments = ctx.get('attachments') as AttachmentFace | undefined
@@ -415,8 +441,9 @@ function tools(ctx: Context, priv: PrivilegeFace) {
       return {
         imagePath: filePath,
         denied: false,
-        width: ref.width || width,
-        height: ref.height || height,
+        ...sizeFields,
+        width: ref.width,
+        height: ref.height,
         image: {
           attachmentId: ref.attachmentId,
           mediaType: ref.mediaType,
@@ -425,7 +452,7 @@ function tools(ctx: Context, priv: PrivilegeFace) {
           height: ref.height,
           ...(ref.name === undefined ? {} : { name: ref.name }),
         },
-        text: `截图已内联返回（${channelNote}；设备物理分辨率 ${width}x${height}，${ref.bytes} 字节，临时文件已删除）。`
+        text: `截图已内联返回（${channelNote}；设备物理分辨率 ${sizeNote}x${sizeNoteH}，${ref.bytes} 字节，临时文件已删除）。`
           + '图像就在本结果里，无需再调用 read_image；像素坐标换算用归一化 nx/ny。',
       }
     } catch (e) {
@@ -455,7 +482,7 @@ function tools(ctx: Context, priv: PrivilegeFace) {
     //
     // 实测：点击虚拟屏上的「深色主题」开关，返回「未观察到界面变化——可能未生效」，
     // 但紧接着的 `android_ui_dump` 明确显示 Switch 从 `[已选中]` 变为未选中——**点击其实成功了**。
-    // 真因：本函数比对的 `beforeGen` 传的是 `uiCache.gen`（那是**配置代次**，如 fp0c052e71，恒定），
+    // 真因：本函数比对的 `beforeGen` 传的是 `uiCacheNow().gen`（那是**配置代次**，如 fp0c052e71，恒定），
     // 而壳侧 `state` 回的是**快照代次**（每次建树自增）。两个量根本不同源，比较必然判「未变」。
     //
     // 不确定时的措辞必须诚实（用户口径：不要用错误结论误导模型）：
@@ -515,9 +542,14 @@ function tools(ctx: Context, priv: PrivilegeFace) {
       '用于界面观察闭环（配合 android_ui_dump 的语义清单核对渲染结果）。' +
       '无障碍通道优先（API 30+，无需 ADB），否则走 ADB screencap。未授权失败关闭。' +
       '当前模型不声明图像输入时回退为返回文件路径（此时再用 read_image）。' +
-      '可传 textRedact: true 获得文本脱敏摘要（避免敏感屏幕内容进入上下文）。',
+      '**textRedact 尚未实现**：本工具没有 OCR/文本提取能力，传 true 会被明确拒绝'
+      + '（而不是静默返回完整截图、让人以为已经脱敏）。要避免像素级内容进入上下文，'
+      + '请改用 android_ui_dump / android_ui_tree 拿结构文本，或不调用本工具。',
     parameters: {
-      textRedact: { type: 'boolean', description: '文本脱敏摘要模式（默认 false 返回图像/路径）' },
+      textRedact: {
+        type: 'boolean',
+        description: '**未实现**：传 true 会被拒绝（本工具无 OCR/文本提取能力；静默返回完整截图等于假装脱敏）',
+      },
       screenId: SCREEN_PARAM,
     },
     output: {
@@ -559,6 +591,21 @@ function tools(ctx: Context, priv: PrivilegeFace) {
     },
     execute: async (args: { textRedact?: boolean; screenId?: string }, exec) => {
       const textRedact = args?.textRedact === true
+      // 死参数修法（2026-10-28 自查）：`textRedact` 此前只在 schema 与工具描述里承诺「获得文本脱敏
+      // 摘要（避免敏感屏幕内容进入上下文）」，实现里**读完就丢**——传 true 与不传的返回值逐字相同
+      // （同样返回 imagePath + 图像 + 宽高，同样调 `screenshot` op 且不带任何脱敏参数）。
+      // 于是模型以为已脱敏、把完整截图读进上下文。本工具没有 OCR/文本提取能力，做不到脱敏，
+      // 故 fail-closed：明确拒绝并给替代路径，而不是静默返回图像。
+      if (textRedact) {
+        return {
+          imagePath: '',
+          denied: false,
+          text: 'textRedact（文本脱敏摘要）**尚未实现**，已拒绝本次截图以免误以为已脱敏——'
+            + '本工具没有 OCR/文本提取能力，传 true 只会拿到完整图像（敏感内容照样进上下文）。'
+            + '要避免像素级内容进入上下文：改用 android_ui_dump / android_ui_tree 拿结构文本，'
+            + '或不调用本工具。',
+        }
+      }
       const screenId = args?.screenId
       const a = await guard('screenshot', args as Record<string, unknown>, exec as { agent?: { session?: unknown } })
       if (!a.ok) return { imagePath: '', denied: true, text: a.guidance }
@@ -584,12 +631,16 @@ function tools(ctx: Context, priv: PrivilegeFace) {
             if (!priv.execAdbLine) return { imagePath: '', denied: false, text: '无障碍截屏未返回文件路径，且 ADB 通道未接通（无法回落）' }
             adbNote = '（无障碍截屏未返回文件路径——已回落 ADB 通道）'
           } else {
+            // 成对判定：只回一半时**整对省略**，文案也一起省略（否则又变成「文案说 1080、返回体没有 width」）。
+            const shotW = typeof data.width === 'number' && Number.isFinite(data.width) ? data.width : undefined
+            const shotH = typeof data.height === 'number' && Number.isFinite(data.height) ? data.height : undefined
+            const shotSize = shotW === undefined || shotH === undefined ? null : `${shotW}x${shotH}`
             return inlineShot(
               data.path,
-              data.width ?? 0,
-              data.height ?? 0,
+              shotW === undefined || shotH === undefined ? undefined : shotW,
+              shotW === undefined || shotH === undefined ? undefined : shotH,
               exec as ExecLike,
-              `无障碍通道，设备物理分辨率 ${data.width ?? '?'}x${data.height ?? '?'}`,
+              `无障碍通道，设备物理分辨率 ${shotSize ?? '?x?'}`,
             )
           }
         }
@@ -653,7 +704,12 @@ function tools(ctx: Context, priv: PrivilegeFace) {
           : isVirtualTarget
             ? `（目标屏 ${screenId}，SurfaceFlinger token）`
             : `（目标屏 ${screenId}，displayId ${targetDisplayId}）`
-        return inlineShot(local, size.w, size.h, exec as ExecLike, `ADB 通道，设备物理分辨率 ${size.w}x${size.h}${scopeNote}${adbNote}`)
+        // screenSize() 在 dumpsys 解析失败时会返回 0 —— 那不是分辨率，当作「没拿到」传给 inlineShot。
+        const adbOk = size.w > 0 && Number.isFinite(size.w) && size.h > 0 && Number.isFinite(size.h)
+        const adbW = adbOk ? size.w : undefined
+        const adbH = adbOk ? size.h : undefined
+        return inlineShot(local, adbW, adbH, exec as ExecLike,
+          `ADB 通道，设备物理分辨率 ${adbOk ? `${size.w}x${size.h}` : '?x?'}${scopeNote}${adbNote}`)
       } catch (e) {
         return { imagePath: '', denied: false, text: '截图失败：' + String((e as Error).message) }
       }
@@ -701,24 +757,24 @@ function tools(ctx: Context, priv: PrivilegeFace) {
       const { ref, all, offset, limit } = args ?? {}
       const a = await guard('ui_detail', args as Record<string, unknown>, exec as { agent?: { session?: unknown } })
       if (!a.ok) return { ok: false, denied: true, text: a.guidance }
-      if (!uiCache || Date.now() - uiCache.ts > UI_CACHE_TTL) {
+      if (!uiCacheNow()! || Date.now() - uiCacheNow()!.ts > UI_CACHE_TTL) {
         return { ok: false, denied: false, text: '没有最近的控件清单——请先取树（android_ui_dump 或 android_ui_tree），再按需取明细' }
       }
       const handle = detailHandle
       const path = detailPath
       if (ref !== undefined && ref.trim() !== '') {
-        const hit = resolveRef(uiCache.byId, uiCache.nodes, ref.trim(), scopePoolFor())
+        const hit = resolveRef(uiCacheNow()!.byId, uiCacheNow()!.nodes, ref.trim(), scopePoolFor())
         if (!hit.ok) return { ok: false, denied: false, handle, path, text: hit.error }
-        const idx = uiCache.nodes.findIndex((n) => n.id === hit.node.id)
-        const rows = uiCache.nodes
+        const idx = uiCacheNow()!.nodes.findIndex((n) => n.id === hit.node.id)
+        const rows = uiCacheNow()!.nodes
         const extra: Record<string, unknown> = {}
-        const v2 = uiCache.v2
+        const v2 = uiCacheNow()!.v2
         if (v2 && idx >= 0) {
           const anc = v2.actionableAncestor[idx]
           extra.actionableAncestor = anc >= 0 ? 'n' + anc : null
           extra.subtree = { start: 'n' + idx, end: v2.subtreeEnd[idx] > idx ? 'n' + v2.subtreeEnd[idx] : null }
         }
-        const parent = uiCache.nodes.find((n) => n.id === hit.node.parentId)
+        const parent = uiCacheNow()!.nodes.find((n) => n.id === hit.node.parentId)
         if (parent) extra.parentLabel = `${parent.type || 'View'}${parent.text ? ' text="' + parent.text.slice(0, 24) + '"' : ''}`
         return {
           ok: true, denied: false, handle, path, total: rows.length,
@@ -728,11 +784,11 @@ function tools(ctx: Context, priv: PrivilegeFace) {
       }
       if (all === true) {
         const lim = Math.min(Math.max(Number(limit ?? 60) || 60, 1), 200)
-        const { page, offset: off, omitted } = pageRows(uiCache.nodes, Number(offset ?? 0) || 0, lim)
+        const { page, offset: off, omitted } = pageRows(uiCacheNow()!.nodes, Number(offset ?? 0) || 0, lim)
         return {
           ok: true, denied: false, handle, path, rows: page.map((n) => detailRecord(n)) as unknown as Array<Record<string, JsonValue>>,
-          total: uiCache.nodes.length, offset: off, omitted,
-          text: `全量明细第 ${off}..${off + page.length - 1} 行 / 共 ${uiCache.nodes.length} 行`
+          total: uiCacheNow()!.nodes.length, offset: off, omitted,
+          text: `全量明细第 ${off}..${off + page.length - 1} 行 / 共 ${uiCacheNow()!.nodes.length} 行`
             + (omitted > 0 ? `（本页外还有 ${omitted} 行，请带 offset 继续）` : '')
             + `；句柄 ${handle}${path ? '，离线可 read/grep：' + path : ''}`,
         }
@@ -744,11 +800,12 @@ function tools(ctx: Context, priv: PrivilegeFace) {
   /**
    * uiautomator 控件树管线（**单一来源**：`android_ui_dump` 的 ADB 回退与 `android_ui_tree` 共用）。
    *
-   * 从 uiautomator XML 一路走到「可被 ref 操作的节点清单」：解析 → 结构自检 → 剪枝 → 落明细 → 写 uiCache。
-   * `uiCache` 是关键：`android_ui_click/scroll/input` 的 ref 都从它解析；纯 Shizuku（无障碍关）下
+   * 从 uiautomator XML 一路走到「可被 ref 操作的节点清单」：解析 → 结构自检 → 剪枝 → 落明细 → 写 uiCacheNow()。
+   * `uiCacheNow()` 是关键：`android_ui_click/scroll/input` 的 ref 都从它解析；纯 Shizuku（无障碍关）下
    * 点击落到壳侧 `input tap cx cy`——**模型只报 ref，像素由引擎算**（用户原话：猜像素就是折磨）。
    */
-  const uiautomatorTree = async (exec: unknown, forceFresh = false): Promise<Record<string, unknown>> => {
+  /** uiautomator 通道取树。`args` 只用于给缓存打归属标记（会话 + 目标屏，issue #688）。 */
+  const uiautomatorTree = async (exec: unknown, forceFresh = false, args?: unknown): Promise<Record<string, unknown>> => {
     if (!priv.execAdbLine) return { ok: false, denied: false, screen: { w: 0, h: 0 }, rotation: 0, count: 0, rawCount: 0, nodes: [], text: 'ADB 执行通道未接通（dsh-android-bridge 未提供 execAdbLine）' }
     const n = Date.now()
     const remote = `/data/local/tmp/dsh-ui-${n}.xml`
@@ -780,9 +837,9 @@ function tools(ctx: Context, priv: PrivilegeFace) {
       const pruned = pruneNodes(parsed.raw)
       const fp = treeFingerprint(pruned.nodes)
       // 0.13.8 P0-4：同 a11y 分支——「界面未变」快路径
-      if (!forceFresh && uiCache && uiCache.fingerprint === fp && Date.now() - uiCache.ts <= UI_CACHE_TTL) {
-        uiCache.ts = Date.now()   // FX-206.3：同 a11y 分支，快路径必须推进时间戳（ADB 载荷不带代次）
-        return unchangedResponse(fp, uiCache.gen)
+      if (!forceFresh && uiCacheNow()! && uiCacheNow()!.fingerprint === fp && Date.now() - uiCacheNow()!.ts <= UI_CACHE_TTL) {
+        uiCacheNow()!.ts = Date.now()   // FX-206.3：同 a11y 分支，快路径必须推进时间戳（ADB 载荷不带代次）
+        return unchangedResponse(fp, uiCacheNow()!.gen, args)
       }
       const size = /Physical size:\s*(\d+)x(\d+)/.exec(r.stdout)
       const screen = size ? { w: Number(size[1]), h: Number(size[2]) } : { w: 0, h: 0 }
@@ -796,7 +853,7 @@ function tools(ctx: Context, priv: PrivilegeFace) {
         rotation: parsed.rotation,
         rawCount: pruned.rawCount,
       })
-      uiCache = {
+      const entry: UiCache = {
         nodes: pruned.nodes,
         byId: pruned.byId,
         byOrig: pruned.byOrig,
@@ -806,7 +863,13 @@ function tools(ctx: Context, priv: PrivilegeFace) {
         ts: Date.now(),
         fingerprint: fp,
         rawCount: pruned.rawCount,
+        session: sessionOf(exec),
+        screenId: screenIdOf(args),
       }
+      // issue #984：经唯一写入口落表（写入时就地回收过期/超额条目）；键 = 会话 + 目标屏（#688）。
+      uiCacheStore(cacheKeyOf(entry.session, entry.screenId), entry)
+      // 本次请求内立即可见（作用域是 per-request 的，并发会话互不覆盖）。
+      if (uiScope.getStore() !== undefined) uiScope.enterWith(entry)
       return {
         ok: true,
         denied: false,
@@ -864,62 +927,6 @@ properties: {
   }
 
   /** 共用行渲染体：节点数组 → 模型可见清单文本（两工具唯一的行格式来源）。 */
-  const nodeListLines = (v: Record<string, unknown>): string => {
-      const value = v as Record<string, unknown>
-  const nodes = Array.isArray(value.nodes) ? value.nodes as Array<Record<string, unknown>> : []
-  // 同名/同描述节点**保留但标注序号**（#k，1 基，按 dump 顺序）——模型可用 text:X#k 精确引用；
-  // 解析层对歧义一律拒绝而非静默挑选（见 ui-tree.resolveRef）。
-  const dupCount = new Map<string, number>()
-  for (const n of nodes) {
-    const key = `${String(n.text || '').trim()}|${String(n.desc || '').trim()}`
-    if (key === '|') continue
-    dupCount.set(key, (dupCount.get(key) ?? 0) + 1)
-  }
-  const seenSoFar = new Map<string, number>()
-  let prevPkg = ''
-  let prevWin = ''
-  const lines = nodes.map((n) => {
-    const flags = [
-      n.clickable ? '可点' : '',
-      n.editable ? '可编辑' : '',
-      n.scrollable ? '可滚动' : '',
-      n.checked ? '已选中' : '',
-      n.visible === false ? '不可见' : '',
-    ].filter(Boolean).join('/')
-    const type = String(n.type || '') || 'View'
-    const rid = String(n.rid || '')
-    const parent = String(n.parentId || '')
-    const text = String(n.text || '').trim()
-    const desc = String(n.desc || '').trim()
-    const box = `${String(n.x ?? 0)},${String(n.y ?? 0)} ${String(n.w)}x${String(n.h)}`
-    const depth = typeof n.depth === 'number' ? n.depth : 0
-    const key = `${text}|${desc}`
-    let occ = ''
-    if (key !== '|' && (dupCount.get(key) ?? 0) > 1) {
-      const k = (seenSoFar.get(key) ?? 0) + 1
-      seenSoFar.set(key, k)
-      occ = `#${k}`
-    }
-    const pkg = String(n.pkg || '')
-    const win = String(n.windowId || '')
-    const owner: string[] = []
-    if (pkg !== '' && pkg !== prevPkg) { owner.push(`pkg=${pkg}`); prevPkg = pkg }
-    if (win !== '' && win !== prevWin) { owner.push(`win=${win}`); prevWin = win }
-    const parts = [
-      '  '.repeat(Math.min(depth, 12)) + `${String(n.id)}`,
-      parent ? `^${parent}` : '',
-      `${type}${rid ? '#' + rid : ''}`,
-      `[${flags || '静态'}]`,
-      owner.join(' '),
-      text ? `text="${text}"${occ}` : '',
-      desc ? `desc="${desc}"` : '',
-      !text && !desc ? '(无文本)' : '',
-      `bounds=${box}`,
-    ].filter(Boolean)
-    return parts.join(' ')
-  })
-return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : '')
-  }
 
   /** 两个树工具共用的 output。render 的**参数类型写成 unknown**（逆变安全）；返回值用字面量类型。 */
   const treeOutput = () => ({
@@ -943,7 +950,7 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
       if (!a.ok) return { ok: false, denied: true, screen: { w: 0, h: 0 }, rotation: 0, count: 0, rawCount: 0, nodes: [], text: a.guidance }
       const cap = adbChannelOnly('ui_tree', exec as { agent?: { session?: unknown } })
       if (!cap.ok) return { ok: false, denied: true, screen: { w: 0, h: 0 }, rotation: 0, count: 0, rawCount: 0, nodes: [], text: cap.text }
-      return await uiautomatorTree(exec, forceFresh)
+      return await uiautomatorTree(exec, forceFresh, args)
     }) as never,
   })
 
@@ -1166,9 +1173,139 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
   // 而墙钟无法区分「模型想得久」与「页面变了」，只会把前者误判成失效。
   // 故 TTL 只作为内存回收上限，放宽到 10 分钟。
   const UI_CACHE_TTL = 10 * 60_000
-  let uiCache:
-    | { nodes: UiNode[]; byId: ReturnType<typeof pruneNodes>['byId']; byOrig: ReturnType<typeof pruneNodes>['byOrig']; parentByOrig: ReturnType<typeof pruneNodes>['parentByOrig']; screen: { w: number; h: number }; rotation: number; ts: number; gen?: number; fingerprint?: string; rawCount?: number; v2?: V2Decoded }
-    | null = null
+  /** 一次 dump 的控件清单。`session` / `screenId` 是**归属标记**（issue #688）。 */
+  interface UiCache {
+    nodes: UiNode[]
+    byId: ReturnType<typeof pruneNodes>['byId']
+    byOrig: ReturnType<typeof pruneNodes>['byOrig']
+    parentByOrig: ReturnType<typeof pruneNodes>['parentByOrig']
+    screen: { w: number; h: number }
+    rotation: number
+    ts: number
+    gen?: number
+    fingerprint?: string
+    rawCount?: number
+    v2?: V2Decoded
+    /** 产出这份清单的会话（`exec.agent.session`，取不到时 `__anonymous__`）。 */
+    session: string
+    /** 目标屏（`screenId` 参数归一化；空串 = 未指定，按真实屏口径）。 */
+    screenId: string
+  }
+
+  /**
+   * issue #688：UI 快照表（键 = 会话 + 目标屏）。
+   *
+   * **按 `tools()` 实例一份**（不是模块级）：旧实现的 `let uiCache` 就是每实例一份，
+   * 放模块级会让不同插件实例（含测试里的多次构造）共享缓存 —— 实测会让「首次 dump」
+   * 误走快路径，直接打红 6 条既有测试。
+   */
+  const uiCaches = new Map<string, UiCache>()
+
+  /**
+   * issue #984：UI 快照表的**容量上限**（键是会话 + 目标屏的 Map，必须有界）。
+   *
+   * 缺陷形态：#688 第二步把单槽改成按会话键的 Map 之后，这张表只增不减——没有 delete / clear /
+   * 容量上限 / 过期清扫，`UI_CACHE_TTL` 只参与**读侧**判定。于是每个做过 UI 工具的会话都会在
+   * 进程里永久留一整棵控件树（nodes + byId + byOrig + parentByOrig，大页面数千节点）；长跑引擎
+   * 一个进程开几十个会话，内存单调增长，旧条目永远不会因为 TTL 过期而释放。
+   *
+   * 上限取 8 的理由：这张表服务的只是「模型读完清单、想几下、再回来点」的短窗口（TTL 10 分钟）。
+   * 一个进程里真正同时在用控件树的会话是个位数；8 对正常用法零影响，对「只增不减」则是硬边界。
+   * 每棵树最多几十 KB，8 棵即上限数十 KB～几 MB，可接受。
+   */
+  const UI_CACHE_MAX_ENTRIES = 8
+
+  /**
+   * issue #984：**唯一写入入口**。写入前先清理：① 过期条目（TTL 已过的读侧本来就用不了）；
+   * ② 超出容量时淘汰最久未写入的条目（`ts` 最小者）。
+   *
+   * 为什么淘汰按 `ts` 而不是 Map 的插入顺序：`ts` 就是「这个条目最近一次 dump 的时刻」，
+   * 而快路径命中时会刷新 `ts`（见 dump 的两条快路径）——按它淘汰即 LRU，保留的正是还在用的条目。
+   *
+   * 为什么必须在**写入**时回收而不是定时器：定时器要随插件实例销毁，还要在测试里可复现；
+   * 而写入点是唯一的增长点，就地回收天然不会漏（也不依赖 GC 时机）。
+   */
+  const uiCacheStore = (key: string, entry: UiCache): void => {
+    const now = Date.now()
+    for (const [k, e] of uiCaches) {
+      if (now - e.ts > UI_CACHE_TTL) uiCaches.delete(k)
+    }
+    uiCaches.set(key, entry)
+    while (uiCaches.size > UI_CACHE_MAX_ENTRIES) {
+      let oldestKey: string | null = null
+      let oldestTs = Infinity
+      for (const [k, e] of uiCaches) {
+        if (e.ts < oldestTs) { oldestTs = e.ts; oldestKey = k }
+      }
+      if (oldestKey === null) break
+      uiCaches.delete(oldestKey)
+    }
+  }
+
+  /** 归属键：会话 + 目标屏（NUL 分隔，避免两个维度拼接出歧义）。 */
+  const cacheKeyOf = (session: string, screenId: string): string => session + '\u0000' + screenId
+
+  /**
+   * 本次请求的清单上下文。
+   *
+   * 为什么不能用一个模块级变量（issue #688）：工具调用可以并发，`await` 会让出执行权——
+   * 另一个会话的 dump 会把模块变量覆盖掉，于是「A 的 ref 配 B 的屏」这种跨会话复用就发生了。
+   * 壳侧只校验 ref 在集合内，回报 ok:true 却点在另一块屏上。
+   */
+  const uiScope = new AsyncLocalStorage<UiCache | null>()
+
+  /** 本次请求的清单；作用域外或无匹配时为 null。 */
+  const uiCacheNow = (): UiCache | null => uiScope.getStore() ?? null
+
+  /** 会话标识：`exec.agent.session` 的字符串或 `.id`，取不到归入匿名桶。 */
+  const sessionOf = (exec: unknown): string => {
+    const session = (exec as { agent?: { session?: unknown } } | undefined)?.agent?.session
+    if (typeof session === 'string' && session !== '') return session
+    if (session !== null && session !== undefined && typeof session === 'object') {
+      const id = (session as { id?: unknown }).id
+      if (typeof id === 'string' && id !== '') return id
+    }
+    return '__anonymous__'
+  }
+
+  /**
+   * `screenId` 参数归一化（缺省与显式 `real` **同义**）。
+   *
+   * `real` 是 `SCREEN_PARAM` 文案里明示的合法取值，和「未指定」指同一块物理屏；不折叠的话
+   * `screenIdOf({screenId:'real'}) === 'real'` 而动作调用（不带 screenId）是 `''` ⇒
+   * `usableUiCache` 判成两块屏 ⇒ dump 明明 3ms 前刚成功，第二次调用却回
+   * 「没有可用的控件清单（缓存已失效）」⇒ 模型以为真过期、每次动作前全量重 dump
+   * （正是 TTL 注释要消除的那个 dump/过期循环）。2026-10-28 自查，误拒方向。
+   * 只折叠大小写与空白：`REAL` / ` real ` 同样是「未指定」。
+   */
+  const screenIdOf = (args: unknown): string =>
+    normalizeScreenId((args as { screenId?: unknown } | undefined)?.screenId)
+
+  /**
+   * 本次调用能不能用这份清单：TTL 内 **且** 会话一致 **且** 目标屏一致。
+   *
+   * 判据为什么不只是 TTL：同名 ref（n3）在两块屏、两个会话里都可能存在，壳侧只校验 ref 在集合内，
+   * 所以「用旧清单」必须明确变成「没有清单」——宁可让模型重新 dump，也不能把点击送到另一块屏。
+   */
+  const usableUiCache = (args: unknown, exec: unknown): UiCache | null => {
+    const candidate = uiCaches.get(cacheKeyOf(sessionOf(exec), screenIdOf(args))) ?? null
+    if (candidate === null) return null
+    if (Date.now() - candidate.ts > UI_CACHE_TTL) return null
+    if (candidate.session !== sessionOf(exec)) return null
+    if (candidate.screenId !== screenIdOf(args)) return null
+    return candidate
+  }
+
+  /** 给工具执行套上清单作用域（issue #688）；没有 execute 的工具原样返回。 */
+  const withUiCacheScope = <T extends { execute?: unknown }>(tool: T): T => {
+    const execute = tool.execute as ((args: unknown, exec: unknown) => unknown) | undefined
+    if (typeof execute !== 'function') return tool
+    return {
+      ...tool,
+      execute: (args: unknown, exec: unknown) =>
+        uiScope.run(usableUiCache(args, exec), () => execute(args, exec)),
+    } as T
+  }
 
   /** 明细文件目录（与截图/XML 同一个 dsh-tmp；LRU 按前缀清理，保留最近 20 份）。 */
   const detailDir = (): string => pruneTmp('ui-detail-', 20)
@@ -1208,42 +1345,33 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
   let detailHandle = ''
   let detailPath = ''
 
-  /**
-   * 0.13.8 P0-4：树结构指纹（FNV-1a）——「界面未变」快路径的判定依据。
-   * 覆盖定位所需字段（文本/描述/类型/几何/交互性）；任一变化 → 指纹翻转 → 完整重抓。
-   * 纯追加语义：指纹相同只回一行「未变」摘要，绝不改写历史结果（L1）。
-   */
-  const treeFingerprint = (nodes: UiNode[]): string => {
-    let h = 0x811c9dc5
-    for (const n of nodes) {
-      const s = `${n.id}|${n.parentId}|${n.text}|${n.desc}|${n.rid}|${n.type}|${n.cx},${n.cy},${n.w},${n.h}|${n.clickable ? 1 : 0}${n.editable ? 1 : 0}${n.scrollable ? 1 : 0}${n.checked ? 1 : 0}${n.visible ? 1 : 0}`
-      for (let i = 0; i < s.length; i++) {
-        h ^= s.charCodeAt(i)
-        h = Math.imul(h, 0x01000193) >>> 0
-      }
-      h ^= 0xff
-      h = Math.imul(h, 0x01000193) >>> 0
-    }
-    return 'fp' + h.toString(16).padStart(8, '0')
-  }
 
   /**
    * 「界面未变」快路径（P0-4）：指纹一致直接回紧凑摘要，模型可复用上次引用。
    * D3：`gen` 只有在**确实是 number** 时才发键——`{type:'number'}` 收 null/undefined 都会整值拒绝，
    * 而含 undefined 成员的对象更不是 lossless JSON（引擎直接抛错）。
    */
-  const unchangedResponse = (fp: string, gen?: number) => ({
+  /**
+   * 续作提示里的 `android_ui_click/id:nN` 片段：**必须带上目标屏**。
+   *
+   * 回包说「引用仍有效，直接继续」而判据要求 `screenId` 与清单一致 —— 模型照字面做（不带
+   * screenId）必然被拒，同一条回包里两句话自相矛盾，形成 dump→照做→被拒→dump 的循环。
+   * 虚拟屏（DSH 自己的 UI 就在 virtual-1）是主路径，所以这不是边角。
+   */
+  const continueRefHint = (args: unknown): string => continueRefHintOf(screenIdOf(args))
+
+  const unchangedResponse = (fp: string, gen?: number, args?: unknown) => ({
     ok: true,
     denied: false,
     unchanged: true,
-    screen: uiCache!.screen,
-    rotation: uiCache!.rotation,
-    count: uiCache!.nodes.length,
-    rawCount: uiCache!.rawCount ?? uiCache!.nodes.length,
+    screen: uiCacheNow()!.screen,
+    rotation: uiCacheNow()!.rotation,
+    count: uiCacheNow()!.nodes.length,
+    rawCount: uiCacheNow()!.rawCount ?? uiCacheNow()!.nodes.length,
     nodes: [] as JsonValue[],
     ...(typeof gen === 'number' ? { gen } : {}),
     note: '界面未变（结构指纹一致）：上次 dump 的引用（n0..nN）与坐标仍然有效，可直接复用；需完整清单请带 fresh:true 重新 dump',
-    text: `界面未变（gen=${gen ?? '未知'}，结构指纹 ${fp}）：上次 dump 的 ${uiCache!.nodes.length} 个节点引用仍有效——直接用 android_ui_click/id:nN 等引用继续，无需重新阅读清单（fresh:true 可强制完整重抓）`,
+    text: `界面未变（gen=${gen ?? '未知'}，结构指纹 ${fp}）：上次 dump 的 ${uiCacheNow()!.nodes.length} 个节点引用仍有效——直接用 ${continueRefHint(args)}继续，无需重新阅读清单（fresh:true 可强制完整重抓）`,
   })
 
   /** 0.13.5 W4：控制通道决策。策略面缺席（旧版 bridge）→ 按 ADB 通道处理，保持旧行为。 */
@@ -1288,17 +1416,6 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
    * 为什么必须把 guidance 单独带出：模型按字段决定下一步。塞进 text 里它可能只当描述读过去，
    * 单独成字段 + schema 声明后，它在结构上就是「可执行的下一步」。
    */
-  const semanticFail = (
-    r: { error?: string; actionMode?: unknown; screenId?: unknown; guidance?: unknown },
-    prefix: string,
-  ): { ok: boolean; denied: boolean; text: string; actionMode?: string; screenId?: string; guidance?: string } => {
-    const actionMode = typeof r.actionMode === 'string' ? r.actionMode : undefined
-    const out: Record<string, unknown> = { ok: false, denied: false, text: prefix + (r.error ?? '未知失败') }
-    if (actionMode !== undefined) out.actionMode = actionMode
-    if (typeof r.screenId === 'string' && r.screenId !== '') out.screenId = r.screenId
-    if (typeof r.guidance === 'string' && r.guidance !== '') out.guidance = r.guidance
-    return out as { ok: boolean; denied: boolean; text: string; actionMode?: string; screenId?: string; guidance?: string }
-  }
 
   /**
    * 从壳侧返回里取出屏幕三件套 + actionMode，**原样**附到工具返回值上（SPEC §4.2）。
@@ -1310,15 +1427,6 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
    * 缺省策略：壳侧未回填 actionMode 时**不编造**（不发键），让模型按「未知」处理；
    * 编一个 a11y 会让模型以为语义树可用而实际不可用（错误引导比缺失更糟）。
    */
-  const screenOut = (data: unknown): Record<string, unknown> => {
-    const d = (data ?? {}) as { screenId?: unknown; displayId?: unknown; scope?: unknown; actionMode?: unknown }
-    const out: Record<string, unknown> = {}
-    if (typeof d.screenId === 'string' && d.screenId !== '') out.screenId = d.screenId
-    if (typeof d.displayId === 'number') out.displayId = d.displayId
-    if (typeof d.scope === 'string' && d.scope !== '') out.scope = d.scope
-    if (typeof d.actionMode === 'string' && d.actionMode !== '') out.actionMode = d.actionMode
-    return out
-  }
 
   /**
    * 纯 Shizuku（无障碍关）下虚拟屏的**坐标模式**结构化响应（SPEC §4.2）。
@@ -1327,13 +1435,6 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
    * 而应给出 actionMode=coordinate + 可直接照做的引导（改用坐标操作），
    * 让模型在**同一轮**里继续推进任务，而不是停下来问用户。
    */
-  const coordinateMode = (screenId: string, reason: string, guidance: string): Record<string, unknown> => ({
-    ok: false,
-    actionMode: 'coordinate',
-    screenId,
-    reason,
-    guidance,
-  })
 
   /** 0.13.5 W4：无障碍通道往返封装（统一错误文案，超时 8s）。 */
   const a11yExec = async (op: string, args: Record<string, unknown>, timeoutMs = 8000) => {
@@ -1350,11 +1451,11 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
   }
 
   /** 公开 id → 原始路径 id（无障碍动作按路径回指壳侧节点）。 */
-  const origPathOf = (publicId: string): string | undefined => uiCache?.byId.get(publicId)?.origPath
+  const origPathOf = (publicId: string): string | undefined => uiCacheNow()?.byId.get(publicId)?.origPath
 
   /** resolveRef 的 V2 子树池（预序区间切片）；V1 缓存返回 undefined（走 origPath 前缀匹配）。 */
   const scopePoolFor = (): ((id: string) => UiNode[] | null) | undefined => {
-    const v2 = uiCache?.v2
+    const v2 = uiCacheNow()?.v2
     return v2 ? (id: string) => scopePoolV2(v2, id) : undefined
   }
 
@@ -1363,7 +1464,7 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
   const putTargetRefById = (payload: Record<string, unknown>, publicId: string): boolean => {
     const handle = origPathOf(publicId)
     if (handle === undefined || handle === '') return false
-    if (uiCache?.v2) payload.row = Number(handle)
+    if (uiCacheNow()?.v2) payload.row = Number(handle)
     else payload.path = handle
     return true
   }
@@ -1371,10 +1472,10 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
 
   /** 祖先回退：V2 查表 O(1)（壳侧编码时已完成同一上溯，DD-8）；V1 走父链上溯（含跳过被剪层）。 */
   const actionableAncestorOf = (node: UiNode): UiNode | null => {
-    const v2 = uiCache?.v2
+    const v2 = uiCacheNow()?.v2
     if (v2) return actionableAncestorV2(v2, node)
-    if (!uiCache) return null
-    return findActionableAncestor(uiCache.byId, uiCache.byOrig, uiCache.parentByOrig, node)
+    if (!uiCacheNow()) return null
+    return findActionableAncestor(uiCacheNow()!.byId, uiCacheNow()!.byOrig, uiCacheNow()!.parentByOrig, node)
   }
 
   /**
@@ -1393,7 +1494,7 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
 
   /** F2 统一坐标系锚点：屏幕物理尺寸（wm size）。uiDump 缓存优先，否则现场查。 */
   async function screenSize(): Promise<{ w: number; h: number }> {
-    if (uiCache && Date.now() - uiCache.ts <= UI_CACHE_TTL && uiCache.screen.w > 0) return uiCache.screen
+    if (uiCacheNow()! && Date.now() - uiCacheNow()!.ts <= UI_CACHE_TTL && uiCacheNow()!.screen.w > 0) return uiCacheNow()!.screen
     if (!priv.execAdbLine) return { w: 0, h: 0 }
     const s = await priv.execAdbLine(`adb shell wm size | grep -m1 'Physical size'`)
     const m = /Physical size:\s*(\d+)x(\d+)/.exec(s.ok ? s.stdout : '')
@@ -1475,15 +1576,15 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
         }
         const fp = treeFingerprint(pruned.nodes)
         // 0.13.8 P0-4：「界面未变」快路径——结构指纹一致且缓存新鲜 → 纯追加一行摘要（L1）
-        if (!forceFresh && uiCache && uiCache.fingerprint === fp && Date.now() - uiCache.ts <= UI_CACHE_TTL) {
-          const gen = v2?.gen ?? data.gen ?? uiCache.gen
+        if (!forceFresh && uiCacheNow()! && uiCacheNow()!.fingerprint === fp && Date.now() - uiCacheNow()!.ts <= UI_CACHE_TTL) {
+          const gen = v2?.gen ?? data.gen ?? uiCacheNow()!.gen
           // FX-206.3：壳侧每次建树都递增代次（buildSnapshot(force=true)），快路径若不推进
-          // uiCache.gen/ts，下一个动作就带着旧 gen 被 requireFresh 拒（文案还误报「界面已变化」）。
+          // uiCacheNow().gen/ts，下一个动作就带着旧 gen 被 requireFresh 拒（文案还误报「界面已变化」）。
           // 命中即续期：时间戳前移、代次对齐本次载荷。
-          uiCache.ts = Date.now()
-          if (typeof gen === 'number') uiCache.gen = gen
-          if (v2) uiCache.v2 = v2
-          return unchangedResponse(fp, gen)
+          uiCacheNow()!.ts = Date.now()
+          if (typeof gen === 'number') uiCacheNow()!.gen = gen
+          if (v2) uiCacheNow()!.v2 = v2
+          return unchangedResponse(fp, gen, args)
         }
         // 0.14 D11：显式重建 screen——老壳 V1 载荷的 data.screen 可能多带键，按引用返回会让整条
         // dump 被 additionalProperties:false 拒绝（构造法可测；无老壳包可实测，见报告「需实测」）。
@@ -1493,7 +1594,7 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
         const screen = v2
           ? v2.screen
           : (Number.isFinite(rawW) && rawW > 0 ? { w: rawW, h: Number.isFinite(rawH) ? rawH : 0 } : { w: 0, h: 0 })
-        uiCache = {
+        const entry: UiCache = {
           nodes: pruned.nodes,
           byId: pruned.byId,
           byOrig: pruned.byOrig,
@@ -1505,7 +1606,13 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
           fingerprint: fp,
           rawCount: pruned.rawCount,
           v2,
+          session: sessionOf(exec),
+          screenId: screenIdOf(args),
         }
+        // issue #984：经唯一写入口落表（写入时就地回收过期/超额条目）；键 = 会话 + 目标屏（#688）。
+        uiCacheStore(cacheKeyOf(entry.session, entry.screenId), entry)
+        // 本次请求内立即可见（作用域是 per-request 的，并发会话互不覆盖）。
+        if (uiScope.getStore() !== undefined) uiScope.enterWith(entry)
         const fg = await foregroundInfo()
         const dumpPkg = pruned.nodes.find((n) => String(n.pkg || '') !== '')?.pkg ?? ''
         const mismatch = fg !== null && dumpPkg !== '' && fg.pkg !== dumpPkg
@@ -1541,7 +1648,7 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
             + warn + webHint + detail.hint,
         }
       }
-      return await uiautomatorTree(exec, forceFresh) as never
+      return await uiautomatorTree(exec, forceFresh, args) as never
     }) as never,
   })
 
@@ -1640,7 +1747,11 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
         return {
           ok: true, denied: false,
           ref: '', id: 'abs(' + Math.round(x!) + ',' + Math.round(y!) + ')', label: '虚拟屏坐标',
-          x: typeof data.displayId === 'number' ? data.displayId : 0, y: 0,
+          // 回显**本次点击的坐标**（模型据此自证落点），屏身份由 screenOut 提供。
+          // 2026-10-28 自查：旧实现写成 `x: typeof data.displayId === 'number' ? data.displayId : 0`——
+          // 语义错位（x 里装的是 displayId，真实坐标 180/524 凭空消失），且壳侧回 `displayId: NaN` 时
+          // `typeof NaN === 'number'` 恒真 ⇒ NaN 进返回体（JSON 序列化成 null）。两条都用探针实测过。
+          x: Math.round(x!), y: Math.round(y!),
           ...screenOut(data),
           text: data.guidance ?? ('已在 ' + screenId + ' 注入坐标点击 (' + Math.round(x!) + ',' + Math.round(y!) + ')'),
         }
@@ -1663,7 +1774,7 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
           if (!wr.ok) return { ok: false, denied: false, text: 'WebView 点击失败：' + wr.error }
           const wd = (wr.data ?? {}) as { ok?: boolean; error?: string; via?: string; target?: { tag?: string; text?: string } }
           if (wd.ok === false) return { ok: false, denied: false, text: 'WebView 点击失败：' + (wd.error ?? '未知') }
-          // beforeGen 传 undefined：手里只有**配置代次**（uiCache.gen，恒定如 fp0c052e71），
+          // beforeGen 传 undefined：手里只有**配置代次**（uiCacheNow().gen，恒定如 fp0c052e71），
           // 与壳侧快照代次不同源，拿它比对必然假报「未变化」（坑 138）。
           // 宁可如实报「未能确认」，也不给模型一个错误的「点击失败」结论。
           const verdict = await verifyClick(undefined, exec as ExecLike)
@@ -1685,12 +1796,12 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
         // 块G F3：payload 必须带 screenId——此分支此前是裸 `{}`，门按 virtual-N 放行、执行却落真实屏，
         // 模型看到「点了但画面没变」比直接拒绝更难排查（同 ui_dump 的双修口径）。
         const payload: Record<string, unknown> = { ...screenArgs(args) }
-        if (uiCache?.gen !== undefined) payload.gen = uiCache.gen
+        if (uiCacheNow()!?.gen !== undefined) payload.gen = uiCacheNow()!.gen
         if (useRef) {
-          if (!uiCache || Date.now() - uiCache.ts > UI_CACHE_TTL) {
+          if (!uiCacheNow()! || Date.now() - uiCacheNow()!.ts > UI_CACHE_TTL) {
             return { ok: false, denied: false, text: '没有可用的控件清单（缓存已失效）——请先执行 android_ui_dump 拿新 ref' }
           }
-          const hit = resolveRef(uiCache.byId, uiCache.nodes, ref!.trim(), scopePoolFor())
+          const hit = resolveRef(uiCacheNow()!.byId, uiCacheNow()!.nodes, ref!.trim(), scopePoolFor())
           if (!hit.ok) return { ok: false, denied: false, text: hit.error }
           let node = hit.node
           if (!node.clickable && !node.editable && !node.scrollable) {
@@ -1706,7 +1817,7 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
           const r = await a11yExec(clickOp, payload)
           if (!r.ok) return semanticFail(r, '无障碍点击失败：')
           const clicked = (r.data ?? {}) as { x?: number; y?: number; via?: string }
-          // beforeGen 传 undefined：手里只有**配置代次**（uiCache.gen，恒定如 fp0c052e71），
+          // beforeGen 传 undefined：手里只有**配置代次**（uiCacheNow().gen，恒定如 fp0c052e71），
           // 与壳侧快照代次不同源，拿它比对必然假报「未变化」（坑 138）。
           // 宁可如实报「未能确认」，也不给模型一个错误的「点击失败」结论。
           const verdict = await verifyClick(undefined, exec as ExecLike)
@@ -1723,27 +1834,40 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
         const r = await a11yExec(clickOp, payload)
         if (!r.ok) return semanticFail(r, '无障碍点击失败：')
         const clicked = (r.data ?? {}) as { x?: number; y?: number; via?: string }
-        // beforeGen 传 undefined：我们手里只有**配置代次**（uiCache.gen），与壳侧
+        // beforeGen 传 undefined：我们手里只有**配置代次**（uiCacheNow().gen），与壳侧
         // 快照代次不同源，拿它比对必然假报「未变」（坑 138）。宁可如实报「未能确认」。
         // targetVerified=false：坐标点击只有全局画面变化可观测，**未验证是否命中目标**
         // （issue #258 §5.1 误报成功）。
         const verdict = await verifyClick(undefined, exec as ExecLike, false)
         // issue #258：回显壳侧所用的归一化基准（basis/basisWidth/basisHeight）。
         const basis = coordBasisNote(r.data)
+        // 实际点击坐标只在壳侧**真回显**时才带（2026-10-28 自查）。
+        //
+        // 修前写 `x: clicked.x ?? 0, y: clicked.y ?? 0`：老壳侧不回 x/y 时编造 0，模型据此
+        // 以为点在了屏幕左上角。更刺眼的是**同一个返回体里两套口径**——紧邻的 basisFields
+        // 遵守「不编造默认值」，文案会如实说「基准未回显：壳侧版本较旧」，而坐标却谎报 0,0
+        // （探针实测文案：「实际坐标 0,0，（基准未回显：壳侧版本较旧）」）。
+        // 顺带把非有限值一并拒：NaN/Infinity 不是合法 JSON，引擎 {type:'number'} 会整值拒绝
+        // （#204/#258 同族）。schema 里 x/y 非 required，缺席是合法的。
+        const clickedXY = typeof clicked.x === 'number' && Number.isFinite(clicked.x)
+          && typeof clicked.y === 'number' && Number.isFinite(clicked.y)
+          ? { x: clicked.x, y: clicked.y }
+          : null
         return {
           ok: true, denied: false, ref: '', id: `norm(${nx!.toFixed(3)},${ny!.toFixed(3)})`, label: '归一化坐标',
-          x: clicked.x ?? 0, y: clicked.y ?? 0,
+          ...(clickedXY ?? {}),
           ...basisFields(r.data),
           text: `已按归一化坐标 (${nx!.toFixed(3)},${ny!.toFixed(3)}) 点击（无障碍通道，实际坐标 `
-            + `${Math.round(clicked.x ?? 0)},${Math.round(clicked.y ?? 0)}，${basis}）；${verdict}`,
+            + (clickedXY === null ? '未回显' : `${Math.round(clickedXY.x)},${Math.round(clickedXY.y)}`)
+            + `，${basis}）；${verdict}`,
         }
       }
       let cx = 0; let cy = 0; let hitId = ''; let label = ''
       if (useRef) {
-        if (!uiCache || Date.now() - uiCache.ts > UI_CACHE_TTL) {
+        if (!uiCacheNow()! || Date.now() - uiCacheNow()!.ts > UI_CACHE_TTL) {
           return { ok: false, denied: false, text: '没有可用的控件清单（缓存已失效）——请先执行 android_ui_dump 拿新 ref' }
         }
-        const hit = resolveRef(uiCache.byId, uiCache.nodes, ref!.trim(), scopePoolFor())
+        const hit = resolveRef(uiCacheNow()!.byId, uiCacheNow()!.nodes, ref!.trim(), scopePoolFor())
         if (!hit.ok) return { ok: false, denied: false, text: hit.error }
         let node = hit.node
         if (!node.clickable && !node.editable && !node.scrollable) {
@@ -1754,8 +1878,8 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
         cx = node.cx; cy = node.cy; hitId = node.id; label = (node.text || node.desc).slice(0, 24)
       } else {
         // 0-1 归一化坐标：无障碍通道从最近一次快照取屏幕尺寸（不依赖 ADB）
-        const size = uiCache && Date.now() - uiCache.ts <= UI_CACHE_TTL && uiCache.screen.w > 0
-          ? uiCache.screen
+        const size = uiCacheNow()! && Date.now() - uiCacheNow()!.ts <= UI_CACHE_TTL && uiCacheNow()!.screen.w > 0
+          ? uiCacheNow()!.screen
           : await screenSize()
         if (!size.w || !size.h) return { ok: false, denied: false, text: '屏幕尺寸未知（无障碍通道需先 android_ui_dump；ADB 通道需 wm size）——请先 dump 或改用 ref' }
         cx = Math.round(nx! * size.w); cy = Math.round(ny! * size.h)
@@ -1765,7 +1889,7 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
       // 0.13.5 W4：无障碍通道优先（语义 performAction；不经 input tap 坐标）
       if (controlDecision('click', exec as { agent?: { session?: unknown } }).backend === 'a11y') {
         const payload: Record<string, unknown> = { ...screenArgs(args) }
-        if (uiCache?.gen !== undefined) payload.gen = uiCache.gen
+        if (uiCacheNow()!?.gen !== undefined) payload.gen = uiCacheNow()!.gen
         if (useRef) {
           if (!putTargetRefById(payload, hitId)) return { ok: false, denied: false, text: '无障碍通道需要节点行句柄/原始路径——请重新 android_ui_dump' }
         } else {
@@ -1843,14 +1967,27 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
       if (!a.ok) return { ok: false, denied: true, text: a.guidance }
       const dir = args.direction === 'left' || args.direction === 'right' ? args.direction : args.direction === 'up' || args.direction === 'down' ? args.direction : ''
       if (!dir) return { ok: false, denied: false, text: `未知方向：${String(args.direction)}` }
+      // issue #1619：ui_scroll 在 SCREEN_ACTIONS 里，门按 virtual-N 放行；a11y 分支带 screenId 没问题，
+      // 但 ADB 分支读的是**真实屏** `wm size` 且 `input swipe` 没有 `-d`——于是
+      // {direction:"down", screenId:"virtual-1"} 滑动的是真实屏，回执仍写「已滑动（down 60%）」。
+      // 口径与 ui_click 对 nx/ny 在虚拟屏上的拒绝一致：非 real 屏在这里直接拒绝并指向真正能做的工具。
+      if (typeof args.screenId === 'string' && args.screenId !== '' && args.screenId !== 'real'
+        && controlDecision('scroll', exec as { agent?: { session?: unknown } }).backend !== 'a11y') {
+        return {
+          ok: false, denied: false,
+          text: '在 ' + args.screenId + ' 上不能用 android_ui_scroll 的 ADB 通道：它读的是真实屏尺寸、'
+            + 'input swipe 也没有屏幕维度，滑动会落在真实屏上。请改用 android_vdisplay_input（verb: swipe，'
+            + '坐标基于该屏自身像素；可先 android_vdisplay_status 看宽高），或开启无障碍通道后再用本工具。',
+        }
+      }
       const frac = Math.min(Math.max(args.fraction ?? 0.6, 0.1), 1.0)
       // 0.13.5 W4：无障碍通道优先（ACTION_SCROLL_* 语义滚动；无坐标 swipe）
       if (controlDecision('scroll', exec as { agent?: { session?: unknown } }).backend === 'a11y') {
         const payload: Record<string, unknown> = { direction: dir, fraction: frac, ...screenArgs(args) }
-        if (uiCache?.gen !== undefined) payload.gen = uiCache.gen
+        if (uiCacheNow()!?.gen !== undefined) payload.gen = uiCacheNow()!.gen
         if (args.ref) {
-          if (!uiCache || Date.now() - uiCache.ts > UI_CACHE_TTL) return { ok: false, denied: false, from: [], to: [], text: '没有可用的控件清单（缓存已失效）——请先执行 android_ui_dump 拿新 ref' }
-          const hit = resolveRef(uiCache.byId, uiCache.nodes, String(args.ref).trim(), scopePoolFor())
+          if (!uiCacheNow()! || Date.now() - uiCacheNow()!.ts > UI_CACHE_TTL) return { ok: false, denied: false, from: [], to: [], text: '没有可用的控件清单（缓存已失效）——请先执行 android_ui_dump 拿新 ref' }
+          const hit = resolveRef(uiCacheNow()!.byId, uiCacheNow()!.nodes, String(args.ref).trim(), scopePoolFor())
           if (!hit.ok) return { ok: false, denied: false, from: [], to: [], text: hit.error }
           if (!putTargetRef(payload, hit.node)) return { ok: false, denied: false, from: [], to: [], text: '无障碍通道需要节点行句柄/原始路径——请重新 android_ui_dump' }
         }
@@ -1862,7 +1999,7 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
       // 未配对 ADB 的部署下根本不需要 adb（此前挡在前面 → 语义滚动被误判成「ADB 执行通道未接通」）。
       if (!priv.execAdbLine || !priv.execAdbShell) return { ok: false, denied: false, text: 'ADB 执行通道未接通' }
       // 屏幕尺寸：缓存优先（dump 附带），无缓存现场查
-      let screen = uiCache && Date.now() - uiCache.ts <= UI_CACHE_TTL ? uiCache.screen : null
+      let screen = uiCacheNow()! && Date.now() - uiCacheNow()!.ts <= UI_CACHE_TTL ? uiCacheNow()!.screen : null
       if (!screen || screen.w === 0) {
         const s = await priv.execAdbLine(`adb shell wm size | grep -m1 'Physical size'`)
         const m = /Physical size:\s*(\d+)x(\d+)/.exec(s.ok ? s.stdout : '')
@@ -1871,10 +2008,10 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
       // 滑动区域：有 ref 取节点 bounds；否则全屏
       let area = { x1: 0, y1: 0, x2: screen.w, y2: screen.h }
       if (args.ref) {
-        if (!uiCache || Date.now() - uiCache.ts > UI_CACHE_TTL) {
+        if (!uiCacheNow()! || Date.now() - uiCacheNow()!.ts > UI_CACHE_TTL) {
           return { ok: false, denied: false, text: 'ref 滚动需要最近的 android_ui_dump 缓存' }
         }
-        const hit = resolveRef(uiCache.byId, uiCache.nodes, args.ref, scopePoolFor())
+        const hit = resolveRef(uiCacheNow()!.byId, uiCacheNow()!.nodes, args.ref, scopePoolFor())
         if (!hit.ok) return { ok: false, denied: false, text: hit.error }
         const n = hit.node
         area = { x1: n.cx - Math.floor(n.w / 2), y1: n.cy - Math.floor(n.h / 2), x2: n.cx + Math.floor(n.w / 2), y2: n.cy + Math.floor(n.h / 2) }
@@ -1969,10 +2106,10 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
       // 0.13.5 W4：无障碍通道优先（ACTION_SET_TEXT 原子写入——绕开 IME 切换与丢字问题 F5）
       if (controlDecision('setText', exec as { agent?: { session?: unknown } }).backend === 'a11y') {
         const payload: Record<string, unknown> = { text: raw, clear: clear === true, ...screenArgs(args) }
-        if (uiCache?.gen !== undefined) payload.gen = uiCache.gen
+        if (uiCacheNow()!?.gen !== undefined) payload.gen = uiCacheNow()!.gen
         if (typeof ref === 'string' && ref.trim().length > 0) {
-          if (!uiCache || Date.now() - uiCache.ts > UI_CACHE_TTL) return { ok: false, denied: false, channel: 'a11y', text: '没有可用的控件清单（缓存已失效）——请先执行 android_ui_dump 拿新 ref' }
-          const hit = resolveRef(uiCache.byId, uiCache.nodes, ref.trim(), scopePoolFor())
+          if (!uiCacheNow()! || Date.now() - uiCacheNow()!.ts > UI_CACHE_TTL) return { ok: false, denied: false, channel: 'a11y', text: '没有可用的控件清单（缓存已失效）——请先执行 android_ui_dump 拿新 ref' }
+          const hit = resolveRef(uiCacheNow()!.byId, uiCacheNow()!.nodes, ref.trim(), scopePoolFor())
           if (!hit.ok) return { ok: false, denied: false, channel: 'a11y', text: hit.error }
           if (!putTargetRef(payload, hit.node)) return { ok: false, denied: false, channel: 'a11y', text: '无障碍通道需要节点行句柄/原始路径——请重新 android_ui_dump' }
         }
@@ -1988,97 +2125,178 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
         // 本应用 0.13.2 起内嵌同协议 IME。F5 修复：ime enable 只入列不生效（广播被静默丢弃）——
         // 探测当前默认 IME → 临时 ime set 切到本通道 → 注入 → 还原原 IME（借道不劫持）。
         const execShell = priv.execAdbShell
-        const cur = await execShell(`settings get secure default_input_method`).catch(() => ({ ok: false, stdout: '' }))
-        const prev = (cur.ok ? cur.stdout : '').trim().replace(/^"|"$/g, '')
-        await execShell(`ime enable ${IME_ID}`).catch(() => undefined)
-        const needSwitch = prev.length > 0 && prev !== IME_ID
-        if (needSwitch) await execShell(`ime set ${IME_ID}`).catch(() => undefined)
-        // 0.13.8 #183 / #413：来源校验 nonce（壳侧私有文件，引擎与壳同 uid 可读）+ 点名组件。
-        const auth = adbKeyboardAuth(process.env.DSH_FILES_DIR)
-        type KbSend = { ok: boolean; stdout: string; guidance?: string; code: number | null }
-        const sendKb = async (action: string, msg?: string): Promise<KbSend> => {
-          const line = adbKeyboardBroadcast(action, msg, auth)
-          let r = await execShell(line)
-          let code = r.ok ? parseBroadcastResult(r.stdout) : null
-          // ime set 与本 IME 的系统绑定存在竞态：未就绪时等一个绑定周期再重试一次（不再静默失败）。
-          if (r.ok && (code === KB_RESULT.imeNotReady || code === KB_RESULT.noConnection)) {
-            await new Promise((resolve) => setTimeout(resolve, 220))
-            r = await execShell(line)
-            code = r.ok ? parseBroadcastResult(r.stdout) : null
-          }
-          return { ok: r.ok, stdout: r.stdout, guidance: r.guidance, code }
-        }
-        const kbFailText = (action: string, code: number | null): string => {
-          const what = action === KB_ACTION_CLEAR ? '清空' : '输入'
-          if (code === KB_RESULT.imeNotReady) return `${what}未落地：内嵌输入法尚未被系统绑定（ime set 后未就绪）——请确认「DSH 设备键盘」已在系统里启用，稍后重试`
-          if (code === KB_RESULT.noConnection) return `${what}未落地：目标输入框没有输入连接（可能未聚焦或已被回收）——请先点聚焦目标输入框后重试`
-          if (code === KB_RESULT.rejected) return `${what}未落地：广播来源校验被拒（只有 adb shell/root 直发或携带有效 auth nonce 才能通过，见 AdbKeyboardReceiver 注释）`
-          if (code === KB_RESULT.badRequest) return `${what}未落地：广播请求不合法（文本为空或动作不识别）`
-          return `${what}未落地：未知结果码 ${code}`
-        }
-        try {
-          if (clear) {
-            const res = await sendKb(KB_ACTION_CLEAR)
-            if (!res.ok) return { ok: false, denied: false, channel: 'adbkeyboard', text: res.guidance ?? (res.stdout || 'ADBKeyboard 清空执行失败') }
-            if (!isCommitAccepted(res.code)) {
-              return { ok: false, denied: false, channel: 'adbkeyboard', text: kbFailText(KB_ACTION_CLEAR, res.code) }
+        // #679：nonce 是唯一凭据（壳侧已撤销 shell/root 白名单）。先确认可用再做 ime enable/ime set，
+        // 否则会先把用户输入法切走、最后却发不出去，且报错伪装成「来源被拒(3)」而非「凭据缺失」。
+        const authState = adbKeyboardAuthState(process.env.DSH_FILES_DIR)
+        if (!authState.ok) return { ok: false, denied: false, channel: 'adbkeyboard', text: kbAuthMissingText(authState.reason) }
+        const auth = authState.auth
+        // 借道窗口的产出（窗口内写、窗口外读）：prev/needSwitch/canRestore/restore 决定「还回谁」，
+        // borrowWaitedMs/borrowQueued 只是排队回执（issue #1516：排在后面的那一路不许静默等待）。
+        let prev = ''
+        let needSwitch = false
+        let canRestore = false
+        let restore: { id: string; source: 'readback' | 'fallback' | 'none' } = { id: '', source: 'none' }
+        let borrowWaitedMs = 0
+        let borrowQueued = 0
+        // 排队预算（毫秒）：一段窗口正常几百毫秒就结束；超过这个数基本只能是前一路卡在设备回填
+        // （单条 execShell 最长 20s）。此时宁可如实失败（未切换、未广播）也不要静默等待。
+        // 测试钩子：DSH_IME_BORROW_BUDGET_MS（与 DSH_SCREEN_SCOPE_TEST 同口径，只影响排队预算）。
+        const IME_BORROW_BUDGET_MS = Number.parseInt(process.env.DSH_IME_BORROW_BUDGET_MS ?? '', 10) || 8000
+          type KbSend = { ok: boolean; stdout: string; guidance?: string; code: number | null }
+          const sendKb = async (action: string, msg?: string): Promise<KbSend> => {
+            const line = adbKeyboardBroadcast(action, msg, auth)
+            let r = await execShell(line)
+            let code = r.ok ? parseBroadcastResult(r.stdout) : null
+            // ime set 与本 IME 的系统绑定存在竞态：未就绪时等一个绑定周期再重试一次（不再静默失败）。
+            if (r.ok && (code === KB_RESULT.imeNotReady || code === KB_RESULT.noConnection)) {
+              await new Promise((resolve) => setTimeout(resolve, 220))
+              r = await execShell(line)
+              code = r.ok ? parseBroadcastResult(r.stdout) : null
             }
+            return { ok: r.ok, stdout: r.stdout, guidance: r.guidance, code }
           }
-          let resultCode: number | null = null
-          if (raw) {
-            const res = await sendKb(KB_ACTION_INPUT, raw)
-            if (!res.ok) return { ok: false, denied: false, channel: 'adbkeyboard', text: res.guidance ?? (res.stdout || 'ADBKeyboard 输入执行失败') }
-            resultCode = res.code
-            if (!isCommitAccepted(res.code)) {
-              return { ok: false, denied: false, channel: 'adbkeyboard', text: kbFailText(KB_ACTION_INPUT, res.code) }
-            }
+          const kbFailText = (action: string, code: number | null): string => {
+            const what = action === KB_ACTION_CLEAR ? '清空' : '输入'
+            if (code === KB_RESULT.imeNotReady) return `${what}未落地：内嵌输入法尚未被系统绑定（ime set 后未就绪）——若本次未能切换（原输入法不可读且 \`ime list -s\` 为空），请手动切到「DSH 设备键盘」后重试；否则只是绑定竞态，稍后重试即可`
+            if (code === KB_RESULT.noConnection) return `${what}未落地：目标输入框没有输入连接（可能未聚焦或已被回收）——请先点聚焦目标输入框后重试`
+            if (code === KB_RESULT.rejected) return `${what}未落地：广播来源校验被拒（只有 adb shell/root 直发或携带有效 auth nonce 才能通过，见 AdbKeyboardReceiver 注释）`
+            if (code === KB_RESULT.badRequest) return `${what}未落地：广播请求不合法（文本为空或动作不识别）`
+            return `${what}未落地：未知结果码 ${code}`
           }
-          // 现场实测（2026-09-10）：`input text` 偶发丢尾字符、中文 IME 可能把字母汉字化——
-          // 注入后**回读断言**（壳侧 nodeText 读聚焦框，便宜），不一致自动重试一次。
-          // 块G F3：回读必须带目标屏——否则壳侧按真实屏读聚焦框，校验与注入不在同一块屏上，
-          // 会假报「输入未落地」（模型据此重试或改道，实际输入早已成功）。
-          const nodeTextArgs = { ...screenArgs(args) }
-          let readBack: string | null = null
-          if (raw.length > 0) {
-            const read = async (): Promise<string | null> => {
-              const nt = await a11yExec('nodeText', { ...nodeTextArgs }, 4000)
-              if (!nt.ok) return null
-              const d = (nt.data ?? {}) as { text?: string }
-              return d.text ?? ''
+            /**
+             * 一次借道窗口（**锁内**，issue #1373）：读 prev → ime enable/set → 按 actions 广播 → 还原。
+             *
+             * issue #1516：窗口里只留 IME 相关动作。回读断言（nodeText，4s 超时 ×2）与重试前的
+             * 260/320ms 等待全部移到锁外——它们不碰输入法；而「还原」必须留在窗口内：下一路在锁内
+             * 读 prev，本路若还没还回去，它会把 DSH 键盘当用户输入法（#1520 同族，还原到 DSH = 原伤）。
+             */
+            const withImeBorrow = async (
+              actions: Array<{ action: string; msg?: string }>,
+            ): Promise<{ sends: KbSend[]; stop: string | null }> => {
+              const acquired = await imeBorrowLock.acquire({ timeoutMs: IME_BORROW_BUDGET_MS }).catch((error: unknown) => {
+                if (error instanceof ImeBorrowTimeout) return error
+                throw error
+              })
+              if (acquired instanceof ImeBorrowTimeout) {
+                // 排队超时 = **没有**取得锁：一律不切换、不广播（把输入法留在原处比劫持一半安全）。
+                return {
+                  sends: [],
+                  stop: `输入未执行：IME 借道排队 ${acquired.waitedMs}ms 超过预算 ${acquired.budgetMs}ms 仍未轮到自己（前一路的切换/还原还没结束，`
+                    + '可能卡在设备回填）——本次未切换输入法、未发送广播；稍后重试，或改用 channel:"input"（仅 ASCII）',
+                }
+              }
+              const release = acquired
+              borrowWaitedMs = release.waitedMs
+              borrowQueued = release.queued
+              const sends: KbSend[] = []
+              try {
+                // issue #1373：读 prev 必须在锁内——它是「本路要还回哪一个」的唯一真源。
+                const cur = await execShell(`settings get secure default_input_method`).catch(() => ({ ok: false, stdout: '' }))
+                const rawPrev = (cur.ok ? cur.stdout : '').trim().replace(/^"|"$/g, '')
+                // issue #1371 第三条路：读回值不可还原时不能直接放弃（不切换 ⇒ 广播拿 imeNotReady，
+                // 注入整条失效），也不能「切换了不管还原」。先试读回值，再退到 `ime list -s`。
+                restore = resolveImeRestoreTarget(rawPrev, '', IME_ID, userImeHistory.list())
+                if (restore.source === 'none') {
+                  const listed = await execShell(`ime list -s`).catch(() => ({ ok: false, stdout: '' }))
+                  if (listed.ok) restore = resolveImeRestoreTarget(rawPrev, listed.stdout, IME_ID, userImeHistory.list())
+                }
+                prev = restore.id
+                // issue #1517：读到了就记进偏好表——下一路读不到时按「用户实际在用的」兜底，不取列表第一行。
+                if (restore.source === 'readback') userImeHistory.remember(prev)
+                await execShell(`ime enable ${IME_ID}`).catch(() => undefined)
+                // issue #1520：等值比较归一化（`pkg/pkg.Class` 与 `pkg/.Class` 等价）。
+                // prev 是本通道时无需切换；其余（含 prev 为空）都要切，否则广播不会被提交。
+                needSwitch = normalizeImeId(prev) !== normalizeImeId(IME_ID)
+                canRestore = prev.length > 0
+                if (needSwitch) await execShell(`ime set ${IME_ID}`).catch(() => undefined)
+                for (const step of actions) {
+                  const res = await sendKb(step.action, step.msg)
+                  sends.push(res)
+                  if (!res.ok) {
+                    const what = step.action === KB_ACTION_CLEAR ? '清空' : '输入'
+                    return { sends, stop: res.guidance ?? (res.stdout || `ADBKeyboard ${what}执行失败`) }
+                  }
+                  if (!isCommitAccepted(res.code)) return { sends, stop: kbFailText(step.action, res.code) }
+                }
+                return { sends, stop: null }
+              } finally {
+                // 还原用户原 IME（广播已被接收器入队提交，留 0.4s 提交窗口防切换竞态）。
+                if (needSwitch && canRestore) await execShell(`sleep 0.4; ime set ${shellQuote(prev)}`).catch(() => undefined)
+                release?.()
+              }
             }
-            await new Promise((resolve) => setTimeout(resolve, 260))
-            readBack = await read()
-            if (readBack !== null && readBack !== raw) {
-              await sendKb(KB_ACTION_CLEAR)
-              await sendKb(KB_ACTION_INPUT, raw)
-              await new Promise((resolve) => setTimeout(resolve, 320))
+            // ① 注入（锁内，短）：clear / text 各一次广播。
+            const injectSteps: Array<{ action: string; msg?: string }> = []
+            if (clear) injectSteps.push({ action: KB_ACTION_CLEAR })
+            if (raw) injectSteps.push({ action: KB_ACTION_INPUT, msg: raw })
+            let resultCode: number | null = null
+            if (injectSteps.length > 0) {
+              const first = await withImeBorrow(injectSteps)
+              if (first.stop !== null) return { ok: false, denied: false, channel: 'adbkeyboard', text: first.stop }
+              resultCode = first.sends[first.sends.length - 1]?.code ?? null
+            }
+            // ② 回读断言（**锁外**，issue #1516）：nodeText 单次 4s、最长两次，读的是聚焦框文本、
+            //    与当前 IME 无关——还原之后再读同样成立，不该让排在后面的那一路陪着等这 8s。
+            //    现场实测（2026-09-10）：`input text` 偶发丢尾字符、中文 IME 可能把字母汉字化——
+            //    注入后**回读断言**（壳侧 nodeText 读聚焦框，便宜），不一致自动重试一次。
+            //    块G F3：回读必须带目标屏——否则壳侧按真实屏读聚焦框，校验与注入不在同一块屏上，
+            //    会假报「输入未落地」（模型据此重试或改道，实际输入早已成功）。
+            const nodeTextArgs = { ...screenArgs(args) }
+            let readBack: string | null = null
+            if (raw.length > 0) {
+              const read = async (): Promise<string | null> => {
+                const nt = await a11yExec('nodeText', { ...nodeTextArgs }, 4000)
+                if (!nt.ok) return null
+                const d = (nt.data ?? {}) as { text?: string }
+                return d.text ?? ''
+              }
+              await new Promise((resolve) => setTimeout(resolve, 260))
               readBack = await read()
+              if (readBack !== null && readBack !== raw) {
+                // ③ 不一致：重来一次**完整窗口**（清空 + 输入 + 还原）——重试同样不许占着锁等回读。
+                const retry = await withImeBorrow([{ action: KB_ACTION_CLEAR }, { action: KB_ACTION_INPUT, msg: raw }])
+                if (retry.stop !== null) return { ok: false, denied: false, channel: 'adbkeyboard', text: retry.stop }
+                resultCode = retry.sends[retry.sends.length - 1]?.code ?? resultCode
+                await new Promise((resolve) => setTimeout(resolve, 320))
+                readBack = await read()
+              }
             }
-          }
-          if (readBack !== null && raw.length > 0 && readBack !== raw) {
+            if (readBack !== null && raw.length > 0 && readBack !== raw) {
+              return {
+                ok: false,
+                denied: false,
+                channel: 'adbkeyboard',
+                text: `输入未落地：期望「${raw.slice(0, 30)}」，回读实际「${readBack.slice(0, 30)}」——`
+                  + '已自动重试一次仍不一致；建议：确认目标输入框处于聚焦态后重试，或改用 android_web_dump + ref=wN（自有 Web UI），'
+                  + '纯 ASCII 也可试 channel:"input"',
+              }
+            }
+            const act = [clear ? '已清空' : '', raw ? `已输入 ${raw.slice(0, 24)}${raw.length > 24 ? '…' : ''}` : ''].filter(Boolean).join(' + ')
+            // issue #1067：无回读时，只有**权威结果码**才能宣称已提交。取不到结果码（截断 / ROM
+            // 不打印）与旧壳的 result=0 都只是「兼容性放行」，不是证据——此时必须明说未证实，
+            // 否则工具回 ok:true「已输入」而文本可能压根没进去（a11y 关闭时没有回读兜底）。
+            const verifyNote = readBack !== null
+              ? '，回读一致'
+              : (hasAuthoritativeCommit(resultCode)
+                ? '，壳侧结果码确认已提交'
+                : '，未证实例（取不到壳侧结果码，且本通道无回读：文本可能未落地，建议开无障碍后重试或改 channel:"input"）')
+            // issue #1517：回执必须报出还原目标的 id 与来源——用户要能核对「还原到了谁」，
+            // 而不是只信一句「已还原」（兜底路径此前连 id 都不写，选错也无从发现）。
+            const imeNote = !needSwitch
+              ? ''
+              : !canRestore
+                ? '，IME 已临时切换；原输入法不可读，未能还原'
+                : restore.source === 'fallback'
+                  ? `，IME 已临时切换，读回值不可用，按已启用列表还原到 ${prev}`
+                  : `，IME 已临时切换，已还原到 ${prev}`
+            // issue #1516：排队量也写进回执（等过锁才有的说；队列空时省略）。
+            const queueNote = borrowQueued > 0 ? `，借道排队 ${borrowWaitedMs}ms（前面 ${borrowQueued} 路）` : ''
             return {
-              ok: false,
+              ok: true,
               denied: false,
               channel: 'adbkeyboard',
-              text: `输入未落地：期望「${raw.slice(0, 30)}」，回读实际「${readBack.slice(0, 30)}」——`
-                + '已自动重试一次仍不一致；建议：确认目标输入框处于聚焦态后重试，或改用 android_web_dump + ref=wN（自有 Web UI），'
-                + '纯 ASCII 也可试 channel:"input"',
+              text: `${act}（ADBKeyboard${imeNote}${verifyNote}${queueNote}）`,
             }
-          }
-          const act = [clear ? '已清空' : '', raw ? `已输入 ${raw.slice(0, 24)}${raw.length > 24 ? '…' : ''}` : ''].filter(Boolean).join(' + ')
-          const verifyNote = readBack === null
-            ? (resultCode === KB_RESULT.committed ? '，壳侧结果码确认已提交' : '')
-            : '，回读一致'
-          return {
-            ok: true,
-            denied: false,
-            channel: 'adbkeyboard',
-            text: `${act}（ADBKeyboard${needSwitch ? '，IME 已临时切换并还原' : ''}${verifyNote}）`,
-          }
-        } finally {
-          // 还原用户原 IME（广播已被接收器入队提交，留 0.4s 提交窗口防切换竞态）。
-          if (needSwitch) await execShell(`sleep 0.4; ime set ${prev}`).catch(() => undefined)
-        }
       }
       // input text 兜底（channel: "input" 强制；仅可见 ASCII——部分 ROM 丢字/丢空格，F5 不推荐）
       const asciiOnly = /^[\x20-\x7E]+$/.test(raw)
@@ -2196,7 +2414,10 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
         ...(typeof data.url === 'string' ? { url: data.url } : {}),
         ...(typeof data.title === 'string' ? { title: data.title } : {}),
         nodes: nodes as WebNode[],
-        text: `WebView DOM 快照：${data.title ?? ''} ${data.url ?? ''}（视口 ${data.vw ?? '?'}x${data.vh ?? '?'}，滚动 ${data.scrollY ?? 0}；`
+        // 同一句文案里未知值的口径必须一致（2026-10-28 自查）：`vw`/`vh` 未知时报 `?`，
+        // 而 `scrollY` 未知时却报 `0` —— 模型会把「壳侧没回显」误读成「页面没滚动」
+        // （在长列表里恰好会导到「已到顶」的错判）。这里统一成 `?`。
+        text: `WebView DOM 快照：${data.title ?? ''} ${data.url ?? ''}（视口 ${data.vw ?? '?'}x${data.vh ?? '?'}，滚动 ${typeof data.scrollY === 'number' && Number.isFinite(data.scrollY) ? data.scrollY : '?'}；`
           + `命中 ${data.total ?? nodes.length} 个可交互元素，返回 ${nodes.length} 个）\n` + lines.join('\n')
           + '\n点击用 ref=wN，或 css:<选择器> / text:<文本> / role:<role>。',
       }
@@ -2247,7 +2468,14 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
       if (animations) {
         if (restore) {
           await restoreAnimScales({})
-          lines.push('动画：已恢复默认（1）')
+          // issue #1372：恢复分支原来没有回读——写失败被 restoreAnimScales 内部 catch 吞掉，
+          // 回执却照旧说「已恢复默认（1）」。与关闭分支同口径：只有读回才算数。
+          const now = await readAnimScales()
+          if (ANIM_KEYS.every((k) => now[k] === '1')) {
+            lines.push('动画：已恢复默认（1）')
+          } else {
+            notDone.push('动画未恢复默认（读回 ' + ANIM_KEYS.map((k) => `${k}=${now[k] ?? '?'}`).join(', ') + '）')
+          }
         } else {
           await setAnimScales('0')
           // 回读验证：写失败被 setAnimScales 吞掉，只有读回才能证明「已关闭」。
@@ -2337,8 +2565,12 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
         if (vd.ok !== true || data.ok === false) {
           return {
             ok: false, denied: false, pkg,
+            // 屏身份（含 displayId）只由 screenOut 提供：它带 Number.isFinite 守卫。
+            // 2026-10-28 自查：这里原本**紧跟**一行手写
+            // `...(typeof data.displayId === 'number' ? { displayId: data.displayId } : {})`，
+            // 展开顺序在 screenOut 之后 ⇒ 把带守卫的值**覆盖**掉 ⇒ NaN/Infinity 照样透出
+            // （而 schema 声明 displayId:{type:'integer'}，非整数会让引擎整值拒绝）。删掉那一行即可。
             ...screenOut(data),
-            ...(typeof data.displayId === 'number' ? { displayId: data.displayId } : {}),
             ...(data.landedDisplayIds === undefined ? {} : { landedDisplayIds: data.landedDisplayIds }),
             ...(typeof data.code === 'string' ? { code: data.code } : {}),
             text: '跨屏拉起未确认落在目标屏：' + (data.guidance ?? (vd.ok ? '壳侧拒绝' : vd.error))
@@ -2349,8 +2581,8 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
         return {
           ok: true, denied: false, pkg,
           foreground: '',
+          // 同上：displayId 只从 screenOut 来，不要在这里手写覆盖（会绕过 finite 守卫）。
           ...screenOut(data),
-          ...(typeof data.displayId === 'number' ? { displayId: data.displayId } : {}),
           ...(data.landedDisplayIds === undefined ? {} : { landedDisplayIds: data.landedDisplayIds }),
           ...(typeof data.code === 'string' ? { code: data.code } : {}),
           text: data.guidance ?? ('已在 ' + screenId + ' 上拉起 ' + pkg),
@@ -2443,7 +2675,9 @@ return String(value.text ?? '') + (lines.length > 0 ? '\n' + lines.join('\n') : 
   })
 
   // 0.14 D4：uiDetail 此前 defineTool 了但没进注册数组（死代码，而提示文案还在引导模型调用）。
+  // issue #688：每个工具的执行都跑在「本次请求的清单作用域」里（会话 + 目标屏，并发会话互不串味）。
   return [screenList, screenshot, uiTree, deviceInfo, actInput, uiDump, uiClick, uiScroll, uiInput, webDump, envPrepare, appLaunch, uiGlobal, uiDetail]
+    .map((tool) => withUiCacheScope(tool))
 }
 
 // ── 启动就绪审计（0.14.2-fx-2, 2026-09-28, task-80）───────────────────────────
@@ -2566,6 +2800,8 @@ function registerBootReadyAudit(ctx: Context): void {
   }, 'dsh-android-manage: boot readiness audit')
 }
 
+
+
 export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
   const priv = (ctx as unknown as { androidPrivilege?: PrivilegeFace }).androidPrivilege
   if (!priv) {
@@ -2575,8 +2811,24 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
     gateFor: () => ({ ok: false, guidance: '授权桥（dsh-android-bridge）未装配' }),
     audit: () => {},
   }
+  // #688：清单作用域已在 tools() 里逐个工具套好（会话 + 目标屏），这里直接注册。
   for (const t of tools(ctx, face)) ctx.tools.register(t)
 
   // 启动就绪审计（异步、不阻塞 boot、异常不上抛）。
   registerBootReadyAudit(ctx)
+}
+
+/**
+ * #679：nonce 不可用时给模型的**可自助**报错（放在文件末尾以保持既有行号锚点零位移；
+ * `function` 声明会被提升，调用点在前面也没问题）。
+ *
+ * 为什么必须在这里返回而不是发一条注定被拒的广播：壳侧已撤销 shell/root 的 uid 白名单，
+ * 只认 nonce，空 auth 的广播 100% 回 result=3——那会把「凭据缺失」伪装成「来源被拒」。
+ */
+function kbAuthMissingText(reason: string): string {
+  return '未执行：键盘 nonce 不可用（' + reason + '）。'
+    + '壳侧已不再信任 uid 白名单（#679：Shizuku 的 shell 与 root 模式都能把身份借给第三方应用），'
+    + '没有 nonce 就发不出广播。最常见原因是壳与插件不同版——请安装同版本的 APK 与快照。'
+    + '诊断：adb shell run-as com.dsharnessmobile.shell cat files/boot-diag.log'
+    + '（查 adb-keyboard-nonce-unavailable / adb-keyboard-nonce-write-failed）'
 }

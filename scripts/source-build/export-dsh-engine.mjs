@@ -9,28 +9,28 @@ import { dirname, join, relative, resolve } from 'node:path'
 // 规范化实现与检查器**共用同一份**（见 normalize-snapshot.mjs 顶部）：构建期写进去的
 // 规范形态与校验期算出来的必须是同一件事，否则摘要对不上。两处各写一份迟早漂移。
 import { canonicalizePackedManifest } from './normalize-snapshot.mjs'
+import { readHarnessIdentity } from './harness-identity.mjs'
 
 const repo = resolve(process.argv[2] ?? '')
 const cache = resolve(process.argv[3] ?? '')
-const expectedCommit = '639ed015397290b3745d163aafe02ffee4aa3f84'
 const overlayPath = resolve('scripts/snapshot-config/engine-overlay.json')
 if (!process.argv[2] || !process.argv[3]) {
   console.error('usage: node scripts/source-build/export-dsh-engine.mjs <dsh-source-root> <overlay-cache>')
   process.exit(2)
 }
 
+const { commit: expectedCommit, version: expectedVersion, packageManager } = readHarnessIdentity()
 const git = (...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim()
 const commit = git('rev-parse', 'HEAD')
 if (commit !== expectedCommit) throw new Error(`unexpected DeepSeek Harness commit: ${commit}`)
 
 const overlay = JSON.parse(readFileSync(overlayPath, 'utf8'))
 const sourcePackage = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'))
-// 身份一律从合同读（0.14.8）：上游 0.2.1 把 pnpm 由 11.7.0 抬到 11.28.5。
-// 写死版本号的后果是每次引擎追版后这条断言静默失效或误判红。
-const contract = JSON.parse(readFileSync(join(process.cwd(), 'scripts', 'contract.json'), 'utf8'))
-if (sourcePackage.version !== contract.baseline || sourcePackage.packageManager !== contract.upstream.packageManager
-  || overlay.engineVersion !== contract.baseline || overlay.rootPackage?.version !== contract.baseline) {
-  throw new Error('source export requires official ' + contract.baseline + ' source/overlay and ' + contract.upstream.packageManager)
+// 身份一律从合同读：上游每次追版都可能同时改版本号与 pnpm 版本。
+// 写死版本号的后果是这条断言静默失效或误判红（0.2.0-rc.2 的绑定就是这样遗留下来的）。
+if (sourcePackage.version !== expectedVersion || sourcePackage.packageManager !== packageManager
+  || overlay.engineVersion !== expectedVersion || overlay.rootPackage?.version !== expectedVersion) {
+  throw new Error('source export requires official ' + expectedVersion + ' source/overlay and ' + packageManager)
 }
 const lockfilePath = join(repo, 'pnpm-lock.yaml')
 if (!existsSync(lockfilePath)) throw new Error('pinned Harness source is missing pnpm-lock.yaml')

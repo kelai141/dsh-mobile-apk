@@ -155,6 +155,44 @@ const packageBase = patch.target.slice(0, Math.max(libIdx, distIdx))
   }
 }
 
+/** Resolve exact telemetry requirements using the consumer's actual nested lookup order. */
+function exactRuntimeDependencyGaps(present, roots) {
+  const gaps = []
+  const seen = new Set()
+  const queue = [...roots]
+  const resolvePackage = (consumer, dependency) => {
+    let directory = consumer.slice(0, consumer.lastIndexOf('/'))
+    while (directory) {
+      const candidate = directory + '/node_modules/' + dependency + '/package.json'
+      if (!directory.endsWith('/node_modules') && directory !== 'node_modules'
+        && present[candidate]?.name === dependency) return candidate
+      directory = directory.slice(0, Math.max(0, directory.lastIndexOf('/')))
+    }
+    return null
+  }
+  while (queue.length) {
+    const consumer = queue.shift()
+    if (seen.has(consumer)) continue
+    seen.add(consumer)
+    const metadata = present[consumer]
+    if (!metadata) continue
+    for (const [dependency, required] of Object.entries(metadata.runtimeRequirements ?? {})) {
+      const resolved = resolvePackage(consumer, dependency)
+      if (!resolved) {
+        gaps.push({ consumer, dependency, required, actual: null, resolved: null })
+        continue
+      }
+      const actual = present[resolved].version
+      if (/^\d+\.\d+\.\d+(?:-[\w.-]+)?(?:\+[\w.-]+)?$/.test(required) && actual !== required) {
+        gaps.push({ consumer, dependency, required, actual, resolved })
+      }
+      queue.push(resolved)
+    }
+  }
+  return gaps
+}
+// Exact dependency resolution ends.
+
 const py = `
 import tarfile, json, sys
 want = set(json.loads(open(sys.argv[2], 'r', encoding='utf-8').read()))
@@ -207,7 +245,8 @@ with tarfile.open(sys.argv[1], 'r|xz') as t:
                       'deps': list((j.get('dependencies') or {}).keys())
                               + list((j.get('optionalDependencies') or {}).keys())
                               + list((j.get('peerDependencies') or {}).keys()),
-                      'runtimeDeps': list((j.get('dependencies') or {}).keys())}
+                      'runtimeDeps': list((j.get('dependencies') or {}).keys()),
+                      'runtimeRequirements': j.get('dependencies') or {}}
 print(json.dumps({'hits': hits, 'carriers': carriers, 'present': present, 'rowFiles': rowFiles, 'lookedNonPkg': looked_non_pkg}))
 `
 let res
@@ -292,7 +331,7 @@ for (const [path, meta] of want) {
     if (ver !== meta.version) fails.push(`[${meta.kind}] 版本不符: ${meta.name} 期望 ${meta.version} 实得 ${ver}`)
     checked++
   } else if (meta.kind === 'patch-marker') {
-    if (!meta.verifier && !content.includes(meta.marker)) fails.push(`[patch-marker] ${meta.name} 标记「${meta.marker}」缺席（补丁未施加或版本漂移）`)
+    if (!meta.verifier && !content.includes(meta.marker)) fails.push(`[patch-marker] ${meta.name} 标记「${meta.marker}」缺席（快照早于本代码集的补丁集，或补丁未施加；engine 补丁在构建快照时施加，官方 release 快照只含它发布那一刻的补丁集 —— 请用 node scripts/build-snapshot-013.mjs <abi> 按当前代码集重建快照后再打包）`)
     for (const marker of meta.requiredMarkers ?? []) {
       if (!content.includes(marker)) fails.push(`[patch-marker] ${meta.name} 必需标记「${marker}」缺席（快照来自旧补丁集）`)
     }
@@ -394,6 +433,14 @@ for (const [path, meta] of want) {
    * 现改为**传递闭包（BFS）**：从行面出发逐层要求在场，缺口逐条列出**完整引用链**
    * （行面 -> … -> 缺的包），逼一次显式裁决。引用链是本改造的全部价值：它把「谁把这条依赖引进来的」
    * 直接写在失败输出里，排障者不必再手推闭包。 */
+  // Telemetry uses exact experimental SDK versions; package presence is insufficient.
+  const telemetryRoots = ['@deepseek-ai/dsh-otel', '@deepseek-ai/dsh-session-telemetry-otel']
+    .filter(name => mounted.has(name))
+    .map(name => NM + 'node_modules/' + name + '/package.json')
+  for (const gap of exactRuntimeDependencyGaps(present, telemetryRoots)) {
+    fails.push('[telemetry-runtime] ' + gap.consumer + ' requires ' + gap.dependency + '@' + gap.required
+      + ', resolved ' + (gap.actual ?? 'missing') + ' at ' + (gap.resolved ?? 'no package'))
+  }
   const runtimeGaps = new Map()
   const closureReached = new Set()
   {

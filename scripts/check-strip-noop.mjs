@@ -53,9 +53,25 @@ if (process.argv.includes('--self-test')) {
   const dirty = mkTar('dirty', ['home/.dsh/settings.yaml', 'home/.dsh/attachments/leak.txt'])
   const cleanRun = spawnSync(process.execPath, [fileURLToPath(import.meta.url), clean], { encoding: 'utf8' })
   const dirtyRun = spawnSync(process.execPath, [fileURLToPath(import.meta.url), dirty], { encoding: 'utf8' })
+  // issue #1188：清单被改小时必须判红 —— 用「安全关键项消失」这一格做反证。
+  // 手法：临时把 strip.json 备份后改成丢了 .credentials.yaml 的版本，跑一次看是否判红。
+  // 自检结束时无论成败都还原，绝不把仓库文件留在改动状态。
+  const STRIP = join(ROOT, 'scripts', 'snapshot-config', 'strip.json')
+  const stripOrig = readFileSync(STRIP, 'utf8')
+  let droppedRun
+  try {
+    const broken = JSON.parse(stripOrig)
+    broken.secretLeaves = (broken.secretLeaves ?? []).filter((p) => p !== '.credentials.yaml')
+    writeFileSync(STRIP, JSON.stringify(broken, null, 2) + '\n')
+    droppedRun = spawnSync(process.execPath, [fileURLToPath(import.meta.url), clean], { encoding: 'utf8' })
+  } finally {
+    writeFileSync(STRIP, stripOrig)
+  }
   const ok = cleanRun.status === 0 && dirtyRun.status === 1 && dirtyRun.stdout.includes('attachments')
+    && droppedRun.status === 1 && (droppedRun.stdout + droppedRun.stderr).includes('安全关键项')
   console.log((ok ? 'STRIP-NOOP SELF-TEST PASSED' : 'STRIP-NOOP SELF-TEST FAILED')
-    + '（干净 tar exit=' + cleanRun.status + ' 期望 0；含 attachments 泄漏的 tar exit=' + dirtyRun.status + ' 期望 1）')
+    + '（干净 tar exit=' + cleanRun.status + ' 期望 0；含 attachments 泄漏 exit=' + dirtyRun.status
+    + ' 期望 1；清单删掉 .credentials.yaml 后 exit=' + droppedRun.status + ' 期望 1）')
   if (!ok) console.log((dirtyRun.stdout + dirtyRun.stderr).slice(0, 300))
   rmSync(tmp, { recursive: true, force: true })
   process.exit(ok ? 0 : 1)
@@ -76,6 +92,33 @@ const items = [
   ...(strip.runtimeDirs ?? []).map((p) => ({ kind: 'runtimeDirs', rel: p.replace(/\/$/, ''), dir: true })),
 ]
 if (items.length === 0) { console.error('CHECK-STRIP-NOOP FAILED：strip.json 清单为空（清单失效？）'); process.exit(1) }
+
+// issue #1188：**清单与反证不能同源**。
+//
+// 旧实现的全部断言都从 strip.json 派生：清单就是判据的唯一来源。于是 strip.json 里任一条
+// 路径写错（少一个点、前缀漂移），那一类判据整类消失，checked 计数静默缩小，门禁照样 PASSED。
+// 后果具体：`.credentials.yaml` 被写成 `credentials.yaml`，凭证就随快照出厂而门禁全绿。
+//
+// 修法：加一份**独立于 strip.json** 的安全关键期望集。它只列「无论如何都不能随快照出厂」的项，
+// 与 strip.json 的完整清单分开维护 —— 两份来源不一致时才可能发现「清单被改小」。
+//
+// 为什么只列这几项、不把整份清单复制一份：
+// 复制整份清单等于把同源问题搬个位置（改错时两处一起改）。这里只钉住**安全关键**的最小集合，
+// 其余条目仍由 strip.json 驱动。清单可以增删，但这几项消失必须有人解释。
+const SECURITY_CRITICAL = [
+  { kind: 'secretLeaves', rel: '.credentials.yaml' },
+  { kind: 'secretLeaves', rel: '.anonymous-user-id' },
+  { kind: 'runtimeDirs', rel: 'sessions' },
+]
+const declared = new Set(items.map((it) => it.kind + ':' + it.rel))
+const dropped = SECURITY_CRITICAL.filter((c) => !declared.has(c.kind + ':' + c.rel))
+if (dropped.length > 0) {
+  console.error('CHECK-STRIP-NOOP FAILED：安全关键项从 strip.json 里消失了（' + dropped.length + ' 条）')
+  for (const d of dropped) console.error('  - ' + d.kind + ': ' + d.rel)
+  console.error('  清单是判据的唯一来源 —— 清单少了条目，对应的剥离断言就整类消失，门禁会静默变绿。')
+  console.error('  若确实要移除某项，请同时修改本文件的安全关键集合并说明理由。')
+  process.exit(1)
+}
 
 // 输入抽象：stage 树 → 文件系统；tar → 成员集合
 let tarEntries = null

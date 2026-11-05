@@ -97,6 +97,23 @@ function readPackages() {
 
 const packages = readPackages()
 const failures = []
+
+// issue #1193：**空包清单不得判绿**。
+//
+// 本门禁的全部许可义务都从 dpkg 包清单派生。清单为空（0 字节 / 被截断 / 被剥离）时
+// 逐包循环一次都不执行，failures 恒空 —— 于是「零组件 = 零违规 = 合规」，
+// 而这与本门禁存在的目的（发布前证明第三方许可义务已覆盖）正好相反。
+//
+// 判据本身没坏（塞一个未知包会红），缺的是「清单不能是空的」这一条。
+// 阈值取 1 而非某个大数：快照真实包数随版本变化，写死大数会变成新的漂移源；
+// 这里只断言「非空」，把「包数异常少」留给上游快照门禁（各守各的面）。
+const MIN_PACKAGES = 1
+if (packages.length < MIN_PACKAGES) {
+  console.error('THIRD-PARTY CHECK FAILED：dpkg 包清单为空（读到 ' + packages.length + ' 个包）')
+  console.error('  许可义务全部由包清单派生 —— 空清单会让所有逐包判据空转并判绿。')
+  console.error('  常见原因：var/lib/dpkg/status 缺失 / 0 字节 / 被剥离 / --tar 内路径不对。')
+  process.exit(1)
+}
 const copyleft = []
 const rows = []
 const avail = availability()

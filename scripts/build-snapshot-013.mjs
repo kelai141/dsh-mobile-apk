@@ -14,8 +14,10 @@ import { mkdirSync, existsSync, writeFileSync, readFileSync, readdirSync, rmSync
 import { join, dirname, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
-import { wslPath, sh as wsl, XZ_THREADS } from './lib/shell.mjs'
+import { wslPath, sh as wsl, shStatus, XZ_THREADS, wslNodeCommand } from './lib/shell.mjs'
 import { sanitizeSymlinks } from './lib/symlink-sanitize.mjs'
+import { assertOverlayDigest } from './lib/overlay-integrity.mjs'
+import { overlayCacheHit, overlayCacheStore } from './lib/overlay-cache.mjs'
 import { relocateGitShellPath } from './lib/git-shell-path.mjs'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -30,19 +32,13 @@ if (!['arm64', 'x86_64'].includes(ABI)) { console.error('用法: node build-snap
 // 只有最终 tar.xz 写回 D:。故 Windows 上直接把自己重新执行进 WSL。
 // DSH_NO_WSL_REEXEC=1 跳过（调试/无 WSL 环境回退到旧的 D: 工作区）。
 if (process.platform === 'win32' && process.env.DSH_NO_WSL_REEXEC !== '1') {
-  const forwarded = ['DSH_SNAPSHOT_STAGE', 'SOURCE_DATE_EPOCH', 'DSH_INJECT_PRESET']
-    .filter((key) => process.env[key])
-    .map((key) => `${key}=${JSON.stringify(process.env[key])}`)
-    .join(' ')
-  const inner = `cd ${wslPath(ROOT)} && node scripts/build-snapshot-013.mjs ${ABI}`
-  const command = forwarded ? `${forwarded} ${inner}` : inner
-  log0(`Windows 宿主 → 转入 WSL 内执行（工作区落 ext4）：${inner}`)
-  try {
-    execSync(`wsl.exe -e bash -lc ${JSON.stringify(command)}`, { stdio: 'inherit' })
-    process.exit(0)
-  } catch (error) {
-    process.exit(typeof error.status === 'number' ? error.status : 1)
-  }
+  const forwarded = Object.fromEntries(['DSH_SNAPSHOT_STAGE', 'SOURCE_DATE_EPOCH', 'DSH_INJECT_PRESET']
+    .filter((key) => process.env[key]).map((key) => [key, process.env[key]]))
+  const command = wslNodeCommand(wslPath(ROOT), 'scripts/build-snapshot-013.mjs', [ABI], forwarded)
+  log0('Windows 宿主 → 转入 WSL 内执行（工作区落 ext4）')
+  const child = spawnSync('wsl.exe', ['-e', 'bash', '-lc', command], { stdio: 'inherit' })
+  if (child.error) console.error(child.error.message)
+  process.exit(child.status ?? 1)
 }
 function log0(msg) { console.log(`[build-013/${ABI}] ${msg}`) }
 
@@ -118,11 +114,11 @@ mkdirSync(join(STAGE, 'root'), { recursive: true })
 // **并发上限 8（0.14.1 用户拍板，系统级约束）**：此处原为 `-dT0`（吃满 16 逻辑核），会把开发机
 // 撑满 → 同时运行的 MuMu 模拟器卡顿/系统不稳；「模拟器优先」是铁律 2。统一用 shell.mjs 的 XZ_THREADS。
 log('解压基座（WSL）…')
-wsl(`set -o pipefail; mkdir -p "${wslPath(join(STAGE, 'root'))}" && xz -dT${XZ_THREADS} -c "${wslPath(baseTar)}" | tar -x -C "${wslPath(join(STAGE, 'root'))}" && du -sh ${wslPath(join(STAGE, 'root', 'usr'))} | cut -f1`)
+wsl(`mkdir -p "${wslPath(join(STAGE, 'root'))}" && xz -dT${XZ_THREADS} -c "${wslPath(baseTar)}" | tar -x -C "${wslPath(join(STAGE, 'root'))}" && du -sh ${wslPath(join(STAGE, 'root', 'usr'))} | cut -f1`)
 // home/.dsh 配置层在独立基座包（架构无关），一并合并
 const baseDsh = join(BASE_DIR, 'base-dsh.tar.xz')
 if (existsSync(baseDsh)) {
-  wsl(`set -o pipefail; xz -dT${XZ_THREADS} -c "${wslPath(baseDsh)}" | tar -x -C "${wslPath(join(STAGE, 'root'))}"`)
+  wsl(`xz -dT${XZ_THREADS} -c "${wslPath(baseDsh)}" | tar -x -C "${wslPath(join(STAGE, 'root'))}"`)
   log('合并 base-dsh（home/.dsh 配置层）')
 }
 // 🔒 机密剥离（安全审计 C1，2026-08-23）：base-dsh 是从运行中设备提取的配置层，
@@ -216,7 +212,9 @@ const OVERLAY_MIRRORS = PREINSTALL.npmMirrors
 let overlayOk = 0
 const overlayTgz = async (name, version) => {
   const dest = join(OVERLAY_CACHE, `${name.replace('@', '').replace('/', '-')}-${version}.tgz`)
-  if (existsSync(dest)) return dest
+  // issue #1414：命中也要校验（sidecar 摘要）；残档/无摘要的旧缓存会被清掉并重下。
+  const cached = overlayCacheHit(dest)
+  if (cached !== null) return cached
   mkdirSync(OVERLAY_CACHE, { recursive: true })
   let meta = null
   for (const m of OVERLAY_MIRRORS) {
@@ -230,11 +228,11 @@ const overlayTgz = async (name, version) => {
   const dist = meta?.versions?.[version]?.dist
   if (!dist) throw new Error(`overlay 元数据不可得: ${name}@${version}`)
   const buf = Buffer.from(await (await fetch(dist.tarball, { signal: AbortSignal.timeout(300000) })).arrayBuffer())
-  if (dist.sha512 && createHash('sha512').update(buf).digest('base64') !== dist.sha512) {
-    throw new Error(`overlay sha512 不匹配: ${name}@${version}`)
-  }
-  writeFileSync(dest, buf)
-  return dest
+  // issue #1415：旧写法 `if (dist.sha512 && …)` 在镜像不返回 sha512 时静默放行远端字节。
+  // 判据收口在 lib/overlay-integrity.mjs（缺摘要即拒，integrity=sha512-… 也能比）。
+  assertOverlayDigest(dist, buf, `${name}@${version}`)
+  // issue #1414：临时文件 + rename 原子落盘，并写 sidecar 供下次命中校验。
+  return overlayCacheStore(dest, buf)
 }
 // 树内路径：scoped 包落在 node_modules/<scope>/<name>（基座实证 @deepseek-ai 域有嵌套 scope 目录）
 const overlayPkgDir = (name, base = ENGINE_NM_STAGE) => {
@@ -445,18 +443,6 @@ for (const entry of OVERLAY.keepUnpublished ?? []) {
   log(`浏览器语法下限降级就位（chrome87；扫描 ${scannedFiles} 个浏览器面文件，改写 ${degradedFiles} 个，降级后复扫全绿）`)
 }
 
-// ── 0g. 能力发现目录快照（0.13.5 W3）：从 stage 引擎树生成 dsh-model-capability 的厂商目录索引 ──
-// 数据必须与本次构建的引擎树同源（精确模型 id → thinkingLevelMap/input/compat），
-// 生成物落在插件 lib/（随注入进快照），因此必须在注入步骤之前完成；引擎升级后自动跟随。
-{
-  const pluginDir = join(ROOT, 'plugins', 'dsh-model-capability')
-  if (existsSync(join(pluginDir, 'package.json'))) {
-    const generator = join(ROOT, 'scripts', 'gen-model-catalog.mjs')
-    const outFile = join(pluginDir, 'lib', 'catalog-snapshot.json')
-    execSync(`node "${generator}" --engine-root "${join(STAGE, 'root')}" --out "${outFile}"`, { encoding: 'utf8', stdio: 'inherit' })
-    log('能力目录快照已生成（plugins/dsh-model-capability/lib/catalog-snapshot.json）')
-  }
-}
 
 // ── 1. Termux 索引（镜像回退链 + 404/超时快速失败）──
 async function fetchMirror(path, timeoutMs = 20000) {
@@ -475,6 +461,10 @@ async function fetchMirror(path, timeoutMs = 20000) {
 }
 
 log('解析 Termux 索引（binary-' + TERMUX_PKG + '）…')
+// OUT_DIR 下面几个写点（Packages / .debs / snapshot.tar.xz）都假定它已存在。
+// 全新 checkout 里 .deploy-tmp 是空的（gitignore），不建目录就会在第一条 writeFileSync
+// 上抛 ENOENT，表现为「解析 Termux 索引」这一步失败——而这跟索引本身毫无关系。
+mkdirSync(OUT_DIR, { recursive: true })
 const gz = await fetchMirror(`/dists/stable/main/binary-${TERMUX_PKG}/Packages.gz`)
 const { gunzipSync } = await import('node:zlib') // 动态加载避免顶层依赖
 writeFileSync(INDEX_BODY, gunzipSync(gz.buf))
@@ -627,10 +617,49 @@ log('dpkg status: ' + dpkgStatus.length + ' 包，available: ' + availableBlocks
 // ── 6. shebang 与 ELF RUNPATH 重写（com.termux → com.dsharnessmobile.shell）──
 log('重写 shebang/RUNPATH…')
 execSync(`${PYTHON} scripts/fix-shebang.py "${U}" ${NEW_PREFIX}`, { encoding: 'utf8', stdio: 'inherit' })
-// termux-elf-cleaner：清理 ELF 中残留 com.termux RUNPATH（幂等：已清理的无操作）
+// termux-elf-cleaner：清理 ELF 中残留 com.termux RUNPATH。
+//
+// 【issue #1147】它是 **Android 目标**的 ELF，不是宿主 ELF：
+//   $ file usr/bin/termux-elf-cleaner
+//   ELF 64-bit LSB shared object, x86-64, ... interpreter /system/bin/linker64, stripped
+//   NEEDED: libc++_shared.so, libdl.so, libc.so     ← bionic，不是 glibc
+// CPU 架构与 WSL 相同（都是 x86-64），但**解释器是 Android 的 /system/bin/linker64**，
+// 宿主上没有它，内核无法加载该映像，bash 报
+//   "cannot execute: required file not found"
+// 并返回 **127**。所以这不是路径写错、也不是缺可执行位，是**平台不匹配**——
+// 在 Windows/WSL/macOS/Linux 构建机上它永远跑不起来。
+//
+// 判据（为什么跳过不改变产物，而不是「掩盖错误」）：
+//   实测基座 x64-base 的 usr/bin 有 361 个 ELF，**361 个**的 RUNPATH 都含
+//   /data/data/com.termux/files/usr/lib；而**已发布的 v0.14.10 官方快照**里 usr/bin
+//   有 393 个 ELF，**393 个仍是原样**（同样含 com.termux，不含的 0 个）。
+//   即：这一步在历史所有发布产物里**从未真正生效过**。#1121 之前它被 `| tail -3` 吞掉
+//   退出码（管道状态取末尾 tail=0），构建照样「成功」，产物带着原 RUNPATH 发布并正常使用
+//   ——设备侧靠 LD_LIBRARY_PATH 解析库。是 #1121 给 sh() 加 pipefail 后才暴露成硬失败。
+//   因此宿主上跳过它**不改变产物**：与历史发布件在这一项上逐项相同。
+//   也没有任何门禁断言 RUNPATH 必须干净（elf-check.mjs 只看 ELF 头 machine 字段）。
+//
+// 处置：用**平台探测**决定是否执行，而不是无条件跳过、也不是掩盖退出码。
+//   - 宿主有 Android linker（Termux/Android 上构建）→ 照旧真跑；跑失败即中止（不静默）。
+//   - 宿主没有 → 显式跳过并打印原因。
+// 真要清理 com.termux RUNPATH，正确做法是在宿主侧用 glibc 工具改写（如 patchelf），
+// 而不是在宿主上执行 Android 二进制；那是独立改动，见 #1147。
 const cleaner = join(U, 'bin', 'termux-elf-cleaner')
 if (existsSync(cleaner)) {
-  wsl(`cd "${wslPath(U)}" && chmod +x bin/termux-elf-cleaner && LD_LIBRARY_PATH=lib bin/termux-elf-cleaner bin/* 2>/dev/null | tail -3`)
+  const androidLinker = shStatus('test -x /system/bin/linker64')
+  if (androidLinker.status === 0) {
+    // 去掉原来的 `2>/dev/null | tail -3`：它把 stderr 现场和退出码都丢了。
+    const run = shStatus(`cd "${wslPath(U)}" && chmod +x bin/termux-elf-cleaner && LD_LIBRARY_PATH=lib bin/termux-elf-cleaner bin/*`)
+    if (run.status !== 0) {
+      console.error(`termux-elf-cleaner 执行失败（退出码 ${run.status}）：`)
+      console.error((run.stderr || run.stdout || '').trim().split('\n').slice(-20).join('\n'))
+      process.exit(1)
+    }
+    log('termux-elf-cleaner 已执行（宿主具备 Android linker）')
+  } else {
+    log('跳过 termux-elf-cleaner：宿主无 /system/bin/linker64，Android 目标 ELF 无法加载'
+      + '（issue #1147；历史发布件同样是原样 RUNPATH，本步骤不改变产物）')
+  }
 }
 
 // ── 7. 三缺陷固化 ──────────────────────────────────────────────────────
@@ -719,10 +748,77 @@ if (shellPath.hits > 0) {
   console.warn('警告: git SHELL_PATH 白名单为空（git.real / libexec/git-core 缺失，apk#247 未施加）')
 }
 
-// ── 7e. pnpm standalone（F4 市场安装的运行时依赖——`dsh plugin add` 走 pnpm，见 apps/cli plugin.ts）──
+// ── 7e. pnpm / npm standalone shim（F4 市场安装的运行时依赖——`dsh plugin add` 走 pnpm，见 apps/cli plugin.ts）──
 // 快照无 pnpm 时市场一键安装失败（实测 "pnpm not found on PATH"）：从 npm registry 拉 standalone 包
 // （自包含，bundledDependencies），解到 usr/lib/node_modules/pnpm + usr/bin/pnpm shim（node 执行）。
 // 镜像链（与 termux MIRRORS 同思路）：registry.npmjs.org → registry.npmmirror.com（下载失败回退）。
+//
+// 真机实证（小米12 / HyperOS2 / Android14，实例跑在 Android 多用户 user 10 上）：早先的 shim 把
+// 构建期 NEW_PREFIX（/data/user/0/<pkg>/files/usr）**烧死在 exec 行**里，而该设备的真实前缀是
+// /data/user/10/<pkg>/files/usr ⇒ exec 的 node 路径不存在 ⇒ exit 127，所有 pnpm 安装链
+// （插件市场 / 普通插件 / subagent）全废。同类风险还有第 6 步 fix-shebang.py 的 A/B 类重写——
+// 它会把 usr/bin、usr/lib 下的裸 env shebang 一并钉到同一个构建期前缀。
+// 结论：**shim 必须自定位**——前缀在设备上由 $0 反推（解析软链后取上一级目录 = usr），构建期一个字面量都不烧。
+//
+// 落点两个，共用同一份模板：
+//   usr/bin/pnpm -> lib/node_modules/pnpm/bin/pnpm.cjs（standalone 包，本段下载）
+//   usr/bin/npm  -> lib/node_modules/npm/bin/npm-cli.js（基座自带 npm payload）
+//
+// 写前必须先删旧条目：基座里的 usr/bin/npm 是**指向 ../lib/node_modules/npm/bin/npm-cli.js 的软链**，
+// 而 writeFileSync 默认 flag='w' 会**跟随软链**写——直接把 npm-cli.js 本体写坏（pnpm 落点同样防御）。
+const NPM_CLI_REL = 'lib/node_modules/npm/bin/npm-cli.js'
+
+/**
+ * 生成自定位 shim 文本（pnpm / npm 共用；逐字节模板只替换 <LABEL> / <PKG> / <CLI>）。
+ *
+ * 运行时算法：$0 可能是裸命令名（PATH 命中）也可能是路径 -> command -v 归一成路径；有 readlink
+ * 就解析软链（无 readlink 或解析失败均退化为原路径）；取上一级目录 = usr，此后 node 与包体相对它拼。
+ */
+const selfLocatingShim = (label, pkg, cli) => [
+  '#!/system/bin/sh',
+  '# dsh-mobile: ' + label + ' shim (self-locating; prefix is derived from $0 so a non-user-0 install prefix still finds node)',
+  'self=$0',
+  'case "$self" in /*) ;; *) self=$(command -v "$self") ;; esac',
+  'if command -v readlink >/dev/null 2>&1; then',
+  '  resolved=$(readlink -f "$self" 2>/dev/null) || resolved=',
+  '  [ -n "$resolved" ] && self=$resolved',
+  'fi',
+  'prefix=$(cd "$(dirname "$self")/.." && pwd)',
+  'export LD_LIBRARY_PATH="$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"',
+  'exec "$prefix/bin/node" "$prefix/lib/node_modules/' + pkg + '/bin/' + cli + '" "$@"',
+  '',
+].join('\n')
+
+/**
+ * 落一个 shim（usr 树内相对路径）：先 lstat 判定，已存在（含软链）就删，再以 0755 重建普通文件。
+ * 不删就写会跟随软链写到目标本体上（基座 usr/bin/npm 正是这种形态），把 npm-cli.js 写坏。
+ */
+const writeShim = (rel, text) => {
+  const dest = join(U, rel)
+  let st = null
+  try {
+    st = lstatSync(dest)
+  } catch (e) {
+    if (e?.code !== 'ENOENT') throw e
+  }
+  if (st) {
+    let kind = 'file'
+    if (st.isSymbolicLink()) {
+      let target = '?'
+      try { target = readlinkSync(dest) } catch { /* 悬空链：按软链处理即可 */ }
+      kind = 'symlink -> ' + target
+    }
+    rmSync(dest, { force: true })
+    log('  替换已存在的 usr/' + rel + '（' + kind + '）——不删旧条目会跟随软链写坏目标本体')
+  }
+  writeFileSync(dest, text, { mode: 0o755 })
+}
+
+// 写后自检判据（7e 尾部逐条断言）：
+//   ① shim 文本不得含构建期设备前缀字面量（/data/user/<n>/ 或旧 Termux 前缀）——多用户设备上必 127；
+//   ② 自定位行必须在场——只证明「没烧前缀」不够，还要证明「会自定位」。
+const SHIM_BUILTIN_PREFIX_RE = /\/data\/(user\/\d+|data\/com\.termux)\//
+const SHIM_SELF_LOCATE_LINE = 'prefix=$(cd "$(dirname "$self")/.." && pwd)'
 log('装配 pnpm（standalone，F4 安装链）…')
 const PNPM_VERSION = PREINSTALL.pnpm.version
 const NPM_MIRRORS = PREINSTALL.npmMirrors
@@ -755,12 +851,33 @@ try {
     log(`  pnpm ${PNPM_VERSION} downloaded from ${mirror} (${(buf.length / 1024 / 1024).toFixed(1)} MB)`)
   }
   wsl(`mkdir -p "${wslPath(join(U, 'lib/node_modules/pnpm'))}" && tar -xzf "${wslPath(pnpmTgz)}" -C "${wslPath(join(U, 'lib/node_modules/pnpm'))}" --strip-components=1 && chmod -R a+rX "${wslPath(join(U, 'lib/node_modules/pnpm'))}"`)
-  writeFileSync(
-    join(U, 'bin/pnpm'),
-    `#!/system/bin/sh\n# dsh-mobile: pnpm standalone shim（npm registry 打包，自包含；node 由快照提供）\nexec "${NEW_PREFIX}/bin/node" "${NEW_PREFIX}/lib/node_modules/pnpm/bin/pnpm.cjs" "$@"\n`,
-    { mode: 0o755 },
-  )
-  log('  pnpm shim 就位: usr/bin/pnpm -> lib/node_modules/pnpm/bin/pnpm.cjs')
+  const pnpmShimText = selfLocatingShim('pnpm standalone', 'pnpm', 'pnpm.cjs')
+  writeShim('bin/pnpm', pnpmShimText)
+  log('  pnpm shim 就位: usr/bin/pnpm -> lib/node_modules/pnpm/bin/pnpm.cjs（前缀运行时自定位）')
+
+  // npm 落点：payload 必须在场——缺失说明基座 npm 树没装配，shim 装了也是死链，必须可见失败。
+  if (!existsSync(join(U, NPM_CLI_REL))) {
+    console.error('  [npm shim 装配失败] 缺 usr/' + NPM_CLI_REL + '（基座 npm payload 未装配）——拒绝出快照')
+    process.exit(1)
+  }
+  const npmShimText = selfLocatingShim('npm CLI', 'npm', 'npm-cli.js')
+  writeShim('bin/npm', npmShimText)
+  log('  npm shim 就位: usr/bin/npm -> ' + NPM_CLI_REL + '（前缀运行时自定位）')
+
+  // 写后自检：两个 shim 都不得含构建期前缀字面量，自定位行必须在场（任一不满足即拒绝出快照）。
+  for (const [rel, text] of [['bin/pnpm', pnpmShimText], ['bin/npm', npmShimText]]) {
+    const hit = SHIM_BUILTIN_PREFIX_RE.exec(text)
+    if (hit) {
+      console.error('  [shim 自检失败] usr/' + rel + ' 含构建期设备前缀字面量 ' + hit[0]
+        + '——多用户设备（/data/user/<n>）上 exec 必失败（exit 127）')
+      process.exit(1)
+    }
+    if (!text.includes(SHIM_SELF_LOCATE_LINE)) {
+      console.error('  [shim 自检失败] usr/' + rel + ' 缺自定位行: ' + SHIM_SELF_LOCATE_LINE)
+      process.exit(1)
+    }
+    log('  shim 自检通过: usr/' + rel + '（无构建期前缀字面量 + 自定位行在场）')
+  }
 } catch (e) {
   // 不静默：市场安装是本里程碑验收项，装配失败必须可见（build-apk 门禁会因此拒绝打包）
   console.error(`  [pnpm 装配失败] ${e?.stack ?? String(e)}`)
@@ -1117,6 +1234,49 @@ for (const entry of SLIM.platformDeadPackages ?? []) {
 //   ④ 其它越界绝对链：删除并计数（不删也必然被设备丢弃，留着只会让归档与设备不一致）。
 // 判据不是「链接看起来对不对」，而是**归档里不得存在任何设备必然丢弃的条目**（见本步之后的产物自检）。
 const STAGE_ROOT = join(STAGE, 'root')
+// ── 8a3b. profile 共享农场补齐（0.15.x，订阅 provider 引入）───────────────────
+//
+// 为什么要这一步：vendored 的 dsh-plugin-subscriptions 注入在 profiles/web|headless/node_modules/，
+// 它的 `import 'undici'` 由 Node 沿祖先目录向上解析 —— 能到达的只有 <profile>/node_modules 与
+// profiles/node_modules（共享农场），**到不了引擎树** usr/lib/node_modules/@deepseek-ai/dsh/node_modules/。
+// 基座 bootstrap 的农场只为「基座自己的依赖」建链，undici 不在其中，于是插件在设备上
+// ERR_MODULE_NOT_FOUND（实测：未补齐时 IMPORT FAIL）。不补齐就得把 undici 复制进 profile（+1.5MB）。
+//
+// 做法：为每个「引擎树有、农场没有」的共享依赖建一条**相对链**指向引擎树。幂等 + 可重建：
+// 目标路径每次按 ENGINE_NM_STAGE 现算，引擎目录换代自动跟着变；已存在且解析正确则跳过，指错则重指。
+// 清单为空时本步是 no-op。
+const PROFILE_SHARED_LINKS = [
+  // 插件把 undici 声明为 peer（见 vendor/dsh-plugin-subscriptions/PROVENANCE.md），由引擎提供。
+  'undici',
+]
+{
+  const farm = join(STAGE_ROOT, 'home', '.dsh', 'profiles', 'node_modules')
+  if (existsSync(farm)) {
+    let made = 0
+    let kept = 0
+    for (const name of PROFILE_SHARED_LINKS) {
+      const target = join(ENGINE_NM_STAGE, name)
+      if (!existsSync(join(target, 'package.json'))) {
+        console.warn('  警告: 共享农场依赖在引擎树缺席: ' + name + '（' + target + '）')
+        continue
+      }
+      const link = join(farm, name)
+      const want = relative(farm, target)
+      let ok = false
+      try { ok = readlinkSync(link) === want } catch { /* 缺席或非链接 */ }
+      if (ok) { kept++; continue }
+      // 目标必须写**相对路径**（want），不是宿主 stage 绝对路径：
+      // 旧写法把 /root/.dsh-stage/<abi>/root/usr/... 烘进归档 → 设备上该路径不存在 →
+      // 插件 import 'undici' 得 ERR_MODULE_NOT_FOUND（subscriptions 整条不激活）；
+      // 且 ok 判据比的是 want（相对），与绝对目标永不相等 → 每次构建都重建、kept 恒 0。
+      wsl('rm -rf "' + wslPath(link) + '" && ln -sfn "' + want + '" "' + wslPath(link) + '"')
+      made++
+    }
+    log('profile 共享农场: 建链 ' + made + ' 条 / 已就位 ' + kept + ' 条（' + PROFILE_SHARED_LINKS.join(', ') + '）')
+  } else {
+    console.warn('  警告: profiles/node_modules 农场不在场，共享依赖链未建（' + farm + '）')
+  }
+}
 {
   const stats = sanitizeSymlinks(STAGE_ROOT, ['usr', 'home/.dsh'])
   log(`软链自净化: 共 ${stats.links} 条；相对化 ${stats.rewrote}；删除残留 ${stats.dropped}；保留 App 绝对链 ${stats.keptAppAbsolute}；其它绝对链 ${stats.keptOtherAbsolute}`)
@@ -1184,7 +1344,11 @@ log('清单驱动裁剪完成（treeDelete + extensionDelete）')
 // ── 8. 归档 ────────────────────────────────────────────────────────────
 log('归档 snapshot.tar.xz…')
 const archive = join(OUT_DIR, 'snapshot.tar.xz')
+// 预删最终产物与它的 sha256（issue #1185）：本轮若在归档段之前/之中失败，
+// 目录里不得留着「上一轮的成功产物 + 上一轮的 sha256」，否则下游会把它当成本轮结果。
+// 成功路径上 archive 由 rename 重新落位、sha256 在归档后重写。
 rmSync(archive, { force: true })
+rmSync(join(OUT_DIR, 'snapshot.sha256'), { force: true })
 // 输出结构对齐既有快照：usr/ + home/.dsh/ + home/.gitconfig（home 其余目录不随快照）
 // 2c 提速（2026-09-05 实测）：tar -cJf 单线程 xz → tar -c | xz -T<n> 多线程（同 preset 档，
 // 743MB tar 380s 级 → 48s；产物字节因分块并行而不同，sha256 由下游重算，一致性门禁不受影响）。
@@ -1196,11 +1360,53 @@ rmSync(archive, { force: true })
 // 多花 3-5 分钟）。统一 `--mtime=@<固定纪元>`（GNU tar）后，同一输入的产物字节稳定；inject-all.py
 // 新增文件同样取固定 mtime（SOURCE_DATE_EPOCH 可覆写）。
 const SOURCE_DATE_EPOCH = process.env.SOURCE_DATE_EPOCH ?? '1704067200'
-wsl(`
-  cd "${wslPath(join(STAGE, 'root'))}" && \
-  tar -c --mtime=@${SOURCE_DATE_EPOCH} usr home/.dsh home/.gitconfig 2>/dev/null | xz -T${XZ_THREADS} -6 > "${wslPath(archive)}" && \
-  ls -lh "${wslPath(archive)}"
-`)
+// 归档 = **两段而不是一条流水线**（issue #1074）。原因不是风格，是判据：
+// 旧写法 `tar … 2>/dev/null | xz … > snapshot.tar.xz` 即使 sh() 已开 pipefail 也不够——
+// 真因有两层：
+//   ① 管道状态默认只看最后一段（xz）。xz 对「读到的残缺流」照样 exit 0，于是 tar 层面的
+//      失败（成员缺失 / 文件不可读 / 读到一半被改）全部不可见；
+//   ② 即便开了 pipefail，`2>/dev/null` 也把**唯一的现场**（tar 报的到底是哪个成员）扔了，
+//      事后只能看到「某处失败」。
+// 改成分段执行：tar 先落 tar 中间件，明确拿它自己的退出码；这一段的 stderr 不再丢弃，
+// 失败时把 tar 的原话带进报错。xz 再单独压，压缩失败同样中止。
+// 中间件长度上限：完整快照 tar 约 700MB 级（xz 后 300MB 级），不能用内存缓冲承接。
+const archiveTar = join(OUT_DIR, 'snapshot.tar')
+rmSync(archiveTar, { force: true })
+const tarRun = shStatus(`cd "${wslPath(join(STAGE, 'root'))}" && tar -c --mtime=@${SOURCE_DATE_EPOCH} usr home/.dsh home/.gitconfig > "${wslPath(archiveTar)}"`)
+if (tarRun.status !== 0) {
+  // tar 非 0 = 归档成员不齐（典型：home/.gitconfig 没生成、某成员读到一半被改）。
+  // 此时**不得**继续算 sha256：那份残缺归档会被指纹化并作为构建输入发出去（issue #1074 实证）。
+  console.error(`归档失败：tar 退出码 ${tarRun.status}（成员不齐或不可读，残缺归档不得进入指纹与发布）`)
+  console.error((tarRun.stderr || tarRun.stdout || '').trim().split('\n').slice(-20).join('\n'))
+  rmSync(archiveTar, { force: true })
+  process.exit(1)
+}
+// 先压到**临时名**，成功后再 rename 到最终路径（issue #1185）。
+//
+// 旧实现直接 `xz … > snapshot.tar.xz`：xz 中途失败（磁盘满、被中断、输入读到一半）时，
+// 最终路径上留着**截断的 .tar.xz**，而失败分支只删了 tar 中间件。后果有两层：
+//   ① 下游拿到一个能读开头、解到一半才报错的「快照」，报错点离真因很远；
+//   ② 上一轮成功时写的 snapshot.sha256 还在，与这份残件对不上，
+//      指纹门禁要么误报「快照被改过」，要么（若重算）把残件当成合法输入。
+// 临时名 + rename 让「最终路径存在」等价于「xz 完整成功」，不需要失败分支去补救；
+// 而「失败时连最终产物一起清」仍有一个窗口期（xz 写到一半时最终路径上是残件），
+// 进程被强杀就补不上。
+const archivePart = archive + '.part'
+rmSync(archivePart, { force: true })
+const xzRun = shStatus(`xz -T${XZ_THREADS} -6 -c "${wslPath(archiveTar)}" > "${wslPath(archivePart)}"`)
+if (xzRun.status !== 0) {
+  console.error(`归档失败：xz 压缩退出码 ${xzRun.status}（tar 中间件在 ${archiveTar}）`)
+  console.error((xzRun.stderr || xzRun.stdout || '').trim().split('\n').slice(-20).join('\n'))
+  // 残件与中间件都清掉：最终路径与临时路径都不得留任何快照文件。
+  rmSync(archivePart, { force: true })
+  rmSync(archiveTar, { force: true })
+  process.exit(1)
+}
+// 中间件只在归档段存在：留着会与 xz 产物混淆成第二份「快照」（体积也翻倍）。
+rmSync(archiveTar, { force: true })
+// 成功才落到最终路径；rename 同盘原子，不会出现「最终路径半截」的中间态。
+renameSync(archivePart, archive)
+log(`归档 ${(statSync(archive).size / 1024 / 1024).toFixed(1)} MB`)
 const sha = createHash('sha256').update(readFileSync(archive)).digest('hex')
 writeFileSync(join(OUT_DIR, 'snapshot.sha256'), sha)
 // 归档后自检（2026-08-23：x86 曾出现「stage 有、归档无」的 LICENSES 目录怪癖——防再犯）。

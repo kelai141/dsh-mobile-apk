@@ -92,7 +92,7 @@ object VdisplayController {
   private const val IDLE_RECLAIM_MS = 10 * 60 * 1000L
 
   /** 刷新某块屏（或全部）的使用时间；由所有会「用到屏」的操作调用。 */
-  private fun touch(alias: String?) {
+  private fun touch(alias: String?) = synchronized(lock) {
     val now = android.os.SystemClock.elapsedRealtime()
     if (alias == null) records.values.forEach { it.lastUsedAt = now }
     else records[alias]?.lastUsedAt = now
@@ -143,13 +143,18 @@ object VdisplayController {
   /** Android display id for one owned virtual alias, or null when the alias is unknown/not owned. */
   fun displayIdForAlias(alias: String?): Int? = synchronized(lock) {
     if (alias == null) return null
+    // #671：按别名取屏 = 本会话正在使用这块屏（a11y 操作/launch 落点），刷新空闲计时——
+    // 旧实现 touch() 全仓零调用，空闲回收退化为「建屏后 10 分钟必回收」。
+    touch(alias)
     records[alias]?.displayId
   }
 
   /** Owned alias for one virtual Android display id, or null. Never maps display 0. */
   fun aliasForDisplayId(displayId: Int): String? = synchronized(lock) {
     if (displayId == Display.DEFAULT_DISPLAY) return null
-    records.values.firstOrNull { it.displayId == displayId }?.alias
+    val hit = records.values.firstOrNull { it.displayId == displayId }?.alias
+    hit?.let { touch(it) }
+    hit
   }
 
   /** Owned virtual aliases ordered by allocation (the model-facing `virtual-N` set). */
@@ -173,10 +178,13 @@ object VdisplayController {
     // 内容宽高比与「谁被选中」无关，只与「哪块屏存在」有关，所以这里按
     // 指定别名 → 当前选中 → 唯一活跃屏 依次退化；只要本机还有虚拟屏，就能给出正确的宽高比。
     val record = synchronized(lock) {
-      (alias?.let { records[it] })
+      val hit = (alias?.let { records[it] })
         ?: records[selectedAlias]
         ?: records.values.firstOrNull()
         ?: return null
+      // #671：宿主正在渲染这块屏的内容 = 使用中，刷新空闲计时。
+      touch(hit.alias)
+      hit
     }
     return liveOrSnapshotSize(record)
   }
@@ -275,7 +283,7 @@ object VdisplayController {
     }
     if (privileged.optBoolean("ok")) {
       return out.put("ok", true).put("state", "ready").put("code", "vdisplay-ready")
-        .put("guidance", "Shizuku 已授权且 shell UserService 已就绪；可创建虚拟屏幕 1。")
+        .put("guidance", UiText.t(context, "Shizuku 已授权且 shell UserService 已就绪；AI 可创建 1 块虚拟屏。", "Shizuku is granted and the shell UserService is ready; the AI can create 1 virtual screen."))
     }
     return out.put("ok", false).put("state", "blocked")
       .put("code", privileged.optString("code", lastCode))
@@ -340,10 +348,10 @@ object VdisplayController {
       .put("code", bound.optString("code", "shizuku-not-ready"))
       .put("guidance", bound.optString("guidance", "Shizuku 未就绪。"))
 
-    if (existing >= MAX_VIRTUAL_DISPLAYS) {
-      return status(appContext).put("ok", false).put("code", "vdisplay-limit")
-        .put("guidance", "已达到本机虚拟屏上限（$MAX_VIRTUAL_DISPLAYS 块）；先销毁一块再创建。")
-    }
+    // #520：旧版此处曾有 `existing >= MAX_VIRTUAL_DISPLAYS → vdisplay-limit` 分支，但它被上面的
+    // 幂等复用早退（existing > 0 即 return）挡成死代码——MAX=1 时上限语义由「存在即复用」表达，
+    // vdisplay-limit 错误码永不返回。刻意删除而非保留：未来把 MAX 调大时，放行面在这里补回
+    // 上限分支并同步幂等早退条件（复用仅应发生在「未达上限」时），而不是让两个入口互相矛盾。
     val real = DisplayMetrics()
     @Suppress("DEPRECATION")
     (appContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.getRealMetrics(real)
@@ -473,7 +481,11 @@ object VdisplayController {
         .put("guidance", if (normalized == ScreenTargets.REAL) {
           "真实屏幕不允许镜像，不能作为查看器目标。"
         } else {
-          "没有名为 $normalized 的 " + UserCopy.APP_NAME + " 虚拟屏；先创建虚拟屏。"
+          UiText.t(
+            context,
+            "没有名为 $normalized 的 " + UserCopy.APP_NAME + " 虚拟屏；先让 AI 创建虚拟屏。",
+            "No " + UserCopy.APP_NAME + " virtual screen named $normalized; ask the AI to create one first.",
+          )
         })
     synchronized(lock) {
       selectedAlias = record.alias
@@ -507,10 +519,20 @@ object VdisplayController {
           .put("target", record.alias)
           .put("guidance", "虚拟屏 ${record.alias} 正由查看器 $owner 显示；同一 Surface 不能同时挂到两个查看器。")
       }
+      // D4（0.14.11）：旧写法先落归属再 setSurface，并把 setSurface 的失败 runCatching 吞掉；
+      // 而 presenting 由 viewerSurface 非空推出 ⇒ 黑屏也报「已挂」。现在先请求输出面，
+      // 成功才落归属；失败回结构化原因、不占用目标（下一次打开查看器还能正常绑）。
+      val applied = runCatching { record.display.setSurface(surface) }.isSuccess
+      if (!applied) {
+        return status(context.applicationContext).put("ok", false)
+          .put("code", "attach-surface-failed")
+          .put("viewerId", id)
+          .put("target", record.alias)
+          .put("guidance", "虚拟屏 " + record.alias + " 的输出面切换失败（Surface 已失效或被系统拒绝）；画面不会显示，请重新打开查看器。")
+      }
       record.viewerId = id
       record.viewerSurface = surface
       selectedAlias = record.alias
-      runCatching { record.display.setSurface(surface) }
       generation += 1
     }
     Log.i(TAG, "viewer=$id attached to ${record.alias} displayId=${record.displayId}")
@@ -574,6 +596,7 @@ object VdisplayController {
     val record = selectedRecord() ?: recordOf(target)
       ?: return status(context.applicationContext).put("ok", false).put("code", "screen-not-ready")
         .put("guidance", "虚拟屏幕尚未创建，无法拉起测试应用。")
+    touch(record.alias) // #671：往这块屏送任务 = 使用中。
     val id = record.displayId
     val result = ShizukuTransport.runController(
       context.applicationContext,
@@ -688,6 +711,7 @@ object VdisplayController {
     val record = selectedRecord() ?: recordOf(target)
       ?: return status(appContext).put("ok", false).put("code", "screen-not-ready")
         .put("guidance", "虚拟屏幕尚未创建，无法在其上拉起应用；可先 android_vdisplay_create。")
+    touch(record.alias) // #671：往这块屏送任务 = 使用中。
     val id = record.displayId
     // 拉起路径（0.14.0 模拟器逐条实测，**四条路只有最后一条成立**）：
     //
@@ -804,6 +828,19 @@ object VdisplayController {
     return JSONObject().put("ok", false).put("code", "vdisplay-session-busy").put("op", op)
       .put("ownerSessionId", current)
       .put("guidance", "虚拟屏正由另一个会话使用；请回到该会话，或由用户在设置页强制销毁。")
+  }
+
+  /**
+   * 该 viewer 是否**仍然**持有一块屏的 Surface（0.14.11，D5 / PR #833）。
+   *
+   * 宿主只在 releaseViewerSurface / surfaceDestroyed 时复位自己的 attached；屏被
+   * destroy / 空闲回收 / 强制销毁时 records 会被清掉，宿主的 attached 却留成 true ⇒
+   * applyStageBounds 的 if (!attached) 永远不成立，新建的屏再也挂不上（侧栏永久旧帧）。
+   * 宿主据此每帧自查真源，把「屏不在了」变成已知事实，而不是等轮询间接发现。
+   */
+  internal fun holdsViewerSurface(viewerId: String): Boolean {
+    val id = viewerId.trim().ifBlank { "files-sidebar" }
+    synchronized(lock) { return records.values.any { it.viewerId == id && it.viewerSurface != null } }
   }
 
   /** 当前选中（或第一块）虚拟屏的分辨率；无屏返回 null（浮窗按此保持宽高比）。 */

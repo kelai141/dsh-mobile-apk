@@ -9,7 +9,7 @@
 | attr | 2.6.0 | LGPL-2.1+ | [termux-packages/attr](https://github.com/termux/termux-packages/tree/master/packages/attr) |
 | busybox | 1.38.0-1 | GPL-2.0 | [termux-packages/busybox](https://github.com/termux/termux-packages/tree/master/packages/busybox) |
 | bzip2 | 1.0.8-8 | BSD-2-Clause | [termux-packages/bzip2](https://github.com/termux/termux-packages/tree/master/packages/bzip2) |
-| ca-certificates | 1:2026.09.25 | MPL-2.0 | [termux-packages/ca-certificates](https://github.com/termux/termux-packages/tree/master/packages/ca-certificates) |
+| ca-certificates | 1:2026.10.20-1 | MPL-2.0 | [termux-packages/ca-certificates](https://github.com/termux/termux-packages/tree/master/packages/ca-certificates) |
 | coreutils | 9.12 | GPL-3.0+ | [termux-packages/coreutils](https://github.com/termux/termux-packages/tree/master/packages/coreutils) |
 | curl | 8.23.0 | MIT | [termux-packages/curl](https://github.com/termux/termux-packages/tree/master/packages/curl) |
 | dash | 0.5.13.5 | BSD-style (dash) | [termux-packages/dash](https://github.com/termux/termux-packages/tree/master/packages/dash) |
@@ -48,7 +48,7 @@
 | libngtcp2 | 1.25.0 | MIT | [termux-packages/libngtcp2](https://github.com/termux/termux-packages/tree/master/packages/libngtcp2) |
 | libsmartcols | 2.42.4 | LGPL-2.1+ | [termux-packages/libsmartcols](https://github.com/termux/termux-packages/tree/master/packages/libsmartcols) |
 | libsodium | 1.0.22-1 | ISC | [termux-packages/libsodium](https://github.com/termux/termux-packages/tree/master/packages/libsodium) |
-| libsqlite | 3.54.0 | Public Domain | [termux-packages/libsqlite](https://github.com/termux/termux-packages/tree/master/packages/libsqlite) |
+| libsqlite | 3.54.1 | Public Domain | [termux-packages/libsqlite](https://github.com/termux/termux-packages/tree/master/packages/libsqlite) |
 | libssh2 | 1.11.1-2 | BSD-3-Clause | [termux-packages/libssh2](https://github.com/termux/termux-packages/tree/master/packages/libssh2) |
 | libyaml | 0.2.5-5 | MIT | [termux-packages/libyaml](https://github.com/termux/termux-packages/tree/master/packages/libyaml) |
 | ncurses | 6.6.20260307+really6.5.20250830 | MIT | [termux-packages/ncurses](https://github.com/termux/termux-packages/tree/master/packages/ncurses) |
@@ -59,11 +59,11 @@
 | perl | 5.44.0 | GPL-1.0+ / Artistic-1.0 | [termux-packages/perl](https://github.com/termux/termux-packages/tree/master/packages/perl) |
 | procps | 4.0.7-2 | GPL-2.0+ | [termux-packages/procps](https://github.com/termux/termux-packages/tree/master/packages/procps) |
 | psmisc | 23.7-1 | GPL-2.0+ | [termux-packages/psmisc](https://github.com/termux/termux-packages/tree/master/packages/psmisc) |
-| python | 3.14.6-1 | PSF-2.0 | [termux-packages/python](https://github.com/termux/termux-packages/tree/master/packages/python) |
-| python-pip | 26.2.1 | MIT | [termux-packages/python-pip](https://github.com/termux/termux-packages/tree/master/packages/python-pip) |
+| python | 3.14.8 | PSF-2.0 | [termux-packages/python](https://github.com/termux/termux-packages/tree/master/packages/python) |
+| python-pip | 26.2.2-2 | MIT | [termux-packages/python-pip](https://github.com/termux/termux-packages/tree/master/packages/python-pip) |
 | readline | 8.3.6 | GPL-3.0+ | [termux-packages/readline](https://github.com/termux/termux-packages/tree/master/packages/readline) |
 | ripgrep | 15.2.0 | MIT | [termux-packages/ripgrep](https://github.com/termux/termux-packages/tree/master/packages/ripgrep) |
-| ruby | 4.0.7 | GPL-2.0+ / Ruby-1.8 | [termux-packages/ruby](https://github.com/termux/termux-packages/tree/master/packages/ruby) |
+| ruby | 4.0.9 | GPL-2.0+ / Ruby-1.8 | [termux-packages/ruby](https://github.com/termux/termux-packages/tree/master/packages/ruby) |
 | sed | 4.10 | GPL-3.0+ | [termux-packages/sed](https://github.com/termux/termux-packages/tree/master/packages/sed) |
 | socat | 1.8.1.3 | GPL-2.0+ | [termux-packages/socat](https://github.com/termux/termux-packages/tree/master/packages/socat) |
 | tar | 1.35-3 | GPL-3.0+ | [termux-packages/tar](https://github.com/termux/termux-packages/tree/master/packages/tar) |
@@ -75,7 +75,7 @@
 | termux-keyring | 3.14 | MIT | [termux-packages/termux-keyring](https://github.com/termux/termux-packages/tree/master/packages/termux-keyring) |
 | termux-tools | 1.46.0+really1.45.0-1 | GPL-3.0+ | [termux-packages/termux-tools](https://github.com/termux/termux-packages/tree/master/packages/termux-tools) |
 | util-linux | 2.42.4 | GPL-2.0+ | [termux-packages/util-linux](https://github.com/termux/termux-packages/tree/master/packages/util-linux) |
-| vim | 9.2.1200 | Vim (GPL-compatible, charityware) | [termux-packages/vim](https://github.com/termux/termux-packages/tree/master/packages/vim) |
+| vim | 9.2.1250 | Vim (GPL-compatible, charityware) | [termux-packages/vim](https://github.com/termux/termux-packages/tree/master/packages/vim) |
 | xz-utils | 5.8.4 | PD + LGPL-2.1+ + GPL-2.0+ | [termux-packages/xz-utils](https://github.com/termux/termux-packages/tree/master/packages/xz-utils) |
 | zip | 3.0-7 | Info-ZIP License | [termux-packages/zip](https://github.com/termux/termux-packages/tree/master/packages/zip) |
 | zlib | 1.3.2 | Zlib | [termux-packages/zlib](https://github.com/termux/termux-packages/tree/master/packages/zlib) |

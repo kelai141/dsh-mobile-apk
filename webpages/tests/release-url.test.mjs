@@ -283,7 +283,10 @@ test('健康探针使用小文件，超时只作为未确认，不禁用来源',
   const app = fs.readFileSync(path.join(WEB, 'src/assets/app.js'), 'utf8');
   const rel = fs.readFileSync(path.join(WEB, 'src/assets/release.js'), 'utf8');
   assert.match(rel, /PROBE_FILE = 'MANIFEST\.txt'/);
-  assert.match(app, /finish\(null\), PROBE_TIMEOUT_MS/);
-  assert.match(app, /alive === null/);
+  // issue #1393：判活从 <script src> 改成 fetch（无执行面）。断言随之改到新的三态：
+  // 超时归入「无法判定」（unprobed）而不是「不可达」——原意（超时不禁用来源）不变。
+  assert.match(app, /ctrl\.abort\(\), PROBE_TIMEOUT_MS\)/);
+  assert.match(app, /classifyProbe\(\{ aborted: true \}\)/);
+  assert.match(app, /alive === 'unknown'/);
   assert.doesNotMatch(app, /\.disabled\s*=/);
 });

@@ -39,7 +39,141 @@
 // 与 check-snapshot-decode 那条「必须用设备同一套解码器」的门禁不同，此处用哪套 tar 不影响判据强度。
 // 换 tar 实现不会放过任何一个敏感路径：两侧都是完整的 49,030 条成员表（见上方比对）。
 import { execFileSync } from 'node:child_process'
+import { mkdirSync, readFileSync, rmSync, lstatSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { TAR } from './lib/shell.mjs'
+
+// ── --self-test：判别力自证（2026-10-29 补；2026-10-30 按 issue #1033 扩到 12 项）──────
+//
+// 判据是「归档成员路径 + 成员内容」，造真实归档才跑得起来，所以此前只能看它对真快照说 PASS，
+// 看不出它在本该红的时候会不会红。这里现场做多个**极小**归档，覆盖：
+//   该绿 1 条 / 路径级该红 2 条 / 内容级该红 5 条（issue #1033 的六组夹具方向）/
+//   假红修正 1 条（home/.npmrc 无凭据不得判红）/ 两个「不是发行快照」的硬失败前提。
+// 归档用**显式列举顶层目录**打包（不是 -C dir .），否则成员名带 './' 前缀，路径判据会被前缀差异漏掉。
+// 压缩用 plain tar（不是 -cJf）：本仓历史上 --self-test 因为 GNU tar 在 Windows 上不能 exec xz 而崩，
+// 而本门禁的判据是成员路径 + 内容，与压缩格式无关（tar -tf / -xOf 对 plain tar 同样有效）。
+if (process.argv.includes('--self-test')) {
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join, dirname } = await import('node:path')
+  const { fileURLToPath } = await import('node:url')
+
+  const selfPath = fileURLToPath(import.meta.url)
+  const ENGINE = 'node_modules/@deepseek-ai/dsh/index.js'
+  const runGate = (archive) => {
+    try {
+      const out = execFileSync(process.execPath, [selfPath, archive], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+      return { code: 0, out }
+    } catch (error) {
+      return { code: error.status ?? 1, out: String(error.stdout ?? '') + String(error.stderr ?? '') }
+    }
+  }
+  const buildArchive = (tag, entries) => {
+    const dir = mkdtempSync(join(tmpdir(), 'snapsecret-src-'))
+    for (const e of entries) {
+      const full = join(dir, e.path)
+      mkdirSync(dirname(full), { recursive: true })
+      writeFileSync(full, e.content ?? 'x')
+    }
+    const tops = [...new Set(entries.map((e) => e.path.split('/')[0]))]
+    const archive = join(tmpdir(), 'snapsecret-' + tag + '-' + process.pid + '.tar')
+    execFileSync(TAR, ['-cf', archive, '-C', dir, ...tops], { stdio: ['ignore', 'pipe', 'pipe'] })
+    rmSync(dir, { recursive: true, force: true })
+    return archive
+  }
+
+  const base = [{ path: 'usr/bin/true' }, { path: ENGINE }]
+  const JWT = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U'
+  const clean = buildArchive('clean', [...base,
+    { path: 'home/.dsh/settings.yaml', content: 'model: x\n' },
+    // issue #1033 反向：路径命中但内容干净 —— 旧实现按路径名判，这里会假红
+    { path: 'home/.npmrc', content: 'registry=https://registry.npmjs.org/\n' },
+  ])
+  const creds = buildArchive('creds', [...base, { path: 'home/.dsh/.credentials', content: '{}' }])
+  const sk = buildArchive('sk', [...base, { path: 'home/.dsh/settings.yaml', content: 'apiKey: sk-abc12345\n' }])
+  // issue #1033 夹具 1：apiKey 放在 config.json（不是 settings.yaml）
+  const configJson = buildArchive('cfgjson', [...base, { path: 'usr/lib/app/config.json', content: '{"apiKey":"sk-live-9f3a2b7c"}\n' }])
+  // 夹具 2：私钥文件（路径即证据）
+  const privKey = buildArchive('privkey', [...base, { path: 'home/.ssh/id_rsa', content: '-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n' }])
+  // 夹具 3：settings.yaml 内含 JWT（旧正则无 JWT 形态）
+  const jwt = buildArchive('jwt', [...base, { path: 'home/.dsh/settings.yaml', content: 'token: ' + JWT + '\n' }])
+  // 夹具 4：JWT 拆两行（旧正则单行，必然漏）
+  const jwtSplit = buildArchive('jwtsplit', [...base, { path: 'home/.dsh/settings.yaml', content: 'token: ' + JWT.slice(0, 20) + '\n  ' + JWT.slice(20) + '\n' }])
+  // 夹具 5：_authToken 写在 usr/etc/npmrc（旧实现只认 home/.npmrc 这个路径名）
+  const authToken = buildArchive('authtoken', [...base, { path: 'usr/etc/npmrc', content: '//registry.npmjs.org/:_authToken=npm_9Xk2abcdef\n' }])
+  // 夹具 6：npmrc 里的 _authToken 在 home/.npmrc（内容级必须抓住，不能只靠路径名）
+  const authTokenHome = buildArchive('authtokenhome', [...base, { path: 'home/.npmrc', content: '//registry.npmjs.org/:_authToken=npm_9Xk2abcdef\n' }])
+  // 夹具 7：CA 证书包（.pem 扩展名但只含 CERTIFICATE）——公钥不是机密，必须放行。
+  // 对应实测三份误报：usr/etc/tls/cert.pem、certifi/cacert.pem、GlobalSign.pem。
+  const caBundle = buildArchive('cabundle', [...base, {
+    path: 'usr/etc/tls/cert.pem',
+    content: '-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIU\n-----END CERTIFICATE-----\n',
+  }])
+  // 夹具 8：.pem 里真的放了私钥块 —— 必须判红（证明判据没被扩成「.pem 一律放行」）
+  const pemWithKey = buildArchive('pemwithkey', [...base, {
+    path: 'usr/etc/tls/leaked.pem',
+    content: '-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK\n-----END RSA PRIVATE KEY-----\n',
+  }])
+  const noEngine = buildArchive('noengine', [{ path: 'usr/bin/true' }])
+  const noUsr = buildArchive('nousr', [{ path: ENGINE }])
+
+  const checks = [
+    ['合规快照（usr/ + 引擎包 + 干净 settings.yaml + 无凭据的 .npmrc）→ PASSED 且 exit 0', clean, (r) => r.code === 0 && r.out.includes('SNAPSHOT_SECRET_CHECK_PASSED')],
+    ['含 home/.dsh/.credentials → FAILED 且 exit 1', creds, (r) => r.code === 1 && r.out.includes('FAIL[credentials]')],
+    ['settings.yaml 含 sk- 实际值 → FAILED（内容级）', sk, (r) => r.code === 1 && r.out.includes('FAIL[credential-content]')],
+    ['夹具 1：apiKey 在 usr/lib/app/config.json → FAILED（内容级扩到多成员）', configJson, (r) => r.code === 1 && r.out.includes('FAIL[credential-content]')],
+    ['夹具 2：home/.ssh/id_rsa 私钥文件 → FAILED（路径即证据）', privKey, (r) => r.code === 1 && r.out.includes('FAIL[private-key-file]')],
+    ['夹具 3：settings.yaml 含 JWT → FAILED（补 JWT 形态）', jwt, (r) => r.code === 1 && r.out.includes('FAIL[credential-content]')],
+    ['夹具 4：JWT 拆两行 → FAILED（多行匹配）', jwtSplit, (r) => r.code === 1 && r.out.includes('FAIL[credential-content]')],
+    ['夹具 5：_authToken 在 usr/etc/npmrc → FAILED', authToken, (r) => r.code === 1 && r.out.includes('FAIL[credential-content]')],
+    ['夹具 6：_authToken 在 home/.npmrc → FAILED（内容级，不只看路径名）', authTokenHome, (r) => r.code === 1 && r.out.includes('FAIL[credential-content]')],
+    // 正控：CA 证书包（.pem 只含 CERTIFICATE）必须 PASSED —— 旧实现按扩展名判，这里会假红
+    ['夹具 7：.pem 只含 CA 证书 → PASSED（公钥/证书包不是机密）', caBundle, (r) => r.code === 0 && r.out.includes('SNAPSHOT_SECRET_CHECK_PASSED')],
+    // 负控：.pem 里真有私钥块必须判红 —— 证明「.pem 按内容判」没被扩成「.pem 一律放行」
+    ['夹具 8：.pem 内含 RSA 私钥块 → FAILED（内容判据仍在）', pemWithKey, (r) => r.code === 1 && r.out.includes('FAIL[private-key-file]')],
+    ['缺 @deepseek-ai/dsh 引擎包 → 硬失败（不是发行快照）', noEngine, (r) => r.code === 1 && r.out.includes('不是发行快照')],
+    ['缺 usr/ 前缀 → 硬失败', noUsr, (r) => r.code === 1 && r.out.includes('没有 usr/ 前缀')],
+  ]
+  let bad = 0
+  for (const [label, archive, verify] of checks) {
+    const result = runGate(archive)
+    const ok = verify(result)
+    console.log((ok ? 'PASS  ' : 'FAIL  ') + label + (ok ? '' : '  -> exit=' + result.code + ' out=' + result.out.trim().slice(0, 220)))
+    if (!ok) bad += 1
+  }
+  // 纯函数面：内容判据的边界（不造归档，直接喂字符串）
+  const pure = [
+    ['纯函数：sk- 命中', credentialHit('apiKey: sk-live-123456') !== null],
+    ['纯函数：JWT 命中', credentialHit('token: ' + JWT) !== null],
+    ['纯函数：JWT 跨行命中', credentialHit('token: ' + JWT.slice(0, 20) + '\n  ' + JWT.slice(20)) !== null],
+    ['纯函数：_authToken 命中', credentialHit('//registry.npmjs.org/:_authToken=npm_x') !== null],
+    ['纯函数：私钥头命中', credentialHit('-----BEGIN OPENSSH PRIVATE KEY-----') !== null],
+    ['纯函数：干净 npmrc 不命中', credentialHit('registry=https://registry.npmjs.org/') === null],
+    ['纯函数：空占位不命中', credentialHit('apiKey: ""\ntoken: ""') === null],
+    // sk- 词边界（本次修）：MIME 名里被截出的 sk-response 不是密钥
+    ['纯函数：MIME 名 application/mbms-msk-response+xml 不命中（sk- 需词首）',
+      credentialHit('"application/mbms-msk-response+xml": { "source": "iana" }') === null],
+    ['纯函数：真密钥 sk-live-123456 仍命中（边界没放宽成一律不命中）',
+      credentialHit('apiKey: sk-live-123456') !== null],
+    ['纯函数：行首 sk-ant-xyz12345 仍命中',
+      credentialHit('sk-ant-xyz12345') !== null],
+    // 布尔字面量误报（本次修）
+    ['纯函数：persist-credentials: false 不命中（布尔字面量不算凭据）',
+      credentialHit('        persist-credentials: false') === null],
+    ['纯函数：credentials: true 不命中', credentialHit('credentials: true') === null],
+    ['纯函数：password 有真值仍命中（没放宽成一律不命中）',
+      credentialHit('password: hunter2xyz') !== null],
+  ]
+  for (const [label, ok] of pure) {
+    console.log((ok ? 'PASS  ' : 'FAIL  ') + label)
+    if (!ok) bad += 1
+  }
+  for (const a of [clean, creds, sk, configJson, privKey, jwt, jwtSplit, authToken, authTokenHome, caBundle, pemWithKey, noEngine, noUsr]) rmSync(a, { force: true })
+  console.log(bad === 0
+    ? 'SNAPSHOT_SECRET_SELF_TEST_PASSED（' + (checks.length + pure.length) + ' 项）'
+    : 'SNAPSHOT_SECRET_SELF_TEST_FAILED（' + bad + ' 项）')
+  process.exit(bad === 0 ? 0 : 1)
+}
 
 const args = process.argv.slice(2)
 const snap = args.find((a) => !a.startsWith('--'))
@@ -75,7 +209,25 @@ function failOut(name, hits) {
   fail = true
 }
 
-// 路径级敏感文件（在单一 listing 内匹配）
+// ── 内容级扫描面（issue #1033）──────────────────────────────────────────────
+//
+// 旧实现只做两件事：① 对 6 个字面路径跑路径名正则；② 只读 home/.dsh/settings.yaml 一个成员做内容级检查，
+// 且那个正则单行、无 JWT/_authToken 形态。于是实测 6 组夹具全部 PASSED exit 0：
+//   usr/lib/app/config.json 里的 apiKey / home/.ssh/id_rsa 的私钥头 / settings.yaml 里的 JWT /
+//   拆两行的 JWT / usr/etc/npmrc 的 _authToken / settings.yaml 超过 maxBuffer 时只 SKIP。
+// 承诺是「快照里不含凭据/令牌/私钥」，实际只覆盖了 6 个路径名 + 1 个成员的内容。
+//
+// 修法：
+//   ① **内容级扩到多成员**：所有「看起来能承载配置/凭据」的成员（配置、yaml/yml/json/ini/toml/
+//      属性文件、npmrc 系列、无扩展名的 dotfile）都读进来扫，不再只认 settings.yaml 一个名字；
+//   ② **多行匹配**：先按行拼成整串再扫，跨行的 JWT / PEM 私钥体也能命中（旧正则单行必然漏）；
+//   ③ **补 JWT / _authToken / bearer 形态**；
+//   ④ 路径命中但内容干净的**假红**修掉：路径级只保留「本身就是凭据载体」的路径
+//      （.credentials / sessions / storages / anonymous-user-id），.npmrc 改为内容级判据
+//      （只有真的写了 token 才红，`registry=https://…` 这种干净文件不再红）；
+//   ⑤ 读不出来的成员在 --require 下判红（SKIP 不得结案），非严格档计数 SKIP。
+const CONTENT_SCAN_RE = /(?:^|\/)(?:[^/]*\.(?:ya?ml|json|ini|toml|cfg|conf|properties|npmrc|netrc|pem|key)|npmrc|netrc|credentials|\.git-credentials|\.npmrc)$/i
+/** 路径级：本身就是凭据载体的文件/目录（内容无关，存在即泄露）。 */
 function pathHits(re) { return lines.filter((l) => re.test(l)) }
 
 const creds = pathHits(/home\/\.dsh\/\.credentials/i)
@@ -86,32 +238,189 @@ const stor = pathHits(/home\/\.dsh\/storages\//i)
 if (stor.length) failOut('storages', stor)
 const anon = pathHits(/\.anonymous-user-id/i)
 if (anon.length) failOut('anon-id', anon)
-const npmrc = pathHits(/home\/\.npmrc/i)
-if (npmrc.length) failOut('npmrc', npmrc)
+// 私钥文件（issue #1033 夹具 2 + 本次误报修正）。
+//
+// 分两类：
+//   ㈠ **本身就是私钥载体**——`.ssh/` 目录、`id_rsa/id_dsa/id_ecdsa/id_ed25519` 这类固定名，
+//      以及 `.p12/.pfx` 密钥库容器。路径即证据，内容无关（p12/pfx 是二进制容器，
+//      不便按文本判私钥头，保持路径判据）。
+//   ㈡ **`.pem` / `.key` 只是扩展名**——公钥、CA 证书包、TLS 信任根全都用它。
+//      实测本次误报的三份，私有钥块计数全为 0、只有 CERTIFICATE：
+//        usr/etc/tls/cert.pem                      → BEGIN CERTIFICATE 118 / PRIVATE KEY 0
+//        .../pip/_vendor/certifi/cacert.pem        → 符号链接，指向 ../../../../../../etc/tls/cert.pem
+//                                                    （即上面那份 CA 包；tar -xOf 读链接成员得空串）
+//        .../rubygems/ssl_certs/GlobalSign.pem     → BEGIN CERTIFICATE 1   / PRIVATE KEY 0
+//      扩展名判据会把它们全判成 "私钥文件"，而它们恰恰是**公钥/证书**——公钥不是机密。
+//      所以这两类必须**看内容**：只有真出现 PEM 私钥头才判红。
+// ── 成员内容读取：一次解压、批量读（性能修复）────────────────────────────────
+//
+// 旧实现对每个成员跑一次 `tar -xOf <tar.xz> <member>`。tar.xz 是**流式压缩**：
+// 取任何一个成员都必须**从头解压整个归档**，于是 N 个成员 = N 次全量解压。
+// 实测本快照：52600 成员、内容级目标 2431 个、归档 158.2 MB
+//   → 约 2431 × 158 MB ≈ 384 GB 解压量，arm64 单份超 100 分钟仍未完成。
+//
+// 改为：把「需要读内容的成员」一次性 `tar -xf` 解到归档同目录下的临时目录
+// （同盘，避免跨盘拷贝），之后直接读文件。用完必删——包括 process.exit 路径
+// （挂 process.on('exit')）与异常路径。
+//
+// 等价性保持（逐条对齐旧行为，不是重新定义判据）：
+//   · **符号链接成员**：旧 `tar -xOf` 对链接成员输出空串 → 这里同样按空串处理，
+//     不跟随链接（否则会读到目标内容，结论可能不同）；
+//   · **超大成员**：旧 `maxBuffer` 32 MB 会抛错 → 这里超过 32 MB 同样记为「读不出」；
+//   · **缺席成员**：解压时缺席 → 这里读文件失败 → 同样计入「读不出」。
+const SCAN_LIMIT = 32 * 1024 * 1024
+const contentTargets = lines.filter((path) => CONTENT_SCAN_RE.test(path) && !path.endsWith('/'))
+const pemCandidates = pathHits(/(?:^|\/).*\.(?:pem|key)$/i)
+  .filter((l) => !/\/(?:node_modules|usr\/lib\/node_modules)\//.test(l))
+const SCAN_TMP = join(dirname(abs), '.secrets-scan-' + process.pid)
+const scanCache = new Map()
+let scanExtracted = false
+const cleanupScanTmp = () => {
+  if (!scanExtracted) return
+  try { rmSync(SCAN_TMP, { recursive: true, force: true }) } catch { /* 忽略清理失败 */ }
+  scanExtracted = false
+}
+process.on('exit', cleanupScanTmp)
 
-// settings.yaml 内容级（0.13.0 C1/Q14）：允许非机密 seed 模板存在，但不得含真实凭据形态
+/**
+ * 读一个成员的内容（首次调用触发一次性解压）。
+ * @param member 归档内相对路径
+ * @returns {string|null} 内容；null = 读不出（缺席 / 超大 / 非普通文件以外的情况）
+ */
+function readMember(member) {
+  if (scanCache.has(member)) return scanCache.get(member)
+  if (!scanExtracted) {
+    scanExtracted = true
+    rmSync(SCAN_TMP, { recursive: true, force: true })
+    mkdirSync(SCAN_TMP, { recursive: true })
+    // 一次全量解压（不是 `-T <清单>` 选择性解压）：实测 `-T` 会漏掉符号链接成员
+    // （arm64 快照的 cacert.pem 是链接，没被解出，导致它被判成「读不出」而 failHard）。
+    // 全量解压只多花几十秒，换来与旧实现逐成员一致的可见性。
+    try {
+      execFileSync(TAR, ['-xf', abs, '-C', SCAN_TMP], { stdio: ['ignore', 'ignore', 'pipe'] })
+    } catch { /* 归档部分损坏时仍可能解出多数成员，缺失者由逐成员读取判定 */ }
+  }
+  const full = join(SCAN_TMP, member)
+  let text = null
+  let needFallback = false
+  try {
+    const st = lstatSync(full)
+    if (st.isSymbolicLink()) text = ''            // 旧 tar -xOf 对链接成员输出空串
+    else if (!st.isFile()) needFallback = true    // 目录等异常：交给回退路径判
+    else if (st.size > SCAN_LIMIT) text = null    // 对齐旧 maxBuffer
+    else text = readFileSync(full, 'utf8')
+  } catch { needFallback = true }
+
+  // 解不出来时回退到旧写法 tar -xOf（与旧实现逐字节等价）。
+  //
+  // 为什么需要这条：Windows 的 tar **建不出符号链接**（悬空链接直接失败且不报错），
+  // 于是像 arm64 快照的 .../certifi/cacert.pem（链接到 usr/etc/tls/cert.pem）
+  // 在解压树里根本不存在。旧实现用 -xOf 对它得空串；若这里直接判「读不出」，
+  // verdict 就从「绿」变成「红」——那就不是提速，是改判据。
+  // 触发面很小（只有解不出来的成员），代价是这几个成员各自一次全量解压。
+  if (needFallback) {
+    try {
+      text = execFileSync(TAR, ['-xOf', abs, member], { encoding: 'utf8', maxBuffer: SCAN_LIMIT })
+    } catch { text = null }
+  }
+  scanCache.set(member, text)
+  return text
+}
+
+const privKeyCarriers = pathHits(/(?:^|\/)(?:id_(?:rsa|dsa|ecdsa|ed25519)|\.ssh\/|.*\.(?:p12|pfx))$/i)
+  .filter((l) => !/\/(?:node_modules|usr\/lib\/node_modules)\//.test(l))
+/** PEM 私钥头（与 credentialHit 里同一条，避免两处漂移）。 */
+const PEM_PRIVKEY_RE = /-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----/
+const privKeyFiles = [...privKeyCarriers]
+const pemKeyUnreadable = []
+for (const member of pemCandidates) {
+  const content = readMember(member)
+  if (content === null) { pemKeyUnreadable.push(member); continue }
+  if (PEM_PRIVKEY_RE.test(content)) privKeyFiles.push(member)
+}
+// 读不出来的 .pem/.key：不能当「干净」放行（否则损坏的归档或超 maxBuffer 就成了逃逸口）。
+// 处置与后面内容级扫描一致：--require 判红，非严格档计 SKIP 并打印。
+if (pemKeyUnreadable.length > 0) {
+  const msg = pemKeyUnreadable.length + ' 个 .pem/.key 成员的内容读取失败（归档部分损坏或超 maxBuffer？）：'
+    + pemKeyUnreadable.slice(0, 3).join(', ') + ' —— 私钥内容判据未执行'
+  if (REQUIRE) failHard(msg + '\n  --require 档不得以 SKIP 结案')
+  skipped += 1
+  console.log('SKIP(#' + skipped + ')  ' + msg)
+}
+if (privKeyFiles.length) failOut('private-key-file', privKeyFiles)
+
+/**
+ * 凭据内容判据（纯函数，供 --self-test 直接钉住）。
+ *
+ * 多行：先把整串拼起来再扫，跨行的 JWT / PEM 体也能命中。
+ * 覆盖：sk- / PEM 私钥头 / 引擎 web token / JWT（三段 base64url）/ npm _authToken / Bearer /
+ *       键值族（apiKey/token/password/secret/credential，值非空且非引号占位）。
+ *
+ * @param {string} content 成员全文
+ * @returns {string|null} 命中片段（null = 干净）
+ */
+export function credentialHit(content) {
+  const text = String(content)
+  const patterns = [
+    // sk- 必须落在「词首」：前面不能是字母/数字/下划线/连字符。
+    // 没有这个边界时 mime-db/db.json 的 MIME 类型
+    //   "application/mbms-msk-response+xml" 会被从中截出 sk-response 而判成 API key
+    // ——实测该文件 sk- 出现 1 次，全部来自这一条 MIME 名。真实密钥形态是
+    // sk-<词>（sk-proj-… / sk-ant-… / sk-live-…），前面不会紧跟标识符字符。
+    /(?:^|[^A-Za-z0-9_$-])sk-[A-Za-z0-9_-]{8,}/,
+    /-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----/,
+    /dsh web: \S*\/\?token=[A-Za-z0-9_-]{40,}/,
+    // JWT：三段 base64url，header 段以 eyJ 开头（典型形态）；允许跨行（先拼串再扫）
+    /eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/,
+    // npm 私有源令牌
+    /_authToken\s*=\s*\S+/i,
+    /(?:_auth|_password)\s*=\s*\S+/i,
+    /Bearer\s+[A-Za-z0-9._-]{20,}/,
+    // 键值族：值不得是布尔/空值字面量。没有这个排除时，GitHub Actions 的
+    //   persist-credentials: false
+    // 会被当成「credentials 有值」而判红——实测 fast-uri/.github/workflows/ci.yml
+    // 两处全是这种布尔字面量，不是凭据。
+    /(?:apiKey|api[_-]?key|token|password|passwd|secret|credentials?)\s*[:=]\s*["']?(?!(?:true|false|null|none|undefined)\b)[^\s"']{4,}/i,
+  ]
+  for (const re of patterns) {
+    const m = re.exec(text)
+    if (m) return m[0]
+  }
+  return null
+}
+
+// settings.yaml.imported：存在即泄露（用户导入的个人设置，不进发行快照）
 const importedSettings = lines.filter((path) => path.split('/').pop()?.toLowerCase() === 'settings.yaml.imported')
 if (importedSettings.length) failOut('imported-user-settings', importedSettings)
-const hasSettings = lines.filter((path) => path === 'home/.dsh/settings.yaml')
-if (hasSettings.length) {
-  let content = ''
-  let readFailed = false
-  // P2：同样改走原生 tar。旧实现是 `sh('tar -xOf ...')`——**对同一份归档第二次全量解码**
-  // （xz 不可随机寻址，取一个成员 = 从头解一遍），且还要再付一次 wsl.exe + 9p 往返。
-  // 实测该分支在原生路径下会把 SKIP(#1) 打成 PASS：成员 49,030 已证明归档可读，
-  // 此时读不出内容只可能是路径写法问题，不是「归档部分损坏」。
-  try { content = execFileSync(TAR, ['-xOf', abs, 'home/.dsh/settings.yaml'], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 }) } catch { readFailed = true }
-  if (readFailed || content.trim() === '') {
-    const msg = 'settings.yaml 内容读取为空/失败（归档部分损坏？）——存在性检查已命中，内容级检查未执行'
-    if (REQUIRE) failHard(msg + '\n  --require 档不得以 SKIP 结案')
-    skipped += 1
-    console.log('SKIP(#' + skipped + ')  ' + msg)
-  } else {
-    const leakRe = /(sk-|apiKey\s*:\s*\S|api[_-]?key\s*=\s*\S|BEGIN (RSA|OPENSSH|PRIVATE)|dsh web: \S*\/\?token=[A-Za-z0-9_-]{40,})/i
-    const m = leakRe.exec(content)
-    if (m) { console.error(`FAIL[settings-yaml-secret]: ${m[0]}`); fail = true }
+
+// ── 内容级：多成员扫描（issue #1033）─────────────────────────────────────────
+//
+// 旧实现只读 home/.dsh/settings.yaml **一个成员**（路径全等比较），且正则是单行、无 JWT/_authToken。
+// 于是 usr/lib/app/config.json 里的 apiKey、usr/etc/npmrc 的 _authToken、拆两行的 JWT 全部 PASSED。
+// 现在：所有「能承载配置/凭据」的成员都读进来扫，且**整串拼起来再扫**（跨行也能命中）。
+// 读不出来的成员：--require 判红（SKIP 不得结案）；非严格档计数 SKIP 并打印。
+// contentTargets 已在上面（readMember 之前）定义，这里复用同一份清单。
+let contentScanned = 0
+const contentUnreadable = []
+for (const member of contentTargets) {
+  const content = readMember(member)
+  if (content === null) { contentUnreadable.push(member); continue }
+  contentScanned += 1
+  const hit = credentialHit(content)
+  if (hit) {
+    console.error('FAIL[credential-content]: ' + member + ' 含凭据形态：' + String(hit).slice(0, 80))
+    fail = true
   }
 }
+if (contentUnreadable.length > 0) {
+  const msg = contentUnreadable.length + ' 个可扫描成员的内容读取失败（归档部分损坏或超 maxBuffer？）：'
+    + contentUnreadable.slice(0, 3).join(', ') + ' —— 这些成员的内容级检查未执行'
+  if (REQUIRE) failHard(msg + '\n  --require 档不得以 SKIP 结案')
+  skipped += 1
+  console.log('SKIP(#' + skipped + ')  ' + msg)
+}
+cleanupScanTmp()   // 临时目录用完即删（process.exit 路径由 exit 钩子兜底）
+console.log('内容级扫描：' + contentScanned + '/' + contentTargets.length + ' 个成员（配置/凭据载体）')
 
 // 私有源映射：仅 @dsh-android 插件的 .js.map 才算泄露（npm 公共依赖带 map 属正常）
 const privMaps = lines.filter((l) => l.includes('@dsh-android') && l.includes('.js.map'))

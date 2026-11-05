@@ -186,6 +186,7 @@ object WatchdogV2 {
     lastLogSignature = null
     lastProbeTimedOut = false
     lastLogTail = ""
+    healthyLogMark = 0L
   }
 
   /**
@@ -206,7 +207,9 @@ object WatchdogV2 {
    * 判据（命中任一条 = 有强证据，才允许跑破坏性阶梯）：
    *  - `EADDRINUSE`：端口被别人占着（我们自己起不来，等下去也不会好）；
    *  - `plugin tree failed to load`：插件树装配失败（引擎没起来，不会自愈）；
-   *  - `uncaught`：未捕获异常（进程已不可信）。
+   *  - `UncaughtException`：未捕获异常（进程已不可信）。字面量与 [logSignatureOf] 同一份 ——
+   *    旧接线实际只可能命中签名，故这里不得放宽成「任何含 uncaught 的行」（2026-10-26 评审：
+   *    4KB 尾部里引擎/插件的普通日志也会出现该字样，放宽等于让无关行解除慢探活否决）。
    *
    * **反向要求**：`reset()` 不得因此类证据缺失而破坏既有坑 153 的语义——半死引擎的 undo/
    * 重启必须仍能生效。故本判据只否决**破坏性**阶梯（DEGRADED_HTTP → 重启/回滚），
@@ -216,7 +219,7 @@ object WatchdogV2 {
     if (logTail.isNullOrEmpty()) return false
     return logTail.contains("EADDRINUSE")
       || logTail.contains("plugin tree failed to load")
-      || logTail.contains("uncaught", ignoreCase = true)
+      || logTail.contains("UncaughtException")
   }
 
   /**
@@ -250,6 +253,43 @@ object WatchdogV2 {
   var lastLogTail: String = ""
     private set
 
+  /**
+   * 上一次 HEALTHY 探活时 engine.log 的长度（[assessProbe] 写、[readEngineLogTail] 读）。
+   *
+   * 为什么需要（2026-10-26 评审）：同一代日志可以**先**出现 EADDRINUSE、随后引擎换临时端口
+   * 重试成功转 HEALTHY（`EngineManager` 的 spawn 前预探活只有 300ms 快照，端口在其后被抢即此
+   * 形态），那句 EADDRINUSE 会留在 4KB 窗口里直到再写约 4KB。若此后一次长 turn 让探活超时，
+   * 陈旧的 EADDRINUSE 会把「解除慢探活否决」提前到 30 秒，强杀一个健康但忙的引擎——正是
+   * #274 要挡的形态。故证据只认**上一次健康点之后**写入的字节。
+   */
+  @Volatile
+  private var healthyLogMark: Long = 0L
+
+  /**
+   * 纯函数（JVM 单测）：证据窗口的起点。
+   *
+   * [mark] 落在 `[0, len]` 内即按水位截断（等于 len 表示健康点之后没有新字节，窗口为空）；
+   * 超过当前长度说明日志被轮转或重建，整份都算新的，退回常规尾部窗口。
+   */
+  internal fun tailWindowStart(len: Long, cap: Int, mark: Long): Long {
+    if (len <= 0L) return 0L
+    val start = if (mark in 0..len) mark else 0L
+    return maxOf(len - cap.toLong(), start)
+  }
+
+  /**
+   * 纯函数（JVM 单测）：健康水位推进。
+   *
+   * 只有 HEALTHY 才把水位抬到当前长度；文件变短（轮转/重建）一律跟到新长度，避免水位停在
+   * 旧文件的大小上，让证据窗口永远读不到东西。
+   */
+  internal fun nextHealthyLogMark(state: ProbeState, len: Long, mark: Long): Long = when {
+    len < 0L -> mark
+    state == ProbeState.HEALTHY -> len
+    len < mark -> len
+    else -> mark
+  }
+
   fun assessProbe(context: Context, callerCurrent: () -> Boolean = { true }): ProbeState {
     if (!callerCurrent()) return ProbeState.DEAD
     val probe = EngineProbe.check(2_500)
@@ -261,16 +301,20 @@ object WatchdogV2 {
     // 于是最需要证据的时刻 lastLogTail 恒为空 —— 判据形同虚设。
     val tail = readEngineLogTail(context)
     if (!callerCurrent()) return ProbeState.DEAD
-    lastLogTail = tail
-    lastLogSignature = logSignatureOf(tail)
+    lastLogTail = tail.text
+    lastLogSignature = logSignatureOf(tail.text)
     val base = probe.optBoolean("running", false)
-    if (!base) return if (EngineProbe.portReachable(1_000)) ProbeState.DEGRADED_HTTP else ProbeState.DEAD
-    val signature = lastLogSignature
-    if (signature != null) {
-      LogCollector.log(TAG, "engine log reports a recoverable warning while HTTP remains alive: " + signature)
-      return ProbeState.DEGRADED_LOG
+    val state = when {
+      !base -> if (EngineProbe.portReachable(1_000)) ProbeState.DEGRADED_HTTP else ProbeState.DEAD
+      lastLogSignature != null -> ProbeState.DEGRADED_LOG
+      else -> ProbeState.HEALTHY
     }
-    return ProbeState.HEALTHY
+    if (state == ProbeState.DEGRADED_LOG) {
+      LogCollector.log(TAG, "engine log reports a recoverable warning while HTTP remains alive: " + lastLogSignature)
+    }
+    // 健康点推进证据水位：此前的字节不再充当破坏性动作的理由（见 [healthyLogMark]）。
+    healthyLogMark = nextHealthyLogMark(state, tail.length, healthyLogMark)
+    return state
   }
 
   /**
@@ -290,6 +334,13 @@ object WatchdogV2 {
     startCooldownMs: Long = EngineManager.START_COOLDOWN_MS,
     /** 本拍的引擎日志签名（[assessProbe] 写、这里读；测试显式传，避免为测试在生产面留钩子）。 */
     logSignature: String? = lastLogSignature,
+    /**
+     * 本拍的引擎日志**原文尾部**（[assessProbe] 写、这里读）。强证据门（#274 ②）必须喂原文：
+     * 签名只有 `"plugin-tree"`/`"uncaught"`/null 三态，EADDRINUSE 连签名都不产生——2026-10-25
+     * 审计实锤旧接线把签名喂给了 [strongEvidenceForDestructiveRecovery]，三个证据分支死了两个
+     * （仅 uncaught 因同名子串侥幸存活），单测直接喂原文的用例全绿掩盖了接线错误。
+     */
+    logTail: String = lastLogTail,
     /**
      * 端口是否归本应用持有（issue #274 ①）。null = 未知（不否决）。
      * 生产面由 EngineService 从进程归属算出；JVM 测试直接传值。
@@ -357,7 +408,8 @@ object WatchdogV2 {
     // 强证据（EADDRINUSE / 插件树装配失败 / uncaught）**解除**「慢」这条否决：
     // 它把「探活超时」从「可能只是在忙」变成「确知引擎坏了」。
     // 注意方向——证据是**放行**的理由，不是**前置条件**（后者会挡掉必需的第 6 拍，见上）。
-    val strongEvidence = strongEvidenceForDestructiveRecovery(logSignature)
+    // 必须喂 logTail 原文而非 logSignature（签名三态折叠会饿死 EADDRINUSE/插件树两个分支）。
+    val strongEvidence = strongEvidenceForDestructiveRecovery(logTail)
     // 两组条件作用面不同，故用「或」：
     //  · portForeign：监听者不是我们 ⇒ **任何**恢复动作都不解决问题（含子进程已死时盲目重启）；
     //  · slowProbe：探活只是超时，但**只有在我们确实托管着一个活进程时**才谈得上「别强杀它」；
@@ -388,7 +440,8 @@ object WatchdogV2 {
     }
     // ── undo 必须先于熔断锁存（0.14.1 修复的锁存盲区）────────────────────────
     // 缺陷形态（存量，非本迭代引入）：[tripped] 曾排在本分支之前，而它一旦为真即**永久** HOLD，
-    // 只有 HEALTHY 探活或 EngineStartFlow 的唯一一处 `WatchdogV2.reset()` 能解。而熔断在
+    // 只有 HEALTHY 探活能解（[recordProbe] 在健康拍把三个计数清零）。生产面没有任何
+    // `WatchdogV2.reset()` 调用点：那个函数只给 JVM 单测清场用。而熔断在
     // effectiveFailureCount >= 12 时打开（12 拍 x 5s = 60s），却小于 START_COOLDOWN_MS = 90s 的
     // 启动预算——于是「托管子进程仍存活、但 HTTP 永远不健康」（半死引擎 / 插件树挂住）这条路径上，
     // 计数器先撞满 12，本函数此后**再也不会求值 undoReady()**：自动 undo 与自动重启同时永久失效。
@@ -643,22 +696,28 @@ object WatchdogV2 {
     else -> null
   }
 
-  private fun readEngineLogTail(context: Context): String {
+  /** 一次尾部读取的结果：原文 + 读取时的文件长度（长度用于证据水位，见 [healthyLogMark]）。 */
+  private data class LogTail(val text: String, val length: Long)
+
+  private fun readEngineLogTail(context: Context): LogTail {
     return try {
       val f = java.io.File(context.filesDir, "engine.log")
-      if (!f.exists()) return ""
+      if (!f.exists()) return LogTail("", 0L)
       java.io.RandomAccessFile(f, "r").use { raf ->
         val len = raf.length()
-        val off = (len - 4096).coerceAtLeast(0)
+        val off = tailWindowStart(len, LOG_TAIL_BYTES, healthyLogMark)
         raf.seek(off)
-        val buf = ByteArray((len - off).toInt().coerceAtMost(4096))
+        val buf = ByteArray((len - off).toInt().coerceIn(0, LOG_TAIL_BYTES))
         val n = raf.read(buf)
-        String(buf, 0, n.coerceAtLeast(0), Charsets.UTF_8)
+        LogTail(String(buf, 0, n.coerceAtLeast(0), Charsets.UTF_8), len)
       }
     } catch (_: Exception) {
-      ""
+      LogTail("", 0L)
     }
   }
+
+  /** 引擎日志尾部窗口上限（原本散落在读取处的字面量）。 */
+  private const val LOG_TAIL_BYTES = 4096
 
   /**
    * 活动租约（0.14.10 §6.2）：唤醒锁按「有没有事在做」持有，而不是按「引擎进程还活着」持有。
@@ -799,6 +858,44 @@ object WatchdogV2 {
 
   /** 终态释放（onDestroy / retireEpoch）：关闭 owner，此后一律拒绝重新 install。 */
   internal fun releaseWakeLock(owner: WakeLockOwner) { owner.acquisition.close() }
+
+  /**
+   * 「缺口拍」阈值（issue #1505）：超出最长合法调度拍（健康态 [HEALTHY_TICK_MS]）一个标准拍以上，
+   * 就不是调度抖动而是**深睡 / 进程挂起**——`Handler.postDelayed` 在 doze 期间不执行，
+   * 唤醒后的第一拍必然出现一个巨大的单调间隔。
+   *
+   * 取 [HEALTHY_TICK_MS] + [STANDARD_TICK_MS]（25s）而不是「2 个标准拍」：健康态 20 秒拍本身
+   * 就是合法的 4 个标准拍，按 10s 设阈值会把它误判成缺口（DEAD 引擎从健康拍降下来那一拍也要
+   * 折算 4 拍，压成 1 拍会让 60 秒熔断变成 240 秒）。
+   */
+  const val GAP_TICK_MS = HEALTHY_TICK_MS + STANDARD_TICK_MS
+
+  /** 一拍记账结果（issue #1505）：[units] 交给 [recordProbe] 的加权标准拍数；[gap] = 深睡/挂起后的缺口拍；[log] 缺口时的结构化日志行（非缺口为空串）。 */
+  internal data class TickAccounting(val units: Int, val gap: Boolean, val log: String = "")
+
+  /**
+   * 纯函数（issue #1505）：本拍实际经过的毫秒 -> 记账。判据见 WatchdogCadenceTest。
+   *
+   * 缺陷形态：#1357 把拍长记账从墙钟换成 `elapsedRealtime()`（这一步是对的，否则系统时间前跳
+   * 会误触熔断），但那个时钟**包含深睡**：doze 或进程挂起后第一拍的 `tickMs` 就是睡眠时长，
+   * 而 [tickUnits] 对任意大间隔都封顶 [MAX_TICK_UNITS]（6），[recordProbe] 又是
+   * `consecutiveFailures += units` ⇒ **两拍**就是 12 = 熔断。深睡唤醒因此被当成「引擎连续失败
+   * 60 秒」，自动恢复反而被抑制。
+   *
+   * 处置：缺口拍只记**一个**标准拍（等价于「醒来后看了一次、失败一次」），并给 [gap]/[log]
+   * 让调用方落 `watchdog-gap` 日志——不静默丢信息，也不让一次睡眠冒充一串失败。
+   * 合法节奏不受影响：健康态 20 秒拍（4 个标准拍）与降级态 5 秒拍（1 个）都 <= [GAP_TICK_MS]。
+   */
+  internal fun tickAccounting(elapsedMs: Long): TickAccounting {
+    if (elapsedMs > GAP_TICK_MS) {
+      return TickAccounting(
+        1,
+        true,
+        "watchdog-gap: 深睡/挂起 " + elapsedMs + "ms 后本拍按 1 个标准拍记账（缺口拍不折算，避免两拍打满熔断）",
+      )
+    }
+    return TickAccounting(tickUnits(elapsedMs), false)
+  }
 }
 
 /** CAS publication/terminal teardown. Acquisition and release may block, but never hold a lock. */

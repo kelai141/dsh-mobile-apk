@@ -67,7 +67,7 @@ ShizukuSupport/ShizukuProbe仍反射探活，授权只能由用户在Shizuku中�
 
 ## 4. 引擎、npm与许可的第二依赖面
 
-当前源码适配目标为官方 dsh-v0.2.1-rc.2 / commit 687f282e8625c6b8d11ff58211a90524be2e4317（预发布，不称stable）。overlay root/第一方包0.2.1-rc.2、pi-ai1.1.0、Cordis4.0.5、schemastery3.18.5、node-addon-require-builtin0.1.9、js-yaml4.3.2，以及官方Lexical0.49.0家族（本代未变，仍为0.49.0）是源码输入；APK内实际版本待终包核实。自包含来源链和协调仓共同管理快照npm/Termux闭包，不是“APK仓不管理”。旧Cordis回退源码逻辑不能继续套在新目标上。
+当前源码适配目标为官方 dsh-v0.2.1-rc.3 / commit 1f81c047fc48fa190a683e469daa699857e9afe8（预发布，不称stable）。overlay root/第一方包0.2.1-rc.2、pi-ai1.1.0、Cordis4.0.5、schemastery3.18.5、node-addon-require-builtin0.1.9、js-yaml4.3.2，以及官方Lexical0.49.0家族（本代未变，仍为0.49.0）是源码输入；APK内实际版本待终包核实。自包含来源链和协调仓共同管理快照npm/Termux闭包，不是“APK仓不管理”。旧Cordis回退源码逻辑不能继续套在新目标上。
 
 raw npm overlay不会自动保留官方pnpm patch。六provider pi-upstream-streaming-020需固定官方patch SHA并精确上下文（本代文件 = `scripts/patches/upstream/pi-ai-1.1.0.patch`，sha256 66eaf960054f10441b93ac3857114e96c1901f6d183713e2f21437b007111644）；Android PTC A1需host/child双目标和副本同步。具体补丁、目标与构建钩子状态见 [运行时补丁台账](RUNTIME-PATCHES.md)。
 

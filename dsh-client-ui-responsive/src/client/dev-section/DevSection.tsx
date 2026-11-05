@@ -12,6 +12,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useShellState } from '../mobile/use-shell-state.ts'
 import { describeHttpFailure, noticeDataAttrs, type Notice } from '../user-copy.ts'
+import { Button, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
 import { tr } from '../i18n.ts'
 import { RuntimeCacheRow } from './runtime-cache.tsx'
 import type { PropsRenderSlots, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
@@ -19,6 +20,7 @@ import type { PropsRenderSlots, PropsRuntime } from '@deepseek-ai/dsh-client-ui-
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 // Single source of truth for the bridge types (incl. the Window.androidBridge global).
 import type {} from '../android-bridge.ts'
+import { openSettingsDocument } from '../mobile/settings-document.ts'
 
 /** Full section props: the settings shell supplies only `close`, plus the
  *  developer-options child seat (adb authorization panel et al) this section declares. */
@@ -259,7 +261,7 @@ export function DevSection({ renderSlot }: DevSectionProps) {
       const raw = window.androidBridge?.exportConfig?.()
       const j = JSON.parse(raw ?? '{}') as { ok?: boolean; path?: string; error?: string }
       setConfigMsg(j.ok
-        ? tr('已导出到 ', 'Exported to ') + (j.path ?? 'exports/config/settings.yaml')
+        ? tr('已导出到 ', 'Exported to ') + (j.path ?? 'exports/config/')
         : tr('导出失败：', 'Export failed: ') + (j.error ?? tr('未知错误', 'unknown error')))
     } catch {
       setConfigMsg(tr('导出失败：应用内连接不可用（仅安卓应用内可用）——请重新打开应用后重试', 'Export failed: the app bridge is unavailable. Reopen the app and try again.'))
@@ -269,9 +271,10 @@ export function DevSection({ renderSlot }: DevSectionProps) {
   const importConfig = useCallback(() => {
     try {
       const raw = window.androidBridge?.importConfig?.()
-      const j = JSON.parse(raw ?? '{}') as { ok?: boolean; hint?: string; error?: string }
+      const j = JSON.parse(raw ?? '{}') as { ok?: boolean; hint?: string; error?: string; backup?: string }
       setConfigMsg(j.ok
-        ? tr('已导入并生效（原配置备份为 settings.yaml.import-backup）。', 'Imported and applied (the previous file is settings.yaml.import-backup). ') + (j.hint ?? '')
+        ? tr('已导入并生效（原配置备份为 ', 'Imported and applied (the previous file is ') +
+          (j.backup ?? '*.import-backup') + tr('）。', '). ') + (j.hint ?? '')
         : tr('导入失败：', 'Import failed: ') + (j.error ?? tr('未知错误', 'unknown error')))
     } catch {
       setConfigMsg(tr('导入失败：应用内连接不可用（仅安卓应用内可用）——请重新打开应用后重试', 'Import failed: the app bridge is unavailable. Reopen the app and try again.'))
@@ -301,51 +304,66 @@ export function DevSection({ renderSlot }: DevSectionProps) {
           the hard-cut migration is verified. */}
       {renderSlot?.('settings.dev.item', {})}
 
-      <div className="dsh-dev-row">
-        <button type="button" className="dsh-dev-btn" onClick={askRestart} disabled={restarting}>
-        {restarting ? tr('重启中…', 'Restarting…') : tr('重启', 'Restart')}
-        </button>
-        <button type="button" className="dsh-dev-btn dsh-dev-danger" onClick={askClose}>{tr('关闭', 'Close')}</button>
-        <button type="button" className="dsh-dev-btn" onClick={reload}>{tr('刷新界面', 'Reload page')}</button>
-        <button type="button" className="dsh-dev-btn" onClick={openConsole}>{tr('打开控制台', 'Open console')}</button>
+      <div className="dsh-gs-row dsh-gs-stacked">
+        <div className="dsh-gs-text">
+          <div className="dsh-gs-title">{tr('运行时', 'Runtime')}</div>
+          <div className="dsh-gs-desc">{tr('重启引擎、关闭引擎、重载界面或打开控制台。', 'Restart the engine, stop it, reload the page, or open the console.')}</div>
+        </div>
+        <div className="dsh-gs-control dsh-gs-actions">
+          <Button size="sm" onClick={askRestart} disabled={restarting}>
+            {restarting ? tr('重启中…', 'Restarting…') : tr('重启', 'Restart')}
+          </Button>
+          <Button size="sm" variant="outline" className="dsh-danger" onClick={askClose}>{tr('关闭', 'Close')}</Button>
+          <Button size="sm" onClick={reload}>{tr('刷新界面', 'Reload page')}</Button>
+          <Button size="sm" onClick={openConsole}>{tr('打开控制台', 'Open console')}</Button>
+        </div>
       </div>
 
       {actionMsg !== null && <p className="dsh-dev-warn" {...noticeDataAttrs(actionMsg)}>{actionMsg.text}</p>}
 
-      <label className="dsh-dev-row dsh-dev-switch">
-        <input
-          type="checkbox"
-          checked={devLog}
-          onChange={(e) => toggleLog(e.target.checked)}
-        />
-        <span>{tr('调试日志', 'Debug log')}</span>
-      </label>
+      <div className="dsh-gs-row">
+        <div className="dsh-gs-text">
+          <div className="dsh-gs-title">{tr('调试日志', 'Debug log')}</div>
+          <div className="dsh-gs-desc">{logPathHint}</div>
+        </div>
+        <div className="dsh-gs-control">
+          <Switch checked={devLog} onChange={(next) => toggleLog(next)} label={tr('调试日志', 'Debug log')} />
+        </div>
+      </div>
 
       {/* 0.13.2 W7：悬浮球（实时工具流 + 停止）。
           P5-6：与「手机控制」页的虚拟屏浮窗去混淆——旧文案两处都只说「浮窗/浮球」，
           用户分不清哪个是任务面板入口、哪个是虚拟屏画面。此处点名各自是什么。 */}
-      <label className="dsh-dev-row dsh-dev-switch">
-        <input
-          type="checkbox"
-          checked={overlayOn}
-          onChange={(e) => toggleOverlay(e.target.checked)}
-        />
-        <span>{tr('悬浮球（任务面板入口）', 'Floating ball (task panel)')}</span>
-      </label>
-      {/* P5-6 只要求「点名的两处不是同一个东西」，不再复述另一页的完整语义（那由该页自己说）。 */}
-      <p className="dsh-dev-hint">{tr('点开可看工具调用并随时停止；它不是手机控制页的虚拟屏浮窗。', 'Tap it to watch tool calls and stop them. It is not the virtual screen window in Phone control.')}</p>
+      <div className="dsh-gs-row">
+        <div className="dsh-gs-text">
+          <div className="dsh-gs-title">{tr('悬浮球（任务面板入口）', 'Floating ball (task panel)')}</div>
+          <div className="dsh-gs-desc">
+            {tr('点开可看工具调用并随时停止；它不是手机控制页的虚拟屏浮窗。', 'Tap it to watch tool calls and stop them. It is not the virtual screen window in Phone control.')}
+          </div>
+        </div>
+        <div className="dsh-gs-control">
+          <Switch checked={overlayOn} onChange={(next) => toggleOverlay(next)} label={tr('悬浮球（任务面板入口）', 'Floating ball (task panel)')} />
+        </div>
+      </div>
       {overlayMsg !== null && <p className="dsh-dev-hint">{overlayMsg}</p>}
 
       {/* 0.13.1 W4：配置导入/导出（安全手改通道；引擎读私有目录，改共享目录副本无效） */}
-      <div className="dsh-dev-row">
-        <button type="button" className="dsh-dev-btn" onClick={exportConfig}>{tr('导出配置', 'Export config')}</button>
-        <button type="button" className="dsh-dev-btn" onClick={importConfig}>{tr('导入配置', 'Import config')}</button>
+      <div className="dsh-gs-row dsh-gs-stacked">
+        <div className="dsh-gs-text">
+          <div className="dsh-gs-title">{tr('配置文件', 'Config file')}</div>
+          <div className="dsh-gs-desc">
+            {tr('导出到 Documents/dshdata/exports/config/（文件名随活动配置而定，通常是 cordis.patch.yml），改完点「导入配置」生效。导出不含 API 密钥。', 'Exported to Documents/dshdata/exports/config/ (the file name follows the active config, usually cordis.patch.yml); edit it there, then tap Import config. API keys are not included.')}
+          </div>
+        </div>
+        <div className="dsh-gs-control dsh-gs-actions">
+          <Button size="sm" onClick={() => { openSettingsDocument() }}>{tr('打开', 'Open')}</Button>
+          <Button size="sm" onClick={exportConfig}>{tr('导出配置', 'Export config')}</Button>
+          <Button size="sm" onClick={importConfig}>{tr('导入配置', 'Import config')}</Button>
+        </div>
       </div>
       {configMsg !== null && <p className="dsh-dev-hint">{configMsg}</p>}
-      {/* 数据安全说明必须保留（配置不含密钥）；路径保留（用户要拿它去改）。 */}
-      <p className="dsh-dev-hint">
-        {tr('导出到 Documents/dshdata/exports/config/settings.yaml，改完点「导入配置」生效。导出不含 API 密钥。', 'Exported to Documents/dshdata/exports/config/settings.yaml; edit it there, then tap Import config. API keys are not included.')}
-      </p>
+      {/* 数据安全说明（配置不含密钥）与导出路径已并入上方「配置文件」行的说明，
+          这里不再重复一遍——同一句话在一屏里出现两次是纯噪音。 */}
 
       {/* 0.14.1 块 E（详档 §4.3）：运行时缓存清理——白名单制、先给可回收体积再执行、逐项落审计。 */}
       <RuntimeCacheRow />
@@ -367,24 +385,29 @@ export function DevSection({ renderSlot }: DevSectionProps) {
 
       {/* F5.1/D15：文件直达临时工作区（占用展示 + 一键清理；PRD R16 手动清理 + 占用展示） */}
       {incomingBytes !== null && (
-        <div className="dsh-dev-row">
-          <span>
-            {tr('文件直达临时工作区占用：', 'Temporary workspace: ')}{fmtBytes(incomingBytes)}
-          </span>
-          {/* S3-14：破坏性操作一律先确认（旧实现单击即删，与同页「运行时缓存清理」的二次确认不一致）。 */}
-          <button
-            type="button"
-            className="dsh-dev-btn dsh-dev-danger"
-            disabled={cleaning || incomingBytes === 0}
-            onClick={() => { setConfirm('clean') }}
-          >
-            {cleaning ? tr('清理中…', 'Clearing…') : tr('一键清理', 'Clear all')}
-          </button>
+        <div className="dsh-gs-row">
+          <div className="dsh-gs-text">
+            <div className="dsh-gs-title">{tr('文件直达临时工作区', 'Temporary workspace')}</div>
+            <div className="dsh-gs-desc">
+              {tr('当前占用：', 'Using ')}{fmtBytes(incomingBytes)}{tr('。清理会删除外部文件；相关会话中的引用将失效。', '. Clearing deletes external files; references in sessions stop working.')}
+            </div>
+          </div>
+          <div className="dsh-gs-control">
+            {/* S3-14：破坏性操作一律先确认（旧实现单击即删，与同页「运行时缓存清理」的二次确认不一致）。 */}
+            <Button
+              size="sm"
+              variant="outline"
+              className="dsh-danger"
+              disabled={cleaning || incomingBytes === 0}
+              onClick={() => { setConfirm('clean') }}
+            >
+              {cleaning ? tr('清理中…', 'Clearing…') : tr('一键清理', 'Clear all')}
+            </Button>
+          </div>
         </div>
       )}
       {incomingMsg !== null && <p className="dsh-dev-hint" {...noticeDataAttrs(incomingMsg)}>{incomingMsg.text}</p>}
       <p className="dsh-dev-hint">{tr('清理会删除临时工作区内的外部文件；相关会话中的文件引用将失效。', 'Clearing deletes external files in the temporary workspace; references in sessions stop working.')}</p>
-      <p className="dsh-dev-hint">{logPathHint}</p>
       <p className="dsh-dev-warn">{tr('日志包含命令与模型内容，仅用于排查，请及时清理。', 'Logs contain commands and model content; use them only for debugging and clear them soon.')}</p>
 
       {confirm !== null && (
@@ -403,15 +426,10 @@ export function DevSection({ renderSlot }: DevSectionProps) {
             <p className="dsh-dev-modal-title">{confirmText()[confirm].title}</p>
             <p className="dsh-dev-modal-desc">{confirmText()[confirm].desc}</p>
             <div className="dsh-dev-modal-actions">
-              <button
-                type="button"
-                className="dsh-dev-btn"
-                autoFocus
-                onClick={cancelConfirm}
-              >取消</button>
-              <button
-                type="button"
-                className={confirm === 'restart' ? 'dsh-dev-btn' : 'dsh-dev-btn dsh-dev-danger'}
+              <Button variant="outline" autoFocus onClick={cancelConfirm}>取消</Button>
+              <Button
+                variant="outline"
+                className={confirm === 'restart' ? undefined : 'dsh-danger'}
                 onClick={() => {
                   const which = confirm
                   setConfirm(null)
@@ -419,7 +437,7 @@ export function DevSection({ renderSlot }: DevSectionProps) {
                   else if (which === 'close') doClose()
                   else void cleanIncoming()
                 }}
-              >{confirmText()[confirm].ok}</button>
+              >{confirmText()[confirm].ok}</Button>
             </div>
           </div>
         </div>

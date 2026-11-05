@@ -65,6 +65,14 @@
   TerminalBlock / HoverCard / user-questions / trajectory / 第三方插件），全部在点击时现取该 API。
 - boot 看门狗：40s 卡住诊断，以及壳 APK **按字段位置**解析的三条契约行（`[dsh-boot-stall]` 卡住、
   `[dsh-boot-ready]` 真渲染完成、`[dsh-boot-failed]` 客户端插件树装配失败）——见「启动诊断契约」。
+- slot-guard（2026-10-25）：在模块系统边界把 undefined 的 React 元素无害化。小米 14 / Google
+  WebView 155 真机上，上游槽位系统把 `conversation.input.left` 的一个 entry 解析成 undefined，
+  React 抛 #130（"Element type … got: undefined"）、整树卸载、每轮启动落修复门——四组对照
+  （壳 0.14.7/main × 快照 rc.2/rc.3 × 第三方全摘 × 57 项全上游装载）均复现，崩点在上游
+  （slot outlet 无 per-entry 错误边界）。守卫拦截 `window.__ModuleLoader__` 赋值（`<head>`
+  开标签后注入、先于上游 queue 脚本），包装每个注册项的 `factory`，对 `react` /
+  `react/jsx-runtime(-dev-runtime)` 命名空间打 fail-soft 守卫：undefined 类型渲染为 null
+  （该 entry 静默缺席）+ 一次 `console.warn`，其余调用原样透传。上游修复后守卫即无害空转。
 
 ## 启动诊断契约
 
@@ -106,12 +114,16 @@
   `Iterator is not defined`，排查花了整整一轮）。
 - `apply()` 在装载期对装配结果做 `new Function` 解析断言，不合格直接抛错（响亮失败优先于静默降级）。
 - **垫片要按真实现的结构补**：全局 `Iterator` 必须是构造器且 `.prototype === %IteratorPrototype%`（pdfjs 等打包代码会用 `Iterator.prototype.x` 直接打补丁），迭代器包装器必须继承同一原型，否则链式助手断链（见坑 61）。
+- **原型上的内建一律用 `Object.defineProperty` 安装，`enumerable` 必须为 `false`**（issue #621）：赋值安装
+  会得到可枚举属性，普通数组 / 字符串的 `for...in` 随即多出方法名，把函数当成数据。判据在
+  `scripts/polyfill-property-descriptors.test.mjs`（含「原生在场时一个字节都不改」与源码契约两条）。
 
 ## 测试
 
 ```sh
 node scripts/smoke-injections.mjs   # 装配 + 逐段解析 + 页面标记断言（无需安装依赖）
 node scripts/boot-watchdog.test.mjs # 看门狗行为：pendingBoot / ready / 失败契约行
+node scripts/slot-guard.test.mjs     # slot 守卫：undefined 元素降级 / 幂等 / 注入位置
 ```
 
 脚本用桩 cordis 真实装载插件、跑一次 `tapIndex` 变换，再对服务出去的 HTML 逐段解析——

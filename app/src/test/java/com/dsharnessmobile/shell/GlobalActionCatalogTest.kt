@@ -42,8 +42,8 @@ class GlobalActionCatalogTest {
     assertTrue(avail.contains("quickSettings"))
     assertFalse("系统未报告的动作不得宣传", avail.contains("menu"))
     assertFalse(avail.contains("lockScreen"))
-    // 空列表 = ROM 不报，按 API 下限放行（此时 menu 可用）
-    val romSilent = GlobalActionCatalog.available(emptySet(), 35)
+    // 空列表 = ROM 不报，按 API 下限放行（此时 menu 可用；#681 后 menu 下限是 36）
+    val romSilent = GlobalActionCatalog.available(emptySet(), 36)
     assertTrue(romSilent.contains("menu"))
   }
 
@@ -54,14 +54,21 @@ class GlobalActionCatalogTest {
     assertFalse(api26.contains("lockScreen"))
     assertFalse(api26.contains("takeScreenshot"))
     assertTrue(api26.contains("quickSettings"))
-    // API 28：放行锁屏与截图；menu（31）仍不可用
+    // API 28：放行锁屏与截图；menu/mediaPlayPause（#681：实为 API 36 引入）仍不可用
     val api28 = GlobalActionCatalog.available(emptySet(), 28)
     assertTrue(api28.contains("lockScreen"))
     assertTrue(api28.contains("takeScreenshot"))
     assertFalse(api28.contains("menu"))
-    // API 31：全表放行
-    val api31 = GlobalActionCatalog.available(GlobalActionCatalog.TABLE.map { it.id }.toSet(), 31)
-    assertEquals(GlobalActionCatalog.TABLE.size, api31.size)
+    assertFalse("mediaPlayPause 是 API 36 常量，API 28 不得宣传", api28.contains("mediaPlayPause"))
+    // API 31：dismissNotificationShade / accessibilityShortcut 放行，menu/mediaPlayPause 仍不可用
+    val api31 = GlobalActionCatalog.available(emptySet(), 31)
+    assertTrue(api31.contains("dismissNotificationShade"))
+    assertTrue(api31.contains("accessibilityShortcut"))
+    assertFalse(api31.contains("menu"))
+    assertFalse(api31.contains("mediaPlayPause"))
+    // API 36：全表放行
+    val api36 = GlobalActionCatalog.available(GlobalActionCatalog.TABLE.map { it.id }.toSet(), 36)
+    assertEquals(GlobalActionCatalog.TABLE.size, api36.size)
   }
 
   @Test

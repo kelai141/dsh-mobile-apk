@@ -87,16 +87,48 @@ internal class BrowserHost(
      */
     private const val BLOCKED_REQUEST_LOG_LIMIT = 20
     private const val SNAPSHOT_MAX_NODES = 400
+    /**
+     * 截图回执里的交付说明。必须与实现一致：文件落在 `files/` 下，**不**是工具层读完即删，
+     * 而是由 [ShotCachePolicy] 按 TTL 与上限清理（issue #672）。
+     */
+    private const val SHOT_NOTE = "截图落在应用私有目录的引擎可读路径；同目录历史截图按 1 小时 TTL 与数量/总量上限自动清理。"
     /** 无活动标签页时的只读占位（避免把“没有页面”误判成“有页面”） */
     private val ORPHAN_GENERATION = AtomicLong(0)
     private val ORPHAN_REFS = HashSet<String>()
   }
 
+  /**
+   * Derive the two independent facts once: a browser can work without identity isolation.
+   * Shared by status(), nativeReply(), caps() and tabSummaries() so the wire cannot drift.
+   */
+  private fun browserStatus(workspace: Workspace? = currentWorkspace): BrowserStatus {
+    val surfacePresent = workspace?.tabs?.values?.any { it.view != null || it.remoteCreated } == true
+    val surfaceCreatable = BrowserHostProfile.supported() || remote != null
+    val profileAttached = remote != null || workspace?.profile?.isAssigned == true
+    return BrowserStatusSemantics.derive(
+      tier = isolation.tier(),
+      profileError = workspace?.profileError.orEmpty(),
+      surfacePresent = surfacePresent,
+      surfaceCreatable = surfaceCreatable,
+      profileAttached = profileAttached,
+    )
+  }
+
+  /**
+   * `browser_state.profileIsolation` 的唯一判据（issue #1575）。
+   *
+   * 与 `profileEstablished` 分开：后者进 `browserAvailable` 派生链，语义是「已拿到隔离身份」；
+   * 这里回答的是**向模型与用户声明隔离程度**。PROCESS_SUFFIX 的 KDoc 明写它隔离的是
+   * 「浏览器 vs 引擎」，全 app 共享一个浏览器档案——把它报成 isolated 是假话：会话 A 在某站
+   * 登录后，会话 B 的 browser_open 直接带着 A 的 cookie/登录态。
+   */
+  private fun profileIsolationOf(tier: BrowserIsolationTier, status: BrowserStatus): String =
+    BrowserStatusSemantics.isolationWire(tier, status)
+
   /** Complete per-session native authority; polling never changes selected workspace or visibility. */
   private fun tabSummaries(workspace: Workspace = requireWorkspace()): JSONArray {
     val density = dshWebView.resources.displayMetrics.density.coerceAtLeast(0.5f)
-    val profileAvailable = (remote != null || workspace.profile.isAssigned) && workspace.profileError.isEmpty()
-    val profileReason = workspace.profileError.ifEmpty { if (profileAvailable) "" else "browser-profile-not-ready" }
+    val status = browserStatus(workspace)
     val out = JSONArray()
     for (tab in workspace.tabs.values) {
       out.put(JSONObject()
@@ -109,7 +141,9 @@ internal class BrowserHost(
         .put("identityId", tab.identityId)
         .put("viewportWidth", tab.requestedViewport?.width ?: (dshWebView.width / density).toInt())
         .put("viewportHeight", tab.requestedViewport?.height ?: (dshWebView.height / density).toInt())
-        .put("profileAvailable", profileAvailable).put("profileReason", profileReason)
+        .put("profileAvailable", status.profileEstablished)
+        .put("isolationAvailable", status.isolationAvailable)
+        .put("profileReason", status.profileReason)
         .put("reason", tab.reason).put("active", tab.id == workspace.activeTabId))
     }
     return out
@@ -133,7 +167,7 @@ internal class BrowserHost(
 
   // ── 兼容档（process-suffix，WebView<114）执行位 ──────────────────────────
   /** evaluateJs 序号 → 回调（tier-2；回调统一回主线程再派发）。 */
-  private val pendingJs = HashMap<Int, (String?) -> Unit>()
+  private val pendingJs = HashMap<Int, PendingJsEntry>()
 
   private val rendererListener = object : RemoteRendererHost.Listener {
     override fun onRendererEvent(tabId: String, event: JSONObject) {
@@ -141,7 +175,7 @@ internal class BrowserHost(
     }
 
     override fun onRendererJsResult(tabId: String, seq: Int, result: JSONObject) {
-      main.post { pendingJs.remove(seq)?.invoke(result.optString("value")) }
+      main.post { deliverJsResult(tabId, seq, result) }
     }
   }
 
@@ -150,6 +184,16 @@ internal class BrowserHost(
     if (!BrowserHostProfile.supported() && Build.VERSION.SDK_INT >= 29) {
       RemoteRendererHost(activity, allowAnonymousEngineAccess, rendererListener)
     } else null
+
+  /**
+   * 远端 tabId → 上一次**已下推**给渲染进程的投影几何（issue #1574）。
+   *
+   * 为什么要记在宿主侧：`setStageBounds` 的续租每秒到两次（`switchTo` + `applyStageBounds`），
+   * 而 tier-2 的 `relayout` 是「销毁投影 + 重建 SCVH + 重设 View」的重量级动作。判据必须基于
+   * 「上一次真正下推的几何」而不是「上一次算出的几何」，否则跨工作台切换时会把别的 tab 的
+   * 几何当成自己的。
+   */
+  private val pushedGeometry = HashMap<String, RemoteProjectionPolicy.Geometry>()
 
   /** 档位解析（PR2 模型）：tier-2 就绪性 = 渲染进程已绑定。 */
   private val isolation = BrowserIsolation(
@@ -167,6 +211,19 @@ internal class BrowserHost(
   /** 远端页面事件 → 本地 Tab 状态（主线程；generation 采用远端计数器的单调值）。 */
   private fun applyRendererEvent(remoteId: String, event: JSONObject) {
     if (remoteId.isEmpty()) {
+      if (event.optString("type") == "rendererConnected") {
+        // #13（2026-10-25 审计）：渲染进程回来了（BIND_AUTO_CREATE 自动重启 + 重新投递
+        // onServiceConnected）。断线时烙下的降级标记必须清掉，否则自动恢复的绑定也救不回
+        // 已降级的面板——用户只能重启应用。**只清我们烙的那一枚**：真实 profile 错误
+        // （browser-not-created 等）另有着落，不得顺手抹掉。tab.remoteCreated 已在断线时清零，
+        // 下一次 ensureSurface/命令会按需重建远端 tab。
+        for (workspace in workspaces.values) {
+          if (workspace.profileError == "browser-renderer-unavailable") workspace.profileError = ""
+        }
+        lastError = ""
+        applyVisibility()
+        return
+      }
       // 渲染进程断线：全部工作台显式降级，面板/模型立即看到 browser-renderer-unavailable。
       for (workspace in workspaces.values) {
         if (workspace.profileError.isEmpty()) workspace.profileError = "browser-renderer-unavailable"
@@ -174,6 +231,12 @@ internal class BrowserHost(
       }
       lastError = "browser-renderer-unavailable"
       applyVisibility()
+      // #13 兜底：多数 ROM 会在 BIND_AUTO_CREATE 下自动重启服务并重新投递 onServiceConnected
+      // （届时上面的 rendererConnected 分支会清降级）；对不重启的 OEM 电池管理器场景，延迟重绑
+      // 一次——connect() 自带 renderer!=null/binding 早退，恢复中重入是安全的 no-op。
+      main.postDelayed({
+        if (remote != null && remote?.ready != true) remote?.connect { remote?.refreshEndpoint() }
+      }, 5_000L)
       return
     }
     val slash = remoteId.indexOf('/')
@@ -221,6 +284,7 @@ internal class BrowserHost(
         tab.snapshotGeneration = -1L
         synchronized(tab.refs) { tab.refs.clear() }
         tab.remoteCreated = false
+        pushedGeometry.remove(remoteId)
         tab.loadState = "error"
         tab.reason = event.optString("reason", "renderer-crashed")
       }
@@ -327,7 +391,7 @@ internal class BrowserHost(
   /** Foreground selection is owned exclusively by trusted UI work on the main thread. */
   private fun switchTo(workspace: Workspace) {
     check(Looper.myLooper() == Looper.getMainLooper())
-    currentWorkspace = workspace
+    currentWorkspace = workspace; evictOverCap(workspace)
     applyStageBounds()
     applyVisibility()
   }
@@ -349,6 +413,7 @@ internal class BrowserHost(
       tab.view = null
       if (remote != null && tab.remoteCreated) {
         tab.remoteCreated = false
+        pushedGeometry.remove(remoteTabId(workspace, tab))
         runCatching { remote!!.renderer?.destroyTab(remoteTabId(workspace, tab)) }
       }
       tab.snapshotGeneration = -1L
@@ -574,20 +639,19 @@ internal class BrowserHost(
     value.isNotBlank() && value.length <= limit && value.none { it.code < 32 || it.code == 127 }
 
   private fun commandUnavailable(session: String, reason: String): String = JSONObject()
-    .put("ok", false).put("available", false).put("session", session)
+    .put("ok", false).put("available", false).put("browserAvailable", false).put("isolationAvailable", false)
+    .put("statusLevel", BrowserStatusLevel.ERROR.wire).put("session", session)
     .put("profileAvailable", false).put("profileReason", reason).put("reason", reason).toString()
 
   private fun nativeReply(workspace: Workspace, tab: Tab? = null, reason: String = ""): JSONObject {
-    val tierOk = isolation.tier() != BrowserIsolationTier.UNAVAILABLE
-    val available = tierOk && workspace.profileError.isEmpty()
-    val isolated = available && (remote != null || workspace.profile.isAssigned)
-    val profileReason = workspace.profileError.ifEmpty {
-      if (!tierOk) "browser-profile-unsupported" else if (!isolated) "browser-profile-not-ready" else ""
-    }
-    return JSONObject().put("ok", available && reason.isEmpty()).put("available", available)
+    val status = browserStatus(workspace)
+    return JSONObject().put("ok", status.browserAvailable && reason.isEmpty()).put("available", status.browserAvailable)
+      .put("browserAvailable", status.browserAvailable)
+      .put("isolationAvailable", status.isolationAvailable)
+      .put("statusLevel", status.level.wire)
       .put("session", workspace.sessionKey).put("ownerSessionId", workspace.sessionKey)
-      .put("profileAvailable", isolated).put("profileReason", profileReason)
-      .put("reason", reason.ifEmpty { if (!available) profileReason else tab?.reason.orEmpty() })
+      .put("profileAvailable", status.profileEstablished).put("profileReason", status.profileReason)
+      .put("reason", reason.ifEmpty { if (!status.browserAvailable) status.reason else tab?.reason.orEmpty() })
       .put("tabs", tabSummaries(workspace)).put("activeTabId", workspace.activeTabId ?: "")
       .apply { tab?.let { put("tabId", it.id) } }
   }
@@ -916,7 +980,7 @@ internal class BrowserHost(
         rh.disconnect()
         rh.detachHostSurface()
       }
-      workspaces.clear()
+      workspaces.clear(); drainPendingJs("destroy")
       currentWorkspace = null
       Unit
     }
@@ -979,6 +1043,9 @@ internal class BrowserHost(
         return null
       }
       rh.setProjectionSize(remoteTabId(workspace, tab), size.first, size.second)
+      // 新建/重建的投影是一块**全新的** SCVH：去重基线必须作废，否则「几何恰好等于上一次」时
+      // 会跳过唯一一次必要的 relayout，新投影停在 1x1（#1574 的反向风险）。
+      pushedGeometry.remove(remoteTabId(workspace, tab))
       tab.remoteCreated = true
       workspace.profileError = ""
       return null
@@ -1134,7 +1201,7 @@ internal class BrowserHost(
           return true
         }
       }
-      webChromeClient = object : WebChromeClient() {
+      webChromeClient = object : JsConfirmChromeClient(activity) {
         override fun onReceivedTitle(view: WebView, pageTitle: String?) {
           if (tab.view !== view) return
           tab.title = pageTitle ?: ""
@@ -1237,9 +1304,16 @@ internal class BrowserHost(
       }
       activeTab()?.let { tab ->
         val rid = remoteTabId(tab.owner, tab)
+        // #1574：续租每秒必到，旧实现无条件 relayout → 远端 destroyProjection + new SCVH + setView，
+        // 画面每秒拆建两次。几何全等时只同步输入换算尺寸，不碰远端投影。
+        val geometry = RemoteProjectionPolicy.Geometry(positionedLeft, positionedTop, width, height)
+        val relaid = RemoteProjectionPolicy.changed(pushedGeometry[rid], geometry)
         rh.setProjectionSize(rid, width, height)
-        runCatching { rh.renderer?.relayout(rid, width, height) }
-        measureRemotePage(tab)
+        if (relaid) {
+          pushedGeometry[rid] = geometry
+          runCatching { rh.renderer?.relayout(rid, width, height) }
+          measureRemotePage(tab)
+        }
       }
     }
     stageVisible = true
@@ -1406,8 +1480,14 @@ internal class BrowserHost(
       // tier-2：舞台不可见≠页面可以不排版——远端窗口同样保持非退化尺寸，只把投影藏起来。
       activeTab()?.let { tab ->
         val rid = remoteTabId(tab.owner, tab)
+        // #1574：同 applyStageBounds——舞台不可见分支同样按四元组去重（原实现每次续租都重建投影）。
+        val geometry = RemoteProjectionPolicy.Geometry(0, 0, w, h)
+        val relaid = RemoteProjectionPolicy.changed(pushedGeometry[rid], geometry)
         rh.setProjectionSize(rid, w, h)
-        runCatching { rh.renderer?.relayout(rid, w, h) }
+        if (relaid) {
+          pushedGeometry[rid] = geometry
+          runCatching { rh.renderer?.relayout(rid, w, h) }
+        }
       }
       return
     }
@@ -1419,19 +1499,26 @@ internal class BrowserHost(
 
   private fun status(): JSONObject {
     val density = dshWebView.resources.displayMetrics.density.coerceAtLeast(0.5f)
+    val workspace = currentWorkspace
     val isolationTier = isolation.tier()
-    val isolationAvailable = isolationTier != BrowserIsolationTier.UNAVAILABLE && currentWorkspace?.profileError.isNullOrEmpty()
-    val profileEstablished = isolationAvailable && (remote != null || currentWorkspace?.profile?.isAssigned == true)
+    val status = browserStatus(workspace)
     return JSONObject()
-      .put("ok", isolationAvailable)
-      .put("available", isolationAvailable)
+      // ok/available 只回答「浏览器能不能用」；隔离是另一个事实（isolationAvailable）。
+      .put("ok", status.browserAvailable)
+      .put("available", status.browserAvailable)
+      .put("browserAvailable", status.browserAvailable)
+      .put("isolationAvailable", status.isolationAvailable)
+      .put("statusLevel", status.level.wire)
       .put("isolationTier", isolationTier.wire)
-      .put("profileAvailable", profileEstablished)
-      .put("profileReason", currentWorkspace?.profileError.orEmpty().ifEmpty { if (profileEstablished) "" else if (isolationAvailable) "browser-profile-not-ready" else "browser-profile-unsupported" })
-      .put("session", currentWorkspace?.sessionKey ?: "")
+      .put("profileAvailable", status.profileEstablished)
+      .put("profileReason", status.profileReason)
+      .put("session", workspace?.sessionKey ?: "")
       .put("multiProfileSupported", BrowserHostProfile.supported())
-      .put("profileIsolation", if (profileEstablished) "isolated" else if (isolationAvailable) "not-created" else "unavailable")
-      .put("profileName", currentWorkspace?.profile?.takeIf { it.isAssigned }?.name ?: if (remote != null) BrowserProcessService.SUFFIX else "")
+      // #1575：tier-2 下 remote != null 恒成立 ⇒ profileEstablished=true，但 PROCESS_SUFFIX 隔离的是
+      // 「浏览器 vs 引擎」，不是「会话 vs 会话」（全 app 共享一个浏览器档案）。旧实现在这里一律报
+      // isolated，于是会话 B 的 browser_open 带着会话 A 的 cookie，browser_state 却对 B 回 isolated。
+      .put("profileIsolation", profileIsolationOf(isolationTier, status))
+      .put("profileName", workspace?.profile?.takeIf { it.isAssigned }?.name ?: if (remote != null) BrowserProcessService.SUFFIX else "")
       .put("created", view != null || activeTab()?.remoteCreated == true)
       .put("visible", view?.visibility == View.VISIBLE || (view == null && remote?.hostSurface?.visibility == View.VISIBLE))
       .put("url", url)
@@ -1442,7 +1529,7 @@ internal class BrowserHost(
       .put("canGoForward", activeTab()?.let { if (it.view != null) it.view!!.canGoForward() else it.remoteCanGoForward } == true)
       .put("identityId", identityId)
       // 会话标识改为「当前工作台的会话」：每个会话各有自己的页面与代次，不再是全局归属。
-      .put("ownerSessionId", currentWorkspace?.sessionKey ?: "")
+      .put("ownerSessionId", workspace?.sessionKey ?: "")
       .put("scrollY", scrollY)
       .put("scrollDirection", scrollDirection)
       .put("atTop", scrollY <= 0)
@@ -1457,8 +1544,9 @@ internal class BrowserHost(
       .put("tabCount", tabs.size)
       // 请求级过滤计数（审查 S-4）：非 0 表示本页有子资源被拒（模型/面板据此知道「页面少了东西」）。
       .put("blockedRequests", activeTab()?.blockedRequests?.get() ?: 0)
-      .put("serviceWorkerBlockedRequests", currentWorkspace?.profile?.serviceWorkerBlockedRequests?.get() ?: 0)
-      .put("reason", activeTab()?.reason?.takeIf { it.isNotEmpty() } ?: lastError.ifEmpty { if (!isolationAvailable) currentWorkspace?.profileError?.takeIf { it.isNotEmpty() } ?: "browser-profile-unsupported" else "" })
+      .put("serviceWorkerBlockedRequests", workspace?.profile?.serviceWorkerBlockedRequests?.get() ?: 0)
+      // 隔离原因只留在 profileReason；只有浏览器本体故障才进 reason（不被降级提示污染）。
+      .put("reason", activeTab()?.reason?.takeIf { it.isNotEmpty() } ?: status.reason)
   }
 
   private fun rejected(reason: String): String = status().put("ok", false).put("reason", reason).toString()
@@ -1466,6 +1554,9 @@ internal class BrowserHost(
   private fun unavailable(reason: String): String = JSONObject()
     .put("ok", false)
     .put("available", false)
+    .put("browserAvailable", false)
+    .put("isolationAvailable", false)
+    .put("statusLevel", BrowserStatusLevel.ERROR.wire)
     .put("created", false)
     .put("visible", false)
     .put("url", "about:blank")
@@ -1494,16 +1585,23 @@ internal class BrowserHost(
     val uaCh = WebViewShim.supports(WebViewFeature.USER_AGENT_METADATA)
     val multiProfile = BrowserHostProfile.supported()
     val isolationTier = isolation.tier()
-    val isolationAvailable = isolationTier != BrowserIsolationTier.UNAVAILABLE && currentWorkspace?.profileError.isNullOrEmpty()
+    val status = browserStatus()
     return JSONObject()
-      .put("ok", isolationAvailable)
-      .put("available", isolationAvailable)
+      .put("ok", status.browserAvailable)
+      .put("available", status.browserAvailable)
+      .put("browserAvailable", status.browserAvailable)
+      .put("isolationAvailable", status.isolationAvailable)
+      .put("statusLevel", status.level.wire)
       .put("isolationTier", isolationTier.wire)
       .put("multiProfileSupported", multiProfile)
+      .put("profileAvailable", status.profileEstablished)
+      .put("profileReason", status.profileReason)
+      // #1575：caps 与 status 共用同一判据（同一份 profileIsolationOf），否则两处口径又会漂移。
+      .put("profileIsolation", profileIsolationOf(isolationTier, status))
       .put("profileIsolationRequired", true)
       .put("defaultProfileFallback", false)
       .put("completeBrowsingDataClearAvailable", false)
-      .put("reason", if (isolationAvailable) "" else currentWorkspace?.profileError?.takeIf { it.isNotEmpty() } ?: "browser-profile-unsupported")
+      .put("reason", status.reason)
       .put("webviewMajor", major)
       .put("webviewVersion", versionText)
       .put("uaChAvailable", uaCh)
@@ -1515,7 +1613,7 @@ internal class BrowserHost(
       .put("screenHeight", metrics.heightPixels)
       .put("densityDpi", metrics.densityDpi)
       .put("rendererProcesses", if (remote?.ready == true) 1 else 0)
-      .put("browserWebViewAvailable", isolationAvailable)
+      .put("browserWebViewAvailable", status.browserAvailable)
       .put("cdpEnabled", false)
       .put("viewportId", requestedViewport?.id ?: "device")
       .put("surface", "browser")
@@ -1554,8 +1652,25 @@ internal class BrowserHost(
     var navigationTarget: ControlTarget? = null
     val started = controlOnMain(captured) {
       val workspace = captured.workspace
-      val newTab = (wantsNewTab && requestedTabId == null) ||
-        (requestedTabId != null && !tabs.containsKey(requestedTabId))
+      // issue #1318：同 URL 的新开请求先按 workspace 口径规范化再查存活标签，命中就复用。
+      // 判定逻辑在 BrowserTabReuse（纯函数，JVM 单测钉住两个方向）；这里只负责接线。
+      // 注意：**不得**在 ensureSurface 之前调用 normalizeForWorkspace 做别的事——
+      // 该函数是「导航前解析目标 URL」的语义锚点，接线测试按 assertBefore 钉着它的位置。
+      val reusable = BrowserTabReuse.reusableTabId(
+        wantsNewTab = wantsNewTab,
+        requestedTabId = requestedTabId,
+        targetUrl = raw.takeIf { it.isNotBlank() }?.let { BrowserHostNavigationPolicy.normalize(
+          it, isolatedProfile = true, allowAnonymousEngineAccess = allowAnonymousEngineAccess,
+        ) },
+        existingTabs = tabs.values.map { it.id to it.url },
+      )
+      if (reusable != null) {
+        activeTabId = reusable
+        workspace.modelTabId = reusable
+        navigationTarget = ControlTarget(workspace, ensureTab(reusable))
+      }
+      val newTab = reusable == null && ((wantsNewTab && requestedTabId == null) ||
+        (requestedTabId != null && !tabs.containsKey(requestedTabId)))
       if (newTab && tabs.size >= MAX_TABS) {
         return@controlOnMain targetFailure(captured, "tab-limit")
           .put("guidance", "同时打开的页面已达上限（$MAX_TABS）；先 browser_close_tab 关掉不再需要的页。")
@@ -1754,6 +1869,7 @@ internal class BrowserHost(
       if (tab.remoteCreated) {
         runCatching { rh.renderer?.destroyTab(remoteTabId(tab.owner, tab)) }
         tab.remoteCreated = false
+        pushedGeometry.remove(remoteTabId(tab.owner, tab))
       }
       tab.generation.incrementAndGet()
       tab.snapshotGeneration = -1L
@@ -1843,6 +1959,7 @@ internal class BrowserHost(
     tab.view = null
     if (remote != null && tab.remoteCreated) {
       tab.remoteCreated = false
+      pushedGeometry.remove(remoteTabId(tab.owner, tab))
       runCatching { remote!!.renderer?.destroyTab(remoteTabId(tab.owner, tab)) }
     }
     tabs.remove(tab.id)
@@ -1889,18 +2006,23 @@ internal class BrowserHost(
       targetProblem(target)?.let { done(targetFailure(target, it)); return@awaitMain }
       val tab = target.tab
       if (tab == null || !surfaceReady(tab)) { done(targetFailure(target, "browser-not-created")); return@awaitMain }
+      // #1611：与 snapshotOp/textOp 同一判据——表达式自身触发导航或页面 meta-refresh 落在
+      // 8 秒窗口内时，旧文档的返回值会以新文档身份交付（pageReply 现读 url/loadState/pageGeneration）。
+      val startedGeneration = tab.generation.get()
       evaluateOnTab(tab, expr) { raw ->
-        val problem = targetProblem(target, tab.view)
-        if (problem != null) {
-          done(targetFailure(target, problem))
-        } else {
-          val value = decodeJs(raw)
-          done(pageReply(target).put("ok", true).put("value", when (value) {
+        val value = decodeJs(raw)
+        done(BrowserJsReplyGuard.settle(
+          problem = targetProblem(target, tab.view),
+          startedGeneration = startedGeneration,
+          currentGeneration = tab.generation.get(),
+          value = when (value) {
             null -> ""
             is String -> value
             else -> value.toString()
-          }))
-        }
+          },
+          pageReply = { pageReply(target) },
+          reject = { reason -> targetFailure(target, reason) },
+        ))
       }
     }
   }
@@ -2055,9 +2177,12 @@ internal class BrowserHost(
       // tier-2：渲染进程 draw → PNG → 应用私有目录（与 tier-1 同一交付语义）。
       val png = rh.capturePng(remoteTabId(tab.owner, tab), 1600, 2400)
         ?: return@controlOnMain targetFailure(target, "shot-failed:renderer")
-      val dir = File(File(activity.filesDir, "home/tmp"), "dsh-tmp").apply { mkdirs() }
+      val dir = shotDir()
       val file = File.createTempFile("browser-shot-", ".png", dir)
       FileOutputStream(file).use { it.write(png) }
+      if (!ShotCachePolicy.prunePublished(dir, file)) {
+        return@controlOnMain targetFailure(target, "shot-failed:cache-limit")
+      }
       // PNG IHDR 宽高（字节 16..23 大端）——不做整图解码。
       val w = if (png.size > 24) ((png[16].toInt() and 0xff) shl 24 or ((png[17].toInt() and 0xff) shl 16)
         or ((png[18].toInt() and 0xff) shl 8) or (png[19].toInt() and 0xff)) else 0
@@ -2065,7 +2190,7 @@ internal class BrowserHost(
         or ((png[22].toInt() and 0xff) shl 8) or (png[23].toInt() and 0xff)) else 0
       return@controlOnMain pageReply(target).put("ok", true).put("path", file.absolutePath).put("bytes", file.length())
         .put("width", w).put("height", h).put("health", "ok")
-        .apply { if (!args.optBoolean("inline", false)) put("note", "截图落在应用私有目录的引擎可读路径；工具层读完即删。") }
+        .apply { if (!args.optBoolean("inline", false)) put("note", SHOT_NOTE) }
     }
     val browser = tab.view ?: return@controlOnMain targetFailure(target, "browser-not-created")
     try {
@@ -2073,14 +2198,27 @@ internal class BrowserHost(
       val bitmap = Bitmap.createBitmap(browser.width, browser.height, Bitmap.Config.ARGB_8888)
       try {
         browser.draw(Canvas(bitmap))
-        val dir = File(File(activity.filesDir, "home/tmp"), "dsh-tmp").apply { mkdirs() }
+        val dir = shotDir()
         val file = File.createTempFile("browser-shot-", ".png", dir)
         FileOutputStream(file).use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        if (!ShotCachePolicy.prunePublished(dir, file)) {
+          return@controlOnMain targetFailure(target, "shot-failed:cache-limit")
+        }
         pageReply(target).put("ok", true).put("path", file.absolutePath).put("bytes", file.length())
           .put("width", bitmap.width).put("height", bitmap.height).put("health", "ok")
-          .apply { if (!args.optBoolean("inline", false)) put("note", "截图落在应用私有目录的引擎可读路径；工具层读完即删。") }
+          .apply { if (!args.optBoolean("inline", false)) put("note", SHOT_NOTE) }
       } finally { bitmap.recycle() }
     } catch (t: Throwable) { targetFailure(target, "shot-failed:" + t.javaClass.simpleName) }
+  }
+
+  /**
+   * 截图落点。`files/` 下的文件不会被系统当缓存回收，历史 PNG 只能由壳侧自己清
+   * （issue #672）：每次取目录前先按 TTL 与数量/总量上限修剪一遍。
+   */
+  private fun shotDir(): File {
+    val dir = File(File(activity.filesDir, "home/tmp"), "dsh-tmp").apply { mkdirs() }
+    ShotCachePolicy.prune(dir)
+    return dir
   }
 
   // ── async plumbing ────────────────────────────────────────────────────────
@@ -2190,7 +2328,7 @@ internal class BrowserHost(
     }
     val rh = remote ?: run { callback(null); return }
     val seq = rh.nextSeq()
-    pendingJs[seq] = callback
+    enqueuePendingJs(seq, tab, callback)
     if (!rh.evaluateJs(remoteTabId(tab.owner, tab), script, seq)) {
       pendingJs.remove(seq)
       callback(null)
@@ -2344,6 +2482,154 @@ internal class BrowserHost(
     "end" to KeyEvent.KEYCODE_MOVE_END,
     "space" to KeyEvent.KEYCODE_SPACE,
   )
+
+  /**
+   * tier-2 JS 回执派发（issue #1363）：**先比对 tab 存活与世代，不同代直接丢弃**。
+   *
+   * 旧实现只按 `seq` 取回调：`closeTabOp` 已经 `generation.incrementAndGet()` + 销毁 view +
+   * `tabs.remove`，在途回执照旧把 url / title / scrollY 写回，模型侧读到「幽灵页」并据此继续操作。
+   *
+   * 为什么要分三态（见 [PendingJsDispatch] 的注释）：`tab 已关` 是正常关闭竞态，
+   * `换过代` 说明有人在旧页面上继续操作——两者排障含义不同，日志要能分开。
+   *
+   * @param tabId 回执上报的 tabId。
+   * @param seq 求值序号。
+   * @param result 渲染侧回执。
+   */
+  private fun deliverJsResult(tabId: String, seq: Int, result: JSONObject) {
+    val entry = pendingJs.remove(seq) ?: return
+    val live = tabs[entry.tabId]?.generation?.get()
+    when (PendingJsDispatch.decide(entry, tabId, live)) {
+      PendingJsDispatch.Decision.DELIVER -> entry.callback(result.optString("value"))
+      PendingJsDispatch.Decision.DISCARD_TAB_GONE ->
+        android.util.Log.w("dsh-browser", "js result discarded (tab gone): tab=" + entry.tabId + " seq=" + seq)
+      PendingJsDispatch.Decision.DISCARD_STALE_GENERATION ->
+        android.util.Log.w("dsh-browser", "js result discarded (stale generation): tab=" + entry.tabId + " seq=" + seq)
+    }
+  }
+
+  /**
+   * 入队一条在途回执，并在**超过上限**时先回收（issue #1362：页面还在但永不回执的那一类）。
+   *
+   * 为什么要上限：`destroy()`/断连的 drain 只能收拾「页面已死」；若渲染进程活着却卡死，
+   * 回执永远不来、调用方各自 2s 闩超时后继续发新请求 —— 同一个页面会持续堆积。
+   * 上限取值依据见 [PendingJsDrain] 的类注释（典型 1–2 条、最坏 ≈1 条/2s，64 ≈ 2 分钟挂死）。
+   *
+   * @param seq 求值序号。
+   * @param tab 发起求值的 tab（记下它的世代，供回执派发时比对）。
+   * @param callback 回执回调。
+   */
+  private fun enqueuePendingJs(seq: Int, tab: Tab, callback: (String?) -> Unit) {
+    if (PendingJsDrain.shouldReclaim(pendingJs.size)) drainPendingJs("cap")
+    pendingJs[seq] = PendingJsEntry(tab.id, tab.generation.get(), callback)
+  }
+
+  /**
+   * 清空在途回执表（issue #1362）：逐条移除并以 `null` 回调，让调用方的 2s 闩**立刻**结束，
+   * 而不是各自等到超时。
+   *
+   * **必须留痕**：每次回收写一行日志（条数 + 原因）。静默回收会让以后分不清
+   * 「没堆」与「堆了但被静默回收」——那正是本 issue 想避免的不可观测。
+   *
+   * @param reason 回收原因（`destroy` / `cap`），进日志。
+   */
+  private fun drainPendingJs(reason: String) {
+    if (pendingJs.isEmpty()) return
+    val drained = ArrayList<PendingJsEntry>(pendingJs.size)
+    for (entry in pendingJs.values) drained.add(entry)
+    pendingJs.clear()
+    android.util.Log.w("dsh-browser", "pending js drained: reason=" + reason + " count=" + drained.size)
+    for (entry in drained) entry.callback(null)
+  }
+
+  /** 会话键 → 最近使用时刻（毫秒）。issue #1364：切换淘汰的依据。 */
+  private val workspaceLastUsedAt = HashMap<String, Long>()
+
+  /**
+   * 切换时**只淘汰超上限**的工作台（issue #1364，按维护者裁定重定时机）。
+   *
+   * 为什么不在切换时清空非当前工作台：那是用户可感知的退化——切走再切回来页面就重建，
+   * 后台浏览状态（滚动位置、表单、正在播放的媒体）全丢。现在保留 current + 最近使用的
+   * [WorkspaceReclaim.RECENT_KEEP] 个，只有当第 [WorkspaceReclaim.MAX_LIVE] 个存活工作区出现时
+   * 才淘汰最久未用的那个。上限依据见 [WorkspaceReclaim] 的类注释。
+   *
+   * **顺序：先删引用，再销毁**（维护者要求）——先从 `workspaces` 摘键，此后新调用会新建，
+   * 不会被半销毁的工作台接住；再 `dropWorkspace`（内部 remove 幂等；profile dispose 失败只 warn）。
+   *
+   * @param keep 当前工作台（永不淘汰）。
+   */
+  private fun evictOverCap(keep: Workspace?) {
+    val now = System.currentTimeMillis()
+    keep?.let { workspaceLastUsedAt[it.sessionKey] = now }
+    val victims = WorkspaceReclaim.evictPlan(
+      workspaces.keys.toList(), keep?.sessionKey, ANONYMOUS_SESSION, workspaceLastUsedAt,
+    )
+    for (key in victims) {
+      val workspace = workspaces[key] ?: continue
+      val lastUsed = workspaceLastUsedAt.remove(key) ?: now
+      workspaces.remove(key)
+      android.util.Log.w(
+        "dsh-browser",
+        "workspace evicted: reason=cap key=" + key + " age=" + (now - lastUsed) + "ms",
+      )
+      dropWorkspace(workspace)
+    }
+  }
+
+  /**
+   * 会话被删除时**立即**回收它的工作台（issue #1364 的主回收点）。
+   *
+   * 删除是唯一能确定「这个页面再也不会被用到」的时刻，所以这里不做任何延迟或额度判断。
+   * 其余工作台**不受影响**（判据里有这条）。
+   *
+   * 注：壳侧目前**没有**会话删除的信号源——session 生命周期归引擎/页面侧，现有的
+   * `/api/android/` 路由里也没有会话事件。本方法是那个信号出现时要调的入口
+   * （`BrowserHostHolder.dropSessionWorkspace`），
+   * 在信号接上之前，驻留由 [evictOverCap] 的上限兜住（最坏 4 个）。
+   *
+   * @param session 被删除的会话 id。
+   */
+  /**
+   * 按**可信会话列表**对账回收（issue #1364 的便宜路）。
+   *
+   * 数据源已经存在：`OverlayPanel.refreshSessionPicker()` 就在调 `session/list` RPC，拿到的
+   * `items[].sessionId` 就是当前真实存在的会话集。所以**不需要新路由、不需要跨仓**。
+   *
+   * 刻意不做的两件事：
+   * - **不动** `ANONYMOUS_SESSION`（非会话调用）；
+   * - **空列表不动手**：空列表几乎一定是「读取失败 / 会话引擎还没起来」，此时大清理会把用户
+   *   正在看的页面全删掉。宁可这轮不回收，也不误删。
+   *
+   * @param liveSessionIds 本次列表里出现的 sessionId 集合（空集合 = 不做回收）。
+   */
+  internal fun reconcileWorkspaces(liveSessionIds: Set<String>) {
+    val plan = WorkspaceReclaim.reconcilePlan(workspaces.keys.toList(), liveSessionIds, ANONYMOUS_SESSION)
+    if (plan.isEmpty()) return
+    val now = System.currentTimeMillis()
+    for (key in plan) {
+      val workspace = workspaces[key] ?: continue
+      val lastUsed = workspaceLastUsedAt.remove(key) ?: now
+      workspaces.remove(key) // 先删引用
+      android.util.Log.w(
+        "dsh-browser",
+        "workspace dropped: reason=session-list-reconcile key=" + key + " age=" + (now - lastUsed) + "ms",
+      )
+      dropWorkspace(workspace) // 再销毁
+    }
+  }
+
+  internal fun dropWorkspaceForSession(session: String?) {
+    val key = session?.takeIf { it.isNotBlank() } ?: return
+    val workspace = workspaces[key] ?: return
+    val now = System.currentTimeMillis()
+    val lastUsed = workspaceLastUsedAt.remove(key) ?: now
+    workspaces.remove(key) // 先删引用
+    android.util.Log.w(
+      "dsh-browser",
+      "workspace dropped: reason=session-delete key=" + key + " age=" + (now - lastUsed) + "ms",
+    )
+    dropWorkspace(workspace) // 再销毁
+  }
 }
 
 /**
@@ -2358,6 +2644,27 @@ internal object BrowserHostHolder {
   var host: BrowserHost? = null
 
   /** Route one control op to the live BrowserHost; absent host is a structured fail-closed answer. */
+  /**
+   * 会话被删除时回收它的隔离工作台（issue #1364 的主回收点）。
+   *
+   * 现在**没有调用方**：壳侧收不到会话删除信号（session 生命周期在引擎/页面侧）。
+   * 已具备可信信号时应在这里接上——在那之前，驻留由切换淘汰的上限兜住（最坏 4 个）。
+   *
+   * @param session 被删除的会话 id。
+   */
+  fun dropSessionWorkspace(session: String?) {
+    host?.dropWorkspaceForSession(session)
+  }
+
+  /**
+   * 按可信会话列表对账回收（issue #1364 便宜路：复用 `session/list` RPC，无新路由）。
+   *
+   * @param liveSessionIds 当前真实存在的 sessionId 集合；空集合时不做任何回收。
+   */
+  fun reconcileSessionWorkspaces(liveSessionIds: Set<String>) {
+    host?.reconcileWorkspaces(liveSessionIds)
+  }
+
   fun control(op: String, args: JSONObject): JSONObject {
     val current = host ?: return JSONObject()
       .put("__error", "浏览器工作台尚未创建：请先在右侧栏「AI 浏览器」中打开页面。")

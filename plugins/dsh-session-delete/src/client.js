@@ -63,13 +63,14 @@
          * @param {string} sessionId - session to delete.
          * @returns {Promise<{ok: boolean, status: number, json: () => Promise<object>}>} XHR result.
          */
-        function postDelete(sessionId) {
+        function postDelete(sessionId, action) {
           // 用 XHR 而不是 fetch：XHR 的 timeout 由浏览器网络栈保证触发，fetch 的
           // AbortSignal 在部分 WebView 上对已入队/半开连接不生效（现场：弹窗无限转）。
           return new Promise(function (resolve, reject) {
             var xhr = new XMLHttpRequest()
             xhr.open('POST', '/api/session-delete', true)
             xhr.setRequestHeader('content-type', 'application/json')
+            // issue #912：action 缺省即 delete（服务端同样缺省），隔离显式传 'quarantine'。
             xhr.timeout = REQUEST_TIMEOUT_MS
             xhr.onload = function () {
               resolve({
@@ -99,8 +100,40 @@
               error.name = 'AbortError'
               reject(error)
             }
-            xhr.send(JSON.stringify({ sessionId: sessionId }))
+            xhr.send(JSON.stringify(action === undefined ? { sessionId: sessionId } : { sessionId: sessionId, action: action }))
           })
+        }
+
+        /**
+         * #510：续做失败的可见反馈。apply 作用域拿不到确认框的 props.t，用本文件
+         * 自己的 zh/en 词典按页面语言取词（与 ctx.locale.register 同一份源）。
+         */
+        function resumeText(code, fallback) {
+          var english = (navigator.language || 'zh').toLowerCase().indexOf('zh') !== 0
+          var dict = english ? en : zh
+          var key = code === 'session-active' ? 'error.active'
+            : code === 'activity-unknown' ? 'error.unknown'
+              : code === 'unload-failed' ? 'error.unload'
+                : code === 'not-found' ? 'error.gone'
+                  : null
+          return (key !== null ? dict[key] : '') || (dict['error'].replace('{message}', fallback))
+        }
+
+        /** 固定 toast（黑底白字 5s 自消；form 与上游错误条一致，无 window.alert——壳会自动放行 alert）。 */
+        function showResumeNotice(message) {
+          try {
+            var id = 'dsh-session-delete-resume-notice'
+            var el = document.getElementById(id)
+            if (!el) {
+              el = document.createElement('div')
+              el.id = id
+              el.setAttribute('role', 'alert')
+              el.style.cssText = 'position:fixed;left:12px;right:12px;bottom:16px;z-index:2147483000;padding:10px 12px;border-radius:8px;background:rgba(20,20,20,.92);color:#fff;font-size:13px;line-height:1.4;box-shadow:0 4px 16px rgba(0,0,0,.3)'
+              document.body.appendChild(el)
+            }
+            el.textContent = message
+            setTimeout(function () { try { el.remove() } catch (e) {} }, 5000)
+          } catch (e) { /* 反馈失败不影响已完成的放弃待办 */ }
         }
 
         /**
@@ -143,6 +176,33 @@
         }
 
         /**
+         * issue #983：把 `already-quarantined` 转成**非成功**提示。
+         *
+         * 这条路径原先被塞进成功横幅：宿主不带 paths ⇒ 这里读不到路径 ⇒ path 为空串 ⇒
+         * setDone('')（不是 null）⇒ 渲染成「已隔离到：（文件仍在，可恢复）」的空路径**成功**横幅。
+         * 三种情况都不允许出现空路径：
+         * - 服务端给了 paths（新宿主）→ 用 error.alreadyQuarantined 带最后一份路径；
+         * - 服务端没给（老宿主）→ 用不带 {path} 的降级文案；
+         * - 拿到的 paths 里全是空串 → 同样走降级文案。
+         * @param {Function} t - locale-bound translator.
+         * @param {Error & {code?: string, paths?: string[]}} reason - 失败原因。
+         * @returns {{ kind: 'already-quarantined', code: string, message: string, path: string }}
+         */
+        function alreadyQuarantinedNotice(t, reason) {
+          var paths = reason && Array.isArray(reason.paths) ? reason.paths : []
+          var usable = paths.filter(function (entry) { return typeof entry === 'string' && entry !== '' })
+          var path = usable.length > 0 ? usable[usable.length - 1] : ''
+          return {
+            kind: 'already-quarantined',
+            code: 'already-quarantined',
+            path: path,
+            message: path === ''
+              ? t('error.alreadyQuarantinedNoPath')
+              : t('error.alreadyQuarantined', { path: path }),
+          }
+        }
+
+        /**
          * Client-side trace (browser console; visible over CDP).
          * @param {'info'|'warn'|'error'} level - severity.
          * @param {string} message - step description.
@@ -167,6 +227,15 @@
           'error.unload': '无法从内存卸载这条对话，未删除任何文件。请稍后重试。',
           'error.gone': '这条对话已经不在了。',
           'close': '关闭',
+          // issue #912：隔离不是删除 —— 文案必须让人一眼看出文件还在。
+          'menu.quarantine': '隔离（不删除，可恢复）',
+          'confirm.quarantineTitle': '隔离这条对话',
+          'confirm.quarantineDesc': '「{title}」会移到同目录的 .corrupt/ 下：它从列表里消失，但文件仍在、随时可恢复。',
+          'quarantining': '正在隔离…',
+          'quarantine.ok': '已隔离到：{path}（文件仍在，可恢复）',
+          'error.alreadyQuarantined': '这条对话已经隔离过了，文件仍在：{path}',
+          // issue #983：老宿主不回 paths 时的降级文案——**不带** {path}，绝不渲染空路径。
+          'error.alreadyQuarantinedNoPath': '这条对话已经隔离过了，文件仍在（位置在该会话目录的 .corrupt/ 下）。',
         }
         var en = {
           'menu.delete': 'Delete conversation',
@@ -181,6 +250,13 @@
           'error.unload': 'Could not unload this conversation from memory, so nothing was deleted. Try again later.',
           'error.gone': 'This conversation no longer exists.',
           'close': 'Close',
+          'menu.quarantine': 'Quarantine (keeps files, restorable)',
+          'confirm.quarantineTitle': 'Quarantine this conversation',
+          'confirm.quarantineDesc': '"{title}" moves into .corrupt/ next to it: it leaves the list, but the files stay and can be restored.',
+          'quarantining': 'Quarantining…',
+          'quarantine.ok': 'Quarantined to: {path} (files kept, restorable)',
+          'error.alreadyQuarantined': 'This conversation is already quarantined; the files are kept at: {path}',
+          'error.alreadyQuarantinedNoPath': 'This conversation is already quarantined; the files are kept under .corrupt/ next to it.',
         }
 
         var cancelStyle = {
@@ -210,8 +286,15 @@
         var PENDING_KEY = 'dsh.session-delete.pending'
         /** 客户端步骤留痕（localStorage，断网也能读；诊断用）。 */
         var TRACE_KEY = 'dsh.session-delete.trace'
-        /** 请求看门狗：超过这个时间还没结果就重载页面重建连接。 */
-        var WATCHDOG_MS = 4000
+        /**
+         * 请求看门狗：超过这个时间还没结果就重载页面重建连接。
+         *
+         * issue #1618：它必须**覆盖完整个重试阶梯**再加余量，而不是短于它。
+         * 旧值 4s 短于 MAX_ATTEMPTS * REQUEST_TIMEOUT_MS = 6s，于是「一次 2.5s 的正常删除」
+         * 会先超时、再在第 2 次重试途中被整页刷新 —— 用户丢掉滚动位置与输入框草稿，
+         * 600ms 后 resume 路径又补发第三次。判据（行为）：阶梯跑完（含各次超时）之前不得 reload。
+         */
+        var WATCHDOG_MS = MAX_ATTEMPTS * REQUEST_TIMEOUT_MS + 4000
 
         /**
          * 本地留痕：不依赖网络，写入 WebView 的 localStorage（可被现场取证）。
@@ -344,28 +427,40 @@
         }
 
         /**
-         * Post-delete bookkeeping: hide the row, then leave the deleted conversation.
-         * @param {object} data - server payload.
+         * 把一条会话从界面上拿掉（删除与隔离共用）。
+         *
+         * issue #1000：隔离分支原先**没有**这段 —— 隔离成功后侧栏那一行留在原地，
+         * 点开仍是读不出历史的坏会话。两份逻辑必须共用一份实现（复制第二份 = 两份判据
+         * 迟早漂移，且再没人能确认「两条路径行为一致」）。
+         *
+         * 判据：
+         * - 挂载中的会话（屏幕正显示它）→ 主视图已无内容可显示，直接重载；
+         * - 未挂载 → 引擎不一定会派发 api-session/removed（只有 session/disposed 才发），
+         *   侧栏行会留在原地；延迟复查 DOM，仍在就重载（幂等、无副作用）。
+         *
+         * @param {string} sessionId - 从界面移除的会话。
+         * @param {object} extra - 追加进决策留痕的字段（删除专有语义留在调用方）。
+         * @param {string} [extra.reason] - 'delete' / 'quarantine'，用于现场取证区分来源。
+         * @param {boolean} [extra.alreadyGone] - 删除专有：服务端 404 视为已删。
+         * @returns {void}
          */
-        function afterDeleted(sessionId, data) {
-          // 删掉的是屏幕上的会话 → 主视图已无会话可显示，重载一次落到新对话。
-          // 删掉的是「没加载过」的会话 → 引擎不会派发 api-session/removed（只有
-          // session/disposed 才发），侧栏那一行会留在原地；这里再查一次 DOM，还在就重载。
+        function removeSessionRowFromUi(sessionId, extra) {
           var mounted = mountedSessionId()
-          var wasMounted = mounted === sessionId
           var report = {
             sessionId: sessionId,
+            reason: extra !== undefined && extra.reason !== undefined ? extra.reason : 'unknown',
             mountedBefore: mounted,
-            alreadyGone: data !== undefined && data.alreadyGone === true,
             url: window.location.href,
           }
-          if (wasMounted) {
+          // 删除专有的语义字段，隔离不传 ⇒ 不会出现在它的留痕里。
+          if (extra !== undefined && extra.alreadyGone !== undefined) report.alreadyGone = extra.alreadyGone === true
+          if (mounted === sessionId) {
             report.decision = 'reload-because-mounted'
             reportTrace(report)
             window.location.reload()
             return
           }
-          // 给引擎的 api-session/removed 一点时间把行移除；仍在就重载（幂等、无副作用）。
+          // 给引擎的 api-session/removed 一点时间把行移除；仍在就重载。
           setTimeout(function () {
             var row = document.querySelector('[data-row-key="session:' + sessionId + '"]')
             report.rowStillPresent = row !== null
@@ -376,10 +471,41 @@
         }
 
         /**
+         * Post-delete bookkeeping: hide the row, then leave the deleted conversation.
+         * @param {object} data - server payload.
+         */
+        function afterDeleted(sessionId, data) {
+          removeSessionRowFromUi(sessionId, {
+            reason: 'delete',
+            alreadyGone: data !== undefined && data.alreadyGone === true,
+          })
+        }
+
+        /**
          * Run the delete for one session and finish the UI transition.
          * @param {string} sessionId - target session.
          * @returns {Promise<void>} resolves after the post-delete transition started.
          */
+        /**
+         * issue #912：发起隔离。**不复用** [runDelete] 的重试与续做逻辑：
+         * 删除有「404 视为已删」的幂等语义，隔离没有 —— 隔离的 409 `already-quarantined` 必须原样回给用户。
+         * @param {string} sessionId - 会话 id。
+         * @returns {Promise<object>} 服务端响应体（含 quarantinedTo）。
+         */
+        function runQuarantine(sessionId) {
+          return postDelete(sessionId, 'quarantine').then(function (res) {
+            return res.json().then(function (body) {
+              if (!res.ok || body.ok === false) {
+                var error = new Error(body.message || ('HTTP ' + res.status))
+                error.code = body.error
+                error.paths = body.paths
+                throw error
+              }
+              return body
+            })
+          })
+        }
+
         function runDelete(sessionId) {
           return attemptDelete(sessionId, 0).then(function (data) {
             localTrace('deleted', { sessionId: sessionId, alreadyGone: data.alreadyGone === true })
@@ -414,6 +540,29 @@
         }
 
         /**
+         * issue #912：隔离入口。文案刻意不含「删除」二字（除了「不删除」这句说明）——
+         * 用户看到 `删除` 会以为历史没了，实际文件仍在。
+         * @param {object} props - slot props（同 [DeleteSessionMenuItem]）。
+         * @returns {object} React element.
+         */
+        function QuarantineSessionMenuItem(props) {
+          var setMenuOpen = props.useMenuOpenState()[1]
+          var t = props.t
+          return h(primitives.MenuItemButton, {
+            onSelect: function () {
+              trace('info', 'quarantine item selected', { sessionId: props.sessionId })
+              localTrace('quarantine-selected', { sessionId: props.sessionId })
+              setMenuOpen(false)
+              setPending({
+                sessionId: props.sessionId,
+                title: props.displayTitle || props.sessionId,
+                kind: 'quarantine',
+              })
+            },
+          }, t('menu.quarantine'))
+        }
+
+        /**
          * Overlay dialog: confirms and performs the deletion.
          * @param {object} props - slot props (`t`).
          * @returns {object|null} React element or null while idle.
@@ -440,11 +589,39 @@
           var errorPair = react.useState(null)
           var error = errorPair[0]
           var setError = errorPair[1]
+          // issue #912：隔离成功后要把**绝对路径**显示成可复制文本（用户要能自行备份/提 issue）。
+          var donePair = react.useState(null)
+          var done = donePair[0]
+          var setDone = donePair[1]
+          // issue #983：`already-quarantined` 是**非成功**结果，走这条独立的展示槽，
+          // 绝不复用 done（done 存在即代表成功横幅 quarantine.ok）。
+          var noticePair = react.useState(null)
+          var notice = noticePair[0]
+          var setNotice = noticePair[1]
+          // issue #1000：这次弹窗里**有没有真的隔离成功过**。行清理由这个闩驱动，
+          // 而不是由 done —— done 是「本次尝试的展示内容」，用户再点一次确认就会变；
+          // 用不随展示状态回退的闩，才能保证「成功过 ⇒ 关窗一定把行拿掉」。
+          var succeededPair = react.useState(false)
+          var succeeded = succeededPair[0]
+          var setSucceeded = succeededPair[1]
+          var quarantine = target.kind === 'quarantine'
 
+          /**
+           * 关闭弹窗。
+           *
+           * issue #1000：隔离成功后的**行清理放在这里**，不放在成功回调里。
+           * 理由：成功回包里带的是可复制的隔离件绝对路径，用户要读它、抄它、贴进 issue；
+           * 而清理动作一旦判定需要重载（挂载中的会话，或侧栏行仍在），页面会立刻刷新——
+           * 刚刚显示的路径就没了。所以隔离走「读完再关，关掉才切界面」的时序；
+           * 删除分支不显示路径，所以在成功回调里直接清理（两条路径共用同一个清理实现）。
+           */
           function close() {
             if (busy) return
             setError(null)
+            setNotice(null)
             setPending(null)
+            // 只有这次隔离**真的成功了**才把行拿掉（已隔离过 = 非成功，不触发）。
+            if (succeeded) removeSessionRowFromUi(target.sessionId, { reason: 'quarantine' })
           }
 
           function confirmDelete() {
@@ -458,6 +635,30 @@
             })
             setBusy(true)
             setError(null)
+            setNotice(null)
+            // 每次尝试都要重置展示内容：失败之后再成功，不能还挂着上一次的旧路径。
+            setDone(null)
+            if (quarantine) {
+              // 隔离不写待办、不挂看门狗、不重载页面：它不会留下「半完成」的文件状态，
+              // 也不需要跨重载续做（服务端要么搬走了要么没动）。
+              runQuarantine(sessionId)
+                .then(function (body) {
+                  setBusy(false)
+                  // 先显示可复制路径（用户要能自行备份 / 提 issue），
+                  // 再在**弹窗关闭后**做行清理 —— 见下面 close() 里的注释。
+                  setDone(body.quarantinedTo || '')
+                  setNotice(null)
+                  setSucceeded(true)
+                })
+                .catch(function (reason) {
+                  setBusy(false)
+                  // issue #983：已隔离 ≠ 成功。渲染成非成功提示，且**不碰 done**
+                  // （done 一非 null 就是成功横幅 quarantine.ok —— 那正是本 issue 的现场）。
+                  if (reason && reason.code === 'already-quarantined') { setNotice(alreadyQuarantinedNotice(t, reason)); return }
+                  setError(String(reason && reason.message ? reason.message : reason))
+                })
+              return
+            }
             // 请求卡死时不再让弹窗无限转：落待办 + 看门狗，超时就重载页面，
             // 重载后插件自动续做这条删除（幂等：404 视为已删）。
             savePending(sessionId)
@@ -493,17 +694,31 @@
           return h(primitives.Modal, {
             open: true,
             onClose: close,
-            title: t('confirm.title'),
+            title: quarantine ? t('confirm.quarantineTitle') : t('confirm.title'),
             closeLabel: t('close'),
-            description: t('confirm.desc', { title: target.title }),
+            description: quarantine ? t('confirm.quarantineDesc', { title: target.title }) : t('confirm.desc', { title: target.title }),
             footer: h('div', { style: { display: 'flex', gap: '8px', justifyContent: 'flex-end' } },
               h('button', { type: 'button', style: cancelStyle, disabled: busy, onClick: close }, t('cancel')),
               h('button', { type: 'button', style: deleteStyle, disabled: busy, onClick: confirmDelete },
-                busy ? t('deleting') : t('delete'))),
-          }, error === null ? null : h('p', {
+                busy ? (quarantine ? t('quarantining') : t('deleting')) : (quarantine ? t('menu.quarantine') : t('delete')))),
+          },
+          // 成功槽：只有**真的搬走了**才会 setDone。issue #983：already-quarantined 不写这里
+          // —— `quarantine.ok` 是成功文案，不得再被「已隔离过」复用。
+          done === null ? null : h('div', { role: 'status', style: { margin: '8px 0 0' } },
+            h('p', { style: { margin: '0 0 6px', fontSize: '12px', color: 'var(--dsw-alias-state-success-primary)' } },
+              t('quarantine.ok', { path: done })),
+            h('input', {
+              type: 'text',
+              readOnly: true,
+              value: done,
+              onFocus: function (event) { try { event.target.select() } catch (_) { /* ignore */ } },
+              style: { width: '100%', fontFamily: 'ui-monospace, monospace', fontSize: '12px', padding: '4px 6px' },
+            })),
+          // 非成功槽：普通错误 + issue #983 的「已隔离过」（带路径，或老宿主的降级文案）。
+          notice === null && error === null ? null : h('p', {
             role: 'alert',
             style: { margin: '8px 0 0', color: 'var(--dsw-alias-state-error-primary)', fontSize: '12px', lineHeight: '18px' },
-          }, t('error', { message: error })))
+          }, notice === null ? t('error', { message: error }) : notice.message))
         }
 
         /** @param {object} ctx - cordis client context. */
@@ -549,6 +764,9 @@
                 localTrace('resume-failed', { sessionId: pendingDelete.sessionId, message: String(reason && reason.message ? reason.message : reason) })
                 // 续做失败就放弃这条待办：否则每次页面加载都会重试同一条。
                 clearPending()
+                // #510：重载前用户已在确认框里同意过删除，续做失败必须说清楚——
+                // 旧实现只留 localStorage 痕迹，用户看到的是「页面闪一下、会话还在、零提示」。
+                showResumeNotice(resumeText(reason && reason.code, String(reason && reason.message ? reason.message : reason)))
               })
             }, 600)
           }
@@ -559,6 +777,17 @@
               order: 500,
               locale: NS,
             }, DeleteSessionMenuItem)
+          })
+          // issue #912：**单独**注册隔离入口（不塞进 DeleteSessionMenuItem 返回两个节点 ——
+          // 那个返回值被 slot 当单个节点渲染，返回数组在旧内核上可能整块不显示）。
+          // 两个入口并存是有意的：既要能「隔离保留」，也要能「彻底删除」。
+          ctx.slots.inject('sidebar.workspaces.session.menu.item', function () {
+            return ctx.slots.register({
+              name: 'sidebar.workspaces.session.menu.item',
+              id: 'quarantine',
+              order: 490,
+              locale: NS,
+            }, QuarantineSessionMenuItem)
           })
           ctx.slots.inject('shell.overlay', function () {
             return ctx.slots.register({

@@ -16,6 +16,7 @@
 // 退出码：0 = 通过（SKIP 有计数）；1 = 失败。
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, statSync } from 'node:fs'
 import { TAR } from './lib/shell.mjs'
+import { stripComments } from './lib/strip-comments.mjs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -52,12 +53,25 @@ if (existsSync(countCompose)) {
 }
 if (existsSync(measurePs1)) {
   const text = readFileSync(measurePs1, 'utf8')
-  check('measure-steady 用设备侧 /proc/net/tcp LISTEN 判定（P-AC-04）', text.includes('/proc/net/tcp') && text.includes('0C08'))
-  // 注释里解释「不用 forward」是合法的；只看可执行行（去掉 # 注释行后不得再出现 forward）。
-  const executable = text.replace(/<#[\s\S]*?#>/g, '').split('\n').filter((line) => !line.trim().startsWith('#')).join('\n')
-  check('measure-steady 不用 adb forward 判定（假阳性口径）', !/forward/.test(executable),
-    executable.split('\n').filter((l) => /forward/.test(l)).slice(0, 2).join(' | '))
-  check('measure-steady 支持 -DryRun（离线自检）', text.includes('-DryRun'))
+  // issue #1196：三条 marker 判据必须**同一口径**（都看代码面，不看原文）。
+  //
+  // 旧实现里两条用裸 text、一条用剥过注释的 executable —— 于是只剩 <# ... #> 文档头的脚本
+  // 仍能满足「用 /proc/net/tcp 判定」「支持 -DryRun」，因为头注释里正好写着这些词。
+  // 一个**只剩文档**的脚本满足实质判据，是「文本在场 ≠ 代码在用」的典型形态。
+  //
+  // 剥离用共享状态机（scripts/lib/strip-comments.mjs）：PowerShell 模式下认 <# #> 与 # 注释，
+  // 且在引号内不误判 —— 不能简单按行首 # 过滤（那会连整行代码一起删，是本仓踩过的坑）。
+  const code = stripComments(text, { mode: 'powershell' })
+  check('measure-steady 用设备侧 /proc/net/tcp LISTEN 判定（P-AC-04）', code.includes('/proc/net/tcp') && code.includes('0C08'))
+  // 注释里解释「不用 forward」是合法的；代码面不得再出现 forward。
+  check('measure-steady 不用 adb forward 判定（假阳性口径）', !/forward/.test(code),
+    code.split('\n').filter((l) => /forward/.test(l)).slice(0, 2).join(' | '))
+  // 判据看**代码面**里的开关本体 $DryRun（PowerShell 变量），不是文档头里的 `-DryRun` 调用示例。
+  // 这一点是修 #1196 时实测出来的：原判据 `text.includes('-DryRun')` 恰好只能靠文档头命中 ——
+  // 代码里写的是 `[switch]$DryRun` / `if ($DryRun)`，从来没有字面量 `-DryRun`。
+  // 也就是说原判据**名义上在验「支持离线自检」，实际验的是「文档里提过这个开关」**。
+  // 改成认 $DryRun 之后，它才真的绑到可执行面上（同时仍能拦住「只剩文档头」的形态）。
+  check('measure-steady 支持 -DryRun（离线自检）', /\$DryRun\b/.test(code))
 }
 
 // ── 2. 出厂 profile 清单体检自检 ────────────────────────────────────────────

@@ -244,6 +244,22 @@ test('FX-206.1：o 列缺失/越界/非递增一律失败关闭（宁可不给�
   assert.equal(decodeV2({ ...payload, o: [0, 2, 3, 5] }).ok, true)
 })
 
+test('p / d 列的值域必须与 o 同档失败关闭（越界会静默产出错行号/错深度）', () => {
+  const payload = encodeV2(MAPPING_ROWS, 'all', 1, 0, 100, 100)
+  const n = payload.n
+  // 把整列替换成同一个越界值，保持长度合法（只让值域越界）。
+  const full = (col, v) => payload[col].map(() => v)
+  // p：下游会拼成 'n' + 该值当 ref 发出去 ⇒ 越界等于给模型一个不存在的句柄。
+  assert.equal(decodeV2({ ...payload, p: full('p', n + 999) }).ok, false, 'p 越界必须拒绝')
+  assert.equal(decodeV2({ ...payload, p: full('p', -2) }).ok, false, 'p 小于 -1 必须拒绝')
+  // d：负深度会让预序单调栈算错，subtreeEnd / parentId / ^nX 父链全偏。
+  assert.equal(decodeV2({ ...payload, d: full('d', -5) }).ok, false, 'd 负值必须拒绝')
+  // 对照：-1 表示「无祖先」，是合法值，必须继续放行。
+  assert.equal(decodeV2({ ...payload, p: full('p', -1) }).ok, true, 'p=-1 必须放行')
+  // 对照：长度 1 的广播列同样要校验（否则广播形态成为绕过口）。
+  assert.equal(decodeV2({ ...payload, d: [-3] }).ok, false, 'd 广播列的负值也必须拒绝')
+})
+
 test('FX-206.4：truncated 真值透出（缺列 = false，不再静默丢弃）', () => {
   const payload = encodeV2(MAPPING_ROWS, 'all', 1, 0, 100, 100)
   assert.equal(decodeV2(payload).value.truncated, false)
@@ -297,4 +313,219 @@ test('容量断言：1 MiB 上限下壳侧 4000 节点结构性不可达', () =>
   const perRow = bytes / EXPECT.v2Rows
   const cap = Math.floor(1048576 / perRow)
   assert.ok(cap > 4000, `1 MiB 可容 ${cap} 行，必须超过壳侧 MAX_NODES=4000`)
+})
+
+// ── 输入数值类型：整数列不得被浮点静默穿透（2026-10-28 自查） ─────────────────────
+//
+// 缺口形态：`isIntArray` 名字承诺整数，实现只查 `Number.isFinite`。于是一个含小数的列会整列"合法"通过，
+// 而下游每一处都按整数语义消费，浮点不会报错、只会**变成另一个值**：
+//   · 符号表下标（t/s/c/k/r/w）⇒ `S[0.5]` 取不到 ⇒ `?? ''` ⇒ 文本/包名静默变空串；
+//   · p（可操作祖先）⇒ 写进 Int32Array 被 ToInt32 截断 ⇒ 0.5 变 0（指向别的行）；
+//   · f（位标志）⇒ 位运算前 ToInt32 ⇒ 1.9 被读成 clickable；
+//   · d（深度）⇒ 预序父链按浮点比较 ⇒ 父子关系错乱；
+//   · b / scr ⇒ 坐标与屏幕基准带小数 ⇒ 点击落点偏移。
+// 修法：判据提到唯一入口（isIntArray 用 Number.isInteger），让"某列忘记复查"结构上不可能发生
+// （o 列此前单独复查过 Number.isInteger，正说明缺口已知但没推广）。
+// 反证方向：把 isIntArray 改回 Number.isFinite，下列 12 个用例逐列变红。
+
+/** 2 行全整数裸载荷（各列都是合法整数；0 与 -1 哨兵也在其中）。 */
+const INT_BASE = {
+  v: 2, gen: 1, rot: 0, scr: [100, 200], str: ['Abc', 'Btn'], n: 2,
+  o: [0, 1], d: [0, 1], p: [-1, 0], f: [0, 1], c: [-1, -1], k: [-1, -1],
+  r: [-1, -1], w: [-1, -1], t: [0, 1], s: [-1, -1],
+  b: [0, 0, 100, 20, 0, 20, 100, 20],
+}
+
+test('整数列含浮点一律失败关闭（不得静默截断成另一个值）', () => {
+  assert.equal(decodeV2(INT_BASE).ok, true, '对照：全整数载荷必须接受')
+
+  const cases = [
+    ['scr', { scr: [100.5, 200] }],
+    ['b', { b: [0.5, 0, 100, 20, 0, 20, 100, 20] }],
+    ['o', { o: [0, 1.5] }],
+    ['d', { d: [0, 1.5] }],
+    ['p', { p: [-1, 0.5] }],
+    ['f', { f: [0, 1.5] }],
+    ['c', { c: [-1, 0.5] }],
+    ['k', { k: [-1, 0.5] }],
+    ['r', { r: [-1, 0.5] }],
+    ['w', { w: [-1, 0.5] }],
+    ['t', { t: [0, 0.5] }],
+    ['s', { s: [-1, 0.5] }],
+  ]
+  for (const [key, patch] of cases) {
+    const r = decodeV2({ ...INT_BASE, ...patch })
+    assert.equal(r.ok, false, `${key} 列含浮点必须失败关闭（放行等于让下游读到另一个值）`)
+    assert.match(r.error, new RegExp(`${key} 必须是整数`), `${key} 的错误必须指向"非整数"这一真因`)
+  }
+})
+
+test('错误文案必须指向真因：长度是对的就不能报成长度不对', () => {
+  // 判据合并成 `!isIntArray(b) || b.length !== n*4` 时，浮点会报成「长度必须为 4n=8（收到 8）」，
+  // 模型照着这条去改长度，永远修不到浮点。类型与长度必须各自成条。
+  const bFloat = decodeV2({ ...INT_BASE, b: [0.5, 0, 100, 20, 0, 20, 100, 20] })
+  assert.equal(bFloat.ok, false)
+  assert.doesNotMatch(bFloat.error, /长度/, 'b 长度是对的（8 = 4n），文案不得指向长度')
+
+  const scrFloat = decodeV2({ ...INT_BASE, scr: [100.5, 200] })
+  assert.equal(scrFloat.ok, false)
+  assert.match(scrFloat.error, /整数数组/, 'scr 浮点必须报成数值类型问题')
+
+  const bShort = decodeV2({ ...INT_BASE, b: [0, 0, 100, 20] })
+  assert.equal(bShort.ok, false)
+  assert.match(bShort.error, /长度/, '真的长度不对就必须报长度')
+})
+
+test('gen / rot 必须是整数：NaN 不得透传成 JSON null（#204 同族）', () => {
+  assert.equal(decodeV2({ ...INT_BASE, gen: 1.5 }).ok, false, 'gen 浮点必须拒绝')
+  assert.match(decodeV2({ ...INT_BASE, gen: 1.5 }).error, /gen/)
+
+  for (const bad of ['abc', NaN, {}, 1.5, Infinity, -Infinity]) {
+    const r = decodeV2({ ...INT_BASE, rot: bad })
+    assert.equal(r.ok, false, `rot=${String(bad)} 必须失败关闭`)
+    assert.match(r.error, /rot 必须是整数/, '错误必须点名 rot')
+  }
+})
+
+test('合法整数必须原样保留：0 与负哨兵不得为了拒浮点一起被拒', () => {
+  const r = decodeV2(INT_BASE)
+  assert.equal(r.ok, true)
+  assert.deepEqual([...r.value.actionableAncestor], [-1, 0], 'p 列的 -1（无祖先）与 0 都是合法值')
+  assert.deepEqual(r.value.screen, { w: 100, h: 200 })
+  assert.equal(r.value.rows[0].text, 'Abc', '符号表下标 0 必须仍取到文本')
+  assert.equal(r.value.rows[1].text, 'Btn')
+  assert.equal(r.value.rows[0].clickable, false)
+  assert.equal(r.value.rows[1].clickable, true, 'f 列 1 = clickable 必须保留')
+
+  // rot 的合法取值与缺省口径（null 当缺省 → 0），且必须序列化成数字 0 而不是 null
+  for (const [label, patch, want] of [
+    ['缺省', {}, 0], ['null', { rot: null }, 0], ['undefined', { rot: undefined }, 0],
+    ['0', { rot: 0 }, 0], ['90', { rot: 90 }, 90], ['180', { rot: 180 }, 180], ['270', { rot: 270 }, 270],
+  ]) {
+    const d = decodeV2({ ...INT_BASE, ...patch })
+    assert.equal(d.ok, true, `rot ${label} 必须接受`)
+    assert.equal(d.value.rotation, want, `rot ${label} 必须原样保留`)
+    assert.equal(JSON.stringify(d.value.rotation), String(want), `rot ${label} 不得变成 JSON null`)
+  }
+})
+
+// ── 输入契约不变量：任何畸形载荷都不得抛异常（2026-10-28 自查，固定种子 240 例） ──────────
+//
+// 契约来自 protocol-v2.ts 文件头：「任何结构问题都返回 ok:false（失败关闭；绝不静默产出空节点表）」。
+// 这条契约此前**零测试**——全仓没有一处 `assert.throws` / `rejects` 覆盖 `decodeV2`，于是
+// 「某个畸形载荷把整个工具调用炸掉、而不是返回一条可读错误」这类回归没有任何东西拦得住。
+//
+// 用固定种子而不是真随机：CI 上可复现，失败能按同一种子重放。断言与实现契约对齐（不得 throw、
+// 被接受时数值干净），不是凭"畸形载荷应该长什么样"的直觉。
+//
+// 反证方向（实测，证明它不是与既有用例重叠）：把 `str` 的类型守卫从 `return {ok:false}` 改成
+// `throw new Error(...)` ⇒ **只有本用例变红，既有用例全绿**——因为它们都喂合法的 `str: []`，
+// 从没验证过这条守卫的「失败关闭」语义。本用例守的是既有用例够不到的那些组合。
+// 相反方向的诚实说明：把 `isIntArray` 改回 `Number.isFinite`、或把 `o` 守卫改成 throw，
+// 变红的是既有定向用例而不是本用例（这两条已被更精确的断言先接住）——那种重叠是好事，不必为
+// "让 fuzz 也红"去削弱定向用例。
+test('输入契约：畸形载荷一律不得抛异常，被接受者必须数值干净（固定种子 240 例）', () => {
+  const mulberry32 = (a) => () => {
+    a |= 0; a = (a + 0x6D2B79F5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+  const rnd = mulberry32(0x20261028)
+  const pickOne = (list) => list[Math.floor(rnd() * list.length)]
+  const NASTY = [0, -1, 1, 0.5, -0.5, 1.5, 1e9, -1e9, NaN, Infinity, -Infinity, '', 'x', '12',
+    null, undefined, true, false, {}, [], [[1]], { a: 1 }]
+  const maybeArray = () => {
+    const len = Math.floor(rnd() * 4)
+    return Array.from({ length: len }, () => pickOne(NASTY))
+  }
+  const fields = ['v', 'gen', 'rot', 'scr', 'str', 'n', 'raw', 'd', 'p', 'f', 'c', 'k', 'r', 'w',
+    't', 's', 'b', 'o', 'view', 'truncated']
+  const junkValue = (depth) => {
+    if (depth > 2) return pickOne(NASTY)
+    const kind = Math.floor(rnd() * 6)
+    if (kind === 0) return maybeArray()
+    if (kind === 1) return pickOne(NASTY)
+    if (kind === 2) {
+      const o = {}
+      for (const key of fields) if (rnd() < 0.5) o[key] = junkValue(depth + 1)
+      return o
+    }
+    return pickOne(NASTY)
+  }
+  const junkPayload = () => {
+    const base = {
+      v: 2, gen: 1, rot: 0, scr: [100, 200], str: [], n: 0,
+      o: [], d: [], p: [], f: [], c: [], k: [], r: [], w: [], t: [], s: [], b: [],
+    }
+    for (const key of Object.keys(base)) if (rnd() < 0.35) base[key] = junkValue(0)
+    return base
+  }
+
+  let accepted = 0
+  for (let i = 0; i < 240; i++) {
+    const payload = rnd() < 0.5 ? junkPayload() : junkValue(0)
+    let r
+    assert.doesNotThrow(() => { r = decodeV2(payload) }, '第 ' + i + ' 例：畸形载荷不得抛异常（契约是失败关闭，不是崩溃）')
+    assert.equal(typeof r?.ok, 'boolean', '第 ' + i + ' 例：必须返回 {ok:boolean}')
+    if (!r.ok) {
+      assert.equal(typeof r.error, 'string', '第 ' + i + ' 例：拒绝时必须带可读原因')
+      assert.notEqual(r.error, '', '第 ' + i + ' 例：拒绝原因不得为空串')
+      continue
+    }
+    accepted += 1
+    const v = r.value
+    // 被接受 ⇒ 对外数值必须干净整数（NaN/小数会让引擎整值拒绝或让下游静默变值）
+    for (const [label, val] of [['gen', v.gen], ['rotation', v.rotation],
+      ['screen.w', v.screen.w], ['screen.h', v.screen.h], ['rawCount', v.rawCount]]) {
+      assert.ok(Number.isInteger(val), '第 ' + i + ' 例：' + label + ' 必须是整数（收到 ' + String(val) + '）')
+    }
+    assert.ok(Array.isArray(v.rows), '第 ' + i + ' 例：rows 必须是数组')
+    assert.equal(v.rows.length, v.origRow.length, '第 ' + i + ' 例：rows 与 origRow 长度必须一致')
+    assert.equal(v.rows.length, v.actionableAncestor.length, '第 ' + i + ' 例：rows 与 actionableAncestor 长度必须一致')
+    for (const row of v.rows) {
+      for (const key of ['x', 'y', 'w', 'h', 'cx', 'cy', 'depth']) {
+        assert.ok(Number.isInteger(row[key]), '第 ' + i + ' 例：row.' + key + ' 必须是整数（收到 ' + String(row[key]) + '）')
+      }
+      for (const key of ['text', 'desc', 'cls', 'pkg', 'rid', 'windowId']) {
+        assert.equal(typeof row[key], 'string', '第 ' + i + ' 例：row.' + key + ' 必须是字符串')
+      }
+    }
+  }
+  // 防御：随机集必须真的既有拒绝也有接受，否则「全拒绝」会让上面的接受分支永远不跑（假绿）
+  assert.ok(accepted > 0, '240 例里必须至少有一例被接受，否则断言只覆盖了拒绝路径')
+})
+
+// ── issue #1208：n 的类型判据 / n=0 的列形状 / 32 位句柄域 ──────────────────────────
+const V2_EMPTY = {
+  v: 2, gen: 1, rot: 0, scr: [1080, 2400], str: [], view: 'all', truncated: false,
+  d: [], p: [], f: [], c: [], k: [], r: [], w: [], t: [], s: [], b: [], o: [],
+}
+
+test('#1208 n 必须是数字：null/""/false/[]/"0"/true 一律失败关闭，不再折算成空树', () => {
+  // 旧实现 Number(d.n)：null/''/false/[] → 0，"0" → 0，于是「n 缺失或类型错」被当成空树放行，
+  // 且 n===0 的提前返回跳过整段列校验 —— 86 行的载荷能解成空树并报 ok。
+  for (const bad of [null, '', false, [], '0', true]) {
+    const r = decodeV2({ ...V2_EMPTY, n: bad })
+    assert.equal(r.ok, false, 'n=' + JSON.stringify(bad) + ' 必须失败关闭（旧实现会解成空树报 ok）')
+    assert.match(r.error, /n 必须是非负整数/)
+  }
+  // 正控：真正的 0 仍然接受（合法空树）
+  assert.equal(decodeV2({ ...V2_EMPTY, n: 0 }).ok, true)
+})
+
+test('#1208 句柄域：raw 越过 2^31 必须失败关闭（否则 Int32Array 截断成负数 / 两节点塌成一行）', () => {
+  const base = {
+    v: 2, gen: 1, rot: 0, scr: [10, 10], str: [], n: 1, view: 'all', truncated: false,
+    d: [0], p: [-1], f: [0], c: [0], k: [0], r: [0], w: [0], t: [0], s: [0], b: [0, 0, 1, 1],
+  }
+  const truncated = decodeV2({ ...base, raw: 4000000000, o: [3000000000] })
+  assert.equal(truncated.ok, false, 'raw=4e9 必须拒绝（旧实现解出 origRow[0]=-1294967296）')
+  assert.match(truncated.error, /32 位句柄域/)
+  assert.equal(decodeV2({ ...base, raw: 4294967296, o: [0] }).ok, false,
+    'raw=2^32 必须拒绝（旧实现里 0 与 4294967296 都被截成 0，严格递增判据随之失效）')
+  // 正控：合法句柄保真
+  const ok = decodeV2({ ...base, raw: 393, o: [42] })
+  assert.equal(ok.ok, true)
+  assert.equal(ok.value.origRow[0], 42)
 })

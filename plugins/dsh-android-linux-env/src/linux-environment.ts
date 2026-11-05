@@ -173,12 +173,16 @@ export function createLinuxPluginHost(options: {
     }
     return undefined
   }
-  /** Releases the activated scope and forgets the manager it handed us. */
+  const isActive = () => scope !== undefined && (scope.state === undefined || scope.state === FiberState.ACTIVE)
+  /** Forgets cached activation even when disposal fails; the caller still receives that failure. */
   const release = async () => {
-    if (scope) await scope.dispose()
-    scope = undefined
-    manager = undefined
-    activeDirectory = undefined
+    try {
+      if (scope) await scope.dispose()
+    } finally {
+      scope = undefined
+      manager = undefined
+      activeDirectory = undefined
+    }
   }
   /**
    * The runtime plugin exposes its manager two equivalent ways: `apply()` returns it, and it
@@ -207,7 +211,7 @@ export function createLinuxPluginHost(options: {
       }
       const entry = await realpath(resolve(directory, defaultEntry(input.entry)))
       if (!inside(directory, entry)) throw new Error('Runtime plugin entry must be inside its verified directory')
-      if (scope && activeDirectory === directory && manager !== undefined) {
+      if (isActive() && activeDirectory === directory && manager !== undefined) {
         return { directory, active: true, manager, rollback: release }
       }
       const plugin = await (options.importModule ?? (url => import(url)))(pathToFileURL(entry).href)
@@ -247,13 +251,13 @@ export function createLinuxPluginHost(options: {
         [query.name, query.runtimeId].some(name => typeof name === 'string' && name !== '')
       const directory = await findInjected(root, query, defaultEntry())
       if (directory !== undefined) {
-        return { injected: true, active: scope !== undefined && activeDirectory === directory, directory }
+        return { injected: true, active: isActive() && activeDirectory === directory, directory }
       }      // A specific query that matched nothing is a real "not present" answer. Only an empty query
       // may fall back to the activated directory, and only while that directory still exists on disk,
       // so a manual deletion stays visible instead of being masked by stale in-memory state.
       if (asked) return { injected: false, active: false }
       if (activeDirectory !== undefined && inside(root, activeDirectory) && await isFile(join(activeDirectory, defaultEntry()))) {
-        return { injected: true, active: scope !== undefined, directory: activeDirectory }
+        return { injected: true, active: isActive(), directory: activeDirectory }
       }
       return { injected: false, active: false }
     },

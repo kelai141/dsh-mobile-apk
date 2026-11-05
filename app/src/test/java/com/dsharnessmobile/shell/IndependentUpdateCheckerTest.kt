@@ -4,7 +4,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -31,7 +30,9 @@ class IndependentUpdateCheckerTest {
   private fun body(tag: String?, assetNames: List<String>): String {
     val arr = JSONArray()
     for (n in assetNames) {
-      arr.put(JSONObject().put("name", n).put("browser_download_url", DL + n).put("size", 123L))
+      val asset = JSONObject().put("name", n).put("browser_download_url", DL + n).put("size", 123L)
+      if (n.endsWith(".apk")) asset.put("digest", "sha256:" + "a".repeat(64))
+      arr.put(asset)
     }
     val o = JSONObject().put("assets", arr)
     if (tag != null) o.put("tag_name", tag)
@@ -174,7 +175,15 @@ class IndependentUpdateCheckerTest {
   /** 反例 4b：assets 里夹着 null 与无名条目时不得整条崩掉，且仍能命中有效资产。 */
   @Test
   fun weirdAssetElementsAreSkipped() {
-    val weird = "{\"tag_name\":\"v9.9.9\",\"assets\":[null,{\"size\":1},{\"name\":\"dsh-mobile-apk-v9.9.9-arm64.apk\",\"browser_download_url\":\"https://x/y.apk\",\"size\":1}]}"
+    val valid = JSONObject()
+      .put("name", "dsh-mobile-apk-v9.9.9-arm64.apk")
+      .put("browser_download_url", "https://x/y.apk")
+      .put("size", 1)
+      .put("digest", "sha256:" + "a".repeat(64))
+    val weird = JSONObject()
+      .put("tag_name", "v9.9.9")
+      .put("assets", JSONArray().put(JSONObject.NULL).put(JSONObject().put("size", 1)).put(valid))
+      .toString()
     val r = UpdateChecker.classifyLatestBody(weird, ARM64_DEVICE, "arm64")
     assertTrue("夹 null/无名条目时仍应命中有效资产，实得 " + r, r is UpdateChecker.CheckResult.Available)
   }
@@ -276,7 +285,7 @@ class IndependentUpdateCheckerTest {
   // 下面这些用例由 tester 独立推导，不复用实现方的样本文件；重点是**反例**：
   //  - 反例 6：任一/全部源失败时，绝不允许出现 UpToDate（"查不到"不是"没有新版"）。
   //  - 反例 7：MANIFEST 里没有可识别的 apk 行 => 解析失败，不得退化成"没有本机架构的包"。
-  //  - 反证 8：摘要缺失时给 null 而不是空串（语义不同，下游据此决定界面上是否声明"已校验"）。
+  //  - 反证 8：摘要缺失时拒绝产生可安装更新。
 
   /** 一档源的最小可测形态（[UpdateChecker.SourceProbe] 是 internal 的，测试与实现同模块）。 */
   private fun down(host: String) = UpdateChecker.SourceProbe.Unreachable(java.net.UnknownHostException(host))
@@ -318,12 +327,12 @@ class IndependentUpdateCheckerTest {
   }
 
   @Test
-  fun missingDigestIsNullNotEmptyString() {
-    // 摘要缺失的语义是"本次发布没有提供校验值"，下游据此在界面如实说明；
+  fun missingDigestRejectsInstallableUpdate() {
+    // 摘要缺失时不得生成可安装更新，避免把下载后校验降级为仅比对文件大小；
     // 空串会被读成"提供了值但校验失败"，那是另一回事（也更容易被静默吞掉）。
     val facts = UpdateChecker.LatestFacts("v99.0.0", mapOf("dsh-mobile-apk-v99.0.0-arm64.apk" to 1L), emptyMap())
-    val r = UpdateChecker.classifyFacts(facts, ARM64_DEVICE, "arm64", "0.13.0") as UpdateChecker.CheckResult.Available
-    assertNull("未提供摘要必须是 null，空串会被读成『给了值但校验失败』", r.sha256)
+    val r = UpdateChecker.classifyFacts(facts, ARM64_DEVICE, "arm64", "0.13.0") as UpdateChecker.CheckResult.Failed
+    assertEquals(UpdateChecker.CheckResult.FailureKind.RELEASE_DATA_BROKEN, r.kind)
   }
 
   @Test

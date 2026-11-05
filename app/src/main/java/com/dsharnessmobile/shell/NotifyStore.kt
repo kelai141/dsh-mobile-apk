@@ -73,6 +73,17 @@ object NotifyStore {
   @Volatile
   private var appContext: Context? = null
 
+  /**
+   * 启动 drain 执行器：`start()` 的调用方在主线程（EngineService.onCreate / 动作广播
+   * receiver），积压行的随机读 + 逐行投递 + offset commit 派到这里（2026-10-25 审计，
+   * receiver 10s ANR 预算）。drain 自带锁，与 watcher/tick 并发安全。
+   */
+  private val drainExecutor by lazy {
+    java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+      Thread(r, "dsh-notify-store-drain").apply { isDaemon = true }
+    }
+  }
+
   /** 最近一次 watcher 事件时刻（任意路径，不筛）：心跳里对照「文件在长 / 事件不来」即判 watcher 失聪。 */
   @Volatile
   private var lastWatchEventAt = 0L
@@ -183,8 +194,18 @@ object NotifyStore {
     val d = dir(app)
     if (!d.exists()) d.mkdirs()
     watching(app, d)
-    // 启动即消费一次（进程离线期间的积压行：偏移持久化保证不重复投递）
-    drain(app, TRIGGER_START)
+    // 启动即消费一次（进程离线期间的积压行：偏移持久化保证不重复投递）。
+    // 派后台（2026-10-25 审计）：调用方是 EngineService.onCreate / NotifyActionReceiver.onReceive
+    // 的**主线程**，drain 的随机读（上限 256KB）+ 逐行投递 + offset commit 是成批磁盘 IO，
+    // 广播 receiver 有 10s ANR 预算。drain 自带锁，与 watcher/tick 并发安全；冷启动的补投
+    // 语义不变（引擎未就绪时本就靠退避重试，不依赖这第一次 drain 同步完成）。
+    drainExecutor.execute {
+      try {
+        drain(app, TRIGGER_START)
+      } catch (t: Throwable) {
+        LogCollector.log(TAG, "startup drain failed: " + t.message)
+      }
+    }
   }
 
   /**
@@ -262,7 +283,7 @@ object NotifyStore {
    * 从一个读取块里取出完整行。**只消费到最后一个换行符**——没有换行（半行）时 consumed=0，
    * 多字节被截断的尾部字符随「下次补齐」自然消失，不产生乱码也不丢行。
    */
-  fun drainBytes(buf: ByteArray, len: Int): DrainResult {
+  fun drainBytes(buf: ByteArray, len: Int, atEof: Boolean = false): DrainResult {
     val n = len.coerceAtMost(buf.size)
     var last = -1
     var i = n - 1
@@ -270,14 +291,37 @@ object NotifyStore {
       if (buf[i] == '\n'.code.toByte()) { last = i; break }
       i--
     }
-    if (last < 0) return DrainResult(emptyList(), 0)
+    if (last < 0) {
+      // issue #1358：整块里没有换行。先按 **JSON 边界**切尾部 —— 两条连续帧都不带换行时，
+      // 这样能把它们分别切出来（按换行切只能得到一行、解析失败、两条一起丢）。
+      val (tailValues, tailConsumed) = NotifyTailSplit.split(buf, 0, n)
+      if (tailValues.isNotEmpty()) return DrainResult(tailValues, tailConsumed.toLong())
+      // 真正的半截帧：只有**流已结束**（atEof）时才当最后一条消费，否则等下次补齐（不宽容）。
+      if (atEof && n > 0) {
+        val tail = String(buf, 0, n, Charsets.UTF_8).trim()
+        return if (tail.isEmpty()) DrainResult(emptyList(), n.toLong()) else DrainResult(listOf(tail), n.toLong())
+      }
+      return DrainResult(emptyList(), 0)
+    }
     val text = String(buf, 0, last, Charsets.UTF_8)
     val lines = ArrayList<String>()
     for (piece in text.split("\n")) {
       val t = piece.trim()
       if (t.isNotEmpty()) lines.add(t)
     }
-    return DrainResult(lines, (last + 1).toLong())
+    // 换行之后的尾部（混排形态：一帧有换行、下一帧无换行）同样按 JSON 边界切一次。
+    val (tailValues, tailConsumed) = NotifyTailSplit.split(buf, last + 1, n)
+    lines.addAll(tailValues)
+    // issue #1358：流已结束（atEof）时，换行之后那截**不完整的残尾**就是最后一条记录——
+    // 必须当正常完成消费掉，否则偏移永远停在这里、其后所有完整行都读不到。
+    if (atEof && tailValues.isEmpty() && last + 1 < n) {
+      val rest = String(buf, last + 1, n - (last + 1), Charsets.UTF_8).trim()
+      if (rest.isNotEmpty()) {
+        lines.add(rest)
+        return DrainResult(lines, n.toLong())
+      }
+    }
+    return DrainResult(lines, (last + 1).toLong() + tailConsumed.toLong())
   }
 
   /** 一行 JSON → 通知条目；解析失败 / 缺 kind 返回 null（调用方记日志，不崩）。 */
@@ -483,7 +527,9 @@ object NotifyStore {
         val buf = ByteArray((len - oldOffset).toInt().coerceAtMost(READ_CAP_BYTES))
         val read = raf.read(buf)
         if (read <= 0) return true
-        for (line in drainBytes(buf, read).lines) {
+        // issue #1358：轮转残段是**已封闭**文件（不会再增长），所以按 atEof 处理——
+      // 它最后那一行即使没有换行，也是完整记录，必须消费掉而不是等一个不会到来的换行。
+      for (line in drainBytes(buf, read, atEof = true).lines) {
           if (dispatch(app, line) == NotifyCenter.Result.ERROR) return false
         }
         NotifyProbe.log(app, TAG, "rotated remnant drained from " + oldOffset + " (len=" + len + ")")

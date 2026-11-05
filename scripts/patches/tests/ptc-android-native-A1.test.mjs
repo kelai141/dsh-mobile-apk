@@ -1,4 +1,4 @@
-/** Regressions against the published 0.2.1-rc.2 runtime library. No child processes, devices, network, or runtime probes. */
+/** Regressions against the published current-baseline runtime library. No child processes, devices, network, or runtime probes. */
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { posix } from 'node:path'
@@ -9,8 +9,10 @@ import {
   ANDROID_ENV_NAMES, LAUNCH_HELPER_JS, assertChildClearing, assertPolicyGate,
   patchEnvironment, patchRuntimeIndex, planPatch,
 } from '../ptc-android-native-A1.mjs'
+import { ENGINE_BASELINE } from './lib/fixture.mjs'
 
-const fixture = new URL('./fixtures/dsh-ptc-runtime-node-0.2.1-rc.2/', import.meta.url)
+// 随版夹具：目录名由 contract.baseline 决定，换代时测试跟着走，不留在上一代字节上全绿。
+const fixture = new URL('./fixtures/dsh-ptc-runtime-node-' + ENGINE_BASELINE + '/', import.meta.url)
 const read = name => readFileSync(new URL(name, fixture), 'utf8')
 const rawIndex = read('lib/index.js')
 const rawChild = read('lib/process.js')
@@ -96,7 +98,7 @@ async function launch(mode, options = {}) {
   catch (error) { return { calls, error } }
 }
 
-test('published 0.2.1-rc.2 library patch is idempotent and preflights the unchanged child', () => {
+test('published ' + ENGINE_BASELINE + ' library patch is idempotent and preflights the unchanged child', () => {
   assert.equal(patchRuntimeIndex(index), index)
   assert.equal(patchEnvironment(environment), environment)
   assertChildClearing(child)
@@ -219,7 +221,16 @@ test('old published artifact is rejected by the version preflight; both compiled
   const oldIndex = readFileSync(new URL('lib/index.js', oldFixture), 'utf8')
   assert.equal(JSON.parse(readFileSync(new URL('package.json', oldFixture), 'utf8')).version, '0.2.0-rc.2')
   assert.match(oldIndex, /this\.config\.nodeExecutable/)
-  assert.throws(() => planPatch(fileURLToPath(oldFixture)), /requires @deepseek-ai\/dsh-ptc-runtime-node@0\.2\.1-rc\.2/)
+  assert.throws(() => planPatch(fileURLToPath(oldFixture)), new RegExp('requires @deepseek-ai/dsh-ptc-runtime-node@' + ENGINE_BASELINE.replaceAll('.', '\\.')))
+  // 同一份当前代字节，只把发布身份改成上一代或未知版本：版本预检必须先判红，
+  // 不能因为锚点仍能命中就把别的产物当成本代施加（代弃夹具本身不再被测试引用）。
+  const manifest = JSON.parse(read('package.json'))
+  assert.equal(manifest.version, ENGINE_BASELINE)
+  const plan = (version, original = rawIndex) => () => planPatch(fileURLToPath(fixture), false,
+    name => name === 'package.json' ? JSON.stringify({ ...manifest, version }) : original)
+  for (const version of ['0.2.1-rc.2', '0.2.1-rc.1', '0.2.1', '0.2.2-rc.3', '1.0.0']) {
+    assert.throws(plan(version), new RegExp('requires @deepseek-ai/dsh-ptc-runtime-node@' + ENGINE_BASELINE.replaceAll('.', '\\.')), version)
+  }
   // 编译产物里同一条 launch 段有 void 0 与 undefined 两种写法；A1 必须归一成同一份补丁产物。
   const reworded = rawIndex.replace(
     'resolveExecutable(this.config.launch.executable, void 0, signal);',

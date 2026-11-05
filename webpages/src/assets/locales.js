@@ -30,7 +30,10 @@ const messages = {
     noAsset: '该版本暂无匹配安装包', error: '版本数据暂不可用，请前往发布页下载。',
     verification: '安装与校验说明', file: '文件名',
     missingHash: '该版本未提供内联校验值，请在发布页的 MANIFEST.txt 中核对。',
-    copy: '复制 SHA-256', copied: '已复制', copyFailed: '复制失败，请选中校验值复制',
+    digestVerified: '已验证（与官方 MANIFEST 一致）',
+  digestUnverified: '未验证（无法证明与官方 MANIFEST 一致）',
+  digestMismatch: '校验失败：与官方 MANIFEST 不一致，请勿使用',
+  copy: '复制 SHA-256', copied: '已复制', copyFailed: '复制失败，请选中校验值复制',
   },
   en: {
     slogan: 'Documents, coding, phone control, deep research. All in your pocket.',
@@ -61,7 +64,10 @@ const messages = {
     noAsset: 'No matching package in this release', error: 'Release data is unavailable. Download from the release page.',
     verification: 'Installation and verification', file: 'Filename',
     missingHash: 'No inline checksum is available. Check MANIFEST.txt on the release page.',
-    copy: 'Copy SHA-256', copied: 'Copied', copyFailed: 'Copy failed. Select the checksum to copy it.',
+    digestVerified: 'verified (matches the official MANIFEST)',
+  digestUnverified: 'unverified (cannot be proven against the official MANIFEST)',
+  digestMismatch: 'checksum mismatch against the official MANIFEST — do not use',
+  copy: 'Copy SHA-256', copied: 'Copied', copyFailed: 'Copy failed. Select the checksum to copy it.',
   },
 };
 export const t = key => messages[locale][key] || key;

@@ -1,0 +1,12 @@
+# Bundle self-activation patch: when this package is installed into a profile
+# via `dsh plugin --profile web add dsh-plugin-subscriptions` (or a local
+# checkout / git URL), this patch mounts the plugin's node half. The client
+# half (Settings > Subscriptions page) is discovered automatically from the
+# `dsh.client` declaration in package.json.
+#
+# Headless usage without installing into the profile (node half only; log in
+# from a web profile first, the token file is shared):
+#   pnpm dsh --profile headless --patch <this-checkout>/overlay.yml "task"
+- insert:
+    - id: llm-subscriptions
+      name: dsh-plugin-subscriptions

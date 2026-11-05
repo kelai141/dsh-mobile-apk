@@ -1,0 +1,76 @@
+RUN   35 个顶层测试（豁免 5 个，已由各自门禁内联执行）
+FAIL  失败数(10) != 已知失败清单长度(0)
+ding/dsh-mobile/dsh-mobile-apk/_dsh-wt/perf-audit/scripts/check-tool-output-schema.test.mjs:141:12
+      at withPlugin (file:///D:/coding/dsh-mobile/dsh-mobile-apk/_dsh-wt/perf-audit/scripts/check-tool-output-schema.test.mjs:73:12)
+      at TestContext.<anonymous> (file:///D:/coding/dsh-mobile/dsh-mobile-apk/_dsh-wt/perf-audit/scripts/check-tool-output-schema.test.mjs:139:3)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1306:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:897:18)
+      at Test.postRun (node:internal/test_runner/test:1447:19)
+      at Test.run (node:internal/test_runner/test:1372:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:897:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 2,
+    expected: 1,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at scripts\check-tool-output-schema.test.mjs:147:1
+✖ schema 声明 url 但不声明 loadState 就判红（G2b′：url 单值区分不了成功/失败） (108.5048ms)
+  AssertionError [ERR_ASSERTION]: SKIP(#1) 引擎校验器缺席（净检出无 node_modules）：plugins/dsh-android-manage/node_modules/@deepseek-ai/dsh-tools/lib/index.js、node_modules/@deepseek-ai/dsh-tools/lib/index.js
+    SKIP=1
+    这是**环境缺口**，不是通过：本门禁本轮未做任何校验。exit 2 与「判据不成立」的 exit 1 区分。
+    → 补产物的做法：在 plugins/dsh-android-manage 下 npm install（把 peerDependency @deepseek-ai/dsh-tools 装进来），或用 --engine-tools <path> 直接指到引擎的 dsh-tools。
+    → 发布链带 --require 时该缺口直接判红（exit 1），不会静默放过。
+  
+  
+  2 !== 1
+  
+      at file:///D:/coding/dsh-mobile/dsh-mobile-apk/_dsh-wt/perf-audit/scripts/check-tool-output-schema.test.mjs:151:12
+      at withPlugin (file:///D:/coding/dsh-mobile/dsh-mobile-apk/_dsh-wt/perf-audit/scripts/check-tool-output-schema.test.mjs:73:12)
+      at TestContext.<anonymous> (file:///D:/coding/dsh-mobile/dsh-mobile-apk/_dsh-wt/perf-audit/scripts/check-tool-output-schema.test.mjs:149:3)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1306:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:897:18)
+      at Test.postRun (node:internal/test_runner/test:1447:19)
+      at Test.run (node:internal/test_runner/test:1372:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:897:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 2,
+    expected: 1,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at scripts\check-tool-output-schema.test.mjs:156:1
+✖ 声明 loadState 但两态 render 逐字相同就判红（G2a-2：issue #232 的假回执形态） (104.3611ms)
+  AssertionError [ERR_ASSERTION]: SKIP(#1) 引擎校验器缺席（净检出无 node_modules）：plugins/dsh-android-manage/node_modules/@deepseek-ai/dsh-tools/lib/index.js、node_modules/@deepseek-ai/dsh-tools/lib/index.js
+    SKIP=1
+    这是**环境缺口**，不是通过：本门禁本轮未做任何校验。exit 2 与「判据不成立」的 exit 1 区分。
+    → 补产物的做法：在 plugins/dsh-android-manage 下 npm install（把 peerDependency @deepseek-ai/dsh-tools 装进来），或用 --engine-tools <path> 直接指到引擎的 dsh-tools。
+    → 发布链带 --require 时该缺口直接判红（exit 1），不会静默放过。
+  
+  
+  2 !== 1
+  
+      at file:///D:/coding/dsh-mobile/dsh-mobile-apk/_dsh-wt/perf-audit/scripts/check-tool-output-schema.test.mjs:180:12
+      at withPlugin (file:///D:/coding/dsh-mobile/dsh-mobile-apk/_dsh-wt/perf-audit/scripts/check-tool-output-schema.test.mjs:73:12)
+      at TestContext.<anonymous> (file:///D:/coding/dsh-mobile/dsh-mobile-apk/_dsh-wt/perf-audit/scripts/check-tool-output-schema.test.mjs:178:3)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1306:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:897:18)
+      at Test.postRun (node:internal/test_runner/test:1447:19)
+      at Test.run (node:internal/test_runner/test:1372:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:897:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 2,
+    expected: 1,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+CHECK-SCRIPT-TESTS FAILED（1 项判据不成立）

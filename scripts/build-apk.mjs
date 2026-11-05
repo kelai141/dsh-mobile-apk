@@ -7,7 +7,8 @@
 // 0.13.8-b ST-06 / F-ENV-04 真源化（此前是本链的三处陈旧字面量）：
 //   ① 版本 = app/build.gradle.kts 的 versionName（此前写死 0.13.0 → 产物名与输出目录恒错）；
 //   ② 注入集 = scripts/plugin-dirs.json（与本地链同一常量；此前 pluginDirs 少一个权威 patch
-//      已挂载的插件 dsh-model-capability，且门禁集比本地链少一批）；
+//      已挂载的插件——该插件 dsh-model-capability 已于 0.14.8 退役，现由 check-retired-plugins.mjs
+//      守「退役插件不得再被构建/发布入口引用」，且门禁集与本地链一致）；
 //   ③ 门禁集与 build-apk-013.ps1 逐项对齐（补 engine-overlay / snapshot-file-modes，机密门禁统一
 //      check-snapshot-secrets.mjs 单实现），check-release-gates.mjs 断言两份编排器差集 = 0；
 //   ④ `--dry-run` 只解析真源并打印产物名/注入集/门禁集，不写任何文件（验收 ① 的机器可读入口）。
@@ -77,7 +78,23 @@ const GATE_SCRIPTS = [
   'check-snapshot-decode.mjs',
   // Delivery gate: every final APK must verify with v1, v2, and v3 before leaving out/.
   'check-apk-signatures.mjs',
+  // Delivery gate: the final APK must not be a debuggable variant (badging has no
+  // `application-debuggable`). Signature correctness says nothing about the variant:
+  // the whole chain runs :app:assembleDebug and debug/release share signingConfigs.repoDebug,
+  // so the 0.14.9 release artifacts were debuggable while passing the signature gate.
+  'check-apk-form.mjs',
+  // 注入源真源（2026-11-01）：降级副本被造出来、注入时却用原始源——历史形态（PR #1272）。
+  // --scan 判的是产物内容是否合规；原始源恰好也合规时两份字节都能过，选错看不出来。
+  // 这条判「注入的是哪一份字节」：tar 内成员 sha256 == 降级副本 且 != 原始源（只读字节，不解析日志）。
+  // 登记进 GATE_SCRIPTS 是硬要求：check-release-gates 断言两份编排器门禁集差集 = 0。
+  'check-degrade-source-of-truth.mjs',
   'check-manifest-hardening.mjs',
+  // vendored 字节绑定（issue #1285）：vendor/dsh-plugin-subscriptions 的逐文件 sha256 必须与
+  // scripts/vendor-provenance.json 相符。此前没有任何门禁消费 PROVENANCE 的哈希，手改 lib/*.js 也能出厂。
+  'check-vendor-provenance.mjs',
+  // 退役插件残留引用（0.14.8 起 dsh-model-capability 退役）：构建/发布入口里不得再有可执行引用。
+  // 缺它的话「注入集多一条指向不存在目录的项」一路静默到设备上才暴露。
+  'check-retired-plugins.mjs',
   // 0.14.8 堆下限：壳侧 shellEnv() 与快照内启动器必须给出同一 clamp 区间（单边漂移 = 部分路径仍 OOM）。
   'check-engine-heap-floor.mjs',
   'check-bounded-io.mjs',
@@ -93,12 +110,19 @@ const GATE_SCRIPTS = [
   'check-gate-skips.mjs',
   'check-engine-overlay.mjs',
   'check-patch-mounts.mjs',
+  // profile 层共享依赖解析（0.15.x）：vendored 订阅插件把 undici 声明为 peer，靠 profile 共享农场的
+  // 相对链解析到引擎树。与本地链同一份实现，差集必须为 0。
+  'check-profile-undici-resolution.mjs',
   'check-inject-completeness.mjs',
   'check-combo-cache.mjs',
   'check-strip-noop.mjs',
   'check-kotlin-comments.mjs',
+  'check-i18n-parity.mjs',
   'check-build-chain-abort.mjs',
   'check-snapshot-file-modes.mjs',
+  // 快照内 node 入口 shim（真机实证 2026-10-31）：usr/bin/npm 必须是普通文件、两个 shim 必须自定位
+  // 且不含构建期前缀 /data/user/<n>/（多用户设备前缀随 user 变化 ⇒ pnpm exit 127）。
+  'check-snapshot-node-shims.mjs',
   'check-third-party.mjs',
   'check-snapshot-secrets.mjs',
   'elf-check.mjs',
@@ -169,6 +193,29 @@ try {
   run(process.execPath, ['--test', gate('check-apk-signatures.test.mjs'), gate('resolve-version-suffix.test.mjs'), gate('build-apk-engine.test.mjs'), gate('build-hard-manifest.test.mjs'), gate('check-perf-instrumentation.test.mjs')])
   mkdirSync(OUT, { recursive: true })
   mkdirSync(work, { recursive: true })
+  // 清掉上一次留在交付目录里的 APK（issue #1077）。
+  //
+  // 真因：本脚本此前只 `mkdirSync(OUT)`，**从不清理**。配合「验签前就拷进交付目录」的老顺序，
+  // 一次签名回归会把未通过验签的包永久留在 out/v<ver>/；而收尾的 `check-apk-signatures --dir`
+  // 是**递归遍历目录**，对任何一个不合格的 *.apk 判红——于是这个版本从此每次构建恒红，
+  // 哪怕当前产物是好的。本地链 build-apk-013.ps1 / 发布链 build-release.ps1 早就在开头做同样
+  // 的清理，portable 链漏了这一步（三条链行为不对称本身就是缺陷）。
+  // 清理范围必须收窄到**本次要产出的 ABI**（issue #1183）。
+  //
+  // 旧实现无条件删掉 OUT 下所有 *.apk。本脚本每次只产一个 ABI（--abi，默认 arm64），
+  // 所以 portable 链跑 x86_64 时会把 arm64 已验签的产物一并删掉：两条 ABI 分别用本脚本
+  // 出包时，后跑的那次总是把前一次的产物清空，交付目录永远只剩一个 ABI。
+  // 而收尾的 ABI 齐全性检查看的是「本次 produced 与 rejected」，察觉不到「上一次的产物没了」。
+  //
+  // 口径与本地链 build-apk-013.ps1 的 $abisThisRun 一致（#1078）：只清本次产出的 ABI，
+  // 其它 ABI 的既有产物保留。
+  //
+  // 仍只删 *.apk：out/ 里还有 snapshot-*.tar.xz 等发布资产，按目录清空会误伤。
+  // 匹配用产物名尾部的 `-<ABI>.apk`，而不是子串包含 —— 避免 x86_64 被 arm64 之类的串味。
+  const staleSuffix = '-' + ABI + '.apk'
+  for (const name of readdirSync(OUT)) {
+    if (name.toLowerCase().endsWith(staleSuffix.toLowerCase())) rmSync(join(OUT, name), { force: true })
+  }
 
   // ---- 1. 前置：基座/插件/vendor 在场 ----
   requires('snapshot 源', snapSrc)
@@ -194,11 +241,20 @@ try {
   run('node', [gate('check-snapshot-fingerprint.mjs')])
   log('门禁：manifest 加固语义…')
   run('node', [gate('check-manifest-hardening.mjs')])
+  // vendored 字节绑定（issue #1285）：只读仓库里的 vendor/ 与 scripts/vendor-provenance.json，
+  // 与 ABI、快照都无关，所以放在 ABI 循环外跑一次。缺它的话改一个 lib/*.js 也能照常出厂。
+  log('门禁：vendored 目录字节绑定…')
+  run('node', [gate('check-vendor-provenance.mjs')])
+  // 退役插件残留引用：同样只读仓库文件，放 ABI 循环外跑一次；必须在打包前，避免静默到设备。
+  log('门禁：退役插件残留引用…')
+  run('node', [gate('check-retired-plugins.mjs')])
   // 0.14.8 堆下限：壳侧 shellEnv() 与快照内启动器必须给出同一 clamp 区间（单边漂移 = 部分路径仍 OOM）。
   log('门禁：引擎堆下限双源一致性…')
   run('node', [gate('check-engine-heap-floor.mjs')])
   log('门禁：Kotlin 注释嵌套…')
   run('node', [gate('check-kotlin-comments.mjs')])
+  log('门禁：中英文案一致性…')
+  run('node', [gate('check-i18n-parity.mjs')])
   log('门禁：构建链中止语义（任一 ABI 被拒 = 非 0）…')
   run('node', [gate('check-build-chain-abort.mjs')])
   log('门禁：子进程有界读…')
@@ -260,6 +316,8 @@ try {
 
   // ---- 3. 插件注入链（python，跨平台）----
   let snapIn
+  // 注入段产出、下游门禁段消费：原始注入源 -> 降级副本 的配对（跨块可见）。
+  let degradePairsForGate = []
   if (!SKIP_INJECT) {
     // 统一补丁门禁（Phase 2a）：engine + vendor 补丁幂等施加与校验（registry.json）
     run('node', [join(ROOT, 'scripts', 'patches', 'apply-patches.mjs'), join(ROOT, 'vendor')])
@@ -289,35 +347,51 @@ try {
     mkdirSync(degradeStaged, { recursive: true })
     // 默认指向**原源目录**（表示「不降级」）；只有真的降级成功才改指向暂存副本。
     // 无 lib/client.js 的源不复制、保持原路径。
-    const degraded = new Map([
-      ['market', market],
-    ])
-    for (const key of ['market']) {
-      const src = degraded.get(key)
-      const leaf = key + '-degraded'
+    // 根级注入源 = plugin-dirs.json.externals **全部**（不再只取 marketplace）。
+    // 历史：只硬编码 dshmarketplace-plugin → 新登记的 external 包不进快照，而权威 patch 已挂它，
+    // 于是 check-patch-mounts 判红「挂载了注入面之外的包」。dsh-plugin-subscriptions 即此。
+    const externName = (p) => p.replace(/\\/g, '/').split('/').pop()
+    const degraded = new Map()
+    for (const dir of externalDirs) degraded.set(externName(dir), dir)
+    const externMissing = [...degraded.keys()].filter((n) => !existsSync(join(degraded.get(n), 'package.json')))
+    if (externMissing.length > 0) throw new Error('缺根级注入源：' + externMissing.join(', '))
+    for (const [name, src] of degraded) {
       if (!existsSync(join(src, 'lib', 'client.js'))) {
         log(`  跳过降级（无 lib/client.js）：${src}`)
         continue
       }
-      const dst = join(degradeStaged, leaf)
+      const dst = join(degradeStaged, name + '-degraded')
       rmSync(dst, { recursive: true, force: true })
       // cpSync recursive 等价于本地链的 `robocopy /MIR`（整树复制；排除 .git 以免把版本库带进暂存树）
       cpSync(src, dst, { recursive: true, filter: (s) => !s.split(/[\\/]/).includes('.git') })
       run('node', [gate('check-browser-syntax-floor.mjs'), '--degrade', '--stage', dst])
-      degraded.set(key, dst)
+      degraded.set(name, dst)
       log(`  暂存降级就位：${src} -> ${dst}`)
     }
-    const marketDeg = degraded.get('market')
+    const externalArgs = []
+    for (const name of [...degraded.keys()].sort()) {
+      externalArgs.push('--external', degraded.get(name))
+      log(`  [inject] ${name} -> ${degraded.get(name)}`)
+    }
+    const marketDeg = degraded.get('dshmarketplace-plugin')
     log('单 pass 注入（@dsh-android + market + 权威 patch，全部装配 profile）…')
     // ST-05：--all-profiles = 权威 patch 写给全部真实装配 profile（web+headless，负控 profile 除外）
     run(PYTHON, [
       join(ROOT, 'scripts', 'inject-all.py'), snapSrc, join(work, 'snap-final2.tar.xz'),
       join(ROOT, 'scripts', 'profile-web.cordis.patch.yml'),
       '--dsh-android', ...pluginDirs,
-      '--external', marketDeg,
+      ...externalArgs,
       '--all-profiles',
     ])
     snapIn = join(work, 'snap-final2.tar.xz')
+    // 注入源真源门禁的配对（含降级失败的源——那时 degraded.get(name) 仍指向原始源，
+    // 配对左右相等，判据会如实走「没被改写」的 SKIP 分支，而不是假装通过）。
+    for (const name of [...degraded.keys()].sort()) {
+      const origSrc = externalDirs.find((d) => externName(d) === name)
+      if (origSrc === undefined) continue
+      if (!existsSync(join(origSrc, 'lib', 'client.js'))) continue
+      degradePairsForGate.push('--pair', origSrc + '=' + degraded.get(name))
+    }
   } else {
     snapIn = snapSrc
     log('--skip-inject：直接用输入快照（dev 档；权限归一化只在注入链发生，禁止用于发布资产）')
@@ -325,7 +399,11 @@ try {
 
   // ---- 4. 门禁（注入后；与 build-apk-013.ps1 同一份门禁集）----
   log('门禁：patch 挂载集校验（双向差集）…')
-  run('node', [gate('check-patch-mounts.mjs'), join(ROOT, 'scripts', 'profile-web.cordis.patch.yml'), ...pluginDirs, market])
+  run('node', [gate('check-patch-mounts.mjs'), join(ROOT, 'scripts', 'profile-web.cordis.patch.yml'), ...pluginDirs, ...externalDirs])
+  // profile 层共享依赖解析（0.15.x）：判据作用于构建 stage 树（软链已就位、尚未归档）。
+  // --require + 负控：移走农场链后子进程复检必须判红，证明判据真在守链而不是被残留洗绿。
+  log('门禁：profile 共享依赖解析（undici -> 引擎树）…')
+  run('node', [gate('check-profile-undici-resolution.mjs'), '--require', '--negative-control'])
   // 注入面成员完整性（P0）：包内新增文件必须随注入进 tar，且相对导入不得悬空
   log('门禁：注入成员完整性（成员集合 + 相对导入可解析）…')
   run('node', [gate('check-inject-completeness.mjs'), snapIn])
@@ -337,8 +415,36 @@ try {
   // → 纯白无字。判据 = 真实解析器 AST + esbuild 双 arm 逐字节差分（禁 grep），扫全清单。
   log('门禁：浏览器语法下限（AST + 双 arm 差分）…')
   run('node', [gate('check-browser-syntax-floor.mjs'), '--scan', snapIn])
+  // 快照包名一致性（2026-10-27，issue #154 / apk #480 第 1 条）：注入进各装配 profile 的
+  // cordis.patch.yml 里，shell 路径（bashPath/prefix/home/cwd）必须与 app/build.gradle.kts 的
+  // applicationId 同源。改包名时漏改 patch，APK 装得上但引擎起不来（路径指向不存在的
+  // /data/user/0/<旧包名>）。历史缺口：该门禁自存在起**从未被任何链调用**（apk #480 实测），
+  // 只能在 CI 工作流里手动跑。
+  //
+  // 为什么是 python 而非 node：它是纯标准库的 tar 流式扫描（ELF 架构 + 机密 + 插件哈希 +
+  // 逐 profile patch 比对），与 CI 的 ci-verify-snapshot.py 是**同一份实现**；PYTHON 常量已在
+  // :26 定义（win32 → python，其余 → python3），与 build-snapshot-013.mjs 口径一致。
+  //
+  // 为什么**不**登记进 GATE_SCRIPTS（:64）：那个数组只收 .mjs，check-gate-skips.mjs:40 的正则
+  // 也只解析 .mjs 形态的条目——把 .py 塞进去既不会被解析到，还会污染 :163 的「门禁集(N)」计数。
+  // 「是否真的接线」改由 check-build-chain-abort.mjs 的静态断言守（断言本调用点必须在场）。
+  log('门禁：快照包名一致性（applicationId vs 各 profile patch）…')
+  run(PYTHON, [gate('ci-verify-snapshot.py'), snapIn, ABI, ...pluginDirs])
   // 模型面工具 wire 预算（0.14.0 §4.1）：注册集（解锁后上限）+ 初始可见集（模型第一眼）双口径。
   // 前置于本步的插件 npm build 已产出 plugins/*/lib，门禁真跑各插件 apply() 采集工具定义。
+  // 注入源真源（2026-11-01）：降级副本被造出来了、注入时却用原始源——历史形态（PR #1272）。
+  // --scan 判的是「产物内容是否合规」；原始源恰好也合规时两份字节都能过，选错看不出来。
+  // 这里判「注入的是哪一份字节」：tar 内成员 sha256 必须等于降级副本且不等于原始源。
+  // 输入只用字节（tar + 两份源目录），不解析日志。--skip-inject 档没有降级段，不判。
+  // 上面注入段的降级表只在 if (!SKIP_INJECT) 块内存在，跨块引用会 ReferenceError——
+  // 故这里由注入段把「原始源 -> 降级副本」的配对留在外层可见的变量里。
+  if (degradePairsForGate.length === 0) {
+    // 与本地链同口径：一个可判对象都没有时显式说出来，不静默略过。
+    log('SKIP(#1)  注入源真源门禁：本轮没有任何带 lib/client.js 的 external，无可判对象')
+  } else {
+    log('门禁：注入源真源（tar 字节 == 降级副本，!= 原始源）…')
+    run('node', [gate('check-degrade-source-of-truth.mjs'), '--snapshot', snapIn, ...degradePairsForGate, '--require'])
+  }
   log('门禁：模型面工具 wire 预算（注册集 + 初始可见集）…')
   run('node', [gate('check-tool-surface-budget.mjs')])
   log('门禁：注入后 /api 路由鉴权 marker…')
@@ -351,6 +457,11 @@ try {
     if (SKIP_INJECT) log('警告：--skip-inject 档快照未做权限归一化（dev 专档，禁止发布）')
     else throw new Error('快照权限模式校验失败')
   }
+  // 快照内 node 入口 shim（真机实证 2026-10-31）：pnpm shim 烧死构建期前缀 /data/user/0/<包名>，
+  // 而多用户设备（user 10）的运行前缀是 /data/user/10/... ⇒ 设备上 pnpm exit 127；usr/bin/npm 是
+  // symlink ⇒ pnpm 的 passThruToNpm spawnSync('npm') 落地 ENOENT。与本地链同一份实现（差集必须为 0）。
+  log('门禁：快照 node 入口 shim（自定位 + npm 普通文件）…')
+  run('node', [gate('check-snapshot-node-shims.mjs'), snapIn])
   log('门禁：第三方许可…')
   run('node', [gate('check-third-party.mjs'), 'x', '--tar', snapIn, '--write-notices', join(ROOT, 'THIRD_PARTY_NOTICES.md')])
   log('门禁：机密（严格：归档不可读/成员为空即失败）…')
@@ -392,7 +503,11 @@ try {
   log('门禁：内嵌快照可解压（设备同源 streaming 解码器全量解压）…')
   run('node', [gate('check-snapshot-decode.mjs'), '--tar', join(apkDir, 'app', 'src', 'main', 'assets', 'snapshot.tar.xz'), '--require'])
   run(process.execPath, [gate('check-apk-signatures.mjs'), '--self-test'])
-  verifyApks({ signatureGate: gate('check-apk-signatures.mjs'), directories: [OUT], selfTest: false, log },
+  // 产物形态门禁（与签名同一「最终产物」关口）：签名全绿不区分 debug/release 变体——
+  // 0.14.9 发布产物就是 debug 变体（全链 :app:assembleDebug + debug/release 共用 signingConfigs.repoDebug），
+  // badging 带 application-debuggable，而签名门禁对此完全无感。--require：刚打出 APK 的机器必有 SDK。
+  run(process.execPath, [gate('check-apk-form.mjs'), '--self-test'])
+  verifyApks({ signatureGate: gate('check-apk-signatures.mjs'), formGate: gate('check-apk-form.mjs'), directories: [OUT], selfTest: false, log },
     (cmd, argv, opts) => spawnSync(cmd, argv, { cwd: ROOT, encoding: 'utf8', stdio: 'inherit', ...opts }))
   console.log(`=== 完成（${ABI} ${SUFFIX}）===\nAPK=${join(OUT, name)}`)
 } catch (e) {

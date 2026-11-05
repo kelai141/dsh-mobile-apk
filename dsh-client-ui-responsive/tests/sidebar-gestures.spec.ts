@@ -199,6 +199,25 @@ function dragging(): boolean {
   return document.documentElement.hasAttribute(DRAWER_DRAGGING_ATTR)
 }
 
+/**
+ * 等某个断言自己成立，而不是「睡固定毫秒再断言」。
+ *
+ * 源码的横向容器扫描是 50ms 防抖（sidebar-gestures.ts 的 queueSurfaceRefresh）。原先测试
+ * 睡 70ms——只留 20ms 余量。全量并行跑时事件循环被别的用例占住，50ms 的回调会晚于 70ms
+ * 的断言落地，于是真实行为正确、测试却红（实测在全量跑里偶发、单跑三次全绿）。
+ *
+ * 改法：轮询等条件成立（含一次宏任务让出，保证 50ms 定时器有机会跑），超时才失败。
+ * 判据不变，只把「等多久」从猜数字改成等事实。
+ */
+async function until(predicate: () => boolean, why: string, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (predicate()) return
+    if (Date.now() > deadline) throw new Error('等待超时：' + why)
+    await new Promise<void>(resolve => window.setTimeout(resolve, 10))
+  }
+}
+
 beforeEach(() => {
   localStorage.clear()
   document.body.innerHTML = ''
@@ -927,9 +946,21 @@ describe('拖动中抽屉内容必须已挂载（0.14.7 task-7 真机真因）',
 })
 
 describe('触点按下前的原生平移策略', () => {
-  it('常驻 CSS 限制横向平移并保留纵向滚动和双指缩放', () => {
-    expect(MOBILE_FORM_CSS).toMatch(/\[data-dsh-frame\], \[data-dsh-frame\] \*\s*\{\s*touch-action: pan-y pinch-zoom/)
+  // 行为变更（图片预览「放大图片会放大整个屏幕」）：本用例原先锁的是
+  // `touch-action: pan-y pinch-zoom`，断言「双指缩放留给浏览器」。实测那条授权正是
+  // 整屏被放大的来源（pinch-zoom = 允许浏览器捏合缩放整页），所以它被**有意撤销**，
+  // 断言随契约一起改：frame 只保留 pan-y，捏合闸门移到根上（body 层 portal 不在 frame
+  // 子树里），横向滚动容器仍保留 auto。最后一条是反向守卫：谁再把 pinch-zoom 加回这张
+  // 样式表，就等于把这条 bug 加回来。
+  it('常驻 CSS 限制横向平移、保留纵向滚动，且不再放行整页双指缩放', () => {
+    expect(MOBILE_FORM_CSS).toMatch(/\[data-dsh-frame\], \[data-dsh-frame\] \*\s*\{\s*touch-action: pan-y;/)
+    expect(MOBILE_FORM_CSS).toMatch(/html\[data-dsh-mobile-form\]\s*\{\s*touch-action: pan-x pan-y;/)
     expect(MOBILE_FORM_CSS).toMatch(/\[data-dsh-frame\] \[data-dsh-horizontal-scroll\] \*\s*\{\s*touch-action: auto/)
+    // 守卫要贴着契约写：禁的是「把 pinch-zoom 写进某条 touch-action 声明」。
+    // 判据前先剥掉注释——这张样式表的注释正在解释 pinch-zoom 为什么被撤销，含该词属正常；
+    // 不剥会让断言被说明文字绊倒（首版就是踩了这个坑，红的是判据自己）。
+    const cssNoComments = MOBILE_FORM_CSS.replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(cssNoComments).not.toMatch(/touch-action:[^;{}]*pinch-zoom/)
   })
 
   it('touchstart 不临时改写元素样式，也不覆盖已有原生策略', () => {
@@ -968,12 +999,10 @@ describe('触点按下前的原生平移策略', () => {
     Object.defineProperty(scroller, 'scrollWidth', { configurable: true, value: 800 })
     Object.defineProperty(scroller, 'clientWidth', { configurable: true, value: 200 })
     h.drawer.appendChild(scroller)
-    await new Promise<void>(resolve => window.setTimeout(resolve, 70))
-    expect(scroller.hasAttribute('data-dsh-horizontal-scroll')).toBe(true)
+    await until(() => scroller.hasAttribute('data-dsh-horizontal-scroll'), '新增的横向容器应被标记')
     Object.defineProperty(scroller, 'scrollWidth', { configurable: true, value: 200 })
     window.dispatchEvent(new Event('resize'))
-    await new Promise<void>(resolve => window.setTimeout(resolve, 70))
-    expect(scroller.hasAttribute('data-dsh-horizontal-scroll')).toBe(false)
+    await until(() => !scroller.hasAttribute('data-dsh-horizontal-scroll'), '溢出消失后标记应被摘掉')
   })
 
   it('父级尺寸或字体样式变化只重测其子树里的横向容器', async () => {
@@ -984,13 +1013,11 @@ describe('触点按下前的原生平移策略', () => {
     Object.defineProperty(scroller, 'scrollWidth', { configurable: true, get: () => width })
     Object.defineProperty(scroller, 'clientWidth', { configurable: true, value: 200 })
     h.drawer.appendChild(scroller)
-    await new Promise<void>(resolve => window.setTimeout(resolve, 70))
-    expect(scroller.hasAttribute('data-dsh-horizontal-scroll')).toBe(true)
+    await until(() => scroller.hasAttribute('data-dsh-horizontal-scroll'), '新增的横向容器应被标记')
 
     width = 200
     h.drawer.style.fontSize = '20px'
-    await new Promise<void>(resolve => window.setTimeout(resolve, 70))
-    expect(scroller.hasAttribute('data-dsh-horizontal-scroll')).toBe(false)
+    await until(() => !scroller.hasAttribute('data-dsh-horizontal-scroll'), '父级字体变化后标记应被摘掉')
   })
 
   it('完整侧栏在手势中挂载时不扫描全 frame；松手后的帧先结算再做一次扫描', async () => {

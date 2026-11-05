@@ -69,10 +69,18 @@ export function writeDetailStore(
   return file
 }
 
-/** 分页切片 + 诚实报告省略量（对齐上游 output-retention 的口径：丢了几个必须说清）。 */
+/** 分页切片 + 诚实报告省略量（对齐上游 output-retention 的口径：丢了几个必须说清）。
+ *
+ * issue #1209：旧实现只夹下界（`Math.max(0, ...)`），于是 `offset >= rows.length` 时
+ * ① 区间倒挂（文案印「第 100..99 行」）；② `omitted` 被算成 0 ——「还有一百行在页外」这一事实
+ * 被抹掉，模型据此得出「明细为空」。offset 是用户可调的普通分页参数（把 limit 调小后继续翻页
+ * 就会到），不是恶意输入。`Infinity`（来自 `Number('1e999')`）也必须收敛：它会序列化成 null，
+ * 与工具声明的 `type:'number'` 不符。
+ */
 export function pageRows<T>(rows: T[], offset: number, limit: number): { page: T[]; offset: number; omitted: number } {
-  const off = Math.max(0, Math.floor(offset))
   const lim = Math.max(1, Math.floor(limit))
+  const safe = Number.isFinite(offset) ? offset : 0
+  const off = Math.min(rows.length, Math.max(0, Math.floor(safe)))
   const page = rows.slice(off, off + lim)
   return { page, offset: off, omitted: Math.max(0, rows.length - off - page.length) }
 }

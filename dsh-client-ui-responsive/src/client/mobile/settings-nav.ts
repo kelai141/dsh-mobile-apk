@@ -32,6 +32,8 @@ const LEVEL_HOME = 'home'
 const LEVEL_DETAIL = 'detail'
 /** 返回控件（首页 = 关设置，二级页 = 回首页）。 */
 const BACK_ATTR = 'data-dsh-settings-back'
+/** 「刚打开、用户还没动」的临时标记：只用于压掉默认选中行的背景。 */
+const FRESH_ATTR = 'data-dsh-settings-fresh'
 /** 顶部条：返回控件 +（二级页才显示的）分区标题 + 右侧占位。 */
 const BAR_ATTR = 'data-dsh-settings-bar'
 const BAR_TITLE_ATTR = 'data-dsh-settings-bar-title'
@@ -51,6 +53,22 @@ const NAV_TITLE_SELECTOR = ':scope > nav > div:first-child'
 const ACTIVE_ROW_SELECTOR = 'nav button[aria-current="true"]'
 
 /**
+ * 「订阅」与「账号与余额」的分区名（issue #1288 第 3、7 条）。
+ *
+ * 身份通道同本模块其余表：DOM 里能看见的只有 label 文本。两个分区都由**第三方插件**
+ * 注册——「账号与余额」来自上游只读的 settings-account 插件（且**只在已登录
+ * `status === "credential-stored"` 时**才注册），「订阅」来自 vendored 的
+ * dsh-plugin-subscriptions。所以这里做的是**装配**（把 A 的分区入口放进 B 的二级页），
+ * 不是上游能力；上游改版时这两张表就是失效判据（见 syncSubscriptionsEntry 的降级分支）。
+ */
+const ACCOUNT_LABELS: readonly string[] = ['账号与余额', 'Account & balance']
+const SUBSCRIPTIONS_LABELS: readonly string[] = ['订阅', 'Subscriptions']
+/** 注入到「账号与余额」二级页里的那一行（本模块自己的节点，收回时删掉即可）。 */
+const ACCOUNT_EXTRA_ATTR = 'data-dsh-settings-account-extra'
+/** 首页被本模块隐藏的「订阅」行（只加一个属性，收回时去掉即复原）。 */
+const HOME_HIDDEN_ATTR = 'data-dsh-settings-nav-hidden'
+
+/**
  * 我方自有分区的「一行短说明」（D4），键 = `index.ts` 里注册的 label 字面量。
  *
  * 只登记我方自有一级分区；上游「通用设置 / 模型 / 内置插件 / 快照…」与第三方插件行一律不加说明、
@@ -63,6 +81,7 @@ const OWN_SECTION_DESCRIPTIONS: ReadonlyMap<string, string> = new Map([
   ['模型能力', '补齐第三方模型的思考档位'],
   ['应用更新', '检查新版本并下载安装包'],
   ['Linux环境', '安装并启用 Debian 环境'],
+  ['关于', '应用与引擎版本'],
 ])
 
 /** English descriptions for the same own sections; the keys stay the registered labels. */
@@ -73,6 +92,7 @@ const OWN_SECTION_DESCRIPTIONS_EN: ReadonlyMap<string, string> = new Map([
   ['模型能力', 'Thinking levels for third-party models'],
   ['应用更新', 'Check for a new version and download the installer'],
   ['Linux环境', 'Install and enable the Debian environment'],
+  ['关于', 'App and engine versions'],
 ])
 
 /**
@@ -235,6 +255,20 @@ export class MobileSettingsNav {
   /** 当前追踪的面板；换面板（React 重建）时复位到首页。 */
   private panel: HTMLElement | null = null
   private level: string = LEVEL_HOME
+  /** 当前二级页对应的分区名（上游 aria-current 的事实）。 */
+  private currentLabel: string | null = null
+  /** 上一个二级页分区名：返回键据此回到「上一页」而不是一路退回列表。 */
+  private previousLabel: string | null = null
+  /**
+   * 当前详情页是否已经「落定」：`aria-current` 追上了用户点的那一行。
+   *
+   * 刚进详情页时上游的 `aria-current` 还停在默认的第一行（通用设置），要等它挪到目标行。
+   * 这段过渡期如果照常记账，就会把「通用设置」误记成上一页——表现为**从任何二级页返回
+   * 都跳到通用设置**（用户反馈）。
+   */
+  private settled = false
+  /** 面板刚打开、用户还没动过：此时压掉上游默认选中行的背景（不改 aria-current）。 */
+  private freshPanel = false
   /** 刚进入二级页时先上屏的标题（等上游把 `aria-current` 挪到目标行后即可撤下）。 */
   private pendingTitle: string | null = null
   /** 同步完成后要落焦点的目标：`'back'` = 返回控件，`'row'` = 当前一级行。 */
@@ -305,6 +339,12 @@ export class MobileSettingsNav {
       }
 
       // 一级分类：进入二级页。这里**不能**拦事件——真正切分区的仍是上游 onSelect。
+      // 任何一次触碰都算「用户动过了」：撤掉 fresh，恢复上游的选中外观。
+      if (this.freshPanel) {
+        this.freshPanel = false
+        document.querySelector('[data-dsh-settings-dialog]')?.removeAttribute(FRESH_ATTR)
+      }
+
       if (this.level === LEVEL_HOME && target.closest('nav button') !== null) {
         const button = target.closest('nav button')
         if (button !== null) this.enterDetail(panel, button)
@@ -320,7 +360,9 @@ export class MobileSettingsNav {
       if (this.level === LEVEL_DETAIL && this.isSettingsMask(target, panel)) {
         event.preventDefault()
         event.stopPropagation()
-        this.backToHome(panel)
+        // 系统返回在 dialog 层表现为「点蒙层」——同样要走 goBack，
+        // 否则「通用 → 关于 → 系统返回」会一次退到列表（用户反馈）。
+        this.goBack(panel)
       }
     } catch (error) {
       console.warn('[dsh-settings-nav] click handling failed; the panel keeps upstream behavior', error)
@@ -328,10 +370,10 @@ export class MobileSettingsNav {
   }
 
   /**
-   * Escape 在二级页里只退回首页。
+   * Escape 在二级页里按「上一页」回退（没有上一页才回首页）。
    *
    * 上游 `useModalLayer` 把 Escape 接成「关设置」；二级页里那会一次退两级。捕获阶段先拦下，
-   * 首页则原样放行给上游（它才是设置的关闭路径）。
+   * 首页则原样放行给上游（它才是设置的关闭路径）。系统返回若走键盘通道也走这条路。
    */
   private readonly onKeyDown = (event: KeyboardEvent): void => {
     if (event.key !== 'Escape' || this.level !== LEVEL_DETAIL) return
@@ -339,12 +381,27 @@ export class MobileSettingsNav {
     if (panel === null) return
     event.preventDefault()
     event.stopPropagation()
-    this.backToHome(panel)
+    this.goBack(panel)
   }
 
-  /** 返回键：二级页回首页，首页关设置。 */
+  /** 返回键：二级页先回「上一页」，没有再回首页；首页关设置。 */
   private goBack(panel: HTMLElement): void {
     if (this.level === LEVEL_DETAIL) {
+      // 分区之间也能跳（如「通用 → 关于」），返回应回到跳转前那一页而不是直接回列表。
+      const previous = this.previousLabel
+      if (previous !== null) {
+        const row = [...panel.querySelectorAll('nav button')].find(button => rowLabel(button) === previous)
+        if (row !== undefined) {
+          // 先把记账改成目标分区再点：否则这次「从 B 切回 A」会被记成新的历史，导致
+          // 再按一次返回又跳回 B（往返循环，永远回不到列表）。
+          this.previousLabel = null
+          this.currentLabel = previous
+          this.settled = true
+          this.pendingTitle = previous
+          ;(row as HTMLElement).click()
+          return
+        }
+      }
       this.backToHome(panel)
       return
     }
@@ -361,6 +418,12 @@ export class MobileSettingsNav {
 
   private enterDetail(panel: HTMLElement, button: Element): void {
     this.pendingTitle = rowLabel(button) || null
+    // 从列表进入：当前分区就是这一行，历史清空。
+    // 不这么做的话，关闭设置再打开时会带着上一次的分区名，第一次切换就记出假历史，
+    // 返回键会跳到用户根本没去过的分区。
+    this.currentLabel = rowLabel(button) || null
+    this.previousLabel = null
+    this.settled = false
     this.level = LEVEL_DETAIL
     this.focusTarget = 'back'
     this.sync()
@@ -369,6 +432,8 @@ export class MobileSettingsNav {
   private backToHome(panel: HTMLElement): void {
     this.level = LEVEL_HOME
     this.pendingTitle = null
+    this.previousLabel = null
+    this.settled = false
     this.focusTarget = 'row'
     this.sync()
   }
@@ -402,10 +467,17 @@ export class MobileSettingsNav {
         this.panel = panel
         this.level = LEVEL_HOME
         this.pendingTitle = null
+        this.freshPanel = true
       }
       if (panel.getAttribute(LEVEL_ATTR) !== this.level) panel.setAttribute(LEVEL_ATTR, this.level)
+      // 刚打开时上游默认把第一行标成 aria-current，看着像「已经选中了通用设置」（用户反馈）。
+      // 只压**外观**：给面板打 fresh 标记，用户第一次触碰就撤掉；aria-current 一律不动
+      // ——返回时的焦点定位与标题跟随都依赖它，之前删标记的做法把这两件事弄坏了。
+      if (this.freshPanel) panel.setAttribute(FRESH_ATTR, '')
+      else panel.removeAttribute(FRESH_ATTR)
       const bar = this.ensureBar(panel)
       this.syncRows(panel)
+      this.syncSubscriptionsEntry(panel)
       this.syncTitle(panel, bar)
       this.applyFocus(panel)
     } catch (error) {
@@ -435,6 +507,8 @@ export class MobileSettingsNav {
     // 上游图标只是被标记隐藏，收回时去掉标记即原样恢复。
     for (const node of panel.querySelectorAll('[' + ICON_ATTR + '-hidden]')) node.removeAttribute(ICON_ATTR + '-hidden')
     for (const node of panel.querySelectorAll('[' + ROW_ATTR + ']')) node.removeAttribute(ROW_ATTR)
+    for (const node of panel.querySelectorAll('[' + ACCOUNT_EXTRA_ATTR + ']')) node.remove()
+    for (const node of panel.querySelectorAll('[' + HOME_HIDDEN_ATTR + ']')) node.removeAttribute(HOME_HIDDEN_ATTR)
   }
 
   /** 顶部条：返回控件 + 分区标题 + 右侧等高占位（标题因此真正居中）。 */
@@ -508,6 +582,72 @@ export class MobileSettingsNav {
   }
 
   /**
+   * 把「订阅」归到「账号与余额」二级页里（issue #1288 第 3、7 条）。
+   *
+   * 做法（两步，都可逆，都不改上游注册项本身）：
+   *   1. 首页：把「订阅」这一行**隐藏**（只加 `data-dsh-settings-nav-hidden`，不删节点）——
+   *      删了它这个分区就再也点不动了，而它仍是唯一的真实分区；
+   *   2. 「账号与余额」的二级页里：往内容列顶部**注入一个可点的入口行**，点它就去点
+   *      第 1 步隐藏的那个真实行 —— 所以进到订阅页之后的一切都是上游原样行为，
+   *      本模块没有重实现任何订阅界面。
+   *
+   * 降级判据（上游改版/未登录时的失效面，必须**安静降级**、不许乱塞也不许报错）：
+   *   · 找不到「订阅」行 → 什么都不做（既没隐藏也没注入）；
+   *   · 找不到「账号与余额」行 → 什么都不做，**尤其不能隐藏订阅行**：
+   *     该分区由上游 settings-account 插件**只在已登录时**注册，未登录时若隐藏了订阅行，
+   *     订阅就彻底点不到了（这是本条最危险的失败模式）；
+   *   · 当前不在账号与余额的二级页 → 移除注入行（切到别的分区不留孤儿）。
+   */
+  private syncSubscriptionsEntry(panel: HTMLElement): void {
+    const list = panel.querySelector<HTMLElement>(NAV_LIST_SELECTOR)
+    if (list === null) return
+    const rows = [...list.querySelectorAll<HTMLButtonElement>(':scope > button')]
+    const find = (labels: readonly string[]): HTMLButtonElement | undefined =>
+      rows.find(row => labels.includes(rowLabel(row)))
+    const accountRow = find(ACCOUNT_LABELS)
+    const subsRow = find(SUBSCRIPTIONS_LABELS)
+
+    // 内容列（二级页）：注入行的宿主。取不到就什么都不做。
+    const content = panel.querySelector<HTMLElement>(':scope > div:last-child > div:nth-child(2)')
+    const existing = content?.querySelector<HTMLElement>(':scope > [' + ACCOUNT_EXTRA_ATTR + ']') ?? null
+    const onAccountDetail = this.level === LEVEL_DETAIL
+      && this.currentLabel !== null
+      && ACCOUNT_LABELS.includes(this.currentLabel)
+
+    // 只有两个分区都在场、且确实在账号二级页时才装配；其余情形一律复原。
+    const shouldPlace = accountRow !== undefined && subsRow !== undefined && content !== null && onAccountDetail
+    if (!shouldPlace) {
+      existing?.remove()
+      // 复原：首页行重新可见（未登录时账号分区缺席，绝不能把订阅藏起来）。
+      subsRow?.removeAttribute(HOME_HIDDEN_ATTR)
+      return
+    }
+
+    subsRow.setAttribute(HOME_HIDDEN_ATTR, '')
+    if (existing !== null) return
+
+    const entry = document.createElement('button')
+    entry.type = 'button'
+    entry.setAttribute(ACCOUNT_EXTRA_ATTR, '')
+    // 复用一级行的观感：图标位留白 + 标签 + 箭头，让它在二级页里像「一个分区入口」
+    // 而不是一条普通按钮。样式全部来自本包的语义属性（无内联字面量）。
+    entry.style.cssText = 'display:flex;align-items:center;gap:12px;width:100%;box-sizing:border-box;'
+      + 'min-height:52px;padding:12px 4px;background:transparent;border:none;cursor:pointer;'
+      + 'color:var(--dsw-alias-label-primary);font-size:15px;line-height:20px;text-align:left'
+    const label = document.createElement('span')
+    label.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
+    label.textContent = rowLabel(subsRow)
+    const chevron = document.createElement('span')
+    chevron.setAttribute('aria-hidden', 'true')
+    chevron.style.cssText = 'flex:none;display:inline-flex;color:var(--dsw-alias-label-tertiary)'
+    chevron.appendChild(strokeArrow('M7 4l5 5-5 5'))
+    entry.append(label, chevron)
+    // 点注入行 = 点上游那个真实的订阅行（section 切换仍由上游 onSelect 完成）。
+    entry.addEventListener('click', () => { subsRow.click() })
+    content.insertBefore(entry, content.firstChild)
+  }
+
+  /**
    * 给我方自有分区行换成该分区自己的图标（上游对未知 id 一律给通用齿轮，三个分类会长得一模一样）。
    *
    * 只影响本表登记的行：上游内置 id 与第三方/未知行不进这里，它们的图标仍是上游渲染。
@@ -557,6 +697,17 @@ export class MobileSettingsNav {
       return
     }
     const activeLabel = rowLabel(panel.querySelector(ACTIVE_ROW_SELECTOR) ?? panel.ownerDocument.createElement('span'))
+    // 记录分区切换：详情页里从 A 换到 B 时把 A 记成「上一页」，返回键据此回到 A。
+    if (activeLabel !== '') {
+      // 过渡期（aria-current 还在默认第一行）只等不记，否则每个分区都会把
+      // 「通用设置」误记成上一页。
+      if (!this.settled) {
+        if (activeLabel === this.currentLabel) this.settled = true
+      } else if (activeLabel !== this.currentLabel) {
+        this.previousLabel = this.currentLabel
+        this.currentLabel = activeLabel
+      }
+    }
     if (this.pendingTitle !== null) {
       this.writeTitle(title, this.pendingTitle)
       // 上游把 aria-current 挪到目标行后即可交回常规路径（期间语言切换也由它接手）。
@@ -580,8 +731,18 @@ export class MobileSettingsNav {
       return
     }
     if (target === 'row') {
-      const row = panel.querySelector<HTMLElement>(ACTIVE_ROW_SELECTOR)
-      if (row !== null && !row.hasAttribute('disabled')) row.focus()
+      const visible = (row: HTMLElement): boolean => {
+        if (row.hasAttribute('disabled') || row.closest('[hidden], [inert]') !== null) return false
+        for (let node: HTMLElement | null = row; node !== null && node !== panel; node = node.parentElement) {
+          const style = window.getComputedStyle(node)
+          if (style.display === 'none' || style.visibility === 'hidden') return false
+        }
+        return true
+      }
+      const active = panel.querySelector<HTMLElement>(ACTIVE_ROW_SELECTOR)
+      const row = active !== null && visible(active) ? active
+        : [...panel.querySelectorAll<HTMLElement>('nav button')].find(visible)
+      row?.focus()
     }
   }
 }

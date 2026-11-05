@@ -1,5 +1,6 @@
 package com.dsharnessmobile.shell
 
+import android.content.Context
 import java.util.Locale
 
 /**
@@ -50,6 +51,16 @@ internal object UserCopy {
   /** 未登记类别的兜底名（不把类别码印给用户）。 */
   const val NOTIFY_CATEGORY_UNKNOWN = "其它通知"
 
+  private val NOTIFY_CATEGORY_EN = mapOf(
+    "approval" to "Approval requests",
+    "question" to "Questions",
+    "report" to "Work reports",
+    "todo" to "Task progress",
+    "silent" to "Background activity",
+  )
+
+  const val NOTIFY_CATEGORY_UNKNOWN_EN = "Other notifications"
+
   /**
    * 通知类别码 → 中文用词（唯一真源）。
    * @param category - `.notify.ndjson` / 设置面用的类别码（`report` / `question` / …）。
@@ -57,6 +68,19 @@ internal object UserCopy {
    */
   fun notifyCategory(category: String): String =
     NOTIFY_CATEGORY[category] ?: NOTIFY_CATEGORY_UNKNOWN
+
+  /**
+   * 类别码 → 当前语言用词（渠道展示名 / 设置页标签的唯一真源）。
+   *
+   * 缺陷现场（2026-10-29 真机）：切英文后**系统设置 → 通知 → 应用 → 通知类别**里仍是
+   * 「授权请求 / 工作汇报 / 后台动态」——渠道名只在创建那一刻取一次中文，之后没有任何路径跟着语言走。
+   * @param category - 类别码。
+   * @param context - 用于判语言；null 视为中文（保持旧调用点语义）。
+   */
+  fun notifyCategory(category: String, context: Context?): String {
+    if (context == null || !UiText.isEnglish(context)) return notifyCategory(category)
+    return NOTIFY_CATEGORY_EN[category] ?: NOTIFY_CATEGORY_UNKNOWN_EN
+  }
 
   // ── 渠道重要性（用户看的是「会不会响/会不会弹」，不是数字档位）──────────
 
@@ -129,10 +153,14 @@ internal object UserCopy {
    * @param toolCount - 本轮工具调用次数。
    * @returns 元信息行；时长未知时只含工具数。
    */
-  fun reportMetaLine(durationLabel: String, toolCount: Int): String {
+  fun reportMetaLine(durationLabel: String, toolCount: Int, app: android.content.Context? = null): String =
+    reportMetaLine(durationLabel, toolCount, UiText.isEnglish(app))
+
+  /** 同一张表，语言已解析（#986：纯函数入口，JVM 单测能覆盖英文分支）。 */
+  fun reportMetaLine(durationLabel: String, toolCount: Int, english: Boolean): String {
     val parts = ArrayList<String>(2)
-    if (durationLabel.isNotBlank()) parts.add("用时 $durationLabel")
-    parts.add("工具 ×$toolCount")
+    if (durationLabel.isNotBlank()) parts.add(UiText.t(english, "用时 $durationLabel", "Duration $durationLabel"))
+    parts.add(UiText.t(english, "工具 ×$toolCount", "Tools ×$toolCount"))
     return parts.joinToString(" · ")
   }
 

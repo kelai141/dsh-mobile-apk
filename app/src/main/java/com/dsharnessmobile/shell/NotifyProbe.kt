@@ -31,7 +31,14 @@ object NotifyProbe {
     val app = context?.applicationContext ?: return
     try {
       val f = file(app)
-      if (f.length() > MAX_BYTES) f.writeText("")
+      if (f.length() > MAX_BYTES) {
+        // 2026-10-25 审计 M-N5：轮转 = rename 保一代（同 WatchdogV2 的 notify-debug.log 先例），
+        // 不再整体清空——停摆取证（DEF-NOTIFY-02 四段断点）恰恰需要阈值前的历史，
+        // writeText("") 会在最需要证据的时刻把它全部蒸发。
+        val rolled = File(f.parentFile, f.name + ".1")
+        runCatching { if (rolled.exists()) rolled.delete() }
+        runCatching { f.renameTo(rolled) }
+      }
       f.appendText(stamp.format(Date()) + " [" + tag + "] " + message + "\n")
     } catch (_: Throwable) {
       // 探针写失败绝不冒泡：通知主流程优先

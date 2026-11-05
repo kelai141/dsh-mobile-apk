@@ -64,6 +64,15 @@ object ShizukuTransport {
    */
   private val bindState = ShizukuBindState(BIND_WATCHDOG_MS)
 
+  // ── issue #1476：就绪的**功能性证据**与失败留痕 ──────────────────────────────
+  /** 功能探测（`protocolVersion()`）的 TTL 缓存；2s 轮询不能每次都打 binder。 */
+  private val functionalProbe = FunctionalProbeCache(clock = { SystemClock.elapsedRealtime() })
+  private val probeLock = Any()
+  private var probeInFlight = false
+  /** 最近一次 shell 失败（进程内环形一项）：让「面板 ready / 工具 timeout」能在同屏对上。 */
+  private var lastShellFailure: JSONObject? = null
+  private val shellFailureLock = Any()
+
   @Volatile private var connectedAt = 0L
   private var activeAttempt: BindAttempt? = null
   // SDK 13.1.5 在主线程遍历未同步的连接集合；注册、注销也必须走同一线程。
@@ -209,7 +218,7 @@ object ShizukuTransport {
     diagnosingStartFailure = true
     Thread({
       try {
-        startFailureLogs = collectStartFailureLogs()
+        startFailureLogs = startFailureDiagnostic(bindState.attempts, bindState.attemptAgeMs(SystemClock.elapsedRealtime()), collectStartFailureLogs())
       } catch (failure: Throwable) {
         startFailureLogs = "读取启动失败日志时出错：" + ProcIo.errorText(failure)
       } finally {
@@ -265,6 +274,8 @@ object ShizukuTransport {
     out.put("startFailed", bindState.startFailed)
     out.put("retryAfterMs", bindState.autoRetryAfterMs(now))
     if (startFailureLogs.isNotEmpty()) out.put("diagnostics", startFailureLogs)
+    lastShellFailure?.let { out.put("lastShellFailure", it) }
+    out.put("functionalProbe", probeJson())
     maybeCollectStartFailureLogs()
 
     if (!running) {
@@ -293,7 +304,12 @@ object ShizukuTransport {
     out.put("granted", granted)
     if (!granted) {
       return out.put("ok", false).put("code", "shizuku-denied")
-        .put("guidance", UiText.t(context, "尚未获得 Shizuku 授权。点击创建虚拟屏后会由 Shizuku 管理器显示用户确认；DSH 不会自行授予权限。", "Shizuku access is not granted yet. Creating a virtual screen asks Shizuku for confirmation; DSH never grants it by itself."))
+        .put("guidance", UiText.t(
+            context,
+            // 建屏只由模型驱动（面板不提供创建按钮），旧文案让用户「点击创建」——指了个不存在的控件。
+            "尚未获得 Shizuku 授权。让 AI 创建虚拟屏时，Shizuku 管理器会显示用户确认；DSH 不会自行授予权限。",
+            "Shizuku access is not granted yet. When the AI creates a virtual screen, Shizuku asks you for confirmation; DSH never grants it by itself.",
+          ))
     }
     if (service?.asBinder()?.pingBinder() != true) {
       // 三态化（0.14.1）：code 只报「正在建立」当且仅当确有 bind 在飞。
@@ -325,8 +341,19 @@ object ShizukuTransport {
       if (binding) answer.put("retryAfterMs", BIND_TIMEOUT_MS)
       return answer
     }
-    return out.put("ok", true).put("code", "shizuku-ready")
-      .put("guidance", UiText.t(context, "Shizuku shell UserService 已就绪（uid=$uid）。", "The Shizuku shell UserService is ready (uid=$uid)."))
+    // issue #1476：binder 活 + 已绑定**还不够**——必须有功能探测成功的证据。
+    // issue #1506：探测未完成不等于「未就绪」——后台线程先做有界同步短探（<=300ms），主线程只催异步
+    // 探测；否则「刚建好通道的第一条命令」必被 readyService 的 ok 判据拒掉。
+    val probeNow = SystemClock.elapsedRealtime()
+    val probeSnapshot = awaitFirstProbe(
+      kick = { kickFunctionalProbe() },
+      snapshot = { functionalProbe.current() },
+      blockingAllowed = Looper.myLooper() != Looper.getMainLooper())
+    return statusReadinessJson(
+      out, ReadyFacts(binderAlive = true, granted = true, version = version, bound = true, probe = probeSnapshot),
+      probeNow, { kickFunctionalProbe() }, { verdict -> probeGuidance(context, verdict) },
+      UiText.t(context, "Shizuku shell UserService 已就绪（uid=$uid）。", "The Shizuku shell UserService is ready (uid=$uid)."),
+    )
   }
 
   /**
@@ -393,7 +420,14 @@ object ShizukuTransport {
       return status(context)
         .put("requested", requested)
         .put("code", if (requested) "shizuku-permission-requested" else "shizuku-denied")
-        .put("guidance", "已向 Shizuku 发起授权请求；请在其系统确认页批准后再次点击创建虚拟屏。")
+        .put(
+          "guidance",
+          UiText.t(
+            context,
+            "已向 Shizuku 发起授权请求；请在其系统确认页批准后让 AI 再创建一次虚拟屏。",
+            "A Shizuku permission request was sent. Approve it in the system prompt, then let the AI create the virtual screen again.",
+          ),
+        )
     }
     if (service?.asBinder()?.pingBinder() == true) return status(context)
 
@@ -610,7 +644,17 @@ object ShizukuTransport {
     dispatched: Boolean,
     leaseUnknown: Boolean,
     maintenanceActive: Boolean,
-  ): Boolean = channel == RootChannel.ABSENT && !dispatched && !leaseUnknown && !maintenanceActive
+    leaseStale: Boolean = false,
+  ): Boolean {
+    // 三个否决项恒成立：已派发 / 状态不可信 / 维护在飞 —— 任一为真都不许自动清。
+    if (dispatched || leaseUnknown || maintenanceActive) return false
+    // ① 通道确实不存在：隔离没有可串行化的对象。
+    if (channel == RootChannel.ABSENT) return true
+    // ② issue #658：租约**从未派发**且已陈旧。按构造不存在在飞的特权工作（dispatched 为空意味着
+    // begin() 之后没走到 markDispatched），所以通道是否存在都不影响安全性；不清的代价是引擎
+    // 一直卡在「等待属主维护」直到整机重启。
+    return leaseStale
+  }
 
   /**
    * 唯一的 root 通道判据（**两条消费面同源**：入口清算与维护 worker 都用它）。
@@ -701,15 +745,19 @@ object ShizukuTransport {
     // 复审第四轮：`unknown` 是**明确否决项**——「没有派发证据」≠「证明没有派发」
     // （markDispatched 写不进时只置 unknown；恢复别的进程的租约也会 unknown）。
     val leaseUnknown = lease?.optBoolean("unknown") == true || RootMaintenanceLease.unknown(app)
-    val allowed = autoClearAllowed(probe.state, dispatched, leaseUnknown, RootExecutionFence.maintenanceActive)
+    // issue #658：陈旧且从未派发的租约也允许自动清（通道是否存在不再是否决项）。
+    val leaseStale = RootMaintenanceLease.stale(app)
+    val allowed = autoClearAllowed(probe.state, dispatched, leaseUnknown, RootExecutionFence.maintenanceActive, leaseStale)
     LeaseClearProbe.record(app, probe, decisive = true, dispatched = dispatched, allowed = allowed,
       leaseUnknown = leaseUnknown)
     if (!allowed) return false
     return RootMaintenanceLease.clearWhenNoRootChannel(app) {
       // 锁内复核（判断—清除之间）：通道可能复活、维护可能刚好开始、租约可能刚被派发、
       // 或租约状态刚变成不可信（unknown）⇒ 任一变化都不得清除。
-      !RootExecutionFence.maintenanceActive && !RootAccess.isGranted(app) &&
-        !RootMaintenanceLease.dispatched(app) && !RootMaintenanceLease.unknown(app)
+      !RootExecutionFence.maintenanceActive &&
+        !RootMaintenanceLease.dispatched(app) && !RootMaintenanceLease.unknown(app) &&
+        // issue #658：陈旧路径不要求「通道已消失」；非陈旧路径保持原有的 isGranted 复核。
+        (!RootAccess.isGranted(app) || RootMaintenanceLease.stale(app))
     }
   }
 
@@ -1056,10 +1104,13 @@ object ShizukuTransport {
     return canon.takeIf { it.path == rootPath || it.path.startsWith(rootPath + java.io.File.separator) }
   }
 
-  private fun shellFailure(t: Throwable): JSONObject = JSONObject()
+  private fun shellFailure(t: Throwable): JSONObject = run {
+    recordShellFailure("shell-transport-failed", t.javaClass.simpleName + ": " + (t.message ?: ""))
+    JSONObject()
     .put("ok", false)
     .put("code", "shell-transport-failed")
     .put("guidance", "Shizuku shell 通道失败：" + t.javaClass.simpleName + ": " + (t.message ?: ""))
+  }
 
   /**
    * issue #262 方案 A：root 通道授权门（策略门 + 知情同意，**不是技术沙箱**）。
@@ -1169,9 +1220,12 @@ object ShizukuTransport {
     .put("noReplay", true)
 
 
-  private fun unavailableShell(): JSONObject = JSONObject()
+  private fun unavailableShell(): JSONObject = run {
+    recordShellFailure("shizuku-user-service-not-bound", "shell 通道未就绪（ensureBound 未拿到可用 UserService）")
+    JSONObject()
     .put("ok", false).put("code", "shizuku-user-service-not-bound")
     .put("guidance", "Shizuku shell 通道未就绪；请在设置页「手机控制」查看状态与引导。")
+  }
 
   /**
    * 「Shizuku 兼容服务在场」的事实判定（0.14.8）。
@@ -1194,5 +1248,68 @@ object ShizukuTransport {
 
   /** Shizuku API binder 是否已收到且存活（官方与兼容实现同一条判据，不猜实现方是谁）。 */
   private fun binderAlive(): Boolean = runCatching { Shizuku.pingBinder() }.getOrDefault(false)
+
+  /** 功能探测的对外快照（进 status()，供面板与诊断区分「缓存命中」与「刚探测」）。 */
+  private fun probeJson(): JSONObject =
+    functionalProbeJson(functionalProbe.current(), SystemClock.elapsedRealtime())
+
+  /** 异步补一次功能探测（单飞）：TTL 过期时沿用上次结果，不把面板闪成 not-ready。 */
+  private fun kickFunctionalProbe() {
+    synchronized(probeLock) {
+      if (probeInFlight) return
+      probeInFlight = true
+    }
+    Thread({
+      try {
+        val remote = service ?: return@Thread
+        functionalProbe.probeIfNeeded({ remote.protocolVersion() })
+      } catch (t: Throwable) {
+        Log.w(TAG, "functional probe failed: " + t.javaClass.simpleName)
+      } finally {
+        synchronized(probeLock) { probeInFlight = false }
+      }
+    }, "dsh-shizuku-probe").apply { isDaemon = true }.start()
+  }
+
+  /** 功能探测未通过时的引导（与「未绑定」「版本过低」分开说）。 */
+  private fun probeGuidance(context: Context, verdict: ReadyVerdict): String {
+    val p = functionalProbe.current()
+    return when (verdict.code) {
+      READY_PROBE_FAILED -> UiText.t(
+        context,
+        "Shizuku 已授权，但 UserService 在 binder 上不可用（功能探测失败：" + p.error + "）。请在本页「重置连接」后重试；仍失败请提供 logcat。",
+        "Shizuku is granted, but the UserService is not usable over binder (probe failed: " + p.error + "). Reset the connection on this page and retry; if it persists, provide logcat.",
+      )
+      READY_PROBE_PENDING -> UiText.t(
+        context,
+        // 坑 161：未知档必须给**可执行动作**，不得劝阻——「探测中」不是「不可用」。
+        "首次功能探测还在跑（这不代表不可用）：现在就可以让 AI 建屏或执行命令，探测一落地即转就绪。",
+        "The first functional probe is still running (not a sign of unavailability): let the AI create a screen or run a command now; it turns ready as soon as the probe lands.",
+      )
+      else -> UiText.t(context, "Shizuku shell 通道未就绪。", "The Shizuku shell channel is not ready.")
+    }
+  }
+
+  /**
+   * 单调时钟注入点（issue #1529）：判据用它证明 elapsedMs 来自**单调时钟**而不是墙钟。
+   *
+   * 只换来源、不加语义：生产恒为 elapsedRealtime()；判据注入假时钟后可断言具体数值，
+   * 于是「把它改成墙钟」会红（旧判据只查字段在场，改墙钟也绿）。
+   */
+  internal var monotonicClock: () -> Long = { SystemClock.elapsedRealtime() }
+
+  /** 记一笔最近一次 shell 失败（进程内环形一项）。 */
+  internal fun recordShellFailure(code: String, message: String) {
+    synchronized(shellFailureLock) {
+      lastShellFailure = JSONObject()
+        .put("code", code)
+        .put("at", System.currentTimeMillis())
+        .put("elapsedMs", monotonicClock())
+        .put("message", message)
+    }
+  }
+
+  /** 最近一次 shell 失败的快照（判据与诊断面用）。 */
+  internal fun lastShellFailureSnapshot(): JSONObject? = synchronized(shellFailureLock) { lastShellFailure }
 }
 

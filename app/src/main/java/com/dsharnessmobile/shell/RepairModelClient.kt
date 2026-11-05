@@ -11,6 +11,26 @@ import org.json.JSONObject
 
 /** One bounded model request. It never opens a browser, Node process, or engine dependency. */
 internal class RepairModelClient {
+  /** anthropic 分支的 token 常量（issue #1015；详见 [anthropicTokenPlan]）。 */
+  internal companion object {
+    /** 不留思考预算时（effort=off/null）的回复上限。与原硬写值一致，保持既有行为不变。 */
+    const val ANTHROPIC_MAX_TOKENS_DEFAULT = 8192
+
+    /** 思考预算之外留给正式回答的空间：只留 budget+1 会让回答被截断。 */
+    const val ANTHROPIC_OUTPUT_HEADROOM = 8192
+
+    /** 回复上限的天花板：防止高档位把 max_tokens 推到端点拒绝的数值。 */
+    const val ANTHROPIC_MAX_TOKENS_CEILING = 32768
+
+  /**
+   * 一次模型请求（含一次重试）的总时长预算，issue #1370。
+   *
+   * 读超时本身是 180s；重试存在的意义只是「连接废了、请求没送达」，那种失败通常几十毫秒就回来。
+   * 所以预算取一个读超时的量级：第一次已经耗掉超过它就不再重试，杜绝 2×180s。
+   */
+  const val RETRY_TOTAL_BUDGET_MS = 180_000L
+  }
+
   private val active = AtomicReference<HttpURLConnection?>(null)
   @Volatile internal var lastOutboundDigest: String = ""
     private set
@@ -48,10 +68,7 @@ internal class RepairModelClient {
       else -> completionsBody(connection, outbound, tools, effort)
     }
     val response = postWithOneTransientRetry(connection, endpoint, body)
-    if (response.contains("\"error\"") && !response.contains("\"tool_calls\"")) {
-      val error = runCatching { JSONObject(response).optJSONObject("error")?.optString("message") }.getOrNull()
-      if (!error.isNullOrBlank()) throw RepairModelFailure("模型接口错误：" + error.take(300))
-    }
+    gatewayErrorOf(response, connection.apiKey)?.let { throw RepairModelFailure(it) }
     val parsed = JSONObject(response)
     val result = when (connection.api) {
       "anthropic-messages" -> anthropicResult(parsed)
@@ -61,16 +78,95 @@ internal class RepairModelClient {
     return RepairToolCallParser.normalize(result)
   }
 
-  private fun endpointFor(connection: RepairModelConnection): String {
-    val base = connection.baseUrl.trimEnd('/')
-    require(base.startsWith("https://") || base.startsWith("http://127.0.0.1") || base.startsWith("http://localhost")) {
-      "模型端点必须使用 HTTPS（本机回环除外）"
+  internal fun endpointFor(connection: RepairModelConnection): String {
+    val base = normalizeModelBase(connection.baseUrl)
+    require(base != null) { "模型端点必须是 http(s) 地址，且不得内嵌账号密码" }
+    val suffix = when (connection.api) {
+      "anthropic-messages" -> if (base.substringBefore('?').endsWith("/v1")) "/messages" else "/v1/messages"
+      "openai-responses" -> "/responses"
+      else -> "/chat/completions"
     }
-    return when (connection.api) {
-      "anthropic-messages" -> if (base.endsWith("/v1")) "$base/messages" else "$base/v1/messages"
-      "openai-responses" -> "$base/responses"
-      else -> "$base/chat/completions"
+    return appendEndpointPath(base, suffix)
+  }
+
+  /**
+   * 把请求路径拼到 base 上，且**把 base 自带的查询串留在最末**。
+   *
+   * 自部署网关常用 `http://host:8000/v1?token=…` 这种形态；直接 `base + "/chat/completions"`
+   * 会拼出 `…?token=…/chat/completions`（查询串把路径吃进去），请求必然打错地方。
+   * 这里先切出 path 再拼，最后接回原查询串与片段。
+   *
+   * @param base 已规范化的基址（可含查询串与片段）。
+   * @param suffix 要追加的路径，必须以 `/` 开头。
+   * @returns 可直接请求的完整端点。
+   */
+  internal fun appendEndpointPath(base: String, suffix: String): String {
+    val hash = base.indexOf('#')
+    val head = if (hash >= 0) base.substring(0, hash) else base
+    val tail = if (hash >= 0) base.substring(hash) else ""
+    val query = head.indexOf('?')
+    return if (query < 0) head + suffix + tail
+    else head.substring(0, query) + suffix + head.substring(query) + tail
+  }
+
+  /**
+   * 抹掉文本里任何 URL 的查询串。
+   *
+   * 放宽到明文 HTTP 之后，端点可能长成 `http://host:8000/v1?token=…`：底层异常消息会把整条 URL
+   * 带出来，而修复助手的失败文案会进聊天记录、`repair-model-source.json` 与共享诊断包。
+   * 查询串里恰恰是自部署网关最常见的放 key 位置，所以**一律不保留查询串内容**，只留路径。
+   *
+   * 凭据（userinfo）在准入层已被拒绝，不会出现在 URL 里；这里只处理查询串与片段。
+   *
+   * @param text 可能含 URL 的任意文本（通常是异常消息）。
+   * @returns 查询串被替换为 `?<redacted>` 的文本。
+   */
+  internal fun redactUrlQuery(text: String): String {
+    val withoutQuery = Regex("(https?://[^\\s?#]+)\\?[^\\s#]*").replace(text) { it.groupValues[1] + "?<redacted>" }
+    return Regex("(https?://[^\\s#]+)#[^\\s]*").replace(withoutQuery) { it.groupValues[1] + "#<redacted>" }
+  }
+
+  /**
+   * 模型端点准入与规范化。
+   *
+   * 用户 2026-11-01 明确要求：**允许本地地址与明文 HTTP**（自部署模型很常见）。旧实现只放行
+   * `https://` 与两个回环字面量，于是自建网关（`http://192.168.x.x:8000/v1`、内网域名、
+   * `http://host:8000/v1`）在修复助手里一律被判「端点不合法」——引擎那边能用的配置，助手用不了。
+   *
+   * 取舍是显式的：明文 HTTP 的代价（同网段可被动嗅探/篡改凭据与内容）由用户自担，平台侧
+   * `network_security_config` 的 base-config 早已 `cleartextTrafficPermitted="true"`（见该文件
+   * 0.14.1 注释），所以这里是「准入面与平台面重新对齐」，不是新开一个口子。
+   *
+   * 仍然拒绝三类：非 http(s) scheme（file/javascript/data 等）、空 host、URL 里内嵌
+   * `user:pass@`（凭据会随请求发到第三方日志里）。
+   *
+   * @param raw 配置里的 baseURL 原文。
+   * @returns 去掉末尾斜杠、保留显式端口与路径前缀（含 IPv6 方括号）的基址；不合法返回 null。
+   */
+  internal fun normalizeModelBase(raw: String): String? {
+    val text = raw.trim()
+    if (text.isEmpty()) return null
+    val lower = text.lowercase()
+    val scheme = when {
+      lower.startsWith("https://") -> "https://"
+      lower.startsWith("http://") -> "http://"
+      else -> return null
     }
+    val rest = text.substring(scheme.length)
+    // user:pass@host 形态：凭据会被写进 Authorization 之外的 URL，可能落到对端日志与重定向里。
+    val authority = rest.substringBefore('/').substringBefore('?').substringBefore('#')
+    if (authority.contains('@')) return null
+    val host = when {
+      authority.startsWith("[") -> {
+        val close = authority.indexOf(']')
+        if (close <= 1) return null
+        authority.substring(0, close + 1)
+      }
+      else -> authority.substringBefore(':')
+    }
+    if (host.isEmpty() || host == "[]") return null
+    // 保留显式端口、路径前缀与 IPv6 方括号，只收敛末尾斜杠。
+    return (scheme + rest).trimEnd('/')
   }
 
 
@@ -172,11 +268,16 @@ internal class RepairModelClient {
       anthTools.put(JSONObject().put("name", t.getString("name")).put("description", t.optString("description"))
         .put("input_schema", t.optJSONObject("parameters")))
     }
-    val body = JSONObject().put("model", connection.model).put("max_tokens", 8192)
+    // issue #1015：max_tokens 与 budget_tokens 必须是**同一个约束下的两个值**，不能各写一张表。
+    // Anthropic 协议要求 budget_tokens **严格小于** max_tokens；旧实现把 max_tokens 硬写成 8192，
+    // 而 effortBudget 的 high=8192 / xhigh,max=16384 ⇒ 这三档必然违规，端点回 400。
+    // 现在由 anthropicTokenPlan() 一处决定二者，从结构上消除「两张表互相不知道」的可能。
+    val plan = anthropicTokenPlan(effort)
+    val body = JSONObject().put("model", connection.model).put("max_tokens", plan.maxTokens)
       .put("messages", converted).put("tools", anthTools)
     if (system.isNotBlank()) body.put("system", system.toString())
-    if (effort != null && effort != "off") {
-      body.put("thinking", JSONObject().put("type", "enabled").put("budget_tokens", effortBudget(effort)))
+    if (plan.budgetTokens != null) {
+      body.put("thinking", JSONObject().put("type", "enabled").put("budget_tokens", plan.budgetTokens))
     }
     return body.toString()
   }
@@ -208,12 +309,67 @@ internal class RepairModelClient {
     }
   }
 
+  /**
+   * anthropic 分支要发的两个 token 参数（issue #1015）。
+   *
+   * [maxTokens] 是回复上限，[budgetTokens] 是思考预算；**不变量：budgetTokens 恒小于 maxTokens**。
+   * null 表示本档不启用思考（effort 为 null / "off"）。
+   */
+  internal data class AnthropicTokenPlan(val maxTokens: Int, val budgetTokens: Int?)
+
+  /**
+   * 由推理档位算出「合法的」max_tokens + budget_tokens（issue #1015）。
+   *
+   * 缺陷现场：旧实现把 max_tokens 硬写成 8192，而思考预算另有一张 fixed 表
+   * （high=8192、xhigh/max=16384），两张表互不知道对方 ⇒ high 档 budget==max、
+   * xhigh/max 档 budget>max，二者都违反 Anthropic「budget_tokens 必须严格小于 max_tokens」，
+   * 端点直接回 400。而真实配置把 reasoningEffort 默认 pin 成 max，所以打开助手即中招。
+   *
+   * 修法不是「把 8192 调大」——那只是把冲突推给下一个更高的档位。这里改成**单一真源**：
+   * 先按档位定思考预算，再由「预算 + 预留输出」推出 max_tokens，二者永远满足约束。
+   * `ANTHROPIC_OUTPUT_HEADROOM` 是留给正式回答的空间：思考用完预算后还要输出结果，
+   * 只把 max_tokens 设成 budget+1 会让回复被截断。
+   *
+   * @return maxTokens 恒 > budgetTokens（有预算时）；无预算时 budgetTokens 为 null。
+   */
+  internal fun anthropicTokenPlan(effort: String?): AnthropicTokenPlan {
+    if (effort == null || effort == "off") {
+      return AnthropicTokenPlan(maxTokens = ANTHROPIC_MAX_TOKENS_DEFAULT, budgetTokens = null)
+    }
+    val budget = effortBudget(effort)
+    val max = (budget + ANTHROPIC_OUTPUT_HEADROOM).coerceAtMost(ANTHROPIC_MAX_TOKENS_CEILING)
+    // 上限夹紧后仍必须满足「严格小于」：极高档位撞到 ceiling 时把预算压回 max-1。
+    val safeBudget = if (budget < max) budget else (max - 1).coerceAtLeast(1)
+    return AnthropicTokenPlan(maxTokens = max, budgetTokens = safeBudget)
+  }
+
+  /** 档位 -> 思考预算。这是**唯一**的档位表；max_tokens 由它派生（见 anthropicTokenPlan）。 */
   private fun effortBudget(effort: String): Int = when (effort.lowercase()) {
     "low" -> 2048
     "medium" -> 4096
     "high" -> 8192
     "xhigh", "max" -> 16384
     else -> 4096
+  }
+
+  /**
+   * 网关错误的结构化判定（2026-10-25 审计 M-R3/M-R4）。null = 不是接口错误。
+   *
+   * - **结构化**而非文本启发：顶层 `error` 键必须是 JSON 对象才算——自建网关常见的
+   *   `{"choices":[...], "error": null}` 或模型正文含 "error" 字样不再被误判（旧实现用
+   *   `contains("\"error\"")`，正常纯文本回答会被当成接口错误）。
+   * - `error.message` 为 null / JSONObject.NULL 时不算错误：`optString` 会把 null 产出成
+   *   `"null"` 字符串，旧实现即误抛「模型接口错误：null」并丢弃正常回答。
+   * - 回显消息与 [post] 的 HTTP 错误路径同口径替换 apiKey，防网关错误回显凭据。
+   *   例外（2026-10-28 扫描 M4）：apiKey 为空串时字面 `replace("")` 会在每个字符间插 `***`，
+   *   把消息毁成乱码——没有可脱敏的凭据就原样放行（空凭据本就发不出有效请求）。
+   */
+  internal fun gatewayErrorOf(response: String, apiKey: String): String? {
+    val errorObject = runCatching { JSONObject(response).optJSONObject("error") }.getOrNull() ?: return null
+    if (response.contains("\"tool_calls\"")) return null
+    val message = (errorObject.opt("message") as? String)?.takeIf { it.isNotBlank() } ?: return null
+    val redacted = if (apiKey.isEmpty()) message else message.replace(apiKey, "***")
+    return "模型接口错误：" + redacted.take(300)
   }
 
   private fun post(connection: RepairModelConnection, endpoint: String, body: String): String {
@@ -259,7 +415,8 @@ internal class RepairModelClient {
       if (text.isBlank()) throw RepairModelFailure("模型返回空响应")
       return text
     } catch (e: RepairModelFailure) { throw e }
-    catch (e: Exception) { throw RepairModelFailure("模型连接失败：" + (e.message ?: e.javaClass.simpleName)) }
+    // 异常消息常带完整 URL：查询串必须抹掉再进文案（见 redactUrlQuery）。
+    catch (e: Exception) { throw RepairModelFailure("模型连接失败：" + redactUrlQuery(e.message ?: e.javaClass.simpleName)) }
     finally {
       active.compareAndSet(conn, null)
       conn.disconnect()
@@ -270,26 +427,46 @@ internal class RepairModelClient {
    * A dropped keep-alive socket can fail before the server accepts the body.
    * Retry one idempotent, byte-identical model request; protocol errors and
    * HTTP responses are never retried because they already carry a diagnosis.
+   *
+   * issue #1370：**读超时不在可重试之列**。`readTimeout` 是 180s，把它算作 transient 会让
+   * 单次请求最坏 2×180s，而且网关在超时后可能已经收到并处理了第一次请求 —— 重发等于让模型
+   * 重复生成、用户重复计费。重试只留给「连上之前/连接被对端掐断」这类**没送达**的失败。
+   * 另外这道闸还有总时长上限：第一次已经花掉的时间计入预算，超预算就不再重试。
    */
   internal fun postWithOneTransientRetry(
     connection: RepairModelConnection,
     endpoint: String,
     body: String,
+    elapsedBudgetMs: Long = RETRY_TOTAL_BUDGET_MS,
+    elapsed: () -> Long = { 0L },
   ): String {
+    val started = System.nanoTime()
     try {
       return post(connection, endpoint, body)
     } catch (failure: RepairModelFailure) {
       if (!isTransientTransportFailure(failure.message.orEmpty())) throw failure
+      // 已经耗掉的时间 + 这次剩余预算：超了就不重试（防止 2×180s 的尾巴）
+      val spent = elapsed().coerceAtLeast((System.nanoTime() - started) / 1_000_000L)
+      if (spent >= elapsedBudgetMs) throw failure
     }
     return post(connection, endpoint, body)
   }
 
+  /**
+   * 哪些传输失败值得原样重发一次。
+   *
+   * 判据是**请求有没有可能已经送达**：
+   *   · 可重试：连接建立前的拒绝 / 对端在响应前掐断（keep-alive 复用最常见的形态）——
+   *     服务端要么没收到，要么明确没给结果；
+   *   · 不可重试：`timed out` / `timeout` —— 读超时意味着我们**已经发出去了**，只是没等到回音，
+   *     重发会让模型重复生成（issue #1370）。
+   */
   internal fun isTransientTransportFailure(message: String): Boolean {
     if (!message.startsWith("模型连接失败：")) return false
     val detail = message.lowercase()
     return listOf(
       "socket closed", "connection reset", "broken pipe", "unexpected end of stream",
-      "connection refused", "connection aborted", "eof", "timed out", "timeout",
+      "connection refused", "connection aborted", "eof",
     ).any { detail.contains(it) }
   }
 

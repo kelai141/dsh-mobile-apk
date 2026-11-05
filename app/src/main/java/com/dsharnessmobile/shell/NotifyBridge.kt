@@ -300,6 +300,9 @@ object NotifyBridge {
           header = q.optString("header", ""),
           question = q.optString("question", ""),
           options = options,
+          // 正文（plan-review 的计划全文走这个字段）：旧实现不读它 ⇒ 通知里只有问题、没有内容，
+          // 用户面对「Approve this plan」只能盲批（N2）。
+          detail = q.optString("detail", ""),
         ),
       )
     }

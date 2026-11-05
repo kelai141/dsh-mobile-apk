@@ -3,6 +3,7 @@ package com.dsharnessmobile.shell
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.graphics.Rect
 import android.os.Bundle
 import android.view.View
 import android.view.ViewGroup
@@ -24,8 +25,26 @@ class ConsoleActivity : ComponentActivity() {
 
   private lateinit var webView: WebView
   private val session = ConsoleSession(this)
+
+  @Volatile private var startPending = false
+  private val pendingStartRunnable = Runnable { startSessionNow() }
+
+  private companion object {
+    /** issue #871 兜底：页面异常（不调 resize）时最多等这么久就照常启动。 */
+    const val START_DEFER_MS = 600L
+  }
   private val handler = android.os.Handler(android.os.Looper.getMainLooper())
-  private var sessionStarted = false
+
+  /**
+   * issue #1008：「只起一次」的准入不再由本类两个裸标志承担。
+   *
+   * 旧形态在 [startSessionNow] 里「读 sessionStarted/sessionStarting → 清 startPending →
+   * removeCallbacks → 再读一次 → 置 sessionStarting」，**两次检查两次赋值**，而
+   * [ConsoleSession.start] 不幂等：onStart 的延时任务与页面首帧 resize 的桥调用同时进门时，
+   * 两个线程都能看到「没在起」，于是各起一个 PTY（同一界面两条 bash、输出互相串）。
+   * 判定与置位现在合并进 [ConsoleSessionStartGuard] 的一个原子单元；本类只调用它。
+   */
+  private val startGuard = ConsoleSessionStartGuard()
   private var pageReady = false
   private var pendingTopInset = 0f
   private var pendingBottomInset = 0f
@@ -37,11 +56,19 @@ class ConsoleActivity : ComponentActivity() {
   /** S1-18：与 lastStatus 配对的状态，页面重放时同样按状态判就绪。 */
   private var lastState: ConsoleSession.State = ConsoleSession.State.STARTING
 
+  /**
+   * 页面脚本派发（M-c2，2026-10-25 审计）：onDestroy 后 WebView 已销毁，迟到的输出/状态推送
+   * 再调 evaluateJavascript 会在部分内核上抛 IllegalStateException——这里统一守卫，
+   * 排队中的投递也由 onDestroy 的 removeCallbacksAndMessages 兜底清空。
+   */
+  private fun evalPage(script: String) {
+    if (isFinishing || isDestroyed) return
+    webView.evaluateJavascript(script, null)
+  }
+
   private val sessionListener = object : ConsoleSession.Listener {
     override fun onOutput(text: String) {
-      handler.post {
-        webView.evaluateJavascript("window.__consoleAppend(" + jsString(text) + ")", null)
-      }
+      handler.post { evalPage("window.__consoleAppend(" + jsString(text) + ")") }
     }
 
     override fun onStatus(state: ConsoleSession.State, text: String) {
@@ -64,18 +91,29 @@ class ConsoleActivity : ComponentActivity() {
    * 做子串正则（措辞一变就静默错判）。
    */
   private fun pushStatus(state: ConsoleSession.State, text: String) {
-    webView.evaluateJavascript(
-      "window.__consoleState && window.__consoleState(" + jsString(state.wire) + "," + jsString(text) + ")",
-      null,
-    )
+    evalPage("window.__consoleState && window.__consoleState(" + jsString(state.wire) + "," + jsString(text) + ")")
   }
 
   private fun pushInsets() {
     if (!pageReady || !::webView.isInitialized) return
-    webView.evaluateJavascript(
-      "window.__consoleInsets && window.__consoleInsets($pendingTopInset,$pendingBottomInset,$pendingImeInset)",
-      null,
-    )
+    evalPage("window.__consoleInsets && window.__consoleInsets($pendingTopInset,$pendingBottomInset,$pendingImeInset)")
+  }
+
+  /** Forward only the IME overlap still inside the WebView after native resizing. */
+  private fun refreshInsets() {
+    if (!::webView.isInitialized || isDestroyed) return
+    val insets = ViewCompat.getRootWindowInsets(webView) ?: return
+    val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+    val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+    val density = resources.displayMetrics.density
+    val visible = Rect()
+    window.decorView.getWindowVisibleDisplayFrame(visible)
+    val location = IntArray(2)
+    webView.getLocationOnScreen(location)
+    pendingTopInset = bars.top / density
+    pendingBottomInset = bars.bottom / density
+    pendingImeInset = consoleImeOverlap(location[1] + webView.height, visible.bottom, ime.bottom) / density
+    pushInsets()
   }
 
   override fun onCreate(savedInstanceState: Bundle?) {
@@ -101,10 +139,36 @@ class ConsoleActivity : ComponentActivity() {
     WebViewShim.applyBaseline(webView.settings)
     // Re-push status after page load: bash may be ready in onStart while console.html's
     // JS bridge is defined later — early evaluateJavascript calls are silently dropped.
+
+    // issue #864：控制台页面的 console 此前**没有任何消费端**（本 Activity 没装 webChromeClient），
+    // 所以页面里的 console.log 只进 logcat、进不了诊断。这里补一个：只拦我们的量测行，
+    // 其余一律返回 false 交回默认处理（不改变页面既有的日志行为）。
+    webView.webChromeClient = object : android.webkit.WebChromeClient() {
+      override fun onConsoleMessage(message: android.webkit.ConsoleMessage?): Boolean {
+        val text = message?.message() ?: return false
+        // 判据用通用字段名 `imeOcclusion`（只出现在 debug 资源的 JS 里）；
+        // release 变体里 BuildConfig.DEBUG 恒 false，且从不注入该 asset。
+        if (BuildConfig.DEBUG && text.contains("\"imeOcclusion\"")) {
+          LogCollector.writeBootDiag(this@ConsoleActivity, "console-metrics", text.substringAfter('{', text))
+          return true
+        }
+        return false
+      }
+    }
     webView.webViewClient = object : android.webkit.WebViewClient() {
       override fun onPageFinished(view: android.webkit.WebView, url: String) {
         super.onPageFinished(view, url)
         pageReady = true
+        // issue #864：debug 变体注入布局量测上报（release 无该 asset，open 抛异常即跳过）。
+        // 量测面只在 debug 存在：见 app/src/debug/assets/console-metrics.js。
+        if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+          try {
+            webView.evaluateJavascript(assets.open("console-metrics.js").bufferedReader().use { it.readText() }, null)
+          } catch (_: Throwable) { /* release 无此 asset：量测面不存在，静默跳过 */ }
+        }
+        // 控制台页面是静态 asset，语言要由壳侧注入（与其它原生面同一判据 UiText.isEnglish）。
+        evalPage("window.__dshConsoleSetLang && window.__dshConsoleSetLang(" +
+          UiText.isEnglish(this@ConsoleActivity) + ")")
         lastStatus?.let { pushStatus(lastState, it) }
         pushInsets()
       }
@@ -112,25 +176,53 @@ class ConsoleActivity : ComponentActivity() {
     webView.addJavascriptInterface(ConsoleBridge(), "consoleBridge")
     setContentView(webView)
     ViewCompat.setOnApplyWindowInsetsListener(webView) { _, insets ->
-      val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-      val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
-      val density = resources.displayMetrics.density
-      pendingTopInset = bars.top / density
-      pendingBottomInset = bars.bottom / density
-      pendingImeInset = ime.bottom / density
-      pushInsets()
+      // Visible frames and the WebView bounds settle after the inset dispatch.
+      webView.post { refreshInsets() }
       insets
     }
+    webView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> refreshInsets() }
     webView.loadUrl("file:///android_asset/console.html")
+  }
+
+  /**
+   * issue #871：真正拉起会话。首次 resize 到达或兜底超时触发，谁先算谁。
+   *
+   * 为什么不能一上来就启动：PTY 若按 DEFAULT_COLS/ROWS（80x24）建，shell 会先在这个宽度画一次
+   * 提示符；随后页面首帧 pushSize() 下发真实尺寸 → SIGWINCH → zle 重绘 ⇒ 首屏出现**两行提示符**。
+   */
+  private fun startSessionNow() {
+    startPending = false
+    handler.removeCallbacks(pendingStartRunnable)
+    // issue #1008：准入是**一次**原子判定（判定 + 置「启动中」在同一个锁内完成）。
+    // 旧实现在这里做了两遍「读 started/starting → 后置 starting」，两遍之间就是双启窗口。
+    if (!startGuard.claimStart()) return
+    launchSession("dsh-console-start") { session.start(sessionListener) }
   }
 
   override fun onStart() {
     super.onStart()
-    if (sessionStarted) return
-    sessionStarted = session.start(sessionListener)
+    if (startGuard.busy() || startPending) return
+    startPending = true
+    handler.postDelayed(pendingStartRunnable, START_DEFER_MS)
+  }
+
+  /**
+   * 把 start/restart 这类**全程文件 IO**（bash 存在性、relay 解包、spawn）挪出主线程。
+   *
+   * M-c4（2026-10-25 审计）：旧实现在主线程跑，慢盘上 onStart 直接卡帧。状态经 handler 回主线程。
+   * issue #1008：准入已由 [ConsoleSessionStartGuard] 在**进这里之前**原子取得，线程内不再判定；
+   * 收尾是唯一把「启动中」放下的地方（失败也放，否则一次失败就永久堵住重连）。
+   */
+  private fun launchSession(threadName: String, start: () -> Boolean) {
+    Thread {
+      val ok = start()
+      handler.post { startGuard.settle(ok) }
+    }.apply { isDaemon = true; name = threadName }.start()
   }
 
   override fun onDestroy() {
+    // M-c2：先清排队中的输出/状态投递，再拆会话——迟到的 evaluateJavascript 不再打到已销毁的 WebView。
+    handler.removeCallbacksAndMessages(null)
     session.destroy()
     webView.destroy()
     super.onDestroy()
@@ -145,6 +237,10 @@ class ConsoleActivity : ComponentActivity() {
       // 且引擎已死时控制台仍可用，正是这条口令存在的理由。
       val action = parseSafeCommand(command)
       if (action == null) {
+        // I1（2026-10-25 审计）：输入框是 <input type="text">，不可能含换行——旧注释的前提
+        // 不成立；而对原文跑 decode 会二次转义：含反斜杠的命令被改写甚至拆分执行
+        // （echo 'C:\new' 拆成两条命令、grep '\d\+' 变 'd+'）。submit 直传原文，
+        // decode 只服务 writeKeys 的 data-send 编码键序列。
         session.writeCommand(command)
         return
       }
@@ -183,7 +279,12 @@ class ConsoleActivity : ComponentActivity() {
     @JavascriptInterface
     fun restart() {
       handler.post {
-        sessionStarted = session.restart(sessionListener)
+        // issue #1008：与首次启动同一道原子准入。旧实现的两行（判 sessionStarting、置 true）
+        // 同样分开——两次点击各起一条线程、各自 destroy 再 spawn，前一条的进程被后一条盖掉后
+        // 无人回收。已启动时允许重连（这正是「重连」按钮的语义），启动中一律拒绝。
+        if (!startGuard.claimRestart()) return@post
+        // M-c4：restart 内含 destroy+start（整段文件 IO），同样离主线程。
+        launchSession("dsh-console-restart") { session.restart(sessionListener) }
       }
     }
 
@@ -200,5 +301,58 @@ class ConsoleActivity : ComponentActivity() {
 
     @JavascriptInterface
     fun ready(): Boolean = session.isAlive()
+
+    /**
+     * 页面尺寸变化时下发（PTY 化之后才有意义）。
+     *
+     * 不接这一步的话 PTY 初始是 0x0 或 80x24 的固定值，vim/top 会按错误宽度排版——
+     * 界面上看就是花屏或半屏空白。
+     */
+    @JavascriptInterface
+    fun resize(cols: Int, rows: Int) {
+      // issue #871：尺寸要在 PTY 建起来**之前**就落进会话，这样首绘即用真实宽度。
+      session.resize(cols, rows)
+      if (startPending) startSessionNow()
+    }
+
+    /**
+     * 写入一段按键。**参数必须是编码后的串**，不能直接传控制字符。
+     *
+     * 为什么：Android WebView 的 @JavascriptInterface 在字符串参数含 \n / \r 时
+     * **整个调用不会到达 Java 侧**——不抛异常、不留日志，桥接调用静默消失。
+     * 设备实测：writeRaw("PLAIN") 有日志，"WITHNL\n" 与 "WITHCR\r" 连日志都没有。
+     * 而控制台要送的方向键、Ctrl-C、Tab 全是这类字符，所以必须换一种编码。
+     *
+     * 编码规则（见 [decodeKeySequence]）：
+     *   \n -> LF，\r -> CR，\t -> TAB，\\ -> 反斜杠，\e -> ESC(0x1B)，
+     *   \xHH -> 原始字节。其余字符原样（含可打印的 \u001b 以 \e 表达）。
+     *
+     * @param encoded 编码后的按键串。
+     */
+    @JavascriptInterface
+    fun writeKeys(encoded: String) {
+      session.writeRaw(ConsoleKeyCodec.decode(encoded))
+    }
+
+    /**
+     * 写入原样文本（不追加换行）。
+     *
+     * 仅用于**不含控制字符**的场景：参数里一旦有 \n/\r，WebView 桥会静默吞掉整次调用。
+     * 页面侧一律走 [writeKeys]（编码串）；这个方法留给壳内与调试。
+     *
+     * @param text 纯文本。
+     */
+    @JavascriptInterface
+    fun writeRaw(text: String) = session.writeRaw(text)
+
+    /** 当前是否真 PTY（页面据此决定按键条是否可用）。 */
+    @JavascriptInterface
+    fun hasPty(): Boolean = session.hasPty()
   }
+}
+
+/** All arguments are screen-relative physical pixels; missing frames are not occlusion. */
+internal fun consoleImeOverlap(viewBottom: Int, visibleBottom: Int, imeBottom: Int): Int {
+  if (viewBottom <= 0 || visibleBottom <= 0 || imeBottom <= 0) return 0
+  return minOf(imeBottom, (viewBottom - visibleBottom).coerceAtLeast(0))
 }

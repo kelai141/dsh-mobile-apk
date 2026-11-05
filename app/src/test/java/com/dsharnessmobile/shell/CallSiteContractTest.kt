@@ -164,7 +164,7 @@ class CallSiteContractTest {
    */
   @Test
   fun startSwitchesToStartingBeforeTheWorkerThread() {
-    val body = memberBody(codeOnly(source("EngineStartFlow.kt")), "fun start() {")
+    val body = memberBody(codeOnly(source("EngineStartFlow.kt")), "fun start(")
     val phaseAt = body.indexOf("applyGuidePhase(GuidePhase.Starting")
     val workerAt = body.indexOf("val caller = Thread {")
     assertTrue("相位切换必须存在（启动即有反馈）", phaseAt >= 0)
@@ -519,7 +519,7 @@ class CallSiteContractTest {
   @Test
   fun theHideEntryLivesInThePanelAndCallsHideBall() {
     val panel = codeOnly(source("OverlayPanel.kt"))
-    assertTrue("J-A1：面板必须有「隐藏悬浮球」入口（可发现性：不得只靠手势）", panel.contains("contentDescription = \"隐藏悬浮球\""))
+    assertTrue("J-A1：面板必须有「隐藏悬浮球」入口（可发现性：不得只靠手势）", panel.contains("t(\"隐藏悬浮球\", \"Hide floating ball\")"))
     assertTrue("J-A1：入口必须挂进顶行（与 ✕ 收起并排）", panel.contains("overlay-hide-entry"))
     assertTrue("J-A1：点击必须走 svc.hideBall()", panel.contains("setOnClickListener { svc.hideBall() }"))
     assertTrue("J-A1：换肤必须同步该入口颜色（漏了会留旧主题灰）", panel.contains("hideEntryView?.setTextColor(c.chevron)"))
@@ -575,7 +575,7 @@ class CallSiteContractTest {
     val recall = codeOnly(source("OverlayRecall.kt"))
     assertTrue("J-A4：条必须有窗口参数（懒建）", recall.contains("WindowManager.LayoutParams("))
     assertTrue("J-A4：条窗口必须 NOT_FOCUSABLE（否则顶掉输入法）", recall.contains("FLAG_NOT_FOCUSABLE"))
-    assertTrue("J-A4：条必须在场时认得出自己（uiautomator/无障碍）", recall.contains("contentDescription = \"唤回悬浮球\""))
+    assertTrue("J-A4：条必须在场时认得出自己（uiautomator/无障碍）", recall.contains("contentDescription = UiText.t(svc, \"唤回悬浮球\""))
     assertTrue("J-A4：条的唯一点击动作是召回", recall.contains("svc.recallBall()"))
   }
 

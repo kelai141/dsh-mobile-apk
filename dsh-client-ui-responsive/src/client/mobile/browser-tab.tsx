@@ -85,8 +85,9 @@ export function BrowserTab(props: AndroidBrowserBodyProps): ReactNode {
     {state?.available === true && state.reason !== '' && <div className={css.status} role="status">
       {t('native.operation.failed', { reason: state.reason })}
     </div>}
-    {state?.available === true && state.profileAvailable === false && <div className={css.status} role="status">
-      {t('native.profile.unavailable', { reason: state.profileReason })}
+    {state?.available === true && state.isolationAvailable === false && <div className={css.status} role="status">
+      {/* 隔离不可用是提示，不是错误：浏览器本体仍可用（单一身份档回退）。 */}
+      {t('native.isolation.unavailable')}
     </div>}
     <div className={css.official}><BrowserBody {...props} /></div>
     <form className={css.controls} onSubmit={submit}>

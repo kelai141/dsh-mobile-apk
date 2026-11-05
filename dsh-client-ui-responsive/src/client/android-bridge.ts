@@ -50,6 +50,11 @@ export interface AndroidShellBridge {
    *  private DSH_HOME (engine hot-reloads via chokidar). Returns JSON {ok, path?, hint?, error?}. */
   importConfig?: () => string
   /** Whether "All Files Access" is granted (prerequisite for external workspaces / public logs). */
+  /**
+   * 本壳（APK）版本名，来自 `BuildConfig.VERSION_NAME`。
+   * 「设置 → 通用」用它显示安装包版本——上游那行「当前版本」只写引擎版本。
+   */
+  version?: () => string
   hasAllFilesAccess?: () => boolean
   /** Immersive status-bar toggle (true = status bar normally hidden), persisted by the shell. */
   setImmersiveMode?: (enable: boolean) => void

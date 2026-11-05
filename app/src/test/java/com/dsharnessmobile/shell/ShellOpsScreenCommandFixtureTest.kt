@@ -110,6 +110,41 @@ class ShellOpsScreenCommandFixtureTest {
       ShellOps.decideScreenCommand("input \\-d 0 tap 500 800") { false })
   }
 
+  /**
+   * #509：管道/输入重定向喂**裸 shell 解释器**。喂入段的命令词在引号内（stripQuotedText 抹空）、
+   * 接收段是裸 `sh`（无命令词），两条都不进词面 ⇒ 旧判据 ALLOW，执行时 sh 从 stdin 读到
+   * `screencap -d 0` 照跑——virtual-only 下真实屏可读。裸解释器段一律 fail-closed；
+   * 合法的嵌套执行 `sh -c '…'` 载荷可见，不受影响（对照列表钉住）。
+   */
+  @Test
+  fun pipingIntoABareShellInterpreterIsRejectedBecauseItsPayloadIsInvisible() {
+    val owns = { raw: String -> raw == "7" }
+    val denied = listOf(
+      "echo 'screencap -d 0' | sh",
+      "echo 'screencap -p /sdcard/real.png' | bash",
+      "cat /sdcard/cmds.txt | /system/bin/sh",
+      "printf 'input tap 1 2' | xargs sh",
+      "echo 'uiautomator dump' | toybox sh",
+      "echo 'screencap -p /sdcard/x.png' | busybox sh",
+    )
+    for (command in denied) {
+      assertEquals("裸解释器段必须按看不懂拒绝：$command", ShellOps.ScreenCommandVerdict.DENY_UNPARSED,
+        ShellOps.decideScreenCommand(command, owns))
+      assertFalse("real-only 同拒（载荷不可见 ⇒ 目标连是不是物理屏都不可证明）：$command",
+        ShellOps.realOnlyScreenCommandAllowed(command))
+    }
+    // 对照：载荷可见的嵌套执行（SHELL_C_PAYLOAD 展开后正常判定）不得被这次修法吃掉。
+    val allowed = listOf(
+      "sh -c 'screencap -d 7 -p /sdcard/a.png'",
+      "bash -c 'input -d 7 tap 100 200'",
+      "screencap -p -d 7 /sdcard/a.png",
+    )
+    for (command in allowed) {
+      assertEquals("可见载荷的合法嵌套必须放行：$command", ShellOps.ScreenCommandVerdict.ALLOW,
+        ShellOps.decideScreenCommand(command, owns))
+    }
+  }
+
   @Test
   fun optionFirstInputIsRecognizedAfterNormalization() {
     // §8.3：`input [-d DISPLAY_ID] <command>` 是 Android CLI 的正式形态；旧实现要求动词紧跟

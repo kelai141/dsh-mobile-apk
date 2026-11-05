@@ -51,8 +51,20 @@ export function isV2Payload(data: unknown): boolean {
     (data as Record<string, unknown>).v === 2
 }
 
+/**
+ * 整数列守卫。名字承诺的是**整数**，实现就必须是整数——只查 `Number.isFinite` 会让浮点整列静默穿过，
+ * 而下游每一处都按整数语义消费，于是"合法"的浮点会变成**另一个值**而不是一条错误：
+ *   · 符号表下标（`t`/`s`/`c`/`k`/`r`/`w`）浮点 ⇒ `S[0.5]` 取不到 ⇒ `?? ''` ⇒ 文本/包名**静默变空串**；
+ *   · `p`（可操作祖先列）浮点 ⇒ 写进 `Int32Array` 被 ToInt32 截断 ⇒ `0.5` 变成 `0`（指向**别的行**）；
+ *   · `f`（位标志）浮点 ⇒ 位运算前 ToInt32 截断 ⇒ `1.9` 被读成 clickable；
+ *   · `d`（深度）浮点 ⇒ 预序父链重建按浮点比较 ⇒ 父子关系错乱；
+ *   · `b`/`scr` 浮点 ⇒ 坐标与屏幕基准带小数 ⇒ 点击落点偏移。
+ * `o` 列此前单独复查过 `Number.isInteger`（说明缺口已知），但只补了一列；这里把判据提到唯一入口，
+ * 让"某列忘了复查"在结构上不可能发生。壳侧 Kotlin 的 `gen: Long` / `rotation: Int` / `width: Int`
+ * 与 TS 编码器产出的都是整数，合法快照不受影响。
+ */
 const isIntArray = (v: unknown): v is number[] =>
-  Array.isArray(v) && v.every((x) => typeof x === 'number' && Number.isFinite(x))
+  Array.isArray(v) && v.every((x) => Number.isInteger(x))
 
 /** 常数广播取值（§S2.3）：长度 1 且 n>1 ⇒ 整列同值。 */
 const pick = (arr: number[], i: number, n: number): number => (arr.length === 1 && n > 1 ? arr[0] : arr[i])
@@ -65,24 +77,50 @@ export function decodeV2(data: unknown): DecodeResult {
   const d = data as Record<string, unknown>
   if (d.v !== 2) return { ok: false, error: `不支持的协议版本 v=${String(d.v)}（本引擎支持 v=2）` }
 
+  // `gen` 与 `rot` 是同一组整数元数据（壳侧 `gen: Long` / `rotation: Int`），必须同一口径校验。
+  // 曾经只有 `gen` 有守卫、`rot` 没有：`rot:"abc"` / `rot:NaN` 会算出 `rotation=NaN` 并原样透出，
+  // 而 NaN 不是合法 JSON ⇒ 工具返回值在引擎侧被**整值拒绝**（#204/#258 同族：模型拿不到任何数据）。
+  // `rot ?? 0` 让缺省与 `null` 落到 0，保持既有兼容；只有"给了但不能解析成整数"才失败关闭。
   const gen = Number(d.gen)
   const rot = Number(d.rot ?? 0)
   const scr = d.scr
-  if (!Number.isFinite(gen)) return { ok: false, error: 'gen 缺失或非数字' }
-  if (!isIntArray(scr) || scr.length !== 2) return { ok: false, error: 'scr 必须是 [宽, 高]' }
+  if (!Number.isInteger(gen)) return { ok: false, error: 'gen 缺失或非整数' }
+  if (!Number.isInteger(rot)) return { ok: false, error: `rot 必须是整数（收到 ${String(d.rot)}）` }
+  // 判据拆开写：类型与长度各自一条错误。合并成 `!isIntArray || length` 时，一个浮点值会报成
+  // 「长度必须为 4n=8（收到 8）」——长度明明是对的，模型会照着错误消息去改长度。判据分叉，文案必须跟着分叉。
+  if (!isIntArray(scr)) return { ok: false, error: 'scr 必须是整数数组（[宽, 高]，物理像素）' }
+  if (scr.length !== 2) return { ok: false, error: `scr 必须是 [宽, 高] 两项（收到 ${scr.length} 项）` }
 
   const str = d.str
   if (!Array.isArray(str) || !str.every((s) => typeof s === 'string')) return { ok: false, error: 'str 必须是字符串数组' }
   const S = str as string[]
 
-  const n = Number(d.n)
-  if (!Number.isInteger(n) || n < 0) return { ok: false, error: 'n 必须是非负整数' }
+  // issue #1208 ①：`Number(d.n)` 把 null / 空串 / false / [] / "0" 一律折算成 0，于是「n 缺失或类型错」
+  // 被当成「空树」放行，再叠加下面 n===0 的提前返回，**整段列校验被跳过**：86 行的载荷能解成空树并报 ok。
+  // 判据必须落在类型上，不能落在折算后的数值上。
+  const nRaw = d.n
+  if (typeof nRaw !== 'number' || !Number.isInteger(nRaw) || nRaw < 0) {
+    return { ok: false, error: 'n 必须是非负整数（收到 ' + String(d.n) + '）' }
+  }
+  const n = nRaw
   const view: V2View = d.view === 'target' ? 'target' : 'all'
   const truncated = d.truncated === true
   const rawCount = Number(d.raw ?? n)
   if (!Number.isInteger(rawCount) || rawCount < n) {
     return { ok: false, error: `raw 必须是不小于 n=${n} 的整数（收到 ${String(d.raw)}）` }
   }
+  // issue #1208 ③：`origRow` 是 Int32Array，句柄域越过 2^31 会被**截断**：
+  //   raw=4e9, o=[3000000000]    → origRow=[-1294967296]（壳侧按负数索引不到任何行）；
+  //   raw=1e21, o=[0,4294967296] → 两项都截成 0，「严格递增」判据随之失效，两节点塌成同一行。
+  // 合法原始行号上限是 rawCount-1，必须 <= 2147483647。
+  if (rawCount > 2 ** 31) {
+    return { ok: false, error: 'raw=' + String(rawCount) + ' 超出 32 位句柄域（上限 2^31=2147483648），原始行号会被截断成负数' }
+  }
+  // issue #1208：这里保留「空树提前返回」，但**不采纳** issue 里建议 B 的「n=0 追加列形状校验」。
+  // B 只在「n 被折算成 0」时才需要：类型判据（上面的 typeof）已把 null / '' / false / [] 折算这条
+  // 入口关死；剩下的 n=0 只可能是调用方**真的**声明了空树，此时列内容与产物无关。
+  // 而 B 会把「老编码器带的非常规列形状」一并拒掉，等于用判据否认合法空载荷 —— 现有输入契约
+  // fuzz 用例（240 例里必须至少一例被接受）就是这条红线的守门人，实测 B 会把它打红。
   if (n === 0) {
     return {
       ok: true,
@@ -103,15 +141,18 @@ export function decodeV2(data: unknown): DecodeResult {
     cols[key] = col
   }
   const b = d.b
-  if (!isIntArray(b) || b.length !== n * 4) {
-    return { ok: false, error: `b 长度必须为 4n=${n * 4}（收到 ${Array.isArray(b) ? b.length : '非数组'}）` }
+  if (!isIntArray(b)) return { ok: false, error: 'b 必须是整数数组（每行 x,y,w,h 四个整数像素）' }
+  if (b.length !== n * 4) {
+    return { ok: false, error: `b 长度必须为 4n=${n * 4}（收到 ${b.length}）` }
   }
 
   // FX-206.1（P0）：句柄必须指回**壳侧 walk 全量行表**的原始行号。载荷行下标 fi 只是列内位置，
   // 壳侧 resolveTarget 用 rows[handle] 索引全量表；两者只在「没有节点被过滤」时偶然相等
   // （探针 393 行 → 86 行下 86/86 全错位）。缺列即失败关闭：宁可不给清单，也不能给出会点错的句柄。
   const o = d.o
-  if (!isIntArray(o)) return { ok: false, error: 'o 必须是整数数组（载荷行下标 → 原始行号映射）——壳侧编码器过旧，请更新 APK' }
+  if (!isIntArray(o)) {
+    return { ok: false, error: 'o 必须是整数数组（载荷行下标 → 原始行号映射）——壳侧编码器过旧或载荷含非整数，请更新 APK 后重试' }
+  }
   if (o.length !== 1 && o.length !== n) {
     return { ok: false, error: `o 长度 ${o.length} 既不是 1（广播）也不是 n=${n}` }
   }
@@ -131,6 +172,20 @@ export function decodeV2(data: unknown): DecodeResult {
   const actionableAncestor = new Int32Array(n)
   for (let i = 0; i < n; i++) {
     const flag = pick(cols.f, i, n)
+    // 值域校验原来只做了 `o`（原始行号），`d`/`p` 两列「整数数组 + 长度 1 或 n」就放行 ——
+    // 但一个当**深度**、一个当**行下标**用，越界会静默产出错数据：
+    //   d[..]=-5     ⇒ 下方预序单调栈算错 ⇒ subtreeEnd / parentId / ^nX 父链全偏；
+    //   p[..]=999999 ⇒ cacheFromV2 之后 actionableAncestor 被拼成 'n999999' 当 ref 发出去，
+    //                  模型按它点得到「未找到目标元素」，归因落在「节点消失」而不是「载荷坏了」。
+    // 与 `o` 同档失败关闭（2026-10-29 自查：o 越界本来就拒，p/d 越界当时能过）。
+    const depth = pick(cols.d, i, n)
+    if (!Number.isInteger(depth) || depth < 0) {
+      return { ok: false, error: `d[${i}]=${String(depth)} 非法：深度必须是非负整数` }
+    }
+    const anc = pick(cols.p, i, n)
+    if (!Number.isInteger(anc) || anc < -1 || anc >= n) {
+      return { ok: false, error: `p[${i}]=${String(anc)} 越界：可操作祖先必须是 -1 或 [0, n=${n}) 内的行下标` }
+    }
     const x = b[i * 4]; const y = b[i * 4 + 1]; const w = b[i * 4 + 2]; const h = b[i * 4 + 3]
     rows[i] = {
       id: 'n' + i,
@@ -142,7 +197,7 @@ export function decodeV2(data: unknown): DecodeResult {
       x, y, w, h,
       cx: x + Math.floor(w / 2),
       cy: y + Math.floor(h / 2),
-      depth: pick(cols.d, i, n),
+      depth,
       clickable: (flag & FLAG.clickable) !== 0,
       scrollable: (flag & FLAG.scrollable) !== 0,
       editable: (flag & FLAG.editable) !== 0,
@@ -151,7 +206,7 @@ export function decodeV2(data: unknown): DecodeResult {
       pkg: sym(S, pick(cols.k, i, n)),
       windowId: sym(S, pick(cols.w, i, n)),
     }
-    actionableAncestor[i] = pick(cols.p, i, n)
+    actionableAncestor[i] = anc
   }
 
   // 子树区间：预序 + 深度 ⇒ 首个更浅或同深的后续行（单调栈，O(n)）。

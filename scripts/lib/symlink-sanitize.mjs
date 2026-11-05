@@ -38,7 +38,7 @@
  */
 
 import { lstatSync, readlinkSync, rmSync, symlinkSync, readdirSync } from 'node:fs'
-import { join, dirname, relative } from 'node:path'
+import { join, dirname, relative, resolve, sep } from 'node:path'
 
 /** 构建机 Termux 数据根（旧前缀）。 */
 export const OLD_DEVICE_PREFIX = '/data/data/com.termux/files'
@@ -100,6 +100,32 @@ export function sanitizeSymlinks(stageRoot, dirs, opts = {}) {
           stats.keptOtherAbsolute++
           continue
         }
+        // issue #1204 ② + issue #1287 ③：`relInTree` 来自链接目标的**字面量**，这里必须证明它没越界。
+        // 旧实现（#1204 之前）只把它拼进 candidate 就直接 lstat：目标里带 `..` 时会去 lstat stage
+        // 树之外的路径，且一旦那个越界路径在构建机上恰好存在，链接就被改写成一条逃出 stage 树的
+        // 相对链（实测 `.../usr/bin/evil -> ../../../../outside/passwd`，stats={rewrote:1,dropped:0}），
+        // 设备侧 SnapshotExtractor 随即拒收 → 正是本模块要消灭的「幽灵缺失」。
+        //
+        // 但 #1204 的修法**判错了对象**（issue #1287 ③）：它看的是「字面量里有没有 `..`」，
+        // 而不是「解析后还在不在树内」。于是 `usr/bin/../bin/bzdiff` 这种——拼写含 `..`、
+        // 解析后仍是树内合法目标、旧实现能算成 `relLink="bzdiff"` 的链接——被一起删了。
+        // 这与 #1286 是同一类毛病：**判据看拼写，而危害看效果**。
+        // 正确判据是效果：把目标按字面量解析，再看解析结果是否仍在 stageRoot 内。
+        //   · 越界（`../../../../outside/passwd`）⇒ 一律 drop（安全边界，不放松）；
+        //   · 树内（`usr/bin/../bin/bzdiff` → `usr/bin/bzdiff`）⇒ 走正常改写流程。
+        const resolvedTarget = resolve(stageRoot, relInTree)
+        const resolvedRoot = resolve(stageRoot)
+        const insideTree = resolvedTarget === resolvedRoot
+          || resolvedTarget.startsWith(resolvedRoot + sep)
+        if (!insideTree) {
+          if (stats.droppedSamples.length < 5) {
+            stats.droppedSamples.push(`${relative(stageRoot, full)} -> ${target}`)
+          }
+          rmSync(full, { force: true })
+          stats.dropped++
+          log(`    [drop-escape] ${relative(stageRoot, full)} -> ${target}`)
+          continue
+        }
         const candidate = join(stageRoot, relInTree)
         let candidateExists = false
         try {
@@ -109,6 +135,20 @@ export function sanitizeSymlinks(stageRoot, dirs, opts = {}) {
         }
         if (candidateExists) {
           const relLink = relative(dirname(full), /** @type {string} */ (candidate))
+          // issue #1204 ①：目标是链接**自己所在的目录**时 `relative()` 返回空串，
+          // 旧实现先 rmSync 再 symlinkSync('') ⇒ ENOENT 未捕获，链接被删且构建步骤中断
+          // （实测：`stage/usr/bin/self -> .../usr/bin`，抛 "ENOENT symlink dest=…"，之后该目录为空）。
+          // 这类链接在本步的处理面内没有语义（它指向自己所在目录，不是「指向树内某个实体」），
+          // 按模块 KDoc 第 3 条走 dropped，且**不先删再建**——先判断再动手。
+          if (relLink === '') {
+            if (stats.droppedSamples.length < 5) {
+              stats.droppedSamples.push(`${relative(stageRoot, full)} -> ${target}`)
+            }
+            rmSync(full, { force: true })
+            stats.dropped++
+            log(`    [drop-self] ${relative(stageRoot, full)} -> ${target}`)
+            continue
+          }
           rmSync(full, { force: true })
           symlinkSync(relLink, full)
           stats.rewrote++

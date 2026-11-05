@@ -8,18 +8,26 @@
 // 断言两层：
 //   A 自包含一致性（任一仓单独可跑）：registry.json 的补丁 id 集合 == apply-patches.mjs
 //     IMPLS 的实现 id 集合（双向），防「登记了没实现 / 实现了没登记」。
-//   B 镜像一致性（对端树在场时）：registry.json / apply-patches.mjs / README.md 逐字节一致
-//     （CRLF 归一后比对）；tests/ 递归文件清单一致，共有文件逐字节一致。
+//   B 镜像一致性（对端树在场时）：`scripts/patches/**` 的**全量递归**——两侧文件清单双向一致
+//     （新增/删除一个补丁文件即判红），共有文件逐字节一致（CRLF 归一后比对）。
+//     issue #1053：此前只比对 registry.json / apply-patches.mjs / README.md + data/ + tests/（234/239），
+//     根级散文件与 upstream/ 整体不在比对范围；现在**不维护任何白名单**，整个目录都是镜像面。
 //
 // 对端树定位顺序：--peer <dir> > 环境变量 DSH_MIRROR_PEER > <root>/dsh-mobile-apk >
 // <root>/..（该目录含 scripts/patches 即认）。对端缺席时镜像层跳过并提示（CI 单仓
 // checkout 场景应显式 checkout 对端后运行，见两仓 pr-gate.yml）。
 //
-// 用法：node scripts/check-patch-mirror.mjs [--self] [--peer <dir>]
+// 2026-10-28 政策：构建 / 门禁 / 校验脚本以 dsh-mobile-apk 仓为准，本仓只留历史副本。
+// 因此 `scripts/**` 的脚本条目不再逐字节比对（差异属正常）；真正的镜像面仍是
+// `scripts/patches/**`（本文件 A/B 两层照旧）与插件 / 子仓镜像目录。
+//
+// 用法：node scripts/check-patch-mirror.mjs [--self] [--peer <dir>] [--self-test]
 // 退出码：0 = 全部通过；1 = 失败（构建链与 CI 以此拒打包/拒合并）。
 import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs'
 import { join, dirname, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { spawnSync } from 'node:child_process'
+import { compareBytes as compareBytesLib, ignoredByGitignore } from './lib/patch-mirror-parse.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = dirname(HERE)
@@ -30,6 +38,13 @@ const SELF_ONLY = argv.includes('--self')
 // review C7：CI 跨仓检出必须硬失败——对端缺席不得以 SKIP 结案（否则检出步骤一旦被软化，
 // 镜像防线静默消失）。CI / 发布链一律带 --require-peer。
 const REQUIRE_PEER = argv.includes('--require-peer')
+
+// L1 门禁自证入口：政策正控（脚本差异正常）与负控（patch / plugin 漂移必须判红）
+// 都在配套的 check-patch-mirror.test.mjs 里。这里只做转接，避免把判据复制成第二份。
+if (argv.includes('--self-test')) {
+  const result = spawnSync(process.execPath, ['--test', join(HERE, 'check-patch-mirror.test.mjs')], { stdio: 'inherit' })
+  process.exit(result.status === 0 ? 0 : 1)
+}
 
 const failures = []
 // ST-31：任何 SKIP 必须计数（发布链要求 SKIP=0；本门禁的 SKIP 只有一种合法形态——
@@ -43,6 +58,41 @@ const check = (label, ok, detail) => {
   console.log((ok ? 'PASS  ' : 'FAIL  ') + label + (ok || detail === undefined ? '' : ' -> ' + detail))
   if (!ok) failures.push(label)
 }
+/**
+ * 本仓 .gitignore 是否忽略了这个镜像面路径——用于区分「本仓缺席但按设计如此」与「条目失效」。
+ *
+ * 背景（issue #156 C 组，2026-10-27）：`dsh-shell-termux` / `dsh-host-web-compat` /
+ * `dsh-client-ui-responsive` 在协调仓是 **由本地 Junction（Windows）/ 符号链接提供的镜像面**，
+ * 路径本身写进协调仓 .gitignore。正常本地布局下它们天然在场且天然同源；但在**裸检出**
+ * （干净 clone / git worktree / CI 未检出对端）下它们必然缺席。
+ *
+ * 修复前：这种缺席被判 FAILED，导致「用干净检出跑 --require-peer」这个标准验证场景恒红，
+ * 任何人做镜像体检都要先踩一次假红（本次诊断就踩了）。修复后：仅当
+ *   ① 本仓路径确实不存在，**且**
+ *   ② 该路径被本仓 .gitignore 忽略（说明缺席是按设计，不是条目写错），**且**
+ *   ③ 对端确实带着这个路径（说明镜像面本身健康，只是本侧由链接提供）
+ * 三条同时成立才记具名 SKIP。**任一条不成立仍然 FAILED**——目录存在但内容不同、
+ * 对端也没有、或条目根本不在 gitignore 里（= MIRROR_TOP 条目确实失效），一律照旧判红。
+ *
+ * @param rel 镜像面相对路径（MIRROR_TOP 条目）。
+ * @returns 该路径是否被本仓 .gitignore 忽略。
+ */
+function ignoredByOwnRepo(rel) {
+  const gitignore = join(ROOT, '.gitignore')
+  if (!existsSync(gitignore)) return false
+  const target = rel.replace(/\\/g, '/').replace(/\/+$/, '')
+  for (const rawLine of readFileSync(gitignore, 'utf8').split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (line === '' || line.startsWith('#')) continue
+    // 只认「目录形态」的忽略规则：/name/ 或 /name 或 name/。其余（通配、反选）一律不认，
+    // 宁可判红也不放过真漂移。
+    const m = /^\/?([A-Za-z0-9._-]+)\/?$/.exec(line)
+    if (m === null) continue
+    if (m[1] === target) return true
+  }
+  return false
+}
+
 /** 比较结果：same = 原始字节一致；eol = 仅行尾差异（工作树 autocrlf 噪声，告警不拦）；
  *  content = 归一后仍不同（真实漂移，FAIL）。 */
 const cmp = (a, b) => {
@@ -106,82 +156,52 @@ if (!SELF_ONLY && !peer) {
 if (peer) {
   console.log(`镜像对端: ${relative(dirname(ROOT), peer) || peer}`)
   const eolWarns = []
-  const MIRROR_FILES = ['registry.json', 'apply-patches.mjs', 'README.md']
-  for (const f of MIRROR_FILES) {
-    const mine = join(ROOT, 'scripts', 'patches', f)
-    const theirs = join(peer, 'scripts', 'patches', f)
-    try {
-      const r = cmp(mine, theirs)
-      check(`镜像一致: scripts/patches/${f}`, r !== 'content', r === 'eol' ? '仅行尾差异（见告警）' : undefined)
-      if (r === 'eol') eolWarns.push(`scripts/patches/${f}`)
-    } catch (e) {
-      check(`镜像一致: scripts/patches/${f}`, false, String(e).slice(0, 200))
-    }
-  }
-  // data/ 注入片段也是 scripts/patches/** 的权威源；逐递归清单和内容比对，避免新片段漏镜像。
-  const walkFiles = (dir, prefix = '') => {
+  // ── issue #1053：镜像面 = `scripts/patches/**` 的**全量递归**，不再维护白名单 ──────────────
+  // 旧实现只逐字节比对 registry.json / apply-patches.mjs / README.md，再各自递归 data/ 与 tests/
+  // （实测覆盖 234 / 239 个文件）。漏掉的 5 个是 scripts/patches 根级散文件与 upstream/ 子目录：
+  //   mimo-thinking-toggle-056.mjs、pi-upstream-streaming-020.mjs、
+  //   ptc-android-native-A1.mjs（apply-patches.mjs 直接 import 的实现）、
+  //   resolve-engine-patch-target.mjs、upstream/pi-ai-1.1.0.patch
+  // ——往对端追加内容仍判 PASS：这正是「单边演进 = 云端构建静默缺补丁」要防的形态。
+  // 修法：**不维护任何白名单**，两侧都递归列出 scripts/patches 的全量文件清单（双向比较），
+  // 共有文件逐字节比对。新增/删除一个补丁文件、改一行散文件，都会当场判红。
+  const patchesFiles = (root) => {
     const out = []
-    for (const name of readdirSync(dir)) {
-      const full = join(dir, name)
-      const rel = prefix ? `${prefix}/${name}` : name
-      if (statSync(full).isDirectory()) out.push(...walkFiles(full, rel))
-      else out.push(rel)
+    const walk = (dir, prefix) => {
+      for (const name of readdirSync(dir)) {
+        if (name === 'node_modules' || name === '.git') continue
+        const full = join(dir, name)
+        const relPath = prefix ? prefix + '/' + name : name
+        if (statSync(full).isDirectory()) walk(full, relPath)
+        else out.push(relPath)
+      }
     }
-    return out
+    walk(join(root, 'scripts', 'patches'), '')
+    return out.sort()
   }
   try {
-    const mineData = walkFiles(join(ROOT, 'scripts', 'patches', 'data'))
-    const peerData = walkFiles(join(peer, 'scripts', 'patches', 'data'))
-    const onlyMine = mineData.filter((r) => !peerData.includes(r))
-    const onlyPeer = peerData.filter((r) => !mineData.includes(r))
-    check('data/ 文件清单一致', onlyMine.length === 0 && onlyPeer.length === 0,
-      `本仓独有: [${onlyMine.join(', ')}]；对端独有: [${onlyPeer.join(', ')}]`)
-    const bad = mineData.filter((r) => peerData.includes(r) && cmp(join(ROOT, 'scripts', 'patches', 'data', r), join(peer, 'scripts', 'patches', 'data', r)) === 'content')
-    check('data/ 共有文件逐字节一致', bad.length === 0, `内容漂移: [${bad.join(', ')}]`)
-  } catch (e) { check('data/ 目录可枚举', false, String(e).slice(0, 200)) }
-  // tests/ 递归清单 + 共有文件逐字节
-  // **递归**列清单：0.14.3 实锤——旧实现只列 tests/ 的一层，于是 `fixtures` 被当成一个dir 条目，
-  // 里面的 31 个夹具目录从未参与比对。协调仓已把夹具换到 0.2.0-rc.2，APK 侧仍留着 0.1.7-rc.2 的旧夹具，
-  // 本地镜像门禁却全绿，直到 APK CI 的 check-patch-fixtures 判红 93 项才暴露。
-  const walk = (dir, prefix = '', out = new Map()) => {
-    for (const name of readdirSync(dir)) {
-      const full = join(dir, name)
-      const rel = prefix ? `${prefix}/${name}` : name
-      if (statSync(full).isDirectory()) {
-        out.set(rel, 'dir')
-        walk(full, rel, out)
-      } else out.set(rel, 'file')
-    }
-    return out
-  }
-  let mineTests, peerTests
-  try {
-    mineTests = walk(join(ROOT, 'scripts', 'patches', 'tests'))
-    peerTests = walk(join(peer, 'scripts', 'patches', 'tests'))
-    const mineFiles = [...mineTests.entries()].filter(([, k]) => k === 'file').map(([r]) => r)
-    const peerFiles = [...peerTests.entries()].filter(([, k]) => k === 'file').map(([r]) => r)
-    const onlyMine = mineFiles.filter((r) => !peerTests.has(r))
-    const onlyPeer = peerFiles.filter((r) => !mineTests.has(r))
-    check('tests/ 文件清单一致',
+    const minePatches = patchesFiles(ROOT)
+    const peerPatches = patchesFiles(peer)
+    const onlyMine = minePatches.filter((r) => !peerPatches.includes(r))
+    const onlyPeer = peerPatches.filter((r) => !minePatches.includes(r))
+    check('scripts/patches/** 文件清单一致（' + minePatches.length + ' 文件，全量递归、无白名单）',
       onlyMine.length === 0 && onlyPeer.length === 0,
-      `本仓独有: [${onlyMine.join(', ')}]；对端独有: [${onlyPeer.join(', ')}]`)
-    let badContent = []
-    for (const rel of mineFiles) {
-      if (!peerTests.has(rel)) continue
+      '本仓独有: [' + onlyMine.slice(0, 5).join(', ') + ']；对端独有: [' + onlyPeer.slice(0, 5).join(', ') + ']')
+    const badPatches = []
+    for (const relPath of minePatches) {
+      if (!peerPatches.includes(relPath)) continue
       try {
-        const r = cmp(join(ROOT, 'scripts', 'patches', 'tests', rel), join(peer, 'scripts', 'patches', 'tests', rel))
-        if (r === 'content') badContent.push(rel)
-        else if (r === 'eol') eolWarns.push(`tests/${rel}`)
-      } catch { badContent.push(rel) }
+        const r = cmp(join(ROOT, 'scripts', 'patches', relPath), join(peer, 'scripts', 'patches', relPath))
+        if (r === 'content') badPatches.push(relPath)
+        else if (r === 'eol') eolWarns.push('scripts/patches/' + relPath)
+      } catch { badPatches.push(relPath) }
     }
-    check('tests/ 共有文件逐字节一致', badContent.length === 0, `内容漂移: [${badContent.join(', ')}]`)
-  } catch (e) {
-    check('tests/ 目录可枚举', false, String(e).slice(0, 200))
-  }
-  // 门禁链自身也在镜像面（0.13.8 批 H 补线）：build-apk-013.ps1 与两个常驻门禁脚本
-  // 单边演进同样造成「云端自包含构建跑旧门禁/旧脚本」的幽灵面——本仓曾出现
-  // bounded-io 门禁只落在 apk 兜、协调仓脚本仍带 Join-Path 拼写缺陷而无人察觉。
-  // 对端缺该文件时跳过（apk 仓独占脚本合法）。
+    check('scripts/patches/** 共有文件逐字节一致（' + (minePatches.length - onlyMine.length) + ' 文件）',
+      badPatches.length === 0, '内容漂移: [' + badPatches.slice(0, 5).join(', ') + ']')
+  } catch (e) { check('scripts/patches/** 可枚举', false, String(e).slice(0, 200)) }
+  // 以下构建 / 门禁脚本条目自 2026-10-28 政策起以 APK 仓为准：本文件会按 scripts/ 前缀
+  // 跳过它们的字节比对（见下方 isApkCanonicalScript），保留清单只为记录历史镜像面。
+  // 真正仍逐字节守的是 scripts/patches/** 与插件 / 子仓目录。
   const MIRROR_TOP = [
     'scripts/build-apk-013.ps1',
     // Shared per-ABI terminal build stage, used by both the local and portable
@@ -203,10 +223,8 @@ if (peer) {
     'scripts/gen-model-catalog.mjs',
     'scripts/resolve-version-suffix.mjs',
     'scripts/resolve-version-suffix.test.mjs',
-    // 门禁脚本**自身**也必须在镜像面（AGENTS.md 铁律 6 明文声明：「scripts/patches/** 与
-    // scripts/check-patch-mirror.mjs 是双仓逐字节镜像，单边演进必拒」）。此前它没被自己列进
-    // MIRROR_TOP，于是 apk 副本可以长期落后而本门禁**永远不会报**——本轮实测就是如此
-    // （coord 306 行 vs apk 305 行，差 P0-c 的 manage 条目）。自指条目是本门禁唯一的自守面。
+    // 自指条目按 2026-10-28 政策同样不比字节（APK 为 canonical）：本仓副本可以落后，
+    // 但本门禁仍会守住 patches 与插件面。旧实现把自身列入逐字节比对，已随政策修正。
     'scripts/check-patch-mirror.mjs',
     // The UI provider E2E helper accepts credential material; its secrecy guards
     // and extracted-function regression must not drift in the APK mirror.
@@ -223,6 +241,7 @@ if (peer) {
     'scripts/check-snapshot-secrets.mjs',
     'scripts/inject-all.py',
     'scripts/ci-verify-snapshot.py',
+    'scripts/test_ci_verify_snapshot.py',
     'scripts/build-snapshot-013.mjs',
     'scripts/lib/shell.mjs',
     // 0.14.1：软链自净化模块（快照归档前归一化旧 Termux 前缀软链）同样双仓同源。
@@ -245,17 +264,36 @@ if (peer) {
     // 防重放静默回退别人的内容）。两个仓都可能作为重放源，脚本必须同源——单边演进 = 一侧拿旧判据
     // 放行一次会覆盖别人的重放，且该次事故不可逆（远端历史已被改写）。
     'scripts/replay-guard.mjs',
-    // 0.14.1：Kotlin 单测数量回归门禁与基线。apk 仓的 check-release-gates.mjs 已把它列进清单，
-    // 但脚本与基线此前**只存在于协调仓** → apk 侧聚合门禁会因「脚本缺席」判红（云端自包含构建同理）。
-    // 门禁脚本自身 = 防线，必须与产物面同源；基线只许升档（--update-baseline 拒绝降级）。
+    // 0.14.1：Kotlin 单测数量回归门禁。apk 仓的 check-release-gates.mjs 已把它列进清单，
+    // 但脚本此前**只存在于协调仓** → apk 侧聚合门禁会因「脚本缺席」判红（云端自包含构建同理）。
+    // 门禁脚本自身 = 防线，必须与产物面同源。
     'scripts/check-kotlin-test-count.mjs',
-    'scripts/kotlin-test-baseline.json',
+    // ── 基线 JSON 刻意**不**入镜像面（2026-10-27，issue #156；PR #158 / #159 实测后移除）──
+    // 别再把它加回来。它和上面那个门禁脚本不是同一类东西：
+    //   - **apk 仓是唯一真源**。它是「Kotlin 单测只许升不许降」的计数基线，由 apk 仓的
+    //     check-kotlin-test-count.mjs 消费。协调仓既没有 Kotlin 测试源目录
+    //     （app/src/test/java/com/dsharnessmobile/shell 缺席，跑该门禁直接 exit 2），
+    //     也没有任何门禁读它（check-release-gates.mjs 里该条是 ciApk:false / ciCoord:false
+    //     / sink:'apk-ci'，即只在 apk 仓 CI 跑）。
+    //   - 它**每合一个带 Kotlin 单测的 PR 就变一次**（2026-10-27 上午就变了 5 次）。
+    //     纳入逐字节比对的实际效果只有周期性假红：当天已空转两次——#158 刚把协调仓追平到
+    //     1859，apk 侧下一个 PR 立刻推到 1865，镜像门禁再次判红。
+    //   - 这种「纯镜像载体」留在逐字节比对面里等于给真漂移制造噪音背景：红得越频繁，
+    //     真红越容易被当作「又是那个基线」而放过。
+    // 结论：门禁脚本镜像（上面那条保留），基线不镜像（本条移除）。要在协调仓核 Kotlin
+    // 用例数，去 apk 仓看，别在本仓留副本。
     // 0.13.8-b 批 B2（ST-25/26/31 + §7.2）：制度性门禁、度量入口与 A1 seed 模块同样双仓同源
     // （云端自包含构建会跑它们；单边演进 = 云端跑旧门禁/旧 seed）。
     'scripts/check-state-registry.mjs',
     'scripts/state-registry.json',
     'scripts/check-bridge-symmetry.mjs',
     'scripts/bridge-symmetry-baseline.json',
+    // 0.15.0 中英文案一致性门禁（2026-10-27，issue #156 / PR #157）：权威源在 apk 仓
+    // （判据输入 app/src/main/res 与 dsh-client-ui-responsive 都在 apk 布局里）。
+    // 但 check-release-gates.mjs 是双仓逐字节镜像的聚合清单、必然声明本门禁，所以它必须两仓都在场；
+    // 一旦两仓各有一份而不入册，就复制了「单边改判据、镜像门禁看不见」的老路（#156 A 组 11 个文件的漂移）。
+    // 故纳入镜像面：两仓逐字节同源。协调仓无 Android 树时走具名 SKIP 并计数，apk 仓照常真跑判据。
+    'scripts/check-i18n-parity.mjs',
     'scripts/check-gate-skips.mjs',
     'scripts/check-perf-instrumentation.mjs',
     'scripts/check-perf-instrumentation.test.mjs',
@@ -345,8 +383,8 @@ if (peer) {
     // 冷启动预算门禁（0.14.1 块F P0-2）：脚本 + 其消费的探针口径实现都双仓同源——只有一侧更新
     // 判据会让另一侧以旧口径判绿（设备实测的 -1 正是「口径不同步」类事故）。
     'scripts/check-boot-budget.mjs',
-    // 快照构建器产出面门禁（0.14.1 P0 反回归）：它断言「两树同版: build-snapshot-013.mjs」，
-    // 故必须自身也在镜像面——脚本若单边演进，云端链就不会跑这条反回归防线。
+    // 快照构建器产出面门禁（0.14.1 P0 反回归）：条目保留；按 2026-10-28 政策，
+    // 脚本差异不比字节（APK canonical），它自身的产出面 / 路径同源判据仍由聚合链执行。
     'scripts/check-snapshot-builder-output.mjs',
     // 浏览器语法下限门禁（0.14.1 块C G-1）：构建期降级原语 + 判据都双仓同源——云端自包含构建会用
     // apk 仓副本跑降级与判据，单边演进 = 两侧对「发往浏览器的 bundle 语法下限」口径分裂。
@@ -382,19 +420,39 @@ if (peer) {
    * 目录级比对中**按设计逐侧不同**的生成物——它们不是镜像漂移，计入比对会让该目录永久判红
    * （假红），反而失去「挡住真漂移」的判别力。两类，逐条具名（排除面刻意极小）：
    *   - `*.tgz`：打包产物，子仓 .gitignore 已忽略；各自打包时按本侧源码生成，两侧本就不同源。
-   *   - `lib/catalog-snapshot.json`：由 build-snapshot-013.mjs 按**本次构建的 ABI 引擎树**生成
-   *     （engineRootHint 使用快照内相对路径；数据仍来自各 ABI 的真实引擎树），是构建期数据，
-   *     不属于铁律 5 的「src + package.json + lib 产物」镜像面。
+   *   - `lib/catalog-snapshot.json` 曾属此类（build-snapshot-013.mjs 按本次构建的 ABI 引擎树生成）；
+   *     生产它的插件 dsh-model-capability 已于 0.14.8 退役，该文件不再产生，故撤掉这条例外。
    * 除外：src/、test/、package.json 等源码仍全量逐字节比对。
    */
   const MIRROR_SKIP = [
     /\.tgz$/,
   ]
   const mirrorKept = (rel, x) => !MIRROR_SKIP.some((re) => re.test(rel + '/' + x))
+  /**
+   * 2026-10-28 政策：构建 / 门禁 / 校验脚本由 dsh-mobile-apk 维护，协调仓副本不再要求同步。
+   * `scripts/patches/**` 不在此面（它由上方 MIRROR_FILES / data / tests 段单独逐字节守），
+   * 这里只排除可执行脚本扩展名；共享 JSON/YAML 配置继续比对，不能因目录名而被一起排除。
+   */
+  const isApkCanonicalScript = (rel) => rel.startsWith('scripts/') &&
+    !rel.startsWith('scripts/patches/') && /\.(?:mjs|cjs|js|py|ps1|sh)$/.test(rel)
+  let canonicalSkipped = 0
   for (const rel of MIRROR_TOP) {
+    if (isApkCanonicalScript(rel)) {
+      canonicalSkipped += 1
+      continue
+    }
     const mine = join(ROOT, rel)
     const theirs = join(peer, rel)
-    if (!existsSync(mine)) { check(`镜像面源文件在场: ${rel}`, false, '本仓缺席（MIRROR_TOP 条目失效）'); continue }
+    if (!existsSync(mine)) {
+      // 三条同时成立才 SKIP（细则见 ignoredByOwnRepo 注释）；否则仍然是 FAILED。
+      const peerHasIt = existsSync(theirs) || existsSync(join(peer, rel.split('/')[0]))
+      if (ignoredByOwnRepo(rel) && peerHasIt) {
+        skip(`镜像面目录在裸检出下缺席: ${rel}（本仓 .gitignore 忽略，正常本地布局由 Junction / 符号链接指向对端提供）`)
+      } else {
+        check(`镜像面源文件在场: ${rel}`, false, '本仓缺席（MIRROR_TOP 条目失效：既未被本仓 .gitignore 忽略，对端也没有）')
+      }
+      continue
+    }
     if (statSync(mine).isDirectory()) {
       if (!existsSync(theirs)) { skip(`镜像目录: ${rel}（对端无此目录）`); continue }
       const mineFiles = walkAll(mine).filter((x) => mirrorKept(rel, x))
@@ -426,6 +484,9 @@ if (peer) {
   if (eolWarns.length > 0) {
     console.log(`WARN  仅行尾差异（git blob 层一致则无碍；本机为工作树 autocrlf 噪声）: [${eolWarns.join(', ')}]`)
   }
+  if (canonicalSkipped > 0) {
+    console.log(`APK-CANONICAL  ${canonicalSkipped} 项 scripts/ 脚本条目按 2026-10-28 政策不比字节（以 dsh-mobile-apk 为准；不计 SKIP）`)
+  }
 }
 
 if (failures.length > 0) {
@@ -433,3 +494,35 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log('CHECK-PATCH-MIRROR PASSED（SKIP=' + skipped + '）')
+
+// ── 内建自测（--self-test）：钉住两个判定原语 ────────────────────────────────
+// `compareBytes` 的分界线决定「算 eol 噪声还是算内容漂移」，错了要么放过真漂移、要么被 autocrlf 刷红；
+// `ignoredByGitignore` 的能力边界（只认单段目录规则）也必须钉住，否则「以为它被忽略」会放过真漂移。
+if (process.argv.includes('--self-test')) {
+  const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const eq = (a, b, what) => {
+    if (a !== b) { console.error('SELF-TEST FAILED：' + what + '\n  实得 ' + JSON.stringify(a) + '\n  期望 ' + JSON.stringify(b)); process.exit(1) }
+  }
+  const dir = mkdtempSync(tmpdir() + '/pm-selftest-')
+  try {
+    const w = (name, content) => { const f = dir + '/' + name; writeFileSync(f, content); return f }
+    eq(compareBytesLib(w('a1', 'x\ny\n'), w('b1', 'x\ny\n')), 'same', '同字节 → same')
+    eq(compareBytesLib(w('a2', 'x\ny\n'), w('b2', 'x\r\ny\r\n')), 'eol', '仅行尾差异 → eol')
+    eq(compareBytesLib(w('a3', 'x\ny\n'), w('b3', 'x\nz\n')), 'content', '内容不同 → content')
+    // ignoredByGitignore 的边界：只认单段目录形态
+    const root = dir + '/root'
+    const { mkdirSync } = await import('node:fs')
+    mkdirSync(root, { recursive: true })
+    writeFileSync(root + '/.gitignore', '# 注释\nbuild/\n/libdir\nplugins/*/lib/\nname-no-slash\n')
+    eq(ignoredByGitignore(root, 'build'), true, '单段目录规则命中（build/ → build）')
+    eq(ignoredByGitignore(root, 'libdir'), true, '单段斜杠前缀命中（/libdir）')
+    eq(ignoredByGitignore(root, 'name-no-slash'), true, '单段无斜杠命中')
+    eq(ignoredByGitignore(root, 'plugins/x/lib'), false, '通配多段规则**不认**（fail-closed，必须 false）')
+    eq(ignoredByGitignore(root, 'scripts/build-apk-013.ps1'), false, '多段文件路径**不认**（MIRROR_TOP 全属此类）')
+  } finally {
+    try { rmSync(dir, { recursive: true, force: true }) } catch { /* 清理失败忽略 */ }
+  }
+  console.log('SELF-TEST PASSED（8 断言）')
+  process.exit(0)
+}

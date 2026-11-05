@@ -107,7 +107,18 @@ class NotifyActionReceiver : BroadcastReceiver() {
         NotifyDecisionQueue.Decision(requestId, eventId, kind, outcome.toString(), System.currentTimeMillis()),
       )
     } else {
-      LogCollector.log(NotifyDecisionQueue.TAG, "notify action retry: eventId=" + eventId)
+      // issue #1621：重试必须**重新入队**再投递，不能只 flush —— 对已超 NOT_READY 预算的
+      // FAILED 决策，光 flush 会立刻再判一次失败，用户点了「重试」却又收到一条「提交失败」。
+      val rearmed = try {
+        NotifyDecisionQueue.retryFailed(app, eventId)
+      } catch (t: Throwable) {
+        LogCollector.log(NotifyDecisionQueue.TAG, "notify action retry rearm failed: " + t.message)
+        false
+      }
+      LogCollector.log(
+        NotifyDecisionQueue.TAG,
+        "notify action retry: eventId=" + eventId + " rearmed=" + rearmed,
+      )
     }
     // 冷启动路径（进程被动作广播拉起）：先确保消费点与应答流在线，再尝试投递。
     // 这里**不**启动前台服务（R9：从动作广播启动 FGS 是否豁免后台限制 [未确证]，

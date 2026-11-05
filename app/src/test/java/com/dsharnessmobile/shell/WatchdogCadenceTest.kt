@@ -200,11 +200,33 @@ class WatchdogCadenceTest {
     assertTrue("第一拍必须按健康节奏挂上", code.contains("scheduleWatchdogTick(epoch, exec, WatchdogV2.HEALTHY_TICK_MS)"))
     assertTrue("每拍末尾必须按 nextDelayMs 重排", code.contains("scheduleWatchdogTick(epoch, exec, nextDelayMs)"))
     assertTrue("下一拍间隔必须由状态决定", code.contains("WatchdogV2.nextTickDelayMs("))
-    assertTrue("标准拍折算必须进每拍", code.contains("val units = WatchdogV2.tickUnits(tickMs)"))
+    assertTrue("标准拍折算必须进每拍（缺口拍也走同一入口，见 tickAccounting）", code.contains("val accounting = WatchdogV2.tickAccounting(tickMs)"))
     assertTrue("标准拍必须传给 planTick", code.contains("units = units,"))
     val tick = code.substringAfter("private fun watchdogTick(").substringBefore("private fun buildNotification(")
     assertTrue("异常拍必须回到 5 秒节奏", tick.contains("nextDelayMs = WatchdogV2.ACTIVE_TICK_MS"))
     assertTrue("冷启动窗口判据必须存在（booting）", tick.contains("isBootingWindow()"))
+  }
+
+  // ── issue #1354：修复态分支不得把 tick 链断死 ──────────────────────────
+
+  @Test
+  fun 修复态分支必须把下一拍挂回去() {
+    val code = codeOnly(source("EngineService.kt"))
+    val tick = code.substringAfter("private fun watchdogTick(").substringBefore("private fun buildNotification(")
+    // 边界用**分支自己的收尾花括号**，不用注释行：codeOnly 已把注释整行删掉，
+    // 拿注释当分隔符会 substringBefore 不到（Kotlin 回落成整段），断言就退化成整条 tick 上找。
+    val repair = tick
+      .substringAfter("if (RepairState.required(this)")
+      .substringBefore("\n      }")
+    assertTrue("修复态分支必须存在", repair.isNotEmpty())
+    assertTrue("修复态保持非健康节奏（5 秒）复看", repair.contains("nextDelayMs = WatchdogV2.ACTIVE_TICK_MS"))
+    // 判据落在「重排的位置」上：scheduleWatchdogTick 全仓只有首拍与尾部两个调用点，
+    // 只要重排留在 try 之后，修复态那句 return 就会跳过它，链子永久断死。
+    assertTrue("重排必须在 finally 里（任何早退都要挂回下一拍）", tick.contains("} finally {"))
+    assertTrue(
+      "finally 里必须按 nextDelayMs 重排",
+      tick.substringAfter("} finally {").contains("scheduleWatchdogTick(epoch, exec, nextDelayMs)"),
+    )
   }
 
   @Test
@@ -219,5 +241,55 @@ class WatchdogCadenceTest {
     )
     assertTrue("计数必须按标准拍加权", code.contains("fun nextDegradedCount(state: ProbeState, count: Int, units: Int = 1)"))
     assertTrue("探活记账必须按标准拍加权", code.contains("fun recordProbe(state: ProbeState, signature: String? = lastLogSignature, units: Int = 1)"))
+  }
+
+  // ── ④ issue #1505：深睡/挂起后的「缺口拍」不得冒充「连续失败」 ──────────────
+
+  @Test
+  fun 缺口拍按一个标准拍记账_合法节奏不受影响() {
+    val active = WatchdogV2.tickAccounting(WatchdogV2.ACTIVE_TICK_MS)
+    assertEquals("降级态 5 秒拍仍是 1 个标准拍", 1, active.units)
+    assertFalse(active.gap)
+    val healthy = WatchdogV2.tickAccounting(WatchdogV2.HEALTHY_TICK_MS)
+    assertEquals("健康态 20 秒拍仍折 4 个标准拍（阈值不能把它误判成缺口）", 4, healthy.units)
+    assertFalse("健康态拍不是缺口", healthy.gap)
+    assertEquals("DEAD 引擎从健康拍降下来那一拍仍折 4 拍（否则 60s 熔断会被拉成 240s）", 4,
+      WatchdogV2.tickAccounting(WatchdogV2.HEALTHY_TICK_MS + 1_000L).units)
+    val boundary = WatchdogV2.tickAccounting(WatchdogV2.GAP_TICK_MS)
+    assertFalse("阈值上沿仍按真实间隔折算", boundary.gap)
+    val gap = WatchdogV2.tickAccounting(WatchdogV2.GAP_TICK_MS + 1L)
+    assertEquals("越界一拍按 1 个标准拍记账", 1, gap.units)
+    assertTrue("必须标记缺口（调用方据此落 watchdog-gap 日志）", gap.gap)
+    assertTrue("缺口必须有结构化日志行：" + gap.log, gap.log.startsWith("watchdog-gap"))
+    val deepSleep = WatchdogV2.tickAccounting(60L * 60L * 1000L)
+    assertEquals("深睡一小时也只算一拍", 1, deepSleep.units)
+    assertTrue(deepSleep.gap)
+    assertTrue("日志必须写清实际间隔：" + deepSleep.log, deepSleep.log.contains("3600000ms"))
+  }
+
+  @Test
+  fun 深睡唤醒两拍不得打满熔断() {
+    // 旧缺陷：tickUnits 对任意大间隔封顶 6 个标准拍，recordProbe 又是 += units ⇒ 两拍 = 12 = 熔断。
+    WatchdogV2.reset()
+    repeat(2) {
+      WatchdogV2.recordProbe(
+        WatchdogV2.ProbeState.DEGRADED_HTTP, null,
+        WatchdogV2.tickAccounting(3L * 60L * 60L * 1000L).units,
+      )
+    }
+    assertEquals("两次深睡唤醒只应记两个标准拍", 2, WatchdogV2.effectiveFailureCount())
+    assertFalse("深睡不等于连续失败，不得熔断", WatchdogV2.tripped())
+    assertFalse("半死阶梯同样不得被深睡推满", WatchdogV2.degradedHttpTripped())
+    // 判别力反证（同一用例内）：旧口径（tickUnits 的封顶值）两拍就会熔断——所以上面不是恒绿。
+    WatchdogV2.reset()
+    repeat(2) {
+      WatchdogV2.recordProbe(
+        WatchdogV2.ProbeState.DEGRADED_HTTP, null,
+        WatchdogV2.tickUnits(3L * 60L * 60L * 1000L),
+      )
+    }
+    assertTrue("旧记账口径下两拍确实熔断（证明本用例有判别力）", WatchdogV2.tripped())
+    assertTrue(WatchdogV2.degradedHttpTripped())
+    WatchdogV2.reset()
   }
 }

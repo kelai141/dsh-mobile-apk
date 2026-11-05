@@ -22,8 +22,6 @@ import {
   VD_STATUS_UNAVAILABLE,
   type FetchLike,
   type VdPanelState,
-  type VdScreen,
-  type VdViewer,
 } from '../status.ts'
 import { watchTerminalKeybars } from '../keybar/mount.ts'
 
@@ -86,7 +84,7 @@ interface TabDefinition {
   kind: string
   priority?: 'extension' | 'builtin' | 'fallback'
   title: () => string
-  guide?: Array<{ id: string; order: number; title: () => string; description: () => string }>
+  guide?: Array<{ id: string; order: number; title: () => string; description: () => string; icon?: (props: { size?: number; className?: string }) => ReactElement }> // icon 缺省时上游落到占位立方体
 }
 /** 结构化注册面（上游 SidebarRightTabRegistry 的最小面）。 */
 interface TabRegistry {
@@ -114,6 +112,11 @@ const VD_STYLE = `
 .dsh-vdisplay-shutdown{margin-left:auto;border-color:var(--dsw-alias-border-l4);color:var(--dsw-alias-label-secondary)}
 .dsh-vdisplay-shutdown:hover{border-color:#e5534b;color:#e5534b}
 .dsh-vdisplay-stage{position:relative;flex:1 1 180px;min-height:180px;overflow:hidden;border-radius:12px;background:var(--dsw-alias-bg-layer-2)}
+/* 空舞台提示（0.14.11）：空屏 / 未连接 / 状态不可用三者在用户眼里都是「一块黑」，
+   看不出是在等画面还是已经坏了。舞台内叠一句居中说明，presenting 后由 1s 轮询自动摘掉。 */
+.dsh-vdisplay-stage-hint{position:absolute;inset:0;margin:0;display:flex;align-items:center;justify-content:center;padding:0 16px;text-align:center;font:var(--dsw-font-markdown-small);color:var(--dsw-alias-label-secondary);pointer-events:none}
+/* 状态不可用（未授权/通道未就绪）时把壳侧 guidance 搬到用户当前这一屏，而不是让人去设置页找。 */
+.dsh-vdisplay-detail{margin:0;padding:0 10px;font:var(--dsw-font-markdown-small);color:var(--dsw-alias-label-secondary);white-space:pre-wrap}
 `
 
 type NativeVdisplayBridge = {
@@ -132,172 +135,6 @@ type NativeVdisplayBridge = {
 
 /** Stable viewer identity for the Files-sidebar stage (independent bounds record + arbitration). */
 const VIEWER_ID = 'files-sidebar'
-
-/**
- * 两次状态快照是否**语义相同**（浅比较：逐字段比值，数组逐项比字段）。
- *
- * 审计 §7.6 的缺陷形态：`setSnap(s)` 每次都是**新对象**（`pull()` 每拍 mapStatusPayload 一次），
- * React 用 Object.is 判等，于是就算内容一个字都没变也要重渲染整个面板——每秒一次。
- * 面板里还有 `snap.screens.filter(...)` 与列表映射，重渲染不是零成本。
- *
- * 为什么自己写而不是上深比较库：形状是本文件定义的（VdPanelState），字段就这些；
- * screens/viewers 是唯一的两层结构，按字段逐项比即可，不必引入依赖（也不该为此新增依赖）。
- *
- * @param a - 上一次的快照。
- * @param b - 这次读回来的快照。
- * @returns 语义相同时 true（调用方据此跳过 setState）。
- */
-export function samePanelState(a: VdPanelState, b: VdPanelState): boolean {
-  if (a === b) return true
-  if (a.state !== b.state) return false
-  if (a.code !== b.code) return false
-  if (a.detail !== b.detail) return false
-  if (a.selected !== b.selected) return false
-  if (a.displayId !== b.displayId) return false
-  if (a.ownerSessionId !== b.ownerSessionId) return false
-  if (a.ops.length !== b.ops.length) return false
-  for (let i = 0; i < a.ops.length; i += 1) if (a.ops[i] !== b.ops[i]) return false
-  if (!sameScreens(a.screens, b.screens)) return false
-  return sameViewers(a.viewers, b.viewers)
-}
-
-/** screens 逐项比（字段全部参与：任何一个变化都可能改变渲染与可见性判据）。 */
-function sameScreens(a: readonly VdScreen[], b: readonly VdScreen[]): boolean {
-  if (a === b) return true
-  if (a.length !== b.length) return false
-  for (let i = 0; i < a.length; i += 1) {
-    const x = a[i]
-    const y = b[i]
-    if (x === y) continue
-    if (x.alias !== y.alias || x.displayId !== y.displayId || x.kind !== y.kind || x.label !== y.label) return false
-    if (x.state !== y.state || x.selectable !== y.selectable || x.reason !== y.reason) return false
-    if (x.width !== y.width || x.height !== y.height || x.densityDpi !== y.densityDpi) return false
-    if (x.viewerId !== y.viewerId) return false
-  }
-  return true
-}
-
-/** viewers 逐项比。 */
-function sameViewers(a: readonly VdViewer[], b: readonly VdViewer[]): boolean {
-  if (a === b) return true
-  if (a.length !== b.length) return false
-  for (let i = 0; i < a.length; i += 1) {
-    const x = a[i]
-    const y = b[i]
-    if (x === y) continue
-    if (x.viewerId !== y.viewerId || x.presenting !== y.presenting || x.target !== y.target) return false
-  }
-  return true
-}
-
-/** 舞台几何下发的输入（全部来自调用点，纯数据，便于单测）。 */
-export interface StageBoundsInput {
-  /** 舞台矩形（getBoundingClientRect 的结果）。 */
-  readonly rect: { readonly left: number; readonly top: number; readonly width: number; readonly height: number }
-  readonly viewportWidth: number
-  readonly viewportHeight: number
-  /** 侧栏已收起（权威信号 = 上游展开控件在场；data-rightbar-collapsed 是常量，不可用）。 */
-  readonly collapsed: boolean
-  /** 舞台自身被 display:none / visibility:hidden 藏起来。 */
-  readonly hidden: boolean
-  /** 有覆盖层（三个点弹层等）压在上面。 */
-  readonly overlapped: boolean
-  /** 本会话之外有主（ownerSessionId 不是本会话）。 */
-  readonly occupied: boolean
-  /** 当前状态快照（用 state 与 screens 决定可见性与目标屏）。 */
-  readonly snap: Pick<VdPanelState, 'state' | 'screens' | 'selected'>
-}
-
-/** 下发给壳侧的舞台几何载荷。 */
-export interface StageBoundsPayload {
-  left: number
-  top: number
-  width: number
-  height: number
-  viewportWidth: number
-  viewportHeight: number
-  visible: boolean
-  viewerId: string
-  target?: string
-}
-
-/**
- * 由一次测量算出下发给壳侧的载荷（纯函数）。
- *
- * **三条可见性判据一条都不能丢**（每条都对着一次用户实报）：
- *   1. `collapsed`——收起侧栏时上游只是把面板隐藏（组件仍在 DOM 里保活），舞台矩形与 display
- *      都不变；缺这条会算出 visible:true → 原生 SurfaceView 保持可见，**盖在聊天界面上**。
- *   2. `overlapped`——三个点弹层展开时必须让开：原生画面在 WebView 之上，否则弹层被整块挡住。
- *   3. `occupied`——别的会话在用时本会话不得抢画面（多窗口仲裁）。
- * 另外 hidden（舞台自身不可见）与「矩形退化」两条是基础判据。
- *
- * 目标屏别名兜底（0.14.0 设备实锤）：`selected` 在面板刚打开 / 状态未拉到 / 该屏刚被销毁时为空，
- * 壳侧便会退回「按舞台宽高比」拉伸（用户报「自适应缩放不对」）。内容宽高比只取决于「哪块屏存在」，
- * 故按 选中 → 唯一活跃屏 依次退化。
- * @param input - 一次测量的全部输入。
- * @returns 待下发的载荷。
- */
-export function stageBoundsPayload(input: StageBoundsInput): StageBoundsPayload {
-  const { rect, snap } = input
-  const virtuals = snap.screens.filter((screen) => screen.kind === 'virtual')
-  const target = snap.selected ?? (virtuals.length === 1 ? virtuals[0]?.alias : undefined)
-  return {
-    left: rect.left,
-    top: rect.top,
-    width: rect.width,
-    height: rect.height,
-    viewportWidth: input.viewportWidth,
-    viewportHeight: input.viewportHeight,
-    visible: !input.occupied && !input.collapsed && !input.hidden && !input.overlapped
-      && snap.state === 'active' && rect.width > 1 && rect.height > 1,
-    viewerId: VIEWER_ID,
-    ...(target === undefined ? {} : { target }),
-  }
-}
-/**
- * 造一个「几何去重下发」通道（审计 §7.6：几何不变就不下发）。
- *
- * 缺陷形态：`publishBounds()` 每秒被轮询调一次，每次都做 rect + 两次 getComputedStyle +
- * JSON.stringify，再发一次 `vdisplayBounds` 桥调用——而几何在绝大多数拍里根本没变
- * （用户只是开着面板不动）。原生侧收到同样的 bounds 还要在主线程重放一遍 setStageBounds。
- *
- * 比较口径 = 下发的**整个载荷**（含 target / viewerId / visible）：任何一项变了都必须下发，
- * 否则会出现「换了屏但原生还按旧宽高比拉伸」「该让位却还挂着画面」这类可见偏差。
- *
- * 为什么抽出来：这条是**时序行为**（同一载荷连发两次只应到达一次），藏在组件里只能靠数桥调用，
- * 而组件还牵扯 React 渲染时机；抽出后可以直接断言「发了几次」。
- * @param send - 真正下发（桥调用）。
- * @returns publish（同一载荷只发一次）与 reset（强制下一次必发，卸载时用）。
- */
-export function createBoundsPublisher(send: (payload: StageBoundsPayload) => void): {
-  publish(payload: StageBoundsPayload): void
-  reset(): void
-} {
-  let last: string | null = null
-  return {
-    publish(payload) {
-      const key = boundsPayloadKey(payload)
-      if (last === key) return
-      last = key
-      send(payload)
-    },
-    reset() { last = null },
-  }
-}
-/**
- * 上一次下发给壳侧的舞台几何（审计 §7.6：几何不变就不下发）。
- *
- * 缺陷形态：`publishBounds()` 每秒被轮询调一次，每次都做 `getBoundingClientRect` + 两次
- * `getComputedStyle` + `JSON.stringify`，再发一次 `vdisplayBounds` 桥调用——而几何在绝大多数
- * 拍里根本没变（用户只是开着面板不动）。原生侧收到同样的 bounds 还要在主线程重放一遍
- * `setStageBounds`（可见性判据、Surface 绑定判定）。
- *
- * 比较口径 = 下发的**整个载荷**（含 target/viewerId）：任何一项变了都必须下发，
- * 否则会出现「看得见但方向不对」「已经切了屏却还按旧宽高比拉伸」这类偏差。
- */
-function boundsPayloadKey(payload: StageBoundsPayload): string {
-  return JSON.stringify(payload)
-}
 
 function nativeBridge(): NativeVdisplayBridge | undefined {
   return (window as Window & { androidBridge?: NativeVdisplayBridge }).androidBridge
@@ -374,101 +211,32 @@ function watchStageVisibility(publish: () => void): () => void {
   }
 }
 
-/** 面板状态的同步回路依赖（注入以便按行为断言：读、提交、下发、可见性、时钟）。 */
-export interface PanelSyncDeps {
-  /** 读一次状态（跨桥 / HTTP 兜底）。 */
-  read(): Promise<VdPanelState>
-  /** 提交到 React（= setSnap）。**只有内容真的变了才调用**。 */
-  commit(state: VdPanelState): void
-  /** 下发/重发舞台几何（其内部再做「几何没变就不发」的去重）。 */
-  bounds(): void
-  /** 页面此刻是否不可见（后台）。 */
-  hidden(): boolean
-  /** 排/清定时器（浏览器传 window，测试传假时钟）。 */
-  setTimer(fn: () => void, ms: number): number
-  clearTimer(id: number): void
-  /** 监听可见性变化，返回解绑函数。 */
-  onVisibilityChange(fn: () => void): () => void
-  /** 续租间隔；缺省 1000ms（**刻意设计，不改**，见审计 §7.6）。 */
-  intervalMs?: number
-}
-
-/** 面板同步回路的句柄。 */
-export interface PanelSyncHandle {
-  /** 立刻对齐一拍（测试与事件通道用）。 */
-  pull(): void
-  /** 停止（幂等）。 */
-  stop(): void
-}
-
-/**
- * 面板状态同步回路（审计 §7.6 的三条修法都落在这里）。
- *
- * 缺陷形态（0.14.9 审计实测）：
- *   1. 每拍 `setSnap(新对象)` → React 必然重渲染，哪怕内容一个字都没变；
- *   2. 每拍无条件 `publishBounds()`（rect + 两次 getComputedStyle + JSON.stringify + 桥调用），
- *      几何不变也照发；
- *   3. 面板不可见时轮询照跑。
- *
- * 修法的边界（审计原文）：**1 秒续租间隔是刻意设计，不要在间隔上动手**——
- * 这里保留 1000ms 默认值，只改「每拍多做的那几件事」与「不可见时停拍」。
- *
- * 为什么把它从组件里抽出来：这三条都是**时序行为**（几拍之后调了什么、后台停不停），
- * 只有用可注入的时钟与计数器才断言得准，而不是靠真实等待去赌机器快慢。
- * @param deps - 注入依赖。
- * @returns 句柄（pull / stop）。
- */
-export function startPanelSync(deps: PanelSyncDeps): PanelSyncHandle {
-  const intervalMs = deps.intervalMs ?? 1000
-  let lastSnap: VdPanelState | undefined
-  let timer: number | null = null
-  let stopped = false
-  /** 一拍：读状态 → 内容变了才提交；同时（去重地）下发几何。 */
-  const pull = (): void => {
-    if (stopped) return
-    void deps.read().then((next) => {
-      if (stopped) return
-      // 浅比较后再提交：不 setState 就不会有 React 重渲染（内容没变的拍占绝大多数）。
-      if (lastSnap !== undefined && samePanelState(lastSnap, next)) return
-      lastSnap = next
-      deps.commit(next)
-    })
-    deps.bounds()
-  }
-  const stopTimer = (): void => {
-    if (timer === null) return
-    deps.clearTimer(timer)
-    timer = null
-  }
-  const startTimer = (): void => {
-    if (stopped || timer !== null) return
-    // 不可见时不排拍：后台定时器在移动端只换来唤醒，回前台会立即补一次。
-    if (deps.hidden()) return
-    timer = deps.setTimer(() => { timer = null; pull(); startTimer() }, intervalMs)
-  }
-  const offVisibility = deps.onVisibilityChange(() => {
-    if (stopped) return
-    if (deps.hidden()) { stopTimer(); return }
-    // 回前台：立即对齐一拍，不等下一拍。
-    pull()
-    startTimer()
-  })
-  pull()
-  startTimer()
-  return {
-    pull,
-    stop(): void {
-      if (stopped) return
-      stopped = true
-      stopTimer()
-      offVisibility()
-    },
-  }
-}
 /**
  * Panel: 编号列表（选择查看哪块虚拟屏）+ 原生画面工位。
  * 空态「暂无虚拟屏」；占用态「由会话 X 使用中」（不渲染任何操作面）。
  */
+/**
+ * 虚拟屏的 guide 图标：主屏 + 右下副屏。
+ *
+ * 上游 guide 条目没有 `icon` 时落到占位立方体（`entry.icon ?? CubeGlyph`），
+ * 在「工作区文件/新建终端/浏览器」这排图标里看着像个不相干的东西；这里给一个
+ * 一眼能认成「屏幕」的形状，颜色走 `currentColor`，跟随主题。
+ *
+ * @param props 上游传入的尺寸与类名。
+ * @returns 图标元素。
+ */
+function VirtualScreenGlyph(props: { size?: number; className?: string }): ReactElement {
+  const size = props.size ?? 26
+  return createElement('svg', {
+    width: size, height: size, viewBox: '0 0 24 24', fill: 'none',
+    stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round',
+    className: props.className, 'aria-hidden': true,
+  },
+  createElement('rect', { x: 2.5, y: 4, width: 15, height: 10.5, rx: 1.6 }),
+  createElement('path', { d: 'M6 18h7.5' }),
+  createElement('rect', { x: 15.5, y: 9.5, width: 6, height: 9.5, rx: 1.4 }))
+}
+
 function VdPanel(props: { sessionId?: unknown }): ReactElement {
   const sessionKey = typeof props.sessionId === 'string' ? props.sessionId : ''
   const stageRef = useRef<HTMLDivElement>(null)
@@ -479,14 +247,6 @@ function VdPanel(props: { sessionId?: unknown }): ReactElement {
   const [tick, setTick] = useState(0)
   const occupied = snap.ownerSessionId !== undefined && sessionKey !== '' && snap.ownerSessionId !== sessionKey
   const occupiedRef = useRef(false)
-
-  // 几何去重下发（审计 §7.6）：同一载荷只发一次，见 createBoundsPublisher 注释。
-  const publisherRef = useRef<ReturnType<typeof createBoundsPublisher> | null>(null)
-  if (publisherRef.current === null) {
-    publisherRef.current = createBoundsPublisher((payload) => {
-      try { nativeBridge()?.vdisplayBounds?.(JSON.stringify(payload)) } catch { /* host gone */ }
-    })
-  }
 
   const publishBounds = useCallback(() => {
     const stage = stageRef.current
@@ -499,22 +259,39 @@ function VdPanel(props: { sessionId?: unknown }): ReactElement {
       // 保活），舞台矩形与 display 都不变，于是旧判据仍算出 visible:true → 原生 SurfaceView 保持
       // 可见，**盖在聊天界面上**。权威收起信号 = 上游展开控件在场（ExpandButton 只在收起时渲染；
       // data-rightbar-collapsed 是恒为 true 的常量，不可用——见坑 119/120）。
-      const payload = stageBoundsPayload({
-        rect,
-        viewportWidth: window.innerWidth,
-        viewportHeight: window.innerHeight,
-        // 三条用户实报对应的可见性判据，一条都不能丢（见 stageBoundsPayload 的注释）。
-        collapsed: document.querySelector('[data-sidebar-right-expand]') !== null,
-        hidden: getComputedStyle(stage).display === 'none' || getComputedStyle(stage).visibility === 'hidden',
-        overlapped: document.documentElement.hasAttribute('data-dsh-popover-open'),
-        occupied: occupiedRef.current,
-        snap,
-      })
-      publisherRef.current?.publish(payload)
+      const collapsed = document.querySelector('[data-sidebar-right-expand]') !== null
+      // 同一元素只解析一次样式表：getComputedStyle 是**强制样式重算**入口，
+      // 一次 publish 调两次就是两次重算（性能审计 2026-11-02 Top 4 的附带项）。
+      const stageStyle = getComputedStyle(stage)
+      const hidden = stageStyle.display === 'none' || stageStyle.visibility === 'hidden'
+      // 覆盖层让位（0.14.8 用户实报）：三个点弹层展开时必须把原生画面藏起来。
+      // 原生 SurfaceView 在 WebView 之上，不藏它的话弹层会被虚拟屏画面整块盖住，
+      // 用户看到的是「点开三个点，结果被一块黑色虚拟屏挡住」。收起后 next publish 自动恢复。
+      const overlapped = document.documentElement.hasAttribute('data-dsh-popover-open')
+      // 应用退后台时判据必须转 false（0.14.11，D1）：后台期间 WebView 的 JS 仍在跑，旧判据六项全不变，
+      // 于是继续下发 visible:true；此时 Surface 已交给浮窗，壳侧 attach 被判 viewer-target-occupied，
+      // 舞台被置 GONE 并进入 30s 冻结——用户按 Home 去用别的应用再回来，侧栏空白最长 30 秒，
+      // 收起/展开也修不好（冻结只由 onDisplayAdded 或 30s 到期解除）。
+      // visibilitychange 已在 watchStageVisibility 里挂了事件通道，所以这里只需要把「后台」算进判据，
+      // 回前台那一拍会自动重发 visible:true，壳侧走正常 reattach 路径。
+      const backgrounded = document.visibilityState === 'hidden'
+      nativeBridge()?.vdisplayBounds?.(JSON.stringify({
+        left: rect.left, top: rect.top, width: rect.width, height: rect.height,
+        viewportWidth: window.innerWidth, viewportHeight: window.innerHeight,
+        visible: !occupiedRef.current && !collapsed && !hidden && !overlapped && !backgrounded &&
+          snap.state === 'active' && rect.width > 1 && rect.height > 1,
+        viewerId: VIEWER_ID,
+        // 目标屏别名兜底（0.14.0 设备实锤）：`snap.selected` 在面板刚打开 / 状态未拉到 / 该屏刚被
+        // 销毁时为空，壳侧便会退回「按舞台宽高比」拉伸（用户报「自适应缩放不对」）。
+        // 内容宽高比只取决于「哪块屏存在」，故这里按 选中 → 唯一活跃屏 依次退化。
+        target: snap.selected ?? (snap.screens.filter((s) => s.kind === 'virtual').length === 1
+          ? snap.screens.find((s) => s.kind === 'virtual')?.alias
+          : undefined),
+      }))
     } catch {
       /* old/desktop shells have no native viewer */
     }
-  }, [snap.selected, snap.state, snap.screens])
+  }, [snap.selected, snap.state])
 
   useEffect(() => {
     publishBounds()
@@ -527,9 +304,6 @@ function VdPanel(props: { sessionId?: unknown }): ReactElement {
       unwatch()
       observer?.disconnect()
       window.removeEventListener('resize', publishBounds)
-      // 卸载必须**强制**下发一次「不可见」：绕过上面那条「几何不变就不发」的短路
-      // （原生 SurfaceView 在 WebView 之上，卸载时藏不掉就会留在屏幕上盖住 UI）。
-      publisherRef.current?.reset()
       try { nativeBridge()?.vdisplayBounds?.(JSON.stringify({ visible: false, viewerId: VIEWER_ID })) } catch { /* host gone */ }
     }
   }, [publishBounds])
@@ -543,26 +317,60 @@ function VdPanel(props: { sessionId?: unknown }): ReactElement {
   }, [occupied, publishBounds])
 
   useEffect(() => {
-    // 轮询里**同时重发 bounds**（0.14.0 用户实报修正）：原先只 setSnap，状态变了但从不把
-    // 新的可见性推给壳侧，于是原生 SurfaceView 的可见性要等别的事件（切页签/切面板）才更新
-    // ——用户原话「在人不查看但 AI 操控的时候状态不刷新，必须切换上方状态栏才显示」。
-    // 收起/展开只改可见性、不改舞台尺寸，ResizeObserver 不触发，所以必须由轮询兜底同批下发。
+    let alive = true
+    // 轮询里**同时重发 bounds**（0.14.0 用户实报修正）。
     //
-    // 三条修法（浅比较提交 / 几何去重下发 / 不可见停拍）都在 startPanelSync 里，见其注释。
-    // 1s 续租间隔是刻意设计，原样保留。
-    const sync = startPanelSync({
-      read: pullPanelState,
-      commit: (next) => { setSnap(next) },
-      bounds: publishBounds,
-      hidden: () => document.hidden,
-      setTimer: (fn, ms) => window.setTimeout(fn, ms),
-      clearTimer: (id) => { window.clearTimeout(id) },
-      onVisibilityChange: (fn) => {
-        document.addEventListener('visibilitychange', fn)
-        return () => { document.removeEventListener('visibilitychange', fn) }
-      },
-    })
-    return () => { sync.stop() }
+    // 原先只 setSnap：状态变了但从不把新的可见性推给壳侧，于是原生 SurfaceView 的可见性
+    // 要等别的事件（切页签/切面板）才更新——用户原话「在人不查看但 AI 操控的时候状态不刷新，
+    // 必须切换上方状态栏才显示」。
+    //
+    // 收起/展开只改可见性、不改舞台尺寸，ResizeObserver 不触发，所以必须由轮询兜底同批下发。
+    // 与浏览器侧同口径（那里也是 refresh + publishBounds 同批，并同样有事件通道）。
+    const pull = () => {
+      void pullPanelState().then((s) => { if (alive) setSnap(s) })
+      if (alive) publishBounds()
+    }
+    pull()
+    // 1s 轮询保留为**兜底对齐**（原生层重建、事件通道漏网时用）；即时性由上面的
+    // watchStageVisibility 事件通道负责，不再依赖这一拍。
+    //
+    // 性能审计 2026-11-02 #4：改成「自续 setTimeout + 页面不可见时不排下一拍」。
+    // 原先的裸 setInterval 在 WebView 被切到后台时仍然每秒跨桥一次（pullPanelState + publishBounds
+    // 各一次原生调用），而页面不可见时这两个动作都没有任何可观测效果——纯白烧。
+    // 周期语义不变（仍是 1s），变的只是「后台不排下一拍」；回前台由 visibilitychange 立刻补一拍。
+    // 与仓库既有正确实现同口径：dsh-client-ui-responsive/src/client/mobile/native-browser-auto-place.ts:87-101。
+    //
+    // 性能审计 2026-11-02 Top 4（剩余面）：`#1325` 只做了「页面在后台」那一半。
+    // 侧栏收起时页面仍在前台，`document.hidden` 为 false，这一拍照跑——而面板不在屏上，
+    // `pullPanelState` + `publishBounds` 两次跨桥没有任何可观测效果。
+    // 现在改成：**在屏才打桥**；不在屏仍然每秒醒来，但只做一次零成本的 DOM 复查，
+    // 一旦回到屏上立刻恢复正常节奏（不需要等 visibilitychange）。
+    // 复查周期刻意不降：降周期会让「用户展开侧栏」后的首帧状态更慢。
+    let timer: number | undefined
+    const schedule = () => {
+      if (!alive || timer !== undefined) return
+      timer = window.setTimeout(() => {
+        timer = undefined
+        if (!alive) return
+        // 不在屏：跳过跨桥，但继续排下一拍（只花一次 DOM 读取）。
+        // 不在屏：跳过跨桥，但继续排下一拍（只花一次 DOM 读取）。
+        if (panelOnScreen()) pull()
+        if (!document.hidden) schedule()
+      }, 1000)
+    }
+    const onVisibility = () => {
+      if (document.hidden) return
+      if (!alive) return
+      if (panelOnScreen()) pull()
+      schedule()
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    schedule()
+    return () => {
+      alive = false
+      document.removeEventListener('visibilitychange', onVisibility)
+      if (timer !== undefined) { window.clearTimeout(timer); timer = undefined }
+    }
   }, [tick, publishBounds])
 
   const selectTarget = (alias: string) => {
@@ -601,6 +409,22 @@ function VdPanel(props: { sessionId?: unknown }): ReactElement {
   }
 
   const screens = snap.screens.filter((screen) => screen.kind === 'virtual')
+  /** 当前该看哪块屏（与 publishBounds 的目标退化口径一致：选中 → 唯一活跃屏）。 */
+  const stageTarget = snap.selected ?? (screens.length === 1 ? screens[0]?.alias : undefined)
+  /**
+   * 是否已有画面挂上。判据只能用壳侧回执里**已验证**的 viewers[]：
+   * viewerId 由宿主生成（页面下发的会被丢弃），所以只能按 target 对齐；
+   * target 未知时不挑指定屏，任一 presenting 即算有画面。
+   */
+  const presenting = snap.viewers.some((viewer) => viewer.presenting &&
+    (stageTarget === undefined || viewer.target === stageTarget))
+  /** 状态不可用时的真因文案（壳侧 guidance 已映射进 detail）；active 态不显示。 */
+  const detailText = snap.state === 'active' ? '' : snap.detail
+  const stageHint = screens.length === 0 || presenting
+    ? ''
+    : snap.state === 'active'
+      ? tr('尚未在虚拟屏上显示内容', 'Nothing is showing on the virtual screen yet')
+      : tr('状态不可用，画面未连接', 'Status unavailable — picture not connected')
 
   if (occupied) {
     return createElement('div', { className: 'dsh-vdisplay-panel', 'data-state': snap.state },
@@ -611,7 +435,7 @@ function VdPanel(props: { sessionId?: unknown }): ReactElement {
 
   return createElement('div', { className: 'dsh-vdisplay-panel', 'data-state': snap.state },
     screens.length === 0
-      ? createElement('p', { className: 'dsh-vdisplay-empty' }, tr('暂无虚拟屏', 'No virtual screens'))
+      ? createElement('p', { className: 'dsh-vdisplay-empty' }, detailText !== '' ? detailText : tr('暂无虚拟屏', 'No virtual screens'))
       : createElement('div', { className: 'dsh-vdisplay-list' },
         screens.map((screen) => createElement('button', {
           key: screen.alias,
@@ -631,7 +455,17 @@ function VdPanel(props: { sessionId?: unknown }): ReactElement {
           'data-action': 'shutdown-all',
           onClick: shutdownAll,
         }, tr('关闭全部', 'Close all'))),
-    createElement('div', { ref: stageRef, className: 'dsh-vdisplay-stage', 'data-testid': 'vdisplay-stage' }),
+    screens.length > 0 && detailText !== ''
+      ? createElement('p', { className: 'dsh-vdisplay-detail' }, detailText)
+      : null,
+    createElement('div', {
+      ref: stageRef,
+      className: 'dsh-vdisplay-stage',
+      'data-testid': 'vdisplay-stage',
+      'data-presenting': presenting ? 'true' : 'false',
+    }, stageHint !== ''
+      ? createElement('p', { className: 'dsh-vdisplay-stage-hint' }, stageHint)
+      : null),
   )
 }
 
@@ -670,133 +504,90 @@ export function apply(ctx: ClientContext): void {
     // 同浏览器侧：**边沿触发 + 收起时延迟落位**，不是每秒无条件抢焦点。
     // 旧实现每 800ms 无条件 openTab，用户收起侧栏后会被下一拍拽开、点 × 收起也会被切回来
     // （设备实测：浏览器侧与虚拟屏侧是同一个结构缺陷，两侧一起改）。
-    /** 上一次已处理过的舞台标记（'' = 还没出现过）。 */
-    let seenActive = false
-    /** 收起期间出现过、等待用户展开后补落位。 */
-    let pending = false
-    /** 最近一次读到的活跃态（决定节拍用短还是用长；不活跃时退回空闲节拍）。 */
-    let lastActive = false
-    /** 已排的下一拍（null = 没有排队）。 */
-    let timer: number | null = null
-    /** 卸载标记：定时器与事件回调都要认它（否则卸载后还会读一次桥）。 */
-    let disposed = false
-    /**
-     * 短节拍：有活跃屏 / 待落位时才用。**800ms 是刻意设计**（审计 §7.5 明确要求不要动这个间隔）：
-     * 原生层重启、事件通道漏网时的重新对齐靠它。
-     */
-    const ACTIVE_POLL_MS = 800
-    /**
-     * 空闲节拍（审计 §7.5）：**既非 active 也无 pending** 时退到 5 秒以上。
-     *
-     * 缺陷形态：旧实现 `setInterval(reveal, 800)` 无条件常驻，而 reveal() 第一句就是
-     * 跨桥读 `vdisplayStatus` 并 decodeNative（内含一次 JSON.parse）。虚拟屏在绝大多数时间里
-     * 根本不存在，用户锁屏放着一夜也照样每 800ms 读一次——纯粹的唤醒与解析开销。
-     */
-    const IDLE_POLL_MS = 5_000
+    // issue #1339：原先用单个布尔 `seenActive` 记「这次激活已经落位过」，它有两个
+    // 死锁面，合起来让自动展示**永远**不再发生：
+    //   ① `pending` 只在 `reveal()` 内部写（折叠分支），而闸门恰在 `pending === false`
+    //      且侧栏收起时**不调用** `reveal()` —— 唯一能把它置真的路径被自己挡住；
+    //   ② `seenActive` 在折叠期间从不重置，屏销毁重建后仍是 true，于是 `reveal()`
+    //      在「已落位」早退分支直接返回，新屏再也拿不到页签。
+    // 改法：把「已落位」锚定到**具体的那块屏**（displayId），而不是一个布尔。
+    // 屏重建 = 新 displayId = 未落位 = 门重新武装；用户手动关掉页签时 displayId 不变，
+    // 仍然不会每拍把页签拽回来（这是 seenActive 原本要保护的用户意图）。
+    /** 已落位过的 displayId（undefined = 尚未落位）。 */
+    let placedFor: number | undefined
+    /** 收起期间攒下、等待用户展开后补落位的 displayId（undefined = 没有待落位）。 */
+    let pendingFor: number | undefined
     // 同浏览器侧：权威收起信号 = 上游展开控件是否在场（`data-rightbar-collapsed` 是常量，不可用）。
     const collapsedNow = (): boolean => document.querySelector('[data-sidebar-right-expand]') !== null
-    /** 舞台是否已挂载（挂上了就说明落位成功，不必再抢焦点）。 */
-    const stageMounted = (): boolean => document.querySelector('[data-testid=vdisplay-stage]') !== null
-    /**
-     * 读一次状态并做一次**边沿**判定（不是每拍无条件 openTab）。
-     *
-     * 边沿语义（0.14.0 设备实锤，不得退回旧行为）：只在「由不活跃变为活跃」那一次落位；
-     * 收起期间攒成 pending，等用户展开后再补——用户自己收起侧栏后不该被下一拍拽开。
-     */
-    const reveal = (): void => {
-      const active = decodeNative('vdisplayStatus')?.state === 'active'
-      lastActive = active
-      if (!active) { seenActive = false; return }
-      if (stageMounted()) return
+    const reveal = () => {
+      const status = decodeNative('vdisplayStatus')
+      // 显式判空而不是用可选链比较：后者在窄化上依赖 TS 对可选链的推断，
+      // 写成两段条件后 status 在这里确定是 VdPanelState，status.displayId 无需断言。
+      if (status === undefined || status.state !== 'active') {
+        // 屏没了：两个标记一起清，下一次激活就是一次全新的落位机会。
+        placedFor = undefined
+        pendingFor = undefined
+        return
+      }
+      const displayId = status.displayId
+      if (document.querySelector('[data-testid=vdisplay-stage]') !== null) {
+        // 舞台已在屏上：记下这块屏已落位，并清掉待落位（没有需要补的了）。
+        placedFor = displayId
+        pendingFor = undefined
+        return
+      }
+      if (placedFor === displayId) {
+        // 这块屏已落位过、页签却被用户关掉了：尊重用户意图，不再每拍拽回来。
+        pendingFor = undefined
+        return
+      }
+      if (collapsedNow()) {
+        // 收起：攒着，展开后由下一拍补落位。注意这里**不**置 placedFor——
+        // 置了就等于「已落位」，展开后反而不会再落（正是 ① 的形态）。
+        pendingFor = displayId
+        return
+      }
       try {
-        if (seenActive) {
-          // 无新事件：仅当「收起期间攒下待落位」且用户已展开时，补一次。
-          if (pending && !collapsedNow()) {
-            pending = false
-            unwatchExpanded()
-            sidebar.openTab(VD_TAB_KIND, { revealIfOpened: true })
-          }
-          return
-        }
-        seenActive = true
-        if (collapsedNow()) {
-          pending = true
-          watchExpanded()
-          return
-        }
         sidebar.openTab(VD_TAB_KIND, { revealIfOpened: true })
+        placedFor = displayId
+        pendingFor = undefined
       } catch {
-        /* 侧栏未挂载：下一拍重试（seenActive 未置位，保持可重试） */
-        seenActive = false
+        /* 侧栏未挂载：下一拍重试（placedFor 未置位，保持可重试） */
+        placedFor = undefined
       }
     }
-    /** 清掉已排的那一拍（幂等）。 */
-    const clearTimer = (): void => {
-      if (timer === null) return
-      window.clearTimeout(timer)
-      timer = null
-    }
-    /** 下一拍间隔：活跃或待落位用短节拍，其余退到空闲节拍。 */
-    // 判据按审计原文：**既非 active 也无 pending** 才退到空闲节拍。屏还在（active）时保持原节拍——
- // 需求是「没屏的时候别常驻读」，不是「有屏的时候慢一拍」。
-    const nextDelay = (): number => (lastActive || pending ? ACTIVE_POLL_MS : IDLE_POLL_MS)
-    /**
-     * 排下一拍。**页面在后台时不排**（审计 §7.5）：后台定时器在移动端只换来唤醒，
-     * 回前台由 visibilitychange 立即补一次对齐。
-     */
-    function scheduleNext(): void {
-      clearTimer()
-      if (disposed || document.hidden) return
-      timer = window.setTimeout(tick, nextDelay())
-    }
-    /** 一拍：读状态 → 按新的活跃/待落位状态决定下一拍间隔。 */
-    function tick(): void {
-      timer = null
-      if (disposed || document.hidden) return
-      reveal()
-      scheduleNext()
-    }
-    /** 事件驱动入口：立即对齐一拍，并按最新状态重排节拍。 */
-    const alignNow = (): void => {
-      if (disposed) return
-      reveal()
-      scheduleNext()
-    }
-    // 事件通道（审计 §7.5：事件驱动优先，轮询只作兜底）：
-    // ① 回前台立即读一次——后台期间我们根本不排拍，回来必须马上对齐；
-    // ② 用户展开右侧栏时，把「收起期间攒下的待落位」立即补上，不等下一拍（旧实现最多晚 800ms）。
-    const onVisibility = (): void => { if (!document.hidden) alignNow() }
-    document.addEventListener('visibilitychange', onVisibility)
-    // 展开监听**只在「收起且有待落位」这一小段窗口内挂**（审计 §7.3 的教训：常驻全文档观察器
-    // 是另一笔账）。窗口之外它一次都不跑，因此这里不构成新的常驻观察成本。
-    const expandWatch = typeof MutationObserver === 'undefined'
-      ? null
-      : new MutationObserver(() => {
-        // 只认一条边沿：待落位 + 已展开。其余结构变更不值得为它去跨桥读一次状态。
-        if (disposed || !pending || collapsedNow()) return
-        alignNow()
-      })
-    let expandWatching = false
-    const watchExpanded = (): void => {
-      if (expandWatch === null || expandWatching) return
-      try {
-        // 权威收起信号是展开控件的**在场与否**：用户展开时 React 会把它从子列表里摘掉。
-        expandWatch.observe(document.body, { childList: true, subtree: true })
-        expandWatching = true
-      } catch { /* body 未就绪：轮询仍可兜底 */ }
-    }
-    const unwatchExpanded = (): void => {
-      if (expandWatch === null || !expandWatching) return
-      expandWatch.disconnect()
-      expandWatching = false
-    }
     reveal()
-    scheduleNext()
+    // 性能审计 2026-11-02 #4：同 1s 兜底轮询的口径——页面不可见时不排下一拍。
+    // 「自动展开查看器」在后台没有任何意义（用户看不到），却在后台仍每 800ms 读一次
+    // collapsedNow()/sidebar 状态并可能触发 openTab。
+    //
+    // 性能审计 2026-11-02 Top 4（剩余面）：与 1s 轮询同口径。`#1325` 已挡掉后台，
+    // 但「页面在前台 + 侧栏收起」时这一拍仍在每 800ms 读一次 collapsedNow()/sidebar 状态。
+    // 自动露出的**目的**就是把面板露出来，所以「侧栏已收起且用户没在展开」时它无事可做——
+    // 唯一例外是待落位（收起期间攒下的那次），那条路径必须继续跑，
+    // 否则用户展开侧栏后不会自动落位。判据因此是「页面在屏 且 (侧栏已展开 或 有待落位)」。
+    //
+    // issue #1339：待落位现在读 `pendingFor`（可被 reveal() 之外的逻辑看见、也可被
+    // 重置），不再是一个只在 reveal() 内部翻转的布尔——那样闸门会把自己锁死。
+    let timer: number | undefined
+    const schedule = () => {
+      if (timer !== undefined) return
+      timer = window.setTimeout(() => {
+        timer = undefined
+        if (!document.hidden && (!collapsedNow() || pendingFor !== undefined)) reveal()
+        if (!document.hidden) schedule()
+      }, 800)
+    }
+    const onVisibility = () => {
+      if (document.hidden) return
+      reveal()
+      schedule()
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    schedule()
     return () => {
-      disposed = true
-      clearTimer()
-      unwatchExpanded()
       document.removeEventListener('visibilitychange', onVisibility)
+      if (timer !== undefined) { window.clearTimeout(timer); timer = undefined }
     }
   }, 'dsh-android-vdisplay: automatically reveal active viewer')
 
@@ -815,6 +606,7 @@ export function apply(ctx: ClientContext): void {
         // 0.1.7 起 guide 条目必填 id（上游按 [providerId, entry.id] 键控，唯一性只在 provider 内判定）
         id: 'open',
         order: 40,
+        icon: VirtualScreenGlyph,
     title: () => tr('虚拟屏', 'Virtual screen'),
     description: () => tr('在独立屏幕上运行第三方 App（Shizuku 特权通道），不挤占用户前台。',
       'Run third-party apps on a separate display through Shizuku without taking over the foreground.'),
@@ -856,4 +648,43 @@ export function apply(ctx: ClientContext): void {
     }
     return () => { watch?.dispose() }
   }, 'dsh-android-vdisplay: terminal keybar')
+}
+
+/**
+ * 面板此刻是否**真的在屏幕上**（只读 DOM，零桥调用）。
+ *
+ * 为什么需要它（性能审计 2026-11-02 Top 4 的剩余面）：
+ * `#1325` 已把「页面切到后台」这一半做掉了（`document.hidden` 时不排下一拍）。但还有另一半：
+ * **侧栏收起时页面仍在前台**——此时 `document.hidden` 是 false，1s 轮询照跑，每秒仍然
+ * 跨桥两次（`vdisplayStatus` + `vdisplayBounds`），而面板根本不在屏幕上，这两个动作
+ * 没有任何可观测效果。用户收起侧栏看聊天界面的整段时间都在白烧。
+ *
+ * 判据与 `publishBounds` 里的可见性口径**同源**（宁可多判一次不可漏判）：
+ *   1. 页面在前台（`visibilityState`）；
+ *   2. 侧栏没有收起（权威信号 = 上游展开控件不在场，见坑 119/120）；
+ *   3. 舞台还在文档里；
+ *   4. 舞台没有 display:none / visibility:hidden；
+ *   5. 舞台矩形大于 1px。
+ *
+ * 任何一条不成立就返回 false —— 保守侧是「不轮询」，代价只是回到「下一拍对齐」，
+ * 而这正是事件通道（watchStageVisibility）已经覆盖的部分。
+ *
+ * **本函数刻意放在文件末尾**：EXECUTION-MAP 有两条锚点钉在 watchStageVisibility 的
+ * 注释与属性过滤行上（`:171` / `:194`），把新函数插在它们之前会把行号推漂。
+ */
+function panelOnScreen(): boolean {
+  if (typeof document === 'undefined') return false
+  if (document.visibilityState === 'hidden') return false
+  if (document.querySelector('[data-sidebar-right-expand]') !== null) return false
+  const stage = document.querySelector('[data-testid=vdisplay-stage]')
+  if (stage === null || !stage.isConnected) return false
+  try {
+    const style = getComputedStyle(stage)
+    if (style.display === 'none' || style.visibility === 'hidden') return false
+    const rect = stage.getBoundingClientRect()
+    return rect.width > 1 && rect.height > 1
+  } catch {
+    // 取不到样式（老内核 / 分离节点）：按「在屏」处理，宁可多轮询也不让状态停更。
+    return true
+  }
 }

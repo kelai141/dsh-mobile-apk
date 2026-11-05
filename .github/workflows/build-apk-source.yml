@@ -4,12 +4,21 @@ on:
   workflow_dispatch:
   workflow_call:
 
+# Use a stable source-build group for direct dispatches and reusable calls. The caller has its own
+# namespace, while both source-build entry paths remain serialized for the same ref.
+concurrency:
+  group: build-apk-source-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
 jobs:
   build-arm64:
     runs-on: ubuntu-latest
+    # 该 workflow 从未有过完成的 run（无实测数据），按 build-apk 同型任务的实测最长 23 分钟
+    # 留足 2.5 倍余量取值。宁可宽松也不能把正常的重构建判死。
+    timeout-minutes: 60
     env:
       DSH_APK_DIR: ${{ github.workspace }}
     steps:
@@ -91,7 +100,7 @@ jobs:
           # 自证（坑 203）：先用这把 keystore 签一个探针包、再把它读回来，验证「apksigner 能读出期望
           # 指纹」这条判据本身可用。放在构建**前**，是为了让工具/keystore 的问题在 2 分钟内暴露，
           # 而不是等 30 分钟的打包跑完才在末尾判红（前两轮各因此烧掉一小时，且产物被丢弃）。
-          expected_signing_certificate='1dde9d980f62b715f29c20b421063f1d3d796085adf7de7e9907dd16d845bcbd'
+          expected_signing_certificate=$(node scripts/check-apk-signatures.mjs --print-expected-cert)  # 期望指纹唯一真源：scripts/fixtures/apk-expected-cert.sha256（issue #1031）；此处原为硬编码 hex，与锚文件各持一份能独立漂移的真源。经检查器读取还断言「锚 == 不变量常量」，改锚洗白在本步即红
           mkdir -p .deploy-tmp/source-build/signing-self-test
           python3 - <<'PY'
           import zipfile
@@ -178,6 +187,14 @@ jobs:
           # Previous stage interruption may leave the project overlay in its source-only form.
           # Regenerate from the immutable audited project commit, not the previous run artifact.
           git show "$GITHUB_SHA:scripts/snapshot-config/engine-overlay.json" > scripts/snapshot-config/engine-overlay.json
+          # Read the contract before leaving the project root. After the cd below the cwd is
+          # the upstream checkout, which has no scripts/contract.json (rc.3 included).
+          contract_package_manager=$(node -p 'require(process.argv[1]).upstream.packageManager' "$GITHUB_WORKSPACE/scripts/contract.json")
+          if ! printf '%s\n' "$contract_package_manager" | grep -Eq '^pnpm@[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::contract packageManager is not an exact pnpm version: $contract_package_manager"
+            exit 1
+          fi
+          expected_pnpm=${contract_package_manager#pnpm@}
           cd .deploy-tmp/deepseek-harness
           # Reset only the dedicated build checkout on rerun; retain ignored caches.
           # All vendor sources now follow the official target; no older commit is staged.
@@ -185,7 +202,8 @@ jobs:
           git clean -fdq
           corepack enable
           corepack pnpm install --frozen-lockfile
-          test "$(corepack pnpm --version)" = "11.7.0"
+          # The contract was captured at the project root above; this cwd is upstream only.
+          test "$(corepack pnpm --version)" = "$expected_pnpm"
           corepack pnpm --version > "$GITHUB_WORKSPACE/.deploy-tmp/source-build/package-manager-versions.txt"
           printf 'deployment pnpm: ' >> "$GITHUB_WORKSPACE/.deploy-tmp/source-build/package-manager-versions.txt"
           # corepack's fetcher has no download deadline: a stalled connection leaves the
@@ -316,7 +334,7 @@ jobs:
           report.androidRuntimeDependencies.resolvedPackages = {
             koffi: exact('koffi', '3.2.1'),
             koffiAndroidArm64: exact('@koromix/koffi-android-arm64', '3.2.1'),
-            sharpWasm32: exact('@img/sharp-wasm32', '0.35.3'),
+            sharpWasm32: exact('@img/sharp-wasm32', '0.35.5'),
           }
           fs.writeFileSync(reportPath, JSON.stringify(report, null, 2) + '\n')
           const policyPath = '.deploy-tmp/source-build/source-build-policy.json'
@@ -325,7 +343,7 @@ jobs:
             audit: '.deploy-tmp/source-build/android-native-runtime-packages.json',
             trustedPublisherInputs: [
               { name: '@koromix/koffi-android-arm64', version: '3.2.1', upstream: 'https://github.com/Koromix/koffi', role: 'Android ARM64 Node-API binding for Koffi' },
-              { name: '@img/sharp-wasm32', version: '0.35.3', upstream: 'https://github.com/lovell/sharp', role: 'WebAssembly fallback for Sharp on Android' },
+              { name: '@img/sharp-wasm32', version: '0.35.5', upstream: 'https://github.com/lovell/sharp', role: 'WebAssembly fallback for Sharp on Android' },
             ],
             lockfileSha256: report.resolvedLockfileSha256,
             lockfileIntegrityEntries: report.androidRuntimeDependencies.resolvedPackages,
@@ -730,7 +748,7 @@ jobs:
             temporaryAdapterSha256: digest('scripts/source-build/check-dsh-source-snapshot-gate.mjs'),
             checker: 'scripts/source-build/check-dsh-source-snapshot.mjs',
             checkerSha256: digest('scripts/source-build/check-dsh-source-snapshot.mjs'),
-            reason: 'The standard gate models the older flattened npm overlay; this source audit uses the pinned 0.2.0-rc.2 pnpm deploy tree. The replacement validates the final snapshot against the pinned source package manifest, pnpm dependency links, and registered engine patch markers.'
+            reason: 'The standard gate models the older flattened npm overlay; this source audit uses the pinned Harness pnpm deploy tree. The replacement validates the final snapshot against the pinned source package manifest, pnpm dependency links, and registered engine patch markers.'
           }
           fs.writeFileSync(policyPath, JSON.stringify(policy, null, 2) + '\n')
           NODE
@@ -752,7 +770,7 @@ jobs:
           find .deploy-tmp/snapshot-013/arm64/.debs -maxdepth 1 -type f -name '*.tgz' -print0 \
             | sort -z | xargs -0 -r sha256sum \
             > .deploy-tmp/source-build/runtime-tarballs-sha256.txt
-          for d in plugins/dsh-android-bridge plugins/dsh-android-manage plugins/dsh-android-linux-env plugins/dsh-android-file-open plugins/dsh-model-capability plugins/dsh-android-browser plugins/dsh-android-vdisplay dsh-shell-termux dsh-client-ui-responsive vendor/dshmarketplace-plugin; do
+          for d in plugins/dsh-android-bridge plugins/dsh-android-manage plugins/dsh-android-linux-env plugins/dsh-android-file-open plugins/dsh-android-browser plugins/dsh-android-vdisplay dsh-shell-termux dsh-client-ui-responsive vendor/dshmarketplace-plugin; do
             sha256sum "$d/package.json" "$d/package-lock.json" 2>/dev/null || true
           done > .deploy-tmp/source-build/plugin-lock-sha256.txt
           printf '%s\n' "$GITHUB_SHA" > .deploy-tmp/source-build/project-source-commit.txt
@@ -807,11 +825,23 @@ jobs:
           [ "${#apks[@]}" -gt 0 ] || { echo "::error::source build has no final APKs"; exit 1; }
           args=()
           for apk in "${apks[@]}"; do args+=(--apk "$apk"); done
-          node scripts/check-apk-signatures.mjs "${args[@]}" --apksigner "$(cat .deploy-tmp/source-build/apksigner-path.txt)" --keystore keystore/debug.keystore
+          # keystore 凭据必须显式声明（issue #1031）：门禁不再回落到 androiddebugkey/android。
+          node scripts/check-apk-signatures.mjs "${args[@]}" --apksigner "$(cat .deploy-tmp/source-build/apksigner-path.txt)" \
+            --keystore keystore/debug.keystore --keystore-alias androiddebugkey --keystore-pass android
+          # provenance 记录的是**锚**（已发布产物的签名身份），不是 keystore 现算值：
+          # keystore 只是交叉核对面，两者不一致时这条断言先判红，绝不能把 keystore 的指纹
+          # 当作发布身份写进 provenance（issue #1031）。
           node --input-type=module <<'NODE'
           import { writeFileSync } from 'node:fs'
-          import { readKeystoreCertificate } from './scripts/check-apk-signatures.mjs'
-          writeFileSync('.deploy-tmp/source-build/signing-certificate-sha256.txt', readKeystoreCertificate('keystore/debug.keystore') + '\n')
+          import { loadCertificateAnchor, crossCheckKeystore, readKeystoreCertificate } from './scripts/check-apk-signatures.mjs'
+          const anchor = loadCertificateAnchor()
+          if (!anchor.ok) {
+            for (const problem of anchor.problems) console.error(problem)
+            process.exit(1)
+          }
+          const cross = crossCheckKeystore({ anchorDigest: anchor.digest, keystoreDigest: readKeystoreCertificate('keystore/debug.keystore', { alias: 'androiddebugkey', pass: 'android' }) })
+          if (!cross.ok) { console.error(cross.detail); process.exit(1) }
+          writeFileSync('.deploy-tmp/source-build/signing-certificate-sha256.txt', anchor.digest + '\n')
           NODE
 
       - name: Upload APK and provenance

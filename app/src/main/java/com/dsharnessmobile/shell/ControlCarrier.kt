@@ -43,15 +43,15 @@ internal object ControlCarrier {
   private var poller: ControlPoller? = null
   private var appContext: Context? = null
 
-  /** Shizuku 特权通道就绪（caps 上报；TTL 缓存——回填信封不为此反复打 binder）。 */
+  /** Shizuku 特权通道就绪（caps 上报；TTL 缓存——回填信封不为此反复打 binder）；三态，null = 尚未探测完（issue #1506，不作折平）。 */
   private const val SHIZUKU_CACHE_MS = 5_000L
-  @Volatile private var shizukuReady = false
+  @Volatile private var shizukuReady: Boolean? = null
   @Volatile private var shizukuCheckedAt = 0L
 
-  private fun shizukuReady(app: Context): Boolean {
+  private fun shizukuReady(app: Context): Boolean? {
     val now = SystemClock.elapsedRealtime()
     if (now - shizukuCheckedAt < SHIZUKU_CACHE_MS) return shizukuReady
-    val ready = runCatching { ShizukuTransport.status(app).optBoolean("ok") }.getOrDefault(false)
+    val ready = runCatching { readinessTriState(ShizukuTransport.status(app)) }.getOrNull() // 三态，不折平：null = 尚未探测完
     shizukuReady = ready
     shizukuCheckedAt = now
     return ready
@@ -80,7 +80,7 @@ internal object ControlCarrier {
       context = app,
       handler = { op, args -> handle(op, args) },
       // 两条通道的能力事实（0.14.0 §6）：a11y = 无障碍服务在场；shizuku = 特权 shell 通道就绪。
-      capsExtra = { JSONObject().put("a11y", a11y != null).put("shizuku", shizukuReady(app)) },
+      capsExtra = { JSONObject().put("a11y", a11y != null).put("shizuku", shizukuReady(app) ?: JSONObject.NULL) },
       heartbeat = { if (a11y != null) DeviceControlService.heartbeat(app) },
     )
     poller = created
@@ -120,9 +120,31 @@ internal object ControlCarrier {
         ShellOps.handle(current, op, args)
       }
     }
-    else -> a11y?.handle(op, args) ?: JSONObject()
-      .put("__error", "无障碍服务未开启——该操作需要「" + UserCopy.A11Y_SERVICE_NAME + "」无障碍通道；浏览器与虚拟屏操作不受影响。")
-      .put("reason", "a11y-unavailable")
-      .put("op", op)
+    else -> {
+      // #648 自愈：只有当**无障碍处理器引用为 null**（= 服务未绑定，内存态确定事实）时，
+      // 才把 prefs 的 a11yEnabled 回写成 false。
+      //
+      // 为什么必须限定在这个判据上：prefs 里的 a11yEnabled 会在进程被 force-stop 后变成
+      // 「僵尸 true」（onDestroy 不保证执行），而引擎侧 a11ySource() 只认新鲜心跳——心跳
+      // 同样会断，于是引擎侧判定为离线、prefs 却还写着 true，两边长期不一致。
+      //
+      // 明确**不**触发回写的情形（这里是 a11y 已死的确定事实，不是调用成败的推断）：
+      //  - handle() 抛异常 / 超时 / 返回 __error：服务在场但操作失败，原因未知，不得据此改状态；
+      //  - op 属于 BROWSER_OPS / VD_OPS / SHELL_OPS：与无障碍无关，前面已分流，走不到这里；
+      //  - a11y 非 null 但内部失败：同上，不写。
+      // 换句话说：回写的唯一依据是「a11y == null」这个引用事实，与任何一次调用的结果无关。
+      //
+      // 闭环：服务重新连上时 DeviceControlService.onServiceConnected() 会 setEnabledFlag(true)
+      // 把 prefs 改回 true（DeviceControlService.kt:459），所以一次回写不会永久写成 false。
+      val handler = a11y
+      if (handler == null) {
+        val ctx = appContext
+        if (ctx != null) DeviceControlService.markUnavailable(ctx)
+      }
+      handler?.handle(op, args) ?: JSONObject()
+        .put("__error", "无障碍服务未开启——该操作需要「" + UserCopy.A11Y_SERVICE_NAME + "」无障碍通道；浏览器与虚拟屏操作不受影响。")
+        .put("reason", "a11y-unavailable")
+        .put("op", op)
+    }
   }
 }

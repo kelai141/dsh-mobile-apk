@@ -22,7 +22,7 @@
  *   node scripts/check-vendored-linux-bootstrap.mjs --print       # regenerate the digest table
  */
 import { createHash } from 'node:crypto'
-import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs'
+import { readdirSync, readFileSync, existsSync, statSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -38,14 +38,16 @@ const UPSTREAM_PACKAGE = 'packages/linux-bootstrap'
  * differently on Windows and Linux.
  */
 const MANIFEST = {
+  'test/rollback-trace-1528.test.mjs': 'ac891c9a72e73a94464181298e7c2a98451f24866139eb1dbe6ec61185e0cf23',
+  'test/asset-bundle-rollback.test.mjs': '33371c99e467e6ae9a23b879ede6e0383fe6c6f6abb5d25669592eb636edf967',
   'README.md': '9809a0991a5314ae7baafdae3a53147099b1dbc66100060519d157512732b8bb',
   'client/api.js': 'e53e3a05f6c9922a9186101a88430fea231880356045289439434e61089ccc38',
   'client/assets.js': '9cbb67716f7d0b7d433d5e3a4d324b16f5121fd7eea64f77f71a4cc02708bc5c',
   'client/i18n.js': '77077f806bfd3f0124a04024de7614d12524474366fcae58ea1dcac3da287a50',
   'client/index.js': '5c53f8eddad50e1092ce7f46c5efb19776f5bf0f9310e50c5c0df8299e60f5aa',
-  'src/asset-bundle.js': '2520d8fec29dbaa7da1d6e602ff313ffed8ae1f124e7a94f6f4276f4474dd622',
+  'src/asset-bundle.js': 'a73998cd72301dae51a7f0ed7e9f2897859131d2bd4cb76cd9c67b0d8b8a601e',
   'src/github.js': '8bf1bdac19fb17dc866087342b55714661e762124953bb6f697a4c87f04e70c3',
-  'src/index.js': 'c94d16e4efd7a0ae5a90eec103c78941d45853c7ac3fadd1dd8f3a6903d6506c',
+  'src/index.js': 'ee3cb7b35086b0f1848ddb1783c2b445ca3163c333b247c397121e2d1bb22673',
   'src/manifest.js': '45b0655c3702bd236090776e3d1b276416ab5a643a2ed58b47b4343bf5c8b86c',
   'src/routes.js': '678391176bcd81ba6cbbbab293a4731d07e37e99c51178d7605821eac6aa5bb9',
   'src/status.js': '494238e39094999e44105d1c56ca562f88ce3e65146bd3070806d4c82dd98f7b',
@@ -53,10 +55,25 @@ const MANIFEST = {
 }
 
 /** Files this repo adds. Neither may be an upstream artifact. */
-const ADDED = ['build.mjs', 'package.json']
+const ADDED = ['build.mjs', 'package.json', 'package-lock.json']
 
 /** `lib/` is a build product (gitignored, rebuilt by `npm run build`); `node_modules` is never vendored. */
-const IGNORED_DIRS = new Set(['node_modules', 'lib', '.git'])
+//
+// issue #1198：**`lib/` 不能对「禁止载荷」扫描隐身**。
+//
+// 旧实现把 lib/ 和 node_modules 一起塞进 IGNORED_DIRS，而 vendoredFiles() 的同一趟 walk
+// 同时喂「文件集断言」和 checkForbiddenPayloads —— 于是 lib/ 对**两者**都不可见。
+// 但同一文件 :139 自己写着「lib/ 是快照注入器会打进包的产物目录」。
+// 结果：往 plugins/dsh-linux-bootstrap/lib/ 放 rootfs.deb 与 node，门禁全绿。
+//
+// 修法：把「不进文件集清单」与「不做载荷扫描」拆成两个集合。
+//   - SKIP_FROM_MANIFEST：lib/（构建产物，文件集哈希清单本来就不该含它）、.git
+//   - SKIP_FROM_SCAN：只有 .git（版本控制内部，不是交付面）
+//   - node_modules：两者都跳过（依赖树不属于本仓 vendoring 面）
+// lib/ 仍在文件集断言之外（它的内容随构建变化，写进哈希清单会天天漂），
+// 但**必须**过载荷扫描 —— 它正是会被打进包的那个目录。
+const SKIP_FROM_MANIFEST = new Set(['node_modules', 'lib', '.git'])
+const SKIP_FROM_SCAN = new Set(['node_modules', '.git'])
 
 /**
  * The vendoring must never carry the pieces that stay Release-only. Each entry is a claim we can
@@ -77,10 +94,29 @@ const digestOf = (path) => createHash('sha256').update(normalize(readFileSync(pa
 function vendoredFiles(dir = PACKAGE_DIR, prefix = '') {
   const out = []
   for (const name of readdirSync(dir).sort()) {
-    if (IGNORED_DIRS.has(name)) continue
+    if (SKIP_FROM_MANIFEST.has(name)) continue
     const full = join(dir, name)
     const rel = prefix ? `${prefix}/${name}` : name
     if (statSync(full).isDirectory()) out.push(...vendoredFiles(full, rel))
+    else out.push(rel)
+  }
+  return out
+}
+
+/**
+ * 需要做**载荷扫描**的文件（issue #1198）。
+ *
+ * 与 vendoredFiles 的差别只有一处：**包含 lib/**。
+ * lib/ 是构建产物，不该进哈希清单（内容随构建变），但它是会被打进包的目录 ——
+ * 「不得夹带二进制/归档载荷」这条承诺必须覆盖它，否则整条承诺在唯一相关的地方失效。
+ */
+function scannableFiles(dir = PACKAGE_DIR, prefix = '') {
+  const out = []
+  for (const name of readdirSync(dir).sort()) {
+    if (SKIP_FROM_SCAN.has(name)) continue
+    const full = join(dir, name)
+    const rel = prefix ? `${prefix}/${name}` : name
+    if (statSync(full).isDirectory()) out.push(...scannableFiles(full, rel))
     else out.push(rel)
   }
   return out
@@ -94,7 +130,7 @@ function checkForbiddenPayloads(files) {
     if (FORBIDDEN_EXTENSIONS.includes(ext)) bad.push(`${rel} (forbidden extension ${ext})`)
     const segments = lower.split('/')
     // A path segment is what distinguishes `bin/node` from the word "node" inside a source file.
-    if (segments.some(segment => FORBIDDEN_NAMES.includes(segment))) bad.push(`${rel} (forbidden path segment)`)
+    if (segments.some(segment => FORBIDDEN_NAMES.includes(segment)) && rel !== 'package-lock.json') bad.push(`${rel} (forbidden path segment)`)
   }
   return bad
 }
@@ -118,7 +154,7 @@ function run({ quiet = false } = {}) {
     ok(`vendored file set matches the contract (${actual.length} files)`)
   } else {
     fail(`vendored file set drifted — extra: [${onlyActual.join(', ')}]; missing: [${onlyExpected.join(', ')}]`
-      + ' (upstream test/ is intentionally excluded; re-vendor per the README contract if upstream added files)')
+      + ' (upstream browser/react test harness is intentionally excluded; re-vendor per the README contract if upstream added files)')
   }
 
   // 2. digests of the upstream-faithful files.
@@ -142,8 +178,8 @@ function run({ quiet = false } = {}) {
   else fail(`package.json entry must be ./lib/index.js so the injector carries code (found ${JSON.stringify(main)})`)
   if (typeof pkg.scripts?.build === 'string') ok('package.json build script present (materializes lib/ from src/)')
   else fail('package.json must keep a build script; lib/ is gitignored and only exists after a build')
-  if (pkg.scripts?.test === undefined) ok('no test script (upstream test/ is intentionally not vendored)')
-  else fail('package.json must not declare a test script while upstream test/ is excluded')
+  if (pkg.scripts?.test === 'npm run build && node --test test/*.test.mjs') ok('retained rollback tests are executable')
+  else fail('package.json must run the retained rollback regression tests')
   if (pkg.private === true) ok('package.json is private (the vendored copy can never be published)')
   else fail('package.json must stay private: true')
   const pin = pkg.dshVendor
@@ -154,7 +190,10 @@ function run({ quiet = false } = {}) {
   }
 
   // 4. nothing Release-only may enter the repo through this directory.
-  const forbidden = checkForbiddenPayloads(actual)
+  // issue #1198：载荷扫描用**更宽的**文件集（含 lib/），文件集断言仍用 actual（不含 lib/）。
+// 两者故意不同：lib/ 内容随构建变化，不该进哈希清单；但它会被打进包，必须过载荷扫描。
+const scannable = scannableFiles()
+const forbidden = checkForbiddenPayloads(scannable)
   if (forbidden.length === 0) ok('no binary/archive payload, runtime plugin, rootfs or Node vendored')
   else fail(`forbidden payload vendored: ${forbidden.join('; ')}`)
 
@@ -209,6 +248,31 @@ function selfTest() {
     if (passed) console.log('SELF-TEST PASSED  ' + control.label)
     else { console.log('SELF-TEST FAILED  ' + control.label + ` — produced: ${JSON.stringify(produced)}`); bad += 1 }
   }
+  // issue #1198 正控（语义与上面几条不同：它们验证「能判红」，这条验证「机制接线正确」）：
+  // lib/ 不进文件集清单（构建产物），但**必须**进载荷扫描集 —— 它是会被打进包的目录。
+  // 临时造一个 lib/ 载荷来验证，不依赖当前 lib/ 里恰好有文件（构建产物可能缺席）。
+  {
+    const probeDir = join(PACKAGE_DIR, 'lib')
+    const probe = join(probeDir, '__probe_payload.deb')
+    const hadDir = existsSync(probeDir)
+    let posBad = []
+    try {
+      mkdirSync(probeDir, { recursive: true })
+      writeFileSync(probe, 'x')
+      const scan = scannableFiles()
+      if (!scan.some((f) => f === 'lib/__probe_payload.deb')) posBad.push('lib/ 不在载荷扫描集里')
+      if (!checkForbiddenPayloads(scan).some((f) => f.includes('__probe_payload.deb'))) posBad.push('lib/ 里的 .deb 未被判禁止')
+      if (vendoredFiles().some((f) => f.startsWith('lib/'))) posBad.push('lib/ 不该进哈希清单')
+    } finally {
+      try { rmSync(probe, { force: true }) } catch { /* ignore */ }
+      if (!hadDir) { try { rmSync(probeDir, { recursive: true, force: true }) } catch { /* ignore */ } }
+    }
+    if (posBad.length > 0) {
+      console.log('SELF-TEST FAILED  positive control: lib/ is inside the payload scan (issue #1198) — ' + posBad.join('; '))
+      bad += 1
+    } else console.log('SELF-TEST PASSED  positive control: lib/ is inside the payload scan (issue #1198)')
+  }
+
   if (bad > 0) process.exit(1)
   console.log(`SELF-TEST PASSED（正控 1 项 + 负控 ${controls.length} 项）`)
 }

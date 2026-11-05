@@ -74,7 +74,18 @@ one must end on a complete statement (see Development constraints).
   the API at click time;
 - boot watchdog: 40s stuck diagnostics plus the three contract lines the shell APK parses by
   field position (`[dsh-boot-stall]` stuck, `[dsh-boot-ready]` really rendered,
-  `[dsh-boot-failed]` client plugin tree failed) — see Boot diagnostics contract.
+  `[dsh-boot-failed]` client plugin tree failed) — see Boot diagnostics contract.;
+- slot-guard (2026-10-25): neutralizes undefined React elements at the module-system boundary.
+  On a Xiaomi 14 / Google WebView 155 device the upstream slot system resolves one
+  `conversation.input.left` entry to `undefined`, React throws #130 ("Element type … got:
+  undefined"), the whole tree unmounts and every boot lands in the repair gate — reproduced with
+  shell 0.14.7/main, snapshot rc.2/rc.3, third-party plugins removed and a 57-entry all-upstream
+  load list, so the crash is upstream's (no per-entry error boundary). The guard traps the
+  `window.__ModuleLoader__` assignment (earliest `<head>` injection, before the upstream queue
+  script), wraps each registration's `factory` so `react` / `react/jsx-runtime(-dev-runtime)`
+  namespaces get fail-soft `createElement` / `jsx` / `jsxs` / `jsxDEV`: `undefined` types render
+  `null` (that entry silently absent) with a single `console.warn`, everything else passes
+  through untouched. Upstream fix pending; the guard is then harmless dead weight.
 
 ## Boot diagnostics contract
 
@@ -113,12 +124,18 @@ Snippets live in the `POLYFILLS` array; the assembly rule is `POLYFILL_SCRIPT_BO
 - `apply()` parse-checks the assembled markup with `new Function` at load and throws on failure
   (loud failure beats a silent downgrade).
 - **Shim the real structure, not just the name**: the global `Iterator` must be a constructor whose `.prototype` IS `%IteratorPrototype%` (bundled code such as pdfjs patches `Iterator.prototype.x` directly), and iterator wrappers must inherit that same prototype or chained helpers break.
+- **Install prototype builtins with `Object.defineProperty` and `enumerable: false`** (issue #621): an
+  assignment produces an enumerable property, so a plain array or string `for...in` then yields method
+  names and treats functions as data. The criterion lives in
+  `scripts/polyfill-property-descriptors.test.mjs` (including "a native method in place is left byte-for-byte
+  untouched" and a source contract).
 
 ## Tests
 
 ```sh
 node scripts/smoke-injections.mjs   # assembly + per-script parse + page-marker assertions, no install needed
 node scripts/boot-watchdog.test.mjs # watchdog behaviour: pendingBoot / ready / failure contract line
+node scripts/slot-guard.test.mjs     # slot guard: undefined-element neutralization / idempotency / injection position
 ```
 
 The script loads the real plugin against a stubbed cordis, runs one `tapIndex` transform, and parses

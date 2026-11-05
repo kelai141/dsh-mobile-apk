@@ -36,7 +36,7 @@ export const BROWSER_TOOLS = {
 /**
  * 壳桥 op 名（DeviceControlService.handle 分支 + ControlProtocolV2.SUPPORTED_OPS + 引擎 ControlOp
  * + ROUTE_OPS + manage 工具面 = 六处登记链；**browser\* 不进 A11Y_OPS**，方案 §4.5 明确）。
- * 本轮壳侧尚未实现，op 名先冻结在契约里。
+ * 壳侧执行位已落地（BrowserHost.kt / DeviceControlService 的 browser* 分支，见 #523），op 名与此处一致。
  */
 export const BROWSER_OPS = {
   caps: 'browserCaps',

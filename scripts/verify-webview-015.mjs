@@ -42,6 +42,22 @@ const formExpr = (body) => '(() => { const mobile = window.innerWidth <= ' + MOB
 const CORNER_PROBE = "(() => { const c = document.querySelector('[data-conversation-header-corner]'); const p = document.querySelector('[data-sidebar-right-panel]'); return { corner: !!c, panel: !!p, open: !!(p && p.hasAttribute('data-sidebar-right-open')), button: !!(c && c.querySelector('button')) } })()"
 
 /**
+ * 页内「打开设置」导航片段（2026-10-26，两个探针共用）。
+ *
+ * 为什么要有它：上游**没有** aria-label=设置 的直连按钮（设备实测 settingsAriaIndex=-1，竖屏/横屏都如此），
+ * 设置入口在「账号菜单」弹出菜单的 menuitem 里。此前两处探针各自写死「找 aria 设置」，只在
+ * 「本轮之前恰好已有浮层」时靠跳过分支蒙过去 ⇒ 新起一局就恒红（存量红，基线同样红）。
+ * 兜底选择器还有一处歧义（设备实测）：单个 .find() 同时认 aria-label 账号菜单 与文字 更多，而侧栏
+ * 导航项「更多」（插件浏览器入口）排在账号菜单之前（index 5 vs 14）⇒ 点了导航项进插件页，再找
+ * menuitem 设置必然落空。故顺序固定为：直连按钮 → 账号菜单（按 aria-label 认）→ 文字 更多；
+ * 点开没看到设置项就把弹层关掉，不把浮层留给后面的兜底与断言。
+ *
+ * 片段无反引号、无 ${} 插值，所以能作为独立的 const 行被 scripts/verify-webview-settings.test.mjs
+ * 原样取出求值（该测试就是这么拿到真源码的）。调用方负责先定义 sleep / tap 与自己的判据。
+ */
+const OPEN_SETTINGS_SRC = `const openSettings = async () => { const direct = [...document.querySelectorAll('button')].find(x => /^(设置|Settings)$/.test((x.getAttribute('aria-label') || '').trim())); if (direct) return { opener: 'direct', el: direct }; const accountMenu = [...document.querySelectorAll('button')].find(b => /^(账号菜单|Account menu)$/.test((b.getAttribute('aria-label') || '').trim())); const trigger = accountMenu || [...document.querySelectorAll('button')].find(b => /^(更多|More)$/.test((b.textContent || '').trim())); if (!trigger) return { opener: 'absent', el: null }; tap(trigger); await sleep(600); const name = /^(账号菜单|Account menu)$/.test((trigger.getAttribute('aria-label') || '').trim()) ? 'account-menu' : 'more'; const item = [...document.querySelectorAll('[role=menuitem],button')].find(b => /^(设置|Settings)$/.test((b.getAttribute('aria-label') || b.textContent || '').trim())); if (!item) { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await sleep(300); } return { opener: name + (item ? '' : ':no-item'), el: item || null }; };`
+
+/**
  * 「重置链接」按钮的页内探针（0.14.2 P1）。
  *
  * 跨层判据分两步，缺一步只证明一半：
@@ -54,9 +70,30 @@ const CORNER_PROBE = "(() => { const c = document.querySelector('[data-conversat
  *   b) 设置打开后「手机控制」是**页签**，不点它该区块不挂载（实测 dialog 文本含「通用设置/模型/
  *      内置插件/…/手机控制/开发者选项」而 #dsh-phone-control-title 为 null）⇒ 补点页签。
  *
+ * c) 设置入口不在直连按钮上（2026-10-26 设备实测，存量红）：上游没有 aria-label=设置 的按钮，
+ *      入口在「账号菜单」弹出菜单里；兜底选择器还同时认文字「更多」，而侧栏导航项「更多」排在
+ *      账号菜单之前（index 5 vs 14）⇒ 旧写法点了导航项进插件页，返回 no-settings-entry。
+ *      导航统一走 OPEN_SETTINGS_SRC（直连 → 账号菜单 → 文字兜底，点空即关弹层），
+ *      steps 里记 open:<用的是哪个入口>，下次一眼看出卡在哪一环。
+ *   d) 「已开」不能用「节点在场」判（2026-10-26 竖屏实测）：上一轮留下的设置页在本视角下 rect=0x0，
+ *      旧 section() 直接短路 ⇒ steps 为空、按钮 w/h=0 判红。改为按**布局尺寸**（rect>0）认已开，
+ *      于是同一次运行里它会先清浮层、再正经导航一遍；判据（w>0 && h>0）保持不放宽。
+ *
  * 失败态带上 steps，下次一眼看出卡在哪一步；打不开就如实判红，不用缺失冒充绿。
  */
-const RESET_BUTTON_PROBE = `(async () => { const sleep = (ms) => new Promise(r => setTimeout(r, ms)); const tap = (el) => { const b = el.getBoundingClientRect(); const x = b.x + b.width / 2; const y = b.y + b.height / 2; el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: x, clientY: y })); el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: x, clientY: y })); el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: x, clientY: y })); el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: x, clientY: y })); el.click(); }; const mobile = window.innerWidth <= ${MOBILE_FORM_MAX_WIDTH}; const section = () => !!document.querySelector('#dsh-phone-control-title'); const steps = []; const dlg = () => document.querySelectorAll('[role=dialog]').length; if (!section() && dlg() > 0) { for (let i = 0; i < 5 && dlg() > 0; i++) { const c = [...document.querySelectorAll('[role=dialog] button')].find(b => (b.getAttribute('aria-label') || '').trim() === '关闭'); if (c) tap(c); else document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await sleep(500); } steps.push('cleared:' + dlg()); } if (!section()) { if (mobile) { const t = document.querySelector('[data-dsh-sidebar-toggle]'); if (t) { tap(t); await sleep(900); steps.push('drawer'); } } const findSettings = () => [...document.querySelectorAll('button')].find(x => (x.getAttribute('aria-label') || '').trim() === '设置'); let s = findSettings(); if (!s) { const more = [...document.querySelectorAll("button")].find(b => b.getAttribute("aria-label") === "账号菜单" || (b.textContent || "").trim() === "更多"); if (more) { tap(more); await sleep(600); steps.push("more"); s = [...document.querySelectorAll("[role=menuitem],button")].find(b => (b.getAttribute("aria-label") || b.textContent || "").trim() === "设置"); } } if (!s) { const t = document.querySelector('[data-dsh-sidebar-toggle]'); if (t) { tap(t); await sleep(600); s = findSettings(); } } if (!s) return 'no-settings-entry'; tap(s); await sleep(2000); steps.push('settings'); if (!section()) { const tab = [...document.querySelectorAll('button,[role=tab]')].find(b => { const label = b.cloneNode(true); label.querySelectorAll('[data-dsh-settings-nav-desc], [data-dsh-settings-nav-chevron]').forEach(n => n.remove()); return /^手机控制$/.test((label.textContent || '').trim()); }); if (tab) { tap(tab); await sleep(1200); steps.push('tab'); } } } if (!section()) return 'settings-not-opened:' + steps.join(','); const btn = [...document.querySelectorAll('button')].find(b => /^重置链接$/.test((b.textContent || '').trim())); if (!btn) return 'button-absent'; const rc = btn.getBoundingClientRect(); return { steps, section: true, present: true, disabled: btn.disabled === true, visible: getComputedStyle(btn).display !== 'none', w: Math.round(rc.width), h: Math.round(rc.height) }; })()`
+/**
+ * 「已退役的 Session-header 入口是否复活」的页内探针（双语）。
+ *
+ * 这是**否定**判据：中英文可访问名任一命中都算复活 → 调用方要求 `present === false`。
+ * 单独抽成 const 是为了让 scripts/verify-webview-settings.test.mjs 能原样取出真源码求值
+ * （无反引号、无插值），从而给这条判据配可证伪的负控。
+ */
+const RETIRED_OPEN_ENTRY_PROBE = `(() => { const active = !!document.querySelector('[data-dsh-frame] [data-phase="active"]'); const labels = ['在文件中打开', 'Open in file manager']; const hits = labels.filter((label) => document.querySelector('[aria-label="' + label + '"]') !== null); return { active, present: hits.length > 0, hits } })()`
+
+// Match the supported accessible names without depending on the active UI locale.
+const FILE_BUTTON_PROBE = `(() => { const btn = document.querySelector('button[aria-label="添加文件或调用指令"], button[aria-label="Add files or run commands"]'); if (!btn) return 'absent'; return getComputedStyle(btn).display !== 'none'; })()`
+
+const RESET_BUTTON_PROBE = `(async () => { const sleep = (ms) => new Promise(r => setTimeout(r, ms)); const tap = (el) => { const b = el.getBoundingClientRect(); const x = b.x + b.width / 2; const y = b.y + b.height / 2; el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: x, clientY: y })); el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: x, clientY: y })); el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: x, clientY: y })); el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: x, clientY: y })); el.click(); }; const mobile = window.innerWidth <= ${MOBILE_FORM_MAX_WIDTH}; const section = () => { const el = document.querySelector('#dsh-phone-control-title'); if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; }; const steps = []; const dlg = () => document.querySelectorAll('[role=dialog]').length; if (!section() && dlg() > 0) { for (let i = 0; i < 5 && dlg() > 0; i++) { const c = [...document.querySelectorAll('[role=dialog] button')].find(b => /^(关闭|Close)$/.test((b.getAttribute('aria-label') || '').trim())); if (c) tap(c); else document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await sleep(500); } steps.push('cleared:' + dlg()); } if (!section()) { if (mobile) { const t = document.querySelector('[data-dsh-sidebar-toggle]'); if (t) { tap(t); await sleep(900); steps.push('drawer'); } } ${OPEN_SETTINGS_SRC} let opened = await openSettings(); steps.push('open:' + opened.opener); let s = opened.el; if (!s) { const t = document.querySelector('[data-dsh-sidebar-toggle]'); if (t) { tap(t); await sleep(600); opened = await openSettings(); steps.push('open2:' + opened.opener); s = opened.el; } } if (!s) return 'no-settings-entry'; tap(s); await sleep(2000); steps.push('settings'); if (!section()) { const tab = [...document.querySelectorAll('button,[role=tab]')].find(b => { const label = b.cloneNode(true); label.querySelectorAll('[data-dsh-settings-nav-desc], [data-dsh-settings-nav-chevron]').forEach(n => n.remove()); return /^(手机控制|Phone control)$/.test((label.textContent || '').trim()); }); if (tab) { tap(tab); await sleep(1200); steps.push('tab'); } } } if (!section()) return 'settings-not-opened:' + steps.join(','); const btn = [...document.querySelectorAll('button')].find(b => /^(重置链接|Reset link)$/.test((b.textContent || '').trim())); if (!btn) return 'button-absent'; const rc = btn.getBoundingClientRect(); return { steps, section: true, present: true, disabled: btn.disabled === true, visible: getComputedStyle(btn).display !== 'none', w: Math.round(rc.width), h: Math.round(rc.height) }; })()`
 
 const checks = [
   ['移动形态标记与实测 viewport 一致（判据取自页内 innerWidth，与 --wide 无关）',
@@ -101,8 +138,12 @@ const checks = [
   // 0.14.2 P5 已按用户反馈退役 Session-header 文件夹入口；
   // dsh-client-ui-responsive/src/client/index.ts:352-356 记录删除注册的原因，组件仍供 open-with tab 使用。
   // 此断言验证退役状态在空白页和活动会话中都成立，避免把历史 UI 入口误报为产品回归。
-  ['已退役的 Session-header「在文件中打开」入口不存在（两方向都判）',
-    "(() => { const active = !!document.querySelector('[data-dsh-frame] [data-phase=\"active\"]'); return { active, present: !!document.querySelector('[aria-label=\"在文件中打开\"]') } })()",
+  //
+  // 双语（#601 后续）：本断言是「不存在」判据，所以中英文**任一**命中都算「入口复活」→ 判红。
+  // 只认中文时，英文界面下把入口加回来会恒真假绿（组件 OpenInFileManagerAction.tsx 的
+  // LABEL 目前只有中文；一旦上游/适配层给它配英文可访问名，旧判据就漏了）。
+  ['已退役的 Session-header「在文件中打开」入口不存在（两方向都判，中英文任一复活即红）',
+    RETIRED_OPEN_ENTRY_PROBE,
     (v) => !!v && v.present === false],
   ['桥 openPathChooser 已注入', "typeof window.androidBridge?.openPathChooser === 'function'", true],
   ['桥 downloadDebugLogs 已退役', "typeof window.androidBridge?.downloadDebugLogs === 'undefined'", true],
@@ -123,7 +164,7 @@ const checks = [
   // 'input.commands'，渲染点 skeleton/InputBar.tsx:423 aria-label），故改查活体 label，
   // 并保留原语义「存在且 display !== none」。这是换正确选器而非删断言：选器一改，遮蔽回归即可证伪。
   ['上游添加文件或调用指令按钮未被遮蔽（活体 label）',
-    "(async () => { const btn = document.querySelector('button[aria-label=\"添加文件或调用指令\"]'); if (!btn) return 'absent'; return getComputedStyle(btn).display !== 'none'; })()",
+    FILE_BUTTON_PROBE,
     true],
   ['名册含 ui-layout 与 ui-responsive',
     "(window.__DSH_BOOT__?.entries ?? []).map(e => e.id).filter(id => id.includes('ui-layout') || id.includes('ui-responsive'))",
@@ -139,6 +180,22 @@ const checks = [
   ['polyfill: Array.fromAsync 可用', "typeof Array.fromAsync === 'function'", true],
   ['polyfill: Set.prototype.union 可用', "typeof Set.prototype.union === 'function'", true],
   ['polyfill: Set.prototype.isDisjointFrom 可用', "typeof Set.prototype.isDisjointFrom === 'function'", true],
+  // 0.14.9 追加：ES2023 change-array-by-copy（2026-10-26 用户报障「模型选择不可用」——
+  // 旧内核缺 toSorted，render 抛错被 slot 错误边界吞成空渲染，模型胶囊看起来被下掉了）。
+  // 该组 API **恰好在 Chrome 110 落地，而模拟器 WebView 就是 110**：这四条在本机是原生在应答，
+  // 单看「是函数」证明不了注入层。所以先断言注入文本真的进了页面（送不到即红），再断言能力可用；
+  // 「删掉原生后仍能用」的语义对照在 dsh-host-web-compat/scripts/array-copy-polyfills.test.mjs。
+  ['polyfill: 注入层送达 ES2023 change-array-by-copy 片段（页面内联脚本含 toSorted/with 实现）',
+    // 认「不可枚举安装」形态（issue #621）：赋值式安装会让 for...in 多出方法名，判据必须钉住修法本身。
+    "(() => { const rows = [...document.querySelectorAll('script:not([src])')].map(s => s.textContent || ''); return rows.some(t => t.includes(\"defNonEnum('toSorted'\")) && rows.some(t => t.includes(\"defNonEnum('with'\")); })()", true],
+  ['polyfill: Array.prototype.toSorted 可用（缺它即模型胶囊/设置模型行/定时任务排序崩）', "typeof [].toSorted === 'function'", true],
+  ['polyfill: Array.prototype.toReversed 可用', "typeof [].toReversed === 'function'", true],
+  ['polyfill: Array.prototype.toSpliced 可用', "typeof [].toSpliced === 'function'", true],
+  ['polyfill: Array.prototype.with 可用', "typeof [].with === 'function'", true],
+  // 同批审计补的 ES2022 对（Chrome 97+；产品语法下限是 chrome87，87-96 在支持范围内却没有它们）。
+  // 与本批报障的 toSorted 无关，别混成一条归因。
+  ['polyfill: Array.prototype.findLast 可用', "typeof [].findLast === 'function'", true],
+  ['polyfill: Array.prototype.findLastIndex 可用', "typeof [].findLastIndex === 'function'", true],
   ['Iterator 迭代器助手可用（map/toArray 跑通）', "[1,2,3].values().map(v => v * 2).toArray().join(',')", '2,4,6'],
   ['页面内全部内联脚本可解析（装配语法回归）',
     "(() => { const bad = []; for (const s of document.querySelectorAll('script:not([src])')) { const body = s.textContent || ''; if (body.trim() === '') continue; try { new Function(body) } catch (e) { bad.push((body.slice(0, 48).replace(/\\s+/g, ' ')) + ' :: ' + e.message) } } return bad; })()",
@@ -167,7 +224,7 @@ const checks = [
   // 现在两条分支都**自己建层**，且都用真实点击（非合成 click）：手机点顶栏开关（抽屉层），
   // 桌面点侧栏的设置入口（dialog 层）。已在竖屏/横屏两方向各自实测：建层后 depth>=1、cached=true。
   ['抽屉/浮层成为返回层且壳侧同步缓存为真（两条分支各自建层；drawer 形态项仅手机判）',
-    "(async () => { const sleep = (ms) => new Promise(r => setTimeout(r, ms)); const kinds = () => Array.isArray(window.__dshBackKinds) ? window.__dshBackKinds : []; const mobile = window.innerWidth <= " + MOBILE_FORM_MAX_WIDTH + "; const tap = (el) => { const r = el.getBoundingClientRect(); const x = r.x + r.width / 2; const y = r.y + r.height / 2; el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: x, clientY: y })); el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: x, clientY: y })); el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: x, clientY: y })); el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: x, clientY: y })); el.click(); }; if (mobile && !kinds().includes('drawer')) { const b = document.querySelector('[data-dsh-sidebar-toggle]'); if (!b) return 'no-sidebar-toggle'; tap(b); await sleep(700); } if (!mobile && kinds().length === 0) { const s = [...document.querySelectorAll('button')].find(x => (x.getAttribute('aria-label') || '').trim() === '设置'); if (!s) return 'no-settings-entry'; tap(s); await sleep(1600); } return { mobile, depth: window.__dshBackDepth, kinds: kinds(), cached: window.dshBackBridge?.getBackAvailable?.() }; })()",
+    "(async () => { const sleep = (ms) => new Promise(r => setTimeout(r, ms)); const kinds = () => Array.isArray(window.__dshBackKinds) ? window.__dshBackKinds : []; const mobile = window.innerWidth <= " + MOBILE_FORM_MAX_WIDTH + "; const tap = (el) => { const r = el.getBoundingClientRect(); const x = r.x + r.width / 2; const y = r.y + r.height / 2; el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: x, clientY: y })); el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: x, clientY: y })); el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: x, clientY: y })); el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: x, clientY: y })); el.click(); }; if (mobile && !kinds().includes('drawer')) { const b = document.querySelector('[data-dsh-sidebar-toggle]'); if (!b) return 'no-sidebar-toggle'; tap(b); await sleep(700); } if (!mobile && kinds().length === 0) { " + OPEN_SETTINGS_SRC + " const opened = await openSettings(); if (!opened.el) return 'no-settings-entry:' + opened.opener; tap(opened.el); await sleep(1600); } return { mobile, depth: window.__dshBackDepth, kinds: kinds(), cached: window.dshBackBridge?.getBackAvailable?.() }; })()",
     (v) => v && v.depth >= 1 && v.cached === true && Array.isArray(v.kinds)
       && (v.mobile ? v.kinds.includes('drawer') : true)],
   ['层栈消费（__dshBack 弹出该层）→ 层数下降且壳侧缓存回读 false',

@@ -41,6 +41,52 @@ class RepairToolsTest {
     )
   }
 
+  // ---- issue #720：restart_engine 的三态映射（逐态回归，不再靠"看文案") ----
+
+  @Test
+  fun `三态映射：STARTED 继续走存活判据，DEFERRED 让行，REFUSED 失败`() {
+    assertEquals(RestartDisposition.PROCEED, restartDisposition(EngineStartOutcome.STARTED))
+    assertEquals(
+      RestartDisposition.DEFERRED,
+      restartDisposition(EngineStartOutcome.DEFERRED_REFRESHING),
+    )
+    assertEquals(RestartDisposition.FAILED, restartDisposition(EngineStartOutcome.REFUSED))
+  }
+
+  @Test
+  fun `让行结果是成功形状：restarted=false 且 deferred=true 且 reason 稳定`() {
+    val deferred = deferredRestartResult(cancelled = false)
+    assertFalse("让行不是重启成功", deferred.getBoolean("restarted"))
+    assertTrue("必须显式标记 deferred，否则调用方只能靠文案猜", deferred.getBoolean("deferred"))
+    assertEquals(
+      RepairTools.DEFERRED_REASON_SNAPSHOT_REFRESH,
+      deferred.getString("reason"),
+    )
+    assertEquals("snapshot-refresh-in-flight", deferred.getString("reason"))
+    assertFalse(deferred.getBoolean("cancelled"))
+    assertTrue("要有可读解释", deferred.getString("detail").contains("让行"))
+  }
+
+  @Test
+  fun `让行结果带取消标记，且绝不带错误码字段`() {
+    val cancelled = deferredRestartResult(cancelled = true)
+    assertTrue(cancelled.getBoolean("cancelled"))
+    // 关键反证：让行结果一旦带 error/code，工具面就会把它渲染成失败（issue #720 的现场）。
+    assertFalse(cancelled.has("error"))
+    assertFalse(cancelled.has("code"))
+  }
+
+  @Test
+  fun `反证：DEFERRED 不得被当成失败态映射`() {
+    // 旧实现把让行与拒启并成同一条 restart-failed；这条断言把那种回归钉死。
+    assertFalse(
+      restartDisposition(EngineStartOutcome.DEFERRED_REFRESHING) == RestartDisposition.FAILED,
+    )
+    assertFalse(
+      restartDisposition(EngineStartOutcome.DEFERRED_REFRESHING) == RestartDisposition.PROCEED,
+    )
+  }
+
   @After
   fun tearDown() {
     base.deleteRecursively()
@@ -87,6 +133,32 @@ class RepairToolsTest {
       writeText("private")
     }
     assertEquals("outside-scope", failure { fs.read(systemNamed.absolutePath, 0, 10) }.getString("error"))
+  }
+
+  /** I-R1（2026-10-25 审计）：list 隐藏的 4 个凭据名必须与 read/write 拦截同源——旧实现漏了两个 key.txt。 */
+  @Test
+  fun keyTextFilesAreNeverReadOrWritten() {
+    for (name in listOf("deepseek-key.txt", "dashscope-key.txt")) {
+      val file = File(runtime, "home/$name")
+      file.parentFile.mkdirs()
+      file.writeText("sk-test")
+      assertEquals(name + " read", "protected-file", failure { fs.read(file.absolutePath, 0, 64) }.getString("error"))
+      assertEquals(name + " write", "protected-file", failure { fs.write(file.absolutePath, "x") }.getString("error"))
+      assertEquals("密钥文件不得被覆盖", "sk-test", file.readText())
+    }
+  }
+
+  /** M-R2：offset 越界必须拒绝——旧实现静默返回文件头内容冒充 offset 处的数据。 */
+  @Test
+  fun readBeyondFileSizeIsRejectedInsteadOfReturningTheFileHead() {
+    val file = File(runtime, "engine.log")
+    file.writeText("0123456789")
+    assertEquals("越界 offset 必须拒绝", "bad-offset", failure { fs.read(file.absolutePath, 11, 4) }.getString("error"))
+    // offset == size 仍合法：读到空并收尾（nextOffset=null）
+    val tail = fs.read(file.absolutePath, 10, 4)
+    assertTrue(tail.getBoolean("ok"))
+    assertEquals("", tail.getString("content"))
+    assertTrue(tail.isNull("nextOffset"))
   }
 
   @Test
@@ -176,6 +248,33 @@ class RepairToolsTest {
     assertTrue(RepairToolsGuard.refusal("base64 /data/data/app/files/home/.dsh/.credentials.yaml") != null)
     assertTrue(RepairToolsGuard.refusal("grep secret home/.dsh/.credentials.yaml") != null)
     assertEquals(null, RepairToolsGuard.refusal("ls usr/bin | head"))
+  }
+
+  /** #512：引号拆词与字面量中断是字面正则的系统性盲区——归一化判据补上（原样命令仍交执行）。 */
+  @Test
+  fun commandGuardNormalizesQuotesBeforeMatching() {
+    assertEquals("引号拆词后必须命中 kill 家族", true,
+      RepairToolsGuard.refusal("ki\"ll\" -9 1") != null)
+    assertEquals("字面量中断的凭据路径必须命中", true,
+      RepairToolsGuard.refusal("cat ~/'.cred'entials.yaml") != null)
+    assertEquals("字面量中断的凭据路径（双引号变体）必须命中", true,
+      RepairToolsGuard.refusal("cat ~/.credenti\"al\"s.yaml") != null)
+  }
+
+  /** #512：变量间接让「路径字面量出现在 rm 之前」的黑名单失明——同段 $VAR 引用一律拒绝。 */
+  @Test
+  fun commandGuardRefusesVariableIndirectionForDestructiveFamilies() {
+    assertEquals("路径经变量中转的删除必须拒绝", true,
+      RepairToolsGuard.refusal("D=/data/app; rm -rf \$D") != null)
+    assertEquals("rm 参数里的变量引用必须拒绝", true,
+      RepairToolsGuard.refusal("rm -rf \$TARGET_DIR") != null)
+    assertEquals("cp 目标变量引用必须拒绝", true,
+      RepairToolsGuard.refusal("cp a \$OUT") != null)
+    // 误伤面锚定：读类命令的变量不受影响（修复场景常见形态，不得因本规则全灭）。
+    assertEquals("读命令带变量不应误拒", null,
+      RepairToolsGuard.refusal("cat \$HOME/status.log"))
+    assertEquals("普通删除无变量仍走既有黑名单口径", null,
+      RepairToolsGuard.refusal("rm usr/tmp/cache.log"))
   }
 
   @Test

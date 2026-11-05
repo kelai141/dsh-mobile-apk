@@ -26,6 +26,21 @@ import org.json.JSONObject
  * before the target is replaced. Every model-visible result passes through
  * [LogSanitizer].
  */
+/**
+ * 备份目录的访问面（issue #1367）：**读放行、写拒绝**。
+ *
+ * `write` 会为被覆盖的文件留备份并回传 backup id，系统提示词也承诺「write 会备份」；而旧实现
+ * 对所有 `/repair-backups/` 路径一律拒绝，`read` / `list` 既不能枚举也不能读取——bash 不可用时
+ * （正是修复助手存在的场景）模型没有任何回滚路径。
+ *
+ * 写仍然拒绝：备份是「最后一份好内容」，不该被模型改写；这也让 backup id 保持不可伪造的语义。
+ */
+internal fun backupWriteDenied(path: String, write: Boolean): Boolean {
+  if (!write) return false
+  val dir = "/" + RepairTools.BACKUP_DIR
+  return path.contains(dir + "/") || path.endsWith(dir)
+}
+
 internal class RepairTools(
   private val context: Context,
   private val engine: EngineManager,
@@ -201,11 +216,19 @@ internal class RepairTools(
         LogCollector.log("dsh-repair", "restart keeps unowned listener; managed engine will use a fallback port")
       }
       if (generation.get() != callGeneration) throw RepairFailure("cancelled", "重启已取消")
-      if (!engine.startEngine(force = true)) {
-        throw RepairFailure(
-          "restart-failed",
-          engine.lastStartRefusal ?: "EngineManager.startEngine(force=true) 返回 false",
-        )
+      // issue #684：让行（快照刷新中）不是拒启，文案必须如实区分——用户点「重启引擎」
+      // 却得到「引擎启动被拒」会被误导去找一个不存在的故障。
+      val restartOutcome = engine.startEngine(force = true)
+      // issue #720：让行（快照刷新中）是**有意延后**，不是失败。它绝不能走 RepairFailure——那条路
+      // 会被 execute() 转成 errorJson(code="restart-failed")，工具面把"已让行"呈现成"重启失败"，
+      // 修复助手据此重试或回报失败，恰好撞上正在写快照的持有者。这里直接返回结构化 deferral：
+      // restarted=false / deferred=true / 稳定 reason，并且**不再 spawn**（让行语义就是「不抢」）。
+      when (restartDisposition(restartOutcome)) {
+        RestartDisposition.DEFERRED -> return deferredRestartResult(generation.get() != callGeneration)
+        RestartDisposition.FAILED ->
+          throw RepairFailure("restart-failed", engine.lastStartRefusal ?: "EngineManager.startEngine(force=true) 被拒")
+        // STARTED（以及将来新增的「可继续」态）落到下面的存活判据。
+        RestartDisposition.PROCEED -> Unit
       }
       val deadline = System.currentTimeMillis() + RESTART_HTTP_WAIT_MS
       var http = EngineProbe.check(HTTP_TIMEOUT_MS)
@@ -305,8 +328,40 @@ internal class RepairTools(
     internal const val MAX_BASH_TIMEOUT_MS = 120_000L
     internal const val HTTP_TIMEOUT_MS = 1_200
     internal const val RESTART_HTTP_WAIT_MS = 45_000L
+
+    /** `restart_engine` 让行时的稳定 reason（issue #720：结构化 deferral 的可判读字段）。 */
+    internal const val DEFERRED_REASON_SNAPSHOT_REFRESH = "snapshot-refresh-in-flight"
   }
 }
+
+/**
+ * `restart_engine` 对引擎三态的处理方式（issue #720）。
+ *
+ * 抽成纯函数是为了**逐态回归**：以前这里只有一个布尔或一个 err_code，让行与失败在工具面
+ * 长成同一个样子，修复助手于是把"刻意不抢快照"读成"重启失败"并重试。
+ *
+ * 放在文件级（不在 companion 内）是为了让测试直接调用，不必先造 RepairTools 实例（那要 Context）。
+ */
+internal enum class RestartDisposition { PROCEED, DEFERRED, FAILED }
+
+internal fun restartDisposition(outcome: EngineStartOutcome): RestartDisposition = when (outcome) {
+  EngineStartOutcome.STARTED -> RestartDisposition.PROCEED
+  EngineStartOutcome.DEFERRED_REFRESHING -> RestartDisposition.DEFERRED
+  EngineStartOutcome.REFUSED -> RestartDisposition.FAILED
+}
+
+/**
+ * 让行的结构化结果：`restarted=false` / `deferred=true` / 稳定 reason。
+ *
+ * 它必须是**成功形状**（不是 errorJson）——调用方据此判断"这次没重启，但也不是失败"，
+ * 从而不去重试、不去抢正在写快照的持有者。
+ */
+internal fun deferredRestartResult(cancelled: Boolean): JSONObject = JSONObject()
+  .put("restarted", false)
+  .put("deferred", true)
+  .put("reason", RepairTools.DEFERRED_REASON_SNAPSHOT_REFRESH)
+  .put("detail", "快照刷新进行中，本次重启已让行（非失败）：刷新完成后由启动流拉起引擎")
+  .put("cancelled", cancelled)
 
 /** Bounded, sanitized filesystem operations shared by [RepairTools] and JVM tests. */
 internal class RepairToolsFs(
@@ -326,9 +381,15 @@ internal class RepairToolsFs(
     if (!file.isFile) throw RepairFailure("not-regular", "目标不是普通文件：" + path)
     val max = limit.coerceIn(1, RepairTools.MAX_READ_LIMIT)
     val size = file.length()
+    // 2026-10-25 审计 M-R2：offset 超出文件大小必须立刻拒绝。旧实现只在 offset < size 时
+    // seek，越界 offset 会静默从文件头读——返回「offset=大值却带着文件头内容」的自相矛盾
+    // 载荷，模型按错位数据做修复判断。offset == size 仍合法（读到空，nextOffset=null 收尾）。
+    if (offset > size) throw RepairFailure("bad-offset", "offset 超出文件大小（offset=$offset size=$size）")
     val buffer = ByteArray(max + 1)
     val read = FileInputStream(file).use { input ->
-      if (offset < size) input.channel.position(offset)
+      // 上层已保证 offset <= size，这里无条件 seek：offset == size 时读到 EOF（空内容收尾），
+      // 旧实现的 `if (offset < size)` 会让 == size 分支同样从文件头读——与越界同族的错位形态。
+      input.channel.position(offset)
       var count = 0
       while (count < buffer.size) {
         val n = input.read(buffer, count, buffer.size - count)
@@ -341,7 +402,6 @@ internal class RepairToolsFs(
     val bytes = buffer.copyOf(if (truncated) max else read)
     val content = LogSanitizer.sanitizeOrNull(String(bytes, Charsets.UTF_8))
       ?: throw RepairFailure("sanitize-failed", "文件内容脱敏失败，已丢弃内容")
-    if (bytes.isEmpty() && offset > size) throw RepairFailure("bad-offset", "offset 超出文件大小")
     return JSONObject()
       .put("ok", true)
       .put("path", file.absolutePath)
@@ -525,13 +585,16 @@ internal class RepairToolsFs(
         throw RepairFailure("apk-protected", "系统分区与 APK 不在允许范围")
       }
     }
-    if (file.name.equals(".credentials.yaml", ignoreCase = true) ||
-      file.name.equals("credentials.yaml", ignoreCase = true)) {
+    // 2026-10-25 审计 I-R1：凭据名判定必须与 list 的 [isProtectedName] 同源（单一真源）。
+    // 旧实现这里只列了两个 yaml 名——deepseek-key.txt / dashscope-key.txt 在 list 里被隐藏，
+    // read/write 却放行（read 靠 LogSanitizer 事后打码兜底；write 可在内容不含凭据形态时
+    // 直接原子覆盖密钥文件），防护面自相矛盾。
+    if (isProtectedName(file.name)) {
       throw RepairFailure("protected-file", "凭据文件不通过修复工具读写")
     }
     val path = file.absolutePath
-    if (path.contains("/repair-backups/") || path.endsWith("/repair-backups")) {
-      throw RepairFailure("backup-reserved", "修复备份目录不通过工具访问")
+    if (backupWriteDenied(path, write)) {
+      throw RepairFailure("backup-reserved", "修复备份目录只允许读取（备份是最后一份好内容，不允许模型改写）")
     }
     if (path.endsWith(".apk") || path.contains("/data/app/") || path.contains("/system/") ||
       path.contains("/product/") || path.contains("/vendor/") || path.contains("/apex/")) {
@@ -616,13 +679,27 @@ internal object RepairToolsGuard {
 
   fun refusal(command: String): String? {
     if (command.isBlank()) return "命令为空"
+    // 引号归一化后再过一遍黑名单：shell 的引号拆词（ki"ll"）与字面量中断（'.cred'entials.yaml）
+    // 是字面正则的系统性盲区（#512 实测形态）；归一化只用于判据，命令原样交执行。
+    val normalized = normalizedForGuard(command)
     for (rule in forbidden) {
-      if (rule.containsMatchIn(command)) {
+      if (rule.containsMatchIn(command) || rule.containsMatchIn(normalized)) {
         return "命令涉及进程、APK、系统分区或凭据访问，修复工具拒绝执行"
       }
     }
+    // 变量间接：rm/mv/cp 家族在同段引用 $VAR 时无法静态核对目标——宁可误拒（#512）。
+    if (VAR_INDIRECT_RISK.containsMatchIn(normalized)) {
+      return "删除/移动/改权命令引用了变量（无法静态核对目标），修复工具拒绝执行"
+    }
     return null
   }
+
+  /** 判据用归一化：剔除成对引号字符，让 ki"ll" → kill、'.cred'entials.yaml → .credentials.yaml。 */
+  internal fun normalizedForGuard(command: String): String = command.replace("""['"]""".toRegex(), "")
+
+  /** rm/mv/cp 家族同段引用 $VAR（如 `D=/data/app; rm -rf $D`）——路径字面量与 rm 的位置关系被变量打断。 */
+  private val VAR_INDIRECT_RISK =
+    Regex("""(?i)\b(?:rm|mv|cp|dd|chmod|chown|truncate)\b[^|;&\n]*\$[A-Za-z_]\w*""")
 
   private val credentialKey = Regex(
     "(?i)[\"']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|client[_-]?secret|" +

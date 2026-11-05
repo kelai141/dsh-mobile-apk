@@ -13,6 +13,7 @@
  * 确实把界面路由到新会话后执行。
  */
 import { mkdirSync, writeFileSync, appendFileSync, readFileSync, readdirSync, rmSync, existsSync, realpathSync, statSync, createReadStream } from 'node:fs'
+import { pipeline } from 'node:stream/promises'
 import { randomBytes } from 'node:crypto'
 import { join, resolve, sep, basename } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -31,6 +32,14 @@ import {
 
 export const name = 'dsh-android-file-open'
 export const inject = ['tools', 'webServer', 'sessions', 'workspaceRegistry'] as const
+
+/**
+ * 一次外发附件流的上限（issue #687）。
+ *
+ * 为什么要上限：这条 GET 直接把 `files/` 里的原文件灌给浏览器，没有上限时一个被拖错的
+ * 超大文件会占满 WebView 的下载通道与内存。256 MiB 之上直接 413，不进入流式阶段。
+ */
+const MAX_CONTENT_BYTES = 256 * 1024 * 1024
 
 /** 临时工作区（与壳侧 FileIncoming.tmpWorkspace 一致；环境注入 DSH_HOME 决定配置根） */
 function tmpWorkspace(): string {
@@ -92,7 +101,11 @@ function ownedInsideWorkspace(owned: string): string | null {
   const wsReal = canonicalPath(tmpWorkspace())
   const real = canonicalPath(resolve(owned))
   if (real === wsReal || !real.startsWith(wsReal + sep)) return null
-  if (basename(real) === '.sessions') return null
+  // 豁免必须按**路径前缀**判，不能只看 basename：清单里出现 `.sessions/<record>.json` 时
+  // basename 是 record 名而不是 `.sessions`，旧判据放行 ⇒ 宿主的会话记录被当"自有临时项"删掉
+  // （`/clean` 还是递归删，目录一并带走）。同 gotcha「前缀混用」的教训。
+  const sessionsDir = join(wsReal, '.sessions')
+  if (real === sessionsDir || real.startsWith(sessionsDir + sep)) return null
   return real
 }
 
@@ -783,18 +796,24 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
         const timeout = setTimeout(() => {
           if (settled) return
           settled = true
-          try { req.destroy() } catch { /* noop */ }
+          // 先答复、再丢请求体：`req.destroy()` 会立刻拆掉底层 socket，之后的 writeHead 写不出去，
+          // 客户端只能看到 ECONNRESET 而不是 413（契约上等于不可达）。`resume()` 只丢弃剩余请求体、
+          // 不拆连接，413 才能真正送达。
           res.writeHead(413, { 'content-type': 'application/json' })
           res.end(JSON.stringify({ ok: false, error: 'body too large or timeout' }))
+          try { (req as unknown as { resume?: () => void }).resume?.() } catch { /* already ended */ }
         }, 5000)
         req.on('data', (b: Buffer) => {
           if (settled) return
           body += b.toString()
           if (body.length > MAX_BODY) {
             settled = true
-            try { req.destroy() } catch { /* noop */ }
+            // 先答复、再丢请求体：`req.destroy()` 会立刻拆掉底层 socket，之后的 writeHead 写不出去，
+            // 客户端只能看到 ECONNRESET 而不是 413（契约上等于不可达）。`resume()` 只丢弃剩余请求体、
+            // 不拆连接，413 才能真正送达。
             res.writeHead(413, { 'content-type': 'application/json' })
             res.end(JSON.stringify({ ok: false, error: 'body too large' }))
+            try { (req as unknown as { resume?: () => void }).resume?.() } catch { /* already ended */ }
           }
         })
         req.on('end', () => {
@@ -836,18 +855,24 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
         const timeout = setTimeout(() => {
           if (settled) return
           settled = true
-          try { req.destroy() } catch { /* request is already terminal */ }
+          // 先答复、再丢请求体：`req.destroy()` 会立刻拆掉底层 socket，之后的 writeHead 写不出去，
+          // 客户端只能看到 ECONNRESET 而不是 413（契约上等于不可达）。`resume()` 只丢弃剩余请求体、
+          // 不拆连接，413 才能真正送达。
           res.writeHead(413, { 'content-type': 'application/json', 'cache-control': 'no-store' })
           res.end(JSON.stringify({ ok: false, error: 'claim timeout' }))
+          try { (req as unknown as { resume?: () => void }).resume?.() } catch { /* already ended */ }
         }, 5000)
         req.on('data', (chunk: Buffer) => {
           if (settled) return
           body += chunk.toString()
           if (body.length > 4096) {
             settled = true
-            try { req.destroy() } catch { /* request is already terminal */ }
+            // 先答复、再丢请求体：`req.destroy()` 会立刻拆掉底层 socket，之后的 writeHead 写不出去，
+            // 客户端只能看到 ECONNRESET 而不是 413（契约上等于不可达）。`resume()` 只丢弃剩余请求体、
+            // 不拆连接，413 才能真正送达。
             res.writeHead(413, { 'content-type': 'application/json', 'cache-control': 'no-store' })
             res.end(JSON.stringify({ ok: false, error: 'claim body too large' }))
+            try { (req as unknown as { resume?: () => void }).resume?.() } catch { /* already ended */ }
           }
         })
         req.on('end', () => {
@@ -873,13 +898,20 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
               return
             }
             const path = safeResolveInside(resolve(tmpWorkspace()), item.path)
+            // 源已经不在（被清理、被搬走、被换成目录）时，**记录必须跟着清掉**：否则这条队列项
+            // 永远留着，每次 claim 都 410，而浏览器侧对 claim 的失败是静默 return —— 每轮重载都会
+            // 先建一张空会话再死在这条 410 上（review C10 同族：僵尸草稿 + 空会话堆积）。
+            // 记录的语义是「还有可交付的字节」，字节没了记录就没有意义（与 content 的 410 立刻杀
+            // lease 是同一口径，三处处置必须一致）。
             if (path === null || !existsSync(path)) {
+              rmSync(join(queueDir(), item.file), { force: true })
               res.writeHead(410, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
               res.end(JSON.stringify({ ok: false, error: 'incoming source expired' }))
               return
             }
             const current = statSync(path)
             if (!current.isFile()) {
+              rmSync(join(queueDir(), item.file), { force: true })
               res.writeHead(410, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
               res.end(JSON.stringify({ ok: false, error: 'incoming source is not a file' }))
               return
@@ -947,18 +979,27 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
           res.end(JSON.stringify({ ok: false, error: String((e as Error).message) }))
           return
         }
+        // 超限必须在写状态行之前拒绝：先 200 再断流，浏览器侧只会看到截断的附件。
+        if (bytes > MAX_CONTENT_BYTES) {
+          draftLeases.delete(ticket)
+          res.writeHead(413, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+          res.end(JSON.stringify({ ok: false, error: 'incoming source too large', bytes, limit: MAX_CONTENT_BYTES }))
+          return
+        }
         res.writeHead(200, {
           'content-type': 'application/octet-stream',
           'content-length': String(bytes),
           'content-disposition': "attachment; filename*=UTF-8''" + encodeURIComponent(lease.name),
           'cache-control': 'no-store',
         })
-        await new Promise<void>((resolve) => {
-          const stream = createReadStream(path)
-          stream.on('data', (chunk: string | Buffer) => { res.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)) })
-          stream.on('error', () => { res.end(); resolve() })
-          stream.on('end', () => { res.end(); resolve() })
-        })
+        // pipeline 自带背压与错误传播：客户端中途断开时立即销毁源流。
+        // 旧写法手写 data 事件并丢弃 res.write() 的返回值 —— 整个文件会被读进 socket 缓冲，
+        // 断开后仍读到 EOF，fd 与 buffer 一起泄漏（issue #687）。
+        try {
+          await pipeline(createReadStream(path), res as unknown as NodeJS.WritableStream)
+        } catch {
+          // 断开/传输失败：pipeline 已销毁两端与源流句柄，这里不再追加任何正文。
+        }
       },
     }))
     // Finalize the process-local lease only after the browser has placed the File into the composer.
@@ -983,18 +1024,24 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
         const timeout = setTimeout(() => {
           if (settled) return
           settled = true
-          try { req.destroy() } catch { /* request is already terminal */ }
+          // 先答复、再丢请求体：`req.destroy()` 会立刻拆掉底层 socket，之后的 writeHead 写不出去，
+          // 客户端只能看到 ECONNRESET 而不是 413（契约上等于不可达）。`resume()` 只丢弃剩余请求体、
+          // 不拆连接，413 才能真正送达。
           res.writeHead(413, { 'content-type': 'application/json', 'cache-control': 'no-store' })
           res.end(JSON.stringify({ ok: false, error: 'completion timeout' }))
+          try { (req as unknown as { resume?: () => void }).resume?.() } catch { /* already ended */ }
         }, 5000)
         req.on('data', (chunk: Buffer) => {
           if (settled) return
           body += chunk.toString()
           if (body.length > 2048) {
             settled = true
-            try { req.destroy() } catch { /* request is already terminal */ }
+            // 先答复、再丢请求体：`req.destroy()` 会立刻拆掉底层 socket，之后的 writeHead 写不出去，
+            // 客户端只能看到 ECONNRESET 而不是 413（契约上等于不可达）。`resume()` 只丢弃剩余请求体、
+            // 不拆连接，413 才能真正送达。
             res.writeHead(413, { 'content-type': 'application/json', 'cache-control': 'no-store' })
             res.end(JSON.stringify({ ok: false, error: 'completion body too large' }))
+            try { (req as unknown as { resume?: () => void }).resume?.() } catch { /* already ended */ }
           }
         })
         req.on('end', () => {

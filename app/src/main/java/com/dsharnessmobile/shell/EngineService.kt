@@ -319,14 +319,18 @@ class EngineService : Service() {
       if (!isEpochCurrent(epoch) || epoch.watchdog.get() !== exec) return
       val now = System.currentTimeMillis()
       // §6.3（0.14.10）：本拍实际经过多久 → 折算成多少个「标准拍（5 秒）」记账。
-      // 阶梯阈值（30s/60s/90s）都按 5 秒拍标定：健康态退到 20 秒一拍后，若仍按
-      // 「一拍 = 一个阶梯单位」计数，30 秒的阶梯会变成 120 秒——审计点名的陷阱。
-      // 折算后无论调度拍长多少，恢复与熔断都落在同一时间点（见 WatchdogV2.tickUnits）。
-      // 首拍（lastWatchdogTickAt = 0）按一个标准拍处理：不能把它当成「隔了很久」，
-      // 否则服务刚起的第一拍就折算成整条阶梯（6 个标准拍），等于跳过整个观察窗。
-      val tickMs = if (epoch.lastWatchdogTickAt <= 0L) 0L else now - epoch.lastWatchdogTickAt
-      epoch.lastWatchdogTickAt = now
-      val units = WatchdogV2.tickUnits(tickMs)
+      // 阶梯阈值（30s/60s/90s）都按 5 秒拍标定：健康态退到 20 秒一拍后，若仍按「一拍 = 一个
+      // 阶梯单位」计数，30 秒的阶梯会变成 120 秒。issue #1357：时钟必须单调（与唤醒锁同域）。
+      // issue #1505：单调时钟**含深睡**，而 doze 期间 postDelayed 不执行 ⇒ 唤醒后必然出现一个
+      // 巨大 tickMs。它不能算「连续失败」的观测：tickAccounting 把缺口拍按**一个**标准拍记账
+      // 并给 gap（旧实现封顶 6 拍 ⇒ 两拍就把 DEGRADED_HTTP 推满 12 拍熔断）。
+      // 首拍（lastWatchdogTickAt = 0）仍按一个标准拍处理：不能把它当成「隔了很久」。
+      val mono = android.os.SystemClock.elapsedRealtime()
+      val tickMs = if (epoch.lastWatchdogTickAt <= 0L) 0L else mono - epoch.lastWatchdogTickAt
+      epoch.lastWatchdogTickAt = mono
+      val accounting = WatchdogV2.tickAccounting(tickMs)
+      val units = accounting.units
+      if (accounting.gap) LogCollector.log("dsh-watchdog", accounting.log)
       // 本拍探活状态（用于定下一拍节奏；异常拍保持非健康节奏）。
       var tickState: WatchdogV2.ProbeState? = null
       // 启动流正在排队重试或修复助手持有闸门时，后台不得同时重启、回撤或改写
@@ -337,6 +341,11 @@ class EngineService : Service() {
         noteWakeActivityForTick(epoch)
         WatchdogV2.refreshWakeLock(this, epoch.wakeOwner)
         // 修复态不打探活 ⇒ 保持非健康节奏（5 秒）复看，不拖到 20 秒。
+        nextDelayMs = WatchdogV2.ACTIVE_TICK_MS
+        // 本拍到此为止（后台不得重启、回撤或改写正在被修复的运行时），但**下一拍必须挂回去**：
+        // 重排在 finally 里，这里 return 也会走到。旧实现是直接 return 跳过尾部重排，而
+        // scheduleWatchdogTick 全仓只有首拍与尾部两个调用点 ⇒ 修复态一出现 tick 链就永久断死
+        // （issue #1354：探活、自动重启、通知 drain 一起停摆，直到 Service 重建）。
         return
       }
       // P1（0.14.1 通知停摆修复）：通知信道消费的**兜底驱动**（`NotifyStore` 的 drainTick）。
@@ -420,14 +429,17 @@ class EngineService : Service() {
           // §6.2：重启窗口算活动——noteWakeActivity 内部即按新租约重取唤醒锁
           // （有事件立即重取，不等下一拍），冷启动期间的 CPU 不会被放掉。
           noteWakeActivity()
-          val requested = engineManager.startEngine(force = plan.force)
+          // issue #684：让行（刷新中）不算「已发起」——日志要如实区分，否则排障时
+          // 「accepted=true 但进程不在」无法归因。
+          val startOutcome = engineManager.startEngine(force = plan.force)
+          val requested = startOutcome == EngineStartOutcome.STARTED
           if (!isEpochCurrent(epoch)) return
           val delayMs = WatchdogV2.nextDelayMs()
           epoch.nextRestartAllowedAt = now + delayMs
           LogCollector.log(
             "dsh-watchdog",
             "restart requested after confirmed failure #" + WatchdogV2.effectiveFailureCount() +
-              " (accepted=" + requested + ", next eligible in " + delayMs + "ms)",
+              " (accepted=" + requested + ", outcome=" + startOutcome + ", next eligible in " + delayMs + "ms)",
           )
         }
       }
@@ -438,18 +450,21 @@ class EngineService : Service() {
       if (isEpochCurrent(epoch)) WatchdogV2.refreshWakeLock(this, epoch.wakeOwner)
       // 异常拍按「非健康」收口：下一拍回到 5 秒节奏复看。
       nextDelayMs = WatchdogV2.ACTIVE_TICK_MS
-    }
-    // §6.3：单次延迟重排——旧 scheduleWithFixedDelay 的固定 5 秒节奏换成按状态自适应。
-    // 判定全部收口在 nextDelayMs，本处只负责「什么时候再看一眼」。
-    if (isEpochCurrent(epoch) && epoch.watchdog.get() === exec) {
-      scheduleWatchdogTick(epoch, exec, nextDelayMs)
+    } finally {
+      // §6.3：单次延迟重排——旧 scheduleWithFixedDelay 的固定 5 秒节奏换成按状态自适应。
+      // 判定全部收口在 nextDelayMs，本处只负责「什么时候再看一眼」。
+      // 为什么在 finally 而不是 try 之后：本拍**任何**早退（修复态、换代、异常）都必须把下一拍
+      // 挂回去，否则 tick 链断死（issue #1354）。停机与换代由这两个判据兜住，不会多出一条链。
+      if (isEpochCurrent(epoch) && epoch.watchdog.get() === exec) {
+        scheduleWatchdogTick(epoch, exec, nextDelayMs)
+      }
     }
   }
 
   private fun buildNotification(): android.app.Notification {
     val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
     if (Build.VERSION.SDK_INT >= 26) {
-      manager.createNotificationChannel(NotificationChannel("engine", UserCopy.APP_NAME + " 引擎", NotificationManager.IMPORTANCE_LOW))
+      manager.createNotificationChannel(NotificationChannel("engine", UserCopy.APP_NAME + UiText.t(this, " 引擎", " engine"), NotificationManager.IMPORTANCE_LOW))
     }
     val pending = PendingIntent.getActivity(
       this, 0, Intent(this, MainActivity::class.java),
@@ -457,8 +472,8 @@ class EngineService : Service() {
     )
     return NotificationCompat.Builder(this, "engine")
       .setSmallIcon(android.R.drawable.stat_notify_chat)
-      .setContentTitle(UserCopy.APP_NAME + " 引擎运行中")
-      .setContentText(UserCopy.APP_NAME + " 正在后台工作")
+      .setContentTitle(UserCopy.APP_NAME + UiText.t(this, " 引擎运行中", " engine is running"))
+      .setContentText(UiText.t(this, UserCopy.APP_NAME + " 正在后台工作", UserCopy.APP_NAME + " is working in the background"))
       .setContentIntent(pending)
       .setOngoing(true)
       .build()

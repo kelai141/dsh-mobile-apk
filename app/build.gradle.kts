@@ -1,3 +1,8 @@
+// issue #1131：内嵌资产一致性检查要在脚本里算 sha256。必须走顶层 import ——
+// 在 Kotlin DSL 里写全限定名 `java.security.MessageDigest` 会先解析到 Gradle 的 `java` 扩展，
+// 报 "Unresolved reference: security"（实测踩到）。
+import java.security.MessageDigest
+
 plugins {
   id("com.android.application")
   id("org.jetbrains.kotlin.android")
@@ -100,6 +105,50 @@ tasks.whenTaskAdded {
             "从 GitHub Releases 下载 snapshot-x86_64.tar.xz 后放到 app/src/main/assets/snapshot.tar.xz（见 README.md）",
         )
       }
+      // issue #1131：只判「存在」不够 —— 三份内嵌资产必须**同代**。
+      // 它们都被 .gitignore（git status 看不见、没有 review 会审到），走完整构建链会被自愈，
+      // 直接用 gradle 则不会：会**成功出包**，装到设备上才发现「界面正常、引擎拒启」
+      // （运行期 EngineManager 以 hard-bundle-selection-unverified 拒绝启动）。
+      // 失败形态与操作者直觉相反，所以在这里当场判死，不把坏包交给装机环节。
+      val actualHex = MessageDigest.getInstance("SHA-256").let { md ->
+        snap.inputStream().use { input ->
+          val buf = ByteArray(1 shl 16)
+          while (true) {
+            val n = input.read(buf)
+            if (n < 0) break
+            md.update(buf, 0, n)
+          }
+        }
+        md.digest().joinToString("") { b: Byte -> String.format("%02x", b) }
+      }
+      val howToFix =
+        "修复：先跑 scripts/build-apk-013.ps1 重建（拷贝 tar 后会一并重写 snapshot.sha256 与 " +
+          "plugin-hard-manifest.json），或删掉 app/src/main/assets/ 下这三份陈旧产物后重跑构建链。"
+      val shaFile = file("src/main/assets/snapshot.sha256")
+      if (shaFile.exists()) {
+        val declaredHex = shaFile.readText().trim().lowercase()
+        if (declaredHex != actualHex) {
+          throw GradleException(
+            "内嵌快照资产不同代：assets/snapshot.sha256 声明 " + declaredHex +
+              "，但 snapshot.tar.xz 实际是 " + actualHex + "。\n" +
+              "这三份（snapshot.tar.xz / snapshot.sha256 / plugin-hard-manifest.json）都被 .gitignore，" +
+              "直接跑 gradle 会打出一个「界面正常、引擎拒启」的包。\n" + howToFix,
+          )
+        }
+      }
+      val hardFile = file("src/main/assets/plugin-hard-manifest.json")
+      if (hardFile.exists()) {
+        // fingerprint 的绑定关系已坐实：build-hard-manifest.mjs 把 sha256(tar 字节) 直接写进该字段。
+        val fingerprint = Regex("\"fingerprint\"\\s*:\\s*\"([0-9a-fA-F]{64})\"")
+          .find(hardFile.readText())?.groupValues?.get(1)?.lowercase()
+        if (fingerprint != null && fingerprint != actualHex) {
+          throw GradleException(
+            "内嵌 Hard 插件清单与快照不同代：plugin-hard-manifest.json 的 fingerprint=" + fingerprint +
+              "，但 snapshot.tar.xz 实际是 " + actualHex + "。\n" +
+              "这是「陈旧残留」的典型形态：清单是上一次构建的，tar 是新的。\n" + howToFix,
+          )
+        }
+      }
     }
   }
 }
@@ -127,4 +176,36 @@ dependencies {
   androidTestImplementation("androidx.test:runner:1.6.2")
   // 本地单测用真实 org.json（android.jar 桩在 JVM 里抛 Stub!）——快照 profiles 合并（#167）测试需要
   testImplementation("org.json:json:20240303")
+}
+
+// 这些单测在运行期**直接读仓内文件**（Kotlin 源、res、scripts 脚本、plugins 源码），而 Gradle 默认
+// 只把编译产物算作 Test 任务的输入 —— 被读的源文件不算。于是改了被读文件，Test 任务的 cache key
+// 不变，:app:testDebugUnitTest 会 FROM-CACHE 拿旧结果。
+//
+// 实锤：#1244 把 scripts/profile-web.cordis.patch.yml 的顶层条目从 21 加到 22，
+// FactoryProfilePatchTest 的断言（22 块）因此失效；但 CI 日志是
+//   > Task :app:testDebugUnitTest FROM-CACHE
+//   BUILD SUCCESSFUL in 19s
+// 任务根本没重跑 → 假绿。红的那条被缓存掩盖，直到本地全链才暴露。
+// 因此把「测试运行期真正读取的仓内目录」显式声明为输入（目录级，覆盖同类文件）。
+val repoRootDir: File = rootProject.projectDir
+tasks.withType<Test>().configureEach {
+    inputs.dir(File(repoRootDir, "scripts"))
+        .withPropertyName("repoScripts")
+        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+    inputs.dir(File(repoRootDir, "plugins"))
+        .withPropertyName("repoPlugins")
+        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+    inputs.dir(File(repoRootDir, "dsh-host-web-compat"))
+        .withPropertyName("repoHostWebCompat")
+        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+    inputs.dir(File(repoRootDir, ".github/workflows"))
+        .withPropertyName("repoWorkflows")
+        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+    inputs.dir(File(projectDir, "src/main"))
+        .withPropertyName("appMainSources")
+        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+    inputs.file(File(projectDir, "build.gradle.kts"))
+        .withPropertyName("appBuildScript")
+        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
 }

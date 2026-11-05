@@ -238,6 +238,27 @@ class RepairModelConfigTest {
     assertTrue(routes.first().label.startsWith("selected-model"))
   }
 
+  // ── 根缺失：issue #1012 ───────────────────────────────────────────────────
+
+  @Test
+  fun configTreeRootMissingIsNotReportedAsFiveMissingFiles() {
+    // 助手只在引擎连续两次启动失败后被拉起，那正是快照可能还没解开的时刻。
+    // 此时 home/.dsh 整个不存在：旧实现给五个来源全记 missing，与「用户自己删了配置」
+    // 完全同形，于是 UI 只能说「未读到可用模型」，把「运行时还没解出来」误报成「你没配模型」。
+    val bareHome = Files.createTempDirectory("repair-model-rootless").toFile()
+    try {
+      val result = RepairModelConfig.loadDetailed(bareHome)
+      assertTrue("根都不存在当然没有候选", result.connections.isEmpty())
+      val statuses = result.sources.joinToString { it.path + "=" + it.status }
+      assertTrue("必须有可判定的「根缺失」状态（实际：$statuses）",
+        result.sources.any { it.status == "root-missing" })
+      assertTrue("根缺失时不得把每个文件都报成 missing（实际：$statuses）",
+        result.sources.none { it.status == "missing" })
+    } finally {
+      bareHome.deleteRecursively()
+    }
+  }
+
   @Test
   fun modelEffortsAndOnlyExplicitCompatibilityAreExposed() {
     File(home, ".dsh/profiles/web/cordis.patch.yml").writeText(

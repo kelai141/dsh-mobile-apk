@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { cp, mkdir, lstat, readFile, readdir, rename, rm, stat, writeFile, copyFile } from 'node:fs/promises'
+import { appendFile, cp, mkdir, lstat, readFile, readdir, rename, rm, stat, writeFile, copyFile } from 'node:fs/promises'
 import path from 'node:path'
 import { parseGithubUrl } from './manifest.js'
 
@@ -17,6 +17,71 @@ async function digestFile(filePath) {
 }
 
 const INTEGRITY_MARKER = '.dsh-asset-integrity.json'
+
+/** 回滚失败留痕文件的文件名（放在 assets root 下，与 `.backup-*` 同级）。 */
+export const ROLLBACK_FAILURE_LOG = '.rollback-failures.log'
+
+/** `.backup-<token>` 目录的默认陈旧阈值：1 小时。 */
+export const STALE_BACKUP_MS = 60 * 60 * 1000
+
+/**
+ * 回滚失败落盘（issue #1528）。
+ *
+ * 为什么必须落盘：`index.js` 只把错误塞进 `error.assetRollbackError`，既不 warn 也不写日志，
+ * 于是「半态现场」（新包已 rm、旧包 rename 不回来）事后无迹可查。这里 best-effort 追加一行，
+ * **绝不因为写日志失败而改变控制流**——调用方仍要拿到原始 rollback 错误。
+ *
+ * @param {string} root assets root（`.backup-*` 所在目录）
+ * @param {string} token 本次发布的备份 token
+ * @param {unknown} error 回滚抛出的错误
+ * @param {number} [now] 注入时钟（判据用）
+ */
+export async function recordRollbackFailure(root, token, error, now = Date.now()) {
+  const message = String((error && error.message) || error)
+  const line = JSON.stringify({ at: new Date(now).toISOString(), token, backup: `.backup-${token}`, error: message })
+  console.warn('[dsh-linux-bootstrap] rollback failed; previous copy may remain at ' + path.join(root, `.backup-${token}`) + ' (' + message + ')')
+  try {
+    await appendFile(path.join(root, ROLLBACK_FAILURE_LOG), line + '\n')
+  } catch {
+    /* 落盘失败不掩盖真错：控制流只由调用方决定 */
+  }
+}
+
+/**
+ * 清理陈旧的 `.backup-<token>` 目录（issue #1528）。
+ *
+ * 为什么需要：`deferCommit: true` 后进程若在 publish 与 commit 之间被杀，`.backup-*` 没有任何
+ * 清理路径，会长期堆积。只在发布链路入口调用，只删本类目录、只删超过阈值的。
+ *
+ * @param {string} root assets root
+ * @param {object} [options]
+ * @param {number} [options.olderThanMs] 陈旧阈值（默认 [STALE_BACKUP_MS]）
+ * @param {number} [options.now] 注入时钟（判据用）
+ * @returns {Promise<string[]>} 被删除的目录名
+ */
+export async function pruneStaleBackups(root, { olderThanMs = STALE_BACKUP_MS, now = Date.now() } = {}) {
+  const removed = []
+  let entries
+  try {
+    entries = await readdir(root, { withFileTypes: true })
+  } catch {
+    return removed
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith('.backup-')) continue
+    const full = path.join(root, entry.name)
+    try {
+      const info = await stat(full)
+      if (now - info.mtimeMs < olderThanMs) continue
+      await rm(full, { recursive: true, force: true })
+      removed.push(entry.name)
+      console.warn('[dsh-linux-bootstrap] pruned stale backup: ' + entry.name)
+    } catch {
+      /* 单个删不掉不影响其它 */
+    }
+  }
+  return removed
+}
 
 async function unpackedBytes(directory) {
   let total = 0
@@ -55,12 +120,18 @@ export async function installVerifiedPluginBundle({
   kind = 'plugin',
   packageName,
   entry = 'lib/index.js',
+  // issue #1374：透传给 publishBundle。为 true 时返回结果里带 `assetHandle`（commit/rollback），
+  // 让调用方能在「资产已发布、但 host 安装/激活失败」时把旧包换回来。
+  deferCommit = false,
 }) {
   const url = assertAsset(asset)
   if (typeof destinationRoot !== 'string' || !destinationRoot) throw new TypeError('destinationRoot is required')
   if (typeof downloadAsset !== 'function' || typeof extractArchive !== 'function') throw new TypeError('downloadAsset and safe extractArchive adapters are required')
   const root = path.resolve(destinationRoot)
   await mkdir(root, { recursive: true })
+  // issue #1375：回收上次中断留下的 .backup-*（原先**无人清理**，磁盘只增不减）。
+  // 保守：只清 10 分钟前的条目，避免删掉正在进行的发布所用的回滚源。清扫失败不影响安装。
+  try { await sweepStaleBundleDirs(root) } catch { /* 清扫是尽力而为 */ }
   const finalDirectory = path.join(root, asset.sha256)
   const markerPath = path.join(finalDirectory, '.dsh-asset-integrity.json')
   try {
@@ -87,7 +158,7 @@ export async function installVerifiedPluginBundle({
   // silently falling back to a download would hide tampering or corruption.
   if (hostStagingRoot) {
     const staged = await publishHostStagedBundle({
-      hostStagingRoot, asset, root, finalDirectory, packageName, entry,
+      hostStagingRoot, asset, root, finalDirectory, packageName, entry, deferCommit,
     })
     if (staged) return staged
     if (requireStagedBundle) {
@@ -116,8 +187,8 @@ export async function installVerifiedPluginBundle({
     const unpackedSize = await unpackedBytes(packageDirectory)
     if (unpackedSize !== asset.unpackedSize) throw new Error(`Unpacked size mismatch: expected ${asset.unpackedSize}, got ${unpackedSize}`)
     if (packageName) await validatePackage(packageDirectory, packageName, entry)
-    await publishBundle({ root, finalDirectory, packageDirectory, asset, unpackedSize, token })
-    return { path: finalDirectory, sha256: asset.sha256, size: asset.size, unpackedSize, reused: false }
+    const assetHandle = await publishBundle({ root, finalDirectory, packageDirectory, asset, unpackedSize, token, deferCommit })
+    return { path: finalDirectory, sha256: asset.sha256, size: asset.size, unpackedSize, reused: false, assetHandle }
   } catch (error) {
     throw error
   } finally {
@@ -142,8 +213,10 @@ async function pickPackageDirectory(rootDirectory) {
  * Publish a verified package directory as `<root>/<sha256>`, replacing any
  * previous copy atomically and rolling back if the swap fails.
  */
-async function publishBundle({ root, finalDirectory, packageDirectory, asset, unpackedSize, token }) {
-  await writeFile(path.join(packageDirectory, '.dsh-asset-integrity.json'), `${JSON.stringify({ sha256: asset.sha256, size: asset.size, unpackedSize })}\n`)
+export async function publishBundle({ root, finalDirectory, packageDirectory, asset, unpackedSize, token, deferCommit = false }) {
+  await writeFile(path.join(packageDirectory, '.dsh-asset-integrity.json'), `${JSON.stringify({ sha256: asset.sha256, size: asset.size, unpackedSize })}`)
+  // issue #1528：进入发布链路先清陈旧 `.backup-*`——`deferCommit` 后进程被杀会留下永不清理的备份。
+  await pruneStaleBackups(root)
   const backupDirectory = path.join(root, `.backup-${token}`)
   let hadPrevious = false
   try {
@@ -154,10 +227,64 @@ async function publishBundle({ root, finalDirectory, packageDirectory, asset, un
   }
   try {
     await rename(packageDirectory, finalDirectory)
-    if (hadPrevious) await rm(backupDirectory, { recursive: true, force: true })
   } catch (error) {
-    if (hadPrevious) await rename(backupDirectory, finalDirectory).catch(() => {})
+    // issue #1375：回滚失败**不得**被吞掉。旧实现是 rename(...).catch(() => {}) ——
+    // 恢复失败既没有日志也没有上报，旧包永久留在 .backup-<uuid>，用户只看到「安装失败」
+    // 而现场无从查起。这里把两个错误一起抛出，并在消息里点明旧包还在哪。
+    if (hadPrevious) {
+      try {
+        await rename(backupDirectory, finalDirectory)
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          `Bundle publish failed and rollback failed; previous copy remains at ${backupDirectory}`,
+        )
+      }
+    }
     throw error
+  }
+  // issue #1375（反向）：清理备份必须在**发布成功之后、且在 try 之外**。
+  // 旧实现把它放在 try 里：rm 一抛（备份目录被占用等）就落进 catch，去把**刚刚发布成功**的
+  // 目录再 rename 回备份（必然失败并被吞），然后 throw —— 安装其实成功却报失败。
+  // 清理失败只告警：新包已就位，不影响可用性，但必须留痕。
+  if (hadPrevious && !deferCommit) {
+    try {
+      await rm(backupDirectory, { recursive: true, force: true })
+    } catch (error) {
+      console.warn('[dsh-linux-bootstrap] backup cleanup deferred: ' + backupDirectory + ' (' + String(error && error.message ? error.message : error) + ')')
+    }
+  }
+  // issue #1374: the caller still has to install the host plugin and activate it, and either step
+  // can fail *after* publish. Default keeps the old semantics; a caller that needs a cross-stage
+  // transaction passes deferCommit=true and gets { commit, rollback }, so a failed activation can
+  // restore the previous copy instead of leaving disk=new / state=old / old-directory-gone.
+  if (!deferCommit) return null
+  return {
+    // Commit drops the backup and never throws: the new bundle is already in place, so a failed
+    // cleanup is a cleanup failure, not an install failure (see #1375).
+    commit: async () => {
+      if (!hadPrevious) return
+      // issue #1375 口径：清理失败**必须留痕**，不得 `.catch(() => {})` 静默吞掉
+      // （这条曾被 #1375 修过一次，加 deferCommit 时又被写回来——见 gotcha）。
+      // 但仍不抛：新包已就位，清理失败只是磁盘占用，不该把一次成功的安装改判为失败。
+      try {
+        await rm(backupDirectory, { recursive: true, force: true })
+      } catch (error) {
+        console.warn('[dsh-linux-bootstrap] deferred backup cleanup failed: ' + backupDirectory + ' (' + String(error && error.message ? error.message : error) + ')')
+      }
+    },
+    // Rollback moves the new copy out and the previous one back; it throws on failure so the
+    // caller can record error.assetRollbackError instead of pretending the rollback worked.
+    rollback: async () => {
+      try {
+        await rm(finalDirectory, { recursive: true, force: true })
+        if (hadPrevious) await rename(backupDirectory, finalDirectory)
+      } catch (rollbackError) {
+        // issue #1528：回滚失败**必须留痕**（warn + 落盘），再原样抛出。
+        await recordRollbackFailure(root, token, rollbackError)
+        throw rollbackError
+      }
+    },
   }
 }
 
@@ -170,7 +297,7 @@ async function publishBundle({ root, finalDirectory, packageDirectory, asset, un
  * own marker is never a usability credential, and a mismatch is a corruption or
  * tampering signal that must not be papered over by a silent re-download.
  */
-async function publishHostStagedBundle({ hostStagingRoot, asset, root, finalDirectory, packageName, entry }) {
+async function publishHostStagedBundle({ hostStagingRoot, asset, root, finalDirectory, packageName, entry, deferCommit = false }) {
   const stagedRoot = path.join(path.resolve(hostStagingRoot), asset.sha256)
   const archivePath = path.join(stagedRoot, 'asset.tar.xz')
   let archiveInfo
@@ -205,11 +332,43 @@ async function publishHostStagedBundle({ hostStagingRoot, asset, root, finalDire
     // Copy rather than move: the host's staging area stays intact and
     // re-verifiable, and our own copy is what gets published and re-used.
     await cp(packageDirectory, copied, { recursive: true })
-    await publishBundle({ root, finalDirectory, packageDirectory: copied, asset, unpackedSize, token })
+    const assetHandle = await publishBundle({ root, finalDirectory, packageDirectory: copied, asset, unpackedSize, token, deferCommit })
+    return { path: finalDirectory, sha256: asset.sha256, size: asset.size, unpackedSize, reused: false, hostStaged: true, assetHandle }
   } finally {
     await rm(staging, { recursive: true, force: true }).catch(() => {})
   }
-  return { path: finalDirectory, sha256: asset.sha256, size: asset.size, unpackedSize, reused: false, hostStaged: true }
+}
+
+/**
+ * 清扫上次中断留下的 `.backup-*` / `.stage-*`（issue #1375：`.backup-*` 原先**无人回收**）。
+ *
+ * 保守点：只删 mtime 超过 minAgeMs 的条目。发布过程中备份目录会短暂存在，
+ * 直接全删会把正在进行的回滚源删掉。
+ *
+ * @param {string} root 插件包根目录。
+ * @param {{ minAgeMs?: number, now?: number }} [options]
+ * @returns {Promise<string[]>} 被删掉的目录名（便于调用方记日志与测试断言）。
+ */
+export async function sweepStaleBundleDirs(root, options = {}) {
+  const minAgeMs = Number.isFinite(options.minAgeMs) ? options.minAgeMs : 10 * 60 * 1000
+  const now = Number.isFinite(options.now) ? options.now : Date.now()
+  const removed = []
+  let entries
+  try { entries = await readdir(root, { withFileTypes: true }) } catch { return removed }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    if (!entry.name.startsWith('.backup-') && !entry.name.startsWith('.stage-')) continue
+    const target = path.join(root, entry.name)
+    try {
+      const info = await stat(target)
+      if (now - info.mtimeMs < minAgeMs) continue
+      await rm(target, { recursive: true, force: true })
+      removed.push(entry.name)
+    } catch (error) {
+      console.warn('[dsh-linux-bootstrap] stale bundle dir cleanup skipped: ' + target + ' (' + String(error && error.message ? error.message : error) + ')')
+    }
+  }
+  return removed
 }
 
 async function validatePackage(directory, packageName, entry) {

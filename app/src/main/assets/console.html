@@ -24,6 +24,7 @@
     --ds-ease: cubic-bezier(0.32, 0.72, 0, 1);
     --inset-top: env(safe-area-inset-top, 0px);
     --inset-bottom: env(safe-area-inset-bottom, 0px);
+    --ime-occlusion: 0px;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -45,6 +46,7 @@
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { height: 100%; margin: 0; }
   body {
+    height: calc(100% - var(--ime-occlusion));
     background: var(--ds-bg);
     color: var(--ds-text-primary);
     font-family: ui-monospace, "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
@@ -97,6 +99,22 @@
   #wrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
   #engineHint { padding: 7px 9px; margin-top: 7px; border-radius: var(--ds-radius); background: var(--ds-chip); font-size: 11px; line-height: 1.4; color: var(--ds-text-secondary); }
   #enginePill[role=button] { cursor: pointer; }
+  /* Keep editing and terminal output reachable above a landscape keyboard. */
+  :root[data-console-compact] #top { display: flex; align-items: center; gap: 8px; padding: calc(4px + var(--inset-top)) 12px 4px; }
+  :root[data-console-compact] #statusbar { flex: 1; min-width: 0; min-height: 44px; }
+  :root[data-console-compact] #statusbar .title,
+  :root[data-console-compact] #enginePill,
+  :root[data-console-compact] #chips { display: none; }
+  :root[data-console-compact] #tools { flex: none; margin: 0; gap: 4px; }
+  :root[data-console-compact] #close,
+  :root[data-console-compact] .ghost { min-width: 44px; min-height: 44px; }
+  :root[data-console-compact] #dock { display: flex; align-items: stretch; gap: 8px; padding: 4px 12px calc(4px + var(--inset-bottom)); }
+  :root[data-console-compact] #ctlrow { width: 220px; max-width: 40vw; padding: 0; gap: 4px; }
+  :root[data-console-compact] #ctlrow .ctl { min-height: 44px; }
+  :root[data-console-compact] #inputrow { flex: 1; min-width: 0; }
+  :root[data-console-compact] #cmd { padding: 10px 12px; min-height: 44px; }
+  :root[data-console-compact] #send { min-height: 44px; }
+  :root[data-console-compact] #output { padding: 4px 10px; line-height: 1.4; }
 </style>
 </head>
 <body>
@@ -124,6 +142,25 @@
       <button class="chip" type="button" data-cmd="ps">ps</button>
       <button class="chip" type="button" data-cmd="df -h">df</button>
       <button class="chip" type="button" data-cmd="echo $HOME && pwd">pwd</button>
+    </div>
+    <style>
+      /* 按键条：真 PTY 下这些控制字符才有意义（无 PTY 时壳侧仍会收到，但 bash 不响应）。 */
+      #ctlrow { display: flex; gap: 6px; padding: 0 12px 6px; overflow-x: auto; }
+      #ctlrow .ctl {
+        flex: 0 0 auto; min-width: 44px; padding: 6px 10px; font-size: 12px;
+        background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.14);
+        border-radius: 8px; font-family: inherit;
+      }
+      #ctlrow .ctl:active { background: rgba(255,255,255,0.2); }
+    </style>
+    <div id="ctlrow">
+      <button class="ctl" type="button" data-send="\t" title="补全">Tab</button>
+      <button class="ctl" type="button" data-send="\x03" title="中断当前程序">Ctrl-C</button>
+      <button class="ctl" type="button" data-send="\x04" title="结束输入">Ctrl-D</button>
+      <button class="ctl" type="button" data-send="\e[A" title="上一条">↑</button>
+      <button class="ctl" type="button" data-send="\e[B" title="下一条">↓</button>
+      <button class="ctl" type="button" data-send="\e[C" title="右移">→</button>
+      <button class="ctl" type="button" data-send="\e[D" title="左移">←</button>
     </div>
     <div id="inputrow">
       <div id="cmdwrap">
@@ -225,10 +262,68 @@
     else setReady(false, t, state);   // failed / exited / missing
   };
 
+  var consoleBottomInset = 0;
+  var consoleImeOverlap = 0;
+
+  /**
+   * issue #864：把 IME 遮挡量换算到 **CSS px**（纯函数，供 JVM/Node 直测）。
+   *
+   * 真机现场（V2425A / Android 16 / 1260x2800 @560dpi，dpr 3.5，CSS 视口 360x800）：
+   * IME 区域高 **1105 设备像素**。它被当成 CSS px 直接用了，于是
+   *   - `height: calc(100% - var(--ime-occlusion))` -> `800 - 1105 < 0` 高度塔成 0；
+   *   - compact 判据 `innerHeight - max(bottom, ime)` -> `800 - 1105 = -305 < 0` -> **误判 compact**。
+   * 结果就是内容被压成一行、下面留一大块空白。
+   *
+   * 取值顺序（**优先不依赖 dpr 的那条**）：
+   *  1. `visualViewport`：`innerHeight - visualViewport.height` **天然是 CSS px**，
+   *     不依赖 dpr、也不依赖 ROM 对 insets 的实现；
+   *  2. 拿不到 `visualViewport` 时用收到的值兜底 —— 但只有当它**明显超过视口高度**时
+   *     才视为设备像素并除以 dpr（否则会误伤本来就已经是 CSS px 的输入）。
+   *
+   * @param {number} innerHeight `window.innerHeight`（CSS px）。
+   * @param {number} visualViewportHeight `visualViewport.height`（CSS px）；不可用时传 0/NaN。
+   * @param {number} devicePixelRatio `window.devicePixelRatio`。
+   * @param {number} rawIme 收到的遮挡量（单位未知：可能是设备像素，也可能是 CSS px）。
+   * @returns {number} 遮挡量的 CSS px 值，恒 >= 0。
+   */
+  function consoleImeCssPx(innerHeight, visualViewportHeight, devicePixelRatio, rawIme) {
+    var h = Number(innerHeight) || 0;
+    var vv = Number(visualViewportHeight) || 0;
+    var raw = Number(rawIme) || 0;
+    if (raw <= 0) return 0;
+    if (vv > 0 && h > 0) {
+      var fromViewport = h - vv;
+      if (fromViewport > 0.5) return fromViewport;
+    }
+    var dpr = Number(devicePixelRatio) || 0;
+    // 只在「明显超过视口高度」时按设备像素处理：这样已按 CSS px 传入的调用方不受影响。
+    if (dpr > 1 && h > 0 && raw > h) return raw / dpr;
+    return raw;
+  }
+
+  function updateConsoleLayout() {
+    var root = document.documentElement;
+    root.style.setProperty('--inset-bottom', consoleBottomInset + 'px');
+    // issue #864：navigation padding 已经占掉了它那份 IME 重叠，先减掉再换单位。
+    var rawOverlap = Math.max(0, consoleImeOverlap - consoleBottomInset);
+    var vv = window.visualViewport;
+    var imeCss = consoleImeCssPx(
+      window.innerHeight,
+      vv && typeof vv.height === 'number' ? vv.height : 0,
+      window.devicePixelRatio || 0,
+      rawOverlap,
+    );
+    root.style.setProperty('--ime-occlusion', imeCss + 'px');
+    // compact 判据同样按 CSS px：`innerHeight - imeCss > 0` 时不得进入 compact。
+    root.toggleAttribute('data-console-compact', window.innerHeight - Math.max(consoleBottomInset, imeCss) < 320);
+  }
   window.__consoleInsets = function (top, bottom, ime) {
+    consoleBottomInset = Math.max(0, bottom || 0);
+    consoleImeOverlap = Math.max(0, ime || 0);
     document.documentElement.style.setProperty('--inset-top', (top || 0) + 'px');
-    document.documentElement.style.setProperty('--inset-bottom', Math.max(bottom || 0, ime || 0) + 'px');
+    updateConsoleLayout();
   };
+  window.addEventListener('resize', updateConsoleLayout);
 
   /** 引擎栏下方的说明行（S1-17：只报状态不给动作，等于让用户自己猜下一步）。 */
   function setEngineHint(text) {
@@ -276,16 +371,108 @@
     var node = document.createElement('span');
     node.textContent = '\n';
     output.appendChild(node);
-    var prompt = document.createElement('span');
-    prompt.className = 'prompt';
-    prompt.textContent = '$ ';
-    output.appendChild(prompt);
-    var echo = document.createElement('span');
-    echo.textContent = text + '\n';
-    output.appendChild(echo);
+    // 真 PTY 下 bash 自己会回显输入（还带行编辑、历史替换），页面再画一遍就成了两份。
+    // 所以这里只画换行分隔，命令本身由 PTY 的回显给出。
+    // 无 PTY 时没有回显，才需要页面补上——判据取壳侧报的 hasPty，不靠猜。
+    if (!pageHasPty) {
+      var prompt = document.createElement('span');
+      prompt.className = 'prompt';
+      prompt.textContent = '$ ';
+      output.appendChild(prompt);
+      var echo = document.createElement('span');
+      echo.textContent = text + '\n';
+      output.appendChild(echo);
+    }
     trimOutput();
     scrollBottom();
     try { window.consoleBridge.submit(text); } catch (e) {}
+  }
+
+  // ── 窗口尺寸上报（PTY 化之后才有意义）────────────────────────────────────
+  // 真 PTY 的尺寸由壳侧 stty 设定，而壳侧不知道页面的字符网格是多少：这里按当前字体
+  // 度量估算「一屏能放多少列/行」并上报。不做这一步，vim/top 会按 80x24 或 0x0 排版，
+  // 宽屏设备上表现为右侧大片空白、窄屏上表现为折行错乱。
+  // 壳侧报的"有没有真 PTY"。决定两件事：要不要自己画命令回显、按键条能不能用。
+  var pageHasPty = false;
+  var lastCols = 0, lastRows = 0;
+  function pushSize() {
+    if (!window.consoleBridge || !window.consoleBridge.resize) return;
+    var probe = document.createElement('span');
+    var cs = window.getComputedStyle(output);
+    probe.style.font = cs.font || (cs.fontSize + ' ' + cs.fontFamily);
+    probe.style.position = 'absolute';
+    probe.style.visibility = 'hidden';
+    probe.style.whiteSpace = 'pre';
+    probe.textContent = '0000000000';
+    document.body.appendChild(probe);
+    var chW = probe.getBoundingClientRect().width / 10;
+    document.body.removeChild(probe);
+    // 行高优先取计算值的像素，取不到时退回 1.2 倍字号（等宽字体的常见行距）。
+    var lineH = parseFloat(cs.lineHeight);
+    if (!lineH || isNaN(lineH)) lineH = parseFloat(cs.fontSize) * 1.2;
+    if (!chW || !lineH) return;
+    var cols = Math.max(20, Math.floor(output.clientWidth / chW));
+    var rows = Math.max(5, Math.floor(output.clientHeight / lineH));
+    if (cols === lastCols && rows === lastRows) return;
+    lastCols = cols;
+    lastRows = rows;
+    try { window.consoleBridge.resize(cols, rows); } catch (e) {}
+  }
+  /**
+   * 按键条是否可用：只有真 PTY 才有意义。
+   *
+   * 无 PTY 时 bash 不是在终端里跑的，Tab/Ctrl-C/方向键要么无效要么被当作普通字符，
+   * 留着可点的按钮等于骗点击。这里按壳侧事实禁用并给出原因。
+   */
+  function syncCtlAvailability() {
+    var hasPty = false;
+    try { hasPty = !!(window.consoleBridge && window.consoleBridge.hasPty && window.consoleBridge.hasPty()); } catch (e) {}
+    pageHasPty = hasPty;
+    var btns = document.querySelectorAll('#ctlrow .ctl');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].disabled = !hasPty;
+      btns[i].title = hasPty ? btns[i].getAttribute('data-title') || btns[i].title : '当前会话没有真 PTY，按键不生效';
+    }
+    var row = document.getElementById('ctlrow');
+    if (row) row.style.opacity = hasPty ? '1' : '0.45';
+    return hasPty;
+  }
+  // 就绪之后再问一次：会话是异步拉起的，页面脚本比 session.start() 早执行。
+  // M-c5（2026-10-25 审计）：轮询有上限（无 PTY 的降级会话下，500ms×∞ 的桥轮询会陪跑整个
+  // Activity 生命周期）；到顶即收手，重连时由 restart 按钮重新挂一轮。
+  var ptyPoll = null;
+  var ptyPollAttempts = 0;
+  function armPtyPoll() {
+    if (ptyPoll) clearInterval(ptyPoll);
+    ptyPollAttempts = 0;
+    ptyPoll = setInterval(function () {
+      if (syncCtlAvailability() || ++ptyPollAttempts >= 120) clearInterval(ptyPoll);
+    }, 500);
+  }
+  armPtyPoll();
+  setTimeout(function () { if (!syncCtlAvailability()) setTimeout(syncCtlAvailability, 2000); }, 0);
+
+  window.addEventListener('resize', pushSize);
+  window.addEventListener('orientationchange', function () { setTimeout(pushSize, 120); });
+  // M-c5：edge-to-edge 下软键盘弹出**不触发 window resize**（布局视口不动，动的只有
+  // visualViewport）——键盘开着时行数不重测，vim/top 按旧高度排版即花屏。补听视觉视口。
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', function () { setTimeout(pushSize, 60); });
+  }
+  setTimeout(pushSize, 0);
+
+  // 按键条：直接把控制字符写进 PTY（不经 submit，不追加换行）。
+  var ctlButtons = document.querySelectorAll('#ctlrow .ctl');
+  for (var i = 0; i < ctlButtons.length; i++) {
+    ctlButtons[i].addEventListener('click', function (e) {
+      var seq = e.currentTarget.getAttribute('data-send');
+      if (!seq) return;
+      // 必须走 writeKeys（编码串）：WebView 的桥在字符串参数含 \n/\r 时整次调用静默消失，
+      // 而按键里全是这类控制字符。编码规则见 ConsoleActivity.decodeKeySequence。
+      try { window.consoleBridge.writeKeys(seq); } catch (err) {}
+      // 把焦点还给输入框，否则连续按键要反复点。
+      if (!cmd.disabled) cmd.focus();
+    });
   }
 
   send.addEventListener('click', submit);
@@ -335,6 +522,7 @@
       return;
     }
     setReady(false, '正在重连…');
+    armPtyPoll();
     try { window.consoleBridge.restart(); } catch (e) {}
   });
   // S1-17：引擎栏可点 = 立即重试探活（离线时不再只是「报个状态」，而是给一个动作）。
@@ -350,6 +538,98 @@
   send.disabled = true;
   refreshEngine();
   setInterval(refreshEngine, 3000);
+})();
+</script>
+
+<script>
+/* 双语（2026-10-29）：控制台此前整页 zh-CN，切英文后按钮/提示仍是中文。
+   壳侧在 onPageFinished 调 __dshConsoleSetLang(UiText.isEnglish(this))。
+   只替换与下表**完全相等**的文本节点，避免动到终端输出。 */
+(function () {
+  var MAP = {
+    '返回': 'Back',
+    '控制台': 'Console',
+    '复制': 'Copy',
+    '清空': 'Clear',
+    '重连': 'Reconnect',
+    '补全': 'Complete',
+    '上一条': 'Previous',
+    '下一条': 'Next',
+    '中断当前程序': 'Interrupt',
+    '输入命令，回车执行': 'Type a command and press Enter',
+    '返回管理中心': 'Back to management',
+    '重连控制台': 'Reconnect console',
+    '点此立即重新检测引擎': 'Tap to re-check the engine',
+    '有没有真 PTY': 'Is it a real PTY?',
+    '右移': 'Move right',
+    '左移': 'Move left',
+    '结束输入': 'End input',
+    '引擎': 'Engine',
+    'bash 已就绪（快照 Termux 环境，真 PTY）': 'bash ready (snapshot Termux, real PTY)',
+    'bash 已就绪（快照 Termux 环境，无 PTY）': 'bash ready (snapshot Termux, no PTY)',
+    'bash 已就绪（快照 Termux 环境，正在建立 PTY）': 'bash ready (snapshot Termux, creating PTY)',
+    '快照内嵌 Termux bash。引擎未运行时也可排查启动失败。': 'Snapshot-embedded Termux bash. You can debug startup failures even when the engine is not running.'
+  };
+  var EN = false;
+  function applyLang() {
+    document.documentElement.lang = 'en';
+    var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+    var node;
+    while ((node = walker.nextNode())) {
+      var t = (node.nodeValue || '').trim();
+      if (MAP[t]) node.nodeValue = (node.nodeValue || '').replace(t, MAP[t]);
+    }
+    // 延迟标签（引擎 29ms）是「标签 + 数字」同一文本节点，精确匹配不到，单独正则处理。
+    var walker2 = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+    var n2;
+    while ((n2 = walker2.nextNode())) {
+      var v = n2.nodeValue || '';
+      if (v.indexOf('引擎') >= 0) n2.nodeValue = v.replace(/引擎/g, 'Engine');
+    }
+    var title = document.querySelector('title');
+    if (title && title.textContent && title.textContent.indexOf('控制台') >= 0) title.textContent = 'DeepCode Console';
+    var ph = document.querySelectorAll('input, textarea');
+    for (var i = 0; i < ph.length; i++) {
+      var p = ph[i].getAttribute('placeholder');
+      if (p && MAP[p]) ph[i].setAttribute('placeholder', MAP[p]);
+    }
+  }
+  // #872：切回中文必须**回滚已替换的英文文本**。旧实现只把 documentElement.lang 改回 'zh-CN'
+  // 就 return，按钮/提示/placeholder 仍是英文，用户必须重载页面才恢复。
+  // 反向表由 MAP 现算，避免两处维护漂移。
+  var RIM = {};
+  for (var zk in MAP) { if (Object.prototype.hasOwnProperty.call(MAP, zk)) RIM[MAP[zk]] = zk; }
+  function revertLang() {
+    document.documentElement.lang = 'zh-CN';
+    var w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+    var nd;
+    while ((nd = w.nextNode())) {
+      var t = (nd.nodeValue || '').trim();
+      if (RIM[t]) nd.nodeValue = (nd.nodeValue || '').replace(t, RIM[t]);
+    }
+    // 延迟标签的 'Engine' 是正则替换进去的，精确匹配捞不到，单独反向处理。
+    var w2 = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+    var n2;
+    while ((n2 = w2.nextNode())) {
+      var v = n2.nodeValue || '';
+      if (v.indexOf('Engine') >= 0) n2.nodeValue = v.replace(/Engine/g, '引擎');
+    }
+    var title = document.querySelector('title');
+    if (title && title.textContent === 'DeepCode Console') title.textContent = '控制台';
+    var ph = document.querySelectorAll('input, textarea');
+    for (var j = 0; j < ph.length; j++) {
+      var p = ph[j].getAttribute('placeholder');
+      if (p && RIM[p]) ph[j].setAttribute('placeholder', RIM[p]);
+    }
+  }
+  window.__dshConsoleSetLang = function (english) {
+    EN = !!english;
+    if (!EN) { revertLang(); return }
+    applyLang();
+  };
+  // 状态行与按钮由壳侧 pushStatus 重渲染，必须持续应用，否则会被覆盖回中文。
+  new MutationObserver(function () { if (EN) applyLang() })
+    .observe(document.body, { childList: true, subtree: true, characterData: true });
 })();
 </script>
 </body>

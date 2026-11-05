@@ -1,8 +1,8 @@
 # gateway/client 由继承的 base/typert-gateway 唯一行提供，不在此重复 insert。
 # 0.14.7 的 host-fiber 时序适配随 client-registry-scan-C4 注入；controllers 全部保留。
 # Android adaptation (M1.1 final form): dsh-shell-termux replaces the temporary patch v2.
-# Protection boundary = Termux app domain (SELinux u0_aXXX) + approval flow;
-# sandboxMode explicitly declares workspace-write (permission-presets mount prerequisite), enforcement honestly reported as partial.
+# Protection boundary = app domain (SELinux u0_aXXX) + approval flow; enforcement honestly reported as partial.
+# sandboxMode declares workspace-write: that fences ONLY fs tools (workspaceRoot). bash is NOT fenced by it.
 - id: bash-sandbox
   disabled: true
 - insert:
@@ -19,9 +19,9 @@
         cwd: /data/data/com.dsharnessmobile.shell/files/home
         timeoutMs: 120000
         maxTimeoutMs: 600000
-        # 写面栅栏（0.13.0 D21）：默认档位仅工作区与选定共享目录；danger-full-access 为完全访问档位
-        # （开放共享存储全域，仍限应用域沙盒）。workspaceRoot/sharedDirs 为全局单一实例，
-        # 由 dsh-android-linux-env 插件在设置页动态维护（此处的初始值仅出厂基线）。
+        # 写面栅栏（0.13.0 D21）：workspace-write 只约束 fs 工具（workspaceRoot 内 containment），
+        # bash 不受约束——命令在应用域执行，真实边界是 SELinux + 审批，壳侧固定上报 enforcement: partial
+        # （见 dsh-shell-termux/src/index.ts:211-213）。danger-full-access 开放共享存储全域，仍限应用域沙盒。
         writeMode: workspace-write
         workspaceRoot: /data/data/com.dsharnessmobile.shell/files/home/.dsh/workspaces
         sharedDirs: []
@@ -48,6 +48,16 @@
 - insert:
     - id: dshmarketplace
       name: dshmarketplace-plugin
+
+# 订阅账号当 provider（0.15.x）：dsh-plugin-subscriptions（vendored，见 vendor/dsh-plugin-subscriptions/PATCHES.md）。
+# 把 ChatGPT(Codex)/Claude/Grok/Copilot/Antigravity 订阅当 LLM provider；OAuth 在 Settings → Subscriptions，
+# token 存 ~/.dsh/plugins/subscriptions/auth.json（0600，自动刷新）。
+# 依赖对齐：上游声明 undici@^7，本平台引擎自带 undici@8.11.2；实测插件用到的 fetch/ProxyAgent/close()
+# 在 8.x 语义等价（唯一 7->8 差异是 proxyTunnel 默认值，插件从不传该选项且目标全为 https，故不受影响），
+# 因此把 undici 改为 peer 由引擎提供，不再物化 7.x（省 1.5MB / 195 文件）。差异详见 PATCHES.md。
+- insert:
+    - id: llm-subscriptions
+      name: dsh-plugin-subscriptions
 
 # 在外部应用打开（0.1.5 新增，桌面编排）：上游 host/client 探查 Finder/Terminal/编辑器目录，
 # Android 上没有等价候选。两条 row 关闭，改由注入层的会话头部入口 + 壳侧系统选择器（PathOpen）承担。
@@ -142,7 +152,7 @@
 
 # 侧栏 AI 浏览器（0.13.8 新插件 @dsh-android/dsh-android-browser）：宿主半——tier 判定、面板数据契约、
 # 壳桥 op 名（BROWSER_OPS，见其 src/contract.ts）。**browser\* 不进 A11Y_OPS**（方案 §4.5）。
-# 本轮壳侧尚未实现壳桥分支，op 名先冻结在契约里（未挂载 = 引擎不加载，故此处先挂载）。
+# 壳侧执行位已落地（BrowserHost.kt:809-820、DeviceControlService.kt:664-678），op 名与此处一致。
 - insert:
     - id: android-browser
       name: '@dsh-android/dsh-android-browser'
@@ -229,6 +239,26 @@
 - id: desktop-product-telemetry
   disabled: true
 - id: product-analytics
+  disabled: true
+
+# 持久 Shell 后端（issue #1344）：@deepseek-ai/dsh-terminal-bash 的**两个入口**
+# （optional-terminal-bash / optional-terminal-pwsh）都按包内 Config.backendType 的默认值 "shell"
+# 注册 PTY 后端（lib/index.js:38 z.string().default("shell")，两个入口都没有覆盖它）⇒ 后者撞名即抛
+#   TerminalError: a PTY backend named "shell" is already registered
+# 插件页出现红色「组件启用失败」，且每次都重放。
+# 上游把「pwsh 只在 Windows 开」写成可选 bundle 补丁里的 !!js 表达式
+# （@deepseek-ai/dsh-experimental-terminal-bundle/cordis.patch.yml，rc.2/rc.3 同为 646 字节：
+#   optional-terminal-pwsh: disabled: !!js process.platform !== 'win32'），
+# 而该表达式由 cordis loader 以 `with (ctx) { return eval(expr) }` 求值（cordis-plugin-loader
+# lib/index.js:233-237）——现场（红米 K Pad / Android 16）里两个入口同时激活，说明这道 !!js 判据
+# 在该环境没兜住。本仓不复用那道表达式：profile 层的 id 定向禁用是**字面量**，在所有 bundle 层之后应用，
+# 不依赖任何求值成功与否。
+# 为什么是禁用而不是「改个后端名共存」：Android 快照里没有 pwsh 可执行文件
+# （copy dsh-pwsh-local 的 resolvePwshPath 在非 win32 直接返回 "pwsh"，不校验存在），
+# 共存只会把「启动失败」换成「显示运行中、真用时报 spawn ENOENT」——语义错误比红点更贵。
+# bash 入口保持 "shell"，工具与终端 UI 一行不变（消费者按 "shell" 取名，不受影响）。
+# 逆转条件：上游按 shell 类型区分两个入口的后端名（issue #1344 建议修法 1）后删掉本行与这段注释。
+- id: optional-terminal-pwsh
   disabled: true
 
 # 删除对话（issue #493）：会话行菜单「删除对话」+ 受鉴权 host 路由 /api/session-delete。

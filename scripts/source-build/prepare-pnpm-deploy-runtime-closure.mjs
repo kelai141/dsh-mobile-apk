@@ -6,6 +6,7 @@ import { createRequire } from 'node:module'
 import { copyFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { dirname, join, relative, resolve } from 'node:path'
+import { readHarnessIdentity } from './harness-identity.mjs'
 
 const [sourceArg, overlayArg, backupArg, reportArg] = process.argv.slice(2)
 if (!sourceArg || !overlayArg || !backupArg || !reportArg) {
@@ -16,11 +17,11 @@ if (!sourceArg || !overlayArg || !backupArg || !reportArg) {
 const sourceRoot = resolve(sourceArg)
 const sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: sourceRoot, encoding: 'utf8' }).trim()
 const sourceManifest = JSON.parse(readFileSync(join(sourceRoot, 'package.json'), 'utf8'))
-// 身份一律从合同读（0.14.8）：写死的提交/版本号会随每次引擎追版漂移。
-const contract = JSON.parse(readFileSync(join(process.cwd(), 'scripts', 'contract.json'), 'utf8'))
-if (sourceCommit !== contract.upstream.commit || sourceManifest.version !== contract.baseline
-  || sourceManifest.packageManager !== contract.upstream.packageManager) {
-  throw new Error('production deployment requires official ' + contract.baseline + ' source and ' + contract.upstream.packageManager)
+// 身份一律从合同读：写死的提交/版本号会随每次引擎追版漂移。
+const { commit: expectedCommit, version: expectedVersion, packageManager } = readHarnessIdentity()
+if (sourceCommit !== expectedCommit || sourceManifest.version !== expectedVersion
+  || sourceManifest.packageManager !== packageManager) {
+  throw new Error('production deployment requires official ' + expectedVersion + ' source and ' + packageManager)
 }
 const cliDir = join(sourceRoot, 'apps', 'cli')
 const packageFile = join(cliDir, 'package.json')
@@ -34,9 +35,9 @@ const originalLock = readFileSync(lockFile)
 const originalWorkspace = readFileSync(workspaceFile)
 const manifest = JSON.parse(originalPackage.toString('utf8'))
 const overlay = JSON.parse(readFileSync(resolve(overlayArg), 'utf8'))
-if (manifest.name !== '@deepseek-ai/dsh' || manifest.version !== '0.2.0-rc.2'
-  || overlay.engineVersion !== '0.2.0-rc.2' || overlay.rootPackage?.version !== '0.2.0-rc.2') {
-  throw new Error('production deployment manifest/overlay must target 0.2.0-rc.2')
+if (manifest.name !== '@deepseek-ai/dsh' || manifest.version !== expectedVersion
+  || overlay.engineVersion !== expectedVersion || overlay.rootPackage?.version !== expectedVersion) {
+  throw new Error('production deployment manifest/overlay must target ' + expectedVersion)
 }
 const packages = Object.entries(overlay.packages ?? {})
   .filter(([name]) => name.startsWith('@deepseek-ai/'))
@@ -55,7 +56,7 @@ if (!importer) throw new Error('pnpm-lock.yaml is missing the apps/cli importer'
 // explicitly in the production closure so those platform-specific runtime
 // fallbacks survive the cross-platform deployment step.
 const androidRuntimeDependencies = {
-  '@img/sharp-wasm32': '0.35.3',
+  '@img/sharp-wasm32': '0.35.5',
 }
 const dependencies = { ...(manifest.dependencies ?? {}) }
 const importerDependencies = { ...(importer.dependencies ?? {}) }
@@ -146,7 +147,7 @@ writeFileSync(reportFile, JSON.stringify({
     ...androidRuntimeDependencies,
     koffiOverride: '3.2.1',
     supportedArchitectures: workspaceConfig.supportedArchitectures,
-    rationale: 'Koffi 3.1.1 has no Android ARM64 binding; upstream Koffi 3.2.1 publishes @koromix/koffi-android-arm64. sharp 0.35.3 uses @img/sharp-wasm32 as its Android-compatible fallback. Both exact upstream packages are included in the pnpm lock and deployment closure.',
+    rationale: 'Koffi 3.1.1 has no Android ARM64 binding; upstream Koffi 3.2.1 publishes @koromix/koffi-android-arm64. sharp 0.35.5 uses @img/sharp-wasm32 as its Android-compatible fallback. Both exact upstream packages are included in the pnpm lock and deployment closure.',
   },
   removedFromManifestSections: removedFrom,
   removedFromImporterSections: removedFromImporter,

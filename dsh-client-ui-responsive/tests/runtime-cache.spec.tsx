@@ -91,8 +91,11 @@ describe('RuntimeCacheRow（块 E 设置页面）', () => {
     expect(el.textContent).toContain('$DSH_FILES_DIR/engine.log.1')
     expect(el.textContent).toContain('$DSH_HOME/cache/pip')
     // 白名单说明与硬清单口径必须在场（用户能看到边界）。
-    expect(el.textContent).toContain('白名单制')
-    expect(el.textContent).toContain('当前引擎日志')
+    expect(el.textContent).toContain('只按清单清理')
+    expect(el.textContent).toContain('120分钟可手动回收')
+    expect(el.textContent).toContain('不清理仍可用')
+    expect(el.textContent).toContain('清理后显示占位')
+    expect(el.textContent).toContain('当前日志保留')
   })
 
   it('不展示任何绝对路径（只接受宿主下发的 $DSH_HOME/$DSH_FILES_DIR 标签）', async () => {

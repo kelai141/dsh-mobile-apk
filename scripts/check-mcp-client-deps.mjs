@@ -28,6 +28,115 @@ import { TAR } from './lib/shell.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = dirname(HERE)
+// ── --self-test：判别力自证（2026-10-29 补；此前这条门禁零判别力面）──────────────────
+//
+// 它守的是「快照内 @deepseek-ai/dsh-mcp-client 的运行期依赖**闭包**必须可解析」——
+// 那条真实用户诊断包里的 boot 硬崩（Cannot find package '@modelcontextprotocol/client'）
+// 就是这条判据的由来。自证造四个极小快照（--snapshot 指向），把六个分支全打一遍，
+// 其中「传递闭包缺」那条专门证明它查的是闭包而不是一层。
+if (process.argv.includes('--self-test')) {
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+
+  const selfPath = fileURLToPath(import.meta.url)
+  const NM = 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules'
+  const runGate = (gateArgs) => {
+    try {
+      const out = execFileSync(process.execPath, [selfPath, ...gateArgs], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+      return { code: 0, out }
+    } catch (error) {
+      return { code: error.status ?? 1, out: String(error.stdout ?? '') + String(error.stderr ?? '') }
+    }
+  }
+  /** pkgs: { 包名: { dependencies } }；包名带 @scope 的会落到 @scope/name 子目录。 */
+  const buildSnapshot = (tag, pkgs) => {
+    const dir = mkdtempSync(join(tmpdir(), 'mcpsnap-' + tag + '-'))
+    const nmDir = join(dir, ...NM.split('/'))
+    for (const [name, meta] of Object.entries(pkgs)) {
+      const pkgDir = join(nmDir, ...name.split('/'))
+      mkdirSync(pkgDir, { recursive: true })
+      writeFileSync(join(pkgDir, 'package.json'),
+        JSON.stringify({ name, version: '1.0.0', dependencies: meta.dependencies ?? {} }))
+    }
+    const tops = ['usr']
+    const archive = join(tmpdir(), 'mcpsnap-' + tag + '-' + process.pid + '.tar.xz')
+    execFileSync(TAR, ['-cJf', archive, '-C', dir, ...tops], { stdio: ['ignore', 'pipe', 'pipe'] })
+    rmSync(dir, { recursive: true, force: true })
+    return archive
+  }
+
+  const HOST = '@deepseek-ai/dsh-mcp-client'
+  /**
+   * 构造「包挂在无关顶层包私有 node_modules 下」的快照（issue #1189 的反证夹具）。
+   * 形态：usr/lib/node_modules/other/node_modules/<name>/package.json ——
+   * 从宿主出发不可解析，但旧的全局包名集合会把它算进来。
+   */
+  const buildSnapshotNested = (tag, pkgs) => {
+    const dir = mkdtempSync(join(tmpdir(), 'mcpsnap-' + tag + '-'))
+    const hostDir = join(dir, ...NM.split('/'))
+    mkdirSync(hostDir, { recursive: true })
+    writeFileSync(join(hostDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '1.0.0' }))
+    // 宿主包本体必须在场（否则门禁以 SKIP(#2) 结案，反证就成了空转）。
+    // 它依赖 dep-a，而 dep-a 只存在于 other 的私有 node_modules 下。
+    const hostPkgDir = join(hostDir, '@deepseek-ai', 'dsh-mcp-client')
+    mkdirSync(hostPkgDir, { recursive: true })
+    writeFileSync(join(hostPkgDir, 'package.json'),
+      JSON.stringify({ name: '@deepseek-ai/dsh-mcp-client', version: '1.0.0', dependencies: { 'dep-a': '^1' } }))
+    const otherNm = join(dir, 'usr', 'lib', 'node_modules', 'other', 'node_modules')
+    for (const [name, meta] of Object.entries(pkgs)) {
+      const pkgDir = join(otherNm, ...name.split('/'))
+      mkdirSync(pkgDir, { recursive: true })
+      writeFileSync(join(pkgDir, 'package.json'),
+        JSON.stringify({ name, version: '1.0.0', dependencies: meta.dependencies ?? {} }))
+    }
+    const archive = join(tmpdir(), 'mcpsnap-' + tag + '-' + process.pid + '.tar.xz')
+    execFileSync(TAR, ['-cJf', archive, '-C', dir, 'usr'], { stdio: ['ignore', 'pipe', 'pipe'] })
+    rmSync(dir, { recursive: true, force: true })
+    return archive
+  }
+  const ok = buildSnapshot('ok', {
+    [HOST]: { dependencies: { 'dep-a': '^1' } },
+    'dep-a': { dependencies: {} },
+  })
+  const oneLevel = buildSnapshot('onelevel', {
+    [HOST]: { dependencies: { 'dep-a': '^1', 'dep-missing': '^1' } },
+    'dep-a': {},
+  })
+  const transitive = buildSnapshot('transitive', {
+    [HOST]: { dependencies: { 'dep-a': '^1' } },
+    'dep-a': { dependencies: { 'dep-deep-missing': '^2' } },
+  })
+  const noHost = buildSnapshot('nohost', { 'dep-a': {} })
+  // issue #1189：dep-a 只挂在无关顶层包 other 的私有 node_modules 下。
+  // Node 从宿主出发永远解析不到它，所以必须判红（旧实现用全局包名集合，会误判可解析）。
+  const nestedElsewhere = buildSnapshotNested('nested-elsewhere', { 'dep-a': { dependencies: { 'dep-deep-missing': '^1' } } })
+  const absent = join(tmpdir(), 'mcpsnap-absent-' + process.pid + '.tar.xz')
+
+  const checks = [
+    ['合规快照（宿主只依赖在场的 dep-a）→ PASSED 且 exit 0', runGate(['--snapshot', ok]), (r) => r.code === 0 && r.out.includes('CHECK-MCP-CLIENT-DEPS PASSED')],
+    ['一层依赖缺 → FAILED 且点名 MISS 与设备后果', runGate(['--snapshot', oneLevel]), (r) => r.code === 1 && r.out.includes('MISS  dep-missing') && r.out.includes('ERR_MODULE_NOT_FOUND')],
+    ['传递闭包缺（dep-a 依赖 dep-deep-missing）→ FAILED（证明查的是闭包不是一层）', runGate(['--snapshot', transitive]), (r) => r.code === 1 && r.out.includes('dep-deep-missing')],
+    ['快照缺席（非 --require）→ SKIP(#1) 且 exit 0', runGate(['--snapshot', absent]), (r) => r.code === 0 && r.out.includes('SKIP(#1)')],
+    ['快照缺席 + --require → 硬失败 exit 1', runGate(['--snapshot', absent, '--require']), (r) => r.code === 1 && r.out.includes('CHECK-MCP-CLIENT-DEPS FAILED')],
+    ['宿主包不在快照 → SKIP(#2)（上游裁包/改名，本门禁不适用）', runGate(['--snapshot', noHost]), (r) => r.code === 0 && r.out.includes('SKIP(#2)')],
+    // issue #1189 反证：包只挂在无关顶层包的私有 node_modules 下 → 必须判红。
+    // 旧实现用全局包名集合，会把它误判成「可解析」并 PASS，且因读不到它的 package.json
+    // 而不再展开它的依赖，传递缺口同时隐身。
+    ['包挂在无关顶层包下（Node 解析不到）→ FAILED（全局名集会误判可解析）', runGate(['--snapshot', nestedElsewhere]), (r) => r.code === 1 && r.out.includes('MISS  dep-a')],
+  ]
+  let bad = 0
+  for (const [label, result, verify] of checks) {
+    const pass = verify(result)
+    console.log((pass ? 'PASS  ' : 'FAIL  ') + label + (pass ? '' : '  -> exit=' + result.code + ' out=' + result.out.trim().slice(0, 240)))
+    if (!pass) bad += 1
+  }
+  for (const a of [ok, oneLevel, transitive, noHost, nestedElsewhere]) rmSync(a, { force: true })
+  console.log(bad === 0
+    ? 'MCP_CLIENT_DEPS_SELF_TEST_PASSED（' + checks.length + ' 项）'
+    : 'MCP_CLIENT_DEPS_SELF_TEST_FAILED（' + bad + ' 项）')
+  process.exit(bad === 0 ? 0 : 1)
+}
+
 const args = process.argv.slice(2)
 let ABI = 'x86_64'
 let SNAP_OVERRIDE = null
@@ -52,6 +161,11 @@ if (!existsSync(SNAP)) {
   if (REQUIRE) fail(msg + '\n  严格模式（--require）：构建链/发布链不得以 SKIP 结案')
   console.log('SKIP(#1)  ' + msg)                                             // SKIP #1：快照缺席（发布链 --require 下改判红）
   console.log('SKIP=1（本门禁在快照缺席时以 SKIP 结案，发布链 --require 强制齐全）')
+  // 具名结论行（issue #1154）：只有 SKIP 行 + SKIP=1 时，审计侧判「no-verdict」（有 SKIP 面却没有
+  // 任何判据行，可能零判据结案），只能靠 AUDIT_BASELINE 登记兜着；而那套登记在双环境下不可能同时
+  // 成立（本地有快照→真跑通过，CI 无快照→恒 SKIP），销账必然倒挂。补一行与 PASSED/FAILED 同形的
+  // SKIP 结论，审计就能直接读懂「这是明确结案」，登记表随之不需要。
+  console.log('CHECK-MCP-CLIENT-DEPS SKIPPED（快照不在场，' + ABI + '；SKIP=1）')
   process.exit(0)
 }
 
@@ -73,6 +187,16 @@ try {
  * 取第一个 `node_modules/` 会把包名解析成 `@deepseek-ai/dsh`（本轮实测的假红/假绿源）。
  * 嵌套 node_modules 也算（Node 解析会逐级向上），故按每段最后一个 node_modules 取其后的包名即可。
  */
+// issue #1189：**可解析性必须按宿主可见的解析路径判定，不能用一个全局包名集合**。
+//
+// 旧实现把**任何位置**的 `node_modules/` 都塞进同一个 pkgDirs 名集，于是：
+//   usr/lib/node_modules/other/node_modules/dep-a/...   （挂在无关顶层包下）
+// 会让 `dep-a` 被判「可解析」—— 而 Node 从宿主出发永远解析不到它（它在别的包的私有树里）。
+// 更糟的是 readPkgJson 只读宿主顶层，于是那个 dep-a 的**自己的依赖从不遍历**，
+// 传递缺口同样看不见：输出「闭包遍历 1 个包」却宣称「闭包全部可解析」，自己就自相矛盾。
+//
+// 修法：只把**宿主顶层 node_modules** 下的包算作可解析（这正是 Node 从宿主出发的解析面：
+// 沿 NM 目录逐级向上，第一站就是宿主顶层）。嵌套副本不参与判定。
 const pkgDirs = new Set()
 const ADD = (seg) => {
   const parts = seg.split('/')
@@ -80,9 +204,8 @@ const ADD = (seg) => {
   pkgDirs.add(parts[0].startsWith('@') ? parts[0] + '/' + parts[1] : parts[0])
 }
 for (const m of members) {
-  const i = m.lastIndexOf('node_modules/')
-  if (i < 0) continue
-  ADD(m.slice(i + 'node_modules/'.length))
+  if (!m.startsWith(NM + '/')) continue
+  ADD(m.slice(NM.length + 1))
 }
 
 /**
@@ -124,6 +247,8 @@ if (host === null) {
   // 宿主包不在快照里：说明上游裁掉了它（或被改名）。这本身要人看一眼，但不属于本门禁的判据面。
   console.log('SKIP(#2)  快照内无 ' + WATCHED + '（上游裁包/改名？）——本门禁不适用，请核对上游依赖图')   // SKIP #2：宿主包被上游裁掉/改名
   console.log('SKIP=1（宿主包不在快照内时以 SKIP 结案；发布链 --require 强制齐全）')
+  // 具名结论行，理由同 SKIP #1（见上）。
+  console.log('CHECK-MCP-CLIENT-DEPS SKIPPED（快照内无宿主包，' + ABI + '；SKIP=1）')
   process.exit(0)
 }
 

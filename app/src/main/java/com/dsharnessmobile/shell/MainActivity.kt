@@ -88,7 +88,7 @@ class MainActivity : ComponentActivity() {
   private val pickToken: String = EngineManager.ensurePickToken()
 
   /** 跨类 ::isInitialized 形式（EngineStartFlow 监控/冻结看门狗用；语义等价原 lambda 内检查）。 */
-  private val pageRecovery = ForegroundPageRecoveryPolicy()
+  internal val pageRecovery = ForegroundPageRecoveryPolicy()
   private var pendingWebPresentation = false
   /**
    * 非前台期间收到插件装配失败契约行时挂起的前台呈现（CONTRACT §4），由 [onResume] 消费。
@@ -107,7 +107,12 @@ class MainActivity : ComponentActivity() {
   internal val webViewReady: Boolean get() = ::webView.isInitialized && !pageRecovery.rendererGone
   internal val guideViewReady: Boolean get() = ::guideView.isInitialized
 
-  internal val guideRenderer by lazy { GuidePageRenderer(this) }
+  internal val guideRenderer by lazy {
+    GuidePageRenderer(this).also {
+      // 状态点脉冲是常驻 INFINITE 动画；订阅动效开关，用户跑起来之后关动画也能停。
+      it.startMotionWatch()
+    }
+  }
   /**
    * 更新动作唯一推进者（引导页按钮与设置页那一行**共用这一份状态**）。
    *
@@ -130,6 +135,8 @@ class MainActivity : ComponentActivity() {
   internal val mediaPickerController = MediaPickController(this)
   /** 启动页视频的系统选择器与有界拷贝（注册必须在 STARTED 之前）。 */
   internal val splashImportController = SplashImportController(this)
+  /** 原生拍照（权限 launcher + 相机 ActivityResult 必须在 STARTED 之前注册）。 */
+  internal val photoCaptureController = PhotoCaptureController(this)
 
   /** 开屏视频覆盖层；在 onCreate 建好 root 之后初始化。 */
   private var splashOverlay: SplashOverlay? = null
@@ -262,9 +269,16 @@ class MainActivity : ComponentActivity() {
     internal const val WEBVIEW_SYNTAX_FLOOR_MAJOR = 94
     /** 虚拟屏空闲回收扫描间隔（判定阈值在 VdisplayController.IDLE_RECLAIM_MS = 10 分钟）。 */
     private const val VDISPLAY_REAP_INTERVAL_MS = 2 * 60 * 1000L
-    const val ACTION_UPDATE = "com.dsharnessmobile.shell.action.UPDATE"
-    /** Set by the repair assistant's "back and retry" action; consumed once by onCreate. */
-    const val ACTION_RETRY_ENGINE = "com.dsharnessmobile.shell.action.RETRY_ENGINE"
+    /**
+     * #682：修复助手「返回并重试」的一次性进程内标志（[RepairActivity] 置位，onCreate/onNewIntent
+     * 消费一次）。取代旧的 `ACTION_RETRY_ENGINE` intent action：MainActivity 是 **exported** 的
+     * launcher Activity，外部应用可以构造显式组件 intent 冒充该 action，清掉持久修复闸门与快照
+     * 刷新账本——`RepairState` 的契约「explicit user retry is the only way past the persistent
+     * gate」由此被绕过。进程内静态标志外部应用摸不到；进程死亡时标志随之消失（该次重试退化为
+     * 普通启动，无副作用）。
+     */
+    @Volatile
+    internal var pendingSelfRetry: Boolean = false
 
     /** #120：显式拒绝哨兵路径前缀（引擎侧识别为拒绝而非取消，见 host-web-compat）。
      *  协议：`__dsh_pick_refused__:<reason>`，reason = permission-denied | android-10。 */
@@ -291,8 +305,8 @@ class MainActivity : ComponentActivity() {
   // —— 引擎流 / 引导页委托（原位一行委托到协作类；引擎启动与引导页状态渲染
   //    的调用面保持不变：onCreate/onResume/监控/WebViewClient/引导按钮共用入口）。 ——
 
-  /** 引擎启动流（委托 EngineStartFlow.start）。 */
-  internal fun startEngineFlow(splash: Boolean = false) {
+  /** 引擎启动流（委托 EngineStartFlow.start）；entry 只进探针日志、不参与判据（两次 caller 都是 main，须显式声明入口）。 */
+  internal fun startEngineFlow(splash: Boolean = false, entry: StartEntryPoint = StartEntryPoint.UNSPECIFIED) {
     if (isFinishing || isDestroyed) return
     // 冷启自动尝试（0.14.10）：门若是上一进程落的残留，允许本进程一次自动越过；本进程内仍有界。
     if (startupEntryDecision(RepairState.required(this), explicitUserRetry = RepairState.coldStartAutoAttemptAvailable(this)) ==
@@ -317,7 +331,7 @@ class MainActivity : ComponentActivity() {
       pageRecovery.userReloadRequested()
       recoverPageIfPending()
     } else {
-      engineFlow.start()
+      engineFlow.start(entry)
     }
   }
 
@@ -335,7 +349,17 @@ class MainActivity : ComponentActivity() {
     }
     engineFlow.engineRetryCount = 0
     engineManager.clearRefreshLedger()
-    startEngineFlow(splash = true)
+    startEngineFlow(splash = true, entry = StartEntryPoint.GUIDE_BUTTON)
+  }
+
+  /**
+   * 消费一次性重试标志（#682；仅主线程 onCreate/onNewIntent 调用）。读后即清，
+   * 同一次 intent 不会被两处重复触发；置位方只有 [RepairActivity]（进程内）。
+   */
+  private fun consumePendingSelfRetry(): Boolean {
+    val pending = pendingSelfRetry
+    pendingSelfRetry = false
+    return pending
   }
 
   private fun applyRepairRequiredGuide() {
@@ -468,6 +492,11 @@ class MainActivity : ComponentActivity() {
   /** Navigate only after this process's engine generation has published a real port. */
   private fun loadConfirmedEnginePage() {
     if (!EngineEndpoint.confirmed || EngineEndpoint.port <= 0 || !webViewReady) return
+    // #686 第二层：在此注册守卫——此刻 EngineEndpoint 端口已确定，守卫里可以用**精确**
+    // origin（EngineProbe.ENGINE_URL）。早注册 + 通配会让本机其它端口的页面拿到桥，
+    // 早注册 + 精确值又可能拿到未确定的端口，所以选「晚注册 + 精确值」。
+    // document-start 脚本对**其后**创建的文档生效，所以必须早于下面的 loadUrl。
+    installBridgeOriginGuard()
     val authCookie = EngineAuth.cookie(this)
     if (authCookie != null) {
       try {
@@ -484,8 +513,8 @@ class MainActivity : ComponentActivity() {
     }
   }
 
-  internal fun retryFailedEnginePage() {
-    if (enginePageFailed && pageRecovery.claimLoadErrorRetry()) reloadEnginePage()
+  internal fun retryFailedEnginePage(epoch: Long = 0L) {
+    if (enginePageFailed && pageRecovery.claimLoadErrorRetry(epoch)) reloadEnginePage()
   }
 
   private fun recoverPageIfPending(): Boolean {
@@ -524,13 +553,25 @@ class MainActivity : ComponentActivity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    // 性能审计 #6：冷启动细分段基准。开发者调试开关关闭时本行只读一次已缓存的布尔值，
+    // 不取时刻、不碰磁盘（见 BootPhaseTrace 头注「有界性」）。
+    //
+    // issue #1338：这一行与下面两处 mark() 曾被 9fe627a8（perf(overlay) 动效开关）在
+    // 同一批提交里静默删掉——markBootBase 只剩声明、全仓无调用者，onCreate 与
+    // webViewConstruct 两个阶段不再产生记录，剩下两个阶段的 at= 全部重新基准。
+    // BootPhaseTraceTest 当时仍绿（它只断言常量存在，不断言调用点），所以补了
+    // BootPhaseCallSiteTest 把「每个阶段常量必须有调用点」变成可判的。
+    BootPhaseTrace.markBootBase(this)
     // 本实例的原生视图树是按创建时的界面语言构建的；桥在运行期改语言后靠
     // refreshUiLanguageIfChanged() 在启动页再次出现前重建。
-    appliedUiLanguage = AppLanguage.mode(this)
+    photoCaptureController.restoreNow(); appliedUiLanguage = AppLanguage.mode(this) // P0：恢复必须在这里（super.onCreate 之后），不能放控制器 init——那时未 attachBaseContext，cacheDir 为 null ⇒ getCacheDir() NPE。相机结果只经 onNewIntent/onActivityResult 投递，都在 onCreate 之后，时序不变。
     // 0.14.9：「打开应用后自动启动」是用户的显式意图，冷启动时优先于上一次的持久化停机标记。
     // 旧行为把「划过任务卡/手动停止」留下的 userShutdown 一路带到下次打开，开关明明开着却
     // 停在启动页——看起来就是开关失效。同一次会话内的停止仍由 savedInstanceState 保留，
     // 只有真正的冷启动（savedInstanceState == null）才按开关清除持久标记。
+    // issue #945：覆盖安装后先把**上一版的**起动意图归一，再读开关。
+    // 顺序不能反：若先读 `autoStart`，残留的 false 会直接决定下面的分支，归一等于没做。
+    StartupPrefsNormalizer.resetOnUpgrade(this)
     val autoStartOnOpen = SplashStore.autoStart(this)
     userClosedEngine = if (savedInstanceState == null && autoStartOnOpen) {
       EngineService.setUserShutdown(this, false)
@@ -547,7 +588,21 @@ class MainActivity : ComponentActivity() {
     // 提示），随后交回默认 handler——只记录，不吞异常、不阻止崩溃。
     installCrashMarker()
     // 启动即 TTL 清扫临时工作区（issue #60 F5.1：7 天过期文件自动回收）
-    try { FileIncoming.sweepExpired(this) } catch (_: Throwable) {}
+    //
+    // 性能审计 2026-11-02 #5：**移出主线程**。
+    //
+    // 原实现直接在 onCreate 同步跑：sweepWorkspace 会 listFiles() 整个来件临时工作区，
+    // 再对 `.sessions` 下**每个 json 各做一次 readText + JSONObject 解析**，最后逐条 stat。
+    // 这是本 Activity 唯一一处「随用户来件量增长」的主线程冷启成本，且上界无硬限
+    // （TTL 是 7 天，重度用户可以让 .sessions 累积数百条）。
+    //
+    // 为什么挪走是**零行为变化**：它的语义只是「删掉 7 天前的过期临时文件」，早两秒晚两秒
+    // 对用户没有任何可观测差异。与 processIncomingIntent 的顺序也不构成正确性问题——
+    // 新来件 age=0，永远不在 TTL 删除集里（sweepWorkspace 只删 lastModified < now - TTL 的项）。
+    // 异常仍按原样吞掉（清扫失败不得影响启动）。
+    Thread({
+      try { FileIncoming.sweepExpired(this) } catch (_: Throwable) {}
+    }, "dsh-incoming-ttl-sweep").apply { isDaemon = true }.start()
     // S1-11：**冷启动不再弹通知权限**。旧实现在 onCreate 里直接 launch：应用刚打开、用户还
   // 不知道这是干什么的，系统弹窗先来了——没有前置说明，拒绝了也没有任何后果提示，而
   // 后果其实很重（引擎提问/授权请求没有超时，通知被丢 = 任务永久挂起）。
@@ -582,8 +637,15 @@ class MainActivity : ComponentActivity() {
     // 系统层面表现为「点开即崩」。改为如实落 boot-diag + 一句话告知 + finish 干净退出；
     // 早退后各 lateinit 面由 ::isInitialized 闸门挡住，onDestroy 不碰未建对象。
     // （赋值保持 `webView = WebView(this)` 字面形态——ForegroundPageRecoveryWiringTest 线序钉。）
+    val webViewConstructStartMs = android.os.SystemClock.elapsedRealtime()
     try {
       webView = WebView(this)
+      // 性能审计 #6：WebView 构造耗时（Chromium provider 首次加载 native 库的成本）。
+      BootPhaseTrace.mark(
+        this,
+        BootPhaseTrace.WEBVIEW_CONSTRUCT,
+        "ms=" + (android.os.SystemClock.elapsedRealtime() - webViewConstructStartMs),
+      )
     } catch (t: Throwable) {
       LogCollector.writeBootDiag(
         this,
@@ -608,6 +670,8 @@ class MainActivity : ComponentActivity() {
     guideRenderer.management.restore(savedInstanceState?.getString("dsh.guide-page"))
     root.addView(guideView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     setContentView(root)
+    // 性能审计 #6：onCreate 主线程段到此结束（setContentView 返回即首帧内容已提交视图树）。
+    BootPhaseTrace.mark(this, BootPhaseTrace.ON_CREATE)
     // 开屏视频是最上层视图：加在 guideView 之后、任何宿主视图之前。
     splashRoot = root
     splashOverlay = SplashOverlay(root) { code ->
@@ -669,16 +733,14 @@ class MainActivity : ComponentActivity() {
     reportWebViewVersion("onCreate")
     // 0.13.8 #183：键盘广播 nonce（应用私有文件，引擎子进程经 DSH_FILES_DIR 读取，
     // manage 插件广播时 --es auth 携带；幂等）。
-    try { AdbKeyboardService.ensureNonce(this) } catch (_: Throwable) {
-    }
-    // Testable update trigger: adb am start -n .../.MainActivity -a com.dsharnessmobile.shell.action.UPDATE
-    if (intent?.action == ACTION_RETRY_ENGINE) {
-      // The assistant's "back and retry" hands over a one-shot user intent. Clear it before
-      // automatic startup so a later resume cannot replay the retry on its own.
-      intent.action = null
+    // #679：写失败必须可见（壳侧已无 uid 兜底，nonce 缺失 = android_ui_input 全链路失效）。
+    try { AdbKeyboardService.ensureNonce(this) } catch (t: Throwable) { reportKeyboardNonceWriteFailure(t) }
+    // #682 收口：外部可达的特权 action 已全部移除——重试改为进程内一次性标志
+    // （见 pendingSelfRetry）；ACTION_UPDATE 的 adb 触发入口直接删除（runUpdate 定义
+    // 保留在 EngineStartFlow，但不再有任何外部 intent 入口——导出的 launcher Activity
+    // 无法区分「adb 联调」与「任意第三方应用」，两者走的是同一条显式组件 intent）。
+    if (consumePendingSelfRetry()) {
       retryEngineExplicitly()
-    } else if (intent?.action == ACTION_UPDATE) {
-      engineFlow.runUpdate()
     } else {
       // 来件接线（VIEW/SEND 外部来件）已迁至 FileIncoming.processIncomingIntent：
       // 校验净化→后台拷贝临时工作区→待发清单投递引擎侧插件；拒绝/失败经 showTestNotification 提示。
@@ -688,7 +750,7 @@ class MainActivity : ComponentActivity() {
       if (!userClosedEngine) {
         if (SplashStore.autoStart(this)) {
           maybePlaySplash(force = false)
-          startEngineFlow()
+          startEngineFlow(entry = StartEntryPoint.ON_CREATE)
         } else {
           // 关闭自动启动后必须显式停在启动页：webView 初始为 GONE，而 guideView
           // 自带 GONE，什么都不做的话用户会看到一片空白（没有可点的「启动引擎」）。
@@ -714,11 +776,21 @@ class MainActivity : ComponentActivity() {
    * 把 id 送进去、并在送不进去时**说话**（不静默）。
    */
   private var pendingNotifySession: String? = null
+  // 落点重试：冷启动时页面往往还没装好会话视图，__dshOpenSession 会先回 false。
+  // 旧实现拿到 false 就一次性放弃并弹失败提示 ⇒ 用户点通知冷启动**经常落空**。
+  private var notifyRouteAttempts = 0
+  private val NOTIFY_ROUTE_MAX_ATTEMPTS = 12
+  private val NOTIFY_ROUTE_RETRY_MS = 800L
 
   private fun consumeNotifyRoute(intent: Intent?) {
-    val session = intent?.getStringExtra(NotifyCenter.EXTRA_TARGET_SESSION).orEmpty()
-    if (session.isEmpty()) return
+    // 交互类通知（提问 / 审批）只带 EXTRA_TARGET_AGENT，旧实现只读 session 键 ⇒ 点开不落点。
+    // 解析规则抽在 NotifyCenter.resolveNotifyTarget（纯函数，可离线判定）。
+    val session = NotifyCenter.resolveNotifyTarget(
+      intent?.getStringExtra(NotifyCenter.EXTRA_TARGET_SESSION),
+      intent?.getStringExtra(NotifyCenter.EXTRA_TARGET_AGENT),
+    ) ?: return
     pendingNotifySession = session
+    notifyRouteAttempts = 0
     deliverNotifyRoute()
   }
 
@@ -726,8 +798,7 @@ class MainActivity : ComponentActivity() {
     super.onNewIntent(intent)
     // SINGLE_TOP：应用已在前台时点击通知走这里（此前**没有这个覆写**，intent 直接丢掉）。
     setIntent(intent)
-    if (intent.action == ACTION_RETRY_ENGINE) {
-      intent.action = null
+    if (consumePendingSelfRetry()) {
       retryEngineExplicitly()
       return
     }
@@ -746,7 +817,14 @@ class MainActivity : ComponentActivity() {
       webView.evaluateJavascript(script) { raw ->
         if (!pageRecovery.accepts(generation)) { pendingNotifySession = session; return@evaluateJavascript }
         if (raw?.trim() != "true") {
-          // 落点失败必须可见：会话可能已被删除，或页面还没装好会话视图。
+          // 冷启动竞态：页面还没装好会话视图时 __dshOpenSession 会先回 false。
+          // 有界重试（最多 12 次 / 约 10s）后再判失败——只有真删除/真不可开才弹失败提示。
+          if (notifyRouteAttempts < NOTIFY_ROUTE_MAX_ATTEMPTS) {
+            notifyRouteAttempts += 1
+            pendingNotifySession = session
+            webView.postDelayed({ deliverNotifyRoute() }, NOTIFY_ROUTE_RETRY_MS)
+            return@evaluateJavascript
+          }
           notifyRouteFailed()
         }
       }
@@ -779,6 +857,11 @@ class MainActivity : ComponentActivity() {
     super.onResume()
     pageRecovery.resume()
     if (!RepairState.active && RepairState.required(this)) {
+      if (RepairState.coldStartAttemptInFlight()) {
+        // Resume passive observation of the one already authorized attempt. Do not spawn or reset retries.
+        engineFlow.startMonitor()
+        return
+      }
       showGuide()
       applyRepairRequiredGuide()
       return
@@ -862,7 +945,7 @@ class MainActivity : ComponentActivity() {
     // 单次同步 HTTP 为秒级）。后台探活 + 主线程分流，失败原因结构化落盘。
     if (!userClosedEngine && autoStart && webView.visibility != View.VISIBLE) {
       probeEngineOffMainThread { running ->
-        if (!running && !userClosedEngine && SplashStore.autoStart(this) && webView.visibility != View.VISIBLE) startEngineFlow()
+        if (!running && !userClosedEngine && SplashStore.autoStart(this) && webView.visibility != View.VISIBLE) startEngineFlow(entry = StartEntryPoint.ON_RESUME)
       }
     }
     // 主题补推：从系统设置/SAF 返回时系统主题可能已变（兜底桥时序覆盖）。
@@ -1143,6 +1226,68 @@ class MainActivity : ComponentActivity() {
     }
   }
 
+  /**
+   * #686 第二层：安装桥帧来源守卫（见 [BridgeOriginGuard]）。
+   *
+   * 第一层是 [AndroidBridge.checkTrustedFrame]：每个桥方法入口校验**顶层帧 URL** 是否为引擎
+   * origin。它关死了「顶层被劫持出引擎 origin」，但按定义读不到「调用者来自哪个子帧」——
+   * 引擎 origin 顶层之下的跨源子帧仍够得到桥面（该缺口在 AndroidBridge 里如实登记）。
+   *
+   * 本层补的就是那个缺口：document-start 脚本让**每个文档自己**读 location.origin 与
+   * 「是否为顶层帧」，非放行帧把 window.androidBridge 整体封死。两层互补，缺一不可：
+   * 第一层挡顶层劫持，第二层挡子帧越权。
+   *
+   * 时序：唯一调用点在 loadConfirmedEnginePage()（:494），紧随其后就是 webView.loadUrl()（:502/:505）；
+   * addJavascriptInterface 更早在 configureWebView()（:1527），两者同在主线程串行，故守卫必先于任何文档解析。
+   *
+   * 内核不支持 DOCUMENT_START_SCRIPT 时**必须发出可见告警**（不是静默跳过）：
+   * 老内核上第二层不存在，只剩第一层，属已知风险，PR 里单独登记。
+   */
+  private fun installBridgeOriginGuard() {
+    // 端口未确定就**不注册**，并报可见告警：不回退通配（http://127.0.0.1:* 会让本机任何
+    // 其他端口的页面拿到桥，风险面比现状更大），也不用未确定的值（会把合法主帧误封）。
+    if (!EngineEndpoint.confirmed || EngineEndpoint.port <= 0) {
+      Log.w(TAG, "WARNING: bridge frame origin guard NOT installed (engine port not confirmed yet); cross-origin subframes can still reach window.androidBridge (#686)")
+      try {
+        LogCollector.writeBootDiag(this, "bridge-guard-port-unconfirmed", "EngineEndpoint.port=" + EngineEndpoint.port + " confirmed=" + EngineEndpoint.confirmed)
+      } catch (t: Throwable) {
+        Log.w(TAG, "bridge guard port diag failed: " + t.message)
+      }
+      return
+    }
+    // 精确 origin：只用 EngineEndpoint 的持久化值（EngineProbe.ENGINE_URL 派生于它）。
+    val origins = listOf(EngineProbe.ENGINE_URL)
+    if (!BridgeOriginGuard.install(webView, origins)) {
+      // 可见告警：老内核降级。写日志 + 落启动诊断，运营侧能查到，不静默。
+      Log.w(TAG, "WARNING: bridge frame origin guard NOT installed (kernel lacks DOCUMENT_START_SCRIPT); cross-origin subframes can still reach window.androidBridge (#686)")
+      try {
+        LogCollector.writeBootDiag(this, "bridge-guard-unsupported", "DOCUMENT_START_SCRIPT unavailable")
+      } catch (t: Throwable) {
+        Log.w(TAG, "bridge guard fallback diag failed: " + t.message)
+      }
+    }
+  }
+
+  /**
+   * #686：顶层帧 URL 的**主线程镜像**，供 JavaBridge 线程上的桥面来源门禁判读。
+   *
+   * 为什么不直接读 `webView.url`：`@JavascriptInterface` 入口跑在 **JavaBridge 线程**，
+   * 而 `WebView.getUrl()` 是 WebView 方法——仓内四处约定（`BackGate.kt` 类注释、
+   * `docs/AGENTS/gotchas.md` 坑 226、`docs/AGENTS/ANDROID-API-USAGE.md` 的
+   * 「@JavascriptInterface 跑在 JavaBridge 线程」一行、`docs/AGENTS/BRIDGE-API.md` 开头）
+   * 都要求 WebView 方法切回主线程。桥面每个入口都要过这道门禁，把一个不确定性乘 77 次
+   * 不值得；改成一个字段读，语义不变且不存在线程争议。
+   *
+   * 写入方只有主线程回调：`onPageStarted` / `onPageFinished` / `shouldOverrideUrlLoading`
+   * （同源放行那一支）。与 [enginePageFailed] / `webFrameCommitted` 同形（都是 `@Volatile` 镜像）。
+   * 初值空串 = 还没开始导航 ⇒ 门禁按 fail-closed 拒（首帧前一律拒是 #686 的既定姿态）。
+   *
+   * 刻意声明在本类**靠后的位置**（在所有被 `EXECUTION-MAP.md` 引用的行号之后）：
+   * 这个文件的锚点密集（54 个），往前插字段会整体平移行号、把全部锚点判漂移。
+   */
+  @Volatile
+  internal var trustedTopFrameUrl: String = ""
+
   private fun configureWebView() {
     // WebView 远程调试（debug 构建）：真机/模拟器 CDP 自动化验证 UI 行为。
     // AGP 8 默认不生成 BuildConfig，用 debuggable 标志判断。
@@ -1162,13 +1307,23 @@ class MainActivity : ComponentActivity() {
         // sec-fetch-site 标记，会被 dsh 的 /api browser-trust fence 拒绝
         // （403 forbidden，防 DNS rebinding/跨站）。改为 app 内下载：
         // HttpURLConnection 无浏览器标记 → fence 放行（MuMu 实测验证）。
+        // issue #919 壳侧一半：引擎插件在真下载前先发 HEAD 预检。旧判据只认 GET ⇒ HEAD 落到下面
+        // 的 isEngineSource 分支交给 WebView 自己导航 ⇒ 插件拿到的是导航结果而不是导出通道 ⇒
+        // 进错误分支，而那个错误弹窗被 Web 侧 CSS 隐藏 ⇒ 用户看到「什么也没发生」。
+        // HEAD 必须拦，但**不得**触发下载（一次导出只该落一份文件），只回状态码。
         if (isSessionExport(url, request.method)) {
-          downloadSaver.downloadToDownloads(url, null)
+          if (isSessionExportPreflight(request.method)) {
+            downloadSaver.probeSessionExport(url)
+          } else {
+            downloadSaver.downloadToDownloads(url, null)
+          }
           return true
         }
         // 只允许引擎同源页面留在 WebView（特权桥 + 下载能力仅对引擎可信）；
         // 外部链接交给系统浏览器，防止不可信页面获得桥能力（社工/通知轰炸/任意下载）。
         if (isEngineSource(url)) {
+          // #686：主线程镜像顶层帧 URL——现场放行同源导航时同步一次，避免门禁读到上一文档。
+          if (view === webView) trustedTopFrameUrl = url
           view.loadUrl(url)
           return true
         }
@@ -1271,6 +1426,8 @@ class MainActivity : ComponentActivity() {
        */
       override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
         super.onPageStarted(view, url, favicon)
+        // #686：主线程镜像顶层帧 URL（桥面门禁在 JavaBridge 线程只读这个字段）。
+        trustedTopFrameUrl = url
         if (isEngineSource(url)) enginePageFailed = false
         // 新文档：上一文档的层栈信号作废（页面插件在新文档里重新推）。
         if (isEngineSource(url)) backGateState.onPageStarted()
@@ -1294,6 +1451,8 @@ class MainActivity : ComponentActivity() {
 
       override fun onPageFinished(view: WebView, url: String) {
         super.onPageFinished(view, url)
+        // #686：主线程镜像顶层帧 URL（与 onPageStarted 同写者，保证门禁看到的是当前文档）。
+        if (view === webView) trustedTopFrameUrl = url
         if (!pageUiActive || view !== webView) return // Resume replays theme/insets/routes; do not restart background page probes.
         // 层栈缓存拉平（插件可能晚于首帧挂载，初始上行信号会漏）。
         if (isEngineSource(url)) pullBackGateState(view)
@@ -1305,6 +1464,8 @@ class MainActivity : ComponentActivity() {
         // P0-1：冷启动时点的通知，落点要等这一帧之后页面才有会话视图（文档级就绪 ≠ 会话列表就绪，
         // 故页面侧的回执为 false 时会给出可见提示，而不是静默失败）。
         if (isEngineSource(url)) deliverNotifyRoute()
+        // issue #1007：进程死亡后恢复出来的拍照在途状态若已判丢失，回执要等到页面就绪才送得出去。
+        if (isEngineSource(url)) photoCaptureController.flushDeferredReceipt()
         // 0.14.2-fx-2 缺口：恢复期「拒绝回滚」的提示要在**页面就绪后**注入（引导页会被 showWeb 盖掉）。
         // 挂在这里的两个理由：① 文档级就绪；② 页面**重载**后补注不丢（进程内存里留着文案）。
         if (isEngineSource(url)) deliverRecoveryNotice()
@@ -1315,7 +1476,7 @@ class MainActivity : ComponentActivity() {
     webView.setDownloadListener { url, _userAgent, contentDisposition, _mimeType, _contentLength ->
       downloadSaver.downloadToDownloads(url, contentDisposition)
     }
-    webView.webChromeClient = object : WebChromeClient() {
+    webView.webChromeClient = object : JsConfirmChromeClient(this@MainActivity) {
       /**
        * 块L L-2：页面控制台消费者（跨层契约的壳侧一半）。
        *
@@ -1402,6 +1563,10 @@ class MainActivity : ComponentActivity() {
     }
     webView.addJavascriptInterface(
       AndroidBridge(
+        // #686：桥面来源门禁——与导航闸门同一判据，守「顶层帧必须是引擎 origin」。
+        // isTrustedTopFrame 默认 false（fail-closed），这里必须在构造时显式放行引擎页。
+        // 只读主线程镜像字段，不在这里调用任何 WebView 方法（本 lambda 跑在 JavaBridge 线程）。
+        isTrustedTopFrame = { isEngineSource(trustedTopFrameUrl) },
         onPickRequest = { callbackId -> dirPickerController.pickDirectoryWithPermissionCheck(callbackId) },
         onKeepScreen = { enable -> keepScreenOn(enable) },
         onNotify = { title, text -> NotifyCenter.notify(this, "task", title, text) },
@@ -1443,6 +1608,12 @@ class MainActivity : ComponentActivity() {
         onSetUiLanguage = { mode ->
           val stored = AppLanguage.setMode(this, mode)
           AppLanguage.syncDshLocale(this)
+          // 渠道展示名只在创建那一刻取一次：语言一变就必须重建，否则系统设置里的类别名不跟语言走
+          //（真机缺陷 2026-10-29：切英文后仍显示「授权请求 / 工作汇报 / 后台动态」）。
+          runCatching { NotifyCenter.syncChannelNames(this) }
+          // 常驻浮层面板的固定文案也只在创建时读过 t(...)，不重设就永远停在上一次的语言
+          //（真机缺陷 2026-10-29：切英文后「隐藏 / 查看汇报」仍是中文）。
+          runCatching { OverlayService.instance?.panel?.applyLanguage() }
           stored
         },
         onSettingsPathRequest = { engineManager.settingsDocumentPath() },
@@ -1450,6 +1621,9 @@ class MainActivity : ComponentActivity() {
         onCopyTextRequest = { text -> copyTextNative(text) },
         // 0.14.6：设置页「检查更新」——动作与引导页按钮共用同一状态机（ApkUpdateController）。
         onApkUpdate = { action -> apkUpdate.handleBridgeAction(action) },
+        // 原生拍照：只受理并立即返回，最终回执经 window.__dshBridge.onPhotoCaptured 推回页面
+        // （相机是外部 Activity，取景时间不可预知，同步桥会把 JS 线程堵到用户按快门）。
+        onCapturePhoto = { action -> photoCaptureController.handleBridgeAction(action) },
         pickToken = pickToken,
         onRestartEngine = { engineFlow.restart() },  // S3-15：返回 Boolean，页面据此如实反馈
         onShutdownToGuide = { engineFlow.shutdownToGuide() },
@@ -1480,6 +1654,11 @@ class MainActivity : ComponentActivity() {
         onOpenNativePath = { path -> FileIncoming.openWithExternalReader(this, path) },
         // 0.13.7：上游 0.1.5「在外部应用打开」的 Android 落点——系统选择器（MT 管理器 / 系统文件管理）。
         onOpenPathChooser = { path, mode -> PathOpen.openChooser(this, path, mode) },
+        // 0.15.0：文件「外部打开 / 转发」到别的应用——chooser 聚合 ACTION_VIEW + ACTION_SEND，
+        // 两条接收面并列出候选（只发一条会漏掉另一半应用）。
+        onOpenFileExternal = { path, mime, kind ->
+          FileExternalBridge.openOrShare(this, path, mime, kind, UiText.isEnglish(this))
+        },
         // 0.14.0：内置 adb 退役——原 ADB 授权面（shell / 状态 / 允许开关 / 配对 / 端口发现）
         // 的四个桥方法已从 AndroidBridge 移除；特权执行改由 Shizuku UserService（设置页「手机控制」）。
         // 0.13.2 W7：悬浮球开关（控制器处理 overlay 权限引导；onResume 补启已授权的开关）。
@@ -1865,7 +2044,15 @@ class MainActivity : ComponentActivity() {
         Log.w(TAG, "openAccessibilitySettings failed: " + t.message)
       }
     }
-    Toast.makeText(this, "无法打开系统设置，请手动前往 系统设置 → 无障碍", Toast.LENGTH_LONG).show()
+    Toast.makeText(
+      this,
+      UiText.t(
+        this,
+        "无法打开系统设置，请手动前往 系统设置 → 无障碍",
+        "Could not open system settings. Open Settings > Accessibility manually.",
+      ),
+      Toast.LENGTH_LONG,
+    ).show()
   }
 
   private fun keepScreenOn(enable: Boolean) {
@@ -2115,6 +2302,25 @@ class MainActivity : ComponentActivity() {
     fun setEnabled(context: Context, enabled: Boolean) {
       context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         .edit().putBoolean(KEY_DEV_LOG, enabled).apply()
+    }
+  }
+
+  /**
+   * #679：nonce 写失败的**可见化**（旧实现 `catch (_: Throwable) {}` 静默吞掉）。
+   *
+   * 为什么必须可见：壳侧已撤销 shell/root 的 uid 白名单，只认 nonce，所以 nonce 不存在就等于
+   * `android_ui_input` 的广播全链路失效；静默时用户只看到「中文输入没反应」，logcat 又常拿不到。
+   * boot-diag 是 `run-as cat` 可取回的自助面，也是发布后定位「壳与插件不同版」的唯一线索。
+   *
+   * 不重试、不回落旧口径：nonce 缺失时引擎侧会收到结构化错误并明确告知原因。
+   */
+  private fun reportKeyboardNonceWriteFailure(t: Throwable) {
+    val reason = t.message ?: t.javaClass.simpleName
+    android.util.Log.e("dsh-adb-kb", "keyboard nonce unavailable at startup: " + reason)
+    try {
+      LogCollector.writeBootDiag(this, "adb-keyboard-nonce-write-failed", reason)
+    } catch (_: Throwable) {
+      // 诊断写不进去时至少 Log.e 已留下；不影响启动。
     }
   }
 }

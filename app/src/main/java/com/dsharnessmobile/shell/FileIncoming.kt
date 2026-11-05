@@ -32,9 +32,19 @@ object FileIncoming {
   fun tmpWorkspace(context: Context): File =
     File(context.filesDir, "home/.dsh/workspaces/incoming").apply { mkdirs() }
 
+  /**
+   * 外部来件（VIEW/SEND）白名单——**只放行外部世界的真实路径**（issue #1353）。
+   *
+   * 为什么私有目录不在其中：这条入口的调用方是任意已安装应用（MainActivity exported），
+   * 而 `file://` 方案下壳侧拿不到调用方身份（Activity 侧才有 getCallingPackage，且 file://
+   * 不携带任何读授权）。前缀匹配一旦放行 `/data/data/<pkg>/`，等于「谁都能让 DSH 把私有目录
+   * 里的 .credentials.yaml 拷进来件工作区，再随强制新会话交给引擎」——FileProvider 那条出口
+   * 特意没映射 home/.dsh，这条入口曾经绕过了它。
+   *
+   * 壳侧自产来件（拍照等）不走本白名单：它们已经有 `File`，直接进 [processIncomingPath]。
+   */
   private val SAFE_PREFIXES = listOf(
-    "content://", "file:///data/user/0/com.dsharnessmobile.shell/", "file:///data/data/com.dsharnessmobile.shell/",
-    "file:///storage/emulated/0/", "file:///sdcard/",
+    "content://", "file:///storage/emulated/0/", "file:///sdcard/",
   )
 
   /** 路径校验：仅接受白名单前缀的真实路径，拒绝上级跳转。返回可拷资源 Uri 描述或 null。 */
@@ -333,7 +343,9 @@ object FileIncoming {
   }
 
   /** 来件 IO 专用单线程执行器（0.13.8 #174：onCreate 前台零 IO——尺寸不可预知的拷贝
-   *  与首帧事务曾同线串行，200MB 提供方可达数十秒 = 无上界阻塞）。daemon = 不阻断进程退出。 */
+   *  与首帧事务曾同线串行，200MB 提供方可达数十秒 = 无上界阻塞）。daemon = 不阻断进程退出。
+   *  issue #1006：本执行器只做 IO，不得承载投递重试的有界等待（重试已搬到类尾的
+   *  deliveryRetryExecutor；旧实现在这条单线程上跑 20s 重试循环，后一个来件要排队等满窗口）。 */
   private val ioExecutor: java.util.concurrent.ExecutorService =
     java.util.concurrent.Executors.newSingleThreadExecutor { r ->
       Thread(r, "dsh-file-incoming").apply { isDaemon = true }
@@ -519,14 +531,47 @@ object FileIncoming {
           // 引擎侧插件端点：路径交给 dsh-android-file-open 强制新会话。
           // 待发清单 + 短促重试（引擎就绪钩子会再补投，冷启动不再丢件）：
           enqueuePending(context, target.absolutePath)
-          val deadline = System.currentTimeMillis() + 20_000
-          while (System.currentTimeMillis() < deadline) {
-            if (flushPending(context)) return@withIncomingDeliveryAfterSweep
-            try { Thread.sleep(4_000) } catch (_: InterruptedException) { return@withIncomingDeliveryAfterSweep }
-          }
+          // issue #1006：重试不在这条单线程上——否则后一个来件要排队等满 20s（旧实现把
+          // 20s 重试循环放在 ioExecutor 上）。拷贝与入队已完成，等待受理交给类尾的
+          // deliveryRetryExecutor；下面这行在 IO 线程上同步返回。
+          retryDelivery(context, deliveryRetryBudgetMs) { }
         }
       } catch (t: Throwable) {
         android.util.Log.w("dsh-file-open", "incoming pipeline failed: " + (t.message ?: t.javaClass.simpleName))
+      }
+    }
+  }
+
+  /**
+   * 把**已在临时工作区内**的文件交给既有来件通路（拍照等壳侧自产来件的入口）。
+   *
+   * 为什么单独开一个入口而不是让调用方自己 enqueuePending + flushPending：
+   * 「记账 → 入待发清单 → 短促重试 → 引擎受理」是一个整体，投递预留计数（activeDeliveries）
+   * 必须在整段里持有，否则「刚入队就划掉应用」会让 cleanupTmp 把在途来件与清单一起删掉
+   * （FX-211.2 的现场）。调用方只负责把文件**拷进**临时工作区；之后的投递全在这里，
+   * 且与「外部分享一个文件进来」走的是同一段代码，不会出现第二条投递链。
+   *
+   * @param context 宿主上下文。
+   * @param copied 已落在 [tmpWorkspace] 内的文件（调用方应已用 [copyIn] 拷入）。
+   * @param notify 投递结果提示（主线程回调；title, text）。
+   */
+  fun processIncomingPath(context: Context, copied: File, notify: (title: String, text: String) -> Unit) {
+    val main = android.os.Handler(android.os.Looper.getMainLooper())
+    ioExecutor.execute {
+      try {
+        withIncomingDeliveryAfterSweep(pendingLock, activeDeliveries, { sweepExpired(context) }) {
+          recordOpening(context, copied.absolutePath)
+          LogCollector.log("dsh-file-open", "incoming processed (shell-produced): " + copied.absolutePath)
+          enqueuePending(context, copied.absolutePath)
+        }
+        // issue #1006：重试**不在这条单线程上**——否则后一个来件要排队等满 20s。
+        // 拷贝与入队已经完成，这里只把「等待受理」交给独立的重试线程。
+        retryDelivery(context, deliveryRetryBudgetMs) {
+          main.post { notify("文件投递未确认", "引擎暂未受理，稍后自动重试") }
+        }
+      } catch (t: Throwable) {
+        android.util.Log.w("dsh-file-open", "incoming pipeline failed: " + (t.message ?: t.javaClass.simpleName))
+        main.post { notify("文件投递失败", t.message ?: t.javaClass.simpleName) }
       }
     }
   }
@@ -571,19 +616,99 @@ object FileIncoming {
    *  0.13.7：PathOpen（系统选择器）复用同一道门——两处出口同一份允许面。 */
   internal fun isReaderAllowed(activity: MainActivity, file: java.io.File): Boolean {
     return try {
-      val canon = file.canonicalPath
-      val roots = listOf(
-        java.io.File(activity.filesDir, "home/.dsh/workspaces"),
-        java.io.File(activity.filesDir, "home/tmp"),
-        java.io.File(activity.filesDir, "usr/bin"),
-        java.io.File(
+      readerAllowedBy(
+        readerRoots(
+          activity.filesDir,
           android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOCUMENTS),
-          "dshdata",
         ),
-      ).map { it.canonicalPath }
-      roots.any { root -> canon == root || canon.startsWith(root + java.io.File.separator) }
+        file.canonicalPath,
+      )
     } catch (_: Exception) {
       false
     }
+  }
+
+  /**
+   * 投递重试专用执行器（issue #1006）：**每个来件一个线程**，不与会话/拷贝串行。
+   *
+   * 为什么必须与 ioExecutor 分开：重试是「等待 + 轮询」，最长 20s，且大部分时间在 Thread.sleep。
+   * 把它放在单线程上等于让 IO 队列为一个纯等待付阻塞代价。这里用 cached pool（线程在等待期间
+   * 不占 CPU，且来件本就低频），daemon 同样不阻断进程退出。
+   *
+   * 放在类尾而非 ioExecutor 旁边：既有 EXECUTION-MAP 锚点按行号引用本文件 30+ 处，插在中段会
+   * 让它们整体位移（本轮实测 13 条漂移）。新增成员集中在末尾可保持零位移。
+   */
+  private val deliveryRetryExecutor: java.util.concurrent.ExecutorService =
+    java.util.concurrent.Executors.newCachedThreadPool { r ->
+      Thread(r, "dsh-file-deliver").apply { isDaemon = true }
+    }
+
+  /** 投递重试的总预算与间隔（issue #1006；与 0.13.8 起的 20s / 4s 口径完全一致）。 */
+  private val deliveryRetryBudgetMs = 20_000L
+  private val deliveryRetryIntervalMs = 4_000L
+
+  /**
+   * 有界投递重试（issue #1006）：把「等待 + flushPending」这段从 IO 线程搬到
+   * [deliveryRetryExecutor]，并在整段里持有投递预留计数。
+   *
+   * 为什么不复用 [withIncomingDeliveryAfterSweep]：那个函数把 sweep 与预留做成一个原子步，
+   * 而这里**必须**在拷贝完成、已入待发清单之后才开始（sweep 若在重试期再跑一次，会把刚入队的
+   * 路径当过期条目清掉）。所以这里只做「预留 → 重试 → 释放」，与调用方已完成的拷贝段解耦。
+   */
+  private fun retryDelivery(context: Context, deadlineMs: Long, onExhausted: () -> Unit) {
+    deliveryRetryExecutor.execute {
+      activeDeliveries.incrementAndGet()
+      try {
+        val deadline = System.currentTimeMillis() + deadlineMs
+        while (System.currentTimeMillis() < deadline) {
+          if (flushPending(context)) return@execute
+          try {
+            Thread.sleep(deliveryRetryIntervalMs)
+          } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            return@execute
+          }
+        }
+        onExhausted()
+      } catch (t: Throwable) {
+        android.util.Log.w("dsh-file-open", "delivery retry failed: " + (t.message ?: t.javaClass.simpleName))
+      } finally {
+        activeDeliveries.decrementAndGet()
+      }
+    }
+  }
+
+  /**
+   * 外部阅读器白名单的**纯判据**（issue #1571）：只回答「这个规范化路径是否落在四条根之下」。
+   *
+   * 为什么把根表从 [isReaderAllowed] 里抽出来：两个出口（`openWithExternalReader` 与
+   * `PathOpen` 的系统选择器）必须共用同一份允许面，而 JVM 单测拿不到 `MainActivity`
+   * （`activity.filesDir` / `Environment.getExternalStoragePublicDirectory` 在无 Robolectric 的
+   * 单测里是默认值 null）。抽出纯判据后，「允许根集合」本身可以逐条被断言——包括**不得**
+   * 混进整个外部存储根这条负控。
+   *
+   * @param roots 允许根的 canonical 路径（由 [readerRoots] 生成）。
+   * @param canonicalPath 目标的 canonical 路径。
+   * @returns true = 放行。
+   */
+  internal fun readerAllowedBy(roots: List<String>, canonicalPath: String): Boolean =
+    ChooserAllowlist.permitted(canonicalPath, roots)
+
+  /**
+   * 外部阅读器的四条允许根（顺序即 [isReaderAllowed] 的判据顺序）。
+   *
+   * @param filesDir 应用私有目录（`Context.filesDir`）。
+   * @param externalDocuments 外部存储的 Documents 目录（`Environment.getExternalStoragePublicDirectory(DIRECTORY_DOCUMENTS)`）。
+   * @returns canonical 化后的根表；任一根不可解析时跳过该根（fail-closed，不抛）。
+   */
+  internal fun readerRoots(filesDir: java.io.File?, externalDocuments: java.io.File?): List<String> = try {
+    listOfNotNull(
+      filesDir?.let { java.io.File(it, "home/.dsh/workspaces") },
+      filesDir?.let { java.io.File(it, "home/tmp") },
+      filesDir?.let { java.io.File(it, "usr/bin") },
+      externalDocuments?.let { java.io.File(it, "dshdata") },
+    ).map { it.canonicalPath }
+  } catch (_: Exception) {
+    emptyList()
   }
 }

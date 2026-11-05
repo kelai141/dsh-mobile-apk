@@ -11,12 +11,12 @@ import java.io.FileOutputStream
  *
  * The file lives in `filesDir/splash/`, outside the snapshot transaction and the
  * incoming-file work area, so neither a runtime refresh nor the 7-day intake sweep
- * can delete it. Writes go through a temporary sibling and an atomic rename, and the
- * byte counter aborts the copy before the limit rather than after.
+ * can delete it. Writes go through a uniquely named temporary sibling and the single
+ * atomic write entry (fsync + atomic publish, issue #1057), and the byte counter aborts
+ * the copy before the limit rather than after.
  */
 internal object SplashStore {
   private const val DIR = "splash"
-  private const val TEMP = "splash_video.tmp"
 
   data class Info(val name: String, val bytes: Long, val durationMs: Long)
 
@@ -69,10 +69,10 @@ internal object SplashStore {
     val folder = dir(context)
     if (!folder.exists() && !folder.mkdirs()) return Result.Rejected("io-failed")
     val target = File(folder, SplashPolicy.storedFileName(name))
-    val temp = File(folder, TEMP)
+    // #1057：临时名唯一（固定名 splash_video.tmp 会让两次导入互相踩）。
+    val temp = java.nio.file.Files.createTempFile(folder.toPath(), ".splash-", ".tmp").toFile()
     var written = 0L
     try {
-      temp.delete()
       val input = context.contentResolver.openInputStream(uri)
         ?: return Result.Rejected("unreadable")
       input.use { source ->
@@ -93,17 +93,11 @@ internal object SplashStore {
       // replace a working video the user already had.
       val duration = durationOf(temp)
       if (duration < 0L) return Result.Rejected("decode-failed")
-      if (!temp.renameTo(target)) {
-        // Same-volume rename should be atomic; a fallback copy keeps the feature usable
-        // on providers that reject rename of an open file, and verifies the byte count.
-        try {
-          temp.copyTo(target, overwrite = true)
-        } catch (_: Throwable) {
-          return Result.Rejected("io-failed")
-        }
-        if (target.length() != written) return Result.Rejected("io-failed")
-      }
-      temp.delete()
+      // #1057：fsync + 原子发布收敛到唯一入口，且**不再回退 copyTo**——copyTo 覆盖目标不是原子的，
+      // 视频可能是几百 MB，读到一半被杀就在用户已有的可用视频上留下半份文件。
+      // 发布后仍回验字节数（这条判据原本就在 copyTo 分支里，现在对两条路径都成立）。
+      AtomicFileReplace.publishWritten(temp, target)
+      if (target.length() != written) return Result.Rejected("io-failed")
       purgeOtherStoredVideos(context, keep = target)
       context.getSharedPreferences(SplashPolicy.PREFS, Context.MODE_PRIVATE).edit()
         .putString(SplashPolicy.KEY_NAME, name)

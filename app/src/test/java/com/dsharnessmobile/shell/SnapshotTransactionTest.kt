@@ -1526,6 +1526,37 @@ class SnapshotTransactionTest {
     }
   }
 
+  @Test
+  fun writeMarkerPreservesAnUnexpectedDirectoryAndItsContents() {
+    val filesDir = tempDir()
+    try {
+      val target = SnapshotTransaction.markerFile(filesDir)
+      target.mkdirs()
+      val original = File(target, "recovery-evidence").apply { writeText("preserve") }
+      try {
+        SnapshotTransaction.writeMarker(filesDir,
+          SnapshotTransaction.Marker(SnapshotTransaction.Phase.SWAPPING, "fp", 1L))
+        org.junit.Assert.fail("a directory cannot become transaction recovery authority")
+      } catch (error: SnapshotFsException) {
+        assertEquals(CODE_MARKER_WRITE, error.code)
+        // 判别力（2026-10-26 复核）：只断言 code 不够——底层 renameTo/直写落到目录上同样会失败，
+        // 抛出的也是同一个 snapshot-marker-write。于是「显式类型检查被删掉」在 Windows/Linux 上
+        // 都能悄悄保持全绿，这条防线就没有可证伪性。这里钉住**显式检查自己的措辞**：
+        // 只有真的先做了「不跟随链接、只认普通文件」的判定，消息里才会带上 not a regular file。
+        val detail = (error.message ?: "") + " | " + (error.cause?.message ?: "")
+        assertTrue(
+          "拒绝必须来自显式的目标类型检查（消息含 not a regular file），不能只靠底层 rename 失败: " + detail,
+          detail.contains("not a regular file"),
+        )
+      }
+      assertTrue(target.isDirectory)
+      assertEquals("preserve", original.readText())
+      assertFalse(File(filesDir, ".snapshot-transaction.tmp").exists())
+    } finally {
+      SnapshotFs.deletePath(filesDir)
+    }
+  }
+
   /**
    * 正证（B）：正常写入**不得**经过「先删目标」的窗口 —— 判据是写入后 marker 立即可读，
    * 且 tmp 不残留。旧实现的 deletePath 窗口无法在单线程 JVM 里「同步」被抓到，

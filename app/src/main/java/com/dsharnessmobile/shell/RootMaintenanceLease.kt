@@ -120,6 +120,50 @@ internal object RootMaintenanceLease {
     refusalLocked().put("detail", detail.take(96))
   }
 
+
+  /**
+   * issue #658：**陈旧租约**的自动清算阈值（仅对「从未派发」的租约生效）。
+   *
+   * 取值依据（不是拍数字）：
+   *  - 合法的一次 root 维护都是 su 一次性命令（setenforce / chmod / mount / 绑定 UserService），
+   *    实测**亚秒到数秒**量级；引擎启动的世代所有权重试预算本身是 3000ms。
+   *  - 5 分钟 = 最长合法操作的两个数量级以上余量，也不足一次冷启动超时（90s）的四倍。
+   *  - 副作用：清掉后会允许重新派发。但**只有 dispatched 为空时才允许**——那意味着 `begin()` 之后
+   *    根本没走到 `markDispatched`，按构造**不存在在飞的特权工作**，所以清它不会与任何东西串行冲突；
+   *    这正是 #658 里「worker 取租约后崩溃、租约永留」的形态。
+   *  - 不清的代价：引擎一直保持「等待属主维护」直到整机重启（#658 描述的不可自愈）。
+   */
+  internal const val STALE_LEASE_TTL_MS = 5L * 60_000L
+
+  /** 租约年龄（毫秒，基于 `elapsedRealtime`，故只在同一次启动内有效；跨启动的陈旧租约由 [restore] 的 newBoot 清掉）。 */
+  internal fun ageMs(context: Context?, nowElapsed: Long = SystemClock.elapsedRealtime()): Long = synchronized(lock) {
+    if (context == null) return@synchronized if (pendingEpoch == null) 0L else (nowElapsed - startedAt).coerceAtLeast(0L)
+    restore(context)
+    if (pendingEpoch == null) 0L else (nowElapsed - startedAt).coerceAtLeast(0L)
+  }
+
+  /**
+   * issue #658：租约是否**陈旧且从未派发**——此时自动清算不会与在飞特权工作冲突。
+   * `dispatched` 非空或 `unknown` 一律**不算陈旧**（[markDispatched] 的注释解释了为什么这两种只能人工清）。
+   */
+  internal fun stale(context: Context, nowElapsed: Long = SystemClock.elapsedRealtime()): Boolean = synchronized(lock) {
+    restore(context)
+    staleLease(
+      hasLease = pendingEpoch != null,
+      dispatched = dispatched.isNotEmpty(),
+      leaseUnknown = unknown,
+      ageMs = (nowElapsed - startedAt).coerceAtLeast(0L),
+    )
+  }
+
+  /**
+   * [stale] 的**纯判据**（不碰 Context/prefs，供 JVM 单测直接钉两个方向）。
+   *
+   * `dispatched` 或 `leaseUnknown` 为真时**恒不陈旧** —— 这两种租约只能人工清（见 [markDispatched]）。
+   */
+  internal fun staleLease(hasLease: Boolean, dispatched: Boolean, leaseUnknown: Boolean, ageMs: Long): Boolean =
+    hasLease && !dispatched && !leaseUnknown && ageMs >= STALE_LEASE_TTL_MS
+
   /** null means no pending lease. Same-boot app recreation/restart never proves helper termination. */
   fun outstanding(context: Context?): JSONObject? = synchronized(lock) {
     if (context == null) return@synchronized if (pendingEpoch != null) refusalLocked() else null
@@ -180,7 +224,9 @@ internal object RootMaintenanceLease {
   private fun refusalLocked(): JSONObject = JSONObject().put("ok", false)
     .put("code", if (unknown) "repair-result-unknown" else "root-maintenance-busy")
     .put("reason", if (unknown) "repair-result-unknown" else "root-maintenance-busy")
-    .put("operation", operation).put("startedAt", startedAt).put("unknown", unknown)
+    .put("operation", operation).put("startedAt", startedAt)
+    // issue #658：`startedAt` 是 elapsedRealtime，人读不了；补一个「租约已挂多久」，让引导页能讲清。
+    .put("leaseAgeMs", (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)).put("staleTtlMs", STALE_LEASE_TTL_MS).put("unknown", unknown)
     .put("dispatched", dispatched.isNotEmpty()).put("dispatchedVia", dispatched).put("dispatchedAt", dispatchedAt)
     .put("failures", 1).put("remaining", -1)
     .put("guidance", if (unknown) "特权工作结果不明，已暂停新派发与维护；不能以重启应用或杀 su 客户端当作结算。请重启设备后再试。"

@@ -99,8 +99,14 @@ class LogShareWiringTest {
       "不得把 cacheDir 整体映射出去",
       xml.contains("<cache-path name=" + escapedQuote + "cache" + escapedQuote + " path=" + escapedQuote + "." + escapedQuote + " />"),
     )
-    // 既有映射面一条都不能少（本改动只许追加）。
-    for (existing in listOf("dshdata_exports", "external_shared", "internal_workspaces", "internal_tmp", "internal_usr_bin")) {
+    // issue #1571：`external_shared`（整个外部存储根）已删除，不再属于「既有映射面」；
+    // 反向判据在下面单独一条，防止它被悄悄加回来。
+    assertFalse(
+      "外部存储根的映射必须保持删除（#1571：允许面 = 用户授予的目录，不是整台设备）",
+      xml.contains("name=\"external_shared\""),
+    )
+    // 既有映射面一条都不能少（本改动只许删 external_shared）。
+    for (existing in listOf("dshdata_exports", "internal_workspaces", "internal_tmp", "internal_usr_bin")) {
       assertTrue("既有映射不得被删：" + existing, xml.contains("name=\"" + existing + "\""))
     }
   }

@@ -37,6 +37,7 @@ import { existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, readlink
 import { tmpdir } from 'node:os'
 import { join, relative, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { gzipSync } from 'node:zlib'
 
 const sha256 = (data) => createHash('sha256').update(data).digest('hex')
 /** 时间戳字段的固定哨兵值：保留键位（差异可见）但抹掉取值（差异无语义）。 */
@@ -92,7 +93,9 @@ export function canonicalJson(text, blankFields = []) {
  *   ① 条目顺序 —— 显式传入**递归排序后**的路径清单，顺序由我们给，不由 readdir 决定；
  *   ② 时间戳   —— 先 `utimesSync` 把整棵树钉到固定时刻，再打包；
  *   ③ 属主     —— 不指定：CI 上恒为同一个用户，跨运行本来就不变；
- *   ④ gzip 头  —— tar 内部接管 `-f`，gzip 经管道读写，不写原文件名与时间戳。
+ *   ④ gzip 头  —— Node 的 gzip 不写原文件名，mtime 固定为 0；不得交给
+ *      `tar -czf`——它调用的 gzip 会把**当前时刻**写进头里，跨秒重跑即换字节
+ *      （Windows 上实测：同一输入两次重打包只差 header 的 4 字节 mtime）。
  * 保留 npm 的 `package/` 前缀——消费方 `inject-dsh-engine-packages.mjs` 按
  * `--strip-components=1` 解包，前缀层数不能变。
  */
@@ -123,7 +126,10 @@ export function canonicalizePackedManifest(tarball, name = '<tarball>') {
     }
     writeFileSync(join(stage, 'package.json'), canonicalJson(readFileSync(join(stage, 'package.json'), 'utf8')))
     const entries = sortedEntryList(stage).map((rel) => join('package', rel))
-    execFileSync('tar', ['-czf', tarball, '-C', work, ...entries])
+    const archive = join(work, 'canonical.tar')
+    execFileSync('tar', ['-cf', archive, '-C', work, ...entries])
+    // gzipSync 的 header 固定 mtime=0 且不含文件名；输出只由输入字节决定。
+    writeFileSync(tarball, gzipSync(readFileSync(archive)))
   } finally {
     rmSync(work, { recursive: true, force: true })
   }

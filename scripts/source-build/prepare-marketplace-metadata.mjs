@@ -5,18 +5,18 @@ import { isDeepStrictEqual } from 'node:util'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { gunzipSync } from 'node:zlib'
 import { dirname, resolve } from 'node:path'
+import { readHarnessIdentity } from './harness-identity.mjs'
 
 const [tarballArg, manifestArg, reportArg, mode = '--check'] = process.argv.slice(2)
 if (!tarballArg || !manifestArg || !reportArg || !['--check', '--apply'].includes(mode) || process.argv.length > 6) {
   throw new Error('usage: node prepare-marketplace-metadata.mjs <published.tgz> <package.json> <report.json> [--check|--apply]')
 }
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
-const contract = JSON.parse(readFileSync(resolve('scripts/contract.json'), 'utf8'))
+const { contract, commit, version } = readHarnessIdentity()
 const deltas = (contract.runtimeCompat?.metadataDeltas ?? []).filter(delta => delta.pkg === 'dshmarketplace-plugin')
 if (deltas.length !== 1) throw new Error('exactly one marketplace metadata delta is required')
 const delta = deltas[0]
-if (contract.baseline !== '0.2.0-rc.2' || contract.upstream?.commit !== '639ed015397290b3745d163aafe02ffee4aa3f84'
-  || delta.targetSourceCommit !== contract.upstream.commit || !String(delta.reason ?? '').trim()
+if (delta.targetSourceCommit !== commit || !String(delta.reason ?? '').trim()
   || delta.packageVersion !== '0.1.7'
   || delta.publishedTarball !== 'https://registry.npmjs.org/dshmarketplace-plugin/-/dshmarketplace-plugin-0.1.7.tgz'
   || delta.publishedTarballSha256 !== '881c21ec33a4a91ad65c61676540faab4122440e3f9685f69939533a6dbbc0c1') {
@@ -47,7 +47,7 @@ const fields = delta.fields ?? []
 const expectedPeers = ['@deepseek-ai/dsh-native-command', '@deepseek-ai/dsh-tools']
 if (fields.length !== expectedPeers.length || new Set(fields.map(field => field.name)).size !== fields.length
   || fields.some(field => field.section !== 'peerDependencies' || !expectedPeers.includes(field.name)
-    || field.from !== '^0.1.0-rc.6' || field.to !== contract.baseline)) {
+    || field.from !== '^0.1.0-rc.6' || field.to !== version)) {
   throw new Error('marketplace delta must change exactly the two registered DSH peers')
 }
 const expected = structuredClone(published)

@@ -24,6 +24,13 @@ on:
         type: string
         default: ''
 
+# 并发控制（2026-10-28）：发布链绝不取消，也绝不允许两次并行。两次同时发布会在同一 tag 上
+# 抢传资产，而 GitHub 的资产上传是逐文件覆盖语义，混出来的 Release 事后无法分辨哪个文件来自哪次构建。
+# group 不带 ref：发布是全局单飞的，不同分支同时发版同样要排队。
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
   actions: read
@@ -33,6 +40,8 @@ jobs:
   # 独立 job：这是整链最重的一段（本地约 4 分钟/ABI），且不需要 gradle；失败时可只重跑它。
   snapshot:
     runs-on: ubuntu-latest
+    # 实测：snapshot job 历史最长 4 分 39 秒（2026-10-22 run 39780515378），取 30 分钟约 6 倍余量。
+    timeout-minutes: 30
     strategy:
       matrix:
         abi: [arm64, x86_64]
@@ -138,6 +147,9 @@ jobs:
   release:
     needs: [snapshot]
     runs-on: ubuntu-latest
+    # 实测：release job 历史最长 23 分 47 秒（2026-10-17 run 39045994319，双 ABI 全链含全量门禁），
+    # 取 90 分钟约 3.8 倍余量。发布链是最不该被误杀的一条。
+    timeout-minutes: 90
     permissions:
       contents: read
       actions: read
@@ -186,11 +198,6 @@ jobs:
           [ "$VER" = "${{ inputs.version }}" ] || { echo "::error::versionName($VER) != 输入——先改 build.gradle.kts 并走 PR"; exit 1; }
           echo "ver=$VER" >> "$GITHUB_ENV"
           echo "code=$CODE" >> "$GITHUB_ENV"
-      - name: 准备固定签名 keystore（与历史发布同一把）
-        run: |
-          mkdir -p "$ANDROID_USER_HOME/.android"
-          cp keystore/debug.keystore "$ANDROID_USER_HOME/.android/debug.keystore"
-          ls -l "$ANDROID_USER_HOME/.android/debug.keystore"
       - name: 准备 Android SDK build-tools（apksigner 供产出侧签名断言）
         run: |
           yes | sudo "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" >/dev/null 2>&1 || true
@@ -251,16 +258,6 @@ jobs:
       # 单 pass 注入（@dsh-android + vendor 外部插件 + 权威 patch，--all-profiles）、产物面门禁、
       # 双 ABI 打包，以及 -ExportSnapshots 的「注入后快照 == APK 内嵌快照」一致性校验。
       # 手搓版缺降级与注入 ⇒ check-inject-completeness 如实判红（真实 run 36356397292）。
-      - name: 从本次快照恢复模型能力目录（跨 job 同源）
-        shell: bash
-        run: |
-          set -euo pipefail
-          CATALOG_ROOT=".deploy-tmp/release-model-catalog"
-          PI="usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai"
-          mkdir -p "$CATALOG_ROOT"
-          # 单次流式解压，只物化目录声明；不依赖 J1 未上传的 lib 或上一次工作区缓存。
-          xz -d -T8 -c .deploy-tmp/snapshot-013/arm64/snapshot.tar.xz | tar -xf - -C "$CATALOG_ROOT" "$PI/package.json" "$PI/dist/providers/data"
-          node scripts/gen-model-catalog.mjs --engine-root "$CATALOG_ROOT" --out plugins/dsh-model-capability/lib/catalog-snapshot.json
       - name: 本地链全量（语法降级 + 注入 + 门禁 + 双 ABI 打包 + 注入后快照导出）
         shell: bash
         run: |
@@ -277,6 +274,15 @@ jobs:
           done
           count=$(find plugins -maxdepth 1 -name '*.tgz' | wc -l)
           [ "$count" -eq 3 ] || { echo "::error::子仓 tgz 必须恰好 3 件"; exit 1; }
+      - name: 准备固定签名 keystore（与历史发布同一把）
+        # 注意：这一步**不是**隔离措施。签名密钥是仓库文件 `keystore/debug.keystore`，
+        # 从 checkout 那一刻起任何脚本都能读到（Gradle 在 app/build.gradle.kts:50 直接 pin 它）。
+        # 这里只是按 issue #735 的 B 方案，把这次**多余拷贝**推到构建与依赖安装之后，
+        # 减少一份密钥材料在盘上的存活时间；完整隔离需要 A（受保护 Environment + 独立签名作业）。
+        run: |
+          mkdir -p "$ANDROID_USER_HOME/.android"
+          cp keystore/debug.keystore "$ANDROID_USER_HOME/.android/debug.keystore"
+          ls -l "$ANDROID_USER_HOME/.android/debug.keystore"
       - name: 归集发布资产（APK + 注入后快照 + 子仓 tgz）
         shell: bash
         run: |
@@ -297,7 +303,14 @@ jobs:
           apk_count=$(find "$OUT/apk" -name '*.apk' | wc -l)
           [ "$apk_count" -ge 2 ] || { echo "::error::APK 少于 2 件（双 ABI 缺件）"; exit 1; }
           node scripts/check-apk-signatures.mjs --self-test
-          node scripts/check-apk-signatures.mjs --dir "$OUT/apk" --keystore keystore/debug.keystore
+          # keystore 凭据必须显式声明（issue #1031）：门禁不再回落到 androiddebugkey/android。
+          node scripts/check-apk-signatures.mjs --dir "$OUT/apk" --keystore keystore/debug.keystore \
+            --keystore-alias androiddebugkey --keystore-pass android
+          # 产物形态门禁：签名全绿不区分 debug/release 变体（0.14.9 发布产物即 debug 变体，
+          # badging 含 application-debuggable 而 v1/v2/v3 全 true）。--require：runner 装有 SDK，
+          # aapt2 缺席即判红（不得以 SKIP 结案）。
+          node scripts/check-apk-form.mjs --self-test
+          node scripts/check-apk-form.mjs --dir "$OUT/apk" --require
           snap_count=$(find "$OUT/snapshot" -name 'snapshot-*.tar.xz' | wc -l)
           [ "$snap_count" -ge 2 ] || { echo "::error::注入后快照少于 2 件"; exit 1; }
       - name: MANIFEST.txt + notes.md
@@ -325,6 +338,8 @@ jobs:
     needs: [release]
     if: ${{ needs.release.result == 'success' }}
     runs-on: ubuntu-latest
+    # 实测：publish job 历史约 49 秒，取 20 分钟。上传大资产受网络影响，不宜贴着实测值定。
+    timeout-minutes: 20
     permissions:
       contents: write
       actions: read
@@ -376,10 +391,47 @@ jobs:
   # Creating a draft with GITHUB_TOKEN does not emit a new workflow-triggering release event.
   # Explicitly refresh Pages here; only the latest public stable release is eligible.
   # Publishing the draft later also triggers pages.yml via release: published.
+  #
+  # **必须以 main ref 派发，不得用可复用工作流调用。**
+  #
+  # 缺陷形态（0.14.10 实锤，run 40777025435）：原来写 `uses: ./.github/workflows/pages.yml`。
+  # 可复用工作流的 deployment ref 继承**调用方**的 ref —— 本次是发版分支 release/0.14.10；
+  # 而仓库 github-pages 环境的 deployment-branch-policies 只放行 branch:main 与 tag:v*，
+  # 于是 deploy job 被策略直接拒绝（sync-pages / deploy: failure），站点没有更新。
+  # 改为 `gh workflow run --ref main`：新起一次 ref=main 的独立运行，
+  # deployment ref 恒为 main，策略必然放行。
+  #
+  # 附带两点改进：
+  #   1. 不再与本次 release 运行同生共死 —— 发布产物此时已全部上传完毕，
+  #      刷新站点失败不该把整条发版判红，故失败只告警不中断；
+  #   2. 真正的站点更新仍由 pages.yml 的 `release: published` 兜底
+  #      （ref=refs/tags/v*，走 tag:v* 策略，0.14.10 实测成功）。
+  #
+  # 注意（0.14.10 实测澄清，勿误判为缺陷）：本 job 跑在「draft 刚建好、尚未转正式版」时，
+  # `/releases/latest` 按 GitHub 语义**不返回 draft**，仍指向上一个正式版，
+  # 因此这一跑构建出的就是上一个版本（本次日志实测：`[build] 版本 v0.14.9`）。
+  # 这不是缓存、不是竞态、也不是 build.mjs 的逻辑错误——build.mjs 对 draft 是 fail-closed 的
+  # （normalize() 里 `json.draft || json.prerelease || !json.published_at` 直接抛错），
+  # 能构建出旧版本恰恰证明它拿到的是上一个**正式版**。
+  # 站点真正翻到新版本由 draft 转正式版时触发的 `release: published` 完成。
   sync-pages:
     needs: [publish]
+    runs-on: ubuntu-latest
+    # 只是一次工作流派发，秒级；取 5 分钟。
+    timeout-minutes: 5
     permissions:
       contents: read
-      pages: write
-      id-token: write
-    uses: ./.github/workflows/pages.yml
+      actions: write
+    steps:
+      - name: 以 main ref 派发站点刷新（deployment 分支策略只放行 main 与 tag）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh workflow run pages.yml --ref main; then
+            echo "已派发 pages.yml（ref=main），deployment ref 恒为 main"
+          else
+            echo "::warning::派发 pages.yml 失败；站点将在 draft 转正式版时由 release:published 自动更新"
+          fi

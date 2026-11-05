@@ -223,6 +223,8 @@ test('F1：virtual-only 下 snapshot 目标为 virtual-1 必须放行（按目�
   useScope('virtual-only')
   const queue = new ControlQueue()
   const svc = service(queue)
+  // issue #1064：SF token 反查不再允许无会话免检；工具层的真实形态是入口先 bindSession。
+  svc.bindSession(TEST_SESSION)
   const out = svc.controlExec('snapshot', { screenId: 'virtual-1' })
   // 虚拟屏别名 → 动态 displayId 必须问壳侧注册表（vdInfo），绝不假设恒为 1、绝不回退 0。
   const vd = await takeNext(queue)
@@ -242,6 +244,7 @@ test('F1：virtual-only 下 screenshot 目标为 virtual-1 同样放行（同类
   useScope('virtual-only')
   const queue = new ControlQueue()
   const svc = service(queue)
+  svc.bindSession(TEST_SESSION)
   const out = svc.controlExec('screenshot', { screenId: 'virtual-1' })
   const vd = await takeNext(queue)
   assert.equal(vd?.op, 'vdInfo')
@@ -259,6 +262,7 @@ test('F1：virtual-only 下目标缺省（= real）仍然拒绝，且文案指�
   useScope('virtual-only')
   const queue = new ControlQueue()
   const svc = service(queue)
+  svc.bindSession(TEST_SESSION)
   const r = await svc.controlExec('snapshot', {})
   assert.equal(r.ok, false, '真实屏目标在 virtual-only 下必须 fail-closed 拒绝')
   assert.match(String(r.error), /screen-out-of-scope/, '稳定错误码必须保留')
@@ -272,6 +276,7 @@ test('F1：virtual-only 下未注册/未就绪的虚拟别名仍然拒绝（放�
   useScope('virtual-only')
   const queue = new ControlQueue()
   const svc = service(queue)
+  svc.bindSession(TEST_SESSION)
   const out = svc.controlExec('snapshot', { screenId: 'virtual-1' })
   const vd = await takeNext(queue)
   assert.equal(vd?.op, 'vdInfo')
@@ -287,6 +292,7 @@ test('F1：real-only 下虚拟屏目标必须拒绝（范围优先于目标解�
   useScope('real-only')
   const queue = new ControlQueue()
   const svc = service(queue)
+  svc.bindSession(TEST_SESSION)
   const r = await svc.controlExec('snapshot', { screenId: 'virtual-1' })
   assert.equal(r.ok, false)
   assert.match(String(r.error), /screen-out-of-scope/)
@@ -326,6 +332,7 @@ test('F1：范围 all 下真实屏目标照旧放行（放宽只针对目标屏�
   useScope('all')
   const queue = new ControlQueue()
   const svc = service(queue)
+  svc.bindSession(TEST_SESSION)
   const out = svc.controlExec('snapshot', {})
   const snap = await takeNext(queue)
   assert.equal(snap?.op, 'snapshot', 'all 范围下真实屏请求必须直达壳侧（不得多打一次 vdInfo）')
@@ -886,8 +893,10 @@ test('S-5：SF token 反查经公开范围判定入口可用，且队列不可�
   useScope('virtual-only')
   const queue = new ControlQueue()
   const svc = service(queue)
-  // 无会话、无档位：SF 反查仍必须能跑（否则范围判定自己就转不动了）。
-  // 范围判定先读取原生虚拟屏注册表，再执行固定 SurfaceFlinger 查询。
+  // issue #1064：SF 反查**不再**允许无会话免检（原注释写的「无会话、无档位仍必须能跑」正是被
+  // 移除的豁免）。工具层的真实形态是入口先 bindSession、嵌套 helper 自动继承——按同一形态绑定，
+  // 才能证明「有会话时反查照常可用」。
+  svc.bindSession(TEST_SESSION)
   const pendingSf = svc.shellCommandScopeDenied(`adb shell screencap -p -d ${F6_VTOKEN} /data/local/tmp/a.png`)
   const registryReq = await takeNext(queue)
   assert.equal(registryReq?.op, 'vdInfo', '必须先读取已登记屏幕')

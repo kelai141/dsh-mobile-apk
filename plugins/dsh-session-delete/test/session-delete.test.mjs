@@ -10,6 +10,7 @@ import {
   deleteStoredSession,
   findSessionDir,
   sessionsRoot,
+  sweepGraveyards,
 } from '../src/session-delete.js'
 
 const ID = 'session-12345678-1234-4abc-8def-1234567890ab'
@@ -274,7 +275,10 @@ test('a non-array activity probe result refuses instead of guessing idle', async
   }
 })
 
-test('a live session is unloaded before its files are removed', async () => {
+// issue #1203：**顺序已反转**。旧用例名与断言写的是「先卸载、后删文件」，那正是本条要修的
+// 缺陷形态——卸载在 rename 之前，一旦移动失败就是「内存没了、磁盘还在」。现在目录先离开
+// 扫描路径，卸载才跑；所以断言从「卸载时目录还在」改为「卸载时目录已不在原位（但未销毁）」。
+test('a live session is unloaded after its directory leaves the scan path', async () => {
   const home = await homeWith([ID])
   const previous = process.env.DSH_HOME
   process.env.DSH_HOME = home
@@ -284,8 +288,9 @@ test('a live session is unloaded before its files are removed', async () => {
     const ctx = fakeCtx({ live: true, activity: [], detach: () => { dirPresentAtDetach = existsSync(dir) } })
     const result = await removeSession(ctx, ID)
     assert.equal(result.ok, true)
-    // 卸载发生在删文件之前：目录此时必须还在。
-    assert.equal(dirPresentAtDetach, true)
+    // issue #1203：卸载发生在目录**离开扫描路径之后**，故此刻原位已不存在（内容仍在 graveyard，
+    // 随后才 rm）。旧断言要求此处为 true，等于钉死「先卸载后移动」这个缺陷顺序。
+    assert.equal(dirPresentAtDetach, false, '卸载必须在目录移出扫描路径之后才发生')
     assert.deepEqual(ctx.calls, ['detach:' + ID])
     // 卸载后不再 live（api-session/removed 因此会广播）。
     assert.equal(ctx.get('sessions').get(ID), undefined)
@@ -369,4 +374,25 @@ test('a missing directory reports not-found and keeps the session live', async (
     if (previous === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previous
   }
+})
+
+test('sweepGraveyards removes only .deleting-* leftovers, never live sessions', async () => {
+  const home = await homeWith([ID])
+  const key = '--workspace--'
+  const graveyard = join(sessionsRoot(home), key, ID + '.deleting-lx8p2')
+  await mkdir(graveyard)
+  await writeFile(join(graveyard, 'session.lock'), '')
+
+  const removed = await sweepGraveyards(home)
+
+  assert.equal(removed.length, 1, 'exactly the graveyard is removed')
+  assert.equal(removed[0], graveyard)
+  assert.equal(existsSync(graveyard), false, 'graveyard directory is gone')
+  assert.equal(existsSync(join(sessionsRoot(home), key, ID)), true, 'live session directory untouched')
+})
+
+test('sweepGraveyards is a no-op without a sessions root', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-session-delete-'))
+  assert.deepEqual(await sweepGraveyards(home), [])
+  assert.deepEqual(await sweepGraveyards(''), [])
 })

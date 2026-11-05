@@ -53,10 +53,10 @@ class OverlayReport(private val svc: OverlayService) {
     val dp = svc.resources.displayMetrics.density
     val c = themeColors()
     val entry = latestEntry()
-    val lines = reportLines(entry)
+    val lines = reportLines(entry, svc)
 
     val title = TextView(svc).apply {
-      text = "工作汇报"
+      text = UiText.t(svc, "工作汇报", "Work report")
       textSize = 13f
       setTypeface(null, android.graphics.Typeface.BOLD)
       setTextColor(c.inputText)
@@ -70,7 +70,7 @@ class OverlayReport(private val svc: OverlayService) {
       // ≈ 26dp 高，手指按不准；并补 contentDescription——无文字的「✕」在无障碍里此前是空白控件。
       minWidth = (MIN_TOUCH_TARGET_DP * dp).toInt()
       minHeight = (MIN_TOUCH_TARGET_DP * dp).toInt()
-      contentDescription = "关闭工作汇报"
+      contentDescription = UiText.t(svc, "关闭工作汇报", "Close work report")
       isClickable = true
       setOnClickListener { hideReport() }
     }
@@ -87,7 +87,7 @@ class OverlayReport(private val svc: OverlayService) {
     // 旧实现把全文插在首行与元信息**之间**，于是「用时 · 工具 ×N · 产出」被 8 KiB 正文顶出首屏
     // ——那三项恰是「一眼看结论」要的度量，却要滚到底才看得到，等于没给。
     val body = LinearLayout(svc).apply { orientation = LinearLayout.VERTICAL }
-    val full = reportBodyText(entry)
+    val full = reportBodyText(entry, svc)
     for ((i, line) in lines.withIndex()) {
       body.addView(TextView(svc).apply {
         text = line
@@ -99,7 +99,7 @@ class OverlayReport(private val svc: OverlayService) {
     }
     // 全文块（元信息之后）。S2-6：正文==摘要时**不渲染**——否则同一句话会连渲染两遍
     // （旧条目没有 body 字段时 reportBodyText 回落 summary，而 summary 已在首行出现过）。
-    if (!reportBodyRedundant(entry, full)) {
+    if (!reportBodyRedundant(entry, full, svc)) {
       body.addView(View(svc).apply {
         background = GradientDrawable().apply { setColor(c.unitStroke) }
       }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (1 * dp).toInt()).apply {
@@ -140,7 +140,7 @@ class OverlayReport(private val svc: OverlayService) {
       orientation = LinearLayout.HORIZONTAL
       gravity = Gravity.CENTER
       setPadding(0, handlePad, 0, handlePad)
-      contentDescription = "上下拖动调整汇报栏高度"
+      contentDescription = UiText.t(svc, "上下拖动调整汇报栏高度", "Drag to resize the report panel")
       isClickable = true
       addView(handle, LinearLayout.LayoutParams((36 * dp).toInt(), (4 * dp).toInt()))
     }
@@ -335,7 +335,8 @@ class OverlayReport(private val svc: OverlayService) {
  * 取 `body`（插件侧有界 8 KiB 的可见正文，见 notify-projection 的 REPORT_BODY_MAX）。
  * **兜底**：旧条目没有 body 字段时回落 summary，再回落 text——报告栏不得因此空掉。
  */
-internal fun reportBodyText(entry: NotifyEntry?): String {
+internal fun reportBodyText(entry: NotifyEntry?, app: android.content.Context? = null): String {
+  val english = UiText.isEnglish(app)
   if (entry == null) return ""
   val body = entry.body.trim()
   if (body.isNotEmpty()) return body
@@ -353,11 +354,17 @@ internal fun reportBodyText(entry: NotifyEntry?): String {
  * 或等于整条首行。不做子串/相似度近似——那会把「摘要里恰好包含正文」误判成重复而**丢掉内容**，
  * 比重复显示更严重。空正文一律判多余（没有块可渲染）。
  */
-internal fun reportBodyRedundant(entry: NotifyEntry?, full: String): Boolean {
+internal fun reportBodyRedundant(entry: NotifyEntry?, full: String, app: android.content.Context? = null): Boolean =
+  reportBodyRedundant(entry, full, UiText.isEnglish(app))
+
+/** 同一判据，语言已解析（#986：纯函数入口，JVM 单测能覆盖英文分支）。 */
+internal fun reportBodyRedundant(entry: NotifyEntry?, full: String, english: Boolean): Boolean {
   val f = full.trim()
   if (f.isEmpty()) return true
   if (entry == null) return false
-  val head = entry.outcomeLabel.ifBlank { entry.outcomeLabel() }.ifBlank { "工作汇报" }
+  // 首行与这里必须同口径：判重拿的是**当前语言**的 head，否则英文态会把正文误判成
+  // 「与首行重复」而整段吞掉（内容丢失比重复显示更严重）。
+  val head = reportOutcomeHead(entry, english)
   val summary = entry.summary.ifBlank { entry.text }.trim()
   if (summary.isEmpty()) return false
   return f == summary || f == (head + " · " + summary).trim()
@@ -443,19 +450,42 @@ internal fun reportBarHeightAfterDrag(startHeight: Int, dragUp: Int, minHeight: 
  *
  * **完整正文刻意不在这里**：它是独立的可滚动区（[reportBodyText]）。三行是「汇报的元信息」，
  * 正文是「汇报内容」，语义不同；混进本表会让既有口径 `lines[0] == head · summary` 无法再表达。
+ *
+ * 语言解析有两个入口，函数体**只有一份**：`Context` 版把语言解出来后转调 [reportLines] 的
+ * `english` 重载。这份双入口不是为了测试而分叉——`isEnglish(null)` 恒 false，`Context` 单入口
+ * 会让英文分支在 JVM 单测里不可达，而「英文态首行仍是中文」正是这样活下来的。
  */
-internal fun reportLines(entry: NotifyEntry?): List<String> {
-  if (entry == null) return listOf("暂无汇报内容", "完成一轮对话后这里会显示汇报")
-  val head = entry.outcomeLabel.ifBlank { entry.outcomeLabel() }.ifBlank { "工作汇报" }
+internal fun reportLines(entry: NotifyEntry?, english: Boolean): List<String> {
+  if (entry == null) return if (english) {
+    listOf("No report yet", "A report shows up here after one round finishes")
+  } else {
+    listOf("暂无汇报内容", "完成一轮对话后这里会显示汇报")
+  }
+  val head = reportOutcomeHead(entry, english)
   val summary = entry.summary.ifBlank { entry.text }
   val out = ArrayList<String>(3)
   out.add(if (summary.isBlank()) head else head + " · " + summary)
-  out.add(UserCopy.reportMetaLine(entry.durationLabel(), entry.toolCount))
+  out.add(UserCopy.reportMetaLine(entry.durationLabel(), entry.toolCount, english))
   if (entry.presentedFiles.isNotEmpty()) {
-    out.add("产出：" + entry.presentedFiles.joinToString("、"))
+    out.add((if (english) "Files: " else "产出：") +
+      entry.presentedFiles.joinToString(if (english) ", " else "、"))
   }
   return out
 }
+
+/**
+ * 汇报结论标签（#986 的唯一真源）：**按当前语言重新算**，不用条目里落库的 `outcomeLabel`。
+ *
+ * 缺陷现场：`outcomeLabel` 是通知**发出时**按当时语言写进条目的字符串（见 NotifyCenter.sendTest
+ * 与 notify-projection），语言切换不会重算；旧实现 `entry.outcomeLabel.ifBlank { … }` 让它
+ * 永远优先，注释却声称「按 outcome 重新算」——注释与实现相反，英文态首行因此仍是「已完成」。
+ * 兜底顺序：outcome → 引擎给的空标签 → 「工作汇报 / Work report」。
+ */
+internal fun reportOutcomeHead(entry: NotifyEntry, english: Boolean): String =
+  entry.outcomeLabel(english).ifBlank { UiText.t(english, "工作汇报", "Work report") }
+
+internal fun reportLines(entry: NotifyEntry?, app: android.content.Context? = null): List<String> =
+  reportLines(entry, UiText.isEnglish(app))
 
 /**
  * 块H 状态行手势的**纯裁决逻辑**（顶层函数，JVM 可直接测——A3 的两条防误触判据在这里判红）。

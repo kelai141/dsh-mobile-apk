@@ -29,7 +29,31 @@ const blocks = [
       '',
       '| Gradle 范围 | 依赖声明 |',
       '|---|---|',
-      ...Array.from(gradle.matchAll(/^\s*(implementation|testImplementation|androidTestImplementation)\("([^"]+)"\)/gm), ([, scope, dependency]) => `| ${scope} | \`${dependency}\` |`),
+      // issue #1197：配置名只认 3 个、且只认字面量写法 —— runtimeOnly / api / compileOnly /
+      // debugImplementation / platform(...) / libs.* / project(...) 全被静默丢弃，
+      // 于是往 build.gradle.kts 加真实依赖，台账一个字都不变而门禁仍报「一致」。
+      //
+      // 改成**开放配置名**（任意 identifier），但用两条排除把非依赖声明挡掉：
+      //   - id("...") / alias(...) 是插件声明，不是依赖；
+      //   - create(...) / register(...) 等是 Gradle 任务/容器 API。
+      // 参数匹配支持一层嵌套括号（platform("...") / project(":x")）与 libs.xxx 版本目录写法。
+      //
+      // 不做的事：不解析 libs.versions.toml 展开版本号 —— 那会让台账依赖另一份文件，
+      // 而本门禁的职责是「台账与 build.gradle.kts 一致」。版本目录引用如实登记。
+      ...(() => {
+        const NOT_A_DEPENDENCY = new Set(['id', 'alias', 'create', 'register', 'plugins', 'apply', 'tasks', 'configurations', 'dependencies'])
+        const out = []
+        const push = (scope, dependency) => {
+          if (NOT_A_DEPENDENCY.has(scope)) return
+          if (out.some((x) => x.scope === scope && x.dependency === dependency)) return
+          out.push({ scope, dependency })
+        }
+        for (const m of gradle.matchAll(/^\s*([A-Za-z][A-Za-z0-9_]*)\s*\(\s*platform\s*\(\s*"([^"]+)"\s*\)\s*\)/gm)) push(m[1], 'platform(' + m[2] + ')')
+        for (const m of gradle.matchAll(/^\s*([A-Za-z][A-Za-z0-9_]*)\s*\(\s*project\s*\(\s*"([^"]+)"\s*\)\s*\)/gm)) push(m[1], 'project(' + m[2] + ')')
+        for (const m of gradle.matchAll(/^\s*([A-Za-z][A-Za-z0-9_]*)\s*\(\s*(libs\.[A-Za-z0-9_.]+)\s*\)/gm)) push(m[1], m[2])
+        for (const m of gradle.matchAll(/^\s*([A-Za-z][A-Za-z0-9_]*)\s*\(\s*"([^"]+)"\s*\)/gm)) push(m[1], m[2])
+        return out
+      })().map(({ scope, dependency }) => `| ${scope} | \`${dependency}\` |`),
     ].join('\n'),
   },
   {

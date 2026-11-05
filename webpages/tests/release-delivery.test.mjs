@@ -130,9 +130,28 @@ assert.ok(!html().includes('[object Object]'));
 test('publication triggers a default-branch site build rather than a draft build', () => {
   const workflow = fs.readFileSync(path.join(root, '../.github/workflows/pages.yml'), 'utf8');
   assert.match(workflow, /\n  release:\s*\n    types: \[published\]/);
-  assert.match(workflow, /\n  workflow_call:/);
-  const release = fs.readFileSync(path.join(root, '../.github/workflows/release.yml'), 'utf8');
-  assert.match(release, /sync-pages:[\s\S]*needs: \[publish\][\s\S]*uses: \.\/.github\/workflows\/pages.yml/);
+  // 站点构建必须检出默认分支，否则 release 事件会按 tag 建出 draft 内容。
   assert.match(workflow, /GH_TOKEN: \$\{\{ github.token \}\}/);
   assert.match(workflow, /ref: \$\{\{ github\.event\.repository\.default_branch \}\}/);
+});
+
+/**
+ * 本文件原来有一条断言**有缺陷的接线**，已随 0.14.10 的修复改正。
+ *
+ * 历史写法（删掉的两行）：
+ *   assert.match(workflow, /\n  workflow_call:/);
+ *   assert.match(release, /sync-pages:[\s\S]*uses: \.\/\.github\/workflows\/pages\.yml/);
+ * 这两条把「pages.yml 暴露 workflow_call」+「release 用 uses: 复用」当成正确形态钉死了，
+ * 于是缺陷一直绿着：可复用工作流的 deployment ref 继承调用方 ref（发版分支
+ * release/0.14.10），被 github-pages 环境的 branch policy（只放行 branch:main 与
+ * tag:v*）拒掉，站点不更新。0.14.10 发版实测 sync-pages / deploy 判红、只能人工补 dispatch。
+ *
+ * 现在改为断言「deployment ref 恒为 main」这一真正的不变量（详见 pages-deploy-ref.test.mjs）。
+ */
+test('sync-pages dispatches the site refresh on main so the deployment ref is trusted', () => {
+  const release = fs.readFileSync(path.join(root, '../.github/workflows/release.yml'), 'utf8');
+  const syncPages = release.slice(release.indexOf('sync-pages:'));
+  assert.match(syncPages, /needs: \[publish\]/, 'sync-pages 必须仍排在 publish 之后');
+  assert.match(syncPages, /gh workflow run pages\.yml --ref main/, '必须以 main ref 派发');
+  assert.doesNotMatch(syncPages, /uses: \.\/\.github\/workflows\/pages\.yml/, '不得用可复用工作流（会继承发版分支 ref）');
 });

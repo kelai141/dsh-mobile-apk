@@ -353,4 +353,45 @@ class BootFailLogTest {
     assertTrue("必须写明 boot-diag 的职责", src.contains("boot-diag.log  **失败过程中的**诊断"))
     assertTrue("必须写明 boot-fail 的职责", src.contains("boot-fail.log  **失败终态**"))
   }
+
+  // ── #673：boot-fail.log 的 detail 与 stack 强制过 EngineAuth.redact ──────────────────
+
+  /** 拒启收口（#657）把 spawn 异常的 message 原样当 detail——异常消息可能携带带 token 的引擎 URL。 */
+  @Test
+  fun failureDetailIsRedacted() {
+    val line = LogCollector.bootFailLine(
+      tmp.newFolder(), "engine-start-false",
+      detail = "spawn 抛出异常：BindException: http://127.0.0.1:3080/?token=SECRETTOKENVALUE1234567890",
+      error = null, nowMs = 1_000,
+    )
+    assertFalse("detail 里的 launch token 必须被脱敏", line.contains("SECRETTOKENVALUE1234567890"))
+    assertTrue("token= 键名必须保留（可读性）", line.contains("token=***"))
+  }
+
+  /** 异常栈同样可能带引擎 URL（如 HTTP 探针异常），stack 段必须同口径脱敏。 */
+  @Test
+  fun failureStackIsRedacted() {
+    val line = LogCollector.bootFailLine(
+      tmp.newFolder(), "start-flow-exception", detail = "boom",
+      error = IllegalStateException("probe failed: http://127.0.0.1:3080/?token=SECRETTOKENVALUE1234567890"),
+      nowMs = 1_000,
+    )
+    assertFalse("stack 里的 launch token 必须被脱敏", line.contains("SECRETTOKENVALUE1234567890"))
+    assertTrue("stack 段必须仍在（脱敏不是丢弃）", line.contains("probe failed: http://127.0.0.1:3080/?token=***"))
+  }
+
+  @Test
+  fun bootDiagDetailAndPageRuntimeAreRedacted() {
+    val line = LogCollector.bootDiagLine(
+      source = "page-console",
+      detail = "url=http://127.0.0.1:3080/?token=DETAILSECRET1234567890",
+      pageSideRuntime = "url=http://127.0.0.1:3080/?token=RUNTIMESECRET1234567890",
+      segments = "snapshot=ready",
+    )
+
+    assertFalse(line.contains("DETAILSECRET1234567890"))
+    assertFalse(line.contains("RUNTIMESECRET1234567890"))
+    assertTrue(line.contains("token=***"))
+    assertTrue(line.contains("snapshot=ready"))
+  }
 }

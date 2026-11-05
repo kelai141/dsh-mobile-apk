@@ -24,16 +24,23 @@ test('广播点名接收器组件，并带上动作/nonce/文本', () => {
 })
 
 test('隐式广播（无 -p / 无 -n）不再是命令形态', () => {
-  const line = mod.adbKeyboardBroadcast(mod.KB_ACTION_CLEAR, undefined, '')
+  const line = mod.adbKeyboardBroadcast(mod.KB_ACTION_CLEAR, undefined, 'nonce-abc')
   assert.ok(line.includes('-n ' + mod.KB_RECEIVER), '必须点名组件')
   assert.ok(!line.includes(' -p '), '不得用包名定向（会同时命中运行期接收器，重复提交）')
   assert.ok(!line.includes('--es msg'), '清空动作不该带 msg')
-  assert.ok(!line.includes('--es auth'), '无 nonce 时不带 auth 参数')
+  assert.ok(line.includes("--es auth 'nonce-abc'"), '必须带 nonce（壳侧已无 uid 白名单）')
 })
 
 test('单引号转义（文本含 shell 元字符时命令仍闭合）', () => {
-  const line = mod.adbKeyboardBroadcast(mod.KB_ACTION_INPUT, `it's a 'q'`, '')
+  const line = mod.adbKeyboardBroadcast(mod.KB_ACTION_INPUT, `it's a 'q'`, 'n')
   assert.ok(line.endsWith(`--es msg 'it'\\''s a '\\''q'\\'''`), line)
+})
+
+test('#679 硬切：空 auth 必须抛错，不得构造一条注定被拒的命令', () => {
+  // 壳侧已撤销 shell/root 的 uid 白名单、只认 nonce ⇒ 空 auth 的广播 100% 被拒(result=3)。
+  // 发出去只会把「凭据缺失」伪装成「来源被拒」，调用方应先取 adbKeyboardAuthState 的原因。
+  assert.throws(() => mod.adbKeyboardBroadcast(mod.KB_ACTION_CLEAR, undefined, ''), /auth nonce is required/)
+  assert.throws(() => mod.adbKeyboardBroadcast(mod.KB_ACTION_INPUT, 'x', ''), /auth nonce is required/)
 })
 
 test('空文本只清空不提交（不构造空的 msg 参数）', () => {
@@ -69,9 +76,25 @@ test('nonce 读取：私有文件在场则取 trim 值，缺失/目录未定义�
   const dir = mkdtempSync(join(tmpdir(), 'kb-nonce-'))
   try {
     assert.equal(mod.adbKeyboardAuth(undefined), '')
-    assert.equal(mod.adbKeyboardAuth(dir), '', '文件缺失 → 空串（退回 uid 白名单）')
+    assert.equal(mod.adbKeyboardAuth(dir), '', '文件缺失 → 空串（#679 后不再有 uid 兜底，调用方必须先看 AuthState）')
     writeFileSync(join(dir, 'adb-keyboard-nonce'), '  deadbeef  \n')
     assert.equal(mod.adbKeyboardAuth(dir), 'deadbeef')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('#679：authState 必须区分三种取不到的原因（这是 fail loud 的前提）', () => {
+  // 实测三种情形，壳侧 nonce **没有过期概念**（ensureNonce 一旦写入永久复用，无时间戳/TTL），
+  // 所以不存在「文件在但过期」这一态；真实存在的是下面这三种 + 空白文件。
+  const dir = mkdtempSync(join(tmpdir(), 'kb-nonce-state-'))
+  try {
+    assert.deepEqual(mod.adbKeyboardAuthState(undefined), { ok: false, reason: 'DSH_FILES_DIR 未设置' })
+    assert.deepEqual(mod.adbKeyboardAuthState(dir), { ok: false, reason: 'nonce 文件不存在或不可读' })
+    writeFileSync(join(dir, 'adb-keyboard-nonce'), '   \n\t ')
+    assert.deepEqual(mod.adbKeyboardAuthState(dir), { ok: false, reason: 'nonce 文件为空' })
+    writeFileSync(join(dir, 'adb-keyboard-nonce'), '  deadbeef  \n')
+    assert.deepEqual(mod.adbKeyboardAuthState(dir), { ok: true, auth: 'deadbeef' })
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

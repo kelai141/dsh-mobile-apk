@@ -21,8 +21,27 @@ const resolve = (rel) => {
   const hit = cands.find((c) => existsSync(join(ROOT, c)))
   return hit ? join(ROOT, hit) : null
 }
-const base = argOf('root', null) ?? resolve('dsh-mobile-apk/app/src')
-if (!base || !existsSync(base)) { console.error('CHECK-KOTLIN-COMMENTS FAILED：根目录不存在（用 --root 指定）'); process.exit(2) }
+// issue #1199：默认根**不止** app/src。头注释承诺的两条检查（嵌套块注释、备份副本扫描）
+// 此前在 plugins/ 下完全失效 —— 扫描器本身是好的（--root plugins 能报出嵌套命中），
+// 坏的是默认作用域：plugins/*/src 下的 Kotlin 注释纪律无人守。
+//
+// 现在默认扫**全部**含 Kotlin 源码的根：壳侧 app/src + 各插件 plugins/<name>/src。
+// 显式传 --root 时仍只扫那一个（保持既有用法，测试与临时排查依赖它）。
+const DEFAULT_ROOTS = (() => {
+  const roots = ['app/src']
+  try {
+    for (const name of readdirSync(resolve('plugins')).sort()) {
+      const src = join('plugins', name, 'src')
+      if (existsSync(resolve(src))) roots.push(src.replace(/\\/g, '/'))
+    }
+  } catch { /* 没有 plugins 目录就只扫 app/src */ }
+  return roots
+})()
+const explicitRoot = argOf('root', null)
+const bases = explicitRoot ? [explicitRoot] : DEFAULT_ROOTS.map((r) => resolve(r))
+for (const b of bases) {
+  if (!b || !existsSync(b)) { console.error('CHECK-KOTLIN-COMMENTS FAILED：根目录不存在（' + b + '，用 --root 指定）'); process.exit(2) }
+}
 
 /** 扫描一段 Kotlin 源码，返回嵌套块注释命中（文件内 0-based 行号 + 片段）。 */
 export function scanNested(text) {
@@ -102,10 +121,20 @@ if (argv.includes('--self-test')) {
   // 备份扫描的判别力自证（DOC-3）：必须命中 .bak/.orig/尾部 ~，且不得误伤正常文件名。
   const backupHits = ['SnapshotTransaction.kt.bak', 'X.orig', 'Y.kt~'].filter((n) => BACKUP_RE.test(n)).length
   const backupMisses = ['SnapshotTransaction.kt', 'README.md', 'a.bak.kt'].filter((n) => BACKUP_RE.test(n)).length
-  const allPass = pass && backupHits === 3 && backupMisses === 0
+  // issue #1199：默认作用域必须覆盖多个根（不能只有 app/src）。
+  // 断言的是**机制**：DEFAULT_ROOTS 里既要有壳侧根，也要覆盖到每个含 src/ 的插件。
+  // 不写死个数（插件增删会漂），而是与磁盘上的实际目录对账。
+  const pluginsWithSrc = (() => {
+    try {
+      return readdirSync(resolve('plugins')).filter((n) => existsSync(resolve('plugins', n, 'src'))).length
+    } catch { return 0 }
+  })()
+  const scopeOk = DEFAULT_ROOTS.includes('app/src') && DEFAULT_ROOTS.length === 1 + pluginsWithSrc
+  const allPass = pass && backupHits === 3 && backupMisses === 0 && scopeOk
   console.log((allPass ? 'KOTLIN-COMMENTS SELF-TEST PASSED' : 'KOTLIN-COMMENTS SELF-TEST FAILED')
     + '（真嵌套命中 ' + hits + ' / 期望 1；误报 ' + falsePositives + ' / 期望 0；'
-    + '备份命中 ' + backupHits + ' / 期望 3；备份误报 ' + backupMisses + ' / 期望 0）')
+    + '备份命中 ' + backupHits + ' / 期望 3；备份误报 ' + backupMisses + ' / 期望 0；'
+    + '默认根 ' + DEFAULT_ROOTS.length + ' / 期望 ' + (1 + pluginsWithSrc) + '）')
   process.exit(allPass ? 0 : 1)
 }
 
@@ -123,14 +152,27 @@ const walk = (dir) => {
     }
   }
 }
-walk(base)
-const backups = findBackups(base)
+for (const b of bases) walk(b)
+const backups = bases.flatMap((b) => findBackups(b))
+
+// issue #1199：**零个 .kt 文件不得判 PASSED**。
+//
+// 计数此前只打印不断言：目录被清空 / 移动 / 拼错时，门禁以「扫描 .kt 文件: 0」结案并报 PASSED。
+// 与 #1024 同族 —— 空集合让「没有嵌套块注释」恒真。
+// 判据取「> 0」而非某个大数：文件数随重构变化，写死会变成新的漂移源。
+if (files === 0) {
+  console.error('CHECK-KOTLIN-COMMENTS FAILED：扫描到 0 个 .kt 文件（根: '
+    + bases.map((b) => relative(ROOT, b).replace(/\\/g, '/')).join(', ') + '）')
+  console.error('  空集合不得判绿：「没有嵌套块注释」在零文件时恒真，这不是通过。')
+  console.error('  常见原因：根目录拼错 / 目录被移动或清空 / --root 指到了非 Kotlin 树。')
+  process.exit(1)
+}
 if (backups.length > 0) {
   console.error('CHECK-KOTLIN-COMMENTS FAILED（发现 ' + backups.length + ' 个源文件备份副本，请在 git 历史里留档后删除）：')
   for (const b of backups.slice(0, 10)) console.error('  - ' + b)
   process.exit(1)
 }
-console.log('扫描 .kt 文件: ' + files + '（根: ' + relative(ROOT, base).replace(/\\/g, '/') + '；备份副本 0）')
+console.log('扫描 .kt 文件: ' + files + '（根: ' + bases.map((b) => relative(ROOT, b).replace(/\\/g, '/')).join(' + ') + '；备份副本 0）')
 if (failures.length > 0) {
   console.error('CHECK-KOTLIN-COMMENTS FAILED（' + failures.length + ' 处嵌套块注释）：')
   for (const f of failures.slice(0, 10)) console.error('  - ' + f)

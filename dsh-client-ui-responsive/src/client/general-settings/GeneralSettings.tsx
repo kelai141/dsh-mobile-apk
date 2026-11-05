@@ -29,7 +29,7 @@
  * （`AppLanguage.syncDshLocale`，非中文一律英文），「跟随系统」不再是可见选项，本页不再渲染语言行。
  */
 import { useCallback, useState } from 'react'
-import { Switch } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useShellState } from '../mobile/use-shell-state.ts'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: pulls in the settings.section owner share (erased at build time, types only).
@@ -69,6 +69,25 @@ function readImmersive(): boolean {
  * @param props - composed slot props (contract/slots.ts).
  * @returns the section element tree.
  */
+/** 账号插件默认的问卷地址（与 dsh-client-ui-settings-account 的 contactFormUrl 默认值一致）。 */
+const CONTACT_FORM_FALLBACK = 'https://trtgsjkv6r.feishu.cn/share/base/form/shrcnlCoGElW7MQznGy9r3YYXcg?hide_uid=1&hide_device_info=1&hide_harness_version=1'
+
+/**
+ * 打开意见反馈问卷。
+ *
+ * 优先走账号插件暴露的 `globalThis.__dshContactUs`——那样会带上它自己组装的上下文字段
+ * （账号 uid、构建版本、device_info），与原来菜单项的行为完全一致。
+ * 账号插件未加载（未登录/被禁用）时退回默认问卷地址，只带 hide_* 参数。
+ */
+function openFeedback(): void {
+  const bridge = globalThis as { __dshContactUs?: () => void }
+  if (typeof bridge.__dshContactUs === 'function') {
+    bridge.__dshContactUs()
+    return
+  }
+  window.open(CONTACT_FORM_FALLBACK, '_blank', 'noopener,noreferrer')
+}
+
 export function GeneralSettings(_props: GeneralSettingsProps) {
   // ST-09：设置页这一处也走 useShellState（挂载 + 可见/回前台重读）；ST-10：真源是壳桥。
   const [immersive, refreshImmersive] = useShellState<boolean>(readImmersive)
@@ -166,6 +185,19 @@ export function GeneralSettings(_props: GeneralSettingsProps) {
           label={tr('右侧栏滑动', 'Swipe for the right sidebar')}
           onChange={(next) => toggleSidebarSwipe('right', next)}
         />
+      </div>
+
+      <div className="dsh-gs-row" data-dsh-feedback="">
+        <div className="dsh-gs-text">
+          <div className="dsh-gs-title">{tr('意见反馈', 'Feedback')}</div>
+          <div className="dsh-gs-desc">
+            {tr('在系统浏览器里打开问卷；会带上当前账号、构建版本与设备信息。',
+              'Opens a form in the system browser with your account, build and device info.')}
+          </div>
+        </div>
+        <div className="dsh-gs-control">
+          <Button size="sm" variant="outline" onClick={openFeedback}>{tr('去反馈', 'Open')}</Button>
+        </div>
       </div>
 
       {notice !== null && <p className="dsh-gs-alert" role="alert">{notice}</p>}

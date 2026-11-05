@@ -1,0 +1,11 @@
+# ladder 2026-11-02T21:49:14.4967714+08:00 archive=D:\coding\dsh-mobile\dsh-mobile-apk\app\src\main\assets\snapshot.tar.xz
+variant=nullsink entries=53178 regular=44568 symlink=1017 dir=7593 bytes=750434969 ms=36359 mbps=19.7
+  wall-ms=37024 ondisk-files=0 ondisk-bytes=0
+variant=mkdirwrite entries=53178 regular=44568 symlink=1017 dir=7593 bytes=750434969 ms=122993 mbps=5.8
+  wall-ms=123899 ondisk-files=44568 ondisk-bytes=750434969
+variant=noperms entries=53178 regular=44568 symlink=1017 dir=7593 bytes=750434969 ms=114341 mbps=6.3
+  wall-ms=114661 ondisk-files=44568 ondisk-bytes=750434969
+variant=full entries=53178 regular=44568 symlink=1017 dir=7593 bytes=750434969 ms=248958 mbps=2.9
+  wall-ms=249442 ondisk-files=44568 ondisk-bytes=750434969
+# done 2026-11-02T22:00:32.5579629+08:00
+LOG=D:\coding\dsh-mobile\dsh-mobile-apk\_dsh-wt\perf-audit\scripts\perf-audit-c\out\bench-ladder-20261102-214914.txt

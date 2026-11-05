@@ -27,30 +27,169 @@ internal object ShellOps {
    * 取值不数值化：`screencap -d` 吃的是 SurfaceFlinger display token，设备实测虚拟屏形如
    * `11529215046816944610`——超出 `Long` 上界，数值化即失真（见坑 147）。
    */
-  private val DISPLAY_OPTION = Regex("""(?:^|[ \t])(-d|--display|--display-id)[ \t=]+(\d+)""")
+  /**
+   * 短选项 `-d` 与长选项的取值语法**不同**，不能共用一个正则（与引擎侧同源）：
+   *   - `-d` 是 getopt 短选项 ⇒ `-d7`（粘连）与 `-d 7`（空格）合法，**`-d=7` 不合法**：
+   *     AOSP 用 `atoi(optarg)`，`atoi("=7") == 0` ⇒ 实际读/操作的是 display **0**（真实屏）。
+   *     旧正则用 `[ \t=]+` 让 `-d=7` 吃到了 `7`，于是拿它当"已注册虚拟屏 7"的凭据放行（漏拦）；
+   *     同时 `-d7` 因为缺分隔符反而认不出来（误拦）。
+   *   - 长选项 `--display` / `--display-id` 才接受 `=`。
+   */
+  private val SHORT_DISPLAY_OPTION = Regex("""(?:^|[ \t])-d[ \t]*(\d+)""")
+  private val LONG_DISPLAY_OPTION = Regex("""(?:^|[ \t])(--display|--display-id)[ \t=]+(\d+)""")
+
+  /**
+   * 「形似 display 选项但取值不是纯数字」的形态（`-d=7`、`-dx`）。
+   *
+   * 为什么要单独判：`-d=7` 的真实值是 `=7`（`atoi` 后为 0），所以它**不能**被当成"已认证 7"；
+   * 也**不能**被当成"没有 display 选项"就放行 —— 它在不同工具下可能落到默认屏 0（真实屏）。
+   * 两侧都必须 fail-closed。注意 `-d7` 是合法粘连形态，前瞻要排除数字。
+   */
+  private val MALFORMED_DISPLAY_OPTION = Regex("""(?:^|[ \t])-d(?:[ \t]*=[ \t]*\S|(?![0-9\s])\S)""")
+
+  /**
+   * 词内引号（命令名被引号拆分）：`scr''eencap` / `scr"e"encap` 在 shell 里都等价于 `screencap`，
+   * 但 stripQuotedText 会把引号内容抹掉（空引号对什么都不留）⇒ 词面看不到命令名 ⇒ 放行。
+   * 真机实测（2026-10-28，小米 14 Pro / SDK 37）：`scr''eencap -p /sdcard/t.png` ⇒ RC=0 且出图，
+   * 与正常 screencap 同字节。只看**进入引号**那一刻，且必须状态机（单正则会把闭合引号误判）。
+   * `$'…'` 只在 `$` 处于词首时属正常语法；`$` 前还有普通字符则是词内拼接（`s$'cre'encap`）。
+   */
+  private fun hasGluedQuote(text: String): Boolean {
+    var quote = '\u0000'
+    for (i in text.indices) {
+      val ch = text[i]
+      if (quote == '\u0000') {
+        if (ch != '"' && ch != '\'') continue
+        val prev = if (i > 0) text[i - 1] else '\u0000'
+        val anchor = if (prev == '$') (if (i > 1) text[i - 2] else '\u0000') else prev
+        if (anchor != '\u0000' && anchor !in " \t;&|()<>") return true
+        quote = ch
+      } else if (ch == quote) {
+        quote = '\u0000'
+      }
+    }
+    return false
+  }
+
+  /**
+   * 反斜杠续行把命令名拆到下一行（`scr\<换行>eencap` 等价于 `screencap`）。
+   * 真机实测：RC=0，出图 2862760 B，与正常 screencap 同字节。两侧都紧邻非空白才算拼接。
+   */
+  private val GLUED_LINE_CONTINUATION = Regex("""[^\s]\\\r?\n[^\s]""")
+
+  /**
+   * 「目标屏参数从哪一段起不再有效」的口径（issue #1060 F2，与引擎侧 `optionWindow` 同三档）。
+   *
+   * - [GETOPT]：工具用 getopt 解析短选项，**第一个非选项词**（或 `--`）之后不再解析 ⇒ 之后出现的
+   *   `-d` 只是普通 argv，工具根本没读它 ⇒ 那里的 `-d` 不得当凭据（`screencap` / `screenrecord`）；
+   * - [COMMAND]：工具自带子命令解析器，`-d` 只在**子命令词之前**有效（`input`）；
+   * - [FULL]：整段都算 —— 这类自解析器在子命令与位置参数**之后**仍认目标屏参数
+   *   （设备实测 `wm size 900x1600 -d 7`、`cmd window size 900x1600 -d 7` 都生效）。
+   */
+  private enum class OptionWindow { GETOPT, COMMAND, FULL }
 
   /** 命令词家族：每个家族自带「哪种拼写才算它的目标屏」（与引擎侧 `SCREEN_COMMAND_FAMILIES` 同表）。 */
-  private data class ScreenFamily(val name: String, val pattern: Regex, val targetFlags: List<String>)
+  private data class ScreenFamily(
+    val name: String,
+    val pattern: Regex,
+    val targetFlags: List<String>,
+    val optionWindow: OptionWindow = OptionWindow.FULL,
+  )
 
   private val ALL_DISPLAY_FLAGS = listOf("-d", "--display", "--display-id")
 
   private val SCREEN_FAMILIES = listOf(
-    ScreenFamily("screencap", Regex("""\bscreencap\b""", RegexOption.IGNORE_CASE), ALL_DISPLAY_FLAGS),
-    ScreenFamily("screenrecord", Regex("""\bscreenrecord\b""", RegexOption.IGNORE_CASE), ALL_DISPLAY_FLAGS),
+    // issue #1060 F2：screencap / screenrecord 是 toybox 工具，用 getopt 解析短选项 ⇒ 第一个非选项词
+    // 之后不再解析。旧实现只给 `input` 算了边界、这两个做全段扫描 ⇒
+    // `screencap -p /sdcard/a.png -d 7`、`screencap -- -d 7`、`screencap -p 7 -d 7` 的尾随 -d
+    // 反而成了「已认证」的通行证（真实 display 0）。
+    ScreenFamily("screencap", Regex("""\bscreencap\b""", RegexOption.IGNORE_CASE), ALL_DISPLAY_FLAGS,
+      OptionWindow.GETOPT),
+    ScreenFamily("screenrecord", Regex("""\bscreenrecord\b""", RegexOption.IGNORE_CASE), ALL_DISPLAY_FLAGS,
+      OptionWindow.GETOPT),
     ScreenFamily(
       "input",
-      Regex("""\binput[ \t]+(?:tap|swipe|roll|draganddrop|motionevent|text|keyevent|keycombination)\b""",
-        RegexOption.IGNORE_CASE),
+      // 正式语法是 `input [<source>] [-d DISPLAY_ID] <command> [<arg>…]`：source 是位置词
+      // （touchscreen/touchpad/…），漏了它整类命令都进不了命令词面；`press` 是其新命令，同族。
+      // source 用通配而不是列举：枚举里少了 `touchpad`（真机 `input` 裸跑列出它），
+      // `input touchpad tap 9999 9999` / `swipe` / `-d 0 tap` 三条 RC=0 而门禁判 allow（2026-10-29 自查）。
+      Regex(
+        """\binput[ \t]+(?:[a-z][a-z0-9_-]*[ \t]+)?""" +
+          """(?:tap|swipe|roll|draganddrop|motionevent|text|keyevent|keycombination|press)\b""",
+        RegexOption.IGNORE_CASE,
+      ),
+      ALL_DISPLAY_FLAGS,
+      OptionWindow.COMMAND,
+    ),
+    // `wm` 是窗口管理器命令面：20+ 子命令里只有 `help` 与 `get-*` 是纯查询，其余每个都改显示状态
+    // 或 dump **真实屏**的窗口视图树。修前的子命令白名单让 `wm dump-visible-window-views`
+    // （真机 65704 B 的 View 层级 ZIP）、`wm dismiss-keyguard`（解锁真实屏）、`wm reset`、
+    // `wm disable-blur` 全数放行（2026-10-29 自查）。改成反向表：新增子命令默认拒。
+    ScreenFamily(
+      "wm",
+      Regex("""\bwm[ \t]+(?!help\b|get-)[a-z][a-z-]*""", RegexOption.IGNORE_CASE),
       ALL_DISPLAY_FLAGS,
     ),
-    ScreenFamily("wm", Regex("""\bwm[ \t]+(?:size|density|overscan)\b""", RegexOption.IGNORE_CASE), ALL_DISPLAY_FLAGS),
+    // 不解析 `-d` 的三个子命令（真机实测 `wm dump-visible-window-views -d 47` 仍 dump 真实屏，
+    // `wm dismiss-keyguard -d 47` RC=0 照常解锁）⇒ 无法自证目标屏，与 `dumpsys` 同档恒拒。
+    ScreenFamily(
+      "wm-no-target",
+      Regex("""\bwm[ \t]+(?:dump-visible-window-views|dismiss-keyguard|disable-blur)\b""", RegexOption.IGNORE_CASE),
+      emptyList(),
+    ),
+    // `cmd window …` 是 `wm` 的等价拼写（实测 `cmd window size 900x1600` 真改真实屏）；
+    // 目标屏参数是**子命令内**的 `[-d DISPLAY_ID]`（实测 `cmd window size 900x1600 -d 7` 被接受）。
+    ScreenFamily("cmd-window", Regex("""\bcmd[ \t]+window\b""", RegexOption.IGNORE_CASE), ALL_DISPLAY_FLAGS),
+    // `cmd display …` 用 `--id DISPLAY_ID`（不是 ScreenTarget 的两种 id 空间）⇒ 无法自证，恒拒。
+    ScreenFamily("cmd-display", Regex("""\bcmd[ \t]+display\b""", RegexOption.IGNORE_CASE), emptyList()),
     // `uiautomator dump` 没有目标屏参数：dump 的是**默认屏**的语义树 ⇒ 无法自证，恒拒。
     ScreenFamily("uiautomator", Regex("""\buiautomator\b""", RegexOption.IGNORE_CASE), emptyList()),
-    ScreenFamily("dumpsys", Regex("""\bdumpsys[ \t]+(?:window|display|input)\b""", RegexOption.IGNORE_CASE), emptyList()),
+    // 直接读写 input 设备的命令：`sendevent` 能注入任意事件（含触摸），`getevent` 能读回触摸/按键。
+    // 两者都没有目标屏参数 ⇒ 自证不了「作用于已注册虚拟屏」，与 `uiautomator` 同档（恒拒）。
+    // 小米 14 Pro 实测（2026-10-28 自查）：shell 直写 /dev/input/eventN 被拒，但已 root 时
+    // `su -c 'sendevent … 0 0 0'` RC=0，而 `su -c` 的载荷会被本门禁展开重扫 ⇒ 修前整条放行。
+    ScreenFamily("sendevent", Regex("""\bsendevent\b""", RegexOption.IGNORE_CASE), emptyList()),
+    ScreenFamily("getevent", Regex("""\bgetevent\b""", RegexOption.IGNORE_CASE), emptyList()),
+    // `dumpsys activity` 也会打完整 `View Hierarchy:`（含每个控件的 bounds）—— 与 `uiautomator dump`
+    // 同级的「读真实屏 UI」，2026-10-28 自查补进来；`battery`/`meminfo` 这类与屏无关的不受影响。
+    //
+    // issue #1060 F3：**服务名永不紧贴 `dumpsys`**。AOSP `frameworks/base/cmds/dumpsys/dumpsys.cpp`
+    // 用 `getopt_long(argc, argv, "+t:l", …)`，`-t <秒>` 是全局超时旗标、`-l` 只列服务名 ⇒
+    // `dumpsys -t 10 window` 的真实 argv 是 ["dumpsys","-t","10","window"]，实际服务 window，
+    // 输出含真实屏 View 层级。旧 pattern 要求服务名紧跟命令名 ⇒ 这一类全部 families=[] ⇒ allow。
+    //
+    // 修法（fail-closed，不新增放行分支）：命中判据改成「服务名**不能确认安全**就命中」——
+    //   ① `dumpsys` 之后紧跟一个**不以 `-` 开头**、**不是**敏感服务、且**不含 `$` / 反引号**的词
+    //      ⇒ 服务名可确认且安全 ⇒ 不命中；
+    //   ② 其余一律命中：紧跟敏感服务 / 紧跟旗标 / 干脆没有服务名 / 服务名是变量或命令替换。
+    //      旗标之后是什么服务**静态不可判**（`--abi arm64` 这类旗标自己带词形参数，任何
+    //      「跳过旗标取下一个词」的推断都会被骗过去），裸 `dumpsys` 更会 dump **全部**服务（含 window）。
+    //
+    // issue #1184（F3 残留）：服务名是**变量**时不得算「已确认安全」。旧启发式只要求
+    // 「下一个词不以 `-` 开头且不是敏感服务」，于是 `dumpsys $S` / `dumpsys ${S}` / `dumpsys win$X`
+    // 全被放行——而 `$S` 完全可能是 `window`（展开后就是 `dumpsys window`，打真实屏 View 层级）。
+    // 判据补一条：可确认安全的服务名不得含 `$` 与反引号（即不得含展开或命令替换）。
+    ScreenFamily(
+      "dumpsys",
+      Regex(
+        "\\bdumpsys\\b(?![ \\t]+(?!-)(?!(?:window|display|input|activity)\\b)(?!\\S*[$\u0060])\\S)",
+        RegexOption.IGNORE_CASE,
+      ),
+      emptyList(),
+    ),
     // `am` 的显示参数是 `--display`；`-d` 是 Intent data，**不得**作为目标屏凭据。
     ScreenFamily("am", Regex("""\bam[ \t]+(?:start|start-activity|force-stop|kill)\b""", RegexOption.IGNORE_CASE),
       listOf("--display", "--display-id")),
     ScreenFamily("monkey", Regex("""\bmonkey\b""", RegexOption.IGNORE_CASE), listOf("--display", "--display-id")),
+    // `cmd activity <start-activity|start|force-stop|kill>` 与 `am start` 走同一个
+    // ActivityManagerShellCommand（无 `--display` 时默认 display 0）——只认 `am` 会把这条等价拼写
+    // 整类放行。`--display` 才是它的目标屏参数。
+    ScreenFamily(
+      "cmd-activity",
+      Regex("""\bcmd[ \t]+activity[ \t]+(?:start-activity|start|force-stop|kill|stop-app)\b""",
+        RegexOption.IGNORE_CASE),
+      listOf("--display", "--display-id"),
+    ),
   )
 
   /** SurfaceFlinger 的虚拟屏 token 行 / 其后的 name= 行（设备实测形态，见坑 147）。 */
@@ -61,10 +200,267 @@ internal object ShellOps {
   /** 嵌套执行体再切一层的深度上限（与引擎侧 `MAX_NESTING` 相同）。 */
   private const val MAX_NESTING = 4
 
-  /** `sh -c '<内层>'` 形式（含 `/system/bin/sh`、`busybox sh`、`su` 等包装）。 */
-  private val SHELL_C_PAYLOAD = Regex(
-    """(?:^|[ \t])(?:[^\s]*/)?(?:sh|bash|mksh|ash|dash|zsh|busybox|toybox|su)[ \t]+(?:-[^\s]+[ \t]+)*-c[ \t]+([\s\S]*)$""",
+  /**
+   * 管道/输入重定向喂**裸 shell 解释器**的段（`| sh`、`| xargs bash`、段尾裸 `sh`）。
+   *
+   * `echo 'screencap -d 0' | sh` 切段后：喂入段是引号文本（stripQuotedText 抹空，无命令词），
+   * 接收段是裸 `sh`（同样无命令词）——两条都不进屏幕命令词面 ⇒ 判 ALLOW；执行时 sh 从
+   * stdin 读到命令照跑，virtual-only 下真实屏可读（#509）。该形态在本通道没有正当用途：
+   * 合法执行本来就整条传给 `shExec`（本身就是 `sh -c`），要嵌套也有 `sh -c '…'`（载荷可见、
+   * 由 SHELL_C_PAYLOAD 展开队列正常判定）。故裸解释器段一律按看不懂拒绝（fail-closed），
+   * 与引擎侧 `screen-scope.ts` 的同构判据同批演进（fixture 权威源用例另行补充）。
+   */
+  private val INTERPRETER_NAMES = setOf("sh", "bash", "mksh", "ash", "dash", "zsh")
+  // 包装词白名单：与引擎侧 INTERPRETER_WRAPPERS 逐条同源。缺一个 = 该包装器后面的裸解释器
+  // 识别不出来，循环停在包装词上返回 false（当成"不是解释器"）⇒ 载荷不可见的段放行。
+  // 小米 14 Pro（SDK 37）实测（2026-10-28 自查）：`echo '…' | nice sh` / `| setsid -w sh` /
+  // `| ionice sh` / `| taskset 1 sh` 都会真的执行 stdin 里的脚本，而 `| sh` 本来就判
+  // deny-unparsed ⇒ 多套一层包装即可绕过 #509 的裸解释器判据。
+  private val INTERPRETER_WRAPPERS =
+    setOf(
+      "env", "timeout", "nohup", "xargs", "busybox", "toybox", "su", "command", "exec",
+      // 调度 / 资源类（真机实测可喂 sh）
+      "nice", "ionice", "taskset", "setsid", "chrt", "numactl", "unshare", "runcon",
+      // 缓冲 / 计时 / 锁类
+      "stdbuf", "time", "flock", "watch",
+    )
+
+  /**
+   * 该段的命令词是不是「载荷对判定器不可见」的解释器调用（#509 的放宽版，与引擎侧
+   * `interpreterPayloadUnparsed` 逐条同源）。
+   *
+   * 只有 `sh -c '<可见载荷>'` 能被展开后判定；其余载荷都来自**运行时**：
+   * `sh -s` / `sh -e` / 无参 `sh`（读 stdin）、`sh /tmp/x.sh`、`. /tmp/x.sh`、`source x`，
+   * 以及经 `env`/`timeout`/`xargs`/`busybox` 包装的同族形态 —— 一律 fail-closed。
+   * 旧实现只认「整段恰好等于解释器名」这一条最窄形态，`sh -s`/`sh file`/`.` 全部放行。
+   */
+  private fun interpreterPayloadUnparsed(segment: String): Boolean {
+    var text = segment.trim()
+    for (guard in 0 until 8) {
+      val parsed = firstShellWord(text)
+      val word = parsed.first
+      if (word.isEmpty()) return false
+      val base = word.substringAfterLast('/')
+      // 变量赋值前缀、包装器、包装器自己的选项/数字参数都不改变「命令词」。
+      if (Regex("""^[A-Za-z_][A-Za-z0-9_]*=""").containsMatchIn(word)) { text = parsed.second.trim(); continue }
+      if (base in INTERPRETER_WRAPPERS || word.startsWith("-") || Regex("""^\d+$""").matches(word)) {
+        text = parsed.second.trim()
+        continue
+      }
+      if (base == "." || base == "source") return true
+      if (base in INTERPRETER_NAMES) {
+        return !Regex("""(?:^|[ \t])-[^\s]*c[^\s]*(?:[ \t]|$)""").containsMatchIn(parsed.second)
+      }
+      return false
+    }
+    return false
+  }
+
+  /** 取 shell 文本第一个词（quote-aware，去包裹引号）与其剩余；与引擎侧 `firstShellWord` 同源。 */
+  private fun firstShellWord(text: String): Pair<String, String> {
+    var i = 0
+    while (i < text.length && (text[i] == ' ' || text[i] == '\t')) i += 1
+    if (i >= text.length) return "" to ""
+    val quote = text[i]
+    if (quote == '\'' || quote == '"') {
+      var j = i + 1
+      while (j < text.length) {
+        if (quote == '"' && text[j] == '\\') { j += 2; continue }
+        if (text[j] == quote) return text.substring(i + 1, j) to text.substring(j + 1)
+        j += 1
+      }
+      return text.substring(i + 1) to ""
+    }
+    var j = i
+    while (j < text.length && text[j] !in " \t;&|") j += 1
+    return text.substring(i, j) to text.substring(j)
+  }
+
+  /**
+   * 载荷里第一个**非选项终结符**词：`--` 只是选项终结符，真正的载荷在它后面。
+   *
+   * 与引擎侧 `firstPayloadWord` 同源（2026-10-28 自查实测，安全侧漏拦）：
+   * `trap -- 'screencap -p /sdcard/real.png' EXIT` / `sh -c -- '…'` / `eval -- '…'` 的载荷以
+   * `--` 开头，旧实现直接把它当载荷 ⇒ 真正的内层命令被丢弃 ⇒ 该段无屏幕命令词、
+   * 无目标屏参数 ⇒ 放行（读真实屏）。小米 14 Pro（`/system/bin/sh` = mksh，SDK 37）实测三条
+   * **都会真的执行 `--` 后面的命令**；`--` 被引号包裹时同样是终结符
+   * （`trap "--" 'cmd' EXIT` 真机实测执行），故判据用**解引号后**的词是否恰好等于 `--`。
+   */
+  private fun firstPayloadWord(text: String): String {
+    var rest = text
+    for (guard in 0 until 8) {
+      val (word, remainder) = firstShellWord(rest)
+      if (word != "--") return word
+      rest = remainder
+    }
+    return ""
+  }
+
+  /**
+   * 「当前段已经走到**载荷位置**」的尾巴判据（`sh -c ` / `eval ` / `trap ` 之后），与引擎侧同名。
+   *
+   * 用来认**不带引号**的运行时载荷：`` sh -c `cat /sdcard/x.sh` `` 的反引号在顶层切段时就被展开，
+   * 段里不再留反引号字符，段级判据看不见它 —— 只能在切段当场看「替换前那段 buf 是否停在载荷位置」。
+   * `sh -c "a b" $(date)` 这种「载荷已给、替换在下一个参数」的形态不命中（脚本静态可见）。
+   */
+  private val PAYLOAD_SLOT_TAIL = Regex("""(?:^|[ \t])(?:-[^\s]*c|eval|trap)[ \t]+$""")
+
+  /**
+   * 段**命令名位置**上是不是运行时值（`$CMD`、`$(…)`、反引号）。
+   *
+   * 小米 14 Pro（SDK 37）实测都会真的执行变量/文件里的内容：`sh -c "$CMD"`、
+   * `sh -c "$(cat /sdcard/x.sh)"`、`` sh -c `cat /sdcard/x.sh` ``、`trap "$(cat …)" EXIT`、
+   * `eval "$(cat …)"` —— 与 `sh /x.sh`（脚本文件）同一性质：静态看不到执行什么 ⇒ fail-closed。
+   * 只看**段首词**：参数位置的替换不改变命令身份，不得误拦；`$'…'` / `$"…"` 是 ANSI-C 引号
+   * （静态字面量），必须排除。
+   */
+  private fun isRuntimeCommandName(segment: String): Boolean {
+    val head = firstShellWord(segment.trim()).first
+    if (head.startsWith("$'") || head.startsWith("$\"")) return false
+    return head.startsWith("$") || head.startsWith("`")
+  }
+
+  /** shell glob 元字符是否出现在**引号外**（引号内的 `*`/`?` 不展开，不参与判定）。 */
+  private fun hasUnquotedGlob(text: String): Boolean {
+    var quote = '\u0000'
+    var i = 0
+    while (i < text.length) {
+      val ch = text[i]
+      if (quote == '\u0000') {
+        if (ch == '"' || ch == '\'') {
+          quote = ch
+          i += 1
+          continue
+        }
+        if (ch == '\\') {
+          i += 2
+          continue
+        }
+        if (ch == '*' || ch == '?' || ch == '[') return true
+      } else if (ch == quote) {
+        quote = '\u0000'
+      }
+      i += 1
+    }
+    return false
+  }
+
+  /**
+   * 经典贪心 glob 匹配（`*` / `?` / `[abc]` / `[!abc]` 单字符集）。
+   *
+   * 为什么不用「转成正则再 match」：glob 与正则元字符大面积重叠，转换本身就是新的判定面
+   * （`$`、反斜杠、`[` 的转义漏一处就是漏拦或误拦）。这里逐字符走指针，只有 4 个分支，
+   * 行为可逐条 fixture 核对。不支持范围写法（`[a-z]`）—— 判据只需回答「这个名字能不能拼出
+   * 已知命令名」，单字符集足够。
+   */
+  private fun globMatch(pattern: String, subject: String): Boolean {
+    var pi = 0
+    var si = 0
+    var starPi = -1
+    var starSi = 0
+    while (si < subject.length) {
+      val pc = if (pi < pattern.length) pattern[pi] else '\u0000'
+      if (pi < pattern.length && (pc == '?' || pc == subject[si])) {
+        pi += 1
+        si += 1
+      } else if (pi < pattern.length && pc == '[') {
+        val close = pattern.indexOf(']', pi + 1)
+        if (close < 0) return false
+        var body = pattern.substring(pi + 1, close)
+        val negate = body.startsWith("!")
+        if (negate) body = body.substring(1)
+        val hit = body.contains(subject[si])
+        if (hit == negate) return false
+        pi = close + 1
+        si += 1
+      } else if (pi < pattern.length && pc == '*') {
+        starPi = pi
+        starSi = si
+        pi += 1
+      } else if (starPi >= 0) {
+        pi = starPi + 1
+        starSi += 1
+        si = starSi
+      } else {
+        return false
+      }
+    }
+    while (pi < pattern.length && pattern[pi] == '*') pi += 1
+    return pi == pattern.length
+  }
+
+  private fun globExpandsToScreenCommand(segment: String): Boolean {
+    if (!hasUnquotedGlob(segment)) return false
+    val head = firstShellWord(segment.trim()).first
+    val base = head.substringAfterLast('/')
+    if (base.any { it == '*' || it == '?' || it == '[' }) {
+      if (SCREEN_EXECUTABLE_NAMES.any { globMatch(base, it) }) return true
+    }
+    return base in SCREEN_SUBCOMMAND_HEADS
+  }
+
+  /**
+   * 命令词用 glob 拼出屏幕命令名（`/system/bin/scr?encap` / `[s]creencap` / `scree*cap`）：
+   * shell 先展开再执行，而词面与任何家族 pattern 都不匹配 ⇒ 一路放行。
+   * 真机实测（2026-10-28，小米 14 Pro / SDK 37 / mksh），均 RC=0 且出图与对照同字节：
+   * `/system/bin/scr?encap` 2861741 B、`/system/bin/[s]creencap` 2861741 B、
+   * `/system/bin/scree*cap` 2861649 B、对照 `screencap` 2861649 B。
+   * 只认**引号外**的 glob：`"/system/bin/scr?encap"` 不展开（真机 RC=127），属无害字面量。
+   * 参数位的 glob 不改变命令身份 —— `ls /sdcard/x*.png`、`rm /sdcard/x*` 必须继续放行（不得误拦）。
+   */
+  private val SCREEN_EXECUTABLE_NAMES = listOf(
+    "screencap", "screenrecord", "input", "wm", "uiautomator", "dumpsys",
+    "sendevent", "getevent", "monkey", "am",
   )
+
+  /** 这些可执行名本身无害，但**子命令位**才决定是否碰真实屏（`cmd win?ow size 900x1600`）。 */
+  private val SCREEN_SUBCOMMAND_HEADS = listOf(
+    "cmd", "wm", "input", "am", "dumpsys", "uiautomator", "monkey", "sendevent", "getevent",
+  )
+
+  /**
+   * `awk` 的 `system(…)` 能执行任意命令，而程序文本通常整段在引号里 —— stripQuotedText 之后
+   * 命令词面只剩 `awk`，载荷里的屏幕命令完全不可见。
+   *
+   * 真机实测（2026-10-29）：`awk 'BEGIN{system("screencap -p /sdcard/awk.png")}'` RC=0，
+   * 出图 2872362 B。修前判 allow。对照 `awk '{print $1}' /sdcard/a.txt` 必须继续放行。
+   */
+  private val AWK_EXEC_PAYLOAD = Regex(
+    """^[ \t]*(?:[^\s]*/)?(?:busybox[ \t]+|toybox[ \t]+)?awk\b[^;|&]*\bsystem[ \t]*\(""",
+    RegexOption.IGNORE_CASE,
+  )
+
+  /**
+   * `sh -c '<内层>'` 形式（含 `/system/bin/sh`、`busybox sh`、`su` 等包装）。
+   *
+   * 末段必须是「短选项**簇**且簇尾是 `c`」（`-[a-zA-Z]*c`），不能只认光杆 `-c`：
+   * `sh -lc '…'` / `sh -ec '…'` / `sh -xc '…'` / `su -lc '…'` 的 `c` 都在组合簇里，光杆 `-c`
+   * 匹配不到 ⇒ 载荷不展开 ⇒ 该段无命令词 ⇒ 放行。小米 14 Pro（SDK 37，mksh）实测四种簇形态
+   * 都会真的执行引号里的脚本（设备无 bash，Linux 侧同样成立）；`-l -c` 分离写法旧实现本来能认。
+   *
+   * 前置组还要能跳过**带独立参数的短选项**（`-o` / `+o` 各吃一个词）：`sh -o errexit -c '…'` 里
+   * `errexit` 既不是 `-` 开头也不在选项簇里，旧前置组会卡在它上面 ⇒ 整条不匹配 ⇒ 载荷不展开 ⇒ 放行。
+   * 小米 14 Pro（mksh）实测 `sh -o errexit -c 'echo X'` 与 `sh +o errexit -c 'echo X'` 都会真的执行。
+   * `[+-]o` 必须排在 `-[^\s]+` **前面**，否则 `-o` 会被整词分支先吃掉、剩下 `errexit` 无处可去。
+   */
+  private val SHELL_C_PAYLOAD = Regex(
+    """(?:^|[ \t])(?:[^\s]*/)?(?:sh|bash|mksh|ash|dash|zsh|busybox|toybox|su)[ \t]+(?:[+-]o[ \t]+\S+[ \t]+|-[^\s]+[ \t]+)*-[a-zA-Z]*c[ \t]+([\s\S]*)$""",
+  )
+
+  /**
+   * `eval <载荷>`：载荷会被 shell **再解释一遍**（等价于把那段文本当命令粘回来执行）。
+   *
+   * 为什么必须单独列：`eval "screencap -p /sdcard/real.png"` 的引号内容会被引号抹除逻辑吃掉，
+   * 命令词面里看不到 `screencap` ⇒ 只靠 [SHELL_C_PAYLOAD] 时它一路放行（2026-10-28 自查实测：
+   * 引擎侧同一形态也漏，两侧必须同改）。与 `sh -c` 同型：拿原文载荷、解一层引号、递归扫。
+   */
+  private val EVAL_PAYLOAD = Regex("""(?:^|[ \t;&|(])eval[ \t]+([\s\S]*)$""")
+
+  /**
+   * `trap <载荷> <信号…>`：第一个参数是**要执行的命令**，退出/收到信号时 shell 会照跑。
+   * 与 `eval` / `sh -c` 并列进「载荷再解释一遍」入口（引擎侧同名入口，fixture 双向锁死）。
+   */
+  private val TRAP_PAYLOAD = Regex("""(?:^|[ \t;&|(])trap[ \t]+([\s\S]*)$""")
 
   /**
    * 屏幕范围判定的结果码——与引擎侧 `ScreenCommandVerdict` 的字符串**逐字相同**，
@@ -190,7 +586,8 @@ internal object ShellOps {
     if (screenVerdictWithRegistry(context, command) == ScreenCommandVerdict.ALLOW) return null
     return JSONObject()
       .put("__error", "用户当前开放屏幕范围为 virtual-only，不允许经特权 shell 读取或操作真实屏幕"
-        + "（screencap / screenrecord / uiautomator / input / wm / dumpsys window|display|input / am / monkey）。"
+        + "（screencap / screenrecord / uiautomator / input / wm / cmd window / cmd display /"
+        + " dumpsys window|display|input / am / monkey / sendevent / getevent）。"
         + "命令里显式指定的目标屏若确为**已注册虚拟屏**（DisplayManager displayId 或该屏的 SurfaceFlinger token）即可放行；"
         + "本条命令的目标屏未能与壳侧注册表核对上，故拒绝。请确认虚拟屏仍在活跃状态"
         + "（android_vdisplay_create / vdInfo），或由用户在设置中修改范围后重试。")
@@ -206,14 +603,17 @@ internal object ShellOps {
     val parsed = splitCommandSegments(command)
     if (parsed.unparsed) return false
     for (segment in parsed.segments) {
+      // 裸解释器段同 virtual-only：载荷不可见即不可证明（连「目标是不是物理屏 0」都无从核对）。
+      if (interpreterPayloadUnparsed(stripQuotedText(segment))) return false
       val bare = stripQuotedText(segment)
       val options = displayOptionsIn(bare)
+      if (MALFORMED_DISPLAY_OPTION.containsMatchIn(bare)) return false
       val normalized = stripDisplayOptions(bare)
       val families = SCREEN_FAMILIES.filter { it.pattern.containsMatchIn(normalized) }
       for (family in families) {
-        val relevant = options.filter { it.first in family.targetFlags }
+        val relevant = options.filter { it.flag in family.targetFlags }
         if (family.targetFlags.isEmpty() && options.isNotEmpty()) return false
-        if (relevant.any { it.second != "0" }) return false
+        if (relevant.any { it.value != "0" }) return false
       }
     }
     return true
@@ -311,23 +711,124 @@ internal object ShellOps {
     if (parsed.unparsed) return ScreenCommandVerdict.DENY_UNPARSED
     for (segment in parsed.segments) {
       val bare = stripQuotedText(segment)
-      val options = displayOptionsIn(bare)
+      // 命令名来自运行时（`$CMD` / `"$(cat /sdcard/x.sh)"` / 反引号）：执行什么静态不可判。
+      if (isRuntimeCommandName(segment)) return ScreenCommandVerdict.DENY_UNPARSED
+      // `awk` 的 system() 载荷不可见（程序文本在引号里）⇒ fail-closed。
+      if (AWK_EXEC_PAYLOAD.containsMatchIn(segment)) {
+        return ScreenCommandVerdict.DENY_UNPARSED
+      }
+      // 命令词用 glob 拼出屏幕命令名（`/system/bin/scr?encap`）：词面不等于执行词 ⇒ 不可判。
+      if (globExpandsToScreenCommand(segment)) return ScreenCommandVerdict.DENY_UNPARSED
+      // 命令名被引号拆开（`scr''eencap` / `s$'cre'encap`）：指纹先被 stripQuotedText 抹平。
+      if (hasGluedQuote(segment)) return ScreenCommandVerdict.DENY_UNPARSED
+      // 反斜杠续行把命令名拆到下一行（`scr\<换行>eencap`）——两半都不可信。
+      if (GLUED_LINE_CONTINUATION.containsMatchIn(segment)) return ScreenCommandVerdict.DENY_UNPARSED
+      // 裸解释器段：管道/重定向喂 shell 的载荷对判定器不可见（#509），fail-closed。
+      if (interpreterPayloadUnparsed(bare)) {
+        return ScreenCommandVerdict.DENY_UNPARSED
+      }
+      // 目标屏参数的**取值**与**边界**另用「保留一个占位词」的版本（issue #1060 F1/F2）：引号词与转义
+      // 空白在真实 argv 里是**独立的词**，抹成空格会让 `-d` 偷走下一个词的值（`-d "" 7`），
+      // 也会让「第一个非选项词」的边界凭空消失（`-p "" -d 7`）。命令词面（家族匹配）仍用上面那个
+      // 默认版本 —— 引号内不是命令词，那里的行为必须与修复前逐字相同。
+      val bareWords = stripQuotedText(segment, keepQuotedWords = true)
+      val options = displayOptionsIn(bareWords)
+      if (MALFORMED_DISPLAY_OPTION.containsMatchIn(bare)) {
+        return ScreenCommandVerdict.DENY_UNCERTIFIED_TARGET
+      }
       val normalized = stripDisplayOptions(bare)
       val families = SCREEN_FAMILIES.filter { it.pattern.containsMatchIn(normalized) }
       if (families.isEmpty()) {
         // 非屏幕命令段：允许，但**不得**携带目标屏凭据（否则就是洗白凭据）。
-        if (options.isNotEmpty()) return ScreenCommandVerdict.DENY_ORPHAN_TARGET_TOKEN
+        // 这里连**抹掉引号**的取值面一起看：`echo -d "" 7` 折叠后是 `-d 7`，历史上按「洗白凭据」拒；
+        // 本轮 F1 只改「屏幕命令族自己解析 -d」那条路，不得顺手把这条拒改成放行
+        // （宁可误拒不可误放——少一条拒就是多一条放行通道）。
+        if (options.isNotEmpty() || displayOptionsIn(bare).isNotEmpty()) {
+          return ScreenCommandVerdict.DENY_ORPHAN_TARGET_TOKEN
+        }
         continue
       }
       for (family in families) {
         if (family.targetFlags.isEmpty()) return ScreenCommandVerdict.DENY_UNCERTIFIED_TARGET
-        val owned = options.filter { it.first in family.targetFlags }.map { it.second }
+        // 目标屏参数只在**本家族真正解析它**的那一段里算凭据（口径见 [OptionWindow]）。
+        // 旧实现只给 `input` 算了边界、其余家族做全段扫描 ⇒ 尾随 `-d <owned>` 反而成了"已认证"的
+        // 通行证（2026-10-28 自查的 `input` 那处；issue #1060 F2 把同源规则补齐到 getopt 家族）。
+        val limit = familyOptionLimit(family, bareWords)
+        // issue #1184：目标屏参数按流式解释——最后一个赋值生效，空值不继承上一个值。
+        // 只按数字过滤（#1060 F1 的形态）会让「取值是空词」的 -d 整个消失，于是一个更早的
+        // 合法 -d 7 为整条命令背书，而真实作用屏是 display 0。这里要求最后一次赋值可解释。
+        val target = displayTargetIn(bareWords, limit)
+        if (target is DisplayTarget.Unresolved) return ScreenCommandVerdict.DENY_UNCERTIFIED_TARGET
+        val owned = options
+          .filter { it.flag in family.targetFlags && it.index < limit }
+          .map { it.value }
         // 该家族必须在**本段内**自证：参数缺席、或任一值不属于已注册虚拟屏 → 拒（不得只认证其中一个）。
         if (owned.isEmpty()) return ScreenCommandVerdict.DENY_UNCERTIFIED_TARGET
         if (!owned.all { ownsTarget(it) }) return ScreenCommandVerdict.DENY_UNCERTIFIED_TARGET
+        // 流式结论也必须属于已注册虚拟屏（不得只看「出现过某个合法值」）。
+        if (target is DisplayTarget.Explicit && !ownsTarget(target.token)) return ScreenCommandVerdict.DENY_UNCERTIFIED_TARGET
       }
     }
     return ScreenCommandVerdict.ALLOW
+  }
+
+  private val INPUT_COMMAND =
+    Regex("""\b(?:tap|swipe|roll|draganddrop|motionevent|text|keyevent|keycombination|press)\b""",
+      RegexOption.IGNORE_CASE)
+
+  /** `input` 家族里 command 词的位置（「只有它之前的 `-d` 才算凭据」的边界）。 */
+  private fun inputCommandIndex(text: String): Int =
+    INPUT_COMMAND.find(text)?.range?.first ?: text.length
+
+  /** 需要**独立取值词**的目标屏参数拼写（`-d7` / `--display=7` 是粘连形态，不吃下一个词）。 */
+  private val SEPARATE_VALUE_DISPLAY_FLAGS = setOf("-d", "--display", "--display-id")
+
+  /**
+   * getopt 停止解析的下标（issue #1060 F2）：**第一个非选项词**的起始位置；`--` 本身即终点
+   * （其后全是操作数），单横 `-` 在 getopt 里是非选项词。
+   *
+   * 真实 argv 依据（`screencap` / `screenrecord` 是 toybox 工具，用 getopt 解析短选项）：
+   *   `screencap -p /sdcard/a.png -d 7` → ["screencap","-p","/sdcard/a.png","-d","7"]
+   *        getopt 在 /sdcard/a.png（第一个非选项词）处停止 ⇒ `-d 7` 是普通 argv ⇒ display 0；
+   *   `screencap -- -d 7`               → `--` 是选项终结符 ⇒ 其后全是操作数 ⇒ display 0；
+   *   `screencap -p 7 -d 7`             → `-p` 不吃参数（只有 `-d` 吃）⇒ `7` 就是第一个非选项词 ⇒ display 0。
+   * 旧实现只给 `input` 算了边界、其余家族做全段扫描 ⇒ 这三条都被尾随 `-d <已注册>` 洗白成 allow。
+   *
+   * 为什么不逐工具维护「哪些选项吃参数」：那张表一旦漏一个带**词形**参数的选项（`--abi arm64` 之类），
+   * 参数就会被当成位置词，边界判断失效方向是**放行**。故一律按「任何非选项词都终止解析」fail-closed。
+   */
+  private fun getoptStopIndex(text: String, commandWord: String): Int {
+    var i = 0
+    var seenCommand = false
+    while (i < text.length) {
+      while (i < text.length && (text[i] == ' ' || text[i] == '\t')) i += 1
+      if (i >= text.length) break
+      val start = i
+      while (i < text.length && text[i] != ' ' && text[i] != '\t') i += 1
+      val word = text.substring(start, i)
+      if (!seenCommand) {
+        // 命令词**不一定在段首**：本门禁也判 `adb shell screencap …`（adb 包装）这类形态 ⇒ 先找到
+        // 家族自己的命令词（允许绝对路径），再从它后面开始数解析窗口。
+        if (word.substring(word.lastIndexOf('/') + 1).lowercase() == commandWord) seenCommand = true
+        continue
+      }
+      if (word == "--" || word == "-" || !word.startsWith("-")) return start
+      if (SEPARATE_VALUE_DISPLAY_FLAGS.contains(word)) {
+        // `-d 7`：`7` 是这个选项的值，不是位置词 —— 不跳过它就会让 `-d` 被**自己的值**判成
+        // 「第一个非选项词」，于是 `screencap -d 7 -d 99 …` 里的第二个 `-d` 反而被放过。
+        while (i < text.length && (text[i] == ' ' || text[i] == '\t')) i += 1
+        while (i < text.length && text[i] != ' ' && text[i] != '\t') i += 1
+      }
+    }
+    // 命令词根本没以独立词出现（家族是靠别的词面命中的）⇒ 上界 0 ⇒ 任何 `-d` 都不算凭据（fail-closed）。
+    return if (seenCommand) text.length else 0
+  }
+
+  /** 该家族「目标屏参数算凭据」的上界（口径见 [OptionWindow]）。 */
+  private fun familyOptionLimit(family: ScreenFamily, bareWords: String): Int = when (family.optionWindow) {
+    OptionWindow.GETOPT -> getoptStopIndex(bareWords, family.name)
+    OptionWindow.COMMAND -> inputCommandIndex(bareWords)
+    OptionWindow.FULL -> bareWords.length
   }
 
   /** 引号感知切段结果（与引擎侧 `CommandSegments` 同构）。 */
@@ -352,9 +853,12 @@ internal object ShellOps {
         return
       }
       val buf = StringBuilder()
+      // 词首状态（注释判定用，见下方 `#` 分支）：分隔符/空白置位，其它字符（含转义对）清除。
+      var atWordStart = true
       fun flush() {
         segments.add(buf.toString())
         buf.setLength(0)
+        atWordStart = true
       }
       var i = 0
       while (i < text.length) {
@@ -362,6 +866,7 @@ internal object ShellOps {
         if (ch == '\\') {
           buf.append(text, i, minOf(i + 2, text.length))
           i += 2
+          atWordStart = false
           continue
         }
         if (ch == '\'') {
@@ -374,16 +879,42 @@ internal object ShellOps {
           }
           buf.append(text, i, end + 1)
           i = end + 1
+          atWordStart = false
           continue
         }
         if (ch == '"') {
           var j = i + 1
           while (j < text.length) {
-            if (text[j] == '\\') {
+            val inner = text[j]
+            if (inner == '\\') {
               j += 2
               continue
             }
-            if (text[j] == '"') break
+            if (inner == '"') break
+            // 双引号内的 `$(...)` 与反引号**会执行**（单引号才不执行）：必须按原文递归扫，
+            // 否则 `echo "$(screencap -p /sdcard/real.png)"` 会把真实屏命令当纯文本放行（issue #674）。
+            if (inner == '`') {
+              val end = backtickEnd(text, j + 1)
+              if (end < 0) {
+                unparsed = true
+                j = text.length
+                break
+              }
+              scan(text.substring(j + 1, end), depth + 1)
+              j = end + 1
+              continue
+            }
+            if (inner == '$' && j + 1 < text.length && text[j + 1] == '(') {
+              val end = parenEnd(text, j + 2)
+              if (end < 0) {
+                unparsed = true
+                j = text.length
+                break
+              }
+              scan(text.substring(j + 2, end), depth + 1)
+              j = end + 1
+              continue
+            }
             j += 1
           }
           if (j >= text.length) {
@@ -394,6 +925,7 @@ internal object ShellOps {
           }
           buf.append(text, i, j + 1)
           i = j + 1
+          atWordStart = false
           continue
         }
         if (ch == '`') {
@@ -404,9 +936,16 @@ internal object ShellOps {
             i = text.length
             continue
           }
+          // **命令位置**上的命令替换：替换结果是运行时文本、会被当成命令执行 ⇒ 执行什么静态不可判
+          // （`sh -c "\`cat /sdcard/x.sh\`"` 真机实测执行文件内容）；**载荷位置**上的替换
+          // （`` sh -c \`cat f\` ``）等于整段脚本来自运行时，同样 fail-closed。参数位置的替换不影响命令身份。
+          if (buf.isBlank() || PAYLOAD_SLOT_TAIL.containsMatchIn(buf)) unparsed = true
           scan(text.substring(i + 1, end), depth + 1)
           buf.append(' ')
           i = end + 1
+          // issue #1572：替换结束后**词已开始**，其后的 `#` 是词内字面量而非注释起点。
+          // 原先这里不清 atWordStart，`echo `true`#; screencap …` 会把后半行当注释吃掉。
+          atWordStart = false
           continue
         }
         if (ch == '$' && i + 1 < text.length && text[i + 1] == '(') {
@@ -417,11 +956,24 @@ internal object ShellOps {
             i = text.length
             continue
           }
+          // 同上：`sh -c "$(cat /sdcard/x.sh)"` / `sh -c "echo hi; $(cat x.sh)"` 的第二段都是
+          // 「命令名来自运行时」⇒ 与 `sh /x.sh`（脚本文件）同档，fail-closed。
+          if (buf.isBlank() || PAYLOAD_SLOT_TAIL.containsMatchIn(buf)) unparsed = true
           scan(text.substring(i + 2, end), depth + 1)
           buf.append(' ')
           i = end + 1
+          atWordStart = false // issue #1572，理由见上方反引号分支
           continue
         }
+            // shell 注释：`#` 只有在**词首**才开注释。词首＝未转义、未引用的 ASCII 空白 / `;` / `&` / `|`
+            // 之后（atWordStart 显式跟踪）—— 不能用「buf 末尾是空白」判定：`echo\ #; screencap …` 里
+            // 那个空格是**转义的**（属词内容），`#` 因此是 echo 的参数而不是注释，screencap 照跑
+            // （dash 实测 `echo\ #; echo REACHED` 会执行 REACHED）；VT/FF/CR/NBSP 也不是分隔符。
+            if (ch == '#' && atWordStart) {
+              val lineEnd = text.indexOf('\n', i)
+              i = if (lineEnd < 0) text.length else lineEnd
+              continue
+            }
         if (ch == ';' || ch == '\n' || ch == '\r') {
           flush()
           i += 1
@@ -432,6 +984,7 @@ internal object ShellOps {
           i += if (i + 1 < text.length && text[i + 1] == ch) 2 else 1
           continue
         }
+        if (ch == ' ' || ch == '\t') atWordStart = true else atWordStart = false
         buf.append(ch)
         i += 1
       }
@@ -448,8 +1001,15 @@ internal object ShellOps {
     while (pending.isNotEmpty() && round < 16) {
       round += 1
       val segment = pending.removeFirst()
-      val payload = SHELL_C_PAYLOAD.find(segment) ?: continue
-      val inner = unwrapOneQuote(payload.groupValues[1])
+      // `sh -c` 与 `eval` 都是「载荷会被再解释一遍」的入口，两者都要展开（issue #674 同类）。
+      val payload = SHELL_C_PAYLOAD.find(segment)
+        ?: EVAL_PAYLOAD.find(segment)
+        ?: TRAP_PAYLOAD.find(segment)
+        ?: continue
+      // 取载荷的**第一个词**（不是整段剩余）：`sh -c 'cmd' sh` / `eval 'cmd' foo` / `trap 'cmd' EXIT`
+      // 的尾随 argv 会让「整段首尾成对」判据失效，从而整段不展开（安全侧漏拦，与引擎侧同源）。
+      // `--` 是**选项终结符**，不是载荷：`trap -- 'cmd' EXIT` 真机会执行 cmd（见 `firstPayloadWord`）。
+      val inner = firstPayloadWord(payload.groupValues[1])
       if (inner.isEmpty()) continue
       val before = segments.size
       scan(inner, 1)
@@ -520,25 +1080,56 @@ internal object ShellOps {
   }
 
   /**
+   * 引号词 / 转义空白的**占位词**（issue #1060 F1，与引擎侧 `QUOTED_WORD_PLACEHOLDER` 同值）。
+   *
+   * 只在 [stripQuotedText] 的 `keepQuotedWords` 模式出现：真实 argv 里「引号包住的东西」是**一个词**
+   * （哪怕是空串），这个占位符保住这条事实。取值刻意选 SOH —— 不含数字、不以 `-` 开头、
+   * 不匹配任何命令词家族、也不是 ASCII 空白 ⇒ 既不会被当成 `-d` 的值，也不会让 getopt 边界消失。
+   */
+  private const val QUOTED_WORD_PLACEHOLDER = '\u0001'
+
+  /**
    * 把**引号内文本与转义字符**替换成 shell 真正会执行的字面量：
    *  - 引号段整体抹成空白（引号内不是命令词，也不是参数——`echo "screencap"` 不执行它）；
    *  - `\x` 解成 `x`（shell 会消掉反斜杠：`input \-d 0 tap 1 2` 实际执行的就是 `input -d 0 tap 1 2`）。
    *
+   * `keepQuotedWords`（issue #1060 F1）：非首词的引号段与**转义空白**改留一个占位词
+   * （[QUOTED_WORD_PLACEHOLDER]），不再折叠成一个空格。
+   *
+   * 缺陷形态（旧实现的 `out.append(' ')`）：`screencap -d "" 7` 的真实 argv 是
+   * `["screencap","-d","","7"]` —— `-d` 的 optarg 是**空串**，AOSP 用 `atoi(optarg)` ⇒ `atoi("")==0`
+   * ⇒ 实际作用 **display 0（真实屏）**，`7` 只是输出文件名。折叠成 `screencap -d   7` 后，
+   * 取值正则把**下一个词**的 `7` 当成 `-d` 的值 ⇒ 门禁判「已认证虚拟屏 7」并放行，而命令读真实屏。
+   * 占位词让 `-d` 取不到数字值 ⇒ 该家族自证失败 ⇒ `deny-uncertified-target`（fail-closed）。
+   *
+   * 命令词面（家族匹配）**仍用默认模式**：引号内不是命令词，抹成空白才对（`echo "screencap"` 必须放行）。
+   *
    * 与引擎侧 `stripQuotedText` 同规则。
    */
-  internal fun stripQuotedText(text: String): String {
+  internal fun stripQuotedText(text: String, keepQuotedWords: Boolean = false): String {
     val out = StringBuilder()
     var i = 0
+    // 只对**段内第一个词**（命令词位置）做 quote removal —— shell 在查找命令前会剥掉那里的引号，
+    // 所以 `"screencap" -p /sdcard/x` 真的会执行 screencap（dash 实测），旧实现把引号段一律抹平
+    // ⇒ 命令词位置上的引号内容也被抹掉 ⇒ 整条放行（2026-10-28 自查，安全侧漏拦，与引擎侧同源）。
+    // 参数位置的引号必须继续抹掉：`echo "screencap"` 只是打印（fixture 有这条对照）。
+    var inFirstWord = true
     while (i < text.length) {
       val ch = text[i]
       if (ch == '\\') {
-        if (i + 1 < text.length) out.append(text[i + 1])
+        val escaped = if (i + 1 < text.length) text[i + 1] else '\u0000'
+        // 转义空白是**词内字符**（`-d \ 7` 的 `-d` 值是一个空格串），不是分隔符 ⇒ 取值面必须留一个词。
+        val wordPlaceholder = keepQuotedWords && !inFirstWord && (escaped == ' ' || escaped == '\t')
+        if (i + 1 < text.length) out.append(if (wordPlaceholder) QUOTED_WORD_PLACEHOLDER else escaped)
         i += 2
+        inFirstWord = false
         continue
       }
-      if (ch == '\'' || ch == '"') {
-        val quote = ch
-        var j = i + 1
+      // `$'…'` / `$"…"` 在词首同样属于命令词：dash/bash 实测 `$'screencap' -p …` 会执行。
+      val ansiC = inFirstWord && ch == '$' && i + 1 < text.length && (text[i + 1] == '\'' || text[i + 1] == '"')
+      if (ch == '\'' || ch == '"' || ansiC) {
+        val quote = if (ansiC) text[i + 1] else ch
+        var j = (if (ansiC) i + 1 else i) + 1
         while (j < text.length) {
           if (quote == '"' && text[j] == '\\') {
             j += 2
@@ -552,10 +1143,23 @@ internal object ShellOps {
           i = text.length
           continue
         }
-        out.append(' ')
+        if (inFirstWord) {
+          out.append(text, (if (ansiC) i + 1 else i) + 1, j)
+        } else {
+          out.append(if (keepQuotedWords) QUOTED_WORD_PLACEHOLDER else ' ')
+        }
         i = j + 1
+        inFirstWord = false
         continue
       }
+      if (ch == ' ' || ch == '\t' || ch == ';' || ch == '&' || ch == '|' || ch == '\n' || ch == '\r') {
+        // 第一个词在此结束：之后的引号都是参数，回到「抹掉」语义。
+        inFirstWord = false
+        out.append(ch)
+        i += 1
+        continue
+      }
+      inFirstWord = false
       out.append(ch)
       i += 1
     }
@@ -563,11 +1167,72 @@ internal object ShellOps {
   }
 
   /** 把目标屏参数整体抹成空白（命令词匹配前归一化，使 `input -d 0 tap …` 也进命令词面）。 */
-  internal fun stripDisplayOptions(text: String): String = DISPLAY_OPTION.replace(text, " ")
+  internal fun stripDisplayOptions(text: String): String =
+    LONG_DISPLAY_OPTION.replace(SHORT_DISPLAY_OPTION.replace(text, " "), " ")
 
   /** 命令里的全部目标屏参数（拼写 + 原样数字串）。 */
-  internal fun displayOptionsIn(text: String): List<Pair<String, String>> =
-    DISPLAY_OPTION.findAll(text).map { it.groupValues[1] to it.groupValues[2] }.toList()
+  /** 目标屏选项：flag / 原始值 / 在文本里的起始下标（下标用于 input 的「只在 command 前才算」）。 */
+  internal data class DisplayOption(val flag: String, val value: String, val index: Int)
+
+  internal fun displayOptionsIn(text: String): List<DisplayOption> {
+    val out = ArrayList<DisplayOption>()
+    for (m in SHORT_DISPLAY_OPTION.findAll(text)) out.add(DisplayOption("-d", m.groupValues[1], m.range.first))
+    for (m in LONG_DISPLAY_OPTION.findAll(text)) {
+      out.add(DisplayOption(m.groupValues[1], m.groupValues[2], m.range.first))
+    }
+    return out.sortedBy { it.index }
+  }
+
+  /**
+   * 目标屏参数的**流式**解析结果（issue #1184，与引擎侧 `displayTargetIn` 同一口径）。
+   *
+   * 为什么需要它（#1060 F1 的修法引入了新绕过）：[displayOptionsIn] 只记录**值为数字**的
+   * `-d`，于是「取值是空词 / 转义空白」的 `-d` 在结果里完全不出现——没有任何判据要求
+   * 「出现过的每个 `-d` 都必须能被解释」。而 screencap / screenrecord 是 getopt 工具，
+   * 语义是**最后一个 `-d` 生效**：
+   *   `screencap -d7 -d "" 0` ⇒ argv ["-d7","-d","","0"] ⇒ 先 7、再 atoi("")=0 ⇒ display 0，
+   * 前面那个合法的 `-d 7` 于是为一个实际打在真实屏上的命令背书。
+   *
+   * 所以按流式建模：每遇到一个目标屏参数就更新当前目标屏，**空值不继承上一个值**
+   * （它是独立的、无效的一次赋值），最终只看**最后一次**赋值的取值。
+   */
+  internal sealed interface DisplayTarget {
+    /** 窗口内没有出现任何目标屏参数。 */
+    data object None : DisplayTarget
+    /** 最后一次赋值的取值可解释为十进制串，由调用方再与注册表核对。 */
+    data class Explicit(val token: String) : DisplayTarget
+    /** 最后一次赋值的取值不可解释（空词 / 占位词 / 粘连非数字 / 缺值）⇒ 必须 fail-closed。 */
+    data class Unresolved(val token: String) : DisplayTarget
+  }
+
+  private val DECIMAL_ONLY = Regex("""^\d+$""")
+  private val GLUED_WITH_EQUALS = Regex("""^(?:--display-id|--display|-d)=(\S*)$""")
+  private val GLUED_SHORT_NUMERIC = Regex("""^-d(\d+)$""")
+
+  internal fun displayTargetIn(text: String, limit: Int = text.length): DisplayTarget {
+    val bounded = text.substring(0, limit.coerceIn(0, text.length))
+    val tokens = bounded.split(' ', '\t').filter { it.isNotEmpty() }
+    var result: DisplayTarget = DisplayTarget.None
+    var i = 0
+    while (i < tokens.size) {
+      val token = tokens[i]
+      if (token == "-d" || token == "--display" || token == "--display-id") {
+        val value = if (i + 1 < tokens.size) tokens[i + 1] else ""
+        result = if (DECIMAL_ONLY.matches(value)) DisplayTarget.Explicit(value) else DisplayTarget.Unresolved(value)
+        i += 2
+        continue
+      }
+      // 粘连形态：`-d7` / `-d=7` / `--display=7` / `--display-id=7`。
+      // 只认「旗标后紧跟数字或 =」，以免把 `-debug` 之类误当目标屏参数。
+      val glued = GLUED_WITH_EQUALS.find(token) ?: GLUED_SHORT_NUMERIC.find(token)
+      if (glued != null) {
+        val value = glued.groupValues[1]
+        result = if (DECIMAL_ONLY.matches(value)) DisplayTarget.Explicit(value) else DisplayTarget.Unresolved(value)
+      }
+      i += 1
+    }
+    return result
+  }
 
   /**
    * 当前**已注册**虚拟屏的 SF token 集合（块G F6）。经 Shizuku shell 通道读
@@ -641,7 +1306,7 @@ internal object ShellOps {
    * 数值化即失真（见坑 147）。与引擎侧 `adbCommandDisplayTokens` 的取法一致。
    */
   internal fun commandDisplayTokens(command: String): List<String> =
-    displayOptionsIn(command).map { it.second }
+    displayOptionsIn(command).map { it.value }
 
   /**
    * 落一条审计。

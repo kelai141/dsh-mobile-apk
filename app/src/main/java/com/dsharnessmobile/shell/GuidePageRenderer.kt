@@ -341,7 +341,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
             activity.engineManager.clearRefreshLedger()
             // Explicit start: replay the launch video even if the automatic path already
             // played it once in this Activity.
-            activity.startEngineFlow(splash = true)
+            activity.startEngineFlow(splash = true, entry = StartEntryPoint.GUIDE_BUTTON)
           } else {
             pushHint(
               result.optString("guidance").ifBlank {
@@ -713,8 +713,21 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
       "Unpacking the runtime; this takes a few minutes. Keep the app open.",
     )
 
+  /** 动效开关订阅的注销句柄；当前是否应脉冲由 [statusPulseWanted] 记住。 */
+  private var motionUnsubscribe: (() -> Unit)? = null
+  private var statusPulseWanted = false
+
+  /**
+   * 状态点脉冲。
+   *
+   * 本处是全仓**唯一**原先未受 [DsUi.animationsEnabled] 约束的 INFINITE 动画：系统关动画时
+   * 它照旧每帧重绘一个 alpha。现在两件事都补上：
+   *  1. 启动前判开关（animationsEnabled == false 直接设终态）；
+   *  2. 订阅开关翻转 —— 脉冲跑起来之后用户去系统设置关动画，也立刻停。
+   */
   private fun setStatusPulse(on: Boolean) {
-    if (on) {
+    statusPulseWanted = on
+    if (on && DsUi.animationsEnabled(activity)) {
       val anim = statusPulse ?: ObjectAnimator.ofFloat(chrome.statusDot, View.ALPHA, 1f, 0.28f).apply {
         duration = 900
         repeatMode = ValueAnimator.REVERSE
@@ -725,14 +738,28 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
       if (!anim.isStarted) anim.start()
     } else {
       statusPulse?.cancel()
+      statusPulse = null
       chrome.statusDot.alpha = 1f
     }
   }
 
+  /** 引导页就绪后调用一次，订阅动效开关翻转；重复调用安全。 */
+  fun startMotionWatch() {
+    if (motionUnsubscribe != null) return
+    motionUnsubscribe = DsUi.registerMotionListener(activity) { setStatusPulse(statusPulseWanted) }
+  }
+
+  fun stopMotionWatch() {
+    motionUnsubscribe?.invoke()
+    motionUnsubscribe = null
+  }
+
   /** 取消状态点脉冲动画（onDestroy 兜底，自 MainActivity.onDestroy 迁入）。 */
   fun cancelPulse() {
+    stopMotionWatch()
     statusPulse?.cancel()
     statusPulse = null
+    statusPulseWanted = false
     management.destroy()
   }
 
@@ -843,6 +870,25 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
     chrome.apkStatus.text = text
   }
 
+  /**
+   * 次入口（文字链接）：label 为 null 表示本状态没有次要动作，整枚隐藏。
+   *
+   * 与 [setDownloadButton] 同一条判据：没有目标也没有动作的入口必须消失，否则用户点了没反应，
+   * 只会以为功能坏了。
+   */
+  private fun setSecondaryLink(label: String?, enabled: Boolean) {
+    val link = chrome.apkSecondaryLink
+    if (label == null) {
+      link.visibility = View.GONE
+      return
+    }
+    link.visibility = View.VISIBLE
+    link.text = label
+    link.contentDescription = label
+    link.isEnabled = enabled
+    link.alpha = if (enabled) 1f else 0.55f
+  }
+
   /** 检查按钮：文案与可点性分开设，状态表逐行对照时不会串。 */
   private fun setCheckButton(label: String, enabled: Boolean) {
     // 固定高按钮 + 长版本号（v0.13.7fx-1）会换行截断（device 实测）——单行 + 省略号
@@ -908,7 +954,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
         setDownloadButton(null, enabled = false)
       }
       ApkUpdateState.STATE_UP_TO_DATE -> {
-        val v = activity.apkUpdate.version() ?: ("v" + UpdateChecker.currentVersion())
+        val v = activity.apkUpdate.version() ?: ("v" + UpdateChecker.displayVersion())
         // 0.14.6：**不再链式调用引擎快照更新**（那条链已下线：UpdateManager.DEFAULT_MANIFEST_URL 为空、
         // 零生产覆盖点 ⇒ 必然只回「本版不提供在线更新」）。留着只会让用户以为在更新应用。
         setApkStatus(activity.getString(R.string.ds_apk_latest, v))
@@ -916,7 +962,19 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
         setDownloadButton(null, enabled = false)
       }
       ApkUpdateState.STATE_AVAILABLE -> {
-        setApkStatus(activity.getString(R.string.ds_apk_version_available, tag ?: "", "v" + UpdateChecker.currentVersion(), size))
+        // 状态行只留「能下什么」：用户口径 `v0.14.10 可用 · 152 MB`。
+        // 「当前版本」不再挤进这一行（与卡片标题重复，也把句子撑长）；它改挂在下载按钮的
+        // contentDescription 上（见下方），读屏用户仍能判断点下去会装哪一版。
+        // 文案仍走资源串（中英成对的唯一真源），由 UpdateCardLayout 决定怎么用：
+        // 老串是「新版本 X（当前 Y，Z MB）」——把「能下什么」和「现在是什么」塞进一句，
+        // 用户口径要的是 `v0.14.10 可用 · 152 MB`。
+        setApkStatus(
+          UpdateCardLayout.availableLine(
+            tag = tag ?: "",
+            size = size,
+            template = activity.getString(R.string.ds_apk_version_available, tag ?: "", size),
+          ),
+        )
         // 检查按钮在此**禁用**：重新检查会把已确认的新版载荷作废（beginCheck 会清掉它），
         // 用户误点一次就得重新联网再查一遍——禁用是保护载荷，不是限制操作。
         setCheckButton(check, enabled = false)
@@ -924,7 +982,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
         // 读屏用户拿不到「版本号在上、按钮在下」的版面关系：把这句「下的是什么版本」挂到下载按钮上，
         // 否则它只会被念成「下载」，用户无从判断点下去会装哪一版。
         chrome.apkDownload.contentDescription = activity.getString(
-          R.string.ds_apk_available, tag ?: "", "v" + UpdateChecker.currentVersion(), size,
+          R.string.ds_apk_available, tag ?: "", "v" + UpdateChecker.displayVersion(), size,
         )
       }
       ApkUpdateState.STATE_DOWNLOADING -> {
@@ -965,6 +1023,46 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
         setCheckButton(check, enabled = true)
         setDownloadButton(null, enabled = false)
       }
+    }
+    // 主/次摆放统一在**所有分支之后**做一次，不在每个分支里各写一遍。
+    //
+    // 为什么：分支里只该回答「这个状态有什么文案、可不可点」；「谁是主按钮、次入口要不要出现」
+    // 是同一张表的事（[UpdateCardLayout.layoutFor]）。分散写必然会漂移成「某个态两枚都在、
+    // 某个态两枚都藏了」，而那种漂移在截图里不明显、在用户手里就是点错东西。
+    applyActionLayout(s)
+  }
+
+  /**
+   * 按 [UpdateCardLayout] 摆放主/次动作。
+   *
+   * 「谁可下载」不在这里重新判断：它由分支已经设过的可见性决定（[setDownloadButton] 传 null 即
+   * 该态没有可下的目标）。这样表只有一个输入，也不需要第二份「哪些状态能下载」的清单。
+   */
+  private fun applyActionLayout(stateName: String) {
+    val canDownload = chrome.apkDownload.visibility == View.VISIBLE
+    val layout = UpdateCardLayout.layoutFor(stateName, canDownload)
+    val downloadPrimary = layout.primary == UpdateCardLayout.PRIMARY_DOWNLOAD
+    // 主按钮 = 下载时，检查那枚降为文字链接；反之亦然。
+    // 两枚按钮里同一时刻只有一枚可见（另一枚的语义由文字链接承担），所以不会出现两枚并列。
+    if (downloadPrimary) {
+      // 下载当主：下载那枚必须**真的可见**（分支里只在有目标时才点亮它，这里是同一件事的确认），
+      // 检查让位成文字链接，并沿用它在分支里算好的可点性（AVAILABLE 态是禁用的）。
+      chrome.apkDownload.visibility = View.VISIBLE
+      val checkEnabled = chrome.updateButton.isEnabled
+      chrome.updateButton.visibility = View.GONE
+      setSecondaryLink(
+        if (layout.secondaryLabel == UpdateCardLayout.SECONDARY_CHECK) {
+          activity.getString(R.string.ds_check_update)
+        } else {
+          null
+        },
+        enabled = checkEnabled,
+      )
+    } else {
+      // 检查当主：检查那枚必须可见，下载那枚让位（分支已把它设成 GONE 或保持 GONE）。
+      chrome.updateButton.visibility = View.VISIBLE
+      chrome.apkDownload.visibility = View.GONE
+      setSecondaryLink(null, enabled = false)
     }
   }
 

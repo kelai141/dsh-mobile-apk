@@ -197,12 +197,12 @@ class OverlayBatch5Test {
   @Test
   fun `两枚圆钮必须补 contentDescription 且视觉尺寸不变`() {
     val panel = codeOnly(source("OverlayPanel.kt"))
-    assertTrue("发送必须有无障碍名", panel.contains("roundButton(\"overlay-send\", R.drawable.dsh_ic_send, 16, 0xFF4176E6.toInt(), \"发送\")"))
-    assertTrue("停止必须有无障碍名", panel.contains("roundButton(\"overlay-stop\", R.drawable.dsh_ic_stop, 12, 0xFFE04848.toInt(), \"停止当前任务\")"))
+    assertTrue("发送必须有无障碍名", panel.contains("roundButton(\"overlay-send\", R.drawable.dsh_ic_send, 16, 0xFF4176E6.toInt(), t(\"发送\", \"Send\"))"))
+    assertTrue("停止必须有无障碍名", panel.contains("roundButton(\"overlay-stop\", R.drawable.dsh_ic_stop, 12, 0xFFE04848.toInt(), t(\"停止当前任务\", \"Stop current task\"))"))
     assertTrue("外层命中区撑到热区下限、内层保持 36dp 观感", panel.contains("FrameLayout.LayoutParams((36 * dp).toInt(), (36 * dp).toInt(), Gravity.CENTER)"))
     val report = codeOnly(source("OverlayReport.kt"))
-    assertTrue("回报栏关闭键必须有无障碍名", report.contains("contentDescription = \"关闭工作汇报\""))
-    assertTrue("手柄行必须有无障碍名", report.contains("contentDescription = \"上下拖动调整汇报栏高度\""))
+    assertTrue("回报栏关闭键必须有无障碍名", report.contains("contentDescription = UiText.t(svc, \"关闭工作汇报\", \"Close work report\")"))
+    assertTrue("手柄行必须有无障碍名", report.contains("contentDescription = UiText.t(svc, \"上下拖动调整汇报栏高度\", \"Drag to resize the report panel\")"))
   }
 
   // ── P5-1：状态行必须有可见入口，长按仍可用 ─────────────────────────────────
@@ -213,7 +213,7 @@ class OverlayBatch5Test {
     assertTrue("入口文案必须在场", panel.contains("\"查看汇报\""))
     assertTrue("入口必须真的开报告栏", panel.contains("setOnClickListener { svc.toggleReportBar() }"))
     assertTrue("入口必须挂在状态行（row1）里", panel.contains("addView(reportEntry"))
-    assertTrue("入口必须有无障碍名", panel.contains("contentDescription = \"查看工作汇报\""))
+    assertTrue("入口必须有无障碍名", panel.contains("t(\"查看工作汇报\", \"View work report\")"))
     assertTrue("换肤时必须同步入口配色", panel.contains("reportEntryView?.setTextColor(c.chevron)"))
   }
 
@@ -235,7 +235,7 @@ class OverlayBatch5Test {
   fun `元信息三行必须排在正文全文之前`() {
     val report = codeOnly(source("OverlayReport.kt"))
     val metaLoop = report.indexOf("for ((i, line) in lines.withIndex())")
-    val bodyBlock = report.indexOf("if (!reportBodyRedundant(entry, full))")
+    val bodyBlock = report.indexOf("if (!reportBodyRedundant(entry, full, svc))")
     assertTrue("元信息循环必须在场", metaLoop > 0)
     assertTrue("正文块必须在场", bodyBlock > 0)
     assertTrue(
@@ -274,7 +274,7 @@ class OverlayBatch5Test {
     val panel = codeOnly(source("OverlayPanel.kt"))
     assertTrue("手势必须真的用上该窗口", panel.contains("tripleTapWindowMs(android.view.ViewConfiguration.getDoubleTapTimeout().toLong())"))
     val svc = codeOnly(source("OverlayService.kt"))
-    assertTrue("跳转失败必须有可见回执（旧实现只写日志）", svc.contains("flashStatus(\"跳转失败，请手动切到 DSH\")"))
+    assertTrue("跳转失败必须有可见回执（旧实现只写日志）", svc.contains("t(\"跳转失败，请手动切到 DSH\", \"Could not switch; open DSH manually\")"))
   }
 
   // ── S2-11 / S2-7：提示语与机器码 ─────────────────────────────────────────

@@ -8,7 +8,8 @@
 // 因此本文件同时验证「测试开关下 env 生效」这条路径。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, symlinkSync, realpathSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, symlinkSync, realpathSync, rmSync, truncateSync } from 'node:fs'
+import { Writable } from 'node:stream'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -148,15 +149,26 @@ async function call(ctx, path, { method = 'POST', headers = {}, body, url = path
   assert.ok(route, 'route must be registered: ' + path)
   const req = fakeReq({ method, headers, body, url })
   const chunks = []
-  const res = {
-    code: 0, body: undefined, headers: {},
-    writeHead(code, h) { this.code = code; this.headers = h ?? {} },
-    write(chunk) { chunks.push(Buffer.from(chunk)); return true },
-    end(b) { this.body = b ?? (chunks.length === 0 ? '' : Buffer.concat(chunks)) },
+  // res 必须是真 Writable：`GET /content` 走 `stream.pipeline`（issue #687），
+  // 手写的普通对象没有 on/destroy，pipeline 会拒绝它 —— 那会把「实现已修」测成红。
+  const res = new Writable({
+    write(chunk, _enc, cb) { chunks.push(Buffer.from(chunk)); cb() },
+  })
+  res.code = 0
+  res.headers = {}
+  res.writeHead = function (code, h) { this.code = code; this.headers = h ?? {} }
+  const baseEnd = res.end.bind(res)
+  res.end = function (b) {
+    if (b !== undefined && b !== null && typeof b !== 'function') {
+      chunks.push(Buffer.from(b))
+      return baseEnd()
+    }
+    return baseEnd(b)
   }
   const done = route.handler(req, res)
   if (body !== undefined) req.emit()
   await done
+  res.body = chunks.length === 0 ? '' : Buffer.concat(chunks)
   return res
 }
 
@@ -407,6 +419,38 @@ test('external file stays opaque received until trusted browser creates its blan
   assert.equal(JSON.parse(complete.body).state, 'draft-ready')
 })
 
+test('#687 外发源超过上限 → 413，且一个正文字节都不写', async () => {
+  const ws = freshWorkspace()
+  const huge = join(ws, 'huge.bin')
+  writeFileSync(huge, '')
+  // 稀疏文件：stat 报 256 MiB + 1 却不真占磁盘，也不进入流式阶段（超限在写状态行前拒绝）。
+  truncateSync(huge, 256 * 1024 * 1024 + 1)
+  const harness = makeCtx(undefined, {
+    workspaces: [],
+    sessionController: {
+      async create() { return { sessionId: 'session-abcdef12-3456' } },
+    },
+  })
+  await boot(harness.ctx)
+  const delivered = await call(harness.ctx, ROUTES.list, { method: 'POST', headers: legit(), body: { path: huge } })
+  assert.equal(delivered.code, 200)
+  const listed = await call(harness.ctx, ROUTES.list, { method: 'GET', headers: legit() })
+  const item = JSON.parse(listed.body).items[0]
+  const claim = await call(harness.ctx, ROUTES.claim, {
+    headers: legit(), body: { entryId: item.entryId, sessionId: 'session-abcdef12-3456' },
+  })
+  assert.equal(claim.code, 200)
+  const ticket = JSON.parse(claim.body).ticket
+  const content = await call(harness.ctx, ROUTES.content, {
+    method: 'GET', headers: legit(), url: ROUTES.content + '?ticket=' + encodeURIComponent(ticket),
+  })
+  assert.equal(content.code, 413)
+  const payload = JSON.parse(content.body)
+  assert.equal(payload.error, 'incoming source too large')
+  assert.equal(payload.limit, 256 * 1024 * 1024)
+  assert.equal(payload.bytes, 256 * 1024 * 1024 + 1)
+})
+
 test('claim rejects a non-durable browser session before deleting queue state', async () => {
   const ws = freshWorkspace()
   const probe = join(ws, 'mismatch.txt')
@@ -551,4 +595,62 @@ test('鉴权纯函数：trusted host 列表与令牌头常量与壳侧契约一�
   )
   assert.equal(authorizeIncomingRoute({ headers: { host: HOST } }, { token: () => undefined }).code, 401)
   assert.equal(authorizeIncomingRoute({ headers: { host: 'evil.example' } }, { token: () => TOKEN }).code, 403)
+})
+
+// ── 2026-10-28 自查（只读审计产出，三处）───────────────────────────────────────
+
+test('自查F1 源已消失时 claim 必须收敛记录（否则每轮重载都白建空会话）', async () => {
+  const ws = freshWorkspace()
+  const incoming = join(ws, 'gone.jpg')
+  writeFileSync(incoming, 'img')
+  const { ctx } = makeCtx()
+  await boot(ctx)
+  const delivered = await call(ctx, ROUTES.list, { method: 'POST', headers: legit(), body: { path: incoming } })
+  assert.equal(delivered.code, 200)
+  const listed = await call(ctx, ROUTES.list, { method: 'GET', headers: legit() })
+  const entry = (JSON.parse(listed.body).items ?? [])[0]
+  assert.ok(entry && entry.entryId, '投递后应能列出条目：' + listed.body)
+  rmSync(incoming, { force: true }) // 模拟「包被清理 / 用户搬走」
+  const claimed = await call(ctx, ROUTES.claim, {
+    method: 'POST',
+    headers: legit(),
+    body: { entryId: entry.entryId, sessionId: 'session-00000000-stub1' },
+  })
+  assert.equal(claimed.code, 410)
+  // 关键断言：记录必须跟着消失。留着它 => 每次 claim 都 410，而浏览器对 claim 失败是静默 return，
+  // 于是每轮重载都先建一张空会话再死在这条 410 上（僵尸草稿）。
+  const after = await call(ctx, ROUTES.list, { method: 'GET', headers: legit() })
+  assert.equal(after.code, 200)
+  const body = JSON.parse(after.body)
+  const items = Array.isArray(body.items) ? body.items : []
+  assert.equal(items.length, 0, '源消失后队列里不得再留着这条记录：' + JSON.stringify(items))
+})
+
+test('自查F2 /clean 的 .sessions 豁免必须按路径前缀，不得只看 basename', async () => {
+  const ws = freshWorkspace()
+  const sessionsDir = join(ws, '.sessions')
+  mkdirSync(sessionsDir, { recursive: true })
+  const record = join(sessionsDir, 'deadbeef.json')
+  writeFileSync(record, '{"session":1}')
+  // 清单里出现 .sessions 下的文件：basename 是 deadbeef.json 而不是 .sessions ⇒ 旧判据会放行。
+  writeFileSync(join(ws, '.tool-temp.ndjson'), record + '\n')
+  const { ctx } = makeCtx()
+  await boot(ctx)
+  const res = await call(ctx, ROUTES.clean, { method: 'POST', headers: legit() })
+  assert.equal(res.code, 200)
+  assert.equal(existsSync(record), true, '宿主会话记录不得被当自有临时项删掉')
+})
+
+test('自查F6 413 必须能真正送达：不得先拆连接再写状态行', () => {
+  const src = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  const lines = src.split('\n')
+  let checked = 0
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!lines[i].includes('res.writeHead(413')) continue
+    checked += 1
+    // 往前看两行：不得出现「先 destroy」
+    const before = lines.slice(Math.max(0, i - 2), i).join('\n')
+    assert.equal(before.includes('req.destroy()'), false, '413 之前不得 req.destroy()（会变成 ECONNRESET）：第 ' + (i + 1) + ' 行')
+  }
+  assert.ok(checked >= 6, '应覆盖到全部 413 分支，实际 ' + checked)
 })

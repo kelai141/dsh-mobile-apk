@@ -17,6 +17,8 @@
 | androidBridge | 用户设置/授权、目录选择、活动配置、窄BrowserHost与虚拟屏控制、通知、自检、console入口；AI能力由插件注册。 |
 | dshBackBridge | setAvailable/getBackAvailable层栈信号；原生返回决策不接受网页任意Intent。 |
 | consoleBridge | 仅本地console页面的输入/尺寸/退出等契约，不复用BrowserHost网页桥。 |
+
+The native console callback `window.__consoleInsets(top, bottom, ime)` uses CSS pixels. `top` and `bottom` are system-bar insets; `ime` is the keyboard overlap still inside the WebView after native resizing, not the raw keyboard height. The page preserves navigation padding and subtracts only the remaining overlap once. Native geometry and page-layout regressions cover resized and unresized views.
 | 壳↔引擎 | 精确受保护Android路由、控制队列、file-incoming与通知$events；本地HTTP/TCP探针NO_PROXY；回包须lossless JSON。 |
 | 插件↔壳 | androidPrivilege与ControlCarrier/ControlPoller；会话权限和native screen范围在执行点复查，不因UI展示值推断授权。 |
 
@@ -32,7 +34,7 @@ Shizuku v4以追加configuration()回读完整app UID/anchor，AIDL旧transactio
 
 ### 2.2 窄browserHostCommand与Session/tab归属
 
-browserHostCommand(payloadJson)由MainActivity转交Activity拥有的BrowserHost.command；payload须受长度/词汇/session/uiTabId/tabId约束，action仅status/tabs/open/select/close/back/forward/reload。它不是任意JS、shell或controlExec通道。status/tabs不创建renderer、不抢UI舞台，返回available/profileAvailable/profileReason/session/ownerSessionId/tabs/activeTabId/tabId及每页真实导航状态。
+browserHostCommand(payloadJson)由MainActivity转交Activity拥有的BrowserHost.command；payload须受长度/词汇/session/uiTabId/tabId约束，action仅status/tabs/open/select/close/back/forward/reload。它不是任意JS、shell或controlExec通道。status/tabs不创建renderer、不抢UI舞台，返回available/browserAvailable/isolationAvailable/profileAvailable/profileReason/session/ownerSessionId/tabs/activeTabId/tabId及每页真实导航状态。available/browserAvailable只表示浏览器本体可用；isolationAvailable=false、profileAvailable=false（如browser-profile-not-ready）只是隔离降级提示，原因码留在profileReason，不得把浏览器报成不可用；只有browser-profile-unsupported且无任何可建表面，或provider/renderer故障才进reason错误面。
 
 模型controlOp捕获自己的Session/tab（包括modelTabId）供后续main-thread片段/异步回调，校验同一workspace/tab/view/generation，不依赖当时UI焦点。UI bounds/viewport/identity必须指定自己的Session/nativeTab/GUI occurrence，暂切上下文后恢复前台；陈旧hide/HMR detach不能盖掉邻页。identity、viewport、error、refs均per-tab。主状态旧入口为兼容面，不是0.14.3多Session查询真源。
 
@@ -47,6 +49,18 @@ exportConfig()/importConfig()/settingsPath()/exportSettingsDocument()现由MainA
 exportConfig返回实际path与可能含provider密钥的共享目录警告hint；importConfig只读exports/config下匹配当前格式的文件、先保存.import-backup再原子替换。旧共享settings.yaml不覆盖已迁移patch；settingsDocumentExport是用户显式公共副本动作，不把private配置目录授予外部app。DirectoryPickerController仍在同名源码文件中承载SAF，未退役。
 
 页面恢复由ForegroundPageRecoveryPolicy限定前台generation和一次quiet retry/recreate，不把destroyed WebView重新reload；Activity recreation重绑所有holder且保留userClosed/userShutdown，不重启共享引擎。新增fixture仅登记、未执行；详见 [外部测试需求](<docs/0.14.3-TEST-REQUIREMENTS.md>)。
+
+### 2.4 tier-2 浏览器兼容档的渲染器契约（IBrowserRenderer，issue #540）
+
+tier-2（`isolationTier=process-suffix`）把浏览器视图放在 `:browser` 进程，主进程经
+`app/src/main/aidl/com/dsharnessmobile/shell/IBrowserRenderer.aidl` 驱动它。这份 AIDL 不属
+`androidBridge`/`consoleBridge` 门禁面，但它是桥协议，签名与语义变更同样受本档约束。
+
+| 方法 | 签名 | 语义边界 |
+|---|---|---|
+| `forwardMotion` | **`oneway void`**（`tabId, action, downTime, eventTime, x, y, pressure, size, metaState`） | 每帧触摸路径。oneway 的代价是**返回值语义丢失**：主进程触摸回调恒按「已消费」处理（一次 MOVE 回 false 会被系统当成手势结束，后续 MOVE 直接不再派发），投递结果不计入任何 UI 线程。合帧在渲染侧 `MotionCoalescer`：DOWN/UP/CANCEL 保序保留、连续 MOVE 只留最后一条、队列上限 64 且溢出优先丢最老的 MOVE。改前是同步 `boolean` + 渲染侧 `FutureTask.get(10s)`，一次滑动 20 余次同步 Binder 往返，渲染主线程忙时把主进程主线程一起挂住（issue #540）。 |
+| `dispatchTap` / `dispatchKey` | 保持 `boolean`（同步） | 一次性工具调用，返回值要如实报给模型，且不在每帧触摸路径上，因此不走 oneway。 |
+| 其余（`start`/`ensureTab`/`loadUrl`/`relayout`/`evaluateJs`/`capture`/`tabState`/`tabIds`/`flushCookies`/`clearBrowsingData`） | 同步回执 | 调用方需要「做了没有」的真实结算，选型理由同上。 |
 
 ## 3. 历史增量（不作为当前构建或验收证据）
 
@@ -180,7 +194,7 @@ exportConfig返回实际path与可能含provider密钥的共享目录警告hint�
 | 方向 | 方法 | 位置 | 说明 |
 |---|---|---|---|
 | 页面 → 壳 | `openPathChooser(path, mode)` | AndroidBridge.kt（新增）→ MainActivity `onOpenPathChooser` → PathOpen.kt `openChooser` | 系统「打开方式」选择器；返回 JSON `{ok, reason?}`（not-exists / not-allowed / no-handler / uri-failed / 异常摘要）。mode=`folder` 视为目录 |
-| 同上（允许面） | — | PathOpen.`isChooserAllowed`（0.13.7 追加） | 允许面 = FileIncoming 的 canonical 白名单（`files/home/.dsh/workspaces`、`files/home/tmp`、`files/usr/bin`、外部存储 `Documents/dshdata/`）**加外部存储根**——上游右栏 Files 标签能浏览整台设备，用户在那里点开的文件/目录必须能交给 MT 管理器或系统文件管理。`file_paths.xml` 相应新增 `<external-path name="external_shared" path="." />`。**引擎/插件驱动**的「文件提及 → 外部阅读器」（`openNativePath` → `FileIncoming.openWithExternalReader`）仍只走严格白名单，不因这条放宽；应用私有区其余部分（含 `.credentials.yaml`）永不进选择器 |
+| 同上（允许面） | — | PathOpen.`isChooserAllowed`（0.13.7 追加；issue #1571 收窄） | 允许面 = FileIncoming 的 canonical 白名单（`files/home/.dsh/workspaces`、`files/home/tmp`、`files/usr/bin`、外部存储 `Documents/dshdata/`）**并上用户经系统目录选择器亲手授予的目录**（`persistedUriPermissions`，即外部工作区那一条）。0.13.7 曾把**整个外部存储根**并进允许面（`file_paths.xml` 的 `<external-path name="external_shared" path="." />`），而三个 `@JavascriptInterface`（`openFileExternal` / `shareFile` / `openPathChooser`）的门禁只要求顶层帧是引擎 origin，`BridgeOriginGuard` 又为同源 HTML artifact 预览帧放行——一段 artifact HTML 就能把 `/storage/emulated/0/Android/data/<别的应用>/files/token.db` 交给系统分享面板或外部阅读器。#1571 起该映射与运行时那一支一并删除，判据收在 `ChooserAllowlist`（纯函数，可单测）。**引擎/插件驱动**的「文件提及 → 外部阅读器」（`openNativePath` → `FileIncoming.openWithExternalReader`）仍只走严格白名单，不因这条放宽；应用私有区其余部分（含 `.credentials.yaml`）永不进选择器 |
 | 页面 → 壳 | ~~`downloadDebugLogs()`~~ | 已删除（AndroidBridge/MainActivity/DebugLogExporter.kt） | 「导出调试日志」整链退役；日志仍按天落盘（设置页开关不变） |
 | 页面 → 壳 | ~~`pickImage(callbackId)`~~ | 已删除（AndroidBridge/MainActivity/ConfigTransfer 图片桥） | 上游 0.1.5 自带附件入口（回形针 → 系统文件选择器 → 官方上传接口）替代 |
 | 页面 → 壳 | ~~`pickFilePath(callbackId)`~~ | 已删除（AndroidBridge / MainActivity / ConfigTransfer 的 SAF 文档选择链 + 页面 `onFilePicked`） | 0.13.7fx-1 退役：`@` 文件引用回到上游原生菜单（`ui-input-trigger` + `ui-reference`，候选限定在会话工作区内），自建 `@路径` 桥不再需要 |
@@ -201,7 +215,7 @@ JS interface count is checked from source by `scripts/check-bridge-symmetry.mjs`
 | 方向 | 方法/通道 | 位置 | 说明 |
 |---|---|---|---|
 | 页面 → 壳 | `getScreenScope()` / `setScreenScope(scope)` | AndroidBridge → MainActivity → `ScreenScopePrefs` | 用户设置唯一写面；wire 值仅 `virtual-only`、`real-only`、`all`，未知值回落 `virtual-only`。模型工具没有 setter。设置页落在开发者选项「屏幕与 Shizuku 控制」。 |
-| 页面 → 壳 | `browserHostStatus/show/hide/reload/bounds/viewport/close/identity` | AndroidBridge → MainActivity → `BrowserHost` | Files 右栏的可信页面把 CSS stage bounds 与视口预设传给壳；第二 WebView 只覆盖该 stage（letterbox rect，不做 CSS 缩放），不挂 JavaScript bridge。`browserHostBounds` 可见挂载1000ms续租、4000ms过期隐藏；hidden/detach停止续租，普通几何消息仍去重。`browserHostStatus` 自 0.14.10 起带 `isolationTier`（`profile-api` = WebView 114+ 会话级隔离 / `process-suffix` = 旧 WebView 走 `:browser` 独立进程 + 数据目录后缀共享档案 / `unavailable`），`available` 与 `profileIsolation/profileName` 均按档位判定；tier-2 下会话共享一个 `dsh-browser-v1` 档案（与引擎 cookie/存储隔离），页签与控制语义不变。 |
+| 页面 → 壳 | `browserHostStatus/show/hide/reload/bounds/viewport/close/identity` | AndroidBridge → MainActivity → `BrowserHost` | Files 右栏的可信页面把 CSS stage bounds 与视口预设传给壳；第二 WebView 只覆盖该 stage（letterbox rect，不做 CSS 缩放），不挂 JavaScript bridge。`browserHostBounds` 可见挂载1000ms续租、4000ms过期隐藏；hidden/detach停止续租，普通几何消息仍去重。`browserHostStatus` 自 0.14.10 起带 `isolationTier`（`profile-api` = WebView 114+ 会话级隔离 / `process-suffix` = 旧 WebView 走 `:browser` 独立进程 + 数据目录后缀共享档案 / `unavailable`），`available` 与 `profileIsolation/profileName` 均按档位判定；tier-2 下会话共享一个 `dsh-browser-v1` 档案（与引擎 cookie/存储隔离），页签与控制语义不变。`profileIsolation` 取值域 = `isolated`（tier-1，会话级隔离）/ `process-shared`（tier-2，档案全 app 共享，**会话之间没有隔离**，issue #1575）/ `not-created`（档位可用但尚未 attach）/ `unavailable`；`browser_caps` 用同一判据。 |
 | 页面 → 壳 | `vdisplayStatus/create/destroy/launchSettingsProbe/backProbe/bounds` | AndroidBridge → MainActivity → `VdisplayController`/`VdisplayHost` | 建屏/销毁/`am start --display` 探针/`input -d` 回退探针/viewer stage 几何。`virtual-1` 建成前一律 `screen-not-ready`，绝不映射 display 0。 |
 | 页面 → 壳 | `dshBackBridge.setAvailable/getBackAvailable` | BackGateBridge（独立 @JavascriptInterface 对象） | 注入层回传页内层栈可用性；URL 由 Activity 决策，`getBackAvailable` 为只读事实。 |
 | 引擎 → 壳 | `dsh_screen_scope.xml` 只读 | `androidPrivilege.screenScope/screenAccess` | manage 工具在选 a11y/ADB 前读取 native scope；无障碍执行点仍重复检查，防止直连控制队列绕过。 |

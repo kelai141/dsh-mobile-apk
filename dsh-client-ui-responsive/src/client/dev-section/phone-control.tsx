@@ -19,9 +19,10 @@
  *  - **授权只能由用户在 Shizuku 内完成**（被提权方不得自改授权），壳侧只负责把人送到界面；
  *    回到本页每 2 秒轮询一次状态，授权完成会自动收敛，不需要用户手动点刷新。
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useShellState } from '../mobile/use-shell-state.ts'
 import { describeCallReason } from '../user-copy.ts'
+import { Button, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
 import { tr } from '../i18n.ts'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -462,6 +463,49 @@ export function rootAccessStateLabel(status: RootAccessStatus): string {
   }
 }
 
+/** issue #1377：等待授权**必须有上界**；超时即写终态，而不是无限停在「正在检测」。 */
+export const ROOT_GRANT_PENDING_TIMEOUT_MS = 30_000
+
+/**
+ * issue #1377：root 授权等待的**终态收敛**（纯函数，便于逐态钉住）。
+ *
+ * 旧实现只 `setPendingEnable(false)` 就 return，文案停在「正在检测 root 授权」——用户分不清
+ * 「还在等」与「已被拒」，于是反复点开关。三种终态必须**可辨**，因为下一步动作不同：
+ *
+ * | 状态 | 可重试 | 原因 |
+ * | --- | --- | --- |
+ * | `denied` | 是 | 用户在管理器里点了拒绝，改过来就能过 |
+ * | `timeout` | 是 | 等太久，重来一次即可 |
+ * | `no-su` | **否** | 本机没有 su：这不是权限问题，重试永远不会成功 |
+ *
+ * @param state 壳侧 `RootAccess.state`。
+ * @returns 终态信息；非终态（granted / requesting / unknown）返回 null。
+ */
+export function rootGrantTerminal(state: string): { code: string; text: string; retryable: boolean } | null {
+  if (state === 'denied') {
+    return {
+      code: 'root-denied',
+      retryable: true,
+      text: tr('已拒绝 root 授权：可在系统的 Root 管理器里改成「允许」，然后重新点开关。', 'Root access was denied. Allow it in your root manager, then toggle again.'),
+    }
+  }
+  if (state === 'timeout') {
+    return {
+      code: 'root-grant-timeout',
+      retryable: true,
+      text: tr('等待授权超时：可以再点一次开关重试。', 'Timed out waiting for the grant; toggle again to retry.'),
+    }
+  }
+  if (state === 'no-su') {
+    return {
+      code: 'root-no-su',
+      retryable: false,
+      text: tr('本机没有 su：这不是权限问题，重试也不会成功。需要换一台已 root 的设备，或先刷入 root。', 'No su on this device: this is not a permission problem, so retrying will not help. Use a rooted device or flash root first.'),
+    }
+  }
+  return null
+}
+
 /** 请求按钮可否点：有 su 且没有请求在飞。 */
 export function canRequestRoot(status: RootAccessStatus): boolean {
   return status.readable && status.suExists && !status.requesting
@@ -747,6 +791,8 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
 
   const [repairReply, setRepairReply] = useState<RootOwnershipStatus | undefined>()
   const [repairFailure, setRepairFailure] = useState<string | undefined>()
+  /** 发起修复时的属主维护基线（issue #1376/#1518）：只在状态**可读**时记，不可读记 null（没有可比对象）。 */
+  const repairBaselineRef = useRef<{ startedAt: number; completedAt: number } | null>(null)
   const polledRepair = rootGrant.ownership ?? OWNERSHIP_UNREADABLE
   const repairState = polledRepair.readable && polledRepair.startedAt >= (repairReply?.startedAt ?? 0)
     ? polledRepair : repairReply ?? polledRepair
@@ -754,6 +800,12 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
 
   /** Native request is asynchronous and single-flight; only later native result counts as completed. */
   const repairOwnership = useCallback(() => {
+    // 点击即记基线：此后只认「越过基线」。没有比较对象时，只看「现在是不是 running/completed」
+    // 会把**上一次**的成功记录当成这次的自愈证据。
+    // 基线取**已渲染状态**（repairState，含上一次点击回执）而不是 polledRepair：界面渲染的是
+    // repairState，判据与渲染必须同源，否则「轮询不可读、回执已推进」时两边各说各话（#1519）。
+    // 不可读时记 null：记成 {0,0} 会让任意一条历史成功记录都算越过基线（#1518）。
+    repairBaselineRef.current = repairState.readable ? { startedAt: repairState.startedAt, completedAt: repairState.completedAt } : null
     let raw: string | undefined
     try { raw = window.androidBridge?.repairRootOwnership?.() } catch { raw = undefined }
     const parsed = parseRootReply(raw)
@@ -767,7 +819,30 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
       setRepairFailure('启动文件属主维护失败：' + describeCallReason(typeof parsed?.reason === 'string' ? parsed.reason : undefined))
     }
     refreshRootGrant()
-  }, [refreshRootGrant])
+  }, [refreshRootGrant, repairState])
+
+  // issue #1376：红字不可自愈——点「修复文件属主」失败后，后续 2s 轮询即使把 ownership 刷成
+  // running / completed，界面仍停在「启动文件属主维护失败」。这里在轮询看到推进时清掉失败态，
+  // 让 describeOwnershipRepair 重新接管文案（成功/进行中/结果不可读各自有话说）。
+  useEffect(() => {
+    if (repairFailure === undefined) return
+    // 判据是「**越过基线**」，不是「现在看起来在跑/已完成」：设备上以前成功修过一次时，
+    // 轮询里永远有一条旧的 completed 记录；只按形态判断会把刚出现的红字在下一个 tick 立刻
+    // 抹掉——失败**根本不会显示**（同 startedAt 更不该清）。
+    // 比较对象是 repairState（与渲染同源），不是 polledRepair：轮询不可读时 polledRepair 恒为
+    // OWNERSHIP_UNREADABLE，这里会直接放弃，而界面早已由点击回执推进到「进行中/完成」——
+    // 红字与正文自相矛盾（#1519）。
+    const base = repairBaselineRef.current
+    if (base === null) {
+      // 点击时状态不可读 ⇒ 没有可比基线。此时只认**活证据**（running）：历史 completed 记录的
+      // startedAt 恒大于 0，用它判自愈等于让任意一次旧成功清掉本次失败（#1518）。
+      if (repairState.readable && repairState.running) setRepairFailure(undefined)
+      return
+    }
+    const advanced = repairState.startedAt > base.startedAt
+      || (repairState.completedAt > base.completedAt && repairState.result !== undefined)
+    if (advanced) setRepairFailure(undefined)
+  }, [repairState, repairFailure])
 
   /**
    * 自动续开（2026-09-30 主人定例的体验闭环）：用户开开关 → 壳侧因「root 未授权」拦下并
@@ -776,8 +851,17 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
    */
   useEffect(() => {
     if (!pendingEnable) return
-    if (!rootGrant.consentValid || ['denied', 'timeout', 'no-su'].includes(rootAccess.state)) {
+    if (!rootGrant.consentValid) {
       setPendingEnable(false)
+      return
+    }
+    // issue #1377：三态收敛时**必须把终态写回文案**。旧实现只关掉 pending 就 return，
+    // 界面仍停在「正在检测 root 授权」——分不清「还在等」与「已被拒」，用户会反复点开关。
+    const terminal = rootGrantTerminal(rootAccess.state)
+    if (terminal !== null) {
+      setPendingEnable(false)
+      setRootOk(false)
+      setRootMsg(terminal.text)
       return
     }
     if (rootGrant.granted) {
@@ -789,6 +873,23 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
       toggleRootGrant(true)
     }
   }, [pendingEnable, rootGrant.granted, rootGrant.consentValid, rootAccess.granted, rootAccess.state, toggleRootGrant])
+
+  /**
+   * issue #1377：等待授权**必须有上界**。旧实现只等壳侧状态收敛；壳侧不收敛（管理器无响应、
+   * 弹窗被系统吞掉）时界面会永久停在「正在检测」。
+   *
+   * 超时写的是**终态**（`timeout` 语义的文案），不是回到「未授权」——回到未授权等于什么都没发生，
+   * 用户又得猜。文案里明写「可以再点一次重试」，所以它是可重试终态而不是死路。
+   */
+  useEffect(() => {
+    if (!pendingEnable) return undefined
+    const timer = window.setTimeout(() => {
+      setPendingEnable(false)
+      setRootOk(false)
+      setRootMsg(rootGrantTerminal('timeout')?.text ?? null)
+    }, ROOT_GRANT_PENDING_TIMEOUT_MS)
+    return () => window.clearTimeout(timer)
+  }, [pendingEnable])
 
   const toggleRootConsent = useCallback((next: boolean) => {
     runRootAction(
@@ -850,6 +951,7 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
   return (
     <section
       className="dsh-screen-control-card"
+      data-plugin="dev-phone-control"
       aria-labelledby="dsh-phone-control-title"
       {...(vdisplay.displayId === undefined ? {} : { 'data-display-id': String(vdisplay.displayId) })}
     >
@@ -964,19 +1066,52 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
             <p className="dsh-dev-hint">{tr('可用通道：', 'Channel: ')}{rootGrant.channelRoot ? 'Shizuku root' : tr('应用 su root', 'app su root')}{tr('。应用获得授权不等于已允许 AI 使用。', '. An app grant does not by itself allow the model.')}</p>
           )}
           <button type="button" className="dsh-dev-link" onClick={openRootDisclaimer}>{tr('阅读《AI root 权限免责声明》', 'Read the root access disclaimer')}</button>
-          <label className="dsh-screen-scope-row dsh-root-toggle-row">
-            <span><strong>{tr('已阅读免责声明', 'Disclaimer read')}</strong><small>{tr('理解 root 操作可能修改或删除系统与个人数据，并承担相应风险。应用升级不需重新确认（免责声明内容更新时才需）；撤销同意会同时关闭 AI 开关。', 'Root operations can change or delete system and personal data, and you accept that risk. App updates keep this consent; revoking it also turns model access off.')}</small></span>
-            <input type="checkbox" aria-label={tr('已阅读免责声明', 'Disclaimer read')} checked={rootGrant.consentValid}
-              disabled={!rootGrant.readable} onChange={(event) => toggleRootConsent(event.target.checked)} />
-          </label>
-          <label className="dsh-screen-scope-row dsh-root-toggle-row">
-            <span><strong>{tr('授权 AI 使用 root', 'Allow model root access')}</strong><small>{rootGrant.honesty || tr('这是策略与知情同意开关，不是技术沙箱。关闭后 AI 的 root 执行路径会被拒绝。', 'This is a policy and consent switch, not a sandbox. When off, model root execution is refused.')}</small></span>
-            <input type="checkbox" role="switch" aria-label={tr('授权 AI 使用 root', 'Allow model root access')} checked={rootGrant.granted}
-              disabled={!rootGrant.readable || (!rootGrant.granted && (!canToggleRootGrant(rootGrant) || !rootGrant.consentValid))}
-              onChange={(event) => toggleRootGrant(event.target.checked)} />
-          </label>
+          <div className="dsh-gs-row">
+            <div className="dsh-gs-text">
+              <div className="dsh-gs-title">{tr('已阅读免责声明', 'Disclaimer read')}</div>
+              <div className="dsh-gs-desc">
+                {tr('理解 root 操作可能修改或删除系统与个人数据，并承担相应风险。应用升级不需重新确认（免责声明内容更新时才需）；撤销同意会同时关闭 AI 开关。', 'Root operations can change or delete system and personal data, and you accept that risk. App updates keep this consent; revoking it also turns model access off.')}
+              </div>
+            </div>
+            <div className="dsh-gs-control">
+              <Switch
+                checked={rootGrant.consentValid}
+                disabled={!rootGrant.readable}
+                onChange={(next) => toggleRootConsent(next)}
+                label={tr('已阅读免责声明', 'Disclaimer read')}
+              />
+            </div>
+          </div>
+          <div className="dsh-gs-row">
+            <div className="dsh-gs-text">
+              <div className="dsh-gs-title">{tr('授权 AI 使用 root', 'Allow model root access')}</div>
+              <div className="dsh-gs-desc">
+                {rootGrant.honesty || tr('这是策略与知情同意开关，不是技术沙箱。关闭后 AI 的 root 执行路径会被拒绝。', 'This is a policy and consent switch, not a sandbox. When off, model root execution is refused.')}
+              </div>
+            </div>
+            <div className="dsh-gs-control">
+              <Switch
+                checked={rootGrant.granted}
+                // issue #1377：no-su 时开关必须置灰——重试永远不会成功。置灰的原因由下方
+                // data-code="root-no-su" 那条明文解释（灰开关不解释 = 用户以为坏了）。
+                disabled={!rootGrant.readable || rootAccess.state === 'no-su' || (!rootGrant.granted && (!canToggleRootGrant(rootGrant) || !rootGrant.consentValid))}
+                onChange={(next) => toggleRootGrant(next)}
+                label={tr('授权 AI 使用 root', 'Allow model root access')}
+              />
+            </div>
+          </div>
           {rootGrant.readable && canToggleRootGrant(rootGrant) && !rootGrant.consentValid ? (
             <p className="dsh-dev-hint">{tr('请先阅读并确认免责声明，才能开启 AI root 权限。', 'Read and accept the disclaimer before turning on model root access.')}</p>
+          ) : null}
+          {/*
+            issue #1377：开关因「本机没有 su」而不可用时，**必须解释为什么**。
+            用户看到灰开关的第一反应是「是不是坏了」，只写「不可用」等于把原因藏起来。
+            这条与上面的终态文案分开：后者是「一次操作的结果」，这条是「一直以来的前提」。
+          */}
+          {rootAccess.state === 'no-su' ? (
+            <p className="dsh-dev-hint" data-code="root-no-su">
+              {rootGrantTerminal('no-su')?.text}
+            </p>
           ) : null}
           {rootMsg === null ? null : (
             <p role="status" aria-live="polite" className={rootOk === true ? 'dsh-dev-hint' : 'dsh-dev-error'}>{rootMsg}</p>
@@ -1021,20 +1156,23 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
         </select>
       </label>
 
-      <label className="dsh-screen-scope-row">
-        <span>
-          <strong>{tr('虚拟屏浮窗（退后台自动显示）', 'Virtual screen window (shown in the background)')}</strong>
+      <div className="dsh-gs-row">
+        <div className="dsh-gs-text">
+          <div className="dsh-gs-title">{tr('虚拟屏浮窗（退后台自动显示）', 'Virtual screen window (shown in the background)')}</div>
           {/* P5-6：与开发者选项里的「悬浮球」去混淆。两者都叫「浮」，但一个是**虚拟屏只读画面**，
               一个是**任务面板入口**——旧文案各说各的，用户在两页之间对不上号。 */}
-          <small>{tr('只读浮窗：退后台时显示虚拟屏画面，前台只在侧栏可见。不是开发者选项里的「悬浮球」（那个是任务面板入口）。', 'Read-only window: it shows the virtual screen in the background and only in the sidebar in front. It is not the floating ball in developer options.')}</small>
-        </span>
-        <input
-          aria-label={tr('虚拟屏浮窗（退后台自动显示）', 'Virtual screen window')}
-          type="checkbox"
-          checked={floatOn}
-          onChange={(event) => setFloat(event.target.checked)}
-        />
-      </label>
+          <div className="dsh-gs-desc">
+            {tr('只读浮窗：退后台时显示虚拟屏画面，前台只在侧栏可见。不是开发者选项里的「悬浮球」（那个是任务面板入口）。', 'Read-only window: it shows the virtual screen in the background and only in the sidebar in front. It is not the floating ball in developer options.')}
+          </div>
+        </div>
+        <div className="dsh-gs-control">
+          <Switch
+            checked={floatOn}
+            onChange={(next) => setFloat(next)}
+            label={tr('虚拟屏浮窗（退后台自动显示）', 'Virtual screen window')}
+          />
+        </div>
+      </div>
 
       <div className="dsh-screen-control-detail">
         <strong>{tr('无障碍通道', 'Accessibility channel')}</strong>

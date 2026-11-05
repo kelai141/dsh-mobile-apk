@@ -96,15 +96,126 @@ export interface DisplayOption {
   flag: string
   /** 原始十进制串（未数值化）。 */
   value: string
+  /** 该选项在文本里的起始下标（用于「只认命令词之前」的家族，见 `input`）。 */
+  index: number
 }
 
-/** 扫描命令里出现的全部目标屏参数（含三种拼写，值原样字符串）。 */
+/**
+ * 扫描命令里出现的全部目标屏参数（含三种拼写，值原样字符串）。
+ *
+ * 短选项 `-d` 与长选项的**取值语法不同**，不能共用一个正则：
+ *   - `-d` 是 getopt 短选项 ⇒ `-d7`（粘连）与 `-d 7`（空格）合法，**`-d=7` 不合法**。
+ *     AOSP 用 `atoi(optarg)`，`atoi("=7") == 0` ⇒ 实际读/操作的是 display **0**（真实屏）。
+ *     旧实现用 `[ \t=]+` 让 `-d=7` 吃到了 `7`，于是拿它当"已注册虚拟屏 7"的凭据放行
+ *     （2026-10-28 自查，安全侧漏拦）；同时 `-d7` 因为缺分隔符反而认不出来（误拦）。
+ *   - 长选项 `--display` / `--display-id` 才接受 `=`。
+ */
+/**
+ * 「形似 display 选项但取值不是纯数字」的形态（`-d=7`、`-dx`）。
+ *
+ * 为什么要单独判：`-d=7` 的真实值是 `=7`（`atoi` 后为 0），所以它**不能**被当成"已认证 7"；
+ * 但也**不能**被当成"没有 display 选项"就放行 —— 它在不同工具下可能落到默认屏 0（真实屏）。
+ * 两侧都必须 fail-closed：段里一旦出现这种形态，直接拒。
+ */
+const MALFORMED_DISPLAY_OPTION = /(?:^|[ \t])-d(?:[ \t]*=[ \t]*\S|(?![0-9\s])\S)/
+
+/**
+ * 词内引号（命令名被引号拆分）：`scr''eencap` / `scr"e"encap` 在 shell 里都等价于 `screencap`，
+ * 但 `stripQuotedText` 会把引号内容抹掉（空引号对什么都不留）⇒ 命令词面里看不到 `screencap`
+ * ⇒ 一路放行。真机实测（2026-10-28，小米 14 Pro / SDK 37）：
+ *   `scr''eencap -p /sdcard/t.png` ⇒ RC=0，出图 2857682 B；正常 `screencap` 2858029 B —— 等价。
+ * 判据只看**进入引号**那一刻：正常 shell 用法里引号总在词边界（`echo "a b"`），出现在词内部
+ * 就意味着这个 token 被拆开拼接，命令词面已不可信 ⇒ fail-closed。
+ * 必须写成状态机而不是单正则：闭合引号同样「紧邻非空白」（`sh -c "…200"` 的收尾引号），
+ * 单正则会把这类正常写法一起误拦（实测误拦 35/96 条 fixture）。
+ * `$'…'`（ANSI-C）与 `$"…"`（本地化）只在 `$` 处于**词首**时属正常语法；`$` 前面还有普通字符
+ * 则是词内拼接（`s$'cre'encap` 展开为 `screencap`，真机实测可执行）。
+ */
+function hasGluedQuote(text: string): boolean {
+  let quote = ''
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]
+    if (quote === '') {
+      if (ch !== '"' && ch !== "'") continue
+      const prev = i > 0 ? text[i - 1] : ''
+      const anchor = prev === '$' ? (i > 1 ? text[i - 2] : '') : prev
+      if (anchor !== '' && !/[\s;&|()<>]/.test(anchor)) return true
+      quote = ch
+    } else if (ch === quote) {
+      quote = ''
+    }
+  }
+  return false
+}
+
+/**
+ * 反斜杠续行把命令名拆到下一行（`scr\<换行>eencap` 在 shell 里等价于 `screencap`）。
+ * `stripQuotedText` 不动续行 ⇒ 词面看到 `scr` + 换行 + `eencap` ⇒ 匹配不到家族 ⇒ 放行。
+ * 真机实测：`scr\<换行>eencap -p /sdcard/t-c.png` ⇒ RC=0，出图 2862760 B（与 screencap 同字节）。
+ * 判据：续行**两侧都紧邻非空白**才算拼接；`screencap\<换行> -p …` 是正常续行，保持既有判据。
+ */
+const GLUED_LINE_CONTINUATION = /[^\s]\\\r?\n[^\s]/
+
 export function displayOptionsIn(text: string): DisplayOption[] {
   const out: DisplayOption[] = []
-  for (const m of text.matchAll(/(?:^|[ \t])(-d|--display|--display-id)[ \t=]+(\d+)/g)) {
-    out.push({ flag: m[1], value: m[2] })
+  for (const m of text.matchAll(/(?:^|[ \t])-d[ \t]*(\d+)/g)) {
+    out.push({ flag: '-d', value: m[1], index: m.index ?? 0 })
   }
-  return out
+  for (const m of text.matchAll(/(?:^|[ \t])(--display|--display-id)[ \t=]+(\d+)/g)) {
+    out.push({ flag: m[1], value: m[2], index: m.index ?? 0 })
+  }
+  return out.sort((a, b) => a.index - b.index)
+}
+
+/**
+ * 目标屏参数**流式解析**的结果（issue #1184）。
+ *
+ * 为什么需要它（#1060 F1 的修法引入了新绕过）：
+ * `displayOptionsIn` 只记录**值为 `\d+`** 的 `-d`，于是「取值是空词 / 转义空白」的 `-d`
+ * 在结果里**完全不出现**——没有任何判据要求「出现过的每个 `-d` 都必须能被解释」。
+ * 而 screencap / screenrecord 是 getopt 工具，语义是**最后一个 `-d` 生效**：
+ *   screencap -d7 -d "" 0   ⇒ argv ["-d7","-d","","0"] ⇒ 先 7、再 atoi("")=0 ⇒ **display 0**
+ * 前面那个合法的 `-d 7` 于是为一个实际打在真实屏上的命令背书。
+ *
+ * 所以这里按**流式**建模：每遇到一个目标屏参数就更新「当前目标屏」，
+ * **空值不继承上一个值**（它是独立的、无效的一次赋值），最终只看**最后一次**赋值的取值。
+ *
+ * - `none`：窗口内没有出现任何目标屏参数；
+ * - `explicit`：最后一次赋值的取值可解释为十进制数字串（由调用方再与注册表核对）；
+ * - `unresolved`：最后一次赋值的取值**不是**十进制数字串（空词 / 占位词 / 粘连非数字 / 缺值）
+ *   ⇒ 调用方必须 fail-closed（真实作用屏是 0 或不可判，不得沿用更早的那次）。
+ */
+export type DisplayTarget =
+  | { kind: 'none' }
+  | { kind: 'explicit'; token: string; index: number }
+  | { kind: 'unresolved'; token: string; index: number }
+
+export function displayTargetIn(text: string, limit: number = text.length): DisplayTarget {
+  const slice = text.slice(0, Math.max(0, limit))
+  const tokens = slice.split(/[ \t]+/).filter((t) => t.length > 0)
+  let result: DisplayTarget = { kind: 'none' }
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i]
+    const isSeparate = token === '-d' || token === '--display' || token === '--display-id'
+    if (isSeparate) {
+      const value = i + 1 < tokens.length ? tokens[i + 1] : ''
+      result = /^\d+$/.test(value)
+        ? { kind: 'explicit', token: value, index: i }
+        : { kind: 'unresolved', token: value, index: i }
+      i += 1
+      continue
+    }
+    // 粘连形态：`-d7` / `-d=7` / `--display=7` / `--display-id=7`。
+    // 只认「旗标后紧跟数字或 =」以免把 `-debug` 之类误当目标屏参数。
+    const glued = /^(?:--display-id|--display|-d)=(\S*)$/.exec(token) || /^-d(\d+)$/.exec(token)
+    if (glued) {
+      const value = glued[1]
+      result = /^\d+$/.test(value)
+        ? { kind: 'explicit', token: value, index: i }
+        : { kind: 'unresolved', token: value, index: i }
+    }
+  }
+  return result
 }
 
 /**
@@ -197,8 +308,255 @@ function parenEnd(text: string, from: number): number {
   return -1
 }
 
-/** `sh -c '<内层>'` 形式的嵌套执行体（含 `/system/bin/sh`、`busybox sh`、`su` 等包装）。 */
-const SHELL_C_PAYLOAD = /(?:^|[ \t])(?:[^\s]*\/)?(?:sh|bash|mksh|ash|dash|zsh|busybox|toybox|su)[ \t]+(?:-[^\s]+[ \t]+)*-c[ \t]+([\s\S]*)$/
+/**
+ * `sh -c '<内层>'` 形式的嵌套执行体（含 `/system/bin/sh`、`busybox sh`、`su` 等包装）。
+ *
+ * 末段必须是「短选项**簇**且簇尾是 `c`」（`-[a-zA-Z]*c`），不能只认光杆 `-c`：
+ * `sh -lc '…'` / `sh -ec '…'` / `sh -xc '…'` / `su -lc '…'` 的 `c` 都在一个组合簇里，
+ * 光杆 `-c` 匹配不到 ⇒ 载荷不展开 ⇒ 该段无命令词 ⇒ 放行。小米 14 Pro（SDK 37，mksh）实测
+ * 四种簇形态**都会真的执行**引号里的脚本（`bash` 在设备上不存在，但 Linux 侧同样成立）；
+ * `-l -c` 分离写法旧实现本来就能认。
+ *
+ * 前置组还要能跳过**带独立参数的短选项**（`-o` / `+o` 各吃一个词）：
+ * `sh -o errexit -c '…'` 里 `errexit` 既不是 `-` 开头也不在选项簇里，旧前置组会卡在它上面
+ * ⇒ 整条不匹配 ⇒ 载荷不展开 ⇒ 放行。小米 14 Pro（mksh）实测 `sh -o errexit -c 'echo X'` 与
+ * `sh +o errexit -c 'echo X'` **都会真的执行**。`[+-]o` 必须排在 `-[^\s]+` **前面**，否则
+ * `-o` 会被整词分支先吃掉、剩下 `errexit` 无处可去。
+ */
+const SHELL_C_PAYLOAD = /(?:^|[ \t])(?:[^\s]*\/)?(?:sh|bash|mksh|ash|dash|zsh|busybox|toybox|su)[ \t]+(?:[+-]o[ \t]+\S+[ \t]+|-[^\s]+[ \t]+)*-[a-zA-Z]*c[ \t]+([\s\S]*)$/
+
+/**
+ * `eval <payload>`：载荷会被 shell **再解释一遍**（等价于把那段文本当命令粘回来执行）。
+ *
+ * 为什么必须单独列：`eval "screencap -p /sdcard/real.png"` 的引号内容会被 `stripQuotedText`
+ * 抹掉，命令词面里看不到 `screencap` ⇒ 只靠 `sh -c` 那条正则时它**一路放行**（2026-10-28 自查实测）。
+ * 与 `sh -c` 同型处理：拿**原文**载荷、解一层引号、递归扫。前面的分界符覆盖 `;` / `&&` / `||` / 管道。
+ */
+const EVAL_PAYLOAD = /(?:^|[ \t;&|(])eval[ \t]+([\s\S]*)$/
+
+/**
+ * `trap <payload> <signals…>`：第一个参数是**要执行的命令**，退出/收到信号时 shell 会照跑。
+ * 与 `eval` / `sh -c` 并列进"载荷再解释"入口（2026-10-28 自查：`trap 'screencap …' EXIT` 实测可执行且被放行）。
+ */
+const TRAP_PAYLOAD = /(?:^|[ \t;&|(])trap[ \t]+([\s\S]*)$/
+
+/**
+ * 取 shell 文本的**第一个词**（quote-aware，去掉包裹它的引号）。
+ *
+ * 为什么载荷不能再用 `unwrapOneQuote(整个剩余)`：`sh -c 'screencap …' sh` 的剩余串是
+ * `'screencap …' sh`，首尾不同一个引号 ⇒ 旧实现判定"不成对"、整段不展开 ⇒ 载荷里的真实屏命令
+ * 一路放行（2026-10-28 自查，安全侧漏拦）。shell 只把 `-c` 的**第一个词**当脚本，尾随的是 $0/$1。
+ * `trap` 同理（第一个参数是要执行的命令，后面是信号名）。
+ */
+function firstShellWord(text: string): { word: string; rest: string } {
+  let i = 0
+  while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i += 1
+  if (i >= text.length) return { word: '', rest: '' }
+  const quote = text[i]
+  if (quote === '\'' || quote === '"') {
+    let j = i + 1
+    while (j < text.length) {
+      if (quote === '"' && text[j] === '\\') { j += 2; continue }
+      if (text[j] === quote) return { word: text.slice(i + 1, j), rest: text.slice(j + 1) }
+      j += 1
+    }
+    return { word: text.slice(i + 1), rest: '' } // 未闭合：按剩余全部当载荷（fail-closed 方向）
+  }
+  let j = i
+  while (j < text.length && !/[ \t;&|]/.test(text[j])) j += 1
+  return { word: text.slice(i, j), rest: text.slice(j) }
+}
+
+/**
+ * 载荷里第一个**非选项终结符**词：`--` 只是选项终结符，真正的载荷在它后面。
+ *
+ * 缺陷形态（2026-10-28 自查实测，安全侧漏拦）：`trap -- 'screencap -p /sdcard/real.png' EXIT`、
+ * `sh -c -- '…'`、`eval -- '…'` 的 `payload[1]` 以 `--` 开头，旧实现直接把它当载荷 ⇒ 真正的内层
+ * 命令被丢弃 ⇒ 该段既无屏幕命令词、也无目标屏参数 ⇒ `continue` 放行（读真实屏）。
+ * 小米 14 Pro（`/system/bin/sh` = mksh，SDK 37）实测三条**都会真的执行 `--` 后面的命令**；
+ * 本机 dash / bash / busybox sh 同样执行。`--` 被引号包裹时也是终结符
+ * （`trap "--" 'cmd' EXIT` 真机实测执行），故判据用**解引号后**的词是否恰好等于 `--`。
+ */
+function firstPayloadWord(text: string): string {
+  let rest = text
+  for (let guard = 0; guard < 8; guard += 1) {
+    const { word, rest: remainder } = firstShellWord(rest)
+    if (word !== '--') return word
+    rest = remainder
+  }
+  return ''
+}
+
+const INTERPRETER_NAMES = new Set(['sh', 'bash', 'mksh', 'ash', 'dash', 'zsh'])
+const INTERPRETER_WRAPPERS = new Set([
+  'env', 'timeout', 'nohup', 'xargs', 'busybox', 'toybox', 'su', 'command', 'exec',
+  // 调度 / 资源类（真机实测可喂 sh）
+  'nice', 'ionice', 'taskset', 'setsid', 'chrt', 'numactl', 'unshare', 'runcon',
+  // 缓冲 / 计时 / 锁类
+  'stdbuf', 'time', 'flock', 'watch',
+])
+
+/**
+ * 该段的命令词是不是「载荷对判定器不可见」的解释器调用（#509 的放宽版）。
+ *
+ * 只有 `sh -c '<可见载荷>'` 能被展开后判定；其余形态的载荷都来自**运行时**，静态看不到：
+ *   - `sh -s` / `sh -e` / 无参 `sh`（读 stdin）；
+ *   - `sh /tmp/x.sh`、`. /tmp/x.sh`、`source x`（读脚本文件）；
+ *   - 经 `env` / `timeout` / `xargs` / `busybox` 包装的同族形态。
+ * 这些一律 deny-unparsed（fail-closed）。旧实现只有「整段恰好等于解释器名」这一条最窄规则，
+ * 且**只在壳侧**——引擎侧连 `| sh` 都放行（两层漂移，fixture 也没锁住）。
+ */
+export function interpreterPayloadUnparsed(segment: string): boolean {
+  let text = segment.trim()
+  for (let guard = 0; guard < 8; guard += 1) {
+    const { word, rest } = firstShellWord(text)
+    if (word.length === 0) return false
+    const base = word.replace(/^.*\//, '')
+    // 变量赋值前缀、包装器、包装器自己的选项/数字参数都不改变"命令词"。
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) { text = rest.trim(); continue }
+    if (INTERPRETER_WRAPPERS.has(base) || word.startsWith('-') || /^\d+$/.test(word)) {
+      text = rest.trim()
+      continue
+    }
+    if (base === '.' || base === 'source') return true
+    if (INTERPRETER_NAMES.has(base)) return !/(?:^|[ \t])-[^\s]*c[^\s]*(?:[ \t]|$)/.test(rest)
+    return false
+  }
+  return false
+}
+
+/**
+ * 段**命令名位置**上是不是运行时值（`$CMD`、`$(…)`、`` `…` ``）。
+ *
+ * 小米 14 Pro（SDK 37）实测都会真的执行变量/文件里的内容：
+ *   `CMD='echo X'; sh -c "$CMD"` → `X`
+ *   `sh -c "$(cat /data/local/tmp/s.sh)"` → 文件里的命令
+ *   `sh -c "\`cat /data/local/tmp/s.sh\`"` → 同上
+ *   `trap "$(cat …)" EXIT` / `eval "$(cat …)"` → 同上
+ * 与 `sh /x.sh`（脚本文件）同一性质：执行什么静态看不到 ⇒ fail-closed。
+ *
+ * 只看**段首词**：参数位置的替换（`echo "$(date)"`、`x=$(cat f); echo $x`）不改变命令身份，不得误拦。
+ */
+/**
+ * 「当前段已经走到**载荷位置**」的尾巴判据（`sh -c ` / `eval ` / `trap ` 之后）。
+ *
+ * 用来认**不带引号**的运行时载荷：`` sh -c `cat /sdcard/x.sh` `` 的反引号在顶层切段时就被展开，
+ * 段里不再留反引号字符，段级判据看不见它 —— 只能在切段当场看「替换前那段 buf 是否停在载荷位置」。
+ * 带引号的同型形态（`sh -c "$CMD"`）由 `payloadIsRuntimeValue` 覆盖。
+ * `sh -c "a b" $(date)` 这种「载荷已给、替换在下一个参数」的形态**不命中**（脚本静态可见）。
+ */
+const PAYLOAD_SLOT_TAIL = /(?:^|[ \t])(?:-[^\s]*c|eval|trap)[ \t]+$/
+
+function isRuntimeCommandName(segment: string): boolean {
+  const head = firstShellWord(segment.trim()).word
+  // `$'…'` / `$"…"` 是 **ANSI-C 引号**（静态字面量），不是变量引用 —— 不得误拦（S-7c）。
+  if (head.startsWith('$\'') || head.startsWith('$"')) return false
+  return head.startsWith('$') || head.startsWith('`')
+}
+
+/**
+ * `awk` 的 `system(…)` 能执行任意命令，而程序文本通常整段在引号里 —— `stripQuotedText` 之后
+ * 命令词面只剩 `awk`，载荷里的屏幕命令完全不可见。
+ *
+ * 真机实测（2026-10-29，小米 14 Pro / SDK 37 / toybox awk）：
+ *   `awk 'BEGIN{system("screencap -p /sdcard/awk.png")}'`    RC=0，出图 2872362 B
+ * 双引号形态 `awk "BEGIN{system(\"screencap …\")}"` 也 RC=0（2872137 B），它修前是被引号
+ * 状态机在嵌套处判成 unparsed 才偶然拦住的。修前单引号形态判 allow。
+ * 对照必须继续放行：`awk '{print $1}' /sdcard/a.txt`（无 system 调用）。
+ */
+const AWK_EXEC_PAYLOAD =
+  /^[ \t]*(?:[^\s]*\/)?(?:busybox[ \t]+|toybox[ \t]+)?awk\b[^;|&]*\bsystem[ \t]*\(/i
+/** shell glob 元字符是否出现在**引号外**（引号内的 `*`/`?` 不展开，不参与判定）。 */
+function hasUnquotedGlob(text: string): boolean {
+  let quote = ''
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]
+    if (quote === '') {
+      if (ch === '"' || ch === "'") {
+        quote = ch
+        continue
+      }
+      if (ch === '\\') {
+        i += 1
+        continue
+      }
+      if (ch === '*' || ch === '?' || ch === '[') return true
+    } else if (ch === quote) {
+      quote = ''
+    }
+  }
+  return false
+}
+
+/**
+ * 经典贪心 glob 匹配（`*` / `?` / `[abc]` / `[!abc]` 单字符集）。
+ * 与壳侧 `ShellOps.globMatch` 逐分支同构 —— 两侧算法一致比「各自实现、口头等价」容易核对，
+ * 也避开「转成正则再 match」那一步自身的转义判定面（`$` / 反斜杠 / `[` 漏一处就是漏拦或误拦）。
+ * 不支持范围写法（`[a-z]`）：判据只需回答「这个名字能不能拼出已知命令名」，单字符集足够。
+ */
+function globMatch(pattern: string, subject: string): boolean {
+  let pi = 0
+  let si = 0
+  let starPi = -1
+  let starSi = 0
+  while (si < subject.length) {
+    const pc = pi < pattern.length ? pattern[pi] : ''
+    if (pi < pattern.length && (pc === '?' || pc === subject[si])) {
+      pi += 1
+      si += 1
+    } else if (pi < pattern.length && pc === '[') {
+      const close = pattern.indexOf(']', pi + 1)
+      if (close < 0) return false
+      let body = pattern.slice(pi + 1, close)
+      const negate = body.startsWith('!')
+      if (negate) body = body.slice(1)
+      const hit = body.includes(subject[si])
+      if (hit === negate) return false
+      pi = close + 1
+      si += 1
+    } else if (pi < pattern.length && pc === '*') {
+      starPi = pi
+      starSi = si
+      pi += 1
+    } else if (starPi >= 0) {
+      pi = starPi + 1
+      starSi += 1
+      si = starSi
+    } else {
+      return false
+    }
+  }
+  while (pi < pattern.length && pattern[pi] === '*') pi += 1
+  return pi === pattern.length
+}
+
+/**
+ * 命令词用 glob 拼出屏幕命令名（`/system/bin/scr?encap` / `[s]creencap` / `scree*cap`）：
+ * shell 会先展开成 `screencap` 再执行，而词面与任何家族 pattern 都不匹配 ⇒ 一路放行。
+ * 真机实测（2026-10-28，小米 14 Pro / SDK 37 / mksh），均 RC=0 且出图与对照同字节：
+ *   `/system/bin/scr?encap` 2861741 B、`/system/bin/[s]creencap` 2861741 B、
+ *   `/system/bin/scree*cap` 2861649 B、对照 `screencap` 2861649 B。
+ * 只认**引号外**的 glob：`"/system/bin/scr?encap"` 不展开（真机 RC=127），属无害字面量。
+ * 参数位的 glob 不改变命令身份 —— `ls /sdcard/*.png`、`rm /sdcard/x*` 必须继续放行。
+ */
+const SCREEN_EXECUTABLE_NAMES = [
+  'screencap', 'screenrecord', 'input', 'wm', 'uiautomator', 'dumpsys',
+  'sendevent', 'getevent', 'monkey', 'am',
+]
+/** 这些可执行名本身无害，但**子命令位**才决定是否碰真实屏（`cmd win?ow size 900x1600`）。 */
+const SCREEN_SUBCOMMAND_HEADS = [
+  'cmd', 'wm', 'input', 'am', 'dumpsys', 'uiautomator', 'monkey', 'sendevent', 'getevent',
+]
+
+function globExpandsToScreenCommand(segment: string): boolean {
+  if (!hasUnquotedGlob(segment)) return false
+  const head = firstShellWord(segment.trim()).word
+  const base = head.slice(head.lastIndexOf('/') + 1)
+  if (/[*?\[]/.test(base)) {
+    if (SCREEN_EXECUTABLE_NAMES.some((name) => globMatch(base, name))) return true
+  }
+  return SCREEN_SUBCOMMAND_HEADS.includes(base)
+}
 
 /** 去掉一层首尾成对的引号（`sh -c "…"` 的载荷取值）。不成对则原样返回。 */
 function unwrapOneQuote(text: string): string {
@@ -224,37 +582,76 @@ export function splitCommandSegments(command: string): CommandSegments {
   const scan = (text: string, depth: number): void => {
     if (depth > MAX_NESTING) { unparsed = true; return }
     let buf = ''
-    const flush = (): void => { segments.push(buf); buf = '' }
+    // 词首状态（注释判定用，见下方 `#` 分支）。分隔符/空白把它置位，其它字符（含转义对）清除。
+    let atWordStart = true
+    const flush = (): void => { segments.push(buf); buf = ''; atWordStart = true }
     let i = 0
     while (i < text.length) {
       const ch = text[i]
-      if (ch === '\\') { buf += text.slice(i, i + 2); i += 2; continue }
+      if (ch === '\\') { buf += text.slice(i, i + 2); i += 2; atWordStart = false; continue }
       if (ch === "'") {
         const end = text.indexOf("'", i + 1)
         if (end < 0) { unparsed = true; buf += text.slice(i); i = text.length; continue }
-        buf += text.slice(i, end + 1); i = end + 1; continue
+        // issue #1572：引号/替换结束后**词已经开始**（`echo ''#…` 里 `#` 是词内字面量，不是注释起点）。
+        // 这四处 continue 原先都不清 atWordStart，于是 `echo ''#; screencap …` 把后半行当注释吃掉、
+        // 真实屏命令整段不进 segments —— 判据看不见它。
+        buf += text.slice(i, end + 1); i = end + 1; atWordStart = false; continue
       }
       if (ch === '"') {
         let j = i + 1
         while (j < text.length) {
-          if (text[j] === '\\') { j += 2; continue }
-          if (text[j] === '"') break
+          const inner = text[j]
+          if (inner === '\\') { j += 2; continue }
+          if (inner === '"') break
+          // 双引号内的 `$(...)` 与反引号**会执行**（单引号才不执行）：必须按原文递归扫，
+          // 否则 `echo "$(screencap -p /sdcard/real.png)"` 会把真实屏命令当纯文本放行（issue #674）。
+          if (inner === '`') {
+            const end = backtickEnd(text, j + 1)
+            if (end < 0) { unparsed = true; j = text.length; break }
+            scan(text.slice(j + 1, end), depth + 1)
+            j = end + 1
+            continue
+          }
+          if (inner === '$' && text[j + 1] === '(') {
+            const end = parenEnd(text, j + 2)
+            if (end < 0) { unparsed = true; j = text.length; break }
+            scan(text.slice(j + 2, end), depth + 1)
+            j = end + 1
+            continue
+          }
           j += 1
         }
         if (j >= text.length) { unparsed = true; buf += text.slice(i); i = text.length; continue }
-        buf += text.slice(i, j + 1); i = j + 1; continue
+        buf += text.slice(i, j + 1); i = j + 1; atWordStart = false; continue
       }
       if (ch === '`') {
         const end = backtickEnd(text, i + 1)
         if (end < 0) { unparsed = true; buf += text.slice(i); i = text.length; continue }
+        // **命令位置**上的命令替换：替换结果是运行时文本，会被当成命令执行 ⇒ 执行什么静态不可判
+        // （`sh -c "\`cat /sdcard/x.sh\`"` 真机实测执行文件内容）。参数位置的替换不影响命令身份；
+        // 但**载荷位置**上的替换（`` sh -c \`cat f\` ``）等于整段脚本来自运行时，同样 fail-closed。
+        if (buf.trim().length === 0 || PAYLOAD_SLOT_TAIL.test(buf)) unparsed = true
         scan(text.slice(i + 1, end), depth + 1)
-        buf += ' '; i = end + 1; continue
+        // issue #1572：替换结果占据当前词的位置，词已开始（见上方单引号分支注释）。
+        buf += ' '; i = end + 1; atWordStart = false; continue
       }
       if (ch === '$' && text[i + 1] === '(') {
         const end = parenEnd(text, i + 2)
         if (end < 0) { unparsed = true; buf += text.slice(i); i = text.length; continue }
+        // 同上：`sh -c "$(cat /sdcard/x.sh)"` / `sh -c "echo hi; $(cat x.sh)"` 的第二段都是
+        // 「命令名来自运行时」⇒ 与 `sh /x.sh`（脚本文件）同档，fail-closed。
+        if (buf.trim().length === 0 || PAYLOAD_SLOT_TAIL.test(buf)) unparsed = true
         scan(text.slice(i + 2, end), depth + 1)
-        buf += ' '; i = end + 1; continue
+        buf += ' '; i = end + 1; atWordStart = false; continue
+      }
+      // shell 注释：`#` 只有在**词首**才开注释。词首＝未转义、未引用的 ASCII 空白 / `;` / `&` / `|`
+      // 之后（由 atWordStart 显式跟踪）——不能用「buf 末尾是 \s」判定：`echo\ #; screencap …` 里
+      // 那个空格是**转义的**（属于词内容），`#` 因此是 echo 的参数而不是注释，screencap 照跑
+      // （dash 实测：`echo\ #; echo REACHED` 会执行 REACHED）。同理 VT/FF/CR/NBSP 都不是分隔符。
+      if (ch === '#' && atWordStart) {
+        const lineEnd = text.indexOf('\n', i)
+        i = lineEnd < 0 ? text.length : lineEnd
+        continue
       }
       if (ch === ';' || ch === '\n' || ch === '\r') { flush(); i += 1; continue }
       if (ch === '&' || ch === '|') {
@@ -263,6 +660,8 @@ export function splitCommandSegments(command: string): CommandSegments {
         i += text[i + 1] === ch ? 2 : 1
         continue
       }
+      if (ch === ' ' || ch === '\t') atWordStart = true
+      else atWordStart = false
       buf += ch; i += 1
     }
     flush()
@@ -274,9 +673,13 @@ export function splitCommandSegments(command: string): CommandSegments {
   const pending = segments.slice()
   for (let round = 0; pending.length > 0 && round < 16; round += 1) {
     const segment = pending.shift() as string
-    const payload = SHELL_C_PAYLOAD.exec(segment)
+    // `sh -c` 与 `eval` 都是「载荷会被再解释一遍」的入口，两者都要展开（issue #674 同类）。
+    const payload = SHELL_C_PAYLOAD.exec(segment) ?? EVAL_PAYLOAD.exec(segment) ?? TRAP_PAYLOAD.exec(segment)
     if (payload === null) continue
-    const inner = unwrapOneQuote(payload[1])
+    // 取载荷的**第一个词**（不是整段剩余）：`sh -c 'cmd' sh`、`eval 'cmd' foo`、`trap 'cmd' EXIT`
+    // 的尾随 argv 会让「整段首尾成对」判据失效，从而整段不展开（安全侧漏拦）。
+    // `--` 是**选项终结符**，不是载荷：`trap -- 'cmd' EXIT` 真机会执行 cmd（见 `firstPayloadWord`）。
+    const inner = firstPayloadWord(payload[1])
     if (inner.length === 0) continue
     const before = segments.length
     scan(inner, 1)
@@ -286,34 +689,83 @@ export function splitCommandSegments(command: string): CommandSegments {
 }
 
 /**
+ * 引号词 / 转义空白的**占位词**（issue #1060 F1）。
+ *
+ * 只在 [stripQuotedText] 的 `keepQuotedWords` 模式出现：真实 argv 里「引号包住的东西」是**一个词**
+ * （哪怕是空串），这个占位符保住这条事实。取值刻意选 SOH —— 不含数字、不以 `-` 开头、
+ * 不匹配任何命令词家族、也不是 ASCII 空白 ⇒ 既不会被当成 `-d` 的值，也不会让 getopt 边界消失。
+ */
+const QUOTED_WORD_PLACEHOLDER = '\u0001'
+
+/**
  * 把**引号内文本与转义字符**替换成 shell 真正会执行的字面量：
  *   - 引号段整体抹成空白（引号内不是命令词，也不是参数——`echo "screencap"` 不执行它）；
  *   - `\x` 解成 `x`（shell 会消掉反斜杠：`input \-d 0 tap 1 2` 实际执行的就是 `input -d 0 tap 1 2`，
  *     不解转义则这行会从命令词面里溜走）。
+ *
+ * `options.keepQuotedWords`（issue #1060 F1）：非首词的引号段与**转义空白**改留一个占位词
+ * （[QUOTED_WORD_PLACEHOLDER]），不再折叠成一个空格。
+ *
+ * 缺陷形态（`src/screen-scope.ts` 旧实现的 `out += inFirstWord ? … : ' '`）：
+ *   `screencap -d "" 7`   真实 argv `["screencap","-d","","7"]` —— `-d` 的 optarg 是**空串**，
+ *                          AOSP 用 `atoi(optarg)` ⇒ `atoi("")==0` ⇒ 实际作用 **display 0（真实屏）**，
+ *                          `7` 只是输出文件名；
+ *   `screencap -d '' 7`   同上（单引号空串同样只是一个**空 word**）；
+ *   `screencap -d "$X" 7` `-d` 的值是一个变量 ⇒ 展开后是任意串 ⇒ 非数字时 `atoi` 亦为 0；
+ *   `screencap -d \ 7`   转义空格是**词内字符**，不是分隔符 ⇒ `-d` 的值是一个" "串 ⇒ `atoi` 为 0。
+ * 旧实现把这四种折叠成 `screencap -d   7` ⇒ 参数扫描用 `-d[ \t]*(\d+)` 把**下一个词**的 `7`
+ * 当成 `-d` 的值 ⇒ 门禁判「已认证虚拟屏 7」并放行，而命令实际读真实屏。
+ * 占位词让 `-d` 取不到数字值 ⇒ 该家族自证失败 ⇒ `deny-uncertified-target`（fail-closed）。
+ *
+ * 命令词面（家族匹配）**仍用默认模式**：引号内不是命令词，抹成空白才对（`echo "screencap"` 必须放行）。
  */
-export function stripQuotedText(text: string): string {
+export function stripQuotedText(text: string, options: { keepQuotedWords?: boolean } = {}): string {
+  const keepQuotedWords = options.keepQuotedWords === true
   let out = ''
   let i = 0
+  // 只对**段内第一个词**（命令词位置）做 quote removal —— shell 在查找命令前会剥掉那里的引号，
+  // 所以 `"screencap" -p /sdcard/x` 真的会执行 screencap（dash 实测），旧实现把引号段一律抹平
+  // ⇒ 命令词位置上的引号内容也被抹掉 ⇒ 整条判 allow（2026-10-28 自查，安全侧漏拦）。
+  // 反之参数位置的引号必须继续抹掉：`echo "screencap"` 只是打印，抹掉才对
+  // （fixture「双引号内纯文本不得误拦」）。故判据是「第一个词内」，不是「每个词首」。
+  let inFirstWord = true
   while (i < text.length) {
     const ch = text[i]
     if (ch === '\\') {
-      out += i + 1 < text.length ? text[i + 1] : ''
+      const escaped = i + 1 < text.length ? text[i + 1] : ''
+      // 转义空白是**词内字符**（`-d \ 7` 的 `-d` 值是一个空格串），不是分隔符 ⇒ 参数取值面必须留一个词。
+      const wordPlaceholder = keepQuotedWords && !inFirstWord && (escaped === ' ' || escaped === '\t')
+      out += wordPlaceholder ? QUOTED_WORD_PLACEHOLDER : escaped
       i += 2
+      inFirstWord = false
       continue
     }
-    if (ch === "'" || ch === '"') {
-      const quote = ch
-      let j = i + 1
+    // `$'…'` / `$"…"`（ANSI-C 与本地化引号）在词首同样属于命令词：dash/bash 实测 `$'screencap' -p …` 会执行。
+    const ansiC = inFirstWord && ch === '$' && (text[i + 1] === "'" || text[i + 1] === '"')
+    if (ch === "'" || ch === '"' || ansiC) {
+      const quote = ansiC ? text[i + 1] : ch
+      let j = (ansiC ? i + 1 : i) + 1
       while (j < text.length) {
         if (quote === '"' && text[j] === '\\') { j += 2; continue }
         if (text[j] === quote) break
         j += 1
       }
       if (j >= text.length) { out += ' '; i = text.length; continue }
-      out += ' '
+      out += inFirstWord
+        ? text.slice((ansiC ? i + 1 : i) + 1, j)
+        : (keepQuotedWords ? QUOTED_WORD_PLACEHOLDER : ' ')
       i = j + 1
+      inFirstWord = false
       continue
     }
+    if (ch === ' ' || ch === '\t' || ch === ';' || ch === '&' || ch === '|' || ch === '\n' || ch === '\r') {
+      // 第一个词在此结束：之后的引号都是参数，回到「抹掉」语义。
+      inFirstWord = false
+      out += ch
+      i += 1
+      continue
+    }
+    inFirstWord = false
     out += ch
     i += 1
   }
@@ -322,7 +774,9 @@ export function stripQuotedText(text: string): string {
 
 /** 把目标屏参数整体抹成空白（命令词匹配前归一化，使 `input -d 0 tap …` 也进命令词面）。 */
 export function stripDisplayOptions(text: string): string {
-  return text.replace(/(?:^|[ \t])(?:-d|--display|--display-id)[ \t=]+\d+/g, ' ')
+  return text
+    .replace(/(?:^|[ \t])-d[ \t]*\d+/g, ' ')
+    .replace(/(?:^|[ \t])(?:--display|--display-id)[ \t=]+\d+/g, ' ')
 }
 
 // ── 命令词家族：每个家族自带「哪种拼写才算它的目标屏」 ──────────────────────────
@@ -349,26 +803,142 @@ interface ScreenCommandFamily {
    * `dumpsys window`、`monkey -p x 1` 都属这一类：它们读的就是**默认屏**）。
    */
   targetFlags: readonly string[]
+  /**
+   * 「目标屏参数从哪一段起不再有效」的口径（issue #1060 F2）。
+   *   - `getopt`：工具用 getopt 解析短选项，**第一个非选项词**（或 `--`）之后不再解析 ⇒ 之后出现的
+   *     `-d` 只是普通 argv，工具根本没读它 ⇒ 那里的 `-d` 不得当凭据（`screencap` / `screenrecord`）；
+   *   - `command`：工具自带子命令解析器，`-d` 只在**子命令词之前**有效（`input`：`input tap 1 2 -d 7`
+   *     的 `-d 7` 是 tap 的多余 argv，真实 input 仍操作 display 0）；
+   *   - `full`：整段都算 —— 这类自解析器在子命令与位置参数**之后**仍认目标屏参数
+   *     （设备实测 `wm size 900x1600 -d 7`、`cmd window size 900x1600 -d 7`、`wm reset -d 7` 都生效；
+   *     `am start --display 7 -n p/.A` 的 `--display` 也在子命令之后）。
+   */
+  optionWindow: 'getopt' | 'command' | 'full'
 }
 
 const ALL_DISPLAY_FLAGS: readonly string[] = ['-d', '--display', '--display-id']
 
 /** 命令词面（与修复前的大正则逐词一致 + `input keycombination`）。 */
 const SCREEN_COMMAND_FAMILIES: readonly ScreenCommandFamily[] = [
-  { name: 'screencap', pattern: /\bscreencap\b/i, targetFlags: ALL_DISPLAY_FLAGS },
-  { name: 'screenrecord', pattern: /\bscreenrecord\b/i, targetFlags: ALL_DISPLAY_FLAGS },
+  { name: 'screencap', pattern: /\bscreencap\b/i, targetFlags: ALL_DISPLAY_FLAGS, optionWindow: 'getopt' },
+  { name: 'screenrecord', pattern: /\bscreenrecord\b/i, targetFlags: ALL_DISPLAY_FLAGS, optionWindow: 'getopt' },
   {
     name: 'input',
-    pattern: /\binput[ \t]+(?:tap|swipe|roll|draganddrop|motionevent|text|keyevent|keycombination)\b/i,
+    // 正式语法是 `input [<source>] [-d DISPLAY_ID] <command> [<arg>…]`：source 是位置词
+    // （touchscreen/touchpad/…），漏了它整类命令都进不了命令词面（`input touchscreen tap 500 800`
+    // 实测放行）。`press` 是 0.14 起的新命令，同族。
+    //
+    // source 用**通配**而不是列举：2026-10-29 自查发现枚举里少了 `touchpad`
+    // （`input` 裸跑打印的 source 清单里有它，属 InputDevice.SOURCE_TOUCHPAD），于是
+    //   `input touchpad tap 9999 9999`             RC=0（与 `input touchscreen tap` 只差一个 source 词）
+    //   `input touchpad swipe 9999 9999 9999 9999` RC=0
+    //   `input touchpad -d 0 tap 9999 9999`         RC=0
+    // 三条全部通过，而门禁判 allow。非 source 的词（`input bogus tap`）真机本来就报
+    // `Unknown command: bogus` ⇒ 多拦无风险；而新 ROM 新增 source 时通配不会漏
+    // （枚举式判据的失效方向是放行，与 `wm` 那处同源）。
+    pattern:
+      /\binput[ \t]+(?:[a-z][a-z0-9_-]*[ \t]+)?(?:tap|swipe|roll|draganddrop|motionevent|text|keyevent|keycombination|press)\b/i,
     targetFlags: ALL_DISPLAY_FLAGS,
+    optionWindow: 'command',
   },
-  { name: 'wm', pattern: /\bwm[ \t]+(?:size|density|overscan)\b/i, targetFlags: ALL_DISPLAY_FLAGS },
+  // `wm` 是窗口管理器命令面。修前用**子命令白名单**（size|density|overscan|user-rotation|
+  // fixed-to-user-rotation），而 `wm` 实际有 20+ 子命令 ⇒ 白名单之外的一律放行。2026-10-29 自查实测：
+  //   `wm dump-visible-window-views`   RC=0，65704 B 的 ZIP（PK 头），内含
+  //       `com.miui.home/com.miui.home.launcher.Launcher`、
+  //       `LauncherOverlayWindow:com.miui.personalassistant` 等每个窗口的 View 层级
+  //       ⇒ 与 `uiautomator dump` 同级的「读真实屏 UI」；
+  //   `wm dismiss-keyguard`            RC=0（解锁真实屏）；
+  //   `wm reset` / `wm disable-blur`   RC=0（重置 / 改真实屏显示覆盖）。
+  // 改成**反向表**：除 `help` 与 `get-*`（纯查询）之外的每个子命令都进家族 —— 新增子命令默认拒
+  // （fail-closed），不再随 ROM 升版本静默漏拦。`wm -d 47 <cmd>` 真机实测 "Unknown command: -d"
+  // ⇒ `-d` 只跟在子命令之后，不需要穿透前导选项。
+  {
+    name: 'wm',
+    pattern: /\bwm[ \t]+(?!help\b|get-)[a-z][a-z-]*/i,
+    targetFlags: ALL_DISPLAY_FLAGS,
+    optionWindow: 'full',
+  },
+  // 其中三个子命令**不解析 `-d`**：`wm dump-visible-window-views -d 47` 真机仍 dump 出真实屏
+  // 窗口树（65702 B，同一批窗口名）、`wm dismiss-keyguard -d 47` RC=0 照常解锁、
+  // `wm disable-blur` 把 `-d 47` 当 blur 参数（随后 SecurityException 拒绝 —— uid 2000 无写权限）。
+  // 它们无法自证目标屏 ⇒ 必须与 `dumpsys` 同档恒拒，否则 `-d <已注册虚拟屏 token>` 就是通行证。
+  {
+    name: 'wm-no-target',
+    pattern: /\bwm[ \t]+(?:dump-visible-window-views|dismiss-keyguard|disable-blur)\b/i,
+    targetFlags: [],
+    optionWindow: 'full',
+  },
+  // `cmd window <size|density|scaling|user-rotation|dismiss-keyguard>` 是 `wm` 的等价拼写：
+  // 小米 14 Pro 实测 `cmd window size 900x1600` 真的把真实屏改成 `Override size: 900x1600`
+  // （`wm size reset` 才恢复），而修前它不在任何家族里 ⇒ 放行（2026-10-28 自查）。
+  // 它的目标屏参数是**子命令内**的 `[-d DISPLAY_ID]`（实测 `cmd window size 900x1600 -d 7`
+  // 被接受、返回 `Physical size: 0x0`），所以按 ALL_DISPLAY_FLAGS 取凭据。
+  { name: 'cmd-window', pattern: /\bcmd[ \t]+window\b/i, targetFlags: ALL_DISPLAY_FLAGS, optionWindow: 'full' },
+  // `cmd display <set-brightness|set-user-preferred-display-mode|…>` 同样改真实屏（亮度/显示模式），
+  // 但它的目标屏参数是 `--id DISPLAY_ID`，与既有凭据口径（-d/--display/--display-id）不同、
+  // 也不是 `ScreenTarget` 的两种 id 空间之一 ⇒ 无法自证，按 `dumpsys` 同档恒拒。
+  { name: 'cmd-display', pattern: /\bcmd[ \t]+display\b/i, targetFlags: [], optionWindow: 'full' },
   // `uiautomator dump` 没有目标屏参数：dump 的就是**默认屏**的语义树 ⇒ 无法自证，恒拒。
-  { name: 'uiautomator', pattern: /\buiautomator\b/i, targetFlags: [] },
-  { name: 'dumpsys', pattern: /\bdumpsys[ \t]+(?:window|display|input)\b/i, targetFlags: [] },
+  { name: 'uiautomator', pattern: /\buiautomator\b/i, targetFlags: [], optionWindow: 'full' },
+  // `dumpsys` 系列：这些服务名的输出里都带**真实屏**的 UI 结构或几何。
+  //
+  // `activity` 是 2026-10-28 自查补进来的：`dumpsys activity top` 会打出完整的
+  // `View Hierarchy:` 树（DecorView → LinearLayout → FrameLayout → WebView，逐个带 `0,0-1440,3200`
+  // 这类 bounds）以及 `android.widget.TextView{… 42,0-699,103}` 等控件行 —— 与 `uiautomator dump`
+  // 同级的「读真实屏 UI」，而修前它不匹配 `window|display|input` ⇒ 整条放行。
+  // `battery`/`meminfo` 这类与屏无关的服务不受影响（见 fixture 里的对照用例）。
+  //
+  // 2026-10-30 自查（issue #1060 F3，安全侧漏拦）：**服务名永不紧贴 `dumpsys`**。
+  // AOSP `frameworks/base/cmds/dumpsys/dumpsys.cpp` 用 `getopt_long(argc, argv, "+t:l", …)`，
+  // `-t <秒>` 是全局超时旗标、`-l` 只列服务名 ⇒ 服务名总在旗标**之后**：
+  //   ｜ 输入                              ｜ 真实 argv                                ｜ 实际服务 ｜
+  //   ｜ dumpsys -t 10 window              ｜ ["dumpsys","-t","10","window"]            ｜ window    ｜
+  //   ｜ dumpsys -t 10 activity top        ｜ ["dumpsys","-t","10","activity","top"]    ｜ activity  ｜
+  //   ｜ dumpsys\t-t\t10\twindow           ｜ 同上（tab 与空格同为 ASCII 空白）          ｜ window    ｜
+  // 旧 pattern 要求 `window|display|input|activity` **紧跟** `dumpsys` ⇒ 这三条全部 families=[]
+  // ⇒ allow，而它们打出的正是真实屏的 View 层级（与 `dumpsys window` 同字节量级）。
+  //
+  // 修法（fail-closed，不新增放行分支）：命中判据改成「服务名**不能确认安全**就命中」——
+  //   ① `dumpsys` 之后紧跟一个**不以 `-` 开头**、且**不是**敏感服务的词 ⇒ 服务名可确认且安全 ⇒ 不命中；
+  //   ② 其余一律命中：紧跟敏感服务 / 紧跟旗标 / 干脆没有服务名。旗标之后是什么服务**静态不可判**
+  //      （`-t 10` 之后是服务名，可 `--abi arm64` 这类旗标自己带词形参数，任何「跳过旗标取下一个词」
+  //      的推断都会被这种参数骗过去），裸 `dumpsys` 更会 dump **全部**服务（含 window）。
+  {
+    name: 'dumpsys',
+    // issue #1184 F3 残留：服务名是**变量**时不得算「已确认安全」。
+    // 旧启发式只要求「下一个词不以 `-` 开头且不是敏感服务」，于是 `dumpsys $S` / `dumpsys ${S}` /
+    // `dumpsys win$X` 全被当作「服务名已确认且安全」放行——而 `$S` 完全可能是 `window`
+    // （shell 展开后就是 `dumpsys window`，打真实屏 View 层级）。
+    // 判据：可确认安全的服务名必须**不含 `$` 与反引号**（即不含展开/命令替换）。
+    pattern: /\bdumpsys\b(?![ \t]+(?!-)(?!(?:window|display|input|activity)\b)(?!\S*[$`])\S)/i,
+    targetFlags: [],
+    optionWindow: 'full',
+  },
+  // 直接读写 input 设备的命令：`sendevent` 能向 `/dev/input/*` 注入任意事件（含触摸坐标），
+  // `getevent` 能读回用户的触摸/按键事件。两者**都没有目标屏参数** ⇒ 永远自证不了「作用于已注册
+  // 虚拟屏」，与 `uiautomator` 同档（恒拒）。
+  // 小米 14 Pro 实测（2026-10-28 自查）：shell 直写 `/dev/input/eventN` 被拒（Permission denied），
+  // 但设备已 root 时 `su -c 'sendevent /dev/input/event1 0 0 0'` **RC=0**；而 `su -c` 的载荷会被
+  // 本门禁展开重扫，扫到 `sendevent` 却不在任何家族里 ⇒ 整条放行（实测 `allow`）。
+  { name: 'sendevent', pattern: /\bsendevent\b/i, targetFlags: [], optionWindow: 'full' },
+  { name: 'getevent', pattern: /\bgetevent\b/i, targetFlags: [], optionWindow: 'full' },
   // `am` 的显示参数是 `--display`；`-d` 是 Intent data，**不得**作为目标屏凭据（见上）。
-  { name: 'am', pattern: /\bam[ \t]+(?:start|start-activity|force-stop|kill)\b/i, targetFlags: ['--display', '--display-id'] },
-  { name: 'monkey', pattern: /\bmonkey\b/i, targetFlags: ['--display', '--display-id'] },
+  {
+    name: 'am',
+    pattern: /\bam[ \t]+(?:start|start-activity|force-stop|kill)\b/i,
+    targetFlags: ['--display', '--display-id'],
+    optionWindow: 'full',
+  },
+  { name: 'monkey', pattern: /\bmonkey\b/i, targetFlags: ['--display', '--display-id'], optionWindow: 'full' },
+  // `cmd activity <start-activity|start|force-stop|kill>` 与 `am start` 走同一个
+  // ActivityManagerShellCommand（无 `--display` 时默认 display 0）——只认 `am` 会把这条等价
+  // 拼写整类放行（2026-10-28 自查）。`--display` 才是它的目标屏参数。
+  {
+    name: 'cmd-activity',
+    pattern: /\bcmd[ \t]+activity[ \t]+(?:start-activity|start|force-stop|kill|stop-app)\b/i,
+    targetFlags: ['--display', '--display-id'],
+    optionWindow: 'full',
+  },
 ]
 
 /** 命令（归一化后）命中哪些命令词家族。 */
@@ -411,26 +981,118 @@ export function screenCommandVerdict(
   if (unparsed) return 'deny-unparsed'
   for (const segment of segments) {
     const bare = stripQuotedText(segment)
-    const options = displayOptionsIn(bare)
+    // 目标屏参数的**取值**与**边界**另用「保留一个占位词」的版本（issue #1060 F1/F2）：引号词与转义
+    // 空白在真实 argv 里是**独立的词**，抹成空格会让 `-d` 偷走下一个词的值（`-d "" 7`），
+    // 也会让「第一个非选项词」的边界凭空消失（`-p "" -d 7`）。命令词面（家族匹配）仍用上面那个
+    // 默认版本 —— 引号内不是命令词，那里的行为必须与修复前逐字相同。
+    const bareWords = stripQuotedText(segment, { keepQuotedWords: true })
+    // 命令名来自运行时（`$CMD` / `"$(cat /sdcard/x.sh)"` / 反引号）：执行什么静态不可判。
+    if (isRuntimeCommandName(segment)) return 'deny-unparsed'
+    // `awk` 的 system() 载荷不可见（程序文本在引号里）⇒ fail-closed。
+    if (AWK_EXEC_PAYLOAD.test(segment)) return 'deny-unparsed'
+    // 命令词用 glob 拼出屏幕命令名（`/system/bin/scr?encap`）：词面不等于执行词 ⇒ 不可判。
+    if (globExpandsToScreenCommand(segment)) return 'deny-unparsed'
+    // 命令名被引号拆开（`scr''eencap` / `s$'cre'encap`）：指纹先被 stripQuotedText 抹平，词面不可信。
+    if (hasGluedQuote(segment)) return 'deny-unparsed'
+    // 反斜杠续行把命令名拆到下一行（`scr\<换行>eencap`）——两半都不可信。
+    if (GLUED_LINE_CONTINUATION.test(segment)) return 'deny-unparsed'
+    // 载荷不可见的解释器调用：静态判不了，fail-closed。
+    if (interpreterPayloadUnparsed(bare)) return 'deny-unparsed'
+    const options = displayOptionsIn(bareWords)
+    if (MALFORMED_DISPLAY_OPTION.test(bare)) return 'deny-uncertified-target'
     const families = SCREEN_COMMAND_FAMILIES.filter(
       (family) => family.pattern.test(stripDisplayOptions(bare)),
     )
     if (families.length === 0) {
       // 非屏幕命令段：允许，但**不得**携带目标屏凭据（否则就是洗白凭据）。
-      if (options.length > 0) return 'deny-orphan-target-token'
+      // 这里连**抹掉引号**的取值面一起看：`echo -d "" 7` 折叠后是 `-d 7`，历史上按「洗白凭据」拒；
+      // 本轮 F1 只改「屏幕命令族自己解析 `-d`」那条路，不得顺手把这条拒改成放行
+      // （宁可误拒不可误放——少一条拒就是多一条放行通道）。
+      if (options.length > 0 || displayOptionsIn(bare).length > 0) return 'deny-orphan-target-token'
       continue
     }
     for (const family of families) {
       if (family.targetFlags.length === 0) return 'deny-uncertified-target'
+      // 目标屏参数只在**本家族真正解析它**的那一段里算凭据（口径见 `optionWindow`）。
+      // 旧实现只给 `input` 算了边界、其余家族做全段扫描 ⇒ 尾随 `-d <owned>` 反而成了"已认证"的
+      // 通行证（2026-10-28 自查的 `input` 那处；issue #1060 F2 把同源规则补齐到 getopt 家族）。
+      const limit = familyOptionLimit(family, bareWords)
+      // issue #1184：目标屏参数按**流式**解释——最后一个赋值生效，空值**不继承**上一个值。
+      // 只按 `\d+` 过滤（#1060 F1 的形态）会让「取值是空词」的 `-d` 整个消失，于是一个更早的
+      // 合法 `-d 7` 为整条命令背书，而真实作用屏是 display 0。这里要求最后一次赋值可解释。
+      const target = displayTargetIn(bareWords, limit)
+      if (target.kind === 'unresolved') return 'deny-uncertified-target'
       const owned = options
-        .filter((option) => family.targetFlags.includes(option.flag))
+        .filter((option) => family.targetFlags.includes(option.flag) && option.index < limit)
         .map((option) => option.value)
       // 该家族必须在**本段内**自证：参数缺席、或任一值不属于已注册虚拟屏 → 拒（不得只认证其中一个）。
       if (owned.length === 0) return 'deny-uncertified-target'
       if (!owned.every(isOwnedTarget)) return 'deny-uncertified-target'
+      // 流式结论也必须属于已注册虚拟屏（不得只看「出现过某个合法值」）。
+      if (target.kind === 'explicit' && !isOwnedTarget(target.token)) return 'deny-uncertified-target'
     }
   }
   return 'allow'
+}
+
+/** `input` 家族里 command 词的位置（用作「只有它之前的 `-d` 才算凭据」的边界）。 */
+const INPUT_COMMAND_RE =
+  /\b(?:tap|swipe|roll|draganddrop|motionevent|text|keyevent|keycombination|press)\b/i
+
+function inputCommandIndex(text: string): number {
+  const m = INPUT_COMMAND_RE.exec(text)
+  return m === null ? text.length : (m.index ?? text.length)
+}
+
+/** 需要**独立取值词**的目标屏参数拼写（`-d7` / `--display=7` 是粘连形态，不吃下一个词）。 */
+const SEPARATE_VALUE_DISPLAY_FLAGS = new Set(['-d', '--display', '--display-id'])
+
+/**
+ * getopt 停止解析的下标（issue #1060 F2）：**第一个非选项词**的起始位置；`--` 本身即终点
+ * （其后全是操作数），单横 `-` 在 getopt 里是非选项词。
+ *
+ * 真实 argv 依据（`screencap` / `screenrecord` 是 toybox 工具，用 getopt 解析短选项）：
+ *   `screencap -p /sdcard/a.png -d 7` → `["screencap","-p","/sdcard/a.png","-d","7"]`
+ *        getopt 在 `/sdcard/a.png`（第一个非选项词）处停止 ⇒ `-d 7` 是普通 argv ⇒ display 0；
+ *   `screencap -- -d 7`               → `--` 是选项终结符 ⇒ 其后全是操作数 ⇒ display 0；
+ *   `screencap -p 7 -d 7`             → `-p` 不吃参数（只有 `-d` 吃）⇒ `7` 就是第一个非选项词 ⇒ display 0。
+ * 旧实现只给 `input` 算了边界、其余家族做全段扫描 ⇒ 这三条都被尾随 `-d <已注册>` 洗白成 allow。
+ *
+ * 为什么不逐工具维护「哪些选项吃参数」：那张表一旦漏一个带**词形**参数的选项（`--abi arm64` 之类），
+ * 参数就会被当成位置词，边界判断失效方向是**放行**。故一律按「任何非选项词都终止解析」fail-closed。
+ */
+function getoptStopIndex(text: string, commandWord: string): number {
+  let i = 0
+  let seenCommand = false
+  while (i < text.length) {
+    while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i += 1
+    if (i >= text.length) break
+    const start = i
+    while (i < text.length && text[i] !== ' ' && text[i] !== '\t') i += 1
+    const word = text.slice(start, i)
+    if (!seenCommand) {
+      // 命令词**不一定在段首**：本门禁也判 `adb shell screencap …`（adb 包装）这类形态 ⇒ 先找到
+      // 家族自己的命令词（允许绝对路径），再从它后面开始数解析窗口。
+      if (word.slice(word.lastIndexOf('/') + 1).toLowerCase() === commandWord) seenCommand = true
+      continue
+    }
+    if (word === '--' || word === '-' || word[0] !== '-') return start
+    if (SEPARATE_VALUE_DISPLAY_FLAGS.has(word)) {
+      // `-d 7`：`7` 是这个选项的值，不是位置词 —— 不跳过它就会让 `-d` 被**自己的值**判成
+      // 「第一个非选项词」，于是 `screencap -d 7 -d 99 …` 里的第二个 `-d` 反而被放过。
+      while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i += 1
+      while (i < text.length && text[i] !== ' ' && text[i] !== '\t') i += 1
+    }
+  }
+  // 命令词根本没以独立词出现（家族是靠别的词面命中的）⇒ 上界 0 ⇒ 任何 `-d` 都不算凭据（fail-closed）。
+  return seenCommand ? text.length : 0
+}
+
+/** 该家族「目标屏参数算凭据」的上界（口径见 [ScreenCommandFamily.optionWindow]）。 */
+function familyOptionLimit(family: ScreenCommandFamily, bareWords: string): number {
+  if (family.optionWindow === 'getopt') return getoptStopIndex(bareWords, family.name)
+  if (family.optionWindow === 'command') return inputCommandIndex(bareWords)
+  return bareWords.length
 }
 
 /** 由注册表投影构造「该值是否属于已注册虚拟屏」的判据（两个 id 空间都按原样字符串比对）。 */
@@ -467,7 +1129,8 @@ function ownedTargetPredicate(options: ScreenAccessOptions): (raw: string) => bo
  * Virtual Display 11529215046816944610
  *     name="DSH virtual-1"
  * ```
- * 该命令**不被** [SCREEN_COMMAND_FAMILIES] 命中（后者只认 `dumpsys (window|display|input)`），
+ * 该命令**不被** [SCREEN_COMMAND_FAMILIES] 命中（那里的 `dumpsys` 只认 window/display/input/activity
+ * 这几个敏感服务名，`SurfaceFlinger` 属「服务名可确认且安全」⇒ 不命中），
  * 故本次改动**不扩大 shell 命令词面**——它只让范围判定能核对 SF token，不是放宽执行面。
  *
  * 尾随空白必须容忍：设备 `dumpsys` 输出常见行尾空格，而旧实现用 `matchEntire` 钉死整行 ⇒
@@ -512,7 +1175,9 @@ export function realScreenAdbCommandDenied(
     if (parsed.unparsed) return realOnlyScreenScopeMessage()
     for (const segment of parsed.segments) {
       const bare = stripQuotedText(segment)
-      const options = displayOptionsIn(bare)
+      // 与 [screenCommandVerdict] 同一个取值口：引号词/转义空白保留为一个占位词（issue #1060 F1），
+      // 免得 `-d "" 7` 这类形态在这里被"下一个词的 7"顶替成显式目标屏。
+      const options = displayOptionsIn(stripQuotedText(segment, { keepQuotedWords: true }))
       const families = SCREEN_COMMAND_FAMILIES.filter(
         (family) => family.pattern.test(stripDisplayOptions(bare)),
       )

@@ -43,6 +43,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useShellState } from '../mobile/use-shell-state.ts'
 import { noticeDataAttrs, type Notice } from '../user-copy.ts'
+import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import { tr } from '../i18n.ts'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -299,41 +300,44 @@ export function ApkUpdateRow() {
     : viewOf(state, status)
 
   return (
-    <div className="dsh-dev-cache" data-plugin="dev-apk-update">
-      <div className="dsh-dev-row" data-apk-state={status === null ? 'unavailable' : state}>
-        <span>{row.text}</span>
-        <button
-          type="button"
-          className="dsh-dev-btn"
-          data-apk-action="check"
-          disabled={!row.checkEnabled}
-          onClick={onCheck}
-        >{row.checkLabel}</button>
+    <div data-plugin="dev-apk-update">
+      <div className="dsh-gs-row" data-apk-state={status === null ? 'unavailable' : state}>
+        <div className="dsh-gs-text">
+          <div className="dsh-gs-title">{tr('检查更新', 'Check for updates')}</div>
+          <div className="dsh-gs-desc">{row.text}</div>
+          {row.detail !== null && <div className="dsh-gs-desc" data-apk-detail>{row.detail}</div>}
+          {message !== null && (
+            <div className="dsh-gs-desc" {...noticeDataAttrs(message)}>{message.text}</div>
+          )}
+        </div>
+        <div className="dsh-gs-control dsh-gs-actions">
+          <Button
+            size="sm"
+            data-apk-action="check"
+            disabled={!row.checkEnabled}
+            onClick={onCheck}
+          >{row.checkLabel}</Button>
         {/* 下载按钮只在有这条路时才渲染（其余态壳侧没有可受理的 install，摆一枚点了没反应的按钮
             比不摆更糟）。失败态的重试路径是 check，故这里不复活它。 */}
-        {row.installLabel !== null && (
-          <button
-            type="button"
-            className="dsh-dev-btn"
-            data-apk-action="install"
-            disabled={!row.installEnabled}
-            onClick={onInstall}
-          >{row.installLabel}</button>
-        )}
+          {row.installLabel !== null && (
+            <Button
+              size="sm"
+              data-apk-action="install"
+              disabled={!row.installEnabled}
+              onClick={onInstall}
+            >{row.installLabel}</Button>
+          )}
+        </div>
       </div>
 
-      {/* 补充事实（目前是「发布方声明的摘要」）：与状态主文本分行，避免把它读成「已校验通过」。 */}
-      {row.detail !== null && <p className="dsh-dev-hint" data-apk-detail>{row.detail}</p>}
-
-      {message !== null && (
-        <p className="dsh-dev-hint" {...noticeDataAttrs(message)}>{message.text}</p>
-      )}
-
-      {/* 保留「更新的是什么、怎么校验、何时发起」「权限缺失怎么办」这些用户真要拿来做决定的信息；
-          去掉与按钮状态逐字重复的流程复述。 */}
-      <p className="dsh-dev-hint">
-        {tr('更新应用安装包（APK）：按本机 ABI 从 GitHub 发布页取包，校验体积与 sha256 后交给系统安装器。只在你点击时下载；缺「安装未知应用」权限会先打开授权页。', 'Updates the app APK: the matching ABI comes from the GitHub release, and its size and sha256 are verified before the system installer opens. Downloads start only when you tap; a missing install permission opens the grant page first.')}
-      </p>
+      {/* 说明段：留在框内，作为行下方的灰色说明，不再单独一个描边段落。 */}
+      <div className="dsh-gs-row">
+        <div className="dsh-gs-text">
+          <div className="dsh-gs-desc">
+            {tr('更新应用安装包（APK）：按本机 ABI 从 GitHub 发布页取包，校验体积与 sha256 后交给系统安装器。只在你点击时下载；缺「安装未知应用」权限会先打开授权页。', 'Updates the app APK: the matching ABI comes from the GitHub release, and its size and sha256 are verified before the system installer opens. Downloads start only when you tap; a missing install permission opens the grant page first.')}
+          </div>
+        </div>
+      </div>
     </div>
   )
 }

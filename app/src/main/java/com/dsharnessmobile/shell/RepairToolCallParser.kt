@@ -60,6 +60,44 @@ internal object RepairToolCallParser {
     message.optBoolean("repair_textual_tool_calls", false)
 
   /**
+   * issue #1014：把「网关没有给推理文本」与「真的给了推理文本」分开。
+   *
+   * 为什么不能直接用 optString + isNotBlank：**Android 的 org.json 会把 JSONObject.NULL
+   * 渲染成字符串 "null"**（AOSP 的 JSONStringer 走 String.valueOf，NULL.toString() 就是 "null"），
+   * 于是 optString(key, "") 拿到的是非空的 "null"，isNotBlank() 为真 —— 界面上就多出一张正文
+   * 只有 null 的「思考」卡，并被 recordEvent 写进会话事件（重开会话仍在）。
+   *
+   * 本仓已为同一个坑写过守卫（RepairModelClient.kt:222-223 的注释 + RepairModelClientTest 的
+   * 专门用例），但另有两处调用点没套上：界面侧（RepairActivity 取 reasoning_content）与历史投影侧
+   * （[toolResultsAsUserObservations] 判空壳）。这里把判定收敛成单点，两处共用，避免第三处复发。
+   *
+   * @param answer - 网关返回的一条消息（或任何带 reasoning_content 的对象）。
+   * @returns 可展示的推理文本；缺失、为 null、或恰好是字面量 "null" 时返回空串。
+   */
+  fun reasoningText(answer: JSONObject): String {
+    val raw = answer.optString("reasoning_content", "")
+    // 字面量 "null" 与真 null 是两种输入形态，设备上都可能出现：前者是 Android org.json 的
+    // 渲染结果，后者是本仓单测用的 Maven org.json 的 fallback 行为。
+    if (raw.isBlank() || raw.trim() == "null") return ""
+    return raw
+  }
+
+  /**
+   * issue #1014：一条 assistant 消息是否**真的**携带了 provider 内容。
+   *
+   * 只有 content 或 reasoning_content 之一有真实文本时才为真。空壳（两者都缺 / 都是 "null"）
+   * 必须从 user-observation 投影里丢掉 —— 保留它会变成一次非法的连续 user 请求。
+   *
+   * @param message - 待判定的 assistant 消息。
+   * @returns true 表示至少一侧有真实文本。
+   */
+  fun hasProviderContent(message: JSONObject): Boolean {
+    val content = message.optString("content", "")
+    return (content.isNotBlank() && content.trim() != "null") || reasoningText(message).isNotBlank()
+  }
+
+
+  /**
    * Closes a provider-issued tool batch that a stop, process death, or older
    * client left without every result. The assistant response and all existing
    * results stay byte-for-byte unchanged; only truthful cancellation results are
@@ -222,8 +260,9 @@ internal object RepairToolCallParser {
         // An empty assistant placeholder has no provider content and becomes an
         // invalid consecutive-user request. Preserve prose/reasoning, omit the
         // empty shell, and attach all results for this batch to one observation.
-        if (assistant.optString("content").isNotBlank() ||
-          assistant.optString("reasoning_content").isNotBlank()) {
+        // issue #1014：判据收敛到 [hasProviderContent] —— 直接 optString + isNotBlank
+        // 会把 Android 渲染出的字面量 "null" 当成真实内容，空壳因此漏留。
+        if (hasProviderContent(assistant)) {
           result.put(assistant)
         }
         var cursor = index + 1

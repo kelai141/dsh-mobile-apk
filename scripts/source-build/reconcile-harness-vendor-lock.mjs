@@ -7,8 +7,10 @@ import { copyFileSync, readFileSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join, posix, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { readHarnessIdentity } from './harness-identity.mjs'
 
 const SECTIONS = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']
+const { commit: expectedCommit } = readHarnessIdentity()
 const sha256 = (value) => createHash('sha256').update(value).digest('hex')
 
 export function reconcileImporter(importer, manifest, path, overrides = {}) {
@@ -64,7 +66,7 @@ function main() {
   const originalPath = join(dirname(reportPath), 'harness-pnpm-lock.original.yaml')
   const overrideReport = JSON.parse(readFileSync(resolve(overrideReportArg), 'utf8'))
   const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: sourceRoot, encoding: 'utf8' }).trim()
-  if (commit !== '639ed015397290b3745d163aafe02ffee4aa3f84'
+  if (commit !== expectedCommit
     || overrideReport.harnessSourceCommit !== commit
     || overrideReport.mode !== 'pinned-target-source-evidence'
     || overrideReport.rewoundSourceCount !== 0

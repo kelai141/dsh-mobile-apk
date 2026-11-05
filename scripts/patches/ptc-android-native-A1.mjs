@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Android PTC native launch adaptation for @deepseek-ai/dsh-ptc-runtime-node 0.2.1-rc.2.
+ * Android PTC native launch adaptation for @deepseek-ai/dsh-ptc-runtime-node 0.2.1-rc.3.
  * Usage: node scripts/patches/ptc-android-native-A1.mjs <runtime-package-root> [--apply|--check] [--source]
  * Default: check lib/index.js + lib/process.js. --source targets a disposable source copy.
  * No policy defaults, approval paths, sandbox providers, or public configuration are changed.
@@ -12,7 +12,7 @@ export const PATCH_ID = 'ptc-android-native-A1'
 export const ENV_MARKER = 'dsh-mobile PTC Android native environment (A1)'
 export const LAUNCH_MARKER = 'dsh-mobile PTC Android linker prefix (A1)'
 const PACKAGE_NAME = '@deepseek-ai/dsh-ptc-runtime-node'
-const PACKAGE_VERSION = '0.2.1-rc.2'
+const PACKAGE_VERSION = '0.2.1-rc.3'
 const BASE_ENV_NAMES = ['PATH', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP']
 /** Exact host-owned native settings; no TERMUX_* wildcard, credentials, HOME, or DSH_* inheritance. */
 export const ANDROID_ENV_NAMES = Object.freeze([

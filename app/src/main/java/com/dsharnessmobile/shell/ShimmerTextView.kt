@@ -31,6 +31,12 @@ class ShimmerTextView @JvmOverloads constructor(
   private var animator: ValueAnimator? = null
   private var running = false
 
+  /** 扫光用的唯一 Matrix 实例（每帧复用，避免高频分配）。 */
+  private val matrix = android.graphics.Matrix()
+
+  /** 动效开关订阅的注销句柄（onAttached 注册、onDetached 注销）。 */
+  private var motionUnsubscribe: (() -> Unit)? = null
+
   /** 启动/停止扫光（工作中 true；空闲/离线 false → 静态文本色）。 */
   fun setShimmering(on: Boolean) {
     if (on == running) return
@@ -75,7 +81,8 @@ class ShimmerTextView @JvmOverloads constructor(
       repeatCount = ValueAnimator.INFINITE
       addUpdateListener { a ->
         val p = a.animatedValue as Float
-        val matrix = android.graphics.Matrix()
+        // 复用同一个 Matrix 实例：原先每帧 new 一个（1800ms 内约 60-120 次分配），
+        // 在 144Hz 下是纯粹的 GC 压力，对结果没有任何影响（setLocalMatrix 是覆盖语义）。
         matrix.setTranslate(-1.5f * w * p, 0f)
         paint.shader = gradient
         gradient.setLocalMatrix(matrix)
@@ -85,8 +92,35 @@ class ShimmerTextView @JvmOverloads constructor(
     }
   }
 
+  override fun onAttachedToWindow() {
+    super.onAttachedToWindow()
+    // 用户可能在动画跑起来之后才去系统设置关动画：订阅开关翻转，立刻停下。
+    motionUnsubscribe?.invoke()
+    motionUnsubscribe = DsUi.registerMotionListener(context) { applyShimmerState() }
+  }
+
   override fun onDetachedFromWindow() {
+    motionUnsubscribe?.invoke(); motionUnsubscribe = null
     animator?.cancel(); animator = null
     super.onDetachedFromWindow()
+  }
+
+  /**
+   * 按**当前**开关状态落实渲染：开 → 扫光，关 → 静态渐变。
+   *
+   * 与 [setShimmering] 的区别：[setShimmering] 由业务状态驱动且带幂等短路
+   * （on == running 时直接返回），而本函数是**开关翻转**的响应——此时业务状态
+   * running 没变，但渲染必须跟着变，所以不能走那个短路。
+   */
+  private fun applyShimmerState() {
+    val on = running && animationsEnabled()
+    if (on) {
+      if (animator == null) startShimmer()
+    } else {
+      animator?.cancel(); animator = null
+      paint.shader = null
+      setTextColor(brand500)
+      invalidate()
+    }
   }
 }

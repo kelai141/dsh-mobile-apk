@@ -8,9 +8,12 @@ import pathlib
 import subprocess
 import sys
 
-SOURCE_COMMIT = "639ed015397290b3745d163aafe02ffee4aa3f84"
+from harness_pin import read_harness_identity
+
+_IDENTITY = read_harness_identity()
+SOURCE_COMMIT = _IDENTITY.commit
 PACKAGE_NAME = "@deepseek-ai/dsh-subprocess-local"
-PACKAGE_VERSION = "0.2.0-rc.2"
+PACKAGE_VERSION = _IDENTITY.version
 PACKAGE_PATH = "packages/subprocess/subprocess-local"
 BUILD_SCRIPT_PATH = f"{PACKAGE_PATH}/scripts/ensure-spawn-helper.mjs"
 ORIGINAL_SELECTOR = (
@@ -30,7 +33,7 @@ def main() -> None:
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=workspace_path.parent, text=True).strip()
     root_manifest = json.loads((workspace_path.parent / "package.json").read_text(encoding="utf-8"))
     if commit != SOURCE_COMMIT or root_manifest.get("version") != PACKAGE_VERSION:
-        raise ValueError("pnpm deploy policy requires the official 0.2.0-rc.2 source")
+        raise ValueError(f"pnpm deploy policy requires the official {PACKAGE_VERSION} source")
     original = workspace_path.read_bytes()
     needle = ORIGINAL_SELECTOR.encode("ascii")
     if original.count(needle) != 1:

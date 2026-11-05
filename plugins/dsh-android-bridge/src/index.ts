@@ -443,7 +443,7 @@ function shellPrefsPath(): string | null {
   return null
 }
 
-/** SharedPreferences XML → 布尔/字符串状态；不存在/解析失败返回 undefined（上层回落 env）。 */
+/** Parse SharedPreferences XML; keep an omitted a11y declaration distinct from explicit false. */
 export function parseAdbPrefsXml(xml: string): ShellAdbPrefs | null {
   const mAllow = /<boolean\s+name="allowSwitch"\s+value="(true|false)"\s*\/?>/.exec(xml)
   const mPair = /<boolean\s+name="paired"\s+value="(true|false)"\s*\/?>/.exec(xml)
@@ -467,7 +467,7 @@ export function parseAdbPrefsXml(xml: string): ShellAdbPrefs | null {
     connected: mConnected ? mConnected[1] === 'true' : false,
     pairPort: mPairPort?.[1] || undefined,
     connectPort: mConnectPort?.[1] || undefined,
-    a11yEnabled: mA11y ? mA11y[1] === 'true' : false,
+    a11yEnabled: mA11y ? mA11y[1] === 'true' : undefined,
     controlToken: mToken?.[1] || undefined,
     controlHeartbeat: mHeartbeat ? Number(mHeartbeat[1]) : undefined,
     fullAccess: mFullAccess ? mFullAccess[1] === 'true' : undefined,
@@ -555,13 +555,26 @@ export const A11Y_FRESH_MS = 20_000
  */
 const CAPS_PROBE_TTL_MS = 10_000
 
+export type A11ySource = 'heartbeat' | 'disabled' | 'stale' | 'unknown'
+
+export interface A11yAvailabilityFacts {
+  enabled: boolean
+  source: A11ySource
+  heartbeatAgeMs: number | null
+}
+
 export interface ControlGateFacts {
   a11yEnabled: boolean
+  /** Positive evidence, explicit disablement, stale heartbeat, and unobserved state stay distinct. */
+  a11ySource: A11ySource
+  a11yHeartbeatAgeMs: number | null
   /**
-   * ST-23：无障碍在线判定的**来源标注**——queue=控制队列取活心跳新鲜，heartbeat=壳侧独立
-   * 心跳线程新鲜（慢建树场景），off=两条都不新鲜。两口径并存时靠它区分，不再只能看一个布尔。
+   * #648：壳侧控制轮询的存活事实（**不是**无障碍证据，两者相互独立）。
+   *
+   * `active` = 最近一次取活在 20s 窗口内；`ageMs` 是距今毫秒数，从未轮询过则为 null。
+   * 排障时用它回答「壳侧轮询还在不在跑」，用 a11yEnabled 回答「无障碍开没开」。
    */
-  a11ySource: 'queue' | 'heartbeat' | 'off'
+  polling: { active: boolean; ageMs: number | null }
   fullAccess: boolean
   allowSwitch: boolean
   paired: boolean
@@ -615,6 +628,60 @@ function looksDangerous(command: string): boolean {
   return false
 }
 
+/**
+ * issue #1063：`shRemove` 的**路径载荷**危险检查。
+ *
+ * 缺陷形态：危险命令黑名单 (`looksDangerousAdb`) 只挂在 `op === 'shExec'` 上，而它的判据读的是
+ * `args.command`。`shRemove` 的载荷是 `args.remote`（一条绝对路径），于是
+ * `controlExec('shRemove', { remote: '/' })` 穿过 #controlExec 的全部检查，直达
+ * `ShellOps.remove` → `ShizukuUserService.removePath` → `SnapshotFs.deletePath`（**递归**）。
+ *
+ * 判据取向与命令黑名单相反：删除是破坏性且**不可撤销**的操作，所以这里用**白名单**——
+ * 只放行明确位于临时/缓存根之下的路径，其余一律拒。理由：
+ *   - 黑名单只能枚举已知的危险根，而 `/data/user/0/<pkg>` / `/data/misc` / `/apex` 这类
+ *     等价破坏面永远列不完；漏一个就是一次不可恢复的删除。
+ *   - 本插件自己的用法只有「清 dsh-tmp 临时产物」，白名单没有表达力损失。
+ *
+ * 规范化在**判定前**做（`..` 折叠、冗余斜杠、末尾斜杠），否则 `/data/local/tmp/../..`
+ * 会绕过前缀匹配。规范化只做纯词法展开，**不**解析符号链接（调用点在引擎侧，链接触达不到）。
+ *
+ * @param remote - `shRemove` 的目标路径（调用方给的原始值）。
+ * @returns true = 必须拒绝。
+ */
+function looksDangerousRemovePath(remote: unknown): boolean {
+  if (typeof remote !== 'string') return true
+  const raw = remote.trim()
+  if (raw === '') return true
+  // 只接受绝对路径：相对路径在 shell 里按 cwd 解析，落点不可预测 ⇒ fail-closed。
+  if (!raw.startsWith('/')) return true
+  // 含 NUL / 换行 / 通配符 / 命令替换等「展开后不是这条路径」的形态，一律不做猜测。
+  if (/[\u0000\n\r]/.test(raw)) return true
+  if (/[*?[\]{}~`$]/.test(raw)) return true
+  // 词法规范化：折叠 //、/./，按段处理 /../（到根为止）。
+  const parts: string[] = []
+  for (const seg of raw.split('/')) {
+    if (seg === '' || seg === '.') continue
+    if (seg === '..') { parts.pop(); continue }
+    parts.push(seg)
+  }
+  const norm = '/' + parts.join('/')
+  // 删除整个文件系统（规范化后就是根）。
+  if (norm === '/') return true
+  /**
+   * 允许删除的根（白名单）。只列本仓自己会写的临时/缓存面：
+   *   - `/data/local/tmp`（Shizuku/Termux 侧临时产物）
+   *   - `/sdcard/Android/data/<pkg>`（应用自有外部目录；**不含**裸 `/sdcard`）
+   * 注意 `/sdcard/Android/data` 这一整个父层**不**放行：别的应用的数据也在里面。
+   */
+  const ALLOWED_ROOTS = [
+    '/data/local/tmp',
+    '/sdcard/Android/data/com.dsharnessmobile.shell',
+    '/storage/emulated/0/Android/data/com.dsharnessmobile.shell',
+  ]
+  // 必须**严格位于**某个允许根之下（等于根本身也不放行：那是清空整个临时面）。
+  return !ALLOWED_ROOTS.some((root) => norm.startsWith(root + '/'))
+}
+
 /** ADB 通道附加黑名单（shell uid=2000 执行面比 app uid 更危险：系统级配置/权限写面一律拒绝）。 */
 function looksDangerousAdb(command: string): boolean {
   if (looksDangerous(command)) return true
@@ -665,12 +732,22 @@ export interface ControlAuth {
  * 刻意不在列（各自的理由不同，别一刀切）：
  *  - `browser*`：0.14.0 做过一次**正确方向**的纠偏（浏览器不该被设备控制门锁死，见 control-policy
  *    的注释），本常量不把它加回来；它的权限档位问题走契约侧对齐（审查 §3.2-S5 / H-8）。
- *  - `vdInfo`/`vdCreate`/`vdDestroy`/`state`/`snapshot`/`nodeText`/`screenshot`/`web*`：读面或
- *    管理面，已被范围门与 A11Y_OPS 门覆盖；把它们也纳入会让「读设备状态」也变得过不去。
+ *  - `vdInfo`/`vdCreate`/`vdDestroy`/`state`/`web*`：读面或管理面。`vdInfo`/`state` 只回注册表
+ *    与代次，不含屏幕内容；`web*` 读的是**壳自有 WebView**（DSH 自己的 Web UI），不是设备屏。
+ *    这几个留在清单外是有意的，别顺手加。
+ *
+ * issue #1062：`snapshot`/`screenshot`/`nodeText` **必须在**清单里。
+ * 早前它们被排除，理由写的是「已被范围门与 A11Y_OPS 门覆盖」——这句话是错的：
+ * 范围门只判**屏幕范围**（real/virtual），A11Y 门只判**无障碍是否在线**，两者都不看档位。
+ * 于是 workspace-write 会话在 scope='all' 下能读整屏（`controlExec('screenshot')` 直通执行面），
+ * 而同一调用交给文档策略 decideControl 会被拒（它要求 sessionMode === 'danger-full-access'）。
+ * 判据存在于 control-policy 却不在执行路径上 = 只有诊断面看得到，执行面照旧放行。
+ * 三者都是 REAL_SCREEN_CONTROL_OPS（读设备屏内容），隐私敏感度与 click 同级，故同门。
  */
 const TIER_REQUIRED_OPS: readonly string[] = [
   'shExec', 'shPull', 'shPush', 'shRemove',
   'vdInput', 'vdLaunch', 'vdLaunchApp', 'vdMoveTask',
+  'snapshot', 'screenshot', 'nodeText',
   'click', 'longClick', 'setText', 'scroll', 'global',
 ]
 
@@ -712,6 +789,27 @@ const INTERNAL_PRIVILEGED: Record<string, { why: string; allows: (command: strin
  * 「假失败 + 副作用已发生」——模型按失败重试即**二次执行**（点击/输入/写入类 op 非幂等）。
  * 单测 test/screen-scope.test.mjs 钉住这条不变量。
  */
+/**
+ * issue #1065：a11y / input 类 op 的**引擎侧入队时限**（壳侧预算 = 它减去 CONTROL_EXEC_MARGIN_MS）。
+ *
+ * 与 sh\* 的 S-6 同一形状：壳侧先到点（放弃继续等、但动作已经在设备上发生），引擎侧后到点
+ * （还在收结果窗口），这样「动作已发生」不会因为引擎侧提前放弃而被报成失败。
+ * 取 8000ms 是因为它本来就是本类的历史默认值（README / control-queue 的默认），
+ * 只是此前壳侧完全不知道这个数字。
+ */
+export const CONTROL_EXEC_TIMEOUT_MS = 8_000
+/** 壳侧预算相对引擎侧入队时限的余量（与 S-6 的 20s/25s 同比例留 5s 太小，这里留 2s 足够）。 */
+export const CONTROL_EXEC_MARGIN_MS = 2_000
+
+/**
+ * input 类是「会让设备产生副作用」的语义动作——迟到结果必须被正确归因（不能报假失败）。
+ * 纯读面（snapshot / screenshot / nodeText / state / web\*）不在列：它们的读没有副作用，
+ * 迟到重试是安全的；neverA11y 族（browser\* / vd\*）由各自通道承载。
+ */
+export function inputClassOp(op: string): boolean {
+  return op === 'click' || op === 'longClick' || op === 'setText' || op === 'scroll' || op === 'global'
+}
+
 export const SHELL_EXEC_TIMEOUT_MS = 20_000
 /** 引擎侧入队超时：必须**大于**壳侧执行时限（见上）。 */
 export const SHELL_QUEUE_TIMEOUT_MS = 25_000
@@ -985,13 +1083,13 @@ export class AndroidPrivilegeService {
    *
    * fail-closed：命令不可达/超时/解析不出 → 返回空数组（判定侧视为无 token 可核对 → 拒绝）。
    */
-  async #shellSfVirtualDisplayTokens(): Promise<Array<{ alias: string; token: string }>> {
+  async #shellSfVirtualDisplayTokens(auth?: ControlAuth): Promise<Array<{ alias: string; token: string }>> {
     try {
       const r = await this.#controlExec('shExec', {
         // 只取「Virtual Display <token>」与其紧跟的 name= 行；输出 ~25 B。
         command: "dumpsys SurfaceFlinger | grep -E '^(Virtual Display |    name=)'",
         timeoutMs: 15_000,
-      }, SHELL_QUEUE_TIMEOUT_MS, undefined, 'sf-token-lookup')
+      }, SHELL_QUEUE_TIMEOUT_MS, auth, 'sf-token-lookup')
       if (!r.ok) return []
       const data = (r.data ?? {}) as Record<string, unknown>
       const stdout = typeof data.stdout === 'string' ? data.stdout : ''
@@ -1009,7 +1107,7 @@ export class AndroidPrivilegeService {
    * 时，才去问壳侧注册表核对；目标确为虚拟屏 → 放行。低成本路径（范围含 real / 命令不命中命令面 /
    * 命令无目标屏）零额外往返——不为一条本来就不该拦的命令多打一次 vdInfo。
    */
-  private async adbCommandScopeDenied(command: string): Promise<string | null> {
+  private async adbCommandScopeDenied(command: string, auth?: ControlAuth): Promise<string | null> {
     const scope = this.screenScope()
     const base = realScreenAdbCommandDenied(scope, command)
     if (base === null) return null
@@ -1032,7 +1130,7 @@ export class AndroidPrivilegeService {
     if (byDisplayId === null) return null
     // displayId 空间不命中：再核对 SurfaceFlinger token（只有这一路需要额外往返与别名集合）。
     if (registry.aliases.length === 0) return byDisplayId
-    const sf = await this.#shellSfVirtualDisplayTokens()
+    const sf = await this.#shellSfVirtualDisplayTokens(auth)
     return realScreenAdbCommandDenied(this.screenScope(), command, {
       virtualDisplayIds: registry.ids,
       virtualAliases: registry.aliases,
@@ -1041,8 +1139,8 @@ export class AndroidPrivilegeService {
   }
 
   /** 同上，公开面（android_shell_exec 工具执行点在类外，需要经服务对象调用）。 */
-  shellCommandScopeDenied(command: string): Promise<string | null> {
-    return this.adbCommandScopeDenied(command)
+  shellCommandScopeDenied(command: string, auth?: ControlAuth): Promise<string | null> {
+    return this.adbCommandScopeDenied(command, auth)
   }
 
   /**
@@ -1063,15 +1161,16 @@ export class AndroidPrivilegeService {
    */
   gateFor(session?: unknown): { ok: true; via?: 'a11y' | 'adb' | 'shizuku' } | { ok: false; guidance: string; gates?: ControlGateFacts } {
     const st = this.status()
-    const a11ySource = this.a11ySource()
-    const a11y = a11ySource !== 'off'
+    const a11y = this.a11yFacts()
     // 0.13.8 #172：能力门只由「引擎级三道门 + 会话档位实时门」决定——部署默认写面
     // 档位（tier）降级为视图字段，不再参与门禁（坑 29：勿把部署默认当死锁）。
     const adbReady = engineLevelReady(st)
     const shizukuReady = this.shizukuReady()
     const gates: ControlGateFacts = {
-      a11yEnabled: a11y,
-      a11ySource,
+      a11yEnabled: a11y.enabled,
+      a11ySource: a11y.source,
+      a11yHeartbeatAgeMs: a11y.heartbeatAgeMs,
+      polling: this.pollingFacts(),
       fullAccess: st.fullAccess === true,
       allowSwitch: st.allowSwitchOn === true,
       paired: st.paired === true,
@@ -1089,7 +1188,7 @@ export class AndroidPrivilegeService {
         guidance: `会话档位为 ${mode ?? '未知'}，设备控制面要求 danger-full-access（无障碍通道同样受此门约束）——会话内 /permission danger-full-access 可即时开放`,
       }
     }
-    if (a11y) return { ok: true, via: 'a11y' }
+    if (a11y.enabled) return { ok: true, via: 'a11y' }
     if (shizukuReady) return { ok: true, via: 'shizuku' }
     if (adbReady) return { ok: true, via: 'adb' }
     return {
@@ -1128,28 +1227,45 @@ export class AndroidPrivilegeService {
     return readShellAdbState()?.connectPort
   }
 
-  /**
-   * ST-23：无障碍在线的**判定来源**。prefs 的 a11yEnabled 会在进程被 force-stop 后变成僵尸
-   * true（onDestroy 不保证执行），所以叠加两类心跳，同一个 20s 新鲜窗口：
-   *  - queue：控制队列最近一次取活（pollAgeMs）新鲜——慢建树的轮次里队列可能长时间没取活；
-   *  - heartbeat：壳侧独立心跳线程写的 live prefs 键 controlHeartbeat 新鲜（防慢建树被误判掉线）；
-   *  - off：都不新鲜 / prefs 未声明 a11yEnabled（fail-closed）。
-   * 两条口径并存时必须能看出走的哪条，故对外同时暴露 {@link a11ySource}。
-   */
-  a11ySource(): 'queue' | 'heartbeat' | 'off' {
+  /** Keep routing fail-closed while preserving disabled, stale, and unobserved diagnostics. */
+  a11yFacts(): A11yAvailabilityFacts {
     const live = readShellAdbState()
-    if (live?.a11yEnabled !== true) return 'off'
-    if (this.#controlQueue && this.#controlQueue.pollAgeMs() < A11Y_FRESH_MS) return 'queue'
-    const heartbeat = live.controlHeartbeat
-    if (typeof heartbeat === 'number' && Number.isFinite(heartbeat) && Date.now() - heartbeat < A11Y_FRESH_MS) {
-      return 'heartbeat'
+    if (!live || live.a11yEnabled === undefined) {
+      return { enabled: false, source: 'unknown', heartbeatAgeMs: null }
     }
-    return 'off'
+    if (live.a11yEnabled === false) {
+      return { enabled: false, source: 'disabled', heartbeatAgeMs: null }
+    }
+    const heartbeat = live.controlHeartbeat
+    if (typeof heartbeat !== 'number' || !Number.isFinite(heartbeat)) {
+      return { enabled: false, source: 'stale', heartbeatAgeMs: null }
+    }
+    const ageMs = Math.max(0, Date.now() - heartbeat)
+    if (ageMs < A11Y_FRESH_MS) {
+      return { enabled: true, source: 'heartbeat', heartbeatAgeMs: ageMs }
+    }
+    return { enabled: false, source: 'stale', heartbeatAgeMs: ageMs }
   }
 
-  /** 0.13.5 W4：无障碍服务是否**真的活着**（ST-23：队列心跳或独立心跳任一新鲜即可）。 */
+  a11ySource(): A11ySource {
+    return this.a11yFacts().source
+  }
+
+  /** 0.13.5 W4：无障碍服务是否**真的活着**（只认 prefs 声明 + 新鲜心跳）。 */
   a11yEnabled(): boolean {
-    return this.a11ySource() !== 'off'
+    return this.a11yFacts().enabled
+  }
+
+  /**
+   * 壳侧控制轮询的存活事实（#648 从 a11ySource 里拆出来的独立诊断面）。
+   *
+   * 它回答的是「壳侧长轮询还在不在跑」，**不是**「无障碍服务开着没」。两者可以同时为真、
+   * 也可以轮询在跑而 a11y 已死（那正是 #648 的现场），所以不能互相推断。
+   */
+  pollingFacts(): { active: boolean; ageMs: number | null } {
+    const age = this.#controlQueue?.pollAgeMs() ?? Number.POSITIVE_INFINITY
+    const finite = Number.isFinite(age)
+    return { active: finite && age < A11Y_FRESH_MS, ageMs: finite ? age : null }
   }
 
   /** 0.13.5 W4：结构化授权事实（两条通道各自的门）。 */
@@ -1157,10 +1273,12 @@ export class AndroidPrivilegeService {
     const st = this.status()
     // 0.13.8 #172：同 gateFor——部署档位视图不参与能力门。
     const adbReady = engineLevelReady(st)
-    const a11ySource = this.a11ySource()
+    const a11y = this.a11yFacts()
     return {
-      a11yEnabled: a11ySource !== 'off',
-      a11ySource,
+      a11yEnabled: a11y.enabled,
+      a11ySource: a11y.source,
+      a11yHeartbeatAgeMs: a11y.heartbeatAgeMs,
+      polling: this.pollingFacts(),
       fullAccess: st.fullAccess === true,
       allowSwitch: st.allowSwitchOn === true,
       paired: st.paired === true,
@@ -1235,10 +1353,15 @@ export class AndroidPrivilegeService {
     const resolved = this.resolveAuth(auth)
     if (internal !== undefined) {
       const entry = INTERNAL_PRIVILEGED[internal]
-      const gate = internal === 'animation-scales'
-        ? (resolved.session === undefined ? { ok: false } : this.gateFor(resolved.session))
-        : { ok: true }
-      const ok = gate.ok && op === 'shExec' && entry !== undefined && command !== undefined && entry.allows(command)
+      // issue #1064：**每条内部键都必须过会话与档位闸**，不允许「内部键 = 免检」。
+      // 原实现只有 animation-scales 过闸，sf-token-lookup 是硬编码 { ok: true }，而它可以经
+      // 公开方法 shellCommandScopeDenied() 触发 ⇒ 任何插件都能让 uid 2000 跑一次
+      // dumpsys SurfaceFlinger。这不是「影响很小所以算了」：它是全文件唯一绕过「没有来源就拒」
+      // 的地方，后来者照着加一条 internal 键就会继承同样的豁免。
+      // 拿不到会话时返回 allowed:false ⇒ 反查拿到空 token 集 ⇒ 屏幕范围判定 fail-closed（拒绝），
+      // 安全方向正确。
+      const internalGate = resolved.session === undefined ? { ok: false } : this.gateFor(resolved.session)
+      const ok = internalGate.ok && op === 'shExec' && entry !== undefined && command !== undefined && entry.allows(command)
       writeAudit({ action: 'privileged-internal', call: internal, op, command: command ?? '', result: ok ? 'ok' : 'denied-internal-shape' })
       if (ok) return { allowed: true, internal: true }
       return {
@@ -1284,6 +1407,20 @@ export class AndroidPrivilegeService {
       if (op === 'shExec' && !decision.internal && command !== undefined && looksDangerousAdb(command)) {
         writeAudit({ action: 'shell-exec', args: { command }, result: 'denied-danger-service' })
         return { ok: false, error: '命令被特权 shell 通道危险检查拦截（服务面拒绝）。' }
+      }
+      // issue #1063：删除路径的危险检查必须挂**在这里**（执行面），而不是工具壳。
+      // 早前只有 shExec 一条，而 shRemove 的载荷是 args.remote —— 判据读 args.command 永远读不到，
+      // 于是 controlExec('shRemove', { remote: '/' }) 直达 uid-2000 的递归删除。
+      if (op === 'shRemove') {
+        const remote = (args as { remote?: unknown }).remote
+        if (looksDangerousRemovePath(remote)) {
+          writeAudit({ action: 'shell-remove', args: { remote }, result: 'denied-danger-path' })
+          return {
+            ok: false,
+            error: '删除路径被特权 shell 通道危险检查拦截（服务面拒绝）：'
+              + '只允许删除明确位于 /data/local/tmp 或本应用自有外部目录之下的路径。',
+          }
+        }
       }
     }
     if (A11Y_OPS.includes(op) && !this.a11yEnabled()) {
@@ -1364,7 +1501,26 @@ export class AndroidPrivilegeService {
         return { ok: false, error: decision.reason + ': ' + decision.guidance }
       }
     }
-    return this.#controlQueue.enqueue(op, args, timeoutMs)
+    // issue #1065：S-6 的「壳侧时限 < 引擎侧入队时限」不变量此前**只对 sh\* 成立**——sh\* 的调用点
+    // 显式传了 SHELL_EXEC_TIMEOUT_MS/SHELL_QUEUE_TIMEOUT_MS 两个值；而 input 类 op（click /
+    // longClick / setText / scroll / global）的调用点不传 timeoutMs，队列默认 8000ms，**壳侧没有
+    // 对应预算**。后果与 S-6 当初修的那个形态完全一样，只是换了 op 家族：壳侧执行慢于引擎侧截止
+    // ⇒ 迟到结果被丢弃 ⇒「点击其实已经在设备上发生了」却回失败 ⇒ 模型重试一个**非幂等**动作
+    // （发送 / 提交表单 / 删除），副作用被放大。
+    //
+    // 修法：把壳侧执行时限**一并下发**（args.timeoutMs），并让引擎侧入队时限比它多留余量。
+    // 为什么下发而不是在壳侧写死：壳侧按 args.timeoutMs 决定「还值不值得继续等」，而引擎侧按
+    // 入队时限决定「还等不等结果」——两者必须同源，否则又回到「两个时限各说各话」。
+    const engineBudget = timeoutMs ?? CONTROL_EXEC_TIMEOUT_MS
+    // 壳侧预算必须由**这一次的**引擎预算推出来（不能写死）：否则调用方传了更短的入队时限时，
+    // 壳侧预算反而更长 —— 又变成两个时限各说各话。留 20% 或 2s（取小者）作余量。
+    const margin = Math.min(CONTROL_EXEC_MARGIN_MS, Math.floor(engineBudget / 5))
+    const shellBudget = Math.max(1, engineBudget - margin)
+    // 只对「真的会让设备产生副作用」的 input 类 op 下发；纯读面与 neverA11y 族按各自通道的
+    // 默认跑（读没有副作用，迟到重试是安全的）。
+    const carryShellBudget = inputClassOp(op) && typeof (args as { timeoutMs?: unknown }).timeoutMs !== 'number'
+    const argsWithBudget = carryShellBudget ? { ...args, timeoutMs: shellBudget } : args
+    return this.#controlQueue.enqueue(op, argsWithBudget, engineBudget)
   }
 
   /**
@@ -1438,7 +1594,7 @@ export class AndroidPrivilegeService {
     }
     // review C11：raw shell 是绕过页面/工具层的执行面——范围不含 real 时真实屏读写命令在此拒绝。
     // 块G F2：命令显式指定了目标屏（`-d <id>`）时按**目标屏**判定，不再按命令词一刀切。
-    const scopeDenied = await this.adbCommandScopeDenied(command)
+    const scopeDenied = await this.adbCommandScopeDenied(command, auth)
     if (scopeDenied !== null) return { ok: false, stdout: '', guidance: scopeDenied }
     // S-6：壳侧执行时限与引擎入队时限**同时**下发，且入队 > 壳侧（见 SHELL_QUEUE_TIMEOUT_MS 的说明）。
     const r = await this.#controlExec(
@@ -1475,7 +1631,7 @@ export class AndroidPrivilegeService {
     }
     // review C11：screencap+pull / uiautomator dump 等行同样要在执行点复查屏幕范围。
     // 块G F2：`screencap -p -d <虚拟屏 id>` 是**读范围内的屏**，必须与无参 screencap 区分开。
-    const scopeDenied = await this.adbCommandScopeDenied(line)
+    const scopeDenied = await this.adbCommandScopeDenied(line, auth)
     if (scopeDenied !== null) return { ok: false, stdout: '', guidance: scopeDenied }
     const translated = translateAdbLine(line)
     if (!translated.ok) return { ok: false, stdout: '', guidance: translated.error }
@@ -1485,7 +1641,15 @@ export class AndroidPrivilegeService {
         const r = await this.controlExec('shExec', { command: step.command, timeoutMs: SHELL_EXEC_TIMEOUT_MS }, SHELL_QUEUE_TIMEOUT_MS, auth)
         if (!r.ok) return { ok: false, stdout: out, guidance: r.error }
         const data = (r.data ?? {}) as Record<string, unknown>
-        out += typeof data.stdout === 'string' ? data.stdout : ''
+        const stdout = typeof data.stdout === 'string' ? data.stdout : ''
+        out += stdout
+        // issue #1061：壳侧回执的 data.ok **必须**看。壳侧判据是
+        // `ok = complete && !truncated && exit == 0`（ShizukuUserService），所以 data.ok=false 同时覆盖
+        // 「非零退出」与「输出被截断」两种真实故障。只判传输层 r.ok 的后果：两种故障都被报成
+        // ok:true，错误文本混在 stdout 里交给调用方（manage 的截图 / uiautomator dump / 前台应用 /
+        // wm size 全部按 r.ok 分支 ⇒「工具报成功、输出里其实是错误」或「截断当完整清单」）。
+        // 同一函数的 pull/push 分支与 #execAdbShell 一直是对的，只有这里漏了。
+        if (data.ok !== true) return { ok: false, stdout: out.slice(0, 128 * 1024), guidance: shellFailureText(data) }
         continue
       }
       const r = step.kind === 'pull'
@@ -1539,7 +1703,7 @@ export const PRIVILEGE_STATUS_OUTPUT_SCHEMA: Record<string, unknown> = {
     writeMode: { type: 'string' },
     deviceModel: { type: 'string', description: '当前绑定设备型号（连接校验缓存；空=未知）' },
     message: { type: 'string' },
-    gates: { type: 'object', additionalProperties: true, description: '结构化授权事实（a11yEnabled/fullAccess/allowSwitch/paired/wirelessDebug/adbReady）' },
+    gates: { type: 'object', additionalProperties: true, description: '结构化授权事实（a11yEnabled/a11ySource/a11yHeartbeatAgeMs/fullAccess/allowSwitch/paired/wirelessDebug/adbReady）' },
     control: { type: 'object', additionalProperties: true, description: '控制通道运行时状态（a11yEnabled/queue/tokenConfigured）' },
     route: { type: 'object', additionalProperties: true, description: '每个常用操作走哪条通道/为什么/另一条缺什么（结构化路由）' },
     shell: { type: 'object', additionalProperties: true, description: '壳侧声明的协议版本与能力（caps.ops/view/gz）与协商结论' },
@@ -1590,13 +1754,17 @@ export function buildPrivilegeStatusToolPayload(
     const d = svc.controlDecision(op, session)
     // 0.14.0 §6：特权面 = Shizuku（内置 adb 退役）；无障碍仍是内容面的首选通道。
     const altPrivileged = facts.adbReady === true || facts.shizukuReady === true
-    const altA11y = svc.a11yEnabled()
+    const a11y = svc.a11yFacts()
     route[op] = {
       backend: d.backend,
       reason: d.reason,
       alternative: d.backend === 'a11y'
         ? { backend: 'shizuku', available: altPrivileged, missing: altPrivileged ? null : '设置页「手机控制」：安装 / 启动 / 授权 Shizuku' }
-        : { backend: 'a11y', available: altA11y, missing: altA11y ? null : '系统设置 → 无障碍 → 开启「DeepCode 设备控制」' },
+        : a11y.enabled
+          ? { backend: 'a11y', available: true, source: a11y.source, missing: null }
+          : a11y.source === 'disabled'
+            ? { backend: 'a11y', available: false, source: a11y.source, missing: a11yAlternativeHint(a11y.source) }
+            : { backend: 'a11y', source: a11y.source, missing: a11yAlternativeHint(a11y.source) },
     }
   }
   const queue = svc.controlStats()
@@ -1611,6 +1779,29 @@ export function buildPrivilegeStatusToolPayload(
     },
     control: { a11yEnabled: svc.a11yEnabled(), queue, tokenConfigured: controlTokenConfigured },
   }) as Record<string, JsonValue>
+}
+
+export function a11yStatusText(source: A11ySource, heartbeatAgeMs: number | null): string {
+  if (source === 'heartbeat') return '已开启（可用·来源 heartbeat）'
+  if (source === 'disabled') return '未开启（壳侧偏好明确关闭）'
+  if (source === 'stale' && heartbeatAgeMs !== null) {
+    return `心跳已过期 ${Math.round(heartbeatAgeMs / 1000)} 秒，服务状态未确认（按不可用处理）`
+  }
+  if (source === 'stale') return '心跳缺失，服务状态未确认（按不可用处理）'
+  return '状态未知（未读取到无障碍状态，按不可用处理）'
+}
+
+function a11yUnavailableText(source: A11ySource): string {
+  if (source === 'disabled') return '无障碍已确认未开启'
+  if (source === 'stale') return '无障碍状态未确认（心跳陈旧）'
+  if (source === 'unknown') return '无障碍状态未知'
+  return '无障碍通道不可用'
+}
+
+function a11yAlternativeHint(source: A11ySource): string {
+  if (source === 'disabled') return '系统设置 → 无障碍 → 开启「DeepCode 设备控制」'
+  if (source === 'stale') return '无障碍心跳陈旧、服务状态未确认；可直接试一次目标操作，再按结构化结果选择备用通道'
+  return '无障碍状态未知；可直接试一次目标操作，再按结构化结果选择备用通道'
 }
 
 function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record<string, unknown>): Record<string, unknown>; run(spec: Record<string, unknown>): Promise<Record<string, unknown>> }, controlTokenConfigured: () => boolean = () => false) {
@@ -1632,18 +1823,24 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
         // schema 静态类型放宽为 json 根后，渲染侧自行收窄（运行期结构由 schema 校验保证）。
         const v = value as Record<string, unknown>
         const gates = v.gates as ControlGateFacts | undefined
-        const control = v.control as { tokenConfigured?: boolean; queue?: { lastTakeAt?: number } } | undefined
-        const queueFresh = typeof control?.queue?.lastTakeAt === 'number' && control.queue.lastTakeAt > 0
-          && Date.now() - control.queue.lastTakeAt < 20_000
+        const control = v.control as { tokenConfigured?: boolean } | undefined
+        const a11ySource = gates?.a11ySource ?? 'unknown'
+        // #648：轮询新鲜度与无障碍是两条独立的生命线，**必须分两行渲染**。
+        // 旧实现把「壳侧轮询在线」挂在「无障碍通道」这一行上，看起来像是无障碍也可用的佐证，
+        // 而 a11y 已死时轮询照样在线——那正是 #648 让调用方误判的原因。
+        const polling = gates?.polling
+        const pollingLine = polling === undefined
+          ? '壳侧轮询：未知'
+          : polling.active
+            ? '壳侧轮询：在线' + (typeof polling.ageMs === 'number' ? '（' + Math.round(polling.ageMs / 1000) + 's 前取活）' : '')
+            : '壳侧轮询：离线' + (typeof polling.ageMs === 'number' ? '（' + Math.round(polling.ageMs / 1000) + 's 未取活）' : '')
         return [{
           type: 'text',
           text: [
             `授权档位 ${String(v.tier)}${v.deviceModel ? ' · ' + String(v.deviceModel) : ''}`,
-            '无障碍通道：' + (gates?.a11yEnabled
-              ? '已开启（可用·来源 ' + String(gates?.a11ySource ?? 'unknown') + '）'
-              : '未开启')
-              + (control?.tokenConfigured === true ? ' · 令牌已配置' : '')
-              + `${queueFresh ? ' · 壳侧轮询在线' : ' · 壳侧轮询离线'}`,
+            '无障碍通道：' + a11yStatusText(a11ySource, gates?.a11yHeartbeatAgeMs ?? null)
+              + (control?.tokenConfigured === true ? ' · 令牌已配置' : ''),
+            pollingLine,
             `ADB 通道：${gates?.adbReady ? '已就绪' : `未就绪（完全访问=${String(gates?.fullAccess)} 允许访问=${String(gates?.allowSwitch)} 配对=${String(gates?.paired)} 无线调试=${String(gates?.wirelessDebug)}）`}`,
             // A2（0.14.1 缺陷）：Shizuku 事实必须有**自己的行**。旧实现只按 adbReady 三选一，
             // 并把 Shizuku 的 message 挂在「ADB 提示：」标签下——唯一用来诊断通道的工具却把
@@ -1657,9 +1854,9 @@ function tools(svc: AndroidPrivilegeService, shellFace?: { resolve?(spec: Record
             // 0.14.1：无障碍关时**不得再把模型引向 android_ui_dump**——那条路在纯 Shizuku 下恒不可用，
             // 会白撞一堵墙；此时控件树的唯一来源是 android_ui_tree（与 ui_dump 同形，可 ref 操作）。
             gates?.a11yEnabled ? '结论：设备控制可用（走无障碍通道）——下一步用 android_ui_dump 拿语义清单'
-              : gates?.shizukuReady === true ? '结论：设备控制可用（走 Shizuku 特权通道）——**无障碍未开启，控件树用 android_ui_tree**（与 android_ui_dump 同形、可 ref 操作）'
-                : gates?.adbReady ? '结论：设备控制可用（走 ADB 通道）——**无障碍未开启，控件树用 android_ui_tree**'
-                : '结论：不可用——开启任一通道即可（推荐无障碍：系统设置 → 无障碍 → DeepCode 设备控制，一步即用）',
+              : gates?.shizukuReady === true ? `结论：设备控制可用（走 Shizuku 特权通道）——**${a11yUnavailableText(a11ySource)}，控件树用 android_ui_tree**（与 android_ui_dump 同形、可 ref 操作）`
+                : gates?.adbReady ? `结论：设备控制可用（走 ADB 通道）——**${a11yUnavailableText(a11ySource)}，控件树用 android_ui_tree**`
+                  : `结论：不可用——${a11yUnavailableText(a11ySource)}；开启任一可用通道即可（推荐无障碍：系统设置 → 无障碍 → DeepCode 设备控制）`,
             v.message ? `通道说明：${String(v.message)}` : '',
             (() => {
               const shell = v.shell as { protocol?: { shell?: number; engine?: number; ok?: boolean; reason?: string }; caps?: { ops?: unknown[] } | null } | undefined
@@ -1854,8 +2051,9 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
   // F0.3 引擎事件桥（最小版，2026-08-24）：session 事件 → 「任务完成」标记文件。
   // 壳侧 WatchdogV2 每 5s 探活周期顺带消费标记 → 系统通知栏弹「任务完成」（POST_NOTIFICATIONS
   // 已由壳首启授权）。引擎→壳方向无页面依赖（不依赖 androidBridge/WebView 上下文）——
-  // 标记文件路经 files/home/.dsh/.task-done.ndjson，壳读后清空。事件面：assistant/message
-  // （agent 完成一轮完整输出）+ assistant/message.interrupted（被打断不弹）。
+  // 标记文件路经 files/home/.dsh/.task-done.ndjson，壳读后清空。
+  // 事件面：**turn/end 写入，aborted 不写**（issue #561）。此前挂在 assistant/message 上——每收到
+  // 一条 assistant 消息就写一行，于是任务其实还在跑（引擎侧仍显示「运行中」）通知栏已弹「任务完成」。
   const TASK_DONE_MARKER = (process.env.DSH_HOME ?? '/data/user/0/com.dsharnessmobile.shell/files/home/.dsh') + '/.task-done.ndjson'
   // 审计 §7.8：每次事件一次同步 append 合并成 100ms 批量（见 AppendBatcher 的不丢数据四条保证）。
   // 兼容期信道（老壳仍读它），consumer 是 WatchdogV2 每 5s 一拍，100ms 窗口远小于消费周期。
@@ -2032,8 +2230,8 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
             const content = (ev.data as { message?: { content?: unknown } })?.message?.content
             const text = visibleText(content)
             notifyState.setSummary(sessId, text)
-            // 兼容期：老壳仍读 .task-done.ndjson（新壳只读 .notify.ndjson，双读不双发）。
-            appendTaskMarker(sessId, notifyState.titleFor(sessId), summarize(text, 80) || '任务完成')
+            // 这里**只累积摘要，不写旧信道标记**（issue #561）：assistant/message 每条消息都会到，
+            // 在此写 .task-done.ndjson 等于任务中途就投递「任务完成」。真实写入点见下方 turn/end 分支。
             break
           }
           case 'deliverables/presented':
@@ -2062,6 +2260,14 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
               )
             }
             const report = notifyState.endTurn({ sessionId: sessId, turn: ev.data?.turn, reason: ev.data?.reason, now })
+            // 旧信道 `.task-done.ndjson`（老壳仍读它）：与本次 report 同源同刻写入（issue #561）。
+            // 判据复用 shouldPopupReport——只在该轮结局会弹通知时写，aborted/interrupted 不写，
+            // 与 NT-05 新信道的 popup 语义一致。字段取该轮 report：sessionId / title / summary，
+            // 摘要为空时回落「任务完成」（与老壳的通知正文文案兼容）。
+            // 时序：turn/end 之后才写，故任务执行期间 notification 栏不会再出现「任务完成」。
+            if (shouldPopupReport(report.outcome)) {
+              appendTaskMarker(report.sessionId, report.title, report.summary || '任务完成')
+            }
             appendNotify({
               kind: 'report',
               outcome: report.outcome,
@@ -2124,9 +2330,13 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
       const shizuku = await svc.shizukuChannelProbed()
       // **未知时必须整体缺席该键**，不得写成 `shizuku: undefined`——工具出口会把它判成
       // 「返回值含 undefined 成员」（无损 JSON 契约），整条工具返回值被拒、模型拿不到任何数据。
-      return shizuku === undefined
-        ? { a11y: svc.a11yEnabled() }
-        : { a11y: svc.a11yEnabled(), shizuku }
+      const a11y = svc.a11yFacts()
+      const a11yChannel = a11y.source === 'heartbeat'
+        ? { a11y: true }
+        : a11y.source === 'disabled' ? { a11y: false } : {}
+      const heartbeat = a11y.heartbeatAgeMs === null ? {} : { a11yHeartbeatAgeMs: a11y.heartbeatAgeMs }
+      const facts = { ...a11yChannel, a11ySource: a11y.source, ...heartbeat }
+      return shizuku === undefined ? facts : { ...facts, shizuku }
     },
   )
   // 状态端点（浏览端面/设置页查询与展示）。**只读**：无任何写面——授权变更经

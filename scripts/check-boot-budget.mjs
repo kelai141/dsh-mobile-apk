@@ -493,18 +493,37 @@ export function runChecks(input, budgets = resolveBudgets([])) {
   // 同时断言「TOTAL 行数 == 末次 calls」：P1 的 calls 是进程内累计计数器，每次 compose 返回处
   // 打一行，故两者必须相等；不等即说明有行被日志轮转截断/解析漏读，读数不可信——判红而非静默取小。
   {
-    const calls = probe.hasProbe ? probe.maxComposeCalls : undefined
+    // issue #1194：调用数取原始事件行，不取被检查方自报的 TOTAL 汇总。
+    //
+    // 旧判据只数 TOTAL calls= 行（maxComposeCalls），而同一份产物里的 [perf] compose #n
+    // 事件行被 C2 用来算耗时、却从不计数。于是 8 次 compose + 只打 1 行 TOTAL（自报 calls=1）
+    // → C3 打印「= 1 ≤ 2」PASS。少打一行 TOTAL、或 TOTAL 只报最后一次，预算就自动放宽 ——
+    // 判据读的是被检查方的自述。
+    //
+    // 现在两路取值并取最大值：
+    //   - events：真实事件行条数（原始事实，除非不打印事件否则改不了）；
+    //   - reported：自报汇总（保留，累计计数器能暴露「事件行被截断」）。
+    // 两者取大，任何一路偏小都不会放宽预算。
+    const events = probe.hasProbe ? probe.composeDur.length : undefined
+    const reported = probe.hasProbe ? probe.maxComposeCalls : undefined
+    const calls = events === undefined || reported === undefined
+      ? undefined : Math.max(events, reported)
     const last = probe.hasProbe ? probe.composeCalls : undefined
     const lines = probe.totalLineCount ?? 0
     if (calls === undefined) {
       add('C3', 'C3 compose 调用数 ≤ ' + budgets.composeCalls, false, '缺 TOTAL calls= 读数',
         strict ? 'fail' : 'skip')
     } else {
+      // 自洽判据保留：TOTAL 行数应当等于末次自报 calls。
+      // 但它不能单独充当调用数判据 —— 只打 1 行 TOTAL 时它对 1 === 1 恒成立。
       const consistent = lines === last
-      add('C3', 'C3 compose 调用数 = ' + calls + '（全部 ' + lines + ' 条 TOTAL 的最大值）≤ ' + budgets.composeCalls,
+      add('C3', 'C3 compose 调用数 = ' + calls + '（事件行 ' + events + ' / 自报 ' + reported
+        + ' 取大）≤ ' + budgets.composeCalls,
         consistent && calls <= budgets.composeCalls,
-        consistent ? 'calls=' + calls + ' 超预算 ' + budgets.composeCalls : ('TOTAL 行数 ' + lines
-          + ' ≠ 末次 calls=' + last + '（累计计数器每次 compose 打一行，不等即有行被截断/漏读，读数不可信）'))
+        consistent
+          ? 'calls=' + calls + '（事件行 ' + events + '，自报 ' + reported + '）超预算 ' + budgets.composeCalls
+          : ('TOTAL 行数 ' + lines + ' ≠ 末次 calls=' + last
+            + '（累计计数器每次 compose 打一行，不等即有行被截断/漏读，读数不可信）'))
     }
   }
 
@@ -641,8 +660,9 @@ function selfTest() {
     const r = run(segLine(), body)
     check('④b-③ 真值 calls=8 > 阈值 2 → C3 判红（旧实现此处打印 PASS）',
       okOf(r, 'C3') === false, 'C3 ok=' + okOf(r, 'C3') + ' label=' + String(resultOf(r, 'C3')?.label ?? ''))
-    check('④b-④ 判红理由点名真值 8 与「全部 N 条」口径',
-      String(resultOf(r, 'C3')?.label ?? '').includes('8') && String(resultOf(r, 'C3')?.label ?? '').includes('全部 8 条'),
+    // issue #1194 后 C3 口径是「事件行 / 自报 取大」，理由行要能看见两个来源。
+    check('④b-④ 判红理由点名真值 8 与「事件行/自报取大」口径',
+      String(resultOf(r, 'C3')?.label ?? '').includes('8') && String(resultOf(r, 'C3')?.label ?? '').includes('事件行') && String(resultOf(r, 'C3')?.label ?? '').includes('自报'),
       String(resultOf(r, 'C3')?.label ?? ''))
     // 行数 ≠ 末次 calls（行被截断/漏读）→ 读数不可信，必须判红而不是静默取小。
     const truncated = run(segLine(), multiTotalProbe(3, 8))

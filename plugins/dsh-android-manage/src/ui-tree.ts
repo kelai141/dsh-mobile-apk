@@ -70,19 +70,54 @@ export interface NodeEntry {
 const ATTR_RE = /([a-zA-Z-]+)="([^"]*)"/g
 
 export function decodeEntities(s: string): string {
+  // `&amp;` **必须最后处理**（且只解一次）：它代表一个字面量 `&`，若提前展开，后续的数字实体
+  // 规则会把 `&amp;#60;`（应显示成 `&#60;`）再解成 `<` —— 双重解码。
+  // 2026-10-28 自查：旧实现把 `&#(\d+);` 排在 `&amp;` 之后，于是**只有数字实体这一支**会双重解码
+  // （`&amp;lt;` 反而正确，因为命名实体都在 `&amp;` 之前 ⇒ 同一个函数两种口径）。
+  // 调用点在 protocol-v2 的 text/desc/rid 解码（控件文本上屏路径）。
   return s
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
-    .replace(/&amp;/g, '&')
     .replace(/&#(\d+);/g, (_m, n: string) => String.fromCodePoint(Number(n)))
+    .replace(/&amp;/g, '&')
+}
+
+/**
+ * bounds 的**唯一一份**取数正则（issue #1286）。
+ *
+ * 为什么是**不锚定**（`exec` 首个匹配），而不是锚定到整串：
+ * ------------------------------------------------------------------
+ * 这里原先有三份各自为政的口径 —— 两个解析器用不锚定的 `exec`，而完整性闸
+ * （{@link checkUiTreeParse}）用锚定的 `^…$`。三份里两份宽、一份严，于是出现
+ * 「旧解析器能吃、新闸不吃」的形状：尾随空格 `"[0,0][10,10] "` 会被解析成合法盒子，
+ * 却让**整棵树**判红、`android_ui_tree` 零节点返回。
+ *
+ * 收敛到哪一侧是**失败模式**的取舍，不是口味问题：
+ *   · 收敛到严（都锚定）⇒ 一个尾空格从「丢这一个节点」升级成「整棵树拒绝」，把局部
+ *     降级放大成全局失败。真机厂商输出带尾随空白的概率远高于零，这是把可用的树换成不可用。
+ *   · 收敛到宽（都不锚定）⇒ 尾随/前导空白、多余后缀仍按既有行为解析出盒子；拿不到数字
+ *     的形状（`[x1,y1][x2,y2]` 这类占位符）依旧解析失败、该节点丢弃，**与 #1210 之前一致**。
+ *
+ * 因此取「宽」，且让三处共用这一份正则：**判据与它所守的解析器必须接受同一个集合**，
+ * 否则闸的失败就不是解析失败的证据。闸侧的配套变化见 {@link BOUNDS_SHAPE}。
+ */
+const BOUNDS_RE = /\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]/
+
+/**
+ * bounds 的取数结果：命中返回四个坐标，未命中返回 null。
+ * @param b - 属性原值。
+ * @returns 坐标，或 null（形状不可解析）。
+ */
+function matchBounds(b: string | undefined): RegExpExecArray | null {
+  if (!b) return null
+  return BOUNDS_RE.exec(b)
 }
 
 /** bounds="[x1,y1][x2,y2]" → {x,y,w,h}；畸形/缺省按零尺寸（0,0,0,0）——V2 编码保留零尺寸节点做骨架。 */
 export function parseBoundsToBox(b: string | undefined): { x: number; y: number; w: number; h: number } {
-  if (!b) return { x: 0, y: 0, w: 0, h: 0 }
-  const m = /\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]/.exec(b)
+  const m = matchBounds(b)
   if (!m) return { x: 0, y: 0, w: 0, h: 0 }
   const x1 = Number(m[1]); const y1 = Number(m[2]); const x2 = Number(m[3]); const y2 = Number(m[4])
   return { x: x1, y: y1, w: Math.max(0, x2 - x1), h: Math.max(0, y2 - y1) }
@@ -90,8 +125,7 @@ export function parseBoundsToBox(b: string | undefined): { x: number; y: number;
 
 /** 解析 bounds="[x1,y1][x2,y2]"；畸形/零尺寸返回 null（该节点丢弃）。 */
 function parseBounds(b: string | undefined): { cx: number; cy: number; w: number; h: number } | null {
-  if (!b) return null
-  const m = /\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]/.exec(b)
+  const m = matchBounds(b)
   if (!m) return null
   const x1 = Number(m[1]); const y1 = Number(m[2]); const x2 = Number(m[3]); const y2 = Number(m[4])
   const w = x2 - x1; const h = y2 - y1
@@ -120,7 +154,12 @@ export function parseUiTreeXml(xml: string): { raw: RawNode[]; rotation: number 
   // 栈帧：index = 本节点在同父下的序号；next = 下一个子节点槽位。
   // 虚拟根永远在栈底，其 index 不参与路径。
   const stack: Array<{ index: number; next: number }> = [{ index: -1, next: 0 }]
-  const re = /<node\s([^>]*?)(\/?)>|<\/node>/g
+  // 属性区必须允许引号内的 `>`：XML 规范只强制转义 `&`、`<` 和定界引号，**字面 `>` 在属性值里合法**
+  // （`text="a>b"`）。旧写法 `[^>]*?` 会在那个 `>` 处截断 ⇒ 该节点**属性全丢** ⇒ 下游 `parseBounds`
+  // 失败 ⇒ 节点被整个丢弃，而 `checkUiTreeParse` 只比节点数、照样报 OK（2026-10-28 自查）。
+  // 实测现状：Android `uiautomator dump` 走 XmlSerializer 会把 `>` 转成 `&gt;`，故当前不可达 ——
+  // 但解析器按语法接受它、自检也要能抓住属性丢光，属纵深防御。
+  const re = /<node\s((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>|<\/node>/g
   let m: RegExpExecArray | null
   while ((m = re.exec(xml)) !== null) {
     if (m[0] === '</node>') {
@@ -151,11 +190,35 @@ export function parseUiTreeXml(xml: string): { raw: RawNode[]; rotation: number 
  * 绝不静默产出错树（错误树比没有树更危险）。
  * 检查：① 节点标签计数与解析产出一一对应；② 根节点必为 "0"；
  * ③ 栈未完全归位（未闭合的开标签）视为畸形——按容错放行但由调用方标记。
+ *
+ * issue #1210：原判据只要求 `bounds` 是**非空字符串**，不要求它能被解析，于是「闸报 OK」与
+ * 「100% 丢节点」可以同时成立（两个解析器要求精确的 `[d,d][d,d]`，偏差即返回 null，下游
+ * `parseBounds` 返回 null 就 continue）。这里补一条**形状**判据：只判形状，不判尺寸——
+ * `[0,0][0,0]` 是合法的零尺寸骨架节点，必须继续放行，所以不能复用 `parseBounds`
+ * （它对零尺寸也返回 null，会把合法节点判成坏）。
+ *
+ * issue #1286：形状判据**必须与解析器共用同一个正则**（{@link BOUNDS_RE}），不得另立一份。
+ * 原先这里是锚定的 `^…$`，而两个解析器不锚定，于是尾随空格的 bounds 被解析成合法盒子、
+ * 却让整棵树判红。判据比它所守的解析器更严时，闸的失败就不再是解析失败的证据 ——
+ * 它变成了一条自己的新规矩，而这条新规矩的代价是「局部降级放大成全局拒绝」。
+ * 现在两边接受**同一个集合**：栅绿 ⇔ 每个节点都能取到坐标（或会按既有行为被丢弃）。
  */
+const BOUNDS_SHAPE = BOUNDS_RE
+
 export function checkUiTreeParse(xml: string, raw: RawNode[]): { ok: true } | { ok: false; reason: string } {
   const tagCount = (xml.match(/<node[\s>]/g) ?? []).length
   if (raw.length !== tagCount) {
     return { ok: false, reason: `节点数不一致：XML 含 ${tagCount} 个 <node> 标签，解析产出 ${raw.length} 条（源 XML 畸形或版本不兼容）` }
+  }
+  // 属性丢光时节点仍在 `raw` 里（只是没有 bounds）⇒ 只比标签数会漏。uiautomator 的每个 `<node>`
+  // 都带 bounds；缺了就是解析断了（例如属性值里有未被转义的 `>` 让属性区提前闭合）。
+  const noBounds = raw.findIndex((r) => typeof r.attrs.bounds !== 'string' || r.attrs.bounds === '')
+  if (noBounds >= 0) {
+    return { ok: false, reason: `第 ${noBounds} 个节点（id "${raw[noBounds].id}"）没有 bounds 属性——属性区解析失败（XML 含未转义的 > 或属性写法异常），解析结果不可信` }
+  }
+  const badShape = raw.findIndex((r) => !BOUNDS_SHAPE.test(r.attrs.bounds ?? ''))
+  if (badShape >= 0) {
+    return { ok: false, reason: `第 ${badShape} 个节点（id "${raw[badShape].id}"）的 bounds 形状非法：应形如 [x1,y1][x2,y2]，实得 ${JSON.stringify(String(raw[badShape].attrs.bounds ?? ''))}——解析结果不可信` }
   }
   if (raw.length > 0 && raw[0].id !== '0') {
     return { ok: false, reason: `根节点 id 应为 "0"，实得 "${raw[0].id}"（栈机归位错误）` }
@@ -214,7 +277,12 @@ export function pruneNodes(
     const editable = at.editable === 'true'
     // 0.13.5：不再按「可交互或带标签」剪枝——完整暴露（容器/无标签节点同样给模型，
     // 复杂界面靠结构定位；去重仍保留，避免同一位置同内容的重复行）。
-    const dedupeKey = [text, desc, at.class ?? '', bounds.cx, bounds.cy].join('|')
+    // **分隔符必须是文本里不可能出现的字符**（2026-10-28 自查）：旧实现用 `'|'`，而 UI 文本里
+    // `|` 非常常见（「标题 | 副标题」这类），于是 `text="a|b", desc="c"` 与 `text="a", desc="b|c"`
+    // 拼出同一个 key ⇒ 两个真实节点被当成重复、丢掉一个（模型看到的清单少一项、目标点不到）。
+    // 与 `protocol-v2.ts` 的叶子去重 key 统一用 `\u0000`（那边一直是这么写的 —— 同仓同类判据
+    // 必须共用一份口径）。
+    const dedupeKey = [text, desc, at.class ?? '', bounds.cx, bounds.cy].join('\u0000')
     if (seen.has(dedupeKey)) continue
     seen.add(dedupeKey)
     nodes.push({
@@ -230,7 +298,10 @@ export function pruneNodes(
       cy: bounds.cy,
       w: bounds.w,
       h: bounds.h,
-      depth: r.id === '' ? 0 : r.id.split('.').length,
+      // 0 起始：根（原始 id '0'）depth=0。旧实现漏了 -1 ⇒ 根算成 1，而 V2 编码侧的
+      // `rowsFromRaw` 一直是 `length - 1`（0 起始）⇒ 两条路径的深度差 1，渲染缩进整体偏一级
+      // （2026-10-29 自查：同一份三层 XML，pruneNodes 给 1/2/3，rowsFromRaw 给 0/1/2）。
+      depth: r.id === '' ? 0 : r.id.split('.').length - 1,
       clickable,
       scrollable,
       editable,
@@ -299,15 +370,31 @@ export function resolveRef(
   }
   if (kind === 'id') {
     const hit = byId.get(value)
-    if (!hit) return { ok: false, error: `id "${value}" 不在最近一次取树结果中（页面可能已变化）——请重新取树（android_ui_dump 或 android_ui_tree）` }
+    if (!hit) {
+      // 「页面可能已变化」对了一半：更常见的成因是 **id 形态用错**（缓存键是 n0/n1 这种
+      // 剪枝后编号，不是壳侧原始 id "0.1"）。原文案只引导「重新取树」，而重新取树后
+      // id:0.1 仍然找不到（缓存键永远是 nN）⇒ 死循环引导。把两种成因与正确形态一起说清。
+      const sample = nodes.length > 0 ? nodes[0].id : 'n0'
+      return {
+        ok: false,
+        error: `id "${value}" 不在最近一次取树结果中——两种可能：① id 形态用错（本次取树的 id 形如 ${sample}，请直接用它，而不是壳侧原始 id）；② 页面已变化（请重新取树 android_ui_dump / android_ui_tree）`,
+      }
+    }
     return { ok: true, node: hit.n }
   }
   // 消歧后缀：#N（第 N 个匹配）/ @nX（限定在 nX 子树内）
-  let occurrence = 0
+  // `null` = **未指定序号**（区别于 `#0`）。旧实现用 0 当哨兵，于是 `text:foo#0` 被静默当成
+  // 「没写序号」⇒ 单候选时直接返回第 1 个、多候选时报「匹配 N 个」，用户看到的都不是
+  // 「#0 非法」——与本函数「绝不静默挑一个」的契约矛盾（2026-10-28 自查）。
+  let occurrence: number | null = null
   let scopeId = ''
   const occMatch = /#(\d+)\s*$/.exec(value)
   if (occMatch) {
-    occurrence = Number(occMatch[1])
+    const n = Number(occMatch[1])
+    if (!Number.isInteger(n) || n < 1) {
+      return { ok: false, error: `${kind} 的序号后缀 #${occMatch[1]} 非法：序号从 1 开始（例：${kind}:${value.slice(0, occMatch.index).slice(0, 20)}#2）` }
+    }
+    occurrence = n
     value = value.slice(0, occMatch.index)
   }
   const scopeMatch = /@(n\d+)\s*$/.exec(value)
@@ -316,6 +403,18 @@ export function resolveRef(
     value = value.slice(0, scopeMatch.index)
   }
   const t = value.trim()
+  // 空值必须在进匹配之前拒掉。`text:` / `desc:` / `rid:` 是**线性字段比对**，空串会命中
+  // 「该字段恰好为空」的节点——目录里只要只剩一个空文本节点（很常见：说明性 TextView、
+  // 占位 View），`text:` 就会静默命中它并返回 ok。模型漏写值的手误于是变成一次**看似成功
+  // 的点击**，落到一个完全无关的节点上。`id:` 因为 byId 没有 "" 键天然被拒，四条前缀行为
+  // 不一致，这里统一 fail-closed。
+  if (t === '') {
+    return {
+      ok: false,
+      error: `ref "${kind}:" 的值不能为空——请写成 ${kind}:<具体值>`
+        + (kind === 'text' || kind === 'desc' ? `（例如 ${kind}:确定）` : '（例如 rid:com.app:id/btn）'),
+    }
+  }
   let pool = nodes
   if (scopeId !== '') {
     const scope = byId.get(scopeId)
@@ -333,15 +432,25 @@ export function resolveRef(
       if (pool.length === 0) pool = [scope.n]
     }
   }
-  const cands = pool.filter((n) => (kind === 'text' ? n.text === t : kind === 'desc' ? n.desc === t : n.rid === t))
-  if (cands.length === 0) {
+  // issue #1406：编号口径必须与渲染侧**完全一致**——都是「按**单一字段**在**整份取树结果**里的顺序」。
+  // 旧实现按 pool（可能已被 scope 缩小）过滤，而清单用整份 nodes 编号 ⇒ 模型照清单写
+  // `text:X#2` 会点到另一个节点，且回 ok=true。
+  const fieldOf = (n: UiNode): string => (kind === 'text' ? n.text : kind === 'desc' ? n.desc : n.rid)
+  const all = nodes.filter((n) => fieldOf(n) === t)
+  const cands = pool === nodes ? all : all.filter((n) => pool.includes(n))
+  if (all.length === 0) {
     return { ok: false, error: `没有 ${kind} 为 "${t.slice(0, 30)}" 的节点${scopeId ? `（作用域 ${scopeId}）` : ''}——请重新取树（android_ui_dump 或 android_ui_tree）确认当前页面` }
   }
-  if (occurrence > 0) {
-    if (occurrence > cands.length) {
-      return { ok: false, error: `${kind} "${t.slice(0, 30)}" 只有 ${cands.length} 个匹配，请求的是第 ${occurrence} 个`, matches: cands.slice(0, 8) }
+  if (occurrence !== null) {
+    // 校验与取值都按**全局**序（与清单一致），作用域只用来拒绝越界引用。
+    if (occurrence > all.length) {
+      return { ok: false, error: `${kind} "${t.slice(0, 30)}" 只有 ${all.length} 个匹配，请求的是第 ${occurrence} 个`, matches: all.slice(0, 8) }
     }
-    return { ok: true, node: cands[occurrence - 1], matches: cands.length > 1 ? cands : undefined }
+    const target = all[occurrence - 1]
+    if (!cands.includes(target)) {
+      return { ok: false, error: `${kind} "${t.slice(0, 30)}#${occurrence}" 落在作用域 ${scopeId} 之外——请去掉 scopeid 或改用在该作用域内的序号`, matches: cands.slice(0, 8) }
+    }
+    return { ok: true, node: target, matches: all.length > 1 ? all : undefined }
   }
   if (cands.length === 1) return { ok: true, node: cands[0] }
   // 多个候选：不猜。列出候选（含类型/坐标），让模型用 id 或 #N / @nX 消歧。
@@ -392,4 +501,27 @@ export function scopePoolV2(v: { rows: UiNode[]; subtreeEnd: Int32Array }, scope
   if (!Number.isInteger(i) || i < 0 || i >= v.rows.length) return null
   const end = v.subtreeEnd[i]
   return v.rows.slice(i, end > i ? end : i + 1)
+}
+
+/**
+ * 0.13.8 P0-4：树结构指纹（FNV-1a）——「界面未变」快路径的判定依据。
+ * 覆盖定位所需字段（文本/描述/类型/几何/交互性）；任一变化 → 指纹翻转 → 完整重抓。
+ * 纯追加语义：指纹相同只回一行「未变」摘要，绝不改写历史结果（L1）。
+ */
+export function treeFingerprint(nodes: UiNode[]): string {
+  let h = 0x811c9dc5
+  for (const n of nodes) {
+    // **分隔符必须是文本里不可能出现的字符**：这段串是「界面未变」快路径的判据，
+    // 用 `|` 分隔时，同一节点（同 id / 同几何）的文本若恰好从 `("a|b","c")` 变成
+    // `("a","b|c")`，两串逐字节相同 ⇒ 指纹不翻转 ⇒ 回「未变」摘要、模型复用旧引用 ⇒ 点错目标。
+    // 统一用 `\u0000`（与 `pruneNodes` / `protocol-v2` 同口径）。
+    const s = `${n.id}\u0000${n.parentId}\u0000${n.text}\u0000${n.desc}\u0000${n.rid}\u0000${n.type}\u0000${n.cx},${n.cy},${n.w},${n.h}\u0000${n.clickable ? 1 : 0}${n.editable ? 1 : 0}${n.scrollable ? 1 : 0}${n.checked ? 1 : 0}${n.visible ? 1 : 0}`
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i)
+      h = Math.imul(h, 0x01000193) >>> 0
+    }
+    h ^= 0xff
+    h = Math.imul(h, 0x01000193) >>> 0
+  }
+  return 'fp' + h.toString(16).padStart(8, '0')
 }

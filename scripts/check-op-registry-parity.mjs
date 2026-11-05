@@ -106,6 +106,22 @@ function main() {
     console.error('CHECK-OP-REGISTRY-PARITY FAILED：壳侧 REAL_SCREEN_OPS 未解析到（锚点被改名/改形？）\n  ' + shellPath)
     process.exit(1)
   }
+  // issue #1047：旧实现只比两侧差集，于是**两侧同时清空**也会「逐条相同」通过（vacuous pass）。
+  // 空清单不表示一致，表示锚点被改名或正则失配 —— 任一侧为空必须判红。
+  if (engineOps.length === 0 || shellOps.length === 0) {
+    console.error('CHECK-OP-REGISTRY-PARITY FAILED：清单解析为空（引擎 ' + engineOps.length + ' 条，壳侧 ' + shellOps.length + ' 条）——')
+    console.error('  空清单不等于「一致」：多半是锚点被改名或正则失配。')
+    console.error('  引擎 ' + enginePath)
+    console.error('  壳侧 ' + shellPath)
+    process.exit(1)
+  }
+  // issue #1047：旧实现只比差集，两侧同时清空也会「逐条相同」通过（vacuous）。
+  // 空清单不表示一致，表示锚点/正则坏了 —— 任一侧为空必须判红。
+  if (engineOps.length === 0 || shellOps.length === 0) {
+    console.error('CHECK-OP-REGISTRY-PARITY FAILED：清单解析为空（引擎 ' + engineOps.length + ' 条，壳侧 ' + shellOps.length + ' 条）——')
+    console.error('  空清单不等于「一致」：多半是锚点被改名或正则失配。')
+    process.exit(1)
+  }
   const r = compare(engineOps, shellOps)
   if (!r.ok) {
     console.error('CHECK-OP-REGISTRY-PARITY FAILED：两份「会读设备屏的 op」清单不一致——')

@@ -417,9 +417,13 @@ export class SidebarBubbles {
       else this.actions.append(proxy)
     }
     if (this.options.workspaces) {
-      const split = button('dsh-bubble-control'); split.textContent = '分栏'; split.setAttribute('aria-label', '创建双工作区'); split.dataset.dshWorkspaceSplit = '';
+      const split = button('dsh-bubble-control'); split.dataset.dshWorkspaceSplit = ''
+      split.textContent = this.options.t('split')
+      split.setAttribute('aria-label', this.options.t('splitLabel'))
       split.addEventListener('click', () => { if (this.options.workspaces?.split()) this.setOpen(false) })
-      const float = button('dsh-bubble-control'); float.textContent = '小窗'; float.setAttribute('aria-label', '将当前标签小窗化'); float.dataset.dshWorkspaceFloat = '';
+      const float = button('dsh-bubble-control'); float.dataset.dshWorkspaceFloat = ''
+      float.textContent = this.options.t('float')
+      float.setAttribute('aria-label', this.options.t('floatLabel'))
       float.addEventListener('click', () => { if (this.options.workspaces?.float()) this.setOpen(false) })
       this.actions.append(split, float)
     }
@@ -642,8 +646,13 @@ export class SidebarBubbles {
     const y = press.latestY
     const delta = y < rect.top + 44 ? -Math.min(10, Math.max(0, (rect.top + 44 - y) / 4))
       : y > rect.bottom - 44 ? Math.min(10, Math.max(0, (y - rect.bottom + 44) / 4)) : 0
-    if (delta && press.latestX >= rect.left && press.latestX <= rect.right) { this.popover.scrollTop += delta; this.trackDrag() }
-    this.trackDrag()
+    // 性能（perf-smooth P2-Top2）：上面这次 trackDrag 不能删 —— scrollTop += delta 改变了滚动位置，
+    // 几何必须重算。但它已经把本帧需要的全部测量做完了（1 次 popover 矩形 + 逐行矩形），紧接着的
+    // 无条件重算只是把同一份测量再跑一遍：每帧 2 次 trackDrag = 2 次强制同步布局 + 逐行测量翻倍。
+    // 打标记跳过即可，走不到滚动分支时仍然照旧补一次。
+    let tracked = false
+    if (delta && press.latestX >= rect.left && press.latestX <= rect.right) { this.popover.scrollTop += delta; this.trackDrag(); tracked = true }
+    if (!tracked) this.trackDrag()
     this.scrollFrame = requestAnimationFrame(this.autoScroll)
   }
 
