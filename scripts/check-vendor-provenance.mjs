@@ -48,9 +48,49 @@ import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(HERE, '..')
+/** 主 vendored 目录（带 PROVENANCE.md，判据 ④ 的自述在那里）。 */
 const VENDOR = 'vendor/dsh-plugin-subscriptions'
 const MANIFEST = 'scripts/vendor-provenance.json'
 const PROVENANCE = VENDOR + '/PROVENANCE.md'
+
+/**
+ * 必须被字节绑定的**全部** vendored 目录（issue #1311）。
+ *
+ * 缺陷形态：本门禁原先把 `VENDOR` 写死成 `vendor/dsh-plugin-subscriptions` 一个目录，
+ * 而 `scripts/plugin-dirs.json` 的 `externals` 里有三个，`build-apk.mjs` 会把它们**整树**
+ * `cpSync` 进 APK —— 也就是说后两个的字节**随包发出、却不受任何绑定**：
+ * 在 `vendor/dshmarketplace-plugin/client.js` 里加 38 B，门禁照样 PASS。
+ *
+ * 现在从 `plugin-dirs.json` 读 `externals`（单一事实源），逐个目录校验；
+ * `retiredExternals` 里的目录不再随包发布，不参与绑定。
+ */
+const PLUGIN_DIRS = 'scripts/plugin-dirs.json'
+
+/**
+ * 读出需要绑定的目录清单（相对仓库根）。
+ * 读不到或格式不对时**退回**只校验主目录：宁可少校验也不让门禁因配置问题整体崩掉，
+ * 但那种情况会由下面的 verifyExternalsCoverage 判红（不静默降级）。
+ * @param {string} root 仓库根。
+ * @returns {{external: string[], retired: string[]}}
+ */
+export function readExternals(root) {
+  const abs = join(root, PLUGIN_DIRS)
+  if (!existsSync(abs)) return { external: [VENDOR], retired: [] }
+  try {
+    const conf = JSON.parse(readFileSync(abs, 'utf8'))
+    const external = Array.isArray(conf.externals) && conf.externals.length > 0
+      ? conf.externals.filter((p) => typeof p === 'string')
+      : [VENDOR]
+    const retired = Array.isArray(conf.retiredExternals)
+      ? conf.retiredExternals.filter((p) => typeof p === 'string')
+      : []
+    // 主目录必须在内：PROVENANCE 自述判据依赖它
+    if (!external.includes(VENDOR)) external.unshift(VENDOR)
+    return { external, retired }
+  } catch {
+    return { external: [VENDOR], retired: [] }
+  }
+}
 
 /**
  * 不参与字节绑定的文件（**只有我们自己写的这一份文档**）。
@@ -97,14 +137,90 @@ export function sha256(absPath) {
  * @returns {{vendorDir: string, files: Record<string, {sha256: string, bytes: number}>}} 清单
  */
 export function buildManifest(root) {
-  const absVendor = join(root, VENDOR)
-  const files = {}
-  for (const rel of listFiles(absVendor).sort()) {
-    if (NOT_BYTE_BOUND.has(VENDOR + '/' + rel)) continue
-    const abs = join(absVendor, rel)
-    files[rel] = { sha256: sha256(abs), bytes: statSync(abs).size }
+  const { external } = readExternals(root)
+  const manifests = {}
+  for (const dir of external) {
+    const absDir = join(root, dir)
+    if (!existsSync(absDir)) continue
+    const files = {}
+    for (const rel of listFiles(absDir).sort()) {
+      if (NOT_BYTE_BOUND.has(dir + '/' + rel)) continue
+      const abs = join(absDir, rel)
+      files[rel] = { sha256: sha256(abs), bytes: statSync(abs).size }
+    }
+    manifests[dir] = { files }
   }
-  return { vendorDir: VENDOR, byteBound: 'PROVENANCE.md 除外（本仓自有文档，只有其自述数字受判据 ④ 约束）', files }
+  // 保留 vendorDir/files 两个旧字段：外部脚本与既有自测仍在读它们（主目录口径）。
+  return {
+    vendorDir: VENDOR,
+    byteBound: 'PROVENANCE.md 除外（本仓自有文档，只有其自述数字受判据 ④ 约束）',
+    manifests,
+    files: manifests[VENDOR]?.files ?? {},
+  }
+}
+
+/**
+ * 校验**单个** vendored 目录与它那一份清单。
+ * @param {string} root 仓库根。
+ * @param {string} dir 相对目录。
+ * @param {{files: Record<string, {sha256: string, bytes: number}>}} entry 该目录的清单条目。
+ * @returns {string[]} 问题列表。
+ */
+export function verifyOneDirectory(root, dir, entry) {
+  const problems = []
+  const absDir = join(root, dir)
+  if (!existsSync(absDir)) return ['vendor 目录不存在：' + dir]
+  const notBound = (rel) => NOT_BYTE_BOUND.has(dir + '/' + rel)
+  const actual = new Set(listFiles(absDir).filter((rel) => !notBound(rel)))
+  const recorded = new Set(Object.keys(entry.files ?? {}))
+  for (const rel of [...actual].sort()) {
+    if (!recorded.has(rel)) problems.push('未登记的文件（新增文件必须跑 --write 登记）：' + dir + '/' + rel)
+  }
+  for (const rel of [...recorded].sort()) {
+    if (!actual.has(rel)) problems.push('清单登记了但文件已不存在（删除必须跑 --write 同步）：' + dir + '/' + rel)
+  }
+  for (const rel of [...actual].sort()) {
+    if (!recorded.has(rel)) continue
+    const want = entry.files[rel]
+    const abs = join(absDir, rel)
+    const gotBytes = statSync(abs).size
+    if (gotBytes !== want.bytes) {
+      problems.push('字节数不符：' + dir + '/' + rel + ' 清单 ' + String(want.bytes) + ' B，实测 ' + String(gotBytes) + ' B')
+    }
+    const gotSha = sha256(abs)
+    if (gotSha !== want.sha256) {
+      problems.push('sha256 不符：' + dir + '/' + rel + ' 清单 ' + String(want.sha256).slice(0, 16) + '…，实测 ' + gotSha.slice(0, 16) + '…')
+    }
+  }
+  return problems
+}
+
+/**
+ * 校验「每个需要随包发布的 vendored 目录都在清单里」（issue #1311）。
+ *
+ * 这条是**覆盖性**判据：即便某个目录自己的文件全对，只要它没被绑定，就是「字节随包发出但不设防」。
+ * @param {string} root 仓库根。
+ * @param {object} manifest 清单。
+ * @returns {string[]} 问题列表。
+ */
+export function verifyExternalsCoverage(root, manifest) {
+  const { external, retired } = readExternals(root)
+  const bound = new Set(
+    manifest.manifests && typeof manifest.manifests === 'object'
+      ? Object.keys(manifest.manifests)
+      : [manifest.vendorDir].filter((d) => typeof d === 'string'),
+  )
+  const problems = []
+  for (const dir of external) {
+    if (!bound.has(dir)) {
+      problems.push('随包发布但未被字节绑定：' + dir + '（在 scripts/plugin-dirs.json 的 externals 里，'
+        + 'build-apk 会整树注入 APK；必须跑 --write 纳入清单）')
+    }
+  }
+  for (const dir of retired) {
+    if (bound.has(dir)) problems.push('已退役目录仍在绑定清单里：' + dir + '（应移出 externals 与清单）')
+  }
+  return problems
 }
 
 /**
@@ -117,6 +233,13 @@ export function verifyManifest(root, manifest) {
   const problems = []
   const absVendor = join(root, VENDOR)
   if (!existsSync(absVendor)) return ['vendor 目录不存在：' + VENDOR]
+  // issue #1311：清单现在按目录分组（manifests[dir]），旧格式（单 vendorDir + files）继续支持。
+  if (manifest.manifests && typeof manifest.manifests === 'object') {
+    for (const [dir, sub] of Object.entries(manifest.manifests)) {
+      problems.push(...verifyOneDirectory(root, dir, sub))
+    }
+    return problems
+  }
   const actual = new Set(listFiles(absVendor).filter((rel) => !NOT_BYTE_BOUND.has(VENDOR + '/' + rel)))
   const recorded = new Set(Object.keys(manifest.files ?? {}))
   for (const rel of [...actual].sort()) {
@@ -211,7 +334,11 @@ function runVerify() {
     return 1
   }
   const manifest = JSON.parse(readFileSync(absManifest, 'utf8'))
-  const problems = [...verifyManifest(ROOT, manifest), ...verifySelfDescription(ROOT)]
+  const problems = [
+    ...verifyManifest(ROOT, manifest),
+    ...verifyExternalsCoverage(ROOT, manifest),
+    ...verifySelfDescription(ROOT),
+  ]
   if (problems.length > 0) {
     console.error('FAIL  vendored 目录与清单不符（' + String(problems.length) + ' 项）')
     console.error('CHECK-VENDOR-PROVENANCE FAILED（' + String(problems.length) + ' 项）：')
