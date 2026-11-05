@@ -162,6 +162,21 @@ function sha1Hex(buf) {
   return createHash('sha1').update(buf).digest('hex');
 }
 
+/**
+ * 目标 blob 是否**已经是一份完整且内容正确**的副本（issue #1626）。
+ *
+ * 为什么不能只看 `pathExists`：并发下目标可能是另一个写者留下的**半截文件**，
+ * 而旧实现的「存在即返回」会把它当成已完成，此后永不重写。
+ * 判据用**长度 + 内容**：长度便宜且能挡住绝大多数半截；内容比对是最后一道
+ * （同长度的错误内容仍必须被识别出来，否则「校验大小」只是把窗口缩小了一点）。
+ */
+async function blobComplete(target, hash, buf) {
+  let existing;
+  try { existing = await fs.readFile(target); } catch { return false; }
+  if (existing.length !== buf.length) return false;
+  if (!existing.equals(buf)) return false;
+  return sha1Hex(existing) === hash;
+}
 /** 共享 blob 库：<快照根>/blobs/<sha1>，跨快照内容去重（v0.2 模块 1 保险 2）。 */
 function blobDir(cfg) {
   return join(dirname(cfg.autoDir), 'blobs');
@@ -172,11 +187,25 @@ async function readBlob(cfg, hash) {
 async function writeBlob(cfg, hash, buf) {
   const dir = blobDir(cfg);
   const target = join(dir, hash);
-  if (await pathExists(target)) return;
+  if (await blobComplete(target, hash, buf)) return;
   await fs.mkdir(dir, { recursive: true });
-  const tmp = `${target}.tmp`;
+  // issue #1626：tmp 名必须**每次唯一**。固定 `${target}.tmp` 时两个并发快照写同一 blob：
+  // A 写 tmp → B 的 writeFile（open+truncate）覆盖成半截 → A 在 B 写完前 rename ⇒ 落盘半截文件；
+  // 随后 B 的 rename 因 tmp 已消失而失败，旧实现用 .catch(() => {}) 吞掉，
+  // 而开头 `if (pathExists(target)) return` 让这个坏 blob **永远不会被重写修复**。
+  const tmp = `${target}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`;
   await fs.writeFile(tmp, buf);
-  await fs.rename(tmp, target).catch(() => { /* 并发下另一个快照已写入，忽略 */ });
+  try {
+    await fs.rename(tmp, target);
+  } catch (e) {
+    // rename 失败不再静默：先看目标是不是已经是**完整且同内容**的（并发下正常竞争），
+    // 是 → 本次写入本就不必要；不是（半截/内容不符/不存在）→ 重写目标，绝不把坏 blob 留在盘上。
+    try { await fs.rm(tmp, { force: true }); } catch { /* 清临时文件失败不掩盖真错 */ }
+    if (await blobComplete(target, hash, buf)) return;
+    const again = `${target}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`;
+    await fs.writeFile(again, buf);
+    await fs.rename(again, target);
+  }
 }
 
 /** 相对路径安全校验：恢复时防 manifest 被篡改后向任意路径写文件。 */
