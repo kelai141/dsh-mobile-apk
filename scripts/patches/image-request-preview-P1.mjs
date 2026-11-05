@@ -60,6 +60,9 @@ export function planRequestPreview(read) {
     if (manifest.name !== '@deepseek-ai/' + file.split('/').at(-3)) {
       throw new Error('P1 requires pinned attachment-local/llm-pi-ai/llm-deepseek@' + ENGINE_BASELINE)
     }
+    // 包身份正确 != 版本正确：上一代同名同包，锚点与预算语义都可能已经变了。
+    // 版本断言走 engine-versions.mjs 的单一真源（不再只比包名就放行）。
+    assertEngineBaseline(manifest, 'P1')
     const before = read(file)
     return { file, before, after: patchRequestPreview(before, kind) }
   })

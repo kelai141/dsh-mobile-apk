@@ -2917,30 +2917,29 @@
         "atomic-stale-lock-F4"
       ]
     },
-    "dsh-client-ui-settings-models-0.2.1-rc.3": {
+    "dsh-compaction-image-offload-0.2.2-rc.1": {
       "source": "engine-tgz",
-      "engine": "0.2.1-rc.3",
-      "package": "@deepseek-ai/dsh-client-ui-settings-models@0.2.1-rc.3",
+      "engine": "0.2.2-rc.1",
+      "package": "@deepseek-ai/dsh-compaction-image-offload@0.2.2-rc.1",
       "provenance": {
-        "tarballFile": "deepseek-ai-dsh-client-ui-settings-models-0.2.1-rc.3.tgz",
-        "tarballSha256": "2fa15781b4b03acca4508f52b108008d1c4d31835f271730e9b8a10f26f0248f",
+        "tarballFile": "deepseek-ai-dsh-compaction-image-offload-0.2.2-rc.1.tgz",
+        "tarballSha256": "1cf15cc0de0e1926ef3e20f95a8fa945e53d0e48b72f150c05f8144aa76f4e81",
         "inputKind": "published-tarball"
       },
       "files": [
-        "lib/client.js",
+        "lib/index.js",
         "package.json"
       ],
       "fileSha256": {
-        "lib/client.js": "190498e15358bcd3fe6810fe6368023a20b0403e3ea493bc979eca9bdb593b28",
-        "package.json": "3f073169bea233b479963ec5f6eb8d046ff6336d86121e17a3292b7baecb3992"
+        "lib/index.js": "6352066e8028a74374f0d6de42ebfeec5125100bb1a32ea98ff7a9fc9f58b940",
+        "package.json": "388917860f2a3387d40bd3eae088fda692e877b9b49dffbe6799cb0969ff085c"
       },
       "targets": {
-        "lib/client.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js",
-        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-models/package.json"
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-compaction-image-offload/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-compaction-image-offload/package.json"
       },
       "patchIds": [
-        "custom-first-model-row-960",
-        "model-catalog-section-labels-960"
+        "image-history-batch-offload-I1"
       ]
     }
   },
@@ -2953,6 +2952,6 @@
       ]
     },
     "overlaySha256": "138e1e58bfe362e7058f5ec00421feee402c8c62e7e5c5cc297f9b061f823225",
-    "registrySha256": "7f20c16ec34bbab293ebd2682405e100ffa40db29db07061617782f5f52125b3"
+    "registrySha256": "f304b4539f2a6f561c84a8413d953cccd02429f2bee5cc396cfb9403ddad808f"
   }
 }

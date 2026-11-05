@@ -42,9 +42,9 @@ function choose(executable, options = {}) {
     process: { platform: options.platform ?? 'android', execPath: options.execPath ?? '/system/bin/linker64', env: options.env ?? native },
   }))
 }
-// 0.2.1 上游 index 里有两条 spawn 路径（一次执行 + 持久 PTC）。A1 只替换「一次执行」的 launch 段；
-// 该段的 signal 是形参 signal，持久路径写的是 this.controller.signal。按这条精确锚点取段，避免整段误取。
-const PER_CALL_LAUNCH = /^[\t ]*const executable = await this\.ctx\.subprocess\.resolveExecutable\(this\.config\.launch\.executable, void 0, signal\);[\s\S]*?^[\t ]*const launched = handle;$/m
+// 上游 index 里有两条 spawn 路径（一次执行 + 持久 PTC）。A1 只替换「一次执行」的 launch 段；
+// 0.2.2-rc.1 起两条路径的第三实参都是 this.controller.signal，故按整行精确锚点取段，避免整段误取。
+const PER_CALL_LAUNCH = /^[\t ]*const executable = await this\.ctx\.subprocess\.resolveExecutable\(this\.config\.launch\.executable, void 0, this\.controller\.signal\);[\s\S]*?^[\t ]*this\.handle = handle;$/m
 function perCallLaunch() {
   const matches = [...index.matchAll(new RegExp(PER_CALL_LAUNCH.source, PER_CALL_LAUNCH.flags + 'g'))]
   assert.equal(matches.length, 1, 'per-call launch segment: expected exactly one anchor, got ' + matches.length)
@@ -59,6 +59,10 @@ async function launch(mode, options = {}) {
   const calls = { spawn: [], confine: [], resolved: [], bootstrap: [] }
   const policy = { mode, workspaceRoot: '/workspace' }
   const context = {
+    // 0.2.2-rc.1：一次执行与持久两条路径都从 this.controller.signal 取取消信号。
+    controller: { signal: undefined },
+    // 0.2.2-rc.1：launch 段通过 this.policy 取解析后的策略（旧版是闭包变量）。
+    policy,
     ctx: {
       fs: {},
       subprocess: {
@@ -85,7 +89,8 @@ async function launch(mode, options = {}) {
       return launch.kind === 'embedded' ? [String(maxMessageBytes)] : ['/runtime/process.js', String(maxMessageBytes)]
     },
   }
-  const js = '(async function () {\n' + segment + '\nreturn { handle, sandbox };\n})'
+  // 段来自 async start(cwd)：cwd 是形参，vm 里补同名局部量，与真实调用形态一致。
+  const js = '(async function () {\nconst cwd = \'/workspace\';\n' + segment + '\nreturn { handle, sandbox: this.confined };\n})'
   const fn = runInNewContext(LAUNCH_HELPER_JS + '\n' + js, {
     isAbsolute: posix.isAbsolute,
     process: { platform: 'android', execPath: '/system/bin/linker64', env: { PATH: prefix + '/bin:/system/bin', ...native, DEEPSEEK_API_KEY: 'fixture-secret', DSH_PICK_TOKEN: 'fixture-token', NODE_OPTIONS: '--inspect=0' } },
@@ -181,7 +186,9 @@ test('an enforcing provider keeps its complete argv and honest enforcement metad
   assert.equal(run.error, undefined)
   assert.deepEqual(Array.from(run.calls.spawn[0].argv), ['enforcing-runner', '--', '/system/bin/linker64', node, '/runtime/process.js', '1234'])
   assert.equal(run.result.sandbox.enforcement, 'full')
-  assert.equal(run.result.sandbox.mode, 'workspace-write')
+  // 0.2.2 的 confine 返回值是 { argv, enforcement }，不再回带 mode；mode 由调用点传入，
+  // 从 confine 的实参记录里读才是真实来源（返回值里没有 mode 这一项）。
+  assert.equal(run.calls.confine[0].policy.mode, 'workspace-write')
 })
 test('published child retains only native OS values while the model-facing process.env stays empty', () => {
   const osEnv = { ...native, PATH: prefix + '/bin', DEEPSEEK_API_KEY: 'fixture-secret', DSH_PICK_TOKEN: 'fixture-token', NODE_OPTIONS: '--max-old-space-size=512' }
@@ -198,20 +205,25 @@ test('published child retains only native OS values while the model-facing proce
 })
 test('both reviewed spawn paths keep the resolved-policy confinement gate in the same shape', () => {
   const gate = /confined = policy\.mode === "danger-full-access" \? void 0 : await this\.ctx\.sandbox\.confine\(argv,/g
-  // 0.2.1 有两条 spawn 路径（一次执行 + 持久 PTC）；两处都必须保留「只有 resolved full-access 才跳过 confine」。
-  assert.equal([...index.matchAll(gate)].length, 2, 'both reviewed spawn paths keep the confinement gate')
-  assert.equal([...index.matchAll(/this\.ctx\.sandbox\.confine\(/g)].length, 2, 'every sandbox.confine call site is a reviewed spawn path')
+  // 0.2.2-rc.1 上游把「一次执行」与「持久 PTC」两条 launch 路径合并成一条：
+  // 产物里只剩 1 处 this.ctx.sandbox.confine( 与 1 处 reviewed gate。判据随之从 2 改 1，
+  // 但仍是「计数相等」的自校准形式 —— 上游若再加回第二条未审阅路径，这条会立刻红。
+  assert.equal([...index.matchAll(gate)].length, 1, 'the reviewed spawn path keeps the confinement gate')
+  assert.equal([...index.matchAll(/this\.ctx\.sandbox\.confine\(/g)].length, 1, 'every sandbox.confine call site is a reviewed spawn path')
   assertPolicyGate(index)
 })
 test('anchor, marker, heap placement, and sandbox-policy drift are rejected', () => {
   assert.throws(() => patchEnvironment(rawIndex.replace('"TMP"', '"TMPDIR"')))
   assert.throws(() => patchEnvironment(environment.replace('"LD_PRELOAD"', '"EVIL_PRELOAD"')))
   assert.throws(() => patchRuntimeIndex(rawIndex.replaceAll('policy.mode === "danger-full-access"', 'policy.mode === "workspace-write"')), /resolved-policy confinement gate/)
-  // 自校准计数（assertPolicyGate）：单点弱化（另一处仍命中）与新增未审阅 spawn 路径都必须判红。
-  assert.throws(() => assertPolicyGate(rawIndex.replace('policy.mode === "danger-full-access"', 'policy.mode === "workspace-write"')), /every sandbox spawn path/)
+  // 自校准计数（assertPolicyGate）：0.2.2 只剩一条 spawn 路径，弱化它会让 gates=0 而 spawnPaths=1，
+  // 由「expected reviewed anchors」判红；新增未审阅路径则由「every sandbox spawn path」判红。两者都验。
+  assert.throws(() => assertPolicyGate(rawIndex.replace('policy.mode === "danger-full-access"', 'policy.mode === "workspace-write"')), /expected reviewed anchors/)
   assert.throws(() => assertPolicyGate(index + '\nconst unrevisedSpawn = () => this.ctx.sandbox.confine(argv, {});\n'), /every sandbox spawn path/)
   assert.throws(() => patchRuntimeIndex(rawIndex.replace('const packaged = this.config.launch.kind === "embedded";', 'const packaged = "pkg" in process && this.config.launch.bootstrapPath === void 0;')), /launch block differs from reviewed upstream/)
-  assert.throws(() => patchRuntimeIndex(rawIndex.replace('bootstrapArgs(this.ctx.fs, this.config.launch, this.config.maxMessageBytes)', 'bootstrapArgs(this.ctx.fs, this.config, this.config.maxMessageBytes)')), /launch block differs from reviewed upstream/)
+  // 0.2.2-rc.1 起 bootstrapArgs 多传一个 this.retainsState；负控替换要带上它，
+  // 否则替换根本不发生，测到的是「锚点没匹配」而不是「审阅条件生效」。
+  assert.throws(() => patchRuntimeIndex(rawIndex.replace('bootstrapArgs(this.ctx.fs, this.config.launch, this.config.maxMessageBytes, this.retainsState)', 'bootstrapArgs(this.ctx.fs, this.config, this.config.maxMessageBytes, this.retainsState)')), /launch block differs from reviewed upstream/)
   assert.throws(() => patchRuntimeIndex(index.replace('...launchPrefix,', '...launchPrefix, heapFlag,')))
   assert.throws(() => assertChildClearing(child.replace('state.env = Object.create(null)', 'state.env = {}')))
 })
@@ -232,9 +244,10 @@ test('old published artifact is rejected by the version preflight; both compiled
     assert.throws(plan(version), new RegExp('requires @deepseek-ai/dsh-ptc-runtime-node@' + ENGINE_BASELINE.replaceAll('.', '\\.')), version)
   }
   // 编译产物里同一条 launch 段有 void 0 与 undefined 两种写法；A1 必须归一成同一份补丁产物。
+  // 0.2.2-rc.1：第三实参是 this.controller.signal（不再有裸 signal），两处都要按新形态写。
   const reworded = rawIndex.replace(
-    'resolveExecutable(this.config.launch.executable, void 0, signal);',
-    'resolveExecutable(this.config.launch.executable, undefined, signal);')
+    'resolveExecutable(this.config.launch.executable, void 0, this.controller.signal);',
+    'resolveExecutable(this.config.launch.executable, undefined, this.controller.signal);')
   assert.notEqual(reworded, rawIndex, '替换必须真的发生，否则下面的判据是空转')
   const rebuilt = patchRuntimeIndex(patchEnvironment(reworded))
   assert.equal(rebuilt, index)

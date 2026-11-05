@@ -62,6 +62,9 @@ export function planImageHistory(read) {
   if (manifest.name !== '@deepseek-ai/dsh-llm') {
     throw new Error('I1 requires @deepseek-ai/dsh-llm, got ' + manifest.name)
   }
+  // 包身份正确 != 版本正确：上一代同名同包，函数体与预算语义可能已经变了。
+  // 版本断言走 engine-versions.mjs 的单一真源，不在补丁里写死数字。
+  assertEngineBaseline(manifest, 'I1')
   const before = read(IMAGE_HISTORY_CORE)
   return [{ file: IMAGE_HISTORY_CORE, before, after: patchImageBatchOffload(before) }]
 }
