@@ -74,6 +74,92 @@ const argOf = (f, d = null) => { const i = argv.indexOf('--' + f); return i >= 0
 const TARGET_LOW = 'es2021'
 const TARGET_HIGH = 'esnext'    // 对照臂（当前出厂口径）
 const ESBUILD_PIN = '0.25.12'   // 判据 2 的口径锁：兼容表随版本变，故显式钉住
+/**
+ * 供应器（provisionEsbuild）**只认这里钉住的字节**（issue #1581）。
+ *
+ * 真因：旧实现拿 npm registry 响应里的 `dist.sha512`（或 `dist.integrity`）去校验**同一次响应**
+ * 指过来的 tgz——哈希与产物同源，投毒/被劫持的镜像可以同时伪造两者，这条校验等于自证。
+ * 更糟的是 `if (sha && …)`：两个字段都缺席时连这条自证都跳过，直接解包并**执行**
+ * （esbuildUsable 里 spawnSync 一个 require(下载来的包) 的子进程），而 ESBUILD_PIN 只钉版本字符串。
+ * 本门禁的产物决定「浏览器语法下限」的判据口径 ⇒ 投毒者既能让坏 bundle 过门禁，也能让好 bundle 判红。
+ *
+ * 修法：sha512（base64，与 npm `dist.integrity` 的 `sha512-` 后缀同格式）作为常量进仓，
+ * 只认这里的值；表里没有的包名或摘要不匹配一律 die，registry 说什么都不作数。
+ * 追版 esbuild 时必须**同批**改 ESBUILD_PIN 与本表（改法：`npm view <pkg>@<ver> dist.integrity`）。
+ */
+const ESBUILD_TARBALL_SHA512 = {
+  esbuild: 'bbPBYYrtZbkt6Os6FiTLCTFxvq4tt3JKall1vRwshA3fdVztsLAatFaZobhkBC8/BrPetoa0oksYoKXoG4ryJg==',
+  '@esbuild/darwin-arm64': 'N3zl+lxHCifgIlcMUP5016ESkeQjLj/959RxxNYIthIg+CQHInujFuXeWbWMgnTo4cp5XVHqFPmpyu9J65C1Yg==',
+  '@esbuild/darwin-x64': 'HQ9ka4Kx21qHXwtlTUVbKJOAnmG1ipXhdWTmNXiPzPfWKpXqASVcWdnf2bnL73wgjNrFXAa3yYvBSd9pzfEIpA==',
+  '@esbuild/linux-arm': 'lPDGyC1JPDou8kGcywY0YILzWlhhnRjdof3UlcoqYmS9El818LLfJJc3PXXgZHrHCAKs/Z2SeZtDJr5MrkxtOw==',
+  '@esbuild/linux-arm64': '8bwX7a8FghIgrupcxb4aUmYDLp8pX06rGh5HqDT7bB+8Rdells6mHvrFHHW2JAOPZUbnjUpKTLg6ECyzvas2AQ==',
+  '@esbuild/linux-ia32': '0y9KrdVnbMM2/vG8KfU0byhUN+EFCny9+8g202gYqSSVMonbsCfLjUO+rCci7pM0WBEtz+oK/PIwHkzxkyharA==',
+  '@esbuild/linux-x64': 'uqZMTLr/zR/ed4jIGnwSLkaHmPjOjJvnm6TVVitAa08SLS9Z0VM8wIRx7gWbJB5/J54YuIMInDquWyYvQLZkgw==',
+  '@esbuild/win32-arm64': 'rMmLrur64A7+DKlnSuwqUdRKyd3UE7oPJZmnljqEptesKM8wx9J8gx5u0+9Pq0fQQW8vqeKebwNXdfOyP+8Bsg==',
+  '@esbuild/win32-ia32': 'HkqnmmBoCbCwxUKKNPBixiWDGCpQGVsrQfJoVGYLPT41XWF8lHuE5N6WhVia2n4o5QK5M4tYr21827fNhi4byQ==',
+  '@esbuild/win32-x64': 'alJC0uCZpTFrSL0CCDjcgleBXPnCrEAhTBILpeAp7M/OFgoqtAetfBzX0xM00MUsVVPpVjlPuMbREqnZCXaTnA==',
+}
+/**
+ * 供应器字节绑定的判据本体（纯函数，便于 --self-test 直接喂合成输入）。
+ *
+ * @param name npm 包名。
+ * @param buf  下载到的 tgz 字节。
+ * @param pins 钉住的摘要表（自检可传合成表，正式链恒为 ESBUILD_TARBALL_SHA512）。
+ * @returns null = 与钉住的字节一致；否则为判红理由（缺钉 / 摘要不符）。
+ */
+const tarballPinProblem = (name, buf, pins = ESBUILD_TARBALL_SHA512) => {
+  const pinned = pins[name]
+  if (typeof pinned !== 'string' || pinned.length === 0) {
+    return 'esbuild 供应器：' + name + '@' + ESBUILD_PIN + ' 没有钉住的 sha512 —— 拒绝解包未锚定的第三方字节'
+      + '（registry 给的 dist.sha512/integrity 与 tarball 同源，不能自证）'
+  }
+  const actual = createHash('sha512').update(buf).digest('base64')
+  if (actual !== pinned) {
+    return 'esbuild 供应器：' + name + '@' + ESBUILD_PIN + ' 的 sha512 与钉住值不符（实际 ' + actual
+      + '，钉住 ' + pinned + '）——镜像被投毒或版本漂移，拒绝解包与执行'
+  }
+  return null
+}
+
+/* ── esbuild 字节锚（issue #1581）────────────────────────────────────────────────
+ * 缺陷形态：provisionEsbuild() 从 npm 镜像链拉元数据与 tgz，用 dist.sha512（或 dist.integrity）
+ * 校验刚下下来的 tarball。**那个 sha512 来自同一个 registry 响应** —— 被投毒/被劫持的镜像可以
+ * 同时伪造 tarball 与哈希，这条「自证」对镜像投毒零判别力；而 `if (sha && …)` 还意味着两个字段
+ * 都缺席时连这条自证也跳过，直接解包。随后 esbuildUsable() 直接 spawnSync 执行它，而 ESBUILD_PIN
+ * 只钉版本字符串、不钉字节。
+ *
+ * 修法：把 esbuild 与各平台包的 sha512 作为常量钉进仓库（与 scripts/vendor-provenance.json 同型：
+ * 能换，但必须显式、可见）。哈希缺席即 die()，不再回落到「响应里给什么就信什么」。
+ * 钉住值取自 npm 官方 registry 的 dist.integrity（SRI 形态 sha512-<base64>，此处只存 base64 段），
+ * 与仓内 package-lock.json 里 plugins/dsh-android-bridge 的 node_modules/esbuild 条目一致。
+ */
+const ESBUILD_SHA512 = {
+  'esbuild': 'bbPBYYrtZbkt6Os6FiTLCTFxvq4tt3JKall1vRwshA3fdVztsLAatFaZobhkBC8/BrPetoa0oksYoKXoG4ryJg==',
+  '@esbuild/win32-x64': 'alJC0uCZpTFrSL0CCDjcgleBXPnCrEAhTBILpeAp7M/OFgoqtAetfBzX0xM00MUsVVPpVjlPuMbREqnZCXaTnA==',
+  '@esbuild/win32-arm64': 'rMmLrur64A7+DKlnSuwqUdRKyd3UE7oPJZmnljqEptesKM8wx9J8gx5u0+9Pq0fQQW8vqeKebwNXdfOyP+8Bsg==',
+  '@esbuild/linux-x64': 'uqZMTLr/zR/ed4jIGnwSLkaHmPjOjJvnm6TVVitAa08SLS9Z0VM8wIRx7gWbJB5/J54YuIMInDquWyYvQLZkgw==',
+  '@esbuild/linux-arm64': '8bwX7a8FghIgrupcxb4aUmYDLp8pX06rGh5HqDT7bB+8Rdells6mHvrFHHW2JAOPZUbnjUpKTLg6ECyzvas2AQ==',
+  '@esbuild/darwin-x64': 'HQ9ka4Kx21qHXwtlTUVbKJOAnmG1ipXhdWTmNXiPzPfWKpXqASVcWdnf2bnL73wgjNrFXAa3yYvBSd9pzfEIpA==',
+  '@esbuild/darwin-arm64': 'N3zl+lxHCifgIlcMUP5016ESkeQjLj/959RxxNYIthIg+CQHInujFuXeWbWMgnTo4cp5XVHqFPmpyu9J65C1Yg==',
+}
+/**
+ * 远端字节的**唯一**接受条件：与钉住值逐字节相符（issue #1581）。
+ * 响应里的 dist.sha512 / dist.integrity 一律不再作为接受依据 —— 它们与 tarball 同源，投毒方可同时伪造。
+ * 钉住值缺席（未登记的平台包）→ 判红并给出补登记指引，不得回落到「响应里给什么就信什么」。
+ * @param {string} name 包名（含 scope）。
+ * @param {Buffer} bytes 下载到的 tarball 字节。
+ * @returns {string|null} 判红文案；相符返回 null。
+ */
+const pinnedDigestProblem = (name, bytes) => {
+  const want = ESBUILD_SHA512[name]
+  if (typeof want !== 'string' || want.length === 0) {
+    return 'esbuild 包 ' + name + ' 没有钉住的 sha512（scripts/check-browser-syntax-floor.mjs 的 ESBUILD_SHA512）'
+      + ' —— 拒绝接受未锚定的远端字节；请先在 PR 里登记该平台包的 dist.integrity'
+  }
+  const got = createHash('sha512').update(bytes).digest('base64')
+  if (got !== want) return 'esbuild 包 ' + name + ' 的 sha512 与钉住值不符（got ' + got.slice(0, 16) + '… want ' + want.slice(0, 16) + '…）'
+  return null
+}
 
 // 显式、固定顺序的依赖候选（不依赖偶然在场；缺席时给出可诊断错误）
 const TS_CANDIDATES = [
@@ -191,16 +277,20 @@ const resolveTar = () => {
 }
 const TAR = resolveTar()
 
-/** 从 npm registry 取 metadata → 下 tgz → sha512 校验 → 解包（机制与 build-snapshot-013.mjs:196-217 同款；不依赖 npm CLI）。 */
-const extractNpmTgz = async (registry, name, version, targetDir) => {
-  const res = await fetch(registry + '/' + name, { signal: AbortSignal.timeout(60000) })
+/** 从 npm registry 取 metadata → 下 tgz → **按仓内钉住的 sha512** 校验 → 解包（不依赖 npm CLI）。
+ *
+ * issue #1581：旧实现用 dist.sha512 / dist.integrity 校验刚下下来的 tarball —— 哈希与 tarball 同源，
+ * 投毒镜像可同时伪造两者；且 `if (sha && …)` 在两者都缺席时整段短路，未校验的字节直接解包并被执行。
+ * 现在只认 ESBUILD_SHA512 里的钉住值（钉住值缺席同样判红），响应里的 dist 字段**不参与接受判定**。 */
+const extractNpmTgz = async (registry, name, version, targetDir, fetchImpl = fetch) => {
+  const res = await fetchImpl(registry + '/' + name, { signal: AbortSignal.timeout(60000) })
   if (!res.ok) throw new Error('metadata HTTP ' + res.status)
   const meta = await res.json()
   const dist = meta?.versions?.[version]?.dist
   if (!dist?.tarball) throw new Error('版本 ' + version + ' 的 dist 不可得')
-  const buf = Buffer.from(await (await fetch(dist.tarball, { signal: AbortSignal.timeout(300000) })).arrayBuffer())
-  const sha = dist.sha512 ?? (String(dist.integrity ?? '').startsWith('sha512-') ? String(dist.integrity).slice(7) : null)
-  if (sha && createHash('sha512').update(buf).digest('base64') !== sha) throw new Error('sha512 不匹配')
+  const buf = Buffer.from(await (await fetchImpl(dist.tarball, { signal: AbortSignal.timeout(300000) })).arrayBuffer())
+  const digestProblem = pinnedDigestProblem(name, buf)
+  if (digestProblem !== null) throw new Error(digestProblem)
   const tgzDir = dirname(targetDir)
   mkdirSync(tgzDir, { recursive: true })
   const tgz = join(tgzDir, '.__' + name.replace(/[@/]/g, '_') + '.tgz')
@@ -679,6 +769,97 @@ if (has('self-test')) {
     + '；esbuild real differs=' + (dHighReal.code !== dLowReal.code) + ' payload differs=' + (dHighPay.code !== dLowPay.code))
   // ⑤ 降级不得洗掉引擎树补丁 marker（esbuild 剥注释；0.14.1 实测缺陷）
   check('⑤ 补丁 marker 保全：降级（剥注释）后 registry 的 marker 必须仍在原文件里', markerKept, markerDetail)
+  /* ⑧ esbuild 字节锚（issue #1581）：判据必须是「钉住值决定接受与否」，不是「代码里有这一行」。
+   * 四向自证，全部离线（不联网）：
+   *   a) 钉住值在场：本平台包与主包都有条目（缺一个 = 该平台永远准备不出来，且是静默失效）；
+   *   b) 正控：与钉住值逐字节相符的字节必须放行（不得把正规镜像也拒了）；
+   *   c) 负控：改一个字节必须判红（钉住值真的在比字节，不是在比长度/在场）；
+   *   d) 负控：**未登记**的包名必须判红（这正是旧实现「响应里给什么就信什么」的入口）。
+   * 旧实现下 b/c 用的是响应里的哈希：c 的负控仍会红，但「投毒镜像同时改 tarball 与哈希」时不红 ——
+   * 所以 d 是这条判据的判别力所在，必须单独钉住。 */
+  const pinnedNames = Object.keys(ESBUILD_SHA512)
+  const platformName = process.platform === 'win32' ? '@esbuild/win32-' + process.arch
+    : process.platform === 'linux' ? '@esbuild/linux-' + process.arch
+      : process.platform === 'darwin' ? '@esbuild/darwin-' + process.arch : null
+  const anchorCovered = pinnedNames.includes('esbuild')
+    && (platformName === null || pinnedNames.includes(platformName))
+    && pinnedNames.length >= 7
+  const goodBytes = Buffer.from('pinned-bytes-fixture', 'utf8')
+  const goodSha = createHash('sha512').update(goodBytes).digest('base64')
+  const savedSha = ESBUILD_SHA512['esbuild']
+  ESBUILD_SHA512['esbuild'] = goodSha
+  const anchorAccepts = pinnedDigestProblem('esbuild', goodBytes) === null
+  const anchorRejects = String(pinnedDigestProblem('esbuild', Buffer.from('pinned-bytes-fixturE', 'utf8')) ?? '').includes('与钉住值不符')
+  ESBUILD_SHA512['esbuild'] = savedSha
+  const anchorRejectsUnpinned = String(pinnedDigestProblem('@esbuild/zzz-selftest-unpinned', goodBytes) ?? '').includes('没有钉住的 sha512')
+  /* **端到端**负控（判据 ⑧ 的承重面，不是纯函数自证）：
+   * 起一个本地假 registry，它对**投毒 tarball** 返回**自洽的** dist.sha512（这正是被劫持镜像的能力）。
+   *   · 旧实现（用响应里的哈希校验）→ 接受并解包 ⇒ 本例必须判红；
+   *   · 修好之后（只认仓内钉住值）→ 拒绝 ⇒ 本例判绿。
+   * 反向再证一次「不是恒红」：把钉住值临时改成投毒字节的哈希，同一响应必须被接受。
+   * 没有这一段，判据 ⑧ 就只是「有个纯函数」——把实现改回旧写法它照样绿（实测踩到过）。 */
+  const { gzipSync } = await import('node:zlib')
+  /** 造一个**合法**的最小 .tgz（一个成员）——投毒夹具必须是真归档，
+   *  否则「被拒」可能只是因为解包失败，而不是因为字节锚（假绿方向）。 */
+  const makeTgz = (name, body) => {
+    const header = Buffer.alloc(512)
+    header.write(name, 0, 100, 'utf8')
+    header.write('0000644\0', 100, 8, 'utf8')
+    header.write('0000000\0', 108, 8, 'utf8')
+    header.write('0000000\0', 116, 8, 'utf8')
+    header.write(body.length.toString(8).padStart(11, '0') + '\0', 124, 12, 'utf8')
+    header.write('00000000000\0', 136, 12, 'utf8')
+    header.write('        ', 148, 8, 'utf8')
+    header.write('0', 156, 1, 'utf8')
+    header.write('ustar\0', 257, 6, 'utf8')
+    header.write('00', 263, 2, 'utf8')
+    let sum = 0
+    for (const b of header) sum += b
+    header.write(sum.toString(8).padStart(6, '0') + '\0 ', 148, 8, 'utf8')
+    const padded = Buffer.concat([body, Buffer.alloc((512 - (body.length % 512)) % 512)])
+    return gzipSync(Buffer.concat([header, padded, Buffer.alloc(1024)]))
+  }
+  const poison = makeTgz('package/package.json', Buffer.from('{"name":"esbuild","version":"' + ESBUILD_PIN + '"}', 'utf8'))
+  const poisonSha = createHash('sha512').update(poison).digest('base64')
+  /* 假 registry：不建 HTTP 服务（keep-alive 套接字会让 Windows 的 process.exit 撞 libuv 断言），
+   * 直接把「元数据 + tarball」注入 extractNpmTgz 的取件口。被测的仍然是**同一条**接受判定路径。 */
+  const fakeRegistry = (sha512) => async (url) => {
+    if (String(url).endsWith('/esbuild')) {
+      return {
+        ok: true,
+        json: async () => ({ versions: { [ESBUILD_PIN]: { dist: { tarball: 'https://mirror.invalid/esbuild.tgz', sha512 } } } }),
+      }
+    }
+    if (String(url) === 'https://mirror.invalid/esbuild.tgz') {
+      return { ok: true, arrayBuffer: async () => poison.buffer.slice(poison.byteOffset, poison.byteOffset + poison.byteLength) }
+    }
+    return { ok: false, status: 404, json: async () => ({}), arrayBuffer: async () => new ArrayBuffer(0) }
+  }
+  const tryExtract = async (sha512) => {
+    const target = join(tmp, 'poison-target-' + Math.random().toString(36).slice(2))
+    try {
+      await extractNpmTgz('https://mirror.invalid', 'esbuild', ESBUILD_PIN, target, fakeRegistry(sha512))
+      return { accepted: true, message: '' }
+    } catch (e) {
+      return { accepted: false, message: String(e.message) }
+    } finally {
+      rmSync(target, { recursive: true, force: true })
+    }
+  }
+  // 镜像自洽地伪造 tarball 与哈希：旧实现（用响应里的哈希校验）会**接受并解包**它。
+  const poisonedRun = await tryExtract(poisonSha)
+  const anchorRejectsPoisonedMirror = !poisonedRun.accepted && /与钉住值不符/.test(poisonedRun.message)
+  // 反向对照：把钉住值换成投毒字节的哈希，同一响应必须被接受（证明这条判据不是「一律拒绝」）。
+  ESBUILD_SHA512['esbuild'] = poisonSha
+  const pinnedRun = await tryExtract(poisonSha)
+  ESBUILD_SHA512['esbuild'] = savedSha
+  const anchorAcceptsPinnedBytes = pinnedRun.accepted
+  check('⑧ esbuild 字节锚：钉住值在场 + 相符放行 + 改一字节判红 + 未登记包判红 + 自洽投毒镜像被拒（issue #1581）',
+    anchorCovered && anchorAccepts && anchorRejects && anchorRejectsUnpinned && anchorRejectsPoisonedMirror && anchorAcceptsPinnedBytes,
+    'covered=' + anchorCovered + '（' + pinnedNames.length + ' 条，平台包 ' + platformName + '）'
+    + ' accepts=' + anchorAccepts + ' rejectsTamper=' + anchorRejects + ' rejectsUnpinned=' + anchorRejectsUnpinned
+    + ' rejectsPoisonedMirror=' + anchorRejectsPoisonedMirror + '（' + poisonedRun.message.slice(0, 90) + '）'
+    + ' acceptsPinnedBytes=' + anchorAcceptsPinnedBytes)
   // ⑥ 接线反回归（task-9）：降级步骤必须真的被两条构建链调用——「脚本存在」不等于「有步骤在用它」。
   //    真因：check-release-gates 只比门禁集合（31/31 全绿），比不出「构建链里少了降级步骤」，
   //    于是 PowerShell 链有降级、Node 链没有，云端自包含构建必判红而无人知。
@@ -686,6 +867,39 @@ if (has('self-test')) {
   check('⑥ 接线反回归：两条构建链都必须在注入消费（inject-all.py）之前调用 --degrade（暂存副本，不原地）',
     wiring.ok, wiring.detail)
   console.log('  接线取证: ' + wiring.evidence)
+
+  /* ⑧ 供应器字节绑定（issue #1581）：provisionEsbuild 拉下来的 tgz 只认**仓内钉住**的 sha512。
+   *    旧判据用 registry 响应自带的 dist.sha512 校验同一次响应指过来的 tarball（同源自证），
+   *    且两个字段都缺席时整条校验跳过 —— 于是「镜像投毒」与「哈希缺席」两个方向都判绿。
+   *    这里的负控刻意分成三条，分别钉住三个失效方向（改坏字节 / 缺钉 / 默认表被换成空表）。 */
+  // 平台包全集 = esbuild 实际发布的组合（darwin 无 arm/ia32，linux 与 win32 各有四个）。
+  // 用显式清单而不是「平台 × 架构」的笛卡尔积：后者会要求 esbuild 根本不存在的包，
+  // 把「钉住表不完整」这条判据变成永远红的假红。
+  const pinPlatforms = ['win32', 'linux', 'darwin']
+  const pinArches = { win32: ['x64', 'arm64', 'ia32'], linux: ['x64', 'arm64', 'arm', 'ia32'], darwin: ['x64', 'arm64'] }
+  const pinRequired = ['esbuild', ...pinPlatforms.flatMap((p) => pinArches[p].map((a) => '@esbuild/' + p + '-' + a))]
+  const pinMissing = pinRequired.filter((n) => typeof ESBUILD_TARBALL_SHA512[n] !== 'string' || ESBUILD_TARBALL_SHA512[n].length === 0)
+  const pinBuf = Buffer.from('syntax-floor-pin-fixture-bytes', 'utf8')
+  const pinBufHash = createHash('sha512').update(pinBuf).digest('base64')
+  const pinTable = { esbuild: pinBufHash }
+  const pinCases = [
+    ['正控：与钉住值一致的字节放行', tarballPinProblem('esbuild', pinBuf, pinTable) === null],
+    ['负控：字节被改坏必须判红（旧实现只在 registry 自己给的哈希上比）',
+      /不符/.test(String(tarballPinProblem('esbuild', Buffer.from('tampered', 'utf8'), pinTable)))],
+    ['负控：钉住表里没有该包必须判红（旧实现在哈希缺席时直接解包执行）',
+      /没有钉住/.test(String(tarballPinProblem('@esbuild/nowhere', pinBuf, pinTable)))],
+    /* 默认实参必须是**真表**：若有人把默认值改成空表（或忘了传），下面两条会同时错向 ——
+     * 真包名会报「没有钉住」而不是「不符」，未登记包名也会报「没有钉住」但第一条就红了。 */
+    ['默认表生效：真包名 + 改坏字节报「不符」而非「没有钉住」',
+      /不符/.test(String(tarballPinProblem('esbuild', Buffer.from('tampered', 'utf8'))))],
+    ['默认表生效：真包名 + 任意字节都不会被放行',
+      tarballPinProblem('esbuild', Buffer.from('tampered', 'utf8')) !== null],
+  ]
+  const pinJudgeOk = pinCases.every(([, ok]) => ok)
+  check('⑧ 供应器字节绑定：esbuild tgz 只认仓内钉住的 sha512（缺钉/不符一律拒绝解包与执行）',
+    pinJudgeOk && pinMissing.length === 0,
+    '判定用例 ' + pinCases.filter(([, ok]) => !ok).map(([l]) => l).join(' / ')
+    + (pinMissing.length > 0 ? '；钉住表缺 ' + pinMissing.join(',') + '（' + pinRequired.length + ' 个平台包必须全覆盖）' : ''))
 
   // ── 真实产物反向对照（C-2）：默认**自动启用**，不再是 opt-in ──
   // 真因：`--as-shipped <path>` 是 opt-in 且**没有任何调用方传它**（两条构建链调的是 `--scan`），

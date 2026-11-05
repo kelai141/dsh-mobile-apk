@@ -185,6 +185,7 @@ const GATES = [
   { script: 'check-state-registry.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
   { script: 'check-bridge-symmetry.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
   { script: 'check-gate-skips.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
+  { script: 'check-workflow-input-injection.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
   { script: 'check-perf-instrumentation.mjs', ciApk: true, ciCoord: true, needsSnapshot: true },
   // 注入面成员完整性（P0：包内新增文件曾被静默丢弃 → ERR_MODULE_NOT_FOUND/引擎启动即死）：
   // 需要「注入后」tar，故 CI 不跑，由两条构建链在注入步骤之后调用 + 发布链按快照面跑。

@@ -183,6 +183,16 @@ jobs:
           node --test scripts/check-control-ops.test.mjs
           node --test scripts/check-patch-mirror.test.mjs
           node --test scripts/check-tool-surface-budget.test.mjs
+      # 构建链自身判据的行为面（P2 批：issue #1613 / #1614 / #1616）。
+      # 三条都不是「源码切片」判据：它们从**真实脚本**抽出对应段落，用合成驱动真跑，并各自带一条
+      # 「改回旧写法必须恢复缺陷行为」的反证 —— 判据没有判别力时反证会红。
+      # pwsh/bash 缺席的布局（Linux 无 PowerShell）由各用例显式 skip 并打印原因，不静默当通过。
+      - name: 构建链行为判据（workflow 输入 / 注入半写 / 快照导出）
+        if: always()
+        run: |
+          node --test scripts/workflow-input-injection.test.mjs
+          node --test scripts/build-release-inject-guard.test.mjs
+          node --test scripts/snapshot-export-produced-guard.test.mjs
       # 壳侧加固语义（NSC / backup 规则 / exported）与子进程有界读（0.13.8-b FX-208.4 / E1）
       - name: 壳侧加固与有界读门禁
         if: always()
@@ -237,6 +247,8 @@ jobs:
           node scripts/check-state-registry.mjs
           node scripts/check-bridge-symmetry.mjs
           node scripts/check-gate-skips.mjs
+          # workflow 输入内插面（issue #1614）：run 块内不得出现 ${{ inputs.* }} / ${{ github.event.inputs.* }}。
+          node scripts/check-workflow-input-injection.mjs
           node scripts/check-kotlin-comments.mjs
           # 中英文案一致性（0.15.0）：资源键集合成对 + tr() 双参数；漏英文时 Android 静默回退中文。
           node scripts/check-i18n-parity.mjs

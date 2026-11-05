@@ -459,6 +459,7 @@ window.__ModuleLoader__.load({
 				className: styles.actions,
 				"data-undo-header": true,
 				children: [
+				/* dsh-mobile undo-E1 removed */
 					
 					stat !== null && (0, react_jsx_runtime.jsx)("button", {
 						type: "button",
@@ -468,6 +469,7 @@ window.__ModuleLoader__.load({
 						onClick: () => { onOpenPanel(); },
 						children: [
 							(0, react_jsx_runtime.jsx)("span", { className: styles.dot }),
+							/* dsh-mobile undo-E6 removed */
 							// dsh-mobile dot-only badge: 数量只在 title/aria-label 里，头部只留绿点
 						]
 					}),
@@ -772,6 +774,7 @@ window.__ModuleLoader__.load({
 			});
 		}
 		//#endregion
+				/* dsh-mobile undo-E2 removed */
 				//#region UndoMainPage + UndoSettingsSection (own sidebar section)
 		/** Full snapshot settings page shown in its own sidebar section. */
 		function UndoMainPage({ t }) {
@@ -937,6 +940,7 @@ window.__ModuleLoader__.load({
 					]
 				});
 			})));
+						/* dsh-mobile undo-E3 removed */
 						// Snapshot settings: own sidebar section (rc8 设置面板改动风险点；失败只跳过整页)
 			let sectionOk = false;
 			safe("slots:settings.section", () => {
@@ -960,9 +964,11 @@ window.__ModuleLoader__.load({
 				}, UndoMainPage)));
 			}
 					}
+		/* dsh-mobile undo-E4 removed */
 		//#endregion
 		exports.UndoHeader = UndoHeader;
 		exports.SnapshotPanel = SnapshotPanel;
+				/* dsh-mobile undo-E5 removed */
 				exports.UndoMainPage = UndoMainPage;
 		exports.UndoSettingsSection = UndoSettingsSection;
 		exports.apply = apply;

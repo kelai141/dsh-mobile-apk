@@ -28,7 +28,7 @@
 // 用法：node scripts/check-browser-parse-floor.mjs --scan <stageRoot|tar.xz>
 //       node scripts/check-browser-parse-floor.mjs --self-test
 // 退出码：0 = 通过；1 = 判据不成立；2 = 无法判定。
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { dirname, join, relative, sep } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -52,6 +52,17 @@ const isBrowserFace = (rel) => {
   if (/(^|\/)dsh-web-frontend\/dist\//.test(p)) return true
   if (/(^|\/)lib\/client\.js$/.test(p)) return true
   return false
+}
+
+/**
+ * tar 成员名 → 是否浏览器面。与 isBrowserFace 同一套规则，但多剥一层：
+ * 快照成员以 `usr/`（或 `home/`）开头，且可能是 `./` 前缀。这里只做前缀归一并复用同一函数，
+ * 保证「解包哪些」与「扫哪些」永远同一口径（两处各写一份规则迟早漂移）。
+ */
+const isBrowserFaceTarMember = (member) => {
+  const m = member.replace(/^\.\//, '').replace(/\/+$/, '')
+  if (m === '' || m.endsWith('/')) return false
+  return isBrowserFace(m)
 }
 
 const walkDir = (base, rel, out) => {
@@ -81,11 +92,29 @@ const materialize = (input) => {
   }
   if (!/\.tar\.xz$/.test(input)) die('--scan 只接受目录或 .tar.xz：' + input)
   const dir = mkdtempSync(join(tmpdir(), 'parse-floor-'))
-  const r = spawnSync('tar', ['-xJf', input, '-C', dir], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
-  if (r.status !== 0) die('解包失败：' + (r.stderr || '').slice(0, 400))
+  // **只解浏览器面成员，不全量解包**。全量 `tar -xJf` 在 Windows 上必失败：快照里有
+  // `usr/lib/*.so`、`usr/bin/*` 这类成员，落到 NTFS 上是非法文件名（实测报
+  // `Can't create '...\\usr\\lib\\libmenu.so': Invalid argument`），整条命令 status!==0。
+  // 而本门只需要 `dist/**/*.js` 与各 `lib/client.js`——它们都在 `usr/` 下的 node_modules 里，
+  // 路径合法。按成员清单精确解包，既避开非法名，也少写几十万个无关文件。
+  const wanted = tarMembers(input).filter((m) => isBrowserFaceTarMember(m))
+  if (wanted.length === 0) die('tar 内没有浏览器面成员（清单口径与 check-browser-syntax-floor 同源）：' + input)
+  // 用 -T <清单文件> 精确解包：成员可能上百个，塞命令行会撞长度上限；也不能用 `-T -`
+  // ——Windows 自带的 bsdtar 不支持从 stdin 读清单（实测 `Error inclusion pattern: Failed to open '-'`）。
+  const listPath = join(dir, '.members.txt')
+  writeFileSync(listPath, wanted.join('\n') + '\n')
+  const r = spawnSync('tar', ['-xJf', input, '-C', dir, '-T', listPath], {
+    encoding: 'utf8', maxBuffer: 16 * 1024 * 1024,
+  })
+  rmSync(listPath, { force: true })
+  if (r.status !== 0) die('解包失败（浏览器面成员 ' + wanted.length + ' 个）：' + (r.stderr || '').slice(0, 400))
   const rels = []
   walkDir(dir, '', rels)
-  return { root: dir, rels: rels.filter(isBrowserFace), cleanup: () => rmSync(dir, { recursive: true, force: true }) }
+  const faces = rels.filter(isBrowserFace)
+  if (faces.length !== wanted.length) {
+    die('解包后浏览器面文件数 ' + faces.length + ' != 清单 ' + wanted.length + '（解包不完整，拒绝给假绿读数）')
+  }
+  return { root: dir, rels: faces, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
 }
 
 /** 解析器来源：优先仓库内已安装的 acorn（与门禁其它工具同源），不做网络安装。 */
@@ -169,6 +198,40 @@ const selfTest = async () => {
   t('清单：任意包 lib/client.js 命中', isBrowserFace('node_modules/@deepseek-ai/dsh-client-ui-foo/lib/client.js') === true)
   t('清单：lib/index.js 不命中（不是浏览器面）', isBrowserFace('node_modules/@deepseek-ai/dsh-foo/lib/index.js') === false)
   t('清单：dist 下非 dsh-web-frontend 不命中', isBrowserFace('node_modules/@deepseek-ai/dsh-foo/dist/x.js') === false)
+  // tar 成员口径（与 isBrowserFace 同一函数，只是剥前缀）：必须和扫描口径一致，
+  // 否则「解包哪些」与「扫哪些」会各写一份规则并漂移。
+  t('tar 成员：./usr/.../lib/client.js 命中', isBrowserFaceTarMember('./usr/lib/node_modules/@deepseek-ai/dsh-client-ui-foo/lib/client.js') === true)
+  t('tar 成员：usr/.../dsh-web-frontend/dist/a.js 命中', isBrowserFaceTarMember('usr/lib/node_modules/@deepseek-ai/dsh-web-frontend/dist/a.js') === true)
+  t('tar 成员：目录项（结尾 /）不命中', isBrowserFaceTarMember('usr/lib/node_modules/@deepseek-ai/dsh-client-ui-foo/lib/') === false)
+  t('tar 成员：usr/lib/libmenu.so 不命中（Windows 非法文件名，绝不能进解包清单）', isBrowserFaceTarMember('usr/lib/libmenu.so') === false)
+  t('tar 成员：usr/bin/bash 不命中', isBrowserFaceTarMember('usr/bin/bash') === false)
+  // 真实解包负控（回归 2026-11-06 缺陷）：整包 `tar -xJf` 在 Windows 上会被 usr/lib/*.so
+  // 的非法文件名打死，所以按清单精确解包。这里造一个同时含 .so 与 client.js 的小 tar.xz，
+  // 断言 materialize 只挑出 client.js 且能读到内容——把「只解浏览器面」这条钉进自检。
+  let tarOk = false
+  let tarDetail = '（跳过：无 tar）'
+  const probe = spawnSync('tar', ['--version'], { encoding: 'utf8' })
+  if (probe.status === 0) {
+    const tdir = mkdtempSync(join(tmpdir(), 'parse-floor-tar-'))
+    try {
+      mkdirSync(join(tdir, 'src', 'usr', 'lib'), { recursive: true })
+      mkdirSync(join(tdir, 'src', 'usr', 'lib', 'node_modules', '@deepseek-ai', 'dsh-client-ui-x', 'lib'), { recursive: true })
+      writeFileSync(join(tdir, 'src', 'usr', 'lib', 'libmenu.so'), 'not really an elf')
+      writeFileSync(join(tdir, 'src', 'usr', 'lib', 'node_modules', '@deepseek-ai', 'dsh-client-ui-x', 'lib', 'client.js'), 'export const ok = 1\n')
+      const tarPath = join(tdir, 'probe.tar.xz')
+      const made = spawnSync('tar', ['-cJf', tarPath, '-C', join(tdir, 'src'), 'usr'], { encoding: 'utf8' })
+      if (made.status === 0) {
+        const m = materialize(tarPath)
+        try {
+          tarOk = m.rels.length === 1
+            && /dsh-client-ui-x\/lib\/client\.js$/.test(m.rels[0])
+            && readFileSync(join(m.root, m.rels[0].split('/').join(sep)), 'utf8').includes('ok = 1')
+          tarDetail = 'rels=' + JSON.stringify(m.rels)
+        } finally { m.cleanup() }
+      } else { tarDetail = '（跳过：打包失败 ' + (made.stderr || '').slice(0, 120) + '）' }
+    } finally { rmSync(tdir, { recursive: true, force: true }) }
+  }
+  t('tar 直读：含 .so 与 client.js 的归档只解出 client.js 且内容可读（' + tarDetail + '）', tarOk)
   if (fails.length > 0) {
     console.error('CHECK-BROWSER-PARSE-FLOOR SELF-TEST FAILED（' + fails.length + ' / ' + count + ' 项）：' + fails.join('；'))
     return 1

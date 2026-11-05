@@ -102,6 +102,7 @@ node (Join-Path $Root "scripts\check-bridge-symmetry.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "桥面出现新的不对称（只有 setter/getter 返偏好），拒绝打包"; exit 1 }
 Write-Host "== 门禁覆盖与 SKIP 纪律门禁 =="
 node (Join-Path $Root "scripts\check-gate-skips.mjs") 2>&1
+node (Join-Path $Root "scripts\check-workflow-input-injection.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "门禁覆盖清单/SKIP 纪律失败（发布链要求 SKIP=0），拒绝打包"; exit 1 }
 
 # 构建链中止语义（任一 ABI 被门禁拒绝 = 整链非 0；含尾部守卫动态自检）
@@ -638,6 +639,14 @@ foreach ($abi in @('arm64', 'x86_64')) {
 if ($ExportSnapshots) {
     foreach ($abi in @('arm64', 'x86_64')) {
         if ($OnlyAbi -and $OnlyAbi -ne $abi) { continue }
+        # issue #1616：导出段必须判「**本轮产出**」，不是「目录里有东西」。
+        # 旧实现的 §644 注释把「发布目录里存在 snapshot-<abi>」定义成「已校验」，而它只等价于
+        # 「APK 文件在场 + check-snapshot-asset 通过」——与「该 ABI 通过了全部门禁」不是同一件事。
+        # 触发路径：arm64 在 assemble **之后**的门禁被拒（内嵌快照可解压 / build-apk-engine 验签）⇒
+        # APK 已落在 out/v<ver>/，导出段照样把 snapshot-arm64.tar.xz + .sha256 写进发布目录，
+        # 而 $rejectedAbis.Count -gt 0 → exit 1 发生在导出段**之后**（末尾守卫）。
+        # CI 侧 publish 不会跑，但文件确实留在了发布目录里 —— 下一次组装/人工拷贝就会带走它。
+        if ($producedAbis -notcontains $abi) { Deny-Abi $abi "本轮未产出该 ABI（未通过全部门禁）——拒绝导出快照资产（#1616）"; continue }
         $snapIn = Join-Path $Root ".deploy-tmp\build-\13-$abi\snap-final2.tar.xz"
         if (-not (Test-Path $snapIn)) { Deny-Abi $abi "缺注入后快照 $snapIn（导出失败：发布资产不完整）"; continue }
         # issue #1080：**先校验，再拷进发布目录**；缺 APK 是硬失败，不是警告。
