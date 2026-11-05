@@ -95,7 +95,7 @@ test('ST-16：配方含三键来源标签，且工具面/状态路由仍在场',
   }
   const status = await callRoute(harness, '/api/android/env/status')
   assert.equal(status.adbTier, 'T0')
-  assert.deepEqual(harness.tools.map((t) => t.name).sort(), ['android_env_recipe', 'android_toolchain_status'])
+  assert.deepEqual(harness.tools.map((t) => t.name).sort(), ['android_env_recipe', 'android_toolchain_status', 'linux_environment_status'])
 })
 
 test('#222：环境 exact 路由在读取状态/配方前拒绝未认证与伪造 Host', async () => {

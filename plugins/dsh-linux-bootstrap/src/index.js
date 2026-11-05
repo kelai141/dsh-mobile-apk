@@ -384,6 +384,9 @@ export function createMobileBootstrap(options = {}) {
     } catch (error) {
       // Activation failure leaves the record installed but inactive: no download,
       // no silent revival, and the reason stays visible in status().
+      // An engine shutdown is cancellation, not a broken persisted install.
+      // Keep the user's activation choice so the next engine can restore it.
+      if (error?.code === 'LINUX_ENGINE_STOPPING') throw error
       state.enabled = false
       state.injectionActivated = false
       state.lastError = safeError(error)

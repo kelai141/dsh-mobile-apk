@@ -55,6 +55,15 @@ class EngineManager(private val context: Context, private val pickToken: String?
   var lastAvailability: EngineProbe.EngineAvailability = EngineProbe.EngineAvailability.DOWN
     private set
 
+  /**
+   * Human-readable outcome of the last stop attempt. Kept separate from
+   * [lastStartRefusal] so a failed stop is never mistaken for a spawn refusal,
+   * and so the caller can report "handle retained" as a real state.
+   */
+  @Volatile
+  var lastStopNote: String? = null
+    private set
+
   val engineReady: Boolean get() = nodeBin.exists()
 
   /**
@@ -1470,6 +1479,17 @@ class EngineManager(private val context: Context, private val pickToken: String?
       LogCollector.log(TAG, "engine start retrying after the tracked child exited during cooldown")
     }
     return try {
+      // Force-path leftovers from a previous generation are settled before this spawn.
+      // The current token is excluded so a live engine (e.g. after an app restart) is
+      // never killed; anything that cannot be proven clean blocks the spawn.
+      // Exclude a generation only while this process still holds its live handle.
+      // A token left by a dead host must be settled, or its guests leak forever.
+      val ownedLiveToken = sharedEngineInstanceToken.takeIf { engineProcess?.isAlive == true }
+      if (!reapOlderGenerations(ownedLiveToken)) {
+        lastStartRefusal = "上一代引擎的 guest 进程未能确认清理；拒绝启动新引擎"
+        STARTING.set(false)
+        return false
+      }
       // 只停止持有句柄的本壳子进程；未归属监听器绝不通过名称匹配清理。
       if (managedProcessAlive && !killExistingEngine()) {
         if (engineProcess?.isAlive == true) {
@@ -1519,9 +1539,33 @@ class EngineManager(private val context: Context, private val pickToken: String?
       val args = arrayOf(
         nodeBin.absolutePath, "--expose-internals", dshBin.absolutePath, "web", "--port", bindPort.toString(), "--no-open",
       )
+      // A close can arrive while snapshot/ownership work holds STARTING. Do
+      // not publish a new child after that explicit user shutdown.
+      if (EngineService.userShutdown) {
+        lastStartRefusal = "启动已取消：用户正在关闭引擎"
+        return false
+      }
       EngineEndpoint.beginBinding()
+      // Per-generation ownership mark: only processes carrying this exact token may be
+      // reaped. It is set before spawn so a crash in between leaves no anonymous domain.
+      val instanceToken = java.util.UUID.randomUUID().toString()
+      // Sequential start: this generation has no spawned children yet, so it is safe
+      // to look like a stop in progress (never publish a "stopped" state meanwhile).
+      sharedEngineInstanceToken = instanceToken
+      engineStopped = false
+      // Persist before the spawn: a Java-process death must not lose ownership of the
+      // domain. If this cannot be written, do not spawn an unowned generation.
+      try {
+        stopLedger().recordGeneration(instanceToken)
+      } catch (t: Throwable) {
+        Log.e(TAG, "could not record the engine generation before spawn", t)
+        lastStartRefusal = "无法持久化引擎代际标识（" + t.javaClass.simpleName + "）；拒绝启动"
+        EngineEndpoint.invalidate()
+        return false
+      }
       val started = startWithArgs(args, shellEnv() + mapOf(
         "DSH_MOBILE_MANAGED_ENGINE" to "1", "DSH_ENGINE_PORT" to bindPort.toString(),
+        OwnedEngineStop.ENV_INSTANCE to instanceToken,
       ))
       engineProcess = started
       // A managed Node server retries EADDRINUSE only once, using the OS-assigned ephemeral port.
@@ -1530,11 +1574,16 @@ class EngineManager(private val context: Context, private val pickToken: String?
       if (!started.isAlive) {
         engineProcess = null
         EngineEndpoint.invalidate()
+        // Never leave the dead generation's token in the ledger as "current": that
+        // would exclude it from the next start's settlement.
+        sharedEngineInstanceToken = null
         lastStartRefusal = "引擎进程在监听前退出，请查看本轮 engine.log"
         return false
       }
       // The cooldown is written only after a real start: failure paths don't consume the window (retry is immediate).
       EngineManager.lastStartAttemptAt = now
+      engineStopped = false
+      lastStopNote = null
       LogCollector.log(TAG, "engine started")
       true
     } catch (t: Throwable) {
@@ -2087,14 +2136,159 @@ class EngineManager(private val context: Context, private val pickToken: String?
     }
   }
 
-  /** Stop the engine process (best-effort). */
-  fun stopEngine() {
-    engineProcess?.destroy()
-    engineProcess = null
-    EngineEndpoint.invalidate()
-    LogCollector.log(TAG, "engine stopped (manual)")
-    // Reset the cooldown after a manual stop: returning to the foreground should allow an immediate restart.
-    EngineManager.lastStartAttemptAt = 0
+  /**
+   * Stop the engine (manual shutdown).
+   *
+   * Never drops a live handle: SIGTERM first, the full host grace window, then
+   * SIGKILL. If the host still refuses to exit the handle is retained and the
+   * caller is told the stop failed, so no second generation can be spawned on
+   * top of it. After a forced stop the generation's process domain is reaped by
+   * exact env token (see [OwnedEngineStop]); survivors stay in the ledger for the
+   * next start instead of being silently reported as cleaned.
+   */
+  fun stopEngine(): Boolean {
+    // The grace window is up to ~12s on a healthy host; blocking the UI thread here would ANR.
+    if (android.os.Looper.myLooper() === android.os.Looper.getMainLooper()) {
+      // True means the stop was accepted and is running off-thread — NOT that it finished.
+      // [engineStopped] stays false and [lastStopNote] carries the outcome until it settles.
+      engineStopped = false
+      // Any spawn that starts meanwhile must not resurrect the engine the user is closing.
+      EngineService.setUserShutdown(context, true)
+      lastStopNote = "engine stop accepted; running in the background"
+      stopInBackground("manual")
+      return true
+    }
+    return stopEngineBlocking("manual")
+  }
+
+  /** True once the tracked host and its guest domain are proven gone. */
+  @Volatile
+  var engineStopped: Boolean = true
+    private set
+
+  /** Best-effort async stop; used where blocking the caller would ANR. */
+  fun stopInBackground(reason: String) {
+    Thread({ stopEngineBlocking(reason) }, "dsh-engine-stop").apply { isDaemon = true }.start()
+  }
+
+  internal fun stopEngineBlocking(reason: String): Boolean = synchronized(STOP_LOCK) {
+    if (!acquireStartGuardForStop(STOP_START_WAIT_MS)) {
+      lastStopNote = "stop deferred: an engine start is in progress"
+      // A start that won the guard gets one more chance to be stopped after it publishes
+      // its handle. Dropping the request here would leave the service shutting down with
+      // a live engine (the user asked to close, the UI would be showing "stopping").
+      if (EngineService.userShutdown) {
+        lastStopNote = "stop queued: an engine start is in progress"
+        stopAfterStartSettles(reason)
+      }
+      LogCollector.log(TAG, "engine stop could not take the start guard (start in progress)")
+      return@synchronized false
+    }
+    try {
+      val held = engineProcess
+      val token = sharedEngineInstanceToken
+      val stopper = OwnedEngineStop()
+      // Record the domain while the host is still alive. The marker is on the runtime
+      // allowlist, but a snapshot also covers an older runtime that stripped it.
+      val domain = captureDomainForStop(stopper, token)
+      // No snapshot = no attribution authority: signalling now could strand guests
+      // with nothing left to identify them. Abort before anything is sent.
+      if (held != null && domain == null) {
+        lastStopNote = "engine stop aborted: guest domain unknown (/proc unreadable); handle kept"
+        return@synchronized false
+      }
+      // Persist members before the host is signalled. A failed write is a failed stop:
+      // signalling now would lose the only record of the guest domain.
+      if (domain != null && !token.isNullOrBlank()) {
+        if (!persistDomain(token, domain)) {
+          lastStopNote = "engine stop aborted: could not persist the guest domain (handle kept)"
+          return@synchronized false
+        }
+      }
+      if (held == null && !EngineProbe.portReachable(250)) {
+        // Nothing tracked and nothing listening here, but an earlier generation's
+        // guests may still be alive in this app domain: settle the ledger too.
+        val ledgerClean = try {
+          reapOlderGenerations(null)
+        } catch (t: Throwable) {
+          Log.e(TAG, "stop could not settle recorded generations", t)
+          false
+        }
+        engineStopped = ledgerClean
+        lastStopNote = if (ledgerClean) null else {
+          "engine stopped, but a recorded generation's guest processes remain"
+        }
+        return@synchronized ledgerClean
+      }
+      if (held == null) {
+        // A reachable listener with no owned handle is not ours to stop; never claim success.
+        lastStopNote = "engine stop refused: " + EngineProbe.ENGINE_AUTHORITY +
+          " is listening without an owned child handle"
+        LogCollector.log(TAG, "engine stop refused (unowned listener)")
+        return@synchronized false
+      }
+      // The tracked host exits first, then the exact recorded guest domain.
+      val outcome = stopper.stopTracked(held.asOwnedStopHandle())
+      if (!outcome.exited) {
+        // Keep the handle: a wedged host must not become an invisible orphan.
+        lastStopNote = "engine did not exit within the shutdown grace; handle retained"
+        LogCollector.log(TAG, "engine stop FAILED: still alive after SIGTERM+SIGKILL (pid kept)")
+        return@synchronized false
+      }
+      engineProcess = null
+      EngineEndpoint.invalidate()
+      if (outcome.forced) LogCollector.log(TAG, "engine ignored the shutdown grace; forced SIGKILL")
+      // Host gone but the guest domain is not settled yet: never report stopped here.
+      engineStopped = false
+      val reaped = reapGeneration(stopper, token, domain, reason)
+      engineStopped = reaped
+      if (!reaped) return@synchronized false
+      LogCollector.log(TAG, "engine stopped (" + reason + ")")
+      // Reset the cooldown after a manual stop: returning to the foreground should allow an immediate restart.
+      EngineManager.lastStartAttemptAt = 0
+      true
+    } catch (t: Throwable) {
+      lastStopNote = "engine stop failed: " + (t.message ?: t.javaClass.simpleName)
+      Log.e(TAG, "engine stop failed; handle retained", t)
+      false
+    } finally {
+      STARTING.set(false)
+    }
+  }
+
+  /**
+   * A start that is already publishing `engineProcess` must finish before a stop
+   * looks at the handle; otherwise the stop could miss a child that appears one
+   * instruction later. Bounded so shutdown never hangs behind a long refresh.
+   */
+  private fun acquireStartGuardForStop(budgetMs: Long): Boolean {
+    var waited = 0L
+    while (true) {
+      if (STARTING.compareAndSet(false, true)) return true
+      if (waited >= budgetMs) return false
+      try {
+        Thread.sleep(STOP_START_STEP_MS)
+      } catch (_: InterruptedException) {
+        Thread.currentThread().interrupt()
+        return false
+      }
+      waited += STOP_START_STEP_MS
+    }
+  }
+
+  /** Bounded retry so a close request survives an in-flight start without a second stop path. */
+  private fun stopAfterStartSettles(reason: String) {
+    Thread {
+      try {
+        val deadline = android.os.SystemClock.elapsedRealtime() + 120_000L
+        while (STARTING.get() && EngineService.userShutdown && android.os.SystemClock.elapsedRealtime() < deadline) {
+          Thread.sleep(STOP_START_STEP_MS)
+        }
+        if (!STARTING.get() && EngineService.userShutdown) stopEngineBlocking("$reason-retry")
+      } catch (_: InterruptedException) {
+        Thread.currentThread().interrupt()
+      }
+    }.apply { isDaemon = true; name = "dsh-engine-stop-retry" }.start()
   }
 
   /** Ownership-aware HTTP/log/process probe used by startup, restart and auth recovery. */
@@ -2168,19 +2362,33 @@ class EngineManager(private val context: Context, private val pickToken: String?
       LogCollector.log(TAG, "killExistingEngine refused: reachable port has no tracked child")
       return false
     }
-    if (held != null && held.isAlive) {
-      try {
-        held.destroy()
-        if (!held.waitFor(6, java.util.concurrent.TimeUnit.SECONDS)) {
-          held.destroyForcibly()
-          held.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)
+    if (held != null) {
+      val token = sharedEngineInstanceToken
+      // Same bounded policy as manual stop: grace for the host's orderly shutdown, then force,
+      // and never release the handle before it has really exited.
+      val stopper = OwnedEngineStop()
+      val domain = captureDomainForStop(stopper, token)
+      if (domain != null && !token.isNullOrBlank()) {
+        if (!persistDomain(token, domain)) {
+          lastStartRefusal = "上一代引擎的 guest 记录无法落盘；拒绝停止与重启"
+          return false
         }
-      } catch (_: Throwable) {
       }
-    }
-    if (held != null && !held.isAlive) {
+      val outcome = stopper.stopTracked(held.asOwnedStopHandle())
+      if (!outcome.exited) {
+        lastStartRefusal = "本壳旧引擎未在关闭宽限内退出，拒绝重复启动（保留句柄）"
+        LogCollector.log(TAG, "killExistingEngine: tracked child still alive; refusing a second spawn")
+        return false
+      }
       engineProcess = null
       EngineEndpoint.invalidate()
+      if (outcome.forced) LogCollector.log(TAG, "killExistingEngine: grace expired, forced SIGKILL")
+      // A dirty domain must block the new spawn: restarting on top of live guest
+      // processes is exactly the double-engine state this path exists to prevent.
+      if (!reapGeneration(stopper, token, domain, "restart")) {
+        lastStartRefusal = lastStopNote ?: "上一代引擎的 guest 进程未确认退出；拒绝启动新引擎"
+        return false
+      }
     }
     repeat(5) {
       if (!EngineProbe.portReachable(250)) return true
@@ -2188,6 +2396,159 @@ class EngineManager(private val context: Context, private val pickToken: String?
     }
     LogCollector.log(TAG, "killExistingEngine: " + EngineProbe.ENGINE_AUTHORITY + " remains occupied; refusing spawn")
     return false
+  }
+
+  /** Record the pre-signal domain; a snapshot failure is itself a stop failure. */
+  private fun captureDomainForStop(stopper: OwnedEngineStop, token: String?): List<OwnedEngineStop.Member>? {
+    val domain = stopper.captureDomain(listOfNotNull(token))
+    if (domain == null) {
+      lastStopNote = "engine stop failed: /proc could not be read, guest ownership unknown"
+      LogCollector.log(TAG, "engine stop: domain capture failed (/proc unreadable)")
+    }
+    return domain
+  }
+
+  /**
+   * Reap this generation and report the truth. Returns true only when nothing of
+   * it survives; otherwise the ledger keeps the generation and the caller must
+   * not spawn. Nothing is inferred from process names or a whole-UID sweep.
+   */
+  private fun reapGeneration(
+    stopper: OwnedEngineStop,
+    token: String?,
+    domain: List<OwnedEngineStop.Member>?,
+    reason: String,
+  ): Boolean {
+    val ledger = stopLedger()
+    if (domain == null) {
+      if (!token.isNullOrBlank()) runCatching { ledger.recordGeneration(token) }
+      lastStopNote = "engine stop incomplete: guest domain could not be verified"
+      return false
+    }
+    val fresh = stopper.captureDomain(listOfNotNull(token)) ?: run {
+      lastStopNote = "engine stop incomplete: guest domain cannot be refreshed"
+      return false
+    }
+    val members = (domain + fresh).distinctBy { it.pid to it.startTime }
+    val outcome = try {
+      stopper.reap(members)
+    } catch (t: Throwable) {
+      Log.w(TAG, "engine domain reap failed", t)
+      if (!token.isNullOrBlank()) {
+        runCatching {
+          ledger.recordGeneration(token)
+          ledger.recordDomain(token, members)
+        }.onFailure { writeError ->
+          Log.e(TAG, "could not keep the unsettled generation in the ledger", writeError)
+        }
+      }
+      lastStopNote = "engine stop incomplete: reap threw " + t.javaClass.simpleName
+      return false
+    }
+    if (outcome.terminated.isNotEmpty() || outcome.killed.isNotEmpty()) {
+      LogCollector.log(
+        TAG,
+        "engine domain reap ($reason): term=" + outcome.terminated.joinToString(",") +
+          " kill=" + outcome.killed.joinToString(","),
+      )
+    }
+    if (!outcome.clean) {
+      if (!token.isNullOrBlank()) {
+        runCatching {
+          ledger.recordGeneration(token)
+          ledger.recordDomain(token, members.filter { it.pid in outcome.survivors || it.pid in outcome.unverified })
+        }.onFailure { writeError ->
+          Log.e(TAG, "could not keep surviving members in the ledger", writeError)
+        }
+      }
+      lastStopNote = "engine stop incomplete (" + reason + "): survivors=" + outcome.survivors.joinToString(",") +
+        " unverified=" + outcome.unverified.joinToString(",") + (outcome.error?.let { " error=" + it } ?: "")
+      LogCollector.log(TAG, lastStopNote!!)
+      return false
+    }
+    val remaining = stopper.captureDomain(listOfNotNull(token))
+    if (remaining == null || remaining.isNotEmpty()) {
+      if (!token.isNullOrBlank() && remaining != null) ledger.recordDomain(token, remaining)
+      lastStopNote = "engine stop incomplete: late guest descendants remain; retry shutdown"
+      return false
+    }
+    if (!token.isNullOrBlank()) {
+      try {
+        ledger.remove(token)
+      } catch (t: Throwable) {
+        // Nothing survives, but the ledger still claims this generation: next start
+        // will re-verify it (cheap) rather than spawn on an unknown domain.
+        Log.e(TAG, "could not clear a settled generation from the ledger", t)
+      }
+    }
+    lastStopNote = null
+    return true
+  }
+
+  private fun stopLedger(): EngineStopLedger = EngineStopLedger(File(context.filesDir, STOP_LEDGER_NAME))
+
+  /** Ledger persistence that must succeed before anything is signalled. */
+  private fun persistDomain(token: String, domain: List<OwnedEngineStop.Member>): Boolean {
+    return try {
+      val ledger = stopLedger()
+      ledger.recordGeneration(token)
+      ledger.recordDomain(token, domain)
+      true
+    } catch (t: Throwable) {
+      Log.e(TAG, "could not persist the engine guest domain", t)
+      lastStopNote = "engine stop aborted: ledger write failed (" + t.javaClass.simpleName + ")"
+      false
+    }
+  }
+
+  /**
+   * Startup-side settlement. Only the token this process still owns is excluded
+   * (a live tracked host), because reaping it would kill a healthy engine.
+   * Every recorded generation is otherwise a candidate, including the newest:
+   * after a Java-process restart the old host may already be dead while its
+   * guest tools survive. Since the marker is on HOST_ENV_ALLOWLIST, those
+   * descendants are found by exact token even after setsid, with no reliance on
+   * a pre-death snapshot. Anything not proven clean blocks the spawn.
+   */
+  internal fun reapOlderGenerations(currentToken: String?): Boolean {
+    val ledger = stopLedger()
+    // The spawn branch is only reached when no usable owned engine exists, so the
+    // newest generation is a candidate; excluding it would leak its guest domain.
+    val entries = try {
+      ledger.read().filter { it.token != currentToken }
+    } catch (t: Throwable) {
+      // An unreadable ledger may hide a previous generation's guests: block the spawn.
+      lastStartRefusal = "引擎代际账本不可读（" + t.javaClass.simpleName + "）；拒绝启动以免叠加 guest 进程"
+      Log.e(TAG, "engine stop ledger unreadable; spawn blocked", t)
+      return false
+    }
+    if (entries.isEmpty()) return true
+    val stopper = OwnedEngineStop()
+    var clean = true
+    for (entry in entries) {
+      val discovery = stopper.captureDomain(listOf(entry.token))
+      if (discovery == null) {
+        clean = false
+        continue
+      }
+      // Ledger members keep their recorded starttime+uid (pid reuse is rejected);
+      // fresh discovery adds anything still carrying this exact token.
+      val members = (entry.members + discovery.filter { d -> entry.members.none { it.pid == d.pid } })
+      val outcome = try { stopper.reap(members) } catch (_: Throwable) { null }
+      if (outcome == null || !outcome.clean) {
+        clean = false
+        LogCollector.log(TAG, "startup stop settlement incomplete for a previous generation; spawn blocked")
+      } else {
+        try {
+          ledger.remove(entry.token)
+        } catch (t: Throwable) {
+          // Settled in the process table but not in the ledger: still not a clean start.
+          clean = false
+          Log.e(TAG, "could not remove a settled generation from the ledger", t)
+        }
+      }
+    }
+    return clean
   }
 
   /** Reset the 90s cooldown window: auto-undo (config rollback) or user retry
@@ -2518,6 +2879,25 @@ description: 手机操控纪律：无障碍语义树优先、ref 语义点击/�
 
     /** Process-level start CAS: visible across EngineManager instances (double-start race guard). */
     val STARTING = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** Bounded wait before a stop gives up on an in-flight start (never silent). */
+    private const val STOP_START_WAIT_MS = 2_000L
+    private const val STOP_START_STEP_MS = 100L
+
+    /** Generation/member ledger for guest-domain ownership across app-process deaths. */
+    private const val STOP_LEDGER_NAME = ".engine-stop-ledger"
+
+    /** Serializes stop/spawn decisions so a stop cannot interleave with a fresh start. */
+    private val STOP_LOCK = Any()
+
+    /**
+     * Ownership mark of the current (or last) engine generation. Children of the
+     * engine inherit it; only exact `DSH_ENGINE_INSTANCE=<token>` matches are
+     * terminated by the force path.
+     */
+    @Volatile
+    var sharedEngineInstanceToken: String? = null
+      private set
 
     /** 快照刷新进行中（companion 级：MainActivity 与 EngineService 各持 EngineManager 实例，实例字段
      *  互不可见——同 STARTING CAS 道理）。看门狗自愈拉起在此期间必须止步：刷新先备份再全量解压

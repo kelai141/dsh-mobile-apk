@@ -40,6 +40,7 @@ export interface BootstrapStatus {
 }
 
 export interface LinuxBootstrap {
+  subscribe?(listener: (status: BootstrapStatus) => void): () => void
   status(): BootstrapStatus | Promise<BootstrapStatus>
   checkForUpdates(options: { source: 'manual' | 'mobile-version-change' }): unknown | Promise<unknown>
   /** bootstrap 要求 confirmed:true 且 activate:true；runtimeId 缺席时按宿主 arch 取默认。 */
@@ -105,6 +106,7 @@ export interface PluginInstallResult {
   rollback: () => Promise<void>
 }
 export interface LinuxPluginHost {
+  shutdown(): Promise<void>
   install(options: PluginInstall): Promise<PluginInstallResult>
   uninstall(options?: PluginUninstall): Promise<void>
   isInjected(query: PluginInjectionQuery): Promise<PluginInjectionState>
@@ -125,6 +127,8 @@ export function createLinuxPluginHost(options: {
   let activeDirectory: string | undefined
   let manager: RuntimeManager | undefined
   let operation: Promise<unknown> = Promise.resolve()
+  let closed = false
+  const stopping = () => Object.assign(new Error('DSH engine is stopping; Linux activation is unavailable'), { code: 'LINUX_ENGINE_STOPPING' })
   const serialize = <T>(fn: () => Promise<T>): Promise<T> => {
     const next = operation.then(fn)
     operation = next.catch(() => {})
@@ -194,6 +198,7 @@ export function createLinuxPluginHost(options: {
   }
   return {
     install: input => serialize(async () => {
+      if (closed) throw stopping()
       const root = await rootReal()
       if (root === undefined) throw new Error('DSH_FILES_DIR is required to activate the Linux runtime plugin')
       const directory = await realpath(input.directory).catch(() => undefined)
@@ -206,6 +211,7 @@ export function createLinuxPluginHost(options: {
         return { directory, active: true, manager, rollback: release }
       }
       const plugin = await (options.importModule ?? (url => import(url)))(pathToFileURL(entry).href)
+      if (closed) throw stopping()
       if (typeof plugin !== 'object' || plugin === null || typeof (plugin as { apply?: unknown }).apply !== 'function') {
         throw new Error('Runtime bundle must export a Cordis apply function')
       }
@@ -215,6 +221,7 @@ export function createLinuxPluginHost(options: {
       try {
         activated = await activation
         if (activated.ready !== undefined) await activated.ready
+        if (closed) throw stopping()
         if (activated.state !== undefined && activated.state !== FiberState.ACTIVE) {
           throw new Error('Runtime Cordis plugin did not become active')
         }
@@ -232,6 +239,7 @@ export function createLinuxPluginHost(options: {
     }),
     // `rollback` belongs to the bootstrap's transaction; the host only releases the scope.
     uninstall: (_options?: PluginUninstall) => serialize(release),
+    shutdown: () => { closed = true; return serialize(release) },
     isInjected: async query => {
       const root = await rootReal()
       if (root === undefined) return { injected: false, active: false }

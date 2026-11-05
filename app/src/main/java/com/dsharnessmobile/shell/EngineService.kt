@@ -121,9 +121,17 @@ class EngineService : Service() {
     if (serviceDestroyed || instance !== this) return
     setUserShutdown(this, true)
     serviceEpoch.get()?.let { retireEpoch(it) }
-    try { engineManager.stopEngine() } catch (_: Exception) {
+    // The bounded stop can take ~12s (host grace + domain reap); never on the Service
+    // main thread. This is the same path the UI uses, so there is exactly one stop queue.
+    if (!shutdownRequested.compareAndSet(false, true)) return
+    try {
+      engineManager.stopInBackground("service-shutdown")
+    } catch (_: Exception) {
+      shutdownRequested.set(false)
     }
   }
+
+  private val shutdownRequested = java.util.concurrent.atomic.AtomicBoolean(false)
 
   /**
    * Start the engine if not running, then arm the watchdog. v2 (PRD F2-4):

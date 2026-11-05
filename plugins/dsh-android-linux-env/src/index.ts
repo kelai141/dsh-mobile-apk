@@ -36,6 +36,7 @@ import {
 } from './linux-environment.js'
 import { createLinuxBootstrapConfig } from './linux-host-asset-io.js'
 import { mountLinuxBootstrap, readLinuxManifest } from './linux-bootstrap-loader.js'
+import { createLinuxLifecycle, onEngineShutdown } from './linux-lifecycle.js'
 
 export const name = 'dsh-android-linux-env'
 export const inject = ['tools', 'webServer', 'androidPrivilege'] as const
@@ -344,6 +345,19 @@ function cacheExecutePayload(plan: CleanupPlan): Record<string, unknown> {
 }
 
 export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
+  const lifecycle = createLinuxLifecycle()
+  ctx.tools.register(defineTool({
+    name: 'linux_environment_status',
+    description: '查看 Linux 运行时是否正在启动、已就绪、未安装或失败。DSH 可先提供对话，Debian 在后台恢复；Linux 工具未出现时先查看此状态，不猜路径、不回退宿主 shell。',
+    parameters: {},
+    output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
+    execute: async () => lifecycle.snapshot(),
+  }))
+  if (typeof ctx.inject === 'function') ctx.inject(['systemPrompt'], scope => {
+    const prompt = serviceOf<{ context(input: unknown): () => void }>(scope, 'systemPrompt')
+    scope.effect(() => prompt!.context({ name: 'android-linux-lifecycle', order: 90, required: true, interpolate: false,
+      text: () => lifecycle.snapshot().message }))
+  })
   // 授权档位权威 = bridge 服务（androidPrivilege，patch 顺序 bridge 先于本插件）
   const svc = (ctx as unknown as { androidPrivilege?: { status(): { tier: string } } }).androidPrivilege
   // 实验性内部 Linux 插件（bootstrap + runtime）：包随机放在内置（hard）插件目录，但**默认不启用**
@@ -355,13 +369,16 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
   })
   if (typeof ctx.provide === 'function') {
     ctx.provide('linuxPluginHost', pluginHost)
-    ctx.effect(() => () => pluginHost.uninstall())
+    const shutdown = async () => { lifecycle.stop(); await pluginHost.shutdown(); lifecycle.stopped() }
+    ctx.effect(() => onEngineShutdown(shutdown))
+    ctx.effect(() => shutdown)
   }
   if (typeof ctx.inject === 'function') {
     // 版本变化检查只在内部 bootstrap 插件**已启用**（服务在场）后发生一次，且还需应用版本变化与
     // 用户开启自动更新；服务缺席（未启用）不重试、不轮询。
     ctx.inject(['linuxBootstrap'], scope => {
       const bootstrap = serviceOf<LinuxBootstrap>(scope, 'linuxBootstrap')
+      if (bootstrap) void lifecycle.attach(bootstrap).catch(error => lifecycle.fail(error))
       if (bootstrap) void checkLinuxEnvironmentAfterMobileChange(bootstrap).catch(() => {
         ctx.logger?.('dsh-android-linux-env')?.warn?.('Linux 环境版本变化检查失败，请通过设置页重试。')
       })
@@ -473,9 +490,12 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
       ...(typeof _config.releaseUrl === 'string' ? { releaseUrl: _config.releaseUrl } : {}),
     })
     void mountLinuxBootstrap(ctx, { config: bootstrapConfig }).catch(error => {
+      lifecycle.fail(error)
       ctx.logger?.('dsh-android-linux-env')?.warn?.(
         'Linux bootstrap 装载失败，Linux 环境设置面不可用：' + (error instanceof Error ? error.message : String(error)),
       )
     })
+  } else {
+    lifecycle.fail(new Error('DSH_FILES_DIR 未提供，无法恢复 Linux 运行时'))
   }
 }

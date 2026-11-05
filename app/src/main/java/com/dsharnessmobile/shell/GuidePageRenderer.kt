@@ -13,7 +13,7 @@ import java.io.File
 
 /** 引导页（启动/测试界面）纯代码 UI：GuidePhase 状态机驱动视图渲染 + WebUI/引导页切换（自 MainActivity 拆出）。 */
 
-internal enum class GuidePhase { Idle, Starting, Extracting, Updating, Recovering, Undoing, Error, Closed, Info }
+internal enum class GuidePhase { Idle, Starting, Stopping, Extracting, Updating, Recovering, Undoing, Error, Closed, Info }
 
 /** Stable user copy comes only from a structured failure code, never raw paths or exception text. */
 internal fun startupFailureHintResource(code: String?): Int = when (code) {
@@ -445,12 +445,12 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
     if (phase == GuidePhase.Error && startupOwnershipRepairAllowed &&
       !RepairState.required(activity)) autoRepairOwnershipOnFailure()
 
-    val busy = phase == GuidePhase.Starting ||
+    val busy = phase == GuidePhase.Starting || phase == GuidePhase.Stopping ||
       phase == GuidePhase.Extracting ||
       phase == GuidePhase.Updating ||
       phase == GuidePhase.Recovering ||
       phase == GuidePhase.Undoing
-    val lockPrimary = phase == GuidePhase.Starting ||
+    val lockPrimary = phase == GuidePhase.Starting || phase == GuidePhase.Stopping ||
       phase == GuidePhase.Extracting ||
       phase == GuidePhase.Updating ||
       phase == GuidePhase.Undoing ||
@@ -468,6 +468,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
     chrome.primaryButton.alpha = if (locked) 0.55f else 1f
     chrome.primaryButton.text = when {
       leasePending -> activity.getString(R.string.ds_clear_isolation)
+      phase == GuidePhase.Stopping -> UiText.t(activity, "正在关闭", "Stopping")
       phase == GuidePhase.Closed -> activity.getString(R.string.ds_restart)
       startupRetryAction -> activity.getString(R.string.ds_start_retry)
       phase == GuidePhase.Recovering -> activity.getString(R.string.ds_recovering)
@@ -493,7 +494,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
     val dotColor = when (phase) {
       GuidePhase.Error, GuidePhase.Closed -> activity.getColor(R.color.ds_danger)
       // 黑白稿里「进行中」统一为墨色脉冲，色相只留给真正的故障信号。
-      GuidePhase.Starting, GuidePhase.Extracting, GuidePhase.Updating,
+      GuidePhase.Starting, GuidePhase.Stopping, GuidePhase.Extracting, GuidePhase.Updating,
       GuidePhase.Recovering, GuidePhase.Undoing -> activity.getColor(R.color.ds_accent)
       // Info = 中性事实陈述（本版没有这项能力、无需处理），既不是故障（红）也不是进行中（墨）。
       GuidePhase.Idle, GuidePhase.Info -> activity.getColor(R.color.ds_text_tertiary)
@@ -632,7 +633,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
   /** 当前相位是否为**不可打断**（旁路动作只能写 hint，不得改相位）。 */
   fun phaseLocked(): Boolean = phaseLocked(lastGuidePhase)
 
-  private fun phaseLocked(phase: GuidePhase): Boolean = phase == GuidePhase.Starting ||
+  private fun phaseLocked(phase: GuidePhase): Boolean = phase == GuidePhase.Starting || phase == GuidePhase.Stopping ||
     phase == GuidePhase.Extracting ||
     phase == GuidePhase.Undoing
 
@@ -682,6 +683,7 @@ internal class GuidePageRenderer(private val activity: MainActivity) {
   }
 
   private fun defaultHint(phase: GuidePhase): String = when (phase) {
+    GuidePhase.Stopping -> UiText.t(activity, "正在释放 Linux 终端和后台任务，文件会保留。", "Releasing Linux terminals and background tasks; files are kept.")
     GuidePhase.Starting -> UiText.t(activity, "首次启动会解压运行时，请保持前台。", "First start unpacks the runtime; stay in the app.")
     GuidePhase.Extracting -> extractHintBody()
     // 0.14.6：这句只允许出现在**引擎快照更新**相位。APK 自更新路径不再把相位设成 Updating

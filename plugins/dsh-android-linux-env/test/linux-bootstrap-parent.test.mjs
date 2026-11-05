@@ -5,6 +5,8 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { Context } from '@deepseek-ai/cordis'
 import * as host from '../lib/index.js'
+import ToolRuntime from '@deepseek-ai/dsh-tools'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 
 test('the actual host publishes bootstrap after its parent fiber activates', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'linux-parent-'))
@@ -12,9 +14,10 @@ test('the actual host publishes bootstrap after its parent fiber activates', asy
   process.env.DSH_FILES_DIR = dir
   process.env.DSH_APP_VERSION = '0.14.9'
   const ctx = new Context()
+  const prompt = new SystemPrompt(ctx, {})
+  const tools = new ToolRuntime(ctx)
   const fibers = []
   ctx.on('internal/plugin', fiber => { fibers.push(fiber) })
-  ctx.provide('tools', { register: () => () => {} })
   ctx.provide('webServer', { register: () => () => {} })
   ctx.provide('androidPrivilege', { status: () => ({ tier: 'T0' }) })
   try {
@@ -26,6 +29,11 @@ test('the actual host publishes bootstrap after its parent fiber activates', asy
     if (!service) t.diagnostic(JSON.stringify(fibers.map(f => ({ name: f.runtime?.name, state: f.state, error: String(f._error) }))))
     assert.ok(service, `bootstrap is absent; parent state=${fiber.state}`)
     assert.equal((await service.status()).installed, false)
+    const statusTool = tools.schemas().find(tool => tool.name === 'linux_environment_status')
+    assert.ok(statusTool, 'status remains visible even when Debian is not installed')
+    await new Promise(resolve => setTimeout(resolve, 20))
+    const assembly = await prompt.assemble({})
+    assert.ok(assembly.contexts.some(part => part.name === 'android-linux-lifecycle' && /尚未安装/.test(part.text)), 'the model receives actual runtime state before a request')
   } finally {
     await ctx.fiber.dispose()
     if (old.files === undefined) delete process.env.DSH_FILES_DIR; else process.env.DSH_FILES_DIR = old.files

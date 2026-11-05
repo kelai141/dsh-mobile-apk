@@ -463,8 +463,15 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     }
   }
 
-  /** 开发者选项「关闭」：停止引擎并回退到初始化（启动/测试）界面，不自动重启。 */
+  /**
+   * 开发者选项「关闭」：显示「正在关闭」，后台执行**一次**有界停止，再按真实结果
+   * 落到 Closed 或失败提示。历史缺陷：先画「引擎已关闭」，再异步 stop 两次
+   * （requestShutdown + engineManager.stopEngine），宿主还活着时 UI 已宣称关闭。
+   *
+   * userShutdown 先持久化——即使本次停止未完成，看门狗/START_STICKY 也不会把它重新拉起。
+   */
   fun shutdownToGuide() {
+    if (!shutdownInFlight.compareAndSet(false, true)) return
     activity.userClosedEngine = true
     flowOwnership.invalidate()
     EngineService.setUserShutdown(activity, true)
@@ -472,17 +479,47 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     freezeHandler.removeCallbacks(freezeRunnable)
     activity.runOnUiThread {
       activity.hideSoftInput()
-      activity.applyGuidePhase(GuidePhase.Closed, UiText.t(activity, "引擎已关闭", "Engine closed"))
+      activity.applyGuidePhase(
+        GuidePhase.Stopping,
+        UiText.t(activity, "正在关闭引擎…", "Stopping the engine…"),
+      )
       activity.showGuide()
     }
-    try { EngineService.instance?.requestShutdown() } catch (_: Exception) {
-    }
-    try { activity.engineManager.stopEngine() } catch (_: Exception) {
-    }
-    try { activity.stopService(Intent(activity, EngineService::class.java)) } catch (_: Exception) {
-    }
-    LogCollector.log("dsh-shell", "harness closed via dev options (shutdownToGuide)")
+    Thread {
+      var stopped = false
+      try {
+        // One owner for the stop, and one blocking wait for its real result.
+        // requestShutdown would issue a second stop and could not report back.
+        stopped = activity.engineManager.stopEngineBlocking("dev-close")
+      } catch (t: Throwable) {
+        LogCollector.log("dsh-shell", "engine stop threw during close: " + t.javaClass.simpleName)
+      } finally {
+        if (stopped) {
+          try { activity.stopService(Intent(activity, EngineService::class.java)) } catch (_: Exception) {
+          }
+        }
+        val failure = activity.engineManager.lastStopNote
+        activity.runOnUiThread {
+          shutdownInFlight.set(false)
+          if (activity.isFinishing || activity.isDestroyed) return@runOnUiThread
+          if (stopped) {
+            activity.applyGuidePhase(GuidePhase.Closed, UiText.t(activity, "引擎已关闭", "Engine closed"))
+          } else {
+            // The gate stays set: nothing may auto-restart, and the user gets the real reason.
+            activity.applyGuidePhase(
+              GuidePhase.Error,
+              UiText.t(activity, "引擎未能完全关闭", "The engine did not fully stop"),
+              failure ?: UiText.t(activity, "停止未完成，请重试", "Stop did not finish; please retry"),
+            )
+          }
+          activity.showGuide()
+        }
+        LogCollector.log("dsh-shell", "harness closed via dev options (shutdownToGuide, stopped=" + stopped + ")")
+      }
+    }.apply { isDaemon = true; name = "dsh-dev-shutdown" }.start()
   }
+
+  private val shutdownInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
 
   private fun scheduleEngineRetry(generation: Long, clientFailure: Boolean = false) {
     if (!isCurrentEngineFlow(generation)) return

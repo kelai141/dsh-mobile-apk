@@ -2506,3 +2506,13 @@ app/src/main/java/com/dsharnessmobile/shell/ApkUpdateAction.kt
 - [B02] 漂移：`历史 BRIDGE-API 副本（当前契约见§6 K04）` 说聚合入口「`--list` 现数，当前 17 项」，源码 `scripts/check-release-gates.mjs:28`（`GATES` 数组）是 27 项（同仓 `docs/AGENTS/build-and-env.md:48` 写的是 27 项，两份文档自相矛盾）。
 - [B02] 漂移：5 个门禁脚本的两仓副本行尾不同（协调仓 CRLF、apk 仓 LF），`cmp` 字节不等、归一化后内容一致：`scripts/check-boot-budget.mjs`、`scripts/check-browser-syntax-floor.mjs`、`scripts/check-build-parallel-cap.mjs`、`scripts/check-snapshot-builder-output.mjs`、`scripts/check-tool-output-schema.mjs`；镜像门禁只按「仅行尾差异」告警放行（`scripts/check-patch-mirror.mjs:339`）——「逐字节镜像」在行尾层不成立。
 - [B02] 漂移：`scripts/check-code-map.mjs` 只在 apk 仓存在（协调仓 `scripts/` 无此文件），且未被列进 `scripts/check-patch-mirror.mjs:160` 起的 `MIRROR_TOP` → 这条新门禁自身没有镜像守护。
+
+
+## Linux 随引擎启停（2026-11-05）
+
+DSH 的父插件先激活，Linux bootstrap 在后台恢复。linux-lifecycle.ts 提供始终可见的状态工具与每轮 required context，明确启动中、就绪、未安装、失败和关闭中。EngineStartFlow 的 Stopping 相位锁住启动按钮；只有宿主和进程域退出后才显示 Closed。正常 SIGTERM 交给插件释放运行时，原生 OwnedEngineStop 给出宽限后校验 PID/starttime/UID，再清理当代引擎残留。代际账本在创建进程前落盘，恢复时只清理旧归属，未确认退出不得再创建一代引擎。
+
+<!-- COVERAGE
+app/src/main/java/com/dsharnessmobile/shell/OwnedEngineStop.kt
+plugins/dsh-android-linux-env/src/linux-lifecycle.ts
+-->
