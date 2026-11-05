@@ -3140,3 +3140,32 @@ The term '//' is not recognized as a name of a cmdlet, function, script file, or
     删配置的改动必须同时扫一遍依赖该配置文本的夹具（`grep` 被删的字面量）。
 
     复验：`node --test scripts/check-manifest-hardening.test.mjs` 8 例全绿，且把 `</paths>` 注入点改坏后能红。
+
+385. **并集合并后「同一条判据的两份等价实现」会互相拆台：取 A 的实现 + B 的夹具，锚字符串与注入缝同时失效**（2026-11-05，`#1643` 实锤）
+
+现象：三支并行修同一片门禁（`#1632` / `#1636` / `#1637`）合成一支后，`lock-rewrite-guard.test.mjs` 的 7 条里 4 条红，
+其中反证报「反证前提不成立：找不到判定调用点」。本地第一次跑这个文件就复现——**但它不在我「改过的那几个」清单里**，
+所以此前三轮「本地绿」根本没覆盖它。
+
+真因有三层，都是合并特有的：
+1. **夹具锚死整句话**。反证要「把判定调用点换成永远放行」，写法是
+   `source.replace("const rewriteProblem = lockRewriteProblem({ inputLockSha256, resolvedLockSha256 })", "const rewriteProblem = null")`。
+   合并取的是 `#1637` 侧实现，调用点变成多行、变量名 `lockRewrite`、参数 `inputSha256/resolvedSha256` ——
+   `String.replace` 静默不注入，反证前提落空（与坑 384 同型，但这次的受害者是**反证**而不是正控）。
+2. **注入缝被连带删掉**。`#1637` 的安装器有 `DSH_NPM_TEST_STUB` 缝（让测试注入假 npm，从而把「判红必须在 ci 之前」
+   变成可断言的调用序列）；我删「旧顶层块」时把它一起删了，于是三条安装器层用例直接 `spawnSync npm.cmd` 失败。
+3. **同一判据两种语言**。`#1636` 的文案是中文「就地重写了 package-lock.json」，`#1637` 是英文
+   `rewrote the committed package-lock.json`；测试按中文匹配、实现给英文。
+
+修法（按优先级）：
+- 夹具**按结构定位**：用 `<name> = lockRewriteProblem(` 正则找到调用点，再**同时配平 `()` 与 `{}`** 找到闭合，
+  整块替换。只配平圆括号会在对象字面量的 `}` 处切半截（实测 `SyntaxError: Unexpected identifier`）。
+- 每一步定不到就 `assert` fail-fast，并给出「实现可能又变了，需同步本夹具」的处置提示；**绝不静默降级**。
+- 删 import 的同时必须删对应的 `export { … }` re-export，否则模块 `SyntaxError: Export not defined`，
+  反证变成「把模块改崩」，证不了判据承重。
+- 反证文件写在临时目录时，相对 import 会按临时目录解析；必须换成绝对 `file://` URL。
+- 文案取**中文首句点题 + 英文正文细节**，只保留一份实现，不为适配某一边的夹具去改判据。
+
+验证面教训（同一轮踩到）：改了 `#1613/#1615` 的实现后，只跑 `install-project-dependencies.test.mjs` 是不够的——
+`lock-rewrite-guard.test.mjs` 也测同一片。**交 PR 前在 WSL 里跑整个 `scripts/**/*.test.mjs` 与 `source-build/*.test.mjs`**，
+不要用 CI 当本地测试。

@@ -134,14 +134,52 @@ test('反证：去掉「就地重写」判据后，被重写的 lock 会被照�
   const dir = makeFixture(t, 'noguard')
   const stub = path.join(dir, 'stub.mjs')
   writeStub(stub, 'rewrite')
-  // 反证通过把判定调用点换成「永远放行」实现：与「旧实现只记不判」等价。
+  /* 反证通过把判定调用点换成「永远放行」实现：与「旧实现只记不判」等价。
+   *
+   * **按结构定位，不按整句话定位**（坑 384/385）：这里曾经锚死 `const rewriteProblem =
+   * lockRewriteProblem({ inputLockSha256, resolvedLockSha256 })` 这一整行；并集把调用点改成多行、
+   * 变量名换成 `lockRewrite`、参数换成 `inputSha256/resolvedSha256` 之后，`String.replace` 静默不注入，
+   * 反证前提落空却仍然「跑完了」。
+   *
+   * 现在：用 `<name> = lockRewriteProblem(` 定位调用点，**同时配平 () 与 {}** 找到闭合，整块替换为
+   * `<name> = null`。任何一步定不到就立即抛（fail-fast），绝不静默降级成「没注入也算过」。
+   */
   const patched = path.join(dir, 'installer-noguard.mjs')
+  // 反证文件写在临时目录，相对 import 会按临时目录解析（ERR_MODULE_NOT_FOUND）——换成绝对 file:// URL。
   const rootsUrl = new URL('./check-package-lock-roots.mjs', new URL('file:///' + INSTALLER.replace(/\\/g, '/'))).href
-  const source = fs.readFileSync(INSTALLER, 'utf8')
-    .replace("import { checkPackageLockRoot, lockDiffSummary, lockRewriteProblem } from './check-package-lock-roots.mjs'",
-      'import { checkPackageLockRoot, lockDiffSummary } from ' + JSON.stringify(rootsUrl))
-    .replace('const rewriteProblem = lockRewriteProblem({ inputLockSha256, resolvedLockSha256 })', 'const rewriteProblem = null')
-  assert.match(source, /const rewriteProblem = null/, '反证前提不成立：找不到判定调用点')
+  const original = fs.readFileSync(INSTALLER, 'utf8')
+  // ① import 去掉 lockRewriteProblem。
+  const withoutImport = original.replace(
+    /import \{([^}]*)\} from '\.\/check-package-lock-roots\.mjs'/,
+    (m, names) => 'import {' + names.split(',').map((s) => s.trim()).filter((s) => s && s !== 'lockRewriteProblem').join(', ')
+      + '} from ' + JSON.stringify(rootsUrl),
+  )
+  assert.notEqual(withoutImport, original, '反证前提不成立：找不到 check-package-lock-roots 的 import')
+  // ② 同步删掉 re-export，否则模块 SyntaxError: Export not defined（反证变成「把模块改崩」）。
+  const withoutReexport = withoutImport.replace(/export\s*\{\s*lockRewriteProblem\s*\}\s*\n?/, '')
+  assert.notEqual(withoutReexport, withoutImport, '反证前提不成立：找不到 `export { lockRewriteProblem }`')
+  // ③ 定位调用点并按括号/花括号配平找到闭合。
+  const callRe = /(const\s+)([A-Za-z_$][\w$]*)(\s*=\s*)lockRewriteProblem\s*\(/
+  const m = callRe.exec(withoutReexport)
+  assert.ok(m !== null, '反证前提不成立：安装器里找不到 `lockRewriteProblem(` 调用点（实现可能又变了，需同步本夹具）')
+  const name = m[2]
+  let depth = 0
+  let braceDepth = 0
+  let i = m.index + m[0].length - 1
+  let end = -1
+  for (; i < withoutReexport.length; i += 1) {
+    const ch = withoutReexport[i]
+    if (ch === '(') depth += 1
+    else if (ch === ')') {
+      depth -= 1
+      if (depth === 0 && braceDepth === 0) { end = i + 1; break }
+    } else if (ch === '{') braceDepth += 1
+    else if (ch === '}') braceDepth -= 1
+  }
+  assert.ok(end > 0, '反证前提不成立：`lockRewriteProblem(` 的括号没有闭合')
+  const source = withoutReexport.slice(0, m.index) + 'const ' + name + ' = null' + withoutReexport.slice(end)
+  assert.match(source, new RegExp('const\\s+' + name + '\\s*=\\s*null'), '反证注入失败：替换后仍找不到 `const ' + name + ' = null`')
+  assert.doesNotMatch(source, /lockRewriteProblem\s*\(/, '反证注入失败：替换后仍残留 lockRewriteProblem( 调用')
   fs.writeFileSync(patched, source)
   const report = path.join(dir, 'report.json')
   const run = spawnSync(process.execPath, [patched, dir, report], {

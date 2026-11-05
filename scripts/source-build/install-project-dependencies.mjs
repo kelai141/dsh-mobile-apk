@@ -74,8 +74,19 @@ function run() {
   const inputLockSha256 = sha256(lockPath)
   const manifestSha256 = sha256(manifestPath)
   const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+  /* 取件器可注入（**只给测试用**，正式链一律不设）：`DSH_NPM_TEST_STUB` 指向一个 node 脚本时，
+   * 两次 npm 调用都改走 `node <stub> <args>`。
+   *
+   * 为什么需要这条缝：Windows 上 Node 拒绝不经 shell 地 spawn npm.cmd，真 npm 起不来；
+   * 有了它，测试可以给一个「会改写 lock 的假 npm」，并记录它到底有没有被以 ci 调用过 ——
+   * 顺序（判红必须发生在 ci 之前）就此变成**可断言的事实**，而不是读源码位置得出的结论。
+   * 合并三支时这条缝曾被删掉，导致 lock-rewrite-guard 的三条安装器层用例全红（spawnSync npm.cmd）。 */
+  const NPM_STUB = process.env.DSH_NPM_TEST_STUB
+  const runNpm = (args, opts) => (NPM_STUB
+    ? execFileSync(process.execPath, [NPM_STUB, ...args], opts)
+    : execFileSync(npm, args, opts))
   // --ignore-scripts resolves metadata without executing lifecycle scripts; npm ci follows only this realized graph.
-  execFileSync(npm, ['install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: directory, stdio: 'inherit' })
+  runNpm(['install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: directory, stdio: 'inherit' })
   if (sha256(manifestPath) !== manifestSha256) throw new Error('lock-only resolution unexpectedly modified package.json')
   const errors = checkPackageLockRoot(directory)
   if (errors.length) throw new Error(errors.join('\n'))
@@ -97,7 +108,7 @@ function run() {
     directoryArg,
   })
   if (lockRewrite !== null) throw new Error(lockRewrite)
-  execFileSync(npm, ['ci', '--no-audit', '--no-fund'], { cwd: directory, stdio: 'inherit' })
+  runNpm(['ci', '--no-audit', '--no-fund'], { cwd: directory, stdio: 'inherit' })
   if (sha256(lockPath) !== resolvedLockSha256 || sha256(manifestPath) !== manifestSha256) {
     throw new Error('npm ci modified its resolved input manifest/lock')
   }

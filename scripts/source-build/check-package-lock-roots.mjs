@@ -88,13 +88,16 @@ export function lockRewriteProblem({
       diff = '  (lock unparseable)\n'
     }
   }
-  return 'npm install --package-lock-only rewrote the committed package-lock.json ('
-    + String(a).slice(0, 16) + ' -> ' + String(b).slice(0, 16) + ').\n'
-    + 'The committed lock is incomplete (missing resolved/integrity, or stale), and CI must not silently '
-    + 'resolve it from the registry and install that graph.\n'
+  // 文案口径：**首句中文点题**（与仓内其余判据一致，且测试与日志检索都按它匹配），
+  // 其后英文细节给出差异面与修法。合并三支时两边各写了一种语言，取中文首句 + 英文正文，
+  // 不保留两份实现、也不为了适配某一边的夹具去改判据文案。
+  return 'npm install --package-lock-only 就地重写了 package-lock.json（'
+    + String(a).slice(0, 16) + ' -> ' + String(b).slice(0, 16) + '）。\n'
+    + '提交进仓的 lock 不完整（缺 resolved/integrity 或已过期），CI 不得静默从 registry 补齐后照单安装。\n'
     + 'Lock graph diff (committed -> resolved):\n' + diff
     + (graphIdentical ? '  (no resolved/integrity delta in the package graph; only metadata bytes differ)\n' : '')
-    + 'Fix: update and commit the lock in a PR — (cd ' + String(directoryArg ?? '<dir>') + ' && npm install --package-lock-only --ignore-scripts).'
+    + 'Fix: update and commit the lock in a PR — (cd ' + String(directoryArg ?? '<dir>') + ' && npm install --package-lock-only --ignore-scripts).\n'
+    + 'issue #1615：锁文件必须先在 PR 里更新并提交。'
 }
 
 /** 锁文件结构性差异（用于把「重写了什么」打到日志里，不让差异只活在一个哈希里）。 */

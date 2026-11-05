@@ -83,7 +83,9 @@ test('判据本体：字节不同即判红，且文案同时给出哈希、差�
     inputText: lock({ alpha: '1.0.0' }), resolvedText: lock({ alpha: '1.0.0', beta: '2.0.0' }), directoryArg: 'demo',
   })
   assert.notEqual(msg, null)
-  assert.match(msg, /rewrote the committed package-lock\.json/)
+  // 文案口径：首句中文点题 + 英文正文细节（合并三支时统一到一份实现，见 check-package-lock-roots.mjs）。
+  // 断言只要求「点名就地重写」与「给出前后摘要」，不锁死语言。
+  assert.match(msg, /就地重写了 package-lock\.json/)
   assert.match(msg, /aaaaaaaaaaaaaaaa -> bbbbbbbbbbbbbbbb/)
   assert.match(msg, /beta/)
   assert.match(msg, /Fix: update and commit the lock in a PR/)
