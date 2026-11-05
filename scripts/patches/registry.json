@@ -327,18 +327,6 @@
       "test": "scripts/patches/tests/combo-probe-p1.test.mjs"
     },
     {
-      "id": "client-registry-scan-C4",
-      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js",
-      "scope": "engine",
-      "summary": "每个同步 flush 按名称单次索引 Loader 条目，错误回调后失效；nearestPackage 已解析的 manifest 在 resolveMeta 内复用。保留同步构造错误、启动 settle 顺序及运行期/HMR即时语义",
-      "provenance": "2026-10-06 MuMu 0.14.5 受控细分：client 构造 flush 193 次 Loader 遍历、38021 行；typert 初始 flush 193 次 qualifies、24181 行。独立CPU样本证实反复遍历热点；C4总体预算仍须无诊断冷启动复测，不以局部耗时改善认绿。",
-      "marker": "dsh-mobile registry scan C4",
-      "requiredMarkers": [
-        "dsh-mobile gateway client source G1"
-      ],
-      "test": "scripts/patches/tests/client-registry-scan-c4.test.mjs"
-    },
-    {
       "id": "client-index-loader-barrier-G2",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-frontend-static/lib/index.js",
       "scope": "engine",
@@ -537,15 +525,6 @@
       "test": "scripts/patches/tests/file-upload-restart-r1.test.mjs"
     },
     {
-      "id": "sidebar-keep-wide-B2",
-      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar/lib/client.js",
-      "scope": "engine",
-      "summary": "手机形态让左抽屉收起态仍挂载宽内容（wide 恒真）+ 收起时不写 56px 内联宽度冻结；把 260 元素的 React 挂载从手势 touchmove 帧上移走",
-      "provenance": "2026-10-18 侧边栏手势真机实测：开方向拖动期 136ms 帧停顿 vs 关方向 69ms，根因是收起态卸载宽内容后手势内 ensureOpen 触发重挂载",
-      "marker": "dsh-mobile sidebar keep wide (B2)",
-      "test": "scripts/patches/tests/sidebar-keep-wide-B2.test.mjs"
-    },
-    {
       "id": "inspector-worker-expose-internals-472",
       "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-experimental-inspector/lib/index.js",
       "scope": "engine",
@@ -655,6 +634,24 @@
       "summary": "孤儿写锁回收——退役理由：上游 rc.2 的 withFileLock 已自带 takeOverExitedLock()（claim 文件独占仲裁 + 回收前二次读锁 + 重新探活），语义比 F4 更严谨（F4 的二次核验留 TOCTOU 窗口；上游另防护「死者的 pid 被活进程复用」）",
       "provenance": "2026-09-26 rc.2 追版实测（.deploy-tmp/lead-verify/f4probe.mjs，rc.2 真产物）：孤儿锁 15ms 内成功执行且锁被清除；活锁对照正确超时且锁保留 ⇒ 前提已被上游吸收",
       "whyHere": "退役不等于删除：本条目让 probe-engine-anchors.mjs 继续为该包产出夹具，使 guard 测试能对**上游真产物**断言该能力仍在（上游若把它改回 operator action，guard 判红）。此前退役（A3/A5/C3）直接从 patches 删条目，代价是夹具随之停供、guard 测试跑不起来——本字段是那次教训的修正。"
+    },
+    {
+      "id": "sidebar-keep-wide-B2",
+      "scope": "engine",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar/lib/client.js",
+      "retiredIn": "0.2.2-rc.1",
+      "summary": "手机形态让左抽屉收起态仍挂载宽内容（wide 恒真）+ 收起时不写 56px 内联宽度冻结；把 260 元素的 React 挂载从手势 touchmove 帧上移走",
+      "reason": "上游 0.2.2-rc.1 SidebarRoot 已把 drawer 纳入两处判据：const wide = drawer || (windowsTitlebar ? !collapsed : !collapsed || !settled); 与 style: wide ? { width: !drawer && collapsed ? lastWideWidth.current : width } : void 0,  —— 正是 B2 两条锚点的目标态（抽屉形态 wide 恒真 + 不写冻结宽度）。旧锚点在新树 0 命中，且行为已由上游提供，继续保留只会重复改造同一段代码。",
+      "supersededByContract": "scripts/patches/tests/sidebar-keep-wide-B2-retired.test.mjs"
+    },
+    {
+      "id": "client-registry-scan-C4",
+      "scope": "engine",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js",
+      "retiredIn": "0.2.2-rc.1",
+      "summary": "每个同步 flush 按名称单次索引 Loader 条目，错误回调后失效；nearestPackage 已解析的 manifest 在 resolveMeta 内复用。保留同步构造错误、启动 settle 顺序及运行期/HMR即时语义",
+      "reason": "上游 0.2.2-rc.1 的 client-modules flush 已是「先建 entriesByName 表、再逐项 processOne(entryName, entries, onError)」：一批变更只扫一次 loader.entries()，正是 C4 要达成的目标态。旧锚点 processOne(entryName, onError) 与新签名不同且行为已具备，继续保留会重复改造。typert 侧的同类补丁（typert-registry-scan-C4）仍在，未受影响。",
+      "supersededByContract": "scripts/patches/tests/client-registry-scan-C4-retired.test.mjs"
     }
   ]
 }
