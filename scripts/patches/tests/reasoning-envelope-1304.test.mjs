@@ -138,7 +138,9 @@ test('diagnostic probe outputs only field names/types, original seal remains rep
 test('empty and nonempty summaries both remain visible, streaming and settled; transport activity pulses idle watchdog', () => {
   const ui = patchReasoningUi(read(REASONING_FILES.at(-1)))
   const start = ui.indexOf('function blockIsVisible(')
-  const end = ui.indexOf('\n\t\tfunction countVisibleBlocks', start)
+  // 0.2.2-rc.1 起 blockIsVisible 后面接的是 hasVisibleContent（原 countVisibleBlocks 已不存在）；
+  // 分隔符跟着换，仍然只截「这一个函数」求值，不放宽到整文件。
+  const end = ui.indexOf('\n\t\tfunction hasVisibleContent', start)
   const visible = new Function(ui.slice(start, end) + ';return blockIsVisible')()
   assert.equal(visible({ kind: 'reasoning', text: '' }), true)
   assert.equal(visible({ kind: 'reasoning', text: 'summary' }), true)

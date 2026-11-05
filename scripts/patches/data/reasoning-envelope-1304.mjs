@@ -394,8 +394,7 @@ export function patchReasoningCompletions(source) {
                             const sealedBlock = ensureThinkingBlock("reasoning_text");
                             sealedBlock.dshSealed = JSON.stringify({ sealedBy: "github-copilot", reasoning_opaque: opaque });
                         }
-                    }
-                    if (choice.delta.content !== null`)
+                    }`)
   out = replace(out, 'const deltaFields = choice.delta;',
     `const deltaFields = choice.delta;
                     if (deltaFields.encrypted_content !== undefined || deltaFields.signature !== undefined)
