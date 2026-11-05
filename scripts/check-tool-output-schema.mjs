@@ -105,6 +105,7 @@ const SKIP_ALLOW = new Map([
   ['dsh-client-ui-responsive', 'WebView 侧 UI 组件与样式表（TS/TSX 渲染层），不定义模型面工具'],
   ['dsh-host-web-compat', 'WebView 兼容层，没有 src/index.*（不是插件入口）'],
   ['plugins/dsh-session-delete', '会话删除插件：只注册同源 /api 路由与 UI 槽位，不定义模型面工具'],
+  ['plugins/dsh-linux-bootstrap', '动态安装与恢复服务，不定义模型工具；Linux 状态工具由 android-linux-env 校验，命令工具由下载的 linux-runtime 提供'],
 ])
 
 /**

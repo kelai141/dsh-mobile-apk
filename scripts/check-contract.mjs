@@ -660,7 +660,16 @@ if (!existsSync(overlayPath) || !existsSync(PROFILE_PATCH_PATH) || semverImpl ==
       const mountNames = new Set(mounts.inserts.map(r => r.name))
       const ghostMounted = [...mountNames].filter(n => !n.startsWith('@deepseek-ai/') && !nameToRepo.has(n))
       if (ghostMounted.length > 0) fail('profile patch 挂了仓库里不存在的包（注入链会带一个空壳）: ' + ghostMounted.join(', '))
-      const registeredNotMounted = contract.inserted.map(i => i.pkg).filter(n => !mountNames.has(n))
+      // 动态加载豁免：与 check-patch-mounts 读同一份登记（scripts/plugin-dirs.json 的 dynamicOnly）。
+      // 只对登记过的包免除「必须挂载」，其余登记包照旧按幽灵登记判红；两条清单都不认的包无法借此漏检。
+      const dynamicRepos = new Set(Array.isArray(pluginManifest.dynamicOnly) ? pluginManifest.dynamicOnly : [])
+      const registeredNotMounted = contract.inserted
+        .filter(i => !mountNames.has(i.pkg))
+        .filter(i => !(i.dynamicOnly === true && dynamicRepos.has(i.repo)))
+      if (contract.inserted.some(i => i.dynamicOnly === true && !dynamicRepos.has(i.repo))) {
+        fail('contract.inserted 标了 dynamicOnly 但未登记进 scripts/plugin-dirs.json.dynamicOnly: '
+          + contract.inserted.filter(i => i.dynamicOnly === true && !dynamicRepos.has(i.repo)).map(i => i.repo).join(', '))
+      }
       if (registeredNotMounted.length > 0) fail('contract.inserted 登记但 profile patch 不挂载（幽灵登记）: ' + registeredNotMounted.join(', '))
       if (ghostMounted.length === 0 && registeredNotMounted.length === 0) ok('insert 行 ↔ 仓库/登记表 双向一致（' + mountNames.size + ' 条）')
 

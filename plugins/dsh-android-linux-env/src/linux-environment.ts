@@ -30,6 +30,9 @@ export interface BootstrapStatus {
   currentMobileVersion?: string
   installedLinuxVersion?: string | null
   runtimeId?: string | null
+  architecture?: string
+  defaultRuntimeId?: string
+  runtimes?: Array<{ id?: string; label?: string; architecture?: string; installed?: boolean }>
   latestReleaseVersion?: string | null
   lastAutomaticCheckMobileVersion?: string | null
   lastError?: string | null
@@ -37,12 +40,16 @@ export interface BootstrapStatus {
 }
 
 export interface LinuxBootstrap {
+  subscribe?(listener: (status: BootstrapStatus) => void): () => void
   status(): BootstrapStatus | Promise<BootstrapStatus>
   checkForUpdates(options: { source: 'manual' | 'mobile-version-change' }): unknown | Promise<unknown>
-  install(options: { runtimeId: string }): unknown | Promise<unknown>
-  reinstall(): unknown | Promise<unknown>
-  uninstall(): unknown | Promise<unknown>
+  /** bootstrap 要求 confirmed:true 且 activate:true；runtimeId 缺席时按宿主 arch 取默认。 */
+  install(options: { runtimeId?: string; confirmed?: boolean; activate?: boolean }): unknown | Promise<unknown>
+  reinstall(options?: { confirmed?: boolean; activate?: boolean }): unknown | Promise<unknown>
+  uninstall(options?: { confirmed?: boolean }): unknown | Promise<unknown>
   setAutoUpdateEnabled(enabled: boolean): unknown | Promise<unknown>
+  /** 可选：只读刷新宿主在场视图（部分 bootstrap 版本提供）。 */
+  syncInjectionState?(): unknown | Promise<unknown>
 }
 
 export interface PluginScope {
@@ -99,6 +106,7 @@ export interface PluginInstallResult {
   rollback: () => Promise<void>
 }
 export interface LinuxPluginHost {
+  shutdown(): Promise<void>
   install(options: PluginInstall): Promise<PluginInstallResult>
   uninstall(options?: PluginUninstall): Promise<void>
   isInjected(query: PluginInjectionQuery): Promise<PluginInjectionState>
@@ -119,6 +127,8 @@ export function createLinuxPluginHost(options: {
   let activeDirectory: string | undefined
   let manager: RuntimeManager | undefined
   let operation: Promise<unknown> = Promise.resolve()
+  let closed = false
+  const stopping = () => Object.assign(new Error('DSH engine is stopping; Linux activation is unavailable'), { code: 'LINUX_ENGINE_STOPPING' })
   const serialize = <T>(fn: () => Promise<T>): Promise<T> => {
     const next = operation.then(fn)
     operation = next.catch(() => {})
@@ -192,6 +202,7 @@ export function createLinuxPluginHost(options: {
   }
   return {
     install: input => serialize(async () => {
+      if (closed) throw stopping()
       const root = await rootReal()
       if (root === undefined) throw new Error('DSH_FILES_DIR is required to activate the Linux runtime plugin')
       const directory = await realpath(input.directory).catch(() => undefined)
@@ -204,6 +215,7 @@ export function createLinuxPluginHost(options: {
         return { directory, active: true, manager, rollback: release }
       }
       const plugin = await (options.importModule ?? (url => import(url)))(pathToFileURL(entry).href)
+      if (closed) throw stopping()
       if (typeof plugin !== 'object' || plugin === null || typeof (plugin as { apply?: unknown }).apply !== 'function') {
         throw new Error('Runtime bundle must export a Cordis apply function')
       }
@@ -213,6 +225,7 @@ export function createLinuxPluginHost(options: {
       try {
         activated = await activation
         if (activated.ready !== undefined) await activated.ready
+        if (closed) throw stopping()
         if (activated.state !== undefined && activated.state !== FiberState.ACTIVE) {
           throw new Error('Runtime Cordis plugin did not become active')
         }
@@ -230,6 +243,7 @@ export function createLinuxPluginHost(options: {
     }),
     // `rollback` belongs to the bootstrap's transaction; the host only releases the scope.
     uninstall: (_options?: PluginUninstall) => serialize(release),
+    shutdown: () => { closed = true; return serialize(release) },
     isInjected: async query => {
       const root = await rootReal()
       if (root === undefined) return { injected: false, active: false }
@@ -276,6 +290,16 @@ export function normalizeLinuxStatus(status: BootstrapStatus) {
     injectionActivated: status.injectionActivated,
     enabled: status.enabled,
     lastCheckAt: status.lastCheckAt ?? undefined,
+    // 设置页按这些字段渲染架构、可选运行时与更新状态。此前归一化把它们丢掉，UI 只能看到
+    // undefined——这里按 bootstrap 的 status 形状原样透传，缺省保持 undefined 而不是伪造默认值。
+    architecture: status.architecture,
+    defaultRuntimeId: status.defaultRuntimeId,
+    runtimeId: status.runtimeId ?? undefined,
+    runtimes: status.runtimes,
+    updateAvailable: status.updateAvailable,
+    updateBlocked: status.updateBlocked,
+    latestReleaseVersion: status.latestReleaseVersion ?? undefined,
+    operation: status.operation ?? undefined,
     error: status.error ?? status.lastError ??
       (updateBlocked ? '此系统版本与当前应用不兼容，暂不能安装更新。' : undefined),
   }
@@ -300,6 +324,7 @@ export async function checkLinuxEnvironmentAfterMobileChange(bootstrap: LinuxBoo
 
 const ROUTES = [
   ['status', '/api/android/linux-environment/status'],
+  ['manifest', '/api/android/linux-environment/manifest'],
   ['check', '/api/android/linux-environment/check'],
   ['install', '/api/android/linux-environment/install'],
   ['reinstall', '/api/android/linux-environment/reinstall'],
@@ -310,7 +335,13 @@ const ROUTES = [
 interface Request extends MobileRouteRequest { [Symbol.asyncIterator](): AsyncIterator<Buffer | string> }
 interface WebServer { register(route: { kind: 'exact'; path: string; handler(req: Request, res: MobileRouteResponse): Promise<void> }): () => void }
 
-async function readConfirmation(req: Request): Promise<boolean> {
+/**
+ * 读确认体：`{confirmed:true}` 之外还允许 `{runtimeId}`。
+ *
+ * runtimeId 由设置页按 manifest 的 `runtimes[]` 选（arm64/x64 各一份），**不在宿主写死**；
+ * 缺席时交给 bootstrap 按 `process.arch` 取默认 id。
+ */
+async function readConfirmation(req: Request): Promise<{ confirmed: boolean; runtimeId?: string }> {
   let size = 0
   const chunks: Buffer[] = []
   for await (const chunk of req) {
@@ -319,8 +350,13 @@ async function readConfirmation(req: Request): Promise<boolean> {
     if (size > 1024) throw new Error('Request body is too large')
     chunks.push(bytes)
   }
-  const value: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
-  return typeof value === 'object' && value !== null && (value as { confirmed?: unknown }).confirmed === true
+  const text = Buffer.concat(chunks).toString('utf8').trim()
+  // 空体 = 没有确认，直接判否（不把 EOF 当 JSON 解析错误之外的语义）。
+  const value: unknown = text === '' ? {} : JSON.parse(text)
+  if (typeof value !== 'object' || value === null) return { confirmed: false }
+  const body = value as { confirmed?: unknown; runtimeId?: unknown }
+  const runtimeId = typeof body.runtimeId === 'string' && /^[a-z0-9][a-z0-9-]*$/.test(body.runtimeId) ? body.runtimeId : undefined
+  return { confirmed: body.confirmed === true, ...(runtimeId === undefined ? {} : { runtimeId }) }
 }
 
 export function registerLinuxEnvironmentRoutes(options: {
@@ -328,6 +364,8 @@ export function registerLinuxEnvironmentRoutes(options: {
   effect(register: () => () => void): unknown
   auth(): MobileRouteAuthOptions
   bootstrap(): LinuxBootstrap | undefined
+  /** 已 check/pinned 的 manifest 只读读取（不触网）；缺省时该路由返回 null。 */
+  manifest?(): Record<string, unknown> | null
 }) {
   let busy = false
   const send = (res: MobileRouteResponse, code: number, body: unknown) => {
@@ -341,7 +379,7 @@ export function registerLinuxEnvironmentRoutes(options: {
       handler: async (req, res) => {
         const rejection = authorizeMobileRoute(req, options.auth())
         if (rejection !== undefined) { sendMobileRouteRejection(res, rejection); return }
-        const method = action === 'status' ? 'GET' : 'POST'
+        const method = action === 'status' || action === 'manifest' ? 'GET' : 'POST'
         if (req.method !== method) {
           res.writeHead(405, { allow: method, 'cache-control': 'no-store' })
           res.end()
@@ -357,19 +395,28 @@ export function registerLinuxEnvironmentRoutes(options: {
           catch { send(res, 500, { error: '无法读取 Linux 环境状态。' }) }
           return
         }
+        if (action === 'manifest') {
+          // UI 先用 manifest 的摘要/体积让壳侧准备资产，再调 install。只读持久状态，不触网。
+          send(res, 200, { manifest: options.manifest?.() ?? null })
+          return
+        }
         if (busy) { send(res, 409, { error: '另一项 Linux 环境操作正在进行，请稍后重试。' }); return }
         busy = true
         try {
+          let runtimeId: string | undefined
           if (action !== 'check') {
-            let confirmed = false
-            try { confirmed = await readConfirmation(req) } catch { send(res, 400, { error: '请求确认信息无效。' }); return }
-            if (!confirmed) { send(res, 400, { error: '操作需要用户明确确认。' }); return }
+            let confirmation: { confirmed: boolean; runtimeId?: string }
+            try { confirmation = await readConfirmation(req) } catch { send(res, 400, { error: '请求确认信息无效。' }); return }
+            if (!confirmation.confirmed) { send(res, 400, { error: '操作需要用户明确确认。' }); return }
+            runtimeId = confirmation.runtimeId
           }
           switch (action) {
             case 'check': await bootstrap.checkForUpdates({ source: 'manual' }); break
-            case 'install': await bootstrap.install({ runtimeId: 'debian-minimal' }); break
-            case 'reinstall': await bootstrap.reinstall(); break
-            case 'uninstall': await bootstrap.uninstall(); break
+            // confirmed/activate 必须逐次显式下发：bootstrap 的 install/reinstall 要求两者皆为 true，
+            // uninstall 要求 confirmed:true。runtimeId 由 UI 按 process.arch 选，缺席交给 bootstrap。
+            case 'install': await bootstrap.install({ ...(runtimeId === undefined ? {} : { runtimeId }), confirmed: true, activate: true } as never); break
+            case 'reinstall': await bootstrap.reinstall({ confirmed: true, activate: true } as never); break
+            case 'uninstall': await bootstrap.uninstall({ confirmed: true } as never); break
             case 'auto-update-on': await bootstrap.setAutoUpdateEnabled(true); break
             case 'auto-update-off': await bootstrap.setAutoUpdateEnabled(false); break
           }

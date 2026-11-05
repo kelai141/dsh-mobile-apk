@@ -6,7 +6,8 @@ import assert from 'node:assert/strict'
 import { readFileSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { apply } from '../lib/index.js'
+// 审计 §7.8：写侧改 100ms 批量后，「写完立刻读」必须先调同步出口 flushPendingAppends()。
+import { apply, flushPendingAppends } from '../lib/index.js'
 import {
   SessionNotifyState,
   TURN_END_KINDS,
@@ -266,6 +267,8 @@ function liveTurnEndLines(reasons) {
   const emit = listeners.get('session/event')
   assert.equal(typeof emit, 'function', 'apply() 必须注册 session/event 监听')
   for (const reason of reasons) emit({ id: 's1' }, { type: 'turn/end', data: { turn: 1, reason } })
+  // 写侧是 100ms 批量：读之前必须走同步出口（这正是「读侧依赖写完立刻可读」的形态）。
+  flushPendingAppends()
   const raw = readFileSync(join(dir, '.live.ndjson'), 'utf8')
   return raw
     .split('\n')
@@ -339,6 +342,8 @@ function notifyChannelsFrom(events) {
   const emit = listeners.get('session/event')
   assert.equal(typeof emit, 'function', 'apply() 必须注册 session/event 监听')
   for (const ev of events) emit({ id: 's1' }, ev)
+  // 写侧是 100ms 批量：读之前必须走同步出口（否则读到的是窗口内的空文件）。
+  flushPendingAppends()
   const readLines = (name) => {
     let raw = ''
     try { raw = readFileSync(join(dir, name), 'utf8') } catch { return [] }

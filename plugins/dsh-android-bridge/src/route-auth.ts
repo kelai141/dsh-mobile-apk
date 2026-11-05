@@ -3,6 +3,15 @@ import { tokenMatches } from './control-queue.js'
 /** Control-token HTTP header shared by Android-owned loopback routes. */
 export const CONTROL_TOKEN_HEADER = 'x-dsh-control-token'
 
+/**
+ * Loopback host names accepted when a deployment provides no client-connection service.
+ *
+ * Ports are never taken from this list: the only trusted port is the engine's current
+ * `DSH_ENGINE_PORT` (see {@link loopbackAuthorities}), so a stale 3080/4145 literal cannot widen
+ * the trust boundary. Kept exported because the bridge re-exports it for native callers.
+ */
+export const FALLBACK_LOOPBACK_HOSTS = ['127.0.0.1', 'localhost'] as const
+
 /** Environment variable carrying the engine's actual listening port (set by the shell spawn). */
 export const ENGINE_PORT_ENV = 'DSH_ENGINE_PORT'
 
@@ -36,7 +45,7 @@ export function enginePortFromEnv(env: Record<string, string | undefined> = proc
  */
 export function loopbackAuthorities(env: Record<string, string | undefined> = process.env): string[] {
   const port = enginePortFromEnv(env)
-  return port === null ? [] : [`127.0.0.1:${port}`, `localhost:${port}`]
+  return port === null ? [] : FALLBACK_LOOPBACK_HOSTS.map((host) => `${host}:${port}`)
 }
 
 /** Minimal Node request view required to apply route trust and token checks. */

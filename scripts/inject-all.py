@@ -61,10 +61,24 @@ def parse_args(argv):
 
 
 def build_dsh_replacements(pkg_dirs):
-    """@dsh-android 包名 -> {lib 相对路径 -> bytes} + package.json bytes"""
+    """node_modules/@dsh-android/<段> -> {lib 相对路径 -> bytes} + package.json bytes
+
+    段名取自 package.json 的 name（去掉 @dsh-android/ 前缀），**不是**目录名：
+    历史缺陷（linux-bootstrap）目录叫 dsh-linux-bootstrap，真实包名是
+    @dsh-android/linux-bootstrap —— 按目录名注入会落到
+    node_modules/@dsh-android/dsh-linux-bootstrap/，与 loader 的 import 名对不上，
+    包在快照里却永远解析不到。name 不是 @dsh-android/* 时退回目录名（保持旧行为）。
+    """
     out = {}
     for d in pkg_dirs:
-        name = os.path.basename(os.path.normpath(d))
+        fallback = os.path.basename(os.path.normpath(d))
+        try:
+            with open(os.path.join(d, "package.json"), "rb") as f:
+                declared = _json.load(f).get("name") or ""
+        except Exception:
+            declared = ""
+        prefix = "@dsh-android/"
+        name = declared[len(prefix):] if declared.startswith(prefix) else fallback
         files = {}
         lib = os.path.join(d, "lib")
         for root, _dirs, fnames in os.walk(lib):
