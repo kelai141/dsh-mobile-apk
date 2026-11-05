@@ -3864,6 +3864,9 @@
     ],
     "composer-insets.css.ts:21": [
       "padding-bottom: max("
+    ],
+    ".github/workflows/pr-gate.yml:286": [
+      "./gradlew :app:testDebugUnitTest --no-daemon --stacktrace --rerun-tasks"
     ]
   },
   "symbols": {

@@ -237,6 +237,8 @@ jobs:
           node scripts/check-state-registry.mjs
           node scripts/check-bridge-symmetry.mjs
           node scripts/check-gate-skips.mjs
+          # workflow 输入内插面（issue #1614）：run 块内不得出现 ${{ inputs.* }} / ${{ github.event.inputs.* }}。
+          node scripts/check-workflow-input-injection.mjs
           node scripts/check-kotlin-comments.mjs
           # 中英文案一致性（0.15.0）：资源键集合成对 + tr() 双参数；漏英文时 Android 静默回退中文。
           node scripts/check-i18n-parity.mjs
