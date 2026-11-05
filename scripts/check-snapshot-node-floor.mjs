@@ -85,11 +85,14 @@ export function evaluate(input) {
   const problems = []
   const failures = []
   const infos = []
+  // skips：本轮没有可判输入（如基座归档是 Git LFS 指针）。按本仓 SKIP 纪律：
+  // 计数、可见、结尾打印 SKIP=<n>，且 --require 档不接受（见下方 LFS 分支）。
+  const skips = []
 
   const floor = parseFloor(input.enginesNode)
   if (!floor) {
     problems.push('contract.upstream.enginesNode 不可解析为 ">=X.Y.Z"：' + JSON.stringify(input.enginesNode))
-    return { problems, failures, infos }
+    return { problems, failures, infos, skips }
   }
   infos.push('声明下限 enginesNode=' + input.enginesNode)
 
@@ -117,14 +120,18 @@ export function evaluate(input) {
       const st = input.statOf(rec.file)
       if (!st.exists) { problems.push(abi + ': 基座归档不存在 ' + rec.file); continue }
       // Git LFS 指针不是基座归档：裸 clone / CI 没拉 LFS 时，base/*.tar.xz 只有一百多字节的
-      // 文本指针。此时「字节数与记录不一致」是**无法判定**，不是「换了基座却没更新取证」——
-      // 把两者混成 exit 1 会让 CI 永远红，而人看不出该改什么（真因是归档没拉到，不是数字过期）。
-      // 判据取向：读得出来就按 pointer 判 exit 2；读不出来（二进制）就走正常字节比对。
+      // 文本指针。这既不是「字节数与记录不一致」（判据不成立，exit 1），也不是「布局不可解析」
+      // （exit 2）——它是**本轮没有可判的输入**。三种情形修法完全不同：
+      //   字节漂移 -> 重新取证；布局坏 -> 修 snapshot-runtime.json；LFS 指针 -> 把归档拉下来。
+      // 混成任何一种都会让 CI 永远红且指错方向。按本仓 SKIP 纪律处理：计数、可见、可被 --require 拦。
       if (st.bytes > 0 && st.bytes < 1024) {
         const head = input.peekOf ? input.peekOf(rec.file, 200) : ''
         if (/^version https:\/\/git-lfs\.github\.com\/spec\/v1/m.test(head)) {
-          problems.push(abi + ': ' + rec.file + ' 是 Git LFS 指针（' + st.bytes + ' B），不是基座归档'
-            + '——先 `git lfs pull --include=base/` 或改走带 LFS 的检出；本门本轮未做任何版本判定')
+          const why = abi + ': ' + rec.file + ' 是 Git LFS 指针（' + st.bytes + ' B），不是基座归档'
+            + '——先 `git lfs pull --include=base/` 或改走带 LFS 的检出；本门本轮未做任何版本判定'
+          // --require 档（发布链）不接受 SKIP：要么归档在场并逐字节核过，要么不发版。
+          if (input.require) failures.push(why + '（--require 档不得 SKIP）')
+          else skips.push(why)
           continue
         }
       }
@@ -142,7 +149,7 @@ export function evaluate(input) {
       }
     }
   }
-  return { problems, failures, infos }
+  return { problems, failures, infos, skips }
 }
 
 export function exitCodeOf(result) {
@@ -162,6 +169,8 @@ function report(root, full) {
     enginesNode: contract?.upstream?.enginesNode,
     evidence,
     full,
+    // --require（发布链）不接受 SKIP：基座归档必须是真归档并逐字节核过。
+    require: process.argv.includes('--require'),
     statOf: (rel) => {
       const p = join(root, rel)
       return existsSync(p) ? { exists: true, bytes: statSync(p).size } : { exists: false, bytes: 0 }
@@ -177,8 +186,10 @@ function report(root, full) {
     },
   })
   for (const i of result.infos) console.log('INFO  ' + i)
+  for (const s of result.skips) console.log('SKIP(#' + result.skips.length + ')  ' + s)
   for (const f of result.failures) console.error('FAIL  ' + f)
   for (const p of result.problems) console.error('PROBLEM ' + p)
+  if (result.skips.length > 0) console.log('SKIP=' + result.skips.length)
   const code = exitCodeOf(result)
   if (code === 2) {
     console.error('CHECK-SNAPSHOT-NODE-FLOOR FAILED（布局/形态不可解析）')
@@ -187,6 +198,10 @@ function report(root, full) {
     console.error('CHECK-SNAPSHOT-NODE-FLOOR FAILED（快照 node 不满足引擎声明下限）')
     console.error('  修法：从 base/base-usr-*.tar.xz 取 usr/bin/node 复测版本，按实测更新 snapshot-runtime.json 并在 docs/adapt/ 记录命令；')
     console.error('  不要为了过门写没实测过的数字——这道门判的就是这个数字是不是真的。')
+  } else if (result.skips.length > 0) {
+    // 有 SKIP 且无失败：判据本轮未执行，不能报 PASSED（那是假绿）。
+    console.log('CHECK-SNAPSHOT-NODE-FLOOR PASSED（SKIP=' + result.skips.length
+      + '：基座归档未拉到，版本下限本轮未判定；发布链 --require 档不接受此状态）')
   } else {
     console.log('CHECK-SNAPSHOT-NODE-FLOOR PASSED（快照 node 满足引擎下限' + (full ? '，含 sha256' : '') + '）')
   }
@@ -205,7 +220,7 @@ function selfTest() {
   })
   const fixed = { 'a.tar.xz': { exists: true, bytes: 3 }, 'b.tar.xz': { exists: true, bytes: 3 } }
   const run = (enginesNode, evidence, opts) => evaluate({
-    enginesNode, evidence, full: !!(opts && opts.full),
+    enginesNode, evidence, full: !!(opts && opts.full), require: !!(opts && opts.require),
     statOf: (rel) => (opts && opts.statOf ? opts.statOf(rel) : fixed[rel] || { exists: false, bytes: 0 }),
     hashOf: () => 'f'.repeat(64),
     peekOf: (opts && opts.peekOf) ? opts.peekOf : () => '',
@@ -222,13 +237,26 @@ function selfTest() {
     t('布局：baseTarballs 缺失 -> exit 2', exitCodeOf(run('>=24.9.0', { nodeVersion: '24.18.0' })) === 2)
     t('布局：基座归档缺失 -> exit 2', exitCodeOf(run('>=24.9.0', ev('24.18.0'), { statOf: () => ({ exists: false, bytes: 0 }) })) === 2)
     t('负控：基座字节数变化 -> exit 1', exitCodeOf(run('>=24.9.0', ev('24.18.0'), { statOf: () => ({ exists: true, bytes: 999 }) })) === 1)
-    // LFS 指针不是「字节漂移」：裸 clone / 未拉 LFS 时 base/*.tar.xz 只有指针，此时门禁没有
-    // 任何可判的版本信息，必须 exit 2（无法判定），而不是 exit 1（判据不成立）——两者修法完全不同。
-    t('形态：基座是 Git LFS 指针 -> exit 2（无法判定，不冒充字节漂移）',
+    // LFS 指针 = 本轮没有可判输入（裸 clone / 未拉 LFS 时 base/*.tar.xz 只有指针）。
+    // 三种情形修法完全不同，不能混：字节漂移 -> 重新取证；布局坏 -> 修 snapshot-runtime.json；
+    // LFS 指针 -> 把归档拉下来。按 SKIP 纪律处理（计数、可见、exit 0），
+    // 但 --require 档（发布链）必须判红：要么归档在场并核过，要么不发版。
+    t('形态：基座是 Git LFS 指针 -> 记 SKIP 且 exit 0（本轮未判定，不冒充字节漂移）',
       exitCodeOf(run('>=24.9.0', ev('24.18.0'), {
         statOf: () => ({ exists: true, bytes: 133 }),
         peekOf: () => 'version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 80933336\n',
-      })) === 2)
+      })) === 0)
+    t('负控：--require 档遇到 LFS 指针 -> exit 1（发布链不得 SKIP）',
+      exitCodeOf(run('>=24.9.0', ev('24.18.0'), {
+        require: true,
+        statOf: () => ({ exists: true, bytes: 133 }),
+        peekOf: () => 'version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 80933336\n',
+      })) === 1)
+    t('正控：LFS 指针只计 SKIP、不进 failures（否则会被当判据不成立）',
+      (() => { const r = run('>=24.9.0', ev('24.18.0'), {
+        statOf: () => ({ exists: true, bytes: 133 }),
+        peekOf: () => 'version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 80933336\n',
+      }); return r.skips.length === 2 && r.failures.length === 0 && r.problems.length === 0 })())
     t('正控：小文件但不是 LFS 指针 -> 仍按字节漂移判 exit 1',
       exitCodeOf(run('>=24.9.0', ev('24.18.0'), {
         statOf: () => ({ exists: true, bytes: 133 }),
@@ -243,7 +271,7 @@ function selfTest() {
     console.error('CHECK-SNAPSHOT-NODE-FLOOR SELF-TEST FAILED（' + fails.length + ' / ' + count + ' 项）：' + fails.join('；'))
     return 1
   }
-  console.log('CHECK-SNAPSHOT-NODE-FLOOR SELF-TEST PASSED（' + count + ' 项判别力断言：正控放行 / 低于下限 / 篡改版本串 / 跨主版本 / 下限抬高 / v 前缀 / 区间不可解析 / 缺字段 / 归档缺失 / 字节漂移 / sha256 一致与不一致）')
+  console.log('CHECK-SNAPSHOT-NODE-FLOOR SELF-TEST PASSED（' + count + ' 项判别力断言：正控放行 / 低于下限 / 篡改版本串 / 跨主版本 / 下限抬高 / v 前缀 / 区间不可解析 / 缺字段 / 归档缺失 / 字节漂移 / LFS 指针转 SKIP 且 --require 档仍红 / sha256 一致与不一致）')
   return 0
 }
 
