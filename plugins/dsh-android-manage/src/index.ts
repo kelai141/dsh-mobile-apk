@@ -1967,6 +1967,19 @@ properties: {
       if (!a.ok) return { ok: false, denied: true, text: a.guidance }
       const dir = args.direction === 'left' || args.direction === 'right' ? args.direction : args.direction === 'up' || args.direction === 'down' ? args.direction : ''
       if (!dir) return { ok: false, denied: false, text: `未知方向：${String(args.direction)}` }
+      // issue #1619：ui_scroll 在 SCREEN_ACTIONS 里，门按 virtual-N 放行；a11y 分支带 screenId 没问题，
+      // 但 ADB 分支读的是**真实屏** `wm size` 且 `input swipe` 没有 `-d`——于是
+      // {direction:"down", screenId:"virtual-1"} 滑动的是真实屏，回执仍写「已滑动（down 60%）」。
+      // 口径与 ui_click 对 nx/ny 在虚拟屏上的拒绝一致：非 real 屏在这里直接拒绝并指向真正能做的工具。
+      if (typeof args.screenId === 'string' && args.screenId !== '' && args.screenId !== 'real'
+        && controlDecision('scroll', exec as { agent?: { session?: unknown } }).backend !== 'a11y') {
+        return {
+          ok: false, denied: false,
+          text: '在 ' + args.screenId + ' 上不能用 android_ui_scroll 的 ADB 通道：它读的是真实屏尺寸、'
+            + 'input swipe 也没有屏幕维度，滑动会落在真实屏上。请改用 android_vdisplay_input（verb: swipe，'
+            + '坐标基于该屏自身像素；可先 android_vdisplay_status 看宽高），或开启无障碍通道后再用本工具。',
+        }
+      }
       const frac = Math.min(Math.max(args.fraction ?? 0.6, 0.1), 1.0)
       // 0.13.5 W4：无障碍通道优先（ACTION_SCROLL_* 语义滚动；无坐标 swipe）
       if (controlDecision('scroll', exec as { agent?: { session?: unknown } }).backend === 'a11y') {

@@ -221,8 +221,11 @@ class FileExternalBridgeTest {
   fun `执行面取 parentFile 作目录项来源`() {
     val code = codeOnly(source("FileExternalBridge.kt"))
     assertTrue("必须取 parentFile 作为目录项来源", code.contains("file.parentFile"))
+    // 父目录的允许面判据在**行为面**由 PathOpenAllowlistTest 驱动真实实现（issue #1571 后
+    // 允许面本身已换成 ChooserAllowlist）。这里只保留「调用点在场」这一条形态断言，
+    // 不重复扮演判据。
     assertTrue("父目录也必须过同一道允许面",
-      code.contains("if (!PathOpen.isChooserAllowedFor(activity, dir))"))
+      code.contains("PathOpen.isChooserAllowedFor(activity, dir)"))
     assertFalse("不得把文件 Uri 直接当目录项传出去",
       code.contains("folderSpec(fileUri"))
   }
