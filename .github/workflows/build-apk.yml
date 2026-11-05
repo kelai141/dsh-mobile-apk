@@ -130,9 +130,16 @@ jobs:
 
       - name: 构建 APK ${abi}（注入插件 + 门禁 + gradle + 产物）
         shell: bash
+        # issue #1614：workflow 输入**不得**内插进 bash 命令行。双引号内仍会做命令替换，
+        # 有 dispatch 权限的人把 suffix 填成 $(curl -s ...|sh) 就会以本 job 身份执行；
+        # 本 job 虽只有 contents: read，但 runner 上有 GITHUB_TOKEN 与完整工作区（含 debug keystore）。
+        # 同文件其余步骤都走 env: / 单引号，只有这一处直插。改走 env: 后输入只作为数据传给 argv。
+        env:
+          ABI: ${{ matrix.abi }}
+          SUFFIX: ${{ github.event.inputs.suffix }}
         run: |
           set -e
-          node scripts/build-apk.mjs --abi "${{ matrix.abi }}" --suffix "${{ github.event.inputs.suffix }}"
+          node scripts/build-apk.mjs --abi "$ABI" --suffix "$SUFFIX"
 
       - name: 上传前复核最终 APK 签名
         shell: bash

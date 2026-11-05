@@ -234,12 +234,37 @@ if (up === undefined) {
   }
 }
 
+/**
+ * 登记集非空下限（issue #1580；与 #1021 的 declarationsProblem 同形制）。
+ *
+ * 真因：§1 / §5 都是「遍历登记表逐条断言」，而**遍历本身**没有任何下限——
+ *   · §1 的 `rows: []` → 循环零次、零条 FAIL、照打 CONTRACT PASS；
+ *   · §5 的 `envContract.keys: []` → 同上。
+ * 于是「删掉登记项」比「改错登记项」更容易通过，而这个方向此前没有任何一层在守
+ * （`--require` 只拦 skip()，拦不住「判据正常执行但对象是空集」）。
+ * 判据 = 登记表必须是非空数组；空/非数组即判红，理由直指该段判据已消失。
+ * 纯函数形式便于 --self-test 直接喂合成输入（不动仓库文件）。
+ */
+const registryNonEmptyProblem = (list, label) => {
+  if (!Array.isArray(list)) return label + ' 不是数组（该段判据会整段消失）'
+  if (list.length === 0) {
+    return label + ' 为空 —— 该段判据对「登记表被清空」恒真（空集不等于「没有违约」，'
+      + '删掉登记项比改错登记项更容易通过）'
+  }
+  return null
+}
+/** §1 / §5 的登记表各判一次（两条判据必须在遍历之前跑，空集时下面的 for 不执行也照样判红）。 */
+const rowsProblem = registryNonEmptyProblem(contract.rows, 'contract.rows')
+const envKeysProblem = registryNonEmptyProblem(contract.envContract.keys, 'contract.envContract.keys')
+
 console.log('== 1. bundle 行引用 ==')
+if (rowsProblem !== null) fail(rowsProblem)
 const upstreamPackages = join(root, contract.upstreamRepo, 'packages')
 if (!existsSync(upstreamPackages)) {
   skip('上游树 ' + contract.upstreamRepo + '/packages 不在场（只读 checkout；CI/自包含树不含）——bundle 行引用未执行')
 } else {
-  for (const row of contract.rows) {
+  // 非数组已由上面的判据报过红；这里只保证遍历不会因类型错误崩掉（崩 = 判据不可读）。
+  for (const row of Array.isArray(contract.rows) ? contract.rows : []) {
     const patchFile = join(upstreamPackages, 'bundle', row.bundle, 'cordis.patch.yml')
     if (!existsSync(patchFile)) { fail('bundle patch 缺失: ' + patchFile); continue }
     const text = readFileSync(patchFile, 'utf8')
@@ -514,8 +539,11 @@ console.log('== 4c. 上游槽位全集（反向断言：上游新长出的槽必
 }
 
 console.log('== 5. 环境契约键 ==')
+// issue #1580：非空下限必须在**读文件之前**——空登记集时连「读哪个文件」都无从谈起，
+// 更不该因为文件读得到就报绿。
+if (envKeysProblem !== null) fail(envKeysProblem)
 const envText = readFileSync(join(root, contract.envContract.repo, 'src/index.ts'), 'utf8')
-for (const key of contract.envContract.keys) {
+for (const key of Array.isArray(contract.envContract.keys) ? contract.envContract.keys : []) {
   if (envText.includes(key)) ok('环境键 ' + key + ' 注入')
   else fail('环境键 ' + key + ' 未注入')
 }
@@ -962,6 +990,16 @@ function runContractSelfTest() {
     { label: '#1021 声明面清空 → 判红（不得整段静默消失）', mutate: c => { c.clientSlots.declarations = [] }, expect: /declarations 为空/ },
     { label: '#1021 声明面不是数组 → 判红（不得静默降级成空集）', mutate: c => { c.clientSlots.declarations = null }, expect: /不是数组/ },
     { label: '#1021 声明面登记了未在 slots 里的槽 → 判红（规模关系）', mutate: c => { c.clientSlots.declarations.push({ slot: 'zzz.selftest.unregistered', file: 'nowhere', kind: 'list', scope: 'root' }) }, expect: /未在 clientSlots\.slots 登记/ },
+    /* ── issue #1580：§1 / §5 的空集恒真（与 #1021 同族，但方向不同）──────────────────
+     * 旧实现两段都只做「遍历登记表逐条断言」，没有任何非空下限：清空 rows / envContract.keys
+     * 后循环零次、零条 FAIL，门禁照打 CONTRACT PASS。这两条负控要证明的是「清空之后仍然判红」，
+     * 且红在**该段判据自身消失**上，不是被别处的红蒙对。
+     * kind 显式给 null：§1 需要上游 checkout 才遍历，但非空下限与上游树无关——
+     * 若按 label 归到 tree 类，缺 checkout 的布局会把这条例静默算成「本布局未执行」，自证就丢了。 */
+    { label: '§1 行登记清空 → 判红（不得整段静默消失）', kind: null, mutate: c => { c.rows = [] }, expect: /contract\.rows 为空/ },
+    { label: '§1 行登记不是数组 → 判红（不得静默降级成空集）', kind: null, mutate: c => { c.rows = null }, expect: /contract\.rows 不是数组/ },
+    { label: '§5 环境键登记清空 → 判红（不得整段静默消失）', kind: null, mutate: c => { c.envContract.keys = [] }, expect: /contract\.envContract\.keys 为空/ },
+    { label: '§5 环境键登记不是数组 → 判红（不得静默降级成空集）', kind: null, mutate: c => { c.envContract.keys = null }, expect: /contract\.envContract\.keys 不是数组/ },
     { label: '§4c 反向判红：登记集漏一条（上游实有 = 未登记的槽）', mutate: dropSlot, expect: /上游长出未登记的槽/ },
     { label: '§4c 反向判红：登记集多一条（上游已无 = 静默落空）', mutate: fakeSlot, expect: /上游删除了已登记的槽/ },
     { label: '§4c 反向判红：登记的 kind 与上游声明不一致', mutate: c => { c.clientSlots.upstreamUniverse.entries.find(e => e.slot === 'settings.section').kind = 'chain' }, expect: /kind\/scope 漂移/ },
