@@ -196,7 +196,7 @@ sequenceDiagram
 | 高 | K04 | `jsString` 的 U+2028/U+2029 转义是**恒等替换**（源码两侧都是裸字符） | `app/src/main/java/com/dsharnessmobile/shell/AndroidBridge.kt:431-438` | 旧 WebView 上注入脚本解析失败，工具回执误报 `stale-ref`，模型被引向错误方向 | **已修（本轮）**：抽成纯函数 `escapeLineSeparators`（方向 = 裸字符转义文本），单测改为不依赖 org.json 实现的形态断言，9 例全绿（`app/src/test/java/com/dsharnessmobile/shell/BrowserHostNavigationPolicyTest.kt:129`） |
 | 高 | K08 | `workspaces`/`currentWorkspace` 跨线程读写，且 `onMain` 只有 finally 没有 catch | `app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#applyRendererEvent@ac0c54d0-192`、`app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#controlOp@6f24634f`、`app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#viewportOp@5c48ac92-1673` | 主线程 CME 一次即进程闪退（模型开页与侧栏展开同时发生）；`workspaces` 无上限无 TTL，每个新会话多一个常驻 WebView | 未修（评审 S-8/R1/R2） |
 | 高 | K08 | 浏览器 op 在控制队列线程上自旋等导航：错误页路径必等满 10s 且仍回 `ok` | `app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#shouldInterceptRequest@60e935eb`、`app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#shouldInterceptRequest@db2ebba9-1107` | 一次 `browser_open` 占住整条设备控制队列 10s，无障碍与特权命令全排队 | 未修（S-7/F-6） |
-| 高 | K08 | 浏览器截图只写不删、`health` 恒 `ok`、失败原因串上一轮 `lastError` | `app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#openConfigProblem@90000906`、`app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#navigateOp@1eff718a`、`app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#navigateOp@59a0a2d8` | 长任务磁盘累积（全页 PNG）；截图失败原因误导 | 未修（S-6/F-7） |
+| 高 | K08 | 浏览器截图只写不删、`health` 恒 `ok`、失败原因串上一轮 `lastError` | `app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#openConfigProblem@90000906`、`app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#navigateOp@176d6443`、`app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#navigateOp@176d6443` | 长任务磁盘累积（全页 PNG）；截图失败原因误导 | 未修（S-6/F-7） |
 | 高 | K08 | 「隔离浏览器」没有存储隔离：无 `setDataDirectorySuffix` 与清理 op，且引擎鉴权 cookie 在**进程级** `CookieManager` | `app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:838` | AI 访问过的站点 cookie/localStorage 持久驻留且用户无撤销入口；过滤一旦有缺口即带引擎 cookie 出网 | 未修（S-3/F-9） |
 | — | K06 | ~~双引号内的命令替换不被扫描~~ **已修（issue #674）**：`"` 分支对引号内的 `$(...)` 与反引号按原文递归扫描，两层同源 | `app/src/main/java/com/dsharnessmobile/shell/ShellOps.kt#realOnlyScreenCommandAllowed@ce20172c` · `plugins/dsh-android-bridge/src/screen-scope.ts#splitCommandSegments@45477a92`（两侧同算法） | fixture `S-4a`/`S-4b`/`S-4c` 三条反证 + `对照 双引号内纯文本不得误拦`（防过度拦截） |
 | — | K06 | **`eval` 载荷不被展开（漏拦）＋ shell 注释被当命令词面（误拦）**（2026-10-28 自查，issue #674 同类）：`eval "screencap -p …"` 的引号内容被引号抹除逻辑吃掉 ⇒ 命令词面看不到 `screencap` ⇒ 一路放行；反过来 `echo hi # screencap …` 把注释文本当命令 ⇒ 误拦合法命令。两层同源修法：`EVAL_PAYLOAD` 与 `sh -c` **并列进"再解释一层"的展开队列**（`;`/`&&`/`||`/管道后的 eval 同样展开），且 `#` 位于**词首**（行首或空白/`;`/`&`/`|` 之后）时剥到行尾 | `app/src/main/java/com/dsharnessmobile/shell/ShellOps.kt`（`EVAL_PAYLOAD`）· `plugins/dsh-android-bridge/src/screen-scope.ts`（`EVAL_PAYLOAD`） | fixture `S-5a`/`S-5b`/`S-5c`/`对照 eval 内无屏命令`/`S-6a` 五条 |
@@ -2431,6 +2431,7 @@ app/src/androidTest/java/com/dsharnessmobile/shell/ShizukuReconnectTest.kt
 app/src/androidTest/java/com/dsharnessmobile/shell/SnapshotAtomicRecoveryTest.kt
 app/src/androidTest/java/com/dsharnessmobile/shell/SnapshotResidueOwnershipTest.kt
 app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt
+app/src/main/java/com/dsharnessmobile/shell/BrowserTabReuse.kt
 app/src/main/java/com/dsharnessmobile/shell/BrowserHostNavigationPolicy.kt
 app/src/main/java/com/dsharnessmobile/shell/BrowserOverlayPolicy.kt
 app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt
@@ -2713,3 +2714,5 @@ Telemetry snapshot closure: check-engine-overlay retains each dependency's decla
 
 
 **ShizukuReadinessGate**：探测未完成按三态报未知，未知不渲染成未就绪（issue #1506）——`app/src/main/java/com/dsharnessmobile/shell/ShizukuReadinessGate.kt:37#expect=internal%20fun%20readinessState(verdict%3A%20ReadyVerdict)%3A%20Boolean%3F%20%3D%20when%20%7B`
+
+**BrowserTabReuse**（issue #1318）：同 URL 的新开请求复用已有标签——`app/src/main/java/com/dsharnessmobile/shell/BrowserTabReuse.kt:24#expect=fun%20reusableTabId(`

@@ -3936,8 +3936,6 @@
     "app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#shouldInterceptRequest@60e935eb": true,
     "app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#shouldInterceptRequest@db2ebba9": true,
     "app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#openConfigProblem@90000906": true,
-    "app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#navigateOp@1eff718a": true,
-    "app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#navigateOp@59a0a2d8": true,
     "app/src/main/java/com/dsharnessmobile/shell/ShellOps.kt#realOnlyScreenCommandAllowed@ce20172c": true,
     "plugins/dsh-android-bridge/src/screen-scope.ts#splitCommandSegments@45477a92": true,
     "plugins/dsh-android-bridge/src/screen-scope.ts#parenEnd@558b76d8": true,
@@ -4007,6 +4005,7 @@
     "BrowserHost.kt#MAX_TABS@930c9bd7": true,
     "scripts/check-code-map.mjs#UNIVERSE@60d8a536": true,
     "scripts/check-contract.mjs#collectConsumedSlots@2c28ea38": true,
-    "BrowserHost.kt#showPayload@bfaa29a3": true
+    "BrowserHost.kt#showPayload@bfaa29a3": true,
+    "app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#navigateOp@176d6443": true
   }
 }
