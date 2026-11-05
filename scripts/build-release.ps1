@@ -141,8 +141,27 @@ foreach ($abi in $ABIS) {
     Remove-Item $outTmp -Force -ErrorAction SilentlyContinue
     $pkgArgs = @()
     foreach ($p in $pluginSrcs) { $pkgArgs += (Join-Path $root $p) }
-    python $injectPy $abi.f $outTmp @pkgArgs 2>&1 | Select-Object -Last 3
+    # issue #1613：**先收退出码再判**。旧写法只判 `Test-Path $outTmp`，而 python 的退出码被
+    # `| Select-Object -Last 3` 完全丢弃 —— inject-snapshot.py 用 tarfile 流式写 .new，中途抛错
+    # （磁盘满 / 条目损坏 / 权限）会留下一个**存在但截断**的 .new，紧接着 Move-Item 就把原输入覆盖掉。
+    # 一次注入失败 + 一次成功的下游重跑，输入位里就是那份截断件；2f 的聚合门禁能拦「解不开」，
+    # 拦不掉「解得开、少了一批条目」。故：非 0 即删 .new 并 throw，绝不让半写快照进入 Move-Item。
+    $injectOut = @(python $injectPy $abi.f $outTmp @pkgArgs 2>&1)
+    $injectCode = $LASTEXITCODE
+    $injectOut | Select-Object -Last 3 | Out-Host
+    if ($injectCode -ne 0) {
+      Remove-Item $outTmp -Force -ErrorAction SilentlyContinue
+      throw ("快照注入失败（inject-snapshot.py exit " + $injectCode + "）: " + $abi.n + " —— 已删除半写产物，输入未被覆盖")
+    }
     if (-not (Test-Path $outTmp)) { throw ("快照注入失败: " + $abi.n) }
+    # 成员数对账（issue #1613 第二条）：退出码为 0 也不代表产物完整（脚本可能吞掉异常）。
+    # 判据 = 注入后成员数必须 >= 输入成员数：注入只增不减，少了就是截断。
+    $inCount = @(& tar -tf $abi.f 2>$null).Count
+    $outCount = @(& tar -tf $outTmp 2>$null).Count
+    if ($outCount -lt $inCount) {
+      Remove-Item $outTmp -Force -ErrorAction SilentlyContinue
+      throw ("快照注入产物成员数少于输入（" + $outCount + " < " + $inCount + "）: " + $abi.n + " —— 半写快照，拒绝覆盖输入")
+    }
     Move-Item $outTmp $abi.f -Force
     Write-Output ("  快照 OK: " + $abi.n + " (" + $abi.expect + " + npm 层 + 插件注入)")
   }

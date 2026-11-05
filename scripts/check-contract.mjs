@@ -234,12 +234,31 @@ if (up === undefined) {
   }
 }
 
+/* issue #1580：§1 / §5 的**空集恒真**（与已修的 #1021 §4b 同族）。
+ * 两处都是「遍历登记表逐条断言」，登记表为空时循环零次、零条 FAIL，仍打印
+ * CONTRACT PASS（SKIP=0）；--require 也拦不住（它只拦 skip()）。
+ * 触发：一次 JSON 合并/手改把 rows 或 envContract.keys 清空（undefined 会抛，[] 不会）⇒
+ * 「bundle 行引用」「环境键注入」两整段判据静默消失。删掉登记项比改错登记项更容易通过，
+ * 而这个方向此前没有任何一层在守。
+ * 修法照 declarationsProblem 的形状：登记本身成为一条判据（非数组 / 空集都判红），
+ * 判据抽成纯函数，--self-test 直接喂合成输入钉住双向判别力。 */
+const entriesProblem = (list, label, consumer) => {
+  if (!Array.isArray(list)) return label + ' 不是数组（' + consumer + ' 会整段消失）'
+  if (list.length === 0) {
+    return label + ' 为空 —— ' + consumer + ' 判据会整段静默消失（空登记集不等于「没有要判的」）'
+  }
+  return null
+}
+const rowsProblem = entriesProblem(contract.rows, 'contract.rows', '§1 bundle 行引用')
+const envKeysProblem = entriesProblem(contract.envContract?.keys, 'contract.envContract.keys', '§5 环境契约键')
+
 console.log('== 1. bundle 行引用 ==')
 const upstreamPackages = join(root, contract.upstreamRepo, 'packages')
+if (rowsProblem !== null) fail(rowsProblem)
 if (!existsSync(upstreamPackages)) {
   skip('上游树 ' + contract.upstreamRepo + '/packages 不在场（只读 checkout；CI/自包含树不含）——bundle 行引用未执行')
 } else {
-  for (const row of contract.rows) {
+  for (const row of Array.isArray(contract.rows) ? contract.rows : []) {
     const patchFile = join(upstreamPackages, 'bundle', row.bundle, 'cordis.patch.yml')
     if (!existsSync(patchFile)) { fail('bundle patch 缺失: ' + patchFile); continue }
     const text = readFileSync(patchFile, 'utf8')
@@ -514,8 +533,9 @@ console.log('== 4c. 上游槽位全集（反向断言：上游新长出的槽必
 }
 
 console.log('== 5. 环境契约键 ==')
+if (envKeysProblem !== null) fail(envKeysProblem)
 const envText = readFileSync(join(root, contract.envContract.repo, 'src/index.ts'), 'utf8')
-for (const key of contract.envContract.keys) {
+for (const key of Array.isArray(contract.envContract.keys) ? contract.envContract.keys : []) {
   if (envText.includes(key)) ok('环境键 ' + key + ' 注入')
   else fail('环境键 ' + key + ' 未注入')
 }
@@ -962,6 +982,13 @@ function runContractSelfTest() {
     { label: '#1021 声明面清空 → 判红（不得整段静默消失）', mutate: c => { c.clientSlots.declarations = [] }, expect: /declarations 为空/ },
     { label: '#1021 声明面不是数组 → 判红（不得静默降级成空集）', mutate: c => { c.clientSlots.declarations = null }, expect: /不是数组/ },
     { label: '#1021 声明面登记了未在 slots 里的槽 → 判红（规模关系）', mutate: c => { c.clientSlots.declarations.push({ slot: 'zzz.selftest.unregistered', file: 'nowhere', kind: 'list', scope: 'root' }) }, expect: /未在 clientSlots\.slots 登记/ },
+    /* ── issue #1580：§1 / §5 的空集恒真（与 #1021 同族，两处各自独立成例）──────────────
+     * 旧实现里 rows / envContract.keys 被清空时循环零次、零条 FAIL，门禁照打 CONTRACT PASS。
+     * 两条负控要证明的是「清空之后仍然判红」，且理由点的是那一段登记本身。 */
+    { label: '#1580 §1 bundle 行登记表清空 → 判红（不得整段静默消失）', mutate: c => { c.rows = [] }, expect: /contract\.rows 为空/ },
+    { label: '#1580 §1 bundle 行登记表不是数组 → 判红（不得静默降级成空集）', mutate: c => { c.rows = null }, expect: /contract\.rows 不是数组/ },
+    { label: '#1580 §5 环境键登记表清空 → 判红（不得整段静默消失）', mutate: c => { c.envContract.keys = [] }, expect: /contract\.envContract\.keys 为空/ },
+    { label: '#1580 §5 环境键登记表不是数组 → 判红（不得静默降级成空集）', mutate: c => { c.envContract.keys = null }, expect: /contract\.envContract\.keys 不是数组/ },
     { label: '§4c 反向判红：登记集漏一条（上游实有 = 未登记的槽）', mutate: dropSlot, expect: /上游长出未登记的槽/ },
     { label: '§4c 反向判红：登记集多一条（上游已无 = 静默落空）', mutate: fakeSlot, expect: /上游删除了已登记的槽/ },
     { label: '§4c 反向判红：登记的 kind 与上游声明不一致', mutate: c => { c.clientSlots.upstreamUniverse.entries.find(e => e.slot === 'settings.section').kind = 'chain' }, expect: /kind\/scope 漂移/ },

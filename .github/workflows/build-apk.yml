@@ -130,9 +130,14 @@ jobs:
 
       - name: 构建 APK ${abi}（注入插件 + 门禁 + gradle + 产物）
         shell: bash
+        # issue #1614：workflow 输入**不得**内插进 run 脚本。双引号里仍会做命令替换
+        # （suffix=`$(curl …|sh)` 即以本 job 身份执行），且 `$VAR` 形态的 suffix 会被 shell 吃掉。
+        # 走 env: 后输入只作为环境变量的值传递，shell 不再对它做任何解释。
+        env:
+          SUFFIX: ${{ github.event.inputs.suffix }}
         run: |
           set -e
-          node scripts/build-apk.mjs --abi "${{ matrix.abi }}" --suffix "${{ github.event.inputs.suffix }}"
+          node scripts/build-apk.mjs --abi "${{ matrix.abi }}" --suffix "$SUFFIX"
 
       - name: 上传前复核最终 APK 签名
         shell: bash
