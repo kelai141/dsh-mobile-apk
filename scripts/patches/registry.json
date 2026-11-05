@@ -375,6 +375,14 @@
       "summary": "inspector 的 Worker 不再清空 execArgv：显式传 --expose-internals，使 android-arm64 上 requireBuiltin 回退可用",
       "provenance": "2026-10-21 apk issue #472：node-addon-require-builtin 无 android-arm64 预编译件，Worker 内 internal/modules/esm/loader 必 MODULE_NOT_FOUND（设备实测）",
       "marker": "dsh-mobile inspector worker expose-internals (472)"
+    },
+    {
+      "id": "appboot-scope-fastpath-S1",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js",
+      "scope": "engine",
+      "summary": "安装域包扫描（collectInstallationScopePackages / dependencyClosure）的 realpath 记忆化：realpath(parent) 已知且子项非符号链接时不再整链 realpathSync，父目录一次扫描只解析一次；符号链接条目仍走完整 realpath。缓存按扫描建立（两个 BFS 入口各自重建），跨扫描无陈旧窗口，故不需要失效判据。三组锚点各必须恰好命中一次，任一失配即抛错拒绝写半成品",
+      "provenance": "2026-10-21 启动审计 docs/0.14.9-PERF-POWER-STARTUP-AUDIT-2026-10-21.md §4（1）与 §10 第 17 项：collectInstallationScopePackages 是 self 热点最大单点（readPackageManifest 4.2% + realpathSync 合计 5.8% + 自身 1.8% + existsSync 1.5%，0-1500ms 窗口约占三成）。实测（真实引擎树 486 包 / 654 个被探测 node_modules 目录 / 486 份 manifest，Node 24.17，Windows NTFS，15 轮配对同轮比较以消负载漂移）：上游 median 325 ms → 改写 median 198 ms，配对比值中位 0.663，省 34%（逐轮 24-52%）；links / declarers / versions / packageNames 四份结果与上游逐项相等（等价性入测试 appboot-scope-fastpath-s1.test.mjs）。realpath 恒等式在真实树逐项校验：32241 个非符号链接条目 0 例不等价。同源建议里的「existsSync 探测与 readPackageManifest 合并成一次读」实测慢 34%，明确未采纳（候选探测 66% 是 miss，961 次 miss 各构造一个带调用栈的 Error）",
+      "marker": "dsh-mobile appboot scope realpath memo (S1)"
     }
   ],
   "retired": [

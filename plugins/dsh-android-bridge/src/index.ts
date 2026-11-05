@@ -46,8 +46,7 @@ import {
   authorizePublicReadOnlyRoute,
   sendMobileRouteRejection,
   CONTROL_TOKEN_HEADER,
-  loopbackAuthorities,
-  enginePortFromEnv,
+  FALLBACK_LOOPBACK_HOSTS,
   ConnectionRouteAuth,
 } from './route-auth.js'
 import {
@@ -91,14 +90,14 @@ export {
   authorizeMobileRoute,
   sendMobileRouteRejection,
   CONTROL_TOKEN_HEADER,
-  loopbackAuthorities,
-  enginePortFromEnv,
+  FALLBACK_LOOPBACK_HOSTS,
   // 0.14.0 §4.1：能力分组常量与 facade 名从单一源再导出——工具面预算门禁据此推导「初始可见集」
   // （= 注册集 - 被 capability gate 掩蔽的组），避免门禁另写一份组名单而与实现漂移。
   DEVICE_TOOL_GROUPS,
   DEVICE_TOOLS,
   CAPABILITY_TOOL_NAME,
 }
+export { enginePortFromEnv, loopbackAuthorities } from './route-auth.js'
 export type {
   MobileRouteRequest,
   MobileRouteResponse,
@@ -140,25 +139,263 @@ export interface AdbStatus {
   message?: string
 }
 
+/**
+ * 追加写批量器（审计 §7.8）。
+ *
+ * 缺陷形态：`writeAudit` 每次事件都 `appendFileSync` + 紧接着 `statSync` 判轮转；
+ * `.task-done.ndjson` / `.notify.ndjson` / `.live.ndjson` 同样是「每事件一次同步追加」。
+ * 一个 turn 里 assistant/message、tool/call、tool/result、turn/end 加起来几十次同步写，
+ * 每次都占用事件循环一次系统调用；statSync 更是每次写后再多一次。
+ *
+ * 修法：**100ms 批量**。行先攒在内存里，到点（或攒够量）一次 append 出去。
+ *
+ * 不丢数据的四条保证（这条是安全敏感面，逐条都要有据）：
+ *   1. **同步 flush 出口**：`flush()` 是同步的——返回后数据一定已在文件里，调用方在关键点
+ *      （卸载、退出、读者要读之前）显式调用。
+ *   2. **进程退出兜底**：注册 `process.on('exit')`（同步执行，能跑完同步 IO）与
+ *      `SIGINT`/`SIGTERM` 处理器。异常退出（SIGKILL / 硬崩溃）最多丢**一个窗口**（≤100ms）的行，
+ *      且只影响实时流/通知类记录；判决性事实（拒绝、命令）在 flush 前后都有明确落点。
+ *   3. **攒够即写**：单批字节超过上限立刻 flush，避免长 turn 里缓冲无限长大。
+ *   4. **写失败不清缓冲**：append 抛错时行仍留在队列里（顺序不变），下一次 flush 重试。
+ *
+ * 为什么读侧不受影响：壳侧 FileObserver 消费 `.notify.ndjson` / `.live.ndjson` 是**按偏移增量读**，
+ * 且只消费到最后一个换行（OverlayLiveFeed.drainLive / NotifyStore.drain），因此：
+ *   - 批量里多行一次写出 = 一次事件带多行，按换行边界消费，不丢不重；
+ *   - 窗口内的行最多晚 100ms 可见（异步 IO 事件本来就不保证同步可见）；
+ *   - 探针类「写完立刻读尾部」的用法由调用方显式 `flush()` 实现（见 appendLive 的注册点）。
+ */
+export interface AppendBatcher {
+  /** 追加一行（不带换行也行；内部统一补）。 */
+  push(line: string): void
+  /** 立刻同步落盘（幂等；未到窗口也写）。 */
+  flush(): void
+  /** 定时器是否已排（测试断言用）。 */
+  pending(): boolean
+  /** 停止定时器（卸载用；不 flush，调用方应先 flush）。 */
+  dispose(): void
+}
+
+/** 单批字节上限：攒够即写（防止长时间不落盘）。 */
+const APPEND_BATCH_MAX_BYTES = 64 * 1024
+/** 批量窗口（毫秒）：审计指定的 100ms。 */
+export const APPEND_BATCH_WINDOW_MS = 100
+
+/**
+ * 造一个追加写批量器。
+ * @param file - 目标文件（绝对路径）。
+ * @param options - 可选：窗口毫秒、单批上限、写实现与定时器（测试注入假时钟）。
+ * @returns 批量器句柄。
+ */
+export function createAppendBatcher(file: string, options: {
+  windowMs?: number
+  maxBytes?: number
+  append?: (file: string, text: string) => void
+  setTimer?: (fn: () => void, ms: number) => unknown
+  clearTimer?: (handle: unknown) => void
+} = {}): AppendBatcher {
+  const windowMs = options.windowMs ?? APPEND_BATCH_WINDOW_MS
+  const maxBytes = options.maxBytes ?? APPEND_BATCH_MAX_BYTES
+  const append = options.append ?? ((target: string, text: string) => { appendFileSync(target, text) })
+  const setTimer = options.setTimer ?? ((fn: () => void, ms: number) => setTimeout(fn, ms))
+  const clearTimer = options.clearTimer ?? ((handle: unknown) => { clearTimeout(handle as ReturnType<typeof setTimeout>) })
+  /** 待写行（FIFO：写失败要按原顺序重试）。 */
+  let queue: string[] = []
+  /** 待写字节数（估算：用于「攒够即写」）。 */
+  let bytes = 0
+  let timer: unknown = null
+  let disposed = false
+  const stopTimer = (): void => {
+    if (timer === null) return
+    clearTimer(timer)
+    timer = null
+  }
+  /** 落盘：把队列一次性写出；写失败保留队列（下次重试），绝不静默丢弃。 */
+  const flush = (): void => {
+    if (queue.length === 0) {
+      stopTimer()
+      return
+    }
+    const text = queue.join('')
+    try {
+      append(file, text)
+    } catch {
+      // 写失败：行仍在队列里（保持顺序），下一拍重试。
+      return
+    }
+    // 只清掉本次写出的那部分：flush 期间的 append 若又 push 了新行，它们必须留着。
+    const written = text.length
+    let dropped = 0
+    let removedBytes = 0
+    while (dropped < queue.length && removedBytes < written) {
+      removedBytes += queue[dropped].length
+      dropped += 1
+    }
+    queue = queue.slice(dropped)
+    bytes = Math.max(0, bytes - removedBytes)
+    if (queue.length === 0) stopTimer()
+  }
+  const ensureTimer = (): void => {
+    if (timer !== null || disposed) return
+    timer = setTimer(() => { timer = null; flush() }, windowMs)
+  }
+  return {
+    push(line) {
+      if (disposed) return
+      const text = line.endsWith('\n') ? line : line + '\n'
+      queue.push(text)
+      bytes += text.length
+      // 攒够即写：不让缓冲无限长大（长 turn 里事件密集时尤其重要）。
+      if (bytes >= maxBytes) { stopTimer(); flush(); return }
+      ensureTimer()
+    },
+    flush,
+    pending: () => timer !== null,
+    dispose() {
+      disposed = true
+      stopTimer()
+    },
+  }
+}
+
+/** 进程退出时统一 flush 的注册表（模块级；dispose 时摘除）。 */
+const EXIT_FLUSHERS = new Set<() => void>()
+let exitHooksInstalled = false
+
+/**
+ * 注册「进程退出前 flush」兜底（只装一次）。
+ *
+ * `process.on('exit')` 里只能跑同步代码——批量器本身是同步 append，所以这条兜底有效。
+ * 再补 SIGINT/SIGTERM：终端 Ctrl-C 与系统 SIGTERM 走信号处理器，不经过 exit 事件。
+ * SIGKILL 与硬崩溃拦不住，最多丢一个窗口（≤100ms）的行——这是批量化的固有代价，
+ * 且只落在实时流/通知类记录上（它们在语义上就是「尽力而为的可观测性」，不是判决性事实）。
+ */
+function installExitHooks(): void {
+  if (exitHooksInstalled) return
+  exitHooksInstalled = true
+  const runAll = (): void => {
+    for (const flush of [...EXIT_FLUSHERS]) {
+      try { flush() } catch { /* 退出路径：尽力而为，不抛 */ }
+    }
+  }
+  try { process.on('exit', runAll) } catch { /* 非 node 宿主 */ }
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    try {
+      process.on(signal, () => { runAll() })
+    } catch { /* 信号不可用（受限宿主） */ }
+  }
+}
+
+/**
+ * **同步读路径**：把所有待写的批量缓冲立刻落盘。
+ *
+ * 给谁用（审计 §7.8 的那条要求）：读侧若依赖「写完立刻可读」，必须先调这里。
+ * 现状核对（哪些读侧真的依赖立刻可读）：
+ *   - 壳侧 `NotifyStore.drain` / `OverlayLiveFeed.drainLive`：FileObserver 事件驱动 + 5 秒
+ *     兜底 tick，**按偏移消费且只消费到最后一个换行**——批量多行一次写出不破坏它，只是晚 ≤100ms；
+ *   - 壳侧 `WatchdogV2` 的 `.task-done.ndjson` 消费：5 秒一拍，同样远大于 100ms 窗口；
+ *   - **探针/验收脚本**读文件尾部判断「刚才那条事件有没有落盘」：这一类**确实**依赖立刻可读，
+ *     所以必须调本函数（或在事件之后等过一个窗口）。
+ *
+ * 为什么不是「自动化让所有读侧都先调它」：读侧在壳侧 Kotlin / 外部脚本里，无法注入；
+ * 能做的就是把同步出口**公开**出来，由需要的人显式调用。
+ */
+export function flushPendingAppends(): void {
+  for (const flush of [...EXIT_FLUSHERS]) {
+    try { flush() } catch { /* 尽力而为 */ }
+  }
+}
+
+/**
+ * 造一个「带退出兜底」的批量器，并登记到退出 flush 表。
+ * @param file - 目标文件。
+ * @param options - 透传给 createAppendBatcher。
+ * @returns 批量器句柄（dispose 会摘除登记）。
+ */
+export function createFileAppendix(file: string, options: Parameters<typeof createAppendBatcher>[1] = {}): AppendBatcher {
+  const batcher = createAppendBatcher(file, options)
+  installExitHooks()
+  EXIT_FLUSHERS.add(batcher.flush)
+  return {
+    push: batcher.push,
+    flush: batcher.flush,
+    pending: batcher.pending,
+    dispose() {
+      batcher.dispose()
+      EXIT_FLUSHERS.delete(batcher.flush)
+    },
+  }
+}
 /** 审计记录落点：files/audit/audit.ndjson（换行分隔 JSON；DSH_ADB_AUDIT_PATH 可覆盖供测试） */
 function auditDir(): string {
   return process.env.DSH_ADB_AUDIT_PATH ?? '/data/user/0/com.dsharnessmobile.shell/files/audit'
 }
 
+/** 审计文件上限：超过即滚动截断（保留尾部 500 行）。 */
+const AUDIT_MAX_BYTES = 2 * 1024 * 1024
+
+/** 审计批量器（懒创建：首次写入才建目录与定时器）。 */
+let auditBatcher: AppendBatcher | null = null
+/** 已写入审计文件的**累计字节数**（审计 §7.8：用它替代每次都 statSync）。 */
+let auditBytes = 0
+/** 审计批量器绑定的文件路径（DSH_ADB_AUDIT_PATH 变了就重建）。 */
+let auditFilePath: string | null = null
+
+/**
+ * 审计写入（审计 §7.8：合并成批量追加，轮转用累计字节计数判定）。
+ *
+ * 缺陷形态：每次事件 `appendFileSync` + 紧接着 `statSync` 判轮转——一个 turn 里几十次同步写、
+ * 几十次同步 stat。
+ *
+ * 修法：① 写走 100ms 批量器（一次系统调用写掉一批）；② 轮转判据改为**累计字节计数**：
+ * 启动时读一次文件大小做基线（auditBytes），之后每批落盘只做加法，不再 stat。
+ *
+ * 为什么累计字节可靠：本进程是该文件的唯一写者。文件被外部截断属异常；那时累计值偏大，
+ * 后果只是**更早**轮转一次（丢的仍是尾部保留逻辑认定该丢的行），不会漏轮转。
+ * @param entry - 审计条目（ts 由本函数补）。
+ */
 function writeAudit(entry: Record<string, unknown>) {
   try {
     const dir = auditDir()
     mkdirSync(dir, { recursive: true })
     const file = join(dir, 'audit.ndjson')
-    appendFileSync(file, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + '\n')
-    // 滚动截断：>2MB 时保留尾部（简单实现；ESM 下用导入的 fs 而非 require）
-    try {
-      if (statSync(file).size > 2 * 1024 * 1024) {
-        const lines = readFileSync(file, 'utf8').split('\n')
-        writeFileSync(file, lines.slice(-500).join('\n'))
-      }
-    } catch { /* 截断失败不阻断 */ }
+    if (auditBatcher === null || auditFilePath !== file) {
+      // 基线：只在这里读一次文件大小（之后的轮转判定全走累计值）。
+      try { auditBytes = statSync(file).size } catch { auditBytes = 0 }
+      auditBatcher?.dispose()
+      auditBatcher = createFileAppendix(file, {
+        append: (target, text) => {
+          appendFileSync(target, text)
+          // 落盘后按**实际写出字节**推进计数（不是按 push 估算）：写失败时 append 抛错、
+          // 批量器把行留回队列，这里也就不会误加。
+          auditBytes += Buffer.byteLength(text)
+          if (auditBytes <= AUDIT_MAX_BYTES) return
+          // 滚动截断：>2MB 时保留尾部（简单实现；ESM 下用导入的 fs 而非 require）。
+          try {
+            const lines = readFileSync(target, 'utf8').split('\n')
+            writeFileSync(target, lines.slice(-500).join('\n'))
+            auditBytes = Buffer.byteLength(readFileSync(target, 'utf8'))
+          } catch {
+            // 截断失败：把计数压回上限以内，避免每次写都尝试截断（下一批再试）。
+            auditBytes = 0
+          }
+        },
+      })
+      auditFilePath = file
+    }
+    auditBatcher.push(JSON.stringify({ ts: new Date().toISOString(), ...entry }))
   } catch { /* 审计失败不阻断主流程（隐私优先，静默放弃） */ }
+}
+
+/**
+ * 审计落盘的**同步出口**（安全敏感面的必要保证）。
+ *
+ * 什么时候必须调：
+ *   - 进程要退出时（另有 exit 钩子兜底，显式调用更早更稳）；
+ *   - 有读者要立刻读审计尾部时（探针、诊断、验收脚本）。
+ * 平时不必调：批量窗口 100ms，正常节奏下延迟不可感知。
+ */
+export function flushAudit(): void {
+  try { auditBatcher?.flush() } catch { /* 尽力而为 */ }
 }
 
 /**
@@ -1620,10 +1857,12 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
   // 标记文件路经 files/home/.dsh/.task-done.ndjson，壳读后清空。事件面：assistant/message
   // （agent 完成一轮完整输出）+ assistant/message.interrupted（被打断不弹）。
   const TASK_DONE_MARKER = (process.env.DSH_HOME ?? '/data/user/0/com.dsharnessmobile.shell/files/home/.dsh') + '/.task-done.ndjson'
+  // 审计 §7.8：每次事件一次同步 append 合并成 100ms 批量（见 AppendBatcher 的不丢数据四条保证）。
+  // 兼容期信道（老壳仍读它），consumer 是 WatchdogV2 每 5s 一拍，100ms 窗口远小于消费周期。
+  const taskMarkerBatch = createFileAppendix(TASK_DONE_MARKER)
   const appendTaskMarker = (sessionId: unknown, title: string | undefined, text: string) => {
     try {
-      const entry = JSON.stringify({ ts: new Date().toISOString(), sessionId: String(sessionId), title: title ?? '', text }) + '\n'
-      appendFileSync(TASK_DONE_MARKER, entry)
+      taskMarkerBatch.push(JSON.stringify({ ts: new Date().toISOString(), sessionId: String(sessionId), title: title ?? '', text }))
     } catch { /* 标记失败不阻断（通知不是关键路径） */ }
   }
   // ── 通知信道 `.notify.ndjson`（0.14.0-preview §6.2.1）──
@@ -1634,17 +1873,34 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
   // `.task-done.ndjson` 兼容期保留（老壳仍读它）；新壳只读本文件，双读不双发。
   const NOTIFY_FILE = (process.env.DSH_HOME ?? '/data/user/0/com.dsharnessmobile.shell/files/home/.dsh') + '/.notify.ndjson'
   const NOTIFY_MAX = 512 * 1024
+  // 审计 §7.8：轮转判据改为**累计字节计数**（启动时读一次基线，之后只做加法，不再每次 stat）。
   let notifyBytes = 0
   try { notifyBytes = statSync(NOTIFY_FILE).size } catch { /* 新文件 */ }
+  // 写侧批量：每批落盘时按实际写出字节推进计数（与 audit 同一口径）。
+  const notifyBatch = createFileAppendix(NOTIFY_FILE, {
+    append: (target, text) => {
+      appendFileSync(target, text)
+      notifyBytes += Buffer.byteLength(text)
+    },
+  })
+  /**
+   * 落盘前的轮转预判：**先 flush 再轮转**。
+   *
+   * 顺序不能反：若先 rename 再 flush，缓冲里的旧行会写进新文件（跨代串行），
+   * 壳侧按偏移消费时会读到两条时间线交错的内容。所以这里 flush 一次（把旧代的行写完），
+   * 再按累计字节判轮转。
+   */
+  const rotateNotifyIfNeeded = (incomingBytes: number): void => {
+    if (notifyBytes + incomingBytes <= NOTIFY_MAX) return
+    notifyBatch.flush()
+    try { renameSync(NOTIFY_FILE, NOTIFY_FILE + '.1') } catch { rmSync(NOTIFY_FILE, { force: true }) }
+    notifyBytes = 0
+  }
   const appendNotify = (entry: Record<string, unknown>) => {
     try {
-      const line = JSON.stringify({ ts: new Date().toISOString(), ...entry }) + '\n'
-      if (notifyBytes + line.length > NOTIFY_MAX) {
-        try { renameSync(NOTIFY_FILE, NOTIFY_FILE + '.1') } catch { rmSync(NOTIFY_FILE, { force: true }) }
-        notifyBytes = 0
-      }
-      appendFileSync(NOTIFY_FILE, line)
-      notifyBytes += line.length
+      const line = JSON.stringify({ ts: new Date().toISOString(), ...entry })
+      rotateNotifyIfNeeded(Buffer.byteLength(line) + 1)
+      notifyBatch.push(line)
     } catch { /* 通知不是关键路径：写失败不阻断引擎 */ }
   }
   // 会话级投影状态（D13/D14 修复的载体：标题表 + 轮次用时/工具数 + 摘要 + 产出文件）
@@ -1654,22 +1910,41 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
     const probe = TASK_DONE_MARKER.replace('.task-done.ndjson', '.notify-probe.log')
     appendFileSync(probe, new Date().toISOString() + ' apply-ran\n')
   } catch { /* 探针失败忽略 */ }
+  /** 实时流批量器（在下方 try 块内建；卸载 flush 需要它，故声明在块外）。 */
+  let liveBatch: AppendBatcher | null = null
   try {
     // ── 实时事件流（W7 悬浮球，2026-08-31；PRD-0.13.2 §4.2）──
     // 壳侧 OverlayService 经 FileObserver tail 消费（毫秒级、省电）；文件上限
     // 512KB，超限轮转 .1 一代。条目使用紧凑键：t=epoch ms s=sessionId k=类型。
     const LIVE_FILE = (process.env.DSH_HOME ?? '/data/user/0/com.dsharnessmobile.shell/files/home/.dsh') + '/.live.ndjson'
     const LIVE_MAX = 512 * 1024
+    // 审计 §7.8：累计字节计数判轮转（不再每次 stat）；写走 100ms 批量。
     let liveBytes = 0
     try { liveBytes = statSync(LIVE_FILE).size } catch { /* 新文件 */ }
+    // 提到外层持有：卸载 flush 在 try 块之外（live 面装配失败时它仍是 null，flush 会跳过）。
+    const builtLiveBatch = createFileAppendix(LIVE_FILE, {
+      append: (target, text) => {
+        appendFileSync(target, text)
+        liveBytes += Buffer.byteLength(text)
+      },
+    })
+    liveBatch = builtLiveBatch
+    /**
+     * 轮转预判：**先 flush 再轮转**（顺序反了会把旧代的行写进新文件，壳侧偏移消费即串行）。
+     * 壳侧 OverlayLiveFeed 检测到文件变短会自动复位偏移，轮转后仍能继续消费。
+     * @param incomingBytes - 本行落盘后的字节数（含换行）。
+     */
+    const rotateLiveIfNeeded = (incomingBytes: number): void => {
+      if (liveBytes + incomingBytes <= LIVE_MAX) return
+      builtLiveBatch.flush()
+      try { renameSync(LIVE_FILE, LIVE_FILE + '.1') } catch { rmSync(LIVE_FILE, { force: true }) }
+      liveBytes = 0
+    }
     const appendLive = (line: string) => {
       try {
-        if (liveBytes + line.length > LIVE_MAX) {
-          try { renameSync(LIVE_FILE, LIVE_FILE + '.1') } catch { rmSync(LIVE_FILE, { force: true }) }
-          liveBytes = 0
-        }
-        appendFileSync(LIVE_FILE, line)
-        liveBytes += line.length
+        const text = line.endsWith('\n') ? line : line + '\n'
+        rotateLiveIfNeeded(Buffer.byteLength(text))
+        builtLiveBatch.push(text)
       } catch { /* 实时流失败不阻断主流程 */ }
     }
     // callId → {name, args, start}（tool/result 按 source.callId 配对，给耗时与参数）
@@ -1827,6 +2102,18 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
       appendFileSync(probe, new Date().toISOString() + ' listener-FAILED: ' + String((e as Error).message) + '\n')
     } catch { /* 探针失败忽略 */ }
   }
+  // 审计 §7.8：卸载时先把三处批量缓冲同步落盘再摘除（顺序不能反：dispose 之后 flush 是空操作）。
+  // 这是「不丢数据」的第 1 条保证在插件生命周期上的落点；进程退出由 createFileAppendix 的
+  // exit/SIGINT/SIGTERM 钩子兜底。
+  ctx.effect?.(() => () => {
+    try { taskMarkerBatch.flush() } catch { /* 尽力而为 */ }
+    try { notifyBatch.flush() } catch { /* 尽力而为 */ }
+    try { liveBatch?.flush() } catch { /* live 面在 try 块内，可能没建起来 */ }
+    flushAudit()
+    try { taskMarkerBatch.dispose() } catch { /* 尽力而为 */ }
+    try { notifyBatch.dispose() } catch { /* 尽力而为 */ }
+    try { liveBatch?.dispose() } catch { /* 同上 */ }
+  })
   for (const t of tools(svc, shellFace, () => controlToken() !== undefined)) ctx.tools.register(t)
   // 渐进披露（0.14.0 §4.1）：设备工具默认对每个 agent 掩蔽，模型经 skill 目录发现能力后调用
   // android_capabilities 解锁；facade 之外的工具不再常驻系统提示词。

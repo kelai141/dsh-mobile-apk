@@ -7,7 +7,10 @@
 //   3. 通路兜底：没有 textarea 时才直写，且**按 acck 动态选** CSI/SS3；
 //   4. 提示：不支持组合 / 唤起失败都必须可见（用户口径：不许静默）；
 //   5. 自愈：React 重建子列表把键条摘掉后，观察者必须把它挂回末尾；
-//   6. visualViewport：resize **与** scroll 都要触发复算。
+//   6. visualViewport：resize **与** scroll 都要触发复算；
+//   7. 观察成本（0.14.9 审计 §7.4）：整页只有一个观察器、同一帧内多次变更只复算一次、
+//      留白值没变时不重写内联样式。这三条是**性能语义**，不是实现细节：旧实现的形态是
+//      「每条键条一个观察器 + 每个微任务一次全文档查询 + 每帧一次样式失效」。
 //
 // jsdom 不在本插件依赖里（禁 npm install），从同仓的响应式子仓按需解析；缺失时本文件**跳过**并
 // 在报告里记为未确证，绝不静默当成通过。
@@ -16,7 +19,7 @@ import { pathToFileURL } from 'node:url'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { KEYBAR_ATTR, KEYBAR_INSET_VAR, KEYBAR_NOTICE_ATTR, KEYBAR_STYLE_ID } from '../src/keybar/layout.ts'
-import { KEYBAR_TEXT, defineLegacyKeyFields, mountKeybar } from '../src/keybar/mount.ts'
+import { KEYBAR_TEXT, defineLegacyKeyFields, mountKeybar, watchTerminalKeybars } from '../src/keybar/mount.ts'
 import { resolveCtrlChar } from '../src/keybar/keymap.ts'
 
 /** 按候选路径解析 jsdom（不新增依赖）。 */
@@ -34,6 +37,38 @@ function win32Trim(pathname) { return /^\/[A-Za-z]:/u.test(pathname) ? 1 : 0 }
 const JSDOM = jsdomModule?.JSDOM
 const SKIP = JSDOM === undefined
 
+/**
+ * 装一个可控的视觉视口替身（jsdom 没有 visualViewport）。
+ *
+ * **必须在挂载前装**：键条的 resize/scroll 订阅发生在其构造期，挂载后再装就绑不到替身上。
+ * @param doc - 被测文档。
+ * @param initial - 初始高度与偏移（innerHeight 默认同高，即「布局视口 == 视觉视口」）。
+ * @returns 改高度/偏移并可派发事件的控制面。
+ */
+function installVisualViewport(doc, initial) {
+  const win = doc.defaultView
+  let height = initial.height
+  let offsetTop = initial.offsetTop ?? 0
+  const listeners = new Map()
+  Object.defineProperty(win, 'visualViewport', {
+    configurable: true,
+    value: {
+      get height() { return height },
+      get offsetTop() { return offsetTop },
+      addEventListener: (type, fn) => { listeners.set(type, [...(listeners.get(type) ?? []), fn]) },
+      removeEventListener: () => {},
+    },
+  })
+  Object.defineProperty(win, 'innerHeight', { configurable: true, value: initial.layoutHeight ?? initial.height })
+  return {
+    set(next) {
+      if (next.height !== undefined) height = next.height
+      if (next.offsetTop !== undefined) offsetTop = next.offsetTop
+    },
+    fire(type) { for (const fn of listeners.get(type) ?? []) fn() },
+  }
+}
+
 /** 搭一个最小但真实的宿主：上游 .root + .xterm-helper-textarea + 记录写入。 */
 function setup(options = {}) {
   const dom = new JSDOM('<!doctype html><html><head></head><body><section data-sidebar-terminal><div class="screen"><div class="xterm"><textarea class="xterm-helper-textarea"></textarea></div></div></section></body></html>',
@@ -41,6 +76,8 @@ function setup(options = {}) {
   const doc = dom.window.document
   const root = doc.querySelector('[data-sidebar-terminal]')
   const writes = []
+  // 可选：挂载前先装视觉视口替身（键条的 resize/scroll 订阅在构造期发生）。
+  const vv = options.viewport === undefined ? undefined : installVisualViewport(doc, options.viewport)
   const host = {
     root,
     write: (data) => { writes.push(data); return true },
@@ -49,7 +86,7 @@ function setup(options = {}) {
     now: () => options.now ?? 1_000,
   }
   const handle = mountKeybar(host)
-  return { dom, doc, root, writes, handle }
+  return { dom, doc, root, writes, handle, vv }
 }
 
 const repr = (value) => JSON.stringify(value)
@@ -60,6 +97,21 @@ function press(doc, key) {
   assert.ok(button, '找不到键: ' + key)
   button.dispatchEvent(new doc.defaultView.MouseEvent('click', { bubbles: true }))
   return button
+}
+
+/**
+ * 等一拍动画帧（= 一次渲染机会）。
+ *
+ * 审计 §7.4 的修法把自愈从「观察回调里同步跑」改成「合帧后跑」，断言的时机因此从
+ * 「微任务之后」挪到「下一帧之后」。这里等**两**帧：jsdom 的 rAF 是 16ms 定时器，
+ * 断言前刚好卡在帧边界时会读到帧前的中间态，测试就成了看运气。
+ * @param {Document} doc - 被测文档。
+ */
+async function nextFrame(doc) {
+  const view = doc.defaultView
+  for (let i = 0; i < 2; i += 1) {
+    await new Promise((resolve) => { view.requestAnimationFrame(() => { resolve() }) })
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -108,8 +160,8 @@ test('反证：React 重建子列表摘掉键条后，观察者必须把它挂�
   // 模拟 React 重写子列表：清空后放回一个 status 节点（键条被摘掉）。
   root.replaceChildren()
   assert.equal(doc.querySelector('[' + KEYBAR_ATTR + ']'), null)
-  // MutationObserver 是微任务回调。
-  await new Promise((resolve) => setTimeout(resolve, 0))
+  // 观察回调合帧后执行：等到下一帧才应看到自愈结果。
+  await nextFrame(doc)
   const restored = doc.querySelector('[' + KEYBAR_ATTR + ']')
   assert.ok(restored, '键条必须被挂回（否则用户在状态切换后就没有键条了）')
   assert.equal(restored.parentElement, root)
@@ -121,7 +173,7 @@ test('反证：上游根节点消失时键条必须一并移除（不得悬空�
   const { doc, handle } = setup()
   assert.ok(doc.querySelector('[' + KEYBAR_ATTR + ']'))
   doc.querySelector('[data-sidebar-terminal]').remove()
-  await new Promise((resolve) => setTimeout(resolve, 0))
+  await nextFrame(doc)
   assert.equal(doc.querySelector('[' + KEYBAR_ATTR + ']'), null, '根没了键条必须跟着走')
   handle.dispose()
 })
@@ -486,4 +538,127 @@ test('反证：visualViewport 缺失时不得崩溃（旧内核/桌面）', { sk
   press(doc, 'down')
   assert.ok(doc.querySelector('[' + KEYBAR_ATTR + ']'))
   handle.dispose()
+})
+// ---------------------------------------------------------------------------
+// 观察成本（0.14.9 审计 §7.4）
+//
+// 这三条对着审计点名的三个缺陷形态，反证方向是「旧实现会红」：
+//   ① 每个键条自建一个观察器（分栏 N 条 = N+1 个）→ 整页观察器计数必须为 1；
+//   ② 观察回调在微任务里同步 reconcile（同一帧内多轮）→ 留白复算每帧至多一次；
+//   ③ 无比较地写内联样式（值没变也写）→ 值不变时不得再写。
+// ---------------------------------------------------------------------------
+
+/** 统计 win.MutationObserver 的构造次数（观察成本的直接读数）。 */
+function countObservers(doc) {
+  const win = doc.defaultView
+  const Real = win.MutationObserver
+  const counter = { created: 0 }
+  win.MutationObserver = class extends Real {
+    constructor(callback) { super(callback); counter.created += 1 }
+  }
+  return counter
+}
+
+/** 统计对 documentElement 的 getComputedStyle 次数（= 留白复算次数）。 */
+function countInsetComputations(doc) {
+  const win = doc.defaultView
+  const real = win.getComputedStyle.bind(win)
+  const counter = { calls: 0 }
+  win.getComputedStyle = (target, pseudo) => {
+    if (target === doc.documentElement) counter.calls += 1
+    return real(target, pseudo)
+  }
+  return counter
+}
+
+/** 统计对某元素内联 style 的写次数（只记留白变量）。 */
+function countInsetWrites(el) {
+  const real = el.style.setProperty.bind(el.style)
+  const counter = { attrs: [], values: [] }
+  el.style.setProperty = (name, value, priority) => {
+    if (name === KEYBAR_INSET_VAR) { counter.attrs.push(name); counter.values.push(value) }
+    return real(name, value, priority)
+  }
+  return counter
+}
+
+test('反证：监视器 + 键条合起来只能有**一个**观察器（旧实现是监视器一个、键条一个）', { skip: SKIP && 'jsdom 不可用' }, async () => {
+  const dom = new JSDOM('<!doctype html><html><head></head><body><section data-sidebar-terminal><div class="screen"></div></section></body></html>',
+    { pretendToBeVisual: true })
+  const doc = dom.window.document
+  const counter = countObservers(doc)
+  // 生产形态：插件加载即挂监视器，监视器为每个终端根挂一条键条。
+  const watch = watchTerminalKeybars({ doc })
+  assert.equal(watch.count(), 1, '终端根出现后必须挂上一条键条')
+  await nextFrame(doc)
+  assert.equal(counter.created, 1,
+    '整页只允许一个观察器（实测 ' + String(counter.created) + ' 个；每多一个 = 每个变更多跑一遍全文档查询）')
+  watch.dispose()
+})
+
+test('反证：同一帧内多次 DOM 变更只复算一次留白（旧实现按微任务各跑一遍）', { skip: SKIP && 'jsdom 不可用' }, async () => {
+  const { doc, handle } = setup()
+  await nextFrame(doc)
+  const computations = countInsetComputations(doc)
+  const runBefore = computations.calls
+  // 同一帧内的多轮变更：每轮之间让出一次微任务（MutationObserver 的投递点），
+  // 旧实现在这里就会同步跑 reconcile，于是读数随轮数线性增长。
+  for (let i = 0; i < 6; i += 1) {
+    const filler = doc.createElement('div')
+    filler.className = 'churn-' + String(i)
+    doc.body.append(filler)
+    await Promise.resolve()
+  }
+  assert.equal(computations.calls - runBefore, 0,
+    '合帧前不得复算（实测多跑了 ' + String(computations.calls - runBefore) + ' 次）')
+  await nextFrame(doc)
+  assert.equal(computations.calls - runBefore, 1,
+    '一帧只复算一次（实测 ' + String(computations.calls - runBefore) + ' 次）')
+  handle.dispose()
+})
+
+test('反证：留白值没变时不得重写内联样式（旧实现每帧都写，值不变也触发样式失效）', { skip: SKIP && 'jsdom 不可用' }, async () => {
+  const { doc, root, handle, vv } = setup({ viewport: { height: 800 } })
+  await nextFrame(doc)
+  const writes = countInsetWrites(root)
+  assert.equal(root.style.getPropertyValue(KEYBAR_INSET_VAR), '0px', '初始留白必须已写入')
+  // 几何/视口都不动，只是页面结构在变（流式输出期间最典型的形态）。
+  for (let i = 0; i < 4; i += 1) {
+    doc.body.append(doc.createElement('span'))
+    await nextFrame(doc)
+  }
+  assert.deepEqual(writes.attrs, [],
+    '留白值没变时不得再写（实测多写了 ' + String(writes.attrs.length) + ' 次：' + repr(writes.values) + '）')
+  // 视口真的变了：必须照写，且只写一次。
+  vv.set({ height: 500 })
+  vv.fire('resize')
+  assert.deepEqual(writes.values, ['300px'], '视口真变时必须写一次（实测 ' + repr(writes.values) + '）')
+  assert.equal(root.style.getPropertyValue(KEYBAR_INSET_VAR), '300px')
+  handle.dispose()
+})
+
+test('反证：留白承载者切换时，旧根上的变量必须清掉（removeProperty 语义保留）', { skip: SKIP && 'jsdom 不可用' }, async () => {
+  const { doc, handle, vv } = setup({ viewport: { height: 800 } })
+  const first = doc.querySelector('[data-sidebar-terminal]')
+  vv.set({ height: 700 })
+  vv.fire('scroll')
+  assert.equal(first.style.getPropertyValue(KEYBAR_INSET_VAR), '100px', '先决条件：旧根上有非零留白')
+  // 新开一个终端根（分栏），键条改挂到新的最后一个根上。
+  const second = doc.createElement('section')
+  second.setAttribute('data-sidebar-terminal', '')
+  doc.body.append(second)
+  await nextFrame(doc)
+  assert.equal(second.style.getPropertyValue(KEYBAR_INSET_VAR), '100px', '留白必须跟到新的承载者')
+  assert.equal(first.style.getPropertyValue(KEYBAR_INSET_VAR), '', '旧承载者上的留白必须被清掉')
+  handle.dispose()
+})
+
+test('反证：dispose 后不再有任何观察器接手（退订必须真的断开）', { skip: SKIP && 'jsdom 不可用' }, async () => {
+  const { doc, handle } = setup()
+  handle.dispose()
+  const computations = countInsetComputations(doc)
+  // 结构变更若仍被观察着，留白复算（getComputedStyle）会跑：退订后必须为 0。
+  doc.body.append(doc.createElement('div'))
+  await nextFrame(doc)
+  assert.equal(computations.calls, 0, '退订后不得再复算（实测 ' + String(computations.calls) + ' 次）')
 })

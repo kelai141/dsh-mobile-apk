@@ -115,6 +115,113 @@ function ensureStyle(doc: Document): () => void {
   return () => { style.remove() }
 }
 
+/**
+ * 全文档共享的 DOM 变更信号（审计 §7.4：合并观察器 + rAF 合帧）。
+ *
+ * 缺陷形态（0.14.9 审计实测）：
+ *   - 每个键条在 mountKeybar 里各挂一个 MutationObserver（分栏时 N 个终端根 = N 份观察成本）；
+ *   - watchTerminalKeybars 再挂一个常驻的，插件加载即活着；
+ *   - 各回调都**同步**跑 reconcile()，而 reconcile 内含
+ *     querySelectorAll('[data-sidebar-terminal]') 与 getComputedStyle(documentElement)。
+ *   流式输出期间 DOM 每秒变更多次，等于每秒多次全文档查询 + 样式计算。
+ *
+ * 修法分两层：
+ *   1. **每个文档只建一个观察器**：所有订阅者（监视器 + 每条键条）共用一个 MutationObserver，
+ *      引用计数归零即断开。分栏出现 N 条键条也只有一份观察成本，不再「一个句柄一个观察器」。
+ *   2. **回调合帧**：观察回调只排一帧，同一帧内的多次 DOM 变更合并成一次复算
+ *      （旧实现按微任务检查点各跑一遍，同一帧内可以有多轮）。
+ *
+ * 为什么仍保留「常驻观察」而不是完全按需：没人观察就发现不了新出现的终端根（键条要等它）。
+ * 能省的是**每个句柄一份**与**每次变更一份**；单帧一次全文档查询是这条自愈通道的必要成本。
+ */
+interface DomSignalState {
+  /** 当前订阅者（监视器 + 各键条）。 */
+  readonly listeners: Set<() => void>
+  observer: MutationObserver | null
+  /** 已排队的动画帧 id（null = 没有排队）。 */
+  frame: number | null
+  /** 无 rAF 宿主上的退路定时器 id（null = 没有排队）。 */
+  timer: number | null
+  /**
+   * 宿主窗口（与 Document.defaultView 同型）。
+   *
+   * 类型必须写成 `Window & typeof globalThis`：MutationObserver 是**全局构造变量**，
+   * 不挂在 Window 接口上（只写 Window 会让 view.MutationObserver 编译期即失败）。
+   */
+  readonly view: (Window & typeof globalThis) | null
+}
+
+/** 每个文档一份共享信号（WeakMap：文档回收即随之回收）。 */
+const DOM_SIGNALS = new WeakMap<Document, DomSignalState>()
+
+/** 排一拍：排队期间重复调用不会重复排（合帧的唯一实现点）。 */
+function scheduleDomSignal(doc: Document, state: DomSignalState): void {
+  if (state.frame !== null || state.timer !== null) return
+  const run = (): void => {
+    state.frame = null
+    state.timer = null
+    // 最后一个订阅者已退订：不跑（此时状态已从 WeakMap 移除）。
+    if (!DOM_SIGNALS.has(doc)) return
+    // 先快照订阅者：回调里可能新增/退订，不能边遍历边改集合。
+    for (const listener of [...state.listeners]) {
+      try { listener() } catch { /* 单个订阅者的异常不得饿死其它订阅者（自愈必须继续） */ }
+    }
+  }
+  const view = state.view
+  if (view !== null && typeof view.requestAnimationFrame === "function") {
+    state.frame = view.requestAnimationFrame(run)
+    return
+  }
+  if (view !== null) { state.timer = view.setTimeout(run, 16); return }
+  // 脱离窗口的文档（defaultView === null）没有帧时钟可用：同步跑一次，避免订阅永不生效。
+  run()
+}
+
+/**
+ * 订阅「文档子树变化」信号，返回退订函数（幂等）。
+ *
+ * 观察范围与旧实现一致（body 子树 childList），只盯结构不盯属性：键条自愈要的是
+ * 「上游 React 重建子列表」这一事实；属性变化（含我们自己写的留白变量）不属于自愈面，
+ * 收进来等于把每次样式写入又变回一次全文档查询。
+ *
+ * @param doc - 目标文档（同一文档的所有订阅者共用一个观察器）。
+ * @param listener - 合帧后调用的复算函数。
+ * @returns 退订函数（可重复调用）。
+ */
+function subscribeDomSignal(doc: Document, listener: () => void): () => void {
+  let state = DOM_SIGNALS.get(doc)
+  if (state === undefined) {
+    state = { listeners: new Set(), observer: null, frame: null, timer: null, view: doc.defaultView }
+    DOM_SIGNALS.set(doc, state)
+  }
+  const current = state
+  current.listeners.add(listener)
+  if (current.observer === null && doc.body !== null) {
+    const Ctor = current.view?.MutationObserver
+    if (typeof Ctor === "function") {
+      try {
+        const observer = new Ctor(() => { scheduleDomSignal(doc, current) })
+        observer.observe(doc.body, { childList: true, subtree: true })
+        current.observer = observer
+      } catch { /* 观察失败不阻断键条本身（调用点的同步 reconcile 仍会挂一次） */ }
+    }
+  }
+  let released = false
+  return (): void => {
+    if (released) return
+    released = true
+    current.listeners.delete(listener)
+    if (current.listeners.size > 0) return
+    // 最后一个订阅者退订：断开观察器并丢弃状态。同一文档再次需要时重建 —— 仍然只有一个实例。
+    current.observer?.disconnect()
+    current.observer = null
+    if (current.frame !== null) current.view?.cancelAnimationFrame(current.frame)
+    if (current.timer !== null) current.view?.clearTimeout(current.timer)
+    current.frame = null
+    current.timer = null
+    DOM_SIGNALS.delete(doc)
+  }
+}
 /** 读一个 CSS 变量为像素数（读不到给 0）。 */
 function readPx(styles: CSSStyleDeclaration, name: string): number {
   const raw = styles.getPropertyValue(name).trim()
@@ -329,9 +436,14 @@ export function mountKeybar(host: KeybarHost): KeybarHandle {
       visualViewportOffsetTop: view.visualViewport?.offsetTop ?? 0,
       layoutViewportHeight: view.innerHeight,
     })
+    // 审计 §7.4：无比较地写内联样式会让宿主每帧重建一次样式（即使值没变）。
+    // 留白在绝大多数帧里是常量（键盘不动、视口不动），先读回内联值再决定要不要写。
+    // 注意：读的是**内联** style（不触发样式重算），与 keybar 自己写进去的那份同源。
+    const next = inset + 'px'
     if (insetHost !== null && insetHost !== host) insetHost.style.removeProperty(KEYBAR_INSET_VAR)
     insetHost = host
-    host.style.setProperty(KEYBAR_INSET_VAR, inset + 'px')
+    if (host.style.getPropertyValue(KEYBAR_INSET_VAR) === next) return
+    host.style.setProperty(KEYBAR_INSET_VAR, next)
   }
 
   /** 自愈挂载：键条必须是 .root 的最后一个子节点（保证「终端底边 <= 键条顶边」）。 */
@@ -361,11 +473,9 @@ export function mountKeybar(host: KeybarHost): KeybarHandle {
   view?.addEventListener('resize', onViewport)
 
   // 上游 .root 的子列表会随状态分支重建，可能摘掉我们手动插入的节点 -> 观察并挂回。
-  const MutationObserverCtor = view === null || view === undefined ? undefined : view.MutationObserver
-  const observer = typeof MutationObserverCtor === 'function'
-    ? new MutationObserverCtor(() => { reconcile() })
-    : null
-  observer?.observe(doc.body, { childList: true, subtree: true })
+  // 审计 §7.4：这里不再自建观察器，而是订阅**全文档共享**的那一个（回调已合帧）。
+  // 分栏时页面上同时有 N 条键条，旧实现是 N+1 个观察器、每个变更跑 N+1 次全文档查询。
+  const releaseSignal = subscribeDomSignal(doc, () => { reconcile() })
 
   syncLatch()
   reconcile()
@@ -375,7 +485,7 @@ export function mountKeybar(host: KeybarHost): KeybarHandle {
       if (disposed) return
       disposed = true
       if (latchTimer !== null) { view?.clearTimeout(latchTimer); latchTimer = null }
-      observer?.disconnect()
+      releaseSignal()
       view?.visualViewport?.removeEventListener('resize', onViewport)
       view?.visualViewport?.removeEventListener('scroll', onViewport)
       view?.removeEventListener('resize', onViewport)
@@ -442,15 +552,14 @@ export function watchTerminalKeybars(deps: {
     }
   }
 
-  const ObserverCtor = doc.defaultView?.MutationObserver
-  const observer = ObserverCtor === undefined ? null : new ObserverCtor(() => { reconcile() })
-  observer?.observe(doc.body, { childList: true, subtree: true })
+  // 审计 §7.4：与各键条共用同一个观察器（不再「监视器一个 + 每条键条一个」），回调已合帧。
+  const releaseSignal = subscribeDomSignal(doc, () => { reconcile() })
   reconcile()
 
   return {
     count: () => mounted.size,
     dispose(): void {
-      observer?.disconnect()
+      releaseSignal()
       for (const handle of mounted.values()) handle.dispose()
       mounted.clear()
     },

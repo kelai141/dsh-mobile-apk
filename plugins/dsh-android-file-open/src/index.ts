@@ -96,6 +96,201 @@ function ownedInsideWorkspace(owned: string): string | null {
   return real
 }
 
+/**
+ * 队列目录的**条目名指纹**（审计 §7.7：空队列的轻量判据）。
+ *
+ * 缺陷形态：客户端每 4 秒 GET 一次清单，而 GET 每次都做 TTL 清理 + `readItems()`
+ * （逐文件 readFileSync + JSON.parse）+ 临时目录 stat 遍历 + 每次读 dsh-adb.xml 鉴权。
+ * 队列常态是空的，但空队列也要走完整条读链——纯白烧 I/O。
+ *
+ * 为什么指纹只用目录项名字：条目落盘是**整文件 writeFileSync**（新条目 = 新文件名，
+ * 认领/更新 = 同名重写或删除）。因此「名字集合变了」是「可能有新条目或条目被消费」的充分信号；
+ * 名字集合没变时仍必须核对 mtime —— 同名重写（补建会话那一步）不改名字，但改了内容。
+ * 反过来，**只看名字不读内容**就能确认「队列还是那几条」，从而省掉整条逐文件读链。
+ *
+ * 安全边界（必须守住）：指纹只用于「要不要读」，**不得**用于跳过鉴权——鉴权永远在路由入口
+ * 第一行执行（见 authorizeIncomingRoute 调用点），与队列是否为空无关。
+ * @returns 指纹串；目录不可读时返回 null（调用方退回完整读链，不得当成「空」）。
+ */
+function queueFingerprint(): string | null {
+  try {
+    const dir = queueDir()
+    const names: string[] = []
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+      // mtime 取整到毫秒：同名重写（补建会话写回）必须被识别成「变了」。
+      const st = statSync(join(dir, entry.name))
+      names.push(entry.name + ':' + String(st.mtimeMs | 0) + ':' + String(st.size))
+    }
+    names.sort()
+    return names.join('|')
+  } catch {
+    return null
+  }
+}
+
+/** 清单 GET 的响应体（浏览器与设置页共用）。 */
+interface QueueListBody {
+  ok: true
+  pending: number
+  items: PublicIncomingItem[]
+  bytes: number
+}
+
+/**
+ * 清单 GET 的读链状态（审计 §7.7）。
+ *
+ * 语义：**缓存只在本进程内，且必须能被指纹证伪**。命中轻量返回的前提是「目录项指纹与上次完整读
+ * 一模一样」——新文件入队会改指纹（新名字），补建会话写回会改 mtime/size，认领会删名字，
+ * 三条都会立刻穿透。也就是说：命中的含义是「队列内容与上次完整读时逐项一致」，
+ * 此时回上次的公开视图与重新读一遍**结果等价**。
+ */
+interface ListState {
+  /** 上一次完整读的指纹（null = 还没读过）。 */
+  fingerprint: string | null
+  /** 上一次完整读的响应体（轻量返回时原样回放）。 */
+  body: QueueListBody | null
+  /** 上一次完整读时是否空队列（空队列才进入退避）。 */
+  empty: boolean
+  /** 连续空读的退避状态。 */
+  backoff: IdleBackoff
+  /** 上一次 GET 的时刻（epoch ms；null = 还没有过请求，回前台判据用）。 */
+  lastListAt: number | null
+}
+
+
+/**
+ * 「连续空读」退避控制器（审计 §7.7 的第二半）：空队列连续命中时把完整读链的间隔指数拉长到 30 秒上限。
+ *
+ * 为什么服务端也要退避：客户端是固定 4 秒一拍（客户端侧不动），服务端若每拍都做完整读链，
+ * 空队列期间的 I/O 与解析就是纯成本。退避只影响「多快能发现新入队」，而新入队会改目录指纹
+ * （新文件名），**指纹判定本身很便宜**（一次 readdir），所以新文件不会因为退避而看不见——
+ * 退避省掉的是后面的逐文件读 + 临时目录遍历。
+ *
+ * 关键不变量（用例锁定）：任何**新条目**都必须立刻越过退避（指纹变了 → 立刻完整读）。
+ */
+interface IdleBackoff {
+  /** 下一次允许做完整读链的时刻（epoch ms）。 */
+  nextFullReadAt: number
+  /** 当前退避档（1 = 无退避）。 */
+  level: number
+  /** 上一次观察到的指纹（null = 还没观察过）。 */
+  lastFingerprint: string | null
+}
+
+/** 退避档上限：1s -> 2s -> 4s -> 8s -> 16s -> 30s（封顶，不再增长）。 */
+const IDLE_BACKOFF_MAX_MS = 30_000
+/**
+ * 「回前台」判据（审计 §7.7 的第三条要求：回前台立即读一次）。
+ *
+ * 判据只能是**请求间隔**：服务端看不见页面可见性，但看得见「多久没人来问」。
+ * 页面进入后台时客户端定时器仍在（它自带 visible 门，实际不发请求），所以一个远超退避上限的
+ * 空档必然对应「页面不在前台/引擎刚被唤醒」——此时第一拍必须做完整读，不能拿退避当理由回旧视图。
+ * 取 2 倍退避上限（60 秒）：比任何一个前台轮询间隔都大，不会在正常前台节奏下误判。
+ */
+const RESUME_GAP_MS = 2 * IDLE_BACKOFF_MAX_MS
+/** 退避起步档（毫秒）：比客户端 4 秒一拍短，保证「第一个空拍」之后仍能及时看到新条目。 */
+const IDLE_BACKOFF_BASE_MS = 1_000
+
+/** 退避档上限（档位单位 = IDLE_BACKOFF_BASE_MS 的倍数）。 */
+const IDLE_BACKOFF_MAX_LEVEL = Math.ceil(IDLE_BACKOFF_MAX_MS / IDLE_BACKOFF_BASE_MS)
+
+/**
+ * 按「刚做完一次完整读」的结果推进退避（纯函数，便于单测锁定三条语义）。
+ *
+ * 三条语义（各对着一个真实要求）：
+ *   1. **队列不空 ⇒ 不退避**：有条目在等浏览器认领，每拍完整读是必要的（它们要立刻被看见）；
+ *   2. **指纹变了 ⇒ 从第一档重来**：刚发生真实变化（新入队/被消费/同名重写），下一拍仍要快；
+ *   3. **指纹没变且空 ⇒ 指数加档，30 秒封顶**：这才是「空队列常态」该付的成本。
+ *
+ * @param state - 当前退避状态。
+ * @param observation - 本轮观察：指纹与「是否空队列」。
+ * @param now - 当前时刻（epoch ms）。
+ * @returns 下一轮状态。
+ */
+function advanceIdleBackoff(
+  state: IdleBackoff,
+  observation: { fingerprint: string | null; empty: boolean },
+  now: number,
+): IdleBackoff {
+  // 队列不空：不退避（下一次 GET 立刻做完整读）。
+  if (!observation.empty) {
+    return { nextFullReadAt: 0, level: 1, lastFingerprint: observation.fingerprint }
+  }
+  const changed = observation.fingerprint !== state.lastFingerprint
+  // 指纹变了（含首次观察）：真实变化刚被这次完整读吸收，退避从第一档重新开始。
+  const level = changed ? 1 : Math.min(state.level * 2, IDLE_BACKOFF_MAX_LEVEL)
+  const delay = Math.min(IDLE_BACKOFF_BASE_MS * level, IDLE_BACKOFF_MAX_MS)
+  return { nextFullReadAt: now + delay, level, lastFingerprint: observation.fingerprint }
+}
+/** 初始读链状态（第一次 GET 必做完整读）。 */
+export function initialListState(): ListState {
+  return {
+    fingerprint: null,
+    body: null,
+    empty: false,
+    backoff: { nextFullReadAt: 0, level: 1, lastFingerprint: null },
+    lastListAt: null,
+  }
+}
+
+/** 读链的外部依赖（注入以便单测：真实实现读盘，用例给替身并计数）。 */
+export interface ListReadDeps {
+  /** 目录项指纹（一次 readdir + 每条 stat；不读文件内容）。 */
+  fingerprint(): string | null
+  /** TTL 复核（空队列轻量返回时**不执行**——它本身就要读一遍队列）。 */
+  purgeTtl(): void
+  /** 完整读链：逐条读队列记录（含读文件与解析）。 */
+  items(): IncomingItem[]
+  /** 临时工作区占用统计（空队列且上次已统计过时跳过，沿用旧值）。 */
+  workspaceBytes(): number
+  /** 现在（epoch ms）。 */
+  now(): number
+}
+
+/**
+ * 一次 GET 的读链决策（审计 §7.7 的核心：空队列走轻量返回，但**鉴权永远在调用点之前**）。
+ *
+ * 三条决策，按优先级：
+ *   1. **回前台立即读**：距上一次 GET 超过 RESUME_GAP_MS ⇒ 强制完整读（退避与缓存都不作数）。
+ *   2. **空队列轻量返回**：目录指纹与上次完整读一致，且还没到退避的下一拍 ⇒ 直接回上次的响应体，
+ *      不读一个文件、不做 TTL 清理、不遍历临时目录。
+ *   3. 其余 ⇒ 完整读链（TTL 清理 + readItems + 占用统计），随后按「是否空队列」推进退避。
+ *
+ * 为什么新条目不会因为退避而看不见：指纹每次 GET 都重新算（一次 readdir），新条目 = 新文件名 =
+ * 指纹变化 ⇒ 第 2 条不成立 ⇒ 立刻走完整读。退避只推迟「指纹没变时的重复完整读」。
+ *
+ * @param state - 上一次的读链状态。
+ * @param deps - 注入的真实读面。
+ * @returns 响应体与下一状态（不修改传入的 state）。
+ */
+export function nextQueueAnswer(state: ListState, deps: ListReadDeps): { body: QueueListBody; state: ListState } {
+  const now = deps.now()
+  // 回前台判据：间隔远超退避上限 ⇒ 页面离开过前台（或引擎刚被唤醒），这一拍必须如实读。
+  const resumed = state.lastListAt !== null && now - state.lastListAt > RESUME_GAP_MS
+  const fingerprint = deps.fingerprint()
+  const fingerprintHit = fingerprint !== null && state.fingerprint === fingerprint
+  if (!resumed && fingerprintHit && state.body !== null && now < state.backoff.nextFullReadAt) {
+    // 轻量返回：队列内容与上次完整读逐项一致，且退避尚未到点。
+    return {
+      body: state.body,
+      state: { ...state, lastListAt: now },
+    }
+  }
+  deps.purgeTtl()
+  const items = deps.items()
+  const publicItems = items.map(publicItem)
+  const pending = items.filter(needsSession).length
+  const empty = publicItems.length === 0
+  // 空队列且上次已统计过占用：沿用旧值（临时目录里没有新增来件）。
+  const bytes = empty && state.empty && state.body !== null ? state.body.bytes : deps.workspaceBytes()
+  const body: QueueListBody = { ok: true, pending, items: publicItems, bytes }
+  const backoff = advanceIdleBackoff(state.backoff, { fingerprint, empty }, now)
+  return {
+    body,
+    state: { fingerprint, body, empty, backoff, lastListAt: now },
+  }
+}
 /** Host session service minimum: a blank session is created without calling prompt or append. */
 interface HostSession {
   id: unknown
@@ -505,6 +700,8 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
   // Claim tickets are intentionally process-local. A browser/app restart drops them, which prevents
   // a previously unsent composer attachment from being reconstructed after restart.
   const draftLeases = new Map<string, DraftLease>()
+  /** 清单 GET 的读链状态（审计 §7.7：空队列轻量返回 + 连续空读退避 + 回前台立即读）。 */
+  let listState: ListState = initialListState()
   const leaseFor = (ticket: string): DraftLease | undefined => {
     const lease = draftLeases.get(ticket)
     if (lease !== undefined && lease.expiresAt <= Date.now()) {
@@ -551,25 +748,27 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
         const rejection = authorizeIncomingRoute(req, authOptions())
         if (rejection) { sendRejection(res, rejection); return }
         if (req.method === 'GET') {
-          // review C10：长驻进程内的 TTL 复核（未认领超时即墓碑化，避免无限积压与补建）。
-          try { purgeStaleUnclaimed('ttl') } catch { /* 清理失败不阻断统计 */ }
-          const items = readItems()
-          // R16：展示临时工作区占用（设置页清理入口用；dir 遍历不含 .sessions）
-          let bytes = 0
-          try {
-            for (const f of readdirSync(tmpWorkspace())) {
-              if (f === '.sessions') continue
-              const st = statSync(join(tmpWorkspace(), f))
-              if (st.isFile()) bytes += st.size
-            }
-          } catch { /* 统计失败不阻断 */ }
+          // 鉴权已在上方 first-line 完成（审计 §7.7 的安全边界：轻量返回不得绕过鉴权）。
+          const answer = nextQueueAnswer(listState, {
+            fingerprint: queueFingerprint,
+            purgeTtl: () => { try { purgeStaleUnclaimed('ttl') } catch { /* 清理失败不阻断 */ } },
+            items: readItems,
+            workspaceBytes: () => {
+              let total = 0
+              try {
+                for (const f of readdirSync(tmpWorkspace())) {
+                  if (f === '.sessions') continue
+                  const st = statSync(join(tmpWorkspace(), f))
+                  if (st.isFile()) total += st.size
+                }
+              } catch { /* 统计失败不阻断 */ }
+              return total
+            },
+            now: Date.now,
+          })
+          listState = answer.state
           res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-          res.end(JSON.stringify({
-            ok: true,
-            pending: items.filter(needsSession).length,
-            items: items.map(publicItem),
-            bytes,
-          }))
+          res.end(JSON.stringify(answer.body))
           return
         }
         if (req.method !== 'POST') {
