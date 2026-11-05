@@ -19,6 +19,24 @@ test('the actual host publishes bootstrap after its parent fiber activates', asy
   const hostBash = defineTool({ name: 'bash', description: 'Run shell command.', parameters: {},
     output: { schema: { type: 'object', additionalProperties: true } }, execute: async () => ({ host: true }) })
   tools.register(hostBash)
+  // 0.2.2-rc.1 起 ToolRuntime 必须显式装载 executor 才能 execute（上游新增
+  // ToolsService.setExecutor；未装载时 selectExecutor 抛 ToolExecutorUnavailableError）。
+  // 这条测试要验的是「本插件注册的工具能被真实 ToolRuntime 调通」，所以补一个最小
+  // executor 把调用路由回 registry 里注册的 ToolDefinition.execute——不是绕过判据，
+  // 而是补上 0.2.2 要求的那块装配；工具注册、schema、执行结果仍走真实链路。
+  ctx.effect(() => tools.setExecutor({
+    describe: visible => ({ schemas: visible.map(tool => ({ name: tool.name, description: tool.description, parameters: tool.parameters })),
+      knownNames: visible.map(tool => tool.name) }),
+    execute: async ({ calls }) => ({
+      results: await Promise.all(calls.map(async call => {
+        const definition = tools.get(call.name)
+        const value = await definition.execute(call.arguments ?? {}, { signal: new AbortController().signal })
+        return { callId: call.callId, result: { isError: false, value } }
+      })),
+      additionalContexts: [],
+      concluded: false,
+    }),
+  }))
   const fibers = []
   ctx.on('internal/plugin', fiber => { fibers.push(fiber) })
   ctx.provide('webServer', { register: () => () => {} })
