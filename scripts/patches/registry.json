@@ -600,6 +600,33 @@
       "provenance": "issue #873：终端 shell 列表里出现 cmd，选中即退出（No service specified / 退出码 20）",
       "marker": "not a shell",
       "test": "scripts/patches/tests/terminal-shell-candidates-T1.test.mjs"
+    },
+    {
+      "id": "custom-endpoint-discovery-960",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js",
+      "scope": "engine",
+      "summary": "自定义 provider 的「获取可用模型」改向用户填的 baseURL 取列表；端点失败明确报错，不再回落内置目录",
+      "provenance": "2026-11-05 issue #960 高优先级：实测 discoverModels 按 provider 短路返回内置目录（amazon-bedrock 193 条，与 issue 条数吻合），用户端点从未被请求",
+      "marker": "dsh-mobile custom endpoint discovery wins over catalog (#960)",
+      "test": "scripts/patches/tests/custom-provider-form-960.test.mjs"
+    },
+    {
+      "id": "custom-first-model-row-960",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js",
+      "scope": "engine",
+      "summary": "自定义 provider 卡片初态即渲染第一行模型输入框；占位空行不进「获取可用模型」的采纳结果",
+      "provenance": "2026-11-05 issue #960 中优先级：提示语「至少需要一个模型」先于任何输入出现，而模型目录区 visibleInputs=0，按 aria-label 填值落进零高隐藏模板",
+      "marker": "dsh-mobile custom first model row (#960)",
+      "test": "scripts/patches/tests/custom-provider-form-960.test.mjs"
+    },
+    {
+      "id": "model-catalog-section-labels-960",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js",
+      "scope": "engine",
+      "summary": "模型目录区 aria-label 带归属标识互不重名；隐藏的添加面板移出无障碍树",
+      "provenance": "2026-11-05 issue #960 中优先级：同屏三个 section[aria-label=\"模型目录\"]（高度 197/0/142），读屏与按 label 定位都无法区分",
+      "marker": "dsh-mobile model catalog section labels (#960)",
+      "test": "scripts/patches/tests/custom-provider-form-960.test.mjs"
     }
   ],
   "retired": [
