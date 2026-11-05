@@ -21,6 +21,14 @@ internal class RepairModelClient {
 
     /** 回复上限的天花板：防止高档位把 max_tokens 推到端点拒绝的数值。 */
     const val ANTHROPIC_MAX_TOKENS_CEILING = 32768
+
+  /**
+   * 一次模型请求（含一次重试）的总时长预算，issue #1370。
+   *
+   * 读超时本身是 180s；重试存在的意义只是「连接废了、请求没送达」，那种失败通常几十毫秒就回来。
+   * 所以预算取一个读超时的量级：第一次已经耗掉超过它就不再重试，杜绝 2×180s。
+   */
+  const val RETRY_TOTAL_BUDGET_MS = 180_000L
   }
 
   private val active = AtomicReference<HttpURLConnection?>(null)
@@ -419,26 +427,46 @@ internal class RepairModelClient {
    * A dropped keep-alive socket can fail before the server accepts the body.
    * Retry one idempotent, byte-identical model request; protocol errors and
    * HTTP responses are never retried because they already carry a diagnosis.
+   *
+   * issue #1370：**读超时不在可重试之列**。`readTimeout` 是 180s，把它算作 transient 会让
+   * 单次请求最坏 2×180s，而且网关在超时后可能已经收到并处理了第一次请求 —— 重发等于让模型
+   * 重复生成、用户重复计费。重试只留给「连上之前/连接被对端掐断」这类**没送达**的失败。
+   * 另外这道闸还有总时长上限：第一次已经花掉的时间计入预算，超预算就不再重试。
    */
   internal fun postWithOneTransientRetry(
     connection: RepairModelConnection,
     endpoint: String,
     body: String,
+    elapsedBudgetMs: Long = RETRY_TOTAL_BUDGET_MS,
+    elapsed: () -> Long = { 0L },
   ): String {
+    val started = System.nanoTime()
     try {
       return post(connection, endpoint, body)
     } catch (failure: RepairModelFailure) {
       if (!isTransientTransportFailure(failure.message.orEmpty())) throw failure
+      // 已经耗掉的时间 + 这次剩余预算：超了就不重试（防止 2×180s 的尾巴）
+      val spent = elapsed().coerceAtLeast((System.nanoTime() - started) / 1_000_000L)
+      if (spent >= elapsedBudgetMs) throw failure
     }
     return post(connection, endpoint, body)
   }
 
+  /**
+   * 哪些传输失败值得原样重发一次。
+   *
+   * 判据是**请求有没有可能已经送达**：
+   *   · 可重试：连接建立前的拒绝 / 对端在响应前掐断（keep-alive 复用最常见的形态）——
+   *     服务端要么没收到，要么明确没给结果；
+   *   · 不可重试：`timed out` / `timeout` —— 读超时意味着我们**已经发出去了**，只是没等到回音，
+   *     重发会让模型重复生成（issue #1370）。
+   */
   internal fun isTransientTransportFailure(message: String): Boolean {
     if (!message.startsWith("模型连接失败：")) return false
     val detail = message.lowercase()
     return listOf(
       "socket closed", "connection reset", "broken pipe", "unexpected end of stream",
-      "connection refused", "connection aborted", "eof", "timed out", "timeout",
+      "connection refused", "connection aborted", "eof",
     ).any { detail.contains(it) }
   }
 
