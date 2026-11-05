@@ -224,6 +224,14 @@ export class ReferenceMenuEnhancer {
     document.removeEventListener('click', this.onMenuClick, true)
     this.observer?.disconnect()
     this.observer = null
+    // issue #1527：在途标志不能带过 detach。整段插入是异步的（每项最长 1500+600ms），
+    // 在途时关面板再 re-attach（enhancer 实例被复用）会让 `if (this.busy) return` 一直挡住点击：
+    // 按钮看着可用、点下去什么都不发生，且没有任何提示。
+    // 代次 +1 让**旧插入链**的 finally 不再动新链的在途标志（否则旧链收尾会把新链的守卫抹掉，
+    // 双击又能起第三条链 —— #1404 的重复插入原样复发）。
+    this.generation += 1
+    this.busy = false
+    this.syncBusy()
     this.clearState()
   }
 
@@ -395,6 +403,15 @@ export class ReferenceMenuEnhancer {
    */
   private busy = false
 
+  /**
+   * 在途代次（issue #1527）：`detach` 时 +1。
+   *
+   * `busy` 是**实例级**状态，而 `addSelected` 的收尾是异步的：detach 之后旧链仍在跑，
+   * 它无条件把 `busy` 置回 false 就会抹掉 re-attach 之后新链的在途标志。代次让「收尾」
+   * 只对它自己那条链生效。
+   */
+  private generation = 0
+
   private statusText(base: string): string {
     return this.lastReport === '' ? base : base + ' · ' + this.lastReport
   }
@@ -402,13 +419,17 @@ export class ReferenceMenuEnhancer {
   /** Insert every checked candidate through upstream's settle-pick, one reference at a time. */
   private async addSelected(): Promise<void> {
     if (this.busy) return
+    const generation = this.generation
     this.busy = true
     this.syncBusy()
     try {
       await this.insertChecked()
     } finally {
-      this.busy = false
-      this.syncBusy()
+      // 只收自己那条链的尾：detach 之后重新起来的链由它自己收（issue #1527）。
+      if (this.generation === generation) {
+        this.busy = false
+        this.syncBusy()
+      }
     }
   }
 
