@@ -27,11 +27,13 @@ test('the actual host publishes bootstrap after its parent fiber activates', asy
   ctx.effect(() => tools.setExecutor({
     describe: visible => ({ schemas: visible.map(tool => ({ name: tool.name, description: tool.description, parameters: tool.parameters })),
       knownNames: visible.map(tool => tool.name) }),
-    execute: async ({ calls }) => ({
+    execute: async ({ calls, signal }) => ({
       results: await Promise.all(calls.map(async call => {
         const definition = tools.get(call.name)
-        const value = await definition.execute(call.arguments ?? {}, { signal: new AbortController().signal })
-        return { callId: call.callId, result: { isError: false, value } }
+        // ToolCallBlock.arguments 是模型产出的原始 JSON 字符串，executor 负责解析。
+        const args = typeof call.arguments === 'string' ? JSON.parse(call.arguments) : (call.arguments ?? {})
+        const value = await definition.execute(args, { signal })
+        return { callId: call.id, result: { isError: false, value } }
       })),
       additionalContexts: [],
       concluded: false,
@@ -53,7 +55,17 @@ test('the actual host publishes bootstrap after its parent fiber activates', asy
     const statusTool = tools.schemas().find(tool => tool.name === 'linux_environment_status')
     assert.ok(statusTool, 'status remains visible even when Debian is not installed')
     assert.equal(tools.get('linux_environment_status').output.schema.additionalProperties, false)
-    const status = await tools.execute({ name: 'linux_environment_status', arguments: {}, callId: 'linux-state-schema', signal: new AbortController().signal })
+    // 0.2.2-rc.1 的 tools.execute 入参从「单个调用」改成 ToolBatchInput：
+    //   { calls: ToolCallBlock[], signal }，返回 { results: [{ callId, result }], ... }。
+    // 旧写法 tools.execute({ name, arguments, callId, signal }) 在 0.2.2 下会让 executor 收到
+    // 没有 calls 的输入（TypeError: Cannot read properties of undefined (reading 'map')）。
+    const batch = await tools.execute({
+      // ToolCallBlock 的字段是 id（不是 callId），arguments 是模型产出的**原始 JSON 字符串**。
+      calls: [{ type: 'tool-call', id: 'linux-state-schema', name: 'linux_environment_status', arguments: '{}' }],
+      signal: new AbortController().signal,
+    })
+    assert.equal(batch.results.length, 1)
+    const status = batch.results[0].result
     assert.equal(status.isError, false, JSON.stringify(status))
     assert.equal(status.value.phase, 'not-installed')
     assert.deepEqual(Object.keys(status.value).sort(), ['engine', 'message', 'phase', 'ready'])
