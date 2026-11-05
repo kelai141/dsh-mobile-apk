@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { ENGINE_BASELINE, PINNED_PI_AI } from '../engine-versions.mjs'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { MIMO_PATCH_MARKER, patchDshThinkingProfile, patchPiAiMimoThinking, planMimoThinking } from '../mimo-thinking-toggle-056.mjs'
@@ -42,20 +43,23 @@ test('version preflight accepts only the pinned pair and rejects the previous or
   // 当前这一代必须通过：证明判据没有把 rc3 当成未知版本。
   assert.equal(planMimoThinking(read).length, 2)
   // 上一代与任何未知版本都必须判红，不能悄悄施加到别的产物上。
-  for (const [name, version] of [['dsh-llm-pi-ai', '0.2.1-rc.2'], ['dsh-llm-pi-ai', '0.2.2-rc.1'], ['dsh-llm-pi-ai', '0.2.1'], ['dsh-llm-pi-ai', '0.3.0-rc.3']]) {
+  // 拒绝清单必须相对真源表达：写死具体版本号会在抬 pin 后把「当前这一代」误列进拒绝集，
+  // 于是测试变成「既要求通过又要求拒绝」的自相矛盾（0.2.2-rc.1 追版实锤）。
+  const previous = ENGINE_BASELINE.replace(/-rc\.\d+$/, (m) => '-rc.' + (Number(m.slice(4)) - 1))
+  for (const [name, version] of [['dsh-llm-pi-ai', previous], ['dsh-llm-pi-ai', ENGINE_BASELINE + '-unknown'], ['dsh-llm-pi-ai', '0.0.0'], ['dsh-llm-pi-ai', '99.0.0-rc.9']]) {
     const mutated = { ...files }
     const file = 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/' + name + '/package.json'
     const manifest = JSON.parse(files[file])
     mutated[file] = JSON.stringify({ ...manifest, version })
     assert.throws(() => planMimoThinking(target => mutated[target] ?? (() => { throw new Error('unexpected read: ' + target) })()),
-      /requires dsh-llm-pi-ai@0\.2\.1-rc\.3 and pi-ai@1\.1\.0/, name + '@' + version)
+      new RegExp('requires dsh-llm-pi-ai@' + ENGINE_BASELINE.replaceAll('.', '\\\.') + ' and pi-ai@' + PINNED_PI_AI.replaceAll('.', '\\\.')), name + '@' + version)
   }
   // pi-ai 侧的钉住值同样不可漂移。
   const piFile = 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/package.json'
   const piMutated = { ...files }
   piMutated[piFile] = JSON.stringify({ ...JSON.parse(piManifest), version: '1.2.0' })
   assert.throws(() => planMimoThinking(target => piMutated[target] ?? (() => { throw new Error('unexpected read: ' + target) })()),
-    /requires dsh-llm-pi-ai@0\.2\.1-rc\.3 and pi-ai@1\.1\.0/)
+    new RegExp('requires dsh-llm-pi-ai@' + ENGINE_BASELINE.replaceAll('.', '\\\.') + ' and pi-ai@' + PINNED_PI_AI.replaceAll('.', '\\\.')))
 })
 
 test('Completions serializer sends only the boolean thinking.type for MiMo', () => {

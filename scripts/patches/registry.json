@@ -626,5 +626,18 @@
       "reason": "上游 0.2.2-rc.1 的 client-modules flush 已是「先建 entriesByName 表、再逐项 processOne(entryName, entries, onError)」：一批变更只扫一次 loader.entries()，正是 C4 要达成的目标态。旧锚点 processOne(entryName, onError) 与新签名不同且行为已具备，继续保留会重复改造。typert 侧的同类补丁（typert-registry-scan-C4）仍在，未受影响。",
       "supersededByContract": "scripts/patches/tests/client-registry-scan-C4-retired.test.mjs"
     }
+  ],
+  "fixtureCompanions": [
+    {
+      "package": "@deepseek-ai/dsh-compaction-image-offload",
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "patchIds": [
+        "image-history-batch-offload-I1"
+      ],
+      "reason": "I1 的消费方：offloadOldestImages 只认 IMAGE_OFFLOAD_REQUIRED_CODE，"
+    }
   ]
 }

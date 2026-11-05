@@ -24,7 +24,7 @@ import { ENV_MARKER as PTC_ENV_MARKER, LAUNCH_MARKER as PTC_LAUNCH_MARKER, asser
 import { PI_STREAMING_FILES, planPiStreaming } from './pi-upstream-streaming-020.mjs'
 import { MIMO_PI_FILE, planMimoThinking } from './mimo-thinking-toggle-056.mjs'
 import { REASONING_FILES, planReasoning } from './data/reasoning-envelope-1304.mjs'
-import { GATEWAY_CLIENT_MARKER, TYPERT_SCAN_MARKER, planTypertRegistryScan } from './data/registry-scan-c4.mjs'
+import { TYPERT_SCAN_MARKER, planTypertRegistryScan } from './data/registry-scan-c4.mjs'
 import { CLIENT_INDEX_LOADER_BARRIER_MARKER, planClientIndexLoaderBarrier } from './data/client-index-loader-barrier.mjs'
 import { resolveEnginePatchFile } from './resolve-engine-patch-target.mjs'
 import { hasSidebarReorder, patchSidebarReorder } from './data/sidebar-bubble-reorder.mjs'
@@ -2884,7 +2884,7 @@ const MAP_OLD = [
         "\t\t\t * disposing the previous fiber's effects, so a restart re-registers while the old resolver",
         '\t\t\t * is still installed. Replace in the single slot instead of refusing; the identity-guarded',
         "\t\t\t * disposer below keeps the previous fiber's disposer from clearing this registration. */",
-        '\t\t\tthis.agentResolver = resolve;',
+        '\t\t\tthis.agentResolution.resolver = resolve;',
       ].join('\n')
       if (!s.includes(OLD)) {
         throw new Error('file-upload 锚点未命中：registerAgentResolver 的 already-registered 守卫——引擎升级后请人工核对 dsh-client-file-upload 构建产物')

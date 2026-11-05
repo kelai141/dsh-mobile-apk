@@ -45,7 +45,7 @@ test('真实固定版本三包预检、幂等与语法检查；任一版本漂�
     const checked = spawnSync(process.execPath, ['--check', '--input-type=module'], { input: after, encoding: 'utf8' })
     assert.equal(checked.status, 0, checked.stderr)
   }
-  assert.throws(() => planRequestPreview(file => file.endsWith('package.json') ? files[file].replace(ENGINE_BASELINE, '9.9.9') : files[file]), /requires pinned/)
+  assert.throws(() => planRequestPreview(file => file.endsWith('package.json') ? files[file].replace(ENGINE_BASELINE, '9.9.9') : files[file]), /requires (?:pinned|0\.2\.2-rc\.1)/)
   assert.throws(() => patchRequestPreview(files[PREVIEW_LOCAL].replace('const REQUEST_IMAGE_TRANSFORM_VERSION', 'const CHANGED'), 'local'), /anchor changed/)
 })
 

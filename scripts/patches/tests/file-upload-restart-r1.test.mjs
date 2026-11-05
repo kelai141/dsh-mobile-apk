@@ -96,40 +96,40 @@ try {
 // ② 静态面
 check('锚点命中：守卫已移除', !patched.includes('Agent resolver is already registered'))
 check('补丁标记在场', patched.includes('dsh-mobile file-upload resolver replace (R1)'))
-check('未引入第二个槽', (patched.match(/this\.agentResolver = resolve/g) || []).length === 1)
+check('未引入第二个槽', (patched.match(/this\.agentResolution\.resolver = resolve/g) || []).length === 1)
 check('disposer 保留身份判据',
-  patched.includes('if (this.agentResolver === resolve) this.agentResolver = void 0;'))
+  patched.includes('if (this.agentResolution.resolver === resolve) this.agentResolution.resolver = void 0;'))
 
 // ③ 行为面：把打过补丁的成员逐字抽出，装进最小宿主跑重启语义
 const member = extractFunction(patched, 'registerAgentResolver(resolve) {')
-const factory = new Function('return { agentResolver: void 0, ' + member + ' };')
+const factory = new Function('return { agentResolution: { resolver: void 0 }, ' + member + ' };')
 
 {
   const svc = factory()
   const first = () => 'first'
   const second = () => 'second'
   const disposeFirst = svc.registerAgentResolver(first)
-  check('首次注册写入槽', svc.agentResolver === first)
+  check('首次注册写入槽', svc.agentResolution.resolver === first)
 
   let threw = null
   let disposeSecond = null
   try { disposeSecond = svc.registerAgentResolver(second) } catch (error) { threw = error }
   check('重启（同槽重注册）不再抛错', threw === null, threw && threw.message)
-  check('同槽覆盖：槽指向新 resolver', svc.agentResolver === second)
+  check('同槽覆盖：槽指向新 resolver', svc.agentResolution.resolver === second)
 
   // cordis 的顺序：新实例先注册，旧 fiber 的 disposer 随后才跑 ⇒ 它绝不能清掉新注册。
   if (disposeFirst) disposeFirst()
-  check('旧 disposer 不误清新注册', svc.agentResolver === second)
+  check('旧 disposer 不误清新注册', svc.agentResolution.resolver === second)
 
   if (disposeSecond) disposeSecond()
-  check('新 disposer 仍能清槽', svc.agentResolver === undefined)
+  check('新 disposer 仍能清槽', svc.agentResolution.resolver === undefined)
 }
 
 // ③ 反证：把**补丁前**的同一成员抽出跑一遍——它必须在重注册时抛错，
 // 否则「不再抛错」这条断言对任何实现都成立。
 {
   const original = extractFunction(fixtureSource, 'registerAgentResolver(resolve) {')
-  const bareFactory = new Function('return { agentResolver: void 0, ' + original + ' };')
+  const bareFactory = new Function('return { agentResolution: { resolver: void 0 }, ' + original + ' };')
   const svc = bareFactory()
   svc.registerAgentResolver(() => 'first')
   let threw = null
