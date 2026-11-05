@@ -2435,6 +2435,7 @@ app/src/main/java/com/dsharnessmobile/shell/BrowserHostNavigationPolicy.kt
 app/src/main/java/com/dsharnessmobile/shell/BrowserOverlayPolicy.kt
 app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt
 app/src/main/java/com/dsharnessmobile/shell/OverlayPanel.kt
+app/src/main/java/com/dsharnessmobile/shell/OverlayPanelBackKey.kt
 app/src/main/java/com/dsharnessmobile/shell/OverlayController.kt
 app/src/main/java/com/dsharnessmobile/shell/OverlayReport.kt
 app/src/main/java/com/dsharnessmobile/shell/OverlayLiveFeed.kt

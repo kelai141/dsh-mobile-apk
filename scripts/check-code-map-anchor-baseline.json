@@ -1592,7 +1592,7 @@
       "}"
     ],
     "OverlayPanel.kt:421": [
-      "val unit = LinearLayout(svc).apply {"
+      "val unit = BackKeyPanelLayout(svc, { svc.hidePanel() }).apply {"
     ],
     "OverlayPanel.kt:487": [
       "/** 块H-A1：完成态常驻文案（并入 overlay_display prefs，与上述两个模板同族，可覆写）。"
