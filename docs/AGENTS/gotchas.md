@@ -3087,3 +3087,26 @@ The term '//' is not recognized as a name of a cmdlet, function, script file, or
 
     复验：`node scripts/check-retired-plugins.mjs`（0）与 `--self-test`（正/负控都符合预期）；
     反证做法 = 往 `plugin-dirs.json` 的 dirs 里塞回该包，门禁必须红。
+380. **`git rebase` 会静默丢掉执行地图的改动——地图必须在重基后按内容重做，delta 重铺不可重放**（2026-11-04，`#1548` 实锤）
+
+    现象：本地 `check-code-map` 绿；rebase 到新 main 之后同一个分支突然 30 项 `bad-anchor-content`，而且不是差一行——**指到了另一行**。
+    真因两层：① rebase 重放提交时，`docs/AGENTS/EXECUTION-MAP.md` 的冲突块取了 upstream（main）侧，我原先算好的锚点位移被**静默丢弃**，
+    工作区只剩「部分更新」的地图；② 我随后的修复又是按 delta 推的，而 delta 是相对**旧基**算的，基一变全错。
+    纪律：任何 rebase 之后，**地图一律按内容重钉**（找出该内容当前所在行），不要复用重基前算出的位移量；
+    判据是 `check-code-map` + `check-code-map-anchors.test.mjs` 双绿，不是只看前者。
+
+381. **CI 验的是 PR 的 merge commit，不是分支 head——「本地全绿、CI 全红」的必然来源**（2026-11-04，`#1548`/`#1537` 实锤）
+
+    现象：分支 head 上 `check-code-map` PASSED，CI 却红；`check-code-map-anchors.test.mjs` 的四条变异反证全部以 `-> exit=1` 失败。
+    读法：那个自测把仓库（含地图与基线）拷进临时副本再跑门禁；`-> exit=1` 表示**副本里门禁本来就已经红**，不是「变异没被抓到」。
+    真因：GitHub 在 `refs/pull/<n>/merge` 上跑 CI，即 **main 与分支的合并结果**。分支落后 main 时，合并会把 main 的地图与我的地图拼在一起，
+    产生 head 上没有、合并后才有的一堆 `bad-anchor-content` / `uncovered`。
+    纪律：推之前本地必须 `git merge origin/main`（或等价地用合并结果）再跑门禁；只验 head 等于没验。
+    复现方式：`git worktree add /tmp/m --detach origin/main && cd /tmp/m && git merge <branch> && node scripts/check-code-map.mjs`。
+
+382. **脚本往 `#expect` 里写值时，正则必须一直吃到反引号为止，不能停在空格**（2026-11-04，`#1548` 实锤，与 376 同族）
+
+    现象：重钉后门禁报 ``Expected "…9#expect=+ warn + webHint + detail.hint," ``——期望值尾部粘着别的 token。
+    真因：`#expect` 值是百分号编码的（本不含空格），但历史上有手工写成裸文本的条目；脚本用 `[^` ]*`（排除空格）匹配，
+    遇到裸文本就只吃掉第一段，剩下的被当成内容的一部分。
+    修法：匹配用 `#expect=[^`]*`（到反引号为止），替换时整段重建；写回的值一律 `encodeURIComponent`。
