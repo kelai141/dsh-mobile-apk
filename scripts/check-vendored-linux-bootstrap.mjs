@@ -4,9 +4,8 @@
  *
  * Why this exists: the experimental internal Linux bootstrap is vendored source, not a sibling
  * sub-repo, so it is not covered by `check-patch-mirror.mjs` (that gate compares two checkouts) and
- * deliberately sits OUTSIDE the injection set (`scripts/plugin-dirs.json`, `scripts/contract.json`,
- * `scripts/profile-web.cordis.patch.yml`) — see docs/AGENTS/modules.md. Without a stop of its own,
- * an edit to the vendored tree would be invisible: nothing else reads those files.
+ * is included in the injection set and loaded dynamically by android-linux-env.
+ * This additional check binds that injected code to its reviewed source bytes.
  *
  * What it asserts:
  *   1. the vendored file set is exactly the upstream package minus `test/`, plus the two files we add;
@@ -34,17 +33,20 @@ const PACKAGE_DIR = join(ROOT, 'plugins', 'dsh-linux-bootstrap')
 const UPSTREAM_PACKAGE = 'packages/linux-bootstrap'
 
 /**
- * Upstream-faithful files (the vendoring contract's 10 files minus package.json, which we adapt).
+ * Upstream-faithful files (upstream source + client minus package.json, which we adapt).
  * Digests are over LF-normalized text: `core.autocrlf` would otherwise make the same commit hash
  * differently on Windows and Linux.
  */
 const MANIFEST = {
-  'README.md': 'e09da4489cfe3007387e5ced6e3810149c9eb7853257dd122036f20b00fe7656',
-  'client/index.js': '747de10f2ce2545ed9b8b63f0261a5fc656b0b9417af5895536731781daaf072',
+  'README.md': '9809a0991a5314ae7baafdae3a53147099b1dbc66100060519d157512732b8bb',
+  'client/api.js': 'e53e3a05f6c9922a9186101a88430fea231880356045289439434e61089ccc38',
+  'client/assets.js': '9cbb67716f7d0b7d433d5e3a4d324b16f5121fd7eea64f77f71a4cc02708bc5c',
+  'client/i18n.js': '77077f806bfd3f0124a04024de7614d12524474366fcae58ea1dcac3da287a50',
+  'client/index.js': '5c53f8eddad50e1092ce7f46c5efb19776f5bf0f9310e50c5c0df8299e60f5aa',
   'src/asset-bundle.js': '2520d8fec29dbaa7da1d6e602ff313ffed8ae1f124e7a94f6f4276f4474dd622',
   'src/github.js': '8bf1bdac19fb17dc866087342b55714661e762124953bb6f697a4c87f04e70c3',
-  'src/index.js': '33da07d3a547ec3fec8f1f73eb09eea3431c0728e2d914bddb9cf4f74744f37e',
-  'src/manifest.js': 'a9b8512e24dfbb1b225c2bc260d3d0496b7e8834ef975d17c69355baf1911067',
+  'src/index.js': '74fac58fb5f823ac89a2fb71f88181849fda587fa08bda88495dc477bedd8b53',
+  'src/manifest.js': '45b0655c3702bd236090776e3d1b276416ab5a643a2ed58b47b4343bf5c8b86c',
   'src/routes.js': '678391176bcd81ba6cbbbab293a4731d07e37e99c51178d7605821eac6aa5bb9',
   'src/status.js': '494238e39094999e44105d1c56ca562f88ce3e65146bd3070806d4c82dd98f7b',
   'src/version.js': 'd0131f71b60ff38183070ddd3ef7142a98ae8a2cb54e2a57b725fa2e0d6b3636',

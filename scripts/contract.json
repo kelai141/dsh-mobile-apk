@@ -1,14 +1,14 @@
 {
-  "baseline": "0.2.1-rc.2",
+  "baseline": "0.2.1-rc.3",
   "cordis": "4.0.5",
   "schemastery": "3.18.5",
   "upstreamRepo": ".deploy-tmp/deepseek-harness",
   "upstream": {
     "$comment": "0.14.8 source-only target identity. Inventories were read from the official SHA; upstreamRepo and adaptationSourceRepo both select the disposable pinned build checkout. dsh/ and .deploy-tmp/upstream-020rc2 remain readonly historical inputs. No build, patch validation or runtime acceptance is implied.",
-    "tag": "dsh-v0.2.1-rc.2",
-    "describe": "dsh-v0.2.1-rc.2",
-    "commit": "687f282e8625c6b8d11ff58211a90524be2e4317",
-    "rootVersion": "0.2.1-rc.2",
+    "tag": "dsh-v0.2.1-rc.3",
+    "describe": "dsh-v0.2.1-rc.3",
+    "commit": "1f81c047fc48fa190a683e469daa699857e9afe8",
+    "rootVersion": "0.2.1-rc.3",
     "packageManager": "pnpm@11.28.5",
     "enginesNode": "^22.19.0 || >=24.0.0",
     "adaptationSourceRepo": ".deploy-tmp/deepseek-harness"
@@ -130,6 +130,13 @@
       "id": "session-delete",
       "pkg": "@dsh-android/dsh-session-delete",
       "repo": "plugins/dsh-session-delete"
+    },
+    {
+      "id": "linux-bootstrap",
+      "pkg": "@dsh-android/linux-bootstrap",
+      "repo": "plugins/dsh-linux-bootstrap",
+      "dynamicOnly": true,
+      "why": "随快照注入（loader 需要能 import '@dsh-android/linux-bootstrap'）但不进 profile patch：apply() 需要函数型 config（linuxAssetIO），YAML 装配表达不了，只由宿主在用户显式启用时动态加载。登记进 inserted 是版本钉覆盖面要求；check-patch-mounts / check-contract 按 scripts/plugin-dirs.json 的 dynamicOnly 同一登记豁免挂载判定，其余包照旧判红。"
     }
   ],
   "symbols": [

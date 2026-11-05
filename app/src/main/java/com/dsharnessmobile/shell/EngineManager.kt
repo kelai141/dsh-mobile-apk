@@ -2421,6 +2421,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
       // 引擎侧插件（如 android-linux-env 导出的环境配方）一律读这两个环境变量，
       // 不许再出现「界面显示 0.13.x 而插件里写 0.13.0」这类内部口径分裂。
       "DSH_APP_VERSION" to BuildConfig.VERSION_NAME,
+      "DSH_DEBUG_BUILD" to if (BuildConfig.DEBUG) "1" else "0",
       "DSH_APP_VERSION_CODE" to BuildConfig.VERSION_CODE.toString(),
       // Directory-picker endpoint auth token (validated by the web-compat plugin via x-dsh-pick-token).
       "DSH_PICK_TOKEN" to (pickToken ?: ""),

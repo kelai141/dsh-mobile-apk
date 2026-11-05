@@ -1,13 +1,21 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fetchLatestManifest } from './github.js'
-import { findRuntime, RUNTIME_ENTRY, RUNTIME_PACKAGE_NAME, validateManifestShape } from './manifest.js'
+import {
+  defaultRuntimeIdForArch,
+  resolveHostArchitecture,
+  RUNTIME_ENTRY,
+  RUNTIME_PACKAGE_NAME,
+  selectRuntimeForArch,
+  validateManifestShape,
+} from './manifest.js'
 import { installVerifiedPluginBundle } from './asset-bundle.js'
 import { compareVersions, parseVersion } from './version.js'
 
 export const name = 'dsh-linux-bootstrap'
 export const inject = ['linuxPluginHost']
+/** @deprecated Historical ARM64 ID; use defaultRuntimeIdForArch for host selection. */
 export const DEFAULT_RUNTIME_ID = 'debian-minimal'
 export const BOOTSTRAP_VERSION = '0.5.0'
 export const STATE_FILE_NAME = 'linux-bootstrap-state.json'
@@ -54,17 +62,17 @@ function initialState(autoUpdate) {
 /**
  * Runtime choices offered by the newest manifest this service has seen.
  *
- * Debian minimal is the default and the only one published today; the list is
- * data-driven so additional runtimes appear in the settings selector as soon as
- * the release manifest carries them.
+ * The list is data-driven, but only runtimes for this host's architecture are
+ * offered: selecting an x64 runtime on an arm64 device is never a valid install.
  *
  * @param {object} state - Persisted bootstrap state.
+ * @param {'arm64'|'x64'} arch - Architecture of this host.
  * @returns {Array<{id: string, label: string, architecture: string, installed: boolean}>} Choices.
  */
-function availableRuntimes(state) {
+function availableRuntimes(state, arch) {
   const manifest = state.availableManifest ?? state.pinnedManifest
   if (!Array.isArray(manifest?.runtimes)) return []
-  return manifest.runtimes.map((runtime) => ({
+  return manifest.runtimes.filter((runtime) => runtime.architecture === arch).map((runtime) => ({
     id: runtime.id,
     label: runtime.label,
     architecture: runtime.architecture,
@@ -72,9 +80,8 @@ function availableRuntimes(state) {
   }))
 }
 
-function statusShape(state, mobileVersion, operation, packageVersion) {
+function statusShape(state, mobileVersion, operation, packageVersion, arch) {
   return Object.freeze({
-    experimental: true,
     experimental: true,
     enabledByDefault: false,
     sandboxed: false,
@@ -92,9 +99,11 @@ function statusShape(state, mobileVersion, operation, packageVersion) {
     updateBlocked: state.updateBlocked,
     busy: operation !== 'idle',
     operation,
+    runtimeId: state.runtimeId,
     runtime: state.runtime ?? (state.runtimeId ? { id: state.runtimeId } : null),
-    runtimes: availableRuntimes(state),
-    defaultRuntimeId: DEFAULT_RUNTIME_ID,
+    runtimes: availableRuntimes(state, arch),
+    defaultRuntimeId: defaultRuntimeIdForArch(arch),
+    architecture: arch,
     plugins: {
       bootstrap: { version: packageVersion, builtIn: true },
       runtime: state.installedLinuxVersion ? { version: state.installedLinuxVersion, package: RUNTIME_PACKAGE_NAME, directory: state.pluginDirectory } : null,
@@ -160,8 +169,12 @@ export function createMobileBootstrap(options = {}) {
     // Where the host stages a bundle it fetched itself (D-015): `<root>/<sha256>/`.
     // A directory that exists but does not match the manifest is an error, never a
     // cache miss; `requireStagedBundle` additionally forbids falling back to a
-    // download when a host owns byte fetching.
-    hostStagingRoot = options.hostStagingRoot ?? (dataDir ? path.join(dataDir, 'staging') : undefined),
+    // download when a host owns byte fetching. Only `undefined` selects the
+    // default: an explicit `null` (or `false`) disables the path, so a host can
+    // make its own IO the single owner of "what is staged".
+    hostStagingRoot = options.hostStagingRoot === undefined
+      ? (dataDir ? path.join(dataDir, 'staging') : undefined)
+      : options.hostStagingRoot,
     requireStagedBundle = options.requireStagedBundle === true,
     runtimePluginConfig = {},
     autoUpdateEnabled,
@@ -170,6 +183,7 @@ export function createMobileBootstrap(options = {}) {
     arch,
   } = options
 
+  const hostArch = resolveHostArchitecture(arch)
   if (typeof dataDir !== 'string' || !dataDir) throw new TypeError('dataDir is required')
   if (typeof releaseUrl !== 'string' || !releaseUrl) throw new TypeError('releaseUrl is required')
   if (!pluginHost || typeof pluginHost.install !== 'function' || typeof pluginHost.uninstall !== 'function') throw new TypeError('linuxPluginHost.install and uninstall are required')
@@ -190,12 +204,16 @@ export function createMobileBootstrap(options = {}) {
   let operation = 'idle'
   let manager = initialManager ?? null
   let installedPlugin = false
+  // Set when this load re-activated a persisted installation. A host that still
+  // reports `active: false` right after a successful install is lagging, not a
+  // user removal, so the opt-in must not be cleared on that basis.
+  let restoredThisLoad = false
   let lastStatus
   let ready
   let tail = Promise.resolve()
   const listeners = new Set()
 
-  const statusValue = () => statusShape(state, mobileVersion, operation, options.version ?? BOOTSTRAP_VERSION)
+  const statusValue = () => statusShape(state, mobileVersion, operation, options.version ?? BOOTSTRAP_VERSION, hostArch)
   const emit = () => {
     lastStatus = statusValue()
     for (const listener of listeners) {
@@ -283,6 +301,7 @@ export function createMobileBootstrap(options = {}) {
     if (!state.installedLinuxVersion) return
     const host = await hostInjection()
     if (!host) return
+    if (restoredThisLoad && host.injected && !host.active) return
     state.enabled = host.injected && host.active
     state.injectionActivated = state.enabled
     await save()
@@ -292,14 +311,89 @@ export function createMobileBootstrap(options = {}) {
     ...runtimePluginConfig,
     dataDir: path.join(root, 'runtime'),
     cacheDir: cacheRoot,
-    arch,
+    arch: hostArch,
     manifest: publicManifest(manifest),
     runtimeId,
   })
 
+  /** A persisted activation is only restorable from a directory the host still owns. */
+  const isInsidePluginRoot = (directory) => {
+    if (typeof directory !== 'string' || directory === '') return false
+    const relative = path.relative(pluginRoot, path.resolve(directory))
+    return relative !== '' && relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative)
+  }
+
+  const entryIsPresent = async (directory) => {
+    try {
+      return (await stat(path.join(directory, RUNTIME_ENTRY))).isFile()
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Re-activate an installation the user already confirmed.
+   *
+   * This runs **before** `synchronizeInjectionState()`: that function derives
+   * `enabled/injectionActivated` from `host.isInjected(...).active`, and a host
+   * that has just started has not loaded the runtime plugin yet, so it reports
+   * `active: false` and the persisted opt-in would be cleared on every cold
+   * start (tools then never come back).
+   *
+   * Three rules keep the restore honest:
+   *   1. only when the user had persisted `enabled && injectionActivated`;
+   *   2. only when the host still reports the plugin as injected (a manual
+   *      removal is never resurrected, and nothing is downloaded here);
+   *   3. only from a directory inside our plugin root with its entry present;
+   *      a missing file disables the record instead of re-fetching it.
+   */
+  async function restoreActivation() {
+    if (!state.installedLinuxVersion || !state.enabled || !state.injectionActivated) return
+    if (!state.pluginDirectory) return
+    const host = await hostInjection()
+    if (!host || !host.injected) return
+    if (!isInsidePluginRoot(state.pluginDirectory) || !(await entryIsPresent(state.pluginDirectory))) {
+      // The user's own removal or an incomplete tree: fail closed, never re-download.
+      state.enabled = false
+      state.injectionActivated = false
+      state.lastError = 'The installed Linux runtime plugin files are missing; an explicit install is required'
+      await save()
+      return
+    }
+    const config = pluginConfig(state.pinnedManifest, state.runtimeId)
+    try {
+      const hostResult = await pluginHost.install({
+        directory: state.pluginDirectory,
+        entry: RUNTIME_ENTRY,
+        config,
+        enable: true,
+      })
+      installedPlugin = true
+      const restored = await resolveManager({ hostResult, directory: state.pluginDirectory, config })
+      state.runtime = typeof restored.status === 'function' ? await restored.status() : state.runtime
+      restoredThisLoad = true
+      // `status()` reads active.json; the runtime plugin registers its tools during
+      // activation only while that record is healthy, so surface an unhealthy
+      // restore instead of reporting a working environment.
+      if (state.runtime && state.runtime.healthy === false) {
+        state.lastError = 'Restored Linux runtime is unhealthy: ' + (state.runtime.reason ?? 'unknown reason')
+      } else {
+        state.lastError = null
+      }
+      await save()
+    } catch (error) {
+      // Activation failure leaves the record installed but inactive: no download,
+      // no silent revival, and the reason stays visible in status().
+      state.enabled = false
+      state.injectionActivated = false
+      state.lastError = safeError(error)
+      await save()
+    }
+  }
+
   async function installRuntime({ manifest, runtimeId, reinstall = false, automatic = false, activate = false }) {
-    const runtime = findRuntime(manifest, runtimeId)
-    if (!runtime) throw new Error(`Unknown runtime id: ${runtimeId}`)
+    const runtime = selectRuntimeForArch(manifest, runtimeId, hostArch)
+    runtimeId = runtime.id
     await updateMobileVersion()
     ensureMobileCompatible(manifest, mobileVersion)
     if (state.installedLinuxVersion) {
@@ -315,6 +409,8 @@ export function createMobileBootstrap(options = {}) {
     let hostResult
     let hostInstalled = false
     let resolvedManager = manager
+    let managerBeforeActivation = manager
+    let stateBeforeActivation = null
     const config = pluginConfig(manifest, runtimeId)
     try {
       result = await installVerifiedPluginBundle({
@@ -342,6 +438,12 @@ export function createMobileBootstrap(options = {}) {
         }
       }
       if (!enable) throw new Error('Runtime plugin activation requires explicit confirmation')
+      // Once the host has loaded the plugin, a later failure (manager
+      // provisioning, health status, or persistence) rolls the host back.
+      // Keep the in-memory view at the pre-activation value as well, so a
+      // rolled-back install is not reported as installed until the next load.
+      stateBeforeActivation = { ...state }
+      managerBeforeActivation = manager
       hostResult = await pluginHost.install({ directory: result.path, entry: RUNTIME_ENTRY, config, enable })
       hostInstalled = true
       installedPlugin = true
@@ -374,6 +476,10 @@ export function createMobileBootstrap(options = {}) {
           error.rollbackError = safeError(rollbackError)
         }
       }
+      if (stateBeforeActivation) {
+        Object.assign(state, stateBeforeActivation)
+        manager = managerBeforeActivation
+      }
       state.lastError = safeError(error)
       emit()
       throw error
@@ -402,7 +508,7 @@ export function createMobileBootstrap(options = {}) {
       if (automatic) {
         state.lastAutomaticCheckMobileVersion = mobileVersion
         await save()
-        if (state.updateAvailable && state.enabled && state.injectionActivated) await installRuntime({ manifest, runtimeId: state.runtimeId ?? DEFAULT_RUNTIME_ID, automatic: true })
+        if (state.updateAvailable && state.enabled && state.injectionActivated) await installRuntime({ manifest, runtimeId: state.runtimeId ?? defaultRuntimeIdForArch(hostArch), automatic: true })
       } else {
         await save()
       }
@@ -435,6 +541,8 @@ export function createMobileBootstrap(options = {}) {
       await save()
     }
     await updateMobileVersion()
+    // Restore before the host view is reconciled (see restoreActivation).
+    await restoreActivation()
     await synchronizeInjectionState()
   }
 
@@ -471,7 +579,7 @@ export function createMobileBootstrap(options = {}) {
     },
     /** Re-read the host's injection view (used after the user changes the injection directory). */
     syncInjectionState: () => ready.then(() => serial(async () => { await synchronizeInjectionState(); return emit() })),
-    install: ({ runtimeId = DEFAULT_RUNTIME_ID, confirmed = false, activate = false } = {}) => ready.then(() => serial(async () => {
+    install: ({ runtimeId, confirmed = false, activate = false } = {}) => ready.then(() => serial(async () => {
       if (confirmed !== true || activate !== true) throw new Error('install requires confirmed:true and activate:true')
       const manifest = await fetchManifest()
       return installRuntime({ manifest, runtimeId, activate: true })
@@ -480,7 +588,7 @@ export function createMobileBootstrap(options = {}) {
       if (confirmed !== true || activate !== true) throw new Error('reinstall requires confirmed:true and activate:true')
       if (!state.pinnedManifest || !state.installedLinuxVersion) throw new Error('There is no installed Linux runtime to reinstall')
       const manifest = validateManifestShape(state.pinnedManifest)
-      return installRuntime({ manifest, runtimeId: state.runtimeId ?? DEFAULT_RUNTIME_ID, reinstall: true, activate: true })
+      return installRuntime({ manifest, runtimeId: state.runtimeId ?? defaultRuntimeIdForArch(hostArch), reinstall: true, activate: true })
     })),
     uninstall: ({ confirmed = false } = {}) => ready.then(() => serial(async () => {
       if (confirmed !== true) throw new Error('uninstall requires confirmed:true')
@@ -540,7 +648,7 @@ export const createBootstrap = createMobileBootstrap
 
 export function apply(ctx, config = {}) {
   const pluginHost = config.pluginHost ?? ctx.linuxPluginHost
-  const filesDir = config.filesDir ?? ctx.filesDir
+  const filesDir = config.filesDir ?? (typeof ctx.get === 'function' ? ctx.get('filesDir') : ctx.filesDir)
   const dataDir = config.dataDir ?? (filesDir ? path.join(filesDir, 'linux-environment') : null)
   if (!dataDir) throw new TypeError('dataDir or ctx.filesDir is required')
   const service = createMobileBootstrap({ ...config, dataDir, pluginHost })
@@ -551,5 +659,15 @@ export function apply(ctx, config = {}) {
 
 export { installVerifiedPluginBundle } from './asset-bundle.js'
 export { compareVersions, parseVersion } from './version.js'
-export { validateManifestShape, findRuntime, RUNTIME_ENTRY, RUNTIME_PACKAGE_NAME } from './manifest.js'
+export {
+  validateManifestShape,
+  findRuntime,
+  selectRuntimeForArch,
+  defaultRuntimeIdForArch,
+  resolveHostArchitecture,
+  DEFAULT_RUNTIME_IDS,
+  SUPPORTED_ARCHITECTURES,
+  RUNTIME_ENTRY,
+  RUNTIME_PACKAGE_NAME,
+} from './manifest.js'
 export { LINUX_ENVIRONMENT_ROUTES, createRouteHandlers } from './routes.js'

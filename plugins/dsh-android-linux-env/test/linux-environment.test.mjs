@@ -17,8 +17,8 @@ function makeBootstrap(overrides = {}) {
     status: async () => ({ ...state }),
     checkForUpdates: async options => { calls.push(['check', options]); state.latestReleaseVersion = '1.2.0'; state.updateAvailable = true },
     install: async options => { calls.push(['install', options]); state.installedLinuxVersion = '1.2.0' },
-    reinstall: async () => { calls.push(['reinstall']) },
-    uninstall: async () => { calls.push(['uninstall']); state.installedLinuxVersion = null },
+    reinstall: async (...args) => { calls.push(['reinstall', ...args]) },
+    uninstall: async (...args) => { calls.push(['uninstall', ...args]); state.installedLinuxVersion = null },
     setAutoUpdateEnabled: async enabled => { calls.push(['autoUpdate', enabled]); state.autoUpdateEnabled = enabled },
   }
 }
@@ -29,17 +29,18 @@ function makeBootstrap(overrides = {}) {
  */
 const makeManager = () => ({ install: async () => {}, uninstall: async () => {} })
 
-function harness(bootstrap = makeBootstrap()) {  const routes = new Map()
+function harness(bootstrap = makeBootstrap(), manifest = null) {  const routes = new Map()
   const disposers = []
   registerLinuxEnvironmentRoutes({
     webServer: { register: route => { routes.set(route.path, route); return () => routes.delete(route.path) } },
     effect: register => { disposers.push(register()) },
     auth: () => ({ token: () => TOKEN }), bootstrap: () => bootstrap,
+    manifest: () => manifest,
   })
   return {
     bootstrap, routes,
     dispose: () => disposers.forEach(fn => fn()),
-    async call(action, { method = action === 'status' ? 'GET' : 'POST', body = { confirmed: true }, token = TOKEN, host = '127.0.0.1:4145' } = {}) {
+    async call(action, { method = action === 'status' || action === 'manifest' ? 'GET' : 'POST', body = { confirmed: true }, token = TOKEN, host = '127.0.0.1:4145' } = {}) {
       const req = Readable.from([Buffer.from(typeof body === 'string' ? body : JSON.stringify(body))])
       req.method = method
       req.headers = { host, 'x-dsh-control-token': token }
@@ -50,16 +51,17 @@ function harness(bootstrap = makeBootstrap()) {  const routes = new Map()
   }
 }
 
-test('all seven routes authenticate before any bootstrap action and enforce HTTP methods', async () => {
+test('all eight routes authenticate before any bootstrap action and enforce HTTP methods', async () => {
   const h = harness()
-  assert.equal(h.routes.size, 7)
+  assert.equal(h.routes.size, 8)
   for (const path of h.routes.keys()) {
     const action = path.split('/').at(-1)
     assert.equal((await h.call(action, { token: '' })).code, 401)
     assert.equal((await h.call(action, { host: 'evil.example' })).code, 403)
-    const response = await h.call(action, { method: action === 'status' ? 'POST' : 'GET' })
+    const readOnly = action === 'status' || action === 'manifest'
+    const response = await h.call(action, { method: readOnly ? 'POST' : 'GET' })
     assert.equal(response.code, 405)
-    assert.equal(response.headers.allow, action === 'status' ? 'GET' : 'POST')
+    assert.equal(response.headers.allow, readOnly ? 'GET' : 'POST')
   }
   assert.deepEqual(h.bootstrap.calls, [])
   h.dispose()
@@ -81,7 +83,28 @@ test('mutations require bounded explicit confirmation; manual check never instal
   assert.equal(h.bootstrap.state.autoUpdateEnabled, true)
   assert.equal(h.bootstrap.calls.length, 2, 'enabling auto update must not check or install')
   await h.call('install')
-  assert.deepEqual(h.bootstrap.calls.at(-1), ['install', { runtimeId: 'debian-minimal' }])
+  // The host must never pick a runtime id itself: bootstrap resolves process.arch when omitted.
+  assert.deepEqual(h.bootstrap.calls.at(-1), ['install', { confirmed: true, activate: true }])
+  await h.call('install', { body: { confirmed: true, runtimeId: 'debian-minimal-x64' } })
+  assert.deepEqual(h.bootstrap.calls.at(-1), ['install', { runtimeId: 'debian-minimal-x64', confirmed: true, activate: true }])
+  // A hostile id must not reach the bootstrap.
+  await h.call('install', { body: { confirmed: true, runtimeId: '../escape' } })
+  assert.deepEqual(h.bootstrap.calls.at(-1), ['install', { confirmed: true, activate: true }])
+  await h.call('reinstall')
+  assert.deepEqual(h.bootstrap.calls.at(-1), ['reinstall', { confirmed: true, activate: true }])
+  await h.call('uninstall')
+  assert.deepEqual(h.bootstrap.calls.at(-1), ['uninstall', { confirmed: true }])
+})
+
+test('manifest route returns only the persisted manifest and never triggers a check', async () => {
+  const manifest = { schemaVersion: 1, version: '1.2.0', runtimes: [{ id: 'debian-minimal', architecture: 'arm64' }] }
+  const h = harness(makeBootstrap(), manifest)
+  const response = await h.call('manifest')
+  assert.equal(response.code, 200)
+  assert.deepEqual(response.payload, { manifest })
+  assert.deepEqual(h.bootstrap.calls, [])
+  const empty = await harness(makeBootstrap()).call('manifest')
+  assert.deepEqual(empty.payload, { manifest: null })
 })
 
 test('missing bootstrap is explicit 503, blocked compatibility is visible, status is read-only', async () => {
@@ -226,7 +249,24 @@ test('normalizer accepts the finalized Bionilux status shape and the earlier pro
     runtime: { id: 'debian-minimal', label: 'Debian minimal' },
     plugins: { bootstrap: { releaseUrl: 'https://github.com/kelai141/dsh-bionilux/releases/tag/v1' }, runtime: { releaseUrl: 'https://github.com/kelai141/dsh-bionilux/releases/tag/v1' } },
     injectionActivated: true, enabled: true, lastCheckAt: '2026-10-16T10:00:00Z', error: undefined,
+    // The settings UI renders these; dropping them made architecture/runtimes invisible.
+    architecture: undefined, defaultRuntimeId: undefined, runtimeId: undefined, runtimes: undefined,
+    updateAvailable: true, updateBlocked: undefined, latestReleaseVersion: undefined, operation: 'idle',
   })
+  // Full passthrough: the UI needs architecture, the arch-scoped runtime list and update flags.
+  const full = normalizeLinuxStatus({
+    installed: true, version: '1.2.0', mobileVersion: '0.14.9', architecture: 'x64', defaultRuntimeId: 'debian-minimal-x64',
+    runtimeId: 'debian-minimal-x64', runtimes: [{ id: 'debian-minimal-x64', architecture: 'x64', installed: true }],
+    updateAvailable: false, updateBlocked: true, latestReleaseVersion: '1.3.0', operation: 'idle',
+  })
+  assert.equal(full.architecture, 'x64')
+  assert.equal(full.defaultRuntimeId, 'debian-minimal-x64')
+  assert.equal(full.runtimeId, 'debian-minimal-x64')
+  assert.deepEqual(full.runtimes, [{ id: 'debian-minimal-x64', architecture: 'x64', installed: true }])
+  assert.equal(full.updateAvailable, false)
+  assert.equal(full.updateBlocked, true)
+  assert.equal(full.latestReleaseVersion, '1.3.0')
+  assert.equal(full.operation, 'idle')
   // Earlier proposed names still normalize; a blocked update hides the candidate but stays visible as an error.
   const legacy = normalizeLinuxStatus({
     installedLinuxVersion: '0.9.0', currentMobileVersion: '0.14.8', autoUpdateEnabled: true,

@@ -34,6 +34,8 @@ import {
   createLinuxPluginHost, checkLinuxEnvironmentAfterMobileChange, registerLinuxEnvironmentRoutes, cordisScope,
   type LinuxBootstrap,
 } from './linux-environment.js'
+import { createLinuxBootstrapConfig } from './linux-host-asset-io.js'
+import { mountLinuxBootstrap, readLinuxManifest } from './linux-bootstrap-loader.js'
 
 export const name = 'dsh-android-linux-env'
 export const inject = ['tools', 'webServer', 'androidPrivilege'] as const
@@ -379,6 +381,12 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
       effect: register => ctx.effect(register),
       auth: authOptions,
       bootstrap: () => serviceOf<LinuxBootstrap>(ctx, 'linuxBootstrap'),
+      // 只读持久 state 里的 availableManifest/pinnedManifest：给 UI 先准备资产，不触网、不安装。
+      manifest: () => {
+        const files = process.env.DSH_FILES_DIR
+        if (files === undefined || files.trim() === '') return null
+        return readLinuxManifest(join(files, 'linux-environment'))
+      },
     })
     for (const [path, builder] of [
       ['/api/android/env/status', () => toolchainStatus(svc?.status().tier, ctx)],
@@ -446,5 +454,28 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
         sendJson(res, 200, cacheExecutePayload(planCleanup()))
       },
     }))
+  }
+
+  // bootstrap 必须真的被装载：此前只提供 linuxPluginHost、从未挂 bootstrap，服务永远缺席，
+  // 状态面恒 503。装载本身不下载、不解包；ready() 只读持久状态（默认不自动检查更新）。
+  // 配置（linuxAssetIO / stagingDirectory / appVersionProvider）由 createLinuxBootstrapConfig 造，
+  // 本处不重复任何资产 IO。
+  //
+  // Do not await this child from its parent's apply: the child injects the
+  // linuxPluginHost service owned by this scope, which becomes available only
+  // after the parent finishes applying. Awaiting it here deadlocks both fibers.
+  const filesDir = process.env.DSH_FILES_DIR
+  if (filesDir !== undefined && filesDir.trim() !== '') {
+    const appVersion = process.env.DSH_APP_VERSION ?? '0.0.0'
+    const bootstrapConfig = createLinuxBootstrapConfig({
+      filesDir,
+      appVersion,
+      ...(typeof _config.releaseUrl === 'string' ? { releaseUrl: _config.releaseUrl } : {}),
+    })
+    void mountLinuxBootstrap(ctx, { config: bootstrapConfig }).catch(error => {
+      ctx.logger?.('dsh-android-linux-env')?.warn?.(
+        'Linux bootstrap 装载失败，Linux 环境设置面不可用：' + (error instanceof Error ? error.message : String(error)),
+      )
+    })
   }
 }

@@ -142,7 +142,7 @@ sequenceDiagram
 | P01 | 桥插件（dsh-android-bridge） | 设备控制的授权判定、控制队列与三条特权执行出口 | 模型设备工具 / 其它插件直连服务面 / 壳侧长轮询取活 | 稳态控制 | K04 控制队列协议、K05 无障碍面、K06 特权执行、P02 manage、P03 浏览器、K10 通知 | cordis 装配（provide androidPrivilege）、模型设备工具、壳侧 ControlPoller 长轮询 | plugins/dsh-android-bridge/src/index.ts,plugins/dsh-android-bridge/src/control-queue.ts,plugins/dsh-android-bridge/src/screen-scope.ts | 高 |
 | P02 | 管理插件（dsh-android-manage） | 把模型意图落成壳侧无障碍或特权 shell 的屏幕工具面 | 模型每轮 tool call；插件 apply 时注册 14 个工具 | 稳态控制 | 授权桥与控制队列（androidPrivilege）,壳侧无障碍与特权执行面,屏幕范围偏好 | 引擎 cordis 装配（android-bridge 先于 android-manage）；每次模型 tool call | plugins/dsh-android-manage/src/index.ts,plugins/dsh-android-manage/src/protocol-v2.ts,plugins/dsh-android-manage/src/vd-shot.ts,plugins/dsh-android-manage/src/ime-broadcast.ts | 高 |
 | P03 | 浏览器与虚拟屏插件 | browser_* 与 vd* 工具落壳侧控制 op 并如实回执 | 模型调用 browser_* / android_vdisplay_* 工具 | 稳态控制 | K08,K07,桥控制队列 | 引擎启动时按装配集注册 | plugins/dsh-android-browser/src/tools.ts,plugins/dsh-android-browser/src/index.ts,plugins/dsh-android-vdisplay/src/index.ts,plugins/dsh-android-vdisplay/src/status.ts | 高 |
-| P04 | 文件打开、Linux 环境与模型能力插件 | 外部来件草稿、工具链与缓存清理、模型能力写回 | 壳侧 FileIncoming 投递 / 设置页 HTTP / cordis 装配 | 稳态控制 | 桥与鉴权、客户端注入层、shell-termux 工具链表、快照装配链 | 壳侧 FileIncoming.processIncomingIntent、设置页与开发者选项、cordis 装配 | plugins/dsh-android-file-open/src/index.ts,plugins/dsh-android-linux-env/src/runtime-cache.ts,plugins/dsh-model-capability/src/index.ts | 高 |
+| P04 | 文件打开、Linux 环境与模型能力插件 | 外部来件草稿、工具链与缓存清理、Linux 环境设置与资产准备、模型能力写回 | 壳侧 FileIncoming 投递 / 设置页 HTTP / `linuxAssetPrepare` 桥 / cordis 装配 | 稳态控制 | 桥与鉴权、客户端注入层、shell-termux 工具链表、快照装配链、Linux bootstrap 与 runtime Release | 壳侧 FileIncoming.processIncomingIntent、设置页与开发者选项、cordis 装配、宿主 mount bootstrap | app/src/main/java/com/dsharnessmobile/shell/LinuxAssetIO.kt,app/src/main/java/com/dsharnessmobile/shell/LinuxAssetPrepare.kt,app/src/main/java/com/dsharnessmobile/shell/LinuxAssetExtractor.kt,plugins/dsh-android-linux-env/src/index.ts,plugins/dsh-android-linux-env/src/linux-environment.ts,plugins/dsh-android-linux-env/src/linux-bootstrap-loader.ts,plugins/dsh-android-linux-env/src/linux-host-asset-io.ts,dsh-client-ui-responsive/src/client/linux-environment/LinuxEnvironmentSection.tsx,dsh-client-ui-responsive/src/client/linux-environment/transport.ts | 高 |
 | S01 | 引擎侧注入层（三个子仓） | 页面内发布标记与桥入口、钳面板几何、装配老内核垫片 | 客户端插件 apply() 装载；每个 index 响应经 tapIndex 注入 | 交互面 | K04（壳侧 androidBridge/dshBackBridge 桥面） | 引擎插件系统按 profile-web.cordis.patch.yml 的 insert 行拉起 | dsh-client-ui-responsive/src/client/index.ts,dsh-host-web-compat/lib/index.js,dsh-shell-termux/src/index.ts | 高 |
 | B01 | 构建链与快照注入 | 快照构建 插件注入 门禁收口 到 APK 出包；本地 PowerShell、云端 build-apk.mjs、发布 build-release.ps1 的 APK 终端组装共用 build-apk-engine，产物再经 apksigner 校验 v1/v2/v3；另有不读 LFS 快照的 ARM64 来源审计构建（签名 Termux 包 → NDK 跨编译 node-pty → 原生闭包门禁 → 快照 → APK） | 人手动 pwsh -File scripts\build-apk-013.ps1、云端 workflow 或发布链 | 构建与发布 | 门禁块,壳侧快照解压,插件源码与 vendor 固化面,可信上游签名/哈希 | 开发者手动,发布链 build-release.ps1,CI 与云端 build-apk.mjs,build-apk-source.yml | scripts/build-apk-013.ps1,scripts/build-apk.mjs,scripts/build-apk-engine.mjs,scripts/build-apk-engine.test.mjs,scripts/build-release.ps1,scripts/check-apk-signatures.mjs,scripts/build-snapshot-013.mjs,scripts/inject-all.py,scripts/source-build/*,.github/workflows/build-apk.yml,.github/workflows/build-apk-source.yml,scripts/patches/data/undo-safe-transaction-snippet.mjs,scripts/patches/data/registry-scan-c4.mjs,scripts/patches/data/client-index-loader-barrier.mjs,scripts/patches/tests/client-index-loader-barrier.test.mjs,scripts/patches/tests/gateway-client-source-g1.test.mjs,scripts/patches/mimo-thinking-toggle-056.mjs,scripts/patches/tests/mimo-thinking-toggle-056.test.mjs | 高 |
 | B02 | 静态门禁链与 CI | 33 个静态门禁脚本与三层接线的唯一声明处 | PR/CI、两条打包链、发布链 | 测试与门禁 | B01,B03 | 提交 PR、推 main、构建/发版 | scripts/check-release-gates.mjs,scripts/check-gate-skips.mjs,.github/workflows/pr-gate.yml,scripts/build-apk-013.ps1 | 高 |
@@ -1463,14 +1463,15 @@ flowchart TD
 
 #### P04 文件打开、Linux 环境与模型能力插件
 
-Linux 内部插件宿主适配（实验性 internal，默认不启用）：`plugins/dsh-android-linux-env/src/linux-environment.ts` 提供受鉴权的 Linux 生命周期 HTTP 路由和 `linuxPluginHost`；`plugins/dsh-android-linux-env/src/linux-host-asset-io.ts` 提供引擎侧 `linuxAssetIO` 的**宿主透传面**（见下）。bootstrap 与 runtime 是我们自己的实验性内部插件，随应用放入内置（hard）插件目录，但**默认不启用——存在不等于启用**；应用更新或插件新版本发布都不会启用它们。宿主不下载、校验或解包资产，也不替用户启用；内部 bootstrap 被启用（服务在场）后设置页才注册「Linux环境」，未启用则 503 且无入口。runtime 目录由内部 bootstrap 完成事务后交给宿主，必须位于 `$DSH_FILES_DIR/linux-environment/plugins` 内；宿主核对 realpath 后动态 import，等待 Cordis fiber 激活，失败或卸载时 dispose。`linuxPluginHost.isInjected({name?,runtimeId?,directory?})` 只读上报**在场**（平铺或 `<name>/<version>` 布局，拒绝分隔符与外逃符号链接）并作为权威判定：显式查询未命中即不在场（不回落内存已激活目录），手工删除后 `install()` 以不在场失败关闭，新 Release 或新应用版本不会把插件重新写回。
+Linux 内部插件宿主适配（实验性 internal，默认不启用）：plugins/dsh-android-linux-env/src/index.ts 在 apply() 内 provide('linuxPluginHost')，再用 void mountLinuxBootstrap(...) **非阻塞**挂载 vendored bootstrap；父 apply() 不能 await 子 fiber，否则子 inject 的 linuxPluginHost 与父 fiber 互相等待。plugins/dsh-android-linux-env/src/linux-bootstrap-loader.ts 按包名 @dsh-android/linux-bootstrap 动态 import，await fiber 后要求 FiberState.ACTIVE，不造配置。plugins/dsh-android-linux-env/src/linux-environment.ts 提供受鉴权生命周期 HTTP 路由和 linuxPluginHost；linuxPluginHost.isInjected({name?,runtimeId?,directory?}) 只读上报**在场**（平铺或 <name>/<version> 布局，拒绝分隔符与外逃符号链接），显式查询未命中即不在场（不回落内存已激活目录），手工删除后 install() 失败关闭，新 Release 或新应用版本不会把插件重新写回。两个包随应用放入内置（hard）插件目录但**默认不启用**；服务缺席时状态路由 503，「Linux环境」分区仍由 ui-responsive 注册。
 
-引擎侧 `linuxAssetIO` 透传面（0.15.0，(iii) 的分工）：`plugins/dsh-android-linux-env/src/linux-host-asset-io.ts` 造出 bootstrap 必需的 `downloadAsset` / `extractArchive`（另导出 `createLinuxBootstrapConfig` 组装 `dataDir`/`releaseUrl`/`appVersionProvider`/`stagingDirectory`）。两者是**透传 + 失败关闭**，不是下载器：`downloadAsset` 只把宿主已暂存的 `<filesDir>/linux-environment/staging/<sha256>/asset.tar.xz` 路径交回 bootstrap（落点由 **manifest 摘要**推导，调用方不能指定；摘要格式与包含关系两道判据与 Kotlin `LinuxAssetPrepare.stagedDir` 同口径），`extractArchive` 按**归档自身摘要**定位宿主已解包的 `<sha256>/unpacked/` 并**复制**进 bootstrap 目标目录（复制而非移动——宿主那份要留着供复验）。宿主没准备、摘要不合规、树含符号链接一律抛带稳定码的错，**绝不回退成自行下载**。`stagingDirectory` 故意**不等于**宿主暂存目录：bootstrap 把 `<stagingDirectory>/<sha256>/` 当自己的包槽位（先 `rename` 到 `.backup-*`，成功后再递归删除），指向宿主暂存会**删掉宿主保留的归档与解包树**，而那两样正是复验依据。复验权威仍在 bootstrap：它自算归档 SHA-256 与体量、重算 `unpackedSize`、校验包名与入口之后才激活；自 `dsh-bionilux@3f86a85` 起**宿主暂存直取路径**（`hostStagingRoot` 默认 `<dataDir>/staging`，与宿主暂存同处）会在调用本模块的 `downloadAsset`/`extractArchive` **之前**就完成复验，因此「已暂存但不合格」由上游拒绝；**没暂存**时才落到本模块的透传钩子并以 `linux-asset-not-prepared` 失败关闭（两条路径都全复验，不一致时取更严的一条）。复用分支亦已复验：被篡改的槽位不被复用而是从已复验的暂存**重建**。
+引擎侧 linuxAssetIO 透传面（0.15.0，(iii) 的分工）：plugins/dsh-android-linux-env/src/linux-host-asset-io.ts 造出 bootstrap 必需的 downloadAsset / extractArchive（另导出 createLinuxBootstrapConfig 组装 dataDir/releaseUrl/appVersionProvider/stagingDirectory）。两者是**透传 + 失败关闭**：downloadAsset 只交回宿主已暂存的 <filesDir>/linux-environment/staging/<sha256>/asset.tar.xz，extractArchive 按归档自身摘要定位 <sha256>/unpacked/ 并复制进目标目录。宿主侧链路由页面经 window.androidBridge.linuxAssetPrepare 触发 LinuxAssetPrepare → LinuxAssetIO（逐跳来源校验、摘要与字节数）→ LinuxAssetExtractor（按 plugin/backend/rootfs/node 选链接规则与上限），成功才原子发布 staging/<sha256>/{asset.tar.xz,unpacked/}。bootstrap 的 stagingDirectory 与宿主暂存目录刻意分开，避免包槽位替换删掉复验源。
 
-版本变化链为 `linuxBootstrap 服务就绪 → 读取持久化安装版本/应用基线/自动更新偏好/尝试记录 → 基线不同时 checkForUpdates({source:'mobile-version-change'})`；偏好开关和页面挂载都不发更新检查。手动检查只调用 `source:'manual'`，安装、重装、卸载与开关写入均需 `confirmed:true`。设置页不持久化第二份系统状态，读写都回到 bootstrap；无该服务时 HTTP 503 且不注册设置入口。这两个实验性内部插件的发布不修改注入目录或默认启用状态。
+vendored bootstrap 与注入集的关系（0.15.0 现行）：plugins/dsh-linux-bootstrap/（package.json.dshVendor 钉 kelai141/dsh-bionilux@0150fea，只源码；lib/ 由 build.mjs 在链上重建）**随快照注入**并在 scripts/plugin-dirs.json 的 dirs、scripts/contract.json 的 inserted 登记，但属 dynamicOnly，**不进 scripts/profile-web.cordis.patch.yml**：其 apply() 需要函数型 config（linuxAssetIO），YAML 装配表达不了，只由宿主动态 mount；check-patch-mounts / check-contract 按 dynamicOnly 同一登记豁免挂载判定。漂移由 scripts/check-vendored-linux-bootstrap.mjs 守（当前 12 个上游一致文件按 EOL 归一化摘要 + 断言偏差点 + 断言未 vendored runtime/rootfs/Node），不进 check-release-gates.mjs 的 GATES。
 
-vendored bootstrap 与注入集的关系（0.15.0）：`plugins/dsh-linux-bootstrap/`（源 `kelai141/dsh-bionilux@3f86a85`，只源码；`lib/` 由 `build.mjs` 在链上重建）**刻意不登记**进 `scripts/plugin-dirs.json`、`scripts/contract.json` 的 `inserted`、`scripts/profile-web.cordis.patch.yml` —— 它的 `apply()` 需要函数型 config（`linuxAssetIO`），YAML 挂载表达不了，挂进 profile 只会抛 `TypeError`；不入注入集也让 `check-patch-mounts`/`check-contract` 的双向一致断言保持真绿（它们守注入集 ↔ 挂载集，本包两边都不在）。漂移由 `scripts/check-vendored-linux-bootstrap.mjs` 守（自带 `--self-test`：1 正控 + 3 负控），它**不进** `check-release-gates.mjs` 的 `GATES`（进册即要求本地链与云端链接线，而那两处是逐字节镜像面）。完整协议见 `docs/AGENTS/BRIDGE-API.md` 的 Linux 内部插件宿主节；设备证据限未启用状态，不代表完成真实安装验收。
+运行顺序（本轮实际链路）：引擎装配 → 宿主 provide('linuxPluginHost') → void mountLinuxBootstrap → bootstrap provide('linuxBootstrap')；设置页 /api/android/linux-environment/status|manifest 只读持久状态，首次 manifest 为空时先 POST /check 再重读。安装时页面按 plugins.runtime（plugin）与该 runtime 的 backendAsset/rootfsAsset/nodeAsset（backend/rootfs/node）逐个准备，全部 ok 后再 POST /install {confirmed:true,activate:true}；bootstrap 自行复验、解包并激活 runtime。runtime 的 apply() 只在 status().healthy 为真时注册 linux_bash / linux_session；工具 schema 必须是标准 JSON schema（对象级 type/required，不能把 required:true 写进字段），注册失败必须上抛并回滚已注册工具，不能再出现「健康但无工具」。
 
+Debug 回放：生产不读 debug-download-origin；DSH_DEBUG_BUILD=1 时仅接受 http://127.0.0.1 的回环端口，只替换官方 URL 的 origin，官方 pathname、redirect: 'error' 与逐跳主机白名单不变。冷启动先 restoreActivation() 再 synchronizeInjectionState()：恢复只针对持久 enabled && injectionActivated、仍在插件根内且入口在场的安装，不下载、不复活手工删除目录；isInjected 只读。最终本地 APK 已在 MuMu 用真实模型完成一键安装、工作区双向读写、持久会话、官方 zstd 构建测试打包及冷启动后新会话执行；nullable schema、按 agent 隔离及 workingDirectory/sharedPaths 自动映射均已落源码并有回归。范围限于本地模拟下载服务，不等于全 ABI 发布验收。完整收口记录见 [Linux 环境接入收口](<docs/contrib/codex/linux-mumu-integration-2026-11-05.md>)。
 
 - **一句话**：三个引擎侧插件的合块——`dsh-android-file-open` 把壳侧拷好的外部文件变成一条「强制新会话、未发送的附件草稿」（配五条受鉴权的 exact 路由与自有临时项清单）、`dsh-android-linux-env` 提供工具链/环境配方视图与开发者选项的运行时缓存白名单清理、`dsh-model-capability` 为手填供应商路由探测能力并把缺失字段写回 settings.yaml。
 - **入口/触发**：① 外部应用 `ACTION_VIEW`/`ACTION_SEND` → 壳侧 `FileIncoming.processIncomingIntent`（`app/src/main/java/com/dsharnessmobile/shell/FileIncoming.kt:379`）→ POST `/api/android/file-incoming`；② 设置页/开发者选项 → file-incoming 五条 exact 路由（GET 统计、claim、content、complete、clean）、`/api/android/env/status|recipe`、`/api/android/runtime-cache/scan|execute`；③ cordis 装配调三个插件的 `apply()`：注册工具 `android_file_incoming_status` / `android_toolchain_status` / `android_env_recipe` / `model_capability_probe` / `model_capability_apply`，并给 model-capability 起 auto-apply 轮询。
@@ -2134,7 +2135,10 @@ app/src/main/java/com/dsharnessmobile/shell/ForegroundPageRecoveryPolicy.kt
 app/src/main/java/com/dsharnessmobile/shell/SnapshotFingerprintPolicy.kt
 app/src/main/java/com/dsharnessmobile/shell/ProfilePackageManifest.kt
 app/src/main/java/com/dsharnessmobile/shell/LinuxAssetIO.kt
+app/src/main/java/com/dsharnessmobile/shell/LinuxAssetExtractor.kt
 app/src/main/java/com/dsharnessmobile/shell/LinuxAssetPrepare.kt
+app/src/test/java/com/dsharnessmobile/shell/LinuxAssetIOTest.kt
+app/src/test/java/com/dsharnessmobile/shell/LinuxAssetPrepareTest.kt
 app/src/test/java/com/dsharnessmobile/shell/ProfilePackageManifestTest.kt
 app/src/test/java/com/dsharnessmobile/shell/OwnershipRepairCoreTest.kt
 app/src/test/java/com/dsharnessmobile/shell/RootMaintenanceLeaseTest.kt
@@ -2325,6 +2329,28 @@ plugins/dsh-android-linux-env/src/index.ts
 plugins/dsh-android-linux-env/src/runtime-cache.ts
 plugins/dsh-android-linux-env/src/linux-environment.ts
 plugins/dsh-android-linux-env/src/linux-host-asset-io.ts
+plugins/dsh-android-linux-env/src/index.ts
+plugins/dsh-android-linux-env/src/linux-bootstrap-loader.ts
+plugins/dsh-android-linux-env/src/linux-bootstrap.d.ts
+plugins/dsh-android-linux-env/test/linux-bootstrap-loader.test.mjs
+plugins/dsh-android-linux-env/test/linux-bootstrap-parent.test.mjs
+plugins/dsh-android-linux-env/test/linux-release-fetch.test.mjs
+plugins/dsh-android-linux-env/test/linux-restore-tools.test.mjs
+dsh-client-ui-responsive/src/client/linux-environment/LinuxEnvironmentSection.tsx
+dsh-client-ui-responsive/src/client/linux-environment/transport.ts
+dsh-client-ui-responsive/src/client/linux-environment/linux-environment.css.ts
+dsh-client-ui-responsive/tests/linux-environment.spec.tsx
+plugins/dsh-linux-bootstrap/src/index.js
+plugins/dsh-linux-bootstrap/src/manifest.js
+plugins/dsh-linux-bootstrap/src/asset-bundle.js
+plugins/dsh-linux-bootstrap/src/github.js
+plugins/dsh-linux-bootstrap/src/routes.js
+plugins/dsh-linux-bootstrap/src/status.js
+plugins/dsh-linux-bootstrap/src/version.js
+plugins/dsh-linux-bootstrap/client/index.js
+plugins/dsh-linux-bootstrap/client/api.js
+plugins/dsh-linux-bootstrap/client/assets.js
+plugins/dsh-linux-bootstrap/client/i18n.js
 plugins/dsh-linux-bootstrap/build.mjs
 glob:plugins/dsh-linux-bootstrap/src/*.js
 glob:plugins/dsh-linux-bootstrap/client/*.js

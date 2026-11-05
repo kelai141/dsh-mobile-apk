@@ -110,6 +110,7 @@
 | `file-upload-restart-R1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-file-upload/lib/index.js` |
 | `sidebar-keep-wide-B2` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar/lib/client.js` |
 | `inspector-worker-expose-internals-472` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-experimental-inspector/lib/index.js` |
+| `appboot-scope-fastpath-S1` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js` |
 
 已退役登记：`market-A`、`market-C`、`atomic-stale-lock-F4`。历史章节保留退役前语义；活动状态以本表和 registry 为准。
 <!-- generated:active-registry:end -->

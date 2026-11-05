@@ -13,7 +13,7 @@ DeepSeek Harness 的**安卓壳应用**（包名 `com.dsharnessmobile.shell`）�
 
 **关键约束：AI 可见的能力全部来自插件**，壳侧不直接注册工具。
 
-**运行时**：内嵌 Termux 快照（`assets/snapshot.tar.xz` → `files/usr` + `files/home`）；当前快照中的 `@deepseek-ai/dsh` 为 **0.2.1-rc.2**（以快照内 `package.json` 与 `scripts/snapshot-config/engine-overlay.json` 为准），监听 `127.0.0.1:3080`；WebView 加载引擎 Web UI。
+**运行时**：内嵌 Termux 快照（`assets/snapshot.tar.xz` → `files/usr` + `files/home`）；快照、`scripts/contract.json` 与 `scripts/snapshot-config/engine-overlay.json` 对齐 **0.2.1-rc.3**。引擎监听本机回环地址，端口由 `EngineEndpoint` 管理；WebView 加载引擎 Web UI。
 
 **构建链**：minSdk 26 / targetSdk 34 / compileSdk 36；Kotlin 2.0.21；AGP 8.8.2；Java 17。
 
@@ -137,7 +137,9 @@ adb -s <serial> install -r -t out\v<版本>\dsh-mobile-apk-v<版本>-arm64.apk
    - 只同步**镜像清单内的文件**，切勿对 `scripts/` 等目录整体 `/MIR`——会删掉本仓独有的设备脚本（真实事故）。
 6. **补丁镜像面**：`scripts/patches/**`、`scripts/check-patch-mirror.mjs`、`scripts/build-apk-013.ps1` 等是协调仓的**逐字节镜像**，单边演进即拒。补丁改动**先合本仓镜像 PR，再合协调仓权威源 PR**。
 7. **禁 emoji**：提交信息、PR 标题/描述、文档、标签一律不用。
-8. **工作区卫生**：`.deploy-tmp` 只增不减会拖垮开发机（实测 2026-10-14 达 34.8 GB / 313,393 文件，是开发机第一大空间消耗，文件数本身就在拖慢目录遍历类工具）。每完成一轮交付，在协调仓根跑 `node scripts/clean-deploy-tmp.mjs`（默认 dry-run，`--apply` 执行）。判定口径与保留清单见该脚本头注释；**注册的 git worktree 与近 3 天内活动过的目录一律保留**。
+8. **issue/PR 评论只在结论定下后才发**：每条评论都会通知全部协作者。中间态、未验证的假设、排查过程、自己纠正自己，一律只写进当轮汇报，**不进 issue/PR**。允许发评论的三种情形：结论已定 / 关单或回答 issue / 有阻塞必须问维护者。写错的处置：已发出的那条**改掉，或补一条更正，然后就停**——不发第三条，不解释为什么发错，不在公开场合复盘自己的过程。
+   理由：评论是广播，不是草稿纸。发得多会吵到所有人；说错还要公开改口，成本比当初多等一会高得多。
+9. **工作区卫生**：`.deploy-tmp` 只增不减会拖垮开发机（实测 2026-10-14 达 34.8 GB / 313,393 文件，是开发机第一大空间消耗，文件数本身就在拖慢目录遍历类工具）。每完成一轮交付，在协调仓根跑 `node scripts/clean-deploy-tmp.mjs`（默认 dry-run，`--apply` 执行）。判定口径与保留清单见该脚本头注释；**注册的 git worktree 与近 3 天内活动过的目录一律保留**。
 
 ---
 

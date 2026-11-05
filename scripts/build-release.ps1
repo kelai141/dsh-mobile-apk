@@ -12,7 +12,7 @@ $root = Split-Path -Parent $PSScriptRoot
 # npm cache must stay inside the workspace (sandbox/CI limit: writes outside the workspace are denied)
 $env:npm_config_cache = Join-Path $root ".npm-cache"
 $relRoot = Join-Path $root "release"
-$pluginSrcs = @('dsh-shell-termux','dsh-client-ui-responsive','dsh-host-web-compat')
+$pluginSrcs = @('dsh-shell-termux','dsh-client-ui-responsive','dsh-host-web-compat','plugins/dsh-linux-bootstrap')
 
 # 0a) git dirty-state gate (Review 2026-08-18 R5): release artifacts must trace back to committed source.
 #     Abort if any repo has uncommitted changes — otherwise tgz/APK ship uncommitted code that can't be diffed for troubleshooting.

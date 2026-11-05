@@ -10,11 +10,16 @@
     "plugins/dsh-android-file-open",
     "plugins/dsh-android-browser",
     "plugins/dsh-android-vdisplay",
-    "plugins/dsh-session-delete"
+    "plugins/dsh-session-delete",
+    "plugins/dsh-linux-bootstrap"
   ],
   "externals": [
     "vendor/dshmarketplace-plugin"
   ],
+  "dynamicOnly": [
+    "plugins/dsh-linux-bootstrap"
+  ],
+  "$dynamicOnlyComment": "随快照注入但**刻意不登记进 profile patch**：bootstrap 的 apply() 需要函数型 config（linuxAssetIO），YAML 装配表达不了，只由宿主在用户显式启用时动态加载。check-patch-mounts / check-contract 只对这里列出的包豁免，其余包仍按双向一致判红；豁免项必须有仓内静态 import 证据（check-patch-mounts 断言）。",
   "retiredExternals": [
     "vendor/dsh-undo-savepoint"
   ]

@@ -25,7 +25,7 @@
   },
   "dshVendor": {
     "source": "kelai141/dsh-bionilux",
-    "commit": "3f86a853e346b4f2c268fbf6a76216294b5c4382",
+    "commit": "0150fea9787fa7c816b2f6c163a3fbe1298e07eb",
     "package": "packages/linux-bootstrap",
     "upstreamVersion": "0.5.0",
     "excludedFromVendor": "test/ (upstream test/client.test.mjs + react-resolver/react-stub hooks depend on a host-provided react peer and POSIX-only cases)",
@@ -33,7 +33,9 @@
       "exports/main point at ./lib: the snapshot injector carries lib/** plus package.json; this tree is built by build.mjs, not published as-is",
       "build script added (copies src/ to lib/); no build artifact is committed",
       "test script dropped: upstream test/ is intentionally not vendored (see excludedFromVendor)",
-      "private: true so the vendored copy can never be published"
-    ]
+      "private: true so the vendored copy can never be published",
+      "local integration changes: authenticated HTTP settings, all-asset native preparation and persisted activation recovery; exact content checked by check-vendored-linux-bootstrap.mjs"
+    ],
+    "localSourceDigest": "4f497d6270087ea29a52b1e3feee1d139ade555c05b749d7c8e64aadf1136eb5"
   }
 }
