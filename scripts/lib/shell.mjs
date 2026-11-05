@@ -16,9 +16,17 @@ import { execFileSync, execSync } from 'node:child_process'
 
 export const IS_WSL_HOST = process.platform === 'win32'
 
+/**
+ * 单引号 shell 转义（POSIX）：把任意字符串包成**不会再被 bash 展开**的一段。
+ *
+ * 为什么必须是单引号：双引号里 `$(...)`、反引号、`$VAR` 仍会被展开（issue #1602 的注入面）。
+ * 唯一需要处理的字符就是单引号本身：闭引号 + \' + 重开引号。
+ */
+export const shellQuote = (value) => "'" + String(value).replace(/'/g, "'\\''") + "'"
+
 /** Construct the WSL re-entry command without letting values become shell syntax. */
 export function wslNodeCommand(root, script, args, variables) {
-  const quote = (value) => "'" + String(value).replace(/'/g, "'\\''") + "'"
+  const quote = shellQuote
   const env = Object.entries(variables).map(([key, value]) => {
     if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new Error('invalid environment variable name')
     return `${key}=${quote(value)}`

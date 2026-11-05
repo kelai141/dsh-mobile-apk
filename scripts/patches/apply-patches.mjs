@@ -37,6 +37,9 @@ import { IMAGE_HISTORY_CORE, planImageHistory } from './image-history-batch-offl
 import { PREVIEW_LOCAL, PREVIEW_PI, PREVIEW_DEEPSEEK, planRequestPreview } from './image-request-preview-P1.mjs'
 import { planImageExpiry } from './image-expiry-E1.mjs'
 import { replaceAtMostOnce, replaceAtMostOnceRe, replaceOnce, replaceOnceRe } from './lib/replace-once.mjs'
+import { hasCustomEndpointDiscovery, patchCustomEndpointDiscovery } from './data/custom-endpoint-discovery-960.mjs'
+import { hasCustomFirstModelRow, patchCustomFirstModelRow } from './data/custom-first-model-row-960.mjs'
+import { hasModelCatalogSectionLabels, patchModelCatalogSectionLabels } from './data/model-catalog-section-labels-960.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const registry = JSON.parse(readFileSync(join(HERE, 'registry.json'), 'utf8'))
@@ -784,6 +787,36 @@ const IMPLS = {
       if (!s.includes('dshm-mobile-count')) throw new Error('market-L 复核失败——不写回')
       return s
     },
+  },
+
+  // ── issue #960：自定义模型提供商表单的三个陷阱（同一张表单，三条独立判据）──
+
+  // 高：「获取可用模型」在自定义 provider 下拉的是内置目录，不是用户填的端点。
+  // 真因：discoverModels 先按 provider 短路返回内置目录，baseURL 根本没被用过。
+  // 判据：给了 baseURL 就必须真的请求 {baseURL}/models；端点失败要明确报错，绝不回落内置目录。
+  'custom-endpoint-discovery-960': {
+    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js',
+    scope: 'engine',
+    check: hasCustomEndpointDiscovery,
+    apply: patchCustomEndpointDiscovery,
+  },
+
+  // 中：「添加模型」未点时提示语已在，模型目录区却一行都没有（visibleInputs = 0）。
+  // 判据：初态就渲染第一行模型输入框；占位空行不得混进「获取可用模型」的采纳结果。
+  'custom-first-model-row-960': {
+    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js',
+    scope: 'engine',
+    check: hasCustomFirstModelRow,
+    apply: patchCustomFirstModelRow,
+  },
+
+  // 中：三个 section[aria-label="模型目录"] 重名，读屏与自动化分不清当前在编辑哪个。
+  // 判据：每个目录区 label 唯一且带归属；隐藏面板移出无障碍树。
+  'model-catalog-section-labels-960': {
+    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js',
+    scope: 'engine',
+    check: hasModelCatalogSectionLabels,
+    apply: patchModelCatalogSectionLabels,
   },
 
   // ── settings-account：意见反馈入口从账号菜单搬到「设置 → 通用」最下方（0.15.0 用户定例）──

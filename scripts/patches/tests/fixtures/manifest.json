@@ -2201,7 +2201,8 @@
         "image-expiry-E1",
         "image-request-preview-P1",
         "sealed-reasoning-1304",
-        "mimo-thinking-toggle-056"
+        "mimo-thinking-toggle-056",
+        "custom-endpoint-discovery-960"
       ]
     },
     "dsh-llm-deepseek-0.2.2-rc.1": {
@@ -2940,6 +2941,59 @@
       "patchIds": [
         "image-history-batch-offload-I1"
       ]
+    },
+    "dsh-client-ui-settings-models-0.2.1-rc.3": {
+      "source": "superseded",
+      "engine": "0.2.1-rc.3",
+      "package": "@deepseek-ai/dsh-client-ui-settings-models@0.2.1-rc.3",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-client-ui-settings-models-0.2.1-rc.3.tgz",
+        "tarballSha256": "2fa15781b4b03acca4508f52b108008d1c4d31835f271730e9b8a10f26f0248f",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/client.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/client.js": "190498e15358bcd3fe6810fe6368023a20b0403e3ea493bc979eca9bdb593b28",
+        "package.json": "3f073169bea233b479963ec5f6eb8d046ff6336d86121e17a3292b7baecb3992"
+      },
+      "targets": {
+        "lib/client.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-models/package.json"
+      },
+      "patchIds": [
+        "custom-first-model-row-960",
+        "model-catalog-section-labels-960"
+      ],
+      "reason": "Historical artifact; not current-baseline regression input. Current real build artifacts were captured separately."
+    },
+    "dsh-client-ui-settings-models-0.2.2-rc.1": {
+      "source": "engine-tgz",
+      "engine": "0.2.2-rc.1",
+      "package": "@deepseek-ai/dsh-client-ui-settings-models@0.2.2-rc.1",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-client-ui-settings-models-0.2.2-rc.1.tgz",
+        "tarballSha256": "61d2fa34792c20faff957944b2e7fa7ac2a0179ac4cc0ec774eba157f04ead58",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/client.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/client.js": "e111ecefea8262e0426f528864b9681d818068042e93d053bcb0b6884b317278",
+        "package.json": "d55cfe6021fc90d831ebdb15380bab368aee4df63a2e4aff99ded2d18f2fabe0"
+      },
+      "targets": {
+        "lib/client.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-models/package.json"
+      },
+      "patchIds": [
+        "custom-first-model-row-960",
+        "model-catalog-section-labels-960"
+      ]
     }
   },
   "capture": {
@@ -2951,6 +3005,6 @@
       ]
     },
     "overlaySha256": "138e1e58bfe362e7058f5ec00421feee402c8c62e7e5c5cc297f9b061f823225",
-    "registrySha256": "f304b4539f2a6f561c84a8413d953cccd02429f2bee5cc396cfb9403ddad808f"
+    "registrySha256": "b300d7407c9232e359f1bbf646a0bb6113a0240e57075ae2deb28e80ba9b9b8e"
   }
 }

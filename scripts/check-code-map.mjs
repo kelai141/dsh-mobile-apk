@@ -28,6 +28,7 @@
 // 这条与「禁止直接 push main」同性质：会大范围改写文件的操作必须显式表达意图。
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { refreshCompletenessProblem, sourceLinesDropProblem } from './lib/refresh-guard.mjs'
+import { writeAtomic } from './lib/atomic-write.mjs'
 import { dirname, join, relative, resolve as resolvePath } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createHash } from 'node:crypto'
@@ -132,7 +133,7 @@ const DERIVE_DRY_RUN = argv.includes('--derive-dry-run')
  *   1. 越界即错：路径不在执行地图里、或该文件在文档中没有任何锚点 -> 报错退出，不得静默跳过；
  *   2. 只动 listed：未列出的文件在文档里一字不改；
  *   3. 推不出锚点仍硬失败：绝不回退成行号锚（那正是要淘汰的形态）；
- *   4. 与 --refresh-anchor-baseline 联用时，先改写文档、再重铺基线。
+ *   4. 与 --refresh-anchor-baseline 联用时，**先写基线、再改写文档**（#1607：写序反了会被杀成修不回来的半份）。
  */
 const ONLY_RAW = (() => {
   const i = argv.indexOf('--only')
@@ -2004,14 +2005,22 @@ if (isMain) {
       }
     }
 
-    writeFileSync(docAbs, out)
+    /* issue #1607：**先基线、后文档**，两次都走原子写（writeAtomic）。
+     *
+     * 写序是判据不是口味：两条落盘之间被杀时，剩下的半份必须是**能自愈的那半**。
+     *   - 基线先落地、文档没改：重跑同一命令会再推一遍（rewrites 还在），第二次即收敛；
+     *   - 文档先落地、基线没改：第二遍 `symbolForm` 直接 continue，rewrites 为空，基线原样
+     *     写回 —— 重跑一万次也修不回来，唯一出口是全量 --refresh-anchor-baseline。
+     * 原子写再解决「写一半被杀」：目标文件要么是旧版完整字节，要么是新版完整字节。
+     */
     const nextBaseline = {
       ...ANCHOR_BASELINE,
       symbols: nextSymbols,
       symbolHashes: nextSymbolHashes,
       sourceLines: nextSourceLines,
     }
-    writeFileSync(ANCHOR_BASELINE_ABS, JSON.stringify(nextBaseline, null, 2) + '\n')
+    writeAtomic(ANCHOR_BASELINE_ABS, JSON.stringify(nextBaseline, null, 2) + '\n')
+    writeAtomic(docAbs, out)
 
     console.log('--only 作用域：' + [...onlySet].join(', '))
     console.log('')
@@ -2109,7 +2118,7 @@ if (isMain) {
       process.exit(0)
     }
 
-    writeFileSync(docAbs, out)
+    writeAtomic(docAbs, out)
     console.log('')
     console.log('已落盘（--write）：')
     console.log('  改写 ' + replaced + ' 处引用 -> ' + DOC_REL)
@@ -2335,7 +2344,8 @@ if (isMain) {
         for (const k of dropped.slice(0, 20)) console.warn('  - ' + k)
       }
     }
-    writeFileSync(ANCHOR_BASELINE_ABS, JSON.stringify({
+    // issue #1607：543 KB 基线裸写被杀会留下截断 JSON，下次启动 JSON.parse 直接崩。
+    writeAtomic(ANCHOR_BASELINE_ABS, JSON.stringify({
       formatVersion: 3,
       legacyReferenceCounts: countLegacyReferences(parsed.anchors),
       couplings: couplingsNext,
