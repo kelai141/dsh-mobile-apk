@@ -2385,7 +2385,9 @@ const IMPLS = {
         + '    // dsh-mobile tool_call guard (G2): ids of tool calls dropped from this request.\n'
         + '    const droppedToolCallIds = new Set();\n'
         + '    const normalizeToolCallId = (id) => {'
-      const MAP_OLD = [
+      // pi-ai 1.3.0 official streaming patch inserts the Gemini thought_signature passthrough
+// lines inside this block; this patch runs after it, so they are part of the anchor.
+const MAP_OLD = [
         '            if (toolCalls.length > 0) {',
         '                assistantMsg.tool_calls = toolCalls.map((tc) => {',
         '                    const customInputProperty = options?.grammarToolInputProperties?.get(tc.name);',
@@ -2399,6 +2401,9 @@ const IMPLS = {
         '                            },',
         '                        };',
         '                    }',
+        '                    const geminiThoughtSignature = tc.thoughtSignature && !parseLegacyEncryptedReasoningDetail(tc.thoughtSignature)',
+        '                        ? tc.thoughtSignature',
+        '                        : undefined;',
         '                    return {',
         '                        id: tc.id,',
         '                        type: "function",',
@@ -2406,6 +2411,7 @@ const IMPLS = {
         '                            name: tc.name,',
         '                            arguments: JSON.stringify(tc.arguments),',
         '                        },',
+        '                        ...(geminiThoughtSignature && { extra_content: { google: { thought_signature: geminiThoughtSignature } } }),',
         '                    };',
         '                });',
         '            }',
@@ -2443,6 +2449,7 @@ const IMPLS = {
         '                                name: tc.name,',
         '                                arguments: typeof serializedArguments === "string" && serializedArguments.length > 0 ? serializedArguments : "{}",',
         '                            },',
+        '                            ...(geminiThoughtSignature && { extra_content: { google: { thought_signature: geminiThoughtSignature } } }),',
         '                        };',
         '                    });',
         '                }',
