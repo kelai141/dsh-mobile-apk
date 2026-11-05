@@ -64,15 +64,40 @@ const argv = process.argv.slice(2)
 const has = (f) => argv.includes('--' + f)
 const argOf = (f, d = null) => { const i = argv.indexOf('--' + f); return i >= 0 ? (argv[i + 1] ?? d) : d }
 
-// 语法下限。**不是 chrome87**：实测 esbuild 在 chrome87 目标下**不降类字段**（`x = new Map()` 原样保留），
-// 而类实例字段是 ES2022 语法，真机 Chromium 87 解析期就抛 SyntaxError —— 正是本门要防的形态。
-// 本文件第 24-27 行早已如实标注该边界（「不降 nullish-coalescing / logical-assignment / 类字段 /
-// 私有成员 / 对象展开」），但当时的结论只是「标注边界」，没有换目标，于是门禁自身在类字段上漏判。
-// 改用 es2021：这是 Chromium 87 对应的 ECMAScript 档位（ES2021），且 esbuild 在该档位**确实降**类字段
-// 与私有成员（实测 __publicField / __privateAdd）。口径因此从「不低于 esbuild 的 chrome87 表」
-// 收紧到「不低于 ES2021」——比 MDN 意义的逐特性 Chromium 87 仍然保守（不会放过真机解析不了的东西）。
-const TARGET_LOW = 'es2021'
+// ── 语法下限（口径 = Android 10 / Chromium 87，唯一在案老内核 87.0.4280.101）──────────
+//
+// 目标取 `chrome87`，不是 `es2021`。曾有一版改成 es2021，理由是「esbuild 在 chrome87 下不降类字段，
+// 而类字段是 ES2022 ⇒ 87 会 SyntaxError」。**那个推论是错的**：esbuild 不降类字段，是因为
+// Chromium 87 本来就支持类字段（public 自 Chrome 72、private 自 Chrome 74），不是因为漏降。
+// 真正会让老内核白屏的只有 `ClassStaticBlockDeclaration`（Chrome 94 起），而 chrome87 目标会降它。
+// 改成 es2021 的结果是把 87 原生支持的语法也降了，白付体积（实测 +1,390,213 B）。
+//
+// 但纯 `chrome87` 也不对：esbuild 的兼容表认为可选链 `?.` 需要 **Chrome 92**，实测阈值就在 92
+// （chrome91 降、chrome92 不降）——而 `?.` 自 **Chrome 80** 起就支持（与 `??` 同批）。
+// 于是纯 chrome87 会把满地的 `?.` 展开成 `(_a = x) == null ? void 0 : _a.cursor`，实测反而比 es2021
+// 还大 6,817 B（+1,397,030 vs +1,390,213）。这是 esbuild 表偏保守，不是 87 缺能力。
+//
+// 故：target 仍钉 chrome87，只把 esbuild 判错的那一项按真实支持面声明回去。
+// **覆盖面严格限定为「esbuild 说 87 不支持、但 87 确实支持」的特性**；凡是 87 真不支持的
+// （如 class-static-block / Chrome 94）一律不许出现在这张表里——那会把判据整体放宽。
+const TARGET_LOW = 'chrome87'
 const TARGET_HIGH = 'esnext'    // 对照臂（当前出厂口径）
+/**
+ * 对 esbuild 兼容表的**逐项纠偏**：只登记「esbuild 认为 TARGET_LOW 不支持、但真实 Chromium 87 支持」
+ * 的特性。三个入口（--degrade / --scan / --self-test）**必须共用这一份**——只改降级不改扫描，
+ * 门禁会把自己降完的产物判成「携带未降级语法」，两边互相打架。
+ *
+ * 每一条都必须给出可复核的依据（真机起始版本 + 实测阈值），不接受「实测如此」这种不可核的说法。
+ */
+const TARGET_SUPPORTED = Object.freeze({
+  // 可选链 `?.`：Chrome 80 起支持（与 `??` 同批发布）。
+  //   复核方式：`echo 'const a = o?.x' | esbuild --target=chrome<N>`，看输出里有没有 `void 0`。
+  //   实测 esbuild 0.25.12 的阈值：chrome91 降（出现 `void 0`）、chrome92 不降 ⇒ 表里记的是 92。
+  //   真实支持版本是 80，故 92 > 87 > 80，对 87 这一档属于表偏保守，纠偏不降低判据强度。
+  'optional-chain': true,
+})
+/** 把 supported 纠偏并进任意 esbuild transform 选项——**唯一**允许的构造方式。 */
+const withTarget = (target, extra = {}) => ({ ...extra, loader: extra.loader ?? 'js', logLevel: 'silent', target, supported: TARGET_SUPPORTED })
 const ESBUILD_PIN = '0.25.12'   // 判据 2 的口径锁：兼容表随版本变，故显式钉住
 /**
  * 供应器（provisionEsbuild）**只认这里钉住的字节**（issue #1581）。
@@ -428,10 +453,11 @@ const astJudgment = (rel, text) => {
 // 不传 format：两臂做**完全相同**的管线，唯一变量就是 target —— 这正是差分要隔离的东西；
 // 且与我方 client.js（CJS 风格闭包工厂）及上游 ESM dist 都保持原格式语义（详见 --degrade 处注释）。
 const diffJudgment = async (text) => {
-  const opts = { loader: 'js', logLevel: 'silent' }
+  // 两臂**必须**共用同一份 supported 纠偏：差分要隔离的唯一变量是 target。
+  // 若只给 B 臂（TARGET_LOW）加纠偏而 A 臂不加，两臂就多出一个变量，差分读数失去意义。
   const [a, b] = await Promise.all([
-    esbuild.transform(text, { ...opts, target: TARGET_HIGH }),
-    esbuild.transform(text, { ...opts, target: TARGET_LOW }),
+    esbuild.transform(text, withTarget(TARGET_HIGH)),
+    esbuild.transform(text, withTarget(TARGET_LOW)),
   ])
   return { a: Buffer.from(a.code, 'utf8'), b: Buffer.from(b.code, 'utf8'), differs: a.code !== b.code }
 }
@@ -538,9 +564,7 @@ const PATCH_MARKERS = (() => {
 })()
 
 const degradeText = async (text) => {
-  const out = (await esbuild.transform(text, {
-    loader: 'js', logLevel: 'silent', target: TARGET_LOW,
-  })).code
+  const out = (await esbuild.transform(text, withTarget(TARGET_LOW))).code
   const missing = PATCH_MARKERS.filter((m) => text.includes(m) && !out.includes(m))
   if (missing.length === 0) return out
   // 以行注释补回（注释对运行时无影响）；仅当降级确实丢失时才补。
@@ -667,10 +691,13 @@ if (has('self-test')) {
   const HOME_CB = 'home/.dsh/profiles/web/node_modules/@deepseek-ai/dsh-client-ui-fixture/lib'
   for (const rel of [FE, CB, HOME_CB]) mkdirSync(join(root, rel.split('/').join(sep)), { recursive: true })
 
-  // 用例 1：真代码（类静态块 + 可选链）—— 两条判据都必须报
-  // 夹具必须含**在 TARGET_LOW 下真的会被降级**的语法，否则判据 2 空转（改成 es2021 后 `?.`
-  // 属于 ES2020、不再降级，原来的夹具因此失效——这正是「换目标必须同步换夹具」的地方）。
-  // 现在同时含：类静态块（ES2022）、类实例字段（ES2022）、类静态字段（ES2022）、私有字段（ES2022）。
+  // 用例 1：真代码 —— 两条判据都必须报。
+  // 夹具必须含**在 TARGET_LOW 下真的会被降级**的语法，否则判据 2 空转。这里踩过两次坑，都记在下面：
+  //   · 用 `?.` 承重 → 在 es2021 档位下 `?.` 是 ES2020、不降，判据 2 空转；
+  //   · 用类字段承重 → 在 chrome87 档位下类字段是 Chrome 72/74 特性、不降，判据 2 又空转。
+  // 唯一在两种档位下都会被降级的只有类静态块（Chrome 94 起），故夹具以它承重；
+  // 类字段/私有字段保留在夹具里是**故意**的：它们必须同时满足「判据 1 静默」且「不产生差分」，
+  // 这正是「87 原生支持的语法不许被降」的反向证据（体积就是从这里省下来的）。
   const realCode = 'export class A {\n  static { this.x = 1 }\n  rows = new Map()\n  static EMPTY = 0\n  #secret = 1\n  static is(v) { return v?.y }\n}\nexport const z = A.is?.length\n'
   writeFileSync(absOf(root, FE + '/index-fixture.js'), realCode)
   // 用例 2/3/4：字符串 / 模板串 / 注释内的同类文本，且**不含任何现代语法**——两条判据都不得触发（载荷对照）。
@@ -679,25 +706,26 @@ if (has('self-test')) {
     + 'export const b = `class B { static { this.y = 2 } }`\n'
     + '// class C { static { this.z = 3 } }\nexport const c = a.length\n'
   writeFileSync(absOf(root, CB + '/client.js'), payload)
-  // 对照件：只有类实例字段（无类静态块）—— 判据 1 必须静默、判据 2 必须命中。
-  // 这证明判据 2 不是「只有含 static{} 才有输出」；换成 es2021 后 `?.` 不再触发差分，
-  // 故用类字段作为承重语法（它在 TARGET_LOW 下确实降级，在 TARGET_HIGH 下保留）。
-  writeFileSync(absOf(root, HOME_CB + '/client.js'), 'export class Opt {\n  rows = new Map()\n}\nexport const n = Opt.length\n')
+  // 对照件（HOME 面）：只含**类字段 + 可选链**，不含类静态块 —— 判据 1 必须静默、判据 2 必须不命中。
+  // 这条是 TARGET_SUPPORTED 纠偏的承重反证：类字段（Chrome 72/74）与 `?.`（Chrome 80）在 87 上都支持，
+  // 若它们触发了差分，就说明纠偏没生效、白付了体积。原来的夹具反过来用它们「必须命中」，
+  // 那是 es2021 口径下的写法；换成 chrome87 + supported 后判据正好相反。
+  writeFileSync(absOf(root, HOME_CB + '/client.js'), 'export class Opt {\n  rows = new Map()\n  m(o) { return o?.a?.b }\n}\nexport const n = Opt.length\n')
 
   const t0 = Date.now()
   const reverse = spawnSelf(['--scan', root])                 // 反向对照：未降级必须判红
   const reverseReported = reverse.status === 1
     && /VIOLATION-STATIC .*index-fixture\.js/.test(reverse.stdout)
     && !/VIOLATION-STATIC .*client\.js/.test(reverse.stdout)
-    && /DIFF .*home\/.*client\.js/.test(reverse.stdout)
     && reverse.stdout.includes('ClassStaticBlockDeclaration 违规文件 1 个')
     && reverse.stdout.includes('解析诊断>0 的文件 0 个')
   // 载荷对照（文件级）：CB/client.js 只含载荷文本 → 判据 1 不得出现该路径、判据 2 不得对该路径出 DIFF；
-  // 同时 HOME 对照件（只有真 ?.）必须被判据 2 命中 —— 证明判据 2 的输出不是只靠类静态块才有。
+  // 同时 HOME 对照件（只有 87 原生支持的类字段 + ?.）必须**不**被判据 2 命中 —— 这是纠偏生效的反证。
+  // 于是全树只有 index-fixture.js 一个文件产生差分（它含 static{}）。
   const payloadClean = !/VIOLATION-STATIC [^\n]*client\.js staticBlocks=/.test(reverse.stdout)
     && !/DIFF usr\/[^\n]*dsh-client-ui-fixture/.test(reverse.stdout)
-    && /DIFF home\/[^\n]*dsh-client-ui-fixture/.test(reverse.stdout)
-    && reverse.stdout.includes('判据2 差分: 2/3 个文件')
+    && !/DIFF home\/[^\n]*dsh-client-ui-fixture/.test(reverse.stdout)
+    && reverse.stdout.includes('判据2 差分: 1/3 个文件')
 
   // 正向对照：同一棵树原地降到 chrome87 后必须全绿
   const degraded = spawnSelf(['--degrade', '--stage', root])
@@ -711,12 +739,12 @@ if (has('self-test')) {
   const astPayload = astJudgment('payload.js', payload)
   const parserDiscriminates = astReal.staticBlocks === 1 && astPayload.staticBlocks === 0 && astPayload.diagnostics === 0
   const [dHighReal, dLowReal] = await Promise.all([
-    esbuild.transform(realCode, { format: 'esm', loader: 'js', logLevel: 'silent', target: TARGET_HIGH }),
-    esbuild.transform(realCode, { format: 'esm', loader: 'js', logLevel: 'silent', target: TARGET_LOW }),
+    esbuild.transform(realCode, withTarget(TARGET_HIGH, { format: 'esm' })),
+    esbuild.transform(realCode, withTarget(TARGET_LOW, { format: 'esm' })),
   ])
   const [dHighPay, dLowPay] = await Promise.all([
-    esbuild.transform(payload, { format: 'esm', loader: 'js', logLevel: 'silent', target: TARGET_HIGH }),
-    esbuild.transform(payload, { format: 'esm', loader: 'js', logLevel: 'silent', target: TARGET_LOW }),
+    esbuild.transform(payload, withTarget(TARGET_HIGH, { format: 'esm' })),
+    esbuild.transform(payload, withTarget(TARGET_LOW, { format: 'esm' })),
   ])
   const diffDiscriminates = dHighReal.code !== dLowReal.code && dHighPay.code === dLowPay.code
 
@@ -767,6 +795,46 @@ if (has('self-test')) {
   check('④ 载荷对照：字符串/模板串/注释内同类文本不得触发（AST 3 用例 + 双 arm 差分 3 用例）', payloadClean && diffDiscriminates,
     'ast real=' + astReal.staticBlocks + ' payload=' + astPayload.staticBlocks
     + '；esbuild real differs=' + (dHighReal.code !== dLowReal.code) + ' payload differs=' + (dHighPay.code !== dLowPay.code))
+  // ④b/④c 纠偏覆盖面负控（TARGET_SUPPORTED 的承重条）：必须**分别**证明「87 真不支持的仍判红」
+  // 与「87 真支持的已放行」——把两者混在一条 fixture 里（如 ② 的 static{} + ?.）证不出覆盖面，
+  // 因为只要任一条判据还红着，整棵树就是红的，看不出「放开了哪一项」。
+  //
+  // 判据取向：这两条不是「跑一遍看结果」，而是**同一条扫描路径**对两份只差一个特性的产物各跑一次，
+  // 结论必须一红一绿。若 TARGET_SUPPORTED 被误加进 87 真不支持的特性（如 class-static-block），
+  // ④b 立刻变绿 ⇒ 判据整体放宽被抓到；若纠偏失效（supported 没生效），④c 立刻变红 ⇒ 白付体积被抓到。
+  const probeRoot = mkdtempSync(join(tmpdir(), 'bsf-cover-'))
+  let coverStatic = null
+  let coverOptChain = null
+  try {
+    const rel = FE + '/cover-probe.js'
+    const abs = absOf(probeRoot, rel)
+    mkdirSync(dirname(abs), { recursive: true })
+    // 夹具必须同时含 dist/**/*.js 与 lib/client.js：清单口径要求两类都在场，
+    // 缺 lib/client.js 会先撞「插件 bundle 口径失效」而掩盖掉真正要看的判据 2 读数。
+    const clientAbs = absOf(probeRoot, CB + '/client.js')
+    mkdirSync(dirname(clientAbs), { recursive: true })
+    writeFileSync(clientAbs, 'export const plain = 1\n')
+    // ④b：只放 static{}（87 真不支持，必须判红）
+    writeFileSync(abs, 'export class OnlyStatic { static { this.x = 1 } }\n')
+    const rStatic = spawnSelf(['--scan', probeRoot])
+    coverStatic = { status: rStatic.status, out: rStatic.stdout }
+    // ④c：只放 ?.（87 真支持，必须判绿）
+    writeFileSync(abs, 'export const opt = (o) => o?.a?.b\nexport const n = opt.length\n')
+    const rOpt = spawnSelf(['--scan', probeRoot])
+    coverOptChain = { status: rOpt.status, out: rOpt.stdout }
+  } finally { rmSync(probeRoot, { recursive: true, force: true }) }
+  // ④b 期望：exit 1，且判据 1 报出 staticBlocks（而不是只靠判据 2 命中）
+  const staticStillRed = coverStatic !== null && coverStatic.status === 1
+    && /VIOLATION-STATIC .*cover-probe\.js/.test(coverStatic.out)
+  check('④b 覆盖面负控：87 真不支持的 static{} 单独出现时必须判红（纠偏不得放宽这一项）', staticStillRed,
+    coverStatic === null ? '（未执行）' : 'exit=' + coverStatic.status + '（期望 1）'
+    + (coverStatic && !/VIOLATION-STATIC .*cover-probe\.js/.test(coverStatic.out) ? '；但判据1 未报出 staticBlocks' : ''))
+  // ④c 期望：exit 0，且该文件不出现在任何违规/差分行里
+  const optChainGreen = coverOptChain !== null && coverOptChain.status === 0
+    && /判据2 差分: 0\//.test(coverOptChain.out)
+  check('④c 覆盖面负控：87 真支持的 ?. 单独出现时必须判绿（纠偏只放开这一项，不是整体放宽）', optChainGreen,
+    coverOptChain === null ? '（未执行）' : 'exit=' + coverOptChain.status + '（期望 0）'
+    + (coverOptChain && !/判据2 差分: 0\//.test(coverOptChain.out) ? '；差分未归零 ⇒ supported 未生效' : ''))
   // ⑤ 降级不得洗掉引擎树补丁 marker（esbuild 剥注释；0.14.1 实测缺陷）
   check('⑤ 补丁 marker 保全：降级（剥注释）后 registry 的 marker 必须仍在原文件里', markerKept, markerDetail)
   /* ⑧ esbuild 字节锚（issue #1581）：判据必须是「钉住值决定接受与否」，不是「代码里有这一行」。
