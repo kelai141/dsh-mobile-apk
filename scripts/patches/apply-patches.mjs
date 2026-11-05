@@ -1372,11 +1372,11 @@ const IMPLS = {
     apply: (s) => {
       if (s.includes('dsh-mobile ptc argv heap via NODE_OPTIONS (L1)')) return s
       const OLD_EXEC = [
-        "\t\t\tconst executable = await this.ctx.subprocess.resolveExecutable(this.config.launch.executable, void 0, signal);",
-        "\t\t\tif (settled) return await result.promise;",
+        "\t\tconst executable = await this.ctx.subprocess.resolveExecutable(this.config.launch.executable, void 0, this.controller.signal);",
+        "\t\tif (this.closed) return;",
       ].join('\n')
       const NEW_EXEC = [
-        "\t\t\tconst executable = await this.ctx.subprocess.resolveExecutable(this.config.launch.executable, void 0, signal);",
+        "\t\tconst executable = await this.ctx.subprocess.resolveExecutable(this.config.launch.executable, void 0, this.controller.signal);",
         "\t\t\t// dsh-mobile ptc argv heap via NODE_OPTIONS (L1): fail loud on an unusable executable.",
         "\t\t\t// Android falls back to the system linker when direct exec of an app-data ELF is denied, and",
         "\t\t\t// process.execPath is then polluted with that linker path; a linker never loads Node, so the",
@@ -1384,35 +1384,35 @@ const IMPLS = {
         "\t\t\t// here instead of guessing a replacement path.",
         "\t\t\tif (typeof executable !== 'string' || !isAbsolute(executable)) {",
         "\t\t\t  throw new Error('ptc-runtime-node: resolved node executable is not an absolute path (' + String(executable) + '); set ptc-runtime.launch.executable to an absolute node binary or wrapper path');",
-        "\t\t\t}",
+        "\t\t}",
         "\t\t\tconst __dshMobileExecBase = executable.slice(executable.lastIndexOf('/') + 1);",
         "\t\t\tif (/^(?:ld\\.so(?:\\.[0-9]+)*|linker(?:64)?)$/.test(__dshMobileExecBase)) {",
         "\t\t\t  throw new Error('ptc-runtime-node: resolved node executable is the system dynamic linker (' + executable + '); set ptc-runtime.launch.executable to an absolute node binary or wrapper path, not a linker');",
-        "\t\t\t}",
-        "\t\t\tif (settled) return await result.promise;",
+        "\t\t}",
+        "\t\tif (this.closed) return;",
       ].join('\n')
       const OLD_ARGV = [
-"\t\t\tconst argv = [",
-"\t\t\t\texecutable,",
-"\t\t\t\t...packaged ? [] : [heapFlag],",
-"\t\t\t\t...bootstrapArgs(this.ctx.fs, this.config.launch, this.config.maxMessageBytes)",
-"\t\t\t];",
+"\t\tconst argv = [",
+"\t\t\texecutable,",
+"\t\t\t...packaged ? [] : [heapFlag],",
+"\t\t\t...bootstrapArgs(this.ctx.fs, this.config.launch, this.config.maxMessageBytes, this.retainsState)",
+"\t\t];",
       ].join('\n')
       const NEW_ARGV = [
 "\t\t\t// dsh-mobile ptc argv heap via NODE_OPTIONS (L1): the heap flag must never sit at argv[1].",
 "\t\t\t// The system linker (used when direct exec of an app-data ELF is denied) treats the first",
 "\t\t\t// non-option argument as the program path, so a leading --max-old-space-size would be read",
 "\t\t\t// as that path and the child would die before Node loads. It travels via env instead.",
-"\t\t\tconst argv = [",
-"\t\t\t\texecutable,",
-"\t\t\t\t...bootstrapArgs(this.ctx.fs, this.config.launch, this.config.maxMessageBytes)",
-"\t\t\t];",
+"\t\tconst argv = [",
+"\t\t\texecutable,",
+"\t\t\t...bootstrapArgs(this.ctx.fs, this.config.launch, this.config.maxMessageBytes, this.retainsState)",
+"\t\t];",
       ].join('\n')
       const OLD_ENV = [
-"\t\t\tif (packaged) {",
-"\t\t\t\tenv.DSH_PTC_RUNTIME_NODE = \"1\";",
-"\t\t\t\tenv.NODE_OPTIONS = heapFlag;",
-"\t\t\t}",
+"\t\tif (packaged) {",
+"\t\t\tenv.DSH_PTC_RUNTIME_NODE = \"1\";",
+"\t\t\tenv.NODE_OPTIONS = heapFlag;",
+"\t\t}",
       ].join('\n')
       const NEW_ENV = [
 "\t\t\t// dsh-mobile ptc argv heap via NODE_OPTIONS (L1): set for every spawn, not only packaged runs,",
@@ -1426,9 +1426,9 @@ const IMPLS = {
 "\t\t\t// engine-level NODE_OPTIONS -- which the child never saw before either -- is now overwritten",
 "\t\t\t// by this value instead of removed.",
 "\t\t\tenv.NODE_OPTIONS = heapFlag;",
-"\t\t\tif (packaged) {",
-"\t\t\t\tenv.DSH_PTC_RUNTIME_NODE = \"1\";",
-"\t\t\t}",
+"\t\tif (packaged) {",
+"\t\t\tenv.DSH_PTC_RUNTIME_NODE = \"1\";",
+"\t\t}",
       ].join('\n')
       for (const pair of [[OLD_EXEC, 'executable 解析行'], [OLD_ARGV, 'argv 构造块'], [OLD_ENV, 'env 赋值块']]) {
         if (!s.includes(pair[0])) {

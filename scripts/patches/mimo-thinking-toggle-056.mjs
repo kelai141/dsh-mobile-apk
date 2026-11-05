@@ -1,4 +1,5 @@
 /** MiMo binary-thinking adapter for the pinned DSH/PiAi runtime contract. */
+import { ENGINE_BASELINE, PINNED_PI_AI, assertEngineBaseline } from './engine-versions.mjs'
 export const MIMO_PATCH_MARKER = 'dsh-mobile MiMo thinking toggle (issue #56)'
 export const MIMO_PI_FILE = 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js'
 
@@ -61,8 +62,8 @@ export function planMimoThinking(read) {
   const piBefore = read(piFile)
   const dshManifest = JSON.parse(read('usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai/package.json'))
   const piManifest = JSON.parse(read('usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai/package.json'))
-  if (dshManifest.version !== '0.2.1-rc.3' || piManifest.version !== '1.1.0') {
-    throw new Error('mimo-thinking-toggle-056 requires dsh-llm-pi-ai@0.2.1-rc.3 and pi-ai@1.1.0')
+  if (dshManifest.version !== ENGINE_BASELINE || piManifest.version !== PINNED_PI_AI) {
+    throw new Error('mimo-thinking-toggle-056 requires dsh-llm-pi-ai@' + ENGINE_BASELINE + ' and pi-ai@' + PINNED_PI_AI)
   }
   return [
     { file: dshFile, before: dshBefore, after: patchDshThinkingProfile(dshBefore) },
