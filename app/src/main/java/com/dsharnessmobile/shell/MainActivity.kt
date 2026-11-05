@@ -757,7 +757,7 @@ class MainActivity : ComponentActivity() {
           showGuide()
         }
       }
-      FileIncoming.processIncomingIntent(this, intent) { title, text -> showTestNotification(title, text) }
+      handleIncomingIntent(intent)
       // P0-1：冷启动路径的通知落点（热路径在 onNewIntent）。放在 startEngineFlow 之后：
       // 落点要等页面把会话列表装起来，故这里只登记，真正的投递由页面就绪/onNewIntent 触发。
       consumeNotifyRoute(intent)
@@ -802,7 +802,22 @@ class MainActivity : ComponentActivity() {
       retryEngineExplicitly()
       return
     }
+    // issue #1605：来件（VIEW/SEND）同样必须走这条路径。
+    // 旧实现只在 onCreate 调 FileIncoming.processIncomingIntent，于是「应用已在前台时分享文件」
+    // （发送方常带 FLAG_ACTIVITY_SINGLE_TOP/CLEAR_TOP）拿到的是 onNewIntent —— 文件既不拷贝也不提示，
+    // 用户以为分享成功了。冷启动与热路径现在共用同一个入口，两条路径不可能再分叉。
+    handleIncomingIntent(intent)
     consumeNotifyRoute(intent)
+  }
+
+  /**
+   * 外部来件的**唯一**处理入口（issue #1605）：冷启动（[onCreate]）与热重启（[onNewIntent]）同调。
+   *
+   * null 安全：`processIncomingIntent` 自己在没有可用 uri 时什么都不做（返回而不抛），
+   * 这里只负责把通知回调接上（拒绝/失败必须说话，见该函数的契约）。
+   */
+  private fun handleIncomingIntent(intent: Intent?) {
+    FileIncoming.processIncomingIntent(this, intent) { title, text -> showTestNotification(title, text) }
   }
 
   /** 把待投递的通知落点交给页面；页面未就绪则留到 onPageFinished 再送一次。 */

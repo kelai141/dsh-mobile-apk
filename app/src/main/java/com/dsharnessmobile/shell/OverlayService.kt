@@ -376,6 +376,22 @@ class OverlayService : Service() {
       softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN
     }
     panelParams = pp
+    // issue #1612：面板窗口是**可聚焦**的（弹输入法需要），于是展开期间 BACK 被派发到这个
+    // overlay 窗口，而全仓没有任何 KEYCODE_BACK 处理 —— 视图树无人消费，非 Activity 窗口没有
+    // 默认回落，事件被直接丢弃。用户视角是「返回键死了」：既关不掉面板，也退不出后面引擎
+    // 页面的子层（BackGate 同样拿不到这次返回），只能去找 ✕。
+    //
+    // 修法只在这一处：面板根 View 上消费 BACK（ACTION_UP，与系统语义一致——按下不动作），
+    // 收起面板并返回 true 表示已处理；其余按键一律返回 false，不拦截输入法/编辑行为。
+    // 不改窗口 flags：可聚焦是弹输入法的前提，面板本来就该能收键盘。
+    unit.setOnKeyListener { _, code, event ->
+      if (OverlayBackKey.shouldCollapse(code, event.action)) {
+        hidePanel()
+        true
+      } else {
+        false
+      }
+    }
     positionPanel()
     panel.refreshSessionPicker()
     unit.visibility = View.VISIBLE

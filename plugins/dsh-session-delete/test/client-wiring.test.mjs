@@ -45,6 +45,38 @@ function createReact() {
   }
 }
 
+/**
+ * 可控时钟（issue #1618 的判据需要「4 秒后看门狗有没有开火」这类断言）。
+ *
+ * 不用真实时间等 8 秒，也不靠读源码常量：把 setTimeout/clearTimeout 注入进沙箱，
+ * 测试按虚拟毫秒推进，看门狗/重试的真实调度顺序就变成可观测量。
+ */
+function createClock() {
+  let now = 0
+  let seq = 0
+  const timers = new Map()
+  const settle = async () => { for (let i = 0; i < 12; i += 1) await Promise.resolve() }
+  return {
+    now: () => now,
+    setTimeout(fn, ms) { const id = ++seq; timers.set(id, { at: now + (Number(ms) || 0), fn, id }); return id },
+    clearTimeout(id) { timers.delete(id) },
+    pending: () => [...timers.values()].map((timer) => timer.at - now).sort((a, b) => a - b),
+    async advance(ms) {
+      const target = now + ms
+      for (;;) {
+        const due = [...timers.values()].filter((timer) => timer.at <= target).sort((a, b) => a.at - b.at || a.id - b.id)[0]
+        if (due === undefined) break
+        timers.delete(due.id)
+        now = due.at
+        due.fn()
+        await settle()
+      }
+      now = target
+      await settle()
+    },
+  }
+}
+
 /** 载入客户端 bundle，返回 { apply }。 */
 function loadClient(options = {}) {
   let factory = null
@@ -108,7 +140,9 @@ function loadClient(options = {}) {
       fetches.push({ url, init })
       return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
     },
-    setTimeout, clearTimeout, console,
+    setTimeout: options.clock === undefined ? setTimeout : options.clock.setTimeout,
+    clearTimeout: options.clock === undefined ? clearTimeout : options.clock.clearTimeout,
+    console,
     Symbol, JSON, Number, Date, String, Object, Array, Promise, RegExp, Error,
   }
   context.window.document = context.document
@@ -117,7 +151,7 @@ function loadClient(options = {}) {
   vm.runInContext(SOURCE, sandbox)
   assert.equal(typeof factory, 'function', 'client bundle did not call __ModuleLoader__.load')
   const module = factory((id) => (id === 'react' ? react : primitives))
-  return { module, react, sent, FakeXHR, sandbox, reloads, storage, toasts, fetches }
+  return { module, react, sent, FakeXHR, sandbox, reloads, storage, toasts, fetches, clock: options.clock }
 }
 
 test('menu item click opens the overlay and the confirm button sends the request', async () => {
@@ -248,6 +282,45 @@ test('a timeout is retried, and a final failure is recorded with its code', asyn
   const failed = trace.filter((row) => row.step === 'failed')
   assert.equal(failed.length, 1, 'the failure must be recorded')
   assert.equal(failed[0].extra.code, 'session-active')
+})
+
+/**
+ * issue #1618：看门狗 4s 短于重试阶梯 6s，重试永远跑不完。
+ *
+ * 缺陷形态：单次 2s × 3 次 = 6s，而看门狗 4s 就 `location.reload()`。一次 2.5s 的正常删除
+ * （慢盘/首包冷启动）会先超时、再在第 2 次重试途中被整页刷新，用户丢掉滚动位置与输入框草稿，
+ * 然后 600ms 后由 resume 路径重发第三次。
+ *
+ * 判据是**行为**：把时钟推到「旧看门狗会开火」的时刻（4s）而阶梯还在跑（第 2 次重试已发出、
+ * 尚未超时），断言页面**没有**被刷新；继续推到阶梯走完 + 余量，看门狗才开火。
+ * 用假定时器而不是真等 8 秒。
+ */
+test('#1618 看门狗必须晚于重试阶梯：阶梯跑完之前不得整页刷新', async () => {
+  const clock = createClock()
+  const { module, react, FakeXHR, reloads } = loadClient({ clock })
+  clickConfirm(module, react)
+  assert.equal(FakeXHR.instances.length, 1)
+
+  // 第 1 次超时（t=2s）⇒ 立刻发第 2 次。
+  await clock.advance(2000)
+  FakeXHR.instances.at(-1).ontimeout()
+  for (let i = 0; i < 8; i += 1) await Promise.resolve()
+  assert.equal(FakeXHR.instances.length, 2, '超时必须触发重试')
+
+  // 旧看门狗（4000ms）在这个时刻就开火了；阶梯此时才走到第 2 次。
+  await clock.advance(2000)
+  assert.equal(reloads.length, 0, '重试阶梯还在跑时看门狗不得刷新页面（issue #1618）')
+
+  // 第 2 次超时（t=4s）⇒ 发第 3 次；阶梯到 t=6s 才走完。
+  FakeXHR.instances.at(-1).ontimeout()
+  for (let i = 0; i < 8; i += 1) await Promise.resolve()
+  assert.equal(FakeXHR.instances.length, 3, '第二次超时必须触发最后一次尝试')
+  await clock.advance(1999)
+  assert.equal(reloads.length, 0, '阶梯最后一轮尚未超时，看门狗仍不得开火')
+
+  // 阶梯走完 + 余量之后，看门狗才允许接管。
+  await clock.advance(4000)
+  assert.equal(reloads.length, 1, '阶梯确实卡死时看门狗仍必须接管（不得改成永不刷新）')
 })
 
 test('a 404 carrying not-found is treated as already deleted', async () => {

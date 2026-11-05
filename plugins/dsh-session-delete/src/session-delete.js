@@ -97,7 +97,9 @@ export async function findSessionDir(root, sessionId) {
  * @param {string} options.home - absolute `DSH_HOME`.
  * @param {string} options.sessionId - session to delete.
  * @param {boolean} options.isActive - whether any provider reports running work for the session.
- * @param {(info: { sessionId: string, dir: string }) => Promise<void>} [options.beforeRemove] - bookkeeping hook (unarchive/unpin).
+ * @param {(info: { sessionId: string, dir: string }) => Promise<void>} [options.beforeRemove] - bookkeeping hook
+ *   (unarchive/unpin). issue #1617：它在目录已经离开扫描路径、内存会话已卸载**之后**才跑，
+ *   失败只记 warn 不阻断删除——记账永远不是「删除失败但副作用已发生」的中间态来源。
  * @param {(info: { sessionId: string, dir: string }) => Promise<void>} [options.afterResolve] - runs once the directory is confirmed (unload the live session).
  * @param {(level: 'info'|'warn'|'error', message: string, extra?: object) => void} [options.logger] - step logger.
  * @param {(target: string, options: object) => Promise<void>} [options.removeDir] - directory remover.
@@ -117,11 +119,13 @@ export async function deleteStoredSession({ home, sessionId, isActive, beforeRem
   const root = sessionsRoot(home)
   const dir = await findSessionDir(root, sessionId)
   log('info', 'resolved session directory', { sessionId, dir })
-  if (typeof beforeRemove === 'function') {
-    log('info', 'clearing archive/pin membership', { sessionId })
-    await beforeRemove({ sessionId, dir })
-    log('info', 'archive/pin membership cleared', { sessionId })
-  }
+  // issue #1617：归档/置顶记账**不得**跑在 rename 之前。
+  //
+  // 旧实现先 unarchive/unpin、随后 rename 失败（EACCES/ENOSPC）→ 返回 500「删除失败」，会话还在
+  // 列表里，但已悄悄退出归档/置顶。用户看到的失败与磁盘事实相反：真正发生的副作用没人告诉他。
+  //
+  // 现在记账挪到 rename **成功之后**（与 afterResolve 同段）：移动失败 = 什么都没发生，记账也
+  // 就一次都没跑过。副作用与「目录已离开扫描路径」这一事实绑定，不再有中间态。
   // issue #1203：顺序必须是**先移目录、后卸载**。
   //
   // 旧实现把 afterResolve（卸载内存会话）放在 rename **之前**，而移动是卸载之后唯一的
@@ -163,6 +167,23 @@ export async function deleteStoredSession({ home, sessionId, isActive, beforeRem
       // 决定调用方映射的 HTTP 状态（409 可重试 vs 500），吞掉就丢了语义。
       if (error instanceof SessionDeleteError) throw error
       throw new SessionDeleteError('delete-failed', `could not unload the session: ${String(error?.message ?? error)}`, { sessionId, dir })
+    }
+  }
+  // issue #1617：归档/置顶记账放在**所有可能失败且会回滚的步骤之后**。
+  //
+  // 旧实现把它放在 rename 之前：先 unarchive/unpin，随后 rename 失败（EACCES/ENOSPC）→
+  // 返回 500「删除失败」，会话还在列表里，却已悄悄退出归档/置顶。副作用发生了，用户却以为
+  // 什么都没变。现在它在「目录已离开扫描路径且内存已卸载」之后才跑，与删除的事实绑定；
+  // 记账自身失败不阻断删除（它只影响列表里的归档/置顶标记），但必须留痕而不是静默。
+  if (typeof beforeRemove === 'function') {
+    log('info', 'clearing archive/pin membership', { sessionId })
+    try {
+      await beforeRemove({ sessionId, dir })
+      log('info', 'archive/pin membership cleared', { sessionId })
+    } catch (error) {
+      log('warn', 'archive/pin bookkeeping failed after the directory moved (ignored)', {
+        sessionId, dir, error: String(error?.message ?? error),
+      })
     }
   }
   try {

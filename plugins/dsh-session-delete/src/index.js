@@ -273,8 +273,10 @@ export async function removeSession(ctx, sessionId) {
     sessionId,
     isActive: false,
     logger: (level, message, extra) => log(ctx, level, message, extra),
-    // 目录确认存在、归档/置顶清理完成之后才卸载：目录不存在或不唯一时不能先把会话
-    // 从内存里拿掉，否则用户会看到「报错却消失」，且文件其实还在。
+    // 目录确认存在之后才卸载：目录不存在或不唯一时不能先把会话从内存里拿掉，
+    // 否则用户会看到「报错却消失」，且文件其实还在。
+    // issue #1617：归档/置顶记账（beforeRemove）已挪到移动与卸载之后，
+    // 所以这里不再承担「清理完才卸载」的顺序责任——顺序由 deleteStoredSession 自己保证。
     afterResolve: async () => {
       const unloaded = unloadLiveSession(ctx, sessionId)
       if (unloaded.wasLive) log(ctx, 'info', 'unloaded the live session', { sessionId })
