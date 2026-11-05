@@ -3058,3 +3058,55 @@ The term '//' is not recognized as a name of a cmdlet, function, script file, or
     现象：给 `/data/user/<N>` 与 `/data/data` 的等价改写加「同用户」守卫后写了一条例据，把守卫删掉负控**仍然绿**——因为那条分支只处理 `user 0`，删了守卫结论也一样。
     补一条真正区分它的用例（base 写成 `user/0`、而当前进程在 `user 10`）之后，删守卫立刻红。
     纪律：**负控不红不是「实现已经正确」，而是「这条判据没有判别力」**——当场补用例，不能放过。
+
+379. **插件退役了，构建/发布入口的引用不会自己消失——而"少一个包"没有任何判据会红**（2026-11-04，0.2.2-rc.1 适配勘测）
+
+    现象：`plugins/dsh-model-capability` 在 0.14.8 就整体退役（本仓连目录都没有），但 8 个月后仍有
+    5 处构建/发布入口在引用它：`build-apk-source.yml` 的插件 `sha256sum` 循环、`release.yml` 里
+    "从本次快照恢复模型能力目录"整步（`gen-model-catalog.mjs --out plugins/dsh-model-capability/lib/catalog-snapshot.json`）、
+    `build-snapshot-013.mjs` 的 0g 生成块、`plugin-dirs.json` 的说明文字、以及 `build-apk-013.ps1` 里
+    "少一个包且无任何门禁能发现"那句自陈注释——**注释本身就在描述这个缺陷，却没人把它变成判据**。
+
+    真因：这些入口对"插件是否存在"全是**静默容错**。
+    ① `for d in <列表>` 里缺失的目录只会让 `sha256sum` 报个错再 `|| true` 吞掉；
+    ② `build-snapshot-013.mjs` 的生成块整个包在 `if (existsSync(join(pluginDir,'package.json')))` 里，
+       目录不在就静默跳过；
+    ③ `release.yml` 那步会自己 `mkdir` 出目标目录再写文件，**把已退役插件的路径重新造出来**；
+    ④ `plugin-dirs.json` 只在 `$comment` 里提到它，没人读注释做判据。
+    于是"退役"只发生在源码树里，入口清单仍是旧世界的副本，谁也不会红。
+
+    修法：
+    - 清引用：两份 workflow（删整步 / 从循环移除）、`build-snapshot-013.mjs`（删 0g 块）、
+      `plugin-dirs.json` 说明、两处自陈注释；`gen-model-catalog.mjs` **撤掉默认 `--out`**，
+      不显式指定就 `exit 2`，杜绝"一跑就把退役插件目录树造回来"。
+    - 加门禁：`scripts/check-retired-plugins.mjs` 扫 7 个构建/发布入口，
+      可执行引用命中即红、**注释里的历史说明放行**（否则逼人删掉理由），并单独断言
+      `plugin-dirs.json` 的 dirs/externals/retiredExternals 与 `profile-web.cordis.patch.yml` 的装配行里没有它；
+      自检用临时样本做正/负控，**不依赖仓库当前是否干净**（依赖现状的自检会在清理完成后变假绿）。
+    - 判据边界：`docs/`、`release/`、`AGENTS.md` 属历史记录，**刻意不扫**——把历史也判红，等于逼人删证据。
+
+    复验：`node scripts/check-retired-plugins.mjs`（0）与 `--self-test`（正/负控都符合预期）；
+    反证做法 = 往 `plugin-dirs.json` 的 dirs 里塞回该包，门禁必须红。
+380. **`git rebase` 会静默丢掉执行地图的改动——地图必须在重基后按内容重做，delta 重铺不可重放**（2026-11-04，`#1548` 实锤）
+
+    现象：本地 `check-code-map` 绿；rebase 到新 main 之后同一个分支突然 30 项 `bad-anchor-content`，而且不是差一行——**指到了另一行**。
+    真因两层：① rebase 重放提交时，`docs/AGENTS/EXECUTION-MAP.md` 的冲突块取了 upstream（main）侧，我原先算好的锚点位移被**静默丢弃**，
+    工作区只剩「部分更新」的地图；② 我随后的修复又是按 delta 推的，而 delta 是相对**旧基**算的，基一变全错。
+    纪律：任何 rebase 之后，**地图一律按内容重钉**（找出该内容当前所在行），不要复用重基前算出的位移量；
+    判据是 `check-code-map` + `check-code-map-anchors.test.mjs` 双绿，不是只看前者。
+
+381. **CI 验的是 PR 的 merge commit，不是分支 head——「本地全绿、CI 全红」的必然来源**（2026-11-04，`#1548`/`#1537` 实锤）
+
+    现象：分支 head 上 `check-code-map` PASSED，CI 却红；`check-code-map-anchors.test.mjs` 的四条变异反证全部以 `-> exit=1` 失败。
+    读法：那个自测把仓库（含地图与基线）拷进临时副本再跑门禁；`-> exit=1` 表示**副本里门禁本来就已经红**，不是「变异没被抓到」。
+    真因：GitHub 在 `refs/pull/<n>/merge` 上跑 CI，即 **main 与分支的合并结果**。分支落后 main 时，合并会把 main 的地图与我的地图拼在一起，
+    产生 head 上没有、合并后才有的一堆 `bad-anchor-content` / `uncovered`。
+    纪律：推之前本地必须 `git merge origin/main`（或等价地用合并结果）再跑门禁；只验 head 等于没验。
+    复现方式：`git worktree add /tmp/m --detach origin/main && cd /tmp/m && git merge <branch> && node scripts/check-code-map.mjs`。
+
+382. **脚本往 `#expect` 里写值时，正则必须一直吃到反引号为止，不能停在空格**（2026-11-04，`#1548` 实锤，与 376 同族）
+
+    现象：重钉后门禁报 ``Expected "…9#expect=+ warn + webHint + detail.hint," ``——期望值尾部粘着别的 token。
+    真因：`#expect` 值是百分号编码的（本不含空格），但历史上有手工写成裸文本的条目；脚本用 `[^` ]*`（排除空格）匹配，
+    遇到裸文本就只吃掉第一段，剩下的被当成内容的一部分。
+    修法：匹配用 `#expect=[^`]*`（到反引号为止），替换时整段重建；写回的值一律 `encodeURIComponent`。

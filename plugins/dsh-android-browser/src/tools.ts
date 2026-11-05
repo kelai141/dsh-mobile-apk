@@ -717,6 +717,15 @@ export function browserTools(face: () => BrowserControlFace | undefined): unknow
       execute: async ({ direction, amount }: { direction: string; amount?: number }, exec) => {
         const session = gate(exec)
         if (!session.ok) return { ok: false, error: 'session-not-full-access', guidance: session.guidance } as never
+        // issue #1620：dx/dy 只认四个字面量，其余一律 0 ⇒ window.scrollBy(0,0) ⇒ 回 ok:true + 原 scrollY。
+        // 表达式由本层自己拼，壳侧不会再校验方向，所以**没有任何一层会报错**：模型传 direction:"upward"
+        // 会收到成功、页面没动，然后反复重试或据此下结论。这里先校验，形状与 open/set_viewport 一致。
+        if (direction !== 'up' && direction !== 'down' && direction !== 'left' && direction !== 'right') {
+          return {
+            ok: false, error: 'unknown-direction',
+            guidance: '可用方向：up, down, left, right（收到 ' + String(direction) + '）。',
+          } as never
+        }
         const step = typeof amount === 'number' && Number.isFinite(amount) ? Math.max(1, Math.min(4000, Math.abs(amount))) : 600
         const dx = direction === 'left' ? -step : direction === 'right' ? step : 0
         const dy = direction === 'up' ? -step : direction === 'down' ? step : 0

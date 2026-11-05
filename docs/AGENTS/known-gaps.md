@@ -147,3 +147,18 @@ slot-guard 注释与本日审计报告。
 | 项 | 当前事实 | 结论 / 后续 |
 |---|---|---|
 | 摘要展示从「有值即显示」改为「证明不了就说未验证」 | `webpages/src/assets/digest.js` 判据把 SHA-256 展示分三态：`verified` / `unverified`（旧 seed 无 `manifestSha256`、拉不到 MANIFEST、或 seed 自洽检查不过）/ `mismatch`（manifest 摘要对不上，或某条 APK 摘要与 manifest 条目不同）。**旧 seed 显示「未验证」是预期行为，不是回归**。 | 跑一次 `node webpages/tools/build.mjs --refresh` 会把 `manifestSha256` 写进 `data/releases.json`，下一次构建自动转 `verified`。**不要把「未验证」当缺陷去改成「已验证」**——那正是 #1394 修掉的东西。 |
+
+
+## 退役插件门禁：本仓已接线，协调仓 CI 未点名（2026-11-04，PR #1553）
+
+| 项 | 当前事实 | 结论 / 后续 |
+|---|---|---|
+| `check-retired-plugins.mjs` 的 `ciCoord: true` 只兑现了一半 | 本仓已接线：`check-release-gates.mjs` 门禁表 + `build-apk-013.ps1` 链尾真实执行点 + `build-apk.mjs` 的 `GATE_SCRIPTS` 与执行段 + `.github/workflows/pr-gate.yml` 接线面聚合断言（`check-gate-skips` / 静态 `check-release-gates` 均 PASS）。协调仓 `.github/workflows/pr-gate.yml` 未点名这道门。 | **已知缺口，本轮不修**：镜像同步已停止维护，跨仓改一个「那边 CI 也跑这道门」的收益低于两处接线不一致的风险。协调仓若恢复镜像维护，需在那里补一行 `node scripts/check-retired-plugins.mjs`。 |
+| 缺口的影响面 | 协调仓 CI 不会跑这道门 ⇒ 若有人在**协调仓**的构建入口重新引入退役插件引用，本仓门禁扫不到（扫描面是 7 个 apk 仓入口，见该脚本的 `TEXT_ENTRIES`/`JSON_ENTRY`）。 | 本仓两条构建链与 PR Gate 仍会拦；发布只走本仓链，故不阻塞发版。 |
+
+## `check-code-map.mjs` 的 `--only` / `--derive-anchors` 会写出「解析不了」的 `path@hash` 锚点（2026-11-04，PR #1553 实测）
+
+| 项 | 当前事实 | 结论 / 后续 |
+|---|---|---|
+| 无包围符号的行（Markdown 行、顶层注释、表格行）会被推成 `path@<hash>` 内容锚 | 对这类行跑 `deriveAnchorFor` 得到的都是 `content` 分支（实测 15/15），而 `parseDoc` 的 `ANCHOR_RE` 只认 `path:line` 与 `path#Symbol` 两支 ⇒ **迁移后该锚点静默失校**。一次 `--only --write` 会让 22 处引用变成没人校验的死文本（`parseDoc('AGENTS.md@e2511d29')` 返回 `anchors=[]`）。 | **必须修，但不在本轮 PR**：要改判据（让 `ANCHOR_RE` 认 `path@hash`，或让 derive 对无符号行保留 `path:line#expect=`）并补自检。在修好之前：**禁止用 `--only --write` / `--derive-anchors --write` 刷基线**，只用「按内容逐条重钉」。 |
+| 为什么这条比「文档数字过期」更严重 | 门禁**以为自己还在守**：`check-code-map` 会 PASS（因为读不到那个锚点了），而实际引用已经没人看。下一次有人改 `AGENTS.md` 那一行，不会有任何红。 | 记入 §5.3 的维护纪律：改执行地图锚点只走「原行 `#expect` 重钉」，禁止整份 derive。 |

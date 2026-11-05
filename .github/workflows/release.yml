@@ -258,16 +258,6 @@ jobs:
       # 单 pass 注入（@dsh-android + vendor 外部插件 + 权威 patch，--all-profiles）、产物面门禁、
       # 双 ABI 打包，以及 -ExportSnapshots 的「注入后快照 == APK 内嵌快照」一致性校验。
       # 手搓版缺降级与注入 ⇒ check-inject-completeness 如实判红（真实 run 36356397292）。
-      - name: 从本次快照恢复模型能力目录（跨 job 同源）
-        shell: bash
-        run: |
-          set -euo pipefail
-          CATALOG_ROOT=".deploy-tmp/release-model-catalog"
-          PI="usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai"
-          mkdir -p "$CATALOG_ROOT"
-          # 单次流式解压，只物化目录声明；不依赖 J1 未上传的 lib 或上一次工作区缓存。
-          xz -d -T8 -c .deploy-tmp/snapshot-013/arm64/snapshot.tar.xz | tar -xf - -C "$CATALOG_ROOT" "$PI/package.json" "$PI/dist/providers/data"
-          node scripts/gen-model-catalog.mjs --engine-root "$CATALOG_ROOT" --out plugins/dsh-model-capability/lib/catalog-snapshot.json
       - name: 本地链全量（语法降级 + 注入 + 门禁 + 双 ABI 打包 + 注入后快照导出）
         shell: bash
         run: |

@@ -49,7 +49,6 @@
     "app/src/main/java/com/dsharnessmobile/shell/OverlayService.kt:274": 1,
     "app/src/main/java/com/dsharnessmobile/shell/ControlAudit.kt:34": 2,
     "dsh-host-web-compat/scripts/smoke-injections.mjs:50": 5,
-    "scripts/build-apk-013.ps1:166": 3,
     "plugins/dsh-android-vdisplay/test/tools-callable.test.mjs:122": 3,
     "scripts/build-apk-013.ps1:141": 3,
     "MainActivity.kt:619": 1,
@@ -325,7 +324,6 @@
     "reference-menu.ts:45": 1,
     "mobile-form.css.ts:25": 1,
     "dsh-client-ui-responsive/src/client/mobile/form-marker.ts:45": 2,
-    "AGENTS.md:30": 3,
     "scripts/build-apk-013.ps1:206": 2,
     "0.13.7-CERTIFICATION.md:11": 2,
     "scripts/make-snapshot.sh:8": 2,
@@ -335,12 +333,10 @@
     "inject-snapshot.py:106": 2,
     "build-release.ps1:109": 2,
     "docs/AGENTS/build-and-env.md:32": 3,
-    "scripts/check-release-gates.mjs:28": 8,
     "scripts/build-release.ps1:56": 5,
     "docs/AGENTS/RUNTIME-PATCHES.md:56": 3,
     "scripts/build-apk-013.ps1:211": 3,
     "docs/AGENTS/0.13.7-CERTIFICATION.md:11": 3,
-    "AGENTS.md:21": 3,
     "scripts/check-patch-mirror.mjs:231": 3,
     "scripts/check-snapshot-builder-output.mjs:156": 2,
     "scripts/check-plugin-tests.mjs:35": 3,
@@ -485,7 +481,6 @@
     "build-snapshot-013.mjs:360": 2,
     "build-apk-013.ps1:229": 2,
     "build-snapshot-013.mjs:309": 2,
-    "scripts/build-apk.mjs:61": 4,
     "scripts/check-patch-mirror.mjs:339": 4,
     "scripts/check-boot-budget.mjs:681": 3,
     "ShizukuProbe.kt:77": 2,
@@ -840,7 +835,6 @@
     "check-inject-completeness.mjs:28": 1,
     "inject-all.py:273": 1,
     "check-snapshot-builder-output.mjs:139": 1,
-    "check-release-gates.mjs:28": 1,
     "scripts/build-apk-013.ps1:182": 1,
     "scripts/patches/data/registry-scan-c4.mjs:11": 1,
     "scripts/patches/data/client-index-loader-barrier.mjs:3": 1,
@@ -855,7 +849,6 @@
     "scripts/build-apk-013.ps1:174": 1,
     "scripts/check-patch-mirror.mjs:170": 1,
     "scripts/check-gate-skips.mjs:197": 2,
-    "scripts/build-apk-013.ps1:145": 1,
     "scripts/build-snapshot-013.mjs:163": 1,
     "scripts/check-browser-syntax-floor.mjs:707": 1,
     "scripts/check-patch-mirror.mjs:347": 1,
@@ -1032,7 +1025,7 @@
     "P04 -> 工具链表 dsh-shell-termux | PROBE_BINARIES/REQUIRED_TOOLCHAIN/TOOLCHAIN_REPRESENTATIVE 是工具链状态的单一来源，linux-env 不再维护第二份字面量",
     "P04 -> 引擎鉴权与日志面 | 运行时缓存清理与当前代 engine.log 共享 files 域：删当前代即断 EngineAuth.tokenFromLog 的令牌链，因此只删历史代",
     "P04 -> 授权档位 androidPrivilege | 工具面 adbTier 与 bridge 服务同源（同一次判定），linux-env 自算的 deployedAdbTier 只作服务缺席兜底",
-    "P04 -> 构建与快照装配 | 三个插件靠 profile-web.cordis.patch.yml 的 insert 才被挂载；model-capability 依赖构建期生成的 lib/catalog-snapshot.json，缺失即整段 engine-catalog 阶段禁用",
+    "P04 -> 构建与快照装配 | 两个引擎侧插件靠 profile-web.cordis.patch.yml 的 insert 才被挂载；第三个插件 dsh-model-capability 已于 0.14.8 整体退役——它依赖的构建期生成物 lib/catalog-snapshot.json（曾使缺失即整段 engine-catalog 阶段禁用）随之消失",
     "P04 -> 桥与鉴权 | 五条 file-incoming 与四条 env/runtime-cache 路由全部走 authorizeMobileRoute，令牌与控制队列同一枚 shellControlToken；route-auth.ts 只是转发不复制",
     "S01 -> K04 | 壳侧 pushWebInsets 写 --dsh-android-system-* 与 --dsh-android-ime-bottom，注入层样式与键盘边界消费",
     "S01 -> K04 | 导出结果经 window.__dshExportResult 回传，页面转成 dsh:export-result 事件由 ExportResultDialog 呈现",
@@ -1051,12 +1044,6 @@
     ],
     "0.13.7-CERTIFICATION.md:11": [
       "| 统一补丁（vendor） | 通过 | 双 ABI 均 `apply-patches: ALL OK（13/13，mode=check）`（新增 undo-E8；attachment-formats 已退役） |"
-    ],
-    "AGENTS.md:21": [
-      "`dsh-shell-termux` 0.2.0 · `dsh-client-ui-responsive` 0.3.3 · `dsh-host-web-compat` 0.1.16 · `plugins/`（bridge 0.2.4 / manage 0.3.0 / model-capability 0.2.1 / file-open 0.1.0 / browser 0.1.0 / linux-env 0.1.2 / vdisplay 0.1.0）· `vendor/`（marketplace / undo-savepoint）"
-    ],
-    "AGENTS.md:30": [
-      ""
     ],
     "ARCHITECTURE.md:15": [
       "| 文件 | 职责一句话 | 被引用 |"
@@ -1605,7 +1592,7 @@
       "}"
     ],
     "OverlayPanel.kt:421": [
-      "val unit = LinearLayout(svc).apply {"
+      "val unit = BackKeyPanelLayout(svc, { svc.hidePanel() }).apply {"
     ],
     "OverlayPanel.kt:487": [
       "/** 块H-A1：完成态常驻文案（并入 overlay_display prefs，与上述两个模板同族，可覆写）。"
@@ -2738,17 +2725,11 @@
     "check-release-gates.mjs:167": [
       "// `A11Y_OPS` 后端能力清单的陈旧拷贝，多带 `state`/`webSnapshot`/`webAction` 三条**不读设备屏**的 op，"
     ],
-    "check-release-gates.mjs:28": [
-      "/**"
-    ],
     "check-snapshot-asset.ps1:26": [
       "$h2 = (Get-FileHash $SnapshotPath -Algorithm SHA256).Hash.ToLower()"
     ],
     "check-snapshot-builder-output.mjs:139": [
       "try { slim = JSON.parse(readFileSync(SLIM, 'utf8')) } catch (e) {"
-    ],
-    "composer-insets.css.ts:13": [
-      "padding-bottom: max("
     ],
     "composer-menu.css.ts:25": [
       "html[data-dsh-mobile-form] [data-composer-card] [data-dsh-popup] {"
@@ -3515,12 +3496,6 @@
     "scripts/build-apk-013.ps1:141": [
       "# 子进程无界读 grep 门禁（0.13.8 #173）：输出必须走 ProcIo.readBounded"
     ],
-    "scripts/build-apk-013.ps1:145": [
-      ""
-    ],
-    "scripts/build-apk-013.ps1:166": [
-      ""
-    ],
     "scripts/build-apk-013.ps1:174": [
       "# 镜像前缀表双真源一致性：壳侧 UpdateChecker.MIRROR_PREFIXES 与下载站 MIRROR_TEMPLATES 必须逐条同序。"
     ],
@@ -3532,9 +3507,6 @@
     ],
     "scripts/build-apk-013.ps1:211": [
       "# 「模拟器优先」是铁律 2（本地构建 → MuMu 实测），两者经常并行，撑满等于自己踩自己的验收环境。"
-    ],
-    "scripts/build-apk.mjs:61": [
-      "const market = externalNamed('dshmarketplace-plugin')"
     ],
     "scripts/build-release.ps1:56": [
       "Write-Output \"== 发布门禁接线断言（唯一接线面聚合入口）==\""
@@ -3622,9 +3594,6 @@
     ],
     "scripts/check-release-gates.mjs:183": [
       "// 0.13.8-b B2（ST-25/26/31 + §7.2 度量）：制度性门禁与性能度量入口一并进声明集合，"
-    ],
-    "scripts/check-release-gates.mjs:28": [
-      "/**"
     ],
     "scripts/check-snapshot-builder-output.mjs:156": [
       "const writesTar = text.includes(\"join(OUT_DIR, 'snapshot.tar.xz')\")"
@@ -3892,6 +3861,9 @@
     ],
     "plugins/dsh-android-vdisplay/src/status.ts:208": [
       "/**"
+    ],
+    "composer-insets.css.ts:21": [
+      "padding-bottom: max("
     ]
   },
   "symbols": {
@@ -3964,8 +3936,6 @@
     "app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#shouldInterceptRequest@60e935eb": true,
     "app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#shouldInterceptRequest@db2ebba9": true,
     "app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#openConfigProblem@90000906": true,
-    "app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#navigateOp@1eff718a": true,
-    "app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#navigateOp@59a0a2d8": true,
     "app/src/main/java/com/dsharnessmobile/shell/ShellOps.kt#realOnlyScreenCommandAllowed@ce20172c": true,
     "plugins/dsh-android-bridge/src/screen-scope.ts#splitCommandSegments@45477a92": true,
     "plugins/dsh-android-bridge/src/screen-scope.ts#parenEnd@558b76d8": true,
@@ -4035,6 +4005,7 @@
     "BrowserHost.kt#MAX_TABS@930c9bd7": true,
     "scripts/check-code-map.mjs#UNIVERSE@60d8a536": true,
     "scripts/check-contract.mjs#collectConsumedSlots@2c28ea38": true,
-    "BrowserHost.kt#showPayload@bfaa29a3": true
+    "BrowserHost.kt#showPayload@bfaa29a3": true,
+    "app/src/main/java/com/dsharnessmobile/shell/BrowserHost.kt#navigateOp@176d6443": true
   }
 }

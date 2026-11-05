@@ -134,10 +134,7 @@ internal class RemoteRendererHost(
    * （直到 GC 玄学回收）。API 33+ 有显式 [SurfaceControlViewHost.SurfacePackage.release]。
    */
   private fun releaseSurfacePackages() {
-    if (Build.VERSION.SDK_INT >= 33) {
-      for (pkg in surfacePackages.values) runCatching { pkg.release() }
-    }
-    surfacePackages.clear()
+    RemoteProjectionPolicy.releaseAll(surfacePackages) { pkg -> releasePackage(pkg) }
   }
 
   /** 引擎换代/首绑时下发受保护端口快照（未确认=0，渲染进程将拒绝一切引擎端口回环）。 */
@@ -164,9 +161,16 @@ internal class RemoteRendererHost(
 
   override fun onSurfacePackage(tabId: String?, pkg: SurfaceControlViewHost.SurfacePackage?) {
     if (tabId != null && pkg != null) {
-      surfacePackages[tabId] = pkg
+      // #1574：远端每次 relayout 都会重建投影并重新上报包；旧实现直接覆盖表项，同 tabId 的旧包
+      // 没有任何 release() ⇒ native Surface 句柄与远端 buffer 生产者都留着（1 小时约 7200 个包）。
+      RemoteProjectionPolicy.replacePackage(surfacePackages, tabId, pkg) { stale -> releasePackage(stale) }
       hostSurface?.let { surface -> surface.post { surface.setChildSurfacePackage(pkg) } }
     }
+  }
+
+  /** 单个包的退役。API 33+ 才有显式 release；更低版本上不假装释放过（保持旧行为）。 */
+  private fun releasePackage(pkg: SurfaceControlViewHost.SurfacePackage) {
+    if (Build.VERSION.SDK_INT >= 33) runCatching { pkg.release() }
   }
 
   override fun onEvent(tabId: String?, eventJson: String?) {

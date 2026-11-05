@@ -943,6 +943,9 @@ internal object ShellOps {
           scan(text.substring(i + 1, end), depth + 1)
           buf.append(' ')
           i = end + 1
+          // issue #1572：替换结束后**词已开始**，其后的 `#` 是词内字面量而非注释起点。
+          // 原先这里不清 atWordStart，`echo `true`#; screencap …` 会把后半行当注释吃掉。
+          atWordStart = false
           continue
         }
         if (ch == '$' && i + 1 < text.length && text[i + 1] == '(') {
@@ -959,6 +962,7 @@ internal object ShellOps {
           scan(text.substring(i + 2, end), depth + 1)
           buf.append(' ')
           i = end + 1
+          atWordStart = false // issue #1572，理由见上方反引号分支
           continue
         }
             // shell 注释：`#` 只有在**词首**才开注释。词首＝未转义、未引用的 ASCII 空白 / `;` / `&` / `|`
