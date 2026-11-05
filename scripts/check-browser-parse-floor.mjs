@@ -9,9 +9,12 @@
 // chrome87 口径，不等价于 MDN 意义的 Chromium 87」。也就是说，如果 esbuild 认为
 // 某个语法在 chrome87 下无需降级、而真实 Chromium 87 解析不了，判据2 会放过它。
 //
-// 这条门补的是**另一个方向的证据**：用真解析器（acorn）按 chrome87 对应的语法档位
-// （ECMAScript 2021 / ecmaVersion 12）逐文件 parse。解析失败 = 老内核在解析期就抛
-// SyntaxError，整个模块一行不执行（正是 0.14.1 块C 那个白屏事故的形态）。
+// 这条门补的是**另一个方向的证据**：用真解析器（acorn）逐文件 parse。解析失败 = 老内核在
+// 解析期就抛 SyntaxError，整个模块一行不执行（正是 0.14.1 块C 那个白屏事故的形态）。
+//
+// 档位取 ES2022 而不是「Chromium 87 对应的 ES2021」：acorn 把「类字段 / 私有字段 / 静态块」
+// 三者统一挂在 ES2022，ES2021 一律拒绝；而 Chromium 87 的真实能力是「前两个 ✓、静态块 ✗」。
+// 没有任何单一 ecmaVersion 能表达这个组合，故判据分两层（见 ECMA_VERSION 处的详细说明）。
 //
 // ── 判据 ───────────────────────────────────────────────────────────────────
 //   1. 清单与 check-browser-syntax-floor 同源（dist/**/*.js + 每个 lib/client.js），
@@ -41,9 +44,27 @@ const has = (f) => argv.includes('--' + f)
 const argOf = (f, d = null) => { const i = argv.indexOf('--' + f); return i >= 0 ? (argv[i + 1] ?? d) : d }
 const die = (msg, code = 2) => { console.error('CHECK-BROWSER-PARSE-FLOOR 无法判定（exit ' + code + '）：' + msg); process.exit(code) }
 
-/** Chromium 87 的语法档位 = ECMAScript 2021（ecmaVersion 12）。 */
-const ECMA_VERSION = 12
-const ECMA_LABEL = 'ES2021'
+/**
+ * 解析档位 = ECMAScript 2022（ecmaVersion 13）。
+ *
+ * **不能是 ES2021**：acorn 把「类实例字段 / 私有字段 / 类静态块」三者**统一**挂在 ES2022，
+ * ES2021 档位一律拒绝。而真实 Chromium 87 的能力是「类字段 ✓（Chrome 72）/ 私有字段 ✓（Chrome 74）
+ * / 静态块 ✗（Chrome 94）」—— 三者不同档，acorn 没有哪个 ecmaVersion 能表达这个组合。
+ *
+ * 曾用 ES2021 当档位，后果是：降级目标为 chrome87 时（它保留类字段），本门会把**合规产物判成
+ * 违规**（实测 63/81 文件假红）。这是口径错，不是产物错。
+ *
+ * 于是判据拆成两层，各自负责它能负责的那一半：
+ *   第一层（本文件）：用 ES2022 解析 —— 保证「不含任何 ES2023+ 语法」，这是 acorn 能可靠判的；
+ *   第二层（本文件内置 AST 扫描）：**单独**断言 ClassStaticBlockDeclaration 计数 == 0 ——
+ *     这正是 Chromium 87 与 ES2022 之间唯一的那一格差（87 有类字段但没有静态块）。
+ * 两层合起来 = 「ES2022 可解析，且不含 87 缺的那一格」，严格覆盖 87 的真实能力，不松不紧。
+ *
+ * 为什么不再用 ES2021：那等于把「87 支持的类字段」也判红，逼着降级去降 87 原生支持的语法，
+ * 白付体积（实测多付 126,841 B 相对本方案）。
+ */
+const ECMA_VERSION = 13
+const ECMA_LABEL = 'ES2022'
 
 /** 清单与 check-browser-syntax-floor 同源：dist/**\/*.js + 每个 lib/client.js。 */
 const isBrowserFace = (rel) => {
@@ -138,16 +159,44 @@ const resolveAcorn = async () => {
   return null
 }
 
+/**
+ * 第二层判据：数 `ClassStaticBlockDeclaration` 节点。
+ *
+ * 为什么必须用 AST 而不是文本匹配：`static {` 会出现在字符串、模板串、注释里（本仓有实测载荷），
+ * 文本判据必然误报；反过来 `static\n{` 这种换行写法文本判据又会漏报（PowerShell 的 `\s` 还跨行，
+ * 把 `static fromText(...)` 都算成静态块，实测假阳性 26 个）。
+ *
+ * 为什么这条要单独存在：Chromium 87 与 ES2022 的唯一差别就是静态块（87 有类字段、私有字段，
+ * 但没有静态块）。ES2022 档位解析放行它，所以必须在这里单独拦一次。
+ */
+const countStaticBlocks = (acorn, ast) => {
+  let n = 0
+  const visit = (node) => {
+    if (node === null || typeof node !== 'object') return
+    if (Array.isArray(node)) { for (const x of node) visit(x); return }
+    // acorn 把静态块建成 ClassBody 里的 StaticBlock 节点（type 名以 acorn 版本为准，两种都认）
+    if (node.type === 'StaticBlock' || node.type === 'ClassStaticBlock') n++
+    for (const k of Object.keys(node)) {
+      if (k === 'type' || k === 'start' || k === 'end' || k === 'loc' || k === 'range') continue
+      visit(node[k])
+    }
+  }
+  visit(ast)
+  return n
+}
+
 const runScan = async (root, rels) => {
   const acorn = await resolveAcorn()
   if (!acorn) die('找不到可用的 acorn 解析器（不联网安装）：试过 node_modules / .deploy-tmp/survey-022rc1/closure022 / dsh-client-ui-responsive')
   if (rels.length === 0) die('清单为空（' + root + '）——拒绝把「没扫到」当通过')
   const failures = []
+  const staticBlocks = []
   let parsed = 0
   for (const rel of rels) {
     const text = readFileSync(join(root, rel), 'utf8')
+    let ast = null
     try {
-      acorn.parse(text, { ecmaVersion: ECMA_VERSION, sourceType: 'module', allowHashBang: true, allowAwaitOutsideFunction: true })
+      ast = acorn.parse(text, { ecmaVersion: ECMA_VERSION, sourceType: 'module', allowHashBang: true, allowAwaitOutsideFunction: true })
       parsed++
     } catch (error) {
       failures.push({
@@ -155,9 +204,13 @@ const runScan = async (root, rels) => {
         message: String(error && error.message ? error.message : error),
         loc: error && error.loc ? (error.loc.line + ':' + error.loc.column) : '?',
       })
+      continue
     }
+    // 解析成功的文件才做静态块计数（解析失败已经判红，不必重复报）
+    const n = countStaticBlocks(acorn, ast)
+    if (n > 0) staticBlocks.push({ rel, n })
   }
-  return { acorn, rels, failures, parsed }
+  return { acorn, rels, failures, parsed, staticBlocks }
 }
 
 const report = (r, root) => {
@@ -165,12 +218,20 @@ const report = (r, root) => {
   console.log('  清单: ' + r.rels.length + ' 个浏览器面文件（' + root + '）')
   for (const f of r.failures.slice(0, 20)) console.error('  FAIL ' + f.rel + ' @' + f.loc + ' —— ' + f.message)
   if (r.failures.length > 20) console.error('  …还有 ' + (r.failures.length - 20) + ' 个')
-  if (r.failures.length > 0) {
-    console.error('CHECK-BROWSER-PARSE-FLOOR FAILED（' + r.failures.length + ' / ' + r.rels.length
-      + ' 个文件在 ' + ECMA_LABEL + ' 档位下解析失败——老内核解析期即抛 SyntaxError，整个模块一行不执行）')
+  // 第二层判据的读数总是打印（0 也要打），否则「没报」和「没查」分不清。
+  const staticTotal = r.staticBlocks.reduce((a, x) => a + x.n, 0)
+  console.log('  静态块 AST: ' + r.staticBlocks.length + ' 个文件 / ' + staticTotal + ' 处 ClassStaticBlockDeclaration（Chromium 87 不支持，必须为 0）')
+  for (const s of r.staticBlocks.slice(0, 20)) console.error('  FAIL ' + s.rel + ' —— ' + s.n + ' 处 static{}')
+  if (r.staticBlocks.length > 20) console.error('  …还有 ' + (r.staticBlocks.length - 20) + ' 个')
+  const bad = r.failures.length + r.staticBlocks.length
+  if (bad > 0) {
+    console.error('CHECK-BROWSER-PARSE-FLOOR FAILED（解析失败 ' + r.failures.length + ' 个 + 含静态块 '
+      + r.staticBlocks.length + ' 个，共 ' + r.rels.length + ' 个文件）——老内核（Chromium 87）解析期即抛 '
+      + 'SyntaxError，整个模块一行不执行')
     return 1
   }
-  console.log('CHECK-BROWSER-PARSE-FLOOR PASSED（' + r.parsed + ' / ' + r.rels.length + ' 个文件在 ' + ECMA_LABEL + ' 档位下解析通过）')
+  console.log('CHECK-BROWSER-PARSE-FLOOR PASSED（' + r.parsed + ' / ' + r.rels.length + ' 个文件在 ' + ECMA_LABEL
+    + ' 档位下解析通过，且 0 处静态块）')
   return 0
 }
 
@@ -183,16 +244,25 @@ const selfTest = async () => {
   const parses = (src) => {
     try { acorn.parse(src, { ecmaVersion: ECMA_VERSION, sourceType: 'module', allowAwaitOutsideFunction: true }); return true } catch { return false }
   }
-  // 注意：acorn 把「类字段 / 私有字段 / static 块」统一挂在 ES2022 档位，ES2021 一律拒绝。
-  // 这与真实 Chromium 的逐特性发布节奏不完全一致（类字段 Chrome 72、static 块 Chrome 94），
-  // 所以本门的口径是**保守**的：它可能比真机更严，但绝不会放过真机解析不了的东西。
-  t('正控：ES2021 代码可解析', parses('const a = 1; function f(x) { return x ?? 0 }'))
-  t('负控：类静态初始化块 static{} 在 ES2021 档位必须解析失败', parses('class C { static { this.x = 1 } }') === false)
-  t('负控：私有字段 #x 在 ES2021 档位必须解析失败', parses('class C { #x = 1 }') === false)
-  t('正控：顶层 await 在 ES2021 module 下可解析（不应误报）', parses('await 1') === true)
-  t('负控：类字段在 ES2021 档位必须解析失败（acorn 保守口径）', parses('class C { x = 2 }') === false)
-  t('载荷：字符串里的 static{} 不得误报', parses('const s = "class C { static {} }"') === true)
-  t('载荷：注释里的 static{} 不得误报', parses('// class C { static {} }\nconst a = 1') === true)
+  // 档位是 ES2022：acorn 把「类字段 / 私有字段 / static 块」统一挂在 ES2022，没有哪个档位能表达
+  // Chromium 87 的真实组合（有类字段、没有静态块）。所以第一层放行到 ES2022，第二层单独拦静态块。
+  t('正控：ES2022 代码可解析（?? 与 ?. 都是 87 支持的）', parses('const a = 1; function f(x) { return x?.y ?? 0 }'))
+  t('正控：类字段在 ES2022 档位可解析（87 支持，不得判红）', parses('class C { x = 2 }') === true)
+  t('正控：私有字段在 ES2022 档位可解析（87 支持，不得判红）', parses('class C { #x = 1 }') === true)
+  t('正控：顶层 await 在 ES2022 module 下可解析（不应误报）', parses('await 1') === true)
+  t('负控：ES2023+ 语法必须解析失败（保证档位不是无限放宽）', parses('class C { static accessor x = 1 }') === false)
+  // 第二层（静态块 AST 判据）的自证：这是 87 与 ES2022 之间唯一那一格差，必须自己会数。
+  const statics = (src) => {
+    let ast = null
+    try { ast = acorn.parse(src, { ecmaVersion: ECMA_VERSION, sourceType: 'module' }) } catch { return -1 }
+    return countStaticBlocks(acorn, ast)
+  }
+  t('第二层正控：真 static{} 必须被数出 1 处', statics('class C { static { this.x = 1 } }') === 1)
+  t('第二层正控：两处 static{} 必须数出 2', statics('class A { static { this.x = 1 } }\nclass B { static { this.y = 2 } }') === 2)
+  t('第二层负控：字符串里的 static{} 不得误报（AST 判据，不是文本匹配）', statics('const s = "class C { static {} }"') === 0)
+  t('第二层负控：注释里的 static{} 不得误报', statics('// class C { static {} }\nconst a = 1') === 0)
+  t('第二层负控：静态方法不得被当成静态块', statics('class C { static m() { return 1 } }') === 0)
+  t('第二层负控：跨行 static + 换行 + { 的写法也必须被数出（文本判据会漏）', statics('class C { static\n{ this.x = 1 } }') === 1)
   // 清单判据：口径与 check-browser-syntax-floor 同源
   t('清单：dsh-web-frontend/dist/**/*.js 命中', isBrowserFace('node_modules/@deepseek-ai/dsh-web-frontend/dist/assets/index-abc.js') === true)
   t('清单：任意包 lib/client.js 命中', isBrowserFace('node_modules/@deepseek-ai/dsh-client-ui-foo/lib/client.js') === true)
@@ -236,7 +306,7 @@ const selfTest = async () => {
     console.error('CHECK-BROWSER-PARSE-FLOOR SELF-TEST FAILED（' + fails.length + ' / ' + count + ' 项）：' + fails.join('；'))
     return 1
   }
-  console.log('CHECK-BROWSER-PARSE-FLOOR SELF-TEST PASSED（' + count + ' 项判别力断言：ES2021 正控 / static 块与私有字段负控 / 载荷不误报 / 清单口径同源）')
+  console.log('CHECK-BROWSER-PARSE-FLOOR SELF-TEST PASSED（' + count + ' 项判别力断言：ES2022 正控含类字段与私有字段 / 静态块 AST 正负控含跨行写法 / 载荷不误报 / 清单与 tar 成员口径同源）')
   return 0
 }
 
