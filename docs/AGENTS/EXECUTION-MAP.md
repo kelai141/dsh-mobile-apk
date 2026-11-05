@@ -2400,6 +2400,7 @@ app/src/main/java/com/dsharnessmobile/shell/ShellOps.kt
 app/src/main/java/com/dsharnessmobile/shell/ScreenScope.kt
 app/src/main/java/com/dsharnessmobile/shell/ShizukuBindState.kt
 app/src/main/java/com/dsharnessmobile/shell/ShizukuReadyEvidence.kt
+app/src/main/java/com/dsharnessmobile/shell/ShizukuReadinessGate.kt
 app/src/main/java/com/dsharnessmobile/shell/ShizukuTransport.kt
 app/src/main/java/com/dsharnessmobile/shell/ShizukuUserService.kt
 app/src/main/java/com/dsharnessmobile/shell/ShizukuProbe.kt
@@ -2709,3 +2710,6 @@ Telemetry snapshot closure: check-engine-overlay retains each dependency's decla
 **GenerationalNodeRecycler**：快照节点句柄延迟回收，只保留一代；兜底重定位节点收编 + API<33 回收守卫（issue #1361 / #1521 / #1522）——`app/src/main/java/com/dsharnessmobile/shell/SnapshotNodeRecycler.kt:28#expect=internal%20class%20GenerationalNodeRecycler%3CT%20%3A%20Any%3E(`
 
 **PrefixRelocation**：快照前缀运行期重定位与同用户判定（issue #1234）——`app/src/main/java/com/dsharnessmobile/shell/PrefixRelocation.kt:34#expect=internal%20fun%20sameUserEquivalent(target%3A%20String%2C%20libDirPath%3A%20String%2C%20currentUser%3A%20Int)%3A%20Boolean%20%7B`
+
+
+**ShizukuReadinessGate**：探测未完成按三态报未知，未知不渲染成未就绪（issue #1506）——`app/src/main/java/com/dsharnessmobile/shell/ShizukuReadinessGate.kt:37#expect=internal%20fun%20readinessState(verdict%3A%20ReadyVerdict)%3A%20Boolean%3F%20%3D%20when%20%7B`

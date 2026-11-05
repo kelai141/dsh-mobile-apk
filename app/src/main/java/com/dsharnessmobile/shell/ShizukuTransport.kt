@@ -342,18 +342,18 @@ object ShizukuTransport {
       return answer
     }
     // issue #1476：binder 活 + 已绑定**还不够**——必须有功能探测成功的证据。
+    // issue #1506：探测未完成不等于「未就绪」——后台线程先做有界同步短探（<=300ms），主线程只催异步
+    // 探测；否则「刚建好通道的第一条命令」必被 readyService 的 ok 判据拒掉。
     val probeNow = SystemClock.elapsedRealtime()
-    if (functionalProbe.shouldProbe(probeNow)) kickFunctionalProbe()
-    val verdict = readinessVerdict(
-      ReadyFacts(binderAlive = true, granted = true, version = version, bound = true, probe = functionalProbe.current()),
-      probeNow,
+    val probeSnapshot = awaitFirstProbe(
+      kick = { kickFunctionalProbe() },
+      snapshot = { functionalProbe.current() },
+      blockingAllowed = Looper.myLooper() != Looper.getMainLooper())
+    return statusReadinessJson(
+      out, ReadyFacts(binderAlive = true, granted = true, version = version, bound = true, probe = probeSnapshot),
+      probeNow, { kickFunctionalProbe() }, { verdict -> probeGuidance(context, verdict) },
+      UiText.t(context, "Shizuku shell UserService 已就绪（uid=$uid）。", "The Shizuku shell UserService is ready (uid=$uid)."),
     )
-    if (!verdict.ok) {
-      return out.put("ok", false).put("code", verdict.code)
-        .put("guidance", probeGuidance(context, verdict))
-    }
-    return out.put("ok", true).put("code", "shizuku-ready")
-      .put("guidance", UiText.t(context, "Shizuku shell UserService 已就绪（uid=$uid）。", "The Shizuku shell UserService is ready (uid=$uid)."))
   }
 
   /**
@@ -1250,20 +1250,8 @@ object ShizukuTransport {
   private fun binderAlive(): Boolean = runCatching { Shizuku.pingBinder() }.getOrDefault(false)
 
   /** 功能探测的对外快照（进 status()，供面板与诊断区分「缓存命中」与「刚探测」）。 */
-  private fun probeJson(): JSONObject {
-    val p = functionalProbe.current()
-    val now = SystemClock.elapsedRealtime()
-    val stale = p.probed && now - p.atMs !in 0..FunctionalProbeCache.DEFAULT_TTL_MS
-    return JSONObject()
-      .put("probed", p.probed)
-      .put("ok", p.ok)
-      .put("protocolVersion", p.protocolVersion)
-      .put("error", p.error)
-      .put("atMs", p.atMs)
-      .put("stale", stale)
-      .put("fromCache", p.probed && !stale)
-      .put("ttlMs", FunctionalProbeCache.DEFAULT_TTL_MS)
-  }
+  private fun probeJson(): JSONObject =
+    functionalProbeJson(functionalProbe.current(), SystemClock.elapsedRealtime())
 
   /** 异步补一次功能探测（单飞）：TTL 过期时沿用上次结果，不把面板闪成 not-ready。 */
   private fun kickFunctionalProbe() {
@@ -1294,12 +1282,21 @@ object ShizukuTransport {
       )
       READY_PROBE_PENDING -> UiText.t(
         context,
-        "binder 已连上，正在做首次功能探测（尚不能证明 UserService 可用）。",
-        "The binder is connected; the first functional probe is still running (availability is not proven yet).",
+        // 坑 161：未知档必须给**可执行动作**，不得劝阻——「探测中」不是「不可用」。
+        "首次功能探测还在跑（这不代表不可用）：现在就可以让 AI 建屏或执行命令，探测一落地即转就绪。",
+        "The first functional probe is still running (not a sign of unavailability): let the AI create a screen or run a command now; it turns ready as soon as the probe lands.",
       )
       else -> UiText.t(context, "Shizuku shell 通道未就绪。", "The Shizuku shell channel is not ready.")
     }
   }
+
+  /**
+   * 单调时钟注入点（issue #1529）：判据用它证明 elapsedMs 来自**单调时钟**而不是墙钟。
+   *
+   * 只换来源、不加语义：生产恒为 elapsedRealtime()；判据注入假时钟后可断言具体数值，
+   * 于是「把它改成墙钟」会红（旧判据只查字段在场，改墙钟也绿）。
+   */
+  internal var monotonicClock: () -> Long = { SystemClock.elapsedRealtime() }
 
   /** 记一笔最近一次 shell 失败（进程内环形一项）。 */
   internal fun recordShellFailure(code: String, message: String) {
@@ -1307,7 +1304,7 @@ object ShizukuTransport {
       lastShellFailure = JSONObject()
         .put("code", code)
         .put("at", System.currentTimeMillis())
-        .put("elapsedMs", SystemClock.elapsedRealtime())
+        .put("elapsedMs", monotonicClock())
         .put("message", message)
     }
   }
