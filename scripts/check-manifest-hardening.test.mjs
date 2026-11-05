@@ -51,10 +51,17 @@ function fixture(t, path, rogue = false) {
     mkdirSync(dirname(dest), { recursive: true })
     copyFileSync(join(root, file), dest)
   }
+  // issue #1571：真实 file_paths.xml 里的宽映射（`<external-path path="." />`）已删除，夹具
+  // 不能再「替换现有那条」——那样会因为源里没有而静默不注入，正向用例变成空转。
+  // 现在显式**注入**一条合成宽映射：判据要守的是「宽映射在场时调用点必须逐文件登记」，
+  // 而这条判据与真实树里有没有那条映射无关。
   const paths = join(dir, 'app/src/main/res/xml/file_paths.xml')
   const original = readFileSync(paths, 'utf8')
-  assert.ok(original.includes('path="."'), 'fixture must replace the real broad mapping')
-  writeFileSync(paths, original.replace('path="."', `path="${path}"`))
+  assert.ok(original.includes('</paths>'), 'fixture must inject the synthetic broad mapping')
+  writeFileSync(paths, original.replace(
+    '</paths>',
+    `  <external-path name="fixture_broad" path="${path}" />\n</paths>`,
+  ))
   if (rogue) writeFileSync(join(dir, 'app/src/main/java/com/dsharnessmobile/shell/Unexpected.kt'),
     'fun emit() = FileProvider.getUriForFile(context, authority, file)\n')
   const result = spawnSync(process.execPath, [checker, '--root', dir], { encoding: 'utf8' })

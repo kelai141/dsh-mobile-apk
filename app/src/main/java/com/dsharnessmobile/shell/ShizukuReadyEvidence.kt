@@ -64,8 +64,11 @@ internal class FunctionalProbeCache(
     probed = false, ok = false, protocolVersion = -1, error = "", atMs = 0L,
   )
 
-  /** 单飞锁：`shouldProbe` 判断与写回必须是同一个原子区，否则两路都看到过期就都会打 binder。 */
+  /** 单飞锁：保护「该不该探」的判断、占位与写回；**不覆盖 binder 调用**（issue #1558）。 */
   private val probeLock = Any()
+
+  /** 是否有一次探测正在锁外跑 binder：期间其它线程直接拿现有快照，不重复打（issue #1558）。 */
+  private var probeInFlight = false
 
   /** 最近一次快照（不触发探测）。 */
   fun current(): FunctionalProbeSnapshot = snapshot
@@ -83,11 +86,22 @@ internal class FunctionalProbeCache(
    * @param run 真正打 binder 的探测（返回协议版本；抛异常表示失败）。
    * @returns 探测后的快照。
    */
-  fun probeIfNeeded(run: () -> Int, now: Long = clock()): FunctionalProbeSnapshot = synchronized(probeLock) {
-    // 读侧（current/isFresh）**不加锁**、只读 @Volatile 快照；锁只保护「判断 + 写回」这段。
-    if (!shouldProbe(now)) return snapshot
-    calls.incrementAndGet()
-    snapshot = try {
+  fun probeIfNeeded(run: () -> Int, now: Long = clock()): FunctionalProbeSnapshot {
+    // issue #1558：**锁内绝不打 binder**。探测要真调 `run()`（`remote.protocolVersion()`），
+    // 而 Shizuku 用户服务挂起时它可以到秒级；`kickFunctionalProbe` 与 `status()` 又走同一把锁，
+    // 于是 UI 线程（`MainActivity.shizukuStatus()`）会在等锁时被一起拖住——那是 ANR 风险，
+    // 不是「探测慢一点」。所以把一次探测拆成三段：
+    //   ① 锁内：判断该不该探 + 占位（原子，保证单飞）；
+    //   ② 锁外：跑 `run()`；
+    //   ③ 锁内：写回快照并释放占位。
+    // 代价是「判断与写回不再同一临界区」，用 `probeInFlight` 补回来：占位期间其它线程直接拿
+    // 现有快照（不重复打 binder），等价于单飞。
+    synchronized(probeLock) {
+      if (probeInFlight || !shouldProbe(now)) return snapshot
+      probeInFlight = true
+      calls.incrementAndGet()
+    }
+    val fresh = try {
       val pv = run()
       FunctionalProbeSnapshot(probed = true, ok = true, protocolVersion = pv, error = "", atMs = now)
     } catch (t: Throwable) {
@@ -96,7 +110,11 @@ internal class FunctionalProbeCache(
         error = t.javaClass.simpleName + ": " + (t.message ?: ""), atMs = now,
       )
     }
-    snapshot
+    return synchronized(probeLock) {
+      snapshot = fresh
+      probeInFlight = false
+      snapshot
+    }
   }
 
   companion object {

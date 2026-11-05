@@ -443,18 +443,6 @@ for (const entry of OVERLAY.keepUnpublished ?? []) {
   log(`浏览器语法下限降级就位（chrome87；扫描 ${scannedFiles} 个浏览器面文件，改写 ${degradedFiles} 个，降级后复扫全绿）`)
 }
 
-// ── 0g. 能力发现目录快照（0.13.5 W3）：从 stage 引擎树生成 dsh-model-capability 的厂商目录索引 ──
-// 数据必须与本次构建的引擎树同源（精确模型 id → thinkingLevelMap/input/compat），
-// 生成物落在插件 lib/（随注入进快照），因此必须在注入步骤之前完成；引擎升级后自动跟随。
-{
-  const pluginDir = join(ROOT, 'plugins', 'dsh-model-capability')
-  if (existsSync(join(pluginDir, 'package.json'))) {
-    const generator = join(ROOT, 'scripts', 'gen-model-catalog.mjs')
-    const outFile = join(pluginDir, 'lib', 'catalog-snapshot.json')
-    execSync(`node "${generator}" --engine-root "${join(STAGE, 'root')}" --out "${outFile}"`, { encoding: 'utf8', stdio: 'inherit' })
-    log('能力目录快照已生成（plugins/dsh-model-capability/lib/catalog-snapshot.json）')
-  }
-}
 
 // ── 1. Termux 索引（镜像回退链 + 404/超时快速失败）──
 async function fetchMirror(path, timeoutMs = 20000) {

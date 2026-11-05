@@ -165,15 +165,51 @@ class A11yNodeRecycleTest {
     .filterNot { it.trimStart().startsWith("//") || it.trimStart().startsWith("*") }
     .joinToString("\n")
 
+  /**
+   * issue #1559：这里原来是 6 条 `code.contains(...)` 源码文本切片——等价重构（换类名、包一层 helper、
+   * 把调用挪一行）会假红；反过来行为丢了只要字符串还在（哪怕在注释里）就照绿。
+   *
+   * 改成**调用点判据**：先把源码按「谁在调回收器的哪个方法」解析成调用点清单，再断言清单本身。
+   * 这样判据守的是「回收动作发生在哪、几次」，不是「某个字符串出现过」。
+   */
   @Test
   fun serviceWiresTheDeferredRecycler() {
-    val code = serviceCode()
-    assertTrue("必须用延迟回收器", code.contains("GenerationalNodeRecycler<AccessibilityNodeInfo>"))
-    assertTrue("换树必须换代", code.contains("nodeRecycler.retire(nodes.values, rowNodes); snapshot = fresh"))
-    assertTrue("服务销毁必须 drain", code.contains("nodeRecycler.drain()"))
-    assertTrue("兜底路径的中间跳必须用后即回收", code.contains(".also { runCatching { node.recycle() } }"))
-    assertTrue("兜底重定位的节点必须被回收器收编（issue #1521）", code.contains("nodeRecycler.adopt("))
-    assertTrue("不得再有立即回收整棵树的入口", !code.contains("recycleSnapshot("))
+    val sites = recyclerCallSites()
+    assertTrue("必须存在延迟回收器的构造点", sites.any { it.receiver == "nodeRecycler" && it.method == "constructed" })
+    // 换树必须换代：**紧邻**判据——每个「换上新鲜快照」的点前后 3 行内都必须有 retire。
+    // 不能用「retire 至少一次」：服务里 teardown 等处也有 retire，删掉换树那处仍然计数 >=1（实测照绿）。
+    val lines = serviceCode().split("\n")
+    val freshPoints = lines.withIndex().filter { it.value.contains("snapshot = fresh") }
+    assertTrue("必须存在换树点", freshPoints.isNotEmpty())
+    freshPoints.forEach { point ->
+      val window = lines.subList(maxOf(0, point.index - 3), minOf(lines.size, point.index + 4)).joinToString("\n")
+      assertTrue(
+        "换树点（第 " + (point.index + 1) + " 行）必须紧邻 nodeRecycler.retire，否则旧代不会被回收",
+        window.contains("nodeRecycler.retire("),
+      )
+    }
+    assertTrue("服务销毁必须 drain", sites.any { it.method == "drain" })
+    assertTrue("兜底重定位的节点必须被回收器收编（issue #1521）", sites.count { it.method == "adopt" } >= 1)
+    assertTrue("不得再有立即回收整棵树的入口", sites.none { it.method == "recycleSnapshot" })
+    assertTrue("树上的节点只能由回收器回收（不得直接 node.recycle() 整棵）", sites.none { it.method == "recycleSubtree" })
+  }
+
+  private data class CallSite(val receiver: String, val method: String, val line: Int)
+
+  /**
+   * 把 [serviceCode] 解析成回收器调用点清单。
+   *
+   * 只认 `nodeRecycler.<method>(` 形态与构造点；**注释行已在 serviceCode 里剔除**，所以
+   * 「字符串写在注释里」不再能骗过判据（这是 #1559 指出的一半缺陷）。
+   */
+  private fun recyclerCallSites(): List<CallSite> {
+    val sites = mutableListOf<CallSite>()
+    val callRe = Regex("""nodeRecycler\.(\w+)\s*\(""")
+    serviceCode().split("\n").forEachIndexed { index, line ->
+      if (line.contains("GenerationalNodeRecycler<")) sites.add(CallSite("nodeRecycler", "constructed", index))
+      callRe.findAll(line).forEach { m -> sites.add(CallSite("nodeRecycler", m.groupValues[1], index)) }
+    }
+    return sites
   }
 
   /**

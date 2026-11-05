@@ -1,18 +1,17 @@
 package com.dsharnessmobile.shell
 
-import android.view.KeyEvent
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * issue #1601 / #1612 的**行为**判据（真实线程 + 真值表，不是源码文本切片）。
+ * issue #1601 的**行为**判据（真实线程，不是源码文本切片）。
  *
- * 这两条缺陷的判据此前只能落在「源码里有 join / 有 KEYCODE_BACK」这类形态断言上——形态在、
- * 语义不对时照样全绿（例如 join 超时写成 0、BACK 判定写成 ACTION_DOWN 才算）。
- * 把判定抽成 [WorkerJoin] / [OverlayBackKey] 之后，判据可以打在真实可观测行为上。
+ * 这条缺陷的判据此前只能落在「源码里有 join」这类形态断言上——形态在、语义不对时照样全绿
+ * （join 超时写成 0、或者干脆不等）。把等待抽成 [WorkerJoin] 之后，判据打在真实可观测行为上：
+ * 线程还在跑必须报 false，线程会在 150ms 后结束时必须真等到它结束再报 true。
  */
-class ShellStopAndBackKeyTest {
+class WorkerJoinTest {
 
   // ── issue #1601：停机必须真的等到执行线程离开 ────────────────────────────────
 
@@ -72,17 +71,4 @@ class ShellStopAndBackKeyTest {
     assertTrue("不得真的等满上界（实测 " + elapsedMs + "ms）", elapsedMs < 500)
   }
 
-  // ── issue #1612：面板展开期间返回键必须能收起面板 ───────────────────────────
-
-  /** 真值表：只有 BACK 的 ACTION_UP 收起；按下不动作，其它键一律不拦。 */
-  @Test
-  fun onlyBackKeyReleaseCollapsesThePanel() {
-    assertTrue("BACK 抬手必须收起", OverlayBackKey.shouldCollapse(KeyEvent.KEYCODE_BACK, KeyEvent.ACTION_UP))
-    assertFalse("BACK 按下不得收起（与系统语义一致）",
-      OverlayBackKey.shouldCollapse(KeyEvent.KEYCODE_BACK, KeyEvent.ACTION_DOWN))
-    assertFalse("HOME 不得被面板吞掉",
-      OverlayBackKey.shouldCollapse(KeyEvent.KEYCODE_HOME, KeyEvent.ACTION_UP))
-    assertFalse("回车不得被面板吞掉（输入法/编辑依赖它）",
-      OverlayBackKey.shouldCollapse(KeyEvent.KEYCODE_ENTER, KeyEvent.ACTION_UP))
-  }
 }

@@ -43,15 +43,15 @@ internal object ControlCarrier {
   private var poller: ControlPoller? = null
   private var appContext: Context? = null
 
-  /** Shizuku 特权通道就绪（caps 上报；TTL 缓存——回填信封不为此反复打 binder）。 */
+  /** Shizuku 特权通道就绪（caps 上报；TTL 缓存——回填信封不为此反复打 binder）；三态，null = 尚未探测完（issue #1506，不作折平）。 */
   private const val SHIZUKU_CACHE_MS = 5_000L
-  @Volatile private var shizukuReady = false
+  @Volatile private var shizukuReady: Boolean? = null
   @Volatile private var shizukuCheckedAt = 0L
 
-  private fun shizukuReady(app: Context): Boolean {
+  private fun shizukuReady(app: Context): Boolean? {
     val now = SystemClock.elapsedRealtime()
     if (now - shizukuCheckedAt < SHIZUKU_CACHE_MS) return shizukuReady
-    val ready = runCatching { ShizukuTransport.status(app).optBoolean("ok") }.getOrDefault(false)
+    val ready = runCatching { readinessTriState(ShizukuTransport.status(app)) }.getOrNull() // 三态，不折平：null = 尚未探测完
     shizukuReady = ready
     shizukuCheckedAt = now
     return ready
@@ -80,7 +80,7 @@ internal object ControlCarrier {
       context = app,
       handler = { op, args -> handle(op, args) },
       // 两条通道的能力事实（0.14.0 §6）：a11y = 无障碍服务在场；shizuku = 特权 shell 通道就绪。
-      capsExtra = { JSONObject().put("a11y", a11y != null).put("shizuku", shizukuReady(app)) },
+      capsExtra = { JSONObject().put("a11y", a11y != null).put("shizuku", shizukuReady(app) ?: JSONObject.NULL) },
       heartbeat = { if (a11y != null) DeviceControlService.heartbeat(app) },
     )
     poller = created

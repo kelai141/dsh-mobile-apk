@@ -114,6 +114,17 @@ internal class BrowserHost(
     )
   }
 
+  /**
+   * `browser_state.profileIsolation` 的唯一判据（issue #1575）。
+   *
+   * 与 `profileEstablished` 分开：后者进 `browserAvailable` 派生链，语义是「已拿到隔离身份」；
+   * 这里回答的是**向模型与用户声明隔离程度**。PROCESS_SUFFIX 的 KDoc 明写它隔离的是
+   * 「浏览器 vs 引擎」，全 app 共享一个浏览器档案——把它报成 isolated 是假话：会话 A 在某站
+   * 登录后，会话 B 的 browser_open 直接带着 A 的 cookie/登录态。
+   */
+  private fun profileIsolationOf(tier: BrowserIsolationTier, status: BrowserStatus): String =
+    BrowserStatusSemantics.isolationWire(tier, status)
+
   /** Complete per-session native authority; polling never changes selected workspace or visibility. */
   private fun tabSummaries(workspace: Workspace = requireWorkspace()): JSONArray {
     val density = dshWebView.resources.displayMetrics.density.coerceAtLeast(0.5f)
@@ -173,6 +184,16 @@ internal class BrowserHost(
     if (!BrowserHostProfile.supported() && Build.VERSION.SDK_INT >= 29) {
       RemoteRendererHost(activity, allowAnonymousEngineAccess, rendererListener)
     } else null
+
+  /**
+   * 远端 tabId → 上一次**已下推**给渲染进程的投影几何（issue #1574）。
+   *
+   * 为什么要记在宿主侧：`setStageBounds` 的续租每秒到两次（`switchTo` + `applyStageBounds`），
+   * 而 tier-2 的 `relayout` 是「销毁投影 + 重建 SCVH + 重设 View」的重量级动作。判据必须基于
+   * 「上一次真正下推的几何」而不是「上一次算出的几何」，否则跨工作台切换时会把别的 tab 的
+   * 几何当成自己的。
+   */
+  private val pushedGeometry = HashMap<String, RemoteProjectionPolicy.Geometry>()
 
   /** 档位解析（PR2 模型）：tier-2 就绪性 = 渲染进程已绑定。 */
   private val isolation = BrowserIsolation(
@@ -263,6 +284,7 @@ internal class BrowserHost(
         tab.snapshotGeneration = -1L
         synchronized(tab.refs) { tab.refs.clear() }
         tab.remoteCreated = false
+        pushedGeometry.remove(remoteId)
         tab.loadState = "error"
         tab.reason = event.optString("reason", "renderer-crashed")
       }
@@ -391,6 +413,7 @@ internal class BrowserHost(
       tab.view = null
       if (remote != null && tab.remoteCreated) {
         tab.remoteCreated = false
+        pushedGeometry.remove(remoteTabId(workspace, tab))
         runCatching { remote!!.renderer?.destroyTab(remoteTabId(workspace, tab)) }
       }
       tab.snapshotGeneration = -1L
@@ -1020,6 +1043,9 @@ internal class BrowserHost(
         return null
       }
       rh.setProjectionSize(remoteTabId(workspace, tab), size.first, size.second)
+      // 新建/重建的投影是一块**全新的** SCVH：去重基线必须作废，否则「几何恰好等于上一次」时
+      // 会跳过唯一一次必要的 relayout，新投影停在 1x1（#1574 的反向风险）。
+      pushedGeometry.remove(remoteTabId(workspace, tab))
       tab.remoteCreated = true
       workspace.profileError = ""
       return null
@@ -1278,9 +1304,16 @@ internal class BrowserHost(
       }
       activeTab()?.let { tab ->
         val rid = remoteTabId(tab.owner, tab)
+        // #1574：续租每秒必到，旧实现无条件 relayout → 远端 destroyProjection + new SCVH + setView，
+        // 画面每秒拆建两次。几何全等时只同步输入换算尺寸，不碰远端投影。
+        val geometry = RemoteProjectionPolicy.Geometry(positionedLeft, positionedTop, width, height)
+        val relaid = RemoteProjectionPolicy.changed(pushedGeometry[rid], geometry)
         rh.setProjectionSize(rid, width, height)
-        runCatching { rh.renderer?.relayout(rid, width, height) }
-        measureRemotePage(tab)
+        if (relaid) {
+          pushedGeometry[rid] = geometry
+          runCatching { rh.renderer?.relayout(rid, width, height) }
+          measureRemotePage(tab)
+        }
       }
     }
     stageVisible = true
@@ -1447,8 +1480,14 @@ internal class BrowserHost(
       // tier-2：舞台不可见≠页面可以不排版——远端窗口同样保持非退化尺寸，只把投影藏起来。
       activeTab()?.let { tab ->
         val rid = remoteTabId(tab.owner, tab)
+        // #1574：同 applyStageBounds——舞台不可见分支同样按四元组去重（原实现每次续租都重建投影）。
+        val geometry = RemoteProjectionPolicy.Geometry(0, 0, w, h)
+        val relaid = RemoteProjectionPolicy.changed(pushedGeometry[rid], geometry)
         rh.setProjectionSize(rid, w, h)
-        runCatching { rh.renderer?.relayout(rid, w, h) }
+        if (relaid) {
+          pushedGeometry[rid] = geometry
+          runCatching { rh.renderer?.relayout(rid, w, h) }
+        }
       }
       return
     }
@@ -1475,7 +1514,10 @@ internal class BrowserHost(
       .put("profileReason", status.profileReason)
       .put("session", workspace?.sessionKey ?: "")
       .put("multiProfileSupported", BrowserHostProfile.supported())
-      .put("profileIsolation", if (status.profileEstablished) "isolated" else if (status.isolationAvailable) "not-created" else "unavailable")
+      // #1575：tier-2 下 remote != null 恒成立 ⇒ profileEstablished=true，但 PROCESS_SUFFIX 隔离的是
+      // 「浏览器 vs 引擎」，不是「会话 vs 会话」（全 app 共享一个浏览器档案）。旧实现在这里一律报
+      // isolated，于是会话 B 的 browser_open 带着会话 A 的 cookie，browser_state 却对 B 回 isolated。
+      .put("profileIsolation", profileIsolationOf(isolationTier, status))
       .put("profileName", workspace?.profile?.takeIf { it.isAssigned }?.name ?: if (remote != null) BrowserProcessService.SUFFIX else "")
       .put("created", view != null || activeTab()?.remoteCreated == true)
       .put("visible", view?.visibility == View.VISIBLE || (view == null && remote?.hostSurface?.visibility == View.VISIBLE))
@@ -1554,6 +1596,8 @@ internal class BrowserHost(
       .put("multiProfileSupported", multiProfile)
       .put("profileAvailable", status.profileEstablished)
       .put("profileReason", status.profileReason)
+      // #1575：caps 与 status 共用同一判据（同一份 profileIsolationOf），否则两处口径又会漂移。
+      .put("profileIsolation", profileIsolationOf(isolationTier, status))
       .put("profileIsolationRequired", true)
       .put("defaultProfileFallback", false)
       .put("completeBrowsingDataClearAvailable", false)
@@ -1608,8 +1652,25 @@ internal class BrowserHost(
     var navigationTarget: ControlTarget? = null
     val started = controlOnMain(captured) {
       val workspace = captured.workspace
-      val newTab = (wantsNewTab && requestedTabId == null) ||
-        (requestedTabId != null && !tabs.containsKey(requestedTabId))
+      // issue #1318：同 URL 的新开请求先按 workspace 口径规范化再查存活标签，命中就复用。
+      // 判定逻辑在 BrowserTabReuse（纯函数，JVM 单测钉住两个方向）；这里只负责接线。
+      // 注意：**不得**在 ensureSurface 之前调用 normalizeForWorkspace 做别的事——
+      // 该函数是「导航前解析目标 URL」的语义锚点，接线测试按 assertBefore 钉着它的位置。
+      val reusable = BrowserTabReuse.reusableTabId(
+        wantsNewTab = wantsNewTab,
+        requestedTabId = requestedTabId,
+        targetUrl = raw.takeIf { it.isNotBlank() }?.let { BrowserHostNavigationPolicy.normalize(
+          it, isolatedProfile = true, allowAnonymousEngineAccess = allowAnonymousEngineAccess,
+        ) },
+        existingTabs = tabs.values.map { it.id to it.url },
+      )
+      if (reusable != null) {
+        activeTabId = reusable
+        workspace.modelTabId = reusable
+        navigationTarget = ControlTarget(workspace, ensureTab(reusable))
+      }
+      val newTab = reusable == null && ((wantsNewTab && requestedTabId == null) ||
+        (requestedTabId != null && !tabs.containsKey(requestedTabId)))
       if (newTab && tabs.size >= MAX_TABS) {
         return@controlOnMain targetFailure(captured, "tab-limit")
           .put("guidance", "同时打开的页面已达上限（$MAX_TABS）；先 browser_close_tab 关掉不再需要的页。")
@@ -1808,6 +1869,7 @@ internal class BrowserHost(
       if (tab.remoteCreated) {
         runCatching { rh.renderer?.destroyTab(remoteTabId(tab.owner, tab)) }
         tab.remoteCreated = false
+        pushedGeometry.remove(remoteTabId(tab.owner, tab))
       }
       tab.generation.incrementAndGet()
       tab.snapshotGeneration = -1L
@@ -1897,6 +1959,7 @@ internal class BrowserHost(
     tab.view = null
     if (remote != null && tab.remoteCreated) {
       tab.remoteCreated = false
+      pushedGeometry.remove(remoteTabId(tab.owner, tab))
       runCatching { remote!!.renderer?.destroyTab(remoteTabId(tab.owner, tab)) }
     }
     tabs.remove(tab.id)
@@ -1943,18 +2006,23 @@ internal class BrowserHost(
       targetProblem(target)?.let { done(targetFailure(target, it)); return@awaitMain }
       val tab = target.tab
       if (tab == null || !surfaceReady(tab)) { done(targetFailure(target, "browser-not-created")); return@awaitMain }
+      // #1611：与 snapshotOp/textOp 同一判据——表达式自身触发导航或页面 meta-refresh 落在
+      // 8 秒窗口内时，旧文档的返回值会以新文档身份交付（pageReply 现读 url/loadState/pageGeneration）。
+      val startedGeneration = tab.generation.get()
       evaluateOnTab(tab, expr) { raw ->
-        val problem = targetProblem(target, tab.view)
-        if (problem != null) {
-          done(targetFailure(target, problem))
-        } else {
-          val value = decodeJs(raw)
-          done(pageReply(target).put("ok", true).put("value", when (value) {
+        val value = decodeJs(raw)
+        done(BrowserJsReplyGuard.settle(
+          problem = targetProblem(target, tab.view),
+          startedGeneration = startedGeneration,
+          currentGeneration = tab.generation.get(),
+          value = when (value) {
             null -> ""
             is String -> value
             else -> value.toString()
-          }))
-        }
+          },
+          pageReply = { pageReply(target) },
+          reject = { reason -> targetFailure(target, reason) },
+        ))
       }
     }
   }

@@ -289,7 +289,8 @@ Write-Host ("== 预清理：本次产出 ABI = " + ($abisThisRun -join ', ') + "
 
 # 注入集单一常量（0.13.8-b ST-06 / F-ENV-04）：dirs/externals 都在 scripts/plugin-dirs.json，
 # 与云端链 dsh-mobile-apk/scripts/build-apk.mjs 共用同一份——此前两条链各写一份，云端
-# pluginDirs 少一个「权威 patch 已挂载」的包（dsh-model-capability）且无任何门禁能发现。
+# pluginDirs 曾少一个「权威 patch 已挂载」的包且无门禁能发现；那个包 dsh-model-capability 已于 0.14.8 退役，
+# 其残留引用改由 scripts/check-retired-plugins.mjs 守（重新引入必须先过那道门）。
 # 注入四件套的历史背景（2026-08-23 修复 C3）：此前快照仅有 3 个 @dsh-android 包，而权威 patch
 # 挂载了 bridge/manage/linux-env/file-open → 装配失败/功能缺席。
 $pluginManifest = Get-Content (Join-Path $Root "scripts\plugin-dirs.json") -Raw | ConvertFrom-Json
@@ -700,3 +701,10 @@ if ($producedAbis.Count -eq 0) { Write-Host "没有任何 ABI 产出——不发
 Write-Host "== vendored 字节绑定门禁 =="
 node (Join-Path $Root "scripts\check-vendor-provenance.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { throw "vendored 目录与 scripts/vendor-provenance.json 不符，拒绝交付" }
+
+# 退役插件残留引用（0.14.8 dsh-model-capability 退役）：构建/发布入口里不得再出现它的可执行引用。
+# 放在链尾与 vendored 那条同因：只读仓库文件、与 ABI 无关，跑一次即可；但它必须在打包之前，
+# 否则「注入集里多一条指向不存在目录的项」会一路静默到设备上才暴露。
+Write-Host "== 退役插件残留引用门禁 =="
+node (Join-Path $Root "scripts\check-retired-plugins.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { throw "构建/发布入口仍引用已退役插件，拒绝交付" }

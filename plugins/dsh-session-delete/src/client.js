@@ -287,17 +287,14 @@
         /** 客户端步骤留痕（localStorage，断网也能读；诊断用）。 */
         var TRACE_KEY = 'dsh.session-delete.trace'
         /**
-         * 重试阶梯的**总时长**：每轮超时 2s、最多 3 轮（首试 + 两次重试）。
+         * 请求看门狗：超过这个时间还没结果就重载页面重建连接。
          *
-         * issue #1618：看门狗必须比这个值**长**，否则一次 2.5s 的正常删除会先触发整页刷新——
-         * 用户丢掉滚动位置与输入框草稿，600ms 后由 resume 路径重发第三次。旧值是写死的 4000，
-         * 短于阶梯本身的 6000，重试永远跑不完。
+         * issue #1618：它必须**覆盖完整个重试阶梯**再加余量，而不是短于它。
+         * 旧值 4s 短于 MAX_ATTEMPTS * REQUEST_TIMEOUT_MS = 6s，于是「一次 2.5s 的正常删除」
+         * 会先超时、再在第 2 次重试途中被整页刷新 —— 用户丢掉滚动位置与输入框草稿，
+         * 600ms 后 resume 路径又补发第三次。判据（行为）：阶梯跑完（含各次超时）之前不得 reload。
          */
-        var RETRY_LADDER_MS = MAX_ATTEMPTS * REQUEST_TIMEOUT_MS
-        /** 余量：最后一轮超时之后还要走完 catch/收尾，看门狗不能卡在同一毫秒。 */
-        var WATCHDOG_MARGIN_MS = 2000
-        /** 请求看门狗：超过这个时间还没结果就重载页面重建连接（= 阶梯 + 余量，不是独立数字）。 */
-        var WATCHDOG_MS = RETRY_LADDER_MS + WATCHDOG_MARGIN_MS
+        var WATCHDOG_MS = MAX_ATTEMPTS * REQUEST_TIMEOUT_MS + 4000
 
         /**
          * 本地留痕：不依赖网络，写入 WebView 的 localStorage（可被现场取证）。

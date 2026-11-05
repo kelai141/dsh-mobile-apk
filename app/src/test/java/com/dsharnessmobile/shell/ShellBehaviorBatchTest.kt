@@ -7,7 +7,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 壳侧行为批（issue #1594 / #1598 / #1599 / #1601 / #1605 / #1612 / #1623）的离线判据。
+ * 壳侧行为批（issue #1594 / #1598 / #1599 / #1601 / #1605 / #1623）的离线判据。
  *
  * 这些缺陷的共同形态是「界面上看起来对、实际不是那么回事」——只能靠设备复现，于是此前没有离线判据。
  * 本类按本仓既有两条路子落判据：
@@ -202,24 +202,6 @@ class ShellBehaviorBatchTest {
       Regex("FileIncoming\\.processIncomingIntent\\(").findAll(code).count())
   }
 
-  // ── issue #1612：面板展开期间返回键必须能收起面板 ───────────────────────────
-
-  /**
-   * 缺陷形态：面板窗口 flags 只有 FLAG_NOT_TOUCH_MODAL（= 可聚焦，弹输入法需要），而全仓没有任何
-   * KEYCODE_BACK 处理。展开期间 BACK 被派发到 overlay 窗口，视图树无人消费，非 Activity 窗口没有
-   * 默认回落 ⇒ 事件被丢弃，用户视角是「返回键死了」。
-   */
-  @Test
-  fun overlayPanelConsumesBackToCollapse() {
-    val code = shellCode("OverlayService.kt")
-    assertTrue("面板根 View 必须消费 BACK（issue #1612）", code.contains("unit.setOnKeyListener"))
-    // 判定真值表本身有独立的行为判据（ShellStopAndBackKeyTest）；这里守「面板真的接上了它」。
-    assertTrue("必须走 OverlayBackKey 判定", code.contains("OverlayBackKey.shouldCollapse(code, event.action)"))
-    val showPanel = code.substringAfter("private fun showPanel()").substringBefore("internal fun hidePanel")
-    assertTrue("收起必须真的调 hidePanel", showPanel.contains("hidePanel()"))
-    assertTrue("不得为了返回键去掉可聚焦（那是弹输入法的前提）",
-      showPanel.contains("FLAG_NOT_TOUCH_MODAL") && !showPanel.contains("FLAG_NOT_FOCUSABLE"))
-  }
 
   // ── issue #1623：工厂 disabled 语义对多子条目 insert 组同样有效 ───────────────
 

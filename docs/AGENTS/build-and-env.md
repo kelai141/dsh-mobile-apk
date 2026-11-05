@@ -53,7 +53,7 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 
 **CI 插件复用**：APK `pr-gate.yml` 从 `scripts/plugin-dirs.json` 选择 termux 与 Android 插件，按顺序只准备一次已解析 lock、`npm ci` 和构建产物；协议、插件测试、output schema 和 wire 预算共用这些产物。`@deepseek-ai/dsh-tools` 是 manage 的固定 devDependency，不再额外解析安装。常规 `build-apk.yml` 与来源链也从清单按顺序选择带 build script 的包，各准备并构建一次；来源审计和常规 build 互斥，`abi` 输入决定常规矩阵。Release job 只准备依赖，`build-apk-013.ps1` 统一构建，后续 `npm pack` 复用同一批 `lib/`，不再次安装或构建。
 
-**模型目录跨 job 交接**：快照 job 的生成 `lib/catalog-snapshot.json` 未跟随归档 artifact 上传，后续干净 checkout 不能依赖它。Release job 从实际输入 arm64 快照提取 pi-ai package metadata 与 `dist/providers/data`，运行 `gen-model-catalog.mjs` 后再注入。目录的 `engineRootHint` 使用快照内相对路径，避免将 runner 的本地绝对路径写进发布内容；本地正式构建仍由快照生成器生成同源目录。
+**模型目录跨 job 交接（已随插件退役失效）**：该交接曾为已退役的能力发现插件生成 `lib/catalog-snapshot.json`（快照 job 的生成物不随 artifact 上传，Release job 从 arm64 快照提取 pi-ai metadata 与 `dist/providers/data` 再跑 `gen-model-catalog.mjs` 后注入）。插件 0.14.8 退役后，release.yml 的该步骤与 build-snapshot-013.mjs 的生成块均已删除，`scripts/gen-model-catalog.mjs` 不再被任何入口调用；本段保留为历史说明，重新引入能力目录产物前必须先过 `scripts/check-retired-plugins.mjs`。目录的 `engineRootHint` 使用快照内相对路径，避免将 runner 的本地绝对路径写进发布内容；本地正式构建仍由快照生成器生成同源目录。
 
 **最终签名与资产身份**：上传前同一 `check-apk-signatures.mjs --keystore keystore/debug.keystore` 同时检查 v1/v2/v3 与固定证书身份；Windows 通过 SDK 的 `apksigner.jar` 传独立参数，避免 shell 解释 APK 路径。来源链保留构建前证书预检，最终 gate 再验证实际 APK；publish 下载并核对 MANIFEST 后提升原字节。真实 CI runner 验收状态以重构台账为准。
 
