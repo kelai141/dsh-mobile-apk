@@ -390,7 +390,8 @@ flush 193 次扫描、38,021 行，entry 迭代49.8ms；metadata38.6ms，其中 
 bundle55份10.8MB读取17.6ms，compose9.4ms。typert 首 flush193次 qualifies、24,181行，qualify41.5ms，
 整轮118.4ms。CPU样本还定位到本方模型能力自动补给初次 descriptor 与最终 signature 的两次
 全量 settings.describe，与离线目录解析堆在同一 turn。修复由上述两条 scan 补丁和插件异步
-pass checkpoint 共同组成；完整自动补给行为见 `plugins/dsh-model-capability/README.md`。
+pass checkpoint 共同组成。当年那个能力发现插件（含其异步 pass checkpoint）已于 0.14.8 整体退役，
+仓内不再有它的 README 可查；本节只保留两条 scan 补丁的判据与计时证据。
 
 实际对照使用同一同步 TOTAL/C4 monitor：仅 client scan 五轮为126.4/13、114.4/12 FAIL，
 76.1/11、88.9/12、93.5/10 PASS；再加 typert scan 仍有147.2/13、110.6/13、116.6/14 FAIL。

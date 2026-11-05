@@ -420,9 +420,8 @@ if (peer) {
    * 目录级比对中**按设计逐侧不同**的生成物——它们不是镜像漂移，计入比对会让该目录永久判红
    * （假红），反而失去「挡住真漂移」的判别力。两类，逐条具名（排除面刻意极小）：
    *   - `*.tgz`：打包产物，子仓 .gitignore 已忽略；各自打包时按本侧源码生成，两侧本就不同源。
-   *   - `lib/catalog-snapshot.json`：由 build-snapshot-013.mjs 按**本次构建的 ABI 引擎树**生成
-   *     （engineRootHint 使用快照内相对路径；数据仍来自各 ABI 的真实引擎树），是构建期数据，
-   *     不属于铁律 5 的「src + package.json + lib 产物」镜像面。
+   *   - `lib/catalog-snapshot.json` 曾属此类（build-snapshot-013.mjs 按本次构建的 ABI 引擎树生成）；
+   *     生产它的插件 dsh-model-capability 已于 0.14.8 退役，该文件不再产生，故撤掉这条例外。
    * 除外：src/、test/、package.json 等源码仍全量逐字节比对。
    */
   const MIRROR_SKIP = [

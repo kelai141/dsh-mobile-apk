@@ -294,6 +294,7 @@ const GATES = [
   // 判据 = 逐文件 sha256 + 字节数与 scripts/vendor-provenance.json 相符（另含目录自述数字）。
   // 输入全在仓库内（不读网络、不需要快照），故 ciApk/ciCoord 皆 true。
   { script: 'check-vendor-provenance.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
+  { script: 'check-retired-plugins.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
 ]
 const CI_COORD_GATES = GATES.filter((g) => g.ciCoord).map((g) => g.script)
 const CI_APK_GATES = GATES.filter((g) => g.ciApk).map((g) => g.script)

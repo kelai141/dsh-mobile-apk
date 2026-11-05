@@ -3058,3 +3058,32 @@ The term '//' is not recognized as a name of a cmdlet, function, script file, or
     现象：给 `/data/user/<N>` 与 `/data/data` 的等价改写加「同用户」守卫后写了一条例据，把守卫删掉负控**仍然绿**——因为那条分支只处理 `user 0`，删了守卫结论也一样。
     补一条真正区分它的用例（base 写成 `user/0`、而当前进程在 `user 10`）之后，删守卫立刻红。
     纪律：**负控不红不是「实现已经正确」，而是「这条判据没有判别力」**——当场补用例，不能放过。
+
+379. **插件退役了，构建/发布入口的引用不会自己消失——而"少一个包"没有任何判据会红**（2026-11-04，0.2.2-rc.1 适配勘测）
+
+    现象：`plugins/dsh-model-capability` 在 0.14.8 就整体退役（本仓连目录都没有），但 8 个月后仍有
+    5 处构建/发布入口在引用它：`build-apk-source.yml` 的插件 `sha256sum` 循环、`release.yml` 里
+    "从本次快照恢复模型能力目录"整步（`gen-model-catalog.mjs --out plugins/dsh-model-capability/lib/catalog-snapshot.json`）、
+    `build-snapshot-013.mjs` 的 0g 生成块、`plugin-dirs.json` 的说明文字、以及 `build-apk-013.ps1` 里
+    "少一个包且无任何门禁能发现"那句自陈注释——**注释本身就在描述这个缺陷，却没人把它变成判据**。
+
+    真因：这些入口对"插件是否存在"全是**静默容错**。
+    ① `for d in <列表>` 里缺失的目录只会让 `sha256sum` 报个错再 `|| true` 吞掉；
+    ② `build-snapshot-013.mjs` 的生成块整个包在 `if (existsSync(join(pluginDir,'package.json')))` 里，
+       目录不在就静默跳过；
+    ③ `release.yml` 那步会自己 `mkdir` 出目标目录再写文件，**把已退役插件的路径重新造出来**；
+    ④ `plugin-dirs.json` 只在 `$comment` 里提到它，没人读注释做判据。
+    于是"退役"只发生在源码树里，入口清单仍是旧世界的副本，谁也不会红。
+
+    修法：
+    - 清引用：两份 workflow（删整步 / 从循环移除）、`build-snapshot-013.mjs`（删 0g 块）、
+      `plugin-dirs.json` 说明、两处自陈注释；`gen-model-catalog.mjs` **撤掉默认 `--out`**，
+      不显式指定就 `exit 2`，杜绝"一跑就把退役插件目录树造回来"。
+    - 加门禁：`scripts/check-retired-plugins.mjs` 扫 7 个构建/发布入口，
+      可执行引用命中即红、**注释里的历史说明放行**（否则逼人删掉理由），并单独断言
+      `plugin-dirs.json` 的 dirs/externals/retiredExternals 与 `profile-web.cordis.patch.yml` 的装配行里没有它；
+      自检用临时样本做正/负控，**不依赖仓库当前是否干净**（依赖现状的自检会在清理完成后变假绿）。
+    - 判据边界：`docs/`、`release/`、`AGENTS.md` 属历史记录，**刻意不扫**——把历史也判红，等于逼人删证据。
+
+    复验：`node scripts/check-retired-plugins.mjs`（0）与 `--self-test`（正/负控都符合预期）；
+    反证做法 = 往 `plugin-dirs.json` 的 dirs 里塞回该包，门禁必须红。
