@@ -570,7 +570,7 @@ sequenceDiagram
 | P03 | K07 | 面板两阶段契约：先 vdisplayBounds 落 bounds 记录，Surface 创建后再仲裁 attach | plugins/dsh-android-vdisplay/src/client/index.ts:194 |
 | P03 | 桥控制队列（dsh-android-bridge） | controlExec 是唯一通路，档位门与范围门在服务面复查（browser*/vdInfo/vdCreate/vdDestroy 刻意不在档位门内） | plugins/dsh-android-bridge/src/index.ts#AndroidPrivilegeService@e33053de@4a237b66 |
 | P03 | 注入层与侧栏面板（dsh-client-ui-responsive） | 浏览器面板与虚拟屏 Tab 经 androidBridge 直连壳侧，与插件共用同一 op 契约与 stage bounds 语义 | dsh-client-ui-responsive/src/client/mobile/native-browser-presentation.ts:61 |
-| P03 | 测试与门禁 | 交付面由 output.schema 门禁（含 browser_* 夹具）、六面登记门禁与插件单测共同守住 | scripts/check-tool-output-schema.mjs:282#expect=const%20VARIANTS%20%3D%20%7B |
+| P03 | 测试与门禁 | 交付面由 output.schema 门禁（含 browser_* 夹具）、六面登记门禁与插件单测共同守住 | `scripts/check-tool-output-schema.mjs:282#expect=const%20VARIANTS%20%3D%20%7B` |
 | P04 | 桥与鉴权 | 五条 file-incoming 与四条 env/runtime-cache 路由全部走 authorizeMobileRoute，令牌与控制队列同一枚 shellControlToken；route-auth.ts 只是转发不复制 | plugins/dsh-android-file-open/src/route-auth.ts:47 |
 | P04 | 壳侧文件来件 FileIncoming | 壳把来件拷进 files/home/.dsh/workspaces/incoming 后 POST 本插件；两处元数据名（.sessions/.meta.ndjson/.pending-notify.ndjson/.tool-temp.ndjson）与 TTL/全清豁免面必须两侧对齐 | app/src/main/java/com/dsharnessmobile/shell/FileIncoming.kt:32 |
 | P04 | 客户端注入层 | 草稿链的公开元数据与 claim/content/complete、clean、runtime-cache scan/execute 全由页面驱动，页面是唯一的草稿消费者 | dsh-client-ui-responsive/src/client/mobile/incoming-draft.ts:247 |
