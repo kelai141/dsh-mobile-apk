@@ -190,12 +190,16 @@ jobs:
           ls -l snapshot/
       - name: 版本与纪律断言（versionName == 输入）
         shell: bash
+        # issue #1614：`inputs.version` 是 workflow_dispatch 的自由文本，**不得**内插进 bash 双引号。
+        # 走 env 传参后 run 里只引用 "$INPUT_VERSION"，shell 不会对输入做二次求值。
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          set -e
+          set -euo pipefail
           VER=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)
           CODE=$(sed -n 's/.*versionCode = \([0-9]*\).*/\1/p' app/build.gradle.kts | head -1)
-          echo "build.gradle versionName=$VER versionCode=$CODE ; input=${{ inputs.version }}"
-          [ "$VER" = "${{ inputs.version }}" ] || { echo "::error::versionName($VER) != 输入——先改 build.gradle.kts 并走 PR"; exit 1; }
+          echo "build.gradle versionName=$VER versionCode=$CODE ; input=$INPUT_VERSION"
+          [ "$VER" = "$INPUT_VERSION" ] || { echo "::error::versionName($VER) != 输入——先改 build.gradle.kts 并走 PR"; exit 1; }
           echo "ver=$VER" >> "$GITHUB_ENV"
           echo "code=$CODE" >> "$GITHUB_ENV"
       - name: 准备 Android SDK build-tools（apksigner 供产出侧签名断言）
@@ -350,9 +354,11 @@ jobs:
           path: release/v${{ inputs.version }}
       - name: 确认待发布包结构
         shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          VER="${{ inputs.version }}"
+          VER="$INPUT_VERSION"
           DIR="release/v${VER}"
           test -s "$DIR/notes.md"
           test -s "$DIR/MANIFEST.txt"
@@ -371,9 +377,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          set -e
-          VER="${{ inputs.version }}"
+          set -euo pipefail
+          VER="$INPUT_VERSION"
           TAG="v${VER}"
           # 幂等：已存在则复用，避免重跑 422
           if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then

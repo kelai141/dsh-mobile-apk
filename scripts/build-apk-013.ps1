@@ -102,6 +102,7 @@ node (Join-Path $Root "scripts\check-bridge-symmetry.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "桥面出现新的不对称（只有 setter/getter 返偏好），拒绝打包"; exit 1 }
 Write-Host "== 门禁覆盖与 SKIP 纪律门禁 =="
 node (Join-Path $Root "scripts\check-gate-skips.mjs") 2>&1
+node (Join-Path $Root "scripts\check-workflow-input-injection.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "门禁覆盖清单/SKIP 纪律失败（发布链要求 SKIP=0），拒绝打包"; exit 1 }
 
 # 构建链中止语义（任一 ABI 被门禁拒绝 = 整链非 0；含尾部守卫动态自检）
