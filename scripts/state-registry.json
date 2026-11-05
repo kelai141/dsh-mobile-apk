@@ -25,15 +25,31 @@
     },
     {
       "id": "external-linux-environment",
-      "holder": "用户显式注入的外部 linuxBootstrap 服务；APK 只提供宿主适配与展示",
+      "holder": "内置宿主动态加载的 linuxBootstrap 服务；用户确认安装/启用，APK 提供资产适配与展示",
       "writePath": "plugins/dsh-android-linux-env/src/linux-environment.ts:registerLinuxEnvironmentRoutes → linuxBootstrap.install/reinstall/uninstall/setAutoUpdateEnabled",
       "sourceOfTruth": "外部 bootstrap 在 context.filesDir/linux-environment 下持久化的安装版本、应用版本基线、偏好与自动检查尝试；DSH_APP_VERSION 来自 BuildConfig",
-      "syncPath": "受鉴权 GET status 归一映射；POST 动作明确确认后委托同一服务并回读。客户端只做单次服务发现与显式刷新，无本地持久化副本；未注入 bootstrap 时无设置入口。",
+      "syncPath": "宿主启动时加载 bootstrap 并恢复已持久化的启用意图；设置入口始终可见，受鉴权 GET status/manifest 展示事实，确认后原生预置全部资产再 POST 安装。客户端不持久化安装状态。",
       "evidence": {
         "kind": "grep",
         "file": "dsh-mobile-apk/plugins/dsh-android-linux-env/src/linux-environment.ts",
         "pattern": "bootstrap.setAutoUpdateEnabled"
       }
+    },
+    {
+      "id": "linux-runtime-readiness",
+      "holder": "android-linux-env 的 createLinuxLifecycle 进程内快照",
+      "writePath": "plugins/dsh-android-linux-env/src/linux-lifecycle.ts:createLinuxLifecycle.attach/fail/stop/stopped",
+      "sourceOfTruth": "bootstrap 的安装与恢复结果、订阅状态，以及本代引擎关闭意图；启动期间不推断已就绪",
+      "syncPath": "linux_environment_status 与每轮 required system context 读取同一快照；Linux 工具按实际激活注册；宿主销毁取消订阅并关闭运行时。",
+      "evidence": { "kind": "grep", "file": "plugins/dsh-android-linux-env/src/index.ts", "pattern": "lifecycle.snapshot" }
+    },
+    {
+      "id": "engine-process-generation-ledger",
+      "holder": "EngineManager 与 OwnedEngineStop 的进程归属账本",
+      "writePath": "app/src/main/java/com/dsharnessmobile/shell/OwnedEngineStop.kt:recordGeneration；EngineManager spawn 前落盘、停止后清理",
+      "sourceOfTruth": "本代引擎 token、PID/starttime/UID 与停止结果；不按进程名或全 UID 认领",
+      "syncPath": "GuidePhase.Stopping 等待归属进程退出；下一次启动结算旧代际后才能 spawn，未确认清理不报告 Closed 或叠加引擎。",
+      "evidence": { "kind": "grep", "file": "app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt", "pattern": "recordGeneration" }
     },
     {
       "id": "immersive-mode",
