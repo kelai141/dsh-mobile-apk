@@ -227,9 +227,13 @@ class FileIncomingCleanupTest {
     val dir = Files.createTempDirectory("pending-ledger").toFile()
     try {
       val ledger = File(dir, ".pending-notify.ndjson")
-      assertEquals(emptyList<String>(), FileIncoming.readPending(ledger))
+      // 清单条目自带来源（缺陷 1）：读出来的每一项是 origin to path；老格式（纯路径）按 external。
+      assertEquals(emptyList<Pair<String, String>>(), FileIncoming.readPending(ledger))
       ledger.writeText("alpha\n\nbeta\n")
-      assertEquals(listOf("alpha", "beta"), FileIncoming.readPending(ledger))
+      assertEquals(
+        listOf(FileIncoming.ORIGIN_EXTERNAL to "alpha", FileIncoming.ORIGIN_EXTERNAL to "beta"),
+        FileIncoming.readPending(ledger),
+      )
       assertTrue(FileIncoming.readPending(dir) == null)
     } finally {
       dir.deleteRecursively()
@@ -242,8 +246,14 @@ class FileIncomingCleanupTest {
     try {
       val ledger = File(dir, ".pending-notify.ndjson")
       ledger.writeText("old\n")
-      FileIncoming.writePending(ledger, listOf("survivor", "new"))
-      assertEquals(listOf("survivor", "new"), FileIncoming.readPending(ledger))
+      FileIncoming.writePending(
+        ledger,
+        listOf(FileIncoming.ORIGIN_EXTERNAL to "survivor", FileIncoming.ORIGIN_EXTERNAL to "new"),
+      )
+      assertEquals(
+        listOf(FileIncoming.ORIGIN_EXTERNAL to "survivor", FileIncoming.ORIGIN_EXTERNAL to "new"),
+        FileIncoming.readPending(ledger),
+      )
       assertTrue("temporary files must not be left behind", dir.listFiles()!!.none { it.name.endsWith(".tmp") })
     } finally {
       dir.deleteRecursively()
@@ -258,7 +268,11 @@ class FileIncomingCleanupTest {
       val old = ledger.readText()
       val failingParent = File(dir, "missing").apply { writeText("not-a-directory") }
       val impossible = File(failingParent, "ledger")
-      assertTrue(runCatching { FileIncoming.writePending(impossible, listOf("new")) }.isFailure)
+      assertTrue(
+        runCatching {
+          FileIncoming.writePending(impossible, listOf(FileIncoming.ORIGIN_EXTERNAL to "new"))
+        }.isFailure,
+      )
       assertEquals(old, ledger.readText())
       assertTrue("no temp residue beside a failed write", dir.listFiles()!!.none { it.name.endsWith(".tmp") })
       assertFalse(File(failingParent, "ledger").exists())

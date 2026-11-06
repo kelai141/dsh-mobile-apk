@@ -114,6 +114,17 @@ export class TopBarFold {
   }
 
   private readonly onViewportChange = (): void => { this.schedule() }
+  /**
+   * Scroll handler.
+   *
+   * The fold only needs geometry while its panel is open (measure() returns immediately when
+   * `open` is false), so a collapsed top bar has nothing to recompute on scroll. Before this
+   * gate every scroll event scheduled a frame that ran a full-document query for the header
+   * seat (measured: part of the 4 document queries per scroll frame in
+   * tests/scroll-frame-budget.spec.ts). Resize stays ungated: crossing the form breakpoint
+   * changes the whole presentation while collapsed.
+   */
+  private readonly onScroll = (): void => { if (this.open) this.schedule() }
 
   /** 开始观察标题栏；非手机竖屏时什么都不做。 */
   attach(): void {
@@ -131,7 +142,7 @@ export class TopBarFold {
     document.addEventListener('mousedown', this.onDocumentPointerDown, true)
     document.addEventListener('keydown', this.onKeyDown)
     window.addEventListener('resize', this.onViewportChange)
-    window.addEventListener('scroll', this.onViewportChange, true)
+    window.addEventListener('scroll', this.onScroll, true)
     this.media?.addEventListener('change', this.onViewportChange)
     this.schedule()
   }
@@ -154,7 +165,7 @@ export class TopBarFold {
     document.removeEventListener('mousedown', this.onDocumentPointerDown, true)
     document.removeEventListener('keydown', this.onKeyDown)
     window.removeEventListener('resize', this.onViewportChange)
-    window.removeEventListener('scroll', this.onViewportChange, true)
+    window.removeEventListener('scroll', this.onScroll, true)
     this.media?.removeEventListener('change', this.onViewportChange)
     this.media = null
     this.restore()

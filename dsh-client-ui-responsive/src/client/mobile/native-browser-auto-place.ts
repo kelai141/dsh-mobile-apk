@@ -49,8 +49,21 @@ export class NativeBrowserPlacement {
     if (workspace === undefined) {
       workspace = new NativeBrowserSession(session)
       this.workspaces.set(session, workspace)
+      // A new workspace is new interest: the poll may have parked itself as idle.
+      this.wake()
     }
     return workspace
+  }
+
+  /**
+   * Restart the loop after it parked itself idle.
+   *
+   * [schedule] stops rescheduling when nothing can change (see [needsPolling]); every entry point
+   * that creates new interest has to call this or the loop would never come back.
+   */
+  wake(): void {
+    if (this.disposed || !this.attached) return
+    this.schedule()
   }
 
   /** Start discovery without expanding another Session or a collapsed column. */
@@ -89,8 +102,24 @@ export class NativeBrowserPlacement {
     this.timer = window.setTimeout(() => {
       this.timer = undefined
       this.tick()
-      if (!document.hidden) this.schedule()
+      if (!document.hidden && this.needsPolling()) this.schedule()
     }, POLL_INTERVAL_MS)
+  }
+
+  /**
+   * Whether another pass could possibly do anything.
+   *
+   * Two cases need the loop: a workspace this plugin already owns native state for (it can hold
+   * bindings that a native close must remove, or a pending claim), and any Session with a pending
+   * claim. Everything else is idle, and an idle page must not cross the bridge: the call is
+   * synchronous on the page thread and the shell answers it on its main thread.
+   * @returns true when the next tick has a reason to exist.
+   */
+  private needsPolling(): boolean {
+    if (this.pending.size > 0) return true
+    if (this.options.mounted() !== undefined) return true
+    for (const workspace of this.workspaces.values()) if (workspace.hasNativeInterest()) return true
+    return false
   }
 
   /** 回前台立刻补一拍；后台里停表（见 [schedule]）。 */
@@ -120,6 +149,10 @@ export class NativeBrowserPlacement {
   private polled(tabs: readonly SidebarRightOpenTab[], mounted: SessionId | undefined): Set<SessionId> {
     const ids = new Set<SessionId>()
     for (const tab of tabs) if (this.isBrowserTab(tab)) ids.add(tab.sessionId)
+    // The mounted Session stays unconditional: an AI-created native tab appears only in the
+    // shell's inventory, so discovering it (and giving it a GUI occurrence) is exactly what this
+    // poll is for. The saving comes from [needsPolling], which stops the loop entirely when
+    // nothing is mounted at all.
     if (mounted !== undefined) ids.add(mounted)
     for (const session of this.pending.keys()) ids.add(session)
     return ids

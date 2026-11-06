@@ -400,7 +400,10 @@ class W3ShellContractTest {
     val code = codeOnly(source("FileIncoming.kt"))
     val pipeline = code.substringAfter("fun processIncomingIntent")
     val reservation = pipeline.indexOf("withIncomingDeliveryAfterSweep(pendingLock, activeDeliveries, { sweepExpired(context) })")
-    val enqueue = pipeline.indexOf("enqueuePending(context, target.absolutePath)")
+    // 入队现在还要带上来源（缺陷 1：external = 外部分享强制新会话 / camera = 壳侧拍照并入
+    // 当前会话）。断言只钉**入队这一动作**及其参数前缀，不钉第三参数的具体值——来源取值由
+    // FileIncomingOriginTest 的行为判据守，这里守的是「入队仍在预留包装内」这条 FX-211.2 契约。
+    val enqueue = pipeline.indexOf("enqueuePending(context, target.absolutePath,")
     // ── 本条契约在 issue #1006 里被**改写**过，为什么这么改写在这里 ──────────────────
     //
     // 改的是哪条：本用例原来断言 `pipeline.indexOf("while (System.currentTimeMillis() < deadline)")`
@@ -477,9 +480,14 @@ class W3ShellContractTest {
     assertTrue("共享存储 file:// 必须保留（外部真实路径）", whitelist.contains("\"file:///storage/emulated/0/\""))
     assertFalse("私有目录不得进外部来件白名单（issue #1353）", whitelist.contains("/data/data/"))
     assertFalse("私有目录不得进外部来件白名单（issue #1353）", whitelist.contains("/data/user/0/"))
+    // 壳侧自产来件入口。0.22 起该入口多了一个**带缺省值**的 origin 参数（缺陷 1：声明来源
+    // 才能让拍照成品并入当前会话），签名因此跨行书写；断言只钉「入口存在 + 前三个参数不变」，
+    // 不钉行内排版，也不钉第四参数——来源取值由 FileIncomingOriginTest 的行为判据守。
     assertTrue(
       "壳侧自产来件必须走 File 入口（不经过 URI 白名单）",
-      code.contains("fun processIncomingPath(context: Context, copied: File, notify:"),
+      code.contains("fun processIncomingPath(") &&
+        Regex("fun processIncomingPath\\(\\s*context: Context,\\s*copied: File,\\s*notify: \\(title: String, text: String\\) -> Unit,")
+          .containsMatchIn(code),
     )
   }
 

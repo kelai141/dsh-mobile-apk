@@ -677,7 +677,14 @@ export function apply(ctx: ClientContext): void {
         } satisfies NativeBrowserControlsInjected
       },
     }, BrowserTabMenu)), 'ui-responsive.browser.menu')
-    scope.effect(() => placement.attach(), 'ui-responsive.browser.native-tab-placement')
+    scope.effect(() => {
+      const detach = placement.attach()
+      // The poll parks itself when no Session is on screen (nothing to reconcile, and the
+      // bridge call is synchronous). A Session coming back on screen must restart it, or an
+      // AI-created native tab would never get its GUI occurrence after the app sat idle.
+      const wake = scope.sidebarRight.mounted.subscribe(() => { placement.wake() })
+      return () => { wake(); detach() }
+    }, 'ui-responsive.browser.native-tab-placement')
   })
 
   // Mobile reference menu (apk #163): rows get a leading checkbox (multi-select) and a

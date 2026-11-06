@@ -989,25 +989,63 @@ class EngineManager(private val context: Context, private val pickToken: String?
     // "A resource failed to call close." 就是它。AssetFileDescriptor 持有真实的 ParcelFileDescriptor，
     // 而这条路径在「每次启动都失败、每次重试」的形态下会被反复走到（真机正是这种形态），
     // 泄漏是**按启动次数累积**的。用 use{} 保证异常路径同样关闭；长度先取出来再进解压。
-    val assetLength = try {
-      context.assets.openFd(BUNDLED_SNAPSHOT_ASSET).use { it.length }
+    //
+    // 【并行解码（2026-11-06）】这里同时取出 STORED 条目的**绝对偏移**：assets 里的
+    // snapshot.tar.xz 是 `noCompress += "xz"` 的 STORED 条目（build.gradle.kts:44-47），
+    // 因此 startOffset 就是它在 base.apk 里的真实文件偏移。设备实测（emulator-5554）：
+    // 从 startOffset 直接读出的字节流与 assets.open() 读出的 SHA-256 完全相同
+    // （c035123ad666283f1e0d0273c66d6770e440177fa884afe39801ecea2db83a12），
+    // 且尾部 8 字节也与条目尾一致 —— 故可交给按块并行解码器做随机访问，
+    // **不需要**先把 168 MB 拷到 files/（那会多占一次磁盘与 3-5 秒）。
+    // 取不到 fd（少数 ROM 把 APK 重打包成 deflate）时如实回落顺序流，不猜。
+    // 一次 openFd 取长度 + 偏移（两个都是常量），**用完立即关闭**。
+    val assetFd = try {
+      context.assets.openFd(BUNDLED_SNAPSHOT_ASSET).use { fd -> fd.startOffset to fd.length }
     } catch (t: Throwable) {
-      // 取不到长度不是致命：totalBytes 只用于进度显示（0 = 未知）。摘要预检已单独归类「资产不可读」。
-      Log.w(TAG, "could not read bundled snapshot asset length; continuing with unknown total", t)
-      0L
+      // 取不到不是致命：长度只用于进度显示（0 = 未知）；偏移拿不到就退回顺序流解码。
+      // 摘要预检已单独归类「资产不可读」，此处不重复判。
+      Log.w(TAG, "could not open bundled snapshot asset descriptor; parallel decode unavailable", t)
+      null
     }
+    val assetLength = assetFd?.second ?: 0L
     return try {
       // 性能审计 #6：快照解压分段。只在「快照不新鲜」时执行（首装/覆盖安装），
       // 因此这条记录出现即代表本次启动走了全量解压路径，不与日常冷启动混淆。
       val extractStartMs = android.os.SystemClock.elapsedRealtime()
-      context.assets.open(BUNDLED_SNAPSHOT_ASSET).use { input ->
-        SnapshotExtractor.extract(input, assetLength, stage, onProgress, runtimeRoot = context.filesDir)
+      val plan = SnapshotExtractor.ParallelPlan.production()
+      // 偏移可用才启用并行：offset 是 APK 内该条目的绝对文件偏移（STORED 条目才有）。
+      val seekable = assetFd?.let { (offset, length) ->
+        if (offset <= 0L || length <= 0L) null
+        else SnapshotExtractor.ApkAssetSource(context.packageCodePath, offset, length)
+      }
+      val result = if (seekable != null && plan.threads >= 2) {
+        SnapshotExtractor.extractParallel(seekable, assetLength, stage, onProgress, runtimeRoot = context.filesDir, plan = plan)
+      } else {
+        context.assets.open(BUNDLED_SNAPSHOT_ASSET).use { input ->
+          SnapshotExtractor.ExtractResult(
+            SnapshotExtractor.extract(input, assetLength, stage, onProgress, runtimeRoot = context.filesDir),
+            SnapshotExtractor.ExtractResult.MODE_SEQUENTIAL,
+            1,
+          )
+        }
+      }
+      if (result.mode == SnapshotExtractor.ExtractResult.MODE_FALLBACK) {
+        // 并行解码失败后回落单线程：解压**成功了**，但「并行没生效」这件事必须留痕，
+        // 否则设备侧永远看不出并行路径是死是活（默认关的开发者日志不可依赖）。
+        LogCollector.writeBootDiag(
+          context,
+          "snapshot-parallel-decode-fallback",
+          "mode=fallback threads=" + plan.threads + " uncompressedBytes=" + result.bytes,
+        )
       }
       BootPhaseTrace.mark(
         context,
         BootPhaseTrace.SNAPSHOT_EXTRACT,
         "ms=" + (android.os.SystemClock.elapsedRealtime() - extractStartMs) +
-          " compressedBytes=" + assetLength,
+          " compressedBytes=" + assetLength +
+          " uncompressedBytes=" + result.bytes +
+          " decodeMode=" + result.mode +
+          " decodeThreads=" + result.threads,
       )
       true
     } catch (t: Throwable) {
