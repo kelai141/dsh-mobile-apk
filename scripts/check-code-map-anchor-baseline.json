@@ -3238,7 +3238,7 @@
     "scripts/patches/data/client-index-loader-barrier.mjs:17": [
       "export function planClientIndexLoaderBarrier(source) {"
     ],
-    "scripts/check-browser-syntax-floor.mjs:806": [
+    "scripts/check-browser-syntax-floor.mjs:813": [
       "'createSourceFile=' + (typeof ts.createSourceFile === 'function')"
     ]
   },

@@ -608,8 +608,15 @@ if (has('degrade')) {
       after += Buffer.byteLength(dst, 'utf8')
       if (dst !== src) { writeFileSync(abs, dst); changed++ }
     }
+    // 输出字段是两个消费方共用的契约，改名字会打断解析方：
+    //   · `files=` / `changed=` 被 build-snapshot-013.mjs 用 `/files=(\d+) changed=(\d+)/` 解析，
+    //     用来做「清单非空 + 真的改写了文件」的反 no-op 断言；
+    //   · `lowered=` / `skipped=` 是本轮新增的语义字段（跳过 = 两臂输出相同、无需改写）。
+    // 故 `changed=` 必须保留（它等于 lowered），新字段追加在后面。曾经把 changed 改名成 lowered，
+    // 快照构建当场报「无法从 --degrade 输出解析文件数」并 exit 1 —— 契约字段不许静默改名。
     console.log('BROWSER-SYNTAX-FLOOR DEGRADE stage=' + stage + ' target=' + TARGET_LOW
-      + ' files=' + rels.length + ' lowered=' + changed + ' skipped=' + skipped
+      + ' files=' + rels.length + ' changed=' + changed
+      + ' lowered=' + changed + ' skipped=' + skipped
       + ' bytes ' + before + ' -> ' + after + ' (+' + (after - before) + ')')
     console.log('  ⚠️ 二次降级不保证逐字节相同（@__PURE__ 注解重排，详档 §5.2 步骤 4）；判绿请用 --scan 的「双 arm 差分归零」。')
     process.exit(0)
