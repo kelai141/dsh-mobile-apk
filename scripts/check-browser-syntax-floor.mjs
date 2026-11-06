@@ -583,16 +583,34 @@ if (has('degrade')) {
     let before = 0
     let after = 0
     let changed = 0
+    let skipped = 0
     for (const rel of rels) {
       const abs = absOf(stage, rel)
       const src = readFileSync(abs, 'utf8')
+      // **幂等短路**（唯一正确的「要不要改写」判据）：判据 2 的两臂对同一份原始字节各跑一次，
+      // 若 esnext 臂与 TARGET_LOW 臂输出**逐字节相同**，说明这份代码在 esbuild 眼里没有需要降级的
+      // 语法 —— 此时改写它语义上等于原文件，只是换了排版，纯浪费体积。实测 0.2.2-rc.1 的真实闭包：
+      // 81 个浏览器面文件里只有 2 个真的需要降，全量改写白付 855,417 B（1,263,372 vs 407,955）。
+      //
+      // 为什么不能用 `dst !== src` 当判据：esbuild 会重排 `@__PURE__` 注解与缩进，几乎任何文件都
+      // 「变了」，那个判据恒真、等于没有短路。也不能用「含 static{} 文本」——本文件全篇禁用文本判据。
+      // 两臂比对与判据 2 是**同一个判据**（同一份 withTarget 选项），所以跳过的一定是判据 2 本来就
+      // 判绿的文件，不可能把该降的漏掉。
+      const high = (await esbuild.transform(src, withTarget(TARGET_HIGH))).code
       const dst = await degradeText(src)
       before += Buffer.byteLength(src, 'utf8')
+      if (dst === high) {
+        // 无需降级：保留原始字节（不写盘），体积按原样计入
+        after += Buffer.byteLength(src, 'utf8')
+        skipped++
+        continue
+      }
       after += Buffer.byteLength(dst, 'utf8')
       if (dst !== src) { writeFileSync(abs, dst); changed++ }
     }
     console.log('BROWSER-SYNTAX-FLOOR DEGRADE stage=' + stage + ' target=' + TARGET_LOW
-      + ' files=' + rels.length + ' changed=' + changed + ' bytes ' + before + ' -> ' + after + ' (+' + (after - before) + ')')
+      + ' files=' + rels.length + ' lowered=' + changed + ' skipped=' + skipped
+      + ' bytes ' + before + ' -> ' + after + ' (+' + (after - before) + ')')
     console.log('  ⚠️ 二次降级不保证逐字节相同（@__PURE__ 注解重排，详档 §5.2 步骤 4）；判绿请用 --scan 的「双 arm 差分归零」。')
     process.exit(0)
   }
