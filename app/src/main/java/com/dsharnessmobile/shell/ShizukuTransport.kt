@@ -984,26 +984,46 @@ object ShizukuTransport {
     if (remoteSvc == null) return refusal ?: unavailableShell()
     val lease = RpcLease(context, "shizuku-pull")
     var offset = 0L // Only bytes acknowledged by the remote and committed to the local sink.
+    // issue #1600：**绝不直写目标文件**。旧实现边拉边写 target，三条失败路径（chunk==null、
+    // shell-output-too-large、catch）都直接返回而不删已写字节：用户拿到 ok:false + offset:N，
+    // 但 local 路径上躺着一个看起来完整、实际被截断的文件。之后打开 sqlite/apk 得到的是
+    // 静默损坏的数据，而 partial 字段不会跟着文件走。
+    //
+    // 现在：写同目录唯一临时名（[StagedPull.begin]，UUID 后缀，两次并发 pull 不会互相踩），
+    // 全部字节落盘且 flush 之后才经 [StagedPull.commit]（内部走 [AtomicFileReplace.publish]）发布；
+    // 失败路径在 finally 里 [StagedPull.discard]——目标要么是上一次的旧内容，要么是这一次的
+    // 完整内容，不存在第三种。
+    val staged = StagedPull.begin(target)
     return try {
-      target.parentFile?.mkdirs()
-      java.io.FileOutputStream(target).use { sink ->
-        while (true) {
-          lease.beforeRpc(remoteSvc)?.let { return transferFacts(it, offset) }
-          val chunk = remoteSvc.readChunk(remote, offset, PULL_CHUNK)
-          lease.acknowledged()
-          if (chunk == null) return transferFacts(lease.complete(shellFailure(
-            IllegalStateException("远端不可读（不存在或权限不足）：$remote"))), offset)
-          if (chunk.isEmpty()) break
-          if (chunk.size > PULL_CHUNK || chunk.size.toLong() > MAX_TRANSFER_BYTES - offset) {
-            return transferFacts(lease.complete(JSONObject().put("ok", false).put("code", "shell-output-too-large")
-              .put("guidance", "远端文件超过传输上限：$remote")), offset)
+      try {
+        java.io.FileOutputStream(staged.staging).use { sink ->
+          while (true) {
+            lease.beforeRpc(remoteSvc)?.let { return transferFacts(it, offset) }
+            val chunk = remoteSvc.readChunk(remote, offset, PULL_CHUNK)
+            lease.acknowledged()
+            if (chunk == null) return transferFacts(lease.complete(shellFailure(
+              IllegalStateException("远端不可读（不存在或权限不足）：$remote"))), offset)
+            if (chunk.isEmpty()) break
+            if (chunk.size > PULL_CHUNK || chunk.size.toLong() > MAX_TRANSFER_BYTES - offset) {
+              return transferFacts(lease.complete(JSONObject().put("ok", false).put("code", "shell-output-too-large")
+                .put("guidance", "远端文件超过传输上限：$remote")), offset)
+            }
+            sink.write(chunk)
+            sink.flush()
+            offset += chunk.size
           }
-          sink.write(chunk)
-          offset += chunk.size
         }
+        // 只有暂存文件真的承载了全部 offset 字节才发布；发布失败按「什么都没发生」如实回报。
+        if (!staged.commit(offset)) {
+          return transferFacts(lease.complete(JSONObject().put("ok", false).put("code", "shell-pull-publish-failed")
+            .put("guidance", "取回内容未能原子落盘（目标保持原样）：$local")), offset)
+        }
+        transferFacts(lease.complete(JSONObject().put("ok", true).put("code", "shell-ok")
+          .put("localPath", target.absolutePath).put("path", target.absolutePath).put("size", offset).put("offset", offset)), offset)
+      } finally {
+        // 失败/早退路径的共同收口：暂存文件不得留在用户目录里（它是半截文件，不是证据）。
+        staged.discard()
       }
-      lease.complete(JSONObject().put("ok", true).put("code", "shell-ok")
-        .put("localPath", target.absolutePath).put("path", target.absolutePath).put("size", offset).put("offset", offset))
     } catch (failure: Throwable) {
       transferFacts(lease.failed(failure), offset)
     }

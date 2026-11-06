@@ -210,7 +210,16 @@ internal object FactoryProfilePatch {
       for (entry in block.entries) {
         factoryEntryIds += entry.id
         val want = disabledOfEntry(block, entry)
-        if (want != null && block.entries.size == 1) factoryDisabled[entry.id] = want
+        // issue #1623：只看**该条目自身**的 disabled 语义，不再要求「块里只有一个条目」。
+        //
+        // 旧条件是 `want != null && block.entries.size == 1`：任何 `- insert:` 组只要有两个及以上
+        // 子条目，组内声明的 disabled 就被**静默丢弃**（既不纠正 live，也不进 factoryDisabled）。
+        // 当时加块级限制是为了兜住 P-2 的「误归属」——而那个问题已由 disabledOfEntry 的条目级
+        // 缩进判据（entry.indent + 2，配置块内更深的同名键不算）解决，块级限制只剩副作用。
+        //
+        // 今天不触发的理由只是「当前工厂件的 disabled 全在顶层单条目块上」；双条目组
+        // （shell-termux + host-web-compat）只要加一行 disabled 就掉进这个洞，且零日志。
+        if (want != null) factoryDisabled[entry.id] = want
       }
     }
 

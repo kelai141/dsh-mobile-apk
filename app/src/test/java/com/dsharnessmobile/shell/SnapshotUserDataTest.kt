@@ -117,4 +117,85 @@ class SnapshotUserDataTest {
       SnapshotFs.deletePath(root)
     }
   }
-}
+
+  // ── issue #1566：配置导入必须拒绝执行型 YAML 标签 ─────────────────────────────
+  //
+  // 缺陷形态：importConfiguration 只校验 isFile && !isSymbolicLink，对内容零检查；而导入源是
+  // <外部存储>/exports/config/ 下的文件（任意应用可写），其 !!js 会被引擎 eval 求值。
+  //
+  // 下面四条是**打红负控**：把 importConfiguration 里那段 firstExecutableTag 校验删掉，
+  // rejectsExecutableTagsOnImport 与 leavesActiveConfigUntouchedWhenRejected 立刻变红。
+
+  /** 造一份「已导出」的配置树，返回 (dshRoot, sharedRoot)。 */
+  private fun importFixture(root: File, documentText: String): Pair<File, File> {
+    val dshRoot = File(root, "dsh").apply { mkdirs() }
+    File(dshRoot, "profiles/web").mkdirs()
+    File(dshRoot, "profiles/web/cordis.patch.yml").writeText("# live config\nproviders: {}\n")
+    val sharedRoot = File(root, "shared").apply { mkdirs() }
+    File(sharedRoot, "exports/config").mkdirs()
+    File(sharedRoot, "exports/config/cordis.patch.yml").writeText(documentText)
+    return dshRoot to sharedRoot
+  }
+
+  @Test
+  fun rejectsExecutableTagsOnImport() {
+    val root = Files.createTempDirectory("config-import-js-tag").toFile()
+    try {
+      val malicious = listOf(
+        "providers:",
+        "  openai:",
+        "    disabled: !!js process.mainModule.require('child_process').exec('id')",
+      ).joinToString("\n")
+      val (dshRoot, sharedRoot) = importFixture(root, malicious)
+      val failure = runCatching { SnapshotUserData.importConfiguration(dshRoot, sharedRoot) }.exceptionOrNull()
+      assertTrue("含 !!js 的导入必须被拒绝，实得：" + failure, failure is IllegalArgumentException)
+      val message = failure!!.message ?: ""
+      assertTrue("拒绝理由必须指出执行型标签与行号，实得：" + message, message.contains("执行型 YAML 标签"))
+      assertTrue("拒绝理由必须给出行号，实得：" + message, message.contains("第 3 行"))
+    } finally {
+      SnapshotFs.deletePath(root)
+    }
+  }
+
+  @Test
+  fun leavesActiveConfigUntouchedWhenRejected() {
+    val root = Files.createTempDirectory("config-import-untouched").toFile()
+    try {
+      val (dshRoot, sharedRoot) = importFixture(root, "disabled: !!js 1\n")
+      val live = File(dshRoot, "profiles/web/cordis.patch.yml")
+      val before = live.readText()
+      runCatching { SnapshotUserData.importConfiguration(dshRoot, sharedRoot) }
+      assertEquals("活动配置不得被坏文档覆盖", before, live.readText())
+      // 备份也必须是**未被坏文档顶过**的：校验在备份之前。
+      val backup = File(live.parentFile, "cordis.patch.yml.import-backup")
+      assertFalse("不得因为一次被拒的导入而写出备份：" + backup, backup.exists())
+    } finally {
+      SnapshotFs.deletePath(root)
+    }
+  }
+
+  @Test
+  fun acceptsOrdinaryConfigAndStillImports() {
+    // 正向对照：不能为了安全把正常导入也堵死（防「一律拒绝」的假绿）。
+    val root = Files.createTempDirectory("config-import-ok").toFile()
+    try {
+      val clean = "providers:\n  openai:\n    disabled: true\n"
+      val (dshRoot, sharedRoot) = importFixture(root, clean)
+      val target = SnapshotUserData.importConfiguration(dshRoot, sharedRoot)
+      assertEquals(clean, target.readText())
+    } finally {
+      SnapshotFs.deletePath(root)
+    }
+  }
+
+  @Test
+  fun tagScanIgnoresCommentsAndAcceptsVariants() {
+    // 判据自身的判别力：注释里的同名文本不误拒；大小写/空白/子类型都要认出来。
+    assertEquals(null, SnapshotUserData.firstExecutableTag(listOf("# disabled: !!js 1", "a: 1")))
+    assertEquals(1, SnapshotUserData.firstExecutableTag(listOf("a: !js x"))!!.first)
+    assertEquals(1, SnapshotUserData.firstExecutableTag(listOf("a: !!JS x"))!!.first)
+    assertEquals(2, SnapshotUserData.firstExecutableTag(listOf("a: 1", "b: !! js  x"))!!.first)
+    assertEquals(1, SnapshotUserData.firstExecutableTag(listOf("a: !!js/regexp x"))!!.first)
+    // 不是 js 标签的其它标签不得误拒
+    assertEquals(null, SnapshotUserData.firstExecutableTag(listOf("a: !!str 1", "b: !ref x")))
+  }}

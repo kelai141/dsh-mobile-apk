@@ -54,6 +54,9 @@ class ControlPoller(
     /** 已执行 reqId 去重集合容量（有界 LRU；4s 内的 in-flight 窗口远用不满 64 条）。 */
     private const val EXECUTED_LRU_CAPACITY = 64
 
+    /** issue #1601：停机等待执行线程的上界（Binder 调用不可中断，只能有界等）。 */
+    internal const val STOP_JOIN_MS = 2_000L
+
     /**
      * 无障碍心跳节拍（0.14.10 §6.5）：2 秒 -> 5 秒。
      *
@@ -122,12 +125,28 @@ class ControlPoller(
     }
   }
 
+  /**
+   * issue #1601：停机必须**等到执行线程真的离开**，而不只是翻标志位。
+   *
+   * 旧实现只置 running=false + interrupt() 就清引用。阻塞点在 runOp → ShizukuTransport 的
+   * Binder 调用上，interrupt() 打断不了（那条链路上没有任何可中断点）。于是
+   * EngineService 重建或无障碍服务重连时，[ControlCarrier.ensureStarted] 见 poller==null 就新建
+   * 一个，**旧线程仍在跑当前 op**——两条特权命令并发执行，而 [executed] 去重 LRU 是实例级的，
+   * 新实例 map 为空，同一个 reqId 重投会被执行第二次。
+   *
+   * join 有上界：执行线程可能正卡在一条长 op 上，停机路径（服务销毁）不能因此无限挂住。
+   * 超时后如实留痕（下一次启动仍可能并发），而不是假装已经停干净。
+   */
   fun stop() {
     running.set(false)
-    thread?.interrupt()
+    val worker = thread
+    worker?.interrupt()
     thread = null
     heartbeatThread?.interrupt()
     heartbeatThread = null
+    if (!WorkerJoin.joinQuietly(worker, STOP_JOIN_MS)) {
+      LogCollector.log(TAG, "poller stop: worker still running after " + STOP_JOIN_MS + "ms (an in-flight op is not interruptible)")
+    }
   }
 
   private fun loop() {

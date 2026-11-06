@@ -3092,6 +3092,24 @@ var AccountTokenManager = class {
 	async hasSession(account) {
 		return await this.peek(account) !== void 0;
 	}
+	/**
+	* 作废某个账号在途的刷新（issue #1588）。登出路径必须调用。
+	*
+	* 只作废**已存在**的 manager：`tokensFor` 会按需新建并缓存，为一次登出凭空造一个没有
+	* 在途刷新的 manager 只是噪音。用 `resolveAccount` 归一化键，与 `tokensFor` 的缓存键一致。
+	* @param account - the account key being logged out.
+	*/
+	async invalidate(account) {
+		const key = await this.resolveAccount(account);
+		// 缓存里可能同时挂着归一化前后的两个键，指向同一个 manager；按 manager 去重，各作废一次。
+		const seen = /* @__PURE__ */ new Set();
+		for (const [cachedKey, cached] of this.managers) {
+			if (cachedKey !== key && !this.managers.has(key)) continue;
+			if (seen.has(cached)) continue;
+			seen.add(cached);
+			cached.invalidate();
+		}
+	}
 	/** The TokenManager bound to one account (created lazily, then cached). */
 	tokensFor(account) {
 		let manager = this.managers.get(account);
@@ -10468,7 +10486,8 @@ var SubscriptionsAuthController = class {
 	* cannot be read off the flow manager.
 	*/
 	claims = /* @__PURE__ */ new Map();
-	constructor(flows, deviceFlows, onAuthChanged, resolveAttachments, usageFetchers = {}, readClaudeCreds = readClaudeCodeCredentials, poolUsage = void 0, clientVersions = {}, resetRedemption, onUsageForced) {
+	constructor(flows, deviceFlows, onAuthChanged, resolveAttachments, usageFetchers = {}, readClaudeCreds = readClaudeCodeCredentials, poolUsage = void 0, clientVersions = {}, resetRedemption, onUsageForced, invalidateTokens = () => Promise.resolve()) {
+		this.invalidateTokens = invalidateTokens;
 		this.flows = flows;
 		this.deviceFlows = deviceFlows;
 		this.onAuthChanged = onAuthChanged;
@@ -10653,6 +10672,13 @@ var SubscriptionsAuthController = class {
 		this.claim(provider);
 		this.flows.pending(provider)?.cancel();
 		this.deviceFlows.pending(provider)?.cancel();
+		// issue #1588：**先作废在途刷新，再删存储**。
+		//
+		// 顺序要紧：反过来的话，一次恰好在两步之间返回的刷新仍会落盘，把账号写回来。
+		// 作废只递增代次、不取消网络请求——它的结果会被代次判据丢弃，没必要取消失败的刷新。
+		//
+		// 这里必须容错：tokens 是懒建缓存，登出时可能压根没有该账号的 manager。
+		await this.invalidateTokens(provider, account);
 		await deleteAccountSession(provider, account);
 		this.lastError.delete(provider);
 		this.onAuthChanged(provider, account);
@@ -11091,7 +11117,7 @@ function apply(ctx, config) {
 			source: "config"
 		}) } : {},
 		...providers.includes("claude") ? { claude: presentedVersion(claudeVersion) } : {}
-	}, resetRedemption, (provider, account) => poolHealth?.clear(provider, account)), speed, {
+	}, resetRedemption, (provider, account) => poolHealth?.clear(provider, account), (provider, account) => accountTokens.get(provider)?.invalidate(account)), speed, {
 		get: () => proxyGetConfig(),
 		set: (input) => proxySetConfig(input),
 		test: (payload) => proxyTestConnection(payload.url, payload.proxy)

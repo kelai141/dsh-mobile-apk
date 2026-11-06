@@ -88,8 +88,19 @@ object NotifyCenter {
    */
   const val QUESTION_TIMEOUT_MS = 0L
 
-  /** 审批动作是否要求解锁（NT-18，B4 批）。B3 保持 false：真机 keyguard 行为未确证，先不阻塞开发循环。 */
-  const val APPROVAL_REQUIRE_UNLOCK = false
+  /**
+   * 审批动作是否要求解锁（NT-18，B4 批）。issue #1598 起改为 true。
+   *
+   * 缺陷形态：正文做了锁屏脱敏（VISIBILITY_PRIVATE + 公版文案），**动作按钮没做**。于是
+   * 设备锁屏放在桌上时，路人点「批准一次」就能放行一条待批的工具调用——可能是 bash。
+   * 同一份隐私口径在正文与动作上取值相反，这不是「保守的默认」，是自相矛盾。
+   *
+   * 旧注释写「真机 keyguard 行为未确证，先不阻塞开发循环」——那是当时的取舍，不是判据。
+   * 一旦用户主动开启审批通知，动作等价于「授权一次特权执行」，它必须与正文同档：走认证解锁。
+   * 平台侧行为由 `NotificationCompat.Action.setAuthenticationRequired(true)` 定义（API 31+ 由系统
+   * 保证；低版本系统不认这个标记，动作与正文一样只作脱敏展示，**不劣化**既有行为）。
+   */
+  const val APPROVAL_REQUIRE_UNLOCK = true
 
   /**
    * 五类信道定案（§6.1.1 表）。信道名 = kind。候选 ID 序列的第一个是首选；后续是

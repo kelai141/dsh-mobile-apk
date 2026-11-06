@@ -317,17 +317,26 @@ export class MobileWorkspaces implements WorkspaceNavigation {
       grid.style.setProperty('--dsh-divider-hit', DIVIDER_HIT_SIZE + 'px')
       const root = layout.nodes[layout.rootId]
       const sizes = root.kind === 'split' ? root.sizes : [.5, .5]
-      this.paintRatio(grid, sizes[0] / (sizes[0] + sizes[1]), vertical)
+      const ratio = sizes[0] / (sizes[0] + sizes[1])
+      const swapped = this.swapped.has(session)
+      this.paintRatio(grid, ratio, vertical)
       for (const cell of grid.querySelectorAll<HTMLElement>(':scope > [data-dockkit-host="dock"]')) {
         const logical = Number(cell.getAttribute('data-dockkit-column'))
-        const physical = this.swapped.has(session) ? 1 - logical : logical
+        // issue #1628：取值必须校验。属性缺失/改名时 Number(null) === 0，两个 dock cell 都拿到
+        // slot='0'，CSS 的 `grid-column:1;grid-row:1 !important` 把两块塞进同一格，后画的整个
+        // 盖住前一块——界面上「少了一个窗格」而没有任何报错。跳过未登记的 cell，而不是猜 0。
+        if (logical !== 0 && logical !== 1) continue
+        const physical = swapped ? 1 - logical : logical
         cell.setAttribute('data-dsh-workspace-slot', String(physical))
       }
       const divider = grid.querySelector<HTMLElement>(':scope > [data-dockkit-divider]')
       if (divider) {
         divider.setAttribute('role', 'separator'); divider.setAttribute('aria-orientation', vertical ? 'horizontal' : 'vertical')
         const bounds = grid.getBoundingClientRect(), extent = vertical ? bounds.height : bounds.width
-        divider.setAttribute('aria-valuenow', String(Math.round(sizes[0] * 100))); divider.setAttribute('aria-valuemin', String(Math.round(splitFraction(0, extent) * 100))); divider.setAttribute('aria-valuemax', String(Math.round(splitFraction(extent, extent) * 100)))
+        // issue #1627：`aria-valuenow` 报的必须是**物理**第一格的百分比。换位后 sizes[0] 是逻辑第一格，
+        // 屏幕左边那一格其实是逻辑第二格——旧读数与画面对不上，读屏用户据此拖分隔条会得到反方向的结果。
+        const physicalRatio = swapped ? 1 - ratio : ratio
+        divider.setAttribute('aria-valuenow', String(Math.round(physicalRatio * 100))); divider.setAttribute('aria-valuemin', String(Math.round(splitFraction(0, extent) * 100))); divider.setAttribute('aria-valuemax', String(Math.round(splitFraction(extent, extent) * 100)))
         divider.tabIndex = 0; divider.setAttribute('aria-label', '调整工作区比例；双击恢复均分')
         divider.ondblclick = () => { const current = this.layout(); if (current && current.nodes[current.rootId].kind === 'split') this.store()?.actions.resizeSplit(session, current.rootId as SplitId, [.5, .5]) }
       }
@@ -655,9 +664,19 @@ export class MobileWorkspaces implements WorkspaceNavigation {
     event.preventDefault(); event.stopImmediatePropagation()
     const grid = this.panel?.querySelector<HTMLElement>('[data-dockkit-split]'), bounds = grid?.getBoundingClientRect()
     const extent = bounds ? (portraitWorkspace() ? bounds.height : bounds.width) : 300
-    const proposed = root.sizes[0] + (event.key === 'ArrowUp' || event.key === 'ArrowLeft' ? -.05 : .05)
-    const ratio = event.key === 'Home' ? .5 : splitFraction(proposed * (extent - DIVIDER_HIT_SIZE) + DIVIDER_HIT_SIZE / 2, extent)
-    this.store()?.actions.resizeSplit(this.session, root.id, [ratio, 1 - ratio])
+    // issue #1627：键盘分支必须与 onUp 共用同一段「物理→逻辑」换算。
+    //
+    // `sizes[0]` 是**逻辑**第一格，而 paintRatio 在换位时按 `physical = 1 - ratio` 画。旧实现
+    // 直接把逻辑值当物理值加减再写回 resizeSplit，于是换位后按 ArrowLeft 反而让物理位置增大——
+    // 分隔条**向右**跑，与按键方向相反。onUp（拖拽收口）一直是对的，键盘分支漏了这一步。
+    //
+    // 现在按键增量作用在**物理**占比上（画面上左侧/上侧那一格），写回前统一换算成逻辑占比。
+    const swapped = this.swapped.has(this.session)
+    const physicalNow = swapped ? 1 - root.sizes[0] : root.sizes[0]
+    const target = physicalNow + (event.key === 'ArrowUp' || event.key === 'ArrowLeft' ? -.05 : .05)
+    const physical = event.key === 'Home' ? .5 : splitFraction(target * (extent - DIVIDER_HIT_SIZE) + DIVIDER_HIT_SIZE / 2, extent)
+    const logical = swapped ? 1 - physical : physical
+    this.store()?.actions.resizeSplit(this.session, root.id, [logical, 1 - logical])
   }
   private resizeTimer: number | undefined
   private readonly onResize = (): void => {

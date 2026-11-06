@@ -144,7 +144,11 @@ class ShizukuUserServiceBridge() : ShizukuUserService.Stub() {
   }
 
 
-  @Synchronized
+  // issue #1594：本方法**不**持实例锁。旧实现与维护面（configure/repairOwnership/writeChunk/
+  // removePath）共用同一把 monitor，而 exec 的超时上限是 120s、Binder 调用无超时——模型跑一条长
+  // 命令期间，应用重启路径上的 configure 会在服务端排队到长命令结束，界面停在「正在启动引擎…」。
+  // 这里没有需要串行的共享可变状态：每次都自己 new Process，spool 文件名带 UUID，appUid/
+  // appDataDir 已是 @Volatile。维护面保持串行（它们真的改共享的落盘状态）。
   override fun exec(argv: Array<String>, timeoutMs: Int): Bundle {
     val out = Bundle().apply {
       putBoolean("resultComplete", false); putInt("exitCode", -1); putString("stdout", "")
@@ -185,7 +189,7 @@ class ShizukuUserServiceBridge() : ShizukuUserService.Stub() {
    * `inlineBytes` stay inline for small-output callers. Reading runs concurrently with bounded exit/drain waits
    * so a silent hang is reported incomplete; only a fully closed spool is published as ready.
    */
-  @Synchronized
+  /** 同 [exec]：不持实例锁（issue #1594）；每次调用写入独立的 UUID spool 文件。 */
   override fun execCapture(argv: Array<String>, timeoutMs: Int, inlineBytes: Int): Bundle {
     if (argv.isEmpty() || argv.any { it.isEmpty() }) return Bundle().apply {
       putBoolean("ok", false); putBoolean("resultComplete", false); putBoolean("spoolReady", false)

@@ -318,14 +318,39 @@ export function settleUnlockCall(raw: string | undefined): { ok: boolean; text: 
   }
 }
 
-function readScope(): ScreenScope {
+/**
+ * 桥面读值 + **是否真的读到了**（issue #1629）。
+ *
+ * 文件头（:7-9）明写「桥不可用/抛错一律如实报不可读，不用安全默认值冒充事实」，而本页三个
+ * 读面（屏幕范围 / 虚拟屏档位 / 浮窗开关）此前正是被点名的那三个值：`virtual-only` / `0.75` /
+ * `true`。桌面宿主或旧壳（没有 `getScreenScope`/`setScreenScope`）时，页面把「仅虚拟屏幕/75%/
+ * 浮窗开」当**事实**显示；用户改成「全部开放」后 `setScope` 静默 no-op，紧接着的 `refreshScope()`
+ * 把值弹回且无回执——用户按一个假值做隐私决策。
+ *
+ * 现在三面与 vdisplay/a11y/shizuku/root 同构：`readable:false` 时控件置灰 + 一行「状态不可读」，
+ * 兜底值只作为**展示占位**存在，不冒充读到的状态；写后回读保留（readable 时值仍来自真源）。
+ */
+interface ShellRead<T> {
+  /** 是否真的读到了（false = 桥缺席 / 抛错 / 取值非法）。
+   * false 时 [value] 只是展示占位，不是事实。 */
+  readonly readable: boolean
+  readonly value: T
+}
+
+/** 不可读时的展示占位（**不是事实**；配 data-code 的「状态不可读」一行共同出现）。 */
+const SCOPE_UNREADABLE: ScreenScope = 'virtual-only'
+const SCALE_UNREADABLE = 0.75
+const FLOAT_UNREADABLE = true
+
+export function readScope(): ShellRead<ScreenScope> {
   try {
     const raw = window.androidBridge?.getScreenScope?.()
-    if (SCOPES.includes(raw as ScreenScope)) return raw as ScreenScope
+    if (SCOPES.includes(raw as ScreenScope)) return { readable: true, value: raw as ScreenScope }
   } catch {
-    /* old/desktop shells retain the safe default */
+    /* bridge absent or threw: report unreadable, do not claim a scope */
   }
-  return 'virtual-only'
+  // 没有 getScreenScope（旧壳/桌面宿主）与「读到了但取值非法」同档：都证明不了当前范围。
+  return { readable: false, value: SCOPE_UNREADABLE }
 }
 
 function readVdisplay(): VdisplayStatus {
@@ -348,22 +373,24 @@ function readVdisplay(): VdisplayStatus {
   }
 }
 
-function readScale(): number {
+export function readScale(): ShellRead<number> {
   try {
     const value = window.androidBridge?.getVdisplayScale?.()
-    if (typeof value === 'number' && Number.isFinite(value)) return value
+    if (typeof value === 'number' && Number.isFinite(value)) return { readable: true, value }
   } catch {
-    /* fall through to the default tier */
+    /* bridge absent or threw: report unreadable, do not claim a tier */
   }
-  return 0.75
+  return { readable: false, value: SCALE_UNREADABLE }
 }
 
-function readFloat(): boolean {
+export function readFloat(): ShellRead<boolean> {
   try {
-    return window.androidBridge?.getVdisplayFloatEnabled?.() ?? true
+    const value = window.androidBridge?.getVdisplayFloatEnabled?.()
+    if (typeof value === 'boolean') return { readable: true, value }
   } catch {
-    return true
+    /* bridge absent or threw: report unreadable, do not claim the window is on */
   }
+  return { readable: false, value: FLOAT_UNREADABLE }
 }
 
 /**
@@ -581,11 +608,11 @@ export function readA11y(): A11yStatus {
  * @returns 分区元素树。
  */
 export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
-  const [scope, refreshScope] = useShellState<ScreenScope>(readScope)
+  const [scopeRead, refreshScope] = useShellState<ShellRead<ScreenScope>>(readScope)
   const [vdisplay, refreshVdisplay] = useShellState<VdisplayStatus>(readVdisplay, { pollMs: 2_000 })
   const [shizuku, refreshShizuku] = useShellState<ShizukuStatus>(readShizuku, { pollMs: 2_000 })
-  const [scale, refreshScale] = useShellState<number>(readScale)
-  const [floatOn, refreshFloat] = useShellState<boolean>(readFloat)
+  const [scaleRead, refreshScale] = useShellState<ShellRead<number>>(readScale)
+  const [floatRead, refreshFloat] = useShellState<ShellRead<boolean>>(readFloat)
   const [a11y, refreshA11y] = useShellState<A11yStatus>(readA11y, { pollMs: 3_000 })
   // issue #262：root 授权面（2s 轮询与 Shizuku 面同拍——开关资格取决于通道身份，二者必须同源同拍）。
   const [rootGrant, refreshRootGrant] = useShellState<RootGrantStatus>(readRootGrant, { pollMs: 2_000 })
@@ -1092,9 +1119,15 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
             <div className="dsh-gs-control">
               <Switch
                 checked={rootGrant.granted}
-                // issue #1377：no-su 时开关必须置灰——重试永远不会成功。置灰的原因由下方
+                // issue #1377：no-su 时开关**不能开**——重试永远不会成功。置灰的原因由下方
                 // data-code="root-no-su" 那条明文解释（灰开关不解释 = 用户以为坏了）。
-                disabled={!rootGrant.readable || rootAccess.state === 'no-su' || (!rootGrant.granted && (!canToggleRootGrant(rootGrant) || !rootGrant.consentValid))}
+                //
+                // issue #1592：no-su 只约束「开」，不约束「关」。壳侧 RootAccess.state() 的判据是
+                // `su == null && state != requesting → no-su`，而 granted 是 SharedPreferences 持久化的，
+                // 两者独立：已 root 设备上开启 AI root 后卸载 root / 把本应用加进 Magisk DenyList
+                // （suPath() 返回 null），开关 ON 但灰、点不动，用户无法从本页收回已生效的 root 授权，
+                // 唯一出路是去点名字完全不同的「已阅读免责声明」开关。收回权限必须是永远可做的动作。
+                disabled={!rootGrant.readable || (!rootGrant.granted && (rootAccess.state === 'no-su' || !canToggleRootGrant(rootGrant) || !rootGrant.consentValid))}
                 onChange={(next) => toggleRootGrant(next)}
                 label={tr('授权 AI 使用 root', 'Allow model root access')}
               />
@@ -1108,10 +1141,26 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
             用户看到灰开关的第一反应是「是不是坏了」，只写「不可用」等于把原因藏起来。
             这条与上面的终态文案分开：后者是「一次操作的结果」，这条是「一直以来的前提」。
           */}
+          {/*
+            issue #1592：no-su 的红字在 **granted 时**必须换成「可关闭」口径。
+
+            旧形态无条件渲染「本机没有 su：这不是权限问题，重试也不会成功」——而开关此时是**已开启**
+            状态：用户读到的是一句解释「为什么开不了」，实际他需要的是「为什么现在还能关」。
+            同一句文案在两种状态下的行动指引相反，这才是 #1592 的前半段缺陷。
+          */}
           {rootAccess.state === 'no-su' ? (
-            <p className="dsh-dev-hint" data-code="root-no-su">
-              {rootGrantTerminal('no-su')?.text}
-            </p>
+            rootGrant.granted ? (
+              <p className="dsh-dev-hint" data-code="root-no-su">
+                {tr(
+                  '本机现在读不到可用的 su（卸载了 root，或本应用被加进了 DenyList）。已经开启的 AI root 授权仍可从本开关关闭——关闭不需要 su。',
+                  'No usable su right now (root was removed, or this app was added to a DenyList). The model root grant that is already on can still be turned off here; turning it off does not need su.',
+                )}
+              </p>
+            ) : (
+              <p className="dsh-dev-hint" data-code="root-no-su">
+                {rootGrantTerminal('no-su')?.text}
+              </p>
+            )
           ) : null}
           {rootMsg === null ? null : (
             <p role="status" aria-live="polite" className={rootOk === true ? 'dsh-dev-hint' : 'dsh-dev-error'}>{rootMsg}</p>
@@ -1134,8 +1183,20 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
         <span>
           <strong>{tr('开放屏幕范围', 'Screen access')}</strong>
           <small>{tr('默认仅虚拟屏幕；真实屏幕、截图与控制都受此范围约束。', 'Defaults to virtual screens only; screenshots and control follow this scope.')}</small>
+          {scopeRead.readable ? null : (
+            <small className="dsh-dev-hint" data-code="screen-scope-unreadable">
+              {tr('状态不可读：本页拿不到当前屏幕范围，上面显示的不是事实，也不能在这里改。', 'State unreadable: this page cannot read the current screen access, so the value above is not a fact and cannot be changed here.')}
+            </small>
+          )}
         </span>
-        <select aria-label={tr('开放屏幕范围', 'Screen access')} value={scope} onChange={(event) => setScope(event.target.value as ScreenScope)}>
+        <select
+          aria-label={tr('开放屏幕范围', 'Screen access')}
+          // issue #1629：不可读时置灰。旧实现在旧壳/桌面宿主上照常可点，改完的写调用静默 no-op，
+          // 紧接着的回读把值弹回且无回执——用户按一个假值做隐私决策（「全部开放」其实没生效）。
+          disabled={!scopeRead.readable}
+          value={scopeRead.value}
+          onChange={(event) => setScope(event.target.value as ScreenScope)}
+        >
           <option value="virtual-only">{tr('仅虚拟屏幕', 'Virtual only')}</option>
           <option value="real-only">{tr('仅真实屏幕', 'Real only')}</option>
           <option value="all">{tr('全部开放', 'All screens')}</option>
@@ -1146,8 +1207,18 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
         <span>
           <strong>{tr('虚拟屏分辨率档位', 'Virtual screen scale')}</strong>
           <small>{tr('跟随真机比例缩放（下次建屏生效；默认 0.75）。', 'Scales with the device; applies to the next screen (default 0.75).')}</small>
+          {scaleRead.readable ? null : (
+            <small className="dsh-dev-hint" data-code="vdisplay-scale-unreadable">
+              {tr('状态不可读：本页拿不到当前档位，上面显示的不是事实，也不能在这里改。', 'State unreadable: this page cannot read the current tier, so the value above is not a fact and cannot be changed here.')}
+            </small>
+          )}
         </span>
-        <select aria-label={tr('虚拟屏分辨率档位', 'Virtual screen scale')} value={String(scale)} onChange={(event) => setScale(Number(event.target.value))}>
+        <select
+          aria-label={tr('虚拟屏分辨率档位', 'Virtual screen scale')}
+          disabled={!scaleRead.readable}
+          value={String(scaleRead.value)}
+          onChange={(event) => setScale(Number(event.target.value))}
+        >
           {SCALE_OPTIONS.map((option) => (
             <option key={option} value={String(option)}>
               {option === 1 ? tr('原生', 'Native') : String(Math.round(option * 100)) + '%'}
@@ -1166,8 +1237,14 @@ export function PhoneControlSection(_props: PropsRuntime<'settings.section'>) {
           </div>
         </div>
         <div className="dsh-gs-control">
+          {floatRead.readable ? null : (
+            <div className="dsh-dev-hint" data-code="vdisplay-float-unreadable">
+              {tr('状态不可读：本页拿不到浮窗开关，上面显示的不是事实，也不能在这里改。', 'State unreadable: this page cannot read the window switch, so the value above is not a fact and cannot be changed here.')}
+            </div>
+          )}
           <Switch
-            checked={floatOn}
+            checked={floatRead.value}
+            disabled={!floatRead.readable}
             onChange={(next) => setFloat(next)}
             label={tr('虚拟屏浮窗（退后台自动显示）', 'Virtual screen window')}
           />
