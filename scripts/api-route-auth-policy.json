@@ -729,6 +729,75 @@
       "verdict": "not-mounted",
       "packageName": "@deepseek-ai/dsh-webhook-github",
       "evidence": "依据三条：packages/bundle/base/cordis.patch.yml 与 packages/bundle/web-app/cordis.patch.yml 均无 webhook-github 行；本仓 scripts/profile-web.cordis.patch.yml 无 insert；上游 apps/cli/package.json 的 dependencies 已无该包（仅留在 devDependencies），发布安装树不产出。发行 profile 不挂载，config.path 无实际注册。"
+    },
+    {
+      "source": "packages/boot/plugin-manager/src/index.ts",
+      "form": "fetch",
+      "expression": "DETAIL_FILE_PATH",
+      "pathText": "/api/plugin-manager/detail-file",
+      "verdict": "protected",
+      "guardedBy": "packages/client/connection/src/index.ts :: web :: API_PATH",
+      "bundleRowId": "plugin-manager",
+      "evidence": "字面量精确 Fetch 路由（const DETAIL_FILE_PATH = '/api/plugin-manager/detail-file'，src/index.ts L92）。注册在 connection.fetch 上，不在 webServer 上——只能由 client-connection 的 /api 前缀 handler 承载：该注册块内先 connection.admit(req)（Host/Origin 栅栏 + browserAuth 凭证），rejection 直接 writeHead + end 返回，通过后才 waterfall 到 createSharedFetchHandler(API_PATH) 分发到各 fetch 站点。故这些 fetch 路由自身无需独立 guard，也拿不到绕过 /api 前缀的路径。该包主入口（注册本条路由的 . 导出）由上游 packages/bundle/base/cordis.patch.yml 的 plugin-manager 行装配；该行带 disabled: !!js \"!ctx.get('profileContext')\"，而本仓 scripts/profile-web.cordis.patch.yml 是权威装配清单、由 build-snapshot-013.mjs 无条件覆盖进快照（L690），profileContext 因此成立，行生效、路由注册到设备上。",
+      "pathEvidence": {
+        "file": "packages/boot/plugin-manager/src/index.ts",
+        "marker": "const DETAIL_FILE_PATH = '/api/plugin-manager/detail-file'"
+      }
+    },
+    {
+      "source": "packages/boot/plugin-market/src/index.ts",
+      "form": "fetch",
+      "expression": "DETAIL_FILE_PATH",
+      "pathText": "/api/plugin-market/detail-file",
+      "verdict": "not-mounted",
+      "packageName": "@deepseek-ai/dsh-plugin-market",
+      "evidence": "字面量精确 Fetch 路由（const DETAIL_FILE_PATH = '/api/plugin-market/detail-file'，src/index.ts L86）。主入口（注册本条路由的 '.' 导出）不在任何上游 bundle 行里：base/web-app/headless/sdk-app/sdk-minimal/acp-app 六份 cordis.patch.yml 全都没有 name: @deepseek-ai/dsh-plugin-market 的行。web-app 的 presets/{cordis,ptc,standard}.patch.yml 里那条 tool-plugin-market 指向的是 /tools 子路径（package.json exports 里的 './tools'），不是注册本路由的 '.' 入口，而且三条都写着 disabled: true。本仓 scripts/profile-web.cordis.patch.yml 也不登记该包。结论：注册 /api/plugin-market/detail-file 的那个入口在任何装配面上都不会被装载。",
+      "pathEvidence": {
+        "file": "packages/boot/plugin-market/src/index.ts",
+        "marker": "const DETAIL_FILE_PATH = '/api/plugin-market/detail-file'"
+      }
+    },
+    {
+      "source": "packages/experimental/liveshare/src/host/owner-http-routes.ts",
+      "form": "fetch",
+      "expression": "'/api/liveshare.ownerCredential'",
+      "pathText": "/api/liveshare.ownerCredential",
+      "verdict": "not-mounted",
+      "packageName": "@deepseek-ai/dsh-experimental-liveshare",
+      "evidence": "字面量精确 Fetch 路由，注册在 connection.fetch 上。packages/experimental/liveshare 是 experimental 包：六份上游 bundle 的 cordis.patch.yml 全都不含 liveshare 行，本仓 scripts/profile-web.cordis.patch.yml 也不登记，快照里也没有 dsh-experimental-liveshare —— 该包不在任何装配面，路由不会被注册到设备上。"
+    },
+    {
+      "source": "packages/experimental/liveshare/src/host/owner-http-routes.ts",
+      "form": "fetch",
+      "expression": "path",
+      "pathText": null,
+      "dynamicPathReason": "registerOwnerJsonRoute 是路径参数化的注册工厂（owner-http-routes.ts L158-172 把入参 path 直接交给 connection.fetch.register），路径在调用点才确定，构建期没有单一常量可钉；本文件里它的两个调用点分别注册 ownerLoginStart 与另一条登录路由，已各自单独登记。",
+      "verdict": "not-mounted",
+      "packageName": "@deepseek-ai/dsh-experimental-liveshare",
+      "evidence": "参数化注册工厂产生的站点。packages/experimental/liveshare 是 experimental 包：六份上游 bundle 的 cordis.patch.yml 全都不含 liveshare 行，本仓 scripts/profile-web.cordis.patch.yml 也不登记，快照里也没有 dsh-experimental-liveshare —— 该包不在任何装配面，路由不会被注册到设备上。工厂本身不会被调用，因此这条在任何设备上都注册不出路由。"
+    },
+    {
+      "source": "packages/experimental/liveshare/src/host/owner-http-routes.ts",
+      "form": "fetch",
+      "expression": "'/api/liveshare.ownerLoginStart'",
+      "pathText": "/api/liveshare.ownerLoginStart",
+      "verdict": "not-mounted",
+      "packageName": "@deepseek-ai/dsh-experimental-liveshare",
+      "evidence": "字面量精确 Fetch 路由，注册在 connection.fetch 上。packages/experimental/liveshare 是 experimental 包：六份上游 bundle 的 cordis.patch.yml 全都不含 liveshare 行，本仓 scripts/profile-web.cordis.patch.yml 也不登记，快照里也没有 dsh-experimental-liveshare —— 该包不在任何装配面，路由不会被注册到设备上。"
+    },
+    {
+      "source": "packages/session-query/session-log-export/src/index.ts",
+      "form": "fetch",
+      "expression": "SESSION_MARKDOWN_EXPORT_PATH",
+      "pathText": "/api/session.markdown",
+      "verdict": "protected",
+      "guardedBy": "packages/client/connection/src/index.ts :: web :: API_PATH",
+      "bundleRowId": "session-log-download",
+      "evidence": "字面量精确 Fetch 路由（src/routes.ts: export const SESSION_MARKDOWN_EXPORT_PATH = '/api/session.markdown'），注册在 connectionOf(ctx).fetch 上。注册在 connection.fetch 上，不在 webServer 上——只能由 client-connection 的 /api 前缀 handler 承载：该注册块内先 connection.admit(req)（Host/Origin 栅栏 + browserAuth 凭证），rejection 直接 writeHead + end 返回，通过后才 waterfall 到 createSharedFetchHandler(API_PATH) 分发到各 fetch 站点。故这些 fetch 路由自身无需独立 guard，也拿不到绕过 /api 前缀的路径。装配面：上游 packages/bundle/web-app/cordis.patch.yml 的 session-log-download 行（name: @deepseek-ai/dsh-session-log-export）无 disabled 条件，随 web-app 一并挂载。",
+      "pathEvidence": {
+        "file": "packages/session-query/session-log-export/src/routes.ts",
+        "marker": "export const SESSION_MARKDOWN_EXPORT_PATH = '/api/session.markdown'"
+      }
     }
   ]
 }
