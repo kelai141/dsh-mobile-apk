@@ -67,6 +67,14 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 available for offline mode`，22s 即 break），且该行把 gradle 输出重定向进 `$null`，日志里只剩一句 `APK build failed (…)`。
 现统一走项目 wrapper。`build-release.ps1 -Version 0.14.5` 的参数是最终版本名，因此传给 Gradle 的 `versionNameSuffix` 为空；测试构建可显式用 `-VersionSuffix "-preview"`（最终目录/包名为 `0.14.5-preview`），或传完整标签 `-Version "0.14.5-preview"`。脚本基于 Gradle 中的 `0.14.5` 派生后缀，拒绝不匹配的完整版本，避免把 `0.14.5` 再拼到自身后面；派生逻辑由 `scripts/resolve-version-suffix.mjs` 与 Node 回归用例覆盖。该链**不直接调 Gradle**：它把快照与后缀交给共享终端引擎 `build-apk-engine.mjs assemble`，由引擎按 `buildType`（缺省 `release`）派生出 `:app:assembleRelease --no-daemon -PversionNameSuffix=$VersionSuffix` 与产物路径 `app/build/outputs/apk/release/app-release.apk`。**改任何一条链的调用前先问：另一条链是不是这条命令**——但先确认两条链**本来就该同口径**：出包链与开发迭代链在构建变体上是**刻意不同**的（见下段），别把分工当漏改。
 
+**构建链自身的三条行为判据（2026-11-05，issue #1613 / #1614 / #1616）**：这六条缺陷的共同形态是「该判红的地方永远绿」，故判据必须是**行为判据**而不是源码切片，且各自带一条「改回旧写法必须恢复缺陷行为」的反证。
+
+- `.github/workflows/build-apk.yml` 的 `suffix` 走 `env:`（不是内插进 `run:`）：双引号不阻止命令替换，`suffix=$(curl …|sh)` 会以 job 身份执行；`$VAR` 形态又会被 shell 先展开。判据 `scripts/workflow-input-injection.test.mjs` 从真实 workflow 抽出该步骤，用敌意 suffix 真跑（node 换成记录实参的桩），要求 payload 不出现且实参逐字节等于输入。
+- `build-release.ps1` 的宿主注入**先收退出码再判**（旧写法 `python … | Select-Object -Last 3` 丢弃退出码，只剩 `Test-Path`，半写 `.new` 会被 `Move-Item` 覆盖输入），并补 `tar -tf` 成员数对账（退出码 0 也可能是截断产物）。判据 `scripts/build-release-inject-guard.test.mjs` 从真实脚本抽出注入段真跑四种状态；两条判据各有「只有它能看见」的反证（退出码非 0 但产物完整 / 退出码 0 但产物截断）。
+- `build-apk-013.ps1` 的快照导出段先判 `$producedAbis`（旧实现只看 `Test-Path $apkOut`，而 `$rejectedAbis` 的 exit 1 在导出段**之后**，被拒 ABI 的 `snapshot-<abi>.tar.xz` 会留在发布目录里）。判据 `scripts/snapshot-export-produced-guard.test.mjs` 用临时 out/ 与桩驱动「被拒 / 零产出 / 已产出」三态，并带一条「去掉守卫必须恢复落盘」的反证。
+
+三条都进 `pr-gate.yml` 的「构建链行为判据」步骤；pwsh / bash / python 缺席的布局由各用例显式 skip 并打印原因（不静默当通过）。
+
 **构建变体：出包走 release，开发迭代走 debug（0.14.11，issue #1118）**：三条正式链（本地 `build-apk-013.ps1`、云端 `build-apk.mjs`、发布 `build-release.ps1`）都经 `build-apk-engine.mjs` 的 `assembleApk()`，其 `buildType` **缺省 `release`**，因此 Gradle 任务是 `:app:assembleRelease`、产物是 `app/build/outputs/apk/release/app-release.apk`。**同一参数单点派生三样东西**——Gradle 任务、清理陈旧产物的目录、取产物的目录——所以三处不会各自漂移（此前是三个写死 `release` 的字面量，改变体要改三处，漏一处只表现为「清 A 目录却从 B 目录取」的假绿）。可选 `debug` 保留给受控负控与将来 `official` 之类的变体，命令行开关是 `--build-type`；未知值在 Gradle 之前就抛错。开发迭代脚本 `scripts/build-apk-dev-fast.mjs` **刻意**留在 `:app:assembleDebug`（它的产物就是 `application-debuggable`，会被 `check-apk-form.mjs` 判红，故禁作发布资产）——这是分工，不是漏改，脚本头注释已写明。为什么必须切：debug 与 release 在 `app/build.gradle.kts` 里**共用** `signingConfigs.repoDebug`，签名门禁对变体完全无感，0.14.9 的发布产物因此是「签名全绿但 debuggable」的 debug 变体；形态判据现由 `check-apk-form.mjs` 在最终产物关口把守（两条构建链都跑），而受控负控保证「构建类型被改回 debug」时它真的会红。
 
 **快照构建入口已收敛为单一链（0.14.5，删除已死的并行 workflow）**：apk 仓原有的 `.github/workflows/build-snapshot.yml`

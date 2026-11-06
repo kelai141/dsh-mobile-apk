@@ -1,4 +1,5 @@
 /** Batch old image occurrences before the request approaches its image limits. */
+import { ENGINE_BASELINE, PINNED_PI_AI, assertEngineBaseline } from './engine-versions.mjs'
 export const IMAGE_HISTORY_MARKER = 'dsh-mobile image history batch offload (I1)'
 const ROOT = 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/'
 export const IMAGE_HISTORY_CORE = ROOT + 'dsh-llm/lib/index.js'
@@ -58,9 +59,12 @@ export function patchImageBatchOffload(source) {
 
 export function planImageHistory(read) {
   const manifest = JSON.parse(read(ROOT + 'dsh-llm/package.json'))
-  if (manifest.name !== '@deepseek-ai/dsh-llm' || manifest.version !== '0.2.1-rc.3') {
-    throw new Error('I1 requires dsh-llm@0.2.1-rc.3')
+  if (manifest.name !== '@deepseek-ai/dsh-llm') {
+    throw new Error('I1 requires @deepseek-ai/dsh-llm, got ' + manifest.name)
   }
+  // 包身份正确 != 版本正确：上一代同名同包，函数体与预算语义可能已经变了。
+  // 版本断言走 engine-versions.mjs 的单一真源，不在补丁里写死数字。
+  assertEngineBaseline(manifest, 'I1')
   const before = read(IMAGE_HISTORY_CORE)
   return [{ file: IMAGE_HISTORY_CORE, before, after: patchImageBatchOffload(before) }]
 }

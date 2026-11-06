@@ -57,6 +57,19 @@ class LinuxAssetIOTest {
     tar.closeArchiveEntry()
   }
 
+  private fun writeHardlink(tar: TarArchiveOutputStream, name: String, target: String) {
+    val entry = TarArchiveEntry(name, TarConstants.LF_LINK)
+    entry.linkName = target
+    tar.putArchiveEntry(entry)
+    tar.closeArchiveEntry()
+  }
+
+  private fun writeFifo(tar: TarArchiveOutputStream, name: String) {
+    val entry = TarArchiveEntry(name, TarConstants.LF_FIFO)
+    tar.putArchiveEntry(entry)
+    tar.closeArchiveEntry()
+  }
+
   private fun archiveFile(root: File, bytes: ByteArray, name: String = "asset.tar.xz"): File =
     File(root, name).apply { writeBytes(bytes) }
 
@@ -83,9 +96,8 @@ class LinuxAssetIOTest {
     val root = tempRoot()
     try {
       val destination = File(root, "x.tar.xz")
-      val failure = LinuxAssetIO.download(ok.copy(sha256 = "../../../app_state"), destination, root) { _, _, _ ->
-        throw AssertionError("must not fetch")
-      }
+      val mustNotFetch = LinuxAssetIO.Opener { _, _, _ -> throw AssertionError("must not fetch") }
+      val failure = LinuxAssetIO.download(ok.copy(sha256 = "../../../app_state"), destination, root, mustNotFetch)
       assertNotNull(failure)
       assertEquals(LinuxAssetIO.CODE_SPEC_INVALID, failure!!.code)
       assertFalse("不合规清单不得留下任何文件", destination.exists())
@@ -272,7 +284,7 @@ class LinuxAssetIOTest {
       val bomb = archive { tar -> repeat(6) { writeEntry(tar, "lib/f$it.js", ByteArray(8)) } }
       val bombFailure = LinuxAssetIO.extract(
         archiveFile(root, bomb), File(env, "stage4").apply { mkdirs() }, env,
-        SnapshotExtractor.Limits(maxEntries = 5),
+        limits = SnapshotExtractor.Limits(maxEntries = 5),
       )
       assertNotNull("解压炸弹（条目数超限）必须判红", bombFailure)
 
@@ -280,7 +292,7 @@ class LinuxAssetIOTest {
       val wide = archive { tar -> writeEntry(tar, "lib/one.js", ByteArray(4096)) }
       val wideFailure = LinuxAssetIO.extract(
         archiveFile(root, wide), File(env, "stage5").apply { mkdirs() }, env,
-        SnapshotExtractor.Limits(maxSingleFileBytes = 1024),
+        limits = SnapshotExtractor.Limits(maxSingleFileBytes = 1024),
       )
       assertNotNull("单文件超限必须判红", wideFailure)
 
@@ -370,6 +382,212 @@ class LinuxAssetIOTest {
       assertEquals(LinuxAssetIO.CODE_DOWNLOAD_FAILED, failure!!.code)
       assertFalse("异常路径不得留下资产", dest.exists())
       assertFalse("异常路径不得留下 tmp", File(dest.parentFile, dest.name + ".tmp").exists())
+    } finally {
+      SnapshotFs.deletePath(root)
+    }
+  }
+
+  // ── kind：符号链接面（rootfs guest 绝对链接 / 其它 kind 的逃逸拒绝） ─────────
+
+  @Test
+  fun kindParsingDefaultsToPluginAndRejectsUnknownValues() {
+    assertEquals(LinuxAssetIO.Kind.PLUGIN, LinuxAssetIO.Kind.parse(null))
+    assertNull("显式空 kind 不是缺省值", LinuxAssetIO.Kind.parse(""))
+    assertEquals(LinuxAssetIO.Kind.PLUGIN, LinuxAssetIO.Kind.parse("runtime-plugin"))
+    assertEquals(LinuxAssetIO.Kind.ROOTFS, LinuxAssetIO.Kind.parse(" rootfs "))
+    assertEquals(LinuxAssetIO.Kind.NODE, LinuxAssetIO.Kind.parse("node"))
+    assertEquals(LinuxAssetIO.Kind.BACKEND, LinuxAssetIO.Kind.parse("backend"))
+    assertNull(LinuxAssetIO.Kind.parse("../../etc"))
+    assertNull(LinuxAssetIO.Kind.parse("rootfs/../../x"))
+  }
+
+  @Test
+  fun rootfsKeepsAbsoluteGuestSymlinksWithoutResolvingThemOnTheHost() {
+    assertEquals(
+      "rootfs 的绝对 guest 链接只做词法判定",
+      "/usr/bin",
+      LinuxAssetExtractor.linkVerdict("/usr/bin", emptyList(), LinuxAssetIO.Kind.ROOTFS),
+    )
+    assertNull(
+      "其它 kind 的绝对链接必须拒绝",
+      LinuxAssetExtractor.linkVerdict("/usr/bin", emptyList(), LinuxAssetIO.Kind.NODE),
+    )
+    assertNull(
+      "相对链接不得越过解包根",
+      LinuxAssetExtractor.linkVerdict("../../etc/passwd", listOf("lib"), LinuxAssetIO.Kind.ROOTFS),
+    )
+    assertNull(
+      "绝对 guest 链接也不能用 .. 爬出 guest 根",
+      LinuxAssetExtractor.linkVerdict("/../../etc/passwd", emptyList(), LinuxAssetIO.Kind.ROOTFS),
+    )
+    val root = tempRoot()
+    try {
+      val env = File(root, LinuxAssetIO.ENV_DIR).apply { mkdirs() }
+      File(env, LinuxAssetIO.STATE_FILE).writeText("{}\n")
+      val bytes = archive { tar ->
+        writeEntry(tar, "usr/bin/bash", "#!/bin/sh\n".toByteArray())
+        writeSymlink(tar, "bin", "usr/bin")
+        writeSymlink(tar, "usr/local/bin/sh", "/bin/bash")
+      }
+      val dest = File(env, "stage-rootfs").apply { mkdirs() }
+      val failure = LinuxAssetIO.extract(archiveFile(root, bytes), dest, env, LinuxAssetIO.Kind.ROOTFS)
+      if (failure != null && failure.detail.contains("特权")) {
+        // Windows JVM 默认无符号链接权限；链接策略已由上面的纯函数用例覆盖。
+        return
+      }
+      assertNull(
+        "rootfs 的绝对 guest 链接必须保留且不得被宿主解引用",
+        failure,
+      )
+      assertEquals("usr/bin", Files.readSymbolicLink(File(dest, "bin").toPath()).toString())
+      assertEquals("/bin/bash", Files.readSymbolicLink(File(dest, "usr/local/bin/sh").toPath()).toString())
+      assertTrue(File(dest, "usr/bin/bash").isFile)
+    } finally {
+      SnapshotFs.deletePath(root)
+    }
+  }
+
+  @Test
+  fun nonRootfsKindsRejectAbsoluteAndEscapingSymlinks() {
+    val root = tempRoot()
+    try {
+      val env = File(root, LinuxAssetIO.ENV_DIR).apply { mkdirs() }
+      for (kind in listOf(LinuxAssetIO.Kind.BACKEND, LinuxAssetIO.Kind.NODE, LinuxAssetIO.Kind.PLUGIN)) {
+        val absolute = archive { tar -> writeSymlink(tar, "lib/absolute", "/etc/passwd") }
+        val escape = archive { tar -> writeSymlink(tar, "lib/escape", "../../../../etc/passwd") }
+        val ok = archive { tar ->
+          writeEntry(tar, "lib/target", "x".toByteArray())
+          writeSymlink(tar, "lib/inner", "target")
+        }
+        for ((label, bytes) in listOf("absolute" to absolute, "escape" to escape)) {
+          val dest = File(env, "stage-$kind-$label").apply { mkdirs() }
+          val failure = LinuxAssetIO.extract(archiveFile(root, bytes, "$label.tar.xz"), dest, env, kind)
+          assertEquals("$kind/$label 必须拒绝", LinuxAssetIO.CODE_UNSAFE_ARCHIVE, failure!!.code)
+        }
+        val goodDest = File(env, "stage-$kind-inner").apply { mkdirs() }
+        val innerFailure = LinuxAssetIO.extract(archiveFile(root, ok, "inner.tar.xz"), goodDest, env, kind)
+        if (innerFailure != null && innerFailure.detail.contains("特权")) continue
+        assertNull(
+          "$kind 的根内相对链接必须保留",
+          innerFailure,
+        )
+        assertEquals("target", Files.readSymbolicLink(File(goodDest, "lib/inner").toPath()).toString())
+      }
+    } finally {
+      SnapshotFs.deletePath(root)
+    }
+  }
+
+  @Test
+  fun hardlinksAndSpecialEntriesAreRejectedForEveryKind() {
+    val root = tempRoot()
+    try {
+      val env = File(root, LinuxAssetIO.ENV_DIR).apply { mkdirs() }
+      val hard = archive { tar ->
+        writeEntry(tar, "usr/bin/tool", "x".toByteArray())
+        writeHardlink(tar, "usr/bin/tool-link", "usr/bin/tool")
+      }
+      val fifo = archive { tar -> writeFifo(tar, "var/run/pipe") }
+      for (kind in LinuxAssetIO.Kind.entries) {
+        val hardDest = File(env, "hard-$kind").apply { mkdirs() }
+        assertEquals(
+          "$kind hardlink 必须拒绝",
+          LinuxAssetIO.CODE_UNSAFE_ARCHIVE,
+          LinuxAssetIO.extract(archiveFile(root, hard, "hard.tar.xz"), hardDest, env, kind)!!.code,
+        )
+        assertFalse("hardlink 不得落地", Files.exists(File(hardDest, "usr/bin/tool-link").toPath()))
+        val fifoDest = File(env, "fifo-$kind").apply { mkdirs() }
+        assertEquals(
+          "$kind 特殊文件必须拒绝",
+          LinuxAssetIO.CODE_UNSAFE_ARCHIVE,
+          LinuxAssetIO.extract(archiveFile(root, fifo, "fifo.tar.xz"), fifoDest, env, kind)!!.code,
+        )
+      }
+    } finally {
+      SnapshotFs.deletePath(root)
+    }
+  }
+
+  @Test
+  fun rootDirectoryEntryIsSkippedButRootFilesAndLinksAreRejected() {
+    val root = tempRoot()
+    try {
+      val env = File(root, LinuxAssetIO.ENV_DIR).apply { mkdirs() }
+      val dotted = archive { tar ->
+        tar.putArchiveEntry(TarArchiveEntry("./", TarConstants.LF_DIR))
+        tar.closeArchiveEntry()
+        writeEntry(tar, "./etc/os-release", "debian".toByteArray())
+      }
+      val dest = File(env, "stage-dot").apply { mkdirs() }
+      assertNull(
+        "Debian 归档的 ./ 根目录条目必须放行",
+        LinuxAssetIO.extract(archiveFile(root, dotted), dest, env, LinuxAssetIO.Kind.ROOTFS),
+      )
+      assertTrue(File(dest, "etc/os-release").isFile)
+
+      val rootFile = archive { tar -> writeEntry(tar, ".", "root-file".toByteArray()) }
+      assertEquals(
+        "根上的普通文件必须拒绝",
+        LinuxAssetIO.CODE_UNSAFE_ARCHIVE,
+        LinuxAssetIO.extract(archiveFile(root, rootFile, "root-file.tar.xz"), File(env, "rf").apply { mkdirs() }, env, LinuxAssetIO.Kind.ROOTFS)!!.code,
+      )
+    } finally {
+      SnapshotFs.deletePath(root)
+    }
+  }
+
+  // ── debug 回放映射：只认官方 URL + 显式 loopback，release 不读配置 ───────────
+
+  @Test
+  fun debugMappingReplaysOnlyOfficialPathsOnExplicitLoopback() {
+    val root = tempRoot()
+    try {
+      val env = File(root, LinuxAssetIO.ENV_DIR).apply { mkdirs() }
+      val config = File(env, LinuxAssetIO.DEBUG_ORIGIN_FILE)
+      val expected = "http://127.0.0.1:18791/kelai141/dsh-bionilux/releases/download/v1.2.0/linux-runtime-plugin.tar.xz"
+
+      config.writeText("http://127.0.0.1:18791\n")
+      assertEquals(expected, LinuxAssetIO.debugMappedUrl(env, goodUrl, debugBuild = true))
+      assertEquals(
+        "release 构建必须原样走官方地址",
+        goodUrl,
+        LinuxAssetIO.debugMappedUrl(env, goodUrl, debugBuild = false),
+      )
+
+      for (bad in listOf(
+        "http://192.168.1.2:18791", "https://127.0.0.1:18791", "http://127.0.0.1",
+        "http://127.0.0.1:18791/api", "http://127.0.0.1:18791/?x=1", "http://user@127.0.0.1:18791",
+        "http://localhost:18791", "file:///tmp/x",
+      )) {
+        config.writeText(bad)
+        assertNull("不合规 origin 必须失败关闭：$bad", LinuxAssetIO.debugMappedUrl(env, goodUrl, debugBuild = true))
+      }
+
+      config.writeText("http://127.0.0.1:18791\n")
+      assertNull(
+        "非官方 URL 在映射前必须被独立拒绝",
+        LinuxAssetIO.debugMappedUrl(env, "https://evil.example.com/x.tar.xz", debugBuild = true),
+      )
+
+      config.delete()
+      assertEquals(
+        "未配置时 debug 构建走官方地址",
+        goodUrl,
+        LinuxAssetIO.debugMappedUrl(env, goodUrl, debugBuild = true),
+      )
+
+      // 下载面：映射后的 URL 才交给 opener；校验仍针对官方清单。
+      config.writeText("http://127.0.0.1:18791")
+      val body = "plugin-bytes".toByteArray()
+      val spec = LinuxAssetIO.Spec(goodUrl, sha256(body), body.size.toLong(), LinuxAssetIO.Kind.ROOTFS)
+      var fetched: String? = null
+      val failure = LinuxAssetIO.download(spec, File(env, "cache/d.tar.xz"), env, { url, target, _ ->
+        fetched = url
+        target.writeBytes(body)
+        body.size.toLong()
+      }, debugBuild = true)
+      assertNull(failure)
+      assertEquals(expected, fetched)
     } finally {
       SnapshotFs.deletePath(root)
     }

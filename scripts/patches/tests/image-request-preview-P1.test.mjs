@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { versionedFixture } from './lib/fixture.mjs'
 import { patchRequestPreview, planRequestPreview, PREVIEW_LOCAL, PREVIEW_PI, PREVIEW_DEEPSEEK } from '../image-request-preview-P1.mjs'
+import { ENGINE_BASELINE } from '../engine-versions.mjs'
 
 const targets = [[PREVIEW_LOCAL, 'local'], [PREVIEW_PI, 'pi'], [PREVIEW_DEEPSEEK, 'deepseek']]
 const repository = join(dirname(fileURLToPath(import.meta.url)), '../../..')
@@ -44,7 +45,7 @@ test('真实固定版本三包预检、幂等与语法检查；任一版本漂�
     const checked = spawnSync(process.execPath, ['--check', '--input-type=module'], { input: after, encoding: 'utf8' })
     assert.equal(checked.status, 0, checked.stderr)
   }
-  assert.throws(() => planRequestPreview(file => file.endsWith('package.json') ? files[file].replace('0.2.1-rc.3', '9.9.9') : files[file]), /requires pinned/)
+  assert.throws(() => planRequestPreview(file => file.endsWith('package.json') ? files[file].replace(ENGINE_BASELINE, '9.9.9') : files[file]), /requires (?:pinned|0\.2\.2-rc\.1)/)
   assert.throws(() => patchRequestPreview(files[PREVIEW_LOCAL].replace('const REQUEST_IMAGE_TRANSFORM_VERSION', 'const CHANGED'), 'local'), /anchor changed/)
 })
 

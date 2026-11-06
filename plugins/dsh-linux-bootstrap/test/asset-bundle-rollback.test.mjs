@@ -51,7 +51,9 @@ test('the caller rolls the assets back BEFORE rolling the host scope back (issue
   // 接线判据：publish 成功之后 host 安装/激活才失败的那条路径，必须**先回滚资产**
   // 再回滚 host scope。反过来会留下「host 已回滚、磁盘仍是新包」——正是本 issue 的半态。
   const src = await readFile(new URL('../src/index.js', import.meta.url), 'utf8')
-  const catchAt = src.indexOf('} catch (error) {')
+  const installAt = src.indexOf('async function installRuntime(')
+  assert.ok(installAt > 0, 'index.js must have the runtime install function')
+  const catchAt = src.indexOf('} catch (error) {', installAt)
   assert.ok(catchAt > 0, 'index.js must have the install catch block')
   const block = src.slice(catchAt, src.indexOf('state.lastError = safeError(error)', catchAt))
   const assetAt = block.indexOf('assetHandle?.rollback')

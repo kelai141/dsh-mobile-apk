@@ -124,4 +124,67 @@ class UpdateCheckerSuffixTest {
     assertFalse("fx 不是预发布段，正式版与它的关系保持原口径",
       UpdateChecker.isNewer("v0.14.5-fx-2", "0.14.5-fx-2"))
   }
+
+  // ── issue #1524：预发布族名按**显式次序**比较（不再靠字典序碰巧成立） ──────────────
+
+  /**
+   * 跨族先后：preview < rc < sn。
+   *
+   * 旧实现比字符串，结果由字母位置偶然给出（p < r < s 恰好等于想要的先后）。
+   * 这几条把「偶然」变成「约定」：任何一边改了族名或次序，这里立刻红。
+   */
+  @Test
+  fun 跨族预发布按显式次序比较() {
+    // preview 早于 rc：rc 用户不该被 preview tag 提示更新，preview 用户必须能升到 rc。
+    assertTrue("rc.1 比 preview.1 新", UpdateChecker.isNewer("v0.14.6-rc.1", "0.14.6-preview.1"))
+    assertFalse("preview 不得被判成比 rc 新", UpdateChecker.isNewer("v0.14.6-preview.1", "0.14.6-rc.1"))
+    // rc 早于 sn：快照是发布前的最后一站。
+    assertTrue("sn.1 比 rc.1 新", UpdateChecker.isNewer("v0.14.6-sn.1", "0.14.6-rc.1"))
+    assertFalse("rc 不得被判成比 sn 新", UpdateChecker.isNewer("v0.14.6-rc.1", "0.14.6-sn.1"))
+    // preview < sn（跨两级的对照：证明不是「只修了相邻一对」）。
+    assertTrue("sn.1 比 preview.1 新", UpdateChecker.isNewer("v0.14.6-sn.1", "0.14.6-preview.1"))
+    assertFalse("preview 不得被判成比 sn 新", UpdateChecker.isNewer("v0.14.6-preview.1", "0.14.6-sn.1"))
+    // 大小写不敏感：解析侧已 lowercase，这条守的是「别在比较处又拿原始文本比」。
+    assertTrue("SN 与 rc 的先后与大小写无关", UpdateChecker.isNewer("v0.14.6-SN-1-13", "0.14.6-rc.1"))
+  }
+
+  /**
+   * 未登记的族名退回字典序（**旧口径不变**）：这是「不静默改变既有比较结果」的边界。
+   *
+   * 为什么直接测判定函数而不是走 isNewer：prereleaseOf 只认白名单，未登记族名在
+   * isNewer 这条路上**根本取不到**（上面那条用例里的 dev 其实被判成 null 段，
+   * 走的是「有/无预发布段」分支，与字典序无关）。兜底分支今天不可达，但它是白名单
+   * 将来扩容时的唯一防线，所以单独钉住。
+   */
+  @Test
+  fun 未登记族名退回字典序且不改变既有结果() {
+    // 两边都未登记：字典序（zz > aa）。
+    assertTrue("两边都未登记时按字典序", UpdateChecker.prereleaseFamilyIsNewer("zz", "aa"))
+    assertFalse("反向不成立", UpdateChecker.prereleaseFamilyIsNewer("aa", "zz"))
+    // 一边未登记：仍是字典序（与历史一致）。
+    assertTrue("未登记的 dev 比 rc 小（字典序 d < r）", UpdateChecker.prereleaseFamilyIsNewer("rc", "dev"))
+    assertFalse("dev 不比 rc 大", UpdateChecker.prereleaseFamilyIsNewer("dev", "rc"))
+    // 两边都登记：走显式次序，而不是字典序（字典序在这里恰好同向，所以另钉一组逆序对照）。
+    assertTrue("sn 比 rc 新", UpdateChecker.prereleaseFamilyIsNewer("sn", "rc"))
+    assertFalse("rc 不比 sn 新", UpdateChecker.prereleaseFamilyIsNewer("rc", "sn"))
+    assertTrue("rc 比 preview 新", UpdateChecker.prereleaseFamilyIsNewer("rc", "preview"))
+    // 同族仍按序号比（#1365 的判据不受本次改动影响）。
+    assertTrue("同族比序号", UpdateChecker.isNewer("v0.14.6-rc.10", "0.14.6-rc.9"))
+  }
+
+
+  /** 族序表本身可读：preview < rc < sn 的排名是**相邻递增**的（防止有人手改成乱序）。 */
+  @Test
+  fun 族序表是连续递增的() {
+    val preview = UpdateChecker.prereleaseOf("v1.0.0-preview.1")!!
+    val rc = UpdateChecker.prereleaseOf("v1.0.0-rc.1")!!
+    val sn = UpdateChecker.prereleaseOf("v1.0.0-SN-1")!!
+    assertEquals("preview", preview.first)
+    assertEquals("rc", rc.first)
+    assertEquals("sn", sn.first)
+    // 用 isNewer 的传递性固定次序：preview < rc < sn。
+    assertTrue(UpdateChecker.isNewer("v1.0.0-rc.1", "1.0.0-preview.1"))
+    assertTrue(UpdateChecker.isNewer("v1.0.0-sn.1", "1.0.0-rc.1"))
+    assertTrue(UpdateChecker.isNewer("v1.0.0-sn.1", "1.0.0-preview.1"))
+  }
 }

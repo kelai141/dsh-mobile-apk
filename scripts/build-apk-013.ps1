@@ -102,6 +102,7 @@ node (Join-Path $Root "scripts\check-bridge-symmetry.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "桥面出现新的不对称（只有 setter/getter 返偏好），拒绝打包"; exit 1 }
 Write-Host "== 门禁覆盖与 SKIP 纪律门禁 =="
 node (Join-Path $Root "scripts\check-gate-skips.mjs") 2>&1
+node (Join-Path $Root "scripts\check-workflow-input-injection.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "门禁覆盖清单/SKIP 纪律失败（发布链要求 SKIP=0），拒绝打包"; exit 1 }
 
 # 构建链中止语义（任一 ABI 被门禁拒绝 = 整链非 0；含尾部守卫动态自检）
@@ -453,6 +454,12 @@ foreach ($abi in @('arm64', 'x86_64')) {
         Write-Host "== 浏览器语法下限门禁（$abi）=="
         node (Join-Path $Root "scripts\check-browser-syntax-floor.mjs") --scan (Join-Path $work "snap-final2.tar.xz") 2>&1
         if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "发往浏览器的 bundle 携带未降级的 ES2022 语法（老内核白屏）"; continue }
+        # 同一条产物的**第二个方向**的证据（0.2.2-rc.1 适配补）：上面那门的判据 2 只证明「不低于
+        # esbuild 的口径」，而 esbuild 在 chrome87 下不降类字段（门自己标注过这个边界）。这里用真解析器
+        # 按 ES2021 档位逐文件 parse——解析失败即老内核解析期抛 SyntaxError、整模块一行不执行。
+        Write-Host "== 浏览器 ES2021 可解析判据（$abi）=="
+        node (Join-Path $Root "scripts\check-browser-parse-floor.mjs") --scan (Join-Path $work "snap-final2.tar.xz") 2>&1
+        if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "发往浏览器的 bundle 在 ES2021 档位下解析失败（老内核 SyntaxError）"; continue }
         # 注入源真源（2026-11-01）：降级副本被造出来了，但注入时用的是原始源——历史形态（PR #1272）。
         # 上面那道 --scan 判的是**产物内容是否合规**；当原始源恰好也合规时，两份字节都能过扫描，
         # 「注入源选错」在内容级看不出来。这里判的是**注入的是哪一份字节**：tar 内成员 sha256 必须
@@ -632,6 +639,14 @@ foreach ($abi in @('arm64', 'x86_64')) {
 if ($ExportSnapshots) {
     foreach ($abi in @('arm64', 'x86_64')) {
         if ($OnlyAbi -and $OnlyAbi -ne $abi) { continue }
+        # issue #1616：导出段必须判「**本轮产出**」，不是「目录里有东西」。
+        # 旧实现的 §644 注释把「发布目录里存在 snapshot-<abi>」定义成「已校验」，而它只等价于
+        # 「APK 文件在场 + check-snapshot-asset 通过」——与「该 ABI 通过了全部门禁」不是同一件事。
+        # 触发路径：arm64 在 assemble **之后**的门禁被拒（内嵌快照可解压 / build-apk-engine 验签）⇒
+        # APK 已落在 out/v<ver>/，导出段照样把 snapshot-arm64.tar.xz + .sha256 写进发布目录，
+        # 而 $rejectedAbis.Count -gt 0 → exit 1 发生在导出段**之后**（末尾守卫）。
+        # CI 侧 publish 不会跑，但文件确实留在了发布目录里 —— 下一次组装/人工拷贝就会带走它。
+        if ($producedAbis -notcontains $abi) { Deny-Abi $abi "本轮未产出该 ABI（未通过全部门禁）——拒绝导出快照资产（#1616）"; continue }
         $snapIn = Join-Path $Root ".deploy-tmp\build-\13-$abi\snap-final2.tar.xz"
         if (-not (Test-Path $snapIn)) { Deny-Abi $abi "缺注入后快照 $snapIn（导出失败：发布资产不完整）"; continue }
         # issue #1080：**先校验，再拷进发布目录**；缺 APK 是硬失败，不是警告。
@@ -708,3 +723,9 @@ if ($LASTEXITCODE -ne 0) { throw "vendored 目录与 scripts/vendor-provenance.j
 Write-Host "== 退役插件残留引用门禁 =="
 node (Join-Path $Root "scripts\check-retired-plugins.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { throw "构建/发布入口仍引用已退役插件，拒绝交付" }
+# 快照 node 下限（0.2.2-rc.1 适配）：引擎首次声明 engines.node ">=24.9.0"，而快照 node 由 Termux
+# nodejs-lts 决定、仓内不钉版本号 ⇒ 必须把「声明下限 vs 快照实测」绑成判据。放在链尾与 vendored 那条
+# 同因：只读仓库文件（contract + 取证 JSON + base 归档字节），与 ABI 无关，跑一次即可；但必须在发版之前。
+Write-Host "== 快照 node 版本下限门禁 =="
+node (Join-Path $Root "scripts\check-snapshot-node-floor.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { throw "快照 node 低于引擎声明下限，拒绝交付（取证见 docs/adapt/022rc1-node-floor.md）" }

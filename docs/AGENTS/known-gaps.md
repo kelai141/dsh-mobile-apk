@@ -162,3 +162,9 @@ slot-guard 注释与本日审计报告。
 |---|---|---|
 | 无包围符号的行（Markdown 行、顶层注释、表格行）会被推成 `path@<hash>` 内容锚 | 对这类行跑 `deriveAnchorFor` 得到的都是 `content` 分支（实测 15/15），而 `parseDoc` 的 `ANCHOR_RE` 只认 `path:line` 与 `path#Symbol` 两支 ⇒ **迁移后该锚点静默失校**。一次 `--only --write` 会让 22 处引用变成没人校验的死文本（`parseDoc('AGENTS.md@e2511d29')` 返回 `anchors=[]`）。 | **必须修，但不在本轮 PR**：要改判据（让 `ANCHOR_RE` 认 `path@hash`，或让 derive 对无符号行保留 `path:line#expect=`）并补自检。在修好之前：**禁止用 `--only --write` / `--derive-anchors --write` 刷基线**，只用「按内容逐条重钉」。 |
 | 为什么这条比「文档数字过期」更严重 | 门禁**以为自己还在守**：`check-code-map` 会 PASS（因为读不到那个锚点了），而实际引用已经没人看。下一次有人改 `AGENTS.md` 那一行，不会有任何红。 | 记入 §5.3 的维护纪律：改执行地图锚点只走「原行 `#expect` 重钉」，禁止整份 derive。 |
+## 0.2.2-rc.1 适配期的「不可发布」窗口（2026-11-04，PR-2）
+
+| 项 | 当前事实 | 结论 / 后续 |
+|---|---|---|
+| peer 声明已指向 0.2.2-rc.1，但插件 API 面迁移未完成 | PR-2（`adapt/022-pin`）把 11 个插入行（3 个子仓 + 8 个插件 + 2 个 vendor）的 `@deepseek-ai/*` peer/dev 依赖从 `0.2.1-rc.3` 抬到 `0.2.2-rc.1`、`cordis 4.1.0`、`schemastery 3.19.0`——这一步是**为了不被上游 boot 期 peer 判定静默 disable**（症状：设备上功能面消失而进程照常起）。API 面迁移（`tools.resolve/executable`、session projection 注册改异步、PTC 控制通道改 birpc、`run_code` 取消 ABORTED、市场改名「自定义插件索引」）在 `adapt/022-plugins`。 | **门禁绿 ≠ 可发布**：`#1544` 同步登记。在 `adapt/022-plugins` 的实跑（起 0.2.2-rc.1 引擎 → 建会话 → 发一次工具调用）通过前，**不得发版**。这句话是给下一个人看的闸，不是免责声明。 |
+| 拒绝了 `contract.runtimeCompat.exemptions` 那条路 | 该字段能把「暂未验证」写成「广而告之的例外」，半年后没人敢删。本轮明确不登记豁免，宁可让 `check-contract` 保持「peer 必须抬」的硬判据。 | 后续若真需要豁免，必须在同一条里写清「哪天、凭什么证据可以删」，否则不接受。 |

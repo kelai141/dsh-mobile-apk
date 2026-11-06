@@ -74,16 +74,20 @@ jobs:
       - name: 按需拉取 LFS 底座（仅本 ABI，未命中缓存时）
         if: steps.lfs-base.outputs.cache-hit != 'true'
         shell: bash
+        env:
+          ABI: ${{ matrix.abi }}
         run: |
-          set -e
+          set -euo pipefail
           git lfs install --local
-          git lfs pull --include="base/base-usr-${{ matrix.abi }}.tar.xz,base/base-dsh.tar.xz"
+          git lfs pull --include="base/base-usr-${ABI}.tar.xz,base/base-dsh.tar.xz"
       - name: 断言底座确实已落地（拒绝 LFS pointer 冒充文件）
         shell: bash
+        env:
+          ABI: ${{ matrix.abi }}
         run: |
-          set -e
+          set -euo pipefail
           node scripts/require-lfs-materialized.mjs \
-            "base/base-usr-${{ matrix.abi }}.tar.xz" "base/base-dsh.tar.xz"
+            "base/base-usr-${ABI}.tar.xz" "base/base-dsh.tar.xz"
 
       - name: 准备运行时（node；dsh-client-ui-responsive 的 tsdown 要求 node ^22.18 || >=24.11）
         uses: actions/setup-node@v4
@@ -111,9 +115,11 @@ jobs:
 
       - name: stage 底座归档（base/ -> .deploy-tmp/<base-dir>/）
         shell: bash
+        env:
+          ABI: ${{ matrix.abi }}
         run: |
-          set -e
-          abi="${{ matrix.abi }}"
+          set -euo pipefail
+          abi="$ABI"
           # build-snapshot-013.mjs 的 BASE_DIR：arm64 -> arm64-base；x86_64 -> x64-base（缩写，勿写 x86_64-base）
           if [ "$abi" = "arm64" ]; then bdir="arm64-base"; else bdir="x64-base"; fi
           mkdir -p ".deploy-tmp/${bdir}"
@@ -124,15 +130,24 @@ jobs:
 
       - name: 构建快照 ${abi}（build-snapshot，Termux 源装配 + 注入 + 门禁 + 归档）
         shell: bash
+        # issue #1614：同一条纪律——值一律走 env，run 里只引用变量。
+        env:
+          ABI: ${{ matrix.abi }}
         run: |
-          set -e
-          node scripts/build-snapshot-013.mjs "${{ matrix.abi }}"
+          set -euo pipefail
+          node scripts/build-snapshot-013.mjs "$ABI"
 
       - name: 构建 APK ${abi}（注入插件 + 门禁 + gradle + 产物）
         shell: bash
+        # issue #1614：`suffix` 是 workflow_dispatch 的自由文本输入，**不得**内插进 bash 双引号。
+        # 内插会把它当 shell 语法求值：`$(id)`、反引号、`"` 都能逃出引号（本仓自用，但仍会把 `$` 吃掉、
+        # 让 `-Suffix` 变成半截字符串）。走 env 传参，run 里只引用 "$SUFFIX"，shell 不会二次求值。
+        env:
+          ABI: ${{ matrix.abi }}
+          SUFFIX: ${{ github.event.inputs.suffix }}
         run: |
-          set -e
-          node scripts/build-apk.mjs --abi "${{ matrix.abi }}" --suffix "${{ github.event.inputs.suffix }}"
+          set -euo pipefail
+          node scripts/build-apk.mjs --abi "$ABI" --suffix "$SUFFIX"
 
       - name: 上传前复核最终 APK 签名
         shell: bash

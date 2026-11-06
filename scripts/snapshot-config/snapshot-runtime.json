@@ -1,0 +1,31 @@
+{
+  "$schema": "dsh-mobile snapshot runtime evidence（0.2.2-rc.1 适配期取证，供 check-snapshot-node-floor.mjs 消费）",
+  "checkedOn": "2026-11-04",
+  "requiredBy": "@deepseek-ai/dsh@0.2.2-rc.1 package.json engines.node",
+  "requiredRangeAtRecord": ">=24.9.0",
+  "nodeVersion": "24.18.0",
+  "nodeMajor": 24,
+  "nodeModuleVersion": 137,
+  "baseTarballs": {
+    "x86_64": {
+      "file": "base/base-usr-x86_64.tar.xz",
+      "bytes": 80933336,
+      "sha256": "9ad3225c1b4468c138afeb7e38c61c31a918797becfe7d1de29e49012d54541a"
+    },
+    "arm64": {
+      "file": "base/base-usr-arm64.tar.xz",
+      "bytes": 68959460,
+      "sha256": "cc82f5b723c73d481728d29efc9203371757644a08805fb0a2705872571289e5"
+    }
+  },
+  "evidence": [
+    "usr/bin/node 二进制内嵌 \"24.18.0\"（6 处）；同一二进制内 node_module_version: 137（Node 24 线）",
+    "基座内 koffi 预编译目录名 koffi/build/koffi/android_x64/v24.18.0_native/（目录名即 node ABI 版本）",
+    "docs/contrib/kelai141/2026-11-01-image-cache-device-evidence.json 的 device.node = \"24.18.0\"（设备侧实跑快照）"
+  ],
+  "why": [
+    "0.2.2-rc.1 是首个在 package.json 声明 engines.node 的引擎版本（0.2.1-rc.3 无该字段），声明值 >=24.9.0；",
+    "本仓快照由 Termux 签名仓库的 nodejs-lts 决定，未显式钉版本 ⇒ 必须有一条判据把「声明下限」与「快照实际 node」对起来，",
+    "否则引擎换代时若 Termux 侧回退到 24.8 以下，整套适配在上设备前都不会红。"
+  ]
+}

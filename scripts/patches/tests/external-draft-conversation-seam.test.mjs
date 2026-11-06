@@ -19,7 +19,7 @@ function fixtureRoot() {
     'var ConversationController = class {',
     '\t\t\tcreateDrafts(sessionId, files) { return files; }',
     '\t\t\t/**',
-    '\t\t\t* Restart one failed file upload.',
+    '\t\t\t* Restart one failed file or image upload.',
     '\t\t\t*/',
     '\t\t\tretryFileUpload() {}',
     '};',

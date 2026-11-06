@@ -80,9 +80,14 @@ export const MOBILE_FORM_CSS: string = `
     /* 顶部安全区（2026-09-11 真机反馈）：关闭沉浸式状态栏时抽屉全高贴顶，上游侧栏的品牌行
        （logo）被状态栏盖住；这里与右栏/中栏用同一个 inset 变量（沉浸式打开时为 0，不影响布局）。 */
     padding-top: var(--dsh-mobile-top-inset, 0px);
-    /* 底部安全区（apk #153 / PR #157）：抽屉全高贴底时，底部用户栏里的设置入口与系统手势条
-       重叠，点击被拦截。与 composer-insets 的底部 inset 取值保持一致。 */
-    padding-bottom: max(env(safe-area-inset-bottom, 0px), var(--dsh-android-system-bottom, 0px));
+    /* 底部安全区（apk #153 / PR #157）：抽屉全高贴底时，底部用户栏里的设置入口与系统栏重叠，
+       点击被拦截。与 composer-insets 同源，取 --dsh-android-navbar-bottom（只算真正盖住页面
+       的系统栏）：手势模式下它是 0，抽屉不该凭空留出一条纯背景带（issue #783 缺陷 A）；
+       旧壳没有这条变量时回落到 system-bottom，行为与修前一致。 */
+    padding-bottom: max(
+      env(safe-area-inset-bottom, 0px),
+      var(--dsh-android-navbar-bottom, var(--dsh-android-system-bottom, 0px))
+    );
   }
 
   [data-dsh-frame]:not([data-sidebar-collapsed]) > [class*='sidebarCol'] {

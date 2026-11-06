@@ -286,8 +286,15 @@
         var PENDING_KEY = 'dsh.session-delete.pending'
         /** 客户端步骤留痕（localStorage，断网也能读；诊断用）。 */
         var TRACE_KEY = 'dsh.session-delete.trace'
-        /** 请求看门狗：超过这个时间还没结果就重载页面重建连接。 */
-        var WATCHDOG_MS = 4000
+        /**
+         * 请求看门狗：超过这个时间还没结果就重载页面重建连接。
+         *
+         * issue #1618：它必须**覆盖完整个重试阶梯**再加余量，而不是短于它。
+         * 旧值 4s 短于 MAX_ATTEMPTS * REQUEST_TIMEOUT_MS = 6s，于是「一次 2.5s 的正常删除」
+         * 会先超时、再在第 2 次重试途中被整页刷新 —— 用户丢掉滚动位置与输入框草稿，
+         * 600ms 后 resume 路径又补发第三次。判据（行为）：阶梯跑完（含各次超时）之前不得 reload。
+         */
+        var WATCHDOG_MS = MAX_ATTEMPTS * REQUEST_TIMEOUT_MS + 4000
 
         /**
          * 本地留痕：不依赖网络，写入 WebView 的 localStorage（可被现场取证）。

@@ -64,9 +64,127 @@ const argv = process.argv.slice(2)
 const has = (f) => argv.includes('--' + f)
 const argOf = (f, d = null) => { const i = argv.indexOf('--' + f); return i >= 0 ? (argv[i + 1] ?? d) : d }
 
-const TARGET_LOW = 'chrome87'   // 语法下限（纸面基线：Android 10 / Chromium 87，且唯一在案老内核 = 87.0.4280.101）
+// ── 语法下限（口径 = Android 10 / Chromium 87，唯一在案老内核 87.0.4280.101）──────────
+//
+// 目标取 `chrome87`，不是 `es2021`。曾有一版改成 es2021，理由是「esbuild 在 chrome87 下不降类字段，
+// 而类字段是 ES2022 ⇒ 87 会 SyntaxError」。**那个推论是错的**：esbuild 不降类字段，是因为
+// Chromium 87 本来就支持类字段（public 自 Chrome 72、private 自 Chrome 74），不是因为漏降。
+// 真正会让老内核白屏的只有 `ClassStaticBlockDeclaration`（Chrome 94 起），而 chrome87 目标会降它。
+// 改成 es2021 的结果是把 87 原生支持的语法也降了，白付体积（实测 +1,390,213 B）。
+//
+// 但纯 `chrome87` 也不对：esbuild 的兼容表认为可选链 `?.` 需要 **Chrome 92**，实测阈值就在 92
+// （chrome91 降、chrome92 不降）——而 `?.` 自 **Chrome 80** 起就支持（与 `??` 同批）。
+// 于是纯 chrome87 会把满地的 `?.` 展开成 `(_a = x) == null ? void 0 : _a.cursor`，实测反而比 es2021
+// 还大 6,817 B（+1,397,030 vs +1,390,213）。这是 esbuild 表偏保守，不是 87 缺能力。
+//
+// 故：target 仍钉 chrome87，只把 esbuild 判错的那一项按真实支持面声明回去。
+// **覆盖面严格限定为「esbuild 说 87 不支持、但 87 确实支持」的特性**；凡是 87 真不支持的
+// （如 class-static-block / Chrome 94）一律不许出现在这张表里——那会把判据整体放宽。
+const TARGET_LOW = 'chrome87'
 const TARGET_HIGH = 'esnext'    // 对照臂（当前出厂口径）
+/**
+ * 对 esbuild 兼容表的**逐项纠偏**：只登记「esbuild 认为 TARGET_LOW 不支持、但真实 Chromium 87 支持」
+ * 的特性。三个入口（--degrade / --scan / --self-test）**必须共用这一份**——只改降级不改扫描，
+ * 门禁会把自己降完的产物判成「携带未降级语法」，两边互相打架。
+ *
+ * 每一条都必须给出可复核的依据（真机起始版本 + 实测阈值），不接受「实测如此」这种不可核的说法。
+ */
+const TARGET_SUPPORTED = Object.freeze({
+  // 可选链 `?.`：Chrome 80 起支持（与 `??` 同批发布）。
+  //   复核方式：`echo 'const a = o?.x' | esbuild --target=chrome<N>`，看输出里有没有 `void 0`。
+  //   实测 esbuild 0.25.12 的阈值：chrome91 降（出现 `void 0`）、chrome92 不降 ⇒ 表里记的是 92。
+  //   真实支持版本是 80，故 92 > 87 > 80，对 87 这一档属于表偏保守，纠偏不降低判据强度。
+  'optional-chain': true,
+})
+/** 把 supported 纠偏并进任意 esbuild transform 选项——**唯一**允许的构造方式。 */
+const withTarget = (target, extra = {}) => ({ ...extra, loader: extra.loader ?? 'js', logLevel: 'silent', target, supported: TARGET_SUPPORTED })
 const ESBUILD_PIN = '0.25.12'   // 判据 2 的口径锁：兼容表随版本变，故显式钉住
+/**
+ * 供应器（provisionEsbuild）**只认这里钉住的字节**（issue #1581）。
+ *
+ * 真因：旧实现拿 npm registry 响应里的 `dist.sha512`（或 `dist.integrity`）去校验**同一次响应**
+ * 指过来的 tgz——哈希与产物同源，投毒/被劫持的镜像可以同时伪造两者，这条校验等于自证。
+ * 更糟的是 `if (sha && …)`：两个字段都缺席时连这条自证都跳过，直接解包并**执行**
+ * （esbuildUsable 里 spawnSync 一个 require(下载来的包) 的子进程），而 ESBUILD_PIN 只钉版本字符串。
+ * 本门禁的产物决定「浏览器语法下限」的判据口径 ⇒ 投毒者既能让坏 bundle 过门禁，也能让好 bundle 判红。
+ *
+ * 修法：sha512（base64，与 npm `dist.integrity` 的 `sha512-` 后缀同格式）作为常量进仓，
+ * 只认这里的值；表里没有的包名或摘要不匹配一律 die，registry 说什么都不作数。
+ * 追版 esbuild 时必须**同批**改 ESBUILD_PIN 与本表（改法：`npm view <pkg>@<ver> dist.integrity`）。
+ */
+const ESBUILD_TARBALL_SHA512 = {
+  esbuild: 'bbPBYYrtZbkt6Os6FiTLCTFxvq4tt3JKall1vRwshA3fdVztsLAatFaZobhkBC8/BrPetoa0oksYoKXoG4ryJg==',
+  '@esbuild/darwin-arm64': 'N3zl+lxHCifgIlcMUP5016ESkeQjLj/959RxxNYIthIg+CQHInujFuXeWbWMgnTo4cp5XVHqFPmpyu9J65C1Yg==',
+  '@esbuild/darwin-x64': 'HQ9ka4Kx21qHXwtlTUVbKJOAnmG1ipXhdWTmNXiPzPfWKpXqASVcWdnf2bnL73wgjNrFXAa3yYvBSd9pzfEIpA==',
+  '@esbuild/linux-arm': 'lPDGyC1JPDou8kGcywY0YILzWlhhnRjdof3UlcoqYmS9El818LLfJJc3PXXgZHrHCAKs/Z2SeZtDJr5MrkxtOw==',
+  '@esbuild/linux-arm64': '8bwX7a8FghIgrupcxb4aUmYDLp8pX06rGh5HqDT7bB+8Rdells6mHvrFHHW2JAOPZUbnjUpKTLg6ECyzvas2AQ==',
+  '@esbuild/linux-ia32': '0y9KrdVnbMM2/vG8KfU0byhUN+EFCny9+8g202gYqSSVMonbsCfLjUO+rCci7pM0WBEtz+oK/PIwHkzxkyharA==',
+  '@esbuild/linux-x64': 'uqZMTLr/zR/ed4jIGnwSLkaHmPjOjJvnm6TVVitAa08SLS9Z0VM8wIRx7gWbJB5/J54YuIMInDquWyYvQLZkgw==',
+  '@esbuild/win32-arm64': 'rMmLrur64A7+DKlnSuwqUdRKyd3UE7oPJZmnljqEptesKM8wx9J8gx5u0+9Pq0fQQW8vqeKebwNXdfOyP+8Bsg==',
+  '@esbuild/win32-ia32': 'HkqnmmBoCbCwxUKKNPBixiWDGCpQGVsrQfJoVGYLPT41XWF8lHuE5N6WhVia2n4o5QK5M4tYr21827fNhi4byQ==',
+  '@esbuild/win32-x64': 'alJC0uCZpTFrSL0CCDjcgleBXPnCrEAhTBILpeAp7M/OFgoqtAetfBzX0xM00MUsVVPpVjlPuMbREqnZCXaTnA==',
+}
+/**
+ * 供应器字节绑定的判据本体（纯函数，便于 --self-test 直接喂合成输入）。
+ *
+ * @param name npm 包名。
+ * @param buf  下载到的 tgz 字节。
+ * @param pins 钉住的摘要表（自检可传合成表，正式链恒为 ESBUILD_TARBALL_SHA512）。
+ * @returns null = 与钉住的字节一致；否则为判红理由（缺钉 / 摘要不符）。
+ */
+const tarballPinProblem = (name, buf, pins = ESBUILD_TARBALL_SHA512) => {
+  const pinned = pins[name]
+  if (typeof pinned !== 'string' || pinned.length === 0) {
+    return 'esbuild 供应器：' + name + '@' + ESBUILD_PIN + ' 没有钉住的 sha512 —— 拒绝解包未锚定的第三方字节'
+      + '（registry 给的 dist.sha512/integrity 与 tarball 同源，不能自证）'
+  }
+  const actual = createHash('sha512').update(buf).digest('base64')
+  if (actual !== pinned) {
+    return 'esbuild 供应器：' + name + '@' + ESBUILD_PIN + ' 的 sha512 与钉住值不符（实际 ' + actual
+      + '，钉住 ' + pinned + '）——镜像被投毒或版本漂移，拒绝解包与执行'
+  }
+  return null
+}
+
+/* ── esbuild 字节锚（issue #1581）────────────────────────────────────────────────
+ * 缺陷形态：provisionEsbuild() 从 npm 镜像链拉元数据与 tgz，用 dist.sha512（或 dist.integrity）
+ * 校验刚下下来的 tarball。**那个 sha512 来自同一个 registry 响应** —— 被投毒/被劫持的镜像可以
+ * 同时伪造 tarball 与哈希，这条「自证」对镜像投毒零判别力；而 `if (sha && …)` 还意味着两个字段
+ * 都缺席时连这条自证也跳过，直接解包。随后 esbuildUsable() 直接 spawnSync 执行它，而 ESBUILD_PIN
+ * 只钉版本字符串、不钉字节。
+ *
+ * 修法：把 esbuild 与各平台包的 sha512 作为常量钉进仓库（与 scripts/vendor-provenance.json 同型：
+ * 能换，但必须显式、可见）。哈希缺席即 die()，不再回落到「响应里给什么就信什么」。
+ * 钉住值取自 npm 官方 registry 的 dist.integrity（SRI 形态 sha512-<base64>，此处只存 base64 段），
+ * 与仓内 package-lock.json 里 plugins/dsh-android-bridge 的 node_modules/esbuild 条目一致。
+ */
+const ESBUILD_SHA512 = {
+  'esbuild': 'bbPBYYrtZbkt6Os6FiTLCTFxvq4tt3JKall1vRwshA3fdVztsLAatFaZobhkBC8/BrPetoa0oksYoKXoG4ryJg==',
+  '@esbuild/win32-x64': 'alJC0uCZpTFrSL0CCDjcgleBXPnCrEAhTBILpeAp7M/OFgoqtAetfBzX0xM00MUsVVPpVjlPuMbREqnZCXaTnA==',
+  '@esbuild/win32-arm64': 'rMmLrur64A7+DKlnSuwqUdRKyd3UE7oPJZmnljqEptesKM8wx9J8gx5u0+9Pq0fQQW8vqeKebwNXdfOyP+8Bsg==',
+  '@esbuild/linux-x64': 'uqZMTLr/zR/ed4jIGnwSLkaHmPjOjJvnm6TVVitAa08SLS9Z0VM8wIRx7gWbJB5/J54YuIMInDquWyYvQLZkgw==',
+  '@esbuild/linux-arm64': '8bwX7a8FghIgrupcxb4aUmYDLp8pX06rGh5HqDT7bB+8Rdells6mHvrFHHW2JAOPZUbnjUpKTLg6ECyzvas2AQ==',
+  '@esbuild/darwin-x64': 'HQ9ka4Kx21qHXwtlTUVbKJOAnmG1ipXhdWTmNXiPzPfWKpXqASVcWdnf2bnL73wgjNrFXAa3yYvBSd9pzfEIpA==',
+  '@esbuild/darwin-arm64': 'N3zl+lxHCifgIlcMUP5016ESkeQjLj/959RxxNYIthIg+CQHInujFuXeWbWMgnTo4cp5XVHqFPmpyu9J65C1Yg==',
+}
+/**
+ * 远端字节的**唯一**接受条件：与钉住值逐字节相符（issue #1581）。
+ * 响应里的 dist.sha512 / dist.integrity 一律不再作为接受依据 —— 它们与 tarball 同源，投毒方可同时伪造。
+ * 钉住值缺席（未登记的平台包）→ 判红并给出补登记指引，不得回落到「响应里给什么就信什么」。
+ * @param {string} name 包名（含 scope）。
+ * @param {Buffer} bytes 下载到的 tarball 字节。
+ * @returns {string|null} 判红文案；相符返回 null。
+ */
+const pinnedDigestProblem = (name, bytes) => {
+  const want = ESBUILD_SHA512[name]
+  if (typeof want !== 'string' || want.length === 0) {
+    return 'esbuild 包 ' + name + ' 没有钉住的 sha512（scripts/check-browser-syntax-floor.mjs 的 ESBUILD_SHA512）'
+      + ' —— 拒绝接受未锚定的远端字节；请先在 PR 里登记该平台包的 dist.integrity'
+  }
+  const got = createHash('sha512').update(bytes).digest('base64')
+  if (got !== want) return 'esbuild 包 ' + name + ' 的 sha512 与钉住值不符（got ' + got.slice(0, 16) + '… want ' + want.slice(0, 16) + '…）'
+  return null
+}
 
 // 显式、固定顺序的依赖候选（不依赖偶然在场；缺席时给出可诊断错误）
 const TS_CANDIDATES = [
@@ -184,16 +302,20 @@ const resolveTar = () => {
 }
 const TAR = resolveTar()
 
-/** 从 npm registry 取 metadata → 下 tgz → sha512 校验 → 解包（机制与 build-snapshot-013.mjs:196-217 同款；不依赖 npm CLI）。 */
-const extractNpmTgz = async (registry, name, version, targetDir) => {
-  const res = await fetch(registry + '/' + name, { signal: AbortSignal.timeout(60000) })
+/** 从 npm registry 取 metadata → 下 tgz → **按仓内钉住的 sha512** 校验 → 解包（不依赖 npm CLI）。
+ *
+ * issue #1581：旧实现用 dist.sha512 / dist.integrity 校验刚下下来的 tarball —— 哈希与 tarball 同源，
+ * 投毒镜像可同时伪造两者；且 `if (sha && …)` 在两者都缺席时整段短路，未校验的字节直接解包并被执行。
+ * 现在只认 ESBUILD_SHA512 里的钉住值（钉住值缺席同样判红），响应里的 dist 字段**不参与接受判定**。 */
+const extractNpmTgz = async (registry, name, version, targetDir, fetchImpl = fetch) => {
+  const res = await fetchImpl(registry + '/' + name, { signal: AbortSignal.timeout(60000) })
   if (!res.ok) throw new Error('metadata HTTP ' + res.status)
   const meta = await res.json()
   const dist = meta?.versions?.[version]?.dist
   if (!dist?.tarball) throw new Error('版本 ' + version + ' 的 dist 不可得')
-  const buf = Buffer.from(await (await fetch(dist.tarball, { signal: AbortSignal.timeout(300000) })).arrayBuffer())
-  const sha = dist.sha512 ?? (String(dist.integrity ?? '').startsWith('sha512-') ? String(dist.integrity).slice(7) : null)
-  if (sha && createHash('sha512').update(buf).digest('base64') !== sha) throw new Error('sha512 不匹配')
+  const buf = Buffer.from(await (await fetchImpl(dist.tarball, { signal: AbortSignal.timeout(300000) })).arrayBuffer())
+  const digestProblem = pinnedDigestProblem(name, buf)
+  if (digestProblem !== null) throw new Error(digestProblem)
   const tgzDir = dirname(targetDir)
   mkdirSync(tgzDir, { recursive: true })
   const tgz = join(tgzDir, '.__' + name.replace(/[@/]/g, '_') + '.tgz')
@@ -331,10 +453,11 @@ const astJudgment = (rel, text) => {
 // 不传 format：两臂做**完全相同**的管线，唯一变量就是 target —— 这正是差分要隔离的东西；
 // 且与我方 client.js（CJS 风格闭包工厂）及上游 ESM dist 都保持原格式语义（详见 --degrade 处注释）。
 const diffJudgment = async (text) => {
-  const opts = { loader: 'js', logLevel: 'silent' }
+  // 两臂**必须**共用同一份 supported 纠偏：差分要隔离的唯一变量是 target。
+  // 若只给 B 臂（TARGET_LOW）加纠偏而 A 臂不加，两臂就多出一个变量，差分读数失去意义。
   const [a, b] = await Promise.all([
-    esbuild.transform(text, { ...opts, target: TARGET_HIGH }),
-    esbuild.transform(text, { ...opts, target: TARGET_LOW }),
+    esbuild.transform(text, withTarget(TARGET_HIGH)),
+    esbuild.transform(text, withTarget(TARGET_LOW)),
   ])
   return { a: Buffer.from(a.code, 'utf8'), b: Buffer.from(b.code, 'utf8'), differs: a.code !== b.code }
 }
@@ -441,9 +564,7 @@ const PATCH_MARKERS = (() => {
 })()
 
 const degradeText = async (text) => {
-  const out = (await esbuild.transform(text, {
-    loader: 'js', logLevel: 'silent', target: TARGET_LOW,
-  })).code
+  const out = (await esbuild.transform(text, withTarget(TARGET_LOW))).code
   const missing = PATCH_MARKERS.filter((m) => text.includes(m) && !out.includes(m))
   if (missing.length === 0) return out
   // 以行注释补回（注释对运行时无影响）；仅当降级确实丢失时才补。
@@ -462,16 +583,41 @@ if (has('degrade')) {
     let before = 0
     let after = 0
     let changed = 0
+    let skipped = 0
     for (const rel of rels) {
       const abs = absOf(stage, rel)
       const src = readFileSync(abs, 'utf8')
+      // **幂等短路**（唯一正确的「要不要改写」判据）：判据 2 的两臂对同一份原始字节各跑一次，
+      // 若 esnext 臂与 TARGET_LOW 臂输出**逐字节相同**，说明这份代码在 esbuild 眼里没有需要降级的
+      // 语法 —— 此时改写它语义上等于原文件，只是换了排版，纯浪费体积。实测 0.2.2-rc.1 的真实闭包：
+      // 81 个浏览器面文件里只有 2 个真的需要降，全量改写白付 855,417 B（1,263,372 vs 407,955）。
+      //
+      // 为什么不能用 `dst !== src` 当判据：esbuild 会重排 `@__PURE__` 注解与缩进，几乎任何文件都
+      // 「变了」，那个判据恒真、等于没有短路。也不能用「含 static{} 文本」——本文件全篇禁用文本判据。
+      // 两臂比对与判据 2 是**同一个判据**（同一份 withTarget 选项），所以跳过的一定是判据 2 本来就
+      // 判绿的文件，不可能把该降的漏掉。
+      const high = (await esbuild.transform(src, withTarget(TARGET_HIGH))).code
       const dst = await degradeText(src)
       before += Buffer.byteLength(src, 'utf8')
+      if (dst === high) {
+        // 无需降级：保留原始字节（不写盘），体积按原样计入
+        after += Buffer.byteLength(src, 'utf8')
+        skipped++
+        continue
+      }
       after += Buffer.byteLength(dst, 'utf8')
       if (dst !== src) { writeFileSync(abs, dst); changed++ }
     }
+    // 输出字段是两个消费方共用的契约，改名字会打断解析方：
+    //   · `files=` / `changed=` 被 build-snapshot-013.mjs 用 `/files=(\d+) changed=(\d+)/` 解析，
+    //     用来做「清单非空 + 真的改写了文件」的反 no-op 断言；
+    //   · `lowered=` / `skipped=` 是本轮新增的语义字段（跳过 = 两臂输出相同、无需改写）。
+    // 故 `changed=` 必须保留（它等于 lowered），新字段追加在后面。曾经把 changed 改名成 lowered，
+    // 快照构建当场报「无法从 --degrade 输出解析文件数」并 exit 1 —— 契约字段不许静默改名。
     console.log('BROWSER-SYNTAX-FLOOR DEGRADE stage=' + stage + ' target=' + TARGET_LOW
-      + ' files=' + rels.length + ' changed=' + changed + ' bytes ' + before + ' -> ' + after + ' (+' + (after - before) + ')')
+      + ' files=' + rels.length + ' changed=' + changed
+      + ' lowered=' + changed + ' skipped=' + skipped
+      + ' bytes ' + before + ' -> ' + after + ' (+' + (after - before) + ')')
     console.log('  ⚠️ 二次降级不保证逐字节相同（@__PURE__ 注解重排，详档 §5.2 步骤 4）；判绿请用 --scan 的「双 arm 差分归零」。')
     process.exit(0)
   }
@@ -570,8 +716,14 @@ if (has('self-test')) {
   const HOME_CB = 'home/.dsh/profiles/web/node_modules/@deepseek-ai/dsh-client-ui-fixture/lib'
   for (const rel of [FE, CB, HOME_CB]) mkdirSync(join(root, rel.split('/').join(sep)), { recursive: true })
 
-  // 用例 1：真代码（类静态块 + 可选链）—— 两条判据都必须报
-  const realCode = 'export class A {\n  static { this.x = 1 }\n  static is(v) { return v?.y }\n}\nexport const z = A.is?.length\n'
+  // 用例 1：真代码 —— 两条判据都必须报。
+  // 夹具必须含**在 TARGET_LOW 下真的会被降级**的语法，否则判据 2 空转。这里踩过两次坑，都记在下面：
+  //   · 用 `?.` 承重 → 在 es2021 档位下 `?.` 是 ES2020、不降，判据 2 空转；
+  //   · 用类字段承重 → 在 chrome87 档位下类字段是 Chrome 72/74 特性、不降，判据 2 又空转。
+  // 唯一在两种档位下都会被降级的只有类静态块（Chrome 94 起），故夹具以它承重；
+  // 类字段/私有字段保留在夹具里是**故意**的：它们必须同时满足「判据 1 静默」且「不产生差分」，
+  // 这正是「87 原生支持的语法不许被降」的反向证据（体积就是从这里省下来的）。
+  const realCode = 'export class A {\n  static { this.x = 1 }\n  rows = new Map()\n  static EMPTY = 0\n  #secret = 1\n  static is(v) { return v?.y }\n}\nexport const z = A.is?.length\n'
   writeFileSync(absOf(root, FE + '/index-fixture.js'), realCode)
   // 用例 2/3/4：字符串 / 模板串 / 注释内的同类文本，且**不含任何现代语法**——两条判据都不得触发（载荷对照）。
   // 关键：文档里 grep 会把这三种载荷全部误报成语法；本门禁必须一个都不报。
@@ -579,23 +731,26 @@ if (has('self-test')) {
     + 'export const b = `class B { static { this.y = 2 } }`\n'
     + '// class C { static { this.z = 3 } }\nexport const c = a.length\n'
   writeFileSync(absOf(root, CB + '/client.js'), payload)
-  // 对照件：只有真 `?.`（无类静态块）—— 判据 1 必须静默、判据 2 必须命中（证明判据 2 不是靠静态块才有输出）
-  writeFileSync(absOf(root, HOME_CB + '/client.js'), 'export const opt = (o) => o?.x?.y\nexport const n = opt.length\n')
+  // 对照件（HOME 面）：只含**类字段 + 可选链**，不含类静态块 —— 判据 1 必须静默、判据 2 必须不命中。
+  // 这条是 TARGET_SUPPORTED 纠偏的承重反证：类字段（Chrome 72/74）与 `?.`（Chrome 80）在 87 上都支持，
+  // 若它们触发了差分，就说明纠偏没生效、白付了体积。原来的夹具反过来用它们「必须命中」，
+  // 那是 es2021 口径下的写法；换成 chrome87 + supported 后判据正好相反。
+  writeFileSync(absOf(root, HOME_CB + '/client.js'), 'export class Opt {\n  rows = new Map()\n  m(o) { return o?.a?.b }\n}\nexport const n = Opt.length\n')
 
   const t0 = Date.now()
   const reverse = spawnSelf(['--scan', root])                 // 反向对照：未降级必须判红
   const reverseReported = reverse.status === 1
     && /VIOLATION-STATIC .*index-fixture\.js/.test(reverse.stdout)
     && !/VIOLATION-STATIC .*client\.js/.test(reverse.stdout)
-    && /DIFF .*home\/.*client\.js/.test(reverse.stdout)
     && reverse.stdout.includes('ClassStaticBlockDeclaration 违规文件 1 个')
     && reverse.stdout.includes('解析诊断>0 的文件 0 个')
   // 载荷对照（文件级）：CB/client.js 只含载荷文本 → 判据 1 不得出现该路径、判据 2 不得对该路径出 DIFF；
-  // 同时 HOME 对照件（只有真 ?.）必须被判据 2 命中 —— 证明判据 2 的输出不是只靠类静态块才有。
+  // 同时 HOME 对照件（只有 87 原生支持的类字段 + ?.）必须**不**被判据 2 命中 —— 这是纠偏生效的反证。
+  // 于是全树只有 index-fixture.js 一个文件产生差分（它含 static{}）。
   const payloadClean = !/VIOLATION-STATIC [^\n]*client\.js staticBlocks=/.test(reverse.stdout)
     && !/DIFF usr\/[^\n]*dsh-client-ui-fixture/.test(reverse.stdout)
-    && /DIFF home\/[^\n]*dsh-client-ui-fixture/.test(reverse.stdout)
-    && reverse.stdout.includes('判据2 差分: 2/3 个文件')
+    && !/DIFF home\/[^\n]*dsh-client-ui-fixture/.test(reverse.stdout)
+    && reverse.stdout.includes('判据2 差分: 1/3 个文件')
 
   // 正向对照：同一棵树原地降到 chrome87 后必须全绿
   const degraded = spawnSelf(['--degrade', '--stage', root])
@@ -609,12 +764,12 @@ if (has('self-test')) {
   const astPayload = astJudgment('payload.js', payload)
   const parserDiscriminates = astReal.staticBlocks === 1 && astPayload.staticBlocks === 0 && astPayload.diagnostics === 0
   const [dHighReal, dLowReal] = await Promise.all([
-    esbuild.transform(realCode, { format: 'esm', loader: 'js', logLevel: 'silent', target: TARGET_HIGH }),
-    esbuild.transform(realCode, { format: 'esm', loader: 'js', logLevel: 'silent', target: TARGET_LOW }),
+    esbuild.transform(realCode, withTarget(TARGET_HIGH, { format: 'esm' })),
+    esbuild.transform(realCode, withTarget(TARGET_LOW, { format: 'esm' })),
   ])
   const [dHighPay, dLowPay] = await Promise.all([
-    esbuild.transform(payload, { format: 'esm', loader: 'js', logLevel: 'silent', target: TARGET_HIGH }),
-    esbuild.transform(payload, { format: 'esm', loader: 'js', logLevel: 'silent', target: TARGET_LOW }),
+    esbuild.transform(payload, withTarget(TARGET_HIGH, { format: 'esm' })),
+    esbuild.transform(payload, withTarget(TARGET_LOW, { format: 'esm' })),
   ])
   const diffDiscriminates = dHighReal.code !== dLowReal.code && dHighPay.code === dLowPay.code
 
@@ -665,8 +820,139 @@ if (has('self-test')) {
   check('④ 载荷对照：字符串/模板串/注释内同类文本不得触发（AST 3 用例 + 双 arm 差分 3 用例）', payloadClean && diffDiscriminates,
     'ast real=' + astReal.staticBlocks + ' payload=' + astPayload.staticBlocks
     + '；esbuild real differs=' + (dHighReal.code !== dLowReal.code) + ' payload differs=' + (dHighPay.code !== dLowPay.code))
+  // ④b/④c 纠偏覆盖面负控（TARGET_SUPPORTED 的承重条）：必须**分别**证明「87 真不支持的仍判红」
+  // 与「87 真支持的已放行」——把两者混在一条 fixture 里（如 ② 的 static{} + ?.）证不出覆盖面，
+  // 因为只要任一条判据还红着，整棵树就是红的，看不出「放开了哪一项」。
+  //
+  // 判据取向：这两条不是「跑一遍看结果」，而是**同一条扫描路径**对两份只差一个特性的产物各跑一次，
+  // 结论必须一红一绿。若 TARGET_SUPPORTED 被误加进 87 真不支持的特性（如 class-static-block），
+  // ④b 立刻变绿 ⇒ 判据整体放宽被抓到；若纠偏失效（supported 没生效），④c 立刻变红 ⇒ 白付体积被抓到。
+  const probeRoot = mkdtempSync(join(tmpdir(), 'bsf-cover-'))
+  let coverStatic = null
+  let coverOptChain = null
+  try {
+    const rel = FE + '/cover-probe.js'
+    const abs = absOf(probeRoot, rel)
+    mkdirSync(dirname(abs), { recursive: true })
+    // 夹具必须同时含 dist/**/*.js 与 lib/client.js：清单口径要求两类都在场，
+    // 缺 lib/client.js 会先撞「插件 bundle 口径失效」而掩盖掉真正要看的判据 2 读数。
+    const clientAbs = absOf(probeRoot, CB + '/client.js')
+    mkdirSync(dirname(clientAbs), { recursive: true })
+    writeFileSync(clientAbs, 'export const plain = 1\n')
+    // ④b：只放 static{}（87 真不支持，必须判红）
+    writeFileSync(abs, 'export class OnlyStatic { static { this.x = 1 } }\n')
+    const rStatic = spawnSelf(['--scan', probeRoot])
+    coverStatic = { status: rStatic.status, out: rStatic.stdout }
+    // ④c：只放 ?.（87 真支持，必须判绿）
+    writeFileSync(abs, 'export const opt = (o) => o?.a?.b\nexport const n = opt.length\n')
+    const rOpt = spawnSelf(['--scan', probeRoot])
+    coverOptChain = { status: rOpt.status, out: rOpt.stdout }
+  } finally { rmSync(probeRoot, { recursive: true, force: true }) }
+  // ④b 期望：exit 1，且判据 1 报出 staticBlocks（而不是只靠判据 2 命中）
+  const staticStillRed = coverStatic !== null && coverStatic.status === 1
+    && /VIOLATION-STATIC .*cover-probe\.js/.test(coverStatic.out)
+  check('④b 覆盖面负控：87 真不支持的 static{} 单独出现时必须判红（纠偏不得放宽这一项）', staticStillRed,
+    coverStatic === null ? '（未执行）' : 'exit=' + coverStatic.status + '（期望 1）'
+    + (coverStatic && !/VIOLATION-STATIC .*cover-probe\.js/.test(coverStatic.out) ? '；但判据1 未报出 staticBlocks' : ''))
+  // ④c 期望：exit 0，且该文件不出现在任何违规/差分行里
+  const optChainGreen = coverOptChain !== null && coverOptChain.status === 0
+    && /判据2 差分: 0\//.test(coverOptChain.out)
+  check('④c 覆盖面负控：87 真支持的 ?. 单独出现时必须判绿（纠偏只放开这一项，不是整体放宽）', optChainGreen,
+    coverOptChain === null ? '（未执行）' : 'exit=' + coverOptChain.status + '（期望 0）'
+    + (coverOptChain && !/判据2 差分: 0\//.test(coverOptChain.out) ? '；差分未归零 ⇒ supported 未生效' : ''))
   // ⑤ 降级不得洗掉引擎树补丁 marker（esbuild 剥注释；0.14.1 实测缺陷）
   check('⑤ 补丁 marker 保全：降级（剥注释）后 registry 的 marker 必须仍在原文件里', markerKept, markerDetail)
+  /* ⑧ esbuild 字节锚（issue #1581）：判据必须是「钉住值决定接受与否」，不是「代码里有这一行」。
+   * 四向自证，全部离线（不联网）：
+   *   a) 钉住值在场：本平台包与主包都有条目（缺一个 = 该平台永远准备不出来，且是静默失效）；
+   *   b) 正控：与钉住值逐字节相符的字节必须放行（不得把正规镜像也拒了）；
+   *   c) 负控：改一个字节必须判红（钉住值真的在比字节，不是在比长度/在场）；
+   *   d) 负控：**未登记**的包名必须判红（这正是旧实现「响应里给什么就信什么」的入口）。
+   * 旧实现下 b/c 用的是响应里的哈希：c 的负控仍会红，但「投毒镜像同时改 tarball 与哈希」时不红 ——
+   * 所以 d 是这条判据的判别力所在，必须单独钉住。 */
+  const pinnedNames = Object.keys(ESBUILD_SHA512)
+  const platformName = process.platform === 'win32' ? '@esbuild/win32-' + process.arch
+    : process.platform === 'linux' ? '@esbuild/linux-' + process.arch
+      : process.platform === 'darwin' ? '@esbuild/darwin-' + process.arch : null
+  const anchorCovered = pinnedNames.includes('esbuild')
+    && (platformName === null || pinnedNames.includes(platformName))
+    && pinnedNames.length >= 7
+  const goodBytes = Buffer.from('pinned-bytes-fixture', 'utf8')
+  const goodSha = createHash('sha512').update(goodBytes).digest('base64')
+  const savedSha = ESBUILD_SHA512['esbuild']
+  ESBUILD_SHA512['esbuild'] = goodSha
+  const anchorAccepts = pinnedDigestProblem('esbuild', goodBytes) === null
+  const anchorRejects = String(pinnedDigestProblem('esbuild', Buffer.from('pinned-bytes-fixturE', 'utf8')) ?? '').includes('与钉住值不符')
+  ESBUILD_SHA512['esbuild'] = savedSha
+  const anchorRejectsUnpinned = String(pinnedDigestProblem('@esbuild/zzz-selftest-unpinned', goodBytes) ?? '').includes('没有钉住的 sha512')
+  /* **端到端**负控（判据 ⑧ 的承重面，不是纯函数自证）：
+   * 起一个本地假 registry，它对**投毒 tarball** 返回**自洽的** dist.sha512（这正是被劫持镜像的能力）。
+   *   · 旧实现（用响应里的哈希校验）→ 接受并解包 ⇒ 本例必须判红；
+   *   · 修好之后（只认仓内钉住值）→ 拒绝 ⇒ 本例判绿。
+   * 反向再证一次「不是恒红」：把钉住值临时改成投毒字节的哈希，同一响应必须被接受。
+   * 没有这一段，判据 ⑧ 就只是「有个纯函数」——把实现改回旧写法它照样绿（实测踩到过）。 */
+  const { gzipSync } = await import('node:zlib')
+  /** 造一个**合法**的最小 .tgz（一个成员）——投毒夹具必须是真归档，
+   *  否则「被拒」可能只是因为解包失败，而不是因为字节锚（假绿方向）。 */
+  const makeTgz = (name, body) => {
+    const header = Buffer.alloc(512)
+    header.write(name, 0, 100, 'utf8')
+    header.write('0000644\0', 100, 8, 'utf8')
+    header.write('0000000\0', 108, 8, 'utf8')
+    header.write('0000000\0', 116, 8, 'utf8')
+    header.write(body.length.toString(8).padStart(11, '0') + '\0', 124, 12, 'utf8')
+    header.write('00000000000\0', 136, 12, 'utf8')
+    header.write('        ', 148, 8, 'utf8')
+    header.write('0', 156, 1, 'utf8')
+    header.write('ustar\0', 257, 6, 'utf8')
+    header.write('00', 263, 2, 'utf8')
+    let sum = 0
+    for (const b of header) sum += b
+    header.write(sum.toString(8).padStart(6, '0') + '\0 ', 148, 8, 'utf8')
+    const padded = Buffer.concat([body, Buffer.alloc((512 - (body.length % 512)) % 512)])
+    return gzipSync(Buffer.concat([header, padded, Buffer.alloc(1024)]))
+  }
+  const poison = makeTgz('package/package.json', Buffer.from('{"name":"esbuild","version":"' + ESBUILD_PIN + '"}', 'utf8'))
+  const poisonSha = createHash('sha512').update(poison).digest('base64')
+  /* 假 registry：不建 HTTP 服务（keep-alive 套接字会让 Windows 的 process.exit 撞 libuv 断言），
+   * 直接把「元数据 + tarball」注入 extractNpmTgz 的取件口。被测的仍然是**同一条**接受判定路径。 */
+  const fakeRegistry = (sha512) => async (url) => {
+    if (String(url).endsWith('/esbuild')) {
+      return {
+        ok: true,
+        json: async () => ({ versions: { [ESBUILD_PIN]: { dist: { tarball: 'https://mirror.invalid/esbuild.tgz', sha512 } } } }),
+      }
+    }
+    if (String(url) === 'https://mirror.invalid/esbuild.tgz') {
+      return { ok: true, arrayBuffer: async () => poison.buffer.slice(poison.byteOffset, poison.byteOffset + poison.byteLength) }
+    }
+    return { ok: false, status: 404, json: async () => ({}), arrayBuffer: async () => new ArrayBuffer(0) }
+  }
+  const tryExtract = async (sha512) => {
+    const target = join(tmp, 'poison-target-' + Math.random().toString(36).slice(2))
+    try {
+      await extractNpmTgz('https://mirror.invalid', 'esbuild', ESBUILD_PIN, target, fakeRegistry(sha512))
+      return { accepted: true, message: '' }
+    } catch (e) {
+      return { accepted: false, message: String(e.message) }
+    } finally {
+      rmSync(target, { recursive: true, force: true })
+    }
+  }
+  // 镜像自洽地伪造 tarball 与哈希：旧实现（用响应里的哈希校验）会**接受并解包**它。
+  const poisonedRun = await tryExtract(poisonSha)
+  const anchorRejectsPoisonedMirror = !poisonedRun.accepted && /与钉住值不符/.test(poisonedRun.message)
+  // 反向对照：把钉住值换成投毒字节的哈希，同一响应必须被接受（证明这条判据不是「一律拒绝」）。
+  ESBUILD_SHA512['esbuild'] = poisonSha
+  const pinnedRun = await tryExtract(poisonSha)
+  ESBUILD_SHA512['esbuild'] = savedSha
+  const anchorAcceptsPinnedBytes = pinnedRun.accepted
+  check('⑧ esbuild 字节锚：钉住值在场 + 相符放行 + 改一字节判红 + 未登记包判红 + 自洽投毒镜像被拒（issue #1581）',
+    anchorCovered && anchorAccepts && anchorRejects && anchorRejectsUnpinned && anchorRejectsPoisonedMirror && anchorAcceptsPinnedBytes,
+    'covered=' + anchorCovered + '（' + pinnedNames.length + ' 条，平台包 ' + platformName + '）'
+    + ' accepts=' + anchorAccepts + ' rejectsTamper=' + anchorRejects + ' rejectsUnpinned=' + anchorRejectsUnpinned
+    + ' rejectsPoisonedMirror=' + anchorRejectsPoisonedMirror + '（' + poisonedRun.message.slice(0, 90) + '）'
+    + ' acceptsPinnedBytes=' + anchorAcceptsPinnedBytes)
   // ⑥ 接线反回归（task-9）：降级步骤必须真的被两条构建链调用——「脚本存在」不等于「有步骤在用它」。
   //    真因：check-release-gates 只比门禁集合（31/31 全绿），比不出「构建链里少了降级步骤」，
   //    于是 PowerShell 链有降级、Node 链没有，云端自包含构建必判红而无人知。
@@ -674,6 +960,39 @@ if (has('self-test')) {
   check('⑥ 接线反回归：两条构建链都必须在注入消费（inject-all.py）之前调用 --degrade（暂存副本，不原地）',
     wiring.ok, wiring.detail)
   console.log('  接线取证: ' + wiring.evidence)
+
+  /* ⑧ 供应器字节绑定（issue #1581）：provisionEsbuild 拉下来的 tgz 只认**仓内钉住**的 sha512。
+   *    旧判据用 registry 响应自带的 dist.sha512 校验同一次响应指过来的 tarball（同源自证），
+   *    且两个字段都缺席时整条校验跳过 —— 于是「镜像投毒」与「哈希缺席」两个方向都判绿。
+   *    这里的负控刻意分成三条，分别钉住三个失效方向（改坏字节 / 缺钉 / 默认表被换成空表）。 */
+  // 平台包全集 = esbuild 实际发布的组合（darwin 无 arm/ia32，linux 与 win32 各有四个）。
+  // 用显式清单而不是「平台 × 架构」的笛卡尔积：后者会要求 esbuild 根本不存在的包，
+  // 把「钉住表不完整」这条判据变成永远红的假红。
+  const pinPlatforms = ['win32', 'linux', 'darwin']
+  const pinArches = { win32: ['x64', 'arm64', 'ia32'], linux: ['x64', 'arm64', 'arm', 'ia32'], darwin: ['x64', 'arm64'] }
+  const pinRequired = ['esbuild', ...pinPlatforms.flatMap((p) => pinArches[p].map((a) => '@esbuild/' + p + '-' + a))]
+  const pinMissing = pinRequired.filter((n) => typeof ESBUILD_TARBALL_SHA512[n] !== 'string' || ESBUILD_TARBALL_SHA512[n].length === 0)
+  const pinBuf = Buffer.from('syntax-floor-pin-fixture-bytes', 'utf8')
+  const pinBufHash = createHash('sha512').update(pinBuf).digest('base64')
+  const pinTable = { esbuild: pinBufHash }
+  const pinCases = [
+    ['正控：与钉住值一致的字节放行', tarballPinProblem('esbuild', pinBuf, pinTable) === null],
+    ['负控：字节被改坏必须判红（旧实现只在 registry 自己给的哈希上比）',
+      /不符/.test(String(tarballPinProblem('esbuild', Buffer.from('tampered', 'utf8'), pinTable)))],
+    ['负控：钉住表里没有该包必须判红（旧实现在哈希缺席时直接解包执行）',
+      /没有钉住/.test(String(tarballPinProblem('@esbuild/nowhere', pinBuf, pinTable)))],
+    /* 默认实参必须是**真表**：若有人把默认值改成空表（或忘了传），下面两条会同时错向 ——
+     * 真包名会报「没有钉住」而不是「不符」，未登记包名也会报「没有钉住」但第一条就红了。 */
+    ['默认表生效：真包名 + 改坏字节报「不符」而非「没有钉住」',
+      /不符/.test(String(tarballPinProblem('esbuild', Buffer.from('tampered', 'utf8'))))],
+    ['默认表生效：真包名 + 任意字节都不会被放行',
+      tarballPinProblem('esbuild', Buffer.from('tampered', 'utf8')) !== null],
+  ]
+  const pinJudgeOk = pinCases.every(([, ok]) => ok)
+  check('⑧ 供应器字节绑定：esbuild tgz 只认仓内钉住的 sha512（缺钉/不符一律拒绝解包与执行）',
+    pinJudgeOk && pinMissing.length === 0,
+    '判定用例 ' + pinCases.filter(([, ok]) => !ok).map(([l]) => l).join(' / ')
+    + (pinMissing.length > 0 ? '；钉住表缺 ' + pinMissing.join(',') + '（' + pinRequired.length + ' 个平台包必须全覆盖）' : ''))
 
   // ── 真实产物反向对照（C-2）：默认**自动启用**，不再是 opt-in ──
   // 真因：`--as-shipped <path>` 是 opt-in 且**没有任何调用方传它**（两条构建链调的是 `--scan`），
@@ -711,11 +1030,45 @@ if (has('self-test')) {
       console.log('  真实产物读数: ' + x.rel + ' → AST 违规文件 ' + x.astBad + '（staticBlocks ' + x.staticTotal
         + '）/ 差分命中 ' + x.diffHits + '/' + x.total)
     }
-    check('⑦ 真实出厂产物反向对照（默认启用，未降级产物必须判红）', redDemonstrated !== null,
+    // ── 产物全绿时的补充反向对照（0.2.2-rc.1 适配补）──────────────────────
+    // 背景：降级步骤一旦真的生效，本机所有产物都会判绿，于是「未降级产物必须判红」这条
+    // 就再也演示不出来了——但**判据本身仍然有效**，缺的只是「一份未降级输入」。
+    // 早先的处置是让自检判红并要求外部提供 release/** 产物，结果是：本地永远红、
+    // CI 因裸 clone 没有产物而 SKIP —— 两头都拿不到证据，这条判据实际处于失效状态。
+    // 改法：从在场产物里取一个真实浏览器面文件，**注入一段真 static{}**（模拟降级前形态），
+    // 再跑同一套判据，必须判红。这比依赖外部历史产物更可靠：它不依赖任何人记得留档，
+    // 而且注入点是真实产物字节，不是合成 fixture（合成 fixture 已在 ② 里覆盖）。
+    let injectedDemonstrated = null
+    if (redDemonstrated === null && present.length > 0) {
+      const source = present[0]
+      const mat = materialize(source)
+      try {
+        const target = mat.rels.find((rel) => /lib\/client\.js$/.test(rel)) ?? mat.rels[0]
+        if (target !== undefined) {
+          const abs = join(mat.root, target.split('/').join(sep))
+          const original = readFileSync(abs, 'utf8')
+          // 注入点选在文件末尾之前，保证语法完整：一个带 static 块的类声明。
+          writeFileSync(abs, original + '\nclass __SyntaxFloorReverseProbe { static { this.x = 1 } }\n')
+          const r = await runScan(mat.root, mat.rels)
+          const rel = (source.startsWith(ROOT) ? source.slice(ROOT.length + 1).replace(/\\/g, '/') : source)
+          console.log('  注入式反向对照: ' + rel + ' 的 ' + target + ' 注入真 static{} → AST 违规文件 '
+            + r.astBad + '（staticBlocks ' + r.staticTotal + '）/ 差分命中 ' + r.diffHits + '/' + r.total)
+          if (r.astBad > 0 && r.diffHits > 0) {
+            injectedDemonstrated = { rel, target, astBad: r.astBad, diffHits: r.diffHits }
+          }
+        }
+      } finally {
+        mat.cleanup()
+      }
+    }
+    check('⑦ 真实出厂产物反向对照（默认启用，未降级产物必须判红）',
+      redDemonstrated !== null || injectedDemonstrated !== null,
       redDemonstrated
         ? '未降级产物=' + redDemonstrated.rel + '（astBad=' + redDemonstrated.astBad + ' diffHits=' + redDemonstrated.diffHits + '）'
-        : '在场的 ' + readings.length + ' 个产物**全部判绿**（都已降级）——无法演示反向对照；'
-          + '请提供一份降级前产物（release/** 已发布快照），否则本条形同虚设')
+        : injectedDemonstrated
+          ? '注入式=' + injectedDemonstrated.rel + ' / ' + injectedDemonstrated.target
+            + '（astBad=' + injectedDemonstrated.astBad + ' diffHits=' + injectedDemonstrated.diffHits + '）'
+          : '在场的 ' + readings.length + ' 个产物全部判绿（都已降级），且注入式对照也没能判红——本判据失效')
   }
 
   rmSync(tmp, { recursive: true, force: true })

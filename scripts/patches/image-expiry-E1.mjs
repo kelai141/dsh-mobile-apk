@@ -1,5 +1,6 @@
 /** Missing reclaimed images become text; passive history replay never renews image lifetime. */
 import { PREVIEW_LOCAL, PREVIEW_PI, PREVIEW_DEEPSEEK } from './image-request-preview-P1.mjs'
+import { ENGINE_BASELINE, PINNED_PI_AI, assertEngineBaseline } from './engine-versions.mjs'
 export const EXPIRY_MARKER = 'dsh-mobile image expiry placeholder (E1)'
 export const EXPIRED_IMAGE_TEXT = '[图片已清理或文件缺失；需要当前画面时请重新截图。]'
 
@@ -76,7 +77,8 @@ export function patchImageExpiry(source, kind) {
 export function planImageExpiry(read) {
   return [[PREVIEW_LOCAL, 'local'], [PREVIEW_PI, 'pi'], [PREVIEW_DEEPSEEK, 'deepseek']].map(([file, kind]) => {
     const manifest = JSON.parse(read(file.replace(/lib\/index\.js$/, 'package.json')))
-    if (manifest.name !== '@deepseek-ai/' + file.split('/').at(-3) || manifest.version !== '0.2.1-rc.3') throw new Error('E1 requires pinned attachment and model runtimes@0.2.1-rc.3')
+    if (manifest.name !== '@deepseek-ai/' + file.split('/').at(-3)) throw new Error('E1 requires pinned attachment and model runtimes' + ' (name mismatch)')
+  assertEngineBaseline(manifest, 'E1 attachment/model runtime ' + manifest.name)
     const before = read(file)
     return { file, before, after: patchImageExpiry(before, kind) }
   })

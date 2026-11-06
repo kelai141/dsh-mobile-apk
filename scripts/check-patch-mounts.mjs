@@ -22,9 +22,10 @@
 // 用法：node scripts/check-patch-mounts.mjs <patch.yml> <pkg_dir>...
 //       加 --self-test 跑内置正反控（不读文件）。
 // 退出码：0 = 双向一致；1 = 任一方向有缺失（打印缺失清单）；2 = 用法错误。
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const TOP_ITEM = /^-(?:\s|$)/
 const TOP_ENTRY = /^(?:-\s+id:|-\s+name:)/
 const ENTRY_ITEM = /^(\s*)-\s+(id|name):\s*(.*)$/
@@ -110,6 +111,84 @@ export function mountedNames(text) {
 }
 
 /**
+ * 动态加载豁免：scripts/plugin-dirs.json 的 dynamicOnly。
+ *
+ * 为什么需要：bootstrap 的 apply() 需要函数型 config（linuxAssetIO），YAML 装配表达不了，
+ * 只能由宿主在用户显式启用时动态加载 —— 它必须随快照注入，却**不能**出现在 profile patch。
+ * 不做显式登记时，双向 ⊇ 判据会把它当漏挂拒包（判据正确，结论错误）。
+ *
+ * 豁免不是全局跳过：每个豁免项都必须在仓内找到**静态 import 该包名**的源码，
+ * 找不到就判红（否则谁都能往登记表塞包）；未登记的包照旧按漏挂判红。
+ */
+export function dynamicOnlyOf(manifest) {
+  const list = Array.isArray(manifest?.dynamicOnly) ? manifest.dynamicOnly : []
+  return new Set(list.map((d) => String(d).replace(/\\/g, '/').replace(/\/+$/, '')))
+}
+
+/** 仓内是否有一处源码静态 import/require 了该包名（跳过 node_modules / lib 产物）。 */
+export function hasStaticImport(root, pkgName) {
+  const needle = new RegExp(
+    String.raw`(?:from|import|require)\s*\(?\s*['"]` + pkgName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + String.raw`(?:/[^'"]*)?['"]`,
+  )
+  const SKIP = new Set(['node_modules', 'lib', '.git', 'build', 'out', '.deploy-tmp', '_dsh-wt'])
+  const walk = (dir, depth) => {
+    if (depth > 6) return false
+    let names = []
+    try { names = readdirSync(dir) } catch { return false }
+    for (const name of names) {
+      if (SKIP.has(name)) continue
+      const full = join(dir, name)
+      let st
+      try { st = statSync(full) } catch { continue }
+      if (st.isDirectory()) { if (walk(full, depth + 1)) return true; continue }
+      if (!/\.(?:m?js|cjs|ts|tsx)$/.test(name)) continue
+      let text = ''
+      try { text = readFileSync(full, 'utf8') } catch { continue }
+      if (needle.test(text)) return true
+    }
+    return false
+  }
+  return walk(root, 0)
+}
+
+/**
+ * 正向差集判定（纯函数，真检与 --self-test 共用）。
+ * @param injected - 注入包名集合。
+ * @param mounted - profile patch 挂载包名集合。
+ * @param dynamicNames - dynamicOnly 登记项对应的包名集合。
+ * @param hasImport - 包名 -> 仓内是否有静态 import。
+ * @returns { missing, deadExemptions }
+ */
+export function exemptionGaps(injected, mounted, dynamicNames, hasImport) {
+  const missing = [...injected].filter((n) => !mounted.has(n) && !dynamicNames.has(n))
+  const deadExemptions = [...dynamicNames].filter((n) => !hasImport(n))
+  return { missing, deadExemptions }
+}
+
+/**
+ * 豁免项的可证性：仓内要么有静态 import 该包名的源码，要么该包自己的 package.json
+ * 声明了同名且入口指向 `./lib`（loader 按 node_modules 解析、注入器只带 lib/** + package.json）。
+ * 两条都不成立 ⇒ 这个包进了注入集却没有任何加载路径，豁免就是掩盖漏挂。
+ * @param root - 仓根。
+ * @param dirs - 注入源目录（相对仓根）。
+ * @param dynamicOnly - 豁免登记（相对仓根的目录集合）。
+ * @returns { name, dir }[] 无加载证据的豁免项。
+ */
+export function unprovenExemptions(root, dirs, dynamicOnly) {
+  const out = []
+  for (const dir of dynamicOnly) {
+    const full = join(root, dir)
+    let pkg
+    try { pkg = JSON.parse(readFileSync(join(full, 'package.json'), 'utf8')) } catch { out.push({ name: null, dir }); continue }
+    if (!dirs.includes(dir)) { out.push({ name: pkg.name ?? null, dir }); continue }
+    const entry = pkg.exports?.['.'] ?? pkg.main
+    const loadable = typeof pkg.name === 'string' && entry === './lib/index.js'
+    if (!loadable || !hasStaticImport(root, pkg.name)) out.push({ name: pkg.name ?? null, dir })
+  }
+  return out
+}
+
+/**
  * 条目级**集合退化**判据（#1036 复现 1/2/5）：只比包名 Set 会丢掉重数，也完全不看 id。
  *
  * 三件事在 Set 里全部不可见，而它们在**装配期**是硬冲突（cordis 按 id 定位条目）：
@@ -180,6 +259,52 @@ if (process.argv.includes('--self-test')) {
   const want = new Set(['@dsh-android/dsh-shell-termux', '@dsh-android/dsh-host-web-compat', '@deepseek-ai/dsh-llm-pi-ai'])
   const missing = [...want].filter((x) => !got.has(x))
   const extra = [...got].filter((x) => !want.has(x))
+  {
+  // 动态加载豁免的判据：豁免项免于「必须挂载」，但**不豁免**静态 import 证据；
+  // 未登记的包照旧按漏挂判红（负控 2 证明这条没有变成全局跳过）。
+  const controls = [
+    {
+      label: '正控: dynamicOnly 包不挂载也通过（且 import 可证）',
+      run: () => exemptionGaps(
+        new Set(['@dsh-android/linux-bootstrap', '@dsh-android/dsh-session-delete']),
+        new Set(['@dsh-android/dsh-session-delete']),
+        new Set(['@dsh-android/linux-bootstrap']),
+        () => true,
+      ),
+      ok: (g) => g.missing.length === 0 && g.deadExemptions.length === 0,
+    },
+    {
+      label: '负控: 未登记的注入包缺挂载必须判红',
+      run: () => exemptionGaps(
+        new Set(['@dsh-android/linux-bootstrap', '@dsh-android/dsh-session-delete']),
+        new Set(),
+        new Set(['@dsh-android/linux-bootstrap']),
+        () => true,
+      ),
+      ok: (g) => g.missing.length === 1 && g.missing[0] === '@dsh-android/dsh-session-delete',
+    },
+    {
+      label: '负控: 豁免项没有静态 import 证据必须判红',
+      run: () => exemptionGaps(
+        new Set(['@dsh-android/linux-bootstrap']),
+        new Set(),
+        new Set(['@dsh-android/linux-bootstrap']),
+        () => false,
+      ),
+      ok: (g) => g.deadExemptions.length === 1,
+    },
+  ]
+  let bad = 0
+  for (const control of controls) {
+    const produced = control.run()
+    if (control.ok(produced)) console.log('SELF-TEST PASSED  ' + control.label)
+    else {
+      console.log('SELF-TEST FAILED  ' + control.label + ' — produced: ' + JSON.stringify(produced))
+      bad += 1
+    }
+  }
+  if (bad > 0) process.exit(1)
+  }
   const cases = []
   cases.push(['条目形态与配置块内显示名', missing.length === 0 && extra.length === 0 && got.size === 3,
     '条目名 ' + got.size + ' / 期望 3；缺 ' + JSON.stringify(missing) + '；多 ' + JSON.stringify(extra)])
@@ -262,21 +387,36 @@ if (engineKnown === null) {
 const ghostEngine = unknownEnginePackages(mounted, engineKnown)
 
 const injected = new Set()
+const dynamicNames = new Set()
+const manifestPath = join(ROOT, 'scripts', 'plugin-dirs.json')
+const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) : {}
+const dynamicOnly = dynamicOnlyOf(manifest)
 for (const d of dirs) {
   try {
     const pkg = JSON.parse(readFileSync(join(d, 'package.json'), 'utf8'))
     injected.add(pkg.name)
+    const rel = String(d).replace(/\\/g, '/').replace(new RegExp('^' + ROOT.replace(/\\/g, '/') + '/'), '')
+    if (dynamicOnly.has(rel)) dynamicNames.add(pkg.name)
   } catch {
     injected.add(d.split(/[\\/]/).pop())
   }
 }
 
-// 正向：注入集 ⊆ 挂载集（注入进快照却未挂载 = 功能静默不装载）
-const missing = [...injected].filter((n) => !mounted.has(n))
+// 正向：注入集 ⊆ 挂载集（注入进快照却未挂载 = 功能静默不装载）。
+// 唯一例外是 dynamicOnly 显式登记的包：不挂 profile，但必须有仓内静态 import 证据。
+const gaps = exemptionGaps(injected, mounted, dynamicNames, (n) => hasStaticImport(ROOT, n))
+const missing = gaps.missing
+// 豁免的可证性用 unprovenExemptions 判（静态 import 或包自身清单），不再只看 import。
+const deadExemptions = unprovenExemptions(ROOT, (manifest.dirs ?? []).map((d) => String(d).replace(/\\/g, '/')),
+  [...dynamicOnly]).map((e) => e.name ?? e.dir)
 // 反向：挂载集 ∩ 本仓注入面 ⊆ 注入集（挂载了但清单/调用方没注入 = 装配失败或旧版残留）
 const ENGINE_SCOPE = '@deepseek-ai/'
 const unmounted = [...mounted].filter((n) => !injected.has(n) && !n.startsWith(ENGINE_SCOPE))
 
+if (deadExemptions.length > 0) {
+  console.error('dynamicOnly 未能证明加载入口: ' + deadExemptions.join(', '))
+  process.exit(1)
+}
 if (entryIssues.length > 0) {
   for (const p of entryIssues) console.error('patch 条目级冲突: ' + p)
 }

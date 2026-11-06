@@ -113,6 +113,41 @@
 
 浏览器UI私有复用官方MIT BrowserBody/Title/controller契约，官方Sidebar指南/标签框架通过注册消费，不拷Electron/Iframe后端。NativeBrowserSession把GUI occurrence绑定native tab，自定义菜单使用真实sidebar.right.tab.menu.item扩展点；HMR/unmount hide而非销毁AI页。BrowserHostProfile按Session隔离cookie/storage/worker，UI geometry focus不替代模型captured Session/tab。Windows UA字符串、JS platform与UA-CH均按目标identity选择；是否实际生效依赖provider能力并在回执如实标注，未设备验证。
 
+### 5.2 0.15 Linux 环境（Bionilux + Debian）的依赖链与失败边界
+
+页面 → 宿主 → bootstrap → runtime 的单向依赖，每一层各自校验，下一层从不把上一层的成功当可用性依据：
+
+LinuxEnvironmentSection / transport.ts        （ui-responsive，settings.section 唯一注册方）
+  ├─ GET  /api/android/linux-environment/status|manifest
+  ├─ POST /api/android/linux-environment/check|install|reinstall|uninstall|auto-update-on|off
+  └─ window.androidBridge.linuxAssetPrepare / linuxAssetPrepareStatus
+        └─ LinuxAssetPrepare → LinuxAssetIO.download/debugMappedUrl → LinuxAssetExtractor.extract
+              └─ <DSH_FILES_DIR>/linux-environment/staging/<sha256>/{asset.tar.xz,unpacked/}
+
+dsh-android-linux-env.apply(ctx)              （宿主 Cordis 插件，随 profile 装配）
+  ├─ provide('linuxPluginHost')               ← install/uninstall/isInjected；父 apply() 返回后才可信
+  ├─ mountLinuxBootstrap(ctx, config)         ← 故意 void，非阻塞
+  │     └─ dsh-linux-bootstrap.apply(ctx, config)
+  │           ├─ inject=['linuxPluginHost']
+  │           └─ provide('linuxBootstrap')     ← status/check/install/…
+  └─ serviceOf(ctx,'linuxBootstrap')          ← 路由每请求现取；缺席即 503
+
+
+启动期有三个独立的失败点，不能合并成一个“配置缺失”：
+
+1. **Cordis 访问声明**：dsh-linux-bootstrap.apply() 取 ctx.filesDir 或 ctx.get('filesDir')，但它只声明 inject=['linuxPluginHost']。宿主当前改为在配置里显式给出 dataDir，所以正常路径不再依赖未声明的 filesDir 服务；若把 dataDir 拿掉、又寄望 ctx.filesDir 自动可见，bootstrap 会在 apply() 抛出 dataDir or ctx.filesDir is required，fiber 不进入 ACTIVE。新的装载器即使收窄了访问面，也不会替调用方补 dataDir。
+2. **父级挂载顺序**：linuxPluginHost 由父作用域在 apply() 内 provide，而子插件按注入等待它。父 apply() 末尾若 await mountLinuxBootstrap(...)，父 fiber 要等子 fiber 落定，子 fiber 又要等父作用域的服务就绪，形成互相等待；现实现用 void mountLinuxBootstrap(...).catch(warn) 断开这条等待，父 fiber 先落定，子 fiber 随后启动。失败只记一行 warn，linuxBootstrap 缺席由路由的 503 如实暴露。
+3. **ACTIVE 判定本身也有等待面**：装载器 await fiber 之后检查 fiber.state === FiberState.ACTIVE；linuxPluginHost.install 则等待 activated.ready（fiber 可等待性）再做 ACTIVE 检查。这里不能用调用瞬间的状态快照：Cordis fiber 异步激活，快照会读到 PENDING，导致“实际成功却报激活失败”。
+
+runtime 激活还有一层**工具面**判据：linuxRuntimeManager.status().healthy 为真时才注册 linux_bash / linux_session，而 fiber ACTIVE 只证明插件体加载成功，不证明工具已登记。旧 runtime 的 schema 把 required: true 写在字段内部，clock 这类真实 ToolRuntime 校验会拒绝；syncTool 又吞掉了注册异常，于是状态仍报 healthy、Agent 却一个 Linux 工具都看不到。修法是标准 JSON schema（对象级 type、required 数组、additionalProperties）、注册失败即抛并回滚已注册的部分，并用真实 rc3 ToolRuntime 的注册 + execute 用例固定这条链路。
+
+**首次 manifest 为空**：GET /manifest 只读持久状态；从未 check 过时 readLinuxManifest 返回 null。页面此时先 POST /check（只报告可用版本，不安装）再重读 manifest；/manifest 返回 404/405 的旧宿主则直接回退单次 check。只有重读仍为空才报“宿主没有发布清单”。
+
+**四类 native assets**：安装前页面按顺序准备 plugins.runtime（kind=plugin）与所选 runtime 的 backendAsset、rootfsAsset、nodeAsset（kind=backend/rootfs/node）。宿主按摘要推导落点、流式下载、逐跳复核来源、验摘要与字节数，再按 kind 解包并原子发布；bootstrap 只消费宿主已暂存的归档与树，自行重算摘要/体量、重算 unpackedSize、校验包名与入口后才激活。stagingDirectory 与宿主暂存目录必须分开，避免 bootstrap 的包槽位替换删掉复验源。
+
+**Debug loopback 仅用于 debug 回放**：生产构建不读取 debug-download-origin，官方 URL 只按正式白名单校验；DSH_DEBUG_BUILD=1 时若文件存在，只接受 http://127.0.0.1:<port>/，并只替换官方 URL 的 origin。这样测试服务器可以按正式 Releases 路径供字节，HTTP 与任意局域网地址仍失败关闭，响应 url 保留官方身份供清单来源复核。
+
+**恢复工具与恢复边界**：冷启动先 restoreActivation() 再 synchronizeInjectionState()，否则“宿主尚未加载 runtime”会被误读成用户移除并清掉启用记录。恢复只针对持久 enabled && injectionActivated、仍在插件根内且入口文件在场的安装；它是一个已校验目录的 Cordis 重新激活，不下载、不复活用户手工删除的目录。status() 读 active.json，healthy:false 会把恢复标成不健康；ACTIVE 本身仍不等于工具可用。isInjected 只读目录，不创建、不修复。 本轮完整根因、四类资产与设备重验状态见 [Linux 环境接入收口](<docs/contrib/codex/linux-mumu-integration-2026-11-05.md>)。
 ## 6. assets/ 结构（app/src/main/assets/）
 
 | 资产 | 作用 | 消费方 |

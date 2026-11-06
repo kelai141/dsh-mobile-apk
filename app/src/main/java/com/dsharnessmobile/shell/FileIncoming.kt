@@ -638,17 +638,13 @@ object FileIncoming {
    *  0.13.7：PathOpen（系统选择器）复用同一道门——两处出口同一份允许面。 */
   internal fun isReaderAllowed(activity: MainActivity, file: java.io.File): Boolean {
     return try {
-      val canon = file.canonicalPath
-      val roots = listOf(
-        java.io.File(activity.filesDir, "home/.dsh/workspaces"),
-        java.io.File(activity.filesDir, "home/tmp"),
-        java.io.File(activity.filesDir, "usr/bin"),
-        java.io.File(
+      readerAllowedBy(
+        readerRoots(
+          activity.filesDir,
           android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOCUMENTS),
-          "dshdata",
         ),
-      ).map { it.canonicalPath }
-      roots.any { root -> canon == root || canon.startsWith(root + java.io.File.separator) }
+        file.canonicalPath,
+      )
     } catch (_: Exception) {
       false
     }
@@ -702,5 +698,39 @@ object FileIncoming {
         activeDeliveries.decrementAndGet()
       }
     }
+  }
+
+  /**
+   * 外部阅读器白名单的**纯判据**（issue #1571）：只回答「这个规范化路径是否落在四条根之下」。
+   *
+   * 为什么把根表从 [isReaderAllowed] 里抽出来：两个出口（`openWithExternalReader` 与
+   * `PathOpen` 的系统选择器）必须共用同一份允许面，而 JVM 单测拿不到 `MainActivity`
+   * （`activity.filesDir` / `Environment.getExternalStoragePublicDirectory` 在无 Robolectric 的
+   * 单测里是默认值 null）。抽出纯判据后，「允许根集合」本身可以逐条被断言——包括**不得**
+   * 混进整个外部存储根这条负控。
+   *
+   * @param roots 允许根的 canonical 路径（由 [readerRoots] 生成）。
+   * @param canonicalPath 目标的 canonical 路径。
+   * @returns true = 放行。
+   */
+  internal fun readerAllowedBy(roots: List<String>, canonicalPath: String): Boolean =
+    ChooserAllowlist.permitted(canonicalPath, roots)
+
+  /**
+   * 外部阅读器的四条允许根（顺序即 [isReaderAllowed] 的判据顺序）。
+   *
+   * @param filesDir 应用私有目录（`Context.filesDir`）。
+   * @param externalDocuments 外部存储的 Documents 目录（`Environment.getExternalStoragePublicDirectory(DIRECTORY_DOCUMENTS)`）。
+   * @returns canonical 化后的根表；任一根不可解析时跳过该根（fail-closed，不抛）。
+   */
+  internal fun readerRoots(filesDir: java.io.File?, externalDocuments: java.io.File?): List<String> = try {
+    listOfNotNull(
+      filesDir?.let { java.io.File(it, "home/.dsh/workspaces") },
+      filesDir?.let { java.io.File(it, "home/tmp") },
+      filesDir?.let { java.io.File(it, "usr/bin") },
+      externalDocuments?.let { java.io.File(it, "dshdata") },
+    ).map { it.canonicalPath }
+  } catch (_: Exception) {
+    emptyList()
   }
 }

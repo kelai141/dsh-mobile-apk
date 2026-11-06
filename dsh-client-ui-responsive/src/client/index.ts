@@ -54,6 +54,8 @@ import { DevSection } from './dev-section/DevSection.tsx'
 import { PhoneControlSection } from './dev-section/phone-control.tsx'
 import { NotifySettingsSection } from './dev-section/notify-settings.tsx'
 import { ApkUpdateSection } from './dev-section/apk-update.tsx'
+import { LinuxEnvironmentSection } from './linux-environment/LinuxEnvironmentSection.tsx'
+import { LINUX_ENVIRONMENT_CSS } from './linux-environment/linux-environment.css.ts'
 import { DEV_SECTION_CSS } from './dev-section/dev-section.css.ts'
 import { MARKETPLACE_CSS } from './marketplace/marketplace.css.ts'
 import { registerMarketplaceAction } from './marketplace/marketplace-entry.tsx'
@@ -390,14 +392,21 @@ export function apply(ctx: ClientContext): void {
     label: () => tr('手机控制', 'Phone control'),
   }, PhoneControlSection))
 
-  // Linux 环境（实验性内部插件）**不由本文件注册**：该分区的唯一注册方是 vendored 的
-  // dsh-linux-bootstrap 客户端插件（plugins/dsh-linux-bootstrap 的 client 条目，id 同为
-  // linux-environment、label 同为「Linux环境」）。dsh-client-ui-slots 对 list 槽的重复 id 是
-  // **抛错**而非叠加，所以这里必须留空——两处都注册会在插件被启用时当场抛错。0.15.0 撤回
-  // 0.14.x 的壳侧同名分区（存在 ≠ 启用，未启用时本就没有任何入口）。
-  //
-  // 插件在内置（hard）插件目录里但默认不启用：它的 Cordis 客户端条目只在被显式启用、拿到
-  // linuxBootstrap 服务后才注册本分区，因此未启用时设置页不出现 Linux 入口。
+  // Linux 环境（实验性内部插件）：**唯一注册方是本文件**（0.15.1 改回）。
+  // 现实：vendored 的 dsh-linux-bootstrap 客户端条目 inject 了 `linuxBootstrap`，而浏览器侧
+  // 永远拿不到引擎 Cordis 上下文里的服务，且该包并未作为 client provider 装载——0.15.0 撤回本
+  // 注册后设置页再无 Linux 入口。故分区回到这里，页面经同源 `/api/android/linux-environment/`
+  // 下的路由取状态/发起动作，资产经 `window.androidBridge.linuxAssetPrepare` 预置。
+  // 注：路径注释不要带块注释起始符号，否则源码扫描类测试剥注释时会把后文整段吞掉。
+  // dsh-client-ui-slots 对 list 槽的重复 id 是**抛错**而非叠加：plugins/dsh-linux-bootstrap 的
+  // client 条目必须保持不注册本分区（其 inject 已收窄为 ['slots']，见该包 README）。
+  ctx.effect(() => injectStyle('linux-environment', LINUX_ENVIRONMENT_CSS), 'ui-responsive: linux environment styles')
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'linux-environment',
+    order: 95,
+    label: () => tr('Linux环境', 'Linux environment'),
+  }, LinuxEnvironmentSection))
 
   // Android general-settings rows (issue #59): immersive status-bar toggle.
   // 0.13.3 (D6): the font-size slider retired — upstream ui-theme fontSize

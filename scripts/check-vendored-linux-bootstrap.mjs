@@ -4,9 +4,8 @@
  *
  * Why this exists: the experimental internal Linux bootstrap is vendored source, not a sibling
  * sub-repo, so it is not covered by `check-patch-mirror.mjs` (that gate compares two checkouts) and
- * deliberately sits OUTSIDE the injection set (`scripts/plugin-dirs.json`, `scripts/contract.json`,
- * `scripts/profile-web.cordis.patch.yml`) — see docs/AGENTS/modules.md. Without a stop of its own,
- * an edit to the vendored tree would be invisible: nothing else reads those files.
+ * is included in the injection set and loaded dynamically by android-linux-env.
+ * This additional check binds that injected code to its reviewed source bytes.
  *
  * What it asserts:
  *   1. the vendored file set is exactly the upstream package minus `test/`, plus the two files we add;
@@ -34,24 +33,29 @@ const PACKAGE_DIR = join(ROOT, 'plugins', 'dsh-linux-bootstrap')
 const UPSTREAM_PACKAGE = 'packages/linux-bootstrap'
 
 /**
- * Upstream-faithful files (the vendoring contract's 10 files minus package.json, which we adapt).
+ * Upstream-faithful files (upstream source + client minus package.json, which we adapt).
  * Digests are over LF-normalized text: `core.autocrlf` would otherwise make the same commit hash
  * differently on Windows and Linux.
  */
 const MANIFEST = {
-  'README.md': 'e09da4489cfe3007387e5ced6e3810149c9eb7853257dd122036f20b00fe7656',
-  'client/index.js': '747de10f2ce2545ed9b8b63f0261a5fc656b0b9417af5895536731781daaf072',
-  'src/asset-bundle.js': '2520d8fec29dbaa7da1d6e602ff313ffed8ae1f124e7a94f6f4276f4474dd622',
+  'test/rollback-trace-1528.test.mjs': 'ac891c9a72e73a94464181298e7c2a98451f24866139eb1dbe6ec61185e0cf23',
+  'test/asset-bundle-rollback.test.mjs': '33371c99e467e6ae9a23b879ede6e0383fe6c6f6abb5d25669592eb636edf967',
+  'README.md': '9809a0991a5314ae7baafdae3a53147099b1dbc66100060519d157512732b8bb',
+  'client/api.js': 'e53e3a05f6c9922a9186101a88430fea231880356045289439434e61089ccc38',
+  'client/assets.js': '9cbb67716f7d0b7d433d5e3a4d324b16f5121fd7eea64f77f71a4cc02708bc5c',
+  'client/i18n.js': '77077f806bfd3f0124a04024de7614d12524474366fcae58ea1dcac3da287a50',
+  'client/index.js': '5c53f8eddad50e1092ce7f46c5efb19776f5bf0f9310e50c5c0df8299e60f5aa',
+  'src/asset-bundle.js': 'a73998cd72301dae51a7f0ed7e9f2897859131d2bd4cb76cd9c67b0d8b8a601e',
   'src/github.js': '8bf1bdac19fb17dc866087342b55714661e762124953bb6f697a4c87f04e70c3',
-  'src/index.js': '429963682227bde1cd42d43f7dbeeade225a23bd3cb6ac06106b10fc85653fb7',
-  'src/manifest.js': 'a9b8512e24dfbb1b225c2bc260d3d0496b7e8834ef975d17c69355baf1911067',
+  'src/index.js': 'ee3cb7b35086b0f1848ddb1783c2b445ca3163c333b247c397121e2d1bb22673',
+  'src/manifest.js': '45b0655c3702bd236090776e3d1b276416ab5a643a2ed58b47b4343bf5c8b86c',
   'src/routes.js': '678391176bcd81ba6cbbbab293a4731d07e37e99c51178d7605821eac6aa5bb9',
   'src/status.js': '494238e39094999e44105d1c56ca562f88ce3e65146bd3070806d4c82dd98f7b',
   'src/version.js': 'd0131f71b60ff38183070ddd3ef7142a98ae8a2cb54e2a57b725fa2e0d6b3636',
 }
 
 /** Files this repo adds. Neither may be an upstream artifact. */
-const ADDED = ['build.mjs', 'package.json']
+const ADDED = ['build.mjs', 'package.json', 'package-lock.json']
 
 /** `lib/` is a build product (gitignored, rebuilt by `npm run build`); `node_modules` is never vendored. */
 //
@@ -126,7 +130,7 @@ function checkForbiddenPayloads(files) {
     if (FORBIDDEN_EXTENSIONS.includes(ext)) bad.push(`${rel} (forbidden extension ${ext})`)
     const segments = lower.split('/')
     // A path segment is what distinguishes `bin/node` from the word "node" inside a source file.
-    if (segments.some(segment => FORBIDDEN_NAMES.includes(segment))) bad.push(`${rel} (forbidden path segment)`)
+    if (segments.some(segment => FORBIDDEN_NAMES.includes(segment)) && rel !== 'package-lock.json') bad.push(`${rel} (forbidden path segment)`)
   }
   return bad
 }
@@ -150,7 +154,7 @@ function run({ quiet = false } = {}) {
     ok(`vendored file set matches the contract (${actual.length} files)`)
   } else {
     fail(`vendored file set drifted — extra: [${onlyActual.join(', ')}]; missing: [${onlyExpected.join(', ')}]`
-      + ' (upstream test/ is intentionally excluded; re-vendor per the README contract if upstream added files)')
+      + ' (upstream browser/react test harness is intentionally excluded; re-vendor per the README contract if upstream added files)')
   }
 
   // 2. digests of the upstream-faithful files.
@@ -174,8 +178,8 @@ function run({ quiet = false } = {}) {
   else fail(`package.json entry must be ./lib/index.js so the injector carries code (found ${JSON.stringify(main)})`)
   if (typeof pkg.scripts?.build === 'string') ok('package.json build script present (materializes lib/ from src/)')
   else fail('package.json must keep a build script; lib/ is gitignored and only exists after a build')
-  if (pkg.scripts?.test === undefined) ok('no test script (upstream test/ is intentionally not vendored)')
-  else fail('package.json must not declare a test script while upstream test/ is excluded')
+  if (pkg.scripts?.test === 'npm run build && node --test test/*.test.mjs') ok('retained rollback tests are executable')
+  else fail('package.json must run the retained rollback regression tests')
   if (pkg.private === true) ok('package.json is private (the vendored copy can never be published)')
   else fail('package.json must stay private: true')
   const pin = pkg.dshVendor

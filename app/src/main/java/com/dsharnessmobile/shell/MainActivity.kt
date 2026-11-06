@@ -700,7 +700,7 @@ class MainActivity : ComponentActivity() {
       // would cover the mobile top bar / settings header (issue #135). bars.top
       // is 0 while the bar is hidden, so this tracks the toggle for free.
       webSystemTopInset = pxToCssPx(maxOf(bars.top, cutout.top), density)
-      webSystemBottomInset = pxToCssPx(maxOf(bars.bottom, mandatoryGestures), density)
+      applyBottomInset(bars.bottom, mandatoryGestures, density)
       // #182-2：左右同样取系统栏与挖孔的较大者（横屏且侧边挖孔时 cutout.left/right > 0）。
       webSystemLeftInset = pxToCssPx(maxOf(bars.left, cutout.left), density)
       webSystemRightInset = pxToCssPx(maxOf(bars.right, cutout.right), density)
@@ -1979,10 +1979,29 @@ class MainActivity : ComponentActivity() {
   }
 
   /**
+   * 真正盖住页面的系统栏高度（navigationBars，不含手势热区）；输入卡与抽屉只认这条。
+   * 与 [webSystemBottomInset] 成对写入，见 [applyBottomInset]（issue #783 缺陷 A）。
+   */
+  private var webNavBarBottomInset = 0
+
+  /** 底部两条通道一起落进缓存字段：system 是含手势热区的保守值，navBar 只算系统栏。 */
+  private fun applyBottomInset(barsBottomPx: Int, gestureBottomPx: Int, density: Float) {
+    val channels = BottomInsetPolicy.channels(barsBottomPx, gestureBottomPx, density)
+    webSystemBottomInset = channels.system
+    webNavBarBottomInset = channels.navBar
+  }
+
+  /**
    * Project edge-to-edge bottom insets into the WebView's CSS coordinate space.
    * The native API reports physical pixels, while WebView CSS uses density-scaled
    * pixels; the cached values survive engine-page reloads and are re-sent from
-   * onPageFinished. The seat CSS consumes the greater of system and IME inset.
+   * onPageFinished.
+   *
+   * 底部有两条通道（issue #783 缺陷 A 起）：--dsh-android-system-bottom 是保守值
+   * （系统栏与手势热区取大），--dsh-android-navbar-bottom 是真正盖住页面的系统栏高度。
+   * 手势热区不是遮挡物，交互面（输入卡、抽屉）只消费后者，否则手势模式下会凭空
+   * 留出一条纯背景带。IME 走独立变量 --dsh-android-ime-bottom，且壳侧已把 IME 施加到
+   * WebView 自身布局尺寸，两者不叠加。
    */
   private fun scheduleWebInsetsPush() {
     if (!pageUiActive || !webViewReady || webInsetsPushScheduled) return
@@ -1999,12 +2018,14 @@ class MainActivity : ComponentActivity() {
       view.evaluateJavascript(
         "(function(){var root=document.documentElement;if(!root)return;var top='" + webSystemTopInset +
           "px';var system='" + webSystemBottomInset +
+          "px';var navbar='" + webNavBarBottomInset +
           "px';var ime='" + webImeBottomInset +
           "px';var left='" + webSystemLeftInset +
           "px';var right='" + webSystemRightInset +
           "px';root.style.setProperty(" +
           "'--dsh-android-system-top',top);root.style.setProperty(" +
-          "'--dsh-android-system-bottom',system);root.style.setProperty('--dsh-android-ime-bottom',ime);" +
+          "'--dsh-android-system-bottom',system);root.style.setProperty(" +
+          "'--dsh-android-navbar-bottom',navbar);root.style.setProperty('--dsh-android-ime-bottom',ime);" +
           "root.style.setProperty('--dsh-android-system-left',left);" +
           "root.style.setProperty('--dsh-android-system-right',right);" +
           "})()",

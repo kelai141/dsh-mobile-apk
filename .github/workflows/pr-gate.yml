@@ -65,10 +65,14 @@ jobs:
         if: always()
         run: |
           # 覆盖文档与脚本：docs/ 下曾遗留未解决的冲突标记（#1012 合并进 modules.md），
-          # 旧版只扫 app/src 的代码文件，因此漏检。这里扩到 docs/.github/scripts，
-          # 但**只匹配 <<<<<<< 与 >>>>>>>**——Markdown 的 setext 标题下划线（一整行 ====）不是冲突。
+          # 旧版只扫 app/src 的代码文件，因此漏检。这里扩到 docs/.github/scripts。
+          # 0.2.2-rc.1 适配：再扩到 plugins/ 与 vendor/——rebase 把一个**未解决的冲突标记**留在了
+          # plugins/dsh-android-linux-env/package.json 里并直接提交，那份 JSON 因此不可解析：
+          # check-contract 直接 SyntaxError 崩掉、check-plugin-tests 与 check-tool-output-schema 连带判红，
+          # 而本步骤当时**扫不到**（根目录只有 app/src docs .github scripts），CI 无从拦截。
+          # 冲突标记只可能出现在第一列，故只匹配行首；Markdown 的 setext 标题下划线（一整行 ====）不是冲突。
           if grep -rEn '^(<<<<<<< |>>>>>>> )' \
-               app/src docs .github scripts \
+               app/src docs .github scripts plugins vendor \
                --include='*.kt' --include='*.java' --include='*.xml' --include='*.html' \
                --include='*.js' --include='*.mjs' --include='*.ts' --include='*.yml' \
                --include='*.yaml' --include='*.md' --include='*.json' \
@@ -183,6 +187,16 @@ jobs:
           node --test scripts/check-control-ops.test.mjs
           node --test scripts/check-patch-mirror.test.mjs
           node --test scripts/check-tool-surface-budget.test.mjs
+      # 构建链自身判据的行为面（P2 批：issue #1613 / #1614 / #1616）。
+      # 三条都不是「源码切片」判据：它们从**真实脚本**抽出对应段落，用合成驱动真跑，并各自带一条
+      # 「改回旧写法必须恢复缺陷行为」的反证 —— 判据没有判别力时反证会红。
+      # pwsh/bash 缺席的布局（Linux 无 PowerShell）由各用例显式 skip 并打印原因，不静默当通过。
+      - name: 构建链行为判据（workflow 输入 / 注入半写 / 快照导出）
+        if: always()
+        run: |
+          node --test scripts/workflow-input-injection.test.mjs
+          node --test scripts/build-release-inject-guard.test.mjs
+          node --test scripts/snapshot-export-produced-guard.test.mjs
       # 壳侧加固语义（NSC / backup 规则 / exported）与子进程有界读（0.13.8-b FX-208.4 / E1）
       - name: 壳侧加固与有界读门禁
         if: always()
@@ -237,6 +251,18 @@ jobs:
           node scripts/check-state-registry.mjs
           node scripts/check-bridge-symmetry.mjs
           node scripts/check-gate-skips.mjs
+          # 快照 node 下限（0.2.2-rc.1 适配引入）：0.2.2-rc.1 是**首个声明 engines.node 的引擎版本**
+          # （0.2.1-rc.3 无该字段），声明值 ">=24.9.0"；而快照里的 node 来自 Termux 的 nodejs-lts，
+          # **仓内不钉版本** ⇒「引擎声明下限 vs 快照实测版本」此前只存在于人读的文档里：Termux 侧回退到
+          # 24.8 以下、或有人把 enginesNode 悄悄改小，整套适配在上设备前都不会红（单测跑在宿主 node 上，
+          # 快照构建成功也不代表快照内 node 达标）。本门把两个数字绑成判据，取证在
+          # scripts/snapshot-config/snapshot-runtime.json（从 base/base-usr-*.tar.xz 取 usr/bin/node 实测）。
+          # CI 净检出里 base/*.tar.xz 是 Git LFS 指针 ⇒ 本门记 SKIP 并 exit 0（判据本轮未执行，不冒充绿）；
+          # 发布链以 --require 跑它，LFS 指针在那里判红——要么归档在场并逐字节核过，要么不发版。
+          node scripts/check-snapshot-node-floor.mjs
+          node scripts/check-snapshot-node-floor.mjs --self-test
+          # workflow 输入内插面（issue #1614）：run 块内不得出现 ${{ inputs.* }} / ${{ github.event.inputs.* }}。
+          node scripts/check-workflow-input-injection.mjs
           node scripts/check-kotlin-comments.mjs
           # 中英文案一致性（0.15.0）：资源键集合成对 + tr() 双参数；漏英文时 Android 静默回退中文。
           node scripts/check-i18n-parity.mjs

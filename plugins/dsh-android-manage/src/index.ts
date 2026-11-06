@@ -25,8 +25,8 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { type JsonValue } from '@deepseek-ai/dsh-util-values'
-import { join } from 'node:path'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { coordBasisNote, basisFields, COMPAT_NOTE } from './coord-basis.js'
 import { screenArgs, screenOut, coordinateMode } from './screen-fields.js'
 import { nodeListLines } from './node-list.js'
@@ -49,6 +49,19 @@ import {
   resolveImeRestoreTarget,
 } from './ime-broadcast.js'
 import { imeBorrowLock, ImeBorrowTimeout } from './ime-borrow.js'
+import {
+  ANIM_KEYS,
+  ANIM_STATE_FILE,
+  animDisableVerdict,
+  animRestoreVerdict,
+  animRestoreValues,
+  checkAnimRestore,
+  checkAnimScales,
+  parseAnimScales,
+  parseAnimState,
+  serializeAnimState,
+  type AnimScales,
+} from './anim-scales.js'
 
 /**
  * 0.13.8 #183 / #413：键盘广播的 nonce 与命令构造已抽到 ./ime-broadcast.js
@@ -492,16 +505,15 @@ function tools(ctx: Context, priv: PrivilegeFace) {
 
   // ── ADB 可靠性批次公共件（2026-09-05，docs/BUGS-open-2026-09-05-ADB-field-report.md）──
 
-  const ANIM_KEYS = ['window_animation_scale', 'transition_animation_scale', 'animator_duration_scale']
+  // ANIM_KEYS / 回读口径 / 恢复写回值都在 ./anim-scales.js（issue #1526）：
+  // 取值形态（1.0 与 1 等值、读不到与不等于分开报）与「恢复写回原值」是纯逻辑，
+  // 抽出去才能被 node --test 直接驱动真实现，而不是对源码做文本切片。
 
-  /** F1 止血：读动画三开关当前值。$k/$(...) 由 execAdbShell 的远端段整体转义保护（0.1.3 起），
-   *  本地 bash 不展开、由设备端求值。 */
-  async function readAnimScales(): Promise<Record<string, string>> {
+  /** F1 止血：读动画三开关当前值（解析口径见 ./anim-scales.js 的 parseAnimScales）。 */
+  async function readAnimScales(): Promise<AnimScales> {
     if (!priv.readAnimationScales) return {}
     const r = await priv.readAnimationScales().catch(() => ({ ok: false, stdout: '' }))
-    const out: Record<string, string> = {}
-    for (const m of r.stdout.matchAll(/R:(\w+)=(\S+)/g)) out[m[1]] = m[2]
-    return out
+    return parseAnimScales(r.stdout)
   }
 
   /** F1 止血：动画三开关置值——uiautomator dump 的 idle 等待依赖无障碍事件流安静，
@@ -512,11 +524,48 @@ function tools(ctx: Context, priv: PrivilegeFace) {
       .catch(() => undefined)
   }
 
-  /** F1 止血：还原动画三开关（读数失败的键回 1 标准值）。 */
-  async function restoreAnimScales(old: Record<string, string>): Promise<void> {
+  /**
+   * F1 止血：还原动画三开关到**给定值**（原值由调用方从落盘记录取出，issue #1526）。
+   *
+   * 旧实现无条件写 '1'：用户自设的 0.5/10 被抹成默认值是新的伤害。目标值怎么算
+   * （原值优先、读不到才退 1）在 ./anim-scales.js 的 animRestoreValues。
+   */
+  async function restoreAnimScales(values: AnimScales): Promise<void> {
     if (!priv.writeAnimationScales) return
-    await priv.writeAnimationScales(Object.fromEntries(ANIM_KEYS.map((k) => [k, old[k] ?? '1'])))
-      .catch(() => undefined)
+    await priv.writeAnimationScales(values).catch(() => undefined)
+  }
+
+  /**
+   * 准备前原值的落盘位置（issue #1526）。
+   *
+   * 为什么不用内存：`env_prepare` 的「关动画」与「恢复」是**两次独立调用**，中间可能隔着
+   * 引擎重启、会话切换或另一次工具调用；内存里的原值活不过这些，恢复就退回写常量 1。
+   * 目录口径与 adb-keyboard-nonce 一致（DSH_FILES_DIR，未设时退回 TMPDIR）。
+   */
+  function animStatePath(): string {
+    return join(process.env.DSH_FILES_DIR ?? process.env.TMPDIR ?? '/tmp', ANIM_STATE_FILE)
+  }
+
+  /** 读落盘的原值（任何异常都当「没有记录」，不让缓存坏掉拖垮工具）。 */
+  async function readAnimState(): Promise<AnimScales> {
+    try {
+      return parseAnimState(readFileSync(animStatePath(), 'utf8'))
+    } catch {
+      return {}
+    }
+  }
+
+  /** 写准备前的原值（写失败不影响本次关闭：恢复时退回默认 1 并点名）。 */
+  async function writeAnimState(before: AnimScales): Promise<void> {
+    try {
+      mkdirSync(dirname(animStatePath()), { recursive: true })
+      writeFileSync(animStatePath(), serializeAnimState(before))
+    } catch { /* 缓存写不进去不是本次失败的理由 */ }
+  }
+
+  /** 恢复成功后清掉记录：再恢复一次不该写回上一次的原值。 */
+  async function clearAnimState(): Promise<void> {
+    try { rmSync(animStatePath(), { force: true }) } catch { /* 忽略 */ }
   }
 
   /** F10：本地临时产物统一目录（TMPDIR/dsh-tmp/）+ 按 prefix LRU 清理，杜绝私有目录无限堆积。 */
@@ -821,7 +870,9 @@ function tools(ctx: Context, priv: PrivilegeFace) {
           `adb shell uiautomator dump ${remote}; adb pull ${remote} ${local} >/dev/null 2>&1; adb shell rm -f ${remote}; adb shell wm size | grep -m1 'Physical size'`,
         )
       } finally {
-        await restoreAnimScales(oldAnim)
+        // 写回**读到的原值**；读不到的键退回默认 1（与旧实现 `old[k] ?? '1'` 同口径）——
+        // 这条路径是「用完即还原」，没有落盘记录，也不需要（同一次调用内闭合）。
+        await restoreAnimScales(animRestoreValues(oldAnim).values)
       }
       if (!r.ok) return { ok: false, denied: false, screen: { w: 0, h: 0 }, rotation: 0, count: 0, rawCount: 0, nodes: [], text: r.guidance ?? (r.stdout || '控件清单导出失败') }
       if (!existsSync(local)) {
@@ -1967,6 +2018,19 @@ properties: {
       if (!a.ok) return { ok: false, denied: true, text: a.guidance }
       const dir = args.direction === 'left' || args.direction === 'right' ? args.direction : args.direction === 'up' || args.direction === 'down' ? args.direction : ''
       if (!dir) return { ok: false, denied: false, text: `未知方向：${String(args.direction)}` }
+      // issue #1619：ui_scroll 在 SCREEN_ACTIONS 里，门按 virtual-N 放行；a11y 分支带 screenId 没问题，
+      // 但 ADB 分支读的是**真实屏** `wm size` 且 `input swipe` 没有 `-d`——于是
+      // {direction:"down", screenId:"virtual-1"} 滑动的是真实屏，回执仍写「已滑动（down 60%）」。
+      // 口径与 ui_click 对 nx/ny 在虚拟屏上的拒绝一致：非 real 屏在这里直接拒绝并指向真正能做的工具。
+      if (typeof args.screenId === 'string' && args.screenId !== '' && args.screenId !== 'real'
+        && controlDecision('scroll', exec as { agent?: { session?: unknown } }).backend !== 'a11y') {
+        return {
+          ok: false, denied: false,
+          text: '在 ' + args.screenId + ' 上不能用 android_ui_scroll 的 ADB 通道：它读的是真实屏尺寸、'
+            + 'input swipe 也没有屏幕维度，滑动会落在真实屏上。请改用 android_vdisplay_input（verb: swipe，'
+            + '坐标基于该屏自身像素；可先 android_vdisplay_status 看宽高），或开启无障碍通道后再用本工具。',
+        }
+      }
       const frac = Math.min(Math.max(args.fraction ?? 0.6, 0.1), 1.0)
       // 0.13.5 W4：无障碍通道优先（ACTION_SCROLL_* 语义滚动；无坐标 swipe）
       if (controlDecision('scroll', exec as { agent?: { session?: unknown } }).backend === 'a11y') {
@@ -2453,25 +2517,30 @@ properties: {
       // D5：任一子步骤未执行成功必须显式说明（此前无论成败都以「环境准备完成」收尾 = 假成功）。
       const notDone: string[] = []
       if (animations) {
+        // issue #1526：回读口径（1.0 与 1 等值、读不到与不等于分开报）与恢复写回值
+        // 都在 ./anim-scales.js；这里只负责接线与回执。
         if (restore) {
-          await restoreAnimScales({})
-          // issue #1372：恢复分支原来没有回读——写失败被 restoreAnimScales 内部 catch 吞掉，
-          // 回执却照旧说「已恢复默认（1）」。与关闭分支同口径：只有读回才算数。
+          // 恢复写回**准备前读到的原值**：落盘记录优先（关与恢复是两次独立调用，
+          // 内存里的原值活不过引擎重启/会话切换）。没有记录才退回默认 1 并点名。
+          const before = await readAnimState()
+          const { values, unknown } = animRestoreValues(before)
+          await restoreAnimScales(values)
           const now = await readAnimScales()
-          if (ANIM_KEYS.every((k) => now[k] === '1')) {
-            lines.push('动画：已恢复默认（1）')
-          } else {
-            notDone.push('动画未恢复默认（读回 ' + ANIM_KEYS.map((k) => `${k}=${now[k] ?? '?'}`).join(', ') + '）')
-          }
+          const verdict = animRestoreVerdict(checkAnimRestore(now, values), values, unknown)
+          if (verdict.ok) lines.push(verdict.text)
+          else notDone.push(verdict.text)
+          await clearAnimState()
         } else {
+          // 关闭前先记下原值（issue #1526）：旧实现恢复时一律写 '1'，用户自设的
+          // 0.5/10 倍速被静默抹成默认值——「恢复」把人家的设置改掉了。
+          const before = await readAnimScales()
+          await writeAnimState(before)
           await setAnimScales('0')
           // 回读验证：写失败被 setAnimScales 吞掉，只有读回才能证明「已关闭」。
           const now = await readAnimScales()
-          if (ANIM_KEYS.every((k) => now[k] === '0')) {
-            lines.push('动画：已关闭（window/transition/animator 三项 = 0）')
-          } else {
-            notDone.push('动画未关闭生效（读回 ' + ANIM_KEYS.map((k) => `${k}=${now[k] ?? '?'}`).join(', ') + '）')
-          }
+          const verdict = animDisableVerdict(checkAnimScales(now, 0))
+          if (verdict.ok) lines.push(verdict.text)
+          else notDone.push(verdict.text)
         }
       }
       if (ime) {

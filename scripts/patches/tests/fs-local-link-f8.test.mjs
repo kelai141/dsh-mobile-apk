@@ -98,9 +98,9 @@ if (ASSET) {
   const F8_PREDICATE = '(error.code === "EACCES" || error.code === "EPERM" || error.code === "ENOTSUP" || error.code === "ENOSYS")'
   check('F8站点的精确predicate包含ENOSYS', patched.includes(F8_PREDICATE))
   check('非权限错误仍走原拒绝路径',
-    patched.includes('await throwGuardedCreateFailure(error, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget);'))
+    patched.includes('await throwGuardedCreateFailure(error, absolutePath, displayPath, inspectPublicationTarget);'))
   check('站点把 internals 透传给等价实现',
-    patched.includes('await dshMobilePublishExclusive(tempPath, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget, internals);'))
+    patched.includes('await dshMobilePublishExclusive(tempPath, absolutePath, displayPath, inspectPublicationTarget, internals);'))
   check('等价实现用 O_EXCL 占位（保住 no-replace 语义）', patched.includes('await openFile(absolutePath, "wx");'))
   check('未把 link 站点直接改成裸 rename', !patched.includes('\t\t\tawait rename(tempPath, absolutePath);\n\t\t} catch (error) {\n\t\t\t/* dsh-mobile'))
 
@@ -143,7 +143,7 @@ if (ASSET) {
     const site = /\t\t\tif \(!\(error instanceof Error[\s\S]*?\n\t\t\t\}\n\t\t\}/.exec(patched)
     check('F8实际link catch块可提取', !!site)
     if (site) {
-      const block = site[0].replaceAll('createIfAbsent.displayPath', 'displayPath')
+      const block = site[0].replaceAll('displayPath', 'displayPath')
       const call = new Function('linkFile', 'throwGuardedCreateFailure', 'dshMobilePublishExclusive', 'tempPath', 'absolutePath', 'displayPath', 'inspectPublicationTarget', 'internals',
         'return async function run() { try { await linkFile(tempPath, absolutePath); } catch (error) {' + block + '\n}')
       const invoke = (link, events) => call(link,

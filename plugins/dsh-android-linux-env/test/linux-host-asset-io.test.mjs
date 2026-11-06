@@ -58,6 +58,9 @@ const RUNTIME_PACKAGE_NAME = '@dsh-android/linux-runtime'
 const MANIFEST_NAME = 'linux-release.json'
 const REPO = 'https://github.com/kelai141/dsh-bionilux'
 const TAG = 'v1.2.0'
+/** 清单必须提供**本宿主架构**的运行时：宿主按 process.arch 选 id，写死 arm64 在 x64 上会失败关闭。 */
+const HOST_ARCH = process.arch === 'arm64' ? 'arm64' : 'x64'
+const RUNTIME_ID = HOST_ARCH === 'arm64' ? 'debian-minimal' : 'debian-minimal-x64'
 /** 宿主已解包树里的入口内容；正控与「篡改不得存活」都对着它断言。 */
 const GENUINE_ENTRY = 'export const apply = () => {}\n'
 
@@ -94,7 +97,8 @@ function makeManifest({ asset, minMobileVersion = '0.14.0', version = '1.2.0' } 
     version,
     minMobileVersion,
     plugins: { bootstrap: bootstrapAsset, runtime: { url: assetUrl('linux-runtime-plugin.tar.xz'), ...asset } },
-    runtimes: [{ id: 'debian-minimal', label: 'Debian minimal', architecture: 'arm64', backend: 'bionilux' }],
+    // The host architecture is process.arch; a fixture pinned to arm64 fails closed on x64 CI.
+    runtimes: [{ id: RUNTIME_ID, label: 'Debian minimal', architecture: HOST_ARCH, backend: 'bionilux' }],
   }
 }
 
@@ -144,7 +148,7 @@ function makeBootstrap({ filesDir, manifest, pluginHost = makePluginHost() }) {
   return { service, pluginHost, fetched }
 }
 
-const installConfirmed = (service) => service.install({ runtimeId: 'debian-minimal', confirmed: true, activate: true })
+const installConfirmed = (service) => service.install({ runtimeId: RUNTIME_ID, confirmed: true, activate: true })
 
 // ── 正控：真正准备好的暂存包可以激活 ────────────────────────────────────────
 
@@ -385,7 +389,7 @@ test('the config neither enables nor installs anything on its own', async () => 
   try {
     const config = createLinuxBootstrapConfig({ filesDir, appVersion: '0.15.0' })
     assert.equal(config.dataDir, linuxEnvironmentRoot(filesDir))
-    assert.equal(String(config.stagingDirectory), join(linuxEnvironmentRoot(filesDir), STAGING_DIR, 'runtime-plugin'))
+    assert.equal(String(config.stagingDirectory), join(linuxEnvironmentRoot(filesDir), 'plugins', 'runtime'))
     // bootstrap 的包槽位**不得**是宿主暂存目录，否则它会删掉宿主保留的归档与解包树。
     assert.notEqual(String(config.stagingDirectory), linuxEnvironmentRoot(filesDir) + '/' + STAGING_DIR)
     assert.equal(Object.keys(config).includes('enable'), false)

@@ -35,6 +35,7 @@ internal object LinuxAssetPrepare {
     val code: String? = null,
     val detail: String? = null,
     val sha256: String? = null,
+    val kind: String? = null,
     val stagedPath: String? = null,
     val bytes: Long = 0L,
   )
@@ -51,22 +52,33 @@ internal object LinuxAssetPrepare {
   /** 下载器注入点（单测用内存实现，避开网络）。 */
   var opener: LinuxAssetIO.Opener = LinuxAssetIO.HttpOpener
 
+  /** debug 回放开关；生产构建恒为 false。 */
+  var debugBuild: Boolean = BuildConfig.DEBUG
+
   /** 测试复位。 */
   fun reset() = synchronized(lock) { snapshot = Snapshot() }
 
   /**
    * 开始一次准备。立即返回 `{ok,phase}`；进度/结果由 [status] 读取。
    *
-   * 请求体只有资产清单（`url`/`sha256`/`size`），**落点由宿主自己推导**（按 sha256 命名），
+   * 请求体只有资产清单（`url`/`sha256`/`size`，可选 `kind`），**落点由宿主自己推导**（按 sha256 命名），
    * 客户端无法指定目标路径。
    */
   fun start(filesDir: File?, specJson: String): String {
-    val spec = try {
+    val spec: LinuxAssetIO.Spec
+    try {
       val o = JSONObject(specJson)
-      LinuxAssetIO.Spec(
+      val kind = LinuxAssetIO.Kind.parse(if (o.has("kind") && !o.isNull("kind")) o.getString("kind") else null)
+        ?: return JSONObject()
+          .put("ok", false)
+          .put("code", LinuxAssetIO.CODE_KIND_INVALID)
+          .put("detail", "kind 必须是 plugin/runtime-plugin/backend/rootfs/node")
+          .toString()
+      spec = LinuxAssetIO.Spec(
         url = o.getString("url"),
         sha256 = o.getString("sha256"),
         size = o.getLong("size"),
+        kind = kind,
       )
     } catch (e: Exception) {
       return JSONObject()
@@ -87,7 +99,7 @@ internal object LinuxAssetPrepare {
         return JSONObject().put("ok", false).put("code", "linux-asset-busy")
           .put("detail", "已有一次准备在进行中").toString()
       }
-      snapshot = Snapshot(phase = PHASE_RUNNING, sha256 = spec.sha256)
+      snapshot = Snapshot(phase = PHASE_RUNNING, sha256 = spec.sha256, kind = spec.kind.wire)
     }
 
     // 门口就把「环境不在场」和「来源不合规」判掉：这两条不需要起线程，也不该留下任何状态。
@@ -100,7 +112,17 @@ internal object LinuxAssetPrepare {
 
     val root = File(filesDir!!, LinuxAssetIO.ENV_DIR)
     runner {
-      val failure = prepareInto(root, spec)
+      val failure = try {
+        prepareInto(root, spec)
+      } catch (e: Exception) {
+        // 解包器已按失败关闭返回；这里兜住平台级异常（如无符号链接权限的 SecurityException），
+        // 否则后台线程会死掉而状态永远停在 running。
+        workDir(root, spec.sha256)?.let { SnapshotFs.deletePath(it) }
+        LinuxAssetIO.Failure(
+          LinuxAssetIO.CODE_UNSAFE_ARCHIVE,
+          "准备异常（${e.javaClass.simpleName}）：${e.message}",
+        )
+      }
       if (failure == null) {
         synchronized(lock) {
           snapshot = snapshot.copy(
@@ -117,7 +139,12 @@ internal object LinuxAssetPrepare {
         }
       }
     }
-    return JSONObject().put("ok", true).put("phase", PHASE_RUNNING).put("sha256", spec.sha256).toString()
+    return JSONObject()
+      .put("ok", true)
+      .put("phase", PHASE_RUNNING)
+      .put("sha256", spec.sha256)
+      .put("kind", spec.kind.wire)
+      .toString()
   }
 
   /** 读取当前状态（含失败原因）。 */
@@ -125,6 +152,7 @@ internal object LinuxAssetPrepare {
     JSONObject()
       .put("phase", snapshot.phase)
       .put("sha256", snapshot.sha256 ?: JSONObject.NULL)
+      .put("kind", snapshot.kind ?: JSONObject.NULL)
       .put("stagedPath", snapshot.stagedPath ?: JSONObject.NULL)
       .put("bytes", snapshot.bytes)
       .put("code", snapshot.code ?: JSONObject.NULL)
@@ -168,12 +196,12 @@ internal object LinuxAssetPrepare {
     staging.mkdirs()
 
     val archive = File(staging, "asset.tar.xz")
-    LinuxAssetIO.download(spec, archive, root, opener)?.let { failure ->
+    LinuxAssetIO.download(spec, archive, root, opener, debugBuild)?.let { failure ->
       SnapshotFs.deletePath(staging)
       return failure
     }
     val unpacked = File(staging, "unpacked").apply { mkdirs() }
-    LinuxAssetIO.extract(archive, unpacked, root)?.let { failure ->
+    LinuxAssetIO.extract(archive, unpacked, root, spec.kind, LinuxAssetIO.limitsFor(spec.kind))?.let { failure ->
       SnapshotFs.deletePath(staging)
       return failure
     }
@@ -191,7 +219,13 @@ internal object LinuxAssetPrepare {
 
   private fun finish(code: String, detail: String, spec: LinuxAssetIO.Spec): JSONObject {
     synchronized(lock) {
-      snapshot = Snapshot(phase = PHASE_FAILED, code = code, detail = detail, sha256 = spec.sha256)
+      snapshot = Snapshot(
+        phase = PHASE_FAILED,
+        code = code,
+        detail = detail,
+        sha256 = spec.sha256,
+        kind = spec.kind.wire,
+      )
     }
     return JSONObject().put("ok", false).put("code", code).put("detail", detail).put("phase", PHASE_FAILED)
   }
