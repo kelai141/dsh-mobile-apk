@@ -388,9 +388,25 @@ export class TokenManager {
     inflight;
     /** The session whose refresh token the in-flight refresh is spending. */
     attempted;
+    /**
+     * 登出代次（issue #1588）。每次 [invalidate] 递增；`doRefresh` 在发起刷新前记下当时的值，
+     * 落盘前再比一次——值变了说明这期间发生过登出，本次刷新结果必须整份丢弃。
+     *
+     * 为什么需要代次而不是「落盘前重读 store 看账号还在不在」：登录与刷新走的是**同一个**
+     * saveAccountSession，重读只能看到「现在有没有」，看不到「这期间删过又建过」。代次是唯一
+     * 能把「刷新横跨了一次登出」与「账号一直在」分开的事实。
+     */
+    generation = 0;
     constructor(options) {
         this.options = options;
-        this.options = options;
+    }
+    /**
+     * 作废当前在途刷新（issue #1588）。登出路径必须调用，否则刷新返回后会把账号写回磁盘。
+     *
+     * 只递增代次、不取消网络请求：取消失败的刷新没有必要——它的结果会被代次判据丢弃。
+     */
+    invalidate() {
+        this.generation += 1;
     }
     /**
      * Read the stored session without any refresh side effect. Catalog queries
@@ -443,6 +459,13 @@ export class TokenManager {
                 this.options.onRemoved?.();
                 throw new LlmError(`${this.options.displayName} login expired or was revoked; log in again via Settings → Subscriptions`, 'INVALID_CREDENTIAL', { cause: error });
             }
+            // issue #1588：**登出优先于「用旧 token 兜底」**。doRefresh 在发现账号已被删时抛
+            // MISSING_CREDENTIAL；此时旧 session 的 expiresAt 往往还在未来，若让它走下面那条
+            // 「transient 失败但 token 仍有效就沿用」的兜底，调用方会拿到一份**已登出账号**的
+            // 会话——那是同一缺陷的另一种复活形态（没落盘，但仍在用）。
+            if (error instanceof LlmError && error.code === 'MISSING_CREDENTIAL') {
+                throw error;
+            }
             if (!forceRefresh && session.expiresAt > Date.now()) {
                 // Transient refresh failure with a still-valid token: use it.
                 return session;
@@ -463,7 +486,20 @@ export class TokenManager {
         }
         const attempted = current ?? session;
         this.attempted = attempted;
+        // issue #1588：发起刷新前记下登出代次。刷新是一次网络往返（几百 ms 到数秒），期间用户
+        // 完全可能点了登出；登出只删存储、不等也不作废在途刷新，所以这里必须自己确认这期间
+        // 没发生过登出——否则刷新结果会把刚登出的账号重新写回磁盘。
+        const generationAtStart = this.generation;
         const next = await this.options.refresh(attempted);
+        // 代次变了 = 这期间登出过。整份丢弃：不落盘，也不把会话交回给调用方。
+        //
+        // 为什么用代次而不是「重读 store 看账号还在不在」：登录与刷新走的是**同一个**
+        // saveAccountSession，重读只能看到「现在有没有」，看不到「这期间删过又建过」；而且
+        // 把判据放在 store 层会连首次登录一起拒掉（空 store 里 entry 本来就是 undefined）。
+        if (this.generation !== generationAtStart) {
+            throw new LlmError(`dsh-plugin-subscriptions: logged out of ${this.options.displayName}`
+                + ' while a token refresh was in flight; log in again via Settings → Subscriptions', 'MISSING_CREDENTIAL');
+        }
         await this.options.save(next);
         return next;
     }

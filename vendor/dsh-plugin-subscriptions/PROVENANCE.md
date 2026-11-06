@@ -8,7 +8,7 @@
 | 发行版 | npm `dsh-plugin-subscriptions@0.9.12`（tarball shasum `a3aff899f615cec19f56b4bf11026a6cbf696382`，integrity `sha512-OHW6LsNjmfQ7gFZ734Lbz9iVtrPeWAaQz2sAzSezNDgyNGpEBzvLufGhzwffh1VgWz2TW8AMJ/JpgBec5Lscrg==`） |
 | 上游 gitHead | `b8023110864494acefc6f5963c2a197d85dda20c`（package.json 的 `gitHead` 字段；无对应 tag 时以此为准） |
 | 许可 | MIT（原文见本目录 `LICENSE`，随快照分发，见下「MIT 许可原文保留位置」） |
-| 解包体积 | 上游 npm 包 2,063,168 B / 143 文件；本目录裁掉源映射与类型声明后 **1,390,871 B / 68 文件**（见差异 #4） |
+| 解包体积 | 上游 npm 包 2,063,168 B / 143 文件；本目录裁掉源映射与类型声明后 **1,401,116 B / 70 文件**（见差异 #4） |
 | 定位 | 把 ChatGPT(Codex)/Claude/Grok/Copilot 订阅当 LLM provider；OAuth 在 Settings → Subscriptions |
 
 ## 为什么 vendor（而不是直接依赖 npm 版本）
@@ -37,8 +37,9 @@
 | 11 | `lib/translate/sse.js`、`lib/index.js` | **SSE 边界回归修（issue #1309）**：① `dispatch()` 对「无 `data:` 行的帧」改为**不派发**（只清 event 名缓冲），符合 WHATWG「dispatch the event」；② `MAX_PENDING_CHARS` 的判据从「扫描换行前量本次 read」改为「扫描后量**尚未闭合的那一帧**」（`pending` + 已消费的 `dataLines` 之和），错误文案同步改为指名帧长度。两份打包副本同步改 | ① #1284 的修法让 `event: ping\n\n` 这类保活帧变成 `{ data: '' }`，三条 wire 的 `JSON.parse('')` 直接抛 `MALFORMED_RESPONSE` —— 一条心跳打掉整条 chat 流；② 该常量的推导（见 sse.js 头注）依据的是「**一个**合法帧能有多大」，而判据量的是「这次 read 带来多少字节」：一次 read 送 9.4 MiB 的 943,719 个完整小帧会被拒（错误文案还说是「没有换行」，与输入不符），同样的字节按 64 KiB 分片则全过。判据见 `scripts/subs-sse-limits.test.mjs`（4 条正控 + 分片一致性 + 2 条负控） |
 | 12 | `lib/translate/sse.js`、`lib/index.js` | **SSE 上限判据补到派发口（issue #1340）**：`dispatch()` 内新增「本帧已累计字符数」判据——帧变成事件的唯一出口就在此处，超限即失败关闭、不产出事件；扫描后的「未闭合帧」判据保留，两条分工明确（闭合帧由 `dispatch()` 判，未闭合帧由扫描后判据判）。两份打包副本同步改 | #1309 ② 把上限挪到扫描之后，但只量了「未闭合的帧」。扫描会把已闭合的帧就地派发，于是「一次 read 送来完整帧」走派发路径，长度判据根本没机会看到它：9.4 MiB 单帧直接进 `JSON.parse`（9,437,184 字符），而同样的字节按 64 KiB 分块则被拒。同一份字节、同一个帧、两种结论——上限仍是「网络分片形状」的属性，只是方向反了。判据见 `scripts/subs-sse-limits.test.mjs`（3 条正控 + 1 条负控） |
 | 13 | `lib/http.js`、`lib/index.js` | **代理用户名优先级修（issue #1341）**：`proxySetConfig` 把 userinfo 的账号提到与密码同一条规则——URL 带 userinfo 且传入的 username **未被改动**（等于已存值，即设置对话框的预填）时，userinfo 胜出；用户显式改过则仍以显式输入为准。两份打包副本同步改 | #1308 只修了密码半区，用户名半区仍让位给显式输入。而设置对话框**总是**发送预填的 username（`lib/client.js` 从已存配置预填、无条件提交），于是粘贴 `http://alice:NEWPASS@host/` 实际生效 `bob:NEWPASS`——旧账号配新密码，凭据被拆到两个账号上，视图仍显示 `bob`、`passwordSet` 仍 true、无任何诊断；认证失败时用户只看到 407，无从判断是账号还是密码错。判据见 `scripts/subs-proxy-secrets.test.mjs`（3 条正控 + 1 条负控） |
+| 14 | `lib/providers/common.js`、`lib/index.js` | **登出与在途刷新竞态修（issue #1588）**：① `TokenManager` 新增 `generation` 代次与 `invalidate()`；`doRefresh` 在发起刷新前记下代次、落盘前再比一次，变了就抛 `MISSING_CREDENTIAL` 且**不落盘、不返回会话**；`session()` 的 catch 里 `MISSING_CREDENTIAL` 优先于「transient 失败但旧 token 仍有效就沿用」的兜底。② `AccountTokenManager` 新增 `invalidate(account)`（按 manager 去重，只作废已存在的缓存项）。③ `SubscriptionsAuthController` 新增 `invalidateTokens` 回调，`logout()` 在 `deleteAccountSession` **之前**调用它。两份打包副本同步改 | 登出只删存储、不等也不作废在途刷新。刷新是一次网络往返（几百 ms 到数秒），期间用户点登出就会撞上：刷新返回后无条件 `save(next)`，把刚登出的账号连**新的** access/refresh token 一起写回磁盘，下一次 `status` 轮询又列出来；因 refresh token 已轮换，这份残留是**可用的**。判据取代次而不是「重读 store 看条目在不在」：登录与刷新走同一个 `saveAccountSession`，重读只能看到「现在有没有」、看不到「这期间删过又建过」，且把判据放在 store 层会把首次登录一起拒掉（空 store 里 entry 本来就是 undefined） |
 
-**未改动**：`lib/` 下运行时代码**除上表第 5、6、8、9、10、11、12、13 条所列代理面、SSE 面、宿主样式面与命令标题 locale 外**逐字节保持上游（仅另删上表第 4 条的 `.map` / `.d.ts`）（含 provider 实现、OAuth 流程、token 存储路径 `~/.dsh/plugins/subscriptions/auth.json` 与其 0600 权限）、`cordis.patch.yml`、`README.md`、`LICENSE`。
+**未改动**：`lib/` 下运行时代码**除上表第 5、6、8、9、10、11、12、13、14 条所列代理面、SSE 面、宿主样式面、命令标题 locale 与登出竞态面外**逐字节保持上游（仅另删上表第 4 条的 `.map` / `.d.ts`）（含 provider 实现、OAuth 流程、token 存储路径 `~/.dsh/plugins/subscriptions/auth.json` 与其 0600 权限）、`cordis.patch.yml`、`README.md`、`LICENSE`。
 
 ## 我们删了什么、为什么
 

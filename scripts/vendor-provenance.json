@@ -181,8 +181,8 @@
           "bytes": 23875
         },
         "lib/index.js": {
-          "sha256": "d710861a693d3b0c2c12833435f8dc24083f5b9ec66b30b45e4c8f0ae0b1c249",
-          "bytes": 450461
+          "sha256": "2768c3a6f25eececa2b8735a2583eeabdb11bcbb9b3dd39457dc608afb4fa931",
+          "bytes": 451926
         },
         "lib/model-defaults.js": {
           "sha256": "3f7b108cf74e9b558e5e8231286c3b0432c3b7915a53c48cf06ce2bf84e61cff",
@@ -229,8 +229,8 @@
           "bytes": 45038
         },
         "lib/providers/common.js": {
-          "sha256": "f256979a111794d72205a46a293118c09917f325cea58f8ecd84916a6804495a",
-          "bytes": 35773
+          "sha256": "9c7065285144fe19e8673c0acdc9f735a13fae9f8b9a40d2057c632ed11ce63c",
+          "bytes": 38465
         },
         "lib/providers/copilot.js": {
           "sha256": "dc7eaa891d8b8a8f358e574e48e1dfccda56b4f5a97d5fc9824c9e39626647d9",
@@ -315,6 +315,14 @@
         "package.json": {
           "sha256": "24c1f29839918892856a4f402c1c8839efcd2fc44339d9b6bd242f35bb9cfcf8",
           "bytes": 1553
+        },
+        "test/_shape-probe.mjs": {
+          "sha256": "ecfb43ce2b151f5e028f048a8ead1deaabc9e5d014eb8b69bec0b537edd01cc2",
+          "bytes": 570
+        },
+        "test/logout-inflight-refresh.test.mjs": {
+          "sha256": "1c0e4b2a83192309f738aa08f0e971b0cd50275b9b3d0a49bb4b9b3a303343d1",
+          "bytes": 5518
         }
       }
     }
@@ -457,8 +465,8 @@
       "bytes": 23875
     },
     "lib/index.js": {
-      "sha256": "d710861a693d3b0c2c12833435f8dc24083f5b9ec66b30b45e4c8f0ae0b1c249",
-      "bytes": 450461
+      "sha256": "2768c3a6f25eececa2b8735a2583eeabdb11bcbb9b3dd39457dc608afb4fa931",
+      "bytes": 451926
     },
     "lib/model-defaults.js": {
       "sha256": "3f7b108cf74e9b558e5e8231286c3b0432c3b7915a53c48cf06ce2bf84e61cff",
@@ -505,8 +513,8 @@
       "bytes": 45038
     },
     "lib/providers/common.js": {
-      "sha256": "f256979a111794d72205a46a293118c09917f325cea58f8ecd84916a6804495a",
-      "bytes": 35773
+      "sha256": "9c7065285144fe19e8673c0acdc9f735a13fae9f8b9a40d2057c632ed11ce63c",
+      "bytes": 38465
     },
     "lib/providers/copilot.js": {
       "sha256": "dc7eaa891d8b8a8f358e574e48e1dfccda56b4f5a97d5fc9824c9e39626647d9",
@@ -591,6 +599,14 @@
     "package.json": {
       "sha256": "24c1f29839918892856a4f402c1c8839efcd2fc44339d9b6bd242f35bb9cfcf8",
       "bytes": 1553
+    },
+    "test/_shape-probe.mjs": {
+      "sha256": "ecfb43ce2b151f5e028f048a8ead1deaabc9e5d014eb8b69bec0b537edd01cc2",
+      "bytes": 570
+    },
+    "test/logout-inflight-refresh.test.mjs": {
+      "sha256": "1c0e4b2a83192309f738aa08f0e971b0cd50275b9b3d0a49bb4b9b3a303343d1",
+      "bytes": 5518
     }
   }
 }
