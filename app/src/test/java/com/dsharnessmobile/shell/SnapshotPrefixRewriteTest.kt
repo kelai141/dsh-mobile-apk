@@ -156,7 +156,14 @@ class SnapshotPrefixRewriteTest {
       return
     }
     val result = SnapshotPrefixRewrite.runOnce(files, usr, "1.0.0", pkg, "fp-link")
-    assertTrue("软链本身不得被改写（改写范围不可控）", link.toPath().toFile().readText().contains(usr0))
+    // 断言对象必须是「链接本身」而不是「经链接读到的内容」：真身 real-shim 就是应当被改写的普通文件，
+    // 经链接读内容只能得到改写后的字节，永远不含 usr0 —— 旧写法自相矛盾（与下面 rewritten==1 互斥）。
+    assertTrue("软链必须仍然是软链（不得被替换成普通文件）", java.nio.file.Files.isSymbolicLink(link.toPath()))
+    assertEquals(
+      "软链的目标必须原样保留（不得被改指到别的路径）",
+      target.toPath().toAbsolutePath(),
+      java.nio.file.Files.readSymbolicLink(link.toPath()).toAbsolutePath(),
+    )
     assertEquals("只有普通文件真身被改写", 1, result.rewritten)
   }
 }
