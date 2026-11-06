@@ -24,11 +24,10 @@ import { ENV_MARKER as PTC_ENV_MARKER, LAUNCH_MARKER as PTC_LAUNCH_MARKER, asser
 import { PI_STREAMING_FILES, planPiStreaming } from './pi-upstream-streaming-020.mjs'
 import { MIMO_PI_FILE, planMimoThinking } from './mimo-thinking-toggle-056.mjs'
 import { REASONING_FILES, planReasoning } from './data/reasoning-envelope-1304.mjs'
-import { CLIENT_SCAN_MARKER, GATEWAY_CLIENT_MARKER, TYPERT_SCAN_MARKER, planClientRegistryScan, planTypertRegistryScan } from './data/registry-scan-c4.mjs'
+import { TYPERT_SCAN_MARKER, planTypertRegistryScan } from './data/registry-scan-c4.mjs'
 import { CLIENT_INDEX_LOADER_BARRIER_MARKER, planClientIndexLoaderBarrier } from './data/client-index-loader-barrier.mjs'
 import { resolveEnginePatchFile } from './resolve-engine-patch-target.mjs'
 import { hasSidebarReorder, patchSidebarReorder } from './data/sidebar-bubble-reorder.mjs'
-import { hasSidebarKeepWide, patchSidebarKeepWide } from './data/sidebar-keep-wide-B2.mjs'
 import { hasInspectorWorkerExposeInternals, patchInspectorWorkerExposeInternals } from './data/inspector-worker-expose-internals-472.mjs'
 import { hasProfileLinkSkip, patchProfileLinkSkip } from './data/profile-link-skip-PL1.mjs'
 import { hasTerminalShellCandidates, patchTerminalShellCandidates } from './data/terminal-shell-candidates-T1.mjs'
@@ -244,11 +243,8 @@ const IMPLS = {
   },
 
   // 手机形态收起态仍挂载宽内容：把 260 元素的挂载从手势帧移走（0.14.8 手势实测）。
-  'sidebar-keep-wide-B2': {
-    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar/lib/client.js',
-    check: hasSidebarKeepWide,
-    apply: patchSidebarKeepWide,
-  },
+  // sidebar-keep-wide-B2 已退役：0.2.2-rc.1 上游 SidebarRoot 自己把 drawer 纳入 wide 判据与内联宽度判据，
+  // 两条锚点的目标态均由上游提供。退役契约见 tests/sidebar-keep-wide-B2-retired.test.mjs。
 
   // issue #472：inspector 的 Worker 用 execArgv: [] 清空继承，丢掉了启动命令里的
   // --expose-internals；android-arm64 没有 require-builtin 预编译件，Worker 内必失败。
@@ -1413,11 +1409,11 @@ const IMPLS = {
     apply: (s) => {
       if (s.includes('dsh-mobile ptc argv heap via NODE_OPTIONS (L1)')) return s
       const OLD_EXEC = [
-        "\t\t\tconst executable = await this.ctx.subprocess.resolveExecutable(this.config.launch.executable, void 0, signal);",
-        "\t\t\tif (settled) return await result.promise;",
+        "\t\tconst executable = await this.ctx.subprocess.resolveExecutable(this.config.launch.executable, void 0, this.controller.signal);",
+        "\t\tif (this.closed) return;",
       ].join('\n')
       const NEW_EXEC = [
-        "\t\t\tconst executable = await this.ctx.subprocess.resolveExecutable(this.config.launch.executable, void 0, signal);",
+        "\t\tconst executable = await this.ctx.subprocess.resolveExecutable(this.config.launch.executable, void 0, this.controller.signal);",
         "\t\t\t// dsh-mobile ptc argv heap via NODE_OPTIONS (L1): fail loud on an unusable executable.",
         "\t\t\t// Android falls back to the system linker when direct exec of an app-data ELF is denied, and",
         "\t\t\t// process.execPath is then polluted with that linker path; a linker never loads Node, so the",
@@ -1425,35 +1421,35 @@ const IMPLS = {
         "\t\t\t// here instead of guessing a replacement path.",
         "\t\t\tif (typeof executable !== 'string' || !isAbsolute(executable)) {",
         "\t\t\t  throw new Error('ptc-runtime-node: resolved node executable is not an absolute path (' + String(executable) + '); set ptc-runtime.launch.executable to an absolute node binary or wrapper path');",
-        "\t\t\t}",
+        "\t\t}",
         "\t\t\tconst __dshMobileExecBase = executable.slice(executable.lastIndexOf('/') + 1);",
         "\t\t\tif (/^(?:ld\\.so(?:\\.[0-9]+)*|linker(?:64)?)$/.test(__dshMobileExecBase)) {",
         "\t\t\t  throw new Error('ptc-runtime-node: resolved node executable is the system dynamic linker (' + executable + '); set ptc-runtime.launch.executable to an absolute node binary or wrapper path, not a linker');",
-        "\t\t\t}",
-        "\t\t\tif (settled) return await result.promise;",
+        "\t\t}",
+        "\t\tif (this.closed) return;",
       ].join('\n')
       const OLD_ARGV = [
-"\t\t\tconst argv = [",
-"\t\t\t\texecutable,",
-"\t\t\t\t...packaged ? [] : [heapFlag],",
-"\t\t\t\t...bootstrapArgs(this.ctx.fs, this.config.launch, this.config.maxMessageBytes)",
-"\t\t\t];",
+"\t\tconst argv = [",
+"\t\t\texecutable,",
+"\t\t\t...packaged ? [] : [heapFlag],",
+"\t\t\t...bootstrapArgs(this.ctx.fs, this.config.launch, this.config.maxMessageBytes, this.retainsState)",
+"\t\t];",
       ].join('\n')
       const NEW_ARGV = [
 "\t\t\t// dsh-mobile ptc argv heap via NODE_OPTIONS (L1): the heap flag must never sit at argv[1].",
 "\t\t\t// The system linker (used when direct exec of an app-data ELF is denied) treats the first",
 "\t\t\t// non-option argument as the program path, so a leading --max-old-space-size would be read",
 "\t\t\t// as that path and the child would die before Node loads. It travels via env instead.",
-"\t\t\tconst argv = [",
-"\t\t\t\texecutable,",
-"\t\t\t\t...bootstrapArgs(this.ctx.fs, this.config.launch, this.config.maxMessageBytes)",
-"\t\t\t];",
+"\t\tconst argv = [",
+"\t\t\texecutable,",
+"\t\t\t...bootstrapArgs(this.ctx.fs, this.config.launch, this.config.maxMessageBytes, this.retainsState)",
+"\t\t];",
       ].join('\n')
       const OLD_ENV = [
-"\t\t\tif (packaged) {",
-"\t\t\t\tenv.DSH_PTC_RUNTIME_NODE = \"1\";",
-"\t\t\t\tenv.NODE_OPTIONS = heapFlag;",
-"\t\t\t}",
+"\t\tif (packaged) {",
+"\t\t\tenv.DSH_PTC_RUNTIME_NODE = \"1\";",
+"\t\t\tenv.NODE_OPTIONS = heapFlag;",
+"\t\t}",
       ].join('\n')
       const NEW_ENV = [
 "\t\t\t// dsh-mobile ptc argv heap via NODE_OPTIONS (L1): set for every spawn, not only packaged runs,",
@@ -1467,9 +1463,9 @@ const IMPLS = {
 "\t\t\t// engine-level NODE_OPTIONS -- which the child never saw before either -- is now overwritten",
 "\t\t\t// by this value instead of removed.",
 "\t\t\tenv.NODE_OPTIONS = heapFlag;",
-"\t\t\tif (packaged) {",
-"\t\t\t\tenv.DSH_PTC_RUNTIME_NODE = \"1\";",
-"\t\t\t}",
+"\t\tif (packaged) {",
+"\t\t\tenv.DSH_PTC_RUNTIME_NODE = \"1\";",
+"\t\t}",
       ].join('\n')
       for (const pair of [[OLD_EXEC, 'executable 解析行'], [OLD_ARGV, 'argv 构造块'], [OLD_ENV, 'env 赋值块']]) {
         if (!s.includes(pair[0])) {
@@ -1614,22 +1610,22 @@ const IMPLS = {
         && s.includes('dshMobilePublishExclusive(')) return s
 
       // ① 站点：createIfAbsent 的 link 失败分支（原文失败即抛，无回退）。
-      const SITE_OLD = [
-        '\t\tif (createIfAbsent !== void 0) try {',
+                  const SITE_OLD = [
+        '\t\tif (options.createIfAbsent) try {',
         '\t\t\tawait linkFile(tempPath, absolutePath);',
         '\t\t} catch (error) {',
-        '\t\t\tawait throwGuardedCreateFailure(error, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget);',
+        '\t\t\tawait throwGuardedCreateFailure(error, absolutePath, displayPath, inspectPublicationTarget);',
         '\t\t}',
       ].join('\n')
       const SITE_NEW = [
-        '\t\tif (createIfAbsent !== void 0) try {',
+        '\t\tif (options.createIfAbsent) try {',
         '\t\t\tawait linkFile(tempPath, absolutePath);',
         '\t\t} catch (error) {',
         '\t\t\t/* dsh-mobile link->rename fallback (F8): Android private EACCES and shared-storage/FUSE ENOSYS. */',
         '\t\t\tif (!(error instanceof Error && "code" in error && (error.code === "EACCES" || error.code === "EPERM" || error.code === "ENOTSUP" || error.code === "ENOSYS"))) {',
-        '\t\t\t\tawait throwGuardedCreateFailure(error, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget);',
+        '\t\t\t\tawait throwGuardedCreateFailure(error, absolutePath, displayPath, inspectPublicationTarget);',
         '\t\t\t} else {',
-        '\t\t\t\tawait dshMobilePublishExclusive(tempPath, absolutePath, createIfAbsent.displayPath, inspectPublicationTarget, internals);',
+        '\t\t\t\tawait dshMobilePublishExclusive(tempPath, absolutePath, displayPath, inspectPublicationTarget, internals);',
         '\t\t\t}',
         '\t\t}',
       ].join('\n')
@@ -1899,7 +1895,7 @@ const IMPLS = {
     check: (s) => s.includes('dsh-mobile external draft addFiles seam (J1)'),
     apply: (s) => {
       if (s.includes('dsh-mobile external draft addFiles seam (J1)')) return s
-      const anchor = '\t\t\t/**\n\t\t\t* Restart one failed file upload.'
+      const anchor = '\t\t\t/**\n\t\t\t* Restart one failed file or image upload.'
       if (!s.includes(anchor)) throw new Error('external draft seam 锚点未命中：ui-conversation createDrafts 后续注释已变')
       const method = [
         '\t\t\t/** dsh-mobile external draft addFiles seam (J1): reuse the normal composer attachment path. */',
@@ -2333,7 +2329,7 @@ const IMPLS = {
       s = replaceOnce(s, ET_OLD, ET_NEW)
 
       // ⑦ writeText 的 replaceIfVersion 同病同治（实测 TOUCH/CHMOD/同字节 rename 三例同样被拒）。
-      const WT_OLD = '\t\t\t\tif (existing.version !== expected.version) throw new FsError(`cannot write "${target.displayPath}": file changed since it was read`, "FS_STALE_VERSION");'
+      const WT_OLD = '\t\t\tif (existing.version !== expected.version) throw new FsError(`cannot write "${target.displayPath}": file changed since it was read`, "FS_STALE_VERSION");'
       const WT_NEW = [
         '\t\t\t\tif (existing.version !== expected.version',
         '\t\t\t\t\t&& !(await this.dshMobileContentUnchanged(target.targetKey, target.targetKey))) {',
@@ -2345,7 +2341,7 @@ const IMPLS = {
       s = replaceOnce(s, WT_OLD, WT_NEW)
 
       // ⑧ 写成功后刷新摘要（edit 与 write 都经 writeFileAtomic 落盘）。
-      const ET_TAIL_OLD = '\t\t\tawait writeFileAtomic(target.targetKey, content, existing.mode, signal, this.internals);'
+      const ET_TAIL_OLD = '\t\t\tawait writeFileAtomic(target.targetKey, content, existing.mode, signal, this.internals, { displayPath: target.displayPath });'
       const ET_TAIL_NEW = [
         ET_TAIL_OLD,
         '\t\t\t/* dsh-mobile digest CAS fallback (B): the target now holds the bytes just written. */',
@@ -2354,7 +2350,7 @@ const IMPLS = {
       if (!s.includes(ET_TAIL_OLD)) throw new Error('fs-local-digest-guard 锚点未命中：editText 落盘行')
       s = replaceOnce(s, ET_TAIL_OLD, ET_TAIL_NEW)
 
-      const WT_TAIL_OLD = '\t\t\tawait writeFileAtomic(target.targetKey, content, existing?.mode, signal, this.internals, expected?.kind === "createIfAbsent" ? { displayPath: target.displayPath } : void 0);'
+      const WT_TAIL_OLD = '			await writeFileAtomic(target.targetKey, content, existing?.mode, signal, this.internals, {\n				displayPath: target.displayPath,\n				createIfAbsent: expected?.kind === "createIfAbsent"\n			});'
       const WT_TAIL_NEW = [
         WT_TAIL_OLD,
         '\t\t\t/* dsh-mobile digest CAS fallback (B): remember the bytes now on disk. */',
@@ -2389,7 +2385,9 @@ const IMPLS = {
         + '    // dsh-mobile tool_call guard (G2): ids of tool calls dropped from this request.\n'
         + '    const droppedToolCallIds = new Set();\n'
         + '    const normalizeToolCallId = (id) => {'
-      const MAP_OLD = [
+      // pi-ai 1.3.0 official streaming patch inserts the Gemini thought_signature passthrough
+// lines inside this block; this patch runs after it, so they are part of the anchor.
+const MAP_OLD = [
         '            if (toolCalls.length > 0) {',
         '                assistantMsg.tool_calls = toolCalls.map((tc) => {',
         '                    const customInputProperty = options?.grammarToolInputProperties?.get(tc.name);',
@@ -2403,6 +2401,9 @@ const IMPLS = {
         '                            },',
         '                        };',
         '                    }',
+        '                    const geminiThoughtSignature = tc.thoughtSignature && !parseLegacyEncryptedReasoningDetail(tc.thoughtSignature)',
+        '                        ? tc.thoughtSignature',
+        '                        : undefined;',
         '                    return {',
         '                        id: tc.id,',
         '                        type: "function",',
@@ -2410,6 +2411,7 @@ const IMPLS = {
         '                            name: tc.name,',
         '                            arguments: JSON.stringify(tc.arguments),',
         '                        },',
+        '                        ...(geminiThoughtSignature && { extra_content: { google: { thought_signature: geminiThoughtSignature } } }),',
         '                    };',
         '                });',
         '            }',
@@ -2440,6 +2442,12 @@ const IMPLS = {
         '                            };',
         '                        }',
         '                        const serializedArguments = JSON.stringify(tc.arguments ?? {});',
+        '                        // 官方 streaming 补丁的 hunk#2 在这里声明 geminiThoughtSignature，下面 extra_content 要用它。',
+        '                        // MAP_OLD 把它连同上下文一起匹配掉了，MAP_NEW 必须原样写回——否则 G2 施加后',
+        '                        // 该标识符未定义（运行期 ReferenceError；check 轮表现为 hunk#2 产物凭空消失）。',
+        '                        const geminiThoughtSignature = tc.thoughtSignature && !parseLegacyEncryptedReasoningDetail(tc.thoughtSignature)',
+        '                            ? tc.thoughtSignature',
+        '                            : undefined;',
         '                        return {',
         '                            id: tc.id,',
         '                            type: "function",',
@@ -2447,6 +2455,7 @@ const IMPLS = {
         '                                name: tc.name,',
         '                                arguments: typeof serializedArguments === "string" && serializedArguments.length > 0 ? serializedArguments : "{}",',
         '                            },',
+        '                            ...(geminiThoughtSignature && { extra_content: { google: { thought_signature: geminiThoughtSignature } } }),',
         '                        };',
         '                    });',
         '                }',
@@ -2806,12 +2815,8 @@ const IMPLS = {
   // 回收——设备上 09-12 23:07 之后零新增条目，而 09-14 三次快照刷新换过引擎树，换掉的模块每次冷启
   // 都重新编译。修法：入口 bin.js 周期 flush（40 s 首刷 + 5 min）并在 exit 兜底；不注册信号处理，
   // 不改变任何命令的退出语义。flush 是同步调用，失败按 Node 契约静默忽略。
-  'client-registry-scan-C4': {
-    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js',
-    scope: 'engine',
-    check: (s) => s.includes(CLIENT_SCAN_MARKER) && s.includes(GATEWAY_CLIENT_MARKER) && s.includes('batchEntries().get(entryName)') && s.includes('located.manifest ??'),
-    apply: planClientRegistryScan,
-  },
+  // client-registry-scan-C4 已退役：0.2.2-rc.1 上游 flush 自己先建 entriesByName 表再逐项 processOne(entryName, entries)，
+  // 「一批只扫一次 loader」由上游提供。退役契约见 tests/client-registry-scan-C4-retired.test.mjs。
   'client-index-loader-barrier-G2': {
     file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-frontend-static/lib/index.js',
     scope: 'engine',
@@ -2918,15 +2923,15 @@ const IMPLS = {
     apply: (s) => {
       if (s.includes('dsh-mobile file-upload resolver replace (R1)')) return s
       const OLD = [
-        '\t\t\tif (this.agentResolver !== void 0) throw new Error("file-upload: Agent resolver is already registered");',
-        '\t\t\tthis.agentResolver = resolve;',
+        '\t\t\tif (this.agentResolution.resolver !== void 0) throw new Error("file-upload: Agent resolver is already registered");',
+        '\t\t\tthis.agentResolution.resolver = resolve;',
       ].join('\n')
       const NEW = [
         '\t\t\t/* dsh-mobile file-upload resolver replace (R1): cordis runs the new plugin body before',
         "\t\t\t * disposing the previous fiber's effects, so a restart re-registers while the old resolver",
         '\t\t\t * is still installed. Replace in the single slot instead of refusing; the identity-guarded',
         "\t\t\t * disposer below keeps the previous fiber's disposer from clearing this registration. */",
-        '\t\t\tthis.agentResolver = resolve;',
+        '\t\t\tthis.agentResolution.resolver = resolve;',
       ].join('\n')
       if (!s.includes(OLD)) {
         throw new Error('file-upload 锚点未命中：registerAgentResolver 的 already-registered 守卫——引擎升级后请人工核对 dsh-client-file-upload 构建产物')

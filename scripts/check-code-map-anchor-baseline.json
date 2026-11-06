@@ -2959,9 +2959,6 @@
     "scripts/check-browser-syntax-floor.mjs:536": [
       "} else {"
     ],
-    "scripts/check-browser-syntax-floor.mjs:658": [
-      "'createSourceFile=' + (typeof ts.createSourceFile === 'function')"
-    ],
     "scripts/check-gate-skips.mjs:197": [
       "const resolveRepoPath = (rel) => {"
     ],
@@ -3027,9 +3024,6 @@
     ],
     "scripts/make-snapshot.sh:8": [
       "SNAP_PKG_ROOT=\"${DSH_SNAPSHOT_PKG_ROOT:-/data/user/0/com.dsharnessmobile.shell}\""
-    ],
-    "scripts/patches/data/client-index-loader-barrier.mjs:3": [
-      "export function planClientIndexLoaderBarrier(source) {"
     ],
     "scripts/patches/data/undo-safe-transaction-snippet.mjs:1": [
       "// dsh-mobile safe mode transaction (S2) with CAS recovery failover, web-store resolver and factory-bundle filter (S5)."
@@ -3240,6 +3234,12 @@
     ],
     "verify-webview-015.mjs:97": [
       ""
+    ],
+    "scripts/patches/data/client-index-loader-barrier.mjs:17": [
+      "export function planClientIndexLoaderBarrier(source) {"
+    ],
+    "scripts/check-browser-syntax-floor.mjs:806": [
+      "'createSourceFile=' + (typeof ts.createSourceFile === 'function')"
     ]
   },
   "symbols": {
@@ -3386,6 +3386,7 @@
     "BrowserHost.kt#showPayload@bfaa29a3": true,
     "keyboard-boundary.ts#KeyboardBoundary@196bb4bd": true,
     "keyboard-boundary.ts#KeyboardBoundary@4a381197": true,
-    "keyboard-boundary.ts#KeyboardBoundary@e3a76f2e": true
+    "keyboard-boundary.ts#KeyboardBoundary@e3a76f2e": true,
+    "scripts/check-browser-syntax-floor.mjs#checkChainWiring@a979d3e8": true
   }
 }

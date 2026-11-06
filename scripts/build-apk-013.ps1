@@ -454,6 +454,12 @@ foreach ($abi in @('arm64', 'x86_64')) {
         Write-Host "== 浏览器语法下限门禁（$abi）=="
         node (Join-Path $Root "scripts\check-browser-syntax-floor.mjs") --scan (Join-Path $work "snap-final2.tar.xz") 2>&1
         if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "发往浏览器的 bundle 携带未降级的 ES2022 语法（老内核白屏）"; continue }
+        # 同一条产物的**第二个方向**的证据（0.2.2-rc.1 适配补）：上面那门的判据 2 只证明「不低于
+        # esbuild 的口径」，而 esbuild 在 chrome87 下不降类字段（门自己标注过这个边界）。这里用真解析器
+        # 按 ES2021 档位逐文件 parse——解析失败即老内核解析期抛 SyntaxError、整模块一行不执行。
+        Write-Host "== 浏览器 ES2021 可解析判据（$abi）=="
+        node (Join-Path $Root "scripts\check-browser-parse-floor.mjs") --scan (Join-Path $work "snap-final2.tar.xz") 2>&1
+        if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "发往浏览器的 bundle 在 ES2021 档位下解析失败（老内核 SyntaxError）"; continue }
         # 注入源真源（2026-11-01）：降级副本被造出来了，但注入时用的是原始源——历史形态（PR #1272）。
         # 上面那道 --scan 判的是**产物内容是否合规**；当原始源恰好也合规时，两份字节都能过扫描，
         # 「注入源选错」在内容级看不出来。这里判的是**注入的是哪一份字节**：tar 内成员 sha256 必须
@@ -717,3 +723,9 @@ if ($LASTEXITCODE -ne 0) { throw "vendored 目录与 scripts/vendor-provenance.j
 Write-Host "== 退役插件残留引用门禁 =="
 node (Join-Path $Root "scripts\check-retired-plugins.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { throw "构建/发布入口仍引用已退役插件，拒绝交付" }
+# 快照 node 下限（0.2.2-rc.1 适配）：引擎首次声明 engines.node ">=24.9.0"，而快照 node 由 Termux
+# nodejs-lts 决定、仓内不钉版本号 ⇒ 必须把「声明下限 vs 快照实测」绑成判据。放在链尾与 vendored 那条
+# 同因：只读仓库文件（contract + 取证 JSON + base 归档字节），与 ABI 无关，跑一次即可；但必须在发版之前。
+Write-Host "== 快照 node 版本下限门禁 =="
+node (Join-Path $Root "scripts\check-snapshot-node-floor.mjs") 2>&1
+if ($LASTEXITCODE -ne 0) { throw "快照 node 低于引擎声明下限，拒绝交付（取证见 docs/adapt/022rc1-node-floor.md）" }

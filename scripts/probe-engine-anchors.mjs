@@ -213,6 +213,26 @@ for (const p of [...targets, ...retiredTargets]) {
   } catch (error) { problems.push(p.id + ': ' + error.message) }
 }
 
+/* 夹具伴随包（registry.fixtureCompanions[]）：补丁**不改**它，但补丁测试要对它的真产物断言。
+ * 为什么需要这个机制：I1 的判别力有一半在消费方 —— 上游 dsh-compaction-image-offload 的
+ * offloadOldestImages 只认 IMAGE_OFFLOAD_REQUIRED_CODE，光验 dsh-llm 侧「算了几个」证明不了
+ * 「谁真正去淘汰」。旧做法是让测试直接读一个硬编码目录，包一旦不再被任何补丁命中就静默缺席，
+ * 而测试会以「夹具缺席」报错 —— 看起来像环境问题，实际是夹具供给面缺一条声明。
+ * 与 retired[] 同理（见上方注释）：守卫测试必须直接对上游真产物断言，不能让夹具停供。
+ * 这里显式声明「哪个包的哪些文件是某条补丁测试的输入」，抓取时走与补丁目标完全相同的
+ * 归属解析、tgz 缓存与哈希校验，因此不会引入第二套口径。 */
+const companions = Array.isArray(registry.fixtureCompanions) ? registry.fixtureCompanions : []
+for (const c of companions) {
+  if (only && !(c.patchIds ?? []).some((id) => only.includes(id))) continue
+  try {
+    if (typeof c.package !== 'string' || !c.package.startsWith('@')) throw new Error('fixtureCompanions.package 必须是包名')
+    const files = Array.isArray(c.files) && c.files.length ? c.files : ['lib/index.js', 'package.json']
+    const own = owners.get('node_modules/' + c.package)
+    if (!own) throw new Error('fixtureCompanions 的包不在本次 overlay 里: ' + c.package)
+    for (const inner of files) materialize(NM_PREFIX + 'node_modules/' + c.package + '/' + inner, (c.patchIds ?? [])[0] ?? 'fixture-companion')
+  } catch (error) { problems.push('fixtureCompanions ' + (c.package ?? '?') + ': ' + error.message) }
+}
+
 if (problems.length) {
   console.error('探针前置未满足（不跑命中矩阵，避免半张表被当成全表）:')
   for (const m of problems) console.error('  - ' + m)

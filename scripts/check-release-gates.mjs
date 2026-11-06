@@ -296,6 +296,9 @@ const GATES = [
   // 输入全在仓库内（不读网络、不需要快照），故 ciApk/ciCoord 皆 true。
   { script: 'check-vendor-provenance.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
   { script: 'check-retired-plugins.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
+  // 0.2.2-rc.1 适配：引擎首次声明 engines.node>=24.9.0，快照 node 由 Termux nodejs-lts 决定、
+  // 仓内不钉版本 ⇒ 把「声明下限 vs 快照实测」绑成判据（取证在 scripts/snapshot-config/snapshot-runtime.json）。
+  { script: 'check-snapshot-node-floor.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
 ]
 const CI_COORD_GATES = GATES.filter((g) => g.ciCoord).map((g) => g.script)
 const CI_APK_GATES = GATES.filter((g) => g.ciApk).map((g) => g.script)
@@ -333,6 +336,9 @@ const REQUIRE_CAPABLE_GATES = new Set([
   'check-engine-heap-floor.mjs',
   'check-i18n-parity.mjs',
   'check-boot-budget.mjs',
+  // 0.2.2-rc.1 适配新增：工程侧 LFS 指针在普通档记 SKIP 计数，--require 档必须判红
+  // （发布链不得 SKIP：要么基座归档在场并逐字节核过，要么不发版）。
+  'check-snapshot-node-floor.mjs',
 ])
 const RELEASE_EXCLUDED = GATES.filter((g) => g.releaseSink === false)
 /**

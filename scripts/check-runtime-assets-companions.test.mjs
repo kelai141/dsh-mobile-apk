@@ -19,6 +19,11 @@ function fixture(change) {
   const write = (path, data) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, data) }
   cpSync(join(scripts, 'patches'), join(temporaryRoot, 'scripts/patches'), { recursive: true, filter: path => !path.includes(join('patches', 'tests')) })
   write(join(temporaryRoot, 'scripts/patches/registry.json'), JSON.stringify(registry))
+  // 补丁断言用的版本真源（engine-versions.mjs）在运行期读这两份合同文件：夹具少了它们，
+  // apply-patches 会在 import 阶段就 ENOENT —— 表现为「正控也红」，而不是任何一条补丁判据红。
+  // 复制真实合同而不是手写常量：手写会随抬 pin 漂移，正是本仓一直在防的那类假绿。
+  write(join(temporaryRoot, 'scripts/contract.json'), readFileSync(join(scripts, 'contract.json')))
+  write(join(temporaryRoot, 'scripts/snapshot-config/engine-overlay.json'), readFileSync(join(scripts, 'snapshot-config', 'engine-overlay.json')))
   for (const [file, kind] of [[PREVIEW_LOCAL, 'local'], [PREVIEW_PI, 'pi'], [PREVIEW_DEEPSEEK, 'deepseek']]) {
     const name = file.split('/').at(-3)
     write(join(stage, file), patchImageExpiry(patchRequestPreview(readFileSync(versionedFixture(name, 'lib/index.js'), 'utf8'), kind), kind))

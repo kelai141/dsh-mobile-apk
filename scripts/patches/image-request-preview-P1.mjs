@@ -1,4 +1,5 @@
 /** Keep originals local; model requests use deterministic, compressed previews. */
+import { ENGINE_BASELINE, PINNED_PI_AI, assertEngineBaseline } from './engine-versions.mjs'
 export const PREVIEW_MARKER = 'dsh-mobile compressed request preview (P1)'
 const ROOT = 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/'
 export const PREVIEW_LOCAL = ROOT + 'dsh-attachment-local/lib/index.js'
@@ -56,9 +57,12 @@ export function patchRequestPreview(source, kind) {
 export function planRequestPreview(read) {
   return [[PREVIEW_LOCAL, 'local'], [PREVIEW_PI, 'pi'], [PREVIEW_DEEPSEEK, 'deepseek']].map(([file, kind]) => {
     const manifest = JSON.parse(read(file.replace(/lib\/index\.js$/, 'package.json')))
-    if (manifest.name !== '@deepseek-ai/' + file.split('/').at(-3) || manifest.version !== '0.2.1-rc.3') {
-      throw new Error('P1 requires pinned attachment-local/llm-pi-ai/llm-deepseek@0.2.1-rc.3')
+    if (manifest.name !== '@deepseek-ai/' + file.split('/').at(-3)) {
+      throw new Error('P1 requires pinned attachment-local/llm-pi-ai/llm-deepseek@' + ENGINE_BASELINE)
     }
+    // 包身份正确 != 版本正确：上一代同名同包，锚点与预算语义都可能已经变了。
+    // 版本断言走 engine-versions.mjs 的单一真源（不再只比包名就放行）。
+    assertEngineBaseline(manifest, 'P1')
     const before = read(file)
     return { file, before, after: patchRequestPreview(before, kind) }
   })

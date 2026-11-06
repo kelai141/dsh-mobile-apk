@@ -35,12 +35,16 @@ const NEW = '\t\t\t/* ' + MARKER + ': 初态就有一行，输入框与「至少
 const ROW_INIT = 'const [models, setModels] = (0, react.useState)([{ id: "" }]);'
 const ADOPT_FILTER = 'models.filter((model) => textOf(model, "id").trim().length > 0)'
 
-/** 锚点二：采纳候选时的既有行索引。 */
-const ADOPT_OLD = '\t\t\t\tconst byId = new Map(models.map((model) => [textOf(model, "id"), model]));'
+/** 锚点二：CustomProviderCard 提交时把 models 写进 profile 的那一处。
+ * 0.2.2-rc.1 重锚：旧锚点 `const byId = new Map(models.map(...))` 在 0.2.2 里属于**另一个组件**
+ * （ModelListEditor 的候选采纳），而 CustomProviderCard 自己的 models 只在这里被写回 profile。
+ * 旧锚点在 0.2.1 能命中纯属两个组件当年长得像；指错组件等于补了个不生效的地方。
+ * 语义不变：占位空行不得进入写回的 profile。 */
+const ADOPT_OLD = '\t\t\t\t\t\tmodels: models.map((model) => ({ ...model }))'
 
-/** 替换二：占位空行不进采纳结果，否则模型 1 恒报「模型 ID 不能为空」。 */
-const ADOPT_NEW = '\t\t\t\t/* ' + MARKER + ': 占位空行不进采纳结果。 */\n'
-  + '\t\t\t\tconst byId = new Map(models.filter((model) => textOf(model, "id").trim().length > 0).map((model) => [textOf(model, "id"), model]));'
+/** 替换二：占位空行不进写回的 profile，否则模型 1 恒报「模型 ID 不能为空」。 */
+const ADOPT_NEW = '\t\t\t\t\t\t/* ' + MARKER + ': 占位空行不进写回的 profile。 */\n'
+  + '\t\t\t\t\t\tmodels: models.filter((model) => textOf(model, "id").trim().length > 0).map((model) => ({ ...model }))'
 
 /**
  * 补丁是否已施加。

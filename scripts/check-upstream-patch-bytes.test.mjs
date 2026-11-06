@@ -6,9 +6,12 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import { OFFICIAL_PI_PATCH_SHA256 } from './patches/pi-upstream-streaming-020.mjs'
+import { PINNED_PI_AI } from './patches/engine-versions.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const patch = 'scripts/patches/upstream/pi-ai-1.1.0.patch'
+// 补丁文件名跟着 overlay 的 pin 走：写死 1.1.0 会在抬 pin 后读旧文件，报「digest 不一致」而不是
+// 「测的对象不对」——那是最容易误判成字节被改写的一种假红。
+const patch = 'scripts/patches/upstream/pi-ai-' + PINNED_PI_AI + '.patch'
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 
 test('the official streaming patch retains its registered bytes', () => {
