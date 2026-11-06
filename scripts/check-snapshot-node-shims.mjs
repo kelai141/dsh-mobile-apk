@@ -140,7 +140,11 @@ const tarFace = (archive) => {
   let extractError = null
   // 只解压「列表里声明为普通文件」的成员：符号链接在 Windows 上解压需要额外特权（而它本来就已判红），
   // 缺席成员也不该让解压整段失败——存在性由列表判定，内容缺失在判据里会如实报 FAIL。
-  const wanted = [NODE_REL, ...SHIMS.map((s) => s.rel), ...SHIMS.map((s) => s.target)]
+  // 去重：`usr/bin/node` 既是 NODE_REL，又是若干 shim 的 exec 目标，同一成员会被列两次。
+  // GNU tar（Linux/CI）对**重复的成员参数**直接报 `Not found in archive` 并 exit 1，
+  // 而 bsdtar（Windows 自带）会静默接受 —— 于是同一份判据在 Windows 绿、在 Linux 红。
+  // 去重不改变「解压哪些成员」的语义，只是把重复项收成一个。
+  const wanted = [...new Set([NODE_REL, ...SHIMS.map((s) => s.rel), ...SHIMS.map((s) => s.target)])]
     .filter((rel) => entries.get(rel)?.kind === 'file')
   if (wanted.length > 0) {
     try {

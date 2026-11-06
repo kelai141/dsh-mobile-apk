@@ -22,8 +22,16 @@ class SnapshotPrefixRewriteTest {
   private val usr0 = "/data/user/0/$pkg/files/usr"
   private val usr10 = "/data/user/10/$pkg/files/usr"
 
+  /**
+   * 绝对路径的临时目录。
+   *
+   * 为什么必须 absoluteFile：`File("build/...")` 是**相对**路径，而符号链接的目标若也用相对路径
+   * 写入，POSIX 会把它解释成「相对于链接所在目录」——`usr/bin/pnpm -> usr/bin/real-shim` 于是解析成
+   * `usr/bin/usr/bin/real-shim`，链接悬空，[symlinkedShimsAreNotFollowed] 里读穿透的那一行会抛
+   * FileNotFoundException。Windows 上这条一直没暴露，是因为非开发者模式建不了符号链接、整个用例提前返回。
+   */
   private fun tempDir(tag: String): File {
-    val dir = File("build/prefix-rewrite-test/" + tag + "-" + System.nanoTime())
+    val dir = File("build/prefix-rewrite-test/" + tag + "-" + System.nanoTime()).absoluteFile
     dir.mkdirs()
     return dir
   }
