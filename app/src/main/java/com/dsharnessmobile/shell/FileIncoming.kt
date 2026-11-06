@@ -48,6 +48,27 @@ object FileIncoming {
   )
 
   /**
+   * 运行期白名单 = 编译期那三条 + **当前用户**的 primary 共享存储根（issue #1234）。
+   *
+   * 为什么不能只靠 `file:///storage/emulated/0/` 这条常量：多用户设备上 DSH 跑在 user 10 时，
+   * 真实共享存储是 `/storage/emulated/10/`，来件的 `file://` 路径不命中 user 0 那条前缀 ⇒
+   * 「无法添加外部工作区」。`/sdcard` 在多数 ROM 指向当前用户，但它不是所有 ROM 都成立，
+   * 且它解决不了「路径已经被改写成 user 0」的上游问题（见 AndroidBridge.resolvePickedPath）。
+   *
+   * 私有目录仍然**不在**白名单内（issue #1353 的判据不变）：这里只加共享存储那一面。
+   */
+  private fun safePrefixes(context: Context): List<String> {
+    val current = try {
+      android.os.Environment.getExternalStorageDirectory()?.absolutePath
+    } catch (_: Throwable) {
+      null
+    }
+    if (current.isNullOrBlank()) return SAFE_PREFIXES
+    val extra = "file://" + current.trimEnd('/') + "/"
+    return if (SAFE_PREFIXES.contains(extra)) SAFE_PREFIXES else SAFE_PREFIXES + extra
+  }
+
+  /**
    * 本应用自己 FileProvider 的 authority（issue #1567）。
    *
    * `AndroidManifest.xml` 里是 `${applicationId}.fileprovider`，applicationId 为
@@ -99,8 +120,9 @@ object FileIncoming {
       "content" -> acceptsContentAuthority(uri.authority, context.packageName)
       "file" -> {
         val p = uri.path ?: return null
-        SAFE_PREFIXES.any { p.startsWith(it.removePrefix("file://").let { it }) } ||
-          SAFE_PREFIXES.any { uriString.startsWith(it) }
+        val prefixes = safePrefixes(context)
+        prefixes.any { p.startsWith(it.removePrefix("file://").let { it }) } ||
+          prefixes.any { uriString.startsWith(it) }
       }
       else -> false
     }

@@ -116,6 +116,45 @@ class RuntimeTreeTest {
     assertTrue("必须说明是悬空（可诊断）", missing.any { it.contains("dangling") })
   }
 
+  /**
+   * issue #1234 根因二（**负控：去掉同用户守卫即红**）：`/data/data/<pkg>` ↔ `/data/user/0/<pkg>`
+   * 的软链等价**只在 user 0 成立**。树在 user 10 时，指向 `/data/data/...` 的绝对链接必须判「树外」。
+   *
+   * 为什么这条能真红：守卫拿掉后，旧实现会把 `/data/data/<pkg>/files/usr/lib` 与
+   * `/data/user/0/<pkg>/files/usr/lib` 当同一个（prefix.startsWith("/data/user/0/") 分支），
+   * 于是 user 10 的树把路径指向 user 0 的安装——正是 issue 里「自愈把路径指回 user 0」的形态。
+   */
+  @Test
+  fun `cross user data data link is outside a user 10 tree`() {
+    val pkg = "com.dsharnessmobile.shell"
+    val lib10 = "/data/user/10/$pkg/files/usr/lib"
+    val lib0 = "/data/user/0/$pkg/files/usr/lib"
+    // 关键判别点：**树路径写的是 user 0 拼写（/data/user/0），而进程跑在 user 10**。
+    // 真机形态：快照里烧的路径就是 user 0 拼写（构建期事实），实例却在 user 10。
+    // 若守卫被去掉，`/data/data` 等价分支会把链接判成「树内」，于是它指向 user 0 的那份安装
+    // ——跨用户 FUSE 隔离 ⇒ 读不到（正是 issue 里「自愈把路径指回 user 0」的形态）。
+    assertFalse(
+      "进程在 user 10 时，user 0 拼写的树不得按 /data/data 等价放行",
+      RuntimeTree.absoluteTargetInsideTree("/data/data/$pkg/files/usr/lib/libz.so.1", lib0, currentUser = 10),
+    )
+    assertTrue(
+      "同一判据在 user 0 下必须判树内（否则既有单用户设备全红）",
+      RuntimeTree.absoluteTargetInsideTree("/data/data/$pkg/files/usr/lib/libz.so.1", lib0, currentUser = 0),
+    )
+    assertTrue(
+      "同用户（10）自己的路径必须判树内",
+      RuntimeTree.absoluteTargetInsideTree("/data/user/10/$pkg/files/usr/lib/libz.so.1", lib10, currentUser = 10),
+    )
+    assertFalse(
+      "user 10 的树里不得接受 user 0 的路径（跨用户一律拒）",
+      RuntimeTree.absoluteTargetInsideTree("/data/user/0/$pkg/files/usr/lib/libz.so.1", lib10, currentUser = 10),
+    )
+    assertFalse(
+      "user 0 的树里不得接受 user 10 的路径（跨用户一律拒）",
+      RuntimeTree.absoluteTargetInsideTree("/data/user/10/$pkg/files/usr/lib/libz.so.1", lib0, currentUser = 0),
+    )
+  }
+
   @Test
   fun `absolute link pointing outside the tree is missing`() {
     val (e0, l0) = completeEntries()

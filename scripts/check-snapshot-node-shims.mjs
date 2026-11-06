@@ -53,14 +53,32 @@ const argv = process.argv.slice(2)
 const REQUIRE = argv.includes('--require')
 
 const NODE_REL = 'usr/bin/node'
+// 快照内的**可执行 shim** 全表（issue #1234）。
+//
+// 为什么从 2 条扩到 5 条：缺陷 1 修 #1243 时只覆盖了报障的 pnpm/npm，同一段构建代码里
+// tar / git / usr/libexec/dsh-node 三个 wrapper 用的是同一套「构建期烧前缀」写法，一个没改。
+// 判据若只盯 pnpm/npm，下次同类复发依旧全绿——门禁的覆盖面本身就是判据的一部分。
+//
+// exec 行逐条写死而不是从模板生成：这五条 exec 形态互不相同（node 直启 / node 经 linker64 /
+// 自管真身二进制），把它们抽象成一个模板反而会让「某条写错了」表现为「模板对、实例错」，
+// 而本门禁要判的正是**产物里的那一行**。
 const SHIMS = [
-  { rel: 'usr/bin/pnpm', target: 'usr/lib/node_modules/pnpm/bin/pnpm.cjs' },
-  { rel: 'usr/bin/npm', target: 'usr/lib/node_modules/npm/bin/npm-cli.js' },
+  { rel: 'usr/bin/pnpm', target: 'usr/lib/node_modules/pnpm/bin/pnpm.cjs', exec: 'exec "$prefix/bin/node"' },
+  { rel: 'usr/bin/npm', target: 'usr/lib/node_modules/npm/bin/npm-cli.js', exec: 'exec "$prefix/bin/node"' },
+  // apk#87：git 编译期 --exec-path 写死 com.termux，wrapper 注入 GIT_EXEC_PATH 后 exec 真身。
+  { rel: 'usr/bin/git', target: 'usr/bin/git.real', exec: 'exec "$prefix/bin/git.real"' },
+  // PRD F1.1：GNU tar 压缩与执行拦截冲突，wrapper unset 遗留变量后 exec 真身。
+  { rel: 'usr/bin/tar', target: 'usr/bin/tar.real', exec: 'exec "$prefix/bin/tar.real"' },
+  // C1：app-data 的 ELF 在 untrusted_app 下不能直接 exec，交给系统 linker（exec 目标 = usr/bin/node）。
+  { rel: 'usr/libexec/dsh-node', target: NODE_REL, exec: 'exec /system/bin/linker64 "$prefix/bin/node"' },
 ]
 const SHEBANG = '#!/system/bin/sh'
-// 自定位两要素：前缀由 $0 反推 + node 相对前缀执行。两条都在场才算真自定位。
+// 自定位要素：前缀由 $0 反推。每条的 exec 行单独写在 SHIMS 里（见上）。
 const SELF_LOCATE = 'prefix=$(cd "$(dirname "$self")/.." && pwd)'
-const EXEC_NODE = 'exec "$prefix/bin/node"'
+// fix-shebang 面（N6）：本包名 —— 运行期重写器认的就是这个 pkg 的 usr 前缀。
+const PKG = 'com.dsharnessmobile.shell'
+// 运行期重写器（SnapshotPrefixRewrite.kt）能修的前缀形态；shebang 脚本里出现的 /data/ 必须落在这里。
+const REWRITABLE_PREFIX_RE = new RegExp('^/data/(?:user/[0-9]+|data)/' + PKG.replace(/\./g, '\\.') + '/files/usr')
 // 缺陷 1 的反回归判据：构建期设备绝对前缀。宁可误报（shim 里本不该出现任何 /data/ 绝对路径），
 // 也不能漏报——漏报的后果是真机上 exit 127。
 const BUILD_PREFIX_RE = /\/data\/(user\/\d+|data\/[^\s"]*)\//
@@ -122,7 +140,11 @@ const tarFace = (archive) => {
   let extractError = null
   // 只解压「列表里声明为普通文件」的成员：符号链接在 Windows 上解压需要额外特权（而它本来就已判红），
   // 缺席成员也不该让解压整段失败——存在性由列表判定，内容缺失在判据里会如实报 FAIL。
-  const wanted = [NODE_REL, ...SHIMS.map((s) => s.rel), ...SHIMS.map((s) => s.target)]
+  // 去重：`usr/bin/node` 既是 NODE_REL，又是若干 shim 的 exec 目标，同一成员会被列两次。
+  // GNU tar（Linux/CI）对**重复的成员参数**直接报 `Not found in archive` 并 exit 1，
+  // 而 bsdtar（Windows 自带）会静默接受 —— 于是同一份判据在 Windows 绿、在 Linux 红。
+  // 去重不改变「解压哪些成员」的语义，只是把重复项收成一个。
+  const wanted = [...new Set([NODE_REL, ...SHIMS.map((s) => s.rel), ...SHIMS.map((s) => s.target)])]
     .filter((rel) => entries.get(rel)?.kind === 'file')
   if (wanted.length > 0) {
     try {
@@ -162,7 +184,59 @@ const tarFace = (archive) => {
     },
     extractError: () => extractError,
     cleanup: () => rmSync(work, { recursive: true, force: true }),
+    // N6：全树 shebang 扫描只在 tar 面提供（stage 面是「已解压的 usr 树」，用 readdir 也行，
+    // 但 stage 面本来就是排障便利档，不给它加一条会拖慢几秒的全树遍历）。
+    shebangPrefixHits: () => scanShebangPrefixes(archive),
   }
+}
+
+/**
+ * 全树扫描 usr/{bin,libexec,lib} 下文本脚本的 shebang，抽出其中的 /data/ 前缀（N6 的输入）。
+ *
+ * 为什么走 Python 流式扫描而不是 `tar -xJf` 再 readdir：真机快照这三个目录有 3 万+ 小文件，
+ * 解压耗时是流式读头的数倍（实测：解压三目录 >2 分钟，流式扫头 41 秒）。本仓已有「判据落在
+ * 内嵌 Python 里」的先例（check-snapshot-file-modes.mjs）。**只读每个成员的头 256 字节**，
+ * 不落盘、不修改归档。
+ *
+ * @returns {{rel: string, prefix: string}[]|null} null = 本机没有 python（由调用方计 SKIP，不得静默变绿）。
+ */
+const scanShebangPrefixes = (archive) => {
+  const python = process.platform === 'win32' ? 'python' : 'python3'
+  const probe = spawnSync(python, ['-c', 'print(1)'], { encoding: 'utf8' })
+  if (probe.status !== 0) return null
+  // 逐行拼 Python 源码（不走模板字符串）：这里面既有 b"#!" 又有 \\n 转义，用模板字符串会让
+  // 反斜杠层数随外层变化——本轮实测就是在这里把正则拼成了非法字面量。逐行 + 单引号最稳。
+  const py = [
+    'import json, sys, tarfile',
+    'archive = sys.argv[1]',
+    'LIMIT = 4 * 1024 * 1024',
+    'SHEBANG = b"#!"',
+    'NEWLINE = b"\\n"',
+    'out = []',
+    'with tarfile.open(archive, "r|xz") as tf:',
+    '    for m in tf:',
+    '        if not m.isreg() or m.size > LIMIT:',
+    '            continue',
+    '        name = m.name',
+    '        if not (name.startswith("usr/bin/") or name.startswith("usr/libexec/") or name.startswith("usr/lib/")):',
+    '            continue',
+    '        fh = tf.extractfile(m)',
+    '        if fh is None:',
+    '            continue',
+    '        head = fh.read(256)',
+    '        if not head.startswith(SHEBANG):',
+    '            continue',
+    '        line = head.split(NEWLINE, 1)[0].decode("utf-8", "replace")',
+    '        for token in line.split():',
+    '            if token.startswith("#!"):',
+    '                token = token[2:]',
+    '            if token.startswith("/data/"):',
+    '                out.append({"rel": name, "prefix": token})',
+    'print(json.dumps(out))',
+  ].join('\n')
+  const run = spawnSync(python, ['-c', py, archive], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+  if (run.status !== 0) return null
+  try { return JSON.parse(run.stdout) } catch { return null }
 }
 
 /**
@@ -205,6 +279,8 @@ const stageFace = (stageRoot) => {
     },
     extractError: () => null,
     cleanup: () => {},
+    // stage 面不提供全树 shebang 扫描（见 tarFace 里的同名字段注释）。
+    shebangPrefixHits: () => null,
   }
 }
 
@@ -247,13 +323,13 @@ const audit = (face) => {
     skip('N1 ' + NODE_REL + ' 的 tar 模式执行位', 'stage 面没有 POSIX 模式（Windows 解压后的权限位不可信），改用 tar 面核')
   }
 
-  // ── N2：两个 shim 必须是普通文件 ────────────────────────────────────────
+  // ── N2：每个 shim 必须是普通文件 ────────────────────────────────────────
   for (const shim of SHIMS) {
     const d = face.describe(shim.rel)
     expect('N2 ' + shim.rel + ' 在场', d.kind !== 'missing',
-      '快照里没有 ' + shim.rel + '：' + (shim.rel.endsWith('npm')
+      '快照里没有 ' + shim.rel + '：' + (shim.absenceHint ?? (shim.rel.endsWith('npm')
         ? 'npm 通道缺席，pnpm 的 passThruToNpm 必 ENOENT'
-        : 'pnpm 通道缺席，市场安装断链'))
+        : 'shim 通道缺席（设备上该命令不可用）')))
     const isFile = d.kind === 'file'
     expect('N2 ' + shim.rel + ' 是普通文件', isFile,
       d.kind === 'symlink'
@@ -290,9 +366,13 @@ const audit = (face) => {
       const firstLine = content.split(/\r?\n/)[0]
       if (firstLine !== SHEBANG) misses.push('首行不是 ' + SHEBANG + '（实际 ' + JSON.stringify(firstLine) + '）')
       if (!content.includes(SELF_LOCATE)) misses.push('缺自定位要素 ' + SELF_LOCATE)
-      if (!content.includes(EXEC_NODE)) misses.push('缺 exec 要素 ' + EXEC_NODE)
+      if (!content.includes(shim.exec)) misses.push('缺 exec 要素 ' + shim.exec)
+      // 自定位要素必须**先于** exec 行：写在 exec 之后等于没写（exec 已把进程换掉）。
+      if (content.includes(shim.exec) && content.indexOf(SELF_LOCATE) > content.indexOf(shim.exec)) {
+        misses.push('自定位要素在 exec 行之后（exec 已换掉进程，前缀永远算不出来）')
+      }
     }
-    expect('N3 ' + shim.rel + ' 首行 ' + SHEBANG + ' + 自定位两要素', misses.length === 0, misses.join('；'))
+    expect('N3 ' + shim.rel + ' 首行 ' + SHEBANG + ' + 自定位 + exec 要素', misses.length === 0, misses.join('；'))
   }
 
   // ── N4：exec 目标必须在快照内 ───────────────────────────────────────────
@@ -322,6 +402,27 @@ const audit = (face) => {
     }
   }
 
+  // ── N6：shebang 面的构建期前缀必须**可被运行期重写器修掉** ──────────────
+  //
+  // 背景（issue #1234 第 5 条）：shebang 是内核 execve 直接解析的绝对路径，没有 $0、没有 sh 语法，
+  // 因此 fix-shebang.py 烧进 usr/bin|libexec|lib 文本脚本头里的构建期前缀**无法自定位**。处置是
+  // 壳侧首次解压后的一次性重写（SnapshotPrefixRewrite.kt）。
+  //
+  // 判据不是「不许出现 /data/ 前缀」（那会把整类脚本判红，而它们必须存在），而是**每一处都得可修**：
+  // 命中行里出现的 /data/ 前缀必须落在重写器认得的形态（/data/{user/<n>|data}/<本包>/files/usr）。
+  // 出现第三种形态（例如别的包名、或构建机绝对路径）⇒ 运行期也修不掉 ⇒ 设备上必然 exec 失败。
+  const shebangHits = face.shebangPrefixHits()
+  if (shebangHits === null) {
+    skip('N6 文本 shim 的 shebang 前缀可被运行期重写器修掉',
+      '本输入面不提供全树扫描（stage 面只看固定成员），N6 只在 <snapshot.tar.xz> 面判')
+  } else {
+    const bad = shebangHits.filter((h) => !REWRITABLE_PREFIX_RE.test(h.prefix))
+    expect('N6 文本 shim 的 shebang 前缀均可被运行期重写器修掉（命中 ' + shebangHits.length + ' 处）',
+      bad.length === 0,
+      bad.slice(0, 3).map((h) => h.rel + ' => ' + h.prefix).join('；')
+        + '（这些形态运行期重写器认不出 ⇒ 设备上 exec 必然失败）')
+  }
+
   // 严格档：SKIP 不得结案（否则「stage 面核不了执行位」会静默变绿）。
   if (REQUIRE && skipped > 0) {
     fail('--require 严格档不得以 SKIP 结案（本次 ' + skipped + ' 处）',
@@ -348,14 +449,23 @@ const audit = (face) => {
 const selfTest = () => {
   const tmp = mkdtempSync(join(tmpdir(), 'snapshot-node-shims-selftest-'))
   const python = process.platform === 'win32' ? 'python' : 'python3'
-  const goodShim = (target) => [
-    SHEBANG,
-    '# dsh-mobile: 自定位 shim（前缀由 $0 推导，不烧构建期设备路径）',
-    'self=$0',
-    SELF_LOCATE,
-    'exec "$prefix/bin/node" "$prefix/' + target.slice('usr/'.length) + '" "$@"',
-    '',
-  ].join('\n')
+  /**
+   * 正样本 shim 文本：按 [SHIMS] 里每条**自己的** exec 形态生成。
+   *
+   * 为什么不复用构建脚本的模板：门禁要判的是**产物**。与构建脚本共用模板会让「模板对、产物错」
+   * 无法暴露；这里逐条手写，等于第二份独立表述——两份对不上就是缺陷。
+   */
+  const goodShim = (rel) => {
+    const head = [SHEBANG, '# dsh-mobile: 自定位 shim（前缀由 $0 推导，不烧构建期设备路径）', 'self=$0', SELF_LOCATE]
+    const tail = (rel === 'usr/bin/git')
+      ? ['export GIT_EXEC_PATH="$prefix/libexec/git-core"', 'exec "$prefix/bin/git.real" "$@"']
+      : (rel === 'usr/bin/tar')
+        ? ['unset -v TERMUX_APP__LEGACY_DATA_DIR', 'exec "$prefix/bin/tar.real" "$@"']
+        : (rel === 'usr/libexec/dsh-node')
+          ? ['export LD_LIBRARY_PATH="$prefix/lib"', 'exec /system/bin/linker64 "$prefix/bin/node" "$@"']
+          : ['exec "$prefix/bin/node" "$prefix/' + SHIMS.find((s) => s.rel === rel).target.slice('usr/'.length) + '" "$@"']
+    return head.concat(tail).concat(['']).join('\n')
+  }
   // 缺陷 1 的原形：构建期前缀烧死在 exec 行里（真机快照实测的 268 字节 shim）。
   const oldShim = (target) => {
     const prefix = '/data/user/0/com.dsharnessmobile.shell/files/usr'
@@ -366,38 +476,64 @@ const selfTest = () => {
       '',
     ].join('\n')
   }
-  const writeTree = (root, { pnpmText, npmText, npmFile = true }) => {
+  /**
+   * 造一棵合成 usr 树。`overrides` 里的文本按 rel 覆盖（负控用它把某一条打回旧形态）。
+   *
+   * 正样本默认全部合规：五条 shim 各自自定位 + 各自的 exec 目标在场 + 一个合规 shebang 脚本。
+   */
+  const writeTree = (root, overrides = {}) => {
     const files = {
       'usr/bin/node': Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00]),
-      'usr/bin/pnpm': pnpmText,
       'usr/lib/node_modules/pnpm/bin/pnpm.cjs': '#!/usr/bin/env node\nconsole.log(1)\n',
       'usr/lib/node_modules/npm/bin/npm-cli.js': '#!/usr/bin/env node\nconsole.log(1)\n',
+      // exec 目标（真身二进制用 ELF 头，类型判据只要求「在场且普通文件」）。
+      'usr/bin/git.real': Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00]),
+      'usr/bin/tar.real': Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00]),
+      // N6 的正样本：一个 shebang 里带**可被运行期重写器修掉**的构建期前缀的脚本。
+      'usr/bin/legacy-script': '#!/data/user/0/' + PKG + '/files/usr/bin/bash\necho ok\n',
     }
-    if (npmFile) files['usr/bin/npm'] = npmText
+    for (const shim of SHIMS) files[shim.rel] = goodShim(shim.rel)
+    Object.assign(files, overrides)
     for (const [rel, data] of Object.entries(files)) {
+      if (data === null) continue
       const p = join(root, ...rel.split('/'))
       mkdirSync(dirname(p), { recursive: true })
       writeFileSync(p, data)
     }
   }
-  // 归档成员模式表：正样本全 0755；负控4 把两个 shim 降成 0644（tar 头无 x）。
-  const specOf = ({ nodeMode = 0o755, pnpmMode = 0o755, npmMode = 0o755, npmKind = 'file' } = {}) => {
-    const spec = [
-      ['usr', 'dir', 0o755],
-      ['usr/bin', 'dir', 0o755],
-      ['usr/lib', 'dir', 0o755],
-      ['usr/lib/node_modules', 'dir', 0o755],
-      ['usr/lib/node_modules/pnpm', 'dir', 0o755],
-      ['usr/lib/node_modules/pnpm/bin', 'dir', 0o755],
-      ['usr/lib/node_modules/npm', 'dir', 0o755],
-      ['usr/lib/node_modules/npm/bin', 'dir', 0o755],
-      ['usr/bin/node', 'file', nodeMode],
-      ['usr/bin/pnpm', 'file', pnpmMode],
-      ['usr/lib/node_modules/pnpm/bin/pnpm.cjs', 'file', 0o644],
-      ['usr/lib/node_modules/npm/bin/npm-cli.js', 'file', 0o644],
-    ].map(([name, kind, mode]) => ({ name, kind, mode }))
-    if (npmKind === 'file') spec.push({ name: 'usr/bin/npm', kind: 'file', mode: npmMode })
-    if (npmKind === 'symlink') spec.push({ name: 'usr/bin/npm', kind: 'symlink', mode: 0o777, target: '../lib/node_modules/npm/bin/npm-cli.js' })
+  /**
+   * 归档成员模式表。正样本全 0755；负控按 tag 改某几条的 mode 或类型。
+   *
+   * @param opts.noExecFor 该 rel 的成员头降成 0644（负控：无执行位）。
+   * @param opts.missing 该 rel 不出现在归档里（负控：缺席）。
+   * @param opts.symlinkFor 该 rel 以符号链接形态出现（负控：不是普通文件）。
+   * @param opts.symlinkTarget symlinkFor 的链接目标。
+   */
+  const specOf = (opts = {}) => {
+    const { noExecFor = null, missing = null, symlinkFor = null, symlinkTarget = null } = opts
+    const dirs = [
+      'usr', 'usr/bin', 'usr/lib', 'usr/libexec',
+      'usr/lib/node_modules', 'usr/lib/node_modules/pnpm', 'usr/lib/node_modules/pnpm/bin',
+      'usr/lib/node_modules/npm', 'usr/lib/node_modules/npm/bin',
+    ]
+    const files = [
+      ['usr/bin/node', 0o755],
+      ['usr/lib/node_modules/pnpm/bin/pnpm.cjs', 0o644],
+      ['usr/lib/node_modules/npm/bin/npm-cli.js', 0o644],
+      ['usr/bin/git.real', 0o755],
+      ['usr/bin/tar.real', 0o755],
+      ['usr/bin/legacy-script', 0o755],
+      ...SHIMS.map((s) => [s.rel, 0o755]),
+    ]
+    const spec = dirs.map((name) => ({ name, kind: 'dir', mode: 0o755 }))
+    for (const [name, mode] of files) {
+      if (name === missing) continue
+      if (name === symlinkFor) {
+        spec.push({ name, kind: 'symlink', mode: 0o777, target: symlinkTarget })
+        continue
+      }
+      spec.push({ name, kind: 'file', mode: name === noExecFor ? 0o644 : mode })
+    }
     return spec
   }
   const buildArchive = (root, archive, spec) => {
@@ -429,39 +565,85 @@ const selfTest = () => {
     execFileSync(python, ['-c', py, root, archive, specPath], { encoding: 'utf8' })
   }
 
-  const goodPnpm = goodShim('usr/lib/node_modules/pnpm/bin/pnpm.cjs')
-  const goodNpm = goodShim('usr/lib/node_modules/npm/bin/npm-cli.js')
+  const bakedGit = [
+    SHEBANG,
+    '# dsh-mobile 0.13.0: git exec-path 重定位（issue apk#87）',
+    'export GIT_EXEC_PATH="/data/user/0/' + PKG + '/files/usr/libexec/git-core"',
+    'exec "/data/user/0/' + PKG + '/files/usr/bin/git.real" "$@"',
+    '',
+  ].join('\n')
+  const bakedPtc = [
+    SHEBANG,
+    '# dsh-mobile: PTC node launcher (C1)',
+    'export LD_LIBRARY_PATH="/data/user/0/' + PKG + '/files/usr/lib"',
+    'exec /system/bin/linker64 "/data/user/0/' + PKG + '/files/usr/bin/node" "$@"',
+    '',
+  ].join('\n')
+  // 自定位行**写在 exec 之后**（写法看着有、实际永远算不出来）：N3 的顺序判据必须抓到。
+  const lateSelfLocate = [
+    SHEBANG,
+    '# dsh-mobile: 自定位要素被放到 exec 之后',
+    'exec "$prefix/bin/git.real" "$@"',
+    'self=$0',
+    SELF_LOCATE,
+    '',
+  ].join('\n')
   const cases = [
     {
-      tag: 'ok', name: '正样本：自定位 shim + 普通文件 + 可执行位',
-      tree: { pnpmText: goodPnpm, npmText: goodNpm }, spec: specOf(),
+      tag: 'ok', name: '正样本：五条 shim 各自自定位 + 普通文件 + 可执行位',
+      tree: {}, spec: specOf(),
       tarExit: 0, tarMarker: 'CHECK-SNAPSHOT-NODE-SHIMS PASSED',
       stageExit: 0, stageMarker: 'CHECK-SNAPSHOT-NODE-SHIMS PASSED',
     },
     {
       tag: 'hardcoded', name: '负控1：pnpm shim 仍烧写 /data/user/0/... 构建期前缀（缺陷 1 原形）',
-      tree: { pnpmText: oldShim('usr/lib/node_modules/pnpm/bin/pnpm.cjs'), npmText: goodNpm }, spec: specOf(),
+      tree: { 'usr/bin/pnpm': oldShim('usr/lib/node_modules/pnpm/bin/pnpm.cjs') }, spec: specOf(),
       tarExit: 1, tarMarker: '/data/user/',
       stageExit: 1, stageMarker: '/data/user/',
     },
     {
       tag: 'no-npm', name: '负控2：缺 usr/bin/npm（普通文件缺席）',
-      tree: { pnpmText: goodPnpm, npmText: '', npmFile: false }, spec: specOf({ npmKind: 'missing' }),
+      tree: { 'usr/bin/npm': null }, spec: specOf({ missing: 'usr/bin/npm' }),
       tarExit: 1, tarMarker: 'N2 usr/bin/npm',
       stageExit: 1, stageMarker: 'N2 usr/bin/npm',
     },
     {
       tag: 'npm-symlink', name: '负控3：usr/bin/npm 仍是 symlink（缺陷 2 原形）',
-      tree: { pnpmText: goodPnpm, npmText: '', npmFile: false }, spec: specOf({ npmKind: 'symlink' }),
+      tree: { 'usr/bin/npm': null }, spec: specOf({ symlinkFor: 'usr/bin/npm', symlinkTarget: '../lib/node_modules/npm/bin/npm-cli.js' }),
       tarExit: 1, tarMarker: '符号链接',
       // stage 面需要宿主真的能建符号链接（Windows 非开发者模式会 EPERM）——建不出来就只验 tar 面。
-      stageExit: 1, stageMarker: '符号链接', stageSymlink: true,
+      stageExit: 1, stageMarker: '符号链接', stageSymlink: 'usr/bin/npm',
     },
     {
       tag: 'no-exec', name: '负控4：shim 无执行位（tar 模式 0644）',
-      tree: { pnpmText: goodPnpm, npmText: goodNpm }, spec: specOf({ pnpmMode: 0o644, npmMode: 0o644 }),
+      tree: {}, spec: specOf({ noExecFor: 'usr/bin/pnpm' }),
       tarExit: 1, tarMarker: '执行位',
       // stage 面没有 POSIX 模式：这一例按设计**判绿**，且必须显式打印 SKIP 计数（不得静默）。
+      stageExit: 0, stageMarker: 'SKIP(#1)',
+    },
+    {
+      tag: 'baked-git', name: '负控5：git wrapper 仍烧构建期前缀（issue #1234 的原形，此前无判据）',
+      tree: { 'usr/bin/git': bakedGit }, spec: specOf(),
+      tarExit: 1, tarMarker: '/data/user/',
+      stageExit: 1, stageMarker: '/data/user/',
+    },
+    {
+      tag: 'baked-ptc', name: '负控6：PTC dsh-node wrapper 仍烧构建期前缀（issue #1234 的原形）',
+      tree: { 'usr/libexec/dsh-node': bakedPtc }, spec: specOf(),
+      tarExit: 1, tarMarker: '/data/user/',
+      stageExit: 1, stageMarker: '/data/user/',
+    },
+    {
+      tag: 'late-self-locate', name: '负控7：自定位行写在 exec 之后（看着有、实际算不出来）',
+      tree: { 'usr/bin/git': lateSelfLocate }, spec: specOf(),
+      tarExit: 1, tarMarker: 'exec 行之后',
+      stageExit: 1, stageMarker: 'exec 行之后',
+    },
+    {
+      tag: 'unrewritable-shebang', name: '负控8：shebang 里出现运行期重写器认不出的前缀（N6 原形）',
+      tree: { 'usr/bin/legacy-script': '#!/data/user/0/com.example.other/files/usr/bin/bash\necho ok\n' }, spec: specOf(),
+      tarExit: 1, tarMarker: 'N6',
+      // stage 面不提供全树 shebang 扫描（N6 计 SKIP）：这一例按设计判绿，但必须显式打印 SKIP。
       stageExit: 0, stageMarker: 'SKIP(#1)',
     },
   ]
@@ -473,8 +655,11 @@ const selfTest = () => {
       writeTree(root, c.tree)
       let stageNote = ''
       if (c.stageSymlink) {
+        const linkRel = c.stageSymlink
+        const linkPath = join(root, ...linkRel.split('/'))
         try {
-          symlinkSync('../lib/node_modules/npm/bin/npm-cli.js', join(root, 'usr', 'bin', 'npm'), 'file')
+          rmSync(linkPath, { force: true })
+          symlinkSync('../lib/node_modules/npm/bin/npm-cli.js', linkPath, 'file')
         } catch {
           c.stageExit = null
           stageNote = '；stage 面无法建符号链接（宿主权限），只验 tar 面'
@@ -510,7 +695,7 @@ const selfTest = () => {
     rmSync(tmp, { recursive: true, force: true })
   }
   console.log(bad === 0
-    ? 'CHECK-SNAPSHOT-NODE-SHIMS SELF-TEST PASSED（正样本 1 + 受控负控 4；每例 tar 面与 stage 面各判一次）'
+    ? 'CHECK-SNAPSHOT-NODE-SHIMS SELF-TEST PASSED（正样本 1 + 受控负控 8；每例 tar 面与 stage 面各判一次）'
     : 'CHECK-SNAPSHOT-NODE-SHIMS SELF-TEST FAILED（' + bad + ' 项）')
   process.exit(bad === 0 ? 0 : 1)
 }

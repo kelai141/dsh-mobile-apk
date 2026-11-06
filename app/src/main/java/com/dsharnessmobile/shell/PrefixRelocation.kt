@@ -12,6 +12,15 @@ package com.dsharnessmobile.shell
  */
 internal object PrefixRelocation {
 
+  /**
+   * 当前进程所在的 Android 用户号（`uid / 100000`；user 0 的 app uid 形如 10xxxx，user 10 形如 1010xxxx）。
+   *
+   * 为什么不用 `UserHandle.myUserId()`：那是 API 24+ 才有，本仓 minSdk 26 够用，但它要一个 Context 或
+   * 静态调用；而 `Process.myUid()` 是纯 JVM 可注入的整数事实，判据保持无 Context。
+   * 为什么写成函数而不是常量：单测要在不换进程的前提下驱动两种用户形态（靠传参，见各调用点）。
+   */
+  internal fun currentUserFromUid(uid: Int): Int = uid / 100000
+
   /** `/data/user/<N>/...` 里的 N；不是该形态返回 null。 */
   internal fun userOfAbsolutePath(path: String): Int? {
     val p = path.replace(java.io.File.separatorChar, '/')

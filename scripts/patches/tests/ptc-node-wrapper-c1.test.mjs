@@ -30,6 +30,19 @@ function check(label, ok, detail) {
 }
 
 const BUILD = join(repoRoot, 'scripts', 'build-snapshot-013.mjs')
+
+/**
+ * 取 build-snapshot 里 **7c1 PTC wrapper 段**的源码（从段标题到下一个 `──` 段标题）。
+ *
+ * 为什么要切段而不是全文件断言：`NEW_PREFIX` 在别处（relocate-snapshot / fix-shebang 调用）**仍然合法**
+ * ——shebang 面无法自定位，只能靠运行期重写（见 SnapshotPrefixRewrite.kt）。判据只该管 wrapper 这一段。
+ */
+const wrapperSectionOf = (text) => {
+  const start = text.indexOf('const PTC_NODE_WRAPPER_REL')
+  if (start < 0) return ''
+  const end = text.indexOf('\n// ──', start)
+  return end < 0 ? text.slice(start) : text.slice(start, end)
+}
 const PROFILE = join(repoRoot, 'scripts', 'profile-web.cordis.patch.yml')
 const WRAPPER_REL = 'libexec/dsh-node'
 const PREFIX = '/data/data/com.dsharnessmobile.shell/files/usr'
@@ -66,12 +79,22 @@ check('wrapper 落点为 usr/libexec/dsh-node', build.includes("const PTC_NODE_W
 // 旧窗口是恒定量，内容一长就假红（实测 0.14.8 堆下限把三段挤到 400 之外）。
 check('wrapper 带可执行位（mode 0o755）',
   /writeFileSync\(\s*\n?\s*join\(U, PTC_NODE_WRAPPER_REL\)[\s\S]{0,2000}?\{ mode: 0o755 \}/.test(build))
-check('wrapper 用 /system/bin/sh shebang', build.includes("'#!/system/bin/sh\\n'"))
-check('wrapper 内部 export LD_LIBRARY_PATH 指向快照 lib', build.includes("'export LD_LIBRARY_PATH=\"' + NEW_PREFIX + '/lib\"\\n'"))
+// issue #1234：wrapper 的前缀不再烧 NEW_PREFIX（构建期事实），改为运行期由 $0 自定位。
+// 判据随之从「烧的是设备路径而不是本地 stage 路径」升级为「根本不许烧任何设备前缀 + 必须自定位」：
+// 前者在单用户设备上够用，在多用户设备上（user 10）必 exit 127。
+check('wrapper 用 /system/bin/sh shebang', build.includes("'#!/system/bin/sh'"))
+check('wrapper 内部 export LD_LIBRARY_PATH 指向快照 lib（相对自定位前缀）',
+  build.includes("'export LD_LIBRARY_PATH=\"$prefix/lib\"\\n'"))
 check('wrapper 经 /system/bin/linker64 启动 node（绕开 app-data ELF exec）',
-  build.includes("'exec /system/bin/linker64 \"' + NEW_PREFIX + '/bin/node\" \"$@\"\\n'"))
-check('wrapper 只烧设备路径、不烧构建期本地路径（NEW_PREFIX 而非 join(U, …)）',
-  build.includes("'export LD_LIBRARY_PATH=\"' + NEW_PREFIX") && build.includes("'exec /system/bin/linker64 \"' + NEW_PREFIX"))
+  build.includes("'exec /system/bin/linker64 \"$prefix/bin/node\" \"$@\"\\n'"))
+check('wrapper 自定位前缀由 $0 推导（prefix=$(cd … && pwd)）',
+  build.includes("'prefix=$(cd \"$(dirname \"$self\")/..\" && pwd)'"))
+check('wrapper 不得烧任何构建期设备前缀（含 NEW_PREFIX 与本地 stage 路径）',
+  // 只判**代码行**：段内注释会点名 NEW_PREFIX 说明「原先烧的是它」，那是解释不是实现。
+  !wrapperSectionOf(build)
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*\/\//.test(line))
+    .some((line) => /NEW_PREFIX/.test(line)))
 
 // ② profile 接线（0.2.1-rc.2：上游删除 nodeExecutable，改为必填 launch:{kind,executable}）
 const ptcEntry = yamlEntry(profile, 'ptc-runtime')

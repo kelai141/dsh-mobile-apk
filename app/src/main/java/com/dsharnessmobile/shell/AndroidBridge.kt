@@ -797,9 +797,13 @@ class AndroidBridge(
   companion object {
     /**
      * Map an ACTION_OPEN_DOCUMENT_TREE result onto a Termux-visible real path
-     * when possible: "primary:rel/path" -> /storage/emulated/0/rel/path.
+     * when possible: "primary:rel/path" -> <current user primary shared storage>/rel/path.
      * Non-primary volumes fall back to the raw content:// tree URI (the page
      * can still use it as an opaque handle).
+     *
+     * issue #1234：`primary:` 指**当前用户**的 primary 共享存储。多用户设备上 DSH 跑在 user 10 时它是
+     * `/storage/emulated/10`，原先恒拼 `/storage/emulated/0`（user 0 的）——选到的目录被翻译成一条
+     * 属于别人的路径，后续校验/建工作区必然失败。故根改为按当前用户推导。
      * @param uri the tree URI from the system picker.
      * @returns the mapped real path or the original URI string.
      */
@@ -813,7 +817,14 @@ class AndroidBridge(
         if (rel.isEmpty() || rel.split("/").any { it == ".." } || rel.startsWith("/")) {
           return uri.toString()
         }
-        if (volume == "primary") "/storage/emulated/0/$rel" else uri.toString()
+        // issue #1234：按当前用户取 primary 根（user 0 → /storage/emulated/0，user 10 → .../10）。
+        // 运行期真源是 Environment；它抛异常或返回 null 时退回 user 0 拼写（保持旧行为，不放大失败面）。
+        val primaryRoot = try {
+          android.os.Environment.getExternalStorageDirectory()?.absolutePath
+        } catch (_: Throwable) {
+          null
+        } ?: WorkspacePickGate.SHARED_STORAGE_ROOT
+        if (volume == "primary") primaryRoot.trimEnd('/') + "/" + rel else uri.toString()
       } catch (_: Exception) {
         uri.toString()
       }

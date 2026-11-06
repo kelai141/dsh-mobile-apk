@@ -53,10 +53,15 @@ internal class RepairTools(
       "/data/user/0/" + context.packageName,
       "/data/data/" + context.packageName,
     ),
+    // issue #1234：公开仓库的**真实根**由 engine.dshDataDir 给出（它走
+    // Environment.getExternalStoragePublicDirectory，天然是当前用户的那份）。原先这里只列
+    // user 0 的两条字面量：多用户设备上 DSH 跑在 user 10 时，模型拿到的仍是 user 0 的路径，
+    // 映射不到真实根。现在真实根排第一，两条历史拼写保留为兼容别名（老提示词/老会话仍在用）。
     publicAliases = listOf(
+      engine.dshDataDir.absolutePath,
       "/storage/emulated/0/Documents/dshdata",
       "/sdcard/Documents/dshdata",
-    ),
+    ).distinct(),
   )
   private val generation = AtomicLong(0L)
   private val commandBusy = AtomicBoolean(false)
