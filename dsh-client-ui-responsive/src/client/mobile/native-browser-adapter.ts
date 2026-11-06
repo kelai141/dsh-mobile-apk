@@ -54,6 +54,21 @@ export class NativeBrowserSession {
   /** Read native authority for reconciliation; failed polls cannot authorize removals. */
   getSnapshot(): NativeBrowserSnapshot { return this.snapshot }
 
+  /**
+   * Whether this Session holds state that a periodic reconcile could change.
+   *
+   * True while a GUI occurrence is bound to a native tab (a native close must remove it), while a
+   * page/frame is mounted here, or while the last native read was unavailable (a later read may
+   * recover). False means the Session is idle and the placement poll has nothing to do for it —
+   * the poll used to run anyway, once per second, as a synchronous cross-language call
+   * (tests/idle-poll-budget.spec.ts).
+   * @returns true when polling this Session can still change something.
+   */
+  hasNativeInterest(): boolean {
+    if (this.disposed) return false
+    return this.bindings.size > 0 || this.frames.size > 0 || !this.snapshot.available
+  }
+
   /** Refresh only this Session; there is no global-focus status fallback. */
   refresh(): NativeBrowserSnapshot {
     if (!this.disposed) this.accept(nativeBrowserCommand(this.session, 'tabs'))

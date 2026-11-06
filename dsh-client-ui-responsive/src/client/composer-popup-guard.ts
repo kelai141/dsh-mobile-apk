@@ -199,7 +199,17 @@ function placementKey(surface: HTMLElement): string {
  * scrolling element.
  */
 export class ComposerPopupGuard {
-  private readonly onViewportChange = (): void => { this.queue() }
+  /**
+   * Viewport change (resize / scroll / visualViewport resize).
+   *
+   * Gated on "a popup is open": the guard's whole job is keeping an OPEN popup inside the
+   * viewport, so with no popup there is nothing to correct. Before the gate this ran
+   * `requestAnimationFrame` + two full-document queries on every scroll event — measured at
+   * 4 document queries per scroll frame with nothing open (tests/scroll-frame-budget.spec.ts).
+   * The flag is maintained by apply() itself, so a popup that appears without a viewport change
+   * is still picked up by the mutation observer below.
+   */
+  private readonly onViewportChange = (): void => { if (this.openPopups > 0) this.queue() }
   private readonly mutationObserver = new MutationObserver((records) => {
     if (records.some(record => this.isRelevantMutation(record))) this.queue()
   })
@@ -219,6 +229,8 @@ export class ComposerPopupGuard {
     if (changed) this.apply()
   })
   private lastImeInset = ''
+  /** Open popup count from the last apply(); 0 short-circuits viewport-driven passes. */
+  private openPopups = 0
   private frame: number | null = null
   private observed: Element[] = []
   private styled = new Set<HTMLElement>()
@@ -267,6 +279,7 @@ export class ComposerPopupGuard {
     const topbar = headerTopChrome()
       ?? document.querySelector<HTMLElement>('[data-dsh-mobile-topbar]')
     if (card === null) {
+      this.openPopups = 0
       this.clear()
       return
     }
@@ -286,6 +299,7 @@ export class ComposerPopupGuard {
         modelMenus.set(controlled, trigger)
       }
     }
+    this.openPopups = popups.size
     if (popups.size === 0) {
       this.clear()
       return
@@ -370,6 +384,7 @@ export class ComposerPopupGuard {
 
   /** Drop every correction and forget the touched elements. */
   private clear(): void {
+    this.openPopups = 0
     for (const element of this.styled) this.clearElement(element)
     this.styled = new Set()
     this.syncObserved([])

@@ -118,6 +118,31 @@ const MARKETPLACE_OVERLAY_SELECTOR = '.dshm-overlay'
 const MARKETPLACE_BACK_SELECTOR = '.dshm-back'
 /** The drilled-listing breadcrumb header (a `nav`; the candidate list is a `div[role=listbox]`). */
 const MENU_DRILL_SELECTOR = '[data-trigger-menu] nav'
+/**
+ * Every element any layer's presence is derived from, as one union selector.
+ *
+ * Why one pass: detect() runs on every coalesced DOM batch (streaming output commits dozens per
+ * second), and it used to issue ten separate `document.querySelector(All)` calls — ten full-tree
+ * walks per commit regardless of whether any layer was open. Measured on a 1,725-element page:
+ * 10.0 document queries per batch. One union pass plus in-memory classification gives the same
+ * detections in the same order for one walk (see tests/back-stack-scan-budget.spec.ts).
+ *
+ * The union must list every selector any detect*() predicate reads, or a layer stops being seen.
+ * Classification is **category-major** (all dialogs, then trajectory, ...) exactly like the old
+ * per-selector calls, because the stack order is the order layers are pushed.
+ */
+const CANDIDATE_SELECTOR = [
+  FRAME_SELECTOR,
+  RIGHT_COL_SELECTOR,
+  DIALOG_SELECTOR,
+  'aside[aria-label]',
+  RIGHT_FULLSCREEN_SELECTOR,
+  '[data-dsh-sidebar-bubbles="open"]',
+  MENU_SELECTOR,
+  MODEL_MENU_SELECTOR,
+  COMPOSER_SHEET_SELECTOR,
+  MARKETPLACE_OVERLAY_SELECTOR,
+].join(', ')
 /** Hashed CSS-module close controls still carry the class token (`[class*=ledger]` precedent). */
 const CLOSE_CLASS_HINT = '[class*="close"]'
 /**
@@ -471,39 +496,45 @@ export class BackStackSignal {
   /** Every layer currently in the DOM, in a fixed detection order. */
   private detect(): BackLayerDetection[] {
     const found: BackLayerDetection[] = []
-    const drawer = this.detectDrawer()
+    // One full-document walk per batch. The predicates below used to walk the tree once each
+    // (ten walks per commit); they now read this snapshot. See CANDIDATE_SELECTOR.
+    const candidates = [...document.querySelectorAll<HTMLElement>(CANDIDATE_SELECTOR)]
+    const first = (selector: string): HTMLElement | null => {
+      for (const element of candidates) if (element.matches(selector)) return element
+      return null
+    }
+    const all = (selector: string): HTMLElement[] => candidates.filter(element => element.matches(selector))
+    const drawer = this.detectDrawer(first)
     if (drawer !== null) found.push(drawer)
     const mainPanel = this.detectMainPanel()
     if (mainPanel !== null) found.push(mainPanel)
-    for (const dialog of this.detectDialogs()) found.push(dialog)
-    const trajectory = this.detectTrajectoryDetails()
+    for (const dialog of this.detectDialogs(all)) found.push(dialog)
+    const trajectory = this.detectTrajectoryDetails(all)
     if (trajectory !== null) found.push(trajectory)
-    const fullscreen = this.detectRightFullscreen()
+    const fullscreen = this.detectRightFullscreen(first)
     if (fullscreen !== null) found.push(fullscreen)
-    const bubbles = document.querySelector('[data-dsh-sidebar-bubbles="open"]')
+    const bubbles = first('[data-dsh-sidebar-bubbles="open"]')
     const bubbleToggle = bubbles?.parentElement?.querySelector<HTMLElement>('[data-dsh-sidebar-bubbles-toggle]')
     if (bubbles && bubbleToggle) found.push({ id: 'sidebar-bubbles', kind: 'sidebar-bubbles', close: () => { bubbleToggle.click(); return true } })
-    const menu = this.detectMenu()
+    const menu = this.detectMenu(first)
     if (menu !== null) found.push(menu)
-    const drill = this.detectMenuDrill()
+    const drill = this.detectMenuDrill(all)
     if (drill !== null) found.push(drill)
-    const modelMenu = this.detectModelMenu()
+    const modelMenu = this.detectModelMenu(first)
     if (modelMenu !== null) found.push(modelMenu)
-    const composerSheet = this.detectComposerSheet()
+    const composerSheet = this.detectComposerSheet(first)
     if (composerSheet !== null) found.push(composerSheet)
-    const marketplace = this.detectMarketplace()
+    const marketplace = this.detectMarketplace(first)
     if (marketplace !== null) found.push(marketplace)
     return found
   }
 
   /** The drawer: the phone form's expanded left sidebar. */
-  private detectDrawer(): BackLayerDetection | null {
+  private detectDrawer(first: (selector: string) => HTMLElement | null): BackLayerDetection | null {
     // Phone form only: on a wide viewport the sidebar is docked chrome, not a
     // layer the system back gesture should close.
     if (!document.documentElement.hasAttribute(MOBILE_FORM_ATTR)) return null
-    const frame = document.querySelector(FRAME_SELECTOR)
-      ?? document.querySelector(RIGHT_COL_SELECTOR)?.parentElement
-      ?? null
+    const frame = first(FRAME_SELECTOR) ?? first(RIGHT_COL_SELECTOR)?.parentElement ?? null
     if (frame === null || frame.hasAttribute(SIDEBAR_COLLAPSED_ATTR)) return null
     return {
       id: 'drawer',
@@ -529,8 +560,8 @@ export class BackStackSignal {
   }
 
   /** Every modal surface, in document order (settings panel, Modal, lightbox). */
-  private detectDialogs(): BackLayerDetection[] {
-    return [...document.querySelectorAll<HTMLElement>(DIALOG_SELECTOR)].map((dialog, index) => ({
+  private detectDialogs(all: (selector: string) => HTMLElement[]): BackLayerDetection[] {
+    return all(DIALOG_SELECTOR).map((dialog, index) => ({
       // Index-keyed: the modal layer is a singleton in practice (one dialog is
       // on top), and open order is what the stack needs, not long-lived identity.
       id: `dialog:${String(index)}`,
@@ -540,8 +571,8 @@ export class BackStackSignal {
   }
 
   /** The trajectory inspector side panel. */
-  private detectTrajectoryDetails(): BackLayerDetection | null {
-    for (const aside of document.querySelectorAll<HTMLElement>('aside[aria-label]')) {
+  private detectTrajectoryDetails(all: (selector: string) => HTMLElement[]): BackLayerDetection | null {
+    for (const aside of all('aside[aria-label]')) {
       if (!TRAJECTORY_LABELS.includes(aside.getAttribute('aria-label') ?? '')) continue
       return {
         id: 'trajectory-details',
@@ -553,8 +584,8 @@ export class BackStackSignal {
   }
 
   /** The right column's fullscreen presentation. */
-  private detectRightFullscreen(): BackLayerDetection | null {
-    const panel = document.querySelector<HTMLElement>(RIGHT_FULLSCREEN_SELECTOR)
+  private detectRightFullscreen(first: (selector: string) => HTMLElement | null): BackLayerDetection | null {
+    const panel = first(RIGHT_FULLSCREEN_SELECTOR)
     if (panel === null) return null
     return {
       id: 'right-fullscreen',
@@ -564,15 +595,15 @@ export class BackStackSignal {
   }
 
   /** An open command/reference menu. */
-  private detectMenu(): BackLayerDetection | null {
-    const menu = document.querySelector<HTMLElement>(MENU_SELECTOR)
+  private detectMenu(first: (selector: string) => HTMLElement | null): BackLayerDetection | null {
+    const menu = first(MENU_SELECTOR)
     if (menu === null) return null
     return { id: 'menu', kind: 'menu', close: () => closeMenu(menu) }
   }
 
   /** ModelSelect owns Escape: leave its drilled pane first, then close and restore trigger focus. */
-  private detectModelMenu(): BackLayerDetection | null {
-    const menu = document.querySelector<HTMLElement>(MODEL_MENU_SELECTOR)
+  private detectModelMenu(first: (selector: string) => HTMLElement | null): BackLayerDetection | null {
+    const menu = first(MODEL_MENU_SELECTOR)
     if (menu === null) return null
     return {
       id: 'model-menu',
@@ -593,8 +624,8 @@ export class BackStackSignal {
    * sheet already closes on the same outside-pointerdown gesture upstream menus use - so the shared
    * dismissal path below is the right control.
    */
-  private detectComposerSheet(): BackLayerDetection | null {
-    const sheet = document.querySelector<HTMLElement>(COMPOSER_SHEET_SELECTOR)
+  private detectComposerSheet(first: (selector: string) => HTMLElement | null): BackLayerDetection | null {
+    const sheet = first(COMPOSER_SHEET_SELECTOR)
     if (sheet === null) return null
     return { id: 'composer-sheet', kind: 'composer-sheet', close: () => closeMenu(sheet) }
   }
@@ -606,8 +637,8 @@ export class BackStackSignal {
    * 找不到控件就不入栈——与「入栈后必须能关掉」相反的方向在这里不适用：它本就不是本插件
    * 的节点，强行入栈会让返回键一直消费却毫无效果。
    */
-  private detectMarketplace(): BackLayerDetection | null {
-    const overlay = document.querySelector<HTMLElement>(MARKETPLACE_OVERLAY_SELECTOR)
+  private detectMarketplace(first: (selector: string) => HTMLElement | null): BackLayerDetection | null {
+    const overlay = first(MARKETPLACE_OVERLAY_SELECTOR)
     if (overlay === null) return null
     return {
       id: 'marketplace',
@@ -621,9 +652,22 @@ export class BackStackSignal {
     }
   }
 
-  /** A menu listing descended into a directory (its breadcrumb header is up). */
-  private detectMenuDrill(): BackLayerDetection | null {
-    const nav = document.querySelector<HTMLElement>(MENU_DRILL_SELECTOR)
+  /**
+   * A menu listing descended into a directory (its breadcrumb header is up).
+   *
+   * `[data-trigger-menu] nav` is a **relationship** query: it matches a `nav` that is a
+   * descendant of any trigger menu. Walking the trigger menus in document order and taking the
+   * first one that contains a `nav` yields the same element: document order puts every
+   * descendant of an earlier menu before a later menu, so the first menu with a nav holds the
+   * globally first matching nav. A menu without a breadcrumb is skipped, exactly like the
+   * original selector (which would keep looking).
+   */
+  private detectMenuDrill(all: (selector: string) => HTMLElement[]): BackLayerDetection | null {
+    let nav: HTMLElement | null = null
+    for (const menu of all(MENU_SELECTOR)) {
+      nav = menu.querySelector<HTMLElement>('nav')
+      if (nav !== null) break
+    }
     if (nav === null) return null
     return { id: 'menu-drill', kind: 'menu-drill', close: () => popMenuDrill(nav) }
   }
