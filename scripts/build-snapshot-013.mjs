@@ -418,6 +418,9 @@ for (const entry of OVERLAY.keepUnpublished ?? []) {
     console.error('[语法下限降级失败] chrome87 降级未成功（exit ' + r.status + '）——快照不可发布')
     process.exit(1)
   }
+  // 契约字段：`files=` 清单条数、`changed=` 真正被改写的条数。
+  // 降级门自己会追加 `lowered=` / `skipped=`（skipped = 两臂输出相同、无需改写），本处不依赖它们；
+  // 但改这两个字段的名字会打断这里，所以它们属于跨脚本契约，改名必须先改本处。
   const m = /files=(\d+) changed=(\d+)/.exec(r.stdout ?? '')
   if (!m) {
     console.error('[语法下限降级失败] 无法从 --degrade 输出解析文件数（files=/changed= 缺席）')
