@@ -86,13 +86,20 @@ export class MobileFormMarker {
   private syncModal(): void {
     const dialogs = [...document.querySelectorAll<HTMLElement>("[role='dialog'][aria-modal='true']")]
       .filter(dialog => dialog.closest('[data-shell-overlay]') === null)
-    const settings = dialogs.find(dialog => dialog.querySelector(':scope > nav') !== null) ?? null
+    // 上游 0.2.2 把设置面板挪进了 `[data-shell-overlay]` 覆盖层（AppFrame 的 overlayLayer），
+    // 于是上面那条「排除覆盖层内对话框」的过滤把它一起排掉，settings 恒为 null ⇒ 本插件整套
+    // 移动设置层（列表/详情切换、返回条、移动布局）永不激活，手机上点开头像菜单里的「设置」
+    // 看到的是桌面双栏布局（错位、进不去分区）。
+    // 判据改用上游自己的标记 `data-shortcut-modal="settings"`（SettingsRoot.tsx:73），
+    // 它不受覆盖层位置影响；旧启发式（直接子级 <nav>）保留为兜底。
+    const settings = document.querySelector<HTMLElement>('[role="dialog"][aria-modal="true"][data-shortcut-modal="settings"]')
+      ?? dialogs.find(dialog => dialog.querySelector(':scope > nav') !== null) ?? null
     if (settings !== this.modal) {
       this.modal?.removeAttribute(SETTINGS_TAG)
       this.modal = settings
       settings?.setAttribute(SETTINGS_TAG, '')
     }
-    document.documentElement.toggleAttribute('data-dsh-modal-open', dialogs.length > 0)
+    document.documentElement.toggleAttribute('data-dsh-modal-open', dialogs.length > 0 || settings !== null)
     document.documentElement.toggleAttribute(SETTINGS_OPEN_TAG, settings !== null)
   }
 

@@ -108,4 +108,24 @@ describe('MobileFormMarker settings dialog fact', () => {
     expect(document.documentElement.hasAttribute('data-dsh-settings-open')).toBe(false)
     expect(document.documentElement.hasAttribute('data-dsh-modal-open')).toBe(false)
   })
+
+  it('tags a settings panel that upstream mounts inside the shell overlay layer', async () => {
+    // 0.2.2 起 SettingsRoot 的面板渲染在 AppFrame 的 [data-shell-overlay] 里；旧的
+    // 「排除覆盖层内对话框」过滤会把它一起排掉，整套移动设置层因此永不激活
+    // （真机表现：点开设置后是桌面双栏布局，错位且进不去分区）。
+    const overlay = document.createElement('div')
+    overlay.setAttribute('data-shell-overlay', '')
+    const dialog = document.createElement('div')
+    dialog.setAttribute('role', 'dialog')
+    dialog.setAttribute('aria-modal', 'true')
+    dialog.setAttribute('data-shortcut-modal', 'settings')
+    dialog.append(document.createElement('nav'))
+    overlay.append(dialog)
+    document.body.append(overlay)
+    attach()
+    await settle()
+    expect(dialog.hasAttribute('data-dsh-settings-dialog')).toBe(true)
+    expect(document.documentElement.hasAttribute('data-dsh-settings-open')).toBe(true)
+    expect(document.documentElement.hasAttribute('data-dsh-modal-open')).toBe(true)
+  })
 })
