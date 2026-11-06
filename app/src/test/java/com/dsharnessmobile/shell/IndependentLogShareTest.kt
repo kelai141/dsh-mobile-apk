@@ -35,8 +35,9 @@ class IndependentLogShareTest {
     val filesDir = tmp.newFolder("files")
     val names = LogShare.candidateFiles(filesDir).map { it.name }
     // 必须逐一等于声明的白名单（不是「包含」，是「恰好」——多一个就是越界）
+    // issue #1599：engine.log 及其轮转世代已移出候选面（白名单挡的是文件名，挡不住内容：
+    // 那份文件就是完整会话）。闭集判据不变，只是闭集本身变小了。
     val expected = listOf(
-      "engine.log", "engine.log.1", "engine.log.2", "engine.log.3", "engine.log.4", "engine.log.5",
       "boot-fail.log", "boot-fail.log.1",
       "boot-diag.log", "boot-diag.log.1",
       "boot-segments.log", "boot-segments.log.1",
@@ -71,7 +72,8 @@ class IndependentLogShareTest {
       val manifest = zf.getInputStream(zf.getEntry(LogShare.MANIFEST_NAME)).readBytes().toString(Charsets.UTF_8)
       // 如实标注：每个缺失日志都必须有一条 =absent
       val absents = manifest.lines().count { it.endsWith("=absent") }
-      assertTrue("manifset 必须如实标注缺失条目，实得 $absents 条", absents >= 12)
+      // 候选面 6 条 + dsh-day.log 1 条 = 7 条全缺（issue #1599 后 engine.log 不再计入）。
+      assertTrue("manifset 必须如实标注缺失条目，实得 $absents 条", absents >= 7)
       assertTrue("manifest 必须自我说明「没有任何条目被静默丢弃」", manifest.contains("没有"))
     }
     // 报告里也要如实
@@ -82,8 +84,8 @@ class IndependentLogShareTest {
   @Test
   fun sanitizeFailureDiscardsEntryAndIsReported() {
     val filesDir = tmp.newFolder("files")
-    // 造一份「一定存在」的日志
-    File(filesDir, "engine.log").writeText("SECRET-RAW-CONTENT token=abc123\n")
+    // 造一份「一定存在」的日志（issue #1599：engine.log 已不在候选面内，改用壳侧启动日志）。
+    File(filesDir, "boot-diag.log").writeText("SECRET-RAW-CONTENT token=abc123\n")
     val zip = File(tmp.root, "diag.zip")
     val inputs = LogShare.fileEntries(filesDir, null)
     // 注入一个必然失败的脱敏器（覆盖 fail-closed 分支）
@@ -91,11 +93,11 @@ class IndependentLogShareTest {
     assertTrue(result.ok)
     ZipFile(zip).use { zf ->
       val names = zf.entries().toList().map { it.name }
-      assertFalse("脱敏失败时绝不写入该条目", names.contains("engine.log"))
+      assertFalse("脱敏失败时绝不写入该条目", names.contains("boot-diag.log"))
       val manifest = zf.getInputStream(zf.getEntry(LogShare.MANIFEST_NAME)).readBytes().toString(Charsets.UTF_8)
       assertTrue(
         "manifest 必须标注 sanitize-failed",
-        manifest.contains("engine.log=" + LogSanitizer.DEREDACT_FAILED),
+        manifest.contains("boot-diag.log=" + LogSanitizer.DEREDACT_FAILED),
       )
       // 更强：整个包里不得出现原始密文
       for (e in zf.entries()) {
@@ -109,25 +111,25 @@ class IndependentLogShareTest {
   @Test
   fun presentLogIsPackedAfterSanitizing() {
     val filesDir = tmp.newFolder("files")
-    File(filesDir, "engine.log").writeText("dsh web: http://127.0.0.1:3080/?token=FIXTURESESSIONTOKEN1234567890ABCDEFGHIJKLM\n")
+    File(filesDir, "boot-diag.log").writeText("dsh web: http://127.0.0.1:3080/?token=FIXTURESESSIONTOKEN1234567890ABCDEFGHIJKLM\n")
     val zip = File(tmp.root, "diag.zip")
     val result = LogShare.packTo(zip, LogShare.fileEntries(filesDir, null))
     assertTrue(result.ok)
     ZipFile(zip).use { zf ->
-      val entry = zf.getEntry("engine.log")
+      val entry = zf.getEntry("boot-diag.log")
       assertNotNull("有内容的日志应被写入", entry)
       val text = zf.getInputStream(entry).readBytes().toString(Charsets.UTF_8)
       assertFalse("启动令牌必须已被脱敏", text.contains("FIXTURESESSIONTOKEN1234567890ABCDEFGHIJKLM"))
       assertTrue("脱敏后应保留 URL 形状", text.contains("token=***"))
     }
-    assertTrue("report 应标 present", result.report.any { it.startsWith("engine.log=present") })
+    assertTrue("report 应标 present", result.report.any { it.startsWith("boot-diag.log=present") })
   }
 
   // ── manifest 必须恒定在场，且逐条状态与 report 一致 ─────────────────────────
   @Test
   fun manifestIsAlwaysPresentAndMatchesReport() {
     val filesDir = tmp.newFolder("files")
-    File(filesDir, "engine.log").writeText("ok\n")
+    File(filesDir, "boot-diag.log").writeText("ok\n")
     val zip = File(tmp.root, "diag.zip")
     val result = LogShare.packTo(zip, LogShare.fileEntries(filesDir, null))
     ZipFile(zip).use { zf ->
@@ -192,7 +194,7 @@ class IndependentLogShareTest {
   @Test
   fun zipEntryNamesHaveNoTraversalOrPrefixes() {
     val filesDir = tmp.newFolder("files")
-    File(filesDir, "engine.log").writeText("ok\n")
+    File(filesDir, "boot-diag.log").writeText("ok\n")
     File(filesDir, "boot-diag.log").writeText("ok\n")
     val zip = File(tmp.root, "diag.zip")
     LogShare.packTo(zip, LogShare.fileEntries(filesDir, null))

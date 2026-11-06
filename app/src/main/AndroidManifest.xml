@@ -122,10 +122,24 @@
       </intent-filter>
     </receiver>
 
+    <!--
+      issue #1605：`launchMode="singleTop"`。
+
+      缺陷形态：此前没有 launchMode（= standard），而来件处理只在 `onCreate` 调用。
+      ① 发送方带 FLAG_ACTIVITY_SINGLE_TOP/CLEAR_TOP 时走 `onNewIntent`，来件完全不被处理
+         —— 文件既不拷贝也不提示，用户以为分享成功了；
+      ② 只带 NEW_TASK 时 standard 语义再压一个实例，而 `webViewRef` 与
+         `OverlayService.frameConsumer` 是进程级单例，旧实例 onDestroy 会清掉新实例的
+         frame consumer，无障碍 webSnapshot/webAction 可能指到被压下面的 WebView。
+
+      singleTop 让「应用已在前台」的来件走 onNewIntent（同一实例、同一 WebView、同一 consumer），
+      而冷启动仍走 onCreate —— 两条路径现在共用 `handleIncomingIntent`。
+    -->
     <activity
       android:name=".MainActivity"
       android:enableOnBackInvokedCallback="true"
       android:exported="true"
+      android:launchMode="singleTop"
       android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
       android:windowSoftInputMode="adjustResize">
       <intent-filter>

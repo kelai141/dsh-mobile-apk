@@ -3,10 +3,9 @@ package com.dsharnessmobile.shell
 import android.content.Context
 import org.json.JSONObject
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import java.util.TimeZone
+import java.time.Instant
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 
 /**
  * 授权审计（原生侧写面，与 dsh-android-bridge 插件同路径同格式：
@@ -45,9 +44,18 @@ object ControlAudit {
   /** 审计记录的工具名（与插件侧 `tool` 字段同面）。 */
   const val TOOL = "shell-native"
 
-  private val TS = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
-    timeZone = TimeZone.getTimeZone("UTC")
-  }
+  /**
+   * issue #1601：时间戳格式化必须**线程安全**。
+   *
+   * 旧实现是 object 级共享的 `SimpleDateFormat`（非线程安全）。并发 [entry]（两条 op 同时收口，
+   * 正是 ControlPoller 双实例并存的现场）会让 `format()` 产出错乱时间戳或直接抛异常，
+   * 而 [log] 外层 `catch (_: Throwable)` 静默吞掉——**审计行直接消失**。取证面因此不可信。
+   *
+   * `DateTimeFormatter` 不可变且线程安全（java.time）。格式串、字面量 `Z` 与毫秒位数与旧实现
+   * 逐字一致，下游解析口径不变；时区由 `withZone(UTC)` 而不是包一层 `Date` 决定。
+   */
+  private val TS: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC)
 
   /**
    * 纯函数：构造一条审计记录（不落盘、不依赖 Context）。
@@ -64,7 +72,7 @@ object ControlAudit {
       "audit result 必须是 $RESULT_OK/$RESULT_FAILED/$RESULT_DENIED 之一，实得 '$result'"
     }
     return JSONObject()
-      .put("ts", TS.format(Date()))
+      .put("ts", TS.format(Instant.now()))
       .put("action", action)
       .put("tool", TOOL)
       .put("args", JSONObject(args as Map<*, *>))

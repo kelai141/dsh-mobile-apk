@@ -97,13 +97,23 @@ internal object LogShare {
   /**
    * 候选日志文件（**白名单**，不做目录遍历）。
    *
-   * 只收壳侧自有的诊断面：engine.log 及其轮转世代、boot-fail / boot-diag / boot-segments
-   * 及各自一代轮转。刻意**不含** home/.dsh 下的配置、凭据、工作区与会话内容——
-   * 「不主动包含无关数据」是结构性的，不靠运行时过滤。
+   * 只收壳侧自有的诊断面：boot-fail / boot-diag / boot-segments 及各自一代轮转。
+   * 刻意**不含** home/.dsh 下的配置、凭据、工作区与会话内容——「不主动包含无关数据」
+   * 是结构性的，不靠运行时过滤。
+   *
+   * issue #1599：`engine.log` 及其 5 代轮转**已移出白名单**。
+   *
+   * 缺陷形态：白名单挡的是**文件名**，挡不住**内容**。`engine.log` 是引擎 stdout/stderr 的
+   * 原样重定向（见 `LogCollector` 的自述），里面就是完整会话：模型读过的文件内容、工具输出、
+   * 用户路径。而 [LogSanitizer] 只覆盖七类凭据形态（token/secret/password/apikey/…），
+   * 一条都不会命中这些内容，于是「脱敏过」的说法在用户按「分享诊断包」时是假的。
+   *
+   * 为什么去掉它不损失定位能力：启动期问题的证据是壳侧自有那三条（boot-fail / boot-diag /
+   * boot-segments，含分段耗时与失败原因）；`engine.log` 只在「引擎起来了但行为不对」时才有
+   * 额外价值，而那条路径的取证应当由用户知情后另行提供，不能混在「一键诊断包」里默认外发。
    */
   internal fun candidateFiles(filesDir: File): List<File> {
     val names = listOf(
-      "engine.log", "engine.log.1", "engine.log.2", "engine.log.3", "engine.log.4", "engine.log.5",
       "boot-fail.log", "boot-fail.log.1",
       "boot-diag.log", "boot-diag.log.1",
       "boot-segments.log", "boot-segments.log.1",

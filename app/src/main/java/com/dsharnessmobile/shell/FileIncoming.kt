@@ -69,6 +69,43 @@ object FileIncoming {
   }
 
   /** 路径校验：仅接受白名单前缀的真实路径，拒绝上级跳转。返回可拷资源 Uri 描述或 null。 */
+   * 本应用自己 FileProvider 的 authority（issue #1567）。
+   *
+   * `AndroidManifest.xml` 里是 `${applicationId}.fileprovider`，applicationId 为
+   * `com.dsharnessmobile.shell`；这里用 `context.packageName` 动态拼，避免 build variant 改包名后失配。
+   */
+  internal fun ownFileProviderAuthority(packageName: String): String = packageName + ".fileprovider"
+
+  /**
+   * `content://` 是否可作外部来件接受（issue #1567）。
+   *
+   * 抽成纯函数是为了能单测：本仓单测 `unitTests.isReturnDefaultValues = true`，`Uri.parse` /
+   * `uri.authority` 在 JVM 下恒为 null，直接对 validate 断言拿不到真值（见
+   * FileExternalBridgeTest 的同类说明）。判据本身是纯字符串比较，不该因为测试环境而不可测。
+   *
+   * @param authority 来件 Uri 的 authority（可为 null，表示无 authority 的畸形 Uri）。
+   * @param packageName 本应用包名。
+   * @returns true 表示可作为外部来件接受。
+   */
+  internal fun acceptsContentAuthority(authority: String?, packageName: String): Boolean =
+    authority != ownFileProviderAuthority(packageName)
+
+  /**
+   * 路径校验：仅接受白名单前缀的真实路径，拒绝上级跳转。返回可拷资源 Uri 描述或 null。
+   *
+   * issue #1567：`content://` **不再无条件放行**。来件入口是 exported 的 MainActivity，调用方是
+   * 任意已安装应用；而本应用自己的 FileProvider 映射了 `home/.dsh/workspaces/` 等私有目录
+   * （`res/xml/file_paths.xml`）。FileProvider 虽 `exported=false`，但调用方若与本应用同 uid
+   * 侧提供的 Uri 属于「本应用自产」语义——外部应用构造 `content://<本包>.fileprovider/...` 时
+   * 框架的授权检查与同 uid 情形不同，但**读取侧的权限判定不该建立在「猜对方是谁」上**。
+   *
+   * 判据取「authority 等于本应用 FileProvider」：那是我们自己的出口，其内容已经在
+   * [processIncomingPath] 的调用链里由壳侧掌控，不需要再经这道外部来件门。允许它反而会把
+   * 「私有目录里的 .credentials.yaml」变成可被外部 Intent 驱动的拷贝源——正是同文件
+   * SAFE_PREFIXES 注释里写明的那个缺陷形态，`file://` 分支挡住了，`content://` 分支曾经绕过。
+   *
+   * 壳侧自产来件（拍照）不经过本函数：`PhotoCaptureController` 直接调 [processIncomingPath]。
+   */
   fun validate(uriString: String, context: Context): Uri? {
     // A content URI's encoded document id is opaque. URLDecoder on the whole URI turns `%2F`
     // into a path separator before DocumentsProvider sees it, so a valid external file can become
@@ -77,7 +114,10 @@ object FileIncoming {
     val uri = try { Uri.parse(uriString) } catch (_: Exception) { return null }
     if (uri.scheme == null) return null
     val ok = when (uri.scheme) {
-      "content" -> true // 内容提供者：临时读授权；只拷贝不引用
+      // issue #1567：内容提供者按 authority 判。本应用 FileProvider 的 Uri 一律拒绝——
+      // 它映射了私有目录（home/.dsh/workspaces 等），放行等于把私有文件变成可驱动拷贝源。
+      // 其它 authority 只持临时读授权、只拷贝不引用，仍是合法来件通道。
+      "content" -> acceptsContentAuthority(uri.authority, context.packageName)
       "file" -> {
         val p = uri.path ?: return null
         val prefixes = safePrefixes(context)

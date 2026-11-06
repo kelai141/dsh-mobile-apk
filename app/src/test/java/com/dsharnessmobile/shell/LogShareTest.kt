@@ -85,7 +85,6 @@ class LogShareTest {
     assertEquals(
       "候选清单必须逐条点名（白名单），不得随目录内容增长",
       listOf(
-        "engine.log", "engine.log.1", "engine.log.2", "engine.log.3", "engine.log.4", "engine.log.5",
         "boot-fail.log", "boot-fail.log.1",
         "boot-diag.log", "boot-diag.log.1",
         "boot-segments.log", "boot-segments.log.1",
@@ -99,30 +98,72 @@ class LogShareTest {
   @Test
   fun missingLogsAreReportedAsAbsentInTheManifest() {
     val files = filesDir()
-    // 只有 engine.log 存在，其余全缺。
-    File(files, "engine.log").writeText("dsh: warning: 2 entries did not activate\n")
+    // 只有 boot-fail.log 存在，其余全缺（issue #1599：engine.log 已不在候选面内）。
+    File(files, "boot-fail.log").writeText("dsh: warning: 2 entries did not activate\n")
 
     val result = LogShare.packTo(zipTarget(), LogShare.fileEntries(files, null))
     assertTrue(result.ok)
     val manifest = entryText(zipTarget(), LogShare.MANIFEST_NAME)
-    assertTrue("存在的条目必须是 present", manifest.contains("engine.log=present"))
-    assertTrue("缺失的条目必须如实标注 absent", manifest.contains("engine.log.1=absent"))
-    assertTrue("boot-fail 缺失也要标注", manifest.contains("boot-fail.log=absent"))
+    assertTrue("存在的条目必须是 present", manifest.contains("boot-fail.log=present"))
+    assertTrue("缺失的条目必须如实标注 absent", manifest.contains("boot-fail.log.1=absent"))
+    assertTrue("boot-diag 缺失也要标注", manifest.contains("boot-diag.log=absent"))
     assertTrue("当日日志没有时不得凭空造", manifest.contains("dsh-day.log=absent"))
     assertFalse("不得出现空状态（例如 name=）", manifest.contains("=\n"))
   }
 
   @Test
-  fun engineLogRotationsAreCollectedWhenPresent() {
+  fun bootLogRotationsAreCollectedWhenPresent() {
     val files = filesDir()
-    File(files, "engine.log").writeText("current\n")
-    File(files, "engine.log.1").writeText("previous generation\n")
+    File(files, "boot-diag.log").writeText("current\n")
+    File(files, "boot-diag.log.1").writeText("previous generation\n")
     val result = LogShare.packTo(zipTarget(), LogShare.fileEntries(files, null))
     assertTrue(result.ok)
     val names = entryNames(zipTarget())
-    assertTrue(names.contains("engine.log"))
-    assertTrue("轮转世代也要收（失败现场常在前一代里）", names.contains("engine.log.1"))
-    assertFalse("不存在的世代不得伪造条目", names.contains("engine.log.2"))
+    assertTrue(names.contains("boot-diag.log"))
+    assertTrue("轮转世代也要收（失败现场常在前一代里）", names.contains("boot-diag.log.1"))
+    assertFalse("不存在的世代不得伪造条目", names.contains("boot-diag.log.2"))
+  }
+
+  /**
+   * issue #1599：诊断包**不得**默认带上引擎会话日志。
+   *
+   * 缺陷形态：白名单挡的是文件名，挡不住内容。`engine.log` 是引擎 stdout/stderr 的原样重定向，
+   * 里面是完整会话（模型读过的文件、工具输出、用户路径），而 LogSanitizer 只认七类凭据形态，
+   * 一条都不命中——用户按「分享诊断包」时以为发出去的是脱敏日志，实际是完整对话。
+   *
+   * 判据是**行为**：造一份真实存在、内容可辨识的 engine.log（含轮转世代），走真实的
+   * [LogShare.fileEntries] + [LogShare.packTo]，断言 ZIP 条目名、候选清单与 ZIP 全部字节里
+   * 都没有它。把 engine.log 加回白名单，这条立刻红。
+   */
+  @Test
+  fun engineConversationLogNeverEntersTheDiagnosticPackage() {
+    val files = filesDir()
+    val conversation = "user: 帮我读一下 /home/me/notes/预算.md\nassistant: 好的，内容是……\n"
+    File(files, "engine.log").writeText(conversation)
+    for (generation in 1..5) File(files, "engine.log." + generation).writeText(conversation)
+    File(files, "boot-fail.log").writeText("stage=engine-start-false\n")
+
+    val result = LogShare.packTo(zipTarget(), LogShare.fileEntries(files, null))
+    assertTrue("打包本身必须成功（缺 engine.log 不是失败）", result.ok)
+
+    val names = entryNames(zipTarget())
+    assertTrue("壳侧自有启动日志必须仍在包里（去掉 engine.log 不得连带丢证据）", names.contains("boot-fail.log"))
+    assertFalse(
+      "engine.log 不得进包（实测条目：" + names.joinToString(",") + "）",
+      names.any { it == "engine.log" || it.startsWith("engine.log.") },
+    )
+    assertFalse(
+      "候选清单同样不得再点名 engine.log",
+      LogShare.candidateFiles(files).map { it.name }.any { it == "engine.log" || it.startsWith("engine.log.") },
+    )
+    // 内容级反证：就算有人只改条目名，ZIP 内也不得出现会话正文。
+    ZipFile(zipTarget()).use { zf ->
+      for (entry in zf.entries()) {
+        val text = zf.getInputStream(entry).readBytes().toString(Charsets.UTF_8)
+        assertFalse("ZIP 条目 " + entry.name + " 不得含会话正文", text.contains("预算.md"))
+        assertFalse("ZIP 条目 " + entry.name + " 不得含会话正文", text.contains("帮我读一下"))
+      }
+    }
   }
 
   // ── ③ 脱敏单出口 ────────────────────────────────────────────────────────────
@@ -132,14 +173,14 @@ class LogShareTest {
     val files = filesDir()
     val secret = "sk-proj-AbCd1234EfGh5678IjKl9012"
     val jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig"
-    File(files, "engine.log").writeText(
+    File(files, "boot-diag.log").writeText(
       "boot ok\nAuthorization: Bearer " + jwt + "\napiKey: \"" + secret + "\"\n" +
         "dsh web: http://127.0.0.1:3080/?token=SECRETSESSIONTOKEN123\n",
     )
     val result = LogShare.packTo(zipTarget(), LogShare.fileEntries(files, null))
     assertTrue(result.ok)
 
-    val body = entryText(zipTarget(), "engine.log")
+    val body = entryText(zipTarget(), "boot-diag.log")
     assertFalse("sk- 密钥不得进包", body.contains(secret))
     assertFalse("Bearer 令牌不得进包", body.contains(jwt))
     assertFalse("启动令牌不得进包", body.contains("SECRETSESSIONTOKEN123"))
@@ -425,7 +466,7 @@ class LogShareTest {
     outDir.mkdirs()
     val files = filesDir()
     // 真实形态的日志 + 真实形态的凭据（必须被打码）。
-    File(files, "engine.log").writeText(
+    File(files, "boot-segments.log").writeText(
       "dsh: warning: 2 entries did not activate\n" +
         "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sigpart\n" +
         "apiKey: \"sk-proj-FIXTUREKEY1234567890\"\n" +

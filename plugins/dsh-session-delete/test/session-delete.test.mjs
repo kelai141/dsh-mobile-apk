@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { existsSync } from 'node:fs'
+import { existsSync, rmSync } from 'node:fs'
 import { mkdtemp, mkdir, writeFile, readdir, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -231,11 +231,15 @@ test('removeSession refuses even an unloaded session when the probe is unavailab
 test('a directory that vanishes mid-delete reports not-found, not a hard failure', async () => {
   const home = await homeWith([ID])
   const dir = join(sessionsRoot(home), '--workspace--', ID)
+  // issue #1617：注入点从 beforeRemove 换成 logger —— beforeRemove 现在跑在 rename 之后，
+  // 拿它删目录时移动早就成功了，测不到「移动途中目录消失」。
   await assert.rejects(
     deleteStoredSession({
       home,
       sessionId: ID,
-      beforeRemove: async () => { await rm(dir, { recursive: true, force: true }) },
+      logger: (level, message) => {
+        if (message === 'resolved session directory') rmSync(dir, { recursive: true, force: true })
+      },
     }),
     (error) => error instanceof SessionDeleteError && error.code === 'not-found',
   )

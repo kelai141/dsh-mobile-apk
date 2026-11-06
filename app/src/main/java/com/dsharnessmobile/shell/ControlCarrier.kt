@@ -88,10 +88,18 @@ internal object ControlCarrier {
     LogCollector.log(TAG, "control carrier started (a11y=" + (a11y != null) + ")")
   }
 
+  /**
+   * issue #1601：停机时一并清 [appContext]。
+   *
+   * 旧实现只丢 poller 引用，appContext 仍指着刚被销毁的服务上下文：此后 [handle] 里
+   * vd/sh 两族 op 仍会拿着一个已死的 Context 去真执行（而不是报 carrier-not-started），
+   * 于是「承载已停」这件事在错误面上看不出来。
+   */
   @Synchronized
   fun stop() {
     poller?.stop()
     poller = null
+    appContext = null
     LogCollector.log(TAG, "control carrier stopped")
   }
 
