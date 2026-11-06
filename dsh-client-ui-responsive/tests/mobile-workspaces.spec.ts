@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
   IconCloseFillRegular: () => null,
   IconCloseOutlineRegular: () => null,
@@ -91,6 +91,13 @@ function viewport(width = 800, height = 1200) {
 
 function rect(left: number, top: number, width: number, height: number): DOMRect {
   return { x: left, y: top, left, top, width, height, right: left + width, bottom: top + height, toJSON: () => ({}) } as DOMRect
+}
+
+/** 逻辑第 [logical] 格当前被画到哪个物理槽位（issue #1628 的判据读数）。 */
+function slotOf(grid: HTMLElement, logical: string): string | null {
+  const cell = [...grid.querySelectorAll<HTMLElement>(':scope > [data-dockkit-host="dock"]')]
+    .find(node => node.getAttribute('data-dockkit-column') === logical)
+  return cell?.getAttribute('data-dsh-workspace-slot') ?? null
 }
 
 function pointer(type: string, target: EventTarget, x: number, y: number) {
@@ -279,6 +286,18 @@ function makeHarness() {
     setMountedSession: (id: string | undefined) => { mountedSession = id },
   }
 }
+
+/**
+ * 每个用例都从「未换位」起步。
+ *
+ * 换位状态持久化在 localStorage（`dsh-mobile-workspace-swap:<session>`），而 jsdom 的
+ * localStorage 在同文件内跨用例共享：前一条用例换过位，后一条一开始就是换位态，
+ * 于是「换位后」的断言会在**没换位**的现场里跑，读数看起来随机。这条清理是判据成立的前提，
+ * 不是顺手加的习惯（issue #1627/#1628 的新用例都依赖它）。
+ */
+beforeEach(() => {
+  try { localStorage.clear() } catch { /* private storage */ }
+})
 
 afterEach(() => {
   for (const workspaces of mounted.splice(0)) workspaces.detach()
@@ -587,6 +606,79 @@ describe('mobile workspace navigation over native Dockkit planners', () => {
     expect(sections[1]!.hasAttribute('data-dsh-workspace-swap-target')).toBe(false)
     // 交换已提交：本地换位状态翻转（物理槽位由刷新时的 data-dsh-workspace-slot 映射落地）。
     expect(localStorage.getItem(swappedKey)).toBe('1')
+    // issue #1628：标题写「松手交换两个窗格的**物理位置**」，旧用例只断言了 localStorage 与 transform，
+    // 把实现里的 `1 - logical` 改成 `logical` 用例照样全绿而窗格永远不换位。这里直接钉物理槽位：
+    // 换位后逻辑第一格必须落到物理槽位 1（屏幕右侧/下侧），逻辑第二格落到 0。
+    expect(slotOf(h.grid, '0'), '换位后逻辑第一格必须画在物理槽位 1').toBe('1')
+    expect(slotOf(h.grid, '1'), '换位后逻辑第二格必须画在物理槽位 0').toBe('0')
+    h.workspaces.detach()
+  })
+
+  /**
+   * issue #1628 的第二半：槽位取值必须校验。
+   *
+   * `Number(cell.getAttribute('data-dockkit-column'))` 在属性缺失/改名时得 0（Number(null) === 0），
+   * 于是两个 dock cell 都拿到 slot='0'，CSS 的 `grid-column:1;grid-row:1 !important` 把两块塞进同一格，
+   * 后画的整个盖住前一块。判据：把两个 cell 的 column 属性都抹掉（模拟上游改名），实现必须**跳过**，
+   * 而不是给两块都写 slot=0。
+   */
+  it('0.14.9：data-dockkit-column 缺失时不得把两块塞进同一物理槽位（issue #1628）', async () => {
+    viewport()
+    const h = makeHarness()
+    expect(h.workspaces.split()).toBe(true)
+    await h.flush()
+    expect(slotOf(h.grid, '0')).toBe('0')
+    expect(slotOf(h.grid, '1')).toBe('1')
+    // 模拟上游改名：属性还在但值不可解析（等价于 Number(null) 得 0 的那条路径）。
+    for (const cell of h.grid.querySelectorAll<HTMLElement>(':scope > [data-dockkit-host="dock"]')) {
+      cell.setAttribute('data-dockkit-column', 'not-a-slot')
+      cell.removeAttribute('data-dsh-workspace-slot')
+    }
+    h.workspaces.refresh()
+    // refresh() 只排一帧（requestAnimationFrame）；不等到那一帧，读到的是**旧**属性值——
+    // 这条用例的第一版就踩在这里：实现去掉取值校验时它照样全绿（负控不红 = 判据没有判别力）。
+    await h.flush()
+    const slots = [...h.grid.querySelectorAll<HTMLElement>(':scope > [data-dockkit-host="dock"]')]
+      .map(cell => cell.getAttribute('data-dsh-workspace-slot'))
+    expect(slots, '取值非法时不得给出槽位（尤其不得两块都是 0）').toEqual([null, null])
+    h.workspaces.detach()
+  })
+
+  /**
+   * issue #1627：换位后分隔条的键盘方向与 aria 读数都必须按**物理**那一格算。
+   *
+   * 缺陷形态：sizes[0] 是逻辑第一格，paintRatio 在换位时按 physical = 1 - ratio 画，而键盘分支
+   * 直接把 ratio 写回 resizeSplit。于是换位后按 ArrowLeft（ratio 减小）反而让物理位置 1-ratio 增大，
+   * 分隔条向右跑；aria-valuenow 报的也是对面那格的百分比。
+   *
+   * 判据是**方向**：换位后 ArrowLeft 必须让物理占比变小（分隔条向左/上移动）。
+   */
+  it('0.14.9：换位后 ArrowLeft 让分隔条向左（不是向右），aria 读数按物理格（issue #1627）', async () => {
+    viewport()
+    const h = makeHarness()
+    expect(h.workspaces.split()).toBe(true)
+    await h.flush()
+    const divider = h.grid.querySelector<HTMLElement>('[data-dockkit-divider]')!
+    // 先换位（Enter 走 swap()）。
+    const grip = h.grid.querySelector<HTMLElement>('[data-workspace-grip]')!
+    grip.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await h.flush()
+    expect(localStorage.getItem('dsh-mobile-workspace-swap:' + SESSION)).toBe('1')
+    const before = h.dock.getSnapshot().state.nodes[h.dock.getSnapshot().state.rootId]
+    const beforeSizes = before.kind === 'split' ? [...before.sizes] : []
+    expect(beforeSizes).toEqual([0.5, 0.5])
+    // 换位后：物理第一格 = 逻辑第二格。ArrowLeft 让物理占比变小 ⇒ 逻辑 sizes[0] 必须**变大**。
+    divider.focus()
+    divider.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true }))
+    await h.flush()
+    const after = h.dock.getSnapshot().state.nodes[h.dock.getSnapshot().state.rootId]
+    const afterSizes = after.kind === 'split' ? [...after.sizes] : []
+    expect(afterSizes[0], '换位后 ArrowLeft 必须让逻辑第一格变大（物理分隔条向左）').toBeGreaterThan(0.5)
+    // aria 读数按物理那一格：逻辑 sizes[0]=0.6 ⇒ 物理第一格 = 0.4 ⇒ aria-valuenow 约 40。
+    // 重新取节点：store 变更会重画 grid（renderNativeLayout 里 replaceChildren），旧引用已脱离文档。
+    const liveDivider = h.grid.querySelector<HTMLElement>('[data-dockkit-divider]')!
+    const ariaNow = Number(liveDivider.getAttribute('aria-valuenow'))
+    expect(ariaNow, 'aria-valuenow 必须报物理第一格的百分比').toBeLessThan(50)
     h.workspaces.detach()
   })
 

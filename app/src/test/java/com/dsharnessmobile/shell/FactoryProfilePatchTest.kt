@@ -85,6 +85,73 @@ class FactoryProfilePatchTest {
     assertTrue(result.changes.isNotEmpty())
   }
 
+  /**
+   * issue #1623：工厂件里**多子条目的 `- insert:` 组**，组内声明的 disabled 同样具有权威。
+   *
+   * 缺陷形态：`merge()` 收集工厂 disabled 语义时的条件是 `want != null && block.entries.size == 1`。
+   * 任何 insert 组只要有两个及以上子条目，组子条目声明的 disabled 就被静默丢弃——既不纠正 live，
+   * 也不进 factoryDisabled。当前工厂件的 disabled 全在顶层单条目块上，所以今天不触发；双条目组
+   * （shell-termux + host-web-compat）只要加一行 disabled 就掉进这个洞，且零日志。
+   *
+   * 判据是**行为**：同样两份文本，只有在组里放两个子条目时才判红——把块级限制加回去即复现。
+   */
+  @Test
+  fun multiEntryInsertGroupStillOwnsItsDisabledSemantics() {
+    val factory = """
+      - insert:
+        - id: shell-termux
+          name: '@dsh-android/dsh-shell-termux'
+          disabled: false
+        - id: host-web-compat
+          name: '@dsh-android/dsh-host-web-compat'
+          disabled: false
+    """.trimIndent() + "\n"
+    // live 两个子条目都残留旧版 disabled: true（用户升级前的工厂件形态）。
+    val live = """
+      - insert:
+        - id: shell-termux
+          name: '@dsh-android/dsh-shell-termux'
+          disabled: true
+        - id: host-web-compat
+          name: '@dsh-android/dsh-host-web-compat'
+          disabled: true
+    """.trimIndent() + "\n"
+
+    val result = FactoryProfilePatch.merge(live, factory)
+
+    // 组内第一个子条目的工厂语义必须落到 live 上（旧实现只在「块里只有一个条目」时才收集）。
+    val group = FactoryProfilePatch.topLevelBlocks(result.text).first { it.contains("shell-termux") }
+    assertTrue(
+      "多子条目组内的工厂 disabled 必须纠正 live（实测：" + result.text.replace("\n", " | ") + "）",
+      group.contains("disabled: false"),
+    )
+    assertFalse("不得把仍然 disabled: true 的子条目留在组里", group.contains("disabled: true"))
+    assertTrue("必须留下可追溯的纠正说明", result.changes.any { it.contains("disabled") })
+  }
+
+  /**
+   * 反证（负控）对照：单条目 insert 组的行为**不得**因为上面放宽而改变。
+   * 两条一起跑才能把「放宽了块级限制」与「干脆不纠正」区分开。
+   */
+  @Test
+  fun singleEntryInsertGroupKeepsItsDisabledSemantics() {
+    val factory = """
+      - insert:
+        - id: shell-termux
+          name: '@dsh-android/dsh-shell-termux'
+          disabled: true
+    """.trimIndent() + "\n"
+    val live = """
+      - insert:
+        - id: shell-termux
+          name: '@dsh-android/dsh-shell-termux'
+    """.trimIndent() + "\n"
+
+    val result = FactoryProfilePatch.merge(live, factory)
+    val group = FactoryProfilePatch.topLevelBlocks(result.text).first { it.contains("shell-termux") }
+    assertTrue("单条目组的工厂 disabled 语义恒在（这条不许被上面的放宽改坏）", group.contains("disabled: true"))
+  }
+
   @Test
   fun userOwnedBlocksSurviveUntouched() {
     val factory = "- id: bash-sandbox\n  disabled: true\n"

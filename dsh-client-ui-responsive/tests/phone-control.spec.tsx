@@ -121,10 +121,49 @@ describe('PhoneControlSection（手机控制设置页）', () => {
     expect(getScreenScope).toHaveBeenCalled()
   })
 
-  it('开放屏幕范围：壳桥缺失时回落安全默认 virtual-only', async () => {
+  /**
+   * issue #1629：桥缺席时**不得**用安全默认值冒充事实。
+   *
+   * 旧实现把 `virtual-only` / `0.75` / `true` 当成「读到的值」显示：桌面宿主或旧壳（没有
+   * getScreenScope/setScreenScope）上，页面把「仅虚拟屏幕/75%/浮窗开」当事实；用户改成
+   * 「全部开放」后 setScope 静默 no-op，紧接着的 refreshScope 把值弹回且无回执。
+   * 用户按一个假值做隐私决策。
+   *
+   * 判据是**行为**：三面都置灰 + 各有一行 data-code 的「状态不可读」；写调用不得发出。
+   */
+  it('桥缺席时三面如实报不可读：置灰 + 说明行，且不得把占位值当事实写回壳侧', async () => {
     const el = await render({})
-    const select = el.querySelector('select[aria-label="开放屏幕范围"]') as HTMLSelectElement
-    expect(select.value).toBe('virtual-only')
+    const scopeSelect = el.querySelector('select[aria-label="开放屏幕范围"]') as HTMLSelectElement
+    const scaleSelect = el.querySelector('select[aria-label="虚拟屏分辨率档位"]') as HTMLSelectElement
+    expect(scopeSelect.disabled, '屏幕范围不可读时必须置灰').toBe(true)
+    expect(scaleSelect.disabled, '档位不可读时必须置灰').toBe(true)
+    expect(toggleOf(el, '虚拟屏浮窗（退后台自动显示）').disabled, '浮窗开关不可读时必须置灰').toBe(true)
+    expect(el.querySelector('[data-code="screen-scope-unreadable"]'), '必须有一行说明为什么不可读').toBeTruthy()
+    expect(el.querySelector('[data-code="vdisplay-scale-unreadable"]')).toBeTruthy()
+    expect(el.querySelector('[data-code="vdisplay-float-unreadable"]')).toBeTruthy()
+    expect(el.textContent).toContain('状态不可读')
+    // 置灰的控件点不动：不得产生任何壳侧写调用（旧实现在这里静默 no-op 且值弹回）。
+    await act(async () => { scopeSelect.value = 'all'; scopeSelect.dispatchEvent(new Event('change', { bubbles: true })) })
+    expect(scopeSelect.value, '不可读时不得把占位值改成用户点的那一项（那是假事实）').toBe('virtual-only')
+  })
+
+  /** 负控对照：桥在时同一批控件必须可读可写（否则上一条可以靠「永远置灰」蒙混过关）。 */
+  it('桥在时三面可读可写（上一条不得靠永久置灰过关）', async () => {
+    const state: { scope: Scope } = { scope: 'all' }
+    const el = await render({
+      getScreenScope: () => state.scope,
+      setScreenScope: (next: Scope) => { state.scope = next },
+      getVdisplayScale: () => 1,
+      setVdisplayScale: () => {},
+      getVdisplayFloatEnabled: () => false,
+      setVdisplayFloatEnabled: () => {},
+    })
+    const scopeSelect = el.querySelector('select[aria-label="开放屏幕范围"]') as HTMLSelectElement
+    expect(scopeSelect.disabled).toBe(false)
+    expect(scopeSelect.value).toBe('all')
+    expect((el.querySelector('select[aria-label="虚拟屏分辨率档位"]') as HTMLSelectElement).disabled).toBe(false)
+    expect(toggleOf(el, '虚拟屏浮窗（退后台自动显示）').disabled).toBe(false)
+    expect(el.querySelector('[data-code="screen-scope-unreadable"]')).toBeNull()
   })
 
   it('虚拟屏档位：读壳值并写壳桥（0.5 / 0.75 / 1）', async () => {
@@ -866,6 +905,49 @@ describe('应用级 Root 授权面（2026-09-30 主人定例）', () => {
     expect(buttonByText(el2, '检测 root 授权').disabled).toBe(true)
     expect(el2.textContent).toContain('本机没有可用的 su')
     expect(el2.textContent).not.toContain('Root 管理器：')
+  })
+
+  /**
+   * issue #1592：「授权 AI 使用 root」在 no-su 态**连关都关不掉**。
+   *
+   * 缺陷形态：开关的 disabled 判据是 `!readable || state === 'no-su' || (!granted && …)`——
+   * `no-su` 这一项没和「当前是否已开启」绑定。壳侧 RootAccess.state() 的判据是
+   * `su == null && state != requesting → no-su`，而 granted 是 SharedPreferences 持久化的，两者独立。
+   * 已 root 设备上开启 AI root → 卸载 root / 加进 Magisk DenyList → 回设置页：开关 ON 但灰、
+   * 点不动，无法从本页收回已生效的 root 授权。
+   *
+   * 判据是**行为**：granted=true + no-su 时必须可点（能关）；granted=false + no-su 时必须置灰
+   * （开不了）。两条一起跑，才能把「放宽了关闭」与「干脆不置灰」区分开。
+   */
+  it('no-su 且已开启：开关必须可点（收回授权不依赖 su）', async () => {
+    const rootGrantOff = vi.fn()
+    const el = await render({
+      shizukuStatus: () => shizukuJson(),
+      rootGrantState: () => rootGrantJson({ granted: true, consentValid: true, channelRoot: true, rootGranted: true }),
+      rootAccessState: () => rootAccessJson({ state: 'no-su', suExists: false }),
+      setRootGranted: rootGrantOff,
+    })
+    const toggle = toggleOf(el, '授权 AI 使用 root')
+    expect(toggle.checked, '已开启的授权必须显示为开').toBe(true)
+    expect(toggle.disabled, 'no-su 只约束「开」，不约束「关」').toBe(false)
+    // 红字改成「可关闭」口径：不得再说「重试也不会成功」（此时用户要做的是关掉它）。
+    const hint = el.querySelector('[data-code="root-no-su"]')
+    expect(hint, 'no-su 仍要解释为什么读不到 su').toBeTruthy()
+    expect(hint!.textContent).toContain('关闭')
+    expect(hint!.textContent).not.toContain('重试也不会成功')
+    await act(async () => { toggle.click() })
+    expect(rootGrantOff, '关掉必须真的调用壳侧写接口').toHaveBeenCalledWith(false)
+  })
+
+  it('no-su 且未开启：开关仍必须置灰（重试永远不会成功）', async () => {
+    const el = await render({
+      shizukuStatus: () => shizukuJson(),
+      rootGrantState: () => rootGrantJson({ granted: false, consentValid: true, channelRoot: true, rootGranted: true }),
+      rootAccessState: () => rootAccessJson({ state: 'no-su', suExists: false }),
+    })
+    expect(toggleOf(el, '授权 AI 使用 root').disabled).toBe(true)
+    const hint = el.querySelector('[data-code="root-no-su"]')
+    expect(hint!.textContent).toContain('重试也不会成功')
   })
 
   it('Root 设置分为应用授权、AI 免责开关、折叠维护三组，互不混淆', async () => {
