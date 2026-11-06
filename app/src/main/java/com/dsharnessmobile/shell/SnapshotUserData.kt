@@ -127,6 +127,32 @@ internal object SnapshotUserData {
   }
 
   /** Imports the matching exported format; a legacy YAML cannot overwrite a migrated profile patch. */
+  /**
+   * 拒绝执行型 YAML 标签（issue #1566）。
+   *
+   * 真因：导入源是 `<外部存储>/exports/config/` 下的文件——**任意应用都能写**（Android 10+ 的
+   * MediaStore 只要 `RELATIVE_PATH=Documents/dshdata/exports/config` 即可，无需权限）。而这份文档
+   * 会被 cordis loader 以 `with (ctx) { return eval(expr) }` 求值（cordis-plugin-loader
+   * lib/index.js:233-237；本仓 `scripts/profile-web.cordis.patch.yml` 对同一机制有记录）。
+   * 于是「一个共享目录里的文件」等价于「以应用 uid 执行的代码」。
+   *
+   * 判据取**逐行扫描标签**而不是解析 YAML：这里要做的是拒绝，不是理解——凡出现执行型标签就
+   * 整份不导入，宁可误拒也不误放；也因此不会被「先让解析器抛错」的构造绕过。
+   *
+   * 覆盖 `!!js` / `!js`（含 `!!js/...` 子类型），大小写不敏感，允许标签与名字间有空白。
+   * 行内 `#` 之后是注释，不参与判定（用户可能在注释里说明自己删掉了什么）。
+   *
+   * @returns 首个违规的 (行号从 1 起, 命中的标签原文)，无违规返回 null。
+   */
+  internal fun firstExecutableTag(document: List<String>): Pair<Int, String>? {
+    val pattern = Regex("""!!?\s*js\b""", RegexOption.IGNORE_CASE)
+    document.forEachIndexed { index, line ->
+      val code = line.substringBefore("#")
+      val match = pattern.find(code)
+      if (match != null) return (index + 1) to match.value
+    }
+    return null
+  }
   @Synchronized
   fun importConfiguration(dshRoot: File, sharedRoot: File): File {
     val target = configurationDocument(dshRoot)
@@ -135,6 +161,15 @@ internal object SnapshotUserData {
       "未找到 exports/config/" + target.name + "；请先导出当前活动配置，再编辑并导入（旧 settings.yaml 不会覆盖已迁移的 profile）"
     }
     require(target.isFile && !Files.isSymbolicLink(target.toPath())) { "活动配置尚未生成，请等待引擎初始化后再导入" }
+    // issue #1566：**先校验，再备份，再落盘**。顺序要紧——旧实现是「先备份活动配置、再覆盖」，
+    // 若把校验放在备份之后，一次被拒的导入仍会用坏文档顶掉上一份好备份，等于二次损失。
+    val offending = firstExecutableTag(source.readLines())
+    require(offending == null) {
+      val where = if (offending == null) "" else "第 " + offending.first + " 行（" + offending.second + "）"
+      "拒绝导入：exports/config/" + target.name + " 含执行型 YAML 标签 " + where +
+        "。这类标签会被引擎以 eval 求值（等价于以应用身份执行任意代码），" +
+        "而 exports/ 目录任意应用可写。请移除 !!js 标签后重新导入。"
+    }
     replaceConfiguration(target, File(target.parentFile, target.name + ".import-backup"))
     replaceConfiguration(source, target)
     return target
