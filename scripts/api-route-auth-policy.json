@@ -729,6 +729,75 @@
       "verdict": "not-mounted",
       "packageName": "@deepseek-ai/dsh-webhook-github",
       "evidence": "依据三条：packages/bundle/base/cordis.patch.yml 与 packages/bundle/web-app/cordis.patch.yml 均无 webhook-github 行；本仓 scripts/profile-web.cordis.patch.yml 无 insert；上游 apps/cli/package.json 的 dependencies 已无该包（仅留在 devDependencies），发布安装树不产出。发行 profile 不挂载，config.path 无实际注册。"
+    },
+    {
+      "source": "packages/boot/plugin-manager/src/index.ts",
+      "form": "fetch",
+      "expression": "DETAIL_FILE_PATH",
+      "pathText": "/api/plugin-manager/detail-file",
+      "verdict": "protected",
+      "guardedBy": "packages/client/connection/src/index.ts :: web :: API_PATH",
+      "bundleRowId": "plugin-manager",
+      "evidence": "字面量精确 Fetch 路由（const DETAIL_FILE_PATH = '/api/plugin-manager/detail-file'，L92），注册在 scope.connection.fetch 上；全部 connection.fetch 注册都由 client-connection 的 /api 前缀 handler 承载：该注册块内先调 connection.admit(req)，rejection 直接 writeHead 并 end，通过后才 waterfall 到 createSharedFetchHandler(API_PATH) 分发到各 fetch 站点（见 guardedBy 指向的那条 protected 判定）。因此这些 fetch 路由自身无需独立 guard —— 它们不在 webServer 上注册，拿不到绕过 /api 前缀的路径。",
+      "pathEvidence": {
+        "file": "packages/boot/plugin-manager/src/index.ts",
+        "marker": "const DETAIL_FILE_PATH = '/api/plugin-manager/detail-file'"
+      }
+    },
+    {
+      "source": "packages/boot/plugin-market/src/index.ts",
+      "form": "fetch",
+      "expression": "DETAIL_FILE_PATH",
+      "pathText": "/api/plugin-market/detail-file",
+      "verdict": "not-mounted",
+      "packageName": "@deepseek-ai/dsh-plugin-market",
+      "evidence": "插件市场客户端包：packages/bundle/{base,web-app,headless,sdk-app,sdk-minimal,acp-app}/cordis.patch.yml 六份 bundle 全都不含 plugin-market 行，本仓 scripts/profile-web.cordis.patch.yml 也不登记它 —— 该包不在任何装配面，路由不会被注册到设备上。",
+      "pathEvidence": {
+        "file": "packages/boot/plugin-market/src/index.ts",
+        "marker": "const DETAIL_FILE_PATH = '/api/plugin-market/detail-file'"
+      }
+    },
+    {
+      "source": "packages/experimental/liveshare/src/host/owner-http-routes.ts",
+      "form": "fetch",
+      "expression": "'/api/liveshare.ownerCredential'",
+      "pathText": "/api/liveshare.ownerCredential",
+      "verdict": "not-mounted",
+      "packageName": "@deepseek-ai/dsh-experimental-liveshare",
+      "evidence": "experimental 包：六份上游 bundle 的 cordis.patch.yml 均不含 liveshare 行，本仓 profile-web.cordis.patch.yml 亦不登记，快照里也没有 dsh-experimental-liveshare —— 该包不在任何装配面，路由不会被注册到设备上。"
+    },
+    {
+      "source": "packages/experimental/liveshare/src/host/owner-http-routes.ts",
+      "form": "fetch",
+      "expression": "path",
+      "pathText": null,
+      "dynamicPathReason": "registerOwnerJsonRoute 是路径参数化的注册工厂（L158-172 把入参 path 直接交给 connection.fetch.register），路径在调用点才确定，构建期没有单一常量可钉；本文件里它的两个调用点分别注册 ownerLoginStart 与另一条登录路由，已各自登记。",
+      "verdict": "not-mounted",
+      "packageName": "@deepseek-ai/dsh-experimental-liveshare",
+      "evidence": "同文件同一包：liveshare 不在任何上游 bundle 行、也不在本仓 profile patch 里，工厂函数根本不会被执行，因此这条参数化注册在任何设备上都注册不出路由。"
+    },
+    {
+      "source": "packages/experimental/liveshare/src/host/owner-http-routes.ts",
+      "form": "fetch",
+      "expression": "'/api/liveshare.ownerLoginStart'",
+      "pathText": "/api/liveshare.ownerLoginStart",
+      "verdict": "not-mounted",
+      "packageName": "@deepseek-ai/dsh-experimental-liveshare",
+      "evidence": "experimental 包：六份上游 bundle 的 cordis.patch.yml 均不含 liveshare 行，本仓 profile-web.cordis.patch.yml 亦不登记，快照里也没有 dsh-experimental-liveshare —— 该包不在任何装配面，路由不会被注册到设备上。"
+    },
+    {
+      "source": "packages/session-query/session-log-export/src/index.ts",
+      "form": "fetch",
+      "expression": "SESSION_MARKDOWN_EXPORT_PATH",
+      "pathText": "/api/session.markdown",
+      "verdict": "protected",
+      "guardedBy": "packages/client/connection/src/index.ts :: web :: API_PATH",
+      "bundleRowId": "session-log-download",
+      "evidence": "字面量精确 Fetch 路由（routes.ts 的 SESSION_MARKDOWN_EXPORT_PATH），注册在 connectionOf(ctx).fetch 上；全部 connection.fetch 注册都由 client-connection 的 /api 前缀 handler 承载：该注册块内先调 connection.admit(req)，rejection 直接 writeHead 并 end，通过后才 waterfall 到 createSharedFetchHandler(API_PATH) 分发到各 fetch 站点（见 guardedBy 指向的那条 protected 判定）。因此这些 fetch 路由自身无需独立 guard —— 它们不在 webServer 上注册，拿不到绕过 /api 前缀的路径。",
+      "pathEvidence": {
+        "file": "packages/session-query/session-log-export/src/routes.ts",
+        "marker": "export const SESSION_MARKDOWN_EXPORT_PATH = '/api/session.markdown'"
+      }
     }
   ]
 }
