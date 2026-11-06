@@ -8,10 +8,34 @@
  */
 
 import { reportUserFacingResult } from '../export-result.ts'
+import { SESSION_ID_ATTRIBUTE } from './session-marker.ts'
+
+/**
+ * 来件来源（与引擎侧 `IncomingOrigin` 同一闭集）。
+ *
+ * - `external`：用户从**别的应用**分享/打开进来（PRD F5）。此时可能根本没有「当前会话」，
+ *   硬规则是**强制新会话**，绝不并入既有会话（F5.2）。
+ * - `camera`：用户在**会话 A 里主动点「+ → 拍照」**。意图就是「加进我现在这个会话」——
+ *   把它按 F5.2 处理，正是「拍完照片进了新会话」这个缺陷。
+ */
+export type IncomingDraftOrigin = 'external' | 'camera'
+
+/** 来源闭集；缺省（字段缺失/未知值）一律 `external`。 */
+export const DRAFT_ORIGINS: readonly IncomingDraftOrigin[] = ['external', 'camera']
+
+/** 缺省来源 = 外部分享 = 强制新会话（F5.2 守门值）。 */
+export const DEFAULT_DRAFT_ORIGIN: IncomingDraftOrigin = 'external'
+
+/** 归一来源：只有显式的 `camera` 才离开缺省；其余（含伪造值）一律 external。 */
+export function normalizeDraftOrigin(value: unknown): IncomingDraftOrigin {
+  return value === 'camera' ? 'camera' : DEFAULT_DRAFT_ORIGIN
+}
 
 export interface IncomingDraftItem {
   entryId: string
   sessionId?: string
+  /** 来源：决定目标是新建会话还是页面当前会话。缺字段的老条目按 external。 */
+  origin: IncomingDraftOrigin
   state: 'received' | 'session-created'
   name: string
   bytes: number
@@ -50,7 +74,8 @@ function itemOf(value: unknown): IncomingDraftItem | undefined {
   if (item.state !== 'received' && item.state !== 'session-created') return undefined
   if (typeof item.name !== 'string' || item.name === '') return undefined
   if (typeof item.bytes !== 'number' || !Number.isFinite(item.bytes) || item.bytes < 0) return undefined
-  return item as IncomingDraftItem
+  // 缺字段（老引擎/老记录）与未知值都归一成 external：漏传不得升级成「并入既有会话」。
+  return { ...(item as IncomingDraftItem), origin: normalizeDraftOrigin(item.origin) }
 }
 
 function claimOf(value: unknown): ClaimReply | undefined {
@@ -134,7 +159,11 @@ export class IncomingDraftConsumer {
   private readonly exhausted = new Set<string>()
   /** 已经提示过「临时工作区不可用」的条目（S3-21：同一 entryId 只提示一次）。 */
   private readonly workspaceWarned = new Set<string>()
+  /** camera 来件「当前会话已失效 → 回落新建」的次数（有界，防无限空会话）。 */
+  private readonly scopeFallbacks = new Map<string, number>()
   private static readonly MAX_HYDRATE_ATTEMPTS = 5
+  /** camera 来件回落新建会话的次数上限（当前会话被删掉时的收敛点）。 */
+  private static readonly MAX_SCOPE_FALLBACKS = 2
   /** issue #1413：一批条目的并发上限。一条慢/失败不得阻塞同批其它条目。 */
   private static readonly POLL_CONCURRENCY = 4
 
@@ -162,6 +191,25 @@ export class IncomingDraftConsumer {
       console.warn('[dsh-mobile] incoming draft queue retry deferred:', String(error))
     } finally {
       this.busy = false
+    }
+  }
+
+  /**
+   * 页面**当前会话** id（壳侧自产来件的目标；缺陷 1）。
+   *
+   * 真源 = `<html data-dsh-session-id>`（session-marker.ts 发布，见该文件头注：它跟踪的是
+   * 客户端会话快照的 `current`，无会话时移除属性）。这里**只读属性、不猜会话**：
+   * 属性缺失 = 当前没有会话，调用方必须落回「新建会话」的原有行为。
+   *
+   * 为什么不走 runtime 面再问一次：会话服务面在冷启/导航投影未就绪时会缺席或抛错，
+   * 而 DOM 属性由页面自己在有会话时同步维护——它是这里唯一既权威又不会抛的判据。
+   */
+  private currentSessionId(): string | undefined {
+    try {
+      const value = document.documentElement.getAttribute(SESSION_ID_ATTRIBUTE)
+      return value === null || value.trim() === '' ? undefined : value.trim()
+    } catch {
+      return undefined
     }
   }
 
@@ -208,6 +256,49 @@ export class IncomingDraftConsumer {
     })
   }
 
+  /**
+   * camera 回落新建会话的**有界**判据。
+   *
+   * 为什么必须有界：回落路径会 createSession，而 createSession 在异常情况下每轮 poll 都可能
+   * 成功一次 ⇒ 无限空会话。这里用一张按 entryId 计数的表把回落次数封在
+   * [MAX_SCOPE_FALLBACKS]，超出即放弃本条（并让既有的 exhausted 提示接手）。
+   *
+   * @returns true = 还允许回落一次（并已记账）。
+   */
+  private fallbackFor(item: IncomingDraftItem): boolean {
+    const used = (this.scopeFallbacks.get(item.entryId) ?? 0) + 1
+    this.scopeFallbacks.set(item.entryId, used)
+    return used <= IncomingDraftConsumer.MAX_SCOPE_FALLBACKS
+  }
+
+  /**
+   * 为一条来件新建空白会话（页面侧是唯一建会话的地方；见文件头注）。
+   *
+   * @returns 新会话 id；拿不到临时工作区或创建失败时 undefined（调用方直接 return，
+   *   条目留在队列等下一轮，不静默丢件）。
+   */
+  private async createBlankSessionFor(item: IncomingDraftItem): Promise<string | undefined> {
+    const cwd = window.androidBridge?.incomingWorkspacePath?.() ?? ''
+    if (cwd === '') {
+      // S3-21：拿不到临时工作区路径时旧实现**彻底静默丢弃**（连一次 console.warn 都在另一条
+      // 分支上）——用户分享了一个文件、看到应用打开了、然后什么都没有，文件不见了。这里给
+      // 一次性可见回执（同一 entryId 只提示一次，不随轮询刷屏），并说清下一步。
+      this.notifyWorkspaceUnavailable(item)
+      return undefined
+    }
+    try {
+      document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'session-create-call')
+      const sessionId = await this.runtime.createSession(cwd)
+      this.createdSessions.set(item.entryId, sessionId)
+      try { this.runtime.openSession(sessionId) } catch { /* attachment handoff is Session-addressed */ }
+      document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'session-opened')
+      return sessionId
+    } catch (error) {
+      console.warn('[dsh-mobile] incoming session creation deferred:', String(error))
+      return undefined
+    }
+  }
+
   private async hydrate(item: IncomingDraftItem): Promise<void> {
     if (this.hydrating.has(item.entryId)) return
     if (this.exhaustedFor(item)) return
@@ -215,7 +306,10 @@ export class IncomingDraftConsumer {
     document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'hydrate:' + item.state)
     try {
       const locallyCreated = this.createdSessions.get(item.entryId)
-      let sessionId = item.sessionId ?? locallyCreated
+      // camera 来件的目标 = **页面当前会话**（缺陷 1 的落点）：不建新会话、也不做可见导航。
+      // 只在这里取一次；拿不到就落回原行为（下面 createSession 分支），不会静默丢件。
+      const cameraTarget = item.origin === 'camera' ? this.currentSessionId() : undefined
+      let sessionId = item.sessionId ?? locallyCreated ?? cameraTarget
       if (sessionId !== undefined) {
         document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'session-refresh')
         try {
@@ -239,29 +333,20 @@ export class IncomingDraftConsumer {
           }
         }
         if (sessionId !== undefined) {
-          try { this.runtime.openSession(sessionId) } catch { /* navigation may lag an addressable Session */ }
-          document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'session-opened')
+          // camera 来件已经在用户眼前那个会话里：**不得导航**。openSession 是可见导航，
+          // 哪怕 id 相同也会把用户从当前视图甩走一次（拍照返回后画面跳走 = 缺陷本身）。
+          if (sessionId !== cameraTarget) {
+            try { this.runtime.openSession(sessionId) } catch { /* navigation may lag an addressable Session */ }
+          }
+          document.documentElement.setAttribute(
+            'data-dsh-incoming-draft-poll',
+            sessionId === cameraTarget ? 'session-target-current' : 'session-opened',
+          )
         }
       }
       if (sessionId === undefined) {
-        const cwd = window.androidBridge?.incomingWorkspacePath?.() ?? ''
-        if (cwd === '') {
-          // S3-21：拿不到临时工作区路径时旧实现**彻底静默丢弃**（连一次 console.warn 都在另一条
-          // 分支上）——用户分享了一个文件、看到应用打开了、然后什么都没有，文件不见了。这里给
-          // 一次性可见回执（同一 entryId 只提示一次，不随轮询刷屏），并说清下一步。
-          this.notifyWorkspaceUnavailable(item)
-          return
-        }
-        try {
-          document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'session-create-call')
-          sessionId = await this.runtime.createSession(cwd)
-          this.createdSessions.set(item.entryId, sessionId)
-          try { this.runtime.openSession(sessionId) } catch { /* attachment handoff is Session-addressed */ }
-          document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'session-opened')
-        } catch (error) {
-          console.warn('[dsh-mobile] incoming session creation deferred:', String(error))
-          return
-        }
+        sessionId = await this.createBlankSessionFor(item)
+        if (sessionId === undefined) return
       }
       // J1 admits through the same InputHub shell that owns the rendered composer. The Session
       // controller resolves before that UI scope can be bound on cold WebView startup, so retain
@@ -269,10 +354,27 @@ export class IncomingDraftConsumer {
       // issue #1413：**不原地自旋**。旧实现最多 100 × 100ms = 10s 卡在这一条上，而 poll 当时
       // 是串行的 ⇒ 队列里其余文件在这 10s 内一个都不处理。会话作用域在冷启动后很快绑定，
       // 条目留在队列里，下一轮 poll 再来即可。
-      const scope = this.runtime.sessionScope(sessionId)
+      let scope = this.runtime.sessionScope(sessionId)
       if (scope === undefined) {
-        document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'scope-deferred')
-        return
+        // camera 来件指向**页面当前会话**，而那个会话可能已经被删掉/失效（用户删了会话但
+        // 页面还没刷新）。此时「留在队列等下一轮」是**死循环**：会话真的没了，scope 永远
+        // undefined，条目永远不消失、每轮 poll 都白跑一次。
+        //
+        // 处置：camera 且当前会话 scope 不可用 ⇒ **回落新建会话**（用户意图是「把照片加进来」，
+        // 加不进当前会话就新建一个，总比丢失好），并且**有界**——回落次数计入既有的
+        // MAX_HYDRATE_ATTEMPTS 预算，不会无限新建。external 的既有行为不变（它本来就是新建）。
+        if (item.origin === 'camera' && sessionId === cameraTarget && this.fallbackFor(item)) {
+          document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'scope-fallback-create')
+          this.createdSessions.delete(item.entryId)
+          const created = await this.createBlankSessionFor(item)
+          if (created === undefined) return
+          sessionId = created
+          scope = this.runtime.sessionScope(sessionId)
+        }
+        if (scope === undefined) {
+          document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'scope-deferred')
+          return
+        }
       }
       let ticket = ''
       try {

@@ -351,7 +351,8 @@ object FileIncoming {
   }
 
   /** null = read failure. Callers that delete files must skip the pass rather than assume empty. */
-  private fun pendingPaths(context: Context): List<String>? = readPending(pendingFile(context))
+  private fun pendingPaths(context: Context): List<String>? =
+    readPending(pendingFile(context))?.map { it.second }
 
   /** Engine queue records whose source file must survive task removal until the browser claims it. */
   private fun queuedSessionPaths(context: Context): List<String>? =
@@ -452,35 +453,52 @@ object FileIncoming {
     }
   }
 
-  private fun enqueuePending(context: Context, path: String) {
+  /**
+   * 入待发清单。
+   *
+   * **同一路径已存在时保留原来源**：先入队的那条来源代表「这次来件是什么」，后到的入队不得
+   * 把它改写（判据见 FileIncomingOriginTest：先 external 后 camera 同路径 → 仍是 external）。
+   * 这条纪律的实际意义是：来源是**来件的属性**，不是调用时刻的属性；重试期间任何一次重复
+   * 入队都不该让一个外部分享突然获得「并入用户当前会话」的能力。
+   */
+  private fun enqueuePending(context: Context, path: String, origin: String) {
     synchronized(pendingLock) {
       try {
         val f = pendingFile(context)
         val current = readPending(f)
         if (current == null) LogCollector.log("dsh-file-open", "pending ledger enqueue skipped (unreadable)")
-        else writePending(f, current + listOf(path))
+        else if (current.any { it.second == path }) return
+        else writePending(f, current + (normalizeOrigin(origin) to path))
       } catch (_: Exception) {
         LogCollector.log("dsh-file-open", "pending ledger enqueue failed")
       }
     }
   }
 
-  /** null = the ledger exists but could not be read; [] = it is absent or empty. */
-  internal fun readPending(f: File): List<String>? {
+  /**
+   * 读待发清单。
+   *
+   * 行格式是 `origin<TAB>path`（见 [encodePendingLine]）；**不含分隔符的旧行按 external 解读**
+   * （升级前落盘的清单原样可读，行为不变）。
+   *
+   * @returns 来源 to 路径；null = 清单存在但读不出来（调用方必须跳过删除/改写）。
+   */
+  internal fun readPending(f: File): List<Pair<String, String>>? {
     if (!f.exists()) return emptyList()
     return try {
-      f.readLines().map { it.trim() }.filter { it.isNotEmpty() }
+      f.readLines().mapNotNull { decodePendingLine(it) }
     } catch (_: Exception) {
       null
     }
   }
 
-  /** Publish a complete ledger with a unique sibling temp file and an atomic replacement. */
-  internal fun writePending(f: File, paths: List<String>) {
+  /** 发布整份清单（唯一临时兄弟文件 + 原子替换）；行格式见 [encodePendingLine]。 */
+  internal fun writePending(f: File, entries: List<Pair<String, String>>) {
     f.parentFile?.mkdirs()
     val temp = File.createTempFile(f.name + ".", ".tmp", f.parentFile)
     try {
-      val text = paths.joinToString("\n") + if (paths.isEmpty()) "" else "\n"
+      val text = entries.joinToString("\n") { encodePendingLine(it.first, it.second) } +
+        if (entries.isEmpty()) "" else "\n"
       java.io.FileOutputStream(temp).use { output ->
         output.write(text.toByteArray(Charsets.UTF_8))
         output.flush()
@@ -496,6 +514,21 @@ object FileIncoming {
     }
   }
 
+  /**
+   * 投递 body（纯函数，JVM 单测直接断言）。
+   *
+   * 缺陷 1 的判据落点：body 必须带 `origin`，否则引擎侧无从区分「外部分享」与「壳侧拍照」，
+   * 只能一律按强制新会话处理 —— 拍照结果就进了新会话。
+   *
+   * @param path 临时工作区内的落点。
+   * @param origin 来源；未归一的值在这里塌回 [ORIGIN_EXTERNAL]。
+   */
+  fun incomingRequestBody(path: String, origin: String): String =
+    org.json.JSONObject()
+      .put("path", path)
+      .put("origin", normalizeOrigin(origin))
+      .toString()
+
   /** 单次投递尝试（无内部重试）。端点语义：HTTP 200 但 body `{ok:false}` = 拒收
    *  （路径形态/不存在）——必须核对 body 的 ok 字段，只看状态码会把拒收当成功（静默丢件）。
    *
@@ -503,7 +536,7 @@ object FileIncoming {
    *  先查 exact 表），必须带共享控制令牌头 `X-DSH-Control-Token`（与无障碍控制队列同一枚
    *  DeviceControlService.token；引擎侧实时读壳侧 prefs 比对）。不带 = 401 fail-closed，
    *  表现为「投递静默失败」——因此投递方与鉴权必须同批发布。 */
-  private fun deliverOnce(context: Context, path: String): Boolean {
+  private fun deliverOnce(context: Context, path: String, origin: String): Boolean {
     return try {
       val conn = java.net.URL(EngineEndpoint.url + "/api/android/file-incoming")
         .openConnection(java.net.Proxy.NO_PROXY) as java.net.HttpURLConnection
@@ -513,7 +546,7 @@ object FileIncoming {
       conn.readTimeout = 5000
       // 共享控制令牌（壳侧生成、写 dsh-adb.xml；引擎侧同一枚）——缺它一律 401。
       conn.setRequestProperty("X-DSH-Control-Token", DeviceControlService.token(context))
-      conn.outputStream.use { it.write(org.json.JSONObject().put("path", path).toString().toByteArray()) }
+      conn.outputStream.use { it.write(incomingRequestBody(path, origin).toByteArray()) }
       val code = conn.responseCode
       val ok = if (code in 200..299) {
         val body = conn.inputStream?.use { it.readBytes().toString(Charsets.UTF_8) } ?: ""
@@ -536,8 +569,8 @@ object FileIncoming {
       val f = pendingFile(context)
       val lines = readPending(f) ?: return false
       if (lines.isEmpty()) { try { f.delete() } catch (_: Exception) {} ; return true }
-      val accepted = HashSet<String>()
-      for (line in lines) if (deliverOnce(context, line)) accepted += line
+      val accepted = HashSet<Pair<String, String>>()
+      for (entry in lines) if (deliverOnce(context, entry.second, entry.first)) accepted += entry
       try {
         val current = readPending(f) ?: return false
         val remaining = current.filter { it !in accepted }
@@ -592,7 +625,7 @@ object FileIncoming {
           LogCollector.log("dsh-file-open", "incoming processed: " + target.absolutePath)
           // 引擎侧插件端点：路径交给 dsh-android-file-open 强制新会话。
           // 待发清单 + 短促重试（引擎就绪钩子会再补投，冷启动不再丢件）：
-          enqueuePending(context, target.absolutePath)
+          enqueuePending(context, target.absolutePath, ORIGIN_EXTERNAL)
           // issue #1006：重试不在这条单线程上——否则后一个来件要排队等满 20s（旧实现把
           // 20s 重试循环放在 ioExecutor 上）。拷贝与入队已完成，等待受理交给类尾的
           // deliveryRetryExecutor；下面这行在 IO 线程上同步返回。
@@ -616,15 +649,26 @@ object FileIncoming {
    * @param context 宿主上下文。
    * @param copied 已落在 [tmpWorkspace] 内的文件（调用方应已用 [copyIn] 拷入）。
    * @param notify 投递结果提示（主线程回调；title, text）。
+   * @param origin 来件来源，缺省 [ORIGIN_EXTERNAL]（强制新会话）。壳侧自产拍照传
+   *   [ORIGIN_CAMERA]，页面侧据此把成品并入**当前会话**而不是新建一个。
    */
-  fun processIncomingPath(context: Context, copied: File, notify: (title: String, text: String) -> Unit) {
+  fun processIncomingPath(
+    context: Context,
+    copied: File,
+    notify: (title: String, text: String) -> Unit,
+    origin: String = ORIGIN_EXTERNAL,
+  ) {
     val main = android.os.Handler(android.os.Looper.getMainLooper())
+    val normalized = normalizeOrigin(origin)
     ioExecutor.execute {
       try {
         withIncomingDeliveryAfterSweep(pendingLock, activeDeliveries, { sweepExpired(context) }) {
           recordOpening(context, copied.absolutePath)
-          LogCollector.log("dsh-file-open", "incoming processed (shell-produced): " + copied.absolutePath)
-          enqueuePending(context, copied.absolutePath)
+          LogCollector.log(
+            "dsh-file-open",
+            "incoming processed (shell-produced, origin=" + normalized + "): " + copied.absolutePath,
+          )
+          enqueuePending(context, copied.absolutePath, normalized)
         }
         // issue #1006：重试**不在这条单线程上**——否则后一个来件要排队等满 20s。
         // 拷贝与入队已经完成，这里只把「等待受理」交给独立的重试线程。
@@ -773,4 +817,68 @@ object FileIncoming {
   } catch (_: Exception) {
     emptyList()
   }
+
+  // ── 来件来源（缺陷 1：拍照后附件被投进新会话）──────────────────────────────
+  //
+  // 投递链把「来源」送到引擎侧，引擎侧把它记进队列记录，页面侧据此决定目标会话：
+  //   external = 用户从别的应用分享/打开进来（PRD F5）⇒ **强制新会话**（F5.2 硬规则）；
+  //   camera   = 用户在会话 A 里主动点「+ → 拍照」⇒ 并入**当前会话**。
+  //
+  // 缺省一律 external（fail-closed 到强制新会话）：漏传来源的调用方不得升级成「并入既有会话」。
+
+  /** 外部分享/打开（缺省）。 */
+  const val ORIGIN_EXTERNAL = "external"
+
+  /** 壳侧自产来件：原生拍照。 */
+  const val ORIGIN_CAMERA = "camera"
+
+  /** 来源闭集（新增一个必须同时改引擎侧与页面侧判据）。 */
+  val KNOWN_ORIGINS: Set<String> = setOf(ORIGIN_EXTERNAL, ORIGIN_CAMERA)
+
+  /**
+   * 归一来源：只有显式的 [ORIGIN_CAMERA] 才离开缺省，其余（含 null / 空串 / 拼错 / 伪造）
+   * 一律塌回 [ORIGIN_EXTERNAL]。
+   *
+   * 为什么 fail-closed 到这个方向：external 的行为是「强制新会话」——那是既有且安全的语义。
+   * 反过来把未知值当 camera，等于让一个拼错的字符串获得「并入用户当前会话」的能力。
+   */
+  fun normalizeOrigin(origin: String?): String =
+    if (origin == ORIGIN_CAMERA) ORIGIN_CAMERA else ORIGIN_EXTERNAL
+
+  /** 待发清单行的分隔符：`origin<TAB>path`。路径本身不含 TAB（文件名净化已剔除控制字符）。 */
+  internal const val PENDING_SEPARATOR = "\t"
+
+  /**
+   * 待发清单行编码（`origin<TAB>path`）。
+   *
+   * 为什么清单必须带来源：清单是**重试的唯一真源**——投递失败（引擎还没 listen）后由
+   * [flushPending] 补投，而 [flushPending] 也被引擎就绪钩子调用（EngineStartFlow boot 探活
+   * 成功点）。清单只存路径的话，重试那一步就丢了来源，拍照来件会在补投时重新变成
+   * 「强制新会话」——缺陷换个时机复活。
+   */
+  internal fun encodePendingLine(origin: String, path: String): String =
+    normalizeOrigin(origin) + PENDING_SEPARATOR + path
+
+  /**
+   * 待发清单行解码。
+   *
+   * **向后兼容**：不含分隔符的行是本次改动之前（或老版本）落盘的旧格式，一律按
+   * [ORIGIN_EXTERNAL] 解读——它们本来就该走强制新会话，升级后行为不变。
+   *
+   * @returns 来源 to 路径；空行/纯空白返回 null。
+   */
+  internal fun decodePendingLine(line: String): Pair<String, String>? {
+    // 不能先 trim 整行：TAB 也是空白字符，trim 会把「origin 后紧跟分隔符、路径为空」的畸形行
+    // 折成 "origin"，于是它会被当成一条**旧格式路径**——既丢了来源语义，又把来源字符串
+    // 当成文件路径去投递。这里只去掉行尾换行（readLines 已去，留作防御），其余原样解析。
+    val text = line.trimEnd('\r', '\n')
+    if (text.trim().isEmpty()) return null
+    val cut = text.indexOf(PENDING_SEPARATOR)
+    // cut <= 0：没有分隔符（旧格式，按 external）或分隔符在最前（畸形行，同样 fail-closed）。
+    if (cut <= 0) return ORIGIN_EXTERNAL to text.trim()
+    val origin = normalizeOrigin(text.substring(0, cut).trim())
+    val path = text.substring(cut + PENDING_SEPARATOR.length).trim()
+    return if (path.isEmpty()) null else origin to path
+  }
+
 }

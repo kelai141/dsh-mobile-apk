@@ -350,10 +350,13 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
       activity.runOnUiThread { job.reply(payload) }
       return
     }
-    // 交给既有投递链：与「外部分享一个文件进来」完全同一条路（待发清单 + 重试 + 引擎受理）。
-    FileIncoming.processIncomingPath(activity, copied) { title, text ->
+    // 交给既有投递链（待发清单 + 重试 + 引擎受理），但**声明来源是 camera**：
+    // 外部分享的语义是「强制新会话」（PRD F5.2，那时可能根本没有当前会话），而拍照是用户在
+    // 会话 A 里主动点的——意图就是「加进我现在这个会话」。不声明来源，引擎侧只能按外部分享
+    // 处理，成品就进了新会话（缺陷 1）。
+    FileIncoming.processIncomingPath(activity, copied, { title, text ->
       toast(title + "：" + text)
-    }
+    }, FileIncoming.ORIGIN_CAMERA)
     val longEdge = try {
       val opts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
       android.graphics.BitmapFactory.decodeFile(job.target.absolutePath, opts)

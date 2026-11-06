@@ -332,11 +332,37 @@ interface HostSessionController {
 
 type IncomingState = 'received' | 'session-created'
 
+/**
+ * 来件来源（闭集）。决定「目标会话」是新建还是当前会话。
+ *
+ * - `external`：用户从**别的应用**把文件分享/打开进来（PRD F5）。此时应用可能都没开、
+ *   根本没有「当前会话」，所以硬规则是**强制新会话**，绝不并入既有会话（F5.2）。
+ * - `camera`：用户在**会话 A 里主动点「+ → 拍照」**。意图明确就是「加进我现在这个会话」，
+ *   与外部来件不是同一种语义——把它按 F5.2 处理，正是「拍完照片进了新会话」这个缺陷。
+ *
+ * 缺省一律 `external`（fail-closed 到强制新会话）：任何漏传来源的投递都不得升级成
+ * 「并入既有会话」。伪造/拼错的值同样塌回 `external`。
+ */
+export type IncomingOrigin = 'external' | 'camera'
+
+/** 来源闭集（新增一个必须同时改页面侧与壳侧判据）。 */
+export const INCOMING_ORIGINS: readonly IncomingOrigin[] = ['external', 'camera']
+
+/** 缺省来源 = 外部分享 = 强制新会话（F5.2 守门值）。 */
+export const DEFAULT_ORIGIN: IncomingOrigin = 'external'
+
+/** 把任意输入归一成闭集内的来源；未知值塌回 `external`（绝不因为「没见过」而放行并入）。 */
+export function normalizeOrigin(value: unknown): IncomingOrigin {
+  return value === 'camera' ? 'camera' : DEFAULT_ORIGIN
+}
+
 /** Persistent shell-to-engine queue record. `path` remains host-only and never reaches the Web UI. */
 interface IncomingItem {
   id: string
   ts: string
   path: string
+  /** 来源决定目标会话：external 强制新会话；camera 并入页面当前会话。 */
+  origin: IncomingOrigin
   forcedNewSession: true
   state: IncomingState
   name: string
@@ -349,6 +375,8 @@ interface IncomingItem {
 interface PublicIncomingItem {
   entryId: string
   sessionId?: string
+  /** 来源（页面据此决定「并入当前会话」还是「新建会话」）。 */
+  origin: IncomingOrigin
   state: IncomingState
   name: string
   bytes: number
@@ -375,6 +403,7 @@ function publicItem(item: IncomingItem): PublicIncomingItem {
   return {
     entryId: item.id,
     ...(item.sessionId === undefined ? {} : { sessionId: item.sessionId }),
+    origin: item.origin,
     state: item.state,
     name: item.name,
     bytes: item.bytes,
@@ -395,6 +424,9 @@ function readItems(): IncomingItem[] {
         id: typeof value.id === 'string' && value.id !== '' ? value.id : f,
         ts: typeof value.ts === 'string' ? value.ts : '',
         path: value.path,
+        // 向后兼容：本次改动之前落盘的记录没有 origin 字段，一律按外部分享处理
+        // （= 强制新会话，即它们本来就有的行为）。绝不能因为「字段缺失」而并入既有会话。
+        origin: normalizeOrigin(value.origin),
         forcedNewSession: true,
         state: value.state === 'session-created' || sessionId !== undefined ? 'session-created' : 'received',
         name: typeof value.name === 'string' && value.name !== '' ? value.name : basename(value.path),
@@ -440,10 +472,15 @@ function purgeStaleUnclaimed(mode: 'boot' | 'ttl'): number {
 }
 
 /**
- * 强制新会话请求入队（每个文件一条独立清单；会话由 ensureSessions 创建）。
+ * 来件请求入队（每个文件一条独立清单）。
+ *
  * 路径边界（H3 修复 2026-08-23）：ws+sep 边界 + realpath 规范化，拒绝跨边界 symlink。
+ *
+ * @param path - 临时工作区内的落点。
+ * @param origin - 来源；缺省 `external`（强制新会话，F5.2）。`camera` 表示壳侧自产拍照来件，
+ *   页面侧会把它并入**当前会话**而不是新建。未知值塌回 `external`。
  */
-function enqueueSession(path: string): { ok: boolean; entryId?: string; message: string } {
+function enqueueSession(path: string, origin: IncomingOrigin = DEFAULT_ORIGIN): { ok: boolean; entryId?: string; message: string } {
   const dir = queueDir()
   const ws = resolve(tmpWorkspace())
   const real = safeResolveInside(ws, path)
@@ -457,6 +494,7 @@ function enqueueSession(path: string): { ok: boolean; entryId?: string; message:
     id: entryId,
     ts: new Date().toISOString(),
     path: real,
+    origin: normalizeOrigin(origin),
     forcedNewSession: true,
     state: 'received',
     name: basename(real),
@@ -590,6 +628,9 @@ async function ensureSessionsOnce(): Promise<number> {
   let created = 0
   for (const item of readItems()) {
     if (!item.file || !needsSession(item)) continue
+    // camera 来件的目标是**页面当前会话**，不是新建会话：这里绝不能替它铸一个空白会话，
+    // 否则「拍完照片多出一个空会话」会以另一种形态复活（页面侧也不再调 createSession）。
+    if (item.origin === 'camera') continue
     try {
       let sessionId = ''
       if (controller) {
@@ -821,8 +862,11 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
           settled = true
           clearTimeout(timeout)
           try {
-            const path = (JSON.parse(body) as { path?: string }).path ?? ''
-            const result = enqueueSession(path)
+            const parsed = JSON.parse(body) as { path?: string; origin?: unknown }
+            const path = parsed.path ?? ''
+            // 来源随投递一起到达（壳侧 FileIncoming 负责在重试清单里保住它）。
+            // 缺省/未知一律 external：漏传不得升级成「并入既有会话」。
+            const result = enqueueSession(path, normalizeOrigin(parsed.origin))
             res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
             res.end(JSON.stringify(result))
           } catch (e) {
