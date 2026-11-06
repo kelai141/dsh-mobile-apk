@@ -316,10 +316,6 @@
           "sha256": "24c1f29839918892856a4f402c1c8839efcd2fc44339d9b6bd242f35bb9cfcf8",
           "bytes": 1553
         },
-        "test/_shape-probe.mjs": {
-          "sha256": "ecfb43ce2b151f5e028f048a8ead1deaabc9e5d014eb8b69bec0b537edd01cc2",
-          "bytes": 570
-        },
         "test/logout-inflight-refresh.test.mjs": {
           "sha256": "1c0e4b2a83192309f738aa08f0e971b0cd50275b9b3d0a49bb4b9b3a303343d1",
           "bytes": 5518
@@ -599,10 +595,6 @@
     "package.json": {
       "sha256": "24c1f29839918892856a4f402c1c8839efcd2fc44339d9b6bd242f35bb9cfcf8",
       "bytes": 1553
-    },
-    "test/_shape-probe.mjs": {
-      "sha256": "ecfb43ce2b151f5e028f048a8ead1deaabc9e5d014eb8b69bec0b537edd01cc2",
-      "bytes": 570
     },
     "test/logout-inflight-refresh.test.mjs": {
       "sha256": "1c0e4b2a83192309f738aa08f0e971b0cd50275b9b3d0a49bb4b9b3a303343d1",
