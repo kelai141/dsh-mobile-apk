@@ -68,7 +68,7 @@ object FileIncoming {
     return if (SAFE_PREFIXES.contains(extra)) SAFE_PREFIXES else SAFE_PREFIXES + extra
   }
 
-  /** 路径校验：仅接受白名单前缀的真实路径，拒绝上级跳转。返回可拷资源 Uri 描述或 null。 */
+  /**
    * 本应用自己 FileProvider 的 authority（issue #1567）。
    *
    * `AndroidManifest.xml` 里是 `${applicationId}.fileprovider`，applicationId 为
