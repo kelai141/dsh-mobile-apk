@@ -207,8 +207,6 @@
     "app/src/test/java/com/dsharnessmobile/shell/FactoryProfilePatchTest.kt:228": 1,
     "app/src/test/java/com/dsharnessmobile/shell/FileIncomingCleanupTest.kt:17": 1,
     "app/src/test/java/com/dsharnessmobile/shell/FileIncomingCleanupTest.kt:25": 1,
-    "app/src/test/java/com/dsharnessmobile/shell/FileIncomingSafetyTest.kt:25": 1,
-    "app/src/test/java/com/dsharnessmobile/shell/FileIncomingSafetyTest.kt:92": 1,
     "app/src/test/java/com/dsharnessmobile/shell/GlobalActionCatalogTest.kt:25": 1,
     "app/src/test/java/com/dsharnessmobile/shell/GlobalActionCatalogTest.kt:50": 1,
     "app/src/test/java/com/dsharnessmobile/shell/LogRedactionTest.kt:23": 1,
@@ -769,7 +767,9 @@
     "verify-state-sync.mjs:246": 1,
     "verify-browser-host.mjs:58": 1,
     "verify-state-sync.mjs:161": 1,
-    "MainActivity.kt:519": 1
+    "MainActivity.kt:519": 1,
+    "app/src/test/java/com/dsharnessmobile/shell/FileIncomingSafetyTest.kt:26": 1,
+    "app/src/test/java/com/dsharnessmobile/shell/FileIncomingSafetyTest.kt:93": 1
   },
   "couplings": [
     "B01 -> CI 与云端构建链 | 云端 build-apk.mjs 与本地链门禁集差集必须为 0。0.14.5：原先并列的 apk 仓独立快照 workflow `build-snapshot.yml`（走 inject-snapshot.py 三包注入、无引擎 overlay/补丁/语法降级）已删除，快照构建入口收敛为单一链",
@@ -2210,12 +2210,6 @@
     "app/src/test/java/com/dsharnessmobile/shell/FileIncomingCleanupTest.kt:25": [
       ""
     ],
-    "app/src/test/java/com/dsharnessmobile/shell/FileIncomingSafetyTest.kt:25": [
-      "@Test"
-    ],
-    "app/src/test/java/com/dsharnessmobile/shell/FileIncomingSafetyTest.kt:92": [
-      "@Test"
-    ],
     "app/src/test/java/com/dsharnessmobile/shell/GlobalActionCatalogTest.kt:25": [
       "@Test"
     ],
@@ -3240,6 +3234,12 @@
     ],
     "scripts/check-browser-syntax-floor.mjs:813": [
       "'createSourceFile=' + (typeof ts.createSourceFile === 'function')"
+    ],
+    "app/src/test/java/com/dsharnessmobile/shell/FileIncomingSafetyTest.kt:26": [
+      "@Test"
+    ],
+    "app/src/test/java/com/dsharnessmobile/shell/FileIncomingSafetyTest.kt:93": [
+      "@Test"
     ]
   },
   "symbols": {

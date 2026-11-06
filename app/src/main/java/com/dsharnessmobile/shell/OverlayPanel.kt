@@ -1255,6 +1255,18 @@ class OverlayPanel(private val svc: OverlayService) {
       // 0.13.5: default target = the running session, else the most recent non-blank one.
       var runningId = ""
       var recentId = ""
+      // issue #1573：**存活会话集**必须单独收，不能用 pickerSessions。
+      //
+      // pickerSessions 是**UI 面**的数据：它按官方可见性规则滤掉了 origin=="subagent" 与
+      // `blank && sid != activeSessionId` 的会话。而下面的对账语义是「不在集合里 = 已删除」——
+      // 拿 UI 面当存活面，等于把「被隐藏」判成「被删除」。
+      //
+      // 实际后果（数据丢失）：新建空白会话 → 在侧栏开 AI 浏览器 → 悬浮球此刻 activeSessionId 为空
+      // （空闲态常态）→ 该会话被 `blank && sid != ""` 滤掉 → 对账判定它已消失 → dropWorkspace →
+      // browser.destroy() + profile.dispose()，用户的 URL / 滚动 / 表单 / 正在播放的媒体无提示消失。
+      //
+      // 判据：**sid 非空即存活**。不作任何可见性过滤——可见性是 UI 的事，存活是引擎的事。
+      val liveIds = LinkedHashSet<String>()
       if (code == 200) {
         try {
           val arr = JSONObject(body).optJSONObject("result")
@@ -1264,6 +1276,8 @@ class OverlayPanel(private val svc: OverlayService) {
               val it = arr.optJSONObject(i) ?: continue
               val sid = it.optString("sessionId", "")
               if (sid.isEmpty()) continue
+              // 存活集：先于任何可见性过滤登记（#1573）。
+              liveIds.add(sid)
               // 0.13.8 G2 (A-R1): official visibility rules (same as ui-workspace tree.ts) —
               // subagent sessions are invisible; blank sessions visible only when current.
               if (it.optString("origin", "") == "subagent") continue
@@ -1292,10 +1306,12 @@ class OverlayPanel(private val svc: OverlayService) {
           }
         } catch (_: Exception) {}
       }
-      // issue #1364 便宜路：这份列表就是「当前真实存在的会话集」，顺手对账回收已消失会话的工作台。
-      // 只有 HTTP 200 才动手（失败时 pickerSessions 是空的，回收会把正在看的页面全删掉）。
-      if (code == 200 && pickerSessions.isNotEmpty()) {
-        BrowserHostHolder.reconcileSessionWorkspaces(pickerSessions.map { it.id }.toSet())
+      // issue #1364 便宜路：顺手对账回收**确实已消失**会话的工作台。
+      // issue #1573 修正：这里必须用 liveIds（全量、未过滤），不能用 pickerSessions（可见性过滤后）。
+      // 两者不是同一个集合：subagent 会话与「非当前空白会话」都只从 UI 面消失，仍然真实存在。
+      // 只有 HTTP 200 才动手（失败时 liveIds 是空的，回收会把正在看的页面全删掉）。
+      if (code == 200 && liveIds.isNotEmpty()) {
+        BrowserHostHolder.reconcileSessionWorkspaces(liveIds)
       }
       // Re-validate the target; auto-follow only when unpinned.
       // (A-R5: agent ids from api-session/status must never be stored as session ids.)
