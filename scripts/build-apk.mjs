@@ -99,7 +99,7 @@ const GATE_SCRIPTS = [
   'check-engine-heap-floor.mjs',
   'check-bounded-io.mjs',
   'check-api-route-auth.mjs',
-  'check-protocol-v2.mjs',
+  'check-protocol-v2.mjs', 'check-snapshot-node-floor.mjs',
   'check-tool-output-schema.mjs',
   'check-control-ops.mjs',
   'check-op-registry-parity.mjs',
@@ -108,6 +108,7 @@ const GATE_SCRIPTS = [
   'check-state-registry.mjs',
   'check-bridge-symmetry.mjs',
   'check-gate-skips.mjs',
+  'check-workflow-input-injection.mjs',
   'check-engine-overlay.mjs',
   'check-patch-mounts.mjs',
   // profile 层共享依赖解析（0.15.x）：vendored 订阅插件把 undici 声明为 peer，靠 profile 共享农场的
@@ -142,6 +143,7 @@ const GATE_SCRIPTS = [
   'check-snapshot-builder-output.mjs',
   // 浏览器语法下限（0.14.1 块C G-1）：与本地链同一份实现（差集必须为 0）。
   'check-browser-syntax-floor.mjs',
+  'check-browser-parse-floor.mjs',
   // 构建并发上限（0.14.1 系统级约束）：不得吃满全部逻辑核（MuMu 模拟器/系统稳定）。
   'check-build-parallel-cap.mjs',
   // Kotlin 单测数量反回归（0.14.1 P0）：CI 不跑 Kotlin 单测 + 只按退出码判 = 防线删失仍绿。
@@ -311,8 +313,14 @@ try {
   run('node', [gate('check-bridge-symmetry.mjs')])
   log('门禁：门禁覆盖清单与 SKIP 纪律…')
   run('node', [gate('check-gate-skips.mjs')])
+  run('node', [gate('check-workflow-input-injection.mjs')])
   log('门禁：引擎 overlay 抽验…')
   run('node', [gate('check-engine-overlay.mjs'), snapSrc])
+  // 快照 node 下限（0.2.2-rc.1 适配）：引擎首次声明 engines.node>=24.9.0，而快照 node 由 Termux
+  // nodejs-lts 决定、仓内不钉版本 ⇒ 必须把「声明下限 vs 快照实测」绑成判据，否则回退到 24.8 以下
+  // 在上设备前不会红。只读仓库文件（contract + 取证 JSON + base 归档字节数），与 ABI/快照产物无关。
+  log('门禁：快照 node 版本下限（声明 engines vs 快照实测）…')
+  run('node', [gate('check-snapshot-node-floor.mjs')])
 
   // ---- 3. 插件注入链（python，跨平台）----
   let snapIn
@@ -415,6 +423,11 @@ try {
   // → 纯白无字。判据 = 真实解析器 AST + esbuild 双 arm 逐字节差分（禁 grep），扫全清单。
   log('门禁：浏览器语法下限（AST + 双 arm 差分）…')
   run('node', [gate('check-browser-syntax-floor.mjs'), '--scan', snapIn])
+  // 同一条产物的第二个方向的证据（0.2.2-rc.1 适配补）：上面那门的判据 2 只证明「不低于 esbuild 的
+  // 口径」，而 esbuild 在 chrome87 下不降类字段（门自己标注过这个边界）。这里用真解析器按 ES2021
+  // 档位逐文件 parse——解析失败即老内核解析期抛 SyntaxError、整模块一行不执行。
+  log('门禁：浏览器 ES2021 可解析…')
+  run('node', [gate('check-browser-parse-floor.mjs'), '--scan', snapIn])
   // 快照包名一致性（2026-10-27，issue #154 / apk #480 第 1 条）：注入进各装配 profile 的
   // cordis.patch.yml 里，shell 路径（bashPath/prefix/home/cwd）必须与 app/build.gradle.kts 的
   // applicationId 同源。改包名时漏改 patch，APK 装得上但引擎起不来（路径指向不存在的

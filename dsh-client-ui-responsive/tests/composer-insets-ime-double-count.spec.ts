@@ -8,6 +8,11 @@
 // `--dsh-composer-height` 跟着变大，把「回到底部」浮层又往上顶。
 //
 // 判据打在**实际生成的 CSS 文本**上（不是源码切片）：从模块导出取真值，断言表达式组成。
+//
+// 注意：这只覆盖「键盘弹起时两侧各算一次」这一半。默认（无键盘）状态下输入卡下方仍有
+// 空带与「回到底部」按钮压正文，真因分别是手势热区被当成遮挡高度、以及底部预留落在
+// ResizeObserver 观察的 seat 自身上——行为判据见 composer-insets-seat-height.spec.ts 与
+// mobile-drawer-bottom-inset.spec.ts（issue #783 复查）。
 import { expect, it } from 'vitest'
 import { COMPOSER_INSETS_CSS } from '../src/client/composer-insets.css'
 

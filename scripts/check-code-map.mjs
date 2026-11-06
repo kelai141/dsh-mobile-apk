@@ -26,9 +26,11 @@
 // **误跑保护**：--derive-anchors 会整体改写受版本控制的 EXECUTION-MAP.md（实测 1246 条锚点、
 // 上千行 diff）。它默认只报告「将改动多少条、前后 sha256」，**不碰磁盘**；确认后加 --write 才落盘。
 // 这条与「禁止直接 push main」同性质：会大范围改写文件的操作必须显式表达意图。
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, linkSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { refreshCompletenessProblem, sourceLinesDropProblem } from './lib/refresh-guard.mjs'
+import { writeAtomic } from './lib/atomic-write.mjs'
 import { dirname, join, relative, resolve as resolvePath } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createHash } from 'node:crypto'
 
@@ -132,7 +134,7 @@ const DERIVE_DRY_RUN = argv.includes('--derive-dry-run')
  *   1. 越界即错：路径不在执行地图里、或该文件在文档中没有任何锚点 -> 报错退出，不得静默跳过；
  *   2. 只动 listed：未列出的文件在文档里一字不改；
  *   3. 推不出锚点仍硬失败：绝不回退成行号锚（那正是要淘汰的形态）；
- *   4. 与 --refresh-anchor-baseline 联用时，先改写文档、再重铺基线。
+ *   4. 与 --refresh-anchor-baseline 联用时，**先写基线、再改写文档**（#1607：写序反了会被杀成修不回来的半份）。
  */
 const ONLY_RAW = (() => {
   const i = argv.indexOf('--only')
@@ -158,6 +160,7 @@ const DERIVE_WRITE = argv.includes('--write')
 const NO_PARENT = argv.includes('--no-parent')
 const ANCHOR_BASELINE_REL = 'scripts/check-code-map-anchor-baseline.json'
 const ANCHOR_BASELINE_ABS = join(REPO, ANCHOR_BASELINE_REL)
+
 const ANCHOR_BASELINE = existsSync(ANCHOR_BASELINE_ABS)
   ? JSON.parse(readFileSync(ANCHOR_BASELINE_ABS, 'utf8'))
   : {}
@@ -1825,6 +1828,37 @@ function selfTest() {
       '#1179 分桶完备且互斥：条数之和等于原集合、业务行只落在需人工一侧',
       st.length + ac.length === failedSample.length && ac.length === 1 && ac[0].text === 'const dup = 1'])
   }
+  // ── #1607 原子写（writeAtomic 的行为判据，不是源码文本切片）──
+  //
+  // 「写到一半被杀不会留下半份」这件事在进程内观测不到，但它的**机制**可观测：
+  // 原子写只往临时文件写、最后 rename 换名，因此**目标路径原来指向的那份 inode 内容不变**；
+  // 非原子写（裸 writeFileSync）是原地截断 + 重写，同一 inode 的内容会变。
+  // 判据就用这个差别，靠硬链接把「同一 inode」摆到台面上：
+  //   · sibling 与 target 硬链接同一份字节（Windows/NTFS 与 POSIX 都支持）；
+  //   · writeAtomic(target, 'REPLACED') 之后：sibling 必须仍是 'ORIGINAL'（换名而非原地改），
+  //     target 必须是 'REPLACED'，且目录里不残留 .tmp- 文件。
+  // 负控（改坏实现必须变红）：把 writeAtomic 换成裸 writeFileSync，sibling 会变成 'REPLACED'。
+  {
+    const scratch = mkdtempSync(join(tmpdir(), 'codemap-atomic-'))
+    const target = join(scratch, 'baseline.json')
+    const sibling = join(scratch, 'sibling.json')
+    writeFileSync(target, 'ORIGINAL')
+    linkSync(target, sibling)
+    writeAtomic(target, 'REPLACED')
+    const replaced = readFileSync(target, 'utf8') === 'REPLACED'
+    // 关键判据：同 inode 的另一个链接仍是旧字节 ⇒ 实现是「写临时文件再换名」，不是原地改。
+    const inodeUntouched = readFileSync(sibling, 'utf8') === 'ORIGINAL'
+    const noResidue = readdirSync(scratch).every((f) => !f.includes('.tmp-'))
+    // 失败路径：目标目录不可达时必须抛错（而不是静默写别处），且既有目标不被改坏。
+    const missingDir = join(scratch, 'nope', 'baseline.json')
+    let threw = false
+    try { writeAtomic(missingDir, 'x') } catch { threw = true }
+    const untouched = readFileSync(target, 'utf8') === 'REPLACED'
+    rmSync(scratch, { recursive: true, force: true })
+    driftCases.push(['#1607 原子写正控：目标换成新字节、且不残留临时文件', replaced && noResidue])
+    driftCases.push(['#1607 原子写判别力：同 inode 的兄弟链接仍是旧字节（换名而非原地截断；裸 writeFileSync 会红）', inodeUntouched])
+    driftCases.push(['#1607 原子写失败路径：目标目录不可达时抛错且不损坏既有目标', threw && untouched])
+  }
   for (const [name, okc] of driftCases) {
     if (okc) pass += 1
     lines.push((okc ? '  ok   ' : '  FAIL ') + name)
@@ -2004,14 +2038,26 @@ if (isMain) {
       }
     }
 
-    writeFileSync(docAbs, out)
+    /* issue #1607：**先基线、后文档**，两次都走原子写（writeAtomic）。
+     *
+     * 写序是判据不是口味：两条落盘之间被杀时，剩下的半份必须是**能自愈的那半**。
+     *   - 基线先落地、文档没改：重跑同一命令会再推一遍（rewrites 还在），第二次即收敛；
+     *   - 文档先落地、基线没改：第二遍 `symbolForm` 直接 continue，rewrites 为空，基线原样
+     *     写回 —— 重跑一万次也修不回来，唯一出口是全量 --refresh-anchor-baseline。
+     * 原子写再解决「写一半被杀」：目标文件要么是旧版完整字节，要么是新版完整字节。
+     */
     const nextBaseline = {
       ...ANCHOR_BASELINE,
       symbols: nextSymbols,
       symbolHashes: nextSymbolHashes,
       sourceLines: nextSourceLines,
     }
-    writeFileSync(ANCHOR_BASELINE_ABS, JSON.stringify(nextBaseline, null, 2) + '\n')
+    /* issue #1607：**先写基线，再写文档**，两次都走 writeAtomic。
+     * 顺序反了（旧实现）时，两次写之间被杀会留下「文档已是符号锚点形态、基线缺 symbolHashes」，
+     * 而重跑同一命令修不回来：第二遍看到 a.symbolForm 就 continue，rewrites 为空，基线原样写回。
+     * 现在中途被杀时文档仍是旧的行号锚点形态 ⇒ 重跑会重新推导出同样的 rewrites 并把基线补齐。 */
+    writeAtomic(ANCHOR_BASELINE_ABS, JSON.stringify(nextBaseline, null, 2) + '\n')
+    writeAtomic(docAbs, out)
 
     console.log('--only 作用域：' + [...onlySet].join(', '))
     console.log('')
@@ -2109,7 +2155,8 @@ if (isMain) {
       process.exit(0)
     }
 
-    writeFileSync(docAbs, out)
+    // issue #1607：同样走原子写（截断的文档比没写更糟：它会被当成一份「已迁移」的地图）。
+    writeAtomic(docAbs, out)
     console.log('')
     console.log('已落盘（--write）：')
     console.log('  改写 ' + replaced + ' 处引用 -> ' + DOC_REL)
@@ -2335,7 +2382,8 @@ if (isMain) {
         for (const k of dropped.slice(0, 20)) console.warn('  - ' + k)
       }
     }
-    writeFileSync(ANCHOR_BASELINE_ABS, JSON.stringify({
+    // issue #1607：裸写会在中途被杀时留下截断 JSON（下次启动 JSON.parse 直接崩）——改原子写。
+    writeAtomic(ANCHOR_BASELINE_ABS, JSON.stringify({
       formatVersion: 3,
       legacyReferenceCounts: countLegacyReferences(parsed.anchors),
       couplings: couplingsNext,

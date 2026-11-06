@@ -120,6 +120,23 @@ if (!ps1Rel) { check('本地链脚本在场: scripts/build-apk-013.ps1', false) 
   check('缺 APK 时不得只警告并跳过一致性校验（#1080：必须 Deny-Abi）',
     warnSkip.length === 0, warnSkip.map((l) => l.trim()).join(' | '))
 
+  // ── C4. 发布快照导出必须以「本轮产出」为准（issue #1616）──────────────────────
+  //
+  // 旧判据只看 Test-Path $apkOut：而 assemble 在「内嵌快照可解压」门禁**之前**，
+  // arm64 在 assemble 之后被拒时 APK 已落在 out/v<ver>/，导出段照样把 snapshot-arm64.tar.xz
+  // 与 .sha256 写进发布目录，随后才在尾部守卫 exit 1。CI 侧 publish 不跑，但文件确实留在了发布目录。
+  // 判据：导出循环内必须有「$producedAbis 不含该 ABI 即拒绝」的守卫，且走 Deny-Abi（记账）。
+  const exportGuardLine = lines.find((l) => !/^\s*#/.test(l)
+    && /\$producedAbis\s+-notcontains\s+\$abi/.test(l) && /Deny-Abi/.test(l))
+  check('导出段以 $producedAbis 为准（#1616：不在本轮产出里的 ABI 必须拒绝导出并记账）',
+    exportGuardLine !== undefined,
+    exportGuardLine === undefined ? '未找到 `$producedAbis -notcontains $abi` + Deny-Abi 的守卫行' : '')
+  // 位置也要对：守卫必须在 Copy-Item 之前（先判后落盘，与 #1080 同一纪律）。
+  const exportGuardIdx = exportGuardLine === undefined ? -1 : lines.indexOf(exportGuardLine)
+  check('导出守卫在落盘之前（#1616：Copy-Item 必须晚于产出判定）',
+    exportGuardIdx === -1 || copyIdx === -1 || exportGuardIdx < copyIdx,
+    'guard L' + (exportGuardIdx + 1) + ' vs copy L' + (copyIdx + 1))
+
   // ── 尾部守卫 ──────────────────────────────────────────────────────────────
   check('含「已产出 / 被拒 ABI」汇总行', /汇总。已产出 ABI/.test(ps1Text))
   check('被拒非空 -> exit 1', /if \(\$rejectedAbis\.Count -gt 0\)[^\n]*exit 1 \}/.test(ps1Text))

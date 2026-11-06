@@ -19,15 +19,17 @@
   },
   "dependencies": {
     "@dsh-android/dsh-android-bridge": "file:../dsh-android-bridge",
-    "@dsh-android/dsh-shell-termux": "file:../../dsh-shell-termux"
+    "@dsh-android/dsh-shell-termux": "file:../../dsh-shell-termux",
+    "@dsh-android/linux-bootstrap": "file:../dsh-linux-bootstrap"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-tools": "0.2.1-rc.3",
-    "@deepseek-ai/cordis": "4.0.5"
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
+    "@deepseek-ai/cordis": "4.1.0"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-tools": "0.2.1-rc.3",
-    "@deepseek-ai/cordis": "4.0.5",
+    "@deepseek-ai/dsh-system-prompt": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
+    "@deepseek-ai/cordis": "4.1.0",
     "@types/node": "^24.0.0",
     "typescript": "^5.5.0"
   },

@@ -12,18 +12,40 @@
  * hidden then clips the blank band instead of letting it scroll into view.
  * Restored to 100% when the keyboard closes.
  *
- * The composer seat (position: sticky; bottom: 0) normally relies on
- * composer-insets.css.ts padding-bottom = --dsh-android-ime-bottom to lift
- * the input above the keyboard while the frame keeps its full height. Once
- * this class pins the frame to the keyboard top edge, that same padding
- * becomes redundant and inflates the seat past its sticky container (seat
+ * The composer seat (position: sticky; bottom: 0) normally carries the
+ * bottom system-bar reservation from composer-insets.css.ts, which is what
+ * lifts the input above the system bar while the frame keeps its full height.
+ * Once this class pins the frame to the keyboard top edge, that reservation is
+ * redundant and inflates the composer past its sticky container (composer
  * height > scrollBody height makes the sticky bottom anchor inert and the
- * composer drifts to the top of the viewport). While pinned, the seat's
- * padding-bottom is therefore zeroed; it is restored on keyboard close.
+ * composer drifts to the top of the viewport). While pinned, the reservation
+ * is therefore zeroed; it is restored on keyboard close.
+ *
+ * 归零的对象是**真正带预留的那个盒子**：composer-insets.css.ts 把预留写在 seat 内部的
+ * composerStack 上（issue #783 缺陷 B：写在 seat 自己身上会让上游挂在 seat 上的
+ * ResizeObserver 失聪，--dsh-composer-height 停在旧值）。见下方 insetTargets()：
+ * 预留换位置时两处一起归零，归零一个本来就是 0px 的盒子是无害的。
  */
+
+/**
+ * 当前携带底部预留的盒子（composer-insets.css.ts 的落点）。
+ *
+ * 两个都返回：seat 是历史落点，composerStack 是现落点。只归零其中一个，
+ * 预留一旦换位置就会漏掉一处，键盘弹起时 composer 高度超过 sticky 容器而向上飘。
+ */
+function insetTargets(): HTMLElement[] {
+  const targets: HTMLElement[] = []
+  const stack = document.querySelector<HTMLElement>('[data-composer-seat] [class*="composerStack"]')
+  if (stack !== null) targets.push(stack)
+  const seat = document.querySelector<HTMLElement>('[data-composer-seat]')
+  if (seat !== null) targets.push(seat)
+  return targets
+}
+
 export class KeyboardBoundary {
   private frame: HTMLElement | null = null
-  private seat: HTMLElement | null = null
+  /** 当前被归零底部预留的盒子（composerStack 优先，seat 兜底）；null = 未归零。 */
+  private insetTargets: HTMLElement[] | null = null
   private media: MediaQueryList | null = null
   private lastIme = 0
   private lastVv = 0
@@ -50,7 +72,7 @@ export class KeyboardBoundary {
     this.onViewportChange()
   }
 
-  /** Remove listeners and restore the frame and seat styles. */
+  /** Remove listeners and restore the frame and composer reservation. */
   detach(): void {
     this.detached = true
     if (this.settleTimer !== null) {
@@ -111,24 +133,26 @@ export class KeyboardBoundary {
       this.lastVv = vvHeight
       this.lastVvTop = vvTop
       frame.style.height = `${vvHeight + vvTop}px`
-      // Null out the seat's IME padding while the frame is pinned (see the
-      // class comment); keep safe-area/system paddings intact.
-      const seat = document.querySelector<HTMLElement>('[data-composer-seat]')
-      if (seat !== null) {
-        this.seat = seat
-        seat.style.paddingBottom = '0px'
+      // Null out the composer's bottom reservation while the frame is pinned
+      // (see the class comment); keep safe-area/system paddings intact.
+      const targets = insetTargets()
+      if (targets.length > 0) {
+        this.insetTargets = targets
+        for (const target of targets) target.style.paddingBottom = '0px'
       }
     } else if (ime === 0 && (this.lastIme !== 0 || frame.style.height !== '')) {
       this.restore()
     }
   }
 
-  /** Restore the natural frame height and seat padding. */
+  /** Restore the natural frame height and the composer's bottom reservation. */
   private restore(): void {
     if (this.frame !== null) this.frame.style.height = ''
     this.frame = null
-    if (this.seat !== null) this.seat.style.paddingBottom = ''
-    this.seat = null
+    if (this.insetTargets !== null) {
+      for (const target of this.insetTargets) target.style.paddingBottom = ''
+    }
+    this.insetTargets = null
     this.lastIme = 0
     this.lastVv = 0
     this.lastVvTop = 0

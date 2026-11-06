@@ -40,6 +40,7 @@ class LinuxAssetPrepareTest {
     File(envRoot, LinuxAssetIO.STATE_FILE).writeText("{\"schemaVersion\":1,\"enabled\":false}\n")
     LinuxAssetPrepare.reset()
     LinuxAssetPrepare.runner = { work -> work() }
+    LinuxAssetPrepare.debugBuild = false
   }
 
   @After
@@ -47,6 +48,7 @@ class LinuxAssetPrepareTest {
     LinuxAssetPrepare.reset()
     LinuxAssetPrepare.runner = { work -> Thread(work, "dsh-linux-asset-prepare").start() }
     LinuxAssetPrepare.opener = LinuxAssetIO.HttpOpener
+    LinuxAssetPrepare.debugBuild = BuildConfig.DEBUG
     SnapshotFs.deletePath(root)
   }
 
@@ -268,11 +270,13 @@ class LinuxAssetPrepareTest {
 
   @Test
   fun traversalSymlinkEscapeAndBombArchivesAllFailClosed() {
-    // 负控：路径穿越。解包器对穿越条目是跳过，故安全属性落在「不得落地」上。
+    // 负控：路径穿越。新解包器对 `..` 条目失败关闭（不再静默跳过）。
     val traversal = archive { tar -> writeEntry(tar, "../evil.txt", "pwned".toByteArray()) }
     LinuxAssetPrepare.opener = installOpener(traversal)
     assertTrue(JSONObject(LinuxAssetPrepare.start(root, specJson(traversal))).getBoolean("ok"))
-    assertEquals(LinuxAssetPrepare.PHASE_OK, status().getString("phase"))
+    assertEquals(LinuxAssetPrepare.PHASE_FAILED, status().getString("phase"))
+    assertEquals(LinuxAssetIO.CODE_UNSAFE_ARCHIVE, status().getString("code"))
+    assertFalse("穿越失败不得发布", stagedDir(traversal).exists())
     assertFalse("穿越条目不得落地到环境根之外", File(envRoot, "evil.txt").exists())
     assertFalse("穿越条目不得落地到环境根的父目录", File(root, "evil.txt").exists())
     assertFalse(File(root.parentFile, "evil.txt").exists())
@@ -318,5 +322,103 @@ class LinuxAssetPrepareTest {
     assertEquals(LinuxAssetIO.CODE_DOWNLOAD_FAILED, state.getString("code"))
     assertFalse(stagedDir(bytes).exists())
     assertNotNull("失败必须留下可落盘的原因", state.getString("detail"))
+  }
+
+  // ── kind：请求契约与按 kind 解包 ─────────────────────────────────────────
+
+  @Test
+  fun kindDefaultsToPluginAndIsReportedInStatus() {
+    val bytes = goodArchive()
+    LinuxAssetPrepare.opener = installOpener(bytes)
+    val answer = JSONObject(LinuxAssetPrepare.start(root, specJson(bytes)))
+    assertEquals("plugin", answer.getString("kind"))
+    assertEquals(LinuxAssetPrepare.PHASE_OK, status().getString("phase"))
+    assertEquals("plugin", status().getString("kind"))
+
+    LinuxAssetPrepare.reset()
+    val alias = JSONObject().put("url", goodUrl).put("sha256", sha256(bytes))
+      .put("size", bytes.size.toLong()).put("kind", "runtime-plugin").toString()
+    assertEquals("plugin", JSONObject(LinuxAssetPrepare.start(root, alias)).getString("kind"))
+  }
+
+  @Test
+  fun rejectsAnUnknownKindBeforeStartingWork() {
+    var started = false
+    LinuxAssetPrepare.runner = { started = true }
+    val bytes = goodArchive()
+    for (bad in listOf("rootfs/../../x", "rootfsx", "../rootfs", "node\u0000")) {
+      val json = JSONObject().put("url", goodUrl).put("sha256", sha256(bytes))
+        .put("size", bytes.size.toLong()).put("kind", bad).toString()
+      val answer = JSONObject(LinuxAssetPrepare.start(root, json))
+      assertEquals(false, answer.getBoolean("ok"))
+      assertEquals("kind=$bad", LinuxAssetIO.CODE_KIND_INVALID, answer.getString("code"))
+    }
+    assertFalse("非法 kind 不得启动工作", started)
+
+    // 显式空串与 JSON null 同义：缺省 plugin（兼容旧 UI 只传 url/sha/size）。
+    LinuxAssetPrepare.opener = installOpener(bytes)
+    val empty = JSONObject().put("url", goodUrl).put("sha256", sha256(bytes))
+      .put("size", bytes.size.toLong()).put("kind", "").toString()
+    val emptyAnswer = JSONObject(LinuxAssetPrepare.start(root, empty))
+    assertEquals(false, emptyAnswer.getBoolean("ok"))
+    assertEquals(LinuxAssetIO.CODE_KIND_INVALID, emptyAnswer.getString("code"))
+    LinuxAssetPrepare.reset()
+    val nullKind = JSONObject().put("url", goodUrl).put("sha256", sha256(bytes))
+      .put("size", bytes.size.toLong()).put("kind", JSONObject.NULL).toString()
+    assertEquals("plugin", JSONObject(LinuxAssetPrepare.start(root, nullKind)).getString("kind"))
+  }
+
+  @Test
+  fun rootfsKindKeepsGuestAbsoluteLinksWhileOtherKindsRejectThem() {
+    val bytes = archive { tar ->
+      writeEntry(tar, "usr/bin/bash", "#!/bin/sh\n".toByteArray())
+      writeEntry(tar, "etc/os-release", "debian\n".toByteArray())
+      val link = TarArchiveEntry("bin", org.apache.commons.compress.archivers.tar.TarConstants.LF_SYMLINK)
+      link.linkName = "/usr/bin"
+      tar.putArchiveEntry(link)
+      tar.closeArchiveEntry()
+    }
+    LinuxAssetPrepare.opener = installOpener(bytes)
+    val json = JSONObject().put("url", goodUrl).put("sha256", sha256(bytes))
+      .put("size", bytes.size.toLong()).put("kind", "rootfs").toString()
+    assertTrue(JSONObject(LinuxAssetPrepare.start(root, json)).getBoolean("ok"))
+    val rootfsState = status()
+    assertEquals("rootfs", rootfsState.getString("kind"))
+    // Windows JVM 默认无符号链接权限；链接策略由 LinuxAssetIOTest 的纯函数用例覆盖。
+    val symlinksUnavailable = rootfsState.getString("phase") == LinuxAssetPrepare.PHASE_FAILED &&
+      (rootfsState.optString("detail") + rootfsState.optString("code")).contains("特权")
+    if (!symlinksUnavailable) {
+      assertEquals("准备失败原因：$rootfsState", LinuxAssetPrepare.PHASE_OK, rootfsState.getString("phase"))
+      val staged = stagedDir(bytes)
+      assertEquals("/usr/bin", java.nio.file.Files.readSymbolicLink(File(staged, "unpacked/bin").toPath()).toString())
+      assertTrue(File(staged, "unpacked/usr/bin/bash").isFile)
+    }
+
+    LinuxAssetPrepare.reset()
+    val nodeJson = JSONObject().put("url", goodUrl).put("sha256", sha256(bytes))
+      .put("size", bytes.size.toLong()).put("kind", "node").toString()
+    assertTrue(JSONObject(LinuxAssetPrepare.start(root, nodeJson)).getBoolean("ok"))
+    val state = status()
+    assertEquals(LinuxAssetPrepare.PHASE_FAILED, state.getString("phase"))
+    assertEquals(LinuxAssetIO.CODE_UNSAFE_ARCHIVE, state.getString("code"))
+    assertFalse("node kind 不得发布含逃逸链接的产物", stagedDir(bytes).exists())
+  }
+
+  @Test
+  fun debugOriginIsIgnoredWhenDebugIsOffAndFailsClosedWhenMalformed() {
+    val bytes = goodArchive()
+    LinuxAssetPrepare.opener = installOpener(bytes)
+    File(envRoot, LinuxAssetIO.DEBUG_ORIGIN_FILE).writeText("http://192.168.1.2:18791")
+    // 生产档不读配置：即使文件不合规也走官方 URL，由注入的 opener 接管。
+    LinuxAssetPrepare.debugBuild = false
+    assertTrue(JSONObject(LinuxAssetPrepare.start(root, specJson(bytes))).getBoolean("ok"))
+    assertEquals(LinuxAssetPrepare.PHASE_OK, status().getString("phase"))
+
+    LinuxAssetPrepare.reset()
+    LinuxAssetPrepare.debugBuild = true
+    assertTrue(JSONObject(LinuxAssetPrepare.start(root, specJson(bytes))).getBoolean("ok"))
+    val state = status()
+    assertEquals(LinuxAssetPrepare.PHASE_FAILED, state.getString("phase"))
+    assertEquals(LinuxAssetIO.CODE_URL_REJECTED, state.getString("code"))
   }
 }

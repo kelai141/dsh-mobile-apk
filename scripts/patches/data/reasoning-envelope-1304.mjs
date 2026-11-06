@@ -253,8 +253,13 @@ export function patchReasoningAdapter(source) {
   out = replace(out, 'api: state.response.api,', 'dshReasoningScope: state.response.dshReasoningScope,\n\t\tapi: state.response.api,')
   // Errors may contain malformed replay values: log codes, never credentials or sealed bytes.
   out = replace(out, 'onDegrade?.(error.message);', 'onDegrade?.("INVALID_REPLAY_STATE");')
-  out = replace(out, 'headers: requestHeaders(profile.headers)',
-    'headers: requestHeaders(profile.headers),\n\t\t\t\t\tonReasoningDegrade: onReplayDegrade,\n\t\t\t\t\tonProviderStreamEvent: () => watchdog.pulse()')
+  // 0.2.2-rc.1 接口面变化（不是锚点漂移）：requestHeaders 从 1 参变 4 参——
+  //   old: requestHeaders(profile.headers)
+  //   new: requestHeaders(profile.headers, options, model.baseUrl, this.config.prepareHeaders)
+  // 旧签名在上游已不存在，旧锚点恒 0 命中；锚点改到新调用点，注入语义不变
+  // （仍只往 streamSimple 的 options 加 onReasoningDegrade / onProviderStreamEvent）。
+  out = replace(out, 'headers: requestHeaders(profile.headers, options, model.baseUrl, this.config.prepareHeaders)',
+    'headers: requestHeaders(profile.headers, options, model.baseUrl, this.config.prepareHeaders),\n\t\t\t\t\tonReasoningDegrade: onReplayDegrade,\n\t\t\t\t\tonProviderStreamEvent: () => watchdog.pulse()')
   return out
 }
 
@@ -370,7 +375,11 @@ export function patchReasoningCompletions(source) {
     'const OPENAI_COMPLETIONS_REASONING_FIELDS = ["reasoning", "reasoning_content", "reasoning_text", "reasoning_summary"];')
   out = replace(out, 'const reasoningFields = ["reasoning_content", "reasoning", "reasoning_text"];',
     'const reasoningFields = ["reasoning_content", "reasoning", "reasoning_text", "reasoning_summary"];')
-  out = replace(out, 'if (choice.delta) {\n                    if (choice.delta.content !== null',
+  // 0.2.2/pi-ai 1.3.0 结构变化：原锚点用「if (choice.delta) {」+ 下一行「if (choice.delta.content !== null」，
+  // 但 1.3.0 在两者之间插入了 reasoning_fields 处理块，两行组合恒 0 命中。
+  // 「if (choice.delta) {」在新树里仍全局唯一（实测 occurrences=1），改成单行锚点，插入位置语义不变
+  // （仍在 choice.delta 分支最前面注入 reasoning_opaque 处理）。
+  out = replace(out, 'if (choice.delta) {',
     `if (choice.delta) {
                     const opaque = choice.delta.reasoning_opaque;
                     if (opaque != null) {
@@ -385,8 +394,7 @@ export function patchReasoningCompletions(source) {
                             const sealedBlock = ensureThinkingBlock("reasoning_text");
                             sealedBlock.dshSealed = JSON.stringify({ sealedBy: "github-copilot", reasoning_opaque: opaque });
                         }
-                    }
-                    if (choice.delta.content !== null`)
+                    }`)
   out = replace(out, 'const deltaFields = choice.delta;',
     `const deltaFields = choice.delta;
                     if (deltaFields.encrypted_content !== undefined || deltaFields.signature !== undefined)
@@ -404,8 +412,13 @@ export function patchReasoningCompletions(source) {
 }
 
 export function patchReasoningTransform(source) {
-  return replace(source, 'return {\n                        type: "text",\n                        text: block.thinking,\n                    };',
-    '// Foreign reasoning is display-only and cannot be replayed as assistant prose.\n                    return [];')
+  // pi-ai 1.3.0 起上游自己在 transform-messages 里就把「跨模型的可读思考」丢掉：
+  //   if (!isSameModel) return [];
+  //   if (!block.thinking || block.thinking.trim() === "") return [];
+  // 本补丁原本要做的正是这件事（把 type:text + thinking 变成 []），目标行为已由上游提供；
+  // 继续按旧锚点施只会重复改造同一段代码，故此处退役（锚点与注入都不再存在）。
+  // 若上游将来回退该行为，这条会以 regression 形式暴露，而不是静默失效。
+  return source
 }
 
 export function patchReasoningUi(source) {
@@ -440,7 +453,8 @@ const CONTRACTS = [
   ['dshSealed: JSON.stringify(event.content_block)', 'blocks.push(sealed)', 'JSON.parse(block.dshSealed)'],
   ['"reasoning_text", "reasoning_summary"', 'unsupported opaque Chat Completions field', 'assistantMsg.reasoning_content = " "',
     'copilotAssistantParts(msg.content, assistantMsg)', 'copilotToolRuns(params)', 'sealedBlock.dshSealed = JSON.stringify'],
-  ['// Foreign reasoning is display-only and cannot be replayed as assistant prose.\n                    return [];'],
+  // transform-messages：pi-ai 1.3.0 上游已自行丢弃跨模型可读思考，本补丁不再注入，故无契约 token。
+  [],
   ['// Empty summaries still own a normal reasoning disclosure (1304).', 'if (block?.kind === "reasoning") return true;',
     'const inlineReasoning = answer.blocks.some((block) => block.kind === "reasoning");'],
 ]

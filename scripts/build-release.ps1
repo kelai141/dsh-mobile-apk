@@ -12,7 +12,7 @@ $root = Split-Path -Parent $PSScriptRoot
 # npm cache must stay inside the workspace (sandbox/CI limit: writes outside the workspace are denied)
 $env:npm_config_cache = Join-Path $root ".npm-cache"
 $relRoot = Join-Path $root "release"
-$pluginSrcs = @('dsh-shell-termux','dsh-client-ui-responsive','dsh-host-web-compat')
+$pluginSrcs = @('dsh-shell-termux','dsh-client-ui-responsive','dsh-host-web-compat','plugins/dsh-linux-bootstrap')
 
 # 0a) git dirty-state gate (Review 2026-08-18 R5): release artifacts must trace back to committed source.
 #     Abort if any repo has uncommitted changes — otherwise tgz/APK ship uncommitted code that can't be diffed for troubleshooting.
@@ -141,8 +141,45 @@ foreach ($abi in $ABIS) {
     Remove-Item $outTmp -Force -ErrorAction SilentlyContinue
     $pkgArgs = @()
     foreach ($p in $pluginSrcs) { $pkgArgs += (Join-Path $root $p) }
-    python $injectPy $abi.f $outTmp @pkgArgs 2>&1 | Select-Object -Last 3
-    if (-not (Test-Path $outTmp)) { throw ("快照注入失败: " + $abi.n) }
+    # issue #1613：python 的退出码此前被**完全丢弃**——旧写法是「管道直连 Select-Object 后只判
+    # Test-Path $outTmp」。inject-snapshot.py 用 tarfile 流式写 .new，中途抛错（磁盘满 / 条目损坏 /
+    # 权限）会留下一个**存在但截断**的 .new，紧接着 Move-Item 就把原输入覆盖掉：一次注入失败 +
+    # 一次成功的下游重跑，输入位里就是那份截断件（下游 2f 拦得住「解不开」，拦不住「解得开、少一批条目」）。
+    #
+    # 现在三层，全部是**行为判据**，缺一即拒绝覆盖：
+    #   ① 退出码：不直连管道（会吞 $LASTEXITCODE），先收进变量再截尾打印；
+    #   ② 完成标记 + 字节数：脚本写完 dst 才打印 written: <dst> <bytes>，该行在场且文件实际字节
+    #      与之相等，才证明「写完了」而不是「写了一半」；
+    #   ③ 成员数对账：用**另一个解码器**（系统 bsdtar）数条目，产物少于输入即拒（截断件通常少一批）。
+    $injectOut = python $injectPy $abi.f $outTmp @pkgArgs 2>&1
+    $injectCode = $LASTEXITCODE
+    ($injectOut | Select-Object -Last 3) | Out-Host
+    if ($injectCode -ne 0) {
+        Remove-Item $outTmp -Force -ErrorAction SilentlyContinue
+        throw ("快照注入失败: " + $abi.n + "（python exit " + $injectCode + "）")
+    }
+    if (-not (Test-Path $outTmp)) { throw ("快照注入失败: " + $abi.n + "（python exit 0 但无产物）") }
+    $writtenLine = @($injectOut | Where-Object { $_ -match '^written: ' } | Select-Object -Last 1)
+    if ($writtenLine.Count -eq 0) {
+        Remove-Item $outTmp -Force -ErrorAction SilentlyContinue
+        throw ("快照注入失败: " + $abi.n + "（python exit 0 但没有完成标记 written: —— 拒绝用未写完的产物覆盖输入）")
+    }
+    $writtenBytes = [int64]($writtenLine[0] -replace '^written:\s+\S+\s+', '')
+    $actualBytes = (Get-Item $outTmp).Length
+    if ($writtenBytes -ne $actualBytes) {
+        Remove-Item $outTmp -Force -ErrorAction SilentlyContinue
+        throw ("快照注入产物被截断: " + $abi.n + "（脚本报 " + $writtenBytes + " 字节，实际 " + $actualBytes + "）")
+    }
+    # ③ 成员数对账走独立门禁（scripts/check-injection-output.mjs，自带 --self-test 的 1 正控 + 3 负控）：
+    #    判据本体是「产物条目数 >= 输入」，且两侧都**读得出**成员清单——读不出不等于零条目。
+    #    为什么单独成脚本：这条判据要能被反证（截断件 / 解不开 / 输入读不出三种负控），
+    #    写在 ps1 里就只剩「跑过没红」这一层证据。
+    node (Join-Path $root "scripts\check-injection-output.mjs") $abi.f $outTmp 2>&1 | Out-Host
+    $injectVerifyCode = $LASTEXITCODE
+    if ($injectVerifyCode -ne 0) {
+        Remove-Item $outTmp -Force -ErrorAction SilentlyContinue
+        throw ("快照注入产物完整性门禁未通过: " + $abi.n + "（exit " + $injectVerifyCode + "）——拒绝覆盖原快照")
+    }
     Move-Item $outTmp $abi.f -Force
     Write-Output ("  快照 OK: " + $abi.n + " (" + $abi.expect + " + npm 层 + 插件注入)")
   }

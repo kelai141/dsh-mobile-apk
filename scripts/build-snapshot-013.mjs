@@ -19,7 +19,7 @@ import { sanitizeSymlinks } from './lib/symlink-sanitize.mjs'
 import { assertOverlayDigest } from './lib/overlay-integrity.mjs'
 import { overlayCacheHit, overlayCacheStore } from './lib/overlay-cache.mjs'
 import { relocateGitShellPath } from './lib/git-shell-path.mjs'
-
+import { stageOverrideError, stageRemovalCommand } from './lib/snapshot-stage.mjs'
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const ABI = process.argv[2] ?? 'arm64'
 if (!['arm64', 'x86_64'].includes(ABI)) { console.error('用法: node build-snapshot-013.mjs <arm64|x86_64>'); process.exit(1) }
@@ -84,10 +84,10 @@ const STAGE_DEFAULT_LINUX = `${process.env.HOME ?? '/root'}/.dsh-stage/${ABI}`
 const STAGE = (() => {
   const override = process.env.DSH_SNAPSHOT_STAGE
   if (override) {
-    if (!override.startsWith('/')) {
-      console.error('DSH_SNAPSHOT_STAGE 必须是 Linux 绝对路径（例如 /root/.dsh-stage/x86_64）')
-      process.exit(2)
-    }
+    // issue #1602：旧校验只有 startsWith('/')，/root 与 $(...) 都能通过，最终交给 rm -rf；
+    // 地板与引号两道判据见 scripts/lib/snapshot-stage.mjs（同一份实现，测试直接跑它）。
+    const bad = stageOverrideError(override)
+    if (bad !== null) { console.error(bad); process.exit(2) }
     return override
   }
   if (IN_WSL) return STAGE_DEFAULT_LINUX
@@ -105,7 +105,7 @@ const baseTar = join(BASE_DIR, 'base-usr.tar.xz')
 if (!existsSync(baseTar)) { console.error(`基座缺失: ${baseTar}`); process.exit(1) }
 if (existsSync(STAGE)) {
   // Windows rmSync 可被 WSL 侧句柄/9p 语义挡住；清场一律走 WSL（Linux 侧删除）。
-  try { wsl(`rm -rf "${wslPath(STAGE)}"`) } catch { rmSync(STAGE, { recursive: true, force: true }) }
+  try { wsl(stageRemovalCommand(wslPath(STAGE))) } catch { rmSync(STAGE, { recursive: true, force: true }) }
 }
 mkdirSync(join(STAGE, 'root'), { recursive: true })
 // WSL 解压保 symlink（Windows bsdtar 需特权）
@@ -418,6 +418,9 @@ for (const entry of OVERLAY.keepUnpublished ?? []) {
     console.error('[语法下限降级失败] chrome87 降级未成功（exit ' + r.status + '）——快照不可发布')
     process.exit(1)
   }
+  // 契约字段：`files=` 清单条数、`changed=` 真正被改写的条数。
+  // 降级门自己会追加 `lowered=` / `skipped=`（skipped = 两臂输出相同、无需改写），本处不依赖它们；
+  // 但改这两个字段的名字会打断这里，所以它们属于跨脚本契约，改名必须先改本处。
   const m = /files=(\d+) changed=(\d+)/.exec(r.stdout ?? '')
   if (!m) {
     console.error('[语法下限降级失败] 无法从 --degrade 输出解析文件数（files=/changed= 缺席）')

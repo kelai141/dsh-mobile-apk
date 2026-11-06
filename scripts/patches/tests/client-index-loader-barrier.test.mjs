@@ -42,42 +42,43 @@ test('home HTML waits for host Loader and its previously registered client graph
     const flushDone = startupWait.then(() => { graph.push('initial'); graph.push('late-api-remotes'); });
     let handler;
     let renders = 0;
+    // 0.2.2-rc.1 的 host-frontend-static 换了三处调用形态：registerFallback 收 { resource } 对象、
+    // renderIndex 收 (html, peer)、authorizeIndex 走 ctx.connection 且 peer 参与判定。
+    // 测试按真实形态搭桩，否则测的是已经不存在的接口。
     const ctx = {
       loader,
-      get(name) { return name === 'loader' ? this.loader : undefined; },
+      get(name) { return name === 'loader' ? loader : undefined; },
       webServer: {
-        registerFallback(fn) { handler = fn; },
+        registerFallback(spec) { handler = spec.resource; },
         renderIndex(html) { renders++; return html + graph.join(','); },
       },
-      connection: { authorizeIndex() { return true; } },
+      connection: { browserPeer: undefined, authorizeIndex() { return true; } },
       effect(fn) { fn(); },
     };
     apply(ctx, { distIndex: index });
-    const response = () => ({ writeHead(status, headers) { this.status = status; this.headers = headers; }, end(body) { this.body = body; } });
-    const first = response(); const concurrent = response();
-    const firstDone = handler({ method: 'GET', url: '/' }, first);
-    const concurrentDone = handler({ method: 'GET', url: '/index.html' }, concurrent);
+    // 0.2.2-rc.1 的 serveStatic 返回标准 Response（不是旧的三参 res），断言按真实返回类型写。
+    const firstDone = handler(new Request('http://127.0.0.1/'));
+    const concurrentDone = handler(new Request('http://127.0.0.1/index.html'));
     await Promise.resolve();
     assert.equal(renders, 0, 'first concurrent home requests stay behind the loader barrier');
     release();
     pendingTasks.splice(0);
-    await Promise.all([firstDone, concurrentDone, flushDone]);
-    assert.match(first.body, /initial,late-api-remotes$/);
-    assert.match(concurrent.body, /initial,late-api-remotes$/);
+    const [first, concurrent] = await Promise.all([firstDone, concurrentDone, flushDone]);
+    assert.match(await first.text(), /initial,late-api-remotes$/);
+    assert.match(await concurrent.text(), /initial,late-api-remotes$/);
     assert.equal(renders, 2);
 
-    const assetResponse = response();
     let assetLoaderCalls = 0;
     ctx.loader.await = () => { assetLoaderCalls++; return new Promise(() => {}); };
-    await handler({ method: 'GET', url: '/asset.js' }, assetResponse);
-    assert.equal(assetResponse.body.toString(), 'asset');
+    const assetResponse = await handler(new Request('http://127.0.0.1/asset.js'));
+    assert.equal(await assetResponse.text(), 'asset');
     assert.equal(assetLoaderCalls, 0, 'non-home resources do not wait for Loader');
 
     ctx.loader.await = () => Promise.reject(new Error('host loader failed'));
-    await assert.rejects(handler({ method: 'GET', url: '/' }, response()), /host loader failed/);
+    await assert.rejects(handler(new Request('http://127.0.0.1/')), /host loader failed/);
     ctx.loader.await = () => Promise.resolve();
     ctx.webServer.renderIndex = () => { throw new Error('client graph composition failed'); };
-    await assert.rejects(handler({ method: 'GET', url: '/' }, response()), /client graph composition failed/);
+    await assert.rejects(handler(new Request('http://127.0.0.1/')), /client graph composition failed/);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }

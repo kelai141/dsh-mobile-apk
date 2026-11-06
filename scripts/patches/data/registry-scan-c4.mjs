@@ -64,15 +64,12 @@ export function planTypertRegistryScan(source) {
     '\t\t\t} catch (error) {\n\t\t\t\tmountedNames = void 0;\n\t\t\t\tonError(toError(error));\n\t\t\t}', 'typert flush error')
 }
 
-// Gateway's browser exports are required synchronously by controller factories.
-// Enabled transport rows supply the gateway and its browser inject closure before host fibers exist;
-// browser inject still decides when the gateway's own service activates.
-export const GATEWAY_CLIENT_MARKER = 'dsh-mobile gateway client source G1'
-export function planGatewayClientSource(source) {
-  if (source.includes(GATEWAY_CLIENT_MARKER)) return source
-  return replaceOnce(source,
-    'if (entry.options.name !== entryName || entry.fiber === void 0 || entry.disabled) continue;',
-    `/* dsh-mobile gateway client source G1: browser dependency survives host activation timing. */
-			if (entry.options.name !== entryName || entry.disabled || (entry.fiber === void 0 && !["@deepseek-ai/dsh-api-gateway", "@deepseek-ai/dsh-typert-registry", "@deepseek-ai/dsh-client-connection"].includes(entryName))) continue;`,
-    'gateway enabled-row client source')
-}
+/* G1 随 client-registry-scan-C4 一并退役（0.2.2-rc.1）。
+ * 原意：网关的 browser 导出必须能被 controller 工厂同步 require，所以 client-modules 的
+ * 条目过滤不能只看 entry.fiber（未激活），还要放行 api-gateway / typert-registry 两类。
+ * 上游 0.2.2 证据（dsh-client-modules lib/index.js:908-914）：
+ *   processOne(entryName, entries, onError) {
+ *     for (const entry of entries) { if (entry.fiber === void 0 || entry.disabled) continue; ... }
+ * 上游不再有按包名的白名单判断，且 processOne 的输入已由 flush 按 name 分桶给出，
+ * 因此「谁能被同步 require」不再由这段决定，G1 要修的那个时序竞争在上游结构里不存在。
+ * 守卫：client-registry-scan-C4-retired.test.mjs 直接断言上述上游结构。 */
