@@ -1259,6 +1259,7 @@ class MainActivity : ComponentActivity() {
    * 老内核上第二层不存在，只剩第一层，属已知风险，PR 里单独登记。
    */
   private fun installBridgeOriginGuard() {
+    bridgeOriginGuardReady = false
     // 端口未确定就**不注册**，并报可见告警：不回退通配（http://127.0.0.1:* 会让本机任何
     // 其他端口的页面拿到桥，风险面比现状更大），也不用未确定的值（会把合法主帧误封）。
     if (!EngineEndpoint.confirmed || EngineEndpoint.port <= 0) {
@@ -1272,7 +1273,8 @@ class MainActivity : ComponentActivity() {
     }
     // 精确 origin：只用 EngineEndpoint 的持久化值（EngineProbe.ENGINE_URL 派生于它）。
     val origins = listOf(EngineProbe.ENGINE_URL)
-    if (!BridgeOriginGuard.install(webView, origins)) {
+    bridgeOriginGuardReady = BridgeOriginGuard.install(webView, origins)
+    if (!bridgeOriginGuardReady) {
       // 可见告警：老内核降级。写日志 + 落启动诊断，运营侧能查到，不静默。
       Log.w(TAG, "WARNING: bridge frame origin guard NOT installed (kernel lacks DOCUMENT_START_SCRIPT); cross-origin subframes can still reach window.androidBridge (#686)")
       try {
@@ -1302,6 +1304,7 @@ class MainActivity : ComponentActivity() {
    */
   @Volatile
   internal var trustedTopFrameUrl: String = ""
+  private var bridgeOriginGuardReady = false
 
   private fun configureWebView() {
     // WebView 远程调试（debug 构建）：真机/模拟器 CDP 自动化验证 UI 行为。
@@ -1318,6 +1321,9 @@ class MainActivity : ComponentActivity() {
     webView.webViewClient = object : WebViewClient() {
       override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
         val url = request.url.toString()
+        if (request.url.scheme == "blob") {
+          return !BridgeOriginGuard.allowsEnginePreview(url, EngineProbe.ENGINE_URL, request.isForMainFrame, bridgeOriginGuardReady)
+        }
         // 会话日志导出（issue apk#6 + 403 修复）：浏览器导航带 Origin:null /
         // sec-fetch-site 标记，会被 dsh 的 /api browser-trust fence 拒绝
         // （403 forbidden，防 DNS rebinding/跨站）。改为 app 内下载：

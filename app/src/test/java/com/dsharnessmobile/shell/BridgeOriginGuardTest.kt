@@ -22,6 +22,17 @@ import org.junit.Test
  *   3. 把零参重载删掉，重载存在性用例红（会让既有页面调用点抛 Method not found）。
  */
 class BridgeOriginGuardTest {
+  @Test
+  fun previewBlobsStayInGuardedSubframesOnly() {
+    val origin = "http://127.0.0.1:4145"
+    val localBlob = "blob:$origin/733cb823-4b63-4d55-8fa0-efba12652fa7"
+    assertTrue(BridgeOriginGuard.allowsEnginePreview(localBlob, origin, mainFrame = false, guardReady = true))
+    assertFalse(BridgeOriginGuard.allowsEnginePreview(localBlob, origin, mainFrame = true, guardReady = true))
+    assertFalse(BridgeOriginGuard.allowsEnginePreview(localBlob, origin, mainFrame = false, guardReady = false))
+    assertFalse(BridgeOriginGuard.allowsEnginePreview("blob:$origin.evil/uuid", origin, mainFrame = false, guardReady = true))
+    assertFalse(BridgeOriginGuard.allowsEnginePreview("blob:null/uuid", origin, mainFrame = false, guardReady = true))
+    assertTrue(BridgeOriginGuard.script(listOf(origin)).contains("var origin = self.origin"))
+  }
 
   private val engine = "http://127.0.0.1:4145"
 
@@ -29,9 +40,9 @@ class BridgeOriginGuardTest {
   fun scriptGatesOnTopFrameAndOriginWhitelist() {
     val js = BridgeOriginGuard.script(listOf(engine))
     assertTrue("守卫必须判顶层帧（主帧 origin 可能为 null，只判 origin 会误封）", js.contains("window.top === window"))
-    assertTrue("守卫必须读 location.origin", js.contains("location.origin"))
+    assertTrue("守卫必须读文档安全 origin，不能用 blob URL 的创建者 origin", js.contains("var origin = self.origin"))
     // 必须是 isTop || listed 两条；**不得**把 origin === 'null' 当放行条件——
-    // sandbox 攻击帧的 location.origin 正是 'null'，列进来等于放行整类攻击帧
+    // sandbox 攻击帧的 self.origin 正是 'null'，列进来等于放行整类攻击帧
     // （实测：sandbox="allow-scripts" 子帧 origin === 'null'）。主帧的 null 期由 isTop 兜住。
     assertTrue("放行判据必须是 isTop || listed", js.contains("var allowed = isTop || listed"))
     assertFalse(
