@@ -37,8 +37,12 @@ const MOBILE_QUERY = '(max-width: 767px)'
 const FOLD_ATTR = 'data-dsh-topbar-fold'
 /** 去 containment 的标记类（内联写在标题行上，见 snapshot-panels 的同一先例）。 */
 const UNCONTAINED_ATTR = 'data-dsh-topbar-fold-uncontained'
+const UNMASKED_ATTR = 'data-dsh-topbar-fold-unmasked'
 /** 折叠箭头的标记属性。 */
 const ARROW_ATTR = 'data-dsh-topbar-fold-arrow'
+const EMPTY_ATTR = 'data-dsh-topbar-fold-empty'
+const ID_PREFIX = 'dsh-conversation-options-'
+let nextPanelId = 0
 
 interface Target {
   /** 标题栏插件 UI 的座位容器。 */
@@ -81,14 +85,17 @@ export class TopBarFold {
   private formObserver: MutationObserver | null = null
   private media: MediaQueryList | null = null
   private open = false
+  private sessionId: string | null = null
   /** 本节流里被我们接管过的容器（收起 / 解除时必须逐项还原）。 */
   private container: HTMLElement | null = null
   private titleRow: HTMLElement | null = null
+  private maskedAncestor: HTMLElement | null = null
   private arrow: HTMLButtonElement | null = null
   /** 箭头当前的宿主：视图标签条所在的那一行（父行，不是标签条本身）。 */
   private arrowRow: HTMLElement | null = null
   /** 容器上被我们覆盖掉的内联样式原值，解除时逐项写回。 */
   private readonly styleSnapshot = new Map<string, string>()
+  private panelId: string | null = null
   private scheduled = false
   /**
    * 已排队的 rAF id（issue #1411）。旧实现只存布尔、不存 id：同一帧内 detach 之后，已排队的
@@ -106,11 +113,32 @@ export class TopBarFold {
     if (!(target instanceof Element)) return
     if (target.closest('[' + ARROW_ATTR + ']') !== null) return
     if (this.container !== null && this.container.contains(target)) return
+    // A plugin may render its secondary UI in a portal. Let the plugin handle
+    // that interaction without hiding its trigger (and invalidating its anchor).
+    if (this.isPluginPopup(target)) return
     this.setOpen(false)
   }
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {
-    if (event.key === 'Escape' && this.open) this.setOpen(false)
+    if (event.key !== 'Escape' || event.defaultPrevented || !this.open) return
+    if (event.target instanceof Element && this.isPluginPopup(event.target)) return
+    if (this.container?.querySelector('[aria-expanded="true"]')) return
+    this.setOpen(false)
+    this.arrow?.focus()
+  }
+
+  private isPluginPopup(target: Element): boolean {
+    const container = this.container
+    if (container === null) return false
+    for (const trigger of container.querySelectorAll('[aria-controls], [aria-owns]')) {
+      const ids = [trigger.getAttribute('aria-controls'), trigger.getAttribute('aria-owns')].join(' ').trim().split(/\s+/)
+      if (ids.some(id => id && document.getElementById(id)?.contains(target))) return true
+    }
+    // Some native slots (e.g. the subagent tree) portal to body without an ID.
+    // Only treat such a surface as related while a slot trigger is expanded.
+    return container.querySelector('[aria-expanded="true"]') !== null
+      && target.closest('[role="dialog"], [role="menu"], [role="listbox"], [role="tree"]') !== null
+      && !container.closest('[data-dsh-frame]')?.contains(target)
   }
 
   private readonly onViewportChange = (): void => { this.schedule() }
@@ -136,12 +164,14 @@ export class TopBarFold {
     this.formObserver = new MutationObserver(() => { this.schedule() })
     this.formObserver.observe(document.documentElement, {
       attributes: true,
-      attributeFilter: ['data-dsh-mobile-form'],
+      attributeFilter: ['data-dsh-mobile-form', 'data-dsh-session-id'],
     })
     document.addEventListener('pointerdown', this.onDocumentPointerDown, true)
     document.addEventListener('mousedown', this.onDocumentPointerDown, true)
     document.addEventListener('keydown', this.onKeyDown)
     window.addEventListener('resize', this.onViewportChange)
+    window.visualViewport?.addEventListener('resize', this.onViewportChange)
+    window.visualViewport?.addEventListener('scroll', this.onViewportChange)
     window.addEventListener('scroll', this.onScroll, true)
     this.media?.addEventListener('change', this.onViewportChange)
     this.schedule()
@@ -165,6 +195,8 @@ export class TopBarFold {
     document.removeEventListener('mousedown', this.onDocumentPointerDown, true)
     document.removeEventListener('keydown', this.onKeyDown)
     window.removeEventListener('resize', this.onViewportChange)
+    window.visualViewport?.removeEventListener('resize', this.onViewportChange)
+    window.visualViewport?.removeEventListener('scroll', this.onViewportChange)
     window.removeEventListener('scroll', this.onScroll, true)
     this.media?.removeEventListener('change', this.onViewportChange)
     this.media = null
@@ -195,11 +227,18 @@ export class TopBarFold {
       this.restore()
       return
     }
+    const sessionId = document.documentElement.getAttribute('data-dsh-session-id')
+    if (this.sessionId !== sessionId && this.open) this.setOpen(false)
+    this.sessionId = sessionId
     if (this.container !== target.container) {
       // 换了一个座位容器（会话切换 / 上游重挂）：把旧的完全还原后再接管新的。
       this.restore()
       this.container = target.container
       this.titleRow = target.titleRow
+      if (!target.container.id) {
+        this.panelId = ID_PREFIX + String(++nextPanelId)
+        target.container.id = this.panelId
+      }
       this.snapshotStyles(target.container)
     } else if (this.titleRow !== target.titleRow) {
       this.setTitleRowUncontained(false)
@@ -240,7 +279,15 @@ export class TopBarFold {
 
   /** 解析折叠目标；标题栏不在场时返回 null。 */
   private resolve(): Target | null {
-    const container = document.querySelector<HTMLElement>(ACTIONS_SELECTOR)
+    // In a split workspace there may be multiple conversation headers. Bind
+    // the seat and trigger to the same visible header.
+    const seats = [...document.querySelectorAll<HTMLElement>(ACTIONS_SELECTOR)]
+    const container = seats.length > 1
+      ? seats.find(seat => {
+        const tabs = seat.closest('header')?.querySelector(TABS_SELECTOR)
+        return tabs !== null && tabs !== undefined && tabs.getClientRects().length > 0
+      }) ?? null
+      : seats[0] ?? null
     if (container === null) return null
     const header = container.closest('header')
     if (header === null) return null
@@ -284,7 +331,10 @@ export class TopBarFold {
     arrow.setAttribute(ARROW_ATTR, '')
     arrow.setAttribute('aria-expanded', 'false')
     arrow.setAttribute('aria-label', this.foldLabel())
-    arrow.appendChild(chevron())
+    const label = document.createElement('span')
+    const language = (document.documentElement.lang || navigator.language || '').toLowerCase()
+    label.textContent = language.startsWith('zh') ? '更多选项' : 'More options'
+    arrow.append(label, chevron())
     arrow.addEventListener('click', this.onArrowClick)
     row.appendChild(arrow)
     this.arrow = arrow
@@ -304,7 +354,7 @@ export class TopBarFold {
    * 宽度=内容宽，行内剩余空间只存在于父行里，所以箭头必须挂父行才推得到最右。
    */
   private resolveArrowRow(): HTMLElement | null {
-    const tabs = document.querySelector<HTMLElement>(TABS_SELECTOR)
+    const tabs = this.container?.closest('header')?.querySelector<HTMLElement>(TABS_SELECTOR)
     return tabs?.parentElement ?? null
   }
 
@@ -317,8 +367,8 @@ export class TopBarFold {
   /** 本地化的箭头无障碍名（本插件自有文案，无上游文案依赖）。 */
   private foldLabel(): string {
     const language = (document.documentElement.lang || navigator.language || '').toLowerCase()
-    if (language.startsWith('zh')) return this.open ? '收起插件工具' : '展开插件工具'
-    return this.open ? 'Collapse plugin tools' : 'Expand plugin tools'
+    if (language.startsWith('zh')) return '更多选项'
+    return 'More options'
   }
 
   private removeArrow(): void {
@@ -344,6 +394,8 @@ export class TopBarFold {
     const container = this.container
     if (container === null) return
     container.setAttribute(FOLD_ATTR, this.open ? 'open' : 'closed')
+    const language = (document.documentElement.lang || navigator.language || '').toLowerCase()
+    container.setAttribute(EMPTY_ATTR, language.startsWith('zh') ? '当前会话暂无更多选项' : 'No additional options in this conversation')
     // 打开时由 measure() 写定位；收起时写回接管前的原值（不是一律删空 ——
     // 那会连上游/插件自己原本写在这条容器上的内联样式一起抹掉）。
     for (const name of OWN_POSITION_VARS) {
@@ -360,6 +412,7 @@ export class TopBarFold {
       else container.style.setProperty('--dsh-topbar-fold-max-height', originalCap)
     }
     this.arrow?.setAttribute('aria-expanded', this.open ? 'true' : 'false')
+    this.arrow?.setAttribute('aria-controls', container.id)
     const label = this.foldLabel()
     if (this.arrow !== null && this.arrow.getAttribute('aria-label') !== label) {
       this.arrow.setAttribute('aria-label', label)
@@ -377,6 +430,21 @@ export class TopBarFold {
     if (row === null) return
     if (on) row.setAttribute(UNCONTAINED_ATTR, '')
     else row.removeAttribute(UNCONTAINED_ATTR)
+    if (on) {
+      // 0.2.2 puts the title and actions inside a fading title cluster.
+      // A CSS mask clips descendants even when they are position:fixed.
+      // Only disable masks on ancestors between this seat and its title row.
+      for (let el = this.container?.parentElement; el && el !== row; el = el.parentElement) {
+        const style = getComputedStyle(el)
+        if (![style.maskImage, style.getPropertyValue('-webkit-mask-image')].some(value => value && value !== 'none')) continue
+        this.maskedAncestor = el
+        el.setAttribute(UNMASKED_ATTR, '')
+        break
+      }
+    } else {
+      this.maskedAncestor?.removeAttribute(UNMASKED_ATTR)
+      this.maskedAncestor = null
+    }
   }
 
   /**
@@ -394,17 +462,19 @@ export class TopBarFold {
     if (anchor === null) return
     // ── 读阶段：只读，不写 ──
     const rect = anchor.getBoundingClientRect()
+    const trigger = this.arrow?.getBoundingClientRect()
     const clientWidth = document.documentElement.clientWidth
     const visible = window.visualViewport
     const viewportBottom = visible !== null && visible !== undefined
       ? Math.round(visible.offsetTop + visible.height)
       : Math.round(window.innerHeight)
     // ── 算阶段 ──
-    const top = String(Math.round(rect.bottom)) + 'px'
+    const panelTop = Math.round(Math.max(rect.bottom, trigger?.bottom ?? 0, visible?.offsetTop ?? 0)) + 6
+    const top = String(panelTop) + 'px'
     const left = String(Math.round(rect.left) + 12) + 'px'
     const right = String(Math.round(Math.max(12, clientWidth - rect.right + 12))) + 'px'
     // 限高到视口底部（留 12px）：内容更多时由面板内部滚动，而不是盖住输入框。
-    const maxHeight = String(Math.max(96, viewportBottom - Math.round(rect.bottom) - 24)) + 'px'
+    const maxHeight = String(Math.max(0, viewportBottom - panelTop - 12)) + 'px'
     // ── 写阶段：只在值真的变了时写 ──
     this.setStyle(container, 'top', top)
     this.setStyle(container, 'left', left)
@@ -425,12 +495,15 @@ export class TopBarFold {
     const container = this.container
     if (container !== null) {
       container.removeAttribute(FOLD_ATTR)
+      container.removeAttribute(EMPTY_ATTR)
+      if (container.id === this.panelId) container.removeAttribute('id')
       for (const [name, value] of this.styleSnapshot) {
         if (value === '') container.style.removeProperty(name)
         else container.style.setProperty(name, value)
       }
     }
     this.styleSnapshot.clear()
+    this.panelId = null
     this.container = null
     this.titleRow = null
     this.open = false
