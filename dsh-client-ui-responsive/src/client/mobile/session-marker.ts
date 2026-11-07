@@ -12,6 +12,7 @@
  */
 export interface SessionListSnapshot {
   current?: unknown
+  byId?: Readonly<Record<string, { id: string; retainedBy?: { mainView?: number } }>>
 }
 export interface SessionListLike {
   getSnapshot?(): SessionListSnapshot | undefined
@@ -61,7 +62,11 @@ export class SessionMarker {
   /** 同步一次：当前会话 id → 属性；无会话则移除。 */
   sync(): void {
     try {
-      const current = this.sessions?.list?.getSnapshot?.()?.current
+      const snapshot = this.sessions?.list?.getSnapshot?.()
+      // 0.2.2 moved selection out of list.current. Use the same mainView
+      // retention fact as the upstream workspace, never a right-panel session.
+      const current = snapshot?.current
+        ?? Object.values(snapshot?.byId ?? {}).find(session => (session.retainedBy?.mainView ?? 0) > 0)?.id
       const root = document.documentElement
       if (current === undefined || current === null || String(current) === '') root.removeAttribute(SESSION_ID_ATTRIBUTE)
       else root.setAttribute(SESSION_ID_ATTRIBUTE, String(current))

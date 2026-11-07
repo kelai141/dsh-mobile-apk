@@ -464,7 +464,11 @@ class PhotoCaptureTest {
   @Test
   fun `控制器把在途原图交给清理侧排除`() {
     val controller = codeOnly(source("PhotoCaptureController.kt"))
-    assertTrue("受理拍照时必须把在途集合交给 sweepOld", controller.contains("exclude = inFlightRawNames.toSet()"))
+    assertTrue("后台清理必须保留当前相机和压缩线程的原图",
+      controller.contains("synchronized(inFlightRawNames) { inFlightRawNames.toSet() + job.raw.name }") &&
+        controller.contains("exclude = protected"))
+    assertTrue("先启动相机再清理缓存", controller.indexOf("cameraLauncher.launch(intent)") in
+      0 until controller.indexOf("PhotoCapture.sweepOld("))
     assertTrue("必须用同步集合（压缩线程与主线程并发读写）",
       controller.contains("Collections.synchronizedSet(mutableSetOf<String>())"))
     // 登记必须在起线程之前：起线程之后再登记会有窗口期让并发的 sweepOld 抢在前面。

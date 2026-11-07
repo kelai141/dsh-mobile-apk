@@ -76,6 +76,16 @@ test('反证：非吸收态（布局视口不随键盘变短的内核）仍然�
   assert.equal(computeBottomInset(unabsorbed), 300, '未吸收态必须让开整整一个键盘')
 })
 
+test('终端所在面板已收缩时，不按全屏视口重复上抬键条', () => {
+  const input = {
+    safeAreaBottom: 0, shellSystemBottom: 0, shellImeBottom: 300,
+    visualViewportHeight: 500, visualViewportOffsetTop: 0, layoutViewportHeight: 800,
+  }
+  assert.equal(computeBottomInset({ ...input, terminalBottom: 500 }), 0)
+  assert.equal(computeBottomInset({ ...input, terminalBottom: 535 }), 35)
+  assert.equal(computeBottomInset({ ...input, terminalBottom: 300 }), 0)
+})
+
 test('视觉视口整个不可用时，壳侧 IME 变量是唯一兜底（不得把键条留在键盘底下）', () => {
   const noViewport = {
     safeAreaBottom: 0, shellSystemBottom: 0, shellImeBottom: 300,

@@ -22,11 +22,12 @@ import androidx.webkit.WebViewFeature
  *
  * 判据为什么是「顶层帧 + origin 白名单（白名单允许 opaque）」
  * -----------------------------------------------------
- * 只比对 origin 字面量会误封主帧：实测主文档在某些阶段 location.origin === "null"
+ * 只比对 origin 字面量会误封主帧：实测主文档在某些阶段 origin === "null"
  * （不透明上下文），写死 http://127.0.0.1:<port> 会把合法主帧的桥一起封掉。
  * 只判顶层帧又会误封同源子帧（HTML artifact 预览要用桥）。因此取「或」：
  *   - window.top === window（顶层帧）→ 放行，与 origin 无关，兜住主帧的 "null" 期；
- *   - 否则 location.origin 必须命中白名单（显式含 "null"，兜住同源 artifact 帧）。
+ *   - 否则文档的安全 origin 必须命中白名单。sandbox blob 的 URL 可写着引擎 origin，
+ *     但文档的安全 origin 是 null，所以必须读取 self.origin。
  * 跨源 / opaque 子帧两条都不满足 → 封死。
  *
  * 为什么是「零新增全局」
@@ -43,6 +44,10 @@ import androidx.webkit.WebViewFeature
 internal object BridgeOriginGuard {
 
     private const val TAG = "dsh-bridge-guard"
+
+    /** Only an engine-created Blob URL in a guarded subframe can stay inside this WebView. */
+    fun allowsEnginePreview(url: String, engineOrigin: String, mainFrame: Boolean, guardReady: Boolean): Boolean =
+        !mainFrame && guardReady && engineOrigin.isNotBlank() && url.startsWith("blob:${engineOrigin.trimEnd('/')}/")
 
     /**
      * 生成 document-start 守卫脚本。
@@ -64,7 +69,7 @@ internal object BridgeOriginGuard {
         sb.append("            top: null, origin: null, allowed: null, applied: null, after: null };\n")
         sb.append("  try {\n")
         sb.append("    var isTop = window.top === window;\n")
-        sb.append("    var origin = location.origin;\n")
+        sb.append("    var origin = self.origin;\n")
         sb.append("    var listed = ALLOWED.indexOf(origin) !== -1;\n")
         // 放行判据：顶层帧（不论 origin，覆盖实测到的「主帧 origin 为 null」）
         //           或 origin 命中真实引擎白名单（覆盖同源 iframe，如 HTML artifact 预览）。

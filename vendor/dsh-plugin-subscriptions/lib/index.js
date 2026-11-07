@@ -14,6 +14,7 @@ import { homedir } from "node:os";
 import { AttachmentId } from "@deepseek-ai/dsh-attachment";
 import { WebError } from "@deepseek-ai/dsh-web";
 import { defineTool } from "@deepseek-ai/dsh-tools";
+import { callbackReceivedPage } from "./auth/oauth-flow.js";
 
 //#region src/auth/pkce.ts
 /**
@@ -56,7 +57,6 @@ function randomHex(bytes = 8) {
 //#region src/auth/oauth-flow.ts
 /** Default attempt lifetime: three minutes for the user to complete login. */
 const DEFAULT_FLOW_TIMEOUT_MS = 18e4;
-const SUCCESS_PAGE = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Login successful</title></head><body style=\"font-family:sans-serif\"><h1>Login successful</h1><p>You can close this tab and return to DeepSeek Harness.</p></body></html>";
 function failurePage(detail) {
 	return `<!doctype html><html><head><meta charset="utf-8"><title>Login failed</title></head><body style="font-family:sans-serif"><h1>Login failed</h1><p>${detail.replace(/[<>&]/g, "")}</p></body></html>`;
 }
@@ -198,8 +198,8 @@ var OAuthFlowManager = class {
 				response.end("missing authorization code");
 				return;
 			}
-			response.writeHead(200, { "content-type": "text/html" });
-			response.end(SUCCESS_PAGE);
+			response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" });
+			response.end(callbackReceivedPage());
 			settle(void 0, code);
 		};
 		const settle = (error, code) => {
