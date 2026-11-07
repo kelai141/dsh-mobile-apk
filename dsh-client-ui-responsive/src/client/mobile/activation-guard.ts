@@ -47,6 +47,16 @@ const EDITOR_REGION_SELECTOR = [
 /** Own marker for the three inert faces, so restoration is exactly reversible. */
 export const INERT_ATTR = 'data-dsh-activation-inert'
 
+const forwardedClicks = new WeakSet<Event>()
+
+/** Forward one click from the visible Android control to its hidden upstream counterpart. */
+export function forwardControlClick(target: HTMLElement): void {
+  if (target.matches(':disabled')) return
+  const click = new MouseEvent('click', { bubbles: true, cancelable: true, composed: true })
+  forwardedClicks.add(click)
+  try { target.dispatchEvent(click) } finally { forwardedClicks.delete(click) }
+}
+
 /** How long after a control activation a programmatic composer focus is still rejected. */
 export const SUPPRESS_WINDOW_MS = 250
 
@@ -209,7 +219,7 @@ export class ActivationGuard {
 
   /** Click: same judgement, so a synthetic click (or a press that produced no pointerdown) is covered. */
   private readonly onClick = (event: Event): void => {
-    if (!this.enabled()) return
+    if (!this.enabled() || forwardedClicks.has(event)) return
     const target = event.target instanceof Element ? event.target : null
     if (target === null) return
     const control = target.closest<HTMLElement>(CONTROL_SELECTOR)
