@@ -61,7 +61,11 @@ function buildPanel(labels: readonly string[], activeLabel?: string, layout: 'le
     if (layout === 'v022') {
       const iconWrapper = document.createElement('span')
       iconWrapper.setAttribute('aria-hidden', 'true')
-      iconWrapper.append(icon)
+      const iconSlot = document.createElement('span')
+      iconSlot.setAttribute('data-slot', 'settings.section.icon')
+      iconSlot.style.display = 'contents'
+      iconSlot.append(icon)
+      iconWrapper.append(iconSlot)
       button.append(iconWrapper)
     } else button.append(icon)
     const text = document.createElement('span')
@@ -625,7 +629,7 @@ describe('一级行的图标（只装饰我方自有分区）', () => {
     for (const label of ['应用更新', '通知', '手机控制', '开发者选项']) {
       const row = handle.rows.get(label)!
       expect(row.querySelectorAll(':scope > svg[data-dsh-settings-nav-icon]')).toHaveLength(1)
-      expect(row.querySelectorAll(':scope > span[data-dsh-settings-nav-icon-hidden] > svg')).toHaveLength(1)
+      expect(row.querySelectorAll(':scope > span[data-dsh-settings-nav-icon-hidden] > [data-slot="settings.section.icon"] > svg')).toHaveLength(1)
     }
     expect(handle.rows.get('第三方')!.querySelector('[data-dsh-settings-nav-icon-hidden]')).toBeNull()
     nav.detach()
