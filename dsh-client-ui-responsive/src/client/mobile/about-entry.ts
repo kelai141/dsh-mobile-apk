@@ -14,6 +14,7 @@
  *  - 导航里那一行在入口成功插入后才隐藏（否则页面不可达 → 保留为兜底入口）。
  */
 import { tr } from '../i18n.ts'
+import { forwardControlClick } from './activation-guard.ts'
 
 /** 已处理的原节点标记（值 = 抓到的引擎版本）。 */
 const HANDLED = 'data-dsh-about-source'
@@ -79,8 +80,8 @@ function openAboutSection(): void {
   const scope: ParentNode = dialog ?? document
   for (const button of scope.querySelectorAll<HTMLButtonElement>('nav button')) {
     if (!(button.textContent ?? '').includes(tr('关于', 'About'))) continue
-    // display:none 的按钮 .click() 依旧会派发事件，所以隐藏后这条路仍然有效。
-    button.click()
+    // 入口可见，实际分区按钮隐藏；明确转发这一次用户点击。
+    forwardControlClick(button)
     return
   }
 }
