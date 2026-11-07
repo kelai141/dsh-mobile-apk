@@ -35,9 +35,9 @@ html[data-dsh-mobile-form] [data-dsh-topbar-fold='open'] {
   position: fixed !important;
   z-index: 25;
   box-sizing: border-box;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 7px;
   padding: 10px 12px;
   border: 0.5px solid var(--dsw-alias-border-l3, rgba(128, 128, 128, 0.4));
   border-radius: var(--dsw-radius-md, 10px);
@@ -47,6 +47,32 @@ html[data-dsh-mobile-form] [data-dsh-topbar-fold='open'] {
   max-height: var(--dsh-topbar-fold-max-height, 60vh);
   overflow-y: auto;
   overflow-x: hidden;
+}
+
+/* Each slot contribution keeps its own DOM and event handlers. A bubble is
+   purely visual; complex components retain their own internal controls. */
+html[data-dsh-mobile-form] [data-dsh-topbar-fold='open'] > :not([hidden]) {
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  min-inline-size: 0;
+  min-block-size: 46px;
+  max-inline-size: 100%;
+  padding: 0 12px;
+  align-content: center;
+  border-radius: 18px;
+  background-color: var(--dsw-alias-interactive-bg-hover, rgba(128, 128, 128, .16));
+}
+html[data-dsh-mobile-form] [data-dsh-topbar-fold='open'] > button,
+html[data-dsh-mobile-form] [data-dsh-topbar-fold='open'] > :not([hidden]) > button:only-child {
+  min-block-size: 46px;
+  inline-size: 100%;
+  max-inline-size: 100%;
+  text-align: start;
+}
+html[data-dsh-mobile-form] [data-dsh-topbar-fold='open']:empty::before {
+  content: attr(data-dsh-topbar-fold-empty);
+  padding: 10px 4px;
+  color: var(--dsw-alias-label-secondary, inherit);
 }
 
 /* 面板容器自身不得建立新的 containing block，否则面板里的二级弹层会被裁在面板内。 */
@@ -61,6 +87,11 @@ html[data-dsh-mobile-form] [data-dsh-topbar-fold] {
 html[data-dsh-mobile-form] div[data-dsh-topbar-fold-uncontained] {
   container-type: normal;
   contain: none;
+}
+html[data-dsh-mobile-form] [data-dsh-topbar-fold-unmasked] {
+  -webkit-mask-image: none !important;
+  mask-image: none !important;
+  overflow: visible !important;
 }
 
 /* 视图菜单（上游的「…」）：用户定例移除，只保留折叠箭头（#862 的行为，保留）。
@@ -127,18 +158,28 @@ html[data-dsh-mobile-form] [data-dsh-topbar-fold-arrow] {
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  align-self: flex-start;
-  margin-top: -4px;
+  align-self: center;
+  margin-top: 0;
   margin-inline-start: auto;
   margin-inline-end: -16px;
-  width: 24px;
-  height: 24px;
-  padding: 0;
+  gap: 6px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 11px;
   border: none;
-  border-radius: var(--dsw-radius-sm, 6px);
+  border-radius: 999px;
   background: transparent;
   color: var(--dsw-alias-label-secondary, inherit);
   cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  white-space: nowrap;
+}
+html[data-dsh-mobile-form] [data-dsh-topbar-fold-arrow][aria-expanded='true'] {
+  background-color: var(--dsw-alias-interactive-bg-hover, rgba(128, 128, 128, .16));
+}
+html[data-dsh-mobile-form] [data-conversation-tabs] {
+  align-self: center;
 }
 html[data-dsh-mobile-form] [data-dsh-topbar-fold-arrow] svg {
   transition: transform var(--ds-transition-duration-fast, 150ms) ease;

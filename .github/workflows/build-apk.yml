@@ -24,6 +24,10 @@ on:
         description: 'APK 版本后缀（默认空=正式版纯净版本号；测试构建显式传 -fix 等）'
         type: string
         default: ''
+      version_code:
+        description: '开发预览安装号（可选；要求非空后缀，用于覆盖此前的开发包）'
+        type: string
+        default: ''
       source_audit:
         description: '仅在来源审计 PR 分支上运行固定源码/签名输入构建'
         type: boolean
@@ -97,9 +101,42 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y python3 python-is-python3 || sudo ln -sf /usr/bin/python3 /usr/bin/python
           python --version
+      - name: 检出合同钉定的上游源码供打包门禁核对
+        shell: bash
+        run: |
+          set -euo pipefail
+          UPSTREAM=$(node -p 'require("./scripts/contract.json").upstreamRepo')
+          COMMIT=$(node -p 'require("./scripts/contract.json").upstream.commit')
+          TAG=$(node -p 'require("./scripts/contract.json").upstream.tag')
+          test -n "$COMMIT" && test -n "$TAG"
+          git clone --filter=blob:none --single-branch --branch "$TAG" --depth=1 \
+            https://github.com/deepseek-ai/deepseek-harness.git "$UPSTREAM"
+          test "$(git -C "$UPSTREAM" rev-parse HEAD)" = "$COMMIT"
+          node scripts/check-dead-tokens.mjs --require
       - name: 准备 Java（gradle 需要）
         uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '17' }
+
+      - name: 设置开发预览安装号
+        if: ${{ inputs.version_code != '' }}
+        shell: bash
+        env:
+          PREVIEW_CODE: ${{ inputs.version_code }}
+          PREVIEW_SUFFIX: ${{ inputs.suffix }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$PREVIEW_SUFFIX" || ! "$PREVIEW_CODE" =~ ^[1-9][0-9]{0,8}$ ]]; then
+            echo "::error::预览安装号须为正整数（至多九位），且必须设置版本后缀"
+            exit 1
+          fi
+          printf 'ORG_GRADLE_PROJECT_versionCode=%s\n' "$PREVIEW_CODE" >> "$GITHUB_ENV"
+
+      - name: 生成本次构建的 Kotlin 单测结果
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew :app:testDebugUnitTest --no-daemon --console=plain
 
       - name: 准备并构建插件（统一清单、锁解析与单次构建）
         shell: bash
