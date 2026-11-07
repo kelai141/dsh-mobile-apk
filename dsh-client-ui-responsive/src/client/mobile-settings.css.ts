@@ -261,7 +261,7 @@ export const MOBILE_SETTINGS_CSS: string = `
     grid-row: 1;
   }
 
-  html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > nav button > svg[data-dsh-settings-nav-icon-hidden] {
+  html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > nav button > [data-dsh-settings-nav-icon-hidden] {
     display: none;
   }
 
