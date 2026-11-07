@@ -90,6 +90,7 @@
     "@deepseek-ai/dsh-client-resources": "0.2.2-rc.1",
     "@deepseek-ai/dsh-util-code-language": "0.2.2-rc.1",
     "@shikijs/langs": "^4.4.3",
+    "acorn": "8.15.0",
     "anser": "^2.3.5",
     "diff": "^9.0.0",
     "katex": "^0.18.7",

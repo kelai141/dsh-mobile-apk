@@ -32,7 +32,8 @@ class SnapshotGateNegativeControlTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.plugin = self.root / 'dsh-shell-termux'
+        # The source folder is not necessarily the package basename (linux-bootstrap).
+        self.plugin = self.root / 'different-source-folder'
         (self.plugin / 'lib').mkdir(parents=True)
         (self.plugin / 'package.json').write_text(
             json.dumps({'name': '@dsh-android/dsh-shell-termux', 'version': 'current'}),
