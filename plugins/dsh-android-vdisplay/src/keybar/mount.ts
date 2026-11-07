@@ -331,6 +331,7 @@ export function mountKeybar(host: KeybarHost): KeybarHandle {
       visualViewportHeight: view.visualViewport?.height ?? view.innerHeight,
       visualViewportOffsetTop: view.visualViewport?.offsetTop ?? 0,
       layoutViewportHeight: view.innerHeight,
+      terminalBottom: host.getBoundingClientRect().bottom,
     })
     if (insetHost !== null && insetHost !== host) {
       insetHost.style.removeProperty(KEYBAR_INSET_VAR)
