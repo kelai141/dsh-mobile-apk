@@ -22,7 +22,9 @@ android {
     // 0.14.9：versionCode 53（覆盖安装 0.14.8(52)）。所有交付 APK 强制包含 v1/v2/v3 签名。
     // 为什么必须升：UpdateChecker 的判据是 isNewer(tag, currentVersion())。若 versionName 仍等于上一个
     // 已发布 tag（0.14.8），应用内更新对任何设备恒判 UpToDate —— 修好更新检测却送不出去。
-    versionCode = 53
+	// 本地调试可用 -PversionCode=<n> 覆盖（真机上被更高 versionCode 的测试包覆盖安装过时才需要）；
+	// 不传时仍是发布口径的固定值。
+	versionCode = providers.gradleProperty("versionCode").getOrElse("53").toInt()
     // Snapshot builds append a suffix (e.g. -SN-1-RC13) via -PversionNameSuffix; release builds pass none.
     val snapshotSuffix = providers.gradleProperty("versionNameSuffix").getOrElse("")
     // 版本号单一来源：UI（GuidePageRenderer）、桥（androidBridge.version）、诊断日志、引擎环境变量

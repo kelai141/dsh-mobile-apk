@@ -13,6 +13,16 @@ const SUCCESS_PAGE = '<!doctype html><html><head><meta charset="utf-8"><title>Lo
     + '<body style="font-family:sans-serif"><h1>Login successful</h1>'
     + '<p>You can close this tab and return to DeepSeek Harness.</p></body></html>';
 const MOBILE_RETURN = 'intent://oauth-return#Intent;scheme=com.dsharnessmobile.shell;package=com.dsharnessmobile.shell;end';
+/**
+ * 直连 scheme 的回跳链接（与壳侧 manifest 的 intent-filter 逐字一致）。
+ *
+ * 为什么要两路：`intent://…#Intent;…` 在部分 Chromium 内核与内置浏览器里不被当作
+ * Android Intent 语法解析，而是当成普通 URL 交给「打开方式」选择器 —— 真机 2026-11-07
+ * 实测：点按钮能正常回到 DeepCode，自动跳转却弹出只含钉钉/Edge 的选择器。
+ * 因此自动跳转改走这条普通深链（系统能唯一定位到 MainActivity），
+ * `intent://` 那一条仍留给按钮做兜底。
+ */
+const MOBILE_RETURN_DIRECT = 'com.dsharnessmobile.shell://oauth-return';
 export function callbackReceivedPage(isMobile = Boolean(process.env.DSH_APP_VERSION)) {
     if (!isMobile) return SUCCESS_PAGE;
     // This page confirms receipt of the callback, not the subsequent token exchange.
@@ -26,7 +36,8 @@ export function callbackReceivedPage(isMobile = Boolean(process.env.DSH_APP_VERS
         + '<a id="return" href="' + MOBILE_RETURN + '">返回 DeepCode / Return to DeepCode</a>'
         + '<p>如果没有跳转，请点上方按钮，或从最近任务打开 DeepCode。<br>'
         + '<span lang="en">If nothing opens, tap the button or switch back to DeepCode from Recents.</span></p>'
-        + '</main><script>if (/Android/i.test(navigator.userAgent)) location.href = document.getElementById("return").href;</script></body></html>';
+        + '</main><script>if (/Android/i.test(navigator.userAgent)) location.href = '
+        + JSON.stringify(MOBILE_RETURN_DIRECT) + ';</script></body></html>';
 }
 function failurePage(detail) {
     return '<!doctype html><html><head><meta charset="utf-8"><title>Login failed</title></head>'

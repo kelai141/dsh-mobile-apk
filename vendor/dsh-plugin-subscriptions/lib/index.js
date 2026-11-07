@@ -54,9 +54,7 @@ function randomHex(bytes = 8) {
 }
 
 //#endregion
-//#region src/auth/oauth-flow.ts
-/** Default attempt lifetime: three minutes for the user to complete login. */
-const DEFAULT_FLOW_TIMEOUT_MS = 18e4;
+//#region src/auth/oauth-flow.ts（实现见 ./auth/oauth-flow.js，回跳页由它导出）
 function failurePage(detail) {
 	return `<!doctype html><html><head><meta charset="utf-8"><title>Login failed</title></head><body style="font-family:sans-serif"><h1>Login failed</h1><p>${detail.replace(/[<>&]/g, "")}</p></body></html>`;
 }
@@ -198,7 +196,7 @@ var OAuthFlowManager = class {
 				response.end("missing authorization code");
 				return;
 			}
-			response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" });
+			response.writeHead(200, { "content-type": "text/html" });
 			response.end(callbackReceivedPage());
 			settle(void 0, code);
 		};
@@ -2643,9 +2641,26 @@ var TokenManager = class {
 	inflight;
 	/** The session whose refresh token the in-flight refresh is spending. */
 	attempted;
+	/**
+	* 登出代次（issue #1588）。每次 invalidate() 递增；doRefresh 在发起刷新前记下当时的值，
+	* 落盘前再比一次——值变了说明这期间发生过登出，本次刷新结果必须整份丢弃。
+	*
+	* 打包产物 lib/index.js 是运行期真正被加载的那一份，本类在此内联，必须与
+	* lib/providers/common.js 的同名类保持同步；#1588 初次只改了源模块，登出于是报
+	* `cached.invalidate is not a function`（真机 2026-11-07 实锤）。
+	*/
+	generation = 0;
 	constructor(options) {
 		this.options = options;
 		this.options = options;
+	}
+	/**
+	* 作废当前在途刷新（issue #1588）。登出路径必须调用，否则刷新返回后会把账号写回磁盘。
+	*
+	* 只递增代次、不取消网络请求：取消失败的刷新没有必要——它的结果会被代次判据丢弃。
+	*/
+	invalidate() {
+		this.generation += 1;
 	}
 	/**
 	* Read the stored session without any refresh side effect. Catalog queries
@@ -2687,6 +2702,10 @@ var TokenManager = class {
 				this.options.onRemoved?.();
 				throw new LlmError(`${this.options.displayName} login expired or was revoked; log in again via Settings → Subscriptions`, "INVALID_CREDENTIAL", { cause: error });
 			}
+			// issue #1588：登出优先于「用旧 token 兜底」。doRefresh 在发现这期间已登出时抛
+			// MISSING_CREDENTIAL；此时旧 session 的 expiresAt 往往还在未来，若让它走下面那条
+			// 「transient 失败但 token 仍有效就沿用」的兜底，调用方会拿到一份已登出账号的会话。
+			if (error instanceof LlmError && error.code === "MISSING_CREDENTIAL") throw error;
 			if (!forceRefresh && session.expiresAt > Date.now()) return session;
 			throw error instanceof LlmError ? error : new LlmError(`${this.options.displayName} token refresh failed`, "AUTH", { cause: error });
 		}
@@ -2696,7 +2715,13 @@ var TokenManager = class {
 		if (current$2 !== void 0 && current$2.accessToken !== session.accessToken && current$2.expiresAt - Date.now() > this.options.preemptMs) return current$2;
 		const attempted = current$2 ?? session;
 		this.attempted = attempted;
+		// issue #1588：发起刷新前记下登出代次。刷新是一次网络往返，期间用户完全可能点登出；
+		// 登出只删存储、不等也不作废在途刷新，所以这里必须自己确认这期间没发生过登出，
+		// 否则刷新结果会把刚登出的账号连新 token 一起重新写回磁盘。
+		const generationAtStart = this.generation;
 		const next = await this.options.refresh(attempted);
+		// 代次变了 = 这期间登出过。整份丢弃：不落盘，也不把会话交回给调用方。
+		if (this.generation !== generationAtStart) throw new LlmError(`dsh-plugin-subscriptions: logged out of ${this.options.displayName} while a token refresh was in flight; log in again via Settings → Subscriptions`, "MISSING_CREDENTIAL");
 		await this.options.save(next);
 		return next;
 	}
@@ -10434,6 +10459,36 @@ function accountOf(provider, session) {
 	}
 }
 /** The plan name a stored session carries, when the provider told us. */
+/**
+* 兑换授权码的整体时限（0.14.11，真机 2026-11-07 实锤的「一直登录中」）。
+*
+* 为什么要单独限时：`proxiedFetch` 走 undici，连接阶段的 DNS 失败本来会自己快速失败，
+* 但本机开着 VPN（Clash tun + HTTP 代理）时会话可能停在「连上了、等首字节」，
+* 于是 busy 恒为 true、设置页永远显示「登录中…」。30s 足够覆盖慢网下的正常兑换，
+* 又远短于用户愿意等待的上限。
+*/
+const EXCHANGE_DEADLINE_MS = 3e4;
+/**
+* 给一次授权码兑换加总时限；超时按可读原因失败，好让 status 轮询收口。
+* @param provider - 供应商路由，仅用于文案。
+* @param run - 实际兑换。
+* @returns 兑换结果。
+* @throws LlmError AUTH，当兑换超过 {@link EXCHANGE_DEADLINE_MS}。
+*/
+async function withExchangeDeadline(provider, run) {
+	let timer;
+	try {
+		return await Promise.race([
+			run(),
+			new Promise((_resolve, reject) => {
+				timer = setTimeout(() => reject(new LlmError(`${provider} 登录兑换超时（${Math.round(EXCHANGE_DEADLINE_MS / 1e3)}s）——请检查网络或代理后重试`, "AUTH")), EXCHANGE_DEADLINE_MS);
+				timer.unref?.();
+			})
+		]);
+	} finally {
+		if (timer !== void 0) clearTimeout(timer);
+	}
+}
 function planOf(provider, session) {
 	switch (provider) {
 		case "codex": return session.planType;
@@ -10608,8 +10663,12 @@ var SubscriptionsAuthController = class {
 	*/
 	async complete(provider, attempt, claim) {
 		try {
+			// 回调等待本身由 flow 的三分钟超时兜底；这里只把**兑换**这一段也限时。
+			// 缺陷形态（真机 2026-11-07）：auth.openai.com 在「网页能打开、应用里 DNS 解析失败」时
+			// 请求可以挂到 TCP 超时才失败（可达数分钟），期间 busy 恒为 true，设置页一直显示
+			// 「登录中…」，用户拿不到任何结论。限时后失败会落到 lastError，轮询立刻收口。
 			const code = await attempt.waitCode();
-			const session = await this.exchange(provider, code, attempt);
+			const session = await withExchangeDeadline(provider, () => this.exchange(provider, code, attempt));
 			if (this.claims.get(provider) !== claim) return;
 			await this.persist(provider, session);
 			this.lastError.delete(provider);

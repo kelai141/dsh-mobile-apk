@@ -709,9 +709,11 @@ export class MobileSettingsNav {
    */
   private syncRowIcon(row: HTMLButtonElement, label: string): void {
     const icon = OWN_SECTION_ICONS.get(label)
-    const injected = row.querySelector<SVGSVGElement>(':scope > [' + ICON_ATTR + ']')
-    // 0.2.2 wraps the upstream SVG in an aria-hidden span. Hide that whole icon
-    // cell so it cannot share the same grid slot with the custom icon.
+    // 判据必须是「整行里第一个带我方标记的 svg」，不能只看按钮的直接子节点：
+    // 我方图标一旦落进上游的图标壳（span.navIcon > span），`:scope >` 就找不到它，
+    // 下一次同步会把它当成上游齿轮加隐藏标记 —— 真机 2026-11-07 实锤：
+    // 四个自有分区最后显示的是上游默认齿轮，我方图标被自己藏掉了。
+    const injected = row.querySelector<SVGSVGElement>('[' + ICON_ATTR + ']')
     const wrapped = row.querySelector(':scope > span[aria-hidden="true"]:not([' + CHEVRON_ATTR + ']) > svg')
     const upstream = wrapped?.parentElement
       ?? row.querySelector(':scope > svg:not([' + ICON_ATTR + '])')
@@ -727,7 +729,8 @@ export class MobileSettingsNav {
     if (injected === null) {
       const svg = sectionIcon(icon)
       svg.setAttribute(ICON_ATTR, '')
-      // 放在行首（grid-area: icon 决定实际位置），上游 svg 仍在其后但已隐藏。
+      // 直接放在按钮里（与样式表的 `> svg[data-dsh-settings-nav-icon]` 对应，
+      // 由 grid-area: icon 定位到图标格）；上游齿轮已被隐藏，同格不会再出现第二个图标。
       row.prepend(svg)
     }
   }

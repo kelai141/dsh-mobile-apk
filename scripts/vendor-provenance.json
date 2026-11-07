@@ -69,8 +69,8 @@
           "bytes": 990
         },
         "lib/auth/oauth-flow.js": {
-          "sha256": "831ba6a112e6d78859f1c0ffb3a579cc42e4f7057769f58e0931e39dcb7bd5ff",
-          "bytes": 11266
+          "sha256": "e5930b4cad6217a6d304c9cbf2098fa5d22db1922d6dd03a27259816ec347140",
+          "bytes": 11926
         },
         "lib/auth/pkce.js": {
           "sha256": "263c8f10cbd91d9b7388c92551c37fb1095c32ab8d129e80cc8b907613df6aeb",
@@ -181,8 +181,8 @@
           "bytes": 23875
         },
         "lib/index.js": {
-          "sha256": "3b054bc7a1e2194f13dcc5d32321ae49d064c5e577bc91f3aa8712fda9b4f850",
-          "bytes": 451823
+          "sha256": "5facb2a935040902418ea99b5ee68afa3e3c87d02ddc3744d2ea05fa41ee91d4",
+          "bytes": 466747
         },
         "lib/model-defaults.js": {
           "sha256": "3f7b108cf74e9b558e5e8231286c3b0432c3b7915a53c48cf06ce2bf84e61cff",
@@ -349,8 +349,8 @@
       "bytes": 990
     },
     "lib/auth/oauth-flow.js": {
-      "sha256": "831ba6a112e6d78859f1c0ffb3a579cc42e4f7057769f58e0931e39dcb7bd5ff",
-      "bytes": 11266
+      "sha256": "e5930b4cad6217a6d304c9cbf2098fa5d22db1922d6dd03a27259816ec347140",
+      "bytes": 11926
     },
     "lib/auth/pkce.js": {
       "sha256": "263c8f10cbd91d9b7388c92551c37fb1095c32ab8d129e80cc8b907613df6aeb",
@@ -461,8 +461,8 @@
       "bytes": 23875
     },
     "lib/index.js": {
-      "sha256": "3b054bc7a1e2194f13dcc5d32321ae49d064c5e577bc91f3aa8712fda9b4f850",
-      "bytes": 451823
+      "sha256": "5facb2a935040902418ea99b5ee68afa3e3c87d02ddc3744d2ea05fa41ee91d4",
+      "bytes": 466747
     },
     "lib/model-defaults.js": {
       "sha256": "3f7b108cf74e9b558e5e8231286c3b0432c3b7915a53c48cf06ce2bf84e61cff",
