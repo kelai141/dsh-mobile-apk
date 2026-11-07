@@ -31,7 +31,8 @@ const SEPARATOR_ATTR = 'data-dsh-file-capsule-separator'
 const SHARE_ONLY_ATTR = 'data-dsh-file-capsule-share-only'
 
 /** 胶囊自身的标记选择器（本模块自产节点的唯一判据，避免手拼方括号）。 */
-const CAPSULE_SELECTOR = '[' + CAPSULE_ATTR + ']'
+const STATUS_ATTR = 'data-dsh-file-capsule-status'
+const CAPSULE_SELECTOR = '[' + CAPSULE_ATTR + '],[' + STATUS_ATTR + ']'
 
 /**
  * 这批新增节点是不是**全**为本模块自己挂的胶囊。
@@ -203,6 +204,7 @@ export interface FileCardCopy {
   readonly external: (name: string) => string
   /** 右段：转发该文件。 */
   readonly share: string
+  readonly failure: (error: string | undefined) => string
 }
 
 /**
@@ -234,15 +236,6 @@ export class FileCardCapsule {
   private bridge: () => FileCardBridge
   private copy: FileCardCopy
   private attached = false
-  /**
-   * 壳侧是否**确证**过这台机器没有外部接收方（终态）。
-   *
-   * 只有壳侧回 `error === 'no-receiver'` 才算确证，见 {@link finish}。
-   * **桥方法不在场不是确证**（issue #990）：桥由壳侧在页面脚本之后注入，晚注入是本类明确
-   * 支持的场景（`bridge` 是每次动作取值的函数）；把「还没注入」当作「没人接」会让左段
-   * 永久消失，桥后来出现了也救不回来。旧实现正是在 act() 的 early return 里置位，故有此事。
-   */
-  private noReceiverConfirmed = false
   /** 这一拍待重扫的卡片（Set 去重：同一张卡被多条记录点到只扫一次）。 */
   private pending = new Set<HTMLElement>()
   /** 合批标志：本拍是否已排过一次扫描。 */
@@ -269,20 +262,9 @@ export class FileCardCapsule {
     this.copy = copy
   }
 
-  /**
-   * 左侧那一段是否可用（是否可以渲染、以及是否可以保留在已渲染的胶囊里）。
-   *
-   * 判据 = **桥方法在场** 且 **壳侧尚未确证没有接收方**。两种「不行」的区别是本类语义的核心：
-   * - 桥方法不在场（桌面 / 旧壳 / 壳侧还没注入）→ 只是**这一轮不确定**，不是无能力：
-   *   下一次 scan（桥出现后）会重新渲染左段，已经渲染成「只剩转发」的胶囊也会被补回左段。
-   * - 壳侧答 no-receiver → **确证**这台机器没人接，终态收起（见 {@link finish}）。
-   *
-   * 真正的「先问有没有接收方」需要壳侧提供查询方法；当前协议只有两个执行方法，所以这里用
-   * 「桥在 + 尚未被确证没有」这条判据，宁可先显示、一旦确证才收起。
-   * @returns 是否渲染/保留左段。
-   */
+  /** 桥可晚注入；可见性与单次打开结果无关。 */
   externalAvailable(): boolean {
-    return typeof this.bridge().openFileExternal === 'function' && !this.noReceiverConfirmed
+    return typeof this.bridge().openFileExternal === 'function'
   }
 
   attach(): void {
@@ -308,7 +290,7 @@ export class FileCardCapsule {
     this.pending.clear()
     this.batchScheduled = false
     this.generation += 1
-    for (const capsule of document.querySelectorAll('[' + CAPSULE_ATTR + ']')) capsule.remove()
+    for (const capsule of document.querySelectorAll(CAPSULE_SELECTOR)) capsule.remove()
   }
 
   /**
@@ -415,8 +397,7 @@ export class FileCardCapsule {
    * 为一行文件挂胶囊。
    *
    * 已挂过的胶囊不是直接跳过：桥缺席时渲染出来的胶囊只有转发，壳侧晚注入桥之后必须能补回左段
-   * （#990 的用户可见后果）。补挂判据仍是 {@link externalAvailable}，所以被 no-receiver 确证
-   * 收起过的胶囊不会被补回来。
+   * （#990 的用户可见后果）。
    * @param anchor - 该行的可点元素（上游写的 aria-describedby 指向绝对路径）。
    * @param host - 胶囊的落点（卡片自身或该行 li）。
    */
@@ -435,7 +416,7 @@ export class FileCardCapsule {
   /**
    * 给「只剩转发」的胶囊补回左段（桥晚注入后重新可用）。
    *
-   * 幂等且可重入：左段已在场、桥仍不在场、上游没写路径、或已被壳侧确证没有接收方，都原地返回。
+   * 幂等且可重入：左段已在场、桥仍不在场、上游没写路径，都原地返回。
    * @param capsule - 已渲染的胶囊。
    * @param anchor - 该行的可点元素（用来重新取绝对路径）。
    */
@@ -495,7 +476,7 @@ export class FileCardCapsule {
     external.addEventListener('click', (event) => {
       event.preventDefault()
       event.stopPropagation()
-      this.act('external', path)
+      this.showResult(external, this.act('external', path))
     })
     return external
   }
@@ -510,7 +491,7 @@ export class FileCardCapsule {
     share.addEventListener('click', (event) => {
       event.preventDefault()
       event.stopPropagation()
-      this.act('share', path)
+      this.showResult(share, this.act('share', path))
     })
     return share
   }
@@ -550,27 +531,18 @@ export class FileCardCapsule {
     return button
   }
 
-  /**
-   * 执行一种动作。两者都走桥、都不抛给 UI。
-   *
-   * ## 桥方法不在场 ≠ 「没有外部接收方」（issue #990）
-   * 这里**不置任何终态**：桥不在场只说明这一轮还不知道能不能开（桌面 / 旧壳 / 壳侧尚未注入），
-   * 置位会让左段永久消失、晚注入的桥也救不回来。确证只有一个来源——壳侧明确回
-   * `error === 'no-receiver'`，由 {@link finish} 写。
-   * @param action - external 或 share。
-   * @param path - 绝对设备路径。
-   */
+  /** 调用壳桥并返回本次打开或分享的结果。 */
   act(action: CardAction, path: string): CardBridgeResult {
     const mime = mimeOf(path)
     const bridge = this.bridge()
     if (action === 'share') {
       const call = bridge.shareFile
       if (typeof call !== 'function') return { ok: false, reason: 'unavailable' }
-      return this.finish(readAnswer(this.safely(() => call(path, mime))), action)
+      return readAnswer(this.safely(() => call(path, mime)))
     }
     const call = bridge.openFileExternal
     if (typeof call !== 'function') return { ok: false, reason: 'unavailable' }
-    return this.finish(readAnswer(this.safely(() => call(path, mime))), action)
+    return readAnswer(this.safely(() => call(path, mime)))
   }
 
   /** 桥抛异常时按失败返回，不让异常穿过 DOM 事件。 */
@@ -583,30 +555,20 @@ export class FileCardCapsule {
     }
   }
 
-  /**
-   * 记录「确证没有外部接收方」，并让已渲染的胶囊收起左段。
-   *
-   * ## 只有 no-receiver 才算「确证」
-   * 判据是壳侧的 `error === 'no-receiver'`——探活为空 / startActivity 抛 ActivityNotFound，
-   * 都是「这台机器上确实没人接」的确证。这是本类**唯一**写终态的地方：桥缺席（unavailable）
-   * 走不到这里，所以晚注入的桥仍能恢复左段（issue #990）。
-   *
-   * 其余错误码（uri-denied / io / bad-request）**不收起左段**：它们是这一次调用的失败
-   * （路径越界、读不到文件、调用方传错参数），不代表机器没有外部应用。把它们当永久无能力，
-   * 会把偶发失败升级成不可恢复的状态——用户挪对路径后按钮也回不来了。
-   *
-   * 注意：`reason` 字段这里是插件内部码（unavailable / empty-answer / malformed-answer），
-   * 不参与本判据；壳侧码一律走 `error`。
-   */
-  private finish(result: CardBridgeResult, action: CardAction): CardBridgeResult {
-    if (action === 'external' && !result.ok && result.error === SHELL_ERROR_NO_RECEIVER && !this.noReceiverConfirmed) {
-      this.noReceiverConfirmed = true
-      for (const capsule of document.querySelectorAll('[' + CAPSULE_ATTR + ']')) {
-        capsule.querySelector('[' + EXTERNAL_ATTR + ']')?.remove()
-        capsule.querySelector('[' + SEPARATOR_ATTR + ']')?.remove()
-        capsule.setAttribute(SHARE_ONLY_ATTR, '')
-      }
+  /** 在当前文件卡片里显示本次操作的失败原因。 */
+  private showResult(button: HTMLButtonElement, result: CardBridgeResult): void {
+    const capsule = button.parentElement
+    if (capsule === null) return
+    let status = capsule.nextElementSibling
+    if (status?.hasAttribute(STATUS_ATTR) !== true) {
+      if (result.ok) return
+      status = document.createElement('p')
+      status.setAttribute(STATUS_ATTR, '')
+      status.setAttribute('role', 'status')
+      capsule.after(status)
     }
-    return result
+    // A failed open describes this file at this moment; other formats and
+    // future attempts still get the Android chooser.
+    status.textContent = result.ok ? '' : this.copy.failure(result.error)
   }
 }
