@@ -45,10 +45,49 @@ const CHEVRON_ATTR = 'data-dsh-settings-nav-chevron'
 const ROW_ATTR = 'data-dsh-settings-nav'
 /** 我方自有分区行的图标（替换上游对未知 id 的通用齿轮降级）；上游/第三方行没有这个节点。 */
 const ICON_ATTR = 'data-dsh-settings-nav-icon'
-/** 上游 nav 的两段结构（标题 + 列表）。面板没有稳定 class，只能按结构取，同 `form-marker`。 */
-const NAV_LIST_SELECTOR = ':scope > nav > div:nth-child(2)'
-/** nav 第一段 = 设置外壳自己的标题（`settings.header` 插槽），首页顶部条直接引用它。 */
-const NAV_TITLE_SELECTOR = ':scope > nav > div:first-child'
+/** 上游 nav 的两段结构（标题 + 列表）。面板没有稳定 class，只能按结构取，同 `form-marker`。
+ *
+ * 0.2.2 改了结构：`SettingsRoot.tsx` 里标题从 nav 内部搬到面板上（`<div className={css.navTitle}>`），
+ * nav 里只剩一个列表 div。旧口径 `:scope > nav > div:nth-child(2)` 因此恒为 null，
+ * `syncRows` / 一级/二级切换 / 返回条全部静默失效——真机表现就是「设置系统完全用不了」。
+ * 改为按「哪个 div 里有 button」认列表、按 `aria-labelledby` 认标题，两种结构都成立。 */
+const NAV_LIST_LEGACY_SELECTOR = ':scope > nav > div:nth-child(2)'
+
+/** 列表容器标记：CSS 无法表达「含 button 的 div」，由本模块认出来后打上属性供样式引用。 */
+const NAV_LIST_ATTR = 'data-dsh-settings-nav-list'
+/** 标题容器标记：同上（0.2.2 起标题是面板的直接子节点，0.1.x 在 nav 里）。 */
+const NAV_TITLE_ATTR = 'data-dsh-settings-nav-title'
+
+/** 取 nav 里的列表容器：优先找含 button 的 div（新旧结构都成立），退化到旧序号口径。 */
+function resolveNavList(panel: HTMLElement): HTMLElement | null {
+  const nav = panel.querySelector<HTMLElement>(':scope > nav')
+  let found: HTMLElement | null = null
+  if (nav !== null) {
+    for (const child of nav.children) {
+      if (child.tagName === 'DIV' && child.querySelector('button') !== null) { found = child as HTMLElement; break }
+    }
+  }
+  found ??= panel.querySelector<HTMLElement>(NAV_LIST_LEGACY_SELECTOR)
+  if (found !== null && !found.hasAttribute(NAV_LIST_ATTR)) found.setAttribute(NAV_LIST_ATTR, '')
+  return found
+}
+
+/** 取设置外壳自己的标题（`settings.header` 插槽）：按 `aria-labelledby` 认，0.1.x 再退化到 nav 首段。 */
+function resolveNavTitle(panel: HTMLElement): HTMLElement | null {
+  let found: HTMLElement | null = null
+  const labelled = panel.getAttribute('aria-labelledby')
+  if (labelled !== null && labelled !== '') {
+    const byId = [...panel.children].find(child => child.id === labelled)
+    if (byId instanceof HTMLElement) found = byId
+  }
+  if (found === null) {
+    const nav = panel.querySelector<HTMLElement>(':scope > nav')
+    const first = nav?.children[0]
+    if (first instanceof HTMLElement && first.tagName === 'DIV' && first.querySelector('button') === null) found = first
+  }
+  if (found !== null && !found.hasAttribute(NAV_TITLE_ATTR)) found.setAttribute(NAV_TITLE_ATTR, '')
+  return found
+}
 /** 上游把 `aria-current="true"` 只写在当前选中的一级行上（`SettingsRoot.tsx`）。 */
 const ACTIVE_ROW_SELECTOR = 'nav button[aria-current="true"]'
 
@@ -541,7 +580,7 @@ export class MobileSettingsNav {
 
   /** 逐行补齐装饰：箭头给所有行，短说明只给我方自有分区。 */
   private syncRows(panel: HTMLElement): void {
-    const list = panel.querySelector<HTMLElement>(NAV_LIST_SELECTOR)
+    const list = resolveNavList(panel)
     if (list === null) return
     const rows = [...list.querySelectorAll<HTMLButtonElement>(':scope > button')]
     for (const row of rows) {
@@ -599,7 +638,7 @@ export class MobileSettingsNav {
    *   · 当前不在账号与余额的二级页 → 移除注入行（切到别的分区不留孤儿）。
    */
   private syncSubscriptionsEntry(panel: HTMLElement): void {
-    const list = panel.querySelector<HTMLElement>(NAV_LIST_SELECTOR)
+    const list = resolveNavList(panel)
     if (list === null) return
     const rows = [...list.querySelectorAll<HTMLButtonElement>(':scope > button')]
     const find = (labels: readonly string[]): HTMLButtonElement | undefined =>
@@ -693,7 +732,7 @@ export class MobileSettingsNav {
     if (this.level === LEVEL_HOME) {
       // 首页：外壳标题（「设置」）。上游对 active 的兜底选择会选中第一行，用它当标题是错的。
       this.pendingTitle = null
-      this.writeTitle(title, panel.querySelector(NAV_TITLE_SELECTOR)?.textContent ?? '')
+      this.writeTitle(title, resolveNavTitle(panel)?.textContent ?? '')
       return
     }
     const activeLabel = rowLabel(panel.querySelector(ACTIVE_ROW_SELECTOR) ?? panel.ownerDocument.createElement('span'))

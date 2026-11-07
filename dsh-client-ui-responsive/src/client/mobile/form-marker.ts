@@ -92,8 +92,18 @@ export class MobileFormMarker {
     // 看到的是桌面双栏布局（错位、进不去分区）。
     // 判据改用上游自己的标记 `data-shortcut-modal="settings"`（SettingsRoot.tsx:73），
     // 它不受覆盖层位置影响；旧启发式（直接子级 <nav>）保留为兜底。
+    //
+    // 兜底启发式必须**排除侧栏本身**（实测真机 A/B 抓到的整条缺陷链的起点）：
+    // 侧栏在抽屉形态下也是 `role=dialog[aria-modal=true]`，且直接含 `<nav class=panelList>`，
+    // 于是 `:scope > nav` 命中，侧栏被错打 `data-dsh-settings-dialog`。上游据此切「设置态」——
+    // `panelList` 变 `flex:1 1 0%`、`footArea` 被设成 `display:none` —— 账号入口就此消失，
+    // 再叠加 52px 返回条，侧栏 839→915 溢出 52px。上游切态本身是对的（设置真打开时本该隐藏
+    // 账号行），错的是我们把侧栏认成了设置面板。
+    // 判据：侧栏列（`class*=sidebarCol`）与带 `data-shortcut-modal` 非 settings 值的对话框一律不选。
+    const isSidebarColumn = (dialog: HTMLElement): boolean =>
+      dialog.className.includes('sidebarCol') || dialog.getAttribute('data-shortcut-modal') === 'sidebar'
     const settings = document.querySelector<HTMLElement>('[role="dialog"][aria-modal="true"][data-shortcut-modal="settings"]')
-      ?? dialogs.find(dialog => dialog.querySelector(':scope > nav') !== null) ?? null
+      ?? dialogs.find(dialog => !isSidebarColumn(dialog) && dialog.querySelector(':scope > nav') !== null) ?? null
     if (settings !== this.modal) {
       this.modal?.removeAttribute(SETTINGS_TAG)
       this.modal = settings
