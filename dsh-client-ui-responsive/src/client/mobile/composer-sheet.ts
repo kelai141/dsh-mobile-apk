@@ -121,7 +121,7 @@ const FEEL_ATTR = 'data-dsh-composer-sheet-feel'
 /** 方向锁：起手这么多像素内不判定归属（避免「想滚列表却把卡片拉高」）。 */
 const DRAG_LOCK_PX = 8
 /** peek 露出的行数（2.5 行：两行整 + 半行提示还有内容）。 */
-const PEEK_ROWS = 2.5
+const PEEK_ROWS = 3.5
 /** 展开上限占视口比例。 */
 const MAX_HEIGHT_RATIO = 0.88
 /** 关闭阈值：超过卡片高度的这个比例才算「拉下去要关」。 */
@@ -828,11 +828,7 @@ export class ComposerSheet {
         event.preventDefault()
         event.stopPropagation()
         // 拍照走壳侧原生相机（issue #1288 第 4 条）；照片/本地文件仍走上游 file input。
-        // 三条路**互不回退**：拍照失败只报码，绝不偷偷拉起图库。
-        //
-        // 拍照这条**不关面板**：相机是另一个 Activity，回执在它返回之后才到；
-        // 面板正是这轮回执唯一的落点（role=status）。照片/文件仍先关再拉选择器 ——
-        // 那是同步交接，关闭面板不会丢掉任何回执。
+        // 拍照成功才收起面板；启动失败或取消时保留入口和回执，便于直接重试。
         if (kind === 'camera') {
           this.capturePhoto()
           return
@@ -1149,6 +1145,7 @@ export class ComposerSheet {
    * 系统拉起图库，拍不到照却看不出哪里不对。没有桥时如实说「未接线」。
    */
   private capturePhoto(): void {
+    if (this.photoGeneration !== null) return
     const t = this.text()
     const bridge = photoBridge()
     if (bridge === null) {
@@ -1157,25 +1154,29 @@ export class ComposerSheet {
     }
     // 回调必须**先**挂上再发起：受理与回执之间的窗口里挂晚了就会丢第一条结果。
     this.installPhotoReceipt()
+    this.photoGeneration = this.generation
     let reply: unknown
     try {
       reply = bridge('capture')
     } catch (error) {
+      this.photoGeneration = null
       // 桥调用抛错（ROM 拦截 / WebView 正在销毁）：如实报错，不吞。
       this.setStatus(t('photoUnknown'), String(error))
       return
     }
     const parsed = parseBridgeReply(reply)
     if (parsed === null) {
+      this.photoGeneration = null
       // 返回值不是可解析的 JSON：无法判断受理与否。**不能当成功**。
       this.setStatus(t('photoUnknown'), typeof reply === 'string' ? reply : '')
       return
     }
-    if (parsed.ok === true) {
+    if (parsed.ok === true && parsed.accepted === true) {
       this.setStatus(t('photoStarting'))
       return
     }
     // 同步失败（通常是 not-wired / failed）：按码给文案。
+    this.photoGeneration = null
     this.setStatus(t(messageKeyForCode(stringField(parsed, 'code'))))
   }
 
@@ -1194,8 +1195,13 @@ export class ComposerSheet {
     host[PHOTO_RECEIPT] = (payload: unknown): void => { this.onPhotoReceipt(payload) }
   }
 
-  /** 壳侧回执：成功只说「正在加入会话」（投递本身在壳侧），失败按码提示。 */
+  private photoGeneration: number | null = null
+
+  /** 成功时收起发起拍照的面板；迟到的回执不得关闭后来打开的面板。 */
   private onPhotoReceipt(payload: unknown): void {
+    const generation = this.photoGeneration
+    this.photoGeneration = null
+    if (generation === null || generation !== this.generation) return
     const t = this.text()
     const parsed = parseBridgeReply(payload)
     if (parsed === null) {
@@ -1203,7 +1209,7 @@ export class ComposerSheet {
       return
     }
     if (parsed.ok === true) {
-      this.setStatus(t('photoAccepted'))
+      this.close()
       return
     }
     const code = stringField(parsed, 'code')
@@ -1315,7 +1321,7 @@ export class ComposerSheet {
   }
 
   /**
-   * peek 高度 = 顶部内边距 + 把手 + 瓦片行 + 行间距 + 2.5 行 + 底部内边距 + 安全区。
+   * peek 高度 = 顶部内边距 + 把手 + 瓦片行 + 行间距 + 3.5 行 + 底部内边距 + 安全区。
    *
    * 行高取**真实第一行**：打开瞬间还没有映射行，用 ROW_FALLBACK_HEIGHT 兜底，
    * 行到齐后 relayoutSheet() 重算。任何一项都不写死 vh —— 内容变高，peek 跟着变。
