@@ -131,6 +131,13 @@ jobs:
           fi
           printf 'ORG_GRADLE_PROJECT_versionCode=%s\n' "$PREVIEW_CODE" >> "$GITHUB_ENV"
 
+      - name: 生成本次构建的 Kotlin 单测结果
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew :app:testDebugUnitTest --no-daemon --console=plain
+
       - name: 准备并构建插件（统一清单、锁解析与单次构建）
         shell: bash
         run: |
