@@ -46,8 +46,11 @@ describe('竖屏设置分层样式', () => {
 
   it('首页只显示分类列表、二级页只显示内容列（同一内容列不卸载）', () => {
     // 首页：隐藏内容列（> div:last-child），保留 nav。
-    const home = MOBILE_SETTINGS_CSS.split("data-dsh-settings-level='home'] > div:last-child")[1] ?? ''
-    expect(home, '首页必须隐藏内容列').toContain('display: none')
+    // 判据不能钉死成 > div:last-child：0.2.2 把面板拆成 navTitle/nav/header/options 四个直接子节点，
+    // 只盖 last-child 会让 header（含上游关闭叉号）露出来，真机表现为「我方返回条 + 上游叉号」两个退出控件。
+    // 这里按「除 [data-dsh-settings-bar] 外的直接子 div 全隐藏」判。
+    const home = MOBILE_SETTINGS_CSS.split("data-dsh-settings-level='home'] > div:not([data-dsh-settings-bar])")[1] ?? ''
+    expect(home, '首页必须隐藏我方标题条以外的直接子 div').toContain('display: none')
     // 二级页：隐藏 nav，内容列占满。
     const detail = MOBILE_SETTINGS_CSS.split("data-dsh-settings-level='detail'] > nav")[1] ?? ''
     expect(detail, '二级页必须隐藏分类列表').toContain('display: none')

@@ -1,10 +1,46 @@
 /** Narrow navigation only; native headers keep their measured boxes and React ownership. */
 export const SIDEBAR_BUBBLES_CSS = `
 @media (max-width: 1100px) {
+  /* 上游 tab 条：**只藏 tab 项，不藏整个容器**（真机 bug：右侧栏返回/收起全失效）。
+   *
+   * 这里原先写 visibility:hidden !important 把整条 strip 藏掉。但 0.2.2 的
+   * 「退出全屏 / 收起」两个 chrome 按钮就在同一个 strip 里（stripChrome 子节点），
+   * 于是它们跟着变成 visibility:hidden —— 实测 mode 按钮 vis=hidden pe=none，
+   * elementFromPoint 落在 tabHostHeader 上，点不到。
+   *
+   * 后果不止按钮点不到：window.__dshBack() 的 closeRightFullscreen 也是点这两个按钮，
+   * 所以手势返回与按钮返回同时失效，右侧栏永远退不出去（kinds 恒为 right-fullscreen）。
+   *
+   * 实测对照（同一页面）：
+   *   保留标记  → __dshBack() 后 open=true  kinds=["right-fullscreen"]  （关不掉）
+   *   去掉标记  → __dshBack() 后 open=null  kinds=[]                    （关掉了）
+   *
+   * 故改为只隐藏 tab 项与关闭按钮，strip 容器与 chrome 区保持可交互；
+   * 我方顶栏另用 padding 给它让出右侧空间。 */
+  [data-dsh-bubble-panel] [data-dsh-bubble-native] [data-dockkit-tab],
+  [data-dsh-bubble-panel] [data-dsh-bubble-native] [data-dockkit-tab-close] {
+    visibility: hidden !important;
+  }
   [data-dsh-bubble-panel] [data-dsh-bubble-native] {
-    visibility: hidden !important; min-height: 48px;
+    min-height: 48px;
   }
   [data-dsh-bubble-panel] [data-dsh-bubble-nav] { box-sizing: border-box; pointer-events: auto; }
+  /* 我方气泡顶栏。必须给上游 chrome 按钮让位（真机 bug：右侧栏返回/收起全失效）。
+   *
+   * 右侧栏全屏时，上游那两个按钮（data-sidebar-right-mode 退出全屏、
+   * data-sidebar-right-toggle 收起）就在同一个顶部条里，位于右侧；
+   * 本规则原先写 left:0; right:0; z-index:90，整条顶部被我们盖住，
+   * elementFromPoint 命中的始终是 .dsh-bubble-header（实测 toggle@392,86 与
+   * mode@356,86 都落到它上面），上游 React onClick 收不到点击。
+   *
+   * 后果不止「按钮点不到」：window.__dshBack() 的 closeRightFullscreen 也是点这两个按钮，
+   * 所以手势返回与按钮返回同时失效，右侧栏永远退不出去（kinds 恒为 right-fullscreen）。
+   *
+   * 修法：右侧栏全屏时本顶栏整体让位（不渲染视觉、不接事件），
+   * 由上游自己的 chrome 承担；只在气泡（左侧栏）场景下显示。 */
+  [data-dsh-bubble-panel][data-sidebar-right-panel='fullscreen'] .dsh-bubble-header {
+    display: none;
+  }
   [data-dsh-bubble-panel] .dsh-bubble-header {
     position: absolute; left: 0; right: 0; z-index: 90; height: 48px;
     display: flex; align-items: center; gap: 2px; padding: 2px 8px;

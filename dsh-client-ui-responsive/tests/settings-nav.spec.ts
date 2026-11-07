@@ -10,6 +10,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { MobileSettingsNav } from '../src/client/mobile/settings-nav.ts'
+import { MOBILE_SETTINGS_CSS } from '../src/client/mobile-settings.css.ts'
 
 /** 我方 index.ts 里 settings.section 注册的 label（真源；下面的漂移用例直接读它）。 */
 function ownRegisteredLabels(): string[] {
@@ -35,7 +36,7 @@ interface PanelHandle {
 }
 
 /** 按上游 SettingsRoot 的真实结构造面板（nav 标题 + nav 列表 + 内容列；蒙层是面板的兄弟节点）。 */
-function buildPanel(labels: readonly string[], activeLabel?: string): PanelHandle {
+function buildPanel(labels: readonly string[], activeLabel?: string, layout: 'legacy' | 'v022' = 'legacy'): PanelHandle {
   document.body.innerHTML = ''
   const overlay = document.createElement('div')
   const mask = document.createElement('div')
@@ -69,7 +70,15 @@ function buildPanel(labels: readonly string[], activeLabel?: string): PanelHandl
     navList.appendChild(button)
     rows.set(label, button)
   }
-  nav.append(navTitle, navList)
+  // 0.2.2 起标题从 nav 内部搬到面板上（SettingsRoot.tsx 的 `css.navTitle`），nav 里只剩列表。
+  // 旧口径 `:scope > nav > div:nth-child(2)` 因此恒为 null，整套移动设置层静默失效。
+  if (layout === 'v022') {
+    navTitle.id = 'settings-title'
+    panel.setAttribute('aria-labelledby', 'settings-title')
+    nav.append(navList)
+  } else {
+    nav.append(navTitle, navList)
+  }
   const content = document.createElement('div')
   const contentHeader = document.createElement('div')
   const options = document.createElement('div')
@@ -78,10 +87,22 @@ function buildPanel(labels: readonly string[], activeLabel?: string): PanelHandl
   input.value = '编辑中'
   options.appendChild(input)
   content.append(contentHeader, options)
-  panel.append(nav, content)
+  if (layout === 'v022') panel.append(navTitle, nav, content)
+  else panel.append(nav, content)
   overlay.append(mask, panel)
   document.body.appendChild(overlay)
   return { overlay, panel, mask, content, rows, maskClicks: () => maskClicks }
+}
+
+/**
+ * 0.2.2 结构回归：nav 里只剩列表一个 div 时，`div:first-child { display: none }` 会命中列表本身。
+ * 这条用例把「列表可见」钉成判据——它是「设置面板只剩一行字、什么都点不了」的直接成因。
+ */
+function expectListVisible(panel: HTMLElement): void {
+  const list = panel.querySelector<HTMLElement>('[data-dsh-settings-nav-list]')
+  expect(list, '列表容器必须被打上 data-dsh-settings-nav-list').not.toBeNull()
+  const style = getComputedStyle(list as HTMLElement)
+  expect(style.display, '列表容器不得被 display:none 藏掉').not.toBe('none')
 }
 
 function setPhoneForm(on: boolean): void {
@@ -111,6 +132,35 @@ afterEach(() => {
   nav = undefined
   document.body.innerHTML = ''
   document.documentElement.removeAttribute('data-dsh-mobile-form')
+})
+
+describe('0.2.2 结构：标题在面板上、nav 里只剩列表', () => {
+  it('列表容器仍被认出来并保持可见（不得被 div:first-child 规则藏掉）', async () => {
+    setPhoneForm(true)
+    // 真把移动设置样式表挂上去：这条用例要判的是 CSS 规则命中谁，不是 DOM 结构本身。
+    const sheet = document.createElement('style')
+    sheet.textContent = MOBILE_SETTINGS_CSS
+    document.head.appendChild(sheet)
+    const handle = buildPanel(['通用设置', '开发者选项'], undefined, 'v022')
+    nav = new MobileSettingsNav()
+    nav.attach()
+    await settle()
+    await settle()
+    expectListVisible(handle.panel)
+    expect(handle.panel.getAttribute('data-dsh-settings-level')).toBe('home')
+    // 一级行必须真的渲染出来（不是空壳）
+    const rows = handle.panel.querySelectorAll('[data-dsh-settings-nav-list] > button')
+    expect(rows.length).toBe(2)
+
+    // jsdom 不实现外部样式表的完整 cascade（getComputedStyle 读不到上面那条 display:none），
+    // 所以「列表会不会被藏掉」只能对样式表文本本身判：0.2.2 布局下 nav 里只有列表一个 div，
+    // 它**就是** first-child，任何 `> nav > div:first-child` 的 display 规则都会命中它。
+    expect(handle.panel.querySelector(':scope > nav')?.children.length).toBe(1)
+    const navEl = handle.panel.querySelector(':scope > nav') as HTMLElement
+    expect(navEl.children[0].hasAttribute('data-dsh-settings-nav-list')).toBe(true)
+    // 判据：样式表不得用位置选择器指向 nav 的子 div（只允许用我们打的属性）。
+    expect(MOBILE_SETTINGS_CSS).not.toMatch(/>\s*nav\s*>\s*div:(first-child|nth-child\(2\))/)
+  })
 })
 
 describe('设置首页：分类列表', () => {
@@ -282,21 +332,25 @@ describe('打开设置时不把默认选中画成高亮', () => {
 })
 
 describe('二级页：点一级分类进入', () => {
-  it('点任意一级行进入二级页，标题取该行的注册名，焦点落到返回控件', () => {
+  it('点任意一级行进入二级页，标题取该行的注册名，焦点落到返回控件', async () => {
     const handle = buildPanel(['通用设置', '开发者选项'])
     nav = new MobileSettingsNav()
     nav.attach()
     handle.rows.get('开发者选项')!.click()
+    // 进入二级页的层级切换必须延到点击派发结束后（见 enterDetail 注释）：
+    // 同步切会让 nav 立刻 display:none，上游冒泡阶段的 onClick 收不到，分区切不过去。
+    await settle()
     expect(handle.panel.getAttribute('data-dsh-settings-level')).toBe('detail')
     expect(handle.panel.querySelector('[data-dsh-settings-bar-title]')!.textContent).toBe('开发者选项')
     expect(document.activeElement).toBe(back(handle.panel))
   })
 
-  it('第三方行也能进入二级页，标题用上游注册名（不新造名字）', () => {
+  it('第三方行也能进入二级页，标题用上游注册名（不新造名字）', async () => {
     const handle = buildPanel(['第三方插件页'])
     nav = new MobileSettingsNav()
     nav.attach()
     handle.rows.get('第三方插件页')!.click()
+    await settle()
     expect(handle.panel.getAttribute('data-dsh-settings-level')).toBe('detail')
     expect(handle.panel.querySelector('[data-dsh-settings-bar-title]')!.textContent).toBe('第三方插件页')
   })
@@ -324,6 +378,7 @@ describe('二级页：点一级分类进入', () => {
     nav = new MobileSettingsNav()
     nav.attach()
     handle.rows.get('通用设置')!.click()
+    await settle()
     expect(handle.panel.querySelector('[data-dsh-settings-bar-title]')!.textContent).toBe('通用设置')
     // 上游把当前分区的 label 换成另一种语言（locale 变化会重建行）：标题必须跟着走。
     const label = handle.rows.get('通用设置')!.querySelector('span')!
@@ -392,7 +447,7 @@ describe('逐级返回', () => {
     expect(handle.maskClicks(), '首页的返回才关闭设置').toBe(1)
   })
 
-  it('返回首页 -> 再进二级页：仍是同一个内容列（不重挂载），可反复往返', () => {
+  it('返回首页 -> 再进二级页：仍是同一个内容列（不重挂载），可反复往返', async () => {
     const handle = buildPanel(['手机控制'])
     nav = new MobileSettingsNav()
     nav.attach()
@@ -400,8 +455,10 @@ describe('逐级返回', () => {
     const content = handle.content
     for (let round = 0; round < 3; round += 1) {
       row.click()
+      await settle()
       expect(handle.panel.getAttribute('data-dsh-settings-level')).toBe('detail')
       back(handle.panel).click()
+      await settle()
       expect(handle.panel.getAttribute('data-dsh-settings-level')).toBe('home')
     }
     expect(handle.panel.lastElementChild).toBe(content)

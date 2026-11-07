@@ -179,19 +179,37 @@ export const MOBILE_SETTINGS_CSS: string = `
     border: none;
   }
 
-  /* 标题行的文案仍由上游渲染（本模块把它抄进标题条），这里只是不重复显示。 */
-  html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level='home'] > nav > div:first-child {
+  /* 标题行的文案仍由上游渲染（本模块把它抄进标题条），这里只是不重复显示。
+   *
+   * 必须按属性认，不能按 div:first-child：0.2.2 把标题搬到了面板上（css.navTitle），
+   * nav 里只剩列表这一个 div —— 于是 div:first-child 命中的正是列表本身，
+   * 整份一级列表被 display:none 藏掉。真机表现就是「面板只剩一行字，什么都点不了」。
+   * 属性由 settings-nav.ts 的 resolveNavTitle/resolveNavList 打上，新旧结构都成立。 */
+  html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level='home'] > nav > [data-dsh-settings-nav-title],
+  /* 0.2.2 把标题从 nav 内搬到了面板直接子级（css.navTitle）。旧规则只盖住 nav 内那一份，
+     于是上游标题和我们自己那条返回条上的标题同时出现 —— 真机表现是「上下两个 Settings」。
+     两份都盖掉：我方返回条（[data-dsh-settings-bar]）是唯一该显示标题的地方，
+     它同时承载二级页的返回控件，删不得。 */
+  html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > [data-dsh-settings-nav-title] {
     display: none;
   }
 
-  html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level='home'] > nav > div:nth-child(2) {
+  html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level='home'] > nav > [data-dsh-settings-nav-list] {
     display: flex;
     flex-direction: column;
     gap: 2px;
     overflow: visible;
   }
 
-  html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level='home'] > div:last-child {
+  /* 首页只留「nav（一级列表）+ 我方标题条」，其余直接子 div 一律不显示。
+   *
+   * 0.2.2 把面板拆成 navTitle / nav / header / options 四个直接子节点，
+   * 旧规则 div:last-child { display:none } 只盖住 options，header 露在外面 ——
+   * header 里是上游的 settings.action 槽 + 关闭叉号，于是首页出现
+   * 「我方返回条 + 上游叉号」两个退出控件（用户实报）。
+   * 用 :not([data-dsh-settings-bar]) 保住我方标题条，其余 div 全收掉；
+   * 关闭整体设置仍可走：我方返回条（首页时它就是关闭）或系统返回。 */
+  html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level='home'] > div:not([data-dsh-settings-bar]) {
     display: none;
   }
 
@@ -216,8 +234,14 @@ export const MOBILE_SETTINGS_CSS: string = `
   }
 
   /* 默认跨两行、在整块里居中（与上游 navIcon 的观感一致）。
-     只有「无说明」的行改成只占第一行，见下面 other 行那条规则。 */
-  html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > nav button > svg {
+     只有「无说明」的行改成只占第一行，见下面 other 行那条规则。
+   *
+   * 0.2.2 把图标包进了 span（SettingsRoot.tsx 的 span.navIcon），不再直接是 > svg。
+   * 旧选择器因此不匹配，图标 span 落到下面那条 > nav button > span { grid-area: label }，
+   * 和标题叠在同一格 —— 真机表现是「图标压在文字上」。故补 span:has(> svg) 这一路，
+   * 两种结构都归到 icon 格。 */
+  html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > nav button > svg,
+  html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > nav button > span:has(svg) {
     grid-area: icon;
     align-self: center;
     /* 图标略小于文字行盒（文字 15/20 → 图标 20） */
@@ -232,7 +256,8 @@ export const MOBILE_SETTINGS_CSS: string = `
      这正是第一版整体上移的效果，但只作用在无说明行上——有说明的行仍跨两行、
      在「标题+说明」整块居中，不会被顶高（用户两轮实报的口径）。
      判据用 settings-nav.ts 打的行标记：own = 我方分区（都带说明），other = 其余。 */
-  html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > nav button[data-dsh-settings-nav='other'] > svg {
+  html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > nav button[data-dsh-settings-nav='other'] > svg,
+  html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > nav button[data-dsh-settings-nav='other'] > span:has(svg) {
     grid-row: 1;
   }
 
@@ -326,13 +351,13 @@ export const MOBILE_SETTINGS_CSS: string = `
     border-bottom: 1px solid var(--dsw-alias-border-l1);
   }
 
-  html[data-dsh-mobile-form] [data-dsh-settings-dialog]:not([data-dsh-settings-level]) > nav > div:first-child {
+  html[data-dsh-mobile-form] [data-dsh-settings-dialog]:not([data-dsh-settings-level]) > nav > [data-dsh-settings-nav-title] {
     flex: none;
     padding: 0;
     white-space: nowrap;
   }
 
-  html[data-dsh-mobile-form] [data-dsh-settings-dialog]:not([data-dsh-settings-level]) > nav > div:nth-child(2) {
+  html[data-dsh-mobile-form] [data-dsh-settings-dialog]:not([data-dsh-settings-level]) > nav > [data-dsh-settings-nav-list] {
     flex-direction: row;
     gap: 4px;
     flex: 1;
@@ -340,7 +365,7 @@ export const MOBILE_SETTINGS_CSS: string = `
     overflow-x: auto;
   }
 
-  html[data-dsh-mobile-form] [data-dsh-settings-dialog]:not([data-dsh-settings-level]) > nav > div:nth-child(2) > button {
+  html[data-dsh-mobile-form] [data-dsh-settings-dialog]:not([data-dsh-settings-level]) > nav > [data-dsh-settings-nav-list] > button {
     /* Review 2026-08-18: the original rule was an unclosed empty block since #2 and never
        applied. Completed by container semantics: the nav button container is
        flex-direction: row + overflow-x: auto, so buttons need flex: none to avoid being
