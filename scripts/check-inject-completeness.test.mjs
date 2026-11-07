@@ -15,14 +15,25 @@ const sourceRoot = fileURLToPath(new URL('../', import.meta.url));
  *   - nonLibImport：lib/**.js 的相对导入指向 lib/ 之外（源包有、注入器不携带 → 旧实现 WARN）；
  *   - extraTarFile：tar 包里多一个源包没有的文件（旧实现按 package.json + lib/ 过滤 → 看不见）。
  */
-function fixture({ profiles = ['web', 'headless'], omitRequired = false, ghostDsh = false, declaredSrc = false, nonLibImport = false, extraTarFile = false } = {}) {
+function fixture({ profiles = ['web', 'headless'], omitRequired = false, ghostDsh = false, declaredSrc = false, nonLibImport = false, extraTarFile = false, linuxBootstrap = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'injection-manifest-'));
   try {
     mkdirSync(join(root, 'scripts/lib'), { recursive: true });
     for (const file of ['scripts/check-inject-completeness.mjs', 'scripts/lib/shell.mjs']) {
       copyFileSync(join(sourceRoot, file), join(root, file));
     }
-    writeFileSync(join(root, 'scripts/plugin-dirs.json'), JSON.stringify({ dirs: [], externals: ['vendor/active'], retiredExternals: ['vendor/retired'] }));
+    writeFileSync(join(root, 'scripts/plugin-dirs.json'), JSON.stringify({ dirs: linuxBootstrap ? ['plugins/dsh-linux-bootstrap'] : [], externals: ['vendor/active'], retiredExternals: ['vendor/retired'] }));
+    const bootstrap = join(root, 'plugins/dsh-linux-bootstrap');
+    if (linuxBootstrap) {
+      for (const dir of ['src', 'client', 'lib']) {
+        mkdirSync(join(bootstrap, dir), { recursive: true });
+        writeFileSync(join(bootstrap, dir, 'index.js'), 'export const installed = true;');
+      }
+      writeFileSync(join(bootstrap, 'README.md'), 'Source notes');
+      writeFileSync(join(bootstrap, 'package.json'), JSON.stringify({
+        name: '@dsh-android/linux-bootstrap', files: ['src/', 'client/', 'lib/', 'README.md'],
+      }));
+    }
     const pkg = JSON.stringify({ name: 'active-plugin', version: '1.0.0', type: 'module', ...(declaredSrc ? { files: ['lib', 'src'] } : {}) });
     mkdirSync(join(root, 'vendor/active/lib'), { recursive: true });
     writeFileSync(join(root, 'vendor/active/package.json'), pkg);
@@ -56,6 +67,12 @@ function fixture({ profiles = ['web', 'headless'], omitRequired = false, ghostDs
         mkdirSync(join(dest, 'src'), { recursive: true });
         writeFileSync(join(dest, 'src/ghost.css'), '.ghost { color: red }');
       }
+      if (linuxBootstrap) {
+        const dest = join(tree, 'home/.dsh/profiles', profile, 'node_modules/@dsh-android/linux-bootstrap');
+        mkdirSync(join(dest, 'lib'), { recursive: true });
+        copyFileSync(join(bootstrap, 'package.json'), join(dest, 'package.json'));
+        copyFileSync(join(bootstrap, 'lib/index.js'), join(dest, 'lib/index.js'));
+      }
       if (ghostDsh) {
         const ghost = join(tree, 'home/.dsh/profiles', profile, 'node_modules/@dsh-android/ghost-plugin');
         mkdirSync(join(ghost, 'lib'), { recursive: true });
@@ -78,6 +95,11 @@ test('negative control: missing active package in headless still rejects the arc
   const result = fixture({ profiles: ['web'] });
   assert.equal(result.status, 1, result.stdout + result.stderr);
   assert.match(result.stdout, /FAIL.*headless.*active-plugin/);
+});
+test('declared bootstrap is accepted under its runtime name in both profiles', () => {
+  const result = fixture({ linuxBootstrap: true });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /PASS.*headless.*成员集合一致.*@dsh-android\/linux-bootstrap/);
 });
 test('negative control: missing a required active member still rejects the archive', () => {
   const result = fixture({ omitRequired: true });

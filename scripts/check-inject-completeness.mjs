@@ -19,8 +19,7 @@
 //   ① 循环只遍历 manifest.dirs/externals，于是 tar 里**多出的未登记 @dsh-android 包**从不参与比较
 //      （实测：造 plugins/dsh-android-ghost 塞进两个 profile 的 tar，门禁一字不差 PASSED）。
 //      现改为**双向枚举**：登记集 → tar 必须都在；tar 里每个 @dsh-android 包 → 必须已登记（未登记判红）。
-//      权威源是 **tar 实际内容**（磁盘上未登记的源码目录不构成注入缺陷——linux-bootstrap 就是
-//      按设计留在装配集之外的 vendored 包，见 scripts/check-vendored-linux-bootstrap.mjs 头注释）。
+//      权威源是 **tar 实际内容**，登记名取 package.json 的 name（注入器也使用这个名字）。
 //   ② 源包成员集合只走 lib/，而多个包的 package.json files 字段发布 src/、test/、SOURCE.json；
 //      tar 侧成员集合又硬编码成 package.json + lib/**。现改为：源侧 = 注入面（见 A），并把
 //      「files 字段声明、但注入器不携带」的面逐包登记（DECLARED_NOT_INJECTED，必须带理由）——
@@ -34,7 +33,7 @@ import { existsSync, readFileSync, readdirSync, statSync, mkdtempSync, rmSync } 
 import { TAR } from './lib/shell.mjs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join, posix } from 'node:path'
+import { dirname, join, posix } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -60,7 +59,7 @@ const dshDirs = (manifest.dirs ?? []).map((d) => join(ROOT, d))
 const extDirs = (manifest.externals ?? []).map((d) => join(ROOT, d))
 
 // ── 注入器口径（与 scripts/inject-all.py 同源；B 段的判据必须用同一份规则）─────────────
-// inject-all.py: build_dsh_replacements 只走 lib/**（.map 除外）+ package.json（按**目录名**放置）；
+// inject-all.py: build_dsh_replacements 只走 lib/**（.map 除外）+ package.json（按 package.json name 放置）；
 // build_ext_replacements 走 lib/** + skills/** + EXT_INCLUDE_FILES 中实际在场的清单文件（按 package.json name 放置）。
 const EXT_INCLUDE_FILES = ['package.json', 'cordis.patch.yml', 'spec.json', 'README.md', 'README.zh-CN.md', 'LICENSE']
 
@@ -159,6 +158,10 @@ const DECLARED_NOT_INJECTED = new Map([
     reason: '上游浏览器的归属/来源元数据随 npm 发布，但注入面只有 lib/**；'
       + '这些文件的合规面由 check-third-party.mjs 的许可台账与 THIRD_PARTY_NOTICES 覆盖，不经快照注入。',
   }],
+  ['@dsh-android/linux-bootstrap', {
+    paths: ['src', 'client', 'README.md'],
+    reason: '服务端源码构建到 lib/ 后注入；Android 设置界面由响应式插件提供，原上游客户端和说明只随源码保留。',
+  }],
 ])
 
 /** 登记路径是否覆盖某个发散成员（按目录前缀）。 */
@@ -173,8 +176,11 @@ const entries = new Set(listing.split('\n').map((l) => l.trim()).filter(Boolean)
 console.log('tar 条目: ' + entries.size + '；装配 profile: ' + PROFILES.join(', '))
 
 // ── issue #1035 ① 双向枚举：tar 里每个 @dsh-android 包都必须已登记 ─────────────────────
-// 登记集（@dsh-android 命名空间）= manifest.dirs 的**目录名**——inject-all.py 按 basename 放置。
-const registeredDshNames = new Set(dshDirs.map((d) => basename(d)))
+// 注入器使用 package.json 的 name；目录名不必与发布名相同。
+const dshPackages = dshDirs.map(dir => packageMeta(dir, 'dsh'))
+const registeredDshNames = new Set(dshPackages
+  .filter(meta => meta.name?.startsWith('@dsh-android/'))
+  .map(meta => meta.name.slice('@dsh-android/'.length)))
 for (const profile of PROFILES) {
   const prefix = 'home/.dsh/profiles/' + profile + '/node_modules/@dsh-android/'
   const seen = new Map()   // pkg -> 至少一个成员
@@ -193,9 +199,7 @@ for (const profile of PROFILES) {
 
 // ── issue #1035 ② 声明面 vs 注入面（tar 无关，逐包一次）──────────────────────────────
 {
-  const allPkgs = []
-  for (const dir of dshDirs) allPkgs.push(packageMeta(dir, 'dsh'))
-  for (const dir of extDirs) allPkgs.push(packageMeta(dir, 'external'))
+  const allPkgs = [...dshPackages, ...extDirs.map(dir => packageMeta(dir, 'external'))]
   const seenNames = new Set()
   for (const meta of allPkgs) {
     if (meta.name === null || seenNames.has(meta.name)) continue
