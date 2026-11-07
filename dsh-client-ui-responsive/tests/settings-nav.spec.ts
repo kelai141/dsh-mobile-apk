@@ -618,6 +618,20 @@ describe('短说明的归属（D4/D5）', () => {
 })
 
 describe('一级行的图标（只装饰我方自有分区）', () => {
+  it('0.2.2 包装的齿轮只在自定义图标行隐藏，并可在卸载时恢复', () => {
+    const handle = buildPanel(['应用更新', '通知', '手机控制', '开发者选项', '第三方'], undefined, 'v022')
+    nav = new MobileSettingsNav()
+    nav.attach()
+    for (const label of ['应用更新', '通知', '手机控制', '开发者选项']) {
+      const row = handle.rows.get(label)!
+      expect(row.querySelectorAll(':scope > svg[data-dsh-settings-nav-icon]')).toHaveLength(1)
+      expect(row.querySelectorAll(':scope > span[data-dsh-settings-nav-icon-hidden] > svg')).toHaveLength(1)
+    }
+    expect(handle.rows.get('第三方')!.querySelector('[data-dsh-settings-nav-icon-hidden]')).toBeNull()
+    nav.detach()
+    expect(handle.panel.querySelector('[data-dsh-settings-nav-icon-hidden]')).toBeNull()
+  })
+
   /** 一行的图标几何指纹：可见 svg 的 viewBox + 各 path 的 d。 */
   function iconFingerprint(row: HTMLButtonElement): string {
     const svg = row.querySelector('svg[data-dsh-settings-nav-icon]')
