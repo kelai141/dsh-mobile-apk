@@ -76,7 +76,7 @@ describe('竖屏设置分层样式', () => {
     // 我方图标与上游被隐藏的那个各自要有规则，否则会出现一行两个图标。
     const injected = MOBILE_SETTINGS_CSS.split('svg[data-dsh-settings-nav-icon]')[1] ?? ''
     expect(injected, '缺我方图标的规则：它不占 grid 的 icon 格').toContain('grid-area: icon')
-    const hidden = MOBILE_SETTINGS_CSS.split('> [data-dsh-settings-nav-icon-hidden]')[1] ?? ''
+    const hidden = /nav button \[data-dsh-settings-nav-icon-hidden\]\s*\{([^}]*)\}/.exec(MOBILE_SETTINGS_CSS)?.[1] ?? ''
     expect(hidden, '缺隐藏上游图标的规则：一行会出现两个图标').toContain('display: none')
     // 不设 color：图标颜色继承行本身，与我方三个分类外的上游分类观感一致。
     expect(injected.split('}')[0] ?? '', '我方图标不得另设颜色，否则与上游图标色差可见').not.toContain('color:')

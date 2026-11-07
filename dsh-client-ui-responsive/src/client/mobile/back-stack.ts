@@ -49,6 +49,7 @@ export type BackLayerKind =
   | 'trajectory-details'
   | 'right-fullscreen'
   | 'sidebar-bubbles'
+  | 'header-options'
   | 'menu'
   | 'menu-drill'
   | 'composer-sheet'
@@ -138,6 +139,7 @@ const CANDIDATE_SELECTOR = [
   'aside[aria-label]',
   RIGHT_FULLSCREEN_SELECTOR,
   '[data-dsh-sidebar-bubbles="open"]',
+  '[data-dsh-topbar-fold="open"]',
   MENU_SELECTOR,
   MODEL_MENU_SELECTOR,
   COMPOSER_SHEET_SELECTOR,
@@ -171,6 +173,7 @@ const OBSERVED_ATTRIBUTES = [
   'data-plugin-panel',
   'data-dsh-main-panel-back',
   'data-dsh-sidebar-bubbles',
+  'data-dsh-topbar-fold',
 ]
 
 declare global {
@@ -519,6 +522,19 @@ export class BackStackSignal {
     const bubbles = first('[data-dsh-sidebar-bubbles="open"]')
     const bubbleToggle = bubbles?.parentElement?.querySelector<HTMLElement>('[data-dsh-sidebar-bubbles-toggle]')
     if (bubbles && bubbleToggle) found.push({ id: 'sidebar-bubbles', kind: 'sidebar-bubbles', close: () => { bubbleToggle.click(); return true } })
+    const headerOptions = first('[data-dsh-topbar-fold="open"]')
+      ?.closest('header')?.querySelector('[data-dsh-topbar-fold-arrow][aria-expanded="true"]')
+    if (headerOptions instanceof HTMLElement) found.push({
+      id: 'header-options',
+      kind: 'header-options',
+      close: () => {
+        // Give native/third-party popup dismissal listeners the same outside
+        // gesture as a tap on the disclosure, before hiding their anchor.
+        dispatchPointerDown(headerOptions)
+        headerOptions.click()
+        return true
+      },
+    })
     const menu = this.detectMenu(first)
     if (menu !== null) found.push(menu)
     const drill = this.detectMenuDrill(all)

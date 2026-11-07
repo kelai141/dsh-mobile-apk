@@ -186,10 +186,9 @@ function assertArrowRightAligned(css: string, arrow: HTMLElement): void {
   if (!/(?:margin-inline-end|margin-right)\s*:\s*-16px/.test(rule)) throw new Error('箭头规则缺少 -16px 末尾外边距，右边缘距视口仍差 28px（超 16px 验收线）')
   // ④ 垂直：对齐标签文字中心（.tab 的 padding-bottom 让盒子中心比文字中心低 4.5px）。
   if (!/align-self\s*:\s*(?:flex-start|start|center)/.test(rule)) throw new Error('箭头规则缺少 align-self，垂直位置会跟父行 align-items 漂移')
-  if (!/margin-top\s*:\s*-4px/.test(rule)) throw new Error('箭头规则缺少 -4px 上移量，与标签文字中心差 4px')
   // ⑤ flex 与尺寸颜色沿用原样。
   if (!/flex\s*:\s*0\s+0\s+auto/.test(rule)) throw new Error('箭头规则缺少 flex: 0 0 auto，在 flex 父行里会被压缩或拉伸')
-  if (!/width\s*:\s*24px/.test(rule) || !/height\s*:\s*24px/.test(rule)) throw new Error('箭头尺寸不再是 24x24')
+  if (!/min-width\s*:\s*44px/.test(rule) || !/min-height\s*:\s*44px/.test(rule)) throw new Error('更多选项的触控区域不足 44px')
   if (!/color\s*:\s*var\(--dsw-alias-label-secondary/.test(rule)) throw new Error('箭头的颜色变量被改掉')
 }
 
@@ -340,7 +339,7 @@ describe('视图菜单与折叠箭头的位置', () => {
     // 退回基线那版箭头规则：flex: none、无 auto、无 -16px、无 -4px、无 align-self。
     const legacy = TOP_BAR_FOLD_CSS
       .replace(/flex:\s*0\s+0\s+auto;/, 'flex: none;')
-      .replace(/align-self:\s*flex-start;/, '')
+      .replace(/align-self:\s*center;/, '')
       .replace(/margin-top:\s*-4px;/, '')
       .replace(/margin-inline-start:\s*auto;/, '')
       .replace(/margin-inline-end:\s*-16px;/, '')
@@ -350,10 +349,10 @@ describe('视图菜单与折叠箭头的位置', () => {
     const noEnd = TOP_BAR_FOLD_CSS.replace(/margin-inline-end:\s*-16px;/, '')
     expect(() => { assertArrowRightAligned(noEnd, arrow) }).toThrow(/-16px 末尾外边距/)
     // 只去掉 -4px：与标签文字中心差 4px，必须红。
-    const noLift = TOP_BAR_FOLD_CSS.replace(/margin-top:\s*-4px;/, '')
-    expect(() => { assertArrowRightAligned(noLift, arrow) }).toThrow(/-4px 上移量/)
+    const smallTarget = TOP_BAR_FOLD_CSS.replace(/min-height:\s*44px;/, 'min-height:24px;')
+    expect(() => { assertArrowRightAligned(smallTarget, arrow) }).toThrow(/触控区域/)
     // 只去掉 align-self：垂直位置会跟父行 align-items 漂移，必须红。
-    const noAlign = TOP_BAR_FOLD_CSS.replace(/align-self:\s*flex-start;/, '')
+    const noAlign = TOP_BAR_FOLD_CSS.replace(/align-self:\s*center;/, '')
     expect(() => { assertArrowRightAligned(noAlign, arrow) }).toThrow(/align-self/)
   })
 
@@ -476,6 +475,28 @@ describe('D 项：竖屏顶栏插件 UI 折叠', () => {
     // 外部：关闭
     document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))
     expect(state().fold).toBe('closed')
+  })
+
+  it('放开标题遮罩，关闭后恢复；第三方弹层可继续交互', async () => {
+    const seat = document.querySelector<HTMLElement>(ACTIONS_SELECTOR)!
+    const ancestor = seat.parentElement!
+    ancestor.style.maskImage = 'linear-gradient(black, transparent)'
+    const trigger = document.createElement('button')
+    trigger.setAttribute('aria-controls', 'third-party-popup')
+    seat.appendChild(trigger)
+    const popup = document.createElement('div')
+    popup.id = 'third-party-popup'
+    document.body.appendChild(popup)
+    fold.attach()
+    await flush()
+    state().arrow!.click()
+    expect(ancestor.hasAttribute('data-dsh-topbar-fold-unmasked')).toBe(true)
+    popup.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))
+    expect(state().fold).toBe('open')
+    document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))
+    expect(state().fold).toBe('closed')
+    expect(ancestor.hasAttribute('data-dsh-topbar-fold-unmasked')).toBe(false)
+    expect(ancestor.style.maskImage).toContain('linear-gradient')
   })
 
   it('Escape 关闭', async () => {
