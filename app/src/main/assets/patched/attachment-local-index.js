@@ -602,7 +602,7 @@ async function saveImageFile(root, input, limits, policy) {
 /**
 * Read and verify one content-addressed image.
 * @param root - absolute `DSH_HOME/attachments/v1` root.
-* @param ref - reference recorded in the session log.
+* @param ref - supplied image reference; display fields are returned unchanged.
 * @param signal - optional cancellation for filesystem and verification work.
 * @returns verified bytes and reference.
 * @throws the signal reason when aborted, or an AttachmentError when verification fails.
@@ -904,15 +904,19 @@ async function readRequestImageFile(root, attachment, target, signal) {
 //#region lib/types/index.js
 /** Local durable attachment backend rooted below `DSH_HOME`. @module @deepseek-ai/dsh-attachment-local */
 /** Default maximum encoded bytes for one submitted image; oversized sources are refused, not shrunk. */
-const DEFAULT_MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const DEFAULT_MAX_IMAGE_BYTES = 50 * 1024 * 1024;
 /** Default maximum images in one prompt. */
 const DEFAULT_MAX_IMAGES_PER_MESSAGE = 20;
 /** Default maximum aggregate image bytes in one prompt. */
 const DEFAULT_MAX_MESSAGE_IMAGE_BYTES = 200 * 1024 * 1024;
 /** Default maximum intrinsic pixels for one submitted image. */
 const DEFAULT_MAX_IMAGE_PIXELS = 64e6;
-/** Default per-side pixel cap for one submitted image. */
-const DEFAULT_MAX_IMAGE_DIMENSION = 8192;
+/**
+* Default per-side pixel cap for one submitted image: the largest side a JPEG
+* can carry. Normalization downscales a long side, so by default the
+* decoded-pixel limit alone bounds admission.
+*/
+const DEFAULT_MAX_IMAGE_DIMENSION = 65535;
 /**
 * Default total-pixel budget of the stored normalized image. A larger source
 * is admitted and downscaled proportionally, so admission bounds what rides
@@ -1007,11 +1011,11 @@ var LocalAttachmentStore = class extends AttachmentStore {
 		this.root = join(dshHome, "attachments", "v1");
 		this.cacheRoot = dshCachePath({ dshHome }, "attachments");
 		this.imageLimits = Object.freeze({
-			maxImageBytes: config.maxImageBytes ?? 20971520,
+			maxImageBytes: config.maxImageBytes ?? 52428800,
 			maxImagesPerMessage: config.maxImagesPerMessage ?? 20,
 			maxMessageImageBytes: config.maxMessageImageBytes ?? 209715200,
 			maxImagePixels: config.maxImagePixels ?? 64e6,
-			maxImageDimension: config.maxImageDimension ?? 8192,
+			maxImageDimension: config.maxImageDimension ?? 65535,
 			mediaTypes: Object.freeze([
 				"image/png",
 				"image/jpeg",
