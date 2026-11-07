@@ -20,7 +20,7 @@
 // 判据（逐包 × 逐 profile × 逐被改写文件）：
 //   ① 改写面 R = 注入面内「原始源与降级副本字节不同」的文件。注入面口径与 scripts/inject-all.py 同源
 //      （package.json + lib/**（.map 除外）+ skills/** + 在场的清单文件），不另造第二份清单。
-//      R 为空 ⇒ 该包没有被降级改写，**不构成判据输入**，必须显式 SKIP 并计数（不是静默通过）。
+//      R 为空 ⇒ 不能区分复制来源；逐文件核对归档是否等于两份相同的输入。
 //   ② 对 R 里每个文件，在 tar 里定位 home/.dsh/profiles/<profile>/node_modules/<name>/<rel>，
 //      **profile 有几个就判几个**（注入器默认覆盖 web + headless；只判一个会让另一个 profile 假绿）。
 //   ③ 每个落点：sha256(tar 成员) == sha256(降级副本对应文件)，且 != sha256(原始源对应文件)。
@@ -67,7 +67,7 @@ const INJECT_SURFACE_FILES = ['package.json', 'cordis.patch.yml', 'spec.json', '
 if (process.argv.includes('--self-test')) {
   const result = spawnSync(process.execPath, ['--test', join(HERE, 'check-degrade-source-of-truth.test.mjs')], { stdio: 'inherit' })
   if ((result.status ?? 1) === 0) {
-    console.log(TAG + ' SELF-TEST PASSED（正控 + 负控 A「注入源是原始源」+ 负控 B「两份同 sha 必须 SKIP 并计数」+ 用法/环境错误档）')
+    console.log(TAG + ' SELF-TEST PASSED（降级注入与原始源负控 + 无改写包的等值校验与篡改负控 + 用法/环境错误档）')
     process.exit(0)
   }
   console.error(TAG + ' SELF-TEST FAILED（单测未全绿：' + (result.status ?? 'spawn 失败') + '）')
@@ -287,10 +287,15 @@ const NEGATIVE_CONTROL_PROFILES = ['headless-bad']
 const memberFor = (profile, name, rel) => 'home/.dsh/profiles/' + profile + '/node_modules/' + name + '/' + rel
 
 // ── 一次性解出需要读字节的成员（逐成员 tar -xOf 会对整包 xz 重解压 N 次）──────────
-const plan = pairs.map((pair) => ({ pair, rewritten: rewriteSurface(pair.origDir, pair.degDir) }))
+const plan = pairs.map((pair) => {
+  const rewritten = rewriteSurface(pair.origDir, pair.degDir)
+  const members = rewritten.length > 0 ? rewritten
+    : [...new Set([...injectSurface(pair.origDir), ...injectSurface(pair.degDir)])].sort()
+  return { pair, rewritten, members }
+})
 const targets = new Set()
-for (const { pair, rewritten } of plan) {
-  for (const rel of rewritten) {
+for (const { pair, members } of plan) {
+  for (const rel of members) {
     for (const profile of profiles) {
       const member = memberFor(profile, pair.name, rel)
       if (entries.has(member)) targets.add(member)
@@ -314,6 +319,7 @@ if (targets.size > 0) {
 const failures = []
 let skipped = 0
 let judged = 0
+let unchangedJudged = 0
 const fail = (label, detail) => {
   console.log('FAIL  ' + label + ' -> ' + detail)
   failures.push(label)
@@ -342,11 +348,7 @@ for (const p of missingProfiles) {
 //
 // R（改写面）只含「原始源与降级副本字节不同」的文件。package.json 这类文件在两边通常逐字节
 // 相同 ⇒ 永远不进 R ⇒ 「注入的是原始源的那一份」在字节上不可区分。这是本门禁的口径边界，
-// 不是可以悄悄放过的地方：下面把「本次有多少注入面文件因字节相同而无法判定来源」计数说出来。
-//
-// 为什么**不**在这里改判「必须等于降级副本」：orig==deg 时该断言恒真，加它只是把不可判定
-// 伪装成已判定（比不判更糟，正是 issue 批评的形态）。真正的补法是让降级步骤改写更多文件面，
-// 那是 check-browser-syntax-floor 的职责，不在本门禁。
+// 来源不能判定；整包未改写时另作完整性校验，把归档的每个文件与两份输入比较。
 let undecidableByBytes = 0
 for (const { pair, rewritten } of plan) {
   const surface = injectSurface(pair.origDir)
@@ -354,22 +356,33 @@ for (const { pair, rewritten } of plan) {
 }
 if (undecidableByBytes > 0) {
   console.log('NOTE  ' + undecidableByBytes + ' 个注入面文件在原始源与降级副本里逐字节相同，'
-    + '其来源不可由字节判定（口径边界；本门禁只判改写面 R）')
+    + '其来源不可由字节区分；整包无改写时仍核对归档内容')
 }
 
-for (const { pair, rewritten } of plan) {
+for (const { pair, rewritten, members } of plan) {
   if (pair.degradedName !== pair.name) {
     fail(pair.name, '降级副本的包名是 ' + pair.degradedName + '，与原始源 ' + pair.name
       + ' 不一致——--pair 配错了，这对目录不是同一个包的两份拷贝')
     continue
   }
   if (rewritten.length === 0) {
-    // 两份注入面逐字节相同 ⇒ 这个包没被降级改写。它**不构成判据输入**：此时 tar 里是原始源还是
-    // 降级副本，字节上一模一样，任何「等于/不等于」的断言都恒真。必须显式 SKIP 并计数。
-    const client = readBytes(under(pair.origDir, 'lib/client.js'))
-    skip(pair.name, '原始源与降级副本的注入面逐字节相同（lib/client.js sha256='
-      + (client === null ? '（无该文件）' : sha256(client))
-      + '）——该包没有被降级改写，不构成判据输入')
+    // Directory provenance cannot be distinguished, but the archived bytes are
+    // independent evidence: absence, tampering or differing source sets fail.
+    for (const profile of declaredProfiles) {
+      for (const rel of members) {
+        const member = memberFor(profile, pair.name, rel)
+        const original = readBytes(under(pair.origDir, rel))
+        const staged = readBytes(under(pair.degDir, rel))
+        const archived = entries.has(member) ? readBytes(under(scratch, member)) : null
+        const label = pair.name + '@' + profile + ' ' + rel
+        if (!original || !staged || !archived || !original.equals(staged) || !archived.equals(staged)) {
+          fail(label, '无改写包的归档字节缺失或与源文件不一致')
+        } else {
+          unchangedJudged += 1
+          console.log('PASS  ' + label + '（未改写；归档等于两份源文件）')
+        }
+      }
+    }
     continue
   }
   // 逐 profile 定位：只判「tar 里真的有的落点」；一个都没有 = 无法定位（非严格档 SKIP，严格档判红）。
@@ -438,10 +451,10 @@ if (failures.length > 0) {
     + (failures.length > 4 ? ' 等' : '') + '；SKIP=' + skipped)
   process.exit(1)
 }
-// 结论行措辞必须与读数一致：judged=0 且 skipped>0 时不能说「N 个落点全部等于降级副本」——
-// 那会读成「判过且过了」，而实际是「这个包没被降级改写，不构成判据输入」。
+// 两种证据分别计数：改写落点验证来源，未改写落点验证内容。
 console.log(TAG + ' PASSED（' + pairs.length + ' 对 × ' + profiles.length + ' profile：'
   + (judged > 0
     ? '判定 ' + judged + ' 个落点全部等于降级副本字节且不等于原始源字节'
-    : '本次没有可判落点（全部 SKIP，见上）')
+    : '无改写落点')
+  + '；未改写文件已核对 ' + unchangedJudged + ' 个落点'
   + '；SKIP=' + skipped + '；判据=tar 字节 sha256 vs 两份源目录字节，不解析日志）')
