@@ -57,7 +57,13 @@ function buildPanel(labels: readonly string[], activeLabel?: string, layout: 'le
     const button = document.createElement('button')
     button.type = 'button'
     // 上游 navIcon(row.id)：每行一个 svg，未知 id 降级通用齿轮——这里只放一个占位 svg。
-    button.appendChild(document.createElementNS('http://www.w3.org/2000/svg', 'svg'))
+    const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    if (layout === 'v022') {
+      const iconWrapper = document.createElement('span')
+      iconWrapper.setAttribute('aria-hidden', 'true')
+      iconWrapper.append(icon)
+      button.append(iconWrapper)
+    } else button.append(icon)
     const text = document.createElement('span')
     text.textContent = label
     button.appendChild(text)
@@ -110,7 +116,7 @@ function setPhoneForm(on: boolean): void {
   else document.documentElement.removeAttribute('data-dsh-mobile-form')
 }
 
-/** MutationObserver 与 queueMicrotask 都在微任务里投递，等一拍即可看到收敛结果。 */
+/** 等观察器收敛，也给设置点击留出完整的一轮派发。 */
 async function settle(): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, 0))
 }
@@ -211,6 +217,26 @@ describe('设置首页：分类列表', () => {
     handle.panel.dispatchEvent(escape)
     expect(escape.defaultPrevented, '首页不得吞掉 Escape').toBe(false)
   })
+})
+
+it('真实点击的微任务检查点不能提前收起列表或夺走焦点', async () => {
+  const { panel, rows } = buildPanel(['通用设置', '开发者选项'], '通用设置', 'v022')
+  nav = new MobileSettingsNav()
+  nav.attach()
+  const row = rows.get('开发者选项')!
+  row.focus()
+  row.click()
+
+  // jsdom 的 click() 同步完成派发；用只等待微任务的断言模拟浏览器在监听器之间的检查点。
+  await Promise.resolve()
+  expect(panel.getAttribute('data-dsh-settings-level')).toBe('home')
+  expect(document.activeElement).toBe(row)
+
+  await settle()
+  expect(panel.getAttribute('data-dsh-settings-level')).toBe('detail')
+  expect(row.getAttribute('aria-current')).toBe('true')
+  expect(panel.querySelector('[data-dsh-settings-bar-title]')?.textContent).toBe('开发者选项')
+  expect(document.activeElement).toBe(back(panel))
 })
 
 describe('重新打开设置后不沿用旧历史', () => {
@@ -390,26 +416,28 @@ describe('二级页：点一级分类进入', () => {
 })
 
 describe('逐级返回', () => {
-  it('returns focus to a visible row when the active About row is hidden', () => {
+  it('returns focus to a visible row when the active About row is hidden', async () => {
     const handle = buildPanel(['通用设置', '关于'])
     nav = new MobileSettingsNav()
     nav.attach()
     const about = handle.rows.get('关于')!
     about.style.display = 'none'
     about.click()
+    await settle()
     back(handle.panel).click()
     expect(handle.panel.getAttribute('data-dsh-settings-level')).toBe('home')
     expect(document.activeElement).toBe(handle.rows.get('通用设置'))
     expect(about.getAttribute('aria-current')).toBe('true')
   })
 
-  it('二级页返回 -> 首页，焦点回到当前一级行，内容列节点原样（未保存编辑不丢）', () => {
+  it('二级页返回 -> 首页，焦点回到当前一级行，内容列节点原样（未保存编辑不丢）', async () => {
     const handle = buildPanel(['开发者选项'])
     nav = new MobileSettingsNav()
     nav.attach()
     const input = handle.content.querySelector('input')!
     input.value = '写了一半'
     handle.rows.get('开发者选项')!.click()
+    await settle()
     back(handle.panel).click()
     expect(handle.panel.getAttribute('data-dsh-settings-level')).toBe('home')
     expect(handle.panel.querySelector('[data-dsh-settings-bar-title]')!.textContent, '回到首页标题必须变回外壳标题').toBe('设置')
@@ -419,11 +447,12 @@ describe('逐级返回', () => {
     expect(handle.maskClicks(), '二级页返回不得关掉设置').toBe(0)
   })
 
-  it('二级页的 Escape 只退回首页，不关设置', () => {
+  it('二级页的 Escape 只退回首页，不关设置', async () => {
     const handle = buildPanel(['开发者选项'])
     nav = new MobileSettingsNav()
     nav.attach()
     handle.rows.get('开发者选项')!.click()
+    await settle()
     const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
     handle.panel.dispatchEvent(escape)
     expect(escape.defaultPrevented).toBe(true)
@@ -433,11 +462,12 @@ describe('逐级返回', () => {
 
   // Android 返回逐级（detail -> home -> 关闭）不是靠新增返回栈层，而是靠 back-stack 的 dialog 层
   // 点蒙层这一步在本层被翻译成「降一级」；首页再按一次才落到 dialog 层真的关闭设置。
-  it('二级页里点蒙层（系统返回的 dialog 层路径）只降一级，不关设置；首页再点一次才关', () => {
+  it('二级页里点蒙层（系统返回的 dialog 层路径）只降一级，不关设置；首页再点一次才关', async () => {
     const handle = buildPanel(['开发者选项'])
     nav = new MobileSettingsNav()
     nav.attach()
     handle.rows.get('开发者选项')!.click()
+    await settle()
     // 第一次返回：dialog 层点蒙层 -> 只降一级。
     handle.mask.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
     expect(handle.panel.getAttribute('data-dsh-settings-level'), '二级页的返回必须落回首页').toBe('home')

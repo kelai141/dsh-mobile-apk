@@ -1628,6 +1628,8 @@ flowchart TD
 
 Settings entry recovery (#563): `dsh-client-ui-responsive/src/client/mobile/about-entry.ts` repairs the adapter-owned About button beside each handled version row, including after module reload, and limits mutation-triggered scans to the settings dialog. `dsh-client-ui-responsive/src/client/mobile/settings-nav.ts` returns focus to a visible enabled navigation row when the active row is hidden. Regression coverage lives in `about-entry.spec.ts` and `settings-nav.spec.ts` under the package tests directory.
 
+0.2.2 设置分区：`settings-nav.ts` 捕获列表点击，下一任务才切二级页、收起列表和移动焦点。浏览器派发真实触摸时，捕获和冒泡之间可能执行微任务，不能用微任务代替这一步。标题、说明及返回历史取导航行的可见标签，跳过上游 `aria-hidden` 图标。
+
 #### S01 引擎侧注入层（三个子仓）
 
 Touch reorder: `sidebar-reorder.ts` flushes each synthetic React drag phase. On multitouch, cancellation, detach, or out-of-list release, a source-row drop takes the upstream source-id no-op before dragend; dragend alone can commit a stale hover. DataTransfer types must also satisfy the global file-drop listener. The ReactDOM declaration is covered in the source ledger below. Browser-stage lease timers use numeric window timer handles.
