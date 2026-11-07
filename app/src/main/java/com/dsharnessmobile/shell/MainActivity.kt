@@ -817,6 +817,7 @@ class MainActivity : ComponentActivity() {
    * 这里只负责把通知回调接上（拒绝/失败必须说话，见该函数的契约）。
    */
   private fun handleIncomingIntent(intent: Intent?) {
+    if (intent?.data?.scheme == "com.dsharnessmobile.shell") return
     FileIncoming.processIncomingIntent(this, intent) { title, text -> showTestNotification(title, text) }
   }
 
