@@ -16,6 +16,7 @@ Exit 0 = pass; exit 1 = fail with reasons.
 """
 import hashlib
 import io
+import json
 import lzma
 import os
 import re
@@ -202,7 +203,20 @@ def scan(snapshot: str, expect: str, plugin_dirs, gradle_reader=app_id_from_grad
 
     expected = {}
     for d in plugin_dirs:
-        name = os.path.basename(os.path.normpath(d))
+        manifest_path = os.path.join(d, 'package.json')
+        try:
+            with open(manifest_path, 'rb') as f:
+                package_bytes = f.read()
+            package_name = json.loads(package_bytes)['name']
+            if not isinstance(package_name, str) or not re.fullmatch(r'@dsh-android/[^/]+', package_name):
+                raise ValueError('expected an @dsh-android package name')
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            fail.append(f'plugin manifest {manifest_path}: {error}')
+            continue
+        name = package_name.split('/', 1)[1]
+        if name in expected:
+            fail.append(f'duplicate plugin package name: {package_name}')
+            continue
         files = {}
         lib = os.path.join(d, 'lib')
         if not os.path.isdir(lib):
@@ -215,8 +229,7 @@ def scan(snapshot: str, expect: str, plugin_dirs, gradle_reader=app_id_from_grad
                 full = os.path.join(root, fn)
                 rel = os.path.relpath(full, lib).replace('\\', '/')
                 files['lib/' + rel] = hashlib.sha256(open(full, 'rb').read()).hexdigest()
-        with open(os.path.join(d, 'package.json'), 'rb') as f:
-            files['package.json'] = hashlib.sha256(f.read()).hexdigest()
+        files['package.json'] = hashlib.sha256(package_bytes).hexdigest()
         expected[name] = files
 
     with lzma.open(snapshot, 'rb') as f:
