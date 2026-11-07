@@ -129,6 +129,16 @@ export const MOBILE_FORM_CSS: string = `
     grid-row: 1;
   }
 
+  /* 0.2.2 also mounts a floating opener above the header. Keep the one in
+     the same header row as the right opener, and preserve the upstream
+     fallback on views that do not render the conversation header. */
+  [data-dsh-frame] > [data-shell-leading] {
+    margin-top: var(--dsh-mobile-top-inset, 0px);
+  }
+  [data-dsh-frame][data-dsh-header-sidebar-toggle] > [data-shell-leading] [data-sidebar-opener] {
+    display: none;
+  }
+
   /* Anchored on upstream's own attribute: CSS attribute-substring matching is
      case-sensitive and the real class is widthHandle (capital H), so a
      [class*=handle] selector matches nothing and the desktop drag handles

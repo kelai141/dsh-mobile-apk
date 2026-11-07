@@ -14,6 +14,7 @@ import { homedir } from "node:os";
 import { AttachmentId } from "@deepseek-ai/dsh-attachment";
 import { WebError } from "@deepseek-ai/dsh-web";
 import { defineTool } from "@deepseek-ai/dsh-tools";
+import { callbackReceivedPage } from "./auth/oauth-flow.js";
 
 //#region src/auth/pkce.ts
 /**
@@ -53,46 +54,7 @@ function randomHex(bytes = 8) {
 }
 
 //#endregion
-//#region src/auth/oauth-flow.ts
-/** Default attempt lifetime: three minutes for the user to complete login. */
-const DEFAULT_FLOW_TIMEOUT_MS = 18e4;
-const SUCCESS_PAGE = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Login successful</title></head><body style=\"font-family:sans-serif\"><h1>Login successful</h1><p>You can close this tab and return to DeepSeek Harness.</p></body></html>";
-/** 移动端回跳链接：与壳侧 AndroidManifest 的 intent-filter 逐字一致（0.14.11）。 */
-const MOBILE_RETURN = "intent://oauth-return#Intent;scheme=com.dsharnessmobile.shell;package=com.dsharnessmobile.shell;end";
-/**
-* 直连 scheme 的回跳链接（与 manifest 的 intent-filter 逐字一致）。
-*
-* 为什么要两路：`intent://…#Intent;…` 在部分 Chromium 内核与内置浏览器里不被当作
-* Android Intent 语法解析，而是当成普通 URL 交给「打开方式」选择器 —— 真机 2026-11-07
-* 实测：点按钮能正常回到 DeepCode，自动跳转却弹出只含钉钉/Edge 的选择器。
-* 因此自动跳转改走这条普通深链（系统能唯一定位到 MainActivity），
-* `intent://` 那一条仍留给按钮做兜底。
-*/
-const MOBILE_RETURN_DIRECT = "com.dsharnessmobile.shell://oauth-return";
-/**
-* 回调页：桌面形态保持原文案，移动端给「回到应用」的说明与显式按钮。
-*
-* 缺陷形态（真机 2026-11-07）：回调页原来只写「可以关闭此标签页」，而手机上的标签页是
-* 系统浏览器——关掉它不会回到本应用；自动跳转用的 intent:// 在 manifest 里也没有对应
-* scheme，系统只能弹「打开方式」（列表里没有本应用）。壳侧已补齐该 scheme，本页保留
-* 手动按钮兜底，并且不声称「已登录成功」——此时只收到授权码，兑换在引擎侧完成。
-* @param isMobile - 手机壳形态（由 DSH_APP_VERSION 判定）。
-*/
-function callbackReceivedPage(isMobile = Boolean(process.env.DSH_APP_VERSION)) {
-	if (!isMobile) return SUCCESS_PAGE;
-	// 本页只确认「回调已收到」，不含 provider / code / state / callback URL。
-	return "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
-		+ "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-		+ "<title>返回 DeepCode / Return to DeepCode</title>"
-		+ "<style>body{font:16px/1.6 system-ui,sans-serif;margin:0;padding:32px 24px;max-width:32rem;margin-inline:auto}a{display:inline-block;padding:12px 18px;background:#245bce;color:white;border-radius:12px;text-decoration:none}</style></head>"
-		+ "<body><main><h1>已收到授权</h1><p>请返回 DeepCode，等待应用完成账号连接。</p>"
-		+ "<p lang=\"en\">Authorization received. Return to DeepCode to finish connecting your account.</p>"
-		+ "<a id=\"return\" href=\"" + MOBILE_RETURN + "\">返回 DeepCode / Return to DeepCode</a>"
-		+ "<p>如果没有跳转，请点上方按钮，或从最近任务打开 DeepCode。<br>"
-		+ "<span lang=\"en\">If nothing opens, tap the button or switch back to DeepCode from Recents.</span></p>"
-		+ "</main><script>if (/Android/i.test(navigator.userAgent)) location.href = "
-		+ JSON.stringify(MOBILE_RETURN_DIRECT) + ";</script></body></html>";
-}
+//#region src/auth/oauth-flow.ts（实现见 ./auth/oauth-flow.js，回跳页由它导出）
 function failurePage(detail) {
 	return `<!doctype html><html><head><meta charset="utf-8"><title>Login failed</title></head><body style="font-family:sans-serif"><h1>Login failed</h1><p>${detail.replace(/[<>&]/g, "")}</p></body></html>`;
 }
@@ -10706,10 +10668,6 @@ var SubscriptionsAuthController = class {
 			// 请求可以挂到 TCP 超时才失败（可达数分钟），期间 busy 恒为 true，设置页一直显示
 			// 「登录中…」，用户拿不到任何结论。限时后失败会落到 lastError，轮询立刻收口。
 			const code = await attempt.waitCode();
-			// 只把**兑换**这一段限时：回调等待由 flow 自己的三分钟超时兜底。
-			// 缺陷形态（真机 2026-11-07）：auth.openai.com 出现「网页能打开、应用里 DNS 解析失败」时
-			// 请求会挂到 TCP 超时才失败（可达数分钟），期间 busy 恒为 true，设置页一直显示「登录中…」，
-			// 用户得不到任何结论。限时后失败落进 lastError，下一次轮询就收口并展示原因。
 			const session = await withExchangeDeadline(provider, () => this.exchange(provider, code, attempt));
 			if (this.claims.get(provider) !== claim) return;
 			await this.persist(provider, session);

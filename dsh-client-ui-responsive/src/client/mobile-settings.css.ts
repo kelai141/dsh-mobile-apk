@@ -263,8 +263,10 @@ export const MOBILE_SETTINGS_CSS: string = `
 
   /* 上游把首图标包在 span.navIcon > span > svg 里（0.14.11 真机 CDP 实测）。
      旧的「> svg」直接子节点选择器因此从未命中，上游通用齿轮与我方分区图标叠在同一格。
-     这里按后代选择器命中，三种结构（直接子 svg / 包一层 span）都能隐藏。 */
-  html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > nav button svg[data-dsh-settings-nav-icon-hidden] {
+     这里按后代选择器命中，三种结构（直接子 svg / 包一层 span）都能隐藏。
+     不限定标签：标记打在要隐藏的那个节点上（可能是 svg，也可能是包住它的 span），
+     与 settings-nav.ts 的 upstream 取值保持同一口径。 */
+  html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > nav button [data-dsh-settings-nav-icon-hidden] {
     display: none;
   }
 

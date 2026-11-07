@@ -38,7 +38,7 @@ import { ComposerSheet } from './mobile/composer-sheet.ts'
 import { zh as sheetZh, en as sheetEn } from './mobile/composer-sheet.locales.ts'
 import { FILE_CARD_CAPSULE_CSS } from './mobile/file-card-capsule.css.ts'
 import { FileCardCapsule, type FileCardBridge } from './mobile/file-card-actions.ts'
-import { zh as cardZh, en as cardEn } from './mobile/file-card-capsule.locales.ts'
+import { zh as cardZh, en as cardEn, fileCardErrorKey } from './mobile/file-card-capsule.locales.ts'
 import { COMPOSER_ROW_CSS } from './composer-row.css.ts'
 import { COMPOSER_INSETS_CSS } from './composer-insets.css.ts'
 import { TRAJECTORY_DETAILS_CSS } from './trajectory-details.css.ts'
@@ -267,7 +267,7 @@ export function apply(ctx: ClientContext): void {
   // 桥是壳侧在页面脚本之后注入的，所以每次动作时才读 window，不在装配期捕获一份快照。
   // 按方法名读取而不是走 AndroidShellBridge 的成员：那两个方法由壳侧另一个会话落地，
   // 先声明会留下 tsOnly 悬空面（check-bridge-symmetry）。方法不在场即 undefined，不是终态
-  // （#990）：这一轮不渲染左段，桥注入后下次扫描补回；只有壳侧答 no-receiver 才永久收起。
+  // （#990）：这一轮不渲染左段，桥注入后下次扫描补回；单次失败只在当前文件卡片显示原因。
   // 每次调用都重新查 window：壳侧注入晚于插件装配，缓存一份会在首批卡片上永远拿到 undefined。
   const bridgeFace = (): FileCardBridge => {
     const read = (name: 'openFileExternal' | 'shareFile') => {
@@ -285,11 +285,11 @@ export function apply(ctx: ClientContext): void {
     scope.effect(() => {
       const capsule = new FileCardCapsule(bridgeFace, {
         external: name => t('openExternal', { name }),
-        share: t('share'),
+        share: t('share'), failure: error => t(fileCardErrorKey(error)),
       })
       capsule.attach()
       const unbind = scope.on('locale/change', () => {
-        capsule.setCopy({ external: name => t('openExternal', { name }), share: t('share') })
+        capsule.setCopy({ external: name => t('openExternal', { name }), share: t('share'), failure: error => t(fileCardErrorKey(error)) })
       })
       return () => { unbind(); capsule.detach() }
     }, 'ui-responsive: delivery file card capsule')

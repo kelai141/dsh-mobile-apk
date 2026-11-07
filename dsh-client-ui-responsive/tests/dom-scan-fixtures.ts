@@ -57,7 +57,7 @@ export async function attachBootObservers(): Promise<() => void> {
     const trajectory = new TrajectoryPanelsObserver(null)
     trajectory.attach(); handles.push(trajectory)
     const capsule = new FileCardCapsule(() => ({ openFileExternal: undefined, shareFile: undefined }), {
-      external: () => '', share: () => '',
+      external: () => '', share: () => '', failure: () => '',
     })
     capsule.attach(); handles.push(capsule)
     const dismiss = new DrawerOverlayDismiss({ mobileForm: () => true })

@@ -251,10 +251,13 @@ function closeTrajectoryDetails(aside: Element): boolean {
  * @returns whether a control was found and triggered.
  */
 function closeRightFullscreen(panel: Element): boolean {
-  // Stable upstream hooks: the mode toggle labels itself "exit fullscreen" while
-  // fullscreen and the collapse toggle folds the column outright, so no
-  // localized aria-label is needed.
-  const target = panel.querySelector('[data-sidebar-right-mode]') ?? panel.querySelector('[data-sidebar-right-toggle]')
+  // First dismiss the bubble menu. On a phone the column has no smaller
+  // presentation, so Back collapses it; on wide layouts it can exit fullscreen.
+  const mobile = document.documentElement.hasAttribute(MOBILE_FORM_ATTR)
+  const mode = panel.querySelector('[data-dsh-mode-proxy]') ?? panel.querySelector('[data-sidebar-right-mode]')
+  const collapse = panel.querySelector('[data-dsh-collapse-proxy]') ?? panel.querySelector('[data-sidebar-right-toggle]')
+  const target = panel.querySelector('[data-dsh-sidebar-bubbles-toggle][aria-expanded="true"]')
+    ?? (mobile ? collapse ?? mode : mode ?? collapse)
   if (target === null) return false
   dispatchMouse(target, 'click')
   return true

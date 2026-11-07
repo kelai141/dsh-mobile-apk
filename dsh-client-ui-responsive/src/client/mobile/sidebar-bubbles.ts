@@ -4,6 +4,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-locale/client'
 import { WORKSPACE_MAX_WIDTH, DRAG_SAFE_PX, DRAG_DWELL_MS, type WorkspaceNavigation } from './mobile-workspaces.ts'
 import type {} from './sidebar-bubbles.locales.ts'
+import { forwardControlClick } from './activation-guard.ts'
 
 /**
  * 0.14.9：面板收起时也保持挂载。悬浮气泡头（.dsh-bubble-header）现在随内容一起滑入滑出
@@ -405,13 +406,14 @@ export class SidebarBubbles {
       if (svg) proxy.append(svg.cloneNode(true))
       const chrome = original.matches('[data-sidebar-right-mode], [data-sidebar-right-toggle]')
       if (original.matches('[data-sidebar-right-mode]')) proxy.setAttribute('data-dsh-mode-proxy', '')
+      if (original.matches('[data-sidebar-right-toggle]')) proxy.setAttribute('data-dsh-collapse-proxy', '')
       if (!chrome) proxy.append(document.createTextNode(label))
       proxy.addEventListener('click', () => {
         if (!this.current() || !original.isConnected) return
         this.setOpen(false)
         // 全屏切换必须直调服务：走原按钮 click() 会因目标解析失败而空转（见选项注释）。
         if (chrome && original.matches('[data-sidebar-right-mode]') && this.options.toggleFullscreen) this.options.toggleFullscreen()
-        else original.click()
+        else forwardControlClick(original)
       })
       if (chrome) this.header.insertBefore(proxy, this.toggle)
       else this.actions.append(proxy)
@@ -437,7 +439,7 @@ export class SidebarBubbles {
     const tab = this.tabs.find(tab => tab.record.id === id)
     if (!tab?.source.isConnected) return
     if (this.options.workspaces) { if (!this.options.workspaces.single(id)) return }
-    else tab.source.click()
+    else forwardControlClick(tab.source)
     this.setOpen(false, true)
   }
 
@@ -446,7 +448,7 @@ export class SidebarBubbles {
     const tab = this.tabs.find(tab => tab.record.id === id)
     if (!tab?.close?.isConnected) return
     const index = this.tabs.indexOf(tab)
-    tab.close.click()
+    forwardControlClick(tab.close)
     this.sync()
     const next = this.tabs[Math.min(index, this.tabs.length - 1)]
     if (next) this.rows.get(next.record.id)?.select.focus({ preventScroll: true })

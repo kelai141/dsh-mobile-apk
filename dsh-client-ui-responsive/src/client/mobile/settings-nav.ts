@@ -22,6 +22,8 @@
  * 只作用于手机形态：`html[data-dsh-mobile-form]` 缺席时本模块不写任何东西，横屏布局与行为不变。
  */
 
+import { forwardControlClick } from './activation-guard.ts'
+
 /** 手机形态标记（`mobile/form-marker.ts` 写在 `<html>` 上，判据同上游 768px 断点）。 */
 const MOBILE_FORM_ATTR = 'data-dsh-mobile-form'
 /** 设置面板：面板自身没有稳定钩子，`form-marker` 按 nav/content 结构写在它上面。 */
@@ -262,10 +264,10 @@ function strokeArrow(d: string): SVGSVGElement {
   return svg
 }
 
-/** 上游一级行的 label 文本（按钮里第一个非本模块添加的 `span`）。 */
+/** 一级行的文本：跳过上游 0.2.2 的装饰图标和本模块注入的说明、箭头。 */
 function rowLabel(button: Element): string {
   const label = [...button.querySelectorAll(':scope > span')].find(
-    node => !node.hasAttribute(DESC_ATTR) && !node.hasAttribute(CHEVRON_ATTR),
+    node => node.getAttribute('aria-hidden') !== 'true' && !node.hasAttribute(DESC_ATTR) && !node.hasAttribute(CHEVRON_ATTR),
   )
   return (label?.textContent ?? '').trim()
 }
@@ -291,6 +293,7 @@ export class MobileSettingsNav {
   private observer: MutationObserver | null = null
   private attached = false
   private scheduled = false
+  private detailTimer: ReturnType<typeof setTimeout> | undefined
   /** 当前追踪的面板；换面板（React 重建）时复位到首页。 */
   private panel: HTMLElement | null = null
   private level: string = LEVEL_HOME
@@ -340,6 +343,7 @@ export class MobileSettingsNav {
   detach(): void {
     if (!this.attached) return
     this.attached = false
+    clearTimeout(this.detailTimer)
     document.removeEventListener('click', this.onClick, true)
     document.removeEventListener('keydown', this.onKeyDown, true)
     this.observer?.disconnect()
@@ -384,9 +388,16 @@ export class MobileSettingsNav {
         document.querySelector('[data-dsh-settings-dialog]')?.removeAttribute(FRESH_ATTR)
       }
 
-      if (this.level === LEVEL_HOME && target.closest('nav button') !== null) {
-        const button = target.closest('nav button')
-        if (button !== null) this.enterDetail(panel, button)
+      const button = target.closest('nav button')
+      if (this.level === LEVEL_HOME && button !== null && resolveNavList(panel)?.contains(button)) {
+        // 浏览器派发真实点击时，捕获和冒泡监听器之间也可能清空微任务。
+        // 把整个层级切换放到下一任务，避免 observer 提前隐藏 nav 或移动焦点。
+        clearTimeout(this.detailTimer)
+        this.detailTimer = setTimeout(() => {
+          if (this.panel !== panel || this.level !== LEVEL_HOME || !panel.contains(button)
+            || !panel.isConnected || !document.documentElement.hasAttribute(MOBILE_FORM_ATTR)) return
+          this.enterDetail(button)
+        }, 0)
         return
       }
 
@@ -437,7 +448,7 @@ export class MobileSettingsNav {
           this.currentLabel = previous
           this.settled = true
           this.pendingTitle = previous
-          ;(row as HTMLElement).click()
+          forwardControlClick(row as HTMLElement)
           return
         }
       }
@@ -455,23 +466,18 @@ export class MobileSettingsNav {
     return mask !== null && (target === mask || mask.contains(target))
   }
 
-  private enterDetail(panel: HTMLElement, button: Element): void {
-    this.pendingTitle = rowLabel(button) || null
+  private enterDetail(button: Element): void {
+    const label = rowLabel(button) || null
+    this.pendingTitle = label
     // 从列表进入：当前分区就是这一行，历史清空。
     // 不这么做的话，关闭设置再打开时会带着上一次的分区名，第一次切换就记出假历史，
     // 返回键会跳到用户根本没去过的分区。
-    this.currentLabel = rowLabel(button) || null
+    this.currentLabel = label
     this.previousLabel = null
     this.settled = false
     this.level = LEVEL_DETAIL
     this.focusTarget = 'back'
-    // 必须延到本次点击派发结束之后，**不能同步 sync()**（实测真机 bug）：
-    // 本模块的 click 监听在捕获阶段，同步切 level 会让 CSS 立刻把 nav 设成 display:none，
-    // 而真正切换分区的仍是上游按钮的 React onClick —— 它在冒泡阶段。
-    // 目标节点在事件到达它之前就从渲染树里消失，上游 onClick 不触发，aria-current 恒停在
-    // 上一次的分区（用户看到「点哪一行都进同一个分区」）。
-    // queueMicrotask 在整轮派发结束后才跑，上游先收到点击、我们后切布局。
-    this.schedule()
+    this.sync()
   }
 
   private backToHome(panel: HTMLElement): void {
@@ -606,8 +612,7 @@ export class MobileSettingsNav {
         // 未知 / 上游 / 第三方 id：只有上游本来的 icon + label 与我们的箭头，一个字都不加。
         existing?.remove()
         // 上游图标原样留用（含它自己对这些 id 的降级）；我方图标若曾装饰过则收回。
-        row.querySelector(':scope > [' + ICON_ATTR + ']')?.remove()
-        row.querySelector(':scope > svg')?.removeAttribute('data-dsh-settings-nav-icon-hidden')
+        this.syncRowIcon(row, label)
         row.setAttribute(ROW_ATTR, 'other')
         continue
       }
@@ -688,7 +693,7 @@ export class MobileSettingsNav {
     chevron.appendChild(strokeArrow('M7 4l5 5-5 5'))
     entry.append(label, chevron)
     // 点注入行 = 点上游那个真实的订阅行（section 切换仍由上游 onSelect 完成）。
-    entry.addEventListener('click', () => { subsRow.click() })
+    entry.addEventListener('click', () => { forwardControlClick(subsRow) })
     content.insertBefore(entry, content.firstChild)
   }
 
@@ -709,17 +714,16 @@ export class MobileSettingsNav {
     // 下一次同步会把它当成上游齿轮加隐藏标记 —— 真机 2026-11-07 实锤：
     // 四个自有分区最后显示的是上游默认齿轮，我方图标被自己藏掉了。
     const injected = row.querySelector<SVGSVGElement>('[' + ICON_ATTR + ']')
-    // 上游把首图标包在 `<span class=navIcon><span><svg>` 里（0.14.11 真机 CDP 实测），
-    // 不是按钮的直接子 svg。旧判据只看直接子节点，于是 hidden 标记从来没加上过——
-    // 上游齿轮留在我方图标旁边，两个图标叠在同一格。这里取按钮内**第一个**非我方的 svg。
-    const upstream = [...row.querySelectorAll('svg')].find(node => node !== injected && !node.hasAttribute(ICON_ATTR))
+    const wrapped = row.querySelector(':scope > span[aria-hidden="true"]:not([' + CHEVRON_ATTR + ']) > svg')
+    const upstream = wrapped?.parentElement
+      ?? row.querySelector(':scope > svg:not([' + ICON_ATTR + '])')
     if (icon === undefined) {
       injected?.remove()
       upstream?.removeAttribute(ICON_ATTR + '-hidden')
       return
     }
     // 上游那个齿轮对本行已无意义：留一个隐藏标记而不是删除，收回时是原样的上游节点。
-    if (upstream !== undefined && !upstream.hasAttribute(ICON_ATTR + '-hidden')) {
+    if (upstream !== null && !upstream.hasAttribute(ICON_ATTR + '-hidden')) {
       upstream.setAttribute(ICON_ATTR + '-hidden', '')
     }
     if (injected === null) {

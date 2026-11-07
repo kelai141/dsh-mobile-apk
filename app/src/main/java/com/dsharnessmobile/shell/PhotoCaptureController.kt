@@ -25,6 +25,13 @@ import org.json.JSONObject
  */
 internal class PhotoCaptureController(private val activity: MainActivity) {
 
+  private companion object {
+    // 顺序保证：上一张的清理结束后才准备下一张，清理不会扫到下一张新建的原图。
+    val cameraIo = java.util.concurrent.Executors.newSingleThreadExecutor { task ->
+      Thread(task, "dsh-camera-io").apply { isDaemon = true }
+    }
+  }
+
   /** 一次在途拍照的状态（单槽；并发请求直接回 CODE_BUSY）。 */
   private var pending: Pending? = null
 
@@ -211,12 +218,14 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
     if (action != "capture") {
       return PhotoCapture.errorPayload(english, PhotoCapture.CODE_NOT_WIRED, "unsupported action: " + action)
     }
-    capture { payload -> pushToPage(payload) }
+    // JavascriptInterface 在 WebView 桥线程调用；ActivityResult 与 pending 归主线程。
+    activity.runOnUiThread { capture { payload -> pushToPage(payload) } }
     return JSONObject().put("ok", true).put("accepted", true).toString()
   }
 
   /** 发起一次拍照。最终结果走 [reply]（主线程回调）。 */
   private fun capture(reply: (String) -> Unit) {
+    if (activity.isFinishing || activity.isDestroyed) return
     val inFlight = pending
     if (inFlight != null) {
       // issue #1389：恢复回来的在途记录可能永远等不到相机结果（相机进程同死 / ROM 丢结果）。
@@ -237,24 +246,25 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
     val names = PhotoCapture.namesFor(System.currentTimeMillis())
     val raw = File(PhotoCapture.rawDir(activity), names.first)
     val target = File(PhotoCapture.outputDir(activity), names.second)
-    // 清历史：成品留最近 N 张、普通原图全清、压缩失败的保留位按件数/时间窗有界回收
-    // （本次原图在压缩成功后立刻删；失败则改名进保留位，见 finish）。
-    // issue #1387：把仍在压缩的原图排除掉——连拍的第二张不能删掉第一张还在读的文件。
-    PhotoCapture.sweepOld(
-      PhotoCapture.outputDir(activity),
-      PhotoCapture.rawDir(activity),
-      exclude = inFlightRawNames.toSet(),
-    )
     val job = Pending(raw = raw, target = target, reply = reply)
     pending = job
-    // issue #1007：受理即刻落盘（在拉起相机**之前**）。进程死亡后新实例靠它把在途状态接回来，
-    // 否则相机结果会被静默丢弃。
-    persistPendingState(job)
-    if (ContextCompat.checkSelfPermission(activity, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-      launchCamera(job)
-    } else {
-      // 只在这里弹一次系统权限框；之后的拒绝一律走错误码（用户要求不弹二次窗）。
-      permissionLauncher.launch(Manifest.permission.CAMERA)
+    cameraIo.execute {
+      // 相机启动前仍需持久化（#1007）；磁盘写不再阻塞 WebView 或主线程。
+      persistPendingState(job)
+      activity.runOnUiThread {
+        if (pending !== job || activity.isFinishing || activity.isDestroyed) return@runOnUiThread
+        if (ContextCompat.checkSelfPermission(activity, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+          launchCamera(job)
+        } else {
+          try {
+            permissionLauncher.launch(Manifest.permission.CAMERA)
+          } catch (t: Exception) {
+            pending = null
+            clearPendingState()
+            job.reply(PhotoCapture.errorPayload(english, PhotoCapture.classifyLaunchFailure(t), t.message))
+          }
+        }
+      }
     }
   }
 
@@ -284,6 +294,12 @@ internal class PhotoCaptureController(private val activity: MainActivity) {
       clearPendingState()
       job.raw.delete()
       job.reply(PhotoCapture.errorPayload(english, PhotoCapture.classifyLaunchFailure(t), t.message))
+      return
+    }
+    // 不等清缓存再开相机。保留当前相机写入的原图和仍在压缩的照片（#1387）。
+    val protected = synchronized(inFlightRawNames) { inFlightRawNames.toSet() + job.raw.name }
+    cameraIo.execute {
+      PhotoCapture.sweepOld(PhotoCapture.outputDir(activity), PhotoCapture.rawDir(activity), exclude = protected)
     }
   }
 

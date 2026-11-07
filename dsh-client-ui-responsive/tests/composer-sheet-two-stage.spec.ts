@@ -6,7 +6,7 @@
 //      panel 带 phase(peek|expanded)、内联 style.height(px)、peek(px)、max(px)；
 //      panel 内没有关闭叉，有抓手；横屏（无 marker）：form="card"、有叉、无抓手、
 //      不写内联 height、不装手势。
-//   2. peek = padTop + handleH + tilesH + gap + 2.5*rowH + padBottom + safeBottom
+//   2. peek = padTop + handleH + tilesH + gap + 3.5*rowH + padBottom + safeBottom
 //      （rowH 取第一条真实行高，拿不到用 46；safeBottom 取 --dsh-sheet-safe-bottom，缺省 0）。
 //      **契约修订（spec-author 记）**：原式没有 handleH 项，但把手是面板内容里的真实一块
 //      （rect + marginTop + marginBottom：jsdom 无布局 rect=0，只算外边距 4+6=10；设备上量到 14）；
@@ -403,7 +403,7 @@ function expectedPeek(): number {
   // 取到哪一个都不改期望值 —— 断言不该绑死在某个属性选择上。
   const gap = Number.parseFloat(getComputedStyle(rows).marginTop) || Number.parseFloat(getComputedStyle(tiles).gap) || 0
   const tilesH = tiles.getBoundingClientRect().height
-  return padTop + handleBlockHeight() + tilesH + gap + 2.5 * measuredRowHeight() + padBottom + safeBottomOf()
+  return padTop + handleBlockHeight() + tilesH + gap + 3.5 * measuredRowHeight() + padBottom + safeBottomOf()
 }
 
 /** 契约里的 max 公式。 */
@@ -451,7 +451,7 @@ function endDrag(y: number): void { dragEvent('end', panelEl(), y) }
 /** 一次完整的「上滑到 expanded 并松手」：用于把面板放进 expanded 态。 */
 async function dragToExpanded(): Promise<void> {
   startDrag()
-  moveTo(DRAG_ORIGIN - 400) // peek(250) + 400 = 650 > (250+880)/2 = 565
+  moveTo(DRAG_ORIGIN - 400) // peek(298) + 400 = 698 > (298+880)/2 = 589
   endDrag(DRAG_ORIGIN - 400)
   await flush()
 }
@@ -514,7 +514,7 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('A. 夹具自检：视觉口径钉子与度量通道', () => {
-  it('1 面板内边距 = 4/16/12，且 peek = 4 + 10 + 96 + 8 + 120 + 12 + 0 = 250', async () => {
+  it('1 面板内边距 = 4/16/12，且 peek = 4 + 10 + 96 + 8 + 168 + 12 + 0 = 298', async () => {
     buildComposer()
     await openSheet()
     const panel = panelEl()
@@ -536,9 +536,9 @@ describe('A. 夹具自检：视觉口径钉子与度量通道', () => {
       measuredRowHeight(),
       safeBottomOf(),
     ]).toEqual([10, 96, 8, 48, 0])
-    // 由这些输入推出的 peek：4 + 10 + 96 + 8 + 2.5*48 + 12 + 0 = 250。
-    expect(expectedPeek()).toBe(250)
-    expect(peekPx()).toBe(250)
+    // 由这些输入推出的 peek：4 + 10 + 96 + 8 + 3.5*48 + 12 + 0 = 298。
+    expect(expectedPeek()).toBe(298)
+    expect(peekPx()).toBe(298)
     expect(expectedMax()).toBe(880)
   })
 })
@@ -606,7 +606,7 @@ describe('C. 横屏：仍是居中卡片，不装手势', () => {
 // D. peek 几何
 // ---------------------------------------------------------------------------
 
-describe('D. peek = padTop + handleH + tilesH + gap + 2.5*rowH + padBottom + safeBottom', () => {
+describe('D. peek = padTop + handleH + tilesH + gap + 3.5*rowH + padBottom + safeBottom', () => {
   it('6 用第一条真实行高（48）：peek 等于公式值，且 height 就是 peek', async () => {
     buildComposer()
     await openSheet()
@@ -616,16 +616,16 @@ describe('D. peek = padTop + handleH + tilesH + gap + 2.5*rowH + padBottom + saf
     expect(heightPx()).toBe(peekPx())
   })
 
-  it('7 拿不到真实行高时回退 46（peek 相应少 2.5*(48-46) = 5）', async () => {
+  it('7 拿不到真实行高时回退 46（peek 相应少 3.5*(48-46) = 7）', async () => {
     metrics.rowH = 0 // 行元素量不到高度（折叠 / 未布局）
     buildComposer()
     await openSheet()
     expect(measuredRowHeight()).toBe(46)
     expect(peekPx()).toBe(expectedPeek())
-    // 反证：回退确实进了公式 —— 若实现忽略回退（按 0 行高算），peek 会少 2.5*46。
-    expect(peekPx()).toBeGreaterThan(expectedPeek() - 2.5 * 46)
+    // 反证：回退确实进了公式 —— 若实现忽略回退（按 0 行高算），peek 会少 3.5*46。
+    expect(peekPx()).toBeGreaterThan(expectedPeek() - 3.5 * 46)
     // 而且必须比「真实行高」的世界低 5px（同一夹具，只换行高）。
-    expect(expectedPeek() + 2.5 * (DEFAULT_METRICS.rowH - 46)).not.toBe(peekPx())
+    expect(expectedPeek() + 3.5 * (DEFAULT_METRICS.rowH - 46)).not.toBe(peekPx())
   })
 
   it('8 safeBottom 取 --dsh-sheet-safe-bottom（34）：peek 只涨 34', async () => {
@@ -650,7 +650,7 @@ describe('D. peek = padTop + handleH + tilesH + gap + 2.5*rowH + padBottom + saf
       PORTRAIT_PADDING.top + handleBlockHeight()
       + document.querySelector<HTMLElement>(TILES)!.getBoundingClientRect().height
       + Number.parseFloat(getComputedStyle(rowsEl()).marginTop)
-      + 2.5 * measuredRowHeight()
+      + 3.5 * measuredRowHeight()
       + PORTRAIT_PADDING.bottom
       + 0,
     )
@@ -776,7 +776,7 @@ describe('F. 8px 方向锁与归属判定', () => {
     expect(heightPx()).toBe(before + 160)
     endDrag(DRAG_ORIGIN - 160)
     await flush()
-    // 250+160 = 410 低于中点 565 -> 吸附回 peek（1:1 只是拖动过程，松手由 8 号契约决定）。
+    // 298+160 = 458 低于中点 589 -> 吸附回 peek（1:1 只是拖动过程，松手由 8 号契约决定）。
     expect(phaseOf()).toBe('peek')
     expect(heightPx()).toBe(peekPx())
   })
@@ -794,7 +794,7 @@ describe('F. 8px 方向锁与归属判定', () => {
     expect(heightPx()).toBe(startH - 300)
     endDrag(DRAG_ORIGIN + 300)
     await flush()
-    expect(phaseOf()).toBe('expanded') // 580/480 都高于中点
+    expect(phaseOf()).toBe('peek') // 580 低于默认高度抬高后的中点 589
   })
 })
 

@@ -5,6 +5,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-locale/client'
 import { SidebarBubbles } from '../src/client/mobile/sidebar-bubbles.ts'
 import { BackStackSignal } from '../src/client/mobile/back-stack.ts'
+import { ActivationGuard } from '../src/client/mobile/activation-guard.ts'
 import { zh } from '../src/client/mobile/sidebar-bubbles.locales.ts'
 
 const owner = 'owner' as SessionId
@@ -87,6 +88,38 @@ afterEach(() => {
 })
 
 describe('narrow navigation over native tabs', () => {
+  it('opens and closes bubble controls in fullscreen without unblocking direct clicks on the native strip', async () => {
+    document.documentElement.setAttribute('data-dsh-mobile-form', '')
+    const guard = new ActivationGuard()
+    guard.attach()
+    back = new BackStackSignal({ toggleSidebar: vi.fn(), activePanelId: () => null, leaveMainPanel: vi.fn() })
+    back.attach()
+    const collapse = panel.querySelector<HTMLButtonElement>('[data-sidebar-right-toggle]')!
+    const add = panel.querySelector<HTMLButtonElement>('[data-dockkit-add-tab]')!
+    const addClicked = vi.fn()
+    add.addEventListener('click', addClicked)
+    try {
+      collapse.click()
+      expect(panel.hasAttribute('data-sidebar-right-open')).toBe(true)
+      add.click()
+      expect(addClicked).not.toHaveBeenCalled()
+      toggle().click()
+      expect(popover().getAttribute('data-state')).toBe('open')
+      popover().querySelector<HTMLButtonElement>('button[aria-label="新建标签"]')!.click()
+      expect(addClicked).toHaveBeenCalledTimes(1)
+      toggle().click()
+      await flush()
+      expect(window.__dshBack?.()).toBe(true)
+      expect(popover().getAttribute('data-state')).toBe('closed')
+      expect(panel.hasAttribute('data-sidebar-right-open')).toBe(true)
+      expect(window.__dshBack?.()).toBe(true)
+      expect(panel.hasAttribute('data-sidebar-right-open')).toBe(false)
+    } finally {
+      guard.detach()
+      document.documentElement.removeAttribute('data-dsh-mobile-form')
+    }
+  })
+
   it('starts collapsed, shows the current identity and maps every opened tab in native order', () => {
     expect(toggle().getAttribute('aria-expanded')).toBe('false')
     expect(popover().getAttribute('aria-hidden')).toBe('true')
