@@ -134,11 +134,15 @@ export class TopBarFold {
       const ids = [trigger.getAttribute('aria-controls'), trigger.getAttribute('aria-owns')].join(' ').trim().split(/\s+/)
       if (ids.some(id => id && document.getElementById(id)?.contains(target))) return true
     }
-    // Some native slots (e.g. the subagent tree) portal to body without an ID.
-    // Only treat such a surface as related while a slot trigger is expanded.
-    return container.querySelector('[aria-expanded="true"]') !== null
-      && target.closest('[role="dialog"], [role="menu"], [role="listbox"], [role="tree"]') !== null
-      && !container.closest('[data-dsh-frame]')?.contains(target)
+    // Some native slots (including background jobs) portal to body without
+    // an ID or an overlay role. Keep those clicks with the plugin while its
+    // trigger is expanded; the conversation and its sidebars remain outside.
+    if (container.querySelector('[aria-expanded="true"]') === null) return false
+    const body = document.body
+    if (target === body || !body.contains(target)) return false
+    let appRoot: Element = container
+    while (appRoot.parentElement && appRoot.parentElement !== body) appRoot = appRoot.parentElement
+    return !appRoot.contains(target)
   }
 
   private readonly onViewportChange = (): void => { this.schedule() }

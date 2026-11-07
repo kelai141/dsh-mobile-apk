@@ -507,6 +507,23 @@ describe('D 项：竖屏顶栏插件 UI 折叠', () => {
     expect(state().fold).toBe('closed')
   })
 
+  it('无角色的后台任务弹层可查看输出，聊天区点击仍能收起', async () => {
+    const seat = document.querySelector<HTMLElement>(ACTIONS_SELECTOR)!
+    const trigger = document.createElement('button')
+    trigger.setAttribute('aria-expanded', 'true')
+    seat.appendChild(trigger)
+    const portal = document.createElement('div')
+    portal.innerHTML = '<ul aria-label="后台任务"><li><button>展开实时输出</button></li></ul>'
+    document.body.appendChild(portal)
+    fold.attach()
+    await flush()
+    state().arrow!.click()
+    portal.querySelector('button')!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))
+    expect(state().fold).toBe('open')
+    state().arrow!.closest('header')!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }))
+    expect(state().fold).toBe('closed')
+  })
+
   it('新插件动态挂载后自动进入面板（不硬编码名单）', async () => {
     fold.attach()
     await flush()
