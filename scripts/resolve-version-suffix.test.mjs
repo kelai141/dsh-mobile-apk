@@ -49,6 +49,8 @@ test('release script treats Version as the final name and passes only its derive
 })
 
 test('the app Gradle file owns a valid base version and positive versionCode', () => {
-  assert.ok(Number(gradle.match(/versionCode\s*=\s*(\d+)/)?.[1]) > 0)
+  const declared = gradle.match(/^\s*versionCode\s*=\s*(\d+)\s*$/m)?.[1]
+    ?? gradle.match(/^\s*versionCode\s*=\s*providers\.gradleProperty\("versionCode"\)\.getOrElse\("(\d+)"\)\.toInt\(\)\s*$/m)?.[1]
+  assert.ok(Number(declared) > 0, 'Gradle must declare a positive literal versionCode or positive fallback')
   assert.deepEqual(resolveVersionSuffix(BASE), { version: BASE, suffix: '' })
 })
