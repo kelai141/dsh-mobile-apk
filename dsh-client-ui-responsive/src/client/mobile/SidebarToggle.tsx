@@ -13,6 +13,7 @@
  * second source of truth.
  */
 import { useEffect, useState } from 'react'
+import { IconPanelLeftOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { BROWSER_PENDING_ATTR } from './browser-auto-place.ts'
 import css from './MobileChrome.module.css'
@@ -100,6 +101,11 @@ function useBrowserPending(): boolean {
 export function SidebarToggle({ toggleSidebar }: SidebarToggleProps) {
   const open = useSidebarOpen()
   const browserPending = useBrowserPending()
+  useEffect(() => {
+    const frame = frameElement()
+    frame?.setAttribute('data-dsh-header-sidebar-toggle', '')
+    return () => { frame?.removeAttribute('data-dsh-header-sidebar-toggle') }
+  }, [])
   return (
     <>
     <button
@@ -114,9 +120,7 @@ export function SidebarToggle({ toggleSidebar }: SidebarToggleProps) {
       aria-expanded={open}
       onClick={() => { toggleSidebar() }}
     >
-      <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
-        <path d="M2.5 4.5h13M2.5 9h13M2.5 13.5h13" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-      </svg>
+      <IconPanelLeftOutlineRegular size={16} />
       {/* S3-19: a badge on the toggle while a browser tab waits (not only aria). */}
       {browserPending && !open && <span className={css.badge} data-dsh-browser-badge="pending" aria-hidden="true" />}
     </button>

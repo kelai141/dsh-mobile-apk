@@ -57,9 +57,9 @@ describe('P4：顶部额头回收', () => {
     expect(clientSource.includes("id: 'mobile-chrome',") && !clientSource.includes('css.bar')).toBe(true)
   })
 
-  it('②b 开关本身带 SVG 三横线，且仍是 button（可点、可聚焦）', () => {
+  it('②b 左栏开关和右栏使用同一套侧栏图标，且仍是 button（可点、可聚焦）', () => {
     expect(toggleSource).toContain('<button')
-    expect(toggleSource).toContain('M2.5 4.5h13M2.5 9h13M2.5 13.5h13')
+    expect(toggleSource).toContain('<IconPanelLeftOutlineRegular')
     expect(toggleSource).toContain('aria-expanded')
   })
 
@@ -240,9 +240,12 @@ describe('P4 硬判据：hero/sessionless 态（新建会话那一屏）必须�
       expect(getComputedStyle(button!).display).not.toBe('none')
       expect(button!.getAttribute('aria-label')).toBe('打开导航')
       expect(button!.hasAttribute('data-dsh-sidebar-toggle')).toBe(true)
+      const frame = leading.closest('[data-dsh-frame]')!
+      expect(frame.hasAttribute('data-dsh-header-sidebar-toggle')).toBe(true)
       act(() => { button!.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       expect(clicked, 'hero 态下点汉堡必须真的触发 drawer 切换').toBe(1)
       act(() => { root.unmount() })
+      expect(frame.hasAttribute('data-dsh-header-sidebar-toggle')).toBe(false)
     }
   })
 
