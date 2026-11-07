@@ -610,8 +610,7 @@ export class MobileSettingsNav {
         // 未知 / 上游 / 第三方 id：只有上游本来的 icon + label 与我们的箭头，一个字都不加。
         existing?.remove()
         // 上游图标原样留用（含它自己对这些 id 的降级）；我方图标若曾装饰过则收回。
-        row.querySelector(':scope > [' + ICON_ATTR + ']')?.remove()
-        row.querySelector(':scope > svg')?.removeAttribute('data-dsh-settings-nav-icon-hidden')
+        this.syncRowIcon(row, label)
         row.setAttribute(ROW_ATTR, 'other')
         continue
       }
@@ -709,14 +708,18 @@ export class MobileSettingsNav {
   private syncRowIcon(row: HTMLButtonElement, label: string): void {
     const icon = OWN_SECTION_ICONS.get(label)
     const injected = row.querySelector<SVGSVGElement>(':scope > [' + ICON_ATTR + ']')
-    const upstream = [...row.querySelectorAll(':scope > svg')].find(node => node !== injected)
+    // 0.2.2 wraps the upstream SVG in an aria-hidden span. Hide that whole icon
+    // cell so it cannot share the same grid slot with the custom icon.
+    const wrapped = row.querySelector(':scope > span[aria-hidden="true"]:not([' + CHEVRON_ATTR + ']) > svg')
+    const upstream = wrapped?.parentElement
+      ?? row.querySelector(':scope > svg:not([' + ICON_ATTR + '])')
     if (icon === undefined) {
       injected?.remove()
       upstream?.removeAttribute(ICON_ATTR + '-hidden')
       return
     }
     // 上游那个齿轮对本行已无意义：留一个隐藏标记而不是删除，收回时是原样的上游节点。
-    if (upstream !== undefined && !upstream.hasAttribute(ICON_ATTR + '-hidden')) {
+    if (upstream !== null && !upstream.hasAttribute(ICON_ATTR + '-hidden')) {
       upstream.setAttribute(ICON_ATTR + '-hidden', '')
     }
     if (injected === null) {
