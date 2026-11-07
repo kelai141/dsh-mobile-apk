@@ -24,6 +24,10 @@ on:
         description: 'APK 版本后缀（默认空=正式版纯净版本号；测试构建显式传 -fix 等）'
         type: string
         default: ''
+      version_code:
+        description: '开发预览安装号（可选；要求非空后缀，用于覆盖此前的开发包）'
+        type: string
+        default: ''
       source_audit:
         description: '仅在来源审计 PR 分支上运行固定源码/签名输入构建'
         type: boolean
@@ -100,6 +104,20 @@ jobs:
       - name: 准备 Java（gradle 需要）
         uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '17' }
+
+      - name: 设置开发预览安装号
+        if: ${{ inputs.version_code != '' }}
+        shell: bash
+        env:
+          PREVIEW_CODE: ${{ inputs.version_code }}
+          PREVIEW_SUFFIX: ${{ inputs.suffix }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$PREVIEW_SUFFIX" || ! "$PREVIEW_CODE" =~ ^[1-9][0-9]{0,8}$ ]]; then
+            echo "::error::预览安装号须为正整数（至多九位），且必须设置版本后缀"
+            exit 1
+          fi
+          printf 'ORG_GRADLE_PROJECT_versionCode=%s\n' "$PREVIEW_CODE" >> "$GITHUB_ENV"
 
       - name: 准备并构建插件（统一清单、锁解析与单次构建）
         shell: bash
