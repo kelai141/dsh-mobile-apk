@@ -22,6 +22,8 @@
  * 只作用于手机形态：`html[data-dsh-mobile-form]` 缺席时本模块不写任何东西，横屏布局与行为不变。
  */
 
+import { forwardControlClick } from './activation-guard.ts'
+
 /** 手机形态标记（`mobile/form-marker.ts` 写在 `<html>` 上，判据同上游 768px 断点）。 */
 const MOBILE_FORM_ATTR = 'data-dsh-mobile-form'
 /** 设置面板：面板自身没有稳定钩子，`form-marker` 按 nav/content 结构写在它上面。 */
@@ -437,7 +439,7 @@ export class MobileSettingsNav {
           this.currentLabel = previous
           this.settled = true
           this.pendingTitle = previous
-          ;(row as HTMLElement).click()
+          forwardControlClick(row as HTMLElement)
           return
         }
       }
@@ -688,7 +690,7 @@ export class MobileSettingsNav {
     chevron.appendChild(strokeArrow('M7 4l5 5-5 5'))
     entry.append(label, chevron)
     // 点注入行 = 点上游那个真实的订阅行（section 切换仍由上游 onSelect 完成）。
-    entry.addEventListener('click', () => { subsRow.click() })
+    entry.addEventListener('click', () => { forwardControlClick(subsRow) })
     content.insertBefore(entry, content.firstChild)
   }
 

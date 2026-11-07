@@ -7,6 +7,7 @@ import { createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { installAboutEntry, getEngineVersion } from '../src/client/mobile/about-entry.ts'
 import { AboutSection } from '../src/client/mobile/about-section.tsx'
+import { ActivationGuard } from '../src/client/mobile/activation-guard.ts'
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -52,8 +53,13 @@ describe('关于入口（独立页面）', () => {
     host.querySelector('#nav-about')!.addEventListener('click', click)
     cleanup = installAboutEntry()
     await tick()
-    host.querySelector<HTMLElement>('[data-dsh-about-entry]')!.click()
-    await tick()
+    const guard = new ActivationGuard()
+    guard.attach()
+    try {
+      host.querySelector<HTMLElement>('#nav-about')!.click()
+      expect(click).not.toHaveBeenCalled()
+      host.querySelector<HTMLElement>('[data-dsh-about-entry]')!.click()
+    } finally { guard.detach() }
     expect(click).toHaveBeenCalledTimes(1)
     expect(document.querySelector('[data-dsh-about-panel]'), '不得出现遮罩层').toBeNull()
   })
