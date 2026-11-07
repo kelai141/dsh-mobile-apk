@@ -12,6 +12,22 @@ export const DEFAULT_FLOW_TIMEOUT_MS = 180_000;
 const SUCCESS_PAGE = '<!doctype html><html><head><meta charset="utf-8"><title>Login successful</title></head>'
     + '<body style="font-family:sans-serif"><h1>Login successful</h1>'
     + '<p>You can close this tab and return to DeepSeek Harness.</p></body></html>';
+const MOBILE_RETURN = 'intent://oauth-return#Intent;scheme=com.dsharnessmobile.shell;package=com.dsharnessmobile.shell;end';
+export function callbackReceivedPage(isMobile = Boolean(process.env.DSH_APP_VERSION)) {
+    if (!isMobile) return SUCCESS_PAGE;
+    // This page confirms receipt of the callback, not the subsequent token exchange.
+    // The app link contains no provider, code, state or callback URL.
+    return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
+        + '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        + '<title>返回 DeepCode / Return to DeepCode</title>'
+        + '<style>body{font:16px/1.6 system-ui,sans-serif;margin:0;padding:32px 24px;max-width:32rem;margin-inline:auto}a{display:inline-block;padding:12px 18px;background:#245bce;color:white;border-radius:12px;text-decoration:none}</style></head>'
+        + '<body><main><h1>已收到授权</h1><p>请返回 DeepCode，等待应用完成账号连接。</p>'
+        + '<p lang="en">Authorization received. Return to DeepCode to finish connecting your account.</p>'
+        + '<a id="return" href="' + MOBILE_RETURN + '">返回 DeepCode / Return to DeepCode</a>'
+        + '<p>如果没有跳转，请点上方按钮，或从最近任务打开 DeepCode。<br>'
+        + '<span lang="en">If nothing opens, tap the button or switch back to DeepCode from Recents.</span></p>'
+        + '</main><script>if (/Android/i.test(navigator.userAgent)) location.href = document.getElementById("return").href;</script></body></html>';
+}
 function failurePage(detail) {
     return '<!doctype html><html><head><meta charset="utf-8"><title>Login failed</title></head>'
         + `<body style="font-family:sans-serif"><h1>Login failed</h1><p>${detail.replace(/[<>&]/g, '')}</p></body></html>`;
@@ -157,8 +173,8 @@ export class OAuthFlowManager {
                 response.end('missing authorization code');
                 return;
             }
-            response.writeHead(200, { 'content-type': 'text/html' });
-            response.end(SUCCESS_PAGE);
+            response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' });
+            response.end(callbackReceivedPage());
             settle(undefined, code);
         };
         const settle = (error, code) => {

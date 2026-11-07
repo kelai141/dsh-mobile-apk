@@ -817,7 +817,7 @@ class MainActivity : ComponentActivity() {
    * 这里只负责把通知回调接上（拒绝/失败必须说话，见该函数的契约）。
    */
   private fun handleIncomingIntent(intent: Intent?) {
-    FileIncoming.processIncomingIntent(this, intent) { title, text -> showTestNotification(title, text) }
+    if (intent?.data?.scheme != "com.dsharnessmobile.shell") FileIncoming.processIncomingIntent(this, intent) { title, text -> showTestNotification(title, text) }
   }
 
   /** 把待投递的通知落点交给页面；页面未就绪则留到 onPageFinished 再送一次。 */
