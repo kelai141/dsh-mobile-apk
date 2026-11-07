@@ -146,6 +146,14 @@
         <action android:name="android.intent.action.MAIN" />
         <category android:name="android.intent.category.LAUNCHER" />
       </intent-filter>
+      <!-- The browser only brings the existing app to the foreground; OAuth
+           codes and tokens stay on the provider's loopback callback. -->
+      <intent-filter>
+        <action android:name="android.intent.action.VIEW" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <category android:name="android.intent.category.BROWSABLE" />
+        <data android:scheme="com.dsharnessmobile.shell" android:host="oauth-return" />
+      </intent-filter>
       <!-- 0.13.0 F5（M3.5）：系统「使用其他应用打开」+ 分享面板入口（D14 查看与分享都支持）。 -->
       <intent-filter>
         <action android:name="android.intent.action.VIEW" />

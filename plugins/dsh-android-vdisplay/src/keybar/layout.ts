@@ -49,10 +49,10 @@ export const KEYBAR_INSET_VAR = '--dsh-terminal-keybar-inset'
  *
  * ## 判据不是「键盘多高」，而是「键条自然落点还在可视底边之下多少」
  *
- * 键条是终端根（height:100%）的最后一个 flex:none 子项，因此它的**自然底边 = 布局视口底边**；
- * 而它必须落在**可视底边**（视觉视口的 offsetTop + height）之上。于是：
+ * 键条是终端根的最后一个 flex:none 子项，跟随终端所在面板的底边。
+ * 面板可能已经因软键盘缩小，或者只占分栏的一部分，所以用根节点实际底边与可视底边比较。
  *
- *   shortfall = max(0, 布局视口高 - (视觉视口高 + 视觉视口偏移))
+ *   shortfall = max(0, 终端根底边 - 可见区域底边)
  *
  * 这个量是**自足**的：它不猜键盘多高，只描述「还差多少没让开」。
  *
@@ -97,11 +97,14 @@ export function computeBottomInset(input: {
   /** 视觉视口相对布局视口的纵向偏移（浏览器把内容平移进可视区时的量）。 */
   readonly visualViewportOffsetTop: number
   readonly layoutViewportHeight: number
+  /** 终端根在布局视口坐标中的底边；无几何数据时用布局视口底边。 */
+  readonly terminalBottom?: number
 }): number {
   const finite = (n: number): number => (Number.isFinite(n) && n > 0 ? n : 0)
   const safe = finite(input.safeAreaBottom)
   const system = finite(input.shellSystemBottom)
   const layout = finite(input.layoutViewportHeight)
+  const terminal = finite(input.terminalBottom ?? 0) || layout
   const viewportHeight = finite(input.visualViewportHeight)
   const viewportTop = finite(input.visualViewportOffsetTop)
   // 视觉视口可用时，壳侧 IME 变量不参与：它描述的高度已经在布局尺寸里生效过了（见上方实测）。
@@ -110,8 +113,9 @@ export function computeBottomInset(input: {
   //
   // 视觉视口不可用（height 为 0）时**没有**这条判据：此时 layout - 0 会退化成「整个布局视口高」，
   // 那不是留白而是把内容顶到屏幕外。该分支一律交给上面的壳侧兜底，不再自己算。
-  const shortfall = viewportHeight > 0 ? Math.max(0, layout - (viewportHeight + viewportTop)) : 0
-  return Math.max(safe, system, imeFallback, shortfall)
+  const systemBottom = layout - Math.max(safe, system, imeFallback)
+  const visualBottom = viewportHeight > 0 ? viewportHeight + viewportTop : Infinity
+  return Math.max(0, terminal - Math.min(systemBottom, visualBottom))
 }
 
 /** 一个矩形（视口坐标，与 getBoundingClientRect 同基准）。 */

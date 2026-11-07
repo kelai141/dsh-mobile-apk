@@ -24,6 +24,18 @@ beforeEach(() => { document.documentElement.removeAttribute(SESSION_ID_ATTRIBUTE
 afterEach(() => { document.documentElement.removeAttribute(SESSION_ID_ATTRIBUTE) })
 
 describe('SessionMarker（ST-15）', () => {
+  it('0.2.2 在会话目录不再返回 current 时，取主视图而不是右栏会话', () => {
+    const marker = new SessionMarker({ list: { getSnapshot: () => ({
+      byId: {
+        sidebar: { id: 'sidebar', retainedBy: { mainView: 0 } },
+        main: { id: 'main', retainedBy: { mainView: 1 } },
+      },
+    }) } })
+    marker.attach()
+    expect(document.documentElement.getAttribute(SESSION_ID_ATTRIBUTE)).toBe('main')
+    marker.detach()
+  })
+
   it('挂载即发布当前会话 id（真源 = 客户端会话快照）', () => {
     const sessions = makeSessions('session-abc')
     const marker = new SessionMarker(sessions.face)

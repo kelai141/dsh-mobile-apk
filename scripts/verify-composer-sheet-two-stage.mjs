@@ -570,10 +570,10 @@ async function runAssertSuite() {
   add('A1g', 'close button absent in sheet form', peek.hasClose === false, peek.hasClose, 'false')
 
   // ---------- 2: peek geometry ----------
-  const peekExpected = 4 + 14 + 96 + 8 + 2.5 * 46 + 12
-  add('A2a', 'peek height = padTop4+handle14+tiles96+gap8+2.5rows115+padBottom12', near(peek.height, peekExpected, 2), { height: peek.height, expected: peekExpected, attr: peek.peekAttr }, '249 +-2')
+  const peekExpected = 4 + 14 + 96 + 8 + 3.5 * 46 + 12
+  add('A2a', 'peek height = padTop4+handle14+tiles96+gap8+3.5rows161+padBottom12', near(peek.height, peekExpected, 2), { height: peek.height, expected: peekExpected, attr: peek.peekAttr }, '295 +-2')
   const ratio = peek.firstRowHeight ? peek.rowsClientHeight / peek.firstRowHeight : null
-  add('A2b', 'visible rows ratio = rows.clientHeight / firstRowHeight in [2.4,2.6]', ratio !== null && ratio >= 2.4 && ratio <= 2.6, { ratio: ratio === null ? null : Math.round(ratio * 1000) / 1000, clientHeight: peek.rowsClientHeight, firstRowHeight: peek.firstRowHeight }, '2.4..2.6')
+  add('A2b', 'visible rows ratio = rows.clientHeight / firstRowHeight in [3.4,3.6]', ratio !== null && ratio >= 3.4 && ratio <= 3.6, { ratio: ratio === null ? null : Math.round(ratio * 1000) / 1000, clientHeight: peek.rowsClientHeight, firstRowHeight: peek.firstRowHeight }, '3.4..3.6')
 
   // ---------- 3: expanded cap ----------
   const maxExpected = Math.round(0.88 * Math.round(peek.visualViewportHeight))
@@ -598,15 +598,15 @@ async function runAssertSuite() {
   // ---------- 4: A feel 1:1 ----------
   await closeViaBackKey('reset')
   st = await ensurePeek()
-  add('A4a', 'reset back to peek before A-feel drag', near(st.height, peekExpected, 2) && st.phase === 'peek', { height: st.height, phase: st.phase }, '249/peek')
+  add('A4a', 'reset back to peek before A-feel drag', near(st.height, peekExpected, 2) && st.phase === 'peek', { height: st.height, phase: st.phase }, '295/peek')
   const feelA = await dragSteps({ direction: 'up', stepPx: 20, steps: 15, stepMs: 16, settleMs: 600, holdShot: 'dragging-portrait' })
   results.feelA = { start: feelA.start, seq: feelA.seq, atRelease: feelA.atRelease, afterRelease: feelA.afterRelease, heldShot: feelA.heldShot }
   if (feelA.heldShot) shots.push(join(out, feelA.heldShot))
   const aFinal = feelA.seq[feelA.seq.length - 1].height
   const aLinear = feelA.seq.every(s => near(s.height, peekExpected + 20 * s.step, 2))
-  add('A4b', 'A feel maps 300px of drag 1:1 (every step = peek + 20n)', aLinear, { final: aFinal, series: feelA.seq.map(s => s.height) }, 'linear 249+20n')
-  add('A4c', 'A feel ends at 249+300=549', near(aFinal, peekExpected + 300, 2), aFinal, '549 +-2')
-  add('A4d', 'slow release snaps back to peek', near(feelA.afterRelease.height, peekExpected, 2), { afterRelease: feelA.afterRelease.height, phase: feelA.afterRelease.phase, pauseBeforeReleaseMs: feelA.pauseBeforeReleaseMs }, '249 +-2')
+  add('A4b', 'A feel maps 300px of drag 1:1 (every step = peek + 20n)', aLinear, { final: aFinal, series: feelA.seq.map(s => s.height) }, 'linear 295+20n')
+  add('A4c', 'A feel ends at 295+300=595', near(aFinal, peekExpected + 300, 2), aFinal, '595 +-2')
+  add('A4d', 'slow release snaps back to peek', near(feelA.afterRelease.height, peekExpected, 2), { afterRelease: feelA.afterRelease.height, phase: feelA.afterRelease.phase, pauseBeforeReleaseMs: feelA.pauseBeforeReleaseMs }, '295 +-2')
 
   // ---------- 5: scrollTop > 0 freezes height ----------
   await ensurePeek()
@@ -615,7 +615,7 @@ async function runAssertSuite() {
   const frozen = await dragSteps({ direction: 'up', stepPx: 20, steps: 15, stepMs: 16, settleMs: 100 })
   results.frozen = { scrolledStart: scrolled.rowsScrollTop, seq: frozen.seq, afterRelease: frozen.afterRelease }
   const frozenHeights = frozen.seq.map(s => s.height)
-  add('A5', 'with rows.scrollTop > 0 an upward drag keeps the card height unchanged', scrolled.rowsScrollTop > 0 && frozenHeights.every(h => near(h, peekExpected, 2)), { scrollTopAtStart: scrolled.rowsScrollTop, heights: frozenHeights }, 'all 249 +-2')
+  add('A5', 'with rows.scrollTop > 0 an upward drag keeps the card height unchanged', scrolled.rowsScrollTop > 0 && frozenHeights.every(h => near(h, peekExpected, 2)), { scrollTopAtStart: scrolled.rowsScrollTop, heights: frozenHeights }, 'all 295 +-2')
   await evaluate("document.querySelector('[data-dsh-composer-sheet-rows]').scrollTop = 0")
 
   // ---------- 7: close threshold ----------
@@ -624,12 +624,12 @@ async function runAssertSuite() {
   await delay(120)
   const after110 = await sheetState()
   results.pull110 = { seq: pull110.seq, afterRelease: pull110.afterRelease }
-  add('A7a', 'slow 110px pull (>0.3x249=74.7) closes the sheet', !after110.present && !after110.backdropPresent, { present: after110.present, backdropPresent: after110.backdropPresent }, 'closed')
+  add('A7a', 'slow 110px pull (>0.3x295=88.5) closes the sheet', !after110.present && !after110.backdropPresent, { present: after110.present, backdropPresent: after110.backdropPresent }, 'closed')
   await ensurePeek()
   const pull40 = await dragSteps({ direction: 'down', stepPx: 10, steps: 4, stepMs: 90, settleMs: 120 })
   const after40 = await sheetState()
   results.pull40 = { seq: pull40.seq, afterRelease: pull40.afterRelease }
-  add('A7b', 'slow 40px pull (<74.7) keeps the sheet and returns to peek', after40.present && near(after40.height, peekExpected, 2), { present: after40.present, height: after40.height }, 'open, 249 +-2')
+  add('A7b', 'slow 40px pull (<88.5) keeps the sheet and returns to peek', after40.present && near(after40.height, peekExpected, 2), { present: after40.present, height: after40.height }, 'open, 295 +-2')
 
   // ---------- 8: three close paths within 500ms ----------
   await ensurePeek()
@@ -744,7 +744,7 @@ async function runSettleScan() {
     return { checks: checks, rows: rows, peekHeight: null }
   }
   const peekHeight = open.height
-  add('S0', 'sheet opens and rests at peek', nearNum(open.height, 249, 2), { height: open.height, phase: open.phase }, '249 +-2')
+  add('S0', 'sheet opens and rests at peek', nearNum(open.height, 295, 2), { height: open.height, phase: open.phase }, '295 +-2')
 
   for (const settle of settles) {
     const trials = []
@@ -766,7 +766,7 @@ async function runSettleScan() {
   const flat = []
   for (const row of rows) for (const t of row.trials) flat.push({ settleMs: row.settleMs, t: t })
   const dragOk = flat.every(e => nearNum(e.t.dragEndHeight, peekHeight + 300, 2))
-  add('S-2', 'every trial drags peek+300 before lifting', dragOk, { distinctDragEnd: Array.from(new Set(flat.map(e => e.t.dragEndHeight))), expected: peekHeight + 300 }, '549 +-2 on all trials')
+  add('S-2', 'every trial drags peek+300 before lifting', dragOk, { distinctDragEnd: Array.from(new Set(flat.map(e => e.t.dragEndHeight))), expected: peekHeight + 300 }, '595 +-2 on all trials')
 
   const foul = []
   for (const row of rows) {

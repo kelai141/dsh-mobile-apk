@@ -136,11 +136,12 @@ describe('「拍照」走原生相机（#1288 第 4 条）', () => {
     const receipt = host['onPhotoCaptured']
     expect(typeof receipt, '回执必须挂在注入层既有对象上').toBe('function')
 
-    for (const [code, copy] of [
+    for (const [index, [code, copy]] of [
       ['camera-unavailable', zh.photoUnavailable],
       ['camera-busy', zh.photoBusy],
       ['camera-failed', zh.photoFailed],
-    ] as const) {
+    ].entries()) {
+      if (index > 0) await clickCamera()
       ;(receipt as (payload: string) => void)(JSON.stringify({ ok: false, code, message: 'shell copy' }))
       expect(statusText()).toBe(copy)
       // 每报一次码都不许伴随一次 file input 点击
@@ -148,16 +149,18 @@ describe('「拍照」走原生相机（#1288 第 4 条）', () => {
     }
   })
 
-  it('成功回执只说「已拍照，正在加入会话」', async () => {
+  it('拍照成功收起加号面板，拍摄期间只受理一次', async () => {
     const host = installPickerBridge()
-    installBridge(['{"ok":true,"accepted":true}'])
+    const bridge = installBridge(['{"ok":true,"accepted":true}'])
     buildCard()
     await openSheet()
     await clickCamera()
+    await clickCamera()
+    expect(bridge.calls).toEqual(['capture'])
     ;(host['onPhotoCaptured'] as (payload: string) => void)(
       JSON.stringify({ ok: true, path: '/tmp/a.jpg', mime: 'image/jpeg', bytes: 10, longEdge: 100 }),
     )
-    expect(statusText()).toBe(zh.photoAccepted)
+    expect(document.querySelector('[data-dsh-composer-sheet-backdrop]')).toBeNull()
     expect(inputClicks).toEqual([])
   })
 
