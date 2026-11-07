@@ -1146,7 +1146,7 @@ function privateZstdStream(stream) {
 	const candidate = stream;
 	const handle = candidate._handle;
 	const errorKey = Reflect.ownKeys(stream).find((key) => typeof key === "symbol" && key.description === "kError");
-	/* v8 ignore next -- one test runtime exposes one Node-private shape; the Node 22/24/26 matrix checks compatibility. */
+	/* v8 ignore next -- one test runtime exposes one Node-private shape; the Node 24/26 matrix checks compatibility. */
 	if (typeof handle !== "object" || handle === null || typeof handle.writeSync !== "function" || !(candidate._writeState instanceof Uint32Array) || candidate._writeState.length < 2 || typeof candidate._defaultFlushFlag !== "number" || errorKey === void 0 || candidate[errorKey] !== null) return void 0;
 	return {
 		stream,
@@ -1383,7 +1383,7 @@ async function decompressZstdFrame(input) {
 	return zstdDecompressAsync(input);
 }
 /**
-* Select the shared private decoder when the running Node 22/24/26 shape is
+* Select the shared private decoder when the running Node 24/26 shape is
 * compatible, otherwise preserve correctness with the public one-shot API.
 * @returns a synchronous decoder with an implementation-independent lifecycle.
 */
@@ -2616,7 +2616,11 @@ var JsonlSessionPersistence = class extends SessionPersistence {
 			return {
 				...metadata,
 				revision: selected.sourceVersion < SESSION_FORMAT_VERSION ? SessionPersistenceRevision(`${fileRevision(identity)}:${await this.historicalCorpusRevision(options?.signal)}`) : fileRevision(identity),
-				sizeBytes: Number(identity.size)
+				sizeBytes: Number(identity.size),
+				location: {
+					kind: "jsonl",
+					path: selected.sourcePath
+				}
 			};
 		} catch (error) {
 			options?.signal?.throwIfAborted();
@@ -2660,7 +2664,11 @@ var JsonlSessionPersistence = class extends SessionPersistence {
 				header: artifact.header,
 				formatStatus: artifact.formatStatus,
 				revision: artifact.sourceVersion < SESSION_FORMAT_VERSION ? SessionPersistenceRevision(`${fileRevision(identity)}:${corpusRevision}`) : fileRevision(identity),
-				sizeBytes: Number(identity.size)
+				sizeBytes: Number(identity.size),
+				location: {
+					kind: "jsonl",
+					path: artifact.path
+				}
 			});
 		}
 		for (const [id, entry] of pending) if (!listed.has(id)) snapshots.push({
