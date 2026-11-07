@@ -465,7 +465,13 @@ export class MobileSettingsNav {
     this.settled = false
     this.level = LEVEL_DETAIL
     this.focusTarget = 'back'
-    this.sync()
+    // 必须延到本次点击派发结束之后，**不能同步 sync()**（实测真机 bug）：
+    // 本模块的 click 监听在捕获阶段，同步切 level 会让 CSS 立刻把 nav 设成 display:none，
+    // 而真正切换分区的仍是上游按钮的 React onClick —— 它在冒泡阶段。
+    // 目标节点在事件到达它之前就从渲染树里消失，上游 onClick 不触发，aria-current 恒停在
+    // 上一次的分区（用户看到「点哪一行都进同一个分区」）。
+    // queueMicrotask 在整轮派发结束后才跑，上游先收到点击、我们后切布局。
+    this.schedule()
   }
 
   private backToHome(panel: HTMLElement): void {

@@ -332,21 +332,25 @@ describe('打开设置时不把默认选中画成高亮', () => {
 })
 
 describe('二级页：点一级分类进入', () => {
-  it('点任意一级行进入二级页，标题取该行的注册名，焦点落到返回控件', () => {
+  it('点任意一级行进入二级页，标题取该行的注册名，焦点落到返回控件', async () => {
     const handle = buildPanel(['通用设置', '开发者选项'])
     nav = new MobileSettingsNav()
     nav.attach()
     handle.rows.get('开发者选项')!.click()
+    // 进入二级页的层级切换必须延到点击派发结束后（见 enterDetail 注释）：
+    // 同步切会让 nav 立刻 display:none，上游冒泡阶段的 onClick 收不到，分区切不过去。
+    await settle()
     expect(handle.panel.getAttribute('data-dsh-settings-level')).toBe('detail')
     expect(handle.panel.querySelector('[data-dsh-settings-bar-title]')!.textContent).toBe('开发者选项')
     expect(document.activeElement).toBe(back(handle.panel))
   })
 
-  it('第三方行也能进入二级页，标题用上游注册名（不新造名字）', () => {
+  it('第三方行也能进入二级页，标题用上游注册名（不新造名字）', async () => {
     const handle = buildPanel(['第三方插件页'])
     nav = new MobileSettingsNav()
     nav.attach()
     handle.rows.get('第三方插件页')!.click()
+    await settle()
     expect(handle.panel.getAttribute('data-dsh-settings-level')).toBe('detail')
     expect(handle.panel.querySelector('[data-dsh-settings-bar-title]')!.textContent).toBe('第三方插件页')
   })
@@ -374,6 +378,7 @@ describe('二级页：点一级分类进入', () => {
     nav = new MobileSettingsNav()
     nav.attach()
     handle.rows.get('通用设置')!.click()
+    await settle()
     expect(handle.panel.querySelector('[data-dsh-settings-bar-title]')!.textContent).toBe('通用设置')
     // 上游把当前分区的 label 换成另一种语言（locale 变化会重建行）：标题必须跟着走。
     const label = handle.rows.get('通用设置')!.querySelector('span')!
@@ -442,7 +447,7 @@ describe('逐级返回', () => {
     expect(handle.maskClicks(), '首页的返回才关闭设置').toBe(1)
   })
 
-  it('返回首页 -> 再进二级页：仍是同一个内容列（不重挂载），可反复往返', () => {
+  it('返回首页 -> 再进二级页：仍是同一个内容列（不重挂载），可反复往返', async () => {
     const handle = buildPanel(['手机控制'])
     nav = new MobileSettingsNav()
     nav.attach()
@@ -450,8 +455,10 @@ describe('逐级返回', () => {
     const content = handle.content
     for (let round = 0; round < 3; round += 1) {
       row.click()
+      await settle()
       expect(handle.panel.getAttribute('data-dsh-settings-level')).toBe('detail')
       back(handle.panel).click()
+      await settle()
       expect(handle.panel.getAttribute('data-dsh-settings-level')).toBe('home')
     }
     expect(handle.panel.lastElementChild).toBe(content)
