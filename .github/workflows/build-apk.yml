@@ -101,6 +101,18 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y python3 python-is-python3 || sudo ln -sf /usr/bin/python3 /usr/bin/python
           python --version
+      - name: 检出合同钉定的上游源码供打包门禁核对
+        shell: bash
+        run: |
+          set -euo pipefail
+          UPSTREAM=$(node -p 'require("./scripts/contract.json").upstreamRepo')
+          COMMIT=$(node -p 'require("./scripts/contract.json").upstream.commit')
+          TAG=$(node -p 'require("./scripts/contract.json").upstream.tag')
+          test -n "$COMMIT" && test -n "$TAG"
+          git clone --filter=blob:none --single-branch --branch "$TAG" --depth=1 \
+            https://github.com/deepseek-ai/deepseek-harness.git "$UPSTREAM"
+          test "$(git -C "$UPSTREAM" rev-parse HEAD)" = "$COMMIT"
+          node scripts/check-dead-tokens.mjs --require
       - name: 准备 Java（gradle 需要）
         uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '17' }
