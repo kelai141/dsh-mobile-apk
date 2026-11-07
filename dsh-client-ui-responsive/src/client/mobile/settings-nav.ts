@@ -714,8 +714,12 @@ export class MobileSettingsNav {
     // 下一次同步会把它当成上游齿轮加隐藏标记 —— 真机 2026-11-07 实锤：
     // 四个自有分区最后显示的是上游默认齿轮，我方图标被自己藏掉了。
     const injected = row.querySelector<SVGSVGElement>('[' + ICON_ATTR + ']')
-    const wrapped = row.querySelector(':scope > span[aria-hidden="true"]:not([' + CHEVRON_ATTR + ']) > svg')
-    const upstream = wrapped?.parentElement
+    // The 0.2.2 icon slot is a display:contents child of the icon cell.
+    // Hide the cell, including its grid footprint, and never match our SVG.
+    const iconSvg = 'svg:not([' + ICON_ATTR + '])'
+    const iconCell = [...row.querySelectorAll(':scope > span[aria-hidden="true"]:not([' + CHEVRON_ATTR + '])')]
+      .find(cell => cell.querySelector(':scope > ' + iconSvg + ', :scope > [data-slot="settings.section.icon"] ' + iconSvg))
+    const upstream = iconCell
       ?? row.querySelector(':scope > svg:not([' + ICON_ATTR + '])')
     if (icon === undefined) {
       injected?.remove()
