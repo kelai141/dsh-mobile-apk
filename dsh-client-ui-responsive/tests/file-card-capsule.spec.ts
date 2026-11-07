@@ -19,7 +19,7 @@ const EXTERNAL = '[data-dsh-file-capsule-external]'
 const SHARE = '[data-dsh-file-capsule-share]'
 const SEPARATOR = '[data-dsh-file-capsule-separator]'
 
-const COPY = { external: (name: string) => '用其他应用打开：' + name, share: '转发该文件' }
+const COPY = { external: (name: string) => '用其他应用打开：' + name, share: '转发该文件', failure: (code?: string) => code ?? 'failed' }
 
 /** 记录桥调用。 */
 interface Calls { external: Array<[string, string]>; share: Array<[string, string]> }
@@ -235,17 +235,19 @@ describe('卡片胶囊：行为', () => {
   // 壳侧真源：FileExternalBridge.errorPayload 产出 {"ok":false,"error":"no-receiver"}。
   // 历史缺陷：插件曾读 reason === 'no-handler'，字段名与取值名双双错位，这段降级在真机上是死代码。
 
-  it('④b 壳侧答 error=no-receiver 后左段永久收起（不留点了报错的按钮）', async () => {
-    buildSingleCard('/work/a.md')
-    const bridge = makeBridge(() => '{"ok":false,"error":"no-receiver"}')
+  it('一个格式没有接收应用时，其他格式仍能打开，并只在失败的行显示提示', async () => {
+    buildMultiCard(['/work/a.html', '/work/b.pdf'])
+    const bridge = makeBridge(() => '{"ok":true}')
+    bridge.openFileExternal = (_path, mime) => mime === 'text/html' ? '{"ok":false,"error":"no-receiver"}' : '{"ok":true}'
     capsule = new FileCardCapsule(() => bridge, COPY)
     capsule.attach()
     await flush()
-    document.querySelector<HTMLElement>(EXTERNAL)!.click()
-    expect(capsule.externalAvailable()).toBe(false)
-    expect(document.querySelector(EXTERNAL)).toBeNull()
-    expect(document.querySelector(SHARE)).not.toBeNull()
-    expect(document.querySelector(CAPSULE)!.hasAttribute('data-dsh-file-capsule-share-only')).toBe(true)
+    const [html, pdf] = document.querySelectorAll<HTMLButtonElement>(EXTERNAL)
+    html!.click()
+    pdf!.click()
+    expect(document.querySelectorAll(EXTERNAL)).toHaveLength(2)
+    expect(html!.closest('li')?.querySelector('[role=status]')?.textContent).toBe('no-receiver')
+    expect(pdf!.closest('li')?.querySelector('[role=status]')).toBeNull()
   })
 
   it('④c 壳侧答 ok=true 时不收起左段', async () => {
@@ -293,8 +295,8 @@ describe('卡片胶囊：行为', () => {
     capsule.attach()
     await flush()
     document.querySelector<HTMLElement>(EXTERNAL)!.click()
-    expect(capsule.externalAvailable()).toBe(false)
-    expect(document.querySelector(EXTERNAL)).toBeNull()
+    expect(capsule.externalAvailable()).toBe(true)
+    expect(document.querySelector('[role=status]')?.textContent).toBe('no-receiver')
   })
 
   // ④f–④h 钉住 #990：**桥方法不在场不是「没有外部接收方」**。
@@ -347,20 +349,19 @@ describe('卡片胶囊：行为', () => {
     expect(bridge.calls.external).toEqual([['/work/a.md', 'text/markdown']])
   })
 
-  it('④h 已确证 no-receiver 后桥重绑也不复活左段（终态只由壳侧确证触发）', async () => {
+  it('安装能打开文件的应用后可直接重试，成功时清掉旧错误', async () => {
     buildSingleCard('/work/a.md')
     let face: FileCardBridge = makeBridge(() => '{"ok":false,"error":"no-receiver"}')
     capsule = new FileCardCapsule(() => face, COPY)
     capsule.attach()
     await flush()
     document.querySelector<HTMLElement>(EXTERNAL)!.click()
-    expect(capsule.externalAvailable()).toBe(false)
-    // 换一份可用的桥（例如壳侧重连）也不该把「这台机器没人接」的结论翻掉。
+    expect(document.querySelector('[role=status]')?.textContent).toBe('no-receiver')
     face = makeBridge(() => '{"ok":true}')
     document.querySelector('[data-changed-files]')!.append(document.createElement('span'))
     await flush()
-    expect(capsule.externalAvailable()).toBe(false)
-    expect(document.querySelector(EXTERNAL)).toBeNull()
+    document.querySelector<HTMLElement>(EXTERNAL)!.click()
+    expect(document.querySelector('[role=status]')?.textContent).toBe('')
     expect(document.querySelector(SHARE)).not.toBeNull()
   })
 

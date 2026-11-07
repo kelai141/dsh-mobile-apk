@@ -109,6 +109,14 @@ body[data-ds-dark-theme] {
 [data-dsh-file-capsule][data-dsh-file-capsule-share-only] {
   align-self: flex-start;
 }
+[data-dsh-file-capsule-status] {
+  flex-basis: 100%;
+  margin: 4px 0 0;
+  color: var(--dsw-alias-label-secondary, inherit);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+[data-dsh-file-capsule-status]:empty { display: none; }
 /* 段间 1px 分隔线，颜色同外框描边。 */
 [data-dsh-file-capsule-separator] {
   flex: none;
