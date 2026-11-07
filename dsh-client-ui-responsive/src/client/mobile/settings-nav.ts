@@ -704,8 +704,15 @@ export class MobileSettingsNav {
    */
   private syncRowIcon(row: HTMLButtonElement, label: string): void {
     const icon = OWN_SECTION_ICONS.get(label)
-    const injected = row.querySelector<SVGSVGElement>(':scope > [' + ICON_ATTR + ']')
-    const upstream = [...row.querySelectorAll(':scope > svg')].find(node => node !== injected)
+    // 判据必须是「整行里第一个带我方标记的 svg」，不能只看按钮的直接子节点：
+    // 我方图标一旦落进上游的图标壳（span.navIcon > span），`:scope >` 就找不到它，
+    // 下一次同步会把它当成上游齿轮加隐藏标记 —— 真机 2026-11-07 实锤：
+    // 四个自有分区最后显示的是上游默认齿轮，我方图标被自己藏掉了。
+    const injected = row.querySelector<SVGSVGElement>('[' + ICON_ATTR + ']')
+    // 上游把首图标包在 `<span class=navIcon><span><svg>` 里（0.14.11 真机 CDP 实测），
+    // 不是按钮的直接子 svg。旧判据只看直接子节点，于是 hidden 标记从来没加上过——
+    // 上游齿轮留在我方图标旁边，两个图标叠在同一格。这里取按钮内**第一个**非我方的 svg。
+    const upstream = [...row.querySelectorAll('svg')].find(node => node !== injected && !node.hasAttribute(ICON_ATTR))
     if (icon === undefined) {
       injected?.remove()
       upstream?.removeAttribute(ICON_ATTR + '-hidden')
@@ -718,7 +725,8 @@ export class MobileSettingsNav {
     if (injected === null) {
       const svg = sectionIcon(icon)
       svg.setAttribute(ICON_ATTR, '')
-      // 放在行首（grid-area: icon 决定实际位置），上游 svg 仍在其后但已隐藏。
+      // 直接放在按钮里（与样式表的 `> svg[data-dsh-settings-nav-icon]` 对应，
+      // 由 grid-area: icon 定位到图标格）；上游齿轮已被隐藏，同格不会再出现第二个图标。
       row.prepend(svg)
     }
   }

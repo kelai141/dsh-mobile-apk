@@ -57,6 +57,42 @@ function randomHex(bytes = 8) {
 /** Default attempt lifetime: three minutes for the user to complete login. */
 const DEFAULT_FLOW_TIMEOUT_MS = 18e4;
 const SUCCESS_PAGE = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Login successful</title></head><body style=\"font-family:sans-serif\"><h1>Login successful</h1><p>You can close this tab and return to DeepSeek Harness.</p></body></html>";
+/** 移动端回跳链接：与壳侧 AndroidManifest 的 intent-filter 逐字一致（0.14.11）。 */
+const MOBILE_RETURN = "intent://oauth-return#Intent;scheme=com.dsharnessmobile.shell;package=com.dsharnessmobile.shell;end";
+/**
+* 直连 scheme 的回跳链接（与 manifest 的 intent-filter 逐字一致）。
+*
+* 为什么要两路：`intent://…#Intent;…` 在部分 Chromium 内核与内置浏览器里不被当作
+* Android Intent 语法解析，而是当成普通 URL 交给「打开方式」选择器 —— 真机 2026-11-07
+* 实测：点按钮能正常回到 DeepCode，自动跳转却弹出只含钉钉/Edge 的选择器。
+* 因此自动跳转改走这条普通深链（系统能唯一定位到 MainActivity），
+* `intent://` 那一条仍留给按钮做兜底。
+*/
+const MOBILE_RETURN_DIRECT = "com.dsharnessmobile.shell://oauth-return";
+/**
+* 回调页：桌面形态保持原文案，移动端给「回到应用」的说明与显式按钮。
+*
+* 缺陷形态（真机 2026-11-07）：回调页原来只写「可以关闭此标签页」，而手机上的标签页是
+* 系统浏览器——关掉它不会回到本应用；自动跳转用的 intent:// 在 manifest 里也没有对应
+* scheme，系统只能弹「打开方式」（列表里没有本应用）。壳侧已补齐该 scheme，本页保留
+* 手动按钮兜底，并且不声称「已登录成功」——此时只收到授权码，兑换在引擎侧完成。
+* @param isMobile - 手机壳形态（由 DSH_APP_VERSION 判定）。
+*/
+function callbackReceivedPage(isMobile = Boolean(process.env.DSH_APP_VERSION)) {
+	if (!isMobile) return SUCCESS_PAGE;
+	// 本页只确认「回调已收到」，不含 provider / code / state / callback URL。
+	return "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+		+ "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+		+ "<title>返回 DeepCode / Return to DeepCode</title>"
+		+ "<style>body{font:16px/1.6 system-ui,sans-serif;margin:0;padding:32px 24px;max-width:32rem;margin-inline:auto}a{display:inline-block;padding:12px 18px;background:#245bce;color:white;border-radius:12px;text-decoration:none}</style></head>"
+		+ "<body><main><h1>已收到授权</h1><p>请返回 DeepCode，等待应用完成账号连接。</p>"
+		+ "<p lang=\"en\">Authorization received. Return to DeepCode to finish connecting your account.</p>"
+		+ "<a id=\"return\" href=\"" + MOBILE_RETURN + "\">返回 DeepCode / Return to DeepCode</a>"
+		+ "<p>如果没有跳转，请点上方按钮，或从最近任务打开 DeepCode。<br>"
+		+ "<span lang=\"en\">If nothing opens, tap the button or switch back to DeepCode from Recents.</span></p>"
+		+ "</main><script>if (/Android/i.test(navigator.userAgent)) location.href = "
+		+ JSON.stringify(MOBILE_RETURN_DIRECT) + ";</script></body></html>";
+}
 function failurePage(detail) {
 	return `<!doctype html><html><head><meta charset="utf-8"><title>Login failed</title></head><body style="font-family:sans-serif"><h1>Login failed</h1><p>${detail.replace(/[<>&]/g, "")}</p></body></html>`;
 }
@@ -199,7 +235,7 @@ var OAuthFlowManager = class {
 				return;
 			}
 			response.writeHead(200, { "content-type": "text/html" });
-			response.end(SUCCESS_PAGE);
+			response.end(callbackReceivedPage());
 			settle(void 0, code);
 		};
 		const settle = (error, code) => {
@@ -2643,9 +2679,26 @@ var TokenManager = class {
 	inflight;
 	/** The session whose refresh token the in-flight refresh is spending. */
 	attempted;
+	/**
+	* 登出代次（issue #1588）。每次 invalidate() 递增；doRefresh 在发起刷新前记下当时的值，
+	* 落盘前再比一次——值变了说明这期间发生过登出，本次刷新结果必须整份丢弃。
+	*
+	* 打包产物 lib/index.js 是运行期真正被加载的那一份，本类在此内联，必须与
+	* lib/providers/common.js 的同名类保持同步；#1588 初次只改了源模块，登出于是报
+	* `cached.invalidate is not a function`（真机 2026-11-07 实锤）。
+	*/
+	generation = 0;
 	constructor(options) {
 		this.options = options;
 		this.options = options;
+	}
+	/**
+	* 作废当前在途刷新（issue #1588）。登出路径必须调用，否则刷新返回后会把账号写回磁盘。
+	*
+	* 只递增代次、不取消网络请求：取消失败的刷新没有必要——它的结果会被代次判据丢弃。
+	*/
+	invalidate() {
+		this.generation += 1;
 	}
 	/**
 	* Read the stored session without any refresh side effect. Catalog queries
@@ -2687,6 +2740,10 @@ var TokenManager = class {
 				this.options.onRemoved?.();
 				throw new LlmError(`${this.options.displayName} login expired or was revoked; log in again via Settings → Subscriptions`, "INVALID_CREDENTIAL", { cause: error });
 			}
+			// issue #1588：登出优先于「用旧 token 兜底」。doRefresh 在发现这期间已登出时抛
+			// MISSING_CREDENTIAL；此时旧 session 的 expiresAt 往往还在未来，若让它走下面那条
+			// 「transient 失败但 token 仍有效就沿用」的兜底，调用方会拿到一份已登出账号的会话。
+			if (error instanceof LlmError && error.code === "MISSING_CREDENTIAL") throw error;
 			if (!forceRefresh && session.expiresAt > Date.now()) return session;
 			throw error instanceof LlmError ? error : new LlmError(`${this.options.displayName} token refresh failed`, "AUTH", { cause: error });
 		}
@@ -2696,7 +2753,13 @@ var TokenManager = class {
 		if (current$2 !== void 0 && current$2.accessToken !== session.accessToken && current$2.expiresAt - Date.now() > this.options.preemptMs) return current$2;
 		const attempted = current$2 ?? session;
 		this.attempted = attempted;
+		// issue #1588：发起刷新前记下登出代次。刷新是一次网络往返，期间用户完全可能点登出；
+		// 登出只删存储、不等也不作废在途刷新，所以这里必须自己确认这期间没发生过登出，
+		// 否则刷新结果会把刚登出的账号连新 token 一起重新写回磁盘。
+		const generationAtStart = this.generation;
 		const next = await this.options.refresh(attempted);
+		// 代次变了 = 这期间登出过。整份丢弃：不落盘，也不把会话交回给调用方。
+		if (this.generation !== generationAtStart) throw new LlmError(`dsh-plugin-subscriptions: logged out of ${this.options.displayName} while a token refresh was in flight; log in again via Settings → Subscriptions`, "MISSING_CREDENTIAL");
 		await this.options.save(next);
 		return next;
 	}
@@ -10434,6 +10497,36 @@ function accountOf(provider, session) {
 	}
 }
 /** The plan name a stored session carries, when the provider told us. */
+/**
+* 兑换授权码的整体时限（0.14.11，真机 2026-11-07 实锤的「一直登录中」）。
+*
+* 为什么要单独限时：`proxiedFetch` 走 undici，连接阶段的 DNS 失败本来会自己快速失败，
+* 但本机开着 VPN（Clash tun + HTTP 代理）时会话可能停在「连上了、等首字节」，
+* 于是 busy 恒为 true、设置页永远显示「登录中…」。30s 足够覆盖慢网下的正常兑换，
+* 又远短于用户愿意等待的上限。
+*/
+const EXCHANGE_DEADLINE_MS = 3e4;
+/**
+* 给一次授权码兑换加总时限；超时按可读原因失败，好让 status 轮询收口。
+* @param provider - 供应商路由，仅用于文案。
+* @param run - 实际兑换。
+* @returns 兑换结果。
+* @throws LlmError AUTH，当兑换超过 {@link EXCHANGE_DEADLINE_MS}。
+*/
+async function withExchangeDeadline(provider, run) {
+	let timer;
+	try {
+		return await Promise.race([
+			run(),
+			new Promise((_resolve, reject) => {
+				timer = setTimeout(() => reject(new LlmError(`${provider} 登录兑换超时（${Math.round(EXCHANGE_DEADLINE_MS / 1e3)}s）——请检查网络或代理后重试`, "AUTH")), EXCHANGE_DEADLINE_MS);
+				timer.unref?.();
+			})
+		]);
+	} finally {
+		if (timer !== void 0) clearTimeout(timer);
+	}
+}
 function planOf(provider, session) {
 	switch (provider) {
 		case "codex": return session.planType;
@@ -10608,8 +10701,16 @@ var SubscriptionsAuthController = class {
 	*/
 	async complete(provider, attempt, claim) {
 		try {
+			// 回调等待本身由 flow 的三分钟超时兜底；这里只把**兑换**这一段也限时。
+			// 缺陷形态（真机 2026-11-07）：auth.openai.com 在「网页能打开、应用里 DNS 解析失败」时
+			// 请求可以挂到 TCP 超时才失败（可达数分钟），期间 busy 恒为 true，设置页一直显示
+			// 「登录中…」，用户拿不到任何结论。限时后失败会落到 lastError，轮询立刻收口。
 			const code = await attempt.waitCode();
-			const session = await this.exchange(provider, code, attempt);
+			// 只把**兑换**这一段限时：回调等待由 flow 自己的三分钟超时兜底。
+			// 缺陷形态（真机 2026-11-07）：auth.openai.com 出现「网页能打开、应用里 DNS 解析失败」时
+			// 请求会挂到 TCP 超时才失败（可达数分钟），期间 busy 恒为 true，设置页一直显示「登录中…」，
+			// 用户得不到任何结论。限时后失败落进 lastError，下一次轮询就收口并展示原因。
+			const session = await withExchangeDeadline(provider, () => this.exchange(provider, code, attempt));
 			if (this.claims.get(provider) !== claim) return;
 			await this.persist(provider, session);
 			this.lastError.delete(provider);

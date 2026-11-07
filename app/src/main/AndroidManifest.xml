@@ -146,6 +146,18 @@
         <action android:name="android.intent.action.MAIN" />
         <category android:name="android.intent.category.LAUNCHER" />
       </intent-filter>
+      <!-- 订阅登录回跳（0.14.11）：OAuth 回调页把用户送回本应用。
+           缺陷形态（真机 2026-11-07 实锤）：回调页用 `intent://oauth-return#Intent;scheme=com.dsharnessmobile.shell`
+           自动跳转，而 manifest 里从来没有这个 scheme —— 系统于是弹「打开方式」，列表里只有钉钉/Edge，
+           没有 DeepCode，用户以为跳转失败。注册后系统能把该 URI 直接交给本 Activity（singleTop，
+           走 onNewIntent），同时它也成为系统「默认打开」的显式候选，不再弹选择器。
+           只声明 scheme + host，不接受任意 scheme：URI 里不含 code/state，仅承载「回到应用」这一事实。 -->
+      <intent-filter>
+        <action android:name="android.intent.action.VIEW" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <category android:name="android.intent.category.BROWSABLE" />
+        <data android:scheme="com.dsharnessmobile.shell" android:host="oauth-return" />
+      </intent-filter>
       <!-- 0.13.0 F5（M3.5）：系统「使用其他应用打开」+ 分享面板入口（D14 查看与分享都支持）。 -->
       <intent-filter>
         <action android:name="android.intent.action.VIEW" />

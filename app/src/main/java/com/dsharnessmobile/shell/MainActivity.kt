@@ -808,6 +808,29 @@ class MainActivity : ComponentActivity() {
     // 用户以为分享成功了。冷启动与热路径现在共用同一个入口，两条路径不可能再分叉。
     handleIncomingIntent(intent)
     consumeNotifyRoute(intent)
+    consumeOAuthReturn(intent)
+  }
+
+  /**
+   * 订阅登录回跳（0.14.11）：把授权页上的「返回 DeepCode」落到实处。
+   *
+   * 缺陷形态（真机 2026-11-07）：回调页用 intent:// 自动跳转，manifest 里没有该 scheme，
+   * 系统弹「打开方式」且列表里没有本应用；用户点按钮时同样落到选择器。
+   * scheme 补齐后这个 Intent 直达本 Activity（singleTop ⇒ onNewIntent），这里只做两件
+   * 用户可感知的事：把应用拉回前台（系统已做，这里兜底）并提示结果仍由插件轮询给出，
+   * 避免「回到应用但页面看起来没动静」。URI 不携带 code/state，兑换仍在引擎侧完成。
+   */
+  private fun consumeOAuthReturn(intent: Intent?) {
+    val data = intent?.data ?: return
+    if (!OAuthReturnLink.matches(data)) return
+    try {
+      android.widget.Toast.makeText(
+        this,
+        UiText.t(this, "已返回 DeepCode，正在完成账号连接…", "Back in DeepCode. Finishing the account connection…"),
+        Toast.LENGTH_SHORT,
+      ).show()
+    } catch (_: Throwable) {
+    }
   }
 
   /**
