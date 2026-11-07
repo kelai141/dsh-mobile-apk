@@ -5,8 +5,7 @@
 // 能把它挑出来。所以自证不能只看它对真实产物说 PASSED，必须证明它在**该红的时候红、该 SKIP 时 SKIP**：
 //   · 正控：tar 里是降级副本的字节                     -> PASSED（exit 0）
 //   · 负控 A：tar 里是**原始源**的字节（PR #1272 形态） -> FAILED（exit 1），且点名包 + 期望/实际 sha
-//   · 负控 B：原始源与降级副本 sha256 相同（没被改写）  -> SKIP 并计数；非严格档 exit 0 且 SKIP=1，
-//                                                         --require 档 exit 1（严格档不许 SKIP 结案）
+//   · 负控 B：两份源相同，归档出现第三份字节，严格档仍判红。
 // 另加：多 profile 全判（只判一个 profile 会让另一个假绿）、第二对被换成原始源时也必须红、
 // 落点定位不到时非严格档 SKIP / 严格档红、配对错配判红、用法与环境错误 exit 2（不静默）。
 //
@@ -163,36 +162,29 @@ test('负控 A：tar 里是原始源字节（降级副本被造出来却没用�
   assert.match(r.out, /注入源仍是原始源/)
 }))
 
-// ── 负控 B：降级副本未被使用且两者 sha 相同 -> SKIP 并计数 ───────────────────────
-test('负控 B：原始源与降级副本 sha256 相同 -> SKIP=1；非严格档 exit 0，--require 档 exit 1', () => withFixture((root) => {
-  // 该包这轮没有被降级改写：两份字节完全相同
-  const orig = makeSource(root, 'src/orig', 'dsh-plugin-subscriptions', UNCHANGED_CLIENT)
-  const deg = makeSource(root, 'src/deg', 'dsh-plugin-subscriptions', UNCHANGED_CLIENT)
-  const snap = makeSnapshot(root, {
-    tag: 'neg-b',
-    profiles: ['web', 'headless'],
-    packages: [{ name: 'dsh-plugin-subscriptions', members: {
+test('无改写包仍核对归档字节，篡改时严格档拒绝', () => withFixture((root) => {
+  const name = 'dsh-plugin-subscriptions'
+  const orig = makeSource(root, 'src/orig', name, UNCHANGED_CLIENT)
+  const deg = makeSource(root, 'src/deg', name, UNCHANGED_CLIENT)
+  const snapshot = (tag, client) => makeSnapshot(root, {
+    tag, profiles: ['web', 'headless'],
+    packages: [{ name, members: {
       'package.json': readFileSync(join(orig, 'package.json'), 'utf8'),
-      'lib/client.js': UNCHANGED_CLIENT,
+      'lib/client.js': client,
       'lib/index.js': 'export const value = 1\n',
     } }],
   })
-  const loose = runGate(['--snapshot', snap, '--pair', orig + '=' + deg])
-  assert.equal(loose.code, 0, loose.out + loose.err)
-  assert.match(loose.out, /SKIP\(#1\)/)
-  assert.match(loose.out, /SKIP=1/)
-  assert.match(loose.out, /CHECK-DEGRADE-SOURCE PASSED/)
-  // SKIP 必须说清「为什么它不构成判据输入」，不能是一条无理由的静默
-  assert.match(loose.out, /不构成判据输入/)
-
-  const strict = runGate(['--snapshot', snap, '--pair', orig + '=' + deg, '--require'])
-  assert.equal(strict.code, 1, strict.out + strict.err)
-  assert.match(strict.err, /CHECK-DEGRADE-SOURCE FAILED/)
-  assert.match(strict.out, /SKIP=1/)
+  const pair = ['--pair', orig + '=' + deg, '--require']
+  const ok = runGate(['--snapshot', snapshot('same', UNCHANGED_CLIENT), ...pair])
+  assert.equal(ok.code, 0, ok.out + ok.err)
+  assert.match(ok.out, /未改写文件已核对 6 个落点.*SKIP=0/)
+  const bad = runGate(['--snapshot', snapshot('third-copy', 'export const wrong = true\n'), ...pair])
+  assert.equal(bad.code, 1, bad.out + bad.err)
+  assert.match(bad.out, /FAIL  dsh-plugin-subscriptions@headless lib\/client\.js/)
 }))
 
-// ── 多包：一对真降级 + 一对没降级 -> 前者判 PASS，后者 SKIP，互不掩盖 ────────────
-test('多对混装：降级对判 PASS，未改写对 SKIP，两条判据互不掩盖', () => withFixture((root) => {
+// ── 多包：一对真降级 + 一对没降级 -> 各自核对，互不掩盖 ────────────
+test('多对混装：降级与未改写包分别核对', () => withFixture((root) => {
   const origA = makeSource(root, 'src/a-orig', 'dshmarketplace-plugin', ORIGINAL_CLIENT)
   const degA = makeSource(root, 'src/a-deg', 'dshmarketplace-plugin', DEGRADED_CLIENT)
   const origB = makeSource(root, 'src/b-orig', 'dsh-plugin-subscriptions', UNCHANGED_CLIENT)
@@ -218,8 +210,8 @@ test('多对混装：降级对判 PASS，未改写对 SKIP，两条判据互不�
   const r = runGate(['--snapshot', snap, '--pair', origA + '=' + degA, '--pair', origB + '=' + degB])
   assert.equal(r.code, 0, r.out + r.err)
   assert.match(r.out, /PASS  dshmarketplace-plugin@web lib\/client\.js/)
-  assert.match(r.out, /SKIP\(#1\)  dsh-plugin-subscriptions/)
-  assert.match(r.out, /SKIP=1/)
+  assert.match(r.out, /PASS  dsh-plugin-subscriptions@headless lib\/client\.js/)
+  assert.match(r.out, /SKIP=0/)
   // issue #1310：夹具补齐两个真源 profile 后，落点数从 1 变 2（web + headless 各一条）。
   assert.match(r.out, /判定 2 个落点/)
 }))
