@@ -35,6 +35,20 @@ if (!existsSync(snapshot)) {
   throw new Error('missing ' + snapshot + ': obtain a verified snapshot asset first; dev repack must not invent one')
 }
 
+// Snapshot/overlay 一致性提示（不阻断）。dev repack 复用仓内资产，资产落后于
+// engine-overlay.json / 插件登记时，设备上只表现为服务 pending（例如缺 dsh-fs-patch 会让
+// sessionController 不可用），打包阶段毫无提示。这里只报告、不拒绝构建：dev repack 本身就是
+// 「先跑起来再说」的通道，硬阻断会把无代码改动的人挡在门外；资产刷新后再收紧为阻断。
+// 退出码语义见 scripts/check-snapshot-packages.mjs（0 通过 / 1 有缺失 / 2 前置缺失）。
+{
+  const gate = spawnSync(process.execPath, [join(apkDir, 'scripts/check-snapshot-packages.mjs'), '--snapshot', snapshot], { encoding: 'utf8' })
+  if (gate.status !== 0) {
+    process.stderr.write('[dev-fast] 快照与 overlay/插件登记不一致（不阻断本次构建）:\n')
+    process.stderr.write((gate.stdout || '') + (gate.stderr || ''))
+    process.stderr.write('[dev-fast] 先刷新 app/src/main/assets/snapshot.tar.xz 再装机；否则设备上可能出现服务 pending / 会话不可用。\n')
+  }
+}
+
 // ABI guard (issue #668). Everything above can only prove that snapshot.sha256 *describes*
 // snapshot.tar.xz. None of it can prove the archive was built for the device we are about to
 // install on, and dev repack is exactly where a foreign-ABI archive slips through: it reuses
