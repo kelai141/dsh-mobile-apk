@@ -630,10 +630,15 @@ describe('一级行的图标（只装饰我方自有分区）', () => {
       const row = handle.rows.get(label)!
       expect(row.querySelectorAll(':scope > svg[data-dsh-settings-nav-icon]')).toHaveLength(1)
       expect(row.querySelectorAll(':scope > span[data-dsh-settings-nav-icon-hidden] > [data-slot="settings.section.icon"] > svg')).toHaveLength(1)
+      // 图标壳必须由本模块打属性：样式表不能写 :has()（本机 Chromium 97 不支持，整条规则会被丢弃）。
+      expect(row.querySelectorAll(':scope > span[data-dsh-settings-nav-icon-cell]')).toHaveLength(1)
     }
     expect(handle.rows.get('第三方')!.querySelector('[data-dsh-settings-nav-icon-hidden]')).toBeNull()
+    // 第三方行仍用上游图标，但外壳同样要归到 icon 格，否则它的图标会压在自己标题上。
+    expect(handle.rows.get('第三方')!.querySelectorAll(':scope > span[data-dsh-settings-nav-icon-cell]')).toHaveLength(1)
     nav.detach()
     expect(handle.panel.querySelector('[data-dsh-settings-nav-icon-hidden]')).toBeNull()
+    expect(handle.panel.querySelector('[data-dsh-settings-nav-icon-cell]')).toBeNull()
   })
 
   /** 一行的图标几何指纹：可见 svg 的 viewBox + 各 path 的 d。 */
