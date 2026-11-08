@@ -88,6 +88,51 @@ test('a complete pair passes with no unmeasured or external cases', () => {
   assert.equal(result.counts.regression, 0)
 })
 
+test('upstream adoption compares only the exact audited pair and keeps regression checks', () => {
+  const left = baseline()
+  const right = candidate()
+  right.upstream.commit = 'b'.repeat(40)
+  right.upstream.baseline = '0.2.2-rc.2'
+  const audit = {
+    schemaVersion: 1, decision: 'requires-validation',
+    baseline: { commit: left.upstream.commit, version: left.upstream.baseline },
+    candidate: { commit: right.upstream.commit, version: right.upstream.baseline },
+  }
+  const options = { upstreamAudit: audit }
+  assert.equal(compareBundles(left, right).exitCode, 2, 'Rust A/B still requires identical upstream')
+  assert.equal(compareBundles(left, right, options).exitCode, 0)
+
+  const wrong = clone(right)
+  wrong.upstream.commit = 'c'.repeat(40)
+  assert.equal(compareBundles(left, wrong, options).exitCode, 2, 'wrong candidate SHA')
+  const sameApk = clone(right)
+  sameApk.apk.apkSha256 = left.apk.apkSha256
+  assert.equal(compareBundles(left, sameApk, options).exitCode, 2, 'same APK cannot prove an upgrade')
+  const regressed = clone(right)
+  regressed.samples[0].cases[1].status = 'fail'
+  regressed.samples[0].cases[1].failureKey = 'theme-entry-missing'
+  assert.equal(compareBundles(left, regressed, options).exitCode, 1, 'cross-version regressions remain red')
+  const missed = clone(right)
+  missed.samples[0].cases[1].status = 'unmeasured'
+  assert.equal(compareBundles(left, missed, options).exitCode, 2, 'unmeasured remains inconclusive')
+  assert.equal(compareBundles(left, right, { upstreamAudit: null }).exitCode, 2, 'invalid audit')
+
+  const dir = mkdtempSync(join(tmpdir(), 'plugin-upstream-'))
+  try {
+    const files = ['baseline', 'candidate', 'audit'].map(name => join(dir, name + '.json'))
+    for (const [i, value] of [left, right, audit].entries()) writeFileSync(files[i], JSON.stringify(value))
+    const result = spawnSync(process.execPath, [
+      SCRIPT, '--baseline', files[0], '--candidate', files[1], '--upstream-audit', files[2], '--json',
+    ], { encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stdout + result.stderr)
+    const report = JSON.parse(result.stdout)
+    assert.equal(report.comparison, 'upstream-adoption')
+    assert.equal(report.candidate.upstream.commit, right.upstream.commit)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('baseline pass + candidate fail is a regression and exits 1', () => {
   const result = compareBundles(baseline(), withCase('fail'))
   assert.equal(result.verdict, 'FAIL')

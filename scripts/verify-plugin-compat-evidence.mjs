@@ -8,7 +8,7 @@
 // 缺实测、外部阻塞、前置不满足一律判 INCONCLUSIVE，绝不当通过。
 //
 // 可比性判据（缺一条即 INCOMPARABLE，exit 2）：
-//   1) 上游身份相同：upstream.commit（40 位十六进制）与 upstream.baseline；
+//   1) 上游身份相同；追版对照显式传入巡检报告，身份必须分别对应旧基线和候选；
 //   2) ABI 相同：apk.abi（arm64-v8a / aarch64 归一为 arm64，x64 / amd64 归一为 x86_64）；
 //   3) 环境相同：系统构建、WebView、设备和测试方案；快照指纹是产物身份，允许两边不同；
 //   4) 样本集相同：samples[].id 双向一致；候选缺样本 = 静默丢功能，判红；
@@ -210,10 +210,11 @@ function inconclusive(reasons, extra = {}) {
  * 比较两份证据。纯函数，不做 I/O。
  * @param {unknown} baseline 基线证据对象。
  * @param {unknown} candidate 候选证据对象。
+ * @param {{upstreamAudit?: object}} options 仅追版对照传入上游巡检报告。
  * @returns {{verdict: string, exitCode: number, comparable: boolean, mismatches: string[],
  *   reasons: string[], counts: object, cases: object[]}} 判定结果。
  */
-export function compareBundles(baseline, candidate) {
+export function compareBundles(baseline, candidate, { upstreamAudit } = {}) {
   const problems = [
     ...validateBundle(baseline, 'baseline'),
     ...validateBundle(candidate, 'candidate'),
@@ -225,8 +226,26 @@ export function compareBundles(baseline, candidate) {
     if (left !== right) mismatches.push(label + '：baseline=' + left + ' candidate=' + right)
   }
   eq('upstream.repo', baseline.upstream.repo, candidate.upstream.repo)
-  eq('upstream.commit', String(baseline.upstream.commit).toLowerCase(), String(candidate.upstream.commit).toLowerCase())
-  eq('upstream.baseline', baseline.upstream.baseline, candidate.upstream.baseline)
+  if (upstreamAudit === undefined) {
+    eq('upstream.commit', baseline.upstream.commit.toLowerCase(), candidate.upstream.commit.toLowerCase())
+    eq('upstream.baseline', baseline.upstream.baseline, candidate.upstream.baseline)
+  } else {
+    const old = upstreamAudit?.baseline
+    const next = upstreamAudit?.candidate
+    if (upstreamAudit?.schemaVersion !== 1 || upstreamAudit?.decision !== 'requires-validation'
+      || !isCommit(old?.commit) || !isCommit(next?.commit)
+      || old.commit.toLowerCase() === next.commit.toLowerCase()
+      || !nonEmpty(old.version) || !nonEmpty(next.version)) {
+      return inconclusive(['上游巡检报告缺失或不是一对待验证的不同提交'])
+    }
+    for (const [side, evidence, pinned] of [['baseline', baseline, old], ['candidate', candidate, next]]) {
+      eq(side + '.upstream.commit', evidence.upstream.commit.toLowerCase(), pinned.commit.toLowerCase())
+      eq(side + '.upstream.baseline', evidence.upstream.baseline, pinned.version)
+    }
+    if (baseline.apk.apkSha256.toLowerCase() === candidate.apk.apkSha256.toLowerCase()) {
+      mismatches.push('追版对照必须使用两份不同的 APK 制品')
+    }
+  }
   eq('apk.abi', normalizeAbi(baseline.apk.abi), normalizeAbi(candidate.apk.abi))
   for (const key of ENV_KEYS) {
     const left = baseline.environment[key]
@@ -496,14 +515,14 @@ function runSelfTest() {
 function main(argv) {
   const { values } = parseArgs({ args: argv, options: {
     baseline: { type: 'string' }, candidate: { type: 'string' }, report: { type: 'string' },
-    json: { type: 'boolean' }, 'self-test': { type: 'boolean' },
+    'upstream-audit': { type: 'string' }, json: { type: 'boolean' }, 'self-test': { type: 'boolean' },
   } })
   if (values['self-test']) { runSelfTest(); return }
   const baselinePath = values.baseline
   const candidatePath = values.candidate
   if (baselinePath === undefined || candidatePath === undefined) {
     console.error('用法：node scripts/verify-plugin-compat-evidence.mjs --baseline <a.json> --candidate <b.json>'
-      + ' [--json] [--report <result.json>] [--self-test]')
+      + ' [--upstream-audit <upstream-report.json>] [--json] [--report <result.json>] [--self-test]')
     process.exit(2)
   }
   const left = readBundle(baselinePath)
@@ -513,9 +532,12 @@ function main(argv) {
     for (const reason of reasons) console.error('PLUGIN-COMPAT EVIDENCE INCONCLUSIVE：' + reason)
     process.exit(2)
   }
-  const result = compareBundles(left.value, right.value)
+  const auditPath = values['upstream-audit']
+  const upstreamAudit = auditPath === undefined ? undefined : JSON.parse(readFileSync(auditPath, 'utf8'))
+  const result = compareBundles(left.value, right.value, { upstreamAudit })
   const payload = {
     schema: SCHEMA,
+    ...(auditPath === undefined ? {} : { comparison: 'upstream-adoption' }),
     baseline: { label: left.value?.label ?? baselinePath, upstream: left.value?.upstream, apk: left.value?.apk },
     candidate: { label: right.value?.label ?? candidatePath, upstream: right.value?.upstream, apk: right.value?.apk },
     ...result,
