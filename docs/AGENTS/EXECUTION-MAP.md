@@ -2624,6 +2624,8 @@ scripts/verify-adb-only-tree.mjs
 scripts/verify-notify-consumption.mjs
 scripts/verify-auto-undo.mjs
 scripts/verify-client-plugin-fail-recovery.mjs
+scripts/verify-plugin-compat-evidence.mjs
+scripts/verify-plugin-compat-evidence.test.mjs
 scripts/device-smoke.ps1
 scripts/deploy-device.ps1
 scripts/deploy-embedded.ps1
