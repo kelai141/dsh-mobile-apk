@@ -4,7 +4,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { spawnSync, execFileSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, symlinkSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 const ROOT = resolve(import.meta.dirname, '../..')
@@ -282,4 +282,79 @@ test('source build reads the contract before entering the upstream checkout', li
 
   const wrongVersion = run({ FAKE_PNPM_VERSION: '9.9.8' })
   assert.notEqual(wrongVersion.status, 0, 'installed pnpm must match the captured contract version')
+}))
+
+// 合同的工作树字段来自仓库文件，按不可信输入处理：只接受 .deploy-tmp/ 下的规范相对路径，
+// 并且 source 链要能在合同指向别名路径时补齐别名，同时不覆盖已有内容。
+// 这段是 build-apk-source.yml 的真实片段，不是复述实现。
+test('contract upstreamRepo is validated and aliased onto the fixed checkout', linux, () => fixture(root => {
+  // 按注释标记切片，而不是按步骤名：步骤名在不同检出/换行渲染下不可靠。
+  const from = yaml.indexOf('# 合同的工作树字段')
+  const to = yaml.indexOf('node -e \'const c=require("./scripts/contract.json"), p=require("./.deploy-tmp/deepseek-harness/package.json")', from)
+  assert.ok(from >= 0 && to > from, 'workflow snippet markers not found')
+  const snippet = yaml.slice(from, to).split('\n')
+    .map((l) => (l.startsWith('          ') ? l.slice(10) : l)).join('\n')
+
+  const fixed = join(root, '.deploy-tmp/deepseek-harness')
+  mkdirSync(join(root, 'scripts'), { recursive: true })
+  mkdirSync(fixed, { recursive: true })
+  writeFileSync(join(fixed, 'package.json'), '{}\n')
+
+  const writeContract = (repo) => writeFileSync(join(root, 'scripts/contract.json'), JSON.stringify({
+    baseline: '0.2.2-rc.1',
+    upstreamRepo: repo,
+    upstream: { commit: 'a'.repeat(40) },
+  }, null, 2) + '\n')
+  const runSnippet = () => bash(snippet, root)
+
+  writeContract('.deploy-tmp/deepseek-harness')
+  assert.equal(runSnippet().status, 0, 'the fixed checkout path must pass')
+
+  writeContract('.deploy-tmp/alias/harness')
+  const first = runSnippet()
+  assert.equal(first.status, 0, first.stderr)
+  assert.equal(realpathSync(join(root, '.deploy-tmp/alias/harness')), realpathSync(fixed))
+
+  // 本地重跑：已存在且指向固定检出的别名必须放行。
+  assert.equal(runSnippet().status, 0, 'a correct alias must be reusable on rerun')
+
+  const rejected = [
+    ['drive letter', 'D:/harness'],
+    ['backslash', '.deploy-tmp\\harness'],
+    ['empty segment', '.deploy-tmp//harness'],
+    ['dot segment', '.deploy-tmp/./harness'],
+    ['parent traversal', '.deploy-tmp/../outside'],
+    ['control character', '.deploy-tmp/harness\u0007'],
+    ['outside .deploy-tmp', 'dsh/packages'],
+    ['absolute path', '/tmp/harness'],
+    ['empty string', ''],
+  ]
+  for (const [label, repo] of rejected) {
+    writeContract(repo)
+    const r = runSnippet()
+    assert.notEqual(r.status, 0, label + ' must be rejected: ' + repo)
+  }
+
+  // 同名实体目录已存在时不得覆盖。
+  writeContract('.deploy-tmp/occupied/harness')
+  mkdirSync(join(root, '.deploy-tmp/occupied/harness'), { recursive: true })
+  assert.notEqual(runSnippet().status, 0, 'an existing real directory must not be replaced by a link')
+
+  // 别名指向别处时判红。
+  writeContract('.deploy-tmp/wrong/harness')
+  mkdirSync(join(root, '.deploy-tmp/other'), { recursive: true })
+  mkdirSync(join(root, '.deploy-tmp/wrong'), { recursive: true })
+  symlinkSync(join(root, '.deploy-tmp/other'), join(root, '.deploy-tmp/wrong/harness'))
+  assert.notEqual(runSnippet().status, 0, 'a link to a different directory must be rejected')
+
+  // 父级 symlink 越出工作区时判红：目标必须真的在工作区外。
+  const outside = mkdtempSync(join(tmpdir(), 'source-rerun-outside-'))
+  try {
+    rmSync(join(root, '.deploy-tmp'), { recursive: true, force: true })
+    symlinkSync(outside, join(root, '.deploy-tmp'))
+    writeContract('.deploy-tmp/deepseek-harness')
+    assert.notEqual(runSnippet().status, 0, 'a parent symlink escaping the workspace must be rejected')
+  } finally {
+    rmSync(outside, { recursive: true, force: true })
+  }
 }))

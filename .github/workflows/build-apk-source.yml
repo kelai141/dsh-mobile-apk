@@ -147,7 +147,52 @@ jobs:
           git -C .deploy-tmp/deepseek-harness checkout --detach "$COMMIT"
           test "$(git -C .deploy-tmp/deepseek-harness rev-parse HEAD)" = "$COMMIT"
           test "$(git -C .deploy-tmp/deepseek-harness describe --tags --always)" = "dsh-v$TAG"
-          node -e 'const c=require("./scripts/contract.json"); if(c.upstreamRepo!==".deploy-tmp/deepseek-harness" || !c.baseline || !c.upstream.commit) throw Error("source workflow identity does not match contract")'
+          # 合同的工作树字段只决定「按哪条路径读这棵树」，不规定它必须叫 deepseek-harness。
+          # 它是仓库文件，按不可信输入校验：拒绝 Windows 绝对路径与盘符、反斜杠、空段、
+          # 点段（. 与 ..）、控制字符；必须落在 .deploy-tmp/ 下。
+          UPSTREAM=$(node -e '
+            const c = require("./scripts/contract.json")
+            const r = c.upstreamRepo
+            const bad = (why) => { throw Error("contract.upstreamRepo " + why + ": " + JSON.stringify(r)) }
+            if (typeof r !== "string" || r === "") bad("missing")
+            if (/[\u0000-\u001f\u007f]/.test(r)) bad("contains control characters")
+            if (r.includes("\\")) bad("contains a backslash")
+            if (r.startsWith("/") || /^[A-Za-z]:/.test(r)) bad("is an absolute path")
+            const parts = r.split("/")
+            if (parts.some((p) => p === "" || p === "." || p === "..")) bad("has empty or dot segments")
+            if (parts.length < 2 || parts[0] !== ".deploy-tmp") bad("is not under .deploy-tmp/")
+            if (!c.baseline || !c.upstream || !c.upstream.commit) bad("leaves baseline/commit unset")
+            process.stdout.write(r)
+          ')
+          FIXED=.deploy-tmp/deepseek-harness
+          # 父级符号链接越界：目标路径上最近的已存在祖先必须解析到工作区内。
+          root=$(realpath .)
+          ancestor=$(dirname "$UPSTREAM")
+          while [ ! -e "$ancestor" ] && [ "$ancestor" != "." ] && [ "$ancestor" != "/" ]; do
+            ancestor=$(dirname "$ancestor")
+          done
+          resolved_ancestor=$(realpath "$ancestor")
+          case "$resolved_ancestor" in
+            "$root"|"$root"/*) ;;
+            *) echo "::error::合同路径 $UPSTREAM 的父级 $ancestor 解析到工作区外: $resolved_ancestor"; exit 1 ;;
+          esac
+          # 本链各步都固定用 .deploy-tmp/deepseek-harness 这一棵检出。合同指向别的名字时，
+          # 在那个位置建一个只读别名指向同一棵树，让按合同路径读树的门禁也能读到它。
+          # 本地重跑允许已存在的别名，但它必须确实指向这棵固定检出；其它内容一律判红。
+          if [ "$UPSTREAM" != "$FIXED" ]; then
+            fixed_real=$(realpath "$FIXED")
+            if [ -L "$UPSTREAM" ]; then
+              test "$(realpath "$UPSTREAM" 2>/dev/null)" = "$fixed_real" \
+                || { echo "::error::合同路径 $UPSTREAM 已存在且不指向 $FIXED"; exit 1; }
+            elif [ -e "$UPSTREAM" ]; then
+              echo "::error::合同路径 $UPSTREAM 已存在且不是别名，拒绝覆盖"
+              exit 1
+            else
+              mkdir -p "$(dirname "$UPSTREAM")"
+              ln -s "$fixed_real" "$UPSTREAM"
+              test "$(realpath "$UPSTREAM")" = "$fixed_real"
+            fi
+          fi
           node -e 'const c=require("./scripts/contract.json"), p=require("./.deploy-tmp/deepseek-harness/package.json"); if(!c.upstream.packageManager || !c.upstream.enginesNode || p.version!==c.baseline || p.packageManager!==c.upstream.packageManager || p.engines.node!==c.upstream.enginesNode) throw Error("official Harness runtime policy changed")'
 
       - name: Checkout pinned component sources
