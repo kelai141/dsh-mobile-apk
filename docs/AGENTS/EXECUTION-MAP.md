@@ -2627,6 +2627,9 @@ scripts/verify-notify-consumption.mjs
 scripts/verify-auto-undo.mjs
 scripts/verify-client-plugin-fail-recovery.mjs
 scripts/verify-plugin-compat-evidence.mjs
+scripts/source-build/check-harness-adoption.mjs
+scripts/source-build/check-harness-adoption.test.mjs
+.github/workflows/harness-adoption.yml
 scripts/verify-plugin-compat-evidence.test.mjs
 scripts/check-plugin-test-samples.mjs
 scripts/plugin-test-samples.json

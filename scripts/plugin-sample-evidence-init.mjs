@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 import { buildEvidence } from './lib/plugin-sample-evidence.mjs'
 import { validateBundle } from './verify-plugin-compat-evidence.mjs'
+import { readHarnessIdentity } from './source-build/harness-identity.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -28,6 +29,9 @@ const main = () => {
       'android-api': { type: 'string' },
       'webview-version': { type: 'string' },
       'device-model': { type: 'string' },
+      'device-primary-abi': { type: 'string' },
+      plan: { type: 'string' },
+      'upstream-contract': { type: 'string' },
       'android-build': { type: 'string' },
       out: { type: 'string' },
     },
@@ -43,8 +47,12 @@ const main = () => {
     process.stderr.write('--side 必须是 baseline 或 candidate\n')
     process.exit(2)
   }
-  const planBytes = readFileSync(join(HERE, 'plugin-test-samples.json'))
+  const planBytes = readFileSync(values.plan ?? join(HERE, 'plugin-test-samples.json'))
   const plan = JSON.parse(planBytes.toString('utf8'))
+  if (values['upstream-contract']) {
+    const upstream = readHarnessIdentity(values['upstream-contract'])
+    plan.engine = { ...plan.engine, commit: upstream.commit, baseline: upstream.version }
+  }
   const evidence = buildEvidence(plan, {
     side: values.side,
     label: values.label,
@@ -60,6 +68,7 @@ const main = () => {
       webviewVersion: values['webview-version'],
       emulator: true,
       deviceModel: values['device-model'],
+      ...(values['device-primary-abi'] ? { devicePrimaryAbi: values['device-primary-abi'] } : {}),
       androidBuild: values['android-build'],
       testPlanSha256: createHash('sha256').update(planBytes).digest('hex'),
     },
