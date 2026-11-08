@@ -481,7 +481,7 @@ sequenceDiagram
 | K02 | UndoGate | 看门狗 UNDO、启动超时与客户端插件树失败共用闸门：可点名时外科拔除非 Hard 插件；整份回撤只用当前 snapshot fingerprint 下的壳侧 HEALTHY known-good ID；被拒后复位锁存以继续引擎重试 | `app/src/main/java/com/dsharnessmobile/shell/EngineService.kt:215#expect=val%20bootAgeMs%20%3D%20nowMs%20-%20EngineManager.lastStartAttemptAt`-293、EngineStartFlow.kt:345-390、`UndoGate.kt:403-670#expect=*%20%E8%90%BD%E4%B8%80%E6%9D%A1%E9%97%B8%E9%97%A8%E8%A7%82%E6%B5%8B%EF%BC%88best-effort%EF%BC%8C%E7%BB%9D%E4%B8%8D%E6%8A%9B%EF%BC%89%E3%80%82**%E4%B8%8D%E7%BB%8F%20DevLogPrefs%20%E9%97%B8%E9%97%A8**%E2%80%94%E2%80%94%E5%AE%83%E5%BF%85%E9%A1%BB%E5%9C%A8%E9%BB%98%E8%AE%A4%E9%85%8D%E7%BD%AE%E4%B8%8B%E5%8F%AF%E8%A7%81%E3%80%82` |
 | K02 | 通知链 NotifyStore/NotifyCenter | 每拍按字节偏移消费 .task-done.ndjson，双读不双发 | WatchdogV2.kt:258-309、`NotifyCenter.kt:201#expect=override%20fun%20onChannelDegraded(category%3A%20String)%20%7B`
 | K02 | 控制载体 ControlCarrier | 随前台引擎服务起停，a11y 关着也承载 browser*/vd* | EngineService.kt:43 |
-| K02 | ConsoleSession | 复用 usrDir 与 shellEnv 起交互 shell，不起第二个引擎；输出经 ConsoleAnsiStripper 剥掉控制序列后上屏（页面是纯文本容器） | app/src/main/java/com/dsharnessmobile/shell/ConsoleSession.kt#ConsoleSession@040bee0c、`app/src/main/java/com/dsharnessmobile/shell/ConsoleShellOverride.kt:39#expect=internal%20data%20class%20ConsoleShellOverride(` |
+| K02 | ConsoleSession | 复用 usrDir 与 shellEnv 起交互 shell，不起第二个引擎；启动参数走单片描述 DSH_CONSOLE_LAUNCH；真 PTY 输出原样转发给页面 xterm 渲染，仅非 PTY 降级经 ConsoleAnsiStripper 剥离 | app/src/main/java/com/dsharnessmobile/shell/ConsoleSession.kt#ConsoleSession@040bee0c、`app/src/main/java/com/dsharnessmobile/shell/ConsoleShellOverride.kt:39#expect=internal%20data%20class%20ConsoleShellOverride(` |
 | K02 | 门禁 check-boot-budget | files/boot-segments.log 是该门禁的唯一产物 | LogCollector.kt:405-434 |
 | K03 | 引导与启动 | refreshSnapshot 的进度/失败文案与恢复前置由启动流拉起，刷新期 snapshotRefreshing 闸门禁止拉引擎 | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:427 |
 | K03 | 引擎探活与看门狗 | 每 5 秒一拍 onEngineProbe 驱动 .update-pending 的 usr-old 确认或回退 | `app/src/main/java/com/dsharnessmobile/shell/EngineService.kt:361#expect=val%20state%20%3D%20WatchdogV2.assessProbe%28this%29%20%7B%20isEpochCurrent%28epoch%29%20%7D` |
@@ -2192,6 +2192,8 @@ app/src/main/java/com/dsharnessmobile/shell/ConsoleSessionStartGuard.kt
 # 控制台 shell 的设备验收入口（debug 专用）：显式登记，不靠 glob 收
 app/src/main/java/com/dsharnessmobile/shell/ConsoleShellOverride.kt
 app/src/test/java/com/dsharnessmobile/shell/ConsoleShellOverrideTest.kt
+app/src/main/java/com/dsharnessmobile/shell/ConsoleLaunch.kt
+app/src/test/java/com/dsharnessmobile/shell/ConsoleLaunchTest.kt
 app/src/test/java/com/dsharnessmobile/shell/ConsoleSessionSingleStartGuardTest.kt
 app/src/main/java/com/dsharnessmobile/shell/FileExternalBridge.kt
 app/src/main/java/com/dsharnessmobile/shell/PhotoCapture.kt
