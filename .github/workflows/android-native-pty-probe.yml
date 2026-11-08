@@ -25,7 +25,9 @@ jobs:
       - name: 准备 Rust 与 Android NDK
         run: |
           rustup toolchain install 1.99.0 --profile minimal --component rustfmt --target "${{ matrix.target }}"
-          sdkmanager 'ndk;27.0.12077973'
+          if [[ ! -x "$ANDROID_HOME/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" ]]; then
+            sudo "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'ndk;27.0.12077973'
+          fi
       - name: 交叉编译与核对 ELF
         env:
           TARGET: ${{ matrix.target }}
