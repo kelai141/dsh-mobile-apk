@@ -123,6 +123,20 @@ Harness按固定0.2.0-rc.2源码完成全仓构建；prepare-harness-vendor-over
 - 远程 RPC（测试面）：POST `/api/<method>`，body 必须全信封 `{"type":"client-request","rpcId":"r1","method":"session.list","payload":{}}`；`session.prompt` 拒绝 live 会话（被 UI 打开的）——直接 API 测代理需先用 session.create 建全新会话。
 - **构建前核对 ABI（见坑 18）**：无真机环境用模拟器（MuMu x86_64 竖屏 `127.0.0.1:16416` / 横屏 `127.0.0.1:16384`），有真机则安装 ABI 匹配的 APK——debug 包默认带 x86_64 快照，覆盖装到 arm64 真机会引擎崩溃。
 
+### Harness 上游候选巡检
+
+`巡检 Harness 上游候选` 每周、巡检或基线文件变更的 PR，以及手动触发时，将官方默认分支与
+`scripts/contract.json` 固定的提交做树级比较。它使用临时裸仓，不检出或执行上游代码。
+手动触发可指定完整的候选提交 SHA。
+报告记录采集时间、两边提交与版本、按 NPM 包名归类的增删移动、依赖与导出等字段变化，
+并标记 WebUI、插件加载和构建等风险面。附件含 JSON 报告与完整 Git 差异，保留 30 天。
+
+本地复核：`node scripts/source-build/audit-harness-upstream.mjs --repo <包含两边提交的Git仓> --candidate <完整提交SHA>`。
+加 `--require-pinned` 时，任何不同的候选 SHA 都返回 2；输入或基线校验错误返回 1。
+`already-pinned` 只表示提交相同。`requires-validation` 也适用于根版本号未变化的提交。
+风险标签用于确定验证范围；未命中标签的变更仍完整列入差异，不能据此判定兼容。
+巡检不改合同、不升级基线、不部署。采用新提交仍须走单独 PR，并提交构建、功能和兼容性证据。
+
 ## 3. 环境无关的开发/维护流程（新人先读此节再动手）
 
 > 本节与协调仓库根 `AGENTS.md` §2-4 对齐，但以壳子仓库为落点；**下列命令均在协调仓库根执行（除非注明「壳内」）**，shell 引用路径用 `scripts/` 前缀。
