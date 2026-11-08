@@ -1,0 +1,952 @@
+{
+  "schema": 1,
+  "capturedAt": "2026-11-08",
+  "engine": {
+    "baseline": "0.2.2-rc.1",
+    "commit": "66491b05e3f05ad35bcdd4f6cd7ed26041d9e3db",
+    "nodeFloor": ">=24.9.0"
+  },
+  "selection": {
+    "minSamples": 8,
+    "lowHeatMaxMonthlyDownloads": 30000,
+    "minLowHeatSamples": 4,
+    "requiredCategories": [
+      "memory",
+      "diagnostics",
+      "security",
+      "board",
+      "local-media",
+      "config",
+      "i18n",
+      "terminal",
+      "import-export",
+      "host-tools"
+    ],
+    "requireHostOnlySample": true
+  },
+  "observation": {
+    "clientGraph": "window.__DSH_BOOT__.entries 是数组；每个条目有 id / url / rev，id 取自 profile 补丁行的 id，不是包名。",
+    "hostInventory": "pluginManager/listPlugins 每行含 entryId / moduleName / enabled / fiberPhase；moduleName 才是包名。",
+    "toolSurface": "工具是否注册以模型侧工具清单与该工具一次真实调用为准；服务端工具不一定有客户端条目。"
+  },
+  "samples": [
+    {
+      "id": "s01-lite-memory",
+      "category": "memory",
+      "heat": {
+        "monthlyDownloads": 15751,
+        "stars": 4,
+        "capturedAt": "2026-11-08"
+      },
+      "plugin": {
+        "name": "dsh-lite-memory",
+        "version": "0.18.83",
+        "artifactSha256": "83254044fc4922357b90c6dea38c6c39088622655d3015c729e014d3a81a6581",
+        "artifactBytes": 336883,
+        "tarball": "https://registry.npmjs.org/dsh-lite-memory/-/dsh-lite-memory-0.18.83.tgz",
+        "integrity": "sha512-mfS4XKOv14aGWi8vxbCBkP6ELE8xyTC4SFkc6+2sdgtWjCbPiGv4CvraJR3AGClvwlgscZ49xvXUtXP63O2N9Q==",
+        "unpackedSize": 1114560
+      },
+      "source": {
+        "kind": "npm-registry",
+        "repo": "https://github.com/regrevia/dsh-lite-memory",
+        "gitHead": "568075ad9aa90ca948242fbcbb4bd174a475173e",
+        "gitHeadStatus": "verified"
+      },
+      "surfaces": {
+        "client": "./client.js",
+        "clientEntryIds": [
+          "lite-memory"
+        ],
+        "clientEntryIdsSameAsPackage": false,
+        "foreignPatchRows": [],
+        "tools": [
+          "memory_save",
+          "memory_search"
+        ]
+      },
+      "metadata": {
+        "licenseField": "MIT",
+        "licenseFile": "MIT",
+        "main": "index.js",
+        "mainExists": true,
+        "bundlePatch": "cordis.patch.yml",
+        "bundlePatchExists": true,
+        "engines": {
+          "dsh": ">=0.1.5"
+        },
+        "client": {
+          "platform": "web",
+          "immediately": true,
+          "inject": [
+            "@deepseek-ai/dsh-client-ui-conversation"
+          ]
+        },
+        "dependencies": [],
+        "peerCount": 0
+      },
+      "notes": [],
+      "cases": [
+        {
+          "id": "install",
+          "kind": "install",
+          "expect": "dsh plugin add dsh-lite-memory@0.18.83 退出码 0，profile 的 dsh.profile.bundles 出现 dsh-lite-memory"
+        },
+        {
+          "id": "activate-client",
+          "kind": "activate",
+          "expect": "冷启动后 window.__DSH_BOOT__.entries（数组）里存在 id 为 lite-memory 的条目，且该条目 url 指向 dsh-lite-memory/client；页面不出现 Failed to load plugins"
+        },
+        {
+          "id": "activate-host",
+          "kind": "activate",
+          "expect": "pluginManager/listPlugins 返回 moduleName 为 dsh-lite-memory 的行，enabled 为 true 且 fiberPhase 为 active；模型侧工具清单里出现 memory_save、memory_search"
+        },
+        {
+          "id": "memory-roundtrip",
+          "kind": "tool",
+          "expect": "memory_save 写入带唯一标记的记录后，memory_search 用该标记能召回同一条，返回值含该标记"
+        },
+        {
+          "id": "panel-visible",
+          "kind": "ui",
+          "expect": "会话侧栏出现记忆面板，且面板列表里能看到上一步写入的记录"
+        }
+      ]
+    },
+    {
+      "id": "s02-restregular-memory",
+      "category": "memory",
+      "heat": {
+        "monthlyDownloads": 18043,
+        "stars": 12,
+        "capturedAt": "2026-11-08"
+      },
+      "plugin": {
+        "name": "@restregular/dsh-memory",
+        "version": "0.30.1",
+        "artifactSha256": "c865f36f4543d114708132b7aafcba8c508524c0202b4a6b3d4397574eb72f73",
+        "artifactBytes": 408718,
+        "tarball": "https://registry.npmjs.org/@restregular/dsh-memory/-/dsh-memory-0.30.1.tgz",
+        "integrity": "sha512-bHjN/NlvIzkfzHTgiN7+VCuyUFPxBKTFZ4WbuP0FTWXujAv2VDQblgRqFPQIGKLIk6me+va9ayM5denhkCw6Bg==",
+        "unpackedSize": 1379763
+      },
+      "source": {
+        "kind": "npm-registry",
+        "repo": "https://github.com/RestRegular/dsh-memory",
+        "gitHead": "91af410133d4ece476c5ee6f3e49fce5f927c540",
+        "gitHeadStatus": "verified"
+      },
+      "surfaces": {
+        "client": "./lib/client.js",
+        "clientEntryIds": [
+          "dsh-memory"
+        ],
+        "clientEntryIdsSameAsPackage": false,
+        "foreignPatchRows": [],
+        "tools": [
+          "memory_save",
+          "memory_search",
+          "memory_list"
+        ]
+      },
+      "metadata": {
+        "licenseField": "MIT",
+        "licenseFile": "MIT",
+        "main": "./lib/index.js",
+        "mainExists": true,
+        "bundlePatch": "./cordis.patch.yml",
+        "bundlePatchExists": true,
+        "engines": {
+          "node": ">=22.13.0"
+        },
+        "client": {
+          "inject": [
+            "@deepseek-ai/dsh-client-ui-slots"
+          ],
+          "platform": "web"
+        },
+        "dependencies": [],
+        "peerCount": 3
+      },
+      "notes": [],
+      "cases": [
+        {
+          "id": "install",
+          "kind": "install",
+          "expect": "dsh plugin add @restregular/dsh-memory@0.30.1 退出码 0，profile 的 dsh.profile.bundles 出现 @restregular/dsh-memory"
+        },
+        {
+          "id": "activate-client",
+          "kind": "activate",
+          "expect": "冷启动后 window.__DSH_BOOT__.entries（数组）里存在 id 为 dsh-memory 的条目，且该条目 url 指向 @restregular/dsh-memory/client；页面不出现 Failed to load plugins"
+        },
+        {
+          "id": "activate-host",
+          "kind": "activate",
+          "expect": "pluginManager/listPlugins 返回 moduleName 为 @restregular/dsh-memory 的行，enabled 为 true 且 fiberPhase 为 active；模型侧工具清单里出现 memory_save、memory_search、memory_list"
+        },
+        {
+          "id": "memory-roundtrip",
+          "kind": "tool",
+          "expect": "memory_save 写入唯一标记后 memory_search 能召回，memory_list 输出里能看到该条目"
+        }
+      ]
+    },
+    {
+      "id": "s03-plugin-health",
+      "category": "diagnostics",
+      "heat": {
+        "monthlyDownloads": 13543,
+        "stars": 4,
+        "capturedAt": "2026-11-08"
+      },
+      "plugin": {
+        "name": "dsh-plugin-health",
+        "version": "3.0.7",
+        "artifactSha256": "e81dd1f092a18da60b436f815fda12461a896234a588fa8e59fae4bcda176cf9",
+        "artifactBytes": 433259,
+        "tarball": "https://registry.npmjs.org/dsh-plugin-health/-/dsh-plugin-health-3.0.7.tgz",
+        "integrity": "sha512-1eFcW39nHg4heTd0V0wUVyYTOWEtroE094AbtW0xdlNNINWsqwFWBVeANAIXt6gnWB+gSlxZYtwelcckn829jg==",
+        "unpackedSize": 934179
+      },
+      "source": {
+        "kind": "npm-registry",
+        "repo": "https://github.com/EasonMWS/dsh-plugin-health",
+        "gitHead": "492ded2d10d0019ea26624c9b3f076f1ee5e65e1",
+        "gitHeadStatus": "verified"
+      },
+      "surfaces": {
+        "client": "./src/ui/client.js",
+        "clientEntryIds": [
+          "plugin-health"
+        ],
+        "clientEntryIdsSameAsPackage": false,
+        "foreignPatchRows": [],
+        "tools": [
+          "plugin_health"
+        ]
+      },
+      "metadata": {
+        "licenseField": "MIT",
+        "licenseFile": "MIT",
+        "main": "./src/plugin.js",
+        "mainExists": true,
+        "bundlePatch": "./cordis.patch.yml",
+        "bundlePatchExists": true,
+        "engines": {
+          "node": ">=20",
+          "dsh": ">=0.2.0-rc.0 <0.3.0-0"
+        },
+        "client": {
+          "platform": "web",
+          "inject": [
+            "@deepseek-ai/dsh-client-ui-settings",
+            "@deepseek-ai/dsh-client-ui-sidebar",
+            "@deepseek-ai/dsh-client-ui-layout"
+          ]
+        },
+        "dependencies": [
+          "@deepseek-ai/dsh-plugin-market-index",
+          "semver",
+          "yaml"
+        ],
+        "peerCount": 2
+      },
+      "notes": [],
+      "cases": [
+        {
+          "id": "install",
+          "kind": "install",
+          "expect": "dsh plugin add dsh-plugin-health@3.0.7 退出码 0，profile 的 dsh.profile.bundles 出现 dsh-plugin-health"
+        },
+        {
+          "id": "activate-client",
+          "kind": "activate",
+          "expect": "冷启动后 window.__DSH_BOOT__.entries（数组）里存在 id 为 plugin-health 的条目，且该条目 url 指向 dsh-plugin-health/client；页面不出现 Failed to load plugins"
+        },
+        {
+          "id": "activate-host",
+          "kind": "activate",
+          "expect": "pluginManager/listPlugins 返回 moduleName 为 dsh-plugin-health 的行，enabled 为 true 且 fiberPhase 为 active；模型侧工具清单里出现 plugin_health"
+        },
+        {
+          "id": "health-report",
+          "kind": "tool",
+          "expect": "plugin_health 返回结构化结果并列出已装插件与其版本；单个插件缺字段时整体仍返回结果"
+        },
+        {
+          "id": "health-panel",
+          "kind": "ui",
+          "expect": "设置页出现插件健康面板，其中列出的插件与 plugin_health 返回的一致"
+        }
+      ]
+    },
+    {
+      "id": "s04-trust-check",
+      "category": "security",
+      "heat": {
+        "monthlyDownloads": 24545,
+        "stars": 2,
+        "capturedAt": "2026-11-08"
+      },
+      "plugin": {
+        "name": "dsh-trust-check",
+        "version": "0.2.5",
+        "artifactSha256": "05653d4e09189e2df42b135bb7e04cd27f5ed8afd776ef49dd7125d586d04464",
+        "artifactBytes": 385948,
+        "tarball": "https://registry.npmjs.org/dsh-trust-check/-/dsh-trust-check-0.2.5.tgz",
+        "integrity": "sha512-d6WepwMpOtyaNAzP/n8U4adWPszEQApcpeydODfJkkDb2RHOBb5gloAAiRsTDJzpIOJR+XGJIqKrg2POYDwAUg==",
+        "unpackedSize": 986225
+      },
+      "source": {
+        "kind": "npm-registry",
+        "repo": "https://github.com/liuwenji007/dsh-trust-check",
+        "gitHead": "7d79a55927ce910adb500bf8c93de29f8fbc6119",
+        "gitHeadStatus": "verified"
+      },
+      "surfaces": {
+        "client": "./lib/client.js",
+        "clientEntryIds": [
+          "dsh-trust-check"
+        ],
+        "clientEntryIdsSameAsPackage": true,
+        "foreignPatchRows": [],
+        "tools": []
+      },
+      "metadata": {
+        "licenseField": "MIT",
+        "licenseFile": "MIT",
+        "main": "lib/index.js",
+        "mainExists": true,
+        "bundlePatch": "./cordis.patch.yml",
+        "bundlePatchExists": true,
+        "engines": {
+          "node": "^22.19.0 || >=24.0.0",
+          "dsh": ">=0.1.0-rc.8"
+        },
+        "client": {
+          "platform": "web",
+          "inject": [
+            "@deepseek-ai/dsh-client-locale",
+            "@deepseek-ai/dsh-client-ui-settings"
+          ]
+        },
+        "dependencies": [
+          "js-yaml"
+        ],
+        "peerCount": 6
+      },
+      "notes": [],
+      "cases": [
+        {
+          "id": "install",
+          "kind": "install",
+          "expect": "dsh plugin add dsh-trust-check@0.2.5 退出码 0，profile 的 dsh.profile.bundles 出现 dsh-trust-check"
+        },
+        {
+          "id": "activate-client",
+          "kind": "activate",
+          "expect": "冷启动后 window.__DSH_BOOT__.entries（数组）里存在 id 为 dsh-trust-check 的条目，且该条目 url 指向 dsh-trust-check/client；页面不出现 Failed to load plugins"
+        },
+        {
+          "id": "activate-host",
+          "kind": "activate",
+          "expect": "pluginManager/listPlugins 返回 moduleName 为 dsh-trust-check 的行，enabled 为 true 且 fiberPhase 为 active"
+        },
+        {
+          "id": "trust-report",
+          "kind": "ui",
+          "expect": "设置页信任报告页可打开且不白屏，页面上至少列出一个已装插件的能力披露条目"
+        }
+      ]
+    },
+    {
+      "id": "s05-task-ledger",
+      "category": "board",
+      "heat": {
+        "monthlyDownloads": 24237,
+        "stars": 6,
+        "capturedAt": "2026-11-08"
+      },
+      "plugin": {
+        "name": "dsh-task-ledger",
+        "version": "0.1.8",
+        "artifactSha256": "1281e1d7d130849994f1c1007244fa796f399c23e291ad97ced2f8ffaf16511a",
+        "artifactBytes": 7534039,
+        "tarball": "https://registry.npmjs.org/dsh-task-ledger/-/dsh-task-ledger-0.1.8.tgz",
+        "integrity": "sha512-421IzaOrl6AL23uulW2dJBd1GYQzsGx5UPmHiYiaUT8HVkAaMO9sN5nr6FoDWJ3xouGyh0cNke62tAsXiXmM7Q==",
+        "unpackedSize": 20873010
+      },
+      "source": {
+        "kind": "npm-registry",
+        "repo": "https://github.com/cq-guojia/dsh-task-ledger",
+        "gitHead": "30af1e1ad661dfc26606f4ebe2b1e830f2e3c67e",
+        "gitHeadStatus": "verified"
+      },
+      "surfaces": {
+        "client": "./dist/client.js",
+        "clientEntryIds": [
+          "dsh-task-ledger"
+        ],
+        "clientEntryIdsSameAsPackage": true,
+        "foreignPatchRows": [],
+        "tools": []
+      },
+      "metadata": {
+        "licenseField": "MIT",
+        "licenseFile": "absent",
+        "main": "dist/index.js",
+        "mainExists": true,
+        "bundlePatch": "./cordis.patch.yml",
+        "bundlePatchExists": true,
+        "engines": {
+          "node": ">=22.5"
+        },
+        "client": {
+          "platform": "web",
+          "inject": [
+            "@deepseek-ai/dsh-client-locale",
+            "@deepseek-ai/dsh-client-ui-renderer",
+            "@deepseek-ai/dsh-client-ui-layout",
+            "@deepseek-ai/dsh-client-ui-settings",
+            "@deepseek-ai/dsh-client-ui-plugin-manager",
+            "@deepseek-ai/dsh-client-ui-sidebar"
+          ]
+        },
+        "dependencies": [
+          "@deepseek-ai/schemastery",
+          "dsh-plugin-core"
+        ],
+        "peerCount": 0
+      },
+      "notes": [
+        "package.json 声明 MIT，但 tarball 内没有 LICENSE 文件；不得用仓库 LICENSE 代替包内许可。"
+      ],
+      "cases": [
+        {
+          "id": "install",
+          "kind": "install",
+          "expect": "dsh plugin add dsh-task-ledger@0.1.8 退出码 0，profile 的 dsh.profile.bundles 出现 dsh-task-ledger"
+        },
+        {
+          "id": "activate-client",
+          "kind": "activate",
+          "expect": "冷启动后 window.__DSH_BOOT__.entries（数组）里存在 id 为 dsh-task-ledger 的条目，且该条目 url 指向 dsh-task-ledger/client；页面不出现 Failed to load plugins"
+        },
+        {
+          "id": "activate-host",
+          "kind": "activate",
+          "expect": "pluginManager/listPlugins 返回 moduleName 为 dsh-task-ledger 的行，enabled 为 true 且 fiberPhase 为 active"
+        },
+        {
+          "id": "board-empty",
+          "kind": "ui",
+          "expect": "任务看板页可打开；未初始化身份时页面给出建立身份的引导，而不是报错或空白"
+        },
+        {
+          "id": "identity-setup",
+          "kind": "ui",
+          "expect": "建立身份后看板显示汇总卡片，刷新页面后身份仍在"
+        }
+      ]
+    },
+    {
+      "id": "s06-music-panel",
+      "category": "local-media",
+      "heat": {
+        "monthlyDownloads": 12579,
+        "stars": 3,
+        "capturedAt": "2026-11-08"
+      },
+      "plugin": {
+        "name": "dsh-music-panel",
+        "version": "0.8.2",
+        "artifactSha256": "dbc28d9795c2bb28ee2bd9db0568004fea9d10d38c3b9f66532df59a1dc36a98",
+        "artifactBytes": 115190,
+        "tarball": "https://registry.npmjs.org/dsh-music-panel/-/dsh-music-panel-0.8.2.tgz",
+        "integrity": "sha512-bqiiekWHVaMXSOL1E9frcv1EgetsyafNW+12iCok1hjNmotMiEPPsAWyNMihc5J3tJY5DujsN/E7mBRYRdA/+w==",
+        "unpackedSize": 527046
+      },
+      "source": {
+        "kind": "npm-registry",
+        "repo": "https://github.com/Aliboder/dsh-music-panel",
+        "gitHead": "3af6d1e532ad844d597e01d758485baf191782dc",
+        "gitHeadStatus": "verified"
+      },
+      "surfaces": {
+        "client": "./client.js",
+        "clientEntryIds": [
+          "music"
+        ],
+        "clientEntryIdsSameAsPackage": false,
+        "foreignPatchRows": [],
+        "tools": [
+          "music_control"
+        ]
+      },
+      "metadata": {
+        "licenseField": "MIT",
+        "licenseFile": "MIT",
+        "main": "./index.js",
+        "mainExists": true,
+        "bundlePatch": "./cordis.patch.yml",
+        "bundlePatchExists": true,
+        "engines": {},
+        "client": {
+          "platform": "web",
+          "immediately": true,
+          "inject": [
+            "@deepseek-ai/dsh-client-ui-conversation",
+            "@deepseek-ai/dsh-client-ui-settings"
+          ]
+        },
+        "dependencies": [
+          "flac-tagger",
+          "music-metadata",
+          "node-id3",
+          "pinyin-pro"
+        ],
+        "peerCount": 0
+      },
+      "notes": [],
+      "cases": [
+        {
+          "id": "install",
+          "kind": "install",
+          "expect": "dsh plugin add dsh-music-panel@0.8.2 退出码 0，profile 的 dsh.profile.bundles 出现 dsh-music-panel"
+        },
+        {
+          "id": "activate-client",
+          "kind": "activate",
+          "expect": "冷启动后 window.__DSH_BOOT__.entries（数组）里存在 id 为 music 的条目，且该条目 url 指向 dsh-music-panel/client；页面不出现 Failed to load plugins"
+        },
+        {
+          "id": "activate-host",
+          "kind": "activate",
+          "expect": "pluginManager/listPlugins 返回 moduleName 为 dsh-music-panel 的行，enabled 为 true 且 fiberPhase 为 active；模型侧工具清单里出现 music_control"
+        },
+        {
+          "id": "music-tool",
+          "kind": "tool",
+          "expect": "music_control 在曲库为空时返回可读结果（说明曲库为空或没有可播放项），不抛未捕获异常"
+        },
+        {
+          "id": "music-panel",
+          "kind": "ui",
+          "expect": "侧栏出现播放器入口；设置页能编辑曲库根目录并保存，重新打开设置页后值仍在"
+        }
+      ]
+    },
+    {
+      "id": "s07-config-manager",
+      "category": "config",
+      "heat": {
+        "monthlyDownloads": 25943,
+        "stars": 318,
+        "capturedAt": "2026-11-08"
+      },
+      "plugin": {
+        "name": "dsh-config-manager",
+        "version": "0.4.3",
+        "artifactSha256": "41b4fdad46daef9a1f478c9d0be245dfb1d9ef7c4700cab45eea4b8b3ad4a55b",
+        "artifactBytes": 7430802,
+        "tarball": "https://registry.npmjs.org/dsh-config-manager/-/dsh-config-manager-0.4.3.tgz",
+        "integrity": "sha512-lR08zUK/YiojaeXmr2iWPUkzRi/0yYhCDuTccLi5vtYUAiO5ZgtPbelanPS4JDsg8t3VX20TN1Il8CdFlAkrlg==",
+        "unpackedSize": 25463798
+      },
+      "source": {
+        "kind": "npm-registry",
+        "repo": "https://github.com/xiajiajun516/dsh-config-manager",
+        "gitHead": "daeabac65e8d781ea562617064af0859375c6133",
+        "gitHeadStatus": "verified"
+      },
+      "surfaces": {
+        "client": "./lib/client.js",
+        "clientEntryIds": [
+          "config-manager"
+        ],
+        "clientEntryIdsSameAsPackage": false,
+        "foreignPatchRows": [],
+        "tools": [
+          "config_backup",
+          "config_list_snapshots"
+        ]
+      },
+      "metadata": {
+        "licenseField": "MIT",
+        "licenseFile": "MIT",
+        "main": "./lib/index.js",
+        "mainExists": true,
+        "bundlePatch": "./cordis.patch.yml",
+        "bundlePatchExists": true,
+        "engines": {
+          "node": "^22.19.0 || >=24.0.0"
+        },
+        "client": {
+          "inject": [
+            "@deepseek-ai/dsh-client-runtime",
+            "@deepseek-ai/dsh-client-connection",
+            "@deepseek-ai/dsh-client-ui-settings"
+          ],
+          "platform": "web"
+        },
+        "dependencies": [
+          "js-yaml"
+        ],
+        "peerCount": 18
+      },
+      "notes": [],
+      "cases": [
+        {
+          "id": "install",
+          "kind": "install",
+          "expect": "dsh plugin add dsh-config-manager@0.4.3 退出码 0，profile 的 dsh.profile.bundles 出现 dsh-config-manager"
+        },
+        {
+          "id": "activate-client",
+          "kind": "activate",
+          "expect": "冷启动后 window.__DSH_BOOT__.entries（数组）里存在 id 为 config-manager 的条目，且该条目 url 指向 dsh-config-manager/client；页面不出现 Failed to load plugins"
+        },
+        {
+          "id": "activate-host",
+          "kind": "activate",
+          "expect": "pluginManager/listPlugins 返回 moduleName 为 dsh-config-manager 的行，enabled 为 true 且 fiberPhase 为 active；模型侧工具清单里出现 config_backup、config_list_snapshots"
+        },
+        {
+          "id": "config-backup",
+          "kind": "tool",
+          "expect": "config_backup 返回成功并给出快照标识，config_list_snapshots 的输出里包含同一标识"
+        },
+        {
+          "id": "settings-page",
+          "kind": "ui",
+          "expect": "设置页出现配置管理分区，可打开，且其中快照列表与 config_list_snapshots 结果一致"
+        }
+      ]
+    },
+    {
+      "id": "s08-russian-lang",
+      "category": "i18n",
+      "heat": {
+        "monthlyDownloads": 13738,
+        "stars": 67,
+        "capturedAt": "2026-11-08"
+      },
+      "plugin": {
+        "name": "@goodandready/dsh-russian-lang",
+        "version": "0.4.23",
+        "artifactSha256": "f87bab4628709c6982bac592a7d4afd55951e8ad4bf083d527dbd7cf7590e1ba",
+        "artifactBytes": 649206,
+        "tarball": "https://registry.npmjs.org/@goodandready/dsh-russian-lang/-/dsh-russian-lang-0.4.23.tgz",
+        "integrity": "sha512-P5QpVhD9t9OHIe7zeiGFrsyazeEigTVtWAYZN2K2R35LW6EmtVSLXYijCjkK9xhiqkS7gR3O7ix3q5ajClVplw==",
+        "unpackedSize": 2668891
+      },
+      "source": {
+        "kind": "npm-registry",
+        "repo": "https://github.com/GooDAnDReaDY/dsh-russian-lang",
+        "gitHead": "16de9e0a3b61aacc25161fcb4fc3d8ef12f64422",
+        "gitHeadStatus": "unresolvable"
+      },
+      "surfaces": {
+        "client": "./lib/client.js",
+        "clientEntryIds": [
+          "dsh-russian-lang"
+        ],
+        "clientEntryIdsSameAsPackage": false,
+        "foreignPatchRows": [],
+        "tools": []
+      },
+      "metadata": {
+        "licenseField": "MIT",
+        "licenseFile": "MIT",
+        "main": "lib/index.js",
+        "mainExists": true,
+        "bundlePatch": "./cordis.patch.yml",
+        "bundlePatchExists": true,
+        "engines": {
+          "node": ">=22",
+          "dsh": "0.2.0-rc.2 || >=0.2.1-rc.2 <0.2.2-0 || >=0.2.2-0 <0.2.3-0"
+        },
+        "client": {
+          "platform": "web",
+          "inject": [
+            "@deepseek-ai/dsh-client-locale",
+            "@deepseek-ai/dsh-client-ui-settings",
+            "@deepseek-ai/dsh-client-ui-slots"
+          ]
+        },
+        "dependencies": [],
+        "peerCount": 10
+      },
+      "notes": [
+        "gitHead 指向的提交在远端不存在（GitHub 返回 422）；该仓只提交 sanitized 树，来源判据只用 tarball 字节哈希。",
+        "peerDependencies 要求 @deepseek-ai/cordis 为 ~4.0.4 || ~4.0.5，当前契约是 4.1.0。该名字不在上游 boot 期判定的 @deepseek-ai/dsh* 面内，判定发生在 npm 安装期；安装结果必须如实记录，不得当作 boot 期禁用。"
+      ],
+      "cases": [
+        {
+          "id": "install",
+          "kind": "install",
+          "expect": "dsh plugin add @goodandready/dsh-russian-lang@0.4.23 退出码 0，profile 的 dsh.profile.bundles 出现 @goodandready/dsh-russian-lang"
+        },
+        {
+          "id": "activate-client",
+          "kind": "activate",
+          "expect": "冷启动后 window.__DSH_BOOT__.entries（数组）里存在 id 为 dsh-russian-lang 的条目，且该条目 url 指向 @goodandready/dsh-russian-lang/client；页面不出现 Failed to load plugins"
+        },
+        {
+          "id": "activate-host",
+          "kind": "activate",
+          "expect": "pluginManager/listPlugins 返回 moduleName 为 @goodandready/dsh-russian-lang 的行，enabled 为 true 且 fiberPhase 为 active"
+        },
+        {
+          "id": "locale-switch",
+          "kind": "ui",
+          "expect": "界面语言切到俄语后，设置页与主界面的固定文案变为俄语；切回中文后恢复原样"
+        }
+      ]
+    },
+    {
+      "id": "s09-gitbash-shell",
+      "category": "terminal",
+      "heat": {
+        "monthlyDownloads": 13779,
+        "stars": 44,
+        "capturedAt": "2026-11-08"
+      },
+      "plugin": {
+        "name": "dsh-gitbash-shell",
+        "version": "0.51.0",
+        "artifactSha256": "99c7a6c6871e29932fd7c7f5b1a541e510237eca84eb952d91faa22aab7e6b61",
+        "artifactBytes": 438738,
+        "tarball": "https://registry.npmjs.org/dsh-gitbash-shell/-/dsh-gitbash-shell-0.51.0.tgz",
+        "integrity": "sha512-1z6Ewr5ujoN61gDtw8p+Ou6XtOYa6iA2m6NPWjLtcmLsunhdbtVlhKGkrpVTmeHhjV9PQqGvwf/NIgDx2Q2FiA==",
+        "unpackedSize": 1263520
+      },
+      "source": {
+        "kind": "npm-registry",
+        "repo": "https://github.com/KannaKuron/dsh-gitbash-shell",
+        "gitHead": "0c7631772299b7146faecedaff6b0a4fe98262ac",
+        "gitHeadStatus": "verified"
+      },
+      "surfaces": {
+        "client": "./src/client.js",
+        "clientEntryIds": [
+          "gitbash-shell"
+        ],
+        "clientEntryIdsSameAsPackage": false,
+        "foreignPatchRows": [
+          {
+            "id": "better-sidebar",
+            "name": "dsh-better-sidebar"
+          }
+        ],
+        "tools": [
+          "gitbash-shell"
+        ]
+      },
+      "metadata": {
+        "licenseField": "MIT",
+        "licenseFile": "MIT",
+        "main": "src/index.js",
+        "mainExists": true,
+        "bundlePatch": "./cordis.patch.yml",
+        "bundlePatchExists": true,
+        "engines": {
+          "node": ">=24.9.0",
+          "dsh": ">=0.2.2-rc.1"
+        },
+        "client": {
+          "inject": [
+            "@deepseek-ai/dsh-client-locale",
+            "@deepseek-ai/dsh-client-ui-slots",
+            "@deepseek-ai/dsh-client-ui-settings"
+          ],
+          "platform": "web"
+        },
+        "dependencies": [],
+        "peerCount": 4
+      },
+      "notes": [],
+      "cases": [
+        {
+          "id": "install",
+          "kind": "install",
+          "expect": "dsh plugin add dsh-gitbash-shell@0.51.0 退出码 0，profile 的 dsh.profile.bundles 出现 dsh-gitbash-shell"
+        },
+        {
+          "id": "activate-client",
+          "kind": "activate",
+          "expect": "冷启动后 window.__DSH_BOOT__.entries（数组）里存在 id 为 gitbash-shell 的条目，且该条目 url 指向 dsh-gitbash-shell/client；页面不出现 Failed to load plugins"
+        },
+        {
+          "id": "activate-host",
+          "kind": "activate",
+          "expect": "pluginManager/listPlugins 返回 moduleName 为 dsh-gitbash-shell 的行，enabled 为 true 且 fiberPhase 为 active；模型侧工具清单里出现 gitbash-shell"
+        },
+        {
+          "id": "shell-tool",
+          "kind": "tool",
+          "expect": "gitbash-shell 执行一条无副作用命令（pwd）并返回输出，输出非空且退出码为 0"
+        }
+      ]
+    },
+    {
+      "id": "s10-chat-import",
+      "category": "import-export",
+      "heat": {
+        "monthlyDownloads": 16037,
+        "stars": 292,
+        "capturedAt": "2026-11-08"
+      },
+      "plugin": {
+        "name": "dsh-chat-import",
+        "version": "0.26.4",
+        "artifactSha256": "08ca60266217b4a5275f599c679971000b63eab0f74d9455b566c105d269a095",
+        "artifactBytes": 1387398,
+        "tarball": "https://registry.npmjs.org/dsh-chat-import/-/dsh-chat-import-0.26.4.tgz",
+        "integrity": "sha512-+fAzz8otvWxMY2E20eck3mGSABssgDgqMvlAXmaxwql0W63uaqeAADPQyGtMwA8YHsJJffNMUrj82g3hQ94MwQ==",
+        "unpackedSize": 3201968
+      },
+      "source": {
+        "kind": "npm-registry",
+        "repo": "https://github.com/Nwflower/dsh-chat-import",
+        "gitHead": "2bc71bdf37edb92209c592588eb15f17dddfe4b6",
+        "gitHeadStatus": "verified"
+      },
+      "surfaces": {
+        "client": "./lib/client.js",
+        "clientEntryIds": [
+          "import-claude"
+        ],
+        "clientEntryIdsSameAsPackage": false,
+        "foreignPatchRows": [],
+        "tools": [
+          "scan_discover",
+          "import_chat"
+        ]
+      },
+      "metadata": {
+        "licenseField": "MIT",
+        "licenseFile": "MIT",
+        "main": "./lib/index.mjs",
+        "mainExists": true,
+        "bundlePatch": "./cordis.patch.yml",
+        "bundlePatchExists": true,
+        "engines": {
+          "node": ">=22.13"
+        },
+        "client": {
+          "inject": [
+            "@deepseek-ai/dsh-client-locale"
+          ],
+          "platform": "web"
+        },
+        "dependencies": [
+          "fzstd"
+        ],
+        "peerCount": 6
+      },
+      "notes": [],
+      "cases": [
+        {
+          "id": "install",
+          "kind": "install",
+          "expect": "dsh plugin add dsh-chat-import@0.26.4 退出码 0，profile 的 dsh.profile.bundles 出现 dsh-chat-import"
+        },
+        {
+          "id": "activate-client",
+          "kind": "activate",
+          "expect": "冷启动后 window.__DSH_BOOT__.entries（数组）里存在 id 为 import-claude 的条目，且该条目 url 指向 dsh-chat-import/client；页面不出现 Failed to load plugins"
+        },
+        {
+          "id": "activate-host",
+          "kind": "activate",
+          "expect": "pluginManager/listPlugins 返回 moduleName 为 dsh-chat-import 的行，enabled 为 true 且 fiberPhase 为 active；模型侧工具清单里出现 scan_discover、import_chat"
+        },
+        {
+          "id": "scan-import",
+          "kind": "tool",
+          "expect": "scan_discover 返回本机可发现的会话来源；对同一来源再次 import_chat 时不产生重复会话"
+        }
+      ]
+    },
+    {
+      "id": "s11-anysearch",
+      "category": "host-tools",
+      "heat": {
+        "monthlyDownloads": 16724,
+        "stars": 686,
+        "capturedAt": "2026-11-08"
+      },
+      "plugin": {
+        "name": "@anysearch/anysearch-dsh",
+        "version": "0.1.8",
+        "artifactSha256": "11a27b02ca77b73b512613e62cec14753681acaa7042b3794113f3f840c300bf",
+        "artifactBytes": 173153,
+        "tarball": "https://registry.npmjs.org/@anysearch/anysearch-dsh/-/anysearch-dsh-0.1.8.tgz",
+        "integrity": "sha512-N00VwXW5j2+IJKtURJIv5eaLJBqr+b/1oLL+B8pX2CfaHjIGPXop0l5fKXpr/iR9cS8cf9yjFOSeVaUa+rEO9A==",
+        "unpackedSize": 271190
+      },
+      "source": {
+        "kind": "npm-registry",
+        "repo": "https://github.com/anysearch-team/anysearch-dsh",
+        "gitHead": "d20ab97727b36b4341977e53d7c9b7d2e93d3d03",
+        "gitHeadStatus": "verified"
+      },
+      "surfaces": {
+        "client": null,
+        "clientEntryIds": [
+          "web-search-anysearch"
+        ],
+        "clientEntryIdsSameAsPackage": false,
+        "foreignPatchRows": [
+          {
+            "id": "web",
+            "name": null
+          }
+        ],
+        "tools": [
+          "anysearch_capabilities",
+          "anysearch_search"
+        ]
+      },
+      "metadata": {
+        "licenseField": "MIT",
+        "licenseFile": "MIT",
+        "main": "lib/index.js",
+        "mainExists": true,
+        "bundlePatch": "./cordis.patch.yml",
+        "bundlePatchExists": true,
+        "engines": {
+          "node": "^22.19.0 || >=24.0.0"
+        },
+        "client": null,
+        "dependencies": [
+          "@deepseek-ai/schemastery"
+        ],
+        "peerCount": 6
+      },
+      "notes": [
+        "只有宿主面：package.json 没有 dsh.client，不产生浏览器条目。判定只能靠 listPlugins 与工具可调用，拿 entries 缺失去判失败是错的。"
+      ],
+      "cases": [
+        {
+          "id": "install",
+          "kind": "install",
+          "expect": "dsh plugin add @anysearch/anysearch-dsh@0.1.8 退出码 0，profile 的 dsh.profile.bundles 出现 @anysearch/anysearch-dsh"
+        },
+        {
+          "id": "activate-host",
+          "kind": "activate",
+          "expect": "pluginManager/listPlugins 返回 moduleName 为 @anysearch/anysearch-dsh 的行，enabled 为 true 且 fiberPhase 为 active；模型侧工具清单里出现 anysearch_capabilities、anysearch_search"
+        },
+        {
+          "id": "host-tools",
+          "kind": "tool",
+          "expect": "anysearch_capabilities 返回可用的域名或标签清单；未配置 API Key 时返回可读的错误说明，而不是静默空结果"
+        }
+      ]
+    }
+  ]
+}
