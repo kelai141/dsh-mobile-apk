@@ -68,7 +68,8 @@
 
 填写要求：
 
-- `upstream.commit` 与 `upstream.baseline` 取自 `scripts/contract.json`，两侧必须同源；
+- `upstream.commit` 与 `upstream.baseline` 取自各自构建使用的 `scripts/contract.json`；
+  Rust A/B 两侧必须同源，追版对照须显式指定巡检报告；
 - `apk.apkSha256` 是本次安装的 APK 字节哈希，不是版本号；
 - `apk.snapshotFingerprint` 记录两边实际快照。Rust 改动可以改变快照，指纹不要求相同；
 - `environment` 必须完整且一致。测试计划摘要包含同一批用例和输入环境；
@@ -107,6 +108,18 @@ node scripts/verify-plugin-compat-evidence.mjs --baseline base.json --candidate 
 node scripts/verify-plugin-compat-evidence.mjs --baseline base.json --candidate cand.json --json
 node scripts/verify-plugin-compat-evidence.mjs --self-test
 ```
+
+默认模式用于隔离 Rust 改动，上游提交和版本必须一致。验证上游追版时，使用
+`巡检 Harness 上游候选` 工作流生成的 `report.json`，从两份不同的 APK 取证：
+
+```bash
+node scripts/verify-plugin-compat-evidence.mjs --baseline old.json --candidate next.json \
+  --upstream-audit upstream-audit/report.json --report adoption-compat.json
+```
+
+两侧证据须分别对应巡检报告中的旧基线和候选提交、版本。设备、ABI、插件制品、
+配置、测试计划和功能判据仍须一致。结果只证明所列插件用例的兼容性；构建、整包
+WebUI 回归和功能完整性证据仍需单独核对，巡检本身不会修改稳定基线。
 
 报告逐条列出所有非 pass 用例，末行是机器可读结论：
 
