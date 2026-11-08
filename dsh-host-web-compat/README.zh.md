@@ -10,11 +10,14 @@
 旧内核（如模拟器自带浏览器、旧 WebView）缺少新 API，导致宿主页面功能直接抛错：
 
 - 缺 `AbortSignal.any()` → 工作区目录选择器的并发 RPC 取消抛错（列表空白）；
+- 缺 `AbortSignal.prototype.throwIfAborted()` → 旧 WebView 的工作区选择请求可能抛错；
 - 缺 `Promise.withResolvers()` → 宿主 boot 就绪尾脚本抛错，插件树加载失败；
 - 缺全局 `Iterator`（Chrome 122+）→ 上游 0.1.5 客户端包（documentpreview 等）import 期
   `Iterator is not defined`，整树报「Failed to load plugins」。
 
 本插件在 HTML 层注入幂等 polyfill——无需浏览器侧改动。
+
+Android 10 及以下由壳传入当前用户的公共存储根。首页和侧栏沿用原工作区入口，选取过程在 WebView 内完成。输入路径、浏览选取都受同一根目录限制，交给 DSH 创建工作区前由引擎实际探测读写；未授权时可直接使用应用私有的临时工作区。Android 11 及以上沿用系统目录选择器。
 
 ## 快速开始
 

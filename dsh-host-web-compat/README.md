@@ -13,6 +13,7 @@ shell APK's directory picker and path-open channels.
 Older kernels (MuMu's bundled browser, older WebViews) lack APIs the host page calls directly:
 
 - missing `AbortSignal.any()` breaks the workspace directory picker's concurrent RPC cancellation;
+- missing `AbortSignal.prototype.throwIfAborted()` can fail workspace picker requests on older WebViews;
 - missing `Promise.withResolvers()` breaks the host boot-ready tail script, failing the plugin tree;
 - missing global `Iterator` (Chrome 122+) makes upstream 0.1.5 client bundles (documentpreview and
   others) throw `Iterator is not defined` at import time ("Failed to load plugins").

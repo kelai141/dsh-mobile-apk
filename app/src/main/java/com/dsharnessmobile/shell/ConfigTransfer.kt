@@ -296,6 +296,9 @@ internal class DirectoryPickerController(private val activity: MainActivity) {
       // 无 toast、无 hint、chip 不变、什么都没有。现在无论有没有在途选择都给可见回执。
       val granted = !grants.values.contains(false)
       if (callback == null) {
+        // The in-app directory picker owns this request; let it retry the
+        // current folder after the actual system answer, even on slow devices.
+        if (android.os.Build.VERSION.SDK_INT < 30) activity.notifyLegacyStorageResult()
         // 授权入口（非 pick 在途）路径：结果要看得见，且要区分「本次拒绝」与「永久拒绝」。
         if (granted) {
           toastIfPossible("存储权限已授予")
@@ -533,6 +536,11 @@ internal class MediaPickController(private val activity: MainActivity) {
   // 文件上传（<input type=file> → WebView onShowFileChooser → 系统文件选择器）。
   // 与目录选择（DirectoryPickerController，工作区用）分离：多选、任意类型。
   private var filePathCallback: ValueCallback<Array<Uri>>? = null
+  private var legacyPicker: LegacyAttachmentPicker? = null
+  private val legacyReadPermission =
+    activity.registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+      legacyPicker?.refresh()
+    }
 
   private val filePicker =
     activity.registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
@@ -563,6 +571,7 @@ internal class MediaPickController(private val activity: MainActivity) {
   private fun deliver(uris: List<Uri>) {
     val callback = filePathCallback
     filePathCallback = null
+    legacyPicker = null
     if (callback != null) {
       callback.onReceiveValue(if (uris.isEmpty()) null else uris.toTypedArray())
     }
@@ -582,15 +591,20 @@ internal class MediaPickController(private val activity: MainActivity) {
     // 两个入口打开同一界面（用户原话「俩控件跳转都是跳到了文件 picker 而不是一个文件一个相册」）。
     //
     // 现在回到按声明分流，但保留当年的兜底：只有**真的没声明**或声明非图片时才用 */*。
-    val declared = (params.acceptTypes ?: emptyArray()).map { it.trim() }.filter { it.isNotEmpty() }
-    if (AcceptRouting.isImageOnly(declared)) {
-      filePathCallback?.onReceiveValue(null)
-      filePathCallback = callback
-      imagePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+    if (filePathCallback != null) {
+      callback.onReceiveValue(null)
       return true
     }
-    filePathCallback?.onReceiveValue(null)
+    val declared = (params.acceptTypes ?: emptyArray()).flatMap { it.split(',') }.map { it.trim() }.filter { it.isNotEmpty() }
     filePathCallback = callback
+    if (AcceptRouting.isImageOnly(declared)) {
+      try {
+        imagePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+      } catch (_: android.content.ActivityNotFoundException) {
+        deliver(emptyList())
+      }
+      return true
+    }
     // apk #182-1：页面可能给**扩展名型** accept（`accept=".pdf"`），原样交给 DocumentsUI 它认不出
     // （列表里看不到 pdf）。逐 token 归一化：`image/*` 这类通配保留、`.ext` 走 MimeTypeMap 查 MIME、
     // 查不到的并入 `*/*`（宁可放宽也不要「一个文件都看不到」）。
@@ -609,7 +623,28 @@ internal class MediaPickController(private val activity: MainActivity) {
       }
     }
     if (wildcard || normalized.isEmpty()) normalized.add("*/*")
-    filePicker.launch(normalized.toTypedArray())
+    val openSystem = {
+      try {
+        filePicker.launch(normalized.toTypedArray())
+      } catch (_: android.content.ActivityNotFoundException) {
+        deliver(emptyList())
+        val zh = activity.resources.configuration.locales[0].language == "zh"
+        android.widget.Toast.makeText(activity,
+          if (zh) "找不到系统文件选择器" else "No system file picker is available", android.widget.Toast.LENGTH_LONG).show()
+      }
+    }
+    val openFile = params.mode == WebChromeClient.FileChooserParams.MODE_OPEN ||
+      params.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE
+    if (android.os.Build.VERSION.SDK_INT < 30 && openFile) {
+      val accept = if (wildcard) emptyList() else declared
+      legacyPicker = LegacyAttachmentPicker(
+        activity, accept, params.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE,
+        { legacyReadPermission.launch(android.Manifest.permission.READ_EXTERNAL_STORAGE) },
+        openSystem, ::deliver,
+      ).also { it.show() }
+    } else {
+      openSystem()
+    }
     return true
   }
 

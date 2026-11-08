@@ -12,6 +12,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { createContext, runInContext } from 'node:vm'
+import { openLegacyWorkspacePicker } from '../lib/legacy-workspace-page.js'
 
 const SRC = readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8')
 
@@ -239,7 +240,7 @@ test('S3-22 目录选择轮询：页面隐藏即停、可见即续（旧实现�
   assert.ok(tplStart > 0, '必须能定位 PICKER_SCRIPT')
   const closeTick = SRC.indexOf('</scr` + `ipt>`;', tplStart)
   assert.ok(closeTick > tplStart, '必须能定位 PICKER_SCRIPT 模板串闭合')
-  const evaluated = new Function(SRC.slice(tplStart, closeTick) + '`; return PICKER_SCRIPT')()
+  const evaluated = new Function('openLegacyWorkspacePicker', SRC.slice(tplStart, closeTick) + '`; return PICKER_SCRIPT')(openLegacyWorkspacePicker)
   const inner = evaluated.replace(/^<script>/, '').replace(/<\/script>$/, '')
 
   const timers = []
@@ -253,7 +254,7 @@ test('S3-22 目录选择轮询：页面隐藏即停、可见即续（旧实现�
   const win = { androidBridge: { getPickToken: () => 't', pickDirectory: () => {} } }
   const ctx = createContext({
     window: win, document: doc, fetch: () => { fetches++; return Promise.resolve({ json: () => Promise.resolve({}) }) },
-    setTimeout: (fn, ms) => { timers.push(ms); return timers.length }, Promise,
+    setTimeout: (fn, ms) => { timers.push(ms); return timers.length }, clearTimeout: () => {}, Promise,
   })
   runInContext(inner, ctx)
   await new Promise((r) => setTimeout(r, 10))
@@ -290,7 +291,7 @@ test('注入脚本体内不得含字面量 </head> 或 </script>（会误导 tap
     const s = SRC.indexOf(marker)
     if (s < 0) continue
     const c = SRC.indexOf('`;', s)
-    const evaluated = new Function(SRC.slice(s, c + 2) + '; return ' + name)()
+    const evaluated = new Function('openLegacyWorkspacePicker', SRC.slice(s, c + 2) + '; return ' + name)(openLegacyWorkspacePicker)
     const inner = evaluated.replace(/^<script>/, '').replace(/<\/script>$/, '')
     assert.ok(!inner.includes('</head>'),
       name + ' 体内含字面量 </head> —— tapIndex 的 replace 会命中它而不是真文档 </head>，把注入内容塞进 <script> 内部并渲染成文本')

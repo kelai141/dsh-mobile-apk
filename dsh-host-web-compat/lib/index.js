@@ -10,9 +10,17 @@ import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { resolve as resolvePath } from 'node:path'
 import { Service } from '@deepseek-ai/cordis'
+import { createLegacyWorkspace, legacyWorkspaceError } from './legacy-workspace.js'
+import { legacyWorkspaceStyle, openLegacyWorkspacePicker } from './legacy-workspace-page.js'
 
 /** Polyfill snippet per missing API (idempotent: skipped when already present). */
 const POLYFILLS = [
+  // Older WebViews have AbortSignal but lack this method. Preserve cancellation
+  // and custom reasons when the WebView has a reason property.
+  `if(typeof AbortSignal!=='undefined'&&typeof AbortSignal.prototype.throwIfAborted!=='function'){
+Object.defineProperty(AbortSignal.prototype,'throwIfAborted',{configurable:true,writable:true,value:function(){
+if(this.aborted)throw 'reason' in this?this.reason:new DOMException('The operation was aborted.','AbortError')
+}})}`,
   // AbortSignal.any: Chrome 116+/Node 20.3+; absent in older WebViews
   // issue #1055 ③：旧实现两个缺陷——① 一个监听都不移除（长寿 signal 上派生 200 个就挂 200 个，
   // 派生 signal 中止后仍挂着）；② 自造 AbortError，丢源 reason（`AbortSignal.any([AbortSignal.timeout(5)])`
@@ -1041,6 +1049,7 @@ applyCanvasTheme(dark)
 /** Page side: directory-picker bridge + open-path route + permission-prompt callback (idempotent injection). */
 const PICKER_SCRIPT = `<script>(function(){
 if(window.__dshBridge){return}
+var openLegacyWorkspacePicker=${openLegacyWorkspacePicker.toString()};
 window.__dshBridge={
 onDirectoryPicked:function(callbackId,path){
 try{var h={'content-type':'application/json'};if(window.androidBridge&&window.androidBridge.getPickToken){h['x-dsh-pick-token']=window.androidBridge.getPickToken()}fetch('/api/android/dir-pick/result',{method:'POST',headers:h,body:JSON.stringify({requestId:callbackId,path:path})})}catch(e){}
@@ -1064,25 +1073,38 @@ return window.androidBridge.openNativePath(path)===true;
 }catch(e){}
 return false;
 };
-var requestedIds={};
+var legacyClose;
 function pickHeaders(){
 var h={};
 if(window.androidBridge&&window.androidBridge.getPickToken){h['x-dsh-pick-token']=window.androidBridge.getPickToken()}
 return h;
 }
+function legacyRequest(action, requestId, fields, signal){
+var h=pickHeaders();
+if(action==='list'){
+var query='?requestId='+encodeURIComponent(requestId);
+if(fields.path!==undefined)query+='&path='+encodeURIComponent(fields.path);
+return fetch('/api/android/dir-pick/browse'+query,{headers:h,signal:signal,cache:'no-store'}).then(function(r){return r.json()})
+}
+h['content-type']='application/json';
+return fetch('/api/android/dir-pick/result',{method:'POST',headers:h,signal:AbortSignal.timeout(10000),body:JSON.stringify({requestId:requestId,path:fields.path,temporary:fields.temporary})}).then(function(r){return r.json()})
+}
 function poll(){
-try{fetch('/api/android/dir-pick/poll',{headers:pickHeaders()}).then(function(r){return r.json()}).then(function(j){
-if(j&&j.requestId&&window.androidBridge&&!requestedIds[j.requestId]){
-requestedIds[j.requestId]=true;window.androidBridge.pickDirectory(j.requestId)
+try{fetch('/api/android/dir-pick/poll',{headers:pickHeaders(),cache:'no-store'}).then(function(r){return r.json()}).then(function(j){
+if(j&&j.requestId&&window.androidBridge){
+if(j.legacy){
+if(legacyClose)legacyClose();
+legacyClose=openLegacyWorkspacePicker(j.requestId,legacyRequest,function(){window.androidBridge.requestAllFilesAccess()})
+}else{window.androidBridge.pickDirectory(j.requestId)}
 }
 }).catch(function(){}).then(schedule)}catch(e){schedule()}
 }
 // S3-22：页面隐藏时暂停轮询（旧实现无条件每 500ms 打一次 /api/android/dir-pick/poll，
 // 应用切到后台/锁屏后照样打——纯耗电与日志噪声；可见时立即续上，不留空窗）。
 // 注意：本段位于模板串内，注释里不得出现反引号。
-var POLL_MS=500;
-function schedule(){if(document.hidden){return}setTimeout(poll,POLL_MS)}
-document.addEventListener('visibilitychange',function(){if(!document.hidden){schedule()}})
+var POLL_MS=500,pollTimer;
+function schedule(){clearTimeout(pollTimer);if(document.hidden){return}pollTimer=setTimeout(poll,POLL_MS)}
+document.addEventListener('visibilitychange',schedule)
 poll()
 })();
 // apk #350：判断某个元素是否已由上游自己接管点击（React 在根容器上以委托方式处理 onClick，
@@ -1359,7 +1381,7 @@ try{
 
 const POLYFILL_SCRIPT =
   '<script>' + POLYFILL_SCRIPT_BODY + '</scr' + 'ipt>' + BOOT_WATCHDOG_SCRIPT + THEME_BRIDGE_SCRIPT + PICKER_SCRIPT
-  + CLIPBOARD_FALLBACK_SCRIPT;
+    + legacyWorkspaceStyle + CLIPBOARD_FALLBACK_SCRIPT;
 
 /**
  * §2.3（0.14.1 块C）静态失败占位 + `window.onerror` 兜底。
@@ -1528,12 +1550,26 @@ class AndroidDirectoryPicker extends Service {
     // twice would re-launch the SAF chooser per poll (observed: picker
     // stacking). A request is handed out exactly once and re-armed only by
     // the next pick().
+    // Keep the single modal alive while a second caller requests a pick.
+    for (const entry of this.pending.values()) if (entry.delivered) return null
     for (const [id, entry] of this.pending) {
       if (entry.delivered) continue
       entry.delivered = true
       return id
     }
     return null
+  }
+
+  isDelivered(requestId) {
+    return this.pending.get(requestId)?.delivered === true
+  }
+
+  resolveLegacy(requestId, path) {
+    if (!this.isDelivered(requestId)) return false
+    const entry = this.pending.get(requestId)
+    this.pending.delete(requestId)
+    entry.resolve(path)
+    return true
   }
 
   /**
@@ -1650,6 +1686,8 @@ export function apply(ctx) {
   // fetches the same token via androidBridge.getPickToken() and sends it as x-dsh-pick-token;
   // other local processes/pages have no token, so they can't poll or forge directory-pick results.
   const picker = new AndroidDirectoryPicker(ctx);
+  const legacyRoot = process.env.DSH_LEGACY_WORKSPACE_ROOT;
+  const legacy = /^\/storage\/emulated\/\d+$/.test(legacyRoot ?? '') ? createLegacyWorkspace(legacyRoot, homedir()) : null;
   const token = process.env.DSH_PICK_TOKEN || '';
   // C1 (2026-08-16): fail-closed — with an empty token (engine started without one / missing env),
   // every request is rejected, never fall-back-allowed; the shell's process-level shared token keeps
@@ -1665,7 +1703,31 @@ export function apply(ctx) {
         return
       }
       res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ requestId: picker.takePoll() }))
+      res.end(JSON.stringify({ requestId: picker.takePoll(), legacy: legacy !== null }))
+    },
+  });
+  const disposeBrowse = ctx.webServer.register({
+    kind: 'exact',
+    path: '/api/android/dir-pick/browse',
+    handler: async (req, res) => {
+      if (!authorized(req)) {
+        res.writeHead(403)
+        res.end('forbidden')
+        return
+      }
+      const url = new URL(req.url, 'http://localhost')
+      if (!legacy || !picker.isDelivered(url.searchParams.get('requestId'))) {
+        res.writeHead(404, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+        res.end('{"ok":false,"error":"expired"}')
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      try {
+        const listing = await legacy.list(url.searchParams.get('path') ?? undefined)
+        res.end(JSON.stringify({ ok: true, listing }))
+      } catch (e) {
+        res.end(JSON.stringify({ ok: false, error: legacyWorkspaceError(e) }))
+      }
     },
   });
   const disposeResult = ctx.webServer.register({
@@ -1684,9 +1746,25 @@ export function apply(ctx) {
         if (size > 64 * 1024) { req.destroy(); return } // loopback malicious-client cap
         body += chunk
       })
-      req.on('end', () => {
+      req.on('end', async () => {
         try {
-          const { requestId, path } = JSON.parse(body)
+          const { requestId, path, temporary } = JSON.parse(body)
+          if (legacy) {
+            let result
+            if (!picker.isDelivered(requestId)) result = { ok: false, error: 'expired' }
+            else {
+              try {
+                const picked = path == null && temporary !== true ? null : await legacy.select(path, temporary === true)
+                const ok = picker.resolveLegacy(requestId, picked)
+                result = ok ? { ok } : { ok, error: 'expired' }
+              } catch (e) {
+                result = { ok: false, error: legacyWorkspaceError(e) }
+              }
+            }
+            res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+            res.end(JSON.stringify(result))
+            return
+          }
           picker.resolve(requestId, path ?? null)
           res.writeHead(200, { 'content-type': 'application/json' })
           res.end('{"ok":true}')
@@ -1733,6 +1811,7 @@ export function apply(ctx) {
   });
   ctx.effect(() => () => {
     disposePoll()
+    disposeBrowse()
     disposeResult()
     disposeOpenPath()
   });

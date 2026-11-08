@@ -1589,7 +1589,8 @@ class MainActivity : ComponentActivity() {
       override fun onShowFileChooser(
         webView: WebView, filePathCallback: ValueCallback<Array<Uri>>, fileChooserParams: FileChooserParams,
       ): Boolean {
-        // 文件上传/图片选择委托 MediaPickController（系统文件选择器或相册）。
+        if (!isEngineSource(trustedTopFrameUrl)) return false
+        // 旧系统可直接浏览公共目录；相册和系统文件选择器仍由控制器分流。
         return mediaPickerController.handleFileChooser(filePathCallback, fileChooserParams)
       }
 
@@ -1635,7 +1636,7 @@ class MainActivity : ComponentActivity() {
             false
           }
         },
-        onAllFilesAccessRequest = { dirPickerController.openAllFilesAccessSettings() },
+        onAllFilesAccessRequest = { runOnUiThread { dirPickerController.requestStorageGrant() } },
 
         onExportConfig = { engineManager.exportConfig() },
         onImportConfig = { engineManager.importConfig() },
@@ -2401,6 +2402,12 @@ class MainActivity : ComponentActivity() {
       LogCollector.writeBootDiag(this, "adb-keyboard-nonce-write-failed", reason)
     } catch (_: Throwable) {
       // 诊断写不进去时至少 Log.e 已留下；不影响启动。
+    }
+  }
+
+  internal fun notifyLegacyStorageResult() {
+    if (::webView.isInitialized && isEngineSource(trustedTopFrameUrl)) {
+      webView.evaluateJavascript("window.dispatchEvent(new Event('dsh-legacy-storage-result'))", null)
     }
   }
 }
