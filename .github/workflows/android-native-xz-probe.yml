@@ -1,0 +1,81 @@
+name: Android 原生 XZ 探针
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/android-native-xz-probe.yml'
+      - 'scripts/android-native/xz-decode-probe/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  xz-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-linux-android, x86_64-linux-android]
+    env:
+      TARGET: ${{ matrix.target }}
+      MANIFEST: scripts/android-native/xz-decode-probe/Cargo.toml
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: 准备 Rust 与 Android NDK
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.99.0 --profile minimal --component rustfmt --target "$TARGET"
+          if [[ ! -x "$ANDROID_HOME/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" ]]; then
+            sudo "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'ndk;27.0.12077973'
+          fi
+      - name: 本机验证摘要及坏输入反证
+        if: matrix.target == 'x86_64-linux-android'
+        run: |
+          set -euo pipefail
+          cargo +1.99.0 fmt --manifest-path "$MANIFEST" --check
+          cargo +1.99.0 build --locked --release --manifest-path "$MANIFEST" --target-dir "$RUNNER_TEMP/xz-build"
+          python3 - "$RUNNER_TEMP/xz-build/release/dsh-xz-decode-probe" <<'PY'
+          import hashlib, lzma, pathlib, subprocess, sys, tempfile
+          data = "dsh 快照探针\n".encode() * 4096
+          compressed = lzma.compress(data)
+          with tempfile.TemporaryDirectory() as d:
+              good = pathlib.Path(d) / "good.xz"
+              good.write_bytes(compressed)
+              bad = pathlib.Path(d) / "truncated.xz"
+              bad.write_bytes(compressed[:-12])
+              for workers in ("1", "2"):
+                  args = (workers, str(len(data)), hashlib.sha256(data).hexdigest())
+                  subprocess.run((sys.argv[1], good, *args), check=True)
+                  wrong_size = (workers, str(len(data) + 1), args[2])
+                  for path, config in ((bad, args), (good, wrong_size)):
+                      result = subprocess.run((sys.argv[1], path, *config), check=False)
+                      if result.returncode != 1:
+                          raise SystemExit(f"负控未被明确拒绝：{path.name} {config[0]}")
+          PY
+      - name: 交叉编译并核对 ELF 架构及 16 KB 对齐
+        run: |
+          set -euo pipefail
+          ndk="$ANDROID_HOME/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export RUSTFLAGS='-C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384'
+          linker_env="CARGO_TARGET_${TARGET^^}_LINKER"
+          export "${linker_env//-/_}=$ndk/${TARGET}26-clang"
+          cargo +1.99.0 build --locked --release --manifest-path "$MANIFEST" \
+            --target-dir "$RUNNER_TEMP/xz-build" --target "$TARGET"
+          binary="$RUNNER_TEMP/xz-build/$TARGET/release/dsh-xz-decode-probe"
+          machine=$("$ndk/llvm-readelf" --file-header "$binary")
+          case "$TARGET" in
+            aarch64-linux-android) grep -Fq AArch64 <<< "$machine" ;;
+            x86_64-linux-android) grep -Fq X86-64 <<< "$machine" ;;
+          esac
+          "$ndk/llvm-readelf" --program-headers "$binary" |
+            awk '$1 == "LOAD" { found=1; if ($NF != "0x4000") bad=1 } END { exit (!found || bad) }'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xz-probe-${{ matrix.target }}
+          path: ${{ runner.temp }}/xz-build/${{ matrix.target }}/release/dsh-xz-decode-probe
+          if-no-files-found: error
+          retention-days: 7
