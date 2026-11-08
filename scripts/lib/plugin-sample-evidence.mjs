@@ -42,4 +42,3 @@ export function applyCase(evidence, sampleId, entry) {
   sample.cases[index] = { ...sample.cases[index], ...entry }
   return evidence
 }
-

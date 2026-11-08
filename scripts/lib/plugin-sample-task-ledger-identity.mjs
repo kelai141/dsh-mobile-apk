@@ -43,7 +43,14 @@ export function judgeIdentity(observation) {
     return { verdict: 'INCONCLUSIVE', detail: '鉴权被拒（' + status + '）：本次观测不能说明插件是否工作', reason: 'auth' }
   }
   if (status !== 200) {
-    return { verdict: 'FAIL', detail: '状态码 ' + status + '（期望 200）', reason: 'status-' + status }
+    let code
+    try { code = JSON.parse(body)?.code } catch { /* Non-JSON error response. */ }
+    const safeCode = typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : null
+    return {
+      verdict: 'FAIL',
+      detail: '状态码 ' + status + '（期望 200）' + (safeCode ? '；错误码 ' + safeCode : ''),
+      reason: 'status-' + status + (safeCode ? '-' + safeCode.toLowerCase().replaceAll('_', '-') : ''),
+    }
   }
   const text = typeof body === 'string' ? body : ''
   if (text.trim() === '') {
@@ -119,4 +126,3 @@ export function toEvidenceCase(judgement, evidence) {
   }
   return { ...base, status: 'unmeasured', detail: judgement.detail, evidence: [] }
 }
-

@@ -347,4 +347,3 @@ const connect = (url) => new Promise((resolvePromise, rejectPromise) => {
 
 // 只在直接运行时执行；被测试 import 时只导出纯函数，不触发任何设备访问。
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) await main()
-

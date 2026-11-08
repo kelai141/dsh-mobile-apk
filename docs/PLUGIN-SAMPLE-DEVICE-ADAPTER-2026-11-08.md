@@ -96,3 +96,19 @@ node scripts/verify-plugin-sample-device.mjs \
 
 脚本不会修改第三方插件、不改产物、不写 `node_modules`。它只读端点与组件清单。
 
+## 7. Android x86_64 对照记录
+
+同一 Android 35 独立 AVD、WebView 124.0.6367.219、同一快照指纹
+`ee4170b102613ee1492914687e5843dc398f232c035e5a20fd2a9457eb76dc00`，
+通过覆盖安装保留同一份插件和装配。固定版本的 npm 制品摘要与样本清单一致，设备锁文件
+记录相同 SHA-512；设备上的 `ledger-linux-amd64` 与制品中原件逐字节一致。
+
+| APK | SHA-256 | 宿主行 | 读取身份 |
+| --- | --- | --- | --- |
+| 无 Rust 中继的基线调试包 | `16121800ae9311f9edab44d7650fa854cba71d57b547b210cf2dafc34321d7a7` | active | HTTP 500 / `LEDGER_SCRIPT_FAILED` |
+| 带 Rust 中继的调试包 | `c1ce83acd556e8a9faf8e180bb855950fb263f795e84d1e2a9352234623dcc8e` | active | HTTP 500 / `LEDGER_SCRIPT_FAILED` |
+
+两侧 Android linker 均报告 `unexpected e_type: 2`。NDK `llvm-readelf` 确认
+随包辅助程序为 x86_64 `ET_EXEC`。因此这个身份接口的失败已存在于基线，与 Rust
+中继无关。没有修改第三方制品；该用例仍判失败，不能记作插件兼容通过。
+这里只比较了这一个 API；看板 UI、其他样本和 arm64 仍未覆盖。

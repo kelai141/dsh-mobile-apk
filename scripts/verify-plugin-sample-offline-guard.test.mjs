@@ -55,4 +55,3 @@ test('没有 --serial 时明确拒绝，而不是自己挑设备', () => {
   assert.equal(r.status, 2)
   assert.match(r.stderr, /--serial/)
 })
-

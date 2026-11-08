@@ -119,6 +119,13 @@ test('证据条目能进比较器而不被判结构错误', () => {
   assert.equal(bundle.samples[0].cases[0].id, 'identity-api')
 })
 
+test('同为 HTTP 500 的不同错误码不会归为同一个已知缺陷', () => {
+  const reply = code => ({ status: 500, body: JSON.stringify({ code, error: 'fixture' }) })
+  const key = code => toEvidenceCase(judgeIdentity(reply(code)), ['observation.json']).failureKey
+  assert.equal(key('LEDGER_SCRIPT_FAILED'), 'status-500-ledger-script-failed')
+  assert.notEqual(key('LEDGER_SCRIPT_FAILED'), key('LEDGER_STORAGE_FAILED'))
+})
+
 test('证据骨架默认全部未测', () => {
   const meta = {
     side: 'baseline',
@@ -212,4 +219,3 @@ test('无 --serial 时拒绝运行，不自行挑设备', () => {
     assert.match(String(e.stderr), /--serial/)
   }
 })
-
