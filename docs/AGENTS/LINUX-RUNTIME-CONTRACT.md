@@ -74,8 +74,11 @@ READY -> DISABLING -> INSTALLED_DISABLED
   launcher 误判前缀并 exec 宿主路径）；`unset` 先于 `env` 生效。
 - 启动描述：壳侧把「启动什么」收敛成单通道 `DSH_CONSOLE_LAUNCH`（JSON：schemaVersion / shell / argv /
   cwd / env / unset），中继只消费描述并 spawn，不解释启动策略（ADR-0001）。`ConsoleLaunch` 是唯一生产者。
+- 渲染：控制台页面用 xterm.js（MIT，随 APK 资产分发）渲染 VT/ANSI，PTY 路径原样转发控制序列；
+  `ConsoleAnsiStripper` 只保留给非 PTY 降级路径。渲染器缺失时页面回落纯文本（不判红，但 TUI 不可用）。
 - 冻结的判据：tty 真实（非 `not a tty`）、job control 打开、`stty size` 非 `0 0`、SIGWINCH 可送达、
-  交互输入被 guest 执行、`Ctrl-C` 中断、`exit` 后进程被回收。未通过前不得对外宣称「交互式 Linux 终端」。
+  交互输入被 guest 执行、`Ctrl-C` 中断、`exit` 后进程被回收；TUI 判据 = `top`/`vim` 能全屏渲染、
+  resize 后重绘、颜色 SGR 生效。未通过前不得对外宣称「交互式 Linux 终端」。
 
 ## 8. 发布验收口径（阻断项）
 

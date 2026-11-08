@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>DeepCode 控制台</title>
+<link rel="stylesheet" href="xterm/xterm.css">
 <style>
   :root {
     color-scheme: light dark;
@@ -169,6 +170,8 @@
       <button id="send" type="button">发送</button>
     </div>
   </div>
+<script src="xterm/xterm.js"></script>
+<script src="xterm/addon-fit.js"></script>
 <script>
 (function () {
   var output = document.getElementById('output');
@@ -191,6 +194,44 @@
     history = JSON.parse(localStorage.getItem('dsh-console-history') || '[]');
     if (!Array.isArray(history)) history = [];
   } catch (e) { history = []; }
+
+  /**
+   * VT/ANSI 渲染器（xterm.js）：此前页面是纯文本容器、壳侧剥离控制序列，导致 vim/top 等
+   * 全屏程序无法显示。这里让 xterm 接管 PTY 原始字节流；壳侧在真 PTY 路径不再剥离。
+   * 渲染器缺席时（资产缺失）自动回落旧行为，页面仍可用。
+   */
+  var term = null;
+  var fitAddon = null;
+  try {
+    if (typeof window.Terminal === 'function') {
+      output.textContent = '';
+      var holder = document.createElement('div');
+      holder.id = 'term';
+      holder.style.width = '100%';
+      holder.style.height = '100%';
+      output.appendChild(holder);
+      term = new window.Terminal({
+        allowProposedApi: true,
+        convertEol: false,
+        cursorBlink: true,
+        scrollback: 5000,
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+        fontSize: 13,
+        theme: { background: '#00000000', foreground: '#e6e6e6', cursor: '#e6e6e6' },
+      });
+      if (window.FitAddon && window.FitAddon.FitAddon) {
+        fitAddon = new window.FitAddon.FitAddon();
+        term.loadAddon(fitAddon);
+      }
+      term.open(holder);
+      term.write('快照内嵌 Termux bash。引擎未运行时也可排查启动失败。\r\n\r\n');
+      window.__term = term;
+      if (fitAddon) { try { fitAddon.fit(); } catch (e) {} }
+    }
+  } catch (e) {
+    term = null;
+    fitAddon = null;
+  }
 
   function trimOutput() {
     var children = output.childNodes;
@@ -219,6 +260,10 @@
 
   window.__consoleAppend = function (text) {
     if (!text) return;
+    if (term) {
+      term.write(text);
+      return;
+    }
     var node = document.createElement('span');
     node.textContent = text;
     output.appendChild(node);
@@ -397,6 +442,16 @@
   var lastCols = 0, lastRows = 0;
   function pushSize() {
     if (!window.consoleBridge || !window.consoleBridge.resize) return;
+    if (term && fitAddon) {
+      try { fitAddon.fit(); } catch (e) {}
+      var tcols = Math.max(20, term.cols);
+      var trows = Math.max(5, term.rows);
+      if (tcols === lastCols && trows === lastRows) return;
+      lastCols = tcols;
+      lastRows = trows;
+      try { window.consoleBridge.resize(tcols, trows); } catch (e2) {}
+      return;
+    }
     var probe = document.createElement('span');
     var cs = window.getComputedStyle(output);
     probe.style.font = cs.font || (cs.fontSize + ' ' + cs.fontFamily);
@@ -503,10 +558,11 @@
     try { window.consoleBridge.close(); } catch (e) {}
   });
   document.getElementById('clearBtn').addEventListener('click', function () {
+    if (term) { term.clear(); return; }
     output.textContent = '';
   });
   document.getElementById('copyBtn').addEventListener('click', function () {
-    var text = output.innerText || '';
+    var text = term ? (term.getSelection() || '') : (output.innerText || '');
     var btn = document.getElementById('copyBtn');
     try {
       if (window.consoleBridge.copyText) window.consoleBridge.copyText(text);

@@ -20,9 +20,9 @@ import java.util.concurrent.TimeUnit
  * and every full-screen program refuses to start. The snapshot's script(1) was the first attempt
  * and did not work — see [ConsolePty] for the measured reason.
  *
- * Output: control sequences pass through [ConsoleAnsiStripper] because the page (console.html) is a
- * plain-text container. The stripping is the current rendering compromise, not a property of the
- * PTY — a page-side ANSI renderer replaces exactly this layer and nothing else.
+ * Output: the page renders VT/ANSI with xterm.js (assets/xterm/), so the PTY path forwards control
+ * sequences verbatim. [ConsoleAnsiStripper] remains only for the non-PTY fallback (no renderer
+ * guarantee; the page falls back to plain text when the renderer assets are absent).
  */
 class ConsoleSession(private val context: Context) {
 
@@ -277,10 +277,9 @@ class ConsoleSession(private val context: Context) {
               next = null
               val data = ConsolePty.dataOf(line)
               if (data != null) {
-                val chunk = stripper.feed(data)
-                if (chunk.isNotEmpty()) {
-                  output.append(chunk)
-                }
+                // 页面用 xterm.js 渲染 VT/ANSI；真 PTY 路径必须原样转发，
+                // 否则全屏程序（vim/top）的控制序列会被剥掉。仅非 PTY 降级路径继续剥离。
+                if (data.isNotEmpty()) output.append(data)
                 continue
               }
               val op = ConsolePty.fieldOf(line, "op")
