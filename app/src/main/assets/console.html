@@ -224,6 +224,12 @@
         term.loadAddon(fitAddon);
       }
       term.open(holder);
+      // TUI 交互键：xterm 的原始字节经编码后送进 PTY（writeKeys 走 ConsoleKeyCodec 解码）。
+      if (term.onData && window.consoleBridge && window.consoleBridge.writeKeys) {
+        term.onData(function (data) {
+          try { window.consoleBridge.writeKeys(encodeKeys(data)); } catch (e) {}
+        });
+      }
       term.write('快照内嵌 Termux bash。引擎未运行时也可排查启动失败。\r\n\r\n');
       window.__term = term;
       if (fitAddon) { try { fitAddon.fit(); } catch (e) {} }
@@ -232,6 +238,28 @@
     term = null;
     fitAddon = null;
   }
+
+  /**
+   * 把终端输入编码成壳侧 ConsoleKeyCodec 认识的串（\n/\r/\t/\e/\\ 与 \xHH）。
+   * 直接传裸控制字符会被 Android WebView 的 @JavascriptInterface 静默丢弃，所以必须编码。
+   * 先按 UTF-8 取字节，避免中文等非 ASCII 输入被 \xHH 按 UTF-16 码元切坏。
+   */
+  function encodeKeys(data) {
+    var bytes = new TextEncoder().encode(String(data || ''));
+    var out = '';
+    for (var i = 0; i < bytes.length; i++) {
+      var b = bytes[i];
+      if (b === 10) out += '\\n';
+      else if (b === 13) out += '\\r';
+      else if (b === 9) out += '\\t';
+      else if (b === 27) out += '\\e';
+      else if (b === 92) out += '\\\\';
+      else if (b >= 32 && b < 127) out += String.fromCharCode(b);
+      else out += '\\x' + ('0' + b.toString(16)).slice(-2);
+    }
+    return out;
+  }
+  window.__encodeKeys = encodeKeys;
 
   function trimOutput() {
     var children = output.childNodes;
