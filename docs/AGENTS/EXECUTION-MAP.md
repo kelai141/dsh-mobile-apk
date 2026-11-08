@@ -472,7 +472,7 @@ sequenceDiagram
 | K01 | 来件与选择器 | onCreate 投递 VIEW/SEND 来件，桥回调接 DirectoryPickerController/MediaPickController/FileIncoming | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:266 |
 | K01 | 快照与更新面 | 检查更新按钮与启动前快照刷新走 UpdateManager，自动回撤走 UndoGate 加 SnapshotTransaction | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:294 |
 | K01 | APK 更新动作 | 检查按钮与下载按钮**各自独立**（可用性相同、语义分离），与管理中心/设置页那一行**读同一份**状态（`ApkUpdateController`，Activity 作用域）；动作经唯一桥入口 `AndroidBridge.apkUpdate(action=status\|check\|install)` 发起，**不占用相位与主按钮**，且壳侧对 `window.__dshBridge` 写入面为 0 | app/src/main/java/com/dsharnessmobile/shell/ApkUpdateAction.kt:245 |
-| K01 | 内置控制台 | 引导页与控制台按钮 START ConsoleActivity，其 ConsoleSession 用与引擎同源的 shellEnv 起快照 bash，并叠加 ConsoleTerminalEnv 的 TERM/TERMINFO/VIMRUNTIME（缺这三个 TUI 一律起不来） | app/src/main/java/com/dsharnessmobile/shell/ConsoleSession.kt:32 |
+| K01 | 内置控制台 | 引导页与控制台按钮 START ConsoleActivity，其 ConsoleSession 用与引擎同源的 shellEnv 起快照 bash，并叠加 ConsoleTerminalEnv 的 TERM/TERMINFO/VIMRUNTIME（缺这三个 TUI 一律起不来） | app/src/main/java/com/dsharnessmobile/shell/ConsoleSession.kt#ConsoleSession@040bee0c |
 | K01 | 软件源切换 | 管理中心「软件源」行经 SourceSettings 双写 sources.list 与 chosen_mirrors，再跑 apt-get update 验证；失败按备份回滚（退出码不足以判成败） | app/src/main/java/com/dsharnessmobile/shell/SourceSettings.kt:88 |
 | K01 | 系统外部角色 | BootReceiver 接 ACTION_BOOT_COMPLETED 决定是否自启前台服务，分享面板经 VIEW/SEND 进本 Activity | app/src/main/java/com/dsharnessmobile/shell/BootReceiver.kt:24 |
 | K02 | K01 | 启动全程用引导页阶段承载文案，成功才切 WebUI | EngineStartFlow.kt:445-479、MainActivity.kt:145-155 |
@@ -481,7 +481,7 @@ sequenceDiagram
 | K02 | UndoGate | 看门狗 UNDO、启动超时与客户端插件树失败共用闸门：可点名时外科拔除非 Hard 插件；整份回撤只用当前 snapshot fingerprint 下的壳侧 HEALTHY known-good ID；被拒后复位锁存以继续引擎重试 | `app/src/main/java/com/dsharnessmobile/shell/EngineService.kt:215#expect=val%20bootAgeMs%20%3D%20nowMs%20-%20EngineManager.lastStartAttemptAt`-293、EngineStartFlow.kt:345-390、`UndoGate.kt:403-670#expect=*%20%E8%90%BD%E4%B8%80%E6%9D%A1%E9%97%B8%E9%97%A8%E8%A7%82%E6%B5%8B%EF%BC%88best-effort%EF%BC%8C%E7%BB%9D%E4%B8%8D%E6%8A%9B%EF%BC%89%E3%80%82**%E4%B8%8D%E7%BB%8F%20DevLogPrefs%20%E9%97%B8%E9%97%A8**%E2%80%94%E2%80%94%E5%AE%83%E5%BF%85%E9%A1%BB%E5%9C%A8%E9%BB%98%E8%AE%A4%E9%85%8D%E7%BD%AE%E4%B8%8B%E5%8F%AF%E8%A7%81%E3%80%82` |
 | K02 | 通知链 NotifyStore/NotifyCenter | 每拍按字节偏移消费 .task-done.ndjson，双读不双发 | WatchdogV2.kt:258-309、`NotifyCenter.kt:201#expect=override%20fun%20onChannelDegraded(category%3A%20String)%20%7B`
 | K02 | 控制载体 ControlCarrier | 随前台引擎服务起停，a11y 关着也承载 browser*/vd* | EngineService.kt:43 |
-| K02 | ConsoleSession | 复用 usrDir 与 shellEnv 起交互 shell，不起第二个引擎；输出经 ConsoleAnsiStripper 剥掉控制序列后上屏（页面是纯文本容器） | ConsoleSession.kt:32-47 |
+| K02 | ConsoleSession | 复用 usrDir 与 shellEnv 起交互 shell，不起第二个引擎；输出经 ConsoleAnsiStripper 剥掉控制序列后上屏（页面是纯文本容器） | app/src/main/java/com/dsharnessmobile/shell/ConsoleSession.kt#ConsoleSession@040bee0c |
 | K02 | 门禁 check-boot-budget | files/boot-segments.log 是该门禁的唯一产物 | LogCollector.kt:405-434 |
 | K03 | 引导与启动 | refreshSnapshot 的进度/失败文案与恢复前置由启动流拉起，刷新期 snapshotRefreshing 闸门禁止拉引擎 | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:427 |
 | K03 | 引擎探活与看门狗 | 每 5 秒一拍 onEngineProbe 驱动 .update-pending 的 usr-old 确认或回退 | `app/src/main/java/com/dsharnessmobile/shell/EngineService.kt:361#expect=val%20state%20%3D%20WatchdogV2.assessProbe%28this%29%20%7B%20isEpochCurrent%28epoch%29%20%7D` |
@@ -726,7 +726,7 @@ Journal publication (#593): `SnapshotTransaction.writeMarker` validates an exist
 
 APK download isolation (#592): each `UpdateChecker.download` attempt creates and cleans its own staging file. `ApkUpdateController` supplies an active-generation predicate and serializes final publication with epoch changes through `publicationLock`. Cancelled attempts cannot publish or delete a retry's staged bytes. `UpdateDownloadIsolationTest` exercises overlapping attempts, cancellation at publication, failed-read cleanup and complete successful delivery through controlled connections.
 
-Terminal output delivery (#591): `ConsoleSession` sends stripped PTY text through `ConsoleOutputBatcher`, which emits at the size threshold or an independently scheduled deadline. Ready/error/exit frames force a flush, and the reader's `finally` closes the batcher so EOF and exceptions release its scheduler. `ConsoleOutputBatcherTest` covers idle prompts, ordering, deadline cancellation and final draining.
+Terminal output delivery (#591): `ConsoleSession` sends stripped PTY text through `ConsoleOutputBatcher`, which emits at the size threshold or an independently scheduled deadline. Ready/error/exit frames force a flush, and the reader's `finally` closes the batcher so EOF and exceptions release its scheduler. `ConsoleOutputBatcherTest` covers idle prompts, ordering, deadline cancellation and final draining. Debug builds with the optional [Android native relay](../../scripts/android-native/console-relay/README.md) verify its ready frame before exposing the process to input writers and retain the existing Node fallback.
 
 #### K01 启动与引导面
 

@@ -2,7 +2,9 @@ package com.dsharnessmobile.shell
 
 import android.content.Context
 import android.util.Log
+import java.io.BufferedReader
 import java.io.File
+import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
 
 /**
@@ -13,7 +15,7 @@ import java.util.concurrent.TimeUnit
  * exist under this app domain — "terminals database is inaccessible", "TERM environment variable
  * not set." and "E1187: Failed to source defaults.vim" all trace back to that missing wiring.
  *
- * PTY: the shell runs under a node-pty relay ([ConsolePty]). A real pty is what makes
+ * PTY: the shell runs under the optional Android relay or node-pty ([ConsolePty]). A real pty is what makes
  * top/vim/termux-change-repo work at all; without it bash prints "no job control in this shell"
  * and every full-screen program refuses to start. The snapshot's script(1) was the first attempt
  * and did not work — see [ConsolePty] for the measured reason.
@@ -118,15 +120,11 @@ class ConsoleSession(private val context: Context) {
     }
 
     val node = File(engineManager.usrDir, ConsolePty.NODE_RELATIVE)
-    val relay = relayScript()
     val ptyModule = File(engineManager.usrDir, ConsolePty.DEFAULT_NODE_PTY)
-    // 三条依赖缺任一都退化为非 PTY：命令照样能敲，只是 TUI 不可用。
-    // 判据是文件存在，不猜系统版本，也不把「可能能用」当成「能用」。
-    val canUsePty = node.isFile && relay != null && ptyModule.isDirectory
 
     val gen = ++generation
     return try {
-      fun build(argv: List<String>): ProcessBuilder =
+      fun build(argv: List<String>, hasProtocol: Boolean): ProcessBuilder =
         ProcessBuilder(argv).also { p ->
           p.environment().putAll(engineManager.shellEnv())
           // 终端环境必须在**子进程启动前**就在环境里：bash -i 起来时 TERM 已定，
@@ -141,17 +139,23 @@ class ConsoleSession(private val context: Context) {
           // PTY 模式：输出是 JSON 帧流，stderr 不能并进来（一行日志就截断协议）；中继自身的
           // stderr 由专职 drain 线程消费（I6——无人读的管道写满 64KB 后写端永久阻塞）。
           // 非 PTY 降级：bash 的 stderr 合并进主输出（终端本来就是混流面，I6 的冻结形态）。
-          if (!canUsePty) p.redirectErrorStream(true)
+          if (!hasProtocol) p.redirectErrorStream(true)
         }
-      val argv = if (canUsePty) ConsolePty.argv(node, relay!!) else listOf(bash.absolutePath, "-i")
+      val native = if (BuildConfig.DEBUG) {
+        val executable = File(context.applicationInfo.nativeLibraryDir, NATIVE_RELAY)
+        if (executable.isFile) startNativeRelay(build(listOf(executable.absolutePath), true)) else null
+      } else null
+      val relay = if (native == null && node.isFile && ptyModule.isDirectory) relayScript() else null
+      val canUsePty = native != null || relay != null
+      val argv = if (relay != null) ConsolePty.argv(node, relay) else listOf(bash.absolutePath, "-i")
       // Same fallback as the engine: Android 15/16 and some OEM systems (Honor/Huawei, measured)
       // forbid the app domain from exec'ing an app-data ELF directly (EACCES Permission denied);
       // loading via /system/bin/linker64 matches the Android system-lib mechanism and always works.
-      val proc = try {
-        build(argv).start()
+      val proc = native?.process ?: try {
+        build(argv, canUsePty).start()
       } catch (e: java.io.IOException) {
         Log.w(TAG, "console: direct exec denied, falling back to linker64: " + e.message)
-        build(listOf("/system/bin/linker64") + argv).start()
+        build(listOf("/system/bin/linker64") + argv, canUsePty).start()
       }
       // M-c4：start 由后台线程执行，onDestroy 可能与 spawn 竞速——closed 已置位时当场回收，
       // 不留孤儿（destroy 会递增 generation，此后所有回调自然作废）。
@@ -184,7 +188,7 @@ class ConsoleSession(private val context: Context) {
           }
         }, "dsh-console-relay-err").apply { isDaemon = true }.start()
       }
-      val reader = Thread { readOutput(proc, gen, canUsePty, listener) }
+      val reader = Thread { readOutput(proc, gen, canUsePty, listener, native?.reader, native?.readyFrame) }
       reader.isDaemon = true
       if (canUsePty) {
         listener.onStatus(State.READY, "bash 已就绪（快照 Termux 环境，正在建立 PTY）")
@@ -201,8 +205,47 @@ class ConsoleSession(private val context: Context) {
     }
   }
 
+  private data class NativeRelay(val process: Process, val reader: BufferedReader, val readyFrame: String)
+
+  /** Verify exec and the first protocol frame before making this process visible to input writers. */
+  private fun startNativeRelay(builder: ProcessBuilder): NativeRelay? {
+    val process = try {
+      builder.start()
+    } catch (error: java.io.IOException) {
+      Log.w(TAG, "console: native relay exec failed; using Node fallback", error)
+      return null
+    }
+    val reader = process.inputStream.bufferedReader(Charsets.UTF_8)
+    val ready = FutureTask { reader.readLine() }
+    Thread(ready, "dsh-console-native-ready").apply { isDaemon = true }.start()
+    try {
+      val first = ready.get(3, TimeUnit.SECONDS)
+      if (first != null && ConsolePty.fieldOf(first, "op") == "ready") {
+        Log.i(TAG, "console: Android native relay ready")
+        return NativeRelay(process, reader, first)
+      }
+      Log.w(TAG, "console: native relay did not report ready; using Node fallback")
+    } catch (error: InterruptedException) {
+      Thread.currentThread().interrupt()
+    } catch (error: java.util.concurrent.ExecutionException) {
+      Log.w(TAG, "console: native relay read failed; using Node fallback", error)
+    } catch (error: java.util.concurrent.TimeoutException) {
+      Log.w(TAG, "console: native relay timed out; using Node fallback")
+    }
+    process.destroyForcibly()
+    ready.cancel(true)
+    return null
+  }
+
   /** Drain one relay and always settle unexpected EOF without duplicate exit events. */
-  internal fun readOutput(proc: Process, gen: Int, canUsePty: Boolean, listener: Listener) {
+  internal fun readOutput(
+    proc: Process,
+    gen: Int,
+    canUsePty: Boolean,
+    listener: Listener,
+    prefetchedReader: BufferedReader? = null,
+    firstFrame: String? = null,
+  ) {
     var exitSeenByReader = false
     try {
       if (canUsePty) {
@@ -213,9 +256,11 @@ class ConsoleSession(private val context: Context) {
           if (generation == gen) listener.onOutput(chunk)
         }
         try {
-          proc.inputStream.bufferedReader(Charsets.UTF_8).use { r ->
+          (prefetchedReader ?: proc.inputStream.bufferedReader(Charsets.UTF_8)).use { r ->
+            var next = firstFrame
             while (true) {
-              val line = r.readLine() ?: break
+              val line = next ?: r.readLine() ?: break
+              next = null
               val data = ConsolePty.dataOf(line)
               if (data != null) {
                 val chunk = stripper.feed(data)
@@ -425,6 +470,7 @@ class ConsoleSession(private val context: Context) {
 
   companion object {
     private const val TAG = "dsh-console"
+    private const val NATIVE_RELAY = "libdsh_console_relay.so"
 
     /** 输出聚合阈值（I7）：16KB 或 50ms 先到者触发一次回调。 */
     internal const val OUTPUT_FLUSH_BYTES = 16 * 1024
