@@ -126,12 +126,6 @@ class ConsoleSession(private val context: Context) {
     // 让「现有 node-pty 中继能否驱动 Debian guest bash」这件事在设备上可验，
     // 而不是只能靠推断。默认路径一个字节都不变。
     val shellOverride = ConsoleShellOverride.resolve(context)
-    if (shellOverride != null && !canUsePty) {
-      // 不静默退回快照 bash：那会把「验的是 Debian」变成「验的还是 Termux」的假绿。
-      Log.w(TAG, "console override present but PTY relay is unavailable")
-      listener.onStatus(State.FAILED, "控制台缺少 PTY 中继，无法启动自定义 shell（验收入口要求真 PTY）")
-      return false
-    }
 
     val gen = ++generation
     return try {
@@ -161,6 +155,12 @@ class ConsoleSession(private val context: Context) {
       } else null
       val relay = if (native == null && node.isFile && ptyModule.isDirectory) relayScript() else null
       val canUsePty = native != null || relay != null
+      if (shellOverride != null && !canUsePty) {
+        // 不静默退回快照 bash：那会把「验的是 Debian」变成「验的还是 Termux」的假绿。
+        Log.w(TAG, "console override present but PTY relay is unavailable")
+        listener.onStatus(State.FAILED, "控制台缺少 PTY 中继，无法启动自定义 shell（验收入口要求真 PTY）")
+        return false
+      }
       val argv = if (relay != null) ConsolePty.argv(node, relay) else listOf(bash.absolutePath, "-i")
       // Same fallback as the engine: Android 15/16 and some OEM systems (Honor/Huawei, measured)
       // forbid the app domain from exec'ing an app-data ELF directly (EACCES Permission denied);
