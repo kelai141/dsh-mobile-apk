@@ -1,0 +1,68 @@
+name: 巡检 Harness 上游候选
+
+on:
+  schedule:
+    - cron: '23 1 * * 1'
+  workflow_dispatch:
+    inputs:
+      candidate:
+        description: 完整上游提交 SHA（留空巡检官方默认分支）
+        required: false
+        type: string
+  pull_request:
+    paths:
+      - '.github/workflows/audit-harness-upstream.yml'
+      - 'scripts/contract.json'
+      - 'scripts/source-build/audit-harness-upstream*.mjs'
+      - 'scripts/source-build/harness-identity.mjs'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: 获取两棵源码树并生成差异
+        shell: bash
+        env:
+          CANDIDATE: ${{ inputs.candidate }}
+        run: |
+          set -euo pipefail
+          repo="$RUNNER_TEMP/harness.git"
+          output="$RUNNER_TEMP/harness-audit"
+          mkdir -p "$output"
+          baseline=$(node --input-type=module -e 'import { readHarnessIdentity } from "./scripts/source-build/harness-identity.mjs"; console.log(readHarnessIdentity().commit)')
+          if [[ -n "$CANDIDATE" && ! "$CANDIDATE" =~ ^[0-9a-f]{40}$ ]]; then
+            echo '::error::候选必须是完整的小写 Git 提交 SHA'
+            exit 1
+          fi
+          candidate_ref="${CANDIDATE:-HEAD}"
+          git init --bare "$repo"
+          git -C "$repo" fetch --no-tags --depth=1 https://github.com/deepseek-ai/deepseek-harness.git \
+            "${baseline}:refs/audit/baseline" "${candidate_ref}:refs/audit/candidate"
+          candidate=$(git -C "$repo" rev-parse refs/audit/candidate)
+          node scripts/source-build/audit-harness-upstream.mjs --repo "$repo" --candidate "$candidate" > "$output/report.json"
+          git -C "$repo" diff --binary --full-index --no-ext-diff --no-textconv \
+            "$baseline" "$candidate" -- > "$output/upstream.diff"
+          node -e '
+            const { baseline, candidate, decision, changes, changedPaths, risks } = require(process.argv[1]);
+            console.log("- 稳定基线：`" + baseline.commit + "` (" + baseline.version + ")");
+            console.log("- 上游候选：`" + candidate.commit + "` (" + JSON.stringify(candidate.version) + ")");
+            console.log("- 判定：`" + decision + "`");
+            console.log("- 变动的包：" + changes.length + "；变动的路径：" + changedPaths.length);
+            console.log("- 风险面：" + risks.join(", "));
+          ' "$output/report.json" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: harness-upstream-audit
+          path: ${{ runner.temp }}/harness-audit/
+          if-no-files-found: error
+          retention-days: 30
