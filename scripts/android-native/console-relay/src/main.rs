@@ -221,7 +221,11 @@ mod android {
     pub fn run() -> io::Result<()> {
         let env = |key| std::env::var_os(key).ok_or_else(|| other("missing console environment"));
         let shell = CString::new(env("DSH_CONSOLE_SHELL")?.as_bytes())?;
-        let cwd = CString::new(env("HOME")?.as_bytes())?;
+        let home = env("HOME")?;
+        let cwd = CString::new(home.as_bytes())?;
+        // Bash accepts this logical spelling when it names cwd. Android may return the
+        // /data/data alias from getcwd(), while HOME uses /data/user/0.
+        std::env::set_var("PWD", &home);
         let read_size = |key, fallback| {
             std::env::var(key)
                 .ok()

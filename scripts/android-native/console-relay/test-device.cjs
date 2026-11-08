@@ -7,7 +7,7 @@ const { createInterface } = require('node:readline')
 
 const relayPath = resolve(process.argv[2])
 const prefix = resolve('files/usr')
-const home = resolve('files/home')
+const home = '/data/user/0/com.dsharnessmobile.shell/files/home'
 const env = {
   ...process.env, HOME: home, PREFIX: prefix,
   LD_LIBRARY_PATH: prefix + '/lib', PATH: prefix + '/bin:/system/bin',
@@ -43,7 +43,7 @@ async function main() {
     assert.equal(live.frames[0].op, 'ready')
     assert.equal(live.frames[0].cols, 80)
     live.send({ op: 'resize', cols: 103, rows: 31 })
-    live.command("test -t 0 && [[ $- == *m* ]] && printf 'dsh-%s中文\\n' 'tty'; stty size")
+    live.command("test -t 0 && [[ $- == *m* && $PWD == \"$HOME\" ]] && printf 'dsh-%s中文\\n' 'tty'; stty size")
     await live.wait(() => /dsh-tty中文\r?\n31 103/.test(live.output()))
     live.command("printf 'sleep-%s\\n' 'ready'; sleep 20")
     await live.wait(() => live.output().includes('sleep-ready'))
