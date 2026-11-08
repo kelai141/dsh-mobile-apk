@@ -141,20 +141,12 @@ class ConsoleSession(private val context: Context) {
           // 终端环境必须在**子进程启动前**就在环境里：bash -i 起来时 TERM 已定，
           // 之后再 export 改变不了已经初始化的 ncurses 程序。
           p.environment().putAll(ConsoleTerminalEnv.terminalEnv(engineManager.usrDir))
-          // 覆盖条目自带 env 时先铺底：终端环境（TERM/TERMINFO/VIMRUNTIME）与 PS1 归覆盖方决定，
-          // 但中继协议键（PREFIX/NODE_PTY/SHELL/ARGS/CWD/尺寸）仍由壳侧最后写，页面侧不可劫持。
-          if (shellOverride != null) {
-            // 覆盖条目可以显式清掉宿主环境里的键（如 TERMUX__PREFIX 会让 guest launcher 误判前缀）。
-            // 必须先于覆盖 env 生效，否则同一键的显式 set 会被清掉。
-            for (key in shellOverride.unset) p.environment().remove(key)
-            if (shellOverride.env.isNotEmpty()) p.environment().putAll(shellOverride.env)
-            p.environment()["DSH_CONSOLE_ARGS"] = ConsoleShellOverride.argsJson(shellOverride.args)
-            shellOverride.cwd?.let { p.environment()["DSH_CONSOLE_CWD"] = it }
-          } else {
-            p.environment()["PS1"] = "dsh:\\w$ "
-          }
+          // 启动描述走单通道（ADR-0001）：壳侧只产 DSH_CONSOLE_LAUNCH，底层（今天 node 中继、
+          // 将来原生 PTY）只消费描述并 spawn。unset/env 一并进描述，由底层在 spawn 前应用。
+          if (shellOverride == null) p.environment()["PS1"] = "dsh:\\w$ "
           p.environment()["DSH_CONSOLE_PREFIX"] = engineManager.usrDir.absolutePath
-          p.environment()["DSH_CONSOLE_SHELL"] = shellOverride?.shell ?: bash.absolutePath
+          val launch = if (shellOverride != null) ConsoleLaunch.ofOverride(shellOverride) else ConsoleLaunch.ofDefault(bash.absolutePath)
+          p.environment()[ConsoleLaunch.ENV_KEY] = launch.toJson()
           p.environment()["DSH_CONSOLE_NODE_PTY"] = ptyModule.absolutePath
           p.environment()["DSH_CONSOLE_COLS"] = ConsolePty.normalizeSize(cols, rows).first.toString()
           p.environment()["DSH_CONSOLE_ROWS"] = ConsolePty.normalizeSize(cols, rows).second.toString()
