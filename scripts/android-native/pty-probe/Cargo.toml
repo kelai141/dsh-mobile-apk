@@ -1,0 +1,11 @@
+[package]
+name = "dsh-native-pty-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+libc = "0.2"
+
+[profile.release]
+strip = "symbols"
