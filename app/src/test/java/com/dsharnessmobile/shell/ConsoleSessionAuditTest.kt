@@ -63,7 +63,7 @@ class ConsoleSessionAuditTest {
   fun `I6 中继 stderr 有专职 drain 且降级路径合并 stderr`() {
     val s = source("ConsoleSession.kt")
     assertTrue("PTY 模式必须有 stderr drain 线程（无人读的管道 64KB 写满即冻结）", s.contains("proc.errorStream.bufferedReader"))
-    assertTrue("非 PTY 降级必须 redirectErrorStream 合并", s.contains("if (!canUsePty) p.redirectErrorStream(true)"))
+    assertTrue("非 PTY 降级必须 redirectErrorStream 合并", s.contains("if (!hasProtocol) p.redirectErrorStream(true)"))
   }
 
   @Test

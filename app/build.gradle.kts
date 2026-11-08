@@ -211,3 +211,12 @@ tasks.withType<Test>().configureEach {
         .withPropertyName("appBuildScript")
         .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
 }
+
+// The optional console relay is an executable PIE stored under lib/<abi>.
+// Only debug builds receive it; installed nativeLibraryDir must expose a real file.
+providers.gradleProperty("nativeConsoleRelayDir").orNull?.let { relayDir ->
+  android {
+    sourceSets.getByName("debug").jniLibs.srcDir(file(relayDir))
+    packaging.jniLibs.useLegacyPackaging = true
+  }
+}

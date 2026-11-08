@@ -5,6 +5,7 @@ on:
     paths:
       - '.github/workflows/android-native-pty-probe.yml'
       - 'scripts/android-native/pty-probe/**'
+      - 'scripts/android-native/console-relay/**'
   workflow_dispatch:
 
 permissions:
@@ -48,9 +49,21 @@ jobs:
           esac
           "$ndk/llvm-readelf" --program-headers "$binary" |
             awk '$1 == "LOAD" { found=1; if ($NF != "0x4000") bad=1 } END { exit (!found || bad) }'
+          cargo +1.99.0 fmt --manifest-path scripts/android-native/console-relay/Cargo.toml --check
+          cargo +1.99.0 build --locked --release --manifest-path scripts/android-native/console-relay/Cargo.toml \
+            --target-dir "$RUNNER_TEMP/native-build" --target "$TARGET"
+          relay="$RUNNER_TEMP/native-build/$TARGET/release/dsh-console-relay"
+          "$ndk/llvm-readelf" --program-headers "$relay" |
+            awk '$1 == "LOAD" { found=1; if ($NF != "0x4000") bad=1 } END { exit (!found || bad) }'
       - uses: actions/upload-artifact@v4
         with:
           name: pty-probe-${{ matrix.target }}
           path: ${{ runner.temp }}/native-build/${{ matrix.target }}/release/dsh-native-pty-probe
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: console-relay-${{ matrix.target }}
+          path: ${{ runner.temp }}/native-build/${{ matrix.target }}/release/dsh-console-relay
           if-no-files-found: error
           retention-days: 7
