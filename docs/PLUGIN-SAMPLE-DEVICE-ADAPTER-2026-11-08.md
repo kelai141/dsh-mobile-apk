@@ -56,7 +56,9 @@ node scripts/verify-plugin-sample-device.mjs --from-fixture /tmp/fx --out /tmp/o
 ```bash
 node scripts/plugin-sample-evidence-init.mjs \
   --side candidate --label "0.14.11 x86_64 MuMu" \
+  --version-name <版本名> --version-code <安装号> \
   --apk-sha256 <64 位十六进制> --snapshot-fingerprint <64 位十六进制> \
+  --patch-sha256 <装配清单摘要> --settings-sha256 <设置摘要> \
   --android-api 34 --webview-version <版本> --device-model MuMu --android-build <指纹> \
   --out /tmp/candidate.json
 
@@ -66,7 +68,9 @@ node scripts/verify-plugin-sample-device.mjs \
   --evidence /tmp/candidate.json
 ```
 
-前一步生成的证据文件默认 **全部 unmeasured**；只有第二条命令真的跑出结果，才会把 `s05-task-ledger` 的 `board-empty` 那一格改成 `pass` 或 `fail`。其余 47 个格子保持未测。
+前一步生成的证据文件默认 **全部 unmeasured**，测试计划摘要直接取清单字节。
+真实设备观测只能填写 `s05-task-ledger/identity-api`；看板渲染 `board-empty` 与其他
+用例保持未测。夹具模式只复算判定，不会写入设备证据文件。
 
 ## 5. 受控负控
 
@@ -85,8 +89,8 @@ node scripts/verify-plugin-sample-device.mjs \
 
 | 项 | 状态 |
 |---|---|
-| 设备实测 | 未做。本机没有跑过 `--serial`，所有结论停在夹具层 |
-| 看板页面渲染 | 未覆盖。`board-empty` 的端点层已可自动判，页面是否渲染出引导仍要人工看 |
+| 设备实测 | Android 35 x86_64 独立模拟器：未安装时，宿主清单 HTTP 200 且无对应条目，身份端点 HTTP 404，适配器以 1 退出。此记录是负控，不是已安装后的兼容通过 |
+| 看板页面渲染 | 未覆盖；`board-empty` 需另验页面引导 |
 | 安装步骤 | 未自动化。本脚本假定插件已装，装与卸由主线程负责 |
 | 其余 10 个样本 | 只有 `s05-task-ledger` 有适配器；其余仍是清单里的判据文字 |
 

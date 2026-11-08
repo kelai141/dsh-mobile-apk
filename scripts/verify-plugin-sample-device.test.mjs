@@ -114,9 +114,9 @@ test('证据条目能进比较器而不被判结构错误', () => {
   }
   assert.deepEqual(validateBundle(bundle, 'baseline'), [])
   // 用例 id 必须与清单一致，否则比较器判缺用例。
-  const planCase = PLAN.samples.find((s) => s.id === 's05-task-ledger').cases.find((c) => c.id === 'board-empty')
-  assert.ok(planCase, '清单里必须有 board-empty 用例')
-  assert.equal(bundle.samples[0].cases[0].id, 'board-empty')
+  const planCase = PLAN.samples.find((s) => s.id === 's05-task-ledger').cases.find((c) => c.id === 'identity-api')
+  assert.ok(planCase, '清单里必须有 identity-api 用例')
+  assert.equal(bundle.samples[0].cases[0].id, 'identity-api')
 })
 
 test('证据骨架默认全部未测', () => {
@@ -147,8 +147,8 @@ test('只改目标用例，其余保持未测', () => {
   const evidence = buildEvidence(PLAN, meta)
   applyCase(evidence, 's05-task-ledger', toEvidenceCase({ verdict: 'PASS', detail: '端点可用' }, ['verdict.txt']))
   const sample = evidence.samples.find((s) => s.id === 's05-task-ledger')
-  assert.equal(sample.cases.find((c) => c.id === 'board-empty').status, 'pass')
-  const rest = evidence.samples.flatMap((s) => s.cases).filter((c) => !(c.id === 'board-empty' && c.status === 'pass'))
+  assert.equal(sample.cases.find((c) => c.id === 'identity-api').status, 'pass')
+  const rest = evidence.samples.flatMap((s) => s.cases).filter((c) => !(c.id === 'identity-api' && c.status === 'pass'))
   assert.ok(rest.every((c) => c.status === 'unmeasured'))
 })
 
@@ -162,7 +162,7 @@ test('拒绝写入清单里没有的用例', () => {
     settingsSha256: 'e'.repeat(64),
   })
   assert.throws(() => applyCase(evidence, 's05-task-ledger', { id: 'made-up', kind: 'ui', status: 'pass' }), /没有用例/)
-  assert.throws(() => applyCase(evidence, 'no-such-sample', { id: 'board-empty', kind: 'ui', status: 'pass' }), /没有样本/)
+  assert.throws(() => applyCase(evidence, 'no-such-sample', { id: 'identity-api', kind: 'ui', status: 'pass' }), /没有样本/)
 })
 
 test('CLI：夹具正样本 exit 0，判红 exit 1，未验 exit 2', () => {

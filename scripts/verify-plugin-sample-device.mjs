@@ -93,6 +93,7 @@ export function rowsFromListPlugins(text) {
   let parsed
   try { parsed = JSON.parse(text) } catch { return null }
   if (Array.isArray(parsed)) return parsed
+  if (parsed?.status === 200 && Array.isArray(parsed.rows)) return parsed.rows
   const value = parsed?.result?.value
   if (Array.isArray(value)) return value
   if (Array.isArray(value?.items)) return value.items
@@ -118,13 +119,13 @@ export function judgeSample(observation) {
       : row.found
         ? (row.enabled === true && row.phase === 'active'
           ? { verdict: 'PASS', detail: 'entryId=' + row.entryId + ' enabled=true fiberPhase=active' }
-          : { verdict: 'FAIL', detail: 'entryId=' + row.entryId + ' enabled=' + row.enabled + ' fiberPhase=' + row.phase })
-        : { verdict: 'FAIL', detail: '组件清单里没有 moduleName=' + MODULE_NAME + ' 的行' },
+          : { verdict: 'FAIL', reason: 'not-active', detail: 'entryId=' + row.entryId + ' enabled=' + row.enabled + ' fiberPhase=' + row.phase })
+        : { verdict: 'FAIL', reason: 'not-installed', detail: '组件清单里没有 moduleName=' + MODULE_NAME + ' 的行' },
     functional,
   }
 
   const failed = Object.values(layers).find((l) => l.verdict === 'FAIL')
-  if (failed) return { verdict: 'FAIL', detail: failed.detail, layers }
+  if (failed) return { verdict: 'FAIL', detail: failed.detail, reason: failed.reason, layers }
   const unmeasured = Object.values(layers).find((l) => l.verdict !== 'PASS')
   if (unmeasured) return { verdict: 'INCONCLUSIVE', detail: unmeasured.detail, layers }
   return { verdict: 'PASS', detail: '组件面与功能面都通过：' + functional.detail, layers }
@@ -157,11 +158,11 @@ const report = (result, outDir, inputs) => {
   const text = lines.join('\n') + '\n'
   if (outDir) {
     writeEvidence(outDir, 'verdict.txt', text)
-    const evidenceCase = toEvidenceCase({ verdict: result.verdict, detail: result.detail, reason: result.verdict === 'FAIL' ? 'layer-failed' : undefined }, ['verdict.txt', 'observation.json'])
+    const evidenceCase = toEvidenceCase(result, ['verdict.txt', 'observation.json'])
     writeEvidence(outDir, 'evidence-case.json', evidenceCase)
     // --evidence：把实测结论写进证据文件的对应格子。默认不写，输入永远保持未测。
     const evidenceFile = argOf('evidence')
-    if (evidenceFile !== '') {
+    if (evidenceFile !== '' && inputs.mode === 'device') {
       const file = resolve(evidenceFile)
       const evidence = JSON.parse(readFileSync(file, 'utf8'))
       applyCase(evidence, SAMPLE_ID, evidenceCase)
@@ -264,27 +265,45 @@ const main = async () => {
 
   const out = argOf('out') || join(ROOT, '.deploy-tmp', 'plugin-sample-device', stamp())
   const pidr = adb(['shell', 'pidof', PKG])
-  const pid = String(pidr.stdout).trim()
+  const pid = String(pidr.stdout).trim().split(/\s+/)[0]
   if (pid === '') {
     process.stderr.write('取不到 ' + PKG + ' 进程号；请先启动 App\n')
     process.exitCode = 2
     return
   }
 
-  const cdpPort = 29325
-  adb(['forward', 'tcp:' + cdpPort, 'localabstract:webview_devtools_remote_' + pid])
+  const mapping = adb(['forward', 'tcp:0', 'localabstract:webview_devtools_remote_' + pid])
+  const cdpPort = String(mapping.stdout).trim()
+  if (mapping.status !== 0 || !/^\d+$/.test(cdpPort)) {
+    process.stderr.write('无法建立临时 CDP 端口映射\n')
+    process.exitCode = 2
+    return
+  }
   let rows = null
   let probe = null
   let page = null
   try {
-    const list = await (await fetch('http://127.0.0.1:' + cdpPort + '/json/list')).json()
-    const wsUrl = list?.[0]?.webSocketDebuggerUrl
-    if (!wsUrl) throw new Error('CDP 列表为空（WebView 尚未加载完成）')
+    const deadline = Date.now() + 60000
+    let wsUrl
+    while (!wsUrl && Date.now() < deadline) {
+      const list = await (await fetch('http://127.0.0.1:' + cdpPort + '/json/list', {
+        signal: AbortSignal.timeout(3000),
+      })).json()
+      const match = list?.find(item => item.type === 'page' && /^https?:\/\/(?:127\.0\.0\.1|localhost)(?=[:/]|$)/.test(item.url))
+      wsUrl = match?.webSocketDebuggerUrl
+      if (!wsUrl) await new Promise(resolve => setTimeout(resolve, 400))
+    }
+    if (!wsUrl) throw new Error('CDP 没有已加载的本地引擎页面')
     page = await connect(wsUrl)
-    const rowsReply = await page.evaluate(PAGE_LIST_PLUGINS, 15000)
-    rows = rowsFromListPlugins(rowsReply?.body ?? '')
-    probe = await page.evaluate(PAGE_PROBE(IDENTITY_ROUTE), 15000)
-    writeEvidence(out, 'list-plugins.json', rowsReply?.body ?? '')
+    const { value: rowsReply } = await page.evaluate(PAGE_LIST_PLUGINS, 15000)
+    rows = rowsReply?.status === 200 ? rowsFromListPlugins(rowsReply.body) : null
+    probe = (await page.evaluate(PAGE_PROBE(IDENTITY_ROUTE), 15000)).value
+    // The full inventory can contain other installed package names and local paths.
+    writeEvidence(out, 'list-plugins.json', JSON.stringify({
+      status: rowsReply?.status ?? null,
+      rows: rows?.filter(row => row?.moduleName === MODULE_NAME)
+        .map(({ moduleName, entryId, enabled, fiberPhase }) => ({ moduleName, entryId, enabled, fiberPhase })) ?? null,
+    }, null, 2) + '\n')
     writeEvidence(out, 'identity-response.json', JSON.stringify(probe ?? {}, null, 2) + '\n')
   } catch (error) {
     writeEvidence(out, 'transport-error.txt', String(error?.message ?? error) + '\n')

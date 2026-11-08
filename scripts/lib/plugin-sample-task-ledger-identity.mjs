@@ -103,8 +103,8 @@ export function pickInstalledRow(rows, moduleName) {
  */
 export function toEvidenceCase(judgement, evidence) {
   // 用例 id 必须是样本清单里已声明的那个，否则两侧用例集不同、比较器会判不可比。
-  // board-empty 的口径是「看板可用」，端点探测是它的第一层；页面渲染由主线程补。
-  const base = { id: 'board-empty', kind: 'ui' }
+  // 身份接口与看板渲染分别记证，接口通过不能把页面判绿。
+  const base = { id: 'identity-api', kind: 'functional' }
   if (judgement.verdict === 'PASS') {
     return { ...base, status: 'pass', detail: judgement.detail, evidence: evidence.length > 0 ? evidence : [] }
   }

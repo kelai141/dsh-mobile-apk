@@ -2,10 +2,6 @@
 //
 // 只做「填格子」：不产生结果、不猜状态。没有 --case 文件时该用例保持 unmeasured。
 // 这样默认输入永远是未测，只有真的跑过适配器才会变成 pass / fail。
-import { readFileSync, writeFileSync } from 'node:fs'
-import { mkdirSync } from 'node:fs'
-import { dirname } from 'node:path'
-
 /**
  * 构造一份证据文件骨架。
  * @param {any} plan 样本计划。
