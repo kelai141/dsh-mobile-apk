@@ -35,17 +35,30 @@ if (!existsSync(snapshot)) {
   throw new Error('missing ' + snapshot + ': obtain a verified snapshot asset first; dev repack must not invent one')
 }
 
-// Snapshot/overlay 一致性提示（不阻断）。dev repack 复用仓内资产，资产落后于
-// engine-overlay.json / 插件登记时，设备上只表现为服务 pending（例如缺 dsh-fs-patch 会让
-// sessionController 不可用），打包阶段毫无提示。这里只报告、不拒绝构建：dev repack 本身就是
-// 「先跑起来再说」的通道，硬阻断会把无代码改动的人挡在门外；资产刷新后再收紧为阻断。
+// Snapshot/overlay 一致性硬阻断（仅 dev-fast 这条实际消费本地快照的路径）。
+//
+// 为什么必须阻断：dev repack 复用 operator 自备的 app/src/main/assets/snapshot.tar.xz，资产落后于
+// engine-overlay.json / 插件登记时，设备上只表现为服务 pending（缺 dsh-fs-patch 会让 sessionController
+// 不可用，新建会话直接报 service-unavailable），而打包阶段毫无提示——表面成功的 APK、实际不可用的应用。
+// 这里把「检测到不一致」变成构建失败，并让 check-snapshot-packages.mjs 打印缺失条目与修复步骤。
+//
+// 作用边界：只影响本脚本（开发自测通道）。release/Fast/CI/静态检查都不经过它，也不读本地快照。
 // 退出码语义见 scripts/check-snapshot-packages.mjs（0 通过 / 1 有缺失 / 2 前置缺失）。
 {
-  const gate = spawnSync(process.execPath, [join(apkDir, 'scripts/check-snapshot-packages.mjs'), '--snapshot', snapshot], { encoding: 'utf8' })
+  const gate = spawnSync(process.execPath, [join(apkDir, 'scripts/check-snapshot-packages.mjs'), '--snapshot', snapshot], {
+    encoding: 'utf8',
+  })
+  const detail = (gate.stdout || '') + (gate.stderr || '')
+  if (gate.status === 2) {
+    process.stderr.write(detail)
+    throw new Error('snapshot package check could not run; fix the prerequisite above, then rebuild')
+  }
   if (gate.status !== 0) {
-    process.stderr.write('[dev-fast] 快照与 overlay/插件登记不一致（不阻断本次构建）:\n')
-    process.stderr.write((gate.stdout || '') + (gate.stderr || ''))
-    process.stderr.write('[dev-fast] 先刷新 app/src/main/assets/snapshot.tar.xz 再装机；否则设备上可能出现服务 pending / 会话不可用。\n')
+    process.stderr.write(detail)
+    throw new Error(
+      'snapshot asset is out of sync with engine-overlay/plugin registry; replace app/src/main/assets/snapshot.tar.xz ' +
+        'with the snapshot published for the current release (see docs/AGENTS/build-and-env.md), then rebuild',
+    )
   }
 }
 

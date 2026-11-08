@@ -315,4 +315,4 @@ Telemetry import failures caused by inherited dependency versions: see docs/cont
 - 为什么需要：dev-fast 构建复用仓内快照、不重建不注入；资产一旦落后，设备上表现为「引擎起得来但服务永远 pending」——缺 `@deepseek-ai/dsh-fs-patch` 时 `fs-sandbox` 导入失败，`sessionController` 随之不可用，新建会话直接 `service-unavailable`，而打包阶段毫无提示。
 - 用法：`node scripts/check-snapshot-packages.mjs`（默认查仓内资产）；`--snapshot <tar>` 查指定快照；`--json` 机器可读；`--self-test` 判别力自检（缺包与缺插件都必须判红）。退出码 0 通过 / 1 有缺失 / 2 前置缺失。
 - 实测：仓内 2026-10-28 资产判红（缺 `dsh-fs-patch` 与 `linux-bootstrap` 等）；同版本 release 附带的 `snapshot-x86_64.tar.xz` 判绿（378 个引擎包、11 个登记插件齐全）。
-- 接线状态：`build-apk-dev-fast.mjs` 已在构建前调用本脚本，但**只提示不阻断**（dev repack 是「先跑起来」通道；仓内资产当前确实判红）。资产刷新后应把提示收紧成阻断。
+- 接线状态：`build-apk-dev-fast.mjs` 在重打包前调用本脚本并**硬阻断**：检测到缺失/不一致即构建失败，并打印缺失条目与修复步骤（下载当前 Release 的快照覆盖本地资产后重跑）。作用范围仅限 dev-fast 这条实际消费本地快照的路径；release/Fast/CI/静态检查不经过它。

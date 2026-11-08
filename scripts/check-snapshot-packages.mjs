@@ -112,6 +112,7 @@ function main(argv) {
   for (const [label, path] of [['快照', snapshot], ['overlay', overlay], ['插件登记', plugins]]) {
     if (!existsSync(path)) {
       console.error('前置缺失: ' + label + ' 不存在: ' + path)
+      if (label === '快照') console.error('  快照是 gitignore 的本地产物，请从当前 Release 下载后放到该路径（见 docs/AGENTS/build-and-env.md）。')
       return 2
     }
   }
@@ -140,7 +141,15 @@ function main(argv) {
       for (const name of missingEngine) console.error('  - 引擎包缺失: ' + name + '（overlay 列了它，快照里没有该包的 package.json）')
       for (const item of missingPlugins) console.error('  - 插件缺失: ' + item.name + '（来自 ' + item.dir + '，快照缺 ' + item.root + item.name + '/package.json）')
 
-      console.error('CHECK-SNAPSHOT-PACKAGES FAILED：开发快照落后于 overlay/插件登记，先刷新资产再构建')
+      console.error('')
+      console.error('修复方式：')
+      console.error('  1) 取当前 Release 附带的快照（不要用历史遗留的本地副本）：')
+      console.error('       gh release download <tag> -R kelai141/dsh-mobile-apk --pattern \"snapshot-<abi>.tar.xz\" -D .deploy-tmp/snap')
+      console.error('  2) 覆盖本地资产：')
+      console.error('       copy .deploy-tmp/snap/snapshot-<abi>.tar.xz app/src/main/assets/snapshot.tar.xz')
+      console.error('  3) 重跑本脚本确认 PASSED，再构建：')
+      console.error('       node scripts/check-snapshot-packages.mjs')
+      console.error('CHECK-SNAPSHOT-PACKAGES FAILED：开发快照落后于 overlay/插件登记，构建已阻断')
     }
     return 1
   }
