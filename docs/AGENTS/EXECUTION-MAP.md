@@ -2626,6 +2626,8 @@ scripts/verify-auto-undo.mjs
 scripts/verify-client-plugin-fail-recovery.mjs
 scripts/verify-plugin-compat-evidence.mjs
 scripts/verify-plugin-compat-evidence.test.mjs
+scripts/check-plugin-test-samples.mjs
+scripts/plugin-test-samples.json
 scripts/device-smoke.ps1
 scripts/deploy-device.ps1
 scripts/deploy-embedded.ps1
