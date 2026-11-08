@@ -37,3 +37,12 @@ Could not find a PHDR: broken executable?
 - 重装后应用 uid 会变；手工 push 的 `home/.dsh` 配置必须按新 uid `chown`，否则表现为凭据插件加载失败 → sessionController 不可用，看起来像产品缺陷。
 - adb 非 root 时无法启动非导出 Activity（ConsoleActivity），会让人以为控制台起不来。
 - force-stop 后 MuMu 可能把 Activity 放到副屏（display 17/18），`screencap` 主屏看起来是桌面；重启设备后回到 display 0。
+
+## Termux 控制台回归（与 Debian 覆盖同批验证，release 也走同一条渲染路径）
+
+- 长输出：`seq 1 20000` 后提示符正常返回，滚动缓冲保留最近约 5000 行，页面无卡死（约 5 秒内渲染完）。
+- Ctrl 键：`sleep 100` 进行中点 Ctrl-C，输出 `^C` 并回到提示符。
+- 中文输入：输入框写入 `echo 中文输入测试` 并发送，guest 原样回显（桥接按 UTF-8 字节编码）。
+- 复制：终端选中文本后点「复制」，壳侧返回 true 并显示「已复制」；系统剪贴板读取受 Android 15 隐私限制，shell 侧读不到内容，改为以桥返回值与按钮态判定。
+- 会话关闭：`exit` 后状态显示「bash 已退出（code 0）」，按钮变「重连」，输入框仍可用。
+- 横竖屏：竖屏网格 72x52、转回横屏 133x21，guest `stty size` 跟随页面网格（旋屏触发 SIGWINCH）。
