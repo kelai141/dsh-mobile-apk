@@ -25,3 +25,28 @@ Windows 也可设置 `ORG_GRADLE_PROJECT_nativeConsoleRelayDir`。这个属性�
 调试应用的 `files/`，设置中继执行权限，以快照 Node 运行脚本并传入中继文件路径。
 脚本断言真实 TTY、作业控制、窗口变化、UTF-8、Ctrl-C、退出码及清理。负控使用
 不存在的 shell，必须先返回 error，不能宣告 ready。装包后还须走仓内三层验收。
+
+同一调试包里的两个实际中继可用 `bench-device.cjs` 做对照。先打开 Node 控制台
+一次，让 APK 解包 `files/console-pty.mjs`。将脚本临时复制到同一已初始化应用的
+`files/`，从 `run-as` 默认工作目录用快照 Node 运行它，传入已安装的原生中继
+（`adb shell pm path <包名>` 对应的 `lib/<ABI>/libdsh_console_relay.so`）。
+若外层 Node 不能直接执行，按应用的方式用 `/system/bin/linker64` 启动外层 Node。
+
+脚本交错执行 5 轮 Node / Rust / Rust / Node，每次新建中继和 Bash；在两条路径
+各预热一次后计时。提示符和 UTF-8 结果不在命令回显中，必须由 Bash 实际输出，
+每次都检查退出码 17。脚本输出每次读数和中继的制品摘要。
+
+Android 35 x86_64 独立模拟器，调试包 `0.14.11-NATIVE-PTY-TEST`，
+快照 Node 24.18.0，APK 源码 `449de87d`（#1686），每条路径 10 次中位数：
+
+| 指标 | Node + node-pty | Rust + bionic |
+| --- | ---: | ---: |
+| 启动至收到 ready 帧 | 872 ms | 59 ms |
+| 启动至验证交互提示符 | 935 ms | 93 ms |
+| 发送命令至收到 UTF-8 结果 | 9.6 ms | 7.9 ms |
+| 等待 500 ms 后中继 RSS | 47,076 KiB | 3,200 KiB |
+| 到提示符时中继累计 CPU 时钟 tick | 93 | 2.5 |
+| 等待 500 ms 期间中继 CPU 时钟 tick | 0 | 0 |
+
+该数据只覆盖中继协议和真实 Bash。RSS/CPU 只记中继进程；不含 Bash、WebView、
+引擎或基准进程。没有测量整机功耗，未在 arm64 设备重复此对照。
