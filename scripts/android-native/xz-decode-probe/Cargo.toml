@@ -1,0 +1,15 @@
+[package]
+name = "dsh-xz-decode-probe"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+
+[dependencies]
+libc = "0.2"
+lzma-rust2 = { version = "=0.25.0", default-features = false, features = ["std", "xz", "optimization"] }
+sha2 = "0.10"
+
+[profile.release]
+lto = "thin"
+strip = true

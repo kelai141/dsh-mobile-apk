@@ -239,9 +239,15 @@ export const MOBILE_SETTINGS_CSS: string = `
    * 0.2.2 把图标包进了 span（SettingsRoot.tsx 的 span.navIcon），不再直接是 > svg。
    * 旧选择器因此不匹配，图标 span 落到下面那条 > nav button > span { grid-area: label }，
    * 和标题叠在同一格 —— 真机表现是「图标压在文字上」。故补 span:has(> svg) 这一路，
-   * 两种结构都归到 icon 格。 */
+   * 两种结构都归到 icon 格。
+  *
+  * 但 span:has(svg) 在老内核上是死路：本机 WebView 是 Chromium 97（设置页实测日志
+  * webview_version=97.0.4692.98），:has() 从 Chromium 105 才支持，而且选择器列表里
+  * 只要有一项不被支持，整条规则（连前面的 > svg 一支）都会被丢弃 —— 图标照样叠在标题上。
+  * 因此改由 settings-nav.ts 给图标壳打 data-dsh-settings-nav-icon-cell，样式只认属性，
+  * 新旧内核走同一套选择器。 */
   html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > nav button > svg,
-  html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > nav button > span:has(svg) {
+  html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > nav button > span[data-dsh-settings-nav-icon-cell] {
     grid-area: icon;
     align-self: center;
     /* 图标略小于文字行盒（文字 15/20 → 图标 20） */
@@ -257,7 +263,7 @@ export const MOBILE_SETTINGS_CSS: string = `
      在「标题+说明」整块居中，不会被顶高（用户两轮实报的口径）。
      判据用 settings-nav.ts 打的行标记：own = 我方分区（都带说明），other = 其余。 */
   html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > nav button[data-dsh-settings-nav='other'] > svg,
-  html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > nav button[data-dsh-settings-nav='other'] > span:has(svg) {
+  html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level] > nav button[data-dsh-settings-nav='other'] > span[data-dsh-settings-nav-icon-cell] {
     grid-row: 1;
   }
 
