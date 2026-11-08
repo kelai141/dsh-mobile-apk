@@ -2205,6 +2205,7 @@ scripts/lib/snapshot-route-auth.mjs
 scripts/build-injection-staging.test.mjs
 scripts/check-inject-completeness.test.mjs
 app/src/androidTest/java/com/dsharnessmobile/shell/SnapshotPreservationSafetyTest.kt
+app/src/androidTest/java/com/dsharnessmobile/shell/XzDecodeProbeTest.kt
 app/src/androidTest/java/com/dsharnessmobile/shell/FactoryRetirementSafetyTest.kt
 scripts/verify-webview-settings.test.mjs
 app/src/test/java/com/dsharnessmobile/shell/NotifyCenterPoisonEventTest.kt
