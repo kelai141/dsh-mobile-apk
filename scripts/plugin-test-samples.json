@@ -442,7 +442,12 @@
         {
           "id": "board-empty",
           "kind": "ui",
-          "expect": "任务看板页可打开；未初始化身份时页面给出建立身份的引导，而不是报错或空白"
+          "expect": "任务看板页可打开；未初始化身份时页面给出建立身份的引导，而不是报错或空白。"
+        },
+        {
+          "id": "identity-api",
+          "kind": "functional",
+          "expect": "GET /api/task-ledger/identity 返回 200 与含 uuid、name 的 JSON（未初始化时两者为 null）"
         },
         {
           "id": "identity-setup",
