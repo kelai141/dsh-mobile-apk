@@ -95,6 +95,9 @@ jobs:
           python3 -m unittest discover -s scripts/source-build -p 'test_*.py' -v
           node --test scripts/source-build/*.test.mjs
           node scripts/source-build/check-package-lock-roots.mjs
+      - name: 插件兼容证据判定回归
+        if: always()
+        run: node --test scripts/verify-plugin-compat-evidence.test.mjs
       # 补丁镜像面（自我一致性，不引用协调仓）：本仓是公开的自包含构建宿主，**不得**依赖
       # 私有协调仓——此前用 `GH_PAT` 跨仓检出私有 dsh-mobile，PAT 失效即在检出步骤硬失败，
       # 该 job 的门禁全部 skipped（0.14.0 实测：PAT 已无法读取协调仓）。
