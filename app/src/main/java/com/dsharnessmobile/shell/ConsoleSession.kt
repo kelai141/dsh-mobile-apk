@@ -122,6 +122,17 @@ class ConsoleSession(private val context: Context) {
     val node = File(engineManager.usrDir, ConsolePty.NODE_RELATIVE)
     val ptyModule = File(engineManager.usrDir, ConsolePty.DEFAULT_NODE_PTY)
 
+    // 设备验收入口（仅 debug 构建；release 恒为 null）：把控制台指向别的 shell，
+    // 让「现有 node-pty 中继能否驱动 Debian guest bash」这件事在设备上可验，
+    // 而不是只能靠推断。默认路径一个字节都不变。
+    val shellOverride = ConsoleShellOverride.resolve(context)
+    if (shellOverride != null && !canUsePty) {
+      // 不静默退回快照 bash：那会把「验的是 Debian」变成「验的还是 Termux」的假绿。
+      Log.w(TAG, "console override present but PTY relay is unavailable")
+      listener.onStatus(State.FAILED, "控制台缺少 PTY 中继，无法启动自定义 shell（验收入口要求真 PTY）")
+      return false
+    }
+
     val gen = ++generation
     return try {
       fun build(argv: List<String>, hasProtocol: Boolean): ProcessBuilder =
@@ -130,9 +141,17 @@ class ConsoleSession(private val context: Context) {
           // 终端环境必须在**子进程启动前**就在环境里：bash -i 起来时 TERM 已定，
           // 之后再 export 改变不了已经初始化的 ncurses 程序。
           p.environment().putAll(ConsoleTerminalEnv.terminalEnv(engineManager.usrDir))
-          p.environment()["PS1"] = "dsh:\\w$ "
+          // 覆盖条目自带 env 时先铺底：终端环境（TERM/TERMINFO/VIMRUNTIME）与 PS1 归覆盖方决定，
+          // 但中继协议键（PREFIX/NODE_PTY/SHELL/ARGS/CWD/尺寸）仍由壳侧最后写，页面侧不可劫持。
+          if (shellOverride != null) {
+            if (shellOverride.env.isNotEmpty()) p.environment().putAll(shellOverride.env)
+            p.environment()["DSH_CONSOLE_ARGS"] = ConsoleShellOverride.argsJson(shellOverride.args)
+            shellOverride.cwd?.let { p.environment()["DSH_CONSOLE_CWD"] = it }
+          } else {
+            p.environment()["PS1"] = "dsh:\\w$ "
+          }
           p.environment()["DSH_CONSOLE_PREFIX"] = engineManager.usrDir.absolutePath
-          p.environment()["DSH_CONSOLE_SHELL"] = bash.absolutePath
+          p.environment()["DSH_CONSOLE_SHELL"] = shellOverride?.shell ?: bash.absolutePath
           p.environment()["DSH_CONSOLE_NODE_PTY"] = ptyModule.absolutePath
           p.environment()["DSH_CONSOLE_COLS"] = ConsolePty.normalizeSize(cols, rows).first.toString()
           p.environment()["DSH_CONSOLE_ROWS"] = ConsolePty.normalizeSize(cols, rows).second.toString()

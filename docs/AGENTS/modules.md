@@ -297,3 +297,4 @@ Android API 面登记见 `docs/AGENTS/ANDROID-API-USAGE.md` §1/§3/§4/§8；�
 - `PluginOfflinePanel.kt`：离线管理页（列表 + 启停按钮 + 错误条），经 `PluginManagementPage` 在引擎不可用时路由进入。`PluginOfflineRepository` 负责读、写、原子替换与写后回读校验：回读状态与请求不一致即报失败并保留原清单。
 - `EngineStartFlow.start()`：入口（主线程）同步把相位切到 `GuidePhase.Starting` 并 `showGuide()`，主按钮立刻显示「启动中」；这一步不探测、不解压、不重建状态，已解压且指纹匹配的运行时仍走既有早退路径。worker 线程内原先那次重复切相位已删。
 - `ConsoleActivity.kt` / `assets/console.html`：控制台黑白灰日夜主题；会话与桥行为保持原有实现。
+- `ConsoleShellOverride.kt`：控制台 shell 的**设备验收入口**（debug 构建专用）。读 `<filesDir>/console-shell-override.json`，让控制台从快照 bash 切到指定 argv（如 bionilux 的 Debian bash），唯一目的是把「现有 node-pty 中继能否驱动 Debian guest bash」变成设备事实而不是推断。**release 变体永不读取**（`BuildConfig.DEBUG` 门）；`parse` 严格拒绝相对 shell、非字符串 args、未知键与带 `=` 的 env 键，非法输入一律落回默认 Termux bash；文件合规但 PTY 中继缺失时控制台**报错**而不是静默退回（否则验收会变成「验的还是快照」的假绿）。中继侧按 `DSH_CONSOLE_ARGS`（JSON 数组）与 `DSH_CONSOLE_CWD` 启动，非法 JSON 当场退出。契约见 `docs/AGENTS/LINUX-RUNTIME-CONTRACT.md` §7。

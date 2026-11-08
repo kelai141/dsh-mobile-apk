@@ -50,13 +50,32 @@ const main = () => {
   const cols = Number(process.env.DSH_CONSOLE_COLS || 80)
   const rows = Number(process.env.DSH_CONSOLE_ROWS || 24)
 
+  // shell 的参数由壳侧显式给出：默认仍是交互式 bash（'-i'），设备验收时换成
+  // launcher 的完整 argv（例如 bionilux --rootfs <R> --guest-cwd <C> /bin/bash -i）。
+  // 非法 JSON 必须当场失败：静默回退 '-i' 会让验收对象悄悄变回快照 bash。
+  const shellArgs = (() => {
+    const raw = process.env.DSH_CONSOLE_ARGS
+    if (raw === undefined || raw === '') return ['-i']
+    try {
+      const parsed = JSON.parse(raw)
+      if (!Array.isArray(parsed) || parsed.some((a) => typeof a !== 'string')) {
+        throw new Error('必须是非空字符串数组')
+      }
+      return parsed
+    } catch (e) {
+      writeJson({ op: 'error', message: 'console-pty: DSH_CONSOLE_ARGS 无效: ' + (e && e.message) })
+      process.exit(5)
+    }
+  })()
+  const cwd = process.env.DSH_CONSOLE_CWD || process.env.HOME || usr
+
   let term
   try {
-    term = pty.spawn(shell, ['-i'], {
+    term = pty.spawn(shell, shellArgs, {
       name: 'xterm-256color',
       cols,
       rows,
-      cwd: process.env.HOME || usr,
+      cwd,
       env: process.env,
     })
   } catch (e) {
