@@ -56,6 +56,7 @@ adb -s <serial> install -r -t out\v<版本>\dsh-mobile-apk-v<版本>-arm64.apk
 | `verify-browser-host.mjs` | 隔离浏览器视口/PC 身份 | ws **positional** |
 | `verify-vdisplay-viewer.mjs` | 虚拟屏 viewer 两阶段契约 | `--ws` |
 | `verify-browser-panel.mjs` / `verify-vdisplay-float.mjs` / `verify-engine-log-copy.mjs` | 面板/浮窗/日志 | 见脚本头注释 |
+| `verify-linux-environment.mjs` | Linux 环境：安装/健康/摘要不符负控（CDP 层） | `--serial`（必填）、`--port`（默认 29225）、`--json`；退出 0 全 PASS / 1 有 FAIL / 2 前置缺失 |
 
 **CDP 调试**：`adb shell "cat /proc/net/unix | grep webview_devtools"` → `adb forward tcp:29225 localabstract:<socket>` → `ws://127.0.0.1:29225/devtools/page/<id>`。
 

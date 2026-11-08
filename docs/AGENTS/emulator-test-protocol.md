@@ -143,7 +143,7 @@ For Safe Mode migration qualification, filter instrumentation to `SafeModeMigrat
 
 For console keyboard changes, measure both the visual viewport and the native IME overlap: an edge-to-edge WebView can retain its full layout viewport behind the keyboard. Assert that the command input and Send control stay above the actual keyboard edge and that output retains a nonzero height. Cover portrait, landscape, already-resized native views, keyboard dismissal and a subsequent command.
 
-套件清单与参数约定见 `AGENTS.md` §2 的表（`verify-webview-015` / `verify-state-sync` / `verify-browser-host` / `verify-browser-panel` / `verify-vdisplay-viewer` / `verify-vdisplay-float` / `verify-engine-log-copy`）。
+套件清单与参数约定见 `AGENTS.md` §2 的表（`verify-webview-015` / `verify-state-sync` / `verify-browser-host` / `verify-browser-panel` / `verify-vdisplay-viewer` / `verify-linux-environment`（Linux 环境安装/健康/摘要负控） / `verify-vdisplay-float` / `verify-engine-log-copy`）。
 
 `verify-webview-015.mjs` supports the Chinese and English accessible names for settings, account menus, phone control, reset links and attachment commands. Its account-menu probe prefers the explicit accessible name over unrelated More buttons. Run `node scripts/verify-webview-015.mjs --self-test` for the locale and missing/disabled-control regressions; PR CI runs the same tests. Resolve a fresh WebView target before each device run.
 
