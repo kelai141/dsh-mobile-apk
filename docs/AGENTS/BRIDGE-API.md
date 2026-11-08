@@ -10,6 +10,8 @@
 
 ## 1. 信任与线程边界
 
+工作区选择的 `requestAllFilesAccess()` 沿用原桥签名。Android 10 及以下改为请求普通存储权限；Android 11 及以上仍打开所有文件访问设置。旧系统 WebView 浏览接口 `/api/android/dir-pick/browse` 要求现有 pick token 与已投递的请求 ID。路径限制在当前用户公共存储；只有用户确认后才做读写探测并交给引擎。
+
 主WebView只对精确受管引擎origin开放androidBridge与dshBackBridge；匿名BrowserHost网页不挂桥、不注入EngineAuth cookie/token。@JavascriptInterface运行在JavaBridge线程；涉及UI的调用必须marshal主线程且返回真实结算/超时，不把任务已提交写成已完成。bridge不存在、畸形/空回包均结构化拒绝。
 
 | 通道 | 当前职责 |

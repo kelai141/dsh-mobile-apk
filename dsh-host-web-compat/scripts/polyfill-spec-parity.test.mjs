@@ -49,6 +49,28 @@ function themeBridgeBody() {
 }
 
 const BODY = polyfillBody()
+
+test('旧 WebView 的 throwIfAborted 保持正常路径、原始取消原因和 AbortError', () => {
+  const context = createContext()
+  runInContext(`
+    class AbortSignal {
+      constructor(aborted, reason) {
+        this.aborted = aborted;
+        if (arguments.length > 1) this.reason = reason;
+      }
+    }
+    class DOMException extends Error { constructor(message, name) { super(message); this.name = name; } }
+  `, context)
+  assert.equal(runInContext('typeof AbortSignal.prototype.throwIfAborted', context), 'undefined')
+  runInContext(BODY, context)
+  assert.equal(runInContext('new AbortSignal(false).throwIfAborted()', context), undefined)
+  assert.equal(runInContext(`(() => {
+    const reason = {};
+    try { new AbortSignal(true, reason).throwIfAborted(); } catch (e) { return e === reason; }
+  })()`, context), true)
+  assert.throws(() => runInContext('new AbortSignal(true).throwIfAborted()', context), { name: 'AbortError' })
+  assert.equal(runInContext('Object.keys(AbortSignal.prototype).includes("throwIfAborted")', context), false)
+})
 const THEME_BODY = themeBridgeBody()
 
 /** 归一化：跨 realm 的值不可直接比较，读数一律在各自 realm 内折成字符串。 */

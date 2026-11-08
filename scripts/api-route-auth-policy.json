@@ -40,7 +40,7 @@
     },
     {
       "source": "dsh-host-web-compat/lib/index.js",
-      "expected": 3
+      "expected": 4
     },
     {
       "source": "plugins/dsh-session-delete/src/index.js",
@@ -349,6 +349,17 @@
       "kind": "exact",
       "registrationSource": "dsh-host-web-compat/lib/index.js",
       "registration": "path: '/api/android/dir-pick/poll'",
+      "endpointSource": "dsh-host-web-compat/lib/index.js",
+      "access": "protected",
+      "authMarker": "if (!authorized(req))",
+      "authCallMarker": "if (!authorized(req))"
+    },
+    {
+      "id": "directory-pick-browse",
+      "path": "/api/android/dir-pick/browse",
+      "kind": "exact",
+      "registrationSource": "dsh-host-web-compat/lib/index.js",
+      "registration": "path: '/api/android/dir-pick/browse'",
       "endpointSource": "dsh-host-web-compat/lib/index.js",
       "access": "protected",
       "authMarker": "if (!authorized(req))",

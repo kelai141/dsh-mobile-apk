@@ -377,7 +377,7 @@ class AndroidBridge(
     // #686：同上，表达式体用 trusted{} 包裹。
     trusted { onOpenFileExternal(path, mime, FileExternalBridge.KIND_SHARE) }
 
-  /** Open the system screen granting All Files Access (special permission). */
+  /** Request shared storage access: runtime permission on API 26–29, special access on 30+. */
   @JavascriptInterface
   fun requestAllFilesAccess() {
     checkTrustedFrame()

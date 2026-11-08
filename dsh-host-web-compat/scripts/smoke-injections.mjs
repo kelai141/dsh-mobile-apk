@@ -8,7 +8,7 @@
 // "Iterator is not defined". Only parsing the assembled markup catches that class of defect.
 //
 // Usage: node scripts/smoke-injections.mjs
-import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, cpSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -31,8 +31,9 @@ try {
   mkdirSync(stub, { recursive: true })
   writeFileSync(join(stub, 'package.json'), JSON.stringify({ name: '@deepseek-ai/cordis', version: '0.0.0-stub', type: 'module', main: 'index.js' }))
   writeFileSync(join(stub, 'index.js'), 'export class Service { constructor(ctx, name) { this.ctx = ctx; this.name = name } }\n')
-  const pluginCopy = join(scratch, 'plugin.mjs')
-  copyFileSync(join(pluginRoot, 'lib', 'index.js'), pluginCopy)
+  writeFileSync(join(scratch, 'package.json'), '{"type":"module"}')
+  cpSync(join(pluginRoot, 'lib'), join(scratch, 'lib'), { recursive: true })
+  const pluginCopy = join(scratch, 'lib', 'index.js')
 
   const mod = await import(pathToFileURL(pluginCopy).href)
   const transforms = []

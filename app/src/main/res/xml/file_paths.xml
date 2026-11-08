@@ -24,4 +24,6 @@
         cache-path 的子目录一并被覆盖，而压缩成功后原图立刻删除，正常状态下包里只剩成品。
         同样不映射 cacheDir 整体。 -->
   <cache-path name="photo_attachments" path="attachments/" />
+  <!-- 旧系统附件选择器只映射用户明确选中的附件暂存副本。 -->
+  <cache-path name="legacy_uploads" path="legacy-uploads/" />
 </paths>

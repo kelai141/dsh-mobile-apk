@@ -3033,6 +3033,10 @@ class EngineManager(private val context: Context, private val pickToken: String?
       "DSH_APP_VERSION_CODE" to BuildConfig.VERSION_CODE.toString(),
       // Directory-picker endpoint auth token (validated by the web-compat plugin via x-dsh-pick-token).
       "DSH_PICK_TOKEN" to (pickToken ?: ""),
+      // Use the current user's primary public root; a blank value keeps the existing SAF route.
+      "DSH_LEGACY_WORKSPACE_ROOT" to if (android.os.Build.VERSION.SDK_INT < 30) {
+        Environment.getExternalStorageDirectory().absolutePath
+      } else "",
       // 0.14.0：内置 adb 退役——DSH_ADB_* 授权快照不再注入（引擎侧特权面改由 Shizuku 承载，
       // 就绪事实经控制队列 caps.shizuku 实时上报，不再有启动期快照与活体两套口径）。
       // Vision backend (Qwen-VL) API key: read from a private file rather than hardcoded in source.
