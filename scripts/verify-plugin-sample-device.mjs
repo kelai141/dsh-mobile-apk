@@ -272,6 +272,12 @@ const main = async () => {
     return
   }
 
+  const timeoutSec = has('timeout') ? Number(argOf('timeout')) : 90
+  if (!Number.isInteger(timeoutSec) || timeoutSec < 1 || timeoutSec > 300) {
+    process.stderr.write('--timeout 必须是 1 至 300 秒的整数\n')
+    process.exitCode = 2
+    return
+  }
   const mapping = adb(['forward', 'tcp:0', 'localabstract:webview_devtools_remote_' + pid])
   const cdpPort = String(mapping.stdout).trim()
   if (mapping.status !== 0 || !/^\d+$/.test(cdpPort)) {
@@ -283,14 +289,20 @@ const main = async () => {
   let probe = null
   let page = null
   try {
-    const deadline = Date.now() + 60000
+    const deadline = Date.now() + timeoutSec * 1000
     let wsUrl
     while (!wsUrl && Date.now() < deadline) {
-      const list = await (await fetch('http://127.0.0.1:' + cdpPort + '/json/list', {
-        signal: AbortSignal.timeout(3000),
-      })).json()
-      const match = list?.find(item => item.type === 'page' && /^https?:\/\/(?:127\.0\.0\.1|localhost)(?=[:/]|$)/.test(item.url))
-      wsUrl = match?.webSocketDebuggerUrl
+      try {
+        const reply = await fetch('http://127.0.0.1:' + cdpPort + '/json/list', {
+          signal: AbortSignal.timeout(3000),
+        })
+        if (reply.ok) {
+          const list = await reply.json()
+          const match = Array.isArray(list) && list.find(item => item.type === 'page'
+            && /^https?:\/\/(?:127\.0\.0\.1|localhost)(?=[:/]|$)/.test(item.url))
+          wsUrl = match?.webSocketDebuggerUrl
+        }
+      } catch { /* The WebView socket can appear after adb accepts the forward. */ }
       if (!wsUrl) await new Promise(resolve => setTimeout(resolve, 400))
     }
     if (!wsUrl) throw new Error('CDP 没有已加载的本地引擎页面')
