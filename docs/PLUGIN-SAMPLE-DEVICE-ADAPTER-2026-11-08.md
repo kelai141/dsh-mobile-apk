@@ -1,0 +1,94 @@
+# 第三方插件真实功能用例：设备适配器
+
+首个用例已落地：**dsh-task-ledger 0.1.8 的只读端点 `GET /api/task-ledger/identity`**。
+
+选它做第一个的理由：只读，不改台账、不写文件，不需要 Git 远端、网络或 API Key；端点自身可被直接请求，结果能逐字段断言；它还覆盖「包装上了但宿主半边没跑起来」这一类真实故障——那种情况下端点直接 404。
+
+## 1. 判据来自插件源码，不是猜的
+
+| 事实 | 依据 |
+|---|---|
+| 路由前缀 `/api/task-ledger` | `dist/host/routes.js` 的 `const API_PREFIX = "/api/task-ledger"` |
+| `/identity` 是只读端点 | 同文件 `registerRead("/identity", ...)`，走 `registerRead` 而非写路由 |
+| 返回 `{ uuid, name, initCommand }` | 同文件 `sendJson(res, 200, { ...identity, initCommand })` |
+| 未初始化时 `uuid` 与 `name` 都是 `null` | `dist/host/repositories/identity.repository.js` 的 `UNKNOWN_IDENTITY` 与 `viewOf` |
+
+端点判据（`scripts/lib/plugin-sample-task-ledger-identity.mjs` 的 `CASE_EXPECT`）：
+
+> GET /api/task-ledger/identity 返回 200 且 JSON 同时含 uuid 与 name 两个键（值可为 null）
+
+## 2. 两层都要看，缺一层就是未验
+
+| 层 | 取值 | 判红条件 |
+|---|---|---|
+| 组件面 | `pluginManager/listPlugins` 里 `moduleName` 为该包名的行 | 没有该行；`enabled` 不是 true；`fiberPhase` 不是 `active` |
+| 功能面 | 页面上下文请求该端点 | 404、非 200、空体、非 JSON、缺键、类型不对、身份自相矛盾 |
+
+组件面存在而端点 404，说明「装上了但宿主半边没跑起来」；这是本用例要抓的典型故障。
+
+拿不到组件清单、请求被 401/403、传输失败，一律 `INCONCLUSIVE`，退出码 2。不能因为「没报错」就当通过。
+
+## 3. 为什么在页面上下文请求
+
+引擎的 `/api` 需要浏览器签名的 cookie，页面本身已持有。适配器通过 CDP `Runtime.evaluate` 在页面里 `fetch`，复用页面已有的鉴权，脚本不去伪造 cookie、不读用户凭据。
+
+## 4. 可复现步骤
+
+离线（不需要设备、不碰 ADB）：
+
+```bash
+node scripts/verify-plugin-sample-device.mjs --self-test
+node --test scripts/verify-plugin-sample-device.test.mjs
+node --test scripts/verify-plugin-sample-offline-guard.test.mjs
+```
+
+用固定夹具复算判定（同样不碰设备）：
+
+```bash
+mkdir -p /tmp/fx
+# list-plugins.json：组件清单响应（RPC 信封或裸数组都可以）
+# identity-response.json：{ "status": 200, "body": "<原始响应体>", "error": null }
+node scripts/verify-plugin-sample-device.mjs --from-fixture /tmp/fx --out /tmp/out
+```
+
+真实设备（**必须显式给 --serial**，脚本不会自己挑设备）：
+
+```bash
+node scripts/plugin-sample-evidence-init.mjs \
+  --side candidate --label "0.14.11 x86_64 MuMu" \
+  --apk-sha256 <64 位十六进制> --snapshot-fingerprint <64 位十六进制> \
+  --android-api 34 --webview-version <版本> --device-model MuMu --android-build <指纹> \
+  --out /tmp/candidate.json
+
+node scripts/verify-plugin-sample-device.mjs \
+  --serial <adb-serial> \
+  --out /tmp/plugin-sample-run \
+  --evidence /tmp/candidate.json
+```
+
+前一步生成的证据文件默认 **全部 unmeasured**；只有第二条命令真的跑出结果，才会把 `s05-task-ledger` 的 `board-empty` 那一格改成 `pass` 或 `fail`。其余 47 个格子保持未测。
+
+## 5. 受控负控
+
+`--self-test` 覆盖 22 条，全部离线：
+
+- 正样本：未初始化身份、已初始化身份都判通过；
+- 判红：404（路由不存在）、200 但空体、200 但非 JSON、缺 `uuid` 键、`uuid` 与 `name` 自相矛盾；
+- 未验：401、传输错误、没有观测；
+- 两层组合：插件未装、装了但 `fiberPhase` 不是 active、被禁用、组件在但端点 404、拿不到组件清单；
+- 解析：`listPlugins` 空响应解析成 `null` 而不是空数组（空数组会被误判成「查过了，没有」）；
+- 证据：未验写成 `unmeasured`，判红必须带 `failureKey`。
+
+`scripts/verify-plugin-sample-offline-guard.test.mjs` 把 `PATH` 指向空目录再跑离线模式。如果离线路径里真的调用了 `adb`，这里会失败——这是「不占用 ADB 实例」的机器证明，不靠口头保证。
+
+## 6. 边界
+
+| 项 | 状态 |
+|---|---|
+| 设备实测 | 未做。本机没有跑过 `--serial`，所有结论停在夹具层 |
+| 看板页面渲染 | 未覆盖。`board-empty` 的端点层已可自动判，页面是否渲染出引导仍要人工看 |
+| 安装步骤 | 未自动化。本脚本假定插件已装，装与卸由主线程负责 |
+| 其余 10 个样本 | 只有 `s05-task-ledger` 有适配器；其余仍是清单里的判据文字 |
+
+脚本不会修改第三方插件、不改产物、不写 `node_modules`。它只读端点与组件清单。
+
