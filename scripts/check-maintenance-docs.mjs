@@ -16,7 +16,7 @@ const blocks = [
     file: 'docs/AGENTS/DEPENDENCIES.md',
     name: 'gradle-declarations',
     body: [
-      `当前源码声明：versionName \`${required(/^\s*versionName\s*=\s*"([^"]+)"/m, 'versionName')}\` / versionCode \`${required(/^\s*versionCode\s*=\s*(\d+)/m, 'versionCode')}\`；suffix 来自 Gradle 属性。此处不证明 APK 产物或验收状态。`,
+      `当前源码声明：versionName \`${required(/^\s*versionName\s*=\s*"([^"]+)"/m, 'versionName')}\` / versionCode \`${required(/^\s*versionCode\s*=\s*providers\.gradleProperty\("versionCode"\)\.getOrElse\("(\d+)"\)/m, 'versionCode')}\`；suffix 来自 Gradle 属性。此处不证明 APK 产物或验收状态。`,
       '',
       '| 配置 | 声明 |',
       '|---|---|',

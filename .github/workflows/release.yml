@@ -197,9 +197,10 @@ jobs:
         run: |
           set -euo pipefail
           VER=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)
-          CODE=$(sed -n 's/.*versionCode = \([0-9]*\).*/\1/p' app/build.gradle.kts | head -1)
+          CODE=$(sed -n 's/.*versionCode = .*getOrElse("\([0-9]*\)").*/\1/p' app/build.gradle.kts | head -1)
           echo "build.gradle versionName=$VER versionCode=$CODE ; input=$INPUT_VERSION"
           [ "$VER" = "$INPUT_VERSION" ] || { echo "::error::versionName($VER) != 输入——先改 build.gradle.kts 并走 PR"; exit 1; }
+          [ -n "$CODE" ] || { echo "::error::无法读取 versionCode 默认值"; exit 1; }
           echo "ver=$VER" >> "$GITHUB_ENV"
           echo "code=$CODE" >> "$GITHUB_ENV"
       - name: 准备 Android SDK build-tools（apksigner 供产出侧签名断言）

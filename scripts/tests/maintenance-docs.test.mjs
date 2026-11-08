@@ -30,7 +30,7 @@ test('Gradle 版本和依赖改变时检查拒绝，生成后通过', (t) => {
   assert.equal(run('--write').status, 0);
   mutate('app/build.gradle.kts', (text) => text
     .replace(/versionName = "[^"]+"/, 'versionName = "fixture-next"')
-    .replace(/versionCode = \d+/, 'versionCode = 999')
+    .replace(/versionCode = providers\.gradleProperty\("versionCode"\)\.getOrElse\("\d+"\)/, 'versionCode = providers.gradleProperty("versionCode").getOrElse("999")')
     .replace('org.tukaani:xz:1.10', 'org.tukaani:xz:fixture-next'));
   assert.equal(run().status, 1);
   assert.equal(run('--write').status, 0);
