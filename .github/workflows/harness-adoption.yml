@@ -1,0 +1,47 @@
+name: Harness 稳定基线采用
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/contract.json'
+      - 'scripts/source-build/check-harness-adoption*.mjs'
+      - 'docs/adapt/harness-evidence/**'
+      - '.github/workflows/harness-adoption.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  adoption:
+    name: 核对上游提交与双 ABI 插件实测证据
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: 比较基线与候选
+        env:
+          BASE_COMMIT: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          base="$RUNNER_TEMP/base-harness-contract.json"
+          head=scripts/contract.json
+          git show "$BASE_COMMIT:scripts/contract.json" > "$base"
+          old=$(node --input-type=module -e 'import { readHarnessIdentity } from "./scripts/source-build/harness-identity.mjs"; console.log(readHarnessIdentity(process.argv[1]).commit)' "$base")
+          next=$(node --input-type=module -e 'import { readHarnessIdentity } from "./scripts/source-build/harness-identity.mjs"; console.log(readHarnessIdentity(process.argv[1]).commit)' "$head")
+          args=(--base-contract "$base" --head-contract "$head")
+          if [[ "$old" != "$next" ]]; then
+            plan="$RUNNER_TEMP/stable-plugin-plan.json"
+            upstream="$RUNNER_TEMP/upstream-adoption.git"
+            git show "$BASE_COMMIT:scripts/plugin-test-samples.json" > "$plan"
+            git init --bare "$upstream"
+            git -C "$upstream" fetch --depth=1 --no-tags https://github.com/deepseek-ai/deepseek-harness.git \
+              "$old:refs/audit/baseline" "$next:refs/audit/candidate"
+            args+=(--repo "$upstream" --plan "$plan" --evidence-root docs/adapt/harness-evidence)
+          fi
+          node scripts/source-build/check-harness-adoption.mjs "${args[@]}"
