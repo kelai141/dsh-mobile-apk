@@ -82,6 +82,22 @@ describe('竖屏设置分层样式', () => {
     expect(injected.split('}')[0] ?? '', '我方图标不得另设颜色，否则与上游图标色差可见').not.toContain('color:')
   })
 
+  it('图标壳用属性定位，不用 :has()（老内核会连累整条选择器列表失效）', () => {
+    // 用户实报：0.2.2 里图标压在文字上。成因是写了 span:has(svg)——本机 WebView 是
+    // Chromium 97，:has() 要 105 才支持；选择器列表里一项不支持，整条规则（含 > svg 一支）
+    // 全被丢弃，图标壳落进 label 格。以后谁再把 :has() 写回这张表，这条断言当场判红。
+    // 只看真正的声明部分：注释里要引用那条旧规则和上游插件的选择器，不算违规。
+    const declarations = MOBILE_SETTINGS_CSS.replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(declarations, '设置表里不得出现 :has()，改用 settings-nav.ts 写的属性').not.toContain(':has(')
+    // 两条图标壳规则都必须在场，且属性名与 settings-nav.ts 写入的一致。
+    const cell = 'span[data-dsh-settings-nav-icon-cell]'
+    const source = readFileSync('src/client/mobile/settings-nav.ts', 'utf8')
+    expect(source, 'settings-nav.ts 必须写图标壳属性').toContain("'data-dsh-settings-nav-icon-cell'")
+    for (const selector of ['nav button > ' + cell, "nav button[data-dsh-settings-nav='other'] > " + cell]) {
+      expect(MOBILE_SETTINGS_CSS, '缺图标壳规则：图标会落进 label 格压住标题').toContain(selector)
+    }
+  })
+
   it('不新增硬编码颜色：每个颜色值都取自 --dsw-* 主题变量', () => {
     // 十六进制色在本表里出现 = 阻断主题继承（深色主题下会成为白底白字）。
     const withoutComments = MOBILE_SETTINGS_CSS.replace(/\/\*[\s\S]*?\*\//g, '')

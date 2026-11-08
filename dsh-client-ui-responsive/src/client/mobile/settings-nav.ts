@@ -47,6 +47,12 @@ const CHEVRON_ATTR = 'data-dsh-settings-nav-chevron'
 const ROW_ATTR = 'data-dsh-settings-nav'
 /** 我方自有分区行的图标（替换上游对未知 id 的通用齿轮降级）；上游/第三方行没有这个节点。 */
 const ICON_ATTR = 'data-dsh-settings-nav-icon'
+/** 上游图标壳（0.2.2 起图标被包进 button > span > span[data-slot] > svg）。
+ *
+ * 样式表要靠它把壳归到 grid 的 icon 格。不能写成 span:has(svg)：本机 WebView 是
+ * Chromium 97，:has() 要 105 才支持，且选择器列表里一项不支持就整条规则失效 ——
+ * 图标壳会落进 `> nav button > span { grid-area: label }`，压在标题上。故由本模块打属性。 */
+const ICON_CELL_ATTR = 'data-dsh-settings-nav-icon-cell'
 /** 上游 nav 的两段结构（标题 + 列表）。面板没有稳定 class，只能按结构取，同 `form-marker`。
  *
  * 0.2.2 改了结构：`SettingsRoot.tsx` 里标题从 nav 内部搬到面板上（`<div className={css.navTitle}>`），
@@ -354,6 +360,7 @@ export class MobileSettingsNav {
     for (const node of document.querySelectorAll('[' + BAR_ATTR + ']')) node.remove()
     for (const node of document.querySelectorAll('[' + DESC_ATTR + '], [' + CHEVRON_ATTR + '], [' + ICON_ATTR + ']')) node.remove()
     for (const node of document.querySelectorAll('[' + ICON_ATTR + '-hidden]')) node.removeAttribute(ICON_ATTR + '-hidden')
+    for (const node of document.querySelectorAll('[' + ICON_CELL_ATTR + ']')) node.removeAttribute(ICON_CELL_ATTR)
     for (const node of document.querySelectorAll('[' + ROW_ATTR + ']')) node.removeAttribute(ROW_ATTR)
     this.panel = null
     this.level = LEVEL_HOME
@@ -557,6 +564,8 @@ export class MobileSettingsNav {
     }
     // 上游图标只是被标记隐藏，收回时去掉标记即原样恢复。
     for (const node of panel.querySelectorAll('[' + ICON_ATTR + '-hidden]')) node.removeAttribute(ICON_ATTR + '-hidden')
+    // 图标壳只是被打上定位属性，收回时去掉即恢复上游原样。
+    for (const node of panel.querySelectorAll('[' + ICON_CELL_ATTR + ']')) node.removeAttribute(ICON_CELL_ATTR)
     for (const node of panel.querySelectorAll('[' + ROW_ATTR + ']')) node.removeAttribute(ROW_ATTR)
     for (const node of panel.querySelectorAll('[' + ACCOUNT_EXTRA_ATTR + ']')) node.remove()
     for (const node of panel.querySelectorAll('[' + HOME_HIDDEN_ATTR + ']')) node.removeAttribute(HOME_HIDDEN_ATTR)
@@ -719,6 +728,12 @@ export class MobileSettingsNav {
     const iconSvg = 'svg:not([' + ICON_ATTR + '])'
     const iconCell = [...row.querySelectorAll(':scope > span[aria-hidden="true"]:not([' + CHEVRON_ATTR + '])')]
       .find(cell => cell.querySelector(':scope > ' + iconSvg + ', :scope > [data-slot="settings.section.icon"] ' + iconSvg))
+    // 图标壳的属性是给样式表定位用的：老内核没有 :has()，认不出「装着 svg 的 span」。
+    // 每次同步重算，结构变化时就地纠正（多打的那个去掉，命中那个打上）。
+    for (const span of row.querySelectorAll<HTMLElement>(':scope > span[' + ICON_CELL_ATTR + ']')) {
+      if (span !== iconCell) span.removeAttribute(ICON_CELL_ATTR)
+    }
+    if (iconCell !== undefined && !iconCell.hasAttribute(ICON_CELL_ATTR)) iconCell.setAttribute(ICON_CELL_ATTR, '')
     const upstream = iconCell
       ?? row.querySelector(':scope > svg:not([' + ICON_ATTR + '])')
     if (icon === undefined) {
