@@ -144,6 +144,9 @@ class ConsoleSession(private val context: Context) {
           // 覆盖条目自带 env 时先铺底：终端环境（TERM/TERMINFO/VIMRUNTIME）与 PS1 归覆盖方决定，
           // 但中继协议键（PREFIX/NODE_PTY/SHELL/ARGS/CWD/尺寸）仍由壳侧最后写，页面侧不可劫持。
           if (shellOverride != null) {
+            // 覆盖条目可以显式清掉宿主环境里的键（如 TERMUX__PREFIX 会让 guest launcher 误判前缀）。
+            // 必须先于覆盖 env 生效，否则同一键的显式 set 会被清掉。
+            for (key in shellOverride.unset) p.environment().remove(key)
             if (shellOverride.env.isNotEmpty()) p.environment().putAll(shellOverride.env)
             p.environment()["DSH_CONSOLE_ARGS"] = ConsoleShellOverride.argsJson(shellOverride.args)
             shellOverride.cwd?.let { p.environment()["DSH_CONSOLE_CWD"] = it }

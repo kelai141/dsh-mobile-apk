@@ -41,6 +41,7 @@ internal data class ConsoleShellOverride(
   val args: List<String>,
   val cwd: String?,
   val env: Map<String, String>,
+  val unset: List<String>,
 ) {
   companion object {
     /** 覆盖文件在私有目录里的名字。 */
@@ -48,7 +49,7 @@ internal data class ConsoleShellOverride(
 
     private const val TAG = "ConsoleShellOverride"
 
-    private val KNOWN_KEYS = setOf("shell", "args", "cwd", "env")
+    private val KNOWN_KEYS = setOf("shell", "args", "cwd", "env", "unset")
 
     /**
      * 纯解析：任何不合规输入返回 null（调用方回落默认 Termux 行为），从不抛。
@@ -90,7 +91,18 @@ internal data class ConsoleShellOverride(
         }
       }
 
-      return ConsoleShellOverride(shell, args, cwd, env)
+      val unset = ArrayList<String>()
+      if (root.has("unset")) {
+        val unsetValue = root.opt("unset")
+        if (unsetValue !is JSONArray) return null
+        for (i in 0 until unsetValue.length()) {
+          val item = unsetValue.opt(i)
+          if (item !is String || !isSafeEnvKey(item)) return null
+          unset.add(item)
+        }
+      }
+
+      return ConsoleShellOverride(shell, args, cwd, env, unset)
     }
 
     /**

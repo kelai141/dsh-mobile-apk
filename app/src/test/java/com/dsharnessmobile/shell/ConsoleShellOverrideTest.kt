@@ -77,6 +77,22 @@ class ConsoleShellOverrideTest {
   }
 
   @Test
+  fun unsetListDropsHostEnvironmentKeys() {
+    val parsed = ConsoleShellOverride.parse(
+      json("shell" to "/system/bin/sh", "unset" to listOf("TERMUX__PREFIX", "TERMUX__ROOTFS")),
+    )
+    assertNotNull(parsed)
+    assertEquals(listOf("TERMUX__PREFIX", "TERMUX__ROOTFS"), parsed!!.unset)
+  }
+
+  @Test
+  fun malformedUnsetIsRejected() {
+    assertNull(ConsoleShellOverride.parse(json("shell" to "/system/bin/sh", "unset" to "TERMUX__PREFIX")))
+    assertNull(ConsoleShellOverride.parse(json("shell" to "/system/bin/sh", "unset" to listOf(1))))
+    assertNull(ConsoleShellOverride.parse(json("shell" to "/system/bin/sh", "unset" to listOf("A=B"))))
+  }
+
+  @Test
   fun malformedJsonFallsBackToDefaultByReturningNull() {
     assertNull(ConsoleShellOverride.parse("{not json"))
     assertNull(ConsoleShellOverride.parse("[]"))

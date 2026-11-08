@@ -70,6 +70,8 @@ READY -> DISABLING -> INSTALLED_DISABLED
 - 控制台默认运行快照 bash（Termux），该行为不变。
 - debug 构建可通过 `<filesDir>/console-shell-override.json` 把控制台指向别的 argv（如 bionilux 的
   Debian bash），用于验「现有 node-pty 中继能否驱动 guest bash」。release 变体永不读取。
+  条目支持 `env`（覆盖）与 `unset`（显式删除宿主环境键，例如 `TERMUX__PREFIX`——留着会让 guest
+  launcher 误判前缀并 exec 宿主路径）；`unset` 先于 `env` 生效。
 - 冻结的判据：tty 真实（非 `not a tty`）、job control 打开、`stty size` 非 `0 0`、SIGWINCH 可送达、
   交互输入被 guest 执行、`Ctrl-C` 中断、`exit` 后进程被回收。未通过前不得对外宣称「交互式 Linux 终端」。
 
