@@ -1,0 +1,19 @@
+[package]
+name = "dsh-git-read-probe"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+publish = false
+
+[[bin]]
+name = "dsh-git-read-probe"
+path = "src/main.rs"
+
+[dependencies]
+gix = { version = "=0.90.0", default-features = false, features = ["sha1"] }
+sha2 = "0.10"
+
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1
