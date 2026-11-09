@@ -1,0 +1,204 @@
+{
+  "node": "v24.18.0",
+  "count": 512,
+  "compression": "zstd",
+  "version": 4,
+  "moduleSha256": "c72afc48ca208ddbf5a2441e9fab567e277804e7182dda9fdcfe4c70b64608a8",
+  "trials": [
+    {
+      "concurrency": 3,
+      "first": {
+        "ms": 21827.933571,
+        "cpuMs": 21160.849,
+        "rssBefore": 80211968,
+        "rssAfter": 88186880,
+        "gcCount": 17,
+        "gcMs": 989.4174880087376,
+        "digest": "270542dd522fa3b6f47d14a0f14423338d5f204170137bc99adeb45fcaded364"
+      },
+      "repeat": {
+        "ms": 23788.366685,
+        "cpuMs": 18688.556,
+        "rssBefore": 88395776,
+        "rssAfter": 93028352,
+        "gcCount": 10,
+        "gcMs": 635.7751720249653,
+        "digest": "270542dd522fa3b6f47d14a0f14423338d5f204170137bc99adeb45fcaded364"
+      }
+    },
+    {
+      "concurrency": 6,
+      "first": {
+        "ms": 24526.116962999993,
+        "cpuMs": 20267.974,
+        "rssBefore": 94584832,
+        "rssAfter": 107220992,
+        "gcCount": 6,
+        "gcMs": 427.8919110149145,
+        "digest": "270542dd522fa3b6f47d14a0f14423338d5f204170137bc99adeb45fcaded364"
+      },
+      "repeat": {
+        "ms": 11583.426596999983,
+        "cpuMs": 12117.511,
+        "rssBefore": 108048384,
+        "rssAfter": 106577920,
+        "gcCount": 7,
+        "gcMs": 231.51053100824356,
+        "digest": "270542dd522fa3b6f47d14a0f14423338d5f204170137bc99adeb45fcaded364"
+      }
+    },
+    {
+      "concurrency": 12,
+      "first": {
+        "ms": 14371.067142000014,
+        "cpuMs": 13015.103,
+        "rssBefore": 106967040,
+        "rssAfter": 117280768,
+        "gcCount": 6,
+        "gcMs": 435.94913697242737,
+        "digest": "270542dd522fa3b6f47d14a0f14423338d5f204170137bc99adeb45fcaded364"
+      },
+      "repeat": {
+        "ms": 15469.802988999989,
+        "cpuMs": 13665.455,
+        "rssBefore": 118480896,
+        "rssAfter": 120057856,
+        "gcCount": 6,
+        "gcMs": 478.16671600937843,
+        "digest": "270542dd522fa3b6f47d14a0f14423338d5f204170137bc99adeb45fcaded364"
+      }
+    },
+    {
+      "concurrency": 12,
+      "first": {
+        "ms": 12365.861543000006,
+        "cpuMs": 11554.601,
+        "rssBefore": 120348672,
+        "rssAfter": 127463424,
+        "gcCount": 3,
+        "gcMs": 193.47067499160767,
+        "digest": "270542dd522fa3b6f47d14a0f14423338d5f204170137bc99adeb45fcaded364"
+      },
+      "repeat": {
+        "ms": 10681.20034499999,
+        "cpuMs": 8915.515,
+        "rssBefore": 127795200,
+        "rssAfter": 125603840,
+        "gcCount": 5,
+        "gcMs": 342.85113102197647,
+        "digest": "270542dd522fa3b6f47d14a0f14423338d5f204170137bc99adeb45fcaded364"
+      }
+    },
+    {
+      "concurrency": 3,
+      "first": {
+        "ms": 13221.676952000009,
+        "cpuMs": 12390.027,
+        "rssBefore": 126803968,
+        "rssAfter": 132526080,
+        "gcCount": 5,
+        "gcMs": 265.4479070007801,
+        "digest": "270542dd522fa3b6f47d14a0f14423338d5f204170137bc99adeb45fcaded364"
+      },
+      "repeat": {
+        "ms": 14476.510053000005,
+        "cpuMs": 11590.972,
+        "rssBefore": 132947968,
+        "rssAfter": 137310208,
+        "gcCount": 3,
+        "gcMs": 169.11141100525856,
+        "digest": "270542dd522fa3b6f47d14a0f14423338d5f204170137bc99adeb45fcaded364"
+      }
+    },
+    {
+      "concurrency": 6,
+      "first": {
+        "ms": 14965.391069000005,
+        "cpuMs": 13576.561,
+        "rssBefore": 137658368,
+        "rssAfter": 131473408,
+        "gcCount": 6,
+        "gcMs": 571.3175960034132,
+        "digest": "270542dd522fa3b6f47d14a0f14423338d5f204170137bc99adeb45fcaded364"
+      },
+      "repeat": {
+        "ms": 14591.304765999987,
+        "cpuMs": 12642.976,
+        "rssBefore": 131809280,
+        "rssAfter": 133558272,
+        "gcCount": 3,
+        "gcMs": 230.9080739915371,
+        "digest": "270542dd522fa3b6f47d14a0f14423338d5f204170137bc99adeb45fcaded364"
+      }
+    },
+    {
+      "concurrency": 6,
+      "first": {
+        "ms": 14602.890766999975,
+        "cpuMs": 13402.333,
+        "rssBefore": 133910528,
+        "rssAfter": 139083776,
+        "gcCount": 3,
+        "gcMs": 157.89294801652431,
+        "digest": "270542dd522fa3b6f47d14a0f14423338d5f204170137bc99adeb45fcaded364"
+      },
+      "repeat": {
+        "ms": 12057.192692000011,
+        "cpuMs": 11955.405,
+        "rssBefore": 139501568,
+        "rssAfter": 131776512,
+        "gcCount": 6,
+        "gcMs": 291.43778698146343,
+        "digest": "270542dd522fa3b6f47d14a0f14423338d5f204170137bc99adeb45fcaded364"
+      }
+    },
+    {
+      "concurrency": 12,
+      "first": {
+        "ms": 12289.541666000034,
+        "cpuMs": 12457.585,
+        "rssBefore": 132169728,
+        "rssAfter": 136945664,
+        "gcCount": 3,
+        "gcMs": 201.0505599975586,
+        "digest": "270542dd522fa3b6f47d14a0f14423338d5f204170137bc99adeb45fcaded364"
+      },
+      "repeat": {
+        "ms": 10382.448088000005,
+        "cpuMs": 11013.704,
+        "rssBefore": 137285632,
+        "rssAfter": 135327744,
+        "gcCount": 5,
+        "gcMs": 371.71242398023605,
+        "digest": "270542dd522fa3b6f47d14a0f14423338d5f204170137bc99adeb45fcaded364"
+      }
+    },
+    {
+      "concurrency": 3,
+      "first": {
+        "ms": 14215.305952000024,
+        "cpuMs": 12161.031,
+        "rssBefore": 135651328,
+        "rssAfter": 134905856,
+        "gcCount": 5,
+        "gcMs": 247.6090489923954,
+        "digest": "270542dd522fa3b6f47d14a0f14423338d5f204170137bc99adeb45fcaded364"
+      },
+      "repeat": {
+        "ms": 14348.069327000005,
+        "cpuMs": 12541.976,
+        "rssBefore": 135344128,
+        "rssAfter": 142647296,
+        "gcCount": 3,
+        "gcMs": 83.55783000588417,
+        "digest": "270542dd522fa3b6f47d14a0f14423338d5f204170137bc99adeb45fcaded364"
+      }
+    }
+  ],
+  "phases": {
+    "listGenerations": 1617.8117530000163,
+    "listArtifacts": 15080.964592000004,
+    "listMs": 16222.802589000028,
+    "digest": "270542dd522fa3b6f47d14a0f14423338d5f204170137bc99adeb45fcaded364"
+  }
+}
