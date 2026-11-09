@@ -125,6 +125,14 @@ export function assembleApk(options, runner = spawnSync) {
 
   const gradle = gradleCommand ?? (process.platform === 'win32' ? 'gradlew.bat' : './gradlew')
   const gradleArgs = [`:app:assemble${buildType === 'release' ? 'Release' : 'Debug'}`, '--no-daemon', `-PversionNameSuffix=${suffix}`]
+  // An app process on targetSdk >= 29 may only execve apk_data_file, so the
+  // Linux runtime's glibc loader ships in jniLibs and is installed into
+  // nativeLibraryDir. The caller supplies one loader per ABI, named
+  // libbionilux-loader.so. Omitting the directory leaves the build unchanged.
+  const nativeLinuxLoaderDir = options.nativeLinuxLoaderDir ?? process.env.DSH_NATIVE_LINUX_LOADER_DIR
+  if (typeof nativeLinuxLoaderDir === 'string' && nativeLinuxLoaderDir !== '') {
+    gradleArgs.push(`-PnativeLinuxLoaderDir=${resolve(nativeLinuxLoaderDir)}`)
+  }
   log(`Gradle: ${gradle} ${gradleArgs.join(' ')}`)
   execute(gradle, gradleArgs, { cwd: resolvedApkDir, shell: process.platform === 'win32' }, runner)
 

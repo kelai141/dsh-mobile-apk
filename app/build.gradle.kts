@@ -220,3 +220,15 @@ providers.gradleProperty("nativeConsoleRelayDir").orNull?.let { relayDir ->
     packaging.jniLibs.useLegacyPackaging = true
   }
 }
+
+// The Linux runtime needs an executable glibc loader, and an app process on
+// targetSdk >= 29 may only execve apk_data_file. The loader therefore ships as
+// lib/<abi>/libbionilux-loader.so and is installed into nativeLibraryDir, which
+// is the only directory SELinux lets us execute. Every build type receives it:
+// without it the Linux environment cannot start on those devices at all.
+providers.gradleProperty("nativeLinuxLoaderDir").orNull?.let { loaderDir ->
+  android {
+    sourceSets.getByName("main").jniLibs.srcDir(file(loaderDir))
+    packaging.jniLibs.useLegacyPackaging = true
+  }
+}
