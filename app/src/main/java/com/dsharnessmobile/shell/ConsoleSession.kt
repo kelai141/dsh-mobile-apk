@@ -139,7 +139,17 @@ class ConsoleSession(private val context: Context) {
           // 将来原生 PTY）只消费描述并 spawn。unset/env 一并进描述，由底层在 spawn 前应用。
           if (shellOverride == null) p.environment()["PS1"] = "dsh:\\w$ "
           p.environment()["DSH_CONSOLE_PREFIX"] = engineManager.usrDir.absolutePath
-          val launch = if (shellOverride != null) ConsoleLaunch.ofOverride(shellOverride) else ConsoleLaunch.ofDefault(bash.absolutePath)
+          val launch = if (shellOverride != null) {
+            // 与 #1704 / dsh-bionilux#13 的 exec 契约对齐：launcher 走系统 linker 启动，
+            // glibc loader 从 nativeLibraryDir 解析（app 数据目录里的 ELF 无法 execve）。
+            ConsoleLaunch.wrapWithAndroidLinker(
+              ConsoleLaunch.ofOverride(shellOverride),
+              ConsoleLaunch.ANDROID_LINKER,
+              context.applicationInfo.nativeLibraryDir ?: "",
+            )
+          } else {
+            ConsoleLaunch.ofDefault(bash.absolutePath)
+          }
           p.environment()[ConsoleLaunch.ENV_KEY] = launch.toJson()
           p.environment()["DSH_CONSOLE_NODE_PTY"] = ptyModule.absolutePath
           p.environment()["DSH_CONSOLE_COLS"] = ConsolePty.normalizeSize(cols, rows).first.toString()

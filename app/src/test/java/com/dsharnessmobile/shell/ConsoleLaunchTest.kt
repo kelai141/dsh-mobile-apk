@@ -52,6 +52,44 @@ class ConsoleLaunchTest {
   }
 
   @Test
+  fun androidLinkerWrapperStartsTheLauncherThroughTheSystemLinker() {
+    val wrapped = ConsoleLaunch.wrapWithAndroidLinker(
+      ConsoleLaunch.ofOverride(
+        ConsoleShellOverride(
+          shell = "/abs/backend/bin/bionilux",
+          args = listOf("/bin/bash", "-i"),
+          cwd = "/abs/cwd",
+          env = mapOf("BIONILUX_FAKE_ROOT" to "1"),
+          unset = listOf("TERMUX__PREFIX"),
+        ),
+      ),
+      linker = "/system/bin/linker64",
+      nativeLibDir = "/data/app/lib/x86_64",
+    )
+    val obj = parse(wrapped.toJson())
+    assertEquals("/system/bin/linker64", obj.getString("shell"))
+    val argv = obj.getJSONArray("argv")
+    assertEquals("/abs/backend/bin/bionilux", argv.getString(0))
+    assertEquals("/bin/bash", argv.getString(1))
+    assertEquals("/data/app/lib/x86_64", obj.getJSONObject("env").getString("BIONILUX_NATIVE_LIB_DIR"))
+    assertEquals("1", obj.getJSONObject("env").getString("BIONILUX_FAKE_ROOT"))
+    assertEquals("TERMUX__PREFIX", obj.getJSONArray("unset").getString(0))
+  }
+
+  @Test
+  fun androidLinkerWrapperKeepsEnvWhenNoNativeLibDirIsAvailable() {
+    val wrapped = ConsoleLaunch.wrapWithAndroidLinker(
+      ConsoleLaunch.ofDefault("/abs/bin/bash"),
+      linker = "/system/bin/linker64",
+      nativeLibDir = "",
+    )
+    val obj = parse(wrapped.toJson())
+    assertEquals("/system/bin/linker64", obj.getString("shell"))
+    assertEquals("/abs/bin/bash", obj.getJSONArray("argv").getString(0))
+    assertFalse(obj.has("env"))
+  }
+
+  @Test
   fun descriptorEnvKeyIsStableAcrossBothSides() {
     assertEquals("DSH_CONSOLE_LAUNCH", ConsoleLaunch.ENV_KEY)
   }

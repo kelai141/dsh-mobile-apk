@@ -72,6 +72,9 @@ READY -> DISABLING -> INSTALLED_DISABLED
   Debian bash），用于验「现有 node-pty 中继能否驱动 guest bash」。release 变体永不读取。
   条目支持 `env`（覆盖）与 `unset`（显式删除宿主环境键，例如 `TERMUX__PREFIX`——留着会让 guest
   launcher 误判前缀并 exec 宿主路径）；`unset` 先于 `env` 生效。
+- exec 契约：Android 的 app 数据目录里的 ELF 不能被 execve（targetSdk >= 29 的 untrusted_app 只对 apk_data_file
+  有 execute_no_trans，拒绝被 dontaudit）；验收用 launcher 走 `/system/bin/linker64 <launcher> ...` 启动，
+  glibc loader 由 `BIONILUX_NATIVE_LIB_DIR` 指向 APK 的 nativeLibraryDir（与 dsh-bionilux#13 / dsh-mobile-apk#1704 对齐）。
 - 启动描述：壳侧把「启动什么」收敛成单通道 `DSH_CONSOLE_LAUNCH`（JSON：schemaVersion / shell / argv /
   cwd / env / unset），中继只消费描述并 spawn，不解释启动策略（ADR-0001）。`ConsoleLaunch` 是唯一生产者。
 - 渲染：控制台页面用 xterm.js（MIT，随 APK 资产分发）渲染 VT/ANSI，PTY 路径原样转发控制序列；

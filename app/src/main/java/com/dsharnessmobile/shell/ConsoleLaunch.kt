@@ -49,6 +49,28 @@ internal data class ConsoleLaunch(
     const val SCHEMA_VERSION = 1
     const val ENV_KEY = "DSH_CONSOLE_LAUNCH"
 
+    /**
+     * Android 上 app 数据目录里的 ELF 不能被 execve（targetSdk >= 29 的 untrusted_app 只对
+     * apk_data_file 有 execute_no_trans，且拒绝被 dontaudit）。验收用的 bionilux launcher
+     * 因此要走系统 linker 启动；它的 glibc loader 则从 nativeLibraryDir 解析
+     * （`BIONILUX_NATIVE_LIB_DIR`，与 dsh-bionilux#13 / dsh-mobile-apk#1704 的契约一致）。
+     *
+     * 这条包装只作用于覆盖条目（debug 验收）；默认 Termux bash 的启动路径不变。
+     */
+    const val ANDROID_LINKER = "/system/bin/linker64"
+    const val NATIVE_LIB_DIR_ENV = "BIONILUX_NATIVE_LIB_DIR"
+
+    fun wrapWithAndroidLinker(launch: ConsoleLaunch, linker: String, nativeLibDir: String): ConsoleLaunch {
+      val env = if (nativeLibDir.isBlank()) launch.env else launch.env + (NATIVE_LIB_DIR_ENV to nativeLibDir)
+      return ConsoleLaunch(
+        shell = linker,
+        argv = listOf(launch.shell) + launch.argv,
+        cwd = launch.cwd,
+        env = env,
+        unset = launch.unset,
+      )
+    }
+
     /** 默认：快照内的 Termux bash（交互式），cwd 交给底层按 HOME/usr 决定。 */
     fun ofDefault(shell: String): ConsoleLaunch =
       ConsoleLaunch(shell = shell, argv = listOf("-i"), cwd = null, env = emptyMap(), unset = emptyList())
