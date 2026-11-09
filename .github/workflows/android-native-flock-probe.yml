@@ -51,6 +51,7 @@ jobs:
           grep -Fq 'napi_register_module_v1' <<< "$symbols"
           grep -Fq 'flock@LIBC' <<< "$symbols"
           node --check scripts/android-native/flock-probe/check-device.mjs
+          node --check scripts/android-native/flock-probe/check-session-device.mjs
           cp "$binary" "$RUNNER_TEMP/flock-probe.node"
       - uses: actions/upload-artifact@v4
         with:

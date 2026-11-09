@@ -1,0 +1,21 @@
+{
+  "stub": {
+    "mode": "stub",
+    "contending": {
+      "acquired": true
+    },
+    "afterClose": {
+      "acquired": true
+    }
+  },
+  "native": {
+    "mode": "native",
+    "contending": {
+      "acquired": false,
+      "name": "SessionAlreadyOwnedError"
+    },
+    "afterClose": {
+      "acquired": true
+    }
+  }
+}
