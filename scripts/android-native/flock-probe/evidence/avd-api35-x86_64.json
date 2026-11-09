@@ -1,0 +1,38 @@
+{
+  "stub": {
+    "mode": "stub",
+    "first": {
+      "acquired": true
+    },
+    "contending": {
+      "acquired": true
+    },
+    "afterClose": {
+      "acquired": true
+    },
+    "invalidFd": {
+      "acquired": true
+    }
+  },
+  "native": {
+    "mode": "native",
+    "first": {
+      "acquired": true
+    },
+    "contending": {
+      "acquired": false,
+      "code": "EAGAIN",
+      "errno": 11,
+      "syscall": "flock"
+    },
+    "afterClose": {
+      "acquired": true
+    },
+    "invalidFd": {
+      "acquired": false,
+      "code": "EBADF",
+      "errno": 9,
+      "syscall": "flock"
+    }
+  }
+}
