@@ -1,0 +1,106 @@
+{
+  "moduleSha256": "99988e1858e227391386ec8579a2991e8be0104a9c9ea6b0b2baeb13cb3b89e6",
+  "node": "v24.18.0",
+  "queries": [
+    "file",
+    "f019",
+    "module",
+    "zzzz",
+    "路径",
+    "STRASSE",
+    "ος",
+    "😀",
+    "İNPUT",
+    ".private",
+    "README",
+    "linked-module",
+    "node_modules"
+  ],
+  "files": 20011,
+  "samples": [
+    {
+      "node": {
+        "coldMs": 426.5388299999977,
+        "warmMs": 7267.474111000003,
+        "cpuMs": 7078.579
+      },
+      "native": {
+        "coldMs": 461.89376100000004,
+        "cpuMs": 1653.4479999999999,
+        "warmMs": 1810.166811,
+        "withSpawnMs": 2348.8298959999993
+      },
+      "resultSha256": "774a0d866207bca584006995b1916ae2aca9e4bb4038c22287c21dc8c092e41b"
+    },
+    {
+      "node": {
+        "coldMs": 299.12591800000155,
+        "warmMs": 8471.853006000001,
+        "cpuMs": 7020.009
+      },
+      "native": {
+        "coldMs": 223.975175,
+        "cpuMs": 1179.9660000000001,
+        "warmMs": 1271.558345,
+        "withSpawnMs": 1594.110636999998
+      },
+      "resultSha256": "774a0d866207bca584006995b1916ae2aca9e4bb4038c22287c21dc8c092e41b"
+    },
+    {
+      "node": {
+        "coldMs": 1654.4401729999954,
+        "warmMs": 8398.141895,
+        "cpuMs": 7385.322
+      },
+      "native": {
+        "coldMs": 272.175646,
+        "cpuMs": 1309.6409999999998,
+        "warmMs": 1516.7774920000002,
+        "withSpawnMs": 1864.5765969999993
+      },
+      "resultSha256": "774a0d866207bca584006995b1916ae2aca9e4bb4038c22287c21dc8c092e41b"
+    },
+    {
+      "node": {
+        "coldMs": 657.807842000002,
+        "warmMs": 6640.931886999999,
+        "cpuMs": 6107.84
+      },
+      "native": {
+        "coldMs": 738.6460430000001,
+        "cpuMs": 2605.563,
+        "warmMs": 2775.758,
+        "withSpawnMs": 3594.981474
+      },
+      "resultSha256": "774a0d866207bca584006995b1916ae2aca9e4bb4038c22287c21dc8c092e41b"
+    },
+    {
+      "node": {
+        "coldMs": 1354.841026999995,
+        "warmMs": 6843.690264999997,
+        "cpuMs": 6265.065
+      },
+      "native": {
+        "coldMs": 165.587735,
+        "cpuMs": 1242.114,
+        "warmMs": 1574.6777779999998,
+        "withSpawnMs": 1947.0371559999985
+      },
+      "resultSha256": "774a0d866207bca584006995b1916ae2aca9e4bb4038c22287c21dc8c092e41b"
+    },
+    {
+      "node": {
+        "coldMs": 820.9204080000054,
+        "warmMs": 10314.708772999991,
+        "cpuMs": 8237.509
+      },
+      "native": {
+        "coldMs": 195.12967,
+        "cpuMs": 1345.529,
+        "warmMs": 1320.748655,
+        "withSpawnMs": 1578.4727009999915
+      },
+      "resultSha256": "774a0d866207bca584006995b1916ae2aca9e4bb4038c22287c21dc8c092e41b"
+    }
+  ]
+}

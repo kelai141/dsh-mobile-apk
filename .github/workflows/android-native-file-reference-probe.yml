@@ -1,0 +1,56 @@
+name: Android 原生文件补全探针
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/android-native-file-reference-probe.yml'
+      - 'scripts/android-native/file-reference-probe/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-linux-android, x86_64-linux-android]
+    env:
+      TARGET: ${{ matrix.target }}
+      MANIFEST: scripts/android-native/file-reference-probe/Cargo.toml
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: 双 ABI 编译并核对 ELF
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.99.0 --profile minimal --component rustfmt --target "$TARGET"
+          ndk="$ANDROID_HOME/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          if [[ ! -x "$ndk/llvm-readelf" ]]; then
+            sudo "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'ndk;27.0.12077973'
+          fi
+          export RUSTFLAGS='-C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384'
+          linker_env="CARGO_TARGET_${TARGET^^}_LINKER"
+          export "${linker_env//-/_}=$ndk/${TARGET}26-clang"
+          cargo +1.99.0 fmt --manifest-path "$MANIFEST" --check
+          cargo +1.99.0 build --locked --release --manifest-path "$MANIFEST" \
+            --target-dir "$RUNNER_TEMP/file-reference-build" --target "$TARGET"
+          binary="$RUNNER_TEMP/file-reference-build/$TARGET/release/dsh-file-reference-probe"
+          machine=$("$ndk/llvm-readelf" --file-header "$binary")
+          case "$TARGET" in
+            aarch64-linux-android) grep -Fq AArch64 <<< "$machine" ;;
+            x86_64-linux-android) grep -Fq X86-64 <<< "$machine" ;;
+          esac
+          "$ndk/llvm-readelf" --program-headers "$binary" |
+            awk '$1 == "LOAD" { found=1; if ($NF != "0x4000") bad=1 } END { exit (!found || bad) }'
+          node --check scripts/android-native/file-reference-probe/compare-device.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: file-reference-probe-${{ matrix.target }}
+          path: ${{ runner.temp }}/file-reference-build/${{ matrix.target }}/release/dsh-file-reference-probe
+          if-no-files-found: error
+          retention-days: 7
