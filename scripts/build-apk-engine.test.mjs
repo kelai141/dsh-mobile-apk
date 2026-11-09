@@ -92,6 +92,59 @@ test('shared terminal engine installs snapshot and fingerprint, builds, then cop
   assert.equal(calls[4].options.cwd, resolve(fileURLToPath(new URL('.', import.meta.url))))
 })
 
+test('an optional native Linux loader directory becomes a Gradle property', (t) => {
+  const f = fixture(t)
+  const loaderDir = join(f.root, 'loader')
+  mkdirSync(join(loaderDir, 'arm64-v8a'), { recursive: true })
+  writeFileSync(join(loaderDir, 'arm64-v8a', 'libbionilux-loader.so'), Buffer.from('loader'))
+  let gradleArgs
+  const runner = (command, args) => {
+    if (args[0]?.endsWith('check-apk-signatures.mjs') || args[0]?.endsWith('check-apk-form.mjs')) return { status: 0 }
+    if (command === 'gradlew.bat' || command === './gradlew') {
+      gradleArgs = args
+      const built = join(f.apkDir, 'app', 'build', 'outputs', 'apk', 'release', 'app-release.apk')
+      mkdirSync(join(built, '..'), { recursive: true })
+      writeFileSync(built, Buffer.from('signed-test-apk'))
+    }
+    return { status: 0 }
+  }
+  assembleApk({
+    snapshot: f.snapshot,
+    apkDir: f.apkDir,
+    outputDir: f.outputDir,
+    artifactName: 'with-loader.apk',
+    fingerprintGate: '/tools/check-snapshot-fingerprint.mjs',
+    nativeLinuxLoaderDir: loaderDir,
+    log() {},
+  }, runner)
+  // The loader must land in nativeLibraryDir, which only jniLibs reaches.
+  assert.ok(gradleArgs.includes(`-PnativeLinuxLoaderDir=${resolve(loaderDir)}`))
+})
+
+test('an absent native Linux loader directory leaves the Gradle arguments unchanged', (t) => {
+  const f = fixture(t)
+  let gradleArgs
+  const runner = (command, args) => {
+    if (args[0]?.endsWith('check-apk-signatures.mjs') || args[0]?.endsWith('check-apk-form.mjs')) return { status: 0 }
+    if (command === 'gradlew.bat' || command === './gradlew') {
+      gradleArgs = args
+      const built = join(f.apkDir, 'app', 'build', 'outputs', 'apk', 'release', 'app-release.apk')
+      mkdirSync(join(built, '..'), { recursive: true })
+      writeFileSync(built, Buffer.from('signed-test-apk'))
+    }
+    return { status: 0 }
+  }
+  assembleApk({
+    snapshot: f.snapshot,
+    apkDir: f.apkDir,
+    outputDir: f.outputDir,
+    artifactName: 'without-loader.apk',
+    fingerprintGate: '/tools/check-snapshot-fingerprint.mjs',
+    log() {},
+  }, runner)
+  assert.equal(gradleArgs.some((arg) => arg.startsWith('-PnativeLinuxLoaderDir=')), false)
+})
+
 test('fingerprint rejection stops before Gradle and a Gradle failure does not copy an artifact', (t) => {
   const f = fixture(t)
   let gradleCalls = 0

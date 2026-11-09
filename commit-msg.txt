@@ -1,0 +1,17 @@
+feat(linux): ship the glibc loader in nativeLibraryDir
+
+An app process on targetSdk >= 29 runs in u:r:untrusted_app, and SELinux
+grants execute_no_trans on apk_data_file only. App data is app_data_file and
+memfd is appdomain_tmpfs; both allow execute for mmap but not for execve. So
+execing the rootfs glibc loader fails with EACCES and no AVC, because the
+denial is dontaudited. MIUI and similar ROMs tighten this further, which is
+why the Linux environment never starts there.
+
+Ship the loader as lib/<abi>/libbionilux-loader.so and let Android install it
+into nativeLibraryDir, then point the runtime at that directory through
+DSH_NATIVE_LIB_DIR. The runtime prefers that copy and keeps the rootfs one as
+a fallback, so a build without the loader behaves as before.
+
+The loader directory is an opt-in Gradle property, the same shape as the
+existing console relay, and every build type receives it: without it the
+Linux environment cannot start at all on those devices.

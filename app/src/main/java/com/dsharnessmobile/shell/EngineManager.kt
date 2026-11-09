@@ -3008,6 +3008,13 @@ class EngineManager(private val context: Context, private val pickToken: String?
       "npm_config_store_dir" to pnpmStoreDir(homeDir),
       // 0.13.8 #183：引擎子进程读取键盘广播 nonce 的路径基（manage 插件 --es auth 随广播携带）
       "DSH_FILES_DIR" to context.filesDir.absolutePath,
+      // The Linux runtime's glibc loader cannot be execve'd from app data: an
+      // app process on targetSdk >= 29 may only execute apk_data_file. Ship it
+      // as lib/<abi>/libbionilux-loader.so and point the runtime at the
+      // directory Android installs those files into.
+      // Absent (empty) when the package carries no native libraries; the
+      // runtime then keeps its rootfs fallback instead of failing.
+      "DSH_NATIVE_LIB_DIR" to (context.applicationInfo.nativeLibraryDir ?: ""),
       // os.tmpdir() falls back to the baked-in Termux tmp on Android
       // (unwritable from the app domain); keep spill inside filesDir.
       "TMPDIR" to File(homeDir, "tmp").apply { mkdirs() }.absolutePath,
