@@ -1,0 +1,166 @@
+{
+  "moduleSha256": "99988e1858e227391386ec8579a2991e8be0104a9c9ea6b0b2baeb13cb3b89e6",
+  "node": "v24.18.0",
+  "queries": [
+    "file",
+    "f019",
+    "module",
+    "zzzz",
+    "路径",
+    "STRASSE",
+    "ος",
+    "😀",
+    "İNPUT",
+    ".private",
+    "README",
+    "linked-module",
+    "node_modules"
+  ],
+  "files": 20011,
+  "samples": [
+    {
+      "order": [
+        "node",
+        "native",
+        "optimizedJs"
+      ],
+      "node": {
+        "coldMs": 1511.7809519999973,
+        "warmMs": 11635.308290999998,
+        "cpuMs": 10112.47
+      },
+      "native": {
+        "coldMs": 280.313171,
+        "cpuMs": 1121.6070000000002,
+        "warmMs": 1370.775445,
+        "withSpawnMs": 1823.083490000001
+      },
+      "optimizedJs": {
+        "coldMs": 1574.2404490000008,
+        "warmMs": 2140.9799090000015,
+        "cpuMs": 3400.085
+      },
+      "resultSha256": "774a0d866207bca584006995b1916ae2aca9e4bb4038c22287c21dc8c092e41b"
+    },
+    {
+      "order": [
+        "native",
+        "optimizedJs",
+        "node"
+      ],
+      "node": {
+        "coldMs": 1495.7178669999994,
+        "warmMs": 8463.194228,
+        "cpuMs": 8295.528
+      },
+      "native": {
+        "coldMs": 138.54491199999998,
+        "cpuMs": 1061.05,
+        "warmMs": 1146.401682,
+        "withSpawnMs": 1414.8642499999987
+      },
+      "optimizedJs": {
+        "coldMs": 2061.5945060000013,
+        "warmMs": 1580.4222569999984,
+        "cpuMs": 2891.125
+      },
+      "resultSha256": "774a0d866207bca584006995b1916ae2aca9e4bb4038c22287c21dc8c092e41b"
+    },
+    {
+      "order": [
+        "optimizedJs",
+        "node",
+        "native"
+      ],
+      "node": {
+        "coldMs": 1591.6212870000018,
+        "warmMs": 9677.149491999997,
+        "cpuMs": 8684.213
+      },
+      "native": {
+        "coldMs": 176.31387,
+        "cpuMs": 1014.916,
+        "warmMs": 1001.325568,
+        "withSpawnMs": 1353.834240000011
+      },
+      "optimizedJs": {
+        "coldMs": 2276.7243869999947,
+        "warmMs": 2005.2279720000006,
+        "cpuMs": 2641.762
+      },
+      "resultSha256": "774a0d866207bca584006995b1916ae2aca9e4bb4038c22287c21dc8c092e41b"
+    },
+    {
+      "order": [
+        "native",
+        "node",
+        "optimizedJs"
+      ],
+      "node": {
+        "coldMs": 1854.2001829999936,
+        "warmMs": 9042.025578,
+        "cpuMs": 8780.474
+      },
+      "native": {
+        "coldMs": 245.471726,
+        "cpuMs": 2070.984,
+        "warmMs": 2966.484504,
+        "withSpawnMs": 3309.20438000001
+      },
+      "optimizedJs": {
+        "coldMs": 1568.4303570000047,
+        "warmMs": 2473.665842000002,
+        "cpuMs": 3232
+      },
+      "resultSha256": "774a0d866207bca584006995b1916ae2aca9e4bb4038c22287c21dc8c092e41b"
+    },
+    {
+      "order": [
+        "optimizedJs",
+        "native",
+        "node"
+      ],
+      "node": {
+        "coldMs": 258.3429649999889,
+        "warmMs": 6331.996518999993,
+        "cpuMs": 5735.702
+      },
+      "native": {
+        "coldMs": 126.03998,
+        "cpuMs": 1090.9370000000001,
+        "warmMs": 1140.3675289999999,
+        "withSpawnMs": 1371.9255919999996
+      },
+      "optimizedJs": {
+        "coldMs": 3298.2992999999988,
+        "warmMs": 757.0038630000054,
+        "cpuMs": 2138.122
+      },
+      "resultSha256": "774a0d866207bca584006995b1916ae2aca9e4bb4038c22287c21dc8c092e41b"
+    },
+    {
+      "order": [
+        "node",
+        "optimizedJs",
+        "native"
+      ],
+      "node": {
+        "coldMs": 805.8720449999964,
+        "warmMs": 9726.017313000004,
+        "cpuMs": 6855.639
+      },
+      "native": {
+        "coldMs": 596.219232,
+        "cpuMs": 1347.044,
+        "warmMs": 1545.5998659999998,
+        "withSpawnMs": 2327.6246600000013
+      },
+      "optimizedJs": {
+        "coldMs": 300.90389299999515,
+        "warmMs": 884.3725339999946,
+        "cpuMs": 904.664
+      },
+      "resultSha256": "774a0d866207bca584006995b1916ae2aca9e4bb4038c22287c21dc8c092e41b"
+    }
+  ]
+}
