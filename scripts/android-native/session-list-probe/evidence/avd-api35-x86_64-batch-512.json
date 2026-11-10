@@ -1,0 +1,290 @@
+{
+  "node": "v24.18.0",
+  "count": 512,
+  "compression": "zstd",
+  "version": 4,
+  "moduleSha256": "c72afc48ca208ddbf5a2441e9fab567e277804e7182dda9fdcfe4c70b64608a8",
+  "trials": [
+    {
+      "variant": "upstream",
+      "first": {
+        "ms": 63750.634125,
+        "cpuMs": 48042.461,
+        "rssBefore": 78704640,
+        "rssAfter": 81199104,
+        "gcCount": 48,
+        "gcMs": 5235.905604064465,
+        "digest": "dfebdffcc07c4297f34160b1f89b2660556093592f59df91bf2260a84f07476c"
+      },
+      "repeat": {
+        "ms": 43688.44539799998,
+        "cpuMs": 34168.302,
+        "rssBefore": 81518592,
+        "rssAfter": 81653760,
+        "gcCount": 45,
+        "gcMs": 1720.6087980866432,
+        "digest": "dfebdffcc07c4297f34160b1f89b2660556093592f59df91bf2260a84f07476c"
+      }
+    },
+    {
+      "variant": "js",
+      "first": {
+        "ms": 16872.37710099999,
+        "cpuMs": 14960.119,
+        "rssBefore": 81997824,
+        "rssAfter": 81584128,
+        "gcCount": 28,
+        "gcMs": 1902.685714006424,
+        "digest": "dfebdffcc07c4297f34160b1f89b2660556093592f59df91bf2260a84f07476c",
+        "headerBatch": {
+          "workMs": 5706.450211000018,
+          "hits": 512,
+          "fallback": 0
+        }
+      },
+      "repeat": {
+        "ms": 5725.112897999992,
+        "cpuMs": 5475.453,
+        "rssBefore": 82194432,
+        "rssAfter": 92446720,
+        "gcCount": 9,
+        "gcMs": 574.5156589746475,
+        "digest": "dfebdffcc07c4297f34160b1f89b2660556093592f59df91bf2260a84f07476c",
+        "headerBatch": {
+          "workMs": 3260.1529779999983,
+          "hits": 512,
+          "fallback": 0
+        }
+      }
+    },
+    {
+      "variant": "rust",
+      "first": {
+        "ms": 5158.790325000009,
+        "cpuMs": 3102.193,
+        "rssBefore": 92717056,
+        "rssAfter": 89165824,
+        "gcCount": 9,
+        "gcMs": 554.8598670363426,
+        "digest": "dfebdffcc07c4297f34160b1f89b2660556093592f59df91bf2260a84f07476c",
+        "headerBatch": {
+          "cpuMs": 1268.56,
+          "maxRssKiB": 43708,
+          "workMs": 1715.375118,
+          "elapsedMs": 2083.3581940000004,
+          "hits": 512,
+          "fallback": 0
+        }
+      },
+      "repeat": {
+        "ms": 5607.728640000016,
+        "cpuMs": 3804.567,
+        "rssBefore": 89423872,
+        "rssAfter": 106946560,
+        "gcCount": 5,
+        "gcMs": 362.23362696170807,
+        "digest": "dfebdffcc07c4297f34160b1f89b2660556093592f59df91bf2260a84f07476c",
+        "headerBatch": {
+          "cpuMs": 1037.447,
+          "maxRssKiB": 44540,
+          "workMs": 1206.337467,
+          "elapsedMs": 1422.8898550000158,
+          "hits": 512,
+          "fallback": 0
+        }
+      }
+    },
+    {
+      "variant": "rust",
+      "first": {
+        "ms": 9147.280936000025,
+        "cpuMs": 6220.691,
+        "rssBefore": 107143168,
+        "rssAfter": 107487232,
+        "gcCount": 3,
+        "gcMs": 265.1167280077934,
+        "digest": "dfebdffcc07c4297f34160b1f89b2660556093592f59df91bf2260a84f07476c",
+        "headerBatch": {
+          "cpuMs": 1775.8639999999998,
+          "maxRssKiB": 61680,
+          "workMs": 2600.047814,
+          "elapsedMs": 2867.777689999988,
+          "hits": 512,
+          "fallback": 0
+        }
+      },
+      "repeat": {
+        "ms": 4216.648642999993,
+        "cpuMs": 2288.692,
+        "rssBefore": 107880448,
+        "rssAfter": 109064192,
+        "gcCount": 3,
+        "gcMs": 551.8434099853039,
+        "digest": "dfebdffcc07c4297f34160b1f89b2660556093592f59df91bf2260a84f07476c",
+        "headerBatch": {
+          "cpuMs": 1299.6009999999999,
+          "maxRssKiB": 62164,
+          "workMs": 1542.7053449999999,
+          "elapsedMs": 1887.9840010000044,
+          "hits": 512,
+          "fallback": 0
+        }
+      }
+    },
+    {
+      "variant": "upstream",
+      "first": {
+        "ms": 43322.56347300002,
+        "cpuMs": 34127.031,
+        "rssBefore": 109510656,
+        "rssAfter": 117481472,
+        "gcCount": 5,
+        "gcMs": 467.0683900117874,
+        "digest": "dfebdffcc07c4297f34160b1f89b2660556093592f59df91bf2260a84f07476c"
+      },
+      "repeat": {
+        "ms": 28403.155241,
+        "cpuMs": 23598.196,
+        "rssBefore": 117895168,
+        "rssAfter": 126767104,
+        "gcCount": 6,
+        "gcMs": 745.7540740072727,
+        "digest": "dfebdffcc07c4297f34160b1f89b2660556093592f59df91bf2260a84f07476c"
+      }
+    },
+    {
+      "variant": "js",
+      "first": {
+        "ms": 18145.64142499998,
+        "cpuMs": 15796.234,
+        "rssBefore": 127164416,
+        "rssAfter": 125513728,
+        "gcCount": 22,
+        "gcMs": 1025.690978974104,
+        "digest": "dfebdffcc07c4297f34160b1f89b2660556093592f59df91bf2260a84f07476c",
+        "headerBatch": {
+          "workMs": 8843.905578999955,
+          "hits": 512,
+          "fallback": 0
+        }
+      },
+      "repeat": {
+        "ms": 12146.706779,
+        "cpuMs": 10689.332,
+        "rssBefore": 125829120,
+        "rssAfter": 124362752,
+        "gcCount": 28,
+        "gcMs": 983.2191699743271,
+        "digest": "dfebdffcc07c4297f34160b1f89b2660556093592f59df91bf2260a84f07476c",
+        "headerBatch": {
+          "workMs": 7308.761048000015,
+          "hits": 512,
+          "fallback": 0
+        }
+      }
+    },
+    {
+      "variant": "js",
+      "first": {
+        "ms": 15934.412483000022,
+        "cpuMs": 11430.587,
+        "rssBefore": 122322944,
+        "rssAfter": 125435904,
+        "gcCount": 23,
+        "gcMs": 1275.2069981098175,
+        "digest": "dfebdffcc07c4297f34160b1f89b2660556093592f59df91bf2260a84f07476c",
+        "headerBatch": {
+          "workMs": 8063.094096000015,
+          "hits": 512,
+          "fallback": 0
+        }
+      },
+      "repeat": {
+        "ms": 18869.776165000047,
+        "cpuMs": 14598.482,
+        "rssBefore": 125485056,
+        "rssAfter": 127279104,
+        "gcCount": 18,
+        "gcMs": 1669.673082023859,
+        "digest": "dfebdffcc07c4297f34160b1f89b2660556093592f59df91bf2260a84f07476c",
+        "headerBatch": {
+          "workMs": 9906.263757999986,
+          "hits": 512,
+          "fallback": 0
+        }
+      }
+    },
+    {
+      "variant": "rust",
+      "first": {
+        "ms": 14858.961782000028,
+        "cpuMs": 8844.416,
+        "rssBefore": 127520768,
+        "rssAfter": 122519552,
+        "gcCount": 22,
+        "gcMs": 1211.7249169647694,
+        "digest": "dfebdffcc07c4297f34160b1f89b2660556093592f59df91bf2260a84f07476c",
+        "headerBatch": {
+          "cpuMs": 2095.192,
+          "maxRssKiB": 76696,
+          "workMs": 2916.4421709999997,
+          "elapsedMs": 3554.251617000031,
+          "hits": 512,
+          "fallback": 0
+        }
+      },
+      "repeat": {
+        "ms": 8969.841275999963,
+        "cpuMs": 6010.346,
+        "rssBefore": 122830848,
+        "rssAfter": 127574016,
+        "gcCount": 6,
+        "gcMs": 588.3745819926262,
+        "digest": "dfebdffcc07c4297f34160b1f89b2660556093592f59df91bf2260a84f07476c",
+        "headerBatch": {
+          "cpuMs": 1331.8179999999998,
+          "maxRssKiB": 76528,
+          "workMs": 2060.3866160000002,
+          "elapsedMs": 2796.8376029999927,
+          "hits": 512,
+          "fallback": 0
+        }
+      }
+    },
+    {
+      "variant": "upstream",
+      "first": {
+        "ms": 36404.24660200003,
+        "cpuMs": 30853.388,
+        "rssBefore": 125718528,
+        "rssAfter": 135061504,
+        "gcCount": 29,
+        "gcMs": 1209.7407970130444,
+        "digest": "dfebdffcc07c4297f34160b1f89b2660556093592f59df91bf2260a84f07476c"
+      },
+      "repeat": {
+        "ms": 24935.186252000043,
+        "cpuMs": 22300.496,
+        "rssBefore": 135368704,
+        "rssAfter": 130637824,
+        "gcCount": 16,
+        "gcMs": 920.1230270266533,
+        "digest": "dfebdffcc07c4297f34160b1f89b2660556093592f59df91bf2260a84f07476c"
+      }
+    }
+  ],
+  "controls": {
+    "good": "matched",
+    "bad-checksum": "SessionPersistenceCorruptionError",
+    "truncated": "incomplete",
+    "bad-magic": "SessionPersistenceCorruptionError",
+    "extra-line": "SessionPersistenceCorruptionError",
+    "absent": "absent"
+  },
+  "phases": {
+    "listGenerations": 912.5619220000226,
+    "listArtifacts": 45233.49632399995,
+    "listMs": 47186.70072000008,
+    "digest": "dfebdffcc07c4297f34160b1f89b2660556093592f59df91bf2260a84f07476c"
+  }
+}
