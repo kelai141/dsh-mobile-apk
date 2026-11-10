@@ -419,6 +419,74 @@ class SnapshotParallelDecodeTest {
     }
   }
 
+  /**
+   * 每条解码流的字典缓存必须在块结束后交还，不得跨块累积（#1714）。
+   *
+   * 判据不是「跑通」——跑通在 192 MiB 堆上也常常成立，只是概率性 OOM。判据是
+   * **默认进程级缓存确实没被这些流留下条目**：块解完就该 `reset`。
+   *
+   * 负控口径：把 `ParallelXzInputStream` 里那两处 `cache.reset()` 去掉，本用例必须红
+   * （默认缓存会留下该块大小的缓冲区）。这条用例存在的意义就是让那两行不可被顺手删掉。
+   */
+  @Test
+  fun parallelDecodeReleasesPerBlockCaches() {
+    val payload = tarBytes(files = 6)
+    val xz = multiStreamXz(payload, pieces = 3)
+    val file = writeTemp(xz)
+    try {
+      val stream = SnapshotExtractor.ParallelXzInputStream(sourceOf(file), 2)
+      try {
+        val out = ByteArrayOutputStream()
+        val buf = ByteArray(64 * 1024)
+        while (true) {
+          val n = stream.read(buf)
+          if (n < 0) break
+          out.write(buf, 0, n)
+        }
+        assertTrue("并行输出必须非空", out.size() == payload.size)
+      } finally {
+        stream.close()
+      }
+      // 每一块（含探针那次）都必须走交还这一层，判据取自生产代码的计数器。
+      assertTrue("探针 + 每块都必须交还缓存，实际次数=" + stream.cacheResetCount(),
+        stream.cacheResetCount() >= 4)
+    } finally {
+      file.delete()
+    }
+  }
+
+  /**
+   * worker 不得无限超前于消费者（#1714 的主因）。
+   *
+   * 队列是**每块一份**、每份 QUEUE_CHUNKS 片。不限制超前量时，worker 会一路抢到
+   * 最后一个块，块数 × 2 MiB 的排队内存正是设备 OOM 的来源。
+   *
+   * 负控口径：把 awaitConsumerCloseEnough 里的等待去掉（回到旧行为），本用例必须红。
+   */
+  @Test
+  fun parallelDecodeLimitsWorkerLookahead() {
+    val payload = tarBytes(files = 8)
+    val xz = multiStreamXz(payload, pieces = 32)
+    val file = writeTemp(xz)
+    try {
+      val stream = SnapshotExtractor.ParallelXzInputStream(sourceOf(file), 2)
+      try {
+        val head = ByteArray(1)
+        assertTrue("必须能读到首字节", stream.read(head) > 0)
+        Thread.sleep(1500)
+        val lookahead = stream.decodedAheadOfConsumer()
+        assertTrue(
+          "worker 超前了 " + lookahead + " 块，超过限流窗口",
+          lookahead <= SnapshotExtractor.ParallelXzInputStream.lookaheadLimit(),
+        )
+      } finally {
+        stream.close()
+      }
+    } finally {
+      file.delete()
+    }
+  }
+
   /** 每个 worker 必须拿到**独立**句柄：源被 open 多次时不得复用同一个流（否则 seek 互相踩）。 */
   @Test
   fun apkAssetSourceOpensIndependentHandles() {
