@@ -11,6 +11,38 @@ import org.junit.Test
 class SplashPolicyTest {
 
   @Test
+  fun coverFillsTabletsAndPhonesWithoutDistortingVideoPixels() {
+    val viewports = listOf(3008 to 1880, 1880 to 3008, 1600 to 900, 1080 to 2400)
+    val videos = listOf(1080 to 1920, 1920 to 1080, 3840 to 2160, 1080 to 1080)
+    for ((vw, vh) in viewports) for ((mw, mh) in videos) {
+      val transform = SplashPolicy.coverTransform(vw, vh, mw, mh)!!
+      val drawnWidth = vw * transform.scaleX
+      val drawnHeight = vh * transform.scaleY
+      assertTrue("left edge uncovered", transform.dx <= 0.001f)
+      assertTrue("top edge uncovered", transform.dy <= 0.001f)
+      assertTrue("right edge uncovered", transform.dx + drawnWidth >= vw - 0.001f)
+      assertTrue("bottom edge uncovered", transform.dy + drawnHeight >= vh - 0.001f)
+      assertEquals("video pixels must stay square", drawnWidth / mw, drawnHeight / mh, 0.001f)
+      assertEquals("horizontal crop must be centred", vw.toFloat(), drawnWidth + 2 * transform.dx, 0.001f)
+      assertEquals("vertical crop must be centred", vh.toFloat(), drawnHeight + 2 * transform.dy, 0.001f)
+      assertTrue("one axis must fit exactly", kotlin.math.abs(drawnWidth - vw) < 0.001f || kotlin.math.abs(drawnHeight - vh) < 0.001f)
+    }
+  }
+
+  @Test
+  fun matchingAspectRatioUsesIdentityEvenForHigherResolutionVideo() {
+    assertEquals(SplashPolicy.CoverTransform(1f, 1f, 0f, 0f), SplashPolicy.coverTransform(1600, 900, 3840, 2160))
+  }
+
+  @Test
+  fun coverWaitsForBothTheSurfaceAndVideoDimensions() {
+    assertNull(SplashPolicy.coverTransform(0, 900, 1920, 1080))
+    assertNull(SplashPolicy.coverTransform(1600, 0, 1920, 1080))
+    assertNull(SplashPolicy.coverTransform(1600, 900, 0, 1080))
+    assertNull(SplashPolicy.coverTransform(1600, 900, 1920, -1))
+  }
+
+  @Test
   fun acceptsExactlyFiftyMebibytesAndRejectsOneByteMore() {
     assertTrue(SplashPolicy.isSizeAllowed(50L * 1024L * 1024L))
     assertFalse(SplashPolicy.isSizeAllowed(50L * 1024L * 1024L + 1L))

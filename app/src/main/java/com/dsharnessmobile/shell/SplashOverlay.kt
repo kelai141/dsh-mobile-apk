@@ -3,7 +3,6 @@ package com.dsharnessmobile.shell
 import android.graphics.Matrix
 import android.graphics.SurfaceTexture
 import android.media.MediaPlayer
-import android.view.Gravity
 import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
@@ -192,16 +191,12 @@ internal class SplashOverlay(
   /** CENTER_CROP: fill the screen without letterboxing, cropping the longer axis. */
   private fun applyCover(videoWidth: Int, videoHeight: Int) {
     val view = textureView ?: return
-    if (videoWidth <= 0 || videoHeight <= 0) return
-    val viewWidth = view.width.toFloat()
-    val viewHeight = view.height.toFloat()
-    if (viewWidth <= 0f || viewHeight <= 0f) return
-    val scale = maxOf(viewWidth / videoWidth, viewHeight / videoHeight)
-    val dx = (viewWidth - videoWidth * scale) / 2f
-    val dy = (viewHeight - videoHeight * scale) / 2f
+    val cover = SplashPolicy.coverTransform(view.width, view.height, videoWidth, videoHeight) ?: return
+    // TextureView's input rectangle is view-sized, not video-sized. A uniform video
+    // pixel scale here would scale an already stretched image and expose the backdrop.
     val matrix = Matrix()
-    matrix.setScale(scale, scale)
-    matrix.postTranslate(dx, dy)
+    matrix.setScale(cover.scaleX, cover.scaleY)
+    matrix.postTranslate(cover.dx, cover.dy)
     view.setTransform(matrix)
   }
 

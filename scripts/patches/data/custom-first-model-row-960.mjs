@@ -31,15 +31,18 @@ const OLD = '\t\t\tconst [models, setModels] = (0, react.useState)([]);'
 const NEW = '\t\t\t/* ' + MARKER + ': 初态就有一行，输入框与「至少需要一个模型」不再互相矛盾。 */\n'
   + '\t\t\tconst [models, setModels] = (0, react.useState)([{ id: "" }]);'
 
-/** 替换里那两段；`has` 用它们区分「完整施加」与「半补丁」。 */
+/** 三段必须同时生效；`has` 区分完整补丁与半补丁。 */
 const ROW_INIT = 'const [models, setModels] = (0, react.useState)([{ id: "" }]);'
 const ADOPT_FILTER = 'models.filter((model) => textOf(model, "id").trim().length > 0)'
+const PICKER_OLD = '\t\t\t\tif (listed.has(id) && !isPicked(id)) removedRows.add(at);'
+const PICKER_DROP = 'if (id.trim().length === 0 || listed.has(id) && !isPicked(id)) removedRows.add(at);'
+const PICKER_NEW = '\t\t\t\t/* ' + MARKER + ': 采纳时删除空占位，并同步清理该行编辑状态。 */\n'
+  + '\t\t\t\t' + PICKER_DROP
 
 /** 锚点二：CustomProviderCard 提交时把 models 写进 profile 的那一处。
- * 0.2.2-rc.1 重锚：旧锚点 `const byId = new Map(models.map(...))` 在 0.2.2 里属于**另一个组件**
- * （ModelListEditor 的候选采纳），而 CustomProviderCard 自己的 models 只在这里被写回 profile。
- * 旧锚点在 0.2.1 能命中纯属两个组件当年长得像；指错组件等于补了个不生效的地方。
- * 语义不变：占位空行不得进入写回的 profile。 */
+ * 提交过滤只作防御：ready 会先校验整份 models，空行尚在时根本到不了提交。
+ * 真正的候选采纳发生在 ModelListEditor，必须先将空行加入 removedRows；这也让
+ * rowState.forget 同步清掉索引对应的编辑状态，避免空行状态错配到新模型。 */
 const ADOPT_OLD = '\t\t\t\t\t\tmodels: models.map((model) => ({ ...model }))'
 
 /** 替换二：占位空行不进写回的 profile，否则模型 1 恒报「模型 ID 不能为空」。 */
@@ -52,19 +55,21 @@ const ADOPT_NEW = '\t\t\t\t\t\t/* ' + MARKER + ': 占位空行不进写回的 pr
  * @returns 已施加为 true
  */
 export function hasCustomFirstModelRow(source) {
-  // 两处替换都必须在场：只看 marker 会让半补丁被当成已完成。
-  return source.includes(MARKER) && source.includes(ROW_INIT) && source.includes(ADOPT_FILTER)
+  // 初值、候选采纳与提交防御必须同时在场，只看 marker 会接受半补丁。
+  return source.includes(MARKER) && source.includes(ROW_INIT) && source.includes(ADOPT_FILTER) && source.includes(PICKER_DROP)
 }
 
 /**
- * 施加补丁：恰好一处替换；marker 已在但锚点不完整时拒绝（半补丁）。
+ * 施加补丁：精确替换三处，或升级已知完整两段补丁；其他半补丁拒绝。
  * @param source 被施加的源码
  * @returns 施加后的源码
  */
 export function patchCustomFirstModelRow(source) {
   if (hasCustomFirstModelRow(source)) return source
+  // Explicit upgrade of the previously complete two-part patch; other partial states still fail closed.
+  const legacyComplete = source.includes(MARKER) && source.includes(ROW_INIT) && source.includes(ADOPT_FILTER)
   const hits = source.split(OLD).length - 1
-  if (hits === 0) {
+  if (hits === 0 && !legacyComplete) {
     if (source.includes(MARKER)) {
       throw new Error('custom-first-model-row-960: 发现 marker 但原锚点已不存在——半补丁状态，拒绝写回')
     }
@@ -72,9 +77,12 @@ export function patchCustomFirstModelRow(source) {
   }
   if (hits > 1) throw new Error('custom-first-model-row-960: 锚点命中 ' + hits + ' 处（期望 1 处）——拒绝半补丁')
   const adoptHits = source.split(ADOPT_OLD).length - 1
-  if (adoptHits !== 1) throw new Error('custom-first-model-row-960: 采纳锚点命中 ' + adoptHits + ' 处（期望 1 处）——拒绝半补丁')
-  const next = source.replace(OLD, NEW).replace(ADOPT_OLD, ADOPT_NEW)
+  if (adoptHits !== (legacyComplete ? 0 : 1)) throw new Error('custom-first-model-row-960: 提交锚点数量异常——拒绝半补丁')
+  const pickerHits = source.split(PICKER_OLD).length - 1
+  if (pickerHits !== 1) throw new Error('custom-first-model-row-960: 候选采纳锚点命中 ' + pickerHits + ' 处（期望 1 处）——拒绝半补丁')
+  const base = legacyComplete ? source : source.replace(OLD, NEW).replace(ADOPT_OLD, ADOPT_NEW)
+  const next = base.replace(PICKER_OLD, PICKER_NEW)
   if (!next.includes(MARKER)) throw new Error('custom-first-model-row-960: 写回后 marker 缺失——拒绝')
-  if (!next.includes('textOf(model, "id").trim().length > 0')) throw new Error('custom-first-model-row-960: 采纳过滤缺失——拒绝写回')
+  if (!hasCustomFirstModelRow(next)) throw new Error('custom-first-model-row-960: 采纳或提交过滤缺失——拒绝写回')
   return next
 }

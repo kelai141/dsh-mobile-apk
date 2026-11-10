@@ -272,6 +272,21 @@ test('B: 初态就有一行模型输入，占位空行不进采纳结果', () =>
   new Script(patched, { filename: 'dsh-client-ui-settings-models/client.js' })
   assert.match(patched, /useState\)\(\[\{ id: "" \}\]\)/, '初值必须给出一行')
   assert.match(patched, /textOf\(model, "id"\)\.trim\(\)\.length > 0/, '采纳必须过滤占位空行')
+  assert.match(patched, /if \(id\.trim\(\)\.length === 0 \|\| listed\.has\(id\) && !isPicked\(id\)\) removedRows\.add\(at\)/, '候选采纳必须通过 removedRows 删除空行及其编辑状态')
+})
+
+test('B: 可升级旧版完整补丁，仍拒绝半补丁与采纳锚点漂移', () => {
+  const fixed = patchCustomFirstModelRow(SM())
+  const pickerNew = '\t\t\t\t/* dsh-mobile custom first model row (#960): 采纳时删除空占位，并同步清理该行编辑状态。 */\n'
+    + '\t\t\t\tif (id.trim().length === 0 || listed.has(id) && !isPicked(id)) removedRows.add(at);'
+  const pickerOld = '\t\t\t\tif (listed.has(id) && !isPicked(id)) removedRows.add(at);'
+  const legacy = fixed.replace(pickerNew, pickerOld)
+  assert.notEqual(legacy, fixed)
+  assert.equal(hasCustomFirstModelRow(legacy), false, '旧补丁不能再冒充采纳完整')
+  assert.equal(patchCustomFirstModelRow(legacy), fixed)
+  const partial = legacy.replace('models.filter((model) => textOf(model, "id").trim().length > 0)', 'models')
+  assert.throws(() => patchCustomFirstModelRow(partial), /半补丁/)
+  assert.throws(() => patchCustomFirstModelRow(legacy.replace(pickerOld, 'picker changed upstream')), /采纳锚点/)
 })
 
 test('B 负控：把初值退回空数组后，初态一行都没有', () => {
