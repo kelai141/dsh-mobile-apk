@@ -547,10 +547,31 @@ object SnapshotExtractor {
               n = tar.read(buf)
             }
           }
-          target.setReadable(false, false)
-          target.setReadable(true, true)
-          target.setWritable(true, true)
-          target.setExecutable(SnapshotFileMode.isDirectlyExecutable(prefix, prefixLength), true)
+          // 四次 File.setXxx 合并成一次 setPosixFilePermissions。
+          //
+          // 旧写法每个条目要做 4 次权限系统调用，5.8 万条目就是 23 万次；
+          // 慢设备上每次几毫秒，这一项单独就占解包时间的 8%（实测见
+          // docs/SNAPSHOT-EXTRACT-PHASES-2026-11-11.md）。setPosixFilePermissions 一次设完。
+          //
+          // 语义必须与旧写法一致：owner 可读写；是否可执行由 [SnapshotFileMode.isDirectlyExecutable]
+          // 决定；group/other 不给任何位（旧写法的 setReadable(false, false) 先清掉全部，
+          // 再用 setReadable(true, true) 只给 owner）。
+          val executable = SnapshotFileMode.isDirectlyExecutable(prefix, prefixLength)
+          // 必须在运行期探测：setPosixFilePermissions 在不支持 POSIX 的宿主上抛
+          // UnsupportedOperationException（Windows 上就是这样，单测会因此整批红）。
+          // 不支持时回落到原来的四次 File.setXxx 调用——那条路径在 Windows 上是 no-op，
+          // 在 Android 上本来就走 POSIX 分支。
+          if (SnapshotFileMode.supportsPosixPermissions(target)) {
+            java.nio.file.Files.setPosixFilePermissions(
+              target.toPath(),
+              SnapshotFileMode.posixPermissions(executable),
+            )
+          } else {
+            target.setReadable(false, false)
+            target.setReadable(true, true)
+            target.setWritable(true, true)
+            target.setExecutable(executable, true)
+          }
         }
       }
       // done 已在循环头部（上限检查处）累加过 entry.size——这里不再重复累加（#680）：
