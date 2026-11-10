@@ -8,10 +8,11 @@ import { setImmediate } from 'node:timers/promises'
 import { pathToFileURL } from 'node:url'
 import { constants, zstdCompressSync, zstdDecompressSync } from 'node:zlib'
 
-const [packagesPath, rawCount = '512', compression = 'zstd'] = process.argv.slice(2)
+const [packagesPath, rawCount = '512', compression = 'zstd', binary] = process.argv.slice(2)
 const count = Number(rawCount)
 assert.ok(packagesPath && Number.isInteger(count) && count >= 12 && count <= 5000)
 assert.ok(compression === 'zstd' || compression === 'none')
+assert.ok(!binary || compression === 'zstd')
 const moduleFile = name => resolve(packagesPath, name, 'lib/index.js')
 const installed = name => import(pathToFileURL(moduleFile(name)).href)
 const { Context } = await installed('cordis')
@@ -175,8 +176,40 @@ async function diagnose() {
   }
 }
 
-try {
-  await createCorpus()
+async function compareBatch(controls) {
+  const { withBatch } = await import('./batch-device.mjs')
+  const trials = []
+  for (const order of [
+    ['upstream', 'js', 'rust'], ['rust', 'upstream', 'js'], ['js', 'rust', 'upstream'],
+  ]) {
+    for (const variant of order) {
+      const instance = await mount(3)
+      try {
+        const measure = () => withBatch(instance.persistence, variant, binary,
+          () => sample(instance.persistence))
+        const first = await measure()
+        const repeat = await measure()
+        assert.equal(first.digest, repeat.digest)
+        if (trials.length) assert.equal(first.digest, trials[0].first.digest)
+        if (variant !== 'upstream') {
+          for (const row of [first, repeat]) {
+            assert.equal(row.headerBatch.hits, count)
+            assert.equal(row.headerBatch.fallback, 0)
+          }
+        }
+        trials.push({ variant, first, repeat })
+        console.error(`session-header: ${variant} first=${Math.round(first.ms)}ms repeat=${Math.round(repeat.ms)}ms`)
+      } finally {
+        await instance.dispose()
+      }
+    }
+  }
+  const phases = await diagnose()
+  assert.equal(phases.digest, trials[0].first.digest)
+  return { trials, controls, phases }
+}
+
+async function concurrencyBaseline() {
   const trials = []
   for (const order of [[3, 6, 12], [12, 3, 6], [6, 12, 3]]) {
     for (const concurrency of order) {
@@ -194,9 +227,26 @@ try {
   }
   const phases = await diagnose()
   assert.equal(phases.digest, trials[0].first.digest)
+  return { trials, phases }
+}
+
+try {
+  let controls
+  if (binary) {
+    const { checkHeaders } = await import('./batch-device.mjs')
+    const instance = await mount(3)
+    try {
+      controls = await checkHeaders(instance.persistence, binary, root)
+      console.error('session-header: frame and cancellation controls passed')
+    } finally {
+      await instance.dispose()
+    }
+  }
+  await createCorpus()
+  const result = binary ? await compareBatch(controls) : await concurrencyBaseline()
   console.log(JSON.stringify({ node: process.version, count, compression,
     version: SESSION_FORMAT_VERSION, moduleSha256: digest(await readFile(moduleFile('dsh-session-persistence-jsonl'))),
-    trials, phases }, null, 2))
+    ...result }, null, 2))
 } finally {
   observer.disconnect()
   await rm(root, { recursive: true, force: true })

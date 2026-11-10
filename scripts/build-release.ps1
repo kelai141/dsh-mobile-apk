@@ -3,7 +3,9 @@ param(
   [string]$VersionSuffix = "",
   [string]$Gradle = "gradle",          # gradle command (accepts a GRADLE_USER_HOME-aware wrapper)
   [switch]$SkipGitCheck,                # skip the git dirty-state gate (emergency releases only)
-  [switch]$GatesOnly                    # 只跑到门禁段（0.13.8-b：验收/本地核验用，不做插件构建与打包）
+  [switch]$GatesOnly,                   # 只跑到门禁段（0.13.8-b：验收/本地核验用，不做插件构建与打包）
+  # issue #1705：glibc loader 源目录。缺省取 DSH_NATIVE_LINUX_LOADER_DIR；不给时行为同改动前。
+  [string]$NativeLinuxLoaderDir = $env:DSH_NATIVE_LINUX_LOADER_DIR
 )
 # build-release.ps1 v2.1 - dual-ABI release build (release/v<v>/{apk,snapshot,plugins}/ + gates)
 # Spec: release/README.md; host injection: plugin builds are injected into both snapshots (prevents "fix not compiled into user env")
@@ -248,6 +250,14 @@ foreach ($abi in @(@{n='arm64-v8a'; f=$armSnap}, @{n='x86_64'; f=$x86Snap})) {
   # Empty native arguments are dropped by Windows PowerShell and would shift the following
   # option into the suffix value. The engine defaults to an empty suffix when omitted.
   if (-not [string]::IsNullOrEmpty($VersionSuffix)) { $engineArgs += @("--suffix", $VersionSuffix) }
+  # issue #1705：ABI 与 loader 源目录。本循环的 $abi.n 是 APK 口径（arm64-v8a / x86_64），
+  # 引擎的 normalizeLoaderAbi 认这种写法；分档与产物断言都在引擎里，本脚本不重复实现。
+  $engineArgs += @("--abi", $abi.n)
+  if ($NativeLinuxLoaderDir) {
+    if (-not (Test-Path $NativeLinuxLoaderDir)) { throw ("loader 源目录不在场: " + $NativeLinuxLoaderDir + "（issue #1705）") }
+    $engineArgs += @("--native-linux-loader-dir", $NativeLinuxLoaderDir)
+    Write-Output ("== glibc loader (" + $abi.n + "): " + $NativeLinuxLoaderDir)
+  }
   node @engineArgs
   if ($LASTEXITCODE -ne 0) { throw ("APK build engine failed (" + $abi.n + ")") }
 }

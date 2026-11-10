@@ -501,6 +501,19 @@ try {
   // ---- 6-8. Shared terminal stage: snapshot/fingerprint + Gradle + copy ----
   const name = `dsh-mobile-apk-v${VER}${SUFFIX}-${ABI}.apk`
   log('构建 APK…')
+  // issue #1705：glibc loader。ABI 显式传（本链的 --abi 值），加载器源目录来自
+  // DSH_NATIVE_LINUX_LOADER_DIR。两条都不给时构建参数与产物和改动前完全一致。
+  // 分档（每 ABI 只暴露自己那一份）与产物断言都在引擎/门禁里，本链不重复实现。
+  const nativeLinuxLoaderDir = process.env.DSH_NATIVE_LINUX_LOADER_DIR
+  if (nativeLinuxLoaderDir) {
+    log('门禁：glibc loader 输入档（' + ABI + '；source=' + nativeLinuxLoaderDir + '）…')
+    // 与本地链同一行命令、同一份脚本：引擎分档时会再跑一次判定，这里显式跑是为了
+    // 「本链的每道门禁都可独立复跑」，且失败点落在出包之前而不是分档中途。
+    run(process.execPath, [gate('check-native-linux-loader.mjs'),
+      '--source', nativeLinuxLoaderDir, '--abi', ABI])
+  } else {
+    log('glibc loader：未配置 DSH_NATIVE_LINUX_LOADER_DIR，本次产物不带 loader（MIUI 上仍会 EACCES）')
+  }
   const finalApk = assembleApk({
     snapshot: snapIn,
     apkDir,
@@ -508,6 +521,8 @@ try {
     artifactName: name,
     suffix: SUFFIX,
     clean: true,
+    abi: ABI,
+    nativeLinuxLoaderDir,
     fingerprintGate: gate('check-snapshot-fingerprint.mjs'),
     log,
   }, (cmd, argv, opts) => spawnSync(cmd, argv, { cwd: ROOT, encoding: 'utf8', stdio: 'inherit', ...opts }))

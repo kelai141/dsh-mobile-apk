@@ -42,6 +42,68 @@ function execute(command, args, options = {}, runner = spawnSync) {
 export const BUILD_TYPES = ['release', 'debug']
 
 /**
+ * Canonical ABI spellings used by the loader contract (issue #1705).
+ *
+ * The three chains disagree on spelling — the local chain passes `arm64`/`x86_64`,
+ * the release assembler passes `arm64-v8a`/`x86_64`, and bionilux Release assets use
+ * `aarch64`/`x86_64`. Normalising here keeps the per-ABI staging and the artifact
+ * assertion from depending on which chain called us.
+ */
+const LOADER_ABI_ALIASES = Object.freeze({
+  arm64: 'arm64',
+  'arm64-v8a': 'arm64',
+  aarch64: 'arm64',
+  x86_64: 'x86_64',
+  x64: 'x86_64',
+  amd64: 'x86_64',
+})
+
+/**
+ * Normalise an ABI spelling into the loader gate's vocabulary, or null when unknown.
+ *
+ * Returns null rather than guessing: a typo must surface as "unknown ABI" at the build
+ * step, not as a build that silently stages the wrong architecture's loader.
+ */
+export function normalizeLoaderAbi(abi) {
+  if (typeof abi !== 'string' || abi === '') return null
+  return LOADER_ABI_ALIASES[abi.trim().toLowerCase()] ?? null
+}
+
+/**
+ * Stage the per-ABI loader directory and return the Gradle property value (issue #1705).
+ *
+ * Why a staging step rather than handing Gradle the caller's directory: this repo's
+ * Gradle has no abiFilters/splits, so both APKs share one `main` source set. A directory
+ * holding `arm64-v8a/` *and* `x86_64/` therefore puts *both* loaders into *both* APKs,
+ * and the wrong one is an ELF the device cannot execute. Staging isolates one ABI per
+ * build; `check-native-linux-loader.mjs --apk` then re-asserts it on the real artifact.
+ *
+ * The staged directory lives under `app/build/` (gitignored, always regenerated) so a
+ * stale stage from a previous ABI can never be picked up.
+ */
+function stageNativeLinuxLoader({ source, abi, apkDir, gate, execute, log, runner }) {
+  // ABI 显式给出时先规范化（错拼当场判红）；不给时由门禁按源目录内容推断。
+  // 「不给 ABI」不等于「不分档」：门禁仍只会把**一个** ABI 的子目录写进 stage —— 推断是
+  // 字节层面的唯一命中判定，不是随机挑。两个 ABI 都在场时门禁判红，不做静默降级。
+  const normalized = abi === undefined || abi === null || abi === '' ? null : normalizeLoaderAbi(abi)
+  if (abi !== undefined && abi !== null && abi !== '' && normalized === null) {
+    throw new Error(`native Linux loader: unknown ABI "${String(abi)}" `
+      + '(expected arm64/arm64-v8a/aarch64 or x86_64/x64/amd64)')
+  }
+  const stageDir = join(apkDir, 'app', 'build', 'native-linux-loader', normalized ?? 'detected')
+  log(`glibc loader：按 ABI 分档（${normalized ?? '由源目录推断'}）`)
+  // The gate owns both the "source present and architecture correct" judgement and the
+  // staging write, so there is exactly one implementation of the ABI table (no second
+  // copy of the naming rules that could drift).
+  const args = [gate, '--source', resolve(source), '--stage', stageDir]
+  if (normalized !== null) args.push('--abi', normalized)
+  const staged = execute(process.execPath, args, { cwd: SCRIPT_DIR }, runner)
+  // 推断档下由门禁自己打印结果；这里只把 Gradle 属性要的路径交回去。产物断言不传 ABI，
+  // 由门禁按**产物自身**的 lib/ 内容判定（比「沿用源目录推断」更接近设备事实）。
+  return { stageDir, abi: normalized, stdout: staged?.stdout }
+}
+
+/**
  * Run the common APK assembly terminal stage. Callers own ABI selection,
  * gates, injection and artifact naming; this function owns assets, Gradle,
  * copying and strict fingerprint verification.
@@ -67,6 +129,8 @@ export function assembleApk(options, runner = spawnSync) {
     signatureGate = join(SCRIPT_DIR, 'check-apk-signatures.mjs'),
     /** 交付前是否验签（默认 true）。关掉只有一种正当理由：分阶段构建里签名由别处负全责。 */
     verifySignatures = true,
+    /** per-ABI glibc loader 门禁脚本；供测试注入。 */
+    nativeLoaderGate = join(SCRIPT_DIR, 'check-native-linux-loader.mjs'),
   } = options
   if (!snapshot || !apkDir || !outputDir || !artifactName) {
     throw new Error('assemble requires snapshot, apkDir, outputDir, and artifactName')
@@ -127,11 +191,27 @@ export function assembleApk(options, runner = spawnSync) {
   const gradleArgs = [`:app:assemble${buildType === 'release' ? 'Release' : 'Debug'}`, '--no-daemon', `-PversionNameSuffix=${suffix}`]
   // An app process on targetSdk >= 29 may only execve apk_data_file, so the
   // Linux runtime's glibc loader ships in jniLibs and is installed into
-  // nativeLibraryDir. The caller supplies one loader per ABI, named
-  // libbionilux-loader.so. Omitting the directory leaves the build unchanged.
+  // nativeLibraryDir. Omitting the directory leaves the build unchanged.
+  //
+  // issue #1705：目录**必须按 ABI 分档**。本仓 Gradle 没有 abiFilters/splits，两次构建共用
+  // 同一个 main 源集；把含两个 ABI 子目录的 loader 目录直接交给 Gradle，会让两个 APK 都带
+  // 上两种 ABI 的 loader，而错的那一种在设备上是架构不匹配的 ELF。故这里先经门禁重造一份
+  // 只含本 ABI 的 stage 目录，再把 stage 目录交给 Gradle。
   const nativeLinuxLoaderDir = options.nativeLinuxLoaderDir ?? process.env.DSH_NATIVE_LINUX_LOADER_DIR
+  let loaderStage = null
   if (typeof nativeLinuxLoaderDir === 'string' && nativeLinuxLoaderDir !== '') {
-    gradleArgs.push(`-PnativeLinuxLoaderDir=${resolve(nativeLinuxLoaderDir)}`)
+    loaderStage = stageNativeLinuxLoader({
+      source: nativeLinuxLoaderDir,
+      // 调用方不一定给 abi（本地链按 ABI 循环时知道，云端/发布链也各自知道），故 ABI 单独取：
+      // 显式 options.abi > 环境变量 DSH_TARGET_ABI；都缺时由门禁按源目录内容唯一命中推断。
+      abi: options.abi ?? process.env.DSH_TARGET_ABI,
+      apkDir: resolvedApkDir,
+      gate: nativeLoaderGate,
+      execute,
+      log,
+      runner,
+    })
+    gradleArgs.push(`-PnativeLinuxLoaderDir=${loaderStage.stageDir}`)
   }
   log(`Gradle: ${gradle} ${gradleArgs.join(' ')}`)
   execute(gradle, gradleArgs, { cwd: resolvedApkDir, shell: process.platform === 'win32' }, runner)
@@ -158,6 +238,19 @@ export function assembleApk(options, runner = spawnSync) {
       selfTest: false,
       log,
     }, runner)
+  }
+  // 产物档 loader 断言（issue #1705）：必须在**拷进交付目录之前**跑，理由与验签完全相同
+  // （#1077：中间态产物被上游当成交付物）。放在这里也使「交付目录里的 APK 都带 loader」
+  // 由构造保证，而不是靠调用方记得再扫一遍。
+  //
+  // 只在调用方给了 loader 源目录时判：没给目录的构建「与改动前完全一致」（#1705 的兼容承诺，
+  // 由 build-apk-engine.test.mjs 的 absent-loader 用例钉住）。给了就判红——那是发布链的形态。
+  if (loaderStage !== null) {
+    log('glibc loader：校验最终 APK 内的产物（在场 / stored / 架构 / 无另一 ABI 混入）')
+    // 不传 --abi：让门禁按**产物自身**判定（文件名 → lib/ 内容），比沿用源目录推断更接近
+    // 设备事实。--require 是硬要求：调用方既然给了 loader 源目录，产物就必须真的带上它。
+    execute(process.execPath, [nativeLoaderGate, '--apk', builtApk, '--require'],
+      { cwd: SCRIPT_DIR }, runner)
   }
   copyFileSync(builtApk, deliveredApk)
   log(`产物: ${deliveredApk}`)
