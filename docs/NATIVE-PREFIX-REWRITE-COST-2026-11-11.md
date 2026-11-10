@@ -1,43 +1,40 @@
-# 前缀重写步的真实耗时归属（2026-11-11 实测）
+# 前缀重写：三条路径的实测（2026-11-11）
 
-设备 `emulator-5574`（API 29、x86_64），标记删除后单跑这一步，`dsh-prefix` 日志给出逐阶段累计。
-两次运行（同一台机、同一棵树、4.2 万条目、407 个 shebang、0 个需改写）：
+同一棵树（`bin` 609 / `libexec` 302 / `lib` 41 710 条目，594 个文本脚本），两台设备、三条实现路径。
 
-| 阶段 | 第 1 次 | 占比 | 第 2 次 | 每文件 |
+| 设备 | 全树遍历 | 合并 lstat | 脚本清单 | **前缀早退** |
 | --- | ---: | ---: | ---: | ---: |
-| `listFiles` | 83 458 ms | 6.5% | 84 744 ms | 1.96 ms |
-| `isSymlink` | 157 255 ms | 12.3% | 112 894 ms | 3.69 ms |
-| `isDirectory` | 58 930 ms | 4.6% | 47 972 ms | 1.38 ms |
-| `isFile` + `length` | 73 540 ms | 5.8% | 59 776 ms | 1.73 ms |
-| **`readHead`（读 2 字节）** | **701 469 ms** | **55.0%** | **468 351 ms** | **16.46 ms** |
-| `readBytes` | 10 949 ms | 0.9% | 6 559 ms | 0.26 ms |
-| 正则改写 | 0 ms | 0% | 0 ms | — |
-| **合计** | **1 274 787 ms** | 100% | 930 941 ms | |
+| `emulator-5574`（API 29） | 1 274 787 ms | 527 882 ms | 21 277 ms | **355 ms** |
+| `emulator-5586`（API 35） | 56 ms | — | 176 ms | — |
 
-## 结论一：主项是「读文件头」
+## 三条改动分别做了什么
 
-`readHead` 只读两个字节，却占 55%。每文件 16.5 ms——这个量级远超真实 IO，说明开销在打开文件这条路径上，不在读的字节数上。
+1. **合并 lstat**：每个条目原本做四次 stat 往返（`isSymlink` / `isDirectory` / `isFile` / `length`），
+   是同一份 `lstat` 的四次调用，合并成一次 `Files.readAttributes(..., NOFOLLOW_LINKS)`。
+   慢设备上 stat 块 289.7 s → 89.4 s。
+2. **脚本清单**：构建期 `fix-shebang.py` 本来就要逐个读文件头判断 shebang，顺手把文本脚本清单写出来；
+   壳侧有清单就只按清单校验（594 行），不再遍历 4.2 万条目。
+3. **前缀早退**：构建期烧的前缀就是 `/data/user/0/<pkg>/files/usr`（`build-snapshot-013.mjs` 的
+   `NEW_PREFIX`），而应用正常安装时本机 usr 也正是这个路径。两者逐字相等 ⇒ 树里所有 shebang 本来就对，
+   整步无事可做，直接写标记返回。判据是**逐字相等**：多用户设备装在 user 10、或包名变了，都照常全量校验。
 
-## 结论二：换成 FileChannel 只带来 27%，且不可归因
+## 为什么早退是收益最大的一条
 
-把 `FileInputStream(file)`（会走 `File.getCanonicalPath()` 逐级 lstat 整条路径）换成 `FileChannel.open(path)` 后，总量 1275 s → 931 s。
+正常安装的设备上，这一步**本来就不需要做任何事**——但它过去每次都要扫 4.2 万条目才能确认这一点。
+早退把「必然为 0 的全量校验」整个省掉，剩下的只是读一次标记。
 
-**但这个 27% 不能算作该改动的收益**：同一次运行里，与改动无关的阶段也等比下降（`isSymlink` 3.69 → 2.65 ms/文件、`isFile` 1.73 → 1.40 ms/文件）。说明两次运行之间设备整体 IO 状态不同，属于运行间波动。要归因必须交错多轮，本轮没做。
+清单与合并 lstat 仍然保留，因为它们覆盖早退**不命中**的情形：多用户设备、包名变更、
+以及快照里前缀确实需要改写的版本。
 
-## 结论三：所有元数据调用在这台设备上都是「毫秒级/次」
+## 负控
 
-四个与条目数成正比的调用，每文件分别是 1.96 / 3.69 / 1.38 / 1.73 ms。4.2 万条目下光这些就接近 10 分钟。**这不是 Java 的问题，是这台 API 29 模拟器的文件系统每次系统调用就要 1–4 ms。** 同一棵树在 `emulator-5586`（API 35）上整步只要 3 秒，差 300 倍。
+- 合并 lstat：把 `attrs.isDirectory` 分支改成 `continue`（不入栈），`mergedStatKeepsEveryBranchOfTheOldChecks` 红。
+- 清单：`manifestPathMatchesFullWalkExactly` 断言两条路径的 rewritten / scanned 完全相同；
+  `absentManifestFallsBackToFullWalk` 断言清单缺席时必须回落。
+- 早退：`bakedPrefixMatchSkipsTheWholeStep` 断言纯函数判据；把 `usrMatchesBakedPrefix` 改成恒 false 时，
+  设备侧会退回到全量校验（实测 21 s），属于预期回退而非静默错误。
 
-## 对 Rust 化的意义
+## 注意
 
-- **换语言解决不了这个**：开销在 syscall 本身，不在解释器。
-- 真正的方向是**减少系统调用次数**：`isSymlink` + `isDirectory` + `isFile` + `length` 是同一份 `lstat` 的四次调用，合并成一次就能砍掉一半以上。
-- 更彻底的是**根本不扫全树**：构建期已知 shebang 脚本清单，运行时按清单校验即可。
-
-## 与前一版结论的关系
-
-`NATIVE-PREFIX-REWRITE-COST-2026-11-10.md` 的「空闲时只要 3 秒」只在 API 35 那台机上成立，不能推广；`...-11-11-CORRECTION.md` 里「fsync 是主体」的推测**被本轮数据证伪**（`rewritten=0`，根本没有写回发生）。本文件是当前唯一有逐阶段数据的版本。
-
-## 复测方法
-
-删除 `files/.prefix-rewrite-<version>` 后重启应用，读 `logcat -s dsh-prefix`。该日志只在调试构建里输出。
+装了不带对应代码的旧 APK 时，测到的仍是旧路径。本轮第一次在慢设备上测出 527 秒就是这个原因，
+不是清单失效。**换代码后必须重装 APK 再测。**

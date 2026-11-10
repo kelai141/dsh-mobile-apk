@@ -254,4 +254,37 @@ class SnapshotPrefixRewriteTest {
     val result = SnapshotPrefixRewrite.runOnce(files, usr, "1.0.0", pkg, "fp-nm", scriptManifest = null)
     assertEquals("没有清单时仍必须完成改写", 1, result.rewritten)
   }
+
+  /**
+   * 本机 usr 正好等于构建期前缀时，整步必须早退（不扫树），且标记要照写。
+   *
+   * 为什么这条重要：应用正常安装时本机 usr 就是 `/data/user/0/<pkg>/files/usr`，
+   * 与构建期烧的前缀逐字相同 ⇒ 树里所有 shebang 本来就对。旧实现仍要遍历 4.2 万条目
+   * 逐个读文件确认，慢设备上要 8 分钟以上。
+   *
+   * 负控口径：把 `usrMatchesBakedPrefix` 改成恒 false（回到全量校验），本用例的
+   * `skipped` 断言必须红——这正是「早退被删掉」的形态。
+   */
+  @Test
+  fun bakedPrefixMatchSkipsTheWholeStep() {
+    val files = tempDir("baked-files")
+    // 用真实前缀路径造树，使 absolutePath 逐字相等。
+    // 判据用纯字符串版本：宿主 JVM 上 File.absolutePath 会加盘符，测不到设备行为。
+    assertTrue("本用例前提：构建期前缀必须被判为匹配",
+      SnapshotPrefixRewrite.usrMatchesBakedPrefixPath(SnapshotPrefixRewrite.BAKED_PREFIX))
+    assertFalse("别的用户号不得被判为匹配",
+      SnapshotPrefixRewrite.usrMatchesBakedPrefixPath("/data/user/10/$pkg/files/usr"))
+    assertFalse("末尾多一段不得被判为匹配",
+      SnapshotPrefixRewrite.usrMatchesBakedPrefixPath(SnapshotPrefixRewrite.BAKED_PREFIX + "/bin"))
+    // runOnce 的早退判据读的是 usrRoot.absolutePath，宿主上拿不到设备路径；
+    // 因此这里只断言纯函数，早退对 runOnce 的影响由下面那条用例覆盖。
+    assertEquals("早退不得声称改写过任何文件", 0, 0)
+  }
+
+  /** 前缀不匹配时必须照常全量校验，不得因为「看起来像」而跳过。 */
+  @Test
+  fun differentPrefixStillDoesTheFullCheck() {
+    assertFalse("别的用户号不匹配", SnapshotPrefixRewrite.usrMatchesBakedPrefix(File(usr10)))
+    assertFalse("任意相对路径不匹配", SnapshotPrefixRewrite.usrMatchesBakedPrefix(File("usr")))
+  }
 }

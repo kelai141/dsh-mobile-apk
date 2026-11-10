@@ -45,10 +45,43 @@ internal object SnapshotPrefixRewrite {
   private const val SLASH = '/'
   private const val HASH = 35
   private const val BANG = 33
+  private const val BACKSLASH = '\\'
 
   /** 判定「这是构建期烧死的本包 usr 前缀」——任意用户号都算（构建机烧的是 user 0）。 */
   private fun bakedPrefixRegex(pkg: String): Regex =
     Regex("/data/(?:user/[0-9]+|data)/" + Regex.escape(pkg) + "/files/usr")
+
+  /**
+   * 构建期烧进快照的前缀。与 `scripts/build-snapshot-013.mjs` 的 `NEW_PREFIX` 必须逐字相同。
+   *
+   * 用途只有一个：判断「本机的 usr 是不是就是这个前缀」——是的话整步无事可做。
+   */
+  internal const val BAKED_PREFIX = "/data/user/0/com.dsharnessmobile.shell/files/usr"
+
+  /**
+   * 本机 usr 是否**正好**是构建期烧的那个前缀。
+   *
+   * 为什么这条早退重要：构建期 `fix-shebang.py` 已经把前缀钉成上面那个值，
+   * 而应用正常安装时本机 usr 也就是它（`/data/user/0/<pkg>/files/usr`）。
+   * 两者相等意味着**树里所有 shebang 本来就对**，这一步无事可做——但旧实现仍要遍历
+   * 4.2 万条目逐个读文件确认，在慢文件系统上要 8 分钟以上（实测见
+   * `docs/NATIVE-PREFIX-REWRITE-COST-2026-11-11.md`）。
+   *
+   * 判据必须逐字相等：只要本机路径不同（多用户设备装在 user 10、或包名变了），
+   * 就照常全量校验，绝不因为「看起来一样」而跳过。
+   */
+  internal fun usrMatchesBakedPrefix(usrDir: File): Boolean =
+    usrMatchesBakedPrefixPath(usrDir.absolutePath)
+
+  /**
+   * 纯字符串版本（JVM 可测）。
+   *
+   * 为什么单独抽出来：`File("/data/user/0/...").absolutePath` 在**宿主 JVM** 上会加上当前
+   * 工作目录前缀（Windows 上是盘符），拿它做断言只能测到宿主行为、测不到设备行为。
+   * 把判据收敛成「一个路径字符串是否等于构建期前缀」，测试就能直接喂设备上的真实路径。
+   */
+  internal fun usrMatchesBakedPrefixPath(usrPath: String): Boolean =
+    usrPath.replace(BACKSLASH, SLASH).trimEnd(SLASH) == BAKED_PREFIX
 
   /**
    * 把文本里的**本包构建期 usr 前缀**换成本机 `usrDir`（纯函数，JVM 可测）。
@@ -146,6 +179,12 @@ internal object SnapshotPrefixRewrite {
     val marker = File(filesDir, MARKER_PREFIX + version)
     if (marker.isFile && markerReadsSnapshot(marker, snapshotId)) return Result(0, 0, 0, skipped = true)
     if (!usrRoot.isDirectory) return Result(0, 0, 1, skipped = false)
+    // 本机 usr 正好等于构建期烧的前缀 ⇒ 树里所有 shebang 本来就对，整步无事可做。
+    // 这条早退把「必然为 0 的全量校验」直接省掉；判据是逐字相等，不相等就照常全量跑。
+    if (usrMatchesBakedPrefix(usrRoot)) {
+      writeMarkerIfComplete(marker, 0, 0, snapshotId)
+      return Result(0, 0, 0, skipped = true)
+    }
     var rewritten = 0
     var scanned = 0
     var failed = 0
@@ -274,6 +313,18 @@ internal object SnapshotPrefixRewrite {
     val lines = try { file.readLines() } catch (_: Throwable) { return null }
     val clean = lines.map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("/") && ".." !in it.split("/") }
     return clean.ifEmpty { null }
+  }
+
+  /** 零失败时写标记（早退与常规路径共用，口径一致）。 */
+  private fun writeMarkerIfComplete(marker: File, rewritten: Int, scanned: Int, snapshotId: String) {
+    try {
+      marker.writeText(
+        "rewritten=" + rewritten + " scanned=" + scanned + " snapshot=" + snapshotId +
+          " at " + System.currentTimeMillis() + "\n",
+      )
+    } catch (_: Throwable) {
+      // 标记写不进去不算失败：下次启动会再跑一遍（幂等）。
+    }
   }
 
   /**
