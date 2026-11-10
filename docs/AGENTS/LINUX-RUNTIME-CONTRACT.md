@@ -75,6 +75,22 @@ READY -> DISABLING -> INSTALLED_DISABLED
 - exec 契约：Android 的 app 数据目录里的 ELF 不能被 execve（targetSdk >= 29 的 untrusted_app 只对 apk_data_file
   有 execute_no_trans，拒绝被 dontaudit）；验收用 launcher 走 `/system/bin/linker64 <launcher> ...` 启动，
   glibc loader 由 `BIONILUX_NATIVE_LIB_DIR` 指向 APK 的 nativeLibraryDir（与 dsh-bionilux#13 / dsh-mobile-apk#1704 对齐）。
+- **loader 的构建面（issue #1705，本节是契约的一部分）**：`#1704` 只做到「运行时优先从 nativeLibraryDir
+  取 loader」，**没有把 loader 放进 APK**，所以 MIUI 上仍会 EACCES。构建侧由三件事合起来负责：
+  1. **源目录**：`-NativeLinuxLoaderDir`（`build-apk-013.ps1` / `build-release.ps1`）或环境变量
+     `DSH_NATIVE_LINUX_LOADER_DIR`（三条链通用）。目录里放 `arm64-v8a/libbionilux-loader.so` 与
+     `x86_64/libbionilux-loader.so`，或直接放 bionilux Release 的 `bionilux-loader-<arch>.so`
+     （资产名用 `aarch64`/`x86_64`，**与 jni 目录名不是同一套拼写**）。不配置时行为与改动前完全一致。
+  2. **每 ABI 分档**：本仓 Gradle **没有** `abiFilters`/`splits`，两次构建共用同一个 `main` 源集。
+     因此引擎不会把源目录直接交给 Gradle，而是先按 ABI 重造一份只含该 ABI 的 stage 目录
+     （`app/build/native-linux-loader/<abi>/`）。直接交源目录会让**两个 APK 都带上两种 ABI 的 loader**，
+     而错的那一份在设备上是架构不匹配的 ELF。
+  3. **产物断言**：`check-native-linux-loader.mjs` 在终端阶段（与验签同一「最终产物」关口）判四件事：
+     `lib/<jniAbi>/libbionilux-loader.so` 在场、归档内是 **stored**（`useLegacyPackaging=true` 的判据，
+     压缩条目安装后不是普通文件）、ELF `e_machine` 与该 APK 的 ABI 一致、本包 `lib/` 下无另一 ABI 的 loader。
+- loader 的**设备侧**判据（改构建面时必须一起看）：`applicationInfo.nativeLibraryDir` 下能看到
+  `libbionilux-loader.so` 且是普通文件；MIUI 真机启用 Linux 环境后 `linux_bash` 能执行命令；
+  **x86_64 模拟器同样要验一遍**（两个 ABI 的 loader 是不同文件，只测一边证明不了另一边）。
 - 启动描述：壳侧把「启动什么」收敛成单通道 `DSH_CONSOLE_LAUNCH`（JSON：schemaVersion / shell / argv /
   cwd / env / unset），中继只消费描述并 spawn，不解释启动策略（ADR-0001）。`ConsoleLaunch` 是唯一生产者。
 - 渲染：控制台页面用 xterm.js（MIT，随 APK 资产分发）渲染 VT/ANSI，PTY 路径原样转发控制序列；
@@ -88,6 +104,10 @@ READY -> DISABLING -> INSTALLED_DISABLED
 真实（非 draft）Release 资产 + 真实 CDN；双 ABI 制品；x86_64 模拟器与 arm64 真机各一次；
 安装→冷启动复用→升级→回滚→卸载 全链；失败注入（断网、摘要不符、磁盘不足、安装中断）；
 真实模型自行编排一次「apt 装工具链并构建一个产物」的任务。以上缺一即未验收。
+
+issue #1705 追加的阻断项：发布 APK 必须自带两个 ABI 各自的 glibc loader（`check-native-linux-loader.mjs`
+在终端阶段以 `--require` 判红），且 MIUI 真机与 x86_64 模拟器各验一次「启用 Linux 环境后 `linux_bash` 能执行命令」。
+构建期门禁通过**不**构成设备可用性的证明（loader 在场 ≠ SELinux 允许它被执行，那一条只有真机能证）。
 
 ## 9. 待定项
 

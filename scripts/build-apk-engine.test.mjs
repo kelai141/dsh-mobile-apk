@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { BUILD_TYPES, assembleApk, parseArgs, verifyApks, resolveEngineKeystoreCredentials } from './build-apk-engine.mjs'
+import { BUILD_TYPES, assembleApk, normalizeLoaderAbi, parseArgs, verifyApks, resolveEngineKeystoreCredentials } from './build-apk-engine.mjs'
 import { evaluateBadging } from './check-apk-form.mjs'
 
 function fixture(t) {
@@ -92,14 +92,29 @@ test('shared terminal engine installs snapshot and fingerprint, builds, then cop
   assert.equal(calls[4].options.cwd, resolve(fileURLToPath(new URL('.', import.meta.url))))
 })
 
-test('an optional native Linux loader directory becomes a Gradle property', (t) => {
+/**
+ * issue #1705：给了 loader 源目录时，引擎必须
+ *   ① 先用门禁把**单个 ABI** 的 loader 落到 stage 目录（不是把调用方目录直接交给 Gradle——
+ *      本仓无 abiFilters/splits，直接给会让两个 APK 都带上两种 ABI 的 loader）；
+ *   ② 把 stage 目录（而非源目录）作为 Gradle 属性；
+ *   ③ 在**拷进交付目录之前**对产物断言一遍（与 #1077 的验签同一位置）。
+ */
+test('a native Linux loader source directory is staged per ABI and asserted on the artifact', (t) => {
   const f = fixture(t)
   const loaderDir = join(f.root, 'loader')
   mkdirSync(join(loaderDir, 'arm64-v8a'), { recursive: true })
-  writeFileSync(join(loaderDir, 'arm64-v8a', 'libbionilux-loader.so'), Buffer.from('loader'))
+  writeFileSync(join(loaderDir, 'arm64-v8a', 'libbionilux-loader.so'), Buffer.from('ELF-fixture'))
   let gradleArgs
+  let stageCall
+  let artifactCall
   const runner = (command, args) => {
     if (args[0]?.endsWith('check-apk-signatures.mjs') || args[0]?.endsWith('check-apk-form.mjs')) return { status: 0 }
+    if (args[0]?.endsWith('check-native-linux-loader.mjs')) {
+      assert.equal(command, process.execPath, 'loader 门禁按 Node 直接执行（Windows 上不能被 cmd 拆路径）')
+      if (args.includes('--stage')) { stageCall = args; return { status: 0 } }
+      artifactCall = args
+      return { status: 0 }
+    }
     if (command === 'gradlew.bat' || command === './gradlew') {
       gradleArgs = args
       const built = join(f.apkDir, 'app', 'build', 'outputs', 'apk', 'release', 'app-release.apk')
@@ -117,15 +132,31 @@ test('an optional native Linux loader directory becomes a Gradle property', (t) 
     nativeLinuxLoaderDir: loaderDir,
     log() {},
   }, runner)
-  // The loader must land in nativeLibraryDir, which only jniLibs reaches.
-  assert.ok(gradleArgs.includes(`-PnativeLinuxLoaderDir=${resolve(loaderDir)}`))
+  // ① stage 调用带来源目录与 stage 落点，且 stage 落在构建目录内（不会残留到源码树）。
+  assert.ok(stageCall, '必须先经门禁分档再交给 Gradle')
+  assert.equal(stageCall[stageCall.indexOf('--source') + 1], resolve(loaderDir))
+  const staged = stageCall[stageCall.indexOf('--stage') + 1]
+  assert.ok(staged.startsWith(join(f.apkDir, 'app', 'build')), 'stage 目录必须落在 app/build 下：' + staged)
+  // ② 交给 Gradle 的是 stage 目录，不是调用方目录（否则两个 ABI 的 loader 会互相串味）。
+  assert.ok(gradleArgs.includes(`-PnativeLinuxLoaderDir=${staged}`),
+    'Gradle 属性必须是分档后的目录，实际: ' + gradleArgs.join(' '))
+  assert.equal(gradleArgs.some((arg) => arg.includes(loaderDir) && !arg.includes(staged)), false,
+    '不得把未分档的源目录交给 Gradle')
+  // ③ 产物断言用 --require（给了源目录就必须真的带上 loader），且排在签名的同一关口。
+  assert.ok(artifactCall, '产物档 loader 断言必须在终端阶段执行')
+  assert.ok(artifactCall.includes('--require'))
+  assert.equal(artifactCall[artifactCall.indexOf('--apk') + 1],
+    join(f.apkDir, 'app', 'build', 'outputs', 'apk', 'release', 'app-release.apk'),
+    '产物断言必须判 Gradle 的输出，不是交付目录里那份拷贝')
 })
 
 test('an absent native Linux loader directory leaves the Gradle arguments unchanged', (t) => {
   const f = fixture(t)
   let gradleArgs
+  let loaderGateCalls = 0
   const runner = (command, args) => {
     if (args[0]?.endsWith('check-apk-signatures.mjs') || args[0]?.endsWith('check-apk-form.mjs')) return { status: 0 }
+    if (args[0]?.endsWith('check-native-linux-loader.mjs')) { loaderGateCalls += 1; return { status: 0 } }
     if (command === 'gradlew.bat' || command === './gradlew') {
       gradleArgs = args
       const built = join(f.apkDir, 'app', 'build', 'outputs', 'apk', 'release', 'app-release.apk')
@@ -142,7 +173,49 @@ test('an absent native Linux loader directory leaves the Gradle arguments unchan
     fingerprintGate: '/tools/check-snapshot-fingerprint.mjs',
     log() {},
   }, runner)
+  // #1705 的兼容承诺：不设 loader 目录时，构建参数与产物和改动前**完全一致**。
   assert.equal(gradleArgs.some((arg) => arg.startsWith('-PnativeLinuxLoaderDir=')), false)
+  assert.equal(loaderGateCalls, 0, '没有 loader 源目录时不得凭空跑 loader 门禁')
+})
+
+/**
+ * issue #1705 的「两个命名维度」：本地链循环用 arm64 / x86_64，发布链用 arm64-v8a / x86_64，
+ * bionilux 资产名用 aarch64 / x86_64。规范化必须三种写法都认，且拒绝未知拼写——
+ * 猜错一个拼写的后果是**另一个 ABI 的 ELF 被装进本包**，只有设备上才炸。
+ */
+test('loader ABI spellings from all three chains normalize, unknown spellings are rejected', () => {
+  assert.equal(normalizeLoaderAbi('arm64'), 'arm64')
+  assert.equal(normalizeLoaderAbi('arm64-v8a'), 'arm64')
+  assert.equal(normalizeLoaderAbi('aarch64'), 'arm64')
+  assert.equal(normalizeLoaderAbi('x86_64'), 'x86_64')
+  assert.equal(normalizeLoaderAbi('ARM64-V8A'), 'arm64', '大小写不应改变语义')
+  assert.equal(normalizeLoaderAbi('arm'), null)
+  assert.equal(normalizeLoaderAbi('armv7'), null)
+  assert.equal(normalizeLoaderAbi(''), null)
+  assert.equal(normalizeLoaderAbi(undefined), null)
+})
+
+test('an unknown loader ABI fails the build before Gradle instead of guessing', (t) => {
+  const f = fixture(t)
+  const loaderDir = join(f.root, 'loader')
+  mkdirSync(join(loaderDir, 'arm64-v8a'), { recursive: true })
+  writeFileSync(join(loaderDir, 'arm64-v8a', 'libbionilux-loader.so'), Buffer.from('ELF-fixture'))
+  let gradleRan = false
+  assert.throws(() => assembleApk({
+    snapshot: f.snapshot,
+    apkDir: f.apkDir,
+    outputDir: f.outputDir,
+    artifactName: 'bad-abi.apk',
+    fingerprintGate: '/tools/check-snapshot-fingerprint.mjs',
+    nativeLinuxLoaderDir: loaderDir,
+    abi: 'armv7',
+    log() {},
+  }, (command, args) => {
+    if (args[0]?.endsWith('check-snapshot-fingerprint.mjs') || args[0]?.endsWith('build-hard-manifest.mjs')) return { status: 0 }
+    if (command === 'gradlew.bat' || command === './gradlew') { gradleRan = true; return { status: 0 } }
+    return { status: 0 }
+  }), /unknown ABI/)
+  assert.equal(gradleRan, false, 'ABI 拼错必须在 Gradle 之前中止，不能先出一份错架构的包')
 })
 
 test('fingerprint rejection stops before Gradle and a Gradle failure does not copy an artifact', (t) => {

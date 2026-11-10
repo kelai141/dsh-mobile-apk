@@ -319,6 +319,12 @@ jobs:
       # 这只证明门禁具备判别力，不代表最终 APK 的快照已通过解码；正式资产仍由 build-apk.mjs 在组装后以 --require 检验。
       - name: 快照解码器反证自测（合成归档）
         run: node scripts/check-snapshot-decode.mjs --self-test-runtime
+      # issue #1705：glibc loader 门禁的判别力自证。判据全在纯字节面上（ELF 架构 / jni 目录
+      # 命名 / zip 里是否 stored / 是否混入另一 ABI），故离线可跑，不需要 APK 也不需要 SDK。
+      # 为什么放在 CI：这道门禁的真执行点是两条打包链的终端阶段（那里才有 APK），
+      # 而「它本身会不会判红」只有自测能证明 —— 否则一条恒绿的门禁等于没有。
+      - name: glibc loader 门禁自证（ELF 架构 / ABI 分档 / 产物断言）
+        run: node scripts/check-native-linux-loader.mjs --self-test
       # 测试报告留档：失败时可直接下载 HTML 报告（否则只有日志尾部行）。
       - name: 上传单测报告（失败时）
         if: failure()
