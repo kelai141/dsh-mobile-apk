@@ -147,6 +147,7 @@ internal object SnapshotPrefixRewrite {
     var failed = 0
     var visited = 0
     var truncated = false
+
     // 与 fix-shebang.py 同范围（bin / libexec / lib）：它烧的前缀在哪，就只去哪修。
     val roots = listOf(File(usrRoot, "bin"), File(usrRoot, "libexec"), File(usrRoot, "lib"))
     for (root in roots) {
@@ -159,10 +160,25 @@ internal object SnapshotPrefixRewrite {
         for (child in children) {
           if (visited >= maxVisits) { truncated = true; break }
           visited += 1
+          // 一次 lstat 拿全部信息。
+          //
+          // 旧实现依次调用 isSymlink / isDirectory / isFile / length —— 那是同一份
+          // lstat 的四次往返，在慢文件系统上每次 1–4 ms（设备实测，见
+          // docs/NATIVE-PREFIX-REWRITE-COST-2026-11-11.md）。合并成一次即可省掉三次。
           // 软链一律不碰：目录链可能成环，文件链会把改写落到链目标上（改写范围不可控）。
-          if (isSymlink(child)) continue
-          if (child.isDirectory) { stack.addLast(child); continue }
-          if (!child.isFile || child.length() > MAX_BYTES) continue
+          val attrs = try {
+            java.nio.file.Files.readAttributes(
+              child.toPath(),
+              java.nio.file.attribute.BasicFileAttributes::class.java,
+              java.nio.file.LinkOption.NOFOLLOW_LINKS,
+            )
+          } catch (_: Throwable) {
+            null
+          }
+          if (attrs == null) continue
+          if (attrs.isSymbolicLink) continue
+          if (attrs.isDirectory) { stack.addLast(child); continue }
+          if (!attrs.isRegularFile || attrs.size() > MAX_BYTES) continue
           val head = try { readHead(child, 2) } catch (_: Throwable) { failed += 1; continue }
           if (head.size < 2 || head[0] != HASH.toByte() || head[1] != BANG.toByte()) continue
           scanned += 1
@@ -217,16 +233,28 @@ internal object SnapshotPrefixRewrite {
     false
   }
 
+  /**
+   * 读文件头两字节。
+   *
+   * 为什么不用 `FileInputStream(file)`：那个构造函数会走
+   * `File.getCanonicalPath()` → `UnixFileSystem.canonicalize()` → 逐级 `lstat`
+   * 整条路径，每次约 16 ms（设备实测，见 docs/NATIVE-PREFIX-REWRITE-COST-2026-11-11.md）。
+   * 4.2 万个文件累计 701 秒，占这一步总耗时的 55%，是唯一的主项。
+   *
+   * `java.nio.file.Files.newByteChannel` 直接按路径打开，不做规范化；本方法只被
+   * 前缀重写用来嗅探 `#!`，路径已经来自 `listFiles()`，不存在需要规范化才能解析的形态。
+   */
   private fun readHead(file: File, count: Int): ByteArray {
-    val buffer = ByteArray(count)
-    java.io.FileInputStream(file).use { input ->
-      var read = 0
-      while (read < count) {
-        val n = input.read(buffer, read, count - read)
-        if (n < 0) break
-        read += n
+    val buffer = java.nio.ByteBuffer.allocate(count)
+    java.nio.channels.FileChannel.open(
+      file.toPath(),
+      java.nio.file.StandardOpenOption.READ,
+    ).use { channel ->
+      while (buffer.hasRemaining()) {
+        if (channel.read(buffer) < 0) break
       }
-      return if (read == count) buffer else buffer.copyOf(read)
     }
+    val read = buffer.position()
+    return if (read == count) buffer.array() else buffer.array().copyOf(read)
   }
 }

@@ -135,6 +135,41 @@ class SnapshotPrefixRewriteTest {
     assertFalse("失败不得写标记", File(files, SnapshotPrefixRewrite.MARKER_PREFIX + "1.0.0").exists())
   }
 
+/**
+   * 合并 lstat 之后，四类条目仍必须各走各的分支（#1716 的语义等价判据）。
+   *
+   * 背景：旧实现对每个条目依次调用 isSymlink / isDirectory / isFile / length，
+   * 是同一份 lstat 的四次往返，在慢文件系统上占这一步耗时的 23%。合并成一次
+   * `readAttributes(NOFOLLOW_LINKS)` 后，行为必须逐项不变：
+   *
+   *  - 目录继续入栈（否则整棵子树被跳过，且不报错）；
+   *  - 软链继续跳过（否则改写会落到链接目标上）；
+   *  - 超过 MAX_BYTES 的普通文件继续跳过（否则会读一个 200 MB 的文件）；
+   *  - 其余普通文件照常嗅探 shebang。
+   *
+   * 负控口径：把 `attrs.isDirectory` 分支改成 `continue`（不入栈），本用例必须红。
+   */
+  @Test
+  fun mergedStatKeepsEveryBranchOfTheOldChecks() {
+    val files = tempDir("merged-files")
+    val usr = File(tempDir("merged-usr"), "usr")
+    val bin = File(usr, "bin")
+    val nested = File(bin, "nested")
+    nested.mkdirs()
+    // 1) 直接位于 bin 的 shim
+    File(bin, "direct").writeText("#!/system/bin/sh\nexec \"$usr0/bin/node\"\n")
+    // 2) 位于子目录的 shim：只有目录分支正确入栈才找得到
+    File(nested, "deeper").writeText("#!/system/bin/sh\nexec \"$usr0/bin/node\"\n")
+    // 3) 非 shebang 的普通文件：不得计入 scanned
+    File(bin, "plain.txt").writeText("not a script\n")
+    val result = SnapshotPrefixRewrite.runOnce(files, usr, "1.0.0", pkg, "fp-merged")
+    assertEquals("两个 shim 都必须被改写（子目录那条证明目录分支入栈）", 2, result.rewritten)
+    assertEquals("只有两个 shim 计入 scanned", 2, result.scanned)
+    assertEquals("不得有失败", 0, result.failed)
+    assertTrue("direct 必须已改写", File(bin, "direct").readText().contains(usr.absolutePath))
+    assertTrue("nested/deeper 必须已改写", File(nested, "deeper").readText().contains(usr.absolutePath))
+  }
+
   @Test
   fun symlinkedShimsAreNotFollowed() {
     val files = tempDir("link-files")
