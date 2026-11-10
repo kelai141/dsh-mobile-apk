@@ -24,4 +24,6 @@ API 35 x86_64 上，用实装模块的副本验证了这条加载器路径：[�
 
 另在引擎运行中从外部进程抢同一会话：带 `DSH_NATIVE_LIB_DIR` 时被拒，去掉该变量即回落旧兼容层放行；实装引擎进程的 `/proc/<pid>/maps` 里确有 `libdsh_session_flock.so`，说明走的是 APK 注入路径而不是测试脚手架。数据见 [打包模式对照](evidence/session-packaged-api35-x86_64.json)。
 
-打包模式的子进程用 `/system/bin/linker64` 启动，需要在应用数据根设置 `LD_LIBRARY_PATH` 指向随包 `usr/lib`，并让父进程不带 `childRoot` 参数（该参数只给子进程用）。arm64-v8a 仍只有编译与 APK 内容检查。
+打包模式的子进程用 `/system/bin/linker64` 启动，需要在应用数据根设置 `LD_LIBRARY_PATH` 指向随包 `usr/lib`，并让父进程不带 `childRoot` 参数（该参数只给子进程用）。
+
+arm64-v8a 仍只有编译与 APK 内容检查。2026-11-10 复核了三台看似可用的设备：它们的 `uname -m` 都是 `aarch64`、`abilist` 也列了 `arm64-v8a`，但 `ro.product.cpu.abi` 是 `x86_64`，`/system/bin/sh` 的 ELF `e_machine` 实测为 `0x3e`（x86_64）。这类设备跑不了 arm64 的 `.so`，不能作为主 ABI 为 arm64-v8a 的验收环境。宿主是 Intel 主机，x86 上的 AVD 也无法用 arm64 系统镜像。arm64 验收需要一台真实 arm64 设备。
