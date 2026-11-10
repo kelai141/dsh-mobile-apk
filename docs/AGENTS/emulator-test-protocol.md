@@ -230,3 +230,8 @@ PR 描述里贴**结论表**（每行一条用户动作）：
   虚拟别名；显式 target 必须对应实际注入 display，不能被 selected 屏静默替换。
 
 Settings probes read section labels after excluding injected description and chevron nodes. The visible text of a mobile category row contains both its upstream name and the adaptation's description; matching the whole text against the bare section name misses the phone-control page. This changes only the navigation probe, not the user's settings flow.
+
+回到底部按钮（#1145）的代码层排版反证入口：`node scripts/verify-to-bottom-gutter.mjs --self-test`。
+它在真实 Chromium 中加载当前上游 chat CSS 夹具，验证三个视口、两个输入区高度与七档距底位置，
+并关闭新增样式复现遮挡。该命令只计代码层；设备侧仍需打开真实长对话、滚动到按钮出现的位置，
+用 CDP 读取按钮与正文边界，再用 ADB 连续滚动、点击回到底部及切换输入法，保留横竖屏截图。
