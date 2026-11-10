@@ -26,4 +26,15 @@
 
 原始真机失败证据：`.deploy-tmp/usb-evidence/XOAUL7RGO7X8A699/ui-35-custom-provider-initial.png`、
 `ui-41-discovery-error-stable.png`、`ui-42-discovery-endpoint-list.png`、`ui-43-adopt-endpoint-model.png`、
-`ui-45-remove-empty-row-workaround.png`。修后设备结果另行补记，不沿用手动绕过结论。
+`ui-45-remove-empty-row-workaround.png`。
+
+## 修后设备结果
+
+树 fe0008f6，设备 XOAUL7RGO7X8A699，Android 16。在原发布快照上精确升级该运行时文件，
+设备 SHA-256 从 `ace087aa37adbf8b5e9211afd28bc967974eea42331aced6250c9a72f2644636`
+变为 `f1e2916b0f0593138142262bfe23e51f3b315eb1ed5c96bc8afdc9856d61de46`。
+通过应用重启引擎、刷新界面后，ADB 真实输入 local-fixed 提供商，获取端点模型、更新列表、创建。
+CDP 回读仅有 `模型 ID 1=dsh-ui-acceptance`，创建按钮 disabled=false，保存后存在 LocalFixed 编辑入口。
+结论：开发期运行时三层 PASS；截图 `ui-70-fixed-discovery.png`、`ui-71-fixed-adopt.png`、
+`ui-72-fixed-created.png`、`ui-73-fixed-provider-saved.png`，命令见同目录 commands.jsonl。
+全链 APK 构建为 Actions 42792432709；热推结论不代替最终 APK 装机验收。
