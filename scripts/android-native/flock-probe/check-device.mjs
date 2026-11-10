@@ -8,9 +8,9 @@ import { pathToFileURL } from 'node:url'
 import { getSystemErrorName } from 'node:util'
 
 const [nodePath, modulePath, mode, childPath] = process.argv.slice(2)
-assert.ok(nodePath && modulePath && (mode === 'stub' || mode === 'native'))
+assert.ok(nodePath && modulePath && ['stub', 'native', 'packaged', 'invalid'].includes(mode))
 let tryLockExclusive
-if (mode === 'stub') {
+if (mode !== 'native') {
   ;({ tryLockExclusive } = await import(pathToFileURL(resolve(modulePath)).href))
 } else {
   const { tryLock } = createRequire(import.meta.url)(resolve(modulePath))
@@ -31,7 +31,22 @@ async function attempt(fd) {
   }
 }
 
-if (childPath) {
+if (mode === 'invalid') {
+  const root = await mkdtemp(resolve('cache/dsh-flock-invalid-'))
+  try {
+    const handle = await open(join(root, 'session.lock'), 'a+')
+    try {
+      const result = await attempt(handle.fd)
+      assert.equal(result.acquired, false)
+      assert.equal(result.code, 'ERR_DLOPEN_FAILED')
+      console.log(JSON.stringify({ mode, result }, null, 2))
+    } finally {
+      await handle.close()
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+} else if (childPath) {
   const handle = await open(childPath, 'a+')
   try {
     console.log(JSON.stringify(await attempt(handle.fd)))

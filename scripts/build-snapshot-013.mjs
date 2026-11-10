@@ -20,6 +20,7 @@ import { assertOverlayDigest } from './lib/overlay-integrity.mjs'
 import { overlayCacheHit, overlayCacheStore } from './lib/overlay-cache.mjs'
 import { relocateGitShellPath } from './lib/git-shell-path.mjs'
 import { stageOverrideError, stageRemovalCommand } from './lib/snapshot-stage.mjs'
+import { installAndroidSessionFlock } from './source-build/install-android-session-flock.mjs'
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const ABI = process.argv[2] ?? 'arm64'
 if (!['arm64', 'x86_64'].includes(ABI)) { console.error('用法: node build-snapshot-013.mjs <arm64|x86_64>'); process.exit(1) }
@@ -32,7 +33,7 @@ if (!['arm64', 'x86_64'].includes(ABI)) { console.error('用法: node build-snap
 // 只有最终 tar.xz 写回 D:。故 Windows 上直接把自己重新执行进 WSL。
 // DSH_NO_WSL_REEXEC=1 跳过（调试/无 WSL 环境回退到旧的 D: 工作区）。
 if (process.platform === 'win32' && process.env.DSH_NO_WSL_REEXEC !== '1') {
-  const forwarded = Object.fromEntries(['DSH_SNAPSHOT_STAGE', 'SOURCE_DATE_EPOCH', 'DSH_INJECT_PRESET']
+  const forwarded = Object.fromEntries(['DSH_SNAPSHOT_STAGE', 'SOURCE_DATE_EPOCH', 'DSH_INJECT_PRESET', 'DSH_ANDROID_SESSION_FLOCK']
     .filter((key) => process.env[key]).map((key) => [key, process.env[key]]))
   const command = wslNodeCommand(wslPath(ROOT), 'scripts/build-snapshot-013.mjs', [ABI], forwarded)
   log0('Windows 宿主 → 转入 WSL 内执行（工作区落 ext4）')
@@ -333,6 +334,10 @@ for (const entry of OVERLAY.keepUnpublished ?? []) {
   // 施加后复查（防 exit 0 但补丁缺席的半成品；包含精确多文件 verifier）
   const checked = execSync(`node "${script}" "${stageRoot}" --check --scope engine`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
   process.stdout.write(checked)
+  if (process.env.DSH_ANDROID_SESSION_FLOCK === '1') {
+    installAndroidSessionFlock(stageRoot)
+    log('Android 会话原生写锁加载器就位')
+  }
   log(`引擎树补丁就位（${enginePatches.length} 项，包含全部 companion 文件与精确上游 verifier）`)
   // 行为回归（0.13.7）：G1/G2 这类补丁光有 marker 不足以证明「改完还能跑」——marker 只证文本被替换。
   // 两个测试直接驱动刚打过补丁的产物（不联网、不花额度），缺目标文件时自行 skip（裸 clone 正常）。

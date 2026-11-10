@@ -11,3 +11,11 @@ DSH 的 JSONL 会话后端通过 `@deepseek-ai/node-addon-system/flock` 获取�
 复测时，把编译产物复制为隔离调试 APK 缓存内的 `.node` 文件。在应用数据根以应用 UID 和随包 Node 运行 `check-device.mjs <node路径> <模块路径> <stub|native>`。先对已安装的 `node-addon-system/lib/flock.js` 跑 `stub`，再对编译产物跑 `native`；脚本用两个进程竞争测试专用锁文件。
 
 会话后端复测命令是 `check-session-device.mjs <node路径> <已安装的@deepseek-ai目录> <stub|native> <.node路径>`。生产路径未改变。接入前须覆盖取消、崩溃后恢复，以及两种 ABI 的 APK 启动和回退。会话格式、npm 包名与 JS 错误映射保持原契约。
+
+调试 APK 的候选接线：
+
+1. 在快照构建时设置 `DSH_ANDROID_SESSION_FLOCK=1`。标准 F3 补丁通过后，构建器从实际会话后端解析 `node-addon-system/flock`，再写入加载器。包清单、导出和 errno 映射不变。源码形状不匹配时拒绝生成候选。
+2. 将两个 ABI 的编译产物放入同一目录的 `arm64-v8a/libdsh_session_flock.so` 和 `x86_64/libdsh_session_flock.so`，设置 Gradle 属性 `nativeSessionFlockDir`（也可用 `ORG_GRADLE_PROJECT_nativeSessionFlockDir`），用该快照构建调试 APK。正式发版路径尚未启用。
+3. 加载器按需从 `DSH_NATIVE_LIB_DIR` 找库。库缺席时保留原单引擎路径；库已部署但无法加载时向调用方传播错误。
+
+API 35 x86_64 上，用实装模块的副本验证了这条加载器路径：[设备报告](evidence/loader-api35-x86_64.json)。正确的 `.so` 令第二进程收到 `EAGAIN`，关闭描述符后可重试；文件缺席时按旧契约运行，坏库返回 `ERR_DLOPEN_FAILED`。这次设备实验用应用缓存模拟安装目录，未完成打包后 APK 三层验收。
