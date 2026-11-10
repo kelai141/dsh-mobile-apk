@@ -14,11 +14,6 @@
 | **CDP 层** | `verify-*.mjs` 跑页面内断言 | 接口与实现脱钩，或跨层数据没打通 |
 | **ADB 用户实际体验层** | adb 真操作真截图，真人能否完成同一件事 | 不符合人体交互逻辑 / 在用户视角里就是坏的 |
 
-回到底部按钮（#1145）的代码层排版反证入口：`node scripts/verify-to-bottom-gutter.mjs --self-test`。
-它在真实 Chromium 中加载当前上游 chat CSS 夹具，验证三个视口、两个输入区高度与七档距底位置，
-并关闭新增样式复现遮挡。该命令只计代码层；设备侧仍需打开真实长对话、滚动到按钮出现的位置，
-用 CDP 读取按钮与正文边界，再用 ADB 连续滚动、点击回到底部及切换输入法，保留横竖屏截图。
-
 三层各自能证明的东西互不替代，**缺一层即未验收**。读法（对应 AGENTS.md §2.1 第 2 条的四类含义）：
 
 - 代码层绿、CDP 层红 → **内部没打通**（引擎/壳侧/页面三方接口对不上）；
@@ -235,3 +230,8 @@ PR 描述里贴**结论表**（每行一条用户动作）：
   虚拟别名；显式 target 必须对应实际注入 display，不能被 selected 屏静默替换。
 
 Settings probes read section labels after excluding injected description and chevron nodes. The visible text of a mobile category row contains both its upstream name and the adaptation's description; matching the whole text against the bare section name misses the phone-control page. This changes only the navigation probe, not the user's settings flow.
+
+回到底部按钮（#1145）的代码层排版反证入口：`node scripts/verify-to-bottom-gutter.mjs --self-test`。
+它在真实 Chromium 中加载当前上游 chat CSS 夹具，验证三个视口、两个输入区高度与七档距底位置，
+并关闭新增样式复现遮挡。该命令只计代码层；设备侧仍需打开真实长对话、滚动到按钮出现的位置，
+用 CDP 读取按钮与正文边界，再用 ADB 连续滚动、点击回到底部及切换输入法，保留横竖屏截图。
