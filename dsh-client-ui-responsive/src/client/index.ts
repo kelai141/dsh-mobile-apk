@@ -41,6 +41,7 @@ import { FileCardCapsule, type FileCardBridge } from './mobile/file-card-actions
 import { zh as cardZh, en as cardEn, fileCardErrorKey } from './mobile/file-card-capsule.locales.ts'
 import { COMPOSER_ROW_CSS } from './composer-row.css.ts'
 import { COMPOSER_INSETS_CSS } from './composer-insets.css.ts'
+import { TO_BOTTOM_GUTTER_CSS } from './to-bottom-gutter.css.ts'
 import { TRAJECTORY_DETAILS_CSS } from './trajectory-details.css.ts'
 import { TERMINAL_BLOCK_CSS } from './terminal-block.css.ts'
 import { TrajectoryPanelsObserver } from './trajectory-panels-observer.ts'
@@ -227,6 +228,7 @@ export function apply(ctx: ClientContext): void {
 
   // Composer insets adaptation: pad composer seat with system bottom / IME bottom.
   ctx.effect(() => injectStyle('composer-insets', COMPOSER_INSETS_CSS), 'ui-responsive: composer insets adaptation')
+  ctx.effect(() => injectStyle('to-bottom-gutter', TO_BOTTOM_GUTTER_CSS), 'ui-responsive: return-to-bottom side lane')
 
   // Composer command-menu scroll fix: the upstream menu viewport lacks
   // flex:1, so an over-long candidate list is clipped unscrollable.
