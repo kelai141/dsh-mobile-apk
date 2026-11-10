@@ -8,6 +8,23 @@ package com.dsharnessmobile.shell
  * boundary rules that the settings page and the importer both read.
  */
 internal object SplashPolicy {
+  /** A transform of TextureView coordinates (the decoder already stretches into the view). */
+  data class CoverTransform(val scaleX: Float, val scaleY: Float, val dx: Float, val dy: Float)
+
+  /** Fill the viewport at the video's aspect ratio, then crop equally on opposite edges. */
+  fun coverTransform(viewWidth: Int, viewHeight: Int, videoWidth: Int, videoHeight: Int): CoverTransform? {
+    if (viewWidth <= 0 || viewHeight <= 0 || videoWidth <= 0 || videoHeight <= 0) return null
+    val scale = maxOf(viewWidth.toFloat() / videoWidth, viewHeight.toFloat() / videoHeight)
+    val drawnWidth = videoWidth * scale
+    val drawnHeight = videoHeight * scale
+    return CoverTransform(
+      drawnWidth / viewWidth,
+      drawnHeight / viewHeight,
+      (viewWidth - drawnWidth) / 2f,
+      (viewHeight - drawnHeight) / 2f,
+    )
+  }
+
   /** App-private preference file; it survives APK upgrades and snapshot refreshes. */
   const val PREFS = "splash_prefs"
   const val KEY_NAME = "video_name"
