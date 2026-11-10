@@ -81,6 +81,9 @@ interface Measured {
   hints: string[]
   sections: Section[]
   inputLabels: string[]
+  modelIds: string[]
+  createEnabled: boolean
+  createdModels?: any[]
 }
 
 /**
@@ -91,7 +94,7 @@ interface Measured {
  * @param source 待测的 settings-models bundle
  * @param fillIdentity 是否填好 Provider ID 与 API 地址（填好后剩下的唯一缺陷就是「没有模型行」）
  */
-async function measure(source: string, fillIdentity: boolean): Promise<Measured> {
+async function measure(source: string, fillIdentity: boolean, adoptCandidates = false): Promise<Measured> {
   const bundle = loadBundle(source)
   let section: any
   const ctx: any = {
@@ -118,10 +121,14 @@ async function measure(source: string, fillIdentity: boolean): Promise<Measured>
   ]
   const snapshot = { status: 'ready', error: null, rows, namespaces, writable: true, credentialError: null }
   const storeFace = { getSnapshot: () => snapshot, subscribe: () => () => {}, update: () => {} }
+  let createdModels: any[] | undefined
   const props = {
     controller: { store: storeFace, load: () => {} },
     useSnapshot: (select: any) => select(snapshot),
-    operations: {},
+    operations: {
+      discoverModels: async () => ({ kind: 'found', models: [{ id: 'endpoint-model', name: 'Endpoint model' }] }),
+      writeSettings: async (_namespace: string, ops: any[]) => { createdModels = ops[0].value.models; return { kind: 'written' } },
+    },
     schema,
     t: (key: string) => key,
     renderSlot: () => null,
@@ -144,7 +151,16 @@ async function measure(source: string, fillIdentity: boolean): Promise<Measured>
     await React.act(async () => { if (route) type(route, 'd1api') })
     await React.act(async () => { if (base) type(base, 'https://d1api.xin/v1') })
   }
+  if (adoptCandidates) {
+    const fetchButton = [...host.querySelectorAll('button')].find(button => button.textContent === 'fetchModels') as HTMLButtonElement
+    expect(fetchButton.disabled).toBe(false)
+    await React.act(async () => { fetchButton.click() })
+    const adoptButton = [...document.querySelectorAll('button')].find(button => button.textContent === 'fetchAdopt') as HTMLButtonElement
+    expect(adoptButton).toBeDefined()
+    await React.act(async () => { adoptButton.click() })
+  }
   const inputs = [...host.querySelectorAll('input')]
+  const createButton = [...host.querySelectorAll('button')].find(button => button.textContent === 'create') as HTMLButtonElement
   const measured: Measured = {
     modelInputs: inputs.filter((input) => /modelId/.test(input.getAttribute('aria-label') ?? '')).length,
     hints: [...host.querySelectorAll('p')].map((p) => p.textContent ?? '')
@@ -155,6 +171,12 @@ async function measure(source: string, fillIdentity: boolean): Promise<Measured>
       inAccessibilityTree: node.closest('[hidden]') === null && node.closest('[aria-hidden="true"]') === null,
     })),
     inputLabels: inputs.map((input) => input.getAttribute('aria-label') ?? ''),
+    modelIds: inputs.filter(input => /modelId/.test(input.getAttribute('aria-label') ?? '') && input.closest('[hidden]') === null).map(input => input.value),
+    createEnabled: createButton !== undefined && !createButton.disabled,
+  }
+  if (adoptCandidates && measured.createEnabled) {
+    await React.act(async () => { createButton.click() })
+    measured.createdModels = createdModels
   }
   await React.act(async () => { root.unmount() })
   host.remove()
@@ -201,6 +223,22 @@ describe.skipIf(upstream === null)('issue #960 自定义 provider 表单', () =>
     // 负控必须把缺陷原样复现：零行 + 提示在。
     expect(measured.modelInputs).toBe(0)
     expect(measured.hints).toContain('customNeedsModels')
+  })
+
+  it('B: 获取并采纳模型后移除空占位，直接创建提供商', async () => {
+    const fixed = await measure(patched(), true, true)
+    expect(fixed.modelIds).toEqual(['endpoint-model'])
+    expect(fixed.createEnabled).toBe(true)
+    expect(fixed.createdModels?.map(model => model.id)).toEqual(['endpoint-model'])
+  })
+
+  it('B 负控：只在提交时过滤，空占位会让创建一直禁用', async () => {
+    const negative = patched().replace('if (id.trim().length === 0 || listed.has(id) && !isPicked(id))', 'if (listed.has(id) && !isPicked(id))')
+    expect(negative).not.toBe(patched())
+    const broken = await measure(negative, true, true)
+    expect(broken.modelIds).toEqual(['', 'endpoint-model'])
+    expect(broken.createEnabled).toBe(false)
+    expect(broken.createdModels).toBeUndefined()
   })
 
   it('C: 无障碍树里每个目录区的 label 互不相同', async () => {

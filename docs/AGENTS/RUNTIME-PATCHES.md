@@ -126,6 +126,8 @@
 | `custom-first-model-row-960` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js` |
 | `model-catalog-section-labels-960` | engine | `usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-models/lib/client.js` |
 
+`custom-first-model-row-960` 同时覆盖首行初值、ModelListEditor 候选采纳的空行/编辑状态回收及提交防御。只在提交时过滤无效：空行会先令 ready=false，用户根本无法提交。旧版两段完整补丁可精确升级；半补丁与上游采纳锚点漂移拒绝写回。完整 DOM 流程与旧行为负控见 `dsh-client-ui-responsive/tests/custom-provider-form-960.spec.tsx`，由 PR Gate 运行。
+
 已退役登记：`market-A`、`market-C`、`atomic-stale-lock-F4`、`sidebar-keep-wide-B2`、`client-registry-scan-C4`。历史章节保留退役前语义；活动状态以本表和 registry 为准。
 <!-- generated:active-registry:end -->
 
