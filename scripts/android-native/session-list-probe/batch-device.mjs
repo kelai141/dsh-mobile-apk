@@ -10,6 +10,28 @@ import { constants, zstdCompressSync, zstdDecompressSync } from 'node:zlib'
 const magic = 0xfd2fb528
 const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
 
+function completeFrameEnd(bytes) {
+  if (bytes.length < 5 || bytes.readUInt32LE() !== magic) return 0
+  const descriptor = bytes[4]
+  if (descriptor & 0x18) return 0
+  const sizeFlag = descriptor >>> 6
+  const dictionaryFlag = descriptor & 3
+  const singleSegment = Boolean(descriptor & 0x20)
+  const sizeBytes = sizeFlag ? 1 << sizeFlag : Number(singleSegment)
+  let offset = 5 + Number(!singleSegment) + (dictionaryFlag === 3 ? 4 : dictionaryFlag) + sizeBytes
+  while (offset + 3 <= bytes.length) {
+    const block = bytes.readUIntLE(offset, 3)
+    const type = (block >>> 1) & 3
+    if (type === 3) return 0
+    offset += 3 + (type === 1 ? 1 : block >>> 3)
+    if (block & 1) {
+      offset += descriptor & 4 ? 4 : 0
+      return offset <= bytes.length ? offset : 0
+    }
+  }
+  return 0
+}
+
 function jsHeader(path, scratch) {
   try {
     const fd = openSync(path, 'r')
@@ -19,8 +41,9 @@ function jsHeader(path, scratch) {
     } finally {
       closeSync(fd)
     }
-    if (read < 5 || scratch.readUInt32LE() !== magic || (scratch[4] & 0x18)) return null
-    const plain = zstdDecompressSync(scratch.subarray(0, read), { maxOutputLength: 65536 })
+    const end = completeFrameEnd(scratch.subarray(0, read))
+    if (!end) return null
+    const plain = zstdDecompressSync(scratch.subarray(0, end), { maxOutputLength: 65536 })
     if (plain.length === 0 || plain.indexOf(10) !== plain.length - 1) return null
     return utf8.decode(plain.subarray(0, -1))
   } catch {

@@ -176,8 +176,8 @@ async function diagnose() {
   }
 }
 
-async function compareBatch() {
-  const { withBatch, checkHeaders } = await import('./batch-device.mjs')
+async function compareBatch(controls) {
+  const { withBatch } = await import('./batch-device.mjs')
   const trials = []
   for (const order of [
     ['upstream', 'js', 'rust'], ['rust', 'upstream', 'js'], ['js', 'rust', 'upstream'],
@@ -198,20 +198,15 @@ async function compareBatch() {
           }
         }
         trials.push({ variant, first, repeat })
+        console.error(`session-header: ${variant} first=${Math.round(first.ms)}ms repeat=${Math.round(repeat.ms)}ms`)
       } finally {
         await instance.dispose()
       }
     }
   }
-  const instance = await mount(3)
-  try {
-    const controls = await checkHeaders(instance.persistence, binary, root)
-    const phases = await diagnose()
-    assert.equal(phases.digest, trials[0].first.digest)
-    return { trials, controls, phases }
-  } finally {
-    await instance.dispose()
-  }
+  const phases = await diagnose()
+  assert.equal(phases.digest, trials[0].first.digest)
+  return { trials, controls, phases }
 }
 
 async function concurrencyBaseline() {
@@ -236,8 +231,19 @@ async function concurrencyBaseline() {
 }
 
 try {
+  let controls
+  if (binary) {
+    const { checkHeaders } = await import('./batch-device.mjs')
+    const instance = await mount(3)
+    try {
+      controls = await checkHeaders(instance.persistence, binary, root)
+      console.error('session-header: frame and cancellation controls passed')
+    } finally {
+      await instance.dispose()
+    }
+  }
   await createCorpus()
-  const result = binary ? await compareBatch() : await concurrencyBaseline()
+  const result = binary ? await compareBatch(controls) : await concurrencyBaseline()
   console.log(JSON.stringify({ node: process.version, count, compression,
     version: SESSION_FORMAT_VERSION, moduleSha256: digest(await readFile(moduleFile('dsh-session-persistence-jsonl'))),
     ...result }, null, 2))
