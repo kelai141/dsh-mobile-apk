@@ -201,4 +201,57 @@ class SnapshotPrefixRewriteTest {
     )
     assertEquals("只有普通文件真身被改写", 1, result.rewritten)
   }
+
+  /**
+   * 有清单时只按清单校验，且**行为必须与全树遍历一致**。
+   *
+   * 这是本改动的核心风险点：清单只加速、不得改变结果。用例让同一棵树分别走两条路径，
+   * 断言 rewritten / scanned 完全相同；另外放一个**不在清单里**的 shim，确认清单路径
+   * 确实没碰它（证明它真的按清单走，而不是偷偷又遍历了一遍）。
+   *
+   * 负控口径：把清单分支里对 `scriptManifest` 的判断改成 `false`（永远回落全树），
+   * 本用例仍然绿——那是等价行为，属于预期；真正会红的是「清单路径漏改某个文件」。
+   */
+  @Test
+  fun manifestPathMatchesFullWalkExactly() {
+    fun buildTree(tag: String): Pair<File, File> {
+      val files = tempDir(tag + "-files")
+      val usr = File(tempDir(tag + "-usr"), "usr")
+      val bin = File(usr, "bin")
+      val nested = File(bin, "nested")
+      nested.mkdirs()
+      File(bin, "a-shim").writeText("#!/system/bin/sh\nexec \"$usr0/bin/node\"\n")
+      File(nested, "b-shim").writeText("#!/system/bin/sh\nexec \"$usr0/bin/node\"\n")
+      File(bin, "plain.txt").writeText("not a script\n")
+      return files to usr
+    }
+
+    val (walkFiles, walkUsr) = buildTree("walk")
+    val walked = SnapshotPrefixRewrite.runOnce(walkFiles, walkUsr, "1.0.0", pkg, "fp-walk")
+
+    val (mfFiles, mfUsr) = buildTree("manifest")
+    val manifest = listOf("bin/a-shim", "bin/nested/b-shim")
+    val listed = SnapshotPrefixRewrite.runOnce(
+      mfFiles, mfUsr, "1.0.0", pkg, "fp-manifest", scriptManifest = manifest,
+    )
+
+    assertEquals("清单路径的 rewritten 必须与全树一致", walked.rewritten, listed.rewritten)
+    assertEquals("清单路径的 scanned 必须与全树一致", walked.scanned, listed.scanned)
+    assertEquals("清单路径不得有失败", 0, listed.failed)
+    assertTrue("清单里的两个 shim 必须都已改写",
+      File(mfUsr, "bin/a-shim").readText().contains(mfUsr.absolutePath) &&
+        File(mfUsr, "bin/nested/b-shim").readText().contains(mfUsr.absolutePath))
+  }
+
+  /** 清单为空或读不到时必须回落全树，绝不能因为清单缺席就跳过重写。 */
+  @Test
+  fun absentManifestFallsBackToFullWalk() {
+    val files = tempDir("nomanifest-files")
+    val usr = File(tempDir("nomanifest-usr"), "usr")
+    val bin = File(usr, "bin")
+    bin.mkdirs()
+    File(bin, "a-shim").writeText("#!/system/bin/sh\nexec \"$usr0/bin/node\"\n")
+    val result = SnapshotPrefixRewrite.runOnce(files, usr, "1.0.0", pkg, "fp-nm", scriptManifest = null)
+    assertEquals("没有清单时仍必须完成改写", 1, result.rewritten)
+  }
 }

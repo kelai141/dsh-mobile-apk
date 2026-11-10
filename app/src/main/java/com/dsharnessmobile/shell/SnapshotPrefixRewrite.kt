@@ -130,6 +130,9 @@ internal object SnapshotPrefixRewrite {
    * @param pkg 本应用包名。
    * @param snapshotId 快照指纹（标记内容的一部分：同版本内换快照也要重跑）。
    * @param maxVisits 遍历上限（缺省 [MAX_VISITS]）。只有测试会传小值——生产路径不接受外部调参。
+   * @param scriptManifest 构建期产出的文本脚本清单（相对 usrRoot）。给出时**只按清单校验**，
+   *   不再遍历整棵树——慢文件系统上 4.2 万条目的 lstat 要十几分钟，而清单只有几百行。
+   *   清单缺席（旧快照）时回落到原来的全树遍历，行为与之前一致。
    */
   internal fun runOnce(
     filesDir: File,
@@ -138,6 +141,7 @@ internal object SnapshotPrefixRewrite {
     pkg: String,
     snapshotId: String,
     maxVisits: Int = MAX_VISITS,
+    scriptManifest: List<String>? = null,
   ): Result {
     val marker = File(filesDir, MARKER_PREFIX + version)
     if (marker.isFile && markerReadsSnapshot(marker, snapshotId)) return Result(0, 0, 0, skipped = true)
@@ -148,6 +152,41 @@ internal object SnapshotPrefixRewrite {
     var visited = 0
     var truncated = false
 
+    if (scriptManifest != null) {
+      // 清单路径：构建期已经确认过「这些是文本脚本」，运行时只需逐个校验前缀，
+      // 不必再遍历整棵树判断谁有 shebang。
+      for (rel in scriptManifest) {
+        if (visited >= maxVisits) { truncated = true; break }
+        visited += 1
+        val child = File(usrRoot, rel)
+        val length = try { child.length() } catch (_: Throwable) { failed += 1; continue }
+        if (length <= 0L || length > MAX_BYTES) continue
+        scanned += 1
+        val bytes = try { child.readBytes() } catch (_: Throwable) { failed += 1; continue }
+        val after = rewriteFileBytes(child.name, bytes, pkg, usrRoot.absolutePath) ?: continue
+        try {
+          java.io.FileOutputStream(child).use { out ->
+            out.write(after)
+            out.flush()
+            out.fd.sync()
+          }
+          rewritten += 1
+        } catch (_: Throwable) {
+          failed += 1
+        }
+      }
+      if (failed == 0 && !truncated) {
+        try {
+          marker.writeText(
+            "rewritten=" + rewritten + " scanned=" + scanned + " snapshot=" + snapshotId +
+              " at " + System.currentTimeMillis() + "\n",
+          )
+        } catch (_: Throwable) {
+          // 标记写不进去不算失败：下次启动会再跑一遍（幂等）。
+        }
+      }
+      return Result(rewritten, scanned, failed, skipped = false, truncated = truncated)
+    }
     // 与 fix-shebang.py 同范围（bin / libexec / lib）：它烧的前缀在哪，就只去哪修。
     val roots = listOf(File(usrRoot, "bin"), File(usrRoot, "libexec"), File(usrRoot, "lib"))
     for (root in roots) {
@@ -211,9 +250,31 @@ internal object SnapshotPrefixRewrite {
     return Result(rewritten, scanned, failed, skipped = false, truncated = truncated)
   }
 
-  /** Context 便利入口：live 树 = `<files>/usr`。 */
-  internal fun runOnce(context: Context, version: String, snapshotId: String): Result =
-    runOnce(context.filesDir, File(context.filesDir, "usr"), version, context.packageName, snapshotId)
+  /** 构建期脚本清单在 live 树里的落点（由快照解压带进来）。 */
+  private const val SCRIPT_MANIFEST_REL = ".dsh-shebang-scripts.txt"
+
+  /**
+   * Context 便利入口：live 树 = `<files>/usr`。
+   *
+   * 有清单就按清单校验（几百行），没有就回落全树遍历（旧快照）。清单只是加速，
+   * **不是正确性前提**：读不到、为空、或路径不存在时一律回落，绝不因此跳过重写。
+   */
+  internal fun runOnce(context: Context, version: String, snapshotId: String): Result {
+    val usr = File(context.filesDir, "usr")
+    return runOnce(
+      context.filesDir, usr, version, context.packageName, snapshotId,
+      scriptManifest = readScriptManifest(usr),
+    )
+  }
+
+  /** 读清单；任何异常或缺席都返回 null（调用方回落全树遍历）。 */
+  private fun readScriptManifest(usr: File): List<String>? {
+    val file = File(usr, SCRIPT_MANIFEST_REL)
+    if (!file.isFile) return null
+    val lines = try { file.readLines() } catch (_: Throwable) { return null }
+    val clean = lines.map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("/") && ".." !in it.split("/") }
+    return clean.ifEmpty { null }
+  }
 
   /**
    * 标记是否对**这一份快照**有效。
