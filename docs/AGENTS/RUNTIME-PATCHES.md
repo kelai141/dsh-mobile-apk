@@ -129,6 +129,8 @@
 已退役登记：`market-A`、`market-C`、`atomic-stale-lock-F4`、`sidebar-keep-wide-B2`、`client-registry-scan-C4`。历史章节保留退役前语义；活动状态以本表和 registry 为准。
 <!-- generated:active-registry:end -->
 
+`custom-first-model-row-960` 同时覆盖首行初值、ModelListEditor 候选采纳的空行/编辑状态回收及提交防御。只在提交时过滤无效：空行会先令 ready=false，用户根本无法提交。旧版两段完整补丁可精确升级；半补丁与上游采纳锚点漂移拒绝写回。完整 DOM 流程与旧行为负控见 `dsh-client-ui-responsive/tests/custom-provider-form-960.spec.tsx`，由 PR Gate 运行。
+
 **与本节 assets/patched/ 的分界**：同一份引擎文件的修复若能在构建期落地（随发行快照固化），优先走 `scope: engine`；运行时 asset 只承担「必须每次启动前覆盖」或「与引擎版本无关的壳侧定制」（见 §3-2）。已退役：pi-drift-F1（上游 0.1.5 原生 strict/deferred 校验）。**assets/patched/ 是设备端运行时补丁**——壳在每次引擎启动前对快照内上游引擎包做覆盖。两者层不同、目标不同、幂等机制不同（构建期 = registry 幂等标记；运行时 = 内容指纹），勿混用；构建期补丁登记见协调仓 scripts/patches/README.md 与 registry.json。
 
 ## 7. 0.13.7 重出（引擎 0.1.5-rc.1，2026-09-10）
