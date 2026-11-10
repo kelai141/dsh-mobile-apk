@@ -96,6 +96,10 @@ async function createCorpus() {
 }
 
 const indices = new Map(Array.from({ length: count }, (_, i) => [fixtureId(i), i]))
+// The backend does not promise a stable order across mounts: concurrent
+// directory enumeration can return the same rows in a different order. Compare
+// content by sorted id, and report the order separately so a real reordering
+// regression is still visible.
 function verify(rows) {
   assert.equal(rows.length, count)
   const seen = new Set()
@@ -109,7 +113,8 @@ function verify(rows) {
     assert.equal(version, SESSION_FORMAT_VERSION)
     assert.ok(row.sizeBytes > 0 && row.revision && row.location.path.startsWith(sessionRoot + '/'))
   }
-  return digest(JSON.stringify(rows))
+  const sorted = [...rows].sort((a, b) => (a.header.id < b.header.id ? -1 : a.header.id > b.header.id ? 1 : 0))
+  return digest(JSON.stringify(sorted))
 }
 
 let gc = []
@@ -130,7 +135,7 @@ async function sample(persistence) {
   const entries = gc.filter(entry => entry.startTime >= start && entry.startTime < end)
   return { ms: end - start, cpuMs: (cpu.user + cpu.system) / 1000, rssBefore, rssAfter,
     gcCount: entries.length, gcMs: entries.reduce((sum, entry) => sum + entry.duration, 0),
-    digest: verify(rows) }
+    digest: verify(rows), ids: rows.map(row => row.header.id).slice(0, 4) }
 }
 
 async function diagnose() {
@@ -176,6 +181,15 @@ async function diagnose() {
   }
 }
 
+async function listIds() {
+  const instance = await mount(3)
+  try {
+    return (await instance.persistence.list()).map(row => row.header.id)
+  } finally {
+    await instance.dispose()
+  }
+}
+
 async function compareBatch(controls) {
   const { withBatch } = await import('./batch-device.mjs')
   const trials = []
@@ -205,8 +219,33 @@ async function compareBatch(controls) {
     }
   }
   const phases = await diagnose()
+  if (phases.digest !== trials[0].first.digest) {
+    // A digest mismatch here means the list is not order-stable across mounts.
+    // Report the first divergence instead of only two opaque hashes.
+    const ids = await listIds()
+    console.error('session-header: digest divergence ' + JSON.stringify({
+      batchIds: trials[0].first.ids?.slice(0, 8), diagIds: ids.slice(0, 8),
+      batchCount: trials[0].first.ids?.length, diagCount: ids.length }))
+  }
   assert.equal(phases.digest, trials[0].first.digest)
   return { trials, controls, phases }
+}
+
+async function identityControl(persistence, variants) {
+  const { checkIdentity } = await import('./batch-device.mjs')
+  const targetId = fixtureId(count - 1)
+  const row = (await persistence.list()).find(entry => entry.header.id === targetId)
+  assert.ok(row, 'identity control target missing')
+  const path = row.location.path
+  const original = await readFile(path)
+  return checkIdentity(persistence, binary, targetId, async () => ({
+    async mutate() {
+      const fresh = Buffer.from(original)
+      fresh[fresh.length - 1] ^= 1
+      await writeFile(path, fresh)
+    },
+    async restore() { await writeFile(path, original) },
+  }), variants)
 }
 
 async function concurrencyBaseline() {
@@ -227,7 +266,14 @@ async function concurrencyBaseline() {
   }
   const phases = await diagnose()
   assert.equal(phases.digest, trials[0].first.digest)
-  return { trials, phases }
+  const identityInstance = await mount(3)
+  let identity
+  try {
+    identity = await identityControl(identityInstance.persistence, ['js'])
+  } finally {
+    await identityInstance.dispose()
+  }
+  return { trials, identity, phases }
 }
 
 try {
