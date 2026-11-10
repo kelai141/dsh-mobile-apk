@@ -18,6 +18,7 @@ import { existsSync, readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync
 import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
+import { wslPath } from './lib/shell.mjs'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const DEFAULTS = {
@@ -44,15 +45,10 @@ export function evaluate({ listing, overlayPackages, plugins }) {
   return { missingEngine, missingPlugins }
 }
 
-function wslPath(path) {
-  const absolute = resolve(path)
-  return absolute.replace(/^([A-Za-z]):[\\/]/, (_m, drive) => '/mnt/' + drive.toLowerCase() + '/').split('\\').join('/')
-}
-
-/** 列出 tar.xz 条目。Windows 上的 bsdtar 不保证支持 xz，所以走 WSL。 */
+/** 在 Windows 上用默认 WSL；把路径作为 tar 参数传入，无需 shell 引号。 */
 export function listEntries(snapshot) {
   const command = process.platform === 'win32'
-    ? ['wsl', ['-d', 'kali-linux', '-e', 'bash', '-lc', "tar -tJf '" + wslPath(snapshot) + "'"]]
+    ? ['wsl.exe', ['-e', 'tar', '-tJf', wslPath(resolve(snapshot))]]
     : ['tar', ['-tJf', snapshot]]
   const result = spawnSync(command[0], command[1], { encoding: 'utf8', maxBuffer: 512 * 1024 * 1024 })
   if (result.status !== 0 || result.error) {
