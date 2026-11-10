@@ -1,0 +1,204 @@
+{
+  "node": "v24.18.0",
+  "count": 2048,
+  "compression": "zstd",
+  "version": 4,
+  "moduleSha256": "c72afc48ca208ddbf5a2441e9fab567e277804e7182dda9fdcfe4c70b64608a8",
+  "trials": [
+    {
+      "concurrency": 3,
+      "first": {
+        "ms": 89054.91461800001,
+        "cpuMs": 76214.482,
+        "rssBefore": 83222528,
+        "rssAfter": 108081152,
+        "gcCount": 35,
+        "gcMs": 2503.3410879969597,
+        "digest": "2daecb455e74cadec0b4a1f369f1ff9c72546a3b1bba38f48e66ecf1ef8e6374"
+      },
+      "repeat": {
+        "ms": 98218.70718000003,
+        "cpuMs": 78091.179,
+        "rssBefore": 109445120,
+        "rssAfter": 123944960,
+        "gcCount": 51,
+        "gcMs": 2186.7608480602503,
+        "digest": "2daecb455e74cadec0b4a1f369f1ff9c72546a3b1bba38f48e66ecf1ef8e6374"
+      }
+    },
+    {
+      "concurrency": 6,
+      "first": {
+        "ms": 56706.412895000016,
+        "cpuMs": 53408.327,
+        "rssBefore": 125640704,
+        "rssAfter": 128532480,
+        "gcCount": 31,
+        "gcMs": 1774.627643957734,
+        "digest": "2daecb455e74cadec0b4a1f369f1ff9c72546a3b1bba38f48e66ecf1ef8e6374"
+      },
+      "repeat": {
+        "ms": 55329.731707,
+        "cpuMs": 53350.41,
+        "rssBefore": 128827392,
+        "rssAfter": 139235328,
+        "gcCount": 49,
+        "gcMs": 2169.5002630203962,
+        "digest": "2daecb455e74cadec0b4a1f369f1ff9c72546a3b1bba38f48e66ecf1ef8e6374"
+      }
+    },
+    {
+      "concurrency": 12,
+      "first": {
+        "ms": 58560.75146599999,
+        "cpuMs": 53592.429,
+        "rssBefore": 140333056,
+        "rssAfter": 151371776,
+        "gcCount": 24,
+        "gcMs": 2163.0316299647093,
+        "digest": "2daecb455e74cadec0b4a1f369f1ff9c72546a3b1bba38f48e66ecf1ef8e6374"
+      },
+      "repeat": {
+        "ms": 50083.69071599998,
+        "cpuMs": 52226.987,
+        "rssBefore": 152670208,
+        "rssAfter": 153452544,
+        "gcCount": 16,
+        "gcMs": 1444.0559970140457,
+        "digest": "2daecb455e74cadec0b4a1f369f1ff9c72546a3b1bba38f48e66ecf1ef8e6374"
+      }
+    },
+    {
+      "concurrency": 12,
+      "first": {
+        "ms": 49552.10590799997,
+        "cpuMs": 44144.564,
+        "rssBefore": 154595328,
+        "rssAfter": 151478272,
+        "gcCount": 20,
+        "gcMs": 1569.7683009952307,
+        "digest": "2daecb455e74cadec0b4a1f369f1ff9c72546a3b1bba38f48e66ecf1ef8e6374"
+      },
+      "repeat": {
+        "ms": 27593.167438999983,
+        "cpuMs": 27032.415,
+        "rssBefore": 152604672,
+        "rssAfter": 160681984,
+        "gcCount": 16,
+        "gcMs": 1254.9353410303593,
+        "digest": "2daecb455e74cadec0b4a1f369f1ff9c72546a3b1bba38f48e66ecf1ef8e6374"
+      }
+    },
+    {
+      "concurrency": 3,
+      "first": {
+        "ms": 46365.867596999975,
+        "cpuMs": 42022.647,
+        "rssBefore": 159952896,
+        "rssAfter": 152686592,
+        "gcCount": 18,
+        "gcMs": 1532.8604509681463,
+        "digest": "2daecb455e74cadec0b4a1f369f1ff9c72546a3b1bba38f48e66ecf1ef8e6374"
+      },
+      "repeat": {
+        "ms": 55636.58957000007,
+        "cpuMs": 47892.05,
+        "rssBefore": 153866240,
+        "rssAfter": 157163520,
+        "gcCount": 17,
+        "gcMs": 1206.5424960106611,
+        "digest": "2daecb455e74cadec0b4a1f369f1ff9c72546a3b1bba38f48e66ecf1ef8e6374"
+      }
+    },
+    {
+      "concurrency": 6,
+      "first": {
+        "ms": 67563.04610799998,
+        "cpuMs": 59258.465,
+        "rssBefore": 157720576,
+        "rssAfter": 158609408,
+        "gcCount": 18,
+        "gcMs": 1311.4207870215178,
+        "digest": "2daecb455e74cadec0b4a1f369f1ff9c72546a3b1bba38f48e66ecf1ef8e6374"
+      },
+      "repeat": {
+        "ms": 71342.20522700006,
+        "cpuMs": 54064.375,
+        "rssBefore": 159916032,
+        "rssAfter": 160419840,
+        "gcCount": 18,
+        "gcMs": 1512.382922977209,
+        "digest": "2daecb455e74cadec0b4a1f369f1ff9c72546a3b1bba38f48e66ecf1ef8e6374"
+      }
+    },
+    {
+      "concurrency": 6,
+      "first": {
+        "ms": 53318.811427999986,
+        "cpuMs": 46191.496,
+        "rssBefore": 155848704,
+        "rssAfter": 154746880,
+        "gcCount": 64,
+        "gcMs": 2630.441412001848,
+        "digest": "2daecb455e74cadec0b4a1f369f1ff9c72546a3b1bba38f48e66ecf1ef8e6374"
+      },
+      "repeat": {
+        "ms": 39985.834477999946,
+        "cpuMs": 37093.009,
+        "rssBefore": 154509312,
+        "rssAfter": 154836992,
+        "gcCount": 25,
+        "gcMs": 1595.979043006897,
+        "digest": "2daecb455e74cadec0b4a1f369f1ff9c72546a3b1bba38f48e66ecf1ef8e6374"
+      }
+    },
+    {
+      "concurrency": 12,
+      "first": {
+        "ms": 39199.39877099998,
+        "cpuMs": 37281.093,
+        "rssBefore": 155262976,
+        "rssAfter": 157237248,
+        "gcCount": 18,
+        "gcMs": 1540.3204459398985,
+        "digest": "2daecb455e74cadec0b4a1f369f1ff9c72546a3b1bba38f48e66ecf1ef8e6374"
+      },
+      "repeat": {
+        "ms": 34681.24097000004,
+        "cpuMs": 31127.731,
+        "rssBefore": 158429184,
+        "rssAfter": 156975104,
+        "gcCount": 17,
+        "gcMs": 1129.824604049325,
+        "digest": "2daecb455e74cadec0b4a1f369f1ff9c72546a3b1bba38f48e66ecf1ef8e6374"
+      }
+    },
+    {
+      "concurrency": 3,
+      "first": {
+        "ms": 79060.66772899986,
+        "cpuMs": 64001.408,
+        "rssBefore": 158171136,
+        "rssAfter": 158027776,
+        "gcCount": 54,
+        "gcMs": 2247.3310401290655,
+        "digest": "2daecb455e74cadec0b4a1f369f1ff9c72546a3b1bba38f48e66ecf1ef8e6374"
+      },
+      "repeat": {
+        "ms": 64620.55145099992,
+        "cpuMs": 56445.176,
+        "rssBefore": 159305728,
+        "rssAfter": 159571968,
+        "gcCount": 25,
+        "gcMs": 1585.7595050036907,
+        "digest": "2daecb455e74cadec0b4a1f369f1ff9c72546a3b1bba38f48e66ecf1ef8e6374"
+      }
+    }
+  ],
+  "phases": {
+    "listGenerations": 5729.6732789999805,
+    "listArtifacts": 73090.12073400011,
+    "listMs": 74205.19936299999,
+    "digest": "2daecb455e74cadec0b4a1f369f1ff9c72546a3b1bba38f48e66ecf1ef8e6374"
+  }
+}
