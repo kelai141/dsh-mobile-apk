@@ -88,6 +88,15 @@
 |---|---|---|---|---|
 | dev.rikka.shizuku:{api, provider, aidl, shared} | 13.1.5 | MIT | Shizuku-API-MIT.txt（assets/licenses/；仓库 LICENSES/） | [Shizuku-API](https://github.com/RikkaApps/Shizuku-API) |
 
+## 前端组件
+
+| 组件 | 版本 | 许可证 | 许可全文 | 上游源码 |
+|---|---|---|---|---|
+| @xterm/xterm | 5.5.0 | MIT | app/src/main/assets/xterm/LICENSE | [xterm.js](https://github.com/xtermjs/xterm.js) |
+| @xterm/addon-fit | 0.10.0 | MIT | app/src/main/assets/xterm/LICENSE | [xterm.js](https://github.com/xtermjs/xterm.js) |
+
+两件均随 APK 资产分发（`app/src/main/assets/xterm/`），MIT 全文与版权声明见同目录 LICENSE。
+
 ## 源码要约（GPL §3）
 
 上表各 copyleft 组件的对应源码及完整构建脚本，见 <https://github.com/termux/termux-packages>（按版本标签对应）。

@@ -810,7 +810,7 @@
     "K01 -> 诊断落盘 | 启动分段、引导页 stall、HTTP/TLS/渲染进程错误全部经 LogCollector 写壳侧自有文件",
     "K01 -> 软件源切换 | 管理中心「软件源」行经 SourceSettings 双写 sources.list 与 chosen_mirrors，再跑 apt-get update 验证；失败按备份回滚（退出码不足以判成败）",
     "K01 -> 隔离浏览器舞台 | onCreate 建 BrowserHost 并挂 BrowserHostHolder，onPause/onDestroy 暂停与销毁",
-    "K02 -> ConsoleSession | 复用 usrDir 与 shellEnv 起交互 shell，不起第二个引擎；输出经 ConsoleAnsiStripper 剥掉控制序列后上屏（页面是纯文本容器）",
+    "K02 -> ConsoleSession | 复用 usrDir 与 shellEnv 起交互 shell，不起第二个引擎；启动参数走单片描述 DSH_CONSOLE_LAUNCH；真 PTY 输出原样转发给页面 xterm 渲染，仅非 PTY 降级经 ConsoleAnsiStripper 剥离",
     "K02 -> K01 | 启动全程用引导页阶段承载文案，成功才切 WebUI",
     "K02 -> K03 | 刷新期禁启动、事务恢复、update-pending 健康 3 拍才删 usr-old 三处握手；刷新窗口内的启动请求**不得静默丢弃**（0.14.8 P1）：`start()`/`restart()` 拿不到世代所有权时按 destroyed/running 分开处置，running 走 boot-fail 留痕 + 有界等待后自动续跑；安全模式重启在停旧引擎前先判事务 journal",
     "K02 -> UndoGate | 看门狗 UNDO、启动超时与客户端插件树失败共用闸门：可点名时外科拔除非 Hard 插件；整份回撤只用当前 snapshot fingerprint 下的壳侧 HEALTHY known-good ID；被拒后复位锁存以继续引擎重试",

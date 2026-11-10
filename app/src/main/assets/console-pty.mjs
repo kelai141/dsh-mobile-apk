@@ -32,10 +32,34 @@ const writeJson = (obj) => {
 
 const main = () => {
   const usr = process.env.DSH_CONSOLE_PREFIX
-  const shell = process.env.DSH_CONSOLE_SHELL || (usr ? path.join(usr, 'bin/bash') : null)
   const ptyModule = process.env.DSH_CONSOLE_NODE_PTY
+  // 启动描述：壳侧单通道产物（ADR-0001）。中继只消费、不解释启动策略；换原生 PTY 时同一份描述可直接复用。
+  const launch = (() => {
+    const raw = process.env.DSH_CONSOLE_LAUNCH
+    if (raw === undefined || raw === '') return null
+    try {
+      const parsed = JSON.parse(raw)
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('必须是对象')
+      if (parsed.schemaVersion !== 1) throw new Error('schemaVersion 必须为 1')
+      if (typeof parsed.shell !== 'string' || !path.isAbsolute(parsed.shell)) throw new Error('shell 必须是绝对路径')
+      if (!Array.isArray(parsed.argv) || parsed.argv.some((a) => typeof a !== 'string')) throw new Error('argv 必须是字符串数组')
+      if (parsed.cwd !== undefined && (typeof parsed.cwd !== 'string' || !path.isAbsolute(parsed.cwd))) throw new Error('cwd 必须是绝对路径')
+      if (parsed.env !== undefined) {
+        if (typeof parsed.env !== 'object' || parsed.env === null || Array.isArray(parsed.env)) throw new Error('env 必须是对象')
+        if (Object.values(parsed.env).some((v) => typeof v !== 'string')) throw new Error('env 的值必须是字符串')
+      }
+      if (parsed.unset !== undefined && (!Array.isArray(parsed.unset) || parsed.unset.some((k) => typeof k !== 'string'))) {
+        throw new Error('unset 必须是字符串数组')
+      }
+      return parsed
+    } catch (e) {
+      writeJson({ op: 'error', message: 'console-pty: DSH_CONSOLE_LAUNCH 无效: ' + (e && e.message) })
+      process.exit(5)
+    }
+  })()
+  const shell = (launch && launch.shell) || process.env.DSH_CONSOLE_SHELL || (usr ? path.join(usr, 'bin/bash') : null)
   if (!usr || !shell || !ptyModule) {
-    writeJson({ op: 'error', message: 'console-pty: 缺少 DSH_CONSOLE_PREFIX / DSH_CONSOLE_SHELL / DSH_CONSOLE_NODE_PTY' })
+    writeJson({ op: 'error', message: 'console-pty: 缺少 DSH_CONSOLE_PREFIX / DSH_CONSOLE_LAUNCH / DSH_CONSOLE_NODE_PTY' })
     process.exit(2)
   }
 
@@ -50,14 +74,39 @@ const main = () => {
   const cols = Number(process.env.DSH_CONSOLE_COLS || 80)
   const rows = Number(process.env.DSH_CONSOLE_ROWS || 24)
 
+  // shell 的参数由壳侧显式给出：默认仍是交互式 bash（'-i'），设备验收时换成
+  // launcher 的完整 argv（例如 bionilux --rootfs <R> --guest-cwd <C> /bin/bash -i）。
+  // 非法 JSON 必须当场失败：静默回退 '-i' 会让验收对象悄悄变回快照 bash。
+  const shellArgs = launch
+    ? launch.argv
+    : (() => {
+        const raw = process.env.DSH_CONSOLE_ARGS
+        if (raw === undefined || raw === '') return ['-i']
+        try {
+          const parsed = JSON.parse(raw)
+          if (!Array.isArray(parsed) || parsed.some((a) => typeof a !== 'string')) {
+            throw new Error('必须是非空字符串数组')
+          }
+          return parsed
+        } catch (e) {
+          writeJson({ op: 'error', message: 'console-pty: DSH_CONSOLE_ARGS 无效: ' + (e && e.message) })
+          process.exit(5)
+        }
+      })()
+  const cwd = (launch && launch.cwd) || process.env.DSH_CONSOLE_CWD || process.env.HOME || usr
+  // 描述里的 unset 先删、env 后铺：与壳侧旧行为顺序一致，避免同名键被清掉。
+  const spawnEnv = { ...process.env }
+  if (launch && launch.unset) for (const key of launch.unset) delete spawnEnv[key]
+  if (launch && launch.env) Object.assign(spawnEnv, launch.env)
+
   let term
   try {
-    term = pty.spawn(shell, ['-i'], {
+    term = pty.spawn(shell, shellArgs, {
       name: 'xterm-256color',
       cols,
       rows,
-      cwd: process.env.HOME || usr,
-      env: process.env,
+      cwd,
+      env: spawnEnv,
     })
   } catch (e) {
     writeJson({ op: 'error', message: 'console-pty: spawn 失败: ' + (e && e.message) })

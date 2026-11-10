@@ -181,7 +181,7 @@ sequenceDiagram
 | S01 | 引擎侧注入层（三个子仓） | 页面内发布标记与桥入口、钳面板几何、装配老内核垫片 | 客户端插件 apply() 装载；每个 index 响应经 tapIndex 注入 | 交互面 | K04（壳侧 androidBridge/dshBackBridge 桥面） | 引擎插件系统按 profile-web.cordis.patch.yml 的 insert 行拉起 | dsh-client-ui-responsive/src/client/index.ts,dsh-host-web-compat/lib/index.js,dsh-shell-termux/src/index.ts | 高 |
 | B01 | 构建链与快照注入 | 快照构建 插件注入 门禁收口 到 APK 出包；本地 PowerShell、云端 build-apk.mjs、发布 build-release.ps1 的 APK 终端组装共用 build-apk-engine，产物再经 apksigner 校验 v1/v2/v3；另有不读 LFS 快照的 ARM64 来源审计构建（签名 Termux 包 → NDK 跨编译 node-pty → 原生闭包门禁 → 快照 → APK） | 人手动 pwsh -File scripts\build-apk-013.ps1、云端 workflow 或发布链 | 构建与发布 | 门禁块,壳侧快照解压,插件源码与 vendor 固化面,可信上游签名/哈希 | 开发者手动,发布链 build-release.ps1,CI 与云端 build-apk.mjs,build-apk-source.yml | scripts/build-apk-013.ps1,scripts/build-apk.mjs,scripts/build-apk-engine.mjs,scripts/build-apk-engine.test.mjs,scripts/build-release.ps1,scripts/check-apk-signatures.mjs,scripts/build-snapshot-013.mjs,scripts/inject-all.py,scripts/source-build/*,.github/workflows/build-apk.yml,.github/workflows/build-apk-source.yml,scripts/patches/data/undo-safe-transaction-snippet.mjs,scripts/patches/data/registry-scan-c4.mjs,scripts/patches/data/client-index-loader-barrier.mjs,scripts/patches/engine-versions.mjs,scripts/patches/tests/client-index-loader-barrier.test.mjs,scripts/patches/tests/gateway-client-source-g1.test.mjs,scripts/patches/mimo-thinking-toggle-056.mjs,scripts/patches/tests/mimo-thinking-toggle-056.test.mjs,scripts/patches/image-history-batch-offload-I1.mjs,scripts/patches/tests/image-history-batch-offload-I1.test.mjs | 高 |
 | B02 | 静态门禁链与 CI | 33 个静态门禁脚本与三层接线的唯一声明处 | PR/CI、两条打包链、发布链 | 测试与门禁 | B01,B03 | 提交 PR、推 main、构建/发版 | scripts/check-release-gates.mjs,scripts/check-gate-skips.mjs,.github/workflows/pr-gate.yml,scripts/build-apk-013.ps1 | 高 |
-| B03 | 设备验收套件（CDP 与 adb 面） | 13 个 CDP/设备断言套件 + 5 个部署冒烟脚本的设备侧验收入口 | 人手动逐个执行 node scripts/verify-*.mjs 与 pwsh scripts/*.ps1 | 测试与门禁 | S-12 双 ABI 包装机、快照刷新完成、桥面 / 浏览器宿主 / 虚拟屏 / 注入层各块 | 人（PR 前设备门禁，无 CI 接入） | scripts/verify-webview-015.mjs,scripts/verify-state-sync.mjs,scripts/verify-browser-host.mjs,scripts/verify-browser-panel.mjs,scripts/verify-vdisplay-viewer.mjs,scripts/verify-vdisplay-float.mjs,scripts/verify-engine-log-copy.mjs,scripts/verify-screen-scope-matrix.mjs,scripts/verify-adb-only-tree.mjs,scripts/verify-notify-consumption.mjs,scripts/verify-auto-undo.mjs,scripts/verify-client-plugin-fail-recovery.mjs,scripts/verify-screen-scope-01410.mjs,scripts/verify-composer-sheet-two-stage.mjs,scripts/verify-console-terminal-env.mjs,scripts/verify-source-mirror.mjs,scripts/device-smoke.ps1,scripts/deploy-device.ps1,scripts/deploy-embedded.ps1,scripts/t0-check.ps1,scripts/e2e-phone-test.ps1 | 高 |
+| B03 | 设备验收套件（CDP 与 adb 面） | 13 个 CDP/设备断言套件 + 5 个部署冒烟脚本的设备侧验收入口 | 人手动逐个执行 node scripts/verify-*.mjs 与 pwsh scripts/*.ps1 | 测试与门禁 | S-12 双 ABI 包装机、快照刷新完成、桥面 / 浏览器宿主 / 虚拟屏 / 注入层各块 | 人（PR 前设备门禁，无 CI 接入） | scripts/verify-webview-015.mjs,scripts/verify-state-sync.mjs,scripts/verify-browser-host.mjs,scripts/verify-browser-panel.mjs,scripts/verify-vdisplay-viewer.mjs,scripts/verify-vdisplay-float.mjs,scripts/verify-engine-log-copy.mjs,scripts/verify-screen-scope-matrix.mjs,scripts/verify-adb-only-tree.mjs,scripts/verify-notify-consumption.mjs,scripts/verify-auto-undo.mjs,scripts/verify-client-plugin-fail-recovery.mjs,scripts/verify-screen-scope-01410.mjs,scripts/verify-composer-sheet-two-stage.mjs,scripts/verify-console-terminal-env.mjs,scripts/verify-linux-environment.mjs,scripts/verify-source-mirror.mjs,scripts/device-smoke.ps1,scripts/deploy-device.ps1,scripts/deploy-embedded.ps1,scripts/t0-check.ps1,scripts/e2e-phone-test.ps1 | 高 |
 
 ## 3. 疑点清单（证据 + 影响 + 状态）
 
@@ -481,7 +481,7 @@ sequenceDiagram
 | K02 | UndoGate | 看门狗 UNDO、启动超时与客户端插件树失败共用闸门：可点名时外科拔除非 Hard 插件；整份回撤只用当前 snapshot fingerprint 下的壳侧 HEALTHY known-good ID；被拒后复位锁存以继续引擎重试 | `app/src/main/java/com/dsharnessmobile/shell/EngineService.kt:215#expect=val%20bootAgeMs%20%3D%20nowMs%20-%20EngineManager.lastStartAttemptAt`-293、EngineStartFlow.kt:345-390、`UndoGate.kt:403-670#expect=*%20%E8%90%BD%E4%B8%80%E6%9D%A1%E9%97%B8%E9%97%A8%E8%A7%82%E6%B5%8B%EF%BC%88best-effort%EF%BC%8C%E7%BB%9D%E4%B8%8D%E6%8A%9B%EF%BC%89%E3%80%82**%E4%B8%8D%E7%BB%8F%20DevLogPrefs%20%E9%97%B8%E9%97%A8**%E2%80%94%E2%80%94%E5%AE%83%E5%BF%85%E9%A1%BB%E5%9C%A8%E9%BB%98%E8%AE%A4%E9%85%8D%E7%BD%AE%E4%B8%8B%E5%8F%AF%E8%A7%81%E3%80%82` |
 | K02 | 通知链 NotifyStore/NotifyCenter | 每拍按字节偏移消费 .task-done.ndjson，双读不双发 | WatchdogV2.kt:258-309、`NotifyCenter.kt:201#expect=override%20fun%20onChannelDegraded(category%3A%20String)%20%7B`
 | K02 | 控制载体 ControlCarrier | 随前台引擎服务起停，a11y 关着也承载 browser*/vd* | EngineService.kt:43 |
-| K02 | ConsoleSession | 复用 usrDir 与 shellEnv 起交互 shell，不起第二个引擎；输出经 ConsoleAnsiStripper 剥掉控制序列后上屏（页面是纯文本容器） | app/src/main/java/com/dsharnessmobile/shell/ConsoleSession.kt#ConsoleSession@040bee0c |
+| K02 | ConsoleSession | 复用 usrDir 与 shellEnv 起交互 shell，不起第二个引擎；启动参数走单片描述 DSH_CONSOLE_LAUNCH；真 PTY 输出原样转发给页面 xterm 渲染，仅非 PTY 降级经 ConsoleAnsiStripper 剥离 | app/src/main/java/com/dsharnessmobile/shell/ConsoleSession.kt#ConsoleSession@040bee0c、`app/src/main/java/com/dsharnessmobile/shell/ConsoleShellOverride.kt:39#expect=internal%20data%20class%20ConsoleShellOverride(` |
 | K02 | 门禁 check-boot-budget | files/boot-segments.log 是该门禁的唯一产物 | LogCollector.kt:405-434 |
 | K03 | 引导与启动 | refreshSnapshot 的进度/失败文案与恢复前置由启动流拉起，刷新期 snapshotRefreshing 闸门禁止拉引擎 | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:427 |
 | K03 | 引擎探活与看门狗 | 每 5 秒一拍 onEngineProbe 驱动 .update-pending 的 usr-old 确认或回退 | `app/src/main/java/com/dsharnessmobile/shell/EngineService.kt:361#expect=val%20state%20%3D%20WatchdogV2.assessProbe%28this%29%20%7B%20isEpochCurrent%28epoch%29%20%7D` |
@@ -1551,7 +1551,7 @@ Linux 内部插件宿主适配（实验性 internal，默认不启用）：`plug
 
 版本变化链为 `linuxBootstrap 服务就绪 → 读取持久化安装版本/应用基线/自动更新偏好/尝试记录 → 基线不同时 checkForUpdates({source:'mobile-version-change'})`；偏好开关和页面挂载都不发更新检查。手动检查只调用 `source:'manual'`，安装、重装、卸载与开关写入均需 `confirmed:true`。设置页不持久化第二份系统状态，读写都回到 bootstrap；无该服务时 HTTP 503 且不注册设置入口。这两个实验性内部插件的发布不修改注入目录或默认启用状态。
 
-vendored bootstrap 与注入集的关系（0.15.0）：`plugins/dsh-linux-bootstrap/`（源 `kelai141/dsh-bionilux@3f86a85`，只源码；`lib/` 由 `build.mjs` 在链上重建）**刻意不登记**进 `scripts/plugin-dirs.json`、`scripts/contract.json` 的 `inserted`、`scripts/profile-web.cordis.patch.yml` —— 它的 `apply()` 需要函数型 config（`linuxAssetIO`），YAML 挂载表达不了，挂进 profile 只会抛 `TypeError`；不入注入集也让 `check-patch-mounts`/`check-contract` 的双向一致断言保持真绿（它们守注入集 ↔ 挂载集，本包两边都不在）。漂移由 `scripts/check-vendored-linux-bootstrap.mjs` 守（自带 `--self-test`：1 正控 + 3 负控），它**不进** `check-release-gates.mjs` 的 `GATES`（进册即要求本地链与云端链接线，而那两处是逐字节镜像面）。完整协议见 `docs/AGENTS/BRIDGE-API.md` 的 Linux 内部插件宿主节；设备证据限未启用状态，不代表完成真实安装验收。
+vendored bootstrap 与注入集的关系（0.15.1 起）：`plugins/dsh-linux-bootstrap/`（源 `kelai141/dsh-bionilux@3f86a85`，只源码；`lib/` 由 `build.mjs` 在链上重建）**已登记**进 `scripts/plugin-dirs.json` 的 `dirs`，并同时列在 `dynamicOnly` 里 —— 它的 `apply()` 需要函数型 config（`linuxAssetIO`），YAML 挂载表达不了，挂进 profile 只会抛 `TypeError`；因此它**随快照注入但刻意不登记进** `scripts/profile-web.cordis.patch.yml`，只由宿主在用户显式启用时动态加载。`check-patch-mounts`/`check-contract` 对 `dynamicOnly` 项按双向一致规则豁免，其余包仍判红。漂移由 `scripts/check-vendored-linux-bootstrap.mjs` 守（自带 `--self-test`：1 正控 + 3 负控），它**不进** `check-release-gates.mjs` 的 `GATES`（进册即要求本地链与云端链接线，而那两处是逐字节镜像面）。完整协议见 `docs/AGENTS/BRIDGE-API.md` 的 Linux 内部插件宿主节；设备证据限未启用状态，不代表完成真实安装验收。
 
 
 - **一句话**：两个引擎侧插件的合块——`dsh-android-file-open` 把壳侧拷好的外部文件变成一条「强制新会话、未发送的附件草稿」（配五条受鉴权的 exact 路由与自有临时项清单）、`dsh-android-linux-env` 提供工具链/环境配方视图与开发者选项的运行时缓存白名单清理。（历史：第三个插件 `dsh-model-capability` 曾为手填供应商路由探测能力并把缺失字段写回 settings.yaml，已于 0.14.8 整体退役，目录、工具与装配行均已删除。）
@@ -2189,6 +2189,11 @@ app/src/debug/AndroidManifest.xml
 
 <!-- COVERAGE
 app/src/main/java/com/dsharnessmobile/shell/ConsoleSessionStartGuard.kt
+# 控制台 shell 的设备验收入口（debug 专用）：显式登记，不靠 glob 收
+app/src/main/java/com/dsharnessmobile/shell/ConsoleShellOverride.kt
+app/src/test/java/com/dsharnessmobile/shell/ConsoleShellOverrideTest.kt
+app/src/main/java/com/dsharnessmobile/shell/ConsoleLaunch.kt
+app/src/test/java/com/dsharnessmobile/shell/ConsoleLaunchTest.kt
 app/src/test/java/com/dsharnessmobile/shell/ConsoleSessionSingleStartGuardTest.kt
 app/src/main/java/com/dsharnessmobile/shell/FileExternalBridge.kt
 app/src/main/java/com/dsharnessmobile/shell/PhotoCapture.kt
@@ -2242,6 +2247,8 @@ app/src/androidTest/java/com/dsharnessmobile/shell/SafeModeMigrationDeviceTest.k
 <!-- COVERAGE
 # 竖屏加号面板底部 sheet + 两段滚动（本 PR）：新增的设备验收脚本必须显式登记。
 scripts/verify-composer-sheet-two-stage.mjs
+# Linux 环境安装/健康/负控（CDP 层）：新增套件显式登记
+scripts/verify-linux-environment.mjs
 -->
 
 设置页设备导航：verify-webview-015 在桌面形态经账号菜单进入设置与手机控制，仍要求真实重置按钮存在、启用且有尺寸；缺少入口、页签或按钮的负控均判红。

@@ -20,9 +20,9 @@ import java.util.concurrent.TimeUnit
  * and every full-screen program refuses to start. The snapshot's script(1) was the first attempt
  * and did not work — see [ConsolePty] for the measured reason.
  *
- * Output: control sequences pass through [ConsoleAnsiStripper] because the page (console.html) is a
- * plain-text container. The stripping is the current rendering compromise, not a property of the
- * PTY — a page-side ANSI renderer replaces exactly this layer and nothing else.
+ * Output: the page renders VT/ANSI with xterm.js (assets/xterm/), so the PTY path forwards control
+ * sequences verbatim. [ConsoleAnsiStripper] remains only for the non-PTY fallback (no renderer
+ * guarantee; the page falls back to plain text when the renderer assets are absent).
  */
 class ConsoleSession(private val context: Context) {
 
@@ -122,6 +122,11 @@ class ConsoleSession(private val context: Context) {
     val node = File(engineManager.usrDir, ConsolePty.NODE_RELATIVE)
     val ptyModule = File(engineManager.usrDir, ConsolePty.DEFAULT_NODE_PTY)
 
+    // 设备验收入口（仅 debug 构建；release 恒为 null）：把控制台指向别的 shell，
+    // 让「现有 node-pty 中继能否驱动 Debian guest bash」这件事在设备上可验，
+    // 而不是只能靠推断。默认路径一个字节都不变。
+    val shellOverride = ConsoleShellOverride.resolve(context)
+
     val gen = ++generation
     return try {
       fun build(argv: List<String>, hasProtocol: Boolean): ProcessBuilder =
@@ -130,9 +135,22 @@ class ConsoleSession(private val context: Context) {
           // 终端环境必须在**子进程启动前**就在环境里：bash -i 起来时 TERM 已定，
           // 之后再 export 改变不了已经初始化的 ncurses 程序。
           p.environment().putAll(ConsoleTerminalEnv.terminalEnv(engineManager.usrDir))
-          p.environment()["PS1"] = "dsh:\\w$ "
+          // 启动描述走单通道（ADR-0001）：壳侧只产 DSH_CONSOLE_LAUNCH，底层（今天 node 中继、
+          // 将来原生 PTY）只消费描述并 spawn。unset/env 一并进描述，由底层在 spawn 前应用。
+          if (shellOverride == null) p.environment()["PS1"] = "dsh:\\w$ "
           p.environment()["DSH_CONSOLE_PREFIX"] = engineManager.usrDir.absolutePath
-          p.environment()["DSH_CONSOLE_SHELL"] = bash.absolutePath
+          val launch = if (shellOverride != null) {
+            // 与 #1704 / dsh-bionilux#13 的 exec 契约对齐：launcher 走系统 linker 启动，
+            // glibc loader 从 nativeLibraryDir 解析（app 数据目录里的 ELF 无法 execve）。
+            ConsoleLaunch.wrapWithAndroidLinker(
+              ConsoleLaunch.ofOverride(shellOverride),
+              ConsoleLaunch.ANDROID_LINKER,
+              context.applicationInfo.nativeLibraryDir ?: "",
+            )
+          } else {
+            ConsoleLaunch.ofDefault(bash.absolutePath)
+          }
+          p.environment()[ConsoleLaunch.ENV_KEY] = launch.toJson()
           p.environment()["DSH_CONSOLE_NODE_PTY"] = ptyModule.absolutePath
           p.environment()["DSH_CONSOLE_COLS"] = ConsolePty.normalizeSize(cols, rows).first.toString()
           p.environment()["DSH_CONSOLE_ROWS"] = ConsolePty.normalizeSize(cols, rows).second.toString()
@@ -147,6 +165,12 @@ class ConsoleSession(private val context: Context) {
       } else null
       val relay = if (native == null && node.isFile && ptyModule.isDirectory) relayScript() else null
       val canUsePty = native != null || relay != null
+      if (shellOverride != null && !canUsePty) {
+        // 不静默退回快照 bash：那会把「验的是 Debian」变成「验的还是 Termux」的假绿。
+        Log.w(TAG, "console override present but PTY relay is unavailable")
+        listener.onStatus(State.FAILED, "控制台缺少 PTY 中继，无法启动自定义 shell（验收入口要求真 PTY）")
+        return false
+      }
       val argv = if (relay != null) ConsolePty.argv(node, relay) else listOf(bash.absolutePath, "-i")
       // Same fallback as the engine: Android 15/16 and some OEM systems (Honor/Huawei, measured)
       // forbid the app domain from exec'ing an app-data ELF directly (EACCES Permission denied);
@@ -263,10 +287,9 @@ class ConsoleSession(private val context: Context) {
               next = null
               val data = ConsolePty.dataOf(line)
               if (data != null) {
-                val chunk = stripper.feed(data)
-                if (chunk.isNotEmpty()) {
-                  output.append(chunk)
-                }
+                // 页面用 xterm.js 渲染 VT/ANSI；真 PTY 路径必须原样转发，
+                // 否则全屏程序（vim/top）的控制序列会被剥掉。仅非 PTY 降级路径继续剥离。
+                if (data.isNotEmpty()) output.append(data)
                 continue
               }
               val op = ConsolePty.fieldOf(line, "op")
