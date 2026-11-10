@@ -730,6 +730,8 @@ Terminal output delivery (#591): `ConsoleSession` sends stripped PTY text throug
 
 #### K01 启动与引导面
 
+原生启动页的品牌、状态卡、底部操作区与管理宿主均跟随当前视口宽度，系统边距只由 `MainActivity` 的 insets 入口施加。`GuideChrome` 不再在 layout 回调中把它们压回固定手机列宽；实际测量与连续旋转回归由 `GuideViewportDeviceTest` 验证（#1320）。
+
 开屏视频的几何链：`SplashOverlay.applyCover` 在媒体尺寸就绪与纹理尺寸变化时调用 `SplashPolicy.coverTransform`。输入矩形是 TextureView 的 View 尺寸，播放器已将视频映射到该矩形；变换按视频宽高比反算两个轴的 View 缩放，再居中裁切。不得直接把视频像素缩放率作为两个 View 轴的缩放率，否则高分辨率视频会露底，平板会变形（#1320）。
 
 **WebView 冻结自愈状态机（#1355 / #1513）**：置位（判定冻结 -> reload）与唯一复位（页面应答 -> onAck）收在 `FreezeRecoveryGate` 里，`onPageLoaded` 只重置计时**不复位**闸门；判据用可注入时钟直接跑状态转换，不再对源码文本切片——`app/src/main/java/com/dsharnessmobile/shell/FreezeRecoveryGate.kt:76#expect=fun%20tick(now%3A%20Long)%3A%20Action%20%7B`
@@ -2357,6 +2359,7 @@ app/src/main/java/com/dsharnessmobile/shell/SplashStore.kt
 app/src/main/java/com/dsharnessmobile/shell/StartupPrefsNormalizer.kt
 app/src/main/java/com/dsharnessmobile/shell/PythonPackages.kt
 app/src/main/java/com/dsharnessmobile/shell/SplashOverlay.kt
+app/src/androidTest/java/com/dsharnessmobile/shell/GuideViewportDeviceTest.kt
 app/src/main/java/com/dsharnessmobile/shell/SplashToggle.kt
 app/src/main/java/com/dsharnessmobile/shell/SplashSettingsPage.kt
 app/src/main/java/com/dsharnessmobile/shell/SplashImportController.kt

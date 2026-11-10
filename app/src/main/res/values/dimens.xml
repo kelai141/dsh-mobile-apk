@@ -25,5 +25,4 @@
   <dimen name="ds_btn_secondary_height">48dp</dimen>
   <dimen name="ds_dot">8dp</dimen>
   <dimen name="ds_guide_gutter">24dp</dimen>
-  <dimen name="ds_guide_max_width">440dp</dimen>
 </resources>

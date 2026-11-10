@@ -473,11 +473,10 @@ class GuideAndConsoleBatch6Test {
   }
 
   @Test
-  fun `ds_guide_max_width 必须真的被引用`() {
+  fun `启动页不再叠加手机宽度上限`() {
     val chrome = codeOnly(source("GuideChrome.kt"))
-    assertTrue("必须引用该 dimen（旧形态：全仓零引用，平板/折叠屏上卡片拉满整屏）", chrome.contains("R.dimen.ds_guide_max_width"))
-    assertTrue("必须同时用上 gutter", chrome.contains("R.dimen.ds_guide_gutter"))
-    assertTrue("宽度变化时要重算（旋转/分屏）", chrome.contains("addOnLayoutChangeListener"))
+    assertFalse("不能恢复已退役的固定列宽；实际几何由 GuideViewportDeviceTest 验证", chrome.contains("R.dimen.ds_guide_max_width"))
+    assertTrue("系统边距仍由窗口入口统一处理", codeOnly(source("MainActivity.kt")).contains("R.dimen.ds_guide_gutter"))
   }
 
   // ── S1-16 / S1-17 / S1-18：控制台 ────────────────────────────────────────
