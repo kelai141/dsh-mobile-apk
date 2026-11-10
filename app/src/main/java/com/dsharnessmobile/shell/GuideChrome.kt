@@ -559,36 +559,9 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
   }
   root.addView(actionBlock)
 
-  // ── S1-15：`ds_guide_max_width`（440dp）此前**全仓零引用** ────────────────────
-  // 后果：平板/折叠屏/横屏上，状态卡与两枚按钮一律拉满整屏（1600px 宽的一张卡 + 两个半屏按钮），
-  // 眼睛要横跨整屏读一行 13sp 的说明。这里给「内容列」与「操作区」套同一个上限宽度并居中，
-  // 并在可用宽度变化时重算（旋转/分屏/折叠态切换都会改 root 宽度）。
-  val maxContentW = dpix(R.dimen.ds_guide_max_width)
-  val gutter = dpix(R.dimen.ds_guide_gutter)
-  val clamp = { v: View ->
-    val avail = root.width - gutter * 2
-    if (avail > 0) {
-      val want = if (avail > maxContentW) maxContentW else ViewGroup.LayoutParams.MATCH_PARENT
-      val lp = v.layoutParams
-      if (lp != null && lp.width != want) {
-        lp.width = want
-        v.layoutParams = lp
-      }
-    }
-  }
-  root.gravity = Gravity.CENTER_HORIZONTAL
-  root.addOnLayoutChangeListener { _, l, _, r, _, ol, _, or, _ ->
-    if (r - l != or - ol) {
-      clamp(actionBlock)
-      clamp(content)
-      clamp(managementHost)
-    }
-  }
-  root.post {
-    clamp(actionBlock)
-    clamp(content)
-    clamp(managementHost)
-  }
+  // #1320: all three regions follow the viewport's MATCH_PARENT width. MainActivity
+  // applies the shared edge/system insets; a second fixed-width clamp leaves a phone
+  // column in the middle of a tablet and also survives into management navigation.
 
   return GuideChrome(
     root = root,
