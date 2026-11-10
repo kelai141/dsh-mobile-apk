@@ -1,0 +1,222 @@
+{
+  "device": {
+    "serial": "emulator-5586",
+    "avd": "dsh-flock-e2e-api35",
+    "abi": "x86_64",
+    "sdk": 35,
+    "node": "v24.18.0",
+    "moduleSha256": "c72afc48ca208ddbf5a2441e9fab567e277804e7182dda9fdcfe4c70b64608a8"
+  },
+  "corpus": {
+    "count": 512,
+    "compression": "zstd",
+    "formatVersion": 4
+  },
+  "note": "Digests are order-insensitive: the backend does not promise a stable row order across mounts, so rows are sorted by session id before hashing. All three variants produce the same digest.",
+  "build": {
+    "local": "scripts/android-native/session-list-probe/build-local.sh (WSL clang + Windows NDK r27 sysroot)",
+    "earlierCloud": "CI job android-native-session-header-probe (ubuntu, NDK r27) — same source, kept as cross-check"
+  },
+  "trialOrder": [
+    "upstream",
+    "js",
+    "rust",
+    "rust",
+    "upstream",
+    "js",
+    "js",
+    "rust",
+    "upstream"
+  ],
+  "trials": [
+    {
+      "variant": "upstream",
+      "first": {
+        "ms": 8067.32,
+        "cpuMs": 9319,
+        "gcMs": 172,
+        "rssMiB": 93,
+        "digest": "2fd1b955ee74c296c0502fbf81d47daba8b7cfaaf8ad0d14168d27920c053fd1"
+      },
+      "repeat": {
+        "ms": 4000.08,
+        "cpuMs": 4264,
+        "gcMs": 76,
+        "rssMiB": 97,
+        "digest": "2fd1b955ee74c296c0502fbf81d47daba8b7cfaaf8ad0d14168d27920c053fd1"
+      }
+    },
+    {
+      "variant": "js",
+      "first": {
+        "ms": 1691.56,
+        "cpuMs": 1994,
+        "gcMs": 108,
+        "rssMiB": 104,
+        "digest": "2fd1b955ee74c296c0502fbf81d47daba8b7cfaaf8ad0d14168d27920c053fd1",
+        "hits": 512,
+        "fallback": 0
+      },
+      "repeat": {
+        "ms": 1909.44,
+        "cpuMs": 1879,
+        "gcMs": 73,
+        "rssMiB": 105,
+        "digest": "2fd1b955ee74c296c0502fbf81d47daba8b7cfaaf8ad0d14168d27920c053fd1",
+        "hits": 512,
+        "fallback": 0
+      }
+    },
+    {
+      "variant": "rust",
+      "first": {
+        "ms": 1800.32,
+        "cpuMs": 1467,
+        "gcMs": 22,
+        "rssMiB": 125,
+        "digest": "2fd1b955ee74c296c0502fbf81d47daba8b7cfaaf8ad0d14168d27920c053fd1",
+        "hits": 512,
+        "fallback": 0
+      },
+      "repeat": {
+        "ms": 1330.45,
+        "cpuMs": 1089,
+        "gcMs": 63,
+        "rssMiB": 132,
+        "digest": "2fd1b955ee74c296c0502fbf81d47daba8b7cfaaf8ad0d14168d27920c053fd1",
+        "hits": 512,
+        "fallback": 0
+      }
+    },
+    {
+      "variant": "rust",
+      "first": {
+        "ms": 2619.8,
+        "cpuMs": 2278,
+        "gcMs": 47,
+        "rssMiB": 138,
+        "digest": "2fd1b955ee74c296c0502fbf81d47daba8b7cfaaf8ad0d14168d27920c053fd1",
+        "hits": 512,
+        "fallback": 0
+      },
+      "repeat": {
+        "ms": 1333.15,
+        "cpuMs": 1069,
+        "gcMs": 46,
+        "rssMiB": 140,
+        "digest": "2fd1b955ee74c296c0502fbf81d47daba8b7cfaaf8ad0d14168d27920c053fd1",
+        "hits": 512,
+        "fallback": 0
+      }
+    },
+    {
+      "variant": "upstream",
+      "first": {
+        "ms": 5679.77,
+        "cpuMs": 5337,
+        "gcMs": 123,
+        "rssMiB": 146,
+        "digest": "2fd1b955ee74c296c0502fbf81d47daba8b7cfaaf8ad0d14168d27920c053fd1"
+      },
+      "repeat": {
+        "ms": 4311.59,
+        "cpuMs": 4437,
+        "gcMs": 108,
+        "rssMiB": 142,
+        "digest": "2fd1b955ee74c296c0502fbf81d47daba8b7cfaaf8ad0d14168d27920c053fd1"
+      }
+    },
+    {
+      "variant": "js",
+      "first": {
+        "ms": 2262.53,
+        "cpuMs": 2294,
+        "gcMs": 38,
+        "rssMiB": 141,
+        "digest": "2fd1b955ee74c296c0502fbf81d47daba8b7cfaaf8ad0d14168d27920c053fd1",
+        "hits": 512,
+        "fallback": 0
+      },
+      "repeat": {
+        "ms": 1633.4,
+        "cpuMs": 1713,
+        "gcMs": 37,
+        "rssMiB": 141,
+        "digest": "2fd1b955ee74c296c0502fbf81d47daba8b7cfaaf8ad0d14168d27920c053fd1",
+        "hits": 512,
+        "fallback": 0
+      }
+    },
+    {
+      "variant": "js",
+      "first": {
+        "ms": 2316.86,
+        "cpuMs": 2278,
+        "gcMs": 35,
+        "rssMiB": 141,
+        "digest": "2fd1b955ee74c296c0502fbf81d47daba8b7cfaaf8ad0d14168d27920c053fd1",
+        "hits": 512,
+        "fallback": 0
+      },
+      "repeat": {
+        "ms": 1593.23,
+        "cpuMs": 1697,
+        "gcMs": 35,
+        "rssMiB": 141,
+        "digest": "2fd1b955ee74c296c0502fbf81d47daba8b7cfaaf8ad0d14168d27920c053fd1",
+        "hits": 512,
+        "fallback": 0
+      }
+    },
+    {
+      "variant": "rust",
+      "first": {
+        "ms": 1483.69,
+        "cpuMs": 1273,
+        "gcMs": 11,
+        "rssMiB": 141,
+        "digest": "2fd1b955ee74c296c0502fbf81d47daba8b7cfaaf8ad0d14168d27920c053fd1",
+        "hits": 512,
+        "fallback": 0
+      },
+      "repeat": {
+        "ms": 1222.27,
+        "cpuMs": 1582,
+        "gcMs": 60,
+        "rssMiB": 143,
+        "digest": "2fd1b955ee74c296c0502fbf81d47daba8b7cfaaf8ad0d14168d27920c053fd1",
+        "hits": 512,
+        "fallback": 0
+      }
+    },
+    {
+      "variant": "upstream",
+      "first": {
+        "ms": 4111.59,
+        "cpuMs": 4505,
+        "gcMs": 51,
+        "rssMiB": 149,
+        "digest": "2fd1b955ee74c296c0502fbf81d47daba8b7cfaaf8ad0d14168d27920c053fd1"
+      },
+      "repeat": {
+        "ms": 5331.35,
+        "cpuMs": 4619,
+        "gcMs": 104,
+        "rssMiB": 142,
+        "digest": "2fd1b955ee74c296c0502fbf81d47daba8b7cfaaf8ad0d14168d27920c053fd1"
+      }
+    }
+  ],
+  "phases": {
+    "listGenerationsMs": 707,
+    "listArtifactsMs": 3578
+  },
+  "controls": {
+    "good": "matched",
+    "bad-checksum": "SessionPersistenceCorruptionError",
+    "truncated": "incomplete",
+    "bad-magic": "SessionPersistenceCorruptionError",
+    "extra-line": "SessionPersistenceCorruptionError",
+    "absent": "absent"
+  }
+}
