@@ -140,7 +140,7 @@
       android:enableOnBackInvokedCallback="true"
       android:exported="true"
       android:launchMode="singleTop"
-      android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
+      android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode"
       android:windowSoftInputMode="adjustResize">
       <intent-filter>
         <action android:name="android.intent.action.MAIN" />
@@ -181,12 +181,12 @@
 
     <!-- 内置控制台：快照 bash 交互终端（引擎未运行时也可排查）。 -->
     <activity android:name=".RepairActivity" android:exported="false"
-      android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+      android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation"
       android:windowSoftInputMode="adjustResize" />
     <activity
       android:name=".ConsoleActivity"
       android:exported="false"
-      android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
+      android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode"
       android:windowSoftInputMode="adjustResize" />
 
     <!-- 外部阅读器打开文件（issue #52）：FileProvider 向 ACTION_VIEW 目标
