@@ -216,6 +216,10 @@ const GATES = [
   // 两条构建链传注入后 tar 真检、发布链按快照面 --require 跑；CI 无 tar，只跑 --self-test 自证
   // （见 pr-gate.yml 同名步骤）。
   { script: 'check-snapshot-node-shims.mjs', ciApk: true, ciCoord: false, needsSnapshot: true },
+  // #1716 回归面：首启脚本清单必须落在 usr/.dsh-shebang-scripts.txt（壳侧唯一读点）。
+  // 清单缺席不会报错——壳侧静默回落全树遍历（慢设备实测 527 秒 vs 21 秒），
+  // 而构建日志照样打印「清单已生成」。判据只存在于产物 tar 成员上，故 needsSnapshot=true。
+  { script: 'check-shebang-manifest.mjs', ciApk: true, ciCoord: false, needsSnapshot: true },
   // combo 缓存覆盖（0.14.0 启动性能 P1-2 / 引擎树补丁 combo-cache-A3）：注入后快照的每条
   // client.js 必须有 sha256 命中的缓存条目，否则运行期回退现场生成会吞掉全部启动收益。
   { script: 'check-combo-cache.mjs', ciApk: false, ciCoord: false, needsSnapshot: true },
@@ -986,6 +990,24 @@ for (const gate of RUN_GATES) {
     if (STRICT) {
       console.error('CHECK-RELEASE-GATES FAILED：' + gate + ' 需要 --snapshot-dir 的快照面，'
         + '严格发布档不得跳过（shim 的成员类型/模式/内容判据全在产物 tar 上）')
+      process.exit(1)
+    }
+    skipTotal += 1
+    console.log('SKIP(#' + skipTotal + ')  ' + gate + '：发布链未提供快照面（--snapshot-dir 下无 tar）')
+    ran += 1
+    continue
+  }
+  if (gate === 'check-shebang-manifest.mjs') {
+    if (snapshotDir && abis.length > 0) {
+      for (const abi of abis) runGate([join('scripts', gate), snapshotTar(abi)], gate + '(' + abi + ')')
+      ran += 1
+      console.log('PASS  ' + gate + '（' + abis.join(', ') + '）')
+      continue
+    }
+    // 严格发布档：判据全在产物 tar 成员上，没有 tar 就等于没验——与 shim 门禁同口径判红。
+    if (STRICT) {
+      console.error('CHECK-RELEASE-GATES FAILED：' + gate + ' 需要 --snapshot-dir 的快照面，'
+        + '严格发布档不得跳过（脚本清单的落点与内容判据全在产物 tar 上）')
       process.exit(1)
     }
     skipTotal += 1

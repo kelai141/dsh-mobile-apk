@@ -635,7 +635,14 @@ log('重写 shebang/RUNPATH…')
 // 第三参数输出「确实是文本脚本」的相对路径清单：壳侧首启重写据此只校验清单，
 // 不再遍历整棵树（慢文件系统上 4.2 万条目的 lstat 要十几分钟，见
 // docs/NATIVE-PREFIX-REWRITE-COST-2026-11-11.md）。
-const SHEBANG_MANIFEST = join(STAGE, 'shebang-scripts.txt')
+//
+// 落点必须与壳侧读点逐字一致：SnapshotPrefixRewrite.SCRIPT_MANIFEST_REL =
+// ".dsh-shebang-scripts.txt"，相对的是 **归档树里的 usr**（即 <stage>/root/usr），
+// 因为解压后它就是 <files>/usr。此前写成 join(STAGE, 'shebang-scripts.txt')：
+// 文件既在归档之外（stage 根不进 tar），名字也不对，壳侧永远读不到 ⇒ 清单静默失效、
+// 回落全树遍历，收益为 0 而构建日志照样打印「清单已生成」。
+// 归档段的自检（见下）会在成员缺席时直接判红，防止同类问题再次静默通过。
+const SHEBANG_MANIFEST = join(U, '.dsh-shebang-scripts.txt')
 execSync(`${PYTHON} scripts/fix-shebang.py "${U}" ${NEW_PREFIX} "${SHEBANG_MANIFEST}"`, { encoding: 'utf8', stdio: 'inherit' })
 // termux-elf-cleaner：清理 ELF 中残留 com.termux RUNPATH。
 //
@@ -1411,6 +1418,12 @@ log('清单驱动裁剪：treeDelete + extensionDelete…')
 }
 log('清单驱动裁剪完成（treeDelete + extensionDelete）')
 
+// 归档前刷新脚本清单：第 6 步之后还会往 usr/bin 写 shim（pnpm/npm/dsh-node 等），
+// 并做上面的清单驱动裁剪。清单若停在第 6 步的时点，壳侧就会漏掉这些脚本——
+// 它们在「构建期前缀 == 本机前缀」的设备上本来就无事可做，但在 user 10 / 换包名的
+// 设备上必须被改写。这里只重扫与写清单，不改任何文件（--manifest-only）。
+execSync(`${PYTHON} scripts/fix-shebang.py "${U}" ${NEW_PREFIX} "${SHEBANG_MANIFEST}" --manifest-only`, { encoding: 'utf8', stdio: 'inherit' })
+
 // ── 8. 归档 ────────────────────────────────────────────────────────────
 log('归档 snapshot.tar.xz…')
 const archive = join(OUT_DIR, 'snapshot.tar.xz')
@@ -1524,6 +1537,25 @@ if (termuxLinks !== 0) {
   process.exit(1)
 }
 log('归档内软链自检通过（0 条旧 Termux 前缀软链）')
+// 归档内脚本清单自检：壳侧 SnapshotPrefixRewrite 只在 <files>/usr/.dsh-shebang-scripts.txt
+// 存在时才走清单路径。构建期若把清单写错地方（上一版就写在 stage 根、且文件名不同），
+// 构建日志照样打印「清单已生成」，设备侧却永远回落全树遍历——收益静默归零。
+// 这里对**产物**复核成员存在与非空，缺了就拒绝出快照。
+let manifestLines = -1
+try {
+  const pyManifest = `import tarfile; t=tarfile.open(${JSON.stringify(archive.replace(/\\/g, '/'))},'r');`
+    + ` m=[x for x in t.getmembers() if x.name=='usr/.dsh-shebang-scripts.txt'];`
+    + ` print(len(m)); print(len(t.extractfile(m[0]).read().decode('utf-8','replace').splitlines()) if m and m[0].isfile() else 0)`
+  const out = execSync(PYTHON + ' -c ' + JSON.stringify(pyManifest), { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }).trim().split('\n')
+  manifestLines = Number(out[0] || 0) === 1 ? Number(out[1] || 0) : -1
+} catch (e) {
+  console.error(`  [脚本清单归档自检执行失败] ${String(e)}`)
+}
+if (manifestLines <= 0) {
+  console.error('归档内缺 usr/.dsh-shebang-scripts.txt（或为空）——壳侧清单路径永不命中，首启仍会全树遍历')
+  process.exit(1)
+}
+log(`归档内脚本清单自检通过（${manifestLines} 条）`)
 // 出厂 profile 清单对账（P-AC-01，--require 严格档）：归档内 profiles/{web,headless}/package.json 必须
 // bundles 非空且无死键。stage 段已体检过，此处是对**产物**的复核——stage 正确而归档缺件
 // 的同型缺陷此前在 LICENSES 上实锤过一次。
