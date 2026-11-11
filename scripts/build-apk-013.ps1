@@ -127,7 +127,7 @@ if ($LASTEXITCODE -ne 0) { Write-Host "快照指纹与声明值不一致（手�
 Write-Host "== manifest 加固门禁 =="
 node (Join-Path $Root "scripts\check-manifest-hardening.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "manifest 加固校验失败，拒绝打包"; exit 1 }
-
+node (Join-Path $Root "scripts\check-input-config-changes.mjs") 2>&1; if ($LASTEXITCODE -ne 0) { Write-Host "Activity 未声明 keyboard/navigation，插拔外接键鼠会重建，拒绝打包"; exit 1 }
 # Kotlin 块注释嵌套（KDoc 里写 node_modules/** 会吞掉整个文件；dev-shell 实测）
 Write-Host "== Kotlin 注释嵌套门禁 =="
 node (Join-Path $Root "scripts\check-kotlin-comments.mjs") 2>&1
