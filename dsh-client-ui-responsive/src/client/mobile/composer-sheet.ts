@@ -1,4 +1,11 @@
 import { zh, en, type ComposerSheetKey } from './composer-sheet.locales.ts'
+import {
+  ADD_BUTTON_SELECTOR,
+  CARD_SELECTOR,
+  ATTACHMENT_ROW_TITLES,
+  readMenuOptionSubtitle,
+  withUpstreamMenu,
+} from './composer-commands.ts'
 
 /**
  * 输入行「+」的底部 sheet（替换上游那个小弹层）。
@@ -26,39 +33,14 @@ import { zh, en, type ComposerSheetKey } from './composer-sheet.locales.ts'
  * 没有它，某些 WebView 会在 sheet 内任何可聚焦元素被点时再次弹键盘。
  */
 
-/** 上游「+」：ui-conversation 里唯一 aria-haspopup="listbox" 的按钮（MenuView 是 combobox）。 */
-const ADD_BUTTON_SELECTOR = '[data-composer-card] button[aria-haspopup="listbox"]'
-const CARD_SELECTOR = '[data-composer-card]'
-/**
- * 上游「+」弹层的根。
- *
- * **是 role="listbox"，不是 role="menu"**（MenuView.tsx:132）。上游整条链自洽：
- * 按钮 aria-haspopup="listbox" → 弹层 role="listbox" → 每项 role="option"。
- * 曾经写成 [role="menu"]，查不到就把「选择器错」误判成「上游不渲染菜单」，
- * 导致映射行长期恒 0（实机取证：同一次点击 [role="menu"] 为 null 而
- * [role="option"] 有 9 项）。
- */
-const UPSTREAM_MENU_SELECTOR = '[data-composer-card] [role="listbox"]'
-/** 弹层里的可选项（MenuView 的每条命令/文件项）。 */
-const UPSTREAM_OPTION_SELECTOR = '[role="option"]'
-/** 等上游菜单出现的轮询间隔与超时（超时后按「没读到」处理，只留三块瓦片）。 */
-const MENU_POLL_INTERVAL_MS = 25
-const MENU_WAIT_TIMEOUT_MS = 3000
 /**
  * 上游隐藏的 multiple file input：**照片 / 本地文件**两块瓦片走它。
  *
  * 拍照**不**走它（issue #1288 第 4 条）：WebView 里 `capture` 属性不被实现，
  * 叠上去只会静默拉起图库 —— 这正是「点拍照却看到相册」的成因。拍照走壳侧原生相机。
+ * 注：上游「+」菜单的选择器/读取层已抽到 composer-commands.ts（与宿主 API 共用）。
  */
 const FILE_INPUT_SELECTOR = 'input[type="file"][multiple]'
-/**
- * 上游编辑器根元素（ComposerContentEditable 渲染的 contenteditable div）。
- *
- * Lexical 把 keydown 挂在这个元素上，关「+」菜单的链路就从这里起（#998）。
- */
-const EDITOR_ROOT_SELECTOR = '[data-composer-input]'
-/** 编辑器根元素缺失时的退化判据（上游不再打 data-composer-input）。 */
-const EDITABLE_SELECTOR = '[contenteditable="true"]'
 
 const BACKDROP_ATTR = 'data-dsh-composer-sheet-backdrop'
 const PANEL_ATTR = 'data-dsh-composer-sheet-panel'
@@ -83,21 +65,6 @@ const STATUS_ATTR = 'data-dsh-composer-sheet-status'
 const LEAVING_ATTR = 'data-dsh-composer-sheet-leaving'
 /** 退场动画时长（规格 140-160ms）。与 CSS 里 dsh-composer-card-out/panel-out 同值。 */
 const EXIT_ANIMATION_MS = 160
-/**
- * 借用上游菜单期间，菜单外层容器上的临时隐藏标记。
- *
- * 为什么必须隐藏（而不是只「读完就关」）：读菜单要跨一次上游提交，实测在这台设备上
- * 从派发 click 到选项出现约 1.2s。这 1.2s 里上游 listbox 是**真的画在屏幕上**的 ——
- * 设备实测它 right=1022.33，而卡片 right=682.33，那一列 role=option 的副标题就露在
- * 卡片右侧外面。用户在开面板的瞬间会看到上游菜单闪一下，正是要消掉的「漏字」现象。
- *
- * 用 visibility: hidden 而不是 display: none / remove()：
- *   - display: none 会让上游的测量与定位拿到 0 尺寸，菜单可能因此改变挂载行为；
- *   - remove() 是别人的 DOM，且我们后面还要在这棵树上按索引取 option 转发 mousedown。
- * visibility: hidden 保留布局与节点身份，只是不可见 —— 合成事件仍能直接派发到节点上。
- */
-const CONCEAL_ATTR = 'data-dsh-composer-sheet-concealed'
-
 /** 竖屏标记（form-marker.ts 维护）。竖屏 sheet 的所有规则与手势都以它为前提。 */
 const MOBILE_FORM_ATTR = 'data-dsh-mobile-form'
 /** 形态：竖屏底部 sheet / 横屏居中卡片。横屏永远 card，新规则一条都不命中。 */
@@ -176,21 +143,6 @@ interface SheetDrag {
   /** 高度已到上限、手势交回列表（此后上滑滚列表）。 */
   handedBack: boolean
 }
-
-/**
- * 附件入口在行列表里的标题（中英两套文案，精确匹配的闭集）。
- *
- * 三块瓦片（拍照 / 照片 / 本地文件）已经覆盖了附件入口，上游「+」菜单里那条
- * 同义的「文件 / file」行是重复的。
- *
- * **必须是精确匹配的闭集，不能用位置或前缀**：
- *   - 按位置（li:first-child / index === 0）会连带隐掉插件插到最前面的项；
- *   - 按前缀（startsWith 文件）会误伤「文件预览」「文件管理」这类真实功能项。
- * 两条都会让用户丢功能，而不是少一条冗余项。负控用例见 composer-sheet.spec.ts。
- */
-const ATTACHMENT_ROW_TITLES: ReadonlySet<string> = new Set([
-  '文件', '本地文件', 'file', 'files', 'local file', 'local files',
-])
 
 type TileKind = 'camera' | 'photo' | 'file'
 
@@ -300,41 +252,7 @@ function tileIcon(kind: TileKind): SVGSVGElement {
   return svg
 }
 
-/** 行副标题：优先取上游自己的 description 节点，没有就空串（不编、不猜）。 */
-function readSubtitle(option: HTMLElement): string {
-  const hint = option.querySelector<HTMLElement>('[class*="itemDescription"]')
-  if (hint !== null) return (hint.textContent ?? '').trim()
-  const alias = option.querySelector<HTMLElement>('[class*="itemAlias"]')
-  if (alias !== null) return (alias.textContent ?? '').trim()
-  return ''
-}
 
-/** 卡片里当前读得到的上游选项（菜单容器不在场时是空表）。 */
-function findOptions(card: Element): HTMLElement[] {
-  const menu = card.querySelector(UPSTREAM_MENU_SELECTOR)
-  if (menu === null) return []
-  return [...menu.querySelectorAll<HTMLElement>(UPSTREAM_OPTION_SELECTOR)]
-}
-
-/**
- * 关掉上游「+」菜单时 Escape 的派发目标。
- *
- * 上游的关闭链挂在**编辑器根元素**上（Lexical 在 contenteditable 上监听 keydown），
- * 而 document.dispatchEvent 的传播路径只有 [document, window]，根本到不了那个元素，
- * 菜单就留在屏幕上（#998）。所以在编辑器根上派发，让它自己冒泡回 document ——
- * 这样两套监听（Lexical 的元素级、MenuView 的 document 级）都能收到。
- *
- * 退化目标是 **card 本身**，这是最后手段而不是等价修法：card 也是 document 的后代，
- * 事件能冒泡到 document 级监听，所以「与旧行为等价、不会让菜单卡死」——
- * 但它**触发不了**挂在上游编辑器根上的元素级监听（Lexical 那一套）。
- * 也就是说退化只保住「菜单还能关」，保不住真正要修的那条链路；
- * 一旦上游改掉 data-composer-input，这条退化路径应当被当成待修的信号。
- * @param card - 上游合成器卡片（菜单与编辑器都挂在它里面）。
- * @returns 派发 Escape 的目标元素。
- */
-function upstreamEscapeTarget(card: Element): Element {
-  return card.querySelector(EDITOR_ROOT_SELECTOR) ?? card.querySelector(EDITABLE_SELECTOR) ?? card
-}
 
 /**
  * 拦截「+」并管理底部 sheet。
@@ -650,49 +568,6 @@ export class ComposerSheet {
   }
 
   /**
-   * 把上游「+」菜单临时藏起来（借用期间），返回还原函数。
-   *
-   * 藏的是菜单的**最外层容器**（有 [data-trigger-menu] 的那层），没有就退到 listbox
-   * 本身：只藏 listbox 时，上游可能还有一个定位用的外壳留在屏幕上。
-   * @param card - 上游合成器卡片（菜单挂在它里面）。
-   * @returns 还原函数；没有菜单可藏时返回空操作。
-   */
-  private concealUpstreamMenu(card: Element): () => void {
-    /** 被我们隐藏过的节点：还原时直接遍历它，不依赖节点是否还挂在 DOM 上。 */
-    const pending = new Set<HTMLElement>()
-    const apply = (): void => {
-      const menu = card.querySelector(UPSTREAM_MENU_SELECTOR)
-      if (menu === null) return
-      const target = menu.closest('[data-trigger-menu]') ?? menu
-      if (!(target instanceof HTMLElement)) return
-      if (target.getAttribute(CONCEAL_ATTR) !== null) return
-      target.setAttribute(CONCEAL_ATTR, '')
-      target.style.setProperty('visibility', 'hidden', 'important')
-      pending.add(target)
-    }
-    apply()
-    // **必须持续盯，不能只在挂上之后藏一次**：菜单是异步提交进 DOM 的，
-    // 等 waitForMenu 轮询到选项再藏，中间那几百毫秒到 1.2s 它已经画在屏幕上了
-    // （实测正是这段窗口让上游副标题露在卡片外）。观察器让它在出现的**第一帧**
-    // 就不可见：MutationObserver 回调在提交后、绘制前同步跑。
-    const observer = new MutationObserver(apply)
-    observer.observe(card, { childList: true, subtree: true })
-    return () => {
-      // **顺序是判据，不是风格**：观察器回调是微任务，会排在本函数之后。
-      // 先 disconnect 再还原，否则那条排队的回调会在还原**之后**再藏一次，
-      // 于是「还原」看似执行了、节点却仍然是 hidden（实测：撤掉还原代码后
-      // 断言照样绿，因为两种写法最终都停在 hidden 上——那条断言当时是假绿）。
-      observer.disconnect()
-      // 用 pending 记录，而不是事后 querySelector：节点可能已被上游卸载（脱 DOM），
-      // querySelector 就找不到它，还原也就漏掉了（那正是「脱离后仍要保持已还原」的情形）。
-      for (const node of pending) {
-        node.removeAttribute(CONCEAL_ATTR)
-        node.style.removeProperty('visibility')
-      }
-      pending.clear()
-    }
-  }
-  /**
    * 播退场动画并真正移除面板。
    *
    * 为什么不用 `animationend` 一个事件了事：动画可能因为元素不可见、
@@ -912,134 +787,36 @@ export class ComposerSheet {
   }
 
   /**
-   * 临时让上游「+」菜单开出来，跑完 run 之后再关掉它。
-   *
-   * 为什么不把菜单留着当数据源：上游 MenuView.tsx:81-92 在 document 捕获阶段监听了
-   * pointerdown，目标既不在菜单里、也不在 composer card 里就自行 onDismiss。我们的 sheet
-   * 挂在 body 上，用户第一次点瓦片/行时上游菜单就会被它自己关掉；那时再去转发，源节点
-   * 已经脱离 DOM，转发静默失效。所以每次读写都重新开一次，用完立刻关。
-   *
-   * 重入闸 replays：开菜单的唯一办法是派发「+」的 click，而这次 click 会再经过本类的
-   * 捕获监听。没有闸就是 onClickCapture -> open -> 派发 click -> onClickCapture 的无限递归
-   * （实测 RangeError: Maximum call stack size exceeded）。
-   *
-   * 上游 onClick 会先 focusDraftEditor 唤起键盘，所以每次开完都补一次 blur —— 配合
-   * inputmode=none，用户看不到键盘。
-   */
-  /**
    * 让上游菜单开出来，等 React 提交完再读，读完关掉。
    *
-   * **必须跨一帧**：React 的 onClick 是委托在 root 上的合成事件，它 setState 之后
-   * 菜单要到下一次提交才会挂进 DOM。派发 click 后立刻 querySelector 永远是 null
-   * （实机复现：菜单能点开、但同一次同步求值里读不到任何 [role=option]）。
-   * 这里用 requestAnimationFrame 等一次提交，再读。
+   * 真正的 DOM 机制（开菜单、等提交、藏菜单、Escape 关闭）在 composer-commands.ts 里，
+   * 与 `window.__dshOverlayHost.commands()` 共用同一份实现（设计 §6.4 要求禁止两份口径）。
+   * 这里只负责本类自己的状态：
+   *   - 重入闸 replaying：合成「+」click 会再次经过本类的捕获监听，不拦住就无限递归；
+   *   - 借用闸 borrowing：借用期间派发的 Escape 只关上游菜单，不能连锁关掉 sheet（#1001）；
+   *   - 代次 generation：借用期间用户可能已经关掉 sheet，收尾就不能再压他此刻的焦点（#999）。
    *
    * @param run - 拿到 option 列表后执行的读取。
    * @param fallback - 菜单始终不出现时的返回值。
    * @returns run 的结果，或 fallback。
    */
   private async withUpstreamMenu<T>(run: (options: HTMLElement[]) => T, fallback: T): Promise<T> {
-    const button = this.addButton ?? document.querySelector<HTMLElement>(ADD_BUTTON_SELECTOR)
-    if (button === null) return fallback
-    const card = button.closest(CARD_SELECTOR)
-    if (card === null) return fallback
-    const openedHere = card.querySelector(UPSTREAM_MENU_SELECTOR) === null
     // 这次借用属于哪一代：借用期间 sheet 可能已经被关掉，收尾就不能再去碰用户的焦点（#999）。
     const generation = this.generation
-    // 借用闸从「派发打开」之前就合上，到**函数真正退出**才断开（#1001）：
-    // 以前复位写在菜单读到之后的 finally 里，菜单没读到时那条早退路径会把它永远留在 true，
-    // 用户此后再按 Escape 都关不掉 sheet。
-    this.borrowing = true
-    // 从**派发打开之前**就开始藏：菜单会在我们不知情的某一帧挂进 DOM，
-    // 事后藏已经晚了一步（那时它已经可见过一次）。观察器在挂载那一帧就把它按下去。
-    const restoreVisibility = this.concealUpstreamMenu(card)
-    try {
-      if (openedHere) {
-        // **先把焦点还给编辑器**：上游 MenuView 绑在 draft editor 的 caret 上，编辑器
-        // 不持焦点时点击「+」只置 aria-expanded、菜单节点不挂载（实机复现：同一按钮，
-        // 带焦点派发 menus=1 opts=9，无焦点派发恒 0 —— sheet 的 open() 恰好总是先 blur）。
-        this.refocusEditor()
-        this.replaying = true
-        try {
-          button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
-        } finally {
-          this.replaying = false
-        }
-        // 等上游把菜单**和选项**提交进 DOM：轮询到选项真的出现（或超时），
-        // 单等一帧不够 —— 实测菜单在这台设备上要过一个宏任务才挂进卡片（#1002）。
-        await this.waitForMenu(card)
-      }
-      const menu = card.querySelector(UPSTREAM_MENU_SELECTOR)
-      const options = menu === null ? [] : [...menu.querySelectorAll<HTMLElement>(UPSTREAM_OPTION_SELECTOR)]
-      try {
-        return run(options)
-      } finally {
-        this.closeUpstreamMenu(card)
-        restoreVisibility()
-      }
-    } finally {
-      // 借完就还：之后用户按 Esc 必须能正常关掉 sheet。
-      this.borrowing = false
-      restoreVisibility()
-      // 上游刚刚把焦点给了编辑器：重新压回去，键盘才不会跟着冒出来。
-      // 只在 sheet 还开着这次借用的那一代时做 —— 用户已经关掉的话，这一下会把他
-      // 此刻正在用的输入框 blur 掉，键盘自己缩回（#999）。
-      if (this.generation === generation) this.blurActiveEditor()
-    }
+    return withUpstreamMenu(run, fallback, {
+      beginBorrow: () => { this.borrowing = true },
+      endBorrow: () => { this.borrowing = false },
+      setReplaying: (active) => { this.replaying = active },
+      afterBorrow: () => {
+        // 上游刚刚把焦点给了编辑器：重新压回去，键盘才不会跟着冒出来。
+        // 只在 sheet 还开着这次借用的那一代时做 —— 用户已经关掉的话，这一下会把他
+        // 此刻正在用的输入框 blur 掉，键盘自己缩回（#999）。
+        if (this.generation === generation) this.blurActiveEditor()
+      },
+    }, this.addButton)
   }
 
-  /**
-   * 用上游自己的关法收起「+」菜单（不直接 remove 别人的 DOM）。
-   *
-   * Escape 必须派发到编辑器根元素：document.dispatchEvent 的传播路径只有
-   * [document, window]，到不了 Lexical 挂在编辑器上的 keydown，菜单不卸载（#998）。
-   *
-   * **不区分菜单是谁开的**：用户直接点「+」时菜单由上游自己打开（openedHere=false），
-   * 旧实现据此直接 return，结果上游 listbox 一直浮在页面上 —— 卡片开着的时候，
-   * 它那一列 role=option 的副标题就露在卡片右侧外面（2026-10-30 设备实测：
-   * listbox left=318 right=1022，卡片 right=682）。菜单留着没有正当用途：
-   * 卡片已经把同样的项映射成自己的行，两个列表同时在屏上只会互相遮挡。
-   * @param card - 上游合成器卡片。
-   */
-  private closeUpstreamMenu(card: Element): void {
-    const menu = card.querySelector(UPSTREAM_MENU_SELECTOR)
-    // 已经关掉了（用户自己按了 Esc / 点掉了）：不再空派发。
-    if (menu === null || !menu.isConnected) return
-    upstreamEscapeTarget(card).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
-  }
 
-  /**
-   * 等一次渲染提交。
-   *
-   * 先排一个 rAF（拿到 Commit 之后的时机），再用一个宏任务兜底：
-   * 某些 WebView 在页面不可见时不给 rAF 回调，纯 rAF 会让整个 sheet 挂住。
-   * @returns 提交时机已过。
-   */
-  /**
-   * 等上游菜单挂进卡片。
-   *
-   * 逐帧轮询而不是固定延时：菜单到达时机取决于上游的提交与（可能的）动画帧，
-   * 固定等待在快机上浪费、在慢机上不够。超时后照常返回，由调用方按「没读到」
-   * 处理 —— 映射是增强，不是面板的前提。
-   * @param card - 上游卡片（菜单挂在它里面）。
-   * @returns 菜单已出现（或已超时）。
-   */
-  private waitForMenu(card: Element): Promise<void> {
-    return new Promise<void>((resolve) => {
-      let waited = 0
-      const step = (): void => {
-        // 判据必须是**选项**，不能只看容器：上游常先提交容器、下一帧才填 [role=option]，
-        // 只等容器会在这两帧之间 resolve，读到的是一张空表（#1002）。
-        if (findOptions(card).length > 0 || waited >= MENU_WAIT_TIMEOUT_MS) {
-          resolve()
-          return
-        }
-        waited += MENU_POLL_INTERVAL_MS
-        setTimeout(step, MENU_POLL_INTERVAL_MS)
-      }
-      step()
-    })
-  }
 
   /** 读上游菜单的项（打开-读-关），失败时返回空（只留三块瓦片）。 */
   private readUpstreamRows(): Promise<MappedRow[]> {
@@ -1048,7 +825,7 @@ export class ComposerSheet {
       const label = (option.getAttribute('aria-label') ?? '').trim()
       return {
         title: name !== '' ? name : label,
-        subtitle: readSubtitle(option),
+        subtitle: readMenuOptionSubtitle(option),
         icon: option.querySelector('svg'),
         index,
       }
@@ -1078,17 +855,7 @@ export class ComposerSheet {
     if (active instanceof HTMLElement && active !== document.body) active.blur()
   }
 
-  /**
-   * 把焦点还上游编辑器（读菜单借用期间用，键盘由 inputmode=none 压住）。
-   *
-   * 上游 MenuView 的打开依赖编辑器持有焦点（绑在 draft editor 的 caret 上），
-   * 没有焦点时点「+」只翻转 aria-expanded，菜单节点不会挂载。
-   */
-  private refocusEditor(): void {
-    const card = this.addButton?.closest(CARD_SELECTOR) ?? document.querySelector(CARD_SELECTOR)
-    const editor = card?.querySelector<HTMLElement>('[data-composer-input]') ?? null
-    if (editor !== null && !editor.contains(document.activeElement)) editor.focus()
-  }
+
 
   /**
    * 照片 / 本地文件：交给上游那个 hidden multiple file input（行为不变）。

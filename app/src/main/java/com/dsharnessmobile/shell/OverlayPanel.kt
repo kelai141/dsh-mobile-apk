@@ -196,7 +196,11 @@ class OverlayPanel(private val svc: OverlayService) {
   /** 当前会话（未选目标 = 全部）的第一条待处理；审批优先。 */
   private fun currentPending(): Pair<String, Any>? {
     val sid = svc.activeSessionId
-    val ok = { s: String -> sid.isEmpty() || s == sid }
+    val agent = svc.currentAgentId
+    // P0-1：agentId 与 sessionId 是两个域。旧实现直接拿 agentId 跟 activeSessionId 比，
+    // 在「agentId 被写进 activeSessionId」的旧缺陷下碰巧成立；域切分修好之后必须两个都比，
+    // 否则待答卡会在目标会话确定的那一刻整体消失（用户视角 = 审批/提问提示丢了）。
+    val ok = { s: String -> sid.isEmpty() || s == sid || (agent.isNotEmpty() && s == agent) }
     pendingApprovals.values.firstOrNull { ok(it.agentId) }?.let { return "approval" to it }
     pendingQuestions.values.firstOrNull { ok(it.agentId) }?.let { return "question" to it }
     return null
@@ -211,6 +215,9 @@ class OverlayPanel(private val svc: OverlayService) {
       approvalArmedId = null
     }
     updateBallOnly()
+    // v2 的卡片也要显示待答 chip：数据真源仍在这里（mux 事件只由 MuxClient 直连接收），
+    // 两个 UI 都从这一份 map 派生，不各自维护一份。
+    svc.v2?.onPendingChanged()
   }
 
   /** 展开合体圆角矩形（上区状态 + 下区输入，radius 30dp）。 */
@@ -1081,6 +1088,17 @@ class OverlayPanel(private val svc: OverlayService) {
         onPendingChanged()
       } else svc.flashStatus(t("应答失败", "Failed to answer"))
     }
+  }
+
+  /**
+   * v2 卡片上的审批按钮入口（允许一次 / 拒绝）。
+   *
+   * 复用 [respondApproval]：受理语义（HTTP 200 ≠ 已处理，15s 兜底）、乐观忙态、状态行提示、
+   * 完成后移除卡片的时机全在那一处；v2 只负责把「点了哪张卡的哪个按钮」翻译成 outcome。
+   */
+  internal fun respondApprovalFromUi(eventId: String, allow: Boolean) {
+    val a = pendingApprovals[eventId] ?: return
+    respondApproval(a, if (allow) "allowed-once" else "rejected")
   }
 
   /** 提问作答：answers 按 questions 原序配对（协议硬约束）；单选 custom 与 selected 互斥。

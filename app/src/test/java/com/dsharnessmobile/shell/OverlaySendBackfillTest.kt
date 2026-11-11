@@ -76,9 +76,26 @@ class OverlaySendBackfillTest {
   }
 
   @Test
-  fun sendUsesSessionIdResolvedAtSendTime() {
+  fun requestSendDelegatesToTheSharedTextSender() {
+    // 2026-11-12（悬浮 v2）：发送实现下沉到 sendTextFromOverlay(text)，因为 v2 输入区不在
+    // OverlayPanel 里（panel.inputBox 为 null）。旧面板入口必须**只剩委托**，否则两条路径
+    // 会各自演化成两份真源（#1042/#1043 的修法只挂在其中一条上就是活缺陷）。
     val code = codeOnly(source("OverlayService.kt"))
     val body = memberBody(code, "internal fun requestSend()")
+    assertTrue(
+      "requestSend 必须委托给 sendTextFromOverlay：\n" + body,
+      body.contains("sendTextFromOverlay(panel.inputBox?.text?.toString()?.trim().orEmpty())"),
+    )
+    assertFalse(
+      "requestSend 不得再自带一份发送逻辑（会与 sendTextFromOverlay 分叉）：\n" + body,
+      body.contains("postRpc(\"session/prompt\""),
+    )
+  }
+
+  @Test
+  fun sendUsesSessionIdResolvedAtSendTime() {
+    val code = codeOnly(source("OverlayService.kt"))
+    val body = memberBody(code, "internal fun sendTextFromOverlay(")
     // 1) 旧形态不得在场：把 activeSessionId 直接塞进请求发起前构建的 payload 就是 #1042 的本体。
     assertFalse(
       "旧形态仍在（payload 在 create 前就把 activeSessionId 写死）：\n" + body,
@@ -110,7 +127,7 @@ class OverlaySendBackfillTest {
   @Test
   fun requestIdIsFixedOncePerSendSoTheRetryIsIdempotent() {
     val code = codeOnly(source("OverlayService.kt"))
-    val body = memberBody(code, "internal fun requestSend()")
+    val body = memberBody(code, "internal fun sendTextFromOverlay(")
     // requestId 是幂等键：同一次用户发送必须复用同一个值。若「把 payload 构建挪到发送时」
     // 顺手在 Runnable 里再生成一次，create 与 prompt 就成了两次不同请求（重试不再幂等）。
     assertEquals(
@@ -176,7 +193,7 @@ class OverlaySendBackfillTest {
   @Test
   fun failureBranchesAskThePlanInsteadOfBackfillingBlindly() {
     val code = codeOnly(source("OverlayService.kt"))
-    val body = memberBody(code, "internal fun requestSend()")
+    val body = memberBody(code, "internal fun sendTextFromOverlay(")
     // 旧实现：三处失败分支无条件 setText(text)。
     assertFalse(
       "仍有绕过判据的无条件回填：\n" + body,

@@ -96,6 +96,9 @@ class OverlayLiveFeed(private val svc: OverlayService) {
       for (line in lines) {
         try {
           val j = JSONObject(line)
+          // v2 聚合层入口：先转发原始事件（含旧实现不消费的 k=think / k=text），
+          // 再走下面的旧消费逻辑——两套 UI 各自决定怎么用，互不干扰（开关只允许一套窗口存在）。
+          svc.liveSink?.invoke(liveEventOf(j))
           when (j.optString("k")) {
             // 注：turn_start 分支删除（bridge 0.1.4 起退役该行，lib 里仅剩注释——#178 取证确认死代码）
             "tool_call" -> {
@@ -181,6 +184,27 @@ class OverlayLiveFeed(private val svc: OverlayService) {
 
   /** 工具参数 JSON → 一行概览（bash=命令 / search=查询 / read·edit=路径；兜底取首个字符串值）。 */
   private fun toolSummary(argsJson: String): String = toolSummaryOf(argsJson)
+
+  /**
+   * live 行 → [LiveEvent]（**顶层纯映射**，字段全部来自既有行，不做业务判断）。
+   *
+   * 为什么单独抽出来：v2 聚合层要按 kind 分流，而「哪种行带哪个字段」是线格式知识，
+   * 只应存在于消费侧这一处；散进多个 when 分支就必然漂移（旧实现里 turn_end 的 ok/kind
+   * 双读就是一次真实漂移的修法）。
+   */
+  private fun liveEventOf(j: JSONObject): LiveEvent {
+    val kind = j.optString("k")
+    return LiveEvent(
+      kind = kind,
+      sessionId = j.optString("s", ""),
+      callId = j.optString("callId", ""),
+      name = j.optString("name", ""),
+      summary = toolSummary(j.optString("args", "")),
+      text = if (kind == LiveEvent.KIND_TEXT || kind == LiveEvent.KIND_THINK) j.optString("sum", "") else "",
+      turnKind = j.optString("kind", ""),
+      atMs = j.optLong("t", System.currentTimeMillis()),
+    )
+  }
 }
 
 /**

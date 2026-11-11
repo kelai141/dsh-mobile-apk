@@ -153,6 +153,48 @@ export function summarize(text: unknown, max = 120): string {
 }
 
 /**
+ * 从 `assistant/message` 的 content 块数组里取**思考文本**（0.14.1 之后新需求：卡片思考行）。
+ *
+ * 为什么必须按类型过滤而不是按字段取值：上游 `TextBlock { type:'text'; text }` 与
+ * `ReasoningBlock { type:'reasoning'; text }` **共用 `text` 字段名**
+ * （dsh/packages/llm/llm/src/types.ts:54-64，判据来源同 [visibleText]）。
+ * 若按 `text` 取值，回答块会被当成思考；若不过滤 type，思考会被当成回答 —— 两个方向都错。
+ *
+ * 一块消息里可能有多段 reasoning；取**最后一个非空块**作为「最新一版」（同轮内思考是叠加演进的，
+ * 用户想看的是当前这一版）。没有任何带 type 的块时返回空串 —— 未知 provider 形状下
+ * **不猜**哪一段是思考（[visibleText] 的兼容分支只用于「宁可显示正文也不要什么都不显示」，
+ * 思考行不需要这种兜底：猜错的思考行比没有更糟）。
+ */
+export function reasoningText(content: unknown): string {
+  if (!Array.isArray(content)) return ''
+  const blocks = content.filter(
+    (b): b is { type?: unknown; text?: unknown } => b !== null && typeof b === 'object',
+  )
+  const typed = blocks.filter((b) => typeof b.type === 'string')
+  for (let i = typed.length - 1; i >= 0; i -= 1) {
+    const block = typed[i]
+    if (block.type !== 'reasoning') continue
+    const text = typeof block.text === 'string' ? block.text.trim() : ''
+    if (text !== '') return text
+  }
+  return ''
+}
+
+/**
+ * 思考行摘要：**首行** + 单行压缩 + 硬截断（默认 120 字，与设计 §5.3 的 `thinkingLine` 同口径）。
+ *
+ * 为什么先取首行再压缩：思考正文里通常有多段；卡片只显示单行，取「第一行的开头」才能让
+ * 用户看出这一版思路的起点。反过来先压成一行再取前面 120 字，会把第二段的内容混进来，
+ * 变成一句读不通的拼接。截断走仓内既有 [summarize]（截断必带省略号），不另造一套。
+ */
+export function reasoningSummary(content: unknown, max = 120): string {
+  const text = reasoningText(content)
+  if (text === '') return ''
+  const firstLine = text.split(/\r?\n/, 1)[0] ?? ''
+  return summarize(firstLine, max)
+}
+
+/**
  * 汇报正文（可滚动区）的上限：8 KiB。
  *
  * 为什么需要正文而不只是摘要（0.14.1 D6，设备实报「长按查看详情…无法滚动查看输出」）：

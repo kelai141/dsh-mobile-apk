@@ -965,6 +965,23 @@ class MainActivity : ComponentActivity() {
         }
       }
     }
+    // v2 页面宿主 API 求值器（design.md §6.2 N3/N4）：原生按需单次求值 window.__dshOverlayHost.*，
+    // 取会话/工作区/命令真源。只在主线程、只在页面就绪时求值；未就绪回 null，调用方走降级分支。
+    OverlayPageHost.evaluator = { expr, callback ->
+      runOnUiThread {
+        try {
+          if (pageUiActive && webViewReady) {
+            webView.evaluateJavascript(expr) { raw -> callback(raw) }
+          } else {
+            callback(null)
+          }
+        } catch (_: Exception) {
+          callback(null)
+        }
+      }
+    }
+    // 本体回到前台：悬浮入口隐藏（服务与后台 Agent 不停，overlay v2 的 onHostForeground 收口）。
+    OverlayService.instance?.onHostForegroundChanged(true)
     // 0.13.2 W7 + ST-02：悬浮球开关已开且权限在场时补启。权限缺失时 OverlayController 把偏好
     // 回落 false，本行随即短路——不再每次回前台弹系统页。
     // S2-17：另外结算「用户已经表达过开启意图、刚去系统页授了权」这一笔——旧实现里这条路径
@@ -1064,6 +1081,8 @@ class MainActivity : ComponentActivity() {
   }
 
   override fun onPause() {
+    // 本体退到后台：悬浮入口恢复（v2 只动窗口，服务与 Agent 不受影响）。
+    OverlayService.instance?.onHostForegroundChanged(false)
     // 退后台不继续解码视频（省电、避免后台播放）；回前台且仍在等引擎时续播。
     splashOverlay?.pause()
     pageRecovery.pause()
@@ -1145,6 +1164,8 @@ class MainActivity : ComponentActivity() {
     if (::webView.isInitialized && webViewRef === webView) webViewRef = null
     // 悬浮球避让帧消费者清除（Service 侧持有引用，避免 Activity 泄漏）
     OverlayService.frameConsumer = null
+    // v2 页面宿主求值器同理：持着本 Activity 的 WebView，不清就是一条泄漏引用。
+    OverlayPageHost.evaluator = null
     dirPickerController.cancelTtl()
     guideRenderer.cancelPulse()
     // 兜底释放：Activity 销毁时清掉可能仍持有的屏幕常亮锁。

@@ -120,6 +120,14 @@ import type { NativeBrowserControlsInjected } from './mobile/native-browser-adap
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { IncomingDraftConsumer } from './mobile/incoming-draft.ts'
 import { createIncomingDraftRuntime } from './mobile/incoming-runtime.ts'
+import {
+  OverlayHost,
+  installOverlayHost,
+  type OverlayConversationFace,
+  type OverlaySessionsFace,
+  type OverlayUiWorkspaceFace,
+  type OverlayWorkspacesFace,
+} from './mobile/overlay-host.ts'
 
 // Contract exports only (export-convergence rule): the plugin surface is
 // `apply` and `inject`; every component, marker, and helper stays internal.
@@ -129,6 +137,8 @@ declare global {
   interface Window {
     /** Android shell session-export outcome bridge (success / failure). */
     __dshExportResult?: (payload: ExportResultPayload) => void
+    /** Android overlay host API (version 1): every method returns a JSON string. */
+    __dshOverlayHost?: Record<string, unknown>
   }
 }
 
@@ -576,6 +586,20 @@ export function apply(ctx: ClientContext): void {
     marker.attach()
     return () => { marker.detach() }
   }, 'ui-responsive: session id marker for tool-row file links')
+
+  // 原生悬浮层读取页面状态的宿主 API（设计 §6.2 N3）。所有方法同步返回 JSON 字符串，
+  // 异常一律折成 {ok:false,error}——原生用 evaluateJavascript 读，抛异常会拿到空值，
+  // 那样它分不清「页面没准备好」和「页面没接线」。
+  ctx.effect(() => {
+    const host = new OverlayHost({
+      // 服务在真正调用时才解析（cordis 的 apply 顺序不受 inject 声明约束）。
+      sessions: () => ctx.sessions as unknown as OverlaySessionsFace,
+      workspaces: () => ctx.get('workspaces') as unknown as OverlayWorkspacesFace,
+      uiWorkspace: () => ctx.get('uiWorkspace') as unknown as OverlayUiWorkspaceFace,
+      conversation: () => ctx.conversation as unknown as OverlayConversationFace,
+    })
+    return installOverlayHost(host)
+  }, 'ui-responsive: overlay host API (window.__dshOverlayHost)')
 
   ctx.inject(['locale', 'sidebarRight', 'sidebarRightTabs'], scope => {
     scope.effect(() => retainDockIdentity(scope.sidebarRight), 'ui-responsive: stable child identity across docking entries')

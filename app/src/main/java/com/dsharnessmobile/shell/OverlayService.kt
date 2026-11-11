@@ -97,6 +97,23 @@ class OverlayService : Service() {
   internal var currentToolSummary = ""           // 工具参数概览（args 提炼一行）
   internal var pendingKind = ""                  // 待用户处理态：question / approval / 空（updateBallOnly 派生）
 
+  // ── 身份域切分（P0-1） ────────────────────────────────────────────────
+  // 旧实现把 api-session/status 的 **agentId** 写进 activeSessionId（会话域），而源码注释与
+  // docs/AGENTS/EXECUTION-MAP.md:292 都写明两者不是一回事：页面/会话列表给出真实 sessionId 之后，
+  // 那个错误映射会把「发送」导向别的会话、让待答卡与完成位永不出现。现在两个域各一个字段，
+  // **禁止互相赋值**：
+  //  - currentAgentId：只服务忙态/待答归属匹配（来源 = $events api-session/status）；
+  //  - currentSessionId：只服务 RPC 的 sessionId 字段（来源 = 页面宿主 API / session/list）；
+  //  - activeSessionId 保留为「本次发送目标」（页面权威写入或用户在选择器里显式选择）。
+  internal var currentAgentId = ""
+  internal var currentSessionId = ""
+  /** v2（entry_ui_v2）窗口编排层；开关关闭时为 null，一切走旧三窗实现。 */
+  internal var v2: OverlayV2? = null
+  /** 新会话目标工作区（v2 工作区药丸写入；null = 沿用 tempWorkspaceId()）。 */
+  internal var targetWorkspaceIdOverride: String? = null
+  /** live 事件转发口（v2 注册；null = 只有旧消费逻辑）。 */
+  internal var liveSink: ((LiveEvent) -> Unit)? = null
+
   // ── 协作类（同包顶层类，构造注入服务引用；均不在构造期解引用服务状态） ──
   private val halo = OverlayHalo(this)
   internal val panel = OverlayPanel(this)
@@ -153,6 +170,8 @@ class OverlayService : Service() {
   /** 明暗切换 + 旋转/分辨率变化：换肤，并重算窗口坐标（治旋转/分屏后球出屏消失）。 */
   override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
     super.onConfigurationChanged(newConfig)
+    // v2：转屏/分屏/折叠后所有 v2 窗口按新几何重算（旧实现只重定位球与面板，卡片/药丸/输入不会动）。
+    v2?.onConfigurationChanged()
     if (expanded) panel.applyThemeColors()
     // P5-3：空闲态光环按主题取色，而 haloView 的 drawable 是手工构造的（不随 uiMode 自动更新）
     // ——不在此重刷就会出现「切到深色后空闲光环仍是浅色主题的灰」。
@@ -188,7 +207,13 @@ class OverlayService : Service() {
     super.onCreate()
     instance = this
     wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-    buildRoot()
+    // 窗口集合二选一：开关开 = v2 接管（入口/卡片/药丸/输入区），关 = 旧三窗（回滚第一手段）。
+    // 两套窗口不得同时存在：同屏 overlay 窗口数直接决定残窗风险（implementation-plan §14）。
+    if (OverlayV2.enabled(this)) {
+      v2 = OverlayV2(this).also { it.start() }
+    } else {
+      buildRoot()
+    }
     live.startWatcher()
     probeEngine()
     scheduleProbe()
@@ -231,6 +256,9 @@ class OverlayService : Service() {
     halo.stopMotionWatch()
     panel.stopMotionWatch()
     live.stopWatcher()
+    // v2 窗口必须逐槽收口（入口/卡片/药丸/输入区共 4 个窗口；漏一个就是「服务没了、屏上还留着窗」）。
+    v2?.destroy()
+    v2 = null
     panel.destroy()
     // 块H-A2：报告栏是独立顶层窗口，必须在此收口（纪律同 panel.closePicker/unitView）。
     report.hideReport()
@@ -379,7 +407,15 @@ class OverlayService : Service() {
     positionPanel()
     panel.refreshSessionPicker()
     unit.visibility = View.VISIBLE
-    try { wm.addView(unit, pp) } catch (_: Exception) {}
+    // P0-2：addView 失败必须回执 + 回滚 expanded——旧实现把异常吞掉，而 expanded 已经是 true，
+    // 结果就是「点球没反应」且后续所有状态机都以为面板开着。
+    if (!addOverlayWindow(unit, pp)) {
+      expanded = false
+      panelParams = null
+      unit.visibility = View.GONE
+      flashStatus(t("面板打开失败，请检查悬浮窗权限", "Could not open the panel; check overlay permission"))
+      return
+    }
     unit.post { positionPanel() }   // 首帧拿到真实宽高后再精确对位一次
     unit.alpha = 0f
     unit.animate().alpha(1f).setDuration(200).start()
@@ -447,6 +483,11 @@ class OverlayService : Service() {
    */
   internal fun hideBall() {
     if (hidden) return
+    // v2：入口的隐藏/召回由 v2 自己收口（v1 的球/光环窗口在 v2 下根本不存在）。
+    if (v2 != null) {
+      v2?.hideEntry()
+      return
+    }
     val p = rootParams
     hidePanel()
     hidden = true
@@ -468,6 +509,10 @@ class OverlayService : Service() {
    */
   internal fun recallBall() {
     if (!hidden) return
+    if (v2 != null) {
+      v2?.restoreEntry()
+      return
+    }
     hidden = false
     val spot = recall.ballPlacementForRecall(ballSizeDp, edgeMarginPx)
     recall.hide()
@@ -606,15 +651,13 @@ class OverlayService : Service() {
    * 会话感知与 live 流一致：无目标会话=全部接受，有目标=仅该会话。
    */
   internal fun applyAgentStatus(agentId: String, running: Boolean) {
-    // 0.13.5：未钉住目标时**自动跟踪正在工作的会话**（用户诉求：悬浮球要跟得上别的对话）。
-    // 钉住 = 用户在选择器里显式选过；面板关闭时解除钉住，下次展开重新跟随。
-    if (running && !userPinnedSession && agentId.isNotEmpty() && agentId != activeSessionId) {
-      activeSessionId = agentId
-      // 块H-A1（详档 §3.2 复位时机）：目标会话已切换 → 清掉归属旧会话的完成位/文案。
-      onTargetSessionChanged(agentId)
-      if (expanded) panel.refreshSessionPicker()
-    }
-    val targeted = activeSessionId.isEmpty() || agentId == activeSessionId
+    // P0-1：agentId 只进 agent 域，**不再写 activeSessionId**（旧代码把两者当同一个东西；
+    // 评审依据见 docs/AGENTS/EXECUTION-MAP.md:292 与 investigation.md §4 的缺陷表）。
+    if (agentId.isNotEmpty()) currentAgentId = agentId
+    v2?.onAgentStatus(agentId, running)
+    // 忙态归属：单引擎模型下 agent 事件就是本机唯一在跑的对话；会话域已知时要求能对上，
+    // 避免别的会话陈旧行把状态点亮后卡死（#2 的原始诉求）。
+    val targeted = activeSessionId.isEmpty() || agentId == activeSessionId || agentId == currentAgentId
     // 0.13.8 G1-5（缺陷 B-5）：pending 清理与「渲染谁」解耦——running=false 对该 agentId
     // 无条件清 pending（否则目标一换，过期卡片永生）；targeted 只影响下面的忙态渲染。
     if (!running) {
@@ -674,6 +717,7 @@ class OverlayService : Service() {
         if (optimisticBusyExpired() && expanded) updateBallOnly()
         // 必须走 deriveHalo()：此 tick 每 10s 一次，自带判定会漏 PENDING 把待答光环盖回白色
         setHalo(deriveHalo())
+        v2?.onEngineRunning(running)
         if (expanded && !running) {
           // 块H-A1：完成态分支在 updateBallOnly 的分支链里**优先于** else 常态分支（详档 §5.1），
           // 而本处是绕过分支链的直接赋值——两者必须同口径，否则完成文案会被每 10s 的探活
@@ -695,7 +739,9 @@ class OverlayService : Service() {
     probeHandle?.let { main.removeCallbacks(it) }
     probeHandle = Runnable {
       probeEngine()
-      if (rootView != null) main.postDelayed(probeHandle!!, 10_000)
+      // 探活常驻条件：旧实现看 rootView（球窗）；v2 没有 v1 球窗，改看「任一套 UI 在跑」。
+      // 漏掉这一条会让 v2 下的探活只跑一次、此后引擎状态永不更新（10s tick 断链）。
+      if (rootView != null || v2 != null) main.postDelayed(probeHandle!!, 10_000)
     }
     main.postDelayed(probeHandle!!, 10_000)
   }
@@ -760,10 +806,21 @@ class OverlayService : Service() {
 
   /** 发送/插话：steer（工作中打断当前轮）/ queue（空闲新轮次）；目标会话 = 选择器当前项（空 = 新会话自动 create）。 */
   internal fun requestSend() {
-    val text = panel.inputBox?.text?.toString()?.trim() ?: return
+    sendTextFromOverlay(panel.inputBox?.text?.toString()?.trim().orEmpty())
+  }
+
+  /**
+   * 发送一条文本（旧面板输入框与 v2 输入区共用的唯一发送实现）。
+   *
+   * 为什么把文本作为参数：v2 的输入区不在 OverlayPanel 里（panel.inputBox 为 null），
+   * 发送链路必须只依赖「文本 + 当前目标会话」；否则就要给 v2 复制一份两百行发送逻辑，
+   * 那正是两份真源的开始（#1042 幂等键 / #1043 失败回填两条修法都挂在同一条链上）。
+   */
+  internal fun sendTextFromOverlay(text: String) {
     if (text.isEmpty()) return
     if (!engineRunning) { flashStatus(t("引擎离线", "Engine offline")); return }
-    panel.inputBox?.setText("")
+    // 只在输入框内容确实还是这次要发的文本时才清空（v2 的输入区不在这里，这一支自然不执行）。
+    if (panel.inputBox?.text?.toString()?.trim() == text) panel.inputBox?.setText("")
     val steer = sessionBusy   // 发送前的忙态决定模式与提示语（成功回调里已被乐观置忙覆盖）
     // #1042：requestId 是**幂等键**，一次用户发送只生成一次，create 与随后的 prompt 复用同一个。
     // 所以它必须留在这里、在 send 之外定好——挪进 send 里"顺便"再生成一次，就变成两次发送语义：
@@ -797,7 +854,8 @@ class OverlayService : Service() {
       // 目标=「新会话」：先 create 再 prompt（用户拍板项：自动建会话为默认）。
       // 0.13.5：显式带 workspaceId=临时工作区（否则新会话落「未分组」，用户实测点名）。
       val createReq = JSONObject()
-      tempWorkspaceId()?.let { createReq.put("workspaceId", it) }
+      // v2 工作区药丸选定的目标工作区优先（语义 = 新会话落在这个工作区；design.md §6.3）。
+      (targetWorkspaceIdOverride ?: tempWorkspaceId())?.let { createReq.put("workspaceId", it) }
       postRpc("session/create", JSONObject().put("request", createReq)) { code, body ->
         if (code == 200) {
           val sid = extractSessionId(body)
@@ -876,6 +934,16 @@ class OverlayService : Service() {
   private fun t(zh: String, en: String): String = UiText.t(this, zh, en)
 
   internal fun flashStatus(msg: String) {
+    // v2 没有旧面板状态行：状态提示改走 Toast（卡片/输入区都可能不可见，Toast 总是可见）。
+    if (v2 != null) {
+      main.post {
+        try {
+          android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show()
+        } catch (_: Throwable) {
+        }
+      }
+      return
+    }
     main.post {
       val st = panel.statusText ?: return@post
       if (expanded) {
@@ -950,6 +1018,94 @@ class OverlayService : Service() {
   internal fun renderPanelOnly() {
     if (!expanded) return
     updateBallOnly()
+  }
+
+  /**
+   * 统一 addView 包装（P0-2）：失败记日志并返回 false，由调用方回滚自己的状态。
+   *
+   * 旧实现在面板与球窗上各写了一遍 `try { wm.addView(...) } catch (_: Exception) {}`：
+   * 异常被吞掉而状态已经前进，用户看到的是「点了没反应」，日志里什么都没有。
+   * v2 的窗口全部经过 OverlayWindows（同一个纪律），这里补上旧路径的同款回执。
+   */
+  internal fun addOverlayWindow(view: View, params: WindowManager.LayoutParams): Boolean = try {
+    wm.addView(view, params)
+    true
+  } catch (t: Throwable) {
+    LogCollector.log("dsh-overlay", "addWindow failed: " + t.javaClass.simpleName + " " + (t.message ?: ""))
+    false
+  }
+
+  /**
+   * 本体（MainActivity）前台态变化：v2 入口随之隐藏/恢复，服务与后台 Agent 一点不受影响（R3）。
+   * 为什么入口必须消失：本体在前台时用户就在看主界面，悬浮入口是纯遮挡，而且会挡住标题栏按钮。
+   */
+  internal fun onHostForegroundChanged(foreground: Boolean) {
+    v2?.onHostForeground(foreground)
+  }
+
+  /** 页面宿主给出的**权威**会话 id（P0-1：只进会话域，绝不与 agentId 互写）。 */
+  internal fun adoptPageSession(sessionId: String) {
+    val sid = sessionId.trim()
+    if (sid.isEmpty()) return
+    currentSessionId = sid
+    if (sid == activeSessionId) return
+    activeSessionId = sid
+    userPinnedSession = false
+    onTargetSessionChanged(sid)
+    if (expanded) panel.refreshSessionPicker()
+    v2?.onSessionChanged()
+  }
+
+  /** 用户在 v2 会话列表里显式选择目标会话（页面不可用时的降级路径）。 */
+  internal fun setTargetSession(sessionId: String) {
+    val sid = sessionId.trim()
+    if (sid.isEmpty()) return
+    currentSessionId = sid
+    activeSessionId = sid
+    userPinnedSession = true
+    onTargetSessionChanged(sid)
+    if (expanded) panel.refreshSessionPicker()
+    v2?.onSessionChanged()
+  }
+
+  /**
+   * v2 卡片上的「回答」入口：把用户带到既有的提问/审批卡片。
+   *
+   * 为什么复用旧面板：提问的选项语义（单选/多选/custom 文本/多问分页/跳过）已经在 OverlayPanel
+   * 里完整实现并有一整套单测（OverlayPendingCardTest）；在 v2 里重写一套只会得到第二份真源，
+   * 而「答错一次工具就会被拒」的代价远高于复用一张老卡片。面板此时没有球可依附（v2 没有球窗），
+   * 因此按屏幕居中摆放；收起仍走既有 hidePanel()。
+   */
+  internal fun showPendingPanelFromOverlay() {
+    if (expanded) return
+    if (panel.unitView == null) panel.buildUnit()
+    val unit = panel.unitView ?: return
+    val dm = resources.displayMetrics
+    val width = panelWindowWidth()
+    val pp = WindowManager.LayoutParams(
+      width, ViewGroup.LayoutParams.WRAP_CONTENT,
+      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+      WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+      PixelFormat.TRANSLUCENT,
+    ).apply {
+      gravity = Gravity.TOP or Gravity.START
+      softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN
+      x = ((dm.widthPixels - width) / 2).coerceAtLeast(0)
+      y = (dm.heightPixels / 4)
+    }
+    panelParams = pp
+    expanded = true
+    completion.consume()
+    unit.visibility = View.VISIBLE
+    if (!addOverlayWindow(unit, pp)) {
+      expanded = false
+      panelParams = null
+      unit.visibility = View.GONE
+      flashStatus(t("无法打开作答卡片", "Could not open the answer card"))
+      return
+    }
+    panel.updateBallOnly()
+    v2?.onDataChanged()
   }
 
   /** 页面避让帧。0.13.2「互吞/挤开」修复：不再向 body 注入 paddingRight/Bottom——
