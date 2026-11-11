@@ -113,9 +113,19 @@ export function judgeSample(observation) {
   const row = rows === null ? { found: false, enabled: null, phase: null, entryId: null } : pickInstalledRow(rows, MODULE_NAME)
   const functional = judgeIdentity(probe)
 
+  // 两种「拿不到清单」必须分开：
+  //  - 页面根本没连上（transport 层失败）⇒ 未验，什么都没测到；
+  //  - 页面连上了但 RPC 没回 200 ⇒ 也是未验，但原因不同，排查方向不同。
+  // 混在一起会让人把「没测到」读成「插件没装/没挂载」——本项目已因此误判过两次。
+  const transport = observation?.transport ?? null
   const layers = {
     component: rows === null
-      ? { verdict: 'INCONCLUSIVE', detail: '取不到组件清单' }
+      ? {
+        verdict: 'INCONCLUSIVE',
+        detail: transport
+          ? '未验（探测链路失败，不是插件问题）：' + transport
+          : '未验（组件清单 RPC 未返回 200，不是插件问题）',
+      }
       : row.found
         ? (row.enabled === true && row.phase === 'active'
           ? { verdict: 'PASS', detail: 'entryId=' + row.entryId + ' enabled=true fiberPhase=active' }
@@ -207,6 +217,13 @@ const selfTest = () => {
   ok('负控：插件被禁用判红', judgeSample({ rows: [{ entryId: 'dsh-task-ledger', moduleName: 'dsh-task-ledger', enabled: false, fiberPhase: 'active' }], probe: good }).verdict === 'FAIL')
   ok('负控：组件在但端点 404 判红', judgeSample({ rows: rowsOk, probe: { status: 404, body: 'x', error: null } }).verdict === 'FAIL')
   ok('未验：拿不到组件清单不得当通过', judgeSample({ rows: null, probe: good }).verdict === 'INCONCLUSIVE')
+  // 探测链路失败与「清单里没有该插件」必须给出不同的说明，否则会被读成「插件没挂载」。
+  const t1 = judgeSample({ rows: null, probe: null, transport: 'CDP 没有已加载的本地引擎页面' })
+  ok('未验：探测链路失败时说明里必须点出「探测链路失败」', t1.layers.component.detail.includes('探测链路失败'))
+  ok('未验：探测链路失败不得写成「插件未装」', !t1.layers.component.detail.includes('没有 moduleName'))
+  const t2 = judgeSample({ rows: null, probe: null })
+  ok('未验：没有 transport 信息时说明里必须点出 RPC 未返回', t2.layers.component.detail.includes('RPC 未返回'))
+  ok('未验：没有 transport 信息也不得写成「插件未装」', !t2.layers.component.detail.includes('没有 moduleName'))
 
   ok('负控：listPlugins 空响应解析为 null 而不是空数组', rowsFromListPlugins('') === null)
   ok('正样本：RPC 信封解析出数组', Array.isArray(rowsFromListPlugins(JSON.stringify({ result: { value: rowsOk } }))))
@@ -288,6 +305,7 @@ const main = async () => {
   let rows = null
   let probe = null
   let page = null
+  let transportError = null
   try {
     const deadline = Date.now() + timeoutSec * 1000
     let wsUrl
@@ -306,10 +324,28 @@ const main = async () => {
       if (!wsUrl) await new Promise(resolve => setTimeout(resolve, 400))
     }
     if (!wsUrl) throw new Error('CDP 没有已加载的本地引擎页面')
-    page = await connect(wsUrl)
-    const { value: rowsReply } = await page.evaluate(PAGE_LIST_PLUGINS, 15000)
+    // 页面可能在探测期间重载：旧 WebSocket 会静默失效，evaluate 返回空值。
+    // 每次取观测都重连一次，并在拿到空值时换一条新连接重试，避免把「连接已死」
+    // 记成「端点返回空」。这个形态本轮实测复现过：手动探测拿到 500，脚本拿到 {}。
+    const evaluateFresh = async (expression, timeoutMs, attempts = 3) => {
+      let last = { value: null, error: null }
+      for (let i = 0; i < attempts; i++) {
+        const conn = await connect(wsUrl)
+        try {
+          last = await conn.evaluate(expression, timeoutMs)
+        } finally {
+          try { conn.close() } catch { /* 已关闭 */ }
+        }
+        if (last?.value != null) return last
+        await new Promise(resolve => setTimeout(resolve, 600))
+      }
+      return last
+    }
+    const rowsAttempt = await evaluateFresh(PAGE_LIST_PLUGINS, 15000)
+    const rowsReply = rowsAttempt.value
     rows = rowsReply?.status === 200 ? rowsFromListPlugins(rowsReply.body) : null
-    probe = (await page.evaluate(PAGE_PROBE(IDENTITY_ROUTE), 15000)).value
+    const probeAttempt = await evaluateFresh(PAGE_PROBE(IDENTITY_ROUTE), 15000)
+    probe = probeAttempt.value
     // The full inventory can contain other installed package names and local paths.
     writeEvidence(out, 'list-plugins.json', JSON.stringify({
       status: rowsReply?.status ?? null,
@@ -318,13 +354,14 @@ const main = async () => {
     }, null, 2) + '\n')
     writeEvidence(out, 'identity-response.json', JSON.stringify(probe ?? {}, null, 2) + '\n')
   } catch (error) {
-    writeEvidence(out, 'transport-error.txt', String(error?.message ?? error) + '\n')
+    transportError = String(error?.message ?? error)
+    writeEvidence(out, 'transport-error.txt', transportError + '\n')
   } finally {
     try { page?.close() } catch { /* 已关闭 */ }
     adb(['forward', '--remove', 'tcp:' + cdpPort])
   }
 
-  const result = judgeSample({ rows, probe })
+  const result = judgeSample({ rows, probe, transport: transportError })
   report(result, out, { mode: 'device', serial, androidBuild: adb(['shell', 'getprop', 'ro.build.fingerprint']).stdout?.trim(), ...identity })
   process.exitCode = result.verdict === 'PASS' ? 0 : result.verdict === 'FAIL' ? 1 : 2
 }
