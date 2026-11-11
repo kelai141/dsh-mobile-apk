@@ -48,22 +48,31 @@ profile 的 `node_modules/@deepseek-ai` 下没有它（实测只有 cosmokit / d
 **归因第三方（插件侧写法）**：宿主提供了 `ctx.tools.register`，源码里也有 `if (ctx?.tools?.register === undefined) return`，
 说明作者知道该 API，只是把它当兜底而不是主路径。按纪律不修、不绕过。
 
-### 3. dsh-config-manager 4.3
+### 3. dsh-config-manager 0.8.0
 
 | 层 | 结果 |
 | --- | --- |
-| 组件面 | PASS `entryId=include:config-manager enabled=true fiberPhase=active`，元数据含中英双语标题/描述与内嵌 SVG 图标 |
+| 组件面 | PASS `entryId=include:config-manager enabled=true fiberPhase=active`；详情页另显 `Components 1 total · 1 running`、`config-manager Running` |
 | 注入面 | PASS `inject` 含 ui-client-runtime / ui-client-connection / ui-settings |
-| UI 面 | PASS 插件页可见 `Config Manager` 与完整描述 |
-| 功能面 | 未验（未做真实备份/导出操作） |
+| UI 面 | PASS 插件页列表可见 `Config Manager` 与完整描述 |
+| 功能界面 | PASS 进详情页后，插件自己的功能界面完整渲染：`DSH Config Manager — Backup, Restore & Migration Plugin`，含 `Backup & Restore` / `Export / Import` / `Migrate` / `Scheduled` 各分区文案 |
+| 功能执行 | **未验**（未实际执行一次备份或导出） |
+
+「功能界面渲染」与「功能执行」是两层，不能混为一谈：前者证明注入链路与组件挂载正确，
+后者才证明功能真的可用。本轮只做到前者。
+
+### 一条方法修正
+
+插件详情页**没有「进入功能页」的按钮**——功能界面嵌在同一页面的下方滚动区。
+不能假设「有功能就有入口按钮」；读 `innerText` 全量往下找才是对的。
 
 ## 归因小结
 
-| 样本 | 组件 | 注入 | UI | 功能 | 归属 |
-| --- | --- | --- | --- | --- | --- |
-| dsh-task-ledger | PASS | PASS | PASS | FAIL | 第三方（linux-amd64 二进制） |
-| dsh-plugin-health | PASS | PASS | PASS | 未验 | 第三方（动态 import 宿主包失败且被静默吞掉） |
-| dsh-config-manager | PASS | PASS | PASS | 未验 | — |
+| 样本 | 组件 | 注入 | UI 列表 | 功能界面 | 功能执行 | 归属 |
+| --- | --- | --- | --- | --- | --- | --- |
+| dsh-task-ledger | PASS | PASS | PASS | PASS | FAIL | 第三方（linux-amd64 二进制） |
+| dsh-plugin-health | PASS | PASS | PASS | 未验 | 未验 | 第三方（动态 import 宿主包失败且被静默吞掉） |
+| dsh-config-manager | PASS | PASS | PASS | PASS | 未验 | — |
 
 **三条样本的组件面、注入面、UI 面全部通过，没有一条暴露我方底层缺陷。**
 
