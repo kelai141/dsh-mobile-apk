@@ -38,9 +38,9 @@ object ControlProtocolV2 {
 
   /** 壳侧支持的 op 列表——**唯一来源**：handle 的 when 与 `caps.ops` 共用（§S4.2）。
    *
-   * 末两组（browser* / vd*）是「六面登记链已冻结、壳侧实现未落地」的 op：白名单与 handle 分支
-   * 必须在场（handle 侧 fail-closed 返回结构化「暂不支持」），否则引擎侧按白名单判「支持」而壳侧
-   * 落进 `else -> error("未知操作")`——诊断面无法区分「名字打错」与「尚未实现」。两组都**不进
+   * browser* / vd* 已由壳侧分派到各平台实现；vdMoveTask 仍结构化拒绝。白名单与 handle 分支
+   * 必须一致，避免引擎侧判「支持」而壳侧落进 `else -> error("未知操作")`。登记存在不代表
+   * 当前平台或授权已就绪，执行点仍须校验。两组都**不进
    * 无障碍通道**（契约 neverA11y；见 plugins/dsh-android-browser/src/contract.ts /
    * plugins/dsh-android-vdisplay/src/status.ts 与 scripts/control-ops-pending.json）。 */
   val SUPPORTED_OPS = listOf(
