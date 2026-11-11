@@ -324,10 +324,28 @@ const main = async () => {
       if (!wsUrl) await new Promise(resolve => setTimeout(resolve, 400))
     }
     if (!wsUrl) throw new Error('CDP 没有已加载的本地引擎页面')
-    page = await connect(wsUrl)
-    const { value: rowsReply } = await page.evaluate(PAGE_LIST_PLUGINS, 15000)
+    // 页面可能在探测期间重载：旧 WebSocket 会静默失效，evaluate 返回空值。
+    // 每次取观测都重连一次，并在拿到空值时换一条新连接重试，避免把「连接已死」
+    // 记成「端点返回空」。这个形态本轮实测复现过：手动探测拿到 500，脚本拿到 {}。
+    const evaluateFresh = async (expression, timeoutMs, attempts = 3) => {
+      let last = { value: null, error: null }
+      for (let i = 0; i < attempts; i++) {
+        const conn = await connect(wsUrl)
+        try {
+          last = await conn.evaluate(expression, timeoutMs)
+        } finally {
+          try { conn.close() } catch { /* 已关闭 */ }
+        }
+        if (last?.value != null) return last
+        await new Promise(resolve => setTimeout(resolve, 600))
+      }
+      return last
+    }
+    const rowsAttempt = await evaluateFresh(PAGE_LIST_PLUGINS, 15000)
+    const rowsReply = rowsAttempt.value
     rows = rowsReply?.status === 200 ? rowsFromListPlugins(rowsReply.body) : null
-    probe = (await page.evaluate(PAGE_PROBE(IDENTITY_ROUTE), 15000)).value
+    const probeAttempt = await evaluateFresh(PAGE_PROBE(IDENTITY_ROUTE), 15000)
+    probe = probeAttempt.value
     // The full inventory can contain other installed package names and local paths.
     writeEvidence(out, 'list-plugins.json', JSON.stringify({
       status: rowsReply?.status ?? null,
