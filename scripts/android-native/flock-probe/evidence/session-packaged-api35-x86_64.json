@@ -1,0 +1,89 @@
+{
+  "device": {
+    "serial": "emulator-5586",
+    "avd": "dsh-flock-e2e-api35",
+    "abi": "x86_64",
+    "sdk": 35,
+    "apk": "0.14.11-FLOCK-DEV",
+    "snapshotFingerprint": "87d09bec4062bfcd3710700f319f421f37540504e61a0df4ea402ea099d816b4",
+    "candidateCommit": "9a5f5b5b03d5fbde41cc2e004553181d9ba993a7"
+  },
+  "probe": {
+    "script": "check-session-device.mjs",
+    "mode": "packaged",
+    "note": "Uses the loader installed by the APK (DSH_NATIVE_LIB_DIR). No module import substitution.",
+    "nativeLibrary": "/data/app/.../lib/x86_64/libdsh_session_flock.so",
+    "packaged": {
+      "contending": {
+        "acquired": false,
+        "name": "SessionAlreadyOwnedError"
+      },
+      "afterClose": {
+        "acquired": true
+      },
+      "crash": {
+        "blocked": {
+          "acquired": false,
+          "name": "SessionAlreadyOwnedError"
+        },
+        "signal": "SIGKILL",
+        "afterKill": {
+          "acquired": true
+        }
+      }
+    },
+    "negativeControl": {
+      "mode": "stub",
+      "warning": "node-addon-system: no prebuilt flock binding for android-x64; stubbed to immediate success (dsh-mobile F3, single-process host)",
+      "contending": {
+        "acquired": true
+      },
+      "afterClose": {
+        "acquired": true
+      }
+    }
+  },
+  "liveEngine": {
+    "note": "External process opens an existing session for write while the running engine holds it.",
+    "enginePid": 7375,
+    "engineMapsContainNativeLibrary": true,
+    "sessionId": "session-8a6cb91e-7347-4eea-8551-dd4d5ee6dfe6",
+    "withNativeLibrary": {
+      "acquired": false,
+      "name": "SessionAlreadyOwnedError"
+    },
+    "withoutNativeLibrary": {
+      "acquired": true
+    }
+  },
+  "cdp": {
+    "baselineReopen": {
+      "id": "session-5e73b036-9d11-4270-a8e6-a4b0f7f58b0b",
+      "retained": true,
+      "listed": true,
+      "opened": true
+    },
+    "created": {
+      "id": "session-bf2c3c49-f945-4e31-8c56-1250e5998f09",
+      "created": true,
+      "listed": true,
+      "opened": true,
+      "persisted": true
+    }
+  },
+  "adbUserLayer": {
+    "steps": [
+      "choose workspace",
+      "tap composer",
+      "input text",
+      "tap send"
+    ],
+    "typedText": "hello from flock test",
+    "composerReadback": "hello from flock test",
+    "modelReply": "absent: no model credentials on this AVD"
+  },
+  "notCovered": [
+    "arm64-v8a device run (compilation and APK contents only)",
+    "assistant reply round trip on this AVD"
+  ]
+}

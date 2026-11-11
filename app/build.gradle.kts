@@ -221,6 +221,14 @@ providers.gradleProperty("nativeConsoleRelayDir").orNull?.let { relayDir ->
   }
 }
 
+// Pair the debug-only APK library with the opt-in snapshot loader.
+providers.gradleProperty("nativeSessionFlockDir").orNull?.let { flockDir ->
+  android {
+    sourceSets.getByName("debug").jniLibs.srcDir(file(flockDir))
+    packaging.jniLibs.useLegacyPackaging = true
+  }
+}
+
 // The Linux runtime needs an executable glibc loader, and an app process on
 // targetSdk >= 29 may only execve apk_data_file. The loader therefore ships as
 // lib/<abi>/libbionilux-loader.so and is installed into nativeLibraryDir, which

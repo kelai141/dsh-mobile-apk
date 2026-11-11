@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { closeSync, openSync, readSync } from 'node:fs'
+import { closeSync, openSync, readSync, statSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -8,6 +8,17 @@ import { setImmediate } from 'node:timers/promises'
 import { constants, zstdCompressSync, zstdDecompressSync } from 'node:zlib'
 
 const magic = 0xfd2fb528
+// The batch widens the window between enumeration and reading. A session file
+// rewritten in that window must not serve the cached header, so its identity is
+// rechecked before the header is handed out.
+const identityOf = path => {
+  try {
+    const s = statSync(path, { bigint: true })
+    return `${s.dev}:${s.ino}:${s.size}:${s.mtimeNs}`
+  } catch {
+    return null
+  }
+}
 const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
 
 function completeFrameEnd(bytes) {
@@ -86,7 +97,8 @@ function nativeBatch(binary, paths, signal) {
   })
 }
 
-export async function withBatch(persistence, variant, binary, run) {
+export async function withBatch(persistence, variant, binary, run,
+  { requireHit = true, afterBatch, watched } = {}) {
   if (variant === 'upstream') return run()
   const proto = Object.getPrototypeOf(persistence)
   const generations = Object.getOwnPropertyDescriptor(proto, 'listGenerations')
@@ -97,6 +109,9 @@ export async function withBatch(persistence, variant, binary, run) {
   let metrics
   let hits = 0
   let fallback = 0
+  let identities = new Map()
+  const cachedPaths = new Set()
+  const fallbackPaths = new Set()
   try {
     Object.defineProperty(proto, 'listGenerations', { ...generations, value: async function (signal) {
       const rows = await Reflect.apply(generations.value, this, [signal])
@@ -105,26 +120,68 @@ export async function withBatch(persistence, variant, binary, run) {
       const { headers, ...stats } = variant === 'rust'
         ? await nativeBatch(binary, paths, signal) : await jsBatch(paths, signal)
       lookup = new Map(paths.map((path, index) => [path, headers[index]]))
+      identities = new Map(paths.map(path => [path, identityOf(path)]))
+      // Control hook: runs inside the widened window, after headers and
+      // identities were captured but before the caller reads them back.
+      if (afterBatch) await afterBatch(paths)
       metrics = stats
       return rows
     } })
     Object.defineProperty(proto, 'readFirstZstdLine', { ...first, value: async function (path, signal) {
       signal?.throwIfAborted()
       const header = lookup.get(path)
-      if (header != null) {
+      if (header != null && identityOf(path) === identities.get(path)) {
         hits++
+        cachedPaths.add(path)
         return header
       }
       fallback++
+      fallbackPaths.add(path)
       return Reflect.apply(first.value, this, [path, signal])
     } })
     const row = await run()
-    assert.ok(metrics && hits > 0)
-    return { ...row, headerBatch: { ...metrics, hits, fallback } }
+    assert.ok(metrics)
+    if (requireHit) assert.ok(hits > 0)
+    // Paths are long Android cache paths. Only the watched one is reported, or
+    // the result JSON would not fit through a device shell pipe.
+    const keep = path => watched?.path !== undefined && path === watched.path
+    return { ...row, headerBatch: { ...metrics, hits, fallback,
+      watchedCached: [...cachedPaths].some(keep),
+      watchedFellBack: [...fallbackPaths].some(keep) } }
   } finally {
     Object.defineProperty(proto, 'readFirstZstdLine', first)
     Object.defineProperty(proto, 'listGenerations', generations)
   }
+}
+
+// Controlled negative control for the identity recheck: rewrite one session file
+// inside the widened window. The batch must not serve its stale header and the
+// changed file must reach the unchanged backend.
+export async function checkIdentity(persistence, binary, targetId, rewrite, variants = ['js', 'rust']) {
+  const results = {}
+  for (const variant of variants) {
+    const state = await rewrite()
+    let observed
+    const watched = { path: undefined }
+    try {
+      observed = await withBatch(persistence, variant, binary, async () => {
+        const rows = await persistence.list()
+        const row = rows.find(entry => entry.header.id === targetId)
+        assert.ok(row, 'target session missing from list')
+        watched.path = row.location.path
+        return { path: row.location.path, header: await persistence.readFirstZstdLine(row.location.path) }
+      }, { requireHit: false, afterBatch: () => state.mutate(), watched })
+    } finally {
+      await state.restore()
+    }
+    assert.ok(!observed.headerBatch.watchedCached,
+      'stale header was served after the file changed')
+    assert.ok(observed.headerBatch.watchedFellBack,
+      'changed file did not reach the backend')
+    results[variant] = { hits: observed.headerBatch.hits, fallback: observed.headerBatch.fallback,
+      targetServedFromCache: false }
+  }
+  return results
 }
 
 export async function checkHeaders(persistence, binary, root) {

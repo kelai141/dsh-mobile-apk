@@ -1,0 +1,45 @@
+{
+  "stub": {
+    "mode": "stub",
+    "first": {
+      "acquired": true
+    },
+    "contending": {
+      "acquired": true
+    },
+    "afterClose": {
+      "acquired": true
+    },
+    "invalidFd": {
+      "acquired": true
+    }
+  },
+  "packaged": {
+    "mode": "packaged",
+    "first": {
+      "acquired": true
+    },
+    "contending": {
+      "acquired": false,
+      "code": "EAGAIN",
+      "errno": 11,
+      "syscall": "flock"
+    },
+    "afterClose": {
+      "acquired": true
+    },
+    "invalidFd": {
+      "acquired": false,
+      "code": "EBADF",
+      "errno": 9,
+      "syscall": "flock"
+    }
+  },
+  "invalid": {
+    "mode": "invalid",
+    "result": {
+      "acquired": false,
+      "code": "ERR_DLOPEN_FAILED"
+    }
+  }
+}
