@@ -29,6 +29,8 @@ class OwnershipRepairCore(
     const val MAX_DEPTH = 64
     const val MAX_PATH_BYTES = 4096
     private const val MAX_ERRORS = 8
+  /** 诊断码里保留的底层消息长度；够放 errno 名与一句系统话，又不至于把长文本灌进 errors。 */
+  private const val OPEN_FAILURE_DETAIL_CHARS = 80
     private const val USER_UID_RANGE = 100_000
 
     fun isAppUid(uid: Int): Boolean = uid >= 0 && uid % USER_UID_RANGE in 10_000..19_999
@@ -175,6 +177,16 @@ class OwnershipRepairCore(
       if (errors.size < MAX_ERRORS) errors.add(code)
     }
 
+    /**
+     * 锚点打开失败的诊断码。旧实现只留一句 `anchor-open-failed`：实测在 ColorOS 上自愈直接失败、
+     * checked=0，而错误串里没有任何 errno 可查（EACCES 与 ENOTDIR 在南辕北辙的处置上完全相反）。
+     * 现在把底层消息截断后带进 errors；它是诊断字段，不参与 ok 判定。
+     */
+    private fun openFailureCode(stage: String, failure: Exception): String {
+      val detail = failure.message?.trim()?.take(OPEN_FAILURE_DETAIL_CHARS).orEmpty()
+      return if (detail.isEmpty()) stage + "-open-failed" else stage + "-open-failed:" + detail
+    }
+
     private fun budget(): Boolean {
       if (deadlineExceeded) return false
       // Subtraction is deliberately wrap-safe for nanoTime's arbitrary signed origin.
@@ -246,7 +258,7 @@ class OwnershipRepairCore(
       try {
         if (budget()) {
           anchor = try { backend.openAnchor(request.dataDir) }
-          catch (_: Exception) { fail("anchor-open-failed"); null }
+          catch (failure: Exception) { fail(openFailureCode("anchor", failure)); null }
           val heldAnchor = anchor
           if (heldAnchor != null) {
             val anchorStat = stat(heldAnchor, "anchor-stat-failed")

@@ -42,6 +42,7 @@ class OwnershipRepairCoreTest {
     var afterOpen: ((Node, String, Node) -> Unit)? = null
     var afterStat: ((Node) -> Unit)? = null
     var afterChown: ((Node) -> Unit)? = null
+    var failAnchor: Exception? = null
 
     private inner class Held(val node: Node) : OwnershipRepairCore.Handle {
       private var closed = false
@@ -53,7 +54,11 @@ class OwnershipRepairCoreTest {
       }
     }
     private fun node(handle: OwnershipRepairCore.Handle): Node = (handle as Held).node
-    override fun openAnchor(dataDir: String): OwnershipRepairCore.Handle { opens++; return Held(root) }
+    override fun openAnchor(dataDir: String): OwnershipRepairCore.Handle {
+      opens++
+      failAnchor?.let { throw it }
+      return Held(root)
+    }
     override fun openChild(
       directory: OwnershipRepairCore.Handle,
       name: String,
@@ -112,6 +117,24 @@ class OwnershipRepairCoreTest {
 
   private fun repair(fake: Fake, target: String = "", cap: Int = 100, clock: Clock = Clock(), depth: Int = 64): OwnershipRepairCore.Result =
     OwnershipRepairCore(fake, clock).repair(OwnershipRepairCore.Request(anchor, target, uid, cap, 10, depth))
+
+  /** 诊断回归：锚点打开失败必须带出底层消息，否则设备上只剩一句无从下手的话。 */
+  @Test fun anchorOpenFailureCarriesTheUnderlyingErrno() {
+    val fake = Fake(Node(1L, OwnershipRepairCore.Kind.DIRECTORY))
+    fake.failAnchor = IOException("errno=EACCES")
+    val result = repair(fake, target = "home")
+    assertFalse(result.ok)
+    assertEquals(1, result.failures)
+    assertEquals("anchor-open-failed:errno=EACCES", result.errors.first())
+  }
+
+  /** 没有底层消息时退回裸码，避免拼出以冒号结尾的空诊断。 */
+  @Test fun anchorOpenFailureWithoutMessageStaysBare() {
+    val fake = Fake(Node(1L, OwnershipRepairCore.Kind.DIRECTORY))
+    fake.failAnchor = IOException()
+    val result = repair(fake, target = "home")
+    assertEquals("anchor-open-failed", result.errors.first())
+  }
 
   private fun assertClosed(fake: Fake) {
     assertEquals("all handles must close", 0, fake.liveHandles)
