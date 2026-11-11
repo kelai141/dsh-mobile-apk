@@ -232,6 +232,13 @@ jobs:
       - name: 快照 node 入口 shim 门禁（自证）
         if: always()
         run: node scripts/check-snapshot-node-shims.mjs --self-test
+      # 首启脚本清单落点（#1716 回归面）：壳侧只在 usr/.dsh-shebang-scripts.txt 存在时走清单路径，
+      # 否则静默回落全树遍历（慢设备 527 秒 vs 21 秒）。CI 净检出没有快照 tar（真检由两条构建链
+      # 传注入后 tar 执行），故这里跑 --self-test：正控 + 4 条受控负控（含「清单写在 stage 根」
+      # 这条真实缺陷形态）。
+      - name: 快照脚本清单门禁（自证）
+        if: always()
+        run: node scripts/check-shebang-manifest.mjs --self-test
       # 浏览器语法下限（0.14.1 块C G-1）：CI 无构建树 -> --self-test 四向自证（反向必红/正向必绿/
       # 载荷不触发/工具链在场且版本钉住）。
       - name: 浏览器语法下限门禁（自证）
