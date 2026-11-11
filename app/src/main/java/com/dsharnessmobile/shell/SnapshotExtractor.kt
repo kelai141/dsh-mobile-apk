@@ -15,6 +15,8 @@ import java.util.concurrent.atomic.AtomicReference
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.compressors.xz.XZCompressorInputStream
+import org.tukaani.xz.BasicArrayCache
+import org.tukaani.xz.ResettableArrayCache
 import org.tukaani.xz.SeekableInputStream
 import org.tukaani.xz.SeekableXZInputStream
 
@@ -137,6 +139,14 @@ object SnapshotExtractor {
 
   /** 每个块的有界队列容量（片数）：worker 阻塞在 put 上即背压。 */
   private const val QUEUE_CHUNKS = 4
+
+  /**
+   * 每个 worker 允许跑在消费者前面多少块。
+   *
+   * 取值依据：把它压到与线程数同阶，排队内存就从「块数 × 2 MiB」降到「threads × 2 MiB」。
+   * 太小会让解码停顿（消费者要等），太大就退化成旧行为；2 倍线程数是常见折中。
+   */
+  private const val LOOKAHEAD_BLOCKS = 8
 
   /**
    * 并行解码计划。
@@ -559,10 +569,11 @@ object SnapshotExtractor {
    * 消费者（TarArchiveInputStream）从当前块队列取，取空且该块已解完就前进到下一块。
    *
    * 有界性（本类最危险的形态是「把整份解压到内存里」）：
-   *  - 队列容量固定 [QUEUE_CHUNKS] 片 ⇒ worker 满了就阻塞在 put 上（背压），
-   *    内存上界 = threads × QUEUE_CHUNKS × [CHUNK_BYTES]（4 线程 = 8 MiB）；
-   *  - 每 worker 另持 xz 字典（preset 6 = 8 MiB），4 线程合计 32 MiB；
-   *  - 与快照总大小无关。
+   *  - 单块排队上界 = [QUEUE_CHUNKS] × [CHUNK_BYTES] = 2 MiB（worker 阻塞在 put 上背压）；
+   *  - 但队列是**每块一份**：块数 × 2 MiB 才是排队总量。原注释只写了 threads × 2 MiB，
+   *    漏算了块数，因此并不是「与快照总大小无关」——设备实测正是这样 OOM 的（#1714）；
+   *  - 真正的上界由 [LOOKAHEAD_BLOCKS] 限流给出：threads × 2 MiB；
+   *  - 每 worker 另持 xz 字典（preset 6 = 8 MiB），4 线程合计 32 MiB。
    *
    * 正确性：块内 CRC64 由 xz 库自校验；块序由消费者强制，字节流与单线程解码**逐字节相同**
    * （单测用多块夹具比对 SHA-256）。
@@ -572,6 +583,52 @@ object SnapshotExtractor {
     threads: Int,
   ) : InputStream() {
 
+    /**
+     * 解码流用的缓冲区缓存。
+     *
+     * 三条实测结论（API 29 / x86_64 / 512 MiB 堆，见 #1714 与 PR 说明），避免后来者重走：
+     *  - 只用默认进程级缓存：34 块快照把堆撑到 516 MiB 后 OOM，整段回落单线程重解；
+     *  - ResettableArrayCache + 每块 reset：**不够**。reset 只让这个包装停止继续使用
+     *    默认缓存，先前已经进默认缓存的数组不会被清掉；
+     *  - ArrayCache.getDummyCache()：**也不够**。主项是队列里的排队内存，不是缓存。
+     *
+     * 真正生效的是 [LOOKAHEAD_BLOCKS] 限流（见 [pump]）。这层 reset 保留作卫生措施，
+     * 但注释不再声称它是这次 OOM 的主因。
+     */
+    internal fun limitedCache(): ResettableArrayCache = ResettableArrayCache(BasicArrayCache.getDefaultCache())
+
+    /**
+     * 已交还字典缓存的次数。测试据此做负控：去掉 `cache.reset()` 时它必须停在 0。
+     * 生产代码不读它；它不是指标，只是「那两行还在不在」的可观测证据。
+     */
+    private val cacheResets = AtomicInteger(0)
+
+    internal fun cacheResetCount(): Int = cacheResets.get()
+
+    /**
+     * 生产端已产出字节（已放进队列或正被提交）的最大块号相对消费者当前位置的差值。
+     *
+     * 不能用 `dispatched`：那是「认领」计数，worker 会在限流处等待，认领数照样跑在前面。
+     * 这里取所有队列里已有内容或已标记完成的块中最大者。
+     */
+    internal fun decodedAheadOfConsumer(): Int {
+      var furthest = blockIndexRead.get()
+      for (i in blockIndexRead.get() until blockSizes.size) {
+        if (queues[i].isNotEmpty() || finished[i].get()) furthest = i
+      }
+      return furthest - blockIndexRead.get()
+    }
+
+    internal companion object {
+      /** 限流窗口，供测试断言与说明引用。 */
+      internal fun lookaheadLimit(): Int = LOOKAHEAD_BLOCKS
+    }
+
+    private fun resetCache(cache: ResettableArrayCache) {
+      cache.reset()
+      cacheResets.incrementAndGet()
+    }
+
     private val blockSizes: LongArray
     private val queues: Array<ArrayBlockingQueue<ByteArray>>
     private val finished: Array<AtomicBoolean>
@@ -580,6 +637,9 @@ object SnapshotExtractor {
     private val pool: ExecutorService
 
     private var blockIndex = 0
+
+    /** 消费者当前正在读的块号（只增不减），worker 据此限流。 */
+    private val blockIndexRead = AtomicInteger(0)
     private var chunk: ByteArray? = null
     private var chunkPos = 0
 
@@ -588,10 +648,15 @@ object SnapshotExtractor {
 
     init {
       val sizes = ArrayList<Long>()
-      source.open().use { probe ->
-        val stream = SeekableXZInputStream(probe)
-        val count = stream.blockCount
-        for (i in 0 until count) sizes += stream.getBlockSize(i)
+      val probeCache = limitedCache()
+      try {
+        source.open().use { probe ->
+          val stream = SeekableXZInputStream(probe, probeCache)
+          val count = stream.blockCount
+          for (i in 0 until count) sizes += stream.getBlockSize(i)
+        }
+      } finally {
+        resetCache(probeCache)
       }
       if (sizes.isEmpty()) throw IOException("xz 归档没有任何 block，无法并行解码")
       blockSizes = LongArray(sizes.size) { sizes[it] }
@@ -611,29 +676,57 @@ object SnapshotExtractor {
       }
     }
 
-    /** worker 主循环：按 [dispatched] 递增顺序认领块，解完再认领下一块。 */
+    /**
+     * worker 主循环：按 [dispatched] 递增顺序认领块，解完再认领下一块。
+     *
+     * **必须限制超前量**：消费者是严格按块序走的 tar 解析，任何"提前解好"的块只能躺在
+     * 自己的队列里占内存。旧实现让 4 个 worker 一路抢到第 34 块，于是 34 个队列各积压
+     * [QUEUE_CHUNKS] 片 × [CHUNK_BYTES] = 2 MiB ⇒ 峰值约 68 MiB 纯排队内存，
+     * 与「内存上界 = threads × QUEUE_CHUNKS × CHUNK_BYTES」的注释严重不符。
+     * 现在每个 worker 只允许跑在消费者前面 [LOOKAHEAD_BLOCKS] 块。
+     */
     private fun pump() {
       while (!closed) {
         val index = dispatched.getAndIncrement()
         if (index >= blockSizes.size) return
+        awaitConsumerCloseEnough(index)
+        if (closed) return
         decodeBlock(index)
+      }
+    }
+
+    /** 等到消费者推进到「本块不得超过 [LOOKAHEAD_BLOCKS] 块之前」，或流被关闭。 */
+    private fun awaitConsumerCloseEnough(index: Int) {
+      while (!closed && index >= blockIndexRead.get() + LOOKAHEAD_BLOCKS) {
+        try {
+          Thread.sleep(2L)
+        } catch (_: InterruptedException) {
+          Thread.currentThread().interrupt()
+          return
+        }
       }
     }
 
     private fun decodeBlock(index: Int) {
       try {
-        source.open().use { seekable ->
-          val stream = SeekableXZInputStream(seekable)
-          stream.seekToBlock(index)
-          var remaining = blockSizes[index]
-          val buffer = ByteArray(CHUNK_BYTES)
-          while (remaining > 0 && !closed) {
-            val want = minOf(CHUNK_BYTES.toLong(), remaining).toInt()
-            val read = stream.read(buffer, 0, want)
-            if (read < 0) break
-            remaining -= read
-            queues[index].put(buffer.copyOf(read))
+        val cache = limitedCache()
+        try {
+          source.open().use { seekable ->
+            val stream = SeekableXZInputStream(seekable, cache)
+            stream.seekToBlock(index)
+            var remaining = blockSizes[index]
+            val buffer = ByteArray(CHUNK_BYTES)
+            while (remaining > 0 && !closed) {
+              val want = minOf(CHUNK_BYTES.toLong(), remaining).toInt()
+              val read = stream.read(buffer, 0, want)
+              if (read < 0) break
+              remaining -= read
+              queues[index].put(buffer.copyOf(read))
+            }
           }
+        } finally {
+          // 块解完就把字典缓冲区交还，不让它留在进程级缓存里跨块累积（#1714）。
+          resetCache(cache)
         }
       } catch (t: Throwable) {
         failures[index].set(t)
@@ -658,6 +751,7 @@ object SnapshotExtractor {
         if (piece != null) return piece
         if (finished[blockIndex].get() && queue.isEmpty()) {
           blockIndex += 1
+          blockIndexRead.set(blockIndex)
           continue
         }
       }
