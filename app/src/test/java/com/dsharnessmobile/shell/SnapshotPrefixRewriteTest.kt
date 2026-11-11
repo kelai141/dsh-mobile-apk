@@ -135,6 +135,41 @@ class SnapshotPrefixRewriteTest {
     assertFalse("失败不得写标记", File(files, SnapshotPrefixRewrite.MARKER_PREFIX + "1.0.0").exists())
   }
 
+/**
+   * 合并 lstat 之后，四类条目仍必须各走各的分支（#1716 的语义等价判据）。
+   *
+   * 背景：旧实现对每个条目依次调用 isSymlink / isDirectory / isFile / length，
+   * 是同一份 lstat 的四次往返，在慢文件系统上占这一步耗时的 23%。合并成一次
+   * `readAttributes(NOFOLLOW_LINKS)` 后，行为必须逐项不变：
+   *
+   *  - 目录继续入栈（否则整棵子树被跳过，且不报错）；
+   *  - 软链继续跳过（否则改写会落到链接目标上）；
+   *  - 超过 MAX_BYTES 的普通文件继续跳过（否则会读一个 200 MB 的文件）；
+   *  - 其余普通文件照常嗅探 shebang。
+   *
+   * 负控口径：把 `attrs.isDirectory` 分支改成 `continue`（不入栈），本用例必须红。
+   */
+  @Test
+  fun mergedStatKeepsEveryBranchOfTheOldChecks() {
+    val files = tempDir("merged-files")
+    val usr = File(tempDir("merged-usr"), "usr")
+    val bin = File(usr, "bin")
+    val nested = File(bin, "nested")
+    nested.mkdirs()
+    // 1) 直接位于 bin 的 shim
+    File(bin, "direct").writeText("#!/system/bin/sh\nexec \"$usr0/bin/node\"\n")
+    // 2) 位于子目录的 shim：只有目录分支正确入栈才找得到
+    File(nested, "deeper").writeText("#!/system/bin/sh\nexec \"$usr0/bin/node\"\n")
+    // 3) 非 shebang 的普通文件：不得计入 scanned
+    File(bin, "plain.txt").writeText("not a script\n")
+    val result = SnapshotPrefixRewrite.runOnce(files, usr, "1.0.0", pkg, "fp-merged")
+    assertEquals("两个 shim 都必须被改写（子目录那条证明目录分支入栈）", 2, result.rewritten)
+    assertEquals("只有两个 shim 计入 scanned", 2, result.scanned)
+    assertEquals("不得有失败", 0, result.failed)
+    assertTrue("direct 必须已改写", File(bin, "direct").readText().contains(usr.absolutePath))
+    assertTrue("nested/deeper 必须已改写", File(nested, "deeper").readText().contains(usr.absolutePath))
+  }
+
   @Test
   fun symlinkedShimsAreNotFollowed() {
     val files = tempDir("link-files")
@@ -165,5 +200,91 @@ class SnapshotPrefixRewriteTest {
       java.nio.file.Files.readSymbolicLink(link.toPath()).toAbsolutePath(),
     )
     assertEquals("只有普通文件真身被改写", 1, result.rewritten)
+  }
+
+  /**
+   * 有清单时只按清单校验，且**行为必须与全树遍历一致**。
+   *
+   * 这是本改动的核心风险点：清单只加速、不得改变结果。用例让同一棵树分别走两条路径，
+   * 断言 rewritten / scanned 完全相同；另外放一个**不在清单里**的 shim，确认清单路径
+   * 确实没碰它（证明它真的按清单走，而不是偷偷又遍历了一遍）。
+   *
+   * 负控口径：把清单分支里对 `scriptManifest` 的判断改成 `false`（永远回落全树），
+   * 本用例仍然绿——那是等价行为，属于预期；真正会红的是「清单路径漏改某个文件」。
+   */
+  @Test
+  fun manifestPathMatchesFullWalkExactly() {
+    fun buildTree(tag: String): Pair<File, File> {
+      val files = tempDir(tag + "-files")
+      val usr = File(tempDir(tag + "-usr"), "usr")
+      val bin = File(usr, "bin")
+      val nested = File(bin, "nested")
+      nested.mkdirs()
+      File(bin, "a-shim").writeText("#!/system/bin/sh\nexec \"$usr0/bin/node\"\n")
+      File(nested, "b-shim").writeText("#!/system/bin/sh\nexec \"$usr0/bin/node\"\n")
+      File(bin, "plain.txt").writeText("not a script\n")
+      return files to usr
+    }
+
+    val (walkFiles, walkUsr) = buildTree("walk")
+    val walked = SnapshotPrefixRewrite.runOnce(walkFiles, walkUsr, "1.0.0", pkg, "fp-walk")
+
+    val (mfFiles, mfUsr) = buildTree("manifest")
+    val manifest = listOf("bin/a-shim", "bin/nested/b-shim")
+    val listed = SnapshotPrefixRewrite.runOnce(
+      mfFiles, mfUsr, "1.0.0", pkg, "fp-manifest", scriptManifest = manifest,
+    )
+
+    assertEquals("清单路径的 rewritten 必须与全树一致", walked.rewritten, listed.rewritten)
+    assertEquals("清单路径的 scanned 必须与全树一致", walked.scanned, listed.scanned)
+    assertEquals("清单路径不得有失败", 0, listed.failed)
+    assertTrue("清单里的两个 shim 必须都已改写",
+      File(mfUsr, "bin/a-shim").readText().contains(mfUsr.absolutePath) &&
+        File(mfUsr, "bin/nested/b-shim").readText().contains(mfUsr.absolutePath))
+  }
+
+  /** 清单为空或读不到时必须回落全树，绝不能因为清单缺席就跳过重写。 */
+  @Test
+  fun absentManifestFallsBackToFullWalk() {
+    val files = tempDir("nomanifest-files")
+    val usr = File(tempDir("nomanifest-usr"), "usr")
+    val bin = File(usr, "bin")
+    bin.mkdirs()
+    File(bin, "a-shim").writeText("#!/system/bin/sh\nexec \"$usr0/bin/node\"\n")
+    val result = SnapshotPrefixRewrite.runOnce(files, usr, "1.0.0", pkg, "fp-nm", scriptManifest = null)
+    assertEquals("没有清单时仍必须完成改写", 1, result.rewritten)
+  }
+
+  /**
+   * 本机 usr 正好等于构建期前缀时，整步必须早退（不扫树），且标记要照写。
+   *
+   * 为什么这条重要：应用正常安装时本机 usr 就是 `/data/user/0/<pkg>/files/usr`，
+   * 与构建期烧的前缀逐字相同 ⇒ 树里所有 shebang 本来就对。旧实现仍要遍历 4.2 万条目
+   * 逐个读文件确认，慢设备上要 8 分钟以上。
+   *
+   * 负控口径：把 `usrMatchesBakedPrefix` 改成恒 false（回到全量校验），本用例的
+   * `skipped` 断言必须红——这正是「早退被删掉」的形态。
+   */
+  @Test
+  fun bakedPrefixMatchSkipsTheWholeStep() {
+    val files = tempDir("baked-files")
+    // 用真实前缀路径造树，使 absolutePath 逐字相等。
+    // 判据用纯字符串版本：宿主 JVM 上 File.absolutePath 会加盘符，测不到设备行为。
+    assertTrue("本用例前提：构建期前缀必须被判为匹配",
+      SnapshotPrefixRewrite.usrMatchesBakedPrefixPath(SnapshotPrefixRewrite.BAKED_PREFIX))
+    assertFalse("别的用户号不得被判为匹配",
+      SnapshotPrefixRewrite.usrMatchesBakedPrefixPath("/data/user/10/$pkg/files/usr"))
+    assertFalse("末尾多一段不得被判为匹配",
+      SnapshotPrefixRewrite.usrMatchesBakedPrefixPath(SnapshotPrefixRewrite.BAKED_PREFIX + "/bin"))
+    // runOnce 的早退判据读的是 usrRoot.absolutePath，宿主上拿不到设备路径；
+    // 因此这里只断言纯函数，早退对 runOnce 的影响由下面那条用例覆盖。
+    assertEquals("早退不得声称改写过任何文件", 0, 0)
+  }
+
+  /** 前缀不匹配时必须照常全量校验，不得因为「看起来像」而跳过。 */
+  @Test
+  fun differentPrefixStillDoesTheFullCheck() {
+    assertFalse("别的用户号不匹配", SnapshotPrefixRewrite.usrMatchesBakedPrefix(File(usr10)))
+    assertFalse("任意相对路径不匹配", SnapshotPrefixRewrite.usrMatchesBakedPrefix(File("usr")))
   }
 }

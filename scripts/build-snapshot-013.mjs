@@ -632,7 +632,11 @@ log('重写 shebang/RUNPATH…')
 //   ② 由本步改写 shebang 的**文本脚本**（node 包 bin 脚本等）保留构建期前缀，由壳侧
 //      **首次解压后的一次性重写**（app/src/main/java/.../SnapshotPrefixRewrite.kt）换成实机 usrDir。
 // 换句话说：构建期写死不是"修好了"，而是"有运行期补丁兜住"，且只在首次解压跑一次。
-execSync(`${PYTHON} scripts/fix-shebang.py "${U}" ${NEW_PREFIX}`, { encoding: 'utf8', stdio: 'inherit' })
+// 第三参数输出「确实是文本脚本」的相对路径清单：壳侧首启重写据此只校验清单，
+// 不再遍历整棵树（慢文件系统上 4.2 万条目的 lstat 要十几分钟，见
+// docs/NATIVE-PREFIX-REWRITE-COST-2026-11-11.md）。
+const SHEBANG_MANIFEST = join(STAGE, 'shebang-scripts.txt')
+execSync(`${PYTHON} scripts/fix-shebang.py "${U}" ${NEW_PREFIX} "${SHEBANG_MANIFEST}"`, { encoding: 'utf8', stdio: 'inherit' })
 // termux-elf-cleaner：清理 ELF 中残留 com.termux RUNPATH。
 //
 // 【issue #1147】它是 **Android 目标**的 ELF，不是宿主 ELF：

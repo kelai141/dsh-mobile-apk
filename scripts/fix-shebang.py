@@ -20,6 +20,14 @@ import sys
 def main():
     usr = sys.argv[1]
     new_prefix = sys.argv[2] if len(sys.argv) > 2 else '/data/user/0/com.dsharnessmobile.shell/files/usr'
+    # 第三个参数（可选）：把「确实是文本脚本」的相对路径清单写到这个文件。
+    #
+    # 为什么要有清单：设备侧的首启前缀重写必须扫全树才能判断哪些文件是脚本，
+    # 而慢文件系统上每次 lstat 要几毫秒，4.2 万条目就是十几分钟（实测见
+    # docs/NATIVE-PREFIX-REWRITE-COST-2026-11-11.md）。构建期这里本来就要逐个打开
+    # 这些文件读头，顺手记下清单，运行时就能只按清单校验，不必再遍历整棵树。
+    manifest_path = sys.argv[3] if len(sys.argv) > 3 else None
+    manifest = []
     old_prefix = '/data/data/com.termux/files/usr'
     dirs = [os.path.join(usr, 'bin'), os.path.join(usr, 'libexec'), os.path.join(usr, 'lib')]
     fixed = 0
@@ -40,6 +48,8 @@ def main():
                         head = f.read(256)
                     if not head.startswith(b'#!'):
                         continue
+                    if manifest_path is not None:
+                        manifest.append(os.path.relpath(p, usr).replace(os.sep, '/'))
                     with open(p, 'r', encoding='utf-8', errors='replace') as f:
                         text = f.read()
                     rewritten = text
@@ -70,6 +80,11 @@ def main():
                 except Exception:
                     skipped += 1
                     continue
+    if manifest_path is not None:
+        with open(manifest_path, 'w', encoding='utf-8', newline='') as f:
+            for rel in sorted(manifest):
+                f.write(rel + '\n')
+        print(f'shebang manifest: {len(manifest)} scripts -> {manifest_path}')
     print(f'shebang fix done: {fixed} fixed, {skipped} skipped')
 
 
