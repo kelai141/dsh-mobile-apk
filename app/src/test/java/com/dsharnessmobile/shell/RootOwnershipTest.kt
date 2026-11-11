@@ -38,7 +38,10 @@ class RootOwnershipTest {
     assertTrue(adapter.contains("0x200000 or OsConstants.O_NOFOLLOW"))
     assertTrue(adapter.contains("Os.fstat"))
     assertTrue(adapter.contains("Os.fchown((handle as AndroidHandle).fd, uid, gid)"))
-    assertTrue(adapter.contains("hardlink-protection-unavailable"))
+    // 内核硬链接保护不是本原语的安全前提（逐条 linkCount == 1 已覆盖），因此这里守的是
+    // 「不要再用整体拒绝把它关掉」，以及探测结果必须出现在结果里（诊断可见）。
+    assertFalse(adapter.contains("rejected(\"hardlink-protection-unavailable\")"))
+    assertTrue(adapter.contains(""""hardlinkProtection" to protectedHardlinksEnabled()"""))
     assertTrue(adapter.contains("pinned-inode-changed"))
     assertFalse(adapter.contains("Os.lchown("))
     assertFalse(adapter.contains("Os.chown("))
