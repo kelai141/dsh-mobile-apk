@@ -14,7 +14,7 @@ import { homedir } from "node:os";
 import { AttachmentId } from "@deepseek-ai/dsh-attachment";
 import { WebError } from "@deepseek-ai/dsh-web";
 import { defineTool } from "@deepseek-ai/dsh-tools";
-import { callbackReceivedPage } from "./auth/oauth-flow.js";
+import { DEFAULT_FLOW_TIMEOUT_MS, callbackReceivedPage } from "./auth/oauth-flow.js";
 
 //#region src/auth/pkce.ts
 /**
