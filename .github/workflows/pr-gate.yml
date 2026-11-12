@@ -210,6 +210,13 @@ jobs:
           node scripts/check-manifest-hardening.mjs --self-test
           node --test scripts/check-manifest-hardening.test.mjs
           node scripts/check-manifest-hardening.mjs
+
+      # issue #1719：外接键鼠插拔会改 keyboard/navigation；Activity 未声明就重建并被当成引擎重启。
+      - name: 输入设备配置变化门禁
+        if: always()
+        run: |
+          node scripts/check-input-config-changes.mjs --self-test
+          node scripts/check-input-config-changes.mjs
           node scripts/check-bounded-io.mjs
           node scripts/check-api-route-auth.mjs
           # 引擎堆下限双源一致性（0.14.8）：壳侧 shellEnv() 与快照内启动器必须同区间

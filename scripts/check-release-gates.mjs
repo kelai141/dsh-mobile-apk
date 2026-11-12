@@ -145,6 +145,7 @@ const GATES = [
   // 自身带 --self-test（1 正样本 + 8 受控负控），证明每条判据仍会判红。
   { script: 'check-engine-heap-floor.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
   { script: 'check-manifest-hardening.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
+  { script: 'check-input-config-changes.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
   { script: 'check-bounded-io.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
   // #222：所有 mobile-owned /api exact/prefix 路由必须在登记表中，并有本地 auth guard 或窄公开白名单。
   { script: 'check-api-route-auth.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
