@@ -14,15 +14,20 @@
  * refresh [196,224] and add [240,336], i.e. a 16px gap with 24px of right padding.
  * The back control is therefore `flex: none` and sized to its content rather than
  * taking a share of the row, and the title block absorbs the squeeze (it wraps).
+ *
+ * 2026-11-13: every selector here keys on `data-dsh-main-panel-head`, not on
+ * `[data-plugin-panel] > header`. The head is nested (`pageBody > pageBar > header`), so
+ * the child combinator matched nothing and the button — once it did mount — would have
+ * landed in a row that still laid itself out as `space-between`.
  */
 export const MAIN_PANEL_BACK_CSS: string = `
 @media (max-width: 767px) {
-  html[data-dsh-mobile-form] [data-plugin-panel] > header[data-window-drag] {
+  html[data-dsh-mobile-form] [data-dsh-main-panel-head] {
     justify-content: flex-start;
     gap: 10px;
   }
 
-  html[data-dsh-mobile-form] [data-plugin-panel] > header[data-window-drag] > div:first-of-type {
+  html[data-dsh-mobile-form] [data-dsh-main-panel-head] > div:first-of-type {
     flex: 1 1 auto;
     min-width: 0;
   }
