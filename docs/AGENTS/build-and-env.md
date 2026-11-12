@@ -304,6 +304,16 @@ gh release download v<ver> -R kelai141/dsh-mobile-apk -p "snapshot-*.tar.xz" -D 
 
 Telemetry import failures caused by inherited dependency versions: see docs/contrib/MCMR-JIM/2026-10-27-telemetry-runtime-closure.md for the consumer-local closure contract and archive-gate evidence. A package being present is insufficient when the consumer declares a different exact version.
 
+## phone-control Rust 原生库
+
+`node scripts/build-phone-control-native.mjs` 按 `native/phone-control-core/build-config.json`（rustc 1.99.0、NDK 27.0.12077973、API 26、16 KiB 页）编译 crate，输出 `app/build/generated/phone-control-jni/<abi>/libdsh_phone_control_core.so` 与 manifest。参数：`--abis arm64-v8a,x86_64`、`--out <dir>`、`--ndk <path>`、`--verify`（只校验）、`--self-test`。`--verify --jni-out <独立目录>` 校验 ELF、manifest 和当前输入哈希后，只复制选中 ABI 的 `.so`，拒绝 JNI 目录内的多余文件。单测 `node --test scripts/build-phone-control-native.test.mjs` 不触发 Android 构建。
+
+Gradle 的 `buildPhoneControlNative` 增量构建默认双 ABI，开发可用 `-PnativeControlAbis=x86_64`；空值、未知或重复 ABI 拒绝。所有 `merge*JniLibFolders` / `merge*NativeLibs` 依赖 `verifyPhoneControlNative`，后者即使构建命中缓存也每次执行校验。main JNI 源集只读取 `app/build/generated/phone-control-jni-libs/<ABI集合>/`，manifest 不进入 AGP；切换单 ABI 不会携带旧架构。输入包含 crate 文件、Cargo.lock、build-config 与构建脚本，排除 target 缓存。不挂 preBuild 或 Kotlin/JVM 单测任务。
+
+Windows 优先用 rustc 1.99.0 的 GNU host toolchain（默认 MSVC 常缺 `link.exe`），脚本只选版本匹配且已安装的工具链，不会自动下载编译器。NDK 默认取 `ANDROID_HOME`/`ANDROID_SDK_ROOT` 下的固定版本；两者不一致时直接报错，请对齐或用 `--ndk` 指明。缺 Android std 时脚本给出 `rustup target add` 命令，也可显式 `--install-targets`。Cargo 缓存放在 `native/phone-control-core/target-android`，与宿主产物隔离；任何非 64 位小端 ET_DYN、machine 不符或未按 16 KiB 对齐的 `.so` 都会被拒复制。
+
+本机 GNU host toolchain 已通过 `rustup run stable-x86_64-pc-windows-gnu cargo test --locked --offline --manifest-path native/phone-control-core/Cargo.toml`（94 项）；GNU 宿主链接可用。Android 交叉编译和 Gradle 任务图验证由主线程在 Cargo 稳定后批量执行。
+
 ## 多文件运行时资产校验
 
 `check-runtime-assets.mjs` 从同一快照一次提取主文件、registry声明的配套文件和所属包清单。正文检查仍以候选asset为主文件，不允许用快照副本覆盖候选。多文件补丁缺配套、身份不符或任一正文漂移均拒绝；`--self-test` 包含真实CLI正控和负控。启动旧资产覆盖现象及本轮证据见 `docs/contrib/kelai141/2026-11-01-image-preview-and-manual-reclaim.md`。

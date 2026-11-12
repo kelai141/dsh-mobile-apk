@@ -229,6 +229,12 @@ class DeviceControlService : AccessibilityService() {
 
     fun connected(): Boolean = instance != null
 
+    /**
+     * 原生控制平台层的服务入口：只回既有绑定实例，不启动、不重建、不改旧分派。
+     * 未连接时返回 null，由调用方按离线处理。
+     */
+    internal fun nativePlatformService(): AccessibilityService? = instance
+
     /** 设置页展示用的状态 JSON（不含令牌本身）。 */
     fun statusJson(context: Context): String {
       val enabled = connected()
