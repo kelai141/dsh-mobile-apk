@@ -4,11 +4,9 @@
 generation、范围策略、执行计划与生命周期记录；Android 只上报事实并执行
 获准的平台调用。
 
-当前状态：策略、生命周期接线、真实文件日志、JSON/JNI 入口、status 所需的
-只读状态查询及纯 Rust 视觉编码已在隔离测试中验证。Kotlin 侧 Frames、Socket、
-Dispatcher、Host、A11yExecution、Facts 与 androidTest 源码已存在，但 Host
-仍是隔离实现，尚未启动生产监听或切换旧路由。尚未接入 Android execution 验收、
-JNI 视觉入口、图像交付到模型、模型 tool schema 或 Node 工具注册。
+当前状态：隔离宿主已接 A11y 观察、坐标与节点动作、Rust 图像编码和 JNI 交付。
+宿主尚未进入生产启动链，旧路由未切换。主机测试验证了 JNI 字节、回执与权限
+反证；Android 设备执行、真实模型回合、Shizuku 与 Root 仍未验收。
 
 公开 method execute 是 Kotlin 私有 IPC 的对外名称，内部由 prepare 与 commit
 两个 exchange 完成。Kotlin 不提供直接发送 prepare/commit 的公开面。
