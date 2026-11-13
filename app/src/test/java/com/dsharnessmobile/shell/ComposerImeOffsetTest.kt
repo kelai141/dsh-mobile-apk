@@ -68,6 +68,27 @@ class ComposerImeOffsetTest {
     )
   }
 
+  @Test fun riseIsSmoothedButCollapseIsInstant() {
+    val script = ComposerImeOffset.script(351)
+    // 弹起给过渡（IME inset 是跳变的，硬套会抢跑），收起一律先置 none
+    assertTrue("弹起要有一段过渡", script.contains("cubic-bezier"))
+    assertTrue("清位移时必须无过渡", script.contains("c.style.transition='none'"))
+    assertTrue(
+      "清位移在前、开过渡在后",
+      script.indexOf("c.style.transition='none'") < script.indexOf("cubic-bezier"),
+    )
+  }
+
+  @Test fun clearingAlwaysKillsTransition() {
+    val script = ComposerImeOffset.script(0)
+    assertTrue(script.contains("c.style.transition='none'"))
+    // 过渡代码在字符串里恒存在，是否执行由 rising 决定——判据是「它挂在 rising 分支里」。
+    assertTrue(
+      "过渡只允许出现在 rising 分支内",
+      script.indexOf("if(rising){") in 0 until script.indexOf("cubic-bezier"),
+    )
+  }
+
   @Test fun scriptIsASelfContainedIife() {
     val script = ComposerImeOffset.script(351)
     assertTrue(script.startsWith("(function(){"))

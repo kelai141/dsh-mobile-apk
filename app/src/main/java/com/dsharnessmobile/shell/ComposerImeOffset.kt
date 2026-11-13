@@ -53,16 +53,24 @@ internal object ComposerImeOffset {
       "if(!api){" +
       "var find=function(){return document.querySelector('$CARD_SELECTOR')" +
       "||document.querySelector('$DOCK_SELECTOR')};" +
-      "var clear=function(){var c=find();if(c)c.style.removeProperty('transform')};" +
+      "var last=0;" +
+      "var clear=function(){var c=find();if(c){c.style.transition='none';c.style.removeProperty('transform')}};" +
       "var apply=function(v){" +
       "var c=find();if(!c)return;" +
-      // 幂等：先清掉上一次的位移，才能量到卡片的自然位置。
+      "var rising=v>last;last=v;" +
+      // 幂等：先清掉上一次的位移与过渡，才能量到卡片的自然位置。
+      "c.style.transition='none';" +
       "c.style.removeProperty('transform');" +
+      "void c.offsetHeight;" +
       "if(v<=0)return;" +
       // 把卡片底边对齐到键盘顶边；差额为负说明卡片本来就在键盘上方，不动。
       "var r=c.getBoundingClientRect();" +
       "var d=Math.round(r.bottom-((window.innerHeight||0)-v));" +
-      "if(d>0)c.style.setProperty('transform','translateY(-'+d+'px)','important')};" +
+      "if(d<=0)return;" +
+      // 弹起给一段短过渡：IME inset 是跳变的（比键盘动画还早），直接套用会「抢跑」；
+      // 收起不给过渡——那一步要求瞬时回落，焦点一离开就落。
+      "if(rising){c.style.transition='transform 180ms cubic-bezier(.2,.7,.3,1)'}" +
+      "c.style.setProperty('transform','translateY(-'+d+'px)','important')};" +
       "api={set:apply,clear:clear};" +
       "window.$API_NAME=api;" +
       // 收起方向不等 insets：焦点离开输入框的那一刻立即回落。
