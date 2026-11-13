@@ -14,11 +14,15 @@
 
 ## 2. 构建与验证命令
 
-Build scripts, profiles and source-extracted host compatibility code use LF so POSIX consumers and exact-context tests agree across checkouts. Official patches, captured patch fixtures, the patch registry, the engine overlay manifest, distributed license texts, the verbatim browser stylesheet, cross-language screen-scope fixtures and the legacy recovery core retain exact bytes with `-text`. `node --test scripts/check-upstream-patch-bytes.test.mjs` checks actual bytes and checkout filtering with `core.autocrlf=true`; PR CI runs this regression before build gates.
+**本仓 PR 增量机密扫描**：`.github/workflows/pr-gate.yml` 的 `static` 仅保留 checkout（完整 Git 历史、禁止持久化凭据）→ Node 24 → `node scripts/check-added-secrets.mjs --self-test` → `node scripts/check-added-secrets.mjs --event "$GITHUB_EVENT_PATH"`。显示名继续使用「冲突标记与敏感信息扫描」，只为兼容 branch protection 已配置的 required status；名称不代表仍检查冲突标记。扫描器仅使用 Node 内置模块；PR 扫描 `merge-base(base.sha, head.sha)..head.sha` 的文本新增行，不取 checkout 的 synthetic merge；push 扫描 `before..after`，全零 `before` 按新 head 相对空树处理。缺失/非法提交或找不到 merge-base 一律 exit 2，不退回全树扫描。所有路径均纳入，扫描的是起止提交间的净新增行（net diff），不遍历中间提交历史；中间提交新增后又删除的机密不会命中。二进制跳过，LFS pointer 仅按文本扫描，不解包或拉取其对象；旧行与删除行不参与；四类模式仍为 `sk-`、`ghp_`、`AKIA`、`xox`，只报告路径、行号、类型，不输出令牌。
 
-FileProvider path classification decodes XML attribute references exactly once before normalization. Decimal and hexadecimal representations of `.` or `..` retain the same broad-path policy as literal characters. `node --test scripts/check-manifest-hardening.test.mjs` exercises the complete gate with encoded broad paths, registered and unregistered callers, and narrow-path controls; it also runs in PR CI.
+`static` 不再执行冲突标记、业务回归、漂移对账、插件安装/构建/测试或发布门禁，也不把这些移除项搬进其他 required PR job。现有 `compile`（含其既有门禁自测）、维护提示与推理回归作业保持不变；本地构建、云端构建、来源链和 release 的既有执行点不变。
 
-**FileProvider 宽映射调用点门禁**：`scripts/check-manifest-hardening.mjs` 从 manifest 的 `FILE_PROVIDER_PATHS` metadata 读取实际 paths XML；当任一路径映射回到 provider 基目录、越出基目录或使用 `root-path` 时，递归扫描 Java/Kotlin 源码，并要求 `getUriForFile` 标识符命中的相对路径与数量逐项匹配登记表。源码注释或字符串中的示例也计入命中数。移动、增加或删除调用点时，更新脚本中的清单和用途说明。PR CI 先跑 `node scripts/check-manifest-hardening.mjs --self-test`，再跑真实树判据 `node scripts/check-manifest-hardening.mjs`。
+Build scripts, profiles and source-extracted host compatibility code use LF so POSIX consumers and exact-context tests agree across checkouts. Official patches, captured patch fixtures, the patch registry, the engine overlay manifest, distributed license texts, the verbatim browser stylesheet, cross-language screen-scope fixtures and the legacy recovery core retain exact bytes with `-text`. `node --test scripts/check-upstream-patch-bytes.test.mjs` checks actual bytes and checkout filtering with `core.autocrlf=true`; it is no longer an always-run PR static step.
+
+FileProvider path classification decodes XML attribute references exactly once before normalization. Decimal and hexadecimal representations of `.` or `..` retain the same broad-path policy as literal characters. `node --test scripts/check-manifest-hardening.test.mjs` exercises the complete gate with encoded broad paths, registered and unregistered callers, and narrow-path controls; it is no longer an always-run PR static step.
+
+**FileProvider 宽映射调用点门禁**：`scripts/check-manifest-hardening.mjs` 从 manifest 的 `FILE_PROVIDER_PATHS` metadata 读取实际 paths XML；当任一路径映射回到 provider 基目录、越出基目录或使用 `root-path` 时，递归扫描 Java/Kotlin 源码，并要求 `getUriForFile` 标识符命中的相对路径与数量逐项匹配登记表。源码注释或字符串中的示例也计入命中数。移动、增加或删除调用点时，更新脚本中的清单和用途说明。本地可先跑 `node scripts/check-manifest-hardening.mjs --self-test`，再跑真实树判据 `node scripts/check-manifest-hardening.mjs`；本仓 PR static 不再运行这两条。
 
 ```powershell
 # 一键双 ABI（协调仓库根；快照→注入→门禁→gradle→out/）：
@@ -39,7 +43,7 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 > - 注入链单 pass（`inject-all.py`，压缩次数 ×4→×1）+ dev 循环 `-Fast`（单 ABI + `DSH_INJECT_PRESET=1`）；
 > - gradle `org.gradle.parallel=true` / `caching` / `configuration-cache`（`gradle.properties`）；
 > - 门禁脚本能用流式并行就用（Python 侧 `tarfile` 单遍流式，勿反复解压同一归档）。
-**快照 node 工具链 shim 门禁（0.14.10）**：`scripts/check-snapshot-node-shims.mjs`——判据是产物面：`usr/bin/node` / `usr/bin/pnpm` / `usr/bin/npm` 三者存在且可执行，`usr/bin/npm` **必须是普通文件**（快照基座里它是指向 `npm-cli.js` 的软链，而该 target 的 shebang 被 `fix-shebang.py` 钉成构建期前缀 ⇒ 多用户设备上 `spawnSync('npm')` 直接 ENOENT），两个 shim 内不得出现 `/data/user/<n>/` 或旧 Termux 前缀字面量，且自定位行与 exec 目标必须在场。**为什么需要它**：构建期把「当前用户」烧进 exec 行（`/data/user/0/...`）时，user 0 机器全绿、多用户设备（user 10）上 `pnpm` 每次执行 exit 127，而没有任何一层为「前缀是否写死」负责。**执行点**：本地链 `build-apk-013.ps1` 与云端 `build-apk.mjs` 在 file-modes 之后对本次快照 tar 真跑（失败即拒打包）；PR CI 无生产快照，运行 `--self-test`（正样本 + 四种受控负控：硬编码前缀 / 缺 npm / npm 是软链 / 无执行位）自证判别力。多用户回归的设备侧复现方式见 `docs/contrib/kelai141/2026-10-31-snapshot-node-shims-self-locating.md`。
+**快照 node 工具链 shim 门禁（0.14.10）**：`scripts/check-snapshot-node-shims.mjs`——判据是产物面：`usr/bin/node` / `usr/bin/pnpm` / `usr/bin/npm` 三者存在且可执行，`usr/bin/npm` **必须是普通文件**（快照基座里它是指向 `npm-cli.js` 的软链，而该 target 的 shebang 被 `fix-shebang.py` 钉成构建期前缀 ⇒ 多用户设备上 `spawnSync('npm')` 直接 ENOENT），两个 shim 内不得出现 `/data/user/<n>/` 或旧 Termux 前缀字面量，且自定位行与 exec 目标必须在场。**为什么需要它**：构建期把「当前用户」烧进 exec 行（`/data/user/0/...`）时，user 0 机器全绿、多用户设备（user 10）上 `pnpm` 每次执行 exit 127，而没有任何一层为「前缀是否写死」负责。**执行点**：本地链 `build-apk-013.ps1` 与云端 `build-apk.mjs` 在 file-modes 之后对本次快照 tar 真跑（失败即拒打包）；无生产快照时可手动运行 `--self-test`（正样本 + 四种受控负控：硬编码前缀 / 缺 npm / npm 是软链 / 无执行位）自证判别力；它不再是本仓 PR static 的固定步骤。多用户回归的设备侧复现方式见 `docs/contrib/kelai141/2026-10-31-snapshot-node-shims-self-locating.md`。
 
 > 新增构建步骤若只能单线程，必须在脚本注释里写明原因（例：9p 写带宽是瓶颈，并行无收益）。
 
@@ -51,7 +55,7 @@ cd ..\plugins\dsh-android-<pkg> && npm run build
 
 **Release 快照契约**：`.github/workflows/release.yml` 始终先构建本次运行的 arm64/x86_64 快照，release job 依赖 snapshot job 成功，再下载同一 run 的快照与 lock provenance。已移除无快照来源的 `skip_snapshot_rebuild` 调试输入；失败后可用 GitHub Actions 的重跑失败 job 复用同一 run 中保留的 artifact，artifact 过期则重新构建本次运行。不得用另一 commit 的快照填充发布输入。
 
-**CI 插件复用**：APK `pr-gate.yml` 从 `scripts/plugin-dirs.json` 选择 termux 与 Android 插件，按顺序只准备一次已解析 lock、`npm ci` 和构建产物；协议、插件测试、output schema 和 wire 预算共用这些产物。`@deepseek-ai/dsh-tools` 是 manage 的固定 devDependency，不再额外解析安装。常规 `build-apk.yml` 与来源链也从清单按顺序选择带 build script 的包，各准备并构建一次；来源审计和常规 build 互斥，`abi` 输入决定常规矩阵。Release job 只准备依赖，`build-apk-013.ps1` 统一构建，后续 `npm pack` 复用同一批 `lib/`，不再次安装或构建。
+**构建/发布插件复用**：本仓 `pr-gate.yml` 的 static 不再安装或构建插件，也不运行协议、插件测试、output schema 或 wire 预算。常规 `build-apk.yml` 与来源链仍从 `scripts/plugin-dirs.json` 按顺序选择带 build script 的包，各准备并构建一次；`@deepseek-ai/dsh-tools` 是 manage 的固定 devDependency，不再额外解析安装。来源审计和常规 build 互斥，`abi` 输入决定常规矩阵。Release job 只准备依赖，`build-apk-013.ps1` 统一构建，后续 `npm pack` 复用同一批 `lib/`，不再次安装或构建。`check-tool-output-schema.mjs` 与 `check-plugin-tests.mjs` 的登记接管方指向已有的 `local-chain` 真实执行点，不新增 required PR job，构建/发布清单不变。
 
 **模型目录跨 job 交接（已随插件退役失效）**：该交接曾为已退役的能力发现插件生成 `lib/catalog-snapshot.json`（快照 job 的生成物不随 artifact 上传，Release job 从 arm64 快照提取 pi-ai metadata 与 `dist/providers/data` 再跑 `gen-model-catalog.mjs` 后注入）。插件 0.14.8 退役后，release.yml 的该步骤与 build-snapshot-013.mjs 的生成块均已删除，`scripts/gen-model-catalog.mjs` 不再被任何入口调用；本段保留为历史说明，重新引入能力目录产物前必须先过 `scripts/check-retired-plugins.mjs`。目录的 `engineRootHint` 使用快照内相对路径，避免将 runner 的本地绝对路径写进发布内容；本地正式构建仍由快照生成器生成同源目录。
 
@@ -73,7 +77,7 @@ available for offline mode`，22s 即 break），且该行把 gradle 输出重�
 - `build-release.ps1` 的宿主注入**先收退出码再判**（旧写法 `python … | Select-Object -Last 3` 丢弃退出码，只剩 `Test-Path`，半写 `.new` 会被 `Move-Item` 覆盖输入），并补 `tar -tf` 成员数对账（退出码 0 也可能是截断产物）。判据 `scripts/build-release-inject-guard.test.mjs` 从真实脚本抽出注入段真跑四种状态；两条判据各有「只有它能看见」的反证（退出码非 0 但产物完整 / 退出码 0 但产物截断）。
 - `build-apk-013.ps1` 的快照导出段先判 `$producedAbis`（旧实现只看 `Test-Path $apkOut`，而 `$rejectedAbis` 的 exit 1 在导出段**之后**，被拒 ABI 的 `snapshot-<abi>.tar.xz` 会留在发布目录里）。判据 `scripts/snapshot-export-produced-guard.test.mjs` 用临时 out/ 与桩驱动「被拒 / 零产出 / 已产出」三态，并带一条「去掉守卫必须恢复落盘」的反证。
 
-三条都进 `pr-gate.yml` 的「构建链行为判据」步骤；pwsh / bash / python 缺席的布局由各用例显式 skip 并打印原因（不静默当通过）。
+这三份行为测试仍可按上列脚本单独运行，但已不再是 `pr-gate.yml` 的「构建链行为判据」固定步骤，也未转移到另一个 required PR job；pwsh / bash / python 缺席的布局仍由各用例显式 skip 并打印原因（不静默当通过）。
 
 **构建变体：出包走 release，开发迭代走 debug（0.14.11，issue #1118）**：三条正式链（本地 `build-apk-013.ps1`、云端 `build-apk.mjs`、发布 `build-release.ps1`）都经 `build-apk-engine.mjs` 的 `assembleApk()`，其 `buildType` **缺省 `release`**，因此 Gradle 任务是 `:app:assembleRelease`、产物是 `app/build/outputs/apk/release/app-release.apk`。**同一参数单点派生三样东西**——Gradle 任务、清理陈旧产物的目录、取产物的目录——所以三处不会各自漂移（此前是三个写死 `release` 的字面量，改变体要改三处，漏一处只表现为「清 A 目录却从 B 目录取」的假绿）。可选 `debug` 保留给受控负控与将来 `official` 之类的变体，命令行开关是 `--build-type`；未知值在 Gradle 之前就抛错。开发迭代脚本 `scripts/build-apk-dev-fast.mjs` **刻意**留在 `:app:assembleDebug`（它的产物就是 `application-debuggable`，会被 `check-apk-form.mjs` 判红，故禁作发布资产）——这是分工，不是漏改，脚本头注释已写明。为什么必须切：debug 与 release 在 `app/build.gradle.kts` 里**共用** `signingConfigs.repoDebug`，签名门禁对变体完全无感，0.14.9 的发布产物因此是「签名全绿但 debuggable」的 debug 变体；形态判据现由 `check-apk-form.mjs` 在最终产物关口把守（两条构建链都跑），而受控负控保证「构建类型被改回 debug」时它真的会红。
 
@@ -90,7 +94,7 @@ available for offline mode`，22s 即 break），且该行把 gradle 输出重�
 旧版文档把 `lfs: true` 说成 `git lfs fetch --all` 并据历史对象估算下载量，此结论已于 2026-10-07 撤回：checkout v4 实际执行 `git lfs fetch origin <ref>`，普通 Git 的 `fetch-depth: 0` 不证明历史 LFS 全量下载。依据：[官方 command manager](https://github.com/actions/checkout/blob/v4/src/git-command-manager.ts#L352-L357)、[官方调用点](https://github.com/actions/checkout/blob/v4/src/git-source-provider.ts#L186-L193)。当前优化减少无用 ABI 与重复 job 的下载；实际流量收益应以 runner 日志核实。
 **云端构建（0.13.0 起，宿主=本仓库，自包含）**：`.github/workflows/build-apk.yml`（`workflow_dispatch` 手动，matrix arm64/x86_64）托管整套构建链并只操作本仓库——快照从源重建（`base/` 底座归档为输入，Git LFS）、按统一清单准备并构建插件、注入/门禁/gradle 全部云端完成，仅 `upload-artifact` 供本地下载 debug，不出 Release；**不依赖协调库**（私库，GITHUB_TOKEN 无法签出）。`build-apk.mjs` 以 `DSH_APK_DIR=$GITHUB_WORKSPACE` 指向本仓库（gradle 在此）。本地仍在协调库根跑 `pwsh scripts\build-apk-013.ps1`（`scripts/` 前缀）。
 
-**CI 权限与正式发布**：构建/PR workflow 的 `GITHUB_TOKEN` 明确只读，checkout 禁止持久化凭据；`release.yml` 的快照构建、APK 构建、测试和签名核验均在只读 job 完成并上传 `release-v<version>` artifact。独立 `publish` job 只下载同一 artifact 并创建 draft Release / 上传资产，写权限仅授予该 job。发布阶段不重新构建或重签资产。PR 与来源构建 workflow 的源码 Node 测试使用 `node --test scripts/source-build/*.test.mjs`，新增测试自动进入该测试集。
+**CI 权限与正式发布**：构建/PR workflow 的 `GITHUB_TOKEN` 明确只读，checkout 禁止持久化凭据；`release.yml` 的快照构建、APK 构建、测试和签名核验均在只读 job 完成并上传 `release-v<version>` artifact。独立 `publish` job 只下载同一 artifact 并创建 draft Release / 上传资产，写权限仅授予该 job。发布阶段不重新构建或重签资产。来源构建 workflow 的源码 Node 测试仍使用 `node --test scripts/source-build/*.test.mjs`，新增测试自动进入该测试集；本仓 PR static 不再运行来源链回归。
 
 **APK 三方案签名核验**：最终 APK 必须通过 `scripts/check-apk-signatures.mjs`，并断言 JAR/v1、APK v2、APK v3 均为 true，且签名证书指纹匹配**独立锚** `scripts/fixtures/apk-expected-cert.sha256`（期望证书的唯一真源，与 keystore 解耦；脚本内另存同一摘要作不变量常量，二者不一致即判红并点名「期望证书锚被改动」）。实际 APK 验证必须传 `--keystore`，但它只参与**交叉核对**（keystore 与锚不一致同样判红），不再产生期望值；锚缺失或格式非法一律判红，不得退化成「无期望值」而放行。**keystore 的 alias 与口令没有任何内置默认值**（issue #1031 后半）：检查器要求显式 `--keystore-alias`/`--keystore-pass` 或环境变量 `DSH_APK_KEYSTORE_ALIAS`/`DSH_APK_KEYSTORE_PASS`，两者都缺席即判红并点名缺哪一项、用哪个开关补。此前的 `|| 'androiddebugkey'`/`|| 'android'` 只对仓库自带 debug keystore 成立，换成任何一把真实发布钥都会让合法签名假红（实测 exit 1，补上环境变量才 exit 0）。仓库那份 debug keystore 的公开凭据（`androiddebugkey`/`android`，与 `app/build.gradle.kts` 的 `signingConfigs.repoDebug` 同源）集中在 `build-apk-engine.mjs` 的 `REPO_DEBUG_KEYSTORE_CREDENTIALS`，由它显式传给检查器——配对关系写在一处可读见，不是散落的猜测；换钥调用方用 CLI 参数或环境变量覆盖，不必改代码。`build-apk-source.yml` 的 `expected_signing_certificate` 经 `--print-expected-cert` 读同一份夹具，消除第二份真源。共享 `build-apk-engine.mjs verify` 默认传仓库固定的 `keystore/debug.keystore`，本地、portable 与发布终端链因此共用同一身份判据；直接调用检查器的 workflow 显式传入该路径。核验命令显式传 `apksigner verify --min-sdk-version 18`：APK 的 `minSdk=26`，而默认核验会按 26 判断老系统兼容性，可能把只供旧系统使用的 v1 SHA-256 签名报告为 false；API 18 起支持此 v1 摘要算法。此参数只选择核验兼容性下限，不改 APK 内容或签名。仍要求 apksigner 返回码为 0，并保留原始输出、scheme 判定与退出码。
 
@@ -106,13 +110,13 @@ available for offline mode`，22s 即 break），且该行把 gradle 输出重�
 
 Harness按固定0.2.0-rc.2源码完成全仓构建；prepare-harness-vendor-overrides保留来源登记接口但不再把五个旧Cordis源码覆盖新官方目标。reconcile-harness-vendor-lock只接受目标pin约束，不以旧importer规则掩盖依赖漂移；来源报告必须记录实际版本/lock。工作区链接仍禁止递归copytree跟随复制。
 
-来源构建还会从本仓九个带 `package-lock.json` 的插件/组件目录执行 `npm ci`。`check-package-lock-roots.mjs` 在 PR 与来源构建的早期步骤核对各目录 `package.json` 与锁文件根声明中的名称、版本及四类依赖，发现镜像后的旧声明就立即报错，避免完成 Harness 和 Termux 构建后才在插件安装阶段失败（坑 196）。锁文件更新后还应对受影响目录运行 `npm ci --dry-run --ignore-scripts --no-audit --no-fund`，因为根声明一致不能证明整份依赖图有效。
+来源构建还会从本仓九个带 `package-lock.json` 的插件/组件目录执行 `npm ci`。`check-package-lock-roots.mjs` 在来源构建的早期步骤核对各目录 `package.json` 与锁文件根声明中的名称、版本及四类依赖，发现镜像后的旧声明就立即报错，避免完成 Harness 和 Termux 构建后才在插件安装阶段失败（坑 196）。锁文件更新后还应对受影响目录运行 `npm ci --dry-run --ignore-scripts --no-audit --no-fund`，因为根声明一致不能证明整份依赖图有效。
 
-`check-android-native-runtime-packages.mjs` 对部署树中的 `.node` / `.node.wasm` 逐文件计数、取哈希，并只接受已审计包族。固定 Harness 当前依赖图还带入 trycua、ubjs、sherpa-onnx 与 node-addon-require-builtin 的 Linux GNU 原生文件；它们作为跨平台部署的外平台 payload 记录，不视为 Android 绑定。新增版本、不同架构路径或未知包族继续拒绝；匹配用例在 PR 与来源构建入口运行（坑 197）。
+`check-android-native-runtime-packages.mjs` 对部署树中的 `.node` / `.node.wasm` 逐文件计数、取哈希，并只接受已审计包族。固定 Harness 当前依赖图还带入 trycua、ubjs、sherpa-onnx 与 node-addon-require-builtin 的 Linux GNU 原生文件；它们作为跨平台部署的外平台 payload 记录，不视为 Android 绑定。新增版本、不同架构路径或未知包族继续拒绝；匹配用例仍在来源构建入口运行，不再作为本仓 PR static 步骤（坑 197）。
 
 快照构建器沿用boot-pending标签调用当前dsh-app-boot的auditStartupEntries回归，required pending/failed致命、optional第三方告警；该构建内置检查不是本轮外部验收。当前验收证据见协调仓重构台账；该内置检查不替代设备三层验收。
 
-`check-dsh-source-snapshot.mjs` 的内置预设载体断言与权威门禁 `check-engine-overlay.mjs` 的 CARRIERS 同源，清单在 `scripts/source-build/preset-carriers.mjs`：载体是 `agent-preset/skills/` 与 `web-app/presets/`（0.1.7 把 `dsh-agent-presets` 拆成 agent-preset + agent-preset-registry 后的新形态），判据是目录在场且递归文件数 ≥ 1。`preset-carriers.test.mjs` 读权威源文本双向比对两侧载体集合——权威源重锚而本侧没跟上的话，判红落在秒级的 PR 门禁上，而不是四十分钟后的云端构建（坑 200）。
+`check-dsh-source-snapshot.mjs` 的内置预设载体断言与权威门禁 `check-engine-overlay.mjs` 的 CARRIERS 同源，清单在 `scripts/source-build/preset-carriers.mjs`：载体是 `agent-preset/skills/` 与 `web-app/presets/`（0.1.7 把 `dsh-agent-presets` 拆成 agent-preset + agent-preset-registry 后的新形态），判据是目录在场且递归文件数 ≥ 1。`preset-carriers.test.mjs` 读权威源文本双向比对两侧载体集合——权威源重锚而本侧没跟上的话，可先单独运行这份回归尽早判红；本仓 PR static 不再自动运行它，来源构建入口仍保留该测试集（坑 200）。
 
 来源链在构建期会把 `@deepseek-ai/*` 从 `scripts/snapshot-config/engine-overlay.json` 摘除（否则快照构建器会按登记表回拉上游发布版 tarball，整目录覆盖已注入的源码产物），摘除清单记进 `source-build-policy.json`；APK 步骤先由 `scripts/source-build/restore-overlay-pins.mjs` 把这份清单并回去，再跑门禁集——`check-contract.mjs` 第 7 节正是按它定运行时版本、并判 profile 里引擎包 insert 行是否与运行时同版（该门禁在拿不到 semver 时 SKIP，旧链因此从未真判过）。还原记录进策略 provenance，退出 trap 覆盖回原文件（坑 201）。
 
@@ -296,7 +300,7 @@ gh release download v<ver> -R kelai141/dsh-mobile-apk -p "snapshot-*.tar.xz" -D 
 
 ## Android SDK 许可资产
 
-`third-party-licenses.json` 除 dpkg 矩阵还登记 Shizuku api/provider/aidl/shared 13.1.5（官方固定版本 POM 的 MIT 许可）。`check-third-party.mjs` 校验实际 Gradle 版本与固定 MIT 文本 SHA256；本地和 portable 构建门禁从实际快照生成 notices，再将 `LICENSES/*.txt` 和 notices 复制到 `assets/licenses/`。缺文本、改文本、未登记版本或无法核实依赖必须拒打包；PR 与本地入口跑 `check-third-party.test.mjs`。最终包另需检查两个 ABI 的实际 assets，源码门禁不替代它。
+`third-party-licenses.json` 除 dpkg 矩阵还登记 Shizuku api/provider/aidl/shared 13.1.5（官方固定版本 POM 的 MIT 许可）。`check-third-party.mjs` 校验实际 Gradle 版本与固定 MIT 文本 SHA256；本地和 portable 构建门禁从实际快照生成 notices，再将 `LICENSES/*.txt` 和 notices 复制到 `assets/licenses/`。缺文本、改文本、未登记版本或无法核实依赖必须拒打包；可在本地运行 `check-third-party.test.mjs`；本仓 PR static 不再固定运行该回归。最终包另需检查两个 ABI 的实际 assets，源码门禁不替代它。
 
 ### WSL 调 Windows PowerShell 的可执行扩展名
 
