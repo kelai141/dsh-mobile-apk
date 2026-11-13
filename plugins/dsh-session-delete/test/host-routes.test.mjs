@@ -6,8 +6,8 @@ import { mkdir, mkdtemp, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { apply, removeSession } from '../src/index.js'
-import { quarantineStoredSession } from '../src/session-delete.js'
+import { apply, removeSession } from '../lib/index.js'
+import { quarantineStoredSession } from '../lib/session-delete.js'
 
 // apply() 注册路由前会对 DSH_HOME 跑一次 graveyard 清扫（best-effort）。
 // 测试进程必须把它钉在临时目录上：否则开发机上真实 ~/.dsh/sessions 里若有
