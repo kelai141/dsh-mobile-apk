@@ -11,6 +11,8 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import com.dsharnessmobile.shell.nativecontrol.LinkToken
+import com.dsharnessmobile.shell.nativecontrol.NativeShizukuFacts
 import org.json.JSONObject
 import rikka.shizuku.Shizuku
 import java.util.concurrent.CountDownLatch
@@ -116,6 +118,9 @@ object ShizukuTransport {
             activeAttempt = null
             discardOnMain(userArgs, connection, remove = true)
           }
+          // 原生事实面：**在同一临界区内**用本代票发布。绑定状态机刚刚接受了这条回调，
+          // 票与代次因此必然同源；放到锁外发布则可能与重置/看门狗换代交错。
+          NativeShizukuFacts.shared.onBound(NativeShizukuFacts.shared.tokenAt(bindState.currentGeneration), valid)
         }
         ControlCarrier.invalidateShizukuCache()
         Log.i(TAG, "user service callback " + name.className + " generation=" + generation)
@@ -129,6 +134,9 @@ object ShizukuTransport {
           configuredForAge = -1L
           activeAttempt = null
           latch.countDown()
+          // onDisconnected 已换代：事实面必须用**换代后**的代次发布，且与状态机同一临界区——
+          // 用旧代会被当成迟到回调丢弃，用锁外发布则可能盖掉刚建立的新连接。
+          NativeShizukuFacts.shared.onConnectionLost(bindState.currentGeneration)
         }
         ControlCarrier.invalidateShizukuCache()
         Log.w(TAG, "user service disconnected " + name.className + " generation=" + generation)
@@ -182,6 +190,8 @@ object ShizukuTransport {
       connectedAt = 0L
       configuredForAge = -1L
       bindState.onReset()
+      // 重置作废了旧代：原生事实面同步降级（绑定 no，功能就绪/远端身份回 unknown）。
+      NativeShizukuFacts.shared.onConnectionLost(bindState.currentGeneration)
       previous?.latch?.countDown()
       discardOnMain(previous?.userArgs ?: args(app), previous?.connection, remove = true)
     }
@@ -201,6 +211,8 @@ object ShizukuTransport {
       configuredForAge = -1L
       previous?.latch?.countDown()
       if (previous != null) discardOnMain(previous.userArgs, previous.connection, remove = true)
+      // 看门狗刚换代：事实面在同一临界区内按新代降级。
+      NativeShizukuFacts.shared.onConnectionLost(bindState.currentGeneration)
     }
     ControlCarrier.invalidateShizukuCache()
     Log.w(TAG, "bind watchdog: remove stale user service (attempts=" + bindState.attempts + ")")
@@ -254,12 +266,28 @@ object ShizukuTransport {
     reapStaleBind()
     // 能力判据（0.14.8）：**只看 binder 是否连上**——包名不参与放行。分支实现（Stellar 等，
     // 管理器包名不同、经兼容层提供同一套 API）因此在 binder 一连上时即可用，不必先装官方 APK。
-    val running = binderAlive()
+    // 探活抛异常时对 status 的既有语义保持不变（按未运行分流），但事实面记「未知」：
+    // 「探不到」与「服务确实没跑」是两件事，不能把前者写成 no。
+    // 票必须在 RPC **之前**取：pingBinder 返回后再取票会把「RPC 前的观测」标成新代，
+    // 若期间发生过断连/重置，这条观测就会被错当成当前连接的证据。
+    val runningTicket = NativeShizukuFacts.shared.tokenAt(bindState.currentGeneration)
+    val runningProbe = runCatching { Shizuku.pingBinder() }.getOrNull()
+    val running = runningProbe == true
     val managerPresent = managerInstalled(context)
+    // 原生事实面：这次 status 是**已完成**的读，把它的观测交给同代缓存（读侧只读缓存）。
+    // 在场判定与 status 同源；探活未知且没装管理器时也不能断言「没装」——分支实现靠 binder 说话。
+    val installedFact = if (managerPresent || running) true else if (runningProbe == null) null else false
+    // onLink 自己可能作废这张票（服务不在/探不到 ⇒ 清理依赖事实并推进失效计数）；
+    // 后续每条观测因此各取各的票，绝不复用已被作废的那张。
+    NativeShizukuFacts.shared.onLink(runningTicket, installedFact, runningProbe)
     val out = JSONObject().put("installed", managerPresent || running)
     out.put("running", running)
     out.put("granted", false)
-    out.put("bound", service?.asBinder()?.pingBinder() == true)
+    val boundTicket = NativeShizukuFacts.shared.tokenAt(bindState.currentGeneration)
+    val boundNow = service?.asBinder()?.pingBinder() == true
+    // 绑定面：pid 存活判定是肯定观测（true/false 都算）；票据在 ping 之前取。
+    NativeShizukuFacts.shared.onBound(boundTicket, boundNow)
+    out.put("bound", boundNow)
     out.put("userServiceAgeMs", if (connectedAt > 0L) SystemClock.elapsedRealtime() - connectedAt else -1)
     // 绑定面三态的可观测出口（0.14.1）：调用方（设置页 / 工具面 / 诊断）据此区分
     // 「尚未发起」「正在建立（确有 bind 在飞）」「已失败」，而不是由一句文案猜。
@@ -298,9 +326,13 @@ object ShizukuTransport {
         .put("guidance", UiText.t(context, "Shizuku 版本过低，虚拟屏需要 v12 及以上的 UserService 支持。", "Shizuku is too old; virtual screens need UserService v12 or later."))
     }
 
-    val granted = runCatching {
+    // null = 权限查询抛异常（未知）。status 的既有语义（未授权）不变，事实面不把它写成 no。
+    val grantTicket = NativeShizukuFacts.shared.tokenAt(bindState.currentGeneration)
+    val grantedProbe = runCatching {
       Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
-    }.getOrDefault(false)
+    }.getOrNull()
+    val granted = grantedProbe == true
+    NativeShizukuFacts.shared.onGranted(grantTicket, grantedProbe)
     out.put("granted", granted)
     if (!granted) {
       return out.put("ok", false).put("code", "shizuku-denied")
@@ -443,6 +475,8 @@ object ShizukuTransport {
         if (bindState.beginAttempt(SystemClock.elapsedRealtime())) {
           val attempt = BindAttempt(args(context.applicationContext), bindState.currentGeneration)
           activeAttempt = attempt
+          // 发起即降级（同一临界区）：新一条连接尚未证明可用，旧连接的绑定/就绪/身份不得残留。
+          NativeShizukuFacts.shared.onBindStarted(attempt.generation)
           bindOnMain(attempt)
         }
         latch = activeAttempt?.latch ?: return status(context)
@@ -867,8 +901,14 @@ object ShizukuTransport {
     val ready = ensureBound(context)
     if (!ready.optBoolean("ok")) return ready
     return try {
-      val remote = service ?: return JSONObject().put("ok", false).put("code", "shizuku-user-service-not-bound")
-      JSONObject().put("ok", true).put("uid", remote.uid()).put("protocolVersion", remote.protocolVersion())
+      // 取对象与票在同一临界区：之后的 RPC 若发生在断连/重置之后，回读不能再代表现状。
+      val (remote, token) = synchronized(lock) {
+        val bound = service ?: return JSONObject().put("ok", false).put("code", "shizuku-user-service-not-bound")
+        bound to NativeShizukuFacts.shared.tokenAt(bindState.currentGeneration)
+      }
+      val uid = remote.uid()
+      publishServerUid(remote, token, uid)
+      JSONObject().put("ok", true).put("uid", uid).put("protocolVersion", remote.protocolVersion())
     } catch (t: Throwable) {
       JSONObject().put("ok", false).put("code", "shizuku-identity-failed")
         .put("guidance", t.javaClass.simpleName + ": " + (t.message ?: ""))
@@ -1158,7 +1198,10 @@ object ShizukuTransport {
 
   private fun dispatchIdentity(context: Context, remote: ShizukuUserService,
     applyGate: Boolean = true): Pair<Int, JSONObject?> {
+    // 票在 RPC 前取：这是本次绑定真实回读到的身份，只有仍是同一条连接时才配发布。
+    val token = synchronized(lock) { NativeShizukuFacts.shared.tokenAt(bindState.currentGeneration) }
     val uid = runCatching { remote.uid() }.getOrDefault(-1)
+    publishServerUid(remote, token, uid)
     if (uid != 0 && uid != 2000) return uid to JSONObject().put("ok", false)
       .put("code", "shizuku-identity-failed").put("reason", "shizuku-identity-failed")
       .put("guidance", "无法确认实际 UserService 通道身份，请重置连接后再试。")
@@ -1273,6 +1316,20 @@ object ShizukuTransport {
   private fun probeJson(): JSONObject =
     functionalProbeJson(functionalProbe.current(), SystemClock.elapsedRealtime())
 
+  /**
+   * 发布**真实 UserService 读到的远端 uid**（null / 负值 = 读不到）。
+   *
+   * [token] 必须在发起 RPC **之前**取，这里再核对「仍是同一条连接」：服务对象未变、
+   * 代次未变、事实面票据未失效。三者任一不成立就丢弃——迟到的成功不得写回已断开的连接。
+   * 只从已绑定服务的 RPC 回读取值：不采用 Shizuku.getUid()（本机撤权后仍返回 0）。
+   */
+  private fun publishServerUid(remote: ShizukuUserService, token: LinkToken, uid: Int) {
+    synchronized(lock) {
+      if (service !== remote || bindState.currentGeneration != token.generation) return
+      NativeShizukuFacts.shared.onServerUid(token, uid.takeIf { it >= 0 })
+    }
+  }
+
   /** 异步补一次功能探测（单飞）：TTL 过期时沿用上次结果，不把面板闪成 not-ready。 */
   private fun kickFunctionalProbe() {
     synchronized(probeLock) {
@@ -1280,9 +1337,30 @@ object ShizukuTransport {
       probeInFlight = true
     }
     Thread({
+      // 票在**发起探测前**取：探测本身是一次 binder 往返，期间可能断连/重置/换代。
+      val remote: ShizukuUserService
+      val token: LinkToken
+      synchronized(lock) {
+        remote = service ?: run { synchronized(probeLock) { probeInFlight = false }; return@Thread }
+        token = NativeShizukuFacts.shared.tokenAt(bindState.currentGeneration)
+      }
       try {
-        val remote = service ?: return@Thread
-        functionalProbe.probeIfNeeded({ remote.protocolVersion() })
+        // probeIfNeeded 在 TTL 内或已有探测在飞时**不会**发 RPC，只回全局缓存——
+        // 那种结果可能属于上一条连接，不能当成这一次的证据。因此只在真执行过时发布。
+        var executed = false
+        // run 不是末位参数（其后还有 now 默认参数），必须用命名实参，尾随 lambda 编译不过。
+        val snapshot = functionalProbe.probeIfNeeded(run = {
+          // 单飞占位在锁内完成，lambda 只会被真正要发起探测的那一次调用。
+          executed = true
+          remote.protocolVersion()
+        })
+        if (!executed) return@Thread
+        // 只发布**本次执行**的结果，且必须仍是同一条连接。
+        synchronized(lock) {
+          if (service === remote && bindState.currentGeneration == token.generation) {
+            NativeShizukuFacts.shared.onProbe(token, snapshot.ok, snapshot.atMs)
+          }
+        }
       } catch (t: Throwable) {
         Log.w(TAG, "functional probe failed: " + t.javaClass.simpleName)
       } finally {

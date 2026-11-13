@@ -19,6 +19,7 @@ internal class NativePlatformFacts(
   private val scope: () -> String,
   // 只接受宿主实际持有的显示器；不扫描并冒认其他应用创建的虚拟显示器。
   private val registeredDisplays: () -> Map<String, Int> = { mapOf("real" to Display.DEFAULT_DISPLAY) },
+  private val shizuku: NativeShizukuFacts = NativeShizukuFacts.shared,
 ) : NativeControlDispatcher.Facts {
   override fun capture(): JSONObject {
     val manager = context.getSystemService(DisplayManager::class.java)
@@ -57,6 +58,7 @@ internal class NativePlatformFacts(
         .put("supportedOps", JSONObject().put("state", "known").put("ops", JSONArray(operations.toList())))
         .put("displaySupport", JSONObject().put("state", "known").put("values", displaySupport))
         .put("displayOperations", displayOperations))
-    // Shizuku / Root 未接入本竖切：省略即 unknown，不复用旧插件推断出的布尔值。
+      .put("shizuku", shizuku.snapshot())
+    // Root 仍省略即 unknown，不从 Shizuku 的远端身份推导授权。
   }
 }
