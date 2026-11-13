@@ -67,11 +67,13 @@ internal object ComposerImeOffset {
       "if(d>0)c.style.setProperty('transform','translateY(-'+d+'px)','important')};" +
       "api={set:apply,clear:clear};" +
       "window.$API_NAME=api;" +
-      // 收起方向不等 insets：焦点离开输入框的那一刻立即回落。
+      // 收起方向不等 insets：焦点离开 composer 卡片的那一刻立即回落。
+      // 判据是「焦点还在卡片内吗」，不是「焦点是否回到 body」——点消息区时焦点会落到
+      // 某个普通 div 上，按 body 判会漏掉，卡片只能等 insets，表现为延迟。
       "document.addEventListener('focusout',function(){" +
       "setTimeout(function(){" +
-      "var a=document.activeElement;" +
-      "if(!a||a===document.body||a===document.documentElement)clear()" +
+      "var c=find();var a=document.activeElement;" +
+      "if(!c||!a||!c.contains(a))clear()" +
       "},0)},true);" +
       "}" +
       "api.set($kb);" +
