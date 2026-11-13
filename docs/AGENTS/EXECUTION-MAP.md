@@ -1899,14 +1899,14 @@ flowchart LR
 #### B02 静态门禁链与 CI
 
 
-- **一句话**：本仓 PR `static` 只用 `scripts/check-added-secrets.mjs` 扫本次文本新增行中的机密并运行扫描器自测；构建/发布仍由 `scripts/check-release-gates.mjs` 声明原门禁集并检查既有接线，发布链 `--run --require` 的 SKIP=0 要求不变。
+- **一句话**：本仓 PR `static` 只用 `scripts/check-added-secrets.mjs` 扫本次文本新增行中的机密并运行扫描器自测；独立 `changes` 仅在 `.kt` 路径有差异时触发原 compile 内部步骤。构建/发布仍由 `scripts/check-release-gates.mjs` 声明原门禁集并检查既有接线，发布链 `--run --require` 的 SKIP=0 要求不变。
 - **入口/触发**（本仓 PR 与构建/发布分工不同）：
-  1. **本仓 PR CI**：`.github/workflows/pr-gate.yml`——`pull_request` 与 `push main` 触发；`static` 仅运行增量机密扫描及其 `--self-test`。保留旧显示名「冲突标记与敏感信息扫描」以兼容 required status，实际不检查冲突标记。既有 `compile`、维护提示和推理回归作业不变，移除的 static 检查不转移到其他 required PR job；协调仓 CI 不在此次改动范围。
+  1. **本仓 PR CI**：`.github/workflows/pr-gate.yml`——`pull_request` 与 `push main` 触发；`static` 仅运行增量机密扫描及其 `--self-test`。保留旧显示名「冲突标记与敏感信息扫描」以兼容 required status，实际不检查冲突标记。独立 `changes` 只检测 `.kt` 路径变更并条件触发 `compile`，compile 内部步骤保留；维护提示和推理回归作业不变，移除的 static 检查不转移到其他 required PR job；协调仓 CI 不在此次改动范围。
   2. **本地链**：`scripts/build-apk-013.ps1`（`pwsh -File scripts\build-apk-013.ps1 -Suffix ""`）——注入前 21 项门禁段 → 逐 ABI 注入 → 注入后 7 项产物级门禁 → 打包。
   3. **云端链**：`.github/workflows/build-apk.yml` → `scripts/build-snapshot-013.mjs <abi>`（归档自检）→ `scripts/build-apk.mjs`（`GATE_SCRIPTS` 与本地链差集须为 0）。
   4. **发布链**：`scripts/build-release.ps1`——`node scripts/check-release-gates.mjs`（静态接线）→ `--run --require`（注入前）→ 手工快照注入 → `--run --require`（注入后产物体）→ gradle。
 - **运行顺序**（什么时候跑 / 被谁触发 / 跑完交给谁）：
-  - **提交期**：本仓 pr-gate `static` 按「完整 Git 历史 checkout → Node 24 → 扫描器自测 → 事件差异新增行扫描」推进；不运行冲突标记、业务回归、漂移对账或插件安装/构建/测试。`static` 与既有 `compile` 等作业并行，没有产物交接；扫描不依赖快照，也不接触设备。
+  - **提交期**：本仓 pr-gate `static` 按「完整 Git 历史 checkout → Node 24 → 扫描器自测 → 事件差异新增行扫描」推进；不运行冲突标记、业务回归、漂移对账或插件安装/构建/测试。`static` 与路径筛选 `changes`、维护提示、推理回归独立；`compile` 等待 `changes`，仅 `kotlin=true` 才执行，内部步骤不变。static 不依赖这些作业或其产物；扫描不依赖快照，也不接触设备。
   - **本地构建期**：`build-apk-013.ps1` 在注入之前跑完注入前门禁段；任一项非 0 立即 `exit 1`（不打包）。逐 ABI 循环内，注入后门禁失败走 `Deny-Abi` 记账并 `continue`，循环结束后若 `$rejectedAbis.Count > 0` 则整链 `exit 1`（`scripts/build-apk-013.ps1:514#expect=node%20(Join-Path%20%24Root%20%22scripts%5Ccheck-snapshot-file-modes.mjs%22)%20%24snapIn%202%3E%261`）——控制权在此交还给调用者（人），不自动重试。
   - **发布期**：`build-release.ps1` 先 `git status --porcelain` 脏检查（含协调仓根的 `plugins/scripts/vendor/LICENSES` 面），再跑聚合入口；`--require` 档下任何 SKIP 即中止组装（`scripts/build-release.ps1@7fbdf317`、`:147`）。
   - **跑完交给谁**：门禁本身不产出交付物，只以退出码裁决；通过后控制权依次交给注入链（`scripts/inject-all.py`）、共享终端引擎的 gradle（`:app:assembleRelease`，构建类型由 `assembleApk({ buildType })` 决定）、上传/发布步骤。
@@ -1915,7 +1915,7 @@ flowchart LR
   2. `check-release-gates.mjs --run`【node 主线程】→ `spawnSync(process.execPath, [scripts/<gate>])`【逐个子进程，串行，`maxBuffer` 128MB】→ 子进程 stdout 回写父进程，父进程用 `/SKIP=(\d+)/` 累计 SKIP（`scripts/check-release-gates.mjs:834#expect=const%20m%20%3D%20%2FSKIP%3D(%5Cd%2B)%2F.exec((r.stdout%20%7C%7C%20'')%20%2B%20(r.stderr%20%7C%7C%20''))`）。
   3. pr-gate `static`【GitHub runner，步骤串行】→ `node scripts/check-added-secrets.mjs --self-test` → `--event "$GITHUB_EVENT_PATH"`【仅 Node 内置模块与 Git 子进程】。插件测试的既有构建执行点仍由 `scripts/check-plugin-tests.mjs` 调度，本仓 PR static 不再调用它。
 - **耦合**（点名符号）：
-  - **唯一声明处**：`GATES` / `CI_APK_GATES` / `CI_COORD_GATES` / `ALL_GATES`（`scripts/check-release-gates.mjs:127#expect=const%20GATES%20%3D%20%5B`/`:106`/`:107`）与云端链的 `GATE_SCRIPTS`（`scripts/build-apk.mjs:62#expect=const%20market%20%3D%20externalNamed('dshmarketplace-plugin')`）；`CI_APK_GATES` / `CI_COORD_GATES` 分别描述两仓现存 CI 执行点；本仓仅保留 compile 的既有检查。构建集与发布集不随 PR static 放宽而删减；schema 与 plugin-tests 的 `releaseSink:false` 接管方改指已有 `local-chain` 执行点，不新增 PR job。
+  - **唯一声明处**：`GATES` / `CI_APK_GATES` / `CI_COORD_GATES` / `ALL_GATES`（`scripts/check-release-gates.mjs:127#expect=const%20GATES%20%3D%20%5B`/`:106`/`:107`）与云端链的 `GATE_SCRIPTS`（`scripts/build-apk.mjs:62#expect=const%20market%20%3D%20externalNamed('dshmarketplace-plugin')`）；`CI_APK_GATES` / `CI_COORD_GATES` 分别描述两仓现存 CI 执行点；本仓仅保留 compile 的既有检查，现由 `changes` 检测到 `.kt` 差异后条件执行。构建集与发布集不随 PR static 放宽而删减；schema 与 plugin-tests 的 `releaseSink:false` 接管方改指已有 `local-chain` 执行点，不为这些移除项新增 required PR job。
   - **注入集单一常量**：`scripts/plugin-dirs.json` 的 `dirs`/`externals` 被 `scripts/build-apk-013.ps1:181#expect=%23%20%E9%95%9C%E5%83%8F%E5%89%8D%E7%BC%80%E8%A1%A8%E5%8F%8C%E7%9C%9F%E6%BA%90%E4%B8%80%E8%87%B4%E6%80%A7%EF%BC%9A%E5%A3%B3%E4%BE%A7%20UpdateChecker.MIRROR_PREFIXES%20%E4%B8%8E%E4%B8%8B%E8%BD%BD%E7%AB%99%20MIRROR_TEMPLATES%20%E5%BF%85%E9%A1%BB%E9%80%90%E6%9D%A1%E5%90%8C%E5%BA%8F%E3%80%82`、`scripts/build-apk.mjs`、`scripts/check-release-gates.mjs:206#expect=%2F%2F%20%E6%9E%84%E5%BB%BA%E9%93%BE%E4%B8%AD%E6%AD%A2%E8%AF%AD%E4%B9%89%EF%BC%88%E4%BB%BB%E4%B8%80%20ABI%20%E8%A2%AB%E6%8B%92%20%3D%20%E6%95%B4%E9%93%BE%E9%9D%9E%200%EF%BC%9B0.13.8-b%20%E5%AE%9E%E9%94%A4%EF%BC%9Aarm64%20%E8%A2%AB%E6%8B%92%E5%90%8E%E4%BB%8D%20exit%200%20%E4%BA%A4%E4%BB%98%E5%8D%95%20ABI%20%E4%BA%A7%E7%89%A9%EF%BC%89%E3%80%82`、`scripts/check-patch-mirror.mjs:170` 共同消费；`scripts/release-plugin-src-gaps.json` 只承载 `$pluginSrcs ⊇ dirs` 的显式差集理由。
   - **台账（谁读谁写）**：`scripts/kotlin-test-baseline.json`（`scripts/check-kotlin-test-count.mjs` 读、`--update-baseline` 只许升档写）、`scripts/bridge-symmetry-baseline.json`（`scripts/check-bridge-symmetry.mjs` 只许减少）、`scripts/tool-surface-budget.json`（`scripts/check-tool-surface-budget.mjs` 取 +2% 阈值）、`scripts/contract.json` 与 `scripts/contract-pin-gaps.json`（`scripts/check-contract.mjs`）、`scripts/state-registry.json`（`scripts/check-state-registry.mjs` 逐条核对 evidence）、`scripts/api-route-auth-policy.json`（`scripts/check-api-route-auth.mjs`）、`scripts/control-ops-pending.json` 与 `scripts/control-ops-known-gaps.json`（`scripts/check-control-ops.mjs`）、`scripts/perf-instrumentation-gaps.json`（`scripts/check-perf-instrumentation.mjs`，gaps 为空是合法终态）、`scripts/third-party-licenses.json`（`scripts/check-third-party.mjs`）。
   - **跨块符号**：`ProcIo.readBounded`（`scripts/check-bounded-io.mjs` 守的调用面）、`AndroidBridge.kt` 的 `@JavascriptInterface` 与 `dsh-client-ui-responsive/src/client/android-bridge.ts` 的 `interface AndroidShellBridge`（`scripts/check-bridge-symmetry.mjs` 的 `baseline.surfaces`）、`DeviceControlService.kt` 的 `handle` when 分支 + `ControlProtocolV2.kt` 的 `SUPPORTED_OPS`（`scripts/check-control-ops.mjs` 的六处之一）、`assets/snapshot.sha256` 与 `assets/patched/*`（指纹与运行时资产两门禁的事实面）、`files/boot-segments.log`（`scripts/check-boot-budget.mjs` 的真数据输入）。
@@ -1926,7 +1926,7 @@ flowchart LR
   - `scripts/build-apk.mjs:62#expect=const%20market%20%3D%20externalNamed('dshmarketplace-plugin')`（云端链 GATE_SCRIPTS，与本地链差集须为 0）/`:197`（`--allow-missing`）
   - `scripts/build-apk-013.ps1:245#expect=node%20(Join-Path%20%24Root%20%22scripts%5Ccheck-kotlin-test-count.mjs%22)%202%3E%261`（本地链 `check-kotlin-test-count --allow-missing`）/`:427`（任一 ABI 被拒 = 整链非 0）
   - `scripts/build-release.ps1@7fbdf317`（注入前 `--run --require`）/`:147`（注入后产物级复跑）
-  - `.github/workflows/pr-gate.yml`（`static` 的扫描器自测与事件入口；`compile` 保持全量 Kotlin 单测与原有门禁自测）及 `scripts/check-added-secrets.mjs`（新增行范围、模式与退出码真源）
+  - `.github/workflows/pr-gate.yml`（`static` 的扫描器自测与事件入口；`changes` 的 kotlin 输出决定 `compile` 是否执行，compile 内保留全量 Kotlin 单测与原有门禁自测）及 `scripts/check-added-secrets.mjs`（提交范围、模式与退出码真源）、`scripts/pr-kotlin-changes.mjs`（路径筛选与输出）
   - `scripts/check-boot-budget.mjs:681`（`SKIP(#1)(real-data)` 发射点）/`:684`（随即 `selfTest()` 退出，`SKIP=` 汇总不打印）
   - `scripts/check-code-map.mjs#UNIVERSE@60d8a536`（UNIVERSE covers the APK source tree; the gate remains in both APK build chains, not APK PR static）
 - **不变量**：
@@ -1979,7 +1979,7 @@ flowchart LR
 | check-snapshot-builder-output.mjs | 构建器产出面构造在场 + slim 配置键无死键 + 与打包链路径同源 | 链 | 归档段被删 → 构建器 exit 0 不产 tar，静默复用陈旧快照 | 否 |
 | check-browser-syntax-floor.mjs | 发往浏览器的 bundle 不得含老内核解析不了的语法（AST + 双 arm 差分） | 链 `--degrade`/`--scan` | vendor 无构建源未降级；降级排在 combo 预计算之后；顺序反了 13 条 combo 键必 miss | 真扫需构建树/快照 |
 | check-build-parallel-cap.mjs | 压缩/解压线程上限 = 单一常量 8 且被链消费 | 链 | 回到 `-T0`；新增脚本吃满全部逻辑核 | 否 |
-| check-kotlin-test-count.mjs | Kotlin 单测逐类不低于基线 + 无缺席 + 结果新鲜 + 无失败用例 | 既有两条链；PR compile 在 gradle 单测后严格运行 | 结果目录缺失/陈旧；整类被删（绕过面，见可疑点 1） | 需 gradle 测试结果 |
+| check-kotlin-test-count.mjs | Kotlin 单测逐类不低于基线 + 无缺席 + 结果新鲜 + 无失败用例 | 既有两条链；PR 仅 `.kt` 差异触发 compile，再于 gradle 单测后严格运行 | 结果目录缺失/陈旧；整类被删（绕过面，见可疑点 1） | 需 gradle 测试结果 |
 | check-engine-overlay.mjs（未进声明集合） | `engine-overlay.json` 登记包在快照内全量落位且版本精确 | 仅链（每 ABI）/发布 | overlay 清单与快照不同版；presets 空 | 需快照 |
 | check-patch-mounts.mjs（未进声明集合） | 权威 patch 的 `name` 集合 ⊇ 注入集（双向） | 仅链/发布 | 注入了但 patch 未挂载 → 功能静默不装载 | 否 |
 | check-snapshot-file-modes.mjs（未进声明集合） | 归档权限符合 Android 解压策略（ELF/shebang 0700、数据 0600） | 仅链/发布 | 重打包层（`inject-all.py`）未做归一化 | 需快照 |
@@ -1998,7 +1998,7 @@ flowchart LR
 
 完整扫描契约与构建/发布边界见 `docs/AGENTS/build-and-env.md` 的「本仓 PR 增量机密扫描」。
 
-**B. pr-gate 其余既有作业（本次不变）**：`compile` 保持 Java 17 / Gradle 缓存 / Android SDK 36 → `:app:testDebugUnitTest --no-daemon --stacktrace --rerun-tasks`（自动编译主代码和测试）→ Kotlin 数量反回归 → 快照解码器合成归档反证 → glibc loader 自证 → 失败时上传 HTML 报告。维护文档仍按输入选择且 `continue-on-error: true`，推理回归仍使用现有四家协议与升级用例。**均不依赖 A 的任何产物**；未接收从 static 移除的检查。
+**B. pr-gate `changes` → 条件 `compile`，以及其余既有作业**：`changes` 经完整历史 checkout → Node 24 → `node scripts/pr-kotlin-changes.mjs --self-test` → `--event "$GITHUB_EVENT_PATH"`，只检测路径、不增加业务检查。它复用机密扫描器的事件范围与提交解析，用 `--name-only -z --no-renames` 纳入新增、修改、删除与重命名旧/新两侧；仅后缀 `.kt` 命中，`.kts` 不命中，输出 `kotlin=true/false`。`compile` 设置 `needs: changes` 与 `if: needs.changes.outputs.kotlin == 'true'`；无 `.kt` 时整个作业跳过，事件/引用非法时 changes exit 2、不输出选择结果，不能当作无变更。命中后 compile 内部仍为 Java 17 / Gradle 缓存 / Android SDK 36 → `:app:testDebugUnitTest --no-daemon --stacktrace --rerun-tasks`（自动编译主代码和测试）→ Kotlin 数量反回归 → 快照解码器合成归档反证 → glibc loader 自证 → 失败时上传 HTML 报告。维护文档仍按输入选择且 `continue-on-error: true`，推理回归仍使用现有四家协议与升级用例。**均不依赖 A 的任何产物**；未接收从 static 移除的检查。
 
 **C. 本地链 `scripts/build-apk-013.ps1`**
 1. 注入前门禁段（`:38-146`，顺序即文件顺序）：patch-mirror → contract `--require` → state-registry → bridge-symmetry → gate-skips → build-chain-abort `--self-test` → snapshot-fingerprint（预检）→ manifest-hardening → kotlin-comments → bounded-io → api-route-auth（源码档）→ protocol-v2 → tool-output-schema → control-ops → plugin-tests（**需本机 `plugins/*/lib`**）→ boot-budget（默认档）→ snapshot-builder-output → build-parallel-cap → kotlin-test-count `--allow-missing`（**用的是上一次 gradle 结果**）。
@@ -2040,7 +2040,7 @@ flowchart LR
   5. `scripts/check-contract.mjs#collectConsumedSlots@2c28ea38` 的版本钉只读 `peerDependencies` + `devDependencies`，`dependencies` 不在判据内（评审 I-10）→ `host-web-compat` 打绿但覆盖面为空。
   6. `scripts/check-plugin-tests.mjs:35`/`:35` 对「无 test 目录/无测试文件」的插件只 WARN；`scripts/check-kotlin-test-count.mjs` 可被整类删除绕过（可疑点 1）——两条同族「删掉即判绿」。
   7. `scripts/check-perf-instrumentation.mjs` 无快照时只计 SKIP（CI 常态如此），A1 面靠两条链的 `--require` 兜。
-- **门禁自身的自检（`--self-test`）覆盖**：33 个 `check-*.mjs` 中 **11 个**真支持 `--self-test`（`scripts/check-api-route-auth.mjs` / `scripts/check-boot-budget.mjs` / `scripts/check-browser-syntax-floor.mjs` / `scripts/check-build-chain-abort.mjs` / `scripts/check-build-parallel-cap.mjs` / `scripts/check-code-map.mjs` / `scripts/check-combo-cache.mjs` / `scripts/check-kotlin-comments.mjs` / `scripts/check-kotlin-test-count.mjs` / `scripts/check-snapshot-builder-output.mjs` / `scripts/check-strip-noop.mjs`），其中 `scripts/check-browser-syntax-floor.mjs:681#expect=problems.push(tag%20%2B%20'%20%E6%97%A0%E6%B3%95%E4%BB%8E%E9%99%8D%E7%BA%A7%E8%B0%83%E7%94%A8%E8%A1%8C%E8%A7%A3%E6%9E%90%E5%87%BA%20--stage%20%E5%AE%9E%E5%8F%82%EF%BC%88%E5%88%A4%E6%8D%AE%E5%A4%B1%E6%95%88%EF%BC%8C%E6%8B%92%E7%BB%9D%E5%81%87%E7%BB%BF%EF%BC%89%EF%BC%9A'%20%2B%20degradeLine.l.trim())` 是六向自证（反向必红 / 正向必绿 / 载荷不触发 / 工具链在场 / marker 保全 / 两链接线反回归），`scripts/check-code-map.mjs` contains 17 self-test cases, including in-range content mismatch, moved-anchor and ambiguous-basename controls. `scripts/check-release-gates.mjs` 与 `scripts/check-perf-instrumentation.mjs` **只在自己的注释里提到** `--self-test`（后者是去跑依赖脚本 `scripts/perf/count-compose.mjs --self-test`），本身没有自证模式——即这两条门禁的判别力无自证。本仓 PR static 现在只显式自测 `scripts/check-added-secrets.mjs`；compile 保留既有 snapshot-decode 与 native-linux-loader 自测，其他自测按实际构建执行点或手动命令复核，不能再从旧 static 清单推断。
+- **门禁自身的自检（`--self-test`）覆盖**：33 个 `check-*.mjs` 中 **11 个**真支持 `--self-test`（`scripts/check-api-route-auth.mjs` / `scripts/check-boot-budget.mjs` / `scripts/check-browser-syntax-floor.mjs` / `scripts/check-build-chain-abort.mjs` / `scripts/check-build-parallel-cap.mjs` / `scripts/check-code-map.mjs` / `scripts/check-combo-cache.mjs` / `scripts/check-kotlin-comments.mjs` / `scripts/check-kotlin-test-count.mjs` / `scripts/check-snapshot-builder-output.mjs` / `scripts/check-strip-noop.mjs`），其中 `scripts/check-browser-syntax-floor.mjs:681#expect=problems.push(tag%20%2B%20'%20%E6%97%A0%E6%B3%95%E4%BB%8E%E9%99%8D%E7%BA%A7%E8%B0%83%E7%94%A8%E8%A1%8C%E8%A7%A3%E6%9E%90%E5%87%BA%20--stage%20%E5%AE%9E%E5%8F%82%EF%BC%88%E5%88%A4%E6%8D%AE%E5%A4%B1%E6%95%88%EF%BC%8C%E6%8B%92%E7%BB%9D%E5%81%87%E7%BB%BF%EF%BC%89%EF%BC%9A'%20%2B%20degradeLine.l.trim())` 是六向自证（反向必红 / 正向必绿 / 载荷不触发 / 工具链在场 / marker 保全 / 两链接线反回归），`scripts/check-code-map.mjs` contains 17 self-test cases, including in-range content mismatch, moved-anchor and ambiguous-basename controls. `scripts/check-release-gates.mjs` 与 `scripts/check-perf-instrumentation.mjs` **只在自己的注释里提到** `--self-test`（后者是去跑依赖脚本 `scripts/perf/count-compose.mjs --self-test`），本身没有自证模式——即这两条门禁的判别力无自证。本仓 PR static 现在只显式自测 `scripts/check-added-secrets.mjs`；compile 被 `.kt` 差异触发时保留既有 snapshot-decode 与 native-linux-loader 自测，其他自测按实际构建执行点或手动命令复核，不能再从旧 static 清单推断。
 
 - 漂移：`历史 BRIDGE-API 副本（当前契约见§6 K04）` 说聚合入口「`--list` 现数，当前 17 项」，源码 `scripts/check-release-gates.mjs:127#expect=const%20GATES%20%3D%20%5B`（`GATES` 数组）是 27 项（同仓 `docs/AGENTS/build-and-env.md:54#expect=**%E7%BB%B4%E6%8A%A4%E6%96%87%E6%A1%A3%E5%AF%B9%E8%B4%A6**%EF%BC%9AGradle%20%E7%89%88%E6%9C%AC%2F%E4%BE%9D%E8%B5%96%E4%B8%8E%E6%B4%BB%E5%8A%A8%E8%A1%A5%E4%B8%81%E6%B8%85%E5%8D%95%E7%94%B1` 写的是 27 项，两份文档自相矛盾）。
 - 漂移：5 个门禁脚本的两仓副本行尾不同（协调仓 CRLF、apk 仓 LF），`cmp` 字节不等、归一化后内容一致：`scripts/check-boot-budget.mjs`、`scripts/check-browser-syntax-floor.mjs`、`scripts/check-build-parallel-cap.mjs`、`scripts/check-snapshot-builder-output.mjs`、`scripts/check-tool-output-schema.mjs`；镜像门禁只按「仅行尾差异」告警放行（`scripts/check-patch-mirror.mjs:339`）——「逐字节镜像」在行尾层不成立。
@@ -2049,7 +2049,12 @@ flowchart LR
 ```mermaid
 flowchart TD
   P1["PR 或 push main"] --> CI1["pr-gate static 增量机密扫描"]
-  P1 --> CI2["既有 compile 维护提示 推理回归 不变"]
+  P1 --> CP1["changes 路径筛选自测与事件检测"]
+  CP1 --> CP2{"本次差异含 .kt 路径"}
+  CP2 -->|"true"| CP3["compile 原内部步骤 编译单测与既有自测"]
+  CP2 -->|"false"| CP4["跳过整个 compile"]
+  CP1 -->|"事件或范围非法"| CP5["changes exit 2 不输出选择结果"]
+  P1 --> CI2["维护提示 推理回归 不变"]
   CI1 --> S1["完整 Git 历史 checkout 与 Node 24"]
   S1 --> S2["扫描器 self-test"]
   S2 --> S3["按事件提交范围只读文本新增行"]

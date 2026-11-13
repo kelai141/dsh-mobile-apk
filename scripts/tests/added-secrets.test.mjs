@@ -147,7 +147,7 @@ test('large diff is not silently truncated before token at tail', t => {
 
 test('static workflow runs only scanner and self-test, preserving required check name', () => {
   const workflow = readFileSync(join(ROOT, '.github/workflows/pr-gate.yml'), 'utf8')
-  const staticJob = workflow.split('  static:\n')[1].split('  compile:\n')[0]
+  const staticJob = workflow.split('  static:\n')[1].split(/\n  [a-z][\w-]*:/)[0]
   assert.match(staticJob, /name: 冲突标记与敏感信息扫描/)
   assert.match(staticJob, /fetch-depth: 0/)
   assert.deepEqual([...staticJob.matchAll(/^\s+run: (.*)$/gm)].map(m => m[1]), [

@@ -83,7 +83,7 @@ export function scanPatch(patch) {
   return { findings, addedLines }
 }
 
-export function scanRange({ base, head, mergeBase = false, cwd = process.cwd() }) {
+export function resolveRange({ base, head, mergeBase = false, cwd = process.cwd() }) {
   const headCommit = commit(head, cwd)
   let start
   if (typeof base === 'string' && SHA.test(base) && ZERO.test(base) && !mergeBase) {
@@ -93,6 +93,17 @@ export function scanRange({ base, head, mergeBase = false, cwd = process.cwd() }
     start = commit(base, cwd)
     if (mergeBase) start = git(['merge-base', start, headCommit], cwd).trim()
   }
+  return { start, head: headCommit, cwd }
+}
+
+export function changedPaths(range) {
+  const { start, head, cwd } = resolveRange(range)
+  // Disable rename pairing so both old and new names participate (including .kt -> .txt).
+  return git(['diff', '--name-only', '-z', '--no-renames', '--no-ext-diff', '--no-textconv', '--no-relative', '--ignore-submodules=none', start, head, '--'], cwd).split('\0').filter(Boolean)
+}
+
+export function scanRange(range) {
+  const { start, head: headCommit, cwd } = resolveRange(range)
   const patch = git([
     '-c', 'core.quotePath=false', 'diff', '--no-ext-diff', '--no-textconv',
     '--no-color', '--unified=0', '--find-renames', '--diff-filter=ACMRT', '--no-relative', '--ignore-submodules=none',

@@ -116,7 +116,7 @@ if (argv.includes('--self-test')) {
  * 本迭代要求的门禁集合（唯一声明处）。
  *
  * **APK PR 政策（2026-11-13）**：static 仅扫描本次新增内容中的敏感信息，不再承担业务门禁，
- * 也不把这些门禁搬到另一个阻断 job。既有 compile / maintenance / reasoning jobs 保持不变。
+ * 也不把这些门禁搬到另一个阻断 job。compile 仅在 .kt 路径变更时执行；维护提示与推理回归不变。
  *   - `ciApk`：仅 compile 保留的 snapshot-decode / native-linux-loader 自证；
  *     Kotlin 数量门禁仍由 compile 真检，以 releaseSink:false + sink=apk-ci 单独核验执行点。
  *   - `ciCoord`：协调仓现有 CI 归属，不受本次 APK PR 政策调整影响。

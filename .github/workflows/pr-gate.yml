@@ -35,8 +35,30 @@ jobs:
       - name: 仅扫描本次新增内容中的敏感信息
         run: node scripts/check-added-secrets.mjs --event "$GITHUB_EVENT_PATH"
 
+  changes:
+    name: Kotlin 文件变更检测
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      kotlin: ${{ steps.paths.outputs.kotlin }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - name: Kotlin 路径筛选自测
+        run: node scripts/pr-kotlin-changes.mjs --self-test
+      - name: 检测本次差异的 Kotlin 文件路径
+        id: paths
+        run: node scripts/pr-kotlin-changes.mjs --event "$GITHUB_EVENT_PATH"
+
   compile:
     name: Kotlin 编译门禁
+    needs: changes
+    # 只认 .kt（不含 .kts）；新增、删除和重命名任一侧均计入。
+    if: ${{ needs.changes.outputs.kotlin == 'true' }}
     runs-on: ubuntu-latest
     # 实测：compile job 历史最长约 1 分 25 秒。取 20 分钟是因为首次无 Gradle 缓存时
     # 依赖下载会显著变慢，这一档不能按缓存命中的数值定。
