@@ -8,7 +8,7 @@
 //   3) 断言 build-release.ps1 的 $pluginSrcs ⊇ build-apk-013.ps1 的 $pluginDirs（差集须显式声明理由）。
 //
 // 用法：
-//   node scripts/check-release-gates.mjs                      # 静态接线断言（CI 可直接跑）
+//   node scripts/check-release-gates.mjs                      # 构建/发布接线断言（不再挂 APK PR static）
 //   node scripts/check-release-gates.mjs --list               # 打印声明的门禁集合
 //   node scripts/check-release-gates.mjs --run [--snapshot-dir <dir>]   # 顺序执行门禁集（发布链用）
 //   node scripts/check-release-gates.mjs --self-test                   # 构建 canonical 路由的正控 / 负控自证
@@ -115,41 +115,40 @@ if (argv.includes('--self-test')) {
 /**
  * 本迭代要求的门禁集合（唯一声明处）。
  *
- * **归属口径（2026-09-21 用户拍板重构）**：每条门禁只跑在**拥有其输入**的那一侧——
- *   - `ciApk`：输入在 apk 仓（壳侧 Kotlin / 引擎 op 两份清单 / bridge 对称基线 / 状态登记表…）⇒ 由 apk 仓 CI 跑；
- *   - `ciCoord`：输入在协调仓（plugins、scripts、patches、vendor）⇒ 由协调仓 CI 跑；
- *   - 两者皆 false：需要**两棵树都在场**（快照产物、跨仓逐字节镜像一致性、聚合发布面）⇒ 只由本地链与发布链
- *     （`build-apk-013.ps1` / `build-release.ps1 --run --require`，SKIP=0）执行。
- * 为什么不再要求「两仓 CI 都跑全量」：协调仓 CI 为跑那些 apk 侧门禁不得不跨仓检出对端，由此长出两个
- * 脆弱面并被实测咬过——① 对端分支名写死，迭代一过就检错分支；② 镜像副本含构建产物（lib/），而 CI 在
- * 构建前比对，必然判「清单不一致」。跨仓一致性交给两棵树都在场的链上执行，CI 只守本仓自包含面。
- * needsSnapshot=true 的门禁由构建/发布链调用，CI 不跑。
+ * **APK PR 政策（2026-11-13）**：static 仅扫描本次新增内容中的敏感信息，不再承担业务门禁，
+ * 也不把这些门禁搬到另一个阻断 job。compile 仅在 .kt 路径变更时执行；维护提示与推理回归不变。
+ *   - `ciApk`：仅 compile 保留的 snapshot-decode / native-linux-loader 自证；
+ *     Kotlin 数量门禁仍由 compile 真检，以 releaseSink:false + sink=apk-ci 单独核验执行点。
+ *   - `ciCoord`：协调仓现有 CI 归属，不受本次 APK PR 政策调整影响。
+ *   - 两者皆 false 不代表门禁退役：ALL_GATES 仍要求本地/云端两条构建链逐项接线，
+ *     RELEASE_GATES 及其严格档执行规则不变；移出发布 --run 段的项必须有真实 sink。
+ * 跨仓/快照/最终 APK 的真检只在拥有对应输入的构建与发布阶段执行；PR 自证不代替产物验收。
  */
 const GATES = [
-  { script: 'check-patch-mirror.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
+  { script: 'check-patch-mirror.mjs', ciApk: false, ciCoord: true, needsSnapshot: false },
   // 0.14.2 D3/B6：死 token 防漂移——我们自己 CSS 引用的 --dsw-* 必须在上游现存令牌集合里
   // （引用不存在的令牌 ⇒ var(--dsw-x, 亮色回退) 整条声明失效 ⇒ 深色主题白底白字，D3 实锤）。
   // 输入在协调仓（我们的 CSS + 上游样式目录）⇒ 由协调仓 CI 与两条构建链跑；上游树不在场时 SKIP 计数。
   { script: 'check-dead-tokens.mjs', ciApk: false, ciCoord: true, needsSnapshot: false },
   // 0.14.2 T6：补丁测试的夹具必须与 contract.baseline 同代——夹具停在上一代时「补丁回归」是结构性假绿
   // （rc.1 实测：真树断 9 条而 16 个补丁测试全绿）。
-  { script: 'check-patch-fixtures.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
+  { script: 'check-patch-fixtures.mjs', ciApk: false, ciCoord: true, needsSnapshot: false },
   // 0.14.5（上游对齐审计 C-1）：夹具同代**不等于**断言被跑过——26 个补丁回归里此前只有 6 个有入口，
   // 其余只被 node --check 解析过。本门禁把全部 26 个真的串行跑起来，并对已知失败采用**带理由的显式白名单**：
   // 存量失败如实记账，任何**新增**失败立刻判红。实测它当场逮到 ptc-android-native-A1 读 fixture 里不存在的 src/*.ts。
-  { script: 'check-patch-test-manifest.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
+  { script: 'check-patch-test-manifest.mjs', ciApk: false, ciCoord: true, needsSnapshot: false },
   // 0.14.8 堆下限：引擎 V8 老生代下限有**两个注入点**（壳侧 shellEnv() 的 NODE_OPTIONS +
   // 快照内启动器 usr/libexec/dsh-node），两处必须表达同一个 clamp 区间。单边漂移会造出
   // 「引擎起来了、code run 却仍 OOM」这类最难查的形态（启动器要覆盖被过滤 env 的调用方）。
-  // 输入均在 apk 仓（EngineManager.kt + build-snapshot-013.mjs）⇒ 由 apk 仓 CI 跑；
+  // 输入均在 apk 仓（EngineManager.kt + build-snapshot-013.mjs），由构建与发布链真检；
   // 自身带 --self-test（1 正样本 + 8 受控负控），证明每条判据仍会判红。
-  { script: 'check-engine-heap-floor.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
-  { script: 'check-manifest-hardening.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
-  { script: 'check-input-config-changes.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
-  { script: 'check-bounded-io.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
+  { script: 'check-engine-heap-floor.mjs', ciApk: false, ciCoord: false, needsSnapshot: false },
+  { script: 'check-manifest-hardening.mjs', ciApk: false, ciCoord: false, needsSnapshot: false },
+  { script: 'check-input-config-changes.mjs', ciApk: false, ciCoord: false, needsSnapshot: false },
+  { script: 'check-bounded-io.mjs', ciApk: false, ciCoord: false, needsSnapshot: false },
   // #222：所有 mobile-owned /api exact/prefix 路由必须在登记表中，并有本地 auth guard 或窄公开白名单。
-  { script: 'check-api-route-auth.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
-  { script: 'check-snapshot-fingerprint.mjs', ciApk: true, ciCoord: false, needsSnapshot: true },
+  { script: 'check-api-route-auth.mjs', ciApk: false, ciCoord: false, needsSnapshot: false },
+  { script: 'check-snapshot-fingerprint.mjs', ciApk: false, ciCoord: false, needsSnapshot: true },
   // 0.14.7 / task-9 D-4：内嵌快照「真的能解压」门禁。输入 = APK 树内嵌 assets/snapshot.tar.xz（构建期就位），
   // 判据 = 用与设备同一套 streaming 解码器完整解压一遍（两条构建链在 assemble 之后真跑；CI 无 jar 缓存时
   // 显式 SKIP 计数，发布链 --require 判红）。needsSnapshot=false：它读的是 APK 树内嵌资产，不是 .deploy-tmp 的 tar。
@@ -163,23 +162,23 @@ const GATES = [
   // 与 #1077 同一「最终产物」关口），由 local-chain / cloud-chain 的 sink 断言核验。
   // 为什么必须登记：不登记 = 没人调它 = 这条防线静默消失（check-gate-skips 会要求两条链逐项调用）。
   { script: 'check-native-linux-loader.mjs', ciApk: true, ciCoord: false, needsSnapshot: false, releaseSink: false, sink: 'local-chain' },
-  // G.3（0.14.2-fx-2）下沉：它的输入是 plugins/*/lib（源码面产物），**不是发布 tar** ⇒ 留在发布链上
-  // 只是把 43.3s 重复付一遍（apk CI 已真跑，见 pr-gate.yml「工具 output.schema」步）。releaseSink:false
-  // 只把它从**发布链的 --run 段**移出，声明仍在（不删门禁），由 apk CI 承担执行。
-  { script: 'check-tool-output-schema.mjs', ciApk: true, ciCoord: false, needsSnapshot: false, releaseSink: false, sink: 'apk-ci' },
-  { script: 'check-protocol-v2.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
-  { script: 'check-control-ops.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
+  // G.3 下沉：输入是 plugins/*/lib（源码面产物），不是发布 tar，故不进发布 --run 段。
+  // APK PR static 移除业务门禁后，由已真实执行该门的本地构建链接管 sink；云端链同样保留调用。
+  // releaseSink:false 与声明集合不变，接管方断言仍要求真实执行点（不能只在注释里提名）。
+  { script: 'check-tool-output-schema.mjs', ciApk: false, ciCoord: false, needsSnapshot: false, releaseSink: false, sink: 'local-chain' },
+  { script: 'check-protocol-v2.mjs', ciApk: false, ciCoord: false, needsSnapshot: false },
+  { script: 'check-control-ops.mjs', ciApk: false, ciCoord: false, needsSnapshot: false },
   // 「会读设备屏的 op」两份清单的跨语言对等（0.14.1）：引擎 `REAL_SCREEN_CONTROL_OPS` 与壳侧
   // `REAL_SCREEN_OPS` 必须逐条相同。设备实测缺陷 B4 的根因就是它们不一致——壳侧那份是
   // `A11Y_OPS` 后端能力清单的陈旧拷贝，多带 `state`/`webSnapshot`/`webAction` 三条**不读设备屏**的 op，
   // 于是这三条在缺省范围 virtual-only 下被壳侧范围门拦死：android_web_dump、WebView ref 路径、
   // 以及点击生效校验（verifyClick 读 `state`）在缺省范围下全不可用，而引擎侧毫无察觉。
-  { script: 'check-op-registry-parity.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
+  { script: 'check-op-registry-parity.mjs', ciApk: false, ciCoord: false, needsSnapshot: false },
   // 镜像前缀表双真源一致性（本轮调查发现）：壳侧 UpdateChecker.MIRROR_PREFIXES 与下载站
   // webpages/src/assets/release.js 的 MIRROR_TEMPLATES 必须逐条同序。两份表曾漂移成 3 条 vs 4 条
   // （壳侧缺 ghproxy.net），后果是「应用内下载」与「浏览器下载」走不同的线路集合，而没有任何一层
   // 为不一致负责。顺序即回退优先级，故判据**不排序**：位置对调也算差异。
-  { script: 'check-mirror-parity.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
+  { script: 'check-mirror-parity.mjs', ciApk: false, ciCoord: false, needsSnapshot: false },
   { script: 'check-runtime-assets.mjs', ciApk: false, ciCoord: false, needsSnapshot: true },
   // 机密门禁（review C3）：归档不可读/成员为空 = 硬失败（旧实现垃圾文件也 PASS 的假绿）；严格档 --require。
   { script: 'check-snapshot-secrets.mjs', ciApk: false, ciCoord: false, needsSnapshot: true },
@@ -188,12 +187,12 @@ const GATES = [
   // （SKIP 计数），由两条构建链与发布链（--run --require，强制 SKIP=0）实际执行。
   { script: 'check-contract.mjs', ciApk: false, ciCoord: false, needsSnapshot: false },
   // 0.13.8-b B2（ST-25/26/31 + §7.2 度量）：制度性门禁与性能度量入口一并进声明集合，
-  // 由本聚合入口保证两条链 + 两仓 CI 都跑到（接线面只此一处）。
-  { script: 'check-state-registry.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
-  { script: 'check-bridge-symmetry.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
-  { script: 'check-gate-skips.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
-  { script: 'check-workflow-input-injection.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
-  { script: 'check-perf-instrumentation.mjs', ciApk: true, ciCoord: true, needsSnapshot: true },
+  // 由本聚合入口保证两条构建链逐项接线；PR CI 仅核验本轮明确保留的子集。
+  { script: 'check-state-registry.mjs', ciApk: false, ciCoord: false, needsSnapshot: false },
+  { script: 'check-bridge-symmetry.mjs', ciApk: false, ciCoord: false, needsSnapshot: false },
+  { script: 'check-gate-skips.mjs', ciApk: false, ciCoord: true, needsSnapshot: false },
+  { script: 'check-workflow-input-injection.mjs', ciApk: false, ciCoord: false, needsSnapshot: false },
+  { script: 'check-perf-instrumentation.mjs', ciApk: false, ciCoord: true, needsSnapshot: true },
   // 注入面成员完整性（P0：包内新增文件曾被静默丢弃 → ERR_MODULE_NOT_FOUND/引擎启动即死）：
   // 需要「注入后」tar，故 CI 不跑，由两条构建链在注入步骤之后调用 + 发布链按快照面跑。
   { script: 'check-inject-completeness.mjs', ciApk: false, ciCoord: false, needsSnapshot: true },
@@ -202,10 +201,10 @@ const GATES = [
   // 本门禁自己按 .deploy-tmp/snapshot-013/<abi>/stage/root 发现根，找不到记计数 SKIP（--require 判红）。
   { script: 'check-profile-undici-resolution.mjs', ciApk: false, ciCoord: false, needsSnapshot: false },
   // Kotlin 块注释嵌套静态检查（KDoc 里写 node_modules/** 会吞掉整个文件；dev-shell 实测）。
-  { script: 'check-kotlin-comments.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
-  { script: 'check-i18n-parity.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
+  { script: 'check-kotlin-comments.mjs', ciApk: false, ciCoord: false, needsSnapshot: false },
+  { script: 'check-i18n-parity.mjs', ciApk: false, ciCoord: false, needsSnapshot: false },
   // 构建链中止语义（任一 ABI 被拒 = 整链非 0；0.13.8-b 实锤：arm64 被拒后仍 exit 0 交付单 ABI 产物）。
-  { script: 'check-build-chain-abort.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
+  { script: 'check-build-chain-abort.mjs', ciApk: false, ciCoord: true, needsSnapshot: false },
   // 剥离清单后置断言（ST-16）：清单项在产物里必须不存在 + 反 no-op（基座命中的必须消失）。
   { script: 'check-strip-noop.mjs', ciApk: false, ciCoord: false, needsSnapshot: true },
   // 快照内 node 入口 shim（真机实证 2026-10-31，实例跑在 Android 多用户 user 10 上）：
@@ -214,32 +213,28 @@ const GATES = [
   //   缺陷 2：usr/bin/npm 是 symlink（-> ../lib/node_modules/npm/bin/npm-cli.js）⇒ pnpm 的
   //     passThruToNpm spawnSync('npm') 经它落地 ENOENT，npm 通道整条断掉。
   // 两类缺陷构建期全绿、只有产物面能看出来（成员类型 / tar 模式 / shim 内容），故 needsSnapshot=true：
-  // 两条构建链传注入后 tar 真检、发布链按快照面 --require 跑；CI 无 tar，只跑 --self-test 自证
-  // （见 pr-gate.yml 同名步骤）。
-  { script: 'check-snapshot-node-shims.mjs', ciApk: true, ciCoord: false, needsSnapshot: true },
+  // 两条构建链传注入后 tar 真检，发布链按快照面 --require 跑；APK PR static 不再执行本门禁自证。
+  { script: 'check-snapshot-node-shims.mjs', ciApk: false, ciCoord: false, needsSnapshot: true },
   // #1716 回归面：首启脚本清单必须落在 usr/.dsh-shebang-scripts.txt（壳侧唯一读点）。
   // 清单缺席不会报错——壳侧静默回落全树遍历（慢设备实测 527 秒 vs 21 秒），
   // 而构建日志照样打印「清单已生成」。判据只存在于产物 tar 成员上，故 needsSnapshot=true。
-  { script: 'check-shebang-manifest.mjs', ciApk: true, ciCoord: false, needsSnapshot: true },
+  { script: 'check-shebang-manifest.mjs', ciApk: false, ciCoord: false, needsSnapshot: true },
   // combo 缓存覆盖（0.14.0 启动性能 P1-2 / 引擎树补丁 combo-cache-A3）：注入后快照的每条
   // client.js 必须有 sha256 命中的缓存条目，否则运行期回退现场生成会吞掉全部启动收益。
   { script: 'check-combo-cache.mjs', ciApk: false, ciCoord: false, needsSnapshot: true },
   // 模型面工具 wire 预算（0.14.0 §4.1 渐进披露）：注册集（解锁后上限）+ 初始可见集（模型第一眼）
   // 双口径。掩蔽组名单从 capability-gate 实现导出，门禁不另写一份（防清单漂移假绿）。
-  // 离线可跑（真跑各插件 apply()，只需 plugins/*/lib 构建产物）-> CI 与两条链都跑。
-  { script: 'check-tool-surface-budget.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
+  // 离线可跑（真跑各插件 apply()，只需 plugins/*/lib 构建产物），由构建与发布链执行。
+  { script: 'check-tool-surface-budget.mjs', ciApk: false, ciCoord: false, needsSnapshot: false },
   // 工具名「承诺 vs 实现」（0.14.1）：指引里提到的 `android_*` 工具名必须真有声明位。
   // 设备实测缺陷 B2 的原形是 `android_vdisplay_input` 被三处模型可见文案与 Skill 文档承诺，却从未
   // `defineTool`——模型照指引调用只拿到 `unknown tool`，且会把这当成自己参数写错而反复重试。
   // 判据零启发式：声明位字面量集合 ⊇ 全仓 `android_*` 提及集合（白名单为空，加任何一条都要被质疑）。
-  { script: 'check-tool-name-promises.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
-  // 插件单测（0.14.1 §1.1b 决策 1 / §2.4 前置项 1）：该脚本自 0.14.0 起就存在，却**从未被任何
-  // 路径调用**（不在 GATES、不在接线断言、两条链与两仓 CI 均无引用）——7 个插件的 34 个测试文件
-  // 全部没人跑，「已新增该门禁」的声明与事实不符。此处接入声明集合即同时被两条构建链与两仓 CI
-  // 覆盖（check-gate-skips.mjs 会断言声明集合被两条链逐项调用）。离线可跑，只需 plugins/*/lib。
-  // G.3（0.14.2-fx-2）下沉：7 个插件的单测（103.1s，是全场最贵的一项）输入同样是 plugins/*/lib，
-  // 与发布 tar 无关；apk CI 已真跑（pr-gate.yml「插件单测」步）。移出发布链 --run 段，声明保留。
-  { script: 'check-plugin-tests.mjs', ciApk: true, ciCoord: false, needsSnapshot: false, releaseSink: false, sink: 'apk-ci' },
+  { script: 'check-tool-name-promises.mjs', ciApk: false, ciCoord: false, needsSnapshot: false },
+  // 插件单测：曾出现「脚本存在、没有入口真跑」的假绿，故声明集合与真实执行点都必须保留。
+  // 输入是 plugins/*/lib，与发布 tar 无关；releaseSink:false 只移出发布 --run 段，不删除门禁。
+  // APK PR static 不再安装/构建插件或跑单测；sink 转交已执行此门的本地链，云端链调用也不变。
+  { script: 'check-plugin-tests.mjs', ciApk: false, ciCoord: false, needsSnapshot: false, releaseSink: false, sink: 'local-chain' },
   // 冷启动预算 C1~C6（0.14.1 块F P0-2）：把口径从「LISTEN 达标」换成「首个 HTTP 响应 + 无 >2s
   // 同步块」——只判 LISTEN 会系统性假绿（设备实测 LISTEN 2981ms 达标而 compose 2795ms 挡住首个响应）。
   // 判据全部为数值算术断言 + 自带反向对照（--self-test）。
@@ -252,37 +247,32 @@ const GATES = [
   //      拉取真产物再真检（自动化半边，免人手导出）。
   //   c. `--require-real`（发布前设备门禁）——产物缺席即判红，禁止「无产物 = 通过」。
   //   此前四处调用点一律传 `--self-test`，真检**永不执行**（判据真会红却被结构性绕开）；现全部改默认档。
-  { script: 'check-boot-budget.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
+  { script: 'check-boot-budget.mjs', ciApk: false, ciCoord: true, needsSnapshot: false },
   // 快照构建器**产出面**结构断言（0.14.1 P0 反回归）：0849579 曾把 §8 归档整段删掉，构建器跑到
   // 瘦身就 exit 0、**从不产出 tar**，而打包链只判「tar 是否存在」→ 静默复用陈旧快照、全链零报错。
   // 判据 = 产出面构造在场 + slim.json 配置键消费者闭合（死键即某步被删的第一手信号）+ 与打包链路径同源。
-  // 离线可跑（只读源码与配置），故 CI 与两条链都跑。
-  { script: 'check-snapshot-builder-output.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
+  // 离线可跑（只读源码与配置），由构建与发布链执行；协调仓 CI 的现有归属不变。
+  { script: 'check-snapshot-builder-output.mjs', ciApk: false, ciCoord: true, needsSnapshot: false },
   // 浏览器语法下限（0.14.1 块C G-1）：老设备（WebView <94）白屏的产物级真因——入口 chunk 带
   // ES2022 类静态块 `static{}`，解析期语法错误 → 整模块不执行 → 纯白无字。判据为**真实解析器 AST**
-  // + esbuild 双 arm 逐字节差分（禁 grep 文本在场），自带四向自证。真检需快照/构建树，CI 跑 --self-test。
-  { script: 'check-browser-syntax-floor.mjs', ciApk: true, ciCoord: false, needsSnapshot: true },
+  // + esbuild 双 arm 逐字节差分（禁 grep 文本在场），自带四向自证；真检需快照/构建树，由链上执行。
+  { script: 'check-browser-syntax-floor.mjs', ciApk: false, ciCoord: false, needsSnapshot: true },
   // 构建并发上限（0.14.1 用户拍板的系统级约束）：构建期压缩/解压不得吃满全部逻辑核（原为 `xz -T0`
   // = 16 线程），否则开发机被撑满 → MuMu 模拟器卡顿/系统不稳（「模拟器优先」是铁律 2，两者常并行）。
   // 判据 = 上限来自单一常量且默认 8 + 构建链真的消费它 + 设备侧同受限 + 注释不自伤。离线可跑。
-  { script: 'check-build-parallel-cap.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
+  { script: 'check-build-parallel-cap.mjs', ciApk: false, ciCoord: true, needsSnapshot: false },
   // Kotlin 单测数量反回归（0.14.1 P0）：审计发现两处同源缺口——① CI 从不跑 Kotlin 单测
   // （pr-gate 只跑 compileDebugKotlin）→ 417 例契约断言只在本地手动跑过；② 即使跑起来，
   // 只按退出码判也分不清「全绿」与「一个用例都没跑」（测试类被删/改名/漏编译时 exit 仍 0）。
   // 本门禁逐类比对基线（只许升）+ 断言无缺席 + 结果新鲜，抓「防线被删却仍然绿」。
-  // ci:false 是刻意的：云端 CI 无 gradle 产物环境，故本项由本地链/发布链跑；
-  // 无结果时显式 SKIP(#1) 计数（不计入绿），绝不冒充通过。
-  // G.0 ⑤ 结构性脱节 + G.3 下沉（0.14.2-fx-2）：apk CI 此前跑 testDebugUnitTest 却**从不**调本门禁，
-  // 而云端链传 --allow-missing ⇒ 「测试类被删」时 CI 仍绿。本轮把它挂到 apk CI 的 testDebugUnitTest
-  // **之后**（同 job，结果目录已就位、无 SKIP），并去掉 build-apk.mjs 的 --allow-missing。
-  // 发布链不再 --run 它（51.1s）：发布产物不含测试结果，判据在 CI 才是真检。
+  // 真执行点在 APK compile 的 testDebugUnitTest 之后（结果已就位），本地/云端构建链也保留调用，
+  // 不能回退 --allow-missing。本次只收窄 static，compile 不动，故 sink=apk-ci 继续成立。
+  // ciApk:false + releaseSink:false 是既有声明口径：不进发布 --run 段，sink 断言单独核验真检。
   { script: 'check-kotlin-test-count.mjs', ciApk: false, ciCoord: false, needsSnapshot: false, releaseSink: false, sink: 'apk-ci' },
-  // Execution-map coverage and anchor checks (0.14.2 D7). Its inputs are APK source and docs,
-  // so this gate belongs to APK CI and both APK build chains, not coordination CI. The shared
-  // script remains in MIRROR_TOP so coordinated builds use the same source-line expectations.
-  // It also runs before packaging; needsSnapshot=false because it reads the tree and docs only.
-  // The APK workflow invokes this gate after Kotlin compilation and before package checks.
-  { script: 'check-code-map.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
+  // Execution-map coverage and anchor checks (0.14.2 D7) read APK source and docs only.
+  // Both APK build chains and the release run retain this gate; APK PR static no longer runs it.
+  // The shared script remains in MIRROR_TOP so coordinated builds use the same expectations.
+  { script: 'check-code-map.mjs', ciApk: false, ciCoord: false, needsSnapshot: false },
   // APK 产物形态门禁（0.14.11）：最终产物 badging 不得含独立行 `application-debuggable`。
   // 缺的判据（0.14.9 实测）：整条链跑 `:app:assembleDebug`，而 app/build.gradle.kts 里 debug/release
   // **共用** signingConfigs.repoDebug —— 发布产物本质是 debug 变体（badging 第 112 行即
@@ -304,12 +294,12 @@ const GATES = [
   // vendored 目录的字节绑定（issue #1285）：vendor/dsh-plugin-subscriptions 此前只按版本字符串
   // 钉住，PROVENANCE 记的 tarball shasum/sha512 无任何门禁消费 ⇒ 手改一个 lib/*.js 也能出厂。
   // 判据 = 逐文件 sha256 + 字节数与 scripts/vendor-provenance.json 相符（另含目录自述数字）。
-  // 输入全在仓库内（不读网络、不需要快照），故 ciApk/ciCoord 皆 true。
-  { script: 'check-vendor-provenance.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
-  { script: 'check-retired-plugins.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
+  // 输入全在仓库内（不读网络、不需要快照），构建与发布链真检，协调仓 CI 归属保持不变。
+  { script: 'check-vendor-provenance.mjs', ciApk: false, ciCoord: true, needsSnapshot: false },
+  { script: 'check-retired-plugins.mjs', ciApk: false, ciCoord: true, needsSnapshot: false },
   // 0.2.2-rc.1 适配：引擎首次声明 engines.node>=24.9.0，快照 node 由 Termux nodejs-lts 决定、
   // 仓内不钉版本 ⇒ 把「声明下限 vs 快照实测」绑成判据（取证在 scripts/snapshot-config/snapshot-runtime.json）。
-  { script: 'check-snapshot-node-floor.mjs', ciApk: true, ciCoord: true, needsSnapshot: false },
+  { script: 'check-snapshot-node-floor.mjs', ciApk: false, ciCoord: true, needsSnapshot: false },
 ]
 const CI_COORD_GATES = GATES.filter((g) => g.ciCoord).map((g) => g.script)
 const CI_APK_GATES = GATES.filter((g) => g.ciApk).map((g) => g.script)
@@ -318,13 +308,13 @@ const ALL_GATES = GATES.map((g) => g.script)
 // 用户原话：「优化所有构建链的校验链路削减无必要环节避免浪费性能资源（现在的校验比命还长，
 // 打包都用不了那么久）」。G.0 实测：发布链 --run 的冷跑合计 322.2s，其中若干条门禁的**输入根本不是
 // 发布 tar**（plugins/*/lib、Kotlin 测试结果），把它们的耗时重复付在发布路径上并不增加任何判别力
-// ——它们的真检点在 CI（那里才有对应输入）。
+// ——真检点应是拥有对应输入的构建链，或保留该输入的 compile job，不在发布 tar 段重复执行。
 //
 // 下沉规则（**不删门禁**，只改「谁来跑」）：
 //   · releaseSink !== false ⇒ 发布链 --run 段执行（默认）；
 //   · releaseSink === false ⇒ 从发布链 --run 段移出，**必须在 sink 字段写明接管方**，
 //     且下方断言会核验该接管方真的调用了它（否则就是「移出去就没人跑」= 静默降级防线）。
-// 声明集合本身不变（33 项）：check-gate-skips 仍逐项要求两条构建链调用，故「移出发布段」不等于「移出防线」。
+// 声明集合本身不变（--list 现数）：check-gate-skips 仍逐项要求两条构建链调用，故「移出发布段」不等于「移出防线」。
 const RELEASE_GATES = GATES.filter((g) => g.releaseSink !== false).map((g) => g.script)
 /**
  * 支持 --require 严格档、且在发布段（--run）会跑的门禁（issue #1052 ⑤）。
