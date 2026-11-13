@@ -14,6 +14,7 @@
  */
 import { readFileSync, appendFileSync, mkdirSync, statSync, writeFileSync, renameSync, rmSync } from 'node:fs'
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { randomUUID } from 'node:crypto'
 import { join, dirname } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -31,6 +32,7 @@ import {
   type UserScreenScope,
 } from './screen-scope.js'
 import { negotiateProtocol } from './control-queue.js'
+import { createNativeClient, type NativeClient } from './native-client.js'
 import { translateAdbLine } from './shell-ops.js'
 import { installCapabilityGate, DEVICE_TOOL_GROUPS, DEVICE_TOOLS, CAPABILITY_TOOL_NAME, shizukuLine } from './capability-gate.js'
 import {
@@ -906,6 +908,7 @@ export class AndroidPrivilegeService {
   readonly #shellFace?: { resolve?(spec: Record<string, unknown>): Record<string, unknown>; run(spec: Record<string, unknown>): Promise<Record<string, unknown>> }
   readonly #controlQueue?: ControlQueue
   readonly #sessions?: { get(id: string): unknown }
+  readonly #nativeVision?: NativeClient
 
   constructor(
     _ctx: Context,
@@ -914,11 +917,13 @@ export class AndroidPrivilegeService {
     shellFace?: { resolve?(spec: Record<string, unknown>): Record<string, unknown>; run(spec: Record<string, unknown>): Promise<Record<string, unknown>> },
     /** 0.13.5 W4：无障碍控制队列（apply() 注入；缺省 = 控制通道不可用）。 */
     controlQueue?: ControlQueue,
+    nativeVision?: NativeClient,
   ) {
     this.#defaultMode = defaultMode
     this.#sandboxPolicy = sandboxPolicy
     this.#shellFace = shellFace
     this.#controlQueue = controlQueue
+    this.#nativeVision = nativeVision
     this.#sessions = (_ctx as Context & { get(name: string): unknown }).get?.('sessions') as
       { get(id: string): unknown } | undefined
   }
@@ -928,6 +933,42 @@ export class AndroidPrivilegeService {
     const id = (session as { id?: unknown }).id
     if (typeof id !== 'string' || id.length === 0) return undefined
     try { return this.#sessions.get(id) === session ? session : undefined } catch { return undefined }
+  }
+
+  /** 只在隔离验证中装配；宿主负责目标、范围和 Android 授权。 */
+  nativeVisionEnabled(): boolean { return this.#nativeVision !== undefined }
+
+  async nativeVisionExecute(
+    operation: 'screenshot' | 'readRegion',
+    screenId: string,
+    args: Record<string, unknown>,
+    session: unknown,
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    const reject = (code: string, executed = 'no') => ({ ok: false, code, executed, screenId })
+    const client = this.#nativeVision
+    if (!client || (operation !== 'screenshot' && operation !== 'readRegion')) return reject('native-vision-unavailable')
+    const allowed = () => {
+      try {
+        const trusted = this.#trustedSession(session)
+        return trusted !== undefined && this.#sandboxPolicy?.resolve({ session: trusted })?.mode === 'danger-full-access'
+      } catch { return false }
+    }
+    if (!allowed()) return reject('session-permission-denied')
+    const facts = await client.capabilities({ signal })
+    if (!facts.ok || !facts.response?.ok) return reject(facts.response?.code ?? facts.error?.code ?? 'native-facts-unavailable')
+    const { epoch, screens } = facts.response
+    const screen = Array.isArray(screens)
+      ? (screens as Array<{ screenId?: unknown; generation?: unknown } | null>).find((row) => row?.screenId === screenId)
+      : undefined
+    if (typeof epoch !== 'string' || typeof screen?.generation !== 'string') return reject('screen-not-ready')
+    if (signal?.aborted) return reject('operation-aborted')
+    if (!allowed()) return reject('session-permission-denied')
+    const result = await client.execute({
+      callId: randomUUID(), operation, screenId, epoch, generation: screen.generation, args,
+    }, { signal })
+    if (!allowed()) return reject('session-permission-revoked', result.executed)
+    return result.response ?? reject(result.error?.code ?? 'native-result-unavailable', result.executed)
   }
 
   status(): AdbStatus {
@@ -2039,7 +2080,10 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
   // 令牌实时读壳侧 prefs（每次启动生成）；DSH_CONTROL_TOKEN 只在显式测试开关
   // DSH_CONTROL_TOKEN_TEST=1 下生效（ST-07）；两处皆缺 → 路由 fail-closed。
   const controlQueue = new ControlQueue()
-  const svc = new AndroidPrivilegeService(ctx, shellMode, sandboxPolicy, shellFace, controlQueue)
+  // 显式隔离入口由启动者提供。端点无效时拒绝，不能退回旧截图。
+  const endpoint = process.env.DSH_NATIVE_VISION_TEST_SOCKET
+  const nativeVision = endpoint === undefined ? undefined : createNativeClient({ endpoint })
+  const svc = new AndroidPrivilegeService(ctx, shellMode, sandboxPolicy, shellFace, controlQueue, nativeVision)
   try {
     ctx.provide('androidPrivilege', svc)
   } catch (e) {

@@ -31,6 +31,7 @@ import { coordBasisNote, basisFields, COMPAT_NOTE } from './coord-basis.js'
 import { screenArgs, screenOut, coordinateMode } from './screen-fields.js'
 import { nodeListLines } from './node-list.js'
 import { semanticFail } from './semantic-fail.js'
+import { renderNativeImage, runNativeImage, type NativeImageDelivery, type NativeImageReceipt } from './native-image-delivery.js'
 import { parseUiTreeXml, pruneNodes, resolveRef, findActionableAncestor, checkUiTreeParse, type UiNode, actionableAncestorV2, scopePoolV2, treeFingerprint } from './ui-tree.js'
 import { cacheFromV2, decodeV2, isV2Payload, type V2Decoded } from './protocol-v2.js'
 import { detailRecord, pageRows, writeDetailStore } from './detail-store.js'
@@ -75,6 +76,9 @@ export const name = 'dsh-android-manage'
 export const inject = ['tools', 'webServer', 'androidPrivilege'] as const
 
 interface PrivilegeFace {
+  nativeVisionEnabled?(): boolean
+  nativeVisionExecute?(operation: 'screenshot' | 'readRegion', screenId: string, args: Record<string, unknown>,
+    session: unknown, signal?: AbortSignal): Promise<Record<string, unknown>>
   /** 会话级通道门：无障碍通道（服务已开启）或 ADB 三道人门任一成立即放行；会话档位 danger-full-access 恒需。 */
   gateFor(session?: unknown): { ok: true; via?: 'a11y' | 'adb' } | { ok: false; guidance: string }
   /** 真实 ADB 通道：adb shell（adbd 执行，shell uid=2000）。 */
@@ -2732,8 +2736,69 @@ properties: {
 
   // 0.14 D4：uiDetail 此前 defineTool 了但没进注册数组（死代码，而提示文案还在引导模型调用）。
   // issue #688：每个工具的执行都跑在「本次请求的清单作用域」里（会话 + 目标屏，并发会话互不串味）。
+  if (priv.nativeVisionEnabled?.() === true) {
+    return [screenList, ...nativeVisionTools(ctx, priv, SCREEN_PARAM), uiTree, deviceInfo, actInput, uiDump,
+      uiClick, uiScroll, uiInput, webDump, envPrepare, appLaunch, uiGlobal, uiDetail]
+      .map((tool) => withUiCacheScope(tool))
+  }
   return [screenList, screenshot, uiTree, deviceInfo, actInput, uiDump, uiClick, uiScroll, uiInput, webDump, envPrepare, appLaunch, uiGlobal, uiDetail]
     .map((tool) => withUiCacheScope(tool))
+}
+
+function nativeVisionTools(ctx: Context, priv: PrivilegeFace, screenParam: {
+  type: 'string'; description: string
+}) {
+  type Exec = { agent?: {
+    session?: { requestHeader?: () => { config?: { provider?: string; model?: string } } | undefined }
+    options?: { provider?: string; model?: string }
+  }; signal?: AbortSignal }
+  type NativeOptions = Parameters<typeof runNativeImage>[1]
+  const output = {
+    schema: { type: 'object', additionalProperties: true } as const,
+    render: (_args: unknown, value: Record<string, unknown>) =>
+      renderNativeImage(value as unknown as NativeImageDelivery) as never,
+  }
+  async function execute(operation: 'screenshot' | 'readRegion', raw: {
+    screenId?: string; textRedact?: boolean; x1?: number; y1?: number; x2?: number; y2?: number
+  }, exec: Exec): Promise<Record<string, JsonValue>> {
+    const screenId = normalizeScreenId(raw.screenId) || 'real'
+    if (raw.textRedact === true) {
+      return { ok: false, executed: 'no', screenId, text: '未执行截图：不支持文本脱敏。' }
+    }
+    const config = exec.agent?.session?.requestHeader?.()?.config
+    const route = { provider: config?.provider ?? exec.agent?.options?.provider,
+      model: config?.model ?? exec.agent?.options?.model, signal: exec.signal }
+    const attachments = ctx.get('attachments') as NativeOptions['attachments']
+    const llm = ctx.get('llm') as NativeOptions['llm']
+    const args = operation === 'readRegion' ? { x1: raw.x1, y1: raw.y1, x2: raw.x2, y2: raw.y2 } : {}
+    const result = await runNativeImage(screenId, { attachments, llm, route }, async () => {
+      const response = await priv.nativeVisionExecute?.(operation, screenId, args, exec.agent?.session, exec.signal)
+      return (response ?? { ok: false, code: 'native-vision-unavailable', executed: 'no', screenId }) as unknown as NativeImageReceipt
+    })
+    const { ok, executed, text } = result
+    if (!result.ok) return { ok, executed, screenId, text, error: { ...result.error } }
+    const { attachmentId, mediaType, bytes, width, height, name } = result.image
+    return { ok, executed, screenId, text, width: result.width, height: result.height, region: { ...result.region },
+      image: { attachmentId, mediaType, bytes, width, height, ...(name === undefined ? {} : { name }) } }
+  }
+  const point = { type: 'integer', required: true } as const
+  return [
+    defineTool({
+      name: 'android_screenshot',
+      description: '截取目标屏幕，直接返回一张图和原始屏幕尺寸。',
+      parameters: { screenId: screenParam, textRedact: { type: 'boolean', description: '不支持脱敏；传 true 时不截图。' } },
+      output,
+      execute: (args: { screenId?: string; textRedact?: boolean }, exec) => execute('screenshot', args, exec as Exec),
+    }),
+    defineTool({
+      name: 'android_read_region',
+      description: '用屏幕实际坐标截取区域并直接返回图像。左上角包含，右下角不包含。',
+      parameters: { screenId: screenParam, x1: point, y1: point, x2: point, y2: point },
+      output,
+      execute: (args: { screenId?: string; x1: number; y1: number; x2: number; y2: number }, exec) =>
+        execute('readRegion', args, exec as Exec),
+    }),
+  ]
 }
 
 // ── 启动就绪审计（0.14.2-fx-2, 2026-09-28, task-80）───────────────────────────

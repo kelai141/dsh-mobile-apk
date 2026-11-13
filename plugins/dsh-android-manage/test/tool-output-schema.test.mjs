@@ -264,16 +264,22 @@ t('FX-212.5：V2 下 parentId 由预序+深度重建——render 的 ^nX 与 ui_
   assert.equal(violations(byName('android_ui_detail'), r).length, 0)
 })
 
-t('D4：android_ui_detail 与 android_screen_list 已注册（源码级 defineTool 集合 − 注册集合 = 空集，注册数 = 14）', async () => {
+t('D4：默认与隔离模式各注册预期工具，只有隔离模式增加区域截图', async () => {
   const { face } = makeFace({ snapshot: v2Payload() })
   const { tools } = applyManage(face)
+  const { tools: native } = applyManage({ ...face, nativeVisionEnabled: () => true })
   const src = readFileSync(join(HERE, '..', 'src', 'index.ts'), 'utf8')
   const defined = new Set([...src.matchAll(/defineTool\(\{\s*name: '([^']+)'/g)].map((m) => m[1]))
   const registered = new Set(tools.map((t) => t.name))
-  const missing = [...defined].filter((n) => !registered.has(n))
-  assert.deepEqual(missing, [], 'defineTool 过但没进注册数组 = 死代码（提示文案还在引导模型调用）')
+  const isolated = new Set(native.map((t) => t.name))
+  assert.deepEqual([...defined].filter((n) => !registered.has(n)), ['android_read_region'])
+  assert.deepEqual([...isolated].filter((n) => !registered.has(n)), ['android_read_region'])
+  assert.deepEqual([...registered].filter((n) => !isolated.has(n)), [])
+  assert.deepEqual([...defined].filter((n) => !isolated.has(n)), [])
+  assert.equal(native.length, isolated.size, '隔离模式不能重复注册旧截图')
+  assert.equal(tools.length, registered.size)
   assert.equal(registered.size, 14, '注册数必须为 14')
-  assert.equal(defined.size, 14)
+  assert.equal(defined.size, 15)
 })
 
 t('D5：策略答「ADB 不可用」→ 四个 ADB 专属工具动手前拒绝，且不碰设备', async () => {
