@@ -2060,7 +2060,7 @@ class MainActivity : ComponentActivity() {
   private fun pushWebInsets(view: WebView = webView) {
     if (!pageUiActive || view !== webView) return
     try {
-      view.evaluateJavascript(
+      val insetsScript =
         "(function(){var root=document.documentElement;if(!root)return;var top='" + webSystemTopInset +
           "px';var system='" + webSystemBottomInset +
           "px';var navbar='" + webNavBarBottomInset +
@@ -2073,9 +2073,14 @@ class MainActivity : ComponentActivity() {
           "'--dsh-android-navbar-bottom',navbar);root.style.setProperty('--dsh-android-ime-bottom',ime);" +
           "root.style.setProperty('--dsh-android-system-left',left);" +
           "root.style.setProperty('--dsh-android-system-right',right);" +
-          "})()",
-        null,
-      )
+          "})()"
+      // #197 机制① 的真机残留：`webView.setPadding` 改的是 View 的 padding，不改
+      // WebView 的 CSS 布局视口——IME 弹出时 innerHeight / visualViewport /
+      // VirtualKeyboard 三者全部恒定（0.14.11 真机实测 873 / 873 / 0），页面拿不到
+      // 任何键盘信号；而 `--dsh-android-ime-bottom` 只有虚拟屏键条在消费，主界面没有
+      // 消费者。壳侧已知道 IME 高度，就直接把 composer 抬到键盘上沿，别指望页面自己让位。
+      // 与上面的变量推送合成一次 IPC：insets 变化时 WebView 侧只排一次队列。
+      view.evaluateJavascript(insetsScript + ";" + ComposerImeOffset.script(webImeBottomInset), null)
     } catch (_: Exception) {
       // 页面/WebView 尚未就绪：onPageFinished 会补推当前缓存值。
     }
