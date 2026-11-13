@@ -53,7 +53,7 @@ try {
   $until = (Get-Date).AddSeconds(25)
   do {
     $proc.Refresh()
-    $captureStarted = (Get-Content -LiteralPath $log -Raw -ErrorAction SilentlyContinue) -match 'test=accessibilityCapturesTheEmulatorDisplayThroughPrivateIpc\r?\nINSTRUMENTATION_STATUS_CODE: 1'
+    $captureStarted = (Get-Content -LiteralPath $log -Raw -ErrorAction SilentlyContinue) -match 'test=accessibility(?:CapturesTheEmulatorDisplayThroughPrivateIpc|ReadsARealNodeAndRefusesItsReplacedReference)\r?\nINSTRUMENTATION_STATUS_CODE: 1'
     if ($captureStarted -or $proc.HasExited) { break }
     Start-Sleep -Milliseconds 100
   } while ((Get-Date) -lt $until)
@@ -63,8 +63,8 @@ try {
   if (-not $proc.WaitForExit(25000)) { throw '仪器进程未在预算内退出。' }
   $body = Get-Content -LiteralPath $log -Raw
   $body
-  if ($proc.ExitCode -ne 0 -or $body -notmatch 'OK \(3 tests\)' -or
-      ([regex]::Matches($body, '(?m)^INSTRUMENTATION_STATUS_CODE: 0\s*$')).Count -ne 3 -or
+  if ($proc.ExitCode -ne 0 -or $body -notmatch 'OK \(4 tests\)' -or
+      ([regex]::Matches($body, '(?m)^INSTRUMENTATION_STATUS_CODE: 0\s*$')).Count -ne 4 -or
       $body -match 'INSTRUMENTATION_STATUS_CODE: -[234]|FAILURES!!!') {
     throw 'MuMu 原生用例未全部通过。'
   }

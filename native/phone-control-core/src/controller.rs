@@ -630,7 +630,7 @@ impl<J: Journal> Controller<J> {
 
         let plan = match self.policy.plan(&operation, target) {
             Ok(plan) => plan,
-            Err(error) => return error_json(error.code(), error.detail(), screen_id.as_deref()),
+            Err(error) => return rejection_json(error.code(), error.detail(), screen_id.as_deref()),
         };
         if let Some(expected) = generation.as_ref().and_then(|value| value.parse::<u64>().ok()) {
             match plan.screen() {
@@ -640,11 +640,12 @@ impl<J: Journal> Controller<J> {
             }
         }
         if let Err(error) = validate_args(&self.policy, &plan, &args) {
-            return error_json(error.code(), error.detail(), screen_id.as_deref());
+            return rejection_json(error.code(), error.detail(), screen_id.as_deref());
         }
         let node = match args.get("ref").and_then(Value::as_str).map(|reference| self.resolve_node(&plan, reference)).transpose() {
             Ok(node) => node,
-            Err(error) => return error_json(error.code(), error.detail(), plan.target.alias()),
+            // The call has no lifecycle record and no platform permit at this point.
+            Err(error) => return rejection_json(error.code(), error.detail(), plan.target.alias()),
         };
 
         match self.lifecycle.begin(&call_id, &request_bytes) {
@@ -1480,11 +1481,19 @@ fn replay_json(call_id: &str, receipt: &Receipt) -> String {
 }
 
 fn error_json(code: &str, detail: impl AsRef<str>, screen_id: Option<&str>) -> String {
+    failure_json(code, detail, screen_id, "unknown")
+}
+
+fn rejection_json(code: &str, detail: impl AsRef<str>, screen_id: Option<&str>) -> String {
+    failure_json(code, detail, screen_id, "no")
+}
+
+fn failure_json(code: &str, detail: impl AsRef<str>, screen_id: Option<&str>, executed: &'static str) -> String {
     json!({
         "protocolVersion": PROTOCOL_VERSION,
         "ok": false,
         "code": code,
-        "executed": "unknown",
+        "executed": executed,
         "screenId": screen_id,
         "detail": detail.as_ref()
     })

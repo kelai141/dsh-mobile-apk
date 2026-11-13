@@ -74,6 +74,8 @@ Coordination-only tools and delivery plans are external prerequisites, not files
 
 ## 3. 设备与前置检查（跑之前先过一遍）
 
+隔离原生控制宿主的 MuMu 仪器套件：先安装同一构建的 x86_64 调试 APK 与 androidTest APK，再执行 `pwsh -File scripts/test-native-control-mumu.ps1 -VmIndex <编号> -ExpectedName <专用实例名> -EvidenceDir <新目录>`。脚本限定实例与 ABI，拒绝运行中的 Node；启动仪器进程后临时重绑 A11y，结束恢复设置。套件覆盖私有 IPC、真实截图、裁剪交付、节点文本与过期 ref。它属于原生组件设备验证；生产模型任务、CDP 和 ADB 用户操作按三层门另验。
+
 设备矩阵、装机命令、CDP 端口与探活见 `AGENTS.md` §2 与 `docs/AGENTS/adb-chain.md`。本规范只列**跑验收前**必须确认的前置：
 
 ```bash

@@ -91,6 +91,12 @@ pub struct RawBoundsInput {
     pub bottom: i32,
 }
 
+impl RawBoundsInput {
+    fn usable(&self) -> Option<&Self> {
+        (self.left <= self.right && self.top <= self.bottom).then_some(self)
+    }
+}
+
 /// Kotlin `RawNode` 的严格镜像。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -373,6 +379,9 @@ impl UiTreeStore {
     /// 解析当前快照的 ref。旧 snapshot、旧屏幕或畸形 ref 都不会回退。
     pub fn action_target(&self, ref_id: &str) -> Result<ActionTarget, UiTreeError> {
         let (snapshot, node) = self.resolve_current_ref(ref_id)?;
+        if node.identity.bounds.usable().is_none() {
+            return fail("node-bounds-unavailable", "Android did not provide usable node bounds");
+        }
         Ok(ActionTarget {
             snapshot_id: snapshot.info.snapshot_id,
             epoch: snapshot.info.epoch,
@@ -430,15 +439,7 @@ impl UiTreeStore {
                 "tree-incomplete",
                 format!("current snapshot is incomplete; no exact {} match is not proof of absence", selector.label()),
             ),
-            [node] => Ok(ActionTarget {
-                snapshot_id: snapshot.info.snapshot_id,
-                epoch: snapshot.info.epoch,
-                screen_id: snapshot.info.screen_id.clone(),
-                display_id: snapshot.info.display_id,
-                generation: snapshot.info.generation,
-                ref_id: node.ref_id.clone(),
-                identity: node.identity.clone(),
-            }),
+            [node] => self.action_target(&node.ref_id),
             many => fail(
                 "selector-ambiguous",
                 format!("exact {} match is ambiguous: {}", selector.label(), many.len()),
@@ -686,9 +687,6 @@ fn identity_from_raw_checked_with_budget(
     if node.window_id < 0 {
         return fail("invalid-window-id", "node window id must be nonnegative");
     }
-    if node.bounds.right < node.bounds.left || node.bounds.bottom < node.bounds.top {
-        return fail("invalid-bounds", "node bounds must not be inverted");
-    }
     for (name, value) in [
         ("className", node.class_name.as_str()),
         ("packageName", node.package_name.as_str()),
@@ -814,7 +812,7 @@ fn render_snapshot(snapshot: &Snapshot) -> String {
                 "description": identity.content_description,
                 "path": identity.path,
                 "windowId": identity.window_id,
-                "bounds": identity.bounds,
+                "bounds": identity.bounds.usable(),
                 "clickable": identity.clickable,
                 "scrollable": identity.scrollable,
                 "editable": identity.editable,
@@ -856,7 +854,9 @@ struct CompactNode<'a> {
     #[serde(rename = "ref")]
     ref_id: &'a str,
     role: String,
-    bounds: &'a RawBoundsInput,
+    // Android can report an inverted rect for a node without usable geometry. Keep its
+    // structure and text, and expose no coordinates rather than inventing a normalized rect.
+    bounds: Option<&'a RawBoundsInput>,
     #[serde(skip_serializing_if = "str::is_empty")]
     text: &'a str,
     #[serde(skip_serializing_if = "str::is_empty")]
@@ -921,7 +921,7 @@ fn render_compact_snapshot(snapshot: &Snapshot) -> Result<String, UiTreeError> {
         CompactNode {
             ref_id: &node.ref_id,
             role: node_role(identity),
-            bounds: &identity.bounds,
+            bounds: identity.bounds.usable(),
             text: &identity.text,
             description: &identity.content_description,
             view_id: &identity.view_id,

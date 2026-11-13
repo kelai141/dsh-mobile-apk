@@ -102,16 +102,7 @@ class NativeControlIpcDeviceTest {
     val execution = NativeA11yExecution()
     val facts = NativePlatformFacts(context, execution, { "real-only" })
     NativeControlHost.openIsolated(context, facts, execution).use { host ->
-      val request = JSONObject("""{"protocolVersion":1,"method":"capabilities"}""")
-      val deadline = android.os.SystemClock.elapsedRealtime() + 12_000
-      var caps = rpc(host, request)
-      while (caps.optJSONObject("channels")?.optJSONObject("a11y")?.optString("online") != "yes" &&
-        android.os.SystemClock.elapsedRealtime() < deadline) {
-        android.os.SystemClock.sleep(200)
-        caps = rpc(host, request)
-      }
-      val a11y = caps.getJSONObject("channels").getJSONObject("a11y")
-      assertEquals(caps.toString(), "yes", a11y.getString("online"))
+      val caps = awaitAccessibility(host)
       val screen = caps.getJSONArray("screens").getJSONObject(0)
       val id = "device-a11y-shot-${System.nanoTime()}"
       val shot = rpc(host, JSONObject().put("protocolVersion", 1).put("method", "execute")
@@ -127,6 +118,55 @@ class NativeControlIpcDeviceTest {
         assertTrue(decoded.width > 0 && decoded.height > 0)
         assertTrue(maxOf(decoded.width, decoded.height) <= 1600)
       } finally { decoded.recycle() }
+    }
+  }
+
+  @Test fun accessibilityReadsARealNodeAndRefusesItsReplacedReference() {
+    requireTestEmulator()
+    assumeTrue("需要显式开启模拟器上的真实 A11y 验证",
+      InstrumentationRegistry.getArguments().getString("nativeTestCapture") == "yes")
+    val context = InstrumentationRegistry.getInstrumentation().targetContext
+    val execution = NativeA11yExecution()
+    NativeControlHost.openIsolated(context, NativePlatformFacts(context, execution, { "real-only" }), execution).use { host ->
+      val caps = awaitAccessibility(host)
+      val screen = caps.getJSONArray("screens").getJSONObject(0)
+      fun execute(operation: String, args: JSONObject? = null): JSONObject =
+        rpc(host, JSONObject().put("protocolVersion", 1).put("method", "execute")
+          .put("operation", operation).put("callId", "device-node-$operation-${System.nanoTime()}")
+          .put("epoch", caps.getString("epoch")).put("screenId", "real")
+          .put("generation", screen.getString("generation")).apply { args?.let { put("args", it) } })
+      fun tree(): JSONObject {
+        val response = execute("snapshot")
+        assertTrue("snapshot failed: " + response.optString("code"), response.getBoolean("ok"))
+        return response.getJSONObject("tree")
+      }
+      val first = tree()
+      val nodes = first.getJSONArray("nodes")
+      val label = (0 until nodes.length()).asSequence().map { nodes.getJSONObject(it) }
+        .firstOrNull { it.optBoolean("visible", true) && !it.optBoolean("editable") && it.optJSONObject("bounds") != null &&
+          it.optString("role") == "TextView" && it.optString("text").length in 2..80 }
+        ?: throw AssertionError("Settings did not expose any visible label; nodes=${nodes.length()}")
+      val oldRef = JSONObject().put("ref", label.getString("ref"))
+      val read = execute("nodeText", oldRef)
+      assertTrue("nodeText failed: " + read.optString("code"), read.getBoolean("ok"))
+      assertEquals(label.getString("text"), read.getJSONObject("data").getString("text"))
+      val second = tree()
+      assertNotEquals(first.getString("snapshotId"), second.getString("snapshotId"))
+      val denied = execute("nodeText", oldRef)
+      assertFalse(denied.getBoolean("ok"))
+      assertEquals("stale-snapshot", denied.getString("code"))
+      assertEquals("no", denied.getString("executed"))
+    }
+  }
+
+  private fun awaitAccessibility(host: NativeControlHost): JSONObject {
+    val request = JSONObject("""{"protocolVersion":1,"method":"capabilities"}""")
+    val deadline = android.os.SystemClock.elapsedRealtime() + 12_000
+    while (true) {
+      val caps = rpc(host, request)
+      if (caps.optJSONObject("channels")?.optJSONObject("a11y")?.optString("online") == "yes") return caps
+      if (android.os.SystemClock.elapsedRealtime() >= deadline) throw AssertionError("A11y offline: $caps")
+      android.os.SystemClock.sleep(200)
     }
   }
 

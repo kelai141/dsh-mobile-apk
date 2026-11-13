@@ -78,6 +78,32 @@ fn replace_ok(store: &mut UiTreeStore, screen: &ScreenBinding, raw: RawTreeInput
     store.replace(7, screen, raw).unwrap();
 }
 
+#[test]
+fn inverted_android_bounds_keep_the_tree_and_refuse_that_node_as_a_target() {
+    let screen = binding("real", 0, 2);
+    let mut raw = basic_tree("real", 0, 2);
+    let mut bad = node(vec![1], "offscreen", "");
+    bad.bounds.right = -1;
+    raw.nodes.push(bad);
+    let mut store = UiTreeStore::new(7);
+    replace_ok(&mut store, &screen, raw);
+
+    let compact: Value =
+        serde_json::from_str(&store.compact_snapshot_json("real").unwrap().unwrap()).unwrap();
+    assert_eq!(compact["complete"], true);
+    assert_eq!(compact["nodeCount"], 3);
+    assert_eq!(compact["nodes"][2]["text"], "offscreen");
+    assert_eq!(compact["nodes"][2]["bounds"], Value::Null);
+    let bad_ref = compact["nodes"][2]["ref"].as_str().unwrap();
+    assert_eq!(store.action_target(bad_ref).unwrap_err().code(), "node-bounds-unavailable");
+    assert_eq!(
+        store.select("real", Selector::Text("offscreen")).unwrap_err().code(),
+        "node-bounds-unavailable",
+    );
+    let good_ref = compact["nodes"][1]["ref"].as_str().unwrap();
+    assert!(store.action_target(good_ref).is_ok());
+}
+
 #[derive(Default)]
 struct MemoryJournal(Option<Vec<u8>>);
 
@@ -158,6 +184,11 @@ fn replacing_snapshot_before_dispatch_refuses_old_node_plan() {
     let denied = exchange(&mut controller, json!({"kind":"commit","callId":"old-node"}));
     assert_eq!(denied["ok"], false);
     assert!(denied.get("dispatch").is_none(), "{denied}");
+    let refused = exchange(&mut controller, json!({"kind":"prepare","operation":"nodeText","callId":"old-node-read",
+        "epoch":"7","screenId":"real","generation":generation,"args":{"ref":reference}}));
+    assert_eq!(refused["code"], "stale-snapshot");
+    assert_eq!(refused["executed"], "no");
+    assert!(refused.get("plan").is_none(), "{refused}");
 }
 
 #[test]
