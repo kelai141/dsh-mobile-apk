@@ -67,14 +67,16 @@ internal object ComposerImeOffset {
       "if(d>0)c.style.setProperty('transform','translateY(-'+d+'px)','important')};" +
       "api={set:apply,clear:clear};" +
       "window.$API_NAME=api;" +
-      // 收起方向不等 insets：焦点离开 composer 卡片的那一刻立即回落。
-      // 判据是「焦点还在卡片内吗」，不是「焦点是否回到 body」——点消息区时焦点会落到
-      // 某个普通 div 上，按 body 判会漏掉，卡片只能等 insets，表现为延迟。
+      // 回落**零延迟**：手指按下那一刻就判断，不等 focusout（那是点击之后事件循环
+      // 里才派发的，肉眼可见地慢半拍）。点在 composer 卡片之外的任何位置，立即清位移。
+      "document.addEventListener('pointerdown',function(e){" +
+      "var c=find();if(!c||!c.contains(e.target))clear()" +
+      "},true);" +
+      // 兜底：焦点确实离开卡片（键盘被系统收回、输入框失焦）时也回。
       "document.addEventListener('focusout',function(){" +
-      "setTimeout(function(){" +
       "var c=find();var a=document.activeElement;" +
       "if(!c||!a||!c.contains(a))clear()" +
-      "},0)},true);" +
+      "},true);" +
       "}" +
       "api.set($kb);" +
       "})()"
