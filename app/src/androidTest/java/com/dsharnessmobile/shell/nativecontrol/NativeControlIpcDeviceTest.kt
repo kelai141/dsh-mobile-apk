@@ -1,12 +1,15 @@
 package com.dsharnessmobile.shell.nativecontrol
 
 import android.content.Context
+import android.content.Intent
+import android.graphics.Rect
 import android.net.LocalSocket
 import android.net.LocalSocketAddress
 import android.os.Build
 import android.os.Process
 import android.system.Os
 import androidx.test.platform.app.InstrumentationRegistry
+import com.dsharnessmobile.shell.NativeControlClickFixtureActivity
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Assume.assumeTrue
@@ -15,7 +18,7 @@ import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.security.MessageDigest
 
-/** 隔离 JNI/文件系统 socket 契约；只允许专用模拟器，不触发真实手势。 */
+/** 仅在专用模拟器验证隔离 JNI、私有 socket 与真实 A11y；手势只作用于本测试按钮。 */
 class NativeControlIpcDeviceTest {
   @Test fun appUidSocketUsesRustAndRejectsRealScreenUnderDefaultScope() {
     requireTestEmulator()
@@ -156,6 +159,69 @@ class NativeControlIpcDeviceTest {
       assertFalse(denied.getBoolean("ok"))
       assertEquals("stale-snapshot", denied.getString("code"))
       assertEquals("no", denied.getString("executed"))
+    }
+  }
+
+  @Test fun accessibilityClicksOnceAndReplaysOnlyTheReceipt() {
+    requireTestEmulator()
+    assumeTrue("需要显式开启模拟器上的真实 A11y 验证",
+      InstrumentationRegistry.getArguments().getString("nativeTestCapture") == "yes")
+    val instrumentation = InstrumentationRegistry.getInstrumentation()
+    val context = instrumentation.targetContext
+    val activity = instrumentation.startActivitySync(
+      Intent(context, NativeControlClickFixtureActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+    ) as NativeControlClickFixtureActivity
+    try {
+      val execution = NativeA11yExecution()
+      val facts = NativePlatformFacts(context, execution, { "real-only" })
+      lateinit var request: JSONObject
+      fun buttonText(): String {
+        var text = ""
+        instrumentation.runOnMainSync { text = activity.button.text.toString() }
+        return text
+      }
+      NativeControlHost.openIsolated(context, facts, execution).use { host ->
+        val caps = awaitAccessibility(host)
+        val screen = caps.getJSONArray("screens").getJSONObject(0)
+        val bounds = Rect()
+        val focusDeadline = android.os.SystemClock.elapsedRealtime() + 5_000
+        var ready = false
+        do {
+          instrumentation.runOnMainSync {
+            val button = activity.button
+            val location = IntArray(2)
+            button.getLocationOnScreen(location)
+            bounds.set(location[0], location[1], location[0] + button.width, location[1] + button.height)
+            ready = activity.hasWindowFocus() && button.isShown && !bounds.isEmpty
+          }
+          if (!ready) android.os.SystemClock.sleep(100)
+        } while (!ready && android.os.SystemClock.elapsedRealtime() < focusDeadline)
+        assertTrue("test button must be visible and focused", ready)
+        assertEquals("Clicks: 0", buttonText())
+        request = JSONObject().put("protocolVersion", 1).put("method", "execute")
+          .put("operation", "click").put("callId", "device-click-${System.nanoTime()}")
+          .put("epoch", caps.getString("epoch")).put("screenId", "real")
+          .put("generation", screen.getString("generation"))
+          .put("args", JSONObject().put("x", bounds.centerX()).put("y", bounds.centerY()))
+        val first = rpc(host, request)
+        assertTrue(first.toString(), first.getBoolean("ok"))
+        assertEquals("gesture-completed", first.getString("code"))
+        assertEquals("yes", first.getString("executed"))
+        instrumentation.waitForIdleSync()
+        assertEquals("Clicks: 1", buttonText())
+      }
+      // Reconnect over a newly created private IPC listener while the APK remains alive.
+      NativeControlHost.openIsolated(context, facts, execution).use { host ->
+        val replay = rpc(host, request)
+        assertTrue(replay.toString(), replay.getBoolean("ok"))
+        assertTrue(replay.toString(), replay.getBoolean("replayed"))
+        assertEquals("yes", replay.getString("executed"))
+        instrumentation.waitForIdleSync()
+        assertEquals("Clicks: 1", buttonText())
+      }
+    } finally {
+      instrumentation.runOnMainSync { activity.finish() }
+      instrumentation.waitForIdleSync()
     }
   }
 

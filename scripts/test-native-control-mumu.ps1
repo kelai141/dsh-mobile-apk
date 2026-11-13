@@ -53,18 +53,18 @@ try {
   $until = (Get-Date).AddSeconds(25)
   do {
     $proc.Refresh()
-    $captureStarted = (Get-Content -LiteralPath $log -Raw -ErrorAction SilentlyContinue) -match 'test=accessibility(?:CapturesTheEmulatorDisplayThroughPrivateIpc|ReadsARealNodeAndRefusesItsReplacedReference)\r?\nINSTRUMENTATION_STATUS_CODE: 1'
+    $captureStarted = (Get-Content -LiteralPath $log -Raw -ErrorAction SilentlyContinue) -match 'test=accessibility(?:CapturesTheEmulatorDisplayThroughPrivateIpc|ReadsARealNodeAndRefusesItsReplacedReference|ClicksOnceAndReplaysOnlyTheReceipt)\r?\nINSTRUMENTATION_STATUS_CODE: 1'
     if ($captureStarted -or $proc.HasExited) { break }
     Start-Sleep -Milliseconds 100
   } while ((Get-Date) -lt $until)
-  if (-not $captureStarted -or $proc.HasExited) { throw '未进入真实截图测试，详见仪器日志。' }
+  if (-not $captureStarted -or $proc.HasExited) { throw '未进入真实 A11y 测试，详见仪器日志。' }
   Set-SecureValue 'enabled_accessibility_services' ((@($others) + $service) -join ':')
   Set-SecureValue 'accessibility_enabled' '1'
   if (-not $proc.WaitForExit(25000)) { throw '仪器进程未在预算内退出。' }
   $body = Get-Content -LiteralPath $log -Raw
   $body
-  if ($proc.ExitCode -ne 0 -or $body -notmatch 'OK \(4 tests\)' -or
-      ([regex]::Matches($body, '(?m)^INSTRUMENTATION_STATUS_CODE: 0\s*$')).Count -ne 4 -or
+  if ($proc.ExitCode -ne 0 -or $body -notmatch 'OK \(5 tests\)' -or
+      ([regex]::Matches($body, '(?m)^INSTRUMENTATION_STATUS_CODE: 0\s*$')).Count -ne 5 -or
       $body -match 'INSTRUMENTATION_STATUS_CODE: -[234]|FAILURES!!!') {
     throw 'MuMu 原生用例未全部通过。'
   }
