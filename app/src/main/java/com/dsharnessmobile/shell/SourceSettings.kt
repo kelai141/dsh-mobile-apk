@@ -12,7 +12,7 @@ import java.io.File
  * 但此时 apt-cache policy 里一条 Packages 都没有——源实际是空的。
  * 只看退出码会把「换成了一个不可用源」判成成功且不回滚。
  *
- * 所以这里的判据是：退出码 + 输出里不得出现失败标记；任一不满足即回滚。
+ * 所以这里的判据是：完整未截断的 I/O + 已知零退出码 + 输出里不得出现失败标记；任一不满足即回滚。
  *
  * ── 为什么必须跑一次 update ──────────────────────────────────────────────────
  * 换源只改文件不会刷新索引。设备实测：切到从未缓存过的源后不 update，
@@ -119,7 +119,9 @@ internal object SourceSettings {
         // M-s4（2026-10-25 审计）：rolledBack 必须反映 rollback 的**真实结果**——旧实现
         // 无条件报 true，回滚半失败（备份读不出等）时用户被告知「已回滚」而实际停留在坏源。
         val restored = rollback(target, backup, hadPrevious, prefix, previousChosen)
-        Result(false, if (restored) verify else verify + "（回滚未完全成功，见日志）", rolledBack = restored)
+        Result(false, verify + UiText.t(context,
+          if (restored) "，已回滚到原来源" else "（回滚未完全成功，见日志）",
+          if (restored) "; restored the previous source" else "; rollback was incomplete, see logs"), rolledBack = restored)
       }
     } catch (t: Throwable) {
       val restored = rollback(target, backup, hadPrevious, prefix, previousChosen)
@@ -225,15 +227,25 @@ internal object SourceSettings {
     }
     // 有界读（门禁 check-bounded-io 强制）：黑洞源不设上限会一直挂住（设备实测 60s+）。
     val r = ProcIo.readBoundedMillis(proc, UPDATE_TIMEOUT_MS)
-    if (r.timedOut) {
-      proc.destroyForcibly()
-      return "软件源刷新超时（网络不可达？），已回滚到原来源"
-    }
+    return aptUpdateFailure(r, UiText.isEnglish(context))
+  }
+
+  /** #1584: pure verdict; rollback success is appended only after rollback actually completes. */
+  internal fun aptUpdateFailure(r: ProcIo.ProcResult, english: Boolean = false): String? {
+    if (r.timedOut) return UiText.t(english,
+      "软件源刷新超时（网络不可达？）", "Package index refresh timed out (network unreachable?)")
+    if (!r.complete || r.truncated) return UiText.t(english,
+      "软件源刷新未能完整确认，请检查日志", "Package index refresh could not be fully verified; check the logs")
+    if (r.exitCode == null) return UiText.t(english,
+      "无法确认软件源刷新进程的退出状态", "Could not determine the package index refresh exit status")
+    if (r.exitCode != 0) return UiText.t(english,
+      "软件源刷新失败（退出码 ${r.exitCode}）", "Package index refresh failed (exit code ${r.exitCode})")
     // 关键：不可达源实测**退出码为 0**，但索引一条都没拿到。所以退出码不足以判成败，
     // 必须同时看输出里的失败标记（见 APT_FAILURE_MARKERS 的注释）。
     val fatal = APT_FAILURE_MARKERS.firstOrNull { r.text.contains(it) }
+      ?: r.text.lineSequence().firstOrNull { it.trimStart().startsWith("E:") }?.take(200)
     return when {
-      fatal != null -> "该软件源不可用（" + fatal + "），已回滚到原来源"
+      fatal != null -> UiText.t(english, "该软件源不可用（$fatal）", "Package source is unavailable ($fatal)")
       else -> null
     }
   }
