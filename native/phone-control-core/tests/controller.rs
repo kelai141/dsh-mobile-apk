@@ -121,6 +121,31 @@ fn publish_default<J: Journal>(controller: &mut Controller<J>) -> Value {
     call(controller, facts("all", 0, "yes"))
 }
 
+#[test]
+fn global_action_has_a_typed_request_and_never_targets_a_virtual_display() {
+    let mut core = controller();
+    let mut input = facts("all", 0, "yes");
+    input["facts"]["screens"]["real"] = json!({"displayId":0,"width":1080,"height":2400,"rotation":0});
+    input["facts"]["a11y"]["supportedOps"]["ops"] = json!(["global"]);
+    input["facts"]["a11y"]["displaySupport"]["values"]["0"] = json!(true);
+    assert_eq!(call(&mut core, input)["ok"], true);
+    for args in [json!({}), json!({"action":"not-an-action"}), json!({"action":"back","x":5}), json!({"action":3})] {
+        let refused = call(&mut core, json!({"protocolVersion":PROTOCOL_VERSION,"kind":"prepare",
+            "operation":"global","callId":"bad-global","epoch":"900","screenId":"real","args":args}));
+        assert_eq!(refused["ok"], false, "{refused}");
+        assert!(refused.get("plan").is_none(), "{refused}");
+    }
+    let wrong = call(&mut core, json!({"protocolVersion":PROTOCOL_VERSION,"kind":"prepare",
+        "operation":"global","callId":"virtual-global","epoch":"900","screenId":"virtual-1","args":{"action":"back"}}));
+    assert_eq!(wrong["code"], "target-unsupported", "{wrong}");
+    assert_eq!(wrong["executed"], "no");
+    let prepared = call(&mut core, json!({"protocolVersion":PROTOCOL_VERSION,"kind":"prepare",
+        "operation":"global","callId":"real-global","epoch":"900","screenId":"real","args":{"action":"back"}}));
+    assert_eq!(prepared["code"], "prepared", "{prepared}");
+    assert_eq!(prepared["plan"]["args"], json!({"action":"back"}));
+    assert_eq!(prepared["plan"]["backend"], "a11y");
+}
+
 fn prepare<J: Journal>(controller: &mut Controller<J>, call_id: &str) -> Value {
     prepare_at(controller, call_id, "virtual-1", "900")
 }

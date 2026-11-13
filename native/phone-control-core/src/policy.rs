@@ -722,6 +722,9 @@ impl PolicyState {
         }
 
         let plan_target = self.resolve_target(spec, target)?;
+        if op == "global" && plan_target.alias() != Some(REAL_ALIAS) {
+            return Err(PolicyError::new("target-unsupported", "Android global actions target only the real display"));
+        }
         let scope_generation = match spec.scope_policy {
             ScopePolicy::ScreenContent
             | ScopePolicy::VirtualNamespace

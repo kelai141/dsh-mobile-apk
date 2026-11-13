@@ -221,6 +221,7 @@ internal class NativeAccessibilityPlatform(
   fun pointGesturesSupported(displayId: Int): Boolean = guardGesture(displayId) == null
   fun screenshotsSupported(displayId: Int): Boolean = guardCapture(displayId) == null
   fun windowContentSupported(displayId: Int): Boolean = guardContent(displayId) == null
+  fun globalActionsSupported(displayId: Int): Boolean = guardGlobal(displayId) == null
 
   fun capabilities(displayId: Int): RawCapabilities {
     val supported = ArrayList<String>(handlerGuards.size)

@@ -12,13 +12,14 @@ internal class NativeA11yExecution : NativeControlDispatcher.Platform {
     return buildList {
       if (platform.pointGesturesSupported(displayId)) addAll(listOf("click", "longClick", "scroll"))
       if (platform.screenshotsSupported(displayId)) addAll(listOf("screenshot", "readRegion"))
+      if (platform.globalActionsSupported(displayId)) add("global")
       if (platform.windowContentSupported(displayId)) addAll(listOf("snapshot", "click", "longClick", "scroll", "setText", "nodeText"))
     }
   }
 
   override fun implements(plan: JSONObject): Boolean =
     plan.optString("backend") == "a11y" && plan.optString("operation") in setOf(
-      "click", "longClick", "scroll", "setText", "nodeText", "screenshot", "readRegion", "snapshot",
+      "click", "longClick", "scroll", "setText", "nodeText", "screenshot", "readRegion", "snapshot", "global",
     ) &&
       DeviceControlService.nativePlatformService() != null
 
@@ -105,6 +106,7 @@ internal class NativeA11yExecution : NativeControlDispatcher.Platform {
         else return rejected("node-target-required")
       "scroll" -> if (node != null) platform.scrollNode(target, node, args.getString("direction"), verify, authorize)
         else platform.scrollAt(target, args.getInt("x"), args.getInt("y"), args.getString("direction"), args.getDouble("fraction"), authorize)
+      "global" -> platform.globalAction(target, args.getString("action"), authorize)
       else -> return rejected("platform-adapter-unavailable")
     }
     return future.thenApply { result ->

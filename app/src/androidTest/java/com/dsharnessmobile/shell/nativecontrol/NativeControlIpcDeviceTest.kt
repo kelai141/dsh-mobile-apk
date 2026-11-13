@@ -218,6 +218,26 @@ class NativeControlIpcDeviceTest {
         assertEquals("yes", replay.getString("executed"))
         instrumentation.waitForIdleSync()
         assertEquals("Clicks: 1", buttonText())
+        val current = awaitAccessibility(host)
+        val real = current.getJSONArray("screens").getJSONObject(0)
+        instrumentation.runOnMainSync {
+          assertTrue("fixture must still own focus before global back", activity.hasWindowFocus())
+        }
+        val back = rpc(host, JSONObject().put("protocolVersion", 1).put("method", "execute")
+          .put("operation", "global").put("callId", "device-global-back-${System.nanoTime()}")
+          .put("epoch", current.getString("epoch")).put("screenId", "real")
+          .put("generation", real.getString("generation")).put("args", JSONObject().put("action", "back")))
+        assertTrue(back.toString(), back.getBoolean("ok"))
+        assertEquals("global-accepted", back.getString("code"))
+        assertEquals("yes", back.getString("executed"))
+        val finishDeadline = android.os.SystemClock.elapsedRealtime() + 5_000
+        var finished = false
+        do {
+          // Android may move a root activity's task to the background instead of finishing it.
+          instrumentation.runOnMainSync { finished = !activity.hasWindowFocus() }
+          if (!finished) android.os.SystemClock.sleep(100)
+        } while (!finished && android.os.SystemClock.elapsedRealtime() < finishDeadline)
+        assertTrue("native global back must leave the test activity", finished)
       }
     } finally {
       instrumentation.runOnMainSync { activity.finish() }

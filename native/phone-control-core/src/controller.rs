@@ -1161,6 +1161,15 @@ fn validate_operation_args(operation: &str, args: &Value) -> Result<(), Controll
         return Ok(());
     }
     let object = args.as_object().ok_or_else(|| ControllerError::new("invalid-request", "args must be an object"))?;
+    if operation == "global" {
+        allowed_fields(args, &["action"]).map_err(|response| ControllerError::new("invalid-request", response))?;
+        return match object.get("action").and_then(Value::as_str) {
+            Some("back" | "home" | "recents" | "notifications" | "quickSettings" | "powerDialog" |
+                "toggleSplitScreen" | "lockScreen" | "takeScreenshot" | "menu" | "mediaPlayPause" |
+                "dismissNotificationShade" | "accessibilityShortcut") => Ok(()),
+            _ => Err(ControllerError::new("invalid-global-action", "a known Android global action is required")),
+        };
+    }
     if matches!(operation, "click" | "longClick" | "nodeText" | "setText" | "scroll") && object.contains_key("ref") {
         let valid_ref = object.get("ref").and_then(Value::as_str).is_some_and(|reference|
             !reference.is_empty() && reference.len() <= 96);
