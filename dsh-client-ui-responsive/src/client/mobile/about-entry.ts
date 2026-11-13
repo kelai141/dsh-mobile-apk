@@ -36,8 +36,20 @@ let engineVersion = ''
  */
 let entryInstalled = false
 
-/** 当前已知的引擎版本；空串表示还没从上游那行抓到。 */
+/**
+ * 当前已知的引擎版本；空串表示还没从上游那行抓到。
+ *
+ * 兜底：内存值会随模块重载（热推 / 页面重载 / 插件重新装配）丢掉，而 `data-dsh-about-source`
+ * 是写在 DOM 上的、跨实例存活的同一份事实。空值时回读一次并缓存——否则「先接管过、之后
+ * 重载模块、再进关于页」会显示 `—`，看起来像引擎版本取不到。
+ *
+ * @returns 引擎版本号；真拿不到时为空串（调用方如实显示占位符）。
+ */
 export function getEngineVersion(): string {
+  if (engineVersion !== '') return engineVersion
+  const marked = document.querySelector('[data-dsh-about-source]')
+  const fromDom = marked?.getAttribute(HANDLED)?.trim() ?? ''
+  if (fromDom !== '') engineVersion = fromDom
   return engineVersion
 }
 
