@@ -156,6 +156,15 @@ impl std::error::Error for ControllerError {}
 struct SavedPlan {
     plan: DispatchPlan,
     permit: DispatchPermit,
+    args: Value,
+    node: Option<crate::ui_tree::ActionTarget>,
+    node_verified: bool,
+}
+
+struct TreeDelivery {
+    plan: DispatchPlan,
+    call_id: String,
+    metadata: Value,
 }
 
 /// 一个原生会话的控制器。所有方法都由外层 mutex 串行化。
@@ -166,6 +175,9 @@ pub struct Controller<J: Journal> {
     saved: BTreeMap<String, SavedPlan>,
     known_screens: BTreeSet<String>,
     poisoned: bool,
+    images: crate::vision_runtime::ImageCache,
+    trees: crate::ui_tree::UiTreeStore,
+    tree_deliveries: BTreeMap<String, TreeDelivery>,
 }
 
 impl Controller<FileJournal> {
@@ -195,6 +207,9 @@ impl<J: Journal> Controller<J> {
             saved: BTreeMap::new(),
             known_screens: BTreeSet::new(),
             poisoned: false,
+            images: crate::vision_runtime::ImageCache::default(),
+            trees: crate::ui_tree::UiTreeStore::new(epoch),
+            tree_deliveries: BTreeMap::new(),
         })
     }
 
@@ -206,12 +221,171 @@ impl<J: Journal> Controller<J> {
         self.policy.revision()
     }
 
+    fn resolve_node(&self, plan: &DispatchPlan, reference: &str) -> Result<crate::ui_tree::ActionTarget, ControllerError> {
+        if plan.backend != Backend::A11y {
+            return Err(ControllerError::new("node-backend-unavailable", "this channel cannot verify the node reference"));
+        }
+        let screen = plan.screen().ok_or_else(|| ControllerError::new("screen-required", "node requires a display"))?;
+        let delivery = self.tree_deliveries.get(&screen.alias)
+            .ok_or_else(|| ControllerError::new("tree-result-expired", "a current snapshot is required"))?;
+        self.policy.revalidate(&delivery.plan).map_err(policy_error)?;
+        if self.lifecycle.phase(&delivery.call_id) != Some(Phase::Settled)
+            || !self.lifecycle.receipt(&delivery.call_id).is_some_and(|receipt| receipt.ok()) {
+            return Err(ControllerError::new("tree-not-settled", "a successful snapshot receipt is required"));
+        }
+        self.trees.action_target_for_binding(self.epoch, screen, reference)
+            .map_err(|error| ControllerError::new(error.code(), error.detail()))
+    }
+
+    fn revalidate_node(&self, saved: &SavedPlan) -> Result<(), ControllerError> {
+        if let Some(node) = &saved.node {
+            let current = self.resolve_node(&saved.plan, node.ref_id())?;
+            if &current != node {
+                return Err(ControllerError::new("node-target-changed", "current snapshot no longer matches the node plan"));
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_verify_node(&mut self, request: &Map<String, Value>) -> String {
+        if let Err(response) = allowed(request, &["protocolVersion", "kind", "callId", "node"]) { return response; }
+        let call_id = match required_string(request, "callId") { Ok(id) => id, Err(response) => return response };
+        if let Some(saved) = self.saved.get_mut(call_id) { saved.node_verified = false; }
+        let result = (|| -> Result<(), ControllerError> {
+            let saved = self.saved.get(call_id).filter(|_| self.lifecycle.phase(call_id) == Some(Phase::Dispatching))
+                .ok_or_else(|| ControllerError::new("node-dispatch-required", "no live node dispatch"))?;
+            let target = saved.node.as_ref().ok_or_else(|| ControllerError::new("node-required", "dispatch is not a node action"))?;
+            self.policy.revalidate(&saved.plan).map_err(policy_error)?;
+            self.revalidate_node(saved)?;
+            let raw: crate::ui_tree::RawNodeInput = serde_json::from_value(request.get("node").cloned().unwrap_or(Value::Null))
+                .map_err(|_| ControllerError::new("invalid-fresh-node", "invalid Android node data"))?;
+            self.trees.verify_target(target, &raw).map_err(|error| ControllerError::new(error.code(), error.detail()))
+        })();
+        match result {
+            Ok(()) => {
+                if let Some(saved) = self.saved.get_mut(call_id) { saved.node_verified = true; }
+                success_json("node-verified", &self.policy, None, None).to_string()
+            }
+            Err(error) => error_json(error.code(), error.detail(), None),
+        }
+    }
+
+    pub fn publish_tree(&mut self, call_id: &str, raw: crate::ui_tree::RawTreeInput) -> Result<Value, ControllerError> {
+        if self.poisoned { return Err(ControllerError::new("core-poisoned", "controller is unavailable")); }
+        let saved = self.saved.get(call_id).filter(|saved| saved.plan.op == "snapshot")
+            .ok_or_else(|| ControllerError::new("tree-dispatch-required", "no native snapshot plan"))?;
+        if self.lifecycle.phase(call_id) != Some(Phase::Dispatching) {
+            return Err(ControllerError::new("tree-dispatch-required", "snapshot is not dispatching"));
+        }
+        let plan = saved.plan.clone();
+        self.policy.revalidate(&plan).map_err(policy_error)?;
+        let binding = plan.screen().ok_or_else(|| ControllerError::new("screen-required", "snapshot requires a display"))?;
+        if self.tree_deliveries.get(&binding.alias).is_some_and(|delivery| delivery.call_id == call_id) {
+            return Err(ControllerError::new("tree-already-produced", "snapshot cannot replace its own result"));
+        }
+        let tree = self.trees.replace(self.epoch, binding, raw)
+            .map_err(|error| ControllerError::new(error.code(), error.detail()))?;
+        let metadata = json!({"snapshotId": tree.snapshot_id.to_string(), "epoch": self.epoch.to_string(),
+            "generation": binding.generation.to_string(), "nodeCount": tree.node_count, "complete": tree.complete});
+        let screen_id = binding.alias.clone();
+        self.tree_deliveries.insert(screen_id.clone(), TreeDelivery { plan, call_id: call_id.to_owned(), metadata: metadata.clone() });
+        Ok(json!({"ok":true,"code":"snapshot-captured","executed":"yes","screenId":screen_id,"data":{"tree":metadata}}))
+    }
+
+    fn handle_read_tree(&self, request: &Map<String, Value>) -> String {
+        if let Err(response) = allowed(request, &["protocolVersion", "kind", "callId"]) { return response; }
+        let call_id = match required_string(request, "callId") { Ok(id) => id, Err(response) => return response };
+        let result = (|| -> Result<Value, ControllerError> {
+            if self.lifecycle.phase(call_id) != Some(Phase::Settled) {
+                return Err(ControllerError::new("tree-not-settled", "snapshot has no definite receipt"));
+            }
+            let receipt = self.lifecycle.receipt(call_id).filter(|receipt| receipt.ok() && receipt.executed() == Executed::Yes)
+                .ok_or_else(|| ControllerError::new("tree-not-successful", "snapshot did not succeed"))?;
+            let screen = receipt.screen_id().ok_or_else(|| ControllerError::new("screen-required", "snapshot has no screen"))?;
+            let delivery = self.tree_deliveries.get(screen).filter(|delivery| delivery.call_id == call_id)
+                .ok_or_else(|| ControllerError::new("tree-result-expired", "snapshot is no longer current"))?;
+            self.policy.revalidate(&delivery.plan).map_err(policy_error)?;
+            if receipt.data().and_then(|data| data.get("tree")) != Some(&delivery.metadata) {
+                return Err(ControllerError::new("tree-receipt-mismatch", "snapshot does not match the receipt"));
+            }
+            let tree = self.trees.compact_snapshot_json(screen)
+                .map_err(|error| ControllerError::new(error.code(), error.detail()))?
+                .filter(|tree| tree.len() <= 2 * 1024 * 1024 - 8192)
+                .ok_or_else(|| ControllerError::new("tree-response-budget", "snapshot cannot fit the IPC response"))?;
+            serde_json::from_str(&tree).map_err(|_| ControllerError::new("invalid-tree-result", "cannot read compact snapshot"))
+        })();
+        match result {
+            Ok(tree) => json!({"protocolVersion":PROTOCOL_VERSION,"ok":true,"code":"tree-delivered","executed":"yes","tree":tree}).to_string(),
+            Err(error) => error_json(error.code(), error.detail(), None),
+        }
+    }
+
+    /// 只能为已经持久化派发的视觉操作取票；票不能由 Kotlin/Node 自行拼接。
+    pub fn visual_ticket(&self, call_id: &str) -> Result<crate::vision_runtime::VisualTicket, ControllerError> {
+        if self.poisoned { return Err(ControllerError::new("core-poisoned", "controller is unavailable")); }
+        if self.lifecycle.phase(call_id) != Some(Phase::Dispatching) {
+            return Err(ControllerError::new("visual-dispatch-required", "visual operation is not dispatching"));
+        }
+        let saved = self.saved.get(call_id)
+            .ok_or_else(|| ControllerError::new("call-not-found", "no native dispatch plan"))?;
+        if !matches!(saved.plan.op, "screenshot" | "readRegion") {
+            return Err(ControllerError::new("visual-operation-required", "call is not a visual operation"));
+        }
+        self.policy.revalidate(&saved.plan).map_err(|error| ControllerError::new(error.code(), error.detail()))?;
+        let binding = saved.plan.screen()
+            .ok_or_else(|| ControllerError::new("screen-required", "visual call requires a display"))?;
+        let target = crate::vision::ScreenTarget::new(saved.plan.epoch, &binding.alias, binding.display_id,
+            binding.generation, binding.width, binding.height)
+            .map_err(|error| ControllerError::new(error.code(), error.detail()))?;
+        let region = if saved.plan.op == "readRegion" {
+            let coordinate = |key: &str| saved.args.get(key).and_then(Value::as_i64)
+                .and_then(|value| i32::try_from(value).ok())
+                .ok_or_else(|| ControllerError::new("invalid-region", "missing native region coordinate"));
+            Some(crate::vision::LogicalRect { x1: coordinate("x1")?, y1: coordinate("y1")?,
+                x2: coordinate("x2")?, y2: coordinate("y2")? })
+        } else { None };
+        Ok(crate::vision_runtime::VisualTicket { call_id: call_id.to_owned(), plan: saved.plan.clone(), target, region })
+    }
+
+    /// 编码期间不持有 CORE 锁；入缓存前重新取得票并逐字段比较。
+    pub fn finish_visual(&mut self, ticket: &crate::vision_runtime::VisualTicket, image: crate::vision::VisionImage)
+        -> Result<Value, ControllerError> {
+        let current = self.visual_ticket(&ticket.call_id)?;
+        if &current != ticket {
+            return Err(ControllerError::new("visual-ticket-stale", "dispatch target changed during encoding"));
+        }
+        let metadata = self.images.insert(ticket.clone(), image)
+            .map_err(|error| ControllerError::new(error.code(), error.detail()))?;
+        Ok(json!({"ok": true, "code": if ticket.region.is_some() { "region-read" } else { "screenshot-captured" },
+            "executed": "yes", "screenId": ticket.target.screen_id, "data": {"image": metadata}}))
+    }
+
+    /// 只交付已结算且仍获授权的当前图片；资源过期不重新截图、不清空回执。
+    pub fn read_visual(&self, call_id: &str) -> Result<(Value, Vec<u8>), ControllerError> {
+        if self.poisoned { return Err(ControllerError::new("core-poisoned", "controller is unavailable")); }
+        if self.lifecycle.phase(call_id) != Some(Phase::Settled) {
+            return Err(ControllerError::new("image-not-settled", "image operation has no definite terminal receipt"));
+        }
+        let receipt = self.lifecycle.receipt(call_id)
+            .ok_or_else(|| ControllerError::new("receipt-missing", "image receipt is absent"))?;
+        if !receipt.ok() || receipt.executed() != Executed::Yes {
+            return Err(ControllerError::new("image-not-successful", "image operation did not succeed"));
+        }
+        let image = self.images.get(call_id)
+            .ok_or_else(|| ControllerError::new("image-result-expired", "JPEG is no longer retained; operation is not replayed"))?;
+        self.policy.revalidate(&image.ticket.plan).map_err(|error| ControllerError::new(error.code(), error.detail()))?;
+        if receipt.data().and_then(|data| data.get("image")) != Some(&image.metadata) {
+            return Err(ControllerError::new("image-receipt-mismatch", "cached image differs from the native receipt"));
+        }
+        Ok((image.metadata.clone(), image.jpeg.clone()))
+    }
+
     /// 处理一个 JSON 请求。任何 panic 都会让本控制器停止服务。
     pub fn exchange(&mut self, payload: &str) -> String {
         self.exchange_with_mode(payload, false)
     }
 
-    /// 处理一个不写日志的快请求：facts、capabilities 与 validateDispatch。
+    /// 处理一个不写日志的快请求：事实查询、节点与派发校验。
     /// 其它 kind 一律拒绝。调用方必须在 try_lock 内调用。
     pub fn exchange_nonblocking(&mut self, payload: &str) -> String {
         self.exchange_with_mode(payload, true)
@@ -251,10 +425,10 @@ impl<J: Journal> Controller<J> {
             Err(response) => return response,
         };
 
-        if nonblocking && !matches!(kind.as_str(), "publishFacts" | "capabilities" | "validateDispatch") {
+        if nonblocking && !matches!(kind.as_str(), "publishFacts" | "capabilities" | "validateDispatch" | "verifyNode") {
             return error_json(
                 "blocking-operation-rejected",
-                "exchangeNonblocking only accepts publishFacts, capabilities and validateDispatch",
+                "exchangeNonblocking only accepts facts and dispatch verification",
                 None,
             );
         }
@@ -268,7 +442,9 @@ impl<J: Journal> Controller<J> {
             "cancel" => self.handle_cancel(object),
             "fallback" => self.handle_fallback(object),
             "operationStatus" => self.handle_operation_status(object),
+            "readTree" => self.handle_read_tree(object),
             "validateDispatch" => self.handle_validate_dispatch(object),
+            "verifyNode" => self.handle_verify_node(object),
             _ => error_json("unknown-kind", format!("unknown kind {kind}"), None),
         }
     }
@@ -317,6 +493,14 @@ impl<J: Journal> Controller<J> {
         policy.set_shizuku_facts(facts.shizuku.map(ShizukuFactsWire::into_policy).unwrap_or_default());
         policy.set_root_facts(facts.root.map(RootFactsWire::into_policy).unwrap_or_default());
         self.policy = policy;
+        let policy = &self.policy;
+        self.images.retain(|ticket| policy.revalidate(&ticket.plan).is_ok());
+        let trees = &mut self.trees;
+        self.tree_deliveries.retain(|screen, delivery| {
+            let valid = policy.revalidate(&delivery.plan).is_ok();
+            if !valid { trees.invalidate_screen(screen); }
+            valid
+        });
         self.known_screens = known;
 
         success_json("facts-published", &self.policy, None, None).to_string()
@@ -346,7 +530,8 @@ impl<J: Journal> Controller<J> {
                         "enabled": tri_wire(self.policy.a11y().enabled),
                         "online": tri_wire(self.policy.a11y().online),
                         "supportedOps": op_set_wire(&self.policy.a11y().supported_ops),
-                        "displaySupport": display_wire(&self.policy.a11y().display_support)
+                        "displaySupport": display_wire(&self.policy.a11y().display_support),
+                        "displayOperations": self.policy.a11y().display_operations
                     },
                     "shizuku": {
                         "installed": tri_wire(self.policy.shizuku().installed),
@@ -457,11 +642,17 @@ impl<J: Journal> Controller<J> {
         if let Err(error) = validate_args(&self.policy, &plan, &args) {
             return error_json(error.code(), error.detail(), screen_id.as_deref());
         }
+        let node = match args.get("ref").and_then(Value::as_str).map(|reference| self.resolve_node(&plan, reference)).transpose() {
+            Ok(node) => node,
+            Err(error) => return error_json(error.code(), error.detail(), plan.target.alias()),
+        };
 
         match self.lifecycle.begin(&call_id, &request_bytes) {
             Ok(Admission::Dispatch(permit)) => {
-                self.saved.insert(call_id.clone(), SavedPlan { plan: plan.clone(), permit });
-                success_json("prepared", &self.policy, Some(&plan), None).to_string()
+                self.saved.insert(call_id.clone(), SavedPlan { plan: plan.clone(), permit, args: args.clone(), node, node_verified: false });
+                let mut response = success_json("prepared", &self.policy, Some(&plan), None);
+                response["plan"]["args"] = args;
+                response.to_string()
             }
             Ok(Admission::Replay(receipt)) => replay_json(&call_id, &receipt),
             Err(error) => error_json(error_code(&error), error.detail(), screen_id.as_deref()),
@@ -487,6 +678,9 @@ impl<J: Journal> Controller<J> {
         if let Err(error) = self.policy.revalidate(&plan) {
             return error_json(error.code(), error.detail(), plan.target.alias());
         }
+        if let Err(error) = self.revalidate_node(saved) {
+            return error_json(error.code(), error.detail(), plan.target.alias());
+        }
 
         match self.lifecycle.mark_dispatched(&permit) {
             Ok(()) => {
@@ -494,6 +688,10 @@ impl<J: Journal> Controller<J> {
                 if let Some(object) = response.as_object_mut() {
                     object.insert("dispatch".into(), json!("permitted"));
                     object.insert("callId".into(), json!(call_id));
+                }
+                response["plan"]["args"] = self.saved[&call_id].args.clone();
+                if let Some(node) = &self.saved[&call_id].node {
+                    response["plan"]["nodeTarget"] = json!({"windowId":node.window_id(), "path":node.raw_child_path()});
                 }
                 response.to_string()
             }
@@ -527,6 +725,28 @@ impl<J: Journal> Controller<J> {
             return error_json("call-not-found", "no tracked call for this id", receipt.screen_id());
         };
         let permit = saved.permit.clone();
+        if receipt.executed() != Executed::Unknown && receipt.screen_id() != saved.plan.target.alias() {
+            return error_json("receipt-target-mismatch", "platform receipt differs from its dispatch target", saved.plan.target.alias());
+        }
+        if receipt.ok() && saved.node.is_some() && !saved.node_verified {
+            return error_json("node-not-verified", "success requires a matching Android node", saved.plan.target.alias());
+        }
+        let post_denial = if receipt.executed() == Executed::Yes {
+            self.policy.revalidate(&saved.plan).err()
+        } else { None };
+        if matches!(saved.plan.op, "screenshot" | "readRegion") && receipt.ok() && post_denial.is_none() {
+            let expected = self.images.get(&call_id).map(|image| &image.metadata);
+            if expected.is_none() || receipt.data().and_then(|data| data.get("image")) != expected {
+                return error_json("invalid-visual-receipt", "visual success requires the native encoded image", receipt.screen_id());
+            }
+        }
+        if saved.plan.op == "snapshot" && receipt.ok() && post_denial.is_none() {
+            let expected = saved.plan.target.alias().and_then(|screen| self.tree_deliveries.get(screen))
+                .filter(|delivery| delivery.call_id == call_id).map(|delivery| &delivery.metadata);
+            if expected.is_none() || receipt.data().and_then(|data| data.get("tree")) != expected {
+                return error_json("invalid-tree-receipt", "snapshot success requires the native tree", receipt.screen_id());
+            }
+        }
         if self.lifecycle.phase(&call_id) != Some(Phase::Dispatching) {
             return error_json("invalid-state", "call has no successful dispatch evidence", receipt.screen_id());
         }
@@ -534,7 +754,9 @@ impl<J: Journal> Controller<J> {
         let result = if receipt.executed() == Executed::Unknown {
             self.lifecycle.mark_unknown(&call_id, &permit.fingerprint().clone(), receipt.code())
         } else {
-            let mut outcome = if receipt.executed() == Executed::Yes {
+            let mut outcome = if let Some(error) = &post_denial {
+                Outcome::new(error.code(), false)
+            } else if receipt.executed() == Executed::Yes {
                 Outcome::new(receipt.code(), receipt.ok())
             } else {
                 Outcome::not_executed(receipt.code())
@@ -545,7 +767,7 @@ impl<J: Journal> Controller<J> {
             if let Some(diagnostic) = receipt.diagnostic() {
                 outcome = outcome.with_diagnostic(diagnostic);
             }
-            if let Some(data) = receipt.data() {
+            if let Some(data) = receipt.data().filter(|_| post_denial.is_none()) {
                 outcome = outcome.with_data(data.clone());
             }
             self.lifecycle
@@ -730,9 +952,12 @@ impl<J: Journal> Controller<J> {
             "invalid-state"
         };
         if valid {
-            if let Err(error) = self.policy.revalidate(&plan) {
+            if let Err(error) = self.policy.revalidate(&plan).map_err(policy_error).and_then(|_| self.revalidate_node(saved)) {
                 valid = false;
                 code = error.code();
+            } else if saved.node.is_some() && !saved.node_verified {
+                valid = false;
+                code = "node-not-verified";
             }
         }
         let mut value = json!({
@@ -781,6 +1006,9 @@ impl<J: Journal> Controller<J> {
         let Some(saved) = self.saved.get(&call_id) else {
             return error_json("call-not-found", "no prepared plan for this call", None);
         };
+        if saved.node.is_some() {
+            return error_json("fallback-not-allowed", "node references cannot switch to another platform", saved.plan.target.alias());
+        }
         if self.lifecycle.phase(&call_id) != Some(Phase::Prepared) {
             return error_json(
                 "fallback-not-allowed",
@@ -920,6 +1148,54 @@ fn screen_alias<'a>(operation: &str, target: &'a TargetRequest) -> Option<&'a st
 }
 
 fn validate_operation_args(operation: &str, args: &Value) -> Result<(), ControllerError> {
+    if matches!(operation, "screenshot" | "snapshot") {
+        return allowed_fields(args, &[]).map_err(|response| ControllerError::new("invalid-request", response));
+    }
+    if operation == "readRegion" {
+        let object = args.as_object().ok_or_else(|| ControllerError::new("invalid-region", "args must be an object"))?;
+        if object.len() != 4 || !["x1", "y1", "x2", "y2"].iter().all(|key| object.contains_key(*key)) {
+            return Err(ControllerError::new("invalid-region", "readRegion requires only x1,y1,x2,y2"));
+        }
+        for key in ["x1", "y1", "x2", "y2"] { coordinate(object, key)?; }
+        return Ok(());
+    }
+    let object = args.as_object().ok_or_else(|| ControllerError::new("invalid-request", "args must be an object"))?;
+    if matches!(operation, "click" | "longClick" | "nodeText" | "setText" | "scroll") && object.contains_key("ref") {
+        let valid_ref = object.get("ref").and_then(Value::as_str).is_some_and(|reference|
+            !reference.is_empty() && reference.len() <= 96);
+        if !valid_ref {
+            return Err(ControllerError::new("invalid-node-ref", "a bounded snapshot ref is required"));
+        }
+        let keys: &[&str] = match operation {
+            "setText" => &["ref", "text", "clear"],
+            "scroll" => &["ref", "direction"],
+            _ => &["ref"],
+        };
+        allowed_fields(args, keys).map_err(|response| ControllerError::new("invalid-request", response))?;
+        if operation == "setText" {
+            if !object.get("text").and_then(Value::as_str).is_some_and(|text| text.len() <= 8192) {
+                return Err(ControllerError::new("invalid-text", "text must be a string of at most 8192 bytes"));
+            }
+            if object.get("clear").is_some_and(|clear| !clear.is_boolean()) {
+                return Err(ControllerError::new("invalid-clear", "clear must be a boolean"));
+            }
+        }
+        if operation == "scroll" { validate_direction(object)?; }
+        return Ok(());
+    }
+    if matches!(operation, "nodeText" | "setText") {
+        return Err(ControllerError::new("invalid-node-ref", "a snapshot ref is required for this operation"));
+    }
+    if operation == "scroll" {
+        allowed_fields(args, &["x", "y", "direction", "fraction"]).map_err(|response| ControllerError::new("invalid-request", response))?;
+        coordinate(object, "x")?;
+        coordinate(object, "y")?;
+        validate_direction(object)?;
+        if object.get("fraction").is_some_and(|value| !value.as_f64().is_some_and(|n| (0.1..=1.0).contains(&n))) {
+            return Err(ControllerError::new("invalid-fraction", "fraction must be between 0.1 and 1"));
+        }
+        return Ok(());
+    }
     if matches!(operation, "click" | "longClick") {
         let object = args.as_object().ok_or_else(|| {
             ControllerError::new("invalid-request", "args must be an object")
@@ -939,11 +1215,28 @@ fn validate_operation_args(operation: &str, args: &Value) -> Result<(), Controll
 }
 
 fn canonical_args(operation: &str, args: &Value) -> Value {
+    if args.get("ref").is_some() {
+        let mut canonical = args.clone();
+        if operation == "setText" && canonical.get("clear").is_none() { canonical["clear"] = json!(true); }
+        return canonical;
+    }
+    if operation == "scroll" {
+        let mut canonical = args.clone();
+        if canonical.get("fraction").is_none() { canonical["fraction"] = json!(0.5); }
+        return canonical;
+    }
     if matches!(operation, "click" | "longClick") {
         let object = args.as_object().expect("click args checked before canonicalization");
         return json!({"x": object["x"], "y": object["y"]});
     }
     args.clone()
+}
+
+fn validate_direction(args: &Map<String, Value>) -> Result<(), ControllerError> {
+    match args.get("direction").and_then(Value::as_str) {
+        Some("up" | "down" | "left" | "right") => Ok(()),
+        _ => Err(ControllerError::new("invalid-direction", "direction must be up, down, left or right")),
+    }
 }
 
 fn request_version(object: &Map<String, Value>) -> Result<(), String> {
@@ -1303,6 +1596,8 @@ struct A11yFactsWire {
     supported_ops: OpSetWire,
     #[serde(default)]
     display_support: DisplaySupportWire,
+    #[serde(default)]
+    display_operations: Option<BTreeMap<i32, BTreeSet<String>>>,
 }
 
 impl A11yFactsWire {
@@ -1312,6 +1607,7 @@ impl A11yFactsWire {
             online: self.online,
             supported_ops: self.supported_ops.into_policy(),
             display_support: self.display_support.into_policy(),
+            display_operations: self.display_operations,
         }
     }
 }

@@ -182,6 +182,7 @@ fn unavailable_a11y_can_route_to_verified_shizuku() {
         online: Tri::No,
         supported_ops: OpSet::known(["click"]),
         display_support: DisplaySupport::known([(41, true)]),
+        display_operations: None,
     });
     state.set_shizuku_facts(shizuku_ready(ServerUid::Shell2000, &["click"], &[(41, true)]));
     let plan = state
@@ -207,6 +208,7 @@ fn unknown_facts_never_fall_through_as_false() {
         online: Tri::Unknown,
         supported_ops: OpSet::known(["click"]),
         display_support: DisplaySupport::known([(41, true)]),
+        display_operations: None,
     };
     state.set_a11y_facts(unknown_a11y);
     assert!(state.plan("click", TargetRequest::Virtual("virtual-1".into())).is_err());
@@ -229,6 +231,7 @@ fn fallback_does_not_jump_to_another_target() {
         online: Tri::No,
         supported_ops: OpSet::known(["click"]),
         display_support: DisplaySupport::known([(41, false)]),
+        display_operations: None,
     });
     let direct = state
         .plan("click", TargetRequest::Virtual("virtual-1".into()))
@@ -440,6 +443,7 @@ fn uid_zero_never_upgrades_basic_screen_control() {
         online: Tri::No,
         supported_ops: OpSet::known::<_, &str>([]),
         display_support: DisplaySupport::known([(41, true)]),
+        display_operations: None,
     });
     state.set_shizuku_facts(shizuku_ready(ServerUid::Root0, &["click"], &[(41, true)]));
     state.set_root_facts(RootFacts::granted());

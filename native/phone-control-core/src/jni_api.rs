@@ -14,8 +14,8 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use jni::objects::{JClass, JString};
-use jni::sys::jstring;
+use jni::objects::{JByteArray, JClass, JObject, JString, JValue};
+use jni::sys::{jobject, jstring};
 use jni::JNIEnv;
 use serde_json::json;
 
@@ -270,7 +270,7 @@ pub fn exchange_core(payload: &str) -> String {
     }
 }
 
-/// Fast gate for Android main thread: facts, capabilities and validateDispatch only.
+/// Fast gate for Android main thread: facts, capabilities and dispatch checks only.
 /// It uses try_lock and never waits for a journal fsync.
 pub fn exchange_nonblocking_core(payload: &str) -> String {
     let result = catch_unwind(AssertUnwindSafe(|| exchange_nonblocking_inner(payload)));
@@ -291,10 +291,10 @@ fn exchange_nonblocking_inner(payload: &str) -> String {
         Some(kind) => kind,
         None => return failure("invalid-request", "payload must be a JSON object with a kind"),
     };
-    if !matches!(kind.as_str(), "publishFacts" | "capabilities" | "validateDispatch") {
+    if !matches!(kind.as_str(), "publishFacts" | "capabilities" | "validateDispatch" | "verifyNode") {
         return failure(
             "blocking-operation-rejected",
-            "exchangeNonblocking only accepts publishFacts, capabilities and validateDispatch",
+            "exchangeNonblocking only accepts facts and dispatch verification",
         );
     }
     let mut guard = match core().try_lock() {
@@ -331,10 +331,12 @@ fn lock_core() -> Result<MutexGuard<'static, Option<Session>>, String> {
 
 fn failure(code: &str, detail: &str) -> String {
     json!({
+        "protocolVersion": PROTOCOL_VERSION,
         "ok": false,
         "protocolVersion": PROTOCOL_VERSION,
         "code": code,
         "executed": "unknown",
+        "screenId": null,
         "detail": detail
     })
     .to_string()
@@ -360,6 +362,123 @@ fn java_string(env: &mut JNIEnv<'_>, value: JString<'_>) -> Result<String, Strin
     env.get_string(&value)
         .map(|string| string.into())
         .map_err(|error| error.to_string())
+}
+
+fn visual_failure(code: &str, executed: &str, screen_id: Option<&str>) -> String {
+    json!({"ok": false, "code": code, "executed": executed, "screenId": screen_id}).to_string()
+}
+
+fn prepare_frame(metadata: &str, length: usize)
+    -> Result<(crate::vision_runtime::FrameMetadata, crate::vision_runtime::VisualTicket), String> {
+    if metadata.len() > 8192 || length > crate::vision_runtime::MAX_JNI_FRAME_BYTES {
+        return Err(visual_failure("frame-byte-budget", "unknown", None));
+    }
+    let metadata: crate::vision_runtime::FrameMetadata = serde_json::from_str(metadata)
+        .map_err(|_| visual_failure("invalid-frame-metadata", "unknown", None))?;
+    let guard = lock_core()?;
+    let session = guard.as_ref().ok_or_else(|| visual_failure("not-initialized", "unknown", None))?;
+    let ticket = session.controller.visual_ticket(&metadata.call_id)
+        .map_err(|error| visual_failure(error.code(), "unknown", None))?;
+    metadata.validate(&ticket, length)
+        .map_err(|error| visual_failure(error.code(), "unknown", Some(&ticket.target.screen_id)))?;
+    Ok((metadata, ticket))
+}
+
+fn encode_prepared_frame(metadata: crate::vision_runtime::FrameMetadata,
+    ticket: crate::vision_runtime::VisualTicket, bytes: &[u8]) -> String {
+    // JPEG 编码不持有进程 CORE 锁，主线程的最终派发门不会等待编解码。
+    let image = match metadata.encode(&ticket, bytes) {
+        Ok(image) => image,
+        Err(error) => return visual_failure(error.code(), "yes", Some(&ticket.target.screen_id)),
+    };
+    let mut guard = match lock_core() { Ok(guard) => guard, Err(response) => return response };
+    let Some(session) = guard.as_mut() else { return visual_failure("not-initialized", "unknown", None) };
+    match session.controller.finish_visual(&ticket, image) {
+        Ok(receipt) => receipt.to_string(),
+        Err(error) => visual_failure(error.code(), "yes", Some(&ticket.target.screen_id)),
+    }
+}
+
+/// 主机行为测试入口；Android JNI 会先核对 byte[] 长度，再复制任何像素。
+pub fn encode_frame_core(metadata: &str, bytes: &[u8]) -> String {
+    catch_unwind(AssertUnwindSafe(|| match prepare_frame(metadata, bytes.len()) {
+        Ok((metadata, ticket)) => encode_prepared_frame(metadata, ticket, bytes),
+        Err(response) => response,
+    })).unwrap_or_else(|_| visual_failure("vision-panic", "unknown", None))
+}
+
+pub fn read_image_core(call_id: &str) -> Result<(serde_json::Value, Vec<u8>), String> {
+    if call_id.is_empty() || call_id.len() > 64 { return Err(visual_failure("invalid-call-id", "unknown", None)); }
+    let guard = lock_core()?;
+    let session = guard.as_ref().ok_or_else(|| visual_failure("not-initialized", "unknown", None))?;
+    session.controller.read_visual(call_id).map_err(|error| visual_failure(error.code(), "unknown", None))
+}
+
+fn image_result(env: &mut JNIEnv<'_>, result: Result<(serde_json::Value, Vec<u8>), String>) -> jobject {
+    let (metadata, bytes) = match result {
+        Ok((metadata, bytes)) => (metadata.to_string(), Some(bytes)),
+        Err(response) => (response, None),
+    };
+    let built = (|| -> jni::errors::Result<jobject> {
+        let metadata = JObject::from(env.new_string(metadata)?);
+        let bytes = match bytes {
+            Some(bytes) => JObject::from(env.byte_array_from_slice(&bytes)?),
+            None => JObject::null(),
+        };
+        Ok(env.new_object("com/dsharnessmobile/shell/nativecontrol/NativeImageResult",
+            "(Ljava/lang/String;[B)V", &[JValue::Object(&metadata), JValue::Object(&bytes)])?.into_raw())
+    })();
+    built.unwrap_or(std::ptr::null_mut())
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_dsharnessmobile_shell_nativecontrol_NativeControlCore_encodeFrame(
+    mut env: JNIEnv<'_>, _class: JClass<'_>, metadata: JString<'_>, rgba: JByteArray<'_>) -> jstring {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let metadata = match java_string(&mut env, metadata) {
+            Ok(value) => value, Err(_) => return visual_failure("invalid-frame-metadata", "unknown", None),
+        };
+        let length = match env.get_array_length(&rgba) {
+            Ok(length) => length as usize, Err(_) => return visual_failure("invalid-frame-bytes", "unknown", None),
+        };
+        let (metadata, ticket) = match prepare_frame(&metadata, length) {
+            Ok(value) => value, Err(response) => return response,
+        };
+        let bytes = match env.convert_byte_array(&rgba) {
+            Ok(value) => value, Err(_) => return visual_failure("frame-copy-failed", "unknown", Some(&ticket.target.screen_id)),
+        };
+        encode_prepared_frame(metadata, ticket, &bytes)
+    }));
+    string_result(&mut env, result.unwrap_or_else(|_| visual_failure("vision-panic", "unknown", None)))
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_dsharnessmobile_shell_nativecontrol_NativeControlCore_readImage(
+    mut env: JNIEnv<'_>, _class: JClass<'_>, call_id: JString<'_>) -> jobject {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let call_id = java_string(&mut env, call_id)
+            .map_err(|_| visual_failure("invalid-call-id", "unknown", None))?;
+        read_image_core(&call_id)
+    })).unwrap_or_else(|_| Err(visual_failure("vision-panic", "unknown", None)));
+    image_result(&mut env, result)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_dsharnessmobile_shell_nativecontrol_NativeControlCore_publishTree(
+    mut env: JNIEnv<'_>, _class: JClass<'_>, call_id: JString<'_>, payload: JString<'_>) -> jstring {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<String, String> {
+        let call_id = java_string(&mut env, call_id).map_err(|_| visual_failure("invalid-call-id", "unknown", None))?;
+        let payload = java_string(&mut env, payload).map_err(|_| visual_failure("invalid-tree", "yes", None))?;
+        if payload.len() > 8 * 1024 * 1024 { return Err(visual_failure("raw-tree-byte-budget", "yes", None)); }
+        let raw = crate::ui_tree::parse_raw_tree_json(&payload)
+            .map_err(|error| visual_failure(error.code(), "yes", None))?;
+        let mut guard = lock_core()?;
+        let session = guard.as_mut().ok_or_else(|| visual_failure("not-initialized", "unknown", None))?;
+        session.controller.publish_tree(&call_id, raw).map(|receipt| receipt.to_string())
+            .map_err(|error| visual_failure(error.code(), "yes", None))
+    }));
+    string_result(&mut env, result.unwrap_or_else(|_| Err(visual_failure("tree-panic", "unknown", None)))
+        .unwrap_or_else(|failure| failure))
 }
 
 /// `@JvmStatic external fun initialize(stateDir: String, appUid: Int): String`

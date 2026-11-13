@@ -29,7 +29,6 @@ internal class NativeControlSocketServer(
 ) : AutoCloseable {
   interface Handler {
     fun handle(request: JSONObject, cancellation: Cancellation): JSONObject
-    fun cancel(callId: String)
   }
 
   class Cancellation internal constructor() {
@@ -42,7 +41,7 @@ internal class NativeControlSocketServer(
   private val appUid = Process.myUid()
   private val stopped = AtomicBoolean(false)
   private val started = AtomicBoolean(false)
-  private val active = ConcurrentHashMap<LocalSocket, Pair<Cancellation, String?>>()
+  private val active = ConcurrentHashMap<LocalSocket, Cancellation>()
   private val workers = ThreadPoolExecutor(
     2, 2, 0L, TimeUnit.MILLISECONDS, ArrayBlockingQueue(4),
     { runnable -> Thread(runnable, "native-control-rpc").apply { isDaemon = true } },
@@ -119,7 +118,7 @@ internal class NativeControlSocketServer(
         continue
       }
       val cancellation = Cancellation()
-      active[connection] = cancellation to null
+      active[connection] = cancellation
       try {
         workers.execute { serve(connection, cancellation) }
       } catch (_: RejectedExecutionException) {
@@ -138,24 +137,25 @@ internal class NativeControlSocketServer(
       if (stopped.get() || cancellation.isCancelled()) return
       val request = NativeControlFrames.readRequest(socket.inputStream)
       callId = (request.opt("callId") as? String)
-      active[socket] = cancellation to callId
       val timeout = request.optInt("timeoutMs", 15_000)
       deadline = timer.schedule({
-        if (cancellation.cancel()) callId?.let { runCatching { handler.cancel(it) } }
+        // 此连接可能是 status 或重复 execute；只有实际取得 prepare 的宿主能按 ID 取消。
+        cancellation.cancel()
         runCatching { socket.close() }
       }, timeout.toLong(), TimeUnit.MILLISECONDS)
       if (stopped.get() || cancellation.isCancelled()) return
       handlerEntered = true
       val response = handler.handle(request, cancellation)
+      if (callId != null && !response.has("callId")) response.put("callId", callId)
       if (!cancellation.isCancelled()) NativeControlFrames.writeResponse(socket.outputStream, response)
     } catch (failure: NativeControlFrames.WireException) {
-      if (handlerEntered && cancellation.cancel()) callId?.let { runCatching { handler.cancel(it) } }
-      runCatching { NativeControlFrames.writeResponse(socket.outputStream, rejection(failure.code, handlerEntered)) }
+      cancellation.cancel()
+      runCatching { NativeControlFrames.writeResponse(socket.outputStream, rejection(failure.code, handlerEntered, callId)) }
     } catch (_: IOException) {
-      if (cancellation.cancel()) callId?.let { runCatching { handler.cancel(it) } }
+      cancellation.cancel()
     } catch (_: Exception) {
-      if (cancellation.cancel()) callId?.let { runCatching { handler.cancel(it) } }
-      runCatching { NativeControlFrames.writeResponse(socket.outputStream, rejection("native-request-failed", handlerEntered)) }
+      cancellation.cancel()
+      runCatching { NativeControlFrames.writeResponse(socket.outputStream, rejection("native-request-failed", handlerEntered, callId)) }
     } finally {
       deadline?.cancel(false)
       active.remove(socket)
@@ -163,15 +163,16 @@ internal class NativeControlSocketServer(
     }
   }
 
-  private fun rejection(code: String, uncertain: Boolean = false): JSONObject = JSONObject()
+  private fun rejection(code: String, uncertain: Boolean = false, callId: String? = null): JSONObject = JSONObject()
     .put("protocolVersion", NativeControlFrames.PROTOCOL_VERSION)
     .put("ok", false).put("code", code).put("executed", if (uncertain) "unknown" else "no")
     .put("screenId", JSONObject.NULL)
+    .also { if (callId != null) it.put("callId", callId) }
 
   override fun close() {
     if (!stopped.compareAndSet(false, true)) return
     active.forEach { (socket, state) ->
-      if (state.first.cancel()) state.second?.let { runCatching { handler.cancel(it) } }
+      state.cancel()
       runCatching { socket.close() }
     }
     runCatching { server?.close() }

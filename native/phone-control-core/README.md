@@ -17,13 +17,17 @@ JNI 视觉入口、图像交付到模型、模型 tool schema 或 Node 工具注
 
 类名固定：com.dsharnessmobile.shell.nativecontrol.NativeControlCore。
 
-Kotlin 对象声明三个方法：
+Kotlin 对象声明六个内部方法：
 
 - initialize(stateDir: String, appUid: Int): String
 - exchange(payload: String): String
 - exchangeNonblocking(payload: String): String
+- encodeFrame(metadata: String, rgba: ByteArray): String
+- readImage(callId: String): NativeImageResult?
+- publishTree(callId: String, payload: String): String
 
-三个入口总是返回 JSON。initialize 只接受应用私有 filesDir 下的真实目录。
+字符串入口返回 JSON。readImage 通过固定 JNI 构造签名交付 JSON 元数据及 JPEG 字节。
+initialize 只接受应用私有 filesDir 下的真实目录。
 Android 构建读取真实 getuid()，要求等于 appUid 且拒绝 uid 0；Windows 主机
 测试会在响应里标记 identityVerified: false，这不能代替 Android 设备校验。
 
@@ -168,6 +172,15 @@ supportedOps 形状为 {"state":"unknown"} 或
 ~~~
 
 ## prepare 与 execute
+
+坐标点击与长按传 `args:{x,y}`。节点点击、长按、文本读取使用
+`args:{ref}`；节点输入另带 `text` 与可选 `clear`（默认 true），节点滚动
+另带 `direction`。坐标滚动使用 `{x,y,direction,fraction?}`，fraction 默认
+0.5。同一操作不能混用 ref 和坐标。
+
+ref 必须来自当前已结算的 UI 快照。Rust 在 commit 回传固定窗口和原始 child
+path；平台通过内部 `verifyNode` 提交新读出的节点身份，再通过
+`validateDispatch` 检查当前授权与快照。节点计划不跨平台重派。
 
 内部 prepare 请求：
 

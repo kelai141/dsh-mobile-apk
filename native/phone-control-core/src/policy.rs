@@ -212,6 +212,8 @@ pub struct A11yFacts {
     pub online: Tri,
     pub supported_ops: OpSet,
     pub display_support: DisplaySupport,
+    #[serde(default)]
+    pub display_operations: Option<BTreeMap<i32, BTreeSet<String>>>,
 }
 
 impl A11yFacts {
@@ -221,6 +223,7 @@ impl A11yFacts {
             online: Tri::Yes,
             supported_ops: OpSet::known(ops.iter().copied()),
             display_support: DisplaySupport::known(displays.iter().copied()),
+            display_operations: None,
         }
     }
 }
@@ -458,7 +461,7 @@ pub enum Backend {
 }
 
 /// 已通过范围与事实检查的派发计划。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DispatchPlan {
     pub op: &'static str,
     pub epoch: u64,
@@ -985,7 +988,14 @@ impl PolicyState {
         facts.push(self.a11y.supported_ops.contains(spec.name));
         if spec.target_domain == TargetDomain::AndroidDisplay {
             if let Some(binding) = target.screen() {
-                facts.push(self.a11y.display_support.contains(binding.display_id));
+                facts.push(match &self.a11y.display_operations {
+                    Some(displays) => match displays.get(&binding.display_id) {
+                        Some(operations) if operations.contains(spec.name) => Tri::Yes,
+                        Some(_) => Tri::No,
+                        None => Tri::Unknown,
+                    },
+                    None => self.a11y.display_support.contains(binding.display_id),
+                });
             } else {
                 facts.push(Tri::Unknown);
             }

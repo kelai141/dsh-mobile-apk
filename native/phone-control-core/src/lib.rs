@@ -4,4 +4,6 @@ pub mod journal;
 pub mod jni_api;
 pub mod lifecycle;
 pub mod policy;
+pub mod ui_tree;
 pub mod vision;
+pub mod vision_runtime;

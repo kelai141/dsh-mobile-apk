@@ -26,7 +26,8 @@ class NativeControlDispatcherTest {
         "publishFacts" -> JSONObject().put("ok", true)
         "prepare" -> if (replay) JSONObject("""{"ok":true,"code":"clicked","executed":"yes","replayed":true}""")
           else JSONObject().put("ok", true).put("code", "prepared").put("plan", plan)
-        "commit" -> JSONObject().put("dispatch", "permitted").put("plan", plan)
+        "commit" -> JSONObject().put("callId", req.getString("callId")).put("dispatch", "permitted")
+          .put("plan", JSONObject(plan.toString()).put("args", JSONObject().put("x", 20).put("y", 30)))
         // ok=false is intentional: only valid+dispatch carry execution authority.
         "validateDispatch" -> JSONObject().put("ok", false).put("valid", valid)
           .put("dispatch", if (valid) "permitted" else "forbidden")
@@ -38,7 +39,8 @@ class NativeControlDispatcherTest {
     }
     val platform = object : NativeControlDispatcher.Platform {
       override fun implements(plan: JSONObject) = supported
-      override fun execute(plan: JSONObject, args: JSONObject, authorize: () -> Boolean): CompletableFuture<JSONObject> {
+      override fun execute(callId: String, plan: JSONObject, args: JSONObject, refreshFacts: () -> Boolean,
+        authorize: () -> Boolean): CompletableFuture<JSONObject> {
         if (!skipGate && !authorize()) return CompletableFuture.completedFuture(JSONObject("""{"ok":false,"code":"authorize-denied","executed":"no"}"""))
         sdkCalls++
         if (throwAfterGate) throw IllegalStateException("lost callback")
@@ -55,7 +57,7 @@ class NativeControlDispatcherTest {
     val result = f.run()
     assertEquals("yes", result.getString("executed"))
     assertEquals("real", result.getString("screenId"))
-    assertEquals(listOf("publishFacts", "prepare", "publishFacts", "commit", "publishFacts", "validateDispatch", "settle"), f.calls)
+    assertEquals(listOf("publishFacts", "prepare", "publishFacts", "commit", "publishFacts", "validateDispatch", "publishFacts", "settle"), f.calls)
     assertEquals(1, f.sdkCalls)
     assertEquals(false, f.secondGate)
   }

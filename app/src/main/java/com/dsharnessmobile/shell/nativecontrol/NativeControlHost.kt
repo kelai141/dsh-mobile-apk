@@ -36,6 +36,7 @@ internal class NativeControlHost private constructor(
         core = object : NativeControlDispatcher.Core {
           override fun exchange(request: JSONObject) = JSONObject(NativeControlCore.exchange(request.toString()))
           override fun fastExchange(request: JSONObject) = JSONObject(NativeControlCore.exchangeNonblocking(request.toString()))
+          override fun readImage(callId: String) = NativeControlCore.readImage(callId)
         },
         facts = facts,
         platform = platform,

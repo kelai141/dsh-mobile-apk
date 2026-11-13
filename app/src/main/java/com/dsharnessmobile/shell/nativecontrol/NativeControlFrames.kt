@@ -13,7 +13,8 @@ import java.nio.charset.CodingErrorAction
 internal object NativeControlFrames {
   const val PROTOCOL_VERSION = 1
   const val MAX_REQUEST_BYTES = 64 * 1024
-  const val MAX_RESPONSE_BYTES = 1024 * 1024
+  // 单张最多 1 MiB JPEG 的 base64 与元数据；请求预算保持独立。
+  const val MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
   private val fields = mapOf(
     "capabilities" to setOf("protocolVersion", "method"),

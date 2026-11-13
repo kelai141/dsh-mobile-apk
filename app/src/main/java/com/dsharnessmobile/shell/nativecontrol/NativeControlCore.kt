@@ -21,4 +21,13 @@ internal object NativeControlCore {
   /** 仅内存事实与最终派发检查；争锁立即拒绝，不能在 UI 回调里等待日志落盘。 */
   @JvmStatic
   external fun exchangeNonblocking(payload: String): String
+
+  @JvmStatic
+  external fun encodeFrame(metadata: String, rgba: ByteArray): String
+
+  @JvmStatic
+  external fun readImage(callId: String): NativeImageResult?
+
+  @JvmStatic
+  external fun publishTree(callId: String, payload: String): String
 }

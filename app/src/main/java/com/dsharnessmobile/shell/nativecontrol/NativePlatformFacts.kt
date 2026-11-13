@@ -24,6 +24,7 @@ internal class NativePlatformFacts(
     val manager = context.getSystemService(DisplayManager::class.java)
     val screens = JSONObject()
     val displaySupport = JSONObject()
+    val displayOperations = JSONObject()
     val operations = linkedSetOf<String>()
     for ((alias, displayId) in registeredDisplays()) {
       val display = manager.getDisplay(displayId) ?: continue
@@ -42,6 +43,7 @@ internal class NativePlatformFacts(
       val available = execution.supportedOperations(displayId)
       operations.addAll(available)
       displaySupport.put(displayId.toString(), available.isNotEmpty())
+      displayOperations.put(displayId.toString(), JSONArray(available))
     }
     val enabled = try {
       val expected = ComponentName(context, DeviceControlService::class.java)
@@ -53,7 +55,8 @@ internal class NativePlatformFacts(
       .put("screens", screens)
       .put("a11y", JSONObject().put("enabled", enabled).put("online", online)
         .put("supportedOps", JSONObject().put("state", "known").put("ops", JSONArray(operations.toList())))
-        .put("displaySupport", JSONObject().put("state", "known").put("values", displaySupport)))
+        .put("displaySupport", JSONObject().put("state", "known").put("values", displaySupport))
+        .put("displayOperations", displayOperations))
     // Shizuku / Root 未接入本竖切：省略即 unknown，不复用旧插件推断出的布尔值。
   }
 }

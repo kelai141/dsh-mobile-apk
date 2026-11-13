@@ -219,6 +219,8 @@ internal class NativeAccessibilityPlatform(
    * 逐个执行与实际派发相同的 guard；不在别处维护第二份白名单。
    */
   fun pointGesturesSupported(displayId: Int): Boolean = guardGesture(displayId) == null
+  fun screenshotsSupported(displayId: Int): Boolean = guardCapture(displayId) == null
+  fun windowContentSupported(displayId: Int): Boolean = guardContent(displayId) == null
 
   fun capabilities(displayId: Int): RawCapabilities {
     val supported = ArrayList<String>(handlerGuards.size)
@@ -333,14 +335,17 @@ internal class NativeAccessibilityPlatform(
     nodeTarget: RawNodeTarget,
     verifyNode: (RawNode) -> Boolean,
     finalAuthorize: () -> Boolean,
+    longClick: Boolean = false,
   ): CompletableFuture<ActionOutcome> = nodeAction(target, nodeTarget) { node ->
-    if (!node.isClickable) return@nodeAction ActionOutcome.no("node-not-clickable")
+    if (longClick && !node.isLongClickable) return@nodeAction ActionOutcome.no("node-not-long-clickable")
+    if (!longClick && !node.isClickable) return@nodeAction ActionOutcome.no("node-not-clickable")
     val raw = captureNode(node, nodeTarget.path)
     if (!safeVerify(verifyNode, raw)) return@nodeAction ActionOutcome.no("verify-failed")
     if (!safeAuthorize(finalAuthorize)) return@nodeAction ActionOutcome.no("authorize-denied")
     try {
-      if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-        ActionOutcome.yes("node-click-accepted")
+      val action = if (longClick) AccessibilityNodeInfo.ACTION_LONG_CLICK else AccessibilityNodeInfo.ACTION_CLICK
+      if (node.performAction(action)) {
+        ActionOutcome.yes(if (longClick) "node-long-click-accepted" else "node-click-accepted")
       } else {
         ActionOutcome.no("node-click-rejected")
       }
@@ -364,12 +369,12 @@ internal class NativeAccessibilityPlatform(
       if (!node.isEditable) return@nodeAction ActionOutcome.no("node-not-editable")
       val raw = captureNode(node, nodeTarget.path)
       if (!safeVerify(verifyNode, raw)) return@nodeAction ActionOutcome.no("verify-failed")
-      if (!safeAuthorize(finalAuthorize)) return@nodeAction ActionOutcome.no("authorize-denied")
       val value = if (clear) text else (node.text?.toString() ?: "") + text
       if (value.length > MAX_TEXT_CHARS) return@nodeAction ActionOutcome.no("text-too-large")
       val bundle = Bundle().apply {
         putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value)
       }
+      if (!safeAuthorize(finalAuthorize)) return@nodeAction ActionOutcome.no("authorize-denied")
       try {
         if (node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundle)) {
           ActionOutcome.yes("node-set-text-accepted")
@@ -395,16 +400,12 @@ internal class NativeAccessibilityPlatform(
       if (!node.isScrollable) return@nodeAction ActionOutcome.no("node-not-scrollable")
       val raw = captureNode(node, nodeTarget.path)
       if (!safeVerify(verifyNode, raw)) return@nodeAction ActionOutcome.no("verify-failed")
-      if (!safeAuthorize(finalAuthorize)) return@nodeAction ActionOutcome.no("authorize-denied")
       val legacy = when (direction) {
         "down" -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
         "up" -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
         else -> null
       }
       try {
-        if (legacy != null && node.performAction(legacy)) {
-          return@nodeAction ActionOutcome.yes("node-scroll-accepted")
-        }
         val directional = when (direction) {
           "down" -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN.id
           "up" -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP.id
@@ -412,7 +413,11 @@ internal class NativeAccessibilityPlatform(
           "right" -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT.id
           else -> null
         }
-        if (directional != null && node.performAction(directional)) {
+        val supported = node.actionList.map { it.id }.toSet()
+        val action = listOfNotNull(directional, legacy).firstOrNull { it in supported }
+          ?: return@nodeAction ActionOutcome.no("node-scroll-unavailable")
+        if (!safeAuthorize(finalAuthorize)) return@nodeAction ActionOutcome.no("authorize-denied")
+        if (node.performAction(action)) {
           ActionOutcome.yes("node-scroll-accepted")
         } else {
           ActionOutcome.no("node-scroll-rejected")
@@ -924,11 +929,13 @@ internal class NativeAccessibilityPlatform(
           return CaptureOutcome.Failed("unknown", "frame-copy-failed", describe(t))
         } ?: return CaptureOutcome.Failed("unknown", "frame-copy-failed")
 
-        // 先复制到 sRGB 的 ARGB_8888 位图，让 GPU 做一次色彩转换；再按行读像素，
+        // 由平台 Canvas 转换到 sRGB；仅改 setColorSpace 会重解释数值，并不转换颜色。
+        // 按行读平台返回的直通 ARGB，再展开 RGBA，避免整屏 IntArray。
         // 只占一行 IntArray，避免为整屏再分配第三张位图与整屏像素数组。
         val srgb = android.graphics.ColorSpace.get(android.graphics.ColorSpace.Named.SRGB)
         straight = try {
-          software.copy(android.graphics.Bitmap.Config.ARGB_8888, false)?.also { it.setColorSpace(srgb) }
+          android.graphics.Bitmap.createBitmap(rawWidth, rawHeight, android.graphics.Bitmap.Config.ARGB_8888, true, srgb)
+            .also { bitmap -> android.graphics.Canvas(bitmap).drawBitmap(software, 0f, 0f, null) }
         } catch (t: Throwable) {
           return CaptureOutcome.Failed("unknown", "frame-color-convert-failed", describe(t))
         } ?: return CaptureOutcome.Failed("unknown", "frame-color-convert-failed")
@@ -957,7 +964,7 @@ internal class NativeAccessibilityPlatform(
             bytes = bytes,
             transform = transform,
             colorSpace = "srgb",
-            // 显式合成到不透明 sRGB：截屏没有可保留的透明语义，避免预乘/直通 alpha 歧义。
+            // getPixels 返回直通通道值；alpha 的 JPEG 合成由 Rust 负责。
             premultipliedAlpha = false,
             capturedAtMs = timestamp,
           ),
@@ -1094,7 +1101,7 @@ internal class NativeAccessibilityPlatform(
      * 单帧原始字节上限。解码期同时存在硬件位图、软件位图、sRGB 副本与输出字节，
      * 取 32 MiB 把峰值控制在约 130 MiB 内；正常屏幕（含 1440x3200）远低于此值。
      */
-    const val MAX_FRAME_BYTES = 32L * 1024L * 1024L
+    const val MAX_FRAME_BYTES = 64L * 1024L * 1024L
     const val MAX_DIMENSION = 16_384
     const val MAX_SCREEN_ID_CHARS = 128
     const val MAX_TEXT_CHARS = 65_536
