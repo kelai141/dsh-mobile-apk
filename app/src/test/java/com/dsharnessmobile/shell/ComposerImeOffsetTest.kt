@@ -70,23 +70,15 @@ class ComposerImeOffsetTest {
 
   @Test fun riseIsSmoothedButCollapseIsInstant() {
     val script = ComposerImeOffset.script(351)
-    // 弹起给过渡（IME inset 是跳变的，硬套会抢跑），收起一律先置 none
-    assertTrue("弹起要有一段过渡", script.contains("cubic-bezier"))
-    assertTrue("清位移时必须无过渡", script.contains("c.style.transition='none'"))
-    assertTrue(
-      "清位移在前、开过渡在后",
-      script.indexOf("c.style.transition='none'") < script.indexOf("cubic-bezier"),
-    )
+    // 位移必须瞬时到位：系统原生 App 的输入框就是直接贴在键盘上沿，没有过渡动画。
+    assertTrue("不得引入过渡动画", !script.contains("cubic-bezier") && !script.contains("transition='transform"))
+    assertTrue("清位移前必须显式关掉过渡", script.contains("c.style.transition='none'"))
   }
 
   @Test fun clearingAlwaysKillsTransition() {
     val script = ComposerImeOffset.script(0)
     assertTrue(script.contains("c.style.transition='none'"))
-    // 过渡代码在字符串里恒存在，是否执行由 rising 决定——判据是「它挂在 rising 分支里」。
-    assertTrue(
-      "过渡只允许出现在 rising 分支内",
-      script.indexOf("if(rising){") in 0 until script.indexOf("cubic-bezier"),
-    )
+    assertTrue("任何方向都不得开过渡", !script.contains("cubic-bezier"))
   }
 
   @Test fun scriptIsASelfContainedIife() {
