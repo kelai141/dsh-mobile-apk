@@ -749,7 +749,13 @@ class MainActivity : ComponentActivity() {
           animation: WindowInsetsAnimationCompat,
           bounds: WindowInsetsAnimationCompat.BoundsCompat,
         ): WindowInsetsAnimationCompat.BoundsCompat {
-          if (animation.typeMask and WindowInsetsCompat.Type.ime() != 0) imeAnimating = true
+          if (animation.typeMask and WindowInsetsCompat.Type.ime() != 0) {
+            imeAnimating = true
+            // 动画一开头就按**终点**推一次：配合注入脚本里的短过渡，卡片和键盘同时起跑。
+            // 之前把推送放在 onEnd，等于让卡片白等一整个键盘动画时长才动，观感就是延迟。
+            // upperBound 是 androidx 的 Insets（物理 px），目标高度直接取 .bottom。
+            pushComposerImePx(bounds.upperBound.bottom)
+          }
           return bounds
         }
 

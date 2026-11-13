@@ -69,7 +69,7 @@ internal object ComposerImeOffset {
       "if(d<=0)return;" +
       // 弹起给一段短过渡：IME inset 是跳变的（比键盘动画还早），直接套用会「抢跑」；
       // 收起不给过渡——那一步要求瞬时回落，焦点一离开就落。
-      "if(rising){c.style.transition='transform 180ms cubic-bezier(.2,.7,.3,1)'}" +
+      "if(rising){c.style.transition='transform 220ms cubic-bezier(.2,.7,.3,1)'}" +
       "c.style.setProperty('transform','translateY(-'+d+'px)','important')};" +
       "api={set:apply,clear:clear};" +
       "window.$API_NAME=api;" +
