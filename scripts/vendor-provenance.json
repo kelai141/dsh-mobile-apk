@@ -9,8 +9,8 @@
           "bytes": 1071
         },
         "PATCHES.md": {
-          "sha256": "85db818e1f7f60c29b8ca87274962a9b34f98b5f0d06bca4fc959fb148c4fdcd",
-          "bytes": 7983
+          "sha256": "ea37e4f30d58c794bc13737c8df54da41fe8abad5eed2afad34d1a8b77f8148b",
+          "bytes": 8505
         },
         "README.md": {
           "sha256": "c3f35f75f83be22788c11791b2fa26335cb3b333f2c892f701e2e50e103f2c8c",
@@ -29,8 +29,8 @@
           "bytes": 18622
         },
         "lib/index.js": {
-          "sha256": "7b0e2ad8dfc72742a3f5610397b1cace8ccac2eaafe07af270b80986e816fc5a",
-          "bytes": 12807
+          "sha256": "7e2cbdc50220c0fc0898c2dbdd8d0c2399d25728104cbb4e7198b386024ef6ec",
+          "bytes": 12878
         },
         "package.json": {
           "sha256": "00f444fde468a1eb6f8948cc1fefb4a357da1b085aa32c01b4f861c477addd95",
@@ -40,7 +40,9 @@
           "sha256": "67d71c61e1a9d9a7c6f80b64a6f2776a2ca4ee4d9ecd98f16c1024c1b2b85bc1",
           "bytes": 2157
         }
-      }
+      },
+      "totalBytes": 57977,
+      "fileCount": 9
     },
     "vendor/dsh-plugin-subscriptions": {
       "files": {
