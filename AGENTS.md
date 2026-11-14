@@ -32,7 +32,7 @@ DeepSeek Harness 的**安卓壳应用**（包名 `com.dsharnessmobile.shell`）�
 # 在【协调仓根】执行（壳侧不单独构建）。三种模式见协调仓 AGENTS.md「三种打包模式」：
 #   release：双 ABI 全链，门禁失败即拒打包
 #   Fast   ：单 ABI x86_64 + preset 1，**门禁全跑**，开发迭代加速（禁发布）
-#   dev    ：node dsh-mobile-apk\scripts\build-apk-dev-fast.mjs，**跳过全部发布门禁**，仅本地测试（禁发布；
+#   dev    ：node dsh-mobile-apk\scripts\build-apk-dev-fast.mjs，不跑发布全链；仍查快照包覆盖、ABI 与指纹，仅本地测试（禁发布；
 #            不重建/不注入快照，复用 app/src/main/assets/snapshot.tar.xz）
 pwsh -File scripts\build-apk-013.ps1 -Suffix ""   # release 档：双 ABI 全链，门禁失败即拒打包
 pwsh -File scripts\build-apk-013.ps1 -Fast         # Fast 档：单 ABI x86_64 + preset 1（禁发布）
