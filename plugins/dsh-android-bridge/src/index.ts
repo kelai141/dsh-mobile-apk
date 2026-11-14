@@ -717,7 +717,7 @@ const INPUT_KEYEVENT_POWER_KEYCODE = /\binput\s+keyevent\s+(?:.*\s)?(?:3|26|82)\
 function looksDangerousAdb(command: string): boolean {
   if (looksDangerous(command)) return true
   // 目标屏参数要在**匹配这些模式之前**归一化掉：`input -d 7 keyevent 3` 是 Android CLI 的正式写法
-  // （`input [-d DISPLAY_ID] <command>`），选项顶掉命令词位置 ⇒ `input\\s+keyevent` 匹配不到 ⇒
+  // （`input [-d DISPLAY_ID] <command>`），选项顶掉命令词位置 ⇒ `input\s+keyevent` 匹配不到 ⇒
   // 换个写法就能注入系统键。与 screen-scope 的命令词面同一归一化（stripDisplayOptions）。
   const c = stripDisplayOptions(command).toLowerCase()
   const PATTERNS_ADB = [
@@ -1021,6 +1021,15 @@ export class AndroidPrivilegeService {
       // 探测失败即「未知」——不是「不可用」。
     }
     return this.shizukuChannel()
+  }
+
+  /**
+   * issue #1604：最近一次 `vdInfo` 回执的注册表快照（**只读缓存**，绝不为读状态入队）。
+   *
+   * 供公开只读状态路由使用；`undefined` = 本进程还没收到过 vdInfo 回执。
+   */
+  cachedVdStatus(): Record<string, unknown> | undefined {
+    return this.#controlQueue?.lastVdInfoSnapshot()?.data
   }
 
   /** 两条通道任一就绪即引擎级放行（不掺会话档位）：无障碍见 a11yEnabled，特权面 = ADB 或 Shizuku。 */
@@ -2442,11 +2451,24 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
           sendMobileRouteRejection(res, rejection)
           return
         }
-        // A1（0.14.1 设备实测缺陷）：渲染前先把 caps 补探一次，让 status / gates / shell.caps 三处
-        // 读的是同一份**新鲜**事实。此前这条路由只回显「上一次控制 op 带回的 caps」，而冷启动后
-        // 没有任何 op ⇒ 引擎面报 shizukuReady:false，而壳侧同一时刻报「已授权且就绪」——
-        // 同一个事实两种读数，就是用户看到的自相矛盾。探测失败保持三态缺席（不是 false）。
-        await svc.shizukuChannelProbed()
+        // issue #1604：本路由**绝不驱动控制队列**——不 await、也不起后台补探。
+        //
+        // 缺陷形态：这条路由按设计不要求令牌（`authorizePublicReadOnlyRoute` 只拦 403），而它此前
+        // 在请求路径上 `await svc.shizukuChannelProbed()`，后者会 `controlExec('vdInfo')`。控制队列
+        // 是**单槽**的 ⇒ 本机任意应用一条裸 socket GET（带 Host、不带 Origin、不带令牌）就能把队列
+        // 占住最长 4-8 秒，期间所有 AI 工具调用都得到「已有在途的设备控制请求——壳侧单线程，请串行
+        // 调用」，而失败文案把原因归到「模型并发调用」，排障方向完全错。
+        //
+        // 为什么不保留「detached 后台补探」：它虽然不阻塞本次响应，但**仍然占掉那个唯一的槽**
+        // ——无令牌调用方照样能让真实工具调用失败，只是把症状推后一步。issue 给的方向是
+        // 「需要补探时由带令牌入口或后台节流触发」，而本仓唯一需要新鲜 caps 的消费面是
+        // **模型面工具**（`android_privilege_status` / `android_capabilities`），它们本来就带会话与
+        // 档位、也本来就该走队列 —— 补探留在那里（见 `execute` 里的 `shizukuChannelProbed()`）。
+        //
+        // 代价（明确记账）：A1 的「冷启动时引擎面报 shizukuReady:false 而壳侧报已授权」不会再由
+        // 本路由的自愈补探消除 —— 冷启动后、任何工具 op 之前，本路由回的是三态里的**未知**
+        // （caps 整键缺席），而不是 `false`。设置页据此显示「未确认」，模型工具一跑即刷新。
+        // 这比「任何本机应用都能让工具调用失败」便宜得多，且三态语义本来就是为了不把未知当未就绪。
         sendJson(res, 200, buildPrivilegeStatusPayload(svc, controlToken() !== undefined))
       },
     })

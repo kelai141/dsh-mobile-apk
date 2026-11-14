@@ -101,6 +101,19 @@ export class ControlQueue {
   private lastCaps?: Record<string, unknown>
   /** 0.13.8 #181：在途标记——take 到 settle 之间二次取活必须被拒（防同一请求双执行）。 */
   private inFlight = false
+  /**
+   * issue #1604：**最近一次 `vdInfo` 的只读回执缓存**。
+   *
+   * 为什么需要它：公开只读状态路由（`/api/android/privilege/status`、`/api/android/vdisplay/status`）
+   * 按设计不要求令牌，但它们此前在**请求路径上** `await controlExec('vdInfo')`。而本队列是**单槽**的
+   * （见 [enqueue] 的「已有在途的设备控制请求」分支）——于是本机任意应用一条裸 socket 的 GET 就能把
+   * 队列占住最长 8 秒，期间任何 AI 工具调用都拿到「已有在途」，且失败文案把原因归到「模型并发调用」，
+   * 排障方向完全错。
+   *
+   * 修法：路由只读**已到手的回执**；缓存由真正会走队列的路径顺带填充（任何 `vd*` op 的 settle），
+   * 路由自己绝不入队。
+   */
+  private lastVdInfo?: { data: Record<string, unknown>; at: number }
 
   /** 是否有壳侧未取走的活（false = 壳侧应停轮）。 */
   get waiting(): boolean {
@@ -124,6 +137,26 @@ export class ControlQueue {
     // 可选键缺省整键不发（caps 从未声明过时不得在场为 undefined：会让消费面
     // 落到 not lossless JSON——android_privilege_status 的实测缺陷）。
     return this.lastCaps === undefined ? base : { ...base, caps: this.lastCaps }
+  }
+
+  /**
+   * 最近一次 `vdInfo` 回执的只读快照（issue #1604：公开只读路由**只读它**，绝不为读状态入队）。
+   *
+   * @returns `undefined` = 从未收到过 vdInfo 回执（路由据此走「未探过」分支，而不是去打队列）。
+   */
+  lastVdInfoSnapshot(): { data: Record<string, unknown>; at: number } | undefined {
+    return this.lastVdInfo
+  }
+
+  /**
+   * 记录一次成功的 `vdInfo` 回执（由 [settle] 在 op 为 `vdInfo` 且 ok 时自动调用）。
+   *
+   * 缓存的是**回执 data 的浅拷贝**：后续调用方若就地改它，不得污染缓存（那会让状态面读出
+   * 一个从未真实存在过的注册表）。
+   */
+  noteVdInfo(data: unknown): void {
+    if (data === null || typeof data !== 'object' || Array.isArray(data)) return
+    this.lastVdInfo = { data: { ...(data as Record<string, unknown>) }, at: Date.now() }
   }
 
   /** 记录壳侧声明的协议版本与能力（回填信封；诊断与协商共用）。 */
@@ -210,6 +243,9 @@ export class ControlQueue {
     this.lastResultAt = Date.now()
     if (result.ok) this.served++
     else this.failed++
+    // issue #1604：`vdInfo` 是注册表读面——它的成功回执顺带刷新只读缓存，公开状态路由就此
+    // 只读缓存、永不入队。放在 settle 里（而不是调用点）是因为**所有**经队列的 vdInfo 都过这里。
+    if (result.ok && entry.req.op === 'vdInfo') this.noteVdInfo(result.data)
     entry.resolve(result)
     return true
   }

@@ -21,9 +21,9 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { readVdToolSnapshot, readVdSnapshot, VD_STATUS_PATH, type VdOp, type VdisplayFace } from './status.js'
+import { readVdCachedSnapshot, readVdToolSnapshot, readVdSnapshot, VD_STATUS_PATH, type VdOp, type VdisplayFace } from './status.js'
 
-export { VD_OPS, VD_STATUS_PATH, mapStatusPayload, readVdSnapshot, readVdToolSnapshot, snapshotFromRaw } from './status.js'
+export { VD_OPS, VD_STATUS_PATH, mapStatusPayload, readVdCachedSnapshot, readVdSnapshot, readVdToolSnapshot, snapshotFromRaw } from './status.js'
 export type { VdOp, VdPanelState, VdSnapshot, VdState, VdStatusPayload, VdisplayFace } from './status.js'
 
 export const name = '@dsh-android/dsh-android-vdisplay'
@@ -440,8 +440,11 @@ export function apply(ctx: Context): void {
         res.end('')
         return
       }
-      // 与控制 op 同源（readVdToolSnapshot 的说明）：控制队列 vdInfo 优先，桥面兜底。
-      sendJson(res, 200, await readVdToolSnapshot(faceOf()))
+      // issue #1604：**只读缓存，绝不入队**。本路由按设计不要求令牌（只拦 403），而控制队列是
+      // 单槽的——在请求路径上 await vdInfo 会让本机任意应用一条裸 socket GET 占住队列 8 秒，
+      // 期间所有工具调用都得到「已有在途的设备控制请求」，且文案把原因归到「模型并发调用」。
+      // 缓存由真正该走队列的入口填充（android_vdisplay_status 工具 / 建屏 / 任意 vd* op 的回执）。
+      sendJson(res, 200, readVdCachedSnapshot(faceOf()))
     },
   })
 }
