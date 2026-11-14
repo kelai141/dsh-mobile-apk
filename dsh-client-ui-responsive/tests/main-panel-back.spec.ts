@@ -27,6 +27,7 @@ import {
   PANEL_DETAIL_SELECTORS,
 } from '../src/client/mobile/main-panel-back.ts'
 import { MAIN_PANEL_BACK_CSS } from '../src/client/mobile/main-panel-back.css.ts'
+import { ActivationGuard, INERT_ATTR } from '../src/client/mobile/activation-guard.ts'
 
 /** Deliver the pending MutationObserver batch (jsdom delivers it as a microtask). */
 function flush(): Promise<void> {
@@ -464,5 +465,127 @@ describe('D. 判据与样式面（机器可判）', () => {
       // 反证：选择器取自上游明确属性，不是 hashed class。
       expect(selector.startsWith('[data-plugin-')).toBe(true)
     }
+  })
+})
+
+
+
+
+describe('E. #1763 主列表页（列表根）的系统返回', () => {
+  /**
+   * 把设备上的整条链路在单测里摆出来：注入键被样式表画成 display:none，而本包的
+   * ActivationGuard 会把「未呈现的控件」的激活主动吞掉（#1317 的既有纪律）。
+   *
+   * 为什么判据必须带 ActivationGuard：jsdom 不做布局，`display: none` 在它里面
+   * **不会**拦合成 click —— 只写「点 button 看 leave 有没有被调」会恒绿（第一版就
+   * 栽在这里，实测 29 passed 但设备上毫无反应）。devices 事实是：注入键 isConnected、
+   * rect 0x0、`dispatchEvent(click)` 返回 false、document 捕获监听一次都没触发，
+   * 且带着 `data-dsh-activation-inert`。挂上真的拦截者，"点不动"才在单测里成立。
+   */
+  const guards: ActivationGuard[] = []
+  afterEach(() => { for (const instance of guards.splice(0)) instance.detach() })
+
+  /** 一个只认内联 display 的样式读取器：正是「样式表把它画成 none」这件事的最小代理。 */
+  function inlineStyle(el: Element): CSSStyleDeclaration {
+    const display = (el as HTMLElement).style.display
+    const visibility = (el as HTMLElement).style.visibility
+    return {
+      display: display === '' ? 'block' : display,
+      visibility: visibility === '' ? 'visible' : visibility,
+      opacity: '1',
+    } as CSSStyleDeclaration
+  }
+
+  function attachGuard(): ActivationGuard {
+    const instance = new ActivationGuard({ styleOf: inlineStyle })
+    instance.attach()
+    guards.push(instance)
+    return instance
+  }
+
+  /** 打开列表页并把注入键画成设备上的形态（display:none）。 */
+  async function listRootWithHiddenInjectedKey(): Promise<HTMLButtonElement> {
+    setPhoneForm(true)
+    buildPanel('list')
+    mount = new MainPanelBackMount(vi.fn())
+    mount.attach()
+    await flush()
+    const button = document.querySelector<HTMLButtonElement>('[' + MAIN_PANEL_BACK_ATTR + ']')!
+    button.style.display = 'none'
+    return button
+  }
+
+  it('注入键点不动（display:none + ActivationGuard）时，系统返回仍必须回到会话', async () => {
+    const button = await listRootWithHiddenInjectedKey()
+    attachGuard()
+    const leave = vi.fn()
+    signal = buildSignal('plugins', vi.fn(), leave)
+    signal.attach()
+    await flush()
+    expect(window.__dshBackKinds).toEqual(['main-panel'])
+
+    // 前置反证：这条路径真的点不动 —— 否则本用例证明不了任何事。
+    const reachesUpstream = button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    expect(reachesUpstream, '注入键被 ActivationGuard 吞掉（设备同形态）').toBe(false)
+    expect(button.hasAttribute(INERT_ATTR)).toBe(true)
+    expect(leave, '被吞掉的那次点击不得顺带关闭面板').not.toHaveBeenCalled()
+
+    expect(window.__dshBack?.(), '返回必须被页面消费').toBe(true)
+    await flush()
+    expect(leave, '列表根的关闭就是 layout.selectPanel(null) 这个语义动作').toHaveBeenCalledTimes(1)
+  })
+
+  it('反向：一次返回只写一次面板选择（reconcile 不得顺带再写）', async () => {
+    await listRootWithHiddenInjectedKey()
+    attachGuard()
+    const leave = vi.fn()
+    signal = buildSignal('plugins', vi.fn(), leave)
+    signal.attach()
+    await flush()
+    expect(window.__dshBack?.()).toBe(true)
+    await flush()
+    expect(leave).toHaveBeenCalledTimes(1)
+    await flush()
+    expect(leave, '层栈 reconcile 不是「再退一次」').toHaveBeenCalledTimes(1)
+  })
+
+  it('反证：详情层仍由页面自己的 crumb 关闭，不得越级调 leave', async () => {
+    setPhoneForm(true)
+    buildPanel('detail')
+    const leave = vi.fn()
+    const crumbSeen: string[] = []
+    const crumb = document.querySelector('[data-plugin-detail] button') as HTMLElement
+    crumb.addEventListener('click', () => { crumbSeen.push('click') })
+    signal = buildSignal('plugins', vi.fn(), leave)
+    signal.attach()
+    await flush()
+    expect(window.__dshBack?.()).toBe(true)
+    expect(crumbSeen, '详情层由页面自己的 crumb 关').toEqual(['click'])
+    expect(leave, '详情层不得越级退出整个主面板').not.toHaveBeenCalled()
+  })
+
+  it('反证：conversation（无主面板）上返回仍不触碰面板选择', async () => {
+    setPhoneForm(true)
+    buildPanel('list')
+    const leave = vi.fn()
+    signal = buildSignal(null, vi.fn(), leave)
+    signal.attach()
+    await flush()
+    expect(window.__dshBack?.()).toBe(false)
+    expect(leave).not.toHaveBeenCalled()
+  })
+})
+
+describe('F. 判据面（#1763）', () => {
+  const src = (...parts: string[]): string => join(process.cwd(), 'src', 'client', ...parts)
+  const code = (source: string): string => source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\//gm, '')
+
+  it('列表根的关闭不再依赖「点一个被样式表画成 display:none 的控件」', () => {
+    const source = code(readFileSync(src('mobile', 'back-stack.ts'), 'utf8'))
+    const closeFn = source.slice(source.indexOf('function closeMainPanel'), source.indexOf('/**', source.indexOf('function closeMainPanel') + 10))
+    // 反证：这条正是真因 —— 注入键是 display:none，点它等于不关。
+    expect(closeFn, '列表根不得再点注入键').not.toContain('PANEL_BACK_SELECTOR')
+    // 判据：它必须走语义动作（本插件的 leave 回调 = ctx.layout.selectPanel(null)）。
+    expect(closeFn).toContain('leave()')
   })
 })
