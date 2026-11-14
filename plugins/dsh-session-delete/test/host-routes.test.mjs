@@ -14,11 +14,30 @@ import { findQuarantinedDirs, quarantineStoredSession, sessionsRoot } from '../l
 // .deleting-* 残留，跑一遍测试就会动真实数据——测试不拥有那个目录。
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dsh-session-delete-test-home-'))
 
-/** 收集注册的路由并提供一个可注入依赖的 ctx。 */
+/**
+ * 收集注册的路由并提供一个可注入依赖的 ctx。
+ *
+ * issue #1595：假 webServer 必须照抄真 WebServer 的两条行为，否则这条用例永远看不见缺陷：
+ * ① 同名 (kind, path) 重复注册会 throw；② register 返回 disposer，服务本身不按 fiber 回收。
+ * `ctx.effect(fn)` 记录 fn 返回的 disposer；`unload()` 模拟 fiber 卸载（HMR / 禁用→启用）。
+ */
 function makeHost(overrides = {}) {
-  const routes = new Map()
+  // 路由表挂在 **webServer 服务**上（与真 WebServer 同形）：HMR 时 ctx 换新、服务不换。
+  const routes = overrides.sharedRoutes ?? new Map()
+  const disposers = []
   const ctx = {
-    webServer: { register: (route) => { routes.set(route.path, route) } },
+    webServer: {
+      routes,
+      register: (route) => {
+        if (routes.has(route.path)) throw new Error('webserver: duplicate exact route "' + route.path + '"')
+        routes.set(route.path, route)
+        return () => { routes.delete(route.path) }
+      },
+    },
+    effect: (fn) => {
+      const dispose = fn()
+      if (typeof dispose === 'function') disposers.push(dispose)
+    },
     logger: { info() {}, warn() {}, error() {} },
     get(name) {
       if (name === 'connection') return { requestRejection: overrides.requestRejection ?? (() => undefined) }
@@ -29,7 +48,13 @@ function makeHost(overrides = {}) {
     waterfall: overrides.waterfall,
   }
   apply(ctx)
-  return { routes, ctx }
+  return {
+    routes,
+    ctx,
+    disposers,
+    /** 卸载这次 apply 装上的东西（路由 + 词典），等价于 fiber dispose。 */
+    unload() { while (disposers.length > 0) disposers.pop()() },
+  }
 }
 
 /** 假请求：body 为 Buffer 或超长串。 */
@@ -258,4 +283,28 @@ test('#1587: unreadable quarantine is 500, never the client success-shaped 404/n
     process.env.DSH_HOME = previous
     await rm(home, { recursive: true, force: true })
   }
+})
+
+// issue #1595：三条 exact 路由必须走 ctx.effect。
+//
+// 缺陷形态：register 是裸调用且丢弃 disposer，而 WebServer 不按 fiber 回收路由。
+// HMR 重载 / 设置页「禁用→启用」之后，旧 handler 仍留在 exact 表里；新实例 apply()
+// 走到 registration 抛 `duplicate exact route` —— 整个插件装载失败（前面装好的
+// 槽位与词典被回滚），而旧 handler 继续用已 dispose 的 svc/ctx 回 200。
+//
+// 判据不看源码（不 grep 'ctx.effect'），而是按 HMR 的真实时序跑一遍重载：
+//   apply(旧 fiber) -> dispose(旧 fiber) -> apply(新 fiber)
+// 路由表挂在 webServer 服务上、跨 fiber 存活，所以`旧 fiber 的 routes 没被 effect 撤掉` => 第二遍抓名。
+// 修前红：卸载后三条路由仍在（size 3），第二遍 apply 抛 duplicate exact route。
+test('#1595: fiber 卸载后路由被回收，重载的 apply 不撞 duplicate route', () => {
+  const first = makeHost()
+  assert.deepEqual([...first.routes.keys()].sort(), [
+    '/api/session-delete',
+    '/api/session-delete-trace',
+    '/api/session-delete-version',
+  ])
+  first.unload()
+  assert.deepEqual([...first.routes.keys()], [], 'fiber 卸载后三条路由必须撤掉（register 必须挂 effect）')
+  const second = makeHost({ sharedRoutes: first.routes })
+  assert.equal(second.routes.size, 3, '重载后的新实例必须重新装回三条路由')
 })

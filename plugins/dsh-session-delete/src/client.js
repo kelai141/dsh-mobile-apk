@@ -115,7 +115,9 @@
             : code === 'activity-unknown' ? 'error.unknown'
               : code === 'unload-failed' ? 'error.unload'
                 : code === 'not-found' ? 'error.gone'
-                  : null
+                  // #1587：续做时上一次删除没清完文件 —— 可不是「已删除」。
+                  : code === 'deletion-incomplete' ? 'error.incomplete'
+                    : null
           return (key !== null ? dict[key] : '') || (dict['error'].replace('{message}', fallback))
         }
 
@@ -170,7 +172,10 @@
             : code === 'activity-unknown' ? 'error.unknown'
               : code === 'unload-failed' ? 'error.unload'
                 : code === 'not-found' ? 'error.gone'
-                  : null
+                  // #1587：上一次删除没清完文件（进程被杀 / rm 失败）。这不是「已删除」，
+                  // 也不能说成「不存在」；用户再点一次删除就能收尾。
+                  : code === 'deletion-incomplete' ? 'error.incomplete'
+                    : null
           if (key === null) return fallback
           return typeof t === 'function' ? t(key) : fallback
         }
@@ -226,6 +231,7 @@
           'error.unknown': '无法确认这条对话是否空闲，已拒绝删除。',
           'error.unload': '无法从内存卸载这条对话，未删除任何文件。请稍后重试。',
           'error.gone': '这条对话已经不在了。',
+          'error.incomplete': '上一次删除没清完文件，数据仍在磁盘上。再点一次「删除」即可收尾。',
           'close': '关闭',
           // issue #912：隔离不是删除 —— 文案必须让人一眼看出文件还在。
           'menu.quarantine': '隔离（不删除，可恢复）',
@@ -249,6 +255,7 @@
           'error.unknown': 'Could not confirm the conversation is idle, so it was not deleted.',
           'error.unload': 'Could not unload this conversation from memory, so nothing was deleted. Try again later.',
           'error.gone': 'This conversation no longer exists.',
+          'error.incomplete': 'The previous deletion stopped before removing the files; the data is still on disk. Delete again to finish.',
           'close': 'Close',
           'menu.quarantine': 'Quarantine (keeps files, restorable)',
           'confirm.quarantineTitle': 'Quarantine this conversation',

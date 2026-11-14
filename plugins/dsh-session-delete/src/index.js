@@ -20,7 +20,7 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { SessionDeleteError, assertSessionId, deleteStoredSession, quarantineStoredSession, sweepGraveyards } from './session-delete.js'
+import { SessionDeleteError, assertSessionId, deleteStoredSession, inspectQuarantine, quarantineStoredSession, sweepGraveyards } from './session-delete.js'
 
 /** Log tag shared with the client half so device logs can be grepped by one string. */
 const TAG = '[dsh-session-delete]'
@@ -316,7 +316,7 @@ function failureOf(error) {
   const status = code === 'invalid-id' || code === 'invalid-body' || code === 'invalid-action'
     ? 400
     : code === 'not-found' ? 404
-      : code === 'session-active' || code === 'activity-unknown' || code === 'unload-failed' || code === 'already-quarantined' || code === 'ambiguous' ? 409
+      : code === 'session-active' || code === 'activity-unknown' || code === 'unload-failed' || code === 'already-quarantined' || code === 'ambiguous' || code === 'deletion-incomplete' ? 409
         : 500
   const failure = { status, code, message: String(error?.message ?? error) }
   if (code === 'already-quarantined') {
@@ -333,22 +333,40 @@ function failureOf(error) {
  */
 export function apply(ctx) {
   log(ctx, 'info', 'registering route', { path: ROUTE })
+  const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
   // 启动清扫上次失败删除留下的 *.deleting-* 墓地目录（best-effort；见 sweepGraveyards 注释）。
-  sweepGraveyards(process.env.DSH_HOME ?? join(homedir(), '.dsh')).then(
+  sweepGraveyards(home).then(
     (removed) => { if (removed.length > 0) log(ctx, 'info', 'swept leftover graveyard directories', { count: removed.length }) },
     () => {},
   )
+  // issue #1587：隔离件不自动过期（可恢复承诺），但「磁盘被吃掉多少」必须可查。
+  // 以前 .corrupt/ 既没有清扫、也没有任何台账，用户报「存储一直涨」时无从下手。
+  inspectQuarantine(home).then(
+    (quarantine) => {
+      if (quarantine.count > 0) {
+        log(ctx, 'info', 'quarantine occupancy', { count: quarantine.count, bytes: quarantine.bytes })
+      }
+    },
+    () => {},
+  )
+  // issue #1595：register 在运行期返回 disposer，且同一 (kind,path) 重复注册会 throw，
+  // 而 WebServer 不按 fiber 回收路由。裸调 + 丢弃 disposer 的后果：HMR 重载或设置页
+  // 「禁用→启用」插件后，旧 handler 仍留在 exact 表里，新实例 apply() 走到这里抛
+  // `duplicate exact route` —— 整插件装载失败（前面已装的槽位/词典被回滚）。
+  // 注册即 effect：卸载时 disposer 撤掉路由，重载不再撞名。同仓 linux-env / file-open /
+  // browser 已是这个写法。
+  //
   // 客户端决策回传：删除后界面为什么没切换，只有浏览器侧知道；把它的选择写进
   // engine.log（[dsh-session-delete] client trace …），现场问题不必再靠猜。
-  ctx.webServer.register({
+  ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: '/api/session-delete-version',
     handler: async (req, res) => {
       if (!authorize(req, res, ctx)) return
       sendJson(res, 200, { ok: true, stamp: buildStamp() })
     },
-  })
-  ctx.webServer.register({
+  }))
+  ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: '/api/session-delete-trace',
     handler: async (req, res) => {
@@ -365,8 +383,8 @@ export function apply(ctx) {
       }
       sendJson(res, 200, { ok: true })
     },
-  })
-  ctx.webServer.register({
+  }))
+  ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: '/api/session-delete',
     handler: async (req, res) => {
@@ -409,5 +427,5 @@ export function apply(ctx) {
         sendJson(res, failure.status, payload)
       }
     },
-  })
+  }))
 }

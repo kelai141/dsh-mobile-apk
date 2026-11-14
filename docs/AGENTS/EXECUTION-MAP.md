@@ -1,6 +1,6 @@
 > **目的**：让排查 bug 的人 5 分钟内知道「这段代码什么时候跑、被谁拉起、跑完交给谁、坏了看哪里」。
 
-会话永久删除（#1587）：`deleteStoredSession` 先定位正常目录和全部同 id 隔离副本，再逐目录执行 rename / unload / remove；隔离区枚举失败不能成为 not-found。启动 `sweepGraveyards` 只清隔离区内显式删除残留，不清可恢复隔离件。行为与反例见 `plugins/dsh-session-delete/test/quarantine-delete-1587.test.mjs` 和 `docs/contrib/Ni-ShuWu/2026-11-13-quarantine-delete-1587.md`。
+会话永久删除（#1587）：`deleteStoredSession` 先定位正常目录、全部同 id 隔离副本**和删除进行到一半的 `<id>.deleting-*` 墓地目录**，再逐目录执行 rename / unload / remove；隔离区枚举失败不能成为 not-found。只剩墓地目录时`findSessionDir` 报 not-found ⇒ 客户端把「文件还在」当「已删除」，所以 `findGraveyardDirs()` 的命中必须并入删除目标（重试即可清完），隔离入口遇到这一形态报 `deletion-incomplete`（409，带 paths），不冒充不存在也不假装可恢复。启动 `sweepGraveyards` 只清隔离区内显式删除残留，不清可恢复隔离件；`inspectQuarantine()` 在启动时把隔离区条数与字节数写进 `engine.log`（不做过期，只让占用可见）。三条 host 路由一律 `ctx.effect(() => webServer.register(...))`（#1595）。行为与反例见 `plugins/dsh-session-delete/test/quarantine-delete-1587.test.mjs`、`test/host-routes.test.mjs` 和 `docs/contrib/kelai141/2026-11-15-session-delete-residue-1587-1595.md`。
 
 > **三种读法（按手里的线索挑一条）**：
 > 1. 手里是**症状**（页面白屏、球不动、命令被拒……）→ 查 §5「症状 → 查点索引」，跳到对应查点的「症状 → 排查」；

@@ -585,6 +585,81 @@ test('已隔离过不触发行清理（issue #1000 反向判据）', async () =>
   assert.equal(reloads.length, 0, '非成功结果不得触发重载，实际 ' + reloads.length + ' 次')
 })
 
+// issue #1587（第二条残留面）：上一次删除没清完文件时，宿主回 409 deletion-incomplete。
+// 客户端必须把它渲染成「再点一次收尾」，绝不能走 error.gone（「已经不在了」）或 404 幂等
+// 「已删除」——两者都会让用户以为数据没了，而文件其实整份还在磁盘上。
+test('deletion-incomplete 必须渲染收尾文案，且不得被当成已删除（issue #1587）', async () => {
+  const { module, react, FakeXHR, storage } = loadClient()
+  const registrations = []
+  module.apply({
+    get: () => undefined,
+    effect: (fn) => fn(),
+    locale: { register: () => () => {} },
+    slots: { inject: (_n, f) => { registrations.push(f()) }, register: (def, component) => ({ def, component }) },
+  })
+  // t 必须把 {message} 展开：errorText 的产物会作为 error 的 {message} 再进一层。
+  const t = (key, params) => (params === undefined ? key : String(params.message ?? ''))
+  const menu = registrations.find((r) => r.def.name === 'sidebar.workspaces.session.menu.item')
+  const overlay = registrations.find((r) => r.def.name === 'shell.overlay')
+  react.render(menu.component, {
+    sessionId: 'session-44444444-4444-4444-8444-444444444444',
+    displayTitle: 'x',
+    useMenuOpenState: () => [true, () => {}],
+    t,
+  }).props.onSelect()
+  const outer = react.render(overlay.component, { t })
+  react.render(outer.type, outer.props).props.footer.props.children[1].props.onClick()
+
+  const xhr = FakeXHR.instances.at(-1)
+  xhr.status = 409
+  xhr.responseText = JSON.stringify({
+    ok: false,
+    error: 'deletion-incomplete',
+    message: 'a previous deletion stopped before its files were removed; delete again to finish it',
+  })
+  xhr.onload()
+  for (let i = 0; i < 12; i += 1) await Promise.resolve()
+
+  const trace = JSON.parse(storage.get('dsh.session-delete.trace') ?? '[]')
+  assert.equal(trace.some((row) => row.step === 'deleted'), false, '这不是「已删除」，不得记 deleted')
+  const failed = trace.filter((row) => row.step === 'failed')
+  assert.equal(failed.length, 1, '必须记录失败')
+  assert.equal(failed[0].extra.code, 'deletion-incomplete')
+  // 用户看到的文案必须来自 error.incomplete；落到兜底就是那句宿主英文原句。
+  const tree = react.renderKeepingState(outer.type, outer.props)
+  const alert = findByRole(tree, 'alert')
+  assert.ok(alert !== null, '必须渲染可见失败提示，实际树：' + JSON.stringify(textNodes(tree)))
+  const alertText = textNodes(alert).join(' ')
+  assert.equal(alertText.includes('error.incomplete'), true, '必须用 error.incomplete 文案，实际：' + alertText)
+  assert.equal(alertText.includes('previous deletion stopped'), false, '不得把宿主英文原句摊给用户，实际：' + alertText)
+})
+
+// #1587：续做（页面重载后自动接着删）失败时，toast 也必须说「再删除一次能收尾」，
+// 不能落进通用的「删除失败：<宿主英文原句>」。
+test('续做遇到 deletion-incomplete 的 toast 用收尾文案（issue #1587）', async () => {
+  const SESSION = 'session-99999999-9999-4999-8999-999999999999'
+  const { module, FakeXHR, storage, toasts } = loadClient({ pending: SESSION })
+  module.apply({
+    get: () => undefined,
+    effect: (fn) => fn(),
+    locale: { register: () => () => {} },
+    slots: { inject: () => {}, register: () => ({}) },
+  })
+  await new Promise((resolve) => setTimeout(resolve, 700))
+  assert.equal(FakeXHR.instances.length, 1, 'resume must fire the request')
+  const xhr = FakeXHR.instances[0]
+  xhr.status = 409
+  xhr.responseText = JSON.stringify({ ok: false, error: 'deletion-incomplete', message: 'leftover files' })
+  xhr.onload()
+  for (let i = 0; i < 12; i += 1) await Promise.resolve()
+  assert.equal(storage.has('dsh.session-delete.pending'), false, '失败续做必须丢掉待办')
+  assert.equal(toasts.length, 1, '必须给出可见提示')
+  assert.equal(
+    toasts[0].textContent.includes('再点一次'), true,
+    'toast 必须来自 zh 词典的 error.incomplete，实际：' + toasts[0].textContent,
+  )
+})
+
 // issue #1000：共用机制的反证 —— 不复制第二份逻辑。
 // 行探针（[data-row-key=session:<id>]）只允许有一处：复制一份清理逻辑必然让它变成两处。
 test('删除与隔离共用同一个行清理实现，不是第二份复制（issue #1000）', () => {

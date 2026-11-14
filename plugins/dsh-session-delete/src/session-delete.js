@@ -131,7 +131,10 @@ export async function deleteStoredSession({ home, sessionId, isActive, beforeRem
   // 在别的工作区、却删不掉，且错误文案指向用户无法行动的「隔离区不是真目录」。
   const quarantineProblems = []
   const quarantined = await findQuarantinedDirs(root, sessionId, { onProblems: (p) => quarantineProblems.push(...p) })
-  const dirs = stored ? [stored, ...quarantined] : quarantined
+  // #1587 第二条残留面：上一次删除把目录改名成 `<id>.deleting-*` 后 rm 失败/进程被杀，
+  // 该目录既不在扫描路径上、也不在隔离区，却占着整份数据。不并进来就永远删不掉。
+  const graveyards = await findGraveyardDirs(root, sessionId, { onProblem: (message) => quarantineProblems.push(message) })
+  const dirs = [...(stored ? [stored] : []), ...quarantined, ...graveyards]
   if (dirs.length === 0) {
     if (quarantineProblems.length > 0) {
       throw new SessionDeleteError('delete-failed', quarantineProblems[0], { sessionId, paths: quarantineProblems })
@@ -321,6 +324,108 @@ export const QUARANTINE_DIR = '.corrupt'
 const QUARANTINED_GRAVEYARD_PATTERN = /^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.\d+(?:\.deleting-[0-9a-z]+)+$/i
 
 /**
+ * 清点隔离区的占用（issue #1587 的「磁盘单调增长」那一半）。
+ *
+ * 隔离件可以无限累积：每份是一整个会话目录，而被隔离的会话已不在列表里，
+ * 用户没有任何入口看到「.corrupt/ 已经吃掉多少空间」。自动过期是**不做**的
+ * （隔离承诺可恢复，删了就是替用户删历史，见 sweepGraveyards 与 #912），
+ * 但「看不见的增长」得能看见：启动时把条数与字节数写进 engine.log，
+ * 用户报「存储被吃掉」时有一条可查的事实。
+ *
+ * @param {string} home - 绝对 `DSH_HOME`。
+ * @returns {Promise<{ count: number, bytes: number, dirs: string[] }>} 清点结果（无隔离区时为 0）。
+ */
+export async function inspectQuarantine(home) {
+  const empty = { count: 0, bytes: 0, dirs: [] }
+  if (typeof home !== 'string' || home === '') return empty
+  const root = sessionsRoot(home)
+  let workspaces
+  try { workspaces = await readdir(root, { withFileTypes: true }) } catch { return empty }
+  const dirs = []
+  let bytes = 0
+  for (const workspace of workspaces) {
+    if (!workspace.isDirectory()) continue
+    const trash = join(root, workspace.name, QUARANTINE_DIR)
+    let entries
+    try { entries = await readdir(trash, { withFileTypes: true }) } catch { continue }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      const target = join(trash, entry.name)
+      dirs.push(target)
+      bytes += await directoryBytes(target)
+    }
+  }
+  return { count: dirs.length, bytes, dirs: dirs.sort() }
+}
+
+/**
+ * Recursive byte size of a directory (best effort: unreadable entries count as 0).
+ * @param {string} dir - absolute directory.
+ * @returns {Promise<number>} total bytes.
+ */
+async function directoryBytes(dir) {
+  let total = 0
+  let entries
+  try { entries = await readdir(dir, { withFileTypes: true }) } catch { return 0 }
+  for (const entry of entries) {
+    const target = join(dir, entry.name)
+    if (entry.isDirectory()) { total += await directoryBytes(target); continue }
+    try { total += (await stat(target)).size } catch { /* vanished mid-scan */ }
+  }
+  return total
+}
+
+/**
+ * 崩溃/失败删除留下的墓地目录：`<工作区>/<id>.deleting-<slug>`。
+ *
+ * issue #1587（第二条残留面）：永久删除的最后一步是 `rm`，它在进程被杀、磁盘满、EACCES
+ * 时失败，目录就停在 `<id>.deleting-*` 里。此后 `findSessionDir` 只报 not-found
+ * （名字已不是 id）、`findQuarantinedDirs` 只看 .corrupt/，于是路由 404、客户端按
+ * 「已删除」收尾 —— 而整份会话数据仍在磁盘上，重试删除也清不掉，只能等下次启动 sweep。
+ * 实测（当前 main）：仅剩 `<id>.deleting-abc` 时 deleteStoredSession 抛 not-found，
+ * 目录存在=true。
+ */
+const GRAVEYARD_PATTERN = /\.deleting-[0-9a-z]+$/i
+
+/**
+ * 找出某个会话**已被移出扫描路径**的墓地目录（`<工作区>/<id>.deleting-*`）。
+ *
+ * 与 [findQuarantinedDirs] 分开：隔离件在 `.corrupt/` 下且可恢复（用户可改名回去），
+ * 墓地目录是**删除已开始**的产物，没有恢复语义，只等清理。
+ *
+ * @param {string} root - `<home>/sessions`。
+ * @param {string} sessionId - 已校验的 id。
+ * @param {{ onProblem?: (message: string) => void }} [options] - 读不动的目录交给收集器。
+ * @returns {Promise<string[]>} 命中的墓地目录绝对路径（排序）。
+ */
+export async function findGraveyardDirs(root, sessionId, options = {}) {
+  assertSessionId(sessionId)
+  let workspaces
+  try { workspaces = await readdir(root, { withFileTypes: true }) } catch (error) {
+    if (error?.code === 'ENOENT') return []
+    throw error
+  }
+  const hits = []
+  for (const workspace of workspaces) {
+    if (!workspace.isDirectory()) continue
+    let entries
+    try { entries = await readdir(join(root, workspace.name), { withFileTypes: true }) } catch (error) {
+      if (error?.code !== 'ENOENT' && typeof options.onProblem === 'function') {
+        options.onProblem('workspace is unreadable: ' + join(root, workspace.name) + ' (' + String(error?.message ?? error) + ')')
+      }
+      continue
+    }
+    for (const entry of entries) {
+      if (!entry.name.startsWith(sessionId + '.') || !GRAVEYARD_PATTERN.test(entry.name)) continue
+      // 链接不是本插件产生的形态（rename 只会搬目录）：跳过，绝不顺着它删到树外。
+      if (!entry.isDirectory()) continue
+      hits.push(join(root, workspace.name, entry.name))
+    }
+  }
+  return hits.sort()
+}
+
+/**
  * issue #912：把一个**读不出历史**的会话隔离起来 —— **移动而不是删除**。
  *
  * 为什么是隔离而不是修上游：v0→v1 迁移拒绝某条 `user/message` 是上游判定
@@ -432,6 +537,16 @@ export async function quarantineStoredSession({ home, sessionId, isActive, befor
         throw new SessionDeleteError('already-quarantined', 'this session is already quarantined; the files are kept and can be restored', {
           sessionId,
           paths: already,
+        })
+      }
+      // #1587：只剩「删除进行到一半」的墓地目录时，不能说 not-found ——
+      // 那会让客户端把「文件还在」当成「已删除」，而隔离入口又给不出任何可行动信息。
+      // 独立错误码：它既不是「已隔离」（不保证可恢复），也不是「不存在」。
+      const crashed = await findGraveyardDirs(root, sessionId)
+      if (crashed.length > 0) {
+        throw new SessionDeleteError('deletion-incomplete', 'a previous deletion stopped before its files were removed; delete again to finish it', {
+          sessionId,
+          paths: crashed,
         })
       }
     }
