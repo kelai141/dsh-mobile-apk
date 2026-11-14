@@ -3003,7 +3003,14 @@ const requirementFailure = (meta) => {
     } catch {
       return `前提补丁 ${dep} 的目标文件缺失（${dimpl.file}）`
     }
-    if (!dimpl.check(dsrc)) return `前提补丁 ${dep} 未打（marker 不在场）——先施加 ${dep}，否则本补丁只会在原地空转`
+    // #1578：前提补丁的 check 在锚点漂移时会抛错；必须转成诊断文本，而不是穿出主循环（会跳过回滚）。
+    let depOk
+    try {
+      depOk = dimpl.check(dsrc)
+    } catch (e) {
+      return `前提补丁 ${dep} 的 check 抛错（锚点可能已漂移）：${e.message}`
+    }
+    if (!depOk) return `前提补丁 ${dep} 未打（marker 不在场）——先施加 ${dep}，否则本补丁只会在原地空转`
   }
   return null
 }
@@ -3012,14 +3019,15 @@ CURRENT_STAGE_ROOT = vendorRoot
 for (const id of order) {
   const impl = IMPLS[id]
   const meta = registry.patches.find((p) => p.id === id)
-  if (meta.targetDiscovery) impl.file = resolveEnginePatchFile(vendorRoot, meta)
   let src
   const secondaryBefore = new Map()
+  // #1578：目标解析、前提检查与 check 都可能抛错；全部纳入 try，保证失败走 failed++ → 整树回滚。
   try {
+    if (meta.targetDiscovery) impl.file = resolveEnginePatchFile(vendorRoot, meta)
     src = loadImpl(impl.file, vendorRoot)
     for (const file of impl.additionalFiles ?? []) secondaryBefore.set(file, loadImpl(file, vendorRoot))
   } catch (e) {
-    console.error(`[fail] ${id}: 目标文件缺失 ${impl.file}（${e.message}）`)
+    console.error(`[fail] ${id}: 目标解析/读取失败 ${impl.file}（${e.message}）`)
     failed++
     continue
   }
@@ -3029,7 +3037,15 @@ for (const id of order) {
     failed++
     continue
   }
-  if (impl.check(src)) {
+  let alreadyApplied
+  try {
+    alreadyApplied = impl.check(src)
+  } catch (e) {
+    console.error(`[fail] ${id}: check 抛错（锚点可能已漂移）：${e.message}`)
+    failed++
+    continue
+  }
+  if (alreadyApplied) {
     console.log(`[skip] ${id} 已应用（${impl.file}）`)
     continue
   }

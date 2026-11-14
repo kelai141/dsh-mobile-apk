@@ -77,6 +77,23 @@ class ProcIoTest {
     assertFalse("正常短命令不得被判超时", result.timedOut)
     assertFalse(result.truncated)
     assertTrue("输出必须被读到: " + result.text, result.text.contains("hello-procio"))
+    assertEquals(0, result.exitCode)
+  }
+
+  @Test
+  fun nonzeroExitWithEmptyOutputKeepsItsExitCode() {
+    val proc = shellProcess(if (isWindows()) "exit /b 42" else "exit 42")
+    val result = ProcIo.readBounded(proc, 30)
+    assertTrue(result.complete)
+    assertEquals("", result.text)
+    assertEquals(42, result.exitCode)
+  }
+
+  @Test
+  fun unreadableExitStatusIsUnknownInsteadOfZero() {
+    val result = ProcIo.readBounded(StubProcess(ByteArrayInputStream(ByteArray(0)),
+      exitImmediately = true, exitStatusUnavailable = true), 1)
+    assertEquals(null, result.exitCode)
   }
 
   @Test
@@ -84,6 +101,7 @@ class ProcIoTest {
     val proc = holdingProcess()
     val result = ProcIo.readBounded(proc, 1)
     assertTrue("挂住的进程必须判为超时", result.timedOut)
+    assertEquals("超时后的强杀状态不能冒充自然退出码", null, result.exitCode)
     assertTrue(result.marker().contains(ProcIo.TIMEOUT_FLAG))
     // 已读部分要么在场（排水线程先拿到 echo），要么为空；但超时标记必须与真空输出不同形。
     assertTrue(result.text.isEmpty() || result.text.contains("partial-procio"))
@@ -112,13 +130,14 @@ class ProcIoTest {
   private class StubProcess(
     private val input: InputStream,
     private val exitImmediately: Boolean,
+    private val exitStatusUnavailable: Boolean = false,
   ) : Process() {
     override fun getOutputStream(): OutputStream = java.io.ByteArrayOutputStream()
     override fun getInputStream(): InputStream = input
     override fun getErrorStream(): InputStream = ByteArrayInputStream(ByteArray(0))
     override fun waitFor(): Int = 0
     override fun waitFor(timeout: Long, unit: TimeUnit): Boolean = exitImmediately
-    override fun exitValue(): Int = 0
+    override fun exitValue(): Int = if (exitStatusUnavailable) throw IllegalThreadStateException() else 0
     override fun destroy() {}
     override fun isAlive(): Boolean = !exitImmediately
     override fun destroyForcibly(): Process = this

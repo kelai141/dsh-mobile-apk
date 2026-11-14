@@ -387,7 +387,8 @@ class EngineService : Service() {
         // 它偏保守：只有在「我们没有活子进程」时才判为他人占用。
         // 自愈性：他人进程退出后端口不再可达 ⇒ 状态转为 DEAD ⇒ 该门不再适用（degradedLadderTripped=false），
         // 重启路径照常恢复，不会形成永久死局。
-        portOwnedByApp = engineManager.engineProcessAlive(),
+        // #1576：必须用「托管子进程是否活着」，不能用 engineProcessAlive()（它在无句柄时退回端口可达性，恒真）。
+        portOwnedByApp = engineManager.trackedChildAlive(),
         feedProbe = { healthy -> if (isEpochCurrent(epoch)) engineManager.onEngineProbe(healthy) },
         consumeMarkers = { if (isEpochCurrent(epoch)) WatchdogV2.consumeTaskDoneMarkers(this) },
         refreshWake = { if (isEpochCurrent(epoch)) WatchdogV2.refreshWakeLock(this, epoch.wakeOwner) },

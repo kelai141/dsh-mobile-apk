@@ -81,6 +81,8 @@
 
 `app/src/main/assets/`：`snapshot.tar.xz`、`snapshot.sha256`、`undo-emergency.mjs`（急救 CLI，UndoGate 用）、`licenses/`（LICENSES 标准文本 + THIRD_PARTY_NOTICES.md，GPL 合规 A2）、`console.html`、`docs/root-disclaimer.html`（0.14.2-fx-2-root.1：issue #262 免责声明，`LocalDocs` 登记消费）。
 
+`ProcIo.ProcResult.exitCode` 保留自然退出状态（超时或未知为 null）；`SourceSettings.aptUpdateFailure` 对完整 I/O、退出码与失败输出做联合判定，失败交既有换源回滚，详见 `docs/contrib/Ni-ShuWu/2026-11-13-apt-update-verdict-1584.md`。
+
 ### 4.1 引擎侧插件文件（协调仓 `plugins/`，镜像到本仓同名目录）
 
 > 本表登记引擎侧插件中本轮新增或职责变化的文件；其余插件文件见协调仓对应 `plugins/*/src/`。
@@ -301,3 +303,4 @@ Android API 面登记见 `docs/AGENTS/ANDROID-API-USAGE.md` §1/§3/§4/§8；�
   0.15.x 起页面用 `assets/xterm/`（xterm.js 5.5.0 + addon-fit，MIT）渲染 VT/ANSI，PTY 字节原样转发；
   `ConsoleAnsiStripper` 仅用于非 PTY 降级。
 - `ConsoleShellOverride.kt`：控制台 shell 的**设备验收入口**（debug 构建专用）。读 `<filesDir>/console-shell-override.json`，让控制台从快照 bash 切到指定 argv（如 bionilux 的 Debian bash），唯一目的是把「现有 node-pty 中继能否驱动 Debian guest bash」变成设备事实而不是推断。**release 变体永不读取**（`BuildConfig.DEBUG` 门）；`parse` 严格拒绝相对 shell、非字符串 args、未知键与带 `=` 的 env 键，合法条目可带 `unset` 显式删除宿主环境键（先于 `env` 生效），非法输入一律落回默认 Termux bash；文件合规但 PTY 中继缺失时控制台**报错**而不是静默退回（否则验收会变成「验的还是快照」的假绿）。中继侧按 `DSH_CONSOLE_LAUNCH` 描述启动（旧 `DSH_CONSOLE_ARGS`/`DSH_CONSOLE_CWD` 仅作兼容回退），非法 JSON 当场退出。契约见 `docs/AGENTS/LINUX-RUNTIME-CONTRACT.md` §7。
+`ShellOps.isRuntimeCommandName`：壳侧执行前的屏幕范围复查，对 ANSI-C / 本地化命令名 fail-closed；与引擎侧共享 fixture，详见 `docs/contrib/Ni-ShuWu/2026-11-13-screen-scope-1610.md`。

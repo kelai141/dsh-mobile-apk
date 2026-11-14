@@ -205,7 +205,20 @@ export async function refreshCopilot(session, fetchFn = proxiedFetch) {
  * @returns true when re-login is the only fix (GitHub token revoked or the subscription lost).
  */
 export function isCopilotPermanentRefreshError(error) {
-    return error instanceof OAuthEndpointError && (error.status === 401 || error.status === 403);
+    if (!(error instanceof OAuthEndpointError))
+        return false;
+    if (error.status === 401)
+        return true;
+    if (error.status !== 403)
+        return false;
+    // GitHub secondary/primary rate limits return 403 with retry-after or
+    // x-ratelimit-remaining: 0 (or a rate-limit message). Treat those as
+    // transient so TokenManager does not delete the GitHub token.
+    if (error.rateLimited || error.retryAfterMs !== undefined)
+        return false;
+    if (/rate.?limit/i.test(error.message))
+        return false;
+    return true;
 }
 /** Display name for one Copilot wire reasoning-effort value. */
 function copilotEffortName(effort) {
