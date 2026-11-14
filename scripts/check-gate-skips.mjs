@@ -372,6 +372,24 @@ const SKIP_LINE_EXEMPT = new Map([
     reason: '单仓 checkout 下对端镜像面缺席是设计内行为；CI/发布链以 --require-peer 判红（见脚本头注释）',
     until: '2026-12-31',
   }],
+  // check-boot-budget（issue #1568）：本轮新判据（严格档审计）**首次**看见的既有缺口，不是新增放宽。
+  // 旧实现从不审计严格档（auditStrict 是 issue #1026 第 4 点才加的），所以这一条一直静默绿。
+  //
+  // ① 为什么 SKIP 是设计内行为：它的真判据只存在于**设备产物面**（boot-segments.log + 引擎探针输出），
+  //    而构建机 / CI / 净检出上那份产物按设计必然不在场（.deploy-tmp/boot-budget/ 在 .gitignore 里）。
+  // ② 严格档语义由谁承担：它的**专用开关** --require-real（设备验收显式跑，无产物即 exit 1）；
+  //    聚合器的 --require 对它只表示「能取到的判据不许 SKIP 结案」。
+  //
+  // 修 #1568 之前那份「--require 下 exit 1」恰恰是把 --require 当成 --require-real：代价是发布链在
+  // 第 31/37 条门禁中止、其后 6 条一条不跑，而 gate-skips-declared.json 给它申报的 max:2 永远走不到。
+  // 登记为显式豁免而不是把 --require 重新绑回设备档：后者会让发布链结构性不可通过（构建机没有设备）。
+  // 到期前要收口的是「净检出下拿不到设备产物」这件事本身——即把设备真检真正接进发布候选流程，
+  // 而不是让这条豁免永久静默（until 到期后本门禁判红）。
+  ['check-boot-budget.mjs', {
+    reason: '真数据产物只在设备验收面（.deploy-tmp/boot-budget/ 被 gitignore，构建机/CI 必然缺席）；'
+      + '严格档语义由专用开关 --require-real 承担（设备验收显式跑，无产物即判红），聚合器 --require 只约束「已取到的判据不得 SKIP」',
+    until: '2026-12-31',
+  }],
   // check-tool-output-schema：SKIP 来自**插件构建产物（lib/）缺席**，而聚合器的 --require 不负责
   // 「先构建插件」。发布链在调本门禁之前已由「准备插件产物」段构建完毕，故严格档下它真会真检；
   // 在净 checkout 的门禁自审里以 SKIP 结案是设计内行为。
