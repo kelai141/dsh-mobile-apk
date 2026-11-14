@@ -895,3 +895,84 @@ addDocumentStartJavaScript`），排在 locale 之前注入。三条纪律：只
 因此本轮**只做最小必要登记**：把新增的 `OverlayActionGlyph.kt` 与 `WebViewPolyfill.kt`
 登记进执行地图对应查点（`uncovered` 从 2 项清零，总数 201 → 199），未触碰任何既有锚点。
 余下 199 项须由分支收口时专门处理，不在本 PR 范围内。
+
+## 22. 第 23 轮：横屏验证与气泡压 chip 的真因修复（2026-11-14）
+
+### 22.1 横屏设备初测
+
+设备 `127.0.0.1:16416`（1600x900，密度 1.5，`ROTATION_90`）实测。
+
+装机前该设备装的是 `0.14.11-native-20261114`（别人的包，不含本轮改动），重装本轮 dev-fast 后：
+
+- `canParse` 报错**同样不存在** —— 垫片在横屏也生效。
+- 页面正常加载：侧栏、历史会话、Markdown 表格、输入区全部渲染。
+
+**悬浮球只在桌面显示**：应用在前台时 overlay 窗口为 0，按 Home 后 `dsh-overlay-v2-entry` 出现。
+这是设计行为（入口服务于切走后召回），不是缺陷。
+
+### 22.2 横屏几何（修复前）
+
+| 窗口 | mAttrs |
+|---|---|
+| entry | `(1531,300) 51x51 gr=TOP START` |
+| card | `(18,48) 1564x114 gr=TOP START` |
+| workspace chip | `(18,726) 94x48` |
+| session chip | `(136,726) 94x48` |
+| composer | `(18,18) 1564xwrap gr=BOTTOM` |
+| drawer（气泡） | `(36,597) 360x138 gr=TOP START` |
+
+卡片与 composer 都不越界，左右各留 18px，符合 1600 宽。
+
+### 22.3 真实缺陷：气泡压住 chip 行 9px
+
+**现象**：气泡窗口 `597+138=735`，而 chip 行顶是 `726` —— 气泡压掉 chip 顶部 9px。
+
+**根因**：`lp.y = (chipRowTop - h - gapPx)` 用的是**测量高度**，而窗口实际高度由内容决定。
+横屏实测测量值 114、实际 138，差 24px；这个差值直接漏进位置里。
+
+**竖屏同样存在**：底边 1435 vs chip 顶 1426，也是压 9px。
+我上一轮声称「气泡在 chip 行上方 10dp」是错的 —— 当时只核了窗口 y，没核窗口底边与 chip 顶的关系。
+
+**修法演进（两次都错，第三次才对）**：
+
+| 尝试 | 结果 |
+|---|---|
+| `gravity=TOP` + 测量高度算顶边 | 窗口被内容撑破，压 chip 9px |
+| `gravity=BOTTOM` + 反推 chipRowTop | 反推值 750、真实 726，仍压 9px |
+| `gravity=BOTTOM` + **直接读 WORKSPACE 窗口的 y** | 正确 |
+
+最终：`lp.y = screen.heightPx - chipRowTop + gapPx`，`chipRowTop` 取自
+`windows.params(OverlayWindows.Slot.WORKSPACE)?.y`，不再反推。
+
+### 22.4 修复后实测（两个朝向）
+
+| 朝向 | 屏幕高 | 气泡 y | 窗口高 | 底边 | chip 顶 | 间隙 |
+|---|---|---|---|---|---|---|
+| 横屏 | 900 | 189 | 138 | **711** | 726 | **15px** |
+| 竖屏 | 1600 | 189 | 144 | **1411** | 1426 | **15px** |
+
+15px = 10dp x 1.5 密度，与设计值一致，两种朝向都不再重叠。
+
+### 22.5 横竖屏切换
+
+在 16480 上做真实旋转（`settings put system user_rotation`）：
+
+- 竖屏转横屏：composer 宽 864 -> 1564，chip 行移到 y=726，悬浮球改为 `(831,533)`，气泡自动收起，无残留错位。
+- 横屏转竖屏：几何全部回到竖屏值，再开气泡得 y=171、底边 1429、chip 顶 1444、间隙 15px。
+
+### 22.6 代码层
+
+| 项 | 值 |
+|---|---|
+| 用例 | 3078（新增 1 条几何回归用例） |
+| 失败 | 0 |
+| 跳过 | 2 |
+
+新增用例 `pickerBubbleAnchorsItsBottomToTheRealChipWindowInsteadOfGuessedHeight` 锁住三条：
+必须 `gravity=BOTTOM` 锚底边、必须读 WORKSPACE 窗口真实 y、必须禁止回到 `lp.y = (chipRowTop - h - gapPx)` 的老写法。
+
+### 22.7 仍未做
+
+- arm64 真机 `10AF2B0GN0001F2`（用户明确本轮不急）。
+- 横屏下的上传/新建对话/切工作区全链路（本轮横屏只验了几何与渲染）。
+- 引擎在 16416 上显示「引擎离线」，未在本轮复核该设备的引擎状态（不影响悬浮层几何结论）。
