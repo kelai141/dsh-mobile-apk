@@ -23,6 +23,7 @@ import {
   MAIN_PANEL_BACK_ATTR,
   MAIN_PANEL_HEAD_ATTR,
   MAIN_PANEL_OPEN_ATTR,
+  MAIN_PANEL_MORE_ATTR,
   PANEL_DETAIL_SELECTORS,
 } from '../src/client/mobile/main-panel-back.ts'
 import { MAIN_PANEL_BACK_CSS } from '../src/client/mobile/main-panel-back.css.ts'
@@ -348,7 +349,24 @@ describe('C2. 页头在嵌套结构里（2026-11-13 用户实报：插件页左�
     expect(document.querySelector('[' + MAIN_PANEL_BACK_ATTR + ']')).toBeNull()
   })
 
-  it('面板在屏时给 frame 打上「主面板占屏」标记，离屏时撤销（抽屉开关据此让位）', async () => {
+  it('「更多」视图：页头打标记、frame 打占屏标记，但不造第二枚返回键（上游 moreBack 是唯一出口）', async () => {
+    setPhoneForm(true)
+    const frame = document.createElement('div')
+    frame.setAttribute('data-dsh-frame', '')
+    document.body.appendChild(frame)
+    buildPanel('more')
+    mount = new MainPanelBackMount(vi.fn())
+    mount.attach()
+    await flush()
+    const head = document.querySelector<HTMLElement>('[data-plugin-panel] > header[data-window-drag]')
+    expect(head?.hasAttribute(MAIN_PANEL_HEAD_ATTR)).toBe(true)
+    // 收上边距只落在这一屏（样式表键在 panel 的 more 标记上）。
+    expect(document.querySelector('[data-plugin-panel]')?.hasAttribute(MAIN_PANEL_MORE_ATTR)).toBe(true)
+    expect(frame.hasAttribute(MAIN_PANEL_OPEN_ATTR)).toBe(true)
+    expect(document.querySelector('[' + MAIN_PANEL_BACK_ATTR + ']')).toBeNull()
+  })
+
+  it('列表根不给 frame 打占屏标记 —— 那一屏没有返回键，☰ 必须留着（用户第二轮反馈）', async () => {
     setPhoneForm(true)
     const frame = document.createElement('div')
     frame.setAttribute('data-dsh-frame', '')
@@ -363,12 +381,10 @@ describe('C2. 页头在嵌套结构里（2026-11-13 用户实报：插件页左�
     mount = new MainPanelBackMount(vi.fn())
     mount.attach()
     await flush()
-    expect(frame.hasAttribute(MAIN_PANEL_OPEN_ATTR)).toBe(true)
-    // 面板离屏（React 卸载）后标记必须撤掉，否则会话页也拿不到抽屉开关。
-    document.querySelector('[data-plugin-panel]')!.remove()
-    await flush()
     expect(frame.hasAttribute(MAIN_PANEL_OPEN_ATTR)).toBe(false)
-    expect(document.querySelector('[' + MAIN_PANEL_BACK_ATTR + ']')).toBeNull()
+    expect(document.querySelector('[data-plugin-panel]')?.hasAttribute(MAIN_PANEL_MORE_ATTR)).toBe(false)
+    // 控件本身仍要挂在列表根（back-stack 靠它退这一层），只是不画脸。
+    expect(document.querySelector('[' + MAIN_PANEL_BACK_ATTR + ']')).not.toBeNull()
   })
 
   it('反证：桌面形态不打标记（抽屉开关只在手机版式让位）', async () => {

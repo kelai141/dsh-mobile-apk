@@ -734,12 +734,16 @@ export function apply(ctx: ClientContext): void {
       collapseDrawer: () => { ctx.layout.toggleSidebar() },
       frame: () => document.querySelector('[data-dsh-frame]'),
     })
+    // 2026-11-14（用户）：点侧边栏条目后抽屉要退场。订阅只覆盖「会话 -> 面板」的跳变，
+    // 点同一项面板、或打开自动化任务这类没有插件页标记的面板都收不到，所以再加交互判据。
+    drawer.attachNavDismiss()
     const unsubscribe = ctx.layout.panelInfo.subscribe(() => {
       backStack.refresh()
       drawer.sync()
     })
     return () => {
       unsubscribe()
+      drawer.detachNavDismiss()
       backStack.detach()
     }
   }, 'ui-responsive: back-stack signal (page layers → shell back gate)')

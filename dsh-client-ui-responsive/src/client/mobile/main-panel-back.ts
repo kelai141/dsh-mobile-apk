@@ -34,6 +34,15 @@
  * Both are now stated as attributes instead of structure: the resolved head is tagged
  * `data-dsh-main-panel-head` and the frame `data-dsh-main-panel-open`, and the two style
  * sheets key on those tags.
+ *
+ * 2026-11-14 (user, screenshot): "去掉最左侧的打开侧边栏与返回，只保留自带的黑色加粗
+ * 字体的放到左上角" — the control keeps its job but loses its face. It is still mounted
+ * (back-stack.ts closes the list root through it) and the frame tag is still written (it
+ * is what hides the drawer opener), but `main-panel-back.css.ts` now paints the button
+ * `display: none`: the phone head of a main panel shows the title, with upstream's
+ * `moreBack` chevron kept — the second round of feedback ("你将自带的返回也给删除了，
+ * 这会导致无法返回上级界面") showed that chevron is the only visible way back to the
+ * plugin list, so it must stay.
  */
 const PANEL_SELECTOR = '[data-plugin-panel]'
 /** The page head row. `data-window-drag` separates it from the intro/status siblings. */
@@ -50,6 +59,11 @@ const HEAD_TITLE_SELECTOR = '[data-plugin-header-part="title"]'
 export const MAIN_PANEL_HEAD_ATTR = 'data-dsh-main-panel-head'
 /** Marker on the frame while a main panel owns the screen (hides the drawer opener). */
 export const MAIN_PANEL_OPEN_ATTR = 'data-dsh-main-panel-open'
+/**
+ * Marker on the panel while it presents the "更多" sub-view (a head that carries its own
+ * back control). 只有这一屏收页头上边距：主列表页的 sticky 测量依赖原值。
+ */
+export const MAIN_PANEL_MORE_ATTR = 'data-dsh-main-panel-more'
 /** Our control. Read by back-stack.ts as the list level's own closure. */
 export const MAIN_PANEL_BACK_ATTR = 'data-dsh-main-panel-back'
 /**
@@ -101,7 +115,9 @@ function resolvePageHead(panel: HTMLElement): HTMLElement | null {
   for (const head of panel.querySelectorAll<HTMLElement>(HEAD_SELECTOR)) {
     if (head.querySelector(HEAD_TITLE_SELECTOR) !== null) return head
   }
-  return null
+  // 「更多」（实验性插件）视图的头：没有 title part，但它是 panel 的直接子 header，
+  // 也就是那一屏的标题行。两屏都要打标记 —— 样式表靠标记收上边距、排标题。
+  return panel.querySelector<HTMLElement>(`:scope > ${HEAD_SELECTOR}`)
 }
 
 /** Whether the plugin-manager page is presenting one of its detail levels. */
@@ -176,6 +192,7 @@ export class MainPanelBackMount {
     for (const button of this.mounted) button.remove()
     this.mounted.length = 0
     this.markedHead?.removeAttribute(MAIN_PANEL_HEAD_ATTR)
+    this.markedHead?.closest(PANEL_SELECTOR)?.removeAttribute(MAIN_PANEL_MORE_ATTR)
     this.markedHead = null
     document.querySelector(FRAME_SELECTOR)?.removeAttribute(MAIN_PANEL_OPEN_ATTR)
   }
@@ -209,19 +226,35 @@ export class MainPanelBackMount {
         head.setAttribute(MAIN_PANEL_HEAD_ATTR, '')
         this.markedHead = head
       }
-      for (const button of this.mounted) {
-        if (button.parentElement !== head) head.insertBefore(button, head.firstChild)
+      // 「更多」（实验性插件）视图的页头是 panel 的直接子 header，自带上游 moreBack：
+      // 标记要打（样式据此收上边距、排标题），但不再造第二枚返回键 ——
+      // 用户 2026-11-14：「你将自带的返回也给删除了…无法返回上级界面」，那一屏只能有一个返回。
+      const ownsControl = head.parentElement === panel
+      if (ownsControl) {
+        if (!panel.hasAttribute(MAIN_PANEL_MORE_ATTR)) panel.setAttribute(MAIN_PANEL_MORE_ATTR, '')
+        for (const button of this.mounted) button.remove()
+        this.mounted.length = 0
+      } else {
+        panel.removeAttribute(MAIN_PANEL_MORE_ATTR)
+        for (const button of this.mounted) {
+          if (button.parentElement !== head) head.insertBefore(button, head.firstChild)
+        }
+        if (this.mounted.length === 0) {
+          const button = this.createButton()
+          head.insertBefore(button, head.firstChild)
+          this.mounted.push(button)
+        }
       }
-      if (this.mounted.length === 0) {
-        const button = this.createButton()
-        head.insertBefore(button, head.firstChild)
-        this.mounted.push(button)
-      }
-      // While the panel owns the screen the drawer opener is not the exit the user wants:
-      // "插件页面左上角不是返回而是打开左侧的抽屉". The page's own control is the back one.
+      // 抽屉开关只在「这一屏自己有返回控件」时让位（更多/实验性插件那一屏）。
+      // 插件主列表页没有返回键，那一屏的 ☰ 是唯一出口 —— 用户 2026-11-14 的第二轮反馈
+      // 正是「删了返回就卡住」，所以列表页必须留着它。
       const frame = document.querySelector(FRAME_SELECTOR)
-      if (frame !== null && !frame.hasAttribute(MAIN_PANEL_OPEN_ATTR)) {
-        frame.setAttribute(MAIN_PANEL_OPEN_ATTR, '')
+      if (frame !== null) {
+        if (ownsControl) {
+          if (!frame.hasAttribute(MAIN_PANEL_OPEN_ATTR)) frame.setAttribute(MAIN_PANEL_OPEN_ATTR, '')
+        } else {
+          frame.removeAttribute(MAIN_PANEL_OPEN_ATTR)
+        }
       }
     } catch (error) {
       console.warn('[dsh-main-panel-back] sync failed; the page keeps its own controls', error)
