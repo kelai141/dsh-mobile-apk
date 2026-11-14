@@ -82,6 +82,44 @@ export function cordisScope(fiber: { state?: FiberState; dispose(): unknown | Pr
     get: name => (fiber.ctx as Record<string, unknown>)[name],
   }
 }
+/**
+ * Cordis owns the meaning of an `apply()` return value: a function is a disposer, a thenable or
+ * iterable is collected as effects, and **anything else throws `Invalid effect`** and kills the
+ * fiber. The Linux runtime plugin resolves to its **manager object** (`apply()` →
+ * `LinuxRuntimeManager`), which is bookkeeping for this host, not an effect.
+ *
+ * Why this is not optional: with a raw `ctx.plugin(module, config)` the activation fiber ends in the
+ * error state with `Invalid effect` **after** every asset was downloaded, verified and unpacked, so
+ * the install reported failure on every device and every release (issue: Linux install always fails
+ * although the download succeeds). The manager is advertised two ways — the `apply()` return value
+ * and `ctx.provide('linuxRuntimeManager', …)` — and both must survive this normalization.
+ *
+ * The wrapper is an async **function expression without a prototype**, so Cordis calls it instead of
+ * instantiating it with `new` (a `function` declaration would be constructed, and the explicitly
+ * returned promise would become the instance, dropping the rejection path).
+ *
+ * @param apply - The plugin's own `apply`.
+ * @param capture - Receives the raw return value before it is discarded or forwarded.
+ * @returns A Cordis-safe `apply` that never returns a non-effect value.
+ */
+export function effectSafeApply(
+  apply: (this: unknown, scope: never, config: never) => unknown,
+  capture: (value: unknown) => void,
+): (this: unknown, scope: never, config: never) => Promise<unknown> {
+  const settle = (value: unknown): unknown => {
+    capture(value)
+    // A disposer is a legal effect; anything else is ours to keep and Cordis's to never see.
+    return typeof value === 'function' ? value : undefined
+  }
+  return async function (this: unknown, scope: never, config: never): Promise<unknown> {
+    const result = apply.call(this, scope, config)
+    if (result !== null && typeof result === 'object' && typeof (result as { then?: unknown }).then === 'function') {
+      return settle(await result)
+    }
+    return settle(result)
+  }
+}
+
 /** The runtime side's handle: exactly the shape the bootstrap's own `isManager` check accepts. */
 export interface RuntimeManager {
   install(...args: unknown[]): unknown
@@ -189,9 +227,24 @@ export function createLinuxPluginHost(options: {
    * publishes the same object through `ctx.provide('linuxRuntimeManager', manager)`. Take whichever
    * the host can see, in the bootstrap's own precedence, so the returned `hostResult` always carries
    * a manager that satisfies `isManager`.
+   *
+   * `returned` is the value `apply()` resolved to, captured before [effectSafeApply] hides it from
+   * Cordis. The published service is preferred because a plugin that also returns a disposer still
+   * publishes the manager; the return value is the fallback that keeps a bundle exposing nothing else
+   * installable.
    */
-  const runtimeManager = (activated: PluginScope) => {
-    const source = activated.manager ?? activated.get?.('linuxRuntimeManager')
+  const runtimeManager = (activated: PluginScope, returned?: unknown) => {
+    // Reading an undeclared service throws in Cordis ('cannot get property … without inject'), and
+    // the plugin this host activates declares no such injection. The lookup is therefore fallible
+    // bookkeeping, not a contract: a throw here would surface as a Cordis access error instead of
+    // the install's own "did not provide a runtime manager" verdict.
+    let published: unknown
+    try {
+      published = activated.get?.('linuxRuntimeManager')
+    } catch {
+      published = undefined
+    }
+    const source = activated.manager ?? published ?? returned
     if (source === null || typeof source !== 'object') return undefined
     const record = source as { manager?: unknown; service?: unknown }
     const service = record.service as { manager?: unknown } | undefined
@@ -220,7 +273,15 @@ export function createLinuxPluginHost(options: {
         throw new Error('Runtime bundle must export a Cordis apply function')
       }
       await release()
-      const activation = options.activate(plugin, input.config ?? {})
+      // The bundle's apply() resolves to the runtime manager, which Cordis would reject as an
+      // invalid effect; capture it here and hand Cordis an effect-safe apply instead (see
+      // effectSafeApply). A bundle that returns a real disposer keeps that disposer.
+      let returned: unknown
+      const mounted = {
+        ...(plugin as Record<string, unknown>),
+        apply: effectSafeApply((plugin as { apply: (scope: never, config: never) => unknown }).apply, value => { returned = value }),
+      }
+      const activation = options.activate(mounted, input.config ?? {})
       let activated: PluginScope | undefined
       try {
         activated = await activation
@@ -229,7 +290,7 @@ export function createLinuxPluginHost(options: {
         if (activated.state !== undefined && activated.state !== FiberState.ACTIVE) {
           throw new Error('Runtime Cordis plugin did not become active')
         }
-        const resolved = runtimeManager(activated)
+        const resolved = runtimeManager(activated, returned)
         if (resolved === undefined) throw new Error('The installed runtime plugin did not provide a runtime manager')
         scope = activated
         manager = resolved
