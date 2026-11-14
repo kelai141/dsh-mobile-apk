@@ -130,5 +130,6 @@ test('#1394 页面渲染与校验真的接上了（源码契约）', () => {
   assert.match(app, /digestStateKey\(state\.digestState\)/, 'SHA-256 行必须带三态标签')
   assert.match(app, /async function verifySeedDigest\(\)/, '必须有校验函数')
   assert.match(app, /classifySeedDigest\(\{/, '必须走 classifySeedDigest 判据')
-  assert.match(app, /probeUrl\(state\.current\)/, '必须重新拉当前线路的 MANIFEST')
+  assert.match(app, /manifestUrl\(state\.current, data\.tag\)/, '必须按 data.tag 拉当前线路的 MANIFEST（与 seed 同口径）')
+  assert.doesNotMatch(app, /probeUrl\(state\.current\)\s*\+\s*'\?dsh/, '不得用 latest 的 MANIFEST 核 tag 的摘要')
 })
