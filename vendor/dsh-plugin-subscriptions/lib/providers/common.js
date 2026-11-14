@@ -329,12 +329,15 @@ export class OAuthEndpointError extends Error {
      * indefinitely.
      */
     retryAfterMs;
-    constructor(message, status, oauthCode, retryAfterMs) {
+    /** Whether the response carried explicit rate-limit headers (e.g. retry-after or x-ratelimit-remaining: 0). */
+    rateLimited;
+    constructor(message, status, oauthCode, retryAfterMs, rateLimited = false) {
         super(message);
         this.name = 'OAuthEndpointError';
         this.status = status;
         this.oauthCode = oauthCode;
         this.retryAfterMs = retryAfterMs;
+        this.rateLimited = rateLimited;
     }
 }
 /**
@@ -365,6 +368,8 @@ export async function oauthEndpointError(response, label) {
         }
         if (typeof parsed.error_description === 'string')
             detail = parsed.error_description;
+        if (detail.length === 0 && typeof parsed.message === 'string')
+            detail = parsed.message;
         if (detail.length === 0)
             detail = oauthCode ?? '';
     }
@@ -374,7 +379,11 @@ export async function oauthEndpointError(response, label) {
     const message = detail.length > 0
         ? `${label} token endpoint error (HTTP ${String(response.status)}): ${detail}`
         : `${label} token endpoint error (HTTP ${String(response.status)})`;
-    return new OAuthEndpointError(message, response.status, oauthCode, parseRetryAfterMs(response));
+    const retryAfterMs = parseRetryAfterMs(response);
+    const hasRetryAfter = response.headers.get('retry-after') !== null;
+    const rateLimitRemaining = response.headers.get('x-ratelimit-remaining');
+    const rateLimited = retryAfterMs !== undefined || hasRetryAfter || rateLimitRemaining?.trim() === '0';
+    return new OAuthEndpointError(message, response.status, oauthCode, retryAfterMs, rateLimited);
 }
 /**
  * Per-provider session freshness: loads the stored session, refreshes
