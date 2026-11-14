@@ -2961,7 +2961,14 @@ const vendorRoot = argv[0]
 const flags = argv.slice(1)
 const mode = flags.includes('--apply') ? 'apply' : flags.includes('--list') ? 'list' : 'check'
 const onlyIdx = flags.indexOf('--only')
-const only = onlyIdx >= 0 ? flags[onlyIdx + 1].split(',').map((s) => s.trim()) : null
+const onlyRaw = onlyIdx >= 0 ? flags[onlyIdx + 1] : undefined
+// issue #1569：「--only 后面没给值」与「写错 id」都是**调用错误**，不能落进「零补丁 + ALL OK」。
+// 旧实现直接 flags[i+1].split(...)，缺值即 TypeError 穿出（一串栈而不是用法说明）。
+if (onlyIdx >= 0 && (typeof onlyRaw !== 'string' || onlyRaw.trim() === '' || onlyRaw.startsWith('--'))) {
+  console.error('用法错误：--only 后面必须给补丁 id（多个用逗号分隔，id 列见 --list）')
+  process.exit(2)
+}
+const only = typeof onlyRaw === 'string' ? onlyRaw.split(',').map((s) => s.trim()).filter((s) => s !== '') : null
 const scopeIdx = flags.indexOf('--scope')
 const scope = scopeIdx >= 0 ? flags[scopeIdx + 1] : 'vendor'
 if (!['vendor', 'engine', 'all'].includes(scope)) {
@@ -2974,7 +2981,33 @@ if (!vendorRoot || flags.some((f) => f.startsWith('-') && !['--check', '--apply'
   process.exit(2)
 }
 
+// issue #1569：--only 的 id 必须先做存在性校验。旧实现过滤后照常往下走，写错一个 id 的结果是
+// 「0 补丁执行 + ALL OK（0/0）+ exit 0」——与「57 条全验过」在日志上完全同形，追版时会把
+// 「一条都没验」当成「已修好」。registry 的 summary 与 id 长得很像，这种手误是常态。
+if (only !== null) {
+  const known = new Set(regIds)
+  const unknown = only.filter((id) => !known.has(id))
+  if (unknown.length > 0) {
+    // exit 2 = 用法错误（与 --scope 非法同档）：顺手给出最接近的候选，省一次 --list。
+    const hint = unknown.map((id) => {
+      const near = regIds.filter((k) => k.includes(id) || id.includes(k)).slice(0, 3)
+      return near.length > 0 ? id + '（相近：' + near.join(', ') + '）' : id
+    })
+    console.error('--only 里有 registry 不认识的补丁 id：' + hint.join('；')
+      + '——registry 共 ' + regIds.length + ' 条，用 --list 查看全部 id')
+    process.exit(2)
+  }
+}
+
 const order = registry.patches.filter((p) => scope === 'all' || scopeOf(p) === scope).map((p) => p.id).filter((id) => !only || only.includes(id))
+// issue #1569 第二条守卫：only 非空却一条也没选中（典型：所给 id 真实存在，但不在当前 scope 里）。
+// 此时「0/0 ALL OK」同样是假绿，必须判失败。
+if (only !== null && order.length === 0) {
+  const scopePool = registry.patches.filter((p) => scope === 'all' || scopeOf(p) === scope).map((p) => p.id)
+  console.error('--only 没有选中任何补丁：所给 id 不在当前 scope=' + scope + ' 里（该 scope 共 '
+    + scopePool.length + ' 条）。换 --scope all，或用 --list 核对 id')
+  process.exit(1)
+}
 if (mode === 'list') {
   for (const p of registry.patches) {
     const status = p.soft ? 'soft' : 'gate'
