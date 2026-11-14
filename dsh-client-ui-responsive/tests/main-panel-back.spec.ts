@@ -21,6 +21,9 @@ import { BackStackSignal } from '../src/client/mobile/back-stack.ts'
 import {
   MainPanelBackMount,
   MAIN_PANEL_BACK_ATTR,
+  MAIN_PANEL_HEAD_ATTR,
+  MAIN_PANEL_OPEN_ATTR,
+  MAIN_PANEL_MORE_ATTR,
   PANEL_DETAIL_SELECTORS,
 } from '../src/client/mobile/main-panel-back.ts'
 import { MAIN_PANEL_BACK_CSS } from '../src/client/mobile/main-panel-back.css.ts'
@@ -36,25 +39,53 @@ function setPhoneForm(on: boolean): void {
 }
 
 /**
- * The plugin-manager page, in the shape the device measured.
- * @param level - which level the page presents: the list root, or one detail level with its crumb.
+ * The plugin-manager page, in the shape upstream actually renders.
+ *
+ * Upstream nests the head: `section[data-plugin-panel] > div[data-plugin-body] >
+ * div[data-plugin-bar] > header[data-window-drag]`. The fixture used to put the head
+ * directly under the panel — a shape upstream never had — which is why the control
+ * looked mounted here while the device showed no back button at all.
+ *
+ * @param level - which level the page presents: the list root, one detail level with its
+ *   crumb, or the "更多" sub-view whose head has a crumb but no section title.
  */
-function buildPanel(level: 'list' | 'detail' = 'list'): HTMLElement {
+function buildPanel(level: 'list' | 'detail' | 'more' = 'list'): HTMLElement {
   const panel = document.createElement('section')
   panel.setAttribute('data-plugin-panel', '')
+  if (level === 'more') {
+    // moreHead: a direct child, carries its own crumb, and no `data-plugin-header-part`.
+    const moreHead = document.createElement('header')
+    moreHead.setAttribute('data-window-drag', '')
+    const back = document.createElement('button')
+    back.setAttribute('aria-label', '返回插件列表')
+    const title = document.createElement('h1')
+    title.textContent = '实验性插件'
+    moreHead.append(back, title)
+    panel.appendChild(moreHead)
+    document.body.appendChild(panel)
+    return panel
+  }
+  const body = document.createElement('div')
+  body.setAttribute('data-plugin-body', '')
+  const bar = document.createElement('div')
+  bar.setAttribute('data-plugin-bar', '')
   const head = document.createElement('header')
   head.setAttribute('data-window-drag', '')
+  const heading = document.createElement('div')
   const title = document.createElement('h1')
+  title.setAttribute('data-plugin-header-part', 'title')
   title.textContent = '插件'
-  head.appendChild(title)
+  heading.appendChild(title)
   const toolbar = document.createElement('div')
   const refresh = document.createElement('button')
   refresh.setAttribute('aria-label', '刷新')
   const add = document.createElement('button')
   add.textContent = '添加插件'
   toolbar.append(refresh, add)
-  head.appendChild(toolbar)
-  panel.appendChild(head)
+  head.append(heading, toolbar)
+  bar.appendChild(head)
+  body.appendChild(bar)
+  panel.appendChild(body)
   if (level === 'detail') {
     const detail = document.createElement('div')
     detail.setAttribute('data-plugin-detail', '@scope/pkg')
@@ -68,6 +99,11 @@ function buildPanel(level: 'list' | 'detail' = 'list'): HTMLElement {
   }
   document.body.appendChild(panel)
   return panel
+}
+
+/** The head our control must land in, resolved the way upstream nests it. */
+function pageHead(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('[data-plugin-bar] > header[data-window-drag]')
 }
 
 /**
@@ -198,8 +234,10 @@ describe('C. 注入的可见返回控件', () => {
     await flush()
     const button = document.querySelector('[' + MAIN_PANEL_BACK_ATTR + ']')
     expect(button).not.toBeNull()
-    const head = document.querySelector('[data-plugin-panel] > header')
+    const head = pageHead()
     expect(head?.firstElementChild).toBe(button)
+    // 页头被打了标记：样式表只认属性，不重述结构（否则上游再挪一层就静默失效）。
+    expect(head?.hasAttribute(MAIN_PANEL_HEAD_ATTR)).toBe(true)
   })
 
   it('反证：详情层已有上游 crumb 时不得重复造返回键', async () => {
@@ -254,7 +292,7 @@ describe('C. 注入的可见返回控件', () => {
     await flush()
     const button = document.querySelector('[' + MAIN_PANEL_BACK_ATTR + ']')
     expect(button).not.toBeNull()
-    expect(document.querySelector('[data-plugin-panel] > header')?.firstElementChild).toBe(button)
+    expect(pageHead()?.firstElementChild).toBe(button)
   })
 
   it('detach 撤掉控件与观察者（热卸载不留孤儿）', async () => {
@@ -282,6 +320,83 @@ describe('C. 注入的可见返回控件', () => {
     expect(button.tagName).toBe('BUTTON')
     expect(button.type).toBe('button')
     expect(button.getAttribute('aria-label')).toBeTruthy()
+  })
+})
+
+describe('C2. 页头在嵌套结构里（2026-11-13 用户实报：插件页左上角只有抽屉开关）', () => {
+  it('页头不是面板直接子节点时也必须挂上（`:scope > header` 那条老判据在这里恒空）', async () => {
+    setPhoneForm(true)
+    buildPanel('list')
+    const head = pageHead()!
+    // 反证：这条正是老判据，它在这个结构上取不到任何东西 —— 控件当年因此从未挂上。
+    expect(document.querySelector('[data-plugin-panel] > header[data-window-drag]')).toBeNull()
+    expect(head.parentElement?.hasAttribute('data-plugin-bar')).toBe(true)
+    mount = new MainPanelBackMount(vi.fn())
+    mount.attach()
+    await flush()
+    expect(document.querySelector('[' + MAIN_PANEL_BACK_ATTR + ']')).not.toBeNull()
+    expect(head.firstElementChild).toBe(document.querySelector('[' + MAIN_PANEL_BACK_ATTR + ']'))
+  })
+
+  it('反证：「更多」子视图的页头有自己的 crumb、且没有分区标题 —— 不得重复造返回键', async () => {
+    setPhoneForm(true)
+    buildPanel('more')
+    // 它确实是 panel 的直接子 header：这正是老判据唯一能命中的那个页头。
+    expect(document.querySelector('[data-plugin-panel] > header[data-window-drag]')).not.toBeNull()
+    mount = new MainPanelBackMount(vi.fn())
+    mount.attach()
+    await flush()
+    expect(document.querySelector('[' + MAIN_PANEL_BACK_ATTR + ']')).toBeNull()
+  })
+
+  it('「更多」视图：页头打标记、frame 打占屏标记，但不造第二枚返回键（上游 moreBack 是唯一出口）', async () => {
+    setPhoneForm(true)
+    const frame = document.createElement('div')
+    frame.setAttribute('data-dsh-frame', '')
+    document.body.appendChild(frame)
+    buildPanel('more')
+    mount = new MainPanelBackMount(vi.fn())
+    mount.attach()
+    await flush()
+    const head = document.querySelector<HTMLElement>('[data-plugin-panel] > header[data-window-drag]')
+    expect(head?.hasAttribute(MAIN_PANEL_HEAD_ATTR)).toBe(true)
+    // 收上边距只落在这一屏（样式表键在 panel 的 more 标记上）。
+    expect(document.querySelector('[data-plugin-panel]')?.hasAttribute(MAIN_PANEL_MORE_ATTR)).toBe(true)
+    expect(frame.hasAttribute(MAIN_PANEL_OPEN_ATTR)).toBe(true)
+    expect(document.querySelector('[' + MAIN_PANEL_BACK_ATTR + ']')).toBeNull()
+  })
+
+  it('列表根不给 frame 打占屏标记 —— 那一屏没有返回键，☰ 必须留着（用户第二轮反馈）', async () => {
+    setPhoneForm(true)
+    const frame = document.createElement('div')
+    frame.setAttribute('data-dsh-frame', '')
+    const leading = document.createElement('div')
+    leading.setAttribute('data-shell-leading', '')
+    const opener = document.createElement('button')
+    opener.setAttribute('data-sidebar-opener', '')
+    leading.appendChild(opener)
+    frame.appendChild(leading)
+    document.body.appendChild(frame)
+    buildPanel('list')
+    mount = new MainPanelBackMount(vi.fn())
+    mount.attach()
+    await flush()
+    expect(frame.hasAttribute(MAIN_PANEL_OPEN_ATTR)).toBe(false)
+    expect(document.querySelector('[data-plugin-panel]')?.hasAttribute(MAIN_PANEL_MORE_ATTR)).toBe(false)
+    // 控件本身仍要挂在列表根（back-stack 靠它退这一层），只是不画脸。
+    expect(document.querySelector('[' + MAIN_PANEL_BACK_ATTR + ']')).not.toBeNull()
+  })
+
+  it('反证：桌面形态不打标记（抽屉开关只在手机版式让位）', async () => {
+    setPhoneForm(false)
+    const frame = document.createElement('div')
+    frame.setAttribute('data-dsh-frame', '')
+    document.body.appendChild(frame)
+    buildPanel('list')
+    mount = new MainPanelBackMount(vi.fn())
+    mount.attach()
+    await flush()
+    expect(frame.hasAttribute(MAIN_PANEL_OPEN_ATTR)).toBe(false)
   })
 })
 
@@ -326,6 +441,20 @@ describe('D. 判据与样式面（机器可判）', () => {
     expect(css).toContain('html[data-dsh-mobile-form] [data-dsh-main-panel-back]')
     // 反证：不得改上游 .pageHead 的 padding（那是页头自己的顶距）。
     expect(css).not.toMatch(/header\[data-window-drag\]\s*\{[^}]*padding-top/)
+  })
+
+  it('样式按页头标记生效，不重述「页头是面板直接子节点」这个结构', () => {
+    // 页头实际嵌在 pageBody > pageBar 里，子选择器匹配不到；标记由 JS 打在真正的页头上。
+    expect(MAIN_PANEL_BACK_CSS).toContain('[data-dsh-main-panel-head]')
+    expect(MAIN_PANEL_BACK_CSS).not.toContain('[data-plugin-panel] > header')
+  })
+
+  it('抽屉开关让位的判据与注入模块共用同一个属性（两处不许各写一个名字）', () => {
+    const formCss = code(readFileSync(src('mobile', 'mobile-form.css.ts'), 'utf8'))
+    expect(formCss).toContain('[data-dsh-main-panel-open]')
+    const mountSource = code(readFileSync(src('mobile', 'main-panel-back.ts'), 'utf8'))
+    expect(mountSource).toContain("MAIN_PANEL_OPEN_ATTR = 'data-dsh-main-panel-open'")
+    expect(formCss).toContain('data-dsh-main-panel-open')
   })
 
   it('详情层选择器与 back-stack 共用同一组（两处不许漂移）', async () => {

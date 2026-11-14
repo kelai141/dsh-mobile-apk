@@ -45,10 +45,43 @@ internal object SnapshotPrefixRewrite {
   private const val SLASH = '/'
   private const val HASH = 35
   private const val BANG = 33
+  private const val BACKSLASH = '\\'
 
   /** 判定「这是构建期烧死的本包 usr 前缀」——任意用户号都算（构建机烧的是 user 0）。 */
   private fun bakedPrefixRegex(pkg: String): Regex =
     Regex("/data/(?:user/[0-9]+|data)/" + Regex.escape(pkg) + "/files/usr")
+
+  /**
+   * 构建期烧进快照的前缀。与 `scripts/build-snapshot-013.mjs` 的 `NEW_PREFIX` 必须逐字相同。
+   *
+   * 用途只有一个：判断「本机的 usr 是不是就是这个前缀」——是的话整步无事可做。
+   */
+  internal const val BAKED_PREFIX = "/data/user/0/com.dsharnessmobile.shell/files/usr"
+
+  /**
+   * 本机 usr 是否**正好**是构建期烧的那个前缀。
+   *
+   * 为什么这条早退重要：构建期 `fix-shebang.py` 已经把前缀钉成上面那个值，
+   * 而应用正常安装时本机 usr 也就是它（`/data/user/0/<pkg>/files/usr`）。
+   * 两者相等意味着**树里所有 shebang 本来就对**，这一步无事可做——但旧实现仍要遍历
+   * 4.2 万条目逐个读文件确认，在慢文件系统上要 8 分钟以上（实测见
+   * `docs/NATIVE-PREFIX-REWRITE-COST-2026-11-11.md`）。
+   *
+   * 判据必须逐字相等：只要本机路径不同（多用户设备装在 user 10、或包名变了），
+   * 就照常全量校验，绝不因为「看起来一样」而跳过。
+   */
+  internal fun usrMatchesBakedPrefix(usrDir: File): Boolean =
+    usrMatchesBakedPrefixPath(usrDir.absolutePath)
+
+  /**
+   * 纯字符串版本（JVM 可测）。
+   *
+   * 为什么单独抽出来：`File("/data/user/0/...").absolutePath` 在**宿主 JVM** 上会加上当前
+   * 工作目录前缀（Windows 上是盘符），拿它做断言只能测到宿主行为、测不到设备行为。
+   * 把判据收敛成「一个路径字符串是否等于构建期前缀」，测试就能直接喂设备上的真实路径。
+   */
+  internal fun usrMatchesBakedPrefixPath(usrPath: String): Boolean =
+    usrPath.replace(BACKSLASH, SLASH).trimEnd(SLASH) == BAKED_PREFIX
 
   /**
    * 把文本里的**本包构建期 usr 前缀**换成本机 `usrDir`（纯函数，JVM 可测）。
@@ -130,6 +163,9 @@ internal object SnapshotPrefixRewrite {
    * @param pkg 本应用包名。
    * @param snapshotId 快照指纹（标记内容的一部分：同版本内换快照也要重跑）。
    * @param maxVisits 遍历上限（缺省 [MAX_VISITS]）。只有测试会传小值——生产路径不接受外部调参。
+   * @param scriptManifest 构建期产出的文本脚本清单（相对 usrRoot）。给出时**只按清单校验**，
+   *   不再遍历整棵树——慢文件系统上 4.2 万条目的 lstat 要十几分钟，而清单只有几百行。
+   *   清单缺席（旧快照）时回落到原来的全树遍历，行为与之前一致。
    */
   internal fun runOnce(
     filesDir: File,
@@ -138,15 +174,58 @@ internal object SnapshotPrefixRewrite {
     pkg: String,
     snapshotId: String,
     maxVisits: Int = MAX_VISITS,
+    scriptManifest: List<String>? = null,
   ): Result {
     val marker = File(filesDir, MARKER_PREFIX + version)
     if (marker.isFile && markerReadsSnapshot(marker, snapshotId)) return Result(0, 0, 0, skipped = true)
     if (!usrRoot.isDirectory) return Result(0, 0, 1, skipped = false)
+    // 本机 usr 正好等于构建期烧的前缀 ⇒ 树里所有 shebang 本来就对，整步无事可做。
+    // 这条早退把「必然为 0 的全量校验」直接省掉；判据是逐字相等，不相等就照常全量跑。
+    if (usrMatchesBakedPrefix(usrRoot)) {
+      writeMarkerIfComplete(marker, 0, 0, snapshotId)
+      return Result(0, 0, 0, skipped = true)
+    }
     var rewritten = 0
     var scanned = 0
     var failed = 0
     var visited = 0
     var truncated = false
+
+    if (scriptManifest != null) {
+      // 清单路径：构建期已经确认过「这些是文本脚本」，运行时只需逐个校验前缀，
+      // 不必再遍历整棵树判断谁有 shebang。
+      for (rel in scriptManifest) {
+        if (visited >= maxVisits) { truncated = true; break }
+        visited += 1
+        val child = File(usrRoot, rel)
+        val length = try { child.length() } catch (_: Throwable) { failed += 1; continue }
+        if (length <= 0L || length > MAX_BYTES) continue
+        scanned += 1
+        val bytes = try { child.readBytes() } catch (_: Throwable) { failed += 1; continue }
+        val after = rewriteFileBytes(child.name, bytes, pkg, usrRoot.absolutePath) ?: continue
+        try {
+          java.io.FileOutputStream(child).use { out ->
+            out.write(after)
+            out.flush()
+            out.fd.sync()
+          }
+          rewritten += 1
+        } catch (_: Throwable) {
+          failed += 1
+        }
+      }
+      if (failed == 0 && !truncated) {
+        try {
+          marker.writeText(
+            "rewritten=" + rewritten + " scanned=" + scanned + " snapshot=" + snapshotId +
+              " at " + System.currentTimeMillis() + "\n",
+          )
+        } catch (_: Throwable) {
+          // 标记写不进去不算失败：下次启动会再跑一遍（幂等）。
+        }
+      }
+      return Result(rewritten, scanned, failed, skipped = false, truncated = truncated)
+    }
     // 与 fix-shebang.py 同范围（bin / libexec / lib）：它烧的前缀在哪，就只去哪修。
     val roots = listOf(File(usrRoot, "bin"), File(usrRoot, "libexec"), File(usrRoot, "lib"))
     for (root in roots) {
@@ -159,10 +238,25 @@ internal object SnapshotPrefixRewrite {
         for (child in children) {
           if (visited >= maxVisits) { truncated = true; break }
           visited += 1
+          // 一次 lstat 拿全部信息。
+          //
+          // 旧实现依次调用 isSymlink / isDirectory / isFile / length —— 那是同一份
+          // lstat 的四次往返，在慢文件系统上每次 1–4 ms（设备实测，见
+          // docs/NATIVE-PREFIX-REWRITE-COST-2026-11-11.md）。合并成一次即可省掉三次。
           // 软链一律不碰：目录链可能成环，文件链会把改写落到链目标上（改写范围不可控）。
-          if (isSymlink(child)) continue
-          if (child.isDirectory) { stack.addLast(child); continue }
-          if (!child.isFile || child.length() > MAX_BYTES) continue
+          val attrs = try {
+            java.nio.file.Files.readAttributes(
+              child.toPath(),
+              java.nio.file.attribute.BasicFileAttributes::class.java,
+              java.nio.file.LinkOption.NOFOLLOW_LINKS,
+            )
+          } catch (_: Throwable) {
+            null
+          }
+          if (attrs == null) continue
+          if (attrs.isSymbolicLink) continue
+          if (attrs.isDirectory) { stack.addLast(child); continue }
+          if (!attrs.isRegularFile || attrs.size() > MAX_BYTES) continue
           val head = try { readHead(child, 2) } catch (_: Throwable) { failed += 1; continue }
           if (head.size < 2 || head[0] != HASH.toByte() || head[1] != BANG.toByte()) continue
           scanned += 1
@@ -195,9 +289,43 @@ internal object SnapshotPrefixRewrite {
     return Result(rewritten, scanned, failed, skipped = false, truncated = truncated)
   }
 
-  /** Context 便利入口：live 树 = `<files>/usr`。 */
-  internal fun runOnce(context: Context, version: String, snapshotId: String): Result =
-    runOnce(context.filesDir, File(context.filesDir, "usr"), version, context.packageName, snapshotId)
+  /** 构建期脚本清单在 live 树里的落点（由快照解压带进来）。 */
+  private const val SCRIPT_MANIFEST_REL = ".dsh-shebang-scripts.txt"
+
+  /**
+   * Context 便利入口：live 树 = `<files>/usr`。
+   *
+   * 有清单就按清单校验（几百行），没有就回落全树遍历（旧快照）。清单只是加速，
+   * **不是正确性前提**：读不到、为空、或路径不存在时一律回落，绝不因此跳过重写。
+   */
+  internal fun runOnce(context: Context, version: String, snapshotId: String): Result {
+    val usr = File(context.filesDir, "usr")
+    return runOnce(
+      context.filesDir, usr, version, context.packageName, snapshotId,
+      scriptManifest = readScriptManifest(usr),
+    )
+  }
+
+  /** 读清单；任何异常或缺席都返回 null（调用方回落全树遍历）。 */
+  private fun readScriptManifest(usr: File): List<String>? {
+    val file = File(usr, SCRIPT_MANIFEST_REL)
+    if (!file.isFile) return null
+    val lines = try { file.readLines() } catch (_: Throwable) { return null }
+    val clean = lines.map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("/") && ".." !in it.split("/") }
+    return clean.ifEmpty { null }
+  }
+
+  /** 零失败时写标记（早退与常规路径共用，口径一致）。 */
+  private fun writeMarkerIfComplete(marker: File, rewritten: Int, scanned: Int, snapshotId: String) {
+    try {
+      marker.writeText(
+        "rewritten=" + rewritten + " scanned=" + scanned + " snapshot=" + snapshotId +
+          " at " + System.currentTimeMillis() + "\n",
+      )
+    } catch (_: Throwable) {
+      // 标记写不进去不算失败：下次启动会再跑一遍（幂等）。
+    }
+  }
 
   /**
    * 标记是否对**这一份快照**有效。
@@ -217,16 +345,28 @@ internal object SnapshotPrefixRewrite {
     false
   }
 
+  /**
+   * 读文件头两字节。
+   *
+   * 为什么不用 `FileInputStream(file)`：那个构造函数会走
+   * `File.getCanonicalPath()` → `UnixFileSystem.canonicalize()` → 逐级 `lstat`
+   * 整条路径，每次约 16 ms（设备实测，见 docs/NATIVE-PREFIX-REWRITE-COST-2026-11-11.md）。
+   * 4.2 万个文件累计 701 秒，占这一步总耗时的 55%，是唯一的主项。
+   *
+   * `java.nio.file.Files.newByteChannel` 直接按路径打开，不做规范化；本方法只被
+   * 前缀重写用来嗅探 `#!`，路径已经来自 `listFiles()`，不存在需要规范化才能解析的形态。
+   */
   private fun readHead(file: File, count: Int): ByteArray {
-    val buffer = ByteArray(count)
-    java.io.FileInputStream(file).use { input ->
-      var read = 0
-      while (read < count) {
-        val n = input.read(buffer, read, count - read)
-        if (n < 0) break
-        read += n
+    val buffer = java.nio.ByteBuffer.allocate(count)
+    java.nio.channels.FileChannel.open(
+      file.toPath(),
+      java.nio.file.StandardOpenOption.READ,
+    ).use { channel ->
+      while (buffer.hasRemaining()) {
+        if (channel.read(buffer) < 0) break
       }
-      return if (read == count) buffer else buffer.copyOf(read)
     }
+    val read = buffer.position()
+    return if (read == count) buffer.array() else buffer.array().copyOf(read)
   }
 }

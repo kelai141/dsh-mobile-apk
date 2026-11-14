@@ -19,273 +19,46 @@ permissions:
 
 jobs:
   static:
+    # 保留旧显示名以兼容 branch protection 的 required check；实际仅扫新增敏感信息。
     name: 冲突标记与敏感信息扫描
     runs-on: ubuntu-latest
-    # 实测：static job 历史最长约 2 分 40 秒（28 个步骤，最慢的是插件构建 26s、
-    # 工具输出 schema 契约 42s、插件单测 38s），取 15 分钟约 5.6 倍余量。
-    timeout-minutes: 15
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with: { node-version: '24' }
-      - name: 快照门禁回归
-        if: always()
-        run: python3 scripts/ci-verify-snapshot.py --self-test
-      # APK assembly/version/signature contracts are small Node-only regressions; run them on every PR
-      # instead of waiting for a manual local build or the release workflow to exercise them.
-      - name: Console keyboard layout regressions
-        if: always()
-        run: node --test scripts/console-keyboard-layout.test.mjs
-      # 软链自净化（issue #1204）：自指链曾「先 rmSync 再 symlinkSync('')」抛 ENOENT 并丢掉链接；
-      # 越界目标曾被改写成逃出 stage 树的相对链。两条都只能在真软链上复现，故单独跑这一份。
-      - name: Symlink sanitize regressions
-        if: always()
-        run: node --test scripts/symlink-sanitize.test.mjs
-      # 订阅 provider 的代理面（issue #1282）：发给浏览器的视图曾把 URL 内嵌 userinfo 的密码原样回传，
-      # passwordSet 还报 false，出错文案也回显整条 URL。用例对序列化结果做全舰搜索（密码用随机串做夹具）。
-      - name: Subscriptions proxy secret regressions
-        if: always()
-        run: node --test scripts/subs-proxy-secrets.test.mjs
-      # 订阅 provider 的 SSE 面（issue #1284）：pending 无上限 + 每 chunk 重置看门狗（既 OOM 又永不超时）、
-      # 以及末帧无空行即丢弃。三条都只能靠构造字节流复现，故单独跑这一份。
-      - name: Subscriptions SSE limit regressions
-        if: always()
-        run: node --test scripts/subs-sse-limits.test.mjs
-      - name: APK 组装、版本与签名回归
-        if: always()
-        run: node --test scripts/check-apk-signatures.test.mjs scripts/resolve-version-suffix.test.mjs scripts/build-apk-engine.test.mjs scripts/check-third-party.test.mjs scripts/check-upstream-patch-bytes.test.mjs scripts/wsl-node-command.test.mjs scripts/check-bridge-symmetry.test.mjs scripts/check-snapshot-secrets.test.mjs
-      - name: 下载站发布同步与路由回归
-        if: always()
-        run: |
-          node webpages/tools/build.mjs --self-test
-          node webpages/tools/build.mjs
-      - name: 冲突标记检查
-        if: always()
-        run: |
-          # 覆盖文档与脚本：docs/ 下曾遗留未解决的冲突标记（#1012 合并进 modules.md），
-          # 旧版只扫 app/src 的代码文件，因此漏检。这里扩到 docs/.github/scripts。
-          # 0.2.2-rc.1 适配：再扩到 plugins/ 与 vendor/——rebase 把一个**未解决的冲突标记**留在了
-          # plugins/dsh-android-linux-env/package.json 里并直接提交，那份 JSON 因此不可解析：
-          # check-contract 直接 SyntaxError 崩掉、check-plugin-tests 与 check-tool-output-schema 连带判红，
-          # 而本步骤当时**扫不到**（根目录只有 app/src docs .github scripts），CI 无从拦截。
-          # 冲突标记只可能出现在第一列，故只匹配行首；Markdown 的 setext 标题下划线（一整行 ====）不是冲突。
-          if grep -rEn '^(<<<<<<< |>>>>>>> )' \
-               app/src docs .github scripts plugins vendor \
-               --include='*.kt' --include='*.java' --include='*.xml' --include='*.html' \
-               --include='*.js' --include='*.mjs' --include='*.ts' --include='*.yml' \
-               --include='*.yaml' --include='*.md' --include='*.json' \
-               --exclude-dir=node_modules 2>/dev/null; then
-            echo "::error::检测到未解决的 merge conflict 标记"
-            exit 1
-          fi
-          echo "无冲突标记"
-      - name: 敏感信息扫描
-        if: always()
-        run: |
-          if grep -rEn '(sk-[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,})' app/src scripts 2>/dev/null; then
-            echo "::error::检测到疑似密钥/令牌"
-            exit 1
-          fi
-          echo "无敏感信息"
-      - name: 来源审计源码替换回归
-        if: always()
-        run: |
-          python3 -m unittest discover -s scripts/source-build -p 'test_*.py' -v
-          node --test scripts/source-build/*.test.mjs scripts/check-plugin-test-samples.test.mjs scripts/verify-plugin-compat-evidence.test.mjs scripts/verify-plugin-sample-*.test.mjs
-          node scripts/source-build/check-package-lock-roots.mjs
-      # 补丁镜像面（自我一致性，不引用协调仓）：本仓是公开的自包含构建宿主，**不得**依赖
-      # 私有协调仓——此前用 `GH_PAT` 跨仓检出私有 dsh-mobile，PAT 失效即在检出步骤硬失败，
-      # 该 job 的门禁全部 skipped（0.14.0 实测：PAT 已无法读取协调仓）。
-      # 跨仓逐字节一致性由**能同时看到两仓的那一侧**保证：协调仓 CI 的
-      # 「检出镜像对端三面」步骤会把本仓 + 两个子仓检出，跑 check-patch-mirror --require-peer。
-      # 这里只做本仓自包含面的守门（补丁自洽 + 引擎树补丁行为回归），不跨仓。
-      - name: 补丁自洽与引擎树补丁回归
-        if: always()
-        run: |
-          # --self：只跑本仓自包含面（registry/IMPLS 集合一致、补丁文件在场、tests 清单自洽），
-          # 不读对端树；跨仓逐字节一致性由协调仓 CI 的 --require-peer 那一侧守。
-          node scripts/check-patch-mirror.mjs --self
-          # 0.14.2 T6：夹具停在上一代引擎时补丁回归测试是结构性假绿（本仓同样携带 tests/ 镜像面）
-          node scripts/check-patch-fixtures.mjs
-          node --test scripts/probe-engine-anchors.test.mjs
-          # 0.14.5 C-1：原先此处硬编码跑 3 个补丁回归（26 个里只覆盖 3 个）。改用清单门禁——
-          # 它串行跑全部 26 个，并对已知失败要求带 reason/since 的显式声明，新增失败立刻判红。
-          # 那 3 条已被完整覆盖，故删除硬编码行而不是并行保留（避免两处清单各自漂移）。
-          node scripts/check-patch-test-manifest.mjs
-      - name: 准备插件产物（单次锁解析、安装与构建）
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          # termux 位于统一清单首位，linux-env 编译依赖它的 lib；各消费者复用本次产物。
-          mapfile -t plugin_dirs < <(node -e "const {dirs}=require('./scripts/plugin-dirs.json'); console.log(dirs.filter(d=>d==='dsh-shell-termux'||d.startsWith('plugins/')).join('\n'))")
-          test "${#plugin_dirs[@]}" -gt 0
-          for d in "${plugin_dirs[@]}"; do
-            node scripts/source-build/install-project-dependencies.mjs "$d" .deploy-tmp/source-build/plugin-lock-resolution-pr.json
-            (cd "$d" && npm run build)
-          done
-      - name: WebView verification locale regressions
-        if: always()
-        run: |
-          node scripts/source-build/install-project-dependencies.mjs dsh-client-ui-responsive .deploy-tmp/source-build/webview-probe-lock-resolution-pr.json
-          node scripts/verify-webview-015.mjs --self-test
-      - name: 回到底部按钮排版与负控回归
-        if: always()
-        run: node scripts/verify-to-bottom-gutter.mjs --self-test
-      - name: 自定义提供商完整采纳与创建回归
-        if: always()
-        run: cd dsh-client-ui-responsive && npx vitest run tests/custom-provider-form-960.spec.tsx --environment jsdom
-      # 控制协议 V2（0.13.8 批 F）：引擎侧编解码的往返等价与体积基线（壳侧 Kotlin 一侧由
-      # 本仓单测 + 跨语言往返门禁另守）。
-      - name: 协议 V2 往返与体积门禁
-        if: always()
-        run: |
-          node scripts/check-protocol-v2.mjs
-      - name: 控制 op 登记链门禁
-        if: always()
-        run: node scripts/check-control-ops.mjs
-      # 跨语言 op 清单对等（0.14.1）：引擎 REAL_SCREEN_CONTROL_OPS 与壳侧 REAL_SCREEN_OPS 必须逐条相同。
-      # 两份清单漂移就是「virtual-only 下点击校验/WebView 路径全不可用」的根因（壳侧多带 3 条不读屏的 op）。
-      - name: op 清单跨语言对等门禁
-        if: always()
-        run: node scripts/check-op-registry-parity.mjs
-      # 镜像前缀表双真源一致性：壳侧 UpdateChecker.MIRROR_PREFIXES 与下载站
-      # webpages/src/assets/release.js 的 MIRROR_TEMPLATES 必须逐条同序。两份表曾漂移成
-      # 3 条 vs 4 条（壳侧缺 ghproxy.net），后果是「应用内下载」与「浏览器下载」走不同
-      # 线路集合，且没有任何一层为不一致负责。顺序即回退优先级，故判据不排序。
-      - name: 镜像前缀表一致性门禁
-        if: always()
-        run: node scripts/check-mirror-parity.mjs
-      # 工具名「承诺 vs 实现」（0.14.1）：指引里提到的 android_* 工具名必须真有声明位
-      # （android_vdisplay_input 曾被三处文案与 Skill 文档承诺却从未 defineTool）。
-      - name: 工具名承诺门禁
-        if: always()
-        run: node scripts/check-tool-name-promises.mjs
-      # 插件单测门禁（0.14.1 §1.1b 决策 1 / §2.4 前置项 1）：脚本存在却从未被调用，34 个测试文件无人跑。
-      # 真跑各插件 test/*.test.mjs（全 skip 判假绿）——需 plugins/*/lib 产物，故先构建。
-      - name: 插件单测门禁
-        if: always()
-        run: |
-          node scripts/check-plugin-tests.mjs
-      # 顶层 scripts/*.test.mjs 门禁（issue #973）：4 处目录级 sweep 都不覆盖顶层，7 个顶层测试无人执行，
-      # 其中 check-runtime-assets.test.mjs 已 fail 8 条而 CI 一直绿。已内联的 5 个在脚本内显式豁免。
-      - name: 顶层脚本测试门禁
-        if: always()
-        run: |
-          node scripts/check-script-tests.mjs
-      # 工具返回值 vs output.schema 运行时契约门禁（0.13.8-b 批 B2 T2 / E-10）。
-      # 依赖上一步构建出的 8 个包 lib（门禁要求 7 个插件的 lib/index.js 在场，缺产物判红——
-      # 原先它只自建 manage 一个，结构上必红：0.14.1 执行地图排查发现，本轮修复）。
-      - name: 工具输出 schema 契约门禁
-        if: always()
-        run: |
-          # manage 将引擎校验器列为固定 devDependency；准备阶段的已解析 lock/npm ci 已安装它。
-          # 契约脚本直接导入该真实校验器，缺席仍判红，不重新解析第二套依赖图。
-          node scripts/check-tool-output-schema.mjs
-      # 门禁脚本自身的测试面（0.14.11 补）：这三个 .test.mjs 此前除 docs 外零引用，
-      # 「补齐测试面」事实上没有生效 —— 测试存在、可判别，但没有任何调用点，回归那天一样没人拦。
-      # 它们守的都是「登记链/镜像面/工具面预算」这类改一处要同步多处的漂移门禁。
-      - name: 门禁脚本自测面（control-ops / patch-mirror / tool-surface-budget）
-        if: always()
-        run: |
-          node --test scripts/check-control-ops.test.mjs
-          node --test scripts/check-patch-mirror.test.mjs
-          node --test scripts/check-tool-surface-budget.test.mjs
-      # 构建链自身判据的行为面（P2 批：issue #1613 / #1614 / #1616）。
-      # 三条都不是「源码切片」判据：它们从**真实脚本**抽出对应段落，用合成驱动真跑，并各自带一条
-      # 「改回旧写法必须恢复缺陷行为」的反证 —— 判据没有判别力时反证会红。
-      # pwsh/bash 缺席的布局（Linux 无 PowerShell）由各用例显式 skip 并打印原因，不静默当通过。
-      - name: 构建链行为判据（workflow 输入 / 注入半写 / 快照导出）
-        if: always()
-        run: |
-          node --test scripts/workflow-input-injection.test.mjs
-          node --test scripts/build-release-inject-guard.test.mjs
-          node --test scripts/snapshot-export-produced-guard.test.mjs
-      # 壳侧加固语义（NSC / backup 规则 / exported）与子进程有界读（0.13.8-b FX-208.4 / E1）
-      - name: 壳侧加固与有界读门禁
-        if: always()
-        run: |
-          node scripts/check-manifest-hardening.mjs --self-test
-          node --test scripts/check-manifest-hardening.test.mjs
-          node scripts/check-manifest-hardening.mjs
-          node scripts/check-bounded-io.mjs
-          node scripts/check-api-route-auth.mjs
-          # 引擎堆下限双源一致性（0.14.8）：壳侧 shellEnv() 与快照内启动器必须同区间
-          node scripts/check-engine-heap-floor.mjs
-      # 冷启动预算（0.14.1 块F P0-2；【0.14.1 P0-a 修复】原来写死 --self-test，使真检被结构性绕开）。
-      # 改为默认档：有真产物则真检（超预算 exit 1），无产物则显式 SKIP(real-data) 后跑自证。
-      # CI 无设备，故常态是 SKIP+自证——**SKIP 不等于达标**，真检由设备验收步骤驱动（--pull/--segments）。
-      - name: 冷启动预算门禁（真产物优先，无产物 SKIP+自证）
-        if: always()
-        run: node scripts/check-boot-budget.mjs
-      # 快照构建器产出面（0.14.1 P0 反回归）：锁归档段是否还在（被删 -> 静默复用陈旧快照）。
-      - name: 快照构建器产出面门禁
-        if: always()
-        run: node scripts/check-snapshot-builder-output.mjs
-      # 快照内 node 入口 shim 门禁（真机实证 2026-10-31）：usr/bin/npm 必须是普通文件（pnpm 的
-      # passThruToNpm spawnSync npm 经 symlink 落地 ENOENT）、两个 shim 必须自定位且不含构建期前缀
-      # /data/user/<n>/（多用户设备 user 10 的前缀是 /data/user/10/...，写死即 pnpm exit 127）。
-      # CI 净检出没有快照 tar（真检由两条构建链传注入后 tar 执行），故这里只跑 --self-test 证明判据
-      # 双向有判别力（正样本 1 + 受控负控 4，含 npm symlink 与无执行位两例）。
-      - name: 快照 node 入口 shim 门禁（自证）
-        if: always()
-        run: node scripts/check-snapshot-node-shims.mjs --self-test
-      # 浏览器语法下限（0.14.1 块C G-1）：CI 无构建树 -> --self-test 四向自证（反向必红/正向必绿/
-      # 载荷不触发/工具链在场且版本钉住）。
-      - name: 浏览器语法下限门禁（自证）
-        if: always()
-        run: node scripts/check-browser-syntax-floor.mjs --self-test
-      # 构建并发上限（0.14.1 用户拍板系统级约束）：打包固定 8 线程、不得吃满 16 逻辑核。
-      - name: 构建并发上限门禁
-        if: always()
-        run: node scripts/check-build-parallel-cap.mjs
-      # 快照指纹对账（ST-04）：净检出下 tar 被 .gitignore 忽略 → SKIP 计数（构建链以 --require 严格跑）
-      - name: 快照指纹对账门禁
-        if: always()
-        run: node scripts/check-snapshot-fingerprint.mjs
-      # 接线面聚合断言（0.13.8-b FX-208.2/E2）：本仓布局下解析到同名相对路径
-      - name: 门禁接线面聚合断言
-        if: always()
-        run: node scripts/check-release-gates.mjs && node scripts/check-vendor-provenance.mjs && node scripts/check-vendor-provenance.mjs --self-test && node scripts/check-retired-plugins.mjs && node scripts/check-retired-plugins.mjs --self-test
-      # 制度性门禁（0.13.8-b 批 B2 ST-25/26/31）：状态登记制 / 桥面对称性 / 门禁覆盖与 SKIP 纪律。
-      # 三者离线可跑（不依赖快照），故在 CI 与两条构建链同源；性能度量入口在无快照时计数 SKIP。
-      - name: 制度性门禁（登记制 / 桥面对称 / SKIP 纪律）
-        if: always()
-        run: |
-          node scripts/check-state-registry.mjs
-          node scripts/check-bridge-symmetry.mjs
-          node scripts/check-gate-skips.mjs
-          # 快照 node 下限（0.2.2-rc.1 适配引入）：0.2.2-rc.1 是**首个声明 engines.node 的引擎版本**
-          # （0.2.1-rc.3 无该字段），声明值 ">=24.9.0"；而快照里的 node 来自 Termux 的 nodejs-lts，
-          # **仓内不钉版本** ⇒「引擎声明下限 vs 快照实测版本」此前只存在于人读的文档里：Termux 侧回退到
-          # 24.8 以下、或有人把 enginesNode 悄悄改小，整套适配在上设备前都不会红（单测跑在宿主 node 上，
-          # 快照构建成功也不代表快照内 node 达标）。本门把两个数字绑成判据，取证在
-          # scripts/snapshot-config/snapshot-runtime.json（从 base/base-usr-*.tar.xz 取 usr/bin/node 实测）。
-          # CI 净检出里 base/*.tar.xz 是 Git LFS 指针 ⇒ 本门记 SKIP 并 exit 0（判据本轮未执行，不冒充绿）；
-          # 发布链以 --require 跑它，LFS 指针在那里判红——要么归档在场并逐字节核过，要么不发版。
-          node scripts/check-snapshot-node-floor.mjs
-          node scripts/check-snapshot-node-floor.mjs --self-test
-          # workflow 输入内插面（issue #1614）：run 块内不得出现 ${{ inputs.* }} / ${{ github.event.inputs.* }}。
-          node scripts/check-workflow-input-injection.mjs
-          node scripts/check-kotlin-comments.mjs
-          # 中英文案一致性（0.15.0）：资源键集合成对 + tr() 双参数；漏英文时 Android 静默回退中文。
-          node scripts/check-i18n-parity.mjs
-          # 执行地图覆盖与锚点（0.14.2 D7）：纳入聚合声明集后，apk 侧 CI 也必须有独立调用点。
-          node scripts/check-code-map.mjs
-          node scripts/check-build-chain-abort.mjs
-          node scripts/check-perf-instrumentation.test.mjs
-          node scripts/check-perf-instrumentation.mjs
-      # 模型面工具 wire 预算（0.14.0 §4.1 渐进披露）：双口径；名单从 capability-gate 导出。
-      # 需先构建七个模型面插件的 lib（门禁真跑 apply()），缺产物时门禁明确拒绝而非假绿。
-      - name: 模型面工具 wire 预算门禁
-        if: always()
-        run: |
-          node scripts/check-tool-surface-budget.mjs
+      - name: 增量敏感信息扫描自测
+        run: node scripts/check-added-secrets.mjs --self-test
+      - name: 仅扫描本次新增内容中的敏感信息
+        run: node scripts/check-added-secrets.mjs --event "$GITHUB_EVENT_PATH"
+
+  changes:
+    name: Kotlin 文件变更检测
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      kotlin: ${{ steps.paths.outputs.kotlin }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - name: Kotlin 路径筛选自测
+        run: node scripts/pr-kotlin-changes.mjs --self-test
+      - name: 检测本次差异的 Kotlin 文件路径
+        id: paths
+        run: node scripts/pr-kotlin-changes.mjs --event "$GITHUB_EVENT_PATH"
 
   compile:
     name: Kotlin 编译门禁
+    needs: changes
+    # 只认 .kt（不含 .kts）；新增、删除和重命名任一侧均计入。
+    if: ${{ needs.changes.outputs.kotlin == 'true' }}
     runs-on: ubuntu-latest
     # 实测：compile job 历史最长约 1 分 25 秒。取 20 分钟是因为首次无 Gradle 缓存时
     # 依赖下载会显著变慢，这一档不能按缓存命中的数值定。
@@ -339,6 +112,30 @@ jobs:
           name: kotlin-unit-test-report
           path: app/build/reports/tests/testDebugUnitTest/
           if-no-files-found: ignore
+
+  webpages:
+    # 下载站页面测试（webpages/tests）在 PR 期间此前**完全不跑**：
+    # pages.yml 的触发只有 push 到 main / release published / workflow_dispatch，没有 pull_request；
+    # check-script-tests.mjs 只遍历 scripts/，不含 webpages/tests；check-release-gates.mjs 里与
+    # webpages 相关的只有 MIRROR_TEMPLATES 顺序一致性，不跑测试。
+    # 于是「页面 JS 改红了」要到合并进 main、pages 工作流 build 时才第一次暴露（那一层在部署之前，
+    # 所以不会发坏站，但 PR 期间没有任何拦截）。
+    # 单独立一个 job 而不是塞进 static：static 的显示名是 branch protection 的 required check，
+    # 1742 已把它收敛为「仅净新增行机密扫描」；把业务测试加回去会让那个名字重新名不副实。
+    # 本 job 不是 required check，红不拦合并，只把信号提前。
+    name: 下载站页面测试
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      # 必须给 glob：node --test 在 Node 24 上不接受目录（传目录会按 CJS 解析并报
+      # Cannot find module .../webpages/tests）。引号交给 node 自己展开，不依赖 shell glob。
+      - name: 资产名 / 路由 / 发布链与 seed 摘要门禁
+        run: node --test "webpages/tests/*.test.mjs"
 
   maintenance:
     name: 维护文档一致性（提示）

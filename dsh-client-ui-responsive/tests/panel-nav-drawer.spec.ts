@@ -98,4 +98,34 @@ describe('PanelNavDrawer：进面板时收起抽屉', () => {
     expect(h.select(null)).toBe(false)
     expect(h.collapseDrawer).toHaveBeenCalledTimes(1)
   })
+
+  it('几何判据：状态位还写着「已收起」，但抽屉右缘在视口内 —— 仍必须收起（手势拉开后的滞后）', () => {
+    setPhoneForm(true)
+    const h = harness(false)
+    const column = document.createElement('div')
+    column.className = 'x_sidebarCol'
+    h.frame.appendChild(column)
+    vi.spyOn(column, 'getBoundingClientRect').mockReturnValue({
+      width: 289, height: 800, top: 0, left: 0, right: 289, bottom: 800, x: 0, y: 0,
+      toJSON: () => ({}),
+    } as DOMRect)
+    // 状态位滞后：属性还在，但抽屉实际在屏上。
+    h.frame.setAttribute('data-sidebar-collapsed', '')
+    expect(h.select('plugins')).toBe(true)
+    expect(h.collapseDrawer).toHaveBeenCalledTimes(1)
+  })
+
+  it('几何判据：抽屉右缘已推出视口时不重复切（toggle 会把它反开）', () => {
+    setPhoneForm(true)
+    const h = harness(false)
+    const column = document.createElement('div')
+    column.className = 'x_sidebarCol'
+    h.frame.appendChild(column)
+    vi.spyOn(column, 'getBoundingClientRect').mockReturnValue({
+      width: 289, height: 800, top: 0, left: -289, right: 0, bottom: 800, x: -289, y: 0,
+      toJSON: () => ({}),
+    } as DOMRect)
+    expect(h.select('plugins')).toBe(false)
+    expect(h.collapseDrawer).not.toHaveBeenCalled()
+  })
 })

@@ -69,6 +69,8 @@ export {
   turnEndKind,
   turnEndOk,
   visibleText,
+  reasoningText,
+  reasoningSummary,
 } from './notify-projection.js'
 export type { ReportEntry, TodoProgress, TurnEndKind, TurnEndKindOrUnknown } from './notify-projection.js'
 

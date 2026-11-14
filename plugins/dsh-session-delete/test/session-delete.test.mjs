@@ -11,7 +11,7 @@ import {
   findSessionDir,
   sessionsRoot,
   sweepGraveyards,
-} from '../src/session-delete.js'
+} from '../lib/session-delete.js'
 
 const ID = 'session-12345678-1234-4abc-8def-1234567890ab'
 
@@ -85,7 +85,7 @@ test('findSessionDir resolves the single matching directory', async () => {
 })
 
 // ── host 侧编排：removeSession 用注入的 ctx 读活会话/工作区登记，再走同一个核心 ──
-import { removeSession } from '../src/index.js'
+import { removeSession } from '../lib/index.js'
 
 function fakeCtx({ live = false, activity = [], registry = {}, detach = null, waterfall = null, detachThrows = false, noDetachCapability = false } = {}) {
   const calls = []
@@ -350,12 +350,12 @@ function codeOf(relative) {
 }
 
 test('host half never calls the flush API (it requires a live session)', () => {
-  const source = codeOf('../src/index.js')
+  const source = codeOf('../lib/index.js')
   assert.equal(/\.flush\s*\(/.test(source), false, 'flush(session) requires a live session; the plugin must not call it')
 })
 
 test('client half never calls private navigation APIs (clearMain / shortcuts.find)', () => {
-  const source = codeOf('../src/client.js')
+  const source = codeOf('../lib/client.js')
   assert.equal(/clearMain/.test(source), false, 'clearMain is private upstream')
   assert.equal(/shortcuts\.find/.test(source), false, 'the Shortcuts service has no find()')
   assert.equal(/liveEntryFor/.test(source), false, 'liveEntryFor is private upstream')

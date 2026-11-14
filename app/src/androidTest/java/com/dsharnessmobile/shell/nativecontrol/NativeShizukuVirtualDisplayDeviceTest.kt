@@ -2,14 +2,16 @@ package com.dsharnessmobile.shell.nativecontrol
 
 import android.net.LocalSocket
 import android.net.LocalSocketAddress
-import android.app.ActivityOptions
 import android.app.Instrumentation
+import android.app.UiAutomation
+import android.os.ParcelFileDescriptor
 import android.content.Context
 import android.content.Intent
 import android.provider.Settings
 import android.os.SystemClock
 import androidx.test.platform.app.InstrumentationRegistry
 import com.dsharnessmobile.shell.NativeControlClickFixtureActivity
+import com.dsharnessmobile.shell.NativeControlVirtualFixtureActivity
 import com.dsharnessmobile.shell.DeviceControlService
 import com.dsharnessmobile.shell.NativeShizukuCapture
 import com.dsharnessmobile.shell.ShizukuTransport
@@ -65,7 +67,7 @@ class NativeShizukuVirtualDisplayDeviceTest {
       // 屏上先有内容（Settings），能力探测才可能测到窗口、树与坐标手势。
       val launched = VdisplayController.executeAuthorized(context, "vdLaunch", JSONObject(), alias)
       assertTrue(launched.toString(), launched.optBoolean("ok"))
-      val observed = awaitDisplays(context, displayId)
+      val observed = awaitDisplays(context, displayId, "snapshot", "screenshot", "click", "scroll")
       assertTrue("未测到该屏的能力: " + NativeShizukuFacts.shared.snapshot(), observed)
 
       NativeControlHost.openIsolated(context, facts, NativeShizukuExecution(a11y)).use { host ->
@@ -85,11 +87,10 @@ class NativeShizukuVirtualDisplayDeviceTest {
         val screen = screen(caps, alias) ?: throw AssertionError("屏未进入能力面: " + caps)
         assertEquals(displayId, screen.getInt("displayId"))
 
-        val tree = awaitTree(host, caps, screen)
+        val tree = awaitTree(context, host, caps, screen)
         assertEquals(alias, tree.getString("screenId"))
-        assertEquals(alias, tree.getJSONObject("tree").getJSONObject("target").getString("screenId"))
-        assertEquals(displayId,
-          tree.getJSONObject("tree").getJSONObject("target").getInt("displayId"))
+        assertEquals(alias, tree.getJSONObject("tree").getString("screenId"))
+        assertEquals(displayId, tree.getJSONObject("tree").getInt("displayId"))
 
         // 坐标点击：由 Shizuku input 直接带 displayId 派发，A11y 全程离线。
         val click = rpc(host, request(caps, screen, "click", "vd-click-" + System.nanoTime(),
@@ -161,13 +162,14 @@ class NativeShizukuVirtualDisplayDeviceTest {
       assertEquals("vdisplay-active", VdisplayController.create(context, dimensions).getString("code"))
       val displayId = requireNotNull(VdisplayController.displayIdForAlias(alias)) { "虚拟屏未登记" }
 
-      // 两块屏各起一个自己的窗口：真实屏哨兵在前、虚拟屏可编辑夹具在后。
-      // 哨兵输入框不可聚焦，只用来证明写入没有串到真实屏。
-      real = launch(instrumentation, context, null, "REAL-SENTINEL", editableFocus = false)
+      // Start the virtual task before the real one. Some launchers pull a new
+      // task back to display 0 while the caller already has a task there.
       virtual = launch(instrumentation, context, displayId, "初始文本", editableFocus = true)
-      awaitFocused(instrumentation, virtual)
+      real = launch(instrumentation, context, null, "REAL-SENTINEL", editableFocus = false)
+      // Some ROMs keep global window focus on display 0. The virtual adapter
+      // must still find the single editable node on the intended display.
       assertTrue("未测到该屏的焦点文本能力: " + NativeShizukuFacts.shared.snapshot(),
-        awaitDisplays(context, displayId))
+        awaitDisplays(context, displayId, "snapshot", "setText"))
 
       NativeControlHost.openIsolated(context, facts, NativeShizukuExecution(a11y)).use { host ->
         val caps = capabilities(host)
@@ -182,7 +184,7 @@ class NativeShizukuVirtualDisplayDeviceTest {
         assertEquals(displayId, screen.getInt("displayId"))
 
         // 树里确实能看到这块屏上的可编辑控件：能力不是静态声明。
-        val tree = awaitTree(host, caps, screen)
+        val tree = awaitTree(context, host, caps, screen)
         fun editable(): JSONObject {
           val nodes = tree.getJSONObject("tree").getJSONArray("nodes")
           return (0 until nodes.length()).map { nodes.getJSONObject(it) }
@@ -246,44 +248,42 @@ class NativeShizukuVirtualDisplayDeviceTest {
     assertFalse(NativeShizukuCapture.isVirtualAlias("real"))
   }
 
-  /** 起一个带可编辑输入框的夹具；displayId 非空时用 ActivityOptions 直接落到那块屏上。 */
+  /** 以 shell 启动 debug 夹具，和真实的 Shizuku 应用启动同身份。 */
   private fun launch(instrumentation: Instrumentation, context: Context, displayId: Int?,
     initial: String, editableFocus: Boolean): NativeControlClickFixtureActivity {
-    val intent = Intent(context, NativeControlClickFixtureActivity::class.java)
+    val type = if (displayId == null) NativeControlClickFixtureActivity::class.java
+      else NativeControlVirtualFixtureActivity::class.java
+    val intent = Intent(context, type)
       .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
       .putExtra(NativeControlClickFixtureActivity.EXTRA_EDITABLE_FOCUS, editableFocus)
       .putExtra(NativeControlClickFixtureActivity.EXTRA_INITIAL_TEXT, initial)
-    val options = displayId?.let {
-      // With a real-screen sentinel already running, do not ask Android to reuse that task.
-      intent.addFlags(Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
-      ActivityOptions.makeBasic().setLaunchDisplayId(it).toBundle()
-    }
-    val activity = instrumentation.startActivitySync(intent, options) as NativeControlClickFixtureActivity
-    if (displayId != null) {
-      instrumentation.runOnMainSync { assertEquals(displayId, activity.display?.displayId) }
-    }
-    return activity
-  }
-
-  /**
-   * 等这块屏的窗口真的拿到输入焦点。
-   * 焦点属于整个系统：另一块屏上的夹具可能抢走它，因此这里只等、不替调用方改焦点来源。
-   */
-  private fun awaitFocused(instrumentation: Instrumentation,
-    activity: NativeControlClickFixtureActivity) {
+    if (displayId == null) return instrumentation.startActivitySync(intent) as NativeControlClickFixtureActivity
+    val previous = NativeControlClickFixtureActivity.latest
+    val encodedText = android.util.Base64.encodeToString(initial.toByteArray(Charsets.UTF_8),
+      android.util.Base64.NO_WRAP).ifEmpty { "-" }
+    val component = intent.component!!.flattenToShortString()
+    val automation = instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_USE_ACCESSIBILITY)
+    val command = "am start --user 0 --display $displayId -W -f 0x18000000 -n $component" +
+      " --ez ${NativeControlClickFixtureActivity.EXTRA_EDITABLE_FOCUS} $editableFocus" +
+      " --es ${NativeControlClickFixtureActivity.EXTRA_INITIAL_TEXT_BASE64} $encodedText"
+    val output = ParcelFileDescriptor.AutoCloseInputStream(automation.executeShellCommand(command))
+      .bufferedReader().use { it.readText() }
+    assertFalse(output, output.contains("Error:") || output.contains("Exception"))
     val deadline = SystemClock.elapsedRealtime() + 10_000
     while (SystemClock.elapsedRealtime() < deadline) {
       instrumentation.waitForIdleSync()
-      var focused = false
-      instrumentation.runOnMainSync { focused = activity.editText.isFocused && activity.hasWindowFocus() }
-      if (focused) return
-      SystemClock.sleep(200)
+      val latest = NativeControlClickFixtureActivity.latest
+      if (latest is NativeControlVirtualFixtureActivity && latest !== previous) {
+        var actual = -1
+        instrumentation.runOnMainSync { actual = latest.display?.displayId ?: -1 }
+        assertEquals(output, displayId, actual)
+        return latest
+      }
+      SystemClock.sleep(100)
     }
-    var display = -1
-    instrumentation.runOnMainSync { display = activity.display?.displayId ?: -1 }
-    throw AssertionError("夹具输入框未拿到焦点: display=" + display +
-      " window=" + activity.hasWindowFocus())
+    throw AssertionError("虚拟屏夹具未启动: " + output)
   }
+
 
   private fun value(instrumentation: Instrumentation,
     activity: NativeControlClickFixtureActivity?): String {
@@ -337,7 +337,7 @@ class NativeShizukuVirtualDisplayDeviceTest {
       instrumentation.waitForIdleSync()
       NativeControlClickFixtureActivity.resetCounters()
       assertTrue("未测到该屏的坐标手势: " + NativeShizukuFacts.shared.snapshot(),
-        awaitDisplays(context, displayId))
+        awaitDisplays(context, displayId, "click", "longClick", "scroll", "swipe", "keyEvent"))
 
       NativeControlHost.openIsolated(context, facts, NativeShizukuExecution(a11y)).use { host ->
         val caps = capabilities(host)
@@ -364,9 +364,14 @@ class NativeShizukuVirtualDisplayDeviceTest {
         assertTrue("长按必须改变目标屏上的长按计数",
           NativeControlClickFixtureActivity.longClickCount >= 1)
 
+        val viewport = android.graphics.Rect()
+        instrumentation.runOnMainSync {
+          assertTrue(requireNotNull(activity).scroller.getGlobalVisibleRect(viewport))
+        }
         val before = NativeControlClickFixtureActivity.lastScrollY
         val scroll = rpc(host, request(caps, screen, "scroll", "vd-sfx-scroll-" + System.nanoTime(),
-          JSONObject().put("x", 240).put("y", 620).put("direction", "down").put("fraction", 0.8)))
+          JSONObject().put("x", viewport.centerX()).put("y", viewport.centerY())
+            .put("direction", "down").put("fraction", 0.3)))
         assertTrue(scroll.toString(), scroll.getBoolean("ok"))
         instrumentation.waitForIdleSync()
         assertTrue("滚动必须产生位移: before=" + before +
@@ -375,7 +380,8 @@ class NativeShizukuVirtualDisplayDeviceTest {
 
         val beforeSwipe = NativeControlClickFixtureActivity.lastScrollY
         val swipe = rpc(host, request(caps, screen, "swipe", "vd-sfx-swipe-" + System.nanoTime(),
-          JSONObject().put("x1", 400).put("y1", 760).put("x2", 60).put("y2", 320)
+          JSONObject().put("x1", viewport.centerX()).put("y1", viewport.bottom - viewport.height() / 4)
+            .put("x2", viewport.centerX() - 20).put("y2", viewport.top + viewport.height() / 4)
             .put("durationMs", 400)))
         assertTrue(swipe.toString(), swipe.getBoolean("ok"))
         instrumentation.waitForIdleSync()
@@ -428,22 +434,23 @@ class NativeShizukuVirtualDisplayDeviceTest {
   }
 
 
-  private fun awaitDisplays(context: android.content.Context, displayId: Int): Boolean {
+  private fun awaitDisplays(context: android.content.Context, displayId: Int, vararg required: String): Boolean {
     val deadline = SystemClock.elapsedRealtime() + 30_000
     while (SystemClock.elapsedRealtime() < deadline) {
       ShizukuTransport.observeNativeRealText(context)
       ShizukuTransport.observeNativeDisplays(context)
       val measured = NativeShizukuFacts.shared.measuredDisplayOperations()
-      if (measured.containsKey(displayId)) return measured.getValue(displayId).isNotEmpty()
+      if (measured[displayId]?.containsAll(required.toList()) == true) return true
       SystemClock.sleep(250)
     }
     return false
   }
 
-  private fun awaitTree(host: NativeControlHost, caps: JSONObject, screen: JSONObject): JSONObject {
+  private fun awaitTree(context: Context, host: NativeControlHost, caps: JSONObject, screen: JSONObject): JSONObject {
     val deadline = SystemClock.elapsedRealtime() + 20_000
     var last: JSONObject? = null
     while (SystemClock.elapsedRealtime() < deadline) {
+      ShizukuTransport.observeNativeDisplays(context)
       last = rpc(host, request(caps, screen, "snapshot", "vd-tree-" + System.nanoTime(), JSONObject()))
       if (last.optBoolean("ok")) return last
       SystemClock.sleep(500)

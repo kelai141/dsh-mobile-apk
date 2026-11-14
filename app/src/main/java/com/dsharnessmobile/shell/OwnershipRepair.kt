@@ -59,9 +59,13 @@ object OwnershipRepair {
       else -> target
     }
     if (Os.getuid() != 0 || Os.geteuid() != 0) return OwnershipRepairCore.rejected("requires-uid-0")
-    // Unprivileged namespace writers must not manufacture a late alias to a root-owned file.
-    // Unknown/disabled hardlink protection is not a safe platform for this repair primitive.
-    if (!protectedHardlinksEnabled()) return OwnershipRepairCore.rejected("hardlink-protection-unavailable")
+    // 本原语**不**把内核硬链接保护当作前提：OwnershipRepairCore 对每个常规文件都要求
+    // linkCount == 1，并在 fchown 前后复核 inode 与 linkCount（safeLinks / visit），而另一个 root
+    // 写者本就在信任边界之外（见类注释）。`fs.protected_hardlinks` 只是纵深防御，且在国内厂商 ROM
+    // 上常态为 0（实测 ColorOS 16 = 0）。旧实现在这里整体 rejected，等于在那些设备上把属主修复
+    // **永久禁用**：实测返回 hardlink-protection-unavailable、checked=0、1 秒退出，于是残留永远
+    // 不会被修，启动只能撞 AccessDenied 后落成 snapshot-refresh-unclassified。改为继续执行，并把
+    // 探测结果作为 hardlinkProtection 如实回报（诊断可见，判定不隐藏）。
     return OwnershipRepairCore(AndroidBackend()).repair(
       OwnershipRepairCore.Request(dataDir, relative, uid, maxEntries, timeoutMs, recursive = recursive),
     )
@@ -105,6 +109,9 @@ object OwnershipRepair {
     "reason" to result.reason,
     "error" to result.reason,
     "selinuxRelabeled" to false,
+    // false = 内核硬链接保护未开启（厂商 ROM 常态）。逐条 linkCount 判定照旧，因此这不是失败态，
+    // 但必须出现在结果里：它是「为什么同一份代码在不同设备上一个修复一个不修」的唯一线索。
+    "hardlinkProtection" to protectedHardlinksEnabled(),
   )
 
   fun toJson(result: OwnershipRepairCore.Result): JSONObject {

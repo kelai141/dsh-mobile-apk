@@ -59,6 +59,10 @@ class AndroidBridge(
   private val onGetOverlayEnabled: () -> Boolean = { false },
   /** 0.13.2 W7：悬浮球开关（未授 overlay 权限时由控制器发起系统授权引导）。返回是否已启动。 */
   private val onSetOverlayEnabled: (Boolean) -> Boolean = { _ -> false },
+  /** Settings-only v2 entry preference; independent of overlay permission/enabled state. */
+  private val onGetOverlayEntryStyle: () -> String = { "ball" },
+  /** Persist ball|strip and return the stored preference; never enables the overlay or v2 rollout. */
+  private val onSetOverlayEntryStyle: (String) -> String = { "ball" },
   /** User-owned scope for model access to real/virtual Android screens. */
   private val onGetScreenScope: () -> String = { "virtual-only" },
   private val onSetScreenScope: (String) -> String = { "virtual-only" },
@@ -457,6 +461,14 @@ class AndroidBridge(
   /** 悬浮球开关（控制器负责权限引导）；返回当前是否已启动。 */
   @JavascriptInterface
   fun setOverlayEnabled(enable: Boolean): Boolean = trusted { onSetOverlayEnabled(enable) }
+
+  /** New floating entry shape selected in application settings (ball|strip, default ball). */
+  @JavascriptInterface
+  fun getOverlayEntryStyle(): String = trusted { onGetOverlayEntryStyle() }
+
+  /** Returns the stored shape, not a claim that an overlay window is currently visible. */
+  @JavascriptInterface
+  fun setOverlayEntryStyle(style: String): String = trusted { onSetOverlayEntryStyle(style) }
 
   /** User-owned screen-access scope. Model tools never call this setter. */
   @JavascriptInterface

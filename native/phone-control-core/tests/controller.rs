@@ -1219,6 +1219,24 @@ fn recycled_allocation_invalidates_a_prepared_plan() {
 }
 
 #[test]
+fn destroyed_virtual_target_is_rejected_before_dispatch() {
+    let mut controller = controller();
+    assert_eq!(call(&mut controller, facts_with_allocation("all", json!("7")))["ok"], true);
+    let prepared = prepare(&mut controller, "before-destroy");
+    let generation = prepared["plan"]["generation"].clone();
+    let mut removed = facts_with_allocation("all", json!("7"));
+    removed["facts"]["screens"].as_object_mut().unwrap().remove("virtual-1");
+    assert_eq!(call(&mut controller, removed)["ok"], true);
+    let reply = call(&mut controller, json!({
+        "protocolVersion": PROTOCOL_VERSION, "kind": "prepare", "callId": "after-destroy",
+        "operation": "screenshot", "screenId": "virtual-1", "generation": generation,
+        "epoch": "900", "args": {}
+    }));
+    assert_eq!(reply["code"], "unknown-target", "{reply}");
+    assert_eq!(reply["executed"], "no", "{reply}");
+}
+
+#[test]
 fn allocation_identity_stays_out_of_the_wire_contract() {
     let mut controller = controller();
     assert_eq!(call(&mut controller, facts_with_allocation("all", json!("0x2a")))["ok"], true);

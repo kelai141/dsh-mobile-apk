@@ -49,6 +49,8 @@ internal object ProcIo {
     val truncated: Boolean,
     val cleanupIncomplete: Boolean = false,
     val readError: String? = null,
+    /** Natural process exit code; null after timeout or when the exit status cannot be read. */
+    val exitCode: Int? = null,
   ) {
     val timedOut: Boolean get() = exitTimedOut || drainTimedOut
     val complete: Boolean get() = !timedOut && !cleanupIncomplete && readError == null
@@ -94,8 +96,9 @@ internal object ProcIo {
     val drain = state.snapshot()
     val text = if (drain.truncated) drain.text + "\n[" + TRUNCATED_FLAG +
       ": output exceeded " + limit + " bytes]\n" else drain.text
+    val exitCode = if (wait.exitTimedOut) null else runCatching { proc.exitValue() }.getOrNull()
     return ProcResult(text, wait.exitTimedOut, wait.drainTimedOut, drain.truncated,
-      wait.cleanupIncomplete, drain.readError ?: wait.waitError)
+      wait.cleanupIncomplete, drain.readError ?: wait.waitError, exitCode)
   }
 
   internal class WaitResult(

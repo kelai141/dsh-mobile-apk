@@ -127,7 +127,7 @@ if ($LASTEXITCODE -ne 0) { Write-Host "快照指纹与声明值不一致（手�
 Write-Host "== manifest 加固门禁 =="
 node (Join-Path $Root "scripts\check-manifest-hardening.mjs") 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Host "manifest 加固校验失败，拒绝打包"; exit 1 }
-
+node (Join-Path $Root "scripts\check-input-config-changes.mjs") 2>&1; if ($LASTEXITCODE -ne 0) { Write-Host "Activity 未声明 keyboard/navigation，插拔外接键鼠会重建，拒绝打包"; exit 1 }
 # Kotlin 块注释嵌套（KDoc 里写 node_modules/** 会吞掉整个文件；dev-shell 实测）
 Write-Host "== Kotlin 注释嵌套门禁 =="
 node (Join-Path $Root "scripts\check-kotlin-comments.mjs") 2>&1
@@ -531,6 +531,12 @@ foreach ($abi in @('arm64', 'x86_64')) {
     Write-Host "== 快照 node 入口 shim 门禁（$abi）=="
     node (Join-Path $Root "scripts\check-snapshot-node-shims.mjs") $snapIn 2>&1
     if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "快照 node 入口 shim 不自定位 / usr/bin/npm 不是普通文件（多用户设备 pnpm exit 127 / npm 通道 ENOENT）"; continue }
+    # 首启脚本清单落点（#1716 回归面）：壳侧只在 usr/.dsh-shebang-scripts.txt 存在时走清单路径，
+    # 否则回落到全树遍历（慢设备实测 527 秒）。旧构建把清单写到 stage 根 + 另一个文件名，
+    # 归档里根本没有它，收益静默归零而日志照样打印「清单已生成」。
+    Write-Host "== 快照脚本清单门禁（$abi）=="
+    node (Join-Path $Root "scripts\check-shebang-manifest.mjs") $snapIn 2>&1
+    if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "快照缺 usr/.dsh-shebang-scripts.txt（首启前缀重写会回落全树遍历）"; continue }
     # 第三方许可合规（GPL 义务 A1/A2 门禁 2026-08-23）：copyleft 包许可证全文须随快照分发，
     # 矩阵须覆盖 dpkg status 全部包；缺失直接拒绝打包（--- tar 视图：9p 权限不影响判定）。
     # issue #1075：GPL 许可合规门禁。与上面 :388 同一个坑——它失败时打印「THIRD-PARTY CHECK FAILED」

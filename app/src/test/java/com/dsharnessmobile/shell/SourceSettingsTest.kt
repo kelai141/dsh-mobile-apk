@@ -19,6 +19,82 @@ import org.junit.rules.TemporaryFolder
  */
 class SourceSettingsTest {
 
+  private fun aptResult(text: String = "", exitCode: Int? = 0,
+    exitTimedOut: Boolean = false, drainTimedOut: Boolean = false,
+    truncated: Boolean = false, cleanupIncomplete: Boolean = false, readError: String? = null,
+  ) = ProcIo.ProcResult(text, exitTimedOut, drainTimedOut, truncated, cleanupIncomplete, readError, exitCode)
+
+  @Test
+  fun aptSuccessRequiresCompleteZeroExitAndCleanOutput() {
+    assertNull(SourceSettings.aptUpdateFailure(aptResult("Hit:1 https://mirror.invalid stable InRelease\nReading package lists... Done")))
+    assertNull(SourceSettings.aptUpdateFailure(aptResult()))
+    assertNull(SourceSettings.aptUpdateFailure(aptResult("W: harmless advisory\n")))
+  }
+
+  @Test
+  fun nonzeroAptExitCannotSucceedWithEmptyOrUnrecognizedOutput() {
+    for (text in listOf("", "The package lists could not be parsed or opened.")) {
+      for (english in listOf(false, true)) {
+        val failure = SourceSettings.aptUpdateFailure(aptResult(text, 100), english)
+        assertNotNull(failure)
+        assertTrue(failure!!.contains("100"))
+        assertFalse("判据不能预先声称回滚成功", failure.contains("已回滚") || failure.contains("restored"))
+      }
+    }
+  }
+
+  @Test
+  fun everyIncompleteAptResultFailsEvenWithoutFailureMarkers() {
+    val incomplete = listOf(
+      aptResult(readError = "IOException: controlled pipe read failure"),
+      aptResult(cleanupIncomplete = true),
+      aptResult(exitTimedOut = true),
+      aptResult(drainTimedOut = true),
+      aptResult(truncated = true),
+      aptResult(exitCode = null),
+    )
+    for (result in incomplete) {
+      val zh = SourceSettings.aptUpdateFailure(result, false)
+      val en = SourceSettings.aptUpdateFailure(result, true)
+      assertNotNull(zh)
+      assertNotNull(en)
+      assertTrue("中英文都必须有独立文案", zh != en)
+    }
+  }
+
+  @Test
+  fun zeroExitStillRejectsGenericAptErrorsAndPartialIndexFailures() {
+    for (text in listOf(
+      "E: The package lists or status file could not be parsed or opened.",
+      "Hit:1 https://mirror.invalid stable InRelease\n  E: unexpected index failure\n",
+      "W: Failed to fetch https://mirror.invalid/Packages",
+      "Some index files failed to download",
+      "Could not handshake",
+      "does not have a Release file",
+      "Could not get lock",
+    )) assertNotNull(text, SourceSettings.aptUpdateFailure(aptResult(text)))
+  }
+
+  @Test
+  fun actualFailedChildProcessCannotBecomeSuccessfulSourceRefresh() {
+    val windows = System.getProperty("os.name").orEmpty().lowercase().contains("win")
+    val proc = (if (windows) ProcessBuilder("cmd.exe", "/c", "exit /b 42")
+      else ProcessBuilder("/bin/sh", "-c", "exit 42")).redirectErrorStream(true).start()
+    val result = ProcIo.readBounded(proc, 10)
+    assertEquals(42, result.exitCode)
+    assertNotNull(SourceSettings.aptUpdateFailure(result))
+  }
+
+  @Test
+  fun negativeControlOldMarkerOnlyRuleAcceptedReadFailureAndUnrecognizedNonzeroExit() {
+    // These marker-free inputs were both successful under the previous text-only rule.
+    for (result in listOf(aptResult(readError = "controlled read failure"), aptResult(exitCode = 42))) {
+      assertFalse(result.timedOut)
+      assertEquals("", result.text)
+      assertNotNull("新判据必须拒绝旧规则会误报成功的结果", SourceSettings.aptUpdateFailure(result))
+    }
+  }
+
   @get:Rule
   val temp = TemporaryFolder()
 

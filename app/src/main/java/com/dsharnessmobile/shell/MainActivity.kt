@@ -32,6 +32,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.NotificationCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.webkit.WebViewCompat
@@ -78,6 +79,8 @@ class MainActivity : ComponentActivity() {
   private var webSystemBottomInset = 0
   private var webSystemTopInset = 0
   private var webImeBottomInset = 0
+  /** 上一次投递给页面的 composer 位移高度（CSS px），用于动画期逐帧推送去重。 */
+  private var lastComposerImeCssPx = -1
   /** apk #182-2：横屏 + 侧边挖孔（short edge = 左右）时页面需要左右 inset 才能避让。 */
   private var webSystemLeftInset = 0
   private var webSystemRightInset = 0
@@ -104,6 +107,9 @@ class MainActivity : ComponentActivity() {
   @Volatile private var initialAuthRecoveryPending = false
   private val initialAuthRecoveryInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
   internal val pageUiActive: Boolean get() = pageRecovery.foreground && !pageRecovery.rendererGone && !isFinishing && !isDestroyed
+  // Overlay RPC is allowed while backgrounded, never before readiness or after renderer/activity teardown.
+  private var overlayDocumentReady = false
+  private val overlayPageReady: Boolean get() = webViewReady && overlayDocumentReady && !pageRecovery.rendererGone && !isFinishing && !isDestroyed
   internal val webViewReady: Boolean get() = ::webView.isInitialized && !pageRecovery.rendererGone
   internal val guideViewReady: Boolean get() = ::guideView.isInitialized
 
@@ -553,6 +559,7 @@ class MainActivity : ComponentActivity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    OverlayHostVisibility.install(application)
     // 性能审计 #6：冷启动细分段基准。开发者调试开关关闭时本行只读一次已缓存的布尔值，
     // 不取时刻、不碰磁盘（见 BootPhaseTrace 头注「有界性」）。
     //
@@ -727,6 +734,39 @@ class MainActivity : ComponentActivity() {
       insets
     }
     ViewCompat.requestApplyInsets(root)
+    // 键盘**弹出**动画期间逐帧推 IME 高度。
+    // setOnApplyWindowInsetsListener 拿到的 IME inset 是跳变的：动画进行中它保持旧值，
+    // 动画走完才一次性归零/到位，卡片因此总是慢半拍才吸上去。onProgress 提供的是插值，
+    // 每帧一次，卡片就能跟着键盘一起走。收起方向另有 focusout 兜底（见 ComposerImeOffset）。
+    ViewCompat.setWindowInsetsAnimationCallback(
+      root,
+      object : WindowInsetsAnimationCompat.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+        override fun onStart(
+          animation: WindowInsetsAnimationCompat,
+          bounds: WindowInsetsAnimationCompat.BoundsCompat,
+        ): WindowInsetsAnimationCompat.BoundsCompat {
+          if (animation.typeMask and WindowInsetsCompat.Type.ime() != 0) {
+            // 动画一开头就按**终点**推一次，卡片立刻贴到位。
+            // 之前把推送放在 onEnd，等于让卡片白等一整个键盘动画时长才动。
+            // upperBound 是 androidx 的 Insets（物理 px），目标高度直接取 .bottom。
+            pushComposerImePx(bounds.upperBound.bottom)
+          }
+          return bounds
+        }
+
+        override fun onProgress(
+          insets: WindowInsetsCompat,
+          runningAnimations: MutableList<WindowInsetsAnimationCompat>,
+        ): WindowInsetsCompat = insets
+
+        override fun onEnd(animation: WindowInsetsAnimationCompat) {
+          if (animation.typeMask and WindowInsetsCompat.Type.ime() == 0) return
+          // 动画落定后补推一次终值，防 onStart 的 upperBound 与最终 insets 有差。
+          val settled = ViewCompat.getRootWindowInsets(root)
+          pushComposerImePx(settled?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0)
+        }
+      },
+    )
     configureWebView()
     // §2.4（0.14.1 块C）：内核版本必须在**首启路径**上落盘，不只进诊断包——老设备白屏时
     // 页面根本跑不起来，用户拿不到版本就无法自助；落 boot-diag.log 后 `run-as cat` 即可取。
@@ -961,6 +1001,23 @@ class MainActivity : ComponentActivity() {
         }
       }
     }
+    // v2 页面宿主 API 求值器（design.md §6.2 N3/N4）：原生按需单次求值 window.__dshOverlayHost.*，
+    // 取会话/工作区/命令真源。只在主线程、只在页面就绪时求值；未就绪回 null，调用方走降级分支。
+    OverlayPageHost.readiness = { overlayPageReady }
+    OverlayPageHost.evaluator = { expr, callback ->
+      runOnUiThread {
+        try {
+          if (overlayPageReady) {
+            webView.evaluateJavascript(expr) { raw -> callback(raw) }
+          } else {
+            callback(null)
+          }
+        } catch (_: Exception) {
+          callback(null)
+        }
+      }
+    }
+    // 本体回到前台：悬浮入口隐藏（服务与后台 Agent 不停，overlay v2 的 onHostForeground 收口）。
     // 0.13.2 W7 + ST-02：悬浮球开关已开且权限在场时补启。权限缺失时 OverlayController 把偏好
     // 回落 false，本行随即短路——不再每次回前台弹系统页。
     // S2-17：另外结算「用户已经表达过开启意图、刚去系统页授了权」这一笔——旧实现里这条路径
@@ -1060,6 +1117,7 @@ class MainActivity : ComponentActivity() {
   }
 
   override fun onPause() {
+    // 本体退到后台：悬浮入口恢复（v2 只动窗口，服务与 Agent 不受影响）。
     // 退后台不继续解码视频（省电、避免后台播放）；回前台且仍在等引擎时续播。
     splashOverlay?.pause()
     pageRecovery.pause()
@@ -1141,6 +1199,9 @@ class MainActivity : ComponentActivity() {
     if (::webView.isInitialized && webViewRef === webView) webViewRef = null
     // 悬浮球避让帧消费者清除（Service 侧持有引用，避免 Activity 泄漏）
     OverlayService.frameConsumer = null
+    // v2 页面宿主求值器同理：持着本 Activity 的 WebView，不清就是一条泄漏引用。
+    OverlayPageHost.evaluator = null
+    OverlayPageHost.readiness = null
     dirPickerController.cancelTtl()
     guideRenderer.cancelPulse()
     // 兜底释放：Activity 销毁时清掉可能仍持有的屏幕常亮锁。
@@ -1251,6 +1312,23 @@ class MainActivity : ComponentActivity() {
    * language the shell never applied. The script reads the shell preference on
    * every document, so the reload after a switch is enough to converge.
    */
+  /**
+   * 安装内核能力垫片（见 [WebViewPolyfill]）。
+   *
+   * 与 locale bootstrap 同一机制（document-start），但**必须排在它之前**：
+   * 垫片是页面能不能跑起来的前提，其它注入都建立在「页面活着」之上。
+   *
+   * 内核不支持 DOCUMENT_START_SCRIPT 时发可见告警而不是静默跳过 —— 那种情况下
+   * 页面会在模块求值期直接崩，得让人能立刻把「引擎离线」指回内核版本。
+   */
+  private fun installWebViewPolyfills() {
+    try {
+      WebViewCompat.addDocumentStartJavaScript(webView, WebViewPolyfill.SCRIPT, setOf("*"))
+    } catch (t: Throwable) {
+      Log.w(WebViewPolyfill.TAG, "WARNING: WebView polyfills NOT installed; page may crash on missing URL.canParse: " + t.message)
+    }
+  }
+
   private fun installLocaleBootstrap() {
     try {
       val script = AppLanguage.bootstrapScript(AppLanguage.mode(this), AppLanguage.systemLanguages(this))
@@ -1333,6 +1411,9 @@ class MainActivity : ComponentActivity() {
     // 版本敏感设置全部走 WebViewShim（单面真源）；引擎页吃共享 baseline 档。
     // 0.13.3：textZoom 持久化退役（D6 收益省略）——上游 ui-theme fontSize 原生管内容字号。
     WebViewShim.applyBaseline(webView.settings, appOwnsTheme = true)
+    // 内核能力垫片必须最先注入：引擎 bundle 在模块求值期就会调用 URL.canParse，
+    // 晚一步整块 entry 就崩（设备实测 WebView 110 + "URL.canParse is not a function"）。
+    installWebViewPolyfills()
     // Locale bootstrap: dsh reads its preference through __DSH_LOCALE__ inside
     // the page. Inject it before the first load so the engine UI and the shell
     // agree on the language from the first frame.
@@ -1472,6 +1553,7 @@ class MainActivity : ComponentActivity() {
         // 新文档：上一文档的层栈信号作废（页面插件在新文档里重新推）。
         if (isEngineSource(url)) backGateState.onPageStarted()
         // 新文档＝还没有任何像素：露出请求若已发生，回到「透明等首帧」状态（#242）。
+        overlayDocumentReady = false
         if (isEngineSource(url)) webFrameCommitted = false
       }
 
@@ -1539,7 +1621,12 @@ class MainActivity : ComponentActivity() {
         val text = message?.message() ?: return false
         return try {
           when {
+            text == "[dsh-overlay-state-changed]" && isEngineSource(trustedTopFrameUrl) && isEngineSource(message.sourceId()) -> {
+              runOnUiThread { OverlayService.instance?.v2?.onPageStateInvalidated() }
+              true
+            }
             LogCollector.isPageReadyMessage(text) -> {
+              overlayDocumentReady = true
               pageRecovery.pageReady()
               engineFlow.onPageReadyReported(text)
               onSplashPageReady()
@@ -1655,6 +1742,7 @@ class MainActivity : ComponentActivity() {
           // 常驻浮层面板的固定文案也只在创建时读过 t(...)，不重设就永远停在上一次的语言
           //（真机缺陷 2026-10-29：切英文后「隐藏 / 查看汇报」仍是中文）。
           runCatching { OverlayService.instance?.panel?.applyLanguage() }
+          runCatching { OverlayService.instance?.v2?.onLanguageChanged() }
           stored
         },
         onSettingsPathRequest = { engineManager.settingsDocumentPath() },
@@ -1705,6 +1793,16 @@ class MainActivity : ComponentActivity() {
         // 0.13.2 W7：悬浮球开关（控制器处理 overlay 权限引导；onResume 补启已授权的开关）。
         onGetOverlayEnabled = { OverlayController.isEnabled(this) },
         onSetOverlayEnabled = { enable -> OverlayController.setEnabled(this, enable) },
+        // Settings own explicit shape selection; keep the existing preference and rollout flag.
+        onGetOverlayEntryStyle = { OverlayV2.entryStyle(this) },
+        onSetOverlayEntryStyle = { requested ->
+          if (requested == OverlayV2.STYLE_BALL || requested == OverlayV2.STYLE_STRIP) {
+            OverlayV2.prefs(this).edit().putString(OverlayV2.KEY_ENTRY_STYLE, requested).apply()
+            // JavascriptInterface callbacks are not on the UI thread; only v2 owns its windows.
+            runOnUiThread { OverlayService.instance?.v2?.onEntryStyleChanged() }
+          }
+          OverlayV2.entryStyle(this)
+        },
         // 0.14：开放屏幕范围由用户设置面独占写入；默认 virtual-only，模型工具只读并由壳侧执行面强制。
         onGetScreenScope = { ScreenScopePrefs.current(this).wire },
         onSetScreenScope = { raw -> ScreenScopePrefs.set(this, raw).wire },
@@ -2056,7 +2154,7 @@ class MainActivity : ComponentActivity() {
   private fun pushWebInsets(view: WebView = webView) {
     if (!pageUiActive || view !== webView) return
     try {
-      view.evaluateJavascript(
+      val insetsScript =
         "(function(){var root=document.documentElement;if(!root)return;var top='" + webSystemTopInset +
           "px';var system='" + webSystemBottomInset +
           "px';var navbar='" + webNavBarBottomInset +
@@ -2069,11 +2167,39 @@ class MainActivity : ComponentActivity() {
           "'--dsh-android-navbar-bottom',navbar);root.style.setProperty('--dsh-android-ime-bottom',ime);" +
           "root.style.setProperty('--dsh-android-system-left',left);" +
           "root.style.setProperty('--dsh-android-system-right',right);" +
-          "})()",
-        null,
-      )
+          "})()"
+      // #197 机制① 的真机残留：`webView.setPadding` 改的是 View 的 padding，不改
+      // WebView 的 CSS 布局视口——IME 弹出时 innerHeight / visualViewport /
+      // VirtualKeyboard 三者全部恒定（0.14.11 真机实测 873 / 873 / 0），页面拿不到
+      // 任何键盘信号；而 `--dsh-android-ime-bottom` 只有虚拟屏键条在消费，主界面没有
+      // 消费者。壳侧已知道 IME 高度，就直接把 composer 抬到键盘上沿，别指望页面自己让位。
+      // 与上面的变量推送合成一次 IPC：insets 变化时 WebView 侧只排一次队列。
+      // composer 位移每次照推：onStart 已经按终点推过一次，这里同值会被去重跳过；
+      // 不能再拿「动画进行中」当抑制条件——那是靠 onEnd 复位的，而系统取消动画时
+      // onEnd 不会触发，标志会永远卡住，卡片从此再也回不来。
+      lastComposerImeCssPx = webImeBottomInset
+      view.evaluateJavascript(insetsScript + ";" + ComposerImeOffset.script(webImeBottomInset), null)
     } catch (_: Exception) {
       // 页面/WebView 尚未就绪：onPageFinished 会补推当前缓存值。
+    }
+  }
+
+  /**
+   * 键盘动画期间逐帧推送 composer 位移。
+   *
+   * `setOnApplyWindowInsetsListener` 收到的 IME inset 是跳变的（动画走完才到位），
+   * 只靠它卡片会慢半拍。`WindowInsetsAnimationCompat.Callback.onProgress` 给的是插值，
+   * 每帧一次；相同高度不重复投递，一帧键盘动画通常只有十几帧真正变化。
+   */
+  private fun pushComposerImePx(imePhysicalPx: Int) {
+    if (!pageUiActive || !webViewReady) return
+    val css = pxToCssPx(imePhysicalPx, resources.displayMetrics.density)
+    if (css == lastComposerImeCssPx) return
+    lastComposerImeCssPx = css
+    try {
+      webView.evaluateJavascript(ComposerImeOffset.script(css), null)
+    } catch (_: Exception) {
+      // 页面尚未就绪：动画结束后的 insets 回调会补推终值。
     }
   }
 

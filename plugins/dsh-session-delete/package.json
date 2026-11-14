@@ -12,7 +12,7 @@
   },
   "scripts": {
     "build": "node build.mjs",
-    "test": "node --test test/*.test.mjs"
+    "test": "npm run build && node --test test/*.test.mjs"
   },
   "license": "MIT",
   "dsh": {

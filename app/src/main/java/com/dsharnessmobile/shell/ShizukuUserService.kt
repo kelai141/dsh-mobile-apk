@@ -487,8 +487,8 @@ class ShizukuUserServiceBridge() : ShizukuUserService.Stub() {
     val nodes = if (tree != 0 && NativeShizukuNode.available(displayId)) 4 else 0
     val capture = if (NativeShizukuCapture.available(displayId, alias,
       android.os.SystemClock.elapsedRealtime() + 2_000L)) 8 else 0
-    // 坐标手势只在「这块屏确实能看到」时才发：看不见的屏即使 input 存在也无从确认落点。
-    val gestures = if ((tree != 0 || text != 0) &&
+    // 截图和 UI 树都是有效的坐标来源。游戏等自绘界面没有树时仍可用截图点按。
+    val gestures = if ((capture != 0 || tree != 0 || text != 0) &&
       com.dsharnessmobile.shell.nativecontrol.NativeShizukuMotion.gesturesAvailable()) 16 else 0
     return text or tree or nodes or capture or gestures
   }

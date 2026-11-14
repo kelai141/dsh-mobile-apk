@@ -432,8 +432,8 @@
         "7",
         "11529215046816944610"
       ],
-      "expect": "deny-uncertified-target",
-      "why": "bash/dash 都接受 $'…' 并把它当普通词；实测 `$'screencap' -p …` 会执行。词首判据要把 `$` 与紧随的引号一起看作命令词。"
+      "expect": "deny-unparsed",
+      "why": "#1610：ANSI-C 引号的执行词可能经过转义解码；未实现展开时统一 fail-closed。"
     },
     {
       "name": "对照 参数位置的引号仍在抹掉（防误拦回归）",
@@ -1546,14 +1546,14 @@
       "why": "真机实测展开为 screencap（RC=0，出图 2857999 B 与对照同字节）；`$` 前面还有普通字符 ⇒ 词内拼接。"
     },
     {
-      "name": "S-18e 对照 词首 ANSI-C 引号（$'screencap'）仍走原判据",
+      "name": "S-18e 词首 ANSI-C 引号同样 fail-closed",
       "command": "$'screencap' -p /sdcard/real.png",
       "ownedTargets": [
         "7",
         "11529215046816944610"
       ],
-      "expect": "deny-uncertified-target",
-      "why": "与 S-18d 成对：`$` 在词首属正常语法，应保持既有 quote removal 语义而非退化成 deny-unparsed。"
+      "expect": "deny-unparsed",
+      "why": "#1610：ANSI-C 引号的执行词可能经过转义解码；未实现展开时统一 fail-closed。"
     },
     {
       "name": "S-18f 反斜杠续行拼接命令名（scr\\<换行>eencap）必须判拒",
@@ -2044,6 +2044,96 @@
       ],
       "expect": "allow",
       "why": "双向判据：既有放行面不得回归。"
+    },
+    {
+      "name": "#1610 十六进制转义命令名",
+      "command": "$'\\x73creencap' -p /sdcard/real.png",
+      "ownedTargets": [
+        "7"
+      ],
+      "expect": "deny-unparsed",
+      "why": "命令位置的 ANSI-C/本地化展开不受静态词面认证；参数位置及可证明的普通命令保持原有行为。"
+    },
+    {
+      "name": "#1610 八进制转义命令名",
+      "command": "$'\\163creencap' -p /sdcard/real.png",
+      "ownedTargets": [
+        "7"
+      ],
+      "expect": "deny-unparsed",
+      "why": "命令位置的 ANSI-C/本地化展开不受静态词面认证；参数位置及可证明的普通命令保持原有行为。"
+    },
+    {
+      "name": "#1610 全转义命令名",
+      "command": "$'\\x73\\x63\\x72\\x65\\x65\\x6e\\x63\\x61\\x70' -p /sdcard/real.png",
+      "ownedTargets": [
+        "7"
+      ],
+      "expect": "deny-unparsed",
+      "why": "命令位置的 ANSI-C/本地化展开不受静态词面认证；参数位置及可证明的普通命令保持原有行为。"
+    },
+    {
+      "name": "#1610 转义绝对路径",
+      "command": "$'/system/bin/\\x73creencap' -p /sdcard/real.png",
+      "ownedTargets": [
+        "7"
+      ],
+      "expect": "deny-unparsed",
+      "why": "命令位置的 ANSI-C/本地化展开不受静态词面认证；参数位置及可证明的普通命令保持原有行为。"
+    },
+    {
+      "name": "#1610 虚拟屏参数不能认证未展开的命令名",
+      "command": "$'\\x73creencap' -d 7 -p /sdcard/virtual.png",
+      "ownedTargets": [
+        "7"
+      ],
+      "expect": "deny-unparsed",
+      "why": "命令位置的 ANSI-C/本地化展开不受静态词面认证；参数位置及可证明的普通命令保持原有行为。"
+    },
+    {
+      "name": "#1610 本地化命令名",
+      "command": "$\"screencap\" -p /sdcard/real.png",
+      "ownedTargets": [
+        "7"
+      ],
+      "expect": "deny-unparsed",
+      "why": "命令位置的 ANSI-C/本地化展开不受静态词面认证；参数位置及可证明的普通命令保持原有行为。"
+    },
+    {
+      "name": "#1610 嵌套 shell 的转义命令名",
+      "command": "sh -c \"$'\\x73creencap' -p /sdcard/real.png\"",
+      "ownedTargets": [
+        "7"
+      ],
+      "expect": "deny-unparsed",
+      "why": "命令位置的 ANSI-C/本地化展开不受静态词面认证；参数位置及可证明的普通命令保持原有行为。"
+    },
+    {
+      "name": "#1610 对照 ANSI-C 引号参数",
+      "command": "echo $'\\x73creencap'",
+      "ownedTargets": [
+        "7"
+      ],
+      "expect": "allow",
+      "why": "命令位置的 ANSI-C/本地化展开不受静态词面认证；参数位置及可证明的普通命令保持原有行为。"
+    },
+    {
+      "name": "#1610 对照本地化参数",
+      "command": "echo $\"screencap\"",
+      "ownedTargets": [
+        "7"
+      ],
+      "expect": "allow",
+      "why": "命令位置的 ANSI-C/本地化展开不受静态词面认证；参数位置及可证明的普通命令保持原有行为。"
+    },
+    {
+      "name": "#1610 对照静态虚拟屏命令",
+      "command": "screencap -d 7 -p /sdcard/virtual.png",
+      "ownedTargets": [
+        "7"
+      ],
+      "expect": "allow",
+      "why": "命令位置的 ANSI-C/本地化展开不受静态词面认证；参数位置及可证明的普通命令保持原有行为。"
     }
   ]
 }

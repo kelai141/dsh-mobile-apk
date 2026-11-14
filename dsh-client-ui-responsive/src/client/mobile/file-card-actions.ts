@@ -74,6 +74,20 @@ const MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
   pdf: 'application/pdf',
   zip: 'application/zip',
   apk: 'application/vnd.android.package-archive',
+  mp3: 'audio/mpeg',
+  m4a: 'audio/mp4',
+  aac: 'audio/aac',
+  wav: 'audio/wav',
+  flac: 'audio/flac',
+  ogg: 'audio/ogg',
+  oga: 'audio/ogg',
+  opus: 'audio/ogg',
+  amr: 'audio/amr',
+  aif: 'audio/aiff',
+  aiff: 'audio/aiff',
+  mid: 'audio/midi',
+  midi: 'audio/midi',
+  wma: 'audio/x-ms-wma',
 }
 
 /**
@@ -162,6 +176,16 @@ function extensionOf(path: string): string {
  */
 export function mimeOf(path: string): string {
   return MIME_BY_EXTENSION[extensionOf(path)] ?? ''
+}
+
+/** Open one device file through the existing shell chooser; read the bridge at the gesture. */
+export function openExternalFile(bridge: FileCardBridge, path: string): CardBridgeResult {
+  if (typeof bridge.openFileExternal !== 'function') return { ok: false, reason: 'unavailable' }
+  try {
+    return readAnswer(bridge.openFileExternal(path, mimeOf(path)))
+  } catch {
+    return { ok: false, reason: 'bridge-error' }
+  }
 }
 
 /** 文件名（末段），用于无障碍文案。 */
@@ -540,9 +564,7 @@ export class FileCardCapsule {
       if (typeof call !== 'function') return { ok: false, reason: 'unavailable' }
       return readAnswer(this.safely(() => call(path, mime)))
     }
-    const call = bridge.openFileExternal
-    if (typeof call !== 'function') return { ok: false, reason: 'unavailable' }
-    return readAnswer(this.safely(() => call(path, mime)))
+    return openExternalFile(bridge, path)
   }
 
   /** 桥抛异常时按失败返回，不让异常穿过 DOM 事件。 */

@@ -1196,7 +1196,7 @@ impl<J: Journal> Controller<J> {
             ),
             TargetRequest::Virtual(alias) => {
                 let binding = self.policy.screen(alias).ok_or_else(|| {
-                    error_json("unknown-target", format!("screen {alias} is not registered"), Some(alias))
+                    rejection_json("unknown-target", format!("screen {alias} is not registered"), Some(alias))
                 })?;
                 (TargetRequest::Virtual(alias.clone()), Some(binding.generation))
             }

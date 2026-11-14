@@ -23,10 +23,13 @@ import android.widget.TextView
  *
  * 默认不抢焦点，保持既有真实屏用例语义；只有显式带 [EXTRA_EDITABLE_FOCUS] 时才让输入框可聚焦。
  */
-class NativeControlClickFixtureActivity : Activity() {
+open class NativeControlClickFixtureActivity : Activity() {
   companion object {
     const val EXTRA_EDITABLE_FOCUS = "dsh.fixture.editableFocus"
     const val EXTRA_INITIAL_TEXT = "dsh.fixture.initialText"
+    const val EXTRA_INITIAL_TEXT_BASE64 = "dsh.fixture.initialTextBase64"
+    @Volatile var latest: NativeControlClickFixtureActivity? = null
+      private set
 
     /** 只在本进程内使用的观测计数（测试与夹具同进程）。 */
     @Volatile var clickCount = 0
@@ -79,7 +82,12 @@ class NativeControlClickFixtureActivity : Activity() {
       isFocusableInTouchMode = editableRequested
       showSoftInputOnFocus = false
     }
-    intent?.getStringExtra(EXTRA_INITIAL_TEXT)?.let { editText.setText(it) }
+    val encodedText = intent?.getStringExtra(EXTRA_INITIAL_TEXT_BASE64)
+    val initialText = if (encodedText != null && encodedText != "-") {
+      runCatching { String(android.util.Base64.decode(encodedText, android.util.Base64.DEFAULT), Charsets.UTF_8) }
+        .getOrNull()
+    } else intent?.getStringExtra(EXTRA_INITIAL_TEXT)
+    initialText?.let { editText.setText(it) }
     // 足够长的内容，滚动一定有位移；把 scrollY 暴露出来供判据读取。
     val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
     for (index in 0 until 60) {
@@ -103,6 +111,16 @@ class NativeControlClickFixtureActivity : Activity() {
     setContentView(container)
   }
 
+  override fun onResume() {
+    super.onResume()
+    latest = this
+  }
+
+  override fun onDestroy() {
+    if (latest === this) latest = null
+    super.onDestroy()
+  }
+
   @Deprecated("Debug fixture observes back on whichever display hosts it")
   override fun onBackPressed() {
     backCount += 1
@@ -113,3 +131,6 @@ class NativeControlClickFixtureActivity : Activity() {
     if (hasFocus && editableRequested) editText.requestFocus()
   }
 }
+
+/** A distinct task avoids Android reusing the real-screen sentinel when starting the virtual fixture. */
+class NativeControlVirtualFixtureActivity : NativeControlClickFixtureActivity()

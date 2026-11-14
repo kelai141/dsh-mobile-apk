@@ -3,6 +3,23 @@
 > 更新：2026-10-07。目标 0.14.5；0.14.4 是旧包与反馈基线。源码有改动不等于新包已验收。
 > 当前自主开发与模拟器验收已获用户授权；远程推送、PR、合并和发版仍需最终授权。历史版本的“外测由别人做”不适用于本轮。
 
+## 悬浮交互 Phase 2（2026-11-13续工，CURRENT VERIFICATION PENDING）
+
+本节区分“已读到源码”与“通过验收”，不豁免最新需求；[用户基线](<docs/overlay-refactor-2026-11/user-baseline.md>)高于[历史交接](<docs/overlay-refactor-2026-11/handoff-phase2.md>)。当前实施见[续工交接](<docs/overlay-refactor-2026-11/handoff-phase2-continued.md>)；历史证据保留，最新结果仅由lead的[测试报告](<docs/overlay-refactor-2026-11/test-report-phase2.md>)维护。不得从单测/编译/安装推出L3三层通过。
+
+| 项 | 当前源码事实 | 未验收边界 |
+|---|---|---|
+| 独立sheet/浮动输入 | DRAWER覆盖COMPOSER不避让；workspace/session各自稳定root/有界WM窗，无fullwidth pillRow；API33主根可见surface union按layout/scroll更新，非逐帧；普通空白只收底部 | 屏幕几何不变时sheet前后composer frame一致、chips随IME、下层透传/两向任务待验；API26–32主根answer/attachments等额外透明间隙未由API33 helper解决，不能称全API无隐形热区 |
+| picker同View原稿 | 原flags/alpha交互租约，让系统焦点触摸且降低opacity；不hide/remove/show或setText；空sid拒绝取件不隐式create，outside早返回、picker配置只禁重建，旋转可同View安全reflow | 失败回滚/同View恢复/精确request/迟到与取消/三类picker/相机遮挡需当前反证与设备；借用期间style/visual-config可能待后续生命周期收敛，不能称已修或无风险 |
+| 历史/Markdown/工具 | 公开eventSource投影user/assistant/tool，工具按真实call身份配对；40行/字段/完整UTF8 JSON预算、Kotlin复验，native spans安全渲染assistant；user/tool literal、稳定row/滚动锚；顶部多余按钮已移除 | 真实idle/流式/重开/切sid/并发工具与长内容、恶意内容惰性显示、滚动锚不抢底需三层；不是完整历史无限加载器 |
+| motion/长胶囊/边滑 | OverlayMotion距离纯数学+provisional配置；card固定root跟手绘制，终态交接长pill；顶缘宽容fade/不足回弹联动收底部；对称球到边arm/继续侧滑收条/内拉复球，设置桥同偏好 | 连贯性/慢拖停顿/CANCEL/单DOWN推顶/双侧触区/系统手势冲突/动态关动画须设备；不再以旧16dp/500dp/s或新DOWN判据冒充当前验收；参数未获产品确认 |
+| 视觉重叠/现代Region与旧fallback | 旧双文字由MorphVisual分阶段修；实色面后设备仍透Gallery，lead确证WMS把NOT_TOUCHABLE alpha1请求强制cap至.80。当前API33 Card真实圆角Region成功则不加NOT_TOUCHABLE，false才fallback；sheet cover最小高度+40%上限防半截chips，picker.15独立不变 | 新代码待当前包前后图，不把前次“alpha1已好”或SCOPED_PASS当通过。API26–32/region失败fallback的系统cap/透底限制未解决；现代Region变化触发框架内部traversal、性能待测；composer Region空隙与跨UID触摸仍须实际反证 |
+| 设置形态桥 | trusted get/setOverlayEntryStyle复用entry_style，精确ball/strip，非法不写、写后读回；中英设置项邻原开关，不启用v2 | getter/setter对称性及拒写反证要保持；设置前后台/取件期间改变、无桥兼容与真实应用结果需验 |
+| 事务/F19/回滚 | cachedV2 UI-only suspend/resume保业务；type/rpcId+literal ok/accepted，UNKNOWN只读原request正证不重发；答案与message草稿隔离、完整form/审批二步保留 | 旧测试数字按原输入历史保留，不自动覆盖最新包；create未知/发送未知不能重复创建/发送，跨层恢复要当前证据 |
+| 附件/命令/状态 | 无RAF serialize→exact Session.prompt固定UUID，draft-ready只草稿成功；官方menu ready/hit/rev/generation守卫、handedOff非handler完成；watchState按card/pill/composer可见订阅，真实缩略图有界 | 三取件/附件真实送达/UNKNOWN恢复/拒绝引用恢复、目录及workspace真值/退订仍需验，不以carrier ok=false当业务拒绝或HTTP200当受理 |
+| 前台/光环/旧兼容 | 应用级resumed集合排除透明代理；v2未建光环，旧回滚保留；旧召回与作答面另由服务持有 | Main/Console/Repair切换/前后台恢复/服务不间断、细条触区/旧召回兼容未有当前完整证据；光环缺席不能当授权删除 |
+| debug与最终产物/性能 | 只读debug快照有View身份/flags/alpha、节点bounds/草稿选区/refs用于前后比对；无发布候选 | 最新APK装机与两向三层、帧时/CPU/PSS/长稳、低API/字号/导航/关动画、同源双ABI和arm64补验均由lead取证；快照初始化不等于最新APK已装，不称功能/性能完成 |
+
 ## 当前入口
 
 - 协调仓 `docs/REFACTOR-2026-10-05.md` 是本轮唯一活动计划、Issue Ledger 与事实账；子仓地图从 [AGENTS.md](../../AGENTS.md) 进入。

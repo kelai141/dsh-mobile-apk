@@ -2,12 +2,12 @@
 // 这些分支此前只靠 curl 手工验证，回归没有覆盖。
 import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
-import { mkdir, mkdtemp, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { apply, removeSession } from '../src/index.js'
-import { quarantineStoredSession } from '../src/session-delete.js'
+import { apply, removeSession } from '../lib/index.js'
+import { findQuarantinedDirs, quarantineStoredSession, sessionsRoot } from '../lib/session-delete.js'
 
 // apply() 注册路由前会对 DSH_HOME 跑一次 graveyard 清扫（best-effort）。
 // 测试进程必须把它钉在临时目录上：否则开发机上真实 ~/.dsh/sessions 里若有
@@ -216,4 +216,46 @@ test('其他错误码的回包不带 paths 字段（issue #983）', async () => 
   assert.equal(res.status, 404)
   assert.equal(res.json.error, 'not-found')
   assert.equal(Object.prototype.hasOwnProperty.call(res.json, 'paths'), false, 'not-found 不得携带 paths')
+})
+
+test('#1587: POST permanent delete succeeds only after quarantined files are removed', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-route-quarantine-delete-'))
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  const id = 'session-77777777-7777-4777-8777-777777777777'
+  try {
+    await makeSession(home, id)
+    await quarantineStoredSession({ home, sessionId: id })
+    const { routes } = makeHost({ sessions: { get: () => undefined }, waterfall: async () => [] })
+    const res = await call(routes, '/api/session-delete', request('POST', { sessionId: id }))
+    assert.equal(res.status, 200)
+    assert.equal(res.json.ok, true)
+    assert.deepEqual(await findQuarantinedDirs(sessionsRoot(home), id), [])
+    const retry = await call(routes, '/api/session-delete', request('POST', { sessionId: id }))
+    assert.equal(retry.status, 404)
+    assert.equal(retry.json.error, 'not-found')
+  } finally {
+    process.env.DSH_HOME = previous
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('#1587: unreadable quarantine is 500, never the client success-shaped 404/not-found', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-route-quarantine-failure-'))
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  try {
+    const root = join(home, 'sessions', 'workspace')
+    await mkdir(root, { recursive: true })
+    await writeFile(join(root, '.corrupt'), 'controlled malformed quarantine')
+    const { routes } = makeHost({ sessions: { get: () => undefined }, waterfall: async () => [] })
+    const res = await call(routes, '/api/session-delete', request('POST', {
+      sessionId: 'session-77777777-7777-4777-8777-777777777777',
+    }))
+    assert.equal(res.status, 500)
+    assert.equal(res.json.error, 'delete-failed')
+  } finally {
+    process.env.DSH_HOME = previous
+    await rm(home, { recursive: true, force: true })
+  }
 })

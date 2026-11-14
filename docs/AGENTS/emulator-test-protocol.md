@@ -241,3 +241,8 @@ Settings probes read section labels after excluding injected description and che
 用 CDP 读取按钮与正文边界，再用 ADB 连续滚动、点击回到底部及切换输入法，保留横竖屏截图。
 
 原生控制的专用 MuMu 启动器另支持 `-DualChannel` 与 `-VirtualDisplay`，均要求预先在 Shizuku 管理页授权。前者在仪器进程启动后重绑 A11y，断言双通道就绪、点按走 A11y 且重发不再点击；后者在 A11y 关闭时验证壳侧建屏、同别名重建、旧代次明确拒绝及撤出注册。它们与 `-Shizuku` 互斥，均只计隔离组件设备证据。
+## 11. 原生悬浮窗验证补充
+
+[verify-overlay-v2.mjs](<scripts/verify-overlay-v2.mjs>)默认只inspect，只有显式`--scenario gestures`才执行输入；每步截图与actual frame联存。须先准备允许悬浮窗的中性后台应用，确认真实PNG方向/density，不在系统权限页套用旧球坐标。到顶保持用`--top-idle-ms 60000`；药丸第二次上推必须在实际触区内且坐标非负，驱动注入的目标速度不等于Android收到的真实末速，失败后结合debug手势日志核对，禁止下调产品阈值洗绿。
+
+同一设备不得并行跑状态套件、手势、性能、安装或任意人工点击。性能采样必须记录前后PID/starttime/实际uptime，切UI后独立确认实际窗形态；WindowManager删除卡片后该窗口的gfxinfo环可能消失，要在窗口仍在时采帧并去重。主PID gfx数据不是整机SurfaceFlinger/WebView子进程/GPU成本；ADB tap到dumpsys检测是RTT上界，不是首帧耗时。结果与未验范围集中在[测试报告](<docs/overlay-refactor-2026-11/test-report-phase2.md>)。

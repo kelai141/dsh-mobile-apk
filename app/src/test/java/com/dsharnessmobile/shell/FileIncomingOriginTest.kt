@@ -30,6 +30,21 @@ import java.nio.file.Files
  */
 class FileIncomingOriginTest {
 
+  @Test
+  fun overlayDeliveryCarriesImmutableTargetAndRequestIdentity() {
+    val json = JSONObject(FileIncoming.targetedRequestBody("/tmp/picked", "camera", "session-a", "request-1234", "image/png"))
+    assertEquals("session-a", json.getString("targetSessionId"))
+    assertEquals("request-1234", json.getString("requestId"))
+    assertEquals("image/png", json.getString("mediaType"))
+    val legacy = JSONObject(FileIncoming.targetedRequestBody("/tmp/file", "external", "", "", ""))
+    assertFalse(legacy.has("targetSessionId"))
+  }
+
+  @Test(expected = IllegalArgumentException::class)
+  fun partialOverlayTargetCannotDegradeIntoCurrentSessionDelivery() {
+    FileIncoming.targetedRequestBody("/tmp/picked", "camera", "", "request-1234", "image/png")
+  }
+
   // ── ① 投递 body ───────────────────────────────────────────────────────────
 
   @Test

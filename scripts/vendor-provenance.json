@@ -9,8 +9,8 @@
           "bytes": 1071
         },
         "PATCHES.md": {
-          "sha256": "85db818e1f7f60c29b8ca87274962a9b34f98b5f0d06bca4fc959fb148c4fdcd",
-          "bytes": 7983
+          "sha256": "ea37e4f30d58c794bc13737c8df54da41fe8abad5eed2afad34d1a8b77f8148b",
+          "bytes": 8505
         },
         "README.md": {
           "sha256": "c3f35f75f83be22788c11791b2fa26335cb3b333f2c892f701e2e50e103f2c8c",
@@ -29,8 +29,8 @@
           "bytes": 18622
         },
         "lib/index.js": {
-          "sha256": "7b0e2ad8dfc72742a3f5610397b1cace8ccac2eaafe07af270b80986e816fc5a",
-          "bytes": 12807
+          "sha256": "7e2cbdc50220c0fc0898c2dbdd8d0c2399d25728104cbb4e7198b386024ef6ec",
+          "bytes": 12878
         },
         "package.json": {
           "sha256": "00f444fde468a1eb6f8948cc1fefb4a357da1b085aa32c01b4f861c477addd95",
@@ -40,7 +40,9 @@
           "sha256": "67d71c61e1a9d9a7c6f80b64a6f2776a2ca4ee4d9ecd98f16c1024c1b2b85bc1",
           "bytes": 2157
         }
-      }
+      },
+      "totalBytes": 57977,
+      "fileCount": 9
     },
     "vendor/dsh-plugin-subscriptions": {
       "files": {
@@ -181,8 +183,8 @@
           "bytes": 23875
         },
         "lib/index.js": {
-          "sha256": "c9889bdb45c855e9258f0be89a7079090949314765c9d41874711de0d04d90fa",
-          "bytes": 455420
+          "sha256": "ebf2e9c746bc0fda9a02da9d1a2961274da3fec732ca37a93df8423196a7631e",
+          "bytes": 456202
         },
         "lib/model-defaults.js": {
           "sha256": "3f7b108cf74e9b558e5e8231286c3b0432c3b7915a53c48cf06ce2bf84e61cff",
@@ -229,12 +231,12 @@
           "bytes": 45038
         },
         "lib/providers/common.js": {
-          "sha256": "9c7065285144fe19e8673c0acdc9f735a13fae9f8b9a40d2057c632ed11ce63c",
-          "bytes": 38465
+          "sha256": "0db7e69b42f543046143a2f318bd86fa27ae53aaec3284f63fcf9df821cdc435",
+          "bytes": 39076
         },
         "lib/providers/copilot.js": {
-          "sha256": "dc7eaa891d8b8a8f358e574e48e1dfccda56b4f5a97d5fc9824c9e39626647d9",
-          "bytes": 44540
+          "sha256": "c836ec9589df0ef533a4ec802b8239cbcf9d59a0643c2dd057a9fd5974f5176d",
+          "bytes": 44999
         },
         "lib/providers/grok.js": {
           "sha256": "411885de42c54a9d7f2bb7db499e0ab6542ae99962934b0d9be10f957c1daba1",
@@ -320,7 +322,9 @@
           "sha256": "1c0e4b2a83192309f738aa08f0e971b0cd50275b9b3d0a49bb4b9b3a303343d1",
           "bytes": 5518
         }
-      }
+      },
+      "totalBytes": 1408196,
+      "fileCount": 69
     }
   },
   "files": {
@@ -461,8 +465,8 @@
       "bytes": 23875
     },
     "lib/index.js": {
-      "sha256": "c9889bdb45c855e9258f0be89a7079090949314765c9d41874711de0d04d90fa",
-      "bytes": 455420
+      "sha256": "ebf2e9c746bc0fda9a02da9d1a2961274da3fec732ca37a93df8423196a7631e",
+      "bytes": 456202
     },
     "lib/model-defaults.js": {
       "sha256": "3f7b108cf74e9b558e5e8231286c3b0432c3b7915a53c48cf06ce2bf84e61cff",
@@ -509,12 +513,12 @@
       "bytes": 45038
     },
     "lib/providers/common.js": {
-      "sha256": "9c7065285144fe19e8673c0acdc9f735a13fae9f8b9a40d2057c632ed11ce63c",
-      "bytes": 38465
+      "sha256": "0db7e69b42f543046143a2f318bd86fa27ae53aaec3284f63fcf9df821cdc435",
+      "bytes": 39076
     },
     "lib/providers/copilot.js": {
-      "sha256": "dc7eaa891d8b8a8f358e574e48e1dfccda56b4f5a97d5fc9824c9e39626647d9",
-      "bytes": 44540
+      "sha256": "c836ec9589df0ef533a4ec802b8239cbcf9d59a0643c2dd057a9fd5974f5176d",
+      "bytes": 44999
     },
     "lib/providers/grok.js": {
       "sha256": "411885de42c54a9d7f2bb7db499e0ab6542ae99962934b0d9be10f957c1daba1",

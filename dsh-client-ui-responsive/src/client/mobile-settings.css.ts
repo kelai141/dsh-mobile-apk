@@ -98,6 +98,9 @@ export const MOBILE_SETTINGS_CSS: string = `
     z-index: 2;
     display: flex;
     align-items: center;
+    /* 标题已改为绝对居中（见下方 bar-title 规则），这里让返回键与右侧占位各贴一边，
+       否则标题脱离文档流后两者会并排挤在左侧。 */
+    justify-content: space-between;
     gap: 8px;
     flex: none;
     box-sizing: border-box;
@@ -112,7 +115,17 @@ export const MOBILE_SETTINGS_CSS: string = `
   }
 
   html[data-dsh-mobile-form] [data-dsh-settings-dialog] [data-dsh-settings-bar-title] {
-    flex: 1;
+    position: absolute;
+    top: 50%;
+    left: 0;
+    right: 0;
+    transform: translateY(-50%);
+    width: max-content;
+    max-width: calc(100% - 112px);
+    /* 老内核兼容：不用 margin-inline（Chrome 87+），用两条物理边。 */
+    margin-left: auto;
+    margin-right: auto;
+    flex: none;
     min-width: 0;
     overflow: hidden;
     white-space: nowrap;
@@ -335,7 +348,12 @@ export const MOBILE_SETTINGS_CSS: string = `
   /* 二级页只留返回，不要关闭（0.15.0 用户定例）：我们的标题条已经有「‹ 返回」，
      上游表头那个「×」是第二个退出控件，并排时既挤又容易误触。
      关闭整体设置仍可走：返回上一级后关闭，或系统返回（back-stack 逐级 detail -> home -> 关闭）。
-     这里按 DOM 顺序取表头最后一个按钮：同一表头里「打开配置文件」已被 JS 隐藏并挪到开发者选项。 */
+
+     上游 0.2.2 起表头从内容列搬成了面板的直接子节点（面板子节点为
+     标题条 / navTitle / nav / header / options 五个），旧选择器指向「内容列第一行」，
+     里面没有 ×，恒不命中 —— 于是二级页一直露着那个 ×，还和标题条抢同一行。
+     新选择器按「倒数第二个 div」认表头；旧那条保留作上游把表头挪回内容列时的兜底。 */
+  html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level='detail'] > div:nth-last-child(2),
   html[data-dsh-mobile-form] [data-dsh-settings-dialog][data-dsh-settings-level='detail'] > div:last-child > div:first-child > button:last-of-type {
     display: none;
   }

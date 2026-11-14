@@ -1,7 +1,7 @@
 /** Static release data only. Probes select a route, never a version. */
 import {
   LATEST_RELEASE_URL, MIRROR_TEMPLATES, SUPPORTED_ABIS,
-  assetUrl, classifyAbi, formatBytes, pickAsset, probeUrl,
+  assetUrl, classifyAbi, formatBytes, manifestUrl, pickAsset, probeUrl,
 } from './release.js';
 import { t, translatePage, toggleLocale } from './locales.js';
 import { selectRoute } from './routing.js';
@@ -160,7 +160,8 @@ async function verifySeedDigest() {
   let computed = '';
   let manifestDigest = null;
   try {
-    const res = await fetch(probeUrl(state.current) + '?dsh=' + Date.now(), { cache: 'no-store' });
+    // 必须按 data.tag 取 MANIFEST：seed 的 manifestSha256 也是按 data.tag 算的（不是 latest）。
+    const res = await fetch(manifestUrl(state.current, data.tag) + '?dsh=' + Date.now(), { cache: 'no-store' });
     if (res.ok) {
       const text = await res.text();
       computed = await sha256HexOf(text);

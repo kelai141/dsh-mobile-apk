@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { IncomingDraftConsumer, isTerminalRefreshFailure, isTerminalStatus, runBounded, type IncomingDraftFetch } from '../src/client/mobile/incoming-draft.ts'
 
 function json(body: unknown, status = 200) {
@@ -11,7 +11,188 @@ function json(body: unknown, status = 200) {
   }
 }
 
+describe('incoming request deadlines', () => {
+  const item = { entryId: 'timeout-entry', targetSessionId: 'session-aaaaaaaa-1', requestId: 'timeout-request', origin: 'camera', state: 'received', name: 'a.txt', bytes: 1 }
+  function deferred<T>() {
+    let resolve!: (value: T) => void
+    const promise = new Promise<T>(done => { resolve = done })
+    return { promise, resolve }
+  }
+  function harness(fetchImpl: IncomingDraftFetch) {
+    const attach = vi.fn(() => true), create = vi.fn(), release = vi.fn()
+    const consumer = new IncomingDraftConsumer(fetchImpl, {
+      refreshSessions: async () => {}, retainSession: async () => release,
+      createSession: create, openSession: vi.fn(), sessionScope: () => ({}),
+      attachGenericFile: attach, notify: vi.fn(),
+    })
+    return { consumer, attach, create, release }
+  }
+  beforeEach(() => { vi.useFakeTimers(); vi.spyOn(console, 'warn').mockImplementation(() => {}) })
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks() })
+
+  it.each(['fetch', 'json'] as const)('releases the busy latch after unresolved list %s and retries on the next tick', async stage => {
+    const late = deferred<ReturnType<typeof json>>()
+    const body = deferred<unknown>()
+    const fetchImpl = vi.fn<IncomingDraftFetch>()
+      .mockImplementationOnce(() => late.promise)
+      .mockResolvedValue(json({ items: [] }))
+    const { consumer, attach, create } = harness(fetchImpl)
+    const first = consumer.poll()
+    await vi.advanceTimersByTimeAsync(stage === 'json' ? 3000 : 3999)
+    if (stage === 'json') {
+      late.resolve({ ...json({}), json: () => body.promise })
+      await vi.advanceTimersByTimeAsync(999)
+    }
+    await consumer.poll() // Still in flight: do not overlap list requests.
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(fetchImpl.mock.calls[0]?.[1]?.signal?.aborted).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    await first
+    expect(fetchImpl.mock.calls[0]?.[1]?.signal?.aborted).toBe(true)
+    await consumer.poll()
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(fetchImpl.mock.calls[1]?.[1]).toMatchObject({ credentials: 'same-origin', cache: 'no-store' })
+    late.resolve(json({ items: [item] })); body.resolve({ items: [item] })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(attach).not.toHaveBeenCalled(); expect(create).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it.each(['claim-fetch', 'claim-json', 'content-fetch', 'content-blob'] as const)('retains the original %s beyond four seconds without replaying claim or marking content removed', async stage => {
+    const late = deferred<ReturnType<typeof json>>()
+    const body = deferred<unknown>()
+    const blob = deferred<Blob>()
+    let blocked = false
+    const fetchImpl = vi.fn<IncomingDraftFetch>(async path => {
+      if (path.endsWith('/claim')) {
+        if (stage.startsWith('claim') && !blocked) {
+          blocked = true
+          return late.promise
+        }
+        return json({ ok: true, ticket: 'timeout-ticket', name: 'a.txt' })
+      }
+      if (path.includes('/content?')) {
+        if (stage.startsWith('content') && !blocked) { blocked = true; return late.promise }
+        return json({})
+      }
+      if (path.endsWith('/complete')) return json({ ok: true })
+      return json({ items: [item, item] })
+    })
+    const { consumer, attach, create, release } = harness(fetchImpl)
+    const first = consumer.poll()
+    await vi.advanceTimersByTimeAsync(0)
+    const blockedCall = fetchImpl.mock.calls.at(-1)!
+    expect(blockedCall[1]?.signal).toBeUndefined()
+    if (stage.endsWith('json') || stage.endsWith('blob')) {
+      await vi.advanceTimersByTimeAsync(3000)
+      late.resolve({ ...json({}), json: () => body.promise, blob: () => blob.promise })
+      await vi.advanceTimersByTimeAsync(999)
+    } else await vi.advanceTimersByTimeAsync(3999)
+    expect(attach).not.toHaveBeenCalled(); expect(release).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    await consumer.poll()
+    expect(release).not.toHaveBeenCalled()
+    expect(attach).not.toHaveBeenCalled()
+    expect(fetchImpl.mock.calls.filter(([path]) => path.endsWith('/claim'))).toHaveLength(1)
+    expect(fetchImpl.mock.calls.filter(([path]) => path.endsWith('/complete'))).toHaveLength(0)
+    late.resolve(json({ ok: true, ticket: 'late-ticket', name: 'a.txt' }))
+    body.resolve({ ok: true, ticket: 'late-ticket', name: 'a.txt' }); blob.resolve(new Blob(['late']))
+    await vi.advanceTimersByTimeAsync(0)
+    await first
+    expect(attach).toHaveBeenCalledOnce(); expect(release).toHaveBeenCalledOnce()
+    await consumer.poll()
+    expect(attach).toHaveBeenCalledOnce(); expect(create).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('retains the same completion ticket across timeouts, including the prior-ack drain before list', async () => {
+    const late = deferred<ReturnType<typeof json>>()
+    let completions = 0
+    const fetchImpl = vi.fn<IncomingDraftFetch>(async path => {
+      if (path.endsWith('/claim')) return json({ ok: true, ticket: 'ack-timeout-ticket', name: 'a.txt' })
+      if (path.includes('/content?')) return json({})
+      if (path.endsWith('/complete')) return ++completions <= 2 ? late.promise : json({ ok: true })
+      return json({ items: [item, item] })
+    })
+    const { consumer, attach, create, release } = harness(fetchImpl)
+    const first = consumer.poll()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(attach).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(4000)
+    await first
+    expect(release).toHaveBeenCalledOnce()
+    const second = consumer.poll()
+    await vi.advanceTimersByTimeAsync(3999)
+    expect(fetchImpl.mock.calls.filter(([path]) => path === '/api/android/file-incoming')).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(1)
+    await second
+    expect(fetchImpl.mock.calls.filter(([path]) => path === '/api/android/file-incoming')).toHaveLength(2)
+    await consumer.poll()
+    const acknowledgements = fetchImpl.mock.calls.filter(([path]) => path.endsWith('/complete'))
+    expect(acknowledgements).toHaveLength(3)
+    expect(acknowledgements.map(([, init]) => JSON.parse(String(init?.body)))).toEqual(Array(3).fill({ ticket: 'ack-timeout-ticket', outcome: 'draft-ready' }))
+    expect(acknowledgements.slice(0, 2).every(([, init]) => init?.signal?.aborted)).toBe(true)
+    late.resolve(json({ ok: true })); await vi.advanceTimersByTimeAsync(0)
+    await consumer.poll()
+    expect(attach).toHaveBeenCalledOnce(); expect(create).not.toHaveBeenCalled()
+    expect(fetchImpl.mock.calls.filter(([path]) => path.endsWith('/claim'))).toHaveLength(1)
+    expect(fetchImpl.mock.calls.filter(([path]) => path.endsWith('/complete'))).toHaveLength(3)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+})
+
 describe('IncomingDraftConsumer', () => {
+  it('retries a lost completion acknowledgement without a second attachment admission', async () => {
+    const item = { entryId: 'ack-entry', targetSessionId: 'session-aaaaaaaa-1', requestId: 'ack-request-1', origin: 'camera', state: 'received', name: 'a.txt', bytes: 1 }
+    const attach = vi.fn(() => true)
+    let completed = 0
+    const fetchImpl = vi.fn<IncomingDraftFetch>(async path => {
+      if (path.endsWith('/claim')) return json({ ok: true, ticket: 'ack-ticket', name: 'a.txt' })
+      if (path.includes('/content?')) return json({})
+      if (path.endsWith('/complete')) { completed++; if (completed === 1) throw new Error('receipt lost'); return json({ ok: true }) }
+      return json({ items: [item] })
+    })
+    const consumer = new IncomingDraftConsumer(fetchImpl, { refreshSessions: async () => {}, createSession: vi.fn(), openSession: vi.fn(), sessionScope: () => ({}), attachGenericFile: attach, notify: vi.fn() })
+    await consumer.poll()
+    await consumer.poll()
+    expect(completed).toBe(2)
+    expect(attach).toHaveBeenCalledOnce()
+    expect(fetchImpl.mock.calls.filter(call => call[0].endsWith('/claim'))).toHaveLength(1)
+  })
+  it('hidden consumer keeps exact overlay target A after navigation to B and ignores external entries', async () => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+    document.documentElement.setAttribute('data-dsh-session-id', 'session-bbbbbbbb-2')
+    const attach = vi.fn((_id: string, _file: File) => true), open = vi.fn(), create = vi.fn(), release = vi.fn()
+    const fetchImpl = vi.fn<IncomingDraftFetch>()
+      .mockResolvedValueOnce(json({ items: [
+        { entryId: 'target', targetSessionId: 'session-aaaaaaaa-1', requestId: 'request-1234', origin: 'camera', mediaType: 'image/png', state: 'received', name: 'image.png', bytes: 7 },
+        { entryId: 'external', origin: 'external', state: 'received', name: 'other.txt', bytes: 4 },
+      ] }))
+      .mockResolvedValueOnce(json({ ok: true, ticket: 'ticket', name: 'image.png' }))
+      .mockResolvedValueOnce(json({})).mockResolvedValueOnce(json({ ok: true }))
+    const consumer = new IncomingDraftConsumer(fetchImpl, {
+      refreshSessions: async () => {}, createSession: create, openSession: open,
+      retainSession: async () => release, sessionScope: id => id === 'session-aaaaaaaa-1' ? {} : undefined,
+      attachGenericFile: attach, notify: vi.fn(),
+    })
+    try {
+      await consumer.poll()
+      expect(attach).toHaveBeenCalledWith('session-aaaaaaaa-1', expect.any(File))
+      expect(attach.mock.calls[0]?.[1].type).toBe('image/png')
+      expect(JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body)).sessionId).toBe('session-aaaaaaaa-1')
+      expect(open).not.toHaveBeenCalled(); expect(create).not.toHaveBeenCalled(); expect(release).toHaveBeenCalledOnce()
+    } finally { Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' }) }
+  })
+
+  it('missing fixed target never falls back to current or new session', async () => {
+    const create = vi.fn(), attach = vi.fn()
+    const fetchImpl = vi.fn<IncomingDraftFetch>().mockResolvedValue(json({ items: [
+      { entryId: 'target', targetSessionId: 'session-aaaaaaaa-1', requestId: 'request-1234', origin: 'camera', state: 'received', name: 'a.txt', bytes: 1 },
+    ] }))
+    const consumer = new IncomingDraftConsumer(fetchImpl, { refreshSessions: async () => {}, createSession: create, openSession: vi.fn(), sessionScope: () => undefined, attachGenericFile: attach, notify: vi.fn() })
+    await consumer.poll()
+    expect(create).not.toHaveBeenCalled(); expect(attach).not.toHaveBeenCalled(); expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
   it('hydrates one server-created blank session with a generic file draft and no text prompt', async () => {
     const scope = {}
     const events: string[] = []

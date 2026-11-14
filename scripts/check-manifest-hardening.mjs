@@ -342,6 +342,7 @@ const COMPONENTS = ['activity', 'service', 'receiver', 'provider', 'activity-ali
 // 这些名字**不得**出现在 main（release）清单里 —— 出现即视为 debug 面泄漏到发布产物。
 // name -> { reason, guard }
 const DEBUG_EXPORTED_ALLOW = new Map([
+  ['.NativeControlVirtualFixtureActivity', { reason: '专用模拟器以 shell 启动虚拟屏测试夹具，入口受 DUMP 权限保护', guard: 'debug-only' }],
   ['.ConsoleDebugAlias', { reason: '控制台 CDP 量测通路（ConsoleActivity 未导出，adb 起不来）；仅 debug 构建', guard: 'debug-only' }],
 ])
 

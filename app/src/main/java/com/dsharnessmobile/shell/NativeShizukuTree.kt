@@ -38,8 +38,7 @@ internal object NativeShizukuTree {
     val deadline = SystemClock.elapsedRealtime() + 2_000L
     if (displayId == 0) return ShellUiAutomation.available(deadline)
     return ShellUiAutomation.withConnection(deadline) { ui ->
-      try { ui.windowsOnAllDisplays[displayId]?.isNotEmpty() == true }
-      catch (_: Throwable) { false }
+      selectWindow(ui, displayId) != null
     } == true
   }
 
@@ -150,7 +149,10 @@ internal object NativeShizukuTree {
   /** 只在该 displayId 的窗口里选：active 优先，其次 focused。 */
   private fun selectWindow(ui: UiAutomation, displayId: Int): AccessibilityWindowInfo? = try {
     ui.windowsOnAllDisplays[displayId]?.let { windows ->
-      windows.firstOrNull { it.isActive } ?: windows.firstOrNull { it.isFocused }
+      if (displayId == 0) windows.firstOrNull { it.isActive } ?: windows.firstOrNull { it.isFocused }
+      else windows.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }.let { apps ->
+        apps.firstOrNull { it.isActive } ?: apps.firstOrNull { it.isFocused } ?: apps.singleOrNull()
+      }
     }
   } catch (_: Throwable) {
     null

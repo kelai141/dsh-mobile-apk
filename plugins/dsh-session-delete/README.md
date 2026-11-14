@@ -19,8 +19,8 @@
     - `workspace/session-activity` 瀑布报告有活动 → `session-active`；
     - **探测状态未知**（provider 抛错 / 返回非数组 / 老引擎没有瀑布）→ `activity-unknown`，
       绝不把「不知道」当「空闲」；
-  - **加载中的会话照常可删**：顺序是「定位目录 → 清归档/置顶 → 卸载内存会话 → 改名 → 删目录」。
-    卸载放在目录确认存在之后：目录不存在 / 不唯一 / 清理失败都发生在卸载之前，避免
+  - **加载中的会话照常可删**：顺序是「定位目录与隔离副本 → 改名 → 卸载内存会话 → 清归档/置顶 → 删目录」。
+    卸载放在目录移出扫描路径之后：目录不存在 / 不唯一 / 移动失败都发生在卸载之前，避免
     「报错但会话已经从内存消失、文件还在」。
     卸载走引擎自己的 teardown 边 `entry.detach()`（**维护者在 PR #496 里接受了插件内驱动这条边，
     不额外加引擎补丁**；上游若改名或改语义，插件会以 `unload-failed` 明确失败、文件不动）：移除 store 条目并派发 `session/disposed`，
@@ -32,8 +32,10 @@
   - `POST /api/session-delete-trace`：客户端决策回传（写 engine.log，便于现场取证）。
   - `GET /api/session-delete-version`：构建戳，供页面自更新。
 - **src/session-delete.js**：可单测的删除核心——定位 `<DSH_HOME>/sessions/<cwd-key>/<id>/`，
-  命中 0 个报 `not-found`、命中 2 个报 `ambiguous`（一个都不删），先 `rename` 成 `.deleting-<t>`
-  再递归删除，避免并发扫描看到删到一半的目录。
+  存储目录命中 2 个报 `ambiguous`（一个都不删）。永久删除同时清除该 id 的所有 `.corrupt/<id>.<时间戳>`
+  隔离副本；只有存储与隔离都不存在才报 `not-found`。枚举失败如实报错，不能成为客户端视为成功的 404。
+  每个目录先 `rename` 成 `.deleting-<t>` 再递归删除；失败报告残留，重试可继续清理。
+  启动 sweep 同时清理隔离区内明确删除产生的 graveyard，不自动过期清理可恢复的隔离件。
 
 ## 构建与安装
 

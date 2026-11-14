@@ -11,6 +11,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import {
   SessionNotifyState,
   formatDuration,
+  reasoningSummary,
   reportOutcomeLabel,
   shouldPopupReport,
   todoProgress,
@@ -243,7 +244,9 @@ export function installSharedNotifications(
       liveBatch.push(text)
     } catch { /* live best effort */ }
   }
-  const liveCalls = new Map<string, { name: string; args: string; start: number }>()
+  type LiveCall = { sessionId: string; callId: string; name: string; args: string; start: number }
+  const liveCalls: LiveCall[] = []
+  let nextAnonCall = 0
   const live = (session: unknown, ev: { type?: string; data?: Record<string, unknown> }): void => {
     const sessionId = String((session as { id?: unknown } | undefined)?.id ?? '')
     const t = Date.now()
@@ -251,28 +254,29 @@ export function installSharedNotifications(
     if (kind === 'tool/call') {
       const data = ev.data as { name?: string; arguments?: string; callId?: string }
       const args = String(data.arguments ?? '').slice(0, 240)
-      if (data.callId) liveCalls.set(String(data.callId), { name: String(data.name ?? ''), args, start: t })
-      appendLive(JSON.stringify({ t, s: sessionId, k: 'tool_call', name: String(data.name ?? ''), args }))
+      const name = String(data.name ?? '')
+      const callId = data.callId ? String(data.callId) : 'anon-' + ++nextAnonCall
+      liveCalls.push({ sessionId, callId, name, args, start: t })
+      if (liveCalls.length > 256) liveCalls.shift()
+      appendLive(JSON.stringify({ t, s: sessionId, k: 'tool_call', name, args, callId }))
       return
     }
     if (kind === 'tool/result') {
       const data = ev.data as { message?: { source?: { callId?: string }; content?: Array<Record<string, unknown>> } }
       const callId = data?.message?.source?.callId ? String(data.message.source.callId) : ''
-      const call = callId ? liveCalls.get(callId) : undefined
+      const index = liveCalls.findIndex((call) => call.sessionId === sessionId && (!callId || call.callId === callId))
+      const call = index === -1 ? undefined : liveCalls.splice(index, 1)[0]
       const err = Array.isArray(data?.message?.content) && data.message.content.some((item) => item.isError === true)
       appendLive(JSON.stringify({
         t, s: sessionId, k: 'tool_result', name: call?.name ?? '', args: call?.args ?? '',
-        dur: call ? t - call.start : undefined, err,
+        dur: call ? t - call.start : undefined, err, callId: call?.callId ?? callId,
       }))
-      if (callId) liveCalls.delete(callId)
-      if (liveCalls.size > 256) {
-        const first = liveCalls.keys().next().value
-        if (first !== undefined) liveCalls.delete(first)
-      }
       return
     }
     if (kind === 'assistant/message') {
       const content = (ev.data as { message?: { content?: unknown } })?.message?.content
+      const think = reasoningSummary(content)
+      if (think !== '') appendLive(JSON.stringify({ t, s: sessionId, k: 'think', sum: think }))
       const text = visibleText(content)
       appendLive(JSON.stringify({ t, s: sessionId, k: 'text', sum: text.slice(0, 160) || '（空回复）' }))
       return

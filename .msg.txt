@@ -1,0 +1,14 @@
+docs(code-map): 按 1738 插入的 7 行重钉 EngineManager 锚点
+
+EngineService 的 portOwnedByApp 改动在 EngineManager.kt 的 trackedChildAlive()
+处新增 7 行，位于其后的 5 条锚点（行号 2996/3010/3020/3047/3243）全部位移 +7，
+使 check-code-map 的 bad-anchor-content 判红（PR #1738 的 CI 失败项）。
+
+逐行核实源码实际行号后按 +7 重钉，未放宽任何判据：
+  2996 -> 3003  DSH_HOME
+  3010 -> 3017  DSH_FILES_DIR
+  3020 -> 3027  TMPDIR
+  3047 -> 3054  0.14.0 内置 adb 退役注释
+  3243 -> 3250  fun ensurePickToken(): String {
+
+复验：node scripts/check-code-map.mjs -> CHECK-CODE-MAP PASSED

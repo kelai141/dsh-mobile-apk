@@ -18,6 +18,8 @@ type Bridge = {
   hasAllFilesAccess?: () => boolean
   getOverlayEnabled?: () => boolean
   setOverlayEnabled?: (enabled: boolean) => boolean
+  getOverlayEntryStyle?: () => 'ball' | 'strip'
+  setOverlayEntryStyle?: (style: 'ball' | 'strip') => 'ball' | 'strip'
 }
 
 /** 悬浮球开关（开发者选项里的第二个复选框；按标签文本定位，不依赖顺序）。 */
@@ -41,6 +43,7 @@ async function render(bridge: Bridge, renderSlot?: () => React.ReactNode): Promi
 
 beforeEach(() => {
   delete window.androidBridge
+  document.documentElement.lang = 'zh'
 })
 
 afterEach(async () => {
@@ -219,6 +222,101 @@ describe('DevSection（开发者选项设置页）', () => {
     expect(el.textContent).toContain('已打开系统授权页；授予后请重新打开本开关')
     expect(el.textContent).not.toContain('返回后自动生效')
     expect(toggle.checked, '桥回读为 false → 开关不得乐观置位').toBe(false)
+  })
+})
+
+describe('新悬浮入口设置 / New floating entry shape', () => {
+  const selector = (el: HTMLElement) => el.querySelector('[data-overlay-entry-setting] select') as HTMLSelectElement
+  const choose = async (el: HTMLElement, value: string) => {
+    await act(async () => {
+      selector(el).value = value
+      selector(el).dispatchEvent(new Event('change', { bubbles: true }))
+    })
+  }
+
+  it('读取已存球/条偏好，关闭悬浮窗时也可预先选择，不改开关', async () => {
+    let stored: 'ball' | 'strip' = 'ball'
+    const setOverlayEnabled = vi.fn(() => false)
+    const write = vi.fn((style: 'ball' | 'strip') => { stored = style; return stored })
+    const el = await render({
+      getOverlayEnabled: () => false,
+      setOverlayEnabled,
+      getOverlayEntryStyle: () => stored,
+      setOverlayEntryStyle: write,
+    })
+    expect(selector(el).disabled).toBe(false)
+    expect(selector(el).value).toBe('ball')
+    await choose(el, 'strip')
+    expect(write).toHaveBeenLastCalledWith('strip')
+    expect(selector(el).value).toBe('strip')
+    await choose(el, 'ball')
+    expect(write).toHaveBeenLastCalledWith('ball')
+    expect(selector(el).value).toBe('ball')
+    expect(setOverlayEnabled).not.toHaveBeenCalled()
+    expect(overlayToggle(el).checked).toBe(false)
+    expect(el.textContent).toContain('此设置不会启用新界面或开启悬浮窗，旧版入口保持不变')
+  })
+
+  it('首次挂载读取 strip 而不是覆盖成默认 ball', async () => {
+    const write = vi.fn(() => 'strip' as const)
+    const el = await render({ getOverlayEntryStyle: () => 'strip', setOverlayEntryStyle: write })
+    expect(selector(el).value).toBe('strip')
+    expect(write).not.toHaveBeenCalled()
+    expect(el.querySelectorAll('[data-overlay-entry-setting]')).toHaveLength(1)
+  })
+
+  it('写入未生效时保留真源，不能仅相信 setter 回值或乐观置位', async () => {
+    const el = await render({ getOverlayEntryStyle: () => 'ball', setOverlayEntryStyle: () => 'strip' })
+    await choose(el, 'strip')
+    expect(selector(el).value).toBe('ball')
+    expect(el.querySelector('[role="status"]')?.textContent).toContain('入口形态未保存')
+  })
+
+  it('setter 抛错时可见失败，保留原形态且不变更悬浮开关', async () => {
+    const el = await render({
+      getOverlayEntryStyle: () => 'strip',
+      setOverlayEntryStyle: () => { throw new Error('bridge gone') },
+    })
+    await choose(el, 'ball')
+    expect(selector(el).value).toBe('strip')
+    expect(el.textContent).toContain('入口形态未保存')
+  })
+
+  it.each([
+    ['旧壳没有形态方法', {}],
+    ['getter 缺席', { setOverlayEntryStyle: () => 'ball' as const }],
+    ['setter 缺席', { getOverlayEntryStyle: () => 'ball' as const }],
+    ['getter 抛错', { getOverlayEntryStyle: () => { throw new Error('denied') }, setOverlayEntryStyle: () => 'ball' as const }],
+    ['getter 非法值', { getOverlayEntryStyle: () => 'other' as 'ball', setOverlayEntryStyle: () => 'ball' as const }],
+  ] as const)('%s 时禁用，不把不可读状态当默认球', async (_label, bridge) => {
+    const el = await render(bridge)
+    expect(selector(el).disabled).toBe(true)
+    expect(selector(el).value).toBe('')
+    expect(el.textContent).toContain('当前应用无法读写入口形态')
+  })
+
+  it('形态经手势/壳侧改变后回前台重读，无需重挂载或页侧偏好副本', async () => {
+    let stored: 'ball' | 'strip' = 'ball'
+    const el = await render({ getOverlayEntryStyle: () => stored, setOverlayEntryStyle: (style) => style })
+    stored = 'strip'
+    await act(async () => { window.dispatchEvent(new Event('focus')) })
+    expect(selector(el).value).toBe('strip')
+    stored = 'ball'
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')) })
+    expect(selector(el).value).toBe('ball')
+  })
+
+  it('已挂载设置随语言即时更新，英文标签/选项/限制均可见', async () => {
+    const el = await render({ getOverlayEntryStyle: () => 'ball', setOverlayEntryStyle: (style) => style })
+    await act(async () => { document.documentElement.lang = 'en' })
+    expect(selector(el).getAttribute('aria-label')).toBe('New floating entry shape')
+    expect(selector(el).options[1].text).toBe('Free ball')
+    expect(selector(el).options[2].text).toBe('Edge strip')
+    expect(el.textContent).toContain('Requires the new overlay UI')
+    expect(el.textContent).toContain('the legacy entry is unchanged')
+    expect(el.textContent).toContain('either edge')
+    await act(async () => { document.documentElement.lang = 'zh' })
+    expect(selector(el).getAttribute('aria-label')).toBe('新悬浮入口形态')
   })
 })
 
