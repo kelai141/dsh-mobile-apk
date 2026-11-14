@@ -138,7 +138,12 @@ internal class EngineStartFlow(private val activity: MainActivity) {
       // 得不到应答是**预期结果**，把它当成「渲染进程冻结」去 reload 只是又一次弹回坏页面
       // （与 showWeb 的 reload 环同族）。清 latch 之后本看门狗自然恢复。
       if (clientPluginTreeFailed) return
-      val now = System.currentTimeMillis()
+      // #1577：冻结闸门做的是**纯区间比较**（now - pageLoadedAt / now - jsAckAt），
+      // 拿墙上时钟量就会吃校时：向前拨 ⇒ 健康页面被判冻结并 reload（表单/滚动丢失）；
+      // 向后拨 ⇒ 差值恒负 ⇒ 真冻结时自愈整段失效。故与 boot-stall 同口径改用单调时钟
+      // [bootStallNow]（见其选型注释：跨休眠继续计数、不受校时影响）。三处取时（tick /
+      // onAck / onPageLoaded）必须同源，只改一处会让区间比较混用两个基准。
+      val now = bootStallNow()
       // 状态机只回答「本拍做什么」；动作（reload / evaluateJavascript）留在 Activity 侧，
       // 这样判据能在 JVM 里离线跑转换，不必构造 WebView。
       val action = freezeGate.tick(now)
@@ -158,7 +163,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
           activity.webView.evaluateJavascript("1") { _ ->
             if (generation != monitorGeneration || !activity.pageUiActive) return@evaluateJavascript
             // #1355：应答=页面真活，重开冻结自愈预算（不能放 onPageFinished，会成 reload 循环）。
-            freezeGate.onAck(System.currentTimeMillis())
+            freezeGate.onAck(bootStallNow())
           }
         } catch (_: Exception) {
           freezeGate.onPingFailed()
@@ -424,7 +429,8 @@ internal class EngineStartFlow(private val activity: MainActivity) {
   fun startFreezeWatchdog() {
     if (!canRunEngineWork()) return
     if (!activity.pageUiActive || activity.userClosedEngine || !activity.webViewReady || activity.webView.visibility != View.VISIBLE) return
-    val now = System.currentTimeMillis()
+    // #1577：与 freezeRunnable 的 tick / onAck 同一单调基准，否则区间比较跨两个时钟。
+    val now = bootStallNow()
     // #1513：计时交给状态机（复位只发生在应答回调，onPageFinished 不等于页面真活）。
     freezeGate.onPageLoaded(now)
     // 冻结自愈闸门（freezeReloaded）在这里**不复位**：文档加载完时 JS 可能仍然死着。

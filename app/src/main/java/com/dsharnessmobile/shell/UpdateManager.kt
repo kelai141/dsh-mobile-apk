@@ -72,7 +72,8 @@ class UpdateManager(private val context: Context) {
         val manifest = JSONObject(fetch(manifestUrl))
         val url = manifest.getString("url")
         // 完整性加固（2026-08-23，审核 A6/B5）：在线更新快照可被中间人篡改——
-        // manifest 必须带 sha256 才能应用（空值拒绝），下载按声明大小限流。
+        // manifest 必须带 sha256 才能应用（空值拒绝）。体积上限是**边写边判**的，
+        // 不是落盘之后再判（#1622，见 [downloadArchive]）。
         val expectedSha = manifest.getString("sha256")
         val declaredSize = manifest.optLong("size", 0)
 
@@ -272,11 +273,46 @@ class UpdateManager(private val context: Context) {
     conn.readTimeout = 60_000
     val code = conn.responseCode
     if (code != 200) throw IllegalStateException("下载 HTTP $code")
-    conn.inputStream.use { input -> dest.outputStream().use { out -> input.copyTo(out) } }
-    // 大小限流（审核 B5 加固）：声明 size 存在且实际超限 → 删除并拒绝
-    if (declaredSize > 0 && dest.length() > declaredSize + 16 * 1024 * 1024) {
-      dest.delete()
-      throw IllegalStateException("下载体积超限: " + dest.length() + " > " + declaredSize)
+    conn.inputStream.use { input -> downloadArchive(input, dest, declaredSize) }
+  }
+
+  /**
+   * 边写边判体积的下载循环（#1622）。
+   *
+   * 缺陷形态：旧实现是 `input.copyTo(out)` 之后再判 `dest.length() > declaredSize + 16 MiB`。
+   * 发布源（或 https 中间人）返回远大于声明的流 / 无限流时，那一份 `files/update-<uuid>.tar.xz`
+   * 会先把数据分区写满（ENOSPC，与共用同一 filesDir 的引擎和快照事务一起受影响），
+   * 只有 finally 才删掉半包；manifest 不带 `size` 时连事后判据都没有。
+   *
+   * 判据（纯函数 [archiveCapFor]）：声明的上限 = declaredSize + 16 MiB；没有声明时用硬上限 2 GiB。
+   * 超限**当场**抛错，半包由调用方的 finally（`SnapshotFs.deletePath(archive)`）清掉。
+   *
+   * @param onChunk 每写一段回调已写字节数（单测用来证明「超限发生在落盘之前/之中」）。
+   */
+  internal fun downloadArchive(
+    input: java.io.InputStream,
+    dest: File,
+    declaredSize: Long = 0,
+    onChunk: (Long) -> Unit = {},
+  ) {
+    val cap = archiveCapFor(declaredSize)
+    var written = 0L
+    dest.outputStream().use { out ->
+      val buffer = ByteArray(64 * 1024)
+      while (true) {
+        val read = input.read(buffer)
+        if (read < 0) break
+        written += read
+        // 先判后写：越过上限的那一段字节**不落盘**，半包最大只到 cap + 一个缓冲块。
+        if (written > cap) {
+          throw IllegalStateException(
+            "下载体积超限: " + written + " > " + cap + "（声明 " + declaredSize + "）",
+          )
+        }
+        out.write(buffer, 0, read)
+        onChunk(written)
+      }
+      out.flush()
     }
   }
 
@@ -312,6 +348,27 @@ class UpdateManager(private val context: Context) {
 
     /** 开发/验收用的模拟器别名（仅 http 且仅此主机允许走明文）。 */
     private const val EMULATOR_HOST = "10.0.2.2"
+
+    /** manifest 声明体积之上允许的余量（旧的**事后**判据同值，现改为边写边判，见 [downloadArchive]）。 */
+    internal const val DECLARED_SIZE_SLACK_BYTES = 16L * 1024L * 1024L
+
+    /**
+     * manifest 不带 `size` 时的硬上限（#1622）。
+     *
+     * 2 GiB 的依据：完整运行时快照解压后约 686 MB、归档量级远小于此；而 Android 上单文件
+     * 落盘超过 2 GiB 在任何一款目标设备上都不是「可用的在线更新」形态。取硬上限而不是「无上限」：
+     * 没有声明时旧实现**一条判据都没有**，无限流会一直写到 ENOSPC。
+     */
+    internal const val UNDECLARED_ARCHIVE_CAP_BYTES = 2L * 1024L * 1024L * 1024L
+
+    /**
+     * 归档允许落盘的上限（纯函数，可 JVM 反证）：有声明 = 声明 + 余量；无声明 = 硬上限。
+     *
+     * 负的声明值（manifest 写了非法数字）一并按「未声明」处理——否则 `declaredSize + slack`
+     * 会变成一条比真实文件还小的上限，把正常更新全判超限。
+     */
+    internal fun archiveCapFor(declaredSize: Long): Long =
+      if (declaredSize > 0L) declaredSize + DECLARED_SIZE_SLACK_BYTES else UNDECLARED_ARCHIVE_CAP_BYTES
 
     /** manifest 地址校验结论：accepted 为空串 = 关闭；refusal 非空 = 拒绝原因。 */
     data class ManifestUrlVerdict(val accepted: String, val refusal: String?)
