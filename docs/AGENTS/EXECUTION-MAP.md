@@ -351,7 +351,7 @@ sequenceDiagram
 - [K11] | app/src/test/java/com/dsharnessmobile/shell/NotifySuppressQueueTest.kt | 横切 | 同会话覆盖、TTL 过期、队列有界 | app/src/test/java/com/dsharnessmobile/shell/NotifySuppressQueueTest.kt:24,app/src/test/java/com/dsharnessmobile/shell/NotifySuppressQueueTest.kt:71 | 无（纯函数 + 边界值） |
 - [K11] | app/src/test/java/com/dsharnessmobile/shell/OverlayCompletionNoticeTest.kt | 横切 | 完成位置位/消费/复位与会话分桶 | app/src/test/java/com/dsharnessmobile/shell/OverlayCompletionNoticeTest.kt:28,app/src/test/java/com/dsharnessmobile/shell/OverlayCompletionNoticeTest.kt:113 | 无（纯 Kotlin 状态机，且 `:113-125` 明确替换掉了旧的无会话形参假断言） |
 - [K11] | app/src/test/java/com/dsharnessmobile/shell/OverlayHaloInvariantTest.kt | 横切 | 四态色值真可读且 ring 与 halo 同源 | app/src/test/java/com/dsharnessmobile/shell/OverlayHaloInvariantTest.kt:92,app/src/test/java/com/dsharnessmobile/shell/OverlayHaloInvariantTest.kt:192 | 几何恒等式自认「单独不是防线」（`:180-191`）：真正有牙的是「派生关系 + 边距下限」；色值断言恰好是防 `Color.argb` 被桩成 0 的假绿闸门 |
-- [K11] | app/src/test/java/com/dsharnessmobile/shell/ProcIoTest.kt | 横切 | 超时、排水超时、截断三态可区分 | app/src/test/java/com/dsharnessmobile/shell/ProcIoTest.kt:27,app/src/test/java/com/dsharnessmobile/shell/ProcIoTest.kt:82 | 低：桩 Process 造三态 + 真实子进程（`ping`/`sleep`）交叉验证；真实子进程部分引入平台与墙钟依赖 |
+- [K11] | app/src/test/java/com/dsharnessmobile/shell/ProcIoTest.kt | 横切 | 超时、排水超时、截断三态可区分 | app/src/test/java/com/dsharnessmobile/shell/ProcIoTest.kt:27,`app/src/test/java/com/dsharnessmobile/shell/ProcIoTest.kt:100#expect=fun%20realProcessTimeoutKeepsPartialOutputAndAMarker` | 低：桩 Process 造三态 + 真实子进程（`ping`/`sleep`）交叉验证；真实子进程部分引入平台与墙钟依赖 |
 - [K11] | app/src/test/java/com/dsharnessmobile/shell/ScreenScopeTest.kt | 横切 | 未知 wire 值一律 fail-closed | app/src/test/java/com/dsharnessmobile/shell/ScreenScopeTest.kt:8,app/src/test/java/com/dsharnessmobile/shell/ScreenScopeTest.kt:15 | 无（纯枚举判据） |
 - [K11] | app/src/test/java/com/dsharnessmobile/shell/ShellOpsScopeTargetTest.kt | 横切 | 目标屏 token 逐字保留、无注册表恒拒 | app/src/test/java/com/dsharnessmobile/shell/ShellOpsScopeTargetTest.kt:21,app/src/test/java/com/dsharnessmobile/shell/ShellOpsScopeTargetTest.kt:121 | 有：`:162` 的生产入口在 JVM 只能传 null context → 恒 fail-closed，放行分支靠另抽的纯判据（注释自述）；SF token 配对用的是设备夹具文本，非真实 dumpsys 产物 |
 - [K11] | app/src/test/java/com/dsharnessmobile/shell/ShellOpsScreenCommandFixtureTest.kt | 横切 | 两侧 screen-scope 判据共一份 fixture | app/src/test/java/com/dsharnessmobile/shell/ShellOpsScreenCommandFixtureTest.kt:44,app/src/test/java/com/dsharnessmobile/shell/ShellOpsScreenCommandFixtureTest.kt:54 | 中：fixture 由 `scripts/gen-screen-scope-fixture.mjs` 从插件侧同步；不重跑生成器则「两侧一致」只是旧事实（与 ControlProtocolV2Test 同型漂移风险） |
@@ -2803,3 +2803,5 @@ plugins/dsh-android-linux-env/src/linux-bootstrap.d.ts
 <!-- COVERAGE
 plugins/dsh-android-manage/src/anim-scales.ts
 -->
+
+软件源刷新（#1584）：runAptUpdate 经 ProcIo.readBoundedMillis 收集退出码与 I/O 状态，再调用 aptUpdateFailure；仅完整未截断、已知零退出码且无失败标记时成功，否则进入双文件回滚，回执在回滚完成后反映真实结果。实现与双语、真实子进程反例见 docs/contrib/Ni-ShuWu/2026-11-13-apt-update-verdict-1584.md。

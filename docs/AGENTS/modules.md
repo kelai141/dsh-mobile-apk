@@ -81,6 +81,8 @@
 
 `app/src/main/assets/`：`snapshot.tar.xz`、`snapshot.sha256`、`undo-emergency.mjs`（急救 CLI，UndoGate 用）、`licenses/`（LICENSES 标准文本 + THIRD_PARTY_NOTICES.md，GPL 合规 A2）、`console.html`、`docs/root-disclaimer.html`（0.14.2-fx-2-root.1：issue #262 免责声明，`LocalDocs` 登记消费）。
 
+`ProcIo.ProcResult.exitCode` 保留自然退出状态（超时或未知为 null）；`SourceSettings.aptUpdateFailure` 对完整 I/O、退出码与失败输出做联合判定，失败交既有换源回滚，详见 `docs/contrib/Ni-ShuWu/2026-11-13-apt-update-verdict-1584.md`。
+
 ### 4.1 引擎侧插件文件（协调仓 `plugins/`，镜像到本仓同名目录）
 
 > 本表登记引擎侧插件中本轮新增或职责变化的文件；其余插件文件见协调仓对应 `plugins/*/src/`。
