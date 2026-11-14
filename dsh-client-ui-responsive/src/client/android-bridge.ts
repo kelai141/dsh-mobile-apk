@@ -150,6 +150,10 @@ export interface AndroidShellBridge {
   /** 0.13.2 W7: floating-ball toggle; returns whether the overlay actually started
    *  (false = SYSTEM_ALERT_WINDOW not granted — the shell opens the settings page). */
   setOverlayEnabled?: (enable: boolean) => boolean
+  /** Settings-only new floating entry preference; independent of enabled/permission/rollout state. */
+  getOverlayEntryStyle?: () => 'ball' | 'strip'
+  /** Persists ball|strip and returns the stored shape; does not enable the overlay or new UI. */
+  setOverlayEntryStyle?: (style: 'ball' | 'strip') => 'ball' | 'strip'
   /** 0.14: user-owned model screen-access scope. This is settings-only, not a model tool. */
   getScreenScope?: () => 'virtual-only' | 'real-only' | 'all'
   /** Persist a user-selected screen scope and return the normalized shell value. */

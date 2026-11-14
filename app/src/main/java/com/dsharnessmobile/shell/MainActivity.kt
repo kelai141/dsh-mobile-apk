@@ -107,6 +107,9 @@ class MainActivity : ComponentActivity() {
   @Volatile private var initialAuthRecoveryPending = false
   private val initialAuthRecoveryInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
   internal val pageUiActive: Boolean get() = pageRecovery.foreground && !pageRecovery.rendererGone && !isFinishing && !isDestroyed
+  // Overlay RPC is allowed while backgrounded, never before readiness or after renderer/activity teardown.
+  private var overlayDocumentReady = false
+  private val overlayPageReady: Boolean get() = webViewReady && overlayDocumentReady && !pageRecovery.rendererGone && !isFinishing && !isDestroyed
   internal val webViewReady: Boolean get() = ::webView.isInitialized && !pageRecovery.rendererGone
   internal val guideViewReady: Boolean get() = ::guideView.isInitialized
 
@@ -556,6 +559,7 @@ class MainActivity : ComponentActivity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    OverlayHostVisibility.install(application)
     // 性能审计 #6：冷启动细分段基准。开发者调试开关关闭时本行只读一次已缓存的布尔值，
     // 不取时刻、不碰磁盘（见 BootPhaseTrace 头注「有界性」）。
     //
@@ -1001,6 +1005,23 @@ class MainActivity : ComponentActivity() {
         }
       }
     }
+    // v2 页面宿主 API 求值器（design.md §6.2 N3/N4）：原生按需单次求值 window.__dshOverlayHost.*，
+    // 取会话/工作区/命令真源。只在主线程、只在页面就绪时求值；未就绪回 null，调用方走降级分支。
+    OverlayPageHost.readiness = { overlayPageReady }
+    OverlayPageHost.evaluator = { expr, callback ->
+      runOnUiThread {
+        try {
+          if (overlayPageReady) {
+            webView.evaluateJavascript(expr) { raw -> callback(raw) }
+          } else {
+            callback(null)
+          }
+        } catch (_: Exception) {
+          callback(null)
+        }
+      }
+    }
+    // 本体回到前台：悬浮入口隐藏（服务与后台 Agent 不停，overlay v2 的 onHostForeground 收口）。
     // 0.13.2 W7 + ST-02：悬浮球开关已开且权限在场时补启。权限缺失时 OverlayController 把偏好
     // 回落 false，本行随即短路——不再每次回前台弹系统页。
     // S2-17：另外结算「用户已经表达过开启意图、刚去系统页授了权」这一笔——旧实现里这条路径
@@ -1100,6 +1121,7 @@ class MainActivity : ComponentActivity() {
   }
 
   override fun onPause() {
+    // 本体退到后台：悬浮入口恢复（v2 只动窗口，服务与 Agent 不受影响）。
     // 退后台不继续解码视频（省电、避免后台播放）；回前台且仍在等引擎时续播。
     splashOverlay?.pause()
     pageRecovery.pause()
@@ -1181,6 +1203,9 @@ class MainActivity : ComponentActivity() {
     if (::webView.isInitialized && webViewRef === webView) webViewRef = null
     // 悬浮球避让帧消费者清除（Service 侧持有引用，避免 Activity 泄漏）
     OverlayService.frameConsumer = null
+    // v2 页面宿主求值器同理：持着本 Activity 的 WebView，不清就是一条泄漏引用。
+    OverlayPageHost.evaluator = null
+    OverlayPageHost.readiness = null
     dirPickerController.cancelTtl()
     guideRenderer.cancelPulse()
     // 兜底释放：Activity 销毁时清掉可能仍持有的屏幕常亮锁。
@@ -1291,6 +1316,23 @@ class MainActivity : ComponentActivity() {
    * language the shell never applied. The script reads the shell preference on
    * every document, so the reload after a switch is enough to converge.
    */
+  /**
+   * 安装内核能力垫片（见 [WebViewPolyfill]）。
+   *
+   * 与 locale bootstrap 同一机制（document-start），但**必须排在它之前**：
+   * 垫片是页面能不能跑起来的前提，其它注入都建立在「页面活着」之上。
+   *
+   * 内核不支持 DOCUMENT_START_SCRIPT 时发可见告警而不是静默跳过 —— 那种情况下
+   * 页面会在模块求值期直接崩，得让人能立刻把「引擎离线」指回内核版本。
+   */
+  private fun installWebViewPolyfills() {
+    try {
+      WebViewCompat.addDocumentStartJavaScript(webView, WebViewPolyfill.SCRIPT, setOf("*"))
+    } catch (t: Throwable) {
+      Log.w(WebViewPolyfill.TAG, "WARNING: WebView polyfills NOT installed; page may crash on missing URL.canParse: " + t.message)
+    }
+  }
+
   private fun installLocaleBootstrap() {
     try {
       val script = AppLanguage.bootstrapScript(AppLanguage.mode(this), AppLanguage.systemLanguages(this))
@@ -1373,6 +1415,9 @@ class MainActivity : ComponentActivity() {
     // 版本敏感设置全部走 WebViewShim（单面真源）；引擎页吃共享 baseline 档。
     // 0.13.3：textZoom 持久化退役（D6 收益省略）——上游 ui-theme fontSize 原生管内容字号。
     WebViewShim.applyBaseline(webView.settings, appOwnsTheme = true)
+    // 内核能力垫片必须最先注入：引擎 bundle 在模块求值期就会调用 URL.canParse，
+    // 晚一步整块 entry 就崩（设备实测 WebView 110 + "URL.canParse is not a function"）。
+    installWebViewPolyfills()
     // Locale bootstrap: dsh reads its preference through __DSH_LOCALE__ inside
     // the page. Inject it before the first load so the engine UI and the shell
     // agree on the language from the first frame.
@@ -1512,6 +1557,7 @@ class MainActivity : ComponentActivity() {
         // 新文档：上一文档的层栈信号作废（页面插件在新文档里重新推）。
         if (isEngineSource(url)) backGateState.onPageStarted()
         // 新文档＝还没有任何像素：露出请求若已发生，回到「透明等首帧」状态（#242）。
+        overlayDocumentReady = false
         if (isEngineSource(url)) webFrameCommitted = false
       }
 
@@ -1579,7 +1625,12 @@ class MainActivity : ComponentActivity() {
         val text = message?.message() ?: return false
         return try {
           when {
+            text == "[dsh-overlay-state-changed]" && isEngineSource(trustedTopFrameUrl) && isEngineSource(message.sourceId()) -> {
+              runOnUiThread { OverlayService.instance?.v2?.onPageStateInvalidated() }
+              true
+            }
             LogCollector.isPageReadyMessage(text) -> {
+              overlayDocumentReady = true
               pageRecovery.pageReady()
               engineFlow.onPageReadyReported(text)
               onSplashPageReady()
@@ -1695,6 +1746,7 @@ class MainActivity : ComponentActivity() {
           // 常驻浮层面板的固定文案也只在创建时读过 t(...)，不重设就永远停在上一次的语言
           //（真机缺陷 2026-10-29：切英文后「隐藏 / 查看汇报」仍是中文）。
           runCatching { OverlayService.instance?.panel?.applyLanguage() }
+          runCatching { OverlayService.instance?.v2?.onLanguageChanged() }
           stored
         },
         onSettingsPathRequest = { engineManager.settingsDocumentPath() },
@@ -1745,6 +1797,16 @@ class MainActivity : ComponentActivity() {
         // 0.13.2 W7：悬浮球开关（控制器处理 overlay 权限引导；onResume 补启已授权的开关）。
         onGetOverlayEnabled = { OverlayController.isEnabled(this) },
         onSetOverlayEnabled = { enable -> OverlayController.setEnabled(this, enable) },
+        // Settings own explicit shape selection; keep the existing preference and rollout flag.
+        onGetOverlayEntryStyle = { OverlayV2.entryStyle(this) },
+        onSetOverlayEntryStyle = { requested ->
+          if (requested == OverlayV2.STYLE_BALL || requested == OverlayV2.STYLE_STRIP) {
+            OverlayV2.prefs(this).edit().putString(OverlayV2.KEY_ENTRY_STYLE, requested).apply()
+            // JavascriptInterface callbacks are not on the UI thread; only v2 owns its windows.
+            runOnUiThread { OverlayService.instance?.v2?.onEntryStyleChanged() }
+          }
+          OverlayV2.entryStyle(this)
+        },
         // 0.14：开放屏幕范围由用户设置面独占写入；默认 virtual-only，模型工具只读并由壳侧执行面强制。
         onGetScreenScope = { ScreenScopePrefs.current(this).wire },
         onSetScreenScope = { raw -> ScreenScopePrefs.set(this, raw).wire },

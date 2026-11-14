@@ -758,6 +758,36 @@ scripts/verify-to-bottom-gutter.mjs
 # 底部预留的两条通道（#783 缺陷 A）：同属「决策抽出来给 JVM 单测驱动」的纯对象，
 # 与 MainActivity 的 insets 监听同属 K01；显式登记，避免被误当成可 glob 收走的细节。
 app/src/main/java/com/dsharnessmobile/shell/BottomInsetPolicy.kt
+app/src/main/java/com/dsharnessmobile/shell/OverlayCardMorphVisual.kt
+app/src/main/java/com/dsharnessmobile/shell/OverlayTouchRegion.kt
+app/src/main/java/com/dsharnessmobile/shell/OverlayAttachProxyActivity.kt
+app/src/main/java/com/dsharnessmobile/shell/OverlayCardView.kt
+app/src/main/java/com/dsharnessmobile/shell/OverlayCommandDrawer.kt
+app/src/main/java/com/dsharnessmobile/shell/OverlayComposer.kt
+app/src/main/java/com/dsharnessmobile/shell/OverlayEntryView.kt
+app/src/main/java/com/dsharnessmobile/shell/OverlayGestureRouter.kt
+app/src/main/java/com/dsharnessmobile/shell/OverlayCardHandleIntent.kt
+app/src/main/java/com/dsharnessmobile/shell/OverlayMarkdown.kt
+app/src/main/java/com/dsharnessmobile/shell/OverlayMotion.kt
+app/src/main/java/com/dsharnessmobile/shell/OverlayMotionSpec.kt
+app/src/main/java/com/dsharnessmobile/shell/OverlayReveal.kt
+app/src/main/java/com/dsharnessmobile/shell/OverlayPageHost.kt
+app/src/main/java/com/dsharnessmobile/shell/OverlayPillView.kt
+app/src/main/java/com/dsharnessmobile/shell/OverlayUiModel.kt
+app/src/main/java/com/dsharnessmobile/shell/OverlayV2.kt
+app/src/main/java/com/dsharnessmobile/shell/OverlayViewTypes.kt
+app/src/main/java/com/dsharnessmobile/shell/OverlayWindowFrames.kt
+app/src/main/java/com/dsharnessmobile/shell/OverlayWindows.kt
+app/src/main/java/com/dsharnessmobile/shell/WorkspaceListParse.kt
+app/src/main/java/com/dsharnessmobile/shell/OverlayHostVisibility.kt
+# 发送/停止按钮的自绘图形（配色与形状由用户参考图逐像素定），以及系统 WebView 内核能力垫片。
+# 垫片与 locale bootstrap 同批 document-start 注入，是本轮「引擎离线」真因的修法
+# （WebView 110 缺 URL.canParse，页面在模块求值期即崩），故随本查点显式登记。
+app/src/main/java/com/dsharnessmobile/shell/OverlayActionGlyph.kt
+app/src/main/java/com/dsharnessmobile/shell/WebViewPolyfill.kt
+scripts/verify-overlay-v2.mjs
+scripts/verify-overlay-v2.test.mjs
+scripts/verify-state-sync-cdp.test.mjs
 # composer 卡片抬到键盘上沿的常驻注入脚本（issue #197 机制①）：同样是「判据抽出来给 JVM
 # 单测驱动的纯对象」（无 Android 依赖），注入点是 MainActivity.pushComposerImePx，
 # 与本块 BottomInsetPolicy 同属 K01 的 insets/键盘通道；显式登记，不靠 glob 收。

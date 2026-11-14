@@ -13,7 +13,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useShellState } from '../mobile/use-shell-state.ts'
 import { describeHttpFailure, noticeDataAttrs, type Notice } from '../user-copy.ts'
 import { Button, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
-import { tr } from '../i18n.ts'
+import { observeDocumentLanguage, tr } from '../i18n.ts'
 import { RuntimeCacheRow } from './runtime-cache.tsx'
 import type { PropsRenderSlots, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: pulls in the settings.section owner share (erased at build time, types only).
@@ -34,6 +34,20 @@ function readOverlayEnabled(): boolean {
     return window.androidBridge?.getOverlayEnabled?.() ?? false
   } catch {
     return false
+  }
+}
+
+type OverlayEntryShape = 'ball' | 'strip'
+
+/** An unreadable/missing bridge is not a default-ball preference or a successful write. */
+function readOverlayEntryStyle(): OverlayEntryShape | undefined {
+  try {
+    const bridge = window.androidBridge
+    if (typeof bridge?.getOverlayEntryStyle !== 'function' || typeof bridge.setOverlayEntryStyle !== 'function') return undefined
+    const stored = bridge.getOverlayEntryStyle()
+    return stored === 'ball' || stored === 'strip' ? stored : undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -71,6 +85,9 @@ const confirmText = (): Record<'restart' | 'close' | 'clean', { title: string; d
  * @returns the section element tree.
  */
 export function DevSection({ renderSlot }: DevSectionProps) {
+  // The shell may update html[lang] after mounting; do not freeze settings copy at startup.
+  const [, refreshLanguage] = useState(0)
+  useEffect(() => observeDocumentLanguage(() => refreshLanguage((revision) => revision + 1)), [])
   // ST-09：四处壳侧状态全部经 useShellState 订阅（挂载 + 可见/回前台重读 + 写后回读），
   // 不再裸写一次性桥读 —— 组件内不得在 useState 初值器里直读 window.androidBridge。
   const [devLog, refreshDevLog] = useShellState<boolean>(() => {
@@ -84,6 +101,8 @@ export function DevSection({ renderSlot }: DevSectionProps) {
   // ST-02：展示值一律以桥回读为准（壳侧 = 偏好 && 权限 && 服务在场），不做乐观置位。
   const [overlayOn, refreshOverlay] = useShellState<boolean>(readOverlayEnabled)
   const [overlayMsg, setOverlayMsg] = useState<string | null>(null)
+  const [entryStyle, refreshEntryStyle] = useShellState(readOverlayEntryStyle)
+  const [entryStyleFailed, setEntryStyleFailed] = useState(false)
   const [restarting, setRestarting] = useState(false)
   /** 重启/刷新等动作的失败回执（S3-15：旧实现在桥缺席时显示「重启中…」两秒后自己变回去）。 */
   const [actionMsg, setActionMsg] = useState<Notice | null>(null)
@@ -253,6 +272,24 @@ export function DevSection({ renderSlot }: DevSectionProps) {
     }
   }, [refreshOverlay])
 
+  const changeEntryStyle = useCallback((requested: string) => {
+    if (requested !== 'ball' && requested !== 'strip') return
+    setEntryStyleFailed(false)
+    try {
+      const bridge = window.androidBridge
+      if (readOverlayEntryStyle() === undefined || bridge?.setOverlayEntryStyle === undefined) {
+        setEntryStyleFailed(true)
+      } else {
+        bridge.setOverlayEntryStyle(requested)
+        // Read after writing, including refusal/mismatch; never show an optimistic shape.
+        setEntryStyleFailed(readOverlayEntryStyle() !== requested)
+      }
+    } catch {
+      setEntryStyleFailed(true)
+    }
+    refreshEntryStyle()
+  }, [refreshEntryStyle])
+
   // 0.13.1 W4：配置导入/导出（安全手改通道——引擎读私有目录，外部改共享副本无效）。
   const [configMsg, setConfigMsg] = useState<string | null>(null)
 
@@ -346,6 +383,25 @@ export function DevSection({ renderSlot }: DevSectionProps) {
         </div>
       </div>
       {overlayMsg !== null && <p className="dsh-dev-hint">{overlayMsg}</p>}
+      <label className="dsh-screen-scope-row" data-overlay-entry-setting>
+        <span>
+          <strong>{tr('新悬浮入口形态', 'New floating entry shape')}</strong>
+          <small>{tr('仅对新悬浮界面生效；此设置不会启用新界面或开启悬浮窗，旧版入口保持不变。', 'Requires the new overlay UI. This setting does not enable it or turn on the overlay; the legacy entry is unchanged.')}</small>
+          <small>{tr('自由球可拖动；贴边后继续向外滑可收成细条，细条向屏内拉出恢复球。', 'Drag the free ball; after reaching either edge, slide farther outward to make a strip. Pull the strip inward to restore the ball.')}</small>
+          {entryStyle === undefined && <small>{tr('当前应用无法读写入口形态，请更新或重新打开应用后重试。', 'The entry shape is unavailable in this app. Update or reopen the app and try again.')}</small>}
+        </span>
+        <select
+          aria-label={tr('新悬浮入口形态', 'New floating entry shape')}
+          disabled={entryStyle === undefined}
+          value={entryStyle ?? ''}
+          onChange={(event) => changeEntryStyle(event.target.value)}
+        >
+          <option value="" disabled>{tr('不可用', 'Unavailable')}</option>
+          <option value="ball">{tr('自由悬浮球', 'Free ball')}</option>
+          <option value="strip">{tr('边缘细条', 'Edge strip')}</option>
+        </select>
+      </label>
+      {entryStyleFailed && <p role="status" className="dsh-dev-hint">{tr('入口形态未保存，请重新打开应用后重试。', 'The entry shape was not saved. Reopen the app and try again.')}</p>}
 
       {/* 0.13.1 W4：配置导入/导出（安全手改通道；引擎读私有目录，改共享目录副本无效） */}
       <div className="dsh-gs-row dsh-gs-stacked">

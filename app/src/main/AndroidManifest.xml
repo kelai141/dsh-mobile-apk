@@ -179,6 +179,17 @@
       </intent-filter>
     </activity>
 
+    <!-- 悬浮输入区的附件取件代理（entry_ui_v2，2026-11-12）：透明、无界面、取完即退。
+         为什么必须是 Activity：拍照/相册/文件三种取件都要走 Activity result 通道，而输入区住在
+         OverlayService 里。taskAffinity 置空 + excludeFromRecents；必须保留历史直到 ActivityResult 返回，
+         也不该把主界面顶走；Theme.Translucent.NoTitleBar 保证没有任何可见过渡。 -->
+    <activity
+      android:name=".OverlayAttachProxyActivity"
+      android:exported="false"
+      android:excludeFromRecents="true"
+      android:taskAffinity=""
+      android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
     <!-- 内置控制台：快照 bash 交互终端（引擎未运行时也可排查）。 -->
     <activity android:name=".RepairActivity" android:exported="false"
       android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation"

@@ -94,6 +94,18 @@ class OverlayPanel(private val svc: OverlayService) {
   private var approvalArmedAtMs = 0L
   private var pendingKey = ""                                    // 当前卡指纹（kind:eventId），变化即清作答态
   private var renderedCardKey = ""                               // 卡片已渲染指纹（防 live 流重绘打断输入）
+  private val questionDrafts = HashMap<String, QuestionDraft>()
+  private val questionTextBindings = HashMap<String, QuestionTextBinding>()
+  private val eventResults = HashMap<String, OverlayQuestionResult>()
+  private val qSkipped = HashSet<String>()
+
+  private data class QuestionDraft(
+    val singles: Map<String, String>, val customs: Map<String, String>,
+    val multis: Map<String, List<String>>, val expanded: Set<String>, val skipped: Set<String>, val page: Int,
+  )
+  private data class QuestionTextBinding(
+    val question: PendingQuestion, val sessionId: String, val activeAgentId: String, val questionId: String,
+  )
 
   /** 服务 onDestroy 联动：先收 picker 顶层窗口（issue #1359），再关 mux 长连接。 */
   internal fun destroy() {
@@ -194,23 +206,116 @@ class OverlayPanel(private val svc: OverlayService) {
   }
 
   /** 当前会话（未选目标 = 全部）的第一条待处理；审批优先。 */
+  private var selectedPendingEventId: String? = null
+
+  internal fun selectPending(eventId: String): Boolean {
+    val agentId = pendingApprovals[eventId]?.agentId ?: pendingQuestions[eventId]?.agentId ?: return false
+    if (!svc.matchesTargetAgent(agentId)) return false
+    selectedPendingEventId = eventId
+    renderPendingCard(true)
+    return true
+  }
+
   private fun currentPending(): Pair<String, Any>? {
     val sid = svc.activeSessionId
-    val ok = { s: String -> sid.isEmpty() || s == sid }
+    val agent = svc.currentAgentId
+    // P0-1：agentId 与 sessionId 是两个域。旧实现直接拿 agentId 跟 activeSessionId 比，
+    // 在「agentId 被写进 activeSessionId」的旧缺陷下碰巧成立；域切分修好之后必须两个都比，
+    // 否则待答卡会在目标会话确定的那一刻整体消失（用户视角 = 审批/提问提示丢了）。
+    val ok = { s: String -> svc.matchesTargetAgent(s) }
+    selectedPendingEventId?.let { id ->
+      pendingApprovals[id]?.takeIf { ok(it.agentId) }?.let { return "approval" to it }
+      pendingQuestions[id]?.takeIf { ok(it.agentId) }?.let { return "question" to it }
+      selectedPendingEventId = null
+    }
     pendingApprovals.values.firstOrNull { ok(it.agentId) }?.let { return "approval" to it }
     pendingQuestions.values.firstOrNull { ok(it.agentId) }?.let { return "question" to it }
     return null
   }
 
   internal fun onPendingChanged() {
+    questionDrafts.keys.retainAll(pendingQuestions.keys)
+    questionTextBindings.keys.retainAll(pendingQuestions.keys)
+    eventResults.keys.retainAll(pendingQuestions.keys)
     val key = currentPending()?.let { "${it.first}:${(it.second as? PendingApproval)?.eventId ?: (it.second as? PendingQuestion)?.eventId ?: ""}" } ?: ""
     if (key != pendingKey) {
+      saveCurrentQuestionDraft()
       pendingKey = key
-      multiSel.clear(); qSingle.clear(); qCustom.clear(); qOptsExpanded.clear(); qPage = 0; renderedCardKey = ""
+      multiSel.clear(); qSingle.clear(); qCustom.clear(); qOptsExpanded.clear(); qSkipped.clear(); qPage = 0; renderedCardKey = ""
+      if (key.startsWith("question:")) questionDrafts[key.removePrefix("question:")]?.let { draft ->
+        qSingle.putAll(draft.singles); qCustom.putAll(draft.customs)
+        for ((id, values) in draft.multis) multiSel[id] = ArrayList(values)
+        qOptsExpanded.addAll(draft.expanded); qSkipped.addAll(draft.skipped); qPage = draft.page
+      }
       // 卡换了就撤臂：待确认态绝不跨卡片存活（否则后来的一次单击会变成放行）。
       approvalArmedId = null
     }
     updateBallOnly()
+    // v2 的卡片也要显示待答 chip：数据真源仍在这里（mux 事件只由 MuxClient 直连接收），
+    // 两个 UI 都从这一份 map 派生，不各自维护一份。
+    svc.v2?.onPendingChanged()
+  }
+
+  private fun saveCurrentQuestionDraft() {
+    if (!pendingKey.startsWith("question:")) return
+    val eventId = pendingKey.removePrefix("question:")
+    if (eventId !in pendingQuestions) return
+    questionDrafts[eventId] = QuestionDraft(
+      qSingle.toMap(), qCustom.toMap(), multiSel.mapValues { it.value.toList() },
+      qOptsExpanded.toSet(), qSkipped.toSet(), qPage,
+    )
+  }
+
+  /** 当前题的文本入口；index 为 0-based，票据仍由原 pending event 持有。 */
+  internal fun questionTextTarget(eventId: String): OverlayQuestionTextTarget? {
+    val qe = pendingQuestions[eventId] ?: return null
+    if (qe.submittedAt > 0L || !svc.matchesTargetAgent(qe.agentId) || eventResults.containsKey(eventId)) return null
+    if (qe.items.length() == 0) return null
+    val ids = (0 until qe.items.length()).map { qe.items.optJSONObject(it)?.optString("id").orEmpty() }
+    if (ids.any { it.isEmpty() } || ids.toSet().size != ids.size) return null
+    selectedPendingEventId = eventId
+    onPendingChanged()
+    qPage = qPage.coerceIn(0, qe.items.length() - 1)
+    val item = qe.items.optJSONObject(qPage) ?: return null
+    val qid = item.optString("id")
+    questionTextBindings[eventId] = QuestionTextBinding(qe, svc.activeSessionId, svc.currentAgentId, qid)
+    return OverlayQuestionTextTarget(eventId, qid, qPage, qe.items.length(), item.optString("question"), qCustom[qid].orEmpty(), qe.agentId)
+  }
+
+  /** true = 当前题已安全保存/推进，或末题已明确受理；false 一律保留调用方输入草稿。 */
+  internal fun questionTextAnswer(eventId: String, questionId: String, text: String, onResult: (Boolean) -> Unit) {
+    val qe = pendingQuestions[eventId]
+    val binding = questionTextBindings[eventId]
+    if (qe == null || binding == null || qe !== binding.question || qe.submittedAt > 0L ||
+      eventResults.containsKey(eventId) || binding.sessionId != svc.activeSessionId ||
+      binding.activeAgentId != svc.currentAgentId || !svc.matchesTargetAgent(qe.agentId) ||
+      binding.questionId != questionId || selectedPendingEventId != eventId) { onResult(false); return }
+    val item = qe.items.optJSONObject(qPage)
+    val custom = text.trim()
+    if (item == null || item.optString("id") != questionId || custom.isEmpty()) { onResult(false); return }
+    qCustom[questionId] = custom
+    qSkipped.remove(questionId)
+    if (!item.optBoolean("multiSelect", false)) qSingle.remove(questionId)
+    if (qPage < qe.items.length() - 1) {
+      qPage++
+      saveCurrentQuestionDraft()
+      renderedCardKey = ""
+      renderPendingCard(true)
+      onResult(true)
+      return
+    }
+    val unanswered = (0 until qe.items.length()).any { index ->
+      val question = qe.items.optJSONObject(index) ?: return@any true
+      val id = question.optString("id")
+      id.isEmpty() || (id !in qSkipped && qCustom[id].isNullOrBlank() && qSingle[id].isNullOrBlank() && multiSel[id].isNullOrEmpty())
+    }
+    saveCurrentQuestionDraft()
+    if (unanswered) {
+      svc.flashStatus(t("还有题目未作答，请在完整问答面板补齐或明确跳过", "Some questions are unanswered; complete or explicitly skip them in the full question panel"))
+      onResult(false)
+      return
+    }
+    respondQuestion(qe, onResult)
   }
 
   /** 展开合体圆角矩形（上区状态 + 下区输入，radius 30dp）。 */
@@ -992,7 +1097,7 @@ class OverlayPanel(private val svc: OverlayService) {
       foot.addView(View(svc), LinearLayout.LayoutParams(0, 1, 1f))
       if (qPage > 0) {
         foot.addView(pendingChip(t("跳过本题", "Skip this question"), filled = false, red = false, dp) {
-          qSingle.remove(qid); qCustom.remove(qid); multiSel.remove(qid)
+          qSingle.remove(qid); qCustom.remove(qid); multiSel.remove(qid); qSkipped.add(qid)
           qPage = (qPage + 1).coerceAtMost(n - 1)
           renderPendingCard(true)
         }, lpChip(dp))
@@ -1059,6 +1164,18 @@ class OverlayPanel(private val svc: OverlayService) {
     }.start()
   }
 
+  /** 新文本入口专用 strict 回包；旧审批/完整表单的传输协议保持原样。 */
+  private fun postQuestionTextResult(eventId: String, outcome: JSONObject, onResult: (OverlayQuestionResult) -> Unit) {
+    val clientId = eventsClientId
+    if (clientId.isEmpty()) { onResult(OverlayQuestionResult.REJECTED); return }
+    val args = JSONObject().put("clientId", clientId).put("eventId", eventId).put("outcome", outcome)
+    svc.postRpc("\$events/result", args) { code, body ->
+      // 仅原流实例的受理回包才有效；换代后即便200也不能声称本题已答。
+      val result = if (clientId != eventsClientId) OverlayQuestionResult.UNKNOWN else overlayQuestionResult(code, body)
+      onResult(result)
+    }
+  }
+
   private fun respondApproval(a: PendingApproval, outcome: String) {
     val outcomeJson = JSONObject().put("kind", "result").put("value", outcome)
     postEventResult(a.eventId, outcomeJson) { accepted ->
@@ -1083,24 +1200,35 @@ class OverlayPanel(private val svc: OverlayService) {
     }
   }
 
+  /**
+   * v2 卡片上的审批按钮入口（允许一次 / 拒绝）。
+   *
+   * 复用 [respondApproval]：受理语义（HTTP 200 ≠ 已处理，15s 兜底）、乐观忙态、状态行提示、
+   * 完成后移除卡片的时机全在那一处；v2 只负责把「点了哪张卡的哪个按钮」翻译成 outcome。
+   */
+  internal fun respondApprovalFromUi(eventId: String, allow: Boolean) {
+    val a = pendingApprovals[eventId] ?: return
+    respondApproval(a, if (allow) "allowed-once" else "rejected")
+  }
+
   /** 提问作答：answers 按 questions 原序配对（协议硬约束）；单选 custom 与 selected 互斥。
    *  0.1.2-rc.1：selected 由旧协议的单 label 字符串改为 label 数组。 */
-  private fun respondQuestion(qe: PendingQuestion) {
-    val arr = org.json.JSONArray()
-    for (i in 0 until qe.items.length()) {
-      val item = qe.items.optJSONObject(i) ?: continue
-      val qid = item.optString("id")
-      val custom = qCustom[qid]?.trim().orEmpty()
-      val sel = ArrayList<String>()
-      if (item.optBoolean("multiSelect", false)) multiSel[qid]?.let { sel.addAll(it) }
-      else if (custom.isEmpty()) qSingle[qid]?.let { sel.add(it) }
-      val entry = JSONObject().put("id", qid).put("selected", org.json.JSONArray(sel))
-      if (custom.isNotEmpty()) entry.put("custom", custom)
-      arr.put(entry)
-    }
-    val value = JSONObject().put("answers", arr)
+  private fun respondQuestion(qe: PendingQuestion, onResult: ((Boolean) -> Unit)? = null) {
+    if (pendingQuestions[qe.eventId] !== qe || qe.submittedAt > 0L || !svc.matchesTargetAgent(qe.agentId) || eventResults.containsKey(qe.eventId)) { onResult?.invoke(false); return }
+    val expectedSession = svc.activeSessionId
+    val expectedAgent = svc.currentAgentId
+    eventResults[qe.eventId] = OverlayQuestionResult.PENDING
+    val value = JSONObject().put("answers", overlayQuestionAnswers(qe.items, qSingle, multiSel, qCustom))
     val outcomeJson = JSONObject().put("kind", "result").put("value", value)
-    postEventResult(qe.eventId, outcomeJson) { accepted ->
+    val complete: (OverlayQuestionResult) -> Unit = { result ->
+      val current = pendingQuestions[qe.eventId]
+      val contextMatches = current === qe && expectedSession == svc.activeSessionId && expectedAgent == svc.currentAgentId && svc.matchesTargetAgent(qe.agentId)
+      val accepted = result == OverlayQuestionResult.ACCEPTED && contextMatches
+      when (result) {
+        OverlayQuestionResult.REJECTED -> eventResults.remove(qe.eventId)
+        OverlayQuestionResult.ACCEPTED, OverlayQuestionResult.UNKNOWN -> eventResults[qe.eventId] = result
+        OverlayQuestionResult.PENDING -> Unit
+      }
       if (accepted) {
         // 0.13.8 G1-4：受理 ≠ 移除，等引擎 cancel/turn-end 收敛（同 respondApproval）
         val entry = pendingQuestions[qe.eventId]
@@ -1117,12 +1245,16 @@ class OverlayPanel(private val svc: OverlayService) {
         svc.markBusyOptimistic()
         svc.flashStatus(t("已回答（等待引擎确认）", "Answered (waiting for the engine)"))
         onPendingChanged()
-      } else svc.flashStatus(t("应答失败", "Failed to answer"))
+      } else svc.flashStatus(if (result == OverlayQuestionResult.UNKNOWN) t("作答结果未确认，草稿已保留；请勿重复提交", "Answer outcome unknown; draft kept, do not resubmit") else t("应答失败", "Failed to answer"))
+      onResult?.invoke(accepted)
     }
+    if (onResult != null) postQuestionTextResult(qe.eventId, outcomeJson, complete)
+    else postEventResult(qe.eventId, outcomeJson) { accepted -> complete(if (accepted) OverlayQuestionResult.ACCEPTED else OverlayQuestionResult.REJECTED) }
   }
 
   /** 跳过提问 = 拒绝该 waterfall（outcome rejected；审批无取消通道）。 */
   private fun dismissQuestion(qe: PendingQuestion) {
+    if (eventResults.containsKey(qe.eventId)) { svc.flashStatus(t("作答处理中或结果未确认，请勿重复提交", "Answer pending or unknown; do not resubmit")); return }
     val outcomeJson = JSONObject().put("kind", "rejected").put(
       "error",
       JSONObject().put("name", "UserQuestionError").put("message", "dismissed from overlay").put("code", "cancelled"),
@@ -1524,6 +1656,52 @@ class OverlayPanel(private val svc: OverlayService) {
     pickerSessions.take(cap).forEach { s ->
       addRow(pickerSessionLabelText(s, english), s.id, s.running, s.id == svc.activeSessionId)
     }
+  }
+}
+
+/** 只供视图显示当前题；index 为 0-based，count 是本次问题总数。 */
+internal data class OverlayQuestionTextTarget(
+  val eventId: String,
+  val questionId: String,
+  val index: Int,
+  val count: Int,
+  val prompt: String,
+  val currentCustom: String,
+  val agentId: String,
+)
+
+internal enum class OverlayQuestionResult { PENDING, ACCEPTED, REJECTED, UNKNOWN }
+
+/** 两条 UI 共用原 answers 协议：保持题序、保多选，单选文本与 selected 互斥。 */
+internal fun overlayQuestionAnswers(
+  items: org.json.JSONArray,
+  singles: Map<String, String>, multis: Map<String, List<String>>, customs: Map<String, String>,
+): org.json.JSONArray {
+  val answers = org.json.JSONArray()
+  for (index in 0 until items.length()) {
+    val item = items.optJSONObject(index) ?: continue
+    val id = item.optString("id")
+    val custom = customs[id]?.trim().orEmpty()
+    val selected = if (item.optBoolean("multiSelect", false)) multis[id].orEmpty()
+      else if (custom.isEmpty()) listOfNotNull(singles[id]) else emptyList()
+    val answer = JSONObject().put("id", id).put("selected", org.json.JSONArray(selected))
+    if (custom.isNotEmpty()) answer.put("custom", custom)
+    answers.put(answer)
+  }
+  return answers
+}
+
+/** $events/result 的成功值为 void，必须读 literal result.ok；200/畸形回包不可当受理。 */
+internal fun overlayQuestionResult(code: Int, body: String): OverlayQuestionResult {
+  if (code == -1 || code == 408 || code >= 500) return OverlayQuestionResult.UNKNOWN
+  if (code != 200) return OverlayQuestionResult.REJECTED
+  val envelope = try { JSONObject(body) } catch (_: Exception) { null }
+  if (envelope?.opt("type") != "server-response" || (envelope.opt("rpcId") as? String).isNullOrBlank()) return OverlayQuestionResult.UNKNOWN
+  val result = envelope.optJSONObject("result") ?: return OverlayQuestionResult.UNKNOWN
+  return when (result.opt("ok")) {
+    true -> OverlayQuestionResult.ACCEPTED
+    false -> OverlayQuestionResult.REJECTED
+    else -> OverlayQuestionResult.UNKNOWN
   }
 }
 

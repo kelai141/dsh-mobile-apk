@@ -12,6 +12,9 @@
 //   node scripts/verify-state-sync.mjs --serial 127.0.0.1:16416 [--pkg com.dsharnessmobile.shell] [--ws <cdp-ws-url>]
 // 退出码：0 = 全部用例 PASS；1 = 有用例 FAIL；2 = 用法/前置不满足。
 import { spawnSync } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
+
+const IS_MAIN = !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
 
 const argv = process.argv.slice(2)
 const argOf = (name, def) => { const i = argv.indexOf('--' + name); return i >= 0 ? (argv[i + 1] ?? def) : def }
@@ -48,53 +51,143 @@ export function makeAdb(serial) {
   return shell
 }
 
-/** 页面观测：CDP Runtime.evaluate（WebView 页面里读桥=getter 事实值）。 */
-export function makeCdp(getWsUrl) {
-  let ws = null
+/** 页面观测只执行调用方给出的只读表达式；缺桥不等于权限 false。 */
+export function makeCdp(getWsUrl, {
+  WebSocketImpl = globalThis.WebSocket, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout,
+} = {}) {
+  let current = null
+  let generation = 0
   let nextId = 1
+  let forceResolve = false
+  let lastDiagnostic = null
   const pending = new Map()
-  // 每次（重）连都重新解析目标：页面重载/应用重启后 target id 与进程号都会变，旧 ws URL 恒 404。
-  const connect = () => Promise.resolve().then(getWsUrl).then((url) => new Promise((resolve, reject) => {
-    ws = new WebSocket(url)
-    ws.onopen = () => resolve()
-    ws.onerror = () => reject(new Error('CDP 连接失败（ws 不可达或目标已消失）'))
-    // 页面重载 / 应用重启会关掉旧 target：清空 pending 并标记可重连，不抛错（否则一次重启即中止整轮）。
-    ws.onclose = () => {
-      ws = null
-      for (const [id, p] of pending) { pending.delete(id); p({ retryable: true }) }
+  const note = (kind, detail) => { lastDiagnostic = { kind, detail } }
+  const reset = (reason = 'reset') => {
+    const old = current
+    current = null
+    generation += 1
+    forceResolve = true
+    if (old) {
+      old.cancelConnect?.()
+      for (const [id, p] of pending) if (p.generation === old.generation) { pending.delete(id); p.finish({ retryable: true, reason }) }
+      try { old.socket?.close() } catch { /* 已关闭 */ }
     }
-    ws.onmessage = (m) => {
-      try {
-        const msg = JSON.parse(m.data)
-        const p = pending.get(msg.id)
-        if (p) { pending.delete(msg.id); p(msg) }
-      } catch { /* 非 JSON 帧忽略 */ }
-    }
-  }))
-  const once = async (expression, timeoutMs) => {
-    if (ws === null) await connect()
-    const id = nextId++
-    const reply = await new Promise((resolve) => {
-      pending.set(id, resolve)
-      try {
-        ws.send(JSON.stringify({ id, method: 'Runtime.evaluate', params: { expression, returnByValue: true, awaitPromise: true } }))
-      } catch { pending.delete(id); resolve({ retryable: true }); return }
-      setTimeout(() => { if (pending.delete(id)) resolve({ retryable: true }) }, timeoutMs)
+  }
+  const connect = async (timeoutMs) => {
+    if (current) return current.ready
+    const connection = { generation: ++generation, socket: null, ready: null, cancelConnect: null }
+    current = connection
+    const forced = forceResolve
+    forceResolve = false
+    connection.ready = new Promise((resolve, reject) => {
+      let settled = false
+      let timer
+      const finish = (error) => {
+        if (settled) return
+        settled = true
+        clearTimer(timer)
+        connection.cancelConnect = null
+        if (error) reject(error); else resolve(connection)
+      }
+      connection.cancelConnect = () => finish(new Error('CDP connection superseded'))
+      timer = setTimer(() => {
+        note('transport-not-ready', 'CDP connection timeout')
+        finish(new Error('CDP connection timeout'))
+        // 先结算真实原因，再reset；否则cancelConnect会把timeout误报成superseded。
+        if (current === connection) reset('connect-timeout')
+      }, timeoutMs)
+      Promise.resolve().then(() => getWsUrl(forced)).then(url => {
+        if (current !== connection) { finish(new Error('CDP connection superseded')); return }
+        const socket = connection.socket = new WebSocketImpl(url)
+        socket.onopen = () => current === connection ? finish() : finish(new Error('CDP connection superseded'))
+        socket.onerror = () => {
+          note('transport', 'CDP 连接失败（ws 不可达或目标已消失）')
+          finish(new Error(lastDiagnostic.detail))
+          if (current === connection) reset('socket-error')
+        }
+        socket.onclose = () => {
+          // 旧 socket 的迟到 close 不能清掉已重解析的新 target，也不能结算新代次 pending。
+          if (current !== connection) return
+          finish(new Error('CDP target closed'))
+          reset('target-closed')
+        }
+        socket.onmessage = event => {
+          if (current !== connection) return
+          try {
+            const message = JSON.parse(event.data)
+            const entry = pending.get(message.id)
+            if (entry?.generation === connection.generation) { pending.delete(message.id); entry.finish(message) }
+          } catch { /* 非 JSON 帧忽略 */ }
+        }
+      }).catch(error => { finish(error); if (current === connection) reset('resolve-failed') })
     })
-    if (reply.retryable) return { retryable: true }
-    if (reply.error) throw new Error('CDP 错误: ' + JSON.stringify(reply.error))
+    return connection.ready
+  }
+  const once = async (expression, timeoutMs) => {
+    const deadline = now() + timeoutMs
+    let connection
+    try { connection = await connect(timeoutMs) } catch (error) {
+      const detail = error.message ?? String(error)
+      note('transport-not-ready', detail)
+      return { retryable: true, reason: detail }
+    }
+    if (current !== connection) return { retryable: true, reason: 'superseded' }
+    const remaining = deadline - now()
+    if (remaining <= 0) return { retryable: true, reason: 'evaluate-budget-exhausted' }
+    const id = nextId++
+    const reply = await new Promise(resolve => {
+      let timer
+      const finish = value => { clearTimer(timer); resolve(value) }
+      pending.set(id, { generation: connection.generation, finish })
+      timer = setTimer(() => { if (pending.delete(id)) finish({ retryable: true, reason: 'evaluate-timeout' }) }, remaining)
+      try {
+        connection.socket.send(JSON.stringify({ id, method: 'Runtime.evaluate', params: { expression, returnByValue: true, awaitPromise: true } }))
+      } catch { pending.delete(id); finish({ retryable: true, reason: 'send-failed' }) }
+    })
+    if (reply.retryable) return reply
+    if (reply.error) {
+      const detail = 'CDP 错误: ' + JSON.stringify(reply.error)
+      note('protocol-error', detail)
+      if (/Cannot find context|Execution context.*(destroyed|not found)|Inspected target navigated|Session closed/i.test(detail)) return { retryable: true, reason: detail }
+      throw new Error(detail)
+    }
+    if (reply.result?.exceptionDetails) {
+      const detail = 'CDP JS exception: ' + JSON.stringify(reply.result.exceptionDetails)
+      note('javascript-exception', detail)
+      if (/Cannot find context|Execution context.*(destroyed|not found)|Inspected target navigated/i.test(detail)) return { retryable: true, reason: detail }
+      // 信任/安全拒绝及真实 getter 异常必须显式失败，不能被当成 false 或静默重试。
+      throw new Error(detail)
+    }
     return { value: reply.result?.result?.value }
   }
-  /** 单次求值可重试（3s）；连续两次失败返回 undefined——调用方按「本轮未收敛」重试，不中止整轮。 */
-  const evaluate = async (expression) => {
-    let r = await once(expression, 3000)
-    if (r.retryable) {
-      try { await connect() } catch { /* 下一轮再试 */ }
-      r = await once(expression, 3000)
+  const evaluate = async (expression, { readOnlyBoolean = false, timeoutMs = 6000 } = {}) => {
+    const deadline = now() + timeoutMs
+    let result
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const remaining = deadline - now()
+      if (remaining <= 0) break
+      result = await once(expression, Math.min(3000, remaining))
+      if (!result.retryable && (!readOnlyBoolean || typeof result.value === 'boolean')) return result.value
+      note(result.retryable ? 'context-not-ready' : 'bridge-not-ready', result.reason ?? '只读 Boolean getter 未就绪（非 Boolean 回包）')
+      reset(lastDiagnostic.kind)
     }
-    return r.retryable ? undefined : r.value
+    return undefined
   }
-  return { evaluate, close: () => { try { ws?.close() } catch { /* 已关闭 */ } } }
+  return { evaluate, reset, close: () => reset('closed'), diagnostic: () => lastDiagnostic }
+}
+
+/** 端点文件仅作精确 target 筛选，不是监听器归属/鉴权证明；getter 仍受壳侧可信帧门。 */
+export function selectEngineTarget(list, engineOrigin) {
+  const origin = new URL(engineOrigin)
+  if (origin.protocol !== 'http:' || origin.hostname !== '127.0.0.1' || !origin.port || origin.pathname !== '/' || origin.username || origin.password) throw new Error('Invalid engine origin')
+  const candidates = Array.isArray(list) ? list.filter(target => {
+    try {
+      const url = new URL(target.url)
+      return target.type === 'page' && url.origin === origin.origin && url.pathname === '/' && typeof target.webSocketDebuggerUrl === 'string'
+    } catch { return false }
+  }) : []
+  if (candidates.length !== 1) throw new Error('Engine main WebView target not ready or ambiguous (matches=' + candidates.length + ')')
+  return candidates[0].webSocketDebuggerUrl
 }
 
 /**
@@ -120,7 +213,7 @@ export const CASES = [
     st: ['ST-01'],
     source: 'system: appops MANAGE_EXTERNAL_STORAGE',
     mutate: (adb, on) => adb(['appops', 'set', PKG, 'MANAGE_EXTERNAL_STORAGE', on ? 'allow' : 'deny']),
-    observe: (page) => page.evaluate("window.androidBridge?.hasAllFilesAccess?.()"),
+    observe: (page, options) => page.evaluate("window.androidBridge?.hasAllFilesAccess?.()", { ...options, readOnlyBoolean: true }),
     expect: (on) => on,
     convergeMs: 3000,
   },
@@ -135,7 +228,7 @@ export const CASES = [
       return adb([prefsUpsertCommand('enabled', on, 'dsh-overlay')])
     },
     restartApp: true,
-    observe: (page) => page.evaluate("window.androidBridge?.getOverlayEnabled?.()"),
+    observe: (page, options) => page.evaluate("window.androidBridge?.getOverlayEnabled?.()", { ...options, readOnlyBoolean: true }),
     expect: (on) => on,
     convergeMs: 3000,
   },
@@ -145,7 +238,7 @@ export const CASES = [
     source: 'shell prefs: shared_prefs/dsh_settings.xml (immersive_mode；键可能缺席，故 upsert)',
     mutate: (adb, on) => adb([prefsUpsertCommand('immersive_mode', on)]),
     restartApp: true,
-    observe: (page) => page.evaluate("window.androidBridge?.getImmersiveMode?.()"),
+    observe: (page, options) => page.evaluate("window.androidBridge?.getImmersiveMode?.()", { ...options, readOnlyBoolean: true }),
     expect: (on) => on,
     convergeMs: 5000,
   },
@@ -155,7 +248,7 @@ export const CASES = [
     source: 'shell prefs: shared_prefs/dsh_settings.xml (dev_log_enabled；键可能缺席，故 upsert)',
     mutate: (adb, on) => adb([prefsUpsertCommand('dev_log_enabled', on, 'dsh_prefs')]),
     restartApp: true,
-    observe: (page) => page.evaluate("window.androidBridge?.getDevLogEnabled?.()"),
+    observe: (page, options) => page.evaluate("window.androidBridge?.getDevLogEnabled?.()", { ...options, readOnlyBoolean: true }),
     expect: (on) => on,
     convergeMs: 5000,
   },
@@ -164,7 +257,7 @@ export const CASES = [
     st: ['ST-12'],
     source: 'system: settings put secure enabled_accessibility_services',
     mutate: (adb, on) => adb(['settings', 'put', 'secure', 'enabled_accessibility_services', on ? PKG + '/com.dsharnessmobile.shell.DeviceControlService' : 'null']),
-    observe: (page) => page.evaluate("(function(){ try { return JSON.parse(window.androidBridge?.a11yStatus?.() ?? '{}').enabled } catch { return null } })()"),
+    observe: (page, options) => page.evaluate("(function(){ const raw = window.androidBridge?.a11yStatus?.(); return raw === undefined ? undefined : JSON.parse(raw).enabled })()", { ...options, readOnlyBoolean: true }),
     expect: (on) => on,
     convergeMs: 3000,
   },
@@ -172,7 +265,9 @@ export const CASES = [
 
 /** 跑一条用例：改真源 -> 轮询观测 -> 报 PASS/FAIL 与收敛耗时。 */
 export async function runCase(c, deps, on) {
-  const t0 = Date.now()
+  const now = deps.now ?? Date.now
+  const pause = deps.pause ?? ((ms) => new Promise(resolve => setTimeout(resolve, ms)))
+  const t0 = now()
   // 重启类用例必须先停应用再改盘上真源：运行中的进程会在 stop 时回写 SharedPreferences，把外部改写冲掉。
   if (c.restartApp) deps.adb(['am', 'force-stop', PKG])
   const mut = c.mutate(deps.adb, on)
@@ -184,23 +279,25 @@ export async function runCase(c, deps, on) {
   }
   // 真源改写（appops/settings 变更）可能重启进程或把 App 挤到后台：观测前先拉回前台（§4.1.5 步骤 ②）。
   if (typeof deps.ensureForeground === 'function') { try { deps.ensureForeground() } catch { /* 下一轮重试 */ } }
+
   let seen = null
   let lastError = null
   // 重启类用例还要覆盖「引擎重新 LISTEN」的冷启动预算（本机实测 ~18s）：否则机制对了也会误报未收敛。
   const deadline = t0 + c.convergeMs + 7000 + (c.restartApp ? 25000 : 0)
-  while (Date.now() < deadline) {
+  while (now() < deadline) {
     try {
-      seen = await c.observe(deps.page)
+      seen = await c.observe(deps.page, { timeoutMs: Math.min(6000, deadline - now()) })
       lastError = null
     } catch (e) {
       lastError = e.message
       seen = '<observe error>'
     }
-    if (seen === c.expect(on)) return { id: c.id, ok: true, ms: Date.now() - t0, detail: 'observed=' + seen }
-    await new Promise((r) => setTimeout(r, 250))
+    if (seen === c.expect(on)) return { id: c.id, ok: true, ms: now() - t0, detail: 'observed=' + seen, diagnostic: deps.page.diagnostic?.() ?? null }
+    await pause(Math.min(250, Math.max(0, deadline - now())))
   }
-  return { id: c.id, ok: false, ms: Date.now() - t0,
-    detail: '未收敛：期望 ' + c.expect(on) + '，实测 ' + JSON.stringify(seen) + (lastError === null ? '' : '（观察错误: ' + lastError + '）') }
+  return { id: c.id, ok: false, ms: now() - t0,
+    detail: '未收敛：期望 ' + c.expect(on) + '，实测 ' + String(JSON.stringify(seen)) + (lastError === null ? '' : '（观察错误: ' + lastError + '）'),
+    diagnostic: deps.page.diagnostic?.() ?? null }
 }
 
 export async function runAll(cases, deps) {
@@ -210,13 +307,13 @@ export async function runAll(cases, deps) {
       const r = await runCase(c, deps, on)
       r.on = on
       results.push(r)
-      console.log((r.ok ? 'PASS  ' : 'FAIL  ') + c.id + ' [真源=' + (on ? 'on' : 'off') + '] ' + r.ms + 'ms  ' + r.detail)
+      console.log((r.ok ? 'PASS  ' : 'FAIL  ') + c.id + ' [真源=' + (on ? 'on' : 'off') + '] ' + r.ms + 'ms  ' + r.detail + (r.diagnostic ? '；诊断=' + JSON.stringify(r.diagnostic) : ''))
     }
   }
   return results
 }
 
-if (SELF_TEST) {
+if (IS_MAIN && SELF_TEST) {
   // 桩驱动：观测值跟随「当前真源改写方向」，但 OVERLAY 在 on=true 时**故意返回错值**——
   // 证明脚本能把「只改真源但判定值没收敛」如实判红（脚本自身可红的故意失败样本）。
   const state = { on: true, failOverlayOn: true }
@@ -239,7 +336,7 @@ if (SELF_TEST) {
       const r = await runCase(c, { adb: stubAdb, page: stubPage }, on)
       r.on = on
       results.push(r)
-      console.log((r.ok ? 'PASS  ' : 'FAIL  ') + c.id + ' [真源=' + (on ? 'on' : 'off') + '] ' + r.ms + 'ms  ' + r.detail)
+      console.log((r.ok ? 'PASS  ' : 'FAIL  ') + c.id + ' [真源=' + (on ? 'on' : 'off') + '] ' + r.ms + 'ms  ' + r.detail + (r.diagnostic ? '；诊断=' + JSON.stringify(r.diagnostic) : ''))
     }
   }
   const failed = results.filter((r) => !r.ok)
@@ -251,26 +348,6 @@ if (SELF_TEST) {
   process.exit(ok ? 0 : 1)
 }
 
-if (!SERIAL) { console.error('用法：--self-test 或 --serial <adb-serial> [--ws <cdp-ws-url>]'); process.exit(2) }
-const adb = makeAdb(SERIAL)
-const state = adb.raw(['get-state'])
-if (!state.out.includes('device')) { console.error('adb 设备不可用: ' + (state.err || state.out)); process.exit(2) }
-/** 解析当前 WebView CDP 地址：进程号会随应用重启变化，故每次（重）连都要重取 pid 与 forward。 */
-const resolveWsUrl = async (force = false) => {
-  if (WS && !force) return WS
-  const pid = adb(['pidof', PKG]).out.trim()
-  if (!pid) throw new Error('取不到 ' + PKG + ' 进程号；请先启动 App')
-  adb.raw(['forward', 'tcp:' + CDP_PORT, 'localabstract:webview_devtools_remote_' + pid])
-  const list = JSON.parse(await (await fetch('http://127.0.0.1:' + CDP_PORT + '/json/list')).text())
-  if (!list[0]?.webSocketDebuggerUrl) throw new Error('CDP 列表为空（WebView 尚未加载完成）')
-  return list[0].webSocketDebuggerUrl
-}
-let page = makeCdp(() => resolveWsUrl())
-await page.evaluate('1').catch((e) => { console.error('CDP 初始化失败：' + e.message); process.exit(2) })
-/** 应用重启/页面重载后由 runCase 调用：丢弃旧连接（下次求值自动重新解析 target）。 */
-const refreshPage = async () => { try { page.close() } catch { /* 已关闭 */ } return page }
-/** 每条用例观测前把 App 拉回前台（§4.1.5 步骤 ② 的「回到 App」）。 */
-const ensureForeground = () => adb(['am', 'start', '-n', PKG + '/.MainActivity'])
 // ── 设备状态快照/还原（队列卫生）：每条用例都收在 off，会把 a11y/权限/偏好留在关闭态并影响后续设备测试 ──
 export function captureExternalState(adb) {
   // appops get 的真实输出**带尾部元数据**，例如：
@@ -318,7 +395,52 @@ export function restoreExternalState(adb, snap) {
   return actions
 }
 
-const pageProxy = { evaluate: (expr) => page.evaluate(expr) }
+if (IS_MAIN && !SELF_TEST) {
+if (!SERIAL) { console.error('用法：--self-test 或 --serial <adb-serial> [--ws <cdp-ws-url>]'); process.exit(2) }
+const adb = makeAdb(SERIAL)
+const state = adb.raw(['get-state'])
+if (!state.out.includes('device')) { console.error('adb 设备不可用: ' + (state.err || state.out)); process.exit(2) }
+/** 解析当前 WebView CDP 地址：进程号会随应用重启变化，故每次（重）连都要重取 pid 与 forward。 */
+const resolveWsUrl = async (force = false) => {
+  if (WS && !force) return WS
+  const process = adb(['pidof', PKG])
+  const pid = process.out.trim()
+  if (process.status !== 0 || !/^[0-9]+$/.test(pid)) throw new Error('主进程 PID 缺失或不唯一；WebView 尚未就绪')
+  const forwarded = adb.raw(['forward', 'tcp:' + CDP_PORT, 'localabstract:webview_devtools_remote_' + pid])
+  if (forwarded.status !== 0) throw new Error('CDP forward 失败: ' + forwarded.err)
+  const saved = adb(['cat', 'files/.engine-endpoint.json'], { runAs: true })
+  const endpoint = saved.status === 0 ? JSON.parse(saved.out) : null
+  if (endpoint?.schema !== 1 || !Number.isInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535) throw new Error('引擎端点偏好尚不可读，不能猜 target 端口')
+  const response = await fetch('http://127.0.0.1:' + CDP_PORT + '/json/list', { signal: AbortSignal.timeout(2500) })
+  if (!response.ok) throw new Error('CDP target 列表 HTTP ' + response.status)
+  return selectEngineTarget(await response.json(), 'http://127.0.0.1:' + endpoint.port)
+}
+const page = makeCdp((force) => resolveWsUrl(force))
+await page.evaluate('1').catch((e) => { console.error('CDP 初始化失败：' + e.message); process.exit(2) })
+/** 应用重启/页面重载后由 runCase 调用：丢弃旧连接（下次求值自动重新解析 target）。 */
+const refreshPage = async () => { try { page.close() } catch { /* 已关闭 */ } return page }
+/** 每条用例观测前把 App 拉回前台（§4.1.5 步骤 ② 的「回到 App」）。 */
+const ensureForeground = () => adb(['am', 'start', '-n', PKG + '/.MainActivity'])
+/**
+ * 权限类改写（appops deny）会杀死宿主进程，WebView 与 CDP target 同时消失。
+ *
+ * 这里只做「进程不在就把它拉起来」这一件设备事实驱动的补救：返回 true 表示本次重建过，
+ * 调用方据此丢弃旧 CDP 连接；进程本来就活着时返回 false，不打断正常运行的同一次观测。
+ */
+const ensureAlive = async () => {
+  const pid = adb(['shell', 'pidof', PKG])
+  if (pid.status === 0 && String(pid.out).trim() !== '') return false
+  adb(['am', 'start', '-W', '-n', PKG + '/.MainActivity'])
+  // 冷启动到引擎 LISTEN 本机实测约 18s：给足预算，避免把「还没起来」误判成「值不对」。
+  const deadline = Date.now() + 30000
+  while (Date.now() < deadline) {
+    const again = adb(['shell', 'pidof', PKG])
+    if (again.status === 0 && String(again.out).trim() !== '') { await new Promise(r => setTimeout(r, 1500)); return true }
+    await new Promise(r => setTimeout(r, 500))
+  }
+  return true
+}
+const pageProxy = { evaluate: (expr, options) => page.evaluate(expr, options), diagnostic: () => page.diagnostic() }
 const before = captureExternalState(adb)
 console.log('设备初始真源快照：' + JSON.stringify(before))
 try {
@@ -339,4 +461,6 @@ try {
   }
   try { adb.raw(['forward', '--remove', 'tcp:' + CDP_PORT]) } catch { /* 未建立或已被移除 */ }
   page.close()
+}
+
 }

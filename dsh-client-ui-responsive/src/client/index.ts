@@ -120,6 +120,14 @@ import type { NativeBrowserControlsInjected } from './mobile/native-browser-adap
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { IncomingDraftConsumer } from './mobile/incoming-draft.ts'
 import { createIncomingDraftRuntime } from './mobile/incoming-runtime.ts'
+import {
+  OverlayHost,
+  installOverlayHost,
+  type OverlayConversationFace,
+  type OverlaySessionsFace,
+  type OverlayUiWorkspaceFace,
+  type OverlayWorkspacesFace,
+} from './mobile/overlay-host.ts'
 
 // Contract exports only (export-convergence rule): the plugin surface is
 // `apply` and `inject`; every component, marker, and helper stays internal.
@@ -129,6 +137,8 @@ declare global {
   interface Window {
     /** Android shell session-export outcome bridge (success / failure). */
     __dshExportResult?: (payload: ExportResultPayload) => void
+    /** Android overlay host API (version 1): every method returns a JSON string. */
+    __dshOverlayHost?: Record<string, unknown>
   }
 }
 
@@ -138,10 +148,13 @@ export const inject = ['slots', 'theme', 'sessions', 'workspaces', 'uiWorkspace'
 /** Narrow runtime face for the existing Conversation draft/upload service. */
 interface IncomingConversationFace {
   /** Build-time J1 seam over the normal composer draft/upload path. */
-  addFiles(sessionId: unknown, files: readonly File[]): boolean
+  addFiles?(sessionId: unknown, files: readonly File[]): boolean
+  createDrafts?(sessionId: unknown, files: readonly File[], uploadImages: boolean): readonly { id: string }[]
+  releaseDraftAttachment?(id: string): void
   input: {
     for(scope: unknown): {
       notify(level: 'info' | 'error', text: string): void
+      addAttachments?(ids: readonly string[]): boolean
     }
   }
 }
@@ -150,6 +163,7 @@ interface IncomingConversationFace {
 interface IncomingSessionsFace {
   refresh(): Promise<void>
   scope(id: unknown): unknown | undefined
+  retain?(id: unknown, options: { source: string }): { ready: Promise<unknown>; release(): void }
 }
 
 /** Standard workspace create path used before connecting its blank Session. */
@@ -577,6 +591,21 @@ export function apply(ctx: ClientContext): void {
     return () => { marker.detach() }
   }, 'ui-responsive: session id marker for tool-row file links')
 
+  // 原生悬浮层读取页面状态的宿主 API（设计 §6.2 N3）。所有方法同步返回 JSON 字符串，
+  // 异常一律折成 {ok:false,error}——原生用 evaluateJavascript 读，抛异常会拿到空值，
+  // 那样它分不清「页面没准备好」和「页面没接线」。
+  ctx.effect(() => {
+    const host = new OverlayHost({
+      // 服务在真正调用时才解析（cordis 的 apply 顺序不受 inject 声明约束）。
+      sessions: () => ctx.sessions as unknown as OverlaySessionsFace,
+      workspaces: () => ctx.get('workspaces') as unknown as OverlayWorkspacesFace,
+      uiWorkspace: () => ctx.get('uiWorkspace') as unknown as OverlayUiWorkspaceFace,
+      conversation: () => ctx.conversation as unknown as OverlayConversationFace,
+      commandController: (scope) => (ctx.get('inputTriggers') as unknown as { sessionOf(scope: unknown): import('./mobile/overlay-host.ts').OverlayCommandController } | undefined)?.sessionOf(scope),
+    })
+    return installOverlayHost(host)
+  }, 'ui-responsive: overlay host API (window.__dshOverlayHost)')
+
   ctx.inject(['locale', 'sidebarRight', 'sidebarRightTabs'], scope => {
     scope.effect(() => retainDockIdentity(scope.sidebarRight), 'ui-responsive: stable child identity across docking entries')
     scope.effect(() => retainWorkspaceTypes(scope.sidebarRightTabs), 'ui-responsive: retain compatible workspace views')
@@ -1003,22 +1032,26 @@ export function apply(ctx: ClientContext): void {
     const workspaces = (): IncomingWorkspacesFace => ctx.get('workspaces') as IncomingWorkspacesFace
     const uiWorkspace = (): IncomingUiWorkspaceFace => ctx.get('uiWorkspace') as IncomingUiWorkspaceFace
     const conversation = (): IncomingConversationFace => ctx.conversation as unknown as IncomingConversationFace
+    const runtime = createIncomingDraftRuntime({ sessions, workspaces, uiWorkspace, conversation })
     const consumer = new IncomingDraftConsumer(
       (path, init) => fetch(path, init),
-      createIncomingDraftRuntime({ sessions, workspaces, uiWorkspace, conversation }),
+      runtime,
     )
     const poll = (): void => { void consumer.poll() }
     const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') poll()
+      poll()
     }, 4000)
     const onVisible = (): void => { if (document.visibilityState === 'visible') poll() }
     document.addEventListener('visibilitychange', onVisible)
     window.addEventListener('focus', onVisible)
+    window.addEventListener('dsh:overlay-incoming', poll)
     poll()
     return () => {
       window.clearInterval(timer)
+      runtime.dispose?.()
       document.removeEventListener('visibilitychange', onVisible)
       window.removeEventListener('focus', onVisible)
+      window.removeEventListener('dsh:overlay-incoming', poll)
       document.documentElement.removeAttribute('data-dsh-incoming-draft-consumer')
     }
   }, 'ui-responsive: blank-session external attachment drafts')

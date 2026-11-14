@@ -32,6 +32,9 @@ export function normalizeDraftOrigin(value: unknown): IncomingDraftOrigin {
 }
 
 export interface IncomingDraftItem {
+  targetSessionId?: string
+  requestId?: string
+  mediaType?: string
   entryId: string
   sessionId?: string
   /** 来源：决定目标是新建会话还是页面当前会话。缺字段的老条目按 external。 */
@@ -56,9 +59,28 @@ interface FetchResponse {
 
 export type IncomingDraftFetch = (input: string, init?: RequestInit) => Promise<FetchResponse>
 
+/** Bound fetch and its consumed body together, even when the transport ignores abort. */
+async function incomingDeadline<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error('incoming request timed out'))
+      controller.abort()
+    }, 4000)
+  })
+  try {
+    return await Promise.race([operation(controller.signal), timeout])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 /** Narrow facade over existing session and conversation services. */
 export interface IncomingDraftRuntime {
   refreshSessions(): Promise<void>
+  retainSession?(id: string): Promise<() => void>
+  dispose?(): void
   createSession(cwd: string): Promise<string>
   openSession(sessionId: string): void
   sessionScope(sessionId: string): unknown | undefined
@@ -70,6 +92,7 @@ function itemOf(value: unknown): IncomingDraftItem | undefined {
   if (value === null || typeof value !== 'object') return undefined
   const item = value as Partial<IncomingDraftItem>
   if (typeof item.entryId !== 'string' || item.entryId === '') return undefined
+  if (item.targetSessionId !== undefined && (typeof item.targetSessionId !== 'string' || item.targetSessionId === '' || typeof item.requestId !== 'string' || item.requestId === '')) return undefined
   if (item.sessionId !== undefined && (typeof item.sessionId !== 'string' || item.sessionId === '')) return undefined
   if (item.state !== 'received' && item.state !== 'session-created') return undefined
   if (typeof item.name !== 'string' || item.name === '') return undefined
@@ -152,6 +175,8 @@ export function isTerminalRefreshFailure(error: unknown): boolean {
 /** Drives one process-local external attachment flow. */
 export class IncomingDraftConsumer {
   private busy = false
+  private readonly admittedEntries = new Set<string>()
+  private readonly pendingAcks = new Map<string, 'draft-ready' | 'removed'>()
   private readonly hydrating = new Set<string>()
   private readonly createdSessions = new Map<string, string>()
   /** review C10：逐条目的载入尝试计数与终止标记——无 sessionId 的补建必须**有限次**。 */
@@ -179,13 +204,16 @@ export class IncomingDraftConsumer {
     this.busy = true
     document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'fetching')
     try {
-      const response = await this.fetchImpl('/api/android/file-incoming', { credentials: 'same-origin', cache: 'no-store' })
-      if (!response.ok) return
-      const payload = await response.json().catch(() => null) as { items?: unknown[] } | null
+      for (const [ticket, outcome] of [...this.pendingAcks]) await this.finish(ticket, outcome)
+      const payload = await incomingDeadline(async signal => {
+        const response = await this.fetchImpl('/api/android/file-incoming', { credentials: 'same-origin', cache: 'no-store', signal })
+        return response.ok ? response.json().catch(() => null) : null
+      }) as { items?: unknown[] } | null
       if (!Array.isArray(payload?.items)) return
       document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'items:' + String(payload.items.length))
       // issue #1413：有界并发，别让一条慢条目把整个队列串住。
       const items = payload.items.map(itemOf).filter((i): i is IncomingDraftItem => i !== undefined)
+        .filter(i => document.visibilityState === 'visible' || i.targetSessionId !== undefined)
       await runBounded(items, IncomingDraftConsumer.POLL_CONCURRENCY, (item) => this.hydrate(item))
     } catch (error) {
       console.warn('[dsh-mobile] incoming draft queue retry deferred:', String(error))
@@ -300,16 +328,19 @@ export class IncomingDraftConsumer {
   }
 
   private async hydrate(item: IncomingDraftItem): Promise<void> {
-    if (this.hydrating.has(item.entryId)) return
+    if (this.hydrating.has(item.entryId) || this.admittedEntries.has(item.entryId)) return
     if (this.exhaustedFor(item)) return
     this.hydrating.add(item.entryId)
     document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'hydrate:' + item.state)
+    let release: (() => void) | undefined
     try {
+      if (item.targetSessionId !== undefined) release = await this.runtime.retainSession?.(item.targetSessionId)
       const locallyCreated = this.createdSessions.get(item.entryId)
       // camera 来件的目标 = **页面当前会话**（缺陷 1 的落点）：不建新会话、也不做可见导航。
       // 只在这里取一次；拿不到就落回原行为（下面 createSession 分支），不会静默丢件。
       const cameraTarget = item.origin === 'camera' ? this.currentSessionId() : undefined
-      let sessionId = item.sessionId ?? locallyCreated ?? cameraTarget
+      const targeted = item.targetSessionId !== undefined
+      let sessionId = item.targetSessionId ?? item.sessionId ?? locallyCreated ?? cameraTarget
       if (sessionId !== undefined) {
         document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'session-refresh')
         try {
@@ -335,7 +366,7 @@ export class IncomingDraftConsumer {
         if (sessionId !== undefined) {
           // camera 来件已经在用户眼前那个会话里：**不得导航**。openSession 是可见导航，
           // 哪怕 id 相同也会把用户从当前视图甩走一次（拍照返回后画面跳走 = 缺陷本身）。
-          if (sessionId !== cameraTarget) {
+          if (!targeted && sessionId !== cameraTarget) {
             try { this.runtime.openSession(sessionId) } catch { /* navigation may lag an addressable Session */ }
           }
           document.documentElement.setAttribute(
@@ -363,7 +394,7 @@ export class IncomingDraftConsumer {
         // 处置：camera 且当前会话 scope 不可用 ⇒ **回落新建会话**（用户意图是「把照片加进来」，
         // 加不进当前会话就新建一个，总比丢失好），并且**有界**——回落次数计入既有的
         // MAX_HYDRATE_ATTEMPTS 预算，不会无限新建。external 的既有行为不变（它本来就是新建）。
-        if (item.origin === 'camera' && sessionId === cameraTarget && this.fallbackFor(item)) {
+        if (!targeted && item.origin === 'camera' && sessionId === cameraTarget && this.fallbackFor(item)) {
           document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'scope-fallback-create')
           this.createdSessions.delete(item.entryId)
           const created = await this.createBlankSessionFor(item)
@@ -379,6 +410,8 @@ export class IncomingDraftConsumer {
       let ticket = ''
       try {
         document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'claim')
+        // Claim removes the durable record before replying with a process-local ticket. Do not
+        // race away its late reply or issue a second claim merely because four seconds elapsed.
         const claimResponse = await this.fetchImpl('/api/android/file-incoming/claim', {
           method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ entryId: item.entryId, sessionId }),
@@ -391,13 +424,16 @@ export class IncomingDraftConsumer {
         // isTerminalRefreshFailure 分支堵掉（重试复用同一个 sessionId）。
         if (claim === undefined) return
         ticket = claim.ticket as string
+        // A slow same-ticket content read is not an explicit removal; retain its original attempt.
         const content = await this.fetchImpl('/api/android/file-incoming/content?ticket=' + encodeURIComponent(ticket), {
           credentials: 'same-origin', cache: 'no-store',
         })
         if (!content.ok) throw new Error('incoming content HTTP ' + content.status)
-        const file = new File([await content.blob()], claim.name as string, { type: 'application/octet-stream' })
+        const blob = await content.blob()
+        const file = new File([blob], claim.name as string, { type: item.mediaType ?? 'application/octet-stream' })
         const attached = this.runtime.attachGenericFile(sessionId, file)
         document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'attached:' + String(attached))
+        this.admittedEntries.add(item.entryId)
         await this.finish(ticket, attached ? 'draft-ready' : 'removed')
         ticket = ''
         if (!attached) this.runtime.notify(scope, '外部附件草稿当前无法加入编辑框，请重新使用系统打开方式。')
@@ -406,16 +442,19 @@ export class IncomingDraftConsumer {
         this.runtime.notify(scope, '外部附件草稿载入失败；文件没有自动发送，请重新使用系统打开方式。')
       }
     } finally {
+      release?.()
       this.hydrating.delete(item.entryId)
     }
   }
 
   private async finish(ticket: string, outcome: 'draft-ready' | 'removed'): Promise<void> {
+    this.pendingAcks.set(ticket, outcome)
     try {
-      await this.fetchImpl('/api/android/file-incoming/complete', {
-        method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
+      const response = await incomingDeadline(signal => this.fetchImpl('/api/android/file-incoming/complete', {
+        method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, signal,
         body: JSON.stringify({ ticket, outcome }),
-      })
+      }))
+      if (response.ok) this.pendingAcks.delete(ticket)
     } catch {
       // The draft is browser-owned; an acknowledgement failure cannot recreate or send it.
     }

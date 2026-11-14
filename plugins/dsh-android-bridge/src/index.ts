@@ -61,6 +61,8 @@ import {
   turnEndOk,
   TURN_END_KINDS,
   visibleText,
+  reasoningText,
+  reasoningSummary,
   boundReportBody,
   REPORT_BODY_MAX,
 } from './notify-projection.js'
@@ -84,6 +86,8 @@ export {
   turnEndOk,
   TURN_END_KINDS,
   visibleText,
+  reasoningText,
+  reasoningSummary,
   boundReportBody,
   toLosslessJson,
   findUndefinedPaths,
@@ -2147,6 +2151,22 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
     }
     // callId → {name, args, start}（tool/result 按 source.callId 配对，给耗时与参数）
     const liveCalls = new Map<string, { name: string; args: string; start: number }>()
+    /**
+     * 会话内「已发起、尚未结束」的调用队列（悬浮卡片「进行中/完成」的工具行必须能配对）。
+     *
+     * 为什么需要：`tool/call` 的 `callId` 与 `tool/result` 的 `message.source.callId`
+     * 是同一个上游 id，正常路径下一定成对出现。但投影层不能假设它恒在——上游换 provider /
+     * 旧版本引擎都可能不带。此时若只写字面量，壳侧只能靠「同名同参」猜配对，两把并发的
+     * 同名工具（例如连续两次 read 不同文件）就会把结果按错行。
+     *
+     * 做法：每条 `tool/call` 都入队（上游 id 优先，缺了就用 **会话内递增序号** `anon-<n>`）。
+     * 结果侧有上游 id 时按 id 从队列里摘掉自己；没有 id 时按 FIFO 认领最早一条未配对的调用。
+     * 队列按「调用发起顺序」而非「结束顺序」，所以并发同名工具也能稳定配对。
+     *
+     * 生成 id 与上游 id 共用同一个 Map（键碰撞风险为零：上游 id 不会以 `anon-` 开头）。
+     */
+    const livePendingCalls = new Map<string, Array<{ callId: string; name: string; args: string; start: number }>>()
+    const liveAnonSeq = new Map<string, number>()
     const live = (session: unknown, ev: { type?: string; data?: Record<string, unknown> }) => {
       const sess = session as { id?: unknown } | undefined
       const s = String(sess?.id ?? '')
@@ -2159,20 +2179,43 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
       if (k === 'tool/call') {
         const d = ev.data as { name?: string; arguments?: string; callId?: string }
         const args = String(d.arguments ?? '').slice(0, 240)
-        if (d.callId) liveCalls.set(String(d.callId), { name: String(d.name ?? ''), args, start: t })
-        appendLive(JSON.stringify({ t, s, k: 'tool_call', name: String(d.name ?? ''), args }) + '\n')
+        const name = String(d.name ?? '')
+        // callId 是**追加字段**（旧壳忽略未知键）：上游给就用上游 id，否则生成会话内递增序号。
+        let callId = d.callId ? String(d.callId) : ''
+        if (callId === '') {
+          const next = (liveAnonSeq.get(s) ?? 0) + 1
+          liveAnonSeq.set(s, next)
+          callId = 'anon-' + next
+        }
+        const queue = livePendingCalls.get(s) ?? []
+        queue.push({ callId, name, args, start: t })
+        livePendingCalls.set(s, queue)
+        liveCalls.set(callId, { name, args, start: t })
+        appendLive(JSON.stringify({ t, s, k: 'tool_call', name, args, callId }) + '\n')
         return
       }
       if (k === 'tool/result') {
         const d = ev.data as { message?: { source?: { callId?: string }; content?: Array<Record<string, unknown>> } }
-        const callId = d?.message?.source?.callId ? String(d.message.source.callId) : ''
-        const call = callId ? liveCalls.get(callId) : undefined
+        let callId = d?.message?.source?.callId ? String(d.message.source.callId) : ''
+        // 结果侧同样可能没有上游 id：按 FIFO 认领最早一条未配对的调用，保证与 tool_call 行配对。
+        const queue = livePendingCalls.get(s) ?? []
+        if (callId !== '') {
+          // 有上游 id：只移除自己，不能顺手把别人的队首摘掉。
+          const index = queue.findIndex((pending) => pending.callId === callId)
+          if (index >= 0) queue.splice(index, 1)
+        } else {
+          const pending = queue.shift()
+          if (pending !== undefined) callId = pending.callId
+        }
+        if (queue.length === 0) livePendingCalls.delete(s)
+        else livePendingCalls.set(s, queue)
+        const call = callId !== '' ? liveCalls.get(callId) : undefined
         const err = Array.isArray(d?.message?.content) && d.message.content.some((c) => c.isError === true)
         appendLive(JSON.stringify({
           t, s, k: 'tool_result', name: call?.name ?? '', args: call?.args ?? '',
-          dur: call ? t - call.start : undefined, err,
+          dur: call ? t - call.start : undefined, err, callId,
         }) + '\n')
-        if (callId) liveCalls.delete(callId)
+        if (callId !== '') liveCalls.delete(callId)
         if (liveCalls.size > 256) { const first = liveCalls.keys().next().value; if (first !== undefined) liveCalls.delete(first) }
         return
       }
@@ -2182,6 +2225,13 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
         // （dsh/packages/llm/llm/src/types.ts:54-64），思考通常排在最前，于是壳侧的汇报摘要
         // 与工具行 chip 显示的是「某一段思考内容」。判据与修法见 notify-projection.visibleText。
         const content = (ev.data as { message?: { content?: unknown } })?.message?.content
+        // 思考行（设计 §5.3 / N1）：与可见正文同一事件、同一投影层。
+        // 为什么单独一行而不塞进 text 行：壳侧旧包对未知 k 走 else 忽略，而 text 行是工具行 chip
+        // 的既有数据源——把思考塞进去会污染正文显示；独立 k 才能让新卡片的「思考单行」与
+        // 「最新进展」各自取值，且旧壳零改动。
+        // 空/纯空白不写行：思考块存在但内容为空时写一行空摘要，只会让卡片显示一条空白行。
+        const think = reasoningSummary(content)
+        if (think !== '') appendLive(JSON.stringify({ t, s, k: 'think', sum: think }) + '\n')
         const text = visibleText(content)
         appendLive(JSON.stringify({ t, s, k: 'text', sum: text.slice(0, 160) || '（空回复）' }) + '\n')
         return
