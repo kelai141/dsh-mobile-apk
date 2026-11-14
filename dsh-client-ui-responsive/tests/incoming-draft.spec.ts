@@ -532,3 +532,100 @@ describe('issue #1412 刷新失败不得丢掉 sessionId', () => {
     }
   })
 })
+// issue #1570：`exhaustedFor()` 原先在 hydrate **最开头**无条件 +1，而 hydrate 有三条
+// **非失败**出口（session-refresh-deferred / scope-deferred / createSession 暂不可用）。
+// 冷启动时 sessionScope 前几拍常是 undefined，于是 5 拍 x 4000ms = 20s 就把条目判死，
+// 第 6 拍起直接 return 永不再试 —— 用户分享的文件在冷启动第 21 秒后彻底消失。
+// 判据：只有**真正发起 createSession / claim 并失败**才消耗预算；scope 未就绪不算。
+describe('issue #1570 冷启动 scope 未就绪不得消耗重试预算', () => {
+  const item = { entryId: 'scope-late', sessionId: 'session-cold-0001', state: 'session-created', name: 'a.txt', bytes: 1 }
+
+  it('sessionScope 连续 8 拍 undefined：不得判 exhausted，且 scope 就绪后仍能投递', async () => {
+    let scopeReady = false
+    const attach = vi.fn(() => true)
+    const fetchImpl = vi.fn<IncomingDraftFetch>(async (path: string) => {
+      if (path === '/api/android/file-incoming') return json({ items: [item] })
+      if (path.endsWith('/claim')) return json({ ok: true, ticket: 't-late', name: 'a.txt' })
+      if (path.includes('/content?')) return json({})
+      return json({ ok: true, state: 'draft-ready' })
+    })
+    const consumer = new IncomingDraftConsumer(fetchImpl, {
+      refreshSessions: async () => {},
+      createSession: async () => 'unused',
+      openSession: () => {},
+      // 冷启动：前 8 拍作用域还没绑上（旧实现到第 5 拍就判死）。
+      sessionScope: id => (scopeReady && id === 'session-cold-0001' ? {} : undefined),
+      attachGenericFile: attach,
+      notify: vi.fn(),
+    })
+
+    for (let i = 0; i < 8; i += 1) {
+      await consumer.poll()
+      expect(document.documentElement.getAttribute('data-dsh-incoming-draft-poll'), '第 ' + String(i + 1) + ' 拍不得判死')
+        .not.toBe('exhausted')
+    }
+    expect(attach).not.toHaveBeenCalled()
+
+    // 第 9 拍作用域绑定完成：条目必须仍能投递（预算没被 scope-deferred 吃掉）。
+    scopeReady = true
+    await consumer.poll()
+    expect(attach).toHaveBeenCalledWith('session-cold-0001', expect.any(File))
+  })
+
+  it('负控（必须红）：真正 claim 且持续失败时仍必须耗尽预算并停手', async () => {
+    const attach = vi.fn(() => true)
+    const createSession = vi.fn(async () => 'session-created-9999')
+    const fetchImpl = vi.fn<IncomingDraftFetch>(async (path: string) => {
+      if (path === '/api/android/file-incoming') {
+        return json({ items: [{ entryId: 'claim-stuck', sessionId: 'session-cold-0002', state: 'session-created', name: 'b.txt', bytes: 1 }] })
+      }
+      return json({ ok: false, error: 'incoming entry not found' }, 404)
+    })
+    const consumer = new IncomingDraftConsumer(fetchImpl, {
+      refreshSessions: async () => {},
+      createSession,
+      openSession: () => {},
+      sessionScope: () => ({}),
+      attachGenericFile: attach,
+      notify: vi.fn(),
+    })
+
+    for (let i = 0; i < 8; i += 1) await consumer.poll()
+
+    const claims = fetchImpl.mock.calls.filter(call => String(call[0]).endsWith('/claim'))
+    expect(claims.length, '封顶后不得再无休止 claim').toBeLessThanOrEqual(5)
+    expect(claims.length).toBeGreaterThan(0)
+    expect(document.documentElement.getAttribute('data-dsh-incoming-draft-poll')).toBe('exhausted')
+  })
+
+  it('没有会话可挂时「已停止重试」仍必须可见（不得因为 scope 缺失就静默）', async () => {
+    const events: CustomEvent[] = []
+    const listener = (e: Event): void => { events.push(e as CustomEvent) }
+    window.addEventListener('dsh:export-result', listener)
+    try {
+      const fetchImpl = vi.fn<IncomingDraftFetch>(async (path: string) => {
+        if (path === '/api/android/file-incoming') {
+          return json({ items: [{ entryId: 'no-scope', sessionId: 'session-gone-0003', state: 'session-created', name: 'c.txt', bytes: 1 }] })
+        }
+        return json({ ok: false, error: 'gone' }, 404)
+      })
+      const notify = vi.fn()
+      const consumer = new IncomingDraftConsumer(fetchImpl, {
+        refreshSessions: async () => {},
+        createSession: async () => 'unused',
+        openSession: () => {},
+        // 会话级通知挂不上去（scope 永远拿不到）。
+        sessionScope: () => undefined,
+        attachGenericFile: () => true,
+        notify,
+      })
+      // 作用域有独立上限（MAX_SCOPE_DEFERRALS = 30 拍）；打到该上限才会收敛并提示。
+      for (let i = 0; i < 40; i += 1) await consumer.poll()
+      expect(notify, '会话挂不上时不得假装已经提示过（通知打给了不存在的 scope）').not.toHaveBeenCalled()
+      expect(events.length, '没有 scope 时必须走全局可见结果通道').toBe(1)
+      expect(String(events[0]?.detail?.detail ?? ''), '必须说清已停止自动重试').toContain('停止自动重试')
+    } finally {
+      window.removeEventListener('dsh:export-result', listener)
+    }
+  })
+})

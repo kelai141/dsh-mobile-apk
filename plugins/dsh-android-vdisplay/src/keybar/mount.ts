@@ -106,14 +106,53 @@ export const KEYBAR_TEXT = {
   noticeNoPath: KEYBAR_NOTICES.noPath,
 } as const
 
+/**
+ * 按 document 维度的样式引用计数（issue #1585）。
+ *
+ * 缺陷真因：旧实现「`<style>` 已存在就给空 disposer」，而**创建者**的 disposer 无条件
+ * `style.remove()`。分屏两个终端根时 A 建、B 复用，用户先关掉 A => A 的 disposer 把样式
+ * 删掉，而 B 还活着 —— 键条失去全部 CSS（布局崩、留白变量失效，用户看到一排裸按钮）。
+ *
+ * 为什么用计数而不是「dispose 时数还有几个 [data-terminal-keybar]」：
+ * 键条 DOM 与句柄生命周期不是一回事 —— 根节点被 React 摘掉时 reconcile 会先 `bar.remove()`
+ * 再自愈挂回，这一瞬间 DOM 计数为 0，却**不该**清样式；反过来句柄泄漏时 DOM 计数又偏多。
+ * 只有「还有几个持有者」才是样式要不要留的**充要**判据。
+ *
+ * 计数挂在 document 上（键条本来就以 document 为作用域注入样式），不挂在模块全局 ——
+ * 测试/多文档宿主各自独立，不会互相污染。
+ */
+interface StyleRefs {
+  /** 当前注入的样式元素（重建后指向新元素）。 */
+  style: HTMLElement
+  /** 还活着、仍需要这份样式的键条句柄数。降到 0 才 remove。 */
+  holders: number
+}
+const STYLE_REFS = new WeakMap<Document, StyleRefs>()
+
 function ensureStyle(doc: Document): () => void {
+  // 没有登记（首个持有者），或登记的元素已被外部换掉/删掉：重建并重登记。
+  let entry: StyleRefs | undefined = STYLE_REFS.get(doc)
   const existing = doc.getElementById(KEYBAR_STYLE_ID)
-  if (existing !== null) return () => {}
-  const style = doc.createElement('style')
-  style.id = KEYBAR_STYLE_ID
-  style.textContent = KEYBAR_CSS
-  doc.head.append(style)
-  return () => { style.remove() }
+  if (entry === undefined || entry.style !== existing) {
+    const style = existing === null ? doc.createElement('style') : existing
+    style.id = KEYBAR_STYLE_ID
+    if (style.textContent === '') style.textContent = KEYBAR_CSS
+    if (style.parentNode === null) doc.head.append(style)
+    entry = { style, holders: 0 }
+    STYLE_REFS.set(doc, entry)
+  }
+  const owner: StyleRefs = entry
+  owner.holders += 1
+  let released = false
+  return () => {
+    // 幂等：同一个 disposer 被调两次不得把别人的计数扣掉。
+    if (released) return
+    released = true
+    owner.holders -= 1
+    if (owner.holders > 0) return
+    owner.style.remove()
+    STYLE_REFS.delete(doc)
+  }
 }
 
 /** 读一个 CSS 变量为像素数（读不到给 0）。 */
