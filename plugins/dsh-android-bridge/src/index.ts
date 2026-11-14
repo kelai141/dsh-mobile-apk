@@ -26,6 +26,7 @@ import {
   realScreenAdbCommandDenied,
   adbCommandDisplayTokens,
   screenTokensFromSfDump,
+  stripDisplayOptions,
   isVirtualScreenId,
   type ScreenAccessDecision,
   type UserScreenScope,
@@ -686,10 +687,39 @@ function looksDangerousRemovePath(remote: unknown): boolean {
   return !ALLOWED_ROOTS.some((root) => norm.startsWith(root + '/'))
 }
 
+/**
+ * `input keyevent` 的导航/电源键（**词形**写法：`POWER` / `HOME` / `MENU` / `KEYCODE_HOME`）——issue #1596。
+ *
+ * 词形同时接受 `KEYCODE_` 前缀：`KeyEvent.keyCodeFromString` 认这个前缀，`input keyevent KEYCODE_HOME`
+ * 与 `input keyevent HOME` 是同一个按键（两种写法都必须拦，否则换一种即可逃逸）。
+ *
+ * 缺陷形态（修前）：`/\binput\s+(keyevent|text)\s+.*(power|home|menu)/` 把 `text` 也放进了命令位置，
+ * 于是 `android_ui_input {action:"text", text:"go home"}` 构造出的 `input text go%shome` 命中，
+ * 回执变成「命令被特权 shell 通道危险检查拦截（系统配置/权限写面一律拒绝）」——**普通文本输入被
+ * 判成危险命令**，能力不可用，且失败归因完全错误（用户会去查权限，而真因是正则写宽了）。
+ *
+ * 判据只认 `keyevent` 子命令：`text` 的载荷是用户要输入的文字，那里的任何词都不是命令身份；
+ * 只有 `keyevent` 的载荷才决定注入哪个按键。本判据与 [INPUT_KEYEVENT_POWER_KEYCODE] 成对使用。
+ */
+const INPUT_KEYEVENT_POWER = /\binput\s+keyevent\s+(?:.*\s)?(?:keycode_)?(?:power|home|menu)\b/
+
+/**
+ * 同上，但按键用**数字键码**拼写（issue #1596 的后半句：旧判据「想拦的目标其实拦不住」）。
+ *
+ * `input keyevent 3`（KEYCODE_HOME）、`26`（KEYCODE_POWER）、`82`（KEYCODE_MENU）都是纯数字，
+ * 旧正则的 `power|home|menu` 词面匹配看不见它们 —— 于是同一条黑名单既误拦普通文本输入、
+ * 又漏掉真正的系统键注入。键码取自 `InputEvent` 的公开常量，与前面词形判据同一个命令位置。
+ * `\b` 边界保证 `13` / `263` 这类不会误命中。
+ */
+const INPUT_KEYEVENT_POWER_KEYCODE = /\binput\s+keyevent\s+(?:.*\s)?(?:3|26|82)\b/
+
 /** ADB 通道附加黑名单（shell uid=2000 执行面比 app uid 更危险：系统级配置/权限写面一律拒绝）。 */
 function looksDangerousAdb(command: string): boolean {
   if (looksDangerous(command)) return true
-  const c = command.toLowerCase()
+  // 目标屏参数要在**匹配这些模式之前**归一化掉：`input -d 7 keyevent 3` 是 Android CLI 的正式写法
+  // （`input [-d DISPLAY_ID] <command>`），选项顶掉命令词位置 ⇒ `input\s+keyevent` 匹配不到 ⇒
+  // 换个写法就能注入系统键。与 screen-scope 的命令词面同一归一化（stripDisplayOptions）。
+  const c = stripDisplayOptions(command).toLowerCase()
   const PATTERNS_ADB = [
     /\bsettings\s+(put|delete)\b/,
     /\bpm\s+(grant|revoke|set-permission|uninstall|install|disable-user|enable)\b/,
@@ -698,7 +728,8 @@ function looksDangerousAdb(command: string): boolean {
     /\bsvc\b/,
     /\bmount\b/,
     /\bcmd\s+(package|wifi|connectivity)\s+(set|reset|enable|disable)\b/,
-    /\binput\s+(keyevent|text)\s+.*(power|home|menu)/,
+    INPUT_KEYEVENT_POWER,
+    INPUT_KEYEVENT_POWER_KEYCODE,
   ]
   return PATTERNS_ADB.some((p) => p.test(c))
 }
@@ -990,6 +1021,15 @@ export class AndroidPrivilegeService {
       // 探测失败即「未知」——不是「不可用」。
     }
     return this.shizukuChannel()
+  }
+
+  /**
+   * issue #1604：最近一次 `vdInfo` 回执的注册表快照（**只读缓存**，绝不为读状态入队）。
+   *
+   * 供公开只读状态路由使用；`undefined` = 本进程还没收到过 vdInfo 回执。
+   */
+  cachedVdStatus(): Record<string, unknown> | undefined {
+    return this.#controlQueue?.lastVdInfoSnapshot()?.data
   }
 
   /** 两条通道任一就绪即引擎级放行（不掺会话档位）：无障碍见 a11yEnabled，特权面 = ADB 或 Shizuku。 */
@@ -2392,7 +2432,14 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
   // 状态端点（浏览端面/设置页查询与展示）。**只读**：无任何写面——授权变更经
   // window.androidBridge.setAdbAllow/setAdbPair/revokeAdbPair 由壳侧原生 AdbState 执行
   // （Shizuku 对照：被提权方不得自改授权；引擎侧不设 POST 写端点）。
-  const wsvc = (ctx as unknown as { webServer?: { register(r: unknown): void } }).webServer
+  // issue #1595：`register()` 运行期返回 **disposer**，且同名 (kind,path) 重复注册会 throw。
+  // 裸调 = 把 disposer 丢掉 ⇒ 这个 fiber 的 effect 表里没有这条路由 ⇒ HMR 重载 / 设置页「禁用→启用」
+  // 时旧实例的路由不会被回收，新实例 `apply()` 走到这里抛
+  //   webserver: duplicate exact route "/api/android/privilege/status"
+  // ⇒ **整个桥插件装载失败**（注册在 apply 最末尾，前面已注册的工具全部回滚），而旧 handler 仍留在
+  // exact 表里、继续用已 dispose 的 svc/ctx 回 200。故这里必须声明成 `() => void` 并走 ctx.effect。
+  // 同仓三处同形态可作参照：linux-env/src/index.ts（#1207）、file-open/src/index.ts、browser/src/index.ts。
+  const wsvc = (ctx as unknown as { webServer?: { register(r: unknown): () => void } }).webServer
   if (wsvc) {
     // review C12：公开只读状态路由补回环栅栏（connection 的 Host/Origin 判定优先；缺服务时退化为回环白名单）。
     const publicRouteConnection = (() => {
@@ -2402,7 +2449,7 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
         return undefined
       }
     })()
-    wsvc.register({
+    ctx.effect(() => wsvc.register({
       kind: 'exact',
       path: '/api/android/privilege/status',
       handler: async (req: WsReq, res: WsRes) => {
@@ -2411,19 +2458,45 @@ export function apply(ctx: Context, config: Record<string, unknown> = {}) {
           sendMobileRouteRejection(res, rejection)
           return
         }
-        // A1（0.14.1 设备实测缺陷）：渲染前先把 caps 补探一次，让 status / gates / shell.caps 三处
-        // 读的是同一份**新鲜**事实。此前这条路由只回显「上一次控制 op 带回的 caps」，而冷启动后
-        // 没有任何 op ⇒ 引擎面报 shizukuReady:false，而壳侧同一时刻报「已授权且就绪」——
-        // 同一个事实两种读数，就是用户看到的自相矛盾。探测失败保持三态缺席（不是 false）。
-        await svc.shizukuChannelProbed()
+        // issue #1604：本路由**绝不驱动控制队列**——不 await、也不起后台补探。
+        //
+        // 缺陷形态：这条路由按设计不要求令牌（`authorizePublicReadOnlyRoute` 只拦 403），而它此前
+        // 在请求路径上 `await svc.shizukuChannelProbed()`，后者会 `controlExec('vdInfo')`。控制队列
+        // 是**单槽**的 ⇒ 本机任意应用一条裸 socket GET（带 Host、不带 Origin、不带令牌）就能把队列
+        // 占住最长 4-8 秒，期间所有 AI 工具调用都得到「已有在途的设备控制请求——壳侧单线程，请串行
+        // 调用」，而失败文案把原因归到「模型并发调用」，排障方向完全错。
+        //
+        // 为什么不保留「detached 后台补探」：它虽然不阻塞本次响应，但**仍然占掉那个唯一的槽**
+        // ——无令牌调用方照样能让真实工具调用失败，只是把症状推后一步。issue 给的方向是
+        // 「需要补探时由带令牌入口或后台节流触发」，而本仓唯一需要新鲜 caps 的消费面是
+        // **模型面工具**（`android_privilege_status` / `android_capabilities`），它们本来就带会话与
+        // 档位、也本来就该走队列 —— 补探留在那里（见 `execute` 里的 `shizukuChannelProbed()`）。
+        //
+        // 代价（明确记账）：A1 的「冷启动时引擎面报 shizukuReady:false 而壳侧报已授权」不会再由
+        // 本路由的自愈补探消除 —— 冷启动后、任何工具 op 之前，本路由回的是三态里的**未知**
+        // （caps 整键缺席），而不是 `false`。设置页据此显示「未确认」，模型工具一跑即刷新。
+        // 这比「任何本机应用都能让工具调用失败」便宜得多，且三态语义本来就是为了不把未知当未就绪。
         sendJson(res, 200, buildPrivilegeStatusPayload(svc, controlToken() !== undefined))
       },
-    })
+    }))
     // 0.13.5 W4：无障碍控制队列两条 exact 路由（自带共享令牌；壳侧轮询取活/回填）。
-    registerControlRoutes(wsvc, {
-      queue: controlQueue,
-      token: controlToken,
-      logger: ctx.logger?.('dsh-android-bridge'),
+    //
+    // issue #1595：同一条纪律——这两条也是 exact 路由，裸注册同样会在热重载后变成 duplicate
+    // exact route。registerControlRoutes 的契约是「拿到 webServer 的 register、逐条注册」，
+    // 所以这里递进去一个**收集型 register**：它把每次注册得到的 disposer 收起来，
+    // 再由外层 effect 统一回收。
+    ctx.effect(() => {
+      const disposers: Array<() => void> = []
+      registerControlRoutes({ register: (route: unknown) => disposers.push(wsvc.register(route)) }, {
+        queue: controlQueue,
+        token: controlToken,
+        logger: ctx.logger?.('dsh-android-bridge'),
+      })
+      return () => {
+        for (const dispose of disposers) {
+          try { dispose() } catch { /* 单条回收失败不阻断其余 */ }
+        }
+      }
     })
   }
 }

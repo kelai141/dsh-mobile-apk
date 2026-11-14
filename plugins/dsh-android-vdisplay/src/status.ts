@@ -56,6 +56,13 @@ export interface VdisplayFace {
     timeoutMs?: number,
     auth?: { session?: unknown; internal?: string },
   ): Promise<VdControlReply>
+  /**
+   * issue #1604：最近一次 `vdInfo` 回执的**只读缓存**（bridge 的 `cachedVdStatus()`）。
+   *
+   * 公开只读状态路由必须走它而不是 `controlExec('vdInfo')`：控制队列单槽，无令牌路由在里面
+   * 排队会把所有工具调用挤成「已有在途」。缺省（老版本 bridge）= 无缓存 ⇒ fail-closed。
+   */
+  cachedVdStatus?(): Record<string, unknown> | undefined
 }
 
 /** 控制队列回执（逐字段收窄；失败一律带结构化 error）。 */
@@ -227,6 +234,37 @@ export function readVdSnapshot(face: VdisplayFace | undefined): VdSnapshot {
  * @param face - 引擎侧 androidPrivilege 面（可选服务）。
  * @returns 状态快照；任何失败都带**归因准确**的 code/guidance，绝不把「读不到」说成「没落地」。
  */
+/**
+ * issue #1604：**公开只读状态路由专用**的读法——只读缓存，绝不入队。
+ *
+ * 缺陷形态：`GET /api/android/vdisplay/status` 按设计不要求令牌（只有 `authorizePublicReadOnlyRoute`
+ * 的 403 栅栏），但它此前在**请求路径上** `await readVdToolSnapshot()`，后者会 `controlExec('vdInfo')`。
+ * 控制队列是**单槽**的 ⇒ 本机任意应用一条裸 socket GET（带 Host、不带 Origin）就能把队列占住
+ * 最长 8 秒，期间任何 AI 工具调用都回「已有在途的设备控制请求——壳侧单线程，请串行调用」，
+ * 而失败文案把原因归到「模型并发调用」——排障方向完全错。
+ *
+ * 判据（与 issue 建议一致）：
+ *   - 有缓存 → 用缓存映射（与工具面同一映射体，不出现「同一事实两种读数」）；
+ *   - 无缓存 → 回 `vdisplay-status-unavailable`（**不**去探、**不**假装 ready）。首次查询由工具面
+ *     （`readVdToolSnapshot`，它本来就该走控制队列）或壳侧桥面填充。
+ *
+ * @param face - 引擎侧 androidPrivilege 面（可选服务）。
+ * @returns 状态快照；无缓存时是带稳定 code 的 blocked，而不是排队等待。
+ */
+export function readVdCachedSnapshot(face: VdisplayFace | undefined): VdSnapshot {
+  const cached = face?.cachedVdStatus?.()
+  if (cached !== undefined) return snapshotFromRaw(cached)
+  // 桥面（壳侧 WebView 直连）仍然优先于「什么都没探过」：那是**已有**的事实，不需要入队。
+  const bridge = face?.vdisplayStatus?.()
+  if (bridge !== undefined) return snapshotFromRaw(bridge)
+  return snapshotFromRaw(undefined, {
+    code: 'vdisplay-status-not-probed',
+    guidance: '虚拟屏状态尚未探过：本端点只读缓存、不驱动控制队列。'
+      + '请先调用 android_vdisplay_status（模型面，会走控制队列取一次真实注册表）或建屏，'
+      + '随后本端点即可读到同一份事实。',
+  })
+}
+
 export async function readVdToolSnapshot(face: VdisplayFace | undefined): Promise<VdSnapshot> {
   const service = face
   if (service?.controlExec !== undefined) {

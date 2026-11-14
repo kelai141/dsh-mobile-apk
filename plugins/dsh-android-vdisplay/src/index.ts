@@ -21,9 +21,9 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { readVdToolSnapshot, readVdSnapshot, VD_STATUS_PATH, type VdOp, type VdisplayFace } from './status.js'
+import { readVdCachedSnapshot, readVdToolSnapshot, readVdSnapshot, VD_STATUS_PATH, type VdOp, type VdisplayFace } from './status.js'
 
-export { VD_OPS, VD_STATUS_PATH, mapStatusPayload, readVdSnapshot, readVdToolSnapshot, snapshotFromRaw } from './status.js'
+export { VD_OPS, VD_STATUS_PATH, mapStatusPayload, readVdCachedSnapshot, readVdSnapshot, readVdToolSnapshot, snapshotFromRaw } from './status.js'
 export type { VdOp, VdPanelState, VdSnapshot, VdState, VdStatusPayload, VdisplayFace } from './status.js'
 
 export const name = '@dsh-android/dsh-android-vdisplay'
@@ -413,7 +413,10 @@ export function apply(ctx: Context): void {
   // "状态源不可达 → blocked"，不影响引擎启动，也不假装可用。
   // 可选服务一律走 ctx.get（不 inject）：属性访问 ctx.webServer 在未声明 inject 时会抛
   // cannot get property "webServer" without inject——与 tools 同一条 cordis 规则（坑 82）。
-  const wsvc = ctx.get('webServer') as { register(r: unknown): void } | undefined
+  // `register()` 在运行期**返回 disposer**（上游 webserver 契约；linux-env #1207 / file-open /
+  // browser 同形）。声明成 `() => void` 才能交给 ctx.effect 回收——否则热重载后这条 exact 路由
+  // 变成 duplicate exact route，整个插件装载失败（issue #1595）。
+  const wsvc = ctx.get('webServer') as { register(r: unknown): () => void } | undefined
   if (!wsvc) {
     ctx.logger?.('dsh-android-vdisplay')?.warn?.('webServer 服务缺席——状态端点未注册（面板将显示 blocked）')
     return
@@ -425,7 +428,12 @@ export function apply(ctx: Context): void {
       return undefined
     }
   })()
-  wsvc.register({
+  // issue #1595：`register()` 运行期返回 disposer，同名 (kind,path) 重复注册会 throw。
+  // 裸调 = 丢掉 disposer ⇒ 这个 fiber 的 effect 表里没有这条路由 ⇒ HMR / 设置页「禁用→启用」时
+  // 新实例 apply() 抛 `webserver: duplicate exact route "/api/android/vdisplay/status"` ⇒ 整插件
+  // 装载失败，而旧 handler 仍用已 dispose 的 ctx 回 200。故必须走 ctx.effect（同仓参照：linux-env
+  // 的 #1207 修法、file-open、browser）。
+  ctx.effect(() => wsvc.register({
     kind: 'exact',
     path: VD_STATUS_PATH,
     handler: async (req: WsReq, res: WsRes) => {
@@ -440,8 +448,11 @@ export function apply(ctx: Context): void {
         res.end('')
         return
       }
-      // 与控制 op 同源（readVdToolSnapshot 的说明）：控制队列 vdInfo 优先，桥面兜底。
-      sendJson(res, 200, await readVdToolSnapshot(faceOf()))
+      // issue #1604：**只读缓存，绝不入队**。本路由按设计不要求令牌（只拦 403），而控制队列是
+      // 单槽的——在请求路径上 await vdInfo 会让本机任意应用一条裸 socket GET 占住队列 8 秒，
+      // 期间所有工具调用都得到「已有在途的设备控制请求」，且文案把原因归到「模型并发调用」。
+      // 缓存由真正该走队列的入口填充（android_vdisplay_status 工具 / 建屏 / 任意 vd* op 的回执）。
+      sendJson(res, 200, readVdCachedSnapshot(faceOf()))
     },
-  })
+  }))
 }
