@@ -155,8 +155,13 @@ const CLOSE_CLASS_HINT = '[class*="close"]'
 const PANEL_DETAIL_SELECTORS = ['[data-plugin-detail]', '[data-plugin-item-detail]', '[data-plugin-row-detail]'] as const
 /** The crumb button inside one of those levels (class token survives CSS-module hashing). */
 const CRUMB_BUTTON_HINT = 'button[class*="crumb"]'
-/** This plugin's back control, mounted by mobile/main-panel-back.ts at the list root. */
-const PANEL_BACK_SELECTOR = '[data-dsh-main-panel-back]'
+/**
+ * This plugin's back control marker, mounted by mobile/main-panel-back.ts at the list root.
+ *
+ * Kept in the observed-attribute list so a mount/unmount still re-reconciles the layer, but
+ * no longer a closure path: the stylesheet paints it display:none and ActivationGuard blocks
+ * its activation, so the list root closes at the layout service instead (#1763).
+ */
 /** Attributes any layer's presence is derived from; the filter keeps the observer cheap. */
 const OBSERVED_ATTRIBUTES = [
   MOBILE_FORM_ATTR,
@@ -272,9 +277,9 @@ function closeRightFullscreen(panel: Element): boolean {
  * The plugin manager owns a depth hierarchy (list -> package -> row) and each
  * detail level draws its own crumb control, so a press pops exactly one level
  * through that control rather than writing the page's store. The list root
- * draws no control of its own, so the fallback is this plugin's back button
- * (mobile/main-panel-back.ts), which is the control that layer closes through.
- * @returns whether a control was found and triggered.
+ * draws no control of its own, so it closes at the layout service directly
+ * (see the #1763 note below).
+ * @returns whether a level was left (the press is consumed either way).
  */
 function closeMainPanel(leave: () => void): boolean {
   // One detail level at a time, through the crumb the page itself draws.
@@ -285,15 +290,21 @@ function closeMainPanel(leave: () => void): boolean {
     dispatchMouse(crumb, 'click')
     return true
   }
-  // The list root: the injected control when this plugin mounted one (phone form).
-  const back = document.querySelector(PANEL_BACK_SELECTOR)
-  if (back !== null) {
-    dispatchMouse(back, 'click')
-    return true
-  }
-  // The list root upstream draws no control at all, at any width. Leaving the panel is
-  // then the layout service own panel selection - the exact action the sidebar rows and
-  // the injected button perform - not a write into the page private store.
+  // The list root. Leaving the panel is the layout service own panel selection - the exact
+  // action the sidebar rows perform - and it is taken directly, not by clicking this plugin
+  // own injected back control (#1763).
+  //
+  // Why the injected control cannot be that path, measured on the device (0.14.11, phone
+  // form, 900x1600): main-panel-back.css.ts paints it display:none !important on purpose
+  // (the 2026-11-14 round that kept only the title), so it has no layout box; and this
+  // plugin own ActivationGuard swallows activations of controls the page does not present
+  // (#1317). Evidence: button.dispatchEvent(new MouseEvent('click')) returned false, no
+  // document capture listener ran, and the node carried data-dsh-activation-inert. The
+  // layer stayed selected, so every system-back press was consumed and did nothing - the
+  // reported "back does nothing" while the shell log said DISPATCH_PAGE_STACK.
+  //
+  // The button stays mounted: it is a real affordance if a later round paints it again, and
+  // main-panel-back.spec.ts group C still covers its click handler.
   leave()
   return true
 }

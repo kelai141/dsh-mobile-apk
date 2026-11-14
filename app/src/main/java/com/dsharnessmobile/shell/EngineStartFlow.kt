@@ -130,6 +130,18 @@ internal class EngineStartFlow(private val activity: MainActivity) {
   // startFreezeWatchdog 到 startUpdateCheck 那一段，而置位点与唯一复位点都在 freezeRunnable 里，
   // 于是把 freezeReloaded=false 挪进冻结分支（每拍复位 = 每 10 秒 reload 的循环）也判不出来。
   private val freezeGate = FreezeRecoveryGate()
+
+  /**
+   * 白屏判据（issue #1744）：页面活着但**什么都没画出来**。
+   *
+   * 为什么必须自己探：壳侧唯一就绪真源是页面自报 `[dsh-boot-ready]`；而页面侧就绪判据只看 DOM，
+   * 一个 client bundle entry 崩掉即整树卸载，且这类崩溃常常一条 console 都不留。零 console 时
+   * 壳侧只能靠自己注入的探针拿判据——这是唯一可行的通道。
+   *
+   * 与 [freezeGate] 的分工：冻结 = 渲染进程不应答；白屏 = 应了，但画出来是空的。两条自愈链
+   * 互不抢动作（探针失败归冻结链，见 [BlankScreenGate.beat] 的 probeFailed 分支）。
+   */
+  private val blankGate = BlankScreenGate()
   private val freezeRunnable = object : Runnable {
     override fun run() {
       if (!canRunEngineWork()) return
@@ -138,7 +150,12 @@ internal class EngineStartFlow(private val activity: MainActivity) {
       // 得不到应答是**预期结果**，把它当成「渲染进程冻结」去 reload 只是又一次弹回坏页面
       // （与 showWeb 的 reload 环同族）。清 latch 之后本看门狗自然恢复。
       if (clientPluginTreeFailed) return
-      val now = System.currentTimeMillis()
+      // #1577：冻结闸门做的是**纯区间比较**（now - pageLoadedAt / now - jsAckAt），
+      // 拿墙上时钟量就会吃校时：向前拨 ⇒ 健康页面被判冻结并 reload（表单/滚动丢失）；
+      // 向后拨 ⇒ 差值恒负 ⇒ 真冻结时自愈整段失效。故与 boot-stall 同口径改用单调时钟
+      // [bootStallNow]（见其选型注释：跨休眠继续计数、不受校时影响）。三处取时（tick /
+      // onAck / onPageLoaded）必须同源，只改一处会让区间比较混用两个基准。
+      val now = bootStallNow()
       // 状态机只回答「本拍做什么」；动作（reload / evaluateJavascript）留在 Activity 侧，
       // 这样判据能在 JVM 里离线跑转换，不必构造 WebView。
       val action = freezeGate.tick(now)
@@ -153,20 +170,84 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         }
       } else if (action == FreezeRecoveryGate.Action.PING) {
         // 心跳只发一次：在飞标记由状态机记（pingOutstanding），回执回来前不重发。
+        //
+        // issue #1744：这条心跳**顺带就是渲染真值探针**。旧实现 evaluateJavascript("1") 只回答
+        // 「JS 活着吗」，拿不到「页面画出来了吗」——而白屏恰恰是「活着的页面什么都没画」。
+        // 把返回值换成 {root,text,err,bundle} 后，同一次往返同时喂两条判据：
+        //   - 应答到达 = 页面真活（freezeGate.onAck，原有语义不变）；
+        //   - 读数里的 root/text = 渲染真值（blankGate，新增判据）。
+        // 不额外增加 binder/主线程往返，拍长也不变。
+        val generation = monitorGeneration
         try {
-          val generation = monitorGeneration
-          activity.webView.evaluateJavascript("1") { _ ->
+          activity.webView.evaluateJavascript(BlankScreenGate.PROBE_SCRIPT) { value ->
             if (generation != monitorGeneration || !activity.pageUiActive) return@evaluateJavascript
             // #1355：应答=页面真活，重开冻结自愈预算（不能放 onPageFinished，会成 reload 循环）。
-            freezeGate.onAck(System.currentTimeMillis())
+            // #1577（已合入 main）用单调时钟；#1744 的探针读数在同一次回调里喂白屏判据。
+            // 两者都必须保留：时钟来源与前一条判据无关，探针读数与时钟来源也无关。
+            freezeGate.onAck(bootStallNow())
+            onRenderProbe(RenderProbe.parse(value))
           }
         } catch (_: Exception) {
           freezeGate.onPingFailed()
+          // 探针发不出去 = 渲染进程可能已死：交给冻结链，本判据不计次。
+          blankGate.beat(0, 0, probeFailed = true)
         }
       }
       // 拍长 10 秒（与旧实现一致，勿单独改）：状态机的 45s/20s 两个窗口按这个节奏标定。
       freezeHandler.postDelayed(this, 10_000)
     }
+  }
+
+  /**
+   * 渲染真值探针的读数处理（issue #1744 的判据落点）。
+   *
+   * 三件事，顺序即契约：
+   *   ① 喂状态机，拿本拍结论——阈值/粘滞/恢复全在 [BlankScreenGate] 里（纯类，可离线判红）；
+   *   ② 只在**首次**判出白屏时动作一次（粘滞态不重复动作，否则每 10 秒重建一次页面）；
+   *   ③ 动作前**再查一次** `pageReadyReported`：探针回调是异步的，页面可能在这期间报了 ready，
+   *      此时「白屏」已被真值否定——宁可少动一次，也不要在健康页面上盖原生底（那是新缺陷）。
+   *
+   * 为什么兜底动作是「落诊断 + 切 Recovering 相位」而不是直接重建页面：
+   * 重建页面在「插件树本身坏了」时会变成 reload 环（CONTRACT §4 那条闸门就是为此存在）。
+   * 先落取证并让用户看到「正在自动恢复」，重建交给既有的页面恢复策略做——那条路径已经带
+   * 一次性闸门与失败预算，不在这里重复实现第二套。
+   */
+  private fun onRenderProbe(probe: RenderProbe) {
+    if (!canRunEngineWork() || !activity.pageUiActive) return
+    // 页面已自报 ready：白屏判据对它不再成立（真值优先，与 pageReadyReported 的语义一致）。
+    if (pageReadyReported) {
+      blankGate.onPageReady()
+      return
+    }
+    val verdict = blankGate.beat(probe.root, probe.text, probeFailed = probe.failed)
+    if (verdict != BlankScreenGate.Verdict.BLANK) return
+    if (pageReadyReported || !activity.pageUiActive || activity.userClosedEngine) return
+
+    // 取证：零 console 的白屏必须留下可检查的现场，否则下一次只能靠猜。
+    // 与 engine-died / spawn-failed / boot-hung 三个镜像点同一通道（run-as 可取，不依赖调试开关）。
+    val detail = "root=" + probe.root +
+      " text=" + probe.text +
+      " bundle=" + probe.bundle +
+      " beats=" + blankGate.blankBeats +
+      (if (probe.err.isNotEmpty()) " err=" + probe.err.replace('\n', ' ') else "") +
+      " hint=page-loaded-but-rendered-nothing"
+    LogCollector.writeBootDiag(
+      activity, "blank-screen", detail,
+      pageSideRuntime = LogCollector.PAGE_RUNTIME_UNAVAILABLE,
+    )
+    LogCollector.log("dsh-shell", "blank screen detected (" + detail + ")")
+    try {
+      activity.runOnUiThread {
+        activity.applyGuidePhase(
+          GuidePhase.Recovering,
+          UiText.t(activity, "页面没有渲染出内容，正在自动恢复…", "The page rendered nothing; recovering automatically…"),
+        )
+        activity.showGuide()
+      }
+    } catch (e: Exception) {
+      Log.w("dsh-shell", "blank screen recovery failed", e)
+    }
+    Thread { runCatching { activity.engineManager.mirrorDiagnosticsToShared("page-blank") } }.apply { isDaemon = true }.start()
   }
 
   /** onResume 前台引擎监控启动（幂等移除后重投）。 */
@@ -424,7 +505,8 @@ internal class EngineStartFlow(private val activity: MainActivity) {
   fun startFreezeWatchdog() {
     if (!canRunEngineWork()) return
     if (!activity.pageUiActive || activity.userClosedEngine || !activity.webViewReady || activity.webView.visibility != View.VISIBLE) return
-    val now = System.currentTimeMillis()
+    // #1577：与 freezeRunnable 的 tick / onAck 同一单调基准，否则区间比较跨两个时钟。
+    val now = bootStallNow()
     // #1513：计时交给状态机（复位只发生在应答回调，onPageFinished 不等于页面真活）。
     freezeGate.onPageLoaded(now)
     // 冻结自愈闸门（freezeReloaded）在这里**不复位**：文档加载完时 JS 可能仍然死着。

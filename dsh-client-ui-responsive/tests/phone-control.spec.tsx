@@ -1488,9 +1488,45 @@ describe('root 授权终态（issue #1377）', () => {
     expect(rootGrantTerminal('')).toBeNull()
   })
 
-  it('等待有上界：pending 超时常量存在且有限', () => {
-    expect(Number.isFinite(ROOT_GRANT_PENDING_TIMEOUT_MS)).toBe(true)
-    expect(ROOT_GRANT_PENDING_TIMEOUT_MS).toBeGreaterThan(0)
+  /**
+   * issue #1593：旧用例只断言「超时常量有限」——**常量有限不等于等待有上界**。
+   *
+   * 判据必须落在**时间推进后的真实状态**上：点开关 → 壳侧回 request-started（进入 pending）
+   * → 推到超时点 → 文案必须等于 rootGrantTerminal('timeout').text（终态可辨），
+   * → 再推进 2s → setRootGranted 调用次数不再增长（等待已收口，不会无限续开）。
+   *
+   * 负控（实跑过）：删掉 phone-control.tsx 里那个 setTimeout 后，本用例在「超时文案」处变红。
+   */
+  it('等待有上界：推进到超时点后落到 timeout 终态文案，且不再续开', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
+    const setRootGranted = vi.fn(() => rootGrantJson({ ok: false, code: 'request-started', requesting: true }))
+    const el = await render({
+      rootGrantState: () => rootGrantJson({ consentValid: true, rootGranted: false }),
+      rootAccessState: () => rootAccessJson({ state: 'requesting', granted: false, requesting: true }),
+      setRootGranted,
+    })
+    await act(async () => { toggleOf(el, '授权 AI 使用 root').click() })
+    // 前置：确实进了 pending（否则下面的超时断言会因「压根没等」而假绿）。
+    expect(setRootGranted).toHaveBeenCalledTimes(1)
+    expect(el.textContent).toContain('正在检测 root 授权')
+
+    // 差一拍：还没到超时点，文案必须仍停在「正在检测」（证明上界不是靠立刻收口凑出来的）。
+    await act(async () => { vi.advanceTimersByTime(ROOT_GRANT_PENDING_TIMEOUT_MS - 1) })
+    expect(el.textContent).toContain('正在检测 root 授权')
+
+    // 到点：必须收敛到 timeout 终态，而不是回到「未授权」或继续挂着。
+    await act(async () => { vi.advanceTimersByTime(1) })
+    const timeoutText = rootGrantTerminal('timeout')!.text
+    expect(el.textContent).toContain(timeoutText)
+    expect(el.textContent).not.toContain('正在检测 root 授权')
+    // 终态是可重试的，但**不能被等待逻辑自己重放**——开关回到关闭。
+    expect(toggleOf(el, '授权 AI 使用 root').checked).toBe(false)
+
+    // 再推进 2s（多个轮询拍）：收口后不得再发起新的开启请求。
+    await act(async () => { vi.advanceTimersByTime(2_000) })
+    await act(async () => { vi.advanceTimersByTime(2_000) })
+    expect(setRootGranted).toHaveBeenCalledTimes(1)
   })
 })
 

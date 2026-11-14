@@ -179,14 +179,27 @@ export class IncomingDraftConsumer {
   private readonly pendingAcks = new Map<string, 'draft-ready' | 'removed'>()
   private readonly hydrating = new Set<string>()
   private readonly createdSessions = new Map<string, string>()
-  /** review C10：逐条目的载入尝试计数与终止标记——无 sessionId 的补建必须**有限次**。 */
+  /** review C10：逐条目的**真实失败**尝试计数与终止标记——补建/领取必须有限次。 */
   private readonly attempts = new Map<string, number>()
+  /** issue #1570：逐条目的「作用域仍未就绪」连续拍数（与失败预算分开记账）。 */
+  private readonly scopeDeferrals = new Map<string, number>()
   private readonly exhausted = new Set<string>()
   /** 已经提示过「临时工作区不可用」的条目（S3-21：同一 entryId 只提示一次）。 */
   private readonly workspaceWarned = new Set<string>()
   /** camera 来件「当前会话已失效 → 回落新建」的次数（有界，防无限空会话）。 */
   private readonly scopeFallbacks = new Map<string, number>()
   private static readonly MAX_HYDRATE_ATTEMPTS = 5
+  /**
+   * issue #1570：作用域连续未就绪的**独立**上限（不占失败预算）。
+   *
+   * 为什么必须是独立的一份：冷启动时 `sessionScope` 前几拍常是 undefined（控制器投影还没绑上），
+   * 而旧实现把这**非失败**出口也计入 MAX_HYDRATE_ATTEMPTS —— 5 拍 x 4000ms = 20s 就把条目判死，
+   * 第 6 拍起 return 永不再试，用户分享的文件在冷启动第 21 秒后彻底消失。
+   *
+   * 也不能索性不封顶：绑定的会话 id 真死掉时作用域永远不出现，条目会永久霸占队列且毫无提示。
+   * 30 拍（poll 间隔 4s，约 2 分钟）远大于实测冷启动绑定时间，同时给用户一个收敛点。
+   */
+  private static readonly MAX_SCOPE_DEFERRALS = 30
   /** camera 来件回落新建会话的次数上限（当前会话被删掉时的收敛点）。 */
   private static readonly MAX_SCOPE_FALLBACKS = 2
   /** issue #1413：一批条目的并发上限。一条慢/失败不得阻塞同批其它条目。 */
@@ -249,15 +262,39 @@ export class IncomingDraftConsumer {
   private exhaustedFor(item: IncomingDraftItem): boolean {
     const attempts = (this.attempts.get(item.entryId) ?? 0) + 1
     this.attempts.set(item.entryId, attempts)
-    if (attempts <= IncomingDraftConsumer.MAX_HYDRATE_ATTEMPTS) return false
+    // MAX_HYDRATE_ATTEMPTS = 允许的真实尝试次数（第 N 次失败即收口）。
+    return attempts >= IncomingDraftConsumer.MAX_HYDRATE_ATTEMPTS ? this.giveUp(item) : false
+  }
+
+  /**
+   * issue #1570：作用域**未就绪**是「再等一拍」，不是「失败一次」。
+   *
+   * 旧实现把这一路也计入 MAX_HYDRATE_ATTEMPTS，于是冷启动 20s 后条目被判死；现在它走
+   * 独立的 MAX_SCOPE_DEFERRALS 预算，且**只有**超出该上限才收敛成终态并提示。
+   *
+   * @returns true = 已耗尽，调用方必须放弃这一拍。
+   */
+  private scopeDeferralExhausted(item: IncomingDraftItem): boolean {
+    const deferrals = (this.scopeDeferrals.get(item.entryId) ?? 0) + 1
+    this.scopeDeferrals.set(item.entryId, deferrals)
+    return deferrals >= IncomingDraftConsumer.MAX_SCOPE_DEFERRALS ? this.giveUp(item) : false
+  }
+
+  /** 收敛成终态：打标记 + 一次性可见提示（有会话走会话级，没有就走全局结果通道）。 */
+  private giveUp(item: IncomingDraftItem): true {
     document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'exhausted')
     if (!this.exhausted.has(item.entryId)) {
       this.exhausted.add(item.entryId)
       console.warn('[dsh-mobile] incoming draft hydration exhausted; a fresh share is required:', item.name)
       const sessionId = item.sessionId ?? this.createdSessions.get(item.entryId)
       const scope = sessionId === undefined ? undefined : this.runtime.sessionScope(sessionId)
+      const text = '外部附件草稿多次载入失败，已停止自动重试；请重新使用系统打开方式分享文件。'
       if (scope !== undefined) {
-        this.runtime.notify(scope, '外部附件草稿多次载入失败，已停止自动重试；请重新使用系统打开方式分享文件。')
+        this.runtime.notify(scope, text)
+      } else {
+        // issue #1570：原先这里「没有 scope 就什么都不说」—— 判死之后用户看不到任何提示，
+        // 文件就那么消失了。没有会话可挂时必须走全局的用户可见结果通道（与导出结果同一通道）。
+        reportUserFacingResult({ ok: false, title: '分享进来的文件没能放进编辑框', detail: text })
       }
     }
     return true
@@ -329,7 +366,14 @@ export class IncomingDraftConsumer {
 
   private async hydrate(item: IncomingDraftItem): Promise<void> {
     if (this.hydrating.has(item.entryId) || this.admittedEntries.has(item.entryId)) return
-    if (this.exhaustedFor(item)) return
+    // issue #1570：**不得**在这里无条件计一次失败。hydrate 有三条非失败出口
+    //（session-refresh-deferred / scope-deferred / createSession 暂不可用），
+    // 把它们算进失败预算正是「冷启动 20s 判死」的真因。计次下沉到下面的真实动作处。
+    // 已判死的条目每拍只回报终态标记，不再发起任何真实动作（用户重新分享才会拿到新记录）。
+    if (this.exhausted.has(item.entryId)) {
+      document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'exhausted')
+      return
+    }
     this.hydrating.add(item.entryId)
     document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'hydrate:' + item.state)
     let release: (() => void) | undefined
@@ -376,8 +420,13 @@ export class IncomingDraftConsumer {
         }
       }
       if (sessionId === undefined) {
-        sessionId = await this.createBlankSessionFor(item)
-        if (sessionId === undefined) return
+        // 建会话是**真实动作**：拿不到工作区或创建失败才算一次失败尝试（issue #1570）。
+        const created = await this.createBlankSessionFor(item)
+        if (created === undefined) {
+          this.exhaustedFor(item)
+          return
+        }
+        sessionId = created
       }
       // J1 admits through the same InputHub shell that owns the rendered composer. The Session
       // controller resolves before that UI scope can be bound on cold WebView startup, so retain
@@ -403,7 +452,9 @@ export class IncomingDraftConsumer {
           scope = this.runtime.sessionScope(sessionId)
         }
         if (scope === undefined) {
+          // issue #1570：作用域未就绪 = 再等一拍，**不消耗失败预算**（它有自己的上限）。
           document.documentElement.setAttribute('data-dsh-incoming-draft-poll', 'scope-deferred')
+          this.scopeDeferralExhausted(item)
           return
         }
       }
@@ -422,7 +473,11 @@ export class IncomingDraftConsumer {
         // 不能改成「立即终态」：finish() 需要 ticket，而 claim 失败时还没有 ticket，没有可终态的
         // 对象；而「反复重试」的**真实危害**是每次新建一个空会话 —— 那一条已由上面的
         // isTerminalRefreshFailure 分支堵掉（重试复用同一个 sessionId）。
-        if (claim === undefined) return
+        if (claim === undefined) {
+          // claim 是真实动作：服务端拒绝/超时算一次失败尝试（有界重试，issue #1412 + C10）。
+          this.exhaustedFor(item)
+          return
+        }
         ticket = claim.ticket as string
         // A slow same-ticket content read is not an explicit removal; retain its original attempt.
         const content = await this.fetchImpl('/api/android/file-incoming/content?ticket=' + encodeURIComponent(ticket), {
@@ -440,6 +495,7 @@ export class IncomingDraftConsumer {
       } catch {
         if (ticket !== '') await this.finish(ticket, 'removed')
         this.runtime.notify(scope, '外部附件草稿载入失败；文件没有自动发送，请重新使用系统打开方式。')
+        this.exhaustedFor(item)
       }
     } finally {
       release?.()

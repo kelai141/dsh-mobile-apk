@@ -17,7 +17,7 @@ import android.widget.TextView
  *
  * 观测点：
  * - 点击：按钮正文的点击计数；
- * - 长按：长按计数（覆盖 swipe 压住不动 600ms 的形态）；
+ * - 长按：长按计数（覆盖固定坐标的持续按压）；
  * - 滑动/滚动：ScrollView 的 scrollY 位移；
  * - 返回：onBackPressed 计数（虚拟屏 back 是否真的落到这块屏）。
  *

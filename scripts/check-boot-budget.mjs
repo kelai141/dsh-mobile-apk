@@ -18,10 +18,13 @@
 //
 // 用法：
 //   node scripts/check-boot-budget.mjs --segments <boot-segments.log> --probe <engine 探针输出> [--require]
+//   node scripts/check-boot-budget.mjs --require-real   # 设备验收档：真数据产物缺席即判红
+//     （--require 只表示「能取到的判据不许 SKIP 结案」，不要求设备产物在场；两者不可混用，见 main() 内注释）
 //   node scripts/check-boot-budget.mjs --self-test
 // 退出码：0 = 通过；1 = 判红；2 = 用法错误。
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -829,6 +832,33 @@ function selfTest() {
       'C4 ok=' + okOf(r, 'C4'))
   }
 
+  // ⑫ issue #1568 回归：--require-real 必须仍能判红（无产物即 exit 1）。
+  //    为什么必须有这条：本轮的修法是「--require 不再等价于 --require-real」，最省事的
+  //    「修好」办法是把 --require-real 也一并废掉——那就把「发布前必须真检」这条保证彻底删了。
+  //    这里用**空产物目录**（DSH_BOOT_BUDGET_DIR 指向临时空目录）构造「无产物」这一确定事实，
+  //    再断言两条档位分道：--require-real → exit 1；--require → exit 0 且仍打印 SKIP(#1)。
+  //    递归防护：--require 档的子进程自己也会退到 selfTest()，子进程里必须跳过本块，
+  //    否则「无产物 → selfTest → 再 spawn 子进程 → …」会无限套娃。用环境变量做一次性闸门。
+  if (process.env.DSH_BOOT_BUDGET_NO_REGRESSION === '1') {
+    console.log('SKIP(#2)(nested)  子进程内的 --require-real 回归（避免 selfTest 递归）')
+  } else {
+    const emptyDir = join(mkdtempSync(join(tmpdir(), 'boot-budget-')), 'boot-budget')
+    mkdirSync(emptyDir, { recursive: true })
+    const childEnv = { ...process.env, DSH_BOOT_BUDGET_DIR: emptyDir, DSH_BOOT_BUDGET_NO_REGRESSION: '1' }
+    delete childEnv.DSH_BOOT_SEGMENTS
+    delete childEnv.DSH_BOOT_PROBE
+    const self = fileURLToPath(import.meta.url)
+    const real = spawnSync(process.execPath, [self, '--require-real'], { encoding: 'utf8', env: childEnv })
+    check('⑫ issue #1568：--require-real 且无产物 → exit 1（设备真检档不得被弱化）',
+      real.status === 1, 'status=' + String(real.status) + ' err=' + (real.stderr || '').trim().slice(0, 120))
+    const relaxed = spawnSync(process.execPath, [self, '--require', '--no-liveness'], { encoding: 'utf8', env: childEnv })
+    const relaxedOut = (relaxed.stdout || '') + (relaxed.stderr || '')
+    check('⑫ issue #1568：--require 且无产物 → exit 0 且明确记 SKIP（不冒充绿、不中止整链）',
+      relaxed.status === 0 && /SKIP\(#1\)\(real-data\)/.test(relaxedOut),
+      'status=' + String(relaxed.status) + ' out=' + relaxedOut.trim().split('\n').slice(0, 2).join(' | ').slice(0, 160))
+    rmSync(emptyDir, { recursive: true, force: true })
+  }
+
   // ⑪ 配套探针自检（C5 正向对照的可执行面）：count-compose --self-test 必须通过。
   {
     const probeSelf = join(ROOT, 'scripts', 'perf', 'count-compose.mjs')
@@ -904,8 +934,19 @@ if (argv.includes('--self-test')) selfTest()
 else {
   const argOf = (name) => { const i = argv.indexOf('--' + name); return i >= 0 ? argv[i + 1] : undefined }
   const strict = argv.includes('--require')
-  // --require-real：产物缺席即判红（发布前设备门禁用）。默认档产物缺席只标 SKIP，但**绝不冒充绿**。
-  const requireReal = argv.includes('--require-real') || strict
+  // --require-real：产物缺席即判红（发布前**设备**门禁用，由设备验收显式跑）。
+  // 默认档产物缺席只标 SKIP，但**绝不冒充绿**。
+  //
+  // issue #1568：此前这里是 `argv.includes('--require-real') || strict`，把聚合器的 `--require`
+  // 当成 `--require-real`。两者语义不同：
+  //   · `--require`（聚合入口严格档）= 「本次能取到的判据不许以 SKIP 结案」，**不**要求设备产物在场；
+  //   · `--require-real`（设备档）= 「没有设备真产物即判红」。
+  // 混为一谈的后果：清洁检出（.deploy-tmp/boot-budget/ 在 .gitignore 里，必然不存在）上
+  // `check-release-gates.mjs --run --require` 到第 31/37 条门禁就 exit 1，其后 6 条门禁一条都不跑，
+  // 而 gate-skips-declared.json 给它申报的 max:2 永远走不到——整条发布链被一条结构性不可达的判据卡死。
+  // 修法：只认 `--require-real`；「发布前必须在设备上真检」的语义仍由设备门禁显式跑 `--require-real` 承担
+  // （无产物即判红），聚合入口按注释既有约定**不**代传。
+  const requireReal = argv.includes('--require-real')
   const pullIdx = argv.indexOf('--pull')
   if (pullIdx >= 0) {
     const serial = argv[pullIdx + 1] !== undefined && !argv[pullIdx + 1].startsWith('--') ? argv[pullIdx + 1] : undefined
@@ -924,8 +965,9 @@ else {
   const segmentsPath = found.segmentsPath
   const probePath = found.probePath
 
-  // 产物缺席：不是绿。默认档明确标 SKIP 并退 self-test（自证判据没退化成假防线），
-  // --require-real/--require 档直接判红——避免「无产物 = 通过」。
+  // 产物缺席：不是绿。默认档与聚合器 `--require` 档明确标 SKIP 并退 self-test（自证判据没退化成
+  // 假防线，且不影响其余门禁跑完）；只有 `--require-real` 档判红——那是设备验收档，无产物就该拒。
+  // 两条纪律的分界见上方 --require-real / --require 的注释（issue #1568）。
   if (!segmentsPath || !probePath) {
     const missing = [!segmentsPath ? 'boot-segments.log' : null, !probePath ? 'engine.log(探针输出)' : null].filter(Boolean)
     if (requireReal) {
@@ -937,7 +979,8 @@ else {
     // SKIP 纪律（check-gate-skips.mjs ST-31）：发射点必须带计数器或 `SKIP=` 汇总。
     // 本行是本脚本唯一的字面量 SKIP 发射点，故编号 #1 并与结尾的 SKIP= 汇总口径一致。
     console.log('SKIP(#1)(real-data)  真数据产物缺席（' + missing.join(', ') + '）——本次**未执行真检**'
-      + '；落点 ' + found.dir + '（--pull <serial> 可取真产物，--require-real 可强制要求）')
+      + '；落点 ' + found.dir + '（--pull <serial> 可取真产物，--require-real 可强制要求）'
+      + (strict ? '；本档是聚合器 --require（只要求「能取到的判据不许 SKIP」），设备真检档是 --require-real' : ''))
     console.log('      退到 --self-test 自证判据本身能判红（这不等于冷启动达标）')
     selfTest()
   }

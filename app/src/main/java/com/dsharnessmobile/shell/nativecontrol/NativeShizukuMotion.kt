@@ -27,7 +27,8 @@ import java.io.File
 internal object NativeShizukuMotion {
   private const val SHELL_UID = 2000
   private const val MAX_DEADLINE_MS = 5_000L
-  private const val LONG_CLICK_MS = 600L
+  // Leave room for touch dispatch and the target app's main thread to process its long-press timer.
+  private const val LONG_CLICK_MS = 900L
   private const val SCROLL_MS = 300L
   private const val MIN_SWIPE_MS = 50L
   private const val MAX_SWIPE_MS = 2_000L

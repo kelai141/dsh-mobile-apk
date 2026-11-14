@@ -131,7 +131,7 @@ class NativeShizukuMotionTest {
     assertEquals("yes", outcome.executed)
     assertEquals("只允许一次派发: " + environment.started, 1, environment.started.size)
     assertEquals(
-      listOf("/system/bin/input", "-d", "0", "swipe", "10", "20", "10", "20", "600"),
+      listOf("/system/bin/input", "-d", "0", "swipe", "10", "20", "10", "20", "900"),
       environment.started.single(),
     )
   }

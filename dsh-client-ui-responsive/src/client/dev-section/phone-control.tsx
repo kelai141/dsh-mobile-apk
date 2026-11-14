@@ -67,8 +67,24 @@ interface ShizukuStatus {
   retryAfterMs?: number
   /** 壳侧截取的启动失败诊断日志（有界 logcat 片段）。 */
   diagnostics?: string
+  /**
+   * 壳侧就绪三态（issue #1476）：`ShizukuTransport.status()` 的 readyState。
+   *
+   * 为什么必须单独透出来：`bound` 只证明 **binder 代理活着**，不证明 UserService 能应答。
+   * issue #1476 的现场正是「面板说就绪、工具说 30s 超时」——两者读的是同一个 binder，
+   * 差别在于壳侧当时只验了 ping。壳侧现在多验一次功能探测（`protocolVersion()` 真过 binder），
+   * 结论落在 readyState 上；UI 若只看 `bound` 就会继续复述那个错误结论。
+   *
+   * 缺席（旧壳/旧桥）按旧口径走——见 [shizukuStateLabel]。
+   */
+  readyState?: ShizukuReadyState
+  /** 功能探测的失败原因（readyState 为 not-ready 时的可读原因）。 */
+  probeError?: string
   guidance: string
 }
+
+/** 壳侧就绪三态；`unknown` = 探测尚未完成，**不等于**不可用（坑 161）。 */
+export type ShizukuReadyState = 'ready' | 'not-ready' | 'unknown'
 
 /**
  * issue #262「AI root 权限」开关状态（壳侧 [RootGrant.state] 的同构面）。
@@ -225,6 +241,8 @@ const SHIZUKU_UNREADABLE: ShizukuStatus = {
   startFailed: false,
   retryAfterMs: 0,
   diagnostics: '',
+  readyState: 'unknown',
+  probeError: '',
   guidance: '',
 }
 
@@ -364,6 +382,17 @@ export function shizukuStateLabel(status: ShizukuStatus): string {
     }
     return tr('已授权，通道未建立', 'Granted, not connected')
   }
+  // issue #1476：`bound` 只证明 binder 代理活着。壳侧还会做一次**功能探测**
+  // （`protocolVersion()` 真过 binder），结论在 readyState 上。只看 bound 就会复述
+  // 「面板说就绪、工具说超时」那个错误结论——本缺陷的用户可见形态正是它。
+  //
+  // 缺席（旧壳无这条判据）必须退回旧的 bound 口径，否则老壳永久显示探测中。
+  if (status.readyState === 'not-ready') {
+    return tr('已授权，用户服务不可用', 'Granted, UserService not responding')
+  }
+  if (status.readyState === 'unknown') {
+    return tr('已授权，正在验证通道', 'Granted, verifying the channel')
+  }
   return tr('通道就绪', 'Channel ready')
 }
 
@@ -380,6 +409,22 @@ export function shizukuStepHint(status: ShizukuStatus): string {
     )
   }
   if (!status.bound) return tr('状态每 2 秒自动刷新，稍等即可；一直停在这里可以点「打开 Shizuku」重进一次。', 'Status refreshes every 2 seconds; if it stays here, open Shizuku once more.')
+  // issue #1476：binder 连上了但功能探测失败——这时「已就绪」是假的，必须说清下一步。
+  if (status.readyState === 'not-ready') {
+    return tr(
+      '通道已连上，但用户服务不应答（功能探测失败' + (status.probeError ? '：' + status.probeError : '') +
+        '）。点「重置链接」重建通道；仍失败请展开诊断日志反馈。',
+      'The channel is connected but the UserService does not answer (probe failed' +
+        (status.probeError ? ': ' + status.probeError : '') +
+        '). Tap Reset link to rebuild; if it persists, expand the diagnostics and report it.',
+    )
+  }
+  if (status.readyState === 'unknown') {
+    return tr(
+      '通道已连上，正在做首次功能探测（这不代表不可用）；探测一落地即转就绪，现在就可以让 AI 试。',
+      'The channel is connected; the first functional probe is running (not a sign of trouble). It turns ready once the probe lands; you can let the AI try now.',
+    )
+  }
   return tr('特权通道已就绪，虚拟屏与特权 shell 可以用了。', 'The privileged channel is ready; virtual screens and the privileged shell work now.')
 }
 
@@ -506,6 +551,25 @@ export function readFloat(): ShellRead<boolean> {
 }
 
 /**
+ * 壳侧 readyState 的解析（issue #1476）。
+ *
+ * 只认三个字面量；其余（含缺席）一律 `undefined`——**缺席不等于 unknown**：
+ * `undefined` 表示「这个壳没有这条判据」，UI 必须退回旧的 `bound` 口径；
+ * `'unknown'` 表示「壳有判据、但探测还没跑完」，那条路径要如实说探测中。
+ * 把两者混成一个值会让老壳永久卡在「探测中」，也会让新壳的诚实态被当成陈旧。
+ */
+export function parseShizukuReadyState(value: unknown): ShizukuReadyState | undefined {
+  return value === 'ready' || value === 'not-ready' || value === 'unknown' ? value : undefined
+}
+
+/** 功能探测快照的失败原因（壳侧 `functionalProbe.error`；缺席或非字符串给空串）。 */
+function parseProbeError(probe: unknown): string {
+  if (probe === null || typeof probe !== 'object') return ''
+  const error = (probe as { error?: unknown }).error
+  return typeof error === 'string' ? error : ''
+}
+
+/**
  * Shizuku 通道状态（**唯一**「装没装」的事实来源）。
  *
  * `installed` 字段决定「打开 Shizuku」是否可点：拿不到状态时按**未安装**处理（复用
@@ -527,6 +591,11 @@ export function readShizuku(): ShizukuStatus {
       startFailed: parsed.startFailed === true,
       retryAfterMs: typeof parsed.retryAfterMs === 'number' ? parsed.retryAfterMs : 0,
       diagnostics: typeof parsed.diagnostics === 'string' ? parsed.diagnostics : '',
+      // 旧壳没有 readyState：给 undefined 而不是 'unknown'，让 [shizukuStateLabel] 能区分
+      // 「壳侧明说尚未探测」与「这个壳根本没这条判据」——后者必须退回旧的 bound 口径，
+      // 否则升级 UI 会让老壳设备永久显示「探测中」。
+      readyState: parseShizukuReadyState(parsed.readyState),
+      probeError: parseProbeError(parsed.functionalProbe),
       guidance: typeof parsed.guidance === 'string' ? parsed.guidance : '',
     }
   } catch {

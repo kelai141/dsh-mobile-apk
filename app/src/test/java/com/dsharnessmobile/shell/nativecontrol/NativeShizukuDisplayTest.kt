@@ -282,7 +282,7 @@ class NativeShizukuDisplayTest {
     val longClick = FakeEnvironment(replies = listOf(Reply(0, "")))
     NativeShizukuMotion.execute(longClick, 7, "longClick",
       JSONObject().put("x", 1).put("y", 2), deadline())
-    assertEquals(listOf("/system/bin/input", "-d", "7", "swipe", "1", "2", "1", "2", "600"),
+    assertEquals(listOf("/system/bin/input", "-d", "7", "swipe", "1", "2", "1", "2", "900"),
       longClick.started.single())
 
     val scroll = FakeEnvironment(replies = listOf(Reply(0, "")))

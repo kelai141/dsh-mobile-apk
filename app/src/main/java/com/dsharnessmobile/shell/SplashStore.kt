@@ -63,7 +63,23 @@ internal object SplashStore {
    * Returns the stored [Info] on success, or a stable code: `forbidden-ts`,
    * `too-large`, `empty`, `unreadable`, `decode-failed`, `io-failed`.
    */
-  fun import(context: Context, uri: Uri, displayName: String, declaredBytes: Long, mime: String?): Result {
+  fun import(context: Context, uri: Uri, displayName: String, declaredBytes: Long, mime: String?): Result =
+    importFrom(context, displayName, declaredBytes, mime) { context.contentResolver.openInputStream(uri) }
+
+  /**
+   * [import] 的流源可注入形态（#1583 的判据入口）。
+   *
+   * 为什么留这个口：五条早退路径都在「流已经打开或已经开始拷」之后，而 [Context.getContentResolver]
+   * 在 JVM 单测里拿不到真实流 ⇒ 「早退是否留下 `.splash-*.tmp`」这条判据在纯 JVM 上不可达，
+   * 而它正是本缺陷的形态。注入点只影响流从哪来，落盘/校验/发布语义一字未改。
+   */
+  internal fun importFrom(
+    context: Context,
+    displayName: String,
+    declaredBytes: Long,
+    mime: String?,
+    openStream: () -> java.io.InputStream?,
+  ): Result {
     val name = displayName.ifBlank { "splash" }
     SplashPolicy.rejection(name, mime, declaredBytes)?.let { return Result.Rejected(it) }
     val folder = dir(context)
@@ -73,8 +89,7 @@ internal object SplashStore {
     val temp = java.nio.file.Files.createTempFile(folder.toPath(), ".splash-", ".tmp").toFile()
     var written = 0L
     try {
-      val input = context.contentResolver.openInputStream(uri)
-        ?: return Result.Rejected("unreadable")
+      val input = openStream() ?: return Result.Rejected("unreadable")
       input.use { source ->
         FileOutputStream(temp).use { sink ->
           val buffer = ByteArray(64 * 1024)
@@ -107,6 +122,13 @@ internal object SplashStore {
     } catch (_: Throwable) {
       temp.delete()
       return Result.Rejected("io-failed")
+    } finally {
+      // #1583：五条早退（unreadable / too-large / empty / decode-failed / io-failed）都是从 try 里
+      // 直接 return 的，旧实现只在 catch 里删 temp ⇒ `.splash-*.tmp` 留在 app 私有目录；
+      // 而 purgeOtherStoredVideos 只认 `splash_video*` 前缀，那份半成品永不回收（一次 50 MiB，
+      // 重复几次即数倍，用户看不见）。发布成功后 temp 已被 AtomicFileReplace.publishWritten 的
+      // move 消费，exists() 为假 ⇒ 对 Saved 分支是空操作，不影响返回语义。
+      if (temp.exists()) temp.delete()
     }
   }
 
