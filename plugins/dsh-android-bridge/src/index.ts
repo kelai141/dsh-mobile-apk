@@ -26,6 +26,7 @@ import {
   realScreenAdbCommandDenied,
   adbCommandDisplayTokens,
   screenTokensFromSfDump,
+  stripDisplayOptions,
   isVirtualScreenId,
   type ScreenAccessDecision,
   type UserScreenScope,
@@ -686,10 +687,39 @@ function looksDangerousRemovePath(remote: unknown): boolean {
   return !ALLOWED_ROOTS.some((root) => norm.startsWith(root + '/'))
 }
 
+/**
+ * `input keyevent` 的导航/电源键（**词形**写法：`POWER` / `HOME` / `MENU` / `KEYCODE_HOME`）——issue #1596。
+ *
+ * 词形同时接受 `KEYCODE_` 前缀：`KeyEvent.keyCodeFromString` 认这个前缀，`input keyevent KEYCODE_HOME`
+ * 与 `input keyevent HOME` 是同一个按键（两种写法都必须拦，否则换一种即可逃逸）。
+ *
+ * 缺陷形态（修前）：`/\binput\s+(keyevent|text)\s+.*(power|home|menu)/` 把 `text` 也放进了命令位置，
+ * 于是 `android_ui_input {action:"text", text:"go home"}` 构造出的 `input text go%shome` 命中，
+ * 回执变成「命令被特权 shell 通道危险检查拦截（系统配置/权限写面一律拒绝）」——**普通文本输入被
+ * 判成危险命令**，能力不可用，且失败归因完全错误（用户会去查权限，而真因是正则写宽了）。
+ *
+ * 判据只认 `keyevent` 子命令：`text` 的载荷是用户要输入的文字，那里的任何词都不是命令身份；
+ * 只有 `keyevent` 的载荷才决定注入哪个按键。本判据与 [INPUT_KEYEVENT_POWER_KEYCODE] 成对使用。
+ */
+const INPUT_KEYEVENT_POWER = /\binput\s+keyevent\s+(?:.*\s)?(?:keycode_)?(?:power|home|menu)\b/
+
+/**
+ * 同上，但按键用**数字键码**拼写（issue #1596 的后半句：旧判据「想拦的目标其实拦不住」）。
+ *
+ * `input keyevent 3`（KEYCODE_HOME）、`26`（KEYCODE_POWER）、`82`（KEYCODE_MENU）都是纯数字，
+ * 旧正则的 `power|home|menu` 词面匹配看不见它们 —— 于是同一条黑名单既误拦普通文本输入、
+ * 又漏掉真正的系统键注入。键码取自 `InputEvent` 的公开常量，与前面词形判据同一个命令位置。
+ * `\b` 边界保证 `13` / `263` 这类不会误命中。
+ */
+const INPUT_KEYEVENT_POWER_KEYCODE = /\binput\s+keyevent\s+(?:.*\s)?(?:3|26|82)\b/
+
 /** ADB 通道附加黑名单（shell uid=2000 执行面比 app uid 更危险：系统级配置/权限写面一律拒绝）。 */
 function looksDangerousAdb(command: string): boolean {
   if (looksDangerous(command)) return true
-  const c = command.toLowerCase()
+  // 目标屏参数要在**匹配这些模式之前**归一化掉：`input -d 7 keyevent 3` 是 Android CLI 的正式写法
+  // （`input [-d DISPLAY_ID] <command>`），选项顶掉命令词位置 ⇒ `input\\s+keyevent` 匹配不到 ⇒
+  // 换个写法就能注入系统键。与 screen-scope 的命令词面同一归一化（stripDisplayOptions）。
+  const c = stripDisplayOptions(command).toLowerCase()
   const PATTERNS_ADB = [
     /\bsettings\s+(put|delete)\b/,
     /\bpm\s+(grant|revoke|set-permission|uninstall|install|disable-user|enable)\b/,
@@ -698,7 +728,8 @@ function looksDangerousAdb(command: string): boolean {
     /\bsvc\b/,
     /\bmount\b/,
     /\bcmd\s+(package|wifi|connectivity)\s+(set|reset|enable|disable)\b/,
-    /\binput\s+(keyevent|text)\s+.*(power|home|menu)/,
+    INPUT_KEYEVENT_POWER,
+    INPUT_KEYEVENT_POWER_KEYCODE,
   ]
   return PATTERNS_ADB.some((p) => p.test(c))
 }
