@@ -8,6 +8,7 @@ import android.provider.Settings
 import android.view.Display
 import android.view.Surface
 import com.dsharnessmobile.shell.DeviceControlService
+import com.dsharnessmobile.shell.VdisplayController
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -17,8 +18,6 @@ internal class NativePlatformFacts(
   private val context: Context,
   private val execution: NativeA11yExecution,
   private val scope: () -> String,
-  // 只接受宿主实际持有的显示器；不扫描并冒认其他应用创建的虚拟显示器。
-  private val registeredDisplays: () -> Map<String, Int> = { mapOf("real" to Display.DEFAULT_DISPLAY) },
   private val shizuku: NativeShizukuFacts = NativeShizukuFacts.shared,
 ) : NativeControlDispatcher.Facts {
   override fun capture(): JSONObject {
@@ -27,9 +26,9 @@ internal class NativePlatformFacts(
     val displaySupport = JSONObject()
     val displayOperations = JSONObject()
     val operations = linkedSetOf<String>()
-    for ((alias, displayId) in registeredDisplays()) {
-      val display = manager.getDisplay(displayId) ?: continue
-      if (!display.isValid) continue
+    fun publishDisplay(alias: String, display: Display, allocationId: Long? = null) {
+      if (!display.isValid) return
+      val displayId = display.displayId
       val size = Point()
       display.getRealSize(size)
       val rotation = when (display.rotation) {
@@ -37,14 +36,21 @@ internal class NativePlatformFacts(
         Surface.ROTATION_90 -> 1
         Surface.ROTATION_180 -> 2
         Surface.ROTATION_270 -> 3
-        else -> continue
+        else -> return
       }
-      screens.put(alias, JSONObject().put("displayId", displayId).put("width", size.x)
-        .put("height", size.y).put("rotation", rotation))
+      val screen = JSONObject().put("displayId", displayId).put("width", size.x)
+        .put("height", size.y).put("rotation", rotation)
+      if (allocationId != null) screen.put("allocationId", allocationId.toString())
+      screens.put(alias, screen)
       val available = execution.supportedOperations(displayId)
       operations.addAll(available)
       displaySupport.put(displayId.toString(), available.isNotEmpty())
       displayOperations.put(displayId.toString(), JSONArray(available))
+    }
+    manager.getDisplay(Display.DEFAULT_DISPLAY)?.let { publishDisplay("real", it) }
+    // Keep each alias, Android Display object, and identity from the same owner snapshot.
+    for ((alias, display, allocationId) in VdisplayController.nativeDisplayAllocations()) {
+      publishDisplay(alias, display, allocationId)
     }
     val enabled = try {
       val expected = ComponentName(context, DeviceControlService::class.java)

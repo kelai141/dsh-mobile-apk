@@ -47,6 +47,8 @@
 | **WatchdogV2.kt** | 引擎看门狗（v2） | 连续失败熔断；boot 恢复用户同意状态；**FX-212.3 标记消费面**：`.task-done.ndjson` 按字节偏移推进（`markerConsumeWindow` 纯函数 + 有界 CAP + 永不截断），偏移 `@Volatile markerOffset` 并落 prefs `notify.markerOffset` |
 | **ShizukuSupport.kt** | Shizuku 反射探活（历史：引导页状态行只读展示，不参与授权链） | — |
 | **nativecontrol/NativeShizukuFacts.kt** | 隔离原生控制宿主的 Shizuku 原始事实缓存 | `ShizukuTransport` 的事件和 RPC 发布观测；连接换代或撤权令旧票失效，过期降为 unknown。`NativePlatformFacts` 只读内存快照；已授权的 UID 2000 握手只发布真实屏点按，其他能力不从中推导。 |
+| **nativecontrol/NativePlatformFacts.kt** | 原生能力快照：真实屏、壳侧持有的虚拟屏、范围、A11y 与 Shizuku | 采集虚拟屏几何时附带私有分配身份；Rust 决定公开代次，客户端不见该身份。 |
+| **NativeVirtualDisplayDeviceTest.kt** | 专用 MuMu 的虚拟屏分配回归 | 同一别名销毁重建后，旧代次通过私有 IPC 明确拒绝。 |
 | **nativecontrol/NativeShizukuExecution.kt** | 隔离宿主的 Shizuku 真实屏点按适配 | 只执行 Rust 已选的真实屏点按计划，独立有界 worker，无排队。Binder 发送前重新核验权限、远端身份和最终派发门。 |
 | **ShizukuTransport.kt** / **ShizukuUserService.kt** | 0.14 新增：特权 transport（应用侧 UserService 生命周期 + shell/root 侧 AIDL 实现） | 原生控制器使用固定 argv；获授权的 `android_shell_exec` 经引擎与壳侧范围门、`ShellOps` 到 `sh -c`；文件分块传输；原始 binder 不向页面/引擎暴露，Shizuku 授权由用户在 Shizuku App 授予。**2026-10-02 判据收紧**：`probeRootChannel`（经可注入 `RootProbeEnv`/`SystemRootProbeEnv` 取原始信号）+ 纯函数 `decideNoRootChannel`（`BindOutcome` + `RootChannel` 三态）是唯一 root 通道判据，只认三类证明、其余 UNKNOWN；`autoClearAllowed`/`clearLeaseWhenNoRootChannel` 做入口清算，`forceClearMaintenanceLease` 是用户确认的人工出口（已派发租约照清并回 `terminationUnproven=true`） |
 | **ShizukuProbe.kt** | 0.14 新增：Shizuku 五态探针（absent/not-running/denied/prev11/…，fail-closed + guidance） | 与 ShizukuSupport 同走反射；调试/诊断面 |

@@ -58,6 +58,7 @@ object VdisplayController {
   private class Record(
     val alias: String,
     val display: VirtualDisplay,
+    val allocationId: Long,
     val reader: ImageReader,
     val thread: HandlerThread,
     val width: Int,
@@ -73,6 +74,7 @@ object VdisplayController {
 
   private val lock = Any()
   private val records = LinkedHashMap<String, Record>()
+  private var lastAllocationId = 0L
   // 序号不再是单调计数器：分配时扫描最小空闲号（见 create 内的分配逻辑）。
   /** 会话归属（0.14.0）：建屏时绑定发起会话；非归属会话的生命周期操作一律拒绝。 */
   private var ownerSessionId: String? = null
@@ -159,6 +161,18 @@ object VdisplayController {
 
   /** Owned virtual aliases ordered by allocation (the model-facing `virtual-N` set). */
   fun activeAliases(): List<String> = synchronized(lock) { records.keys.toList() }
+
+  internal data class NativeDisplayAllocation(val alias: String, val display: Display, val allocationId: Long)
+
+  /** Snapshot of the shell's own allocations. A facts read must not renew the idle lease. */
+  internal fun nativeDisplayAllocations(): List<NativeDisplayAllocation> = synchronized(lock) {
+    records.values.mapNotNull { record ->
+      val display = record.display.display
+      if (display.isValid && display.displayId != Display.DEFAULT_DISPLAY) {
+        NativeDisplayAllocation(record.alias, display, record.allocationId)
+      } else null
+    }
+  }
 
   /**
    * 某虚拟屏的**内容尺寸**（虚拟屏自己的像素宽高）。
@@ -421,7 +435,8 @@ object VdisplayController {
           nextReader.surface,
           flags,
         ) ?: throw IllegalStateException("DisplayManager returned null VirtualDisplay")
-        records[alias] = Record(alias, created, nextReader, nextThread, width, height, dpi, owner = session)
+        records[alias] = Record(alias, created, ++lastAllocationId, nextReader, nextThread, width, height, dpi,
+          owner = session)
         if (selectedAlias == null) selectedAlias = alias
         if (ownerSessionId == null && session != null) ownerSessionId = session
         generation += 1

@@ -102,7 +102,7 @@
 | RootGrant.kt / RootAccess.kt | 有效 AI 同意与 su 授权是独立门；最后可信派发点检查，固定维护例外不暴露任意 shell | ShizukuTransport、ShellOps、AndroidBridge |
 | OwnershipRepairCore.kt / OwnershipRepair.kt / RootRepairMain.kt | 共享有界遍历与 Android FD 适配；su 只加载已安装 APK 的固定 helper | RootAccess、ShizukuUserService |
 | RootExecutionFence.kt / RootMaintenanceLease.kt / RootOwnershipJobs.kt | Context感知公平零时限读栅栏/维护写栅栏；UID0派发前耐久lease；同boot UNKNOWN阻止新派发/维护/启动；共享job状态按当前lease诚实pending | RootAccess、ShizukuTransport、EngineStartFlow、EngineService、RootGrant |
-| VdisplayController.kt | VirtualDisplay 创建/销毁、Settings launch 探针、`input -d` 回退探针、viewer Surface attach/detach | MainActivity、VdisplayHost、DeviceControlService |
+| VdisplayController.kt | VirtualDisplay 创建/销毁、Settings launch 探针、`input -d` 回退探针、viewer Surface attach/detach；`nativeDisplayAllocations()` 提供同源的别名、Android Display 与私有分配身份，不续空闲租期 | MainActivity、VdisplayHost、DeviceControlService、NativePlatformFacts |
 | VdisplayHost.kt | 原生 viewer SurfaceView 宿主：把可信 Files stage 几何映射到根 FrameLayout 并 attach 到 controller | MainActivity |
 | VirtualDisplayProbe.kt | 建屏 flags 探针（本地位值常量，不引用 @hide 常量；金丝雀/无泄漏断言） | 调试验收（device probe） |
 | BackGate.kt | 返回网关决策器（页内层栈可用性 → 消费/退出）+ `BackGateBridge`（setAvailable/getBackAvailable 2 个 @JavascriptInterface） | MainActivity（OnBackPressedCallback 接线） |
