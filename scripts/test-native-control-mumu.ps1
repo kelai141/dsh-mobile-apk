@@ -6,14 +6,15 @@ param(
   [switch]$ShizukuDenied,
   [switch]$DualChannel,
   [switch]$VirtualDisplay,
+  [switch]$RuntimeRestart,
   [string]$MuMuCli = 'D:/MuMuPlayer/nx_main/mumu-cli.exe',
   [string]$Adb = 'D:/Android/Sdk/platform-tools/adb.exe'
 )
 
 $ErrorActionPreference = 'Stop'
 if ($ShizukuDenied -and -not $Shizuku) { throw '撤权用例必须同时选择 Shizuku 套件。' }
-$suites = @(@($Shizuku, $DualChannel, $VirtualDisplay) | Where-Object { $_ })
-if ($suites.Count -gt 1) { throw '-Shizuku、-DualChannel、-VirtualDisplay 只能选择一个。' }
+$suites = @(@($Shizuku, $DualChannel, $VirtualDisplay, $RuntimeRestart) | Where-Object { $_ })
+if ($suites.Count -gt 1) { throw '只可选择一个原生控制测试套件。' }
 $vm = (& $MuMuCli info --vmindex $VmIndex | Out-String | ConvertFrom-Json)
 if ($LASTEXITCODE -ne 0 -or $vm.index -ne "$VmIndex" -or $vm.name -ne $ExpectedName -or
     -not $vm.is_android_started -or $vm.adb_host_ip -ne '127.0.0.1' -or $vm.adb_port -notin 1024..65535) {
@@ -56,6 +57,8 @@ try {
   $virtualClass = 'com.dsharnessmobile.shell.nativecontrol.NativeVirtualDisplayDeviceTest'
   $selected = if ($VirtualDisplay) {
     $virtualClass + '#ownedAllocationIsPublishedAndRecreatedTargetRejectsOldPlan'
+  } elseif ($RuntimeRestart) {
+    $testClass + '#accessibilityClicksOnceAndReplaysOnlyTheReceipt'
   } elseif ($DualChannel) {
     $testClass + '#a11yWinsWithShizukuReadyAndTouchesThePointOnce'
   } elseif ($Shizuku) {
@@ -69,11 +72,12 @@ try {
     '-e','nativeTestEmulator','mumu','-e','nativeTestCapture','yes',
     '-e','nativeTestShizukuDenied',$(if ($ShizukuDenied) {'yes'} else {'no'}),
     '-e','nativeTestShizuku',$(if ($Shizuku -or $DualChannel -or $VirtualDisplay) {'yes'} else {'no'}),
+    '-e','nativeTestRuntimeRestart',$(if ($RuntimeRestart) {'yes'} else {'no'}),
     '-e','class',$selected,
     'com.dsharnessmobile.shell.test/androidx.test.runner.AndroidJUnitRunner')
   $proc = Start-Process -FilePath $Adb -ArgumentList $argsList -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $err -PassThru
-  $captureSuite = -not ($Shizuku -or $DualChannel -or $VirtualDisplay)
-  if ($captureSuite -or $DualChannel) {
+  $captureSuite = $suites.Count -eq 0
+  if ($captureSuite -or $DualChannel -or $RuntimeRestart) {
     $until = (Get-Date).AddSeconds(25)
     do {
       $proc.Refresh()
@@ -85,7 +89,8 @@ try {
     Set-SecureValue 'enabled_accessibility_services' ((@($others) + $service) -join ':')
     Set-SecureValue 'accessibility_enabled' '1'
   }
-  if (-not $proc.WaitForExit(30000)) { throw '仪器进程未在预算内退出。' }
+  $timeout = if ($RuntimeRestart) { 145000 } else { 30000 }
+  if (-not $proc.WaitForExit($timeout)) { throw '仪器进程未在预算内退出。' }
   $body = Get-Content -LiteralPath $log -Raw
   $body
   $expected = if ($captureSuite) { 5 } else { 1 }

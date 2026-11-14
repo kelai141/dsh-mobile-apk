@@ -10,6 +10,11 @@ import android.os.Process
 import android.system.Os
 import androidx.test.platform.app.InstrumentationRegistry
 import com.dsharnessmobile.shell.NativeControlClickFixtureActivity
+import com.dsharnessmobile.shell.EngineAuth
+import com.dsharnessmobile.shell.EngineManager
+import com.dsharnessmobile.shell.EngineProbe
+import com.dsharnessmobile.shell.EngineService
+import com.dsharnessmobile.shell.EngineStartOutcome
 import com.dsharnessmobile.shell.ShizukuTransport
 import org.json.JSONObject
 import org.junit.Assert.*
@@ -170,6 +175,12 @@ class NativeControlIpcDeviceTest {
       InstrumentationRegistry.getArguments().getString("nativeTestCapture") == "yes")
     val instrumentation = InstrumentationRegistry.getInstrumentation()
     val context = instrumentation.targetContext
+    val engine = if (InstrumentationRegistry.getArguments().getString("nativeTestRuntimeRestart") == "yes") {
+      check(InstrumentationRegistry.getArguments().getString("nativeTestEmulator") == "mumu")
+      EngineManager(context, EngineManager.ensurePickToken())
+    } else null
+    val priorShutdown = EngineService.userShutdown
+    var ownsTestEngine = false
     val activity = instrumentation.startActivitySync(
       Intent(context, NativeControlClickFixtureActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
     ) as NativeControlClickFixtureActivity
@@ -183,6 +194,14 @@ class NativeControlIpcDeviceTest {
         return text
       }
       NativeControlHost.openIsolated(context, facts, execution).use { host ->
+        val firstRuntime = engine?.let {
+          check(EngineService.instance == null) { "Runtime restart requires no service watchdog" }
+          check(nodePids().isEmpty()) { "Runtime restart requires an idle dedicated device" }
+          EngineAuth.initContext(context) // Mirrors the app startup path before adopting the reported port.
+          EngineService.userShutdown = false
+          ownsTestEngine = true
+          startRuntime(it)
+        }
         val caps = awaitAccessibility(host)
         val screen = caps.getJSONArray("screens").getJSONObject(0)
         val bounds = Rect()
@@ -211,6 +230,32 @@ class NativeControlIpcDeviceTest {
         assertEquals("yes", first.getString("executed"))
         instrumentation.waitForIdleSync()
         assertEquals("Clicks: 1", buttonText())
+        if (engine != null && firstRuntime != null) {
+          val shellPid = Process.myPid()
+          assertTrue("owned Runtime stop was not confirmed", engine.stopEngine())
+          assertTrue("Node still present after stop", nodePids().isEmpty())
+          assertFalse("HTTP stayed available after stop", EngineProbe.check().optBoolean("running"))
+          fun verifyNativeState() {
+            assertEquals(shellPid, Process.myPid())
+            val current = awaitAccessibility(host)
+            assertEquals(caps.getString("epoch"), current.getString("epoch"))
+            assertEquals(screen.getString("generation"), current.getJSONArray("screens").getJSONObject(0)
+              .getString("generation"))
+            val replay = rpc(host, request)
+            assertTrue(replay.toString(), replay.getBoolean("replayed"))
+            assertEquals("gesture-completed", replay.getString("code"))
+            assertEquals("yes", replay.getString("executed"))
+            instrumentation.waitForIdleSync()
+            assertEquals("Clicks: 1", buttonText())
+          }
+          verifyNativeState()
+          val replacement = startRuntime(engine)
+          assertNotEquals("Runtime PID must change", firstRuntime, replacement)
+          verifyNativeState()
+          android.util.Log.i("dsh-native-device-test",
+            "runtime=$firstRuntime -> down -> $replacement shell=$shellPid epoch=${caps.getString("epoch")} " +
+              "same socket and generation; both replays returned the receipt; Clicks: 1")
+        }
       }
       // Reconnect over a newly created private IPC listener while the APK remains alive.
       NativeControlHost.openIsolated(context, facts, execution).use { host ->
@@ -242,9 +287,44 @@ class NativeControlIpcDeviceTest {
         assertTrue("native global back must leave the test activity", finished)
       }
     } finally {
-      instrumentation.runOnMainSync { activity.finish() }
-      instrumentation.waitForIdleSync()
+      try {
+        if (engine != null && ownsTestEngine) {
+          assertTrue("test Runtime cleanup did not stop", engine.stopEngine())
+          assertTrue("test Node leaked after cleanup", nodePids().isEmpty())
+        }
+      } finally {
+        if (ownsTestEngine) EngineService.userShutdown = priorShutdown
+        instrumentation.runOnMainSync { activity.finish() }
+        instrumentation.waitForIdleSync()
+      }
     }
+  }
+
+  private fun nodePids(): Set<Int> {
+    val probe = Runtime.getRuntime().exec(arrayOf("/system/bin/pidof", "node"))
+    assertTrue("pidof did not exit", probe.waitFor(2, java.util.concurrent.TimeUnit.SECONDS))
+    val output = probe.inputStream.bufferedReader().use { it.readText() }.trim()
+    return when (probe.exitValue()) {
+      1 -> emptySet()
+      0 -> output.split(Regex("\\s+")).map(String::toInt).toSet()
+      else -> throw AssertionError("pidof failed: ${probe.exitValue()}")
+    }
+  }
+
+  private fun startRuntime(engine: EngineManager): Int {
+    assertEquals("Runtime refused to start", EngineStartOutcome.STARTED, engine.startEngine())
+    val deadline = android.os.SystemClock.elapsedRealtime() + 50_000
+    var lastState = ""
+    do {
+      val pids = nodePids()
+      val health = EngineProbe.check()
+      lastState = "nodeCount=${pids.size}, httpCode=${health.optInt("code", -1)}, " +
+        "listening=${health.optBoolean("listening")}"
+      if (pids.size == 1 && health.optBoolean("running") &&
+        engine.probeAvailability() == EngineProbe.EngineAvailability.OUR_PROCESS) return pids.single()
+      android.os.SystemClock.sleep(300)
+    } while (android.os.SystemClock.elapsedRealtime() < deadline)
+    throw AssertionError("No unique owned Runtime PID and live HTTP response: $lastState")
   }
 
   @Test fun shizukuRealTapRequiresObservedShellAndUsesTheNativePlan() {
