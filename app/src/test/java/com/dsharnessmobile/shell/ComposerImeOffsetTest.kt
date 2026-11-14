@@ -58,21 +58,23 @@ class ComposerImeOffsetTest {
     assertTrue("重复注入不得重复注册监听器", script.contains("if(!api){"))
   }
 
-  @Test fun focusOutCollapsesWithoutWaitingForInsets() {
+  @Test fun pointerDownCollapsesBeforeFocusOutFires() {
     val script = ComposerImeOffset.script(351)
-    assertTrue("收起方向靠 focusout 立即回落", script.contains("addEventListener('focusout'"))
-    // 必须在安装块里（常驻），而不是绑在单次位移上
+    assertTrue(script.contains("addEventListener('pointerdown'"))
+    // 按下即回落：pointerdown 分支必须直接调 collapse
+    assertTrue(script.contains("api.collapse()"))
     assertTrue(
-      script.indexOf("addEventListener('focusout'") in
-        script.indexOf("if(!api){") until script.indexOf("api.set("),
+      "pointerdown 必须早于 focusout 注册",
+      script.indexOf("addEventListener('pointerdown'") < script.indexOf("addEventListener('focusout'"),
     )
   }
 
-  @Test fun riseIsSmoothedButCollapseIsInstant() {
+  @Test fun collapseSuppressesStaleInsetsUntilTheySettle() {
     val script = ComposerImeOffset.script(351)
-    // 位移必须瞬时到位：系统原生 App 的输入框就是直接贴在键盘上沿，没有过渡动画。
-    assertTrue("不得引入过渡动画", !script.contains("cubic-bezier") && !script.contains("transition='transform"))
-    assertTrue("清位移前必须显式关掉过渡", script.contains("c.style.transition='none'"))
+    // 抑制窗口是防横跳的唯一手段：回落之后、insets 归零之前，忽略一切「键盘还在」的推送
+    assertTrue(script.contains("suppressed"))
+    assertTrue("抑制期内正高度必须被丢弃", script.contains("if(suppressed){if(v>0)return;suppressed=false}"))
+    assertTrue("点回卡片要能解除抑制，否则会卡死不抬高", script.contains("release:function(){suppressed=false}"))
   }
 
   @Test fun clearingAlwaysKillsTransition() {

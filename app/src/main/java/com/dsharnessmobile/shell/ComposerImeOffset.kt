@@ -53,7 +53,13 @@ internal object ComposerImeOffset {
       "if(!api){" +
       "var find=function(){return document.querySelector('$CARD_SELECTOR')" +
       "||document.querySelector('$DOCK_SELECTOR')};" +
-      "var clear=function(){var c=find();if(c){c.style.transition='none';c.style.removeProperty('transform')}};" +
+      // 抑制窗口：手指点卡片外之后，直到 insets 真的归零为止，忽略一切「键盘还在」的推送。
+      // 没有它，pointerdown 刚落下去、insets 还停在旧值（964），下一次推送就把卡片重新抬起来，
+      // 表现就是「底部和中间反复横跳」。
+      "var suppressed=false;" +
+      "var clear=function(){" +
+      "var c=find();if(!c)return;" +
+      "c.style.transition='none';c.style.removeProperty('transform')};" +
       "var apply=function(v){" +
       "var c=find();if(!c)return;" +
       // 幂等：先清掉上一次的位移，才能量到卡片的自然位置。
@@ -65,17 +71,23 @@ internal object ComposerImeOffset {
       "var r=c.getBoundingClientRect();" +
       "var d=Math.round(r.bottom-((window.innerHeight||0)-v));" +
       "if(d>0)c.style.setProperty('transform','translateY(-'+d+'px)','important')};" +
-      "api={set:apply,clear:clear};" +
+      "api={" +
+      "set:function(v){" +
+      "if(suppressed){if(v>0)return;suppressed=false}" +
+      "apply(v)}," +
+      "collapse:function(){suppressed=true;clear()}," +
+      "release:function(){suppressed=false}" +
+      "};" +
       "window.$API_NAME=api;" +
-      // 回落**零延迟**：手指按下那一刻就判断，不等 focusout（那是点击之后事件循环
-      // 里才派发的，肉眼可见地慢半拍）。点在 composer 卡片之外的任何位置，立即清位移。
+      // 手指按下那一刻就决定：点卡片外立即回落（零延迟），点卡片内则解除抑制。
       "document.addEventListener('pointerdown',function(e){" +
-      "var c=find();if(!c||!c.contains(e.target))clear()" +
+      "var c=find();" +
+      "if(!c||!c.contains(e.target))api.collapse();else api.release()" +
       "},true);" +
-      // 兜底：焦点确实离开卡片（键盘被系统收回、输入框失焦）时也回。
+      // 兜底：焦点离开卡片（键盘被系统收回、输入框失焦）时同样回落。
       "document.addEventListener('focusout',function(){" +
       "var c=find();var a=document.activeElement;" +
-      "if(!c||!a||!c.contains(a))clear()" +
+      "if(!c||!a||!c.contains(a))api.collapse()" +
       "},true);" +
       "}" +
       "api.set($kb);" +
