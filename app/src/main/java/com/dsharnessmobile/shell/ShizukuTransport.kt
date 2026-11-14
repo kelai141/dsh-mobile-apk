@@ -1409,5 +1409,61 @@ object ShizukuTransport {
 
   /** 最近一次 shell 失败的快照（判据与诊断面用）。 */
   internal fun lastShellFailureSnapshot(): JSONObject? = synchronized(shellFailureLock) { lastShellFailure }
+
+  /** Explicit preparation, outside the native fact reader and dispatcher. Never prompts. */
+  internal fun observeNativeRealTap(context: Context): Boolean {
+    if (!ensureBound(context, requestPermission = false).optBoolean("ok")) return false
+    val (remote, token) = nativeInputConnection() ?: return false
+    if (!configureIfNeeded(context) || !isNativeInputConnection(remote, token)) return false
+    val uid = runCatching { remote.uid() }.getOrNull()
+    // An older service can fail this optional transaction without breaking the v4 contract.
+    val supported = if (uid == 2000) runCatching { remote.nativeInputCapabilities() and 1 != 0 }.getOrNull()
+      else if (uid == null) null else false
+    return synchronized(lock) {
+      if (!isNativeInputConnection(remote, token)) return false
+      NativeShizukuFacts.shared.onServerUid(token, uid)
+      NativeShizukuFacts.shared.onRealTapCapability(token, supported)
+      NativeShizukuFacts.shared.permitsRealTap(token)
+    }
+  }
+
+  private fun nativeInputConnection(): Pair<ShizukuUserService, LinkToken>? = synchronized(lock) {
+    service?.let { it to NativeShizukuFacts.shared.tokenAt(bindState.currentGeneration) }
+  }
+
+  private fun isNativeInputConnection(remote: ShizukuUserService, token: LinkToken): Boolean = synchronized(lock) {
+    service === remote && bindState.currentGeneration == token.generation
+  }
+
+  /** Does not establish or replace a connection; never falls back to the root service. */
+  internal fun nativeTapReal(x: Int, y: Int, authorize: () -> Boolean): JSONObject {
+    fun result(code: String, executed: String = "no") =
+      JSONObject().put("ok", executed == "yes").put("code", code).put("executed", executed)
+    val (remote, token) = nativeInputConnection() ?: return result("shizuku-native-input-unavailable")
+    if (!NativeShizukuFacts.shared.permitsRealTap(token)) return result("shizuku-native-input-unavailable")
+    val granted = runCatching {
+      Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED &&
+        remote.uid() == 2000 && remote.nativeInputCapabilities() and 1 != 0
+    }.getOrDefault(false)
+    if (!granted) return result("shizuku-native-input-unavailable")
+    if (!authorize()) return result("authorize-denied")
+    if (!isNativeInputConnection(remote, token) || !NativeShizukuFacts.shared.permitsRealTap(token))
+      return result("shizuku-native-input-stale")
+    return try {
+      val reply = remote.nativeTapReal(x, y)
+      val code = reply.getString("code")
+      when (reply.getString("executed")) {
+        "yes" -> if (code == "shizuku-input-accepted") result(code, "yes") else result("shizuku-input-unconfirmed", "unknown")
+        "no" -> when (code) {
+          "invalid-coordinate", "shizuku-native-input-unavailable", "shizuku-input-start-failed" -> result(code)
+          else -> result("shizuku-input-unconfirmed", "unknown")
+        }
+        else -> result("shizuku-input-unconfirmed", "unknown")
+      }
+    } catch (_: Exception) {
+      result("shizuku-input-unconfirmed", "unknown")
+    }
+  }
+
 }
 

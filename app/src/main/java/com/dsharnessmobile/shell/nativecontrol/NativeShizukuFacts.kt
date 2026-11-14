@@ -1,6 +1,7 @@
 package com.dsharnessmobile.shell.nativecontrol
 
 import android.os.SystemClock
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -35,8 +36,7 @@ internal data class LinkToken(val generation: Long, val epoch: Long, val takenAt
  *    （本机实测撤权后仍返回 0，不能当事实）。
  * 4. **服务不在或授权失去 = 立刻降级**：探活为 no/unknown、授权为 no/unknown 时，
  *    依赖它们的连接级事实同步清除，并推进 [LinkToken.epoch]，使在飞的结果被拒。
- * 5. **supportedOps / displaySupport 恒为 unknown**：本竖切不新增 shell、不执行命令，
- *    没有证据能列出实际支持的专属操作与屏幕支持，不得由其它布尔值推断。
+ * 5. 专属能力只来自当前 Binder 的明确握手，不能由通用就绪状态推断。
  * 6. **过期即 unknown**：按**观测时刻**计 TTL，反复读快照不会续命。
  *
  * 输出形状与 Rust 端 phone-control-core 的 ShizukuFactsWire 逐字段对应
@@ -67,6 +67,7 @@ internal class NativeShizukuFacts(
   private var bound: Timed<Boolean>? = null
   private var functionalReady: Timed<Boolean>? = null
   private var serverUid: Timed<Int>? = null
+  private var realTap: Timed<Boolean>? = null
 
   /**
    * 为指定绑定代次取一张当前票（连接回调自带代次时用）。
@@ -104,6 +105,7 @@ internal class NativeShizukuFacts(
       this.bound = Timed(false, now)
       this.functionalReady = null
       this.serverUid = null
+      realTap = null
       invalidate()
     } else if (running == null) {
       // 探不到：不能断言 no，也不能沿用上次的 yes。
@@ -137,6 +139,8 @@ internal class NativeShizukuFacts(
     if (!bound) {
       functionalReady = null
       serverUid = null
+      realTap = null
+      invalidate()
     }
   }
 
@@ -161,6 +165,22 @@ internal class NativeShizukuFacts(
     serverUid = uid?.takeIf { it >= 0 }?.let { Timed(it, token.takenAtMs) }
   }
 
+  fun onRealTapCapability(token: LinkToken, supported: Boolean?) = synchronized(lock) {
+    if (!open(token)) return
+    val existing = realTap
+    if (existing != null && token.takenAtMs < existing.atMs) return
+    realTap = supported?.let { Timed(it, token.takenAtMs) }
+  }
+
+  fun permitsRealTap(token: LinkToken): Boolean = synchronized(lock) {
+    val now = clock()
+    token.generation == currentGeneration && token.epoch == epoch && readyForRealTap(now)
+  }
+
+  private fun readyForRealTap(now: Long): Boolean =
+    listOf(installed, running, granted, bound, functionalReady, realTap).all { tri(it, now) == "yes" } &&
+      serverUid?.let { it.value == 2000 && fresh(it.atMs, now) } == true
+
   /**
    * 连接断开的肯定观测（断连回调 / 用户重置 / 看门狗回收僵尸绑定）。
    *
@@ -173,6 +193,7 @@ internal class NativeShizukuFacts(
     bound = Timed(false, clock())
     functionalReady = null
     serverUid = null
+    realTap = null
     invalidate()
   }
 
@@ -183,6 +204,7 @@ internal class NativeShizukuFacts(
     bound = Timed(false, clock())
     functionalReady = null
     serverUid = null
+    realTap = null
     invalidate()
   }
 
@@ -200,6 +222,7 @@ internal class NativeShizukuFacts(
     NativeControlDispatcher.Facts { attachTo(inner.capture()) }
 
   internal fun snapshotAt(now: Long): JSONObject = synchronized(lock) {
+    val tap = readyForRealTap(now)
     JSONObject()
       .put("installed", tri(installed, now))
       .put("running", tri(running, now))
@@ -207,9 +230,10 @@ internal class NativeShizukuFacts(
       .put("bound", tri(bound, now))
       .put("functionalReady", tri(functionalReady, now))
       .put("serverUid", serverUidJson(now))
-      // 本竖切没有新增执行面：没有证据能列出专属操作与屏幕支持，保持未知。
-      .put("supportedOps", JSONObject().put("state", "unknown"))
-      .put("displaySupport", JSONObject().put("state", "unknown"))
+      .put("supportedOps", if (tap) JSONObject().put("state", "known").put("ops", JSONArray().put("click"))
+        else JSONObject().put("state", "unknown"))
+      .put("displaySupport", if (tap) JSONObject().put("state", "known").put("values", JSONObject().put("0", true))
+        else JSONObject().put("state", "unknown"))
   }
 
   /**
@@ -220,18 +244,19 @@ internal class NativeShizukuFacts(
    * - epoch 不符：同一代次内已发生清除，这条结果属于此前那条连接，丢弃。
    */
   private fun open(token: LinkToken): Boolean {
-    if (token.generation < currentGeneration) return false
+    if (token.epoch != epoch || token.generation < currentGeneration) return false
     if (token.generation > currentGeneration) {
       currentGeneration = token.generation
       clearConnection()
     }
-    return token.epoch == epoch
+    return true
   }
 
   private fun clearConnection() {
     bound = null
     functionalReady = null
     serverUid = null
+    realTap = null
   }
 
   private fun invalidate() {

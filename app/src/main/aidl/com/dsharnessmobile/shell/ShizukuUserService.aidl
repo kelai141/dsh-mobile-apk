@@ -69,5 +69,11 @@ interface ShizukuUserService {
 
     /** v4: confirm the one-time configured full UID and trusted data anchor. */
     Bundle configuration() = 10;
+
+    /** Optional native input contract: bit 0 is a real-display point tap. */
+    int nativeInputCapabilities() = 11;
+
+    /** Typed point tap for display 0 only. No text, argv or display override. */
+    Bundle nativeTapReal(int x, int y) = 12;
 }
 

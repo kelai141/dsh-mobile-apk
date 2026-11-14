@@ -2,11 +2,14 @@ param(
   [Parameter(Mandatory=$true)][int]$VmIndex,
   [Parameter(Mandatory=$true)][string]$ExpectedName,
   [Parameter(Mandatory=$true)][string]$EvidenceDir,
+  [switch]$Shizuku,
+  [switch]$ShizukuDenied,
   [string]$MuMuCli = 'D:/MuMuPlayer/nx_main/mumu-cli.exe',
   [string]$Adb = 'D:/Android/Sdk/platform-tools/adb.exe'
 )
 
 $ErrorActionPreference = 'Stop'
+if ($ShizukuDenied -and -not $Shizuku) { throw '撤权用例必须同时选择 Shizuku 套件。' }
 $vm = (& $MuMuCli info --vmindex $VmIndex | Out-String | ConvertFrom-Json)
 if ($LASTEXITCODE -ne 0 -or $vm.index -ne "$VmIndex" -or $vm.name -ne $ExpectedName -or
     -not $vm.is_android_started -or $vm.adb_host_ip -ne '127.0.0.1' -or $vm.adb_port -notin 1024..65535) {
@@ -45,26 +48,36 @@ function Set-SecureValue([string]$Key, [string]$Value) {
 try {
   Set-SecureValue 'enabled_accessibility_services' ($others -join ':')
   Invoke-MuMuAdb @('shell','am','start','-W','-a','android.settings.SETTINGS') | Out-Null
+  $testClass = 'com.dsharnessmobile.shell.nativecontrol.NativeControlIpcDeviceTest'
+  $selected = if ($Shizuku) { $testClass + '#shizukuRealTapRequiresObservedShellAndUsesTheNativePlan' } else {
+    (@('appUidSocketUsesRustAndRejectsRealScreenUnderDefaultScope','realAndroidJniDeliversOnlyTheSettledJpeg',
+      'accessibilityCapturesTheEmulatorDisplayThroughPrivateIpc','accessibilityReadsARealNodeAndRefusesItsReplacedReference',
+      'accessibilityClicksOnceAndReplaysOnlyTheReceipt') | ForEach-Object { $testClass + '#' + $_ }) -join ','
+  }
   $argsList = @('-s',$serial,'shell','am','instrument','-w','-r',
     '-e','nativeTestEmulator','mumu','-e','nativeTestCapture','yes',
-    '-e','class','com.dsharnessmobile.shell.nativecontrol.NativeControlIpcDeviceTest',
+    '-e','nativeTestShizukuDenied',$(if ($ShizukuDenied) {'yes'} else {'no'}),
+    '-e','nativeTestShizuku',$(if ($Shizuku) {'yes'} else {'no'}),'-e','class',$selected,
     'com.dsharnessmobile.shell.test/androidx.test.runner.AndroidJUnitRunner')
   $proc = Start-Process -FilePath $Adb -ArgumentList $argsList -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $err -PassThru
-  $until = (Get-Date).AddSeconds(25)
-  do {
-    $proc.Refresh()
-    $captureStarted = (Get-Content -LiteralPath $log -Raw -ErrorAction SilentlyContinue) -match 'test=accessibility(?:CapturesTheEmulatorDisplayThroughPrivateIpc|ReadsARealNodeAndRefusesItsReplacedReference|ClicksOnceAndReplaysOnlyTheReceipt)\r?\nINSTRUMENTATION_STATUS_CODE: 1'
-    if ($captureStarted -or $proc.HasExited) { break }
-    Start-Sleep -Milliseconds 100
-  } while ((Get-Date) -lt $until)
-  if (-not $captureStarted -or $proc.HasExited) { throw '未进入真实 A11y 测试，详见仪器日志。' }
-  Set-SecureValue 'enabled_accessibility_services' ((@($others) + $service) -join ':')
-  Set-SecureValue 'accessibility_enabled' '1'
-  if (-not $proc.WaitForExit(25000)) { throw '仪器进程未在预算内退出。' }
+  if (-not $Shizuku) {
+    $until = (Get-Date).AddSeconds(25)
+    do {
+      $proc.Refresh()
+      $captureStarted = (Get-Content -LiteralPath $log -Raw -ErrorAction SilentlyContinue) -match 'test=accessibility(?:CapturesTheEmulatorDisplayThroughPrivateIpc|ReadsARealNodeAndRefusesItsReplacedReference|ClicksOnceAndReplaysOnlyTheReceipt)\r?\nINSTRUMENTATION_STATUS_CODE: 1'
+      if ($captureStarted -or $proc.HasExited) { break }
+      Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $until)
+    if (-not $captureStarted -or $proc.HasExited) { throw '未进入真实 A11y 测试，详见仪器日志。' }
+    Set-SecureValue 'enabled_accessibility_services' ((@($others) + $service) -join ':')
+    Set-SecureValue 'accessibility_enabled' '1'
+  }
+  if (-not $proc.WaitForExit(30000)) { throw '仪器进程未在预算内退出。' }
   $body = Get-Content -LiteralPath $log -Raw
   $body
-  if ($proc.ExitCode -ne 0 -or $body -notmatch 'OK \(5 tests\)' -or
-      ([regex]::Matches($body, '(?m)^INSTRUMENTATION_STATUS_CODE: 0\s*$')).Count -ne 5 -or
+  $expected = if ($Shizuku) { 1 } else { 5 }
+  if ($proc.ExitCode -ne 0 -or $body -notmatch "OK \($expected tests?\)" -or
+      ([regex]::Matches($body, '(?m)^INSTRUMENTATION_STATUS_CODE: 0\s*$')).Count -ne $expected -or
       $body -match 'INSTRUMENTATION_STATUS_CODE: -[234]|FAILURES!!!') {
     throw 'MuMu 原生用例未全部通过。'
   }

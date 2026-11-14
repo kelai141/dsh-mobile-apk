@@ -62,6 +62,29 @@ class NativeShizukuFactsTest {
     assertEquals("unknown", snapshot.getJSONObject("displaySupport").getString("state"))
   }
 
+  @Test fun tapRequiresSameConnectionShellIdentityAndLiveHandshake() {
+    val token = healthy()
+    assertFalse(facts.permitsRealTap(token))
+    facts.onRealTapCapability(token, true)
+    assertTrue(facts.permitsRealTap(token))
+    assertEquals("click", snap().getJSONObject("supportedOps").getJSONArray("ops").getString(0))
+    assertEquals(setOf("0"), snap().getJSONObject("displaySupport").getJSONObject("values").keys().asSequence().toSet())
+    facts.onServerUid(token, 0)
+    assertFalse(facts.permitsRealTap(token))
+    facts.onServerUid(token, 2000)
+    assertTrue(facts.permitsRealTap(token))
+    facts.onBound(token, false)
+    facts.onRealTapCapability(token, true)
+    facts.onBound(token, true)
+    assertFalse(facts.permitsRealTap(token))
+    assertEquals("unknown", snap().getJSONObject("supportedOps").getString("state"))
+    val current = healthy()
+    facts.onRealTapCapability(current, true)
+    assertTrue(facts.permitsRealTap(current))
+    now += NativeShizukuFacts.DEFAULT_TTL_MS + 1
+    assertFalse(facts.permitsRealTap(current))
+  }
+
   @Test fun serverUidKeepsShellRootAndOtherStrictlyApart() {
     val token = facts.tokenAt(1)
     facts.onLink(token, true, true)

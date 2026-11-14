@@ -322,6 +322,38 @@ class ShizukuUserServiceBridge() : ShizukuUserService.Stub() {
   }
 
   private fun isAbsolute(path: String): Boolean = path.startsWith("/") && path.length > 1
+
+  override fun nativeInputCapabilities(): Int =
+    if (Process.myUid() == 2000 && appUid > 0 && android.os.Binder.getCallingUid() == appUid &&
+      File("/system/bin/input").canExecute()) 1 else 0
+
+  override fun nativeTapReal(x: Int, y: Int): Bundle {
+    fun result(code: String, executed: String) = Bundle().apply {
+      putString("code", code)
+      putString("executed", executed)
+    }
+    if (nativeInputCapabilities() and 1 == 0) return result("shizuku-native-input-unavailable", "no")
+    if (x !in 0..65535 || y !in 0..65535) return result("invalid-coordinate", "no")
+    // The package and UID are pinned at configure(); the Binder method cannot accept an argv.
+    val process = try {
+      ProcessBuilder("/system/bin/input", "-d", "0", "tap", x.toString(), y.toString())
+        .redirectErrorStream(true).start()
+    } catch (_: java.io.IOException) {
+      return result("shizuku-input-start-failed", "no")
+    }
+    return try {
+      val outcome = ProcIo.readBoundedMillis(process, 4_000L, 1024)
+      if (outcome.complete && !outcome.truncated && outcome.text.isBlank() && process.exitValue() == 0) {
+        result("shizuku-input-accepted", "yes")
+      } else {
+        // Nonzero exit, output, or timeout is not proof that Android injected nothing.
+        result("shizuku-input-unconfirmed", "unknown")
+      }
+    } catch (_: Exception) {
+      result("shizuku-input-unconfirmed", "unknown")
+    }
+  }
+
 }
 
 /** Private staging spool + immutable bounded snapshot; no live writer can own a published path. */

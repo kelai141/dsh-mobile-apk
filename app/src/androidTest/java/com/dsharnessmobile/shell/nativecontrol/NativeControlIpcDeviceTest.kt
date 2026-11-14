@@ -10,6 +10,7 @@ import android.os.Process
 import android.system.Os
 import androidx.test.platform.app.InstrumentationRegistry
 import com.dsharnessmobile.shell.NativeControlClickFixtureActivity
+import com.dsharnessmobile.shell.ShizukuTransport
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Assume.assumeTrue
@@ -238,6 +239,71 @@ class NativeControlIpcDeviceTest {
           if (!finished) android.os.SystemClock.sleep(100)
         } while (!finished && android.os.SystemClock.elapsedRealtime() < finishDeadline)
         assertTrue("native global back must leave the test activity", finished)
+      }
+    } finally {
+      instrumentation.runOnMainSync { activity.finish() }
+      instrumentation.waitForIdleSync()
+    }
+  }
+
+  @Test fun shizukuRealTapRequiresObservedShellAndUsesTheNativePlan() {
+    requireTestEmulator()
+    assumeTrue("仅在专用模拟器并确认已授权时执行",
+      InstrumentationRegistry.getArguments().getString("nativeTestShizuku") == "yes")
+    val instrumentation = InstrumentationRegistry.getInstrumentation()
+    val context = instrumentation.targetContext
+    val deniedByManager = InstrumentationRegistry.getArguments().getString("nativeTestShizukuDenied") == "yes"
+    val deadline = android.os.SystemClock.elapsedRealtime() + 8_000
+    var observed = false
+    do {
+      observed = ShizukuTransport.observeNativeRealTap(context)
+      if (!observed) android.os.SystemClock.sleep(250)
+    } while (!deniedByManager && !observed && android.os.SystemClock.elapsedRealtime() < deadline)
+    assertEquals(NativeShizukuFacts.shared.snapshot().toString(), !deniedByManager, observed)
+    val activity = instrumentation.startActivitySync(
+      Intent(context, NativeControlClickFixtureActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+    ) as NativeControlClickFixtureActivity
+    try {
+      val a11y = NativeA11yExecution()
+      val facts = NativePlatformFacts(context, a11y, { "real-only" })
+      NativeControlHost.openIsolated(context, facts, NativeShizukuExecution(a11y)).use { host ->
+        val caps = rpc(host, JSONObject("""{"protocolVersion":1,"method":"capabilities"}"""))
+        val a11yCaps = caps.getJSONObject("channels").getJSONObject("a11y")
+        assertEquals("no", a11yCaps.getString("enabled"))
+        if (deniedByManager) {
+          val shizukuCaps = caps.getJSONObject("channels").getJSONObject("shizuku")
+          assertEquals("yes", shizukuCaps.getString("running"))
+          assertEquals("no", shizukuCaps.getString("granted"))
+        }
+        val screen = caps.getJSONArray("screens").getJSONObject(0)
+        val args = JSONObject()
+        instrumentation.waitForIdleSync()
+        instrumentation.runOnMainSync {
+          val button = activity.button
+          assertTrue("test button must be shown", button.isShown && button.width > 0)
+          assertEquals("Clicks: 0", button.text.toString())
+          val point = IntArray(2)
+          button.getLocationOnScreen(point)
+          args.put("x", point[0] + button.width / 2).put("y", point[1] + button.height / 2)
+        }
+        val request = JSONObject().put("protocolVersion", 1).put("method", "execute")
+          .put("operation", "click").put("callId", "device-shizuku-tap-${System.nanoTime()}")
+          .put("epoch", caps.getString("epoch")).put("screenId", "real")
+          .put("generation", screen.getString("generation")).put("args", args)
+        val reply = rpc(host, request)
+        if (deniedByManager) {
+          assertFalse(reply.toString(), reply.getBoolean("ok"))
+          assertEquals("channel-unavailable", reply.getString("code"))
+          assertEquals("no", reply.getString("executed"))
+          instrumentation.waitForIdleSync()
+          instrumentation.runOnMainSync { assertEquals("Clicks: 0", activity.button.text.toString()) }
+          return@use
+        }
+        assertTrue(reply.toString(), reply.getBoolean("ok"))
+        assertEquals("shizuku-input-accepted", reply.getString("code"))
+        assertEquals("yes", reply.getString("executed"))
+        instrumentation.waitForIdleSync()
+        instrumentation.runOnMainSync { assertEquals("Clicks: 1", activity.button.text.toString()) }
       }
     } finally {
       instrumentation.runOnMainSync { activity.finish() }

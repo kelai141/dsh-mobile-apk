@@ -266,3 +266,7 @@ bootstrap 调用 `linuxPluginHost.install({directory,entry='lib/index.js',config
 
 页面状态由 `normalizeLinuxStatus` 映射，同时接受 Bionilux 定稿字段与此前提案字段；其中两条插件 `releaseUrl` 来自 bootstrap 状态（`pluginReleaseUrls` 或 `plugins.*.releaseUrl`），不拼接默认最新版本。Linux rootfs 是 glibc 运行支持，不是安全沙箱；guest root 不等于 Android root；Termux/Bionic Bash 与 Debian/glibc Linux Bash 分开展示，共享 glibc Node 不替换原有 Termux Node。已安装但 runtime 被手工移除时，页面显式显示「自动更新已停用」并要求重新放回并启用，而不是静默停更。内部 bootstrap 成品接线及真实安装验收状态见 `known-gaps.md`。
 
+# 原生控制隔离接口补充
+
+Shizuku UserService v4 保留既有事务编号；增加可选事务 `nativeInputCapabilities()`（11）和 `nativeTapReal(x, y)`（12）。前者 bit 0 表示仅真实屏点按；旧服务不识别事务则能力未知。后者要求已配置且匹配的 Binder 调用方、实际服务 UID 2000、固定 display 0 和整数坐标。只有 Rust 计划选中该通道且最终派发验证通过才发出调用。执行不确认时返回 `executed=unknown`，不重放。没有新增 WebView、Node 或公开 Binder 入口。
+
