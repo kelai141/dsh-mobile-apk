@@ -1,4 +1,7 @@
 > **目的**：让排查 bug 的人 5 分钟内知道「这段代码什么时候跑、被谁拉起、跑完交给谁、坏了看哪里」。
+
+会话永久删除（#1587）：`deleteStoredSession` 先定位正常目录和全部同 id 隔离副本，再逐目录执行 rename / unload / remove；隔离区枚举失败不能成为 not-found。启动 `sweepGraveyards` 只清隔离区内显式删除残留，不清可恢复隔离件。行为与反例见 `plugins/dsh-session-delete/test/quarantine-delete-1587.test.mjs` 和 `docs/contrib/Ni-ShuWu/2026-11-13-quarantine-delete-1587.md`。
+
 > **三种读法（按手里的线索挑一条）**：
 > 1. 手里是**症状**（页面白屏、球不动、命令被拒……）→ 查 §5「症状 → 查点索引」，跳到对应查点的「症状 → 排查」；
 > 2. 手里是**文件或函数** → 查 §2 主表的「关键文件」列，或 §6 分块详解里的小节；
