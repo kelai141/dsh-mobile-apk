@@ -41,12 +41,48 @@ class OverlayUiModelTest {
   }
 
   @Test
-  fun `同名工具不同 callId 更新原行而不是再插一行`() {
+  fun `同名工具不同 callId 保留两个并发调用且结果只结束对应行`() {
     val first = OverlayUiModel.onToolCall(toolModel(), "c1", "Read", "a.kt", 100L)
     val second = OverlayUiModel.onToolCall(first, "c2", "Read", "b.kt", 110L)
-    assertEquals("同名工具只占一行", 1, second.toolRows.size)
-    assertEquals("行内 callId 要更新为最新", "c2", second.toolRows[0].callId)
-    assertEquals("调用计数仍要累加", 2, second.toolCount)
+    assertEquals("不同调用不能因同名被覆盖", listOf("c1", "c2"), second.toolRows.map { it.callId })
+    assertEquals("两次调用都计数", 2, second.toolCount)
+    assertTrue("两条调用同时运行", second.toolRows.all { it.running })
+
+    val firstDone = OverlayUiModel.onToolResult(second, "c1", 120L)
+    assertFalse("较早调用的结果仍能配对", firstDone.toolRows[0].running)
+    assertTrue("结果不能结束另一个同名调用", firstDone.toolRows[1].running)
+    val allDone = OverlayUiModel.onToolResult(firstDone, "c2", 130L, failed = true)
+    assertFalse("第二个结果只结束第二条", allDone.toolRows[1].running)
+    assertFalse("第一条不能沾染第二条失败位", allDone.toolRows[0].failed)
+    assertTrue("第二条携带失败位", allDone.toolRows[1].failed)
+  }
+
+  @Test
+  fun `旧协议空 callId 只与同样空 id 的同名行合并`() {
+    val modern = OverlayUiModel.onToolCall(toolModel(), "c1", "Read", "modern", 100L)
+    val legacy = OverlayUiModel.onToolCall(modern, "", "Read", "legacy-1", 110L)
+    val updated = OverlayUiModel.onToolCall(legacy, "", "Read", "legacy-2", 120L)
+    assertEquals("旧协议不能覆盖现代调用身份", listOf("c1", ""), updated.toolRows.map { it.callId })
+    assertEquals("现代调用摘要保留", "modern", updated.toolRows[0].summary)
+    assertEquals("旧协议同名原位更新", "legacy-2", updated.toolRows[1].summary)
+    assertEquals("无身份事件每次仍算实际调用", 3, updated.toolCount)
+  }
+
+  @Test
+  fun `有 callId 的调用不回落匹配旧协议同名行`() {
+    val legacy = OverlayUiModel.onToolCall(toolModel(), "", "Read", "legacy", 100L)
+    val modern = OverlayUiModel.onToolCall(legacy, "c1", "Read", "modern", 110L)
+    assertEquals("新协议调用不能吞旧协议行", listOf("", "c1"), modern.toolRows.map { it.callId })
+    assertEquals("两次调用分别计数", 2, modern.toolCount)
+  }
+
+  @Test
+  fun `重复 tool_result 的缺省成功不能抹掉已有失败`() {
+    val started = OverlayUiModel.onToolCall(toolModel(), "c1", "Bash", "false", 100L)
+    val failed = OverlayUiModel.onToolResult(started, "c1", 120L, failed = true)
+    val repeated = OverlayUiModel.onToolResult(failed, "c1", 130L)
+    assertTrue("显式失败必须保留", repeated.toolRows.single().failed)
+    assertFalse("重复结果不能恢复运行态", repeated.toolRows.single().running)
   }
 
   @Test
@@ -155,6 +191,7 @@ class OverlayUiModelTest {
     assertEquals("结局文案清空", "", started.completionLabel)
     assertEquals("计数归零", 0, started.toolCount)
     assertEquals("轮次开始时间更新", 200L, started.turnStartedAt)
+    assertTrue("新轮次占用边界", started.turnActive)
   }
 
   @Test
@@ -164,6 +201,7 @@ class OverlayUiModelTest {
     assertEquals("中文结局文案", "已完成", done.completionLabel)
     assertEquals("完成后回到空闲", OverlayAgentState.IDLE, done.agent)
     assertFalse("残留运行行必须收口", done.toolRows[0].running)
+    assertFalse("结束释放轮次边界", done.turnActive)
   }
 
   @Test
@@ -213,6 +251,112 @@ class OverlayUiModelTest {
       toolModel().copy(agent = OverlayAgentState.ERROR), running = false, at = 2L,
     )
     assertEquals("错误态不被状态回调抹掉", OverlayAgentState.ERROR, keepsError.agent)
+  }
+
+  @Test
+  fun `重复 running true 不清本轮事件与待答`() {
+    var m = OverlayUiModel.onRuntimeStatus(toolModel(), true, 100L)
+    m = OverlayUiModel.onToolCall(m, "c1", "Read", "a.kt", 110L)
+    m = OverlayUiModel.onThink(m, "继续分析", 120L)
+    m = OverlayUiModel.onText(m, "当前进度", 130L)
+    m = OverlayUiModel.setPending(m, listOf(pending("e1")))
+    val repeated = OverlayUiModel.onRuntimeStatus(m, true, 200L)
+    assertEquals("重复 true 只更新时间", m.copy(lastEventAt = 200L), repeated)
+    assertEquals("计时不因重复状态重启", 100L, repeated.turnStartedAt)
+  }
+
+  @Test
+  fun `WAITING 展示态不是新轮边界`() {
+    var m = OverlayUiModel.onRuntimeStatus(toolModel(), true, 100L)
+    m = OverlayUiModel.onToolCall(m, "c1", "Read", "a.kt", 110L)
+    m = OverlayUiModel.setPending(m, listOf(pending("e1"))).copy(agent = OverlayAgentState.WAITING)
+    val repeated = OverlayUiModel.onRuntimeStatus(m, true, 200L)
+    assertEquals("待答与调用都保留", m.copy(agent = OverlayAgentState.RUNNING, lastEventAt = 200L), repeated)
+    assertTrue("仍是同一活动轮次", repeated.turnActive)
+  }
+
+  @Test
+  fun `两轮运行态边界必须清除上一轮全部累积`() {
+    var first = OverlayUiModel.onRuntimeStatus(toolModel(), true, 100L)
+    first = OverlayUiModel.onToolCall(first, "c1", "Read", "a.kt", 110L)
+    first = OverlayUiModel.onThink(first, "上一轮思考", 120L)
+    first = OverlayUiModel.onText(first, "上一轮正文", 130L)
+    first = OverlayUiModel.setPending(first, listOf(pending("e1")))
+    first = OverlayUiModel.setCompletionLabel(first, "上一轮回执")
+    val stopped = OverlayUiModel.onRuntimeStatus(first, false, 200L)
+    assertEquals("false 不提前清内容", first.copy(agent = OverlayAgentState.IDLE, lastEventAt = 200L, turnActive = false), stopped)
+    val next = OverlayUiModel.onRuntimeStatus(stopped, true, 300L)
+    assertEquals("下一轮回到全新聚合", OverlayCardModel(
+      agent = OverlayAgentState.RUNNING, turnStartedAt = 300L, lastEventAt = 300L, turnActive = true,
+    ), next)
+  }
+
+  @Test
+  fun `turn_end 后没有 false 仍允许下一轮清空`() {
+    val first = OverlayUiModel.onRuntimeStatus(toolModel(), true, 100L)
+    val withTool = OverlayUiModel.onToolCall(first, "c1", "Read", "a.kt", 110L)
+    val ended = OverlayUiModel.onTurnEnd(withTool, "completed", 200L, english = false)
+    val next = OverlayUiModel.onRuntimeStatus(ended, true, 300L)
+    assertEquals("turn_end 本身就是轮次边界", OverlayCardModel(
+      agent = OverlayAgentState.RUNNING, turnStartedAt = 300L, lastEventAt = 300L, turnActive = true,
+    ), next)
+  }
+
+  @Test
+  fun `turn_end error 后迟到 false 不清错误或结局`() {
+    val started = OverlayUiModel.onRuntimeStatus(toolModel(), true, 100L)
+    val ended = OverlayUiModel.onTurnEnd(started, "error", 200L, english = true)
+    val lateFalse = OverlayUiModel.onRuntimeStatus(ended, false, 300L)
+    assertEquals("迟到 false 只更新时间", ended.copy(lastEventAt = 300L), lateFalse)
+    assertEquals("错误不是空闲", OverlayAgentState.ERROR, lateFalse.agent)
+    assertEquals("失败不是离线", "Failed", OverlayUiModel.pillOf(lateFalse, english = true).text)
+    assertFalse("不能再次激活已结束轮次", lateFalse.turnActive)
+  }
+
+  @Test
+  fun `切会话用独立模型不会继承上一会话事件`() {
+    val first = OverlayUiModel.onRuntimeStatus(toolModel(), true, 100L)
+    val firstWithTool = OverlayUiModel.onToolCall(first, "c1", "Read", "a.kt", 110L)
+    val second = OverlayUiModel.onRuntimeStatus(OverlayCardModel(), true, 200L)
+    val secondWithTool = OverlayUiModel.onToolCall(second, "c1", "Read", "b.kt", 210L)
+    assertEquals("第一会话内容不受另一模型影响", "a.kt", firstWithTool.toolRows.single().summary)
+    assertEquals("另一会话相同 callId 也独立计数", 1, secondWithTool.toolCount)
+    assertEquals("新会话只显示自己的调用", "b.kt", secondWithTool.toolRows.single().summary)
+    assertEquals("新会话重新计时", 200L, secondWithTool.turnStartedAt)
+  }
+
+  @Test
+  fun `断线先展示离线且重连恢复当前轮次不清内容`() {
+    var running = OverlayUiModel.onRuntimeStatus(toolModel(), true, 100L)
+    running = OverlayUiModel.onToolCall(running, "c1", "Read", "a.kt", 110L)
+    running = OverlayUiModel.setPending(running, listOf(pending("e1")))
+    val offline = OverlayUiModel.onEngineStatus(running, false, 200L)
+    assertEquals("离线仅改变连接维度和时间", running.copy(engineOnline = false, lastEventAt = 200L), offline)
+    assertEquals("残留运行行和待答不能盖掉离线", "Engine offline", OverlayUiModel.pillOf(offline, english = true).text)
+    assertEquals("标题同样明确离线", "引擎离线", OverlayUiModel.headlineOf(offline))
+    val online = OverlayUiModel.onEngineStatus(offline, true, 300L)
+    val repeated = OverlayUiModel.onRuntimeStatus(online, true, 310L)
+    assertEquals("重连 true 不是下一轮", running.copy(lastEventAt = 310L), repeated)
+    assertEquals("重连恢复待答提示", "Waiting for your answer", OverlayUiModel.pillOf(repeated, english = true).text)
+  }
+
+  @Test
+  fun `轮次失败离线重连后仍 Failed 而不是 Idle`() {
+    val ended = OverlayUiModel.onTurnEnd(toolModel(), "error", 100L, english = true)
+    val offline = OverlayUiModel.onEngineStatus(ended, false, 200L)
+    assertEquals("断线独立展示", "Engine offline", OverlayUiModel.pillOf(offline, english = true).text)
+    val online = OverlayUiModel.onEngineStatus(offline, true, 300L)
+    assertEquals("重连恢复原失败", "Failed", OverlayUiModel.pillOf(online, english = true).text)
+    assertEquals("重连不篡改结局或主状态", ended.copy(lastEventAt = 300L), online)
+    assertEquals("失败标题不冒充离线", "Failed", OverlayUiModel.headlineOf(online, english = true))
+  }
+
+  @Test
+  fun `新轮次不擅自把引擎离线改为在线`() {
+    val offline = OverlayUiModel.onEngineStatus(toolModel(), false, 100L)
+    val started = OverlayUiModel.onRuntimeStatus(offline, true, 200L)
+    assertFalse("轮次状态不能覆盖连接事实", started.engineOnline)
+    assertEquals("离线仍优先显示", "引擎离线", OverlayUiModel.pillOf(started, english = false).text)
   }
 
   // ── 待答上限 ─────────────────────────────────────────────────────────
@@ -271,7 +415,7 @@ class OverlayUiModelTest {
   }
 
   @Test
-  fun `pillOf 等待用户优先级最高`() {
+  fun `pillOf 在线时等待用户优先级最高`() {
     val m = OverlayCardModel(
       agent = OverlayAgentState.RUNNING,
       toolRows = listOf(OverlayToolRow("c1", "Bash", "ls", running = true, failed = false)),
@@ -306,11 +450,56 @@ class OverlayUiModelTest {
   }
 
   @Test
-  fun `pillOf 引擎离线与空闲文案`() {
+  fun `headline 英文兜底与失败工具逐条双语`() {
+    val failed = OverlayCardModel(toolRows = listOf(OverlayToolRow("c1", "", "x", running = false, failed = true)))
+    assertEquals("缺省保留中文", "失败 工具 · x", OverlayUiModel.headlineOf(failed))
+    assertEquals("英文工具和失败前缀", "Failed Tool · x", OverlayUiModel.headlineOf(failed, english = true))
+    val fallbacks = listOf(
+      Triple(OverlayAgentState.IDLE, "空闲", "Idle"),
+      Triple(OverlayAgentState.RUNNING, "工作中", "Working"),
+      Triple(OverlayAgentState.WAITING, "等待你的回答", "Waiting for your answer"),
+      Triple(OverlayAgentState.ERROR, "失败", "Failed"),
+    )
+    for ((agent, zh, en) in fallbacks) {
+      val m = OverlayCardModel(agent = agent)
+      assertEquals("中文状态兜底", zh, OverlayUiModel.headlineOf(m))
+      assertEquals("英文状态兜底", en, OverlayUiModel.headlineOf(m, english = true))
+    }
+  }
+
+  @Test
+  fun `completionLabelOf 按kind重新本地化但不篡改旧label`() {
+    val zh = OverlayUiModel.onTurnEnd(toolModel(), "completed", 100L, english = false)
+    assertEquals("completed", zh.completionKind)
+    assertEquals("已完成", zh.completionLabel)
+    assertEquals("Completed", OverlayUiModel.completionLabelOf(zh, english = true))
+    val failed = OverlayUiModel.onTurnEnd(toolModel(), "error", 100L, english = true)
+    assertEquals("失败", OverlayUiModel.completionLabelOf(failed, english = false))
+    assertEquals("Failed", OverlayUiModel.pillOf(failed, english = true).text)
+    assertEquals("Engine offline", OverlayUiModel.pillOf(failed.copy(engineOnline = false), english = true).text)
+    assertEquals("", OverlayUiModel.onTurnStart(zh, 200L).completionKind)
+    val custom = OverlayUiModel.setCompletionLabel(zh, "custom receipt")
+    assertEquals("", custom.completionKind)
+    assertEquals("custom receipt", OverlayUiModel.completionLabelOf(custom, english = false))
+    val unknown = OverlayUiModel.onTurnEnd(toolModel(), "future-kind", 1L, english = false)
+    assertEquals("Unknown result", OverlayUiModel.completionLabelOf(unknown, english = true))
+  }
+
+  @Test
+  fun `在线轮次失败不冒充引擎离线`() {
     val error = OverlayCardModel(agent = OverlayAgentState.ERROR)
-    assertEquals("中文离线", "引擎离线", OverlayUiModel.pillOf(error, english = false).text)
-    assertEquals("英文离线", "Engine offline", OverlayUiModel.pillOf(error, english = true).text)
-    assertEquals("离线色调", OverlayTone.ERROR, OverlayUiModel.pillOf(error, english = false).tone)
+    assertEquals("中文轮次失败", "失败", OverlayUiModel.pillOf(error, english = false).text)
+    assertEquals("英文轮次失败", "Failed", OverlayUiModel.pillOf(error, english = true).text)
+    assertEquals("失败仍用错误色调", OverlayTone.ERROR, OverlayUiModel.pillOf(error, english = true).tone)
+    assertTrue("轮次错误不代表断线", error.engineOnline)
+  }
+
+  @Test
+  fun `pillOf 引擎离线与空闲文案`() {
+    val offline = OverlayCardModel(engineOnline = false)
+    assertEquals("中文离线", "引擎离线", OverlayUiModel.pillOf(offline, english = false).text)
+    assertEquals("英文离线", "Engine offline", OverlayUiModel.pillOf(offline, english = true).text)
+    assertEquals("离线色调", OverlayTone.ERROR, OverlayUiModel.pillOf(offline, english = false).tone)
     val idle = OverlayCardModel()
     assertEquals("中文空闲", "空闲", OverlayUiModel.pillOf(idle, english = false).text)
     assertEquals("英文空闲", "Idle", OverlayUiModel.pillOf(idle, english = true).text)

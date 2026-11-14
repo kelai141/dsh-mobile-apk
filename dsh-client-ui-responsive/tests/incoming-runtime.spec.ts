@@ -3,7 +3,49 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { IncomingDraftConsumer, type IncomingDraftFetch } from '../src/client/mobile/incoming-draft.ts'
 import { createIncomingDraftRuntime } from '../src/client/mobile/incoming-runtime.ts'
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers() })
+
+it('bounds incoming Session.ready, releases timed-out reference and permits retry after late settlement', async () => {
+  vi.useFakeTimers()
+  let ready!: () => void
+  const release = vi.fn(), pending = new Promise<void>(resolve => { ready = resolve })
+  const runtime = createIncomingDraftRuntime({
+    sessions: () => ({ refresh: async () => {}, scope: () => ({}), retain: () => ({ ready: pending, release }) }),
+    workspaces: () => ({ create: async () => ({ workspaceId: 'w' }) }),
+    uiWorkspace: () => ({ connectWorkspace: async () => 'A', openSession() {} }),
+    conversation: () => ({ input: { for: () => ({ notify() {} }) } }),
+  })
+  const first = runtime.retainSession!('A')
+  const rejected = expect(first).rejects.toThrow('session-not-ready')
+  await vi.advanceTimersByTimeAsync(4001)
+  await rejected
+  expect(release).toHaveBeenCalledOnce()
+  ready(); await vi.advanceTimersByTimeAsync(0)
+  expect(release).toHaveBeenCalledOnce()
+  const completed = await runtime.retainSession!('A')
+  completed()
+  expect(release).toHaveBeenCalledTimes(2)
+})
+
+it('uses public createDrafts/input.addAttachments, releases rejected drafts and retains exact target', async () => {
+  const scope = {}, release = vi.fn(), addAttachments = vi.fn(() => true), drop = vi.fn()
+  const createDrafts = vi.fn(() => [{ id: 'draft-a' }])
+  const runtime = createIncomingDraftRuntime({
+    sessions: () => ({ refresh: async () => {}, scope: () => scope, retain: () => ({ ready: Promise.resolve({}), release }) }),
+    workspaces: () => ({ create: async () => ({ workspaceId: 'w' }) }),
+    uiWorkspace: () => ({ connectWorkspace: async () => 's', openSession() {} }),
+    conversation: () => ({ createDrafts, releaseDraftAttachment: drop, input: { for: () => ({ notify() {}, addAttachments }) } }),
+  })
+  const held = await runtime.retainSession!('target-A')
+  const file = new File(['data'], 'pic.png', { type: 'image/png' })
+  expect(runtime.attachGenericFile('target-A', file)).toBe(true)
+  expect(createDrafts).toHaveBeenCalledWith('target-A', [file], true)
+  expect(addAttachments).toHaveBeenCalledWith(['draft-a'])
+  addAttachments.mockReturnValue(false)
+  expect(runtime.attachGenericFile('target-A', file)).toBe(false)
+  expect(drop).toHaveBeenCalledWith('draft-a')
+  held(); expect(release).toHaveBeenCalledOnce()
+})
 
 it('opens through rc.2 uiWorkspace and retains the target scope before claiming the file', async () => {
   const scope = {}; let opened = false

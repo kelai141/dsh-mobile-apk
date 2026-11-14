@@ -38,6 +38,9 @@ internal class OverlayWindows(
     CARD("card", 3),
     PILL("pill", 4),
     COMPOSER("composer", 5),
+    WORKSPACE("workspace", 6),
+    SESSION("session", 7),
+    DRAWER("drawer", 8),
   }
 
   private class Held(val view: View, val params: WindowManager.LayoutParams)
@@ -52,6 +55,12 @@ internal class OverlayWindows(
       remove(slot)
     }
     return try {
+      params.title = "dsh-overlay-v2-" + slot.label
+      // 几何函数已扣系统栏；WMS再fit会把卡片状态栏算两遍，并使药丸y=0到不了物理顶缘。
+      if (slot != Slot.COMPOSER && slot != Slot.DRAWER) {
+        if (android.os.Build.VERSION.SDK_INT >= 30) params.setFitInsetsTypes(0)
+        params.flags = params.flags or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+      }
       wm.addView(view, params)
       held[slot] = Held(view, params)
       if (orderViolation()) {
@@ -75,6 +84,50 @@ internal class OverlayWindows(
       log("updateWindow failed slot=" + slot.label + " err=" + t.javaClass.simpleName + " " + (t.message ?: ""))
       false
     }
+  }
+
+  /** A same-view lease: no detach/re-add and no draft or focus selection writes. */
+  internal class InteractionLease internal constructor(internal val entries: List<InteractionEntry>)
+  internal class InteractionEntry internal constructor(
+    internal val slot: Slot, internal val view: View, internal val flags: Int, internal val alpha: Float,
+  )
+
+  internal var pendingInteractionRestore: InteractionLease? = null
+    private set
+
+  internal fun yieldInteraction(): InteractionLease? {
+    val entries = held.map { (slot, h) -> InteractionEntry(slot, h.view, h.params.flags, h.params.alpha) }
+    val lease = InteractionLease(entries)
+    for (entry in entries) {
+      val params = held[entry.slot]?.params ?: continue
+      params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+      // Android 12+ blocks touches through opaque untrusted overlays even with NOT_TOUCHABLE.
+      // Nine slots at .15 have combined opacity < .8. Keep windows visible, never hide/remove.
+      params.alpha = minOf(entry.alpha, .15f)
+      if (!update(entry.slot, params)) {
+        pendingInteractionRestore = lease
+        if (restoreInteraction(lease)) pendingInteractionRestore = null
+        return null // The picker must not start unless EVERY existing window yielded successfully.
+      }
+    }
+    return lease
+  }
+
+  internal fun restoreInteraction(lease: InteractionLease): Boolean {
+    var restored = true
+    for (entry in lease.entries) {
+      val current = held[entry.slot] ?: continue
+      if (current.view !== entry.view) continue // A late result must not mutate a replacement window.
+      val oldFlags = current.params.flags; val oldAlpha = current.params.alpha
+      current.params.flags = entry.flags
+      current.params.alpha = entry.alpha
+      if (!update(entry.slot, current.params)) {
+        current.params.flags = oldFlags; current.params.alpha = oldAlpha
+        restored = false
+      }
+    }
+    if (restored && pendingInteractionRestore === lease) pendingInteractionRestore = null
+    return restored
   }
 
   /** 移除窗口（幂等）。窗口本来就不在持有者里时返回 false。 */

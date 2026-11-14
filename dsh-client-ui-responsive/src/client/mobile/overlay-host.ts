@@ -22,14 +22,15 @@
  *   - `commands()`：composer-commands.ts 的公共读取函数（与「+」菜单同一份口径）。
  */
 
-import { readComposerMenuCommands, hasComposerMenuButton, type ComposerMenuCommand } from './composer-commands.ts'
+import { ATTACHMENT_ROW_TITLES, type ComposerMenuCommand } from './composer-commands.ts'
+import { keepDraftReference } from './incoming-runtime.ts'
 import { SESSION_ID_ATTRIBUTE } from './session-marker.ts'
 
 /** 全局对象名（壳侧 evaluateJavascript 求值的目标，改了就两端一起改）。 */
 export const OVERLAY_HOST_GLOBAL = '__dshOverlayHost'
 
 /** 宿主 API 版本：新增/改变方法语义时递增，原生据此判断能力。 */
-export const OVERLAY_HOST_VERSION = 1
+export const OVERLAY_HOST_VERSION = 2
 
 /** 会话列表行（只读我们确实要用的字段；缺字段一律按「没有」处理）。 */
 export interface OverlaySessionRowLike {
@@ -45,9 +46,42 @@ export interface OverlaySessionListSnapshotLike {
 }
 
 /** `ctx.sessions` 的窄面。 */
+export interface OverlaySessionFace {
+  readonly sessionId: string
+  getSnapshot?(): { readonly sessionId?: string; readonly openState?: string; readonly openError?: unknown; readonly removed?: boolean }
+  subscribe?(listener: () => void): () => void
+  prompt?(content: readonly unknown[], mode: 'queue' | 'steer', signal?: AbortSignal, requestId?: string): Promise<{ readonly ok: boolean; readonly value?: { readonly accepted?: boolean }; readonly error?: { readonly code?: string; readonly message?: string } }>
+}
+export interface OverlayEventWindow {
+  readonly entries: readonly { readonly type: 'event' | 'transient'; readonly event: { readonly type: string; readonly seq: number; readonly data: unknown } }[]
+  readonly revision?: number
+  readonly hasMore?: boolean
+}
+export interface OverlaySessionBinding {
+  readonly sessionId: string
+  readonly ctx: unknown
+  readonly session: OverlaySessionFace
+  readonly eventSource: { getSnapshot(): OverlayEventWindow; subscribe(listener: () => void): () => void }
+}
+export interface OverlayTranscriptRow {
+  readonly id: string
+  readonly role: 'user' | 'assistant' | 'tool'
+  /** Visible dialog only; tool payloads never masquerade as assistant text. */
+  readonly text: string
+  readonly toolName?: string
+  readonly arguments?: string
+  readonly result?: string
+  readonly state?: 'running' | 'done' | 'failed'
+  /** This row's fields, or older history preceding it, were omitted by the projection budget. */
+  readonly truncated?: boolean
+}
+
 export interface OverlaySessionsFace {
-  readonly list?: { getSnapshot?(): OverlaySessionListSnapshotLike | undefined }
+  readonly list?: { getSnapshot?(): OverlaySessionListSnapshotLike | undefined; subscribe?(listener: () => void): () => void }
+  binding?(id: string): OverlaySessionBinding | undefined
   scope?(id: string): unknown
+  sessionOf?(scope: unknown): OverlaySessionFace | undefined
+  retain?(id: string, options: { source: string }): { readonly binding?: { readonly ctx: unknown; readonly session: unknown }; ready: Promise<unknown>; release(): void }
 }
 
 /** 工作区行（WorkspaceView 的窄面）。 */
@@ -59,17 +93,20 @@ export interface OverlayWorkspaceRowLike {
 
 /** `ctx.workspaces` 的窄面。 */
 export interface OverlayWorkspacesFace {
-  getSnapshot?(): { readonly items?: readonly OverlayWorkspaceRowLike[] } | undefined
+  readonly list?: { getSnapshot(): { readonly items: readonly OverlayWorkspaceRowLike[]; readonly phase: 'pending' | 'ready'; readonly state: 'idle' | 'loading' | 'error'; readonly error?: unknown }; subscribe?(listener: () => void): () => void }
 }
 
 /** `ctx.uiWorkspace` 的窄面（导航）。 */
 export interface OverlayUiWorkspaceFace {
   openSession(id: unknown): void
+  openWorkspace?(id: unknown): Promise<void>
 }
 
 /** 输入机公开状态（InputState 的窄面）。 */
 export interface OverlayInputStateLike {
   readonly draft?: string
+  readonly phase?: string
+  readonly draftRev?: number
   readonly attachmentIds?: readonly string[]
 }
 
@@ -77,21 +114,29 @@ export interface OverlayInputStateLike {
 export interface OverlayAttachmentLike {
   readonly kind: 'image' | 'file'
   readonly id: string
+  readonly previewUrl?: string
+  readonly width?: number
+  readonly height?: number
   readonly file?: { readonly name?: string }
 }
 
 /** 会话输入机（SessionInput 的窄面）。 */
 export interface OverlayInputLike {
-  readonly state?: { getSnapshot?(): OverlayInputStateLike | undefined }
+  readonly state?: { getSnapshot?(): OverlayInputStateLike | undefined; subscribe?(listener: () => void): () => void }
   setDraft(text: string): void
   submit(): void
   removeAttachment(id: string): boolean
+  addAttachments?(ids: readonly string[]): boolean
 }
 
 /** `ctx.conversation` 的窄面。 */
 export interface OverlayConversationFace {
   readonly input?: { for(scope: unknown): OverlayInputLike }
+  sendSession?(session: unknown, text: string, ids: readonly string[], mode: 'queue' | 'steer', signal?: AbortSignal): Promise<{ kind: 'success' | 'error'; text?: string }>
+  readonly fileUploads?: { getSnapshot(): Readonly<Record<string, { readonly status: 'uploading' | 'ready' | 'error' } | undefined>> }
   resolveDraftAttachments?(ids: readonly string[]): readonly OverlayAttachmentLike[]
+  serializeDraftAttachments?(ids: readonly string[]): Promise<{ readonly attachments: readonly unknown[] }>
+  releaseDraftAttachment?(id: string): void
 }
 
 /**
@@ -101,11 +146,31 @@ export interface OverlayConversationFace {
  * （cordis 的 apply 顺序不受 inject 声明约束），装配期捕获实例会拿到 undefined。
  * 与 index.ts 其它 inject 块同一纪律：**在真正用到的时刻**再取。
  */
+export interface OverlayMenuHit {
+  readonly trigger: '/'; readonly query: string; readonly quoted: boolean; readonly position: 'leading'
+  readonly span: { readonly start: number; readonly end: number; readonly draftRev: number }
+}
+export interface OverlayMenuCandidate {
+  readonly name: string; readonly label?: string; readonly description?: string; readonly section?: string; readonly value?: string
+}
+export interface OverlayMenuSnapshot {
+  readonly open: boolean; readonly hit: OverlayMenuHit | null; readonly generation: number
+  readonly groups: readonly { readonly source: string; readonly status: 'pending' | 'ready'; readonly items: readonly OverlayMenuCandidate[] }[]
+}
+export interface OverlayCommandController {
+  resolveClaim(token: string, signal: AbortSignal): Promise<{ submit(args: string, scope: unknown, attachments: readonly unknown[]): Promise<{ kind: 'success' | 'error'; text?: string }> } | undefined>
+  readonly menu?: { getSnapshot(): OverlayMenuSnapshot; subscribe(listener: () => void): () => void }
+  toggleSource?(source: string, hit: OverlayMenuHit): void
+  pick?(source: string, index: number): void
+  dismiss?(): void
+}
+
 export interface OverlayHostFaces {
   sessions?: () => OverlaySessionsFace | undefined
   workspaces?: () => OverlayWorkspacesFace | undefined
   uiWorkspace?: () => OverlayUiWorkspaceFace | undefined
   conversation?: () => OverlayConversationFace | undefined
+  commandController?: (scope: unknown) => OverlayCommandController | undefined
 }
 
 /** 一条命令（宿主 API 线上字段，与 composer-commands 同形）。 */
@@ -136,31 +201,249 @@ export function readPageSessionId(): string {
   }
 }
 
+const TRANSCRIPT_ROWS = 40
+const TRANSCRIPT_BYTES = 24 * 1024
+const TRANSCRIPT_CHARS = 4000
+const TRANSCRIPT_CAPTURE_CHARS = TRANSCRIPT_CHARS + 1
+/** Read only a bounded prefix; opaque payloads are never stringified. */
+const transcriptText = (text: string, limit = TRANSCRIPT_CAPTURE_CHARS): string => {
+  let end = 0, count = 0
+  for (const char of text) { if (count++ === limit) break; end += char.length }
+  return text.slice(0, end)
+}
+const transcriptRecord = (value: unknown): Record<string, unknown> | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+const bodyText = (value: unknown): string => {
+  if (!Array.isArray(value)) return ''
+  let text = '', hasBlock = false
+  for (const block of value) {
+    const entry = transcriptRecord(block)
+    if (entry?.type !== 'text' || typeof entry.text !== 'string') continue
+    text = transcriptText(text + (hasBlock ? '\n' : '') + transcriptText(entry.text))
+    hasBlock = true
+    if (Array.from(text).length === TRANSCRIPT_CAPTURE_CHARS) break
+  }
+  return text
+}
+
+/** Escaping, ids, tool payloads and metadata all share one UTF-8 JSON budget. */
+function boundOverlayTranscript(rows: readonly OverlayTranscriptRow[], hasMore: boolean): OverlayTranscriptRow[] {
+  const latest: OverlayTranscriptRow[] = rows.slice(-TRANSCRIPT_ROWS).flatMap(row => {
+    // Never shorten an identity and risk aliasing unrelated source rows.
+    if (row.id.length > 1024) return []
+    let truncated = row.truncated === true
+    const clip = (text: string, limit: number): string => {
+      const value = transcriptText(text, limit)
+      if (value.length !== text.length) truncated = true
+      return value
+    }
+    const text = clip(row.text, TRANSCRIPT_CHARS)
+    const fields = row.role === 'tool' ? {
+      toolName: clip(row.toolName ?? '', 256), arguments: clip(row.arguments ?? '', 1600),
+      result: clip(row.result ?? '', 1600), state: row.state,
+    } : {}
+    return [{ id: row.id, role: row.role, text, ...fields, ...(truncated ? { truncated: true } : {}) }]
+  })
+  const encoder = new TextEncoder(), size = () => encoder.encode(JSON.stringify(latest)).byteLength
+  const markOmitted = (): void => { if (latest.length > 0) latest[0] = { ...latest[0], truncated: true } }
+  if (hasMore || rows.length > latest.length) markOmitted()
+  while (latest.length > 1 && size() > TRANSCRIPT_BYTES) { latest.shift(); markOmitted() }
+  // Control-character escaping can exceed 24KiB even for a single bounded row.
+  while (latest.length === 1 && size() > TRANSCRIPT_BYTES) {
+    const row = latest[0]
+    const field = (['text', 'arguments', 'result', 'toolName'] as const).reduce((largest, key) => (row[key]?.length ?? 0) > (row[largest]?.length ?? 0) ? key : largest, 'text')
+    const value = row[field] ?? ''
+    if (value.length === 0) { latest.pop(); break }
+    latest[0] = { ...row, [field]: transcriptText(value, Math.floor(Array.from(value).length / 2)), truncated: true }
+  }
+  return latest
+}
+
+/** Public SessionBinding eventSource only: real dialog/tools, never reasoning or tool-private meta. */
+export function projectOverlayTranscript(sessionId: string, window: OverlayEventWindow): OverlayTranscriptRow[] {
+  const rows = new Map<string, OverlayTranscriptRow>()
+  const live = new Map<string, { attempt: string; blocks: Map<number, { text: string; closed: boolean }> }>()
+  const settled = new Set<string>()
+  const assistantKey = (data: Record<string, unknown>, seq: number): string => typeof data.turn === 'number' && typeof data.step === 'number'
+    ? sessionId + ':assistant:' + data.turn + ':' + data.step : sessionId + ':assistant-seq:' + seq
+  const toolKey = (data: Record<string, unknown>, callId: unknown): string | undefined =>
+    typeof callId === 'string' && callId.trim() !== '' && typeof data.turn === 'number' && typeof data.step === 'number'
+      ? sessionId + ':tool:' + data.turn + ':' + data.step + ':' + callId : undefined
+  const addTool = (data: Record<string, unknown>, callId: unknown, name: unknown, args: unknown): void => {
+    const id = toolKey(data, callId)
+    if (id === undefined || typeof name !== 'string' || name.trim() === '' || typeof args !== 'string') return
+    const previous = rows.get(id)
+    rows.set(id, { id, role: 'tool', text: '', toolName: transcriptText(name, 257), arguments: transcriptText(args, 1601), result: previous?.result ?? '', state: previous?.state ?? 'running' })
+  }
+  for (const entry of window.entries) {
+    const data = transcriptRecord(entry.event.data)
+    if (entry.type === 'event' && data !== undefined && entry.event.type === 'assistant/message') settled.add(assistantKey(data, entry.event.seq))
+  }
+  for (const entry of window.entries) {
+    const event = entry.event, data = transcriptRecord(event.data)
+    if (data === undefined) continue
+    if (entry.type === 'event' && event.type === 'user/message') {
+      if (transcriptRecord(data.source)?.kind !== 'user') continue
+      const text = bodyText(data.content)
+      if (text.trim() === '') continue
+      const id = sessionId + ':user:' + (typeof data.id === 'string' ? data.id : String(event.seq))
+      rows.set(id, { id, role: 'user', text })
+    } else if (entry.type === 'event' && event.type === 'assistant/message') {
+      const message = transcriptRecord(data.message), text = bodyText(message?.content)
+      const id = assistantKey(data, event.seq)
+      if (text.trim() !== '') rows.set(id, { id, role: 'assistant', text })
+      if (Array.isArray(message?.content)) for (const raw of message.content) {
+        const block = transcriptRecord(raw)
+        if (block?.type === 'tool-call') addTool(data, block.id, block.name, block.arguments)
+      }
+    } else if (entry.type === 'event' && event.type === 'tool/call') {
+      addTool(data, data.callId, data.name, data.arguments)
+    } else if (entry.type === 'event' && event.type === 'tool/result') {
+      const message = transcriptRecord(data.message), id = toolKey(data, message?.toolCallId)
+      const previous = id === undefined ? undefined : rows.get(id)
+      if (previous === undefined || message === undefined || message.role !== 'tool') continue
+      const result = bodyText(message.content), reason = transcriptRecord(data.error)?.reason
+      rows.set(previous.id, { ...previous, result: result || (message.isError === true && typeof reason === 'string' ? transcriptText(reason) : ''), state: message.isError === true ? 'failed' : 'done' })
+    } else if (entry.type === 'transient' && event.type === 'assistant/live-chunk') {
+      const id = assistantKey(data, event.seq), chunk = transcriptRecord(data.chunk)
+      if (settled.has(id) || chunk === undefined || typeof data.attemptId !== 'string' || typeof chunk.index !== 'number') continue
+      let state = live.get(id)
+      if (state === undefined || state.attempt !== data.attemptId) { state = { attempt: data.attemptId, blocks: new Map() }; live.set(id, state); rows.delete(id) }
+      if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
+        const block = state.blocks.get(chunk.index)
+        if (block?.closed !== true) state.blocks.set(chunk.index, { text: transcriptText((block?.text ?? '') + transcriptText(chunk.text)), closed: false })
+      } else if (chunk.type === 'block-end') {
+        const block = transcriptRecord(chunk.block)
+        if (block?.type === 'text' && typeof block.text === 'string') state.blocks.set(chunk.index, { text: transcriptText(block.text), closed: true })
+      }
+      const text = transcriptText([...state.blocks.entries()].sort(([a], [b]) => a - b).map(([, block]) => block.text).join('\n'))
+      if (text.trim() !== '') rows.set(id, { id, role: 'assistant', text })
+    }
+  }
+  return boundOverlayTranscript([...rows.values()], window.hasMore === true)
+}
+
 /**
  * 页面宿主 API 的实现（无 DOM 依赖的测试面：会话/工作区/输入机都是注入的窄面）。
  */
 export class OverlayHost {
   /** 最近一次成功读到的命令表；null = 还没成功读过。 */
   private commands: OverlayCommand[] | null = null
+  private commandsReadAt = 0
+  private commandsSessionId = ''
+  private commandsError = ''
+  private operationSequence = 0
+  private readonly instanceId = globalThis.crypto?.randomUUID?.() ?? (Date.now().toString(36) + Math.random().toString(36).slice(2))
+  private readonly activeOperationKeys = new Map<string, string>()
+  private readonly operations = new Map<string, string>()
+  private readonly sending = new Set<string>()
+  private readonly draftOwners = new Set<() => void>()
+
+  private disposed = false
+  private readonly thumbnails = new Map<string, string>()
+  private readonly thumbnailPending = new Set<string>()
+  private stateWatching = false
+  private stateSubscriptions: (() => void)[] = []
+  private inputSubscription: (() => void) | undefined
+  private watchedInputState: OverlayInputLike['state'] | undefined
+  private transcriptSubscriptions: (() => void)[] = []
+  private watchedTranscriptBinding: OverlaySessionBinding | undefined
+  private markerObserver: MutationObserver | undefined
+  private stateNotification: ReturnType<typeof setTimeout> | undefined
+
+  /** Subscribe only while a native card or composer is visible. Signal invalidation, never duplicate state. */
+  watchState(enabled: unknown): string {
+    const watching = enabled === true && !this.disposed
+    if (watching && this.stateWatching) { this.bindVisibleSessionObservation(); return ok({}) }
+    this.stateWatching = watching
+    for (const unsubscribe of this.stateSubscriptions) unsubscribe()
+    this.stateSubscriptions = []
+    this.inputSubscription?.(); this.inputSubscription = undefined; this.watchedInputState = undefined
+    for (const unsubscribe of this.transcriptSubscriptions) unsubscribe()
+    this.transcriptSubscriptions = []; this.watchedTranscriptBinding = undefined
+    this.markerObserver?.disconnect(); this.markerObserver = undefined
+    if (this.stateNotification !== undefined) { clearTimeout(this.stateNotification); this.stateNotification = undefined }
+    if (!this.stateWatching) return ok({})
+    const changed = () => { this.bindVisibleSessionObservation(); this.signalStateChanged() }
+    const sessions = this.faces.sessions?.()?.list, workspaces = this.faces.workspaces?.()?.list
+    const sessionDrop = sessions?.subscribe?.(changed), workspaceDrop = workspaces?.subscribe?.(changed)
+    if (sessionDrop !== undefined) this.stateSubscriptions.push(sessionDrop)
+    if (workspaceDrop !== undefined) this.stateSubscriptions.push(workspaceDrop)
+    const bindInput = () => changed()
+    bindInput()
+    this.markerObserver = new MutationObserver(bindInput)
+    this.markerObserver.observe(document.documentElement, { attributes: true, attributeFilter: [SESSION_ID_ATTRIBUTE] })
+    return ok({})
+  }
+
+  private bindVisibleSessionObservation(): void {
+    if (!this.stateWatching || this.disposed) return
+    const inputState = this.inputFacade(this.sessionId())?.state
+    if (inputState !== this.watchedInputState) {
+      this.inputSubscription?.()
+      this.watchedInputState = inputState
+      this.inputSubscription = inputState?.subscribe?.(() => this.signalStateChanged())
+    }
+    this.bindTranscriptObservation()
+  }
+
+  private bindTranscriptObservation(): void {
+    if (!this.stateWatching || this.disposed) return
+    let binding: OverlaySessionBinding | undefined
+    try { binding = this.faces.sessions?.()?.binding?.(this.sessionId()) } catch { /* unavailable is published by state() */ }
+    if (binding?.sessionId !== this.sessionId()) binding = undefined
+    if (binding === this.watchedTranscriptBinding) return
+    for (const unsubscribe of this.transcriptSubscriptions) unsubscribe()
+    this.transcriptSubscriptions = []; this.watchedTranscriptBinding = binding
+    if (binding === undefined) return
+    const changed = () => this.signalStateChanged()
+    this.transcriptSubscriptions.push(binding.eventSource.subscribe(changed))
+    const lifecycleDrop = binding.session.subscribe?.(changed)
+    if (lifecycleDrop !== undefined) this.transcriptSubscriptions.push(lifecycleDrop)
+  }
+
+  private transcriptOf(sessionId: string): { rows: OverlayTranscriptRow[]; ready: boolean; error: string } {
+    if (sessionId === '') return { rows: [], ready: false, error: 'transcript-session-unavailable' }
+    try {
+      const binding = this.faces.sessions?.()?.binding?.(sessionId)
+      if (binding === undefined || binding.sessionId !== sessionId || binding.session.sessionId !== sessionId) return { rows: [], ready: false, error: 'transcript-session-unavailable' }
+      const lifecycle = binding.session.getSnapshot?.()
+      if (lifecycle?.removed === true || lifecycle?.openState === 'error') return { rows: [], ready: false, error: 'transcript-history-error' }
+      const window = binding.eventSource.getSnapshot()
+      return { rows: projectOverlayTranscript(sessionId, window), ready: lifecycle?.openState === 'open', error: lifecycle?.openState === 'open' ? '' : 'transcript-history-pending' }
+    } catch { return { rows: [], ready: false, error: 'transcript-unavailable' } }
+  }
+
+  private signalStateChanged(): void {
+    if (!this.stateWatching || this.disposed || this.stateNotification !== undefined) return
+    this.stateNotification = setTimeout(() => { this.stateNotification = undefined; if (this.stateWatching && !this.disposed) console.info('[dsh-overlay-state-changed]') }, 100)
+  }
+  private readonly unknownSendChecks = new Map<string, { check(): void; dispose(): void }>()
+  dispose(): void { this.watchState(false); this.disposed = true; this.thumbnails.clear(); for (const pending of this.unknownSendChecks.values()) pending.dispose(); this.unknownSendChecks.clear(); for (const drop of [...this.draftOwners]) drop() }
+  private readonly incomingStates = new Map<string, string>()
+  private readonly incomingReads = new Set<string>()
   /** 读命令的并发合并：原生可能连点几次「命令抽屉」，不能并发开多轮上游菜单。 */
   private commandsInFlight: Promise<void> | null = null
 
   constructor(
     private readonly faces: OverlayHostFaces,
     private readonly sessionId: () => string = readPageSessionId,
-    private readonly readCommands: () => Promise<OverlayCommand[]> = readComposerMenuCommands,
-    private readonly composerReady: () => boolean = hasComposerMenuButton,
+    private readonly readCommands?: () => Promise<OverlayCommand[]>,
+    private readonly composerReady: () => boolean = () => false,
   ) {}
 
   /** 原生桥对象（全局只装一份；版本字段供能力强弱判断）。 */
   api(): Record<string, unknown> {
     return {
       version: OVERLAY_HOST_VERSION,
+      watchState: (enabled: unknown) => this.watchState(enabled),
+      operation: (id: unknown) => this.operation(id),
+      incoming: (id: unknown) => this.incoming(id),
+      openWorkspace: (id: unknown) => this.openWorkspace(id),
       state: () => this.state(),
       sessions: () => this.sessions(),
       commands: () => this.commandsJson(),
-      execute: (line: unknown) => this.execute(line),
-      send: (text: unknown) => this.send(text),
+      execute: (line: unknown, sessionId: unknown) => this.execute(line, sessionId),
+      send: (text: unknown, sessionId: unknown) => this.send(text, sessionId),
       removeAttachment: (index: unknown) => this.removeAttachment(index),
       openSession: (sessionId: unknown) => this.openSession(sessionId),
     }
@@ -178,17 +461,27 @@ export class OverlayHost {
     try {
       const sessionId = this.sessionId()
       const snapshot = this.sessionSnapshot()
+      if (snapshot === undefined || snapshot.phase !== 'ready') return fail('sessions-not-ready')
       const row = sessionId === '' ? undefined : snapshot?.byId?.[sessionId]
-      const workspaces = this.workspacesSnapshot()
+      const workspaceSnapshot = this.workspaceSnapshot()
+      const workspacesReady = workspaceSnapshot?.phase === 'ready' && workspaceSnapshot.state !== 'error'
+      const workspaces = workspacesReady ? workspaceSnapshot.items : []
       const current = sessionId === '' ? undefined : workspaces.find((item) => (item.sessionIds ?? []).includes(sessionId))
       const inputState = this.inputState(sessionId)
+      const transcript = this.transcriptOf(sessionId)
       return ok({
         sessionId,
+        agentId: this.resolvedSession(sessionId)?.sessionId ?? '',
         sessionTitle: row?.title ?? '',
         workspaceId: current?.workspaceId ?? '',
         workspaceName: current?.title ?? '',
+        workspacesReady,
+        workspacesError: workspaceSnapshot === undefined ? 'workspaces-unavailable' : workspaceSnapshot.state === 'error' ? 'workspaces-error' : workspaceSnapshot.phase !== 'ready' ? 'workspaces-pending' : '',
         workspaces: workspaces.map((item) => ({ id: item.workspaceId, title: item.title ?? '' })),
         busy: row?.running === true,
+        transcript: transcript.rows,
+        transcriptReady: transcript.ready,
+        transcriptError: transcript.error,
         attachments: this.attachmentsOf(inputState),
         draft: typeof inputState?.draft === 'string' ? inputState.draft : '',
       })
@@ -207,135 +500,472 @@ export class OverlayHost {
     try {
       const snapshot = this.sessionSnapshot()
       if (snapshot === undefined) return fail('sessions-unavailable')
-      if (snapshot.phase === 'pending') return fail('sessions-pending')
+      if (snapshot.phase !== 'ready') return fail('sessions-pending')
       const byId = snapshot.byId ?? {}
       const ids = Array.isArray(snapshot.ids) ? snapshot.ids : Object.keys(byId)
       return ok({
-        items: ids.map((id) => ({ id, title: byId[id]?.title ?? '' })),
+        items: ids.map((id) => ({ id, title: byId[id]?.title ?? '', agentId: this.resolvedSession(id)?.sessionId ?? '' })),
       })
     } catch (error) {
       return failWith('sessions', error)
     }
   }
 
-  /**
-   * 动态命令清单（来自上游「+」菜单的真实 DOM，不硬编码任何命令）。
-   *
-   * **为什么可能返回 ok:false**：读上游菜单必须跨一次 React 提交（异步），而本 API 是同步
-   * 求值接口。所以采用「缓存 + 预取」：缓存命中直接返回；未命中时启动一次异步读取并返回
-   * `commands-not-ready`，原生稍后重读即可（自然幂等）。页面没有合成器（无「+」）时返回
-   * `composer-unavailable`，不假装「没有命令」。
-   */
+  /** Official per-session menu store, not DOM rendering/focus, owns the overlay directory. */
   commandsJson(): string {
     try {
-      if (this.commands !== null) return ok({ items: this.commands })
-      if (!this.composerReady()) return fail('composer-unavailable')
+      const id = this.sessionId()
+      if (this.commandsSessionId !== id) { this.commands = null; this.commandsError = ''; this.commandsSessionId = id }
+      if (this.commands !== null && Date.now() - this.commandsReadAt < 1000) return ok({ items: this.commands })
+      if (this.readCommands !== undefined && !this.composerReady()) return fail('composer-unavailable')
+      const previousError = this.commandsError
       void this.refreshCommands()
-      return fail('commands-not-ready')
-    } catch (error) {
-      return failWith('commands', error)
-    }
+      return fail(previousError || 'commands-not-ready')
+    } catch (error) { return failWith('commands', error) }
   }
 
-  /** 预取命令表（安装时调用一次；失败不抛）。返回是否已完成一次成功读取。 */
   async warmCommands(): Promise<boolean> {
     await this.refreshCommands()
     return this.commands !== null
   }
 
-  /** 读一次命令表并落缓存（并发合并；失败保持未就绪，等下次重试）。 */
   async refreshCommands(): Promise<void> {
     if (this.commandsInFlight !== null) return this.commandsInFlight
+    if (this.readCommands !== undefined && !this.composerReady()) return
+    const id = this.sessionId()
+    this.commandsSessionId = id
     const run = (async () => {
       try {
-        const items = await this.readCommands()
-        this.commands = items
-      } catch {
-        // 读失败保持「未就绪」：宁可让原生重试，也不拿一张空命令表冒充真源。
-      } finally {
-        this.commandsInFlight = null
-      }
+        const items = this.readCommands !== undefined ? await this.readCommands() : await this.withOfficialMenu(id, (items) => items.filter(item => {
+          // Same exact-match attachment-title closure as the shared sheet; never prefix-match commands.
+          const name = item.name.trim().replace(/^\//u, '').toLowerCase()
+          const label = (item.label ?? '').trim().toLowerCase()
+          return !ATTACHMENT_ROW_TITLES.has(name) && !ATTACHMENT_ROW_TITLES.has(label)
+        }).map(item => ({
+          // The provider routes by canonical candidate.name; localized label is display copy only.
+          name: item.name.startsWith('/') ? item.name : '/' + item.name,
+          label: item.label ?? item.name, description: item.description ?? '', section: item.section ?? '',
+        })))
+        if (this.sessionId() !== id) return
+        this.commands = items; this.commandsSessionId = id; this.commandsError = ''; this.commandsReadAt = Date.now()
+      } catch (error) {
+        this.commands = null
+        this.commandsError = error instanceof Error ? error.message : String(error)
+      } finally { this.commandsInFlight = null }
     })()
     this.commandsInFlight = run
     return run
   }
 
+  private async withOfficialMenu<T>(id: string, run: (items: readonly OverlayMenuCandidate[], controller: OverlayCommandController, input: OverlayInputLike) => T): Promise<T> {
+    const sessions = this.faces.sessions?.(), scope = sessions?.scope?.(id), input = this.inputFacade(id)
+    if (scope === undefined || input === undefined) throw new Error('composer-unavailable')
+    const controller = this.faces.commandController?.(scope), menu = controller?.menu
+    if (controller === undefined || menu === undefined || controller.toggleSource === undefined || controller.dismiss === undefined) throw new Error('commands-unavailable')
+    if (menu.getSnapshot().open) throw new Error('commands-menu-busy')
+    const state = input.state?.getSnapshot?.()
+    if (state?.draftRev === undefined || state.phase === 'submitting' || state.phase === 'adjudicating') throw new Error('composer-busy')
+    const reference = sessions?.retain?.(id, { source: 'workspaceOperation' })
+    let opened = false
+    const hit: OverlayMenuHit = { trigger: '/', query: '', quoted: false, position: 'leading', span: { start: 0, end: 0, draftRev: state.draftRev } }
+    let generation = -1
+    let readinessTimer: number | undefined
+    try {
+      // SessionReference.ready is an initial history-open waiter, not an immediately hot scope.
+      // A stuck open must release this borrow and leave the directory retryable, never cache [].
+      await Promise.race([
+        reference?.ready ?? Promise.resolve(),
+        new Promise<never>((_resolve, reject) => { readinessTimer = window.setTimeout(() => reject(new Error('session-not-ready')), 4000) }),
+      ])
+      window.clearTimeout(readinessTimer)
+      if (this.sessionId() !== id || sessions?.scope?.(id) !== scope) throw new Error('session-generation-changed')
+      const binding = reference?.binding
+      if (binding !== undefined && binding.ctx !== scope) throw new Error('session-generation-changed')
+      if (menu.getSnapshot().open) throw new Error('commands-menu-busy')
+      return await new Promise<T>((resolve, reject) => {
+        let finished = false, unsubscribe: (() => void) | undefined
+        const timer = window.setTimeout(() => finish(new Error('commands-not-ready')), 4000)
+        const finish = (error?: Error, value?: T) => {
+          if (finished) return
+          finished = true; window.clearTimeout(timer); unsubscribe?.()
+          if (error !== undefined) reject(error); else resolve(value as T)
+        }
+        const inspect = () => {
+          if (!opened || finished) return
+          const current = menu.getSnapshot()
+          if (this.sessionId() !== id || sessions?.scope?.(id) !== scope || input.state?.getSnapshot?.()?.draftRev !== state.draftRev) { finish(new Error('commands-aborted')); return }
+          if (current.generation !== generation || current.hit !== hit) { finish(new Error('commands-menu-aborted')); return }
+          const group = current.groups.find(group => group.source === 'command')
+          if (!current.open || group === undefined) { finish(new Error('commands-source-unavailable')); return }
+          if (group.status === 'ready') {
+            finished = true; window.clearTimeout(timer); unsubscribe?.()
+            try { resolve(run(group.items, controller, input)) } catch (error) { reject(error) }
+          }
+        }
+        unsubscribe = menu.subscribe(inspect)
+        try {
+          controller.toggleSource!('command', hit)
+          generation = menu.getSnapshot().generation; opened = true; inspect()
+        } catch (error) { finish(error instanceof Error ? error : new Error(String(error))) }
+      })
+    } finally {
+      window.clearTimeout(readinessTimer)
+      const current = menu.getSnapshot()
+      // Do not close a user menu which superseded the one this borrow opened.
+      if (opened && current.hit === hit && current.generation === generation) controller.dismiss()
+      reference?.release()
+    }
+  }
+
+  private waitForForeground(): Promise<void> {
+    if (document.visibilityState === 'visible') return Promise.resolve()
+    return new Promise<void>((resolve, reject) => {
+      const done = () => { window.clearTimeout(timer); document.removeEventListener('visibilitychange', changed) }
+      const changed = () => { if (document.visibilityState === 'visible') { done(); resolve() } }
+      const timer = window.setTimeout(() => { done(); reject(new Error('commands-foreground-required')) }, 10000)
+      document.addEventListener('visibilitychange', changed)
+    })
+  }
+
   // ── 动作面 ────────────────────────────────────────────────────────────────
 
-  /**
-   * 执行一条命令行（如 `/compact`）。
-   *
-   * 走页面自己的提交路径（写入草稿 → 触发 composer 提交 → 上游命令仲裁），因此
-   * 与用户手打命令**完全同一条链路**：命令是否成立、参数是否合法都由页面裁决，
-   * 失败会以页面自己的 notice 呈现。这是设计 §6.4「优先复用页面既有命令执行路径」的落点；
-   * 不走 `POST /api/commands/execute` 是因为那条路由要 `agentId`，而页面只拥有
-   * `sessionId`（设计 §6.3 明令两者不得互串），强行拼一个 agentId 属于猜身份。
-   */
-  execute(line: unknown): string {
-    try {
-      if (typeof line !== 'string' || line.trim() === '') return fail('invalid-line')
-      const input = this.requireInput()
-      if (input === undefined) return fail('composer-unavailable')
-      input.setDraft(line)
-      input.submit()
-      return ok({})
-    } catch (error) {
-      return failWith('execute', error)
+  /** Wake the targeted-only background consumer and poll the authenticated receipt, never infer success. */
+  incoming(id: unknown): string {
+    if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{8,100}$/.test(id)) return fail('invalid-request-id')
+    window.dispatchEvent(new Event('dsh:overlay-incoming'))
+    if (!this.incomingReads.has(id)) {
+      this.incomingReads.add(id)
+      const controller = new AbortController()
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const timeout = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error('incoming receipt timed out'))
+          controller.abort()
+        }, 4000)
+      })
+      // Keep body decoding inside the deadline, but state mutation outside it: a late body is stale.
+      const receipt = Promise.resolve().then(async () => {
+        const response = await fetch('/api/android/file-incoming?requestId=' + encodeURIComponent(id), { credentials: 'same-origin', cache: 'no-store', signal: controller.signal })
+        const result = await response.json() as { ok?: boolean; state?: string }
+        return { response, result }
+      })
+      void Promise.race([receipt, timeout]).then(({ response, result }) => {
+        if (response.ok && result.ok === true && typeof result.state === 'string') this.incomingStates.set(id, result.state)
+      }).catch(() => {}).finally(() => { clearTimeout(timer); this.incomingReads.delete(id) })
     }
+    return ok({ state: this.incomingStates.get(id) ?? 'pending' })
   }
 
-  /**
-   * 通过页面自身 composer 提交文本。
-   *
-   * 为什么必须走 composer 而不是直发 RPC：用户草稿里可能已有附件（图片/文件），
-   * 那些附件只属于页面的 composer；绕过去发文本会让「带附件发送」静默丢附件。
-   * 写入草稿 + submit 的语义与用户点发送键一致。
-   */
-  send(text: unknown): string {
+  /** Pollable settlement: evaluateJavascript cannot await a Promise returned by the page. */
+  operation(id: unknown): string {
+    if (typeof id !== 'string') return fail('invalid-operation')
+    this.unknownSendChecks.get(id)?.check()
+    return this.operations.get(id) ?? JSON.stringify({ pending: true, unknown: true, operationId: id, error: 'operation-not-found' })
+  }
+
+  private begin(key: string, run: (signal: AbortSignal) => Promise<string>): string {
+    const existing = this.activeOperationKeys.get(key)
+    if (existing !== undefined) return this.operations.get(existing)!
+    const operationId = this.instanceId + '-overlay-' + String(++this.operationSequence)
+    const pending = JSON.stringify({ pending: true, operationId })
+    this.operations.set(operationId, pending)
+    this.activeOperationKeys.set(key, operationId)
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => {
+      // A read-only proof may have settled this ticket while its original carrier is still open.
+      if (this.activeOperationKeys.get(key) !== operationId) return
+      // An invoked handler may already have committed. Timeout is not proof of refusal.
+      this.operations.set(operationId, JSON.stringify({ pending: true, unknown: true, operationId }))
+    }, 25000)
+    let settled = false
+    void Promise.resolve().then(() => run(controller.signal)).then(result => {
+      const reply = JSON.parse(result) as { pending?: boolean }
+      settled = reply.pending !== true
+      this.operations.set(operationId, reply.pending === true ? JSON.stringify({ ...reply, operationId }) : result)
+    }, error => {
+      this.operations.set(operationId, JSON.stringify({ pending: true, unknown: true, operationId, error: String(error) }))
+    }).finally(() => {
+      window.clearTimeout(timer)
+      if (settled && this.activeOperationKeys.get(key) === operationId) this.activeOperationKeys.delete(key)
+      if (this.operations.size > 100) {
+        for (const [id, result] of this.operations) {
+          if (!JSON.parse(result).pending && id !== operationId) this.operations.delete(id)
+          if (this.operations.size <= 100) break
+        }
+      }
+    })
+    return pending
+  }
+
+  /** Resolve the real scoped claim; no composer mutation and no draft attachments on commands. */
+  execute(line: unknown, expectedSessionId: unknown = this.sessionId()): string {
     try {
+      if (typeof line !== 'string' || !line.trim().startsWith('/')) return fail('invalid-line')
+      const id = this.sessionId()
+      if (id === '' || id !== expectedSessionId) return fail('session-mismatch')
+      const key = JSON.stringify(['execute', id, line])
+      const existing = this.activeOperationKeys.get(key)
+      if (existing !== undefined) return this.operations.get(existing)!
+      const sessions = this.faces.sessions?.(), scope = sessions?.scope?.(id)
+      if (scope === undefined) return fail('composer-unavailable')
+      if (this.faces.commandController?.(scope)?.menu !== undefined) {
+        return this.begin(key, async () => {
+          let invoked = false
+          try {
+          await this.waitForForeground()
+          return await this.withOfficialMenu(id, (items, controller, input) => {
+            if (controller.pick === undefined) return fail('commands-unavailable')
+            if (input.state?.getSnapshot?.()?.phase !== 'plain') return fail('composer-busy')
+            const token = line.trim().replace(/^\//u, '')
+            const index = items.findIndex(item => item.name === token)
+            if (index < 0) return fail('command-not-found')
+            invoked = true
+            controller.pick('command', index)
+            return ok({ handedOff: true })
+          })
+          } catch (error) {
+            return invoked ? JSON.stringify({ pending: true, unknown: true, error: String(error) }) : failWith('execute', error)
+          }
+        })
+      }
+      const reference = sessions?.retain?.(id, { source: 'workspaceOperation' })
+      return this.begin(key, async signal => {
+        let invoked = false, uncertain = false
+        try {
+          await reference?.ready
+          const binding = reference?.binding
+          if (binding !== undefined && (binding.ctx !== scope || binding.session !== sessions?.sessionOf?.(scope))) return fail('session-generation-changed')
+          const controller = this.faces.commandController?.(binding?.ctx ?? scope)
+          if (controller === undefined) return fail('commands-unavailable')
+          const token = line.trim().split(/\s/u)[0] as string
+          const claim = await controller.resolveClaim(token, signal)
+          if (claim === undefined) return fail('command-not-found')
+          invoked = true
+          const result = await claim.submit(line.trim().slice(token.length).trimStart(), binding?.ctx ?? scope, [])
+          return result.kind === 'success' ? ok({}) : fail(result.text ?? 'command-failed')
+        } catch (error) {
+          if (!invoked) return failWith('execute', error)
+          uncertain = true
+          return JSON.stringify({ pending: true, unknown: true, error: String(error) })
+        } finally { if (!uncertain) reference?.release() }
+      })
+    } catch (error) { return failWith('execute', error) }
+  }
+
+  /** The input rail gives up this batch synchronously; the browser registry retains its bytes. */
+  send(text: unknown, expectedSessionId: unknown = this.sessionId()): string {
+    try {
+      if (this.disposed) return fail('host-disposed')
       if (typeof text !== 'string') return fail('invalid-text')
-      const input = this.requireInput()
-      if (input === undefined) return fail('composer-unavailable')
-      input.setDraft(text)
-      input.submit()
-      return ok({})
-    } catch (error) {
-      return failWith('send', error)
-    }
+      const id = this.sessionId()
+      if (id === '' || id !== expectedSessionId) return fail('session-mismatch')
+      const key = JSON.stringify(['send', id, text])
+      const existing = this.activeOperationKeys.get(key)
+      if (existing !== undefined) return this.operations.get(existing)!
+      const input = this.inputFacade(id), session = this.resolvedSession(id), conversation = this.faces.conversation?.()
+      if (input === undefined || session === undefined || conversation?.sendSession === undefined) return fail('composer-unavailable')
+      const state = input.state?.getSnapshot?.()
+      if (state === undefined || state.phase === 'submitting' || state.phase === 'adjudicating' || this.sending.has(id)) return fail('composer-busy')
+      const ids = [...state.attachmentIds ?? []]
+      if (text.trim() === '' && ids.length === 0) return fail('empty-message')
+      if (ids.length > 0 && input.addAttachments === undefined) return fail('attachment-admission-unavailable')
+      if (conversation.resolveDraftAttachments !== undefined && conversation.fileUploads !== undefined) {
+        const drafts = conversation.resolveDraftAttachments(ids), uploads = conversation.fileUploads.getSnapshot()
+        if (drafts.length !== ids.length) return fail('attachment-not-found')
+        if (drafts.some(draft => (draft.kind === 'file' || uploads[draft.id] !== undefined) && uploads[draft.id]?.status !== 'ready')) return fail('attachment-not-ready')
+      }
+      const reference = this.faces.sessions?.()?.retain?.(id, { source: 'workspaceOperation' })
+      const requestId = crypto.randomUUID()
+      const detached: string[] = []
+      let detachFailed = false
+      this.sending.add(id)
+      // JS cannot interleave a user input event inside this batch. Guard refusals must not submit.
+      for (const attachmentId of ids) {
+        if (!input.removeAttachment(attachmentId)) { detachFailed = true; break }
+        detached.push(attachmentId)
+      }
+      const lifecycle = new AbortController()
+      let operationId = '', invoked = false, uncertain = false, accepted = false, finished = false, checking = false
+      const finish = (dispose = false) => {
+        if (finished) return
+        finished = true
+        lifecycle.abort()
+        this.unknownSendChecks.delete(operationId)
+        this.sending.delete(id)
+        if (reference !== undefined) {
+          const retained = reference.binding
+          const exactGeneration = retained === undefined || (retained.session === session && retained.ctx === this.faces.sessions?.()?.scope?.(id))
+          if (dispose || !exactGeneration || !keepDraftReference(reference, input.state, this.draftOwners)) reference.release()
+        }
+      }
+      const accept = () => {
+        if (accepted) return ok({ requestId })
+        accepted = true
+        // The captured batch has already left the input rail. Never clear newer draft IDs or text.
+        for (const attachmentId of ids) { try { conversation.releaseDraftAttachment?.(attachmentId) } catch { /* admission is already proven */ } }
+        this.operations.set(operationId, ok({ requestId }))
+        if (this.activeOperationKeys.get(key) === operationId) this.activeOperationKeys.delete(key)
+        finish()
+        return ok({ requestId })
+      }
+      const pending = () => JSON.stringify({ pending: true, unknown: true, requestId })
+      const raw = this.begin(key, async () => {
+        try {
+          await this.withSendDeadline(reference?.ready ?? Promise.resolve(), 4000, 'session-not-ready', lifecycle.signal)
+          const scope = this.faces.sessions?.()?.scope?.(id)
+          const binding = reference?.binding
+          if (binding !== undefined && (binding.ctx !== scope || binding.session !== session)) { await this.restoreAttachments(input, detached, lifecycle.signal); return fail('session-generation-changed') }
+          if (detachFailed) { await this.restoreAttachments(input, detached, lifecycle.signal); return fail('attachment-detach-refused') }
+          const target = (binding?.session ?? session) as OverlaySessionFace
+          if (ids.length > 0 && conversation.serializeDraftAttachments !== undefined && target.prompt !== undefined) {
+            // Public serialization and Session admission have no visual-frame dependency.
+            const serialized = await this.withSendDeadline(conversation.serializeDraftAttachments(ids), 8000, 'attachment-serialization-timeout', lifecycle.signal)
+            if (this.faces.sessions?.()?.sessionOf?.(scope) !== session) { await this.restoreAttachments(input, detached, lifecycle.signal); return fail('session-generation-changed') }
+            const content = [...serialized.attachments, ...(text === '' ? [] : [{ type: 'text', text }])]
+            invoked = true
+            const receipt = await target.prompt(content, 'queue', lifecycle.signal, requestId)
+            if (accepted) return ok({ requestId })
+            if (finished) { uncertain = true; return pending() }
+            // Remote folds lost receipts into ok:false gateway/*, not a rejected Promise.
+            const code = receipt?.error?.code
+            if (receipt?.ok === false && typeof code === 'string' && code !== '' && !code.startsWith('gateway/')) {
+              await this.restoreAttachments(input, detached, lifecycle.signal)
+              return fail([code, receipt.error?.message].filter(Boolean).join(': '))
+            }
+            if (receipt?.ok !== true || receipt.value?.accepted !== true) { uncertain = true; return pending() }
+            return accept()
+          }
+          invoked = true
+          const outcome = await conversation.sendSession!(target, text, ids, 'queue', lifecycle.signal)
+          if (outcome.kind !== 'success') { await this.restoreAttachments(input, detached, lifecycle.signal); return fail(outcome.text ?? 'send-failed') }
+          return ok({})
+        } catch (error) {
+          if (accepted) return ok({ requestId })
+          if (invoked) { uncertain = true; return pending() }
+          if (!finished) await this.restoreAttachments(input, detached, lifecycle.signal)
+          return failWith('send', error)
+        } finally { if (!uncertain || accepted) finish(this.disposed) }
+      })
+      operationId = (JSON.parse(raw) as { operationId: string }).operationId
+      this.unknownSendChecks.set(operationId, {
+        dispose: () => finish(true),
+        check: () => {
+          if (!invoked || finished || checking || this.disposed) return
+          checking = true
+          void this.readPromptAdmission(id, requestId, lifecycle.signal).then(observed => {
+            if (observed && !finished && !this.disposed) accept()
+          }).finally(() => { checking = false })
+        },
+      })
+      if (this.disposed) finish(true)
+      return raw
+    } catch (error) { return failWith('send', error) }
   }
 
-  /**
-   * 按索引移除一个草稿附件（原生附件预览条的删除按钮）。
-   *
-   * 索引对应 `state().attachments` 的顺序（同一份输入机状态）。越界或页面拒绝（提交中
-   * 等忙态）都返回 ok:false，由原生如实提示，不静默当作已删。
-   */
-  removeAttachment(index: unknown): string {
+  private withSendDeadline<T>(promise: Promise<T>, ms: number, reason: string, signal?: AbortSignal): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = window.setTimeout(() => done(new Error(reason)), ms)
+      const aborted = () => done(new Error('send-observer-disposed'))
+      let finished = false
+      const done = (error?: Error, value?: T) => {
+        if (finished) return
+        finished = true; window.clearTimeout(timer); signal?.removeEventListener('abort', aborted)
+        if (error !== undefined) reject(error); else resolve(value as T)
+      }
+      void promise.then(value => done(undefined, value), error => done(error instanceof Error ? error : new Error(String(error))))
+      signal?.addEventListener('abort', aborted, { once: true })
+      if (signal?.aborted) aborted()
+    })
+  }
+
+  /** Read-only exact request evidence. A missing/failed query is never proof of rejection. */
+  private async readPromptAdmission(sessionId: string, requestId: string, signal: AbortSignal): Promise<boolean> {
+    const read = async (method: 'session/state' | 'session/events'): Promise<boolean> => {
+      const controller = new AbortController(), abort = () => controller.abort()
+      signal.addEventListener('abort', abort, { once: true })
+      try {
+        if (signal.aborted) return false
+        const rpcId = crypto.randomUUID()
+        const request = method === 'session/state' ? { sessionId } : { address: { kind: 'session', sessionId }, maxMessages: 100 }
+        const query = async () => {
+          const response = await fetch('/api/' + method, {
+            method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, signal: controller.signal,
+            body: JSON.stringify({ type: 'client-request', rpcId, method, payload: { args: { request } } }),
+          })
+          if (!response.ok) return false
+          const wire = await response.json() as { type?: string; rpcId?: string; result?: { ok?: boolean; value?: { queue?: { rpcId?: string }[]; records?: { type?: string; event?: { type?: string; data?: { source?: { kind?: string; rpcId?: string } } } }[] } } }
+          if (wire.type !== 'server-response' || wire.rpcId !== rpcId || wire.result?.ok !== true) return false
+          const value = wire.result.value
+          if (method === 'session/state') return Array.isArray(value?.queue) && value.queue.some(row => row?.rpcId === requestId)
+          return Array.isArray(value?.records) && value.records.some(record => record?.type === 'event' && record.event?.type === 'user/message' && record.event.data?.source?.kind === 'user' && record.event.data.source.rpcId === requestId)
+        }
+        return await this.withSendDeadline(query(), 2500, 'receipt-query-timeout', signal)
+      } catch { return false } finally { controller.abort(); signal.removeEventListener('abort', abort) }
+    }
+    if (await read('session/state')) return true
+    return signal.aborted ? false : read('session/events')
+  }
+
+  private restoreAttachments(input: OverlayInputLike, ids: readonly string[], signal?: AbortSignal): Promise<void> {
+    if (ids.length === 0) return Promise.resolve()
+    const restore = (): boolean => {
+      const state = input.state?.getSnapshot?.()
+      if (state === undefined || state.phase === 'submitting' || state.phase === 'adjudicating') return false
+      const missing = ids.filter(id => !(state.attachmentIds ?? []).includes(id))
+      return missing.length === 0 || input.addAttachments?.(missing) === true
+    }
+    if (restore()) return Promise.resolve()
+    return new Promise<void>(resolve => {
+      let restoring = false, finished = false
+      let unsubscribe: (() => void) | undefined
+      const done = () => {
+        if (finished) return
+        finished = true; unsubscribe?.(); signal?.removeEventListener('abort', done); resolve()
+      }
+      const inspect = () => {
+        if (restoring || finished) return
+        restoring = true
+        if (restore()) done()
+        restoring = false
+      }
+      signal?.addEventListener('abort', done, { once: true })
+      if (signal?.aborted) { done(); return }
+      unsubscribe = input.state?.subscribe?.(inspect)
+      inspect()
+      if (finished) unsubscribe?.()
+      // Keep the exact generation until editable ownership returns, or page teardown releases it.
+    })
+  }
+
+  removeAttachment(id: unknown): string {
     try {
-      if (typeof index !== 'number' || !Number.isInteger(index) || index < 0) return fail('invalid-index')
+      if (typeof id !== 'string' || id === '') return fail('invalid-attachment-id')
       const input = this.requireInput()
       if (input === undefined) return fail('composer-unavailable')
-      const ids = this.inputState(this.sessionId())?.attachmentIds ?? []
-      const id = ids[index]
-      if (id === undefined) return fail('attachment-not-found')
-      const removed = input.removeAttachment(id)
-      return removed ? ok({}) : fail('attachment-remove-refused')
-    } catch (error) {
-      return failWith('removeAttachment', error)
-    }
+      if (!(input.state?.getSnapshot?.()?.attachmentIds ?? []).includes(id)) return fail('attachment-not-found')
+      return input.removeAttachment(id) ? ok({}) : fail('attachment-remove-refused')
+    } catch (error) { return failWith('removeAttachment', error) }
   }
 
-  /** 切到指定会话（会话药丸）。不存在/不可切换时由页面导航语义决定，异常一律 ok:false。 */
   openSession(sessionId: unknown): string {
     try {
       if (typeof sessionId !== 'string' || sessionId === '') return fail('invalid-session-id')
+      const snapshot = this.sessionSnapshot()
+      if (snapshot?.phase !== 'ready' || !snapshot.ids?.includes(sessionId)) return fail('session-not-found')
       const ui = this.faces.uiWorkspace?.()
       if (ui === undefined) return fail('ui-workspace-unavailable')
       ui.openSession(sessionId)
       return ok({})
-    } catch (error) {
-      return failWith('openSession', error)
-    }
+    } catch (error) { return failWith('openSession', error) }
+  }
+
+  openWorkspace(id: unknown): string {
+    const snapshot = this.workspaceSnapshot()
+    if (snapshot?.phase !== 'ready' || snapshot.state === 'error') return fail('workspaces-not-ready')
+    if (typeof id !== 'string' || !snapshot.items.some(w => w.workspaceId === id)) return fail('workspace-not-found')
+    const ui = this.faces.uiWorkspace?.()
+    if (ui?.openWorkspace === undefined) return fail('ui-workspace-unavailable')
+    return this.begin(JSON.stringify(['workspace', id]), async () => { await ui.openWorkspace!(id); return ok({}) })
   }
 
   // ── 内部 ──────────────────────────────────────────────────────────────────
@@ -344,9 +974,8 @@ export class OverlayHost {
     return this.faces.sessions?.()?.list?.getSnapshot?.()
   }
 
-  private workspacesSnapshot(): readonly OverlayWorkspaceRowLike[] {
-    const items = this.faces.workspaces?.()?.getSnapshot?.()?.items
-    return Array.isArray(items) ? items : []
+  private workspaceSnapshot() {
+    return this.faces.workspaces?.()?.list?.getSnapshot()
   }
 
   /** 当前会话的输入机；任何一环缺失都返回 undefined（调用方据此 ok:false）。 */
@@ -364,6 +993,12 @@ export class OverlayHost {
     }
   }
 
+  private resolvedSession(id: string): OverlaySessionFace | undefined {
+    const sessions = this.faces.sessions?.()
+    const scope = sessions?.scope?.(id)
+    return scope === undefined ? undefined : sessions?.sessionOf?.(scope)
+  }
+
   private requireInput(): OverlayInputLike | undefined {
     return this.inputFacade(this.sessionId())
   }
@@ -372,16 +1007,53 @@ export class OverlayHost {
     return this.inputFacade(sessionId)?.state?.getSnapshot?.()
   }
 
+  private thumbnailOf(attachment: OverlayAttachmentLike): string {
+    const cached = this.thumbnails.get(attachment.id)
+    if (cached !== undefined) return cached
+    const url = attachment.previewUrl
+    if (this.disposed || this.thumbnailPending.has(attachment.id) || this.thumbnailPending.size >= 2 || typeof url !== 'string' || !url.startsWith('blob:') || typeof createImageBitmap !== 'function') return ''
+    this.thumbnailPending.add(attachment.id)
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => controller.abort(), 4000)
+    void fetch(url, { signal: controller.signal }).then(response => {
+      if (!response.ok) throw new Error('thumbnail-source-unavailable')
+      return response.blob()
+    }).then(blob => {
+      const width = attachment.width, height = attachment.height
+      const scale = typeof width === 'number' && typeof height === 'number' && width > 0 && height > 0 ? Math.min(1, 256 / Math.max(width, height)) : undefined
+      return createImageBitmap(blob, scale === undefined ? { resizeWidth: 256, resizeQuality: 'low' } : { resizeWidth: Math.max(1, Math.round(width! * scale)), resizeHeight: Math.max(1, Math.round(height! * scale)), resizeQuality: 'low' })
+    }).then(bitmap => {
+      try {
+        if (this.disposed) return
+        const canvas = document.createElement('canvas')
+        const scale = Math.min(1, 256 / Math.max(bitmap.width, bitmap.height))
+        canvas.width = Math.max(1, Math.round(bitmap.width * scale)); canvas.height = Math.max(1, Math.round(bitmap.height * scale))
+        const context = canvas.getContext('2d')
+        if (context === null) throw new Error('thumbnail-canvas-unavailable')
+        context.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
+        const data = canvas.toDataURL('image/jpeg', 0.7)
+        this.thumbnails.set(attachment.id, data.length <= 49152 ? data : '')
+        this.signalStateChanged()
+      } finally { bitmap.close() }
+    }).catch(() => { if (!this.disposed) this.thumbnails.set(attachment.id, '') }).finally(() => {
+      window.clearTimeout(timer); this.thumbnailPending.delete(attachment.id)
+      while (this.thumbnails.size > 8) this.thumbnails.delete(this.thumbnails.keys().next().value!)
+    })
+    return ''
+  }
+
   /** 草稿附件 → 线上形态（名字取 File.name；拿不到就空串，不编）。 */
-  private attachmentsOf(inputState: OverlayInputStateLike | undefined): Array<{ name: string; kind: 'image' | 'file' }> {
+  private attachmentsOf(inputState: OverlayInputStateLike | undefined): Array<{ id: string; name: string; kind: 'image' | 'file'; thumbnail?: string }> {
     const ids = inputState?.attachmentIds
     if (!Array.isArray(ids) || ids.length === 0) return []
     const conversation = this.faces.conversation?.()
     if (conversation?.resolveDraftAttachments === undefined) return []
     try {
       return conversation.resolveDraftAttachments(ids).map((attachment) => ({
+        id: attachment.id,
         name: attachment.file?.name ?? '',
         kind: attachment.kind === 'image' ? 'image' : 'file',
+        ...(attachment.kind === 'image' ? { thumbnail: this.thumbnailOf(attachment) } : {}),
       }))
     } catch {
       return []
@@ -400,8 +1072,9 @@ export function installOverlayHost(host: OverlayHost): () => void {
   const api = host.api()
   target[OVERLAY_HOST_GLOBAL] = api
   // 预取命令表：原生第一次调 commands() 时大概率已命中缓存（读菜单需要跨一次提交）。
-  void host.warmCommands()
+  // No eager menu borrowing at install: cold startup may have no composer at all.
   return () => {
+    host.dispose()
     if (target[OVERLAY_HOST_GLOBAL] !== api) return
     if (previous === undefined) delete target[OVERLAY_HOST_GLOBAL]
     else target[OVERLAY_HOST_GLOBAL] = previous

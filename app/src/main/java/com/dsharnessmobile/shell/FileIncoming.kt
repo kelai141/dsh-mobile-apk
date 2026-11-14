@@ -529,6 +529,32 @@ object FileIncoming {
       .put("origin", normalizeOrigin(origin))
       .toString()
 
+  internal fun targetedRequestBody(path: String, origin: String, targetSessionId: String, requestId: String, mediaType: String): String {
+    val body = org.json.JSONObject(incomingRequestBody(path, origin))
+    if (targetSessionId.isNotEmpty() || requestId.isNotEmpty()) {
+      require(targetSessionId.isNotBlank() && requestId.isNotBlank())
+      body.put("targetSessionId", targetSessionId).put("requestId", requestId).put("mediaType", mediaType)
+    }
+    return body.toString()
+  }
+
+  /** Overlay targets are immutable, process-local and never fall back to a current/new session. */
+  internal fun processTargetedIncomingPath(context: Context, copied: File, targetSessionId: String, requestId: String, mediaType: String, onResult: (Boolean) -> Unit) {
+    val app = context.applicationContext
+    val main = android.os.Handler(android.os.Looper.getMainLooper())
+    ioExecutor.execute {
+      val ok = try {
+        require(targetSessionId.isNotBlank() && requestId.isNotBlank())
+        require(copied.isFile && copied.canonicalFile.parentFile == tmpWorkspace(app).canonicalFile)
+        withIncomingDeliveryAfterSweep(pendingLock, activeDeliveries, { sweepExpired(app) }) {
+          recordOpening(app, copied.absolutePath)
+          deliverOnce(app, copied.absolutePath, ORIGIN_CAMERA, targetSessionId, requestId, mediaType)
+        }
+      } catch (_: Throwable) { false }
+      main.post { onResult(ok) }
+    }
+  }
+
   /** 单次投递尝试（无内部重试）。端点语义：HTTP 200 但 body `{ok:false}` = 拒收
    *  （路径形态/不存在）——必须核对 body 的 ok 字段，只看状态码会把拒收当成功（静默丢件）。
    *
@@ -536,7 +562,7 @@ object FileIncoming {
    *  先查 exact 表），必须带共享控制令牌头 `X-DSH-Control-Token`（与无障碍控制队列同一枚
    *  DeviceControlService.token；引擎侧实时读壳侧 prefs 比对）。不带 = 401 fail-closed，
    *  表现为「投递静默失败」——因此投递方与鉴权必须同批发布。 */
-  private fun deliverOnce(context: Context, path: String, origin: String): Boolean {
+  private fun deliverOnce(context: Context, path: String, origin: String, targetSessionId: String = "", requestId: String = "", mediaType: String = ""): Boolean {
     return try {
       val conn = java.net.URL(EngineEndpoint.url + "/api/android/file-incoming")
         .openConnection(java.net.Proxy.NO_PROXY) as java.net.HttpURLConnection
@@ -546,7 +572,7 @@ object FileIncoming {
       conn.readTimeout = 5000
       // 共享控制令牌（壳侧生成、写 dsh-adb.xml；引擎侧同一枚）——缺它一律 401。
       conn.setRequestProperty("X-DSH-Control-Token", DeviceControlService.token(context))
-      conn.outputStream.use { it.write(incomingRequestBody(path, origin).toByteArray()) }
+      conn.outputStream.use { it.write(targetedRequestBody(path, origin, targetSessionId, requestId, mediaType).toByteArray()) }
       val code = conn.responseCode
       val ok = if (code in 200..299) {
         val body = conn.inputStream?.use { it.readBytes().toString(Charsets.UTF_8) } ?: ""

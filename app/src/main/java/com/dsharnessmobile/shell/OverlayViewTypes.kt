@@ -63,6 +63,78 @@ internal data class OverlayPendingAction(
 )
 
 /**
+ * 工具行的单行摘要（参考样式：图标 + 操作名 + 关键参数，全部压在一行内）。
+ *
+ * 为什么单独抽成纯函数：卡片默认折叠工具行，折叠态只能显示这一行文本，所以「取哪个参数当摘要」
+ * 是产品语义，必须在 JVM 单测里可断言，不能散落在 View 代码里。纪律：
+ *  - 只取命令行/路径这类最有辨识度的参数，绝不拼接整段 JSON；
+ *  - 摘要长度有界，超出按字符截断并加省略号，避免一行吃掉整块卡片；
+ *  - 不解释结果内容，也不猜测成功与否（状态另有 state 字段）。
+ */
+internal object OverlayToolSummary {
+  const val MAX_SUMMARY_CHARS = 72
+
+  private val keys = listOf(
+    "command", "cmd", "file_path", "path", "filePath", "file", "pattern", "query", "url", "name", "prompt",
+  )
+  private val pathKeys = setOf("file_path", "path", "filePath", "file")
+
+  /** 从已经字符串化的参数投影中取一个可读要点；找不到就返回空串（调用方只显示工具名）。 */
+  fun hint(arguments: String): String {
+    if (arguments.isBlank()) return ""
+    val flat = arguments.replace('\n', ' ').replace('\r', ' ').trim()
+    for (key in keys) {
+      val marker = "\"" + key + "\""
+      val at = flat.indexOf(marker)
+      if (at < 0) continue
+      val colon = flat.indexOf(':', at + marker.length)
+      if (colon < 0) continue
+      val value = flat.substring(colon + 1).trimStart().removePrefix("\"").trimStart()
+      if (value.isEmpty()) continue
+      val stop = value.indexOfFirst { it == '\"' || it == ',' || it == '}' }
+      val text = (if (stop >= 0) value.substring(0, stop) else value).trim()
+      if (text.isNotEmpty()) return bound(if (key in pathKeys) shortPath(text) else text)
+    }
+    // No known key: show the raw projection head so the row still says something true.
+    return bound(flat)
+  }
+
+  /**
+   * Paths are shown by their tail, never by the whole absolute path.
+   *
+   * Why: an Android app-private path is ~70 characters of constant noise
+   * (/data/data/<pkg>/files/home/...) that pushes the meaningful file name off a one-line row.
+   * Keeping the last two segments preserves identity ("workspaces/incoming/demo-report.md").
+   */
+  private fun shortPath(full: String): String {
+    val parts = full.split('/').filter { it.isNotEmpty() }
+    if (parts.size <= 2) return full
+    return parts.takeLast(2).joinToString("/")
+  }
+
+  private fun bound(text: String): String {
+    val single = text.replace(Regex("\\s+"), " ").trim()
+    return if (single.length <= MAX_SUMMARY_CHARS) single else single.take(MAX_SUMMARY_CHARS - 1).trimEnd() + "…"
+  }
+}
+
+/**
+ * 公开会话记录的有界投影。user/assistant 的 text 为真实多行正文；tool 的 text 必须为空，
+ * 参数与结果单列且只作为字面量展示，不能伪装成助手正文。state 缺失表示未知，不能猜已完成。
+ * truncated 表示本行字段或其前方历史被预算截断；稳定 id 从公开消息/turn/step/callId 派生。
+ */
+internal data class OverlayTranscriptRow(
+  val id: String,
+  val role: String,
+  val text: String,
+  val toolName: String = "",
+  val arguments: String = "",
+  val result: String = "",
+  val state: OverlayToolRowState? = null,
+  val truncated: Boolean = false,
+)
+
+/**
  * 顶部事件卡片的渲染快照（§3.1 W3）。
  *
  * @param stateLabel 状态行主文案（空闲/正在思考/等待审批…）。
@@ -72,6 +144,7 @@ internal data class OverlayPendingAction(
  * @param footerLine 底部说明行（空串隐藏）。
  * @param pending 待答项；视图层按 kind 渲染按钮。
  * @param running 是否处于运行态，决定状态点/呼吸动画是否允许。
+ * @param transcript 当前会话真实用户/助手正文与工具调用；空闲也保留，不由 running 决定清空。
  */
 internal data class OverlayCardData(
   val stateLabel: String,
@@ -81,6 +154,7 @@ internal data class OverlayCardData(
   val footerLine: String,
   val pending: List<OverlayPendingAction>,
   val running: Boolean,
+  val transcript: List<OverlayTranscriptRow> = emptyList(),
 )
 
 /**
@@ -102,9 +176,14 @@ internal data class OverlayCommandItem(
 /**
  * 输入区的附件 chip。
  *
- * @param kind 固定 "image" 或 "file"：决定是否保留图片扩展名展示，不做富预览（§8.3）。
+ * @param kind 固定 "image" 或 "file"；图片携带页面有界JPEG缩略图，不传原始附件字节。
  */
-internal data class OverlayAttachmentChip(val name: String, val kind: String)
+internal data class OverlayAttachmentChip(val name: String, val kind: String, val id: String = "", val thumbnail: String = "")
+
+/** 仅接收页面投影的48KiB以内JPEG缩略图；拒绝URL/原图/SVG及畸形base64。 */
+internal fun overlayThumbnailData(data: String): String =
+  if (data.length in 24..49152 && data.startsWith("data:image/jpeg;base64,") &&
+    data.substringAfter(",").all { it.isLetterOrDigit() && it.code < 128 || it == '+' || it == '/' || it == '=' }) data else ""
 
 /**
  * 底部输入区的渲染快照（§3.1 W5 / §8.1）。
@@ -123,6 +202,7 @@ internal data class OverlayComposerData(
   val pendingHint: String,
   val busy: Boolean,
   val sendEnabled: Boolean,
+  val answeringQuestion: Boolean = false,
 )
 
 /**
@@ -132,7 +212,7 @@ internal data class OverlayComposerData(
  *
  * 拖动位移语义（全 UI 统一）：dxPx/dyPx 都是**相对 ACTION_DOWN 的累计位移**，不是相邻
  * 两帧增量——服务侧用「窗口起点位置 + 累计位移」即可定位窗口，不必自己累加（累加会在
- * 丢帧/事件合并时漂移）。速度取 VelocityTracker 当前主方向的 px/s（向下/向右为正）。
+ * 丢帧/事件合并时漂移）。速度固定取 VelocityTracker 的 y 分量 px/s（向下为正）。
  */
 internal interface OverlayCardListener {
   /** 点右上角关闭按钮：只收卡片窗，不动 Agent（§4.2）。 */
@@ -146,9 +226,12 @@ internal interface OverlayCardListener {
    */
   fun onCardHideEntry()
 
+  /** 在卡片内切换球/侧边条，偏好回调只重建入口，保留输入草稿和事件模型。 */
+  fun onCardEntryStyle() = Unit
+
   /**
-   * 白条把手拖动。dyPx 是**自 DOWN 起的累计位移**（向下为正），UP/CANCEL 时 velocityPxPerS
-   * 为把手方向的瞬时速度（VelocityTracker 口径，像素/秒，向下为正）；其余阶段速度为 0。
+   * 白条把手拖动。dyPx 是**自 DOWN 起的累计位移**（向下为正），UP 时 velocityPxPerS
+   * 为 y 方向的瞬时速度（VelocityTracker 口径，像素/秒，向下为正）；其余阶段速度为 0。
    */
   fun onCardHandleDrag(phase: OverlayDragPhase, dyPx: Float, velocityPxPerS: Float)
 
@@ -161,7 +244,9 @@ internal interface OverlayCardListener {
 
 /**
  * 药丸窗回调（服务侧实现）。拖动阶段语义同 [OverlayCardListener.onCardHandleDrag]，
- * 只是多一个 dxPx（药丸可自由拖动，横向也要上报）；消散阈值由服务用
+ * 只是多一个 dxPx（药丸可自由拖动，横向也要上报），速度仍固定为 y 分量。
+ * DOWN 必须在所有 MOVE/UP 之前上报（即使最后是点击），让服务记录本次手势的窗口起点；
+ * UP 使用抬手当帧的累计位移，CANCEL 只终止手势、不消散。消散阈值由服务用
  * OverlayWindowFrames.pillDismissReached 判定，本视图不决定。
  */
 internal interface OverlayPillListener {
@@ -180,6 +265,16 @@ internal interface OverlayComposerListener {
   fun onComposerSend(text: String)
 
   fun onComposerStop()
+
+  fun onComposerCancelAnswer() {}
+
+  fun onComposerFullQuestionForm() {}
+
+  /** 返回键：编排层先收抽屉，再收输入窗；不发送、不停止后台任务。 */
+  fun onComposerBack()
+
+  /** 「＋」只请求编排层切换抽屉；命令/会话/工作区模式由编排层唯一持有。 */
+  fun onComposerToggleDrawer()
 
   /** kind 固定 "camera" / "photo" / "file"。 */
   fun onComposerAttach(kind: String)
@@ -203,6 +298,39 @@ internal interface OverlayComposerListener {
 
 /** 卡片工具行的渲染上限（§4.3 环形缓冲上限 50）。超出的旧行直接丢弃，不在视图里留空壳。 */
 internal const val OVERLAY_CARD_MAX_ROWS = 50
+
+/** 页面与原生同时约束行数/正文和UTF-8 JSON总预算；多行不降成思考摘要。 */
+internal const val OVERLAY_TRANSCRIPT_MAX_ROWS = 40
+
+internal data class OverlayTranscriptMergePlan(
+  val rows: List<OverlayTranscriptRow>,
+  val removedIds: Set<String>,
+  val changedIds: Set<String>,
+)
+
+/** 最后出现的同 id 为最新快照；未知角色不冒充助手，保留正文的所有空白与换行。 */
+internal fun overlayTranscriptMergePlan(
+  previous: List<OverlayTranscriptRow>, next: List<OverlayTranscriptRow>,
+): OverlayTranscriptMergePlan {
+  val byId = LinkedHashMap<String, OverlayTranscriptRow>()
+  for (row in next) {
+    if (row.id.isBlank() || row.role !in setOf("user", "assistant", "tool")) continue
+    if (row.role == "tool" && row.toolName.isBlank()) continue
+    byId.remove(row.id)
+    byId[row.id] = row
+  }
+  val rows = byId.values.toList().takeLast(OVERLAY_TRANSCRIPT_MAX_ROWS)
+  val old = previous.associateBy { it.id }
+  val ids = rows.map { it.id }.toSet()
+  return OverlayTranscriptMergePlan(
+    rows, old.keys - ids, rows.filter { old[it.id] != it }.map { it.id }.toSet(),
+  )
+}
+
+/** 仅原先贴底且没有触摸中的用户才跟随；向上读历史时绝不因流更新强制跳到底。 */
+internal fun overlayTranscriptShouldFollow(
+  scrollY: Int, viewportHeight: Int, contentHeight: Int, touching: Boolean, tolerancePx: Int,
+): Boolean = !touching && (viewportHeight <= 0 || contentHeight - (scrollY + viewportHeight) <= tolerancePx.coerceAtLeast(0))
 
 /**
  * 把多行文本压成单行：换行/制表/连续空白折叠成一个空格并去首尾。

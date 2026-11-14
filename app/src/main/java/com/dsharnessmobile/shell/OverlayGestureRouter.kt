@@ -10,6 +10,10 @@ import kotlin.math.sqrt
  */
 internal enum class EntryGesture { NONE, TAP, DOUBLE_TAP, LONG_PRESS, DRAG_START, DRAG_MOVE, DRAG_END }
 
+/** Outside与入口DOWN属于同次触摸时只收一次，不能按被outside改变后的可见态误重开。 */
+internal fun overlayEntryTapShouldOpen(cardVisibleAtDown: Boolean, outsideClosedSameDown: Boolean): Boolean =
+  !cardVisibleAtDown && !outsideClosedSameDown
+
 /**
  * 悬浮入口（球/细条）的单/双/长按/拖动裁决器。
  *
@@ -173,4 +177,32 @@ internal class OverlayGestureRouter(
   /** 相对按下点的欧氏距离；用浮点而非平方比较，小位移边界才与 touchSlop 同口径。 */
   private fun distance(dxPx: Float, dyPx: Float): Float =
     sqrt(dxPx * dxPx + dyPx * dyPx)
+}
+
+/** 有界原始坐标末速补偿：部分系统在UP后VT归零，停住或反向绝不复用陈旧上推。 */
+internal class OverlayReleaseVelocity {
+  private val samples = ArrayList<Pair<Long, Float>>()
+  private var movedAt = Long.MIN_VALUE
+  private var lastDirection = 0f
+  fun reset(at: Long, y: Float) { samples.clear(); samples.add(at to y); movedAt = Long.MIN_VALUE; lastDirection = 0f }
+  fun add(at: Long, y: Float) {
+    val last = samples.lastOrNull()
+    if (last != null && at < last.first) { reset(at, y); return }
+    if (last != null && y != last.second) { movedAt = at; lastDirection = y - last.second }
+    samples.add(at to y)
+    while (samples.size > 2 && samples[1].first < at - 100L) samples.removeAt(0)
+    while (samples.size > 32) samples.removeAt(0)
+  }
+  override fun toString(): String = "samples=$samples movedAt=$movedAt"
+  fun resolve(tracked: Float, upAt: Long): Float {
+    if (tracked != 0f && tracked.isFinite()) return tracked
+    if (movedAt == Long.MIN_VALUE || upAt - movedAt !in 0..80) return 0f
+    val last = samples.lastOrNull() ?: return 0f
+    // 稀疏输入可能只有DOWN/UP（如120ms的短甩），保留窗口前一采样但跨度不得超过200ms。
+    val first = samples.firstOrNull { it.first >= upAt - 200 && it.first < last.first } ?: return 0f
+    val elapsed = last.first - first.first
+    val delta = last.second - first.second
+    if (delta * lastDirection <= 0f) return 0f // 同窗末段反向：不能把旧上推净差当成末速。
+    return if (elapsed > 0) delta * 1000f / elapsed else 0f
+  }
 }

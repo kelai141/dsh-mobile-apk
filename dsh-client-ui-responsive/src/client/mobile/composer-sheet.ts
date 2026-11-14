@@ -5,6 +5,7 @@ import {
   ATTACHMENT_ROW_TITLES,
   readMenuOptionSubtitle,
   withUpstreamMenu,
+  isComposerMenuReplay,
 } from './composer-commands.ts'
 
 /**
@@ -379,7 +380,7 @@ export class ComposerSheet {
    */
   private readonly onClickCapture = (event: Event): void => {
     // 我们自己合成的「+」点击：放过去，交还上游自己的 onClick。
-    if (this.replaying) return
+    if (this.replaying || isComposerMenuReplay(event)) return
     const target = event.target
     if (!(target instanceof Element)) return
     if (this.backdrop !== null && this.backdrop.contains(target)) return

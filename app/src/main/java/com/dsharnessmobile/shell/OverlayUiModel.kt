@@ -1,9 +1,9 @@
 package com.dsharnessmobile.shell
 
 /**
- * 卡片主状态：空闲 / 工作中 / 等待用户 / 引擎出错。
+ * 卡片轮次状态：空闲 / 工作中 / 等待用户 / 轮次失败。
  *
- * 为什么状态只有四档：渲染层只据此决定状态点颜色与默认文案，
+ * 为什么状态只有四档：渲染层只据此决定轮次状态点颜色与默认文案，
  * 更多细分（被阻塞、输出超限）由 [OverlayCardModel.completionLabel] 承载，
  * 两者混在一起会让每个新 kind 都要改一遍状态机。
  */
@@ -12,8 +12,8 @@ internal enum class OverlayAgentState { IDLE, RUNNING, WAITING, ERROR }
 /**
  * 药丸色调：与状态一一对应，但不复用 [OverlayAgentState]。
  *
- * 为什么分开：药丸还可以用于引擎探活等非轮次信号（ERROR = 引擎离线），
- * 状态枚举里没有「引擎」这一维，硬塞会污染轮次语义。
+ * 为什么分开：药丸还可以用于引擎探活等非轮次信号（离线也用 ERROR 色调），
+ * 引擎在线维度由 [OverlayCardModel.engineOnline] 独立记录，不能把轮次失败冒充离线。
  */
 internal enum class OverlayTone { IDLE, WORKING, WAITING, ERROR }
 
@@ -21,11 +21,11 @@ internal enum class OverlayTone { IDLE, WORKING, WAITING, ERROR }
  * 卡片里的一行工具调用。
  *
  * @property callId 工具调用 id；用于 tool_result 配对。旧插件可能没有该字段，
- *   此时为空串——空串不参与按 id 配对，只按 name 去重。
+ *   此时为空串——空串不参与结果配对，只与同样缺少 id 的旧协议行按 name 去重。
  * @property name 工具名（如 android_screenshot）。
  * @property summary 单行摘要（参数/结果摘要，由事件源截好）。
  * @property running 是否仍在执行（tool_result 到达后置 false）。
- * @property failed 是否失败；当前 live 协议没有失败位，保留字段供后续事件源填充。
+ * @property failed 是否失败；事件源有失败位时由 onToolResult 填充，缺省不猜测失败。
  */
 internal data class OverlayToolRow(
   val callId: String,
@@ -64,6 +64,8 @@ internal data class OverlayPendingItem(
  * @property lastEventAt 最近一条事件时间，用于合并窗口判定。
  * @property completionLabel 本轮结局文案（中英按调用方语言落地在 onTurnEnd）。
  * @property toolCount 本轮工具调用计数（含已被环形淘汰的），药丸/汇报可用。
+ * @property turnActive 是否处于已开始且未结束的轮次；不依赖 RUNNING/WAITING 的展示状态判断边界。
+ * @property engineOnline 引擎连接态，独立于轮次错误；断线不得伪造失败或清除本轮内容。
  */
 internal data class OverlayCardModel(
   val agent: OverlayAgentState = OverlayAgentState.IDLE,
@@ -75,6 +77,9 @@ internal data class OverlayCardModel(
   val lastEventAt: Long = 0L,
   val completionLabel: String = "",
   val toolCount: Int = 0,
+  val turnActive: Boolean = false,
+  val engineOnline: Boolean = true,
+  val completionKind: String = "",
 )
 
 /**
@@ -142,19 +147,19 @@ internal object OverlayUiModel {
    * 为什么失败行加了前缀而不是只换颜色：卡片是扫一眼的信息层，
    * 纯颜色差异在色弱/强光下读不出来。
    */
-  private fun toolLine(row: OverlayToolRow): String {
-    val name = row.name.ifBlank { "工具" }
-    val prefix = if (row.failed) "失败 " else ""
+  private fun toolLine(row: OverlayToolRow, english: Boolean): String {
+    val name = row.name.ifBlank { UiText.t(english, "工具", "Tool") }
+    val prefix = if (row.failed) UiText.t(english, "失败 ", "Failed ") else ""
     val body = if (row.summary.isBlank()) name else name + " · " + row.summary
     return prefix + body
   }
 
   /**
-   * 收到一条 tool_call：按 callId 优先、其次按 name 去重后追加/更新。
+   * 收到一条 tool_call：有 callId 时只按 id 更新，缺少 id 的旧协议才按 name 去重。
    *
-   * 为什么同名也去重：同一工具在一轮里被连续调用时，UI 上连续出现两行同名
-   * 只会挤掉别的行信息量；更新已有行（新摘要覆盖旧摘要）更接近「当前在做什么」。
-   * 保留原位置而不是移到末尾，是为了避免列表在事件风暴里上下跳。
+   * 为什么不同 id 不能按同名合并：并发/重复调用同一工具仍是不同操作，
+   * 合并会让较早的结果找不到原调用，或把另一条正在运行的调用误标为结束。
+   * 旧协议同名回落只匹配同样缺少 id 的行，不能抹掉新协议的可追踪身份。
    *
    * @param callId 工具调用 id；旧插件可能传空串。
    * @param name 工具名。
@@ -175,8 +180,11 @@ internal object OverlayUiModel {
       running = true,
       failed = false,
     )
-    val index = m.toolRows.indexOfFirst { callId.isNotEmpty() && it.callId == callId }
-      .let { if (it >= 0) it else m.toolRows.indexOfFirst { it.name == name } }
+    val index = if (callId.isNotEmpty()) {
+      m.toolRows.indexOfFirst { it.callId == callId }
+    } else {
+      m.toolRows.indexOfFirst { it.callId.isEmpty() && it.name == name }
+    }
     val rows = if (index >= 0) {
       m.toolRows.toMutableList().also { it[index] = row }
     } else {
@@ -195,12 +203,18 @@ internal object OverlayUiModel {
    *
    * 为什么找不到配对就整体忽略、不新增占位行：结果事件本身没有工具名与摘要，
    * 凭空插一行「未知工具」只会污染列表；丢弃比乱编更安全。
+   * 可选 failed 缺省 false，已知失败为粘性位，重复缺省结果不得抹去事实。
    */
-  fun onToolResult(m: OverlayCardModel, callId: String, at: Long): OverlayCardModel {
+  fun onToolResult(
+    m: OverlayCardModel,
+    callId: String,
+    at: Long,
+    failed: Boolean = false,
+  ): OverlayCardModel {
     val index = m.toolRows.indexOfFirst { callId.isNotEmpty() && it.callId == callId }
     if (index < 0) return m
     val rows = m.toolRows.toMutableList()
-    rows[index] = rows[index].copy(running = false)
+    rows[index] = rows[index].copy(running = false, failed = rows[index].failed || failed)
     return m.copy(toolRows = rows, lastEventAt = at)
   }
 
@@ -250,7 +264,9 @@ internal object OverlayUiModel {
     turnStartedAt = at,
     lastEventAt = at,
     completionLabel = "",
+    completionKind = "",
     toolCount = 0,
+    turnActive = true,
   )
 
   /**
@@ -278,7 +294,9 @@ internal object OverlayUiModel {
       toolRows = m.toolRows.map { it.copy(running = false) },
       pending = emptyList(),
       completionLabel = label,
+      completionKind = kind,
       lastEventAt = at,
+      turnActive = false,
     )
   }
 
@@ -286,7 +304,8 @@ internal object OverlayUiModel {
    * 收到 agent 运行态：只切主状态，不动内容。
    *
    * 为什么 running=false 时不清工具行：结束信号与 turn_end 可能乱序，
-   * 清空会让用户在卡刚出现时看到空白。内容只由 turn_start / turn_end 负责收口。
+   * 清空会让用户在卡刚出现时看到空白。新调用方用 [onRuntimeStatus] 管理轮次边界，
+   * 此方法保留为只切展示态的兼容 helper，不单独改 turnActive。
    */
   fun onAgentStatus(m: OverlayCardModel, running: Boolean, at: Long): OverlayCardModel {
     val agent = when {
@@ -297,6 +316,22 @@ internal object OverlayUiModel {
     }
     return m.copy(agent = agent, lastEventAt = at)
   }
+
+  /**
+   * 运行态边界：首次 running=true 开新轮；本轮重复 true 只更新状态，不清内容。
+   *
+   * 为什么不能用 agent != RUNNING 判新轮：审批/提问会暂时显示 WAITING，
+   * 引擎离线也不是一轮结束。只有显式 false 或 turn_end 才释放 turnActive。
+   * running=false 保留结果与待答，下一轮开始才清理；切会话由上层换独立模型。
+   */
+  fun onRuntimeStatus(m: OverlayCardModel, running: Boolean, at: Long): OverlayCardModel {
+    if (running && !m.turnActive) return onTurnStart(m, at)
+    return onAgentStatus(m, running, at).copy(turnActive = running)
+  }
+
+  /** 引擎连接变化只改连接维度，不伪造轮次失败、不清内容、不结束活动轮次。 */
+  fun onEngineStatus(m: OverlayCardModel, online: Boolean, at: Long): OverlayCardModel =
+    m.copy(engineOnline = online, lastEventAt = at)
 
   /**
    * 整体替换待答项，最多保留最新 [MAX_PENDING] 条。
@@ -311,7 +346,12 @@ internal object OverlayUiModel {
 
   /** 单独更新结局文案（例如页面回执比 turn_end 先到时的兜底）。 */
   fun setCompletionLabel(m: OverlayCardModel, label: String): OverlayCardModel =
-    m.copy(completionLabel = label)
+    m.copy(completionLabel = label, completionKind = "")
+
+  /** 新视图按语义切语言；旧调用方的缓存label及自定义label兼容原样保留。 */
+  fun completionLabelOf(m: OverlayCardModel, english: Boolean): String =
+    if (m.completionKind.isBlank()) m.completionLabel
+    else if (english) endLabelEn(m.completionKind) else endLabelZh(m.completionKind)
 
   /**
    * 合并两条单行文本：新文本优先，空白新文本不覆盖旧内容。
@@ -335,35 +375,38 @@ internal object OverlayUiModel {
   /**
    * 推导卡片单行标题。
    *
-   * 优先级：正在执行的工具 > 最新工具 > 可见正文 > 思考摘要 > 结局 > 状态文案。
-   * 为什么「运行中的工具」永远第一：这一行回答的是「它现在在干什么」，
+   * 优先级：引擎离线 > 正在执行的工具 > 最新工具 > 可见正文 > 思考摘要 > 结局 > 状态文案。
+   * 为什么在线时「运行中的工具」优先：这一行回答的是「它现在在干什么」，
    * 已完成工具和思考都是过去式，只有正在跑的工具是进行时。
-   * 注意兜底状态文案只有中文：本函数契约没有语言参数，双语药丸走 [pillOf]；
-   * 卡片正文通常已由 onText 写入，这里的兜底只在空模型上出现。
+   * english 缺省 false 以兼容原中文调用方；工具失败与状态兜底同样成对翻译。
    */
-  fun headlineOf(m: OverlayCardModel): String {
-    m.toolRows.lastOrNull { it.running }?.let { return toolLine(it) }
-    m.toolRows.lastOrNull()?.let { return toolLine(it) }
+  fun headlineOf(m: OverlayCardModel, english: Boolean = false): String {
+    if (!m.engineOnline) return UiText.t(english, "引擎离线", "Engine offline")
+    m.toolRows.lastOrNull { it.running }?.let { return toolLine(it, english) }
+    m.toolRows.lastOrNull()?.let { return toolLine(it, english) }
     if (m.headline.isNotBlank()) return m.headline
     if (m.thinkingLine.isNotBlank()) return m.thinkingLine
     if (m.completionLabel.isNotBlank()) return m.completionLabel
     return when (m.agent) {
-      OverlayAgentState.RUNNING -> "工作中"
-      OverlayAgentState.WAITING -> "等待你的回答"
-      OverlayAgentState.ERROR -> "引擎离线"
-      OverlayAgentState.IDLE -> "空闲"
+      OverlayAgentState.RUNNING -> UiText.t(english, "工作中", "Working")
+      OverlayAgentState.WAITING -> UiText.t(english, "等待你的回答", "Waiting for your answer")
+      OverlayAgentState.ERROR -> UiText.t(english, "失败", "Failed")
+      OverlayAgentState.IDLE -> UiText.t(english, "空闲", "Idle")
     }
   }
 
   /**
    * 药丸单行状态。
    *
-   * 优先级 WAITING > RUNNING > ERROR > IDLE：等待用户是唯一需要用户动作的状态，
-   * 被工具/正文文案盖住会让用户以为它还在自己跑；引擎离线则必须在没有轮次时也能说清。
+   * 优先级 OFFLINE > WAITING > RUNNING > ERROR > IDLE：离线时不能用残留工具行
+   * 冒充仍在运行；在线时等待用户是唯一需要用户动作的状态，不得被工具/正文盖住。
    *
    * @param english true = 英文文案（中英成对，调用方按当前语言传入）。
    */
   fun pillOf(m: OverlayCardModel, english: Boolean): OverlayPillModel {
+    if (!m.engineOnline) {
+      return OverlayPillModel(UiText.t(english, "引擎离线", "Engine offline"), OverlayTone.ERROR)
+    }
     if (m.pending.isNotEmpty() || m.agent == OverlayAgentState.WAITING) {
       return OverlayPillModel(
         UiText.t(english, "等待你的回答", "Waiting for your answer"),
@@ -381,7 +424,7 @@ internal object OverlayUiModel {
     }
     if (m.agent == OverlayAgentState.ERROR) {
       return OverlayPillModel(
-        UiText.t(english, "引擎离线", "Engine offline"),
+        UiText.t(english, "失败", "Failed"),
         OverlayTone.ERROR,
       )
     }

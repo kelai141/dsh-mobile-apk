@@ -1,15 +1,14 @@
 package com.dsharnessmobile.shell
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
  * 窗口几何契约（纯 JVM）。
  *
- * 钉的是 [OverlayWindowFrames] 那张算术表：可用高、32%/40% 上限、小屏下限、
- * 4dp 量化、药丸/细条钳制与消散三条件。位图层面的实际观感只能靠截图，
+ * 钉的是 [OverlayWindowFrames] 那张算术表：可用高、32%/40% 上限、小屏硬边界、
+ * 4dp 量化、长胶囊/细条钳制及独立输入边距。长条消散距离策略由 OverlayMotionTest 覆盖；
  * 这里只保证「喂进去的几何 -> 窗口矩形」这一层不会算错。
  */
 class OverlayWindowFramesTest {
@@ -32,7 +31,7 @@ class OverlayWindowFramesTest {
     density = 2.75f,
   )
 
-  /** 小屏：1280x720（横屏可用高只有 600px），用来触发 180dp 下限。 */
+  /** 小屏：1280x720（横屏可用高只有 600px），确认不突破比例上限。 */
   private val smallLandscape = OverlayScreen(
     widthPx = 1280,
     heightPx = 720,
@@ -102,19 +101,16 @@ class OverlayWindowFramesTest {
   }
 
   @Test
-  fun `横屏两个比例同样按可用高算但下限更高`() {
-    // 936 x 0.32 = 299、936 x 0.40 = 374，两者都低于 180dp x 2.75 = 495 的下限，
-    // 所以横屏两档都按下限取值。
-    assertEquals("横屏收起上限 = 180dp 下限", 495,
+  fun `横屏严格比例上限且展开高于收起`() {
+    assertEquals("横屏收起上限 = floor(936 * 0.32)", 299,
       OverlayWindowFrames.cardHeightLimitPx(landscape, expanded = false))
-    assertEquals("横屏展开上限 = 180dp 下限", 495,
+    assertEquals("横屏展开上限 = floor(936 * 0.40)", 374,
       OverlayWindowFrames.cardHeightLimitPx(landscape, expanded = true))
   }
 
   @Test
-  fun `小屏比例低于 180dp 时按下限取`() {
-    // 可用高 600，32% = 192；180dp x 2.0 = 360，下限更大。
-    assertEquals("小屏收起态必须抬到 180dp 下限", 360,
+  fun `小屏也不得用dp地板突破比例`() {
+    assertEquals("小屏收起态严格32%", 192,
       OverlayWindowFrames.cardHeightLimitPx(smallLandscape, expanded = false))
   }
 
@@ -123,8 +119,8 @@ class OverlayWindowFramesTest {
     val tiny = OverlayScreen(
       widthPx = 720, heightPx = 300, statusBarPx = 20, navBarPx = 20, density = 2f,
     )
-    // 可用高 260，下限 360 -> 夹到 260。
-    assertEquals("可用高不足 180dp 时上限 = 可用高", 260,
+    // 可用高260，严格32%为83；不能为了最小高覆盖余下屏幕。
+    assertEquals("极小可用高仍遵守32%", 83,
       OverlayWindowFrames.cardHeightLimitPx(tiny, expanded = false))
   }
 
@@ -186,8 +182,8 @@ class OverlayWindowFramesTest {
   // ── 药丸尺寸与钳制 ───────────────────────────────────────────────────
 
   @Test
-  fun `药丸宽度上限为屏宽的八成`() {
-    assertEquals("内容超长时取 80% 屏宽", 864,
+  fun `长胶囊宽度上限与卡片可视宽一致而非旧八成短pill`() {
+    assertEquals("长输出仍保左右12dp可视边距", 1014,
       OverlayWindowFrames.pillWidthPx(2000, portrait))
     assertEquals("内容短时按内容宽", 300,
       OverlayWindowFrames.pillWidthPx(300, portrait))
@@ -280,36 +276,28 @@ class OverlayWindowFramesTest {
       OverlayWindowFrames.composerWidthPx(portrait))
   }
 
-  // ── 药丸消散三条件 ───────────────────────────────────────────────────
-
-  @Test
-  fun `三条同时满足才消散`() {
-    // 48dp x 2.75 = 132px；500dp/s x 2.75 = 1375px/s；8dp x 2.75 = 22px。
-    assertTrue("距离/速度/贴顶都满足必须消散",
-      OverlayWindowFrames.pillDismissReached(132f, 1375f, 22, portrait))
+  @Test fun composerBottomGapIsIndependentOfSheetAndExcludesStatusBar() {
+    assertEquals(165, OverlayWindowFrames.composerBottomPx(portrait))
+    assertEquals(129, OverlayWindowFrames.composerBottomPx(landscape))
+    assertEquals(104, OverlayWindowFrames.composerBottomPx(smallLandscape))
+    assertEquals(OverlayWindowFrames.composerBottomPx(portrait),
+      OverlayWindowFrames.composerBottomPx(portrait.copy(statusBarPx = 200)))
+    assertEquals(33, OverlayWindowFrames.composerBottomPx(portrait.copy(navBarPx = 0)))
   }
 
-  @Test
-  fun `只有距离不够`() {
-    assertFalse("没有末速度不得消散",
-      OverlayWindowFrames.pillDismissReached(300f, 0f, 0, portrait))
-  }
-
-  @Test
-  fun `只有速度不够`() {
-    assertFalse("上推距离不足不得消散",
-      OverlayWindowFrames.pillDismissReached(100f, 5000f, 0, portrait))
-  }
-
-  @Test
-  fun `只有距离与速度但没贴顶不够`() {
-    assertFalse("药丸不在顶缘时上推不得消散",
-      OverlayWindowFrames.pillDismissReached(300f, 5000f, 23, portrait))
-  }
-
-  @Test
-  fun `上滑的负速度分量同样能判消散`() {
-    assertTrue("VelocityTracker 上滑为负值，也必须判对",
-      OverlayWindowFrames.pillDismissReached(132f, -1375f, 0, portrait))
+  @Test fun composerAndLongCapsuleStayBoundedAcrossRotationDensityAndNarrowScreens() {
+    for (width in listOf(40, 300, 720, 1080, 2400)) {
+      for (density in listOf(1f, 1.5f, 2f, 2.75f, 3.5f)) {
+        val s = portrait.copy(widthPx = width, density = density)
+        val inputWidth = OverlayWindowFrames.composerWidthPx(s)
+        val capsuleWidth = OverlayWindowFrames.pillWidthPx(Int.MAX_VALUE, s)
+        assertTrue(inputWidth in 0..width)
+        assertEquals("long capsule and card must share the same visible horizontal envelope",
+          OverlayWindowFrames.cardWidthPx(s), capsuleWidth)
+        assertTrue(OverlayWindowFrames.composerBottomPx(s) > s.navBarPx)
+        val right = OverlayWindowFrames.clampPillX(Int.MAX_VALUE, capsuleWidth, s)
+        assertEquals(width - capsuleWidth, right)
+      }
+    }
   }
 }

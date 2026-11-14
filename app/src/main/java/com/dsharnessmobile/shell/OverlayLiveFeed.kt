@@ -41,6 +41,8 @@ class OverlayLiveFeed(private val svc: OverlayService) {
             svc.main.post {
               val eventId = "test-" + System.currentTimeMillis()
               when (v) {
+                "v2-on" -> OverlayV2.prefs(svc).edit().putBoolean(OverlayV2.KEY_ENTRY_UI_V2, true).apply()
+                "v2-off" -> OverlayV2.prefs(svc).edit().putBoolean(OverlayV2.KEY_ENTRY_UI_V2, false).apply()
                 // 0.13.3 W3 帧形：合成 $events waterfall 副本（eventId/agentId 字段）
                 "approval" -> svc.panel.pendingApprovals[eventId] = PendingApproval(eventId, svc.activeSessionId, "bash", "rm -rf build/ 需要审批（debug 注入）")
                 "question" -> {
@@ -203,6 +205,7 @@ class OverlayLiveFeed(private val svc: OverlayService) {
       text = if (kind == LiveEvent.KIND_TEXT || kind == LiveEvent.KIND_THINK) j.optString("sum", "") else "",
       turnKind = j.optString("kind", ""),
       atMs = j.optLong("t", System.currentTimeMillis()),
+      failed = j.optBoolean("err", false),
     )
   }
 }

@@ -37,19 +37,21 @@ internal object OverlayPageHost {
   @Volatile
   internal var evaluator: ((String, (String?) -> Unit) -> Unit)? = null
 
-  internal fun available(): Boolean = evaluator != null
+  @Volatile internal var readiness: (() -> Boolean)? = null
+
+  internal fun available(): Boolean = evaluator != null && readiness?.invoke() == true
 
   /** 页面侧返回的工作区条目（与 [WorkspaceListParse] 的平行类型：这里只服务页面通道，互不依赖）。 */
   internal data class PageWorkspace(val id: String, val title: String)
 
   /** 页面侧返回的附件条目（kind: image|file）。 */
-  internal data class PageAttachment(val name: String, val kind: String)
+  internal data class PageAttachment(val name: String, val kind: String, val id: String = "", val thumbnail: String = "")
 
   /** 页面侧返回的命令条目（真源 = 上游命令菜单，禁止硬编码）。 */
   internal data class PageCommand(val name: String, val label: String, val description: String)
 
   /** 页面侧返回的会话条目（供输入区的会话药丸切换）。 */
-  internal data class PageSession(val id: String, val title: String)
+  internal data class PageSession(val id: String, val title: String, val agentId: String = "")
 
   /** 页面宿主 state() 的解析结果。字段缺失一律空值/空列表——**不得猜测**（design.md §6.3 硬规则 2/3）。 */
   internal data class PageState(
@@ -61,12 +63,19 @@ internal object OverlayPageHost {
     val busy: Boolean,
     val attachments: List<PageAttachment>,
     val draft: String,
+    val agentId: String = "",
+    val workspacesReady: Boolean = false,
+    val workspacesError: String = "",
+    val transcript: List<OverlayTranscriptRow> = emptyList(),
+    val transcriptReady: Boolean = false,
+    val transcriptError: String = "",
   )
 
   /** 一次求值。表达式必须自己 try/catch 并返回字符串；这里只做超时与空回包归一。 */
   private fun eval(expr: String, onResult: (String?) -> Unit) {
+    if (Looper.myLooper() != Looper.getMainLooper()) { main.post { eval(expr, onResult) }; return }
     val ev = evaluator
-    if (ev == null) {
+    if (ev == null || !available()) {
       onResult(null)
       return
     }
@@ -89,6 +98,10 @@ internal object OverlayPageHost {
   /** 把用户输入安全地放进 JS 字符串字面量（复用既有 U+2028/2029 处理）。 */
   private fun jsArg(value: String): String = jsString(value)
 
+  internal fun watchState(enabled: Boolean) {
+    eval(callExpression("watchState", enabled.toString())) { }
+  }
+
   internal fun state(onResult: (PageState?) -> Unit) {
     eval("(function(){try{return window.__dshOverlayHost?window.__dshOverlayHost.state():'';}catch(e){return '';}})()") { raw ->
       onResult(parseState(parseHostReply(raw)))
@@ -101,35 +114,111 @@ internal object OverlayPageHost {
     }
   }
 
+  internal fun sessionsOrNull(onResult: (List<PageSession>?) -> Unit) {
+    eval("(function(){try{return window.__dshOverlayHost?window.__dshOverlayHost.sessions():'';}catch(e){return '';}})()") { raw ->
+      val obj = parseHostReply(raw)
+      onResult(if (obj?.optBoolean("ok", false) == true) parseSessions(obj) else null)
+    }
+  }
+
+  internal fun commandsOrNull(onResult: (List<PageCommand>?) -> Unit) {
+    val deadline = android.os.SystemClock.uptimeMillis() + 5000L
+    fun read() {
+      eval(callExpression("commands", "")) { raw ->
+        val obj = parseHostReply(raw)
+        if (obj?.optBoolean("ok", false) == true) onResult(parseCommands(obj))
+        else if (obj?.optString("error") == "commands-not-ready" && android.os.SystemClock.uptimeMillis() < deadline) main.postDelayed({ read() }, 100L)
+        else onResult(null)
+      }
+    }
+    read()
+  }
+
   internal fun commands(onResult: (List<PageCommand>) -> Unit) {
     eval("(function(){try{return window.__dshOverlayHost?window.__dshOverlayHost.commands():'';}catch(e){return '';}})()") { raw ->
       onResult(parseCommands(parseHostReply(raw)))
     }
   }
 
-  internal fun execute(line: String, onResult: (Boolean) -> Unit) {
-    eval("(function(){try{return window.__dshOverlayHost?window.__dshOverlayHost.execute(" + jsArg(line) + "):'';}catch(e){return '';}})()") { raw ->
-      onResult(parseOk(parseHostReply(raw)))
+  private fun callExpression(method: String, argument: String): String =
+    "(function(){try{return window.__dshOverlayHost?window.__dshOverlayHost." + method + "(" + argument + "):'';}catch(e){return '';}})()"
+
+  private data class PendingAction(
+    val id: String,
+    val onUnknown: (String) -> Unit,
+    val onResult: (Boolean) -> Unit,
+    var unknownShown: Boolean = false,
+    var polling: Boolean = false,
+    var cancelled: Boolean = false,
+  )
+  private val pendingActions = LinkedHashMap<String, PendingAction>()
+
+  private fun unknown(action: PendingAction) {
+    if (!action.unknownShown) { action.unknownShown = true; action.onUnknown(action.id) }
+  }
+
+  /** Unknown/timeout is never a refusal: keep the ticket and require an explicit recheck. */
+  private fun action(method: String, argument: String, onResult: (Boolean) -> Unit, onUnknown: (String) -> Unit = {}) {
+    eval(callExpression(method, argument)) { raw ->
+      val obj = parseHostReply(raw)
+      if (obj?.has("ok") == true && !obj.optBoolean("pending", false)) { onResult(parseOk(obj)); return@eval }
+      val id = obj?.optString("operationId", "").orEmpty().ifEmpty { "unconfirmed-" + java.util.UUID.randomUUID().toString() }
+      val pending = PendingAction(id, onUnknown, onResult)
+      pendingActions[id] = pending
+      if (obj == null) { unknown(pending); return@eval }
+      pollOperation(pending, android.os.SystemClock.uptimeMillis() + 30000L, 100L)
     }
   }
 
-  internal fun send(text: String, onResult: (Boolean) -> Unit) {
-    eval("(function(){try{return window.__dshOverlayHost?window.__dshOverlayHost.send(" + jsArg(text) + "):'';}catch(e){return '';}})()") { raw ->
-      onResult(parseOk(parseHostReply(raw)))
+  internal fun recheckPendingActions() {
+    for (pending in pendingActions.values.toList()) {
+      if (!pending.polling && !pending.cancelled) pollOperation(pending, android.os.SystemClock.uptimeMillis() + 30000L, 100L)
     }
   }
 
-  internal fun removeAttachment(index: Int, onResult: (Boolean) -> Unit) {
-    eval("(function(){try{return window.__dshOverlayHost?window.__dshOverlayHost.removeAttachment(" + index + "):'';}catch(e){return '';}})()") { raw ->
-      onResult(parseOk(parseHostReply(raw)))
+  internal fun cancelPendingActions() {
+    for (pending in pendingActions.values.toList()) { pending.cancelled = true; unknown(pending) }
+    pendingActions.clear()
+  }
+
+  private fun pollOperation(action: PendingAction, deadline: Long, delay: Long) {
+    if (action.cancelled) return
+    if (!available() || android.os.SystemClock.uptimeMillis() >= deadline) { action.polling = false; unknown(action); return }
+    action.polling = true
+    eval(callExpression("operation", jsArg(action.id))) { raw ->
+      if (action.cancelled) return@eval
+      val obj = parseHostReply(raw)
+      if (obj == null || obj.optString("error") == "operation-not-found") {
+        action.polling = false; unknown(action); return@eval
+      }
+      if (obj.optBoolean("pending", false)) {
+        if (obj.optBoolean("unknown", false)) unknown(action)
+        val nextDelay = (delay * 2L).coerceAtMost(1000L)
+        main.postDelayed({ pollOperation(action, deadline, nextDelay) }, delay)
+      } else {
+        action.polling = false
+        pendingActions.remove(action.id)
+        action.onResult(parseOk(obj))
+      }
     }
   }
 
-  internal fun openSession(sessionId: String, onResult: (Boolean) -> Unit) {
-    eval("(function(){try{return window.__dshOverlayHost?window.__dshOverlayHost.openSession(" + jsArg(sessionId) + "):'';}catch(e){return '';}})()") { raw ->
-      onResult(parseOk(parseHostReply(raw)))
+  internal fun pollIncoming(requestId: String, onResult: (String) -> Unit) {
+    eval(callExpression("incoming", jsArg(requestId))) { raw ->
+      val obj = parseHostReply(raw)
+      onResult(obj?.optString("state", "pending") ?: "pending")
     }
   }
+
+  internal fun execute(line: String, onResult: (Boolean) -> Unit) = action("execute", jsArg(line), onResult)
+  internal fun execute(line: String, expectedSessionId: String, onUnknown: (String) -> Unit, onResult: (Boolean) -> Unit) = action("execute", jsArg(line) + "," + jsArg(expectedSessionId), onResult, onUnknown)
+  internal fun execute(line: String, expectedSessionId: String, onResult: (Boolean) -> Unit) = action("execute", jsArg(line) + "," + jsArg(expectedSessionId), onResult)
+  internal fun send(text: String, onResult: (Boolean) -> Unit) = action("send", jsArg(text), onResult)
+  internal fun send(text: String, expectedSessionId: String, onUnknown: (String) -> Unit, onResult: (Boolean) -> Unit) = action("send", jsArg(text) + "," + jsArg(expectedSessionId), onResult, onUnknown)
+  internal fun send(text: String, expectedSessionId: String, onResult: (Boolean) -> Unit) = action("send", jsArg(text) + "," + jsArg(expectedSessionId), onResult)
+  internal fun openWorkspace(id: String, onResult: (Boolean) -> Unit) = action("openWorkspace", jsArg(id), onResult)
+  internal fun removeAttachment(id: String, onResult: (Boolean) -> Unit) = action("removeAttachment", jsArg(id), onResult)
+  internal fun openSession(sessionId: String, onResult: (Boolean) -> Unit) = action("openSession", jsArg(sessionId), onResult)
 
   /**
    * 解析 evaluateJavascript 的回包（**纯函数**，JVM 可测）。
@@ -154,6 +243,74 @@ internal object OverlayPageHost {
     }
   }
 
+  /** Defense in depth: budget the canonical UTF-8 JSON, not just text or UTF-16 code units. */
+  internal fun transcriptJson(rows: List<OverlayTranscriptRow>): String = JSONArray().also { array ->
+    for (row in rows) array.put(JSONObject().also { value ->
+      value.put("id", row.id).put("role", row.role).put("text", row.text)
+      if (row.role == "tool") {
+        value.put("toolName", row.toolName).put("arguments", row.arguments).put("result", row.result)
+        row.state?.let { value.put("state", it.name.lowercase(java.util.Locale.ROOT)) }
+      }
+      if (row.truncated) value.put("truncated", true)
+    })
+  }.toString()
+
+  private fun transcriptPrefix(value: String, count: Int): String {
+    var end = 0
+    var remaining = count
+    while (end < value.length && remaining-- > 0) end += Character.charCount(value.codePointAt(end))
+    return value.substring(0, end)
+  }
+
+  private fun parseTranscript(array: JSONArray?): List<OverlayTranscriptRow> {
+    if (array == null) return emptyList()
+    val latest = ArrayList<OverlayTranscriptRow>()
+    val ids = HashSet<String>()
+    var omitted = array.length() > OVERLAY_TRANSCRIPT_MAX_ROWS
+    for (index in array.length() - 1 downTo (array.length() - OVERLAY_TRANSCRIPT_MAX_ROWS).coerceAtLeast(0)) {
+      val raw = array.optJSONObject(index) ?: continue
+      val id = raw.opt("id") as? String ?: continue
+      val role = raw.opt("role") as? String ?: continue
+      if (id.isBlank() || id.length > 1024 || role !in setOf("user", "assistant", "tool") || !ids.add(id)) continue
+      var clipped = raw.opt("truncated") == true
+      fun field(key: String, cap: Int): String {
+        val value = raw.opt(key) as? String ?: return ""
+        val prefix = transcriptPrefix(value, cap)
+        if (prefix != value) clipped = true
+        return prefix
+      }
+      val text = if (role == "tool") "" else field("text", 4000)
+      val name = if (role == "tool") field("toolName", 256) else ""
+      val arguments = if (role == "tool") field("arguments", 1600) else ""
+      val result = if (role == "tool") field("result", 1600) else ""
+      if (role == "tool" && name.isBlank()) continue
+      val state = if (role != "tool") null else when (raw.opt("state") as? String) {
+        "running" -> OverlayToolRowState.RUNNING
+        "done" -> OverlayToolRowState.DONE
+        "failed" -> OverlayToolRowState.FAILED
+        else -> null
+      }
+      var row = OverlayTranscriptRow(id, role, text, name, arguments, result, state, clipped)
+      // Reserve the omission flag so adding it below cannot exceed the global budget.
+      while (latest.isEmpty() && transcriptJson(listOf(row.copy(truncated = true))).toByteArray(Charsets.UTF_8).size > 24576) {
+        val longest = listOf(row.text, row.arguments, row.result, row.toolName).maxByOrNull { it.length } ?: ""
+        if (longest.isEmpty()) break
+        val prefix = transcriptPrefix(longest, longest.codePointCount(0, longest.length) / 2)
+        row = when (longest) {
+          row.text -> row.copy(text = prefix, truncated = true)
+          row.arguments -> row.copy(arguments = prefix, truncated = true)
+          row.result -> row.copy(result = prefix, truncated = true)
+          else -> row.copy(toolName = prefix, truncated = true)
+        }
+      }
+      val candidate = listOf(row.copy(truncated = true)) + latest
+      if (transcriptJson(candidate).toByteArray(Charsets.UTF_8).size > 24576) { omitted = true; break }
+      latest.add(0, row)
+    }
+    if (omitted && latest.isNotEmpty()) latest[0] = latest[0].copy(truncated = true)
+    return latest
+  }
+
   /** state() 回包 -> 模型。缺失字段留空，不猜（design.md §6.3）。 */
   internal fun parseState(obj: JSONObject?): PageState? {
     if (obj == null) return null
@@ -175,9 +332,10 @@ internal object OverlayPageHost {
         val a = atArr.optJSONObject(i) ?: continue
         val name = a.optString("name", "")
         if (name.isEmpty()) continue
-        attachments.add(PageAttachment(name, a.optString("kind", "file")))
+        attachments.add(PageAttachment(name, a.optString("kind", "file"), a.optString("id", ""), overlayThumbnailData(a.optString("thumbnail", ""))))
       }
     }
+    val transcript = parseTranscript(obj.optJSONArray("transcript"))
     return PageState(
       sessionId = obj.optString("sessionId", ""),
       sessionTitle = obj.optString("sessionTitle", ""),
@@ -187,6 +345,12 @@ internal object OverlayPageHost {
       busy = obj.optBoolean("busy", false),
       attachments = attachments,
       draft = obj.optString("draft", ""),
+      agentId = obj.optString("agentId", ""),
+      workspacesReady = obj.optBoolean("workspacesReady", false),
+      workspacesError = obj.optString("workspacesError", ""),
+      transcript = transcript,
+      transcriptReady = obj.optBoolean("transcriptReady", false),
+      transcriptError = obj.optString("transcriptError", ""),
     )
   }
 
@@ -198,7 +362,7 @@ internal object OverlayPageHost {
       val it = arr.optJSONObject(i) ?: continue
       val id = it.optString("id", "")
       if (id.isEmpty()) continue
-      out.add(PageSession(id, it.optString("title", "")))
+      out.add(PageSession(id, it.optString("title", ""), it.optString("agentId", "")))
     }
     return out
   }

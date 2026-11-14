@@ -36,8 +36,6 @@ internal object OverlayWindowFrames {
   const val CARD_MAX_RATIO = 0.32f
   /** 卡片下拉展开态高度上限 = 可用高的 40%（design.md §4.2 / R4）。 */
   const val CARD_EXPANDED_RATIO = 0.40f
-  /** 小屏下限：32% 甚至不到 180dp 时按 180dp 取大，但绝不超可用高（design.md §12 U7）。 */
-  const val CARD_MIN_HEIGHT_DP = 180f
   /** 卡片左右边距 12dp（design.md §4.1 W3）。 */
   const val CARD_SIDE_MARGIN_DP = 12f
   /** 卡片顶边与状态栏之间的视觉间隙 8dp，避免和状态栏内容贴死。 */
@@ -49,9 +47,9 @@ internal object OverlayWindowFrames {
   /** 药丸高度 44dp（design.md §9.1 L2）。 */
   const val PILL_HEIGHT_DP = 44f
   /** 药丸宽度上限 = 屏宽的 80%，超长文本必须省略而不是撑满整屏。 */
-  const val PILL_WIDTH_MAX_RATIO = 0.8f
-  /** 药丸消散：上推距离阈值 48dp（design.md §9.4）。 */
-  const val PILL_DISMISS_PUSH_DP = 48f
+  const val PILL_WIDTH_MAX_RATIO = 1f
+  /** 顶缘二次上推16dp：44dp高窗内可达，仍须起点贴顶+500dp/s（design.md §9.4）。 */
+  const val PILL_DISMISS_PUSH_DP = 16f
   /** 药丸消散：末速度阈值 500dp/s（design.md §9.4）。 */
   const val PILL_DISMISS_VELOCITY_DP_PER_S = 500f
   /** 药丸消散：药丸顶边容差 8dp，只有贴顶时上推才解释为消散（design.md §9.4）。 */
@@ -68,6 +66,12 @@ internal object OverlayWindowFrames {
   const val ENTRY_EDGE_MARGIN_DP = 8f
   /** 底部输入区左右边距 12dp（design.md §4.1 W5）。 */
   const val COMPOSER_SIDE_MARGIN_DP = 12f
+  /** 独立输入药丸距底12dp，与贴底选择卡片保持可见间隔。 */
+  const val COMPOSER_BOTTOM_GAP_DP = 12f
+
+  /** Sheet is an independent overlay: its height must never displace the composer. */
+  fun composerBottomPx(screen: OverlayScreen): Int =
+    screen.navBarPx + dpPx(COMPOSER_BOTTOM_GAP_DP, screen.density)
 
   /** dp -> px（四舍五入，负数按 0）。所有窗口尺寸共用同一换算，避免各自取整不同。 */
   private fun dpPx(valueDp: Float, density: Float): Int =
@@ -111,10 +115,9 @@ internal object OverlayWindowFrames {
     (screen.widthPx - 2 * dpPx(CARD_SIDE_MARGIN_DP, screen.density)).coerceAtLeast(0)
 
   /**
-   * 卡片高度上限：可用高 x 比例（收起 32%，展开 40%），且不低于小屏下限。
+   * 卡片严格高度上限：可用高 x 比例（收起32%，展开40%）。
    *
-   * 下限取 min(180dp, available)：小屏上如果硬塞 180dp 会超出可用高，
-   * 窗口就会盖住导航条，所以下限本身也要再被可用高夹一次。
+   * 小屏也不得突破比例；内容必须在有界滚动区内，不能用固定dp地板扩大窗口。
    *
    * @param expanded true = 下拉展开态（40%）。
    */
@@ -124,8 +127,8 @@ internal object OverlayWindowFrames {
     val ratio = if (expanded) CARD_EXPANDED_RATIO else CARD_MAX_RATIO
     // toInt() 对正数是向下取整，符合「上限」语义：宁可少 1px 也不能越界。
     val byRatio = (available * ratio).toInt()
-    val minPx = dpPx(CARD_MIN_HEIGHT_DP, screen.density).coerceAtMost(available)
-    return maxOf(byRatio, minPx).coerceAtMost(available)
+    // 用户的比例是硬上限；横屏可读性由内部滚动解决，不得用180dp地板突破32%/40%。
+    return byRatio.coerceAtMost(available)
   }
 
   /**
@@ -167,7 +170,7 @@ internal object OverlayWindowFrames {
    * @param contentWidthPx 内容测量宽（px）。
    */
   fun pillWidthPx(contentWidthPx: Int, screen: OverlayScreen): Int {
-    val maxPx = (screen.widthPx * PILL_WIDTH_MAX_RATIO).toInt().coerceIn(0, screen.widthPx)
+    val maxPx = minOf(cardWidthPx(screen), (screen.widthPx * PILL_WIDTH_MAX_RATIO).toInt()).coerceIn(0, screen.widthPx)
     return contentWidthPx.coerceIn(0, maxPx)
   }
 
@@ -258,7 +261,7 @@ internal object OverlayWindowFrames {
    * @param velocityYpxPerS 末速度（px/s，向上为正）。取绝对值的原因：
    *   Android VelocityTracker 的上滑 y 分量为负，本函数也允许调用方统一成正向上，
    *   两种取值都能判对；方向本来就由 [pushUpPx] 的阈值兜底。
-   * @param pillTopPx 药丸当前顶边 y（px）。
+   * @param pillTopPx 本次手势 DOWN 时药丸顶边 y（px），不可传移动后的坐标。
    */
   fun pillDismissReached(
     pushUpPx: Float,

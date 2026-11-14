@@ -104,7 +104,8 @@ class OverlaySendBackfillTest {
     // 2) 发出去的 sessionId 必须是**发送时刻**现算的。
     assertTrue(
       "payload 的 sessionId 必须在 send 时用 payloadSessionId(activeSessionId) 现算：\n" + body,
-      body.contains("\"sessionId\", payloadSessionId(activeSessionId)"),
+      body.contains("\"sessionId\", payloadSessionId(targetSessionId)") &&
+        body.contains("var targetSessionId = initialTarget") && body.contains("targetSessionId = sid"),
     )
     // 3) 反向判据：建会话分支、「成功后记住新 id」、以及「建完再发」都必须仍在场
     //    （靠删掉建会话功能让判据变绿，这里会红）。

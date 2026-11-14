@@ -51,6 +51,11 @@ import java.net.URL
  */
 class OverlayService : Service() {
 
+  /** Debug-only read-only evidence; never a bridge/tool or release data surface. */
+  override fun dump(fd: java.io.FileDescriptor, writer: java.io.PrintWriter, args: Array<out String>) {
+    if (BuildConfig.DEBUG) writer.println("DSH_OVERLAY_V2_DUMP=" + (v2?.snapshotDiagnostics() ?: JSONObject().put("schemaVersion", 1).put("available", false)).toString())
+  }
+
   internal lateinit var wm: WindowManager
   internal val main = Handler(Looper.getMainLooper())
   private var rootView: FrameLayout? = null      // 窗口根（球 + 展开区）
@@ -93,6 +98,9 @@ class OverlayService : Service() {
   // 乐观忙态置位时刻（0=无）：发送成功/应答提交后、live 事件（turn_start/tool_call）到来前的
   // 空窗补偿——live 流只有轮次中后段事件，此空窗内壳侧原本完全失聪（面板显示「空闲」，2026-09-05 实测回归）。
   internal var optimisticBusyAt = 0L
+  /** 未确认的文本提交保留原 requestId/目标；未知结果不能解锁成一次新的发送。 */
+  private var pendingTextSend: PendingOverlayTextSend? = null
+  private var rpcLifecycleClosed = false
   internal var currentToolName = ""              // 当前运行工具（模板化显示：工具类型+概览）
   internal var currentToolSummary = ""           // 工具参数概览（args 提炼一行）
   internal var pendingKind = ""                  // 待用户处理态：question / approval / 空（updateBallOnly 派生）
@@ -109,10 +117,79 @@ class OverlayService : Service() {
   internal var currentSessionId = ""
   /** v2（entry_ui_v2）窗口编排层；开关关闭时为 null，一切走旧三窗实现。 */
   internal var v2: OverlayV2? = null
+  /** 回滚仅拆UI；同一V2保留草稿、宿主票据、未知锁和live模型直到Service真正销毁。 */
+  private var cachedV2: OverlayV2? = null
+  private val legacyDrafts = HashMap<String, String>()
+  private val legacyDraftBaselines = HashMap<String, String>()
+  private var legacyDraftSessionId = ""
   /** 新会话目标工作区（v2 工作区药丸写入；null = 沿用 tempWorkspaceId()）。 */
   internal var targetWorkspaceIdOverride: String? = null
   /** live 事件转发口（v2 注册；null = 只有旧消费逻辑）。 */
   internal var liveSink: ((LiveEvent) -> Unit)? = null
+  private val languagePrefs by lazy { getSharedPreferences(AppLanguage.PREFS, Context.MODE_PRIVATE) }
+  private val languageListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+    if (key == AppLanguage.KEY_MODE) main.post { if (!rpcLifecycleClosed) cachedV2?.onLanguageChanged() }
+  }
+  private val displayPrefs by lazy { OverlayV2.prefs(this) }
+  private val displayListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+    if (key == OverlayV2.KEY_ENTRY_UI_V2) main.post { switchOverlayUi() }
+    else if (key == OverlayV2.KEY_ENTRY_STYLE) main.post { v2?.onEntryStyleChanged() }
+  }
+
+  /** 只重建 UI，不触及 watcher / mux / Agent；也是运行时开关的原子回滚路径。 */
+  private fun switchOverlayUi() {
+    if (rpcLifecycleClosed) return
+    val useV2 = OverlayV2.enabled(this)
+    if (useV2 && v2 != null) return
+    if (!useV2 && v2 == null && rootView != null) return
+    val wasHidden = hidden
+    if (v2 == null) captureLegacyDraft()
+    val suspendedDraft = v2?.suspendUi()
+    v2 = null
+    hidePanel()
+    report.hideReport()
+    recall.hide()
+    removeWindow(rootView); rootView = null; rootParams = null
+    removeWindow(haloView); haloView = null; haloParams = null
+    if (useV2) {
+      val existing = cachedV2
+      val overlay = existing ?: OverlayV2(this).also { cachedV2 = it }
+      v2 = overlay
+      liveSink = overlay::onLiveEvent
+      if (existing == null) overlay.start()
+      val current = overlay.exportDraftSnapshot()
+      val legacy = legacyDrafts[activeSessionId]
+      if (legacy != null && shouldImportLegacyOverlayDraft(current.text, legacy, legacyDraftBaselines[activeSessionId])) {
+        overlay.restoreDraftSnapshot(current.copy(text = legacy, selectionStart = legacy.length, selectionEnd = legacy.length))
+      } else if (legacy != null && legacy != legacyDraftBaselines[activeSessionId] && legacy != current.text) {
+        flashStatus(t("两份草稿均已保留，未覆盖当前输入", "Both drafts kept; current input was not overwritten"))
+      }
+      if (existing != null) overlay.resumeUi()
+      overlay.onPendingChanged()
+      overlay.onEngineRunning(engineRunning)
+      if (wasHidden) overlay.hideEntry()
+    } else {
+      hidden = false
+      buildRoot()
+      if (panel.unitView == null) panel.buildUnit()
+      legacyDraftSessionId = activeSessionId
+      if (suspendedDraft != null && suspendedDraft.sessionId == activeSessionId) {
+        val legacy = legacyDrafts[activeSessionId]
+        val baseline = legacyDraftBaselines[activeSessionId]
+        if (legacy == null || legacy == baseline || legacy == suspendedDraft.text) {
+          legacyDrafts[activeSessionId] = suspendedDraft.text
+          legacyDraftBaselines[activeSessionId] = suspendedDraft.text
+        }
+      }
+      panel.inputBox?.setText(legacyDrafts[activeSessionId].orEmpty())
+      if (wasHidden) hideBall()
+      else if (suspendedDraft?.composerVisible == true) showPanel()
+    }
+  }
+
+  private fun captureLegacyDraft() {
+    if (v2 == null && panel.inputBox != null) legacyDrafts[legacyDraftSessionId] = panel.inputBox?.text?.toString().orEmpty()
+  }
 
   // ── 协作类（同包顶层类，构造注入服务引用；均不在构造期解引用服务状态） ──
   private val halo = OverlayHalo(this)
@@ -144,6 +221,12 @@ class OverlayService : Service() {
 
   /** 块H-A1：目标会话切换（详档 §3.2 复位时机）——完成位归属别的会话即清除。 */
   internal fun onTargetSessionChanged(newSessionId: String) {
+    if (v2 == null && legacyDraftSessionId != newSessionId) {
+      captureLegacyDraft()
+      legacyDraftSessionId = newSessionId
+      panel.inputBox?.setText(legacyDrafts[newSessionId].orEmpty())
+    }
+    cachedV2?.onSessionChanged()
     if (completion.onTargetSessionChanged(newSessionId)) {
       // 文案已失效：面板展开态需立即重绘回常态（否则残留文案要等下一次事件才消失）。
       if (expanded) updateBallOnly()
@@ -171,7 +254,7 @@ class OverlayService : Service() {
   override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
     super.onConfigurationChanged(newConfig)
     // v2：转屏/分屏/折叠后所有 v2 窗口按新几何重算（旧实现只重定位球与面板，卡片/药丸/输入不会动）。
-    v2?.onConfigurationChanged()
+    cachedV2?.onConfigurationChanged()
     if (expanded) panel.applyThemeColors()
     // P5-3：空闲态光环按主题取色，而 haloView 的 drawable 是手工构造的（不随 uiMode 自动更新）
     // ——不在此重刷就会出现「切到深色后空闲光环仍是浅色主题的灰」。
@@ -209,11 +292,9 @@ class OverlayService : Service() {
     wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
     // 窗口集合二选一：开关开 = v2 接管（入口/卡片/药丸/输入区），关 = 旧三窗（回滚第一手段）。
     // 两套窗口不得同时存在：同屏 overlay 窗口数直接决定残窗风险（implementation-plan §14）。
-    if (OverlayV2.enabled(this)) {
-      v2 = OverlayV2(this).also { it.start() }
-    } else {
-      buildRoot()
-    }
+    displayPrefs.registerOnSharedPreferenceChangeListener(displayListener)
+    languagePrefs.registerOnSharedPreferenceChangeListener(languageListener)
+    switchOverlayUi()
     live.startWatcher()
     probeEngine()
     scheduleProbe()
@@ -242,23 +323,42 @@ class OverlayService : Service() {
   }
 
   /**
-   * 划掉任务 = 主动关闭：自停，由 onDestroy 统一撤窗（三条路径都走同一个收口）。
+   * 划掉**主任务** = 主动关闭：自停，由 onDestroy 统一撤窗（三条路径都走同一个收口）。
    * 引擎没开时 Activity/EngineService 可能都不在进程里，不能指望它们替本服务收尾。
+   *
+   * 但不能只看「有任务被移除」就自停：取件代理（[OverlayAttachProxyActivity]）用独立
+   * taskAffinity 起一个只存在一两秒的透明任务，picker 一关它就消失，系统随后回调本服务。
+   * 现场实测：点「文件」取件后浮窗连球带窗全部消失，草稿同时被清空——取件把悬浮窗整个拆了。
+   * 所以这里只认包内**主任务**（MAIN/LAUNCHER）的移除，代理任务或系统取件的任务消失时保持浮窗。
    */
   override fun onTaskRemoved(rootIntent: Intent?) {
     super.onTaskRemoved(rootIntent)
+    if (!isMainTaskIntent(rootIntent)) return
     stopSelf()
   }
 
+  /** 该 rootIntent 是否指向本应用的主入口任务（用户真从最近任务划掉的那一个）。 */
+  private fun isMainTaskIntent(intent: Intent?): Boolean =
+    isMainTaskSignal(intent?.action, intent?.categories)
+
   override fun onDestroy() {
+    rpcLifecycleClosed = true
+    pendingTextSend?.releaseCallbacks()
+    pendingTextSend = null
     if (instance === this) instance = null
     // 动效开关订阅必须在窗口拆除前注销，否则 ContentObserver 会持有已销毁的 View。
     halo.stopMotionWatch()
     panel.stopMotionWatch()
     live.stopWatcher()
+    displayPrefs.unregisterOnSharedPreferenceChangeListener(displayListener)
+    languagePrefs.unregisterOnSharedPreferenceChangeListener(languageListener)
+    liveSink = null
     // v2 窗口必须逐槽收口（入口/卡片/药丸/输入区共 4 个窗口；漏一个就是「服务没了、屏上还留着窗」）。
-    v2?.destroy()
+    cachedV2?.destroy()
+    cachedV2 = null
     v2 = null
+    legacyDrafts.clear()
+    legacyDraftBaselines.clear()
     panel.destroy()
     // 块H-A2：报告栏是独立顶层窗口，必须在此收口（纪律同 panel.closePicker/unitView）。
     report.hideReport()
@@ -650,20 +750,25 @@ class OverlayService : Service() {
    * 乐观忙态（optimisticBusyAt 清零）；running=false 等价 turn_end 回空闲。
    * 会话感知与 live 流一致：无目标会话=全部接受，有目标=仅该会话。
    */
+  internal fun matchesTargetAgent(agentId: String): Boolean =
+    activeSessionId.isEmpty() || agentId == activeSessionId ||
+      (currentAgentId.isNotEmpty() && agentId == currentAgentId)
+
   internal fun applyAgentStatus(agentId: String, running: Boolean) {
     // P0-1：agentId 只进 agent 域，**不再写 activeSessionId**（旧代码把两者当同一个东西；
     // 评审依据见 docs/AGENTS/EXECUTION-MAP.md:292 与 investigation.md §4 的缺陷表）。
-    if (agentId.isNotEmpty()) currentAgentId = agentId
-    v2?.onAgentStatus(agentId, running)
+    // status 的 id 只能用于匹配，不可写入会话发送目标。已选 A 时绝不接受 B 的忙态。
+    val targeted = matchesTargetAgent(agentId)
+    if (targeted && agentId.isNotEmpty()) currentAgentId = agentId
     // 忙态归属：单引擎模型下 agent 事件就是本机唯一在跑的对话；会话域已知时要求能对上，
     // 避免别的会话陈旧行把状态点亮后卡死（#2 的原始诉求）。
-    val targeted = activeSessionId.isEmpty() || agentId == activeSessionId || agentId == currentAgentId
     // 0.13.8 G1-5（缺陷 B-5）：pending 清理与「渲染谁」解耦——running=false 对该 agentId
     // 无条件清 pending（否则目标一换，过期卡片永生）；targeted 只影响下面的忙态渲染。
     if (!running) {
       panel.dropPendingFor(agentId)
     }
     if (!targeted) return
+    cachedV2?.onAgentStatus(agentId, running)
     if (running) {
       optimisticBusyAt = 0L
       if (!sessionBusy) { sessionBusy = true; turnStartedAt = System.currentTimeMillis() }
@@ -682,7 +787,7 @@ class OverlayService : Service() {
       // 自动收起是默认路径，用户此刻还没看到面板，完成位要能存活到下次点球重开。
       // 注意：本处的键沿用既有 targeted 逻辑用的 agentId（源码明文警告 agentId != sessionId，
       // 该映射未确证——详见文件头与 docs 的登记；此处仅保持与既有会话感知一致，不新造映射）。
-      onAuthoritativeIdle(agentId)
+      onAuthoritativeIdle(activeSessionId.ifEmpty { agentId })
       // 面板此刻已展开 = 用户「已经看到了」→ 直接消费并展示（否则 autoCollapseOnDone 关闭时
       // 展开态会永远不显示完成文案：consume 只挂在 showPanel 上）。
       if (expanded) completion.consume()
@@ -717,7 +822,7 @@ class OverlayService : Service() {
         if (optimisticBusyExpired() && expanded) updateBallOnly()
         // 必须走 deriveHalo()：此 tick 每 10s 一次，自带判定会漏 PENDING 把待答光环盖回白色
         setHalo(deriveHalo())
-        v2?.onEngineRunning(running)
+        cachedV2?.onEngineRunning(running)
         if (expanded && !running) {
           // 块H-A1：完成态分支在 updateBallOnly 的分支链里**优先于** else 常态分支（详档 §5.1），
           // 而本处是绕过分支链的直接赋值——两者必须同口径，否则完成文案会被每 10s 的探活
@@ -756,9 +861,10 @@ class OverlayService : Service() {
         // payload = {args:{<wire 参数名>:<值>}}（Typert 描述符强校验，缺 args 即
         // "Remote payload must contain exactly one plain-object args field"）。
         // 调用方传的 payload = 参数值对象（session/list={_request:{…}}、其余={request:{…}}）。
+        val rpcId = "overlay-" + java.util.UUID.randomUUID().toString()
         val envelope = JSONObject()
           .put("type", "client-request")
-          .put("rpcId", "overlay-" + System.currentTimeMillis())
+          .put("rpcId", rpcId)
           .put("method", method)
           .put("payload", JSONObject().put("args", payload))
         code = -1
@@ -783,10 +889,11 @@ class OverlayService : Service() {
           conn.disconnect()
           break
         }
+        if (code == 200 && !overlayRpcReplyMatches(body, rpcId)) code = -1
       } catch (e: Exception) {
         code = -1; body = e.message ?: "网络异常"
       }
-      main.post { onResult(code, body) }
+      main.post { if (!rpcLifecycleClosed) onResult(code, body) }
     }.start()
   }
 
@@ -798,9 +905,13 @@ class OverlayService : Service() {
     if (!sessionBusy) { flashStatus(t("当前没有正在运行的任务", "Nothing is running right now")); return }
     if (!engineRunning) { flashStatus(t("引擎离线，无法停止", "Engine is offline; cannot stop")); return }
     if (activeSessionId.isEmpty()) { flashStatus(t("无活动会话", "No active session")); return }
-    setHalo(Halo.WORKING)
     postRpc("session/cancel", JSONObject().put("request", JSONObject().put("sessionId", activeSessionId))) { code, body ->
-      if (code == 200) flashStatus(t("已发送停止指令", "Stop request sent")) else flashStatus(t("停止失败（HTTP $code）", "Stop failed (HTTP $code)"))
+      val reply = parseOverlayRpcAdmission(code, body, "session/cancel")
+      when (reply.state) {
+        OverlayRpcAdmissionState.ACCEPTED -> flashStatus(t("停止请求已受理", "Stop request accepted"))
+        OverlayRpcAdmissionState.UNKNOWN -> flashStatus(t("停止结果未确认，请查看任务状态", "Stop outcome unknown; check task state"))
+        OverlayRpcAdmissionState.REJECTED -> flashStatus(t("停止失败：", "Stop failed: ") + reply.reason)
+      }
     }
   }
 
@@ -816,18 +927,46 @@ class OverlayService : Service() {
    * 发送链路必须只依赖「文本 + 当前目标会话」；否则就要给 v2 复制一份两百行发送逻辑，
    * 那正是两份真源的开始（#1042 幂等键 / #1043 失败回填两条修法都挂在同一条链上）。
    */
-  internal fun sendTextFromOverlay(text: String) {
-    if (text.isEmpty()) return
-    if (!engineRunning) { flashStatus(t("引擎离线", "Engine offline")); return }
-    // 只在输入框内容确实还是这次要发的文本时才清空（v2 的输入区不在这里，这一支自然不执行）。
-    if (panel.inputBox?.text?.toString()?.trim() == text) panel.inputBox?.setText("")
+  internal fun sendTextFromOverlay(
+    text: String,
+    onResult: ((Boolean) -> Unit)? = null,
+    onUnknown: ((String) -> Unit)? = null,
+    onCreated: ((String) -> Unit)? = null,
+  ) {
+    if (pendingTextSend != null) {
+      val message = t("上一条发送结果未确认，草稿已保留；不会重复发送", "Previous send outcome unknown; draft kept, not resending")
+      flashStatus(message)
+      onUnknown?.invoke(message)
+      recheckTextSendOutcome()
+      return
+    }
+    if (v2 == null) {
+      val cachedDraft = cachedV2?.exportDraftSnapshot()
+      if (cachedDraft?.sendPending == true || cachedDraft?.commandPending == true) {
+        OverlayPageHost.recheckPendingActions()
+        val message = t("原悬浮操作尚未确认，草稿已保留；不会重复提交", "Original overlay action is unresolved; draft kept, not resubmitting")
+        flashStatus(message)
+        onUnknown?.invoke(message)
+        return
+      }
+    }
+    if (text.isEmpty()) { onResult?.invoke(false); return }
+    if (!engineRunning) { flashStatus(t("引擎离线", "Engine offline")); onResult?.invoke(false); return }
+    // 草稿仅在明确受理后清空；HTTP200/超时本身都不是消息已受理的证据。
     val steer = sessionBusy   // 发送前的忙态决定模式与提示语（成功回调里已被乐观置忙覆盖）
     // #1042：requestId 是**幂等键**，一次用户发送只生成一次，create 与随后的 prompt 复用同一个。
     // 所以它必须留在这里、在 send 之外定好——挪进 send 里"顺便"再生成一次，就变成两次发送语义：
     // create 成功后的 prompt 重试不再幂等（引擎可能记成两条请求）。判据见 requestIdIsFixedOncePerSend。
     val requestId = "overlay-" + System.currentTimeMillis() + "-" + (0..999).random()
     val content = org.json.JSONArray().put(JSONObject().put("type", "text").put("text", text))
+    val initialTarget = payloadSessionId(activeSessionId)
+    var targetSessionId = initialTarget
+    val pending = PendingOverlayTextSend(requestId, text, onResult, onUnknown)
+    pendingTextSend = pending
     val send = Runnable {
+      if (pendingTextSend !== pending || rpcLifecycleClosed) return@Runnable
+      pending.sessionId = targetSessionId
+      pending.phase = "session/prompt"
       // #1042：payload 在**真正发送的那一刻**才组装。sessionId 尤其必须此刻取——
       // 「目标=新会话」时 activeSessionId 要等 session/create 成功后才被赋值（见下方 create 分支），
       // 请求发起前就固化会把空串发出去（wire 上先是 create 成功、接着 prompt 却带 sessionId:""，
@@ -835,18 +974,26 @@ class OverlayService : Service() {
       // 0.1.2-rc.1 SessionPromptRequest：requestId 必填（幂等键）+ sessionId/mode/content
       val payload = JSONObject()
         .put("requestId", requestId)
-        .put("sessionId", payloadSessionId(activeSessionId))
+        .put("sessionId", payloadSessionId(targetSessionId))
         .put("mode", if (steer) "steer" else "queue")
         .put("content", content)
       postRpc("session/prompt", JSONObject().put("request", payload)) { code, body ->
-        if (code == 200) {
+        if (pendingTextSend !== pending) return@postRpc
+        val reply = parseOverlayRpcAdmission(code, body, "session/prompt")
+        if (reply.state == OverlayRpcAdmissionState.ACCEPTED) {
           // 发送成功：立即亮工作态（乐观忙态）——live 事件（turn_start/tool_call）到来前
           // 原本显示「空闲」，实测被用户点名（2026-09-05）；45s 无 live 确认由探活兜底回退。
-          markBusyOptimistic()
+          if (activeSessionId == targetSessionId) markBusyOptimistic()
+          if (activeSessionId == targetSessionId && panel.inputBox?.text?.toString()?.trim() == text) panel.inputBox?.setText("")
           flashStatus(if (steer) t("已插话", "Interjected") else t("已发送", "Sent"))
+          finishTextSend(pending, true)
+        } else if (reply.state == OverlayRpcAdmissionState.UNKNOWN) {
+          reportTextSendUnknown(pending)
         } else {
           // 发送失败：只在用户没动过输入框时回填（避免「以为发出去了」——#4；避免覆盖新输入——#1043）
-          restoreAfterFailure(text, t("发送失败（HTTP $code）", "Send failed (HTTP $code)"))
+          if (pending.onResult == null) restoreAfterFailure(text, t("发送失败：", "Send failed: ") + reply.reason)
+          else flashStatus(t("发送失败，草稿已保留：", "Send failed; draft kept: ") + reply.reason)
+          finishTextSend(pending, false)
         }
       }
     }
@@ -856,27 +1003,99 @@ class OverlayService : Service() {
       val createReq = JSONObject()
       // v2 工作区药丸选定的目标工作区优先（语义 = 新会话落在这个工作区；design.md §6.3）。
       (targetWorkspaceIdOverride ?: tempWorkspaceId())?.let { createReq.put("workspaceId", it) }
+      pending.phase = "session/create"
       postRpc("session/create", JSONObject().put("request", createReq)) { code, body ->
+        if (pendingTextSend !== pending) return@postRpc
+        val reply = parseOverlayRpcAdmission(code, body, "session/create")
         if (code == 200) {
-          val sid = extractSessionId(body)
-          if (sid.isNotEmpty()) {
-            activeSessionId = sid
-            userPinnedSession = false
-            // 块H-A1：新建会话 = 目标会话切换（详档 §3.2 复位时机）。
-            onTargetSessionChanged(sid)
-            panel.refreshSessionPicker()
+          val sid = reply.sessionId
+          if (reply.state == OverlayRpcAdmissionState.ACCEPTED && sid.isNotEmpty()) {
+            targetSessionId = sid
+            // create等待期间用户可能选了B；请求仍发到本次创建的A，不能改投B或覆盖选择。
+            if (activeSessionId == initialTarget) {
+              onCreated?.invoke(sid) // Migrate this exact in-flight UI draft before target observers run.
+              activeSessionId = sid
+              currentSessionId = sid
+              currentAgentId = ""
+              userPinnedSession = false
+              onTargetSessionChanged(sid)
+              panel.refreshSessionPicker()
+            }
             // 此刻 activeSessionId 已是 sid，send 里的 sessionId 才取得到（#1042 的落点）。
             send.run()
+          } else if (reply.state == OverlayRpcAdmissionState.UNKNOWN) {
+            reportTextSendUnknown(pending)
           } else {
-            restoreAfterFailure(text, t("建会话失败（解析）", "Failed to create session (parse error)"))
+            if (pending.onResult == null) restoreAfterFailure(text, t("建会话失败：", "Could not create session: ") + reply.reason)
+            else flashStatus(t("建会话失败，草稿已保留", "Could not create session; draft kept"))
+            finishTextSend(pending, false)
           }
+        } else if (reply.state == OverlayRpcAdmissionState.UNKNOWN) {
+          reportTextSendUnknown(pending)
         } else {
-          restoreAfterFailure(text, t("建会话失败（HTTP $code）", "Failed to create session (HTTP $code)"))
+          if (pending.onResult == null) restoreAfterFailure(text, t("建会话失败：", "Could not create session: ") + reply.reason)
+          else flashStatus(t("建会话失败，草稿已保留：", "Could not create session; draft kept: ") + reply.reason)
+          finishTextSend(pending, false)
         }
       }
     } else {
       send.run()
     }
+  }
+
+  /** 只读核对原会话的精确 requestId；查不到不代表拒绝，不自动重发 prompt。 */
+  internal fun recheckTextSendOutcome() {
+    val pending = pendingTextSend ?: return
+    if (!pending.unknown || pending.rechecking || rpcLifecycleClosed) return
+    if (pending.sessionId.isBlank()) { reportTextSendUnknown(pending); return }
+    pending.rechecking = true
+    val request = JSONObject().put("sessionId", pending.sessionId)
+    postRpc("session/state", JSONObject().put("request", request)) { code, body ->
+      if (pendingTextSend !== pending) return@postRpc
+      if (overlayPromptReceiptObserved(code, body, pending.requestId, "session/state")) {
+        acceptRecheckedTextSend(pending)
+        return@postRpc
+      }
+      // queue 仅含尚未消费项；durable user/message 仍可证明同一次提交曾被受理。
+      val eventsRequest = JSONObject()
+        .put("address", JSONObject().put("kind", "session").put("sessionId", pending.sessionId))
+        .put("maxMessages", 100)
+      postRpc("session/events", JSONObject().put("request", eventsRequest)) { eventCode, eventBody ->
+        if (pendingTextSend === pending) {
+          pending.rechecking = false
+          if (overlayPromptReceiptObserved(eventCode, eventBody, pending.requestId, "session/events")) {
+            acceptRecheckedTextSend(pending)
+          } else reportTextSendUnknown(pending)
+        }
+      }
+    }
+  }
+
+  private fun acceptRecheckedTextSend(pending: PendingOverlayTextSend) {
+    if (pendingTextSend !== pending) return
+    // 受理证据不证明此刻仍忙，不得重启已结束任务的乐观忙态。
+    if (activeSessionId == pending.sessionId && panel.inputBox?.text?.toString()?.trim() == pending.text) panel.inputBox?.setText("")
+    flashStatus(t("已确认原消息已受理，未重复发送", "Original message acceptance confirmed; not resent"))
+    finishTextSend(pending, true)
+  }
+
+  private fun reportTextSendUnknown(pending: PendingOverlayTextSend) {
+    pending.unknown = true
+    val message = if (pending.phase == "session/create") {
+      t("建会话结果未确认，草稿已保留；请在主界面核对，不会重复建会话", "Session creation outcome unknown; draft kept. Check the main app; not creating again")
+    } else {
+      t("发送结果未确认，草稿已保留；再次发送只查询原结果", "Send outcome unknown; draft kept. Send again only checks the original outcome")
+    }
+    flashStatus(message)
+    pending.onUnknown?.invoke(message)
+  }
+
+  private fun finishTextSend(pending: PendingOverlayTextSend, accepted: Boolean) {
+    if (pendingTextSend !== pending) return
+    pendingTextSend = null
+    val callback = pending.onResult
+    pending.releaseCallbacks()
+    callback?.invoke(accepted)
   }
 
   /**
@@ -915,19 +1134,9 @@ class OverlayService : Service() {
     LogCollector.log("dsh-overlay", "send failed; original text kept in log: " + text)
   }
 
-  /** 从 session.create 的 server-response 中取 sessionId（兼容 result.value / 嵌套 JSON 字符串两种形态）。 */
-  private fun extractSessionId(body: String): String {
-    return try {
-      val root = JSONObject(body).optJSONObject("result") ?: return ""
-      // value 可能是对象 {sessionId:...}，也可能被序列化成字符串
-      val value = root.opt("value")
-      when (value) {
-        is JSONObject -> value.optString("sessionId", "")
-        is String -> if (value.isBlank()) "" else JSONObject(value).optString("sessionId", "")
-        else -> ""
-      }
-    } catch (_: Exception) { "" }
-  }
+  /** 仅从严格成功的 create wire 回包取身份；HTTP 失败由调用方先排除。 */
+  internal fun extractSessionId(body: String): String =
+    parseOverlayRpcAdmission(200, body, "session/create").sessionId
 
   /** 面板状态行短暂提示（发送/停止结果）。 */
   // 面板状态行文案走双语（与 OverlayPanel 同一入口；切英文后这些提示此前仍是中文）。
@@ -1040,7 +1249,12 @@ class OverlayService : Service() {
    * 为什么入口必须消失：本体在前台时用户就在看主界面，悬浮入口是纯遮挡，而且会挡住标题栏按钮。
    */
   internal fun onHostForegroundChanged(foreground: Boolean) {
-    v2?.onHostForeground(foreground)
+    if (foreground && v2 != null) {
+      hidePanel()
+      report.hideReport()
+      recall.hide()
+    }
+    cachedV2?.onHostForeground(foreground)
   }
 
   /** 页面宿主给出的**权威**会话 id（P0-1：只进会话域，绝不与 agentId 互写）。 */
@@ -1050,10 +1264,12 @@ class OverlayService : Service() {
     currentSessionId = sid
     if (sid == activeSessionId) return
     activeSessionId = sid
+    currentAgentId = ""
+    sessionBusy = false
     userPinnedSession = false
     onTargetSessionChanged(sid)
     if (expanded) panel.refreshSessionPicker()
-    v2?.onSessionChanged()
+    cachedV2?.onSessionChanged()
   }
 
   /** 用户在 v2 会话列表里显式选择目标会话（页面不可用时的降级路径）。 */
@@ -1062,10 +1278,12 @@ class OverlayService : Service() {
     if (sid.isEmpty()) return
     currentSessionId = sid
     activeSessionId = sid
+    currentAgentId = ""
+    sessionBusy = false
     userPinnedSession = true
     onTargetSessionChanged(sid)
     if (expanded) panel.refreshSessionPicker()
-    v2?.onSessionChanged()
+    cachedV2?.onSessionChanged()
   }
 
   /**
@@ -1134,6 +1352,26 @@ class OverlayService : Service() {
 
   companion object {
     /**
+     * 主任务判据的对外可测入口（测试锁判据本身，不看 Android 桩副作用）。
+     *
+     * 现场实测：点「文件」拉起取件后浮窗连球带窗全灭、草稿被清空。真因是 [onTaskRemoved]
+     * 无条件自停，把取件代理那个只活一两秒的透明任务当成「用户划掉主任务」。
+     */
+    internal fun isMainTaskIntentForTest(action: String?, categories: Collection<String>?): Boolean =
+      isMainTaskSignal(action, categories)
+
+    /**
+     * 纯判据：只有 MAIN + LAUNCHER 的 rootIntent 才算用户主动关闭主任务。
+     *
+     * 抽成不碰 Intent 的纯函数，是因为 Robolectric 的 Intent 桩不记录 categories，
+     * 直接在桩上断言会让这条关键回归无法真正判红。
+     */
+    internal fun isMainTaskSignal(action: String?, categories: Collection<String>?): Boolean {
+      if (action != Intent.ACTION_MAIN) return false
+      return categories?.contains(Intent.CATEGORY_LAUNCHER) == true
+    }
+
+    /**
      * 球距屏幕四边的最小边距（dp，0.14.1 块I 新增的唯一具名常量）。
      * 与 `edgeMarginPx`（运行期 px）同源；**同时**参与 haloSizeDp 的推导——
      * 改小它会让 `haloSizeDp / 2 - ballSizeDp / 2 != 该值`，贴边时光环窗请求 x 为负、
@@ -1161,7 +1399,108 @@ class OverlayService : Service() {
   }
 }
 
-// ── 发送链路的两个判定（internal 顶层纯函数；#1042 / #1043） ──────────────────
+// ── 发送链路纯判据（JVM 可测；不实例化 Android Service） ──────────────────
+
+/** 一次未确认文本提交；只存字符串/回调，不持有输入 View，销毁时必须释放回调。 */
+private class PendingOverlayTextSend(
+  val requestId: String,
+  val text: String,
+  var onResult: ((Boolean) -> Unit)?,
+  var onUnknown: ((String) -> Unit)?,
+) {
+  var sessionId = ""
+  var phase = ""
+  var unknown = false
+  var rechecking = false
+  fun releaseCallbacks() { onResult = null; onUnknown = null }
+}
+
+/** 只合并旧面板用户确实修改过的草稿；两端都改过则保留两份，不覆盖当前V2输入。 */
+internal fun shouldImportLegacyOverlayDraft(current: String, legacy: String, baseline: String?): Boolean =
+  legacy != baseline && (current.isEmpty() || baseline == null && current == legacy || current == baseline)
+
+internal enum class OverlayRpcAdmissionState { ACCEPTED, REJECTED, UNKNOWN }
+
+/** rpcSucceeded 只标识 wire result.ok=true；create 的身份仍须单独通过非空字符串校验。 */
+internal data class OverlayRpcAdmission(
+  val state: OverlayRpcAdmissionState,
+  val reason: String = "",
+  val sessionId: String = "",
+  val rpcSucceeded: Boolean = false,
+)
+
+/** 官方 Connection server-response 外壳；不用 optBoolean，字符串 "true" 不是成功。 */
+internal fun overlayRpcReplyMatches(body: String, requestId: String): Boolean = try {
+  val reply = JSONObject(body)
+  reply.opt("type") == "server-response" && reply.opt("rpcId") == requestId
+} catch (_: Exception) { false }
+
+private fun overlayRpcResult(body: String): JSONObject? = try {
+  val envelope = JSONObject(body)
+  if (envelope.opt("type") != "server-response" || (envelope.opt("rpcId") as? String).isNullOrBlank()) null
+  else envelope.optJSONObject("result")
+} catch (_: Exception) { null }
+
+/**
+ * HTTP200只是载体成功；prompt/cancel还必须有原生Boolean accepted=true。
+ * -1、损坏/截断/错误类型成功回包都不能证明未受理，故保持 UNKNOWN 而非触发重发。
+ * 官方来源：dsh-client-connection RpcResult 与 session-controller SessionPrompt/Cancel/CreateValue。
+ */
+internal fun parseOverlayRpcAdmission(code: Int, body: String, method: String): OverlayRpcAdmission {
+  if (code == -1) return OverlayRpcAdmission(OverlayRpcAdmissionState.UNKNOWN, "Transport outcome unknown")
+  if (code != 200) return OverlayRpcAdmission(OverlayRpcAdmissionState.REJECTED, "HTTP " + code)
+  val result = overlayRpcResult(body)
+    ?: return OverlayRpcAdmission(OverlayRpcAdmissionState.UNKNOWN, "Invalid RPC envelope")
+  val ok = result.opt("ok")
+  if (ok == false) {
+    val error = result.optJSONObject("error")
+    val errorCode = error?.opt("code") as? String
+    val message = error?.opt("message") as? String
+    val reason = listOfNotNull(errorCode?.takeIf { it.isNotBlank() }, message?.takeIf { it.isNotBlank() })
+      .joinToString(": ").take(240).ifBlank { "RPC rejected" }
+    return OverlayRpcAdmission(OverlayRpcAdmissionState.REJECTED, reason)
+  }
+  if (ok != true) return OverlayRpcAdmission(OverlayRpcAdmissionState.UNKNOWN, "Missing Boolean result.ok")
+  val value = result.optJSONObject("value")
+  if (method == "session/create") {
+    val sessionId = (value?.opt("sessionId") as? String)?.trim().orEmpty()
+    return if (sessionId.isNotEmpty()) OverlayRpcAdmission(OverlayRpcAdmissionState.ACCEPTED, sessionId = sessionId, rpcSucceeded = true)
+    else OverlayRpcAdmission(OverlayRpcAdmissionState.UNKNOWN, "Missing session identity", rpcSucceeded = true)
+  }
+  if (method != "session/prompt" && method != "session/cancel") {
+    return OverlayRpcAdmission(OverlayRpcAdmissionState.UNKNOWN, "Unsupported admission method")
+  }
+  return when (value?.opt("accepted")) {
+    true -> OverlayRpcAdmission(OverlayRpcAdmissionState.ACCEPTED, rpcSucceeded = true)
+    false -> OverlayRpcAdmission(OverlayRpcAdmissionState.REJECTED, "Request not accepted", rpcSucceeded = true)
+    else -> OverlayRpcAdmission(OverlayRpcAdmissionState.UNKNOWN, "Missing Boolean acceptance", rpcSucceeded = true)
+  }
+}
+
+/** 精确 requestId 的正面证据；找不到/截断/无权查询均不能证明拒绝。 */
+internal fun overlayPromptReceiptObserved(code: Int, body: String, requestId: String, method: String): Boolean {
+  if (code != 200 || requestId.isBlank()) return false
+  val result = overlayRpcResult(body) ?: return false
+  if (result.opt("ok") != true) return false
+  val value = result.optJSONObject("value") ?: return false
+  if (method == "session/state") {
+    val queue = value.optJSONArray("queue") ?: return false
+    for (index in 0 until queue.length()) {
+      if (queue.optJSONObject(index)?.opt("rpcId") == requestId) return true
+    }
+  } else if (method == "session/events") {
+    val records = value.optJSONArray("records") ?: return false
+    for (index in 0 until records.length()) {
+      val record = records.optJSONObject(index) ?: continue
+      if (record.opt("type") != "event") continue
+      val event = record.optJSONObject("event") ?: continue
+      if (event.opt("type") != "user/message") continue
+      val source = event.optJSONObject("data")?.optJSONObject("source") ?: continue
+      if (source.opt("kind") == "user" && source.opt("rpcId") == requestId) return true
+    }
+  }
+  return false
+}
 //
 // 为什么是顶层纯函数而不是 OverlayService 的成员：本服务的两处判定要在 JVM 单测里跑，
 // 而 Service 实例化不了（Looper/WindowManager 都要真实运行环境）。抽成无副作用的纯函数后，

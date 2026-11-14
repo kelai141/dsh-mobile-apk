@@ -150,6 +150,9 @@ export interface UpstreamMenuHooks {
  * 重入闸：开菜单的唯一办法是派发「+」的 click，而 sheet 的捕获监听会再次看到它；
  * 不设闸就是无限递归（实测 RangeError）。
  */
+const syntheticMenuClicks = new WeakSet<Event>()
+export function isComposerMenuReplay(event: Event): boolean { return syntheticMenuClicks.has(event) }
+
 export async function withUpstreamMenu<T>(
   run: (options: HTMLElement[]) => T,
   fallback: T,
@@ -171,7 +174,9 @@ export async function withUpstreamMenu<T>(
       refocusEditor(card)
       hooks.setReplaying?.(true)
       try {
-        addButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+        const click = new MouseEvent('click', { bubbles: true, cancelable: true })
+        syntheticMenuClicks.add(click)
+        addButton.dispatchEvent(click)
       } finally {
         hooks.setReplaying?.(false)
       }
@@ -199,7 +204,9 @@ export async function withUpstreamMenu<T>(
  * 返回的是**当前页面真实菜单**的投影，因此天然跟随上游/第三方插件新增的命令。
  */
 export async function readComposerMenuCommands(): Promise<ComposerMenuCommand[]> {
+  if (!hasComposerMenuButton()) throw new Error('composer-unavailable')
   return withUpstreamMenu((options) => {
+    if (options.length === 0) throw new Error('commands-not-ready')
     const commands: ComposerMenuCommand[] = []
     for (const option of options) {
       const mapped = mapMenuOption(option)

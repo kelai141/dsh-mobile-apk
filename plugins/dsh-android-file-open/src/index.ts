@@ -358,6 +358,9 @@ export function normalizeOrigin(value: unknown): IncomingOrigin {
 
 /** Persistent shell-to-engine queue record. `path` remains host-only and never reaches the Web UI. */
 interface IncomingItem {
+  targetSessionId?: string
+  requestId?: string
+  mediaType?: string
   id: string
   ts: string
   path: string
@@ -373,6 +376,9 @@ interface IncomingItem {
 
 /** Browser-safe metadata for the queue status endpoint and model-visible status tool. */
 interface PublicIncomingItem {
+  targetSessionId?: string
+  requestId?: string
+  mediaType?: string
   entryId: string
   sessionId?: string
   /** 来源（页面据此决定「并入当前会话」还是「新建会话」）。 */
@@ -384,6 +390,7 @@ interface PublicIncomingItem {
 
 /** One short-lived, process-local stream ticket after the UI has navigated to its blank session. */
 interface DraftLease {
+  requestId?: string
   entryId: string
   sessionId: string
   path: string
@@ -391,6 +398,10 @@ interface DraftLease {
   bytes: number
   expiresAt: number
 }
+
+const targetedOutcomes = new Map<string, { targetSessionId: string; state: string }>()
+
+const completedDraftTickets = new Map<string, { entryId: string; state: string }>()
 
 const DRAFT_LEASE_MS = 5 * 60_000
 
@@ -402,6 +413,7 @@ const UNCLAIMED_TTL_MS = 10 * 60_000
 function publicItem(item: IncomingItem): PublicIncomingItem {
   return {
     entryId: item.id,
+    ...(item.targetSessionId === undefined ? {} : { targetSessionId: item.targetSessionId, requestId: item.requestId, mediaType: item.mediaType }),
     ...(item.sessionId === undefined ? {} : { sessionId: item.sessionId }),
     origin: item.origin,
     state: item.state,
@@ -424,6 +436,7 @@ function readItems(): IncomingItem[] {
         id: typeof value.id === 'string' && value.id !== '' ? value.id : f,
         ts: typeof value.ts === 'string' ? value.ts : '',
         path: value.path,
+        ...(typeof value.targetSessionId === 'string' ? { targetSessionId: value.targetSessionId, requestId: value.requestId, mediaType: value.mediaType } : {}),
         // 向后兼容：本次改动之前落盘的记录没有 origin 字段，一律按外部分享处理
         // （= 强制新会话，即它们本来就有的行为）。绝不能因为「字段缺失」而并入既有会话。
         origin: normalizeOrigin(value.origin),
@@ -480,7 +493,12 @@ function purgeStaleUnclaimed(mode: 'boot' | 'ttl'): number {
  * @param origin - 来源；缺省 `external`（强制新会话，F5.2）。`camera` 表示壳侧自产拍照来件，
  *   页面侧会把它并入**当前会话**而不是新建。未知值塌回 `external`。
  */
-function enqueueSession(path: string, origin: IncomingOrigin = DEFAULT_ORIGIN): { ok: boolean; entryId?: string; message: string } {
+function enqueueSession(path: string, origin: IncomingOrigin = DEFAULT_ORIGIN, target?: { targetSessionId: string; requestId: string; mediaType?: string }): { ok: boolean; entryId?: string; message: string } {
+  if (target !== undefined) {
+    if (!DURABLE_SESSION_ID.test(target.targetSessionId) || !/^[a-zA-Z0-9_-]{8,100}$/.test(target.requestId)) return { ok: false, message: 'invalid overlay target' }
+    const previous = targetedOutcomes.get(target.requestId)
+    if (previous !== undefined) return { ok: previous.targetSessionId === target.targetSessionId, message: previous.state }
+  }
   const dir = queueDir()
   const ws = resolve(tmpWorkspace())
   const real = safeResolveInside(ws, path)
@@ -495,6 +513,7 @@ function enqueueSession(path: string, origin: IncomingOrigin = DEFAULT_ORIGIN): 
     ts: new Date().toISOString(),
     path: real,
     origin: normalizeOrigin(origin),
+    ...target,
     forcedNewSession: true,
     state: 'received',
     name: basename(real),
@@ -503,6 +522,7 @@ function enqueueSession(path: string, origin: IncomingOrigin = DEFAULT_ORIGIN): 
   writeFileSync(sessionFile, JSON.stringify(item, null, 2))
   // 受理即记自有临时项（/clean 只删这些）。
   recordOwnedTemp(real)
+  if (target !== undefined) targetedOutcomes.set(target.requestId, { targetSessionId: target.targetSessionId, state: 'pending' })
   return { ok: true, entryId, message: '已创建空白临时会话请求' }
 }
 
@@ -794,6 +814,7 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
       path: '/api/android/file-incoming',
       handler: async (req: {
         method?: string
+        url?: string
         headers?: Record<string, string | string[] | undefined>
         on(_e: string, cb: (b: Buffer) => void): void
         destroy(): void
@@ -802,6 +823,13 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
         const rejection = authorizeIncomingRoute(req, authOptions())
         if (rejection) { sendRejection(res, rejection); return }
         if (req.method === 'GET') {
+          const requestId = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams.get('requestId')
+          if (requestId !== null) {
+            const result = targetedOutcomes.get(requestId)
+            res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+            res.end(JSON.stringify(result === undefined ? { ok: false, state: 'unknown' } : { ok: true, ...result }))
+            return
+          }
           // 鉴权已在上方 first-line 完成（审计 §7.7 的安全边界：轻量返回不得绕过鉴权）。
           const answer = nextQueueAnswer(listState, {
             fingerprint: queueFingerprint,
@@ -862,11 +890,13 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
           settled = true
           clearTimeout(timeout)
           try {
-            const parsed = JSON.parse(body) as { path?: string; origin?: unknown }
+            const parsed = JSON.parse(body) as { path?: string; origin?: unknown; targetSessionId?: string; requestId?: string; mediaType?: string }
             const path = parsed.path ?? ''
             // 来源随投递一起到达（壳侧 FileIncoming 负责在重试清单里保住它）。
             // 缺省/未知一律 external：漏传不得升级成「并入既有会话」。
-            const result = enqueueSession(path, normalizeOrigin(parsed.origin))
+            const targeted = parsed.targetSessionId !== undefined || parsed.requestId !== undefined
+            if (targeted && (typeof parsed.targetSessionId !== 'string' || typeof parsed.requestId !== 'string')) throw new Error('overlay target and requestId required')
+            const result = enqueueSession(path, normalizeOrigin(parsed.origin), targeted ? { targetSessionId: parsed.targetSessionId!, requestId: parsed.requestId!, mediaType: parsed.mediaType } : undefined)
             res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
             res.end(JSON.stringify(result))
           } catch (e) {
@@ -936,6 +966,11 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
             // The browser's official sessions.create() returns a locally-addressable durable id.
             // Legacy host-created records may carry another id after an app restart; accepting the
             // browser-selected replacement avoids resurrecting an unsent old draft.
+            if (item.targetSessionId !== undefined && item.targetSessionId !== sessionId) {
+              res.writeHead(409, { 'content-type': 'application/json' })
+              res.end(JSON.stringify({ ok: false, error: 'overlay target mismatch' }))
+              return
+            }
             if (!DURABLE_SESSION_ID.test(sessionId)) {
               res.writeHead(409, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
               res.end(JSON.stringify({ ok: false, error: 'incoming session is not ready' }))
@@ -970,6 +1005,7 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
               path,
               name: item.name,
               bytes: current.size,
+              requestId: item.requestId,
               expiresAt: Date.now() + DRAFT_LEASE_MS,
             })
             res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
@@ -1095,6 +1131,12 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
           try {
             const payload = JSON.parse(body) as { ticket?: string; outcome?: string }
             const ticket = typeof payload.ticket === 'string' ? payload.ticket : ''
+            const previous = completedDraftTickets.get(ticket)
+            if (previous !== undefined) {
+              res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+              res.end(JSON.stringify({ ok: true, ...previous }))
+              return
+            }
             const lease = leaseFor(ticket)
             if (lease === undefined) {
               res.writeHead(404, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
@@ -1103,6 +1145,9 @@ export function apply(ctx: Context, _config: Record<string, unknown> = {}) {
             }
             const state = payload.outcome === 'draft-ready' ? 'draft-ready' : 'removed'
             draftLeases.delete(ticket)
+            completedDraftTickets.set(ticket, { entryId: lease.entryId, state })
+            if (completedDraftTickets.size > 256) completedDraftTickets.delete(completedDraftTickets.keys().next().value!)
+            if (lease.requestId !== undefined) targetedOutcomes.set(lease.requestId, { targetSessionId: lease.sessionId, state })
             res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
             res.end(JSON.stringify({ ok: true, entryId: lease.entryId, state }))
           } catch (e) {

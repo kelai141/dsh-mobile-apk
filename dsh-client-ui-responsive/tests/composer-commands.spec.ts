@@ -8,6 +8,7 @@ import {
   ADD_BUTTON_SELECTOR,
   ATTACHMENT_ROW_TITLES,
   hasComposerMenuButton,
+  isComposerMenuReplay,
   readComposerMenuCommands,
 } from '../src/client/mobile/composer-commands.ts'
 
@@ -125,8 +126,10 @@ describe('readComposerMenuCommands', () => {
     expect(fixture.surface()).toBeNull()
   })
 
-  it('页面没有合成器时返回空数组（不抛、不编）', async () => {
-    await expect(readComposerMenuCommands()).resolves.toEqual([])
+  it('未挂composer必须拒绝而非缓存空表，稍后可恢复', async () => {
+    await expect(readComposerMenuCommands()).rejects.toThrow('composer-unavailable')
+    buildComposer([{ label: 'later' }])
+    expect((await readComposerMenuCommands()).map(c => c.name)).toEqual(['later'])
   })
 
   it('读不到名字的项跳过（不猜名称）', async () => {
@@ -134,6 +137,14 @@ describe('readComposerMenuCommands', () => {
     const commands = await readComposerMenuCommands()
     expect(commands).toEqual([])
   })
+})
+
+it('marks borrowed clicks so sheet document capture does not swallow them', async () => {
+  buildComposer([{ label: 'command' }])
+  const capture = (event: Event) => { if (!isComposerMenuReplay(event)) event.stopImmediatePropagation() }
+  document.addEventListener('click', capture, true)
+  try { expect((await readComposerMenuCommands()).length).toBe(1) }
+  finally { document.removeEventListener('click', capture, true) }
 })
 
 describe('hasComposerMenuButton', () => {

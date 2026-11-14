@@ -16,19 +16,144 @@ import androidx.core.content.ContextCompat
  * 为什么要拆成独立类：入口形态（球/细条）是**窗口尺寸**不同的两种东西（球 34dp 方窗、
  * 细条 8x88dp），而窗口管理属于服务。视图层只交付一个与窗口等大的 View，服务把它塞进
  * WindowManager；触摸监听（单/双/长按、拖动）同样由服务挂 OnTouchListener。
- * 这条分界保证「换形态 = 重建窗口」的实现不被视图层偷偷改成「只换 View」。
+ * 根对象在球/条转换时保持不变，终态由服务更新有界窗口尺寸，避免截断同一指针序列。
+ *
+ * 换形过渡（2026-11 动效补齐）：新表面从 0.92 放大 + 淡入，旧表面同时淡出，两者在同一个根里
+ * 交叠 [OverlayMotionSpec.ENTRY_SWAP_MS]；旧表面在过渡结束（或被打断/移出窗口）时移除。
+ * 为什么做成「交叠」而不是先消失再出现：入口只有 34dp，一闪而过会被读成「球没了又来一个条」，
+ * 交叠才读得出是同一个物件在改形状。过渡期间触摸监听始终挂在稳定的根上（服务在根上挂 listener），
+ * 因此不会丢指针序列。时长/幅度取自 [OverlayMotionSpec]，系统关动画时直接换形不留一帧。
  *
  * @param context 取资源/颜色/density 的上下文（壳侧传 Service，/ Theme 不需要 Activity）。
- * @param style 入口形态；决定窗口尺寸与视觉，创建后不可变（换形态必须重建入口窗）。
+ * @param style 初始入口形态；形态终态切换仍须调用方同步更新窗口几何。
  */
-internal class OverlayEntryView(context: Context, val style: OverlayEntryStyle) {
+internal class OverlayEntryView(private val context: Context, style: OverlayEntryStyle) {
 
   private val density = context.resources.displayMetrics.density
+  var style: OverlayEntryStyle = style
+    private set
 
-  /** 入口视图；尺寸按形态固定，调用方直接作为窗口 contentView（窗口 = 可视，不留隐形触区）。 */
-  val view: View = when (style) {
+  private val root = FrameLayout(context).apply { clipChildren = true; clipToPadding = true }
+  private var surface: View = buildSurface(style)
+  /** 正在淡出的旧表面：换形过渡期与 surface 短暂共存，过渡结束才移除。 */
+  private var retiring: View? = null
+  private var swapGeneration = 0
+  private var attached = false
+  private var motionEnabled = false
+  private var unregisterMotionListener: (() -> Unit)? = null
+
+  /** Stable touch target: switching shape does not replace the root or its touch listener. */
+  val view: View = root
+
+  init {
+    installSurface()
+    root.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+      override fun onViewAttachedToWindow(v: View) {
+        attached = true
+        motionEnabled = DsUi.animationsEnabled(context)
+        unregisterMotionListener?.invoke()
+        unregisterMotionListener = DsUi.registerMotionListener(context) {
+          motionEnabled = DsUi.animationsEnabled(context)
+          if (!motionEnabled) finishSwap()
+        }
+        finishSwap()
+      }
+
+      override fun onViewDetachedFromWindow(v: View) {
+        attached = false
+        unregisterMotionListener?.invoke()
+        unregisterMotionListener = null
+        // 移窗不是过渡完成：立即收口，不能让淡出中的旧表面跟着下一次显示复活。
+        finishSwap()
+      }
+    })
+  }
+
+  /**
+   * Only call at a terminal shape change; caller owns the matching bounded WM geometry change.
+   *
+   * 换形走「新旧交叠」：旧表面淡出，新表面从 0.92 缩放进位。动效关闭、未 attached 或时长为 0 时
+   * 直接换形（同步移除旧表面），因此关动画的设备上不存在任何中间帧。
+   */
+  fun renderStyle(next: OverlayEntryStyle) {
+    if (next == style) { renderEdgeProgress(0f, OverlayEntryEdge.LEFT); return }
+    style = next
+    val outgoing = surface
+    val incoming = buildSurface(next)
+    surface = incoming
+    root.removeView(outgoing)
+    installSurface()
+    val durationMs = OverlayMotionSpec.entrySwapMs(reduced = !motionEnabled)
+    if (!attached || durationMs <= 0L) {
+      finishSwap()
+      return
+    }
+    // 上一轮未收口的旧表面立刻移除：只保留「当前 + 本轮旧」两层，避免连点边角堆叠。
+    finishSwap()
+    resetSurfaceTransforms(incoming)
+    incoming.alpha = 0f
+    incoming.scaleX = OverlayMotionSpec.ENTRY_DIP_SCALE
+    incoming.scaleY = OverlayMotionSpec.ENTRY_DIP_SCALE
+    root.addView(outgoing, 0, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+    retiring = outgoing
+    val generation = ++swapGeneration
+    incoming.animate().alpha(1f).scaleX(1f).scaleY(1f)
+      .setDuration(durationMs).setInterpolator(OverlayEasing.DECELERATE.interpolator()).start()
+    outgoing.animate().alpha(0f)
+      .setDuration(durationMs).setInterpolator(OverlayEasing.ACCELERATE.interpolator()).withEndAction {
+        if (generation == swapGeneration) clearRetiring()
+      }.start()
+  }
+
+  /** 换形过渡立即收口：移除旧表面、新表面写终态，不发任何后续回调。 */
+  fun finishSwap() {
+    swapGeneration++
+    clearRetiring()
+    resetSurfaceTransforms(surface)
+  }
+
+  private fun clearRetiring() {
+    val old = retiring ?: return
+    retiring = null
+    old.animate().withEndAction(null).cancel()
+    root.removeView(old)
+  }
+
+  /** 只复位换形用的两个渲染属性；拖动反馈（renderEdgeProgress）自己拥有 scale/alpha 的口径。 */
+  private fun resetSurfaceTransforms(target: View) {
+    target.animate().withEndAction(null).cancel()
+    target.alpha = 1f
+    target.scaleX = 1f
+    target.scaleY = 1f
+  }
+
+  /** Cheap reversible staged-edge feedback, kept inside existing bounds; no animator/layout loop. */
+  fun renderEdgeProgress(progress: Float, side: OverlayEntryEdge) {
+    val p = if (progress.isFinite()) progress.coerceIn(0f, 1f) else 0f
+    // 与换形过渡的分工：没有拖动量（p=0，换形刚发生的那一帧）时把这一帧让给过渡，
+    // 否则这里写的 alpha=1/scale=1 会把刚起步的淡入当帧抹平；一旦有真实拖动量，
+    // 反馈立即接管并当帧收口过渡 —— 手指就是过渡本身，不需要两套动画叠加写同一个表面。
+    if (retiring != null) {
+      if (p <= 0f) return
+      finishSwap()
+    }
+    surface.pivotX = if (side == OverlayEntryEdge.LEFT) 0f else surface.width.toFloat()
+    surface.pivotY = surface.height / 2f
+    surface.scaleX = if (style == OverlayEntryStyle.BALL) 1f - 0.28f * p else 1f
+    surface.scaleY = if (style == OverlayEntryStyle.BALL) 1f - 0.08f * p else 1f - 0.16f * p
+    surface.alpha = 1f - 0.08f * p
+  }
+
+  private fun buildSurface(style: OverlayEntryStyle): View = when (style) {
     OverlayEntryStyle.BALL -> buildBall(context)
     OverlayEntryStyle.STRIP -> buildStrip(context)
+  }
+
+  private fun installSurface() {
+    root.addView(surface, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+    root.contentDescription = UiText.t(context,
+      if (style == OverlayEntryStyle.BALL) "悬浮球" else "悬浮入口条",
+      if (style == OverlayEntryStyle.BALL) "Floating ball" else "Floating entry strip")
   }
 
   /**
@@ -90,15 +215,27 @@ internal class OverlayEntryView(context: Context, val style: OverlayEntryStyle) 
    * 随主题）：两条入口在用户眼里是同一族「贴边拉手」，新造色相会让同一块屏出现第三套配色。
    */
   private fun buildStrip(context: Context): View {
-    val stripWidthPx = dp(8)
-    val windowHeightPx = dp(88)
-    val visibleHeightPx = dp(64)
-    val strip = View(context).apply {
+    val stripWidthPx = dp(10)
+    val visibleHeightPx = dp(72)
+    // Two-tone pill: the base keeps the recall-strip family color so both edge handles read as one
+    // gesture vocabulary, and a soft inner highlight gives it a deliberate, non-scrollbar surface.
+    // Pure drawables only: no animator, no layout loop, no extra window bounds.
+    val strip = FrameLayout(context).apply {
       background = GradientDrawable().apply {
         shape = GradientDrawable.RECTANGLE
         cornerRadius = context.resources.getDimension(R.dimen.ds_radius_pill)
         setColor(OverlayTheme(context).themeColors().recallStrip)
       }
+      addView(
+        View(context).apply {
+          background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = context.resources.getDimension(R.dimen.ds_radius_pill)
+            setColor(withAlpha(ContextCompat.getColor(context, R.color.ds_text_on_accent), .55f))
+          }
+        },
+        FrameLayout.LayoutParams(dp(2), dp(28), Gravity.CENTER),
+      )
       contentDescription = UiText.t(context, "悬浮入口条", "Floating entry strip")
     }
     // 根 View 与窗口同尺寸（8x88dp）：尺寸由服务侧 WindowManager.LayoutParams 按形态给定
@@ -112,6 +249,10 @@ internal class OverlayEntryView(context: Context, val style: OverlayEntryStyle) 
       )
     }
   }
+
+  /** Single alpha source for drawable tints; avoids a second color pipeline in this view. */
+  private fun withAlpha(color: Int, alpha: Float): Int =
+    Color.argb((alpha.coerceIn(0f, 1f) * 255).toInt(), Color.red(color), Color.green(color), Color.blue(color))
 
   /** dp 换算统一走整数截断（与仓内 ballSizeDp / edgeMarginPx 同口径）。 */
   private fun dp(value: Int): Int = (value * density).toInt()
