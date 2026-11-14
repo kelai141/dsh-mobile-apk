@@ -18,6 +18,7 @@ import org.junit.Test
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.security.MessageDigest
+import java.util.concurrent.CompletableFuture
 
 /** 仅在专用模拟器验证隔离 JNI、私有 socket 与真实 A11y；手势只作用于本测试按钮。 */
 class NativeControlIpcDeviceTest {
@@ -304,6 +305,125 @@ class NativeControlIpcDeviceTest {
         assertEquals("yes", reply.getString("executed"))
         instrumentation.waitForIdleSync()
         instrumentation.runOnMainSync { assertEquals("Clicks: 1", activity.button.text.toString()) }
+      }
+    } finally {
+      instrumentation.runOnMainSync { activity.finish() }
+      instrumentation.waitForIdleSync()
+    }
+  }
+
+  @Test fun a11yWinsWithShizukuReadyAndTouchesThePointOnce() {
+    requireTestEmulator()
+    assumeTrue("双通道前提需要已授权的 Shizuku，由 MuMu 启动器显式开启",
+      InstrumentationRegistry.getArguments().getString("nativeTestShizuku") == "yes")
+    val instrumentation = InstrumentationRegistry.getInstrumentation()
+    val context = instrumentation.targetContext
+    val a11y = NativeA11yExecution()
+    val facts = NativePlatformFacts(context, a11y, { "real-only" })
+    val taps = java.util.concurrent.atomic.AtomicInteger()
+    val dispatched = java.util.concurrent.CopyOnWriteArrayList<String>()
+    val shizuku = NativeShizukuExecution(a11y)
+    // 计数只包在本用例内，用来证明同一请求没有第二次落到 Shizuku 点按路径。
+    val dual = object : NativeControlDispatcher.Platform {
+      override fun implements(plan: JSONObject): Boolean =
+        a11y.implements(plan) || shizuku.implements(plan)
+      override fun execute(callId: String, plan: JSONObject, args: JSONObject, refreshFacts: () -> Boolean,
+        authorize: () -> Boolean): CompletableFuture<JSONObject> {
+        dispatched.add(plan.optString("backend"))
+        if (plan.optString("backend") == "shizuku") taps.incrementAndGet()
+        return shizuku.execute(callId, plan, args, refreshFacts, authorize)
+      }
+    }
+    val deadline = android.os.SystemClock.elapsedRealtime() + 8_000
+    while (!ShizukuTransport.observeNativeRealTap(context)) {
+      if (android.os.SystemClock.elapsedRealtime() >= deadline) {
+        throw AssertionError("Shizuku 未就绪，双通道前提不成立：" + NativeShizukuFacts.shared.snapshot())
+      }
+      android.os.SystemClock.sleep(250)
+    }
+    val activity = instrumentation.startActivitySync(
+      Intent(context, NativeControlClickFixtureActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+    ) as NativeControlClickFixtureActivity
+    try {
+      fun buttonText(): String {
+        var text = ""
+        instrumentation.runOnMainSync { text = activity.button.text.toString() }
+        return text
+      }
+      NativeControlHost.openIsolated(context, facts, dual).use { host ->
+        // Shizuku 事实有 TTL；进入用例后仍未就绪就再观测一次，保证双通道前提是当场成立。
+        var caps = awaitAccessibility(host)
+        val channelDeadline = android.os.SystemClock.elapsedRealtime() + 8_000
+        while (caps.getJSONObject("channels").getJSONObject("shizuku").optString("functionalReady") != "yes") {
+          if (android.os.SystemClock.elapsedRealtime() >= channelDeadline) break
+          ShizukuTransport.observeNativeRealTap(context)
+          android.os.SystemClock.sleep(250)
+          caps = awaitAccessibility(host)
+        }
+        val a11yCaps = caps.getJSONObject("channels").getJSONObject("a11y")
+        val shizukuCaps = caps.getJSONObject("channels").getJSONObject("shizuku")
+        assertEquals("yes", a11yCaps.getString("enabled"))
+        assertEquals("yes", a11yCaps.getString("online"))
+        assertEquals("yes", shizukuCaps.getString("running"))
+        assertEquals("yes", shizukuCaps.getString("granted"))
+        assertEquals("yes", shizukuCaps.getString("bound"))
+        assertEquals("yes", shizukuCaps.getString("functionalReady"))
+        assertEquals("shell2000", shizukuCaps.getJSONObject("serverUid").getString("kind"))
+        val screen = caps.getJSONArray("screens").getJSONObject(0)
+        val bounds = Rect()
+        val focusDeadline = android.os.SystemClock.elapsedRealtime() + 5_000
+        var ready = false
+        do {
+          instrumentation.runOnMainSync {
+            val button = activity.button
+            val location = IntArray(2)
+            button.getLocationOnScreen(location)
+            bounds.set(location[0], location[1], location[0] + button.width, location[1] + button.height)
+            ready = activity.hasWindowFocus() && button.isShown && !bounds.isEmpty
+          }
+          if (!ready) android.os.SystemClock.sleep(100)
+        } while (!ready && android.os.SystemClock.elapsedRealtime() < focusDeadline)
+        assertTrue("test button must be visible and focused", ready)
+        assertEquals("Clicks: 0", buttonText())
+        val x = bounds.centerX()
+        val y = bounds.centerY()
+        val callId = "device-dual-channel-" + System.nanoTime()
+        val request = JSONObject().put("protocolVersion", 1).put("method", "execute")
+          .put("operation", "click").put("callId", callId)
+          .put("epoch", caps.getString("epoch")).put("screenId", "real")
+          .put("generation", screen.getString("generation"))
+          .put("args", JSONObject().put("x", x).put("y", y))
+        val first = rpc(host, request)
+        assertTrue(first.toString(), first.getBoolean("ok"))
+        assertEquals("gesture-completed", first.getString("code"))
+        assertEquals("yes", first.getString("executed"))
+        assertEquals("real", first.getString("screenId"))
+        assertEquals(listOf("a11y"), dispatched.toList())
+        assertEquals("A11y 优先时不得落到 Shizuku 点按", 0L, taps.get().toLong())
+        instrumentation.waitForIdleSync()
+        assertEquals("Clicks: 1", buttonText())
+
+        val replay = rpc(host, request)
+        assertTrue(replay.toString(), replay.getBoolean("replayed"))
+        assertEquals("gesture-completed", replay.getString("code"))
+        assertEquals("yes", replay.getString("executed"))
+        assertEquals(0L, taps.get().toLong())
+        instrumentation.waitForIdleSync()
+        assertEquals("Clicks: 1", buttonText())
+
+        val again = rpc(host, request.put("callId", "device-dual-channel-again-" + System.nanoTime()))
+        assertTrue(again.toString(), again.getBoolean("ok"))
+        assertEquals("gesture-completed", again.getString("code"))
+        assertEquals(listOf("a11y", "a11y"), dispatched.toList())
+        assertEquals(0L, taps.get().toLong())
+        instrumentation.waitForIdleSync()
+        assertEquals("同一坐标每次只点一次", "Clicks: 2", buttonText())
+        android.util.Log.i("dsh-native-device-test",
+          "dual-channel click x=" + x + " y=" + y +
+            " a11y=" + a11yCaps.getString("online") + "/" + a11yCaps.getString("enabled") +
+            " shizuku=" + shizukuCaps.getString("functionalReady") +
+            " uid=" + shizukuCaps.getJSONObject("serverUid").getString("kind") +
+            " backend=" + dispatched + " code=" + first.getString("code") + " shizukuTaps=" + taps.get())
       }
     } finally {
       instrumentation.runOnMainSync { activity.finish() }

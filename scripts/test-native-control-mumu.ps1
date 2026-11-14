@@ -4,12 +4,16 @@ param(
   [Parameter(Mandatory=$true)][string]$EvidenceDir,
   [switch]$Shizuku,
   [switch]$ShizukuDenied,
+  [switch]$DualChannel,
+  [switch]$VirtualDisplay,
   [string]$MuMuCli = 'D:/MuMuPlayer/nx_main/mumu-cli.exe',
   [string]$Adb = 'D:/Android/Sdk/platform-tools/adb.exe'
 )
 
 $ErrorActionPreference = 'Stop'
 if ($ShizukuDenied -and -not $Shizuku) { throw '撤权用例必须同时选择 Shizuku 套件。' }
+$suites = @(@($Shizuku, $DualChannel, $VirtualDisplay) | Where-Object { $_ })
+if ($suites.Count -gt 1) { throw '-Shizuku、-DualChannel、-VirtualDisplay 只能选择一个。' }
 $vm = (& $MuMuCli info --vmindex $VmIndex | Out-String | ConvertFrom-Json)
 if ($LASTEXITCODE -ne 0 -or $vm.index -ne "$VmIndex" -or $vm.name -ne $ExpectedName -or
     -not $vm.is_android_started -or $vm.adb_host_ip -ne '127.0.0.1' -or $vm.adb_port -notin 1024..65535) {
@@ -49,7 +53,14 @@ try {
   Set-SecureValue 'enabled_accessibility_services' ($others -join ':')
   Invoke-MuMuAdb @('shell','am','start','-W','-a','android.settings.SETTINGS') | Out-Null
   $testClass = 'com.dsharnessmobile.shell.nativecontrol.NativeControlIpcDeviceTest'
-  $selected = if ($Shizuku) { $testClass + '#shizukuRealTapRequiresObservedShellAndUsesTheNativePlan' } else {
+  $virtualClass = 'com.dsharnessmobile.shell.nativecontrol.NativeVirtualDisplayDeviceTest'
+  $selected = if ($VirtualDisplay) {
+    $virtualClass + '#ownedAllocationIsPublishedAndRecreatedTargetRejectsOldPlan'
+  } elseif ($DualChannel) {
+    $testClass + '#a11yWinsWithShizukuReadyAndTouchesThePointOnce'
+  } elseif ($Shizuku) {
+    $testClass + '#shizukuRealTapRequiresObservedShellAndUsesTheNativePlan'
+  } else {
     (@('appUidSocketUsesRustAndRejectsRealScreenUnderDefaultScope','realAndroidJniDeliversOnlyTheSettledJpeg',
       'accessibilityCapturesTheEmulatorDisplayThroughPrivateIpc','accessibilityReadsARealNodeAndRefusesItsReplacedReference',
       'accessibilityClicksOnceAndReplaysOnlyTheReceipt') | ForEach-Object { $testClass + '#' + $_ }) -join ','
@@ -57,14 +68,16 @@ try {
   $argsList = @('-s',$serial,'shell','am','instrument','-w','-r',
     '-e','nativeTestEmulator','mumu','-e','nativeTestCapture','yes',
     '-e','nativeTestShizukuDenied',$(if ($ShizukuDenied) {'yes'} else {'no'}),
-    '-e','nativeTestShizuku',$(if ($Shizuku) {'yes'} else {'no'}),'-e','class',$selected,
+    '-e','nativeTestShizuku',$(if ($Shizuku -or $DualChannel -or $VirtualDisplay) {'yes'} else {'no'}),
+    '-e','class',$selected,
     'com.dsharnessmobile.shell.test/androidx.test.runner.AndroidJUnitRunner')
   $proc = Start-Process -FilePath $Adb -ArgumentList $argsList -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $err -PassThru
-  if (-not $Shizuku) {
+  $captureSuite = -not ($Shizuku -or $DualChannel -or $VirtualDisplay)
+  if ($captureSuite -or $DualChannel) {
     $until = (Get-Date).AddSeconds(25)
     do {
       $proc.Refresh()
-      $captureStarted = (Get-Content -LiteralPath $log -Raw -ErrorAction SilentlyContinue) -match 'test=accessibility(?:CapturesTheEmulatorDisplayThroughPrivateIpc|ReadsARealNodeAndRefusesItsReplacedReference|ClicksOnceAndReplaysOnlyTheReceipt)\r?\nINSTRUMENTATION_STATUS_CODE: 1'
+      $captureStarted = (Get-Content -LiteralPath $log -Raw -ErrorAction SilentlyContinue) -match 'test=(?:a11yWinsWithShizukuReadyAndTouchesThePointOnce|accessibility(?:CapturesTheEmulatorDisplayThroughPrivateIpc|ReadsARealNodeAndRefusesItsReplacedReference|ClicksOnceAndReplaysOnlyTheReceipt))\r?\nINSTRUMENTATION_STATUS_CODE: 1'
       if ($captureStarted -or $proc.HasExited) { break }
       Start-Sleep -Milliseconds 100
     } while ((Get-Date) -lt $until)
@@ -75,7 +88,7 @@ try {
   if (-not $proc.WaitForExit(30000)) { throw '仪器进程未在预算内退出。' }
   $body = Get-Content -LiteralPath $log -Raw
   $body
-  $expected = if ($Shizuku) { 1 } else { 5 }
+  $expected = if ($captureSuite) { 5 } else { 1 }
   if ($proc.ExitCode -ne 0 -or $body -notmatch "OK \($expected tests?\)" -or
       ([regex]::Matches($body, '(?m)^INSTRUMENTATION_STATUS_CODE: 0\s*$')).Count -ne $expected -or
       $body -match 'INSTRUMENTATION_STATUS_CODE: -[234]|FAILURES!!!') {

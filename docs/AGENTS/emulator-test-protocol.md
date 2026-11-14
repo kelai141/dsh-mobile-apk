@@ -239,3 +239,5 @@ Settings probes read section labels after excluding injected description and che
 它在真实 Chromium 中加载当前上游 chat CSS 夹具，验证三个视口、两个输入区高度与七档距底位置，
 并关闭新增样式复现遮挡。该命令只计代码层；设备侧仍需打开真实长对话、滚动到按钮出现的位置，
 用 CDP 读取按钮与正文边界，再用 ADB 连续滚动、点击回到底部及切换输入法，保留横竖屏截图。
+
+原生控制的专用 MuMu 启动器另支持 `-DualChannel` 与 `-VirtualDisplay`，均要求预先在 Shizuku 管理页授权。前者在仪器进程启动后重绑 A11y，断言双通道就绪、点按走 A11y 且重发不再点击；后者在 A11y 关闭时验证壳侧建屏、同别名重建、旧代次明确拒绝及撤出注册。它们与 `-Shizuku` 互斥，均只计隔离组件设备证据。
