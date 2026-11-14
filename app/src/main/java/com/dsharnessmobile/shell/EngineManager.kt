@@ -1096,7 +1096,10 @@ class EngineManager(private val context: Context, private val pickToken: String?
       // 先判在场再读：缺席视同「需要刷新」。
       val existingSkill = if (skillFile.isFile) skillFile.readText() else null
       if (existingSkill?.trim() != PHONE_CONTROL_SKILL.trim()) {
-        skillFile.writeText(PHONE_CONTROL_SKILL)
+        // #1609：SKILL.md 每次启动都刷新，必须走唯一原子写入口——裸 writeText 是「截断后直写」，
+        // 写到一半被杀就留下半份纪律文案。失败语义不变：AtomicFileReplace.writeText 抛 IOException，
+        // 与旧 writeText 一样落进本函数的 catch(Throwable)，下一次启动重试。
+        AtomicFileReplace.writeText(skillFile, PHONE_CONTROL_SKILL)
         Log.i(TAG, "phone-control SKILL refreshed")
       }
       // 0.13.8 #130/V2 P1-11：标准组合的 skill-filesystem 行没有 config——预设自带的
@@ -1115,7 +1118,8 @@ class EngineManager(private val context: Context, private val pickToken: String?
             "      - !!js \"process.getBuiltinModule('node:url').fileURLToPath(new URL('skills/', baseUrl))\""
           val patched = text.replace(anchor, injected)
           if (patched != text) {
-            composition.writeText(patched)
+            // #1609：composition 是引擎装配入口，半份 YAML 会让整个预设加载失败。
+            AtomicFileReplace.writeText(composition, patched)
             Log.i(TAG, "phone-control preset: customSkillDirs injected into skill-filesystem row")
           } else {
             Log.w(TAG, "phone-control preset: skill-filesystem anchor not found; customSkillDirs not injected")
@@ -1131,8 +1135,11 @@ class EngineManager(private val context: Context, private val pickToken: String?
         Log.w(TAG, "phone-control preset skipped: shipped standard composition absent at " + shipped.absolutePath)
         return
       }
-      File(dir, "agent.cordis.yml").writeText(shipped.readText())
-      File(dir, "preset.yml").writeText(
+      // #1609：播种的两份文件同样走原子写——幂等早退判据是 preset.yml 存在，
+      // 半份 preset.yml 会让「已播种」判据成立却永远加载失败（且不再重试）。
+      AtomicFileReplace.writeText(File(dir, "agent.cordis.yml"), shipped.readText())
+      AtomicFileReplace.writeText(
+        File(dir, "preset.yml"),
         "name: 手机操控\n" +
           "description: 以无障碍语义树 / DOM 快照驱动的手机操控预设：dump → 按 ref 点击或输入 → 校验 → 再 dump；禁止盲点坐标。\n" +
           "order: 50\n",
@@ -2363,7 +2370,11 @@ class EngineManager(private val context: Context, private val pickToken: String?
       }
       val fixed = out.toString().removeSuffix("\n")
       if (changed && fixed != src) {
-        f.writeText(fixed)
+        // #1609：settings.yaml 是引擎每次启动都读的文件，也是**唯一**修复坏裸键的路径。
+        // 裸 writeText = 截断后直写：写回被杀 / 磁盘满 → 半份 YAML → 引擎 settings section
+        // 解析失败——正是这条修复要治的症状被它自己放大。改走唯一原子写入口（同文件
+        // publishFingerprint / publishOnlineIdentity 即此写法）。失败仍由本函数 catch(Throwable) 兜底。
+        AtomicFileReplace.writeText(f, fixed)
         LogCollector.log(TAG, "settings.yaml repaired: bare null key -> object (0.13.0 seed migration)")
       }
     } catch (t: Throwable) {
