@@ -129,3 +129,63 @@ describe('PanelNavDrawer：进面板时收起抽屉', () => {
     expect(h.collapseDrawer).not.toHaveBeenCalled()
   })
 })
+// 2026-11-14 审查实测：dismiss() 原本查 [data-sidebar-mask]，而遮罩的真名是
+// [data-dsh-mobile-mask]（MobileChrome.tsx 发布）。查询名写错 ⇒ mask 恒 null ⇒ 第二行就
+// return，点侧栏条目抽屉根本不收，而上面 9 条用例全绿（它们只测 sync() 的 id 跳变）。
+// 本用例钉住整条交互链：点了抽屉里的导航条目，必须真的把遮罩的 mousedown/click 打出去。
+describe('PanelNavDrawer：点抽屉条目后真的收起（遮罩真名）', () => {
+  it('点抽屉里的导航条目 ⇒ 对遮罩派发 mousedown + click（收起动作真的发生）', async () => {
+    vi.useFakeTimers()
+    setPhoneForm(true)
+    document.body.innerHTML = ''
+    const frame = document.createElement('div')
+    frame.setAttribute('data-dsh-frame', '')
+    const column = document.createElement('div')
+    column.className = 'x_sidebarCol'
+    column.innerHTML = '<button type="button" id="nav-item">插件</button>'
+    frame.appendChild(column)
+    document.body.appendChild(frame)
+    // 遮罩用上游的真名发布；这里只观察它有没有被点到。
+    const mask = document.createElement('div')
+    mask.setAttribute('data-dsh-mobile-mask', '')
+    const onMask = vi.fn()
+    mask.addEventListener('mousedown', onMask)
+    mask.addEventListener('click', onMask)
+    document.body.appendChild(mask)
+    vi.spyOn(column, 'getBoundingClientRect').mockReturnValue({
+      width: 289, height: 800, top: 0, left: 0, right: 289, bottom: 800, x: 0, y: 0,
+      toJSON: () => ({}),
+    } as DOMRect)
+    const drawer = new PanelNavDrawer({ activePanelId: () => 'plugins', collapseDrawer: vi.fn(), frame: () => frame })
+    drawer.attachNavDismiss()
+    column.querySelector<HTMLButtonElement>('#nav-item')!.click()
+    // 收起判定要等抽屉 200ms 过渡跑完（NAV_DISMISS_DELAY_MS）。
+    await vi.advanceTimersByTimeAsync(400)
+    expect(onMask).toHaveBeenCalledTimes(2)
+    drawer.detachNavDismiss()
+    vi.useRealTimers()
+  })
+
+  it('反证：遮罩不在场时不得抛错（热卸载 / 非手机形态都会走到）', async () => {
+    vi.useFakeTimers()
+    setPhoneForm(true)
+    document.body.innerHTML = ''
+    const frame = document.createElement('div')
+    frame.setAttribute('data-dsh-frame', '')
+    const column = document.createElement('div')
+    column.className = 'x_sidebarCol'
+    column.innerHTML = '<button type="button" id="nav-item">插件</button>'
+    frame.appendChild(column)
+    document.body.appendChild(frame)
+    vi.spyOn(column, 'getBoundingClientRect').mockReturnValue({
+      width: 289, height: 800, top: 0, left: 0, right: 289, bottom: 800, x: 0, y: 0,
+      toJSON: () => ({}),
+    } as DOMRect)
+    const drawer = new PanelNavDrawer({ activePanelId: () => 'plugins', collapseDrawer: vi.fn(), frame: () => frame })
+    drawer.attachNavDismiss()
+    column.querySelector<HTMLButtonElement>('#nav-item')!.click()
+    await vi.advanceTimersByTimeAsync(400)
+    drawer.detachNavDismiss()
+    vi.useRealTimers()
+  })
+})

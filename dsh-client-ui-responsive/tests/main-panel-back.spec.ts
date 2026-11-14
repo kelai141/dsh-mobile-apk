@@ -387,6 +387,30 @@ describe('C2. 页头在嵌套结构里（2026-11-13 用户实报：插件页左�
     expect(document.querySelector('[' + MAIN_PANEL_BACK_ATTR + ']')).not.toBeNull()
   })
 
+  it('「更多」屏面板卸载后必须撤掉 frame 占屏标记（否则会话页左上角没有抽屉开关）', async () => {
+    setPhoneForm(true)
+    const frame = document.createElement('div')
+    frame.setAttribute('data-dsh-frame', '')
+    const leading = document.createElement('div')
+    leading.setAttribute('data-shell-leading', '')
+    const opener = document.createElement('button')
+    opener.setAttribute('data-sidebar-opener', '')
+    leading.appendChild(opener)
+    frame.appendChild(leading)
+    document.body.appendChild(frame)
+    buildPanel('more')
+    mount = new MainPanelBackMount(vi.fn())
+    mount.attach()
+    await flush()
+    // 「更多」屏自带上游 moreBack，本实例不造按钮 ⇒ mounted 恒空。
+    expect(frame.hasAttribute(MAIN_PANEL_OPEN_ATTR)).toBe(true)
+    // React 卸载整块面板（用户从「更多」退回会话）。
+    document.querySelector('[data-plugin-panel]')!.remove()
+    await flush()
+    // 标记必须撤掉：留着它，会话页的 ☰ 会被样式藏掉，用户看不到抽屉开关。
+    expect(frame.hasAttribute(MAIN_PANEL_OPEN_ATTR)).toBe(false)
+  })
+
   it('反证：桌面形态不打标记（抽屉开关只在手机版式让位）', async () => {
     setPhoneForm(false)
     const frame = document.createElement('div')

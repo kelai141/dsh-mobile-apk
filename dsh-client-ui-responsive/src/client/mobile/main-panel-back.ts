@@ -204,7 +204,12 @@ export class MainPanelBackMount {
    * does no document-wide query at all.
    */
   private sync(): void {
-    if (this.mounted.length === 0 && document.querySelector(PANEL_SELECTOR) === null) return
+    // 快出口必须在确认没有残留面要撤之后才成立：mounted 为空不等于「上一轮什么都没写」。
+    // 「更多」屏（ownsControl）自带上游 moreBack，本实例不造按钮，所以 mounted 恒空；
+    // 面板一旦卸载，只看 mounted 就会在这里 return，frame 的占屏标记留在原地，
+    // 回到会话页后左上角抽屉开关被样式藏掉 —— 用户侧就是「开关消失了」。
+    if (this.mounted.length === 0 && this.markedHead === null
+      && document.querySelector(PANEL_SELECTOR) === null) return
     try {
       for (let index = this.mounted.length - 1; index >= 0; index -= 1) {
         const button = this.mounted[index]!

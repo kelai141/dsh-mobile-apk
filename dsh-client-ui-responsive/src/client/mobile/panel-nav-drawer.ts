@@ -119,7 +119,9 @@ export class PanelNavDrawer {
   /** 抽屉真在屏上时，用遮罩自己的 toggleSidebar 把它收回去。 */
   private dismiss(frame: Element): void {
     if (!this.drawerOnScreen(frame)) return
-    const mask = document.querySelector('[data-sidebar-mask]')
+    // 遮罩的真名是 [data-dsh-mobile-mask]（MobileChrome.tsx 发布）；查询名写错时
+    // 这里恒 null，dismiss() 第二行就 return —— 点侧栏条目抽屉不收，而单测全绿。
+    const mask = document.querySelector('[data-dsh-mobile-mask]')
     if (!(mask instanceof HTMLElement)) return
     mask.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
     mask.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
