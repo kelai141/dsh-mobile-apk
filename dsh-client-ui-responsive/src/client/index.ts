@@ -37,8 +37,10 @@ import { COMPOSER_SHEET_CSS } from './mobile/composer-sheet.css.ts'
 import { ComposerSheet } from './mobile/composer-sheet.ts'
 import { zh as sheetZh, en as sheetEn } from './mobile/composer-sheet.locales.ts'
 import { FILE_CARD_CAPSULE_CSS } from './mobile/file-card-capsule.css.ts'
-import { FileCardCapsule, type FileCardBridge } from './mobile/file-card-actions.ts'
+import { FileCardCapsule, openExternalFile, type FileCardBridge } from './mobile/file-card-actions.ts'
 import { zh as cardZh, en as cardEn, fileCardErrorKey } from './mobile/file-card-capsule.locales.ts'
+import { PreviewExternalAction } from './mobile/PreviewExternalAction.tsx'
+import { zh as previewExternalZh, en as previewExternalEn } from './mobile/preview-external.locales.ts'
 import { COMPOSER_ROW_CSS } from './composer-row.css.ts'
 import { COMPOSER_INSETS_CSS } from './composer-insets.css.ts'
 import { TO_BOTTOM_GUTTER_CSS } from './to-bottom-gutter.css.ts'
@@ -309,6 +311,19 @@ export function apply(ctx: ClientContext): void {
       })
       return () => { unbind(); capsule.detach() }
     }, 'ui-responsive: delivery file card capsule')
+  })
+
+  // Upstream owns unsupported-format detection and places this slot below its hint.
+  // Use its resolved absolutePath rather than guessing from the foreground Session.
+  ctx.inject(['locale'], (scope) => {
+    const namespace = 'androidPreviewExternal'
+    scope.effect(() => scope.locale.register(namespace, { zh: previewExternalZh, en: previewExternalEn }), 'ui-responsive: preview external copy')
+    scope.effect(() => scope.slots.inject('sidebar.right.tab.document.unpreviewable', () => scope.slots.register({
+      name: 'sidebar.right.tab.document.unpreviewable',
+      id: 'android-preview-external',
+      locale: namespace,
+      inject: () => ({ openExternal: (path: string) => openExternalFile(bridgeFace(), path) }),
+    }, PreviewExternalAction)), 'ui-responsive: unsupported preview external action')
   })
 
   // Trajectory local details panel (issue apk#67): on narrow screens the
