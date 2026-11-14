@@ -52,12 +52,17 @@ test('#1587: running and ambiguous sessions preserve all quarantine copies', asy
   assert.equal(existsSync(join(root, ID)), true)
 })
 
-test('#1587: unreadable/malformed quarantine must not become successful not-found or partially delete', async t => {
+test('#1587: malformed quarantine never becomes successful not-found', async t => {
   const { home, root } = await fixture(t)
   await writeFile(join(root, '.corrupt'), 'not a directory')
-  await assert.rejects(deleteStoredSession({ home, sessionId: ID }), { code: 'delete-failed' })
-  assert.equal(existsSync(join(root, ID)), true)
-  await rm(join(root, ID), { recursive: true })
+  // 会话本身在场：删得掉就照常删（形态异常只挡住「这个工作区里的副本」，不挡本会话）。
+  //
+  // 边界收窄的理由：旧实现在这里直接 delete-failed，于是**任意**工作区的一个杂散
+  // .corrupt 文件就让整台设备的会话都删不掉 —— 错误文案还是「隔离区不是真目录」，
+  // 用户没有任何可行动信息。实测：目标会话完好、在别的工作区，仍报 delete-failed。
+  assert.equal((await deleteStoredSession({ home, sessionId: ID })).ok, true)
+  assert.equal(existsSync(join(root, ID)), false)
+  // 一处都没命中且隔离区形态异常时，仍不得冒充 not-found（文件可能就藏在里面）。
   await assert.rejects(deleteStoredSession({ home, sessionId: ID }), { code: 'delete-failed' })
 })
 
@@ -120,9 +125,25 @@ test('#1587 negative control: omitting quarantine discovery reproduces false not
   const { home } = await fixture(t)
   const { quarantinedTo } = await quarantineStoredSession({ home, sessionId: ID })
   const source = readFileSync(new URL('../src/session-delete.js', import.meta.url), 'utf8')
-  const old = source.replace('const quarantined = await findQuarantinedDirs(root, sessionId)', 'const quarantined = []')
+  const old = source.replace(
+    'const quarantined = await findQuarantinedDirs(root, sessionId, { onProblems: (p) => quarantineProblems.push(...p) })',
+    'const quarantined = []',
+  )
   assert.ok(old !== source)
   const mutant = await import('data:text/javascript;base64,' + Buffer.from(old).toString('base64'))
   await assert.rejects(mutant.deleteStoredSession({ home, sessionId: ID }), { code: 'not-found' })
   assert.equal(existsSync(quarantinedTo), true)
+})
+test('#1587: a stray .corrupt file in an unrelated workspace must not block this session', async t => {
+  const { home, root } = await fixture(t)
+  // 无关工作区里的杂散普通文件（用户手动/旧版本遗留/同步工具/解压事故都会产生）。
+  const other = join(home, 'sessions', 'ws-unrelated')
+  await mkdir(other, { recursive: true })
+  await writeFile(join(other, '.corrupt'), 'stray file')
+  const warnings = []
+  const result = await deleteStoredSession({ home, sessionId: ID, logger: (_l, message) => warnings.push(message) })
+  assert.equal(result.ok, true)
+  assert.equal(existsSync(join(root, ID)), false)
+  // 被忽略的异常必须留痕，否则「这个工作区里的副本看得见吗」没有线索。
+  assert.equal(warnings.some((w) => w.includes('quarantine anomaly ignored')), true)
 })
