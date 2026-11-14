@@ -466,6 +466,61 @@ function isRuntimeCommandName(segment: string): boolean {
  */
 const AWK_EXEC_PAYLOAD =
   /^[ \t]*(?:[^\s]*\/)?(?:busybox[ \t]+|toybox[ \t]+)?awk\b[^;|&]*\bsystem[ \t]*\(/i
+
+/**
+ * 「命令段里出现**会执行字符串载荷**的选项」——issue #1565。
+ *
+ * 缺陷形态（修前）：`find /data/local/tmp/s.sh -exec sh {} \;` 切成一段，段首词是 `find`：
+ *   - 不是解释器名（[INTERPRETER_NAMES]），也不是包装器（[INTERPRETER_WRAPPERS]）；
+ *   - 不含任何屏幕命令词（`screencap` 在别处的文件里，或根本没出现）；
+ *   - 不含目标屏参数 ⇒ 该段判 allow。
+ * 而执行时 `find` 真的调起 `sh` 跑文件内容 ⇒ virtual-only 下读真实屏。同族入口（`-execdir` /
+ * `-ok` / `-okdir`）语义相同，只是执行位置/是否询问不同。
+ *
+ * 判据是**选项形态**而不是命令名：`-exec` 只可能是 find 家族的执行入口，别处没有正当用法；
+ * 遇到即「静态看不到被执行的命令是什么」⇒ fail-closed 判 `deny-unparsed`（与 `sh -c` 的
+ * 运行时载荷同档，理由同 [isRuntimeCommandName]）。
+ *
+ * 设备取证（MuMu x86_64 / Android 15 / toybox 0.8.11 multicall）：
+ *   `find --help` 明列 `-exec` / `-execdir` / `-ok` / `-okdir`；
+ *   `find /data/local/tmp -maxdepth 0 -ok echo {} \; < /dev/null` 打印 `[echo] /data/local/tmp (y/N):`
+ *   —— 选项确实被 find 解析（不是被当成普通 argv）。
+ *
+ * 同类入口的**评估结论**（不是漏做，见各分支注释）：
+ *   - `perl -e '<程序>' / -E`：程序文本整段在被引号里，`stripQuotedText` 抹掉后命令词面只剩
+ *     `perl` ⇒ 载荷不可见。本机（模拟器）没有 perl，但这属于 ROM 差异而非语言保证，
+ *     且 deny 的代价为零（Android 上没有合法的 perl 用法）⇒ 一并 deny。
+ *   - `sed 'e <命令>' / `s///e``：设备实测 toybox sed **不支持** `e` 命令
+ *     （`echo probe | sed 's/probe/x/;e id'` ⇒ `sed: bad pattern 'e id'@2`），当前不是活通路；
+ *     而 `sed -e '…'` 是极常见的正常写法，任何以 `-e` 为判据的 deny 都会大面积误拦 ⇒ **不加**。
+ *     若将来 ROM 换成支持 `e` 的 sed，再按「命令词 + 程序文本里出现 e 命令」单独判。
+ *   - `tar --to-command=…`：设备实测 toybox tar **没有**该选项（`tar --help` 的输出里只有
+ *     compress/decompress 一族），当前不是活通路。仍一并 deny —— 它的唯一语义就是「把每个成员
+ *     喂给一条命令」，静态判不了那条命令是什么，且本仓没有任何合法用法（`scripts/` 全树无该选项）。
+ */
+const EXEC_VECTOR_OPTION =
+  /(?:^|[ \t])(?:-exec|-execdir|-ok|-okdir)[ \t]|(?:^|[ \t])--to-command[ \t=]/
+
+/**
+ * 该段是不是「会被执行、但执行什么静态看不到」的入口（issue #1565）。
+ *
+ * 两类合一：
+ *   ① [EXEC_VECTOR_OPTION]：find 家族的执行选项与 `tar --to-command`——判据是**选项形态**，
+ *      遇到即不可判；
+ *   ② 命令词就是 `perl`：`perl -e '<程序>'` 的程序文本在引号里（`stripQuotedText` 抹掉 ⇒
+ *      命令词面只剩 `perl`），`perl /tmp/x.pl` 与 `sh /x.sh` 同为「脚本文件」形态——
+ *      两者都是运行时载荷。perl 不在 [INTERPRETER_NAMES] 里（那里是 shell 家族，`-c` 口径不同），
+ *      故在此单独收口。本仓与设备侧都没有 perl 的合法用法（模拟器实测 `which perl` 空），
+ *      deny 的误拦面为零。
+ *
+ * 刻意**不含** sed：设备实测 toybox sed 不支持 `e` 命令（见 [EXEC_VECTOR_OPTION] 上方的取证），
+ * 而 `sed -e '…'` 是极常见正常写法，以 `-e` 为判据会大面积误拦。
+ */
+export function execVectorUnparsed(segment: string): boolean {
+  if (EXEC_VECTOR_OPTION.test(segment)) return true
+  const head = firstShellWord(segment.trim()).word
+  return head.replace(/^.*\//, '') === 'perl'
+}
 /** shell glob 元字符是否出现在**引号外**（引号内的 `*`/`?` 不展开，不参与判定）。 */
 function hasUnquotedGlob(text: string): boolean {
   let quote = ''
@@ -998,6 +1053,11 @@ export function screenCommandVerdict(
     if (GLUED_LINE_CONTINUATION.test(segment)) return 'deny-unparsed'
     // 载荷不可见的解释器调用：静态判不了，fail-closed。
     if (interpreterPayloadUnparsed(bare)) return 'deny-unparsed'
+    // issue #1565：`find … -exec sh {} \;` / `tar --to-command` / `perl -e '<程序>'` 同样把
+    // 真正执行的命令藏在运行时（文件内容 / 程序文本），段首词与命令词面都看不见它 ⇒ 同档 deny。
+    // 判据看**原文**而不是 bare：`-exec` 若被引号包住（`find . '-exec' …`）find 仍会解析它
+    // （选项是 argv 级匹配，引号只影响 shell 分词），而 stripQuotedText 会把它抹掉。
+    if (execVectorUnparsed(segment)) return 'deny-unparsed'
     const options = displayOptionsIn(bareWords)
     if (MALFORMED_DISPLAY_OPTION.test(bare)) return 'deny-uncertified-target'
     const families = SCREEN_COMMAND_FAMILIES.filter(

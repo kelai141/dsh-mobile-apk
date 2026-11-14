@@ -2134,6 +2134,106 @@
       ],
       "expect": "allow",
       "why": "命令位置的 ANSI-C/本地化展开不受静态词面认证；参数位置及可证明的普通命令保持原有行为。"
+    },
+    {
+      "name": "S-24a find -exec 载荷不可见必须判拒（#1565）",
+      "command": "find /data/local/tmp/s.sh -exec sh {} \\;",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "issue #1565 的原样复现：第一段 screencap 在文件里（引号/文件外都看不见），第二段段首是 find——既非解释器也非屏幕命令词、无 -d ⇒ 修前 allow。执行时 find 真的调起 sh 跑文件内容，screencap 读 display 0。设备取证：toybox find --help 明列 -exec/-execdir/-ok/-okdir；find … -ok echo {} \\; 实测打印 [echo] … (y/N): 证明选项被解析。"
+    },
+    {
+      "name": "S-24b find -execdir 同族",
+      "command": "find /sdcard -name '*.sh' -execdir sh {} \\;",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "与 S-24a 同语义，只在目标文件所在目录执行：漏了这条就等于留一个同义入口。"
+    },
+    {
+      "name": "S-24c find -ok 同族",
+      "command": "find /sdcard -maxdepth 1 -ok sh {} \\;",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "与 S-24a 同语义，只多一次询问（-ok 读 stdin）；载荷同样不可见。"
+    },
+    {
+      "name": "S-24d find -okdir 同族",
+      "command": "find /sdcard -mindepth 1 -okdir sh {} \\;",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "四个执行选项里最后一个拼写；判据按选项族取，不按命令名取，故四条同拒。"
+    },
+    {
+      "name": "S-24e tar --to-command 同族",
+      "command": "tar -xf /data/local/tmp/a.tar --to-command=sh",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "把每个成员喂给一条命令，静态判不了那条命令是什么。设备实测 toybox tar 无该选项（当前非活通路），仍一并 deny：本仓 scripts/ 全树无该选项，误拦面为零。"
+    },
+    {
+      "name": "S-24f perl -e 程序文本在引号里",
+      "command": "perl -e 'system(\"screencap -p /sdcard/real.png\")'",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "deny-unparsed",
+      "why": "perl 不是 shell 家族（INTERPRETER_NAMES 的 -c 口径不适用），程序文本整段在引号里被 stripQuotedText 抹掉 ⇒ 修前命令词面只剩 perl、families 空 ⇒ allow。Android 上没有 perl 的合法用法（模拟器 which perl 为空），故按段首命令词 deny。"
+    },
+    {
+      "name": "S-24g 对照 无执行选项的 find 必须放行",
+      "command": "find /sdcard -name '*.png'",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "判据锚定「执行选项」而不是命令名 find：普通查找没有任何运行时载荷，属正常用途，不得误拦。"
+    },
+    {
+      "name": "S-24h 对照 find -print 是非执行动作",
+      "command": "find /sdcard -name '*.png' -print",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "同上：-print/-delete 之类动作不执行字符串命令，误拦会让正常脚本全废。"
+    },
+    {
+      "name": "S-24i 对照 sed -e 必须放行（刻意不纳入）",
+      "command": "sed -e 's/a/b/' /sdcard/a.txt",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "issue 提到 sed 的 e 命令。设备实测 toybox sed 不支持 e（echo probe | sed 's/probe/x/;e id' ⇒ sed: bad pattern 'e id'@2），当前不是活通路；而 sed -e 是极常见正常写法 ⇒ 刻意不加判据。将来 ROM 换成支持 e 的 sed 时必须按「命令词 sed + 程序文本含 e 命令」单独判，不能以 -e 为判据。"
+    },
+    {
+      "name": "S-24j 对照 grep 的 -e 同理放行",
+      "command": "grep -e foo /sdcard/a.txt",
+      "ownedTargets": [
+        "7",
+        "11529215046816944610"
+      ],
+      "expect": "allow",
+      "why": "与 S-24i 同一条纪律：-e 在 grep/sed 上是「表达式」选项，以它为判据会大面积误拦。"
     }
   ]
 }
