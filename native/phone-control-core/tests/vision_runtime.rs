@@ -615,6 +615,7 @@ fn direct_ticket(
         height,
         rotation: 0,
         generation,
+        allocation: None,
     };
     let plan = DispatchPlan {
         op: if region.is_some() { "readRegion" } else { "screenshot" },

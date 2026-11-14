@@ -478,12 +478,17 @@ impl<J: Journal> Controller<J> {
             }
         }
         for (alias, screen) in &facts.screens {
+            let allocation = match allocation_wire(screen.allocation_id.as_ref()) {
+                Ok(value) => value,
+                Err(detail) => return error_json("invalid-facts", detail, None),
+            };
             let screen_facts = ScreenFacts::new(
                 screen.display_id,
                 screen.width,
                 screen.height,
                 screen.rotation,
-            );
+            )
+            .with_allocation(allocation);
             if let Err(error) = policy.observe_screen(alias, screen_facts) {
                 return error_json(error.code(), error.detail(), None);
             }
@@ -1334,6 +1339,22 @@ fn u64_wire(value: u64) -> String {
     value.to_string()
 }
 
+/// 解析可选的平台分配身份。只接受十进制/0x 十六进制字符串或非负整数，
+/// 其它形态（布尔、浮点、负数、超长文本）一律拒绝而不是猜值。
+fn allocation_wire(value: Option<&Value>) -> Result<Option<u64>, String> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => parse_id_string(text)
+            .map(Some)
+            .ok_or_else(|| "allocationId must be a decimal or 0x-prefixed hex string".to_owned()),
+        Some(Value::Number(number)) => number
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| "allocationId must be a non-negative integer".to_owned()),
+        Some(_) => Err("allocationId must be a decimal or hex string".to_owned()),
+    }
+}
+
 fn optional_object<'a>(request: &'a Map<String, Value>, key: &str) -> Result<Option<&'a Value>, String> {
     match request.get(key) {
         None | Some(Value::Null) => Ok(None),
@@ -1601,6 +1622,10 @@ struct ScreenFactsWire {
     width: u32,
     height: u32,
     rotation: u8,
+    /// 可选平台分配身份。只用于识别同 alias/displayId/几何下的重建，
+    /// 不参与 generation 分配，也不进入 capabilities 输出。
+    #[serde(default)]
+    allocation_id: Option<Value>,
 }
 
 #[derive(Deserialize)]

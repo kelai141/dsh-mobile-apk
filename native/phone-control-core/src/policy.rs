@@ -6,8 +6,10 @@
 //!
 //! 稳定规则：
 //! - revision 只在事实变化时增加；同一事实的时间刷新不改变 revision。
-//! - 屏幕 alias 的 displayId、逻辑尺寸或 rotation 变化，以及销毁后重建，都会
-//!   得到新的 generation。旧计划不能跨 generation 复活。
+//! - 屏幕 alias 的 displayId、逻辑尺寸、rotation 或平台分配身份变化，以及销毁
+//!   后重建，都会得到新的 generation。旧计划不能跨 generation 复活。
+//! - 平台分配身份可选：缺席时沿用几何判据；一旦上报，同 alias/displayId/几何
+//!   下身份变化即视为另一块屏，不能被旧 generation 复用。
 //! - unknown 事实保持 unknown，不折平成 false。无法证明可用时拒绝派发。
 //! - browser* 与 web* 是应用内工作台目标，不套 Android 显示屏范围门。
 //! - 基础屏幕操作优先 A11y；Shizuku 兜底必须携带明确的“未派发”证据和限定原因。
@@ -135,11 +137,23 @@ pub struct ScreenFacts {
     pub width: u32,
     pub height: u32,
     pub rotation: u8,
+    /// 平台分配的显示器身份（例如虚拟屏每次新建时分配的 token）。
+    ///
+    /// 平台可能回收旧 displayId，并在同一 alias、同一 displayId、同一几何上
+    /// 重建另一块屏；只有几何无法区分两者。带上该身份后，身份变化即视为新屏。
+    /// 缺席表示平台没有可用的分配身份，按原几何判据处理。
+    pub allocation: Option<u64>,
 }
 
 impl ScreenFacts {
     pub const fn new(display_id: i32, width: u32, height: u32, rotation: u8) -> Self {
-        Self { display_id, width, height, rotation }
+        Self { display_id, width, height, rotation, allocation: None }
+    }
+
+    /// 附带平台分配身份的事实。身份只参与比对新旧屏，generation 仍由本模块分配。
+    pub const fn with_allocation(mut self, allocation: Option<u64>) -> Self {
+        self.allocation = allocation;
+        self
     }
 }
 
@@ -152,6 +166,8 @@ pub struct ScreenBinding {
     pub height: u32,
     pub rotation: u8,
     pub generation: u64,
+    /// 参与比对的平台分配身份；不进入 capabilities 输出。
+    pub allocation: Option<u64>,
 }
 
 /// 某通道声称支持哪些 op。整体未知与“已探明不支持”分开。
@@ -634,6 +650,7 @@ impl PolicyState {
                 && current.width == facts.width
                 && current.height == facts.height
                 && current.rotation == facts.rotation
+                && current.allocation == facts.allocation
             {
                 return Ok(current.clone());
             }
@@ -645,6 +662,7 @@ impl PolicyState {
                 height: facts.height,
                 rotation: facts.rotation,
                 generation,
+                allocation: facts.allocation,
             };
             self.screens.insert(alias.to_owned(), next.clone());
             self.revision = self.revision.saturating_add(1);
@@ -661,6 +679,7 @@ impl PolicyState {
             height: facts.height,
             rotation: facts.rotation,
             generation,
+            allocation: facts.allocation,
         };
         self.screens.insert(alias.to_owned(), binding.clone());
         self.revision = self.revision.saturating_add(1);
@@ -1088,6 +1107,11 @@ fn validate_screen_facts(alias: &str, facts: ScreenFacts) -> Result<(), PolicyEr
     if alias == REAL_ALIAS {
         if facts.display_id != REAL_DISPLAY_ID {
             return Err(PolicyError::new("invalid-screen", "real screen must use display 0"));
+        }
+        if facts.allocation.is_some() {
+            // 真实屏没有“重新分配”的语义；带身份的真实屏事实一律拒绝，
+            // 保证真实屏播报与既有调用回放行为不变。
+            return Err(PolicyError::new("invalid-screen", "real screen cannot carry an allocation identity"));
         }
     } else if facts.display_id <= REAL_DISPLAY_ID {
         return Err(PolicyError::new("invalid-screen", "virtual screen needs a positive display id"));

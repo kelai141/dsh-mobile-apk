@@ -63,7 +63,7 @@ revision、scope generation、authorization generation 与屏幕 generation 都�
     "scope": "virtual-only",
     "observedAtMs": 1760000000000,
     "screens": {
-      "virtual-1": {"displayId": 41, "width": 1080, "height": 1920, "rotation": 0}
+      "virtual-1": {"displayId": 41, "width": 1080, "height": 1920, "rotation": 0, "allocationId": "7"}
     },
     "a11y": {
       "enabled": "yes",
@@ -97,6 +97,14 @@ scope 只接受 virtual-only、real-only、all；缺省或损坏值按 virtual-o
 screens 是本次已知屏幕的完整集合：消失的 alias 视为销毁，重建会分配新
 generation；displayId、宽高或 rotation 变化也分配新 generation。仅刷新
 observedAtMs 不增加 revision。
+
+`allocationId` 可选，是平台提供的显示器分配身份（十进制或 `0x` 十六进制
+字符串，也接受非负整数）。它用于区分「同一 alias、同一 displayId、同一几何
+但实际换了一块屏」的回收重建：身份变化即分配新 generation，旧计划在
+commit 时被判 `target-generation-mismatch`。generation 仍只由 Rust 分配，
+`allocationId` 不会出现在 capabilities 输出里。缺省时沿用几何判据；真实屏
+不接受该字段（`invalid-screen`）。格式非法的值整条事实被拒（`invalid-facts`），
+不做猜测。
 
 rotation 的单位是 Android Surface 旋转枚举值，不是角度：0、1、2、3 依次对应
 Surface.ROTATION_0、ROTATION_90、ROTATION_180、ROTATION_270（即 0、90、180、

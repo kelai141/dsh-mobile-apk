@@ -90,6 +90,68 @@ fn screen_identity_changes_allocate_generations() {
 }
 
 #[test]
+fn allocation_identity_distinguishes_recycled_screens_with_equal_geometry() {
+    let mut state = PolicyState::new(1);
+    state.set_scope(Scope::VirtualOnly);
+    let first = state
+        .observe_screen("virtual-1", ScreenFacts::new(41, 1080, 1920, 0).with_allocation(Some(7)))
+        .unwrap();
+    state.set_a11y_facts(a11y_ready(&["click"], &[(41, true)]));
+    let plan = state
+        .plan("click", TargetRequest::Virtual("virtual-1".into()))
+        .unwrap();
+
+    // 同 alias、同 displayId、同几何，但换了一次平台分配：必须是另一块屏。
+    let recycled = state
+        .observe_screen("virtual-1", ScreenFacts::new(41, 1080, 1920, 0).with_allocation(Some(8)))
+        .unwrap();
+    assert_ne!(recycled.generation, first.generation);
+    assert_eq!(recycled.allocation, Some(8));
+    assert_eq!(
+        state.revalidate(&plan).unwrap_err().code(),
+        "target-generation-mismatch",
+        "an old plan must not survive a recycled allocation"
+    );
+
+    // 同身份重复上报保持稳定，不分配新 generation。
+    let again = state
+        .observe_screen("virtual-1", ScreenFacts::new(41, 1080, 1920, 0).with_allocation(Some(8)))
+        .unwrap();
+    assert_eq!(again.generation, recycled.generation);
+}
+
+#[test]
+fn allocation_identity_is_optional_and_absent_keeps_geometry_rule() {
+    let mut state = PolicyState::new(1);
+    let plain = virtual_screen(&mut state, "virtual-1", 41);
+    let same = virtual_screen(&mut state, "virtual-1", 41);
+    assert_eq!(same, plain, "platforms without an identity keep the old generation");
+
+    // 先缺席、后上报同一几何：身份加入属于事实变化，应换 generation。
+    let with_id = state
+        .observe_screen("virtual-1", ScreenFacts::new(41, 1080, 1920, 0).with_allocation(Some(1)))
+        .unwrap()
+        .generation;
+    assert_ne!(with_id, plain);
+    // 之后又回到缺席，同样不能复用旧 generation。
+    let dropped = virtual_screen(&mut state, "virtual-1", 41);
+    assert_ne!(dropped, with_id);
+}
+
+#[test]
+fn real_screen_rejects_allocation_identity() {
+    let mut state = PolicyState::new(1);
+    assert_eq!(
+        state
+            .observe_screen("real", ScreenFacts::new(0, 1080, 2400, 0).with_allocation(Some(1)))
+            .unwrap_err()
+            .code(),
+        "invalid-screen"
+    );
+    real_screen(&mut state);
+}
+
+#[test]
 fn scope_wire_is_serde_compatible_and_corruption_is_minimal() {
     for good in ["virtual-only", "real-only", "all"] {
         let scope = Scope::from_wire(Some(good));

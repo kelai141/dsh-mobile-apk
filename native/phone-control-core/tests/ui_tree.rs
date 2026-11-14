@@ -18,6 +18,7 @@ fn binding(alias: &str, display: i32, generation: u64) -> ScreenBinding {
         height: 2400,
         rotation: 0,
         generation,
+        allocation: None,
     }
 }
 

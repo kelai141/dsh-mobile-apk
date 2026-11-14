@@ -117,6 +117,12 @@ fn facts(scope: &str, rotation: u8, a11y_online: &str) -> Value {
     })
 }
 
+fn facts_with_allocation(scope: &str, allocation: Value) -> Value {
+    let mut input = facts(scope, 0, "yes");
+    input["facts"]["screens"]["virtual-1"]["allocationId"] = allocation;
+    input
+}
+
 fn publish_default<J: Journal>(controller: &mut Controller<J>) -> Value {
     call(controller, facts("all", 0, "yes"))
 }
@@ -939,6 +945,64 @@ fn concurrent_initialize_never_replaces_the_first_session() {
         }
     }
     let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn recycled_allocation_invalidates_a_prepared_plan() {
+    let mut controller = controller();
+    assert_eq!(call(&mut controller, facts_with_allocation("all", json!("7")))["ok"], true);
+    let prepared = prepare(&mut controller, "recycle");
+    assert_eq!(prepared["code"], "prepared", "{prepared}");
+
+    // 同 alias、同 displayId、同几何，只有平台分配身份变了。
+    assert_eq!(call(&mut controller, facts_with_allocation("all", json!("8")))["ok"], true);
+    let denied = call(
+        &mut controller,
+        json!({"protocolVersion": PROTOCOL_VERSION, "kind": "commit", "callId": "recycle"}),
+    );
+    assert_eq!(denied["ok"], false);
+    assert_eq!(denied["code"], "target-generation-mismatch", "{denied}");
+}
+
+#[test]
+fn allocation_identity_stays_out_of_the_wire_contract() {
+    let mut controller = controller();
+    assert_eq!(call(&mut controller, facts_with_allocation("all", json!("0x2a")))["ok"], true);
+    let capabilities = call(
+        &mut controller,
+        json!({"protocolVersion": PROTOCOL_VERSION, "kind": "capabilities"}),
+    );
+    let screen = &capabilities["screens"][0];
+    assert_eq!(screen["displayId"], 41);
+    assert!(screen["generation"].is_string());
+    assert!(screen.get("allocationId").is_none(), "{screen}");
+}
+
+#[test]
+fn malformed_allocation_identity_is_rejected_without_guessing() {
+    let mut controller = controller();
+    for bad in [json!(true), json!(-1), json!(1.5), json!(""), json!("12x"), json!("0x"), json!(" ")] {
+        let response = call(&mut controller, facts_with_allocation("all", bad.clone()));
+        assert_eq!(response["ok"], false, "{bad} must be refused");
+        assert_eq!(response["code"], "invalid-facts", "{bad}: {response}");
+    }
+    // 拒绝后不留下半登记屏幕。
+    let capabilities = call(
+        &mut controller,
+        json!({"protocolVersion": PROTOCOL_VERSION, "kind": "capabilities"}),
+    );
+    assert_eq!(capabilities["screens"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn real_screen_cannot_replay_with_an_allocation_identity() {
+    let mut controller = controller();
+    let mut input = facts("all", 0, "yes");
+    input["facts"]["screens"]["real"] = json!({"displayId":0,"width":1080,"height":2400,"rotation":0});
+    assert_eq!(call(&mut controller, input.clone())["ok"], true);
+    input["facts"]["screens"]["real"]["allocationId"] = json!("1");
+    let refused = call(&mut controller, input);
+    assert_eq!(refused["code"], "invalid-screen", "{refused}");
 }
 
 #[cfg(unix)]
