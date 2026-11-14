@@ -953,6 +953,7 @@ fn recycled_allocation_invalidates_a_prepared_plan() {
     assert_eq!(call(&mut controller, facts_with_allocation("all", json!("7")))["ok"], true);
     let prepared = prepare(&mut controller, "recycle");
     assert_eq!(prepared["code"], "prepared", "{prepared}");
+    let old_generation = prepared["plan"]["generation"].clone();
 
     // 同 alias、同 displayId、同几何，只有平台分配身份变了。
     assert_eq!(call(&mut controller, facts_with_allocation("all", json!("8")))["ok"], true);
@@ -962,6 +963,13 @@ fn recycled_allocation_invalidates_a_prepared_plan() {
     );
     assert_eq!(denied["ok"], false);
     assert_eq!(denied["code"], "target-generation-mismatch", "{denied}");
+    let stale = call(&mut controller, json!({
+        "protocolVersion": PROTOCOL_VERSION, "kind": "prepare", "callId": "recycle-stale",
+        "operation": "click", "screenId": "virtual-1", "generation": old_generation,
+        "epoch": "900", "args": {"x": 3, "y": 4}
+    }));
+    assert_eq!(stale["code"], "generation-mismatch", "{stale}");
+    assert_eq!(stale["executed"], "no", "{stale}");
 }
 
 #[test]

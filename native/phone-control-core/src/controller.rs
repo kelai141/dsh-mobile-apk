@@ -640,8 +640,8 @@ impl<J: Journal> Controller<J> {
         if let Some(expected) = generation.as_ref().and_then(|value| value.parse::<u64>().ok()) {
             match plan.screen() {
                 Some(binding) if binding.generation == expected => {}
-                Some(_) => return error_json("generation-mismatch", "screen generation does not match", screen_id.as_deref()),
-                None => return error_json("generation-mismatch", "this target has no screen generation", screen_id.as_deref()),
+                Some(_) => return rejection_json("generation-mismatch", "screen generation does not match", screen_id.as_deref()),
+                None => return rejection_json("generation-mismatch", "this target has no screen generation", screen_id.as_deref()),
             }
         }
         if let Err(error) = validate_args(&self.policy, &plan, &args) {
@@ -1100,7 +1100,7 @@ impl<J: Journal> Controller<J> {
         };
         if let (Some(explicit), Some(effective)) = (requested_generation, effective_generation) {
             if explicit != effective {
-                return Err(error_json(
+                return Err(rejection_json(
                     "generation-mismatch",
                     "screen generation does not match",
                     screen_alias(operation, &target),
