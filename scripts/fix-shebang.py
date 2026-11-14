@@ -11,22 +11,27 @@ B. 裸 `#!/usr/bin/env <cmd>` 形式（issue apk#83：node 包 bin 脚本的标�
 
 只处理 64 字节头含 '#!' 的小文件；二进制与现有脚本零触碰。
 
-用法：python fix-shebang.py <usr_root> [<new_prefix>]
+用法：python fix-shebang.py <usr_root> [<new_prefix>] [<manifest_path>] [--manifest-only]
+
+--manifest-only：只重扫并写出脚本清单，不改任何文件。构建链在**归档前**用它刷新一次，
+使清单反映最终树（第 6 步之后还会写 usr/bin 下的 shim、并做清单驱动的裁剪）。
 """
 import os
 import sys
 
 
 def main():
-    usr = sys.argv[1]
-    new_prefix = sys.argv[2] if len(sys.argv) > 2 else '/data/user/0/com.dsharnessmobile.shell/files/usr'
+    args = [a for a in sys.argv[1:] if a != '--manifest-only']
+    manifest_only = '--manifest-only' in sys.argv
+    usr = args[0]
+    new_prefix = args[1] if len(args) > 1 else '/data/user/0/com.dsharnessmobile.shell/files/usr'
     # 第三个参数（可选）：把「确实是文本脚本」的相对路径清单写到这个文件。
     #
     # 为什么要有清单：设备侧的首启前缀重写必须扫全树才能判断哪些文件是脚本，
     # 而慢文件系统上每次 lstat 要几毫秒，4.2 万条目就是十几分钟（实测见
     # docs/NATIVE-PREFIX-REWRITE-COST-2026-11-11.md）。构建期这里本来就要逐个打开
     # 这些文件读头，顺手记下清单，运行时就能只按清单校验，不必再遍历整棵树。
-    manifest_path = sys.argv[3] if len(sys.argv) > 3 else None
+    manifest_path = args[2] if len(args) > 2 else None
     manifest = []
     old_prefix = '/data/data/com.termux/files/usr'
     dirs = [os.path.join(usr, 'bin'), os.path.join(usr, 'libexec'), os.path.join(usr, 'lib')]
@@ -50,6 +55,8 @@ def main():
                         continue
                     if manifest_path is not None:
                         manifest.append(os.path.relpath(p, usr).replace(os.sep, '/'))
+                    if manifest_only:
+                        continue
                     with open(p, 'r', encoding='utf-8', errors='replace') as f:
                         text = f.read()
                     rewritten = text

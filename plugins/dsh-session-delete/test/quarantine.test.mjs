@@ -23,7 +23,7 @@ import {
   findSessionDir,
   quarantineStoredSession,
   sessionsRoot,
-} from '../src/session-delete.js'
+} from '../lib/session-delete.js'
 
 const ID = 'session-12345678-1234-4abc-8def-1234567890ab'
 const OTHER = 'session-aaaabbbb-cccc-4ddd-8eee-ffff00001111'

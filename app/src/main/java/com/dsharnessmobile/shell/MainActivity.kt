@@ -32,6 +32,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.NotificationCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.webkit.WebViewCompat
@@ -78,6 +79,8 @@ class MainActivity : ComponentActivity() {
   private var webSystemBottomInset = 0
   private var webSystemTopInset = 0
   private var webImeBottomInset = 0
+  /** 上一次投递给页面的 composer 位移高度（CSS px），用于动画期逐帧推送去重。 */
+  private var lastComposerImeCssPx = -1
   /** apk #182-2：横屏 + 侧边挖孔（short edge = 左右）时页面需要左右 inset 才能避让。 */
   private var webSystemLeftInset = 0
   private var webSystemRightInset = 0
@@ -731,6 +734,39 @@ class MainActivity : ComponentActivity() {
       insets
     }
     ViewCompat.requestApplyInsets(root)
+    // 键盘**弹出**动画期间逐帧推 IME 高度。
+    // setOnApplyWindowInsetsListener 拿到的 IME inset 是跳变的：动画进行中它保持旧值，
+    // 动画走完才一次性归零/到位，卡片因此总是慢半拍才吸上去。onProgress 提供的是插值，
+    // 每帧一次，卡片就能跟着键盘一起走。收起方向另有 focusout 兜底（见 ComposerImeOffset）。
+    ViewCompat.setWindowInsetsAnimationCallback(
+      root,
+      object : WindowInsetsAnimationCompat.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+        override fun onStart(
+          animation: WindowInsetsAnimationCompat,
+          bounds: WindowInsetsAnimationCompat.BoundsCompat,
+        ): WindowInsetsAnimationCompat.BoundsCompat {
+          if (animation.typeMask and WindowInsetsCompat.Type.ime() != 0) {
+            // 动画一开头就按**终点**推一次，卡片立刻贴到位。
+            // 之前把推送放在 onEnd，等于让卡片白等一整个键盘动画时长才动。
+            // upperBound 是 androidx 的 Insets（物理 px），目标高度直接取 .bottom。
+            pushComposerImePx(bounds.upperBound.bottom)
+          }
+          return bounds
+        }
+
+        override fun onProgress(
+          insets: WindowInsetsCompat,
+          runningAnimations: MutableList<WindowInsetsAnimationCompat>,
+        ): WindowInsetsCompat = insets
+
+        override fun onEnd(animation: WindowInsetsAnimationCompat) {
+          if (animation.typeMask and WindowInsetsCompat.Type.ime() == 0) return
+          // 动画落定后补推一次终值，防 onStart 的 upperBound 与最终 insets 有差。
+          val settled = ViewCompat.getRootWindowInsets(root)
+          pushComposerImePx(settled?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0)
+        }
+      },
+    )
     configureWebView()
     // §2.4（0.14.1 块C）：内核版本必须在**首启路径**上落盘，不只进诊断包——老设备白屏时
     // 页面根本跑不起来，用户拿不到版本就无法自助；落 boot-diag.log 后 `run-as cat` 即可取。
@@ -2122,7 +2158,7 @@ class MainActivity : ComponentActivity() {
   private fun pushWebInsets(view: WebView = webView) {
     if (!pageUiActive || view !== webView) return
     try {
-      view.evaluateJavascript(
+      val insetsScript =
         "(function(){var root=document.documentElement;if(!root)return;var top='" + webSystemTopInset +
           "px';var system='" + webSystemBottomInset +
           "px';var navbar='" + webNavBarBottomInset +
@@ -2135,11 +2171,39 @@ class MainActivity : ComponentActivity() {
           "'--dsh-android-navbar-bottom',navbar);root.style.setProperty('--dsh-android-ime-bottom',ime);" +
           "root.style.setProperty('--dsh-android-system-left',left);" +
           "root.style.setProperty('--dsh-android-system-right',right);" +
-          "})()",
-        null,
-      )
+          "})()"
+      // #197 机制① 的真机残留：`webView.setPadding` 改的是 View 的 padding，不改
+      // WebView 的 CSS 布局视口——IME 弹出时 innerHeight / visualViewport /
+      // VirtualKeyboard 三者全部恒定（0.14.11 真机实测 873 / 873 / 0），页面拿不到
+      // 任何键盘信号；而 `--dsh-android-ime-bottom` 只有虚拟屏键条在消费，主界面没有
+      // 消费者。壳侧已知道 IME 高度，就直接把 composer 抬到键盘上沿，别指望页面自己让位。
+      // 与上面的变量推送合成一次 IPC：insets 变化时 WebView 侧只排一次队列。
+      // composer 位移每次照推：onStart 已经按终点推过一次，这里同值会被去重跳过；
+      // 不能再拿「动画进行中」当抑制条件——那是靠 onEnd 复位的，而系统取消动画时
+      // onEnd 不会触发，标志会永远卡住，卡片从此再也回不来。
+      lastComposerImeCssPx = webImeBottomInset
+      view.evaluateJavascript(insetsScript + ";" + ComposerImeOffset.script(webImeBottomInset), null)
     } catch (_: Exception) {
       // 页面/WebView 尚未就绪：onPageFinished 会补推当前缓存值。
+    }
+  }
+
+  /**
+   * 键盘动画期间逐帧推送 composer 位移。
+   *
+   * `setOnApplyWindowInsetsListener` 收到的 IME inset 是跳变的（动画走完才到位），
+   * 只靠它卡片会慢半拍。`WindowInsetsAnimationCompat.Callback.onProgress` 给的是插值，
+   * 每帧一次；相同高度不重复投递，一帧键盘动画通常只有十几帧真正变化。
+   */
+  private fun pushComposerImePx(imePhysicalPx: Int) {
+    if (!pageUiActive || !webViewReady) return
+    val css = pxToCssPx(imePhysicalPx, resources.displayMetrics.density)
+    if (css == lastComposerImeCssPx) return
+    lastComposerImeCssPx = css
+    try {
+      webView.evaluateJavascript(ComposerImeOffset.script(css), null)
+    } catch (_: Exception) {
+      // 页面尚未就绪：动画结束后的 insets 回调会补推终值。
     }
   }
 

@@ -138,6 +138,12 @@ export const MOBILE_FORM_CSS: string = `
   [data-dsh-frame][data-dsh-header-sidebar-toggle] > [data-shell-leading] [data-sidebar-opener] {
     display: none;
   }
+  /* 主面板（左侧栏「插件」等）占屏时同理：那一屏的左上角该是「返回会话」，不是抽屉开关。
+     判据由 mobile/main-panel-back.ts 写在 frame 上（它正是注入返回键的那个模块），
+     两处共用同一个属性，不存在「按钮在、开关也在」的中间态。 */
+  [data-dsh-frame][data-dsh-main-panel-open] > [data-shell-leading] [data-sidebar-opener] {
+    display: none;
+  }
 
   /* Anchored on upstream's own attribute: CSS attribute-substring matching is
      case-sensitive and the real class is widthHandle (capital H), so a

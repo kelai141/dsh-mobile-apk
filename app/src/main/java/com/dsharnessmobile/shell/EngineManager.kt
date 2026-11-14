@@ -2578,6 +2578,13 @@ class EngineManager(private val context: Context, private val pickToken: String?
     return false
   }
 
+  /**
+   * 仅看本进程托管的子进程句柄是否活着（不退回端口可达性兜底）。
+   * 用于「端口归属」判据：[engineProcessAlive] 在无句柄时以端口可达性兜底，
+   * 对 DEGRADED_HTTP（端口必然可连）恒为 true，会让「端口被他人占用」否决永不触发（#1576）。
+   */
+  internal fun trackedChildAlive(): Boolean = engineProcess?.isAlive == true
+
   /** Activity boot polling also waits for another manager's accepted pre-spawn request.
    * This is separate from process liveness: watchdog/ownership callers must never
    * treat an in-flight request as evidence that a child exists. */

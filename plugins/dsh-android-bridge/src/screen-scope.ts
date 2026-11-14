@@ -449,8 +449,8 @@ const PAYLOAD_SLOT_TAIL = /(?:^|[ \t])(?:-[^\s]*c|eval|trap)[ \t]+$/
 
 function isRuntimeCommandName(segment: string): boolean {
   const head = firstShellWord(segment.trim()).word
-  // `$'…'` / `$"…"` 是 **ANSI-C 引号**（静态字面量），不是变量引用 —— 不得误拦（S-7c）。
-  if (head.startsWith('$\'') || head.startsWith('$"')) return false
+  // #1610：ANSI-C 引号会解码转义，本地化引号会翻译文本；未实现这些展开时，
+  // 词面不能证明执行的命令身份。与变量命令同样 fail-closed，不能只剥引号后放行。
   return head.startsWith('$') || head.startsWith('`')
 }
 

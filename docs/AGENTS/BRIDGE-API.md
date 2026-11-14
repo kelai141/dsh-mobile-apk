@@ -28,7 +28,7 @@ The native console callback `window.__consoleInsets(top, bottom, ime)` uses CSS 
 
 ### 2.1 Root状态、维护与结果
 
-rootGrantState返回有效AI授权（raw switch且当前versionCode consent），rootAccessState仅读应用su状态，不触发弹窗。requestRootAccess显式发起有界真实UID检测，不保证管理器弹窗；setRootConsent(false)同时关开关。root Shizuku与显式su授权为替代路径，uid2000不是root。repairRootOwnership立即返回repair-started/repair-running，rootGrantState().ownership轮询结果。
+rootGrantState返回有效AI授权（raw switch且同意覆盖当前免责声明内容版本 DISCLAIMER_REVISION），rootAccessState仅读应用su状态，不触发弹窗。APK 升级本身不使同意失效；旧 consentVersionCode 只用于迁移。requestRootAccess显式发起有界真实UID检测，不保证管理器弹窗；setRootConsent(false)同时关开关。root Shizuku与显式su授权为替代路径，uid2000不是root。repairRootOwnership立即返回repair-started/repair-running，rootGrantState().ownership轮询结果。
 
 ownership包含running/overdue/startedAt/completedAt/elapsedMs/operation/result?/lease?；当前耐久lease未finish即保持pending、completedAt=0，旧result不能覆盖当前UNKNOWN。UID0派发前耐久commit，完整回执才finish；部分已确认helper信封可结算但不报修复成功。timeout/drain/read/cleanup/Binder未知阻止新派发/维护/启动，不fallback重放；同boot应用重启或resetShizuku不清lease，只有同epoch方案真boot变化可解除。详见 [Root维护契约](<dsh-mobile-apk/docs/AGENTS/ROOT-MAINTENANCE.md>)。
 

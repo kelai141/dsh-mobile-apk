@@ -88,7 +88,7 @@ const GATE_SCRIPTS = [
   // 这条判「注入的是哪一份字节」：tar 内成员 sha256 == 降级副本 且 != 原始源（只读字节，不解析日志）。
   // 登记进 GATE_SCRIPTS 是硬要求：check-release-gates 断言两份编排器门禁集差集 = 0。
   'check-degrade-source-of-truth.mjs',
-  'check-manifest-hardening.mjs',
+  'check-manifest-hardening.mjs', 'check-input-config-changes.mjs',
   // vendored 字节绑定（issue #1285）：vendor/dsh-plugin-subscriptions 的逐文件 sha256 必须与
   // scripts/vendor-provenance.json 相符。此前没有任何门禁消费 PROVENANCE 的哈希，手改 lib/*.js 也能出厂。
   'check-vendor-provenance.mjs',
@@ -124,6 +124,10 @@ const GATE_SCRIPTS = [
   // 快照内 node 入口 shim（真机实证 2026-10-31）：usr/bin/npm 必须是普通文件、两个 shim 必须自定位
   // 且不含构建期前缀 /data/user/<n>/（多用户设备前缀随 user 变化 ⇒ pnpm exit 127）。
   'check-snapshot-node-shims.mjs',
+  // 首启脚本清单落点（#1716 回归面）：壳侧只在 usr/.dsh-shebang-scripts.txt 存在时走清单路径，
+  // 否则回落全树遍历（慢设备实测 527 秒）。清单写错落点或写错名字时归档里根本没有它，
+  // 而构建日志照样打印「清单已生成」——判据必须落在产物成员上。
+  'check-shebang-manifest.mjs',
   'check-third-party.mjs',
   'check-snapshot-secrets.mjs',
   'elf-check.mjs',
@@ -242,7 +246,7 @@ try {
   log('门禁：快照指纹对账（预检）…')
   run('node', [gate('check-snapshot-fingerprint.mjs')])
   log('门禁：manifest 加固语义…')
-  run('node', [gate('check-manifest-hardening.mjs')])
+  run('node', [gate('check-manifest-hardening.mjs')]); run('node', [gate('check-input-config-changes.mjs')])
   // vendored 字节绑定（issue #1285）：只读仓库里的 vendor/ 与 scripts/vendor-provenance.json，
   // 与 ABI、快照都无关，所以放在 ABI 循环外跑一次。缺它的话改一个 lib/*.js 也能照常出厂。
   log('门禁：vendored 目录字节绑定…')
@@ -475,6 +479,8 @@ try {
   // symlink ⇒ pnpm 的 passThruToNpm spawnSync('npm') 落地 ENOENT。与本地链同一份实现（差集必须为 0）。
   log('门禁：快照 node 入口 shim（自定位 + npm 普通文件）…')
   run('node', [gate('check-snapshot-node-shims.mjs'), snapIn])
+  log('门禁：首启脚本清单落点（清单缺席即回落全树遍历）…')
+  run('node', [gate('check-shebang-manifest.mjs'), snapIn])
   log('门禁：第三方许可…')
   run('node', [gate('check-third-party.mjs'), 'x', '--tar', snapIn, '--write-notices', join(ROOT, 'THIRD_PARTY_NOTICES.md')])
   log('门禁：机密（严格：归档不可读/成员为空即失败）…')

@@ -27,7 +27,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * 轻载原则：
  *  - 事件只用于**失效标记**（窗口状态/内容变化 + 200ms 节流），不做事件流处理；
  *  - 快照按需重建（每次 snapshot 请求一次遍历，约数百节点）；
- *  - 队列轮询只在引擎侧有活时进行（ControlPoller 读 pollHintMs）。
+ *  - 控制队列采用固定 5000ms 长轮询（ControlPoller.LONG_POLL_MS），不消费 pollHintMs。
  *
  * 安全边界：
  *  - 只服务本应用引擎（EngineEndpoint，默认 127.0.0.1:4145）的请求，且请求必须带共享令牌；

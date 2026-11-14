@@ -47,6 +47,8 @@ const CATALOGUE = {
   results: [
     { fullName: 'acme/good', name: 'good', install: 'dsh plugin add @acme/good', installCheck: 'passed', riskFlags: [], stars: 1, url: 'https://example.invalid/good' },
     { fullName: 'acme/other', name: 'other', install: 'dsh plugin add @acme/other', installCheck: 'passed', riskFlags: [], stars: 2, url: 'https://example.invalid/other' },
+    { fullName: 'acme/failed', name: 'failed', install: 'dsh plugin add @acme/failed', installCheck: 'failed', riskFlags: [], stars: 3, url: 'https://example.invalid/failed' },
+    { fullName: 'acme/failed-tool', name: 'failed-tool', install: 'dsh plugin add @acme/failed-tool', installCheck: 'failed', riskFlags: [], stars: 4, url: 'https://example.invalid/failed-tool' },
   ],
 }
 
@@ -63,9 +65,10 @@ globalThis.fetch = async (url) => {
 /** 走 apply() 捕获 install 路由的 handler（与运行时同一个闭包）。 */
 function captureInstallHandler() {
   let installHandler = null
+  const tools = new Map()
   const ctx = {
     commands: { register() {} },
-    tools: { register() {} },
+    tools: { register(tool) { if (tool?.name) tools.set(tool.name, tool) } },
     skills: { register() {} },
     on() {},
     get(name) {
@@ -80,7 +83,7 @@ function captureInstallHandler() {
   }
   mod.apply(ctx)
   assert.ok(installHandler, '必须注册 install 路由')
-  return installHandler
+  return { installHandler, tools }
 }
 
 function makeReq(body) {
@@ -100,7 +103,7 @@ function makeRes() {
   return res
 }
 
-const handler = captureInstallHandler()
+const { installHandler: handler, tools } = captureInstallHandler()
 
 test('#1391 请求体里的 install 被忽略，执行的是目录里该 fullName 的 install', async () => {
   stub.calls.length = 0
@@ -146,4 +149,34 @@ test('#1391 未确认的请求仍先被挡掉（不得因为新判据放宽既�
   assert.equal(res.status, 400)
   assert.match(res.body, /not confirmed/)
   assert.equal(stub.calls.length, 0)
+})
+
+test('#1625 install 路由拒绝 installCheck=failed 的条目并返回 LISTING_NOT_FOUND', async () => {
+  stub.calls.length = 0
+  seenUrls.length = 0
+  const res = makeRes()
+  await handler(makeReq({
+    confirmed: true,
+    plugin: { fullName: 'acme/failed', install: 'dsh plugin add @acme/failed' },
+  }), res)
+
+  assert.equal(res.status, 400, 'failed 条目不得安装：' + res.status + ' ' + res.body)
+  assert.match(res.body, /LISTING_NOT_FOUND/)
+  assert.equal(stub.calls.length, 0)
+  assert.ok(seenUrls.some((u) => new URL(u).searchParams.get('installCheck') === 'passed'),
+    'lookup 查询必须携带 installCheck=passed：' + JSON.stringify(seenUrls))
+})
+
+test('#1625 dshmarketplace_install 工具拒绝 installCheck=failed 的条目', async () => {
+  stub.calls.length = 0
+  seenUrls.length = 0
+  const installTool = tools.get('dshmarketplace_install')
+  assert.ok(installTool, '必须注册 dshmarketplace_install 工具')
+  await assert.rejects(
+    () => installTool.execute({ fullName: 'acme/failed-tool' }),
+    /Not in the catalogue: acme\/failed-tool/,
+  )
+  assert.equal(stub.calls.length, 0)
+  assert.ok(seenUrls.some((u) => new URL(u).searchParams.get('installCheck') === 'passed'),
+    'dshmarketplace_install 查询必须携带 installCheck=passed：' + JSON.stringify(seenUrls))
 })

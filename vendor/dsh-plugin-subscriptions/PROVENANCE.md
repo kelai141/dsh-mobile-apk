@@ -8,7 +8,7 @@
 | 发行版 | npm `dsh-plugin-subscriptions@0.9.12`（tarball shasum `a3aff899f615cec19f56b4bf11026a6cbf696382`，integrity `sha512-OHW6LsNjmfQ7gFZ734Lbz9iVtrPeWAaQz2sAzSezNDgyNGpEBzvLufGhzwffh1VgWz2TW8AMJ/JpgBec5Lscrg==`） |
 | 上游 gitHead | `b8023110864494acefc6f5963c2a197d85dda20c`（package.json 的 `gitHead` 字段；无对应 tag 时以此为准） |
 | 许可 | MIT（原文见本目录 `LICENSE`，随快照分发，见下「MIT 许可原文保留位置」） |
-| 解包体积 | 上游 npm 包 2,063,168 B / 143 文件；本目录裁掉源映射与类型声明后 **1,406,344 B / 69 文件**（见差异 #4） |
+| 解包体积 | 上游 npm 包 2,063,168 B / 143 文件；本目录裁掉源映射与类型声明后 **1,408,196 B / 69 文件**（见差异 #4） |
 | 定位 | 把 ChatGPT(Codex)/Claude/Grok/Copilot 订阅当 LLM provider；OAuth 在 Settings → Subscriptions |
 
 ## 为什么 vendor（而不是直接依赖 npm 版本）
@@ -41,6 +41,8 @@
 | 15 |  `lib/index.js`（`TokenManager` 内联副本） | **打包副本与源模块对齐（0.14.11）**：`TokenManager` 补 `generation` 与 `invalidate()`，`doRefresh` 加代次比对、`session()` catch 早退 `MISSING_CREDENTIAL`。`lib/index.js` 是运行期真正被加载的打包产物，`TokenManager` 在其中内联；#1588 只改了 `lib/providers/common.js` 的源模块，登出因此报 `cached.invalidate is not a function`（真机 2026-11-07 实锤：红色小字一闪而过、账号退不掉） | 源模块与打包产物是两份代码，只改前者等于没改。判据是行为面：登出要真的把账号从列表里去掉 |
 | 16 |  `lib/index.js` | **手机回跳页与兑换超时（0.14.11）**：① 回调页改走 `callbackReceivedPage()`，手机形态给出「返回 DeepCode」按钮与 `intent://oauth-return#Intent;scheme=com.dsharnessmobile.shell` 链接，桌面形态保持原文案。② `SubscriptionsAuthController.complete` 的授权码兑换加 30s 上限（`withExchangeDeadline`），超时按 `AUTH` 失败落进 `lastError` | ① 手机上的标签页是系统浏览器，原文案「关闭此标签页」不会把人送回应用；且 `intent://` 当时在 manifest 里没有对应 scheme，系统只能弹「打开方式」。② `auth.openai.com` 在 VPN 下可能停在等首字节，`busy` 恒为 true，设置页永远显示「登录中…」 |
 | 17 |  `lib/auth/oauth-flow.js`、`lib/index.js` | Android 回环页区分收到授权与账号连接完成，提供指向 DeepCode 的返回按钮；响应不缓存、不传 Referer | 浏览器收到授权码时应用仍在换取令牌。返回链接不含授权码、state 或账号信息，两份打包副本同步改 |
+| 18 |  `lib/index.js` | **OAuth 默认超时常量导入补全（issue #1728）**：0.14.11 把 oauth-flow 拆成独立文件时，入口只从 `./auth/oauth-flow.js` 导入了 `callbackReceivedPage`，而 `OAuthFlowManager.start()` 仍然引用 `DEFAULT_FLOW_TIMEOUT_MS`；于是不带 `spec.timeoutMs` 的登录（Codex/Claude 等默认路径）点「登录」就抛 `ReferenceError: DEFAULT_FLOW_TIMEOUT_MS is not defined`。补导入该常量；判据见 `scripts/subs-oauth-flow-timeout.test.mjs`（含两份负控） |
+| 19 |  `lib/providers/common.js`、`lib/providers/copilot.js`、`lib/index.js` | **Copilot 403 限流误判永久修（issue #1624）**：`OAuthEndpointError` 新增 `rateLimited` 字段，`oauthEndpointError` 同步读取 `parsed.message`、`retry-after` 与 `x-ratelimit-remaining: 0`；`isCopilotPermanentRefreshError` 对带限流信号或 `rate limit` 文案的 403 判瞬时错误，不再删除用户 GitHub token。两份打包副本同步改；判据见 `scripts/subs-copilot-rate-limit.test.mjs` |
 
 **未改动**：`lib/` 下运行时代码**除上表第 5、6、8、9、10、11、12、13、14、15 条所列代理面、SSE 面、宿主样式面、命令标题 locale 、登出竞态与 Android 回环页外**逐字节保持上游（仅另删上表第 4 条的 `.map` / `.d.ts`）（含 provider 实现、OAuth 凭据交换、token 存储路径 `~/.dsh/plugins/subscriptions/auth.json` 与其 0600 权限）、`cordis.patch.yml`、`README.md`、`LICENSE`。
 

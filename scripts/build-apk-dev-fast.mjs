@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Local-only APK repack for shell/UI iteration. This intentionally skips every
-// release gate and requires an existing snapshot asset in the APK project.
-// Never publish this artifact: it is ungated and unverified.
+// Local-only APK repack for shell/UI iteration. This skips the full release gate
+// chain but retains snapshot package coverage, ABI and fingerprint checks below.
+// Never publish this artifact: it has not passed the full release validation.
 //
 // DELIBERATE DEBUG VARIANT — do not "fix" this into assembleRelease.
 // This script runs `:app:assembleDebug` on purpose: it is the fast local iteration

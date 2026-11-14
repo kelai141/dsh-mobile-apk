@@ -18,7 +18,7 @@
  *   half-deleted session, then removed recursively.
  */
 import { lstatSync } from 'node:fs'
-import { mkdir, readdir, rename, rm, stat } from 'node:fs/promises'
+import { lstat, mkdir, readdir, rename, rm, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
 /** Session ids are the storage unit name; anything else is a path-injection attempt. */
@@ -117,7 +117,39 @@ export async function deleteStoredSession({ home, sessionId, isActive, beforeRem
   }
   if (typeof home !== 'string' || home === '') throw new SessionDeleteError('delete-failed', 'DSH_HOME is not available')
   const root = sessionsRoot(home)
-  const dir = await findSessionDir(root, sessionId)
+  let stored
+  try {
+    stored = await findSessionDir(root, sessionId)
+  } catch (error) {
+    if (!(error instanceof SessionDeleteError) || error.code !== 'not-found') throw error
+  }
+  // #1587：永久删除覆盖这个 id 的全部隔离副本；枚举失败不能冒充 not-found。
+  // 先完整定位，再开始删除：歧义或隔离区不可读时，不产生部分删除副作用。
+  //
+  // 边界（审查实测收窄）：隔离区的**形态异常**只在「一处都没命中」时才判失败。
+  // 旧实现让任意工作区的杂散 .corrupt 文件升级成全局 delete-failed —— 目标会话完好、
+  // 在别的工作区、却删不掉，且错误文案指向用户无法行动的「隔离区不是真目录」。
+  const quarantineProblems = []
+  const quarantined = await findQuarantinedDirs(root, sessionId, { onProblems: (p) => quarantineProblems.push(...p) })
+  const dirs = stored ? [stored, ...quarantined] : quarantined
+  if (dirs.length === 0) {
+    if (quarantineProblems.length > 0) {
+      throw new SessionDeleteError('delete-failed', quarantineProblems[0], { sessionId, paths: quarantineProblems })
+    }
+    throw new SessionDeleteError('not-found', 'session not found', { sessionId })
+  }
+  // 命中已存在：隔离区异常不阻断本次删除，但必须留痕（否则「清不掉」没有线索）。
+  for (const problem of quarantineProblems) log('warn', 'quarantine anomaly ignored; the session itself was found', { sessionId, problem })
+  for (const [index, dir] of dirs.entries()) {
+    await deleteResolvedSessionDir({ sessionId, dir, log, removeDir,
+      afterResolve: index === 0 ? afterResolve : undefined,
+      beforeRemove: index === 0 ? beforeRemove : undefined })
+  }
+  return { ok: true, sessionId, dir: dirs[0] }
+}
+
+/** Same rename/unload/remove transaction for a stored directory or an explicit quarantine deletion. */
+async function deleteResolvedSessionDir({ sessionId, dir, log, removeDir, afterResolve, beforeRemove }) {
   log('info', 'resolved session directory', { sessionId, dir })
   // issue #1617：归档/置顶记账**不得**跑在 rename 之前。
   //
@@ -255,6 +287,21 @@ export async function sweepGraveyards(home) {
     } catch {
       continue
     }
+    // 隔离件本身不自动过期（可恢复承诺）；只扫用户已明确删除留下的 graveyard。
+    const quarantine = entries.find((entry) => entry.name === QUARANTINE_DIR && entry.isDirectory())
+    if (quarantine) {
+      try {
+        const trash = join(root, workspace.name, QUARANTINE_DIR)
+        for (const entry of await readdir(trash, { withFileTypes: true })) {
+          if (!entry.isDirectory() || !QUARANTINED_GRAVEYARD_PATTERN.test(entry.name)) continue
+          const target = join(trash, entry.name)
+          try {
+            await rm(target, { recursive: true, force: true })
+            removed.push(target)
+          } catch { /* retry on the next startup */ }
+        }
+      } catch { /* best effort, as with the workspace sweep */ }
+    }
     for (const entry of entries) {
       if (!entry.isDirectory() || !entry.name.includes('.deleting-')) continue
       const target = join(root, workspace.name, entry.name)
@@ -271,6 +318,7 @@ export async function sweepGraveyards(home) {
 
 /** 坏会话的隔离目录名。放在会话所在的工作区目录下，**不在扫描路径上**。 */
 export const QUARANTINE_DIR = '.corrupt'
+const QUARANTINED_GRAVEYARD_PATTERN = /^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.\d+(?:\.deleting-[0-9a-z]+)+$/i
 
 /**
  * issue #912：把一个**读不出历史**的会话隔离起来 —— **移动而不是删除**。
@@ -305,18 +353,62 @@ export const QUARANTINE_DIR = '.corrupt'
  * @param {string} sessionId - 已校验的 id。
  * @returns {Promise<string[]>} 命中的隔离目录绝对路径（按名字排序，旧→新）。
  */
-export async function findQuarantinedDirs(root, sessionId) {
+export async function findQuarantinedDirs(root, sessionId, options = {}) {
+  assertSessionId(sessionId)
   let entries
-  try { entries = await readdir(root, { withFileTypes: true }) } catch { return [] }
+  try { entries = await readdir(root, { withFileTypes: true }) } catch (error) {
+    if (error?.code === 'ENOENT') return []
+    throw error
+  }
   const hits = []
+  // 形态异常先收集，不立即抛：一个**与本会话无关**的工作区里有杂散 .corrupt 文件时，
+  // 立即抛会让该设备的会话删除/隔离全部失败（实测：ws-b/.corrupt 是普通文件、
+  // 目标会话在 ws-a 且完好，删除仍报 delete-failed 且文件不动）。
+  // 判据保留在最后一步：一处都没命中且有异常，才不能被冒充成 not-found。
+  const problems = []
+  // 形态异常分两档，因为它们的风险性质不同：
+  // - blocking：链接/非目录形态**可能把删除引到树外**（遍历风险），无论如何 fail-closed；
+  // - advisory：只是一份普通文件占着 .corrupt 这个名字，删不动任何树外的东西，
+  //   但它确实让我们看不见该工作区里的副本 —— 只在「一处都没命中」时才据此判失败。
+  const note = (message, blocking) => problems.push(blocking ? 'BLOCK:' + message : message)
   for (const entry of entries) {
     if (!entry.isDirectory()) continue
     const trash = join(root, entry.name, QUARANTINE_DIR)
     let names
-    try { names = await readdir(trash) } catch { continue }
-    for (const name of names.filter((n) => n.startsWith(sessionId + '.'))) {
-      hits.push(join(trash, name))
+    try {
+      const info = await lstat(trash)
+      if (!info.isDirectory()) {
+        // 链接可以指到树外：删它等于删别人（#1587 的遍历面）。
+        note('quarantine is not a real directory: ' + trash, info.isSymbolicLink())
+        continue
+      }
+      names = await readdir(trash, { withFileTypes: true })
+    } catch (error) {
+      if (error?.code === 'ENOENT') continue
+      note('quarantine is unreadable: ' + trash + ' (' + String(error?.message ?? error) + ')', false)
+      continue
     }
+    for (const name of names) {
+      if (!name.name.startsWith(sessionId + '.')) continue
+      if (!name.isDirectory()) {
+        note('quarantined entry is not a real directory: ' + join(trash, name.name), name.isSymbolicLink())
+        continue
+      }
+      hits.push(join(trash, name.name))
+    }
+  }
+  const blocking = problems.filter((p) => p.startsWith('BLOCK:'))
+  // 链接/树外形态一律 fail-closed：这条与「命中多少」无关，它是安全边界不是可用性问题。
+  if (blocking.length > 0) {
+    throw new SessionDeleteError('delete-failed', blocking[0].slice('BLOCK:'.length), { sessionId, paths: blocking })
+  }
+  // 其余是 advisory：调用方给了收集器就交出去，由它决定「该不该打断本次操作」。
+  if (typeof options.onProblems === 'function') {
+    options.onProblems(problems)
+    return hits.sort()
+  }
+  if (hits.length === 0 && problems.length > 0) {
+    throw new SessionDeleteError('delete-failed', problems[0], { sessionId, paths: problems })
   }
   return hits.sort()
 }

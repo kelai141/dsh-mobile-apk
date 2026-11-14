@@ -1,10 +1,10 @@
 # Root 策略与固定属主维护（0.14.3，PR #308）
 
-> 源码交接，不是验收报告。当前版本声明为 0.14.3 / versionCode 45，尚未构建本轮双 ABI APK；没有本轮 APK/hash/测试通过证据。用户当前停止点为 #308 按正常 GitHub CI/review 合并、完整 0.14.3 同步、双 ABI 测试包交付；外部测试保持未执行，不作为等待合并的占位阻塞。发布未授权。
+> 源码契约，不是验收报告。本文源自 0.14.3 交接，现行语义按源码维护；旧版本的交付状态不能作为当前测试、发布授权或设备通过的证据。本次原生重构证据见协调仓 `docs/phonecontrolrebuild/`。
 
 ## 1. 模型执行与应用维护分开
 
-模型 root 执行须满足实际 root 通道、用户开启 AI root 及当前 versionCode 的知情同意。RootGrant.isGranted 是有效授权，不只读原始开关；root Shizuku 与显式授权 su 是替代通道，uid2000 不是 root。升级使旧 consent 失效，重新同意不恢复旧开关；关闭和撤销始终允许。su 只对明确的派发前通道不可用回退一次；拒绝、命令非零 exit、超时、Binder 派发后结果不明不重跑。
+模型 root 执行须满足实际 root 通道、用户开启 AI root 及覆盖当前免责声明内容版本 `RootGrant.DISCLAIMER_REVISION` 的知情同意。RootGrant.isGranted 是有效授权，不只读原始开关；root Shizuku 与显式授权 su 是替代通道，uid2000 不是 root。APK 升级本身不使同意失效，免责声明内容版本变化才需重新确认；旧 `consentVersionCode` 只用于迁移。重新同意不恢复旧开关；关闭和撤销始终允许。su 只对明确的派发前通道不可用回退一次；拒绝、命令非零 exit、超时、Binder 派发后结果不明不重跑。
 
 应用维护只修固定本应用 dataDir，目标为 ApplicationInfo 的完整 Android UID。su 从已安装签名 APK 的 sourceDir 加载 RootRepairMain；固定五参数 fullUid、dataDir、relativeSubpath、cap、timeoutMs，逐项检查并独立 shell 引用。无可写快照 dex/JAR、任意 uid/gid、任意命令、递归 restorecon 入口。Shizuku v4 追加 configuration 回读确认完整 UID/可信 anchor；旧或未确认服务不派发。
 
