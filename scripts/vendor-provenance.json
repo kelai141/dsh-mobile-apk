@@ -40,9 +40,7 @@
           "sha256": "67d71c61e1a9d9a7c6f80b64a6f2776a2ca4ee4d9ecd98f16c1024c1b2b85bc1",
           "bytes": 2157
         }
-      },
-      "totalBytes": 57977,
-      "fileCount": 9
+      }
     },
     "vendor/dsh-plugin-subscriptions": {
       "files": {
@@ -59,8 +57,8 @@
           "bytes": 632
         },
         "lib/auth/claude-code-creds.js": {
-          "sha256": "5c9c35aff60610ff02b2723edf3451fba8dc7174f93d8c7071a3588ec75cd429",
-          "bytes": 6454
+          "sha256": "4028e3028feb09e5b55553690a7e4c5aad2fce9624b107989279c3d958febb59",
+          "bytes": 7467
         },
         "lib/auth/device-flow.js": {
           "sha256": "a6c4fb4a423cda73f02ad5afcbe4f0ab85b1da60908e292a14f0d860a0372a09",
@@ -183,8 +181,8 @@
           "bytes": 23875
         },
         "lib/index.js": {
-          "sha256": "ebf2e9c746bc0fda9a02da9d1a2961274da3fec732ca37a93df8423196a7631e",
-          "bytes": 456202
+          "sha256": "3e0f4521320d4457b5a80cac638dda7c80cbcc871fc19475536e6c12cbca63a6",
+          "bytes": 456984
         },
         "lib/model-defaults.js": {
           "sha256": "3f7b108cf74e9b558e5e8231286c3b0432c3b7915a53c48cf06ce2bf84e61cff",
@@ -318,13 +316,15 @@
           "sha256": "24c1f29839918892856a4f402c1c8839efcd2fc44339d9b6bd242f35bb9cfcf8",
           "bytes": 1553
         },
+        "test/claude-keychain-bound-1589.test.mjs": {
+          "sha256": "7944cce09e3d91ad0f13360447fbe5689e88798811aaf376f0cd0ecab575d8c6",
+          "bytes": 7766
+        },
         "test/logout-inflight-refresh.test.mjs": {
           "sha256": "1c0e4b2a83192309f738aa08f0e971b0cd50275b9b3d0a49bb4b9b3a303343d1",
           "bytes": 5518
         }
-      },
-      "totalBytes": 1408196,
-      "fileCount": 69
+      }
     }
   },
   "files": {
@@ -341,8 +341,8 @@
       "bytes": 632
     },
     "lib/auth/claude-code-creds.js": {
-      "sha256": "5c9c35aff60610ff02b2723edf3451fba8dc7174f93d8c7071a3588ec75cd429",
-      "bytes": 6454
+      "sha256": "4028e3028feb09e5b55553690a7e4c5aad2fce9624b107989279c3d958febb59",
+      "bytes": 7467
     },
     "lib/auth/device-flow.js": {
       "sha256": "a6c4fb4a423cda73f02ad5afcbe4f0ab85b1da60908e292a14f0d860a0372a09",
@@ -465,8 +465,8 @@
       "bytes": 23875
     },
     "lib/index.js": {
-      "sha256": "ebf2e9c746bc0fda9a02da9d1a2961274da3fec732ca37a93df8423196a7631e",
-      "bytes": 456202
+      "sha256": "3e0f4521320d4457b5a80cac638dda7c80cbcc871fc19475536e6c12cbca63a6",
+      "bytes": 456984
     },
     "lib/model-defaults.js": {
       "sha256": "3f7b108cf74e9b558e5e8231286c3b0432c3b7915a53c48cf06ce2bf84e61cff",
@@ -599,6 +599,10 @@
     "package.json": {
       "sha256": "24c1f29839918892856a4f402c1c8839efcd2fc44339d9b6bd242f35bb9cfcf8",
       "bytes": 1553
+    },
+    "test/claude-keychain-bound-1589.test.mjs": {
+      "sha256": "7944cce09e3d91ad0f13360447fbe5689e88798811aaf376f0cd0ecab575d8c6",
+      "bytes": 7766
     },
     "test/logout-inflight-refresh.test.mjs": {
       "sha256": "1c0e4b2a83192309f738aa08f0e971b0cd50275b9b3d0a49bb4b9b3a303343d1",

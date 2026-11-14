@@ -1045,10 +1045,21 @@ function writeBackClaudeCodeCredentials(next, expectedPriorAccessToken) {
 async function refreshClaudeSynced(session, doRefresh) {
 	const fromSource = readClaudeCodeCredentials();
 	const base = fromSource !== void 0 && fromSource.accessToken !== session.accessToken ? fromSource : session;
-	if (base.expiresAt > Date.now() + 6e4) return base;
+	// issue #1589: `keychainBound` is the ONLY marker that this account follows Claude
+	// Code's own credential store, and neither branch below carries it: `fromSource`
+	// comes straight from that store (the marker never exists there), and the refreshed
+	// session is rebuilt from token fields only. So TokenManager.doRefresh saved a
+	// session WITHOUT the marker on the first successful refresh, and the 5-minute sync
+	// timer (`if (session.keychainBound !== true) continue`) skipped the account from
+	// then on. Re-attach the marker to whatever this function returns.
+	const keepBound = (value) => session !== void 0 && session.keychainBound === true
+		&& value !== void 0 && value.keychainBound !== true
+		? { ...value, keychainBound: true }
+		: value;
+	if (base.expiresAt > Date.now() + 6e4) return keepBound(base);
 	const next = await doRefresh(base);
 	writeBackClaudeCodeCredentials(next, base.accessToken);
-	return next;
+	return keepBound(next);
 }
 
 //#endregion

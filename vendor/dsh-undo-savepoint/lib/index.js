@@ -484,8 +484,12 @@ export function apply(ctx, config = {}) {
     description: 'Delete expired snapshots right now: auto/baseline beyond keepAuto and pre-restore beyond keepPre (respects the autoCleanup setting; manual snapshots are never touched). Use when the user asks to clean up snapshots.',
     parameters: {},
     output: TEXT_OUTPUT,
-    isConcurrencySafe: () => true,
+    // issue #1590：这条会删 blob，而 restore 正在写 pre-restore 快照时那些 blob 还没进
+    // manifest。「并发安全」的旧声明与事实相反——它恰恰是那个竞态的一半，故按 undoBusy 如实声明。
+    isConcurrencySafe: () => !cfg.undoBusy,
     execute: async () => {
+      // restore 在飞：它自己的 pre-restore 快照是本轮回滚的安全网，绝不能在此时裁剪存储。
+      if (cfg.undoBusy) return t('busy');
       const list = await listSnapshots(cfg);
       const r = await pruneAuto(cfg, list);
       if (cfg.autoCleanup === false) return t('prune.disabled');
@@ -579,9 +583,12 @@ export function apply(ctx, config = {}) {
       dry_run: { type: 'boolean', description: 'Only report what would be removed without deleting anything (default false).' },
     },
     output: TEXT_OUTPUT,
-    isConcurrencySafe: () => true,
+    // issue #1590：与 undo_prune 同族——restore 在写 pre-restore 快照时它的 blob 尚未进 manifest，
+    // 此时 GC 会把安全网删残。按 undoBusy 如实声明。
+    isConcurrencySafe: () => !cfg.undoBusy,
     execute: async (p) => {
       if (p?.dry_run === true) return 'undo_compact dry-run: run "undo_compact" (without dry_run) to actually delete orphans.';
+      if (cfg.undoBusy) return t('busy');
       const r = await undoCompact(cfg);
       if (!r.ok) return t('compact.failed', { err: r.error });
       return r.removed === 0 ? t('compact.none') : t('compact.done', { n: r.removed, freed: fmtBytes(r.freed) });
