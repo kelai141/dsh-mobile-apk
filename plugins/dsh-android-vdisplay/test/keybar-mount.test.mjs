@@ -162,6 +162,51 @@ test('样式只注入一次（重复挂载不叠加 style 元素）', { skip: SK
   assert.equal(doc.querySelectorAll('#' + KEYBAR_STYLE_ID).length, 0, '最后一个句柄卸载后样式应清掉')
 })
 
+/**
+ * issue #1585：分屏两个终端根时，**先挂的那条先卸**，后挂的那条必须仍有 CSS。
+ *
+ * 缺陷形态（ensureStyle 只判「<style> 在不在」就返回空 disposer）：
+ *   实例 A 建 style，B 发现已存在 -> 拿到 `() => {}`；
+ *   A 卸载时按创建者身份 style.remove() => B 还活着，但样式元素没了 => 键条失去全部 CSS
+ *   （布局崩、留白失效，用户看到一排没有样式的按钮）。
+ *
+ * 现有用例（"样式只注入一次"）只走"先挂后挂、先卸后挂"这一侧，永远走不到出问题的那一侧。
+ * 这里补的就是**先挂先卸、后挂仍活**。
+ */
+test('#1585 分屏：先挂的那条先卸载，后挂的那条仍必须保有键条样式（不得被连带删掉）', { skip: SKIP && 'jsdom 不可用' }, () => {
+  const { doc, roots, handles } = multiRootSetup(2)
+  const styleCount = () => doc.querySelectorAll('#' + KEYBAR_STYLE_ID).length
+  assert.equal(styleCount(), 1, '前置：两条键条共用同一份样式元素')
+  // 先挂的 A 先死（用户关掉了左边那栏）。
+  handles[0].dispose()
+  assert.equal(styleCount(), 1, 'A 卸载后样式必须仍在：B 还活着，键条不能失去 CSS')
+  assert.ok(roots[1].querySelector('[' + KEYBAR_ATTR + ']'), 'B 的键条必须仍然挂在 B 的根上')
+  // B 自己卸载后才允许清掉样式。
+  handles[1].dispose()
+  assert.equal(styleCount(), 0, '最后一个持有者卸载后样式才应清掉')
+})
+
+test('#1585 反证：A 还在时 B 卸载不得删掉样式（反过来那一侧）', { skip: SKIP && 'jsdom 不可用' }, () => {
+  const { doc, handles } = multiRootSetup(2)
+  handles[1].dispose()
+  assert.equal(doc.querySelectorAll('#' + KEYBAR_STYLE_ID).length, 1, 'B 卸载后 A 的样式必须仍在')
+  assert.ok(doc.querySelector('[' + KEYBAR_ATTR + ']'), 'A 的键条必须仍在场')
+  handles[0].dispose()
+  assert.equal(doc.querySelectorAll('#' + KEYBAR_STYLE_ID).length, 0, '最后一个持有者卸载后样式才应清掉')
+})
+
+test('#1585 反证：脱离文档的终端根被摘掉后，样式必须随最后一个键条一起清（不得泄漏）', { skip: SKIP && 'jsdom 不可用' }, async () => {
+  const { doc, roots, handles } = multiRootSetup(2)
+  roots[0].remove()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  handles[1].dispose()
+  // handles[0] 的根已经离开文档，但它是显式挂载的实例，仍需自己 dispose 才收摊；
+  // 这里断言的是「只要还有存活实例，样式不得消失」。
+  assert.equal(doc.querySelectorAll('#' + KEYBAR_STYLE_ID).length, 1, '仍有一个未卸载实例时必须保留样式')
+  handles[0].dispose()
+  assert.equal(doc.querySelectorAll('#' + KEYBAR_STYLE_ID).length, 0, '全部卸载后样式必须清掉')
+})
+
 test('反证：React 重建子列表摘掉键条后，观察者必须把它挂回末尾（自愈）', { skip: SKIP && 'jsdom 不可用' }, async () => {
   const { doc, root, handle } = setup()
   const bar = doc.querySelector('[' + KEYBAR_ATTR + ']')
